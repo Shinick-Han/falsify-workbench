@@ -224,4 +224,7 @@ Check 'web origin fixed' ($sources['falsify-connection.psm1'] -match "WebOrigin 
 Check 'no automatic CLI install or sign-in' ($sources['start-companion.ps1'] -notmatch '(?i)npm\s+(i|install)|winget|&\s*codex|&\s*claude|login\s*$')
 
 Write-Host ('{0} checks, {1} failed ({2} {3})' -f $script:checks, $script:failures, $PSVersionTable.PSEdition, $PSVersionTable.PSVersion)
-if ($script:failures -ne 0) { exit 1 }
+if ($script:failures -ne 0 -or $script:checks -eq 0) { exit 1 }
+# Expected-failure children (rejected URIs, occupied port) leave $LASTEXITCODE nonzero; hosts such as the
+# GitHub Actions pwsh wrapper propagate it, so success must be explicit once every assertion has passed.
+exit 0

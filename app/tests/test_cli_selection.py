@@ -212,22 +212,49 @@ class ClaudeBackendTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
         backend.infer('x', SCHEMA); self.assertEqual(backend.infer('x', SCHEMA)['error_code'], 'call_budget')
 
+WINDOWS = os.name == 'nt'
+
+def launcher(directory, executable=True):
+    """Platform-native Claude launcher fixture: claude.exe on Windows (PATHEXT), mode-0755 claude on POSIX (X_OK)."""
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / ('claude.exe' if WINDOWS else 'claude')
+    path.write_bytes(b'')
+    if not WINDOWS: path.chmod(0o755 if executable else 0o644)
+    return path
+
 class DiscoveryTests(unittest.TestCase):
+    @unittest.skipUnless(WINDOWS, 'npm .cmd shims and PATHEXT resolution exist only on Windows; POSIX launchers are covered below')
     def test_windows_cmd_resolves_native_without_shell(self):
         with tempfile.TemporaryDirectory() as root:
             bindir = Path(root) / 'npm'; native = bindir / 'node_modules' / '@anthropic-ai' / 'claude-code' / 'bin' / 'claude.exe'
             native.parent.mkdir(parents=True); native.write_bytes(b''); (bindir / 'claude.cmd').write_text('@echo off')
             with patch.dict(os.environ, {'PATH': str(bindir), 'PATHEXT': '.CMD;.EXE'}), patch.object(Path, 'home', return_value=Path(root) / 'home'):
                 self.assertEqual(cli_backend.discover_claude(), [str(native)])
+
+    def test_missing_launcher_unavailable(self):
+        with tempfile.TemporaryDirectory() as root:
             with patch.dict(os.environ, {'PATH': str(Path(root) / 'empty')}), patch.object(Path, 'home', return_value=Path(root) / 'home'):
                 with self.assertRaises(FileNotFoundError): cli_backend.discover_claude()
 
     def test_local_bin_and_relative_path_ignored(self):
         with tempfile.TemporaryDirectory() as root:
-            local = Path(root) / '.local' / 'bin'; local.mkdir(parents=True); (local / 'claude.exe').write_bytes(b'')
+            native = launcher(Path(root) / '.local' / 'bin')
             with patch.dict(os.environ, {'PATH': '.' + os.pathsep + 'relative', 'PATHEXT': '.EXE'}), patch.object(Path, 'home', return_value=Path(root)):
                 found = cli_backend.discover_claude()
-                self.assertEqual([p.lower() for p in found], [str((local / 'claude.exe').absolute()).lower()])
+                self.assertEqual([os.path.normcase(p) for p in found], [os.path.normcase(str(native.absolute()))])
+
+    @unittest.skipIf(WINDOWS, 'POSIX executable-bit semantics; Windows executability comes from PATHEXT')
+    def test_posix_executable_launcher_required(self):
+        with tempfile.TemporaryDirectory() as root:
+            bindir = Path(root) / 'bin'; home = Path(root) / 'home'
+            (bindir / 'node_modules' / '@anthropic-ai' / 'claude-code' / 'bin').mkdir(parents=True)
+            (bindir / 'claude.cmd').write_text('@echo off'); (bindir / 'claude.exe').write_bytes(b'')
+            with patch.dict(os.environ, {'PATH': str(bindir)}), patch.object(Path, 'home', return_value=home):
+                with self.assertRaises(FileNotFoundError): cli_backend.discover_claude()  # Windows-named shims never match on POSIX
+                plain = launcher(bindir, executable=False)
+                with self.assertRaises(FileNotFoundError): cli_backend.discover_claude()  # non-executable file is not a launcher
+                plain.chmod(0o755)
+                self.assertEqual(cli_backend.discover_claude(), [str(plain.absolute())])  # suffixless executable runs directly, no shell
 
 class CapabilityTests(unittest.TestCase):
     def test_cli_agents_shape(self):
