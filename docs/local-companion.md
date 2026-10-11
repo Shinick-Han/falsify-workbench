@@ -4,13 +4,38 @@ The website is https://shinick-han.github.io/falsify-workbench/. It does not run
 
 ## Windows
 
-1. Install Python 3.10+ and your preferred CLI. The built-in adapter requires a separately installed and logged-in Codex CLI with access to the configured `gpt-6.1-sol` model. The platform never asks for an API key.
-2. Download this repository's source ZIP, extract it, and open PowerShell in the extracted folder. Read the launcher before executing it.
-3. Run `powershell -NoProfile -ExecutionPolicy Bypass -File .\start-companion.ps1`. This applies the execution policy only to this process; it does not modify your global policy. The launcher creates `.venv` in this project and installs the pinned Python dependencies from PyPI. It does not install a CLI or sign into an account.
-4. Open the hosted website. In its CLI connection panel, enter the pairing token printed by the companion and connect. If the browser asks for local-network access, allow it only for this trusted site. Tokens live only for this broker process; keep them private.
-5. In RED or BLUE, supply a paper and choose the desired harness. Pairing does not execute a model. Each execution still requires its own consent.
+1. Install Python 3.10+ and at least one built-in CLI yourself: Codex CLI or Claude Code. Sign in with your own subscription (`codex login`, or run `claude` and use `/login`). The platform never installs a CLI, signs you in or asks for an API key.
+2. Download this repository's source ZIP, extract it to a folder you will keep, and open PowerShell in that folder. Read the scripts before executing them.
+3. Start the companion, either manually each time or with the optional click-to-launch link below. Either way it runs in a visible PowerShell window. On the first launch it creates `.venv` in this project and installs the pinned Python dependencies from PyPI, printing each setup step; later launches skip pip until the requirements change. Before the broker starts it lists which of `codex` / `claude` were found on PATH (nothing is run) and how to sign in.
+4. The window prints a pairing token. Copy it into the hosted website's CLI connection panel yourself and connect. The token is never placed in a link or URL. If the browser asks for local-network access, allow it only for this trusted site. Tokens live only for this broker process; keep them private.
+5. In RED or BLUE, supply a paper and choose CLI, model and effort for that role. These are per-role choices, not a global setting of the companion or the link. Pairing does not execute a model. Each execution still requires its own consent.
 
-If port 7816 is occupied, launch with `-Port 7817` and set the website's port field to 7817. Never stop another user's program to free a port. For subsequent runs `-NoInstall` skips pip. `-NoPdf` skips installation of the optional PDF editor in a new environment; it does not uninstall an existing one. PDF import remains browser-local, but PDF modified-file export requires PyMuPDF. TXT export does not require it.
+### Manual start
+
+Run `powershell -NoProfile -ExecutionPolicy Bypass -File .\start-companion.ps1`. This applies the execution policy only to this process; it does not modify your global policy.
+
+### Optional: click-to-launch `falsify://connect`
+
+Install once, yourself, from the folder you will keep:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install-connection.ps1 -WhatIf   # preview, changes nothing
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install-connection.ps1
+```
+
+This registers a per-user URL protocol under `HKCU\Software\Classes\falsify` (see Microsoft's [application registration](https://learn.microsoft.com/en-us/windows/win32/shell/app-registration) and [URI scheme registration](https://learn.microsoft.com/en-us/previous-versions/windows/internet-explorer/ie-developer/platform-apis/aa767914(v=vs.85)) documentation). It needs no administrator rights and creates no startup entry, scheduled task, service or background process. The registered command is fixed: the PowerShell executable you installed with runs `open-connection.ps1` from this checkout with `-NoExit`, and the clicked link is passed as one quoted argument. The installer refuses if `falsify:` is already registered by another application, per-user or machine-wide, and never overwrites it. **Do not move or rename the folder afterwards**; if you do, run `uninstall-connection.ps1` and install again from the new location.
+
+Then open `falsify://connect?port=7816` from the website's connect link, or paste it into the browser address bar. The browser asks whether to open Windows PowerShell; this prompt is the browser's own approval and is not suppressed. A visible PowerShell window starts the companion for that port; errors stay on screen because the window does not close by itself.
+
+`open-connection.ps1` accepts exactly `falsify://connect?port=<1024-65535>`: no path, user info, fragment, extra or repeated query keys, percent-encoding or other text. Anything else is rejected before any network, Python, model or child process. The link carries only the port: never a token, command, script, CLI, model or website origin. The companion always pairs with the fixed origin `https://shinick-han.github.io`.
+
+Remove it with `powershell -NoProfile -ExecutionPolicy Bypass -File .\uninstall-connection.ps1` (`-WhatIf` previews). It removes only this launcher's own exact registration, key by key, and refuses to touch anything else. The project folder and `.venv` remain.
+
+Browser limits of custom protocols: the web page cannot tell whether the protocol is installed (if not, clicking does nothing or shows a browser message), cannot see the terminal or read its output, and receives no token from it. Browsers may require a user click and show a confirmation each time unless you choose to remember it for this site. Entering the link in Win+R also works but has no browser prompt.
+
+If the port is already in use, the launcher stops before setup with a clear message and does not stop, replace or reuse the program on that port. Use another port, e.g. `-Port 7817` or `falsify://connect?port=7817`, and set the website's port field to the same number. Never stop another user's program to free a port. `-NoInstall` skips pip entirely; deleting `.venv` forces a fresh setup. `-NoPdf` skips installation of the optional PDF editor in a new environment; it does not uninstall an existing one. PDF import remains browser-local, but PDF modified-file export requires PyMuPDF. TXT export does not require it.
+
+The launcher tests in `scripts/test-connection.ps1` are dry-run only: they never write the registry, start the companion, open a window or call a model.
 
 ## macOS / Linux or manual Windows setup
 
@@ -26,7 +51,7 @@ Windows equivalent after creating a venv: `.venv\Scripts\python.exe ...`. Add `-
 
 ## Other CLIs and custom harnesses
 
-The built-in adapter invokes Codex. Other CLIs, including Claude Code, are not automatically discovered or a built-in one-click option in this release. They can be connected through a trusted wrapper that follows the JSON stdin/stdout protocol in [the harness contract](harness-contract.md). Import that wrapper's `stdio` harness JSON in Harness, then select it in RED or BLUE. It is **not** sufficient to put a chat CLI path in the executable field: the wrapper must translate input, invoke the CLI using your own subscription login, validate and return only the requested JSON object, without mixing logs into stdout.
+Codex CLI and Claude Code are both built-in adapters using your own subscription login; choose either per role in RED or BLUE. Any other CLI can be connected through a trusted wrapper that follows the JSON stdin/stdout protocol in [the harness contract](harness-contract.md). Import that wrapper's `stdio` harness JSON in Harness, then select it in RED or BLUE. It is **not** sufficient to put a chat CLI path in the executable field: the wrapper must translate input, invoke the CLI using your own subscription login, validate and return only the requested JSON object, without mixing logs into stdout.
 
 No account keys belong in the website, harness JSON, GitHub or the execution ledger. A wrapper may use its CLI's local authentication stores. The minimal stdio environment does not automatically pass all home/config variables; wrappers must resolve their own CLI configuration explicitly. Trusted custom code can access your files/network and incur costs; it is not OS-isolated or guaranteed to enforce internal call budgets. The included `app/examples/stdio_harness.py` intentionally abstains and is a protocol example, not a model implementation.
 
