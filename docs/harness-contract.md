@@ -24,7 +24,7 @@
 
 ### 기본 CLI 선택과 사용자 연결 방식
 
-- `codex`: 로그인된 Codex CLI에 instructions와 호출 상한을 적용. `adapter: {"type":"codex","model":"gpt-6.1-sol","effort":"medium"}`로 모델과 추론 강도를 선택한다. model 생략은 기존 gpt-6.1-sol, effort 생략은 medium이다. ChatGPT 로그인만 허용하며 API 키로 자동 전환하지 않는다.
+- `codex`: 로그인된 Codex CLI에 instructions와 호출 상한을 적용. `adapter: {"type":"codex","model":"gpt-6.1-sol","effort":"medium"}`로 모델과 추론 강도를 선택한다. model 생략은 기존 gpt-6.1-sol이다. 새 선택 설정에서 effort 생략은 medium; adapter 생략 또는 기존 `{"type":"codex"}`만 있는 계약은 기존 CLI 기본 effort를 유지한다. ChatGPT 로그인만 허용하며 API 키로 자동 전환하지 않는다.
 - `claude`: 로그인된 Claude Code 구독을 사용한다. `adapter: {"type":"claude","model":"claude-opus-5-5","effort":"medium"}`. model 생략은 claude-opus-5-5, effort 생략은 medium. API 인증·외부 provider는 허용하지 않고 오류로 끝낸다. 별도 일회성 실행에서 도구·customization을 제한한다. OAuth를 차단하는 `--bare`는 쓰지 않는다.
 - `stdio`: `adapter: {"type":"stdio","executable":"C:/.../python.exe","args":["C:/.../my_harness.py"]}`. 존재하는 executable 절대 경로, 문자열 args 최대32개. 임의 shell 문자열/eval은 사용하지 않는다. 시작 시 사용자 코드 실행 동의를 별도로 받는다. Python뿐 아니라 Node·실행 파일 등 JSON stdin/stdout을 지원하면 가능하다.
 - `http`: `adapter: {"type":"http","url":"https://your-server.example/falsify"}`. 공인 HTTPS 주소만, URL userinfo/query/fragment 금지, redirect/자동 재시도/환경 proxy 금지. DNS 결과를 검사하고 검사한 공인 IP에 연결하며 TLS는 원래 hostname을 검증한다. 서버가 인증을 요구하면 로컬 stdio wrapper가 자기 비밀 저장소를 이용해 호출하도록 구현한다. 앱 등록 JSON에 인증키를 저장하는 기능은 없다.
