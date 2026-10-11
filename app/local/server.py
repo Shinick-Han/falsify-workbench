@@ -9,11 +9,13 @@ import argparse
 import hmac
 import json
 import mimetypes
+import os
 import re
 import secrets
+import socket
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer as _NativeThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit, unquote
 from red_service import run_review, validate_request
@@ -28,6 +30,14 @@ TOKEN = secrets.token_urlsafe(32)
 JOBS = {}
 LOCK = threading.Lock()
 ACTIVE = threading.BoundedSemaphore(1)
+
+class ThreadingHTTPServer(_NativeThreadingHTTPServer):
+    """On Windows SO_REUSEADDR lets a later bind take over a live listener; claim the port exclusively instead.
+    Elsewhere keep the stdlib default (normal restart over TIME_WAIT; a live listener still refuses the bind)."""
+    if os.name == 'nt': allow_reuse_address = False
+    def server_bind(self):
+        if os.name == 'nt': self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 CORS_HEADERS = {'authorization', 'content-type'}
 HOST_LABEL = re.compile(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?')
 
