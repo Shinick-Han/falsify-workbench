@@ -15,6 +15,8 @@ import threading
 import time
 
 MODEL = "gpt-6.1-sol"
+EFFORTS = ("low", "medium", "high")
+MODEL_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,119}", re.ASCII)
 DISABLED_FEATURES = ("shell_tool", "unified_exec", "apps", "plugins", "multi_agent", "browser_use", "browser_use_external",
                      "computer_use", "code_mode", "code_mode_only", "code_mode_prewarm",
                      "code_mode_host", "view_image", "hooks", "image_generation", "sleep_tool",
@@ -212,11 +214,18 @@ def bounded_transport(command, *, cwd, env, stdin, timeout_seconds, max_output_b
 
 class CodexBackend:
     def __init__(self, max_calls=3, timeout_seconds=90, max_prompt_chars=30000,
-                 *, transport=None, executable=None, skill_folders=None):
+                 *, transport=None, executable=None, skill_folders=None, model=None, effort=None):
         if type(max_calls) is not int or not 1 <= max_calls <= 100:
             raise ValueError("invalid_call_budget")
         if not 0 < timeout_seconds <= 600 or not 1 <= max_prompt_chars <= 100000:
             raise ValueError("invalid_limits")
+        # Omitted model/effort keep the legacy argv exactly (no effort override).
+        model = MODEL if model is None else model
+        if type(model) is not str or not MODEL_PATTERN.fullmatch(model):
+            raise ValueError("invalid_model")
+        if effort is not None and effort not in EFFORTS:
+            raise ValueError("invalid_effort")
+        self.model, self.effort = model, effort
         self.max_calls, self.timeout_seconds = max_calls, timeout_seconds
         self.max_prompt_chars = max_prompt_chars
         self.calls = 0
@@ -225,7 +234,8 @@ class CodexBackend:
         self.executable = executable
         self.skill_folders = host_skill_folders() if skill_folders is None else list(skill_folders)
         self.skills_override = disabled_skills_override(self.skill_folders)
-        self.capability_config = {"model": MODEL, "sandbox": "read-only",
+        self.capability_config = {"provider": "codex", "model": self.model,
+                                  "effort": self.effort or "cli_default", "sandbox": "read-only",
                                   "approval_policy": "never", "ignore_user_config": True,
                                   "host_skill_discovery_requested": "discovered_folders_disabled",
                                   "host_skill_folders_disabled": len(self.skill_folders),
@@ -241,7 +251,8 @@ class CodexBackend:
     def infer(self, prompt, schema):
         start = time.monotonic()
         result = {"status": "error", "response": None, "usage": {},
-                  "elapsed_seconds": 0., "model": MODEL, "error_code": None,
+                  "elapsed_seconds": 0., "model": self.model, "effort": self.effort or "cli_default",
+                  "error_code": None,
                   "observed_tool_calls": 0, "observed_item_types": [],
                   "observed_error_categories": [], "observed_advisories": []}
         try:
@@ -271,11 +282,13 @@ class CodexBackend:
                 schema_path = Path(directory) / "schema.json"
                 schema_path.write_text(encoded, encoding="utf-8")
                 command = executable + ["exec", "--ignore-user-config", "--ephemeral", "--json",
-                            "--skip-git-repo-check", "--sandbox", "read-only", "--model", MODEL,
+                            "--skip-git-repo-check", "--sandbox", "read-only", "--model", self.model,
                             "--output-schema", str(schema_path), "-c", "project_doc_max_bytes=0",
                             "-c", "approval_policy=\"never\"",
                             "-c", self.skills_override,
                             "-c", "model_provider=\"openai\"", "-c", "web_search=\"disabled\""]
+                if self.effort is not None:
+                    command += ["-c", f"model_reasoning_effort=\"{self.effort}\""]
                 for feature in DISABLED_FEATURES:
                     command += ["-c", f"features.{feature}=false"]
                 command += ["-"]

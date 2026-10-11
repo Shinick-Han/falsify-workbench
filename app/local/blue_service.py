@@ -1,7 +1,7 @@
 """Fresh bounded BLUE reads: only supplied modified text, never RED plans/gold."""
 import json
-from harness import resolve, guidance, backend, model_label
-from red_service import (CodexBackend, strict_object, STRING, EVIDENCE, SCAN,
+from harness import resolve, guidance, backend, model_label, builtin, record
+from red_service import (CodexBackend, ClaudeBackend, strict_object, STRING, EVIDENCE, SCAN,
                          evidence_check, validate_request as validate_document)
 
 VERSION = 'falsify.document-blue.v1'
@@ -19,7 +19,7 @@ def validate_request(data):
         if not isinstance(s, dict) or set(s) != {'id', 'label', 'text'}:
             raise ValueError('BLUE 문단에 추가 메타데이터를 넣을 수 없습니다.')
     harness, _ = resolve(data, 'blue')
-    if harness.get('adapter', {}).get('type', 'codex') != 'codex' and data.get('executionConsent') is not True:
+    if not builtin(harness) and data.get('executionConsent') is not True:
         raise ValueError('사용자 harness 실행/전송 동의가 필요합니다.')
     # Shared document validation must not treat BLUE strategy as a RED harness.
     return validate_document({**{k:v for k,v in data.items() if k not in ('harness','harnessCanonical')}, 'schema': 'falsify.document-red.v1', 'level': 1,
@@ -39,11 +39,11 @@ def validate_findings(response, segments):
             raise ValueError('BLUE 설명/한계 제한 초과')
         evidence_check(f['evidence'], source)
 
-def run_review(data, progress, cancelled, backend_factory=CodexBackend):
+def run_review(data, progress, cancelled, backend_factory=CodexBackend, claude_factory=ClaudeBackend):
     chunks, required = validate_request(data)
     harness, harness_hash = resolve(data, 'blue')
     # A new backend and ephemeral CLI session; no shared RED conversation or notes.
-    engine = backend(data, 'blue', required, backend_factory)
+    engine = backend(data, 'blue', required, backend_factory, claude_factory)
     source = {s['id']: s['text'] for s in data['segments']}
     calls, notes = 0, []
     policy = ('Independently review the supplied scientific document for INTERNAL document consistency only. '
@@ -61,7 +61,7 @@ def run_review(data, progress, cancelled, backend_factory=CodexBackend):
         calls += 1
         result = engine.infer(prompt, schema)
         if cancelled.is_set(): raise ValueError('BLUE 취소됨. 결과 폐기')
-        if result['status'] != 'ok': raise ValueError('Codex BLUE 중단: ' + str(result.get('error_code') or result['status']))
+        if result['status'] != 'ok': raise ValueError('CLI BLUE 중단: ' + str(result.get('error_code') or result['status']))
         return result['response']
     if len(chunks) > 1:
         for i, chunk in enumerate(chunks):
@@ -70,7 +70,7 @@ def run_review(data, progress, cancelled, backend_factory=CodexBackend):
                 + json.dumps({'part': i+1, 'parts': len(chunks), 'segments': chunk}, ensure_ascii=False), SCAN)
             if note['status'] != 'ok':
                 return {'schema': VERSION, 'revision': data['revision'], 'sourceHash': data['sourceHash'],
-                    'harness': harness, 'harnessHash': harness_hash, 'model': model_label(harness),
+                    'harness': harness, 'harnessHash': harness_hash, 'model': model_label(harness), **record(harness),
                     'status': note['status'], 'findings': [], 'coverage': {'complete': False, 'calls': calls, 'chunks': len(chunks), 'completedChunks': i+1}}
             if len(note['summary']) > 2500: raise ValueError('BLUE 요약 제한 초과')
             evidence_check(note['evidence'], source, 600)
@@ -83,6 +83,6 @@ def run_review(data, progress, cancelled, backend_factory=CodexBackend):
     validate_findings(response, data['segments'])
     return {'schema': VERSION, 'revision': data['revision'], 'sourceHash': data['sourceHash'], **response,
         'harness': harness, 'harnessHash': harness_hash,
-        'model': model_label(harness), 'coverage': {'complete': True, 'calls': calls, 'chunks': len(chunks), 'completedChunks': len(chunks),
+        'model': model_label(harness), **record(harness), 'coverage': {'complete': True, 'calls': calls, 'chunks': len(chunks), 'completedChunks': len(chunks),
             'meaning': '전체 추출 텍스트 전달 완료. 다중 청크의 종합 판단은 인용 요약 기반이며 결함 전수 탐지 보증 아님.'},
         'isolation': 'application payload separation; custom harness isolation/tools/model not verified; not OS input-only isolation'}

@@ -19,6 +19,9 @@ from urllib.parse import urlsplit, unquote
 from red_service import run_review, validate_request
 from preserve import handle_export
 from blue_service import run_review as run_blue_review, validate_request as validate_blue_request
+from harness import CLI_AGENTS, EFFORTS
+import cli_backend
+from experiments.selfplay_codex import discover_codex
 
 DIST = Path(__file__).resolve().parents[1] / 'dist'
 TOKEN = secrets.token_urlsafe(32)
@@ -53,6 +56,18 @@ def no_duplicates(items):
         if k in result: raise ValueError('중복 JSON 키')
         result[k] = v
     return result
+
+def cli_agents():
+    """Install presence and model suggestions only: no paths, accounts or tokens; not an access catalog."""
+    def present(discover):
+        try:
+            discover()
+            return True
+        except (OSError, ValueError):
+            return False
+    found = {'codex': present(discover_codex), 'claude': present(cli_backend.discover_claude)}
+    return [{'id': key, 'name': agent['name'], 'installed': found[key], 'defaultModel': agent['defaultModel'],
+             'models': list(agent['models']), 'efforts': list(EFFORTS)} for key, agent in CLI_AGENTS.items()]
 
 def work(job, data):
     try:
@@ -127,7 +142,8 @@ class Handler(BaseHTTPRequestHandler):
                     pdf = True
                 except ImportError: pdf = False
                 self.reply(200, {'red': True, 'blue': True, 'pdf': pdf, 'officeLayoutVerifiedExport': False,
-                    'model': 'gpt-6.1-sol', 'isolation': 'read-only CLI restrictions; not OS-enforced input-only isolation'}); return
+                    'model': 'gpt-6.1-sol', 'isolation': 'read-only CLI restrictions; not OS-enforced input-only isolation',
+                    'cliSelection': True, 'cliAgents': cli_agents()}); return
             with LOCK:
                 role = 'blue' if path.startswith('/api/blue/jobs/') else 'red'
                 prefix = '/api/' + role + '/jobs/'

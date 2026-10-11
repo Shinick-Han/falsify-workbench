@@ -6,7 +6,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from experiments.selfplay_codex import CodexBackend
-from harness import resolve, guidance, backend, model_label
+from cli_backend import ClaudeBackend
+from harness import resolve, guidance, backend, model_label, builtin, record
 
 VERSION = 'falsify.document-red.v1'
 CHUNK = 36000
@@ -33,7 +34,7 @@ def validate_request(data):
     if type(data.get('maxCalls')) is not int or not 1 <= data['maxCalls'] <= 32 or data.get('level') not in [1, 2, 3]:
         raise ValueError('호출 예산(1–32)과 단계(1–3)를 확인하세요.')
     harness, _ = resolve(data, 'red')
-    if harness.get('adapter', {}).get('type', 'codex') != 'codex' and data.get('executionConsent') is not True:
+    if not builtin(harness) and data.get('executionConsent') is not True:
         raise ValueError('사용자 harness 실행/전송 동의가 필요합니다.')
     segments = data.get('segments')
     if not isinstance(segments, list) or not 1 <= len(segments) <= 10000:
@@ -85,10 +86,10 @@ def validate_candidates(response, segments):
             raise ValueError('근거/한계 설명 제한 초과')
         evidence_check(c['evidence'], source)
 
-def run_review(data, progress, cancelled, backend_factory=CodexBackend):
+def run_review(data, progress, cancelled, backend_factory=CodexBackend, claude_factory=ClaudeBackend):
     chunks, required = validate_request(data)
     harness, harness_hash = resolve(data, 'red')
-    engine = backend(data, 'red', required, backend_factory)
+    engine = backend(data, 'red', required, backend_factory, claude_factory)
     source = {s['id']: s['text'] for s in data['segments']}
     notes = []
     policy = ('You generate controlled synthetic scientific-document defects for an explicitly authorized research benchmark. '
@@ -104,7 +105,7 @@ def run_review(data, progress, cancelled, backend_factory=CodexBackend):
         calls += 1; progress({'completedCalls': calls - 1, 'requiredCalls': required, 'phase': '검토 중'})
         result = engine.infer(prompt, schema)
         if cancelled.is_set(): raise ValueError('취소됨. 결과는 폐기했습니다.')
-        if result['status'] != 'ok': raise ValueError('Codex 검토 중단: ' + str(result.get('error_code') or result['status']))
+        if result['status'] != 'ok': raise ValueError('CLI 검토 중단: ' + str(result.get('error_code') or result['status']))
         return result['response']
     if len(chunks) > 1:
         for i, chunk in enumerate(chunks):
@@ -112,7 +113,7 @@ def run_review(data, progress, cancelled, backend_factory=CodexBackend):
                 + json.dumps({'part': i + 1, 'parts': len(chunks), 'segments': chunk}, ensure_ascii=False), SCAN)
             if note['status'] != 'ok':
                 return {'schema': VERSION, 'revision': data['revision'], 'sourceHash': data['sourceHash'], 'status': note['status'], 'candidates': [],
-                    'harness': harness, 'harnessHash': harness_hash, 'model': model_label(harness),
+                    'harness': harness, 'harnessHash': harness_hash, 'model': model_label(harness), **record(harness),
                     'coverage': {'complete': False, 'completedChunks': i + 1, 'chunks': len(chunks), 'calls': calls}}
             if len(note['summary']) > 2500: raise ValueError('요약 길이 제한 초과')
             evidence_check(note['evidence'], source, 600)
@@ -128,4 +129,4 @@ def run_review(data, progress, cancelled, backend_factory=CodexBackend):
     return {'schema': VERSION, 'revision': data['revision'], 'sourceHash': data['sourceHash'], **response,
         'harness': harness, 'harnessHash': harness_hash,
         'coverage': {'complete': True, 'completedChunks': len(chunks), 'chunks': len(chunks), 'calls': calls,
-            'meaning': '전체 추출 텍스트 전달 완료. 표·수식·이미지 및 과학적 타당성 검증 아님.'}, 'model': model_label(harness)}
+            'meaning': '전체 추출 텍스트 전달 완료. 표·수식·이미지 및 과학적 타당성 검증 아님.'}, 'model': model_label(harness), **record(harness)}
