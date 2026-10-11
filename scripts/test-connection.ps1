@@ -49,12 +49,19 @@ Check 'valid 7816' ((ConvertFrom-FalsifyConnectUri 'falsify://connect?port=7816'
 Check 'valid 1024' ((ConvertFrom-FalsifyConnectUri 'falsify://connect?port=1024') -eq 1024)
 Check 'valid 65535' ((ConvertFrom-FalsifyConnectUri 'falsify://connect?port=65535') -eq 65535)
 Check 'typed port is int' ((ConvertFrom-FalsifyConnectUri 'falsify://connect?port=7817') -is [int])
+# Windows ShellExecute normalizes the empty authority path: Start-Process 'falsify://connect?port=7817'
+# delivers argv "falsify://connect/?port=7817". That single empty root slash is the same link and is
+# accepted (previously rejected here, which made every real click fail); any other path is not.
+Check 'valid root-slash 7817' ((ConvertFrom-FalsifyConnectUri 'falsify://connect/?port=7817') -eq 7817)
+Check 'valid root-slash 1024' ((ConvertFrom-FalsifyConnectUri 'falsify://connect/?port=1024') -eq 1024)
+Check 'valid root-slash 65535' ((ConvertFrom-FalsifyConnectUri 'falsify://connect/?port=65535') -eq 65535)
+Check 'root-slash typed port is int' ((ConvertFrom-FalsifyConnectUri 'falsify://connect/?port=7817') -is [int])
 $fullWidthDigits = 'falsify://connect?port=' + [string][char]0xFF17 + [char]0xFF18 + [char]0xFF11 + [char]0xFF16
 $malformed = @(
     '', 'falsify://connect', 'falsify://connect?', 'falsify://connect?port=',
     'falsify://connect?port=1023', 'falsify://connect?port=65536', 'falsify://connect?port=99999', 'falsify://connect?port=0',
     'falsify://connect?port=07816', 'falsify://connect?port=+7816', 'falsify://connect?port=-7816', 'falsify://connect?port=7816.0',
-    'falsify://connect/?port=7816', 'falsify://connect/x?port=7816', 'falsify://connect?port=7816#frag', 'falsify://connect?port=7816/',
+    'falsify://connect/x?port=7816', 'falsify://connect?port=7816#frag', 'falsify://connect?port=7816/',
     'falsify://user@connect?port=7816', 'falsify://user:pw@connect?port=7816', 'falsify://connect:80?port=7816',
     'falsify://connect?port=7816&port=7817', 'falsify://connect?port=7816&cmd=calc', 'falsify://connect?origin=https://evil.example&port=7816',
     'falsify://connect?port=7816&model=x', 'falsify://connect?port=7816&token=abc', 'falsify://connect?port=%37816', 'falsify://connect?port%3D7816',
@@ -63,13 +70,26 @@ $malformed = @(
     'falsify://connect?port=7816 -Command calc', 'FALSIFY://connect?port=7816', 'falsify://CONNECT?port=7816', 'falsify://connect?PORT=7816',
     'falsify:connect?port=7816', 'falsify:///connect?port=7816', 'https://connect?port=7816', 'falsify://evil?port=7816', $fullWidthDigits
 )
+# Root-slash form: only the bare empty root slash is allowed; every other variation still rejects.
+$malformed += @(
+    'falsify://connect/', 'falsify://connect/?', 'falsify://connect/?port=', 'falsify://connect//?port=7816', 'falsify://connect///?port=7816',
+    'falsify://connect/evil?port=7816', 'falsify://connect/./?port=7816', 'falsify://connect/../?port=7816', 'falsify://connect\?port=7816',
+    'falsify://connect%2F?port=7816', 'falsify://connect%2f?port=7816', 'falsify://connect/%3Fport=7816', 'falsify://connect/?port=%37816',
+    'falsify://connect/?port=1023', 'falsify://connect/?port=65536', 'falsify://connect/?port=0', 'falsify://connect/?port=07816',
+    'falsify://connect/?port=7816#frag', 'falsify://connect/?port=7816/', 'falsify://connect/?port=7816&cmd=calc', 'falsify://connect/?port=7816&port=7817',
+    'falsify://connect/?origin=x&port=7816', 'falsify://connect/?port=7816&token=abc', 'falsify://user@connect/?port=7816', 'falsify://connect:80/?port=7816',
+    'falsify://connect/ ?port=7816', 'falsify://connect /?port=7816', 'falsify://connect/?port=7816 ', "falsify://connect/?port=7816`n",
+    'FALSIFY://connect/?port=7816', 'falsify://CONNECT/?port=7816', 'falsify://connect/?PORT=7816', 'falsify://evil/?port=7816',
+    'falsify:///?port=7816', 'falsify://connect/?port=7816;calc', 'falsify://connect/?port=7816" -Command "calc'
+)
 foreach ($uri in $malformed) { Check ('rejects [{0}]' -f ($uri -replace "`r", '\r' -replace "`n", '\n')) (Test-Rejected $uri) }
 Check 'rejects null' (Test-Rejected $null)
 
 # --- open-connection.ps1 fails closed before launching anything --------------------------
 $openScript = Join-Path $root 'open-connection.ps1'
 $dryRun = @{ FALSIFY_CONNECT_DRY_RUN = '1' }
-foreach ($uri in @('falsify://connect?port=80', 'falsify://connect?port=7816&cmd=calc', 'falsify://connect?port=7816#x', 'falsify://connect?origin=x&port=7816')) {
+foreach ($uri in @('falsify://connect?port=80', 'falsify://connect?port=7816&cmd=calc', 'falsify://connect?port=7816#x', 'falsify://connect?origin=x&port=7816',
+        'falsify://connect/evil?port=7816', 'falsify://connect//?port=7816', 'falsify://connect/?port=80', 'falsify://connect/?port=7816&cmd=calc')) {
     $result = Invoke-Child @('-File', $openScript, $uri) $dryRun
     Check "open-connection rejects [$uri]" ($result.ExitCode -ne 0 -and $result.Output -match 'Rejected' -and $result.Output -notmatch 'DRY-RUN')
 }
@@ -79,6 +99,8 @@ $result = Invoke-Child @('-File', $openScript, 'falsify://connect?port=7816', '-
 Check 'open-connection rejects extra arguments' ($result.ExitCode -ne 0 -and $result.Output -notmatch 'DRY-RUN')
 $result = Invoke-Child @('-File', $openScript, 'falsify://connect?port=7817') $dryRun
 Check 'open-connection valid link reaches launcher with typed port' ($result.ExitCode -eq 0 -and $result.Output -match 'DRY-RUN start-companion port=7817 ')
+$result = Invoke-Child @('-File', $openScript, 'falsify://connect/?port=7817') $dryRun
+Check 'open-connection ShellExecute root-slash link reaches launcher with typed port' ($result.ExitCode -eq 0 -and $result.Output -match 'DRY-RUN start-companion port=7817 ')
 
 # --- Registered command quoting with spaces ----------------------------------------------
 $spacedDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ('falsify launcher test ' + [guid]::NewGuid().ToString('N'))
@@ -100,12 +122,16 @@ try {
     $prefix = @($powerShell, '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-NoExit', '-File', $spacedScript)
     $argv = @(Split-CommandLine ($command.Replace('%1', 'falsify://connect?port=7816')))
     Check 'argv keeps spaced paths intact' (($argv -join '|') -ceq (($prefix + 'falsify://connect?port=7816') -join '|'))
+    $argv = @(Split-CommandLine ($command.Replace('%1', 'falsify://connect/?port=7816')))
+    Check 'argv keeps root-slash link as one argument' (($argv -join '|') -ceq (($prefix + 'falsify://connect/?port=7816') -join '|'))
     $argv = @(Split-CommandLine ($command.Replace('%1', 'falsify://connect?port=7816" -Command "calc')))
     Check 'quote injection cannot add PowerShell options before -File' ((($argv[0..7]) -join '|') -ceq ($prefix -join '|'))
     $result = Invoke-Child @('-File', $spacedScript, 'falsify://connect?port=7816" -Command "calc') $dryRun
     Check 'quote injection becomes rejected script arguments' ($result.ExitCode -ne 0 -and $result.Output -notmatch 'DRY-RUN')
     $result = Invoke-Child @('-File', $spacedScript, 'falsify://connect?port=7818') $dryRun
     Check 'launcher runs from a path with spaces' ($result.ExitCode -eq 0 -and $result.Output -match 'DRY-RUN start-companion port=7818 ')
+    $result = Invoke-Child @('-File', $spacedScript, 'falsify://connect/?port=7819') $dryRun
+    Check 'launcher accepts root-slash link from a path with spaces' ($result.ExitCode -eq 0 -and $result.Output -match 'DRY-RUN start-companion port=7819 ')
     Check 'rejects percent in script path' (Test-Throws { New-FalsifyProtocolCommand -PowerShellPath $powerShell -ScriptPath (Join-Path $percentDirectory 'open-connection.ps1') })
     Check 'rejects relative script path' (Test-Throws { New-FalsifyProtocolCommand -PowerShellPath $powerShell -ScriptPath '.\open-connection.ps1' })
     Check 'rejects UNC script path' (Test-Throws { New-FalsifyProtocolCommand -PowerShellPath $powerShell -ScriptPath '\\server\share\open-connection.ps1' })

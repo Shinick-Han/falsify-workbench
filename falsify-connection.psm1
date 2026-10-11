@@ -20,13 +20,17 @@ function Get-FalsifyConnectionConstants {
     }
 }
 
-# Accepts exactly falsify://connect?port=<1024..65535>. No path, userinfo, fragment, extra or
-# repeated query keys, percent-decoding, whitespace, leading zeros or trailing newline.
+# Accepts exactly falsify://connect?port=<1024..65535> or its serialized equivalent
+# falsify://connect/?port=<1024..65535>: Windows ShellExecute normalizes the empty authority
+# path to a single root slash before passing the link, so exactly one optional empty root slash
+# is allowed. No other path, double slash, userinfo, fragment, extra or repeated query keys,
+# percent-decoding, whitespace, case changes, leading zeros or trailing newline.
 function ConvertFrom-FalsifyConnectUri {
     param([AllowNull()][AllowEmptyString()][string]$Uri)
-    if ([string]::IsNullOrEmpty($Uri) -or $Uri.Length -gt 40) { throw 'Rejected: not a falsify://connect?port=<1024-65535> link.' }
-    $match = [regex]::Match($Uri, '\Afalsify://connect\?port=([1-9][0-9]{3,4})\z', [System.Text.RegularExpressions.RegexOptions]::CultureInvariant)
-    if (-not $match.Success) { throw 'Rejected: not a falsify://connect?port=<1024-65535> link.' }
+    $rejected = 'Rejected: not a falsify://connect?port=<1024-65535> link (or falsify://connect/?port=<1024-65535>).'
+    if ([string]::IsNullOrEmpty($Uri) -or $Uri.Length -gt 40) { throw $rejected }
+    $match = [regex]::Match($Uri, '\Afalsify://connect/?\?port=([1-9][0-9]{3,4})\z', [System.Text.RegularExpressions.RegexOptions]::CultureInvariant)
+    if (-not $match.Success) { throw $rejected }
     [int]$port = [int]::Parse($match.Groups[1].Value, [System.Globalization.CultureInfo]::InvariantCulture)
     if ($port -lt 1024 -or $port -gt 65535) { throw 'Rejected: port must be 1024-65535.' }
     return $port
