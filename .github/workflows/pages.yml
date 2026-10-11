@@ -26,8 +26,18 @@ jobs:
         run: npm test
       - name: Broker and document contracts (no paid models)
         run: python -m unittest discover -s app/tests -p 'test_*.py'
+  verify-windows-launcher:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Connection launcher dry-run contracts (PowerShell 7)
+        shell: pwsh
+        run: ./scripts/test-connection.ps1
+      - name: Connection launcher dry-run contracts (Windows PowerShell)
+        shell: powershell
+        run: ./scripts/test-connection.ps1
   deploy:
-    needs: verify
+    needs: [verify, verify-windows-launcher]
     runs-on: ubuntu-latest
     permissions:
       pages: write
