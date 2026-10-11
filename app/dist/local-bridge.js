@@ -8,16 +8,28 @@
   function validToken(t){return typeof t==='string'&&t.length>=16&&t.length<=512&&/^[A-Za-z0-9._~+/-]+=*$/.test(t);}
   function command(port){return 'python app/local/server.py --web-origin '+WEB_ORIGIN+(port&&port!==DEFAULT_PORT?' --port '+port:'');}
   function launcher(port){return 'powershell -NoProfile -ExecutionPolicy Bypass -File ./start-companion.ps1'+(port&&port!==DEFAULT_PORT?' -Port '+port:'');}
+  const INSTALL='powershell -NoProfile -ExecutionPolicy Bypass -File .\\install-connection.ps1';
+  // The only URI this page opens: fixed scheme, host and path plus a strict port. Never a token, model, origin or command.
+  function launchUri(value){const p=typeof value==='number'?(Number.isInteger(value)&&value>=1024&&value<=65535?value:null):parsePort(value);return p===null?null:'falsify://connect?port='+p;}
+  const MODEL=/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,119}$/,EFFORTS=['low','medium','high'];
+  // Optional CLI catalogue from a newer broker. Suggestions only, not proof of account access; unknown or malformed entries are dropped.
+  function agents(list){if(!Array.isArray(list))return null;const out=[];
+    for(const a of list.slice(0,8)){if(!a||typeof a!=='object'||!['codex','claude'].includes(a.id)||out.some(x=>x.id===a.id))continue;
+      out.push(Object.freeze({id:a.id,name:typeof a.name==='string'&&a.name.trim()?a.name.slice(0,60):a.id,installed:typeof a.installed==='boolean'?a.installed:null,defaultModel:typeof a.defaultModel==='string'&&MODEL.test(a.defaultModel)?a.defaultModel:null,
+        models:Object.freeze((Array.isArray(a.models)?a.models:[]).filter(m=>typeof m==='string'&&MODEL.test(m)).slice(0,40)),efforts:Object.freeze((Array.isArray(a.efforts)?a.efforts:EFFORTS).filter(e=>EFFORTS.includes(e)))}));}
+    return Object.freeze(out);}
   function capSnapshot(d){if(!d||typeof d!=='object'||Array.isArray(d)||typeof d.red!=='boolean'||typeof d.blue!=='boolean')return null;
-    return Object.freeze({red:d.red,blue:d.blue,pdf:d.pdf===true,officeLayoutVerifiedExport:d.officeLayoutVerifiedExport===true,model:typeof d.model==='string'?d.model.slice(0,80):null,isolation:typeof d.isolation==='string'?d.isolation.slice(0,200):null});}
+    return Object.freeze({red:d.red,blue:d.blue,pdf:d.pdf===true,officeLayoutVerifiedExport:d.officeLayoutVerifiedExport===true,model:typeof d.model==='string'?d.model.slice(0,80):null,isolation:typeof d.isolation==='string'?d.isolation.slice(0,200):null,
+      cliSelection:d.cliSelection===true,cliAgents:d.cliSelection===true?agents(d.cliAgents):null});}
   const NETWORK='로컬 broker에 닿지 못했습니다. 서버 미실행·포트 불일치·--web-origin 누락(CORS 거부)·브라우저 로컬 네트워크 권한 차단 중 하나일 수 있습니다. 브라우저는 원인을 구분해 알려주지 않습니다.';
+  const PORT_ERROR='포트는 1024–65535 사이 정수만 허용합니다. 주소는 항상 http://127.0.0.1입니다.';
 
   function create({fetch:fetchImpl,location:loc,emit=()=>{}}){
     const local=loc.hostname===HOST;
-    let status=local?'checking':'manual',error='',link=null,cap=null,attempt=0,port=local?Number(loc.port)||80:DEFAULT_PORT;
+    let status=local?'checking':'manual',error='',link=null,cap=null,attempt=0,port=local?Number(loc.port)||80:DEFAULT_PORT,launched=false;
     const busy={red:false,blue:false};
     const frozen=()=>busy.red||busy.blue||!!link&&link.inflight>0;
-    function state(){return Object.freeze({mode:local?'local':'hosted',status,error,port,frozen:frozen(),busy:Object.freeze({...busy}),connected:status==='local'||status==='paired',cap,command:command(port)});}
+    function state(){return Object.freeze({mode:local?'local':'hosted',status,error,port,frozen:frozen(),busy:Object.freeze({...busy}),connected:status==='local'||status==='paired',cap,command:command(port),launched});}
     const changed=()=>emit(state());
     function drop(l){if(l){l.alive=false;l.token=null;}}
     // One request against a fixed link snapshot. The token travels only in the Authorization header.
@@ -51,7 +63,7 @@
       const fail=message=>{error=message;changed();return {ok:false,error:message};};
       if(local)return fail('로컬 작업대는 same-origin 세션을 사용합니다. 페어링이 필요 없습니다.');
       if(frozen())return fail('RED/BLUE 작업 중에는 연결을 바꿀 수 없습니다.');
-      const p=parsePort(rawPort);if(p===null)return fail('포트는 1024–65535 사이 정수만 허용합니다. 주소는 항상 http://127.0.0.1입니다.');
+      const p=parsePort(rawPort);if(p===null)return fail(PORT_ERROR);
       const t=typeof rawToken==='string'?rawToken.trim():'';if(!t)return fail('터미널에 표시된 페어링 토큰을 붙여넣으세요.');if(!validToken(t))return fail('토큰 형식이 올바르지 않습니다. 터미널의 페어링 토큰 한 줄만 붙여넣으세요.');
       const id=++attempt;drop(link);link=null;cap=null;port=p;status='connecting';error='';changed();
       const candidate={token:t,base:'http://'+HOST+':'+p,remote:true,alive:true,inflight:0};
@@ -63,22 +75,40 @@
     }
     function disconnect(){if(local)return {ok:false,error:'로컬 작업대 세션은 끊지 않습니다.'};if(frozen()){error='RED/BLUE 작업 중에는 연결을 끊을 수 없습니다.';changed();return {ok:false,error};}
       attempt++;drop(link);link=null;cap=null;status='manual';error='';changed();return {ok:true};}
+    // Explicit user click only (never on load): asks the OS to open the registered companion terminal.
+    // Browsers cannot report whether a falsify:// handler exists, so success here only means the request was handed over.
+    function launch(rawPort,open){
+      const fail=message=>{error=message;changed();return {ok:false,error:message};};
+      if(local)return fail('로컬 작업대는 same-origin 세션을 사용합니다. 터미널 열기가 필요 없습니다.');
+      if(frozen())return fail('RED/BLUE 작업 중에는 연결을 바꿀 수 없습니다.');
+      if(link||status==='connecting')return fail('이미 연결되었거나 연결 확인 중입니다. 다시 열려면 먼저 연결을 해제하세요.');
+      const p=parsePort(rawPort);if(p===null)return fail(PORT_ERROR);
+      if(typeof open!=='function')return fail('이 브라우저에서는 터미널 열기를 쓸 수 없습니다. 수동 실행을 쓰세요.');
+      const uri=launchUri(p);port=p;error='';launched=true;
+      try{open(uri);}catch{launched=false;return fail('브라우저가 연결 앱 열기를 막았습니다. 수동 실행을 쓰세요.');}
+      changed();return {ok:true,uri};
+    }
     function setBusy(role,value){if(!Object.hasOwn(busy,role))return;value=!!value;if(busy[role]===value)return;busy[role]=value;changed();}
     function setPort(value){if(local||status==='connecting'||link)return null;const p=parsePort(value);if(p!==null&&p!==port){port=p;changed();}return p;}
     const ready=boot();
-    return Object.freeze({ready,state,session,pair,disconnect,busy:setBusy,setPort,capabilities:()=>cap});
+    return Object.freeze({ready,state,session,pair,disconnect,launch,busy:setBusy,setPort,capabilities:()=>cap});
   }
 
-  function mount(bridge,doc){
+  function mount(bridge,doc,options={}){
     const $=id=>doc.getElementById(id),panel=$('local-bridge');if(!panel)return;
     const statusEl=$('bridge-status'),pairEl=$('bridge-pair'),portEl=$('bridge-port'),tokenEl=$('bridge-token'),connectEl=$('bridge-connect'),disconnectEl=$('bridge-disconnect'),commandEl=$('bridge-command'),launcherEl=$('bridge-launcher'),feedbackEl=$('bridge-feedback');
-    function text(s){const c=s.cap,detail=c?' · RED '+(c.red?'가능':'불가')+' · BLUE '+(c.blue?'가능':'불가')+' · PDF 보존 '+(c.pdf?'가능':'불가'):'';
+    const launchEl=$('bridge-launch'),launchStatusEl=$('bridge-launch-status'),otherOsEl=$('bridge-other-os'),installEl=$('bridge-install');
+    // The terminal handler is installed by the Windows connection app; other platforms keep the manual path.
+    const nav=doc.defaultView?.navigator,windows=/win/i.test(String(options.platform??nav?.userAgentData?.platform??nav?.platform??''));
+    const open=options.open||(uri=>{const a=doc.createElement('a');a.href=uri;a.rel='noopener noreferrer';a.click();});
+    if(installEl)installEl.textContent=INSTALL;
+    function text(s){const c=s.cap,detail=c?' · RED '+(c.red?'가능':'불가')+' · BLUE '+(c.blue?'가능':'불가')+' · PDF 보존 '+(c.pdf?'가능':'불가')+' · CLI 선택 '+(c.cliSelection?'가능':'미지원(구버전 companion)'):'';
       if(s.status==='checking')return '로컬 작업대 세션 확인 중';
       if(s.status==='local')return '로컬 작업대 · same-origin 세션 (페어링 불필요)'+detail;
       if(s.status==='local-unavailable')return '정적 미리보기 · 인증된 로컬 broker 없음 · 파일 추출과 수동 JSON 교환만 가능';
       if(s.status==='connecting')return 'http://127.0.0.1:'+s.port+' 인증 확인 중';
       if(s.status==='paired')return '페어링됨 · http://127.0.0.1:'+s.port+' · 인증된 capabilities 확인'+detail;
-      return '연결 안 됨 · 수동 JSON 교환 모드';}
+      return '연결 안 됨 · 아래 순서로 내 PC와 연결하거나 수동 JSON 교환을 쓰세요';}
     function render(s=bridge.state()){
       panel.dataset.state=s.status;statusEl.textContent=text(s)+(s.frozen&&s.connected?' · 작업 중이라 연결 변경 잠김':'');
       if(pairEl)pairEl.hidden=s.mode==='local';
@@ -86,19 +116,22 @@
       const linked=s.status==='paired'||s.status==='connecting';
       if(portEl)portEl.disabled=s.frozen||linked;if(tokenEl)tokenEl.disabled=s.frozen||linked;
       if(connectEl)connectEl.disabled=s.frozen||linked;if(disconnectEl){disconnectEl.hidden=!linked;disconnectEl.disabled=s.frozen;}
+      if(launchEl){launchEl.hidden=s.mode==='local'||!windows;launchEl.disabled=s.frozen||linked;}if(otherOsEl)otherOsEl.hidden=s.mode==='local'||windows;
+      if(launchStatusEl)launchStatusEl.textContent=s.launched&&s.status==='manual'?'포트 '+s.port+'로 터미널 열기를 요청했습니다. 브라우저가 물으면 열기를 허용하고, 터미널에 표시된 페어링 토큰을 아래에 붙여넣으세요. 아무 창도 뜨지 않으면 연결 앱이 아직 설치되지 않았을 수 있습니다. 브라우저는 설치 여부를 알려주지 않습니다. 1단계를 먼저 하거나 수동 실행을 쓰세요.':'';
       const p=linked?s.port:parsePort(portEl?.value)??s.port;if(commandEl)commandEl.textContent=command(p);if(launcherEl)launcherEl.textContent=launcher(p);
       for(const a of doc.querySelectorAll?.('[data-bridge-local]')||[])a.href='http://127.0.0.1:'+(s.mode==='local'?s.port:p)+'/';
     }
     render();
     doc.addEventListener('falsify:local-bridge',e=>render(e.detail));
     portEl?.addEventListener('input',()=>{bridge.setPort(portEl.value);render();});
+    launchEl?.addEventListener('click',()=>{const r=bridge.launch(portEl?.value,open);if(r.ok)tokenEl?.focus?.();});
     // The token field is cleared on every attempt; the value lives only inside the bridge closure after success.
     connectEl?.addEventListener('click',async()=>{const t=tokenEl.value;tokenEl.value='';await bridge.pair(t,portEl?.value);});
     tokenEl?.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();connectEl.click();}});
     disconnectEl?.addEventListener('click',()=>bridge.disconnect());
   }
 
-  if(typeof module==='object'&&module.exports){module.exports={create,mount,parsePort,validToken,command,launcher,DEFAULT_PORT};return;}
+  if(typeof module==='object'&&module.exports){module.exports={create,mount,parsePort,validToken,command,launcher,launchUri,INSTALL,DEFAULT_PORT};return;}
   const bridge=create({fetch:(...args)=>root.fetch(...args),location:root.location,emit:detail=>root.document.dispatchEvent(new CustomEvent('falsify:local-bridge',{detail}))});
   root.FalsifyLocalBridge=bridge;mount(bridge,root.document);
 })(typeof window==='object'?window:globalThis);

@@ -2,6 +2,8 @@
 (function(){
   'use strict';const H=FalsifyHarness,$=s=>document.querySelector(s),clone=x=>JSON.parse(JSON.stringify(x));
   const KEY='falsify.experiment-ledger.v1';let db={schema:KEY,harnesses:[],runs:[],reviews:[]},selected={red:null,blue:null},comparison=null,planEpoch=0,recoveryRequired=false;
+  // Per-role built-in CLI choice: cli = explicit selection (null = harness value), effective = config/hash actually bound, deriving = pending hash job.
+  const cli={red:null,blue:null},effective={red:null,blue:null},deriving={red:null,blue:null},locked={red:false,blue:false},cliError={red:'',blue:''},cliEls={};
   const HEX=/^[a-f0-9]{64}$/,RUN_KEYS=['id','createdAt','role','revision','fileHash','sourceHash','segments','harness','harnessHash','maxCalls','level','model','provenance','response','sourceName','format','finalState','sourceRunId','snapshotOf','requestId'],PATCH_KEYS=['id','segmentId','label','before','after','offset','edited'],PRIVATE=['finalState','sourceRunId','snapshotOf','plan','comparison','reviews','assessments','gold'];
   const fail=s=>{throw Error(s);},plain=v=>!!v&&typeof v==='object'&&!Array.isArray(v);
   const stable=v=>Array.isArray(v)?'['+v.map(stable).join(',')+']':plain(v)?'{'+Object.keys(v).sort().map(k=>JSON.stringify(k)+':'+stable(v[k])).join(',')+'}':JSON.stringify(v);
@@ -23,24 +25,85 @@
       const detail=text('p','기본 harness 준비 중');detail.id=role+'-harness-detail';detail.className='muted';
       const consent=document.createElement('label');consent.className='check-row';const input=document.createElement('input');input.id=role+'-harness-consent';input.type='checkbox';
       consent.append(input,text('span','사용자 코드 실행 / 외부 서버 전송에 동의합니다. 로컬 코드는 PC 파일·네트워크에 접근할 수 있고, 외부 서버는 논문을 받습니다. OS 샌드박스·내부 호출 예산은 보장하지 않습니다.'));
-      const button=text('button','Harness 관리');button.type='button';button.className='text-button';button.dataset.view='agents';section.append(label,select,detail,consent,button);
+      const button=text('button','Harness 관리');button.type='button';button.className='text-button';button.dataset.view='agents';section.append(label,select,detail,cliBox(role),consent,button);
       const anchor=$(role==='red'?'#red-connection':'#doc-blue-connection');anchor.after(section);
-      select.addEventListener('change',()=>{selected[role]=db.harnesses.find(h=>h.hash===select.value);input.checked=false;details(role);document.dispatchEvent(new CustomEvent('falsify:harness-change',{detail:{role}}));});
+      select.addEventListener('change',()=>{selected[role]=db.harnesses.find(h=>h.hash===select.value);input.checked=false;rebind(role);details(role);document.dispatchEvent(new CustomEvent('falsify:harness-change',{detail:{role}}));});
       input.addEventListener('change',()=>document.dispatchEvent(new CustomEvent('falsify:harness-consent',{detail:{role}})));
     }
     const redButton=text('button','RED 실행 결과 기록');redButton.id='red-record';redButton.className='button secondary';redButton.type='button';redButton.disabled=true;const redStatus=text('p','');redStatus.id='red-record-status';redStatus.setAttribute('role','status');$('#red-export').after(redButton,redStatus);
-    const manager=document.createElement('section');manager.id='harness-manager';manager.className='document-red';manager.innerHTML='<h2>Harness</h2><p>이름·역할·버전과 입출력 계약만 고정합니다. 내부 전략·도구·모델·설정은 자유롭게 구현하세요. 수정하면 새 내용 해시로 추가되어 이전 실행을 덮어쓰지 않습니다.</p><div class="button-row"><button id="harness-example-red" type="button" class="button secondary">RED 설정 예시</button><button id="harness-example-blue" type="button" class="button secondary">BLUE 설정 예시</button><button id="harness-example-code" type="button" class="button secondary">로컬 코드 예시</button><button id="harness-example-http" type="button" class="button secondary">외부 서버 예시</button></div><label for="harness-file">harness JSON 가져오기<input id="harness-file" type="file" accept=".json"></label><label for="harness-editor">harness JSON · 비밀정보를 넣지 마세요<textarea id="harness-editor" rows="12" maxlength="50000" spellcheck="false"></textarea></label><div class="button-row"><button id="harness-register" type="button" class="button primary">새 harness 버전 등록</button><button id="harness-download" type="button" class="button secondary">편집 JSON 저장</button></div><p id="harness-status" role="status" class="ledger-status"></p><section id="harness-preview" class="harness-preview" hidden aria-label="불러온 Harness 검토"></section><details class="red-help"><summary>연결 계약과 실행 범위</summary><p>codex: 지침을 기존 실행기에 적용. stdio: 로컬 executable 절대 경로와 args로 실행하며 stdin JSON 한 개를 받아 stdout JSON 한 개를 반환. http: 공인 HTTPS URL에 POST하고 JSON 한 개 반환. 반환값은 invocation의 outputSchema를 따라야 합니다. settings는 사용자 구현에 그대로 전달합니다.</p><p>입력: schema=falsify.harness-invocation.v1, role, prompt, outputSchema, settings, call, maxCalls. 출력: outputSchema의 객체 자체 (외부 envelope 없이). 앱이 논문을 분할하므로 호출마다 독립 실행될 수 있습니다. 내부 상태·하위 호출·도구 격리는 사용자 harness 책임입니다. 외부 실행은 로컬 broker에서만 가능하며 회당 180초, 출력 150KB, 자동 재시도 없음. API 키는 JSON이 아닌 코드/서버의 자체 비밀 저장소에서 관리하세요.</p><p>임의 shell 문자열은 실행하지 않습니다. 등록만으로 실행되지 않으며 실행 시 별도 동의가 필요합니다. 이 앱은 사용자 코드를 신뢰해서 실행하는 도구이지 보안 샌드박스가 아닙니다.</p></details><h3>등록된 버전</h3><div id="harness-library" class="harness-library"></div>';
+    const manager=document.createElement('section');manager.id='harness-manager';manager.className='document-red';manager.innerHTML='<h2>Harness</h2><p>이름·역할·버전과 입출력 계약만 고정합니다. 내부 전략·도구·모델·설정은 자유롭게 구현하세요. 수정하면 새 내용 해시로 추가되어 이전 실행을 덮어쓰지 않습니다.</p><div class="button-row"><button id="harness-example-red" type="button" class="button secondary">RED 설정 예시</button><button id="harness-example-blue" type="button" class="button secondary">BLUE 설정 예시</button><button id="harness-example-code" type="button" class="button secondary">로컬 코드 예시</button><button id="harness-example-http" type="button" class="button secondary">외부 서버 예시</button></div><label for="harness-file">harness JSON 가져오기<input id="harness-file" type="file" accept=".json"></label><label for="harness-editor">harness JSON · 비밀정보를 넣지 마세요<textarea id="harness-editor" rows="12" maxlength="50000" spellcheck="false"></textarea></label><div class="button-row"><button id="harness-register" type="button" class="button primary">새 harness 버전 등록</button><button id="harness-download" type="button" class="button secondary">편집 JSON 저장</button></div><p id="harness-status" role="status" class="ledger-status"></p><section id="harness-preview" class="harness-preview" hidden aria-label="불러온 Harness 검토"></section><details class="red-help"><summary>연결 계약과 실행 범위</summary><p>codex / claude: 이 PC에 로그인된 Codex CLI 또는 Claude Code CLI로 실행합니다. model(영문·숫자로 시작하는 ASCII ID)과 effort(low / medium / high)는 선택 사항이며, RED / BLUE 화면의 CLI 선택은 이 값을 바꾼 새 내용 해시로 기록됩니다(CLI 선택 지원 companion 필요, 기존 {"type":"codex"}는 그대로 유효). stdio: 로컬 executable 절대 경로와 args로 실행하며 stdin JSON 한 개를 받아 stdout JSON 한 개를 반환. http: 공인 HTTPS URL에 POST하고 JSON 한 개 반환. 반환값은 invocation의 outputSchema를 따라야 합니다. settings는 사용자 구현에 그대로 전달합니다.</p><p>입력: schema=falsify.harness-invocation.v1, role, prompt, outputSchema, settings, call, maxCalls. 출력: outputSchema의 객체 자체 (외부 envelope 없이). 앱이 논문을 분할하므로 호출마다 독립 실행될 수 있습니다. 내부 상태·하위 호출·도구 격리는 사용자 harness 책임입니다. 외부 실행은 로컬 broker에서만 가능하며 회당 180초, 출력 150KB, 자동 재시도 없음. API 키는 JSON이 아닌 코드/서버의 자체 비밀 저장소에서 관리하세요.</p><p>임의 shell 문자열은 실행하지 않습니다. 등록만으로 실행되지 않으며 실행 시 별도 동의가 필요합니다. 이 앱은 사용자 코드를 신뢰해서 실행하는 도구이지 보안 샌드박스가 아닙니다.</p></details><h3>등록된 버전</h3><div id="harness-library" class="harness-library"></div>';
     $('#view-agents').prepend(manager);
     const board=document.createElement('section');board.id='ledger-board';board.className='document-red';board.innerHTML='<h2>Harness별 실행 · 검수 기록</h2><p>같은 입력 텍스트 해시·역할·모델 표기·RED 난이도·호출 예산별로 나눠 표시합니다. 평균은 실행별 최신 사람 평가 1건의 주관적 품질 점수이며 탐지율이 아닙니다. 유보는 평균에서 제외합니다. 서로 다른 조건의 우열이나 변경의 인과 효과는 자동 결론 내리지 않습니다.</p><p id="ledger-summary"></p><div class="ledger-table-wrap"><table class="ledger-table"><caption>Harness 내용 해시와 동일 조건별 관찰</caption><thead><tr><th>Harness / 역할</th><th>조건</th><th>실행 / 검수</th><th>품질 평균</th><th>유보 / 출처 미검증</th></tr></thead><tbody id="ledger-table-body"></tbody></table></div><section id="ledger-tools" class="ledger-section"><h3>기록 백업 · 복원</h3><p>논문 추출문·모델 응답·검수 내용은 이 브라우저에 저장됩니다. 서버에 공유되지 않으며 로컬/비공개 웹/다른 PC의 기록은 자동 동기화되지 않습니다. JSON 백업으로 옮기세요. 가져온 실행의 출처는 미검증으로 표시합니다.</p><button id="ledger-export" class="button secondary" type="button">전체 기록 JSON 백업</button><label for="ledger-import">백업 JSON 병합<input id="ledger-import" type="file" accept=".json"></label><p id="ledger-status" role="status"></p></section>';
     $('#view-results').prepend(board);
+    document.addEventListener('falsify:local-bridge',()=>{for(const role of ['red','blue'])renderCli(role);});
   }
-  function details(role){const h=selected[role];if(!h)return;$('#'+role+'-harness-detail').textContent=h.config.name+' · v'+h.config.version+' · '+h.hash.slice(0,12)+' · '+(h.config.adapter?.type||'codex')+' · 상한 '+h.config.maxCalls+'회';$('#'+role+'-harness-consent').closest('label').hidden=!external(role);}
-  function external(role){return (selected[role]?.config.adapter?.type||'codex')!=='codex';}
+  // Built-in CLI controls. A choice derives a new config (new content hash) for binding and never edits a stored harness version.
+  function cliBox(role){
+    const box=document.createElement('fieldset');box.className='cli-select';box.id=role+'-cli';const legend=text('legend',role.toUpperCase()+' 실행 CLI · 모델 · effort');
+    const note=text('p','');note.id=role+'-cli-note';note.setAttribute('aria-live','polite');
+    const field=(copy,control)=>{const l=text('label',copy);l.htmlFor=control.id;control.setAttribute('aria-describedby',note.id);l.append(control);return l;};
+    const type=document.createElement('select');type.id=role+'-cli-type';const opts={};
+    for(const [v,copy] of [['','Harness 지정값'],['codex','Codex CLI'],['claude','Claude Code CLI']]){const o=text('option',copy);o.value=v;opts[v]=o;type.append(o);}
+    const model=document.createElement('input');model.id=role+'-cli-model';model.type='text';model.maxLength=120;model.autocomplete='off';model.spellcheck=false;model.setAttribute('list',role+'-cli-models');
+    const list=document.createElement('datalist');list.id=role+'-cli-models';
+    const effort=document.createElement('select');effort.id=role+'-cli-effort';const effortOpts={};for(const v of H.EFFORTS){const o=text('option',v);o.value=v;effortOpts[v]=o;effort.append(o);}
+    const modelLabel=field('모델 ID',model);modelLabel.append(list);
+    box.append(legend,field('CLI',type),modelLabel,field('effort',effort),note);
+    cliEls[role]={type,model,effort,list,note,opts,effortOpts};
+    type.addEventListener('change',()=>chooseCli(role,'type',type.value));model.addEventListener('change',()=>chooseCli(role,'model',model.value.trim()));effort.addEventListener('change',()=>chooseCli(role,'effort',effort.value));
+    return box;
+  }
+  const bridgeCap=()=>globalThis.FalsifyLocalBridge?.capabilities?.()||null;
+  const bridgeOn=()=>!!globalThis.FalsifyLocalBridge?.state?.()?.connected;
+  const agentInfo=(type,cap=bridgeCap())=>cap?.cliAgents?.find(a=>a.id===type)||null;
+  // Explicit CLI choice needs a broker advertising cliSelection; when it sends a catalogue the CLI must be listed and not reported missing.
+  function agentOk(type,cap=bridgeCap()){if(!cap?.cliSelection||!Object.hasOwn(H.CLI,type))return false;if(!cap.cliAgents)return true;const a=agentInfo(type,cap);return !!a&&a.installed!==false;}
+  const bound=role=>effective[role]||selected[role];
+  function runnable(role){const c=effective[role]?.config;return !!c&&(!H.needsCliCaps(c)||agentOk(c.adapter.type));}
+  // Re-derives the bound config. Until it settles the role is not runnable and bind() waits, so no run can use a superseded selection.
+  function rebind(role){const base=selected[role],sel=base&&H.cliCapable(base.config)?cli[role]:null;effective[role]=null;
+    const job=(async()=>{await null;let next=base||null;
+      try{if(sel){const config=H.withCli(base.config,sel);next={config,hash:await H.hash(config)};}}catch(e){next=null;cliError[role]='선택을 적용하지 못했습니다: '+e.message;}
+      if(deriving[role]!==job)return;deriving[role]=null;effective[role]=next;details(role);renderCli(role);document.dispatchEvent(new CustomEvent('falsify:harness-consent',{detail:{role}}));})();
+    deriving[role]=job;renderCli(role);return job;}
+  function clearConsent(role){for(const id of [role+'-harness-consent',role==='red'?'red-consent':'doc-blue-consent']){const e=$('#'+id);if(e)e.checked=false;}}
+  function chooseCli(role,field,value){
+    const base=selected[role],prev=cli[role];if(locked[role]||deriving[role]||!base||!H.cliCapable(base.config)){renderCli(role);return;}
+    let next;
+    if(field==='type'){if(!value)next=null;else{if(!agentOk(value)){renderCli(role);return;}const efforts=agentInfo(value)?.efforts?.length?agentInfo(value).efforts:H.EFFORTS;
+      next={type:value,model:prev?.type===value?prev.model:agentInfo(value)?.defaultModel||H.CLI[value].defaultModel,effort:efforts.includes(prev?.effort)?prev.effort:efforts.includes(H.DEFAULT_EFFORT)?H.DEFAULT_EFFORT:efforts[0]};}}
+    else{if(!prev||!agentOk(prev.type)){renderCli(role);return;}next={...prev,[field]:value};}
+    try{if(next){H.cliSelection(next);const efforts=agentInfo(next.type)?.efforts;if(efforts?.length&&!efforts.includes(next.effort))throw Error('이 broker의 '+H.CLI[next.type].name+'는 effort '+next.effort+'를 지원하지 않습니다.');}}
+    catch(e){cliError[role]=field==='model'?'모델 ID 형식 오류: 영문·숫자로 시작하는 ASCII(._:- 포함 최대 120자)만 허용합니다. 이전 값을 유지했습니다.':e.message;renderCli(role);return;}
+    cliError[role]='';if(JSON.stringify(prev)===JSON.stringify(next)){renderCli(role);return;}
+    // Like a Harness switch: consent is cleared, the bound hash re-derived, and role pages invalidate their responses.
+    cli[role]=next;clearConsent(role);rebind(role);document.dispatchEvent(new CustomEvent('falsify:harness-change',{detail:{role,cli:true}}));
+  }
+  function renderCli(role){
+    const e=cliEls[role];if(!e)return;const base=selected[role]?.config,sel=cli[role],cap=bridgeCap(),capable=!!base&&H.cliCapable(base),applied=capable&&!!sel,frozen=locked[role]||!!deriving[role];
+    e.opts[''].textContent='Harness 지정값'+(base?' · '+executor(base):'');e.opts.codex.disabled=!agentOk('codex',cap);e.opts.claude.disabled=!agentOk('claude',cap);
+    const fromBase=capable?base.adapter||{}:{};e.type.value=applied?sel.type:'';e.model.value=applied?sel.model:fromBase.model||'';e.model.placeholder=applied?'':'harness 지정값 사용';e.effort.value=applied?sel.effort:fromBase.effort||H.DEFAULT_EFFORT;
+    const editable=applied&&agentOk(sel.type,cap),info=applied?agentInfo(sel.type,cap):null;
+    e.type.disabled=frozen||!capable;e.model.disabled=frozen||!editable;e.effort.disabled=frozen||!editable;
+    for(const [v,o] of Object.entries(e.effortOpts))o.disabled=!!info?.efforts?.length&&!info.efforts.includes(v);
+    e.list.replaceChildren(...(applied?(info?.models?.length?info.models:H.CLI[sel.type].models):[]).map(m=>{const o=document.createElement('option');o.value=m;return o;}));
+    const now=effective[role]?.config;let msg;
+    if(!base)msg='Harness 준비 중';
+    else if(!capable)msg='이 harness는 자체 실행기('+executor(base)+')를 씁니다. CLI·모델·effort 선택을 적용하지 않으며 harness 설정을 덮어쓰지 않습니다.';
+    else if(!cap?.cliSelection)msg=(bridgeOn()?'연결된 companion이 CLI·모델 선택을 지원하지 않는 구버전입니다. 최신 앱 ZIP으로 업데이트한 뒤 다시 연결하세요. 지금은 broker 기본 Codex CLI로만 실행합니다.':'로컬 broker에 연결하면 그 broker가 지원하는 CLI·모델·effort를 고를 수 있습니다. 연결 전 수동 요청은 현재 harness 값을 그대로 씁니다.')+(now&&H.needsCliCaps(now)?' 현재 값('+executor(now)+')은 CLI 선택을 지원하는 companion에서만 실행됩니다. 「Harness 지정값」으로 되돌리거나 최신 companion에 연결하세요.':'');
+    else if(applied&&!editable)msg=H.CLI[sel.type].name+'는 이 broker에서 쓸 수 없습니다(미설치 또는 미지원). 다른 CLI를 고르거나 「Harness 지정값」으로 되돌리세요.';
+    else msg=(applied?'적용: '+executor(now||H.withCli(base,sel)):'Harness 지정값 사용')+' · 모델 목록은 입력 제안일 뿐 계정에서 쓸 수 있는지 확인하지 않습니다. 목록에 없는 모델 ID도 입력할 수 있습니다.'+(agentInfo('claude',cap)?.installed===false?' Claude Code CLI는 이 PC에 설치되지 않은 것으로 보고되었습니다.':'');
+    if(deriving[role])msg='선택을 harness 내용 해시에 고정하는 중 · 완료 전에는 실행이 잠깁니다.';else if(locked[role])msg+=' 실행·기록 중이라 변경이 잠겼습니다.';
+    e.note.textContent=(cliError[role]?cliError[role]+' ':'')+msg;e.note.classList.toggle('error',!!cliError[role]);
+  }
+  function details(role){const h=selected[role],b=bound(role);if(!h||!b)return;$('#'+role+'-harness-detail').textContent=b.config.name+' · v'+b.config.version+' · '+b.hash.slice(0,12)+' · '+executor(b.config)+' · 상한 '+b.config.maxCalls+'회'+(b.hash!==h.hash?' · 선택 반영본 (기반 '+h.hash.slice(0,8)+' · 기록할 때 새 내용 해시로 추가 등록하며 기존 버전은 그대로)':'');$('#'+role+'-harness-consent').closest('label').hidden=!external(role);}
+  // Built-in Codex/Claude CLIs are not user code; stdio/http adapters keep their own execution consent.
+  function external(role){return !Object.hasOwn(H.CLI,bound(role)?.config.adapter?.type||'codex');}
   function refreshHarness(){
-    for(const role of ['red','blue']){const s=$('#'+role+'-harness'),previous=selected[role]?.hash;s.replaceChildren();for(const h of db.harnesses.filter(h=>h.config.role===role)){const o=text('option',h.config.name+' · v'+h.config.version+' · '+h.hash.slice(0,8));o.value=h.hash;s.append(o);}selected[role]=db.harnesses.find(h=>h.hash===previous)||db.harnesses.find(h=>h.config.role===role);s.value=selected[role]?.hash||'';details(role);}
+    for(const role of ['red','blue']){const s=$('#'+role+'-harness'),previous=selected[role]?.hash;s.replaceChildren();for(const h of db.harnesses.filter(h=>h.config.role===role)){const o=text('option',h.config.name+' · v'+h.config.version+' · '+h.hash.slice(0,8));o.value=h.hash;s.append(o);}selected[role]=db.harnesses.find(h=>h.hash===previous)||db.harnesses.find(h=>h.config.role===role);s.value=selected[role]?.hash||'';if(selected[role]?.hash!==previous)rebind(role);details(role);renderCli(role);}
     const list=$('#harness-library');list.replaceChildren();for(const h of db.harnesses){const a=document.createElement('article');a.append(text('h4',h.config.name+' · '+h.config.role.toUpperCase()+' · v'+h.config.version),text('p','실행기: '+executor(h.config)+' · 상한 '+h.config.maxCalls+'회'),text('p',h.config.instructions));const meta=document.createElement('details');meta.append(text('summary','내용 해시'),text('code',h.hash));const button=text('button','이 버전에서 수정');button.type='button';button.className='text-button';button.addEventListener('click',()=>{$('#harness-editor').value=JSON.stringify(h.config,null,2);$('#harness-editor').focus();});a.append(meta,button);list.append(a);}
   }
-  function executor(c){const a=c.adapter;return !a||a.type==='codex'?'codex (기본 실행기)':a.type==='stdio'?'로컬 코드 '+a.executable+(a.args?.length?' '+a.args.join(' '):''):'외부 서버 '+a.url;}
+  function executor(c){const a=c.adapter;if(!a)return 'broker 기본 실행기 (Codex CLI)';if(Object.hasOwn(H.CLI,a.type))return H.CLI[a.type].name+(a.model||a.effort?' · '+(a.model||'기본 모델')+' · effort '+(a.effort||'기본'):' (broker 기본 모델)');return a.type==='stdio'?'로컬 코드 '+a.executable+(a.args?.length?' '+a.args.join(' '):''):'외부 서버 '+a.url;}
   // Standalone review of an imported Harness before any registration or execution.
   async function previewHarness(config){const box=$('#harness-preview'),hash=await H.hash(config),known=db.harnesses.some(h=>h.hash===hash);box.replaceChildren(text('h3','불러온 Harness 검토'));const dl=document.createElement('dl');for(const [k,v] of [['이름',config.name],['역할',config.role.toUpperCase()],['버전',config.version],['실행기',executor(config)],['호출 상한',config.maxCalls+'회'],['설정 키',Object.keys(config.settings||{}).join(', ')||'없음'],['등록 상태',known?'이미 등록된 내용':'미등록 · 등록 전에는 실행 선택 메뉴에 나타나지 않습니다']])dl.append(text('dt',k),text('dd',v));const ins=document.createElement('details');ins.append(text('summary','지침 · 내용 해시'),text('p',config.instructions),text('code',hash));box.append(dl,ins);box.hidden=false;}
   let shown=null;
@@ -111,13 +174,17 @@
   const ready=(async()=>{if(document.readyState!=='complete')await new Promise(resolve=>document.addEventListener('DOMContentLoaded',resolve,{once:true}));try{const stored=localStorage.getItem(KEY);if(stored)db=await validateDatabase(JSON.parse(stored));}catch(e){recoveryRequired=true;status('#ledger-status','저장된 기록을 읽지 못했습니다: '+e.message+' 기존 저장본은 덮어쓰지 않고 JSON 복원을 기다립니다.',true);}
     for(const role of ['red','blue']){const config=H.builtin(role),hash=await H.hash(config);if(!db.harnesses.some(h=>h.hash===hash))db.harnesses.unshift({config,hash});}refreshHarness();refreshRuns();$('#harness-editor').value=JSON.stringify(H.builtin('red'),null,2);
   })();ready.catch(()=>{});
-  globalThis.FalsifyLab={ready,external,allowed:role=>!external(role)||$('#'+role+'-harness-consent').checked,
-    busy(role,value){$('#'+role+'-harness').disabled=value;$('#'+role+'-harness-consent').disabled=value;},
-    async bind(role,request){await ready;const config=clone(selected[role].config),clean=clone(request);for(const k of PRIVATE)delete clean[k];return {...clean,harness:config,harnessCanonical:H.canonical(config),...(external(role)?{executionConsent:$('#'+role+'-harness-consent').checked}:{})};},
+  globalThis.FalsifyLab={ready,external,allowed:role=>!deriving[role]&&runnable(role)&&(!external(role)||$('#'+role+'-harness-consent').checked),
+    // value covers execution, source binding and record transitions; CLI controls follow the same lock.
+    busy(role,value){value=!!value;$('#'+role+'-harness').disabled=value;$('#'+role+'-harness-consent').disabled=value;if(locked[role]!==value){locked[role]=value;renderCli(role);}},
+    // Captures the CLI/model/effort actually selected, after any pending derivation, as an immutable copy for this request.
+    async bind(role,request){await ready;while(deriving[role])await deriving[role];if(!effective[role])throw Error('실행 harness 선택을 확정하지 못했습니다. CLI 선택을 확인하세요.');const config=clone(effective[role].config),clean=clone(request);for(const k of PRIVATE)delete clean[k];return {...clean,harness:config,harnessCanonical:H.canonical(config),...(external(role)?{executionConsent:$('#'+role+'-harness-consent').checked}:{})};},
     // Selects a saved run in 검수 without navigating; navigation stays with the caller.
     async review(id){await ready;if(!db.runs.some(r=>r.id===id))return false;$('#evaluation-run').value=id;renderEvaluation();return true;},
     // extras: finalState (RED), sourceRunId (BLUE) are stored; isCurrent is a live-only guard checked right before the synchronous persist.
     async record(role,doc,request,response,provenance,extras={}){const isCurrent=extras?.isCurrent;if(!plain(extras??{})||Object.keys(extras??{}).some(k=>!['finalState','sourceRunId','snapshotOf','isCurrent'].includes(k))||isCurrent!==undefined&&typeof isCurrent!=='function')throw Error('기록 추가 정보 형식 오류');const {finalState:final=null,sourceRunId=null,snapshotOf=null}=clone({...(extras??{}),isCurrent:undefined});doc=clone(doc);request=clone(request);response=clone(response);await ready;if(!request?.harness)throw Error('현재 harness 요청을 먼저 저장하거나 실행하세요.');const harness=H.validate(request.harness,role),harnessHash=await H.hash(harness);
+      // A CLI selection derived from a registered version is registered as its own version on first record; stored versions are never edited.
+      let derived=false;if(!db.harnesses.some(h=>h.hash===harnessHash)){if(!db.harnesses.some(h=>h.config.role===role&&H.derivedFrom(harness,h.config)))throw Error('등록되지 않은 harness로 만든 요청입니다. 기록 차단');derived=true;}
       if(provenance==='local-codex'&&(response.harnessHash!==harnessHash||H.canonical(response.harness)!==H.canonical(harness)))throw Error('실행 harness가 요청과 일치하지 않습니다. 기록 차단');
       const r={id:crypto.randomUUID(),createdAt:new Date().toISOString(),role,revision:doc.revision,fileHash:doc.fileHash,sourceHash:doc.sourceHash,segments:clone(doc.segments),harness,harnessHash,maxCalls:request.maxCalls,level:role==='red'?request.level:null,model:provenance==='local-codex'?response.model:'manual-model-unverified',provenance,response:clone(response)};
       if(typeof doc.name==='string'&&doc.name.trim())r.sourceName=doc.name.trim().slice(0,200);if(typeof doc.format==='string'&&doc.format.trim())r.format=doc.format.trim().slice(0,40);
@@ -125,11 +192,11 @@
       if(sourceRunId!==null){if(role!=='blue')throw Error('인계 관계는 BLUE 기록에만 둘 수 있습니다.');r.sourceRunId=sourceRunId;}
       if(snapshotOf!==null)r.snapshotOf=snapshotOf;
       if(request.requestId!==undefined&&request.requestId!==null){if(!validRequestId(request.requestId))throw Error('실행 요청 ID 형식 오류');r.requestId=request.requestId;}
-      const run=await checkRun(r,db.harnesses,db.runs,false);checkLinks(run,[...db.runs,run]);
+      const run=await checkRun(r,derived?[...db.harnesses,{config:harness,hash:harnessHash}]:db.harnesses,db.runs,false);checkLinks(run,[...db.runs,run]);
       if(isCurrent&&!isCurrent()){const e=Error('입력이 바뀌어 이전 결과 기록을 취소했습니다.');e.name='StaleRecordError';throw e;}
       // Same execution (same requestId) re-recorded unchanged, e.g. auto then manual: keep one record.
       const same=db.runs.find(x=>stable({...x,id:0,createdAt:0})===stable({...run,id:0,createdAt:0}));if(same)return same.id;
-      const next={...db,runs:[...db.runs,run]};if(next.runs.length>100)throw Error('실행 기록은 최대 100건입니다. 먼저 백업하세요.');persist(next);refreshRuns(shown?undefined:run.id);return run.id;
+      const add=!db.harnesses.some(h=>h.hash===harnessHash),next={...db,harnesses:add?[...db.harnesses,{config:harness,hash:harnessHash}]:db.harnesses,runs:[...db.runs,run]};if(next.runs.length>100)throw Error('실행 기록은 최대 100건입니다. 먼저 백업하세요.');if(next.harnesses.length>100)throw Error('harness는 최대 100개입니다. 먼저 백업하세요.');persist(next);if(add)refreshHarness();refreshRuns(shown?undefined:run.id);return run.id;
     }
   };
   $('#evaluation-run').addEventListener('change',renderEvaluation);

@@ -3,7 +3,7 @@
   'use strict';const C=FalsifyDocumentRed,B=FalsifyLocalBridge,$=s=>document.querySelector(s);
   let generation=0,doc=null,file=null,candidates=[],response=null,job=null,jobLink=null,busy=false,request=null,binding=null;
   // Run records: one key per (response epoch, final snapshot) so unchanged auto/manual saves never duplicate.
-  let epoch=0,exported=null,lastSaved=null,failure=null,harnessValue=null;const saved=new Map(),pending=new Map(),settings={level:$('#red-level').value,budget:$('#red-budget').value};
+  let epoch=0,exported=null,lastSaved=null,failure=null,guard={};const saved=new Map(),pending=new Map(),settings={level:$('#red-level').value,budget:$('#red-budget').value};
   const hash=async bytes=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))).map(x=>x.toString(16).padStart(2,'0')).join('');
   const msg=(s,error=false)=>{const e=$('#red-progress');e.textContent=s;e.classList.toggle('error',error);};
   function jsonDownload(value,name){download(new TextEncoder().encode(JSON.stringify(value,null,2)),name,'application/json');}
@@ -11,13 +11,13 @@
   // Every job/export binds one bridge link for its whole life (start, polls, cancel); the bridge refuses to switch while busy.
   function link(){const l=B.session();if(!l)throw new Error('로컬 broker 연결이 없습니다. 위 연결 패널에서 연결하거나 수동 JSON 교환을 쓰세요.');return l;}
   function connection(){const s=B.state(),cap=s.cap;
-    $('#red-connection').textContent=s.status==='checking'?'로컬 실행 상태 확인 중':s.connected?(s.status==='paired'?'페어링된 로컬 broker':'로컬 broker 연결')+(cap?.red?' · 기본 harness는 이 PC에 로그인된 Codex CLI'+(cap.model?' ('+cap.model+')':'')+' · 사용자 harness는 자체 모델/도구를 사용하며 내부 격리는 미검증':' · 이 broker는 RED 실행을 지원하지 않습니다.'):'로컬 broker 연결 없음 · 파일 추출과 수동 JSON 교환만 가능합니다. 위 연결 패널을 확인하세요.';}
+    $('#red-connection').textContent=s.status==='checking'?'로컬 실행 상태 확인 중':s.connected?(s.status==='paired'?'페어링된 로컬 broker':'로컬 broker 연결')+(cap?.red?' · 실행 CLI·모델은 아래 Harness 선택을 따릅니다'+(cap.cliSelection?'':' · 이 companion은 기본 Codex CLI'+(cap.model?' ('+cap.model+')':'')+'만 지원 (CLI 선택은 최신 companion 필요)')+' · 사용자 harness는 자체 모델/도구를 사용하며 내부 격리는 미검증':' · 이 broker는 RED 실행을 지원하지 않습니다.'):'로컬 broker 연결 없음 · 파일 추출과 수동 JSON 교환만 가능합니다. 위 연결 패널을 확인하세요.';}
   // The record button is ledger-mounted; bridge changes before that only refresh the connection line.
   document.addEventListener('falsify:local-bridge',()=>{connection();if($('#red-record'))controls();});connection();
   function controls(){
     const active=!!doc&&!busy;
     const cap=B.capabilities();$('#red-start').disabled=!active||!cap?.red||!$('#red-consent').checked||!FalsifyLab.allowed('red');
-    $('#red-record').disabled=!active||!response||pending.size>0;FalsifyLab.busy('red',busy);B.busy('red',busy);
+    $('#red-record').disabled=!active||!response||pending.size>0;FalsifyLab.busy('red',busy||pending.size>0);B.busy('red',busy);
     $('#red-request').disabled=!active;$('#red-import-response').disabled=!active;
     $('#red-level').disabled=busy;$('#red-budget').disabled=busy;
     $('#red-cancel').hidden=!busy||!job;
@@ -87,7 +87,7 @@
   $('#red-cancel').addEventListener('click',()=>{generation++;cancelCurrent();busy=!!binding;msg('취소 요청. 이미 시작된 CLI 호출은 종료/최대 180초까지 실행될 수 있지만 결과는 적용하지 않습니다.');controls();});
   for(const id of ['#red-consent','#red-export-consent'])$(id).addEventListener('change',controls);
   document.addEventListener('falsify:harness-consent',controls);
-  document.addEventListener('falsify:harness-change',e=>{if(e.detail.role!=='red')return;harnessValue=$('#red-harness').value;discard();msg('harness 변경: 이전 응답 무효화. 기록한 실행은 별도로 보존됩니다.');});
+  document.addEventListener('falsify:harness-change',e=>{if(e.detail.role!=='red')return;snapshot();discard();msg('harness 변경: 이전 응답 무효화. 기록한 실행은 별도로 보존됩니다.');});
   $('#red-record').addEventListener('click',()=>{if(!doc||!response||busy)return;let final;try{final=finalState();}catch(e){failure={key:null,message:'현재 선택을 기록할 수 없습니다: '+e.message};renderRecord();return;}if(saved.has(key(final))){failure=null;renderRecord('변경이 없어 다시 기록하지 않았습니다. ');return;}void save(final);});
   for(const [id,name] of [['#red-level','level'],['#red-budget','budget']])$(id).addEventListener('change',()=>{const field=$(id);if(!keepEdits()){field.value=settings[name];return;}settings[name]=field.value;discard();msg('검토 설정이 바뀌어 이전 응답·후보 선택을 무효화했습니다. 새 요청을 만드세요.');});
   function plan(patches,extra={}){return {schema:'falsify.document-edit-plan.v1',revision:doc.revision,sourceHash:doc.sourceHash,sourceFileHash:doc.fileHash,sourceName:doc.name,format:doc.format,selected:patches,
@@ -158,8 +158,10 @@
       // BLUE may cancel the handoff to keep its own running job or unrecorded result.
       if(!document.dispatchEvent(new CustomEvent('falsify:blue-file',{cancelable:true,detail:{file:exported.file,sourceRunId}}))){$('#red-export-status').textContent='BLUE의 진행 중이거나 기록되지 않은 결과를 유지하려고 인계를 취소했습니다.';return;}visibleNav('blue')?.click();}
   });
-  // The Harness select belongs to the ledger; guard it in capture phase so a cancelled change never reaches the ledger handler.
-  document.addEventListener('change',e=>{if(e.target?.id!=='red-harness')return;const select=e.target;if(harnessValue!==null&&harnessValue!==select.value&&[...select.options].some(o=>o.value===harnessValue)&&!keepEdits()){e.stopImmediatePropagation();select.value=harnessValue;}},true);
-  FalsifyLab.ready.then(()=>{harnessValue=$('#red-harness')?.value??null;if(B.state().connected)controls();}).catch(()=>{});
+  // Harness and CLI controls belong to the ledger; guard them in capture phase so a cancelled change never reaches the ledger handler.
+  const GUARDED=['red-harness','red-cli-type','red-cli-model','red-cli-effort'];
+  function snapshot(){for(const id of GUARDED){const e=$('#'+id);if(e)guard[id]=e.value;}}
+  document.addEventListener('change',e=>{const id=e.target?.id;if(!GUARDED.includes(id))return;const field=e.target,previous=guard[id];if(previous!==undefined&&previous!==field.value&&(id!=='red-harness'||[...field.options].some(o=>o.value===previous))&&!keepEdits()){e.stopImmediatePropagation();field.value=previous;}},true);
+  FalsifyLab.ready.then(()=>{snapshot();if(B.state().connected)controls();}).catch(()=>{});
   addEventListener('beforeunload',e=>{if(unrecorded()){e.preventDefault();e.returnValue='';}});
 })();
