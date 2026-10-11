@@ -20,15 +20,20 @@
 
 필수: 위 schema/id/name/version/role/instructions/maxCalls. adapter와 settings는 선택이다. adapter 생략은 Codex. ID/버전은 영문·숫자·`._-` 1–80자, 이름 120자, 지침 8,000자, 호출 상한 1–32. settings는 임의 JSON 객체(32,000자); 비밀키·로그인 정보는 넣지 않는다. 정렬 JSON의 SHA-256으로 정확한 내용 버전을 식별한다. 같은 ID/버전명을 다시 써도 내용이 달라지면 별도 해시로 공존한다. 등록은 실행이 아니다. RED/BLUE 선택 메뉴에서 쓸 버전을 선택한다. 선택 변경은 현재 응답을 무효화하지만 저장된 실행은 그대로다.
 
-실제 호출 상한은 UI 예산과 harness 상한 중 작은 값이다. 전체 추출문을 전달할 예산이 부족하면 시작하지 않는다. 앱의 분할/인용/응답 검증 계약은 유지한다. custom harness는 내부 모델, 도구, 탐색, 하위 agent, 자체 반복 로직을 자유롭게 구현할 수 있다. 앱이 제공하는 기본 Codex만 기존 도구 제한을 강제하며, 사용자 코드/서버의 도구·내부 모델 호출량·도메인 타당성·격리는 검증하지 못한다.
+실제 호출 상한은 UI 예산과 harness 상한 중 작은 값이다. 전체 추출문을 전달할 예산이 부족하면 시작하지 않는다. 앱의 분할/인용/응답 검증 계약은 유지한다. custom harness는 내부 모델, 도구, 탐색, 하위 agent, 자체 반복 로직을 자유롭게 구현할 수 있다. 앱이 제공하는 기본 CLI는 도구 제한을 적용하며, 사용자 코드/서버의 도구·내부 모델 호출량·도메인 타당성·격리는 검증하지 못한다.
 
-### 세 연결 방식
+### 기본 CLI 선택과 사용자 연결 방식
 
-- `codex`: 기존 Codex CLI에 instructions와 호출 상한을 적용. 모델은 현재 gpt-6.1-sol 고정. settings의 temperature/tool/model 같은 임의 값은 이 adapter에서 적용하지 않는다; 이를 직접 제어하려면 stdio/http를 구현한다. hard role/output/evidence/safety constraints override conflicting user instructions.
+- `codex`: 로그인된 Codex CLI에 instructions와 호출 상한을 적용. `adapter: {"type":"codex","model":"gpt-6.1-sol","effort":"medium"}`로 모델과 추론 강도를 선택한다. model 생략은 기존 gpt-6.1-sol, effort 생략은 medium이다. ChatGPT 로그인만 허용하며 API 키로 자동 전환하지 않는다.
+- `claude`: 로그인된 Claude Code 구독을 사용한다. `adapter: {"type":"claude","model":"claude-opus-5-5","effort":"medium"}`. model 생략은 claude-opus-5-5, effort 생략은 medium. API 인증·외부 provider는 허용하지 않고 오류로 끝낸다. 별도 일회성 실행에서 도구·customization을 제한한다. OAuth를 차단하는 `--bare`는 쓰지 않는다.
 - `stdio`: `adapter: {"type":"stdio","executable":"C:/.../python.exe","args":["C:/.../my_harness.py"]}`. 존재하는 executable 절대 경로, 문자열 args 최대32개. 임의 shell 문자열/eval은 사용하지 않는다. 시작 시 사용자 코드 실행 동의를 별도로 받는다. Python뿐 아니라 Node·실행 파일 등 JSON stdin/stdout을 지원하면 가능하다.
 - `http`: `adapter: {"type":"http","url":"https://your-server.example/falsify"}`. 공인 HTTPS 주소만, URL userinfo/query/fragment 금지, redirect/자동 재시도/환경 proxy 금지. DNS 결과를 검사하고 검사한 공인 IP에 연결하며 TLS는 원래 hostname을 검증한다. 서버가 인증을 요구하면 로컬 stdio wrapper가 자기 비밀 저장소를 이용해 호출하도록 구현한다. 앱 등록 JSON에 인증키를 저장하는 기능은 없다.
 
 실제 custom 실행은 인증된 **사용자 PC의 로컬 broker**에서만 가능하다. 공개 웹에서도 [로컬 실행기 설치와 토큰 연결](local-companion.md)을 명시적으로 진행하면 같은 실행기를 호출할 수 있다. 연결하지 않으면 입력/등록/수동 JSON 교환/검수/기록만 가능하다. 사용자 코드에는 최소 환경만 넘기고 임시 작업 폴더에서 실행하지만 **OS sandbox가 아니다**. 신뢰하는 코드만 실행한다. 코드는 PC 파일·네트워크에 접근할 수 있다. 외부 endpoint는 입력 논문을 받을 수 있다. 회당180초, 응답150KB, 앱 adapter 호출 최대32회; custom 내부 하위 호출/토큰/지출은 이 상한으로 제한되지 않는다. 취소는 결과를 폐기하며 현재 호출은 timeout까지 이어질 수 있다. escaped processes나 외부 서버 내부 작업의 중단은 보장하지 않는다.
+
+기본 CLI의 모델 ID는 영문·숫자로 시작하는 ASCII `[A-Za-z0-9_.:-]` 최대120자, effort는 `low` / `medium` / `high`다. 모델 추천 목록은 계정별 접근 가능 목록이 아니다. 직접 ID를 입력할 수 있지만 모델/effort가 계정·CLI에서 지원되지 않으면 실패하고 다른 모델로 자동 대체하지 않는다. 기본 CLI의 `settings.temperature`나 도구 관련 자유 설정은 적용하지 않는다. mandatory role/output/evidence/safety constraints override conflicting instructions. 도구 제한은 OS 파일 읽기 격리가 아니며 관리 정책의 개입까지 없다고 보장하지 않는다.
+
+RED와 BLUE의 CLI·모델·effort는 독립적이다. UI에서 바꾼 실행 설정은 선택 harness의 새 내용 해시로 고정해 요청과 결과 기록에 남긴다. 과거 실행의 설정은 바뀌지 않는다. `stdio`/`http`는 등록한 harness 자체의 실행기를 사용하므로 UI의 기본 CLI 선택으로 덮어쓰지 않는다. 모델 표기는 요청한 ID이며 alias가 실제로 어느 버전으로 해석되는지는 별도로 확인해야 한다. 모델 비교에는 고정 ID 사용을 권한다.
 
 ### Invocation 입출력
 
