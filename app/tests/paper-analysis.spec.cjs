@@ -50,6 +50,22 @@ test('core: fixed layout statuses read missing-glyph, line overlap and overflow 
   assert.deepEqual([...A.view(A.summary(summary(),{sourceSha256:HASH,ids:[]})).layout],['선택한 후보가 없어 줄 공간은 측정하지 않았습니다.']);
   for(const r of Object.keys(A.UNSUPPORTED))assert.equal(A.summary(summary({layout:[{id:'edit-1',status:'unsupported',reason:r}]}),{sourceSha256:HASH,ids:['edit-1']}).layout[0].reason,r);});
 
+// Fixed broker allow-lists (app/local/paper_analysis_service.py OVERFLOW_REASONS / UNSUPPORTED_REASONS); the in-repo layout probe may emit only these.
+const BROKER_UNSUPPORTED=['after-not-text','after-empty','after-too-long','invalid-bbox','invalid-font-size','invalid-line-height','invalid-obstacles','too-many-obstacles','pymupdf-unavailable','font-unavailable',
+  'font-metrics-unavailable','unsupported-character','missing-glyphs','line-bands-overlap','source-not-simple','invalid-edit','source-font-not-found','source-font-ambiguous','source-font-type3',
+  'source-font-program-unreadable','source-font-not-embedded','probe-error'],BROKER_OVERFLOW=['height','unbreakable-width','slot-budget'];
+test('core: every fixed broker/probe layout reason survives the summary and renders fixed copy; unknown or raw reasons are still refused',()=>{
+  const probe=fs.readFileSync(path.resolve(__dirname,'../local/pdf_layout_probe.py'),'utf8');
+  const emitted=new Set([...probe.matchAll(/_result\([^,]+, 'unsupported', '([a-z0-9-]+)'/g),...probe.matchAll(/return None, '([a-z0-9-]+)', None/g)].map(m=>m[1]));
+  for(const r of ['pymupdf-unavailable','font-unavailable','source-font-not-found','source-font-ambiguous','source-font-type3','source-font-program-unreadable','source-font-not-embedded','missing-glyphs','probe-error'])assert.ok(emitted.has(r),'probe emits '+r);
+  for(const r of emitted)assert.ok(BROKER_UNSUPPORTED.includes(r),'broker allows '+r);
+  assert.deepEqual(Object.keys(A.UNSUPPORTED).sort(),[...BROKER_UNSUPPORTED].sort());assert.deepEqual(Object.keys(A.OVERFLOW).sort(),[...BROKER_OVERFLOW].sort());
+  for(const [status,codes,table,prefix] of [['unsupported',BROKER_UNSUPPORTED,A.UNSUPPORTED,'측정 불가: '],['overflow',BROKER_OVERFLOW,A.OVERFLOW,'원래 줄 공간을 넘침: ']])for(const r of codes){
+    const s=A.summary(summary({layout:[{id:'edit-1',status,reason:r}]}),{sourceSha256:HASH,ids:['edit-1']});assert.equal(s.layout[0].reason,r);
+    const line=A.view(s,{'edit-1':'후보 1'}).layout[0];assert.equal(line,'후보 1 · '+prefix+table[r]);assert.ok(!line.includes(r),r);}
+  for(const r of ['source-font-missing','Source-Font-Not-Embedded','source-font-not-embedded ','font_unavailable','conversion_unconfigured','The trial shows a modest benefit','<b>x</b>','__proto__','constructor','toString','',null,0])
+    for(const status of ['unsupported','overflow'])assert.throws(()=>A.summary(summary({layout:[{id:'edit-1',status,reason:r}]}),{sourceSha256:HASH,ids:['edit-1']}),e=>e.analysis===true&&/형식/.test(e.message),status+' '+String(r));});
+
 test('bridge: only /api/paper/inspect is added; descriptor and version are exact-or-absent and shown in the status line',async()=>{
   assert.deepEqual({...L.paperAnalysis(DESCRIPTOR)},DESCRIPTOR);
   for(const bad of [null,[],true,{available:'yes',schema:DESCRIPTOR.schema},{available:true,schema:'falsify.pdf-analysis-summary.v2'},{available:true},{...DESCRIPTOR,command:'python x.py'}])assert.equal(L.paperAnalysis(bad),null,JSON.stringify(bad));

@@ -9,7 +9,9 @@
   const OVERFLOW=Object.freeze({height:'원래 줄 수보다 많은 줄이 필요함','unbreakable-width':'끊을 수 없는 단어가 줄 폭보다 김','slot-budget':'배치할 수 있는 줄 자리를 넘음'});
   const UNSUPPORTED=Object.freeze({'missing-glyphs':'원본 글꼴에 없는 글자가 있음','line-bands-overlap':'줄 간격이 좁아 인접 줄과 겹칠 수 있음','unsupported-character':'측정할 수 없는 문자가 있음','font-metrics-unavailable':'원본 글꼴 치수를 읽지 못함',
     'source-not-simple':'원문 위치가 단순한 한 줄 영역이 아님','after-empty':'After가 비어 있음','after-not-text':'After가 텍스트가 아님','after-too-long':'After가 측정 한도보다 김','invalid-bbox':'원문 영역을 확인하지 못함','invalid-font-size':'글자 크기를 확인하지 못함',
-    'invalid-line-height':'줄 높이를 확인하지 못함','invalid-obstacles':'주변 개체 정보를 확인하지 못함','too-many-obstacles':'주변 개체가 너무 많음','invalid-edit':'변경 형식을 측정할 수 없음','probe-error':'측정 중 오류 (세부 내용은 표시하지 않음)'});
+    'invalid-line-height':'줄 높이를 확인하지 못함','invalid-obstacles':'주변 개체 정보를 확인하지 못함','too-many-obstacles':'주변 개체가 너무 많음','invalid-edit':'변경 형식을 측정할 수 없음',
+    'pymupdf-unavailable':'측정 도구(PyMuPDF)를 사용할 수 없음','font-unavailable':'측정용 글꼴을 사용할 수 없음','source-font-not-found':'원본 글꼴을 쪽에서 찾지 못함','source-font-ambiguous':'원본 글꼴을 하나로 특정하지 못함',
+    'source-font-type3':'원본 글꼴이 Type3 글꼴이라 측정하지 않음','source-font-program-unreadable':'원본 글꼴 파일을 읽지 못함','source-font-not-embedded':'원본 글꼴이 PDF에 포함되어 있지 않음','probe-error':'측정 중 오류 (세부 내용은 표시하지 않음)'});
   const SHAPE='사전분석 응답이 약속된 형식과 달라 표시하지 않았습니다. 원본·후보·편집·다운로드 상태는 그대로입니다.';
   function fail(message){const e=new Error(message);e.analysis=true;throw e;}
   const exact=(o,keys)=>!!o&&typeof o==='object'&&!Array.isArray(o)&&Object.keys(o).length===keys.length&&keys.every(k=>Object.hasOwn(o,k));
