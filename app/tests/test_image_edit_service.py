@@ -243,6 +243,15 @@ class ChildContractTests(unittest.TestCase):
             self.assertError(svc.export_image, req, Runner(envelope('export', 'error', reason=reason)), 422, 'image_edit_rejected', 'engine-error')
         self.assertError(svc.export_image, req, Runner(envelope('export', 'error', reason='dependency-unavailable')), 503, 'image_editor_unavailable')
         self.assertError(svc.list_images, req[:2], Runner(envelope('list', 'error', reason='dependency-unavailable')), 503, 'image_editor_unavailable')
+    def test_no_op_refusal_kept_and_raw_reasons_sanitized(self):
+        req = (SOURCE, sha(SOURCE), OCC, PNG)
+        self.assertError(svc.export_image, req, Runner(envelope('export', 'error', reason='no-op')), 422, 'image_edit_rejected', 'no-op')
+        self.assertEqual(svc._reason(ValueError('no-op')), 'no-op')
+        for reason in ['no-op: ' + SECRET, 'No-Op', 'noop', 'output-limit', 'rawpaper']:
+            with self.subTest(reason=reason):
+                self.assertError(svc.export_image, req, Runner(envelope('export', 'error', reason=reason)), 422, 'image_edit_rejected', 'engine-error')
+                self.assertEqual(svc._reason(ValueError(reason)), 'engine-error')
+        self.assertEqual(svc._reason(RuntimeError('no-op')), 'engine-error')
     def test_export_recomputes_hashes(self):
         runner = export_runner()
         with TempTracker() as t, patch.object(svc, 'default_runner', runner): result = svc.export_image((SOURCE, sha(SOURCE), OCC, PNG))

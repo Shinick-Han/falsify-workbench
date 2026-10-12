@@ -54,7 +54,7 @@ REASONS = frozenset(('form-image', 'inline-image', 'rotated-page', 'cropped-page
     'unsupported-transform', 'overlapping-content', 'malformed-pdf', 'scan-limit', 'dependency-unavailable'))
 # Engine refusals published on 422; any other engine code is published as 'engine-error'.
 EXPORT_REASONS = REASONS | frozenset(('occurrence-not-found', 'not-editable', 'replacement-transparent', 'replacement-invalid',
-    'replacement-too-large', 'output-too-large', 'check-failed', 'engine-error'))
+    'replacement-too-large', 'output-too-large', 'check-failed', 'no-op', 'engine-error'))
 LIMITS = {'maxPdfBytes': 25 * 1024 * 1024, 'maxOutputBytes': 64 * 1024 * 1024, 'maxPngBytes': 4 * 1024 * 1024,
     'maxPngPixels': 4_000_000, 'maxPngSide': 8192, 'maxOccurrences': 256, 'maxPages': 64, 'maxThumbnailSide': 320,
     'maxThumbnailBytes': 256 * 1024, 'maxListJsonBytes': 16 * 1024 * 1024, 'timeoutSeconds': 90, 'maxStdinBytes': 4096,
