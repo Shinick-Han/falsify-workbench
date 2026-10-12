@@ -24,7 +24,7 @@ Case dict:
                                  qaGate: must-not-fail|must-not-pass, capability: bool,
                                  defect: None|{kind, pageIndex, regions}}
 qaGate is the policy target; capability=True marks a case the current engine is not expected to recognise, so a
-matrix records the observed verdict instead of gating on it. Page 1 of every document is an untouched control page.
+matrix records the observed verdict instead of gating on it. Page index 1 (the second page) is an untouched control page.
 """
 import pymupdf
 

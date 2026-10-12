@@ -2,7 +2,7 @@
   "name": "falsify-paper-workbench",
   "license": "AGPL-3.0-only",
   "private": true,
-  "scripts": {"build:import": "node scripts/build-import.mjs", "test": "node scripts/test.mjs"},
+  "scripts": {"build:import": "node scripts/build-import.mjs", "build:preview": "node scripts/build-preview.mjs", "test": "node scripts/test.mjs"},
   "dependencies": {"fflate": "0.8.3", "parse5": "8.0.1", "pdfjs-dist": "6.4.299"},
   "devDependencies": {"esbuild": "0.28.2"}
 }
