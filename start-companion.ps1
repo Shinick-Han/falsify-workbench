@@ -71,7 +71,7 @@ try {
     if ($editorConfiguration) {
         $nodeCommand = Get-Command node -CommandType Application -ErrorAction SilentlyContinue
         if (-not $nodeCommand) { throw 'The configured PDF editor requires Node.js 24+. No installation or broker startup ran.' }
-        & $nodeCommand.Source -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 24 ? 0 : 1)'
+        & $nodeCommand.Source -e 'process.exit(parseInt(process.versions.node,10) >= 24 ? 0 : 1)'
         if ($LASTEXITCODE -ne 0) { throw 'The configured PDF editor requires Node.js 24+. Upgrade Node explicitly; nothing was installed.' }
     }
     $venvPython = Join-Path $venvDirectory 'Scripts/python.exe'

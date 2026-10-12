@@ -18,5 +18,32 @@ Check 'missing local paths reject' (Rejects { Resolve-FalsifyPdfEditorConfig -Pr
 $tokens = $null; $errors = $null
 $null = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'pdf-editor-config.psm1'), [ref]$tokens, [ref]$errors)
 Check 'module syntax' (@($errors).Count -eq 0)
-Write-Host "$checks checks passed; no installation, process, registry or network mutations."
+# Windows PowerShell 5 strips inner double quotes from native arguments, so the launcher's Node probe must stay quote-free.
+$intendedProbe = 'process.exit(parseInt(process.versions.node,10) >= 24 ? 0 : 1)'
+$probeMatch = [regex]::Match((Get-Content -Raw -LiteralPath (Join-Path $root 'start-companion.ps1')), "& \`$nodeCommand\.Source -e '([^']*)'")
+$probe = $probeMatch.Groups[1].Value
+Check 'launcher Node probe is the quote-free form' ($probeMatch.Success -and $probe -ceq $intendedProbe -and $probe -notmatch '["`]')
+function Invoke-NodeProbe([string]$Node, [string]$Script) {
+    $ErrorActionPreference = 'Continue'
+    $diagnostics = (& $Node -e $Script 2>&1 | Out-String).Trim()
+    [pscustomobject]@{ ExitCode = $LASTEXITCODE; Diagnostics = $diagnostics }
+}
+$skipped = 0
+$nodeCommand = Get-Command node -CommandType Application -ErrorAction SilentlyContinue
+if (-not $nodeCommand) {
+    $skipped++
+    Write-Host 'SKIP Node runtime probe: node is not on PATH; this check did not pass.'
+} else {
+    $major = [int](((& $nodeCommand.Source --version) | Out-String).Trim().TrimStart('v').Split('.')[0])
+    $result = Invoke-NodeProbe $nodeCommand.Source $probe
+    $expected = if ($major -ge 24) { 0 } else { 1 }
+    Check "launcher Node probe parses in PowerShell $($PSVersionTable.PSVersion.Major) (no diagnostic: '$($result.Diagnostics)')" ($result.Diagnostics -eq '' -and $result.Diagnostics -notmatch 'SyntaxError')
+    Check "launcher Node probe exits $expected for actual Node major $major (got $($result.ExitCode))" ($result.ExitCode -eq $expected)
+    foreach ($sampleMajor in 18, 23, 24, 25) {
+        $sample = Invoke-NodeProbe $nodeCommand.Source ($probe.Replace('process.versions.node', "$sampleMajor.9"))
+        $sampleExpected = if ($sampleMajor -ge 24) { 0 } else { 1 }
+        Check "probe threshold for sample major $sampleMajor exits $sampleExpected (got $($sample.ExitCode), diagnostic: '$($sample.Diagnostics)')" ($sample.Diagnostics -eq '' -and $sample.ExitCode -eq $sampleExpected)
+    }
+}
+Write-Host "$checks checks passed; $skipped skipped; no installation, model, editor or server startup."
 exit 0
