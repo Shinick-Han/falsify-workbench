@@ -5,6 +5,10 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('n
 const H=require('../dist/harness-core.js'),L=require('../dist/local-bridge.js'),dist=path.resolve(__dirname,'../dist');
 const tests=[];const test=(name,fn)=>tests.push([name,fn]);
 const flush=async(n=12)=>{for(let i=0;i<n;i++)await new Promise(r=>setImmediate(r));};
+// CI hashes off-thread, so derivation can outlast flush(). CLI_SELECTION_DELAY_TICKS=N makes every SHA-256 digest
+// (ledger and harness core) resolve N macrotasks late, deterministically reproducing that scheduling.
+const DELAY=Number(process.env.CLI_SELECTION_DELAY_TICKS||0);
+const slowCrypto=ticks=>({randomUUID:()=>globalThis.crypto.randomUUID(),subtle:{digest:(a,d)=>globalThis.crypto.subtle.digest(a,d).then(async v=>{await flush(ticks);return v;})}});
 const TOKEN='Abc_def-ghi_JKL-mno_pqr-stu_VWX-yz0123456789';
 const OLD_CAP={red:true,blue:true,pdf:false,model:'gpt-6.1-sol'};
 const NEW_CAP={...OLD_CAP,cliSelection:true,cliAgents:[{id:'codex',name:'Codex CLI',installed:true,defaultModel:'gpt-6.1-sol',models:['gpt-6.1-sol','gpt-6-astra','bad model'],efforts:['low','medium','high']},{id:'claude',name:'Claude Code CLI',installed:true,defaultModel:'claude-opus-5-5',models:['claude-opus-5-5','sonnet'],efforts:['low','medium','high']},{id:'rm -rf',installed:true}]};
@@ -68,7 +72,9 @@ function world(stored){
   // VM-realm objects are normalized to this realm so deepStrictEqual compares values only.
   const plain=x=>JSON.parse(JSON.stringify(x)),events=[];document.addEventListener('falsify:harness-change',e=>events.push(plain(e.detail)));
   const ctx=vm.createContext({document,FalsifyHarness:H,FalsifyLocalBridge:{capabilities:()=>state.cap,state:()=>state},FalsifyDocumentRed:require('../dist/document-red-core.js'),FalsifyDocumentBlue:require('../dist/document-blue-core.js'),
-    localStorage:{getItem:k=>store.get(k)??null,setItem:(k,v)=>store.set(k,v)},crypto:globalThis.crypto,TextEncoder,CustomEvent,Event,URL,Blob,setTimeout,clearTimeout});
+    localStorage:{getItem:k=>store.get(k)??null,setItem:(k,v)=>store.set(k,v)},crypto:DELAY?slowCrypto(DELAY):globalThis.crypto,TextEncoder,CustomEvent,Event,URL,Blob,setTimeout,clearTimeout});
+  // With delayed crypto the harness core is loaded in the page realm so its hash() uses the same slow digest.
+  if(DELAY)vm.runInContext(fs.readFileSync(path.join(dist,'harness-core.js'),'utf8'),ctx,{filename:'harness-core.js'});
   vm.runInContext(fs.readFileSync(path.join(dist,'experiment-ledger.js'),'utf8'),ctx,{filename:'experiment-ledger.js'});
   const setCap=cap=>{state={status:cap?'paired':'manual',connected:!!cap,cap};document.dispatchEvent(new CustomEvent('falsify:local-bridge',{detail:state}));};
   const change=(id,value)=>{const e=get(id);e.value=value;e.dispatchEvent(new Event('change'));};
@@ -79,6 +85,12 @@ function world(stored){
 async function capOf(raw){const b=L.create({fetch:async()=>({ok:true,status:200,redirected:false,type:'cors',json:async()=>raw}),location:{hostname:'x.example',port:''}});await b.pair(TOKEN,'7816');return b.capabilities();}
 async function live(raw,stored){const w=world(stored);await w.lab.ready;await flush();if(raw)w.setCap(await capOf(raw));return w;}
 const consents=(w,role)=>[w.get(role+'-harness-consent'),w.get(role==='red'?'red-consent':'doc-blue-consent')];
+// A user picks the next CLI option only after the controls unlock; the UI ignores changes while the hash is derived.
+// Bounded wait on bind(), which resolves once the pending derivation settles; then the controls must be ready.
+let settleWaits=0;
+async function settle(w,role,ms=5000){if(/고정하는 중/.test(w.get(role+'-cli-note').textContent))settleWaits++;let timer;
+  try{await Promise.race([w.lab.bind(role,{}),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error(role+' CLI derivation did not settle within '+ms+'ms')),ms);})]);}finally{clearTimeout(timer);}
+  assert.doesNotMatch(w.get(role+'-cli-note').textContent,/고정하는 중/);assert.equal(w.get(role+'-cli-type').disabled,false,role+' CLI controls ready');}
 
 test('legacy default: no explicit selection binds the unchanged built-in harness; disconnected choice refused',async()=>{const w=await live(null);
   assert.deepEqual((await w.lab.bind('red',{maxCalls:8})).harness,H.builtin('red'),'no adapter injected');
@@ -98,14 +110,14 @@ test('provider/model/effort change clears consent, emits harness-change and lock
   const first=await w.lab.bind('red',{maxCalls:8});assert.deepEqual(first.harness.adapter,{type:'claude',model:'claude-opus-5-5',effort:'medium'},'bind waits for derivation');
   await flush();assert.equal(w.lab.allowed('red'),true);assert.equal(w.get('red-cli-model').value,'claude-opus-5-5');assert.match(w.get('red-harness-detail').textContent,/Claude Code CLI · claude-opus-5-5 · effort medium/);
   assert.deepEqual(w.get('red-cli-models').children.map(o=>o.value),['claude-opus-5-5','sonnet']);
-  for(const [id,value,count] of [['red-cli-effort','high',2],['red-cli-model','sonnet',3],['red-cli-model','bad model!',3],['red-cli-model','sonnet',3]]){w.change(id,value);await flush();assert.equal(w.events.length,count,id+'='+value);}
+  for(const [id,value,count] of [['red-cli-effort','high',2],['red-cli-model','sonnet',3],['red-cli-model','bad model!',3],['red-cli-model','sonnet',3]]){w.change(id,value);await settle(w,'red');assert.equal(w.events.length,count,id+'='+value);}
   assert.equal(w.get('red-cli-model').value,'sonnet','invalid model reverted');
   const second=await w.lab.bind('red',{maxCalls:8});assert.deepEqual(second.harness.adapter,{type:'claude',model:'sonnet',effort:'high'});
   assert.deepEqual(first.harness.adapter,{type:'claude',model:'claude-opus-5-5',effort:'medium'},'earlier request unchanged');second.harness.adapter.model='mutated';assert.equal((await w.lab.bind('red',{})).harness.adapter.model,'sonnet','bound copy is immutable');
   assert.notEqual(H.canonical(first.harness),H.canonical(second.harness));assert.deepEqual((await w.lab.bind('blue',{})).harness,H.builtin('blue'),'roles are independent');
   w.change('red-cli-type','');await flush();assert.deepEqual((await w.lab.bind('red',{})).harness,H.builtin('red'),'revert to harness value');});
 
-test('role busy (run, source binding or record) locks CLI controls and ignores changes',async()=>{const w=await live(NEW_CAP);w.change('blue-cli-type','codex');await flush();const n=w.events.length;
+test('role busy (run, source binding or record) locks CLI controls and ignores changes',async()=>{const w=await live(NEW_CAP);w.change('blue-cli-type','codex');await settle(w,'blue');const n=w.events.length;
   w.lab.busy('blue',true);for(const id of ['blue-harness','blue-harness-consent','blue-cli-type','blue-cli-model','blue-cli-effort'])assert.equal(w.get(id).disabled,true,id);assert.match(w.get('blue-cli-note').textContent,/잠겼습니다/);
   w.change('blue-cli-effort','low');w.change('blue-cli-type','claude');await flush();assert.equal(w.events.length,n);assert.deepEqual((await w.lab.bind('blue',{})).harness.adapter,{type:'codex',model:'gpt-6.1-sol',effort:'medium'});
   assert.equal(w.get('blue-cli-type').value,'codex');assert.equal(w.get('blue-cli-effort').value,'medium','display restored');
@@ -123,7 +135,7 @@ test('custom stdio harness uses its own executor; selection never overrides it',
   assert.deepEqual((await w.lab.bind('red',{})).harness,custom,'stdio config untouched');assert.equal(w.get('red-cli-type').disabled,true);assert.match(w.get('red-cli-note').textContent,/자체 실행기/);assert.equal(w.lab.external('red'),true);});
 
 test('recording a selection registers a new version without editing old ones and survives reload',async()=>{const w=await live(NEW_CAP);
-  w.change('blue-cli-type','claude');await flush();w.change('blue-cli-effort','low');await flush();
+  w.change('blue-cli-type','claude');await settle(w,'blue');w.change('blue-cli-effort','low');await settle(w,'blue');
   const text='Only an association was observed.',sourceHash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text)))).map(x=>x.toString(16).padStart(2,'0')).join('');
   const doc={revision:'r1',sourceHash,fileHash:'f'.repeat(64),name:'a.txt',format:'TXT',segments:[{id:'s0',label:'p1',text}]};
   const request=await w.lab.bind('blue',{schema:'falsify.document-blue.v1',revision:'r1',sourceHash,requestId:'r1:x',maxCalls:8,segments:doc.segments});
@@ -135,4 +147,5 @@ test('recording a selection registers a new version without editing old ones and
   const reloaded=await live(null,[['falsify.experiment-ledger.v1',JSON.stringify(saved)]]);assert.equal(reloaded.get('ledger-status').textContent,'','reload validates without recovery');
   const forged={...request,harness:{...request.harness,instructions:'unregistered'}};await assert.rejects(w.lab.record('blue',doc,forged,{schema:'falsify.document-blue.v1',revision:'r1',sourceHash,status:'refusal',findings:[]},'manual-unverified'),/등록되지 않은/);});
 (async()=>{let passed=0;for(const [name,fn] of tests){try{await fn();passed++;console.log('PASS '+name);}catch(e){console.error('FAIL '+name+'\n'+(e.stack||e));process.exitCode=1;}}
-  console.log(JSON.stringify({passed,total:tests.length}));if(passed!==tests.length)process.exit(1);})();
+  if(DELAY&&!settleWaits){console.error('FAIL delayed crypto never outlasted flush(); delay proof missing');process.exitCode=1;}
+  console.log(JSON.stringify({passed,total:tests.length,...(DELAY?{delayTicks:DELAY,settleWaits}:{})}));if(passed!==tests.length||process.exitCode)process.exit(1);})();
