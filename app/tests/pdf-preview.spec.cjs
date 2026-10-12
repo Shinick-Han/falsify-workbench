@@ -5,6 +5,7 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('n
 const C=require('../dist/document-red-core.js');
 const BUNDLE=fs.readFileSync(path.resolve(__dirname,'../dist/document-preview.js'),'utf8'),RED=fs.readFileSync(path.resolve(__dirname,'../dist/document-red.js'),'utf8');
 const HTML=fs.readFileSync(path.resolve(__dirname,'../dist/index.html'),'utf8');
+const CSS=fs.readFileSync(path.resolve(__dirname,'../dist/document-red.css'),'utf8'),SOURCE=fs.readFileSync(path.resolve(__dirname,'../src/document-preview.js'),'utf8');
 const tests=[];const test=(name,fn)=>tests.push([name,fn]);
 const sha=b=>nodeCrypto.createHash('sha256').update(b).digest('hex'),BASE='http://127.0.0.1:7815/';
 const until=async(cond,label)=>{for(let i=0;i<400;i++){if(cond())return;await new Promise(r=>setTimeout(r,5));}assert.fail('timed out: '+label);};
@@ -19,9 +20,10 @@ function element(id,tag=''){
     replaceChildren(...c){this.children=c;},append(...c){this.children.push(...c);},after(){},remove(){},click(){this.dispatchEvent(new Event('click'));},getClientRects:()=>[]});
   return e;
 }
-function dom(){const els=new Map(),created=[],get=id=>{if(!els.has(id))els.set(id,element(id));return els.get(id);};
+// focus() records document.activeElement; there is no focus fixup, so a focused button that is merely disabled stays active (as in the bug).
+function dom(){const els=new Map(),created=[],get=id=>{if(!els.has(id)){const e=element(id);e.focus=()=>{document.activeElement=e;};els.set(id,e);}return els.get(id);};
   const document=new EventTarget();Object.assign(document,{baseURI:BASE,querySelector:s=>s.startsWith('#')?get(s.slice(1)):null,querySelectorAll:()=>[],
-    createElement:tag=>{const e=element('',tag);created.push(e);return e;},body:element('body')});return {document,get,created};}
+    createElement:tag=>{const e=element('',tag);created.push(e);return e;},body:element('body')});document.activeElement=document.body;return {document,get,created};}
 // Mocked PDF.js: records params, detaches the given buffer like the real worker transfer, and lets tests hold load/render steps.
 function pdfjs({pages=3,hold=false,manual=false,deaf=false,loadError=null,badPages=new Set()}={}){
   const log={params:[],received:[],tasks:[],renders:[],cleanups:0};
@@ -125,6 +127,34 @@ test('bounds: render scale fits the stage and caps side and area for oversized p
   assert.equal(fit({width:612,height:792},612,1),1);assert.equal(fit({width:612,height:792},1224,1),2);assert.equal(fit({width:612,height:792},612,3),2,'device ratio capped at 2');
   const s=fit({width:20000,height:20000},800,2);assert.ok(20000*s<=4096&&20000*s*20000*s<=4096*4096);const long=fit({width:100,height:100000},640,2);assert.ok(100000*long<=4096);
   for(const bad of [{width:0,height:10},{width:NaN,height:10},{width:-1,height:-1}])assert.equal(fit(bad,640,1),0);});
+
+test('focus: reaching a page boundary moves keyboard focus to the opposite nav button instead of dropping it',async()=>{
+  const v=preview({pages:2}),bytes=pdfBytes(),prev=v.get('red-preview-prev'),next=v.get('red-preview-next');await v.p.show({file:pdfFile(bytes),sha256:sha(bytes)});await until(()=>v.canvas().length===1,'p1 drawn');
+  next.focus();next.click();assert.equal(next.disabled,true,'last page');assert.equal(v.document.activeElement,prev,'focus handed to prev, not body');await until(()=>v.canvas()[0]?.painted===2,'p2 drawn');
+  assert.equal(v.document.activeElement,prev);prev.click();assert.equal(prev.disabled,true,'first page');assert.equal(v.document.activeElement,next,'mirrored on page 1');await until(()=>v.canvas()[0]?.painted===1,'p1 again');
+  const w=preview({pages:3}),n3=w.get('red-preview-next');await w.p.show({file:pdfFile(bytes),sha256:sha(bytes)});await until(()=>w.canvas().length===1,'3-page p1');
+  n3.focus();n3.click();assert.equal(w.document.activeElement,n3,'interior page keeps focus where it was');await until(()=>w.canvas()[0]?.painted===2,'3-page p2');
+  w.document.activeElement=w.document.body;n3.click();assert.equal(w.document.activeElement,w.document.body,'focus is never stolen when no nav button had it');});
+
+test('failure: a page whose getPage/render exceeds 60 s is cancelled with fixed copy; a late finish never paints and other pages still draw',async()=>{
+  const v=preview({manual:true,deaf:true}),bytes=pdfBytes(),file=pdfFile(bytes),armed=()=>v.timeouts.filter(Boolean);void v.p.show({file,sha256:sha(bytes)});await until(()=>v.log.renders.length===1,'p1 rendering');
+  assert.equal(armed().length,1,'load timer cleared, one page timer armed');armed()[0]();
+  assert.equal(v.log.renders[0].r.cancelled,true,'stuck render cancelled');assert.match(v.status(),/^1쪽을 60초 안에 그리지 못해 멈췄습니다\. 다른 쪽은 이전·다음으로 시도할 수 있습니다\. 다운로드한 사본과 해시는 그대로 유효하며, 「같은 사본 다시 다운로드」로 같은 파일을 다시 받을 수 있습니다\.$/);
+  assert.equal(v.get('red-preview-status').classList.contains('error'),true);assert.equal(v.get('red-preview-download').disabled,false);assert.equal(v.get('red-preview-next').disabled,false);
+  v.log.renders[0].r.finish();await settle();assert.equal(v.canvas().length,0,'late page 1 dropped after timeout');assert.match(v.status(),/60초 안에 그리지 못해/,'timeout copy not overwritten');
+  v.get('red-preview-download').click();assert.equal(v.downloads[0],file);
+  v.get('red-preview-next').click();await until(()=>v.log.renders.length===2,'p2 rendering');v.log.renders[1].r.finish();await until(()=>v.canvas()[0]?.painted===2,'p2 drawn');
+  assert.equal(armed().length,0,'finished draw clears its timer');v.p.clear();await settle();assert.equal(armed().length,0);});
+
+test('markup: toolbar and status sit before the page stage in DOM order; copy is direction-neutral; the canvas is flat',()=>{
+  const at=HTML.indexOf('<section class="red-preview"'),section=HTML.slice(at,HTML.indexOf('</section>',at)),stage=section.indexOf('id="red-preview-stage"');assert.ok(stage>0);
+  for(const id of ['prev','page','next','download','status'])assert.ok(section.indexOf('id="red-preview-'+id+'"')>0&&section.indexOf('id="red-preview-'+id+'"')<stage,id+' precedes the stage');
+  assert.ok(section.indexOf('id="red-preview-status"')>section.indexOf('id="red-preview-download"'),'status follows the toolbar');
+  // The minified bundle escapes Hangul, so fixed copy is checked in the source it is built from (the RED/failure tests cover the bundle's output).
+  assert.match(section,/<button[^>]*id="red-preview-download"[^>]*>같은 사본 다시 다운로드<\/button>/);assert.match(SOURCE,/「같은 사본 다시 다운로드」로/);assert.doesNotMatch(SOURCE,/아래에서|위에서|아래의|위의/,'no direction in fixed copy');
+  assert.match(section,/SHA-256을 다시 확인한 뒤에만/);assert.doesNotMatch(section,/SHA-256 일치/,'note does not assert equality before the async re-check');
+  const rules=CSS.match(/[^{}]*\.red-preview[^{}]*\{[^}]*\}/g)||[];assert.ok(rules.length>=5);for(const r of rules)assert.doesNotMatch(r,/box-shadow/,r);
+  assert.match(CSS,/\.red-preview-canvas\{[^}]*border:1px solid var\(--line\)/);});
 
 test('markup: canvas-only preview with labelled controls; no iframe/object/embed; CSP unchanged',()=>{
   const section=HTML.slice(HTML.indexOf('<section class="red-preview"'),HTML.indexOf('</section>',HTML.indexOf('<section class="red-preview"')));
