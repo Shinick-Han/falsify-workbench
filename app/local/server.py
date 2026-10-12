@@ -25,6 +25,7 @@ from harness import CLI_AGENTS, EFFORTS
 import cli_backend
 import editor_service
 import paper_analysis_service
+import image_edit_service
 from build_info import WORKBENCH_VERSION
 from experiments.selfplay_codex import discover_codex
 
@@ -66,6 +67,7 @@ def busy_locked(server):
         ACTIVE.release(); return True, False
     return False, True
 CORS_HEADERS = {'authorization', 'content-type'}
+IMAGE_ROUTES = ('/api/paper/images', '/api/paper/images/export')
 HOST_LABEL = re.compile(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?')
 
 def parse_web_origin(value):
@@ -84,7 +86,7 @@ def parse_web_origin(value):
 def cors_route(method, path):
     """Existing allowlisted API operations a configured web origin may reach."""
     if method == 'GET': return path == '/api/capabilities' or re.fullmatch(r'/api/(red|blue)/jobs/.+', path) is not None
-    if method == 'POST': return path in ['/api/red/jobs', '/api/blue/jobs', '/api/export', '/api/paper/inspect'] or re.fullmatch(r'/api/(red|blue)/jobs/.+/cancel', path) is not None
+    if method == 'POST': return path in ['/api/red/jobs', '/api/blue/jobs', '/api/export', '/api/paper/inspect', *IMAGE_ROUTES] or re.fullmatch(r'/api/(red|blue)/jobs/.+/cancel', path) is not None
     return False
 
 def no_duplicates(items):
@@ -228,7 +230,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(200, {'red': True, 'blue': True, 'pdf': pdf, 'officeLayoutVerifiedExport': False,
                     'model': 'gpt-6.1-sol', 'isolation': 'read-only CLI restrictions; not OS-enforced input-only isolation',
                     'cliSelection': True, 'cliAgents': cli_agents(), 'pdfEditor': pdf_editor,
-                    'paperAnalysis': paper_analysis_service.capability(), 'workbenchVersion': WORKBENCH_VERSION}); return
+                    'paperAnalysis': paper_analysis_service.capability(), 'imageEditor': image_edit_service.capability(),
+                    'workbenchVersion': WORKBENCH_VERSION}); return
             with LOCK:
                 role = 'blue' if path.startswith('/api/blue/jobs/') else 'red'
                 prefix = '/api/' + role + '/jobs/'
@@ -249,12 +252,12 @@ class Handler(BaseHTTPRequestHandler):
         path = unquote(urlsplit(self.path).path)
         role = 'blue' if path.startswith('/api/blue/jobs') else 'red'
         prefix = '/api/' + role + '/jobs'
-        if path not in ['/api/red/jobs', '/api/blue/jobs', '/api/export', '/api/paper/inspect'] and not (path.startswith(prefix + '/') and path.endswith('/cancel')):
+        if path not in ['/api/red/jobs', '/api/blue/jobs', '/api/export', '/api/paper/inspect', *IMAGE_ROUTES] and not (path.startswith(prefix + '/') and path.endswith('/cancel')):
             self.reply(404, {'error': 'operation_not_allowed'}); return
         try:
             if self.headers.get('Content-Type') != 'application/json': raise ValueError('application/json 필요')
             size = int(self.headers.get('Content-Length', '-1'))
-            limit = 37 * 1024 * 1024 if path in ['/api/export', '/api/paper/inspect'] else 6 * 1024 * 1024
+            limit = 40 * 1024 * 1024 if path == '/api/paper/images/export' else 37 * 1024 * 1024 if path in ['/api/export', '/api/paper/inspect', '/api/paper/images'] else 6 * 1024 * 1024
             if not 1 <= size <= limit: raise ValueError('본문 크기 제한 초과')
             raw = self.rfile.read(size)
             if len(raw) != size: raise ValueError('본문 수신 중단')
@@ -281,6 +284,17 @@ class Handler(BaseHTTPRequestHandler):
                 with LOCK: admitted = not self.server_closing() and ACTIVE.acquire(blocking=False)
                 if not admitted: self.reply(409, {'error': 'companion_busy'}); return
                 try: result = paper_analysis_service.analyze(request)
+                finally: ACTIVE.release()
+                self.reply(200, result); return
+            if path in IMAGE_ROUTES:
+                # Manual RED-only image experiment: bytes, hash and PNG header are validated before admission; the engine runs only
+                # in the isolated child, gated like export (not a JOB, never a model call); fixed error codes only.
+                export = path == '/api/paper/images/export'
+                request = (image_edit_service.validate_export_request if export else image_edit_service.validate_list_request)(data)
+                with LOCK: admitted = not self.server_closing() and ACTIVE.acquire(blocking=False)
+                if not admitted: self.reply(409, {'error': 'companion_busy'}); return
+                try: result = (image_edit_service.export_image if export else image_edit_service.list_images)(request)
+                except image_edit_service.ImageEditError as error: self.reply(error.status, error.payload()); return
                 finally: ACTIVE.release()
                 self.reply(200, result); return
             (validate_blue_request if role == 'blue' else validate_request)(data)
@@ -330,8 +344,8 @@ def main():
     if web_origin:
         print(f'Web origin enabled: {web_origin}\n'
             '  Trust is origin-level, not path-level: every page on that origin (any repository or path\n'
-            '  published under it) that holds the pairing token can run RED/BLUE jobs, PDF export and\n'
-            '  advisory PDF inspection here.\n'
+            '  published under it) that holds the pairing token can run RED/BLUE jobs, PDF export,\n'
+            '  advisory PDF inspection and manual image-experiment export here.\n'
             '  The token is never served over HTTP to that origin; paste it into the page yourself.\n'
             f'Pairing token (valid until this server stops; do not share): {TOKEN}', flush=True)
     try: server.serve_forever()
