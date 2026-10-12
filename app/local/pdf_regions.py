@@ -7,6 +7,11 @@ per-line boxes of the selected source characters in MuPDF unrotated page points;
 compare_plan only cross-checks a supplied plan against that one: a caller can never define, widen or move what QA
 excludes. check_page compares one edited output page with its source page and returns fixed codes only (no text,
 coordinates or paths).
+
+The raster comparison of an edited page excludes only the tight per-line boxes of the selected SOURCE characters plus
+a fixed BLEED, never whole lines, whole pages or anything the output defines. Where the After or kept text of an
+edited line legitimately lands outside those sealed boxes (a longer or shorter After, re-justified spacing), the
+difference there is at most a warning (regional_partial); it is never widened into the exclusion and never passes.
 """
 import hashlib
 import json
@@ -21,7 +26,7 @@ LIMITS = {'maxPlanBytes': 512 * 1024, 'maxPlanEdits': 64, 'maxEditLines': 64, 'm
 BASE_TOL = 0.6           # points: same baseline
 POS_TOL = 0.6            # points: same glyph origin on an unedited line
 PLAN_TOL = 1.5           # points: a supplied region may differ this much from the located one
-MARGIN = 1.5             # points of antialiasing bleed around excluded edited lines
+BLEED = 1.0              # points of antialiasing bleed around the sealed selected source regions (fixed, never widened)
 SIZE_TOL = (0.25, 0.03)  # absolute points, fraction of the source size
 COLOR_TOL = 8            # RGB channel levels
 PIXEL_DELTA = 40         # channel levels a sample must move to count as changed
@@ -129,19 +134,26 @@ def _same_styles(got, own):
 
 def compare_plan(supplied, plan):
     """'absent' | 'accepted' | 'rejected'. A supplied plan is accepted only when it is well formed, bound to the same
-    source bytes and selected Before/After hashes, and agrees with the located plan; it never adds or widens a region."""
+    source bytes and selected Before/After hashes, and agrees with the located plan; it never adds or widens a region.
+    Ids are the caller's own labels (QA numbers its edits edit-N internally). A supplied edit may be more conservative
+    (ambiguous/unavailable with no regions) than the located one, but never claims a region QA could not locate."""
     if supplied is None: return 'absent'
     try:
         if not isinstance(supplied, dict) or len(json.dumps(supplied, allow_nan=False)) > LIMITS['maxPlanBytes']: return 'rejected'
-        if any(supplied.get(k) != plan[k] for k in ('schema', 'sourceSha256', 'policy', 'status')): return 'rejected'
+        if any(supplied.get(k) != plan[k] for k in ('schema', 'sourceSha256', 'policy')): return 'rejected'
+        if supplied.get('status') not in ('resolved', 'partial', 'unavailable'): return 'rejected'
         got_edits = supplied.get('edits')
         if not isinstance(got_edits, list) or len(got_edits) != len(plan['edits']): return 'rejected'
         for got, own in zip(got_edits, plan['edits']):
-            if not isinstance(got, dict) or not isinstance(got.get('id'), str) or type(got.get('pageIndex')) is not int: return 'rejected'
+            if not isinstance(got, dict) or not isinstance(got.get('id'), str) or not 0 < len(got['id']) <= 64 \
+                    or type(got.get('pageIndex')) is not int: return 'rejected'
             if not all(_HEX.fullmatch(str(got.get(k))) for k in ('beforeSha256', 'afterSha256')): return 'rejected'
-            if any(got.get(k) != own[k] for k in ('pageIndex', 'beforeSha256', 'afterSha256', 'status')): return 'rejected'
+            if any(got.get(k) != own[k] for k in ('pageIndex', 'beforeSha256', 'afterSha256')): return 'rejected'
             if not isinstance(got.get('regions'), list) or not isinstance(got.get('styles'), list): return 'rejected'
-            if own['status'] == 'resolved' and not (_same_regions(got['regions'], own['regions']) and _same_styles(got['styles'], own['styles'])):
+            if got.get('status') in ('ambiguous', 'unavailable'):
+                if got['regions'] or got['styles']: return 'rejected'
+            elif got.get('status') != 'resolved' or own['status'] != 'resolved' \
+                    or not (_same_regions(got['regions'], own['regions']) and _same_styles(got['styles'], own['styles'])):
                 return 'rejected'
         return 'accepted'
     except (TypeError, ValueError, AttributeError, KeyError, RecursionError):
@@ -175,46 +187,58 @@ def _px(pix, page, box, margin=0.0):
     return (max(0, int((box[0] - margin) * zx)), max(0, int((box[1] - margin) * zy)),
         min(pix.width, math.ceil((box[2] + margin) * zx)), min(pix.height, math.ceil((box[3] + margin) * zy)))
 
-def _masked_diff(pa, pb, page, boxes):
-    """'passed' | 'warning' | 'failed' for the same-frame renders outside the given boxes (plus MARGIN)."""
-    if (pa.width, pa.height, pa.n, pa.stride) != (pb.width, pb.height, pb.n, pb.stride): return 'failed'
-    sa, sb, n, stride = bytearray(pa.samples), bytearray(pb.samples), pa.n, pa.stride
+def _blank(sa, sb, pix, page, boxes):
+    """Zero the given boxes (plus BLEED) in both sample buffers."""
+    n, stride = pix.n, pix.stride
     for box in boxes:
-        x0, y0, x1, y1 = _px(pa, page, box, MARGIN)
+        x0, y0, x1, y1 = _px(pix, page, box, BLEED)
         if x1 <= x0: continue
         blank = bytes((x1 - x0) * n)
         for y in range(y0, y1):
             o = y * stride + x0 * n
             sa[o:o + len(blank)] = blank; sb[o:o + len(blank)] = blank
-    if sa == sb: return 'passed'
+
+def _masked_diff(pa, pb, page, sealed, zones):
+    """(status, zone_changed) for the same-frame renders. Only the sealed source regions (plus BLEED) are excluded.
+    A difference confined to the zones (After or kept edited-line text that slid outside the sealed regions) is a
+    warning, never a pass; elsewhere any sample moving more than PIXEL_DELTA is a definite change."""
+    if (pa.width, pa.height, pa.n, pa.stride) != (pb.width, pb.height, pb.n, pb.stride): return 'failed', False
+    sa, sb, stride = bytearray(pa.samples), bytearray(pb.samples), pa.stride
+    _blank(sa, sb, pa, page, sealed)
+    za = zb = None
+    if zones: za, zb = bytes(sa), bytes(sb); _blank(sa, sb, pa, page, zones)
+    if sa == sb: return ('warning', True) if za != zb else ('passed', False)
     minor = 0
     for y in range(pa.height):
         ra, rb = sa[y * stride:(y + 1) * stride], sb[y * stride:(y + 1) * stride]
         if ra == rb: continue
         for x, z in zip(ra, rb):
             if x != z:
-                if abs(x - z) > PIXEL_DELTA: return 'failed'
+                if abs(x - z) > PIXEL_DELTA: return 'failed', False
                 minor += 1
-    return 'passed' if minor <= MINOR_FRACTION * len(sa) else 'warning'
+    if minor > MINOR_FRACTION * len(sa): return 'warning', False
+    return ('warning', True) if za != zb else ('passed', False)
 
-def _inked(pix, page, chars):
-    """Every letter or digit of the given output characters leaves ink against its own line's background."""
+def _ink(pix, page, chars):
+    """Per character: True/False whether a letter or digit leaves ink against its own line's background, None when
+    it is not a letter or digit or has no pixel area."""
     rows = {}
-    for ch in chars: rows.setdefault(round(ch.base, 1), []).append(ch)
+    for k, ch in enumerate(chars): rows.setdefault(round(ch.base, 1), []).append(k)
     n, stride, data = pix.n, pix.stride, pix.samples
     pixel = lambda x, y: data[y * stride + x * n:y * stride + x * n + n]
+    flags = [None] * len(chars)
     for row in rows.values():
-        x0, y0, x1, y1 = _px(pix, page, _union([c.box for c in row]))
+        x0, y0, x1, y1 = _px(pix, page, _union([chars[k].box for k in row]))
         background = Counter(pixel(x, y) for y in range(y0, y1) for x in range(x0, x1)).most_common(1)
         if not background: continue
         bg = background[0][0]
-        for ch in row:
+        for k in row:
+            ch = chars[k]
             if not ch.c.isalnum(): continue
             cx0, cy0, cx1, cy1 = _px(pix, page, ch.box)
             if cx1 <= cx0 or cy1 <= cy0: continue
-            if not any(max(abs(p - q) for p, q in zip(pixel(x, y), bg)) > INK_DELTA for y in range(cy0, cy1) for x in range(cx0, cx1)):
-                return False
-    return True
+            flags[k] = any(max(abs(p - q) for p, q in zip(pixel(x, y), bg)) > INK_DELTA for y in range(cy0, cy1) for x in range(cx0, cx1))
+    return flags
 
 def _box_eq(a, b): return all(abs(x - y) <= 0.01 for x, y in zip(a, b))
 
@@ -266,13 +290,19 @@ def check_page(src_page, out_page, model, picks, mupdf, raster, max_chars):
             elif hits: match, restyled = hits[0], True
             else: lost = True
         if match is not None: used.add(match)
-    boxes, style_bad, unknown = {k: [] for k in afters}, False, False
+    # zones: output-side areas that may legitimately differ but are outside the sealed source regions (warning only).
+    boxes, style_bad, unknown, zones, kept = {k: [] for k in afters}, False, False, [], []
     if strict:
         for (_, i, k), j in zip(expected, aligned):
-            if k is None: restyled |= not _style_eq(S[i].style, O[j].style)
-            else:
+            if k is not None:
                 boxes[k].append(O[j])
                 style_bad |= not any(_style_eq(s, O[j].style) for s in picks[k][2])
+                zones.append(O[j].box)
+                continue
+            # Unselected text on an edited line keeps its style; it may only slide along its own baseline.
+            restyled |= not _style_eq(S[i].style, O[j].style)
+            kept.append((S[i], O[j]))
+            if abs(S[i].box[0] - O[j].box[0]) > POS_TOL or abs(S[i].box[2] - O[j].box[2]) > POS_TOL: zones += [S[i].box, O[j].box]
         res['edited_page_text'] = 'failed' if lost or restyled or moved else 'warning' if len(used) < len(out_rows) else 'passed'
     else:
         notes.add('regional_partial')
@@ -286,18 +316,29 @@ def check_page(src_page, out_page, model, picks, mupdf, raster, max_chars):
     trace = out_page.get_texttrace()
     if sum(len(s.get('chars', ())) for s in trace) > max_chars:
         notes.add('budget'); res['edited_region_visible'] = 'warning'; trace = None
-    pb = raster(out_page)
+    pa, pb = raster(src_page), raster(out_page)
     if trace is not None:
         hidden = [s['bbox'] for s in trace if s.get('type') == 3 or s.get('opacity', 1) == 0]
         overlaps = lambda a, b: min(a[2], b[2]) > max(a[0], b[0]) and min(a[3], b[3]) > max(a[1], b[1])
-        invisible = any(overlaps(ch.box, h) for chars in boxes.values() for ch in chars for h in hidden) \
-            or not all(_inked(pb, out_page, chars) for chars in boxes.values() if chars)
+        after = [ch for chars in boxes.values() for ch in chars]
+        shown = after + [o for _, o in kept]
+        # Every After letter must leave ink; kept same-line letters must still leave ink where the source did.
+        lost_ink = any(f is False for f in _ink(pb, out_page, after))
+        if kept:
+            was, now = _ink(pa, src_page, [s for s, _ in kept]), _ink(pb, out_page, [o for _, o in kept])
+            lost_ink |= any(w and n is False for w, n in zip(was, now))
+        invisible = lost_ink or any(overlaps(ch.box, h) for ch in shown for h in hidden)
         res['edited_region_visible'] = 'failed' if invisible else 'warning' if unknown else 'passed'
     if not strict:
         res['edited_page_render'] = 'warning'; return res, notes
-    excluded = [_union([S[i].box for i in src_rows[r][1]]) for r in edited] + [_union([O[j].box for j in out_rows[q][1]]) for q in mapped]
-    area = sum((b[2] - b[0] + 2 * MARGIN) * (b[3] - b[1] + 2 * MARGIN) for b in excluded)
+    # Sealed: tight per-line boxes of the selected SOURCE characters only (never whole lines or output boxes).
+    by_line = {}
+    for i in selected: by_line.setdefault(S[i].line, []).append(S[i].box)
+    sealed = [_union(b) for b in by_line.values()]
+    area = sum((b[2] - b[0] + 2 * BLEED) * (b[3] - b[1] + 2 * BLEED) for b in sealed)
     if area > LIMITS['maxMaskFraction'] * src_page.rect.width * src_page.rect.height:
         notes.add('regional_partial'); res['edited_page_render'] = 'warning'
-    else: res['edited_page_render'] = _masked_diff(raster(src_page), pb, src_page, excluded)
+    else:
+        res['edited_page_render'], partial = _masked_diff(pa, pb, src_page, sealed, zones)
+        if partial: notes.add('regional_partial')
     return res, notes

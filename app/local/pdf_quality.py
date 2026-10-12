@@ -1,8 +1,8 @@
 """Bounded, local, independent per-output PDF QA with PyMuPDF (MuPDF), a different engine from the editor's PDFium.
 
 Public API:
-  verify_pdf_quality(source_bytes, output_bytes, edits, page_map, page_count=None) -> report (in-process)
-  inspect_isolated(source_path, output_path, edits, page_map, page_count=None) -> report (child process, timeout)
+  verify_pdf_quality(source_bytes, output_bytes, edits, page_map, page_count=None, *, edit_plan=None) -> report (in-process)
+  inspect_isolated(source_path, output_path, edits, page_map, page_count=None, *, edit_plan=None) -> report (child process)
   sanitize(value) -> report, or the unavailable report when the value is not a well-formed report
 
 Report: {schema:'falsify.pdf-quality.v1', status, method, checks:[{code, status, pages}], limitations}.
@@ -10,8 +10,14 @@ status is passed|warning|failed|unavailable; pages are 1-based OUTPUT page numbe
 from fixed sets. No document text or filesystem path ever leaves this module. Only 'failed' is a definite defect
 (changed unedited page, missing intended After/original text, unreadable output); uncertain coverage, ambiguous
 continuations and hidden-text heuristics are warnings. Nothing is repaired, rewritten, flattened or rasterized.
+
+Edited pages are also checked regionally by the sibling pdf_regions.py (loaded by absolute path, so the isolated child
+needs no sys.path or working directory): QA locates every selected Before in the immutable source itself, compares the
+page outside those tight source regions, and checks the After's style and visibility. A supplied edit_plan is only
+cross-checked against that located plan (code edit_plan); it never defines what is excluded.
 """
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -25,7 +31,9 @@ SCHEMA = 'falsify.pdf-quality.v1'
 STATUSES = ('passed', 'warning', 'failed', 'unavailable')
 CODES = ('engine', 'output_readable', 'page_count', 'page_map', 'unedited_geometry', 'unedited_text', 'unedited_render',
     'edited_after_present', 'edited_before_removed', 'edited_text_order', 'continuation_pages',
-    'hidden_text_invisible', 'hidden_text_white', 'hidden_text_covered')
+    'hidden_text_invisible', 'hidden_text_white', 'hidden_text_covered', 'edit_plan',
+    'edited_page_render', 'edited_page_text', 'edited_region_style', 'edited_region_visible')
+REGIONAL = ('edited_page_render', 'edited_page_text', 'edited_region_style', 'edited_region_visible')
 LIMITATIONS = {
     'scope': 'Independent MuPDF re-read of this output only; not full scientific, typographic or human verification.',
     'text': 'Text is compared after Unicode compatibility normalization ignoring whitespace and hyphens.',
@@ -35,6 +43,8 @@ LIMITATIONS = {
     'page_map_unusable': 'No usable page map and page counts differ: unedited pages were not compared.',
     'budget': 'Page, raster or time budget reached: some pages were not fully compared.',
     'continuation': 'Continuation pages are inferred from the page map; copied header/footer text is tolerated and ambiguity is a warning.',
+    'regional': 'Edited pages are compared outside tight source-located edit regions, and the After text style and visibility are checked.',
+    'regional_partial': 'Some edited-page areas (moved, reflowed, continued, ambiguous or unsupported text) were only partially compared.',
     'unavailable': 'Independent QA could not run; this output is not independently checked.',
 }
 LIMITS = {'timeoutSeconds': 90, 'workBudgetSeconds': 60, 'maxPages': 2000, 'maxRenderPages': 120, 'maxRasterSide': 1000,
@@ -80,6 +90,21 @@ def sanitize(value):
         return unavailable()
 
 def _norm(text): return _DROP.sub('', unicodedata.normalize('NFKC', text or ''))
+
+_REGIONS = []
+def _regions():
+    """The sibling pdf_regions module loaded from this file's own directory by absolute path (never sys.path or the
+    working directory, so it also loads in the isolated -I child); None when it cannot be loaded."""
+    if not _REGIONS:
+        try:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location('falsify_pdf_regions', Path(__file__).resolve().with_name('pdf_regions.py'))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _REGIONS.append(module)
+        except Exception:
+            _REGIONS.append(None)
+    return _REGIONS[0]
 
 class _Report:
     RANK = {'passed': 0, 'unavailable': 1, 'warning': 2, 'failed': 3}
@@ -248,9 +273,30 @@ def _check_edited(rep, src_page, out, group, edits, out_all, mupdf):
     vanished = any(len(c) >= MIN_LOST_CHUNK and c not in out_all for c in lost)
     rep.set('edited_text_order', 'failed' if vanished else 'warning', group)
 
-def verify_pdf_quality(source_bytes, output_bytes, edits, page_map, page_count=None):
+def _check_regional(rep, regions, s, src_page, out, group, ks, edits, located, models, mupdf, assumed):
+    """Regional codes for one edited source page. Unsupported cases (continuation, unlocated edit, budget) are warnings."""
+    if regions is None:
+        for code in REGIONAL: rep.set(code, 'unavailable', group)
+        return
+    if len(group) > 1 or any(k not in located for k in ks) or models.get(s) is None:
+        rep.note('budget' if s in models and models[s] is None else 'regional_partial')
+        for code in REGIONAL: rep.set(code, 'warning', group)
+        return
+    picks = [(located[k][0], edits[k]['after'], located[k][1]) for k in ks]
+    try:
+        res, notes = regions.check_page(src_page, out[group[0]], models[s], picks, mupdf, lambda p: _raster(p, mupdf), LIMITS['maxTraceChars'])
+    except Exception:
+        res, notes = {}, {'regional_partial'}
+    for code in REGIONAL:
+        state = res.get(code, 'warning')
+        if state == 'failed' and assumed: state = 'warning'  # an assumed page mapping never gates
+        rep.set(code, state, () if state == 'passed' else group)
+    for key in sorted(notes): rep.note(key)
+
+def verify_pdf_quality(source_bytes, output_bytes, edits, page_map, page_count=None, *, edit_plan=None):
     """In-process QA. edits: [{pageIndex, before, after}] exactly as selected; page_map: sanitized sourcePageMap or None;
-    page_count: the editor's reported {source, output}, compared with the actual counts and never trusted."""
+    page_count: the editor's reported {source, output}, compared with the actual counts and never trusted; edit_plan:
+    the private source-derived plan, only cross-checked against QA's own located plan."""
     try: import pymupdf as mupdf
     except Exception: return unavailable()
     started = time.monotonic()
@@ -284,11 +330,25 @@ def verify_pdf_quality(source_bytes, output_bytes, edits, page_map, page_count=N
     if groups is None: return sanitize(rep.result(method))
     rep.note('render'); rep.note('hidden')
     defect = 'warning' if assumed else 'failed'
+    regions, located, models = _regions(), {}, {}
+    if regions is not None:
+        try: plan, located, models = regions.build_plan(src, mupdf, hashlib.sha256(bytes(source_bytes)).hexdigest(), edits, LIMITS['maxTraceChars'])
+        except Exception: regions = None
+    if edit_plan is not None:
+        accepted = regions is not None and regions.compare_plan(edit_plan, plan) == 'accepted'
+        rep.set('edit_plan', 'passed' if accepted else 'warning')
     out_all = ''.join(_norm(_text(p, mupdf)) for p in out)
     rendered = 0
     for s, group in enumerate(groups):
         if s in edited:
             _check_edited(rep, src[s], out, group, edited[s], out_all, mupdf)
+            ks = [k for k, e in enumerate(edits) if e['pageIndex'] == s]
+            if rendered >= LIMITS['maxRenderPages'] or time.monotonic() - started > LIMITS['workBudgetSeconds']:
+                rep.note('budget')
+                for code in REGIONAL: rep.set(code, 'warning', group)
+            else:
+                rendered += 1
+                _check_regional(rep, regions, s, src[s], out, group, ks, edits, located, models, mupdf, assumed)
             base = _hidden_counts(src[s], LIMITS['maxTraceChars'])
             tallies = [_hidden_counts(out[o], LIMITS['maxTraceChars']) for o in group]
             if base is None or any(t is None for t in tallies):
@@ -318,12 +378,15 @@ def default_runner(argv, *, input, cwd, env, timeout):
     return subprocess.run(argv, input=input, cwd=cwd, env=env, timeout=timeout, shell=False,
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, creationflags=flags)
 
-def inspect_isolated(source_path, output_path, edits, page_map, page_count=None, *, runner=None):
+def inspect_isolated(source_path, output_path, edits, page_map, page_count=None, *, edit_plan=None, runner=None):
     """Production entry: verify_pdf_quality in a child of this interpreter (startup executable, isolated mode,
     minimal environment, fixed argv) with a hard timeout. Any failure to run is 'unavailable', never 'passed'."""
     if not sys.executable: return unavailable()
     request = {'source': str(source_path), 'output': str(output_path), 'pageMap': page_map, 'pageCount': page_count,
         'edits': [{'pageIndex': e['pageIndex'], 'before': e['before'], 'after': e['after']} for e in edits]}
+    if edit_plan is not None:
+        try: json.dumps(edit_plan, allow_nan=False); request['editPlan'] = edit_plan
+        except (TypeError, ValueError, RecursionError): request['editPlan'] = 'malformed'  # cross-checked as rejected
     env = {k: os.environ[k] for k in ENV_ALLOW if k in os.environ}
     try:
         result = (runner or default_runner)([sys.executable, '-I', str(Path(__file__).resolve()), '--worker'],
@@ -338,7 +401,7 @@ def inspect_isolated(source_path, output_path, edits, page_map, page_count=None,
 def _worker():
     request = json.loads(sys.stdin.buffer.read(4 * 1024 * 1024).decode('utf-8'))
     report = verify_pdf_quality(Path(request['source']).read_bytes(), Path(request['output']).read_bytes(),
-        request['edits'], request.get('pageMap'), request.get('pageCount'))
+        request['edits'], request.get('pageMap'), request.get('pageCount'), edit_plan=request.get('editPlan'))
     sys.stdout.write(json.dumps(report) + '\n')
 
 if __name__ == '__main__' and sys.argv[1:] == ['--worker']:
