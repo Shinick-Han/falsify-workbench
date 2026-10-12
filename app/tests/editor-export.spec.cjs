@@ -8,6 +8,8 @@ const tests=[];const test=(name,fn)=>tests.push([name,fn]);
 let current=null;
 const flush=async(n=12)=>{for(let i=0;i<n;i++)await new Promise(r=>setImmediate(r));for(let i=0;i<400&&current&&current.bridge.busyCalls.at(-1)&&!current.inflight;i++)await new Promise(r=>setTimeout(r,5));for(let i=0;i<n;i++)await new Promise(r=>setImmediate(r));};
 const sha=b=>nodeCrypto.createHash('sha256').update(b).digest('hex'),WASM='ab'.repeat(32);
+// Mock elements keep textContent and appended children separately; the rendered text is both, as in a real DOM.
+const text=e=>typeof e==='string'?e:(e.textContent||'')+e.children.map(text).join('');
 const EDITOR={available:true,engine:'falsify-pdf-editor',version:'0.4.1',wasmSha256:WASM,reflow:true,pagination:true,limits:{maxAddedPages:4,maxPatchChars:4000},sourceUrl:'https://github.com/Shinick-Han/falsify-pdf-editor'};
 const SEG0='The trial shows a modest benefit in adults.',SEG1='Effects were observed only in the treated cohort.';
 const BEFORE0='shows a modest benefit',BEFORE1='only in the treated cohort';
@@ -34,7 +36,7 @@ function world(cap){
   document.addEventListener('falsify:blue-file',e=>handoffs.push(e.detail));
   const fire=(type,detail)=>document.dispatchEvent(new CustomEvent(type,{cancelable:true,detail}));
   const w={cap,get,created,downloads,calls,handoffs,fire,bridge,set reply(f){reply=f;},
-    status:()=>get('red-export-status').textContent,
+    status:()=>text(get('red-export-status')),
     // Real WebCrypto digests finish off-thread, so wait for the bound panel instead of a fixed number of ticks.
     async load(){fire('falsify:document',{file:{name:'paper.pdf',type:'application/pdf',arrayBuffer:async()=>new Uint8Array(SRC).buffer},result:{text:SEG0+'\n'+SEG1,format:'PDF',segments:[{label:'p1',text:SEG0},{label:'p2',text:SEG1}]}});
       for(let i=0;i<400&&get('document-red').hidden;i++)await new Promise(r=>setTimeout(r,5));assert.equal(get('document-red').hidden,false,'document bound');await flush();},
@@ -52,6 +54,12 @@ function world(cap){
 }
 const ok=(verification,file=OUT)=>async()=>({file:file.toString('base64'),sourceFileHash:sha(SRC),outputFileHash:sha(file),verification});
 const NEW={red:true,blue:true,pdf:true,pdfEditor:EDITOR},OLD={red:true,blue:true,pdf:true},REFLOWED={engine:'falsify-pdf-editor',layoutVerified:true,reflow:{wrappedLines:3},pagination:{inputPages:10,outputPages:11},limits:'Synthetic engine limits.'};
+// Shape of the actual capture's verification (browser-receipt.json): same-engine self-check, QA pending, three warning codes.
+const ACTUAL={mode:'falsify-pdf-editor',engine:'falsify-pdf-editor',version:'0.1.0-alpha.2',layoutVerified:true,reflow:{wrappedLines:null},pagination:{inputPages:2,outputPages:4},addedPages:2,
+  warnings:[{pageIndex:0,code:'engine_model_lines_stale',severity:'info'},{pageIndex:0,code:'pagination_required',severity:'info'},{pageIndex:0,code:'content_stream_append_order',severity:'warning'}],
+  diagnostics:['engine_model_lines_stale (p. 1)','pagination_required (p. 1)','content_stream_append_order (p. 1)'],
+  selfCheck:{status:'passed',independent:false,method:'same-pdfium-text-geometry',warnings:[{pageIndex:null,code:'self_check_not_independent'}]},independentQA:'pending',
+  checkBoundary:'Same-engine self-check only (same PDFium build re-reads the saved file); independent extraction, rendering and human review are still required.'};
 
 test('descriptor: new broker keeps pdf boolean and a sanitized frozen pdfEditor; legacy broker has none',async()=>{
   const boot=async caps=>{const b=L.create({fetch:async p=>({ok:true,json:async()=>p==='/api/session'?{token:'t'.repeat(32)}:caps}),location:{hostname:'127.0.0.1',port:'7816'}});await b.ready;return b.capabilities();};
@@ -70,10 +78,14 @@ test('descriptor: malformed core fields drop it, bounded optional fields are cle
   assert.equal(L.pdfEditor({...EDITOR,limits:'x'.repeat(500)}).limits.length,300);});
 
 test('export mode line distinguishes reflow engine, legacy single-line and missing editor',async()=>{
-  let w=world(NEW);await w.ready();const m=w.get('red-export-mode');
-  assert.equal(m.hidden,false);assert.match(m.textContent,/falsify-pdf-editor 0\.4\.1/);assert.match(m.textContent,/줄바꿈 재배치와 필요 시 페이지 추가/);assert.match(m.textContent,/엔진 검증 결과로만/);assert.equal(w.get('red-download').disabled,false);
-  w=world(OLD);await w.ready();assert.match(w.get('red-export-mode').textContent,/^기존 한 줄 보존 편집/);assert.match(w.get('red-export-mode').textContent,/최신 companion/);assert.equal(w.get('red-download').disabled,false);
-  w=world({...OLD,pdfEditor:{...EDITOR,available:false}});await w.ready();assert.match(w.get('red-export-mode').textContent,/아직 준비되지 않았습니다.*연결 패널/);
+  let w=world(NEW);await w.ready();const m=w.get('red-export-mode'),mt=text(m);
+  assert.equal(m.hidden,false);assert.match(mt,/falsify-pdf-editor 0\.4\.1/);assert.match(mt,/줄바꿈 재배치와 필요 시 이어지는 페이지 추가/);assert.match(mt,/엔진 자체검사 결과로만/);assert.equal(w.get('red-download').disabled,false);
+  assert.match(mt,/1단·회전 없음·잘림 없음인 최상위 본문 텍스트뿐/);assert.match(mt,/본문만 담고 머리말·꼬리말·쪽번호가 없으며, 뒤쪽 원래 페이지의 쪽번호는 다시 매기지 않습니다/);
+  assert.equal(w.get('red-download').textContent,'재배치·자체검사 후 실험용 사본 다운로드');
+  w=world(OLD);await w.ready();assert.match(text(w.get('red-export-mode')),/^기존 한 줄 보존 편집/);assert.match(text(w.get('red-export-mode')),/최신 companion/);assert.equal(w.get('red-download').disabled,false);
+  assert.equal(w.get('red-download').textContent,'보존 검사 후 완성본 다운로드','legacy single-line label unchanged');
+  w=world({...OLD,pdfEditor:{...EDITOR,reflow:false,pagination:false}});await w.ready();assert.match(text(w.get('red-export-mode')),/줄바꿈 재배치를 지원하지 않아/);assert.equal(w.get('red-download').textContent,'보존 검사 후 완성본 다운로드');
+  w=world({...OLD,pdfEditor:{...EDITOR,available:false}});await w.ready();assert.match(text(w.get('red-export-mode')),/아직 준비되지 않았습니다.*연결 패널/);
   w=world({red:true,blue:true,pdf:false,pdfEditor:{...EDITOR,available:false}});await w.ready();
   assert.equal(w.get('red-download').disabled,true);assert.equal(w.get('red-export-mode').hidden,true);assert.match(w.status(),/연결 패널.*After는 그대로/);assert.equal(w.get('red-plan').disabled,false,'plan JSON still available');});
 
@@ -87,13 +99,15 @@ test('same /api/export body: only checked candidates with the user-edited After;
   assert.deepEqual(Object.keys(body).sort(),['file','fileHash','format','patches']);assert.equal(body.format,'PDF');assert.equal(body.fileHash,sha(SRC));assert.equal(Buffer.from(body.file,'base64').equals(SRC),true);
   assert.equal(body.patches.length,1);assert.equal(body.patches[0].id,'c2');assert.equal(body.patches[0].before,BEFORE1);assert.equal(body.patches[0].after,'in every cohort, including the untreated one');assert.equal(body.patches[0].edited,true);
   for(const id of ['red-download','red-plan','red-request','red-import-response','red-level'])assert.equal(w.get(id).disabled,true,id);
-  assert.equal(w.bridge.busyCalls.at(-1),true,'bridge frozen during export');assert.match(w.status(),/줄바꿈 재배치·보존 검사하는 중/);assert.doesNotMatch(w.status(),/\d+\s*%/);
+  assert.equal(w.bridge.busyCalls.at(-1),true,'bridge frozen during export');assert.match(w.status(),/줄바꿈 재배치·엔진 자체검사하는 중/);assert.doesNotMatch(w.status(),/\d+\s*%/);
   release(await ok(REFLOWED)());await flush();
   assert.equal(w.bridge.busyCalls.at(-1),false);assert.equal(w.get('red-download').disabled,false);
   assert.equal(w.area(1).value,'in every cohort, including the untreated one','After kept after export');});
 
 test('verified success reports wrapping and new pages, downloads copy + separate plan, offers unchanged BLUE handoff',async()=>{const w=world(NEW);await w.ready();w.reply=ok(REFLOWED);w.get('red-download').click();await flush();
   const s=w.status();assert.match(s,/다운로드했습니다/);assert.match(s,/줄바꿈 재배치 3줄/);assert.match(s,/페이지 10 → 11 \(새 페이지 1쪽\)/);assert.match(s,/과학적 타당성·결함 품질 판정이 아닙니다/);assert.match(s,/Synthetic engine limits/);
+  assert.match(s,/머리말·꼬리말·쪽번호가 없으며/,'continuation limitation whenever pages grow');assert.doesNotMatch(s,/엔진 검증 결과/);
+  assert.match(s,/엔진 자체검사 · 독립성 미보고/,'legacy payload without selfCheck claims no independence');assert.match(s,/독립 검수 상태 미보고/);
   assert.equal(w.get('red-export-status').classList.contains('error'),false);
   assert.equal(w.downloads.length,2);assert.equal(Buffer.from(await w.downloads[0].arrayBuffer()).equals(OUT),true);
   const plan=JSON.parse(await w.downloads[1].text());assert.equal(plan.outputFileHash,sha(OUT));assert.deepEqual(plan.verification.pagination,REFLOWED.pagination);assert.equal(plan.status.gold,'pending');
@@ -125,10 +139,41 @@ test('no blanket success: unverified layout, hash mismatch and missing paginatio
   w=world(NEW);await w.ready();w.reply=async()=>({...(await ok(REFLOWED)()),outputFileHash:'0'.repeat(64)});w.get('red-download').click();await flush();
   assert.match(w.status(),/출력 해시와 받은 파일이 달라/);assert.equal(w.downloads.length,0);
   w=world(NEW);await w.ready();w.reply=ok({engine:'falsify-pdf-editor',layoutVerified:true,reflow:{wrappedLines:'3'},pagination:{inputPages:10,outputPages:9},diagnostics:['Hyphenation differs from source']});w.get('red-download').click();await flush();
-  assert.match(w.status(),/줄바꿈 결과 미보고/);assert.match(w.status(),/페이지 수 변화 미검증/);assert.match(w.status(),/엔진 주의: Hyphenation differs/);assert.doesNotMatch(w.status(),/새 페이지/);
+  assert.match(w.status(),/줄바꿈 결과 미보고/);assert.match(w.status(),/페이지 수 변화 미검증/);assert.match(w.status(),/심각도 미보고 · 엔진 진단 \(Hyphenation differs/);assert.doesNotMatch(w.status(),/새 페이지|머리말·꼬리말/);
   assert.match(w.status(),/다운로드했습니다/,'honest missing counters only with layoutVerified true');assert.equal(w.downloads.length,2);
   w=world(OLD);await w.ready();w.reply=ok({mode:'pdf-original-font-single-line',pages:10,limits:'96dpi'});w.get('red-download').click();await flush();
   assert.match(w.status(),/기존 한 줄 교체 · 줄바꿈·페이지 추가 없음 · 10쪽/);assert.doesNotMatch(w.status(),/새 페이지|재배치 \d/);});
+
+test('actual engine payload: ink outcome, same-engine self-check state, mapped diagnostics with severity and codes',async()=>{const w=world(NEW);await w.ready();w.reply=ok(ACTUAL);w.get('red-download').click();await flush();
+  const e=w.get('red-export-status'),[outcome,check,notes]=e.children;assert.equal(e.classList.contains('error'),false);assert.equal(w.downloads.length,2);
+  assert.equal(outcome.className,'red-export-outcome');assert.match(outcome.textContent,/^실험용 사본과 별도 변경 계획을 다운로드했습니다\. 엔진 자체검사 결과: 페이지 2 → 4 \(새 페이지 2쪽\) · 줄바꿈 결과 미보고\./);
+  assert.match(outcome.textContent,/추가된 이어지는 페이지에는 본문만 있고 머리말·꼬리말·쪽번호가 없으며, 뒤쪽 원래 페이지의 쪽번호는 다시 매기지 않았습니다/);
+  assert.doesNotMatch(outcome.textContent,/engine_|pagination_required|주의/,'diagnostics stay out of the outcome line');
+  assert.equal(check.className,'red-export-check');assert.equal(check.children[0].className,'status-label');assert.equal(check.children[0].textContent,'같은 엔진 자체검사');
+  assert.match(text(check),/독립 추출\/렌더링·사람 검수 대기/);assert.doesNotMatch(w.status(),/독립 검증 완료|엔진 검증 결과|독립성 미보고/);
+  assert.equal(notes.className,'red-export-notes');const items=notes.children.map(text);assert.equal(items.length,3);
+  assert.equal(items[0],'정보 · 엔진 내부 줄 모델이 편집 뒤 갱신되지 않았다고 보고됨 (engine_model_lines_stale, p. 1)');
+  assert.equal(items[1],'정보 · 긴 After를 담으려고 이어지는 페이지가 필요했다고 보고됨 (pagination_required, p. 1)');
+  assert.equal(items[2],'주의 · 엔진이 추가 콘텐츠의 그리기/추출 순서 확인을 요청함 (content_stream_append_order, p. 1)');assert.doesNotMatch(items[2],/원본과 다름/,'structural warning is not a defect verdict');
+  assert.equal(notes.children.map(li=>li.children[0].className).join(),'note-info,note-info,note-warning','only warning severity is marked 주의');
+  const v=world(NEW);await v.ready();v.reply=ok({...ACTUAL,warnings:[{pageIndex:'x',code:'<b>new_code</b>'+'z'.repeat(80)},{code:'pagination_required',severity:'bogus'},{code:'__proto__',severity:'info'}]});v.get('red-download').click();await flush();
+  const unknown=v.get('red-export-status').children[2].children.map(text);
+  assert.equal(unknown[0],'심각도 미보고 · 알 수 없는 엔진 진단 코드 (<b>new_code</b>'+'z'.repeat(49)+')','unknown code: fixed text, bounded code kept as text');
+  assert.equal(unknown[1],'심각도 미보고 · 긴 After를 담으려고 이어지는 페이지가 필요했다고 보고됨 (pagination_required)');assert.match(unknown[2],/^정보 · 알 수 없는 엔진 진단 코드 \(__proto__\)/);
+  assert.doesNotMatch(SOURCE,/innerHTML|insertAdjacentHTML|outerHTML/);});
+
+test('engine source link and limits sit next to the engine metadata; unsafe or absent URLs render no link',async()=>{
+  let w=world({...NEW,pdfEditor:{...EDITOR,limits:{maxEdits:12,maxTextChars:4000,maxFileBytes:26214400,other:9}}});await w.ready();const m=w.get('red-export-mode'),a=m.children.find(x=>typeof x!=='string'&&x.className==='red-engine-source');
+  assert.ok(a,'engine source anchor');assert.equal(a.href,EDITOR.sourceUrl);assert.equal(a.target,'_blank');assert.equal(a.rel,'noopener noreferrer');assert.equal(a.textContent,'엔진 소스');
+  assert.match(text(m),/^PDF 편집 엔진 falsify-pdf-editor 0\.4\.1 \(엔진 소스\) · /);assert.match(text(m),/엔진 제한: 변경 최대 12개 · After 최대 4,000자 · 파일 최대 25 MB\./);assert.doesNotMatch(text(m),/other/);
+  for(const sourceUrl of [null,'javascript:alert(1)','https://evil.example/Shinick-Han/x','https://github.com/Shinick-Han/x"><img>']){w=world({...NEW,pdfEditor:{...EDITOR,sourceUrl}});await w.ready();
+    assert.equal(w.get('red-export-mode').children.some(x=>typeof x!=='string'),false,String(sourceUrl));assert.equal(w.calls.length,0,'nothing fetched');}});
+
+test('help states the reflow scope; status is a block container; footer source link has a >=12px, 24px target',()=>{
+  const html=fs.readFileSync(path.resolve(__dirname,'../dist/index.html'),'utf8'),css=fs.readFileSync(path.resolve(__dirname,'../dist/document-red.css'),'utf8');
+  assert.match(html,/1단·회전 없음·잘림 없음인 최상위 본문 텍스트뿐/);assert.match(html,/본문만 담고 머리말·꼬리말·쪽번호가 없으며/);assert.match(html,/독립 추출\/렌더링·사람 검수는 별도로 필요/);assert.doesNotMatch(html,/특이한 레이아웃에서는 재배치가 거부/);
+  assert.match(html,/<div id="red-export-status" class="form-feedback" role="status" aria-live="polite"><\/div>/);
+  assert.match(css,/\.page-foot \.source-link\{display:inline-flex;align-items:center;min-height:24px;font-size:12px\}/);assert.match(css,/\.red-export-outcome\{[^}]*font-size:14px[^}]*color:var\(--ink\)/);});
 
 test('fail closed: new-engine export without layoutVerified === true never downloads or offers handoff',async()=>{
   const {layoutVerified,...unproven}=REFLOWED;void layoutVerified;

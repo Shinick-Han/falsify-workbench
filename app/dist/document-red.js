@@ -27,14 +27,16 @@
     const plain=doc&&/^(TXT|MD|MARKDOWN|TEXT|TEX|CSV|TSV|RST)$/.test(doc.format);
     const pdf=doc?.format==='PDF'?pdfMode(cap):null,supported=plain||!!pdf&&pdf.kind!=='none';
     $('#red-download').disabled=!active||!count||!$('#red-export-consent').checked||!supported;
-    const mode=$('#red-export-mode');mode.hidden=!supported||!pdf;mode.textContent=supported&&pdf?pdfModeText(pdf):'';
-    if(doc&&!supported)$('#red-export-status').textContent=doc.format==='PDF'?(cap?(pdf.engine?MISSING_ENGINE+' 후보와 편집한 After는 그대로 남고, 변경 계획 JSON은 지금 저장할 수 있습니다.':'PDF 보존 검사는 PyMuPDF가 설치된 로컬 broker가 필요합니다.'):'PDF 보존 검사는 연결된 로컬 broker가 필요합니다. 변경 계획 JSON은 저장할 수 있습니다.'):'이 형식은 레이아웃 검증 렌더러가 아직 없습니다. 완성본 다운로드를 차단하고 변경 계획만 저장합니다.';
+    const mode=$('#red-export-mode');mode.hidden=!supported||!pdf;mode.replaceChildren();if(supported&&pdf)mode.append(...pdfModeText(pdf));
+    // Reflow deliberately changes pagination, so its action never promises preservation or a finished copy.
+    $('#red-download').textContent=pdf?.kind==='reflow'?'재배치·자체검사 후 실험용 사본 다운로드':'보존 검사 후 완성본 다운로드';
+    if(doc&&!supported)statusText(doc.format==='PDF'?(cap?(pdf.engine?MISSING_ENGINE+' 후보와 편집한 After는 그대로 남고, 변경 계획 JSON은 지금 저장할 수 있습니다.':'PDF 보존 검사는 PyMuPDF가 설치된 로컬 broker가 필요합니다.'):'PDF 보존 검사는 연결된 로컬 broker가 필요합니다. 변경 계획 JSON은 저장할 수 있습니다.'):'이 형식은 레이아웃 검증 렌더러가 아직 없습니다. 완성본 다운로드를 차단하고 변경 계획만 저장합니다.');
     document.querySelectorAll('#red-candidates input,#red-candidates textarea').forEach(e=>e.disabled=busy);
     renderRecord();renderHandoff();
     document.dispatchEvent(new CustomEvent('falsify:document-state',{detail:doc?{name:doc.name,count:candidates.length,selected:count,busy}:null}));
   }
   function cancelCurrent(){const old=job,l=jobLink;job=null;jobLink=null;if(old&&l)void l.request('/api/red/jobs/'+encodeURIComponent(old)+'/cancel',{}).catch(()=>{});}
-  function clear(){generation++;cancelCurrent();binding=null;doc=null;file=null;candidates=[];response=null;request=null;busy=false;invalidate();$('#document-red').hidden=true;$('#red-candidates').replaceChildren();$('#red-response').value='';$('#red-record-status').textContent='';$('#red-export').hidden=true;$('#red-consent').checked=false;$('#red-harness-consent').checked=false;$('#red-export-consent').checked=false;$('#red-export-status').textContent='';msg('');controls();}
+  function clear(){generation++;cancelCurrent();binding=null;doc=null;file=null;candidates=[];response=null;request=null;busy=false;invalidate();$('#document-red').hidden=true;$('#red-candidates').replaceChildren();$('#red-response').value='';$('#red-record-status').textContent='';$('#red-export').hidden=true;$('#red-consent').checked=false;$('#red-harness-consent').checked=false;$('#red-export-consent').checked=false;statusText('');msg('');controls();}
   document.addEventListener('falsify:document-clear',clear);
   // The shell asks before replacing/closing the source; cancelling the discard confirmation keeps everything.
   document.addEventListener('falsify:before-document-change',e=>{if(e.detail?.role==='red'&&!keepEdits())e.preventDefault();});
@@ -97,33 +99,61 @@
     status:{domainReview:'pending',teamApproval:'pending',gold:'pending',metric:null},...extra};}
   $('#red-plan').addEventListener('click',()=>{try{jsonDownload(plan(C.patches(doc,candidates)),'falsify-document-edit-plan.json');exportStatus('선택 변경과 근거를 저장했습니다. 이 파일은 BLUE에 전달하지 마세요.');}catch(e){exportStatus(e.message,true);}});
   function base64(bytes){let s='';for(let i=0;i<bytes.length;i+=32768)s+=String.fromCharCode(...bytes.subarray(i,i+32768));return btoa(s);}
-  function exportStatus(s,error=false){const e=$('#red-export-status');e.textContent=s;e.classList.toggle('error',error);}
+  function statusText(s){const e=$('#red-export-status');e.replaceChildren();e.textContent=s;return e;}
+  function exportStatus(s,error=false){statusText(s).classList.toggle('error',error);}
+  const node=(tag,className,text)=>{const x=document.createElement(tag);x.className=className;x.textContent=text;return x;};
+  // Success hierarchy: one ink outcome line, the self-check boundary as a discrete state, then secondary engine diagnostics. textContent only.
+  function successStatus(r,limits){const e=statusText('');e.classList.toggle('error',false);
+    const out=[node('span','red-export-outcome','실험용 사본과 별도 변경 계획을 다운로드했습니다.'+(r.facts.length?' '+(r.check?'엔진 자체검사 결과: ':'')+r.facts.join(' · ')+'.':'')+(r.continuation?' '+CONTINUED:''))];
+    if(r.check){const c=node('span','red-export-check','');c.append(node('span','status-label',r.check.label),' '+r.check.text);out.push(c);}
+    if(r.notes?.length){const list=node('ul','red-export-notes','');for(const n of r.notes){const li=node('li','','');li.append(node('span',n.severity==='warning'||n.severity==='error'?'note-warning':'note-info',SEVERITY[n.severity]||'심각도 미보고'),' · '+n.phrase+' ',node('span','red-export-code','('+n.detail+')'));list.append(li);}out.push(list);}
+    if(limits)out.push(node('span','red-export-limits',limits));
+    e.append(...out);}
   // PDF export path comes only from authenticated capabilities: reflow-capable editor, editor without reflow, legacy single-line preservation, or none.
   function pdfMode(cap){const e=cap?.pdfEditor||null;return {kind:e?.available?(e.reflow?'reflow':'editor'):cap?.pdf?'legacy':'none',engine:e};}
   const MISSING_ENGINE='줄바꿈 재배치 PDF 편집 엔진이 이 companion에 아직 준비되지 않았습니다. 위 연결 패널의 설치·실행 안내로 companion을 다시 준비한 뒤 연결하세요.';
-  function pdfModeText(m){const e=m.engine;
-    if(m.kind==='reflow')return 'PDF 편집 엔진 '+e.engine+' '+e.version+' · 원래 줄 공간을 넘는 After는 줄바꿈 재배치'+(e.pagination?'와 필요 시 페이지 추가':'(페이지 추가는 미지원)')+'를 시도합니다. 실제 줄바꿈·페이지 수는 완성본 생성 후 엔진 검증 결과로만 표시합니다.';
-    if(m.kind==='editor')return 'PDF 편집 엔진 '+e.engine+' '+e.version+' · 이 버전은 줄바꿈 재배치를 지원하지 않아 원래 줄 공간에 들어가는 변경만 가능합니다.';
-    return '기존 한 줄 보존 편집 · 원래 줄 공간에 들어가는 변경만 가능하며 줄바꿈·페이지 추가가 필요한 After는 차단됩니다.'+(e?' '+MISSING_ENGINE:' 긴 After의 줄바꿈 재배치는 최신 companion이 필요합니다.');}
+  const SCOPE='재배치 대상은 1단·회전 없음·잘림 없음인 최상위 본문 텍스트뿐이며, 그 밖의 텍스트는 재배치하지 않습니다.';
+  const CONTINUATION='새로 추가되는 이어지는 페이지는 본문만 담고 머리말·꼬리말·쪽번호가 없으며, 뒤쪽 원래 페이지의 쪽번호는 다시 매기지 않습니다.';
+  const CONTINUED='추가된 이어지는 페이지에는 본문만 있고 머리말·꼬리말·쪽번호가 없으며, 뒤쪽 원래 페이지의 쪽번호는 다시 매기지 않았습니다.';
+  // Engine source link is display-only and comes from the bridge-sanitized descriptor; re-checked here, never fetched.
+  const SOURCE=/^https:\/\/github\.com\/Shinick-Han\/[A-Za-z0-9._~\/-]{1,250}$/;
+  const LIMITS={maxEdits:n=>'변경 최대 '+n+'개',maxTextChars:n=>'After 최대 '+n.toLocaleString()+'자',maxAddedPages:n=>'추가 페이지 최대 '+n+'쪽',maxFileBytes:n=>'파일 최대 '+Math.floor(n/1048576)+' MB'};
+  function limitText(l){if(typeof l==='string')return l.slice(0,300);if(!l||typeof l!=='object')return '';return Object.entries(LIMITS).filter(([k])=>whole(l[k])).map(([k,f])=>f(l[k])).join(' · ');}
+  function engineName(e){const out=['PDF 편집 엔진 '+e.engine+' '+e.version];
+    if(typeof e.sourceUrl==='string'&&SOURCE.test(e.sourceUrl)){const a=node('a','red-engine-source','엔진 소스');a.href=e.sourceUrl;a.target='_blank';a.rel='noopener noreferrer';out.push(' (',a,')');}
+    return out;}
+  function pdfModeText(m){const e=m.engine,limit=e?limitText(e.limits):'',tail=limit?' 엔진 제한: '+limit+'.':'';
+    if(m.kind==='reflow')return [...engineName(e),' · 원래 줄 공간을 넘는 After는 줄바꿈 재배치'+(e.pagination?'와 필요 시 이어지는 페이지 추가':'(페이지 추가는 미지원)')+'를 시도합니다. '+SCOPE+(e.pagination?' '+CONTINUATION:'')+' 실제 줄바꿈·페이지 수는 출력 사본의 엔진 자체검사 결과로만 표시합니다.'+tail];
+    if(m.kind==='editor')return [...engineName(e),' · 이 버전은 줄바꿈 재배치를 지원하지 않아 원래 줄 공간에 들어가는 변경만 가능합니다.'+tail];
+    return ['기존 한 줄 보존 편집 · 원래 줄 공간에 들어가는 변경만 가능하며 줄바꿈·페이지 추가가 필요한 After는 차단됩니다.'+(e?' '+MISSING_ENGINE:' 긴 After의 줄바꿈 재배치는 최신 companion이 필요합니다.')];}
   const whole=x=>Number.isSafeInteger(x)&&x>=0;
   function diagnostics(v){return Array.isArray(v?.diagnostics)?v.diagnostics.slice(0,5).map(x=>typeof x==='string'?x:x?.message).filter(x=>typeof x==='string'&&x.trim()).map(x=>x.slice(0,300)):[];}
+  // Known engine warning codes get fixed Korean phrases; severity is shown only as reported, unknown codes keep their bounded code.
+  const NOTES={engine_model_lines_stale:'엔진 내부 줄 모델이 편집 뒤 갱신되지 않았다고 보고됨',pagination_required:'긴 After를 담으려고 이어지는 페이지가 필요했다고 보고됨',content_stream_append_order:'엔진이 추가 콘텐츠의 그리기/추출 순서 확인을 요청함'};
+  const SEVERITY={info:'정보',warning:'주의',error:'주의'};
+  function engineNotes(v){
+    if(Array.isArray(v.warnings)&&v.warnings.some(w=>typeof w?.code==='string'))return v.warnings.filter(w=>typeof w?.code==='string').slice(0,8).map(w=>{const code=w.code.slice(0,64);
+      return {severity:typeof w.severity==='string'&&SEVERITY[w.severity]?w.severity:null,phrase:Object.hasOwn(NOTES,code)?NOTES[code]:'알 수 없는 엔진 진단 코드',detail:code+(whole(w.pageIndex)?', p. '+(w.pageIndex+1):'')};});
+    return diagnostics(v).map(d=>({severity:null,phrase:'엔진 진단',detail:d}));}
+  // The self-check is the same engine re-reading its own output; independence and QA are read from the payload and never claimed.
+  function selfCheck(v){return {label:v.selfCheck?.independent===false?'같은 엔진 자체검사':'엔진 자체검사 · 독립성 미보고',
+    text:(v.independentQA==='pending'?'독립 추출/렌더링·사람 검수 대기':'독립 검수 상태 미보고')+' · 레이아웃 검사일 뿐 과학적 타당성·결함 품질 판정이 아닙니다.'};}
   // Layout facts are read only from the engine's verification of this output; missing or malformed fields read as unverified, never assumed.
   function layoutReport(v){
-    if(v?.engine==='falsify-pdf-editor'){const r=v.reflow,p=v.pagination,d=diagnostics(v),out=[];
-      out.push(whole(r?.wrappedLines)?(r.wrappedLines?'줄바꿈 재배치 '+r.wrappedLines+'줄':'줄바꿈 없이 교체'):'줄바꿈 결과 미보고');
-      out.push(whole(p?.inputPages)&&whole(p?.outputPages)&&p.outputPages>=p.inputPages?(p.outputPages>p.inputPages?'페이지 '+p.inputPages+' → '+p.outputPages+' (새 페이지 '+(p.outputPages-p.inputPages)+'쪽)':'페이지 수 그대로 '+p.outputPages+'쪽'):'페이지 수 변화 미검증');
-      if(d.length)out.push('엔진 주의: '+d.join(' / '));
-      return '엔진 검증 결과 · '+out.join(' · ')+'. 레이아웃 검사일 뿐 과학적 타당성·결함 품질 판정이 아닙니다. ';}
-    if(v?.mode==='pdf-original-font-single-line')return '기존 한 줄 교체 · 줄바꿈·페이지 추가 없음'+(whole(v.pages)?' · '+v.pages+'쪽':'')+'. ';
-    return '';}
+    if(v?.engine==='falsify-pdf-editor'){const r=v.reflow,p=v.pagination,facts=[],counted=whole(p?.inputPages)&&whole(p?.outputPages)&&p.outputPages>=p.inputPages,grew=counted&&p.outputPages>p.inputPages;
+      facts.push(counted?(grew?'페이지 '+p.inputPages+' → '+p.outputPages+' (새 페이지 '+(p.outputPages-p.inputPages)+'쪽)':'페이지 수 그대로 '+p.outputPages+'쪽'):'페이지 수 변화 미검증');
+      facts.push(whole(r?.wrappedLines)?(r.wrappedLines?'줄바꿈 재배치 '+r.wrappedLines+'줄':'줄바꿈 없이 교체'):'줄바꿈 결과 미보고');
+      return {facts,continuation:grew,check:selfCheck(v),notes:engineNotes(v)};}
+    if(v?.mode==='pdf-original-font-single-line')return {facts:['기존 한 줄 교체 · 줄바꿈·페이지 추가 없음'+(whole(v.pages)?' · '+v.pages+'쪽':'')]};
+    return {facts:[]};}
   function recovery(kind){if(!kind)return '';const keep=' 선택한 후보와 직접 편집한 After는 그대로 남아 있습니다.';
-    if(kind==='reflow')return keep+' 특이한 레이아웃에서는 긴 After의 재배치가 아직 지원되지 않을 수 있습니다. 해당 후보 선택을 해제하거나 After를 직접 조정해 다시 시도하거나, 변경 계획 JSON만 저장할 수 있습니다. 엔진·연결 오류라면 위 연결 패널에서 companion을 다시 실행·연결하세요.';
+    if(kind==='reflow')return keep+' 긴 After의 재배치는 1단·회전 없음·잘림 없음인 최상위 본문 텍스트에서만 됩니다. 해당 후보 선택을 해제하거나 After를 직접 조정해 다시 시도하거나, 변경 계획 JSON만 저장할 수 있습니다. 엔진·연결 오류라면 위 연결 패널에서 companion을 다시 실행·연결하세요.';
     return keep+' 이 companion은 원래 줄 공간에 들어가는 변경만 지원합니다. 줄바꿈 재배치 엔진이 있는 companion으로 다시 연결하거나, 다른 후보를 고르거나, 변경 계획 JSON만 저장할 수 있습니다.';}
   $('#red-download').addEventListener('click',async()=>{
-    if(busy||!doc||!$('#red-export-consent').checked)return;const current=generation,pdf=doc.format==='PDF'?pdfMode(B.capabilities()):null;busy=true;controls();exportStatus('선택 변경만 적용하고 보존 검사 중');
+    if(busy||!doc||!$('#red-export-consent').checked)return;const current=generation,pdf=doc.format==='PDF'?pdfMode(B.capabilities()):null;busy=true;controls();exportStatus(pdf?.kind==='reflow'?'선택 변경만 적용하고 재배치·자체검사 중':'선택 변경만 적용하고 보존 검사 중');
     try{const patches=C.patches(doc,candidates);let output,reported=null;
       // Same request body as before: only checked candidates' Before plus the user's current After; progress is staged text, never an invented percentage.
-      if(pdf){exportStatus('원본 PDF와 선택 변경 '+patches.length+'개를 companion에서 '+(pdf.kind==='reflow'?'교체·줄바꿈 재배치·보존 검사':'한 줄 교체·보존 검사')+'하는 중입니다. 엔진이 진행률을 알려주지 않아 퍼센트는 표시하지 않습니다.');
+      if(pdf){exportStatus('원본 PDF와 선택 변경 '+patches.length+'개를 companion에서 '+(pdf.kind==='reflow'?'교체·줄바꿈 재배치·엔진 자체검사':'한 줄 교체·보존 검사')+'하는 중입니다. 엔진이 진행률을 알려주지 않아 퍼센트는 표시하지 않습니다.');
         const result=await link().request('/api/export',{format:doc.format,fileHash:doc.fileHash,file:base64(new Uint8Array(await file.arrayBuffer())),patches});if(current!==generation)return;
         exportStatus('companion 결과 수신 · 출력 파일과 레이아웃 검증 확인 중');reported=typeof result.outputFileHash==='string'?result.outputFileHash:null;
         output={bytes:Uint8Array.from(atob(result.file),x=>x.charCodeAt(0)),verification:result.verification};
@@ -136,7 +166,7 @@
       if(reported&&reported!==outputFileHash)throw new Error('companion이 보고한 출력 해시와 받은 파일이 달라 다운로드하지 않았습니다.');
       const name=file.name.replace(/(\.[^.]+)$/,'-falsify-research$1'),type=file.type||'application/octet-stream';download(output.bytes,name,type);jsonDownload(plan(patches,{outputFileHash,verification:output.verification}),'falsify-document-edit-plan.json');
       exported={outputFileHash,verification:output.verification,file:new File([output.bytes],name,{type})};const final={selected:patches,outputFileHash,verification:output.verification};exported.key=key(final);void save(final);
-      exportStatus('실험용 사본과 별도 변경 계획을 다운로드했습니다. '+(pdf?layoutReport(output.verification):'')+(typeof output.verification?.limits==='string'?output.verification.limits.slice(0,400):''));
+      successStatus(pdf?layoutReport(output.verification):{facts:[]},typeof output.verification?.limits==='string'?output.verification.limits.slice(0,400):'');
     }catch(e){if(current===generation)exportStatus('다운로드 차단: '+e.message+recovery(pdf?.kind),true);}
     finally{if(current===generation){busy=false;controls();}}
   });
@@ -187,7 +217,7 @@
     if(e.target.closest?.('#red-evaluate')){if(!lastSaved)return;const select=$('#evaluation-run');if(select&&[...select.options].some(o=>o.value===lastSaved)){select.value=lastSaved;select.dispatchEvent(new Event('change'));}visibleNav('review')?.click();}
     if(e.target.closest?.('#red-handoff')){if(!exported||exported.key!==currentKey()||busy||pending.has(exported.key))return;const sourceRunId=saved.get(exported.key)||null;
       // BLUE may cancel the handoff to keep its own running job or unrecorded result.
-      if(!document.dispatchEvent(new CustomEvent('falsify:blue-file',{cancelable:true,detail:{file:exported.file,sourceRunId}}))){$('#red-export-status').textContent='BLUE의 진행 중이거나 기록되지 않은 결과를 유지하려고 인계를 취소했습니다.';return;}visibleNav('blue')?.click();}
+      if(!document.dispatchEvent(new CustomEvent('falsify:blue-file',{cancelable:true,detail:{file:exported.file,sourceRunId}}))){statusText('BLUE의 진행 중이거나 기록되지 않은 결과를 유지하려고 인계를 취소했습니다.');return;}visibleNav('blue')?.click();}
   });
   // Harness and CLI controls belong to the ledger; guard them in capture phase so a cancelled change never reaches the ledger handler.
   const GUARDED=['red-harness','red-cli-type','red-cli-model','red-cli-effort'];
