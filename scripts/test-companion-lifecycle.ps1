@@ -2,7 +2,7 @@
 Lifecycle tests for start-companion.ps1 and companion-lifecycle.psm1. Pure helpers run on synthetic inputs;
 real tests run throwaway stub companions on fresh ephemeral loopback ports from a temporary checkout copy.
 They never use an existing port, never stop a process they did not start (stubs leave through their own
-test-only route or stdin EOF), never call a model and never contact the network.
+test-only route or stdin EOF), never call a model and never contact an external network.
 Run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\test-companion-lifecycle.ps1
 (also under pwsh). Exit code 0 means every check passed.
 #>

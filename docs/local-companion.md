@@ -33,9 +33,15 @@ Remove it with `powershell -NoProfile -ExecutionPolicy Bypass -File .\uninstall-
 
 Browser limits of custom protocols: the web page cannot tell whether the protocol is installed (if not, clicking does nothing or shows a browser message), cannot see the terminal or read its output, and receives no token from it. Browsers may require a user click and show a confirmation each time unless you choose to remember it for this site. Entering the link in Win+R also works but has no browser prompt.
 
-If the port is already in use, the launcher stops before setup with a clear message and does not stop, replace or reuse the program on that port. Use another port, e.g. `-Port 7817` or `falsify://connect?port=7817`, and set the website's port field to the same number. Never stop another user's program to free a port. `-NoInstall` skips pip entirely; deleting `.venv` forces a fresh setup. `-NoPdf` skips installation of the optional PDF editor in a new environment; it does not uninstall an existing one. PDF import remains browser-local, but PDF modified-file export requires PyMuPDF. TXT export does not require it.
+Clicking Connect again does not require manually finding and killing the old server. The launcher checks the Windows listener and its exact Python script path before contacting it. An idle companion from this same checkout is gracefully restarted after startup prerequisites pass. Use the new terminal's pairing token afterwards: restart invalidates the previous token, but does not clear browser-local papers, harnesses or records.
+
+If RED/BLUE or PDF export is running, or the companion still retains recent job results, it is reused rather than stopped. Older same-checkout companions without the restart protocol are also reused; they need a manual stop once to adopt the new restart behavior. The launcher never force-kills a process. A foreign, ambiguous or differently configured listener is left untouched with an explanatory message. In that case use a genuinely free port, e.g. `-Port 7817` or `falsify://connect?port=7817`, and set the website's port field to the same number. Simultaneous clicks are serialized during startup; a second terminal does not start a competing broker.
+
+`-NoInstall` skips pip entirely; deleting `.venv` forces a fresh setup. `-NoPdf` skips installation of the optional PDF editor in a new environment; it does not uninstall an existing one. PDF import remains browser-local, but PDF modified-file export requires PyMuPDF. TXT export does not require it.
 
 The launcher tests in `scripts/test-connection.ps1` are dry-run only: they never write the registry, start the companion, open a window or call a model.
+
+`scripts/test-companion-lifecycle.ps1` additionally checks lifecycle identity, HTTP behavior, startup failure protection, restart/reuse and mutex recovery using synthetic companions on temporary loopback ports. Run it under both Windows PowerShell and PowerShell 7. It does not call an AI model or touch an existing companion.
 
 ### Longer PDF edits (opt-in reflow engine)
 

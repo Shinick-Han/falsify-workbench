@@ -30,18 +30,30 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
       - name: Connection launcher dry-run contracts (PowerShell 7)
         shell: pwsh
         run: ./scripts/test-connection.ps1
       - name: PDF editor startup configuration (PowerShell 7)
         shell: pwsh
         run: ./scripts/test-pdf-editor-config.ps1
+      - name: Companion restart and reconnect contracts (PowerShell 7)
+        shell: pwsh
+        run: ./scripts/test-companion-lifecycle.ps1
       - name: Connection launcher dry-run contracts (Windows PowerShell)
         shell: powershell
         run: ./scripts/test-connection.ps1
       - name: PDF editor startup configuration (Windows PowerShell)
         shell: powershell
         run: ./scripts/test-pdf-editor-config.ps1
+      - name: Companion restart and reconnect contracts (Windows PowerShell)
+        shell: powershell
+        run: ./scripts/test-companion-lifecycle.ps1
   deploy:
     needs: [verify, verify-windows-launcher]
     runs-on: ubuntu-latest
