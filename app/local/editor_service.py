@@ -7,6 +7,7 @@ path: an editor failure is reported as an error and no file is produced.
 """
 import base64
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -18,6 +19,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+import paper_inventory
 import pdf_quality
 
 ENGINE = 'falsify-pdf-editor'
@@ -86,6 +88,12 @@ def config_from(root=None, manifest=None, source_root=None, node=None, environ=N
         _absolute(source_root, 'pdf editor source root') if source_root else None, str(_absolute(node, 'node executable')) if node else None)
     if config.manifest.name != MANIFEST_NAME: raise ValueError(f'pdf editor manifest must be named {MANIFEST_NAME}')
     return config
+
+def _accepts_edit_plan(fn):
+    """True when the QA entry takes a keyword edit_plan; an older inspect_isolated keeps its five-argument call."""
+    try: param = inspect.signature(fn).parameters.get('edit_plan')
+    except (TypeError, ValueError): return False
+    return param is not None and param.kind in (param.KEYWORD_ONLY, param.POSITIONAL_OR_KEYWORD)
 
 def unconfigured_capability():
     return {'available': False, 'configured': False, 'engine': ENGINE, 'version': None, 'wasmSha256': None,
@@ -163,10 +171,15 @@ def validate_export(data):
     return raw, edits
 
 class PdfEditorService:
-    def __init__(self, config, runner=None, clock=time.monotonic, retry_seconds=15, quality=None):
+    def __init__(self, config, runner=None, clock=time.monotonic, retry_seconds=15, quality=None, planner=None):
         self.config, self.runner, self.clock, self.retry_seconds = config, runner or default_runner, clock, retry_seconds
         # Independent per-output QA always runs in production; tests inject a stub explicitly (never keyed to the runner).
         self.quality = quality or pdf_quality.inspect_isolated
+        # Only the default production QA receives the private source-derived edit plan (keyword edit_plan, when it
+        # accepts one); an explicitly injected checker keeps the legacy five-positional-argument call unchanged.
+        self._qa_takes_plan = quality is None and _accepts_edit_plan(self.quality)
+        # Source-only edit plan, built in an isolated child before the editor runs; failure degrades to 'unavailable'.
+        self.planner = planner or paper_inventory.plan_isolated
         self._lock = threading.Lock()
         self._cap, self._cap_at, self._node = None, None, None
         self.leftovers = []
@@ -244,6 +257,7 @@ class PdfEditorService:
         paths = {k: directory / v for k, v in names.items()}
         try:
             with open(paths['source'], 'xb') as f: f.write(raw)
+            plan = self._edit_plan(paths['source'], data['fileHash'], edits)
             request = {'schema': REQUEST_SCHEMA, 'input': names['source'], 'inputSha256': data['fileHash'], 'reflow': cap['reflow'],
                 'edits': [{k: e[k] for k in ['id', 'pageIndex', 'before', 'after']} for e in edits]}
             with open(paths['request'], 'x', encoding='utf-8') as f: json.dump(request, f, ensure_ascii=False)
@@ -262,8 +276,16 @@ class PdfEditorService:
                 error = (report or {}).get('error') if isinstance((report or {}).get('error'), dict) else {}
                 code = next((c for c in [error.get('code'), status.get('code')] if isinstance(c, str) and CODE.fullmatch(c)), 'EDITOR_FAILED')
                 raise ValueError(f'PDF 편집기가 변경을 적용하지 못했습니다 ({code}). {NO_FALLBACK}')
-            return self._result(data, edits, cap, report, paths['out'], paths['source'])
+            return self._result(data, edits, cap, report, paths['out'], paths['source'], plan)
         finally: self._cleanup(directory, names.values())
+
+    def _edit_plan(self, source, source_hash, edits):
+        """Private plan read from the immutable source and the exact selected Before/After, revalidated against both.
+        Never blocks the export: any planner failure or malformed plan becomes the unavailable plan."""
+        try: plan = paper_inventory.validate_plan(self.planner(source, source_hash, edits), source_hash, edits)
+        except Exception: plan = None
+        try: return plan or paper_inventory.unavailable_plan(source_hash, edits)
+        except ValueError: return None  # selection outside the planner's bounds: no plan, summary 'unavailable'
 
     def _read_report(self, path):
         if not path.is_file(): return None
@@ -272,12 +294,13 @@ class PdfEditorService:
         except (ValueError, UnicodeDecodeError): raise ValueError(f'PDF 편집기 보고서 형식 오류. {NO_FALLBACK}') from None
         return report if isinstance(report, dict) else None
 
-    def _independent(self, source, out, edits, page_map, page_count):
+    def _independent(self, source, out, edits, page_map, page_count, plan=None):
         """Sanitized independent QA report; any error running it is 'unavailable' (non-gating, never 'passed')."""
-        try: return pdf_quality.sanitize(self.quality(source, out, [{k: e[k] for k in ['pageIndex', 'before', 'after']} for e in edits], page_map, page_count))
+        args = (source, out, [{k: e[k] for k in ['pageIndex', 'before', 'after']} for e in edits], page_map, page_count)
+        try: return pdf_quality.sanitize(self.quality(*args, edit_plan=plan) if self._qa_takes_plan else self.quality(*args))
         except Exception: return pdf_quality.unavailable()
 
-    def _result(self, data, edits, cap, report, out, source):
+    def _result(self, data, edits, cap, report, out, source, plan=None):
         fail = lambda what: ValueError(f'PDF 편집기 결과 검증 실패: {what}. {NO_FALLBACK}')
         if report is None: raise fail('보고서 없음')
         if not out.is_file(): raise fail('출력 없음')
@@ -323,8 +346,10 @@ class PdfEditorService:
             'repairs': [{'pageIndex': r.get('pageIndex'), 'count': r.get('count')} for r in report.get('repairs', []) if isinstance(r, dict)] if isinstance(report.get('repairs'), list) else [],
             'warnings': warnings, 'diagnostics': diagnostics,
             'selfCheck': {'status': 'passed', 'independent': False, 'method': self_check.get('method'), 'warnings': codes(self_check.get('warnings'))},
-            'checkBoundary': CHECK_BOUNDARY}
-        checks = self._independent(source, out, edits, verification['sourcePageMap'], {'source': input_pages, 'output': output_pages})
+            'checkBoundary': CHECK_BOUNDARY,
+            # Fixed counts only; the private plan's text hashes, styles and coordinates never leave the server.
+            'editPlanSummary': paper_inventory.summarize(plan)}
+        checks = self._independent(source, out, edits, verification['sourcePageMap'], {'source': input_pages, 'output': output_pages}, plan)
         verification['independentQA'], verification['independentChecks'] = checks['status'], checks
         if checks['status'] == 'failed':
             found = [f"{c['code']}" + (f" (출력 p. {', '.join(map(str, c['pages'][:10]))})" if c['pages'] else '') for c in checks['checks'] if c['status'] == 'failed']

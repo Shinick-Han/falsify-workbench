@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'local'))
 import editor_service as es
+import paper_inventory
 import pdf_quality
 import server
 
@@ -282,6 +283,92 @@ class IndependentQATests(Base):
             return SimpleNamespace(returncode=0,stdout=b'{"ok":true}\n')
         r=es.PdfEditorService(self.config,runner=FakeRunner(edit=run_white)).export(data)
         self.assertEqual(r['verification']['independentQA'],'warning');self.assertEqual(base64.b64decode(r['file']),out,'uncertain diagnostics keep the download')
+
+class EditPlanTests(Base):
+    """Source-derived private edit plan: built before the editor runs, handed only to the default production QA, public summary only."""
+    HEAD='Running header'
+    def setUp(self):
+        super().setUp()
+        self.src=IndependentQATests.real_pdf(self,[[self.HEAD,'Page one stays as it was.'],[self.HEAD,'We see that the result','holds here today.']])
+        self.out=IndependentQATests.real_pdf(self,[[self.HEAD,'Page one stays as it was.'],[self.HEAD,'We see that the result','may hold here today.']])
+        self.edits=[{'id':'edit-1','pageIndex':1,'before':'the result holds','after':'the result may hold'}]
+    def data(self,before='the result holds',after='the result may hold'):
+        return payload(file=base64.b64encode(self.src).decode(),fileHash=hashlib.sha256(self.src).hexdigest(),
+            patches=[{'label':'PDF p. 2','before':before,'after':after}])
+    def editor(self):
+        out=self.out
+        def run(args):
+            req=json.loads(Path(args['--request']).read_text(encoding='utf-8'))
+            Path(args['--out']).write_bytes(out)
+            Path(args['--report']).write_text(json.dumps({'ok':True,'layoutVerified':True,'runtime':{'wasmSha256':WASM},'edits':[{'id':e['id'],'pageIndex':e['pageIndex'],'status':'applied'} for e in req['edits']],
+                'selfCheck':{'status':'passed','failures':[]},'pageCount':{'source':2,'output':2},'outputSha256':hashlib.sha256(out).hexdigest(),
+                'sourcePageMap':[{'sourcePageIndex':i,'outputPageIndex':i,'continuationPageIndices':[]} for i in range(2)]}))
+            return SimpleNamespace(returncode=0,stdout=b'{"ok":true}\n')
+        return FakeRunner(edit=run)
+    def assert_private(self,result,plan):
+        blob=json.dumps(result['verification'])
+        for leak in ['Helvetica','the result','regions','beforeSha256',plan['edits'][0]['beforeSha256'],str(self.tmp.name).lower()]:self.assertNotIn(leak.lower(),blob.lower())
+        for region in plan['edits'][0]['regions']:self.assertNotIn(str(region[0]),blob)
+
+    def test_production_qa_gets_same_sealed_plan_by_keyword(self):
+        calls=[]
+        def production(source,out,edits,page_map,page_count=None,*,edit_plan=None,runner=None):
+            calls.append({'args':(Path(source).read_bytes(),Path(out).read_bytes(),edits,page_map,page_count),'edit_plan':edit_plan})
+            return pdf_quality.verify_pdf_quality(Path(source).read_bytes(),Path(out).read_bytes(),edits,page_map,page_count)
+        runner=self.editor();planned=[]
+        def planner(source,source_hash,edits):
+            planned.append(([c for c in runner.calls if '--request' in c['argv']],Path(source).read_bytes(),source_hash))
+            return paper_inventory.plan_isolated(source,source_hash,edits)
+        with patch.object(pdf_quality,'inspect_isolated',production):
+            svc=es.PdfEditorService(self.config,runner=runner,planner=planner);result=svc.export(self.data())
+        expected=paper_inventory.build_edit_plan(self.src,self.edits)
+        self.assertEqual(expected['status'],'resolved')
+        self.assertEqual(planned,[([],self.src,hashlib.sha256(self.src).hexdigest())],'plan built from the exact source before the editor ran')
+        self.assertEqual(len(calls),1);self.assertEqual(calls[0]['edit_plan'],expected)
+        self.assertEqual(calls[0]['args'][2],[{'pageIndex':1,'before':'the result holds','after':'the result may hold'}],'positional arguments unchanged')
+        v=result['verification']
+        self.assertEqual(v['editPlanSummary'],{'schema':'falsify.pdf-edit-plan-summary.v1','status':'resolved','plannedEdits':1,'resolvedEdits':1,'policy':'document-consistency-text'})
+        self.assertEqual(v['independentQA'],'passed',v['independentChecks']);self.assert_private(result,expected)
+        self.assertEqual(self.runner_request(runner),{'schema':es.REQUEST_SCHEMA,'input':'source.pdf','inputSha256':hashlib.sha256(self.src).hexdigest(),'reflow':True,
+            'edits':[{'id':'edit-1','pageIndex':1,'before':'the result holds','after':'the result may hold'}]},'Node wire request unchanged')
+    def runner_request(self,runner):return runner.requests[-1]
+
+    def test_default_planner_and_legacy_production_qa_without_edit_plan(self):
+        calls=[]
+        def legacy(source,out,edits,page_map,page_count=None):
+            calls.append(edits);return pdf_quality.verify_pdf_quality(Path(source).read_bytes(),Path(out).read_bytes(),edits,page_map,page_count)
+        with patch.object(pdf_quality,'inspect_isolated',legacy):
+            svc=es.PdfEditorService(self.config,runner=self.editor());result=svc.export(self.data())
+        self.assertIs(svc.planner,paper_inventory.plan_isolated);self.assertFalse(svc._qa_takes_plan)
+        self.assertEqual(len(calls),1);self.assertEqual(result['verification']['independentQA'],'passed')
+        self.assertEqual(result['verification']['editPlanSummary']['status'],'resolved','default isolated planner')
+        self.assert_private(result,paper_inventory.build_edit_plan(self.src,self.edits))
+
+    def test_injected_qa_never_receives_plan(self):
+        seen=[]
+        def injected(source,out,edits,page_map,page_count,edit_plan='unset'):seen.append(edit_plan);return qa_report('passed','page_map')
+        svc=es.PdfEditorService(self.config,runner=self.editor(),quality=injected);result=svc.export(self.data())
+        self.assertEqual(seen,['unset']);self.assertEqual(result['verification']['independentQA'],'passed')
+        self.assertEqual(result['verification']['editPlanSummary']['resolvedEdits'],1)
+
+    def test_unresolved_or_failed_plan_never_blocks_export(self):
+        forged=paper_inventory.build_edit_plan(self.src,self.edits);forged['sourceSha256']='0'*64
+        nan=paper_inventory.build_edit_plan(self.src,self.edits);nan['edits'][0]['regions']=[[0,0,float('nan'),1]]
+        for name,planner,status in [('raises',lambda *a:(_ for _ in ()).throw(RuntimeError('boom')),'unavailable'),('garbage',lambda *a:{'schema':'x'},'unavailable'),
+                ('other source',lambda *a:forged,'unavailable'),('nan',lambda *a:nan,'unavailable'),('none',lambda *a:None,'unavailable')]:
+            with self.subTest(name=name):
+                q=FakeQuality(qa_report('passed','page_map'))
+                result=es.PdfEditorService(self.config,runner=self.editor(),quality=q,planner=planner).export(self.data())
+                self.assertEqual(base64.b64decode(result['file']),self.out)
+                self.assertEqual(result['verification']['editPlanSummary'],{'schema':'falsify.pdf-edit-plan-summary.v1','status':status,'plannedEdits':1,'resolvedEdits':0,'policy':'document-consistency-text'})
+        result=es.PdfEditorService(self.config,runner=self.editor(),quality=FakeQuality(qa_report('passed','page_map'))).export(self.data('he','He'))
+        self.assertEqual(paper_inventory.build_edit_plan(self.src,[{**self.edits[0],'before':'he','after':'He'}])['edits'][0]['status'],'ambiguous')
+        self.assertEqual(result['verification']['editPlanSummary']['status'],'unavailable','repeated anchor: no guessed plan, export unaffected')
+        self.assertEqual(self.service().export(payload())['verification']['editPlanSummary']['status'],'unavailable','synthetic non-PDF bytes')
+        with patch.dict(paper_inventory.LIMITS,{'maxTextChars':3}):
+            result=es.PdfEditorService(self.config,runner=self.editor(),quality=FakeQuality(qa_report('passed','page_map'))).export(self.data())
+        self.assertEqual(base64.b64decode(result['file']),self.out)
+        self.assertEqual((result['verification']['editPlanSummary']['status'],result['verification']['editPlanSummary']['plannedEdits']),('unavailable',0),'outside planner bounds')
 
 class ServerTests(Base):
     def start(self,editor):
