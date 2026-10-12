@@ -38,7 +38,7 @@ function Test-Throws([scriptblock]$Block) {
 }
 
 # --- PowerShell syntax of every launcher file -------------------------------------------
-foreach ($file in @('falsify-connection.psm1', 'install-connection.ps1', 'open-connection.ps1', 'uninstall-connection.ps1', 'start-companion.ps1', 'scripts\test-connection.ps1')) {
+foreach ($file in @('falsify-connection.psm1', 'companion-lifecycle.psm1', 'install-connection.ps1', 'open-connection.ps1', 'uninstall-connection.ps1', 'start-companion.ps1', 'scripts\test-connection.ps1', 'scripts\test-companion-lifecycle.ps1')) {
     $tokens = $null; $errors = $null
     $null = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $root $file), [ref]$tokens, [ref]$errors)
     Check "syntax $file" (@($errors).Count -eq 0)
@@ -212,11 +212,16 @@ try {
 
 # --- Static guards against persistence, broad deletes and remote commands -----------------
 $sources = @{}
-foreach ($file in @('falsify-connection.psm1', 'install-connection.ps1', 'open-connection.ps1', 'uninstall-connection.ps1', 'start-companion.ps1')) { $sources[$file] = Get-Content -LiteralPath (Join-Path $root $file) -Raw }
+foreach ($file in @('falsify-connection.psm1', 'companion-lifecycle.psm1', 'install-connection.ps1', 'open-connection.ps1', 'uninstall-connection.ps1', 'start-companion.ps1')) { $sources[$file] = Get-Content -LiteralPath (Join-Path $root $file) -Raw }
 $all = ($sources.Values -join "`n")
+$allCode = $all -replace '(?m)^\s*#.*$', ''
+# The one allowed Start-Process runs the broker inside the connection terminal itself (-NoNewWindow), never detached.
+$brokerLaunch = '$broker = Start-Process -FilePath $venvPython -ArgumentList (Join-FalsifyNativeArguments -Arguments $brokerArguments) -NoNewWindow -PassThru'
+Check 'only Start-Process is the in-terminal broker' (([regex]::Matches($allCode, 'Start-Process')).Count -eq 1 -and $sources['start-companion.ps1'].Contains($brokerLaunch))
+Check 'no process termination' ($all -notmatch '(?i)Stop-Process|taskkill|\.Kill\(')
 Check 'no recursive registry delete' ($all -notmatch '(?i)Remove-Item[^\r\n]*-Recurse|Remove-ItemProperty|reg(\.exe)?\s+delete')
 Check 'no machine-wide writes' ($all -notmatch '(?i)(New-Item|Set-ItemProperty|Remove-Item)[^\r\n]*HKLM')
-Check 'no startup, task or service persistence' ($all -notmatch '(?i)CurrentVersion\\Run|Register-ScheduledTask|schtasks|New-Service|Start-Process')
+Check 'no startup, task or service persistence' ($allCode.Replace($brokerLaunch, '') -notmatch '(?i)CurrentVersion\\Run|Register-ScheduledTask|schtasks|New-Service|Start-Process')
 Check 'no remote download or eval' ($all -notmatch '(?i)Invoke-WebRequest|Invoke-RestMethod|DownloadString|Invoke-Expression|\biex\b|-EncodedCommand')
 Check 'no browser-policy suppression' ($all -notmatch '(?i)AutoLaunchProtocolsFromOrigins|ExternalProtocolDialog|ExcludedSchemes')
 Check 'open-connection passes only the typed port' ($sources['open-connection.ps1'] -match '& \$launcher -Port \$port\r?\n' -and $sources['open-connection.ps1'] -notmatch '(?i)web-origin|--model|codex|claude')
