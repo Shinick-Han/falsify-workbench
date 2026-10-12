@@ -37,6 +37,17 @@ If the port is already in use, the launcher stops before setup with a clear mess
 
 The launcher tests in `scripts/test-connection.ps1` are dry-run only: they never write the registry, start the companion, open a window or call a model.
 
+### Longer PDF edits (opt-in reflow engine)
+
+The unconfigured companion retains legacy single-line PDF editing. For longer After text,
+configure the separate verified `falsify-pdf-editor` module and its patched candidate
+manifest as described in [PDF editor setup](pdf-editor.md). The Windows launcher reads
+the ignored `.pdf-editor.local.json` or explicit `-PdfEditorRoot`/`-PdfEditorManifest`.
+Once configured, the same connect button and selected-only download action use that
+engine; no manual Node command is needed for each export. Missing Node 24+, source or
+verified runtime is reported without silently returning to the old editor. The public
+source release does not bundle a prebuilt patched WASM.
+
 ## macOS / Linux or manual Windows setup
 
 From the extracted repository root:

@@ -12,6 +12,8 @@ Use the [hosted platform](https://shinick-han.github.io/falsify-workbench/). Fol
 
 ## Third-party components
 
-Browser parser license notices are retained in `app/dist/vendor/`. Python dependencies are installed by the user, not bundled. Optional PDF editing uses PyMuPDF, which is AGPL/commercial licensed; users must comply with the applicable license. No open-source license is granted for the original application code by this publication alone.
+The original Workbench application code is licensed under AGPL-3.0-only; see [LICENSE](LICENSE) and [NOTICE](NOTICE). This grants no license to user-uploaded papers, private harnesses, recordings or research records. The complete application source is available in this repository, including the static frontend and local companion.
+
+Browser parser license notices are retained in `app/dist/vendor/`. Python dependencies are installed by the user, not bundled. Legacy PDF editing uses PyMuPDF (AGPL/commercial). The source-preserving reflow editor is a separate AGPL-3.0-only module with its own pinned upstream sources and notices: [Falsify PDF Editor](https://github.com/Shinick-Han/falsify-pdf-editor). Its WASM is loaded by the local companion, not shipped to GitHub Pages. See [PDF editor setup](docs/pdf-editor.md) for configuration and current support boundaries.
 
 Model results and human reviews are not scientific gold, domain approval, or verified performance metrics. Custom harness code must be trusted: the companion is not an OS sandbox.

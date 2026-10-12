@@ -2,7 +2,9 @@ param(
     [ValidateRange(1024, 65535)][int]$Port = 7816,
     [switch]$LocalOnly,
     [switch]$NoPdf,
-    [switch]$NoInstall
+    [switch]$NoInstall,
+    [string]$PdfEditorRoot = $env:FALSIFY_PDF_EDITOR_ROOT,
+    [string]$PdfEditorManifest = $env:FALSIFY_PDF_EDITOR_MANIFEST
 )
 $ErrorActionPreference = 'Stop'
 $projectDirectory = $PSScriptRoot
@@ -12,6 +14,14 @@ if (-not (Test-FalsifyPortAvailable -Port $Port)) {
     throw "Port $Port is already in use on this computer. Nothing was stopped, replaced or reused, and no setup ran. Start again on a free port, e.g. -Port $alternatePort or falsify://connect?port=$alternatePort, and enter the same port on the website."
 }
 $venvDirectory = Join-Path $projectDirectory '.venv'
+Import-Module (Join-Path $projectDirectory 'pdf-editor-config.psm1') -Force
+$editorConfiguration = Resolve-FalsifyPdfEditorConfig -ProjectDirectory $projectDirectory -EditorRoot $PdfEditorRoot -EditorManifest $PdfEditorManifest -Disabled:$NoPdf
+if ($editorConfiguration) {
+    $nodeCommand = Get-Command node -CommandType Application -ErrorAction SilentlyContinue
+    if (-not $nodeCommand) { throw 'The configured PDF editor requires Node.js 24+. No installation or broker startup ran.' }
+    & $nodeCommand.Source -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 24 ? 0 : 1)'
+    if ($LASTEXITCODE -ne 0) { throw 'The configured PDF editor requires Node.js 24+. Upgrade Node explicitly; nothing was installed.' }
+}
 $venvPython = Join-Path $venvDirectory 'Scripts/python.exe'
 if (-not (Test-Path -LiteralPath $venvPython)) {
     if ($NoInstall) { throw 'No local virtual environment. Run once without -NoInstall.' }
@@ -45,6 +55,12 @@ Write-Host '  Codex CLI and Claude Code are built-in adapters using your own sub
 Write-Host '  If one is not signed in, do it yourself in another terminal: "codex login", or run "claude" and use /login.'
 Write-Host '  CLI, model and effort are chosen per role in RED or BLUE on the website, not here. Other CLIs need a trusted custom stdio harness.'
 $brokerArguments = @((Join-Path $projectDirectory 'app/local/server.py'), '--port', [string]$Port)
+if ($editorConfiguration) {
+    $brokerArguments += @('--pdf-editor-root', $editorConfiguration.Root, '--pdf-editor-manifest', $editorConfiguration.Manifest)
+    Write-Host 'PDF editing: configured source-preserving reflow engine. Availability and page continuation are verified by the companion at startup.'
+} else {
+    Write-Host 'PDF editing: legacy single-line mode. Configure a verified PDF editor locally for longer changes.'
+}
 if (-not $LocalOnly) { $brokerArguments += @('--web-origin', (Get-FalsifyConnectionConstants).WebOrigin) }
 Write-Host 'Your own CLI login is used. Paste the pairing token printed below into the website yourself; it is never put in a link.'
 Write-Host 'This window must remain open. Ctrl+C stops the companion.'

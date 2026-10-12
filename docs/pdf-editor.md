@@ -22,6 +22,21 @@ the companion keeps the legacy export path (old/unconfigured companions).
 
 ## Behaviour
 
+Windows click-to-launch reads an optional local `.pdf-editor.local.json` in the extracted
+Workbench root. It is ignored by Git and must contain exactly two absolute paths:
+
+```json
+{"root":"C:/path/to/falsify-pdf-editor","manifest":"C:/path/to/candidate-manifest.json"}
+```
+
+Alternatively pass `-PdfEditorRoot` and `-PdfEditorManifest` to `start-companion.ps1`.
+The launcher requires Node 24+ when configured and does not install it automatically.
+The protocol link still accepts only a port, never a path, token, executable or command.
+For the module, clone with `--recurse-submodules` and follow its
+[candidate build instructions](https://github.com/Shinick-Han/falsify-pdf-editor/blob/main/docs/BUILD.md).
+This source release does **not** bundle or automatically download a patched WASM: selecting
+the upstream default binary is not a substitute for the stream-order-patched candidate.
+
 - Capability probe (`/api/capabilities` → `pdfEditor`, also warmed in the background at
   start): checks module/manifest presence, `node --version` >= 24, then runs the fixed
   `node src/web-bridge.mjs --capabilities`, which verifies the manifest, artifact digests and
@@ -58,4 +73,25 @@ the companion keeps the legacy export path (old/unconfigured companions).
 ## Limits
 
 Same-engine self-check only; independent extraction/rendering review remains required.
-Pagination is not claimed. Live GUI integration and launcher wiring are owned by root.
+Long After text wraps and can continue onto added pages in a bounded, single-column,
+unrotated, uncropped top-level body flow. Default budget: eight added pages per document;
+each Before/After remains limited to 4000 characters and the web request to 12 selected edits.
+Original page headers, footers and downstream page contents remain unchanged. Added pages
+currently contain body lines only: running headers, footers and page numbers are not copied,
+and existing page numbers are not renumbered. This is not invisible editing or complete
+original-layout preservation. Tables, images inside the continued flow, ambiguous columns
+and other unsupported layouts fail explicitly without truncation, flattening or legacy fallback.
+See [pagination scope](https://github.com/Shinick-Han/falsify-pdf-editor/blob/main/docs/PAGINATION.md).
+
+The integration was exercised with actual browser upload, editable After, authenticated
+PDF export and explicit BLUE file handoff using synthetic data, without model calls. This
+does not establish RED/BLUE model performance. Per-output independent extraction, rendering
+and domain review remain separate from the same-engine self-check.
+
+An inherited PDFium save limitation remains: decimal page-box numbers can be reserialized
+at float32 precision (the tested synthetic A4 MediaBox differed by about 0.00003 pt).
+Unselected content streams and text remained identical, and MuPDF/PDFium rendered the
+mapped unselected pages identically; Poppler showed raster differences for that synthetic
+fixture despite visually stable layout. An isolated restore/perturb control attributed the
+differences to the page box, not to changed words or font resources. Therefore this release
+does not promise byte-identical page geometry or pixel identity in every renderer.

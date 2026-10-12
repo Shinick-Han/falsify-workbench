@@ -9,3 +9,4 @@ node_modules/
 app/local-test-output/
 app/.sites/
 app/.openai/
+.pdf-editor.local.json
