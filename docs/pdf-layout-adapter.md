@@ -34,6 +34,14 @@ propose_layout(after, bbox, font, font_size, line_height, obstacles=()) ->
 - Font size and line pitch are echoed unchanged. An After that needs more lines than the box holds is `overflow`
   (`height`) with the required and available line counts; it is never shrunk, re-pitched, given extra pages or lines,
   or hyphenated.
+- Line bands: a result with two or more lines (an empty paragraph's line counts) is `fits` only when every pair of
+  consecutive lines is at least one band (`(ascender - descender) * fontSize`) apart; bands may touch, never overlap.
+  Otherwise it is `unsupported` (`line-bands-overlap`) with no positions. This is deliberately conservative: the band
+  is font-program (or source-span) metrics, not measured ink, so the probe cannot prove that real glyphs of adjacent
+  lines stay apart; the refusal is not a claim that such a PDF would be corrupt. The probe never raises the caller's
+  pitch or shrinks the font to escape it. Helvetica's band is 1.374 em, so a common 1.2 em pitch is refused for
+  multi-line text (one line at any pitch may still fit). This metrics-only planner is not wired into export, download
+  or any production block.
 
 ## Rules
 
@@ -46,6 +54,7 @@ propose_layout(after, bbox, font, font_size, line_height, obstacles=()) ->
 | any drawn character without a glyph in the font program's Unicode cmap | `unsupported` (`missing-glyphs`, code points listed) |
 | one space-free run (URL, long word, `-0.42`) wider than the box | `overflow` (`unbreakable-width`) |
 | more lines than the box holds | `overflow` (`height`) |
+| two or more lines whose bands overlap at the caller's pitch | `unsupported` (`line-bands-overlap`) |
 | everything placed inside the box and outside obstacles | `fits` |
 
 Line breaking: `\n`, `\r\n` and `\r` are hard breaks; an empty paragraph still takes a line. Soft breaks happen only

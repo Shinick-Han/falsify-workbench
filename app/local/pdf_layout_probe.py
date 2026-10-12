@@ -12,6 +12,9 @@ pitch, never adds a page or a line outside the box, never hyphenates or splits a
 past the box, never rewrites the After and never guesses a glyph: a character the font program has no glyph for, or a control or
 format character, makes the result 'unsupported' with no positions. Widths are PyMuPDF Font advances (no kerning, shaping or
 ligatures): metrics-only evidence, not a guarantee that the source font, its PDF encoding or a renderer would draw these shapes.
+A multi-line proposal whose line bands (ascender to descender of the font metrics) would overlap at the caller's pitch is
+'unsupported' (reason 'line-bands-overlap'), never 'fits': metrics cannot prove the actual ink of adjacent lines stays apart.
+That is a conservative refusal, not proof of a broken PDF; the probe never raises the pitch or shrinks the font to avoid it.
 The box is geometry, not edit authority. The result is private (offsets, hashes and coordinates, never text). Nothing here edits,
 masks, flattens or writes a PDF; the source wrapper only reads the source bytes.
 
@@ -193,6 +196,10 @@ def _propose(after, bbox, resolved, size, pitch, obstacles, region):
         first = next(l['start'] for l in lines if l['slot'] >= inside)
         return _result(after, 'overflow', 'height', overflow={'kind': 'height', 'firstUnplacedOffset': first,
             'availableLines': inside, 'requiredLines': used}, **common)
+    glyph = (asc - desc) * float(size)
+    if any((b['slot'] - a['slot']) * float(pitch) < glyph for a, b in zip(lines, lines[1:])):
+        # every proposed line (an empty paragraph too) owns its full band; adjacent bands may touch but never overlap
+        return _result(after, 'unsupported', 'line-bands-overlap', **common)
     out = []
     for l in lines:
         top = box[1] + l['slot'] * pitch

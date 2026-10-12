@@ -11,7 +11,9 @@ source page geometry.
 - `normalize_docling(payload, source_bytes, *, payload_origin='supplied')` — pure normalization. `payload` is a
   DoclingDocument as `dict` (`export_to_dict()`, JSON or Python mode) or JSON `str`/`bytes`. Never raises for bad input.
 - `summarize(envelope)` — fixed public summary `{schema: 'falsify.pdf-structure-summary.v1', status, reason, items,
-  resolvedItems}`; no refs, coordinates or text.
+  resolvedItems}`; no refs, coordinates or text. `reason` is `null` or one of the fixed codes in `REASONS` (every
+  envelope-level code this module emits); an envelope with any other reason (free text, list, dict, ...) or without
+  `authority: 'structure-hint'` summarizes as `unavailable/envelope_invalid`, so no caller or document text is echoed.
 - `convert_isolated(source_path, source_sha256, *, python, artifacts_path, runner=None)` — optional real conversion, see
   below. Without an explicit Docling interpreter and a local artifacts directory it returns
   `unavailable/conversion_unconfigured`.

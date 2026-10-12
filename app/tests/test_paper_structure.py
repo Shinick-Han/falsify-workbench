@@ -6,6 +6,7 @@ validated by DoclingDocument.model_validate. No Docling conversion or model runs
 import copy
 import hashlib
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -219,6 +220,23 @@ class NormalizeTests(unittest.TestCase):
         self.assertEqual(ps.summarize(env),{'schema':'falsify.pdf-structure-summary.v1','status':'available','reason':None,'items':4,'resolvedItems':4})
         self.assertEqual(ps.summarize({'schema':'x'})['status'],'unavailable')
         self.assertEqual(ps.normalize_docling(payload,src,payload_origin='trusted')['payloadOrigin'],'supplied')
+
+    def test_summary_reason_is_allow_listed_and_never_echoes_text(self):
+        src=pdf();sha_=sha(src);invalid={'schema':'falsify.pdf-structure-summary.v1','status':'unavailable','reason':'envelope_invalid','items':0,'resolvedItems':0}
+        emitted=set(re.findall(r"(?:_Reject|fail)\('([a-z_]+)'\)|unavailable\(source_sha256, '([a-z_]+)'",Path(ps.__file__).read_text(encoding='utf-8')))
+        emitted={a or b for a,b in emitted}|{'no_items','no_resolved_items'}
+        self.assertTrue(emitted<=ps.REASONS,emitted-ps.REASONS)
+        for reason in sorted(ps.REASONS):
+            self.assertEqual(ps.summarize(ps.unavailable(sha_,reason))['reason'],reason)
+        self.assertEqual(ps.summarize(self.norm(doc(src,[]),src))['reason'],'no_items')
+        env=self.norm(standard(src),src)
+        for bad in ('private paper excerpt','x'*40,'','No_Items','no_items ',['no_items'],{'no_items':1},{'a'},1,True,b'no_items'):
+            e=dict(env,reason=bad);out=ps.summarize(e)
+            self.assertEqual(out,invalid,bad)
+            self.assertNotIn('private',json.dumps(out))
+        self.assertEqual(ps.summarize(dict(env,authority='edit')),invalid)   # only the structure-hint envelope is summarized
+        self.assertEqual(env['authority'],'structure-hint')
+        self.assertEqual(ps.summarize(dict(env,reason=None))['reason'],None)
 
 class ConversionTests(unittest.TestCase):
     def setUp(self):

@@ -37,6 +37,10 @@ SUMMARY_SCHEMA = 'falsify.pdf-structure-summary.v1'
 AUTHORITY = 'structure-hint'
 STATUSES = ('available', 'partial', 'unavailable')
 ORIGINS = ('supplied', 'local-conversion')
+# Every envelope-level reason this module emits; summarize() publishes only these (never caller or document text).
+REASONS = frozenset(('no_items', 'no_resolved_items', 'source_unreadable', 'source_hash_mismatch', 'payload_invalid',
+    'over_budget', 'schema_unsupported', 'origin_hash_mismatch', 'page_count_mismatch', 'page_geometry_mismatch', 'ref_invalid',
+    'ref_cycle', 'conversion_unconfigured', 'conversion_failed'))
 LIMITS = {'maxFileBytes': 25 * 1024 * 1024, 'maxPages': 10000, 'maxPayloadBytes': 64 * 1024 * 1024, 'maxItems': 20000,
     'maxNodes': 50000, 'maxProv': 64, 'maxCaptions': 64, 'timeoutSeconds': 600, 'maxStdinBytes': 64 * 1024,
     'maxStdoutBytes': 64 * 1024 * 1024}
@@ -270,12 +274,14 @@ def normalize_docling(payload, source_bytes, *, payload_origin='supplied'):
     return _envelope(source_sha256, status, reason, origin, payload_sha256, version, checks, page_entries, items)
 
 def summarize(envelope):
-    """Fixed public summary: status, fixed reason code and counts only, never coordinates or refs."""
-    if not isinstance(envelope, dict) or envelope.get('schema') != SCHEMA or envelope.get('status') not in STATUSES \
-            or not isinstance(envelope.get('items'), list):
+    """Fixed public summary: status, an allow-listed reason code (REASONS) and counts only, never coordinates, refs or text.
+    An envelope with any other reason value (free text, list, dict, ...) is not one this module produced: envelope_invalid."""
+    reason = envelope.get('reason') if isinstance(envelope, dict) else None
+    if not isinstance(envelope, dict) or envelope.get('schema') != SCHEMA or envelope.get('authority') != AUTHORITY \
+            or envelope.get('status') not in STATUSES or not isinstance(envelope.get('items'), list) \
+            or not (reason is None or (isinstance(reason, str) and reason in REASONS)):
         return {'schema': SUMMARY_SCHEMA, 'status': 'unavailable', 'reason': 'envelope_invalid', 'items': 0, 'resolvedItems': 0}
-    reason = envelope.get('reason')
-    return {'schema': SUMMARY_SCHEMA, 'status': envelope['status'], 'reason': reason if isinstance(reason, str) and len(reason) <= 32 else None,
+    return {'schema': SUMMARY_SCHEMA, 'status': envelope['status'], 'reason': reason,
         'items': len(envelope['items']), 'resolvedItems': sum(isinstance(e, dict) and e.get('status') == 'resolved' for e in envelope['items'])}
 
 def default_runner(argv, *, input, cwd, env, timeout):
