@@ -215,7 +215,7 @@ test('engine source link and limits sit next to the engine metadata; unsafe or a
 
 test('help states the reflow scope; status is a block container; footer source link has a >=12px, 24px target',()=>{
   const html=fs.readFileSync(path.resolve(__dirname,'../dist/index.html'),'utf8'),css=fs.readFileSync(path.resolve(__dirname,'../dist/document-red.css'),'utf8');
-  assert.match(html,/1단·회전 없음·잘림 없음인 최상위 본문 텍스트뿐/);assert.match(html,/본문만 담고 머리말·꼬리말·쪽번호가 없으며/);assert.match(html,/독립 추출\/렌더링·사람 검수는 별도로 필요/);assert.doesNotMatch(html,/특이한 레이아웃에서는 재배치가 거부/);
+  assert.match(html,/1단·회전 없음·잘림 없음인 최상위 본문 텍스트뿐/);assert.match(html,/머리말·꼬리말 지원 여부는 연결된 엔진에 따라/);assert.match(html,/추가 쪽번호를 10\.1처럼/);assert.match(html,/독립 추출\/렌더링·사람 검수는 별도로 필요/);assert.doesNotMatch(html,/특이한 레이아웃에서는 재배치가 거부/);
   assert.match(html,/<div id="red-export-status" class="form-feedback" role="status" aria-live="polite"><\/div>/);
   assert.match(css,/\.page-foot \.source-link\{display:inline-flex;align-items:center;min-height:24px;font-size:12px\}/);assert.match(css,/\.red-export-outcome\{[^}]*font-size:14px[^}]*color:var\(--ink\)/);});
 
