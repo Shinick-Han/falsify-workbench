@@ -151,7 +151,7 @@ function Invoke-FalsifyLoopbackRequest {
     try {
         $request = New-Object System.Net.Http.HttpRequestMessage ([System.Net.Http.HttpMethod]::new($Method)), ('http://127.0.0.1:{0}{1}' -f $Port, $Path)
         foreach ($name in $Headers.Keys) { $null = $request.Headers.TryAddWithoutValidation($name, [string]$Headers[$name]) }
-        if ($null -ne $JsonBody) {
+        if ($Method -eq 'POST' -and $null -ne $JsonBody) {
             $request.Content = New-Object System.Net.Http.ByteArrayContent (, [System.Text.Encoding]::UTF8.GetBytes($JsonBody))
             $request.Content.Headers.ContentType = New-Object System.Net.Http.Headers.MediaTypeHeaderValue 'application/json'
         }
