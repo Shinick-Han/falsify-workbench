@@ -24,7 +24,9 @@ if (pkg.version !== version || !companion.includes(`WORKBENCH_VERSION = '${versi
 const forbidden = /(?:^|\/)(?:\.venv|\.local|node_modules|\.pdf-editor\.local\.json|\.runtime[^/]*|output|tmp)(?:\/|$)|^experiments\/|\.(?:pdf|docx|wav|mp3|wasm)$/i;
 const tracked = git('ls-tree', '-r', '--name-only', commit).split('\n');
 // Vendored browser PDF.js WASM is licensed shipped source runtime, not our private editor candidate.
-const bad = tracked.filter(p => forbidden.test(p) && !p.startsWith('app/dist/vendor/') && p !== 'experiments/selfplay_codex.py');
+const shippedWasm = new Set(['jbig2.wasm', 'openjpeg.wasm', 'qcms_bg.wasm', 'quickjs-eval.wasm']
+  .map(name => `app/dist/vendor/wasm/${name}`));
+const bad = tracked.filter(p => forbidden.test(p) && !shippedWasm.has(p) && p !== 'experiments/selfplay_codex.py');
 if (bad.length) throw new Error(`Unexpected private/binary paths in source release: ${bad.join(', ')}`);
 const directory = resolve(args[1]);
 mkdirSync(directory, { recursive: true });
