@@ -2,6 +2,7 @@
 Ephemeral ports and fake backends only; never invokes Codex/Claude and never touches a server on 7816.
 Assertions avoid echoing token contents. Global ACTIVE/JOBS are restored after every test."""
 import http.client
+import io
 import json
 import os
 import socket
@@ -10,6 +11,7 @@ import sys
 import threading
 import time
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 LOCAL=Path(__file__).resolve().parents[1]/'local'
@@ -326,5 +328,25 @@ class ProcessRestartTests(unittest.TestCase):
             finally:probe.close()
         finally:
             if proc.poll() is None:proc.kill();proc.communicate()
+
+class ShutdownSnapshotTests(unittest.TestCase):
+    def test_shutdown_uses_locked_snapshot_and_permanent_closing(self):
+        called=[]
+        jobs={}
+        class Event:
+            def __init__(self,name):self.name=name
+            def set(self):
+                called.append(self.name)
+                if self.name=='first':jobs.pop('second',None)
+        jobs.update(first={'cancel':Event('first')},second={'cancel':Event('second')})
+        class FakeServer:
+            def __init__(self,*a,**k):self.closing=False
+            def serve_forever(self):raise KeyboardInterrupt
+            def server_close(self):called.append(('closed',self.closing))
+        with patch.object(server,'JOBS',jobs),patch.object(server,'ThreadingHTTPServer',FakeServer), \
+                patch.object(server.editor_service,'config_from',return_value=None), \
+                patch.object(sys,'argv',['server.py','--port','54321']),redirect_stdout(io.StringIO()):
+            server.main()
+        self.assertEqual(called,['first','second',('closed',True)])
 
 if __name__=='__main__':unittest.main()

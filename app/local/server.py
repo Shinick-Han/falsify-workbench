@@ -324,7 +324,10 @@ def main():
     try: server.serve_forever()
     except KeyboardInterrupt: pass
     finally:
-        for job in JOBS.values(): job['cancel'].set()
+        with LOCK:
+            server.closing = True
+            jobs = list(JOBS.values())
+        for job in jobs: job['cancel'].set()
         server.server_close()
 
 if __name__ == '__main__': main()
