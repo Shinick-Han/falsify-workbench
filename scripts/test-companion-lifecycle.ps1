@@ -251,6 +251,20 @@ function Stop-Stub($Stub) {
     $null = $Stub.Process.WaitForExit(10000)
 }
 
+# Host error views wrap long messages (PS7 adds "| " gutters) and, when colored, put ANSI CSI sequences inside wrapped
+# words, so phrase checks strip CSI sequences first and then whitespace and gutters. Nothing else is removed.
+function Remove-AnsiCsi([string]$Text) { $Text -replace '\x1b\[[0-?]*[ -/]*[@-~]', '' }
+function ConvertTo-PhraseText([string]$Text) { (Remove-AnsiCsi $Text) -replace '[\s|]', '' }
+
+$esc = [char]27
+$plainError = "start-companion.ps1: Port 7816 is held by a different server script.`nconnect?port=[7817]"
+$coloredError = "$esc[31;1mstart-companion.ps1: Port 7816 is held by a diff$esc[0m`r`n$esc[31;1m     | $esc[0m$esc[31;1merent server script.$esc[0m`n$esc[36m|$esc[0m connect?port=[7817]"
+$expectedPhrase = 'start-companion.ps1:Port7816isheldbyadifferentserverscript.connect?port=[7817]'
+Check 'phrase normalization: plain error text' ((ConvertTo-PhraseText $plainError) -ceq $expectedPhrase)
+Check 'phrase normalization: ANSI-colored wrapped error equals plain' ((ConvertTo-PhraseText $coloredError) -ceq $expectedPhrase)
+Check 'phrase normalization: gutter-only stripping misses colored phrase' (($coloredError -replace '[\s|]', '') -notmatch 'adifferentserverscript')
+Check 'phrase normalization: bracket text without ESC preserved' ((ConvertTo-PhraseText '[31mkeep[0m') -ceq '[31mkeep[0m')
+
 function Invoke-Launcher([string]$Project, [string[]]$Arguments, [hashtable]$Environment = @{}, [int]$TimeoutSeconds = 90) {
     $info = New-Object System.Diagnostics.ProcessStartInfo $powerShell
     $info.Arguments = Join-FalsifyNativeArguments -Arguments (@('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $Project 'start-companion.ps1')) + $Arguments)
@@ -263,8 +277,15 @@ function Invoke-Launcher([string]$Project, [string[]]$Arguments, [hashtable]$Env
     $done = $process.WaitForExit($TimeoutSeconds * 1000)
     if ($done) { $process.WaitForExit() }
     $output = if ($done) { $stdout.Result + $stderr.Result } else { '' }
-    # Host error views wrap long messages (PS7 adds "| " gutters), so phrase checks compare text with whitespace and gutters removed.
-    return [pscustomobject]@{ Done = $done; ExitCode = $(if ($done) { $process.ExitCode } else { $null }); Output = ($output -replace '[\s|]', '') }
+    return [pscustomobject]@{ Done = $done; ExitCode = $(if ($done) { $process.ExitCode } else { $null }); Output = (ConvertTo-PhraseText $output); Text = (Remove-AnsiCsi $output) }
+}
+
+# Bounded failure diagnostic: ANSI-stripped launcher text, token-like values redacted, at most 1200 characters.
+function Write-LauncherDiagnostic([string]$Name, $Result) {
+    $text = $Result.Text -replace '(?i)(token[^:\r\n]*:\s*)\S+', '$1<redacted>' -replace '(?i)stub-token-[0-9a-f]+', '<redacted>'
+    if ($text.Length -gt 1200) { $text = $text.Substring(0, 1200) + ' ...' }
+    Write-Host "diag $Name (exit $($Result.ExitCode)):"
+    Write-Host $text
 }
 
 function Read-Mark([string]$Path) { if (Test-Path -LiteralPath $Path) { Get-Content -LiteralPath $Path -Raw } else { '' } }
@@ -305,7 +326,9 @@ if ($python) {
         $otherMark = Join-Path $work 'other.mark'
         $spoof = Start-Stub -Port $port -Script $otherServer -Environment @{ FAKE_MARK = $otherMark }
         $result = Invoke-Launcher $project (@('-Port', [string]$port) + $baseArgs)
-        Check 'other-checkout companion is foreign with no setup' ($result.ExitCode -ne 0 -and $result.Output -match 'adifferentserverscript' -and $result.Output -notmatch 'preflight|Setup:|Restarting|Pairingtoken')
+        $foreignOk = $result.ExitCode -ne 0 -and $result.Output -match 'adifferentserverscript' -and $result.Output -notmatch 'preflight|Setup:|Restarting|Pairingtoken'
+        Check 'other-checkout companion is foreign with no setup' $foreignOk
+        if (-not $foreignOk) { Write-LauncherDiagnostic 'other-checkout companion' $result }
         Check 'other-checkout companion untouched and never contacted' (-not $spoof.HasExited -and (Read-Mark $otherMark) -notmatch 'GET|POST')
         Stop-Stub $script:stubs[$script:stubs.Count - 1]
 
