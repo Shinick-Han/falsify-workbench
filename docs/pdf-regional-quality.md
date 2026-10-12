@@ -22,8 +22,8 @@ implementation-level evidence about this one output, not a typographic, scientif
 | code | failed (definite) | warning (uncertain) |
 |---|---|---|
 | `edited_page_render` | a sample outside the sealed regions moved more than 40 levels (new graphic, white cover, damaged figure or paragraph) | kept text of the edited line slid outside the sealed regions (longer/shorter After, re-justified spacing); reflow; continuation; oversized regions |
-| `edited_page_text` | unedited text on the edited page lost, restyled or moved; kept same-line text restyled | extra output lines; reflowed or continued text |
-| `edited_region_style` | an After glyph has a different font, size (±max(0.25 pt, 3%)) or RGB color (±8) from the selected source | After position unknown after reflow |
+| `edited_page_text` | unedited text on the edited page lost, restyled (size, color or disproven metrics) or moved; kept same-line text restyled | extra output lines; reflowed or continued text; a font name changed alone |
+| `edited_region_style` | an After glyph has a different size (±max(0.25 pt, 3%)) or RGB color (±8) from the selected source, or another font name whose advance the source's own glyphs of that character disprove (±max(0.3 pt, 10%)) | After position unknown after reflow; a font name changed alone (fallback, embedding or supplemental glyph) |
 | `edited_region_visible` | an After letter leaves no ink, kept same-line letters lose ink they had, or overlapping invisible text | After position unknown |
 | `edit_plan` | — | supplied plan inconsistent with the located plan |
 
@@ -31,6 +31,13 @@ Only definite corruption is `failed`. Rotated/cropped pages, continuation groups
 budgets and an assumed page mapping make the regional codes warnings (limitation `regional_partial` or `budget`), so
 they never become a new blanket download block. If the sibling module cannot load, the regional codes are
 `unavailable`, never `passed`.
+
+A font name is not proof of a visual change: an engine may draw a glyph the source subset lacks from a supplemental
+fallback font, or re-embed the same face under another name. A font name mismatch with size and color within tolerance
+is therefore a `warning` (limitation `regional_partial`), never `passed`. It becomes `failed` only when the source page
+itself holds the same character in the expected style and its advance width disagrees beyond tolerance. No font is
+treated as equivalent to another by name. The raster comparison outside the sealed regions is unaffected, so a
+visibly different face on unedited or kept text is still measured there.
 
 ## Isolation
 
@@ -48,3 +55,5 @@ coordinates or paths.
 - Rotated or cropped pages and vertical text are not regionally compared.
 - Proportional-font edits whose After width differs from the Before almost always shift kept text and therefore
   report `warning` rather than `passed`.
+- A renamed or fallback font for a character the source page never draws in that style cannot be checked by metrics;
+  it stays an unverified `warning`.

@@ -29,6 +29,7 @@ PLAN_TOL = 1.5           # points: a supplied region may differ this much from t
 BLEED = 1.0              # points of antialiasing bleed around the sealed selected source regions (fixed, never widened)
 SIZE_TOL = (0.25, 0.03)  # absolute points, fraction of the source size
 COLOR_TOL = 8            # RGB channel levels
+WIDTH_TOL = (0.3, 0.1)   # absolute points, fraction of a source advance: a renamed font with other metrics
 PIXEL_DELTA = 40         # channel levels a sample must move to count as changed
 MINOR_FRACTION = 0.0005  # sub-PIXEL_DELTA samples outside the excluded lines tolerated before it is a warning
 INK_DELTA = 64           # channel levels a pixel must differ from its line background to count as ink
@@ -161,8 +162,31 @@ def compare_plan(supplied, plan):
 
 def _style_eq(a, b):
     """(font key, size, RGB int) equality with a bounded size and color tolerance."""
-    if a[0] != b[0] or abs(a[1] - b[1]) > max(SIZE_TOL[0], SIZE_TOL[1] * a[1]): return False
-    return all(abs(((a[2] >> s) & 255) - ((b[2] >> s) & 255)) <= COLOR_TOL for s in (16, 8, 0))
+    return _style_cmp(a, b) == 'same'
+
+def _style_cmp(a, b):
+    """'same', 'font' (only the font identity differs; size and color within tolerance) or 'bad' (size or color)."""
+    if abs(a[1] - b[1]) > max(SIZE_TOL[0], SIZE_TOL[1] * a[1]): return 'bad'
+    if any(abs(((a[2] >> s) & 255) - ((b[2] >> s) & 255)) > COLOR_TOL for s in (16, 8, 0)): return 'bad'
+    return 'same' if a[0] == b[0] else 'font'
+
+def _width(ch): return ch.box[2] - ch.box[0]
+
+def _glyph(style, ch, refs):
+    """Verdict of one output glyph drawn where the source style is expected. A font name mismatch alone (fallback,
+    embedding or renaming) is 'font', i.e. unverified, unless the source advances of the same character in that
+    style (refs) prove other metrics, which is 'bad'. Size and color changes are always 'bad'."""
+    v = _style_cmp(style, ch.style)
+    if v != 'font' or not refs: return v
+    lo, hi = min(refs), max(refs)
+    ok = lo - max(WIDTH_TOL[0], WIDTH_TOL[1] * lo) <= _width(ch) <= hi + max(WIDTH_TOL[0], WIDTH_TOL[1] * hi)
+    return 'font' if ok else 'bad'
+
+def _after_glyph(styles, ch, refs):
+    """Best verdict of one After glyph against any of the selected source styles; refs maps (char, style) to the
+    source advances of that character in that style."""
+    vs = [_glyph(s, ch, refs.get((ch.c, s), ())) for s in styles]
+    return 'same' if 'same' in vs else 'font' if 'font' in vs else 'bad'
 
 def _rows(chars):
     """[(baseline, char indices left to right)] grouping characters that share a baseline."""
@@ -175,12 +199,16 @@ def _rows(chars):
 def _text(chars, row): return ''.join(chars[i].c for i in row)
 
 def _same_row(S, row, O, orow, placed):
-    if len(row) != len(orow): return False
+    """'same', 'font' (only font names differ, advances within tolerance) or None when the rows differ."""
+    if len(row) != len(orow): return None
+    font = False
     for i, j in zip(row, orow):
         a, b = S[i], O[j]
-        if a.c != b.c or not _style_eq(a.style, b.style): return False
-        if placed and (abs(a.base - b.base) > BASE_TOL or abs(a.box[0] - b.box[0]) > POS_TOL): return False
-    return True
+        v = _glyph(a.style, b, [_width(a)]) if a.c == b.c else 'bad'
+        if v == 'bad': return None
+        font |= v == 'font'
+        if placed and (abs(a.base - b.base) > BASE_TOL or abs(a.box[0] - b.box[0]) > POS_TOL): return None
+    return 'font' if font else 'same'
 
 def _px(pix, page, box, margin=0.0):
     zx, zy = pix.width / page.rect.width, pix.height / page.rect.height
@@ -279,31 +307,38 @@ def check_page(src_page, out_page, model, picks, mupdf, raster, max_chars):
     blocks, edited_set, by_text = {S[i].block for i in selected}, set(edited), {}
     for q, (_, row) in enumerate(out_rows):
         if q not in used: by_text.setdefault(_text(O, row), []).append(q)
-    lost = restyled = moved = False
+    # text_font/after_font: a font name changed without a proven size, color or metric change (unverified, warning).
+    lost = restyled = moved = text_font = after_font = False
+    first_row = lambda row, hits, placed: next(((q, v) for q in hits for v in (_same_row(S, row, O, out_rows[q][1], placed),) if v), None)
     for r, (_, row) in enumerate(src_rows):
         if r in edited_set or (not strict and any(S[i].block in blocks for i in row)): continue
         hits = [q for q in by_text.get(_text(S, row), ()) if q not in used]
-        match = next((q for q in hits if _same_row(S, row, O, out_rows[q][1], True)), None)
+        match = first_row(row, hits, True)
         if match is None:
-            match = next((q for q in hits if _same_row(S, row, O, out_rows[q][1], False)), None)
+            match = first_row(row, hits, False)
             if match is not None: moved = True
-            elif hits: match, restyled = hits[0], True
+            elif hits: match, restyled = (hits[0], None), True
             else: lost = True
-        if match is not None: used.add(match)
+        if match is not None: used.add(match[0]); text_font |= match[1] == 'font'
+    refs = {}
+    for ch in S: refs.setdefault((ch.c, ch.style), []).append(_width(ch))
     # zones: output-side areas that may legitimately differ but are outside the sealed source regions (warning only).
     boxes, style_bad, unknown, zones, kept = {k: [] for k in afters}, False, False, [], []
     if strict:
         for (_, i, k), j in zip(expected, aligned):
             if k is not None:
                 boxes[k].append(O[j])
-                style_bad |= not any(_style_eq(s, O[j].style) for s in picks[k][2])
+                v = _after_glyph(picks[k][2], O[j], refs)
+                style_bad |= v == 'bad'; after_font |= v == 'font'
                 zones.append(O[j].box)
                 continue
             # Unselected text on an edited line keeps its style; it may only slide along its own baseline.
-            restyled |= not _style_eq(S[i].style, O[j].style)
+            v = _glyph(S[i].style, O[j], [_width(S[i])])
+            restyled |= v == 'bad'; text_font |= v == 'font'
             kept.append((S[i], O[j]))
             if abs(S[i].box[0] - O[j].box[0]) > POS_TOL or abs(S[i].box[2] - O[j].box[2]) > POS_TOL: zones += [S[i].box, O[j].box]
-        res['edited_page_text'] = 'failed' if lost or restyled or moved else 'warning' if len(used) < len(out_rows) else 'passed'
+        res['edited_page_text'] = ('failed' if lost or restyled or moved else
+            'warning' if text_font or len(used) < len(out_rows) else 'passed')
     else:
         notes.add('regional_partial')
         res['edited_page_text'] = 'failed' if lost or restyled else 'warning'
@@ -311,8 +346,10 @@ def check_page(src_page, out_page, model, picks, mupdf, raster, max_chars):
             hits = _find(out_model.stream, after)
             if len(hits) != 1: unknown = True; continue
             boxes[k] = O[hits[0]:hits[0] + len(after)]
-            style_bad |= not all(any(_style_eq(s, ch.style) for s in picks[k][2]) for ch in boxes[k])
-    res['edited_region_style'] = 'failed' if style_bad else 'warning' if unknown else 'passed'
+            vs = {_after_glyph(picks[k][2], ch, refs) for ch in boxes[k]}
+            style_bad |= 'bad' in vs; after_font |= 'font' in vs
+    if text_font or after_font: notes.add('regional_partial')
+    res['edited_region_style'] = 'failed' if style_bad else 'warning' if unknown or after_font else 'passed'
     trace = out_page.get_texttrace()
     if sum(len(s.get('chars', ())) for s in trace) > max_chars:
         notes.add('budget'); res['edited_region_visible'] = 'warning'; trace = None

@@ -22,7 +22,7 @@ X=72+pymupdf.get_text_length(PREFIX,fontname='cour',fontsize=11)
 WORD_W=pymupdf.get_text_length('valid',fontname='cour',fontsize=11)
 SECRETS=['Synthetic','study','supports','valid','findings','Neighbor','research']
 
-def build(word='valid',font='cour',size=11,color=(0,0,0),mode=0,head_dy=0,neighbor='Neighbor text must remain unchanged.',ncolor=(0,0,0),extra=None,reflow=False):
+def build(word='valid',font='cour',size=11,color=(0,0,0),mode=0,head_dy=0,neighbor='Neighbor text must remain unchanged.',ncolor=(0,0,0),extra=None,reflow=False,nfont='cour'):
     d=pymupdf.open();p=d.new_page(width=W,height=H)
     p.insert_text((72,50+head_dy),'Synthetic research control header',fontname='cour',fontsize=11)
     p.insert_text((72,100),PREFIX,fontname='cour',fontsize=11)
@@ -30,7 +30,7 @@ def build(word='valid',font='cour',size=11,color=(0,0,0),mode=0,head_dy=0,neighb
     tail=' findings under stated conditions.'
     if reflow:p.insert_text((72,112),tail.strip(),fontname='cour',fontsize=11)
     else:p.insert_text((X+pymupdf.get_text_length(word,fontname='cour',fontsize=11),100),tail,fontname='cour',fontsize=11)
-    p.insert_text((72,132),neighbor,fontname='cour',fontsize=11,color=ncolor)
+    p.insert_text((72,132),neighbor,fontname=nfont,fontsize=11,color=ncolor)
     p.draw_rect(pymupdf.Rect(72,180,250,240),color=(0,0,0),width=1)
     if extra:extra(p)
     return d.tobytes()
@@ -57,10 +57,25 @@ class SamePosition(unittest.TestCase):
         for code in (*q.REGIONAL,'edit_plan'):self.assertEqual(status(r,code),'passed',code)
         self.assertEqual(hashlib.sha256(SRC).hexdigest(),before);self.assertEqual(pymupdf.open(stream=out,filetype='pdf')[0].get_text().count('false'),1)
     def test_selected_after_red_size_or_font_fails(self):
+        # Helvetica has a different font name AND advances that the source's own Courier glyphs disprove: definite.
         for kw in [{'color':(1,0,0)},{'size':13},{'font':'helv'}]:
             with self.subTest(**kw):
                 r=run(build('false',**kw))
                 self.assertEqual(status(r,'edited_region_style'),'failed',bad(r));self.assertEqual(r['status'],'failed')
+    def test_font_name_mismatch_alone_is_unverified_warning(self):
+        # Like an engine's supplemental glyph fallback: same size, color and advances under another font name.
+        r=run(build('false',font='cobo'),plan=plan_for())
+        self.assertEqual(status(r,'edited_region_style'),'warning',bad(r));self.assertEqual(r['status'],'warning',bad(r))
+        self.assertIn(q.LIMITATIONS['regional_partial'],r['limitations'])
+        for kw in [{'color':(1,0,0)},{'size':13}]:
+            with self.subTest(**kw):
+                r=run(build('false',font='cobo',**kw))
+                self.assertEqual(status(r,'edited_region_style'),'failed',bad(r));self.assertEqual(r['status'],'failed')
+    def test_kept_text_font_name_mismatch_is_warning_but_raster_still_fails(self):
+        r=run(build('false',nfont='cobo'))
+        self.assertEqual(status(r,'edited_page_text'),'warning',bad(r))
+        self.assertEqual(status(r,'edited_page_render'),'failed','the bolder neighbor is measured outside the sealed region')
+        r=run(build('false',nfont='cobo',ncolor=(1,0,0)));self.assertEqual(status(r,'edited_page_text'),'failed',bad(r))
     def test_invisible_after_fails(self):
         r=run(build('false',mode=3));self.assertEqual(status(r,'edited_region_visible'),'failed',bad(r));self.assertEqual(r['status'],'failed')
 
