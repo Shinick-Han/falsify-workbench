@@ -138,10 +138,12 @@ class SharedOccurrences(unittest.TestCase):
         with pikepdf.open(io.BytesIO(out)) as pdf:
             page = pdf.Root.Pages.Kids[0]
             names = sorted(str(k) for k in page.Resources.XObject.keys())
-            self.assertEqual(names, ['/FalsifyImg1', '/Im1', '/Im2'])
+            self.assertEqual(names, ['/Im1', '/Im2', '/Im3'])
+            self.assertNotRegex(names[2], '(?i)falsify|red|attack')   # no self-inserted tool/experiment label
+            self.assertNotIn(b'Falsify', out)
             self.assertEqual(page.Resources.XObject.Im1.read_bytes(),
                 pixels(1))
-            self.assertEqual(page.Contents.read_bytes(), (A + B + C + TEXT).replace(b'/Im1 Do', b'/FalsifyImg1 Do', 1))
+            self.assertEqual(page.Contents.read_bytes(), (A + B + C + TEXT).replace(b'/Im1 Do', b'/Im3 Do', 1))
 
     def test_inherited_resources_across_pages_identical_bbox_distinct_ids(self):
         src = make_pdf([A + TEXT, A + TEXT, C], IM, inherit=True)
@@ -169,7 +171,7 @@ class SharedOccurrences(unittest.TestCase):
             self.assertEqual(kids[2].Resources.objgen, shared.objgen)
             self.assertEqual(sorted(shared.XObject.keys()), ['/Im1', '/Im2'])
             self.assertFalse(kids[1].Resources.is_indirect)
-            self.assertEqual(sorted(kids[1].Resources.XObject.keys()), ['/FalsifyImg1', '/Im1', '/Im2'])
+            self.assertEqual(sorted(kids[1].Resources.XObject.keys()), ['/Im1', '/Im2', '/Im3'])
             self.assertEqual(kids[1].Resources.XObject.Im1.objgen, shared.XObject.Im1.objgen)
         self.assertEqual(len(texts(out)), 3)
         self.assertEqual(texts(src), texts(out))
@@ -182,17 +184,17 @@ class SharedOccurrences(unittest.TestCase):
         self.assertEqual([(o['width'], o['height']) for o in listing(out)], [(8, 8), (6, 5)])
 
     def test_contents_array_comment_and_name_collision(self):
-        xo = dict(IM, FalsifyImg1=lambda p: rgb_image(p, 4))
+        xo = dict(IM, Im3=lambda p: rgb_image(p, 4))
         page = [b'q 1 0 0 1 0 0 cm\n', b'q 100 0 0 80 30 280 cm /Im2 Do Q 100 0 0 80 30 120 cm /Im1 %keep\n Do Q\n',
-            b'q 10 0 0 10 250 20 cm /FalsifyImg1 Do Q\n']
+            b'q 10 0 0 10 250 20 cm /Im3 Do Q %/Im4 named only in content\n']
         src = make_pdf([page], xo)
         occ = listing(src)
         self.assertEqual(len(occ), 3)
         out, _ = ed.replace_occurrence(src, occ[1]['id'], png(8))
         with pikepdf.open(io.BytesIO(out)) as pdf:
             p = pdf.Root.Pages.Kids[0]
-            self.assertIn('/FalsifyImg2', p.Resources.XObject)
-            self.assertEqual(p.Contents[1].read_bytes(), page[1].replace(b'/Im1 %keep', b'/FalsifyImg2 %keep'))
+            self.assertEqual(sorted(p.Resources.XObject.keys()), ['/Im1', '/Im2', '/Im3', '/Im5'])
+            self.assertEqual(p.Contents[1].read_bytes(), page[1].replace(b'/Im1 %keep', b'/Im5 %keep'))
             self.assertEqual(p.Contents[0].read_bytes(), page[0])
             self.assertEqual(p.Contents[2].read_bytes(), page[2])
 
@@ -406,6 +408,12 @@ class OutputCheck(unittest.TestCase):
             pdf.Root.Pages.Kids[1].Contents = pdf.make_stream(C + TEXT.replace(b'stays', b'moved'))
         with patch.object(ed, '_rewrite', self.tampered(text)):
             with self.assertRaisesRegex(ValueError, '^check-failed$'):
+                ed.replace_occurrence(self.src, self.occ[0]['id'], png())
+
+    def test_output_over_bound_rejected_before_output_is_parsed(self):
+        with patch.dict(ed.LIMITS, {'maxOutputBytes': 1}), \
+                patch.object(ed, '_page_streams', side_effect=AssertionError('output parsed')):
+            with self.assertRaisesRegex(ValueError, '^output-too-large$'):
                 ed.replace_occurrence(self.src, self.occ[0]['id'], png())
 
 

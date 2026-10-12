@@ -659,8 +659,9 @@ def _rewrite(pk, source, target, rgb, size):
         xobjects = resources.get('/XObject')
         if not isinstance(xobjects, pk.Dictionary): raise ValueError('malformed-pdf')
         n = 1
-        while pk.Name('/FalsifyImg%d' % n) in xobjects: n += 1
-        new_name = 'FalsifyImg%d' % n
+        # Plain PDF image naming: the first /ImN unused by the page's resources and not named in its content streams.
+        while pk.Name('/Im%d' % n) in xobjects or any(b'/Im%d' % n in d for d in datas): n += 1
+        new_name = 'Im%d' % n
         rewritten = _rename_do(pk, scratch, datas[k], ordinal, new_name)
         before, after = _instructions(pk, scratch, datas[k]), _instructions(pk, scratch, rewritten)
         index = target['path'][1]
@@ -715,8 +716,13 @@ def _zoom(rect, cap):
     return zoom
 
 
+def _position(path):
+    """Operator positions of a path. The writer renumbers objects, so nested form object numbers are not compared."""
+    return [None if isinstance(p, list) else p for p in path]
+
+
 def _verify(pk, mu, Image, ImageChops, source, output, scan, target, expected_streams, size):
-    if len(output) > LIMITS['maxOutputBytes']: raise ValueError('output-limit')
+    if len(output) > LIMITS['maxOutputBytes']: raise ValueError('output-too-large')
     fail = ValueError('check-failed')
     pno = target['pageIndex']
     a_pdf, b_pdf = _open_pike(pk, source), _open_pike(pk, output)
@@ -764,7 +770,7 @@ def _verify(pk, mu, Image, ImageChops, source, output, scan, target, expected_st
     for x, y in zip(before, after):
         same = (x['pageIndex'], x['bbox'], x['reason'], x['kind']) == (y['pageIndex'], y['bbox'], y['reason'], y['kind'])
         dims = (y['width'], y['height']) == (size if x is target else (x['width'], x['height']))
-        if not (same and dims and x['path'] == y['path']): raise fail
+        if not (same and dims and _position(x['path']) == _position(y['path'])): raise fail
 
 
 def replace_occurrence(source, occurrence_id, replacement_png):
