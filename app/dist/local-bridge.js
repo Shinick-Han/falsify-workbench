@@ -20,7 +20,20 @@
     return Object.freeze(out);}
   function capSnapshot(d){if(!d||typeof d!=='object'||Array.isArray(d)||typeof d.red!=='boolean'||typeof d.blue!=='boolean')return null;
     return Object.freeze({red:d.red,blue:d.blue,pdf:d.pdf===true,officeLayoutVerifiedExport:d.officeLayoutVerifiedExport===true,model:typeof d.model==='string'?d.model.slice(0,80):null,isolation:typeof d.isolation==='string'?d.isolation.slice(0,200):null,
-      cliSelection:d.cliSelection===true,cliAgents:d.cliSelection===true?agents(d.cliAgents):null});}
+      cliSelection:d.cliSelection===true,cliAgents:d.cliSelection===true?agents(d.cliAgents):null,pdfEditor:pdfEditor(d.pdfEditor)});}
+  const HEX64=/^[0-9a-f]{64}$/,ENGINE_VERSION=/^[0-9A-Za-z][0-9A-Za-z.+_-]{0,39}$/,LIMIT_KEY=/^[A-Za-z][A-Za-z0-9]{0,31}$/,SOURCE_PATH=/^\/Shinick-Han\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._~-]+)*\/?$/;
+  // Engine source link is display-only: https://github.com/Shinick-Han/... with no credentials, port, query or fragment.
+  function sourceUrl(v){if(typeof v!=='string'||v.length>300)return null;let u;try{u=new URL(v);}catch{return null;}
+    return u.protocol==='https:'&&u.host==='github.com'&&!u.username&&!u.password&&!u.search&&!u.hash&&SOURCE_PATH.test(u.pathname)?u.href:null;}
+  function limits(v){if(typeof v==='string')return v.slice(0,300);if(!v||typeof v!=='object'||Array.isArray(v))return null;const out={};
+    for(const [k,n] of Object.entries(v).slice(0,8))if(LIMIT_KEY.test(k)&&Number.isSafeInteger(n)&&n>=0)out[k]=n;return Object.freeze(out);}
+  // Optional reflow-capable PDF editor from a newer broker. A malformed core field drops the whole descriptor; the legacy pdf flag is unaffected.
+  function pdfEditor(d){if(!d||typeof d!=='object'||Array.isArray(d)||d.engine!=='falsify-pdf-editor'||typeof d.available!=='boolean'||typeof d.reflow!=='boolean'||typeof d.pagination!=='boolean')return null;
+    const version=typeof d.version==='string'&&ENGINE_VERSION.test(d.version)?d.version:null,wasmSha256=typeof d.wasmSha256==='string'&&HEX64.test(d.wasmSha256)?d.wasmSha256:null;
+    if(d.available&&(!version||!wasmSha256))return null;
+    return Object.freeze({available:d.available,engine:d.engine,version,wasmSha256,reflow:d.reflow,pagination:d.pagination,limits:limits(d.limits),sourceUrl:sourceUrl(d.sourceUrl)});}
+  function pdfText(c){const e=c.pdfEditor;if(e?.available)return ' · PDF 편집 '+(e.reflow?'줄바꿈 재배치'+(e.pagination?'·페이지 추가':''):'한 줄 교체')+' ('+e.engine+' '+e.version+')';
+    return ' · PDF 보존 '+(c.pdf?'한 줄 교체만':'불가')+(e?' · PDF 편집 엔진 미준비':'');}
   const NETWORK='로컬 broker에 닿지 못했습니다. 서버 미실행·포트 불일치·--web-origin 누락(CORS 거부)·브라우저 로컬 네트워크 권한 차단 중 하나일 수 있습니다. 브라우저는 원인을 구분해 알려주지 않습니다.';
   const PORT_ERROR='포트는 1024–65535 사이 정수만 허용합니다. 주소는 항상 http://127.0.0.1입니다.';
 
@@ -102,7 +115,7 @@
     const nav=doc.defaultView?.navigator,windows=/win/i.test(String(options.platform??nav?.userAgentData?.platform??nav?.platform??''));
     const open=options.open||(uri=>{const a=doc.createElement('a');a.href=uri;a.rel='noopener noreferrer';a.click();});
     if(installEl)installEl.textContent=INSTALL;
-    function text(s){const c=s.cap,detail=c?' · RED '+(c.red?'가능':'불가')+' · BLUE '+(c.blue?'가능':'불가')+' · PDF 보존 '+(c.pdf?'가능':'불가')+' · CLI 선택 '+(c.cliSelection?'가능':'미지원(구버전 companion)'):'';
+    function text(s){const c=s.cap,detail=c?' · RED '+(c.red?'가능':'불가')+' · BLUE '+(c.blue?'가능':'불가')+pdfText(c)+' · CLI 선택 '+(c.cliSelection?'가능':'미지원(구버전 companion)'):'';
       if(s.status==='checking')return '로컬 작업대 세션 확인 중';
       if(s.status==='local')return '로컬 작업대 · same-origin 세션 (페어링 불필요)'+detail;
       if(s.status==='local-unavailable')return '정적 미리보기 · 인증된 로컬 broker 없음 · 파일 추출과 수동 JSON 교환만 가능';
@@ -131,7 +144,7 @@
     disconnectEl?.addEventListener('click',()=>bridge.disconnect());
   }
 
-  if(typeof module==='object'&&module.exports){module.exports={create,mount,parsePort,validToken,command,launcher,launchUri,INSTALL,DEFAULT_PORT};return;}
+  if(typeof module==='object'&&module.exports){module.exports={create,mount,parsePort,validToken,command,launcher,launchUri,pdfEditor,INSTALL,DEFAULT_PORT};return;}
   const bridge=create({fetch:(...args)=>root.fetch(...args),location:root.location,emit:detail=>root.document.dispatchEvent(new CustomEvent('falsify:local-bridge',{detail}))});
   root.FalsifyLocalBridge=bridge;mount(bridge,root.document);
 })(typeof window==='object'?window:globalThis);

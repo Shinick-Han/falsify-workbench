@@ -20,7 +20,11 @@
 .red-export{border-top:1px solid var(--line);padding-top:20px}
 #document-blue input[type=file]{display:block;max-width:100%;margin:12px 0;font-weight:400}
 #doc-blue-findings blockquote{margin:12px 0;padding:16px;background:var(--surface);white-space:pre-wrap;overflow-wrap:anywhere}
-#red-record-status.error,#doc-blue-record-status.error{color:var(--red-ink)}
+#red-record-status.error,#doc-blue-record-status.error,#red-export-status.error{color:var(--red-ink)}
+.red-export-mode{padding:10px 12px;background:var(--surface);font-size:14px;line-height:1.6}
+.page-foot .source-link{color:var(--muted);text-decoration:underline;text-underline-offset:3px;text-decoration-thickness:1px}
+.page-foot .source-link:hover{color:var(--ink)}
+.page-foot .source-link:focus-visible{outline:2px solid var(--ink);outline-offset:2px;color:var(--ink)}
 #red-handoff{margin:4px 0 0}
 #red-evaluate,#doc-blue-evaluate{display:block;margin:2px 0 12px;font-size:14px}
 .red-help li{margin:12px 0;max-width:75ch;line-height:1.7}
