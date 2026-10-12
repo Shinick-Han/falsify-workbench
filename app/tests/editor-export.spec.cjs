@@ -226,6 +226,39 @@ test('engine source link and limits sit next to the engine metadata; unsafe or a
   for(const sourceUrl of [null,'javascript:alert(1)','https://evil.example/Shinick-Han/x','https://github.com/Shinick-Han/x"><img>']){w=world({...NEW,pdfEditor:{...EDITOR,sourceUrl}});await w.ready();
     assert.equal(w.get('red-export-mode').children.some(x=>typeof x!=='string'&&x.className==='red-engine-source'),false,String(sourceUrl));assert.equal(w.calls.length,0,'nothing fetched');}});
 
+// falsify.pdf-quality.v1: independent QA is its own label next to the same-engine self-check; only an exact consistent payload reads passed.
+const QA=(status,checks,extra={})=>({...ACTUAL,independentQA:status,independentChecks:{schema:'falsify.pdf-quality.v1',status,method:'pdfjs-text-render',checks,limitations:['Bounded check only.'],...extra}});
+const qaPart=w=>w.get('red-export-status').children.find(c=>c.className==='red-export-check red-export-qa');
+const runQA=async v=>{const w=world(NEW);await w.ready();w.reply=ok(v);w.get('red-download').click();await flush();return w;};
+test('independent QA: passed, warning and unavailable are distinct from the self-check and never claim full proof',async()=>{
+  let w=await runQA(QA('passed',[{code:'text_extract',status:'passed',pages:[1,2]},{code:'render_nonblank',status:'passed',pages:[1,2,3,4]}]));
+  const self=part(w,'red-export-check');assert.equal(text(self.children[0]),'같은 엔진 자체검사','self-check chip unchanged');assert.doesNotMatch(text(self),/대기 ·|미보고|독립 검사/);
+  let q=qaPart(w);assert.equal(q.children[0].className,'status-label');assert.equal(q.children[0].textContent,'독립 검사 통과');
+  assert.equal(text(q),'독립 검사 통과 제한된 독립 추출·렌더 검사 2항목 통과 (pdfjs-text-render). 전체 시각 품질·성능을 증명하지는 않습니다. 사람의 과학 검수는 아직 대기 중입니다.');
+  assert.equal(w.downloads.length,2);assert.equal(w.get('red-export-status').classList.contains('error'),false);
+  w=await runQA(QA('warning',[{code:'text_extract',status:'passed',pages:[1]},{code:'render_diff_high',status:'warning',pages:[3,3,4]},{code:'C:/Users/x/<b>secret</b>',status:'warning',pages:[2]}],{method:'C:/tools/qa.exe'}));
+  q=qaPart(w);assert.equal(q.children[0].textContent,'독립 검사 주의');assert.match(text(q),/확인할 항목: render_diff_high 2쪽, 형식 외 코드 1쪽\. 다운로드는 그대로 진행했습니다\. 사람의 과학 검수는 아직 대기 중입니다\.$/);
+  assert.doesNotMatch(w.status(),/C:\/|<b>|secret|qa\.exe|검사 통과|Bounded check/);assert.equal(w.downloads.length,2);assert.equal(w.get('red-export-status').classList.contains('error'),false);assert.equal(w.get('red-handoff').hidden,false,'warning still hands off');
+  w=await runQA(QA('unavailable',[{code:'renderer_missing',status:'unavailable',pages:[]}]));q=qaPart(w);
+  assert.equal(q.children[0].textContent,'독립 검사 미실행');assert.match(text(q),/이 환경에서 독립 추출·렌더 검사를 하지 못했습니다 \(renderer_missing\)\. 사람의 과학 검수는 아직 대기 중입니다\.$/);assert.equal(w.downloads.length,2);
+  w=await runQA(ACTUAL);assert.equal(qaPart(w),undefined,'legacy pending keeps the self-check line');assert.match(text(part(w,'red-export-check')),/독립 추출\/렌더링·사람 검수 대기/);});
+
+test('independent QA: unknown or malformed states never read passed',async()=>{
+  const one=[{code:'a',status:'passed',pages:[1]}];
+  for(const [label,v] of [['schema',QA('passed',one,{schema:'falsify.pdf-quality.v2'})],['status mismatch',{...QA('passed',one),independentChecks:QA('warning',one).independentChecks}],['passed with warning item',QA('passed',[{code:'a',status:'warning',pages:[1]}])],
+      ['empty passed',QA('passed',[])],['zero page',QA('passed',[{code:'a',status:'passed',pages:[0]}])],['string page',QA('passed',[{code:'a',status:'passed',pages:['1']}])],['bad item status',QA('passed',[{code:'a',status:'ok',pages:[1]}])],
+      ['checks object missing',{...ACTUAL,independentQA:'passed'}],['limitations not strings',QA('passed',one,{limitations:[1]})],['method missing',QA('passed',one,{method:undefined})],['warning with failed item is not warning',QA('warning',[{code:'a',status:'failed',pages:[1]}])]]){
+    const w=await runQA(v);assert.equal(qaPart(w).children[0].textContent,'독립 검사 형식 확인 불가',label);assert.doesNotMatch(w.status(),/검사 통과|항목 통과/,label);assert.equal(w.downloads.length,2,label);}
+  for(const s of ['PASSED','passed ',null,42]){const w=await runQA({...QA('passed',one),independentQA:s});assert.equal(qaPart(w),undefined,String(s));assert.match(w.status(),/독립 검수 상태 미보고/,String(s));assert.doesNotMatch(w.status(),/통과/,String(s));}});
+
+test('independent QA failed never downloads even when the companion returns bytes; selection and After stay',async()=>{
+  const cases=[['failed',QA('failed',[{code:'render_blank',status:'failed',pages:[2,5]},{code:'text_extract',status:'passed',pages:[1]}])],['checks failed under passed',{...QA('passed',[]),independentChecks:QA('failed',[]).independentChecks}],['failed without checks',{...ACTUAL,independentQA:'failed'}]];
+  for(const [label,v] of cases){const w=await runQA(v);
+    assert.match(w.status(),/^다운로드 차단: 독립 추출·렌더 검사가 실패로 보고되어 받은 파일을 다운로드하지 않았습니다\./,label);assert.doesNotMatch(w.status(),/다운로드했습니다/,label);
+    assert.equal(w.downloads.length,0,label);assert.equal(w.get('red-handoff').hidden,true,label);assert.equal(w.handoffs.length,0,label);
+    assert.equal(w.boxes()[1].checked,true,label);assert.equal(w.area(1).value,'in every cohort, including the untreated one',label);assert.equal(w.get('red-download').disabled,false,label);}
+  const w=await runQA(cases[0][1]);assert.match(w.status(),/실패 항목: render_blank 2쪽\./);});
+
 test('help states the reflow scope; status is a block container; footer source link has a >=12px, 24px target',()=>{
   const html=fs.readFileSync(path.resolve(__dirname,'../dist/index.html'),'utf8'),css=fs.readFileSync(path.resolve(__dirname,'../dist/document-red.css'),'utf8');
   assert.match(html,/1단·회전 없음·잘림 없음인 최상위 본문 텍스트뿐/);assert.match(html,/머리말·꼬리말 지원 여부는 연결된 엔진에 따라/);assert.match(html,/원본에 단독 아라비아 숫자 쪽번호가 있으면 추가 페이지는 그 번호에 소수 접미\(예: 10\.1\)를 붙입니다/);assert.doesNotMatch(html,/10\.1처럼/);assert.match(html,/독립 추출\/렌더링·사람 검수는 별도로 필요/);assert.doesNotMatch(html,/특이한 레이아웃에서는 재배치가 거부/);

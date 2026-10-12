@@ -107,6 +107,7 @@
     const out=[node('span','red-export-outcome','실험용 사본과 별도 변경 계획을 다운로드했습니다.'+(r.facts.length?' '+(r.check?'엔진 자체검사 결과: ':'')+r.facts.join(' · ')+'.':''))];
     if(r.continuation)out.push(node('span','red-export-outcome',continuedText(r)));
     if(r.check){const c=node('span','red-export-check','');c.append(node('span','status-label',r.check.label),' '+r.check.text);out.push(c);}
+    if(r.check?.qa){const q=node('span','red-export-check red-export-qa','');q.append(node('span','status-label',QA_LABEL[r.check.qa.state]),' '+qaText(r.check.qa));out.push(q);}
     if(r.notes?.length){const list=node('ul','red-export-notes','');for(const n of r.notes){const li=node('li','','');li.append(node('span',n.severity==='warning'||n.severity==='error'?'note-warning':'note-info',SEVERITY[n.severity]||'심각도 미보고'),' · '+n.phrase+' ',node('span','red-export-code','('+n.detail+')'));list.append(li);}out.push(list);}
     if(limits)out.push(node('span','red-export-limits',limits));
     e.append(...out);}
@@ -154,8 +155,29 @@
       return {severity:typeof w.severity==='string'&&SEVERITY[w.severity]?w.severity:null,phrase:Object.hasOwn(NOTES,code)?NOTES[code]:'알 수 없는 엔진 진단 코드',detail:code+(whole(w.pageIndex)?', p. '+(w.pageIndex+1):'')};});
     return diagnostics(v).map(d=>({severity:null,phrase:'엔진 진단',detail:d}));}
   // The self-check is the same engine re-reading its own output; independence and QA are read from the payload and never claimed.
-  function selfCheck(v){return {label:v.selfCheck?.independent===false?'같은 엔진 자체검사':'엔진 자체검사 · 독립성 미보고',
-    text:(v.independentQA==='pending'?'독립 추출/렌더링·사람 검수 대기':'독립 검수 상태 미보고')+' · 레이아웃 검사일 뿐 과학적 타당성·결함 품질 판정이 아닙니다.'};}
+  // Legacy pending/missing QA stays in the self-check line; a reported independent QA state gets its own label next to it.
+  function selfCheck(v,q){return {label:v.selfCheck?.independent===false?'같은 엔진 자체검사':'엔진 자체검사 · 독립성 미보고',
+    text:(q.state==='pending'?'독립 추출/렌더링·사람 검수 대기 · ':q.state==='unreported'?'독립 검수 상태 미보고 · ':'')+'레이아웃 검사일 뿐 과학적 타당성·결함 품질 판정이 아닙니다.',qa:Object.hasOwn(QA_LABEL,q.state)?q:null};}
+  // Independent QA (falsify.pdf-quality.v1) is a bounded second extraction/render check, never full visual, performance or scientific proof.
+  // Only an exact, self-consistent payload reads passed; unknown or malformed reads unverified. Only safe codes and page counts are shown.
+  const QA_STATES=['passed','warning','failed','unavailable'],QA_CODE=/^[a-z][a-z0-9_]{0,47}$/,QA_METHOD=/^[a-z0-9][a-z0-9._-]{0,47}$/;
+  const QA_LABEL={passed:'독립 검사 통과',warning:'독립 검사 주의',unavailable:'독립 검사 미실행',malformed:'독립 검사 형식 확인 불가'},HUMAN=' 사람의 과학 검수는 아직 대기 중입니다.';
+  function qaChecks(x,state){
+    if(!x||typeof x!=='object'||x.schema!=='falsify.pdf-quality.v1'||x.status!==state||typeof x.method!=='string'||!Array.isArray(x.checks)||x.checks.length>64||!Array.isArray(x.limitations)||!x.limitations.every(s=>typeof s==='string'))return null;
+    const checks=[];for(const c of x.checks){if(!c||typeof c.code!=='string'||!QA_STATES.includes(c.status)||!Array.isArray(c.pages)||c.pages.length>10000||!c.pages.every(p=>Number.isSafeInteger(p)&&p>=1))return null;checks.push({code:QA_CODE.test(c.code)?c.code:null,status:c.status,pages:new Set(c.pages).size});}
+    // The overall status must agree with its items: passed has only passed items, and any failed item means failed.
+    if(state==='passed'&&(!checks.length||checks.some(c=>c.status!=='passed'))||state!=='failed'&&checks.some(c=>c.status==='failed'))return null;
+    return {method:QA_METHOD.test(x.method)?x.method:null,checks};}
+  function independentQA(v){const s=v?.independentQA;
+    if(s==='failed'||v?.independentChecks?.status==='failed')return {state:'failed',checks:qaChecks(v.independentChecks,'failed')?.checks||[]};
+    if(!QA_STATES.includes(s))return {state:s==='pending'?'pending':'unreported'};
+    const q=qaChecks(v.independentChecks,s);return q?{state:s,...q}:{state:'malformed'};}
+  function qaItems(checks){return checks.filter(c=>c.status!=='passed').slice(0,6).map(c=>(c.code||'형식 외 코드')+(c.pages?' '+c.pages+'쪽':'')).join(', ');}
+  function qaText(q){const items=q.checks?qaItems(q.checks):'',method=q.method?' ('+q.method+')':'';
+    if(q.state==='passed')return '제한된 독립 추출·렌더 검사 '+q.checks.length+'항목 통과'+method+'. 전체 시각 품질·성능을 증명하지는 않습니다.'+HUMAN;
+    if(q.state==='warning')return '제한된 독립 추출·렌더 검사에서 확인할 항목'+(items?': '+items:'이 보고됨')+method+'. 다운로드는 그대로 진행했습니다.'+HUMAN;
+    if(q.state==='unavailable')return '이 환경에서 독립 추출·렌더 검사를 하지 못했습니다'+(items?' ('+items+')':'')+'.'+HUMAN;
+    return '독립 검사 결과 형식을 확인할 수 없어 통과로 보지 않습니다.'+HUMAN;}
   // Layout facts are read only from the engine's verification of this output; missing or malformed fields read as unverified, never assumed.
   // styleCapable is the export-time descriptor (styled engine), so a bad report under it reads as unknown rather than body-only.
   function layoutReport(v,styleCapable){
@@ -163,7 +185,7 @@
       facts.push(counted?(grew?'페이지 '+p.inputPages+' → '+p.outputPages+' (새 페이지 '+(p.outputPages-p.inputPages)+'쪽)':'페이지 수 그대로 '+p.outputPages+'쪽'):'페이지 수 변화 미검증');
       facts.push(whole(r?.wrappedLines)?(r.wrappedLines?'줄바꿈 재배치 '+r.wrappedLines+'줄':'줄바꿈 없이 교체'):'줄바꿈 결과 미보고');
       const added=grew?p.outputPages-p.inputPages:0;
-      return {facts,continuation:grew,style:grew?continuationReport(v,added):null,styleCapable:styleCapable===true,check:selfCheck(v),notes:engineNotes(v)};}
+      return {facts,continuation:grew,style:grew?continuationReport(v,added):null,styleCapable:styleCapable===true,check:selfCheck(v,independentQA(v)),notes:engineNotes(v)};}
     if(v?.mode==='pdf-original-font-single-line')return {facts:['기존 한 줄 교체 · 줄바꿈·페이지 추가 없음'+(whole(v.pages)?' · '+v.pages+'쪽':'')]};
     return {facts:[]};}
   function recovery(kind){if(!kind)return '';const keep=' 선택한 후보와 직접 편집한 After는 그대로 남아 있습니다.';
@@ -179,7 +201,9 @@
         output={bytes:Uint8Array.from(atob(result.file),x=>x.charCodeAt(0)),verification:result.verification};
         // Fail closed: a new-engine export downloads only with explicit layoutVerified === true; missing, null or false proof is never success.
         const v=output.verification,d=diagnostics(v),engine=pdf.kind==='reflow'||pdf.kind==='editor'||v?.engine==='falsify-pdf-editor';
-        if(engine&&(v?.engine!=='falsify-pdf-editor'||v.layoutVerified!==true))throw new Error((v?.layoutVerified===false?'엔진이 이 출력의 레이아웃 검증을 통과시키지 못해':'엔진이 이 출력의 레이아웃 검증 통과를 증명하지 않아')+' 다운로드하지 않았습니다.'+(d.length?' 엔진 진단: '+d.join(' / '):''));}
+        if(engine&&(v?.engine!=='falsify-pdf-editor'||v.layoutVerified!==true))throw new Error((v?.layoutVerified===false?'엔진이 이 출력의 레이아웃 검증을 통과시키지 못해':'엔진이 이 출력의 레이아웃 검증 통과를 증명하지 않아')+' 다운로드하지 않았습니다.'+(d.length?' 엔진 진단: '+d.join(' / '):''));
+        // Defense in depth: a failed independent check never downloads even if the companion still returned bytes; warning/unavailable do not block.
+        const qa=independentQA(v);if(qa.state==='failed'){const items=qaItems(qa.checks);throw new Error('독립 추출·렌더 검사가 실패로 보고되어 받은 파일을 다운로드하지 않았습니다.'+(items?' 실패 항목: '+items+'.':''));}}
       else output=await FalsifyExport.textFile(file,patches);
       if(current!==generation)return;
       const outputFileHash=await hash(output.bytes);if(current!==generation)return;
