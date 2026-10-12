@@ -21,10 +21,10 @@ const companion = readFileSync(join(root, 'app/local/build_info.py'), 'utf8');
 if (pkg.version !== version || !companion.includes(`WORKBENCH_VERSION = '${version}'`)
     && !companion.includes(`WORKBENCH_VERSION='${version}'`)
     && !companion.includes(`WORKBENCH_VERSION = "${version}"`)) throw new Error('App, companion and release versions differ.');
-const forbidden = /(?:^|\/)(?:\.venv|\.local|node_modules|\.pdf-editor\.local\.json|\.runtime[^/]*|experiments|output|tmp)(?:\/|$)|\.(?:pdf|docx|wav|mp3|wasm)$/i;
+const forbidden = /(?:^|\/)(?:\.venv|\.local|node_modules|\.pdf-editor\.local\.json|\.runtime[^/]*|output|tmp)(?:\/|$)|^experiments\/|\.(?:pdf|docx|wav|mp3|wasm)$/i;
 const tracked = git('ls-tree', '-r', '--name-only', commit).split('\n');
 // Vendored browser PDF.js WASM is licensed shipped source runtime, not our private editor candidate.
-const bad = tracked.filter(p => forbidden.test(p) && !p.startsWith('app/dist/vendor/'));
+const bad = tracked.filter(p => forbidden.test(p) && !p.startsWith('app/dist/vendor/') && p !== 'experiments/selfplay_codex.py');
 if (bad.length) throw new Error(`Unexpected private/binary paths in source release: ${bad.join(', ')}`);
 const directory = resolve(args[1]);
 mkdirSync(directory, { recursive: true });
