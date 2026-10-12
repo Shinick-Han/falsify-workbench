@@ -23,6 +23,7 @@ from preserve import handle_export
 from blue_service import run_review as run_blue_review, validate_request as validate_blue_request
 from harness import CLI_AGENTS, EFFORTS
 import cli_backend
+import editor_service
 from experiments.selfplay_codex import discover_codex
 
 DIST = Path(__file__).resolve().parents[1] / 'dist'
@@ -151,9 +152,13 @@ class Handler(BaseHTTPRequestHandler):
                     import pymupdf
                     pdf = True
                 except ImportError: pdf = False
+                # Configured companions export only through the probed editor; unconfigured ones keep the legacy path.
+                editor = getattr(self.server, 'pdf_editor', None)
+                pdf_editor = editor.capability() if editor else editor_service.unconfigured_capability()
+                if editor: pdf = pdf_editor['available']
                 self.reply(200, {'red': True, 'blue': True, 'pdf': pdf, 'officeLayoutVerifiedExport': False,
                     'model': 'gpt-6.1-sol', 'isolation': 'read-only CLI restrictions; not OS-enforced input-only isolation',
-                    'cliSelection': True, 'cliAgents': cli_agents()}); return
+                    'cliSelection': True, 'cliAgents': cli_agents(), 'pdfEditor': pdf_editor}); return
             with LOCK:
                 role = 'blue' if path.startswith('/api/blue/jobs/') else 'red'
                 prefix = '/api/' + role + '/jobs/'
@@ -193,7 +198,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(200, {'status': 'cancel_requested'}); return
             if path == '/api/export':
                 if not ACTIVE.acquire(blocking=False): self.reply(409, {'error': '다른 작업을 마친 뒤 내보내세요.'}); return
-                try: result = handle_export(data)
+                editor = getattr(self.server, 'pdf_editor', None)
+                try: result = editor.export(data) if editor else handle_export(data)
                 finally: ACTIVE.release()
                 self.reply(200, result); return
             (validate_blue_request if role == 'blue' else validate_request)(data)
@@ -220,16 +226,26 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser(); parser.add_argument('--port', type=int, default=7816)
     parser.add_argument('--web-origin', help='opt-in: one exact https origin allowed to call the API with the pairing token')
+    parser.add_argument('--pdf-editor-root', help=f'opt-in: absolute falsify-pdf-editor module root (or {editor_service.ENV_ROOT})')
+    parser.add_argument('--pdf-editor-manifest', help=f'absolute patched candidate-manifest.json (or {editor_service.ENV_MANIFEST})')
+    parser.add_argument('--pdf-editor-source-root', help=f'absolute pinned editor app source root (or {editor_service.ENV_SOURCE_ROOT})')
+    parser.add_argument('--pdf-editor-node', help=f'absolute Node {editor_service.MIN_NODE_MAJOR}+ executable (or {editor_service.ENV_NODE}; default: node on PATH)')
     args = parser.parse_args()
     if not 1024 <= args.port <= 65535: parser.error('port must be 1024–65535')
     web_origin = None
     if args.web_origin is not None:
         try: web_origin = parse_web_origin(args.web_origin)
         except ValueError as error: parser.error(str(error))
+    try: editor_config = editor_service.config_from(args.pdf_editor_root, args.pdf_editor_manifest, args.pdf_editor_source_root, args.pdf_editor_node)
+    except ValueError as error: parser.error(str(error))
     server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
     server.daemon_threads = True
     server.web_origin = web_origin
+    server.pdf_editor = editor_service.PdfEditorService(editor_config) if editor_config else None
     print(f'Falsify local: http://127.0.0.1:{args.port}/ (loopback only; Ctrl+C to stop)', flush=True)
+    if server.pdf_editor:
+        print('PDF editor: falsify-pdf-editor configured (capability probe runs in background; no legacy fallback)', flush=True)
+        threading.Thread(target=server.pdf_editor.capability, daemon=True).start()
     if web_origin:
         print(f'Web origin enabled: {web_origin}\n'
             '  Trust is origin-level, not path-level: every page on that origin (any repository or path\n'

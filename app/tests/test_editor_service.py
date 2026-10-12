@@ -1,0 +1,229 @@
+"""Configured PDF editor adapter tests. Injected subprocess runner and synthetic bytes only:
+never runs Node, never creates or edits a real PDF, never touches a server on 7816/7817."""
+import base64
+import hashlib
+import http.client
+import io
+import json
+import subprocess
+import sys
+import tempfile
+import threading
+import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'local'))
+import editor_service as es
+import server
+
+SOURCE=b'%PDF-1.7 synthetic bytes only'
+OUTPUT=b'%PDF-1.7 synthetic edited bytes'
+WASM='12e43c4c2e7deedab629c3b08b14fc0b24c1336f92b7de30ac58d7ec6dcbb833'
+def payload(**over):
+    d={'format':'PDF','fileHash':hashlib.sha256(SOURCE).hexdigest(),'file':base64.b64encode(SOURCE).decode(),
+       'patches':[{'id':'c1','segmentId':'s1','label':'PDF p. 3','before':'the result holds','after':'the result may hold','offset':4,'edited':False}]}
+    d.update(over);return d
+
+class FakeRunner:
+    """Simulates node --version, the bridge --capabilities probe and an edit run."""
+    def __init__(self,version=b'v24.19.0\n',caps=None,edit='ok'):
+        self.version,self.caps,self.edit=version,caps,edit;self.calls=[];self.requests=[]
+    def __call__(self,argv,*,cwd,env,timeout):
+        self.calls.append({'argv':list(argv),'cwd':cwd,'env':dict(env),'timeout':timeout})
+        if argv[1:]==['--version']:return SimpleNamespace(returncode=0,stdout=self.version)
+        if argv[2:]==['--capabilities']:
+            caps=self.caps if self.caps is not None else {'ok':True,'engine':'falsify-pdf-editor','version':'0.1.0-alpha.2','wasmSha256':WASM,
+                'runtime':{'jsSha256':'a'*64,'manifestSha256':'b'*64,'runtimeKind':'candidate','build':'x'},'reflow':True,'pagination':False,
+                'sourceUrl':'https://github.com/Shinick-Han/falsify-pdf-editor'}
+            if isinstance(caps,Exception):raise caps
+            return SimpleNamespace(returncode=0 if caps.get('ok') else 1,stdout=(json.dumps(caps)+'\n').encode())
+        args=dict(zip(argv[2::2],argv[3::2]))
+        self.requests.append(json.loads(Path(args['--request']).read_text(encoding='utf-8')))
+        self.tempdir=Path(args['--request']).parent
+        if callable(self.edit):return self.edit(args)
+        if self.edit=='timeout':raise subprocess.TimeoutExpired(argv,timeout)
+        req=self.requests[-1]
+        edits=[{'id':e['id'],'pageIndex':e['pageIndex'],'status':'applied'} for e in req['edits']]
+        report={'ok':True,'status':'self-check-passed','reflow':True,'wrappedLines':None,'layoutVerified':True,'runtime':{'wasmSha256':WASM,'jsSha256':'a'*64,'manifestSha256':'b'*64,'runtimeKind':'candidate'},
+            'edits':edits,'repairs':[{'pageIndex':2,'count':1}],'warnings':[],'selfCheck':{'status':'passed','independent':False,'method':'same-pdfium-text-geometry','failures':[],'warnings':[{'code':'self_check_not_independent','pageIndex':None}]},
+            'pageCount':{'source':5,'output':5},'sourcePageMap':None,'outputSha256':hashlib.sha256(OUTPUT).hexdigest()}
+        if isinstance(self.edit,dict):report.update(self.edit)
+        if self.edit=='fail':
+            Path(args['--report']).write_text(json.dumps({'ok':False,'error':{'code':'MATCH_FAILED','message':'x'}}));return SimpleNamespace(returncode=1,stdout=b'{"ok":false,"code":"MATCH_FAILED"}\n')
+        if self.edit=='wrong-wasm':report['runtime']['wasmSha256']='c'*64
+        if self.edit=='not-applied':report['edits'][0]['status']='noop'
+        Path(args['--out']).write_bytes(OUTPUT if self.edit!='oversize' else b'%PDF-'+b'0'*64)
+        Path(args['--report']).write_text(json.dumps(report))
+        return SimpleNamespace(returncode=0,stdout=b'{"ok":true,"code":"OK"}\n' if self.edit!='stdout-oversize' else b'x'*(es.LIMITS['maxStdoutBytes']+1))
+
+class Base(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();base=Path(self.tmp.name)
+        (base/'module'/'src').mkdir(parents=True);(base/'module'/'src'/'web-bridge.mjs').write_text('// stub')
+        (base/'cand').mkdir();(base/'cand'/'candidate-manifest.json').write_text('{}')
+        (base/'node.exe').write_bytes(b'');self.base=base
+        self.config=es.config_from(str(base/'module'),str(base/'cand'/'candidate-manifest.json'),node=str(base/'node.exe'),environ={})
+    def tearDown(self):self.tmp.cleanup()
+    def service(self,**kw):
+        self.runner=FakeRunner(**kw);return es.PdfEditorService(self.config,runner=self.runner)
+
+class ConfigTests(unittest.TestCase):
+    def test_unconfigured_is_legacy(self):self.assertIsNone(es.config_from(environ={}))
+    def test_partial_or_relative_rejected(self):
+        for kw in [{'root':'C:/x' if sys.platform=='win32' else '/x'},{'manifest':str(Path(tempfile.gettempdir())/'candidate-manifest.json')},
+                {'root':'rel','manifest':'rel/candidate-manifest.json'},{'source_root':str(Path(tempfile.gettempdir()))}]:
+            with self.subTest(kw=kw):
+                with self.assertRaises(ValueError):es.config_from(environ={},**kw)
+    def test_manifest_name_and_env_equivalents(self):
+        t=Path(tempfile.gettempdir())
+        with self.assertRaises(ValueError):es.config_from(str(t),str(t/'other.json'),environ={})
+        c=es.config_from(environ={es.ENV_ROOT:str(t),es.ENV_MANIFEST:str(t/'candidate-manifest.json'),es.ENV_SOURCE_ROOT:str(t)})
+        self.assertEqual(c.manifest.name,'candidate-manifest.json');self.assertIsNotNone(c.source_root)
+    def test_unconfigured_capability_shape(self):
+        c=es.unconfigured_capability()
+        self.assertEqual((c['available'],c['configured'],c['engine'],c['reflow'],c['pagination']),(False,False,'falsify-pdf-editor',False,False))
+
+class CapabilityTests(Base):
+    def test_probe_success_is_truthful_and_path_free(self):
+        svc=self.service();cap=svc.capability()
+        self.assertTrue(cap['available']);self.assertEqual(cap['wasmSha256'],WASM);self.assertIs(cap['reflow'],True);self.assertIs(cap['pagination'],False)
+        self.assertEqual(set(cap)>={'available','engine','version','wasmSha256','reflow','pagination','limits','sourceUrl'},True)
+        self.assertNotIn(self.tmp.name.lower(),json.dumps(cap).lower())
+        probe=self.runner.calls[-1];self.assertEqual(probe['argv'][1:],[str(self.config.root/'src'/'web-bridge.mjs'),'--capabilities'])
+        self.assertEqual(probe['env']['FALSIFY_EDITOR_CANDIDATE_MANIFEST'],str(self.config.manifest));self.assertNotIn('NODE_OPTIONS',probe['env'])
+        svc.capability();self.assertEqual(len(self.runner.calls),2,'success cached')
+    def test_pagination_descriptor_must_be_bool_true(self):
+        caps={'ok':True,'engine':'falsify-pdf-editor','version':'1','wasmSha256':WASM,'reflow':True,'pagination':{'supported':True}}
+        self.assertIs(self.service(caps=caps).capability()['pagination'],False)
+    def test_unavailable_reasons(self):
+        self.assertEqual(self.service(version=b'v22.1.0\n').capability()['error']['code'],'node_too_old')
+        self.assertEqual(self.service(caps={'ok':False,'code':'CANDIDATE_HASH_MISMATCH'}).capability()['error']['code'],'probe_failed')
+        self.assertEqual(self.service(caps=subprocess.TimeoutExpired('n',1)).capability()['error']['code'],'probe_timeout')
+        self.assertEqual(self.service(caps=OSError()).capability()['error']['code'],'node_missing')
+        (self.base/'node.exe').unlink();self.assertEqual(self.service().capability()['error']['code'],'node_missing')
+        (self.base/'cand'/'candidate-manifest.json').unlink();self.assertEqual(self.service().capability()['error']['code'],'manifest_missing')
+        (self.base/'module'/'src'/'web-bridge.mjs').unlink();cap=self.service().capability()
+        self.assertEqual(cap['error']['code'],'module_missing');self.assertFalse(cap['available']);self.assertTrue(cap['configured'])
+        self.assertNotIn(self.tmp.name.lower(),json.dumps(cap).lower())
+    def test_failed_probe_retries_after_interval(self):
+        now=[0.0];runner=FakeRunner(version=b'v20.0.0\n');svc=es.PdfEditorService(self.config,runner=runner,clock=lambda:now[0])
+        svc.capability();svc.capability();self.assertEqual(len(runner.calls),1)
+        runner.version=b'v24.19.0\n';now[0]=100;self.assertTrue(svc.capability()['available'])
+
+class ExportTests(Base):
+    def test_success_fixed_argv_exact_spans_and_cleanup(self):
+        svc=self.service();data=payload();before=json.dumps(data)
+        result=svc.export(data)
+        self.assertEqual(json.dumps(data),before,'request untouched')
+        self.assertEqual(base64.b64decode(result['file']),OUTPUT);self.assertEqual(result['sourceFileHash'],data['fileHash'])
+        self.assertEqual(result['outputFileHash'],hashlib.sha256(OUTPUT).hexdigest())
+        v=result['verification'];self.assertEqual((v['engine'],v['runtime']['wasmSha256'],v['pages'],v['independentQA']),('falsify-pdf-editor',WASM,5,'pending'))
+        self.assertIs(v['layoutVerified'],True);self.assertEqual(v['reflow'],{'wrappedLines':None});self.assertEqual(v['pagination'],{'inputPages':5,'outputPages':5})
+        self.assertIsNone(v['sourcePageMap']);self.assertEqual(v['capabilities'],{'reflow':True,'pagination':False});self.assertEqual(v['diagnostics'],[])
+        self.assertEqual(v['edits'],[{'label':'PDF p. 3','id':'edit-1','pageIndex':2,'status':'applied'}])
+        call=self.runner.calls[-1];d=self.runner.tempdir
+        self.assertEqual(call['argv'],[str(self.base/'node.exe'),str(self.config.root/'src'/'web-bridge.mjs'),'--request',str(d/'request.json'),'--out',str(d/'output.pdf'),'--report',str(d/'report.json')])
+        self.assertEqual(call['timeout'],es.LIMITS['timeoutSeconds'])
+        self.assertEqual(self.runner.requests[-1],{'schema':es.REQUEST_SCHEMA,'input':'source.pdf','inputSha256':data['fileHash'],'reflow':True,
+            'edits':[{'id':'edit-1','pageIndex':2,'before':'the result holds','after':'the result may hold'}]})
+        self.assertFalse(d.exists(),'own temp dir removed');self.assertEqual(svc.leftovers,[])
+    def test_malformed_requests_never_invoke_editor(self):
+        p=payload()['patches'][0]
+        bad=[payload(file='***'),payload(fileHash='0'*64),payload(fileHash='X'),payload(format='DOCX'),payload(extra=1),payload(file=base64.b64encode(b'not pdf').decode(),fileHash=hashlib.sha256(b'not pdf').hexdigest()),
+            payload(patches=[]),payload(patches=[p]*13),payload(patches=[{**p,'rationale':'gold'}]),payload(patches=[{**p,'offset':-1}]),
+            payload(patches=[{**p,'after':'the result holds 2'}]),payload(patches=[{**p,'after':p['before']}])]
+        bad+=[payload(patches=[{**p,'label':l}]) for l in ['PDF p. 0','PDF p. 03','PDF p.3','p. 3','PDF p. 3 ','PDF p. -1','PDF p. 3a','DOCX p. 3']]
+        svc=self.service()
+        for d in bad:
+            with self.subTest(d={k:v for k,v in d.items() if k!='file'}):
+                with self.assertRaises(ValueError):svc.export(d)
+        self.assertEqual(self.runner.calls,[])
+    def test_failures_raise_without_fallback(self):
+        for mode in ['fail','timeout','wrong-wasm','not-applied','stdout-oversize']:
+            with self.subTest(mode=mode):
+                svc=self.service(edit=mode)
+                with patch.object(server,'handle_export',side_effect=AssertionError('legacy fallback')):
+                    with self.assertRaises(ValueError) as ctx:svc.export(payload())
+                self.assertIn('대신 내보내지 않습니다',str(ctx.exception));self.assertFalse(self.runner.tempdir.exists())
+        svc=self.service(edit='fail')
+        with self.assertRaisesRegex(ValueError,'MATCH_FAILED'):svc.export(payload())
+    def test_layout_facts_follow_report(self):
+        spm=[{'sourcePageIndex':0,'outputPageIndex':0,'continuationPageIndices':[]},{'sourcePageIndex':1,'outputPageIndex':1,'continuationPageIndices':[2],'extra':'x'}]
+        v=self.service(edit={'wrappedLines':3,'pageCount':{'source':5,'output':6},'addedPages':1,'sourcePageMap':spm}).export(payload())['verification']
+        self.assertEqual((v['reflow'],v['pagination'],v['addedPages'],v['layoutVerified']),({'wrappedLines':3},{'inputPages':5,'outputPages':6},1,True))
+        self.assertEqual(v['sourcePageMap'],[spm[0],{'sourcePageIndex':1,'outputPageIndex':1,'continuationPageIndices':[2]}])
+        for over in [{'layoutVerified':False},{'warnings':[{'code':'repair_x','severity':'error','pageIndex':0}]},{'layoutVerified':None},{'selfCheck':{'status':'passed','failures':[{'code':'x'}]}}]:
+            with self.subTest(over=over):
+                v=self.service(edit=over).export(payload())['verification'];self.assertIs(v['layoutVerified'],False)
+        v=self.service(edit={'warnings':[{'code':'edge_edit_unverified','severity':'warning','pageIndex':1}],'sourcePageMap':['C:/x'],'wrappedLines':-2}).export(payload())['verification']
+        self.assertEqual((v['diagnostics'],v['sourcePageMap'],v['reflow']['wrappedLines'],v['layoutVerified']),(['edge_edit_unverified (p. 2)'],None,None,True))
+    def test_output_oversize(self):
+        svc=self.service(edit='oversize')
+        with patch.dict(es.LIMITS,{'maxOutputBytes':16}):
+            with self.assertRaisesRegex(ValueError,'출력 크기'):svc.export(payload())
+    def test_source_modified_by_editor_rejected(self):
+        def tamper(args):(Path(args['--request']).parent/'source.pdf').write_bytes(b'%PDF-changed');return SimpleNamespace(returncode=0,stdout=b'{"ok":true}\n')
+        with self.assertRaisesRegex(ValueError,'입력 파일'):self.service(edit=tamper).export(payload())
+    def test_unavailable_editor_refuses_export(self):
+        svc=self.service(version=b'v20.0.0\n')
+        with self.assertRaisesRegex(ValueError,'node_too_old'):svc.export(payload())
+        self.assertEqual([c for c in self.runner.calls if '--request' in c['argv']],[])
+
+class ServerTests(Base):
+    def start(self,editor):
+        httpd=server.ThreadingHTTPServer(('127.0.0.1',0),server.Handler);httpd.pdf_editor=editor
+        t=threading.Thread(target=httpd.serve_forever,daemon=True);t.start()
+        self.addCleanup(lambda:(httpd.shutdown(),httpd.server_close(),t.join()));return httpd.server_port
+    def call(self,port,path,body=None):
+        origin=f'http://127.0.0.1:{port}';h={'Host':f'127.0.0.1:{port}','Origin':origin,'Authorization':'Bearer '+server.TOKEN}
+        if body is not None:h['Content-Type']='application/json'
+        c=http.client.HTTPConnection('127.0.0.1',port,timeout=10);c.request('POST' if body is not None else 'GET',path,body=json.dumps(body) if body is not None else None,headers=h)
+        r=c.getresponse();data=json.loads(r.read());c.close();return r.status,data
+    def test_capabilities_old_keys_plus_pdf_editor(self):
+        with patch.object(server,'cli_agents',lambda:[]):
+            status,data=self.call(self.start(None),'/api/capabilities')
+            self.assertEqual(status,200)
+            for k in ['red','blue','pdf','officeLayoutVerifiedExport','model','isolation','cliSelection','cliAgents']:self.assertIn(k,data)
+            self.assertEqual(data['pdfEditor'],es.unconfigured_capability())
+            status,data=self.call(self.start(self.service()),'/api/capabilities')
+            self.assertTrue(data['pdfEditor']['available']);self.assertIs(data['pdf'],True)
+            status,data=self.call(self.start(self.service(version=b'v20.0.0\n')),'/api/capabilities')
+            self.assertFalse(data['pdfEditor']['available']);self.assertIs(data['pdf'],False)
+    def test_configured_export_routes_to_editor_and_failure_has_no_fallback(self):
+        with patch.object(server,'handle_export',side_effect=AssertionError('legacy fallback')):
+            status,data=self.call(self.start(self.service()),'/api/export',payload());self.assertEqual(status,200);self.assertEqual(data['verification']['engine'],'falsify-pdf-editor')
+            status,data=self.call(self.start(self.service(edit='fail')),'/api/export',payload());self.assertEqual(status,400);self.assertIn('MATCH_FAILED',data['error'])
+        self.assertTrue(server.ACTIVE.acquire(blocking=False));server.ACTIVE.release()
+    def test_unconfigured_export_keeps_legacy(self):
+        with patch.object(server,'handle_export',lambda d:{'legacy':True}):
+            self.assertEqual(self.call(self.start(None),'/api/export',payload()),(200,{'legacy':True}))
+
+class MainTests(unittest.TestCase):
+    def run_main(self,argv,environ=None):
+        created=[]
+        class Fake:
+            def __init__(s,*a,**k):created.append(s)
+            def serve_forever(s):raise KeyboardInterrupt
+            def server_close(s):pass
+        err=io.StringIO()
+        with patch.object(sys,'argv',['server.py',*argv]),patch.object(server,'ThreadingHTTPServer',Fake),patch.dict('os.environ',environ or {},clear=False),\
+                patch.object(es.PdfEditorService,'capability',lambda s,refresh=False:None),redirect_stdout(io.StringIO()),patch.object(sys,'stderr',err):
+            try:server.main();code=0
+            except SystemExit as e:code=e.code
+        return code,created
+    def test_partial_config_refused_before_bind(self):
+        clean={k:'' for k in [es.ENV_ROOT,es.ENV_MANIFEST,es.ENV_SOURCE_ROOT,es.ENV_NODE]}
+        code,created=self.run_main(['--port','40125','--pdf-editor-root',tempfile.gettempdir()],clean)
+        self.assertEqual(code,2);self.assertEqual(created,[])
+        code,created=self.run_main(['--port','40125','--pdf-editor-root','relative','--pdf-editor-manifest','candidate-manifest.json'],clean)
+        self.assertEqual(code,2);self.assertEqual(created,[])
+    def test_configured_and_default(self):
+        t=Path(tempfile.gettempdir())
+        clean={k:'' for k in [es.ENV_ROOT,es.ENV_MANIFEST,es.ENV_SOURCE_ROOT,es.ENV_NODE]}
+        code,created=self.run_main(['--port','40125','--pdf-editor-root',str(t),'--pdf-editor-manifest',str(t/'candidate-manifest.json')],clean)
+        self.assertEqual(code,0);self.assertIsInstance(created[0].pdf_editor,es.PdfEditorService)
+        code,created=self.run_main(['--port','40125'],clean);self.assertEqual(code,0);self.assertIsNone(created[0].pdf_editor)
+
+if __name__=='__main__':unittest.main()
