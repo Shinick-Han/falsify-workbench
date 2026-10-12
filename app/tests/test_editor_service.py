@@ -270,7 +270,10 @@ class IndependentQATests(Base):
             patches=[{'label':'PDF p. 2','before':'the result holds','after':'the result may hold'}])
         good=[[head,'Page one stays as it was.'],[head,'We see that the result may hold here today.'],[head,'Page three stays too.']]
         svc=es.PdfEditorService(self.config,runner=FakeRunner(edit=editor(good)))
-        v=svc.export(data)['verification'];self.assertEqual(v['independentQA'],'passed',v['independentChecks'])
+        # A longer proportional-font After moves kept text beyond the sealed source region.
+        # The usable file is retained, but that movement cannot be certified as unchanged raster.
+        v=svc.export(data)['verification'];self.assertEqual(v['independentQA'],'warning',v['independentChecks'])
+        self.assertIn({'code':'edited_page_render','status':'warning','pages':[2]},v['independentChecks']['checks'])
         corrupt=[good[0],good[1],[head,'Page three changed too.']]
         with self.assertRaisesRegex(ValueError,'unedited_'):es.PdfEditorService(self.config,runner=FakeRunner(edit=editor(corrupt))).export(data)
         def white(out_pages):
@@ -328,7 +331,9 @@ class EditPlanTests(Base):
         self.assertEqual(calls[0]['args'][2],[{'pageIndex':1,'before':'the result holds','after':'the result may hold'}],'positional arguments unchanged')
         v=result['verification']
         self.assertEqual(v['editPlanSummary'],{'schema':'falsify.pdf-edit-plan-summary.v1','status':'resolved','plannedEdits':1,'resolvedEdits':1,'policy':'document-consistency-text'})
-        self.assertEqual(v['independentQA'],'passed',v['independentChecks']);self.assert_private(result,expected)
+        self.assertEqual(v['independentQA'],'warning',v['independentChecks'])
+        self.assertIn({'code':'edited_page_render','status':'warning','pages':[2]},v['independentChecks']['checks'])
+        self.assert_private(result,expected)
         self.assertEqual(self.runner_request(runner),{'schema':es.REQUEST_SCHEMA,'input':'source.pdf','inputSha256':hashlib.sha256(self.src).hexdigest(),'reflow':True,
             'edits':[{'id':'edit-1','pageIndex':1,'before':'the result holds','after':'the result may hold'}]},'Node wire request unchanged')
     def runner_request(self,runner):return runner.requests[-1]
@@ -340,7 +345,8 @@ class EditPlanTests(Base):
         with patch.object(pdf_quality,'inspect_isolated',legacy):
             svc=es.PdfEditorService(self.config,runner=self.editor());result=svc.export(self.data())
         self.assertIs(svc.planner,paper_inventory.plan_isolated);self.assertFalse(svc._qa_takes_plan)
-        self.assertEqual(len(calls),1);self.assertEqual(result['verification']['independentQA'],'passed')
+        self.assertEqual(len(calls),1);self.assertEqual(result['verification']['independentQA'],'warning')
+        self.assertIn({'code':'edited_page_render','status':'warning','pages':[2]},result['verification']['independentChecks']['checks'])
         self.assertEqual(result['verification']['editPlanSummary']['status'],'resolved','default isolated planner')
         self.assert_private(result,paper_inventory.build_edit_plan(self.src,self.edits))
 
