@@ -38,6 +38,15 @@
 .red-engine-source{color:inherit;text-decoration:underline;text-underline-offset:3px;text-decoration-thickness:1px}
 .red-engine-source:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
 #red-handoff{margin:4px 0 0}
+.red-preview{margin:16px 0 8px;padding-top:16px;border-top:1px solid var(--line);max-width:75ch}
+.red-preview>p{margin:6px 0}
+.red-preview-hash{display:block;font-family:Consolas,monospace;font-size:12px;color:var(--muted);overflow-wrap:anywhere;word-break:break-all}
+.red-preview-stage{display:flex;justify-content:center;margin-top:12px;padding:12px;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);min-width:0}
+.red-preview-stage:empty{display:none}
+.red-preview-canvas{display:block;max-width:100%;height:auto;background:var(--paper);box-shadow:0 1px 3px rgba(17,19,21,.18)}
+.red-preview .button-row{align-items:center}
+.red-preview-page{font-size:13px;font-variant-numeric:tabular-nums;min-width:5em}
+#red-preview-status.error{color:var(--red-ink)}
 #red-evaluate,#doc-blue-evaluate{display:block;margin:2px 0 12px;font-size:14px}
 .red-help li{margin:12px 0;max-width:75ch;line-height:1.7}
 @media(max-width:700px){

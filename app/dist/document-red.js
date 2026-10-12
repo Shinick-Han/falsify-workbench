@@ -4,6 +4,8 @@
   let generation=0,doc=null,file=null,candidates=[],response=null,job=null,jobLink=null,busy=false,request=null,binding=null;
   // Run records: one key per (response epoch, final snapshot) so unchanged auto/manual saves never duplicate.
   let epoch=0,exported=null,lastSaved=null,failure=null,guard={};const saved=new Map(),pending=new Map(),settings={level:$('#red-level').value,budget:$('#red-budget').value};
+  // Final-PDF preview (optional bundle): shown only for a hash-verified PDF export and cleared with every invalidation of `exported`.
+  const preview=globalThis.FalsifyPreview?.createPreview?.()||null;
   const hash=async bytes=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))).map(x=>x.toString(16).padStart(2,'0')).join('');
   const msg=(s,error=false)=>{const e=$('#red-progress');e.textContent=s;e.classList.toggle('error',error);};
   function jsonDownload(value,name){download(new TextEncoder().encode(JSON.stringify(value,null,2)),name,'application/json');}
@@ -192,7 +194,7 @@
     if(kind==='reflow')return keep+' 긴 After의 재배치는 1단·회전 없음·잘림 없음인 최상위 본문 텍스트에서만 됩니다. 해당 후보 선택을 해제하거나 After를 직접 조정해 다시 시도하거나, 변경 계획 JSON만 저장할 수 있습니다. 엔진·연결 오류라면 위 연결 패널에서 companion을 다시 실행·연결하세요.';
     return keep+' 이 companion은 원래 줄 공간에 들어가는 변경만 지원합니다. 줄바꿈 재배치 엔진이 있는 companion으로 다시 연결하거나, 다른 후보를 고르거나, 변경 계획 JSON만 저장할 수 있습니다.';}
   $('#red-download').addEventListener('click',async()=>{
-    if(busy||!doc||!$('#red-export-consent').checked)return;const current=generation,pdf=doc.format==='PDF'?pdfMode(B.capabilities()):null;busy=true;controls();exportStatus(pdf?.kind==='reflow'?'선택 변경만 적용하고 재배치·자체검사 중':'선택 변경만 적용하고 보존 검사 중');
+    if(busy||!doc||!$('#red-export-consent').checked)return;const current=generation,pdf=doc.format==='PDF'?pdfMode(B.capabilities()):null;busy=true;preview?.clear();controls();exportStatus(pdf?.kind==='reflow'?'선택 변경만 적용하고 재배치·자체검사 중':'선택 변경만 적용하고 보존 검사 중');
     try{const patches=C.patches(doc,candidates);let output,reported=null;
       // Same request body as before: only checked candidates' Before plus the user's current After; progress is staged text, never an invented percentage.
       if(pdf){exportStatus('원본 PDF와 선택 변경 '+patches.length+'개를 companion에서 '+(pdf.kind==='reflow'?'교체·줄바꿈 재배치·엔진 자체검사':'한 줄 교체·보존 검사')+'하는 중입니다. 엔진이 진행률을 알려주지 않아 퍼센트는 표시하지 않습니다.');
@@ -211,6 +213,8 @@
       const name=file.name.replace(/(\.[^.]+)$/,'-falsify-research$1'),type=file.type||'application/octet-stream';download(output.bytes,name,type);jsonDownload(plan(patches,{outputFileHash,verification:output.verification}),'falsify-document-edit-plan.json');
       exported={outputFileHash,verification:output.verification,file:new File([output.bytes],name,{type})};const final={selected:patches,outputFileHash,verification:output.verification};exported.key=key(final);void save(final);
       successStatus(pdf?layoutReport(output.verification,styled(pdf.engine)):{facts:[]},typeof output.verification?.limits==='string'?output.verification.limits.slice(0,400):'');
+      // Preview the exact File just downloaded and handed to BLUE, only for PDF; a preview failure never touches `exported` or the download.
+      if(pdf)void preview?.show({file:exported.file,sha256:outputFileHash});
     }catch(e){if(current===generation)exportStatus('다운로드 차단: '+e.message+recovery(pdf?.kind),true);}
     finally{if(current===generation){busy=false;controls();}}
   });
@@ -220,9 +224,9 @@
   function currentKey(){try{return key(finalState());}catch{return null;}}
   function unrecorded(){return !!response&&(pending.size>0||!saved.has(key(null))||candidates.some(c=>c.selected||c.edited)&&!saved.has(currentKey()));}
   function keepEdits(){return !unrecorded()||confirm('선택·편집한 RED 후보가 아직 기록되지 않았습니다. 계속하면 후보와 편집 내용이 사라집니다. 계속할까요?');}
-  function invalidate(){epoch++;exported=null;lastSaved=null;failure=null;saved.clear();pending.clear();}
+  function invalidate(){epoch++;exported=null;lastSaved=null;failure=null;saved.clear();pending.clear();preview?.clear();}
   function discard(){generation++;cancelCurrent();busy=!!binding;if(doc)doc.revision=crypto.randomUUID();candidates=[];response=null;request=null;invalidate();renderCandidates();}
-  function changed(){exported=null;exportStatus('');controls();}
+  function changed(){exported=null;preview?.clear();exportStatus('');controls();}
   // One root per execution: a final snapshot first awaits (or retries) the original response save and links to it via snapshotOf.
   // If the original cannot be persisted the final snapshot is not recorded either, so no second root ever appears.
   // isCurrent is live-only: the ledger checks it right before persisting, so a source/settings reset cancels a stale save.
@@ -253,7 +257,7 @@
   }
   function renderHandoff(){
     // No handoff while the final snapshot is still being saved; a failed save hands off with an explicitly unrecorded relation.
-    const status=$('#red-export-status'),ready=!!exported&&!busy&&exported.key===currentKey()&&!pending.has(exported.key),b=action('red-handoff','이 사본으로 BLUE 실행',status,'button secondary');b.hidden=!ready;
+    const status=$('#red-export-status'),ready=!!exported&&!busy&&exported.key===currentKey()&&!pending.has(exported.key),b=action('red-handoff','이 사본으로 BLUE 실행',$('#red-preview')||status,'button secondary');b.hidden=!ready;
     let note=$('#red-handoff-note');if(!note){note=document.createElement('p');note.id='red-handoff-note';note.className='muted';b.after(note);}note.hidden=!ready;
     if(ready)note.textContent='BLUE에는 이 사본 파일만 전달합니다. 변경 계획·후보·근거는 보내지 않으며, BLUE 동의와 실행은 BLUE 화면에서 따로 합니다.'+(saved.has(exported.key)?'':' 최종 선택이 기록되지 않아 BLUE 결과와 이 RED 실행의 인계 관계는 기록되지 않습니다. 먼저 「RED 실행 결과 기록」으로 다시 시도할 수 있습니다.');
   }
