@@ -22,7 +22,7 @@ X=72+pymupdf.get_text_length(PREFIX,fontname='cour',fontsize=11)
 WORD_W=pymupdf.get_text_length('valid',fontname='cour',fontsize=11)
 SECRETS=['Synthetic','study','supports','valid','findings','Neighbor','research']
 
-def build(word='valid',font='cour',size=11,color=(0,0,0),mode=0,head_dy=0,neighbor='Neighbor text must remain unchanged.',ncolor=(0,0,0),extra=None,reflow=False,nfont='cour'):
+def build(word='valid',font='cour',size=11,color=(0,0,0),mode=0,head_dy=0,neighbor='Neighbor text must remain unchanged.',ncolor=(0,0,0),extra=None,reflow=False,nfont='cour',nx=72,nsize=11):
     d=pymupdf.open();p=d.new_page(width=W,height=H)
     p.insert_text((72,50+head_dy),'Synthetic research control header',fontname='cour',fontsize=11)
     p.insert_text((72,100),PREFIX,fontname='cour',fontsize=11)
@@ -30,7 +30,7 @@ def build(word='valid',font='cour',size=11,color=(0,0,0),mode=0,head_dy=0,neighb
     tail=' findings under stated conditions.'
     if reflow:p.insert_text((72,112),tail.strip(),fontname='cour',fontsize=11)
     else:p.insert_text((X+pymupdf.get_text_length(word,fontname='cour',fontsize=11),100),tail,fontname='cour',fontsize=11)
-    p.insert_text((72,132),neighbor,fontname=nfont,fontsize=11,color=ncolor)
+    p.insert_text((nx,132),neighbor,fontname=nfont,fontsize=nsize,color=ncolor)
     p.draw_rect(pymupdf.Rect(72,180,250,240),color=(0,0,0),width=1)
     if extra:extra(p)
     return d.tobytes()
@@ -159,6 +159,34 @@ class Partial(unittest.TestCase):
         d=pymupdf.open(stream=SRC,filetype='pdf');d[0].set_rotation(90);src=d.tobytes()
         d=pymupdf.open(stream=build('false'),filetype='pdf');d[0].set_rotation(90)
         r=run(d.tobytes(),src=src);self.assertNotIn('failed',bad(r).values(),bad(r))
+
+class DriftNoise(unittest.TestCase):
+    # An engine re-serializing the page in float32 moves an unchanged neighbor line by 1e-4 pt. On an odd 1/8 pt
+    # origin that crosses MuPDF's sub-pixel glyph quantization and re-antialiases glyph edges by more than PIXEL_DELTA.
+    ON,DRIFT=72.125,72.125-0.0001
+    def raster_delta(self,a,b):
+        pa,pb=(pymupdf.open(stream=x,filetype='pdf')[0].get_pixmap(colorspace=pymupdf.csRGB,alpha=False) for x in (a,b))
+        return sum(abs(x-y)>q._regions().PIXEL_DELTA for x,y in zip(pa.samples,pb.samples))
+    def test_float32_drift_of_unchanged_text_is_warning_never_pass(self):
+        src=build(nx=self.ON);out=build('false',nx=self.DRIFT)
+        self.assertGreater(self.raster_delta(build('false',nx=self.ON),out),0,'the drift really re-antialiases glyph edges')
+        r=run(out,src=src,plan=plan_for(src))
+        self.assertEqual(status(r,'edited_page_render'),'warning',bad(r));self.assertEqual(r['status'],'warning',bad(r))
+        for code in ('edited_page_text','edited_region_style','edited_region_visible','edit_plan'):self.assertEqual(status(r,code),'passed',code)
+        self.assertIn(q.LIMITATIONS['regional_partial'],r['limitations'])
+        self.assertEqual(status(run(build('false',nx=self.ON),src=src),'edited_page_render'),'passed','no drift, nothing to explain')
+    def test_drift_does_not_hide_real_changes_on_or_near_the_drifted_glyphs(self):
+        src=build(nx=self.ON);g=72.125+6.6  # second neighbor glyph
+        cases={'tick':dict(extra=lambda p:p.draw_rect(pymupdf.Rect(g+2,126,g+3,127),color=None,fill=(0,0,0))),
+            'white_cover':dict(extra=lambda p:p.draw_rect(pymupdf.Rect(g,124,g+6.6,134),color=None,fill=(1,1,1))),
+            'blank_tick':dict(extra=lambda p:p.draw_rect(pymupdf.Rect(300,150,301,151),color=None,fill=(0,0,0))),
+            'figure':dict(extra=lambda p:p.draw_line(pymupdf.Point(80,190),pymupdf.Point(240,230),color=(1,0,0),width=3)),
+            'recolor':dict(ncolor=(1,0,0)),'resize':dict(nsize=11.5),'face':dict(nfont='cobo'),
+            'beyond_drift_tol':dict(nx=self.ON-0.05)}
+        for name,kw in cases.items():
+            with self.subTest(name):
+                r=run(build('false',**{'nx':self.DRIFT,**kw}),src=src,plan=plan_for(src))
+                self.assertEqual(status(r,'edited_page_render'),'failed',bad(r));self.assertEqual(r['status'],'failed')
 
 class Isolation(unittest.TestCase):
     def test_reports_are_sanitized_and_text_free(self):

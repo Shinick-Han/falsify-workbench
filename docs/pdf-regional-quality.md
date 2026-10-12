@@ -21,7 +21,7 @@ implementation-level evidence about this one output, not a typographic, scientif
 
 | code | failed (definite) | warning (uncertain) |
 |---|---|---|
-| `edited_page_render` | a sample outside the sealed regions moved more than 40 levels (new graphic, white cover, damaged figure or paragraph) | kept text of the edited line slid outside the sealed regions (longer/shorter After, re-justified spacing); reflow; continuation; oversized regions |
+| `edited_page_render` | a sample outside the sealed regions moved more than 40 levels (new graphic, white cover, damaged figure or paragraph) | kept text of the edited line slid outside the sealed regions (longer/shorter After, re-justified spacing); float32 drift re-antialiasing unchanged glyphs (below); reflow; continuation; oversized regions |
 | `edited_page_text` | unedited text on the edited page lost, restyled (size, color or disproven metrics) or moved; kept same-line text restyled | extra output lines; reflowed or continued text; a font name changed alone |
 | `edited_region_style` | an After glyph has a different size (±max(0.25 pt, 3%)) or RGB color (±8) from the selected source, or another font name whose advance the source's own glyphs of that character disprove (±max(0.3 pt, 10%)) | After position unknown after reflow; a font name changed alone (fallback, embedding or supplemental glyph) |
 | `edited_region_visible` | an After letter leaves no ink, kept same-line letters lose ink they had, or overlapping invisible text | After position unknown |
@@ -38,6 +38,24 @@ is therefore a `warning` (limitation `regional_partial`), never `passed`. It bec
 itself holds the same character in the expected style and its advance width disagrees beyond tolerance. No font is
 treated as equivalent to another by name. The raster comparison outside the sealed regions is unaffected, so a
 visibly different face on unedited or kept text is still measured there.
+
+## Float32 drift of unchanged glyphs
+
+An engine that re-serializes the page can move every unchanged glyph by a float32 rounding step (about 0.0001 pt).
+That is invisible, but when a glyph origin sits on MuPDF's sub-pixel glyph quantization boundary (for example an odd
+1/8 pt) the step re-antialiases its edges by more than 40 levels: a real browser export showed 12 such pixels in one
+unchanged paragraph glyph, with identical text, styles and vector drawings. These pixels are a `warning` (limitation
+`regional_partial`), never `passed`, and only when every one of them
+
+- lies on an unedited glyph (or a kept same-line glyph that did not slide) matched in place to its source glyph with
+  the same character and exact style (font name, size, color), whose position moved by more than 0 and at most
+  0.002 pt (`DRIFT_TOL`);
+- belongs to a glyph whose rendered ink differs by at most 8% (`NOISE_INK`) between source and output;
+- has no drawing, image, annotation or unmatched output character on that glyph that differs between source and
+  output (a vector tick or white cover is a drawing, so it stays `failed` even if its ink were small).
+
+A pixel on blank page, on a glyph that did not drift, on a recolored, resized or renamed glyph, or on a glyph moved
+beyond 0.002 pt is still a definite `failed`. Beyond 4096 such pixels (`NOISE_MAX`) nothing is classified.
 
 ## Isolation
 
@@ -57,3 +75,6 @@ coordinates or paths.
   report `warning` rather than `passed`.
 - A renamed or fallback font for a character the source page never draws in that style cannot be checked by metrics;
   it stays an unverified `warning`.
+- Drift noise is classified from MuPDF's own drawing, image and annotation lists plus ink: a shading or other content
+  those lists do not report, drawn on a drifted glyph and keeping its ink within 8%, would be a `warning`, not a
+  `failed`.

@@ -12,6 +12,13 @@ The raster comparison of an edited page excludes only the tight per-line boxes o
 a fixed BLEED, never whole lines, whole pages or anything the output defines. Where the After or kept text of an
 edited line legitimately lands outside those sealed boxes (a longer or shorter After, re-justified spacing), the
 difference there is at most a warning (regional_partial); it is never widened into the exclusion and never passes.
+
+A re-serialized page may also move unchanged glyphs by a float32 rounding step (about 1e-4 pt). That is invisible, but
+it can carry a glyph origin across MuPDF's sub-pixel glyph quantization and re-antialias its edge by more than
+PIXEL_DELTA. Such samples are only a warning, and only when each one lies on an unedited glyph whose character and
+exact style match the source and whose position moved by more than 0 and at most DRIFT_TOL, the glyph keeps its ink
+within NOISE_INK, and no drawing, image, annotation or unmatched output text differs or appears there. Anything else
+(an added mark, a white cover, a recolor, a resize) stays a definite failure.
 """
 import hashlib
 import json
@@ -33,6 +40,10 @@ WIDTH_TOL = (0.3, 0.1)   # absolute points, fraction of a source advance: a rena
 PIXEL_DELTA = 40         # channel levels a sample must move to count as changed
 MINOR_FRACTION = 0.0005  # sub-PIXEL_DELTA samples outside the excluded lines tolerated before it is a warning
 INK_DELTA = 64           # channel levels a pixel must differ from its line background to count as ink
+DRIFT_TOL = 0.002        # points: float32 re-serialization drift of an unchanged glyph (never a visible move)
+NOISE_INK = 0.08         # fraction of its ink a drifted glyph may gain or lose when its antialiased edge re-quantizes
+NOISE_MAX = 4096         # high-delta pixels examined for drift noise; beyond this a difference is definite
+IMAGE_KEYS = ('bbox', 'transform', 'digest', 'width', 'height', 'bpc', 'cs-name')
 _SUBSET = re.compile(r'^[A-Z]{6}\+')
 _HEX = re.compile(r'[0-9a-f]{64}')
 
@@ -226,26 +237,68 @@ def _blank(sa, sb, pix, page, boxes):
             o = y * stride + x0 * n
             sa[o:o + len(blank)] = blank; sb[o:o + len(blank)] = blank
 
-def _masked_diff(pa, pb, page, sealed, zones):
+def _masked_diff(pa, pb, page, sealed, zones, explain=None):
     """(status, zone_changed) for the same-frame renders. Only the sealed source regions (plus BLEED) are excluded.
     A difference confined to the zones (After or kept edited-line text that slid outside the sealed regions) is a
-    warning, never a pass; elsewhere any sample moving more than PIXEL_DELTA is a definite change."""
+    warning, never a pass; elsewhere any sample moving more than PIXEL_DELTA is a definite change unless explain
+    (given the set of such (x, y) pixels) proves it is float32 drift noise of unchanged glyphs, which is a warning."""
     if (pa.width, pa.height, pa.n, pa.stride) != (pb.width, pb.height, pb.n, pb.stride): return 'failed', False
-    sa, sb, stride = bytearray(pa.samples), bytearray(pb.samples), pa.stride
+    sa, sb, stride, n = bytearray(pa.samples), bytearray(pb.samples), pa.stride, pa.n
     _blank(sa, sb, pa, page, sealed)
     za = zb = None
     if zones: za, zb = bytes(sa), bytes(sb); _blank(sa, sb, pa, page, zones)
     if sa == sb: return ('warning', True) if za != zb else ('passed', False)
-    minor = 0
+    minor, high = 0, set()
     for y in range(pa.height):
         ra, rb = sa[y * stride:(y + 1) * stride], sb[y * stride:(y + 1) * stride]
         if ra == rb: continue
-        for x, z in zip(ra, rb):
+        for k, (x, z) in enumerate(zip(ra, rb)):
             if x != z:
-                if abs(x - z) > PIXEL_DELTA: return 'failed', False
-                minor += 1
+                if abs(x - z) <= PIXEL_DELTA: minor += 1; continue
+                high.add((k // n, y))
+                if explain is None or len(high) > NOISE_MAX: return 'failed', False
+    if high: return ('warning', True) if explain(high) else ('failed', False)
     if minor > MINOR_FRACTION * len(sa): return 'warning', False
     return ('warning', True) if za != zb else ('passed', False)
+
+def _overlap(a, b): return min(a[2], b[2]) > max(a[0], b[0]) and min(a[3], b[3]) > max(a[1], b[1])
+
+def _norm(v):
+    """Drawing/image values made comparable: numbers rounded to 0.01, points/rects/quads as nested tuples."""
+    if v is None or isinstance(v, (str, bool)): return v
+    if isinstance(v, (int, float)): return round(v, 2)
+    if isinstance(v, dict): return tuple(sorted((k, _norm(x)) for k, x in v.items() if k not in ('seqno', 'layer', 'level')))
+    return tuple(_norm(x) for x in v)
+
+def _ink_sum(pix, box):
+    n, stride, data = pix.n, pix.stride, pix.samples
+    return sum(255 * n - sum(data[y * stride + x * n:y * stride + x * n + n]) for y in range(box[1], box[3]) for x in range(box[0], box[2]))
+
+def _drift_noise(high, pa, pb, src_page, out_page, drifted, unmatched):
+    """True when every high-delta pixel lies on an unedited glyph pair from drifted (same character and exact style,
+    position moved by more than 0 and at most DRIFT_TOL), each such glyph keeps its ink within NOISE_INK, and no
+    drawing, image, annotation or unmatched output character differs or appears on those glyphs."""
+    rects, rows = [], {}
+    for s, o in drifted:
+        box = _union([s.box, o.box]); px = _px(pb, out_page, box, 1.0)
+        rects.append((box, px))
+        for y in range(px[1], px[3]): rows.setdefault(y, []).append(len(rects) - 1)
+    hit = set()
+    for x, y in high:
+        k = next((k for k in rows.get(y, ()) if rects[k][1][0] <= x < rects[k][1][2]), None)
+        if k is None: return False
+        hit.add(k)
+    boxes = [rects[k][0] for k in hit]
+    for k in hit:
+        a, b = _ink_sum(pa, rects[k][1]), _ink_sum(pb, rects[k][1])
+        if not a or abs(a - b) > NOISE_INK * max(a, b): return False
+    if any(_overlap(u, box) for u in unmatched for box in boxes): return False
+    near = lambda r: any(_overlap(tuple(r), box) for box in boxes)
+    for page in (src_page, out_page):
+        if any(near(a.rect) for a in page.annots()): return False
+    objects = lambda page: sorted([('d', _norm(d)) for d in page.get_drawings() if near(d['rect'])] +
+        [('i', _norm({k: i.get(k) for k in IMAGE_KEYS})) for i in page.get_image_info(hashes=True) if near(i['bbox'])], key=repr)
+    return objects(src_page) == objects(out_page)
 
 def _ink(pix, page, chars):
     """Per character: True/False whether a letter or digit leaves ink against its own line's background, None when
@@ -309,12 +362,14 @@ def check_page(src_page, out_page, model, picks, mupdf, raster, max_chars):
         if q not in used: by_text.setdefault(_text(O, row), []).append(q)
     # text_font/after_font: a font name changed without a proven size, color or metric change (unverified, warning).
     lost = restyled = moved = text_font = after_font = False
+    pairs = []  # (source, output) characters of unedited lines matched in place: candidates for float32 drift noise
     first_row = lambda row, hits, placed: next(((q, v) for q in hits for v in (_same_row(S, row, O, out_rows[q][1], placed),) if v), None)
     for r, (_, row) in enumerate(src_rows):
         if r in edited_set or (not strict and any(S[i].block in blocks for i in row)): continue
         hits = [q for q in by_text.get(_text(S, row), ()) if q not in used]
         match = first_row(row, hits, True)
-        if match is None:
+        if match is not None: pairs += [(S[i], O[j]) for i, j in zip(row, out_rows[match[0]][1])]
+        else:
             match = first_row(row, hits, False)
             if match is not None: moved = True
             elif hits: match, restyled = (hits[0], None), True
@@ -368,6 +423,12 @@ def check_page(src_page, out_page, model, picks, mupdf, raster, max_chars):
         res['edited_region_visible'] = 'failed' if invisible else 'warning' if unknown else 'passed'
     if not strict:
         res['edited_page_render'] = 'warning'; return res, notes
+    pairs += [(s, o) for s, o in kept if abs(s.box[0] - o.box[0]) <= POS_TOL and abs(s.box[2] - o.box[2]) <= POS_TOL]
+    drifted = [(s, o) for s, o in pairs if s.c == o.c and s.style == o.style and
+        0 < max(abs(s.base - o.base), *(abs(a - b) for a, b in zip(s.box, o.box))) <= DRIFT_TOL]
+    matched = {id(o) for _, o in pairs} | {id(ch) for chars in boxes.values() for ch in chars}
+    unmatched = [o.box for o in O if id(o) not in matched]
+    explain = lambda high: bool(drifted) and _drift_noise(high, pa, pb, src_page, out_page, drifted, unmatched)
     # Sealed: tight per-line boxes of the selected SOURCE characters only (never whole lines or output boxes).
     by_line = {}
     for i in selected: by_line.setdefault(S[i].line, []).append(S[i].box)
@@ -376,6 +437,6 @@ def check_page(src_page, out_page, model, picks, mupdf, raster, max_chars):
     if area > LIMITS['maxMaskFraction'] * src_page.rect.width * src_page.rect.height:
         notes.add('regional_partial'); res['edited_page_render'] = 'warning'
     else:
-        res['edited_page_render'], partial = _masked_diff(pa, pb, src_page, sealed, zones)
+        res['edited_page_render'], partial = _masked_diff(pa, pb, src_page, sealed, zones, explain)
         if partial: notes.add('regional_partial')
     return res, notes
