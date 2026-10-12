@@ -64,7 +64,7 @@ const ACTUAL={mode:'falsify-pdf-editor',engine:'falsify-pdf-editor',version:'0.1
 test('descriptor: new broker keeps pdf boolean and a sanitized frozen pdfEditor; legacy broker has none',async()=>{
   const boot=async caps=>{const b=L.create({fetch:async p=>({ok:true,json:async()=>p==='/api/session'?{token:'t'.repeat(32)}:caps}),location:{hostname:'127.0.0.1',port:'7816'}});await b.ready;return b.capabilities();};
   const fresh=await boot({...NEW,pdfEditor:{...EDITOR,extra:'dropped'}});
-  assert.equal(fresh.pdf,true);assert.deepEqual({...fresh.pdfEditor,limits:{...fresh.pdfEditor.limits}},EDITOR);assert.equal(Object.isFrozen(fresh.pdfEditor),true);
+  assert.equal(fresh.pdf,true);assert.deepEqual({...fresh.pdfEditor,limits:{...fresh.pdfEditor.limits}},{...EDITOR,continuationStyle:null},'no style capability unless declared');assert.equal(Object.isFrozen(fresh.pdfEditor),true);
   const legacy=await boot(OLD);assert.equal(legacy.pdf,true);assert.equal(legacy.pdfEditor,null);
   const missing=await boot({red:true,blue:true,pdf:false,pdfEditor:{available:false,engine:'falsify-pdf-editor',version:null,wasmSha256:null,reflow:true,pagination:true}});
   assert.equal(missing.pdf,false);assert.equal(missing.pdfEditor.available,false);});
@@ -76,6 +76,50 @@ test('descriptor: malformed core fields drop it, bounded optional fields are cle
     assert.equal(L.pdfEditor({...EDITOR,sourceUrl:url}).sourceUrl,null,String(url));
   assert.deepEqual({...L.pdfEditor({...EDITOR,limits:{good:3,neg:-1,frac:1.5,'bad key':2,str:'9'}}).limits},{good:3});
   assert.equal(L.pdfEditor({...EDITOR,limits:'x'.repeat(500)}).limits.length,300);});
+
+const STYLE={supported:true,policy:'source-number-suffix',scope:'text-only source-style header/footer; standalone Arabic source number plus decimal suffix; originals unchanged'};
+const STYLED={...NEW,pdfEditor:{...EDITOR,continuationStyle:STYLE}};
+test('descriptor: continuationStyle is declared, exact-policy, fixed scope; never inferred from pagination',()=>{
+  const s=L.pdfEditor({...EDITOR,continuationStyle:{...STYLE,scope:'C:/Users/x/paper.pdf · Secret header text',extra:1}}).continuationStyle;
+  assert.deepEqual({...s},STYLE,'engine scope text is not echoed');assert.equal(Object.isFrozen(s),true);
+  assert.equal(L.pdfEditor({...EDITOR,pagination:true}).continuationStyle,null,'pagination true alone is not a style capability');
+  for(const bad of [null,true,'source-number-suffix',[],[STYLE],{...STYLE,supported:'true'},{...STYLE,supported:1},{...STYLE,policy:'renumber-all'},{supported:true},{policy:'source-number-suffix'}])
+    assert.equal(L.pdfEditor({...EDITOR,continuationStyle:bad}).continuationStyle,null,JSON.stringify(bad));
+  assert.equal(L.pdfEditor({...EDITOR,pagination:false,continuationStyle:STYLE}).continuationStyle,null,'no style without pagination');
+  assert.notEqual(L.pdfEditor({...EDITOR,continuationStyle:{...STYLE,supported:'x'}}),null,'malformed optional style keeps the descriptor');});
+
+test('mode line: declared style explains unchanged originals and decimal suffix; copy claimed only per report',async()=>{
+  let w=world(STYLED);await w.ready();const mt=text(w.get('red-export-mode'));
+  assert.match(mt,/추가 페이지에도 원본 머리말·꼬리말 텍스트와 글꼴을 이어갑니다\. 원래 쪽번호는 유지하고 추가 쪽번호는 10\.1처럼 표기합니다\. 이미지·도형 머리말·꼬리말이 있으면 내보내기를 차단합니다\. 실제 적용 여부는 다운로드 결과에 표시합니다\./);
+  assert.doesNotMatch(mt,/본문만 담고 머리말·꼬리말·쪽번호가 없으며/);assert.doesNotMatch(mt,/보이지 않|모든 형식|독립 검증 완료/);
+  w=world({...NEW,pdfEditor:{...EDITOR,continuationStyle:{...STYLE,policy:'other'}}});await w.ready();
+  assert.match(text(w.get('red-export-mode')),/본문만 담고 머리말·꼬리말·쪽번호가 없으며/,'unsupported style keeps body-only copy');assert.doesNotMatch(text(w.get('red-export-mode')),/10\.1/);});
+
+test('success: header/footer copy and suffix only when the output report declares them; malformed reports read body-only',async()=>{
+  const run=async(cap,continuationStyle)=>{const w=world(cap);await w.ready();w.reply=ok({...ACTUAL,continuationStyle});w.get('red-download').click();await flush();return w;};
+  const OK={policy:'source-number-suffix',applied:true,copiedPages:2};
+  let w=await run(STYLED,OK);let o=w.get('red-export-status').children[0].textContent;
+  assert.match(o,/엔진 보고: 추가 페이지 2쪽 모두에 원본 머리말·꼬리말 텍스트를 이어 붙였습니다\. 원래 쪽번호는 유지하고 추가 쪽번호는 10\.1처럼 표기했습니다\./);
+  assert.doesNotMatch(o,/본문만 있고|독립 검증|보이지 않/);assert.equal(text(w.get('red-export-status').children[1].children[0]),'같은 엔진 자체검사');
+  const body=async(label,over)=>{const x=world(STYLED);await x.ready();x.reply=ok({...ACTUAL,continuationStyle:OK,...over});x.get('red-download').click();await flush();const s=x.get('red-export-status').children[0].textContent;
+    assert.match(s,/추가된 이어지는 페이지에는 본문만 있고 머리말·꼬리말·쪽번호가 없으며/,label);assert.doesNotMatch(s,/이어 붙였습니다|10\.1/,label);assert.equal(x.downloads.length,2,label);};
+  for(const bad of [undefined,null,'yes',{...OK,applied:'true'},{...OK,copiedPages:3},{...OK,copiedPages:1},{...OK,copiedPages:-1},{...OK,copiedPages:1.5},{...OK,copiedPages:'2'},
+      {policy:'source-number-suffix',applied:true},{...OK,policy:'renumber'},{...OK,copiedPages:0}])await body(JSON.stringify(bad),{continuationStyle:bad});
+  for(const [label,over] of [['addedPages missing',{addedPages:undefined}],['addedPages mismatch',{addedPages:1}],['addedPages string',{addedPages:'2'}]])await body(label,over);
+  await body('over 32 pages',{pagination:{inputPages:1,outputPages:34},addedPages:33,continuationStyle:{...OK,copiedPages:33}});
+  const edge=world(STYLED);await edge.ready();edge.reply=ok({...ACTUAL,pagination:{inputPages:1,outputPages:33},addedPages:32,continuationStyle:{...OK,copiedPages:32}});edge.get('red-download').click();await flush();
+  assert.match(edge.get('red-export-status').children[0].textContent,/추가 페이지 32쪽 모두에/);
+  w=world(STYLED);await w.ready();w.reply=ok({...ACTUAL,continuationStyle:OK,layoutVerified:false});w.get('red-download').click();await flush();
+  assert.match(w.status(),/^다운로드 차단/);assert.doesNotMatch(w.status(),/이어 붙였습니다/);assert.equal(w.downloads.length,0);
+  w=world(STYLED);await w.ready();w.reply=ok({...ACTUAL,pagination:{inputPages:2,outputPages:2},continuationStyle:{policy:'source-number-suffix',applied:true,copiedPages:0}});w.get('red-download').click();await flush();
+  assert.doesNotMatch(w.status(),/머리말·꼬리말|10\.1/,'no added pages, no continuation claim');});
+
+test('styled capability: failed export keeps selection, edited After and source; nothing downloads',async()=>{const w=world(STYLED);await w.ready();
+  w.reply=async()=>{throw new Error('synthetic: EDGE_SUFFIX_GLYPH_MISSING');};w.get('red-download').click();await flush();
+  assert.match(w.status(),/^다운로드 차단: synthetic: EDGE_SUFFIX_GLYPH_MISSING/);assert.match(w.status(),/After는 그대로 남아 있습니다/);assert.equal(w.downloads.length,0);assert.equal(w.get('red-handoff').hidden,true);
+  assert.equal(w.boxes()[1].checked,true);assert.equal(w.area(1).value,'in every cohort, including the untreated one');
+  w.reply=ok({...ACTUAL,continuationStyle:{policy:'source-number-suffix',applied:true,copiedPages:2}});w.get('red-download').click();await flush();
+  assert.equal(w.calls[1].body.file,w.calls[0].body.file,'same source bytes on retry');assert.deepEqual(Object.keys(w.calls[1].body).sort(),['file','fileHash','format','patches'],'no style field sent');});
 
 test('export mode line distinguishes reflow engine, legacy single-line and missing editor',async()=>{
   let w=world(NEW);await w.ready();const m=w.get('red-export-mode'),mt=text(m);

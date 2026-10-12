@@ -44,10 +44,16 @@ the upstream default binary is not a substitute for the stream-order-patched can
   Successes are cached; failures are retried after 15 s. `available` is true only after a
   successful probe. No filesystem paths are exposed.
 - `pdfEditor` = `{available, configured, engine:'falsify-pdf-editor', version, wasmSha256,
-  reflow, pagination, limits, sourceUrl[, runtime][, error]}`. `reflow`/`pagination` are
+  reflow, pagination, continuationStyle, limits, sourceUrl[, runtime][, error]}`. `reflow`/`pagination` are
   booleans; a module descriptor counts only when `.supported === true`. Until the editor
   exports `EDITOR_CAPABILITIES`, reflow is true and pagination false. The legacy `pdf`
   boolean reflects editor availability when configured.
+- `continuationStyle` is `null` unless the engine's `--capabilities` output declares
+  `continuationStyle:{supported:true, policy:'source-number-suffix'}` and `pagination` is true;
+  it is never inferred from pagination. When declared it is `{supported:true,
+  policy:'source-number-suffix', scope}` with a fixed scope text (text-only source-style
+  header/footer; standalone Arabic source number plus decimal suffix; originals unchanged).
+  The engine's own scope string is not echoed, so no document text or path reaches the page.
 - Export: same wire format `{format:'PDF', fileHash, file, patches:[{label:'PDF p. N',
   before, after, …}]}`. Unknown fields are rejected; labels must be exactly `PDF p. N`
   (N >= 1, no leading zero) and map to `pageIndex = N-1`; edit ids are `edit-<i>` by order.
@@ -68,6 +74,12 @@ the upstream default binary is not a substitute for the stream-order-patched can
   booleans, runtime hashes, edit statuses, warning codes, `diagnostics` (codes only),
   `independentQA:'pending'` and the same-engine boundary. Missing facts are null, never
   invented (`wrappedLines` stays null until the editor reports it).
+- `verification.continuationStyle` is `{policy:'source-number-suffix', applied:true,
+  copiedPages}` only when the capability was declared, `layoutVerified` is true, the report's
+  `continuationStyle` has that policy with `applied === true`, and `copiedPages` is an
+  integer in 1..32 equal to both the reported `addedPages` and the counted page growth.
+  Otherwise it is null (unknown or mismatched counts make no claim; there is no partial
+  success) and the UI keeps the body-only continuation wording.
 - Any editor failure is a 400 error; there is no automatic fallback to the legacy path.
 
 ## Limits
@@ -77,8 +89,14 @@ Long After text wraps and can continue onto added pages in a bounded, single-col
 unrotated, uncropped top-level body flow. Default budget: eight added pages per document;
 each Before/After remains limited to 4000 characters and the web request to 12 selected edits.
 Original page headers, footers and downstream page contents remain unchanged. Added pages
-currently contain body lines only: running headers, footers and page numbers are not copied,
-and existing page numbers are not renumbered. This is not invisible editing or complete
+contain body lines only unless the engine declares the `source-number-suffix` continuation
+style and the output report confirms it for every added page: then the source text headers
+and footers continue on added pages in the source fonts, original page numbers stay as they
+are, and a standalone Arabic page number on an added page reads as the source number plus a
+decimal suffix (e.g. 10.1). Image or vector header/footer graphics are not supported and the
+engine refuses the export instead of omitting them. Existing page numbers are never
+renumbered. The UI states header/footer copying only when the output report declares it;
+it is a same-engine report, not independent verification. This is not invisible editing or complete
 original-layout preservation. Tables, images inside the continued flow, ambiguous columns
 and other unsupported layouts fail explicitly without truncation, flattening or legacy fallback.
 See [pagination scope](https://github.com/Shinick-Han/falsify-pdf-editor/blob/main/docs/PAGINATION.md).

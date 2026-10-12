@@ -31,6 +31,12 @@ CHECK_BOUNDARY = ('Same-engine self-check only (same PDFium build re-reads the s
 LABEL = re.compile(r'PDF p\. ([1-9][0-9]{0,3})')
 HEX64 = re.compile(r'[0-9a-f]{64}')
 CODE = re.compile(r'[A-Z][A-Z0-9_]{0,63}')
+# Continuation header/footer policy the UI knows how to describe. The scope text is fixed here,
+# never echoed from the engine, so no document text or filesystem path can reach the page.
+CONTINUATION_POLICY = 'source-number-suffix'
+CONTINUATION_SCOPE = ('text-only source-style header/footer; standalone Arabic source number plus decimal suffix; '
+    'originals unchanged')
+MAX_COPIED_PAGES = 32
 EXPORT_KEYS = {'format', 'fileHash', 'file', 'patches'}
 # Fields the current frontend sends per patch; only label/before/after reach the editor.
 PATCH_KEYS = {'label', 'before', 'after', 'id', 'segmentId', 'offset', 'edited'}
@@ -77,7 +83,7 @@ def config_from(root=None, manifest=None, source_root=None, node=None, environ=N
 
 def unconfigured_capability():
     return {'available': False, 'configured': False, 'engine': ENGINE, 'version': None, 'wasmSha256': None,
-        'reflow': False, 'pagination': False, 'limits': None, 'sourceUrl': None}
+        'reflow': False, 'pagination': False, 'continuationStyle': None, 'limits': None, 'sourceUrl': None}
 
 def default_runner(argv, *, cwd, env, timeout):
     flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
@@ -94,6 +100,23 @@ def _single_json(raw):
 
 def _hex(value): return value if isinstance(value, str) and HEX64.fullmatch(value) else None
 def _count(value): return value if type(value) is int and value >= 0 else None
+
+def _continuation_capability(value, pagination):
+    """Engine-declared continuation style, only with pagination and the exact known policy; else None.
+    Never inferred from pagination alone."""
+    if not pagination or not isinstance(value, dict) or value.get('supported') is not True or value.get('policy') != CONTINUATION_POLICY:
+        return None
+    return {'supported': True, 'policy': CONTINUATION_POLICY, 'scope': CONTINUATION_SCOPE}
+
+def _continuation_report(value, cap, layout_verified, added_pages, grown):
+    """Per-output continuation style: declared capability, verified layout, and copiedPages (1..32) equal to both the
+    reported addedPages and the counted page growth. Unknown or mismatched counts make no claim (no partial success)."""
+    if not cap.get('continuationStyle') or layout_verified is not True or not isinstance(value, dict) \
+            or value.get('policy') != CONTINUATION_POLICY or value.get('applied') is not True:
+        return None
+    copied = _count(value.get('copiedPages'))
+    if copied is None or not 0 < copied <= MAX_COPIED_PAGES or copied != added_pages or copied != grown: return None
+    return {'policy': CONTINUATION_POLICY, 'applied': True, 'copiedPages': copied}
 
 def _page_map(value):
     """Bridge-sanitized sourcePageMap: [{sourcePageIndex, outputPageIndex, continuationPageIndices}]; else None."""
@@ -172,8 +195,10 @@ class PdfEditorService:
             return self._unavailable('probe_failed'), None
         runtime = info.get('runtime') if isinstance(info.get('runtime'), dict) else {}
         source_url = info.get('sourceUrl') if isinstance(info.get('sourceUrl'), str) and re.fullmatch(r'https://[^\s]{1,300}', info['sourceUrl']) else None
+        pagination = info.get('pagination') is True
         cap = {'available': True, 'configured': True, 'engine': ENGINE, 'version': str(info.get('version'))[:40],
-            'wasmSha256': info['wasmSha256'], 'reflow': info.get('reflow') is True, 'pagination': info.get('pagination') is True,
+            'wasmSha256': info['wasmSha256'], 'reflow': info.get('reflow') is True, 'pagination': pagination,
+            'continuationStyle': _continuation_capability(info.get('continuationStyle'), pagination),
             'limits': dict(LIMITS), 'sourceUrl': source_url,
             'runtime': {'jsSha256': _hex(runtime.get('jsSha256')), 'manifestSha256': _hex(runtime.get('manifestSha256')),
                 'runtimeKind': runtime.get('runtimeKind') if runtime.get('runtimeKind') in ['candidate', 'pinned'] else None,
@@ -256,6 +281,8 @@ class PdfEditorService:
             raise fail('적용되지 않은 변경')
         page_count = report.get('pageCount') if isinstance(report.get('pageCount'), dict) else {}
         input_pages, output_pages = _count(page_count.get('source')), _count(page_count.get('output'))
+        added_pages = _count(report.get('addedPages'))
+        grown = output_pages - input_pages if input_pages is not None and output_pages is not None and output_pages >= input_pages else None
         codes = lambda items: [{'pageIndex': _count(w.get('pageIndex')), 'code': str(w.get('code'))[:64],
             **({'severity': w['severity']} if w.get('severity') in ['error', 'warning', 'info'] else {})}
             for w in (items if isinstance(items, list) else []) if isinstance(w, dict)]
@@ -273,8 +300,10 @@ class PdfEditorService:
             # Facts about this output only; null when the editor did not report them (never invented).
             'reflow': {'wrappedLines': _count(report.get('wrappedLines'))},
             'pagination': {'inputPages': input_pages, 'outputPages': output_pages},
-            'addedPages': _count(report.get('addedPages')),
+            'addedPages': added_pages,
             'sourcePageMap': _page_map(report.get('sourcePageMap')),
+            # Header/footer copy and page-number suffix only as this report declares them; null keeps the body-only reading.
+            'continuationStyle': _continuation_report(report.get('continuationStyle'), cap, layout_verified, added_pages, grown),
             'capabilities': {'reflow': cap['reflow'], 'pagination': cap['pagination']},
             'pages': output_pages,
             'edits': [{'label': e['label'], 'id': e['id'], 'pageIndex': e['pageIndex'], 'status': 'applied'} for e in edits],

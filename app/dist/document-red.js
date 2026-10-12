@@ -104,7 +104,7 @@
   const node=(tag,className,text)=>{const x=document.createElement(tag);x.className=className;x.textContent=text;return x;};
   // Success hierarchy: one ink outcome line, the self-check boundary as a discrete state, then secondary engine diagnostics. textContent only.
   function successStatus(r,limits){const e=statusText('');e.classList.toggle('error',false);
-    const out=[node('span','red-export-outcome','실험용 사본과 별도 변경 계획을 다운로드했습니다.'+(r.facts.length?' '+(r.check?'엔진 자체검사 결과: ':'')+r.facts.join(' · ')+'.':'')+(r.continuation?' '+CONTINUED:''))];
+    const out=[node('span','red-export-outcome','실험용 사본과 별도 변경 계획을 다운로드했습니다.'+(r.facts.length?' '+(r.check?'엔진 자체검사 결과: ':'')+r.facts.join(' · ')+'.':'')+(r.continuation?' '+continuedText(r):''))];
     if(r.check){const c=node('span','red-export-check','');c.append(node('span','status-label',r.check.label),' '+r.check.text);out.push(c);}
     if(r.notes?.length){const list=node('ul','red-export-notes','');for(const n of r.notes){const li=node('li','','');li.append(node('span',n.severity==='warning'||n.severity==='error'?'note-warning':'note-info',SEVERITY[n.severity]||'심각도 미보고'),' · '+n.phrase+' ',node('span','red-export-code','('+n.detail+')'));list.append(li);}out.push(list);}
     if(limits)out.push(node('span','red-export-limits',limits));
@@ -115,6 +115,10 @@
   const SCOPE='재배치 대상은 1단·회전 없음·잘림 없음인 최상위 본문 텍스트뿐이며, 그 밖의 텍스트는 재배치하지 않습니다.';
   const CONTINUATION='새로 추가되는 이어지는 페이지는 본문만 담고 머리말·꼬리말·쪽번호가 없으며, 뒤쪽 원래 페이지의 쪽번호는 다시 매기지 않습니다.';
   const CONTINUED='추가된 이어지는 페이지에는 본문만 있고 머리말·꼬리말·쪽번호가 없으며, 뒤쪽 원래 페이지의 쪽번호는 다시 매기지 않았습니다.';
+  // Engine-declared header/footer copy (policy source-number-suffix). The mode line states the capability; copying is claimed only per output report.
+  const CONTINUATION_STYLED='추가 페이지에도 원본 머리말·꼬리말 텍스트와 글꼴을 이어갑니다. 원래 쪽번호는 유지하고 추가 쪽번호는 10.1처럼 표기합니다. 이미지·도형 머리말·꼬리말이 있으면 내보내기를 차단합니다. 실제 적용 여부는 다운로드 결과에 표시합니다.';
+  // Claimed only for a whole-output report (every added page copied); anything else reads as the body-only result.
+  function continuedText(r){return r.style?'엔진 보고: 추가 페이지 '+r.style.copiedPages+'쪽 모두에 원본 머리말·꼬리말 텍스트를 이어 붙였습니다. 원래 쪽번호는 유지하고 추가 쪽번호는 10.1처럼 표기했습니다.':CONTINUED;}
   // Engine source link is display-only and comes from the bridge-sanitized descriptor; re-checked here, never fetched.
   const SOURCE=/^https:\/\/github\.com\/Shinick-Han\/[A-Za-z0-9._~\/-]{1,250}$/;
   const LIMITS={maxEdits:n=>'변경 최대 '+n+'개',maxTextChars:n=>'After 최대 '+n.toLocaleString()+'자',maxAddedPages:n=>'추가 페이지 최대 '+n+'쪽',maxFileBytes:n=>'파일 최대 '+Math.floor(n/1048576)+' MB'};
@@ -123,10 +127,17 @@
     if(typeof e.sourceUrl==='string'&&SOURCE.test(e.sourceUrl)){const a=node('a','red-engine-source','엔진 소스');a.href=e.sourceUrl;a.target='_blank';a.rel='noopener noreferrer';out.push(' (',a,')');}
     return out;}
   function pdfModeText(m){const e=m.engine,limit=e?limitText(e.limits):'',tail=limit?' 엔진 제한: '+limit+'.':'';
-    if(m.kind==='reflow')return [...engineName(e),' · 원래 줄 공간을 넘는 After는 줄바꿈 재배치'+(e.pagination?'와 필요 시 이어지는 페이지 추가':'(페이지 추가는 미지원)')+'를 시도합니다. '+SCOPE+(e.pagination?' '+CONTINUATION:'')+' 실제 줄바꿈·페이지 수는 출력 사본의 엔진 자체검사 결과로만 표시합니다.'+tail];
+    if(m.kind==='reflow')return [...engineName(e),' · 원래 줄 공간을 넘는 After는 줄바꿈 재배치'+(e.pagination?'와 필요 시 이어지는 페이지 추가':'(페이지 추가는 미지원)')+'를 시도합니다. '+SCOPE+(e.pagination?' '+(styled(e)?CONTINUATION_STYLED:CONTINUATION):'')+' 실제 줄바꿈·페이지 수는 출력 사본의 엔진 자체검사 결과로만 표시합니다.'+tail];
     if(m.kind==='editor')return [...engineName(e),' · 이 버전은 줄바꿈 재배치를 지원하지 않아 원래 줄 공간에 들어가는 변경만 가능합니다.'+tail];
     return ['기존 한 줄 보존 편집 · 원래 줄 공간에 들어가는 변경만 가능하며 줄바꿈·페이지 추가가 필요한 After는 차단됩니다.'+(e?' '+MISSING_ENGINE:' 긴 After의 줄바꿈 재배치는 최신 companion이 필요합니다.')];}
   const whole=x=>Number.isSafeInteger(x)&&x>=0;
+  const STYLE_POLICY='source-number-suffix',styled=e=>e?.pagination===true&&e.continuationStyle?.supported===true&&e.continuationStyle.policy===STYLE_POLICY;
+  // Per-output style report: exact policy, applied === true, layoutVerified === true and copiedPages in 1..32 equal to both the
+  // counted page growth and the reported addedPages. Unknown or mismatched counts make no claim (body-only reading).
+  const MAX_COPIED_PAGES=32;
+  function continuationReport(v,added){const s=v.continuationStyle;
+    return v.layoutVerified===true&&s&&typeof s==='object'&&s.policy===STYLE_POLICY&&s.applied===true&&whole(s.copiedPages)&&s.copiedPages>0&&s.copiedPages<=MAX_COPIED_PAGES
+      &&s.copiedPages===added&&s.copiedPages===v.addedPages?{copiedPages:s.copiedPages}:null;}
   function diagnostics(v){return Array.isArray(v?.diagnostics)?v.diagnostics.slice(0,5).map(x=>typeof x==='string'?x:x?.message).filter(x=>typeof x==='string'&&x.trim()).map(x=>x.slice(0,300)):[];}
   // Known engine warning codes get fixed Korean phrases; severity is shown only as reported, unknown codes keep their bounded code.
   const NOTES={engine_model_lines_stale:'엔진 내부 줄 모델이 편집 뒤 갱신되지 않았다고 보고됨',pagination_required:'긴 After를 담으려고 이어지는 페이지가 필요했다고 보고됨',content_stream_append_order:'엔진이 추가 콘텐츠의 그리기/추출 순서 확인을 요청함'};
@@ -143,7 +154,8 @@
     if(v?.engine==='falsify-pdf-editor'){const r=v.reflow,p=v.pagination,facts=[],counted=whole(p?.inputPages)&&whole(p?.outputPages)&&p.outputPages>=p.inputPages,grew=counted&&p.outputPages>p.inputPages;
       facts.push(counted?(grew?'페이지 '+p.inputPages+' → '+p.outputPages+' (새 페이지 '+(p.outputPages-p.inputPages)+'쪽)':'페이지 수 그대로 '+p.outputPages+'쪽'):'페이지 수 변화 미검증');
       facts.push(whole(r?.wrappedLines)?(r.wrappedLines?'줄바꿈 재배치 '+r.wrappedLines+'줄':'줄바꿈 없이 교체'):'줄바꿈 결과 미보고');
-      return {facts,continuation:grew,check:selfCheck(v),notes:engineNotes(v)};}
+      const added=grew?p.outputPages-p.inputPages:0;
+      return {facts,continuation:grew,style:grew?continuationReport(v,added):null,check:selfCheck(v),notes:engineNotes(v)};}
     if(v?.mode==='pdf-original-font-single-line')return {facts:['기존 한 줄 교체 · 줄바꿈·페이지 추가 없음'+(whole(v.pages)?' · '+v.pages+'쪽':'')]};
     return {facts:[]};}
   function recovery(kind){if(!kind)return '';const keep=' 선택한 후보와 직접 편집한 After는 그대로 남아 있습니다.';

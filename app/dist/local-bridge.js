@@ -27,11 +27,15 @@
     return u.protocol==='https:'&&u.host==='github.com'&&!u.username&&!u.password&&!u.search&&!u.hash&&SOURCE_PATH.test(u.pathname)?u.href:null;}
   function limits(v){if(typeof v==='string')return v.slice(0,300);if(!v||typeof v!=='object'||Array.isArray(v))return null;const out={};
     for(const [k,n] of Object.entries(v).slice(0,8))if(LIMIT_KEY.test(k)&&Number.isSafeInteger(n)&&n>=0)out[k]=n;return Object.freeze(out);}
+  // Continuation header/footer style is engine-declared, never inferred from pagination; scope text is fixed here, not echoed.
+  const CONTINUATION_POLICY='source-number-suffix',CONTINUATION_SCOPE='text-only source-style header/footer; standalone Arabic source number plus decimal suffix; originals unchanged';
+  function continuationStyle(v,pagination){if(pagination!==true||!v||typeof v!=='object'||Array.isArray(v)||v.supported!==true||v.policy!==CONTINUATION_POLICY)return null;
+    return Object.freeze({supported:true,policy:CONTINUATION_POLICY,scope:CONTINUATION_SCOPE});}
   // Optional reflow-capable PDF editor from a newer broker. A malformed core field drops the whole descriptor; the legacy pdf flag is unaffected.
   function pdfEditor(d){if(!d||typeof d!=='object'||Array.isArray(d)||d.engine!=='falsify-pdf-editor'||typeof d.available!=='boolean'||typeof d.reflow!=='boolean'||typeof d.pagination!=='boolean')return null;
     const version=typeof d.version==='string'&&ENGINE_VERSION.test(d.version)?d.version:null,wasmSha256=typeof d.wasmSha256==='string'&&HEX64.test(d.wasmSha256)?d.wasmSha256:null;
     if(d.available&&(!version||!wasmSha256))return null;
-    return Object.freeze({available:d.available,engine:d.engine,version,wasmSha256,reflow:d.reflow,pagination:d.pagination,limits:limits(d.limits),sourceUrl:sourceUrl(d.sourceUrl)});}
+    return Object.freeze({available:d.available,engine:d.engine,version,wasmSha256,reflow:d.reflow,pagination:d.pagination,continuationStyle:continuationStyle(d.continuationStyle,d.pagination),limits:limits(d.limits),sourceUrl:sourceUrl(d.sourceUrl)});}
   function pdfText(c){const e=c.pdfEditor;if(e?.available)return ' · PDF 편집 '+(e.reflow?'줄바꿈 재배치'+(e.pagination?'·페이지 추가':''):'한 줄 교체')+' ('+e.engine+' '+e.version+')';
     return ' · PDF 보존 '+(c.pdf?'한 줄 교체만':'불가')+(e?' · PDF 편집 엔진 미준비':'');}
   const NETWORK='로컬 broker에 닿지 못했습니다. 서버 미실행·포트 불일치·--web-origin 누락(CORS 거부)·브라우저 로컬 네트워크 권한 차단 중 하나일 수 있습니다. 브라우저는 원인을 구분해 알려주지 않습니다.';

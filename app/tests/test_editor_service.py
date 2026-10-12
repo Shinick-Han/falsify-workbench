@@ -21,6 +21,7 @@ import server
 SOURCE=b'%PDF-1.7 synthetic bytes only'
 OUTPUT=b'%PDF-1.7 synthetic edited bytes'
 WASM='12e43c4c2e7deedab629c3b08b14fc0b24c1336f92b7de30ac58d7ec6dcbb833'
+STYLE={'supported':True,'policy':'source-number-suffix','scope':'text-only source-style header/footer; standalone Arabic source number plus decimal suffix; originals unchanged'}
 def payload(**over):
     d={'format':'PDF','fileHash':hashlib.sha256(SOURCE).hexdigest(),'file':base64.b64encode(SOURCE).decode(),
        'patches':[{'id':'c1','segmentId':'s1','label':'PDF p. 3','before':'the result holds','after':'the result may hold','offset':4,'edited':False}]}
@@ -97,6 +98,18 @@ class CapabilityTests(Base):
     def test_pagination_descriptor_must_be_bool_true(self):
         caps={'ok':True,'engine':'falsify-pdf-editor','version':'1','wasmSha256':WASM,'reflow':True,'pagination':{'supported':True}}
         self.assertIs(self.service(caps=caps).capability()['pagination'],False)
+    def test_continuation_style_declared_exact_and_path_free(self):
+        base={'ok':True,'engine':'falsify-pdf-editor','version':'1','wasmSha256':WASM,'reflow':True,'pagination':True}
+        self.assertIsNone(self.service(caps=base).capability()['continuationStyle'],'pagination true alone is not a style capability')
+        self.assertIsNone(self.service().capability()['continuationStyle'],'older engine without the field')
+        cap=self.service(caps={**base,'continuationStyle':{**STYLE,'scope':str(self.base/'paper.pdf')+' header text','extra':1}}).capability()
+        self.assertEqual(cap['continuationStyle'],{'supported':True,'policy':'source-number-suffix','scope':es.CONTINUATION_SCOPE})
+        self.assertNotIn(self.tmp.name.lower(),json.dumps(cap).lower());self.assertNotIn('header text',json.dumps(cap))
+        for bad in [None,True,'source-number-suffix',[STYLE],{**STYLE,'supported':'true'},{**STYLE,'supported':1},{**STYLE,'policy':'renumber-all'},{'supported':True}]:
+            with self.subTest(bad=bad):
+                cap=self.service(caps={**base,'continuationStyle':bad}).capability();self.assertTrue(cap['available']);self.assertIsNone(cap['continuationStyle'])
+        self.assertIsNone(self.service(caps={**base,'pagination':False,'continuationStyle':STYLE}).capability()['continuationStyle'],'no style without pagination')
+        self.assertIsNone(es.unconfigured_capability()['continuationStyle'])
     def test_unavailable_reasons(self):
         self.assertEqual(self.service(version=b'v22.1.0\n').capability()['error']['code'],'node_too_old')
         self.assertEqual(self.service(caps={'ok':False,'code':'CANDIDATE_HASH_MISMATCH'}).capability()['error']['code'],'probe_failed')
@@ -159,6 +172,27 @@ class ExportTests(Base):
                 v=self.service(edit=over).export(payload())['verification'];self.assertIs(v['layoutVerified'],False)
         v=self.service(edit={'warnings':[{'code':'edge_edit_unverified','severity':'warning','pageIndex':1}],'sourcePageMap':['C:/x'],'wrappedLines':-2}).export(payload())['verification']
         self.assertEqual((v['diagnostics'],v['sourcePageMap'],v['reflow']['wrappedLines'],v['layoutVerified']),(['edge_edit_unverified (p. 2)'],None,None,True))
+    def test_continuation_style_only_when_declared_and_reported(self):
+        styled={'ok':True,'engine':'falsify-pdf-editor','version':'1','wasmSha256':WASM,'reflow':True,'pagination':True,'continuationStyle':STYLE}
+        grown={'pageCount':{'source':5,'output':7},'addedPages':2}
+        report=lambda style,**kw:{**grown,**kw,'continuationStyle':style}
+        v=self.service(caps=styled,edit=report({'policy':'source-number-suffix','applied':True,'copiedPages':2,'text':'Running head','path':'C:/x'})).export(payload())['verification']
+        self.assertEqual(v['continuationStyle'],{'policy':'source-number-suffix','applied':True,'copiedPages':2})
+        ok={'policy':'source-number-suffix','applied':True,'copiedPages':2}
+        for bad in [None,'yes',[],{**ok,'applied':'true'},{**ok,'copiedPages':3},{**ok,'copiedPages':1},{**ok,'copiedPages':0},{**ok,'copiedPages':-1},{**ok,'copiedPages':True},
+                {**ok,'copiedPages':2.0},{'policy':'source-number-suffix','applied':True},{**ok,'policy':'other'}]:
+            with self.subTest(bad=bad):
+                v=self.service(caps=styled,edit=report(bad)).export(payload())['verification'];self.assertIsNone(v['continuationStyle']);self.assertIs(v['layoutVerified'],True)
+        for over in [{'addedPages':None},{'addedPages':1},{'pageCount':{'source':5,'output':6}},{'pageCount':{'source':5}},{'pageCount':None},{'layoutVerified':False},
+                {'warnings':[{'code':'x','severity':'error','pageIndex':0}]}]:
+            with self.subTest(over=over):
+                self.assertIsNone(self.service(caps=styled,edit=report(ok,**over)).export(payload())['verification']['continuationStyle'],'unknown/mismatched counts or unverified layout: no claim')
+        big={'policy':'source-number-suffix','applied':True,'copiedPages':33}
+        self.assertIsNone(self.service(caps=styled,edit=report(big,pageCount={'source':1,'output':34},addedPages=33)).export(payload())['verification']['continuationStyle'],'over 32')
+        edge={'policy':'source-number-suffix','applied':True,'copiedPages':32}
+        self.assertEqual(self.service(caps=styled,edit=report(edge,pageCount={'source':1,'output':33},addedPages=32)).export(payload())['verification']['continuationStyle']['copiedPages'],32)
+        self.assertIsNone(self.service(edit=report(ok)).export(payload())['verification']['continuationStyle'],'undeclared capability ignores the report')
+        self.assertIsNone(self.service().export(payload())['verification']['continuationStyle'],'older report without the field')
     def test_output_oversize(self):
         svc=self.service(edit='oversize')
         with patch.dict(es.LIMITS,{'maxOutputBytes':16}):
