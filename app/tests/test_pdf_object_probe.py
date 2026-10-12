@@ -4,6 +4,7 @@ import hashlib
 import json
 import sys
 import unittest
+import zlib
 from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'local'))
@@ -37,6 +38,11 @@ def wrap(prefix,suffix=b''):
     return draw
 INLINE=b'\nq 100 0 0 100 150 50 cm BI /W 2 /H 2 /CS /RGB /BPC 8 ID \xff\x00\x00\x00\xff\x00\x00\x00\xff\xff\xff\xff EI Q\n'
 def images(probe,kind='image'):return [o for o in probe['occurrences'] if o['kind']==kind]
+def chunk(kind,data):return len(data).to_bytes(4,'big')+kind+data+zlib.crc32(kind+data).to_bytes(4,'big')
+def raw_png(width,height,depth=8,colour=2,idat=None):
+    """Hand-built PNG whose IHDR claims width x height; idat defaults to a tiny deflate stream (a bomb when dims are huge)."""
+    ihdr=width.to_bytes(4,'big')+height.to_bytes(4,'big')+bytes([depth,colour,0,0,0])
+    return op.PNG_SIGNATURE+chunk(b'IHDR',ihdr)+chunk(b'IDAT',zlib.compress(b'\0'*4096) if idat is None else idat)+chunk(b'IEND',b'')
 
 class ProbeTests(unittest.TestCase):
     def test_corpus_shared_image_occurrence_is_two_placements_of_one_xref(self):
@@ -138,6 +144,25 @@ class ProbeTests(unittest.TestCase):
             probe=op.build_object_probe(busy)
         self.assertEqual((len(probe['occurrences']),probe['pages'][0]['truncated'],probe['complete']),(2,True,False))
 
+    def test_placement_budgets_leave_count_incomplete_and_nothing_inspected(self):
+        two_pages=build([image((20,20,120,120)),image((20,20,120,120),2)])
+        self.assertEqual([o['capability'] for o in images(op.build_object_probe(two_pages))],['inspected','inspected'])
+        with patch.dict(op.LIMITS,{'maxPlacements':1}):
+            probe=op.build_object_probe(two_pages)
+        self.assertFalse(probe['complete'])
+        for o in images(probe):
+            self.assertFalse(o['sharedUse']['complete']);self.assertIn('shared-use-incomplete',o['reasons']);self.assertEqual(o['capability'],'ambiguous')
+        busy=build([both(image((20,20,60,60),1),image((80,80,120,120),2),image((140,140,180,180),3))])
+        with patch.dict(op.LIMITS,{'maxPagePlacements':2}):
+            probe=op.build_object_probe(busy)
+        self.assertEqual((probe['complete'],probe['pages'][0]['truncated'],len(images(probe))),(False,True,2))
+        self.assertTrue(all({'page-truncated','shared-use-incomplete'}<=set(o['reasons']) and o['capability']=='ambiguous' for o in images(probe)))
+        self.assertEqual(len(probe['resources']),2)
+        drawn=build([both(image((20,20,120,120)),lambda d,p:[p.draw_rect(R(150+10*k,150,155+10*k,160)) for k in range(3)])])
+        with patch.dict(op.LIMITS,{'maxPageDrawings':1}):
+            (o,)=images(op.build_object_probe(drawn))
+        self.assertEqual(o['capability'],'ambiguous');self.assertIn('page-truncated',o['reasons'],'clips past the drawing budget are unknown')
+
     def test_ids_are_deterministic_and_bound_to_source(self):
         a=build([image((20,20,120,120))]);b=build([image((20,20,120,120),5)])
         ida=images(op.build_object_probe(a))[0]['id']
@@ -221,6 +246,42 @@ class PrototypeTests(unittest.TestCase):
         src=mixed();occ=images(op.build_object_probe(src))[0]['id']
         for bad in (b'',b'not png',png(3,alpha=True)):
             self.assertEqual(self.replace(src,occ,new=bad)['reason'],'replacement-invalid')
+
+    def test_replacement_header_is_checked_before_any_decode(self):
+        src=mixed();occ=images(op.build_object_probe(src))[0]['id']
+        good=png(9);bad_crc=bytearray(good);bad_crc[29]^=0xFF
+        jpeg=pymupdf.Pixmap(good).tobytes('jpeg')
+        cases={'replacement-over-budget':[raw_png(65535,65535),raw_png(2049,2048),good+b'\0'*op.LIMITS['maxReplacementBytes']],
+            'replacement-invalid':[jpeg,raw_png(4,4,colour=6),raw_png(4,4,colour=0),raw_png(4,4,colour=3),raw_png(4,4,depth=16),
+                raw_png(0,4),bytes(bad_crc),good[:30],b'GIF89a'+good]}
+        with patch.object(pymupdf,'Pixmap',side_effect=AssertionError('decoder reached')) as decoder:
+            for reason,blobs in cases.items():
+                for blob in blobs:
+                    res=self.replace(src,occ,new=blob)
+                    self.assertEqual((res['status'],res['reason'],res['output']),('refused',reason,None))
+            self.assertEqual(decoder.call_count,0)
+        corrupt=raw_png(4,4,idat=b'not deflate')   # header passes; the decoder still rejects the samples
+        self.assertEqual(self.replace(src,occ,new=corrupt)['reason'],'replacement-invalid')
+
+    def test_giant_pages_are_refused_before_any_raster(self):
+        unique=lambda d,p:p.insert_image(R(20,20,120,120),stream=png(1))
+        def mediabox_only(d,p):
+            unique(d,p);d.xref_set_key(p.xref,'MediaBox','[0 0 30000 300]');d.xref_set_key(p.xref,'CropBox','[0 0 300 300]')
+        sources=[build([unique],size=(5000,300)),build([unique],size=(3000,3000)),build([unique,mediabox_only])]
+        with patch.object(pymupdf.Page,'get_pixmap',side_effect=AssertionError('raster reached')) as raster:
+            for src in sources:
+                res=op.synthetic_replace_unique_image(src,sha(src),images(op.build_object_probe(src))[0]['id'],png(9))
+                self.assertEqual((res['status'],res['reason'],res['output'],res['proof']),('refused','page-over-budget',None,None))
+            src=mixed();occ=images(op.build_object_probe(src))[0]['id']
+            with patch.dict(op.LIMITS,{'maxProofPixels':100000}):
+                self.assertEqual(self.replace(src,occ)['reason'],'page-over-budget','two 300x300 pages exceed the document budget')
+            with patch.object(op,'_raster_refusal',side_effect=[None,'page-over-budget']) as preflight:
+                res=self.replace(src,occ)
+            self.assertEqual((res['reason'],res['output'],preflight.call_count),('output-page-over-budget',None,2))
+            self.assertEqual(raster.call_count,0)
+        inf=type('Doc',(),{'page_count':1,'__getitem__':lambda s,i:type('P',(),{'mediabox':R(0,0,float('inf'),100),'rect':R(0,0,100,100)})()})()
+        self.assertEqual(op._raster_refusal(inf),'page-over-budget')
+        self.assertEqual(self.replace(src,occ)['status'],'replaced','the same source passes inside the default budgets')
 
     def test_identical_replacement_fails_proof(self):
         src=build([image((20,20,120,120),1)])

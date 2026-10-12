@@ -15,12 +15,16 @@ One image XObject (xref) may be placed many times: sharedUse counts its rendered
 expanded) and the indirect references to it from every object, or says complete=False when a budget stopped the count.
 capability is inspected|unsupported|ambiguous and is never an editability guarantee: 'inspected' only means this
 occurrence is the sole use of a page-level image XObject on an identity page with no detected clip, form, mask, shared
-use or repeated placement. Nothing here writes a PDF except the synthetic prototype, which works on a private copy.
+use, repeated placement or page truncation. Nothing here writes a PDF except the synthetic prototype, which works on a
+private copy.
+Bounds are counts, sizes and loop budgets checked in Python; PyMuPDF still materializes each page's native result list
+(image info, image listing, drawings, bbox log) before its length is checked, and no OS memory/time limit is applied.
 """
 import hashlib
 import json
 import math
 import re
+import zlib
 
 SCHEMA = 'falsify.pdf-object-probe.v1'
 REPLACE_SCHEMA = 'falsify.pdf-object-replace-prototype.v1'
@@ -28,13 +32,17 @@ POLICY = 'inventory-only'
 CAPABILITIES = ('inspected', 'unsupported', 'ambiguous')
 REASONS = ('inline-image', 'vector-no-object-identity', 'shading-no-object-identity', 'shared-xref', 'shared-use-incomplete',
     'via-form', 'multiple-resource-names', 'resource-unresolved', 'soft-mask', 'transform-not-axis-aligned', 'clip-uncertain',
-    'repeated-bbox', 'page-geometry', 'degenerate-bbox')
+    'repeated-bbox', 'page-geometry', 'degenerate-bbox', 'page-truncated')
 OPERATIONS = {'replaceImageOccurrence': 'unsupported', 'replaceSharedImageOccurrence': 'unsupported',
     'replaceUniqueImageXObject': 'synthetic-prototype-only'}
 SYNTHETIC_KEYWORD = 'falsify-synthetic-object-fixture'
 LIMITS = {'maxFileBytes': 25 * 1024 * 1024, 'maxPages': 10000, 'maxProbePages': 64, 'maxCountPages': 512,
-    'maxObjects': 200000, 'maxPageDrawings': 5000, 'maxPageOccurrences': 500, 'maxOccurrences': 4000,
-    'maxProofPages': 16, 'maxReplacementPixels': 2048 * 2048}
+    'maxObjects': 200000, 'maxPagePlacements': 2000, 'maxPlacements': 20000, 'maxPageDrawings': 5000,
+    'maxPageOccurrences': 500, 'maxOccurrences': 4000, 'maxProofPages': 16, 'maxProofSide': 4000,
+    'maxProofPagePixels': 4000000, 'maxProofPixels': 16000000, 'maxReplacementBytes': 16 * 1024 * 1024,
+    'maxReplacementPixels': 2048 * 2048}
+PNG_SIGNATURE = b'\x89PNG\r\n\x1a\n'
+PNG_RGB8 = (b'\x08\x02\x00\x00\x00', b'\x08\x02\x00\x00\x01')   # bit depth 8, colour type 2 (RGB), deflate, filter 0, any interlace
 ORIGIN_TOLERANCE = 0.01
 AXIS_TOLERANCE = 1e-6
 _REF = re.compile(rb'(\d+)\s+(\d+)\s+R\b')
@@ -64,10 +72,14 @@ def _page_supported(page):
         and near(c.width, m.width) and near(c.height, m.height)
 
 def _placements(doc):
-    """{xref: {'placements': n, 'pages': [page indices]}} of rendered image placements over the source, and completeness."""
-    uses, count = {}, min(doc.page_count, LIMITS['maxCountPages'])
+    """{xref: {'placements': n, 'pages': [page indices]}} of rendered image placements over the source, and completeness.
+    The count stops incomplete when the page, per-page placement or total placement budget is exceeded."""
+    uses, total, count = {}, 0, min(doc.page_count, LIMITS['maxCountPages'])
     for pno in range(count):
-        for info in doc[pno].get_image_info(xrefs=True):
+        infos = doc[pno].get_image_info(xrefs=True)
+        total += len(infos)
+        if len(infos) > LIMITS['maxPagePlacements'] or total > LIMITS['maxPlacements']: return uses, False
+        for info in infos:
             xref = info.get('xref') or 0
             if xref > 0:
                 use = uses.setdefault(xref, {'placements': 0, 'pages': []})
@@ -102,9 +114,10 @@ def _occurrence_id(source_sha256, page_index, kind, ordinal, xref, bbox, transfo
     key = json.dumps([source_sha256, page_index, kind, ordinal, xref, bbox, transform], separators=(',', ':'))
     return 'occ-' + _sha(key.encode('utf-8'))[:24]
 
-def _image_reasons(mupdf, info, xref, listing, uses, uses_complete, refs, refs_complete, clips, repeated, geometry):
+def _image_reasons(mupdf, info, xref, listing, uses, uses_complete, refs, refs_complete, clips, repeated, geometry, truncated):
     reasons = []
     if not geometry: reasons.append('page-geometry')
+    if truncated: reasons.append('page-truncated')
     bbox = mupdf.Rect(info['bbox'])
     if not _finite(info['bbox']) or bbox.is_empty: reasons.append('degenerate-bbox')
     a, b, c, d = (tuple(info.get('transform') or ()) + (0, 0, 0, 0))[:4]
@@ -124,25 +137,27 @@ def _image_reasons(mupdf, info, xref, listing, uses, uses_complete, refs, refs_c
     return reasons
 
 def _page_occurrences(mupdf, page, page_index, source_sha256, uses, uses_complete, refs, refs_complete):
-    """(occurrences, truncated) for one page; images in content order, then vector paths, then shadings."""
+    """(occurrences, truncated) for one page; images in content order, then vector paths, then shadings. When placements,
+    resource listing or drawings exceed their page budget, clips/repeats are not fully known: images get 'page-truncated'."""
     geometry = _page_supported(page)
-    infos = page.get_image_info(xrefs=True)
-    listing = page.get_images(full=True)
+    infos, listing = page.get_image_info(xrefs=True), page.get_images(full=True)
     drawings = page.get_drawings(extended=True)
-    truncated = len(drawings) > LIMITS['maxPageDrawings']
-    drawings = drawings[:LIMITS['maxPageDrawings']]
+    placed, drawn = LIMITS['maxPagePlacements'], LIMITS['maxPageDrawings']
+    truncated = len(infos) > placed or len(listing) > placed or len(drawings) > drawn
+    infos, listing, drawings = infos[:placed], listing[:placed], drawings[:drawn]
     clips = _clips(drawings)
     boxes = [tuple(_round(i['bbox'])) for i in infos]
-    out, ordinals = [], {}
+    out, ordinals, cap = [], {}, LIMITS['maxPageOccurrences']
     def add(kind, xref, bbox, transform, names, shared, capability, reasons):
         ordinal = ordinals[kind] = ordinals.get(kind, -1) + 1
         out.append({'id': _occurrence_id(source_sha256, page_index, kind, ordinal, xref, bbox, transform),
             'pageIndex': page_index, 'kind': kind, 'ordinal': ordinal, 'xref': xref, 'resourceNames': names, 'bbox': bbox,
             'transform': transform, 'sharedUse': shared, 'capability': capability, 'reasons': reasons})
     for info, box in zip(infos, boxes):
+        if len(out) > cap: break
         xref = info.get('xref') or 0
         reasons = _image_reasons(mupdf, info, xref, listing, uses, uses_complete, refs, refs_complete, clips,
-            boxes.count(box) > 1, geometry)
+            boxes.count(box) > 1, geometry, truncated)
         shared = None
         if xref:
             use = uses.get(xref, {'placements': 0, 'pages': []})
@@ -152,11 +167,12 @@ def _page_occurrences(mupdf, page, page_index, source_sha256, uses, uses_complet
         add('image' if xref else 'inline-image', xref, list(box), _round(info.get('transform') or ()),
             sorted({e[7] for e in listing if e[0] == xref}) if xref else [], shared, capability, reasons)
     for d in drawings:
+        if len(out) > cap: break
         if d.get('type') in ('f', 's', 'fs') and d.get('rect') is not None:
             add('vector', 0, _round(d['rect']), None, [], None, 'unsupported', ['vector-no-object-identity'])
     for kind, rect in page.get_bboxlog():
+        if len(out) > cap: break
         if kind == 'fill-shade': add('shading', 0, _round(rect), None, [], None, 'unsupported', ['shading-no-object-identity'])
-    cap = LIMITS['maxPageOccurrences']
     return out[:cap], truncated or len(out) > cap
 
 def build_object_probe(source_bytes, page_indices=None):
@@ -174,7 +190,7 @@ def build_object_probe(source_bytes, page_indices=None):
         indices = indices[:LIMITS['maxProbePages']]
         uses, uses_complete = _placements(doc)
         wanted = set(uses)
-        for i in indices: wanted.update(e[0] for e in doc[i].get_images(full=True))
+        for i in indices: wanted.update(e[0] for e in doc[i].get_images(full=True)[:LIMITS['maxPagePlacements']])
         refs, refs_complete = _references(doc, wanted)
         seen = []
         for i in indices:
@@ -202,8 +218,34 @@ def _refuse(result, reason):
     result.update(status='refused', reason=reason, output=None, outputSha256=None)
     return result
 
+def _raster_refusal(doc):
+    """'page-over-budget' unless every page's MediaBox and rendered rect are finite, positive and within the 72 dpi side,
+    per-page pixel and whole-document pixel budgets, else None. Geometry only: run before any page of doc is rasterized."""
+    side, total = LIMITS['maxProofSide'], 0
+    for pno in range(doc.page_count):
+        page = doc[pno]
+        for r in (page.mediabox, page.rect):
+            if not _finite(tuple(r)) or not (0 < r.width <= side and 0 < r.height <= side): return 'page-over-budget'
+        pixels = (math.ceil(page.rect.width) + 1) * (math.ceil(page.rect.height) + 1)
+        total += pixels
+        if pixels > LIMITS['maxProofPagePixels'] or total > LIMITS['maxProofPixels']: return 'page-over-budget'
+    return None
+
+def _png_header(data):
+    """(refusal, (width, height)) from the PNG signature and IHDR alone, before any decoder sees the bytes. Only a bounded,
+    8-bit RGB (no alpha, no palette) PNG with a CRC-valid IHDR inside the pixel budget passes."""
+    if len(data) > LIMITS['maxReplacementBytes']: return 'replacement-over-budget', None
+    if len(data) < 33 or not data.startswith(PNG_SIGNATURE) or data[8:16] != b'\x00\x00\x00\x0dIHDR' \
+            or zlib.crc32(data[12:29]) != int.from_bytes(data[29:33], 'big') or data[24:29] not in PNG_RGB8:
+        return 'replacement-invalid', None
+    width, height = int.from_bytes(data[16:20], 'big'), int.from_bytes(data[20:24], 'big')
+    if not (width and height): return 'replacement-invalid', None
+    if width * height > LIMITS['maxReplacementPixels']: return 'replacement-over-budget', None
+    return None, (width, height)
+
 def _render_proof(mupdf, source, output, target):
-    """Every page renders pixel-identically except inside the target placement (dilated 2 px), which must change."""
+    """Every page renders pixel-identically except inside the target placement (dilated 2 px), which must change.
+    Callers must have passed both documents through _raster_refusal first."""
     a, b = mupdf.open(stream=source, filetype='pdf'), mupdf.open(stream=output, filetype='pdf')
     try:
         proof = {'pagesCompared': a.page_count, 'identicalPages': 0, 'outsideIdentical': False, 'targetChanged': False}
@@ -230,19 +272,25 @@ def synthetic_replace_unique_image(source_bytes, source_sha256, occurrence_id, r
     """SYNTHETIC-ONLY prototype: replace the samples of one image XObject that is used exactly once in the whole source.
     Refuses unless the source hashes to source_sha256, carries the synthetic fixture keyword, probes completely, and the
     occurrence is an 'inspected' image whose xref has one placement and one object reference. Shared xrefs are refused
-    (per-occurrence isolation is unsupported). The output is returned only with a passing rendered proof; the source bytes
-    are never modified. Not a public operation and not for real papers."""
+    (per-occurrence isolation is unsupported). The replacement PNG header and every source/output page size are checked
+    before any decode or raster. The output is returned only with a passing rendered proof; the source bytes are never
+    modified. Not a public operation and not for real papers."""
     source = _bytes(source_bytes)
+    replacement = _bytes(replacement_png)
     result = {'schema': REPLACE_SCHEMA, 'status': 'refused', 'reason': None, 'sourceSha256': _sha(source),
         'occurrenceId': occurrence_id if isinstance(occurrence_id, str) else None, 'occurrenceReasons': [], 'output': None,
         'outputSha256': None, 'proof': None}
     if not isinstance(source_sha256, str) or source_sha256 != result['sourceSha256']: return _refuse(result, 'source-identity')
+    png_refusal, size = _png_header(replacement)
+    if png_refusal: return _refuse(result, png_refusal)
     opened = _open(source)
     if opened is None: return _refuse(result, 'source-unreadable')
     mupdf, doc = opened
     try:
         if (doc.metadata or {}).get('keywords') != SYNTHETIC_KEYWORD: return _refuse(result, 'not-synthetic')
         if doc.page_count > LIMITS['maxProofPages']: return _refuse(result, 'over-budget')
+        over = _raster_refusal(doc)
+        if over: return _refuse(result, over)
         probe = build_object_probe(source)
         if probe['status'] != 'available' or not probe['complete']: return _refuse(result, 'probe-incomplete')
         target = next((o for o in probe['occurrences'] if o['id'] == occurrence_id), None)
@@ -253,9 +301,10 @@ def synthetic_replace_unique_image(source_bytes, source_sha256, occurrence_id, r
         shared = target['sharedUse']
         if target['capability'] != 'inspected' or shared['placements'] != 1 or shared['objectReferences'] != 1:
             return _refuse(result, 'occurrence-not-inspected')
-        try: pix = mupdf.Pixmap(_bytes(replacement_png))
+        try: pix = mupdf.Pixmap(replacement)
         except Exception: return _refuse(result, 'replacement-invalid')
-        if pix.alpha or pix.n != 3 or not 0 < pix.width * pix.height <= LIMITS['maxReplacementPixels']:
+        if pix.alpha or pix.n != 3 or (pix.width, pix.height) != size \
+                or not 0 < pix.width * pix.height <= LIMITS['maxReplacementPixels']:
             return _refuse(result, 'replacement-invalid')
         xref = target['xref']
         doc.update_object(xref, f'<</Type/XObject/Subtype/Image/Width {pix.width}/Height {pix.height}'
@@ -266,6 +315,13 @@ def synthetic_replace_unique_image(source_bytes, source_sha256, occurrence_id, r
         return _refuse(result, 'prototype-error')
     finally:
         doc.close()
+    try:
+        check = mupdf.open(stream=output, filetype='pdf')
+        try: over = _raster_refusal(check)
+        finally: check.close()
+    except Exception:
+        return _refuse(result, 'proof-error')
+    if over: return _refuse(result, 'output-' + over)
     try:
         proof = _render_proof(mupdf, source, output, target)
         after = build_object_probe(output)

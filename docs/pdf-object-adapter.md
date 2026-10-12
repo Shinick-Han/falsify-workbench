@@ -25,9 +25,16 @@ and no capability value in it is an editability guarantee. There is no public op
   `Page.get_drawings(extended=True)` (vector paths and clip scissors), `Page.get_bboxlog()` (shadings),
   `Document.xref_object` (indirect-reference count).
 - `sharedUse` is **source-wide**: rendered placements of that xref over every page (not just probed pages) and the
-  number of `N G R` references to it from every object. When `maxCountPages` (512) or `maxObjects` (200000) stops the
-  count, `complete` is false and the occurrence gets `shared-use-incomplete`. Probed pages are capped at 64, drawings
-  at 5000 per page, occurrences at 500 per page and 4000 overall; any cap sets `truncated`/`complete: false`.
+  number of `N G R` references to it from every object. When `maxCountPages` (512), `maxPagePlacements` (2000 image
+  placements on one page), `maxPlacements` (20000 placements in total) or `maxObjects` (200000) stops the count,
+  `complete` is false and every image occurrence gets `shared-use-incomplete`, so none stays `inspected`. Probed pages
+  are capped at 64, image placements and resource listings at 2000 per page, drawings at 5000 per page, occurrences at
+  500 per page and 4000 overall; any cap sets `truncated`/`complete: false`, and an image on a page whose placements,
+  listing or drawings were cut gets `page-truncated` (its clips/repeats are not fully known).
+- Bounds are Python-side counts and loop budgets plus the 25 MiB input cap. PyMuPDF still materializes each page's
+  native list (`get_image_info`, `get_images`, `get_drawings`, `get_bboxlog`) before its length can be checked, and no
+  OS-level memory/time limit (job object, rlimit, subprocess) is applied. A hostile page can therefore still cost one
+  page's native parse before it is refused or truncated.
 
 ### Capability
 
@@ -38,7 +45,8 @@ and no capability value in it is an editability guarantee. There is no public op
 | `unsupported` | `inline-image` (no xref), `vector-no-object-identity`, `shading-no-object-identity` |
 
 Image reasons: `shared-xref`, `shared-use-incomplete`, `via-form`, `multiple-resource-names`, `resource-unresolved`,
-`soft-mask`, `transform-not-axis-aligned`, `clip-uncertain`, `repeated-bbox`, `page-geometry`, `degenerate-bbox`.
+`soft-mask`, `transform-not-axis-aligned`, `clip-uncertain`, `repeated-bbox`, `page-geometry`, `degenerate-bbox`,
+`page-truncated`.
 `clip-uncertain` is conservative: MuPDF does not bind a clip to the image it applies to, so any clip on the page whose
 scissor does not contain the image bbox as a plain rectangle marks every image on that page.
 
@@ -59,7 +67,24 @@ test-only function. It refuses (`status: 'refused'`, no output) unless: the byte
 metadata `keywords` is exactly `falsify-synthetic-object-fixture`; at most 16 pages; the probe is complete; the
 occurrence id exists in that probe; it is an `inspected` image with one placement and one object reference; the
 replacement is an RGB PNG without alpha, at most 2048x2048. Shared xrefs are refused with
-`shared-xref-requires-occurrence-isolation`. It then rewrites only that image object's dictionary and samples in a
+`shared-xref-requires-occurrence-isolation`.
+
+Preflight before any decode or raster:
+
+- Replacement (`replacement-over-budget` / `replacement-invalid`): at most 16 MiB of bytes; PNG signature; first chunk
+  a 13-byte `IHDR` with a valid CRC; bit depth 8, colour type 2 (RGB, so no alpha and no palette), compression 0,
+  filter 0; non-zero width/height with width x height <= 2048x2048. Only then does MuPDF decode it, and the decoded
+  pixmap must still be 3-channel, alpha-free and exactly the IHDR size. A header claiming 65535x65535 over a tiny
+  deflate stream (decompression bomb), JPEG/GIF, RGBA/grey/palette/16-bit PNGs and truncated or CRC-broken headers never
+  reach the decoder.
+- Pages (`page-over-budget` for the source, `output-page-over-budget` for the output): for **every** page, MediaBox
+  and rendered page rect must be finite, positive and at most 4000 pt (= px at 72 dpi) per side; the rendered page at
+  72 dpi must be at most 4,000,000 px and the whole document at most 16,000,000 px. The source is checked right after
+  the synthetic gate and the output right before the proof, so an oversized page is never rendered even when the
+  synthetic keyword is present. The MediaBox check is deliberately conservative: a huge MediaBox with a small CropBox
+  is refused although MuPDF would only render the CropBox.
+
+It then rewrites only that image object's dictionary and samples in a
 private copy (no redaction, no cover rectangle, no content-stream change) and returns the output only if a rendered
 proof passes: every other page pixel-identical at 72 dpi, the target page pixel-identical outside the placement bbox
 dilated by 2 px, the placement visibly changed, and a re-probe showing every other occurrence and the target bbox/
@@ -104,4 +129,8 @@ shared image occurrence (corpus), same object across pages, unique image, inline
 repeated identical bbox, partial clip, form XObject (once and twice), rotated and cropped pages, budget truncation,
 deterministic source-bound ids, unreadable input, no source mutation, whole-corpus probe; prototype: unique replace
 with rendered proof and untouched shared page, shared refusal, identity/synthetic gates, unsupported/ambiguous refusal,
-invalid replacement, identical replacement fails the proof.
+invalid replacement, identical replacement fails the proof. Bounds: total/per-page placement and drawing budgets leave
+the count incomplete with no `inspected` occurrence; replacement header refusals (bomb, oversize, non-PNG, wrong colour
+type/depth, bad CRC, truncated) with `pymupdf.Pixmap` patched to fail if reached; giant-page refusals (wide side,
+page pixels, document pixels, MediaBox-only, non-finite, output preflight) with `Page.get_pixmap` patched to fail if
+reached.
