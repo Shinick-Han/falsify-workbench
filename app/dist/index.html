@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="document-red.css">
   <link rel="stylesheet" href="experiment-ledger.css">
+  <link rel="stylesheet" href="image-editor.css">
   <script src="harness-core.js" defer></script>
   <script src="local-bridge.js" defer></script>
   <script src="experiment-ledger.js" defer></script>
@@ -19,6 +20,8 @@
   <script src="document-export.js" defer></script>
   <script src="app.js" defer></script>
   <script src="document-preview.js" defer></script>
+  <script src="image-editor-core.js" defer></script>
+  <script src="image-editor.js" defer></script>
   <script src="document-red.js" defer></script>
   <script src="document-blue-core.js" defer></script>
   <script src="document-blue.js" defer></script>
@@ -107,6 +110,21 @@
             <section id="document-red" class="role-run" tabindex="-1" hidden aria-labelledby="document-red-title">
               <h3 id="document-red-title">문서 전체 RED 검토</h3><p id="red-document-summary" class="muted"></p>
               <div class="red-analysis" id="red-analysis" hidden><div class="button-row"><button class="button secondary" type="button" id="red-analyze" aria-describedby="red-analysis-note" disabled>PDF 사전분석</button></div><p id="red-analysis-note" class="muted"></p><p id="red-analysis-status" class="form-feedback" role="status" aria-live="polite"></p><details class="red-help" id="red-analysis-result" hidden><summary>사전분석 요약 · 참고용 힌트</summary><div id="red-analysis-body"></div></details></div>
+              <details class="red-help image-edit" id="image-edit" hidden><summary>그림 한 곳 교체 · 선택 사항 (PDF)</summary>
+                <p id="image-note" class="muted"></p>
+                <ul class="image-limits"><li>사람이 직접 고른 그림 한 곳을 직접 고른 PNG로 바꾸는 수동 실험입니다. RED 모델 성능이나 과학적 타당성 판정이 아니며 모델을 호출하지 않습니다.</li><li>원본 파일은 바뀌지 않습니다. 선택한 한 곳만 바꾼 별도 실험용 사본과 별도 보고서 JSON을 만듭니다.</li><li>BLUE는 현재 사본의 텍스트만 읽습니다. 이 사본은 BLUE에 자동으로 넘기지 않습니다.</li><li>Form XObject 안의 그림·인라인 그림·잘림(clip)·회전·투명도 등은 지원하지 않으며 우회하지 않습니다.</li></ul>
+                <div class="button-row"><button class="button secondary" type="button" id="image-list" aria-describedby="image-note" disabled>그림 위치 목록 불러오기</button></div>
+                <p id="image-status" class="form-feedback" role="status" aria-live="polite"></p>
+                <fieldset class="image-occurrences" id="image-occurrences" hidden><legend>교체할 그림 한 곳</legend><div id="image-rows" class="image-rows"></div></fieldset>
+                <div class="image-replace" id="image-replace" hidden>
+                  <div class="image-compare"><figure><figcaption>Before · 원본</figcaption><img id="image-before" class="image-preview" alt="" hidden><p id="image-before-note" class="muted"></p></figure><figure><figcaption>After · 직접 고른 PNG</figcaption><img id="image-after" class="image-preview" alt="" hidden><label for="image-png">교체 PNG (4 MiB·400만 픽셀·한 변 8192 px 이하)</label><input type="file" id="image-png" accept="image/png" disabled><p id="image-png-status" class="form-feedback" role="status" aria-live="polite"></p></figure></div>
+                  <p id="image-stretch" class="image-stretch" hidden></p>
+                  <label class="check-row"><input type="checkbox" id="image-consent"><span>교체한 그림은 의도적 결함 연구용 실험 사본에만 반영합니다. 실제 논문·출판물로 제출하지 않습니다.</span></label>
+                  <div class="button-row"><button class="button primary" type="button" id="image-export" disabled>선택한 한 곳만 교체한 사본 만들기</button></div>
+                  <p id="image-export-status" class="form-feedback" role="status" aria-live="polite"></p>
+                  <div class="image-result" id="image-result" hidden><code id="image-result-hash" class="image-hash"></code><div class="button-row"><button class="button secondary" type="button" id="image-download-pdf" disabled>실험용 PDF 다운로드</button><button class="button secondary" type="button" id="image-download-report" disabled>교체 보고서 JSON 다운로드</button></div><p class="muted">보고서의 렌더 검사는 같은 엔진(MuPDF)의 자체 확인입니다. 독립 검사·도메인 검수는 아직 대기 중입니다.</p></div>
+                </div>
+              </details>
               <div class="red-settings"><label>공격 단계<select id="red-level"><option value="1">L1 · 명시적 모순</option><option value="2">L2 · 필요한 조건 누락</option><option value="3">L3 · 근거 없는 해석</option></select></label></div>
               <details class="red-help advanced"><summary>고급 설정 · 최대 모델 호출</summary><div class="red-settings"><label>최대 모델 호출 (1–32)<input id="red-budget" type="number" min="1" max="32" value="8"></label></div></details>
               <label class="check-row"><input type="checkbox" id="red-consent"><span>전체 추출 텍스트를 선택 harness에 전송합니다.<small>원본 파일은 변경하지 않습니다. 사용자 코드/외부 서버는 자체 도구·격리를 관리합니다.</small></span></label>

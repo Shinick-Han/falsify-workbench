@@ -8,6 +8,9 @@
   const preview=globalThis.FalsifyPreview?.createPreview?.()||null;
   // Optional advisory PDF pre-analysis (its core bundle may be absent): explicit click only, never a model call, export gate or BLUE input.
   const A=globalThis.FalsifyPaperAnalysis||null;let analysis=null;
+  // Optional single-occurrence image replacement (its bundle may be absent): this module is its only source authority and busy owner.
+  // It receives the bound PDF file/hash, never candidates, text exports or the BLUE handoff; clear() cancels it.
+  const IMG=globalThis.FalsifyImageEditor?.mount?.({hold:imageHold})||null;
   const hash=async bytes=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))).map(x=>x.toString(16).padStart(2,'0')).join('');
   const msg=(s,error=false)=>{const e=$('#red-progress');e.textContent=s;e.classList.toggle('error',error);};
   function jsonDownload(value,name){download(new TextEncoder().encode(JSON.stringify(value,null,2)),name,'application/json');}
@@ -36,11 +39,11 @@
     $('#red-download').textContent=pdf?.kind==='reflow'?'재배치·자체검사 후 실험용 사본 다운로드':'보존 검사 후 완성본 다운로드';
     if(doc&&!supported)statusText(doc.format==='PDF'?(cap?(pdf.engine?MISSING_ENGINE+' 후보와 편집한 After는 그대로 남고, 변경 계획 JSON은 지금 저장할 수 있습니다.':'PDF 보존 검사는 PyMuPDF가 설치된 로컬 broker가 필요합니다.'):'PDF 보존 검사는 연결된 로컬 broker가 필요합니다. 변경 계획 JSON은 저장할 수 있습니다.'):'이 형식은 레이아웃 검증 렌더러가 아직 없습니다. 완성본 다운로드를 차단하고 변경 계획만 저장합니다.');
     document.querySelectorAll('#red-candidates input,#red-candidates textarea').forEach(e=>e.disabled=busy);
-    analysisControls(cap,active,count);renderRecord();renderHandoff();
+    analysisControls(cap,active,count);IMG?.sync(busy);renderRecord();renderHandoff();
     document.dispatchEvent(new CustomEvent('falsify:document-state',{detail:doc?{name:doc.name,count:candidates.length,selected:count,busy}:null}));
   }
   function cancelCurrent(){const old=job,l=jobLink;job=null;jobLink=null;if(old&&l)void l.request('/api/red/jobs/'+encodeURIComponent(old)+'/cancel',{}).catch(()=>{});}
-  function clear(){generation++;cancelCurrent();analysisReset();binding=null;doc=null;file=null;candidates=[];response=null;request=null;busy=false;invalidate();$('#document-red').hidden=true;$('#red-candidates').replaceChildren();$('#red-response').value='';$('#red-record-status').textContent='';$('#red-export').hidden=true;$('#red-consent').checked=false;$('#red-harness-consent').checked=false;$('#red-export-consent').checked=false;statusText('');msg('');controls();}
+  function clear(){generation++;cancelCurrent();analysisReset();IMG?.source(null);binding=null;doc=null;file=null;candidates=[];response=null;request=null;busy=false;invalidate();$('#document-red').hidden=true;$('#red-candidates').replaceChildren();$('#red-response').value='';$('#red-record-status').textContent='';$('#red-export').hidden=true;$('#red-consent').checked=false;$('#red-harness-consent').checked=false;$('#red-export-consent').checked=false;statusText('');msg('');controls();}
   document.addEventListener('falsify:document-clear',clear);
   // The shell asks before replacing/closing the source; cancelling the discard confirmation keeps everything.
   document.addEventListener('falsify:before-document-change',e=>{if(e.detail?.role==='red'&&!keepEdits())e.preventDefault();});
@@ -50,7 +53,7 @@
     clear();const self={};binding=self;busy=true;const {file:source,result}=event.detail;msg('원문 해시 확인 중 · 완료 전에는 harness 변경과 실행이 잠깁니다.');controls();
     try{const sourceHash=await hash(new TextEncoder().encode(result.text)),fileHash=await hash(await source.arrayBuffer());if(binding!==self)return;
       file=source;doc={revision:crypto.randomUUID(),sourceHash,fileHash,format:String(result.format).slice(0,40),name:source.name.slice(0,160),segments:result.segments.map((s,i)=>({...s,id:'s'+i}))};
-      $('#document-red').hidden=false;$('#red-document-summary').textContent=source.name+' · '+result.segments.length+'개 페이지/문단 · '+result.text.length.toLocaleString()+'자';
+      IMG?.source({file:source,fileHash,format:doc.format});$('#document-red').hidden=false;$('#red-document-summary').textContent=source.name+' · '+result.segments.length+'개 페이지/문단 · '+result.text.length.toLocaleString()+'자';
       msg('추출 텍스트 전체가 검토 대상입니다. 추출에서 빠진 이미지·수식·머리말 등은 읽었다고 주장하지 않습니다.');
     }catch(e){if(binding===self)msg('문서 바인딩 실패: '+e.message,true);}
     finally{if(binding===self){binding=null;busy=false;controls();}}
@@ -147,6 +150,8 @@
     catch(e){if(analysis===self&&current===generation)analysisText(expired?'사전분석이 '+A.DEADLINE_MS/1000+'초 안에 끝나지 않아 중단했습니다. 원본·후보·편집·다운로드 상태는 그대로입니다.':e?.analysis?e.message:ANALYSIS_FAILED,true);}
     finally{clearTimeout(timer);if(analysis===self)analysis=null;if(current===generation){busy=false;controls();}}
   });
+  // Image replacement holds the same RED busy phase as export/analysis; the release is bound to this generation and runs once.
+  function imageHold(){if(busy||!doc||binding)return null;const current=generation;let done=false;busy=true;controls();return ()=>{if(done)return;done=true;if(current===generation){busy=false;controls();}};}
   // PDF export path comes only from authenticated capabilities: reflow-capable editor, editor without reflow, legacy single-line preservation, or none.
   function pdfMode(cap){const e=cap?.pdfEditor||null;return {kind:e?.available?(e.reflow?'reflow':'editor'):cap?.pdf?'legacy':'none',engine:e};}
   const MISSING_ENGINE='줄바꿈 재배치 PDF 편집 엔진이 이 companion에 아직 준비되지 않았습니다. 위 연결 패널의 설치·실행 안내로 companion을 다시 준비한 뒤 연결하세요.';

@@ -2,7 +2,7 @@
 (function(root){
   'use strict';
   const HOST='127.0.0.1',DEFAULT_PORT=7816,WEB_ORIGIN='https://shinick-han.github.io';
-  const PATH=/^\/api\/(?:capabilities|export|paper\/inspect|(?:red|blue)\/jobs(?:\/[A-Za-z0-9%._~-]+(?:\/cancel)?)?)$/;
+  const PATH=/^\/api\/(?:capabilities|export|paper\/(?:inspect|images(?:\/export)?)|(?:red|blue)\/jobs(?:\/[A-Za-z0-9%._~-]+(?:\/cancel)?)?)$/;
   // Strict decimal port only; host and scheme are never user input.
   function parsePort(value){const s=String(value??'').trim();if(s==='')return DEFAULT_PORT;if(!/^[1-9][0-9]{3,4}$/.test(s))return null;const n=Number(s);return n>=1024&&n<=65535?n:null;}
   function validToken(t){return typeof t==='string'&&t.length>=16&&t.length<=512&&/^[A-Za-z0-9._~+/-]+=*$/.test(t);}
@@ -20,10 +20,13 @@
     return Object.freeze(out);}
   function capSnapshot(d){if(!d||typeof d!=='object'||Array.isArray(d)||typeof d.red!=='boolean'||typeof d.blue!=='boolean')return null;
     return Object.freeze({red:d.red,blue:d.blue,pdf:d.pdf===true,officeLayoutVerifiedExport:d.officeLayoutVerifiedExport===true,model:typeof d.model==='string'?d.model.slice(0,80):null,isolation:typeof d.isolation==='string'?d.isolation.slice(0,200):null,
-      cliSelection:d.cliSelection===true,cliAgents:d.cliSelection===true?agents(d.cliAgents):null,pdfEditor:pdfEditor(d.pdfEditor),paperAnalysis:paperAnalysis(d.paperAnalysis),workbenchVersion:workbenchVersion(d.workbenchVersion)});}
+      cliSelection:d.cliSelection===true,cliAgents:d.cliSelection===true?agents(d.cliAgents):null,pdfEditor:pdfEditor(d.pdfEditor),paperAnalysis:paperAnalysis(d.paperAnalysis),imageEditor:imageEditor(d.imageEditor),workbenchVersion:workbenchVersion(d.workbenchVersion)});}
   // Optional advisory PDF pre-analysis from a newer broker: exact descriptor or none. An older broker without it keeps every other path.
   const ANALYSIS_SCHEMA='falsify.pdf-analysis-summary.v1',WORKBENCH_VERSION=/^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(?:-[0-9A-Za-z]{1,16}(?:\.[0-9A-Za-z]{1,16}){0,3})?$/;
   function paperAnalysis(d){if(!d||typeof d!=='object'||Array.isArray(d)||Object.keys(d).length!==2||typeof d.available!=='boolean'||d.schema!==ANALYSIS_SCHEMA)return null;return Object.freeze({available:d.available,schema:ANALYSIS_SCHEMA});}
+  // Optional single-occurrence image replacement from a newer broker: exact descriptor or none, like pre-analysis.
+  const IMAGE_SCHEMA='falsify.image-list.v1';
+  function imageEditor(d){if(!d||typeof d!=='object'||Array.isArray(d)||Object.keys(d).length!==2||typeof d.available!=='boolean'||d.schema!==IMAGE_SCHEMA)return null;return Object.freeze({available:d.available,schema:IMAGE_SCHEMA});}
   function workbenchVersion(v){return typeof v==='string'&&v.length<=40&&WORKBENCH_VERSION.test(v)?v:null;}
   const HEX64=/^[0-9a-f]{64}$/,ENGINE_VERSION=/^[0-9A-Za-z][0-9A-Za-z.+_-]{0,39}$/,LIMIT_KEY=/^[A-Za-z][A-Za-z0-9]{0,31}$/,SOURCE_PATH=/^\/Shinick-Han\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._~-]+)*\/?$/;
   // Engine source link is display-only: https://github.com/Shinick-Han/... with no credentials, port, query or fragment.
@@ -42,7 +45,7 @@
     return Object.freeze({available:d.available,engine:d.engine,version,wasmSha256,reflow:d.reflow,pagination:d.pagination,continuationStyle:continuationStyle(d.continuationStyle,d.pagination),limits:limits(d.limits),sourceUrl:sourceUrl(d.sourceUrl)});}
   function pdfText(c){const e=c.pdfEditor;if(e?.available)return ' · PDF 편집 '+(e.reflow?'줄바꿈 재배치'+(e.pagination?'·페이지 추가':''):'한 줄 교체')+' ('+e.engine+' '+e.version+')';
     return ' · PDF 보존 '+(c.pdf?'한 줄 교체만':'불가')+(e?' · PDF 편집 엔진 미준비':'');}
-  function versionText(c){return ' · companion '+(c.workbenchVersion?'버전 '+c.workbenchVersion:'버전 미보고(구버전)')+' · PDF 사전분석 '+(c.paperAnalysis?(c.paperAnalysis.available?'가능':'준비 안 됨'):'미지원(companion 업데이트 필요)');}
+  function versionText(c){return ' · companion '+(c.workbenchVersion?'버전 '+c.workbenchVersion:'버전 미보고(구버전)')+' · PDF 사전분석 '+(c.paperAnalysis?(c.paperAnalysis.available?'가능':'준비 안 됨'):'미지원(companion 업데이트 필요)')+' · 그림 한 곳 교체 '+(c.imageEditor?(c.imageEditor.available?'가능':'준비 안 됨'):'미지원');}
   const NETWORK='로컬 broker에 닿지 못했습니다. 서버 미실행·포트 불일치·--web-origin 누락(CORS 거부)·브라우저 로컬 네트워크 권한 차단 중 하나일 수 있습니다. 브라우저는 원인을 구분해 알려주지 않습니다.';
   const PORT_ERROR='포트는 1024–65535 사이 정수만 허용합니다. 주소는 항상 http://127.0.0.1입니다.';
 
@@ -156,7 +159,7 @@
     disconnectEl?.addEventListener('click',()=>bridge.disconnect());
   }
 
-  if(typeof module==='object'&&module.exports){module.exports={create,mount,parsePort,validToken,command,launcher,launchUri,pdfEditor,paperAnalysis,workbenchVersion,INSTALL,DEFAULT_PORT};return;}
+  if(typeof module==='object'&&module.exports){module.exports={create,mount,parsePort,validToken,command,launcher,launchUri,pdfEditor,paperAnalysis,imageEditor,workbenchVersion,INSTALL,DEFAULT_PORT};return;}
   const bridge=create({fetch:(...args)=>root.fetch(...args),location:root.location,emit:detail=>root.document.dispatchEvent(new CustomEvent('falsify:local-bridge',{detail}))});
   root.FalsifyLocalBridge=bridge;mount(bridge,root.document);
 })(typeof window==='object'?window:globalThis);
