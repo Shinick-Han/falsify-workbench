@@ -65,7 +65,7 @@ test('bridge: only the two image routes are added; descriptor is exact-or-absent
 
 function element(id){
   const e=new EventTarget(),classes=new Set(),attrs={};
-  Object.assign(e,{id,disabled:false,hidden:false,checked:false,value:'',textContent:'',children:[],className:'',src:'',alt:'',files:null,
+  Object.assign(e,{id,disabled:false,hidden:false,checked:false,value:'',textContent:'',children:[],className:'',src:'',alt:'',files:null,style:{},
     classList:{toggle:(c,on)=>{(on??!classes.has(c))?classes.add(c):classes.delete(c);},contains:c=>classes.has(c)},
     removeAttribute(n){if(n==='src')this.src='';attrs[n]=undefined;},replaceChildren(...c){this.children=c;},append(...c){this.children.push(...c);},after(){},remove(){},click(){this.dispatchEvent(new Event('click'));},getClientRects:()=>[]});
   return e;
@@ -167,6 +167,17 @@ test('panel: source clear or replacement cancels pending requests and discards s
   // A source file whose bytes changed after binding is refused before any request.
   const swapped=world();await swapped.load();let calls=0;swapped.fire('falsify:document',{file:{name:'paper.pdf',size:SRC.length,arrayBuffer:async()=>(calls++?new Uint8Array(OTHER):new Uint8Array(SRC)).buffer},result:{text:SEG0,format:'PDF',segments:[{label:'PDF p. 1',text:SEG0}]}});
   await until(()=>!swapped.get('red-request').disabled,'bound');swapped.reply=async()=>listing();swapped.get('image-list').click();await until(()=>/원본 파일이 올린 뒤 바뀌어/.test(swapped.status()),'hash refusal');assert.match(swapped.status(),/원본 파일이 올린 뒤 바뀌어/);assert.equal(swapped.calls.length,0);});
+
+test('panel: Before and After share one source-box preview frame; a small or mismatched PNG is stretched into it like the export; clear resets it',async()=>{
+  const geo=e=>({width:e.style.width,aspectRatio:e.style.aspectRatio,height:e.style.height,objectFit:e.style.objectFit,maxHeight:e.style.maxHeight});
+  const FRAME={width:'min(100%, 320px)',aspectRatio:'200 / 100',height:'auto',objectFit:'fill',maxHeight:'320px'},NONE={width:'',aspectRatio:'',height:'',objectFit:'',maxHeight:''};
+  const w=world();await w.load();await w.list(listing({occurrences:[occ(0),occ(1,{bbox:[0,0,50,200]}),occ(2,{bbox:[0,0,1000,10]})]}));w.pick(0);
+  const before=w.get('image-before'),after=w.get('image-after');assert.deepEqual(geo(before),FRAME,'160 px source thumbnail framed by the 2:1 box');
+  await w.png(png(96,48));assert.equal(after.hidden,false);assert.deepEqual(geo(after),geo(before),'a 96 px PNG previews at the same extent as the source thumbnail');
+  await w.png(png(300,300));assert.match(text(w.get('image-stretch')),/^주의: PNG 비율\(300×300 px\)/);assert.deepEqual(geo(after),FRAME,'mismatched PNG takes the box ratio, stretched like the export');
+  w.pick(1);assert.deepEqual(geo(before),{...FRAME,width:'min(100%, 80px)',aspectRatio:'50 / 200'},'tall box: 320 px long side');assert.deepEqual(geo(after),geo(before),'After follows the new selection');
+  w.pick(2);assert.deepEqual(geo(before),{...FRAME,aspectRatio:'1000 / 10'},'wide box keeps its ratio within 320 px');assert.deepEqual(geo(after),geo(before));
+  w.fire('falsify:document-clear');await flush();for(const e of [before,after]){assert.deepEqual(geo(e),NONE,'clear drops the stale frame');assert.equal(e.src,'');assert.equal(e.hidden,true);}});
 
 test('panel: large or malformed PNG is refused before decode or preview; consent is required',async()=>{
   const w=world();await w.load();await w.list();w.pick(0);

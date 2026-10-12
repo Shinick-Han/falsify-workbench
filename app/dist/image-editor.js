@@ -18,7 +18,11 @@
     const hash=async bytes=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))).map(x=>x.toString(16).padStart(2,'0')).join('');
     const say=(id,s,error=false)=>{const e=$(id);if(!e)return;e.textContent=s;e.classList?.toggle('error',error);};
     const node=(tag,className,text)=>{const x=doc.createElement(tag);if(className)x.className=className;if(text!==undefined)x.textContent=text;return x;};
-    function blank(img){if(!img)return;if(img.removeAttribute)img.removeAttribute('src');else img.src='';img.alt='';img.hidden=true;}
+    function blank(img){if(!img)return;if(img.removeAttribute)img.removeAttribute('src');else img.src='';img.alt='';img.hidden=true;frame(img,null);}
+    // Before and After share one frame derived from the selected source box (long side at most 320 px, never wider than the parent);
+    // the PNG is stretched into it exactly as the export fills the original box, so its own pixel size never suggests a smaller placement.
+    function frame(img,o){const s=img?.style;if(!s)return;if(!o){s.width=s.aspectRatio=s.height=s.objectFit=s.maxHeight='';return;}
+      const w=o.bbox[2]-o.bbox[0],h=o.bbox[3]-o.bbox[1];s.width='min(100%, '+Math.floor(320*Math.min(1,w/h)*100)/100+'px)';s.aspectRatio=w+' / '+h;s.height='auto';s.objectFit='fill';s.maxHeight='320px';}
     function revoke(){for(const u of URLs)URL.revokeObjectURL(u);URLs.clear();}
     function save(bytes,name,type){const url=URL.createObjectURL(new Blob([bytes],{type}));URLs.add(url);const a=doc.createElement('a');a.href=url;a.download=name;a.rel='noopener';doc.body.append(a);a.click();a.remove();
       setTimeout(()=>{URL.revokeObjectURL(url);URLs.delete(url);},1000);}
@@ -26,7 +30,7 @@
     function abort(){const o=op;op=null;seq++;if(o){clearTimeout(o.timer);o.controller?.abort();o.release();}}
     function clearOutput(){output=null;const box=$('image-result');if(box)box.hidden=true;say('image-result-hash','');}
     function clearPng(){pngSeq++;png=null;blank($('image-after'));const input=$('image-png');if(input)input.value='';say('image-png-status','');}
-    function reset(){abort();clearOutput();clearPng();occurrences=null;complete=false;selected=null;radios=[];$('image-rows')?.replaceChildren();const field=$('image-occurrences');if(field)field.hidden=true;
+    function reset(){abort();clearOutput();clearPng();blank($('image-before'));occurrences=null;complete=false;selected=null;radios=[];$('image-rows')?.replaceChildren();const field=$('image-occurrences');if(field)field.hidden=true;
       say('image-status','');say('image-export-status','');const consent=$('image-consent');if(consent)consent.checked=false;revoke();render();}
     // The bound root source, or null to cancel everything. Only PDF shows the disclosure; other formats keep it hidden.
     function source(next){reset();src=next&&next.format==='PDF'&&next.file&&typeof next.fileHash==='string'?Object.freeze({file:next.file,fileHash:next.fileHash,token:{}}):null;render();}
@@ -43,7 +47,8 @@
       const consent=$('image-consent');if(consent)consent.disabled=!idle;
       const go=$('image-export');if(go)go.disabled=!idle||!ready||!occ||!png||!consent?.checked;
       for(const id of ['image-download-pdf','image-download-report']){const b=$(id);if(b)b.disabled=!idle||!output;}
-      const before=$('image-before');if(before){if(occ?.thumbnail){before.src='data:image/png;base64,'+occ.thumbnail;before.alt='교체 전 그림 미리보기 · '+label(occ);before.hidden=false;}else blank(before);}
+      const before=$('image-before');if(before){if(occ?.thumbnail){before.src='data:image/png;base64,'+occ.thumbnail;before.alt='교체 전 그림 미리보기 · '+label(occ);before.hidden=false;frame(before,occ);}else blank(before);}
+      const after=$('image-after');if(after&&png)frame(after,occ);
       say('image-before-note',occ&&!occ.thumbnail?'companion이 이 그림의 미리보기를 보내지 않았습니다.':'');
       const warn=$('image-stretch');if(warn){warn.hidden=!occ;warn.textContent=occ?(png&&I.stretch(occ,png.info)?'주의: PNG 비율('+png.info.width+'×'+png.info.height+' px)이 원래 상자 비율과 달라 늘어나거나 눌려 보입니다. ':'')+'교체 그림은 원래 상자(같은 쪽·같은 위치·같은 크기)를 그대로 채웁니다.':'';warn.classList?.toggle('error',!!(occ&&png&&I.stretch(occ,png.info)));}
     }
