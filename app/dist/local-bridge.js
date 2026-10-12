@@ -48,6 +48,16 @@
   function versionText(c){return ' · companion '+(c.workbenchVersion?'버전 '+c.workbenchVersion:'버전 미보고(구버전)')+' · PDF 사전분석 '+(c.paperAnalysis?(c.paperAnalysis.available?'가능':'준비 안 됨'):'미지원(companion 업데이트 필요)')+' · 그림 한 곳 교체 '+(c.imageEditor?(c.imageEditor.available?'가능':'준비 안 됨'):'미지원');}
   const NETWORK='로컬 broker에 닿지 못했습니다. 서버 미실행·포트 불일치·--web-origin 누락(CORS 거부)·브라우저 로컬 네트워크 권한 차단 중 하나일 수 있습니다. 브라우저는 원인을 구분해 알려주지 않습니다.';
   const PORT_ERROR='포트는 1024–65535 사이 정수만 허용합니다. 주소는 항상 http://127.0.0.1입니다.';
+  // Image routes only: a fixed companion error code and, for an engine refusal, one allowlisted reason ride the Error as properties.
+  // Server text never becomes a code or reason (own string properties only); every other route keeps its existing error semantics.
+  const IMAGE_PATH=/^\/api\/paper\/images(?:\/export)?$/;
+  const IMAGE_ERRORS=Object.freeze(['image_edit_rejected','image_editor_unavailable','image_edit_timeout','image_edit_failed','companion_busy','invalid_request','invalid_file_hash','invalid_file','source_hash_mismatch',
+    'consent_required','invalid_occurrence_id','invalid_replacement']);
+  const IMAGE_REASONS=Object.freeze(['form-image','inline-image','rotated-page','cropped-page','clipped-image','transparency','unsupported-transform','overlapping-content','malformed-pdf','scan-limit','dependency-unavailable',
+    'occurrence-not-found','not-editable','replacement-transparent','replacement-invalid','replacement-too-large','output-too-large','check-failed','no-op','engine-error']);
+  const ownString=(d,k)=>!!d&&typeof d==='object'&&!Array.isArray(d)&&Object.hasOwn(d,k)&&typeof d[k]==='string'?d[k]:null;
+  function imageError(e,status,data){const code=status===401||status===403?'unauthorized':ownString(data,'error');e.code=code==='unauthorized'||IMAGE_ERRORS.includes(code)?code:null;
+    const why=e.code==='image_edit_rejected'?ownString(data,'reason'):null;e.reason=IMAGE_REASONS.includes(why)?why:null;return e;}
 
   function create({fetch:fetchImpl,location:loc,emit=()=>{}}){
     const local=loc.hostname===HOST;
@@ -71,7 +81,8 @@
         let res;try{res=await fetchImpl(l.remote?l.base+path:path,init);}catch{if(signal?.aborted)throw aborted();throw new Error(NETWORK);}
         if(res.redirected||res.type==='opaqueredirect')throw new Error('로컬 broker 리디렉션을 거부했습니다.');
         let data=null;try{data=await res.json();}catch{}if(signal?.aborted)throw aborted();
-        if(!res.ok){if(res.status===401||res.status===403)throw new Error('로컬 broker가 인증을 거부했습니다 ('+res.status+'). 토큰·포트·--web-origin을 확인하세요.');throw new Error(typeof data?.error==='string'?data.error.slice(0,300):'로컬 요청 실패 ('+res.status+')');}
+        if(!res.ok){const e=res.status===401||res.status===403?new Error('로컬 broker가 인증을 거부했습니다 ('+res.status+'). 토큰·포트·--web-origin을 확인하세요.'):new Error(typeof data?.error==='string'?data.error.slice(0,300):'로컬 요청 실패 ('+res.status+')');
+          throw IMAGE_PATH.test(path)?imageError(e,res.status,data):e;}
         if(!data||typeof data!=='object')throw new Error('로컬 broker 응답이 JSON 객체가 아닙니다.');
         return data;
       }finally{l.inflight--;if(l===link)changed();}
@@ -159,7 +170,7 @@
     disconnectEl?.addEventListener('click',()=>bridge.disconnect());
   }
 
-  if(typeof module==='object'&&module.exports){module.exports={create,mount,parsePort,validToken,command,launcher,launchUri,pdfEditor,paperAnalysis,imageEditor,workbenchVersion,INSTALL,DEFAULT_PORT};return;}
+  if(typeof module==='object'&&module.exports){module.exports={create,mount,parsePort,validToken,command,launcher,launchUri,pdfEditor,paperAnalysis,imageEditor,workbenchVersion,INSTALL,DEFAULT_PORT,IMAGE_ERRORS,IMAGE_REASONS};return;}
   const bridge=create({fetch:(...args)=>root.fetch(...args),location:root.location,emit:detail=>root.document.dispatchEvent(new CustomEvent('falsify:local-bridge',{detail}))});
   root.FalsifyLocalBridge=bridge;mount(bridge,root.document);
 })(typeof window==='object'?window:globalThis);

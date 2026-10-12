@@ -32,7 +32,7 @@ test('core: list request has fixed keys; exact listing passes and every shape, b
   assert.ok(padded.endsWith('==')&&loose!==padded);assert.equal(I.list(listing({occurrences:[occ(0,{thumbnail:padded})]}),{sourceSha256:HASH}).occurrences[0].thumbnail,padded);
   const mutations=[o=>{o.extra=INJECT;},o=>{delete o.limits;},o=>{o.schema='falsify.image-list.v2';},o=>{o.complete='yes';},o=>{o.limits.reverse();},o=>{o.limits.push(INJECT);},o=>{o.occurrences=null;},
     o=>{o.occurrences=Array.from({length:257},(_,i)=>occ(0,{id:sha('n'+i),pageIndex:0}));},o=>{o.occurrences[1].id=ID[0];},o=>{o.occurrences[0].id='ABC';},o=>{o.occurrences[0].pageIndex=64;},o=>{o.occurrences[0].pageIndex=-1;},o=>{o.occurrences[0].pageIndex=1.5;},
-    o=>{o.occurrences[0].bbox=[272,100,72,200];},o=>{o.occurrences[0].bbox=[0,0,1];},o=>{o.occurrences[0].bbox=[0,0,'1',2];},o=>{o.occurrences[0].bbox=[0,0,1e9,2];},o=>{o.occurrences[0].width=0;},o=>{o.occurrences[0].height=70000;},
+    o=>{o.occurrences[0].bbox=[272,100,72,200];},o=>{o.occurrences[0].bbox=[0,0,1];},o=>{o.occurrences[0].bbox=[0,0,'1',2];},o=>{o.occurrences[0].bbox=[0,0,1e9,2];},o=>{o.occurrences[0].width=0;},o=>{o.occurrences[0].height=1048577;},
     o=>{o.occurrences[0].shared=1;},o=>{o.occurrences[0].reason='form-image';},o=>{o.occurrences[2].reason=null;},o=>{o.occurrences[2].reason=INJECT;},o=>{o.occurrences[2].reason='toString';},o=>{o.occurrences[0].xref=12;},o=>{o.occurrences[0].text=INJECT;},
     o=>{o.occurrences[0].thumbnail='not base64!';},o=>{o.occurrences[0].thumbnail=Buffer.from('GIF89a'+'x'.repeat(40)).toString('base64');},o=>{o.occurrences[0].thumbnail=big;},o=>{o.occurrences[0].thumbnail=large;},o=>{o.occurrences[0].thumbnail=loose;}];
   for(const [i,m] of mutations.entries()){const bad=clone(listing());m(bad);let e;try{I.list(bad,{sourceSha256:HASH});}catch(x){e=x;}assert.ok(e,'mutation '+i);assert.equal(e.image,true,'mutation '+i);assert.ok(!/img|trial|secret/.test(e.message),'mutation '+i);}
@@ -127,19 +127,21 @@ test('panel: explicit list renders native rows with fixed reasons; export sends 
 test('panel: forged listings and exports cannot inject raw text; broker error text is never echoed; output hash mismatch never downloads',async()=>{
   for(const forged of [{...listing(),raw:INJECT},listing({sourceSha256:sha(OTHER)}),listing({occurrences:[occ(0,{reason:INJECT,editable:false})]})]){
     const w=world();await w.load();await w.list(forged);assert.match(w.status(),/형식과 달라|맞지 않아/);assert.equal(w.radios().length,0);assert.ok(!/img|trial|secret/.test(w.status()));}
-  const failing=world();await failing.load();failing.reply=async()=>{throw new Error(INJECT);};failing.get('image-list').click();await flush();assert.match(failing.status(),/^요청이 실패했습니다/);assert.ok(!/img|trial|secret/.test(failing.status()));
-  const coded=world();await coded.ready();coded.reply=async()=>{throw new Error('transparency');};coded.get('image-export').click();await flush();assert.match(coded.exportStatus(),/그림 교체을 할 수 없습니다: 투명도가 있는 그림/);
+  const failing=world();await failing.load();failing.reply=async()=>{throw new Error(INJECT);};failing.get('image-list').click();await until(()=>!/찾는 중/.test(failing.status()),'list failed');assert.match(failing.status(),/^요청이 실패했습니다/);assert.ok(!/img|trial|secret/.test(failing.status()));
+  const coded=world();await coded.ready();coded.reply=async()=>{throw Object.assign(new Error(INJECT),{code:'image_edit_rejected',reason:'transparency'});};coded.get('image-export').click();await until(()=>!/하는 중/.test(coded.exportStatus()),'export refused');
+  assert.match(coded.exportStatus(),/^이 그림을 교체하지 못했습니다: 투명도가 있는 그림이라 지원하지 않음\. 목록에서 교체 가능한 다른 위치를 고르세요\./);assert.ok(!/img|trial|secret/.test(coded.exportStatus()));
+  const bare=world();await bare.ready();bare.reply=async()=>{throw new Error('transparency');};bare.get('image-export').click();await until(()=>!/하는 중/.test(bare.exportStatus()),'export failed');assert.match(bare.exportStatus(),/^요청이 실패했습니다/,'error message text is never interpreted as a reason');
   const mismatch=world();await mismatch.ready();const lie=exported({file:Buffer.from('%PDF-1.7 different bytes').toString('base64')});await mismatch.exportWith(lie);
   assert.match(mismatch.exportStatus(),/보고한 출력 해시와 받은 파일이 달라/);assert.equal(mismatch.get('image-result').hidden,true);mismatch.get('image-download-pdf').click();await flush();assert.equal(mismatch.downloads.length,0);
   const wrongBox=world();await wrongBox.ready();await wrongBox.exportWith(exported({},{bbox:[0,0,10,10]}));assert.match(wrongBox.exportStatus(),/쪽·상자가 선택한 그림과 맞지 않아/);assert.equal(wrongBox.downloads.length,0);
   for(const f of ['image-editor.js','image-editor-core.js'])assert.ok(!/innerHTML|outerHTML|insertAdjacentHTML|document\.write/.test(read(f)),f);});
 
 test('panel: list/export freeze RED, harness and bridge; no overlapping requests; release afterwards',async()=>{
-  const w=world();await w.load();const d=deferred();w.reply=()=>d.promise;w.get('image-list').click();await flush();
+  const w=world();await w.load();const d=deferred();w.reply=()=>d.promise;w.get('image-list').click();await until(()=>w.calls.length===1,'list requested');
   assert.equal(w.bridge.busyCalls.at(-1),true);assert.equal(w.labBusy.at(-1),true);for(const id of ['image-list','red-start','red-request','red-import-response','red-level','red-budget'])assert.equal(w.get(id).disabled,true,id);
   w.get('image-list').click();await flush();assert.equal(w.calls.length,1,'no double submission');assert.equal(w.timers.filter(t=>t.live).length,1);assert.equal(w.timers[0].ms,95000);
   d.resolve(listing());await until(()=>w.bridge.busyCalls.at(-1)===false,'released');assert.equal(w.labBusy.at(-1),false);assert.equal(w.get('image-list').disabled,false);assert.equal(w.timers.filter(t=>t.live).length,0,'deadline cleared');
-  w.pick(0);await w.png();w.consent();const d2=deferred();w.reply=()=>d2.promise;w.get('image-export').click();await flush();
+  w.pick(0);await w.png();w.consent();const d2=deferred();w.reply=()=>d2.promise;w.get('image-export').click();await until(()=>w.calls.length===2,'export requested');
   for(const id of ['image-export','image-png','image-consent','image-list'])assert.equal(w.get(id).disabled,true,id);assert.equal(w.radios()[1].disabled,true,'selection frozen');assert.equal(w.bridge.busyCalls.at(-1),true);
   d2.resolve(exported());await until(()=>!w.get('image-result').hidden,'result');assert.equal(w.bridge.busyCalls.at(-1),false);
   // RED busy elsewhere (e.g. pre-analysis/export) disables the image actions without owning them.
@@ -147,16 +149,16 @@ test('panel: list/export freeze RED, harness and bridge; no overlapping requests
   assert.equal(r.get('image-list').disabled,true,'RED run locks the image list');r.get('image-list').click();await flush();assert.ok(r.calls.every(c=>c.path!=='/api/paper/images'));});
 
 test('panel: 95 s deadline aborts, releases busy, keeps source, selection and PNG, and does not retry',async()=>{
-  const w=world();await w.ready();let signal=null;w.reply=(p,b,o)=>new Promise((_,reject)=>{signal=o.signal;signal.addEventListener('abort',()=>reject(new Error(INJECT)));});w.get('image-export').click();await flush();
+  const w=world();await w.ready();let signal=null;w.reply=(p,b,o)=>new Promise((_,reject)=>{signal=o.signal;signal.addEventListener('abort',()=>reject(new Error(INJECT)));});w.get('image-export').click();await until(()=>signal,'export requested');
   assert.equal(w.bridge.busyCalls.at(-1),true);const timer=w.timers.find(t=>t.live);assert.equal(timer.ms,95000);timer.fn();await flush();
   assert.equal(signal.aborted,true);assert.match(w.exportStatus(),/95초 안에 끝나지 않아 중단했습니다/);assert.ok(!/img|secret/.test(w.exportStatus()));assert.equal(w.get('image-export-status').classList.contains('error'),true);
   assert.equal(w.bridge.busyCalls.at(-1),false);assert.equal(w.labBusy.at(-1),false);assert.equal(w.radios()[0].checked,true);assert.match(w.get('image-after').src,/^data:image\/png/);assert.equal(w.get('image-export').disabled,false);
   await flush();assert.equal(w.calls.length,2,'no automatic retry');});
 
 test('panel: source clear or replacement cancels pending requests and discards stale responses; selection/PNG changes clear output',async()=>{
-  const replaced=world();await replaced.load();const d=deferred();let signal=null;replaced.reply=(p,b,o)=>{signal=o.signal;return d.promise;};replaced.get('image-list').click();await flush();
+  const replaced=world();await replaced.load();const d=deferred();let signal=null;replaced.reply=(p,b,o)=>{signal=o.signal;return d.promise;};replaced.get('image-list').click();await until(()=>signal,'list requested');
   await replaced.load('PDF',OTHER);assert.equal(signal.aborted,true);d.resolve(listing());await flush();assert.equal(replaced.radios().length,0);assert.equal(replaced.get('image-occurrences').hidden,true);assert.equal(replaced.bridge.busyCalls.at(-1),false);
-  const cleared=world();await cleared.ready();const d2=deferred();cleared.reply=()=>d2.promise;cleared.get('image-export').click();await flush();cleared.fire('falsify:document-clear');d2.resolve(exported());await flush();
+  const cleared=world();await cleared.ready();const d2=deferred();cleared.reply=()=>d2.promise;cleared.get('image-export').click();await until(()=>cleared.calls.length===2,'export requested');cleared.fire('falsify:document-clear');d2.resolve(exported());await flush();
   assert.equal(cleared.get('image-edit').hidden,true);assert.equal(cleared.get('image-result').hidden,true);assert.equal(cleared.downloads.length,0);assert.equal(cleared.bridge.busyCalls.at(-1),false);
   const w=world();await w.ready();await w.exportWith();assert.equal(w.get('image-result').hidden,false);w.pick(1);assert.equal(w.get('image-result').hidden,true,'selection change clears output');w.get('image-download-pdf').click();await flush();assert.equal(w.downloads.length,0);
   w.consent();await w.exportWith(exported({occurrenceId:ID[1]},{occurrenceId:ID[1],pageIndex:1}));assert.equal(w.get('image-result').hidden,false);await w.png(png(800,400));assert.equal(w.get('image-result').hidden,true,'PNG change clears output');
@@ -164,7 +166,7 @@ test('panel: source clear or replacement cancels pending requests and discards s
   w.get('red-level').value='2';w.get('red-level').dispatchEvent(new Event('change'));assert.equal(w.radios()[1].checked,true);assert.equal(w.get('image-occurrences').hidden,false);
   // A source file whose bytes changed after binding is refused before any request.
   const swapped=world();await swapped.load();let calls=0;swapped.fire('falsify:document',{file:{name:'paper.pdf',size:SRC.length,arrayBuffer:async()=>(calls++?new Uint8Array(OTHER):new Uint8Array(SRC)).buffer},result:{text:SEG0,format:'PDF',segments:[{label:'PDF p. 1',text:SEG0}]}});
-  await until(()=>!swapped.get('red-request').disabled,'bound');swapped.reply=async()=>listing();swapped.get('image-list').click();await flush();assert.match(swapped.status(),/원본 파일이 올린 뒤 바뀌어/);assert.equal(swapped.calls.length,0);});
+  await until(()=>!swapped.get('red-request').disabled,'bound');swapped.reply=async()=>listing();swapped.get('image-list').click();await until(()=>/원본 파일이 올린 뒤 바뀌어/.test(swapped.status()),'hash refusal');assert.match(swapped.status(),/원본 파일이 올린 뒤 바뀌어/);assert.equal(swapped.calls.length,0);});
 
 test('panel: large or malformed PNG is refused before decode or preview; consent is required',async()=>{
   const w=world();await w.load();await w.list();w.pick(0);
@@ -194,7 +196,55 @@ test('page: image modules load before RED, CSS is linked, the disclosure sits in
   for(const id of ['image-list','image-status','image-png','image-before','image-after','image-consent','image-export','image-download-pdf','image-download-report'])assert.ok(panel.includes('id="'+id+'"'),id);
   assert.match(panel,/BLUE는 현재 사본의 텍스트만 읽습니다/);assert.match(panel,/RED 모델 성능이나 과학적 타당성 판정이 아니며/);assert.match(panel,/원본 파일은 바뀌지 않습니다/);assert.match(panel,/우회하지 않습니다/);
   assert.match(panel,/id="image-status" class="form-feedback" role="status" aria-live="polite"/);assert.ok(!/document-blue|blue-file/.test(panel));
-  const css=read('image-editor.css');assert.match(css,/@media\(max-width:700px\)\{\n\.image-compare\{grid-template-columns:1fr/);});
+  // Static CSS inspection is line-ending neutral: a Windows checkout may hold CRLF.
+  const css=read('image-editor.css');assert.match(css,/@media\(max-width:700px\)\{\r?\n\.image-compare\{grid-template-columns:1fr/);});
+
+// A real bridge session whose non-session/capability replies come from one fixed refusal; returns the rejection of one request.
+async function refused(p,status,body){
+  const b=L.create({fetch:async url=>url==='/api/session'?{ok:true,status:200,redirected:false,json:async()=>({token:'Abc_def-ghi_JKL-mno_pqr-stu_VWX-yz0123456789'})}
+    :url==='/api/capabilities'?{ok:true,status:200,redirected:false,json:async()=>CAP}:{ok:false,status,redirected:false,json:async()=>body},location:{hostname:'127.0.0.1',port:'7816'}});
+  await b.ready;let e;try{await b.session().request(p,{schema:'x'});}catch(x){e=x;}assert.ok(e,p);return e;}
+
+test('core: source bounds equal the companion service limits (100000 pt, 2^20 px); export-only reasons never pass as list entries',()=>{
+  const one=over=>I.list(listing({occurrences:[occ(0,over)]}),{sourceSha256:HASH}).occurrences[0];
+  assert.equal(I.MAX_COORD,100000);assert.equal(I.MAX_SOURCE_SIDE,1048576);
+  assert.equal(one({width:1048576,height:1048576}).height,1048576);assert.equal(one({width:65536,height:70000}).width,65536,'old 65535 cap no longer refuses');
+  assert.deepEqual([...one({bbox:[-100000,-100000,100000,100000]}).bbox],[-100000,-100000,100000,100000]);assert.deepEqual([...one({bbox:[14400,0,14400.5,70000]}).bbox],[14400,0,14400.5,70000],'old 14400 cap no longer refuses');
+  for(const over of [{width:1048577},{height:1048577},{width:0},{bbox:[0,0,100000.5,1]},{bbox:[-100000.5,0,1,1]},{bbox:[0,0,1,Infinity]}]){let e;try{one(over);}catch(x){e=x;}assert.ok(e&&e.image,JSON.stringify(over));}
+  assert.deepEqual(I.EXPORT_REASONS.slice(0,11),Object.keys(I.REASONS));
+  assert.deepEqual(I.EXPORT_REASONS.slice(11),['occurrence-not-found','not-editable','replacement-transparent','replacement-invalid','replacement-too-large','output-too-large','check-failed','no-op','engine-error']);
+  for(const r of I.EXPORT_REASONS.slice(11))assert.throws(()=>one({editable:false,reason:r,thumbnail:null}),/형식/,r);});
+
+test('core: every fixed reason and error code has fixed recovery copy; unknown, raw or prototype codes give none',()=>{
+  const noop=I.refusal('export','image_edit_rejected','no-op');assert.match(noop,/^이 그림을 교체하지 못했습니다: 교체 PNG가 원래 그림과 보기에 달라지지 않음/);assert.match(noop,/눈에 띄게 다른 PNG/);assert.match(noop,/자동으로 다시 시도하지 않습니다\.$/);
+  for(const kind of ['list','export'])for(const r of I.EXPORT_REASONS){const s=I.refusal(kind,'image_edit_rejected',r);assert.ok(s&&!/연결|요청이 실패/.test(s),kind+' '+r);}
+  for(const c of Object.keys(I.ERRORS))assert.ok(I.refusal('export',c,null),c);
+  for(const r of [INJECT,'toString','__proto__','constructor','NO-OP',null,42])assert.match(I.refusal('export','image_edit_rejected',r),/^companion 그림 엔진이 이 요청을 거부했습니다\(사유 미확인\)\. 연결 문제가 아닙니다\./,String(r));
+  assert.match(I.refusal('export','image_edit_failed','no-op'),/^companion 그림 엔진 처리 중 오류/,'a reason only counts for an engine refusal');
+  for(const c of [INJECT,'toString','__proto__','constructor','hasOwnProperty','',null,undefined,42,{}])assert.equal(I.refusal('export',c,'no-op'),null,String(c));});
+
+test('bridge: image routes keep only a fixed error code and an allowlisted refusal reason; other routes keep their error semantics',async()=>{
+  assert.deepEqual([...L.IMAGE_REASONS],[...I.EXPORT_REASONS]);assert.deepEqual([...L.IMAGE_ERRORS,'unauthorized'].sort(),Object.keys(I.ERRORS).sort());
+  for(const p of ['/api/paper/images','/api/paper/images/export'])for(const r of I.EXPORT_REASONS){const e=await refused(p,422,{error:'image_edit_rejected',reason:r});assert.equal(e.code,'image_edit_rejected');assert.equal(e.reason,r);assert.equal(e.message,'image_edit_rejected');}
+  const inherited=Object.assign(Object.create({reason:'no-op'}),{error:'image_edit_rejected'});
+  for(const body of [{error:'image_edit_rejected',reason:INJECT},{error:'image_edit_rejected',reason:'toString'},{error:'image_edit_rejected',reason:'__proto__'},{error:'image_edit_rejected',reason:'NO-OP'},{error:'image_edit_rejected',reason:['no-op']},{error:'image_edit_rejected'},inherited]){
+    const e=await refused('/api/paper/images/export',422,body);assert.equal(e.code,'image_edit_rejected');assert.equal(e.reason,null,JSON.stringify(body));}
+  const failed=await refused('/api/paper/images/export',500,{error:'image_edit_failed',reason:'no-op'});assert.equal(failed.code,'image_edit_failed');assert.equal(failed.reason,null,'a reason only rides an engine refusal');
+  for(const body of [{error:INJECT,reason:'no-op'},{error:'toString'},{error:'__proto__'},Object.assign(Object.create({error:'image_edit_rejected'}),{reason:'no-op'}),null,['image_edit_rejected']]){
+    const e=await refused('/api/paper/images',422,body);assert.equal(e.code,null,JSON.stringify(body));assert.equal(e.reason,null);}
+  const auth=await refused('/api/paper/images',403,{error:'image_edit_rejected',reason:'no-op'});assert.equal(auth.code,'unauthorized');assert.equal(auth.reason,null);assert.match(auth.message,/인증을 거부했습니다 \(403\)/);
+  for(const p of ['/api/paper/inspect','/api/red/jobs','/api/export']){const e=await refused(p,422,{error:'image_edit_rejected',reason:'no-op'});assert.equal(e.message,'image_edit_rejected');assert.ok(!('code' in e)&&!('reason' in e),p);}});
+
+test('panel: an engine refusal shows its fixed reason and recovery, never a connection failure; unknown codes stay generic and nothing retries',async()=>{
+  const w=world();await w.ready();const noop=await refused('/api/paper/images/export',422,{error:'image_edit_rejected',reason:'no-op'});w.reply=async()=>{throw noop;};
+  w.get('image-export').click();await until(()=>!/하는 중/.test(w.exportStatus()),'export refused');await flush();
+  assert.match(w.exportStatus(),/^이 그림을 교체하지 못했습니다: 교체 PNG가 원래 그림과 보기에 달라지지 않음/);assert.doesNotMatch(w.exportStatus(),/연결|요청이 실패했습니다/);assert.equal(w.get('image-export-status').classList.contains('error'),true);
+  assert.equal(w.radios()[0].checked,true);assert.match(w.get('image-after').src,/^data:image\/png/);assert.equal(w.get('image-result').hidden,true);assert.equal(w.get('image-export').disabled,false);assert.equal(w.bridge.busyCalls.at(-1),false);
+  await flush();assert.equal(w.calls.length,2,'no automatic retry');assert.equal(w.downloads.length,0);
+  const cases=[[422,{error:'image_edit_rejected',reason:'malformed-pdf'},/^그림 목록을 만들지 못했습니다: PDF 구조를 확인하지 못함\. 이 PDF에서는 그림 교체를 쓸 수 없습니다\./],[409,{error:'companion_busy'},/^companion이 다른 작업을 처리 중입니다/],
+    [503,{error:'image_editor_unavailable'},/^companion에 그림 교체 엔진이 준비되지 않았습니다/],[422,{error:'image_edit_rejected',reason:INJECT},/^companion 그림 엔진이 이 요청을 거부했습니다\(사유 미확인\)/],[500,{error:INJECT},/^요청이 실패했습니다/]];
+  for(const [status,body,expect] of cases){const l=world();await l.load();const e=await refused('/api/paper/images',status,body);l.reply=async()=>{throw e;};l.get('image-list').click();await until(()=>!/찾는 중/.test(l.status()),'list refused');await flush();
+    assert.match(l.status(),expect);assert.ok(!/img|trial|secret/.test(l.status()));assert.equal(l.radios().length,0);assert.equal(l.calls.length,1,'no automatic retry');}});
 
 (async()=>{let passed=0;for(const [name,fn] of tests){try{await fn();passed++;console.log('PASS '+name);}catch(e){console.error('FAIL '+name);console.error(e);process.exitCode=1;}}
   console.log(JSON.stringify({passed,failed:tests.length-passed,skipped:0}));if(passed!==tests.length)process.exit(1);})();

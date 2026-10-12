@@ -64,13 +64,14 @@
     // Reads the bound file again and refuses if its bytes no longer match the hash bound at upload.
     async function sourceBase64(s){if(s.file.size>I.MAX_FILE_BYTES)throw Object.assign(new Error('25 MiB를 넘는 PDF는 그림 교체에 쓰지 않습니다.'),{image:true});
       const bytes=new Uint8Array(await s.file.arrayBuffer());if(await hash(bytes)!==s.fileHash)throw Object.assign(new Error('원본 파일이 올린 뒤 바뀌어 요청하지 않았습니다. 원본을 다시 올리세요.'),{image:true});return I.encode(bytes);}
-    function failure(e,what){if(e==='deadline')return what+'이 '+I.DEADLINE_MS/1000+'초 안에 끝나지 않아 중단했습니다. 원본·선택·PNG는 그대로이며 자동으로 다시 시도하지 않습니다.';
-      if(e?.image)return e.message;const code=typeof e?.message==='string'?e.message:'';return Object.hasOwn(I.REASONS,code)?what+'을 할 수 없습니다: '+I.REASONS[code]+'. 원본·선택·PNG는 그대로입니다.':FAILED;}
+    // Fixed copy only: deadline, local preflight, or a fixed companion code/reason kept by the bridge. Error message text is never interpreted.
+    function failure(e,kind){if(e==='deadline')return (kind==='list'?'그림 목록 요청':'그림 교체 요청')+'이 '+I.DEADLINE_MS/1000+'초 안에 끝나지 않아 중단했습니다. 원본·선택·PNG는 그대로이며 자동으로 다시 시도하지 않습니다.';
+      if(e?.image)return e.message;return I.refusal(kind,e?.code,e?.reason)||FAILED;}
     $('image-list')?.addEventListener('click',async()=>{
       if(!src||op)return;const s=src;clearOutput();
       say('image-status','원본 PDF에서 교체할 수 있는 그림 위치를 찾는 중입니다. 모델은 호출하지 않으며 '+I.DEADLINE_MS/1000+'초가 지나면 중단합니다.');
       const r=await run(async()=>I.listRequest(s.fileHash,await sourceBase64(s)),'/api/paper/images');if(!r||src!==s)return;
-      if(r.error){say('image-status',failure(r.error,'그림 목록 불러오기'),true);render();return;}
+      if(r.error){say('image-status',failure(r.error,'list'),true);render();return;}
       let v;try{v=I.list(r.res,{sourceSha256:s.fileHash});}catch(e){say('image-status',e.image?e.message:FAILED,true);render();return;}
       const keep=v.occurrences.some(o=>o.id===selected&&o.editable)?selected:null;occurrences=v.occurrences;complete=v.complete;selected=keep;rows();
       const editable=occurrences.filter(o=>o.editable).length;
@@ -101,7 +102,7 @@
       say('image-export-status','선택한 그림 한 곳만 교체하고 엔진 자체 렌더 검사를 하는 중입니다. 퍼센트 진행률은 없으며 '+I.DEADLINE_MS/1000+'초가 지나면 중단합니다.');
       const r=await run(async()=>I.exportRequest(s.fileHash,await sourceBase64(s),occ.id,p.base64),'/api/paper/images/export');
       if(!r||src!==s)return;if(selected!==occ.id||png!==p){say('image-export-status',STALE);render();return;}
-      if(r.error){say('image-export-status',failure(r.error,'그림 교체'),true);render();return;}
+      if(r.error){say('image-export-status',failure(r.error,'export'),true);render();return;}
       let v;try{v=I.exportResult(r.res,{sourceSha256:s.fileHash,occurrence:occ});}catch(e){say('image-export-status',e.image?e.message:EXPORT_FAILED,true);render();return;}
       const actual=await hash(v.bytes);if(src!==s||selected!==occ.id||png!==p||op)return;
       if(actual!==v.outputSha256){say('image-export-status','companion이 보고한 출력 해시와 받은 파일이 달라 결과를 버렸습니다.',true);render();return;}
