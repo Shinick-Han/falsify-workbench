@@ -323,9 +323,11 @@ class ProcessRestartTests(unittest.TestCase):
             out,err=proc.communicate(timeout=20)
             self.assertEqual(proc.returncode,0)
             logs=out+err;self.assertNotIn(token.encode(),logs);self.assertNotIn(desc['instanceId'].encode(),logs)
-            probe=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
-            try:probe.bind(('127.0.0.1',port))
-            finally:probe.close()
+            # Rebind with the production server class so the proof follows its binding policy exactly:
+            # exclusive on Windows, stdlib address reuse on POSIX (a plain socket would trip over TIME_WAIT there).
+            rebound=server.ThreadingHTTPServer(('127.0.0.1',port),server.Handler)
+            try:self.assertEqual(rebound.server_port,port)
+            finally:rebound.server_close()
         finally:
             if proc.poll() is None:proc.kill();proc.communicate()
 
