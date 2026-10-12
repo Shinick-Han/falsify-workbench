@@ -10,9 +10,12 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'local'))
 import image_occurrence_editor as ed
-import pikepdf
-import pymupdf
-from PIL import Image
+try:
+    import pikepdf
+    import pymupdf
+    from PIL import Image
+except ImportError as error:
+    raise unittest.SkipTest('Optional image dependencies are not installed; see requirements-images.txt') from error
 
 sha = lambda b: hashlib.sha256(b).hexdigest()
 

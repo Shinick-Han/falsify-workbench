@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.0-alpha.2
+
+- Optional manual raster-image placement selection in RED, separate from text candidates and BLUE.
+- Source-bound painting IDs and single-occurrence resource isolation, including shared page resources.
+- PNG Before/After and experimental-copy consent; PDF and separate rendering-check report downloads.
+- Authenticated isolated image service with bounded input, fixed errors and temporary cleanup.
+
+Requires optional image dependencies on Python3.11+. Forms/inline images, complex clipping/masks, vector figures and tables
+are outside the initial supported boundary. BLUE remains text-only, and rendering checks are not scientific approval.
+See docs/pdf-image-editing.md. Six synthetic shared/inherited placements were each replaced separately: MuPDF and the
+configured PDFium runtime found zero changed pixels outside the selected region. This is not arbitrary-paper fidelity or
+domain approval. The separate PDF editor remains0.1.0-alpha.4; image writing is an optional companion operation.
+
 ## 0.2.0-alpha.1
 
 Source-only prerelease of the Workbench and local companion. The separate PDF editor remains 0.1.0-alpha.4.

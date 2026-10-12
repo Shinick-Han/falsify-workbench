@@ -11,6 +11,8 @@ editor WASM. The separate editor and its configured runtime are not silently rep
 Keep your source/configuration backed up before updating. For a Git checkout, pull the selected release commit; for a ZIP,
 extract into a new named folder and register that folder's launcher after reviewing it. Do not overwrite paper/record backups
 or copy untrusted local configuration. See [local companion setup](local-companion.md) and [PDF editor setup](pdf-editor.md).
+The optional manual raster-image writer has separate [dependency/setup instructions](pdf-image-editing.md); a source update
+does not silently install its native wheels. Existing image dependencies/configuration are retained in the local checkout.
 
 The Windows launcher checks exact listener identity and startup prerequisites before gracefully restarting an idle
 same-checkout companion. Busy companions and recent job results are preserved; foreign listeners are not terminated.

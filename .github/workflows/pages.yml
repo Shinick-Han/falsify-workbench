@@ -20,7 +20,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Python dependencies
-        run: python -m pip install -r app/local/requirements.txt
+        run: python -m pip install -r app/local/requirements.txt -r app/local/requirements-images.txt
       - name: Browser contracts
         working-directory: app
         run: npm test

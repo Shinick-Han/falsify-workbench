@@ -3,10 +3,12 @@
 These are **optional advisory analysis modules**, not a replacement editor or public table/figure attack feature.
 Workbench 0.2.0-alpha.1 connects their bounded inventory/object counts and selected-text metrics to RED's explicit
 `PDF 사전분석` action through authenticated `POST /api/paper/inspect`. Detailed geometry stays private in the isolated child;
-the UI receives fixed counts/statuses only. Docling conversion remains unconfigured, and object writing remains unwired.
+the UI receives fixed counts/statuses only. Docling conversion remains unconfigured. The legacy object-writing prototype stays
+unwired; the separate [manual raster-placement writer](pdf-image-editing.md) has its own source-bound HTTP/UI contract.
 The default Bento/PDFium editor, HTTP export contract, browser import, independent quality gate and separate RED/BLUE/review
 workflows are unchanged. None of these probes may select an edit, widen a QA mask, block a production download or feed a
-private source/RED plan into BLUE. No new shipped dependency was added.
+private source/RED plan into BLUE. These advisory probes add no new required dependency; the separate image writer has optional
+pikepdf/Pillow dependencies.
 
 | Component | Implemented and exercised | Not proved |
 | --- | --- | --- |
@@ -18,6 +20,7 @@ private source/RED plan into BLUE. No new shipped dependency was added.
 
 The experimental Python modules are `app/local/paper_structure.py`, `pdf_layout_probe.py` and `pdf_object_probe.py`.
 Their read-only count/metrics summaries have the advisory HTTP/UI caller described above; the writing prototype does not.
+Do not confuse that synthetic-only prototype with the newer isolated manual-image service and its painting-operator writer.
 Their detailed outputs are private geometry/metrics hints. The immutable source bytes and
 independently derived selected-text plan remain the authority for the existing editor and quality checks.
 
@@ -52,11 +55,11 @@ synthetic example; that is not original-PDF reflow proof.
 
 ## Next dependent implementation
 
-1. Build a versioned, source-derived **painting-operator plan** before per-occurrence image writing: clone the resource,
-   localize any shared page/Form resource dictionary, and change only the selected `Do` invocation. Compare pikepdf surgical
-   writing with PDF4QT's full-page builder; do not replace the default editor based on source inspection alone.
-2. Exercise that writer on shared resources, forms, clips, masks, repeated placements and vector/transparent graphics; require
-   inside-region quality and outside-region preservation with at least two renderers. Keep benign/no-op controls.
+1. Extend the separate source-derived **painting-operator writer** beyond its initial direct opaque raster boundary only after
+   explicit Form-path cloning, clip/mask handling and cross-renderer proof. Its current page-resource isolation must not be
+   confused with shared Form-resource isolation. The default text editor is not replaced.
+2. Broaden real-paper regression coverage before forms, complex clips, masks, repeated transparent placements and vector figures;
+   require inside-region quality and outside-region preservation with at least two renderers. Keep benign/no-op controls.
 3. Run real on-demand Docling conversion only in an explicit model/artifact environment. Compare geometry against source
    inventory before using it for user-facing candidate hints; never promote predictions into automatic edit authority.
 4. Prove CID/ToUnicode and original-font writeback before using this metrics planner for hard real-paper replacements. Prefer
