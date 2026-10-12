@@ -72,7 +72,7 @@ the upstream default binary is not a substitute for the stream-order-patched can
   `sourcePageMap` (`report.pagination.sourcePageMap` reduced to `{sourcePageIndex,
   outputPageIndex, continuationPageIndices}`; flow digests/text dropped; else null), `capabilities:{reflow,pagination}`
   booleans, runtime hashes, edit statuses, warning codes, `diagnostics` (codes only),
-  `independentQA:'pending'` and the same-engine boundary. Missing facts are null, never
+  `independentQA`/`independentChecks` (below) and the check boundary. Missing facts are null, never
   invented (`wrappedLines` stays null until the editor reports it).
 - `verification.continuationStyle` is `{policy:'source-number-suffix', applied:true,
   copiedPages}` only when the capability was declared, `layoutVerified` is true, the report's
@@ -84,9 +84,47 @@ the upstream default binary is not a substitute for the stream-order-patched can
   body-only); engines without the declared style keep the body-only continuation wording.
 - Any editor failure is a 400 error; there is no automatic fallback to the legacy path.
 
+## Independent per-output QA (MuPDF)
+
+After the editor's same-engine self-check passes, the companion re-reads the source and the
+saved output with the installed PyMuPDF/MuPDF (a different engine from the editor's PDFium)
+in `app/local/pdf_quality.py`. Production runs it as a child of the server's own Python
+(`-I`, fixed argv, minimal environment, 90 s timeout, bounded stdout); nothing in the HTTP
+request selects an executable. `verify_pdf_quality(source_bytes, output_bytes, edits,
+page_map, page_count=None)` is the in-process helper.
+
+- `verification.independentQA` is `passed|warning|failed|unavailable` and
+  `verification.independentChecks` is `{schema:'falsify.pdf-quality.v1', status, method,
+  checks:[{code, status, pages}], limitations}`: fixed check codes, 1-based output page
+  numbers and fixed limitation sentences only, never document text or paths.
+- Page map: the reported `sourcePageMap` (indices only; no body-band metadata is assumed) is
+  used only if it is an in-order partition of the actual output pages, with integer
+  (non-boolean) indices and continuations only on edited pages. Otherwise it is a warning;
+  with equal page counts an identity mapping is assumed and differences are warnings only,
+  else unedited pages are not compared. A reported page count is compared with the actual one.
+- Unedited mapped pages: page boxes/rotation within 0.01 pt (the known float32 MediaBox
+  drift is tolerated), normalized text, and the same MuPDF RGB render at bounded resolution
+  (any sample moving more than 40 levels is a change). Not cross-renderer pixel identity.
+- Edited pages plus continuations: the exact selected After must appear (a long After may
+  cross pages: only source-matching header/footer edges, including a `.N` page-number suffix,
+  are stripped; an interleaved but complete After is a warning), the Before must not remain,
+  and the source text with Before replaced must survive in order (only insertions such as
+  copied headers/footers are tolerated). Invisible, white and covered text (MuPDF text trace
+  and draw-order bbox log) is a warning only when it increases over the source page, so
+  pre-existing source defects are not reported as new.
+- `failed` is only definite: unreadable output, a changed unedited page under a valid map, an
+  After missing although MuPDF finds the Before in the source, or original text that vanished
+  from the whole output. The export is then refused with a fixed message naming the check codes
+  and pages and stating that no safe automatic repair is available; nothing is rewritten,
+  flattened or rasterized. `warning` and `unavailable` (QA could not run, timed out or
+  returned a malformed report) keep the download and never read as passed.
+- Budgets: 2000 pages, 120 rendered unedited pages, 1000 px raster side, 60 s work budget,
+  20000 normalized characters per edited group; beyond them checks become warnings.
+
 ## Limits
 
-Same-engine self-check only; independent extraction/rendering review remains required.
+The same-engine self-check plus the bounded MuPDF QA above are not full scientific,
+typographic or human verification; domain review remains required.
 Long After text wraps and can continue onto added pages in a bounded, single-column,
 unrotated, uncropped top-level body flow. Default budget: eight added pages per document;
 each Before/After remains limited to 4000 characters and the web request to 12 selected edits.
@@ -107,8 +145,8 @@ See [pagination scope](https://github.com/Shinick-Han/falsify-pdf-editor/blob/ma
 
 The integration was exercised with actual browser upload, editable After, authenticated
 PDF export and explicit BLUE file handoff using synthetic data, without model calls. This
-does not establish RED/BLUE model performance. Per-output independent extraction, rendering
-and domain review remain separate from the same-engine self-check.
+does not establish RED/BLUE model performance. The bounded MuPDF QA is separate from the
+same-engine self-check; human and domain review remain separate from both.
 
 An inherited PDFium save limitation remains: decimal page-box numbers can be reserialized
 at float32 precision (the tested synthetic A4 MediaBox differed by about 0.00003 pt).

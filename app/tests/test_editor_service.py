@@ -1,5 +1,6 @@
-"""Configured PDF editor adapter tests. Injected subprocess runner and synthetic bytes only:
-never runs Node, never creates or edits a real PDF, never touches a server on 7816/7817."""
+"""Configured PDF editor adapter tests. Injected subprocess runner and synthetic bytes, with the independent QA
+explicitly injected (FakeQuality); IndependentQATests also runs the production MuPDF QA on real in-memory PDFs.
+Never runs Node and never touches a server on 7816/7817."""
 import base64
 import hashlib
 import http.client
@@ -16,12 +17,25 @@ from types import SimpleNamespace
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'local'))
 import editor_service as es
+import pdf_quality
 import server
 
 SOURCE=b'%PDF-1.7 synthetic bytes only'
 OUTPUT=b'%PDF-1.7 synthetic edited bytes'
 WASM='12e43c4c2e7deedab629c3b08b14fc0b24c1336f92b7de30ac58d7ec6dcbb833'
 STYLE={'supported':True,'policy':'source-number-suffix','scope':'text-only source-style header/footer; standalone Arabic source number plus decimal suffix; originals unchanged'}
+def qa_report(status='warning',code='page_map',pages=()):
+    checks=[{'code':'output_readable','status':'passed','pages':[]},{'code':code,'status':status,'pages':list(pages)}]
+    return {'schema':'falsify.pdf-quality.v1','status':status,'method':'mupdf 1.28.2 text/geometry/raster','checks':checks,'limitations':[pdf_quality.LIMITATIONS['scope']]}
+
+class FakeQuality:
+    """Explicit QA stub for synthetic pseudo-PDF bytes; records what the service hands the checker."""
+    def __init__(self,result=None):self.result=result if result is not None else qa_report();self.calls=[]
+    def __call__(self,source,out,edits,page_map,page_count):
+        self.calls.append({'source':Path(source).read_bytes(),'out':Path(out).read_bytes(),'edits':edits,'page_map':page_map,'page_count':page_count})
+        if isinstance(self.result,Exception):raise self.result
+        return self.result
+
 def payload(**over):
     d={'format':'PDF','fileHash':hashlib.sha256(SOURCE).hexdigest(),'file':base64.b64encode(SOURCE).decode(),
        'patches':[{'id':'c1','segmentId':'s1','label':'PDF p. 3','before':'the result holds','after':'the result may hold','offset':4,'edited':False}]}
@@ -67,8 +81,9 @@ class Base(unittest.TestCase):
         (base/'node.exe').write_bytes(b'');self.base=base
         self.config=es.config_from(str(base/'module'),str(base/'cand'/'candidate-manifest.json'),node=str(base/'node.exe'),environ={})
     def tearDown(self):self.tmp.cleanup()
-    def service(self,**kw):
-        self.runner=FakeRunner(**kw);return es.PdfEditorService(self.config,runner=self.runner)
+    def service(self,quality=None,**kw):
+        self.runner=FakeRunner(**kw);self.quality=quality or FakeQuality()
+        return es.PdfEditorService(self.config,runner=self.runner,quality=self.quality)
 
 class ConfigTests(unittest.TestCase):
     def test_unconfigured_is_legacy(self):self.assertIsNone(es.config_from(environ={}))
@@ -132,7 +147,8 @@ class ExportTests(Base):
         self.assertEqual(json.dumps(data),before,'request untouched')
         self.assertEqual(base64.b64decode(result['file']),OUTPUT);self.assertEqual(result['sourceFileHash'],data['fileHash'])
         self.assertEqual(result['outputFileHash'],hashlib.sha256(OUTPUT).hexdigest())
-        v=result['verification'];self.assertEqual((v['engine'],v['runtime']['wasmSha256'],v['pages'],v['independentQA']),('falsify-pdf-editor',WASM,5,'pending'))
+        v=result['verification'];self.assertEqual((v['engine'],v['runtime']['wasmSha256'],v['pages'],v['independentQA']),('falsify-pdf-editor',WASM,5,'warning'))
+        self.assertEqual(v['independentChecks'],qa_report())
         self.assertIs(v['layoutVerified'],True);self.assertEqual(v['reflow'],{'wrappedLines':None});self.assertEqual(v['pagination'],{'inputPages':5,'outputPages':5})
         self.assertIsNone(v['sourcePageMap']);self.assertEqual(v['capabilities'],{'reflow':True,'pagination':False});self.assertEqual(v['diagnostics'],[])
         self.assertEqual(v['edits'],[{'label':'PDF p. 3','id':'edit-1','pageIndex':2,'status':'applied'}])
@@ -204,6 +220,68 @@ class ExportTests(Base):
         svc=self.service(version=b'v20.0.0\n')
         with self.assertRaisesRegex(ValueError,'node_too_old'):svc.export(payload())
         self.assertEqual([c for c in self.runner.calls if '--request' in c['argv']],[])
+
+class IndependentQATests(Base):
+    def test_production_qa_is_default_regardless_of_runner(self):
+        self.assertIs(es.PdfEditorService(self.config,runner=FakeRunner()).quality,pdf_quality.inspect_isolated)
+    def test_qa_gets_exact_edits_actual_files_map_and_counts(self):
+        spm=[{'sourcePageIndex':i,'outputPageIndex':i,'continuationPageIndices':[]} for i in range(5)]
+        svc=self.service(edit={'sourcePageMap':spm});svc.export(payload())
+        call=self.quality.calls[0]
+        self.assertEqual((call['source'],call['out']),(SOURCE,OUTPUT))
+        self.assertEqual(call['edits'],[{'pageIndex':2,'before':'the result holds','after':'the result may hold'}])
+        self.assertEqual((call['page_map'],call['page_count']),(spm,{'source':5,'output':5}))
+    def test_warning_and_unavailable_keep_download(self):
+        for result,expected in [(qa_report('warning','edited_text_order',[3]),'warning'),(pdf_quality.unavailable(),'unavailable'),(RuntimeError('boom'),'unavailable'),
+                ({'schema':'falsify.pdf-quality.v1','status':'passed','method':'C:/secret/paper.pdf','checks':[],'limitations':['the result holds']},'unavailable'),
+                (qa_report('passed','page_map'),'passed')]:
+            with self.subTest(expected=expected):
+                r=self.service(quality=FakeQuality(result)).export(payload())
+                self.assertEqual(base64.b64decode(r['file']),OUTPUT);self.assertEqual(r['verification']['independentQA'],expected)
+                self.assertEqual(r['verification']['independentChecks']['status'],expected)
+                blob=json.dumps(r['verification']);self.assertNotIn('secret',blob);self.assertNotIn('the result holds',blob)
+    def test_failed_rejects_with_fixed_actionable_error(self):
+        svc=self.service(quality=FakeQuality(qa_report('failed','unedited_render',[4])))
+        with self.assertRaises(ValueError) as ctx:svc.export(payload())
+        msg=str(ctx.exception)
+        for part in ['unedited_render (출력 p. 4)','안전한 자동 복구 방법이 없어','대신 내보내지 않습니다']:self.assertIn(part,msg)
+        self.assertNotIn('the result',msg);self.assertNotIn(self.tmp.name.lower(),msg.lower());self.assertFalse(self.runner.tempdir.exists())
+    def real_pdf(self,pages):
+        import pymupdf
+        d=pymupdf.open()
+        for lines in pages:
+            p=d.new_page(width=595.276,height=841.89)
+            for k,l in enumerate(lines):p.insert_text((72,80+16*k),l,fontsize=11)
+        return d.tobytes()
+    def test_real_pdfs_through_production_qa(self):
+        head='Running header';src=self.real_pdf([[head,'Page one stays as it was.'],[head,'We see that the result holds here today.'],[head,'Page three stays too.']])
+        def editor(out_pages):
+            out=self.real_pdf(out_pages)
+            def run(args):
+                req=json.loads(Path(args['--request']).read_text(encoding='utf-8'))
+                Path(args['--out']).write_bytes(out)
+                Path(args['--report']).write_text(json.dumps({'ok':True,'layoutVerified':True,'runtime':{'wasmSha256':WASM},'edits':[{'id':e['id'],'pageIndex':e['pageIndex'],'status':'applied'} for e in req['edits']],
+                    'selfCheck':{'status':'passed','failures':[]},'pageCount':{'source':3,'output':3},'outputSha256':hashlib.sha256(out).hexdigest(),
+                    'sourcePageMap':[{'sourcePageIndex':i,'outputPageIndex':i,'continuationPageIndices':[]} for i in range(3)]}))
+                return SimpleNamespace(returncode=0,stdout=b'{"ok":true}\n')
+            return run
+        data=payload(file=base64.b64encode(src).decode(),fileHash=hashlib.sha256(src).hexdigest(),
+            patches=[{'label':'PDF p. 2','before':'the result holds','after':'the result may hold'}])
+        good=[[head,'Page one stays as it was.'],[head,'We see that the result may hold here today.'],[head,'Page three stays too.']]
+        svc=es.PdfEditorService(self.config,runner=FakeRunner(edit=editor(good)))
+        v=svc.export(data)['verification'];self.assertEqual(v['independentQA'],'passed',v['independentChecks'])
+        corrupt=[good[0],good[1],[head,'Page three changed too.']]
+        with self.assertRaisesRegex(ValueError,'unedited_'):es.PdfEditorService(self.config,runner=FakeRunner(edit=editor(corrupt))).export(data)
+        def white(out_pages):
+            import pymupdf
+            d=pymupdf.open(stream=self.real_pdf(out_pages),filetype='pdf');d[1].insert_text((72,300),'white words',fontsize=11,color=(1,1,1));return d
+        out=white(good).tobytes()
+        def run_white(args):
+            editor_run=editor(good);editor_run(args);Path(args['--out']).write_bytes(out)
+            rep=json.loads(Path(args['--report']).read_text());rep['outputSha256']=hashlib.sha256(out).hexdigest();Path(args['--report']).write_text(json.dumps(rep))
+            return SimpleNamespace(returncode=0,stdout=b'{"ok":true}\n')
+        r=es.PdfEditorService(self.config,runner=FakeRunner(edit=run_white)).export(data)
+        self.assertEqual(r['verification']['independentQA'],'warning');self.assertEqual(base64.b64decode(r['file']),out,'uncertain diagnostics keep the download')
 
 class ServerTests(Base):
     def start(self,editor):

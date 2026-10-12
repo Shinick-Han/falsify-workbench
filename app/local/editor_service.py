@@ -18,6 +18,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+import pdf_quality
+
 ENGINE = 'falsify-pdf-editor'
 REQUEST_SCHEMA = 'falsify-web-bridge-request/1'
 ENV_ROOT, ENV_MANIFEST = 'FALSIFY_PDF_EDITOR_ROOT', 'FALSIFY_PDF_EDITOR_MANIFEST'
@@ -26,8 +28,9 @@ MANIFEST_NAME = 'candidate-manifest.json'
 MIN_NODE_MAJOR = 24
 LIMITS = {'maxFileBytes': 25 * 1024 * 1024, 'maxEdits': 12, 'maxTextChars': 4000, 'maxOutputBytes': 64 * 1024 * 1024,
     'maxReportBytes': 2 * 1024 * 1024, 'maxStdoutBytes': 64 * 1024, 'timeoutSeconds': 180, 'probeTimeoutSeconds': 60}
-CHECK_BOUNDARY = ('Same-engine self-check only (same PDFium build re-reads the saved file); independent extraction, '
-    'rendering and human review are still required. Pagination is not claimed unless the editor reports it.')
+CHECK_BOUNDARY = ('Same-engine self-check (same PDFium build re-reads the saved file) plus a separate bounded MuPDF '
+    'independent QA of this output; neither is full scientific, typographic or human verification. '
+    'Pagination is not claimed unless the editor reports it.')
 LABEL = re.compile(r'PDF p\. ([1-9][0-9]{0,3})')
 HEX64 = re.compile(r'[0-9a-f]{64}')
 CODE = re.compile(r'[A-Z][A-Z0-9_]{0,63}')
@@ -52,6 +55,9 @@ PROBE_MESSAGES = {
     'probe_failed': 'PDF 편집기 런타임을 불러오지 못했습니다(WASM/매니페스트/고정 소스 확인 필요).',
 }
 NO_FALLBACK = '원본은 바뀌지 않았고, 이전 단일 줄 편집 방식으로 대신 내보내지 않습니다.'
+QA_FAILED = ('독립 PDF 품질 검사(MuPDF)가 출력 결함을 확인했습니다: {checks}. 편집하지 않은 페이지가 바뀌었거나 선택한 After/원문 '
+    '텍스트가 출력에서 확인되지 않습니다. 안전한 자동 복구 방법이 없어 파일을 내보내지 않습니다. 선택한 변경 수를 줄이거나 '
+    '다른 After 문구로 다시 시도하세요.')
 
 @dataclass(frozen=True)
 class EditorConfig:
@@ -157,8 +163,10 @@ def validate_export(data):
     return raw, edits
 
 class PdfEditorService:
-    def __init__(self, config, runner=None, clock=time.monotonic, retry_seconds=15):
+    def __init__(self, config, runner=None, clock=time.monotonic, retry_seconds=15, quality=None):
         self.config, self.runner, self.clock, self.retry_seconds = config, runner or default_runner, clock, retry_seconds
+        # Independent per-output QA always runs in production; tests inject a stub explicitly (never keyed to the runner).
+        self.quality = quality or pdf_quality.inspect_isolated
         self._lock = threading.Lock()
         self._cap, self._cap_at, self._node = None, None, None
         self.leftovers = []
@@ -254,7 +262,7 @@ class PdfEditorService:
                 error = (report or {}).get('error') if isinstance((report or {}).get('error'), dict) else {}
                 code = next((c for c in [error.get('code'), status.get('code')] if isinstance(c, str) and CODE.fullmatch(c)), 'EDITOR_FAILED')
                 raise ValueError(f'PDF 편집기가 변경을 적용하지 못했습니다 ({code}). {NO_FALLBACK}')
-            return self._result(data, edits, cap, report, paths['out'])
+            return self._result(data, edits, cap, report, paths['out'], paths['source'])
         finally: self._cleanup(directory, names.values())
 
     def _read_report(self, path):
@@ -264,7 +272,12 @@ class PdfEditorService:
         except (ValueError, UnicodeDecodeError): raise ValueError(f'PDF 편집기 보고서 형식 오류. {NO_FALLBACK}') from None
         return report if isinstance(report, dict) else None
 
-    def _result(self, data, edits, cap, report, out):
+    def _independent(self, source, out, edits, page_map, page_count):
+        """Sanitized independent QA report; any error running it is 'unavailable' (non-gating, never 'passed')."""
+        try: return pdf_quality.sanitize(self.quality(source, out, [{k: e[k] for k in ['pageIndex', 'before', 'after']} for e in edits], page_map, page_count))
+        except Exception: return pdf_quality.unavailable()
+
+    def _result(self, data, edits, cap, report, out, source):
         fail = lambda what: ValueError(f'PDF 편집기 결과 검증 실패: {what}. {NO_FALLBACK}')
         if report is None: raise fail('보고서 없음')
         if not out.is_file(): raise fail('출력 없음')
@@ -310,5 +323,10 @@ class PdfEditorService:
             'repairs': [{'pageIndex': r.get('pageIndex'), 'count': r.get('count')} for r in report.get('repairs', []) if isinstance(r, dict)] if isinstance(report.get('repairs'), list) else [],
             'warnings': warnings, 'diagnostics': diagnostics,
             'selfCheck': {'status': 'passed', 'independent': False, 'method': self_check.get('method'), 'warnings': codes(self_check.get('warnings'))},
-            'independentQA': 'pending', 'checkBoundary': CHECK_BOUNDARY}
+            'checkBoundary': CHECK_BOUNDARY}
+        checks = self._independent(source, out, edits, verification['sourcePageMap'], {'source': input_pages, 'output': output_pages})
+        verification['independentQA'], verification['independentChecks'] = checks['status'], checks
+        if checks['status'] == 'failed':
+            found = [f"{c['code']}" + (f" (출력 p. {', '.join(map(str, c['pages'][:10]))})" if c['pages'] else '') for c in checks['checks'] if c['status'] == 'failed']
+            raise ValueError(f"{QA_FAILED.format(checks='; '.join(found))} {NO_FALLBACK}")
         return {'file': base64.b64encode(output).decode('ascii'), 'sourceFileHash': data['fileHash'], 'outputFileHash': output_hash, 'verification': verification}
