@@ -6,6 +6,8 @@
   let epoch=0,exported=null,lastSaved=null,failure=null,guard={};const saved=new Map(),pending=new Map(),settings={level:$('#red-level').value,budget:$('#red-budget').value};
   // Final-PDF preview (optional bundle): shown only for a hash-verified PDF export and cleared with every invalidation of `exported`.
   const preview=globalThis.FalsifyPreview?.createPreview?.()||null;
+  // Optional advisory PDF pre-analysis (its core bundle may be absent): explicit click only, never a model call, export gate or BLUE input.
+  const A=globalThis.FalsifyPaperAnalysis||null;let analysis=null;
   const hash=async bytes=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))).map(x=>x.toString(16).padStart(2,'0')).join('');
   const msg=(s,error=false)=>{const e=$('#red-progress');e.textContent=s;e.classList.toggle('error',error);};
   function jsonDownload(value,name){download(new TextEncoder().encode(JSON.stringify(value,null,2)),name,'application/json');}
@@ -34,11 +36,11 @@
     $('#red-download').textContent=pdf?.kind==='reflow'?'재배치·자체검사 후 실험용 사본 다운로드':'보존 검사 후 완성본 다운로드';
     if(doc&&!supported)statusText(doc.format==='PDF'?(cap?(pdf.engine?MISSING_ENGINE+' 후보와 편집한 After는 그대로 남고, 변경 계획 JSON은 지금 저장할 수 있습니다.':'PDF 보존 검사는 PyMuPDF가 설치된 로컬 broker가 필요합니다.'):'PDF 보존 검사는 연결된 로컬 broker가 필요합니다. 변경 계획 JSON은 저장할 수 있습니다.'):'이 형식은 레이아웃 검증 렌더러가 아직 없습니다. 완성본 다운로드를 차단하고 변경 계획만 저장합니다.');
     document.querySelectorAll('#red-candidates input,#red-candidates textarea').forEach(e=>e.disabled=busy);
-    renderRecord();renderHandoff();
+    analysisControls(cap,active,count);renderRecord();renderHandoff();
     document.dispatchEvent(new CustomEvent('falsify:document-state',{detail:doc?{name:doc.name,count:candidates.length,selected:count,busy}:null}));
   }
   function cancelCurrent(){const old=job,l=jobLink;job=null;jobLink=null;if(old&&l)void l.request('/api/red/jobs/'+encodeURIComponent(old)+'/cancel',{}).catch(()=>{});}
-  function clear(){generation++;cancelCurrent();binding=null;doc=null;file=null;candidates=[];response=null;request=null;busy=false;invalidate();$('#document-red').hidden=true;$('#red-candidates').replaceChildren();$('#red-response').value='';$('#red-record-status').textContent='';$('#red-export').hidden=true;$('#red-consent').checked=false;$('#red-harness-consent').checked=false;$('#red-export-consent').checked=false;statusText('');msg('');controls();}
+  function clear(){generation++;cancelCurrent();analysisReset();binding=null;doc=null;file=null;candidates=[];response=null;request=null;busy=false;invalidate();$('#document-red').hidden=true;$('#red-candidates').replaceChildren();$('#red-response').value='';$('#red-record-status').textContent='';$('#red-export').hidden=true;$('#red-consent').checked=false;$('#red-harness-consent').checked=false;$('#red-export-consent').checked=false;statusText('');msg('');controls();}
   document.addEventListener('falsify:document-clear',clear);
   // The shell asks before replacing/closing the source; cancelling the discard confirmation keeps everything.
   document.addEventListener('falsify:before-document-change',e=>{if(e.detail?.role==='red'&&!keepEdits())e.preventDefault();});
@@ -113,6 +115,38 @@
     if(r.notes?.length){const list=node('ul','red-export-notes','');for(const n of r.notes){const li=node('li','','');li.append(node('span',n.severity==='warning'||n.severity==='error'?'note-warning':'note-info',SEVERITY[n.severity]||'심각도 미보고'),' · '+n.phrase+' ',node('span','red-export-code','('+n.detail+')'));list.append(li);}out.push(list);}
     if(limits)out.push(node('span','red-export-limits',limits));
     e.append(...out);}
+  // PDF pre-analysis: one request bound to this doc, file, hash and exact selected Before/After under a fixed deadline; any change discards it.
+  const ANALYSIS_NEED_LINK='선택 사항 · PDF 사전분석은 연결된 로컬 companion이 필요합니다. 연결 없이도 검토·수동 JSON 교환·변경 계획 저장은 그대로 쓸 수 있습니다.';
+  const ANALYSIS_OLD='이 companion은 PDF 사전분석을 지원하지 않습니다(구버전). 위 연결 패널 안내로 companion을 업데이트한 뒤 다시 연결하세요. 다른 작업은 그대로 쓸 수 있습니다.';
+  const ANALYSIS_OFF='연결된 companion에서 PDF 사전분석을 지금 쓸 수 없습니다. 다른 작업은 그대로 쓸 수 있습니다.';
+  const ANALYSIS_FAILED='사전분석 요청이 실패했습니다(연결·인증·companion 오류 또는 다른 작업 진행 중). 원본·후보·편집·다운로드 상태는 그대로입니다.';
+  const ANALYSIS_STALE='사전분석 중 원본이나 선택한 변경이 바뀌어 결과를 버렸습니다.';
+  function analysisText(s,error=false){const e=$('#red-analysis-status');if(!e)return;e.textContent=s;e.classList?.toggle('error',error);}
+  function analysisReset(){const old=analysis;analysis=null;old?.abort();const box=$('#red-analysis-result');if(box)box.hidden=true;$('#red-analysis-body')?.replaceChildren();analysisText('');}
+  function analysisList(){return A.patches(candidates.some(c=>c.selected)?C.patches(doc,candidates):[]);}
+  function analysisControls(cap,active,count){const panel=$('#red-analysis');if(!panel)return;const on=!!A&&doc?.format==='PDF';panel.hidden=!on;if(!on)return;
+    const s=B.state(),pa=cap?.paperAnalysis,ready=!!s.connected&&pa?.available===true,button=$('#red-analyze'),note=$('#red-analysis-note');if(button)button.disabled=!active||!ready;
+    if(note)note.textContent=!s.connected?ANALYSIS_NEED_LINK:!pa?ANALYSIS_OLD:!pa.available?ANALYSIS_OFF:'선택 사항 · 연결된 companion이 원본 PDF'+(count?'와 선택한 후보 '+count+'개의 줄 공간':'')+'을 검사합니다. 모델은 호출하지 않으며 결과는 참고용 힌트입니다.';}
+  function renderAnalysis(v){const body=$('#red-analysis-body'),box=$('#red-analysis-result');if(!body||!box)return;
+    const group=(title,items)=>{const list=node('ul','red-analysis-list','');for(const t of items)list.append(node('li','',t));return [node('p','red-analysis-label',title),list];};
+    body.replaceChildren(...group('개수 요약',v.counts),...group('선택한 후보의 줄 공간',v.layout),...group('한계',v.notes));box.hidden=false;}
+  $('#red-analyze')?.addEventListener('click',async()=>{
+    if(busy||!doc||!file||doc.format!=='PDF'||!A||!B.state().connected||B.capabilities()?.paperAnalysis?.available!==true)return;
+    let list;try{list=analysisList();if(file.size>A.MAX_FILE_BYTES)throw Object.assign(new Error('25MiB를 넘는 PDF는 사전분석하지 않습니다.'),{analysis:true});}
+    catch(e){analysisReset();analysisText(e.analysis?e.message:'선택한 변경을 확인할 수 없어 사전분석을 요청하지 않았습니다: '+e.message,true);return;}
+    analysisReset();const l=B.session();if(!l){analysisText(ANALYSIS_NEED_LINK,true);return;}
+    const current=generation,source=doc,bytes=file,key=JSON.stringify(list),labels={};candidates.filter(c=>c.selected).forEach((c,k)=>{labels['edit-'+(k+1)]='후보 '+(candidates.indexOf(c)+1);});
+    const controller=typeof AbortController==='function'?new AbortController():null,self={abort:()=>controller?.abort()};let timer=null,expired=false;
+    analysis=self;busy=true;controls();analysisText('원본 PDF'+(list.length?'와 선택한 후보 '+list.length+'개':'')+'를 companion에서 사전분석하는 중입니다. 모델은 호출하지 않으며 '+A.DEADLINE_MS/1000+'초가 지나면 중단합니다.');
+    const stale=()=>{let now=null;try{now=JSON.stringify(analysisList());}catch{}return analysis!==self||current!==generation||doc!==source||file!==bytes||now!==key;};
+    try{const deadline=new Promise((_,reject)=>{timer=setTimeout(()=>{expired=true;controller?.abort();reject(new Error('deadline'));},A.DEADLINE_MS);});
+      const body=A.request(source.fileHash,base64(new Uint8Array(await Promise.race([bytes.arrayBuffer(),deadline]))),list);if(stale())return;
+      const res=await Promise.race([l.request('/api/paper/inspect',body,controller?{signal:controller.signal}:undefined),deadline]);
+      if(stale()){if(analysis===self&&current===generation)analysisText(ANALYSIS_STALE);return;}
+      const v=A.view(A.summary(res,{sourceSha256:source.fileHash,ids:list.map(p=>p.id)}),labels);renderAnalysis(v);analysisText(v.headline);}
+    catch(e){if(analysis===self&&current===generation)analysisText(expired?'사전분석이 '+A.DEADLINE_MS/1000+'초 안에 끝나지 않아 중단했습니다. 원본·후보·편집·다운로드 상태는 그대로입니다.':e?.analysis?e.message:ANALYSIS_FAILED,true);}
+    finally{clearTimeout(timer);if(analysis===self)analysis=null;if(current===generation){busy=false;controls();}}
+  });
   // PDF export path comes only from authenticated capabilities: reflow-capable editor, editor without reflow, legacy single-line preservation, or none.
   function pdfMode(cap){const e=cap?.pdfEditor||null;return {kind:e?.available?(e.reflow?'reflow':'editor'):cap?.pdf?'legacy':'none',engine:e};}
   const MISSING_ENGINE='줄바꿈 재배치 PDF 편집 엔진이 이 companion에 아직 준비되지 않았습니다. 위 연결 패널의 설치·실행 안내로 companion을 다시 준비한 뒤 연결하세요.';
@@ -225,8 +259,8 @@
   function unrecorded(){return !!response&&(pending.size>0||!saved.has(key(null))||candidates.some(c=>c.selected||c.edited)&&!saved.has(currentKey()));}
   function keepEdits(){return !unrecorded()||confirm('선택·편집한 RED 후보가 아직 기록되지 않았습니다. 계속하면 후보와 편집 내용이 사라집니다. 계속할까요?');}
   function invalidate(){epoch++;exported=null;lastSaved=null;failure=null;saved.clear();pending.clear();preview?.clear();}
-  function discard(){generation++;cancelCurrent();busy=!!binding;if(doc)doc.revision=crypto.randomUUID();candidates=[];response=null;request=null;invalidate();renderCandidates();}
-  function changed(){exported=null;preview?.clear();exportStatus('');controls();}
+  function discard(){generation++;cancelCurrent();analysisReset();busy=!!binding;if(doc)doc.revision=crypto.randomUUID();candidates=[];response=null;request=null;invalidate();renderCandidates();}
+  function changed(){exported=null;preview?.clear();exportStatus('');analysisReset();controls();}
   // One root per execution: a final snapshot first awaits (or retries) the original response save and links to it via snapshotOf.
   // If the original cannot be persisted the final snapshot is not recorded either, so no second root ever appears.
   // isCurrent is live-only: the ledger checks it right before persisting, so a source/settings reset cancels a stale save.

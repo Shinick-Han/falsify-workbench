@@ -48,6 +48,13 @@
 .red-preview-page{font-size:13px;font-variant-numeric:tabular-nums;min-width:5em}
 #red-preview-status.error{color:var(--red-ink)}
 #red-evaluate,#doc-blue-evaluate{display:block;margin:2px 0 12px;font-size:14px}
+.red-analysis{margin:16px 0 4px;padding-top:16px;border-top:1px solid var(--line);max-width:75ch}
+.red-analysis>p{margin:8px 0}
+.red-analysis .red-help{margin:8px 0 0}
+.red-analysis-label{font-size:13px;font-weight:600;margin:14px 0 4px}
+.red-analysis-list{margin:0;padding-left:18px;font-size:13px;line-height:1.6;font-variant-numeric:tabular-nums}
+.red-analysis-list li{margin:2px 0;overflow-wrap:anywhere}
+#red-analysis-status.error{color:var(--red-ink)}
 .red-help li{margin:12px 0;max-width:75ch;line-height:1.7}
 @media(max-width:700px){
 .document-red{padding:18px}

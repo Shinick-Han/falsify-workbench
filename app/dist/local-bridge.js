@@ -2,7 +2,7 @@
 (function(root){
   'use strict';
   const HOST='127.0.0.1',DEFAULT_PORT=7816,WEB_ORIGIN='https://shinick-han.github.io';
-  const PATH=/^\/api\/(?:capabilities|export|(?:red|blue)\/jobs(?:\/[A-Za-z0-9%._~-]+(?:\/cancel)?)?)$/;
+  const PATH=/^\/api\/(?:capabilities|export|paper\/inspect|(?:red|blue)\/jobs(?:\/[A-Za-z0-9%._~-]+(?:\/cancel)?)?)$/;
   // Strict decimal port only; host and scheme are never user input.
   function parsePort(value){const s=String(value??'').trim();if(s==='')return DEFAULT_PORT;if(!/^[1-9][0-9]{3,4}$/.test(s))return null;const n=Number(s);return n>=1024&&n<=65535?n:null;}
   function validToken(t){return typeof t==='string'&&t.length>=16&&t.length<=512&&/^[A-Za-z0-9._~+/-]+=*$/.test(t);}
@@ -20,7 +20,11 @@
     return Object.freeze(out);}
   function capSnapshot(d){if(!d||typeof d!=='object'||Array.isArray(d)||typeof d.red!=='boolean'||typeof d.blue!=='boolean')return null;
     return Object.freeze({red:d.red,blue:d.blue,pdf:d.pdf===true,officeLayoutVerifiedExport:d.officeLayoutVerifiedExport===true,model:typeof d.model==='string'?d.model.slice(0,80):null,isolation:typeof d.isolation==='string'?d.isolation.slice(0,200):null,
-      cliSelection:d.cliSelection===true,cliAgents:d.cliSelection===true?agents(d.cliAgents):null,pdfEditor:pdfEditor(d.pdfEditor)});}
+      cliSelection:d.cliSelection===true,cliAgents:d.cliSelection===true?agents(d.cliAgents):null,pdfEditor:pdfEditor(d.pdfEditor),paperAnalysis:paperAnalysis(d.paperAnalysis),workbenchVersion:workbenchVersion(d.workbenchVersion)});}
+  // Optional advisory PDF pre-analysis from a newer broker: exact descriptor or none. An older broker without it keeps every other path.
+  const ANALYSIS_SCHEMA='falsify.pdf-analysis-summary.v1',WORKBENCH_VERSION=/^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(?:-[0-9A-Za-z]{1,16}(?:\.[0-9A-Za-z]{1,16}){0,3})?$/;
+  function paperAnalysis(d){if(!d||typeof d!=='object'||Array.isArray(d)||Object.keys(d).length!==2||typeof d.available!=='boolean'||d.schema!==ANALYSIS_SCHEMA)return null;return Object.freeze({available:d.available,schema:ANALYSIS_SCHEMA});}
+  function workbenchVersion(v){return typeof v==='string'&&v.length<=40&&WORKBENCH_VERSION.test(v)?v:null;}
   const HEX64=/^[0-9a-f]{64}$/,ENGINE_VERSION=/^[0-9A-Za-z][0-9A-Za-z.+_-]{0,39}$/,LIMIT_KEY=/^[A-Za-z][A-Za-z0-9]{0,31}$/,SOURCE_PATH=/^\/Shinick-Han\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._~-]+)*\/?$/;
   // Engine source link is display-only: https://github.com/Shinick-Han/... with no credentials, port, query or fragment.
   function sourceUrl(v){if(typeof v!=='string'||v.length>300)return null;let u;try{u=new URL(v);}catch{return null;}
@@ -38,6 +42,7 @@
     return Object.freeze({available:d.available,engine:d.engine,version,wasmSha256,reflow:d.reflow,pagination:d.pagination,continuationStyle:continuationStyle(d.continuationStyle,d.pagination),limits:limits(d.limits),sourceUrl:sourceUrl(d.sourceUrl)});}
   function pdfText(c){const e=c.pdfEditor;if(e?.available)return ' · PDF 편집 '+(e.reflow?'줄바꿈 재배치'+(e.pagination?'·페이지 추가':''):'한 줄 교체')+' ('+e.engine+' '+e.version+')';
     return ' · PDF 보존 '+(c.pdf?'한 줄 교체만':'불가')+(e?' · PDF 편집 엔진 미준비':'');}
+  function versionText(c){return ' · companion '+(c.workbenchVersion?'버전 '+c.workbenchVersion:'버전 미보고(구버전)')+' · PDF 사전분석 '+(c.paperAnalysis?(c.paperAnalysis.available?'가능':'준비 안 됨'):'미지원(companion 업데이트 필요)');}
   const NETWORK='로컬 broker에 닿지 못했습니다. 서버 미실행·포트 불일치·--web-origin 누락(CORS 거부)·브라우저 로컬 네트워크 권한 차단 중 하나일 수 있습니다. 브라우저는 원인을 구분해 알려주지 않습니다.';
   const PORT_ERROR='포트는 1024–65535 사이 정수만 허용합니다. 주소는 항상 http://127.0.0.1입니다.';
 
@@ -50,23 +55,26 @@
     const changed=()=>emit(state());
     function drop(l){if(l){l.alive=false;l.token=null;}}
     // One request against a fixed link snapshot. The token travels only in the Authorization header.
-    async function call(l,path,body){
+    // An optional caller AbortSignal ends the fetch (deadline or stale result) so the in-flight freeze is always released.
+    async function call(l,path,body,options){
       if(!l||!l.alive||!l.token)throw new Error(local?'인증된 로컬 작업대 세션이 없습니다.':'로컬 broker에 먼저 연결하세요. 연결 없이는 수동 JSON 교환만 가능합니다.');
       if(typeof path!=='string'||!PATH.test(path)||/\/\.{1,2}(?:\/|$)/.test(path))throw new Error('허용되지 않은 로컬 경로입니다.');
       const init={method:body?'POST':'GET',headers:{Authorization:'Bearer '+l.token,...(body?{'Content-Type':'application/json'}:{})},credentials:'omit',redirect:'error',cache:'no-store',referrerPolicy:'no-referrer'};
       if(body)init.body=JSON.stringify(body);
       if(l.remote){init.mode='cors';init.targetAddressSpace='loopback';}
+      const signal=options&&typeof options==='object'?options.signal:undefined;if(signal)init.signal=signal;
       l.inflight++;if(l===link)changed();
       try{
-        let res;try{res=await fetchImpl(l.remote?l.base+path:path,init);}catch{throw new Error(NETWORK);}
+        let res;try{res=await fetchImpl(l.remote?l.base+path:path,init);}catch{if(signal?.aborted)throw aborted();throw new Error(NETWORK);}
         if(res.redirected||res.type==='opaqueredirect')throw new Error('로컬 broker 리디렉션을 거부했습니다.');
-        let data=null;try{data=await res.json();}catch{}
+        let data=null;try{data=await res.json();}catch{}if(signal?.aborted)throw aborted();
         if(!res.ok){if(res.status===401||res.status===403)throw new Error('로컬 broker가 인증을 거부했습니다 ('+res.status+'). 토큰·포트·--web-origin을 확인하세요.');throw new Error(typeof data?.error==='string'?data.error.slice(0,300):'로컬 요청 실패 ('+res.status+')');}
         if(!data||typeof data!=='object')throw new Error('로컬 broker 응답이 JSON 객체가 아닙니다.');
         return data;
       }finally{l.inflight--;if(l===link)changed();}
     }
-    function session(){const l=link;if(!l||!l.alive||!(status==='local'||status==='paired'))return null;return Object.freeze({request:(path,body)=>call(l,path,body)});}
+    function aborted(){const e=new Error('로컬 요청을 중단했습니다.');e.name='AbortError';return e;}
+    function session(){const l=link;if(!l||!l.alive||!(status==='local'||status==='paired'))return null;return Object.freeze({request:(path,body,options)=>call(l,path,body,options)});}
     async function boot(){
       if(!local){changed();return;}
       try{const r=await fetchImpl('/api/session',{cache:'no-store',redirect:'error'});if(!r.ok)throw new Error();const s=await r.json();if(!validToken(s?.token))throw new Error();
@@ -119,7 +127,7 @@
     const nav=doc.defaultView?.navigator,windows=/win/i.test(String(options.platform??nav?.userAgentData?.platform??nav?.platform??''));
     const open=options.open||(uri=>{const a=doc.createElement('a');a.href=uri;a.rel='noopener noreferrer';a.click();});
     if(installEl)installEl.textContent=INSTALL;
-    function text(s){const c=s.cap,detail=c?' · RED '+(c.red?'가능':'불가')+' · BLUE '+(c.blue?'가능':'불가')+pdfText(c)+' · CLI 선택 '+(c.cliSelection?'가능':'미지원(구버전 companion)'):'';
+    function text(s){const c=s.cap,detail=c?versionText(c)+' · RED '+(c.red?'가능':'불가')+' · BLUE '+(c.blue?'가능':'불가')+pdfText(c)+' · CLI 선택 '+(c.cliSelection?'가능':'미지원(구버전 companion)'):'';
       if(s.status==='checking')return '로컬 작업대 세션 확인 중';
       if(s.status==='local')return '로컬 작업대 · same-origin 세션 (페어링 불필요)'+detail;
       if(s.status==='local-unavailable')return '정적 미리보기 · 인증된 로컬 broker 없음 · 파일 추출과 수동 JSON 교환만 가능';
@@ -148,7 +156,7 @@
     disconnectEl?.addEventListener('click',()=>bridge.disconnect());
   }
 
-  if(typeof module==='object'&&module.exports){module.exports={create,mount,parsePort,validToken,command,launcher,launchUri,pdfEditor,INSTALL,DEFAULT_PORT};return;}
+  if(typeof module==='object'&&module.exports){module.exports={create,mount,parsePort,validToken,command,launcher,launchUri,pdfEditor,paperAnalysis,workbenchVersion,INSTALL,DEFAULT_PORT};return;}
   const bridge=create({fetch:(...args)=>root.fetch(...args),location:root.location,emit:detail=>root.document.dispatchEvent(new CustomEvent('falsify:local-bridge',{detail}))});
   root.FalsifyLocalBridge=bridge;mount(bridge,root.document);
 })(typeof window==='object'?window:globalThis);
