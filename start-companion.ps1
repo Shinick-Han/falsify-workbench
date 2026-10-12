@@ -69,7 +69,8 @@ try {
     $venvDirectory = Join-Path $projectDirectory '.venv'
     $editorConfiguration = Resolve-FalsifyPdfEditorConfig -ProjectDirectory $projectDirectory -EditorRoot $PdfEditorRoot -EditorManifest $PdfEditorManifest -Disabled:$NoPdf
     if ($editorConfiguration) {
-        $nodeCommand = Get-Command node -CommandType Application -ErrorAction SilentlyContinue
+        # Hosts can expose several Node installations; use the first on PATH, as a plain `node` call would.
+        $nodeCommand = Get-Command node -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
         if (-not $nodeCommand) { throw 'The configured PDF editor requires Node.js 24+. No installation or broker startup ran.' }
         & $nodeCommand.Source -e 'process.exit(parseInt(process.versions.node,10) >= 24 ? 0 : 1)'
         if ($LASTEXITCODE -ne 0) { throw 'The configured PDF editor requires Node.js 24+. Upgrade Node explicitly; nothing was installed.' }

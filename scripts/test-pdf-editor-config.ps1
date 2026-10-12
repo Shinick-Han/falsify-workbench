@@ -29,7 +29,16 @@ function Invoke-NodeProbe([string]$Node, [string]$Script) {
     [pscustomobject]@{ ExitCode = $LASTEXITCODE; Diagnostics = $diagnostics }
 }
 $skipped = 0
-$nodeCommand = Get-Command node -CommandType Application -ErrorAction SilentlyContinue
+# Get-Command returns every node on PATH; .Source of several would be invoked as one joined, unrecognized name.
+$discoveryMatch = [regex]::Match((Get-Content -Raw -LiteralPath (Join-Path $root 'start-companion.ps1')), '(?m)^\s*(\$nodeCommand = Get-Command node -CommandType Application[^\r\n]*)\r?$')
+Check 'launcher Node discovery selects the first PATH match' ($discoveryMatch.Success -and $discoveryMatch.Groups[1].Value.TrimEnd() -cmatch '\| Select-Object -First 1$')
+$discovery = [scriptblock]::Create($discoveryMatch.Groups[1].Value + '; $nodeCommand')
+$simulated = & {
+    function Get-Command { [pscustomobject]@{ Source = 'C:\first\node.exe' }; [pscustomobject]@{ Source = 'C:\second\node.exe' } }
+    & $discovery
+}
+Check 'launcher Node discovery keeps only the first of two installations' (@($simulated).Count -eq 1 -and $simulated.Source -ceq 'C:\first\node.exe')
+$nodeCommand = & $discovery
 if (-not $nodeCommand) {
     $skipped++
     Write-Host 'SKIP Node runtime probe: node is not on PATH; this check did not pass.'
