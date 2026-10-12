@@ -310,7 +310,8 @@ class EditPlanTests(Base):
         return FakeRunner(edit=run)
     def assert_private(self,result,plan):
         blob=json.dumps(result['verification'])
-        for leak in ['Helvetica','the result','regions','beforeSha256',plan['edits'][0]['beforeSha256'],str(self.tmp.name).lower()]:self.assertNotIn(leak.lower(),blob.lower())
+        # Fixed QA limitation prose may say "regions"; private region DATA must not be returned.
+        for leak in ['Helvetica','the result','"regions":','beforeSha256',plan['edits'][0]['beforeSha256'],str(self.tmp.name).lower()]:self.assertNotIn(leak.lower(),blob.lower())
         for region in plan['edits'][0]['regions']:self.assertNotIn(str(region[0]),blob)
 
     def test_production_qa_gets_same_sealed_plan_by_keyword(self):
