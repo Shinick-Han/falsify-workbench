@@ -79,7 +79,9 @@ the upstream default binary is not a substitute for the stream-order-patched can
   `continuationStyle` has that policy with `applied === true`, and `copiedPages` is an
   integer in 1..32 equal to both the reported `addedPages` and the counted page growth.
   Otherwise it is null (unknown or mismatched counts make no claim; there is no partial
-  success) and the UI keeps the body-only continuation wording.
+  success). Under an engine that declared the style, the UI then says the added-page
+  header/footer/page-number state was not reported in a verifiable form (neither copied nor
+  body-only); engines without the declared style keep the body-only continuation wording.
 - Any editor failure is a 400 error; there is no automatic fallback to the legacy path.
 
 ## Limits
@@ -96,6 +98,8 @@ are, and a standalone Arabic page number on an added page reads as the source nu
 decimal suffix (e.g. 10.1). Image or vector header/footer graphics are not supported and the
 engine refuses the export instead of omitting them. Existing page numbers are never
 renumbered. The UI states header/footer copying only when the output report declares it;
+the report carries no page-number fact, so the UI states the numbering only as the engine's
+conditional policy, never as an applied result or with this output's numbers;
 it is a same-engine report, not independent verification. This is not invisible editing or complete
 original-layout preservation. Tables, images inside the continued flow, ambiguous columns
 and other unsupported layouts fail explicitly without truncation, flattening or legacy fallback.

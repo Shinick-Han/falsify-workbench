@@ -79,6 +79,8 @@ test('descriptor: malformed core fields drop it, bounded optional fields are cle
 
 const STYLE={supported:true,policy:'source-number-suffix',scope:'text-only source-style header/footer; standalone Arabic source number plus decimal suffix; originals unchanged'};
 const STYLED={...NEW,pdfEditor:{...EDITOR,continuationStyle:STYLE}};
+// Status parts by class, not position: headline + separate continuation line share red-export-outcome.
+const outcomes=w=>w.get('red-export-status').children.filter(c=>c.className==='red-export-outcome'),part=(w,cls)=>w.get('red-export-status').children.find(c=>c.className===cls);
 test('descriptor: continuationStyle is declared, exact-policy, fixed scope; never inferred from pagination',()=>{
   const s=L.pdfEditor({...EDITOR,continuationStyle:{...STYLE,scope:'C:/Users/x/paper.pdf · Secret header text',extra:1}}).continuationStyle;
   assert.deepEqual({...s},STYLE,'engine scope text is not echoed');assert.equal(Object.isFrozen(s),true);
@@ -88,27 +90,38 @@ test('descriptor: continuationStyle is declared, exact-policy, fixed scope; neve
   assert.equal(L.pdfEditor({...EDITOR,pagination:false,continuationStyle:STYLE}).continuationStyle,null,'no style without pagination');
   assert.notEqual(L.pdfEditor({...EDITOR,continuationStyle:{...STYLE,supported:'x'}}),null,'malformed optional style keeps the descriptor');});
 
-test('mode line: declared style explains unchanged originals and decimal suffix; copy claimed only per report',async()=>{
+const NUMBERING='원래 쪽번호는 바꾸지 않으며, 원본에 단독 아라비아 숫자 쪽번호가 있으면 추가 페이지는 그 번호에 소수 접미(예: 10.1)를 붙입니다.';
+test('mode line: declared style explains unchanged originals and a conditional decimal suffix in separate blocks; copy claimed only per report',async()=>{
   let w=world(STYLED);await w.ready();const mt=text(w.get('red-export-mode'));
-  assert.match(mt,/추가 페이지에도 원본 머리말·꼬리말 텍스트와 글꼴을 이어갑니다\. 원래 쪽번호는 유지하고 추가 쪽번호는 10\.1처럼 표기합니다\. 이미지·도형 머리말·꼬리말이 있으면 내보내기를 차단합니다\. 실제 적용 여부는 다운로드 결과에 표시합니다\./);
+  assert.ok(mt.includes('추가 페이지에도 원본 머리말·꼬리말 텍스트와 글꼴을 이어갑니다. '+NUMBERING+' 이미지·도형 머리말·꼬리말이 있으면 내보내기를 차단합니다. 실제 적용 여부는 다운로드 결과에 표시합니다.'),mt);
+  assert.doesNotMatch(mt,/10\.1처럼|표기합니다|추가 쪽번호는/,'numbering is conditional on a standalone Arabic source number');
+  const blocks=w.get('red-export-mode').children.filter(x=>typeof x!=='string'&&x.className==='red-export-outcome').map(x=>x.textContent);
+  assert.equal(blocks.length,2,'scope, added pages and self-check boundary are separate sentence groups');assert.match(blocks[0],/^추가 페이지에도 원본 머리말/);assert.match(blocks[1],/^실제 줄바꿈·페이지 수는 출력 사본의 엔진 자체검사 결과로만 표시합니다\./);
+  const help=fs.readFileSync(path.resolve(__dirname,'../dist/index.html'),'utf8');assert.ok(help.includes('지원 엔진은 원본 텍스트와 글꼴을 복제합니다. '+NUMBERING),'shared help uses the same conditional numbering');assert.doesNotMatch(help,/10\.1처럼|표기하며/);
   assert.doesNotMatch(mt,/본문만 담고 머리말·꼬리말·쪽번호가 없으며/);assert.doesNotMatch(mt,/보이지 않|모든 형식|독립 검증 완료/);
   w=world({...NEW,pdfEditor:{...EDITOR,continuationStyle:{...STYLE,policy:'other'}}});await w.ready();
   assert.match(text(w.get('red-export-mode')),/본문만 담고 머리말·꼬리말·쪽번호가 없으며/,'unsupported style keeps body-only copy');assert.doesNotMatch(text(w.get('red-export-mode')),/10\.1/);});
 
-test('success: header/footer copy and suffix only when the output report declares them; malformed reports read body-only',async()=>{
+test('success: header/footer copy only when the output report declares it, in its own block; malformed reports under a styled engine read unknown',async()=>{
   const run=async(cap,continuationStyle)=>{const w=world(cap);await w.ready();w.reply=ok({...ACTUAL,continuationStyle});w.get('red-download').click();await flush();return w;};
   const OK={policy:'source-number-suffix',applied:true,copiedPages:2};
-  let w=await run(STYLED,OK);let o=w.get('red-export-status').children[0].textContent;
-  assert.match(o,/엔진 보고: 추가 페이지 2쪽 모두에 원본 머리말·꼬리말 텍스트를 이어 붙였습니다\. 원래 쪽번호는 유지하고 추가 쪽번호는 10\.1처럼 표기했습니다\./);
-  assert.doesNotMatch(o,/본문만 있고|독립 검증|보이지 않/);assert.equal(text(w.get('red-export-status').children[1].children[0]),'같은 엔진 자체검사');
-  const body=async(label,over)=>{const x=world(STYLED);await x.ready();x.reply=ok({...ACTUAL,continuationStyle:OK,...over});x.get('red-download').click();await flush();const s=x.get('red-export-status').children[0].textContent;
-    assert.match(s,/추가된 이어지는 페이지에는 본문만 있고 머리말·꼬리말·쪽번호가 없으며/,label);assert.doesNotMatch(s,/이어 붙였습니다|10\.1/,label);assert.equal(x.downloads.length,2,label);};
+  let w=await run(STYLED,OK);const [main,cont]=outcomes(w),check=part(w,'red-export-check');assert.equal(outcomes(w).length,2,'headline and continuation are two outcome nodes');
+  assert.match(main.textContent,/페이지 2 → 4 \(새 페이지 2쪽\)/);assert.doesNotMatch(main.textContent,/머리말|꼬리말|쪽번호/,'page growth and continuation scan separately');
+  assert.equal(cont.className,'red-export-outcome');
+  assert.equal(cont.textContent,'엔진 보고: 추가 페이지 2쪽 모두에 원본 머리말·꼬리말 텍스트를 이어 붙였습니다. 원래 쪽번호는 바꾸지 않으며, 원본에 단독 아라비아 숫자 쪽번호가 있으면 추가 페이지는 그 번호에 소수 접미를 붙입니다.');
+  assert.doesNotMatch(w.status(),/본문만 있고|표기했습니다|10\.1|독립 검증|보이지 않/,'no numbering fact in the report: no past tense, no example as this output');assert.equal(text(check.children[0]),'같은 엔진 자체검사');
+  const body=async(label,over)=>{const x=world(STYLED);await x.ready();x.reply=ok({...ACTUAL,continuationStyle:OK,...over});x.get('red-download').click();await flush();const s=x.status();
+    assert.equal(outcomes(x)[1].textContent,'추가 페이지 머리말·꼬리말·쪽번호 적용 여부는 엔진이 확인 가능한 형태로 보고하지 않았습니다.',label);
+    assert.doesNotMatch(s,/본문만 있고|머리말·꼬리말·쪽번호가 없으며|이어 붙였습니다|10\.1/,label);assert.equal(x.downloads.length,2,label);};
   for(const bad of [undefined,null,'yes',{...OK,applied:'true'},{...OK,copiedPages:3},{...OK,copiedPages:1},{...OK,copiedPages:-1},{...OK,copiedPages:1.5},{...OK,copiedPages:'2'},
       {policy:'source-number-suffix',applied:true},{...OK,policy:'renumber'},{...OK,copiedPages:0}])await body(JSON.stringify(bad),{continuationStyle:bad});
   for(const [label,over] of [['addedPages missing',{addedPages:undefined}],['addedPages mismatch',{addedPages:1}],['addedPages string',{addedPages:'2'}]])await body(label,over);
   await body('over 32 pages',{pagination:{inputPages:1,outputPages:34},addedPages:33,continuationStyle:{...OK,copiedPages:33}});
   const edge=world(STYLED);await edge.ready();edge.reply=ok({...ACTUAL,pagination:{inputPages:1,outputPages:33},addedPages:32,continuationStyle:{...OK,copiedPages:32}});edge.get('red-download').click();await flush();
-  assert.match(edge.get('red-export-status').children[0].textContent,/추가 페이지 32쪽 모두에/);
+  assert.match(outcomes(edge)[1].textContent,/추가 페이지 32쪽 모두에/);
+  for(const [label,cap] of [['no style',NEW],['other policy',{...NEW,pdfEditor:{...EDITOR,continuationStyle:{...STYLE,policy:'other'}}}]])for(const report of [undefined,{...OK,copiedPages:3}]){const x=await run(cap,report);
+    assert.equal(outcomes(x)[1].textContent,'추가된 이어지는 페이지에는 본문만 있고 머리말·꼬리말·쪽번호가 없으며, 뒤쪽 원래 페이지의 쪽번호는 다시 매기지 않았습니다.',label+' keeps body-only');
+    assert.doesNotMatch(x.status(),/확인 가능한 형태로 보고하지|이어 붙였습니다/,label);}
   w=world(STYLED);await w.ready();w.reply=ok({...ACTUAL,continuationStyle:OK,layoutVerified:false});w.get('red-download').click();await flush();
   assert.match(w.status(),/^다운로드 차단/);assert.doesNotMatch(w.status(),/이어 붙였습니다/);assert.equal(w.downloads.length,0);
   w=world(STYLED);await w.ready();w.reply=ok({...ACTUAL,pagination:{inputPages:2,outputPages:2},continuationStyle:{policy:'source-number-suffix',applied:true,copiedPages:0}});w.get('red-download').click();await flush();
@@ -189,9 +202,9 @@ test('no blanket success: unverified layout, hash mismatch and missing paginatio
   assert.match(w.status(),/기존 한 줄 교체 · 줄바꿈·페이지 추가 없음 · 10쪽/);assert.doesNotMatch(w.status(),/새 페이지|재배치 \d/);});
 
 test('actual engine payload: ink outcome, same-engine self-check state, mapped diagnostics with severity and codes',async()=>{const w=world(NEW);await w.ready();w.reply=ok(ACTUAL);w.get('red-download').click();await flush();
-  const e=w.get('red-export-status'),[outcome,check,notes]=e.children;assert.equal(e.classList.contains('error'),false);assert.equal(w.downloads.length,2);
+  const e=w.get('red-export-status'),[outcome,cont]=outcomes(w),check=part(w,'red-export-check'),notes=part(w,'red-export-notes');assert.equal(outcomes(w).length,2);assert.equal(e.classList.contains('error'),false);assert.equal(w.downloads.length,2);
   assert.equal(outcome.className,'red-export-outcome');assert.match(outcome.textContent,/^실험용 사본과 별도 변경 계획을 다운로드했습니다\. 엔진 자체검사 결과: 페이지 2 → 4 \(새 페이지 2쪽\) · 줄바꿈 결과 미보고\./);
-  assert.match(outcome.textContent,/추가된 이어지는 페이지에는 본문만 있고 머리말·꼬리말·쪽번호가 없으며, 뒤쪽 원래 페이지의 쪽번호는 다시 매기지 않았습니다/);
+  assert.equal(cont.className,'red-export-outcome');assert.match(cont.textContent,/^추가된 이어지는 페이지에는 본문만 있고 머리말·꼬리말·쪽번호가 없으며, 뒤쪽 원래 페이지의 쪽번호는 다시 매기지 않았습니다/);assert.doesNotMatch(outcome.textContent,/머리말/);
   assert.doesNotMatch(outcome.textContent,/engine_|pagination_required|주의/,'diagnostics stay out of the outcome line');
   assert.equal(check.className,'red-export-check');assert.equal(check.children[0].className,'status-label');assert.equal(check.children[0].textContent,'같은 엔진 자체검사');
   assert.match(text(check),/독립 추출\/렌더링·사람 검수 대기/);assert.doesNotMatch(w.status(),/독립 검증 완료|엔진 검증 결과|독립성 미보고/);
@@ -201,7 +214,7 @@ test('actual engine payload: ink outcome, same-engine self-check state, mapped d
   assert.equal(items[2],'주의 · 엔진이 추가 콘텐츠의 그리기/추출 순서 확인을 요청함 (content_stream_append_order, p. 1)');assert.doesNotMatch(items[2],/원본과 다름/,'structural warning is not a defect verdict');
   assert.equal(notes.children.map(li=>li.children[0].className).join(),'note-info,note-info,note-warning','only warning severity is marked 주의');
   const v=world(NEW);await v.ready();v.reply=ok({...ACTUAL,warnings:[{pageIndex:'x',code:'<b>new_code</b>'+'z'.repeat(80)},{code:'pagination_required',severity:'bogus'},{code:'__proto__',severity:'info'}]});v.get('red-download').click();await flush();
-  const unknown=v.get('red-export-status').children[2].children.map(text);
+  const unknown=v.get('red-export-status').children.find(c=>c.className==='red-export-notes').children.map(text);
   assert.equal(unknown[0],'심각도 미보고 · 알 수 없는 엔진 진단 코드 (<b>new_code</b>'+'z'.repeat(49)+')','unknown code: fixed text, bounded code kept as text');
   assert.equal(unknown[1],'심각도 미보고 · 긴 After를 담으려고 이어지는 페이지가 필요했다고 보고됨 (pagination_required)');assert.match(unknown[2],/^정보 · 알 수 없는 엔진 진단 코드 \(__proto__\)/);
   assert.doesNotMatch(SOURCE,/innerHTML|insertAdjacentHTML|outerHTML/);});
@@ -211,11 +224,11 @@ test('engine source link and limits sit next to the engine metadata; unsafe or a
   assert.ok(a,'engine source anchor');assert.equal(a.href,EDITOR.sourceUrl);assert.equal(a.target,'_blank');assert.equal(a.rel,'noopener noreferrer');assert.equal(a.textContent,'엔진 소스');
   assert.match(text(m),/^PDF 편집 엔진 falsify-pdf-editor 0\.4\.1 \(엔진 소스\) · /);assert.match(text(m),/엔진 제한: 변경 최대 12개 · After 최대 4,000자 · 파일 최대 25 MB\./);assert.doesNotMatch(text(m),/other/);
   for(const sourceUrl of [null,'javascript:alert(1)','https://evil.example/Shinick-Han/x','https://github.com/Shinick-Han/x"><img>']){w=world({...NEW,pdfEditor:{...EDITOR,sourceUrl}});await w.ready();
-    assert.equal(w.get('red-export-mode').children.some(x=>typeof x!=='string'),false,String(sourceUrl));assert.equal(w.calls.length,0,'nothing fetched');}});
+    assert.equal(w.get('red-export-mode').children.some(x=>typeof x!=='string'&&x.className==='red-engine-source'),false,String(sourceUrl));assert.equal(w.calls.length,0,'nothing fetched');}});
 
 test('help states the reflow scope; status is a block container; footer source link has a >=12px, 24px target',()=>{
   const html=fs.readFileSync(path.resolve(__dirname,'../dist/index.html'),'utf8'),css=fs.readFileSync(path.resolve(__dirname,'../dist/document-red.css'),'utf8');
-  assert.match(html,/1단·회전 없음·잘림 없음인 최상위 본문 텍스트뿐/);assert.match(html,/머리말·꼬리말 지원 여부는 연결된 엔진에 따라/);assert.match(html,/추가 쪽번호를 10\.1처럼/);assert.match(html,/독립 추출\/렌더링·사람 검수는 별도로 필요/);assert.doesNotMatch(html,/특이한 레이아웃에서는 재배치가 거부/);
+  assert.match(html,/1단·회전 없음·잘림 없음인 최상위 본문 텍스트뿐/);assert.match(html,/머리말·꼬리말 지원 여부는 연결된 엔진에 따라/);assert.match(html,/원본에 단독 아라비아 숫자 쪽번호가 있으면 추가 페이지는 그 번호에 소수 접미\(예: 10\.1\)를 붙입니다/);assert.doesNotMatch(html,/10\.1처럼/);assert.match(html,/독립 추출\/렌더링·사람 검수는 별도로 필요/);assert.doesNotMatch(html,/특이한 레이아웃에서는 재배치가 거부/);
   assert.match(html,/<div id="red-export-status" class="form-feedback" role="status" aria-live="polite"><\/div>/);
   assert.match(css,/\.page-foot \.source-link\{display:inline-flex;align-items:center;min-height:24px;font-size:12px\}/);assert.match(css,/\.red-export-outcome\{[^}]*font-size:14px[^}]*color:var\(--ink\)/);});
 
