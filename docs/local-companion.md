@@ -68,6 +68,18 @@ Windows equivalent after creating a venv: `.venv\Scripts\python.exe ...`. Add `-
 
 ## Other CLIs and custom harnesses
 
+### Optional PDF preflight (0.2.0-alpha.1+)
+
+After connecting, RED's **PDF 사전분석** button sends the currently supplied PDF and only selected Before/After candidates to
+your own local companion. Upload alone does not send this request. It calls no model, runs the bounded probes in an isolated
+child, and displays only inspected-page/object counts and advisory text-layout statuses. This is not a visual/scientific verdict
+or editing permission and does not affect the existing export quality gate. Detailed geometry, RED plans and gold are not sent
+to BLUE. Docling ML conversion is not configured or downloaded. Object writing remains a separate experiment.
+
+Old companions show an update hint; manual exchange and supported RED/BLUE/export flows remain usable. The connection panel
+reports the authenticated companion version. Analysis has a fixed deadline and is serialized with other local operations.
+See [adapter evidence](pdf-adapter-experiments.md) and [source release updates](releases.md).
+
 Codex CLI and Claude Code are both built-in adapters using your own subscription login; choose either per role in RED or BLUE. Any other CLI can be connected through a trusted wrapper that follows the JSON stdin/stdout protocol in [the harness contract](harness-contract.md). Import that wrapper's `stdio` harness JSON in Harness, then select it in RED or BLUE. It is **not** sufficient to put a chat CLI path in the executable field: the wrapper must translate input, invoke the CLI using your own subscription login, validate and return only the requested JSON object, without mixing logs into stdout.
 
 No account keys belong in the website, harness JSON, GitHub or the execution ledger. A wrapper may use its CLI's local authentication stores. The minimal stdio environment does not automatically pass all home/config variables; wrappers must resolve their own CLI configuration explicitly. Trusted custom code can access your files/network and incur costs; it is not OS-isolated or guaranteed to enforce internal call budgets. The included `app/examples/stdio_harness.py` intentionally abstains and is a protocol example, not a model implementation.

@@ -1,6 +1,9 @@
 # PDF adapter experiments
 
-This batch adds **optional, unwired backend experiments**, not a replacement editor or public table/figure attack feature.
+These are **optional advisory analysis modules**, not a replacement editor or public table/figure attack feature.
+Workbench 0.2.0-alpha.1 connects their bounded inventory/object counts and selected-text metrics to RED's explicit
+`PDF 사전분석` action through authenticated `POST /api/paper/inspect`. Detailed geometry stays private in the isolated child;
+the UI receives fixed counts/statuses only. Docling conversion remains unconfigured, and object writing remains unwired.
 The default Bento/PDFium editor, HTTP export contract, browser import, independent quality gate and separate RED/BLUE/review
 workflows are unchanged. None of these probes may select an edit, widen a QA mask, block a production download or feed a
 private source/RED plan into BLUE. No new shipped dependency was added.
@@ -14,7 +17,8 @@ private source/RED plan into BLUE. No new shipped dependency was added.
 ## Use and authority
 
 The experimental Python modules are `app/local/paper_structure.py`, `pdf_layout_probe.py` and `pdf_object_probe.py`.
-They have no HTTP/UI callers. Their detailed outputs are private geometry/metrics hints. The immutable source bytes and
+Their read-only count/metrics summaries have the advisory HTTP/UI caller described above; the writing prototype does not.
+Their detailed outputs are private geometry/metrics hints. The immutable source bytes and
 independently derived selected-text plan remain the authority for the existing editor and quality checks.
 
 `normalize_docling(payload, source_bytes)` requires no Docling install. Its `sourceSha256` binds the result to the supplied
@@ -62,4 +66,4 @@ synthetic example; that is not original-PDF reflow proof.
 
 For upstream pins, licenses and runtime/source-only distinctions see each linked adapter document. Docling's MIT code license
 does not cover every model automatically; PDF4QT's MIT core does not make Qt dependencies MIT. BabelDOC was inspected for
-typesetting ideas, not imported or executed. No release, server restart or hosted deployment is implied by these experiments.
+typesetting ideas, not imported or executed. See [source releases](releases.md) for installed/hosted update boundaries.
