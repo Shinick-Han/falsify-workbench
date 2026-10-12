@@ -24,7 +24,7 @@ class HarnessTests(unittest.TestCase):
         with self.assertRaises(ValueError):red_service.validate_request(d)
     def test_blue_large_budget(self):
         d=self.request('blue','x'*360001);d['maxCalls']=32;d['harness']['maxCalls']=32
-        self.assertEqual(blue_service.validate_request(d)[1],12)
+        self.assertEqual(blue_service.validate_request(d)[1],13)  # 11 scans + reread selection + final
     def test_digest_canonical(self):
         d=self.request();d['harness']['settings']={'temperature':0.00001};raw=json.dumps(d['harness'],ensure_ascii=False,sort_keys=True,separators=(',',':'));d['harnessCanonical']=raw
         self.assertEqual(harness.resolve(d,'red')[1],hashlib.sha256(raw.encode()).hexdigest())

@@ -55,6 +55,30 @@ stdin JSON 하나(UTF-8, newline 후 EOF) 또는 HTTPS POST JSON:
 
 시작용 코드: [app/examples/stdio_harness.py](../app/examples/stdio_harness.py). 기본은 정직한 abstain을 반환한다. 자기 모델/도구 pipeline으로 교체한다. 합성 연결 fixture는 app/tests/fixtures에 별도 위치하며 실제 모델이 아니다.
 
+### BLUE 다중 청크 근거 재독
+
+단일 청크(추출문이 36,000자 이하 한 묶음)는 기존대로 전체 원문을 한 번의 호출에 그대로 보내며 `coverage.reread.status`는 `not-needed`다. 여러 청크면 BLUE는 `N`회 청크 읽기 → 1회 재독 대상 선택 → 1회 최종 판단, 총 `N+2`회를 사용한다. 요청 예산과 harness `maxCalls` 중 작은 값이 `N+2`보다 작으면 backend 생성과 모델 호출 전에 시작하지 않는다. 모든 호출의 prompt(harness 지침 포함, JSON escape 후)는 100,000자 이하이며, 모델과 무관한 청크/단일 prompt는 backend 생성 전에 검사한다. 입력은 사용자가 공급한 변경 문서 텍스트뿐이며 원본 논문·정답·RED 기록·파일·도구·외부 자료는 쓰지 않는다.
+
+선택 호출의 `outputSchema`(custom stdio/http adapter도 매 호출 받는다):
+
+```json
+{"status": "ok|abstain|refusal",
+ "targets": [{"segmentId": "입력 문단 ID", "anchor": "그 문단에 정확히 한 번 나오는 인용(<=300자)", "reason": "<=600자"}]}
+```
+
+targets는 최대 8개, strict(추가 필드 금지). 선택 prompt에는 청크 메모(`allChunkNotes`)와 문단 색인(`segmentIndex`: 문단 ID·label·offset·길이·미리보기, 긴 문단은 6,000자마다 항목; 상한 초과 시 미리보기를 줄이고 그래도 넘으면 뒤 항목을 생략하며 `indexTruncated`로 알림)이 들어간다. anchor는 실제로 전달된 색인 미리보기나 검증된 청크 메모 인용에서 복사해야 한다. 없는 ID, 원문에 없거나 중복되는 anchor, 선택 단계에 보이지 않은 anchor는 오류로 끝내고 최종 호출을 하지 않는다. 선택이 abstain/refusal이면 그 상태로, ok인데 대상이 0개이면 요약만으로 판단하지 않고 `abstain`으로 끝낸다(지적 없음, `reread.status = incomplete`).
+
+최종 호출은 기존 status/findings 스키마 그대로이며, 청크 메모와 `rereadWindows`(선택 문단의 RAW 원문 창, `[start,end)` 원문 offset 포함)를 받는다. 창은 anchor 중심으로 결정적으로 자르며 대상당 최대 6,000자, 합계 48,000자 이하다. prompt 상한을 맞추려 줄이거나 anchor조차 담지 못해 생략한 창은 `truncated: true`, `status: incomplete`로 보고한다. 최종 지적의 quote와 evidence 인용은 원문 일치·유일성에 더해, 최종 단계에 실제로 전달된 창이나 검증된 청크 메모 인용 안에 있어야 한다.
+
+```json
+"coverage": {"complete": true, "calls": 4, "chunks": 2, "completedChunks": 2, "meaning": "...",
+  "reread": {"status": "completed|not-needed|incomplete", "selectedSegments": ["s1"], "deliveredChars": 6000,
+             "truncated": false, "meaning": "상태별 고정 문구"},
+  "rereadWindows": [{"segmentId": "s1", "start": 15000, "end": 21000}]}
+```
+
+`coverage.complete`는 추출 텍스트 전달 여부만 뜻한다. 재독은 모델이 고른 일부 창이며 전체 원문 재독이나 결함 전수 탐지의 보증이 아니다. 부분/중단/유보/거절 결과는 과학적 성공이 아니고 지적을 포함하지 않는다. 진행 상황 `phase`는 고정 ASCII token `reviewing`(청크 읽기·단일 호출) / `selecting` / `reread`(창 구성, 호출 없음) / `finalizing`이며 `requiredCalls`는 `N+2`(단일 1)다. 취소는 다음 호출 전·호출 직후에 확인해 결과를 폐기한다.
+
 ## 검수와 비교
 
 검수에서 고정 실행을 선택하고 평가자, 사례/실험 조건, supported/unsupported/mixed/uncertain, 선택적인1–5 품질 점수, 필수 근거를 남긴다. 기존 평가를 덮어쓰지 않고 새 이력을 추가한다. RED 원출력과 사용자 최종 선택·편집 After를 구분해 표시한다. 보존 검사 후 출력 해시가 있는 RED 스냅샷과 BLUE 입력 파일의 바이너리 SHA-256이 일치하면 검수에서 변경문 위치를 대조한다. 없으면 기존 변경 계획 JSON을 선택할 수 있다. 계획은 검수에만 존재한다. 인용 겹침은 탐지 성공이 아니며 사람이 변경별 detected/missed/uncertain을 판정한다. 모델 호출·domain gold·팀 승인으로 자동 승격하지 않는다.
