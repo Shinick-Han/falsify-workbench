@@ -258,13 +258,18 @@ def build_envelope(source, patches):
         'inventory': _inventory_counts(adapters['paper_inventory'], source, page_count), 'objects': objects,
         'layout': [_layout_result(adapters['paper_inventory'], adapters['pdf_layout_probe'], source, p) for p in patches]}
 
-def _worker():
+def _worker(out):
     request = json.loads(sys.stdin.buffer.read(LIMITS['maxStdinBytes'] + 1).decode('utf-8'))
     path = Path(request['source'])
     source = path.read_bytes() if path.stat().st_size <= LIMITS['maxPdfBytes'] else b''
     envelope = build_envelope(source, _patches(request['patches'])) if _sha(source) == request['sourceSha256'] else {}
-    sys.stdout.write(json.dumps(envelope) + '\n')
+    out.write(json.dumps(envelope) + '\n')
 
 if __name__ == '__main__' and sys.argv[1:] == ['--worker']:
-    try: _worker()
-    except Exception: sys.stdout.write('{}\n')
+    # Only a private duplicate of fd 1 carries the envelope; fd 1 itself becomes devnull, so library chatter (PyMuPDF prints
+    # recoverable 'MuPDF error: ...' lines on stdout) cannot turn a readable source into the unavailable summary.
+    out = os.fdopen(os.dup(1), 'w', encoding='utf-8')
+    os.dup2(os.open(os.devnull, os.O_WRONLY), 1)
+    try: _worker(out)
+    except Exception: out.write('{}\n')
+    out.flush()

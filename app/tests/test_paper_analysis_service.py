@@ -302,6 +302,13 @@ class RealChildTests(ContractAsserts, unittest.TestCase):
         summary = self.inspect(MINIMAL, [PATCH])
         self.assertPublic(summary, sha(MINIMAL), ['e0']); self.assertEqual(summary['status'], 'unavailable')
         self.assertEqual((summary['inventory'], summary['objects']), (svc._empty(svc.INVENTORY_KEYS), svc._empty(svc.OBJECT_KEYS)))
+    def test_mupdf_stdout_errors_do_not_hide_a_readable_source(self):
+        doc = pymupdf.open(); doc.new_page().insert_text((72, 72), 'Hello world', fontsize=11); good = doc.tobytes(deflate=True)
+        start = good.index(b'stream\n') + len(b'stream\n')
+        source = good[:start] + b'\x00garbage' + good[start + 8:]   # broken content stream: MuPDF prints a recoverable error
+        summary = self.inspect(source, [])
+        self.assertPublic(summary, sha(source), [])
+        self.assertEqual((summary['status'], summary['inventory']['pages'], summary['objects']['complete']), ('available', 1, True))
     def test_child_rehashes_the_private_copy(self):
         case = corpus.build_case('valid_same_length_wording'); source = bytes(case['source'])
         other = bytes(corpus.build_case('shared_image_occurrence')['source'])
