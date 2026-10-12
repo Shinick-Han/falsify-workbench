@@ -31,14 +31,38 @@ TOKEN = secrets.token_urlsafe(32)
 JOBS = {}
 LOCK = threading.Lock()
 ACTIVE = threading.BoundedSemaphore(1)
+LIFECYCLE_SCHEMA = 'falsify-companion-lifecycle/1'
+RESULT_RETENTION = 3600
 
 class ThreadingHTTPServer(_NativeThreadingHTTPServer):
     """On Windows SO_REUSEADDR lets a later bind take over a live listener; claim the port exclusively instead.
     Elsewhere keep the stdlib default (normal restart over TIME_WAIT; a live listener still refuses the bind)."""
     if os.name == 'nt': allow_reuse_address = False
+    web_origin = None
+    pdf_editor = None
+    def __init__(self, *args, **kwargs):
+        # Per-instance launcher identity and restart state; a restart holds ACTIVE until the server closes.
+        self.instance_id = secrets.token_urlsafe(24)
+        self.closing = False
+        self.restart_reserved = False
+        super().__init__(*args, **kwargs)
     def server_bind(self):
         if os.name == 'nt': self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
         super().server_bind()
+    def server_close(self):
+        super().server_close()
+        with LOCK:
+            if self.restart_reserved: self.restart_reserved = False; ACTIVE.release()
+
+def busy_locked(server):
+    """Caller holds LOCK. Returns (busy, reserved): reserved means ACTIVE was acquired and the caller owns it.
+    Completed results are protected too: any job finished within the retention window counts as busy."""
+    if server.closing: return True, False
+    if not ACTIVE.acquire(blocking=False): return True, False
+    now = time.monotonic()
+    if any(job.get('finished', float('inf')) >= now - RESULT_RETENTION for job in JOBS.values()):
+        ACTIVE.release(); return True, False
+    return False, True
 CORS_HEADERS = {'authorization', 'content-type'}
 HOST_LABEL = re.compile(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?')
 
@@ -123,6 +147,48 @@ class Handler(BaseHTTPRequestHandler):
         origin = self.headers.get('Origin')
         if not self.cors_ok() and origin != self.origin and not (self.command == 'GET' and origin is None and self.headers.get('Sec-Fetch-Site') == 'same-origin'): return False
         return hmac.compare_digest(self.headers.get('Authorization', ''), 'Bearer ' + TOKEN)
+    def server_closing(self):
+        # Caller holds LOCK. Closing is permanent: requests accepted before shutdown never admit work afterwards,
+        # even once server_close has released the restart reservation.
+        return getattr(self.server, 'closing', False)
+    def launcher_authorized(self):
+        """Native launcher only: exact loopback Host, bearer token, launcher marker, and no browser fetch metadata."""
+        if not self.host_ok() or 'Origin' in self.headers or 'Sec-Fetch-Site' in self.headers: return False
+        if self.headers.get_all('X-Falsify-Launcher') != ['1']: return False
+        auth = self.headers.get_all('Authorization') or []
+        return len(auth) == 1 and hmac.compare_digest(auth[0].encode('utf-8', 'surrogatepass'), ('Bearer ' + TOKEN).encode())
+    def launcher_instance(self):
+        if not self.launcher_authorized(): self.reply(403, {'error': 'unauthorized'}); return
+        with LOCK:
+            busy, reserved = busy_locked(self.server)
+            if reserved: ACTIVE.release()
+        self.reply(200, {'schema': LIFECYCLE_SCHEMA, 'pid': os.getpid(), 'instanceId': self.server.instance_id,
+            'serverPath': str(Path(__file__).resolve()), 'webOrigin': self.web_origin, 'busy': busy})
+    def launcher_restart(self):
+        if not self.launcher_authorized(): self.reply(403, {'error': 'unauthorized'}); return
+        try:
+            if self.headers.get_all('Content-Type') != ['application/json']: raise ValueError('application/json required')
+            lengths = self.headers.get_all('Content-Length') or []
+            if len(lengths) != 1 or not lengths[0].isascii() or not lengths[0].isdigit(): raise ValueError('Content-Length required')
+            size = int(lengths[0])
+            if not 1 <= size <= 1024: raise ValueError('body size limit')
+            raw = self.rfile.read(size)
+            if len(raw) != size: raise ValueError('body truncated')
+            data = json.loads(raw.decode('utf-8'), object_pairs_hook=no_duplicates, parse_constant=lambda _: (_ for _ in ()).throw(ValueError('nonfinite JSON')))
+            if not isinstance(data, dict) or set(data) != {'schema', 'instanceId'}: raise ValueError('expected exactly schema and instanceId')
+            if data['schema'] != LIFECYCLE_SCHEMA or not isinstance(data['instanceId'], str): raise ValueError('invalid lifecycle request')
+        except (ValueError, UnicodeDecodeError): self.reply(400, {'error': 'invalid_request'}); return
+        if not hmac.compare_digest(data['instanceId'].encode('utf-8', 'surrogatepass'), self.server.instance_id.encode()):
+            self.reply(409, {'error': 'instance_mismatch'}); return
+        with LOCK:
+            busy, reserved = busy_locked(self.server)
+            if reserved: self.server.closing = True; self.server.restart_reserved = True
+        if busy: self.reply(409, {'error': 'companion_busy'}); return
+        # ACTIVE stays reserved (no new RED/BLUE/export admission) until server_close; shut down after the reply is sent.
+        try:
+            self.reply(200, {'restarting': True}); self.wfile.flush()
+        finally:
+            threading.Thread(target=self.server.shutdown, daemon=True).start()
     def do_OPTIONS(self):
         method = self.headers.get('Access-Control-Request-Method', '')
         requested = {h.strip().lower() for h in self.headers.get('Access-Control-Request-Headers', '').split(',') if h.strip()}
@@ -145,6 +211,7 @@ class Handler(BaseHTTPRequestHandler):
             if (origin is not None and origin != self.origin) or self.headers.get('Sec-Fetch-Site') != 'same-origin':
                 self.reply(403, {'error': 'same_origin_browser_required'}); return
             self.reply(200, {'token': TOKEN, 'mode': 'loopback-only', 'model': 'gpt-6.1-sol'}); return
+        if path == '/api/launcher/instance': self.launcher_instance(); return
         if path.startswith('/api/'):
             if not self.authorized(): self.reply(403, {'error': 'unauthorized'}); return
             if path == '/api/capabilities':
@@ -174,6 +241,7 @@ class Handler(BaseHTTPRequestHandler):
         mime = 'application/javascript' if target.suffix in ['.js', '.mjs'] else mimetypes.guess_type(target)[0] or 'application/octet-stream'
         self.reply(200, target.read_bytes(), mime)
     def do_POST(self):
+        if unquote(urlsplit(self.path).path) == '/api/launcher/restart': self.launcher_restart(); return
         if not self.authorized(): self.reply(403, {'error': 'unauthorized'}); return
         path = unquote(urlsplit(self.path).path)
         role = 'blue' if path.startswith('/api/blue/jobs') else 'red'
@@ -197,7 +265,8 @@ class Handler(BaseHTTPRequestHandler):
                     if job['state'] == 'completed': job['state'] = 'cancelled'; job.pop('result', None)
                 self.reply(200, {'status': 'cancel_requested'}); return
             if path == '/api/export':
-                if not ACTIVE.acquire(blocking=False): self.reply(409, {'error': '다른 작업을 마친 뒤 내보내세요.'}); return
+                with LOCK: admitted = not self.server_closing() and ACTIVE.acquire(blocking=False)
+                if not admitted: self.reply(409, {'error': '다른 작업을 마친 뒤 내보내세요.'}); return
                 editor = getattr(self.server, 'pdf_editor', None)
                 try: result = editor.export(data) if editor else handle_export(data)
                 finally: ACTIVE.release()
@@ -214,7 +283,7 @@ class Handler(BaseHTTPRequestHandler):
                     if existing['role'] != role or existing['fingerprint'] != fingerprint: raise ValueError('같은 요청 ID의 내용이 달라졌습니다.')
                     self.reply(200, {'id': request_id, 'state': existing['state']}); return
                 if len(JOBS) >= 16: raise ValueError('메모리 작업 제한. 완료 후 서버를 재시작하세요.')
-                if not ACTIVE.acquire(blocking=False): self.reply(409, {'error': '이미 실행 중입니다. 재시도는 자동 호출되지 않습니다.'}); return
+                if self.server_closing() or not ACTIVE.acquire(blocking=False): self.reply(409, {'error': '이미 실행 중입니다. 재시도는 자동 호출되지 않습니다.'}); return
                 job = {'id': request_id, 'role': role, 'state': 'running', 'progress': {'completedCalls': 0}, 'cancel': threading.Event(),
                     'fingerprint': fingerprint, 'created': time.monotonic()}
                 JOBS[request_id] = job
