@@ -12,8 +12,8 @@ This is a source-only prerelease of the Workbench and local companion. It pairs 
 - Fixed refusal codes on PDF export failures.
 - Regional, typography and reading-order QA fixes (see [regional quality](pdf-regional-quality.md)), and legacy
   editor/export fixes in the local companion.
-- Editor 0.1.0-alpha.5: repeated same-line edits succeeded on the calibration documents across two and three
-  successive edit generations. Source/preservation warnings and three AMAS refusals remain.
+- Editor 0.1.0-alpha.5: repeated same-line edits succeeded on one fixed ReBRAC calibration case through edit
+  generations two and three. Source/preservation warnings and three refused/unsupported edit cases on one AMAS paper remain.
 
 ## Not claimed
 
