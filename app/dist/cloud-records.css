@@ -1,4 +1,5 @@
 /* Shared records: a flat extension of the results work surface. Existing tokens only; no yellow, no shadows. */
+.cloud-auth label small{display:block;margin-top:2px;color:var(--muted);font-size:12px;font-weight:400}
 .cloud-records .section-heading{margin-bottom:12px}
 .cloud-records .section-heading h2{margin:0}
 .cloud-records .section-heading{flex-wrap:wrap;min-width:0}

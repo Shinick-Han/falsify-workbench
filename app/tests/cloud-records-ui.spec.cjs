@@ -5,7 +5,7 @@ const src=fs.readFileSync(path.resolve(__dirname,'../dist/cloud-records.js'),'ut
 const tests=[];const test=(name,fn)=>tests.push([name,fn]);
 const flush=async(n=20)=>{for(let i=0;i<n;i++)await new Promise(r=>setImmediate(r));};
 const until=async(f,label)=>{for(let i=0;i<300&&!f();i++)await new Promise(r=>setTimeout(r,5));assert.ok(f(),label);};
-const H='a'.repeat(64),S='b'.repeat(64),F='c'.repeat(64),FUTURE=new Date(Date.now()+864e5).toISOString(),TOKEN='t'.repeat(43);
+const H='a'.repeat(64),S='b'.repeat(64),F='c'.repeat(64),FUTURE=new Date(Date.now()+864e5).toISOString(),TOKEN='t'.repeat(43),INVITE='fsi_'+'Q'.repeat(42)+'w';
 
 class El extends EventTarget{
   constructor(tag){super();Object.assign(this,{tagName:tag.toUpperCase(),children:[],parent:null,attrs:{},dataset:{},_text:'',id:'',className:'',value:'',checked:false,disabled:false,hidden:false,open:false});
@@ -59,17 +59,30 @@ function setup({apiBase=BASE,store=new Map(),routes=()=>({status:404,body:{error
 const sharedRoute=(m,p)=>m==='GET'&&p.startsWith('/v1/records?scope=shared')?{status:200,body:{records:sharedRecords,nextCursor:null}}:null;
 async function login(t){t.$('cloud-username').value='synthetic_me';t.$('cloud-password').value='correct horse battery';t.$('cloud-auth-form').dispatchEvent(new Event('submit',{cancelable:true}));await flush();}
 const authOk=(m,p)=>m==='POST'&&p==='/v1/auth/login'?{status:200,body:{token:TOKEN,author:{id:'author-me',username:'me',displayName:'Me'},expiresAt:FUTURE}}:null;
+const signedIn=()=>new Map([[KEY,meSession()]]);
+// Wording that would describe team records as readable without signing in.
+const PUBLIC_READ=/누구나|로그인 없이|로그인하지 않은|로그인은 필요 없|공개본/;
 
 test('unconfigured or non-https server stays off and never touches the network',async()=>{
   for(const apiBase of ['','http://api.test','https://user:pw@api.test','https://api.test/?x=1']){const t=setup({apiBase});await t.ready;
     assert.equal(t.results.children[0].id,'ledger-board','local ledger stays first');assert.equal(t.results.children[1].id,'cloud-records');
     assert.match(t.$('cloud-connection').textContent,/꺼짐/);assert.equal(t.$('cloud-refresh').visible(),false);assert.equal(t.$('cloud-account').visible(),false);assert.equal(t.calls.length,0);}});
 
-test('shared records are read anonymously, only on explicit refresh',async()=>{
+test('signed out, shared records request nothing: refresh and kind open sign-in with fixed copy',async()=>{
   const t=setup({routes:sharedRoute});await t.ready;await flush();assert.equal(t.calls.length,0,'no automatic read');assert.equal(t.$('cloud-tab-mine').disabled,false,'mine stays reachable and explains sign-in');
+  assert.match(t.$('cloud-list').textContent,/초대받은 팀 멤버만/);assert.match(t.$('cloud-account-summary').textContent,/공유 기록을 보려면 필요/);
+  t.press(t.$('cloud-refresh'));await flush();
+  assert.equal(t.calls.length,0,'no shared GET without sign-in');assert.equal(t.$('cloud-account').open,true);assert.equal(t.doc.activeElement,t.$('cloud-username'),'sign-in form takes focus');
+  assert.equal(t.$('cloud-status').textContent,'공유 기록은 초대받은 팀 멤버만 볼 수 있습니다. 로그인한 뒤 불러오세요.');assert.ok(t.$('cloud-status').classList.contains('error'));
+  t.$('cloud-kind').change('run');t.press(t.$('cloud-tab-shared'));await flush();assert.equal(t.calls.length,0,'kind change and the shared tab request nothing either');assert.equal(t.records().length,0);
+  assert.ok(!PUBLIC_READ.test(t.$('cloud-records').textContent),'no copy claims anonymous or internet-public reads');});
+
+test('shared records are read signed in as a member, only on explicit refresh',async()=>{
+  const t=setup({store:signedIn(),routes:sharedRoute});await t.ready;await flush();assert.equal(t.calls.length,0,'no automatic read');
   t.$('cloud-refresh').click();await until(()=>t.records().length===2,'two shared records');
-  assert.equal(t.calls[0].url,BASE+'/v1/records?scope=shared');assert.equal(t.calls[0].headers.authorization,undefined);assert.equal(t.calls[0].init.credentials,'omit');
-  assert.ok(t.records().every(a=>a.textContent.includes('작성자 보고 · 미검증')),'source badge on every record');assert.equal(t.action(t.records()[1],'review'),null,'anonymous visitor cannot review');});
+  assert.equal(t.calls[0].url,BASE+'/v1/records?scope=shared');assert.equal(t.calls[0].headers.authorization,'Bearer '+TOKEN,'shared reads carry the session');assert.equal(t.calls[0].init.credentials,'omit');
+  assert.ok(t.records().every(a=>a.textContent.includes('작성자 보고 · 미검증')),'source badge on every record');assert.ok(t.action(t.records()[1],'review'),'a member can review a shared run');
+  assert.ok(!PUBLIC_READ.test(t.$('cloud-records').textContent),'team wording only');});
 
 test('sign-in keeps the token for the configured server only and never stores the password',async()=>{
   const t=setup({routes:(m,p)=>authOk(m,p)||sharedRoute(m,p)||(m==='GET'&&p.startsWith('/v1/records?scope=mine')?{status:200,body:{records:[],nextCursor:null}}:null)});await t.ready;
@@ -79,15 +92,16 @@ test('sign-in keeps the token for the configured server only and never stores th
   const stored=t.store.get(KEY);assert.ok(stored&&!stored.includes('correct horse'),'password not persisted');assert.equal(JSON.parse(stored).apiBase,BASE);assert.equal(JSON.parse(stored).token,TOKEN);
   assert.ok(![...t.body.walk()].some(n=>n.value==='correct horse battery'),'password not left in any field');assert.match(t.$('cloud-account-summary').textContent,/로그인됨 · Me/);
   t.$('cloud-tab-mine').click();await until(()=>t.calls.length===2&&!t.$('cloud-tab-shared').disabled,'mine read');assert.equal(t.calls[1].headers.authorization,'Bearer '+TOKEN);
-  t.$('cloud-tab-shared').click();await until(()=>t.calls.length===3,'shared read');assert.equal(t.calls[2].headers.authorization,undefined,'shared reads stay anonymous');
+  t.$('cloud-tab-shared').click();await until(()=>t.calls.length===3,'shared read');assert.equal(t.calls[2].headers.authorization,'Bearer '+TOKEN,'shared reads are authenticated');
   assert.ok(t.calls.every(c=>c.url.startsWith(BASE+'/v1/')),'no other destination');
-  const other=setup({apiBase:'https://other.test',store:new Map([[KEY,meSession()]])});await other.ready;other.$('cloud-tab-mine').click();await flush();assert.equal(other.calls.length,0,'token for another server is ignored');assert.match(other.$('cloud-account-summary').textContent,/로그인 · 가입/);});
+  const other=setup({apiBase:'https://other.test',store:new Map([[KEY,meSession()]])});await other.ready;other.$('cloud-tab-mine').click();await flush();assert.equal(other.calls.length,0,'token for another server is ignored');assert.match(other.$('cloud-account-summary').textContent,/로그인 · 초대 가입/);});
 
-test('expired or rejected session asks to sign in again and keeps local and shared data',async()=>{
+test('expired or rejected session asks to sign in again, keeps the local ledger and drops loaded server records',async()=>{
   const old=setup({store:new Map([[KEY,meSession({expiresAt:'2020-01-01T00:00:00Z'})]])});await old.ready;assert.equal(old.store.has(KEY),false);assert.match(old.$('cloud-account-summary').textContent,/다시 로그인 필요/);assert.equal(old.$('cloud-account').open,true);
   const t=setup({store:new Map([[KEY,meSession()]]),routes:(m,p)=>sharedRoute(m,p)||(p.startsWith('/v1/records?scope=mine')?{status:401,body:'<html><body>proxy says hi</body></html>'}:null)});await t.ready;
   t.$('cloud-refresh').click();await until(()=>t.records().length===2,'shared loaded');t.$('cloud-tab-mine').click();await until(()=>!t.store.has(KEY),'token dropped on 401');await flush();
-  assert.match(t.$('cloud-account-body').textContent,/세션이 끝났습니다/);assert.ok(!t.body.textContent.includes('proxy says hi'),'no raw server body');assert.equal(t.$('cloud-tab-shared').getAttribute('aria-pressed'),'true');assert.ok(t.lab.unchanged(),'local ledger untouched');});
+  assert.match(t.$('cloud-account-body').textContent,/세션이 끝났습니다/);assert.ok(!t.body.textContent.includes('proxy says hi'),'no raw server body');assert.equal(t.$('cloud-tab-shared').getAttribute('aria-pressed'),'true');
+  assert.equal(t.records().length,0,'loaded team records are purged');assert.match(t.$('cloud-list').textContent,/초대받은 팀 멤버만/);t.$('cloud-refresh').click();await flush();assert.equal(t.calls.length,2,'no anonymous fallback read');assert.ok(t.lab.unchanged(),'local ledger untouched');});
 
 test('failed reads and writes keep what is on screen and are never retried',async()=>{
   let page=0;const t=setup({store:new Map([[KEY,meSession()]]),routes:(m,p)=>{if(m==='GET'&&p.startsWith('/v1/records?scope=shared')){page++;return page===1?{status:200,body:{records:sharedRecords,nextCursor:'c1'}}:{status:502,body:'<html>Bad gateway from proxy</html>'};}if(m==='POST'&&p==='/v1/records')return 'hang';}});await t.ready;
@@ -122,7 +136,7 @@ test('deduplicated upload reports the returned visibility, not the requested sha
 });
 
 test('public harness preview only loads the editor and links to the existing Harness view',async()=>{
-  const t=setup({routes:sharedRoute});await t.ready;t.$('cloud-refresh').click();await until(()=>t.records().length===2,'loaded');
+  const t=setup({store:signedIn(),routes:sharedRoute});await t.ready;t.$('cloud-refresh').click();await until(()=>t.records().length===2,'loaded');
   t.press(t.action(t.records()[0],'preview'));await until(()=>t.lab.calls.length===1,'preview called');await flush();assert.equal(t.doc.activeElement,t.action(t.records()[0],'preview'),'focus back on the preview action');
   assert.equal(JSON.stringify(t.lab.calls[0]),JSON.stringify(['preview',harnessConfig,H]),'config and recorded hash only');assert.match(t.$('cloud-status').textContent,/등록·선택·실행은 하지 않았습니다/);
   const go=t.action(t.records()[0],'open-agents');assert.ok(go,'navigation button');assert.equal(go.dataset.view,'agents');assert.equal(t.calls.length,1,'no extra request');assert.ok(t.lab.unchanged());});
@@ -130,9 +144,10 @@ test('public harness preview only loads the editor and links to the existing Har
 test('owner share, unshare and delete send the revision; conflicts change nothing',async()=>{
   const mine=rec('rec-m1','run',{...runPayload,localId:'local-run-1'},{owner:'author-me',name:'Me',user:'me',visibility:'private',revision:3});let patch=0;
   const t=setup({store:new Map([[KEY,meSession()]]),routes:(m,p,init)=>{if(m==='GET')return {status:200,body:{records:[mine],nextCursor:null}};if(m==='PATCH'){patch++;return patch===1?{status:409,body:{error:{code:'revision_conflict',message:'stale'}}}:{status:200,body:{record:{...mine,visibility:'shared',revision:4}}};}if(m==='DELETE')return {status:204};}});await t.ready;
-  t.$('cloud-tab-mine').click();await until(()=>t.records().length===1,'mine');t.action(t.records()[0],'visibility').click();assert.match(t.records()[0].textContent,/로그인하지 않은 사람도 읽습니다/);assert.equal(t.calls.length,1,'share asks first');
+  t.$('cloud-tab-mine').click();await until(()=>t.records().length===1,'mine');t.action(t.records()[0],'visibility').click();assert.match(t.records()[0].textContent,/로그인한 팀 멤버 모두가 읽습니다\. 인터넷 공개는 아닙니다/);assert.equal(t.calls.length,1,'share asks first');
   t.action(t.records()[0],'confirm').click();await until(()=>t.$('cloud-status').classList.contains('error'),'conflict');assert.match(t.$('cloud-status').textContent,/먼저 바뀌었습니다/);assert.deepEqual(t.calls[1].body,{expectedRevision:3,visibility:'shared'});assert.match(t.records()[0].textContent,/비공개/);
-  t.action(t.records()[0],'visibility').click();t.action(t.records()[0],'confirm').click();await until(()=>/공유했습니다/.test(t.$('cloud-status').textContent),'shared');assert.match(t.records()[0].textContent,/버전 4/);
+  t.action(t.records()[0],'visibility').click();t.action(t.records()[0],'confirm').click();await until(()=>/공유했습니다/.test(t.$('cloud-status').textContent),'shared');assert.match(t.records()[0].textContent,/버전 4/);assert.match(t.$('cloud-status').textContent,/팀 멤버 모두가/);
+  t.action(t.records()[0],'visibility').click();assert.match(t.records()[0].textContent,/이미 받아 간 사본은 회수할 수 없습니다/);t.action(t.records()[0],'cancel').click();
   t.action(t.records()[0],'delete').click();t.action(t.records()[0],'confirm').click();await until(()=>t.records().length===0,'deleted');const del=t.calls.at(-1);assert.equal(del.method,'DELETE');assert.equal(del.headers['if-match'],'4');assert.equal(del.url,BASE+'/v1/records/rec-m1');});
 
 test('reviews of others\' shared runs are the author\'s own judgment; uncertain carries no score',async()=>{
@@ -145,11 +160,11 @@ test('reviews of others\' shared runs are the author\'s own judgment; uncertain 
   assert.deepEqual(t.calls.at(-1).body,body);assert.equal(t.core.calls.some(c=>c[0]==='compare'),false,'no automatic comparison or model call');});
 
 test('comparison draws the core result with its warnings and no ranking language',async()=>{
-  const t=setup({routes:sharedRoute});await t.ready;t.$('cloud-refresh').click();await until(()=>t.records().length===2,'loaded');t.$('cloud-compare-run').click();await until(()=>t.$('cloud-compare-out').textContent.includes('조건 1'),'table');
+  const t=setup({store:signedIn(),routes:sharedRoute});await t.ready;t.$('cloud-refresh').click();await until(()=>t.records().length===2,'loaded');t.$('cloud-compare-run').click();await until(()=>t.$('cloud-compare-out').textContent.includes('조건 1'),'table');
   const out=t.$('cloud-compare-out').textContent;assert.equal(t.core.calls.find(c=>c[0]==='compare')[1],2);assert.match(out,/Synthetic BLUE v1/);assert.match(out,/로컬 broker 실행\(보고\)/);assert.match(out,/미평가/);
   assert.match(out,/사례 라벨이나 프로토콜이 없는 실행은 비교할 수 없어 뺐습니다\. \(1건\)/);assert.match(out,/대상 실행과 다른 검수는 검수 수·평균에서 뺐습니다\. \(1건\)/);assert.match(out,/검증되지 않았습니다/);assert.ok(!/1위|우승|정확도 검증됨/.test(out.replace('순위가 아닙니다','')));});
 
-test('record JSON download fetches one record only on click: owner authenticated with private evidence, others anonymous, identity checked',async()=>{
+test('record JSON download fetches one record only on click, always signed in: owner gets private evidence, others the shared projection, identity checked',async()=>{
   const full={...runPayload,localId:'local-run-1',evidence:{segments:[{id:'s0',label:'p1',text:'Synthetic paper text'}],response:{status:'ok'}}},mine=rec('rec-m1','run',runPayload,{owner:'author-me',name:'Me',user:'me',visibility:'private'});
   const t=setup({store:new Map([[KEY,meSession()]]),routes:(m,p)=>{if(m!=='GET')return null;if(p.startsWith('/v1/records?scope=mine'))return {status:200,body:{records:[mine],nextCursor:null}};if(p.startsWith('/v1/records?scope=shared'))return {status:200,body:{records:sharedRecords,nextCursor:null}};
     if(p==='/v1/records/rec-m1')return {status:200,body:{record:{...mine,payload:full}}};if(p==='/v1/records/rec-r1')return {status:200,body:{record:sharedRecords[1]}};if(p==='/v1/records/rec-h1')return {status:200,body:{record:{...sharedRecords[0],id:'rec-other'}}};return null;}});await t.ready;
@@ -159,7 +174,8 @@ test('record JSON download fetches one record only on click: owner authenticated
   assert.deepEqual(JSON.parse(await t.saved[0].text()).payload,full);assert.equal(t.anchors.at(-1).getAttribute('download'),'falsify-run-rec-m1.json');assert.match(t.$('cloud-status').textContent,/비공개 증거.*공유하지 마세요/);
   assert.ok(!t.body.textContent.includes('Synthetic paper text'),'private evidence is never rendered');
   t.$('cloud-tab-shared').click();await until(()=>t.records().length===2,'shared');
-  t.action(t.records()[1],'download').click();await until(()=>t.saved.length===2,'public saved');assert.equal(t.calls.at(-1).url,BASE+'/v1/records/rec-r1');assert.equal(t.calls.at(-1).headers.authorization,undefined,'other authors are read anonymously');assert.match(t.$('cloud-status').textContent,/공개본/);
+  t.action(t.records()[1],'download').click();await until(()=>t.saved.length===2,'shared copy saved');assert.equal(t.calls.at(-1).url,BASE+'/v1/records/rec-r1');assert.equal(t.calls.at(-1).headers.authorization,'Bearer '+TOKEN,'other authors are read signed in too');
+  assert.match(t.$('cloud-status').textContent,/다른 작성자의 공유본.*비공개 증거와 로컬 ID는 빠져/);assert.ok(!PUBLIC_READ.test(t.$('cloud-status').textContent));
   t.action(t.records()[0],'download').click();await until(()=>t.$('cloud-status').classList.contains('error'),'identity mismatch');assert.equal(t.saved.length,2,'a different record is never saved');assert.match(t.$('cloud-status').textContent,/맞지 않아 저장하지 않았습니다/);
   // The downloaded full record lets a local review link to a run uploaded from another PC.
   t.$('cloud-upload-read').click();await flush();t.$('cloud-upload-kind').change('review');t.$('cloud-upload-item').change('0');await until(()=>t.$('cloud-upload-preview').textContent.includes('"runId": "rec-m1"'),'review linked via downloaded record');
@@ -221,6 +237,61 @@ test('styles: hover never repaints the active tab, the kind label keeps its gap,
   const css=fs.readFileSync(path.resolve(__dirname,'../dist/cloud-records.css'),'utf8');
   for(const m of css.matchAll(/([^{}]*:hover[^{}]*)\{/g))if(m[1].includes('.cloud-tabs'))assert.match(m[1],/\[aria-pressed=false\]/,'tab hover is limited to inactive tabs');
   assert.match(css,/label\.cloud-kind\{[^}]*gap:12px/);assert.match(css,/\.cloud-record h3\{/);assert.ok(!/\.cloud-record h4/.test(css));});
+
+// Invitation sign-up: what was typed, what was sent and what is left anywhere afterwards.
+const register=async(t,{user='synthetic_new',code=INVITE,display=''}={})=>{t.$('cloud-username').value=user;t.$('cloud-password').value='correct horse battery';t.$('cloud-invite').value=code;t.$('cloud-display-name').value=display;t.press(t.$('cloud-register'));await flush();};
+const leftovers=(t,code)=>[...t.store.values()].some(v=>v.includes(code))||[...t.body.walk()].some(n=>n.value===code||n.textContent.includes(code))||t.calls.some(c=>c.url.includes(code)||c.url.includes('fsi_'));
+
+test('register sends the invitation once with the account fields; login never sends it; the field is masked and not autofilled',async()=>{
+  const t=setup({routes:(m,p)=>m==='POST'&&p==='/v1/auth/register'?{status:201,body:{token:TOKEN,author:{id:'author-new',username:'synthetic_new',displayName:'New'},expiresAt:FUTURE}}:authOk(m,p)});await t.ready;
+  const field=t.$('cloud-invite');assert.equal(field.type,'password');assert.equal(field.getAttribute('autocomplete'),'off');assert.equal(field.name,undefined,'no name, so no form submission carries it');assert.match(t.$('cloud-account-body').textContent,/초대 코드 · 가입할 때만/);
+  t.$('cloud-invite').value=INVITE;await login(t);assert.deepEqual(t.calls[0].body,{username:'synthetic_me',password:'correct horse battery'},'login omits the invitation');assert.ok(!leftovers(t,INVITE),'typed code cleared on login too');
+  const t2=setup({routes:(m,p)=>m==='POST'&&p==='/v1/auth/register'?{status:201,body:{token:TOKEN,author:{id:'author-new',username:'synthetic_new',displayName:'New'},expiresAt:FUTURE}}:null});await t2.ready;
+  await register(t2,{display:'New'});await until(()=>t2.store.has(KEY),'registered');
+  assert.equal(t2.calls.length,1,'one request');assert.equal(t2.calls[0].url,BASE+'/v1/auth/register');assert.deepEqual(t2.calls[0].body,{username:'synthetic_new',password:'correct horse battery',inviteCode:INVITE,displayName:'New'});
+  assert.equal(t2.calls[0].headers.authorization,undefined);assert.ok(!t2.store.get(KEY).includes(INVITE)&&!t2.store.get(KEY).includes('correct horse'),'session holds neither code nor password');
+  assert.ok(!leftovers({...t2,calls:[]},INVITE),'nothing on screen or in storage keeps the code');assert.match(t2.$('cloud-status').textContent,/가입했습니다/);assert.equal(t2.doc.activeElement,t2.$('cloud-status'),'focus lands on the outcome');});
+
+test('every register outcome clears the invitation field and shows fixed copy, never the server body',async()=>{
+  const outcomes=[[403,/초대 코드가 맞지 않거나 만료·회수·사용된 코드입니다/,'cloud-invite'],[409,/이미 쓰는 사용자 이름입니다\. 초대 코드는 쓰이지 않았으니/,'cloud-password'],[400,/초대 가입을 지원하지 않는 서버일 수 있으니/,'cloud-password'],[429,/요청이 너무 많습니다/,'cloud-password'],[503,/공유 서버 오류/,'cloud-password'],['hang',/15초/,'cloud-password']];
+  for(const [status,copy,focus] of outcomes){const t=setup({routes:(m,p)=>m==='POST'&&p==='/v1/auth/register'?(status==='hang'?'hang':{status,body:{error:{code:'invalid_invitation',message:'server says '+INVITE}}}):null});await t.ready;
+    await register(t);await until(()=>t.$('cloud-status').classList.contains('error'),'refused '+status);
+    assert.equal(t.calls.length,1,'sent once, never retried ('+status+')');assert.equal(t.calls[0].body.inviteCode,INVITE);assert.match(t.$('cloud-status').textContent,copy);
+    assert.ok(!t.body.textContent.includes('server says'),'no server message');assert.equal(t.$('cloud-invite').value,'','field cleared ('+status+')');assert.equal(t.$('cloud-password').value,'');assert.equal(t.$('cloud-username').value,'synthetic_new','username kept for the retry');
+    assert.ok(!leftovers({...t,calls:[]},INVITE),'code left nowhere ('+status+')');assert.equal(t.store.has(KEY),false);assert.equal(t.doc.activeElement,t.$(focus),'focus on the field to fix ('+status+')');}
+  for(const [code,copy] of [['',/초대 코드가 필요합니다/],['fsi_short',/형식이 맞지 않습니다/],['x'.repeat(47),/형식이 맞지 않습니다/]]){const t=setup();await t.ready;await register(t,{code});
+    assert.equal(t.calls.length,0,'malformed or missing codes are refused locally');assert.match(t.$('cloud-status').textContent,copy);assert.ok(!t.$('cloud-status').textContent.includes(code||'\u0000'),'the typed value is not echoed');assert.equal(t.$('cloud-invite').value,'');assert.equal(t.doc.activeElement,t.$('cloud-invite'));}
+  const login403=setup({routes:(m,p)=>m==='POST'&&p==='/v1/auth/login'?{status:403,body:{error:{code:'membership_required',message:'nope'}}}:null});await login403.ready;await login(login403);
+  assert.match(login403.$('cloud-status').textContent,/활성 팀 멤버가 아니라 로그인할 수 없습니다/);assert.equal(login403.store.has(KEY),false);});
+
+test('a 403 on a signed-in read signs out with fixed member copy and purges server records; writes keep the session',async()=>{
+  let deny=false;const t=setup({store:signedIn(),routes:(m,p)=>{if(m==='GET'&&p.startsWith('/v1/records?'))return deny?{status:403,body:'<html>membership proxy page</html>'}:{status:200,body:{records:sharedRecords,nextCursor:null}};if(m==='PATCH')return {status:403,body:{error:{code:'forbidden'}}};}});await t.ready;
+  t.$('cloud-refresh').click();await until(()=>t.records().length===2,'loaded');t.$('cloud-compare-run').click();await until(()=>t.$('cloud-compare-out').textContent.includes('조건 1'),'compared');
+  deny=true;t.$('cloud-refresh').click();await until(()=>!t.store.has(KEY),'session dropped');await flush();
+  assert.equal(t.records().length,0,'records purged');assert.equal(t.$('cloud-compare-out').textContent,'','comparison purged');assert.match(t.$('cloud-account-summary').textContent,/팀 멤버 확인 필요/);assert.equal(t.$('cloud-account').open,true);
+  assert.match(t.$('cloud-account-body').textContent,/팀 멤버 자격이 확인되지 않아/);assert.match(t.$('cloud-status').textContent,/운영자에게 확인한 뒤 다시 로그인하세요/);assert.ok(!t.body.textContent.includes('membership proxy page'));assert.ok(t.lab.unchanged());
+  const mine=rec('rec-m1','harness',{config:harnessConfig,hash:H},{owner:'author-me',name:'Me',user:'me',visibility:'private'});
+  const w=setup({store:signedIn(),routes:(m,p)=>m==='GET'?{status:200,body:{records:[mine],nextCursor:null}}:m==='PATCH'?{status:403,body:{error:{code:'forbidden'}}}:null});await w.ready;
+  w.$('cloud-tab-mine').click();await until(()=>w.records().length===1,'mine');w.action(w.records()[0],'visibility').click();w.action(w.records()[0],'confirm').click();await until(()=>w.$('cloud-status').classList.contains('error'),'write refused');
+  assert.match(w.$('cloud-status').textContent,/권한이 없거나 팀 멤버 자격이 확인되지 않습니다/);assert.ok(w.store.has(KEY),'an ownership refusal does not sign out');assert.equal(w.records().length,1);});
+
+test('sign-out purges loaded records, comparison, review composer and upload preview; a late response is dropped',async()=>{
+  let gate=null;const store=signedIn(),t=setup({store,routes:(m,p)=>{if(m==='POST'&&p==='/v1/logout')return {status:204};if(m==='GET'&&p.startsWith('/v1/records?scope=shared'))return gate===null?{status:200,body:{records:sharedRecords,nextCursor:null}}:new Promise(r=>{gate=()=>r({status:200,body:{records:sharedRecords,nextCursor:null}});});
+    if(m==='GET'&&p.startsWith('/v1/records?scope=mine'))return {status:200,body:{records:[rec('rec-m1','run',{...runPayload,localId:'local-run-1'},{owner:'author-me',name:'Me',user:'me',visibility:'private'})],nextCursor:null}};}});await t.ready;
+  t.$('cloud-refresh').click();await until(()=>t.records().length===2,'loaded');t.$('cloud-compare-run').click();await until(()=>t.$('cloud-compare-out').textContent.includes('조건 1'),'compared');
+  t.action(t.records()[1],'review').click();assert.equal(t.$('cloud-review').hidden,false);t.press(t.action(t.records()[0],'preview'));await until(()=>t.action(t.records()[0],'open-agents'),'previewed');
+  t.$('cloud-tab-mine').click();await until(()=>t.records().length===1&&!t.$('cloud-tab-shared').disabled,'mine');t.$('cloud-upload-read').click();await flush();t.$('cloud-upload-kind').change('review');t.$('cloud-upload-item').change('0');await until(()=>t.$('cloud-upload-preview').textContent.includes('rec-m1'),'review upload preview');
+  t.press(t.$('cloud-logout'));await until(()=>!store.has(KEY),'signed out');await flush();
+  assert.equal(t.records().length,0);assert.equal(t.$('cloud-compare-out').textContent,'');assert.equal(t.$('cloud-review').hidden,true);assert.equal(t.$('cloud-review-preview').textContent,'');assert.equal(t.$('cloud-upload-preview').textContent,'','upload preview built from server records is cleared');
+  assert.equal(t.$('cloud-tab-shared').getAttribute('aria-pressed'),'true');assert.match(t.$('cloud-status').textContent,/불러온 서버 기록을 지웠습니다/);assert.equal(t.doc.activeElement,t.$('cloud-status'),'focus follows the outcome');assert.ok(t.lab.unchanged(),'local ledger untouched');
+  const late=setup({store:signedIn(),routes:(m,p)=>m==='POST'&&p==='/v1/logout'?{status:204}:m==='GET'?new Promise(r=>{gate=()=>r({status:200,body:{records:sharedRecords,nextCursor:null}});}):null});await late.ready;
+  gate=null;late.$('cloud-refresh').click();await until(()=>gate,'list pending');late.$('cloud-forget').click();gate();await until(()=>!late.$('cloud-refresh').disabled,'list settled');await flush();
+  assert.equal(late.records().length,0,'a response after sign-out never re-fills the screen');assert.equal(late.calls.filter(c=>c.method==='GET').length,1);});
+
+test('another author\'s copy carrying owner-only fields is refused, not saved',async()=>{
+  const t=setup({store:signedIn(),routes:(m,p)=>m!=='GET'?null:p.startsWith('/v1/records?')?{status:200,body:{records:sharedRecords,nextCursor:null}}:p==='/v1/records/rec-r1'?{status:200,body:{record:{...sharedRecords[1],payload:{...runPayload,localId:'leak',evidence:{segments:[{id:'s0',label:'p1',text:'Leaked paper text'}],response:{}}}}}}:null});await t.ready;
+  t.$('cloud-refresh').click();await until(()=>t.records().length===2,'loaded');t.press(t.action(t.records()[1],'download'));await until(()=>t.$('cloud-status').classList.contains('error'),'refused');await flush();
+  assert.equal(t.saved.length,0,'nothing saved');assert.match(t.$('cloud-status').textContent,/작성자 전용 필드.*저장하지 않았습니다/);assert.ok(!t.body.textContent.includes('Leaked paper text'));assert.equal(t.calls.at(-1).headers.authorization,'Bearer '+TOKEN);assert.equal(t.doc.activeElement,t.action(t.records()[1],'download'));});
 
 // With the contract core beside it (after integration, or FALSIFY_CLOUD_CORE before), run the upload/review/compare path through the real validators.
 const corePath=process.env.FALSIFY_CLOUD_CORE||path.resolve(__dirname,'../dist/cloud-records-core.mjs');
