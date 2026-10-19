@@ -63,7 +63,7 @@
   // Explicit CLI choice needs a broker advertising cliSelection; when it sends a catalogue the CLI must be listed and not reported missing.
   function agentOk(type,cap=bridgeCap()){if(!cap?.cliSelection||!Object.hasOwn(H.CLI,type))return false;if(!cap.cliAgents)return true;const a=agentInfo(type,cap);return !!a&&a.installed!==false;}
   const bound=role=>effective[role]||selected[role];
-  function runnable(role){const c=effective[role]?.config;return !!c&&(!H.needsCliCaps(c)||agentOk(c.adapter.type));}
+  function runnable(role){const c=effective[role]?.config;return !!c&&(c.adapter?.type!=='wrapper'||bridgeCap()?.harnessWrapper===true)&&(!H.needsCliCaps(c)||agentOk(c.adapter.type));}
   // Re-derives the bound config. Until it settles the role is not runnable and bind() waits, so no run can use a superseded selection.
   function rebind(role){const base=selected[role],sel=base&&H.cliCapable(base.config)?cli[role]:null;effective[role]=null;
     const job=(async()=>{await null;let next=base||null;
@@ -93,7 +93,7 @@
     e.list.replaceChildren(...(applied?(info?.models?.length?info.models:H.CLI[sel.type].models):[]).map(m=>{const o=document.createElement('option');o.value=m;return o;}));
     const now=effective[role]?.config;let msg;
     if(!base)msg='Harness 준비 중';
-    else if(!capable)msg='이 harness는 자체 실행기('+executor(base)+')를 씁니다. CLI·모델·effort 선택을 적용하지 않으며 harness 설정을 덮어쓰지 않습니다.';
+    else if(!capable)msg='이 harness는 자체 실행기('+executor(base)+')를 씁니다. CLI·모델·effort 선택을 적용하지 않으며 harness 설정을 덮어쓰지 않습니다.'+(base.adapter?.type==='wrapper'&&!cap?.harnessWrapper?' 연결된 companion이 wrapper 실행을 지원하지 않습니다. 최신 companion으로 업데이트한 뒤 다시 연결하세요. 등록·샘플 미리보기는 가능합니다.':'');
     else if(!cap?.cliSelection)msg=(bridgeOn()?'연결된 companion이 CLI·모델 선택을 지원하지 않는 구버전입니다. 최신 앱 ZIP으로 업데이트한 뒤 다시 연결하세요. 지금은 broker 기본 Codex CLI로만 실행합니다.':'로컬 broker에 연결하면 그 broker가 지원하는 CLI·모델·effort를 고를 수 있습니다. 연결 전 수동 요청은 현재 harness 값을 그대로 씁니다.')+(now&&H.needsCliCaps(now)?' 현재 값('+executor(now)+')은 CLI 선택을 지원하는 companion에서만 실행됩니다. 「Harness 지정값」으로 되돌리거나 최신 companion에 연결하세요.':'');
     else if(applied&&!editable)msg=H.CLI[sel.type].name+'는 이 broker에서 쓸 수 없습니다(미설치 또는 미지원). 다른 CLI를 고르거나 「Harness 지정값」으로 되돌리세요.';
     else msg=(applied?'적용: '+executor(now||H.withCli(base,sel)):'Harness 지정값 사용')+' · 모델 목록은 입력 제안일 뿐 계정에서 쓸 수 있는지 확인하지 않습니다. 목록에 없는 모델 ID도 입력할 수 있습니다.'+(agentInfo('claude',cap)?.installed===false?' Claude Code CLI는 이 PC에 설치되지 않은 것으로 보고되었습니다.':'');
@@ -107,7 +107,7 @@
     for(const role of ['red','blue']){const s=$('#'+role+'-harness'),previous=selected[role]?.hash;s.replaceChildren();for(const h of db.harnesses.filter(h=>h.config.role===role)){const o=text('option',h.config.name+' · v'+h.config.version+' · '+h.hash.slice(0,8));o.value=h.hash;s.append(o);}selected[role]=db.harnesses.find(h=>h.hash===previous)||db.harnesses.find(h=>h.config.role===role);s.value=selected[role]?.hash||'';if(selected[role]?.hash!==previous)rebind(role);details(role);renderCli(role);}
     const list=$('#harness-library');list.replaceChildren();for(const h of db.harnesses){const a=document.createElement('article');a.append(text('h4',h.config.name+' · '+h.config.role.toUpperCase()+' · v'+h.config.version),text('p','실행기: '+executor(h.config)+' · 상한 '+h.config.maxCalls+'회'),text('p',h.config.instructions));const meta=document.createElement('details');meta.append(text('summary','내용 해시'),text('code',h.hash));const button=text('button','이 버전에서 수정');button.type='button';button.className='text-button';button.addEventListener('click',()=>{$('#harness-editor').value=JSON.stringify(h.config,null,2);$('#harness-editor').focus();});a.append(meta,button);list.append(a);}
   }
-  function executor(c){const a=c.adapter;if(!a)return 'broker 기본 실행기 (Codex CLI)';if(Object.hasOwn(H.CLI,a.type))return H.CLI[a.type].name+(a.model||a.effort?' · '+(a.model||'기본 모델')+' · effort '+(a.effort||'기본'):' (broker 기본 모델)');return a.type==='stdio'?'로컬 코드 '+a.executable+(a.args?.length?' '+a.args.join(' '):''):'외부 서버 '+a.url;}
+  function executor(c){const a=c.adapter;if(!a)return 'broker 기본 실행기 (Codex CLI)';if(Object.hasOwn(H.CLI,a.type))return H.CLI[a.type].name+(a.model||a.effort?' · '+(a.model||'기본 모델')+' · effort '+(a.effort||'기본'):' (broker 기본 모델)');if(a.type==='wrapper')return '연결 wrapper · '+(a.target.type==='stdio'?'로컬 프로그램':'HTTPS 서버')+' · '+a.input.mode;return a.type==='stdio'?'로컬 코드 '+a.executable+(a.args?.length?' '+a.args.join(' '):''):'외부 서버 '+a.url;}
   // Standalone review of an imported Harness before any registration or execution.
   async function previewHarness(config,heading='불러온 Harness 검토'){const box=$('#harness-preview'),hash=await H.hash(config),known=db.harnesses.some(h=>h.hash===hash);box.replaceChildren(text('h3',heading));const dl=document.createElement('dl');for(const [k,v] of [['이름',config.name],['역할',config.role.toUpperCase()],['버전',config.version],['실행기',executor(config)],['호출 상한',config.maxCalls+'회'],['설정 키',Object.keys(config.settings||{}).join(', ')||'없음'],['등록 상태',known?'이미 등록된 내용':'미등록 · 등록 전에는 실행 선택 메뉴에 나타나지 않습니다']])dl.append(text('dt',k),text('dd',v));const ins=document.createElement('details');ins.append(text('summary','지침 · 내용 해시'),text('p',config.instructions),text('code',hash));box.append(dl,ins);box.hidden=false;return hash;}
   let shown=null;
