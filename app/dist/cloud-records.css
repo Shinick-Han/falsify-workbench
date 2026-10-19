@@ -8,9 +8,9 @@
 .cloud-tabs{display:inline-flex;border:1px solid #aeb6bc;border-radius:var(--radius);overflow:hidden}
 .cloud-tabs button{min-height:40px;padding:9px 15px;border:0;background:transparent;color:var(--ink);font-size:12px;font-weight:600;transition:background var(--motion) var(--ease),color var(--motion) var(--ease)}
 .cloud-tabs button+button{border-left:1px solid #aeb6bc}
-.cloud-tabs button:hover:not(:disabled){background:#e5e8e9}
+.cloud-tabs button[aria-pressed=false]:hover:not(:disabled){background:#e5e8e9}
 .cloud-tabs button[aria-pressed=true]{background:var(--ink);color:var(--paper)}
-.cloud-records label.cloud-kind{font-size:12px}
+.cloud-records label.cloud-kind{display:inline-flex;align-items:center;gap:12px;font-size:12px}
 .cloud-records .cloud-kind select{width:auto;min-width:150px;min-height:40px}
 .cloud-status{min-height:22px;margin:10px 0}
 .cloud-records .error,.cloud-status.error,#cloud-upload-status.error,#cloud-review-status.error{color:var(--red-ink)}
@@ -26,7 +26,7 @@
 .cloud-display>summary{cursor:pointer;font-size:13px;color:var(--muted)}
 .cloud-list{margin-top:6px}
 .cloud-record{padding:16px 0;border-top:1px solid var(--line)}
-.cloud-record h4{margin:6px 0 0;overflow-wrap:anywhere}
+.cloud-record h3{margin:6px 0 0;font-size:14px;overflow-wrap:anywhere}
 .cloud-chips{display:flex;flex-wrap:wrap;gap:6px}
 .cloud-note{white-space:pre-wrap;background:var(--surface);padding:14px}
 .cloud-confirm{font-weight:600}
@@ -43,7 +43,8 @@
 .cloud-auth{grid-template-columns:1fr}
 .cloud-toolbar{align-items:stretch;flex-direction:column}
 .cloud-tabs button{flex:1}
-.cloud-records .cloud-kind select{width:100%}
+.cloud-records label.cloud-kind{display:flex}
+.cloud-records .cloud-kind select{flex:1;width:auto;min-width:0}
 .cloud-panel dl,.cloud-record dl,.cloud-compose dl{grid-template-columns:1fr}
 .cloud-panel dt,.cloud-record dt,.cloud-compose dt{margin-top:6px}
 .cloud-records .button-row .button{width:100%}}

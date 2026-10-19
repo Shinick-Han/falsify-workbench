@@ -14,9 +14,11 @@ class El extends EventTarget{
   set textContent(v){this.children=[];this._text=String(v);}
   append(...kids){for(const c of kids){if(typeof c==='object')c.parent=this;this.children.push(c);}}
   prepend(...kids){for(const c of kids)if(typeof c==='object')c.parent=this;this.children.unshift(...kids);}
-  replaceChildren(...kids){this.children=[];this._text='';this.append(...kids);}
+  // Like a browser, removing the focused node sends focus to body.
+  replaceChildren(...kids){const d=this.ownerDocument,a=d?.activeElement;if(a&&a!==this&&this.contains(a))d.activeElement=d.body;for(const c of this.children)if(typeof c==='object')c.parent=null;this.children=[];this._text='';this.append(...kids);}
+  contains(n){for(let x=n;x;x=x.parent)if(x===this)return true;return false;}
   setAttribute(k,v){this.attrs[k]=String(v);}getAttribute(k){return this.attrs[k]??null;}
-  focus(){}scrollIntoView(){}
+  focus(){if(!this.disabled&&this.ownerDocument)this.ownerDocument.activeElement=this;}scrollIntoView(){}
   click(){if(!this.disabled)this.dispatchEvent(new Event('click'));}
   change(value){if(value!==undefined)this.value=value;this.dispatchEvent(new Event('change'));}
   *walk(){yield this;for(const c of this.children)if(typeof c==='object')yield* c.walk();}
@@ -43,7 +45,7 @@ function coreStub(){const calls=[];return {calls,
 function setup({apiBase=BASE,store=new Map(),routes=()=>({status:404,body:{error:{code:'not_found',message:'x'}}}),lab=labStub(),core=coreStub()}={}){
   const body=new El('body'),results=new El('section');results.id='view-results';const ledger=new El('section');ledger.id='ledger-board';results.append(ledger);body.append(results);
   const anchors=[],saved=[];class TURL extends URL{static createObjectURL(b){saved.push(b);return 'blob:synthetic/'+saved.length;}static revokeObjectURL(){}}
-  const document=new EventTarget();Object.assign(document,{readyState:'complete',body,createElement:t=>{const e=new El(t);if(t==='a')anchors.push(e);return e;},querySelector:s=>s.startsWith('#')?body.find(n=>n.id===s.slice(1)):null});
+  const document=new EventTarget();Object.assign(document,{readyState:'complete',body,activeElement:body,createElement:t=>{const e=new El(t);e.ownerDocument=document;if(t==='a')anchors.push(e);return e;},querySelector:s=>s.startsWith('#')?body.find(n=>n.id===s.slice(1)):null});body.ownerDocument=document;
   const calls=[],fetch=async(url,init)=>{const u=new URL(url);calls.push({url,method:init.method,headers:{...init.headers},body:init.body===undefined?undefined:JSON.parse(init.body),init});
     const r=await routes(init.method,u.pathname+u.search,init);if(r==='hang')return new Promise((_,reject)=>init.signal.addEventListener('abort',()=>reject(Error('aborted'))));
     return {ok:r.status>=200&&r.status<300,status:r.status,text:async()=>r.body===undefined?'':typeof r.body==='string'?r.body:JSON.stringify(r.body)};};
@@ -51,7 +53,9 @@ function setup({apiBase=BASE,store=new Map(),routes=()=>({status:404,body:{error
   const ctx=vm.createContext({document,FalsifyCloudConfig:{apiBase},localStorage,fetch,FalsifyLab:lab,FalsifyCloudCore:core,URL:TURL,URLSearchParams,Blob,AbortController,TextEncoder,Event,console,setTimeout:(f,ms)=>setTimeout(f,ms>=15000?20:ms),clearTimeout,location:{href:'https://shinick-han.github.io/falsify-workbench/'}});
   vm.runInContext(src,ctx,{filename:'cloud-records.js'});
   const $=id=>body.find(n=>n.id===id),records=()=>[...$('cloud-list').walk()].filter(n=>n.tagName==='ARTICLE'),action=(article,name)=>article.find(n=>n.dataset.action===name);
-  return {ctx,calls,store,lab,core,body,results,$,records,action,anchors,saved,ready:ctx.FalsifyCloudRecords.ready};}
+  // press = keyboard activation: the control takes focus, then clicks.
+  const press=b=>{b.focus();b.click();};
+  return {ctx,calls,store,lab,core,body,doc:document,results,$,records,action,press,anchors,saved,ready:ctx.FalsifyCloudRecords.ready};}
 const sharedRoute=(m,p)=>m==='GET'&&p.startsWith('/v1/records?scope=shared')?{status:200,body:{records:sharedRecords,nextCursor:null}}:null;
 async function login(t){t.$('cloud-username').value='synthetic_me';t.$('cloud-password').value='correct horse battery';t.$('cloud-auth-form').dispatchEvent(new Event('submit',{cancelable:true}));await flush();}
 const authOk=(m,p)=>m==='POST'&&p==='/v1/auth/login'?{status:200,body:{token:TOKEN,author:{id:'author-me',username:'me',displayName:'Me'},expiresAt:FUTURE}}:null;
@@ -62,7 +66,7 @@ test('unconfigured or non-https server stays off and never touches the network',
     assert.match(t.$('cloud-connection').textContent,/꺼짐/);assert.equal(t.$('cloud-refresh').visible(),false);assert.equal(t.$('cloud-account').visible(),false);assert.equal(t.calls.length,0);}});
 
 test('shared records are read anonymously, only on explicit refresh',async()=>{
-  const t=setup({routes:sharedRoute});await t.ready;await flush();assert.equal(t.calls.length,0,'no automatic read');assert.equal(t.$('cloud-tab-mine').disabled,true,'mine needs login');
+  const t=setup({routes:sharedRoute});await t.ready;await flush();assert.equal(t.calls.length,0,'no automatic read');assert.equal(t.$('cloud-tab-mine').disabled,false,'mine stays reachable and explains sign-in');
   t.$('cloud-refresh').click();await until(()=>t.records().length===2,'two shared records');
   assert.equal(t.calls[0].url,BASE+'/v1/records?scope=shared');assert.equal(t.calls[0].headers.authorization,undefined);assert.equal(t.calls[0].init.credentials,'omit');
   assert.ok(t.records().every(a=>a.textContent.includes('작성자 보고 · 미검증')),'source badge on every record');assert.equal(t.action(t.records()[1],'review'),null,'anonymous visitor cannot review');});
@@ -77,7 +81,7 @@ test('sign-in keeps the token for the configured server only and never stores th
   t.$('cloud-tab-mine').click();await until(()=>t.calls.length===2&&!t.$('cloud-tab-shared').disabled,'mine read');assert.equal(t.calls[1].headers.authorization,'Bearer '+TOKEN);
   t.$('cloud-tab-shared').click();await until(()=>t.calls.length===3,'shared read');assert.equal(t.calls[2].headers.authorization,undefined,'shared reads stay anonymous');
   assert.ok(t.calls.every(c=>c.url.startsWith(BASE+'/v1/')),'no other destination');
-  const other=setup({apiBase:'https://other.test',store:new Map([[KEY,meSession()]])});await other.ready;assert.equal(other.$('cloud-tab-mine').disabled,true,'token for another server is ignored');assert.match(other.$('cloud-account-summary').textContent,/로그인 · 가입/);});
+  const other=setup({apiBase:'https://other.test',store:new Map([[KEY,meSession()]])});await other.ready;other.$('cloud-tab-mine').click();await flush();assert.equal(other.calls.length,0,'token for another server is ignored');assert.match(other.$('cloud-account-summary').textContent,/로그인 · 가입/);});
 
 test('expired or rejected session asks to sign in again and keeps local and shared data',async()=>{
   const old=setup({store:new Map([[KEY,meSession({expiresAt:'2020-01-01T00:00:00Z'})]])});await old.ready;assert.equal(old.store.has(KEY),false);assert.match(old.$('cloud-account-summary').textContent,/다시 로그인 필요/);assert.equal(old.$('cloud-account').open,true);
@@ -119,7 +123,7 @@ test('deduplicated upload reports the returned visibility, not the requested sha
 
 test('public harness preview only loads the editor and links to the existing Harness view',async()=>{
   const t=setup({routes:sharedRoute});await t.ready;t.$('cloud-refresh').click();await until(()=>t.records().length===2,'loaded');
-  t.action(t.records()[0],'preview').click();await until(()=>t.lab.calls.length===1,'preview called');await flush();
+  t.press(t.action(t.records()[0],'preview'));await until(()=>t.lab.calls.length===1,'preview called');await flush();assert.equal(t.doc.activeElement,t.action(t.records()[0],'preview'),'focus back on the preview action');
   assert.equal(JSON.stringify(t.lab.calls[0]),JSON.stringify(['preview',harnessConfig,H]),'config and recorded hash only');assert.match(t.$('cloud-status').textContent,/등록·선택·실행은 하지 않았습니다/);
   const go=t.action(t.records()[0],'open-agents');assert.ok(go,'navigation button');assert.equal(go.dataset.view,'agents');assert.equal(t.calls.length,1,'no extra request');assert.ok(t.lab.unchanged());});
 
@@ -181,6 +185,42 @@ test('a signed-in browser survives reload; sign-out revokes then clears; another
   const failing=setup({store:new Map([[KEY,meSession()]]),routes:()=>({status:503,body:'down'})});await failing.ready;failing.$('cloud-logout').click();await until(()=>failing.$('cloud-status').classList.contains('error'),'logout failure');assert.ok(failing.store.has(KEY),'failed revoke does not pretend');
   failing.$('cloud-forget').click();assert.equal(failing.store.has(KEY),false);
   const pc2=setup({routes:authOk});await pc2.ready;await login(pc2);assert.equal(JSON.parse(pc2.store.get(KEY)).author.id,'author-me','same author on another PC');});
+
+test('keyboard focus follows each record action through the re-render and never pulls focus the user moved',async()=>{
+  const m1=rec('rec-m1','run',runPayload,{owner:'author-me',name:'Me',user:'me',visibility:'private'}),m2=rec('rec-m2','harness',{config:harnessConfig,hash:H},{owner:'author-me',name:'Me',user:'me',visibility:'private'});let gate=null;
+  const t=setup({store:new Map([[KEY,meSession()]]),routes:(m,p)=>{if(m==='GET'&&p.startsWith('/v1/records?scope=mine'))return {status:200,body:{records:[m1,m2],nextCursor:null}};if(m==='GET'&&p==='/v1/records/rec-m1')return {status:200,body:{record:m1}};
+    if(m==='PATCH')return new Promise(r=>{gate=()=>r({status:200,body:{record:{...m1,visibility:'shared',revision:2}}});});if(m==='DELETE')return {status:204};}});await t.ready;
+  const at=(i,name)=>t.action(t.records()[i],name),on=(i,name)=>t.doc.activeElement===at(i,name);
+  t.$('cloud-tab-mine').click();await until(()=>t.records().length===2,'mine');
+  t.press(at(0,'visibility'));assert.ok(on(0,'confirm'),'ask focuses the confirm button');t.press(at(0,'cancel'));assert.ok(on(0,'visibility'),'cancel returns to the visibility action');
+  t.press(at(0,'delete'));assert.ok(on(0,'confirm'));t.press(at(0,'cancel'));assert.ok(on(0,'delete'),'cancel returns to delete');assert.equal(t.calls.length,1,'asking and cancelling send nothing');
+  t.press(at(0,'download'));await until(()=>t.saved.length===1,'downloaded');await flush();assert.ok(on(0,'download'),'download returns to its button');
+  t.press(at(0,'visibility'));t.press(at(0,'confirm'));await until(()=>gate,'patch pending');gate();await until(()=>/공유했습니다/.test(t.$('cloud-status').textContent),'shared');await flush();assert.ok(on(0,'visibility'),'a finished change returns to the same action');
+  gate=null;t.press(at(0,'visibility'));t.press(at(0,'confirm'));await until(()=>gate,'second patch pending');t.$('cloud-kind').focus();gate();await until(()=>!t.$('cloud-status').textContent.includes('반영하는 중'),'second done');await flush();
+  assert.equal(t.doc.activeElement,t.$('cloud-kind'),'focus moved during the request stays put');
+  t.press(at(0,'delete'));t.press(at(0,'confirm'));await until(()=>t.records().length===1,'first deleted');await flush();assert.equal(t.records()[0].dataset.recordId,'rec-m2');assert.ok(on(0,'download'),'delete moves to the neighbouring record');
+  t.press(at(0,'delete'));t.press(at(0,'confirm'));await until(()=>t.records().length===0,'all deleted');await flush();assert.equal(t.doc.activeElement,t.$('cloud-status'),'empty list falls back to the status line');
+  assert.deepEqual(t.calls.map(c=>c.method),['GET','GET','PATCH','PATCH','DELETE','DELETE'],'only the confirmed actions were sent');});
+
+test('server and session times read as local ko-KR with a zone and keep the raw ISO; record titles are h3 under the section h2',async()=>{
+  const iso='2026-10-19T08:15:03.558Z',good={...sharedRecords[0],createdAt:iso},bad={...sharedRecords[1],id:'rec-bad',createdAt:'not-a-date',payload:{...runPayload,createdAt:42}};
+  const t=setup({store:new Map([[KEY,meSession()]]),routes:(m,p)=>m==='GET'&&p.startsWith('/v1/records?scope=shared')?{status:200,body:{records:[good,bad],nextCursor:null}}:null});await t.ready;
+  t.$('cloud-refresh').click();await until(()=>t.records().length===2,'loaded');
+  const time=t.records()[0].find(n=>n.tagName==='TIME'),zone=new Intl.DateTimeFormat('ko-KR',{timeZoneName:'short'}).formatToParts(Date.parse(iso)).find(x=>x.type==='timeZoneName').value;
+  assert.ok(time,'time element');assert.equal(time.getAttribute('datetime'),iso);assert.equal(time.getAttribute('title'),iso);assert.match(time.textContent,/2026/);assert.ok(time.textContent.includes(zone),'zone shown');assert.ok(!time.textContent.includes('T08:15')&&!t.records()[0].textContent.includes('.558Z'),'no raw ISO on screen');
+  assert.equal(t.records()[1].find(n=>n.tagName==='TIME'),null);assert.equal((t.records()[1].textContent.match(/시각 미상/g)||[]).length,2,'unparseable server and reported times get fixed copy');
+  const exp=t.$('cloud-account-body').find(n=>n.tagName==='TIME');assert.equal(exp.getAttribute('datetime'),FUTURE);assert.ok(!t.$('cloud-account-body').textContent.includes(FUTURE),'session expiry is formatted');
+  assert.ok(t.$('cloud-records').find(n=>n.tagName==='H2'));for(const a of t.records()){assert.ok(a.find(n=>n.tagName==='H3'),'record title is h3');assert.equal(a.find(n=>n.tagName==='H4'),null);}});
+
+test('signed out, 내 기록 explains sign-in, focuses the username field and requests nothing',async()=>{
+  const t=setup({routes:sharedRoute});await t.ready;assert.equal(t.$('cloud-account').open,false);t.press(t.$('cloud-tab-mine'));await flush();
+  assert.equal(t.calls.length,0,'no request without sign-in');assert.equal(t.$('cloud-account').open,true);assert.equal(t.doc.activeElement,t.$('cloud-username'));
+  assert.match(t.$('cloud-status').textContent,/내 기록은 로그인한 뒤 볼 수 있습니다/);assert.ok(t.$('cloud-status').classList.contains('error'));assert.equal(t.$('cloud-tab-shared').getAttribute('aria-pressed'),'true');assert.equal(t.$('cloud-tab-mine').getAttribute('aria-pressed'),'false');});
+
+test('styles: hover never repaints the active tab, the kind label keeps its gap, record titles are styled as h3',()=>{
+  const css=fs.readFileSync(path.resolve(__dirname,'../dist/cloud-records.css'),'utf8');
+  for(const m of css.matchAll(/([^{}]*:hover[^{}]*)\{/g))if(m[1].includes('.cloud-tabs'))assert.match(m[1],/\[aria-pressed=false\]/,'tab hover is limited to inactive tabs');
+  assert.match(css,/label\.cloud-kind\{[^}]*gap:12px/);assert.match(css,/\.cloud-record h3\{/);assert.ok(!/\.cloud-record h4/.test(css));});
 
 // With the contract core beside it (after integration, or FALSIFY_CLOUD_CORE before), run the upload/review/compare path through the real validators.
 const corePath=process.env.FALSIFY_CLOUD_CORE||path.resolve(__dirname,'../dist/cloud-records-core.mjs');

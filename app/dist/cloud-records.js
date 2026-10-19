@@ -11,6 +11,9 @@
   const clone=x=>JSON.parse(JSON.stringify(x)),short=h=>typeof h==='string'&&h?h.slice(0,12):'-',str=(v,n=300)=>v===null||v===undefined||v===''?'-':String(v).slice(0,n);
   function el(tag,props,...kids){const e=document.createElement(tag);for(const [k,v] of Object.entries(props||{})){if(k==='dataset')Object.assign(e.dataset,v);else if(PROPS.has(k))e[k]=v;else e.setAttribute(k,v);}e.append(...kids.filter(x=>x!==null&&x!==undefined&&x!==false));return e;}
   const local=message=>Object.assign(Error(message),{code:'local'});
+  // Local ko-KR date-time with its zone; the raw ISO stays in datetime/title, and anything unparseable gets fixed copy instead of an exception.
+  function when(iso){let text='';try{const ms=typeof iso==='string'?Date.parse(iso):NaN;if(Number.isFinite(ms))text=new Intl.DateTimeFormat('ko-KR',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',timeZoneName:'short'}).format(ms);}catch{}
+    return text?el('time',{datetime:iso.slice(0,40),title:iso.slice(0,40)},text):el('span',{},'시각 미상');}
   // '' keeps the feature off; anything but a plain https origin/path is refused instead of guessed.
   function parseBase(value){if(value===undefined||value===null||value==='')return '';if(typeof value!=='string')return null;try{const u=new URL(value);if(u.protocol!=='https:'||u.username||u.password||u.search||u.hash||value.trim()!==value)return null;return u.origin+u.pathname.replace(/\/+$/,'');}catch{return null;}}
   // Fixed copy only: server bodies are never shown, so a proxy error page cannot reach the screen.
@@ -32,9 +35,10 @@
   function create(host,deps){
     const cfg=deps.config??globalThis.FalsifyCloudConfig,storage=deps.storage??globalThis.localStorage,fetcher=deps.fetch??globalThis.fetch?.bind(globalThis),lab=deps.lab??globalThis.FalsifyLab;
     const base=parseBase(cfg?.apiBase),hostName=base?new URL(base).host:'';
-    let session=null,expired=false,memoryOnly=false,lastUser='',scope='shared',kind='',shown=[],cursor=null,loaded=false,snapshot=null,confirming=null,previewed=null,reviewTarget=null,uploadSeq=0,reviewSeq=0,coreP=null,compared=false;
+    let session=null,expired=false,memoryOnly=false,lastUser='',scope='shared',kind='',shown=[],cursor=null,loaded=false,snapshot=null,confirming=null,previewed=null,reviewTarget=null,uploadSeq=0,reviewSeq=0,coreP=null,compared=false,userField=null;
     // localIds keeps only my runs' local IDs (absent from list projections) so a local review can link to a run uploaded elsewhere.
-    const seen=new Map(),localIds=new Map(),busy={list:false,auth:false,upload:false,review:false,op:false},upload={body:null},review={body:null};
+    // controls maps 'recordId action' to the buttons of the current render so focus can follow a re-render.
+    const seen=new Map(),localIds=new Map(),controls=new Map(),busy={list:false,auth:false,upload:false,review:false,op:false},upload={body:null},review={body:null};
     const core=()=>coreP??=(deps.core?Promise.resolve(deps.core):globalThis.FalsifyCloudCore?Promise.resolve(globalThis.FalsifyCloudCore):import(new URL('cloud-records-core.mjs',script?.src||location.href).href)).catch(()=>{coreP=null;throw local('공유 기록 검증 모듈을 불러오지 못했습니다. 새로고침 후 다시 시도하세요.');});
     const ownedBy=r=>!!session&&r.owner.id===session.author.id;
 
@@ -64,7 +68,7 @@
     const say=(message,error=false)=>{status.textContent=message;status.classList.toggle('error',error);};
     const button=(label,variant,fn,props={})=>{const b=el('button',{type:'button',className:variant==='text'?'text-button':'button '+variant,...props},label);b.addEventListener('click',fn);return b;};
     // One section appended after the local ledger: heading, toolbar, status, account, list, review composer, upload and comparison.
-    const connection=el('span',{className:'status-label',id:'cloud-connection'}),status=el('p',{id:'cloud-status',className:'ledger-status cloud-status',role:'status'});
+    const connection=el('span',{className:'status-label',id:'cloud-connection'}),status=el('p',{id:'cloud-status',className:'ledger-status cloud-status',role:'status',tabIndex:-1});
     const tabShared=el('button',{type:'button',id:'cloud-tab-shared','aria-pressed':'true'},'공유 기록'),tabMine=el('button',{type:'button',id:'cloud-tab-mine','aria-pressed':'false'},'내 기록');
     const kindSelect=el('select',{id:'cloud-kind'},el('option',{value:''},'전체 종류'),...Object.entries(KINDS).map(([k,v])=>el('option',{value:k},v)));kindSelect.value='';
     const refresh=el('button',{type:'button',id:'cloud-refresh',className:'button primary'},'불러오기');
@@ -118,8 +122,10 @@
 
     function setBusy(){refresh.disabled=more.disabled=kindSelect.disabled=busy.list;refreshTabs();refreshSend();refreshReview();}
     function refreshTabs(){if(!session&&scope==='mine'){scope='shared';shown=[];cursor=null;loaded=false;renderList();}
-      tabShared.setAttribute('aria-pressed',String(scope==='shared'));tabMine.setAttribute('aria-pressed',String(scope==='mine'));tabShared.disabled=busy.list;tabMine.disabled=busy.list||!session;}
-    function choose(next){if(busy.list||scope===next)return;scope=next;shown=[];cursor=null;loaded=false;confirming=null;refreshTabs();load(false);}
+      tabShared.setAttribute('aria-pressed',String(scope==='shared'));tabMine.setAttribute('aria-pressed',String(scope==='mine'));tabShared.disabled=tabMine.disabled=busy.list;}
+    // Signed out, '내 기록' stays reachable and explains itself: it opens the sign-in form and requests nothing.
+    function choose(next){if(busy.list||scope===next)return;if(next==='mine'&&!session){account.open=true;say('내 기록은 로그인한 뒤 볼 수 있습니다.',true);userField?.focus?.();return;}
+      scope=next;shown=[];cursor=null;loaded=false;confirming=null;refreshTabs();load(false);}
     async function load(append){
       if(busy.list)return;if(scope==='mine'&&!session){say('내 기록은 로그인한 뒤 볼 수 있습니다.',true);return;}
       const q=new URLSearchParams({scope});if(kind)q.set('kind',kind);if(append&&cursor)q.set('cursor',cursor);
@@ -132,15 +138,15 @@
         if(compared)compare();}
       catch(e){say(explain(e,'read')+(shown.length?' 이미 불러온 기록은 그대로 둡니다.':''),true);}
       finally{busy.list=false;setBusy();renderList();}}
-    function renderList(){list.replaceChildren(...(shown.length?shown.map(recordView):[el('p',{className:'muted'},loaded?'조건에 맞는 기록이 없습니다.':'아직 불러오지 않았습니다. 불러오기를 누르면 서버에서 공유 기록을 읽습니다. 로그인은 필요 없습니다.')]));more.hidden=!cursor;}
+    function renderList(){controls.clear();list.replaceChildren(...(shown.length?shown.map(recordView):[el('p',{className:'muted'},loaded?'조건에 맞는 기록이 없습니다.':'아직 불러오지 않았습니다. 불러오기를 누르면 서버에서 공유 기록을 읽습니다. 로그인은 필요 없습니다.')]));more.hidden=!cursor;}
     function recordView(r){
-      const p=r.payload,mine=ownedBy(r),rows=[['작성자',str(r.owner.displayName,80)+(r.owner.username?' (@'+str(r.owner.username,40)+')':'')+' · 자기 보고 이름'],['서버 기록',str(r.createdAt,40)+' · 버전 '+r.revision]];let title;
+      const p=r.payload,mine=ownedBy(r),rows=[['작성자',str(r.owner.displayName,80)+(r.owner.username?' (@'+str(r.owner.username,40)+')':'')+' · 자기 보고 이름'],['서버 기록',[when(r.createdAt),' · 버전 '+r.revision]]];let title;
       if(r.kind==='harness'){const c=p.config&&typeof p.config==='object'?p.config:{};title=str(c.name,120)+' · '+str(c.role,10).toUpperCase()+' · v'+str(c.version,40);rows.push(['내용 해시',short(p.hash)]);if(p.parentHash)rows.push(['이전 버전',short(p.parentHash)]);}
-      else if(r.kind==='run'){title=str(p.role,10).toUpperCase()+' 실행 · '+str(p.model,120);rows.push(['결과',(STATUSES[p.status]||str(p.status,20))+' · 호출 '+str(p.calls)+' / 예산 '+str(p.maxCalls)],['조건','입력 '+short(p.sourceHash)+' · 난이도 '+str(p.level)+' · 프로토콜 '+str(p.protocolVersion,80)+' · 사례 '+str(p.caseLabel,160)],['Harness',short(p.harnessHash)],['출처(보고)',str(p.provenance,60)],['실행 시각(보고)',str(p.createdAt,40)]);if(p.evidence)rows.push(['증거','비공개 원문 포함 · 작성자만 봄']);}
+      else if(r.kind==='run'){title=str(p.role,10).toUpperCase()+' 실행 · '+str(p.model,120);rows.push(['결과',(STATUSES[p.status]||str(p.status,20))+' · 호출 '+str(p.calls)+' / 예산 '+str(p.maxCalls)],['조건','입력 '+short(p.sourceHash)+' · 난이도 '+str(p.level)+' · 프로토콜 '+str(p.protocolVersion,80)+' · 사례 '+str(p.caseLabel,160)],['Harness',short(p.harnessHash)],['출처(보고)',str(p.provenance,60)],['실행 시각(보고)',when(p.createdAt)]);if(p.evidence)rows.push(['증거','비공개 원문 포함 · 작성자만 봄']);}
       else{title='검수 · '+(VERDICTS[p.verdict]||str(p.verdict,20))+' · '+(p.score===null||p.score===undefined?'점수 없음':'점수 '+str(p.score)+' / 5');rows.push(['대상 실행',short(p.runId)],['조건','사례 '+str(p.caseLabel,160)+' · 프로토콜 '+str(p.protocolVersion,80)]);if(p.supersedes)rows.push(['대체한 검수',short(p.supersedes)]);}
-      const dl=el('dl');for(const [k,v] of rows)dl.append(el('dt',{},k),el('dd',{},v));
+      const dl=el('dl');for(const [k,v] of rows)dl.append(el('dt',{},k),el('dd',{},...[v].flat()));
       const selfReview=r.kind==='review'&&seen.get(p.runId)?.owner.id===r.owner.id;
-      const a=el('article',{className:'cloud-record',dataset:{recordId:r.id}},el('div',{className:'cloud-chips'},...[KINDS[r.kind],r.visibility==='shared'?'공유':'비공개',mine?'내 기록':'다른 작성자',selfReview?'자체 평가 · 독립 검수 아님':'','작성자 보고 · 미검증'].filter(Boolean).map(t=>el('span',{className:'status-label'},t))),el('h4',{},title),dl);
+      const a=el('article',{className:'cloud-record',dataset:{recordId:r.id}},el('div',{className:'cloud-chips'},...[KINDS[r.kind],r.visibility==='shared'?'공유':'비공개',mine?'내 기록':'다른 작성자',selfReview?'자체 평가 · 독립 검수 아님':'','작성자 보고 · 미검증'].filter(Boolean).map(t=>el('span',{className:'status-label'},t))),el('h3',{},title),dl);
       if(r.kind==='review'&&p.note)a.append(el('p',{className:'cloud-note'},str(p.note,3000)));
       if(mine&&r.kind==='run')a.append(el('p',{className:'muted'},'기록 JSON 다운로드는 내 로그인으로 전체 기록을 받습니다. 비공개 증거(논문 추출문·모델 응답)와 로컬 ID가 들어 있을 수 있으니 받은 파일을 공유하지 마세요.'));
       const actions=[button('기록 JSON 다운로드','secondary',()=>download(r),{disabled:busy.op,dataset:{action:'download'}})];
@@ -148,17 +154,24 @@
       if(r.kind==='run'&&session&&(mine||r.visibility==='shared'))actions.push(button(mine?'자체 평가 쓰기':'검수 쓰기','secondary',()=>openReview(r),{dataset:{action:'review'}}));
       if(mine&&confirming?.id===r.id){const act=confirming.action;
         a.append(el('p',{className:'cloud-confirm'},act==='delete'?'서버에서 이 기록을 지웁니다. 로컬 기록은 그대로입니다.':act==='shared'?'공유하면 로그인하지 않은 사람도 읽습니다. 실행의 비공개 증거와 로컬 ID는 공개본에서 빠집니다.':'비공개로 바꿔도 이미 읽어 간 사본은 회수할 수 없습니다.'));
-        actions.push(button(act==='delete'?'삭제 확인':act==='shared'?'공유 확인':'비공개 전환 확인','primary',()=>act==='delete'?remove(r):setVisibility(r,act),{disabled:busy.op,dataset:{action:'confirm'}}),button('취소','secondary',()=>{confirming=null;renderList();},{dataset:{action:'cancel'}}));}
+        actions.push(button(act==='delete'?'삭제 확인':act==='shared'?'공유 확인':'비공개 전환 확인','primary',()=>act==='delete'?remove(r):setVisibility(r,act),{disabled:busy.op,dataset:{action:'confirm'}}),button('취소','secondary',()=>cancel(r),{dataset:{action:'cancel'}}));}
       else if(mine)actions.push(button(r.visibility==='shared'?'비공개로 전환':'공유하기','secondary',()=>ask(r,r.visibility==='shared'?'private':'shared'),{disabled:busy.op,dataset:{action:'visibility'}}),button('삭제','secondary',()=>ask(r,'delete'),{disabled:busy.op,dataset:{action:'delete'}}));
+      for(const b of actions)if(b.dataset.action)controls.set(r.id+' '+b.dataset.action,b);
       if(actions.length)a.append(el('div',{className:'button-row'},...actions));
       return a;}
-    function ask(r,action){confirming={id:r.id,action};renderList();}
+    function ask(r,action){confirming={id:r.id,action};renderList();refocus(r.id,['confirm']);}
+    function cancel(r){const back=confirming?.action==='delete'?'delete':'visibility';confirming=null;renderList();refocus(r.id,[back]);}
+    // A re-render replaces the activated button: focus returns to that record's control, else the record now in its place, else the status line.
+    // Focus the user has moved elsewhere in the meantime is left alone.
+    function refocus(id,names,at=shown.findIndex(x=>x.id===id)){const a=document.activeElement;if(a&&a!==document.body&&!list.contains(a))return;
+      const next=shown.some(x=>x.id===id)?null:shown[Math.min(at,shown.length-1)],target=next?controls.get(next.id+' download'):names.map(n=>controls.get(id+' '+n)).find(b=>b&&!b.disabled);
+      (target||status).focus?.();}
     const recordPath=r=>'/v1/records/'+encodeURIComponent(r.id);
-    async function mutate(work,done){if(busy.op)return;busy.op=true;confirming=null;renderList();say('서버에 반영하는 중…');
-      try{await work();say(done);}catch(e){say(explain(e,'write'),true);}finally{busy.op=false;renderList();}}
-    function setVisibility(r,visibility){return mutate(async()=>{const data=await api('PATCH',recordPath(r),{auth:true,body:{expectedRevision:r.revision,visibility}});const rec=data.record;
+    async function mutate(r,origin,work,done){if(busy.op)return;const at=shown.findIndex(x=>x.id===r.id);busy.op=true;confirming=null;renderList();say('서버에 반영하는 중…');
+      try{await work();say(done);}catch(e){say(explain(e,'write'),true);}finally{busy.op=false;renderList();refocus(r.id,[origin],at);}}
+    function setVisibility(r,visibility){return mutate(r,'visibility',async()=>{const data=await api('PATCH',recordPath(r),{auth:true,body:{expectedRevision:r.revision,visibility}});const rec=data.record;
       if(!validRecord(rec)||rec.id!==r.id)throw local('서버 응답 형식이 맞지 않습니다. 다시 불러와 확인하세요.');seen.set(rec.id,rec);shown=shown.flatMap(x=>x.id!==rec.id?[x]:scope==='shared'&&rec.visibility!=='shared'?[]:[rec]);},visibility==='shared'?'공유했습니다. 이제 누구나 읽을 수 있습니다.':'비공개로 바꿨습니다.');}
-    function remove(r){return mutate(async()=>{await api('DELETE',recordPath(r),{auth:true,ifMatch:r.revision});seen.delete(r.id);shown=shown.filter(x=>x.id!==r.id);},'서버에서 삭제했습니다. 로컬 기록은 그대로입니다.');}
+    function remove(r){return mutate(r,'delete',async()=>{await api('DELETE',recordPath(r),{auth:true,ifMatch:r.revision});seen.delete(r.id);shown=shown.filter(x=>x.id!==r.id);},'서버에서 삭제했습니다. 로컬 기록은 그대로입니다.');}
     // One record per explicit click: the owner's request is authenticated (full private payload), anyone else's is anonymous (public projection).
     // The body is saved only if it is the record that was clicked; it is never rendered, kept in the list or sent anywhere else.
     async function download(r){if(busy.op)return;const owner=ownedBy(r);busy.op=true;renderList();say('기록을 받는 중…');
@@ -168,22 +181,22 @@
         save('falsify-'+rec.kind+'-'+rec.id.replace(/[^A-Za-z0-9_-]/g,'_')+'.json',rec);
         say(rec.kind==='run'&&rec.payload.evidence?'기록 JSON을 저장했습니다. 파일에 비공개 증거(논문 추출문·모델 응답)가 들어 있으니 공유하지 마세요.':owner?'내 기록 전체를 JSON으로 저장했습니다. 로컬 ID 같은 비공개 필드가 들어 있을 수 있습니다.':'공개본 기록 JSON을 저장했습니다. 작성자가 보고한 내용이며 검증되지 않았습니다.');}
       catch(e){say(e?.code==='local'||e?.code==='http'||e?.code==='timeout'||e?.code==='network'||e?.code==='response'?explain(e,'read'):'기록 JSON을 저장하지 못했습니다.',true);}
-      finally{busy.op=false;renderList();}}
+      finally{busy.op=false;renderList();refocus(r.id,['download']);}}
     function save(name,data){const href=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)+'\n'],{type:'application/json'}));el('a',{href,download:name}).click();setTimeout(()=>URL.revokeObjectURL(href),60000);}
     // Preview only: the ledger hook loads the editor without registering, selecting or executing anything.
     async function previewHarness(r){if(busy.op)return;busy.op=true;
       try{if(typeof lab?.previewSharedHarness!=='function')throw local('이 작업대는 공유 Harness 미리보기를 지원하지 않습니다.');const hash=await lab.previewSharedHarness(clone(r.payload.config),typeof r.payload.hash==='string'?r.payload.hash:undefined);previewed=r.id;
         say('Harness 편집기에 미리보기만 불러왔습니다'+(typeof hash==='string'?' (내용 해시 '+short(hash)+')':'')+'. 등록·선택·실행은 하지 않았습니다.');}
-      catch(e){say(e?.code==='local'?e.message:'Harness 미리보기 실패: '+str(e?.message,200),true);}finally{busy.op=false;renderList();}}
+      catch(e){say(e?.code==='local'?e.message:'Harness 미리보기 실패: '+str(e?.message,200),true);}finally{busy.op=false;renderList();refocus(r.id,['preview']);}}
 
-    function renderAccount(){accountBody.replaceChildren();
+    function renderAccount(){accountBody.replaceChildren();userField=null;
       if(session){accountSummary.textContent='로그인됨 · '+str(session.author.displayName,80);
-        accountBody.append(el('dl',{},el('dt',{},'표시 이름'),el('dd',{},str(session.author.displayName,80)+' · 자기 보고'),el('dt',{},'사용자 이름'),el('dd',{},str(session.author.username,40)),el('dt',{},'세션 만료'),el('dd',{},str(session.expiresAt,40))),
+        accountBody.append(el('dl',{},el('dt',{},'표시 이름'),el('dd',{},str(session.author.displayName,80)+' · 자기 보고'),el('dt',{},'사용자 이름'),el('dd',{},str(session.author.username,40)),el('dt',{},'세션 만료'),el('dd',{},when(session.expiresAt))),
           el('p',{className:'muted'},memoryOnly?'브라우저 저장소를 쓸 수 없어 이 탭을 닫으면 로그아웃됩니다.':'세션 토큰은 이 브라우저 localStorage의 별도 항목('+SESSION_KEY+')에만 있고 '+hostName+'로만 보냅니다. 비밀번호는 저장하지 않습니다.'),
           el('div',{className:'button-row'},button('로그아웃','secondary',logout,{id:'cloud-logout',disabled:busy.auth}),button('이 브라우저에서만 지우기','text',()=>{forget();say('이 브라우저의 세션 토큰만 지웠습니다. 서버 세션은 만료될 때까지 남습니다.');renderAccount();setBusy();renderList();},{id:'cloud-forget',disabled:busy.auth})));return;}
       accountSummary.textContent=expired?'다시 로그인 필요':'로그인 · 가입 (올리기와 내 기록에만 필요)';
       const user=el('input',{id:'cloud-username',type:'text',autocomplete:'username',maxLength:32,spellcheck:'false',autocapitalize:'none'}),pass=el('input',{id:'cloud-password',type:'password',autocomplete:'current-password',maxLength:128}),display=el('input',{id:'cloud-display-name',type:'text',autocomplete:'nickname',maxLength:80});
-      user.value=lastUser;
+      user.value=lastUser;userField=user;
       const form=el('form',{id:'cloud-auth-form',className:'cloud-auth',novalidate:''},el('label',{},'사용자 이름',user),el('label',{},'비밀번호',pass),
         el('details',{className:'cloud-display'},el('summary',{},'가입할 때 표시 이름 (선택)'),el('label',{},'표시 이름 · 비우면 사용자 이름',display)),
         el('div',{className:'button-row'},el('button',{type:'submit',id:'cloud-login',className:'button primary'},'로그인'),button('가입','secondary',()=>authenticate('register',user,pass,display),{id:'cloud-register'})));
