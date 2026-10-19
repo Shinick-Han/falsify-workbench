@@ -15,6 +15,7 @@ const KINDS = ['harness', 'run', 'review'];
 const VISIBILITIES = ['private', 'shared'];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const TOKEN = /^fss_[A-Za-z0-9_-]{43}$/;
+const INVITE = /^fsi_[A-Za-z0-9_-]{43}$/;
 const USERNAME = /^[A-Za-z0-9_-]{3,32}$/;
 const CURSOR = /^[1-9][0-9]{0,15}$/;
 const UNSAFE_NAME = /[\p{Cc}\u200B\u200C\u200E\u200F\u2028\u2029\u202A-\u202E\u2066-\u2069\uFEFF]/u;
@@ -40,6 +41,8 @@ const MESSAGES = {
   invalid_credentials: 'The username or password is incorrect.',
   username_taken: 'This username is not available.',
   unauthorized: 'A valid session is required.',
+  invalid_invitation: 'The invitation code is not valid.',
+  membership_required: 'An active team membership is required.',
   origin_not_allowed: 'This origin is not allowed.',
   not_found: 'Not found.',
   method_not_allowed: 'Method not allowed.',
@@ -193,20 +196,23 @@ async function bucketKey(prefix, value) {
 
 const clientIp = request => request.headers.get('CF-Connecting-IP') || 'unknown';
 
-async function authenticate(request, db, required) {
+// Every session must be valid AND belong to an active team member; only logout skips the membership check
+// so a revoked or never-admitted author can still end their own session.
+async function authenticate(request, db, { member = true } = {}) {
   const header = request.headers.get('Authorization');
-  if (header === null) {
-    if (required) throw fail(401, 'unauthorized');
-    return null;
-  }
+  if (header === null) throw fail(401, 'unauthorized');
   const match = /^Bearer (\S+)$/.exec(header);
   if (!match || !TOKEN.test(match[1])) throw fail(401, 'unauthorized');
   const keyHash = await sha256Hex(match[1]);
   const row = await db
-    .prepare('SELECT a.id, a.username, a.display_name FROM sessions s JOIN authors a ON a.id = s.author_id WHERE s.token_hash = ?1 AND s.revoked_at IS NULL AND s.expires_at > ?2')
+    .prepare(
+      `SELECT a.id, a.username, a.display_name, m.status AS member_status FROM sessions s JOIN authors a ON a.id = s.author_id
+       LEFT JOIN team_members m ON m.author_id = a.id WHERE s.token_hash = ?1 AND s.revoked_at IS NULL AND s.expires_at > ?2`
+    )
     .bind(keyHash, Date.now())
     .first();
   if (!row) throw fail(401, 'unauthorized');
+  if (member && row.member_status !== 'active') throw fail(403, 'membership_required');
   return { id: row.id, username: row.username, displayName: row.display_name, keyHash };
 }
 
@@ -317,26 +323,57 @@ async function ownedRecord(db, id, ownerId) {
 
 function health(ctx) {
   database(ctx.env);
-  return json(200, { schema: SCHEMA, ready: true, auth: 'password' });
+  return json(200, { schema: SCHEMA, ready: true, auth: 'password', registration: 'invite-only', sharedAccess: 'members' });
 }
 
+const INVITE_USABLE = 'claimed_by IS NULL AND revoked_at IS NULL AND expires_at > ?2';
+
+// Registration needs an unused, unexpired, unrevoked invitation. The cheap invitation check runs after the
+// rate limits and before the scrypt derivation; the claim itself is one D1 batch (a single transaction):
+// the author insert is conditional on the invitation still being usable, and the claim and membership are
+// conditional on that author row, so a lost race or a taken username leaves no author and no used code.
 async function register(ctx) {
   const db = database(ctx.env);
   const body = await readJson(ctx.request, MAX_AUTH_BODY_BYTES);
-  fields(body, ['username', 'password', 'displayName'], ['username', 'password']);
+  fields(body, ['username', 'password', 'displayName', 'inviteCode'], ['username', 'password', 'inviteCode']);
   if (!validUsername(body.username)) throw fail(400, 'invalid_username');
   const password = passwordText(body.password);
   if (password === null) throw fail(400, 'invalid_password');
   const name = body.displayName === undefined ? body.username : displayName(body.displayName);
   await rateLimit(db, await bucketKey('register:ip:', clientIp(ctx.request)), ctx.settings.registersPerIpHour);
   await rateLimit(db, 'register:all', ctx.settings.registersPerHour);
+  if (typeof body.inviteCode !== 'string' || !INVITE.test(body.inviteCode)) throw fail(403, 'invalid_invitation');
+  const codeHash = await sha256Hex(body.inviteCode);
+  const usable = await db.prepare(`SELECT 1 AS ok FROM invitations WHERE code_hash = ?1 AND ${INVITE_USABLE}`).bind(codeHash, Date.now()).first();
+  if (!usable) throw fail(403, 'invalid_invitation');
   const author = { id: crypto.randomUUID(), username: body.username.toLowerCase(), displayName: name };
   const passwordHash = await hashPassword(password);
-  const inserted = await db
-    .prepare('INSERT INTO authors (id, username, display_name, password_hash, created_at) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT (username) DO NOTHING')
-    .bind(author.id, author.username, author.displayName, passwordHash, now())
-    .run();
-  if (inserted.meta.changes !== 1) throw fail(409, 'username_taken');
+  const at = now();
+  let results;
+  try {
+    results = await db.batch([
+      db
+        .prepare(
+          `INSERT INTO authors (id, username, display_name, password_hash, created_at)
+           SELECT ?3, ?4, ?5, ?6, ?7 WHERE EXISTS (SELECT 1 FROM invitations WHERE code_hash = ?1 AND ${INVITE_USABLE})`
+        )
+        .bind(codeHash, Date.now(), author.id, author.username, author.displayName, passwordHash, at),
+      db
+        .prepare(`UPDATE invitations SET claimed_by = ?3, claimed_at = ?4 WHERE code_hash = ?1 AND ${INVITE_USABLE} AND EXISTS (SELECT 1 FROM authors WHERE id = ?3)`)
+        .bind(codeHash, Date.now(), author.id, at),
+      db
+        .prepare("INSERT INTO team_members (author_id, status, created_at) SELECT ?1, 'active', ?2 WHERE EXISTS (SELECT 1 FROM invitations WHERE claimed_by = ?1)")
+        .bind(author.id, at),
+    ]);
+  } catch (error) {
+    // The username unique index aborts the whole batch, so the invitation stays unused.
+    const taken = await db.prepare('SELECT 1 AS ok FROM authors WHERE username = ?1').bind(author.username).first();
+    if (taken) throw fail(409, 'username_taken');
+    throw error;
+  }
+  const [inserted, claimed, admitted] = results.map(r => r.meta.changes);
+  if (inserted !== 1) throw fail(403, 'invalid_invitation');
+  if (claimed !== 1 || admitted !== 1) throw new Error('invitation claim invariant');
   return json(201, await createSession(db, author));
 }
 
@@ -355,22 +392,27 @@ async function login(ctx) {
   const reserved = await rateLimit(db, failures, ctx.settings.loginFailuresPerUsernameHour);
   const password = passwordText(body.password);
   const row = validUsername(body.username) && password !== null
-    ? await db.prepare('SELECT id, username, display_name, password_hash FROM authors WHERE username = ?1').bind(username).first()
+    ? await db
+        .prepare('SELECT a.id, a.username, a.display_name, a.password_hash, m.status AS member_status FROM authors a LEFT JOIN team_members m ON m.author_id = a.id WHERE a.username = ?1')
+        .bind(username)
+        .first()
     : null;
   const ok = await verifyPassword(password ?? body.password, row?.password_hash ?? null);
   if (!ok || !row) throw fail(401, 'invalid_credentials');
+  // A correct password of a non-member creates no session and keeps its failure slot.
+  if (row.member_status !== 'active') throw fail(403, 'membership_required');
   await releaseSlot(db, failures, reserved);
   return json(200, await createSession(db, { id: row.id, username: row.username, displayName: row.display_name }));
 }
 
 async function me(ctx) {
-  const author = await authenticate(ctx.request, database(ctx.env), true);
+  const author = await authenticate(ctx.request, database(ctx.env));
   return json(200, { author: authorView(author) });
 }
 
 async function logout(ctx) {
   const db = database(ctx.env);
-  const author = await authenticate(ctx.request, db, true);
+  const author = await authenticate(ctx.request, db, { member: false });
   await db.prepare('UPDATE sessions SET revoked_at = ?1 WHERE token_hash = ?2 AND revoked_at IS NULL').bind(now(), author.keyHash).run();
   return json(200, { revoked: true });
 }
@@ -382,8 +424,10 @@ function singleParam(params, name) {
 }
 
 // Listings always return the public projection; the owner reads full private fields one record at a time.
+// Shared means shared with the team: every listing requires an active member session.
 async function listRecords(ctx) {
   const db = database(ctx.env);
+  const author = await authenticate(ctx.request, db);
   const params = ctx.url.searchParams;
   const scope = singleParam(params, 'scope') ?? 'shared';
   const kind = singleParam(params, 'kind');
@@ -399,7 +443,6 @@ async function listRecords(ctx) {
   const where = [];
   const binds = [];
   if (scope === 'mine') {
-    const author = await authenticate(ctx.request, db, true);
     binds.push(author.id);
     where.push(`r.owner_id = ?${binds.length}`);
   } else {
@@ -427,7 +470,7 @@ async function listRecords(ctx) {
 
 async function createRecord(ctx) {
   const db = database(ctx.env);
-  const author = await authenticate(ctx.request, db, true);
+  const author = await authenticate(ctx.request, db);
   const body = await readJson(ctx.request);
   fields(body, ['kind', 'visibility', 'payload'], ['kind', 'payload']);
   const visibility = body.visibility ?? 'private';
@@ -473,12 +516,12 @@ async function createRecord(ctx) {
 
 async function getRecord(ctx) {
   const db = database(ctx.env);
-  const author = await authenticate(ctx.request, db, false);
+  const author = await authenticate(ctx.request, db);
   const row = await db
     .prepare(`SELECT ${RECORD_COLUMNS}, r.payload, r.public_payload, ${PUBLIC_REVIEW_GATE} AS review_visible FROM records r JOIN authors a ON a.id = r.owner_id WHERE r.id = ?1`)
     .bind(ctx.id)
     .first();
-  if (row && author && row.owner_id === author.id) return json(200, { record: serialize(row, row.payload) });
+  if (row && row.owner_id === author.id) return json(200, { record: serialize(row, row.payload) });
   // Private records of other authors are indistinguishable from missing ones.
   if (!row || row.visibility !== 'shared' || !row.review_visible) throw fail(404, 'not_found');
   return json(200, { record: serialize(row, row.public_payload) });
@@ -486,7 +529,7 @@ async function getRecord(ctx) {
 
 async function updateRecord(ctx) {
   const db = database(ctx.env);
-  const author = await authenticate(ctx.request, db, true);
+  const author = await authenticate(ctx.request, db);
   const body = await readJson(ctx.request);
   fields(body, ['expectedRevision', 'visibility'], ['expectedRevision', 'visibility']);
   if (!Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 1 || !VISIBILITIES.includes(body.visibility)) throw fail(400, 'invalid_request');
@@ -509,7 +552,7 @@ async function updateRecord(ctx) {
 
 async function deleteRecord(ctx) {
   const db = database(ctx.env);
-  const author = await authenticate(ctx.request, db, true);
+  const author = await authenticate(ctx.request, db);
   const header = ctx.request.headers.get('If-Match');
   if (header === null) throw fail(428, 'precondition_required');
   const match = /^(?:W\/)?"?([1-9][0-9]{0,14})"?$/.exec(header.trim());

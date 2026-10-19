@@ -2,8 +2,10 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { createHash, randomBytes, scryptSync } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -44,7 +46,7 @@ async function bundle() {
 }
 
 function migrationStatements() {
-  const sql = readFileSync(path.join(apiRoot, 'migrations/0001_shared_records.sql'), 'utf8');
+  const sql = ['0001_shared_records.sql', '0002_invite_membership.sql'].map(name => readFileSync(path.join(apiRoot, 'migrations', name), 'utf8')).join('\n');
   return sql
     .split('\n')
     .filter(line => !line.trim().startsWith('--'))
@@ -87,7 +89,24 @@ function client(instance) {
   };
 }
 
-const register = (username, password = PASSWORD, extra = {}, headers = {}) => call('POST', '/v1/auth/register', { body: { username, password, ...extra }, headers });
+// Seeds one invitation row directly (only its SHA-256 is stored) and returns the plaintext code.
+async function invite(instance = mf, { ttlMs = 3600e3, revoked = false } = {}) {
+  const code = 'fsi_' + randomBytes(32).toString('base64url');
+  const d1 = await instance.getD1Database('DB');
+  await d1
+    .prepare('INSERT INTO invitations (code_hash, created_at, expires_at, revoked_at) VALUES (?1, ?2, ?3, ?4)')
+    .bind(sha256(code), new Date().toISOString(), Date.now() + ttlMs, revoked ? new Date().toISOString() : null)
+    .run();
+  return code;
+}
+
+// Every registration carries a fresh invitation unless the caller supplies (or omits) inviteCode itself.
+async function registerOn(c, instance, username, password = PASSWORD, extra = {}, headers = {}) {
+  const body = { username, password, ...(Object.hasOwn(extra, 'inviteCode') ? {} : { inviteCode: await invite(instance) }), ...extra };
+  if (body.inviteCode === undefined) delete body.inviteCode;
+  return c('POST', '/v1/auth/register', { body, headers });
+}
+const register = (username, password = PASSWORD, extra = {}, headers = {}) => registerOn(call, mf, username, password, extra, headers);
 const login = (username, password = PASSWORD, headers = {}) => call('POST', '/v1/auth/login', { body: { username, password }, headers });
 
 // An oversized body answered before it is consumed can reset a shared keep-alive connection mid-upload, so
@@ -183,7 +202,7 @@ after(async () => {
 test('health reports password auth', async () => {
   const res = await call('GET', '/v1/health');
   assert.equal(res.status, 200);
-  assert.deepEqual(res.body, { schema: 'falsify.cloud.v1', ready: true, auth: 'password' });
+  assert.deepEqual(res.body, { schema: 'falsify.cloud.v1', ready: true, auth: 'password', registration: 'invite-only', sharedAccess: 'members' });
 });
 
 test('register validates username and password without composition rules', async () => {
@@ -222,8 +241,12 @@ test('register validates username and password without composition rules', async
 });
 
 test('concurrent registrations of one username create exactly one account', async () => {
-  const results = await Promise.all([register('carol', PASSWORD), register('Carol', 'different password')]);
+  const codes = [await invite(), await invite()];
+  const results = await Promise.all([register('carol', PASSWORD, { inviteCode: codes[0] }), register('Carol', 'different password', { inviteCode: codes[1] })]);
   assert.deepEqual(results.map(r => r.status).sort(), [201, 409]);
+  users.carol = results.find(r => r.status === 201).body;
+  const claims = await d1All(mf, `SELECT claimed_by FROM invitations WHERE code_hash IN ('${sha256(codes[0])}', '${sha256(codes[1])}')`);
+  assert.deepEqual(claims.map(r => r.claimed_by === null).sort(), [false, true], 'the losing registration does not burn its invitation');
   const rows = await d1All(mf, "SELECT id FROM authors WHERE username = 'carol'");
   assert.equal(rows.length, 1);
 });
@@ -296,10 +319,10 @@ test('private records are isolated between authors', async () => {
   users.privateId = record.id;
 
   assert.equal((await call('GET', `/v1/records/${record.id}`, { token: users.bob.token })).status, 404);
-  assert.equal((await call('GET', `/v1/records/${record.id}`)).status, 404);
+  assert.equal((await call('GET', `/v1/records/${record.id}`)).status, 401);
   const bobMine = await call('GET', '/v1/records?scope=mine', { token: users.bob.token });
   assert.ok(!bobMine.body.records.some(r => r.id === record.id));
-  const shared = await call('GET', '/v1/records?scope=shared');
+  const shared = await call('GET', '/v1/records?scope=shared', { token: users.bob.token });
   assert.ok(!shared.body.records.some(r => r.id === record.id));
   assert.equal((await call('GET', '/v1/records?scope=mine')).status, 401);
   const aliceMine = await call('GET', '/v1/records?scope=mine', { token: users.alice.token });
@@ -314,7 +337,7 @@ test('share and unshare use revision compare-and-set; payload is immutable', asy
   assert.equal(shared.status, 200);
   assert.equal(shared.body.record.revision, 2);
   assert.equal((await call('GET', `/v1/records/${id}`, { token: users.bob.token })).status, 200);
-  assert.ok((await call('GET', '/v1/records?scope=shared&kind=harness')).body.records.some(r => r.id === id));
+  assert.ok((await call('GET', '/v1/records?scope=shared&kind=harness', { token: users.bob.token })).body.records.some(r => r.id === id));
 
   const stale = await call('PATCH', `/v1/records/${id}`, { token: users.alice.token, body: { expectedRevision: 1, visibility: 'private' } });
   assert.equal(stale.status, 409);
@@ -335,13 +358,13 @@ test('public projections redact run evidence and local ids', async () => {
   assert.ok(created.body.record.payload.evidence, 'owner create response keeps private evidence');
   const owner = await call('GET', `/v1/records/${id}`, { token: users.alice.token });
   assert.equal(owner.body.record.payload.localId, 'local-run-1');
-  for (const res of [await call('GET', `/v1/records/${id}`), await call('GET', `/v1/records/${id}`, { token: users.bob.token })]) {
+  for (const res of [await call('GET', `/v1/records/${id}`, { token: users.carol.token }), await call('GET', `/v1/records/${id}`, { token: users.bob.token })]) {
     assert.equal(res.status, 200);
     assert.ok(!('evidence' in res.body.record.payload));
     assert.ok(!('localId' in res.body.record.payload));
     assert.ok(!JSON.stringify(res.body).includes('private evidence'));
   }
-  const list = await call('GET', '/v1/records?scope=shared&kind=run');
+  const list = await call('GET', '/v1/records?scope=shared&kind=run', { token: users.bob.token });
   assert.ok(list.body.records.some(r => r.id === id));
   assert.ok(!JSON.stringify(list.body).includes('private evidence'));
 
@@ -355,12 +378,12 @@ test('reviews require a visible run and disappear when the run is unshared', asy
   const review = await call('POST', '/v1/records', { token: users.bob.token, body: { kind: 'review', visibility: 'shared', payload: reviewPayload(users.runId) } });
   assert.equal(review.status, 201);
   const reviewId = review.body.record.id;
-  assert.equal((await call('GET', `/v1/records/${reviewId}`)).status, 200);
+  assert.equal((await call('GET', `/v1/records/${reviewId}`, { token: users.carol.token })).status, 200);
 
   const run = await call('GET', `/v1/records/${users.runId}`, { token: users.alice.token });
   await call('PATCH', `/v1/records/${users.runId}`, { token: users.alice.token, body: { expectedRevision: run.body.record.revision, visibility: 'private' } });
-  assert.equal((await call('GET', `/v1/records/${reviewId}`)).status, 404);
-  assert.ok(!(await call('GET', '/v1/records?scope=shared&kind=review')).body.records.some(r => r.id === reviewId));
+  assert.equal((await call('GET', `/v1/records/${reviewId}`, { token: users.carol.token })).status, 404);
+  assert.ok(!(await call('GET', '/v1/records?scope=shared&kind=review', { token: users.carol.token })).body.records.some(r => r.id === reviewId));
   assert.equal((await call('GET', `/v1/records/${reviewId}`, { token: users.bob.token })).status, 200, 'owner still reads own review');
 
   const hidden = await call('POST', '/v1/records', { token: users.bob.token, body: { kind: 'review', payload: reviewPayload(users.runId, 'Second.') } });
@@ -385,10 +408,11 @@ test('pagination is bounded and cursor-validated', async () => {
   assert.equal(second.body.nextCursor, null);
   const ids = [...first.body.records, ...second.body.records].map(r => r.id);
   assert.equal(new Set(ids).size, 3);
-  assert.equal((await call('GET', '/v1/records?cursor=abc')).body.error.code, 'invalid_cursor');
-  assert.equal((await call('GET', '/v1/records?limit=101')).status, 400);
-  assert.equal((await call('GET', '/v1/records?scope=all')).status, 400);
-  assert.equal((await call('GET', '/v1/records?kind=run&kind=review')).status, 400);
+  const token = users.bob.token;
+  assert.equal((await call('GET', '/v1/records?cursor=abc', { token })).body.error.code, 'invalid_cursor');
+  assert.equal((await call('GET', '/v1/records?limit=101', { token })).status, 400);
+  assert.equal((await call('GET', '/v1/records?scope=all', { token })).status, 400);
+  assert.equal((await call('GET', '/v1/records?kind=run&kind=review', { token })).status, 400);
 });
 
 test('malformed requests get fixed safe errors', async () => {
@@ -442,7 +466,7 @@ test('auth rate caps, record quota and hashed rate buckets', async () => {
   try {
     const c = client(limited);
     const ip = { 'CF-Connecting-IP': '203.0.113.9' };
-    const reg = (u, h) => c('POST', '/v1/auth/register', { body: { username: u, password: PASSWORD }, headers: h });
+    const reg = (u, h) => registerOn(c, limited, u, PASSWORD, {}, h);
     assert.equal((await reg('quota_one', ip)).status, 201);
     const second = await reg('quota_two', ip);
     assert.equal(second.status, 201);
@@ -479,7 +503,7 @@ test('concurrent wrong-password logins from many IPs cannot exceed the per-usern
   try {
     const c = client(limited);
     const attempt = (password, i) => c('POST', '/v1/auth/login', { body: { username: 'victim', password }, headers: { 'CF-Connecting-IP': `198.51.100.${i}` } });
-    assert.equal((await c('POST', '/v1/auth/register', { body: { username: 'victim', password: PASSWORD } })).status, 201);
+    assert.equal((await registerOn(c, limited, 'victim')).status, 201);
     for (let i = 0; i < 12; i++) assert.equal((await attempt(PASSWORD, 200)).status, 200, 'successful logins release their reserved slot');
     const burst = await Promise.all(Array.from({ length: 40 }, (_, i) => attempt('wrong password value', i)));
     assert.deepEqual(tally(burst), { 401: 10, 429: 30 });
@@ -507,6 +531,245 @@ test('global login attempt cap holds across fresh IPs and usernames', async () =
     assert.equal(fresh.status, 429, 'a new IP and username do not bypass the global cap');
   } finally {
     await limited.dispose();
+  }
+});
+
+const INVALID_INVITATION = { error: { code: 'invalid_invitation', message: 'The invitation code is not valid.' } };
+
+test('registration requires a usable invitation; every bad code is one fixed 403', async () => {
+  assert.equal((await register('no_code', PASSWORD, { inviteCode: undefined })).body.error.code, 'invalid_request', 'inviteCode is a required field');
+  const used = await invite();
+  assert.equal((await register('first_claim', PASSWORD, { inviteCode: used })).status, 201);
+  const cases = {
+    malformed: 'fsi_short',
+    wrongPrefix: 'fss_' + 'A'.repeat(43),
+    nonString: 42,
+    unknown: 'fsi_' + randomBytes(32).toString('base64url'),
+    expired: await invite(mf, { ttlMs: -1000 }),
+    revoked: await invite(mf, { revoked: true }),
+    used,
+  };
+  for (const [label, inviteCode] of Object.entries(cases)) {
+    const res = await register(`denied_${label.toLowerCase()}`, PASSWORD, { inviteCode });
+    assert.equal(res.status, 403, label);
+    assert.deepEqual(res.body, INVALID_INVITATION, label);
+  }
+  assert.equal((await d1All(mf, "SELECT id FROM authors WHERE username LIKE 'denied_%'")).length, 0, 'no stranded authors');
+  const dump = JSON.stringify(await d1All(mf, 'SELECT * FROM invitations'));
+  assert.ok(!dump.includes(used) && dump.includes(sha256(used)), 'only invitation hashes are stored');
+});
+
+test('invalid invitations are rate limited before any password derivation', async () => {
+  const limited = await start({ REGISTERS_PER_IP_HOUR: '2' });
+  try {
+    const c = client(limited);
+    const bad = () => registerOn(c, limited, 'guesser', PASSWORD, { inviteCode: 'fsi_' + randomBytes(32).toString('base64url') }, { 'CF-Connecting-IP': '203.0.113.50' });
+    assert.equal((await bad()).status, 403);
+    assert.equal((await bad()).status, 403);
+    const third = await bad();
+    assert.equal(third.status, 429);
+    assert.equal(third.body.error.code, 'rate_limited');
+  } finally {
+    await limited.dispose();
+  }
+});
+
+test('one invitation admits exactly one of several concurrent registrations', async () => {
+  const code = await invite();
+  const results = await Promise.all(['race_a', 'race_b', 'race_c'].map(u => register(u, PASSWORD, { inviteCode: code })));
+  assert.deepEqual(tally(results), { 201: 1, 403: 2 });
+  const winner = results.find(r => r.status === 201).body.author;
+  assert.deepEqual(await d1All(mf, "SELECT username FROM authors WHERE username LIKE 'race_%'"), [{ username: winner.username }]);
+  const [row] = await d1All(mf, `SELECT claimed_by, claimed_at FROM invitations WHERE code_hash = '${sha256(code)}'`);
+  assert.equal(row.claimed_by, winner.id);
+  assert.ok(row.claimed_at);
+  assert.deepEqual(await d1All(mf, `SELECT status FROM team_members WHERE author_id = '${winner.id}'`), [{ status: 'active' }]);
+});
+
+test('a taken username leaves the invitation usable', async () => {
+  const code = await invite();
+  const taken = await register('ALICE', PASSWORD, { inviteCode: code });
+  assert.equal(taken.status, 409);
+  assert.equal(taken.body.error.code, 'username_taken');
+  assert.deepEqual(await d1All(mf, `SELECT claimed_by FROM invitations WHERE code_hash = '${sha256(code)}'`), [{ claimed_by: null }]);
+  assert.equal((await register('alice_two', PASSWORD, { inviteCode: code })).status, 201);
+});
+
+test('signed-out and non-member requests never read records', async () => {
+  for (const pathname of ['/v1/records', '/v1/records?scope=shared', `/v1/records/${users.runId}`, '/v1/me']) {
+    const res = await call('GET', pathname, { headers: { Origin: ORIGIN } });
+    assert.equal(res.status, 401, pathname);
+    assert.equal(res.body.error.code, 'unauthorized');
+    assert.equal(res.headers.get('Access-Control-Allow-Origin'), ORIGIN);
+    assert.ok(!('records' in res.body) && !('record' in res.body));
+  }
+  const preflight = await call('OPTIONS', '/v1/records', { headers: { Origin: ORIGIN, 'Access-Control-Request-Method': 'GET' } });
+  assert.deepEqual([preflight.status, preflight.body], [204, null]);
+});
+
+test('authenticated members read other owners only through the shared projection', async () => {
+  const run = await call('POST', '/v1/records', { token: users.alice.token, body: { kind: 'run', visibility: 'shared', payload: runPayload('member-projection') } });
+  assert.equal(run.status, 201);
+  const id = run.body.record.id;
+  const privateRun = await call('POST', '/v1/records', { token: users.alice.token, body: { kind: 'run', payload: runPayload('member-private') } });
+  for (const token of [users.bob.token, users.carol.token]) {
+    const one = await call('GET', `/v1/records/${id}`, { token });
+    assert.equal(one.status, 200);
+    assert.equal(one.body.record.owner.username, 'alice');
+    assert.equal(one.body.record.attestation, 'client-reported');
+    assert.ok(!JSON.stringify(one.body).includes('private evidence') && !JSON.stringify(one.body).includes('member-projection'));
+    const list = await call('GET', '/v1/records?scope=shared&kind=run', { token });
+    assert.ok(list.body.records.some(r => r.id === id));
+    assert.ok(!list.body.records.some(r => r.id === privateRun.body.record.id));
+    assert.ok(!JSON.stringify(list.body).includes('private evidence'));
+    assert.equal((await call('GET', `/v1/records/${privateRun.body.record.id}`, { token })).status, 404);
+  }
+});
+
+// Runs operator CLI SQL locally; its validated literals never contain ';'.
+async function operatorSql(sql) {
+  const d1 = await mf.getD1Database('DB');
+  for (const statement of sql.split(';').map(s => s.trim()).filter(Boolean)) await d1.prepare(statement).run();
+}
+
+// Mirrors the Worker's stored format so a test can seed an author the way migration 0001 left it.
+function scryptHash(password) {
+  const salt = randomBytes(16);
+  const key = scryptSync(password.normalize('NFC'), salt, 32, { N: 32768, r: 8, p: 3, maxmem: 64 * 1024 * 1024 });
+  return `scrypt$32768$8$3$${salt.toString('base64url')}$${key.toString('base64url')}`;
+}
+
+test('pre-migration accounts and sessions are denied until an operator admits them; revoke keeps records', async () => {
+  const { admitSql, revokeSql } = await import('../scripts/invites.mjs');
+  const d1 = await mf.getD1Database('DB');
+  const id = crypto.randomUUID();
+  const token = 'fss_' + randomBytes(32).toString('base64url');
+  const at = new Date().toISOString();
+  await d1.prepare('INSERT INTO authors (id, username, display_name, password_hash, created_at) VALUES (?1, ?2, ?3, ?4, ?5)').bind(id, 'legacy', 'Legacy', scryptHash(PASSWORD), at).run();
+  await d1.prepare('INSERT INTO sessions (token_hash, author_id, created_at, expires_at) VALUES (?1, ?2, ?3, ?4)').bind(sha256(token), id, at, Date.now() + 3600e3).run();
+  const shared = await call('GET', '/v1/records?scope=shared', { token: users.alice.token });
+  const existingId = shared.body.records[0].id;
+  const denied = [
+    await call('GET', '/v1/me', { token }),
+    await call('GET', '/v1/records?scope=shared', { token }),
+    await call('GET', '/v1/records?scope=mine', { token }),
+    await call('GET', `/v1/records/${existingId}`, { token }),
+    await call('POST', '/v1/records', { token, body: { kind: 'harness', payload: await harnessPayload('legacy-h') } }),
+    await call('PATCH', `/v1/records/${existingId}`, { token, body: { expectedRevision: 1, visibility: 'private' } }),
+    await call('DELETE', `/v1/records/${existingId}`, { token, headers: { 'If-Match': '1' } }),
+  ];
+  for (const res of denied) {
+    assert.equal(res.status, 403);
+    assert.deepEqual(res.body, { error: { code: 'membership_required', message: 'An active team membership is required.' } });
+  }
+  const before = (await d1All(mf, `SELECT COUNT(*) AS n FROM sessions WHERE author_id = '${id}'`))[0].n;
+  const login = await call('POST', '/v1/auth/login', { body: { username: 'legacy', password: PASSWORD } });
+  assert.deepEqual([login.status, login.body.error.code], [403, 'membership_required']);
+  assert.equal((await d1All(mf, `SELECT COUNT(*) AS n FROM sessions WHERE author_id = '${id}'`))[0].n, before, 'no session for a non-member');
+  assert.equal((await call('POST', '/v1/auth/login', { body: { username: 'legacy', password: 'wrong password value' } })).status, 401);
+
+  await operatorSql(admitSql('legacy', new Date().toISOString()));
+  assert.equal((await call('GET', '/v1/me', { token })).status, 200, 'admit reactivates the existing session');
+  const member = await call('POST', '/v1/auth/login', { body: { username: 'Legacy', password: PASSWORD } });
+  assert.equal(member.status, 200);
+  const created = await call('POST', '/v1/records', { token: member.body.token, body: { kind: 'harness', payload: await harnessPayload('legacy-kept') } });
+  assert.equal(created.status, 201);
+
+  await operatorSql(revokeSql('legacy', new Date().toISOString()));
+  for (const t of [token, member.body.token]) assert.equal((await call('GET', '/v1/me', { token: t })).status, 401, 'revoke ends every session');
+  assert.equal((await call('POST', '/v1/auth/login', { body: { username: 'legacy', password: PASSWORD } })).status, 403);
+  assert.equal((await d1All(mf, `SELECT COUNT(*) AS n FROM records WHERE owner_id = '${id}'`))[0].n, 1, 'records are preserved');
+  assert.deepEqual(await d1All(mf, `SELECT status FROM team_members WHERE author_id = '${id}'`), [{ status: 'revoked' }]);
+  await operatorSql(admitSql('legacy', new Date().toISOString()));
+  assert.equal((await call('POST', '/v1/auth/login', { body: { username: 'legacy', password: PASSWORD } })).status, 200, 'admit after revoke');
+});
+
+test('invite CLI: argument validation and environment mapping match wrangler.jsonc', async () => {
+  const cli = await import('../scripts/invites.mjs');
+  const outside = path.join(os.tmpdir(), 'falsify-invite-never-created.txt');
+  const bad = [
+    [],
+    ['delete', '--env', 'staging'],
+    ['issue', '--env', 'dev', '--out', outside],
+    ['issue', '--env', 'staging', '--out', 'relative.txt'],
+    ['issue', '--env', 'staging', '--out', path.join(repoRoot, 'invite.txt')],
+    ['issue', '--env', 'staging', '--out', outside, '--hours', '0'],
+    ['issue', '--env', 'staging', '--out', outside, '--hours', '169'],
+    ['issue', '--env', 'staging', '--out', outside, '--username', 'alice'],
+    ['issue', '--env', 'staging', '--env', 'production', '--out', outside],
+    ['admit', '--env', 'staging', '--username', "x'; DROP TABLE authors;--"],
+    ['revoke', '--env', 'production'],
+  ];
+  for (const argv of bad) assert.throws(() => cli.parseArgs(argv), cli.UsageError, argv.join(' '));
+  assert.deepEqual(cli.parseArgs(['issue', '--env', 'production', '--out', outside]), { action: 'issue', dryRun: false, env: 'production', out: outside, hours: 168 });
+  assert.equal(cli.parseArgs(['admit', '--env', 'staging', '--username', 'Alice']).username, 'alice');
+  const config = readFileSync(path.join(apiRoot, 'wrangler.jsonc'), 'utf8');
+  const names = [...config.matchAll(/"database_name": "([^"]+)"/g)].map(m => m[1]);
+  assert.deepEqual(names, [cli.ENVIRONMENTS.production.database, cli.ENVIRONMENTS.staging.database]);
+  const args = cli.wranglerArgs('staging', 'SELECT 1;');
+  assert.deepEqual(args.slice(1, 6), ['d1', 'execute', 'falsify-harness-records-staging', '--remote', '--config']);
+  assert.ok(args.includes('--env') && args[args.indexOf('--env') + 1] === 'staging');
+  assert.ok(!cli.wranglerArgs('production', 'SELECT 1;').includes('--env'));
+});
+
+test('invite CLI issue writes the code only to an exclusive 0600 file and leaves nothing on failure', async () => {
+  const cli = await import('../scripts/invites.mjs');
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'falsify-invites-'));
+  try {
+    const out = path.join(dir, 'invite.txt');
+    const options = cli.parseArgs(['issue', '--env', 'staging', '--out', out, '--hours', '2']);
+    const calls = [];
+    const dry = cli.run({ ...options, dryRun: true }, { runner: args => calls.push(args) });
+    assert.equal(calls.length, 0);
+    assert.ok(!existsSync(out), 'dry run creates no file');
+    assert.deepEqual(Object.keys(dry).sort(), ['action', 'database', 'dryRun', 'env', 'expiresAt', 'out']);
+
+    assert.throws(() => cli.run(options, { runner: () => { throw new Error('wrangler d1 execute failed (exit 1)'); } }), /exit 1/);
+    assert.ok(!existsSync(out), 'a failed insert leaves no plaintext file');
+
+    const d1 = await mf.getD1Database('DB');
+    let sql;
+    const report = cli.run(options, { runner: args => { sql = args[args.length - 1]; } });
+    const code = readFileSync(out, 'utf8').trim();
+    assert.match(code, /^fsi_[A-Za-z0-9_-]{43}$/);
+    if (process.platform !== 'win32') assert.equal(statSync(out).mode & 0o777, 0o600);
+    assert.ok(sql.includes(sha256(code)) && !sql.includes(code), 'SQL carries the hash only');
+    assert.ok(!JSON.stringify(report).includes(code) && !JSON.stringify(report).includes(sha256(code)), 'report is redacted');
+    const ttl = Date.parse(report.expiresAt) - Date.now();
+    assert.ok(ttl > 1.9 * 3600e3 && ttl <= 2 * 3600e3);
+    await operatorSql(sql);
+    const res = await register('cli_invited', PASSWORD, { inviteCode: code });
+    assert.equal(res.status, 201, 'the issued SQL creates a usable invitation');
+    assert.equal((await register('cli_again', PASSWORD, { inviteCode: code })).status, 403, 'single use');
+
+    writeFileSync(out, 'existing');
+    let ran = false;
+    assert.throws(() => cli.run(options, { runner: () => { ran = true; } }), { code: 'EEXIST' });
+    assert.ok(!ran, 'nothing is inserted when --out exists');
+    assert.equal(readFileSync(out, 'utf8'), 'existing');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('invite CLI subprocess: dry run prints redacted metadata and bad usage exits 2', () => {
+  const script = path.join(apiRoot, 'scripts/invites.mjs');
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'falsify-invites-cli-'));
+  try {
+    const out = path.join(dir, 'code.txt');
+    const dry = spawnSync(process.execPath, [script, 'issue', '--env', 'staging', '--out', out, '--dry-run'], { encoding: 'utf8', shell: false });
+    assert.equal(dry.status, 0, dry.stderr);
+    const report = JSON.parse(dry.stdout);
+    assert.deepEqual([report.action, report.env, report.database, report.dryRun, report.out], ['issue', 'staging', 'falsify-harness-records-staging', true, out]);
+    assert.ok(!/fsi_/.test(dry.stdout + dry.stderr));
+    assert.ok(!existsSync(out));
+    const admit = spawnSync(process.execPath, [script, 'admit', '--env', 'production', '--username', 'Alice', '--dry-run'], { encoding: 'utf8', shell: false });
+    assert.deepEqual(JSON.parse(admit.stdout), { action: 'admit', env: 'production', database: 'falsify-harness-records', dryRun: true, username: 'alice', changes: null });
+    const usage = spawnSync(process.execPath, [script, 'issue', '--env', 'staging'], { encoding: 'utf8', shell: false });
+    assert.equal(usage.status, 2);
+    assert.match(usage.stderr, /usage: invites\.mjs issue/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
