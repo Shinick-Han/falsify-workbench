@@ -349,6 +349,9 @@ async function register(ctx) {
   const author = { id: crypto.randomUUID(), username: body.username.toLowerCase(), displayName: name };
   const passwordHash = await hashPassword(password);
   const at = now();
+  // Use one eligibility instant for the whole transaction. Separate JS timestamps could let
+  // the author insert pass immediately before expiry but make the claim fail after expiry.
+  const claimNow = Date.now();
   let results;
   try {
     results = await db.batch([
@@ -357,10 +360,10 @@ async function register(ctx) {
           `INSERT INTO authors (id, username, display_name, password_hash, created_at)
            SELECT ?3, ?4, ?5, ?6, ?7 WHERE EXISTS (SELECT 1 FROM invitations WHERE code_hash = ?1 AND ${INVITE_USABLE})`
         )
-        .bind(codeHash, Date.now(), author.id, author.username, author.displayName, passwordHash, at),
+        .bind(codeHash, claimNow, author.id, author.username, author.displayName, passwordHash, at),
       db
         .prepare(`UPDATE invitations SET claimed_by = ?3, claimed_at = ?4 WHERE code_hash = ?1 AND ${INVITE_USABLE} AND EXISTS (SELECT 1 FROM authors WHERE id = ?3)`)
-        .bind(codeHash, Date.now(), author.id, at),
+        .bind(codeHash, claimNow, author.id, at),
       db
         .prepare("INSERT INTO team_members (author_id, status, created_at) SELECT ?1, 'active', ?2 WHERE EXISTS (SELECT 1 FROM invitations WHERE claimed_by = ?1)")
         .bind(author.id, at),
