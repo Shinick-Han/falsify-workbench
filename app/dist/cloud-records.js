@@ -6,7 +6,7 @@
   const VERDICTS={uncertain:'판단 불가',supported:'지지',unsupported:'반박',mixed:'혼재'},STATUSES={ok:'완료',abstain:'유보',refusal:'거절',failed:'실패',cancelled:'취소',unknown:'상태 미상'};
   const ORIGINS={executed:'로컬 broker 실행(보고)',manual:'수동 응답',imported:'가져온 기록'};
   // Korean copy for the core's comparison warning codes; unknown codes fall back to a generic line.
-  const WARNINGS={client_reported:'모든 값은 작성자가 보고한 것이며 실행·모델·출처·검수자 이름은 검증되지 않았습니다.',invalid_record:'형식이 맞지 않는 기록은 뺐습니다.',review_run_missing:'대상 실행을 불러오지 않은 검수는 뺐습니다.',review_supersedes_other_owner:'다른 작성자의 검수를 대체한다는 표시는 무시했습니다.',incomparable_missing_condition:'사례 라벨이나 프로토콜이 없는 실행은 비교할 수 없어 뺐습니다.',harness_definition_missing:'공유된 Harness 정의가 보이지 않는 실행이 있습니다.'};
+  const WARNINGS={client_reported:'모든 값은 작성자가 보고한 것이며 실행·모델·출처·검수자 이름은 검증되지 않았습니다.',invalid_record:'형식이 맞지 않는 기록은 뺐습니다.',review_run_missing:'대상 실행을 불러오지 않은 검수는 뺐습니다.',review_supersedes_other_owner:'다른 작성자의 검수를 대체한다는 표시는 무시했습니다.',incomparable_missing_condition:'사례 라벨이나 프로토콜이 없는 실행은 비교할 수 없어 뺐습니다.',harness_definition_missing:'공유된 Harness 정의가 보이지 않는 실행이 있습니다.',review_condition_mismatch:'사례 라벨이나 프로토콜이 없거나 대상 실행과 다른 검수는 검수 수·평균에서 뺐습니다.'};
   const PROPS=new Set(['id','className','type','value','checked','disabled','hidden','textContent','name','htmlFor','open','rows','maxLength','tabIndex']);
   const clone=x=>JSON.parse(JSON.stringify(x)),short=h=>typeof h==='string'&&h?h.slice(0,12):'-',str=(v,n=300)=>v===null||v===undefined||v===''?'-':String(v).slice(0,n);
   function el(tag,props,...kids){const e=document.createElement(tag);for(const [k,v] of Object.entries(props||{})){if(k==='dataset')Object.assign(e.dataset,v);else if(PROPS.has(k))e[k]=v;else e.setAttribute(k,v);}e.append(...kids.filter(x=>x!==null&&x!==undefined&&x!==false));return e;}
@@ -33,8 +33,10 @@
     const cfg=deps.config??globalThis.FalsifyCloudConfig,storage=deps.storage??globalThis.localStorage,fetcher=deps.fetch??globalThis.fetch?.bind(globalThis),lab=deps.lab??globalThis.FalsifyLab;
     const base=parseBase(cfg?.apiBase),hostName=base?new URL(base).host:'';
     let session=null,expired=false,memoryOnly=false,lastUser='',scope='shared',kind='',shown=[],cursor=null,loaded=false,snapshot=null,confirming=null,previewed=null,reviewTarget=null,uploadSeq=0,reviewSeq=0,coreP=null,compared=false;
-    const seen=new Map(),busy={list:false,auth:false,upload:false,review:false,op:false},upload={body:null},review={body:null};
+    // localIds keeps only my runs' local IDs (absent from list projections) so a local review can link to a run uploaded elsewhere.
+    const seen=new Map(),localIds=new Map(),busy={list:false,auth:false,upload:false,review:false,op:false},upload={body:null},review={body:null};
     const core=()=>coreP??=(deps.core?Promise.resolve(deps.core):globalThis.FalsifyCloudCore?Promise.resolve(globalThis.FalsifyCloudCore):import(new URL('cloud-records-core.mjs',script?.src||location.href).href)).catch(()=>{coreP=null;throw local('공유 기록 검증 모듈을 불러오지 못했습니다. 새로고침 후 다시 시도하세요.');});
+    const ownedBy=r=>!!session&&r.owner.id===session.author.id;
 
     // The session token is the only thing stored, under its own key, and only for the configured server.
     function loadSession(){try{const s=JSON.parse(storage.getItem(SESSION_KEY)||'null');if(!s||s.apiBase!==base||typeof s.token!=='string'||!s.token||!s.author||typeof s.author.id!=='string')return null;if(!(Date.parse(s.expiresAt)>Date.now())){storage.removeItem(SESSION_KEY);expired=true;return null;}return s;}catch{return null;}}
@@ -42,7 +44,7 @@
       session={apiBase:base,token:data.token,author:{id:a.id,username:a.username,displayName:typeof a.displayName==='string'&&a.displayName?a.displayName:a.username},expiresAt:typeof data.expiresAt==='string'?data.expiresAt:''};expired=false;
       try{storage.setItem(SESSION_KEY,JSON.stringify(session));memoryOnly=false;}catch{memoryOnly=true;}}
     // Signing out also drops private server copies held in memory; shared reads stay on screen.
-    function forget(){session=null;try{storage.removeItem(SESSION_KEY);}catch{}for(const [id,r] of seen)if(r.visibility!=='shared')seen.delete(id);shown=shown.filter(r=>r.visibility==='shared');reviewTarget=null;reviewBox.hidden=true;}
+    function forget(){session=null;try{storage.removeItem(SESSION_KEY);}catch{}localIds.clear();for(const [id,r] of seen)if(r.visibility!=='shared')seen.delete(id);shown=shown.filter(r=>r.visibility==='shared');reviewTarget=null;reviewBox.hidden=true;}
     function onUnauthorized(){if(!session)return;forget();expired=true;account.open=true;renderAccount();refreshTabs();}
 
     async function api(method,path,{body,auth=false,ifMatch}={}){
@@ -83,11 +85,14 @@
     const upEvidence=el('input',{type:'checkbox',id:'cloud-upload-evidence'}),upConsent=el('input',{type:'checkbox',id:'cloud-upload-consent'}),upConsentText=el('span');
     const upCase=el('input',{type:'text',id:'cloud-upload-case',maxLength:160}),upProtocol=el('input',{type:'text',id:'cloud-upload-protocol',maxLength:80});
     const runFields=el('div',{id:'cloud-upload-run-fields'},el('div',{className:'ledger-fields'},el('label',{},'사례 라벨 · 160자 이내',upCase),el('label',{},'프로토콜 버전 · 비우면 응답 schema',upProtocol)),el('p',{className:'muted'},'사례 라벨과 프로토콜이 없는 실행은 같은 조건 비교에서 빠집니다.'));
+    // A local review records no protocol: it is sent only when the user confirms the linked run's, never inferred.
+    const upRvProtocol=el('input',{type:'checkbox',id:'cloud-upload-review-protocol',disabled:true}),upRvProtocolText=el('span',{},'대상 실행과 같은 프로토콜로 검수했음을 확인합니다'),upRvCond=el('p',{id:'cloud-upload-review-conditions',className:'muted'});
+    const reviewFields=el('div',{id:'cloud-upload-review-fields',hidden:true},upRvCond,el('label',{className:'check-row'},upRvProtocol,upRvProtocolText));
     const upPreview=el('pre',{id:'cloud-upload-preview',className:'cloud-preview',tabIndex:0,'aria-label':'보낼 내용'}),upStatus=el('p',{id:'cloud-upload-status',className:'ledger-status',role:'status'});
     const upSend=el('button',{type:'button',id:'cloud-upload-send',className:'button primary',disabled:true},'올리기'),uploadGate=el('p',{className:'muted'},'로그인한 뒤 내 로컬 기록을 골라 올릴 수 있습니다.');
     const uploadForm=el('div',{},el('p',{},'로컬 기록을 자동으로 올리지 않습니다. 하나를 고르고 보낼 내용을 확인한 뒤 동의해야 올라갑니다. 논문 추출문·모델 응답 같은 증거는 기본으로 빼며, 넣더라도 비공개 실행 기록에만 들어갑니다.'),
       button('로컬 기록 읽기','secondary',readSnapshot,{id:'cloud-upload-read'}),
-      el('div',{className:'ledger-fields'},el('label',{},'종류',upKind),el('label',{},'로컬 기록',upItem)),runFields,el('label',{},'공개 범위',upVis),
+      el('div',{className:'ledger-fields'},el('label',{},'종류',upKind),el('label',{},'로컬 기록',upItem)),runFields,reviewFields,el('label',{},'공개 범위',upVis),
       el('label',{className:'check-row'},upEvidence,el('span',{},'비공개 증거 포함',el('small',{},'실행 기록의 논문 추출문과 모델 응답입니다. 공유로 올릴 때는 넣을 수 없습니다.'))),
       el('h4',{},'보낼 내용'),upPreview,el('label',{className:'check-row'},upConsent,upConsentText),el('div',{className:'button-row'},upSend),upStatus);
     uploadBody.append(uploadGate,uploadForm);
@@ -95,11 +100,12 @@
 
     const rvVerdict=el('select',{id:'cloud-review-verdict'},el('option',{value:''},'판정 선택'),...Object.entries(VERDICTS).map(([k,v])=>el('option',{value:k},v)));rvVerdict.value='';
     const rvScore=el('select',{id:'cloud-review-score'},el('option',{value:''},'점수 없음'),...[1,2,3,4,5].map(n=>el('option',{value:String(n)},n+' / 5')));rvScore.value='';
-    const rvNote=el('textarea',{id:'cloud-review-note',rows:5,maxLength:3000}),rvCase=el('input',{type:'text',id:'cloud-review-case',maxLength:160}),rvVis=el('select',{id:'cloud-review-visibility'},el('option',{value:'private'},'비공개 · 나만 봄'),el('option',{value:'shared'},'공유 · 누구나 읽음'));rvVis.value='private';
+    const rvVisShared=el('option',{value:'shared'},'공유 · 누구나 읽음'),rvNote=el('textarea',{id:'cloud-review-note',rows:5,maxLength:3000}),rvCase=el('input',{type:'text',id:'cloud-review-case',maxLength:160}),rvVis=el('select',{id:'cloud-review-visibility'},el('option',{value:'private'},'비공개 · 나만 봄'),rvVisShared);rvVis.value='private';
     const rvTarget=el('dl',{id:'cloud-review-target'}),rvPreview=el('pre',{id:'cloud-review-preview',className:'cloud-preview',tabIndex:0,'aria-label':'보낼 검수'}),rvConsent=el('input',{type:'checkbox',id:'cloud-review-consent'}),rvConsentText=el('span');
     const rvSend=el('button',{type:'button',id:'cloud-review-send',className:'button primary',disabled:true},'검수 올리기'),rvStatus=el('p',{id:'cloud-review-status',className:'ledger-status',role:'status'});
-    reviewBox.append(el('h3',{id:'cloud-review-title'},'공유 실행 검수 쓰기'),el('p',{className:'muted'},'내가 직접 판단한 평가만 적습니다. 모델을 자동으로 부르지 않으며, 다른 사람의 검수를 고치지 않고 새 기록으로 더합니다. 판단 불가는 점수 없이 기록합니다.'),rvTarget,
-      el('div',{className:'ledger-fields'},el('label',{},'판정',rvVerdict),el('label',{},'점수',rvScore)),el('label',{},'판정 근거 · 3000자 이내',rvNote),el('label',{},'사례 라벨 · 대상 실행과 같으면 비교에 묶입니다',rvCase),el('label',{},'공개 범위',rvVis),el('h4',{},'보낼 내용'),rvPreview,
+    const rvTitle=el('h3',{id:'cloud-review-title'}),rvIntro=el('p',{id:'cloud-review-intro',className:'muted'}),rvCond=el('p',{id:'cloud-review-conditions',className:'muted'});
+    reviewBox.append(rvTitle,rvIntro,rvTarget,rvCond,
+      el('div',{className:'ledger-fields'},el('label',{},'판정',rvVerdict),el('label',{},'점수',rvScore)),el('label',{},'판정 근거 · 3000자 이내',rvNote),el('label',{},'사례 라벨 · 대상 실행에 있으면 그 값에 묶입니다',rvCase),el('label',{},'공개 범위',rvVis),el('h4',{},'보낼 내용'),rvPreview,
       el('label',{className:'check-row'},rvConsent,rvConsentText),el('div',{className:'button-row'},rvSend,button('닫기','secondary',closeReview,{id:'cloud-review-close'})),rvStatus);
     const rvSay=(message,error=false)=>{rvStatus.textContent=message;rvStatus.classList.toggle('error',error);};
 
@@ -128,16 +134,18 @@
       finally{busy.list=false;setBusy();renderList();}}
     function renderList(){list.replaceChildren(...(shown.length?shown.map(recordView):[el('p',{className:'muted'},loaded?'조건에 맞는 기록이 없습니다.':'아직 불러오지 않았습니다. 불러오기를 누르면 서버에서 공유 기록을 읽습니다. 로그인은 필요 없습니다.')]));more.hidden=!cursor;}
     function recordView(r){
-      const p=r.payload,mine=!!session&&r.owner.id===session.author.id,rows=[['작성자',str(r.owner.displayName,80)+(r.owner.username?' (@'+str(r.owner.username,40)+')':'')+' · 자기 보고 이름'],['서버 기록',str(r.createdAt,40)+' · 버전 '+r.revision]];let title;
+      const p=r.payload,mine=ownedBy(r),rows=[['작성자',str(r.owner.displayName,80)+(r.owner.username?' (@'+str(r.owner.username,40)+')':'')+' · 자기 보고 이름'],['서버 기록',str(r.createdAt,40)+' · 버전 '+r.revision]];let title;
       if(r.kind==='harness'){const c=p.config&&typeof p.config==='object'?p.config:{};title=str(c.name,120)+' · '+str(c.role,10).toUpperCase()+' · v'+str(c.version,40);rows.push(['내용 해시',short(p.hash)]);if(p.parentHash)rows.push(['이전 버전',short(p.parentHash)]);}
       else if(r.kind==='run'){title=str(p.role,10).toUpperCase()+' 실행 · '+str(p.model,120);rows.push(['결과',(STATUSES[p.status]||str(p.status,20))+' · 호출 '+str(p.calls)+' / 예산 '+str(p.maxCalls)],['조건','입력 '+short(p.sourceHash)+' · 난이도 '+str(p.level)+' · 프로토콜 '+str(p.protocolVersion,80)+' · 사례 '+str(p.caseLabel,160)],['Harness',short(p.harnessHash)],['출처(보고)',str(p.provenance,60)],['실행 시각(보고)',str(p.createdAt,40)]);if(p.evidence)rows.push(['증거','비공개 원문 포함 · 작성자만 봄']);}
       else{title='검수 · '+(VERDICTS[p.verdict]||str(p.verdict,20))+' · '+(p.score===null||p.score===undefined?'점수 없음':'점수 '+str(p.score)+' / 5');rows.push(['대상 실행',short(p.runId)],['조건','사례 '+str(p.caseLabel,160)+' · 프로토콜 '+str(p.protocolVersion,80)]);if(p.supersedes)rows.push(['대체한 검수',short(p.supersedes)]);}
       const dl=el('dl');for(const [k,v] of rows)dl.append(el('dt',{},k),el('dd',{},v));
-      const a=el('article',{className:'cloud-record',dataset:{recordId:r.id}},el('div',{className:'cloud-chips'},...[KINDS[r.kind],r.visibility==='shared'?'공유':'비공개',mine?'내 기록':'다른 작성자','작성자 보고 · 미검증'].map(t=>el('span',{className:'status-label'},t))),el('h4',{},title),dl);
+      const selfReview=r.kind==='review'&&seen.get(p.runId)?.owner.id===r.owner.id;
+      const a=el('article',{className:'cloud-record',dataset:{recordId:r.id}},el('div',{className:'cloud-chips'},...[KINDS[r.kind],r.visibility==='shared'?'공유':'비공개',mine?'내 기록':'다른 작성자',selfReview?'자체 평가 · 독립 검수 아님':'','작성자 보고 · 미검증'].filter(Boolean).map(t=>el('span',{className:'status-label'},t))),el('h4',{},title),dl);
       if(r.kind==='review'&&p.note)a.append(el('p',{className:'cloud-note'},str(p.note,3000)));
-      const actions=[];
+      if(mine&&r.kind==='run')a.append(el('p',{className:'muted'},'기록 JSON 다운로드는 내 로그인으로 전체 기록을 받습니다. 비공개 증거(논문 추출문·모델 응답)와 로컬 ID가 들어 있을 수 있으니 받은 파일을 공유하지 마세요.'));
+      const actions=[button('기록 JSON 다운로드','secondary',()=>download(r),{disabled:busy.op,dataset:{action:'download'}})];
       if(r.kind==='harness'){actions.push(button('편집기로 미리보기','secondary',()=>previewHarness(r),{disabled:busy.op,dataset:{action:'preview'}}));if(previewed===r.id)actions.push(el('button',{type:'button',className:'text-button',dataset:{view:'agents',action:'open-agents'}},'Harness 화면에서 보기'));}
-      if(r.kind==='run'&&!mine&&session&&r.visibility==='shared')actions.push(button('검수 쓰기','secondary',()=>openReview(r),{dataset:{action:'review'}}));
+      if(r.kind==='run'&&session&&(mine||r.visibility==='shared'))actions.push(button(mine?'자체 평가 쓰기':'검수 쓰기','secondary',()=>openReview(r),{dataset:{action:'review'}}));
       if(mine&&confirming?.id===r.id){const act=confirming.action;
         a.append(el('p',{className:'cloud-confirm'},act==='delete'?'서버에서 이 기록을 지웁니다. 로컬 기록은 그대로입니다.':act==='shared'?'공유하면 로그인하지 않은 사람도 읽습니다. 실행의 비공개 증거와 로컬 ID는 공개본에서 빠집니다.':'비공개로 바꿔도 이미 읽어 간 사본은 회수할 수 없습니다.'));
         actions.push(button(act==='delete'?'삭제 확인':act==='shared'?'공유 확인':'비공개 전환 확인','primary',()=>act==='delete'?remove(r):setVisibility(r,act),{disabled:busy.op,dataset:{action:'confirm'}}),button('취소','secondary',()=>{confirming=null;renderList();},{dataset:{action:'cancel'}}));}
@@ -151,6 +159,17 @@
     function setVisibility(r,visibility){return mutate(async()=>{const data=await api('PATCH',recordPath(r),{auth:true,body:{expectedRevision:r.revision,visibility}});const rec=data.record;
       if(!validRecord(rec)||rec.id!==r.id)throw local('서버 응답 형식이 맞지 않습니다. 다시 불러와 확인하세요.');seen.set(rec.id,rec);shown=shown.flatMap(x=>x.id!==rec.id?[x]:scope==='shared'&&rec.visibility!=='shared'?[]:[rec]);},visibility==='shared'?'공유했습니다. 이제 누구나 읽을 수 있습니다.':'비공개로 바꿨습니다.');}
     function remove(r){return mutate(async()=>{await api('DELETE',recordPath(r),{auth:true,ifMatch:r.revision});seen.delete(r.id);shown=shown.filter(x=>x.id!==r.id);},'서버에서 삭제했습니다. 로컬 기록은 그대로입니다.');}
+    // One record per explicit click: the owner's request is authenticated (full private payload), anyone else's is anonymous (public projection).
+    // The body is saved only if it is the record that was clicked; it is never rendered, kept in the list or sent anywhere else.
+    async function download(r){if(busy.op)return;const owner=ownedBy(r);busy.op=true;renderList();say('기록을 받는 중…');
+      try{const rec=(await api('GET',recordPath(r),{auth:owner})).record;
+        if(!validRecord(rec)||rec.id!==r.id||rec.kind!==r.kind||rec.owner.id!==r.owner.id)throw local('받은 기록이 고른 기록과 맞지 않아 저장하지 않았습니다.');
+        if(owner&&rec.kind==='run'&&typeof rec.payload.localId==='string')localIds.set(rec.id,rec.payload.localId);
+        save('falsify-'+rec.kind+'-'+rec.id.replace(/[^A-Za-z0-9_-]/g,'_')+'.json',rec);
+        say(rec.kind==='run'&&rec.payload.evidence?'기록 JSON을 저장했습니다. 파일에 비공개 증거(논문 추출문·모델 응답)가 들어 있으니 공유하지 마세요.':owner?'내 기록 전체를 JSON으로 저장했습니다. 로컬 ID 같은 비공개 필드가 들어 있을 수 있습니다.':'공개본 기록 JSON을 저장했습니다. 작성자가 보고한 내용이며 검증되지 않았습니다.');}
+      catch(e){say(e?.code==='local'||e?.code==='http'||e?.code==='timeout'||e?.code==='network'||e?.code==='response'?explain(e,'read'):'기록 JSON을 저장하지 못했습니다.',true);}
+      finally{busy.op=false;renderList();}}
+    function save(name,data){const href=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)+'\n'],{type:'application/json'}));el('a',{href,download:name}).click();setTimeout(()=>URL.revokeObjectURL(href),60000);}
     // Preview only: the ledger hook loads the editor without registering, selecting or executing anything.
     async function previewHarness(r){if(busy.op)return;busy.op=true;
       try{if(typeof lab?.previewSharedHarness!=='function')throw local('이 작업대는 공유 Harness 미리보기를 지원하지 않습니다.');const hash=await lab.previewSharedHarness(clone(r.payload.config),typeof r.payload.hash==='string'?r.payload.hash:undefined);previewed=r.id;
@@ -189,28 +208,32 @@
       catch(e){upSay(e?.code==='local'?e.message:'로컬 기록을 읽지 못했습니다: '+str(e?.message,200),true);}}
     function itemLabel(k,x){if(k==='harness')return str(x.config?.name,80)+' · '+str(x.config?.role,10).toUpperCase()+' · v'+str(x.config?.version,40)+' · '+short(x.hash);
       if(k==='run')return str(x.role,10).toUpperCase()+' · '+str(x.model,60)+' · '+str(x.createdAt,16)+' · '+str(x.provenance,40);return (VERDICTS[x.verdict]||str(x.verdict,20))+' · '+str(x.caseLabel,60)+' · '+str(x.createdAt,16);}
-    function fillItems(){const k=upKind.value,items=snapshot?.[COLLECTION[k]]||[];
+    function fillItems(){const k=upKind.value,items=snapshot?.[COLLECTION[k]]||[];upRvProtocol.checked=false;
       upItem.replaceChildren(el('option',{value:''},!snapshot?'먼저 로컬 기록 읽기를 누르세요':items.length?'기록 선택':'이 종류의 로컬 기록 없음'),...items.map((x,i)=>[x,i]).reverse().map(([x,i])=>el('option',{value:String(i)},itemLabel(k,x))));upItem.value='';rebuildUpload();}
     async function validate(c,k,payload){const v=await c.validatePayload(k,payload);if(v&&typeof v==='object'&&(v.ok===false||Array.isArray(v.errors)&&v.errors.length))throw local('올리기 전 검증 실패: '+(Array.isArray(v.errors)?v.errors.slice(0,5).map(x=>str(x,120)).join(', '):'형식 오류'));}
     // Every change rebuilds the exact body and clears consent, so consent always refers to the preview on screen.
     async function rebuildUpload(){const seq=++uploadSeq,k=upKind.value,vis=upVis.value==='shared'?'shared':'private';upload.body=null;upConsent.checked=false;upPreview.textContent='';
-      runFields.hidden=k!=='run';upEvidence.disabled=k!=='run'||vis!=='private';if(upEvidence.disabled)upEvidence.checked=false;
+      runFields.hidden=k!=='run';reviewFields.hidden=k!=='review';upRvCond.textContent='';upEvidence.disabled=k!=='run'||vis!=='private';if(upEvidence.disabled)upEvidence.checked=false;
       upConsentText.textContent='위 내용 그대로 '+hostName+'에 '+(vis==='shared'?'누구나 읽을 수 있는 공유':'나만 보는 비공개')+' 기록으로 올리는 데 동의합니다.';refreshSend();
       const item=upItem.value===''?null:snapshot?.[COLLECTION[k]]?.[Number(upItem.value)];if(!item)return;
       try{const c=await core();let payload;
         if(k==='harness')payload={config:clone(item.config),hash:item.hash};
         else if(k==='run'){const caseLabel=upCase.value.trim(),protocolVersion=upProtocol.value.trim();
           payload=clone(await c.runFromLocal(clone(item),{includeEvidence:upEvidence.checked,...(caseLabel?{caseLabel}:{}),...(protocolVersion?{protocolVersion}:{})}));if(!upEvidence.checked)delete payload.evidence;else if(!payload.evidence)throw local('이 실행 기록에는 포함할 증거가 없습니다. 체크를 해제하세요.');}
-        else{const cloudRun=[...seen.values()].filter(r=>r.kind==='run'&&!!session&&r.owner.id===session.author.id&&r.payload.localId===item.runId).sort((a,b)=>String(a.createdAt).localeCompare(String(b.createdAt))).at(-1);
-          if(!cloudRun)throw local('이 검수가 가리키는 실행 기록을 먼저 올리고 내 기록을 불러오세요.');const prior=myLatestReview(cloudRun.id),options={};
-          if(typeof cloudRun.payload.protocolVersion==='string')options.protocolVersion=cloudRun.payload.protocolVersion;if(prior)options.supersedes=prior.id;payload=clone(await c.reviewFromLocal(clone(item),cloudRun.id,options));}
+        else{const cloudRun=[...seen.values()].filter(r=>r.kind==='run'&&ownedBy(r)&&(r.payload.localId??localIds.get(r.id))===item.runId).sort((a,b)=>String(a.createdAt).localeCompare(String(b.createdAt))).at(-1);
+          if(!cloudRun)throw local('이 검수가 가리키는 실행 기록을 먼저 올리세요. 다른 곳에서 올렸다면 내 기록에서 그 실행의 "기록 JSON 다운로드"로 전체 기록을 받은 뒤 다시 고르세요.');
+          const rp=cloudRun.payload,protocol=typeof rp.protocolVersion==='string'&&rp.protocolVersion?rp.protocolVersion:null,prior=myLatestReview(cloudRun.id),options={};if(seq!==uploadSeq)return;
+          upRvProtocol.disabled=!protocol;if(!protocol)upRvProtocol.checked=false;upRvProtocolText.textContent=protocol?'이 검수를 대상 실행과 같은 프로토콜('+str(protocol,80)+')로 했음을 확인합니다':'대상 실행에 프로토콜이 없어 확인할 수 없습니다';
+          if(upRvProtocol.checked)options.protocolVersion=protocol;if(prior)options.supersedes=prior.id;
+          upRvCond.textContent='대상 실행: 사례 '+str(rp.caseLabel,160)+' · 프로토콜 '+str(protocol,80)+'. 이 검수: 사례 '+str(item.caseLabel,160)+' · 프로토콜 '+(options.protocolVersion?str(options.protocolVersion,80):'미상')+'.'+(options.protocolVersion&&item.caseLabel===rp.caseLabel?'':' 사례나 프로토콜이 없거나 다르면 같은 조건 비교의 검수 수·평균에서 빠집니다.');
+          payload=clone(await c.reviewFromLocal(clone(item),cloudRun.id,options));}
         await validate(c,k,payload);const body={kind:k,visibility:vis,payload};
         if(new TextEncoder().encode(JSON.stringify(body)).length>MAX_BODY)throw local('보낼 내용이 256KiB를 넘습니다. 증거를 빼거나 다른 기록을 고르세요.');
         if(seq!==uploadSeq)return;upload.body=body;upPreview.textContent=JSON.stringify(body,null,2);upSay('');}
       catch(e){if(seq===uploadSeq)upSay(e?.code==='local'?e.message:'올리기 전 검증 실패: '+str(e?.message,200),true);}
       finally{if(seq===uploadSeq)refreshSend();}}
     function refreshSend(){uploadGate.hidden=!!session;uploadForm.hidden=!session;upConsent.disabled=!upload.body||busy.upload;upSend.disabled=!session||busy.upload||!upload.body||!upConsent.checked;}
-    function adoptRecord(rec){seen.set(rec.id,rec);if((scope==='mine'||rec.visibility==='shared')&&(!kind||kind===rec.kind))shown=[rec,...shown.filter(x=>x.id!==rec.id)];renderList();}
+    function adoptRecord(rec){seen.set(rec.id,rec);if(ownedBy(rec)&&rec.kind==='run'&&typeof rec.payload.localId==='string')localIds.set(rec.id,rec.payload.localId);if((scope==='mine'||rec.visibility==='shared')&&(!kind||kind===rec.kind))shown=[rec,...shown.filter(x=>x.id!==rec.id)];renderList();}
     // Writes are sent once; a failure or timeout keeps the form and asks the user to check before sending again.
     async function sendUpload(){const body=upload.body;if(!body||!upConsent.checked||busy.upload||!session)return;
       if(body.visibility!=='private'&&'evidence' in body.payload){upSay('증거는 공유 기록에 넣을 수 없습니다.',true);return;}
@@ -220,16 +243,21 @@
       catch(e){upSay(explain(e,'write')+' 고른 기록과 보낼 내용은 그대로 둡니다.',true);}
       finally{busy.upload=false;refreshSend();}}
 
-    function openReview(r){reviewTarget=r;rvVerdict.value='';rvScore.value='';rvNote.value='';rvCase.value=typeof r.payload.caseLabel==='string'?r.payload.caseLabel:'';rvVis.value='private';rvSay('');
-      const p=r.payload,prior=myLatestReview(r.id);rvTarget.replaceChildren(el('dt',{},'대상 실행'),el('dd',{},str(p.role,10).toUpperCase()+' · '+str(p.model,120)+' · '+(STATUSES[p.status]||str(p.status,20))),el('dt',{},'작성자'),el('dd',{},str(r.owner.displayName,80)+' · 자기 보고 이름'),el('dt',{},'조건'),el('dd',{},'사례 '+str(p.caseLabel,160)+' · 프로토콜 '+str(p.protocolVersion,80)),
+    // The review is bound to the run's case label and protocol; an author may judge their own run, labelled as self-assessment, never as independent.
+    function openReview(r){reviewTarget=r;const p=r.payload,self=ownedBy(r),prior=myLatestReview(r.id),hasCase=typeof p.caseLabel==='string'&&!!p.caseLabel,hasProtocol=typeof p.protocolVersion==='string'&&!!p.protocolVersion;
+      rvVerdict.value='';rvScore.value='';rvNote.value='';rvCase.value=hasCase?p.caseLabel:'';rvCase.disabled=hasCase;rvVisShared.disabled=r.visibility!=='shared';rvVis.value='private';rvSay('');
+      rvTitle.textContent=self?'내 실행 자체 평가 쓰기':'공유 실행 검수 쓰기';
+      rvIntro.textContent=(self?'내가 올린 실행을 내가 판단한 자체 평가입니다. 독립 검수가 아니며 비교표의 검수 수에도 작성자 본인 판단으로 더해집니다. ':'내가 직접 판단한 평가만 적습니다. ')+'모델을 자동으로 부르지 않으며, 다른 기록을 고치지 않고 새 기록으로 더합니다. 판단 불가는 점수 없이 기록합니다.';
+      rvCond.textContent=hasCase&&hasProtocol?'이 검수는 대상 실행의 사례 라벨과 프로토콜에 묶여 같은 조건 비교에 들어갑니다.':'대상 실행에 '+(hasCase?'프로토콜':hasProtocol?'사례 라벨':'사례 라벨과 프로토콜')+'이 없어 이 검수는 같은 조건 비교의 검수 수·평균에서 빠집니다.'+(hasCase?'':' 사례 라벨은 직접 적어야 올릴 수 있습니다.');
+      rvTarget.replaceChildren(el('dt',{},'대상 실행'),el('dd',{},str(p.role,10).toUpperCase()+' · '+str(p.model,120)+' · '+(STATUSES[p.status]||str(p.status,20))),el('dt',{},'작성자'),el('dd',{},self?'나 · 자체 평가':str(r.owner.displayName,80)+' · 자기 보고 이름'),el('dt',{},'조건'),el('dd',{},'사례 '+str(p.caseLabel,160)+' · 프로토콜 '+str(p.protocolVersion,80)),
         ...(prior?[el('dt',{},'내 이전 검수'),el('dd',{},short(prior.id)+'를 대체하는 새 기록으로 더합니다. 이전 검수는 지우지 않습니다.')]:[]));
       reviewBox.hidden=false;rebuildReview();rvVerdict.focus?.();}
     function closeReview(){reviewTarget=null;review.body=null;reviewBox.hidden=true;}
     function myLatestReview(runId){return [...seen.values()].filter(x=>x.kind==='review'&&!!session&&x.owner.id===session.author.id&&x.payload.runId===runId).sort((a,b)=>String(a.createdAt).localeCompare(String(b.createdAt))).at(-1)||null;}
-    async function rebuildReview(){const seq=++reviewSeq,t=reviewTarget,verdict=rvVerdict.value,vis=rvVis.value==='shared'?'shared':'private';review.body=null;rvConsent.checked=false;rvPreview.textContent='';
+    async function rebuildReview(){const seq=++reviewSeq,t=reviewTarget,verdict=rvVerdict.value,vis=rvVis.value==='shared'&&!rvVisShared.disabled?'shared':'private';review.body=null;rvConsent.checked=false;rvPreview.textContent='';
       rvScore.disabled=verdict==='uncertain';if(rvScore.disabled)rvScore.value='';
       rvConsentText.textContent='위 검수 그대로 '+hostName+'에 '+(vis==='shared'?'누구나 읽을 수 있는 공유':'나만 보는 비공개')+' 기록으로 올리는 데 동의합니다.';refreshReview();
-      if(!t||!Object.hasOwn(VERDICTS,verdict))return;const note=rvNote.value.trim(),caseLabel=rvCase.value.trim();if(!note||!caseLabel){rvSay('판정 근거와 사례 라벨을 적으면 보낼 내용이 만들어집니다.');return;}
+      if(!t||!Object.hasOwn(VERDICTS,verdict))return;const note=rvNote.value.trim(),caseLabel=rvCase.disabled?t.payload.caseLabel:rvCase.value.trim();if(!note||!caseLabel){rvSay('판정 근거와 사례 라벨을 적으면 보낼 내용이 만들어집니다.');return;}
       const p=t.payload,payload={runId:t.id,verdict,score:verdict==='uncertain'||!rvScore.value?null:Number(rvScore.value),note,caseLabel};
       if(typeof p.protocolVersion==='string')payload.protocolVersion=p.protocolVersion;const prior=myLatestReview(t.id);if(prior)payload.supersedes=prior.id;
       try{const c=await core();await validate(c,'review',payload);if(seq!==reviewSeq)return;review.body={kind:'review',visibility:vis,payload};rvPreview.textContent=JSON.stringify(review.body,null,2);rvSay('');}
@@ -258,7 +286,7 @@
     tabShared.addEventListener('click',()=>choose('shared'));tabMine.addEventListener('click',()=>choose('mine'));
     kindSelect.addEventListener('change',()=>{kind=Object.hasOwn(KINDS,kindSelect.value)?kindSelect.value:'';shown=[];cursor=null;loaded=false;load(false);});
     refresh.addEventListener('click',()=>load(false));more.addEventListener('click',()=>load(true));
-    upKind.addEventListener('change',fillItems);for(const e of [upItem,upVis,upEvidence])e.addEventListener('change',rebuildUpload);for(const e of [upCase,upProtocol])e.addEventListener('input',rebuildUpload);upConsent.addEventListener('change',refreshSend);upSend.addEventListener('click',sendUpload);
+    upKind.addEventListener('change',fillItems);upItem.addEventListener('change',()=>{upRvProtocol.checked=false;rebuildUpload();});for(const e of [upVis,upEvidence,upRvProtocol])e.addEventListener('change',rebuildUpload);for(const e of [upCase,upProtocol])e.addEventListener('input',rebuildUpload);upConsent.addEventListener('change',refreshSend);upSend.addEventListener('click',sendUpload);
     for(const e of [rvVerdict,rvScore,rvVis])e.addEventListener('change',rebuildReview);for(const e of [rvNote,rvCase])e.addEventListener('input',rebuildReview);rvConsent.addEventListener('change',refreshReview);rvSend.addEventListener('click',sendReview);
     session=loadSession();connection.textContent='서버 '+hostName+' · 아직 불러오지 않음';
     renderAccount();if(expired)account.open=true;renderList();fillItems();setBusy();
