@@ -70,10 +70,13 @@ test('unconfigured or non-https server stays off and never touches the network',
 
 test('signed out, shared records request nothing: refresh and kind open sign-in with fixed copy',async()=>{
   const t=setup({routes:sharedRoute});await t.ready;await flush();assert.equal(t.calls.length,0,'no automatic read');assert.equal(t.$('cloud-tab-mine').disabled,false,'mine stays reachable and explains sign-in');
-  assert.match(t.$('cloud-list').textContent,/초대받은 팀 멤버만/);assert.match(t.$('cloud-account-summary').textContent,/공유 기록을 보려면 필요/);
+  assert.equal(t.$('cloud-list').textContent,'로그인 후 불러오면 이곳에 팀 공유 기록이 표시됩니다.','signed-out list stays neutral');assert.match(t.$('cloud-account-summary').textContent,/공유 기록을 보려면 필요/);
+  for(const [id,hint,rule] of [['cloud-username','cloud-username-hint',/영문·숫자·_·- 3–32자/],['cloud-password','cloud-password-hint',/12–128자/]]){assert.equal(t.$(id).getAttribute('aria-describedby'),hint);assert.match(t.$(hint).textContent,rule);}
+  const body=t.$('cloud-account-body').textContent;assert.equal(body.split('3–32자').length,2,'username rule only in its hint');assert.equal(body.split('12–128자').length,2,'password rule only in its hint');
   t.press(t.$('cloud-refresh'));await flush();
   assert.equal(t.calls.length,0,'no shared GET without sign-in');assert.equal(t.$('cloud-account').open,true);assert.equal(t.doc.activeElement,t.$('cloud-username'),'sign-in form takes focus');
   assert.equal(t.$('cloud-status').textContent,'공유 기록은 초대받은 팀 멤버만 볼 수 있습니다. 로그인한 뒤 불러오세요.');assert.ok(t.$('cloud-status').classList.contains('error'));
+  assert.ok(!t.$('cloud-list').textContent.includes('초대받은 팀 멤버만'),'the gating sentence is said once, in the status line');
   t.$('cloud-kind').change('run');t.press(t.$('cloud-tab-shared'));await flush();assert.equal(t.calls.length,0,'kind change and the shared tab request nothing either');assert.equal(t.records().length,0);
   assert.ok(!PUBLIC_READ.test(t.$('cloud-records').textContent),'no copy claims anonymous or internet-public reads');});
 
@@ -101,7 +104,7 @@ test('expired or rejected session asks to sign in again, keeps the local ledger 
   const t=setup({store:new Map([[KEY,meSession()]]),routes:(m,p)=>sharedRoute(m,p)||(p.startsWith('/v1/records?scope=mine')?{status:401,body:'<html><body>proxy says hi</body></html>'}:null)});await t.ready;
   t.$('cloud-refresh').click();await until(()=>t.records().length===2,'shared loaded');t.$('cloud-tab-mine').click();await until(()=>!t.store.has(KEY),'token dropped on 401');await flush();
   assert.match(t.$('cloud-account-body').textContent,/세션이 끝났습니다/);assert.ok(!t.body.textContent.includes('proxy says hi'),'no raw server body');assert.equal(t.$('cloud-tab-shared').getAttribute('aria-pressed'),'true');
-  assert.equal(t.records().length,0,'loaded team records are purged');assert.match(t.$('cloud-list').textContent,/초대받은 팀 멤버만/);t.$('cloud-refresh').click();await flush();assert.equal(t.calls.length,2,'no anonymous fallback read');assert.ok(t.lab.unchanged(),'local ledger untouched');});
+  assert.equal(t.records().length,0,'loaded team records are purged');assert.match(t.$('cloud-list').textContent,/로그인 후 불러오면/);t.$('cloud-refresh').click();await flush();assert.equal(t.calls.length,2,'no anonymous fallback read');assert.ok(t.lab.unchanged(),'local ledger untouched');});
 
 test('failed reads and writes keep what is on screen and are never retried',async()=>{
   let page=0;const t=setup({store:new Map([[KEY,meSession()]]),routes:(m,p)=>{if(m==='GET'&&p.startsWith('/v1/records?scope=shared')){page++;return page===1?{status:200,body:{records:sharedRecords,nextCursor:'c1'}}:{status:502,body:'<html>Bad gateway from proxy</html>'};}if(m==='POST'&&p==='/v1/records')return 'hang';}});await t.ready;

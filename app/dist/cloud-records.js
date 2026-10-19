@@ -149,7 +149,8 @@
         if(compared)compare();}
       catch(e){say(explain(e,'read')+(shown.length&&live(at)?' 이미 불러온 기록은 그대로 둡니다.':''),true);}
       finally{busy.list=false;setBusy();renderList();}}
-    function renderList(){controls.clear();list.replaceChildren(...(shown.length?shown.map(recordView):[el('p',{className:'muted'},!session?'공유 기록은 초대받은 팀 멤버만 볼 수 있습니다. 로그인하면 불러오기로 서버에서 읽습니다.':loaded?'조건에 맞는 기록이 없습니다.':'아직 불러오지 않았습니다. 불러오기를 누르면 서버에서 팀 공유 기록을 읽습니다.')]));more.hidden=!cursor;}
+    // Signed out, the gating sentence lives in the status line and the account form; the empty list stays neutral so it is never said twice.
+    function renderList(){controls.clear();list.replaceChildren(...(shown.length?shown.map(recordView):[el('p',{className:'muted'},!session?'로그인 후 불러오면 이곳에 팀 공유 기록이 표시됩니다.':loaded?'조건에 맞는 기록이 없습니다.':'아직 불러오지 않았습니다. 불러오기를 누르면 서버에서 팀 공유 기록을 읽습니다.')]));more.hidden=!cursor;}
     function recordView(r){
       const p=r.payload,mine=ownedBy(r),rows=[['작성자',str(r.owner.displayName,80)+(r.owner.username?' (@'+str(r.owner.username,40)+')':'')+' · 자기 보고 이름'],['서버 기록',[when(r.createdAt),' · 버전 '+r.revision]]];let title;
       if(r.kind==='harness'){const c=p.config&&typeof p.config==='object'?p.config:{};title=str(c.name,120)+' · '+str(c.role,10).toUpperCase()+' · v'+str(c.version,40);rows.push(['내용 해시',short(p.hash)]);if(p.parentHash)rows.push(['이전 버전',short(p.parentHash)]);}
@@ -208,18 +209,18 @@
           el('p',{className:'muted'},memoryOnly?'브라우저 저장소를 쓸 수 없어 이 탭을 닫으면 로그아웃됩니다.':'세션 토큰은 이 브라우저 localStorage의 별도 항목('+SESSION_KEY+')에만 있고 '+hostName+'로만 보냅니다. 비밀번호는 저장하지 않습니다.'),
           el('div',{className:'button-row'},button('로그아웃','secondary',logout,{id:'cloud-logout',disabled:busy.auth}),button('이 브라우저에서만 지우기','text',()=>{forget();say('이 브라우저의 세션 토큰과 불러온 서버 기록을 지웠습니다. 서버 세션은 만료될 때까지 남습니다.');renderAccount();setBusy();renderList();status.focus?.();},{id:'cloud-forget',disabled:busy.auth})));return;}
       accountSummary.textContent=expired?'다시 로그인 필요':denied?'팀 멤버 확인 필요':'로그인 · 초대 가입 (공유 기록을 보려면 필요)';
-      const user=el('input',{id:'cloud-username',type:'text',autocomplete:'username',maxLength:32,spellcheck:'false',autocapitalize:'none'}),pass=el('input',{id:'cloud-password',type:'password',autocomplete:'current-password',maxLength:128}),display=el('input',{id:'cloud-display-name',type:'text',autocomplete:'nickname',maxLength:80});
+      const user=el('input',{id:'cloud-username',type:'text',autocomplete:'username',maxLength:32,spellcheck:'false',autocapitalize:'none','aria-describedby':'cloud-username-hint'}),pass=el('input',{id:'cloud-password',type:'password',autocomplete:'current-password',maxLength:128,'aria-describedby':'cloud-password-hint'}),display=el('input',{id:'cloud-display-name',type:'text',autocomplete:'nickname',maxLength:80});
       // The invitation is masked, never autofilled or saved by the browser, and has no name, so no form submission can carry it.
       const invite=el('input',{id:'cloud-invite',type:'password',autocomplete:'off',maxLength:200,spellcheck:'false',autocapitalize:'none','aria-describedby':'cloud-invite-note'});
       user.value=lastUser;userField=user;fields={user,pass,invite};
-      const form=el('form',{id:'cloud-auth-form',className:'cloud-auth',novalidate:''},el('label',{},'사용자 이름',user),el('label',{},'비밀번호',pass),
+      const form=el('form',{id:'cloud-auth-form',className:'cloud-auth',novalidate:''},el('label',{},'사용자 이름',el('small',{id:'cloud-username-hint'},'영문·숫자·_·- 3–32자'),user),el('label',{},'비밀번호',el('small',{id:'cloud-password-hint'},'12–128자 · 저장하지 않습니다'),pass),
         el('label',{className:'cloud-invite'},'초대 코드 · 가입할 때만',el('small',{id:'cloud-invite-note'},'운영자에게 받은 fsi_ 코드 · 로그인에는 보내지 않고 저장하지 않습니다'),invite),
         el('details',{className:'cloud-display'},el('summary',{},'가입할 때 표시 이름 (선택)'),el('label',{},'표시 이름 · 비우면 사용자 이름',display)),
         el('div',{className:'button-row'},el('button',{type:'submit',id:'cloud-login',className:'button primary'},'로그인'),button('가입','secondary',()=>authenticate('register',user,pass,display,invite),{id:'cloud-register'})));
       form.addEventListener('submit',e=>{e.preventDefault();authenticate('login',user,pass,display,invite);});
       if(expired)accountBody.append(el('p',{className:'error',role:'alert'},'세션이 끝났습니다. 다시 로그인하세요. 로컬 기록은 그대로이며, 불러온 서버 기록은 화면에서 지웠습니다.'));
       else if(denied)accountBody.append(el('p',{className:'error',role:'alert'},MEMBER_DENIED));
-      accountBody.append(el('p',{className:'muted'},'공유 기록은 초대받은 팀 멤버만 읽습니다. 가입에는 운영자에게 받은 한 번 쓰는 초대 코드가 필요하고, 로그인은 사용자 이름과 비밀번호만 보냅니다. 초대 코드는 저장하지 않으며 가입을 시도하면 결과와 관계없이 입력란에서 지웁니다. 사용자 이름은 영문·숫자·_·- 3–32자, 비밀번호는 12–128자입니다. 이메일·실명 확인과 비밀번호 재설정은 없습니다. 로그인하면 7일짜리 세션 토큰만 이 브라우저 localStorage의 별도 항목에 저장하고 비밀번호는 저장하지 않습니다. 공용 PC에서는 쓰고 나서 로그아웃하세요.'),form);}
+      accountBody.append(el('p',{className:'muted'},'공유 기록은 초대받은 팀 멤버만 읽습니다. 처음에는 운영자에게 받은 한 번 쓰는 초대 코드로 가입하고, 그 뒤에는 사용자 이름과 비밀번호로 로그인합니다. 초대 코드는 가입을 시도하면 결과와 관계없이 지웁니다. 로그인하면 7일짜리 세션 토큰만 이 브라우저에 남기고, 이메일·실명 확인과 비밀번호 재설정은 없습니다. 공용 PC에서는 쓰고 나서 로그아웃하세요.'),form);}
     // The password and invitation leave their fields before anything else happens, whatever the outcome; only the register body carries the code.
     // Focus lost to the re-render goes to the field to fix, or to the status line once signed in.
     async function authenticate(mode,user,pass,display,invite){if(busy.auth)return;const username=user.value.trim(),password=pass.value,displayName=display.value.trim(),inviteCode=invite.value.trim();pass.value='';invite.value='';lastUser=username;let retry='pass';
