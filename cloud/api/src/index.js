@@ -82,6 +82,7 @@ function settings(env) {
     registersPerIpHour: positiveInt(env.REGISTERS_PER_IP_HOUR, 10),
     registersPerHour: positiveInt(env.REGISTERS_PER_HOUR, 300),
     loginsPerIpHour: positiveInt(env.LOGINS_PER_IP_HOUR, 60),
+    loginsPerHour: positiveInt(env.LOGINS_PER_HOUR, 1000),
     loginFailuresPerUsernameHour: positiveInt(env.LOGIN_FAILURES_PER_USERNAME_HOUR, 10),
     writesPerAuthorHour: positiveInt(env.WRITES_PER_AUTHOR_HOUR, 240),
     maxRecordsPerAuthor: positiveInt(env.MAX_RECORDS_PER_AUTHOR, 5000),
@@ -167,6 +168,7 @@ const windowStart = seconds => seconds - (seconds % HOUR);
 const retryAfter = seconds => ({ 'Retry-After': String(windowStart(seconds) + HOUR - seconds) });
 
 // Fixed-window counter; the upsert is a single atomic statement so concurrent requests cannot both pass.
+// Returns the window it counted in so a caller can release exactly that slot.
 async function rateLimit(db, bucket, limit) {
   const seconds = Math.floor(Date.now() / 1000);
   const start = windowStart(seconds);
@@ -176,13 +178,12 @@ async function rateLimit(db, bucket, limit) {
     .first();
   if (row.count === 1) await db.prepare('DELETE FROM rate_counters WHERE window_start < ?1').bind(start).run();
   if (row.count > limit) throw fail(429, 'rate_limited', retryAfter(seconds));
+  return start;
 }
 
-// Read-only check for counters that only failures increment (failed logins per username).
-async function rateCheck(db, bucket, limit) {
-  const seconds = Math.floor(Date.now() / 1000);
-  const row = await db.prepare('SELECT count FROM rate_counters WHERE bucket = ?1 AND window_start = ?2').bind(bucket, windowStart(seconds)).first();
-  if (row && row.count >= limit) throw fail(429, 'rate_limited', retryAfter(seconds));
+// Gives back one slot taken by rateLimit in the same window; never touches other windows or goes below zero.
+async function releaseSlot(db, bucket, start) {
+  await db.prepare('UPDATE rate_counters SET count = count - 1 WHERE bucket = ?1 AND window_start = ?2 AND count > 0').bind(bucket, start).run();
 }
 
 // Rate buckets carry truncated hashes, never a raw IP address or username.
@@ -339,7 +340,9 @@ async function register(ctx) {
   return json(201, await createSession(db, author));
 }
 
-// Every credential failure is the same 401 after one derivation; failures also count per username.
+// Every credential failure is the same 401 after one derivation. Each attempt atomically reserves a
+// per-username failure slot (and a global attempt slot) before deriving, so concurrent guesses cannot
+// overrun the cap; only a successful login releases its username slot.
 async function login(ctx) {
   const db = database(ctx.env);
   const body = await readJson(ctx.request, MAX_AUTH_BODY_BYTES);
@@ -348,16 +351,15 @@ async function login(ctx) {
   const username = body.username.toLowerCase();
   const failures = await bucketKey('login:user:', username);
   await rateLimit(db, await bucketKey('login:ip:', clientIp(ctx.request)), ctx.settings.loginsPerIpHour);
-  await rateCheck(db, failures, ctx.settings.loginFailuresPerUsernameHour);
+  await rateLimit(db, 'login:all', ctx.settings.loginsPerHour);
+  const reserved = await rateLimit(db, failures, ctx.settings.loginFailuresPerUsernameHour);
   const password = passwordText(body.password);
   const row = validUsername(body.username) && password !== null
     ? await db.prepare('SELECT id, username, display_name, password_hash FROM authors WHERE username = ?1').bind(username).first()
     : null;
   const ok = await verifyPassword(password ?? body.password, row?.password_hash ?? null);
-  if (!ok || !row) {
-    await rateLimit(db, failures, Number.MAX_SAFE_INTEGER);
-    throw fail(401, 'invalid_credentials');
-  }
+  if (!ok || !row) throw fail(401, 'invalid_credentials');
+  await releaseSlot(db, failures, reserved);
   return json(200, await createSession(db, { id: row.id, username: row.username, displayName: row.display_name }));
 }
 

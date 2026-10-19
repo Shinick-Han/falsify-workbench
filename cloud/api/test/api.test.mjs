@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -88,6 +89,50 @@ function client(instance) {
 
 const register = (username, password = PASSWORD, extra = {}, headers = {}) => call('POST', '/v1/auth/register', { body: { username, password, ...extra }, headers });
 const login = (username, password = PASSWORD, headers = {}) => call('POST', '/v1/auth/login', { body: { username, password }, headers });
+
+// An oversized body answered before it is consumed can reset a shared keep-alive connection mid-upload, so
+// these cases use their own connection: send the headers (and, when chunked, body chunks only until the
+// response arrives), read the early response, then drop the socket. The response status is still asserted.
+async function oversized(instance, pathname, { token, bytes, chunked = false }) {
+  const url = new URL(pathname, await instance.ready);
+  const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, Connection: 'close' };
+  if (!chunked) headers['Content-Length'] = String(bytes);
+  return new Promise((resolve, reject) => {
+    let answered = false;
+    const timer = setTimeout(() => {
+      req.destroy();
+      reject(new Error('no early response'));
+    }, 10000);
+    const req = http.request(url, { method: 'POST', headers, agent: false }, res => {
+      answered = true;
+      const parts = [];
+      res.on('data', part => parts.push(part));
+      res.on('end', () => {
+        clearTimeout(timer);
+        req.destroy();
+        const text = Buffer.concat(parts).toString('utf8');
+        resolve({ status: res.statusCode, headers: new Headers(res.headers), body: text ? JSON.parse(text) : null });
+      });
+    });
+    req.on('error', error => {
+      if (!answered) {
+        clearTimeout(timer);
+        reject(error);
+      }
+    });
+    req.flushHeaders();
+    if (!chunked) return;
+    const chunk = Buffer.from('{"kind":"run","payload":{"pad":"' + 'x'.repeat(64 * 1024));
+    let sent = 0;
+    const pump = () => {
+      while (!answered && sent < bytes) {
+        sent += chunk.length;
+        if (!req.write(chunk)) return req.once('drain', pump);
+      }
+    };
+    pump();
+  });
+}
 
 async function harnessPayload(id) {
   const config = { schema: 'falsify.harness.v1', id, name: `Synthetic ${id}`, version: '1', role: 'red', instructions: 'Find explicit contradictions.', maxCalls: 4 };
@@ -353,7 +398,8 @@ test('malformed requests get fixed safe errors', async () => {
     [await call('POST', '/v1/records', { token: t, raw: '[]' }), 400, 'invalid_json'],
     [await call('POST', '/v1/records', { token: t, raw: '{}', headers: { 'Content-Type': 'text/plain' } }), 415, 'unsupported_media_type'],
     [await call('POST', '/v1/auth/login', { raw: JSON.stringify({ username: 'alice', password: 'x'.repeat(5000) }) }), 413, 'payload_too_large'],
-    [await call('POST', '/v1/records', { token: t, raw: JSON.stringify({ kind: 'run', payload: { pad: 'x'.repeat(257 * 1024) } }) }), 413, 'payload_too_large'],
+    [await oversized(mf, '/v1/records', { token: t, bytes: 257 * 1024 }), 413, 'payload_too_large'],
+    [await oversized(mf, '/v1/records', { token: t, bytes: 1024 * 1024, chunked: true }), 413, 'payload_too_large'],
     [await call('POST', '/v1/records', { token: t, body: { kind: 'run', payload: { role: 'red' } } }), 422, 'invalid_payload'],
     [await call('POST', '/v1/records', { token: t, body: { kind: 'other', payload: {} } }), 400, 'invalid_request'],
     [await call('POST', '/v1/records', { token: t, body: { kind: 'harness', payload: {}, owner: 'x' } }), 400, 'invalid_request'],
@@ -421,6 +467,44 @@ test('auth rate caps, record quota and hashed rate buckets', async () => {
 
     const buckets = JSON.stringify(await d1All(limited, 'SELECT bucket FROM rate_counters'));
     for (const raw of ['203.0.113', 'quota_one', 'quota_two']) assert.ok(!buckets.includes(raw));
+  } finally {
+    await limited.dispose();
+  }
+});
+
+const tally = responses => responses.reduce((acc, res) => ({ ...acc, [res.status]: (acc[res.status] || 0) + 1 }), {});
+
+test('concurrent wrong-password logins from many IPs cannot exceed the per-username failure cap', async () => {
+  const limited = await start({ LOGIN_FAILURES_PER_USERNAME_HOUR: '10' });
+  try {
+    const c = client(limited);
+    const attempt = (password, i) => c('POST', '/v1/auth/login', { body: { username: 'victim', password }, headers: { 'CF-Connecting-IP': `198.51.100.${i}` } });
+    assert.equal((await c('POST', '/v1/auth/register', { body: { username: 'victim', password: PASSWORD } })).status, 201);
+    for (let i = 0; i < 12; i++) assert.equal((await attempt(PASSWORD, 200)).status, 200, 'successful logins release their reserved slot');
+    const burst = await Promise.all(Array.from({ length: 40 }, (_, i) => attempt('wrong password value', i)));
+    assert.deepEqual(tally(burst), { 401: 10, 429: 30 });
+    for (const res of burst.filter(r => r.status === 401)) assert.equal(res.body.error.code, 'invalid_credentials');
+    for (const res of burst.filter(r => r.status === 429)) {
+      assert.equal(res.body.error.code, 'rate_limited');
+      assert.ok(Number(res.headers.get('Retry-After')) > 0);
+    }
+    assert.equal((await attempt(PASSWORD, 201)).status, 429, 'locked username stays locked for the right password');
+  } finally {
+    await limited.dispose();
+  }
+});
+
+test('global login attempt cap holds across fresh IPs and usernames', async () => {
+  const limited = await start({ LOGINS_PER_HOUR: '5' });
+  try {
+    const c = client(limited);
+    const burst = await Promise.all(Array.from({ length: 20 }, (_, i) =>
+      c('POST', '/v1/auth/login', { body: { username: `ghost_${i}`, password: 'wrong password value' }, headers: { 'CF-Connecting-IP': `192.0.2.${i}` } })
+    ));
+    assert.deepEqual(tally(burst), { 401: 5, 429: 15 });
+    for (const res of burst.filter(r => r.status === 429)) assert.equal(res.body.error.code, 'rate_limited');
+    const fresh = await c('POST', '/v1/auth/login', { body: { username: 'ghost_new', password: 'wrong password value' }, headers: { 'CF-Connecting-IP': '192.0.2.250' } });
+    assert.equal(fresh.status, 429, 'a new IP and username do not bypass the global cap');
   } finally {
     await limited.dispose();
   }
