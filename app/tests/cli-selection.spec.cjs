@@ -137,7 +137,7 @@ test('custom stdio harness uses its own executor; selection never overrides it',
 test('wrapper runs only on companions explicitly supporting it; registration stays possible',async()=>{
   const custom={...H.builtin('red'),id:'wrapper-gate',adapter:{type:'wrapper',target:{type:'stdio',executable:'C:/py.exe',args:[]},input:{mode:'invocation'},output:{source:'stdout',format:'json'}}};
   const hash=await H.hash(custom),db={schema:'falsify.experiment-ledger.v1',harnesses:[{config:custom,hash}],runs:[],reviews:[]};
-  for(const supported of [false,true]){const w=await live({...NEW_CAP,harnessWrapper:supported},[['falsify.experiment-ledger.v1',JSON.stringify(db)]]);w.change('red-harness',hash);await settle(w,'red');w.get('red-harness-consent').checked=true;assert.equal(w.lab.allowed('red'),supported);assert.ok(!w.get('red-harness-detail').textContent.includes('undefined'));}
+  for(const supported of [false,true]){const w=await live({...NEW_CAP,harnessWrapper:supported},[['falsify.experiment-ledger.v1',JSON.stringify(db)]]);w.change('red-harness',hash);await w.lab.bind('red',{});w.get('red-harness-consent').checked=true;assert.equal(w.lab.allowed('red'),supported);assert.equal(w.get('red-cli-type').disabled,true);assert.ok(!w.get('red-harness-detail').textContent.includes('undefined'));}
 });
 
 test('recording a selection registers a new version without editing old ones and survives reload',async()=>{const w=await live(NEW_CAP);
