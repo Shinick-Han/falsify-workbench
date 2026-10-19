@@ -19,8 +19,11 @@ export class CloudRecordError extends Error{constructor(code,message){super(mess
 const fail=(code,message)=>{throw new CloudRecordError(code,message);};
 const invalid=field=>fail('invalid_payload','Invalid payload field: '+field);
 const HEX=/^[a-f0-9]{64}$/,UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const ISO=/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})$/;
-const CONTROL=/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/,LINE=/[\u0000-\u001f\u007f]/;
+const ISO=/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(?:Z|[+-](\d{2}):(\d{2}))$/;
+const CONTROL=/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/,LINE=/[\u0000-\u001f\u007f\u{85}\u{2028}\u{2029}]/u;
+// Single-line values are grouping keys shown to other users: bidi controls and invisible format characters would make
+// visually equal labels differ. ZWNJ/ZWJ (U+200C/U+200D) stay allowed for scripts and emoji that need them.
+const INVISIBLE=/[\u{ad}\u{61c}\u{180e}\u{200b}\u{200e}\u{200f}\u{202a}-\u{202e}\u{2060}-\u{2064}\u{2066}-\u{206f}\u{feff}\u{fff9}-\u{fffb}]/u;
 const own=(o,k)=>Object.prototype.hasOwnProperty.call(o,k);
 // Plain JSON-like object from any realm (a ledger snapshot may come from another frame or VM context): Object or null prototype.
 const plain=v=>{if(!v||typeof v!=='object'||Array.isArray(v))return false;const proto=Object.getPrototypeOf(v);return proto===null||Object.getPrototypeOf(proto)===null;};
@@ -32,9 +35,14 @@ export async function payloadHash(kind,payload){return sha256(canonicalJSON({kin
 // A JSON round trip drops getters, prototypes and toJSON tricks, so validation sees exactly what would be stored.
 function json(v,max,field){let raw;try{raw=JSON.stringify(v);}catch{invalid(field);}if(typeof raw!=='string')invalid(field);if(raw.length>max)fail('payload_too_large','Payload too large: '+field);return JSON.parse(raw);}
 function exact(o,required,optional,field){if(!plain(o))invalid(field);for(const k of required)if(!own(o,k))invalid(field+'.'+k);if(Object.keys(o).some(k=>!required.includes(k)&&!optional.includes(k)))fail('invalid_payload','Unknown field in '+field);}
-function text(v,max,field,multiline=false){if(typeof v!=='string'||!v.trim()||v.length>max||(multiline?CONTROL:LINE).test(v))invalid(field);return v;}
-const hex=(v,field)=>HEX.test(v)?v:invalid(field);
-const iso=(v,field)=>typeof v==='string'&&v.length<=40&&ISO.test(v)&&Number.isFinite(Date.parse(v))?v:invalid(field);
+function text(v,max,field,multiline=false){if(typeof v!=='string'||!v.trim()||v.length>max||(multiline?CONTROL:LINE).test(v)||!multiline&&INVISIBLE.test(v))invalid(field);return v;}
+// RegExp.test coerces its argument (['<64 hex>'] would pass), so the type is checked first.
+const hex=(v,field)=>typeof v==='string'&&HEX.test(v)?v:invalid(field);
+// Date.parse rolls 2026-02-30 over to March instead of rejecting it, so the calendar fields are checked explicitly.
+function iso(v,field){const m=typeof v==='string'&&v.length<=40?ISO.exec(v):null;if(!m)invalid(field);
+  const [y,mo,d,h,mi,s,oh,om]=m.slice(1).map(x=>+(x??0)),day=new Date(0);day.setUTCFullYear(y,mo-1,d);
+  if(mo<1||mo>12||day.getUTCMonth()!==mo-1||day.getUTCDate()!==d||h>23||mi>59||s>59||oh>23||om>59||!Number.isFinite(Date.parse(v)))invalid(field);
+  return v;}
 
 const RUN_REQUIRED=['localId','role','harnessHash','sourceHash','fileHash','model','level','maxCalls','status','calls','provenance','createdAt'];
 // publicView checks a projection (no localId, no evidence) as read back from GET shared.
@@ -116,7 +124,9 @@ const later=(a,b)=>time(a.createdAt)-time(b.createdAt)||(a.revision??0)-(b.revis
 // groups[] = {conditionKey, conditions:{sourceHash,role,model,level,maxCalls,protocolVersion,caseLabel}, attestation:'client-reported',
 //   runCount, harnesses[]}; harnesses[] = one entry per harness hash and claimed origin (executed|manual|imported are never mixed):
 //   {hash, origin, harnessAvailable, runIds, runCount, statuses, calls, callsUnknown, reviewCount, uncertainCount, scoreCount, scoreMean, reviewerCount}.
-// Reviews count once per run and server owner (the latest); uncertain reviews never enter scoreMean. warnings[] = {code,message,recordIds}.
+// Reviews count once per run and server owner (the latest among those whose caseLabel and protocolVersion both exactly match
+// the run's); uncertain reviews never enter scoreMean. warnings[] = {code,message,recordIds}.
+// harnessAvailable means a visible, structurally plausible definition: its hash is checked by validatePayload on write, not here.
 export function compareRecords(records){
   const warned=new Map(),warn=(code,id)=>{if(!warned.has(code))warned.set(code,new Set());if(id!==undefined)warned.get(code).add(id);};
   const byId=new Map();
@@ -125,12 +135,16 @@ export function compareRecords(records){
     const prev=byId.get(r.id);if(!prev||(r.revision??0)>(prev.revision??0)||(r.revision??0)===(prev.revision??0)&&canonicalJSON(r)>canonicalJSON(prev))byId.set(r.id,r);}
   const runs=new Map(),reviews=[],harnesses=new Set();
   for(const r of byId.values()){try{
-    if(r.kind==='harness'){const p=r.payload;if(!plain(p.config)||!HEX.test(p.hash))invalid('harness');harnesses.add(p.hash);}
+    if(r.kind==='harness'){const p=r.payload;if(!plain(p.config)||typeof p.hash!=='string'||!HEX.test(p.hash))invalid('harness');harnesses.add(p.hash);}
     else if(r.kind==='run')runs.set(r.id,{r,p:checkRun(publicPayload('run',r.payload),true)});
     else reviews.push({r,p:checkReview(publicPayload('review',r.payload))});}catch{warn('invalid_record',r.id);}}
   const latest=new Map();
-  for(const v of reviews){if(!runs.has(v.p.runId)){warn('review_run_missing',v.r.id);continue;}
+  for(const v of reviews){const run=runs.get(v.p.runId)?.p;if(!run){warn('review_run_missing',v.r.id);continue;}
     if(v.p.supersedes&&byId.get(v.p.supersedes)?.kind==='review'&&byId.get(v.p.supersedes).owner.id!==v.r.owner.id)warn('review_supersedes_other_owner',v.r.id);
+    // A review attaches by runId but declares the conditions it was judged under. Only an exact match with the run's own case
+    // label and protocol version is a review under those conditions; matching is filtered before "latest" so a newer mismatched
+    // review never hides an older matching one. Mismatched records stay in the data, they are only left out of the aggregation.
+    if(!own(run,'caseLabel')||!own(run,'protocolVersion')||!own(v.p,'protocolVersion')||v.p.caseLabel!==run.caseLabel||v.p.protocolVersion!==run.protocolVersion){warn('review_condition_mismatch',v.r.id);continue;}
     const key=v.p.runId+'\n'+v.r.owner.id,prev=latest.get(key);if(!prev||later(v.r,prev.r)>0)latest.set(key,v);}
   const groups=new Map();
   for(const {r,p} of runs.values()){
@@ -149,6 +163,7 @@ export function compareRecords(records){
   if(runs.size)warn('client_reported');
   const MESSAGES={client_reported:COMPARISON_NOTICE,invalid_record:'Records with an invalid shape or payload were ignored.',review_run_missing:'Reviews whose run is not visible were ignored.',
     review_supersedes_other_owner:'A review can only supersede a review by the same owner; the reference was ignored.',incomparable_missing_condition:'Runs without a protocol version or case label are not comparable and were left out.',
+    review_condition_mismatch:'Reviews whose case label or protocol version is missing or differs from the reviewed run were left out of review counts and means.',
     harness_definition_missing:'Some runs reference a harness hash with no visible shared definition.'};
   const warnings=[...warned].sort((a,b)=>cmp(a[0],b[0])).map(([code,ids])=>({code,message:MESSAGES[code],recordIds:[...ids].sort()}));
   return {groups:out,warnings};}

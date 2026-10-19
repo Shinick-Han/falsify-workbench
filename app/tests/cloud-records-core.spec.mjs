@@ -16,6 +16,7 @@ async function localRun(over={}){const harness=H.builtin('red');return {id:'loca
   response:{schema:R.VERSION,revision:'rev',sourceHash:'x',status:'abstain',candidates:[],coverage:{complete:false,completedChunks:1,chunks:2,calls:3}},...over};}
 const runPayload=(over={})=>({localId:'l1',role:'red',harnessHash:A,sourceHash:B,fileHash:F,model:'gpt-6.1-sol',level:1,maxCalls:8,status:'ok',calls:4,provenance:'local-codex',createdAt:'2026-10-19T00:00:00.000Z',caseLabel:'case-1',protocolVersion:'falsify.document-red.v1',...over});
 const reviewPayload=(over={})=>({runId:uuid(1),verdict:'supported',score:4,note:'Synthetic note.',caseLabel:'case-1',...over});
+const P='falsify.document-red.v1';
 
 test('harness payload: canonical H hash, key order free, strict fields, injected or global H',async()=>{
   const config={...H.builtin('blue'),id:'shared-blue'},hash=await H.hash(config),reordered=Object.fromEntries(Object.entries(config).reverse());
@@ -101,7 +102,7 @@ function fixture(){seq=0;const runs={},list=[];const add=r=>{list.push(r);return
     ['b-ok',runPayload({harnessHash:B,status:'ok',calls:2}),'author-b'],['b-refusal',runPayload({harnessHash:B,status:'refusal',calls:null}),'author-b'],['b-manual',runPayload({harnessHash:B,status:'ok',provenance:'manual-unverified',model:'gpt-6.1-sol',calls:null}),'author-b'],
     ['other-case',runPayload({harnessHash:A,caseLabel:'case-2'}),'author-a'],['no-protocol',(()=>{const p=runPayload({harnessHash:A});delete p.protocolVersion;return p;})(),'author-a']]){
     const p={...payload};delete p.localId;runs[name]=add(rec('run',p,owner));}
-  const review=(run,owner,over,meta)=>add(rec('review',reviewPayload({runId:runs[run].id,...over}),owner,meta));
+  const review=(run,owner,over,meta)=>add(rec('review',reviewPayload({runId:runs[run].id,protocolVersion:P,...over}),owner,meta));
   review('a-ok','author-r1',{score:2},{createdAt:'2026-10-19T01:00:00.000Z'});review('a-ok','author-r1',{score:5},{createdAt:'2026-10-19T02:00:00.000Z'});
   review('a-ok','author-r2',{verdict:'uncertain',score:null},{createdAt:'2026-10-19T01:30:00.000Z'});review('a-fail','author-r2',{score:3},{createdAt:'2026-10-19T01:30:00.000Z'});
   review('b-ok','author-r1',{score:1});review('b-manual','author-r1',{score:5});
@@ -145,9 +146,59 @@ test('compareRecords: deterministic over input order and duplicate revisions',()
   assert.deepEqual(C.compareRecords([]),{groups:[],warnings:[]});assert.deepEqual(C.compareRecords(null),{groups:[],warnings:[]});});
 
 test('compareRecords: cross-owner supersedes is ignored with a warning',()=>{
-  const {runs,list}=fixture(),first=list.find(r=>r.kind==='review'),other=rec('review',reviewPayload({runId:runs['a-ok'].id,supersedes:first.id,score:1}),'author-r3');
+  const {runs,list}=fixture(),first=list.find(r=>r.kind==='review'),other=rec('review',reviewPayload({runId:runs['a-ok'].id,protocolVersion:P,supersedes:first.id,score:1}),'author-r3');
   const out=C.compareRecords([...list,other]);assert.deepEqual(out.warnings.find(w=>w.code==='review_supersedes_other_owner').recordIds,[other.id]);
   assert.equal(groupFor(out,'case-1').harnesses[0].reviewCount,4,'r1 latest still counted; r3 counted separately');});
+
+const reviewStats=e=>({reviewCount:e.reviewCount,uncertainCount:e.uncertainCount,scoreCount:e.scoreCount,scoreMean:e.scoreMean,reviewerCount:e.reviewerCount});
+const MISMATCH='Reviews whose case label or protocol version is missing or differs from the reviewed run were left out of review counts and means.';
+
+test('compareRecords: reviews count only when their case label and protocol version exactly match the run',()=>{
+  const {runs,list}=fixture(),base=groupFor(C.compareRecords(list),'case-1').harnesses[0],later={createdAt:'2026-10-19T09:00:00.000Z'};
+  assert.deepEqual(reviewStats(base),{reviewCount:3,uncertainCount:1,scoreCount:2,scoreMean:4,reviewerCount:2},'valid mean unchanged by the matching rule');
+  const onA=(over,owner)=>rec('review',reviewPayload({runId:runs['a-ok'].id,protocolVersion:P,...over}),owner,later);
+  const noProtocol=rec('review',reviewPayload({runId:runs['a-ok'].id,score:1}),'author-r4',later);
+  const extra=[noProtocol,onA({caseLabel:'case-2',score:1},'author-r5'),onA({protocolVersion:'p9',score:1},'author-r6'),onA({caseLabel:'Case-1',score:1},'author-r7'),
+    onA({protocolVersion:'p9',score:1},'author-r1'),rec('review',reviewPayload({runId:runs['no-protocol'].id,protocolVersion:P,score:1}),'author-r1')];
+  const input=[...list,...extra],before=JSON.stringify(input),out=C.compareRecords(input),a=groupFor(out,'case-1').harnesses[0];
+  assert.deepEqual(reviewStats(a),reviewStats(base),'missing/mismatched excluded; the newer mismatched r1 review does not hide the older matching one');
+  const w=out.warnings.find(x=>x.code==='review_condition_mismatch');
+  assert.deepEqual(w,{code:'review_condition_mismatch',message:MISMATCH,recordIds:extra.map(r=>r.id).sort()});
+  assert.equal(JSON.stringify(input),before,'records are kept as they are, never rewritten or dropped from the data');
+  assert.deepEqual(C.compareRecords([...input].reverse()),out,'deterministic over input order');});
+
+test('compareRecords: a newer matching uncertain review still removes that owner score from the mean',()=>{
+  const {runs,list}=fixture(),uncertain=rec('review',reviewPayload({runId:runs['a-ok'].id,protocolVersion:P,verdict:'uncertain',score:null}),'author-r1',{createdAt:'2026-10-19T09:00:00.000Z'});
+  const a=groupFor(C.compareRecords([...list,uncertain]),'case-1').harnesses[0];
+  assert.deepEqual(reviewStats(a),{reviewCount:3,uncertainCount:2,scoreCount:1,scoreMean:3,reviewerCount:2},'r1 latest is uncertain; only r2 on a-fail scores');});
+
+test('reviewFromLocal: protocolVersion stays optional for storage, nothing is backfilled, and such a review is not aggregated',async()=>{
+  const {runs,list}=fixture(),local={id:'local-review',runId:'local-run-1',createdAt:'2026-10-19T00:00:00.000Z',reviewer:'Dr. Synthetic',caseLabel:'case-1',verdict:'supported',score:1,note:'Synthetic note.'};
+  const p=C.reviewFromLocal(local,runs['a-ok'].id);assert.ok(!('protocolVersion' in p),'no protocol is invented');assert.deepEqual(await C.validatePayload('review',p),p);
+  const r=rec('review',p,'author-r8'),out=C.compareRecords([...list,r]);
+  assert.equal(groupFor(out,'case-1').harnesses[0].scoreMean,4);assert.deepEqual(out.warnings.find(x=>x.code==='review_condition_mismatch').recordIds,[r.id]);});
+
+test('64-hex hash fields reject non-string values that a regular expression test would coerce',async()=>{
+  for(const field of ['harnessHash','sourceHash','fileHash'])for(const bad of [[A],[],64,null,{}])
+    await rejects(()=>C.validatePayload('run',runPayload({[field]:bad})),'invalid_payload');
+  const config=H.builtin('red'),hash=await H.hash(config);
+  for(const bad of [[hash],[],1,null,{}]){await rejects(()=>C.validatePayload('harness',{config,hash:bad},{harness:H}),'invalid_payload');
+    await rejects(()=>C.validatePayload('harness',{config,hash,parentHash:bad},{harness:H}),'invalid_payload');}
+  const strip=({localId,...p})=>p,run=rec('run',strip(runPayload({harnessHash:A}))),arrayRun=rec('run',strip(runPayload({harnessHash:[A]}))),arrayHarness=rec('harness',{config,hash:[A]});
+  const out=C.compareRecords([run,arrayRun,arrayHarness]),[entry]=out.groups[0].harnesses;
+  assert.deepEqual(out.warnings.find(w=>w.code==='invalid_record').recordIds,[arrayRun.id,arrayHarness.id].sort());
+  assert.equal(out.groups[0].harnesses.length,1);assert.equal(entry.runCount,1,'an array hash is never merged with the string hash');assert.equal(entry.harnessAvailable,false);});
+
+test('single-line labels reject bidi and invisible format characters; ISO dates are calendar-checked',async()=>{
+  for(const bad of ['case\u{202e}A','case\u{200b}','\u{2066}case\u{2069}','case\u{feff}','case\u{2028}x','case\u{85}x','case\u{ad}','case\u{61c}']){
+    await rejects(()=>C.validatePayload('run',runPayload({caseLabel:bad})),'invalid_payload');await rejects(()=>C.validatePayload('review',reviewPayload({caseLabel:bad})),'invalid_payload');}
+  for(const bad of [{model:'\u{200f}gpt'},{protocolVersion:'p\u{202a}1'},{localId:'l\u{2060}1'}])await rejects(()=>C.validatePayload('run',runPayload(bad)),'invalid_payload');
+  for(const ok of ['사례 1','caso-ñ','\u{1f469}\u{200d}\u{1f52c} lab','\u{645}\u{6cc}\u{200c}\u{62e}'])assert.equal((await C.validatePayload('run',runPayload({caseLabel:ok}))).caseLabel,ok,'ZWJ/ZWNJ and ordinary scripts stay valid');
+  for(const ok of ['2024-02-29T00:00:00Z','2026-10-19T09:30:00+09:00','2026-10-19T09:30-05:30','2026-12-31T23:59:59.999999999Z','2026-10-19T00:00:00.000+14:00','2026-10-19T01:02:03.000Z'])
+    assert.equal((await C.validatePayload('run',runPayload({createdAt:ok}))).createdAt,ok);
+  for(const bad of ['2026-02-30T00:00:00Z','2025-02-29T00:00:00Z','2026-04-31T00:00:00Z','2026-00-10T00:00:00Z','2026-10-00T00:00:00Z','2026-10-19T24:00:00Z','2026-10-19T10:60:00Z','2026-10-19T10:00:60Z',
+    '2026-10-19T10:00:00+24:00','2026-10-19T10:00:00+09:60',['2026-10-19T00:00:00Z']])
+    await rejects(()=>C.validatePayload('run',runPayload({createdAt:bad})),'invalid_payload');});
 
 let passed=0;for(const [name,fn] of tests){try{await fn();passed++;console.log('PASS '+name);}catch(e){console.error('FAIL '+name+'\n'+(e.stack||e));process.exitCode=1;}}
 console.log(JSON.stringify({passed,total:tests.length}));if(passed!==tests.length)process.exit(1);
