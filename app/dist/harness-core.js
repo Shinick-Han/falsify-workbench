@@ -15,9 +15,10 @@
   // pointer/map syntax only; the local backend checks the executable and runs it. Messages are fixed text and never echo user values.
   const WRAPPER_ERRORS=Object.freeze({shape:'wrapper: type·target·input·output 네 필드만 허용합니다. 알 수 없는 필드를 지우세요.',size:'wrapper 설정은 직렬화 32,000자 이내여야 합니다. 매핑을 줄이세요.',
     target:'wrapper target은 stdio(executable 절대 경로와 args 배열) 또는 http(HTTPS URL) 형태만 허용합니다. wrapper 중첩은 지원하지 않습니다.',
-    input:'input.mode는 invocation / prompt / template / files 중 하나입니다. template은 template 모드에서만 넣으세요.',
+    input:'input.mode는 invocation / prompt / template / files 중 하나이며 files는 stdio target에서만 씁니다. template은 template 모드에서만 넣으세요.',
     output:'output.source는 stdout 또는 file(stdio 전용), format은 json 또는 json-fence입니다. path·map·stageMaps 외 필드는 지우세요.',
     placeholder:'args의 {input} · {prompt} · {schema} · {output}은 다른 글자와 섞지 말고 인자 하나 전체로 쓰세요.',
+    filesOnly:'args의 {input} · {prompt} · {schema}는 input.mode가 files일 때만 씁니다. {output}은 모든 모드에서 쓸 수 있습니다.',
     pointer:'JSON pointer는 비어 있거나 /로 시작해야 하며, ~는 ~0 또는 ~1로만 씁니다.',proto:'__proto__ · constructor · prototype 키와 경로는 쓸 수 없습니다.',
     directive:'매핑 지시어는 {"$from":"/경로"} 또는 {"$each":"/배열","template":…} 정확한 형태만 허용합니다. $로 시작하는 다른 키는 지우세요.',
     mapSize:'매핑은 깊이 20단계, 항목 1,000개 이내여야 합니다.',stage:'stageMaps 키는 scan / selection / red / blue만 허용합니다.',
@@ -28,7 +29,8 @@
   const WRAPPER_STAGES=Object.freeze(['scan','selection','red','blue']),WRAPPER_INPUTS=Object.freeze(['invocation','prompt','template','files']),UNSAFE=new Set(['__proto__','constructor','prototype']);
   // Invocation outputSchema top-level array/summary key -> stage, the same selection the backend makes for stageMaps.
   const STAGE_KEYS=Object.freeze({summary:'scan',targets:'selection',candidates:'red',findings:'blue'});
-  const stageForSchema=s=>{const p=s&&typeof s==='object'&&s.properties;if(!p||typeof p!=='object')return null;for(const k of Object.keys(STAGE_KEYS))if(Object.hasOwn(p,k))return STAGE_KEYS[k];return null;};
+  // null unless exactly one stage key is present, the same rule as the backend stage_of.
+  const stageForSchema=s=>{const p=s&&typeof s==='object'&&s.properties;if(!plain(p))return null;const found=Object.keys(STAGE_KEYS).filter(k=>Object.hasOwn(p,k));return found.length===1?STAGE_KEYS[found[0]]:null;};
   function fail(code){const e=Error(WRAPPER_ERRORS[code]);e.code=code;throw e;}
   const plain=v=>!!v&&typeof v==='object'&&!Array.isArray(v);
   const only=(o,allowed,required)=>plain(o)&&Object.keys(o).every(k=>allowed.includes(k))&&required.every(k=>Object.hasOwn(o,k));
@@ -44,12 +46,15 @@
     if(Object.hasOwn(t,'$each')){if(ks.length!==2||!Object.hasOwn(t,'template'))fail('directive');pointer(t.$each);checkMap(t.template,depth+1,seen);return;}
     for(const k of ks){if(UNSAFE.has(k))fail('proto');if(k[0]==='$')fail('directive');checkMap(t[k],depth+1,seen);}}
   const own=(o,k,v)=>Object.defineProperty(o,k,{value:v,enumerable:true,writable:true,configurable:true});
+  // One budget unit per template node and per copied output node, as the backend _spend counts.
+  function spend(v,seen){if(++seen.n>100000)fail('resultSize');if(Array.isArray(v))for(const x of v)spend(x,seen);else if(plain(v))for(const k of Object.keys(v))spend(v[k],seen);}
   // Pure template application: $from copies, $each maps elements relative to each element, everything else is a literal.
-  function applyMap(t,src,seen){if(++seen.n>100000)fail('resultSize');
+  function applyMap(t,src,seen){
+    if(plain(t)&&Object.hasOwn(t,'$from')){const v=resolve(src,t.$from);spend(v,seen);return JSON.parse(JSON.stringify(v));}
+    if(plain(t)&&Object.hasOwn(t,'$each')){const list=resolve(src,t.$each);if(!Array.isArray(list))fail('notArray');if(list.length>1000)fail('resultSize');spend(null,seen);return list.map(x=>applyMap(t.template,x,seen));}
+    spend(null,seen);
     if(Array.isArray(t))return t.map(x=>applyMap(x,src,seen));
     if(!plain(t))return t;
-    if(Object.hasOwn(t,'$from'))return JSON.parse(JSON.stringify(resolve(src,t.$from)));
-    if(Object.hasOwn(t,'$each')){const list=resolve(src,t.$each);if(!Array.isArray(list))fail('notArray');return list.map(x=>applyMap(t.template,x,seen));}
     const out={};for(const k of Object.keys(t))own(out,k,applyMap(t[k],src,seen));return out;}
   function checkOutput(o,targetType){
     if(!only(o,['source','format','path','map','stageMaps'],['source','format'])||!['stdout','file'].includes(o.source)||!['json','json-fence'].includes(o.format)||o.source==='file'&&targetType&&targetType!=='stdio')fail('output');
@@ -60,18 +65,22 @@
     if(!only(a,['type','target','input','output'],['type','target','input','output'])||a.type!=='wrapper')fail('shape');
     let text;try{text=JSON.stringify(a);}catch{fail('shape');}if(text.length>32000)fail('size');
     const t=a.target;if(!plain(t)||!['stdio','http'].includes(t.type))fail('target');try{transport(t);}catch{fail('target');}
-    if(t.type==='stdio'&&t.args.some(x=>!['{input}','{prompt}','{schema}','{output}'].includes(x)&&/\{(?:input|prompt|schema|output)\}/.test(x)))fail('placeholder');
-    const i=a.input;if(!only(i,['mode','template'],['mode'])||!WRAPPER_INPUTS.includes(i.mode)||(i.mode==='template')!==Object.hasOwn(i,'template'))fail('input');
+    const i=a.input;if(!only(i,['mode','template'],['mode'])||!WRAPPER_INPUTS.includes(i.mode)||(i.mode==='template')!==Object.hasOwn(i,'template')||i.mode==='files'&&t.type!=='stdio')fail('input');
     if(i.mode==='template')checkMap(i.template);
+    if(t.type==='stdio'){if(i.mode!=='files'&&t.args.some(x=>['{input}','{prompt}','{schema}'].includes(x)))fail('filesOnly');
+      if(t.args.some(x=>!['{input}','{prompt}','{schema}','{output}'].includes(x)&&/\{(?:input|prompt|schema|output)\}/.test(x)))fail('placeholder');}
     checkOutput(a.output,t.type);
     return JSON.parse(text);}
+  // JSON.parse turns 1e400 into Infinity, so the parsed value is walked; the backend rejects the same literals.
+  function finite(v){if(typeof v==='number'&&!Number.isFinite(v))fail('parse');if(Array.isArray(v))for(const x of v)finite(x);else if(plain(v))for(const k of Object.keys(v))finite(v[k]);}
+  // Same rule as the backend FENCE: JSON whitespace around one block, newline before the closing fence, no embedded fence, no BOM.
   function parseOutput(text,format){if(new TextEncoder().encode(text).length>150000)fail('outputSize');
-    if(format==='json-fence'){const m=/^```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n```$/.exec(text.trim());if(!m||m[1].includes('```'))fail('fence');text=m[1];}
-    try{return JSON.parse(text);}catch{fail('parse');}}
+    if(format==='json-fence'){const m=/^[ \t\r\n]*```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n```[ \t\r\n]*$/.exec(text);if(!m||m[1].includes('```'))fail('fence');text=m[1];}
+    let v;try{v=JSON.parse(text);}catch{fail('parse');}finite(v);return v;}
   // Browser parity helper: raw text is parsed by format, output.path applies before the map, and an explicit known stage selects its
   // stageMap. An unknown stage or missing stageMap falls back to output.map, then identity. The backend result stays authoritative.
   function transformWrapperOutput(value,output,stage){checkOutput(output);
-    let v=typeof value==='string'?parseOutput(value,output.format):JSON.parse(JSON.stringify(value));
+    let v;if(typeof value==='string')v=parseOutput(value,output.format);else{finite(value);v=JSON.parse(JSON.stringify(value));}
     if(Object.hasOwn(output,'path'))v=resolve(v,output.path);
     const map=typeof stage==='string'&&WRAPPER_STAGES.includes(stage)&&plain(output.stageMaps)&&Object.hasOwn(output.stageMaps,stage)?output.stageMaps[stage]:output.map;
     return map===undefined?v:applyMap(map,v,{n:0});}

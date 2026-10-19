@@ -73,7 +73,7 @@
     c.source.setAttribute('aria-describedby',sourceHint.id);c.source.parentElement.append(sourceHint);
     const result=x('pre',{className:'wrapper-result',hidden:true,tabIndex:0,'aria-label':'매핑 미리보기 결과'}),checks=x('ul',{className:'wrapper-checks',hidden:true});
     const previewButton=x('button',{type:'button',className:'button secondary',text:'샘플로 매핑 미리보기'});
-    const previewBox=x('section',{className:'wrapper-preview','aria-labelledby':'wrapper-preview-title'},x('h4',{id:'wrapper-preview-title',text:'샘플 출력 매핑 미리보기'}),
+    const previewBox=x('section',{className:'wrapper-preview','aria-labelledby':'wrapper-preview-title'},x('h3',{id:'wrapper-preview-title',text:'샘플 출력 매핑 미리보기'}),
       x('p',{className:'wrapper-note',text:'붙여넣은 샘플 텍스트에 위 출력 설정을 적용한 결과만 보여 줍니다. 프로그램 실행 · 설치 · 모델 호출은 하지 않으며 실제 호환성 증명이 아닙니다. 실행 파일 존재와 실제 출력은 로컬 companion이 실행할 때 확인합니다.'}),
       field('stage','적용할 단계',select(Object.entries(STAGE_LABEL),'red')),field('sample','샘플 출력',area(5,'{"state":"ok","items":[{"old":"…"}]}')),
       x('div',{className:'button-row'},previewButton),checks,result);

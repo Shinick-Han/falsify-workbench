@@ -95,7 +95,6 @@ class MappingTests(unittest.TestCase):
         for text in ['Here: ```json\n{"a":1}\n```','```json\n{"a":1}\n```\n```json\n{"b":2}\n```','{"a":1}',
                      '```json\n{"a":1}\n``` trailing prose','```python\n{"a":1}\n```']:
             with self.subTest(text=text),self.assertRaises(ValueError):parse_output(text.encode(),'json-fence')
-        self.assertEqual(parse_output('﻿{"a":[1]}'.encode(),'json'),{'a':[1]})
         for raw in [b'```json\n{"a":1}\n```',b'{"a": NaN}',b'\xff',b'{"a":1} {"b":2}',b'x'*150001]:
             with self.subTest(raw=raw[:30]),self.assertRaises(ValueError):parse_output(raw,'json')
     def test_stage_detection(self):
@@ -119,6 +118,39 @@ class MappingTests(unittest.TestCase):
                                ({'rows':list(range(900))},[{'$from':'/rows'}]*200)]:
             with self.subTest(template=repr(template)[:80]),self.assertRaises(ValueError):run(value,template)
 
+class ParityTests(unittest.TestCase):
+    """Review W2-W8 repros: the backend accepts exactly what the browser helper (harness-core.js) accepts."""
+    def test_w2_placeholder_substrings_rejected(self):
+        for mode,args in [('invocation',['--out={output}']),('files',['{input}.json']),('files',['x{schema}']),('files',['--p={prompt}'])]:
+            with self.subTest(args=args),self.assertRaises(ValueError):validate_adapter(wrapper(mode,args=args))
+        validate_adapter(wrapper('files',args=['{input}','{prompt}','{schema}','{output}','{other}']))
+    def test_w3_compact_utf16_config_size(self):
+        compact=wrapper(output={'source':'stdout','format':'json','map':{'k%03d'%i:'x'*25 for i in range(900)}})
+        self.assertLessEqual(len(json.dumps(compact,ensure_ascii=False,separators=(',',':'))),32000)
+        self.assertGreater(len(json.dumps(compact,ensure_ascii=False)),32000)
+        validate_adapter(compact)
+        with self.assertRaises(ValueError):validate_adapter(wrapper(output={'source':'stdout','format':'json','map':{'a':'\U0001F600'*16000}}))
+    def test_w5_strict_shared_fence_and_bom(self):
+        for text,fmt in [('```json\n{"a":1}```','json-fence'),('```json\n{"a":"```"}\n```','json-fence'),('﻿{"a":[1]}','json'),
+                         ('﻿```json\n{"a":1}\n```','json-fence'),('```json\n﻿{"a":1}\n```','json-fence'),('\x85```json\n{"a":1}\n```','json-fence')]:
+            with self.subTest(text=text),self.assertRaises(ValueError):parse_output(text.encode(),fmt)
+        self.assertEqual(parse_output(b' \n```\r\n[1]\r\n```\n','json-fence'),[1])
+    def test_w6_ambiguous_or_malformed_stage_is_none(self):
+        for schema in [{'properties':{'summary':{},'findings':{}}},{'properties':{'candidates':{},'targets':{}}},{'properties':['summary']}]:
+            with self.subTest(schema=schema):self.assertIsNone(stage_of(schema))
+    def test_w7_unsafe_pointer_tokens_rejected(self):
+        doc={'constructor':1,'prototype':1,'a':{'__proto__':1}}
+        for p in ['/constructor','/prototype','/a/__proto__']:
+            with self.subTest(p=p):
+                with self.assertRaises(ValueError):resolve_pointer(doc,p)
+                with self.assertRaises(ValueError):validate_adapter(wrapper(output={'source':'stdout','format':'json','path':p}))
+                with self.assertRaises(ValueError):validate_adapter(wrapper(output={'source':'stdout','format':'json','map':{'v':{'$from':p}}}))
+    def test_w8_nonfinite_numbers_rejected(self):
+        for raw in [b'{"a":1e400}',b'[-1e400]',b'{"a":1'+b'0'*400+b'}',b'{"a":NaN}',b'Infinity']:
+            with self.subTest(raw=raw[:30]),self.assertRaises(ValueError):parse_output(raw,'json')
+        with self.assertRaises(ValueError):parse_output(b'```json\n{"a":1e400}\n```','json-fence')
+        self.assertEqual(parse_output(b'{"a":1.5e300,"b":-0.0,"c":12}','json'),{'a':1.5e300,'b':-0.0,'c':12})
+
 class RuntimeTests(unittest.TestCase):
     def test_invocation_mode_path_and_map(self):
         output={'source':'stdout','format':'json','path':'/result','map':{'role':{'$from':'/role'},'tag':{'$from':'/tag'},'call':{'$from':'/call'},
@@ -127,8 +159,10 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(infer(wrapper(output=output),schema,'한글 prompt'),{'status':'ok','response':{'role':'red','tag':'falsify.harness-invocation.v1',
                          'call':1,'prompt':'한글 prompt','texts':[{'t':'a'},{'t':'b'}],'fixed':'literal'}})
     def test_prompt_mode_json_fence(self):
-        prompt='line one\nline "two" 한글 ```not a fence'
+        prompt='line one\nline "two" 한글 ``not a fence'
         self.assertEqual(infer(wrapper('prompt',output={'source':'stdout','format':'json-fence'}),obj(echo=STRING),prompt)['response'],{'echo':prompt})
+        # Strict shared fence rule (W5): a fence inside the fenced JSON fails closed instead of being guessed.
+        with self.assertRaises(ValueError):infer(wrapper('prompt',output={'source':'stdout','format':'json-fence'}),obj(echo=STRING),'a ```b')
     def test_template_mode(self):
         template={'r':{'$from':'/role'},'p':{'$from':'/prompt'},'schemaType':{'$from':'/outputSchema/type'},'fixed':[1,'x',None,True]}
         r=infer(wrapper('template',template=template,output={'source':'stdout','format':'json','path':'/got'}),
@@ -149,9 +183,11 @@ class RuntimeTests(unittest.TestCase):
         def fake(argv, stdin, cwd, stdout_path):
             seen.update(argv=argv,stdin=stdin,cwd=cwd);return b'{"x":"y"}'
         with mock.patch.object(harness_adapter,'run_stdio',fake):
-            infer(wrapper(args=['x{output}','{output}','$(whoami)']),obj(x=STRING),'p')
+            infer(wrapper(args=['x','{output}','$(whoami)']),obj(x=STRING),'p')
+            # A placeholder mixed into a larger argument is refused before any call (W2), never passed literally.
+            with self.assertRaises(ValueError):infer(wrapper(args=['x{output}']),obj(x=STRING),'p')
         self.assertEqual(seen['argv'][:2],[sys.executable,PROGRAM])
-        self.assertEqual(seen['argv'][2],'x{output}');self.assertEqual(seen['argv'][4],'$(whoami)')
+        self.assertEqual(seen['argv'][2],'x');self.assertEqual(seen['argv'][4],'$(whoami)')
         self.assertEqual(seen['argv'][3],os.path.join(seen['cwd'],'output.json'))
         self.assertEqual(json.loads(seen['stdin'])['schema'],'falsify.harness-invocation.v1');self.assertTrue(seen['stdin'].endswith(b'\n'))
     def test_red_and_blue_services_real_process(self):

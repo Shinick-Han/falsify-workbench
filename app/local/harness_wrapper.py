@@ -4,6 +4,7 @@ Trusted user code, NOT an OS sandbox. Mappings are pure data templates (no eval,
 scripts); validate_shape and the services' evidence checks stay authoritative over anything mapped here.
 """
 import json
+import math
 import os
 import re
 import stat
@@ -20,6 +21,7 @@ STAGES = ('scan', 'selection', 'red', 'blue')
 STAGE_KEYS = {'summary': 'scan', 'targets': 'selection', 'candidates': 'red', 'findings': 'blue'}
 # Whole-token argument placeholders -> fixed generated file names in the private temp dir.
 PLACEHOLDERS = {'{input}': 'invocation.json', '{prompt}': 'prompt.txt', '{schema}': 'schema.json', '{output}': 'output.json'}
+PLACEHOLDER_TEXT = re.compile(r'\{(?:input|prompt|schema|output)\}')
 MAX_CONFIG_CHARS = 32000
 MAX_DEPTH = 20
 MAX_ITEMS = 1000
@@ -27,11 +29,15 @@ MAX_PRODUCED = 100000
 FORBIDDEN_KEYS = {'__proto__', 'constructor', 'prototype'}
 POINTER = re.compile(r'(?:/(?:[^~/]|~[01])*)*', re.S)
 INDEX = re.compile(r'0|[1-9][0-9]*', re.ASCII)
-FENCE = re.compile(r'\s*```(?:json)?[ \t]*\r?\n(.*?)\r?\n?```\s*', re.S)
+# Shared with harness-core.js parseOutput: JSON whitespace only around the block, newline before the closing fence.
+FENCE = re.compile(r'[ \t\r\n]*```(?:json)?[ \t]*\r?\n(.*?)\r?\n```[ \t\r\n]*', re.S)
 
 def check_pointer(pointer):
     if not isinstance(pointer, str) or len(pointer) > 2000 or not POINTER.fullmatch(pointer):
         raise ValueError('wrapper JSON pointer는 RFC 6901 형식("" 또는 "/a/0")이어야 합니다.')
+    # Mirrors the browser helper, which refuses prototype tokens.
+    if FORBIDDEN_KEYS & {t.replace('~1', '/').replace('~0', '~') for t in pointer.split('/')[1:]}:
+        raise ValueError('wrapper JSON pointer에 금지된 토큰(__proto__/constructor/prototype)이 있습니다.')
 
 def check_template(node, depth=0, count=None):
     count = [0] if count is None else count
@@ -56,7 +62,8 @@ def check_template(node, depth=0, count=None):
 def validate_adapter(adapter):
     if not isinstance(adapter, dict) or set(adapter) != {'type', 'target', 'input', 'output'} or adapter['type'] != 'wrapper':
         raise ValueError('wrapper adapter 필드는 type/target/input/output만 허용합니다.')
-    try: size = len(json.dumps(adapter, ensure_ascii=False, allow_nan=False))
+    # Compact JSON measured in UTF-16 code units, the same count as JSON.stringify(...).length in the browser.
+    try: size = len(json.dumps(adapter, ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode('utf-16-le', 'surrogatepass')) // 2
     except (TypeError, ValueError): raise ValueError('wrapper 설정은 JSON이어야 합니다.') from None
     if size > MAX_CONFIG_CHARS: raise ValueError('wrapper 설정은 직렬화 32,000자 이내입니다.')
     target, given, output = adapter['target'], adapter['input'], adapter['output']
@@ -70,6 +77,8 @@ def validate_adapter(adapter):
     if mode == 'files' and target['type'] != 'stdio': raise ValueError('wrapper files 모드는 stdio target만 허용합니다.')
     if target['type'] == 'stdio' and mode != 'files' and {a for a in target['args'] if a in PLACEHOLDERS} - {'{output}'}:
         raise ValueError('{input}/{prompt}/{schema} 자리표시자는 files 모드에서만 허용합니다.')
+    if target['type'] == 'stdio' and any(a not in PLACEHOLDERS and PLACEHOLDER_TEXT.search(a) for a in target['args']):
+        raise ValueError('wrapper args 자리표시자는 인자 하나 전체로만 씁니다.')
     if not isinstance(output, dict) or not {'source', 'format'} <= set(output) or set(output) - {'source', 'format', 'path', 'map', 'stageMaps'}:
         raise ValueError('wrapper output 필드는 source/format/path/map/stageMaps만 허용합니다.')
     if output['source'] not in SOURCES or output['format'] not in FORMATS:
@@ -117,7 +126,8 @@ def apply_map(node, context, budget):
 def stage_of(schema):
     """scan/selection/red/blue from the invocation output schema; None when not exactly one matches."""
     props = schema.get('properties') if isinstance(schema, dict) else None
-    found = [STAGE_KEYS[k] for k in props or () if k in STAGE_KEYS]
+    if not isinstance(props, dict): return None
+    found = [STAGE_KEYS[k] for k in props if k in STAGE_KEYS]
     return found[0] if len(found) == 1 else None
 
 def transform_output(value, output, stage=None):
@@ -132,16 +142,26 @@ def transform_output(value, output, stage=None):
 def _reject_constant(_):
     raise ValueError('non-finite')
 
+def _finite_float(text):
+    value = float(text)
+    if not math.isfinite(value): raise ValueError('non-finite')
+    return value
+
+def _finite_int(text):
+    value = int(text)
+    float(value)  # OverflowError beyond the double range, where JSON.parse yields Infinity
+    return value
+
 def parse_output(raw, fmt):
     if len(raw) > harness_adapter.MAX_OUTPUT_BYTES: raise ValueError('adapter 출력은 150,000바이트 이내입니다.')
     try:
-        text = raw.decode('utf-8-sig')
+        text = raw.decode('utf-8')  # a BOM is not JSON and is rejected, as in the browser
         if fmt == 'json-fence':
-            # One whole fenced block; a second block or surrounding prose leaves non-JSON and fails.
+            # One whole fenced block; a second block, an embedded fence or surrounding prose fails.
             match = FENCE.fullmatch(text)
-            if not match: raise ValueError('fence')
+            if not match or '```' in match.group(1): raise ValueError('fence')
             text = match.group(1)
-        return json.loads(text, parse_constant=_reject_constant)
+        return json.loads(text, parse_constant=_reject_constant, parse_float=_finite_float, parse_int=_finite_int)
     except Exception:
         raise ValueError('wrapper 출력이 선언한 형식(json/json-fence)이 아닙니다. 출력은 기록하지 않았습니다.') from None
 

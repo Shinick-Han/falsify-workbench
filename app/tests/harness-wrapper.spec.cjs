@@ -62,6 +62,27 @@ check('formats: json whole value, json-fence single whole block, Markdown prose 
   code(()=>H.transformWrapperOutput('Here you go: {"a":1}',out),'parse');code(()=>H.transformWrapperOutput('```json\n{"a":1}\n```',out),'parse');
   for(const t of ['Result:\n```json\n{"a":1}\n```','```json\n{"a":1}\n```\nDone.','```json\n{"a":1}\n```\n```json\n{"b":2}\n```','{"a":1}','```json {"a":1}```'])code(()=>H.transformWrapperOutput(t,f),'fence');
   code(()=>H.transformWrapperOutput('"'+'x'.repeat(150000)+'"',out),'outputSize');});
+// Review W1-W8 parity: the browser helper accepts exactly what the backend (harness_wrapper.py) accepts.
+check('parity W1: files mode needs stdio; {input}/{prompt}/{schema} only in files mode',()=>{
+  code(()=>H.validateWrapper(wrap({target:{type:'http',url:'https://example.com/x'},input:{mode:'files'}})),'input');
+  for(const input of [{mode:'invocation'},{mode:'prompt'},{mode:'template',template:{}}])for(const arg of ['{input}','{prompt}','{schema}'])code(()=>H.validateWrapper(wrap({input,target:{...stdio,args:[arg]}})),'filesOnly');
+  assert.ok(H.validateWrapper(wrap({target:{...stdio,args:['{output}']}})));});
+check('parity W3: size counts UTF-16 units of compact JSON',()=>{const map=Object.fromEntries(Array.from({length:900},(_,i)=>['k'+String(i).padStart(3,'0'),'x'.repeat(25)]));
+  assert.ok(H.validateWrapper(wrap({output:{...out,map}})));code(()=>H.validateWrapper(wrap({output:{...out,map:{a:'\u{1F600}'.repeat(16000)}}})),'size');});
+check('parity W4: $each over 1000 elements and copied nodes over 100000 fail',()=>{const each=n=>({x:Array.from({length:n},(_,i)=>i)});
+  assert.equal(H.transformWrapperOutput(each(1000),{...out,map:{$each:'/x',template:1}}).length,1000);code(()=>H.transformWrapperOutput(each(1001),{...out,map:{$each:'/x',template:1}}),'resultSize');
+  assert.equal(H.transformWrapperOutput(each(30000),{...out,map:Array(3).fill({$from:'/x'})}).length,3);code(()=>H.transformWrapperOutput(each(30000),{...out,map:Array(4).fill({$from:'/x'})}),'resultSize');});
+check('parity W5: strict shared fence, BOM and non-JSON whitespace rejected',()=>{const f={...out,format:'json-fence'};
+  for(const t of ['```json\n{"a":1}```','```json\n{"a":"```"}\n```','﻿```json\n{"a":1}\n```','```json\n﻿{"a":1}\n```',' ```json\n{"a":1}\n```'])assert.throws(()=>H.transformWrapperOutput(t,f),e=>['fence','parse'].includes(e.code),JSON.stringify(t));
+  code(()=>H.transformWrapperOutput('﻿{"a":1}',out),'parse');assert.deepEqual(H.transformWrapperOutput(' \n```\r\n[1]\r\n```\n',f),[1]);});
+check('parity W6: ambiguous or malformed schema has no stage',()=>{for(const s of [{properties:{summary:{},findings:{}}},{properties:{candidates:{},targets:{}}},{properties:['summary']}])assert.equal(H.stageForSchema(s),null);
+  assert.deepEqual(H.transformWrapperOutput({},{...out,map:{from:'map'},stageMaps:{scan:{from:'scan'}}},H.stageForSchema({properties:{summary:{},findings:{}}})),{from:'map'});});
+check('parity W7: prototype pointer tokens rejected in path and directives',()=>{for(const p of ['/constructor','/prototype','/a/__proto__']){code(()=>H.validateWrapper(wrap({output:{...out,path:p}})),'proto');code(()=>H.validateWrapper(wrap({output:{...out,map:{v:{$from:p}}}})),'proto');}});
+check('parity W8: non-finite numbers rejected after parse',()=>{for(const t of ['{"a":1e400}','[-1e400]','{"a":1'+'0'.repeat(400)+'}'])code(()=>H.transformWrapperOutput(t,out),'parse');
+  code(()=>H.transformWrapperOutput('```json\n{"a":1e400}\n```',{...out,format:'json-fence'}),'parse');code(()=>H.transformWrapperOutput({a:[Infinity]},out),'parse');
+  assert.deepEqual(H.transformWrapperOutput('{"a":1.5e300,"c":12}',out),{a:1.5e300,c:12});});
+check('preview heading is h3 (no skipped level) and styled',()=>{const fs=require('node:fs'),path=require('node:path'),read=f=>fs.readFileSync(path.join(__dirname,'../dist',f),'utf8');
+  const js=read('harness-wrapper.js'),css=read('harness-wrapper.css');assert.ok(js.includes("x('h3',{id:'wrapper-preview-title'"));assert.ok(!js.includes("x('h4'"));assert.ok(css.includes('.wrapper-preview h3{'));assert.ok(!css.includes('h4'));});
 check('error messages are fixed text and never echo user values',()=>{const secret='sk-SECRET-VALUE';
   for(const fn of [()=>H.transformWrapperOutput(secret,out),()=>H.transformWrapperOutput({},{...out,path:'/'+secret}),()=>H.validateWrapper(wrap({output:{...out,path:secret}}))])
     assert.throws(fn,e=>!e.message.includes(secret)&&Object.values(H.WRAPPER_ERRORS).includes(e.message));
@@ -73,7 +94,8 @@ check('builder http target, template mode, empty optional fields',()=>{const h=W
   assert.deepEqual(h.adapter,{type:'wrapper',target:{type:'http',url:'https://example.com/run'},input:{mode:'template',template:{text:{$from:'/prompt'}}},output:{source:'stdout',format:'json'}});assert.deepEqual(h.settings,{});});
 check('builder negatives use fixed recovery messages',()=>{for(const [d,m] of [[{args:'"--x"'},'args'],[{args:'{'},'args'],[{settings:'[]'},'settings'],[{inputMode:'template',template:''},'template'],[{advanced:'{"other":1}'},'advanced'],[{advanced:'[]'},'advanced']])assert.throws(()=>W.build({...fields,...d}),e=>e.message===W.MSG[m],m);
   assert.throws(()=>W.build({...fields,maxCalls:'0'}),e=>e.fixed&&e.message==='호출 한도는 1–32회입니다.');assert.throws(()=>W.build({...fields,executable:'python'}),e=>e.code==='target');
-  assert.throws(()=>W.build({...fields,source:'file',targetType:'http',url:'https://example.com/'}),e=>e.code==='output');});
+  assert.throws(()=>W.build({...fields,inputMode:'invocation',source:'file',targetType:'http',url:'https://example.com/'}),e=>e.code==='output');
+  assert.throws(()=>W.build({...fields,targetType:'http',url:'https://example.com/'}),e=>e.code==='input');});
 check('preview: explicit stage, missing/extra top-level keys reported, not certification',()=>{const p=W.preview(fields,JSON.stringify(legacy),'red');assert.deepEqual(p.missing,[]);assert.deepEqual(p.extra,[]);assert.equal(p.value.candidates[0].evidence[0].quote,'Only an association was observed.');
   const s=W.preview({...fields,advanced:JSON.stringify({stageMaps:{scan:{status:{$from:'/state'},note:'x'}}})},JSON.stringify(legacy),'scan');assert.deepEqual(s.missing,['summary','evidence']);assert.deepEqual(s.extra,['note']);
   assert.throws(()=>W.preview(fields,'  ','red'),e=>e.message===W.MSG.sample);assert.throws(()=>W.preview(fields,'{"result":{}}','red'),e=>e.code==='missing');});
