@@ -1,0 +1,26 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "falsify-cloud-api",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-19",
+  // Password hashing uses the native node:crypto scrypt.
+  "compatibility_flags": ["nodejs_compat"],
+  // Deploy-inert until the root coordinator binds the real database: no route, no workers.dev
+  // or preview URL, and no D1 binding (without DB every endpoint answers 503 not_configured).
+  // The root adds, with the real id of a database it created:
+  //   "d1_databases": [{ "binding": "DB", "database_name": "falsify-cloud", "database_id": "<id>", "migrations_dir": "migrations" }]
+  "workers_dev": false,
+  "preview_urls": false,
+  "vars": {
+    // Exact origins only; local test origins belong in .dev.vars or test bindings, never here.
+    "ALLOWED_ORIGINS": "https://shinick-han.github.io"
+  },
+  // Platform invocation logs are off (they carry client request metadata); the Worker emits one
+  // structured line per request with route template, method, status and duration only.
+  "observability": {
+    "enabled": true,
+    "redact_query_string": true,
+    "logs": { "enabled": true, "invocation_logs": false },
+    "traces": { "enabled": true }
+  }
+}
