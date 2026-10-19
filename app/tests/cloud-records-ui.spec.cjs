@@ -110,6 +110,13 @@ test('upload is private by default, previews the exact body and needs consent; e
   assert.ok(!t.$('cloud-upload-preview').textContent.includes('protocolVersion'),'an unconfirmed local review keeps its protocol unknown');assert.match(t.$('cloud-upload-review-conditions').textContent,/프로토콜 미상.*빠집니다/);
   t.$('cloud-upload-review-protocol').checked=true;t.$('cloud-upload-review-protocol').change();await until(()=>t.$('cloud-upload-preview').textContent.includes('"protocolVersion": "p1"'),'confirmed protocol');assert.equal(t.$('cloud-upload-consent').checked,false,'confirming resets consent');});
 
+test('deduplicated upload reports the returned visibility, not the requested sharing state',async()=>{
+  const t=setup({store:new Map([[KEY,meSession()]]),routes:(m,p,init)=>m==='POST'&&p==='/v1/records'?{status:200,body:{deduplicated:true,record:rec('existing-private','harness',JSON.parse(init.body).payload,{owner:'author-me',name:'Me',user:'me',visibility:'private'})}}:null});await t.ready;
+  t.$('cloud-upload-read').click();await flush();t.$('cloud-upload-item').change('0');t.$('cloud-upload-visibility').change('shared');await until(()=>t.$('cloud-upload-preview').textContent.includes('shared'),'preview');
+  t.$('cloud-upload-consent').checked=true;t.$('cloud-upload-consent').change();t.$('cloud-upload-send').click();await until(()=>t.$('cloud-upload-status').textContent.includes('같은 내용'),'dedup');
+  assert.match(t.$('cloud-upload-status').textContent,/비공개 기록으로 올렸습니다/);assert.ok(!t.$('cloud-upload-status').textContent.includes('공유 기록으로 올렸습니다'));
+});
+
 test('public harness preview only loads the editor and links to the existing Harness view',async()=>{
   const t=setup({routes:sharedRoute});await t.ready;t.$('cloud-refresh').click();await until(()=>t.records().length===2,'loaded');
   t.action(t.records()[0],'preview').click();await until(()=>t.lab.calls.length===1,'preview called');await flush();

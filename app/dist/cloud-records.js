@@ -239,7 +239,8 @@
       if(body.visibility!=='private'&&'evidence' in body.payload){upSay('증거는 공유 기록에 넣을 수 없습니다.',true);return;}
       busy.upload=true;upConsent.checked=false;refreshSend();upSay('올리는 중…');
       try{const data=await api('POST','/v1/records',{auth:true,body});if(!validRecord(data.record))throw local('서버 응답 형식이 맞지 않습니다. 내 기록을 다시 불러와 확인하세요.');adoptRecord(data.record);
-        upSay((body.visibility==='shared'?'공유':'비공개')+' 기록으로 올렸습니다 (서버 ID '+short(data.record.id)+'). 로컬 기록은 바뀌지 않았습니다.');}
+        const visibility=data.record.visibility==='shared'?'공유':'비공개';
+        upSay(visibility+' 기록으로 올렸습니다 (서버 ID '+short(data.record.id)+'). '+(data.record.visibility!==body.visibility?'같은 내용이 이미 '+visibility+'로 저장돼 있습니다. 내 기록에서 공개 범위를 바꾸세요. ':'')+'로컬 기록은 바뀌지 않았습니다.');}
       catch(e){upSay(explain(e,'write')+' 고른 기록과 보낼 내용은 그대로 둡니다.',true);}
       finally{busy.upload=false;refreshSend();}}
 
