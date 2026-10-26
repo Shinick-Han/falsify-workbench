@@ -1,6 +1,7 @@
 'use strict';
 // Synthetic manual-provenance checks. No browser, network, model, or Confluence write.
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
+const {pathToFileURL}=require('node:url');
 const {test}=require('node:test');
 const bundlePromise=import('../dist/review-bundle.mjs');
 const dist=path.resolve(__dirname,'../dist');
@@ -307,15 +308,7 @@ test('ledger bridge opens a paper-edit without writing the AI ledger or copying 
 
 test('real paper-edits core captures null style, duplicate ranges, history, and review binding',async()=>{
   const bundle=await bundlePromise;
-  const {execFileSync}=require('node:child_process');
-  const os=require('node:os');
-  const coreFile=path.join(os.tmpdir(),'falsify-paper-edits-ebb7b21.js');
-  const coreSource=execFileSync('git',['show','origin/feature/paper-workspace-20261026:app/dist/paper-edits.js'],{encoding:'utf8'});
-  assert.match(coreSource,/FalsifyPaperEdits/);
-  fs.writeFileSync(coreFile,coreSource);
-  assert.equal(fs.existsSync(path.join(dist,'paper-edits.js')),false);
-  assert.equal(coreFile.startsWith(path.resolve(dist,'..','..')),false);
-  const E=require(coreFile);
+  const E=require('../dist/paper-edits.js');
   let tick=1700000000000;
   const segments=[{id:'s0',label:'p1',text:'alpha alpha',pageIndex:0}];
   const session=E.create({fileHash:SOURCE,name:'synthetic.txt',segments,now:()=>tick++});
@@ -478,6 +471,79 @@ test('a stale capture or output link cannot overwrite a newer source or revision
   assert.equal(t.api.downloadLink(t.api.records()[0]),null);
   assert.equal(t.posts.length,0);
   assert.equal(t.fetches.length,0);
+});
+
+function bootFromScript(scriptSrc){
+  const posts=[];
+  const storage=new Map([[LEDGER,'{"schema":"falsify.experiment-ledger.v1","runs":[{"id":"keep-local"}]}']]);
+  const body=new El('body'), review=new El('section'); review.id='human-evaluation'; body.append(review);
+  const location={hash:''};
+  let scriptEl=scriptSrc?{src:scriptSrc}:null;
+  const document=new EventTarget();
+  Object.assign(document,{readyState:'complete',body,createElement:tag=>new El(tag),
+    get currentScript(){return scriptEl;},
+    set currentScript(value){scriptEl=value&&value.src?{src:value.src}:null;},
+    querySelector(sel){if(sel==='[data-view="review"]') return null; if(sel.startsWith('#')) return body.find(node=>node.id===sel.slice(1)); return null;}});
+  const ctx=vm.createContext({document,location,CustomEvent,Event,URL,Date,TextEncoder,crypto:globalThis.crypto,console,setTimeout,clearTimeout,
+    localStorage:{getItem:key=>storage.get(key)??null,setItem:(key,value)=>storage.set(key,String(value)),removeItem:key=>storage.delete(key)},
+    fetch(){posts.push('fetch'); throw Error('network disabled');},
+    FalsifyConfluenceStore:{ready:Promise.resolve({async publishPaperEdit(record,options){posts.push({record,options}); return {stored:true,pageId:'9001',archiveSha256:HASH_A,alreadyExisted:false};}})}
+  });
+  const source=fs.readFileSync(path.join(dist,'paper-manual-records.js'),'utf8');
+  new vm.Script(source,{filename:scriptSrc||'paper-manual-records.js',importModuleDynamically:vm.constants.USE_MAIN_CONTEXT_DEFAULT_LOADER}).runInContext(ctx);
+  document.currentScript=null;
+  const $=id=>body.find(node=>node.id===id);
+  return {ctx,document,body,posts,storage,api:ctx.FalsifyPaperManualRecords,$};
+}
+test('capture imports review-bundle from the evaluation URL without a preinjected global',async()=>{
+  const bundle=await bundlePromise;
+  const scriptSrc=pathToFileURL(path.join(dist,'paper-manual-records.js')).href;
+  const t=bootFromScript(scriptSrc);
+  await t.api.ready;
+  assert.equal(t.document.currentScript,null);
+  assert.equal(t.ctx.FalsifyReviewBundle,undefined);
+  const anchor={start:6,end:11,occurrence:1,bbox:null,style:null};
+  const segments=[{id:'s0',label:'p1',text:'alpha alpha',pageIndex:0}];
+  const edit={id:'e1',enabled:true,pageIndex:0,segmentId:'s0',before:'alpha',after:'beta',origin:'human',anchor,createdAt:10,updatedAt:10,history:[{revision:1,at:10,after:'beta',enabled:true,anchor}]};
+  const captured=await t.api.capture({source:{fileHash:SOURCE,name:'synthetic.txt',segments},snapshot:snapshot(SOURCE,1,[edit]),output:{sha256:HASH_A,revision:1,verification:{applied:1}},now:10});
+  assert.equal(t.ctx.FalsifyReviewBundle,undefined);
+  assert.equal(t.document.currentScript,null);
+  assert.equal(captured.edits[0].history.length,1);
+  assert.equal(captured.edits[0].history[0].after,'beta');
+  assert.equal(captured.edits[0].anchor.bbox,null);
+  assert.equal(captured.edits[0].anchor.style,null);
+  assert.equal(captured.output.sha256,HASH_A);
+  const built=await bundle.buildPaperEditArchive(t.api.records()[0]);
+  const validated=await bundle.validateArchive(built);
+  assert.equal(await bundle.archiveHash(built),await bundle.archiveHash(validated));
+  assert.equal(validated.data.record.edits[0].history.length,1);
+  assert.equal(validated.data.record.edits[0].createdAt,10);
+  t.$('paper-manual-prepare').click();
+  assert.equal(t.$('paper-manual-publish').disabled,true);
+  assert.equal(t.posts.length,0);
+  t.$('paper-manual-cancel').click();
+  assert.equal(t.posts.length,0);
+  t.$('paper-manual-prepare').click();
+  t.$('paper-manual-consent').checked=true; t.$('paper-manual-consent').change();
+  t.$('paper-manual-publish').click();
+  await until(()=>t.posts.length===1,'one consented post');
+  assert.equal(t.posts[0].options.teamShare,true);
+  assert.equal(t.posts.some(item=>item==='fetch'),false);
+  assert.equal(t.storage.get(LEDGER).includes('keep-local'),true);
+  const crashes=[];
+  const onUnhandled=error=>crashes.push(error);
+  process.on('unhandledRejection', onUnhandled);
+  try{
+    const bare=bootFromScript(null);
+    await bare.api.ready;
+    await assert.rejects(bare.api.capture({source:{fileHash:SOURCE,name:'synthetic.txt',segments},snapshot:snapshot(SOURCE,1,[edit]),output:null}),/보관 형식 모듈/);
+    await assert.rejects(bare.api.capture({source:{fileHash:SOURCE,name:'synthetic.txt',segments},snapshot:snapshot(SOURCE,1,[edit]),output:null}),/보관 형식 모듈/);
+    const missing=bootFromScript(pathToFileURL('/tmp/falsify-no-such-manual/paper-manual-records.js').href);
+    await missing.api.ready;
+    await assert.rejects(missing.api.capture({source:{fileHash:SOURCE,name:'synthetic.txt',segments},snapshot:snapshot(SOURCE,1,[edit]),output:null}),/보관 형식 모듈|Failed to load|Cannot find/);
+    await flush();
+    assert.equal(crashes.length,0);
+  }finally{process.off('unhandledRejection', onUnhandled);}
 });
 
 test('manual record stylesheet keeps the airport tokens',()=>{
