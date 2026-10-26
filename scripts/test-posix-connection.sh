@@ -43,26 +43,26 @@ else
   check 'open rejects password' 1
 fi
 
-home=$(mktemp -d)
-FALSIFY_CONNECT_HOME="$home" FALSIFY_CONNECT_DRY_RUN=1 "$root/install-connection.sh" | grep -q 'DRY-RUN install linux'
-FALSIFY_CONNECT_HOME="$home" "$root/install-connection.sh" >/dev/null
-mode=$(stat -c '%a' "$home/.local/share/applications")
-check 'applications dir is private' "$([ "$mode" = 700 ] && echo 1 || echo 0)"
-grep -q "Exec=$root/open-connection.sh %u" "$home/.local/share/applications/falsify-connect.desktop"
+test_home_dir=$(mktemp -d)
+FALSIFY_CONNECT_OS=Linux FALSIFY_CONNECT_HOME="$test_home_dir" FALSIFY_CONNECT_DRY_RUN=1 "$root/install-connection.sh" | grep -q 'DRY-RUN install linux'
+FALSIFY_CONNECT_OS=Linux FALSIFY_CONNECT_HOME="$test_home_dir" "$root/install-connection.sh" >/dev/null
+mode=$(falsify_mode "$test_home_dir/.local/share/applications")
+check 'linux applications dir is private' "$([ "$mode" = 700 ] && echo 1 || echo 0)"
+grep -q "Exec=$root/open-connection.sh %u" "$test_home_dir/.local/share/applications/falsify-connect.desktop"
 # A foreign handler is not removed.
-foreign=$home/.local/share/applications/falsify-connect.desktop
+foreign=$test_home_dir/.local/share/applications/falsify-connect.desktop
 printf 'Exec=/other/open-connection.sh %%u\n' > "$foreign"
-if FALSIFY_CONNECT_HOME="$home" "$root/uninstall-connection.sh" >/dev/null 2>&1; then
-  check 'uninstall refuses foreign handler' 0
+if FALSIFY_CONNECT_OS=Linux FALSIFY_CONNECT_HOME="$test_home_dir" "$root/uninstall-connection.sh" >/dev/null 2>&1; then
+  check 'linux uninstall refuses foreign handler' 0
 else
-  check 'uninstall refuses foreign handler' 1
+  check 'linux uninstall refuses foreign handler' 1
 fi
-FALSIFY_CONNECT_HOME="$home" "$root/install-connection.sh" >/dev/null
-FALSIFY_CONNECT_HOME="$home" "$root/uninstall-connection.sh" >/dev/null
-if [ -f "$home/.local/share/applications/falsify-connect.desktop" ]; then
-  check 'uninstall removes own handler' 0
+FALSIFY_CONNECT_OS=Linux FALSIFY_CONNECT_HOME="$test_home_dir" "$root/install-connection.sh" >/dev/null
+FALSIFY_CONNECT_OS=Linux FALSIFY_CONNECT_HOME="$test_home_dir" "$root/uninstall-connection.sh" >/dev/null
+if [ -f "$test_home_dir/.local/share/applications/falsify-connect.desktop" ]; then
+  check 'linux uninstall removes own handler' 0
 else
-  check 'uninstall removes own handler' 1
+  check 'linux uninstall removes own handler' 1
 fi
 work=$(mktemp -d)
 if FALSIFY_PYTHON= falsify_project_python "$work" >"$work/out" 2>"$work/err"; then
@@ -99,10 +99,30 @@ if grep -E 'kill -9|pkill|killall' "$root/open-connection.sh" "$root/install-con
 else
   check 'no arbitrary force kill' 1
 fi
+private_file=$work/private-mode
+printf 'x\n' > "$private_file"
+chmod 600 "$private_file"
+check 'gnu stat mode' "$([ "$(falsify_mode "$private_file")" = 600 ] && echo 1 || echo 0)"
+real_stat=$(command -v stat)
+stat_dir=$work/stat-bsd
+mkdir -p "$stat_dir"
+cat > "$stat_dir/stat" << EOF
+#!/bin/sh
+if [ "\$1" = -c ]; then
+  echo 'gnu stat refused' >&2
+  exit 1
+fi
+if [ "\$1" = -f ] && [ "\$2" = %OLp ]; then
+  exec $(printf '%q' "$real_stat") -c '%a' "\$3"
+fi
+echo "unexpected stat \$*" >&2
+exit 1
+EOF
+chmod +x "$stat_dir/stat"
+bsd_mode=$(PATH="$stat_dir:$PATH" falsify_mode "$private_file")
+check 'bsd stat mode fallback' "$([ "$bsd_mode" = 600 ] && echo 1 || echo 0)"
 rm -rf "$work"
-out=$(FALSIFY_CONNECT_OS=Darwin FALSIFY_CONNECT_DRY_RUN=1 FALSIFY_CONNECT_HOME="$home" "$root/install-connection.sh")
-check 'darwin dry-run is not certification' "$(printf '%s' "$out" | grep -q 'not a macOS certification' && printf '%s' "$out" | grep -q 'DRY-RUN install darwin' && echo 1 || echo 0)"
-rm -rf "$home"
+rm -rf "$test_home_dir"
 
 python3 - << PY
 import pathlib, sys
