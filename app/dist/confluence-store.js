@@ -211,7 +211,9 @@
     function codec(){
       if(deps.codec) return Promise.resolve(deps.codec);
       if(globalThis.FalsifyReviewBundle) return Promise.resolve(globalThis.FalsifyReviewBundle);
-      return import(new URL('review-bundle.mjs', script?.src||loc.href)).catch(()=>{throw local('보관 형식 모듈을 불러오지 못했습니다. 올리지 않았습니다. 로컬 기록은 그대로입니다.');});
+      const codecUrl=new URL('review-bundle.mjs', script?.src||loc.href);
+      codecUrl.search=new URL(script?.src||loc.href).search;
+      return import(codecUrl.href).catch(()=>{throw local('보관 형식 모듈을 불러오지 못했습니다. 올리지 않았습니다. 로컬 기록은 그대로입니다.');});
     }
     function validators(){return {harness:globalThis.FalsifyHarness, red:globalThis.FalsifyDocumentRed, blue:globalThis.FalsifyDocumentBlue, review:globalThis.FalsifyReview};}
     function release(){state.busy=false; paint();}

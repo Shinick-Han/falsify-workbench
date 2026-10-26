@@ -171,7 +171,8 @@ test('review shows text, accept sends only a checked unique match, and ambiguous
   assert.equal(ui.calls[0].proposals[0].anchor.occurrence,1);
   assert.equal(ui.calls[0].proposals[0].anchor.start,ui.calls[0].proposals[0].matches[0].start);
   assert.equal(ui.calls[0].proposals[0].origin,'external-ai-import');
-  assert.match(ui.input('external-red-accept-status').textContent,/검증된 실행으로 기록하지 않았습니다/);
+  assert.equal(ui.calls[0].options.confirmed,true);
+  assert.match(ui.input('external-red-accept-status').textContent,/편집 목록에서 확인/);
   assert.equal(ui.calls[0].proposals.some(item=>item.segmentId==='missing'),false);
 });
 

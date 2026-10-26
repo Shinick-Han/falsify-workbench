@@ -420,7 +420,12 @@
       return {
         get:hash=>open().then(db=>new Promise((ok,no)=>done(db.transaction('files').objectStore('files').get(hash),ok,no))),
         put:(hash,record)=>open().then(db=>new Promise((ok,no)=>done(db.transaction('files','readwrite').objectStore('files').put(record,hash),ok,no))),
-        delete:hash=>open().then(db=>new Promise((ok,no)=>done(db.transaction('files','readwrite').objectStore('files').delete(hash),ok,no)))
+        delete:hash=>open().then(db=>new Promise((ok,no)=>done(db.transaction('files','readwrite').objectStore('files').delete(hash),ok,no))),
+        purgeExpired:at=>open().then(db=>new Promise((ok,no)=>{
+          const tx=db.transaction('files','readwrite'),cursor=tx.objectStore('files').openCursor();
+          cursor.onsuccess=()=>{const row=cursor.result;if(!row)return;if(!(row.value?.expiresAt>at))row.delete();row.continue();};
+          tx.oncomplete=()=>{db.close();ok();};tx.onerror=()=>{db.close();no(tx.error);};
+        }))
       };
     }
     let epoch=0,source=null,session=null,unsub=null,snapshot=null,output=null,inline=null,pageText=null;
@@ -957,6 +962,10 @@
       proposalQueue={proposals:Array.isArray(proposals)?proposals:[],origin:norm.origin,model:norm.model};
       accepted=new Set();paintProposals();
       ui.proposals.hidden=!proposalQueue.proposals.length;
+      if(norm.origin==='external-ai-import'&&options?.confirmed===true){
+        proposalQueue.proposals.forEach((_,i)=>acceptOne(i));
+        return {applied:accepted.size};
+      }
     }
     async function drawAfter(){
       const seq=++afterSeq,mine=epoch,current=output;
@@ -1230,6 +1239,7 @@
     ui.inlineAfter.addEventListener('keydown',onKey);
     for(const [node,name] of [[ui.original,'download'],[ui.generate,'pencil'],[ui.team,'users'],[ui.blue,'arrow-right'],[ui.undo,'refresh-cw'],[ui.current,'download'],[ui.draftDelete,'x']])paintIcon(node,name);
     renderChrome();renderInline();renderEdits();remindDraft();
+    try{const blobs=blobApi();if(blobs?.purgeExpired)void blobs.purgeExpired(now()).catch(()=>{});}catch{}
     if(ui.file.files&&ui.file.files[0])void openFile(ui.file.files[0]);
     return {
       acceptProposals,

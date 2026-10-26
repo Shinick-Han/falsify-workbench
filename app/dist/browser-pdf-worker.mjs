@@ -1,4 +1,6 @@
-import {prepare} from './browser-pdf.mjs';
+const engineUrl = new URL('./browser-pdf.mjs', import.meta.url);
+engineUrl.search = new URL(import.meta.url).search;
+const {prepare} = await import(engineUrl.href);
 
 self.onmessage = async (event) => {
   const data = event.data || {};

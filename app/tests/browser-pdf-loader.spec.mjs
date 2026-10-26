@@ -128,7 +128,7 @@ function install(Worker) {
 test('evaluating the classic loader does not construct a worker or fetch wasm', () => {
   assert.equal(loaderSource.includes('mupdf-wasm'), false);
   assert.equal(/import\s*\(|from\s+['"]\.\/browser-pdf\.mjs['"]/.test(loaderSource), false);
-  assert.match(workerSource, /from '\.\/browser-pdf\.mjs'/);
+  assert.match(workerSource, /new URL\('\.\/browser-pdf\.mjs', import\.meta\.url\)/);
   assert.match(workerSource, /postMessage\(\{ready: true\}\)/);
   const loadedModules = process.moduleLoadList || [];
   assert.equal(loadedModules.some(item => /mupdf|browser-pdf\.mjs|mupdf-wasm/.test(item)), false);

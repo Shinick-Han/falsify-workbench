@@ -39,7 +39,9 @@
   }
 
   function spawn(scriptUrl) {
-    var created = new Worker(new URL('./browser-pdf-worker.mjs', scriptUrl), {type: 'module'});
+    var workerUrl = new URL('./browser-pdf-worker.mjs', scriptUrl);
+    workerUrl.search = new URL(scriptUrl).search;
+    var created = new Worker(workerUrl, {type: 'module'});
     var readySettled = false;
     var markReady, rejectReady;
     created.ready = new Promise(function (resolve, reject) {

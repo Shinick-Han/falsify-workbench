@@ -5,6 +5,8 @@
   'use strict';
   const script=document.currentScript;
   const BUNDLE_URL=script&&script.src?new URL('./review-bundle.mjs', script.src).href:null;
+  const CODEC_URL=BUNDLE_URL?new URL(BUNDLE_URL):null;
+  if(CODEC_URL)CODEC_URL.search=new URL(script.src).search;
   const TTL=12*60*60*1000;
   const HEX=/^[a-f0-9]{64}$/;
   const ORIGIN_LABEL={human:'사람 편집', 'external-ai-import':'외부 AI 가져오기', 'ai-proposal':'작업대 AI 제안'};
@@ -36,7 +38,7 @@
       missing.catch(()=>{});
       return missing;
     }
-    const pending=import(BUNDLE_URL).then(module=>{
+    const pending=import(CODEC_URL.href).then(module=>{
       if(!module||typeof module.normalizePaperEdit!=='function'||typeof module.buildPaperEditArchive!=='function'||typeof module.validateArchive!=='function') throw Error('수동 편집 보관 형식 모듈을 찾지 못했습니다.');
       return module;
     });

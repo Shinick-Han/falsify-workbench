@@ -248,13 +248,13 @@
         matches:item.matches.map(copyMatch)
       }));
       const model=modelInput.value.trim().slice(0,modelInput.maxLength||120);
-      const options={origin:ORIGIN};
+      const options={origin:ORIGIN,confirmed:true};
       if(model)options.model=model;
       const token=mapped;
       try{
         await Promise.resolve().then(()=>apiWorkspace.acceptProposals(payload,options));
         if(mapped!==token){clearMapping();return;}
-        say(acceptStatus,'편집 목록에 올렸습니다. 모호한 위치는 가져오지 않았고, 검증된 실행으로 기록하지 않았습니다.');
+        say(acceptStatus,'선택한 변경을 작업대로 보냈습니다. 편집 목록에서 확인하세요.');
       }catch{say(acceptStatus,'편집 화면이 받지 못해 가져오지 못했습니다. 적용하지 않았습니다.',true);}
     }
     copyButton.addEventListener('click',()=>{if(!copyButton.disabled)void copyPrompt();});
