@@ -1,6 +1,7 @@
 /* Confluence team archive: airport surface, same tokens as the workbench. No status lamp, no shadow. */
 .confluence-store{margin-top:22px;padding-top:16px;border-top:1px solid var(--line);min-width:0}
 .confluence-store h3{margin:0 0 8px;font-size:16px;font-weight:700;letter-spacing:-0.02em}
+.confluence-temporary{margin:0 0 10px;padding:10px 12px;border:1px solid var(--line);background:var(--paper);color:var(--ink);font-size:15px;font-weight:700;line-height:1.5}
 .confluence-store .muted,.confluence-connection{color:var(--muted);font-size:13px;line-height:1.6}
 .confluence-connection{min-height:22px;margin:10px 0}
 .confluence-status{min-height:22px;margin:10px 0}

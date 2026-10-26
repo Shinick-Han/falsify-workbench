@@ -7,6 +7,7 @@ const SESSION_KEY='falsify.confluence-session.v1',LEDGER_KEY='falsify.experiment
 const H='a'.repeat(64),HASH='ab'.repeat(32),FUTURE=new Date(Date.now()+864e5).toISOString();
 const TOKEN='sealed-SESSION-TOKEN-9f3a-not-a-secret-field';
 const tests=[]; const test=(name,fn)=>tests.push([name,fn]);
+const liveIntervals=new Set();
 const flush=async(n=30)=>{for(let i=0;i<n;i++) await new Promise(r=>setImmediate(r));};
 const until=async(f,label)=>{for(let i=0;i<400&&!f();i++) await new Promise(r=>setTimeout(r,5)); assert.ok(f(),label);};
 
@@ -34,9 +35,10 @@ function labStub(extraRuns=[]){
   const before=JSON.stringify(db);
   return {calls,db,before,unchanged:()=>JSON.stringify(db)===before,ready:Promise.resolve(),
     cloudSnapshot:async()=>{calls.push('snapshot'); return JSON.parse(JSON.stringify(db));},
-    restoreArchive:async(archive)=>{calls.push(['restore',archive.kind,archive.data&&archive.data.selectedRunId]); if(labStub.fail) throw Error('같은 실행 ID의 내용이 달라 병합을 차단했습니다.');
-      for(const r of archive.data?.ledger?.runs||[]) if(r&&!db.runs.some(x=>x.id===r.id)) db.runs.push(JSON.parse(JSON.stringify(r)));
-      return {kind:'experiment',runId:archive.data.selectedRunId};},
+    reviewSnapshot:async(id)=>{calls.push(['reviewSnapshot',id]); const snap=JSON.parse(JSON.stringify(db)); if(labStub.unsent) snap.reviews=snap.reviews.concat([{id:'unsent-1',runId:id,note:'UNSENT_REVIEW_MARKER',findingAssessments:[{id:'F9',verdict:'pending'}],reviewContext:{mode:'blue-only'}}]); return snap;},
+    openArchive:async(archive)=>{calls.push(['open',archive.kind,archive.kind==='harness'?archive.data&&archive.data.hash:archive.data&&archive.data.selectedRunId]); if(labStub.fail) throw Error('임시 열람을 열지 못했습니다. 로컬 기록은 그대로입니다.'); if(archive.kind==='harness') return {kind:'harness',hash:archive.data.hash}; return {kind:'experiment',runId:archive.data.selectedRunId};},
+    closeArchive:async()=>{calls.push('closeArchive');},
+    restoreArchive:async()=>{calls.push('restore'); throw Error('persistent restore');},
     review:async(id)=>{calls.push(['review',id]); return true;},
     previewSharedHarness:async(config,hash)=>{calls.push(['preview',hash,config&&config.role]); return hash;},
     record:async()=>{calls.push('record'); throw Error('model');},
@@ -77,27 +79,37 @@ function teamApi(){
   }
   return {archives,routes};
 }
-function setup({store=new Map(),routes,lab,codec,config}={}){
+function appRoutes(){
+  const text=fs.readFileSync(path.resolve(__dirname,'../dist/app.js'),'utf8');
+  const found=Object.fromEntries([...text.matchAll(/(\w+):'([^']+)'/g)].filter(m=>['workbench','blue','review','results','agents'].includes(m[1])).map(m=>[m[1],m[2]]));
+  assert.equal(found.review,'review'); assert.equal(found.agents,'harness');
+  return found;
+}
+function setup({store=new Map(),routes,lab,codec,config,trace,sessionWrite}={}){
   const body=new El('body'), review=new El('section'), results=new El('section'), agents=new El('section'), manager=new El('section'), board=new El('section');
   review.id='human-evaluation'; const run=new El('select'); run.id='evaluation-run'; review.append(run);
   results.id='view-results'; board.id='ledger-board'; const exp=new El('button'); exp.id='ledger-export'; exp.textContent='전체 기록 JSON 백업'; const imp=new El('input'); imp.id='ledger-import'; board.append(exp,imp); results.append(board);
-  agents.id='view-agents'; manager.id='harness-manager'; const reg=new El('button'); reg.id='harness-register'; reg.textContent='새 harness 버전 등록'; let registered=0; reg.addEventListener('click',()=>{registered++;}); const red=new El('select'); red.id='red-harness'; const blue=new El('select'); blue.id='blue-harness'; manager.append(reg,red,blue); agents.append(manager); body.append(review,results,agents);
-  const opened=[]; const window=new EventTarget(); window.open=(url,name,features)=>{const popup={closed:false,url,name,features,close(){this.closed=true;}}; opened.push(popup); return popup;};
-  const calls=[]; const fetch=async(url,init)=>{const u=new URL(url); calls.push({url,method:init.method,path:u.pathname+u.search,headers:{...init.headers},body:init.body===undefined?undefined:JSON.parse(init.body),credentials:init.credentials,redirect:init.redirect});
-    const answer=await (routes||teamApi().routes)(init.method,u.pathname+u.search,init); if(answer==='hang') return new Promise((_,reject)=>init.signal.addEventListener('abort',()=>reject(Error('aborted'))));
+  agents.id='view-agents'; manager.id='harness-manager'; const reg=new El('button'); reg.id='harness-register'; reg.textContent='새 harness 버전 등록'; let registered=0; reg.addEventListener('click',()=>{registered++;}); const red=new El('select'); red.id='red-harness'; const blue=new El('select'); blue.id='blue-harness'; manager.append(reg,red,blue); agents.append(manager);
+  const location={origin:PAGE,href:PAGE+'/falsify-workbench/',hash:''}, nav=[];
+  const railReview=new El('button'); railReview.setAttribute('data-view','review'); railReview.addEventListener('click',()=>{nav.push('review'); location.hash='#review';});
+  const railAgents=new El('button'); railAgents.setAttribute('data-view','agents'); railAgents.addEventListener('click',()=>{nav.push('agents'); location.hash='#harness';});
+  body.append(review,results,agents,railReview,railAgents);
+  const opened=[]; const window=new EventTarget(); window.open=(url,name,features)=>{if(trace) trace.push('open'); const popup={closed:false,url:String(url),name,features,opener:window,close(){this.closed=true;}}; popup.location={set href(v){popup.url=String(v);},get href(){return popup.url;}}; opened.push(popup); return popup;};
+  const calls=[], timers=[]; const fetch=async(url,init)=>{if(trace) trace.push('fetch'); const u=new URL(url); calls.push({url,method:init.method,path:u.pathname+u.search,headers:{...init.headers},body:init.body===undefined?undefined:JSON.parse(init.body),credentials:init.credentials,redirect:init.redirect});
+    const answer=await (routes||teamApi().routes)(init.method,u.pathname+u.search,init); if(trace) trace.push('settled'); if(answer==='hang') return new Promise((_,reject)=>init.signal.addEventListener('abort',()=>reject(Error('aborted'))));
     return {ok:answer.status>=200&&answer.status<300,status:answer.status,headers:{get:n=>answer.headers?.[n.toLowerCase()]??null},text:async()=>answer.body===undefined?'':typeof answer.body==='string'?answer.body:JSON.stringify(answer.body)};};
-  const localStorage={getItem:k=>store.has(k)?store.get(k):null,setItem:(k,v)=>{if(k===LEDGER_KEY) throw Error('ledger write'); store.set(k,String(v));},removeItem:k=>store.delete(k)};
+  const localStorage={getItem:k=>store.has(k)?store.get(k):null,setItem:(k,v)=>{if(k===LEDGER_KEY) throw Error('ledger write'); if(sessionWrite) sessionWrite(k,v); store.set(k,String(v));},removeItem:k=>store.delete(k)};
   store.set(LEDGER_KEY,'{"schema":"falsify.experiment-ledger.v1","runs":[{"id":"keep-local"}]}');
-  const document=new EventTarget(); Object.assign(document,{readyState:'complete',body,currentScript:null,createElement:t=>{const e=new El(t); e.ownerDocument=document; return e;},querySelector:s=>s.startsWith('#')?body.find(n=>n.id===s.slice(1)):null});
+  const document=new EventTarget(); Object.assign(document,{readyState:'complete',body,currentScript:null,createElement:t=>{const e=new El(t); e.ownerDocument=document; return e;},querySelector:s=>s.startsWith('#')?body.find(n=>n.id===s.slice(1)):null,querySelectorAll(sel){const m=String(sel).match(/^\[data-view="([^"]+)"\]$/); return m?[...body.walk()].filter(n=>n.getAttribute&&n.getAttribute('data-view')===m[1]):[];}});
   body.ownerDocument=document;
-  const ctx=vm.createContext({document,window,location:{origin:PAGE,href:PAGE+'/falsify-workbench/'},localStorage,fetch,crypto:globalThis.crypto,FalsifyCloudConfig:config||{apiBase:BASE,provider:'confluence'},FalsifyLab:lab||labStub(),FalsifyReviewBundle:codec||codecStub(),URL,URLSearchParams,TextEncoder,TextDecoder,AbortController,Event,Uint8Array,btoa:b64,atob:ub64,setTimeout:(f,ms)=>setTimeout(f,ms>=15000?30:ms),clearTimeout,setInterval,clearInterval,console});
+  const ctx=vm.createContext({document,window,location,localStorage,fetch,crypto:globalThis.crypto,Date,FalsifyCloudConfig:config||{apiBase:BASE,provider:'confluence'},FalsifyLab:lab||labStub(),FalsifyReviewBundle:codec||codecStub(),URL,URLSearchParams,TextEncoder,TextDecoder,AbortController,Event,Uint8Array,btoa:b64,atob:ub64,setTimeout:(f,ms)=>{timers.push(ms); return setTimeout(f,ms>=15000?30:ms);},clearTimeout,setInterval:(fn,ms)=>{const id=setInterval(fn,ms); liveIntervals.add(id); return id;},clearInterval:(id)=>{liveIntervals.delete(id); return clearInterval(id);},console});
   vm.runInContext(src,ctx,{filename:'confluence-store.js'});
   const $=id=>body.find(n=>n.id===id);
-  return {ctx,calls,store,body,window,opened,$,registered:()=>registered,lab:ctx.FalsifyLab,codec:ctx.FalsifyReviewBundle,ready:ctx.FalsifyConfluenceStore.ready};
+  return {ctx,calls,timers,store,body,window,opened,location,nav,$,registered:()=>registered,lab:ctx.FalsifyLab,codec:ctx.FalsifyReviewBundle,ready:ctx.FalsifyConfluenceStore.ready};
 }
 async function connect(t,token=TOKEN){
   t.$('confluence-review-connect').click();
-  await until(()=>t.opened.length===1,'popup');
+  await until(()=>t.opened[0]&&/^https:\/\/auth\.atlassian\.com\//.test(t.opened[0].url),'popup');
   const nonce=t.calls.find(c=>c.path==='/v1/confluence/auth/start').body.nonce;
   const ev=new Event('message'); ev.origin=ORIGIN; ev.source=t.opened[0]; ev.data={type:'falsify.confluence.session.v1',nonce,session:token,expiresAt:FUTURE};
   t.window.dispatchEvent(ev); await until(()=>/팀 공간에 연결했습니다/.test(t.$('confluence-review-status').textContent),'connected');
@@ -123,12 +135,13 @@ test('startup does not upload, and the local ledger tools stay on the results bo
   for(const id of ['confluence-review-connect','confluence-review-share','confluence-review-load','confluence-results-connect','confluence-harness-connect']) assert.equal(t.$(id).textContent, id.endsWith('connect')?'Confluence에 연결':id.endsWith('share')?'Confluence에 팀 공유':'팀 기록 불러오기');
   assert.equal([...t.body.walk()].some(n=>n.type==='password'||/api.?key|비밀번호|비공개\/공유|username/i.test(n.textContent+n.id)),false);
   assert.match(t.$('confluence-panel-review').textContent,/원본 PDF/);
+  assert.match(t.body.textContent,/임시 열람/); assert.match(t.body.textContent,/Confluence만 영구 보관/); assert.match(t.body.textContent,/12시간/);
   assert.ok(!/과학적 결론이 아닙니다/.test('')&&!/gold|정확도 검증|온라인 표시/.test(t.body.textContent));
   assert.equal(t.store.get(LEDGER_KEY).includes('keep-local'),true);
 });
 
 test('connect checks origin, popup source and nonce, and stores only an encrypted session',async()=>{
-  const t=setup(); await t.ready; t.$('confluence-review-connect').click(); await until(()=>t.opened.length===1,'popup');
+  const t=setup(); await t.ready; t.$('confluence-review-connect').click(); await until(()=>t.opened[0]&&/^https:\/\/auth\.atlassian\.com\/authorize/.test(t.opened[0].url),'popup');
   const start=t.calls.find(c=>c.path==='/v1/confluence/auth/start');
   assert.deepEqual(Object.keys(start.body).sort(),['nonce','returnOrigin']); assert.equal(start.body.returnOrigin,PAGE);
   assert.equal(t.opened[0].name,'falsify-confluence-oauth'); assert.match(t.opened[0].url,/^https:\/\/auth\.atlassian\.com\/authorize/);
@@ -145,15 +158,16 @@ test('connect checks origin, popup source and nonce, and stores only an encrypte
 });
 
 test('cancel, unconfigured gateway and wrong site never create a session',async()=>{
-  const cancel=setup(); await cancel.ready; cancel.$('confluence-review-connect').click(); await until(()=>cancel.opened.length===1,'popup');
+  const cancel=setup(); await cancel.ready; cancel.$('confluence-review-connect').click(); await until(()=>/^https:\/\/auth\.atlassian\.com\//.test(cancel.opened[0]&&cancel.opened[0].url),'popup');
   cancel.opened[0].closed=true; await until(()=>/취소했습니다/.test(cancel.$('confluence-review-status').textContent),'cancel');
   assert.equal(cancel.store.has(SESSION_KEY),false); assert.equal(cancel.calls.filter(c=>c.path==='/v1/confluence/archives').length,0);
   const off=setup({routes:(m,p)=>m==='GET'&&p==='/v1/confluence/capabilities'?{status:200,body:caps({configured:false})}:{status:500,body:{error:{code:'unexpected'}}}});
   await off.ready; off.$('confluence-review-connect').click(); await until(()=>/운영자/.test(off.$('confluence-review-status').textContent),'operator');
-  assert.equal(off.opened.length,0); assert.equal(off.calls.some(c=>c.path==='/v1/confluence/auth/start'),false);
+  assert.equal(off.opened.length,1); assert.equal(off.opened[0].closed,true); assert.equal(off.opened[0].url,'about:blank');
+  assert.equal(off.calls.some(c=>c.path==='/v1/confluence/auth/start'),false);
   const wrong=setup({routes:(m,p)=>m==='GET'&&p==='/v1/confluence/capabilities'?{status:200,body:caps({siteUrl:'https://evil.atlassian.net'})}:{status:500,body:{error:{code:'unexpected'}}}});
   await wrong.ready; wrong.$('confluence-results-connect').click(); await until(()=>/Falsify Confluence가 아니어서/.test(wrong.$('confluence-results-status').textContent),'site');
-  assert.equal(wrong.opened.length,0);
+  assert.equal(wrong.opened.length,1); assert.equal(wrong.opened[0].closed,true); assert.equal(wrong.opened[0].url,'about:blank');
 });
 
 test('two browser stores share one team archive without model calls or losing local runs',async()=>{
@@ -162,7 +176,7 @@ test('two browser stores share one team archive without model calls or losing lo
   const red={id:'red-root',role:'red',harnessHash:'b'.repeat(64),response:{raw:'RED_RAW'}};
   const snap={id:'red-final',role:'red',snapshotOf:'red-root',harnessHash:'b'.repeat(64)};
   const review={id:'rev-1',runId:'blue-1',comparison:{sourceRunId:'red-final'},findingAssessments:[{id:'F1',verdict:'supported'}],reviewContext:{mode:'red-assisted'}};
-  const labA=labStub([blue,red,snap]); labA.db.reviews=[review]; const beforeA=JSON.stringify(labA.db);
+  const labA=labStub([blue,red,snap]); labA.db.reviews=[review]; const beforeA=JSON.stringify(labA.db); labStub.unsent=true;
   const labB=labStub(); labB.db.runs[0].id='keep-b';
   const a=setup({lab:labA,codec:codecStub(),routes:api.routes,store:new Map()}); const b=setup({lab:labB,codec:codecStub(),routes:api.routes,store:new Map()});
   await a.ready; await b.ready; await connect(a); await connect(b,TOKEN+'B');
@@ -177,16 +191,20 @@ test('two browser stores share one team archive without model calls or losing lo
   assert.deepEqual(ids,['blue-1','red-final','red-root']);
   assert.equal(posts[0].body.archive.data.ledger.reviews[0].reviewContext.mode,'red-assisted');
   assert.equal(posts[0].body.archive.data.ledger.reviews[0].findingAssessments[0].id,'F1');
+  assert.ok(labA.calls.some(c=>c[0]==='reviewSnapshot'&&c[1]==='blue-1')); assert.equal(labA.calls.includes('snapshot'),false);
+  assert.ok(JSON.stringify(posts[0].body).includes('UNSENT_REVIEW_MARKER')); assert.equal(JSON.stringify(labA.db).includes('UNSENT_REVIEW_MARKER'),false);
   assert.equal(JSON.stringify(labA.db),beforeA,'publish does not change the local ledger');
+  labStub.unsent=false;
   assert.ok(!a.body.textContent.includes('EXTRACTED_TEXT_MARKER')&&!a.body.textContent.includes('RAW_RESPONSE_MARKER'));
   b.$('confluence-results-load').click(); await until(()=>b.$('confluence-results-list').textContent.includes('Synthetic blue'),'listed');
   assert.ok(!b.body.textContent.includes('EXTRACTED_TEXT_MARKER'));
   assert.equal(b.calls.some(c=>c.method==='POST'&&c.path==='/v1/confluence/archives'),false,'loading does not upload');
-  openSaved(b,'confluence-results-list');
-  await until(()=>labB.calls.some(c=>c[0]==='review'),'review selected');
-  assert.deepEqual(labB.calls.filter(c=>c[0]==='restore')[0],[ 'restore','experiment','blue-1' ]);
-  assert.deepEqual(labB.calls.filter(c=>c[0]==='review')[0],['review','blue-1']);
-  assert.ok(labB.db.runs.some(r=>r.id==='keep-b')&&labB.db.runs.some(r=>r.id==='blue-1')&&labB.db.runs.some(r=>r.id==='red-final'));
+  const beforeB=JSON.stringify(labB.db); openSaved(b,'confluence-results-list');
+  await until(()=>labB.calls.some(c=>c[0]==='open'),'temporary view');
+  assert.deepEqual(labB.calls.filter(c=>c[0]==='open')[0],[ 'open','experiment','blue-1' ]);
+  assert.equal(labB.calls.includes('restore')||labB.calls.some(c=>c[0]==='restore'||c[0]==='review'),false);
+  const routes=appRoutes(); assert.equal(b.location.hash,'#'+routes.review); assert.ok(b.nav.includes('review'));
+  assert.equal(JSON.stringify(labB.db),beforeB); assert.ok(labB.db.runs.some(r=>r.id==='keep-b')); assert.equal(labB.db.runs.some(r=>r.id==='blue-1'),false);
   assert.equal(labB.calls.includes('record')||labB.calls.includes('bind'),false);
   assert.equal(a.lab.calls.includes('record')||b.lab.calls.some(c=>c==='record'||c==='bind'),false);
   assert.ok(![...b.store.values()].join('\n').includes(TOKEN));
@@ -199,11 +217,14 @@ test('harness share is preview-only and consent is explicit',async()=>{
   t.$('confluence-harness-share').click(); await until(()=>api.archives.length===1,'harness archived');
   const post=t.calls.find(c=>c.path==='/v1/confluence/archives'&&c.method==='POST');
   assert.equal(post.body.archive.kind,'harness'); assert.equal(post.body.archive.id,H); assert.equal(post.body.teamShare,true);
+  assert.ok(t.lab.calls.includes('snapshot')); assert.equal(t.lab.calls.some(c=>c[0]==='reviewSnapshot'),false);
   t.$('confluence-harness-load').click(); await until(()=>t.$('confluence-harness-list').textContent.includes('Synthetic BLUE'),'list');
-  openSaved(t,'confluence-harness-list'); await until(()=>t.lab.calls.some(c=>c[0]==='preview'),'preview');
+  const before=t.lab.unchanged(); openSaved(t,'confluence-harness-list'); await until(()=>t.lab.calls.some(c=>c[0]==='open'),'temporary harness');
   assert.equal(t.registered(),0,'registration stays with the user');
-  assert.equal(t.lab.calls.some(c=>c[0]==='restore'),false);
-  assert.deepEqual(t.lab.calls.find(c=>c[0]==='preview').slice(0,3),['preview',H,'blue']);
+  assert.equal(t.lab.calls.some(c=>c==='restore'||c[0]==='restore'||c[0]==='preview'),false);
+  assert.deepEqual(t.lab.calls.find(c=>c[0]==='open').slice(0,3),['open','harness',H]);
+  assert.equal(before,true); assert.equal(t.lab.unchanged(),true);
+  const routes=appRoutes(); assert.equal(t.location.hash,'#'+routes.agents); assert.notEqual(routes.agents,'agents'); assert.ok(t.nav.includes('agents'));
 });
 
 test('unknown write, conflict, oversize, permission and empty list are actionable and not retried',async()=>{
@@ -227,6 +248,8 @@ test('unknown write, conflict, oversize, permission and empty list are actionabl
   const t=setup({routes,codec,lab:labStub([{id:'blue-1',role:'blue',harnessHash:H}])}); await t.ready; await connect(t); arm(t);
   mode='hang'; t.$('confluence-review-share').click(); await until(()=>/올라갔는지 알 수 없어/.test(t.$('confluence-review-status').textContent),'unknown'); await flush();
   assert.equal(t.calls.filter(c=>c.method==='POST'&&c.path==='/v1/confluence/archives').length,1);
+  assert.equal(t.timers.filter(ms=>ms===90000).length,1,'aborted publish is not retried');
+  assert.ok(t.timers.includes(15000)&&t.timers.includes(30000));
   mode='conflict'; arm(t); t.$('confluence-review-share').click(); await until(()=>/충돌했습니다/.test(t.$('confluence-review-status').textContent),'conflict');
   assert.ok(!t.body.textContent.includes('secret')); assert.equal(t.calls.filter(c=>c.method==='POST'&&c.path==='/v1/confluence/archives').length,2,'no automatic replay');
   mode='partial'; arm(t); t.$('confluence-review-share').click(); await until(()=>/확인하지 못했습니다/.test(t.$('confluence-review-status').textContent),'partial');
@@ -250,11 +273,142 @@ test('session expiry, disconnect and restore rollback leave local records',async
   api.archives.push({pageId:'1001',title:'Synthetic blue',webUrl:'https://falsify.atlassian.net/wiki/spaces/Falsify/pages/1001',archive:{schema:'falsify.confluence-archive.v1',kind:'experiment',id:'blue-1',title:'Synthetic blue',data:{schema:'falsify.review-bundle.v1',selectedRunId:'blue-1',ledger:{schema:'falsify.experiment-ledger.v1',harnesses:[],runs:[{id:'blue-1',segments:[{text:'EXTRACTED_TEXT_MARKER'}]}],reviews:[]}}},archiveSha256:HASH});
   rollback.$('confluence-review-load').click(); await until(()=>rollback.$('confluence-review-list').textContent.includes('Synthetic blue'),'row');
   const before=JSON.stringify(rollback.lab.db); openSaved(rollback,'confluence-review-list');
-  await until(()=>/병합을 차단했습니다/.test(rollback.$('confluence-review-status').textContent),'rollback');
-  assert.equal(JSON.stringify(rollback.lab.db),before); assert.equal(rollback.lab.calls.filter(c=>c[0]==='restore').length,1);
+  await until(()=>/임시 열람을 열지 못했습니다/.test(rollback.$('confluence-review-status').textContent),'rollback');
+  assert.equal(JSON.stringify(rollback.lab.db),before); assert.equal(rollback.lab.calls.filter(c=>c[0]==='open').length,1); assert.equal(rollback.lab.calls.includes('restore'),false);
+  assert.equal(rollback.location.hash,'','failed restore does not navigate');
   labStub.fail=false; rollback.$('confluence-review-disconnect').click(); await flush();
   assert.equal(rollback.store.has(SESSION_KEY),false); assert.ok(rollback.store.get(LEDGER_KEY).includes('keep-local'));
   assert.match(rollback.$('confluence-review-status').textContent,/권한 전체가 취소된 것은 아닙니다/);
+});
+
+test('popup opens before the gateway answers and closes without navigating on a bad url or lost opener',async()=>{
+  let release=()=>{}; const hold=new Promise(r=>{release=r;}); const trace=[];
+  const routes=async(method,path)=>{
+    await hold;
+    if(method==='GET'&&path==='/v1/confluence/capabilities') return {status:200,body:caps()};
+    if(method==='POST'&&path==='/v1/confluence/auth/start') return {status:200,body:{authorizeUrl:'https://auth.atlassian.com/authorize?state=held'}};
+    return {status:500,body:{error:{code:'unexpected'}}};
+  };
+  const t=setup({routes,trace}); await t.ready;
+  try{
+    t.$('confluence-review-connect').click();
+    assert.deepEqual(trace,['open','fetch'],'window.open is synchronous and precedes the unsettled fetch');
+    assert.equal(t.opened.length,1); assert.equal(t.opened[0].url,'about:blank'); assert.equal(t.opened[0].name,'falsify-confluence-oauth');
+    release(); await until(()=>/^https:\/\/auth\.atlassian\.com\/authorize/.test(t.opened[0].url),'navigated after validation');
+  }finally{release();}
+  let releaseBad=()=>{}; const holdBad=new Promise(r=>{releaseBad=r;});
+  const bad=setup({routes:async(method,path)=>{await holdBad; if(method==='GET'&&path==='/v1/confluence/capabilities') return {status:200,body:caps()}; if(method==='POST'&&path==='/v1/confluence/auth/start') return {status:200,body:{authorizeUrl:'https://evil.example/phish'}}; return {status:500,body:{error:{code:'unexpected'}}};}});
+  await bad.ready;
+  try{
+    bad.$('confluence-review-connect').click();
+    assert.equal(bad.opened[0].url,'about:blank');
+    bad.$('confluence-review-disconnect').click();
+    assert.equal(bad.opened[0].closed,true);
+    releaseBad(); await flush();
+    assert.equal(bad.opened[0].url,'about:blank'); assert.equal(bad.store.has(SESSION_KEY),false);
+    assert.match(bad.$('confluence-review-status').textContent,/권한 전체가 취소된 것은 아닙니다/);
+  }finally{releaseBad();}
+  const orphan=setup(); await orphan.ready;
+  orphan.window.open=()=>{const popup={closed:false,url:'about:blank',name:'falsify-confluence-oauth',features:'',opener:null,close(){this.closed=true;}}; popup.location={set href(v){popup.url=String(v);},get href(){return popup.url;}}; orphan.opened.push(popup); return popup;};
+  orphan.$('confluence-results-connect').click();
+  await until(()=>/이 페이지와 연결되어 있지 않아/.test(orphan.$('confluence-results-status').textContent),'missing opener');
+  assert.equal(orphan.opened[0].closed,true); assert.equal(orphan.opened[0].url,'about:blank'); assert.equal(orphan.store.has(SESSION_KEY),false);
+  assert.equal(orphan.$('confluence-results-connect').disabled,false);
+});
+
+test('storage and crypto failures release the connect lock and do not claim a session',async()=>{
+  const rejections=[]; const onReject=e=>rejections.push(e); process.on('unhandledRejection',onReject);
+  let realEncrypt=null, cryptoFail=null;
+  try{
+    const quota=setup({sessionWrite(key){if(key===SESSION_KEY||key==='falsify.confluence-cache-key.v1') throw Object.assign(Error('quota-secret'),{name:'QuotaExceededError'});}});
+    await quota.ready; quota.$('confluence-review-connect').click();
+    await until(()=>/^https:\/\/auth\.atlassian\.com\//.test(quota.opened[0]&&quota.opened[0].url),'popup');
+    const nonce=quota.calls.find(c=>c.path==='/v1/confluence/auth/start').body.nonce;
+    const ev=new Event('message'); ev.origin=ORIGIN; ev.source=quota.opened[0]; ev.data={type:'falsify.confluence.session.v1',nonce,session:TOKEN,expiresAt:FUTURE};
+    quota.window.dispatchEvent(ev);
+    await until(()=>/저장하지 못했습니다/.test(quota.$('confluence-review-status').textContent),'quota');
+    await flush();
+    assert.equal(quota.store.has(SESSION_KEY),false); assert.ok(!/연결했습니다/.test(quota.$('confluence-review-status').textContent));
+    assert.ok(!quota.body.textContent.includes('quota-secret')); assert.ok(!quota.body.textContent.includes(TOKEN));
+    assert.equal(quota.$('confluence-review-connect').disabled,false); assert.equal(quota.$('confluence-review-share').disabled,true);
+    assert.ok(quota.store.get(LEDGER_KEY).includes('keep-local'));
+    cryptoFail=setup(); await cryptoFail.ready; cryptoFail.$('confluence-review-connect').click();
+    await until(()=>/^https:\/\/auth\.atlassian\.com\//.test(cryptoFail.opened[0]&&cryptoFail.opened[0].url),'popup');
+    realEncrypt=cryptoFail.ctx.crypto.subtle.encrypt.bind(cryptoFail.ctx.crypto.subtle);
+    cryptoFail.ctx.crypto.subtle.encrypt=async()=>{throw Error('crypto-secret');};
+    const nonce2=cryptoFail.calls.find(c=>c.path==='/v1/confluence/auth/start').body.nonce;
+    const ev2=new Event('message'); ev2.origin=ORIGIN; ev2.source=cryptoFail.opened[0]; ev2.data={type:'falsify.confluence.session.v1',nonce:nonce2,session:TOKEN,expiresAt:FUTURE};
+    cryptoFail.window.dispatchEvent(ev2);
+    await until(()=>/저장하지 못했습니다/.test(cryptoFail.$('confluence-review-status').textContent),'crypto');
+    await flush();
+    assert.equal(cryptoFail.store.has(SESSION_KEY),false); assert.ok(!/연결했습니다/.test(cryptoFail.$('confluence-review-status').textContent));
+    assert.ok(!cryptoFail.body.textContent.includes('crypto-secret')); assert.equal(cryptoFail.$('confluence-review-connect').disabled,false);
+    assert.ok(cryptoFail.store.get(LEDGER_KEY).includes('keep-local')); assert.equal(rejections.length,0);
+  }finally{if(realEncrypt&&cryptoFail) cryptoFail.ctx.crypto.subtle.encrypt=realEncrypt; process.off('unhandledRejection',onReject);}
+});
+
+test('disconnect clears the team list and sealed session only',async()=>{
+  const api=teamApi(); const t=setup({routes:api.routes}); t.store.set('falsify.local-note.v1','keep-note');
+  await t.ready; await connect(t);
+  api.archives.push({pageId:'1001',title:'Synthetic blue',webUrl:'https://falsify.atlassian.net/wiki/spaces/Falsify/pages/1001',updatedAt:'2026-10-26T00:00:00.000Z',archiveSha256:HASH});
+  t.$('confluence-results-load').click(); await until(()=>t.$('confluence-results-list').textContent.includes('Synthetic blue'),'listed');
+  assert.equal(t.store.has(SESSION_KEY),true); assert.equal(t.store.has('falsify.confluence-cache-key.v1'),true);
+  const ledger=t.store.get(LEDGER_KEY);
+  t.$('confluence-results-disconnect').click(); await flush();
+  assert.equal(t.store.has(SESSION_KEY),false);
+  assert.equal(t.store.get(LEDGER_KEY),ledger); assert.equal(t.store.get('falsify.local-note.v1'),'keep-note');
+  assert.equal(t.store.has('falsify.confluence-cache-key.v1'),true);
+  assert.ok(!t.$('confluence-results-list').textContent.includes('Synthetic blue'));
+  assert.ok(!t.$('confluence-review-list').textContent.includes('Synthetic blue'));
+  assert.match(t.$('confluence-results-status').textContent,/권한 전체가 취소된 것은 아닙니다/);
+  assert.equal(t.calls.some(c=>c.method==='POST'&&c.path==='/v1/confluence/archives'),false);
+});
+
+test('temporary view stays out of the ledger until explicit close, disconnect or 12 hours',async()=>{
+  const api=teamApi(); const t=setup({routes:api.routes,lab:labStub([{id:'blue-1',role:'blue',harnessHash:H}])});
+  await t.ready; await connect(t);
+  api.archives.push({pageId:'1001',title:'Synthetic blue',webUrl:'https://falsify.atlassian.net/wiki/spaces/Falsify/pages/1001',archive:{schema:'falsify.confluence-archive.v1',kind:'experiment',id:'blue-1',title:'Synthetic blue',data:{schema:'falsify.review-bundle.v1',selectedRunId:'blue-1',ledger:{schema:'falsify.experiment-ledger.v1',harnesses:[],runs:[{id:'blue-1'}],reviews:[]}}},archiveSha256:HASH});
+  t.$('confluence-review-load').click(); await until(()=>t.$('confluence-review-list').textContent.includes('Synthetic blue'),'listed');
+  const before=JSON.stringify(t.lab.db); openSaved(t,'confluence-review-list');
+  await until(()=>t.lab.calls.includes('closeArchive')===false&&t.lab.calls.some(c=>c[0]==='open'),'opened');
+  assert.equal(t.$('confluence-review-close-temp').hidden,false);
+  assert.equal(JSON.stringify(t.lab.db),before); assert.equal(t.store.get(LEDGER_KEY).includes('blue-1'),false);
+  t.$('evaluation-run').value='blue-1'; t.$('confluence-review-consent').checked=true; t.$('confluence-review-consent').change();
+  assert.equal(t.$('confluence-review-share').disabled,false);
+  t.$('evaluation-run').value='other-run'; t.$('evaluation-run').change();
+  assert.equal(t.$('confluence-review-share').disabled,true,'consent follows the selected run');
+  t.$('confluence-review-close-temp').click(); await until(()=>t.lab.calls.includes('closeArchive')&&t.$('confluence-review-close-temp').hidden===true,'closed');
+  assert.equal(JSON.stringify(t.lab.db),before);
+  openSaved(t,'confluence-review-list'); await until(()=>t.lab.calls.filter(c=>c[0]==='open').length===2,'reopened');
+  const realNow=t.ctx.Date.now.bind(t.ctx.Date), start=realNow();
+  t.ctx.Date.now=()=>start+12*60*60*1000+50;
+  try{
+    t.$('confluence-review-consent').change();
+    await until(()=>t.lab.calls.filter(c=>c==='closeArchive').length>=2&&t.$('confluence-review-close-temp').hidden===true,'expired');
+  }finally{t.ctx.Date.now=realNow;}
+  assert.equal(JSON.stringify(t.lab.db),before); assert.equal(t.location.hash,'#review');
+});
+
+test('list and auth aborts use their own budgets and do not publish',async()=>{
+  let mode='list';
+  const routes=(m,p,init)=>{
+    if(mode==='list'&&m==='GET'&&p==='/v1/confluence/archives') return 'hang';
+    if(mode==='auth'&&m==='POST'&&p==='/v1/confluence/auth/start') return 'hang';
+    if(m==='GET'&&p==='/v1/confluence/capabilities') return {status:200,body:caps()};
+    if(m==='POST'&&p==='/v1/confluence/auth/start') return {status:200,body:{authorizeUrl:'https://auth.atlassian.com/authorize?state=1'}};
+    if(m==='POST'&&p==='/v1/confluence/auth/refresh') return {status:200,body:{session:'rotated',expiresAt:FUTURE}};
+    return {status:404,body:{error:{code:'not_found'}}};
+  };
+  const list=setup({routes}); await list.ready; await connect(list);
+  const before=list.timers.length; list.$('confluence-review-load').click();
+  await until(()=>/자동으로 다시 시도하지 않습니다/.test(list.$('confluence-review-status').textContent),'list timeout');
+  assert.ok(list.timers.slice(before).includes(30000)); assert.equal(list.timers.slice(before).includes(90000),false);
+  assert.ok(!/올라갔는지 알 수 없어/.test(list.$('confluence-review-status').textContent));
+  assert.equal(list.calls.some(c=>c.method==='POST'&&c.path==='/v1/confluence/archives'),false);
+  mode='auth'; const auth=setup({routes}); await auth.ready; auth.$('confluence-review-connect').click();
+  await until(()=>auth.opened.length===1&&/확인하지 못했습니다|자동으로 다시 시도하지 않습니다/.test(auth.$('confluence-review-status').textContent),'auth timeout');
+  assert.ok(auth.timers.includes(15000)); assert.equal(auth.timers.includes(90000),false);
+  assert.equal(auth.opened[0].closed,true); assert.equal(auth.store.has(SESSION_KEY),false); assert.equal(auth.$('confluence-review-connect').disabled,false);
 });
 
 test('styles keep the airport tokens and do not paint an online lamp',()=>{
@@ -264,4 +418,5 @@ test('styles keep the airport tokens and do not paint an online lamp',()=>{
 });
 
 (async()=>{let failed=0; for(const [name,fn] of tests){try{await fn(); console.log('ok - '+name);}catch(e){failed++; console.error('not ok - '+name+'\n'+(e.stack||e));}}
-  console.log(JSON.stringify({passed:tests.length-failed,failed})); process.exitCode=failed?1:0;})();
+  for(const id of liveIntervals) clearInterval(id); liveIntervals.clear();
+  console.log(JSON.stringify({passed:tests.length-failed,failed})); process.exit(failed?1:0);})();
