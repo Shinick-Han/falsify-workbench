@@ -135,7 +135,11 @@ test('startup does not upload, and the local ledger tools stay on the results bo
   for(const id of ['confluence-review-connect','confluence-review-share','confluence-review-load','confluence-results-connect','confluence-harness-connect']) assert.equal(t.$(id).textContent, id.endsWith('connect')?'Confluence에 연결':id.endsWith('share')?'Confluence에 팀 공유':'팀 기록 불러오기');
   assert.equal([...t.body.walk()].some(n=>n.type==='password'||/api.?key|비밀번호|비공개\/공유|username/i.test(n.textContent+n.id)),false);
   assert.match(t.$('confluence-panel-review').textContent,/원본 PDF/);
-  assert.match(t.body.textContent,/임시 열람/); assert.match(t.body.textContent,/Confluence만 영구 보관/); assert.match(t.body.textContent,/12시간/);
+  const banners=[...t.body.walk()].filter(n=>n.classList.contains('confluence-temporary')).map(n=>n.textContent);
+  assert.ok(banners.length>=3);
+  for(const text of banners) assert.match(text,/임시 열람\. Confluence만 영구 보관\. 새로고침·연결 해제·12시간 후 임시 기록 소멸\. 보내지 않은 사람 검수는 Confluence에 팀 공유를 누르기 전에는 저장되지 않습니다\./);
+  assert.equal(t.$('confluence-review-close-temp').textContent,'임시 열람 닫기'); assert.equal(t.$('confluence-review-close-temp').hidden,true);
+  assert.ok(!/면제|정책상 허용|exempt/i.test(t.body.textContent));
   assert.ok(!/과학적 결론이 아닙니다/.test('')&&!/gold|정확도 검증|온라인 표시/.test(t.body.textContent));
   assert.equal(t.store.get(LEDGER_KEY).includes('keep-local'),true);
 });
@@ -353,15 +357,37 @@ test('disconnect clears the team list and sealed session only',async()=>{
   api.archives.push({pageId:'1001',title:'Synthetic blue',webUrl:'https://falsify.atlassian.net/wiki/spaces/Falsify/pages/1001',updatedAt:'2026-10-26T00:00:00.000Z',archiveSha256:HASH});
   t.$('confluence-results-load').click(); await until(()=>t.$('confluence-results-list').textContent.includes('Synthetic blue'),'listed');
   assert.equal(t.store.has(SESSION_KEY),true); assert.equal(t.store.has('falsify.confluence-cache-key.v1'),true);
-  const ledger=t.store.get(LEDGER_KEY);
-  t.$('confluence-results-disconnect').click(); await flush();
+  const ledger=t.store.get(LEDGER_KEY), closes=t.lab.calls.filter(c=>c==='closeArchive').length;
+  t.$('confluence-results-disconnect').click();
+  await until(()=>t.lab.calls.filter(c=>c==='closeArchive').length===closes+1&&/임시 열람을 닫았습니다/.test(t.$('confluence-results-status').textContent),'disconnect closes even without an open archive');
   assert.equal(t.store.has(SESSION_KEY),false);
   assert.equal(t.store.get(LEDGER_KEY),ledger); assert.equal(t.store.get('falsify.local-note.v1'),'keep-note');
   assert.equal(t.store.has('falsify.confluence-cache-key.v1'),true);
+  assert.equal(t.$('ledger-export').textContent,'전체 기록 JSON 백업');
   assert.ok(!t.$('confluence-results-list').textContent.includes('Synthetic blue'));
   assert.ok(!t.$('confluence-review-list').textContent.includes('Synthetic blue'));
+  assert.match(t.$('confluence-results-status').textContent,/임시 열람을 닫았습니다/);
   assert.match(t.$('confluence-results-status').textContent,/권한 전체가 취소된 것은 아닙니다/);
+  assert.ok(!/면제|정책상 허용|exempt/i.test(t.$('confluence-results-status').textContent));
   assert.equal(t.calls.some(c=>c.method==='POST'&&c.path==='/v1/confluence/archives'),false);
+  const failing=labStub();
+  failing.closeArchive=async()=>{failing.calls.push('closeArchive'); throw Error('close-secret');};
+  const badClose=setup({routes:teamApi().routes,lab:failing});
+  await badClose.ready; await connect(badClose);
+  const kept=badClose.store.get(LEDGER_KEY);
+  badClose.$('confluence-review-disconnect').click();
+  await until(()=>failing.calls.includes('closeArchive')&&/닫지 못했습니다/.test(badClose.$('confluence-review-status').textContent),'close failed');
+  assert.equal(badClose.store.has(SESSION_KEY),false); assert.equal(badClose.store.get(LEDGER_KEY),kept);
+  assert.equal(badClose.store.has('falsify.confluence-cache-key.v1'),true);
+  assert.match(badClose.$('confluence-review-status').textContent,/권한 전체가 취소된 것은 아닙니다/);
+  assert.ok(!badClose.body.textContent.includes('close-secret'));
+  const bare=labStub(); delete bare.closeArchive;
+  const none=setup({lab:bare}); await none.ready; await connect(none);
+  const bareLedger=none.store.get(LEDGER_KEY);
+  none.$('confluence-review-disconnect').click(); await flush();
+  assert.match(none.$('confluence-review-status').textContent,/임시 열람 닫기를 지원하지 않습니다/);
+  assert.equal(none.store.has(SESSION_KEY),false); assert.equal(none.store.get(LEDGER_KEY),bareLedger);
+  assert.match(none.$('confluence-review-status').textContent,/권한 전체가 취소된 것은 아닙니다/);
 });
 
 test('temporary view stays out of the ledger until explicit close, disconnect or 12 hours',async()=>{
@@ -370,8 +396,9 @@ test('temporary view stays out of the ledger until explicit close, disconnect or
   api.archives.push({pageId:'1001',title:'Synthetic blue',webUrl:'https://falsify.atlassian.net/wiki/spaces/Falsify/pages/1001',archive:{schema:'falsify.confluence-archive.v1',kind:'experiment',id:'blue-1',title:'Synthetic blue',data:{schema:'falsify.review-bundle.v1',selectedRunId:'blue-1',ledger:{schema:'falsify.experiment-ledger.v1',harnesses:[],runs:[{id:'blue-1'}],reviews:[]}}},archiveSha256:HASH});
   t.$('confluence-review-load').click(); await until(()=>t.$('confluence-review-list').textContent.includes('Synthetic blue'),'listed');
   const before=JSON.stringify(t.lab.db); openSaved(t,'confluence-review-list');
-  await until(()=>t.lab.calls.includes('closeArchive')===false&&t.lab.calls.some(c=>c[0]==='open'),'opened');
-  assert.equal(t.$('confluence-review-close-temp').hidden,false);
+  await until(()=>t.lab.calls.includes('closeArchive')===false&&t.lab.calls.some(c=>c[0]==='open')&&t.$('confluence-review-close-temp').hidden===false,'opened');
+  assert.match(t.$('confluence-review-status').textContent,/팀 공유를 누르기 전에는 저장되지 않습니다/);
+  assert.equal(t.location.hash,'#review');
   assert.equal(JSON.stringify(t.lab.db),before); assert.equal(t.store.get(LEDGER_KEY).includes('blue-1'),false);
   t.$('evaluation-run').value='blue-1'; t.$('confluence-review-consent').checked=true; t.$('confluence-review-consent').change();
   assert.equal(t.$('confluence-review-share').disabled,false);
@@ -387,6 +414,17 @@ test('temporary view stays out of the ledger until explicit close, disconnect or
     await until(()=>t.lab.calls.filter(c=>c==='closeArchive').length>=2&&t.$('confluence-review-close-temp').hidden===true,'expired');
   }finally{t.ctx.Date.now=realNow;}
   assert.equal(JSON.stringify(t.lab.db),before); assert.equal(t.location.hash,'#review');
+  openSaved(t,'confluence-review-list');
+  await until(()=>t.lab.calls.filter(c=>c[0]==='open').length===3,'opened again');
+  assert.equal(t.$('confluence-review-close-temp').hidden,false);
+  const closes=t.lab.calls.filter(c=>c==='closeArchive').length;
+  t.$('confluence-review-disconnect').click();
+  await until(()=>t.lab.calls.filter(c=>c==='closeArchive').length===closes+1&&t.$('confluence-review-close-temp').hidden===true&&t.store.has(SESSION_KEY)===false,'disconnect closes the open temporary view');
+  assert.equal(JSON.stringify(t.lab.db),before); assert.equal(t.store.get(LEDGER_KEY).includes('blue-1'),false);
+  assert.ok(!t.$('confluence-review-list').textContent.includes('Synthetic blue'));
+  assert.equal(t.store.has('falsify.confluence-cache-key.v1'),true);
+  assert.match(t.$('confluence-review-status').textContent,/권한 전체가 취소된 것은 아닙니다/);
+  assert.equal(t.calls.some(c=>c.method==='POST'&&c.path==='/v1/confluence/archives'),false);
 });
 
 test('list and auth aborts use their own budgets and do not publish',async()=>{
