@@ -67,7 +67,7 @@
   function imageError(e,status,data){const code=status===401||status===403?'unauthorized':ownString(data,'error');e.code=code==='unauthorized'||IMAGE_ERRORS.includes(code)?code:null;
     const why=e.code==='image_edit_rejected'?ownString(data,'reason'):null;e.reason=IMAGE_REASONS.includes(why)?why:null;return e;}
 
-  function create({fetch:fetchImpl,location:loc,emit=()=>{}}){
+  function create({fetch:fetchImpl,location:loc,emit=()=>{},forget=()=>{}}){
     const local=loc.hostname===HOST;
     let status=local?'checking':'manual',error='',link=null,cap=null,attempt=0,port=local?Number(loc.port)||80:DEFAULT_PORT,launched=false;
     const busy={red:false,blue:false};
@@ -121,7 +121,22 @@
       catch(e){drop(candidate);if(id!==attempt)return {ok:false,error:'stale'};status='manual';return fail(e.message);}
     }
     function disconnect(){if(local)return {ok:false,error:'로컬 작업대 세션은 끊지 않습니다.'};if(frozen()){error='RED/BLUE 작업 중에는 연결을 끊을 수 없습니다.';changed();return {ok:false,error};}
-      attempt++;drop(link);link=null;cap=null;status='manual';error='';changed();return {ok:true};}
+      const revoke=link&&link.remote&&typeof link.token==='string'&&link.token.startsWith('rc1.')?{token:link.token,base:link.base}:null;
+      attempt++;drop(link);link=null;cap=null;status='manual';error='';
+      if(revoke)void fetchImpl(revoke.base+'/api/pair/revoke',{method:'POST',headers:{Authorization:'Bearer '+revoke.token,'Content-Type':'application/json'},body:JSON.stringify({schema:'falsify.pair-revoke.v1'}),credentials:'omit',redirect:'error',cache:'no-store',mode:'cors',targetAddressSpace:'loopback'}).catch(()=>{});
+      try{forget();}catch{}
+      changed();return {ok:true};}
+    // Click-pairing holds the panel in 'connecting' until redeem finishes. It does not open a model request.
+    function hold(rawPort){
+      const fail=message=>{error=message;changed();return {ok:false,error:message};};
+      if(local)return fail('로컬 작업대는 same-origin 세션을 사용합니다. 페어링이 필요 없습니다.');
+      if(frozen())return fail('RED/BLUE 작업 중에는 연결을 바꿀 수 없습니다.');
+      if(link||status==='connecting')return fail('이미 연결되었거나 연결 확인 중입니다. 다시 열려면 먼저 연결을 해제하세요.');
+      const p=parsePort(rawPort);if(p===null)return fail(PORT_ERROR);
+      port=p;status='connecting';error='';launched=true;changed();return {ok:true,port:p};
+    }
+    function releaseHold(){if(status==='connecting'&&!link){status='manual';changed();}}
+    function report(message){error=String(message||'').slice(0,300);changed();return {ok:!error,error};}
     // Explicit user click only (never on load): asks the OS to open the registered companion terminal.
     // Browsers cannot report whether a falsify:// handler exists, so success here only means the request was handed over.
     function launch(rawPort,open){
@@ -138,7 +153,7 @@
     function setBusy(role,value){if(!Object.hasOwn(busy,role))return;value=!!value;if(busy[role]===value)return;busy[role]=value;changed();}
     function setPort(value){if(local||status==='connecting'||link)return null;const p=parsePort(value);if(p!==null&&p!==port){port=p;changed();}return p;}
     const ready=boot();
-    return Object.freeze({ready,state,session,pair,disconnect,launch,busy:setBusy,setPort,capabilities:()=>cap});
+    return Object.freeze({ready,state,session,pair,disconnect,launch,hold,releaseHold,report,busy:setBusy,setPort,capabilities:()=>cap});
   }
 
   function mount(bridge,doc,options={}){
@@ -164,14 +179,14 @@
       if(portEl)portEl.disabled=s.frozen||linked;if(tokenEl)tokenEl.disabled=s.frozen||linked;
       if(connectEl)connectEl.disabled=s.frozen||linked;if(disconnectEl){disconnectEl.hidden=!linked;disconnectEl.disabled=s.frozen;}
       if(launchEl){launchEl.hidden=s.mode==='local'||!windows;launchEl.disabled=s.frozen||linked;}if(otherOsEl)otherOsEl.hidden=s.mode==='local'||windows;
-      if(launchStatusEl)launchStatusEl.textContent=s.launched&&s.status==='manual'?'포트 '+s.port+'로 터미널 열기를 요청했습니다. 브라우저가 물으면 열기를 허용하고, 터미널에 표시된 페어링 토큰을 아래에 붙여넣으세요. 아무 창도 뜨지 않으면 연결 앱이 아직 설치되지 않았을 수 있습니다. 브라우저는 설치 여부를 알려주지 않습니다. 1단계를 먼저 하거나 수동 실행을 쓰세요.':'';
+      if(launchStatusEl)launchStatusEl.textContent=s.launched&&s.status==='manual'?'포트 '+s.port+'로 연결 앱 열기를 요청했습니다. 브라우저와 로컬 승인 창이 뜨면 고정 웹 출처만 허용하세요. 승인 뒤에는 새로고침이 상태만 다시 확인합니다. 창이 없거나 취소하면 아래 수동 토큰을 쓰세요. 브라우저는 설치 여부를 알려주지 않습니다.':'';
       const p=linked?s.port:parsePort(portEl?.value)??s.port;if(commandEl)commandEl.textContent=command(p);if(launcherEl)launcherEl.textContent=launcher(p);
       for(const a of doc.querySelectorAll?.('[data-bridge-local]')||[])a.href='http://127.0.0.1:'+(s.mode==='local'?s.port:p)+'/';
     }
     render();
     doc.addEventListener('falsify:local-bridge',e=>render(e.detail));
     portEl?.addEventListener('input',()=>{bridge.setPort(portEl.value);render();});
-    launchEl?.addEventListener('click',()=>{const r=bridge.launch(portEl?.value,open);if(r.ok)tokenEl?.focus?.();});
+    launchEl?.addEventListener('click',()=>{const auto=options.autoPair||doc.defaultView?.FalsifyAutoPair;if(auto&&typeof auto.begin==='function'){void auto.begin({bridge,port:portEl?.value,open});return;}const r=bridge.launch(portEl?.value,open);if(r.ok)tokenEl?.focus?.();});
     // The token field is cleared on every attempt; the value lives only inside the bridge closure after success.
     connectEl?.addEventListener('click',async()=>{const t=tokenEl.value;tokenEl.value='';await bridge.pair(t,portEl?.value);});
     tokenEl?.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();connectEl.click();}});
@@ -179,6 +194,7 @@
   }
 
   if(typeof module==='object'&&module.exports){module.exports={create,mount,parsePort,validToken,command,launcher,launchUri,pdfEditor,paperAnalysis,imageEditor,profileProposal,workbenchVersion,companionInstance,INSTALL,DEFAULT_PORT,IMAGE_ERRORS,IMAGE_REASONS};return;}
-  const bridge=create({fetch:(...args)=>root.fetch(...args),location:root.location,emit:detail=>root.document.dispatchEvent(new CustomEvent('falsify:local-bridge',{detail}))});
+  const bridge=create({fetch:(...args)=>root.fetch(...args),location:root.location,emit:detail=>root.document.dispatchEvent(new CustomEvent('falsify:local-bridge',{detail})),forget:()=>{const auto=root.FalsifyAutoPair;if(auto&&typeof auto.forget==='function')auto.forget();}});
   root.FalsifyLocalBridge=bridge;mount(bridge,root.document);
+  if(root.FalsifyAutoPair&&typeof root.FalsifyAutoPair.attach==='function')root.FalsifyAutoPair.attach(bridge);
 })(typeof window==='object'?window:globalThis);
