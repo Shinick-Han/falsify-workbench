@@ -104,8 +104,7 @@ test('macOS jobs run portable connection tests and do not invent a handler-bundl
   assert.match(workflow, /shell:\s*pwsh/);
   assert.match(workflow, /shell:\s*powershell/);
   assert.match(workflow, /Windows PowerShell 5\.1/);
-  assert.match(workflow, /scripts\/test-macos-handler-bundle\.sh/);
-  assert.match(workflow, /does not record a bundle-test pass/);
+  assert.equal((workflow.match(/bash scripts\/test-macos-handler\.sh/g) || []).length, 2);
   assert.doesNotMatch(workflow, /handler bundle passed|bundle test: PASS/i);
 });
 

@@ -103,19 +103,8 @@ jobs:
           python-version: '3.12'
       - name: Portable POSIX connection tests
         run: bash scripts/test-posix-connection.sh
-      - name: Real macOS handler bundle, only when the script exists
-        id: macos-bundle
-        run: |
-          set -euo pipefail
-          if [ -f scripts/test-macos-handler-bundle.sh ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "scripts/test-macos-handler-bundle.sh is absent; this does not record a bundle-test pass."
-          fi
       - name: Run real macOS handler bundle test
-        if: steps.macos-bundle.outputs.present == 'true'
-        run: bash scripts/test-macos-handler-bundle.sh
+        run: bash scripts/test-macos-handler.sh
   verify-macos-intel:
     runs-on: macos-15-intel
     steps:
@@ -128,19 +117,8 @@ jobs:
           python-version: '3.12'
       - name: Portable POSIX connection tests
         run: bash scripts/test-posix-connection.sh
-      - name: Real macOS handler bundle, only when the script exists
-        id: macos-bundle
-        run: |
-          set -euo pipefail
-          if [ -f scripts/test-macos-handler-bundle.sh ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "scripts/test-macos-handler-bundle.sh is absent; this does not record a bundle-test pass."
-          fi
       - name: Run real macOS handler bundle test
-        if: steps.macos-bundle.outputs.present == 'true'
-        run: bash scripts/test-macos-handler-bundle.sh
+        run: bash scripts/test-macos-handler.sh
   deploy:
     if: github.ref == 'refs/heads/main'
     needs: [verify, verify-windows-launcher, verify-macos-arm, verify-macos-intel]

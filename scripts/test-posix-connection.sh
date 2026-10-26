@@ -113,7 +113,11 @@ if [ "\$1" = -c ]; then
   exit 1
 fi
 if [ "\$1" = -f ] && [ "\$2" = %OLp ]; then
-  exec $(printf '%q' "$real_stat") -c '%a' "\$3"
+  if mode=\$($(printf '%q' "$real_stat") -c '%a' "\$3" 2>/dev/null); then
+    printf '%s\\n' "\$mode"
+  else
+    exec $(printf '%q' "$real_stat") -f '%OLp' "\$3"
+  fi
 fi
 echo "unexpected stat \$*" >&2
 exit 1

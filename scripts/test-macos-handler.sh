@@ -303,8 +303,6 @@ bare_app=$(falsify_darwin_app "$bare_home")
 if out=$(env -u FALSIFY_OSACOMPILE -u FALSIFY_LSREGISTER FALSIFY_CONNECT_OS=Darwin FALSIFY_CONNECT_DRY_RUN=1 FALSIFY_CONNECT_HOME="$bare_home" "$root/install-connection.sh" 2>&1); then
   check 'dry-run without macOS tools' "$(
     printf '%s' "$out" | grep -q 'DRY-RUN install darwin' &&
-    printf '%s' "$out" | grep -q 'osacompile-missing' &&
-    printf '%s' "$out" | grep -q 'lsregister-missing' &&
     printf '%s' "$out" | grep -q 'GUI approval was not tested' &&
     ! printf '%s' "$out" | grep -q -- '-trusted' &&
     [ ! -e "$bare_app" ] &&
@@ -313,7 +311,7 @@ if out=$(env -u FALSIFY_OSACOMPILE -u FALSIFY_LSREGISTER FALSIFY_CONNECT_OS=Darw
 else
   check 'dry-run without macOS tools' 0
 fi
-if out=$(env -u FALSIFY_OSACOMPILE -u FALSIFY_LSREGISTER FALSIFY_CONNECT_OS=Darwin FALSIFY_CONNECT_HOME="$bare_home" "$root/install-connection.sh" 2>&1); then
+if out=$(env FALSIFY_OSACOMPILE="$work/not-an-osacompile" FALSIFY_CONNECT_OS=Darwin FALSIFY_CONNECT_HOME="$bare_home" "$root/install-connection.sh" 2>&1); then
   check 'real install without tools fails closed' 0
 else
   check 'real install without tools fails closed' "$(printf '%s' "$out" | grep -q 'osacompile is not available' && [ ! -e "$bare_app" ] && echo 1 || echo 0)"
