@@ -12,7 +12,45 @@
   function reportCaught(e){if(sticky||notice)return;msg(e.message+' 자동 재시도하지 않습니다.',true);}
   function panelLatched(){const n=document.querySelector('#doc-blue-failure');return !!(n&&!n.hidden&&n.textContent);}
   function terminalKind(record){if(!record)return null;if(record.disposition==='failed')return 'failed';if(record.disposition==='cancelled')return 'cancelled';return null;}
-  function clearSticky(){sticky=null;notice=false;for(const id of ['doc-blue-failure','doc-blue-pending-discard','doc-blue-failure-diagnostic','doc-blue-failure-request']){const node=document.querySelector('#'+id);if(!node)continue;if(id==='doc-blue-failure')node.textContent='';node.hidden=true;}}
+  const priorHarnessLabel=new Map(),priorDescribed=new Map(),NEW_ATTEMPT_LABEL='새 시도용 Harness 선택';
+  function harnessLabels(select){
+    if(!select)return [];
+    const list=select.labels;
+    if(list&&typeof list.length==='number'&&list.length)return Array.from(list);
+    if(select.id){const found=document.querySelector('label[for="'+select.id+'"]');if(found)return [found];}
+    return [];
+  }
+  // The menu is the next attempt. Its visible label is restored when the failed attempt leaves the page.
+  function markNewAttempt(on){
+    const select=document.querySelector('#blue-harness');if(!select)return;
+    for(const label of harnessLabels(select)){
+      if(on){if(!priorHarnessLabel.has(label))priorHarnessLabel.set(label,label.textContent);label.textContent=NEW_ATTEMPT_LABEL;}
+      else if(priorHarnessLabel.has(label)){label.textContent=priorHarnessLabel.get(label);priorHarnessLabel.delete(label);}
+    }
+    if(typeof select.setAttribute!=='function'||typeof select.getAttribute!=='function')return;
+    if(on){if(!priorDescribed.has(select))priorDescribed.set(select,select.getAttribute('aria-describedby'));select.setAttribute('aria-describedby','doc-blue-attempt-context');}
+    else if(priorDescribed.has(select)){const prior=priorDescribed.get(select);priorDescribed.delete(select);if(prior)select.setAttribute('aria-describedby',prior);else if(typeof select.removeAttribute==='function')select.removeAttribute('aria-describedby');}
+  }
+  // Stored failed request only. A blank, unsafe, or missing field is unavailable. The current menu is never a fallback.
+  function shownName(harness){
+    if(!harness||typeof harness!=='object'||Array.isArray(harness)||typeof harness.name!=='string'||!P||typeof P.safeFailure!=='function')return 'unavailable';
+    const safe=P.safeFailure(harness.name);
+    return typeof safe==='string'&&safe&&safe.length<=120?safe:'unavailable';
+  }
+  function shownVersion(harness){return harness&&typeof harness==='object'&&!Array.isArray(harness)&&typeof harness.version==='string'&&/^[A-Za-z0-9_.-]{1,80}$/.test(harness.version)?harness.version:'unavailable';}
+  function shownHash(record){return record&&typeof record.harnessHash==='string'&&/^[0-9a-f]{64}$/.test(record.harnessHash)?record.harnessHash:'unavailable';}
+  function shownRequestId(record){const id=record&&record.requestId,body=record&&record.request;return typeof id==='string'&&/^[A-Za-z0-9_:-]{1,160}$/.test(id)&&body&&body.requestId===id?id:'unavailable';}
+  function failedAttemptText(record){
+    const harness=record&&record.request&&typeof record.request==='object'?record.request.harness:null;
+    return '실패한 시도의 harness 이름 '+shownName(harness)+' · 버전 '+shownVersion(harness)+' · 해시 '+shownHash(record)+' · 요청 '+shownRequestId(record)+'. 이 값은 저장된 실패 요청에서만 읽었고, 현재 Harness 드롭다운에서 가져오지 않았습니다. 현재 드롭다운은 새 시도의 선택입니다. 드롭다운이 다른 harness를 보여도 보존된 실패 요청은 바뀌지 않습니다. 다시 시작하려면 「이 대기 작업 버리기」를 누른 뒤 「BLUE 독립 검토 시작」을 직접 누르세요. 자동으로 버리거나 다시 보내지 않습니다.';
+  }
+  function hideAttemptContext(){const n=document.querySelector('#doc-blue-attempt-context');if(!n)return;n.textContent='';n.hidden=true;}
+  function showAttemptContext(record){
+    let n=document.querySelector('#doc-blue-attempt-context');
+    if(!n){n=document.createElement('p');n.id='doc-blue-attempt-context';n.className='form-feedback';ensurePanel().after(n);}
+    n.hidden=false;n.textContent=failedAttemptText(record);markNewAttempt(true);
+  }
+  function clearSticky(){sticky=null;notice=false;markNewAttempt(false);for(const id of ['doc-blue-failure','doc-blue-pending-discard','doc-blue-failure-diagnostic','doc-blue-failure-request','doc-blue-attempt-context']){const node=document.querySelector('#'+id);if(!node)continue;if(id==='doc-blue-failure'||id==='doc-blue-attempt-context')node.textContent='';node.hidden=true;}}
   function ensurePanel(){let n=document.querySelector('#doc-blue-failure');if(!n){n=document.createElement('p');n.id='doc-blue-failure';n.className='form-feedback error';$('#doc-blue-progress').after(n);}return n;}
   function ensureButton(id,label,onClick){let b=document.querySelector('#'+id);if(!b){b=document.createElement('button');b.type='button';b.id=id;b.className='button secondary';$('#doc-blue-progress').after(b);}if(!b.__recoveryBound){b.type='button';b.className=b.className||'button secondary';b.addEventListener('click',onClick);b.__recoveryBound=true;}b.textContent=label;b.hidden=false;return b;}
   function saveJSON(data,name){const url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
@@ -127,6 +165,8 @@
     const guidance=' 대기 작업은 다시 열거나 연결과 조회가 바뀌어도 버릴 때까지 유지됩니다. 다시 시작하려면 「이 대기 작업 버리기」를 누른 뒤 「BLUE 독립 검토 시작」을 직접 누르세요. 진단 정보와 원래 요청은 저장만 하며 실행하지 않습니다.';
     msg(head+foreign,true,true);
     const box=ensurePanel();box.hidden=false;box.textContent=head+foreign+guidance;
+    if(kind==='failed')showAttemptContext(record);
+    else {hideAttemptContext();markNewAttempt(false);}
     showRecoveryActions();
   }
   function showUnknown(record){
