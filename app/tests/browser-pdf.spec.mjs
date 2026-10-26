@@ -4,6 +4,7 @@ import {execFileSync} from 'node:child_process';
 import {readFileSync} from 'node:fs';
 import http from 'node:http';
 import {extname, join} from 'node:path';
+import {fileURLToPath} from 'node:url';
 import {test} from 'node:test';
 import * as mupdf from 'mupdf';
 import * as pdfjs from '../node_modules/pdfjs-dist/legacy/build/pdf.mjs';
@@ -86,6 +87,12 @@ const cafe = buildPdf([
 const repeated = buildPdf([
   'BT /F1 12 Tf 0 0 0 rg 1 0 0 1 72 700 Tm (See beta and beta.) Tj ET\n',
 ]);
+const overlap = buildPdf([
+  'BT /F1 12 Tf 0 0 0 rg 1 0 0 1 72 700 Tm (XXXX) Tj ET\n',
+]);
+const actualText = buildPdf([
+  'BT /F1 12 Tf 0 0 0 rg /Span << /ActualText (REPLACE) >> BDC 1 0 0 1 72 700 Tm (XXXXXXX) Tj (.) Tj EMC ET\n',
+]);
 
 function fileOf(bytes, name = 'fixture.pdf') {
   return new File([bytes], name, {type: 'application/pdf'});
@@ -96,8 +103,9 @@ function snapshot(bytes, edits) {
 async function bytesOf(file) {
   return new Uint8Array(await file.arrayBuffer());
 }
+const cMapUrl = fileURLToPath(new URL('../node_modules/pdfjs-dist/cmaps/', import.meta.url)) + '/';
 async function pdfText(bytes) {
-  const doc = await pdfjs.getDocument({data: new Uint8Array(bytes), useSystemFonts: true, isEvalSupported: false}).promise;
+  const doc = await pdfjs.getDocument({data: new Uint8Array(bytes), useSystemFonts: true, isEvalSupported: false, cMapUrl, cMapPacked: true}).promise;
   const pages = [];
   for (let i = 1; i <= doc.numPages; i++) {
     const page = await doc.getPage(i);
@@ -188,7 +196,15 @@ test('vendored engine pin and global', () => {
   assert.deepEqual(COORDINATES, {space: 'top-left-page', origin: 'top-left', yAxis: 'down', unit: 'pt'});
   assert.equal(globalThis.FalsifyBrowserPdf.COORDINATE_SPACE, COORDINATE_SPACE);
   assert.equal(typeof globalThis.FalsifyBrowserPdf.prepare, 'function');
-  assert.match(readFileSync(new URL('../dist/browser-pdf.js', import.meta.url), 'utf8'), /FalsifyBrowserPdf/);
+  const loader = readFileSync(new URL('../dist/browser-pdf.js', import.meta.url), 'utf8');
+  const worker = readFileSync(new URL('../dist/browser-pdf-worker.mjs', import.meta.url), 'utf8');
+  assert.match(loader, /FalsifyBrowserPdf/);
+  assert.match(loader, /browser-pdf-worker\.mjs/);
+  assert.match(loader, /terminate\(/);
+  assert.match(loader, /id: id/);
+  assert.equal(loader.includes("import(new URL('./browser-pdf.mjs'"), false);
+  assert.match(worker, /from '\.\/browser-pdf\.mjs'/);
+  assert.match(worker, /\[copy\]/);
   assert.match(readFileSync(new URL('../dist/browser-pdf-vendor/NOTICE.md', import.meta.url), 'utf8'), /AGPL/);
 });
 
@@ -302,7 +318,7 @@ test('refuses a long After that would cover the next line', async () => {
   }), error => error instanceof BrowserPdfError && error.code === 'unsupported' && error.details.edits[0].code === 'long-after-no-room');
 });
 
-test('non-ASCII WinAnsi replacement and missing Hangul glyphs', async () => {
+test('WinAnsi Latin and Korean CJK replacement', async () => {
   const result = await prepare({
     file: fileOf(cafe),
     edits: snapshot(cafe, [{id: 'cafe', pageIndex: 0, before: 'café', after: 'naïve', origin: 'human'}]),
@@ -311,10 +327,31 @@ test('non-ASCII WinAnsi replacement and missing Hangul glyphs', async () => {
   assert.equal(text.includes('café'), false);
   assert.equal(text.includes('naïve'), true);
   assert.equal(text.includes('table'), true);
-  await assert.rejects(() => prepare({
+  const korean = await prepare({
     file: fileOf(cafe),
     edits: snapshot(cafe, [{id: 'hangul', pageIndex: 0, before: 'table', after: '한글', origin: 'human'}]),
-  }), error => error instanceof BrowserPdfError && error.code === 'unsupported' && error.details.edits[0].code === 'missing-glyphs');
+  });
+  const koreanBytes = await bytesOf(korean.file);
+  assert.equal(korean.sha256, sha(koreanBytes));
+  assert.notEqual(korean.sha256, sha(cafe));
+  const koreanText = (await pdfText(koreanBytes))[0];
+  assert.equal(koreanText.includes('table'), false);
+  assert.equal(koreanText.includes('한글'), true);
+  assert.equal(koreanText.includes('café'), true);
+  const koreanStream = contentStreams(koreanBytes)[0];
+  assert.equal(koreanStream.includes('table'), false);
+  assert.match(koreanStream, /<d55cae00> Tj/);
+  assert.equal(korean.verification.edits[0].encoding, 'uniks-utf16');
+  assert.equal(korean.verification.edits[0].fontSubstituted, true);
+  assert.equal(korean.verification.edits[0].status, 'applied');
+  assert.equal(korean.verification.status, 'warning');
+  assert.equal(korean.verification.layoutVerified, false);
+  assert.ok(korean.warnings.some(item => item.code === 'font-substituted'));
+  let extracted = '';
+  const opened = mupdf.Document.openDocument(new Uint8Array(koreanBytes), 'application/pdf');
+  try { opened.loadPage(0).toStructuredText('preserve-whitespace').walk({onChar(ch) { extracted += ch; }}); }
+  finally { opened.destroy(); }
+  assert.equal(extracted.includes('한글'), true);
 });
 
 test('top-left bbox edits and a bottom-left bbox does not', async () => {
@@ -383,6 +420,113 @@ test('an unrotated page can change while a rotated page stays untouched', async 
   assertNoVisibleStamps(contentStreams(out), pages);
 });
 
+test('raw segment offsets do not choose a page hit', async () => {
+  const ignored = await prepare({
+    file: fileOf(multi),
+    edits: snapshot(multi, [{id: 'word', pageIndex: 0, before: 'REPLACE', after: 'AFTER', origin: 'human', anchor: {start: 0, end: 7}}]),
+  });
+  const ignoredText = (await pdfText(await bytesOf(ignored.file)))[0];
+  assert.equal(ignoredText.includes('REPLACE'), false);
+  assert.equal(ignoredText.includes('AFTER'), true);
+  await assert.rejects(() => prepare({
+    file: fileOf(repeated),
+    edits: snapshot(repeated, [{id: 'dup', pageIndex: 0, before: 'beta', after: 'BETA', origin: 'human', anchor: {start: 13, end: 17}}]),
+  }), error => error instanceof BrowserPdfError && error.code === 'unsupported' && error.details.edits[0].code === 'ambiguous');
+});
+
+test('overlapping hits stay ambiguous until occurrence is set', async () => {
+  await assert.rejects(() => prepare({
+    file: fileOf(overlap),
+    edits: snapshot(overlap, [{id: 'over', pageIndex: 0, before: 'XXX', after: 'YY', origin: 'human'}]),
+  }), error => error instanceof BrowserPdfError && error.code === 'unsupported' && error.details.edits[0].code === 'ambiguous');
+  const picked = await prepare({
+    file: fileOf(overlap),
+    edits: snapshot(overlap, [{id: 'over', pageIndex: 0, before: 'XXX', after: 'YY', origin: 'human', anchor: {occurrence: 0}}]),
+  });
+  const out = await bytesOf(picked.file);
+  assert.equal(picked.sha256, sha(out));
+  assert.equal(String.fromCharCode(...out.slice(0, 5)), '%PDF-');
+  assert.equal((await pdfText(out))[0].includes('XXXX'), false);
+});
+
+test('empty After deletes the matched text', async () => {
+  const result = await prepare({
+    file: fileOf(multi),
+    edits: snapshot(multi, [{id: 'gone', pageIndex: 0, before: 'REPLACE', after: '', origin: 'human'}]),
+  });
+  const out = await bytesOf(result.file);
+  assert.equal(result.sha256, sha(out));
+  assert.notEqual(result.sha256, sha(multi));
+  assert.equal(result.verification.status, 'applied');
+  const text = (await pdfText(out))[0];
+  assert.equal(text.includes('REPLACE'), false);
+  assert.equal(text.includes('AFTER'), false);
+  assert.equal(text.includes('alpha'), true);
+  assert.equal(contentStreams(out)[0].includes('REPLACE'), false);
+});
+
+test('exact top-left unrotated coordinates', async () => {
+  const doc = mupdf.Document.openDocument(new Uint8Array(multi), 'application/pdf');
+  let box;
+  try {
+    const chars = [];
+    doc.loadPage(0).toStructuredText('preserve-whitespace').walk({onChar(ch, _origin, _font, _size, quad) { chars.push({ch, quad: [...quad]}); }});
+    const at = chars.map(item => item.ch).join('').indexOf('REPLACE');
+    const slice = chars.slice(at, at + 'REPLACE'.length);
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const item of slice) for (let i = 0; i < 8; i += 2) {
+      x0 = Math.min(x0, item.quad[i]); y0 = Math.min(y0, item.quad[i + 1]);
+      x1 = Math.max(x1, item.quad[i]); y1 = Math.max(y1, item.quad[i + 1]);
+    }
+    box = [x0, y0, x1, y1];
+  } finally { doc.destroy(); }
+  assert.ok(box[1] > 70 && box[3] < 110, 'top-left y ' + box.join(','));
+  assert.ok(box[0] > 120 && box[2] < 210, 'top-left x ' + box.join(','));
+  const edited = await prepare({
+    file: fileOf(multi),
+    edits: snapshot(multi, [{id: 'word', pageIndex: 0, before: 'REPLACE', after: 'AFTER', origin: 'human', anchor: {bbox: box}}]),
+  });
+  assert.equal(edited.pageMap[0].coordinateSpace, 'top-left-page');
+  assert.equal(edited.pageMap[0].rotation, 0);
+  assert.equal(edited.pageMap[0].width, 612);
+  assert.equal(edited.pageMap[0].height, 792);
+  assert.equal((await pdfText(await bytesOf(edited.file)))[0].includes('AFTER'), true);
+  const shifted = [box[0], box[1] + 600, box[2], box[3] + 600];
+  await assert.rejects(() => prepare({
+    file: fileOf(multi),
+    edits: snapshot(multi, [{id: 'word', pageIndex: 0, before: 'REPLACE', after: 'AFTER', origin: 'human', anchor: {bbox: shifted}}]),
+  }), error => error instanceof BrowserPdfError && error.code === 'unsupported' && error.details.edits[0].code === 'anchor-mismatch');
+});
+
+test('a failed check still returns the same parseable PDF and hash', async () => {
+  const result = await prepare({
+    file: fileOf(actualText),
+    edits: snapshot(actualText, [{id: 'word', pageIndex: 0, before: 'REPLACE', after: 'AFTER', origin: 'human'}]),
+  });
+  const out = await bytesOf(result.file);
+  const again = await bytesOf(result.file);
+  assert.equal(result.verification.status, 'failed');
+  assert.equal(result.verification.layoutVerified, false);
+  assert.equal(result.verification.edits[0].status, 'failed');
+  assert.equal(result.verification.edits[0].checks[0].code, 'removed-before');
+  assert.equal(result.verification.quality.removedBefore, false);
+  assert.notEqual(result.verification.status, 'applied');
+  assert.equal(result.sha256, sha(out));
+  assert.equal(result.verification.outputSha256, sha(again));
+  assert.equal(sha(out), sha(again));
+  assert.equal(String.fromCharCode(...out.slice(0, 5)), '%PDF-');
+  const opened = mupdf.Document.openDocument(new Uint8Array(out), 'application/pdf');
+  let extracted = '';
+  try {
+    assert.equal(opened.countPages(), 1);
+    opened.loadPage(0).toStructuredText('preserve-whitespace').walk({onChar(ch) { extracted += ch; }});
+  } finally { opened.destroy(); }
+  const text = (await pdfText(out))[0];
+  assert.equal(text.includes('AFTER'), true);
+  assert.equal(extracted.includes('AFTER'), true);
+  assert.equal(extracted.includes('REPLACE'), true);
+});
+
 test('ambiguous, stale, and aborted requests do not return a file', async () => {
   await assert.rejects(() => prepare({
     file: fileOf(repeated),
@@ -411,14 +555,17 @@ test('ambiguous, stale, and aborted requests do not return a file', async () => 
 
 function listen(root) {
   const types = {'.js': 'text/javascript', '.mjs': 'text/javascript', '.wasm': 'application/wasm', '.json': 'application/json'};
+  const hits = [];
   const server = http.createServer((req, res) => {
-    const pathname = decodeURIComponent(new URL(req.url, 'http://127.0.0.1').pathname).replace(/^\/+/, '');
-    if (pathname === 'harness.html') {
+    const pathname = decodeURIComponent(new URL(req.url, 'http://127.0.0.1').pathname);
+    hits.push(pathname);
+    const relative = pathname.replace(/^\/+/, '');
+    if (relative === 'harness.html') {
       res.writeHead(200, {'content-type': 'text/html; charset=utf-8'});
       res.end('<!doctype html><title>browser-pdf</title><script src="/dist/browser-pdf.js"></script>');
       return;
     }
-    const path = join(root, pathname);
+    const path = join(root, relative);
     if (path !== root && !path.startsWith(root + '/')) { res.writeHead(403); res.end(); return; }
     try {
       const body = readFileSync(path);
@@ -426,7 +573,7 @@ function listen(root) {
       res.end(body);
     } catch { res.writeHead(404); res.end('missing'); }
   });
-  return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve(server)));
+  return new Promise(resolve => server.listen(0, '127.0.0.1', () => { server.hits = hits; resolve(server); }));
 }
 
 test('chrome classic loader runs the vendored WASM edit', async (t) => {
@@ -443,27 +590,70 @@ test('chrome classic loader runs the vendored WASM edit', async (t) => {
     page.on('pageerror', error => errors.push(String(error)));
     await page.goto(`http://127.0.0.1:${port}/harness.html`, {waitUntil: 'domcontentloaded'});
     await page.waitForFunction(() => globalThis.FalsifyBrowserPdf && typeof globalThis.FalsifyBrowserPdf.prepare === 'function');
+    const before = server.hits.filter(path => /wasm|browser-pdf\.mjs|browser-pdf-worker/.test(path));
+    assert.deepEqual(before, []);
     const encoded = Buffer.from(multi).toString('base64');
-    const produced = await page.evaluate(async (b64) => {
+    const produced = await Promise.race([
+      page.evaluate(async (b64) => {
+      const workers = [];
+      const NativeWorker = window.Worker;
+      window.Worker = function (...args) {
+        const worker = new NativeWorker(...args);
+        const record = {terminated: false};
+        const stop = worker.terminate.bind(worker);
+        worker.terminate = () => { record.terminated = true; return stop(); };
+        workers.push(record);
+        return worker;
+      };
       const binary = atob(b64);
       const bytes = new Uint8Array(binary.length);
       for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      const kept = bytes.slice();
       const digest = await crypto.subtle.digest('SHA-256', bytes);
       const fileHash = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+      const early = new AbortController();
+      early.abort();
+      let earlyCode = '';
+      try {
+        await FalsifyBrowserPdf.prepare({
+          file: new File([bytes], 'paper.pdf', {type: 'application/pdf'}),
+          edits: {schema: 'falsify.paper-edits.v1', fileHash, edits: [{id: 'word', enabled: true, pageIndex: 0, before: 'REPLACE', after: 'AFTER', origin: 'human'}]},
+          signal: early.signal,
+        });
+      } catch (error) { earlyCode = error.code; }
       const file = new File([bytes], 'paper.pdf', {type: 'application/pdf'});
       const result = await FalsifyBrowserPdf.prepare({
         file,
         edits: {schema: 'falsify.paper-edits.v1', fileHash, edits: [{id: 'word', enabled: true, pageIndex: 0, before: 'REPLACE', after: 'AFTER', origin: 'human'}]},
       });
+      const sourceStill = bytes.length === kept.length && bytes.every((value, index) => value === kept[index]);
+      const controller = new AbortController();
+      const cancelled = FalsifyBrowserPdf.prepare({
+        file,
+        edits: {schema: 'falsify.paper-edits.v1', fileHash, edits: [{id: 'word', enabled: true, pageIndex: 0, before: 'REPLACE', after: 'AFTER', origin: 'human'}]},
+        signal: controller.signal,
+      });
+      controller.abort();
+      let cancelCode = '';
+      try { await cancelled; } catch (error) { cancelCode = error.code; }
+      const again = await FalsifyBrowserPdf.prepare({
+        file,
+        edits: {schema: 'falsify.paper-edits.v1', fileHash, edits: [{id: 'word', enabled: true, pageIndex: 0, before: 'REPLACE', after: 'LATER', origin: 'human'}]},
+      });
       const out = new Uint8Array(await result.file.arrayBuffer());
       let text = '';
       for (let i = 0; i < out.length; i += 0x8000) text += String.fromCharCode(...out.subarray(i, i + 0x8000));
+      const later = new Uint8Array(await again.file.arrayBuffer());
       return {
         b64: btoa(text), sha256: result.sha256, status: result.verification.status, pages: result.pageMap.length, head: text.slice(0, 5),
         coordinateSpace: result.pageMap[0].coordinateSpace, origin: result.pageMap[0].origin, yAxis: result.pageMap[0].yAxis,
         width: result.pageMap[0].width, height: result.pageMap[0].height, rotation: result.pageMap[0].rotation,
+        earlyCode, cancelCode, workers: workers.length, terminated: workers.filter(item => item.terminated).length,
+        sourceStill, laterStatus: again.verification.status, laterHasLater: new TextDecoder('latin1').decode(later).includes('(LATER)'),
       };
-    }, encoded);
+    }, encoded),
+      new Promise((_resolve, reject) => setTimeout(() => reject(new Error('browser prepare timed out ' + server.hits.join(' | '))), 20000)),
+    ]);
     assert.deepEqual(errors, []);
     assert.equal(produced.status, 'applied');
     assert.equal(produced.pages, 2);
@@ -474,6 +664,15 @@ test('chrome classic loader runs the vendored WASM edit', async (t) => {
     assert.equal(produced.height, 792);
     assert.equal(produced.rotation, 0);
     assert.equal(produced.head, '%PDF-');
+    assert.equal(produced.earlyCode, 'aborted');
+    assert.equal(produced.cancelCode, 'aborted');
+    assert.equal(produced.sourceStill, true);
+    assert.ok(produced.workers >= 2, 'workers ' + produced.workers);
+    assert.ok(produced.terminated >= 1, 'terminated ' + produced.terminated);
+    assert.equal(produced.laterStatus, 'applied');
+    assert.equal(produced.laterHasLater, true);
+    assert.ok(server.hits.some(path => path.endsWith('browser-pdf-worker.mjs')));
+    assert.ok(server.hits.some(path => path.endsWith('mupdf-wasm.wasm')));
     const out = Uint8Array.from(Buffer.from(produced.b64, 'base64'));
     assert.equal(produced.sha256, sha(out));
     const stream = contentStreams(out)[0];
