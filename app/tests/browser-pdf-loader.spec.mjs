@@ -220,6 +220,29 @@ test('aborting a completed request does not terminate the next job', async () =>
   } finally { loaded.restore(); }
 });
 
+test('cancelling an unread file does not terminate another active request', async () => {
+  const harness = createHarness();
+  harness.hold = true;
+  const loaded = install(harness.Worker);
+  const signal = controllableSignal();
+  let releaseRead;
+  try {
+    const active = loaded.api.prepare({file: pdfFile(), edits: {}});
+    await flush();
+    const unread = loaded.api.prepare({file: {name: 'slow.pdf', arrayBuffer: () => new Promise(resolve => { releaseRead = resolve; })}, edits: {}, signal: signal.signal});
+    const cancelled = assert.rejects(unread, error => error.code === 'aborted');
+    signal.signal.abort();
+    await cancelled;
+    assert.equal(harness.workers[0].terminated, false);
+    const message = harness.workers[0].messages[0].data;
+    harness.workers[0].deliver(failedPayload(message.id));
+    assert.equal((await withTimeout(active)).sha256, FAILED_SHA);
+    releaseRead(new ArrayBuffer(4));
+    await flush();
+    assert.equal(harness.workers[0].messages.length, 1);
+  } finally { loaded.restore(); }
+});
+
 test('postMessage failure rejects engine and the next prepare uses a new worker', async () => {
   const harness = createHarness();
   harness.throwOnPost = true;

@@ -102,7 +102,7 @@
         function cancel() {
           if (settled) return;
           var job = jobs.get(id);
-          var target = (job && job.worker) || worker;
+          var target = job && job.worker;
           finish(abortedError());
           if (target) resetWorker(target, abortedError());
         }
