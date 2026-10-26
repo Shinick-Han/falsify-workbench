@@ -27,44 +27,43 @@
     return error;
   }
 
-  function dropWorker() {
-    var dead = worker;
-    worker = null;
-    if (!dead) return;
+  function resetWorker(target, error) {
+    if (!target || target._reset) return;
+    target._reset = true;
+    if (worker === target) worker = null;
     var pending = [];
-    jobs.forEach(function (job, id) { if (job.worker === dead) pending.push(id); });
-    pending.forEach(function (id) {
-      var job = jobs.get(id);
-      jobs.delete(id);
-      job.reject(abortedError());
-    });
-    dead.terminate();
+    jobs.forEach(function (job) { if (job.worker === target) pending.push(job); });
+    if (typeof target._settleReady === 'function') target._settleReady(error);
+    try { target.terminate(); } catch (terminateError) { /* already stopped */ }
+    pending.forEach(function (job) { job.finish(error); });
   }
 
   function spawn(scriptUrl) {
     var created = new Worker(new URL('./browser-pdf-worker.mjs', scriptUrl), {type: 'module'});
-    var markReady;
-    created.ready = new Promise(function (resolve) { markReady = resolve; });
+    var readySettled = false;
+    var markReady, rejectReady;
+    created.ready = new Promise(function (resolve, reject) {
+      markReady = resolve;
+      rejectReady = reject;
+    });
+    created._settleReady = function (error) {
+      if (readySettled) return;
+      readySettled = true;
+      if (error) rejectReady(error);
+      else markReady();
+    };
     created.onmessage = function (event) {
       var data = event.data || {};
-      if (data.ready) { markReady(); return; }
+      if (data.ready) { created._settleReady(); return; }
       var job = jobs.get(data.id);
       if (!job || job.worker !== created) return;
-      jobs.delete(data.id);
-      if (!data.ok) { job.reject(engineError(data.error)); return; }
+      if (!data.ok) { job.finish(engineError(data.error)); return; }
       var bytes = new Uint8Array(data.bytes);
       var file = new File([bytes], data.name, {type: data.type || 'application/pdf'});
-      job.resolve({file: file, sha256: data.sha256, verification: data.verification, pageMap: data.pageMap, warnings: data.warnings});
+      job.finish(null, {file: file, sha256: data.sha256, verification: data.verification, pageMap: data.pageMap, warnings: data.warnings});
     };
     created.onerror = function () {
-      var pending = [];
-      jobs.forEach(function (job, id) { if (job.worker === created) pending.push(id); });
-      pending.forEach(function (id) {
-        var job = jobs.get(id);
-        jobs.delete(id);
-        job.reject(engineError({code: 'engine', message: 'PDF 워커가 실패했습니다. 출력 파일은 만들지 않았습니다.'}));
-      });
-      if (worker === created) worker = null;
+      resetWorker(created, engineError({code: 'engine', message: 'PDF 워커가 실패했습니다. 출력 파일은 만들지 않았습니다.'}));
     };
     return created;
   }
@@ -92,38 +91,64 @@
       var id = nextId++;
       return new Promise(function (resolve, reject) {
         var settled = false;
-        function fail(error) {
+        function finish(error, value) {
           if (settled) return;
           settled = true;
-          reject(error);
+          if (signal && typeof signal.removeEventListener === 'function') signal.removeEventListener('abort', cancel);
+          jobs.delete(id);
+          if (error) reject(error);
+          else resolve(value);
         }
         function cancel() {
-          dropWorker();
-          fail(abortedError());
+          if (settled) return;
+          var job = jobs.get(id);
+          var target = (job && job.worker) || worker;
+          finish(abortedError());
+          if (target) resetWorker(target, abortedError());
         }
-        if (signal) signal.addEventListener('abort', cancel, {once: true});
+        if (signal && typeof signal.addEventListener === 'function') signal.addEventListener('abort', cancel);
         readFileBytes(request && request.file).then(function (bytes) {
-          if (settled || (signal && signal.aborted)) { fail(abortedError()); return; }
-          if (!worker) worker = spawn(current);
-          var target = worker;
-          jobs.set(id, {resolve: resolve, reject: fail, worker: target});
-          target.ready.then(function () {
-            if (settled || (signal && signal.aborted)) { fail(abortedError()); return; }
-            var buffer = freshBuffer(bytes);
-            try {
-              target.postMessage({
-                id: id,
-                name: request.file && request.file.name || 'document.pdf',
-                type: request.file && request.file.type || 'application/pdf',
-                fileHash: request.fileHash || '',
-                edits: request.edits,
-                bytes: buffer,
-              }, [buffer]);
-            } catch (error) {
-              fail(engineError({code: 'engine', message: String(error && error.message || error)}));
+          try {
+            if (settled || (signal && signal.aborted)) { finish(abortedError()); return; }
+            if (!worker || worker._reset) worker = spawn(current);
+            var target = worker;
+            if (target._reset) {
+              if (worker === target) worker = null;
+              finish(engineError({code: 'engine', message: 'PDF 워커가 실패했습니다. 출력 파일은 만들지 않았습니다.'}));
+              return;
             }
-          }, fail);
-        }, fail);
+            jobs.set(id, {finish: finish, worker: target});
+            target.ready.then(function () {
+              if (settled) return;
+              if (signal && signal.aborted) {
+                finish(abortedError());
+                resetWorker(target, abortedError());
+                return;
+              }
+              var buffer = freshBuffer(bytes);
+              try {
+                target.postMessage({
+                  id: id,
+                  name: request.file && request.file.name || 'document.pdf',
+                  type: request.file && request.file.type || 'application/pdf',
+                  fileHash: request.fileHash || '',
+                  edits: request.edits,
+                  bytes: buffer,
+                }, [buffer]);
+              } catch (error) {
+                var failure = engineError({code: 'engine', message: String(error && error.message || error)});
+                finish(failure);
+                resetWorker(target, failure);
+              }
+            }, function (error) {
+              finish(error && error.code ? error : engineError({code: 'engine', message: String(error && error.message || error)}));
+            });
+          } catch (error) {
+            finish(engineError({code: 'engine', message: String(error && error.message || error)}));
+          }
+        }, function (error) {
+          finish(error && error.code ? error : engineError({code: 'engine', message: String(error && error.message || error)}));
+        });
       });
     },
   };
