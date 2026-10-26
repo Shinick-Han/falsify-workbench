@@ -1,5 +1,7 @@
 // Installed Edge fallback: Aside has no viewport API. No browser installation or model calls.
-const {chromium}=require(process.argv[2]),assert=require('node:assert/strict'),fs=require('node:fs/promises'),path=require('node:path');
+// Offline failed-attempt checks run first and do not need Edge. Pass the Playwright module path to continue into the browser half.
+const {offlineFailedAttempt}=require('./document-blue.spec.cjs');
+const assert=require('node:assert/strict'),fs=require('node:fs/promises'),path=require('node:path');
 const base=process.argv[3]||'http://127.0.0.1:7816/';let browser,passed=0;const checks=[];
 function check(name,condition){assert.ok(condition,name);passed++;checks.push(name);}
 const source='Full invariance was found.\n\nOnly partial invariance holds.\n';
@@ -12,6 +14,9 @@ async function stub(page){await page.evaluate(()=>{window.__records=[];window.__
 const records=page=>page.evaluate(()=>window.__records),recordText=page=>page.locator('#doc-blue-record-status').innerText();
 async function apply(page,res){await reveal(page,'#doc-blue-response');await page.locator('#doc-blue-response').fill(JSON.stringify(res));await page.locator('#doc-blue-apply').click();}
 (async()=>{
+ await offlineFailedAttempt();
+ if(!process.argv[2]){console.log('document-blue-browser: offline failed-attempt checks passed');return;}
+ const {chromium}=require(process.argv[2]);
  browser=await chromium.launch({channel:'msedge',headless:true});const page=await browser.newPage({viewport:{width:1440,height:900},reducedMotion:'reduce',acceptDownloads:true}),errors=[];page.on('pageerror',e=>errors.push(e.message));let jobPosts=0;page.on('request',q=>{if(q.method()==='POST'&&q.url().endsWith('/api/blue/jobs'))jobPosts++;});await page.goto(base);await page.evaluate(()=>FalsifyLab.ready);await stub(page);await page.locator('.rail [data-view=blue]:visible').first().click();await page.waitForFunction(()=>document.querySelector('#doc-blue-connection').textContent.includes('로컬 BLUE 연결'));
  check('independent BLUE paper action panel',(await page.locator('#blue-title').innerText()).includes('논문 파일'));check('empty start disabled',await page.locator('#doc-blue-start').isDisabled());check('BLUE has no human assessment controls',await page.locator('#view-blue #doc-blue-plan,#view-blue #evaluation-form').count()===0);
  // Actual AMAS extraction only: no model calls, candidate selection or edited PDF artifact.

@@ -14,6 +14,8 @@ The page distinguishes five observations:
 
 The phrase `BLUE 재독 기준 인용이 해당 문단에 없거나 중복됩니다.` is the companion's ValueError for a BLUE reread anchor. It is shown as text on a failed job. It is not a generic pending notice, and a later generic recover sentence does not replace it.
 
+Beside that diagnostic, a failed attempt also shows the harness name, version, and hash and the request id taken from the stored failed request. The harness menu is only the choice for a new attempt. After reload it may show the default harness while the retained failure still uses the harness that was stored with the request. The page does not read the menu's label, value, or detail line to fill the failed attempt. The name uses the same safe-text rule as the server phrase. A missing name, version, hash, or request id, or a name that the safe-text rule reduces to nothing, is the word `unavailable`. The menu label says the menu is for a new attempt until the failure is discarded. Changing the menu does not discard the record, rewrite the stored request, or POST.
+
 ## When the server phrase is shown
 
 The phrase is stored and shown only when every identity check already required for recovery matches:
@@ -38,6 +40,6 @@ The original request stays on the record. Discard is the only delete. The failur
 
 ## Again, only on purpose
 
-The failure panel tells the user to press "이 대기 작업 버리기" and then "BLUE 독립 검토 시작". Discard removes the record and does not submit a job. The next run happens only when the user starts it. A click on start while the failed, cancelled, or unknown record is still there does not POST.
+The failure panel tells the user to press "이 대기 작업 버리기" and then "BLUE 독립 검토 시작". The same discard-then-start instruction is repeated next to the failed attempt's harness identity. Discard removes the record and does not submit a job. The next run happens only when the user starts it, and that run uses the harness then selected in the menu. A click on start while the failed, cancelled, or unknown record is still there does not POST.
 
 A matched completed GET can still restore a job whose receipt was unknown, because that receipt never became a confirmed failure. A record already marked failed or cancelled is not replaced by a later running or completed body.
