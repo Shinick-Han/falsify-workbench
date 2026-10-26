@@ -916,6 +916,52 @@ console.log(JSON.stringify({
   }
 });
 
+test('saved-byte check detects collateral loss on an edited page and keeps the candidate downloadable', () => {
+  const script = `
+import {readFileSync} from 'node:fs';
+import {createHash} from 'node:crypto';
+import {PDFPage} from './dist/browser-pdf-vendor/mupdf.js';
+import {prepare} from './dist/browser-pdf.mjs';
+const bytes = new Uint8Array(readFileSync(0));
+const original = PDFPage.prototype.applyRedactions;
+PDFPage.prototype.applyRedactions = function (...args) {
+  // Inject the exact class of regression: lose a nearby unselected word.
+  const quads = this.search('Second')[0];
+  if (quads?.length) {
+    const annot = this.createAnnotation('Redact');
+    annot.setRect([70, 98, 120, 114]);
+    annot.setQuadPoints(quads);
+  }
+  return original.apply(this, args);
+};
+const digest = createHash('sha256').update(bytes).digest('hex');
+const result = await prepare({
+  file: new File([bytes], 'fixture.pdf', {type: 'application/pdf'}),
+  edits: {schema: 'falsify.paper-edits.v1', fileHash: digest, revision: 1, edits: [
+    {id: 'word', pageIndex: 0, before: 'REPLACE', after: 'AFTER', origin: 'human'},
+  ]},
+});
+const output = new Uint8Array(await result.file.arrayBuffer());
+console.log(JSON.stringify({status: result.verification.status,
+  layoutVerified: result.verification.layoutVerified,
+  untouchedText: result.verification.quality.untouchedText,
+  presentAfter: result.verification.quality.presentAfter,
+  checks: result.verification.checks,
+  head: String.fromCharCode(...output.slice(0, 5)),
+  hashMatches: createHash('sha256').update(output).digest('hex') === result.sha256}));
+`;
+  const report = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', script], {
+    cwd: fileURLToPath(new URL('..', import.meta.url)), input: Buffer.from(multi), maxBuffer: 8 * 1024 * 1024,
+  }).toString());
+  assert.equal(report.status, 'failed');
+  assert.equal(report.layoutVerified, false);
+  assert.equal(report.untouchedText, false);
+  assert.equal(report.presentAfter, true);
+  assert.ok(report.checks.some(item => item.pageIndex === 0 && item.code === 'untouched-text'));
+  assert.equal(report.head, '%PDF-');
+  assert.equal(report.hashMatches, true);
+});
+
 test('exact top-left unrotated coordinates', async () => {
   const doc = mupdf.Document.openDocument(new Uint8Array(multi), 'application/pdf');
   let box;
