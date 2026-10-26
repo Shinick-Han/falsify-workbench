@@ -36,7 +36,7 @@ falsify_pairing_dir() {
 # macOS uses osascript only when that binary exists. Linux cloud runs do not have it.
 falsify_ask_visible() {
   if [ "$(uname -s)" = Darwin ] && command -v osascript >/dev/null 2>&1; then
-    osascript -e "display dialog \"Allow $(falsify_fixed_origin) to receive a short-lived local reconnect credential? This does not run a model or reveal the server process token.\" buttons {\"No\", \"Yes\"} default button \"No\" with title \"Falsify local companion\"" >/dev/null
+    osascript -e "display dialog \"Allow $(falsify_fixed_origin) to receive a short-lived local reconnect credential? This does not run a model or reveal the server process token.\" buttons {\"No\", \"Yes\"} default button \"No\" cancel button \"No\" with title \"Falsify local companion\"" >/dev/null
     return $?
   fi
   echo 'Visible approval is unavailable on this host. Use the manual token fallback. Nothing was approved.' >&2

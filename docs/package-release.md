@@ -15,9 +15,9 @@ No other WASM path is added. A private PDF is still rejected. The receipt keeps 
 
 `.github/workflows/pages.yml` runs verify jobs on a push to `main` and on `workflow_dispatch` of any branch. The deploy job runs only when `github.ref == refs/heads/main` and the verify jobs passed. A feature-branch dispatch is verify-only.
 
-`verify-macos-arm` (`macos-15`) and `verify-macos-intel` (`macos-15-intel`) use Node 24 and Python 3.12 and run `scripts/test-posix-connection.sh`. `scripts/test-macos-handler-bundle.sh` runs only when that file exists. Its absence is not recorded as a pass. Windows keeps PowerShell 7 (`pwsh`) and Windows PowerShell 5.1 (`powershell`).
+`verify-macos-arm` (`macos-15`) and `verify-macos-intel` (`macos-15-intel`) use Node 24 and Python 3.12 and run `scripts/test-posix-connection.sh` plus `scripts/test-macos-handler.sh`. The latter compiles and registers an isolated test scheme with real macOS tools, then unregisters it; it does not click a native approval dialog. Windows keeps PowerShell 7 (`pwsh`) and Windows PowerShell 5.1 (`powershell`).
 
-The MuPDF browser step runs `npm ci` and `npx playwright install chromium` before `app/tests/browser-pdf.spec.mjs`. It exports `FALSIFY_CHROME_EXECUTABLE` and, when `/usr/bin/google-chrome` is missing, points that path at the installed Chromium because the committed test launches that path. `scripts/assert-browser-pdf-executed.mjs` fails the job if that test was skipped. A skip is not a success.
+The browser dependency step runs `npm ci --ignore-scripts` and installs Chromium before all browser contracts. The MuPDF step supplies the installed browser and Python executable paths. `scripts/assert-browser-pdf-executed.mjs` fails the job if the actual browser test was skipped. A skip is not a success.
 
 ```bash
 node --test scripts/packaging.spec.mjs

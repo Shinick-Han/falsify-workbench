@@ -28,6 +28,24 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Match native AppleScript semantics: No/Escape must exit nonzero, never approve.
+(
+  uname() { printf '%s\n' Darwin; }
+  osascript() {
+    printf '%s\n' "$*" > "$work/approval-command.txt"
+    return "$approval_exit"
+  }
+  approval_exit=1
+  if falsify_ask_visible; then
+    echo 'FAIL native approval cancellation accepted' >&2
+    exit 1
+  fi
+  approval_exit=0
+  falsify_ask_visible
+  grep -Fq 'cancel button "No"' "$work/approval-command.txt"
+)
+check 'native approval No and Escape cancel; Yes approves' 1
+
 check 'xml escape' "$([ "$(falsify_xml_escape 'a&b<c>d')" = 'a&amp;b&lt;c&gt;d' ] && echo 1 || echo 0)"
 check 'darwin app path' "$([ "$(falsify_darwin_app /var/test)" = '/var/test/Library/Application Support/falsify-workbench/Falsify Connect.app' ] && echo 1 || echo 0)"
 
