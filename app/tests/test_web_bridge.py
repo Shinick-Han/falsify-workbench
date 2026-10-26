@@ -66,7 +66,7 @@ class CliTests(unittest.TestCase):
         out=io.StringIO();err=io.StringIO();created=[]
         def make(*a,**k):
             s=(factory or self.FakeServer)(*a,**k);created.append(s);return s
-        with tempfile.TemporaryDirectory() as tmp,patch.dict(os.environ,{'FALSIFY_PAIRING_DIR':tmp}),\
+        with tempfile.TemporaryDirectory() as tmp,patch.dict(os.environ,{'FALSIFY_PAIRING_DIR':str(Path(tmp)/'pairing')}),\
                 patch.object(sys,'argv',['server.py',*argv]),patch.object(server,'ThreadingHTTPServer',make),redirect_stdout(out),patch.object(sys,'stderr',err):
             try:server.main();code=0
             except SystemExit as e:code=e.code
@@ -87,7 +87,7 @@ class CliTests(unittest.TestCase):
     def test_no_token_when_bind_fails(self):
         def fail(*a,**k):raise OSError('address in use')
         out=io.StringIO()
-        with tempfile.TemporaryDirectory() as tmp,patch.dict(os.environ,{'FALSIFY_PAIRING_DIR':tmp}),\
+        with tempfile.TemporaryDirectory() as tmp,patch.dict(os.environ,{'FALSIFY_PAIRING_DIR':str(Path(tmp)/'pairing')}),\
                 patch.object(sys,'argv',['server.py','--port','40123','--web-origin',WEB]),patch.object(server,'ThreadingHTTPServer',fail),redirect_stdout(out):
             with self.assertRaises(OSError):server.main()
         self.assertFalse(server.TOKEN in out.getvalue())
