@@ -12,6 +12,17 @@ export const ENGINE = Object.freeze({
   redaction: 'pdf-redact-text-remove-image-none-line-art-none',
 });
 
+/* Public anchors use one space only: the top-left of the page view, y down,
+ * in points, plus that view's width, height, and /Rotate. PDF user space
+ * (bottom-left, y up) is never accepted as an anchor. */
+export const COORDINATE_SPACE = 'top-left-page';
+export const COORDINATES = Object.freeze({
+  space: COORDINATE_SPACE,
+  origin: 'top-left',
+  yAxis: 'down',
+  unit: 'pt',
+});
+
 export const LIMITS = Object.freeze({
   maxFileBytes: 25 * 1024 * 1024,
   maxPages: 200,
@@ -106,7 +117,7 @@ async function prepareExclusive(request) {
     });
     const overlaps = overlapping(plans);
     if (overlaps.length) failures.push(...overlaps);
-    if (failures.length) throw unsupported(failures);
+    if (failures.length) throw unsupported(failures, models);
     checkAbort(request.signal);
 
     const warnings = [];
@@ -124,10 +135,12 @@ async function prepareExclusive(request) {
         byPage.set(plan.pageIndex, list);
       }
     }
-    if (failures.length) throw unsupported(failures);
+    if (failures.length) throw unsupported(failures, models);
 
     for (const [pageIndex, group] of byPage) {
       checkAbort(request.signal);
+      const turned = group.filter(plan => plan.rotation !== 0);
+      if (turned.length) throw unsupported(turned.map(plan => failure(plan.edit, plan.pageIndex, 'rotated-page')), models);
       const page = doc.loadPage(pageIndex);
       for (const plan of group) redact(page, plan.chars);
       page.applyRedactions(false, mupdf.PDFPage.REDACT_IMAGE_NONE, mupdf.PDFPage.REDACT_LINE_ART_NONE, mupdf.PDFPage.REDACT_TEXT_REMOVE);
@@ -150,19 +163,21 @@ async function prepareExclusive(request) {
     const quality = verify(bytes, out, plans, models);
     warnings.push(...quality.warnings);
     const file = new File([out], editedName(parsed.name), {type: 'application/pdf'});
-    const pageMap = Array.from({length: pageCount}, (_, i) => ({sourcePageIndex: i, outputPageIndex: i, continuationPageIndices: []}));
+    const pageMap = models.map((model, index) => pageMapEntry(model, index));
     const verification = {
       schema: SCHEMA,
       engine: ENGINE.name,
       engineVersion: ENGINE.version,
       license: ENGINE.license,
       redaction: ENGINE.redaction,
+      coordinateSpace: COORDINATE_SPACE,
       sourceSha256,
       outputSha256,
       status: 'applied',
       layoutVerified: warnings.every(item => item.severity === 'info'),
       independent: false,
       pageCount: {source: pageCount, output: pageCount},
+      pages: models.map((model, index) => verificationPage(model, index)),
       edits: plans.map(plan => ({
         id: plan.edit.id,
         pageIndex: plan.pageIndex,
@@ -264,12 +279,14 @@ function locate(edit, index, models, pageCount) {
   if (typeof edit.before !== 'string' || !edit.before.trim() || edit.before.length > LIMITS.maxChars) return fail('invalid-before');
   if (typeof edit.after !== 'string' || edit.after.length > LIMITS.maxChars) return fail('invalid-after');
   const anchor = edit.anchor && typeof edit.anchor === 'object' ? edit.anchor : null;
+  if (anchorConvention(edit, anchor)) return fail('invalid-anchor');
   if (anchor?.bbox && !validBox(anchor.bbox)) return fail('invalid-anchor');
   if (anchor && anchor.occurrence !== undefined && (!Number.isInteger(anchor.occurrence) || anchor.occurrence < 0)) return fail('invalid-anchor');
   if (anchor && (anchor.start !== undefined || anchor.end !== undefined)) {
     if (!Number.isInteger(anchor.start) || !Number.isInteger(anchor.end) || anchor.end <= anchor.start) return fail('invalid-anchor');
   }
   const model = models[pageIndex];
+  if (model.rotation !== 0) return fail('rotated-page');
   const {text, map} = normalized(model.chars);
   const needle = edit.before.replace(/\s+/g, ' ').trim();
   const hits = [];
@@ -337,6 +354,8 @@ function redact(page, chars) {
   annot.update();
 }
 
+/* Tm is PDF user space and is written only after a zero /Rotate check.
+ * The public anchor is never converted into this space. */
 function showText(doc, page, plan) {
   if (!plan.layout.lines.length) return '';
   const resource = ensureFont(doc, page, plan.layout.font);
@@ -402,9 +421,63 @@ function verify(sourceBytes, outBytes, plans, models) {
   return {warnings, figures: true};
 }
 
-function unsupported(failures) {
-  const pages = [...new Set(failures.map(item => item.pageIndex).filter(index => Number.isInteger(index)))];
-  return new BrowserPdfError('unsupported', `적용하지 않은 편집이 있습니다 (${failures.map(item => item.code).join(', ')}). 페이지 ${pages.map(index => index + 1).join(', ') || '-'}. 부분 적용 파일은 만들지 않았습니다.`, {edits: failures});
+function unsupported(failures, models) {
+  const indexes = [...new Set(failures.map(item => item.pageIndex).filter(index => Number.isInteger(index)))];
+  return new BrowserPdfError('unsupported', `적용하지 않은 편집이 있습니다 (${failures.map(item => item.code).join(', ')}). 페이지 ${indexes.map(index => index + 1).join(', ') || '-'}. 부분 적용 파일은 만들지 않았습니다.`, {
+    coordinateSpace: COORDINATE_SPACE,
+    pages: models.map((model, index) => verificationPage(model, index)),
+    edits: failures,
+  });
+}
+
+function anchorConvention(edit, anchor) {
+  const spaces = [edit?.coordinateSpace, anchor?.coordinateSpace].filter(value => value !== undefined);
+  if (spaces.some(value => value !== COORDINATE_SPACE)) return 'invalid-anchor';
+  if (anchor?.origin !== undefined && anchor.origin !== COORDINATES.origin) return 'invalid-anchor';
+  const axes = [edit?.yAxis, anchor?.yAxis].filter(value => value !== undefined);
+  if (axes.some(value => value !== COORDINATES.yAxis)) return 'invalid-anchor';
+  const units = [edit?.unit, anchor?.unit].filter(value => value !== undefined);
+  if (units.some(value => value !== COORDINATES.unit)) return 'invalid-anchor';
+  return null;
+}
+
+function pageMapEntry(model, index) {
+  const view = pageView(model);
+  return {
+    sourcePageIndex: index,
+    outputPageIndex: index,
+    continuationPageIndices: [],
+    coordinateSpace: COORDINATE_SPACE,
+    origin: COORDINATES.origin,
+    yAxis: COORDINATES.yAxis,
+    unit: COORDINATES.unit,
+    width: view.width,
+    height: view.height,
+    rotation: model.rotation,
+  };
+}
+
+function verificationPage(model, index) {
+  const entry = pageMapEntry(model, index);
+  return {
+    pageIndex: index,
+    coordinateSpace: entry.coordinateSpace,
+    origin: entry.origin,
+    yAxis: entry.yAxis,
+    unit: entry.unit,
+    width: entry.width,
+    height: entry.height,
+    rotation: entry.rotation,
+    editable: entry.rotation === 0,
+  };
+}
+
+function pageView(model) {
+  const bounds = model.bounds;
+  return {
+    width: Math.round((bounds[2] - bounds[0]) * 1000) / 1000,
+    height: Math.round((bounds[3] - bounds[1]) * 1000) / 1000,
+  };
 }
 
 function failure(edit, pageIndex, code) {
@@ -629,6 +702,7 @@ function union(chars) {
   return [x0, y0, x1, y1];
 }
 
+/* Width in PDF user space. Callers reach this only for rotation 0. */
 function pdfSpan(transform, chars) {
   let x0 = Infinity, x1 = -Infinity;
   for (const ch of chars) for (let i = 0; i < 8; i += 2) {
@@ -686,4 +760,4 @@ async function sha256(bytes) {
   return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
 }
 
-globalThis.FalsifyBrowserPdf = {prepare, ENGINE, LIMITS, BrowserPdfError};
+globalThis.FalsifyBrowserPdf = {prepare, ENGINE, LIMITS, COORDINATE_SPACE, COORDINATES, BrowserPdfError};
