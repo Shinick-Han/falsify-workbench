@@ -26,7 +26,8 @@
 .paper-inline label{font-weight:600}
 .paper-edits{list-style:none;margin:8px 0 16px;padding:0}
 .paper-edits li{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 0;border-top:1px solid var(--line)}
-.paper-edit-origin{color:var(--muted);font-size:12px}
+.paper-edit-origin,.paper-edit-cause{color:var(--muted);font-size:12px}
+.paper-edit-cause.is-failed{color:var(--red-ink)}
 .paper-output-hash{display:block;font-family:Consolas,monospace;font-size:12px;color:var(--muted);overflow-wrap:anywhere;word-break:break-all}
 .paper-share,.paper-draft,.paper-proposals{margin-top:12px;padding-top:12px;border-top:1px solid var(--line)}
 .paper-draft .check-row{display:flex;gap:10px;align-items:flex-start;margin:8px 0}
