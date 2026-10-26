@@ -15,6 +15,9 @@ import uuid
 
 HERE = Path(__file__).resolve().parent
 V033_DIR = HERE.parent / 'evidence_blue_v033'
+# v033 imports `core` and `reanchor` as top-level modules. Keep this package ahead of that directory.
+if str(V033_DIR) not in sys.path:
+    sys.path.insert(1, str(V033_DIR))
 _spec = importlib.util.spec_from_file_location('falsify_blue_v033_runner_for_v034', V033_DIR / 'runner.py')
 v033 = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(v033)
