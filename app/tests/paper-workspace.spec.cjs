@@ -25,7 +25,7 @@ const ITEMS=[
 ];
 const TAGS={
   'paper-file':'input','paper-inline-after':'textarea','paper-draft-opt':'input','paper-draft-source':'input','paper-before-stage':'div','paper-after-stage':'div','paper-edits':'ul','paper-proposal-list':'ul',
-  'paper-original-download':'button','paper-page-prev':'button','paper-page-next':'button','paper-zoom-out':'button','paper-zoom-in':'button',
+  'paper-original-download':'button','paper-page-prev':'button','paper-page-next':'button','paper-page-jump':'input','paper-zoom-out':'button','paper-zoom-in':'button',
   'paper-inline-apply':'button','paper-inline-cancel':'button','paper-undo':'button','paper-redo':'button','paper-generate':'button',
   'paper-current-download':'button','paper-team-share':'button','paper-blue-handoff':'button','paper-draft-save':'button','paper-draft-restore':'button','paper-draft-delete':'button'
 };
@@ -33,8 +33,9 @@ const TAGS={
 function element(document,id,tag=''){
   const classes=new Set(),attrs={},e=new EventTarget();
   Object.assign(e,{id,tagName:tag,disabled:false,hidden:false,checked:false,value:'',textContent:'',children:[],className:'',clientWidth:640,type:'',dataset:{},
-    style:{setProperty(){}},
-    classList:{toggle(c,on){(on??!classes.has(c))?classes.add(c):classes.delete(c);},contains:c=>classes.has(c)},
+    style:{setProperty(k,v){this[k]=v;}},
+    getBoundingClientRect(){return {left:0,top:0,right:0,bottom:0,width:0,height:0};},
+    classList:{add(c){classes.add(c);},remove(...names){for(const c of names)classes.delete(c);},toggle(c,on){(on??!classes.has(c))?classes.add(c):classes.delete(c);},contains:c=>classes.has(c)},
     setAttribute(k,v){attrs[k]=String(v);},getAttribute:k=>attrs[k]??null,
     getContext(){return tag==='canvas'?{canvas:e}:null;},
     replaceChildren(...c){this.children=c;},append(...c){this.children.push(...c);},prepend(...c){this.children.unshift(...c);},
@@ -58,7 +59,7 @@ function dom(){
     createElementNS:()=>make('','svg'),
     getSelection:()=>null});
   document.body=make('body','body');document.activeElement=document.body;
-  get('paper-draft-opt').type='checkbox';get('paper-draft-source').type='checkbox';get('paper-file').type='file';
+  get('paper-draft-opt').type='checkbox';get('paper-draft-source').type='checkbox';get('paper-file').type='file';get('paper-page-jump').type='number';
   return {document,get,created};
 }
 function pdfjs({pages=2,hold=false,make,items=ITEMS,rotation=0}={}){
@@ -123,7 +124,7 @@ function mount(opts={}){
   const timers={setTimeout(fn,ms){if(ms>=1000){long.push(fn);return 1e9+long.length-1;}return setTimeout(fn,ms);},clearTimeout(id){if(id>=1e9){long[id-1e9]=null;return;}clearTimeout(id);}};
   const {lib,log}=pdfjs({pages:opts.pages??2,hold:!!opts.hold,make:tag=>w.document.createElement(tag),items:opts.items,rotation:opts.rotation||0});
   w.get('paper-before-stage').clientWidth=opts.width||640;w.get('paper-after-stage').clientWidth=opts.width||640;
-  const edits=opts.edits===false?null:editCore();
+  const edits=opts.edits===false?null:(opts.edits||editCore());
   const exporter=opts.exporter||null;
   const sourceBlobs=opts.sourceBlobs||blobMemory();
   const clock={value:opts.clock??1_700_000_000_000};
@@ -140,7 +141,7 @@ function buttons(v,act,id){return v.get('paper-edits').querySelectorAll('button'
 test('geometry: the second occurrence keeps its own top-left box and is not collapsed onto the first',()=>{
   const second=api.anchorFromSelection(ITEMS,[0,0,612,792],[1]);
   assert.equal(second.before,'Alpha');assert.deepEqual(second.anchor.bbox,[10,700,50,712]);
-  assert.equal(second.anchor.occurrence,1);assert.equal(second.anchor.start,5);assert.equal(second.anchor.end,10);
+  assert.equal(second.anchor.occurrence,1);assert.equal(second.anchor.start,6);assert.equal(second.anchor.end,11);
   assert.equal(second.anchor.coordinate,'top-left');assert.equal(second.anchor.rotation,0);
   assert.equal(second.anchor.pageWidth,612);assert.equal(second.anchor.pageHeight,792);
   assert.equal(api.anchorFromSelection(ITEMS,[0,0,612,792],[1],{rotation:90}),null);
@@ -163,6 +164,26 @@ test('geometry: the second occurrence keeps its own top-left box and is not coll
   assert.equal(api.TTL,12*60*60*1000);
   const fit=api.clampScale({width:612,height:792},320,1,Preview.fitScale);
   assert.ok(612*fit<=320&&fit>0);
+  const font11={str:'Hello',transform:[11,0,0,11,72,700],width:200,height:11,hasEOL:false};
+  const wide=api.anchorFromSelection([font11],[0,0,612,792],[0]);
+  assert.deepEqual(wide.anchor.bbox,[72,81,272,92]);
+  assert.equal(wide.anchor.bbox[2]-wide.anchor.bbox[0],200);
+  const word=api.anchorFromSelection([{str:'Alpha words stay',transform:[1,0,0,1,10,100],width:160,height:12,hasEOL:false}],[0,0,612,792],[0],{range:{startItem:0,startOffset:6,endItem:0,endOffset:11}});
+  assert.equal(word.before,'words');assert.equal(word.anchor.start,6);assert.equal(word.anchor.end,11);
+  assert.deepEqual(word.anchor.bbox,[70,680,120,692]);
+  const crlf='Alpha\r\nBeta';
+  const picked=api.classifyProposals([
+    {segmentId:'s0',before:'Alpha',after:'Beta',pageIndex:0,anchor:{start:6,end:11,occurrence:1}},
+    {segmentId:'s0',before:'Alpha',after:'Beta',pageIndex:0,anchor:{start:6,end:11,occurrence:0}},
+    {segmentId:'s0',before:'Alpha',after:'',pageIndex:0,anchor:{start:0,end:5,occurrence:0}},
+    {segmentId:'s0',before:'Alpha',after:'  ',pageIndex:0,anchor:{start:0,end:5,occurrence:0}},
+    {segmentId:'s1',before:'Beta',after:'Gamma',pageIndex:0,anchor:{start:7,end:11,occurrence:0}},
+    {segmentId:'s1',before:'Beta',after:'Gamma',pageIndex:0,anchor:{start:6,end:10,occurrence:0}}
+  ],[{id:'s0',label:'PDF p. 1',text:'Alpha Alpha'},{id:'s1',label:'PDF p. 1',text:crlf}],{origin:'external-ai-import'});
+  assert.equal(picked.items[0].status,'matched');assert.equal(picked.items[0].anchor.occurrence,1);assert.equal(picked.items[0].anchor.start,6);
+  assert.equal(picked.items[1].status,'missing');assert.equal(picked.items[2].status,'matched');assert.equal(picked.items[2].after,'');
+  assert.equal(picked.items[3].status,'missing');assert.equal(picked.items[4].status,'matched');assert.equal(picked.items[4].anchor.start,7);
+  assert.equal(crlf.slice(7,11),'Beta');assert.equal(picked.items[5].status,'missing');
 });
 
 test('markup: scripts, optional AI disclosure, empty import mount, and bounded stage',()=>{
@@ -176,6 +197,9 @@ test('markup: scripts, optional AI disclosure, empty import mount, and bounded s
   assert.match(fs.readFileSync(path.resolve(__dirname,'../dist/visual-workflow.js'),'utf8'),/#red-ai-optional > summary/);
   assert.match(RED,/origin:'external-ai-import'/);assert.match(RED,/origin:'ai-proposal'/);
   assert.match(CSS,/max-height:\s*min\(70vh,\s*720px\)/);assert.match(CSS,/@media\(max-width:700px\)/);
+  assert.match(HTML,/id="paper-page-jump"/);assert.match(CSS,/\.paper-inline\.is-open\{position:absolute/);
+  assert.match(CSS,/\.paper-inline\.is-open\{position:fixed|\.paper-inline\.is-open.is-docked\{position:fixed/);
+  assert.doesNotMatch(CSS,/box-shadow/);
   assert.doesNotMatch(WS+CSS,/\p{Extended_Pictographic}/u);
   const ids=[...HTML.matchAll(/\bid="([^"]+)"/g)].map(m=>m[1]);assert.equal(ids.length,new Set(ids).size);
 });
@@ -199,21 +223,26 @@ test('reader: file input paints one original page before extraction, and the sec
   v.document.getSelection=()=>({isCollapsed:false,rangeCount:1,anchorNode:span,getRangeAt:()=>({commonAncestorContainer:textEl,intersectsNode:n=>n===span})});
   v.get('paper-before-stage').dispatchEvent(new Event('mouseup'));
   assert.equal(v.get('paper-inline-before').textContent,'Alpha');
+  assert.equal(v.get('paper-inline-after').value,'Alpha');
   assert.match(v.get('paper-inline-meta').textContent,/occurrence 1/);assert.match(v.get('paper-inline-meta').textContent,/10, 700, 50, 712/);
   v.get('paper-inline-after').value='Beta';v.get('paper-inline-apply').click();
   assert.equal(v.edits.added.length,0);assert.match(v.get('paper-edit-status').textContent,/원문 구간이 아직 없어/);
   v.document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file,result:{segments:[
-    {id:'s0',label:'PDF p. 1',text:'Alpha',extra:'drop'},{id:'s1',label:'PDF p. 1',text:'Unique claim stays.'},{id:'s2',label:'PDF p. 2',text:'Alpha shared'},{id:'s3',label:'PDF p. 2',text:'Alpha shared'}]}}}));
+    {id:'s0',label:'PDF p. 1',text:'Alpha Alpha',extra:'drop'},{id:'s1',label:'PDF p. 1',text:'Unique claim stays.'},{id:'s2',label:'PDF p. 2',text:'Alpha shared'},{id:'s3',label:'PDF p. 2',text:'Alpha shared'}]}}}));
   v.get('paper-inline-apply').click();
   const human=v.edits.added.at(-1);
   assert.equal(human.origin,'human');assert.equal(human.segmentId,'s0');
-  assert.deepEqual(human.anchor,{start:0,end:5,occurrence:0,bbox:[10,700,50,712]});
+  assert.deepEqual(human.anchor,{start:6,end:11,occurrence:1,bbox:[10,700,50,712]});
   assert.equal('coordinate' in human.anchor,false);assert.equal('style' in human.anchor,false);
   assert.match(textOf(v.get('paper-edits')),/직접 편집/);assert.doesNotMatch(textOf(v.get('paper-edits')),/AI 제안|gpt-/);
   assert.match(v.get('paper-edit-status').textContent,/모델 실행으로 기록하지 않습니다/);
   v.get('paper-inline-after').value='';v.get('paper-before-stage').dispatchEvent(new Event('mouseup'));
+  assert.equal(v.get('paper-inline-after').value,'Alpha');
   v.get('paper-inline-after').value='';v.get('paper-inline-apply').click();
-  assert.match(v.get('paper-edit-status').textContent,/삭제가 되지 않습니다/);
+  assert.equal(v.edits.added.at(-1).after,'');assert.equal(v.edits.added.at(-1).before,'Alpha');
+  v.get('paper-before-stage').dispatchEvent(new Event('mouseup'));
+  v.get('paper-inline-after').value='   ';v.get('paper-inline-apply').click();
+  assert.match(v.get('paper-edit-status').textContent,/공백만/);assert.equal(v.edits.added.at(-1).after,'');
   v.document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file,result:{segments:[
     {id:'s0',label:'PDF p. 1',text:'Unique claim stays.'},{id:'s1',label:'PDF p. 2',text:'Alpha shared'},{id:'s2',label:'PDF p. 2',text:'Alpha shared'}]}}}));
   v.ws.acceptProposals([
@@ -245,6 +274,14 @@ test('keyboard: arrows move pages except from a field, Escape returns to the sta
   assert.equal(v.get('paper-page-label').textContent,'1 / 2쪽');
   keydown(v.get('paper-before-stage'),{key:'ArrowRight'});
   await until(()=>v.canvas()[0]&&v.canvas()[0].painted===2,'page 2');
+  v.get('paper-page-jump').value='1';v.get('paper-page-jump').dispatchEvent(new Event('change'));
+  await until(()=>v.canvas()[0]&&v.canvas()[0].painted===1,'typed page 1');
+  keydown(v.get('paper-page-jump'),{key:'ArrowRight'});
+  assert.equal(v.get('paper-page-label').textContent,'1 / 2쪽');
+  v.get('paper-page-jump').value='9';v.get('paper-page-jump').dispatchEvent(new Event('change'));
+  assert.match(v.get('paper-before-status').textContent,/없는 쪽/);assert.equal(v.get('paper-page-label').textContent,'1 / 2쪽');
+  v.get('paper-page-jump').value='2';keydown(v.get('paper-page-jump'),{key:'Enter'});
+  await until(()=>v.canvas()[0]&&v.canvas()[0].painted===2,'enter page 2');
   const textEl=v.get('paper-before-stage').children[0].children.find(c=>String(c.className).includes('textLayer'));
   const span=textEl.querySelectorAll('span')[1];
   v.document.getSelection=()=>({isCollapsed:false,rangeCount:1,anchorNode:span,getRangeAt:()=>({commonAncestorContainer:textEl,intersectsNode:n=>n===span})});
@@ -258,7 +295,14 @@ test('keyboard: arrows move pages except from a field, Escape returns to the sta
   assert.equal(v.ws.getEditSnapshot().canUndo,true);assert.equal(v.edits.added.at(-1).anchor.occurrence,0);
   keydown(v.get('paper-workspace'),{key:'z',ctrlKey:true});
   assert.equal(v.ws.getEditSnapshot().edits.length,0);assert.equal(v.get('paper-undo').disabled,true);assert.equal(v.get('paper-redo').disabled,false);
-  v.get('paper-redo').click();assert.equal(v.ws.getEditSnapshot().edits.length,1);assert.equal(v.ws.getEditSnapshot().edits[0].origin,'human');
+  keydown(v.get('paper-workspace'),{key:'y',ctrlKey:true});
+  assert.equal(v.ws.getEditSnapshot().edits.length,1);assert.equal(v.ws.getEditSnapshot().edits[0].origin,'human');
+  keydown(v.get('paper-workspace'),{key:'z',metaKey:true});
+  assert.equal(v.ws.getEditSnapshot().edits.length,0);
+  keydown(v.get('paper-inline-after'),{key:'y',metaKey:true});
+  assert.equal(v.ws.getEditSnapshot().edits.length,0,'redo stays out of a text field');
+  keydown(v.get('paper-workspace'),{key:'Z',ctrlKey:true,shiftKey:true});
+  assert.equal(v.ws.getEditSnapshot().edits.length,1);
 });
 
 test('refocus: last page, one-page replacement, and 200% zoom keep focus on an enabled control',async()=>{
@@ -484,6 +528,165 @@ test('draft: metadata asks for the matching PDF, and a consented blob stays loca
   await until(()=>v.ws.getSource()&&v.ws.getSource().file===file&&v.ws.getEditSnapshot().edits.length===1,'blob reopen');
   assert.match(v.get('paper-draft-status').textContent,/서버로 올리지 않습니다|원본 PDF 바이트가 없습니다/);
   assert.equal(v.downloads.length,0);
+});
+
+test('selection: one word keeps its own range, and the editor sits on that rect',async()=>{
+  const sentence=[{str:'Alpha words stay',transform:[1,0,0,1,10,100],width:160,height:12,hasEOL:false}];
+  const v=mount({pages:1,width:612,items:sentence});
+  const file=pdfFile(pdfBytes('MARKER-A'),'sentence.pdf');
+  v.file(file);await until(()=>v.canvas().length===1,'sentence page');
+  const pageEl=v.get('paper-before-stage').children[0];
+  const textEl=pageEl.children.find(c=>String(c.className).includes('textLayer'));
+  const span=textEl.querySelectorAll('span')[0];
+  const node={nodeType:3,nodeValue:sentence[0].str,textContent:sentence[0].str,parentElement:span,parentNode:span};
+  span.childNodes=[node];
+  pageEl.getBoundingClientRect=()=>({left:10,top:30,right:622,bottom:822,width:612,height:792});
+  v.get('paper-workspace').getBoundingClientRect=()=>({left:0,top:0,right:900,bottom:800,width:900,height:800});
+  const rect={left:80,top:50,right:140,bottom:62,width:60,height:12};
+  v.document.getSelection=()=>({isCollapsed:false,rangeCount:1,anchorNode:node,getRangeAt:()=>({commonAncestorContainer:span,startContainer:node,startOffset:6,endContainer:node,endOffset:11,getBoundingClientRect:()=>rect})});
+  v.get('paper-before-stage').dispatchEvent(new Event('mouseup'));
+  assert.equal(v.get('paper-inline-before').textContent,'words');
+  assert.equal(v.get('paper-inline-after').value,'words');
+  assert.match(v.get('paper-inline-meta').textContent,/70, 20, 130, 32/);
+  assert.equal(v.get('paper-inline').classList.contains('is-open'),true);
+  assert.equal(v.get('paper-inline').classList.contains('is-docked'),false);
+  assert.equal(v.get('paper-inline').style.left,'80px');assert.equal(v.get('paper-inline').style.top,'70px');
+  assert.equal(v.document.activeElement,v.get('paper-inline-after'));
+  v.document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file,result:{segments:[{id:'s0',label:'PDF p. 1',text:'Alpha words stay'}]}}}));
+  v.get('paper-inline-after').value='terms';v.get('paper-inline-apply').click();
+  const edit=v.edits.added.at(-1);
+  assert.equal(edit.before,'words');assert.equal(edit.after,'terms');
+  assert.deepEqual(edit.anchor,{start:6,end:11,occurrence:0,bbox:[70,20,130,32]});
+  assert.notEqual(edit.before,'Alpha words stay');
+  const prior=global.matchMedia;
+  global.matchMedia=()=>({matches:true,media:'(max-width:700px)'});
+  try{
+    v.get('paper-before-stage').dispatchEvent(new Event('mouseup'));
+    assert.equal(v.get('paper-inline').classList.contains('is-docked'),true);
+    keydown(v.get('paper-inline'),{key:'Escape'});
+    assert.equal(v.get('paper-inline').hidden,true);assert.equal(v.document.activeElement,v.get('paper-before-stage'));
+  }finally{global.matchMedia=prior;}
+});
+
+test('geometry: vendored PDF.js font 11 keeps TextItem width in page points',async()=>{
+  if(typeof Promise.withResolvers!=='function')Promise.withResolvers=function(){let resolve,reject;const promise=new Promise((ok,no)=>{resolve=ok;reject=no;});return {promise,resolve,reject};};
+  if(typeof Promise.try!=='function')Promise.try=function(fn){const args=[].slice.call(arguments,1);return new Promise(ok=>{ok(fn.apply(null,args));});};
+  if(!Uint8Array.prototype.toHex)Uint8Array.prototype.toHex=function(){let hex='';for(const b of this)hex+=b.toString(16).padStart(2,'0');return hex;};
+  const parts=[];const push=s=>parts.push(Buffer.from(s,'latin1'));
+  push('%PDF-1.4\n');const offs=[0];
+  const add=(n,body)=>{offs[n]=parts.reduce((sum,part)=>sum+part.length,0);push(n+' 0 obj\n'+body+'\nendobj\n');};
+  add(1,'<< /Type /Catalog /Pages 2 0 R >>');
+  add(2,'<< /Type /Pages /Count 1 /Kids [3 0 R] >>');
+  add(3,'<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>');
+  const stream='BT /F1 11 Tf 72 700 Td (Hello) Tj ET\n';
+  add(4,'<< /Length '+Buffer.byteLength(stream)+' >>\nstream\n'+stream+'endstream');
+  add(5,'<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
+  const xrefAt=parts.reduce((sum,part)=>sum+part.length,0);
+  let xref='xref\n0 6\n0000000000 65535 f \n';
+  for(let i=1;i<=5;i++)xref+=String(offs[i]).padStart(10,'0')+' 00000 n \n';
+  push(xref);push('trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n'+xrefAt+'\n%%EOF\n');
+  const lib=await import(require('node:url').pathToFileURL(path.resolve(__dirname,'../dist/vendor/pdf.mjs')).href);
+  const task=lib.getDocument({data:new Uint8Array(Buffer.concat(parts)),isEvalSupported:false,disableFontFace:true});
+  const pdf=await task.promise,page=await pdf.getPage(1),viewport=page.getViewport({scale:1});
+  const content=await page.getTextContent();
+  const item=content.items.find(row=>row&&row.str==='Hello');
+  assert.equal(item.transform[0],11);assert.equal(item.height,11);
+  assert.ok(item.width>20&&item.width<40,'font 11 Hello advance stays near 26pt');
+  const located=api.anchorFromSelection([item],viewport.viewBox,[0]);
+  const box=located.anchor.bbox;
+  assert.ok(Math.abs((box[2]-box[0])-item.width)<0.01);assert.ok(Math.abs((box[3]-box[1])-item.height)<0.01);
+  assert.ok(item.width*5>box[2]-box[0],'width is not multiplied by the font matrix again');
+  assert.equal(box[0],72);assert.equal(box[1],81);
+  if(typeof task.destroy==='function')await task.destroy();
+});
+
+function loadUmbrella(filename,src){
+  const sandbox={console,TextEncoder,TextDecoder,Uint8Array,ArrayBuffer,Promise,Error,Math,Number,Array,Object,String,JSON,Date,Map,Set,RegExp,parseInt,isNaN,Boolean,WeakSet,WeakMap};
+  sandbox.globalThis=sandbox;sandbox.module={exports:{}};sandbox.exports=sandbox.module.exports;
+  vm.createContext(sandbox);vm.runInContext(src,sandbox,{filename});
+  if(!sandbox.module.exports||typeof sandbox.module.exports.create!=='function'&&typeof sandbox.module.exports.parse!=='function')throw new Error(filename+' did not export');
+  return sandbox.module.exports;
+}
+function siblingSource(file){
+  const {execFileSync}=require('node:child_process');
+  const read=spec=>execFileSync('git',['show',spec],{encoding:'utf8',stdio:['ignore','pipe','pipe']});
+  try{return read('f5b696b:app/dist/'+file);}
+  catch{
+    execFileSync('git',['fetch','origin','feature/paper-workspace-20261026'],{stdio:['ignore','pipe','pipe']});
+    return read('origin/feature/paper-workspace-20261026:app/dist/'+file);
+  }
+}
+
+test('core: second alpha, CRLF, deletion, and resume keep the real edit id',async()=>{
+  const edits=loadUmbrella('paper-edits.js',siblingSource('paper-edits.js'));
+  const external=loadUmbrella('external-red.js',siblingSource('external-red.js'));
+  const v=mount({pages:1,edits});
+  const file=pdfFile(pdfBytes('MARKER-A'),'scan.pdf');
+  v.file(file);await until(()=>v.ws.getSource()&&v.ws.getSource().fileHash,'hashed');
+  const hash=v.ws.getSource().fileHash;
+  const pageText='Alpha Alpha',crlf='Alpha\r\nBeta stays\r\nTail';
+  const segments=[{id:'s0',label:'PDF p. 1',text:pageText,pageIndex:0},{id:'s1',label:'PDF p. 1',text:crlf,pageIndex:0}];
+  v.document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file,result:{segments}}}));
+  await settle();
+  const parsed=external.parse(JSON.stringify({changes:[
+    {segmentId:'s0',pageIndex:0,before:'Alpha',after:'Beta'},
+    {segmentId:'s1',pageIndex:0,before:'Beta',after:'Gamma'},
+    {segmentId:'s1',pageIndex:0,before:'Tail',after:''}
+  ]}),{segments,fileHash:hash});
+  const alpha=parsed.proposals.find(p=>p.before==='Alpha');
+  const beta=parsed.proposals.find(p=>p.before==='Beta');
+  const tail=parsed.proposals.find(p=>p.before==='Tail');
+  assert.equal(alpha.status,'ambiguous');assert.equal(alpha.anchor,null);assert.equal(alpha.matches.length,2);
+  const second=alpha.matches.find(m=>m.occurrence===1);
+  assert.equal(second.start,6);assert.equal(second.end,11);assert.equal(pageText.slice(second.start,second.end),'Alpha');
+  assert.equal(beta.status,'matched');assert.equal(beta.anchor.start,7);assert.equal(crlf.slice(beta.anchor.start,beta.anchor.end),'Beta');
+  assert.notEqual(beta.anchor.start,crlf.replace(/\r\n/g,'\n').indexOf('Beta'));
+  assert.equal(tail.status,'matched');assert.equal(tail.after,'');
+  const chosen={segmentId:second.segmentId,pageIndex:second.pageIndex,before:'Alpha',after:'Beta',anchor:{start:second.start,end:second.end,occurrence:second.occurrence}};
+  v.ws.acceptProposals([chosen,beta,tail],{origin:'external-ai-import'});
+  const buttons=v.get('paper-proposal-list').querySelectorAll('button');
+  assert.equal(buttons.length,3);assert.equal(buttons.every(b=>!b.disabled),true);
+  buttons[0].click();buttons[1].click();buttons[2].click();
+  const snap=v.ws.getEditSnapshot();
+  assert.equal(snap.edits[0].id,'e1');assert.equal(snap.edits[0].anchor.start,6);assert.equal(snap.edits[0].anchor.occurrence,1);
+  assert.equal(snap.edits[1].anchor.start,7);assert.equal(snap.edits[1].before,'Beta');
+  assert.equal(snap.edits[2].after,'');assert.equal(snap.edits[2].before,'Tail');assert.equal(snap.canUndo,true);
+  const savedId=snap.edits[0].id,savedRevision=snap.revision,savedAt=snap.edits[0].createdAt;
+  v.clock.value+=1000;
+  v.get('paper-draft-opt').checked=true;v.get('paper-draft-opt').dispatchEvent(new Event('change'));
+  v.get('paper-draft-save').click();await settle();
+  v.document.dispatchEvent(new CustomEvent('falsify:document-clear'));
+  v.file(file);await until(()=>v.ws.getSource()&&v.ws.getSource().fileHash===hash,'reopened');
+  v.document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file,result:{segments}}}));
+  await settle();
+  v.get('paper-draft-restore').click();await settle();
+  const restored=v.ws.getEditSnapshot();
+  assert.equal(restored.edits[0].id,savedId);assert.equal(restored.revision,savedRevision);
+  assert.equal(restored.canUndo,false);assert.equal(restored.edits[0].createdAt,savedAt);
+  assert.equal(restored.edits[0].anchor.start,6);assert.equal(restored.edits[2].after,'');
+  assert.match(v.get('paper-draft-status').textContent,/실행 취소 기록은 복구 이후부터/);
+});
+
+test('download: an open PDF workspace skips the companion layout gate',async()=>{
+  const v=mount({pages:1}),calls=[];
+  const file=pdfFile(pdfBytes('MARKER-A'),'scan.pdf');
+  v.file(file);await until(()=>v.ws.getSource(),'pdf source');
+  const ctx=vm.createContext({document:v.document,crypto,CustomEvent,Event,URL,Blob,File,TextEncoder,TextDecoder,Uint8Array,Array,Promise,Error,Map,JSON,Number,String,setTimeout,clearTimeout,confirm:()=>true,btoa,atob,
+    FalsifyDocumentRed:require('../dist/document-red-core.js'),FalsifyHarness:require('../dist/harness-core.js'),
+    FalsifyLocalBridge:{busy(){},session(){calls.push('session');return null;},state:()=>({status:'manual',connected:false,cap:null}),capabilities:()=>({red:false,pdf:false})},
+    FalsifyLab:{busy(){},allowed:()=>false,ready:Promise.resolve(),bind:(_,r)=>r,record:async()=>'run1'},FalsifyPaperWorkspace:v.ws,addEventListener(){}});
+  vm.runInContext(RED,ctx,{filename:'document-red.js'});
+  v.document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file,result:{text:'Alpha',format:'PDF',segments:[{label:'PDF p. 1',text:'Alpha'}]}}}));
+  await until(()=>v.get('document-red').hidden===false,'red bound');
+  v.get('red-export-consent').checked=true;v.get('red-download').click();await settle();
+  assert.equal(calls.length,0);assert.match(v.get('red-export-status').textContent,/현재 편집으로 생성/);
+  assert.equal(v.document.activeElement,v.get('paper-generate'));
+  const txt={name:'note.txt',type:'text/plain',size:5,arrayBuffer:async()=>new TextEncoder().encode('Alpha').buffer};
+  v.document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file:txt,result:{text:'Alpha',format:'TXT',segments:[{label:'문단 1',text:'Alpha'}]}}}));
+  await until(()=>v.get('document-red').hidden===false,'txt bound');
+  v.get('red-export-consent').checked=true;v.get('red-download').click();await settle();
+  assert.doesNotMatch(v.get('red-export-status').textContent,/현재 편집으로 생성/);
+  assert.equal(calls.length,0);
 });
 
 (async()=>{let passed=0;for(const [name,fn] of tests){try{await fn();passed++;console.log('PASS '+name);}catch(e){console.error('FAIL '+name+'\n'+(e.stack||e));process.exitCode=1;}}
