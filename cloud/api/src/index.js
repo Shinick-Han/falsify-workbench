@@ -49,6 +49,7 @@ const MESSAGES = {
   revision_conflict: 'The record revision has changed.',
   precondition_required: 'An If-Match revision is required.',
   payload_too_large: 'The request body exceeds 256 KiB.',
+  restore_private_only: 'A private review restore bundle cannot be shared.',
   unsupported_media_type: 'The request body must be application/json.',
   quota_exceeded: 'The record quota for this author is exhausted.',
   rate_limited: 'Too many requests; retry later.',
@@ -306,6 +307,16 @@ async function normalize(kind, payload) {
   }
   if (!isObject(projected)) throw fail(422, 'invalid_payload');
   return { stored, projected: JSON.parse(JSON.stringify(projected)), hash: await payloadHash(kind, stored) };
+}
+
+// restoreBundle is optional raw material inside an existing run payload. It is never a visibility flag.
+function payloadHasRestoreBundle(payloadText) {
+  try {
+    const payload = JSON.parse(payloadText);
+    return isObject(payload) && Object.hasOwn(payload, 'restoreBundle');
+  } catch {
+    return false;
+  }
 }
 
 function serialize(row, payloadText) {
@@ -573,6 +584,8 @@ async function createRecord(ctx) {
   if (!KINDS.includes(body.kind) || !VISIBILITIES.includes(visibility) || !isObject(body.payload)) throw fail(400, 'invalid_request');
   await rateLimit(db, 'writes:' + author.id, ctx.settings.writesPerAuthorHour);
   const { stored, projected, hash: payloadDigest } = await normalize(body.kind, body.payload);
+  // A restore bundle is account-private. Sharing it would publish the only copy the owner GET returns in full.
+  if (visibility === 'shared' && Object.hasOwn(stored, 'restoreBundle')) throw fail(422, 'restore_private_only');
   let refId = null;
   let supersedesId = null;
   if (body.kind === 'review') {
@@ -630,12 +643,18 @@ async function updateRecord(ctx) {
   fields(body, ['expectedRevision', 'visibility'], ['expectedRevision', 'visibility']);
   if (!Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 1 || !VISIBILITIES.includes(body.visibility)) throw fail(400, 'invalid_request');
   await rateLimit(db, 'writes:' + author.id, ctx.settings.writesPerAuthorHour);
+  const existing = await ownedRecord(db, ctx.id, author.id);
+  if (!existing) throw fail(404, 'not_found');
+  if (existing.revision !== body.expectedRevision) throw fail(409, 'revision_conflict');
+  if (body.visibility === 'shared' && payloadHasRestoreBundle(existing.payload)) throw fail(422, 'restore_private_only');
   // Compare-and-set on revision; payload is immutable and only visibility may change.
+  // json_type is a predicate on the existing payload text. It does not add a column or kind.
   const updated = await db
     .prepare(
       `UPDATE records SET visibility = ?1, revision = revision + 1, updated_at = ?2
        WHERE id = ?3 AND owner_id = ?4 AND revision = ?5
-         AND (?1 = 'private' OR kind <> 'review' OR EXISTS (SELECT 1 FROM records x WHERE x.id = records.ref_id AND x.kind = 'run' AND x.visibility = 'shared'))`
+         AND (?1 = 'private' OR kind <> 'review' OR EXISTS (SELECT 1 FROM records x WHERE x.id = records.ref_id AND x.kind = 'run' AND x.visibility = 'shared'))
+         AND (?1 = 'private' OR json_type(payload, '$.restoreBundle') IS NULL)`
     )
     .bind(body.visibility, now(), ctx.id, author.id, body.expectedRevision)
     .run();

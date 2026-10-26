@@ -10,6 +10,12 @@ export const PROVENANCES=Object.freeze(['local-codex','manual-unverified','impor
 export const ORIGINS=Object.freeze({'local-codex':'executed','manual-unverified':'manual','imported-unverified':'imported'});
 // Sizes are JSON string lengths; the API separately bounds the whole request body (256 KiB).
 export const LIMITS=Object.freeze({payload:240*1024,evidence:200*1024,localId:160,model:120,caseLabel:160,protocolVersion:80,note:3000,calls:100000,segments:10000,segmentId:80,segmentLabel:200});
+// Private restore bundle. It is a minimal closure copied from a validated local ledger, not a new result and not an execution.
+// Caps fail closed: an oversized closure is rejected whole. Nothing is dropped, trimmed or rewritten to fit.
+export const PRIVATE_BUNDLE_SCHEMA='falsify.private-review-bundle.v1';
+export const LEDGER_SCHEMA='falsify.experiment-ledger.v1';
+export const BUNDLE_LIMITS=Object.freeze({runs:8,harnesses:8,reviews:100,bytes:200*1024,findings:1000,assessments:1000,patches:12});
+export const LEDGER_INPUT_LIMITS=Object.freeze({harnesses:100,runs:100,reviews:1000});
 export const COMPARISON_NOTICE='All shared records are client-reported claims: execution, model, coverage, provenance and reviewer names are not verified. Groups compare only identical conditions (input text hash, role, model label, RED level, call budget, protocol and case label). Scores are subjective human reviews, not accuracy or detection rates; uncertain reviews are excluded from means and means are shown only for claimed local broker runs. Differences between harnesses are observations, never causal conclusions.';
 export const PUBLIC_FIELDS=Object.freeze({harness:Object.freeze(['config','hash','parentHash']),
   run:Object.freeze(['role','harnessHash','sourceHash','fileHash','model','level','maxCalls','status','calls','provenance','caseLabel','protocolVersion','createdAt']),
@@ -47,7 +53,8 @@ function iso(v,field){const m=typeof v==='string'&&v.length<=40?ISO.exec(v):null
 const RUN_REQUIRED=['localId','role','harnessHash','sourceHash','fileHash','model','level','maxCalls','status','calls','provenance','createdAt'];
 // publicView checks a projection (no localId, no evidence) as read back from GET shared.
 function checkRun(p,publicView=false){
-  exact(p,publicView?RUN_REQUIRED.filter(k=>k!=='localId'):RUN_REQUIRED,publicView?['caseLabel','protocolVersion']:['caseLabel','protocolVersion','evidence'],'run');
+  exact(p,publicView?RUN_REQUIRED.filter(k=>k!=='localId'):RUN_REQUIRED,publicView?['caseLabel','protocolVersion']:['caseLabel','protocolVersion','evidence','restoreBundle'],'run');
+  if(own(p,'evidence')&&own(p,'restoreBundle'))invalid('restoreBundle');
   if(!['red','blue'].includes(p.role))invalid('role');
   if(p.role==='red'?![1,2,3].includes(p.level):p.level!==null)invalid('level');
   if(!Number.isInteger(p.maxCalls)||p.maxCalls<1||p.maxCalls>32)invalid('maxCalls');
@@ -81,7 +88,187 @@ async function checkHarness(p,H){exact(p,['config','hash'],['parentHash'],'harne
   if(own(p,'parentHash')&&(hex(p.parentHash,'parentHash')===p.hash))invalid('parentHash');
   return {config,hash:p.hash,...(own(p,'parentHash')?{parentHash:p.parentHash}:{})};}
 
+const RUN_OBJECT_REQUIRED=['id','createdAt','role','revision','fileHash','sourceHash','segments','harness','harnessHash','maxCalls','level','model','provenance','response'];
+const RUN_OBJECT_OPTIONAL=['sourceName','format','finalState','sourceRunId','snapshotOf','requestId'];
+const REVIEW_OBJECT_REQUIRED=['id','runId','createdAt','reviewer','caseLabel','verdict','score','note','comparison'];
+const REVIEW_OBJECT_OPTIONAL=['findingAssessments','reviewContext'];
+const FINDING_VERDICTS=['pending','supported','unsupported','mixed','uncertain'];
+const recordId=(v,field)=>typeof v==='string'&&v.length>0&&v.length<=LIMITS.localId&&!CONTROL.test(v)?v:invalid(field);
+const tooBig=field=>fail('payload_too_large','Payload too large: '+field);
+
+function readInputLedger(snapshot){
+  if(!plain(snapshot)||snapshot.schema!==LEDGER_SCHEMA||!Array.isArray(snapshot.harnesses)||!Array.isArray(snapshot.runs)||!Array.isArray(snapshot.reviews))invalid('restoreBundle.ledger');
+  if(Object.keys(snapshot).some(k=>!['schema','harnesses','runs','reviews'].includes(k)))invalid('restoreBundle.ledger');
+  if(snapshot.harnesses.length>LEDGER_INPUT_LIMITS.harnesses)tooBig('restoreBundle.ledger.harnesses');
+  if(snapshot.runs.length>LEDGER_INPUT_LIMITS.runs)tooBig('restoreBundle.ledger.runs');
+  if(snapshot.reviews.length>LEDGER_INPUT_LIMITS.reviews)tooBig('restoreBundle.ledger.reviews');
+  const runIds=new Set(),reviewIds=new Set();
+  for(const h of snapshot.harnesses)if(!plain(h)||typeof h.hash!=='string')invalid('restoreBundle.ledger.harnesses');
+  for(const r of snapshot.runs){if(!plain(r)||typeof r.id!=='string')invalid('restoreBundle.ledger.runs');if(runIds.has(r.id))invalid('restoreBundle.ledger.runs');runIds.add(r.id);}
+  for(const v of snapshot.reviews){if(!plain(v)||typeof v.id!=='string'||typeof v.runId!=='string')invalid('restoreBundle.ledger.reviews');if(reviewIds.has(v.id))invalid('restoreBundle.ledger.reviews');reviewIds.add(v.id);}
+  return snapshot;}
+
+function assertSnapshotLink(run,root){
+  if(!root||run.role!=='red'||root.role!=='red'||root.id===run.id||own(root,'snapshotOf')||!own(run,'finalState')||!plain(run.finalState))invalid('restoreBundle.ledger.runs.snapshotOf');
+  for(const k of ['sourceHash','fileHash','model','provenance','revision','harnessHash','level','maxCalls'])if(run[k]!==root[k])invalid('restoreBundle.ledger.runs.snapshotOf');
+  if(own(root,'requestId')&&run.requestId!==root.requestId)invalid('restoreBundle.ledger.runs.snapshotOf');
+  if(canonicalJSON(root.response)!==canonicalJSON(run.response))invalid('restoreBundle.ledger.runs.snapshotOf');}
+function assertSourceLink(run,red){
+  if(run.role!=='blue'||!red||red.role!=='red'||!plain(red.finalState)||red.finalState.outputFileHash!==run.fileHash)invalid('restoreBundle.ledger.runs.sourceRunId');}
+
+// Minimal dependency closure. Ancestors only: snapshot parent, explicit sourceRunId, review comparison source,
+// and the last RED final whose output hash matches a BLUE that has no explicit source. Descendants stay out.
+function bundleClosure(ledger,selectedRunId){
+  const byId=new Map(ledger.runs.map(r=>[r.id,r]));
+  if(!byId.has(selectedRunId))invalid('restoreBundle.selectedRunId');
+  const included=new Set(),stack=[];
+  function add(id,field){
+    if(stack.includes(id))invalid(field);
+    if(included.has(id))return;
+    const run=byId.get(id);
+    if(!run)invalid(field);
+    if(included.size>=BUNDLE_LIMITS.runs)tooBig('restoreBundle.ledger.runs');
+    stack.push(id);included.add(id);
+    if(own(run,'snapshotOf')){if(typeof run.snapshotOf!=='string')invalid('restoreBundle.ledger.runs.snapshotOf');add(run.snapshotOf,'restoreBundle.ledger.runs.snapshotOf');assertSnapshotLink(run,byId.get(run.snapshotOf));}
+    if(own(run,'sourceRunId')){if(typeof run.sourceRunId!=='string')invalid('restoreBundle.ledger.runs.sourceRunId');add(run.sourceRunId,'restoreBundle.ledger.runs.sourceRunId');assertSourceLink(run,byId.get(run.sourceRunId));}
+    stack.pop();}
+  add(selectedRunId,'restoreBundle.selectedRunId');
+  const selected=byId.get(selectedRunId);
+  if(selected.role==='blue'&&!own(selected,'sourceRunId')){
+    const matches=ledger.runs.filter(r=>r.role==='red'&&typeof r.finalState?.outputFileHash==='string'&&HEX.test(r.finalState.outputFileHash)&&r.finalState.outputFileHash===selected.fileHash);
+    if(matches.length)add(matches[matches.length-1].id,'restoreBundle.ledger.runs');}
+  for(let guard=0;;){
+    let grew=false;
+    for(const review of ledger.reviews){
+      if(!included.has(review.runId)||!plain(review.comparison)||!own(review.comparison,'sourceRunId'))continue;
+      const src=review.comparison.sourceRunId;
+      if(typeof src!=='string'||!byId.has(src))invalid('restoreBundle.ledger.reviews.comparison');
+      if(!included.has(src)){add(src,'restoreBundle.ledger.reviews.comparison');grew=true;}}
+    if(!grew)break;
+    if(++guard>BUNDLE_LIMITS.runs)tooBig('restoreBundle.ledger.runs');}
+  const runs=ledger.runs.filter(r=>included.has(r.id));
+  const reviews=ledger.reviews.filter(v=>included.has(v.runId));
+  if(reviews.length>BUNDLE_LIMITS.reviews)tooBig('restoreBundle.ledger.reviews');
+  const hashes=[];
+  for(const run of runs)if(typeof run.harnessHash==='string'&&!hashes.includes(run.harnessHash))hashes.push(run.harnessHash);
+  if(hashes.length>BUNDLE_LIMITS.harnesses)tooBig('restoreBundle.ledger.harnesses');
+  const harnesses=ledger.harnesses.filter(h=>hashes.includes(h.hash));
+  if(harnesses.length!==hashes.length||new Set(harnesses.map(h=>h.hash)).size!==hashes.length)invalid('restoreBundle.ledger.harnesses');
+  return {schema:LEDGER_SCHEMA,harnesses,runs,reviews};}
+
+async function checkBundleHarness(raw,H){
+  const h=json(raw,LIMITS.payload,'restoreBundle.ledger.harnesses');
+  exact(h,['config','hash'],[],'restoreBundle.ledger.harnesses');
+  hex(h.hash,'restoreBundle.ledger.harnesses.hash');
+  if(!validH(H))fail('harness_unavailable','Harness validator unavailable');
+  try{if(await H.hash(H.validate(h.config))!==h.hash)fail('harness_hash_mismatch','Harness hash does not match its canonical content');}
+  catch(e){if(e instanceof CloudRecordError)throw e;invalid('restoreBundle.ledger.harnesses.config');}
+  return h;}
+async function checkBundledRun(raw,H){
+  const run=json(raw,LIMITS.payload,'restoreBundle.ledger.runs');
+  exact(run,RUN_OBJECT_REQUIRED,RUN_OBJECT_OPTIONAL,'restoreBundle.ledger.runs');
+  recordId(run.id,'restoreBundle.ledger.runs.id');
+  if(!['red','blue'].includes(run.role))invalid('restoreBundle.ledger.runs.role');
+  text(run.revision,LIMITS.localId,'restoreBundle.ledger.runs.revision');
+  hex(run.fileHash,'restoreBundle.ledger.runs.fileHash');hex(run.sourceHash,'restoreBundle.ledger.runs.sourceHash');hex(run.harnessHash,'restoreBundle.ledger.runs.harnessHash');
+  text(run.model,LIMITS.model,'restoreBundle.ledger.runs.model');
+  if(!Number.isInteger(run.maxCalls)||run.maxCalls<1||run.maxCalls>32)invalid('restoreBundle.ledger.runs.maxCalls');
+  if(run.role==='red'?! [1,2,3].includes(run.level):run.level!==null)invalid('restoreBundle.ledger.runs.level');
+  if(!PROVENANCES.includes(run.provenance))invalid('restoreBundle.ledger.runs.provenance');
+  iso(run.createdAt,'restoreBundle.ledger.runs.createdAt');
+  if(own(run,'sourceName'))text(run.sourceName,200,'restoreBundle.ledger.runs.sourceName');
+  if(own(run,'format'))text(run.format,40,'restoreBundle.ledger.runs.format');
+  if(own(run,'requestId'))text(run.requestId,200,'restoreBundle.ledger.runs.requestId');
+  if(!Array.isArray(run.segments)||!run.segments.length||run.segments.length>LIMITS.segments)invalid('restoreBundle.ledger.runs.segments');
+  const ids=new Set();
+  for(const s of run.segments){
+    if(!plain(s)||typeof s.id!=='string'||!s.id||s.id.length>LIMITS.segmentId||typeof s.label!=='string'||s.label.length>LIMITS.segmentLabel||typeof s.text!=='string'||!s.text.trim())invalid('restoreBundle.ledger.runs.segments');
+    if(ids.has(s.id))invalid('restoreBundle.ledger.runs.segments');ids.add(s.id);}
+  if(await sha256(run.segments.map(s=>s.text).join('\n\n'))!==run.sourceHash)invalid('restoreBundle.ledger.runs.sourceHash');
+  if(!plain(run.response))invalid('restoreBundle.ledger.runs.response');
+  if(own(run.response,'findings')){if(!Array.isArray(run.response.findings)||run.response.findings.length>BUNDLE_LIMITS.findings)run.response.findings?.length>BUNDLE_LIMITS.findings?tooBig('restoreBundle.ledger.runs.response.findings'):invalid('restoreBundle.ledger.runs.response.findings');}
+  if(own(run,'finalState')){
+    if(run.role!=='red'||!plain(run.finalState))invalid('restoreBundle.ledger.runs.finalState');
+    if(own(run.finalState,'outputFileHash')&&run.finalState.outputFileHash!==null&&(typeof run.finalState.outputFileHash!=='string'||!HEX.test(run.finalState.outputFileHash)))invalid('restoreBundle.ledger.runs.finalState');}
+  if(own(run,'snapshotOf'))recordId(run.snapshotOf,'restoreBundle.ledger.runs.snapshotOf');
+  if(own(run,'sourceRunId'))recordId(run.sourceRunId,'restoreBundle.ledger.runs.sourceRunId');
+  if(!validH(H))fail('harness_unavailable','Harness validator unavailable');
+  try{if(await H.hash(H.validate(run.harness,run.role))!==run.harnessHash)fail('harness_hash_mismatch','Harness hash does not match its canonical content');}
+  catch(e){if(e instanceof CloudRecordError)throw e;invalid('restoreBundle.ledger.runs.harness');}
+  return run;}
+function checkBundledReview(raw){
+  const v=json(raw,LIMITS.payload,'restoreBundle.ledger.reviews');
+  exact(v,REVIEW_OBJECT_REQUIRED,REVIEW_OBJECT_OPTIONAL,'restoreBundle.ledger.reviews');
+  recordId(v.id,'restoreBundle.ledger.reviews.id');recordId(v.runId,'restoreBundle.ledger.reviews.runId');
+  iso(v.createdAt,'restoreBundle.ledger.reviews.createdAt');
+  text(v.reviewer,120,'restoreBundle.ledger.reviews.reviewer');text(v.caseLabel,LIMITS.caseLabel,'restoreBundle.ledger.reviews.caseLabel');
+  if(!VERDICTS.includes(v.verdict))invalid('restoreBundle.ledger.reviews.verdict');
+  if(v.verdict==='uncertain'?v.score!==null:v.score!==null&&(!Number.isInteger(v.score)||v.score<1||v.score>5))invalid('restoreBundle.ledger.reviews.score');
+  text(v.note,LIMITS.note,'restoreBundle.ledger.reviews.note',true);
+  if(v.comparison!==null){
+    const c=v.comparison;exact(c,['outputFileHash','selected','assessments'],['sourceRunId'],'restoreBundle.ledger.reviews.comparison');
+    hex(c.outputFileHash,'restoreBundle.ledger.reviews.comparison');
+    if(!Array.isArray(c.selected)||!c.selected.length||c.selected.length>BUNDLE_LIMITS.patches||c.selected.some(p=>!plain(p)))invalid('restoreBundle.ledger.reviews.comparison');
+    if(!Array.isArray(c.assessments)||c.assessments.length!==c.selected.length||c.assessments.some(a=>!plain(a)))invalid('restoreBundle.ledger.reviews.comparison');
+    if(own(c,'sourceRunId'))recordId(c.sourceRunId,'restoreBundle.ledger.reviews.comparison');}
+  if(own(v,'reviewContext')){
+    exact(v.reviewContext,['mode'],[],'restoreBundle.ledger.reviews.reviewContext');
+    if(!['red-assisted','blue-only'].includes(v.reviewContext.mode)||v.comparison&&v.reviewContext.mode!=='red-assisted')invalid('restoreBundle.ledger.reviews.reviewContext');}
+  if(own(v,'findingAssessments')){
+    if(!Array.isArray(v.findingAssessments)||v.findingAssessments.length>BUNDLE_LIMITS.assessments)v.findingAssessments?.length>BUNDLE_LIMITS.assessments?tooBig('restoreBundle.ledger.reviews.findingAssessments'):invalid('restoreBundle.ledger.reviews.findingAssessments');
+    const ids=new Set();
+    for(const a of v.findingAssessments){
+      exact(a,['id','verdict','note'],[],'restoreBundle.ledger.reviews.findingAssessments');
+      if(typeof a.id!=='string'||!a.id||a.id.length>80||ids.has(a.id)||!FINDING_VERDICTS.includes(a.verdict)||typeof a.note!=='string'||a.note.length>2000||a.verdict!=='pending'&&!a.note.trim()||CONTROL.test(a.note))invalid('restoreBundle.ledger.reviews.findingAssessments');
+      ids.add(a.id);}}
+  return v;}
+function bindReview(review,run,runs){
+  if(!run)invalid('restoreBundle.ledger.reviews.runId');
+  if(review.comparison!==null&&run.role!=='blue')invalid('restoreBundle.ledger.reviews.comparison');
+  if(own(review,'findingAssessments')){
+    const findings=run.response.findings;
+    if(run.role!=='blue'||!Array.isArray(findings)||review.findingAssessments.length!==findings.length)invalid('restoreBundle.ledger.reviews.findingAssessments');
+    for(const a of review.findingAssessments)if(!findings.some(f=>f&&f.id===a.id))invalid('restoreBundle.ledger.reviews.findingAssessments');}
+  if(plain(review.comparison)&&own(review.comparison,'sourceRunId')){
+    const red=runs.find(r=>r.id===review.comparison.sourceRunId);
+    if(!red||red.role!=='red'||!plain(red.finalState)||red.finalState.outputFileHash!==review.comparison.outputFileHash)invalid('restoreBundle.ledger.reviews.comparison');}}
+function summaryRoot(runs,selectedRunId){
+  const selected=runs.find(r=>r.id===selectedRunId);
+  if(!selected)invalid('restoreBundle.selectedRunId');
+  if(!own(selected,'snapshotOf'))return selected;
+  const root=runs.find(r=>r.id===selected.snapshotOf);
+  if(!root||own(root,'snapshotOf'))invalid('restoreBundle.ledger.runs.snapshotOf');
+  return root;}
+function sameSummary(summary,root,H){
+  const expected=runFromLocal(root,{harness:H}),actual={...summary};
+  delete actual.caseLabel;delete actual.restoreBundle;
+  if(canonicalJSON(actual)!==canonicalJSON(expected))invalid('restoreBundle.identity');}
+
+async function checkRestoreBundle(summary,bundle,H){
+  if(!plain(bundle))invalid('restoreBundle');
+  exact(bundle,['schema','selectedRunId','ledger'],[],'restoreBundle');
+  if(bundle.schema!==PRIVATE_BUNDLE_SCHEMA)invalid('restoreBundle.schema');
+  const selectedRunId=recordId(bundle.selectedRunId,'restoreBundle.selectedRunId');
+  const source=readInputLedger(bundle.ledger);
+  if(source.runs.length>BUNDLE_LIMITS.runs)tooBig('restoreBundle.ledger.runs');
+  if(source.harnesses.length>BUNDLE_LIMITS.harnesses)tooBig('restoreBundle.ledger.harnesses');
+  if(source.reviews.length>BUNDLE_LIMITS.reviews)tooBig('restoreBundle.ledger.reviews');
+  const harnesses=[];for(const h of source.harnesses)harnesses.push(await checkBundleHarness(h,H));
+  const runs=[];for(const r of source.runs)runs.push(await checkBundledRun(r,H));
+  const reviews=source.reviews.map(checkBundledReview);
+  for(const review of reviews)bindReview(review,runs.find(r=>r.id===review.runId),runs);
+  const ledger={schema:LEDGER_SCHEMA,harnesses,runs,reviews};
+  const closed=bundleClosure(ledger,selectedRunId);
+  const same=(a,b,k)=>a.length===b.length&&a.every((x,i)=>x[k]===b[i][k]);
+  if(!same(closed.runs,runs,'id')||!same(closed.harnesses,harnesses,'hash')||!same(closed.reviews,reviews,'id'))invalid('restoreBundle.ledger');
+  for(const run of runs)if(!harnesses.some(h=>h.hash===run.harnessHash))invalid('restoreBundle.ledger.harnesses');
+  sameSummary(summary,summaryRoot(runs,selectedRunId),H);
+  const normalized={schema:PRIVATE_BUNDLE_SCHEMA,selectedRunId,ledger};
+  json(normalized,BUNDLE_LIMITS.bytes,'restoreBundle');
+  return normalized;}
+
 // Returns the normalized stored payload or throws CloudRecordError. Unknown fields are rejected, never passed through.
+// A run may carry restoreBundle. That bundle is owner-private raw material for a later local import, not proof of execution.
 export async function validatePayload(kind,payload,{harness:H=globalThis.FalsifyHarness}={}){
   if(!KINDS.includes(kind))fail('unsupported_kind','Unsupported record kind');
   const p=json(payload,LIMITS.payload,'payload');
@@ -89,10 +276,29 @@ export async function validatePayload(kind,payload,{harness:H=globalThis.Falsify
   if(kind==='review')return checkReview(p);
   const run=checkRun(p);
   if(run.evidence&&await sha256(run.evidence.segments.map(s=>s.text).join('\n\n'))!==run.sourceHash)fail('invalid_payload','Invalid payload field: evidence.segments');
+  if(own(p,'restoreBundle'))run.restoreBundle=await checkRestoreBundle(run,p.restoreBundle,H);
   return run;}
-// Allowlist projection for anyone but the owner: run evidence and the local record ID never leave it.
+// Allowlist projection for anyone but the owner. Evidence, localId and restoreBundle never leave it.
 export function publicPayload(kind,payload){if(!KINDS.includes(kind))fail('unsupported_kind','Unsupported record kind');if(!plain(payload))invalid('payload');
-  const out={};for(const k of PUBLIC_FIELDS[kind])if(own(payload,k)&&payload[k]!==undefined)out[k]=JSON.parse(JSON.stringify(payload[k]));return out;}
+  const out={};for(const k of PUBLIC_FIELDS[kind])if(own(payload,k)&&payload[k]!==undefined&&k!=='restoreBundle')out[k]=JSON.parse(JSON.stringify(payload[k]));return out;}
+
+// Selected ledger run -> existing run summary plus a private restore bundle.
+// A final RED snapshot is not a second execution: the summary is its root, and selectedRunId still names the snapshot.
+// Definitions and raw responses are copied. Nothing is executed, attested, or promoted to a verified provenance.
+export async function privateRunFromSnapshot(snapshot,selectedRunId,{harness:H=globalThis.FalsifyHarness}={}){
+  if(!validH(H))fail('harness_unavailable','Harness validator unavailable');
+  const selected=recordId(selectedRunId,'restoreBundle.selectedRunId');
+  const source=readInputLedger(snapshot);
+  const closed=bundleClosure(source,selected);
+  const harnesses=[];for(const h of closed.harnesses)harnesses.push(await checkBundleHarness(h,H));
+  const runs=[];for(const r of closed.runs)runs.push(await checkBundledRun(r,H));
+  const reviews=closed.reviews.map(checkBundledReview);
+  for(const review of reviews)bindReview(review,runs.find(r=>r.id===review.runId),runs);
+  const ledger={schema:LEDGER_SCHEMA,harnesses,runs,reviews};
+  const again=bundleClosure(ledger,selected);
+  if(again.runs.length!==runs.length||again.harnesses.length!==harnesses.length||again.reviews.length!==reviews.length)invalid('restoreBundle.ledger');
+  const summary=runFromLocal(summaryRoot(runs,selected),{harness:H});
+  return validatePayload('run',{...summary,restoreBundle:{schema:PRIVATE_BUNDLE_SCHEMA,selectedRunId:selected,ledger}},{harness:H});}
 
 // Status and call count come from the harness core when present (a call count only for a claimed local broker run),
 // otherwise from validated response fields with the same rules.
