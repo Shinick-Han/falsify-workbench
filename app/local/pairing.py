@@ -305,7 +305,7 @@ class PairingStore:
         if self.key_path.exists():
             _assert_private(self.key_path, False)
         else:
-            fd = os.open(self.key_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            fd = os.open(self.key_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, 'O_BINARY', 0), 0o600)
             try:
                 os.write(fd, os.urandom(32))
             finally:

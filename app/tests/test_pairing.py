@@ -68,6 +68,13 @@ class ParserTests(unittest.TestCase):
 
 
 class StoreTests(unittest.TestCase):
+    def test_signing_key_bytes_do_not_undergo_windows_newline_translation(self):
+        expected = b'\n' * 32
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(pairing.os, 'urandom', return_value=expected):
+                store = pairing.PairingStore(Path(tmp) / 'pair').ensure_key()
+            self.assertEqual(store.key_path.read_bytes(), expected)
+
     def test_key_is_outside_checkout_and_mode_restricted(self):
         repo = Path(__file__).resolve().parents[2]
         with self.assertRaises(pairing.PairingError):
@@ -312,7 +319,7 @@ class HttpPairingTests(Client, unittest.TestCase):
                 raise KeyboardInterrupt
             def server_close(self):
                 pass
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'FALSIFY_PAIRING_DIR': tmp}), \
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'FALSIFY_PAIRING_DIR': str(Path(tmp) / 'private-pair')}), \
                 patch.object(sys, 'argv', ['server.py', '--port', '40123', '--web-origin', WEB, '--token-display', 'hidden']), \
                 patch.object(server, 'ThreadingHTTPServer', Fake), redirect_stdout(out), patch.object(sys, 'stderr', err):
             server.main()
