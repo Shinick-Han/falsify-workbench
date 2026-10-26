@@ -19,6 +19,8 @@
 
 이벤트는 `falsify:paper-workspace-edits`, `falsify:paper-workspace-output`, `falsify:paper-workspace-source`, `falsify:paper-team-share`다. 편집 이벤트만 메모리 기록을 만든다. 팀 공유 이벤트는 동의 화면만 연다.
 
+보관 코덱 주소는 `paper-manual-records.js`가 평가될 때 스크립트 URL에서 한 번 잡는다. 이후 캡처는 그 주소의 `review-bundle.mjs`를 불러온다. 스크립트가 끝난 뒤의 `document.currentScript`는 다시 읽지 않는다. 불러오기가 거절되면 그 거절을 처리하고, 다음 캡처가 다시 시도할 수 있게 비운다.
+
 기록은 원문, 최종 문장, 쪽, 앵커, 출처(`human`, `external-ai-import`, `ai-proposal`), 사용 여부, 편집 리비전, 그 리비전과 같은 생성 해시만 담는다. 코어 앵커는 `start`, `end`, `occurrence`, `bbox`, `style`이다. `bbox`와 `style`은 null일 수 있고, style이 있으면 `font`, `size`, `color`(0–0xffffff 정수)만 둔다. 편집의 `createdAt`, `updatedAt`, `history`(최대 12)는 검증 후 그대로 아카이브에 남긴다. 사람이 Before나 위치를 다시 치지 않아도 된다. 원문 해시와 스냅샷 해시가 다르면 기록을 만들지 않는다. 리비전이 다른 생성 해시는 현재 다운로드 해시로 연결하지 않는다. 진행 중인 이전 캡처나 출력 연결은 더 새로운 원문·리비전을 덮어쓰지 않는다.
 
 ## 검수
@@ -49,4 +51,4 @@ node --test cloud/api/test/confluence-gateway.test.mjs
 node app/tests/cloud-ledger-hooks.spec.cjs
 ```
 
-합성 기록만 사용한다. 통과는 Confluence 저장이나 배포 인증이 아니다.
+합성 기록만 사용한다. 실제 편집 코어 시험은 이 분기에 있는 `app/dist/paper-edits.js`를 읽는다. 통과는 Confluence 저장이나 배포 인증이 아니다.

@@ -3,6 +3,8 @@
    Team publication goes through the existing Confluence session and gateway. */
 (function(){
   'use strict';
+  const script=document.currentScript;
+  const BUNDLE_URL=script&&script.src?new URL('./review-bundle.mjs', script.src).href:null;
   const TTL=12*60*60*1000;
   const HEX=/^[a-f0-9]{64}$/;
   const ORIGIN_LABEL={human:'사람 편집', 'external-ai-import':'외부 AI 가져오기', 'ai-proposal':'작업대 AI 제안'};
@@ -29,9 +31,17 @@
     const ready=globalThis.FalsifyReviewBundle;
     if(ready&&typeof ready.normalizePaperEdit==='function'&&typeof ready.buildPaperEditArchive==='function'&&typeof ready.validateArchive==='function') return Promise.resolve(ready);
     if(bundlePromise) return bundlePromise;
-    const src=document.currentScript&&document.currentScript.src;
-    if(!src) return Promise.reject(Error('수동 편집 보관 형식 모듈을 찾지 못했습니다.'));
-    bundlePromise=import(new URL('./review-bundle.mjs', src));
+    if(!BUNDLE_URL){
+      const missing=Promise.reject(Error('수동 편집 보관 형식 모듈을 찾지 못했습니다.'));
+      missing.catch(()=>{});
+      return missing;
+    }
+    const pending=import(BUNDLE_URL).then(module=>{
+      if(!module||typeof module.normalizePaperEdit!=='function'||typeof module.buildPaperEditArchive!=='function'||typeof module.validateArchive!=='function') throw Error('수동 편집 보관 형식 모듈을 찾지 못했습니다.');
+      return module;
+    });
+    bundlePromise=pending.catch(error=>{bundlePromise=null; throw error;});
+    bundlePromise.catch(()=>{});
     return bundlePromise;
   }
   function setStatus(text, error){
