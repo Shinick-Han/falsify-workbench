@@ -241,6 +241,7 @@
     walk(copy);return copy;
   }
   const CAUSE_TEXT={
+    'selection-font-metrics':'미리보기 글꼴의 선택 위치를 보정함',
     'font-substituted':'글꼴을 대체함',
     'wrapped-after':'After가 여러 줄로 바뀜',
     'extraction-gap':'추출 공백이 있어 줄이 어긋날 수 있음',

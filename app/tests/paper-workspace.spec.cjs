@@ -3,7 +3,7 @@
 // No browser, network, model, upload, or private PDF. Sibling edit/export modules are contract mocks.
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),crypto=require('node:crypto');
 const WS=fs.readFileSync(path.resolve(__dirname,'../dist/paper-workspace.js'),'utf8');
-const HTML=fs.readFileSync(path.resolve(__dirname,'../dist/index.html'),'utf8');
+const HTML=fs.readFileSync(path.resolve(__dirname,'../dist/index.html'),'utf8').replace(/\?v=[^"\s]+(?=")/g,'');
 const CSS=fs.readFileSync(path.resolve(__dirname,'../dist/paper-workspace.css'),'utf8');
 const RED=fs.readFileSync(path.resolve(__dirname,'../dist/document-red.js'),'utf8');
 const PREVIEW_SRC=fs.readFileSync(path.resolve(__dirname,'../dist/document-preview.js'),'utf8');
@@ -441,6 +441,30 @@ test('draft: opt-in 12h storage, no automatic restore, expiry, and delete',async
   assert.equal(v.ws.getEditSnapshot().revision,envelope.snapshot.revision);assert.equal(v.ws.getEditSnapshot().canUndo,false);
   assert.match(v.get('paper-draft-status').textContent,/실행 취소 기록은 복구 이후부터/);
   v.get('paper-draft-delete').click();assert.equal(v.storage.getItem(key),null);assert.equal(v.get('paper-draft-restore').hidden,true);
+});
+
+test('confirmed imports apply once and saved drafts remain recoverable without an open file',async()=>{
+  const real=require('../dist/paper-edits.js');
+  const v=mount({pages:1,edits:real});
+  const file=pdfFile(pdfBytes('MARKER-A'),'draft.pdf');
+  v.file(file);await until(()=>v.ws.getSource()?.fileHash,'source');
+  v.document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file,result:{segments:[{id:'s0',label:'PDF p. 1',text:'Alpha Alpha'}]}}}));
+  const accepted=v.ws.acceptProposals([{segmentId:'s0',pageIndex:0,before:'Alpha',after:'Beta',anchor:{start:6,end:11,occurrence:1}}],{origin:'external-ai-import',confirmed:true});
+  assert.equal(accepted.applied,1);
+  assert.equal(v.ws.getEditSnapshot().edits.length,1);
+  assert.equal(v.ws.getEditSnapshot().edits[0].origin,'external-ai-import');
+  buttons(v,'edit')[0].click();v.get('paper-inline-after').value='Gamma';v.get('paper-inline-apply').click();
+  const undo=keydown(v.get('paper-before-stage'),{key:'z',ctrlKey:true});
+  v.get('paper-workspace').dispatchEvent(undo);
+  assert.equal(v.ws.getEditSnapshot().edits[0].after,'Beta');
+  v.get('paper-draft-opt').checked=true;v.get('paper-draft-source').checked=true;
+  v.get('paper-draft-save').click();await settle();
+  const reopened=mount({storage:v.storage,sourceBlobs:v.sourceBlobs,edits:real});
+  assert.equal(reopened.get('paper-draft-restore').hidden,false);
+  assert.equal(reopened.get('paper-draft-delete').disabled,false);
+  reopened.get('paper-draft-delete').click();await settle();
+  assert.equal(v.storage.keys().some(k=>k.startsWith('falsify.paper-draft.v1.')),false);
+  assert.equal(v.sourceBlobs.box.size,0);
 });
 
 test('boot: the ready event is dispatched on a later turn',async()=>{

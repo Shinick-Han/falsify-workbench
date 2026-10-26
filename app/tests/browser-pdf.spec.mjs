@@ -218,7 +218,7 @@ test('vendored engine pin and global', () => {
   assert.match(loader, /terminate\(/);
   assert.match(loader, /id: id/);
   assert.equal(loader.includes("import(new URL('./browser-pdf.mjs'"), false);
-  assert.match(worker, /from '\.\/browser-pdf\.mjs'/);
+  assert.match(worker, /new URL\('\.\/browser-pdf\.mjs', import\.meta\.url\)/);
   assert.match(worker, /\[copy\]/);
   assert.match(readFileSync(new URL('../dist/browser-pdf-vendor/NOTICE.md', import.meta.url), 'utf8'), /AGPL/);
 });
