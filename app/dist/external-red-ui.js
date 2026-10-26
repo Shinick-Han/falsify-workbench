@@ -222,6 +222,13 @@
         matches:item.matches.map(copyMatch)
       }));
       render();
+      if(!state.length){
+        acceptButton.disabled=true;
+        acceptStatus.setAttribute('data-state','no-changes');
+        say(acceptStatus,'변경 0건입니다. 변경이 없어 적용하지 않습니다.',true);
+        return;
+      }
+      acceptStatus.setAttribute('data-state','ready');
       say(acceptStatus,'변경을 찾았습니다. 검증된 실행이 아니며 아직 가져오지 않았습니다.');
     }
     async function accept(){

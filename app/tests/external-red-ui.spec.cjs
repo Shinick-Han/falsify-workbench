@@ -233,6 +233,52 @@ test('accept without a workspace API does not throw or invent a run',async()=>{
   assert.equal(ui.calls.length,0);
 });
 
+test('an empty or unrecognized paste is zero changes and is not applied',async()=>{
+  const ui=world();
+  ui.input('external-red-paste').value=JSON.stringify({edits:[]});
+  ui.input('external-red-review').click();
+  assert.equal(queryAll(ui.section(),'article').length,0);
+  assert.equal(ui.input('external-red-accept-status')['data-state'],'no-changes');
+  assert.match(ui.input('external-red-accept-status').textContent,/변경 0건입니다/);
+  assert.match(ui.input('external-red-accept-status').textContent,/적용하지 않습니다/);
+  assert.doesNotMatch(ui.input('external-red-accept-status').textContent,/변경을 찾았습니다/);
+  assert.equal(ui.input('external-red-accept').disabled,true);
+  ui.input('external-red-accept').click();
+  await flush();
+  assert.equal(ui.calls.length,0);
+  ui.input('external-red-paste').value=JSON.stringify({notes:'no edits'});
+  ui.input('external-red-review').click();
+  assert.equal(ui.input('external-red-accept-status')['data-state'],'no-changes');
+  assert.doesNotMatch(ui.input('external-red-accept-status').textContent,/변경을 찾았습니다/);
+  assert.equal(ui.input('external-red-accept').disabled,true);
+  ui.input('external-red-accept').click();
+  await flush();
+  assert.equal(ui.calls.length,0);
+  ui.input('external-red-paste').value=JSON.stringify({edits:[{segmentId:'s0',pageIndex:0,before:ALPHA,after:ALPHA}]});
+  ui.input('external-red-review').click();
+  assert.equal(queryAll(ui.section(),'article').length,0);
+  assert.equal(ui.input('external-red-accept-status')['data-state'],'no-changes');
+  assert.equal(ui.calls.length,0);
+});
+
+test('an edits alias reviews as one exact change',async()=>{
+  const ui=world();
+  ui.input('external-red-paste').value=JSON.stringify({edits:[{segmentId:'s0',pageIndex:0,before:ALPHA,after:'Changed.'}]});
+  ui.input('external-red-review').click();
+  assert.equal(ui.input('external-red-accept-status')['data-state'],'ready');
+  assert.match(ui.input('external-red-accept-status').textContent,/변경을 찾았습니다/);
+  assert.equal(queryAll(ui.section(),'article')[0]['data-status'],'matched');
+  const box=queryAll(ui.section(),'input').find(node=>node.type==='checkbox');
+  box.checked=true;
+  box.dispatchEvent(new Event('change'));
+  ui.input('external-red-accept').click();
+  await flush();
+  assert.equal(ui.calls.length,1);
+  assert.equal(ui.calls[0].proposals[0].before,ALPHA);
+  assert.equal(ui.calls[0].proposals[0].after,'Changed.');
+  assert.equal(ui.calls[0].proposals[0].origin,'external-ai-import');
+});
+
 test('the second alpha match is the occurrence the real edit core accepts',async()=>{
   const src=fs.readFileSync(path.resolve(__dirname,'../dist/paper-edits.js'),'utf8');
   const sandbox={module:{exports:{}},exports:{}};

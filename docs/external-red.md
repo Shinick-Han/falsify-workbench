@@ -34,6 +34,7 @@ ID와 쪽이 서로 모순되면 맞추지 않고 `page-mismatch`로 `missing`�
 
 - 펜스 JSON (` ```json `)
 - 레거시 `candidates` (`segmentId`, `before`, `after`). 후보 ID·level·rationale은 편집 위치가 아니다.
+- `edits` 배열. `changes`, `candidates`와 같은 항목·한도·정확 위치 규칙을 쓴다. 셋 중 목록은 하나만 둔다. 빈 목록, 배열이 아닌 값, 알 수 없는 JSON은 제안을 만들지 않는다.
 - `Before:` / `After:` 쌍. 머리글로 `segmentId`, `pageIndex`, `pageLabel`을 둘 수 있다.
 - 정확한 문맥이 회복되는 unified diff. 경로가 문단 ID와 같으면 그 문단만 보고, 아니면 문맥으로만 찾는다.
 - `rewritten` 또는 `fullText`, 또는 `FULL REWRITE` 본문. 줄 단위로 제한된 차이만 만든다.
@@ -61,7 +62,7 @@ CRLF는 찾을 때만 LF로 맞춘다. 제안의 Before와 오프셋은 원문 �
 
 화면 글은 쉬운 한국어다. 버튼은 `변경 찾기`와 `선택한 변경 가져오기`다. 쪽은 `PDF p.1`처럼 1부터 보여 주고, `pageIndex 0`이나 호스트 이름은 보여 주지 않는다. 위치가 여러 곳이면 각 위치의 앞뒤 문맥을 대괄호로 표시하고, 라디오는 미리 고르지 않는다. 사람이 위치를 확정하고 체크한 뒤에만 가져온다.
 
-복사는 `FalsifyPaperWorkspace.getSource()`로 전체 쪽 원문과 과제 프롬프트를 만든다. 클립보드 권한이 없으면 `falsify-external-red-prompt.txt`로 내려받는다. 진단과 Before/After, 문맥은 `textContent`로만 보인다. 체크한 `matched`만 `acceptProposals(proposals,{origin:'external-ai-import',model?})`로 보낸다. 고른 위치의 `before`는 그 원문 조각이고, `anchor.occurrence`는 그 출현 번호다. 같은 범위를 덮는 제안을 둘 이상 체크하면 보내지 않는다. 편집 화면 API가 없으면 보내지 않는다.
+복사는 `FalsifyPaperWorkspace.getSource()`로 전체 쪽 원문과 과제 프롬프트를 만든다. 클립보드 권한이 없으면 `falsify-external-red-prompt.txt`로 내려받는다. 진단과 Before/After, 문맥은 `textContent`로만 보인다. 제안이 0건이면 상태는 `no-changes`이고, 문구는 변경 0건이며 적용하지 않는다고 말한다. 그때 가져오기 버튼은 꺼져 있다. 제안이 있을 때만 찾았다고 말한다. 체크한 `matched`만 `acceptProposals(proposals,{origin:'external-ai-import',model?})`로 보낸다. 고른 위치의 `before`는 그 원문 조각이고, `anchor.occurrence`는 그 출현 번호다. 같은 범위를 덮는 제안을 둘 이상 체크하면 보내지 않는다. 편집 화면 API가 없으면 보내지 않는다.
 
 ## 출처
 
@@ -72,5 +73,5 @@ CRLF는 찾을 때만 LF로 맞춘다. 제안의 Before와 오프셋은 원문 �
 - 스크립트와 스타일 연결, `#paper-workspace` 호스트, `FalsifyPaperWorkspace` 구현은 UI 담당이다. 이 분기만으로는 화면이 열리지 않는다.
 - 기존 정적 점검은 `paper-workspace` 문자열과, `index.html`에 없는 새 스크립트를 레거시로 본다. 계약이 그 호스트와 이벤트를 요구하므로 통합 담당이 점검 예외를 갱신하기 전까지 그 점검은 실패한다.
 - 로마 숫자 등 비십진 PDF 페이지 라벨은 0부터의 문단 순서로만 둔다.
-- 편집 세션에 위치 선택 API가 없어, 모호한 위치는 이 패널에서 고른 뒤 공개 `acceptProposals`로만 넘긴다. 테스트는 `git show origin/feature/paper-workspace-20261026:app/dist/paper-edits.js`로 실제 편집 모듈을 읽고, 그 파일을 이 분기에 넣지 않는다.
+- 편집 세션에 위치 선택 API가 없어, 모호한 위치는 이 패널에서 고른 뒤 공개 `acceptProposals`로만 넘긴다. 테스트는 저장소에 있는 `app/dist/paper-edits.js`를 읽고, 원격 git ref로 모듈을 가져오지 않는다.
 - 빈 줄 구분으로 이은 전체 다시 쓰기만 다룬다. 레이아웃·글꼴·수치 검증은 하지 않는다.
