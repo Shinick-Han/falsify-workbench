@@ -353,7 +353,7 @@
     const previewApi=()=>deps.preview||globalThis.FalsifyPreview||null;
     const editsApi=()=>deps.edits||globalThis.FalsifyPaperEdits||null;
     const exporterApi=()=>deps.exporter||globalThis.FalsifyBrowserPdf||null;
-    const store=()=>deps.storage||globalThis.localStorage||null;
+    const store=()=>{try{return deps.storage||globalThis.localStorage||null;}catch{return null;}};
     function blobApi(){
       if(deps.sourceBlobs)return deps.sourceBlobs;
       const idb=globalThis.indexedDB;
@@ -444,8 +444,9 @@
       ui.exportNote.textContent=!pdf&&source?'PDF가 아니라 브라우저에서 생성본을 만들지 않습니다.':exporterApi()?'':'브라우저 PDF 편집 모듈이 아직 없습니다. 생성본을 만들지 않으며, 성공으로 표시하지 않습니다.';
       ui.generate.disabled=generating||!exporterApi()||!pdf||!enabledEdits().length;
       ui.draftSave.disabled=!(ui.draftOpt.checked&&session&&ready);
-      ui.draftRestore.hidden=!draftRaw;
-      ui.draftDelete.disabled=!draftRaw;
+      const hasDraft=!!draftRaw||readIndex().length>0;
+      ui.draftRestore.hidden=!hasDraft;
+      ui.draftDelete.disabled=!hasDraft;
       const blocked=!output||output.blocked;
       ui.current.disabled=blocked;
       ui.current.textContent=output&&stale()?'마지막 생성본 다운로드':'현재 생성본 다운로드';
@@ -615,7 +616,7 @@
     function remindDraft(){
       const row=readIndex().find(item=>!source||item.fileHash!==source.fileHash);
       if(!row)return;
-      setDraftStatus('초안에는 편집만 있습니다. 이름이 '+row.name+' 이고 해시가 '+row.fileHash.slice(0,12)+'… 인 원본 PDF를 다시 선택한 뒤 초안 복구를 누르세요. 서버로 올리지 않습니다.');
+      setDraftStatus(row.source?'보관한 '+row.name+' 초안과 원본 PDF가 있습니다. 초안 복구를 누르면 이 브라우저에서 다시 엽니다.':'초안에는 편집만 있습니다. 이름이 '+row.name+' 이고 해시가 '+row.fileHash.slice(0,12)+'… 인 원본 PDF를 다시 선택한 뒤 초안 복구를 누르세요. 서버로 올리지 않습니다.');
     }
     async function openFile(file){
       const mine=++epoch;
@@ -1018,7 +1019,19 @@
         const file=kept&&fileFromKept(kept);
         if(file){
           setDraftStatus('이 브라우저에 보관한 원본 PDF를 다시 엽니다. 서버로 올리지 않습니다.');
-          await openFile(file);
+          if(typeof DataTransfer==='function'&&typeof Event==='function'){
+            const transfer=new DataTransfer();transfer.items.add(file);ui.file.files=transfer.files;
+            const selected=ui.file.files[0];
+            // The normal input path clears the old source before asynchronously extracting it.
+            await new Promise(resolve=>{
+              let timeout;
+              const finish=()=>{doc.removeEventListener('falsify:document',ready);timers.clearTimeout(timeout);resolve();};
+              const ready=event=>{if(event.detail?.file===selected)finish();};
+              doc.addEventListener('falsify:document',ready);
+              timeout=timers.setTimeout(finish,60000);
+              ui.file.dispatchEvent(new Event('change',{bubbles:true}));
+            });
+          }else await openFile(file);
         }
         if(!source||source.fileHash!==expected){
           const name=envelope.snapshot&&envelope.snapshot.name||'원본';
@@ -1046,8 +1059,8 @@
       return null;
     }
     function deleteDraft(){
-      const key=draftKey(),box=store();
-      const hash=source&&source.fileHash;
+      const hash=source&&source.fileHash||readIndex()[0]?.fileHash;
+      const key=hash?'falsify.paper-draft.v1.'+hash:null,box=store();
       if(!key||!box){setDraftStatus('지울 초안이 없습니다.',true);return;}
       try{box.removeItem(key);writeIndex(readIndex().filter(row=>row.fileHash!==hash));}catch(e){setDraftStatus('초안을 지우지 못했습니다. '+safeMessage(e),true);return;}
       const blobs=blobApi();if(blobs&&hash)Promise.resolve(blobs.delete(hash)).catch(()=>{});
