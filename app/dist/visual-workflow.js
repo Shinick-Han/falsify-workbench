@@ -163,6 +163,7 @@
     const cloud=await globalThis.FalsifyConfluenceStore?.ready;
     const reviewPanel=$('#confluence-panel-review');if(reviewPanel)$('#evaluation-run').closest('label').after(reviewPanel);
     const harnessPanel=$('#confluence-panel-harness');if(harnessPanel&&manager)manager.querySelector('h2').after(harnessPanel);
+    const aiSummary=document.querySelector('#red-ai-optional > summary');if(aiSummary&&!aiSummary.querySelector('svg'))aiSummary.prepend(icon('bot'));
     document.documentElement.classList.add('visual-ready');
     return {render,choose,cloud};
   })();

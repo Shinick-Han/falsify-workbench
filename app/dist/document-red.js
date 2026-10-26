@@ -81,7 +81,13 @@
       check.addEventListener('change',()=>{c.selected=check.checked;changed();});area.addEventListener('input',()=>{c.after=area.value;c.edited=true;changed();});list.append(section);
     });controls();
   }
-  function applyResponse(res,origin,ask=false){const validated=C.validateResponse(doc,res);if(ask&&!keepEdits()){msg('응답 적용 취소: 기존 후보와 편집을 그대로 유지했습니다.');return;}invalidate();candidates=validated;response={...res,provenance:origin};renderCandidates();void save(null);msg((res.status==='refusal'?'모델이 거절했습니다. 우회하거나 자동 재시도하지 않습니다.':res.status==='abstain'?'모델이 유보했습니다. 후보를 강제로 만들지 않고 자동 재시도하지 않습니다.':validated.length+'개 후보 · 인용 위치 확인 완료, 과학적 타당성 미검증.')+' '+H.outcomeText('red',res,origin)+'.');}
+  const MODEL_ID=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$/;
+  // Validated proposals only. Manual JSON is not recorded as a model run; a broker result may carry its own model id.
+  function bridgeWorkspace(validated,origin){const ws=globalThis.FalsifyPaperWorkspace;if(!ws||typeof ws.acceptProposals!=='function'||!validated.length)return;
+    const modelRun=origin==='local-codex',hinted=modelRun&&typeof response?.model==='string'&&MODEL_ID.test(response.model)?response.model:undefined;
+    const proposals=validated.map(c=>({segmentId:c.segmentId,before:c.before,after:c.after,anchor:Number.isInteger(c.offset)?{start:c.offset,end:c.offset+c.before.length}:undefined}));
+    try{ws.acceptProposals(proposals,modelRun?{origin:'ai-proposal',...(hinted?{model:hinted}:{})}:{origin:'external-ai-import'});}catch{/* the validated RED response stays either way */}}
+  function applyResponse(res,origin,ask=false){const validated=C.validateResponse(doc,res);if(ask&&!keepEdits()){msg('응답 적용 취소: 기존 후보와 편집을 그대로 유지했습니다.');return;}invalidate();candidates=validated;response={...res,provenance:origin};renderCandidates();void save(null);bridgeWorkspace(validated,origin);msg((res.status==='refusal'?'모델이 거절했습니다. 우회하거나 자동 재시도하지 않습니다.':res.status==='abstain'?'모델이 유보했습니다. 후보를 강제로 만들지 않고 자동 재시도하지 않습니다.':validated.length+'개 후보 · 인용 위치 확인 완료, 과학적 타당성 미검증.')+' '+H.outcomeText('red',res,origin)+'.');}
   async function makeRequest(){const budget=Number($('#red-budget').value);if(!Number.isInteger(budget)||budget<1||budget>32)throw new Error('호출 예산은 1–32 사이 정수입니다.');return FalsifyLab.bind('red',C.request(doc,Number($('#red-level').value),budget));}
   // While a response is retained, re-download its bound request so later final snapshots keep the root's requestId; only a fresh start mints a new execution request.
   $('#red-request').addEventListener('click',async()=>{const current=generation;try{const next=response&&request?request:await makeRequest();if(current!==generation)return;request=next;jsonDownload(request,'falsify-document-red-request.json');msg('수동 전달용 요청과 harness를 저장했습니다. 실행·전송은 하지 않았습니다.');}catch(e){msg(e.message,true);}});

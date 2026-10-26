@@ -1,0 +1,393 @@
+'use strict';
+// Node VM contract for the RED paper surface. Synthetic DOM and a mocked PDF.js.
+// No browser, network, model, upload, or private PDF. Sibling edit/export modules are contract mocks.
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),crypto=require('node:crypto');
+const WS=fs.readFileSync(path.resolve(__dirname,'../dist/paper-workspace.js'),'utf8');
+const HTML=fs.readFileSync(path.resolve(__dirname,'../dist/index.html'),'utf8');
+const CSS=fs.readFileSync(path.resolve(__dirname,'../dist/paper-workspace.css'),'utf8');
+const RED=fs.readFileSync(path.resolve(__dirname,'../dist/document-red.js'),'utf8');
+const PREVIEW_SRC=fs.readFileSync(path.resolve(__dirname,'../dist/document-preview.js'),'utf8');
+const api=require('../dist/paper-workspace.js');
+const previewCtx=vm.createContext({URL,TextDecoder,Uint8Array,Promise,Error,Math,Number,Array,Object,String});
+vm.runInContext(PREVIEW_SRC,previewCtx,{filename:'document-preview.js'});
+const Preview=previewCtx.FalsifyPreview;
+const tests=[];const test=(name,fn)=>tests.push([name,fn]);
+const sha=b=>crypto.createHash('sha256').update(b).digest('hex');
+const BASE='http://127.0.0.1:7815/';
+const until=async(cond,label)=>{for(let i=0;i<400;i++){if(cond())return;await new Promise(r=>setTimeout(r,5));}assert.fail('timed out: '+label);};
+const settle=async()=>{for(let i=0;i<30;i++)await new Promise(r=>setImmediate(r));};
+const textOf=e=>!e?'':(e.textContent||'')+(e.children||[]).map(textOf).join('');
+const pdfBytes=marker=>Buffer.from('%PDF-1.7\n'+marker+'\n%%EOF');
+const pdfFile=(bytes,name='paper.pdf')=>new File([bytes],name,{type:'application/pdf'});
+const ITEMS=[
+  {str:'Alpha',transform:[1,0,0,1,10,100],width:40,height:12,hasEOL:false},
+  {str:'Alpha',transform:[1,0,0,1,10,80],width:40,height:12,hasEOL:false}
+];
+const TAGS={
+  'paper-file':'input','paper-inline-after':'textarea','paper-draft-opt':'input','paper-before-stage':'div','paper-after-stage':'div','paper-edits':'ul','paper-proposal-list':'ul',
+  'paper-original-download':'button','paper-page-prev':'button','paper-page-next':'button','paper-zoom-out':'button','paper-zoom-in':'button',
+  'paper-inline-apply':'button','paper-inline-cancel':'button','paper-undo':'button','paper-redo':'button','paper-generate':'button',
+  'paper-current-download':'button','paper-team-share':'button','paper-blue-handoff':'button','paper-draft-save':'button','paper-draft-restore':'button','paper-draft-delete':'button'
+};
+
+function element(document,id,tag=''){
+  const classes=new Set(),attrs={},e=new EventTarget();
+  Object.assign(e,{id,tagName:tag,disabled:false,hidden:false,checked:false,value:'',textContent:'',children:[],className:'',clientWidth:640,type:'',dataset:{},
+    style:{setProperty(){}},
+    classList:{toggle(c,on){(on??!classes.has(c))?classes.add(c):classes.delete(c);},contains:c=>classes.has(c)},
+    setAttribute(k,v){attrs[k]=String(v);},getAttribute:k=>attrs[k]??null,
+    getContext(){return tag==='canvas'?{canvas:e}:null;},
+    replaceChildren(...c){this.children=c;},append(...c){this.children.push(...c);},prepend(...c){this.children.unshift(...c);},
+    after(){},remove(){},click(){this.dispatchEvent(new Event('click'));},getClientRects:()=>[{width:8,height:8}],
+    focus(){document.activeElement=e;},
+    contains(n){if(n===this)return true;return (this.children||[]).some(c=>c.contains?c.contains(n):c===n);},
+    querySelector(sel){return this.querySelectorAll(sel)[0]||null;},
+    querySelectorAll(sel){const out=[];(function walk(n){for(const c of n.children||[]){const name=String(c.tagName||'').toLowerCase();if((sel==='span'&&name==='span')||(sel==='svg'&&name==='svg')||(sel==='button'&&name==='button'))out.push(c);walk(c);}})(this);return out;}});
+  return e;
+}
+function dom(){
+  const els=new Map(),created=[];
+  let document;
+  const make=(id,tag)=>element(document,id,tag);
+  const get=id=>{if(!els.has(id)){const e=make(id,TAGS[id]||'');els.set(id,e);}return els.get(id);};
+  document=new EventTarget();
+  Object.assign(document,{baseURI:BASE,activeElement:null,body:null,scripts:[],
+    querySelector:s=>s.startsWith('#')?get(s.slice(1)):null,
+    querySelectorAll:()=>[],
+    createElement:tag=>{const e=make('',tag);created.push(e);return e;},
+    createElementNS:()=>make('','svg'),
+    getSelection:()=>null});
+  document.body=make('body','body');document.activeElement=document.body;
+  get('paper-draft-opt').type='checkbox';get('paper-file').type='file';
+  return {document,get,created};
+}
+function pdfjs({pages=2,hold=false,make,items=ITEMS}={}){
+  const state={pageCount:pages};
+  const log={params:[],received:[],tasks:[],renders:[],setPages(n){state.pageCount=n;}};
+  class TextLayer{constructor({textContentSource,container}){this.container=container;this.textDivs=(textContentSource.items||[]).map(()=>make('span'));}
+    render(){for(const span of this.textDivs)this.container.append(span);return Promise.resolve();}cancel(){this.cancelled=true;}}
+  const lib={GlobalWorkerOptions:{},TextLayer,getDocument(params){
+    log.params.push(params);const received=Buffer.from(params.data);log.received.push(received);params.data.buffer.transfer();
+    const marker=received.includes('MARKER-A')?'A':received.includes('MARKER-B')?'B':received.includes('MARKER-GEN')?'GEN':'P';
+    let resolve,reject;const task={destroyed:false,marker,promise:new Promise((ok,no)=>{resolve=ok;reject=no;})};task.promise.catch(()=>{});
+    task.destroy=async()=>{task.destroyed=true;reject(Object.assign(new Error('Worker was destroyed'),{name:'AbortException'}));};
+    task.open=()=>{if(task.destroyed)return;const count=state.pageCount;resolve({numPages:count,getPage:async n=>{
+      if(n<1||n>count)throw new Error('page');
+      return {getViewport:({scale})=>({width:612*scale,height:792*scale,viewBox:[0,0,612,792]}),
+        getTextContent:async()=>({items:items.map(item=>({...item,transform:item.transform.slice()}))}),cleanup(){},
+        render({canvas}){let ok,no;const r={cancelled:false,promise:new Promise((a,b)=>{ok=a;no=b;})};
+          r.cancel=()=>{if(r.done)return;r.cancelled=true;r.done=true;no(Object.assign(new Error('Rendering cancelled'),{name:'RenderingCancelledException'}));};
+          r.finish=()=>{if(r.done)return;r.done=true;canvas.marker=marker;canvas.painted=n;ok();};log.renders.push(r);setImmediate(r.finish);return r;}};
+    }});};log.tasks.push(task);if(!hold)setImmediate(task.open);return task;}};
+  return {lib,log};
+}
+function memory(){const box=new Map();return {getItem:k=>box.has(k)?box.get(k):null,setItem:(k,v)=>{box.set(k,String(v));},removeItem:k=>{box.delete(k);},keys:()=>[...box.keys()]};}
+function editCore(){
+  const added=[];let restores=0,drafts=0,last=null;
+  const core={added,get restores(){return restores;},get drafts(){return drafts;},get last(){return last;},
+    create({fileHash,name}){
+      let edits=[],past=[],future=[],listeners=[],rev=0;
+      const snap=()=>({schema:'falsify.paper-edits.v1',fileHash,name,revision:rev,edits:edits.map(e=>({...e})),canUndo:past.length>0,canRedo:future.length>0});
+      const emit=()=>{rev++;const s=JSON.parse(JSON.stringify(snap()));for(const fn of [...listeners])fn(s);};
+      const apply=u=>{if(u.kind==='add')edits.push(u.edit);else if(u.kind==='update'){const e=edits.find(x=>x.id===u.id);if(e)e.after=u.afterNow;}};
+      last={snapshot:()=>JSON.parse(JSON.stringify(snap())),subscribe(fn){listeners.push(fn);return ()=>{listeners=listeners.filter(x=>x!==fn);};},
+        add(edit){const id='e'+edits.length+'-'+rev;const stored={...edit,id,enabled:true};edits.push(stored);past.push({kind:'add',id,edit:stored});future=[];added.push(edit);emit();return id;},
+        update(id,changes){const e=edits.find(x=>x.id===id);if(!e)throw new Error('없는 편집');past.push({kind:'update',id,after:e.after,afterNow:changes.after});e.after=changes.after;future=[];emit();},
+        remove(id){const edit=edits.find(e=>e.id===id);edits=edits.filter(e=>e.id!==id);past.push({kind:'remove',edit});future=[];emit();},
+        setEnabled(id,on){const e=edits.find(x=>x.id===id);if(!e)throw new Error('없는 편집');e.enabled=!!on;past.push({kind:'enable',id,on:!on});future=[];emit();},
+        undo(){const u=past.pop();if(!u)return;if(u.kind==='add')edits=edits.filter(e=>e.id!==u.id);else if(u.kind==='update'){const e=edits.find(x=>x.id===u.id);if(e){u.afterNow=e.after;e.after=u.after;}}else if(u.kind==='remove'&&u.edit)edits.push(u.edit);else if(u.kind==='enable'){const e=edits.find(x=>x.id===u.id);if(e)e.enabled=u.on;}future.push(u);emit();},
+        redo(){const u=future.pop();if(!u)return;if(u.kind==='add')edits.push(u.edit);else if(u.kind==='update'){const e=edits.find(x=>x.id===u.id);if(e)e.after=u.afterNow;}else if(u.kind==='remove')edits=edits.filter(e=>e.id!==u.edit.id);else if(u.kind==='enable'){const e=edits.find(x=>x.id===u.id);if(e)e.enabled=!u.on;}past.push(u);emit();}};
+      return last;
+    },
+    draft({snapshot,now}){drafts++;return {schema:'falsify.paper-draft.v1',fileHash:snapshot.fileHash,savedAt:now,expiresAt:now+api.TTL,edits:snapshot.edits};},
+    restoreDraft(envelope,{fileHash,now}){restores++;if(!envelope||envelope.fileHash!==fileHash)throw new Error('다른 파일의 초안입니다.');if(!(now<envelope.expiresAt))throw new Error('12시간이 지나 초안이 만료되었습니다.');return {edits:Array.isArray(envelope.edits)?envelope.edits:[]};}};
+  return core;
+}
+function mount(opts={}){
+  const w=dom(),storage=opts.storage||memory(),downloads=[],long=[];
+  const timers={setTimeout(fn,ms){if(ms>=1000){long.push(fn);return 1e9+long.length-1;}return setTimeout(fn,ms);},clearTimeout(id){if(id>=1e9){long[id-1e9]=null;return;}clearTimeout(id);}};
+  const {lib,log}=pdfjs({pages:opts.pages??2,hold:!!opts.hold,make:tag=>w.document.createElement(tag),items:opts.items});
+  w.get('paper-before-stage').clientWidth=opts.width||640;w.get('paper-after-stage').clientWidth=opts.width||640;
+  const edits=opts.edits===false?null:editCore();
+  const exporter=opts.exporter||null;
+  const clock={value:opts.clock??1_700_000_000_000};
+  const ws=api.create({document:w.document,preview:opts.preview===false?undefined:{pdfParams:Preview.pdfParams,fitScale:Preview.fitScale,defaultImport:async()=>lib},
+    edits:edits||undefined,exporter:exporter||undefined,storage,urls:{createObjectURL(file){downloads.push(file);return 'blob:'+downloads.length;},revokeObjectURL(){}},
+    timers,subtle:crypto.subtle,now:()=>clock.value});
+  const file=f=>{w.get('paper-file').files=[f];w.get('paper-file').dispatchEvent(new Event('change'));};
+  const canvas=()=>w.get('paper-before-stage').children.flatMap(page=>(page.children||[]).filter(c=>c.tagName==='canvas'));
+  return {...w,ws,lib,log,edits,storage,downloads,clock,file,canvas,long};
+}
+function keydown(target,init){const e=new Event('keydown',{cancelable:true});Object.assign(e,init);target.dispatchEvent(e);return e;}
+function buttons(v,act,id){return v.get('paper-edits').querySelectorAll('button').filter(b=>b.dataset.act===act&&(!id||b.dataset.edit===id));}
+
+test('geometry: the second occurrence keeps its own top-left box and is not collapsed onto the first',()=>{
+  const second=api.anchorFromSelection(ITEMS,[0,0,612,792],[1]);
+  assert.equal(second.before,'Alpha');assert.deepEqual(second.anchor.bbox,[10,700,50,712]);
+  assert.equal(second.anchor.occurrence,1);assert.equal(second.anchor.start,5);assert.equal(second.anchor.end,10);
+  const first=api.anchorFromSelection(ITEMS,[0,0,612,792],[0]);
+  assert.deepEqual(first.anchor.bbox,[10,680,50,692]);assert.equal(first.anchor.occurrence,0);assert.equal(first.anchor.start,0);
+  assert.equal(api.pageIndexFromLabel('PDF p. 2'),1);assert.equal(api.pageIndexFromLabel('page 2'),null);
+  const segs=[{id:'s0',label:'PDF p. 1',text:'Alpha Alpha'},{id:'s1',label:'PDF p. 2',text:'Only once.'},{id:'s2',text:'Only once.'}];
+  const out=api.classifyProposals([
+    {segmentId:'s0',before:'Alpha',after:'Beta',status:'matched'},
+    {before:'Only once.',after:'Only twice.',status:'matched'},
+    {before:'missing words',after:'still missing',status:'matched'},
+    {segmentId:'s1',before:'Only once.',after:'Moved.',pageIndex:9,status:'matched'}
+  ],segs,{origin:'external-ai-import',model:'gpt-sneaky'});
+  assert.equal(out.model,undefined,'a non-model origin cannot carry a model id');
+  assert.equal(out.items[0].status,'ambiguous');assert.equal(out.items[1].status,'ambiguous');
+  assert.equal(out.items[2].status,'missing');assert.equal(out.items[3].status,'ambiguous');
+  assert.equal(api.TTL,12*60*60*1000);
+  const fit=api.clampScale({width:612,height:792},320,1,Preview.fitScale);
+  assert.ok(612*fit<=320&&fit>0);
+});
+
+test('markup: scripts, optional AI disclosure, empty import mount, and bounded stage',()=>{
+  const at=s=>HTML.indexOf(s);
+  assert.ok(at('src="app.js')<at('src="paper-edits.js"')&&at('src="paper-edits.js"')<at('src="external-red.js"')&&at('src="external-red.js"')<at('src="browser-pdf.js"')&&at('src="browser-pdf.js"')<at('src="paper-workspace.js"')&&at('src="paper-workspace.js"')<at('src="external-red-ui.js"')&&at('src="external-red-ui.js"')<at('src="document-red.js'));
+  assert.match(HTML,/href="paper-workspace.css"/);assert.match(HTML,/href="external-red-ui.css"/);
+  assert.match(HTML,/<div id="paper-external-mount"><\/div>/);
+  assert.match(HTML,/<details class="red-help" id="red-ai-optional"><summary>AI 검토 · 선택 사항<\/summary>/);
+  assert.doesNotMatch(HTML,/id="red-ai-optional"[^>]*\sopen/);
+  assert.match(fs.readFileSync(path.resolve(__dirname,'../dist/visual-workflow.js'),'utf8'),/#red-ai-optional > summary/);
+  assert.match(RED,/origin:'external-ai-import'/);assert.match(RED,/origin:'ai-proposal'/);
+  assert.match(CSS,/max-height:\s*min\(70vh,\s*720px\)/);assert.match(CSS,/@media\(max-width:700px\)/);
+  assert.doesNotMatch(WS+CSS,/\p{Extended_Pictographic}/u);
+  const ids=[...HTML.matchAll(/\bid="([^"]+)"/g)].map(m=>m[1]);assert.equal(ids.length,new Set(ids).size);
+});
+
+test('reader: file input paints one original page before extraction, and the second selection is a human edit',async()=>{
+  const v=mount({width:320}),bytes=pdfBytes('MARKER-A'),file=pdfFile(bytes,'scan.pdf');
+  const sources=[];v.document.addEventListener('falsify:paper-workspace-source',e=>sources.push(e.detail));
+  v.file(file);
+  await until(()=>v.canvas().length===1,'page painted');
+  assert.equal(v.ws.getSource().file,file);assert.deepEqual(v.ws.getSource().segments,[]);
+  assert.equal(v.get('paper-workspace-status').textContent,'');
+  assert.match(v.get('paper-before-status').textContent,/원본 바이트/);
+  assert.equal(v.canvas()[0].marker,'A');assert.ok(v.canvas()[0].width<=320&&v.canvas()[0].width>0,'mobile stage clamps the page');
+  assert.equal(sources.at(-1).fileHash,v.ws.getSource().fileHash);assert.equal('file' in sources.at(-1),false);
+  const params=v.log.params[0];
+  assert.equal(params.isEvalSupported,false);assert.equal(params.disableFontFace,true);assert.equal('url' in params,false);
+  assert.equal(v.lib.GlobalWorkerOptions.workerSrc,BASE+'vendor/pdf.worker.mjs');
+  assert.equal(v.log.tasks.length,1);v.file(file);await settle();assert.equal(v.log.tasks.length,1,'the same File is not reloaded');
+  const textEl=v.get('paper-before-stage').children[0].children.find(c=>String(c.className).includes('textLayer'));
+  const span=textEl.querySelectorAll('span')[1];assert.equal(span.dataset.i,'1');
+  v.document.getSelection=()=>({isCollapsed:false,rangeCount:1,anchorNode:span,getRangeAt:()=>({commonAncestorContainer:textEl,intersectsNode:n=>n===span})});
+  v.get('paper-before-stage').dispatchEvent(new Event('mouseup'));
+  assert.equal(v.get('paper-inline-before').textContent,'Alpha');
+  assert.match(v.get('paper-inline-meta').textContent,/occurrence 1/);assert.match(v.get('paper-inline-meta').textContent,/10, 700, 50, 712/);
+  v.get('paper-inline-after').value='Beta';v.get('paper-inline-apply').click();
+  assert.equal(v.edits.added.at(-1).origin,'human');
+  assert.deepEqual(v.edits.added.at(-1).anchor.bbox,[10,700,50,712]);assert.equal(v.edits.added.at(-1).anchor.occurrence,1);
+  assert.match(textOf(v.get('paper-edits')),/직접 편집/);assert.doesNotMatch(textOf(v.get('paper-edits')),/AI 제안|gpt-/);
+  assert.match(v.get('paper-edit-status').textContent,/모델 실행으로 기록하지 않습니다/);
+  v.document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file,result:{segments:[
+    {id:'s0',label:'PDF p. 1',text:'Unique claim stays.'},{id:'s1',label:'PDF p. 2',text:'Alpha shared'},{id:'s2',label:'PDF p. 2',text:'Alpha shared'}]}}}));
+  v.ws.acceptProposals([
+    {segmentId:'s0',before:'Unique claim stays.',after:'Unique claim moves.',status:'matched'},
+    {before:'Alpha shared',after:'Alpha changed',status:'matched'},
+    {before:'missing words',after:'nope',status:'matched'}
+  ],{origin:'external-ai-import',model:'gpt-sneaky'});
+  assert.doesNotMatch(textOf(v.get('paper-proposal-list')),/gpt-sneaky/);
+  const proposals=v.get('paper-proposal-list').querySelectorAll('button');
+  assert.equal(proposals[0].disabled,false);assert.equal(proposals[1].disabled,true);assert.equal(proposals[2].disabled,true);
+  const before=v.edits.added.length;proposals[1].click();proposals[2].click();
+  assert.equal(v.edits.added.length,before,'ambiguous and missing proposals are not applied');
+  proposals[0].click();assert.equal(v.edits.added.at(-1).origin,'external-ai-import');
+  const jumped=v.edits.last.add({pageIndex:1,before:'Later',after:'Now',origin:'human'});
+  buttons(v,'jump',jumped)[0].click();
+  assert.equal(v.get('paper-page-label').textContent,'2 / 2쪽');
+  buttons(v,'toggle',jumped)[0].click();
+  const off=buttons(v,'toggle',jumped)[0];assert.equal(off.textContent,'켜기');assert.equal(off.getAttribute('aria-pressed'),'false');
+  buttons(v,'delete',jumped)[0].click();
+  assert.equal(v.ws.getEditSnapshot().edits.some(e=>e.id===jumped),false);
+});
+
+test('keyboard: arrows move pages except from a field, Escape returns to the stage, and Ctrl+Z undoes',async()=>{
+  const v=mount(),file=pdfFile(pdfBytes('MARKER-A'));v.file(file);await until(()=>v.canvas().length===1,'painted');
+  keydown(v.get('paper-inline-after'),{key:'ArrowRight'});
+  assert.equal(v.get('paper-page-label').textContent,'1 / 2쪽');
+  keydown(v.get('paper-before-stage'),{key:'ArrowRight'});
+  await until(()=>v.canvas()[0]&&v.canvas()[0].painted===2,'page 2');
+  const textEl=v.get('paper-before-stage').children[0].children.find(c=>String(c.className).includes('textLayer'));
+  const span=textEl.querySelectorAll('span')[1];
+  v.document.getSelection=()=>({isCollapsed:false,rangeCount:1,anchorNode:span,getRangeAt:()=>({commonAncestorContainer:textEl,intersectsNode:n=>n===span})});
+  v.get('paper-before-stage').dispatchEvent(new Event('pointerup'));
+  assert.equal(v.get('paper-inline').hidden,false);
+  keydown(v.get('paper-inline-after'),{key:'Escape'});
+  assert.equal(v.get('paper-inline').hidden,true);assert.equal(v.document.activeElement,v.get('paper-before-stage'));
+  v.get('paper-before-stage').dispatchEvent(new Event('mouseup'));
+  v.get('paper-inline-after').value='Beta';v.get('paper-inline-apply').click();
+  assert.equal(v.ws.getEditSnapshot().canUndo,true);
+  keydown(v.get('paper-workspace'),{key:'z',ctrlKey:true});
+  assert.equal(v.ws.getEditSnapshot().edits.length,0);assert.equal(v.get('paper-undo').disabled,true);assert.equal(v.get('paper-redo').disabled,false);
+  v.get('paper-redo').click();assert.equal(v.ws.getEditSnapshot().edits.length,1);assert.equal(v.ws.getEditSnapshot().edits[0].origin,'human');
+});
+
+test('refocus: last page, one-page replacement, and 200% zoom keep focus on an enabled control',async()=>{
+  const v=mount({width:320});
+  v.file(pdfFile(pdfBytes('MARKER-A'),'a.pdf'));await until(()=>v.canvas().length===1,'two pages');
+  const next=v.get('paper-page-next'),prev=v.get('paper-page-prev'),stage=v.get('paper-before-stage');
+  next.focus();next.click();assert.equal(next.disabled,true);assert.equal(v.document.activeElement,prev);
+  v.log.setPages(1);prev.focus();
+  v.file(pdfFile(pdfBytes('MARKER-B'),'b.pdf'));
+  assert.equal(prev.disabled,true);assert.equal(next.disabled,true);assert.equal(v.document.activeElement,stage);
+  await until(()=>v.canvas().length===1&&v.canvas()[0].marker==='B','one page');
+  assert.equal(v.get('paper-page-prev').disabled,true);assert.equal(v.get('paper-page-next').disabled,true);
+  assert.equal(v.document.activeElement,stage);assert.notEqual(v.document.activeElement,v.document.body);
+  const z=mount({pages:1,width:320});
+  z.file(pdfFile(pdfBytes('MARKER-A'),'z.pdf'));await until(()=>z.canvas().length===1,'zoom base');
+  const zin=z.get('paper-zoom-in'),zout=z.get('paper-zoom-out');zin.focus();
+  let guard=0;while(!zin.disabled){zin.click();if(++guard>6)assert.fail('zoom did not reach the end');}
+  assert.equal(z.get('paper-zoom-label').textContent,'200%');assert.equal(z.document.activeElement,zout);
+});
+
+test('async: a held read of file A cannot become the source after B is chosen',async()=>{
+  const v=mount({pages:1});
+  let release;const gate=new Promise(r=>{release=r;});
+  const aBytes=pdfBytes('MARKER-A');
+  const a={name:'a.pdf',type:'application/pdf',size:aBytes.length,arrayBuffer:()=>gate.then(()=>Uint8Array.from(aBytes).buffer)};
+  const b=pdfFile(pdfBytes('MARKER-B'),'b.pdf');
+  const seen=new Set();const timer=setInterval(()=>{const s=v.ws.getSource();if(s)seen.add(s.file);},0);
+  v.file(a);v.file(b);release();
+  await until(()=>v.ws.getSource()&&v.ws.getSource().file===b&&v.canvas()[0]&&v.canvas()[0].marker==='B','B painted');
+  clearInterval(timer);
+  assert.equal(seen.has(a),false);assert.equal(sha(Buffer.from(await v.ws.getSource().file.arrayBuffer())),sha(pdfBytes('MARKER-B')));
+  assert.ok(v.log.received.length>=1&&v.log.received.every(buf=>buf.includes('MARKER-B')&&!buf.includes('MARKER-A')));
+});
+
+test('async: a held load of A is destroyed and a late open does not paint over B',async()=>{
+  const v=mount({pages:1,hold:true});
+  const a=pdfFile(pdfBytes('MARKER-A'),'a.pdf'),b=pdfFile(pdfBytes('MARKER-B'),'b.pdf');
+  v.file(a);await until(()=>v.log.tasks.length===1,'A loading');
+  v.file(b);await until(()=>v.log.tasks.length===2,'B loading');
+  assert.equal(v.log.tasks[0].destroyed,true);
+  v.log.tasks[0].open();v.log.tasks[1].open();
+  await until(()=>v.canvas().length===1&&v.canvas()[0].marker==='B','B painted');
+  await settle();
+  assert.equal(v.canvas().length,1);assert.equal(v.canvas()[0].marker,'B');assert.equal(v.ws.getSource().file,b);
+});
+
+test('output: preview and download use the generated bytes; failure keeps the last real file',async()=>{
+  const exp={calls:[],fail:false,files:[]};exp.prepare=async req=>{exp.calls.push(req);if(exp.fail)throw new Error('<engine secret>');
+    const bytes=pdfBytes('MARKER-GEN');const file=new File([bytes],'current.pdf',{type:'application/pdf'});exp.files.push(file);
+    return {file,sha256:sha(bytes),verification:{applied:req.edits.length,token:'secret-token'},warnings:['font']};};
+  const v=mount({pages:1,exporter:exp});
+  const outputs=[],edits=[];
+  v.document.addEventListener('falsify:paper-workspace-output',e=>outputs.push(e.detail));
+  v.document.addEventListener('falsify:paper-workspace-edits',e=>edits.push(e.detail));
+  const source=pdfFile(pdfBytes('MARKER-A'),'origin.pdf');v.file(source);
+  await until(()=>v.ws.getSource()&&v.edits.last,'ready');
+  v.edits.last.add({pageIndex:0,before:'Alpha',after:'Beta',origin:'human'});
+  exp.fail=true;v.get('paper-generate').click();
+  await until(()=>/생성하지 못했습니다/.test(v.get('paper-generate-status').textContent),'first failure');
+  assert.match(v.get('paper-generate-status').textContent,/마지막 생성본은 그대로입니다/);
+  assert.doesNotMatch(v.get('paper-generate-status').textContent,/성공|engine secret/);
+  assert.equal(v.ws.getOutput(),null);assert.equal(outputs.length,0);
+  exp.fail=false;v.get('paper-generate').click();
+  await until(()=>v.ws.getOutput()&&v.get('paper-after-stage').children.some(c=>c.marker==='GEN'),'generated');
+  const out=v.ws.getOutput();assert.equal(out.file,exp.files[0]);assert.equal(out.sha256,sha(pdfBytes('MARKER-GEN')));
+  assert.equal(out.verification.token,'secret-token');
+  assert.equal(outputs.length,1);assert.equal('file' in outputs[0],false);assert.equal('token' in outputs[0].verification,false);
+  assert.equal(outputs[0].sha256,out.sha256);assert.equal(outputs[0].verification.applied,1);
+  assert.ok(edits.every(s=>!('file' in s)));
+  assert.equal(v.get('paper-current-download').textContent,'현재 생성본 다운로드');
+  v.get('paper-current-download').click();assert.equal(v.downloads.at(-1),out.file);
+  v.get('paper-original-download').click();assert.equal(v.downloads.at(-1),source);
+  const teams=[];v.document.addEventListener('falsify:paper-team-share',e=>teams.push(e.detail));
+  const beforeTeam=v.downloads.length;v.get('paper-team-share').click();
+  assert.equal(v.downloads.length,beforeTeam,'team publication is not a download');
+  assert.deepEqual(Object.keys(teams[0]).sort(),['name','revision','sha256','verification']);
+  assert.equal(teams[0].name,'current.pdf');assert.equal('token' in teams[0].verification,false);
+  assert.match(v.get('paper-generate-status').textContent,/업로드하지 않으며/);
+  let blue=null;v.document.addEventListener('falsify:blue-file',e=>{blue=e.detail;e.preventDefault();});
+  v.get('paper-blue-handoff').click();
+  assert.deepEqual(Object.keys(blue),['file']);assert.equal(blue.file,out.file);
+  assert.match(v.get('paper-generate-status').textContent,/받지 않았습니다/);
+  v.edits.last.add({pageIndex:0,before:'Beta',after:'Gamma',origin:'human'});
+  assert.equal(v.get('paper-after-label').textContent,'마지막 생성본 · 현재 편집과 다름');
+  assert.equal(v.get('paper-current-download').textContent,'마지막 생성본 다운로드');
+  assert.equal(v.ws.getOutput().file,out.file);
+  exp.fail=true;v.get('paper-generate').click();
+  await until(()=>/생성하지 못했습니다/.test(v.get('paper-generate-status').textContent),'second failure');
+  assert.match(v.get('paper-generate-status').textContent,/마지막 생성본은 그대로입니다/);
+  assert.doesNotMatch(v.get('paper-generate-status').textContent,/성공/);
+  assert.equal(v.ws.getOutput().file,out.file);assert.equal(outputs.length,1);
+  v.get('paper-current-download').click();assert.equal(v.downloads.at(-1),out.file);
+});
+
+test('unavailable: a missing exporter or PDF helper never reports a generated file',async()=>{
+  const v=mount({pages:1,preview:false,edits:false});
+  const source=pdfFile(pdfBytes('MARKER-A'),'origin.pdf');v.file(source);
+  await until(()=>/PDF\.js 도우미가 없어/.test(v.get('paper-workspace-status').textContent),'no preview');
+  assert.equal(v.log.tasks.length,0);assert.equal(v.ws.getOutput(),null);
+  assert.match(v.get('paper-export-note').textContent,/성공으로 표시하지 않습니다/);
+  assert.match(v.get('paper-core-note').textContent,/편집 코어가 아직 없습니다/);
+  v.get('paper-generate').click();assert.equal(v.get('paper-generate-status').textContent,'');
+  v.get('paper-original-download').click();assert.equal(v.downloads[0],source);
+});
+
+test('draft: opt-in 12h storage, no automatic restore, expiry, and delete',async()=>{
+  const v=mount();
+  const file={name:'note.txt',type:'text/plain',size:11,arrayBuffer:async()=>new TextEncoder().encode('hello world').buffer};
+  v.file(file);await until(()=>v.ws.getSource()&&v.edits.last,'hashed');
+  v.edits.last.add({pageIndex:0,before:'hello',after:'goodbye',origin:'human'});
+  v.get('paper-draft-save').click();
+  assert.equal(v.storage.keys().length,0);assert.match(v.get('paper-draft-status').textContent,/직접 켠 뒤에만/);assert.equal(v.edits.drafts,0);
+  v.get('paper-draft-opt').checked=true;v.get('paper-draft-opt').dispatchEvent(new Event('change'));
+  const original=v.edits.draft.bind(v.edits);v.edits.draft=()=>({token:'x',fileHash:'abc'});
+  v.get('paper-draft-save').click();assert.equal(v.storage.keys().length,0);assert.match(v.get('paper-draft-status').textContent,/비밀/);
+  v.edits.draft=original;const savedAt=v.clock.value;v.get('paper-draft-save').click();
+  const key='falsify.paper-draft.v1.'+v.ws.getSource().fileHash;const raw=v.storage.getItem(key);const envelope=JSON.parse(raw);
+  assert.equal(envelope.expiresAt-envelope.savedAt,api.TTL);assert.equal(envelope.savedAt,savedAt);
+  assert.doesNotMatch(raw,/token|password|bytes|%PDF/);assert.equal(envelope.edits.length,1);
+  v.document.dispatchEvent(new CustomEvent('falsify:document-clear'));
+  v.file(file);await until(()=>v.ws.getSource(),'reopened');
+  assert.equal(v.get('paper-draft-restore').hidden,false);assert.match(textOf(v.get('paper-edits')),/아직 편집이 없습니다/);assert.equal(v.edits.restores,0);
+  v.clock.value=savedAt+api.TTL;v.get('paper-draft-restore').click();
+  assert.match(v.get('paper-draft-status').textContent,/만료/);assert.match(textOf(v.get('paper-edits')),/아직 편집이 없습니다/);assert.equal(v.edits.restores,1);
+  v.clock.value=savedAt+1000;v.get('paper-draft-restore').click();
+  assert.equal(v.ws.getEditSnapshot().edits.length,1);assert.equal(v.ws.getEditSnapshot().edits[0].origin,'human');
+  assert.match(v.get('paper-draft-status').textContent,/실행 취소 기록은 복구 이후부터/);
+  v.get('paper-draft-delete').click();assert.equal(v.storage.getItem(key),null);assert.equal(v.get('paper-draft-restore').hidden,true);
+});
+
+test('boot: the ready event is dispatched on a later turn',async()=>{
+  const w=dom();let ready=0;w.document.addEventListener('falsify:paper-workspace-ready',()=>{ready++;});
+  const ctx=vm.createContext({document:w.document,CustomEvent,Event,URL,TextDecoder,Uint8Array,Promise,Error,Math,Number,Array,Object,String,Set,Map,JSON,Date,crypto,setTimeout,clearTimeout,TextEncoder});
+  vm.runInContext(WS,ctx,{filename:'paper-workspace.js'});
+  assert.equal(typeof ctx.FalsifyPaperWorkspace.acceptProposals,'function');assert.equal(ready,0);
+  await new Promise(r=>setTimeout(r,0));assert.equal(ready,1);
+});
+
+test('bridge: manual JSON is not a model run, and a broker result keeps its model id',async()=>{
+  const w=dom(),edits=editCore(),storage=memory();
+  const ws=api.create({document:w.document,edits,storage,subtle:crypto.subtle,timers:{setTimeout,clearTimeout},urls:URL,now:()=>1_700_000_000_000});
+  w.get('red-level').value='1';w.get('red-budget').value='4';w.get('red-empty').textContent='비어 있음';
+  const blobs=[];const jobs=[];
+  const link={request:async(path,body)=>{if(path==='/api/red/jobs'&&body){jobs.push(body);return {id:body.requestId};}if(String(path).includes('/cancel'))return {};
+    const req=jobs[0];return {state:'completed',progress:{},result:{schema:'falsify.document-red.v1',revision:req.revision,sourceHash:req.sourceHash,status:'ok',model:'gpt-test-1',candidates:[{id:'c1',segmentId:'s0',level:1,before:'does not show',after:'does show',rationale:'The sentence states the opposite of the reported direction.',uncertainty:'Synthetic fixture, not a domain review.',evidence:[{segmentId:'s0',quote:'does not show',relation:'contradicts the sentence'}]}]}};}};
+  const ctx=vm.createContext({document:w.document,crypto,CustomEvent,Event,URL:{createObjectURL(b){blobs.push(b);return 'blob:'+blobs.length;},revokeObjectURL(){}},Blob,File,TextEncoder,TextDecoder,Uint8Array,Array,Promise,Error,Map,JSON,Number,String,setTimeout,clearTimeout,confirm:()=>true,btoa,atob,
+    FalsifyDocumentRed:require('../dist/document-red-core.js'),FalsifyHarness:require('../dist/harness-core.js'),
+    FalsifyLocalBridge:{busy(){},session:()=>link,state:()=>({status:'manual',connected:false,cap:null}),capabilities:()=>({red:true,pdf:false})},
+    FalsifyLab:{busy(){},allowed:()=>true,ready:Promise.resolve(),bind:(_,r)=>r,record:async()=>'run1'},FalsifyPaperWorkspace:ws,addEventListener(){}});
+  vm.runInContext(RED,ctx,{filename:'document-red.js'});
+  const file={name:'note.txt',type:'text/plain',size:32,arrayBuffer:async()=>new TextEncoder().encode('Alpha does not show benefit.').buffer};
+  w.document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file,result:{text:'Alpha does not show benefit.',format:'TXT',segments:[{label:'PDF p. 1',text:'Alpha does not show benefit.'}]}}}));
+  await until(()=>ws.getSource()&&ws.getSource().segments.some(s=>s.text.includes('does not show'))&&w.get('document-red').hidden===false,'bound');
+  w.get('red-request').click();await until(()=>blobs.length===1,'request downloaded');
+  const req=JSON.parse(await blobs[0].text());
+  w.get('red-response').value=JSON.stringify({schema:req.schema,revision:req.revision,sourceHash:req.sourceHash,status:'ok',model:'gpt-sneaky',candidates:[{id:'m1',segmentId:'s0',level:1,before:'does not show',after:'does show',rationale:'The sentence states the opposite of the reported direction.',uncertainty:'Synthetic fixture, not a domain review.',evidence:[{segmentId:'s0',quote:'does not show',relation:'contradicts the sentence'}]}]});
+  w.get('red-import-response').click();
+  await until(()=>/외부 제안/.test(textOf(w.get('paper-proposal-list'))),'manual proposal');
+  assert.doesNotMatch(textOf(w.get('paper-proposal-list')),/gpt-sneaky|AI 제안/);
+  assert.match(textOf(w.get('paper-edits')),/아직 편집이 없습니다/);assert.equal(edits.added.length,0);
+  w.get('red-consent').checked=true;w.get('red-start').click();
+  await until(()=>/AI 제안 · gpt-test-1/.test(textOf(w.get('paper-proposal-list'))),'broker proposal');
+  assert.match(textOf(w.get('paper-edits')),/아직 편집이 없습니다/);
+  assert.equal(w.get('paper-proposal-list').querySelectorAll('button')[0].disabled,false);
+});
+
+(async()=>{let passed=0;for(const [name,fn] of tests){try{await fn();passed++;console.log('PASS '+name);}catch(e){console.error('FAIL '+name+'\n'+(e.stack||e));process.exitCode=1;}}
+  console.log(JSON.stringify({file:'paper-workspace.spec.cjs',passed,failed:tests.length-passed,total:tests.length}));})();
