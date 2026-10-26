@@ -162,7 +162,8 @@
                 <p id="paper-team-note" class="muted">다운로드와 별개입니다. 팀 공개는 동의 화면에서만 이어지며, 비공개 초안은 올리지 않습니다. BLUE에는 생성 PDF만 넘깁니다.</p>
               </div>
               <div class="paper-draft">
-                <label class="check-row"><input type="checkbox" id="paper-draft-opt"><span>이 브라우저에 12시간 초안 보관<small>직접 켠 뒤에만 저장합니다. 원본 PDF와 토큰은 넣지 않습니다.</small></span></label>
+                <label class="check-row"><input type="checkbox" id="paper-draft-opt"><span>이 브라우저에 12시간 초안 보관<small>직접 켠 뒤에만 저장합니다. 편집 기록만 남고 원본 PDF와 토큰은 넣지 않습니다.</small></span></label>
+                <label class="check-row"><input type="checkbox" id="paper-draft-source"><span>원본 PDF도 이 브라우저에 12시간 보관<small>편집 초안과 별개의 동의입니다. 이 브라우저의 Blob 저장소에만 두고, 서버로 올리지 않습니다.</small></span></label>
                 <div class="button-row"><button type="button" class="button secondary" id="paper-draft-save" disabled>초안 저장</button><button type="button" class="button secondary" id="paper-draft-restore" hidden>초안 복구</button><button type="button" class="button secondary" id="paper-draft-delete" disabled>초안 삭제</button></div>
                 <p id="paper-draft-status" class="form-feedback" role="status" aria-live="polite"></p>
               </div>

@@ -24,7 +24,7 @@ const ITEMS=[
   {str:'Alpha',transform:[1,0,0,1,10,80],width:40,height:12,hasEOL:false}
 ];
 const TAGS={
-  'paper-file':'input','paper-inline-after':'textarea','paper-draft-opt':'input','paper-before-stage':'div','paper-after-stage':'div','paper-edits':'ul','paper-proposal-list':'ul',
+  'paper-file':'input','paper-inline-after':'textarea','paper-draft-opt':'input','paper-draft-source':'input','paper-before-stage':'div','paper-after-stage':'div','paper-edits':'ul','paper-proposal-list':'ul',
   'paper-original-download':'button','paper-page-prev':'button','paper-page-next':'button','paper-zoom-out':'button','paper-zoom-in':'button',
   'paper-inline-apply':'button','paper-inline-cancel':'button','paper-undo':'button','paper-redo':'button','paper-generate':'button',
   'paper-current-download':'button','paper-team-share':'button','paper-blue-handoff':'button','paper-draft-save':'button','paper-draft-restore':'button','paper-draft-delete':'button'
@@ -58,7 +58,7 @@ function dom(){
     createElementNS:()=>make('','svg'),
     getSelection:()=>null});
   document.body=make('body','body');document.activeElement=document.body;
-  get('paper-draft-opt').type='checkbox';get('paper-file').type='file';
+  get('paper-draft-opt').type='checkbox';get('paper-draft-source').type='checkbox';get('paper-file').type='file';
   return {document,get,created};
 }
 function pdfjs({pages=2,hold=false,make,items=ITEMS,rotation=0}={}){
@@ -82,16 +82,31 @@ function pdfjs({pages=2,hold=false,make,items=ITEMS,rotation=0}={}){
   return {lib,log};
 }
 function memory(){const box=new Map();return {getItem:k=>box.has(k)?box.get(k):null,setItem:(k,v)=>{box.set(k,String(v));},removeItem:k=>{box.delete(k);},keys:()=>[...box.keys()]};}
+function blobMemory(){const box=new Map();return {box,get:async k=>box.has(k)?box.get(k):null,put:async(k,v)=>{box.set(k,v);},delete:async k=>{box.delete(k);}};}
 function editCore(){
   const added=[];let restores=0,drafts=0,last=null;
   const core={added,get restores(){return restores;},get drafts(){return drafts;},get last(){return last;},
-    create({fileHash,name}){
+    create({fileHash,name,resume}){
       let edits=[],past=[],future=[],listeners=[],rev=0;
+      if(resume){
+        if(resume.fileHash&&resume.fileHash!==fileHash)throw new Error('이어받을 스냅샷이 이 파일/이름과 맞지 않습니다.');
+        if(resume.name&&resume.name!==name)throw new Error('이어받을 스냅샷이 이 파일/이름과 맞지 않습니다.');
+        if(Number.isInteger(resume.revision))rev=resume.revision;
+        if(Array.isArray(resume.edits))edits=resume.edits.map(e=>({...e}));
+      }
       const snap=()=>({schema:'falsify.paper-edits.v1',fileHash,name,revision:rev,edits:edits.map(e=>({...e})),canUndo:past.length>0,canRedo:future.length>0});
       const emit=()=>{rev++;const s=JSON.parse(JSON.stringify(snap()));for(const fn of [...listeners])fn(s);};
       const apply=u=>{if(u.kind==='add')edits.push(u.edit);else if(u.kind==='update'){const e=edits.find(x=>x.id===u.id);if(e)e.after=u.afterNow;}};
       last={snapshot:()=>JSON.parse(JSON.stringify(snap())),subscribe(fn){listeners.push(fn);return ()=>{listeners=listeners.filter(x=>x!==fn);};},
-        add(edit){const id='e'+edits.length+'-'+rev;const stored={...edit,id,enabled:true};edits.push(stored);past.push({kind:'add',id,edit:stored});future=[];added.push(edit);emit();return id;},
+        add(edit){
+          const allowed=['pageIndex','segmentId','before','after','anchor','origin'];
+          for(const k of Object.keys(edit||{}))if(!allowed.includes(k))throw new Error('편집에 허용되지 않은 필드가 있습니다.');
+          if(edit.anchor){
+            for(const k of Object.keys(edit.anchor))if(!['start','end','occurrence','bbox','style'].includes(k))throw new Error('anchor에 허용되지 않은 필드가 있습니다.');
+            if(edit.anchor.bbox===null||edit.anchor.style===null)throw new Error('빈 bbox/style은 입력에서 생략합니다.');
+          }
+          const id='e'+(edits.length+1);const stored={...edit,id,enabled:true};edits.push(stored);past.push({kind:'add',id,edit:stored});future=[];added.push(edit);emit();return id;
+        },
         update(id,changes){const e=edits.find(x=>x.id===id);if(!e)throw new Error('없는 편집');past.push({kind:'update',id,after:e.after,afterNow:changes.after});e.after=changes.after;future=[];emit();},
         remove(id){const edit=edits.find(e=>e.id===id);edits=edits.filter(e=>e.id!==id);past.push({kind:'remove',edit});future=[];emit();},
         setEnabled(id,on){const e=edits.find(x=>x.id===id);if(!e)throw new Error('없는 편집');e.enabled=!!on;past.push({kind:'enable',id,on:!on});future=[];emit();},
@@ -99,8 +114,8 @@ function editCore(){
         redo(){const u=future.pop();if(!u)return;if(u.kind==='add')edits.push(u.edit);else if(u.kind==='update'){const e=edits.find(x=>x.id===u.id);if(e)e.after=u.afterNow;}else if(u.kind==='remove')edits=edits.filter(e=>e.id!==u.edit.id);else if(u.kind==='enable'){const e=edits.find(x=>x.id===u.id);if(e)e.enabled=!u.on;}past.push(u);emit();}};
       return last;
     },
-    draft({snapshot,now}){drafts++;return {schema:'falsify.paper-draft.v1',fileHash:snapshot.fileHash,savedAt:now,expiresAt:now+api.TTL,edits:snapshot.edits};},
-    restoreDraft(envelope,{fileHash,now}){restores++;if(!envelope||envelope.fileHash!==fileHash)throw new Error('다른 파일의 초안입니다.');if(!(now<envelope.expiresAt))throw new Error('12시간이 지나 초안이 만료되었습니다.');return {edits:Array.isArray(envelope.edits)?envelope.edits:[]};}};
+    draft({snapshot,now}){drafts++;return {schema:'falsify.paper-edits-draft.v1',fileHash:snapshot.fileHash,savedAt:now,expiresAt:now+api.TTL,snapshot};},
+    restoreDraft(envelope,{fileHash,now}){restores++;if(!envelope||envelope.fileHash!==fileHash)throw new Error('다른 파일의 초안입니다.');if(!(now<envelope.expiresAt))throw new Error('12시간이 지나 초안이 만료되었습니다.');const snapshot=envelope.snapshot;if(!snapshot||snapshot.fileHash!==fileHash)throw new Error('다른 파일의 초안입니다.');return snapshot;}};
   return core;
 }
 function mount(opts={}){
@@ -110,13 +125,14 @@ function mount(opts={}){
   w.get('paper-before-stage').clientWidth=opts.width||640;w.get('paper-after-stage').clientWidth=opts.width||640;
   const edits=opts.edits===false?null:editCore();
   const exporter=opts.exporter||null;
+  const sourceBlobs=opts.sourceBlobs||blobMemory();
   const clock={value:opts.clock??1_700_000_000_000};
   const ws=api.create({document:w.document,preview:opts.preview===false?undefined:{pdfParams:Preview.pdfParams,fitScale:Preview.fitScale,defaultImport:async()=>lib},
-    edits:edits||undefined,exporter:exporter||undefined,storage,urls:{createObjectURL(file){downloads.push(file);return 'blob:'+downloads.length;},revokeObjectURL(){}},
+    edits:edits||undefined,exporter:exporter||undefined,storage,sourceBlobs,urls:{createObjectURL(file){downloads.push(file);return 'blob:'+downloads.length;},revokeObjectURL(){}},
     timers,subtle:crypto.subtle,now:()=>clock.value});
   const file=f=>{w.get('paper-file').files=[f];w.get('paper-file').dispatchEvent(new Event('change'));};
   const canvas=()=>w.get('paper-before-stage').children.flatMap(page=>(page.children||[]).filter(c=>c.tagName==='canvas'));
-  return {...w,ws,lib,log,edits,storage,downloads,clock,file,canvas,long};
+  return {...w,ws,lib,log,edits,storage,sourceBlobs,downloads,clock,file,canvas,long};
 }
 function keydown(target,init){const e=new Event('keydown',{cancelable:true});Object.assign(e,init);target.dispatchEvent(e);return e;}
 function buttons(v,act,id){return v.get('paper-edits').querySelectorAll('button').filter(b=>b.dataset.act===act&&(!id||b.dataset.edit===id));}
@@ -185,12 +201,19 @@ test('reader: file input paints one original page before extraction, and the sec
   assert.equal(v.get('paper-inline-before').textContent,'Alpha');
   assert.match(v.get('paper-inline-meta').textContent,/occurrence 1/);assert.match(v.get('paper-inline-meta').textContent,/10, 700, 50, 712/);
   v.get('paper-inline-after').value='Beta';v.get('paper-inline-apply').click();
-  assert.equal(v.edits.added.at(-1).origin,'human');
-  assert.deepEqual(v.edits.added.at(-1).anchor.bbox,[10,700,50,712]);assert.equal(v.edits.added.at(-1).anchor.occurrence,1);
-  assert.equal(v.edits.added.at(-1).anchor.coordinate,'top-left');assert.equal(v.edits.added.at(-1).anchor.rotation,0);
-  assert.equal(v.edits.added.at(-1).anchor.pageWidth,612);assert.equal(v.edits.added.at(-1).anchor.pageHeight,792);
+  assert.equal(v.edits.added.length,0);assert.match(v.get('paper-edit-status').textContent,/원문 구간이 아직 없어/);
+  v.document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file,result:{segments:[
+    {id:'s0',label:'PDF p. 1',text:'Alpha',extra:'drop'},{id:'s1',label:'PDF p. 1',text:'Unique claim stays.'},{id:'s2',label:'PDF p. 2',text:'Alpha shared'},{id:'s3',label:'PDF p. 2',text:'Alpha shared'}]}}}));
+  v.get('paper-inline-apply').click();
+  const human=v.edits.added.at(-1);
+  assert.equal(human.origin,'human');assert.equal(human.segmentId,'s0');
+  assert.deepEqual(human.anchor,{start:0,end:5,occurrence:0,bbox:[10,700,50,712]});
+  assert.equal('coordinate' in human.anchor,false);assert.equal('style' in human.anchor,false);
   assert.match(textOf(v.get('paper-edits')),/직접 편집/);assert.doesNotMatch(textOf(v.get('paper-edits')),/AI 제안|gpt-/);
   assert.match(v.get('paper-edit-status').textContent,/모델 실행으로 기록하지 않습니다/);
+  v.get('paper-inline-after').value='';v.get('paper-before-stage').dispatchEvent(new Event('mouseup'));
+  v.get('paper-inline-after').value='';v.get('paper-inline-apply').click();
+  assert.match(v.get('paper-edit-status').textContent,/삭제가 되지 않습니다/);
   v.document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file,result:{segments:[
     {id:'s0',label:'PDF p. 1',text:'Unique claim stays.'},{id:'s1',label:'PDF p. 2',text:'Alpha shared'},{id:'s2',label:'PDF p. 2',text:'Alpha shared'}]}}}));
   v.ws.acceptProposals([
@@ -229,9 +252,10 @@ test('keyboard: arrows move pages except from a field, Escape returns to the sta
   assert.equal(v.get('paper-inline').hidden,false);
   keydown(v.get('paper-inline-after'),{key:'Escape'});
   assert.equal(v.get('paper-inline').hidden,true);assert.equal(v.document.activeElement,v.get('paper-before-stage'));
+  v.document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file,result:{segments:[{id:'s0',label:'PDF p. 2',text:'Alpha'}]}}}));
   v.get('paper-before-stage').dispatchEvent(new Event('mouseup'));
   v.get('paper-inline-after').value='Beta';v.get('paper-inline-apply').click();
-  assert.equal(v.ws.getEditSnapshot().canUndo,true);
+  assert.equal(v.ws.getEditSnapshot().canUndo,true);assert.equal(v.edits.added.at(-1).anchor.occurrence,0);
   keydown(v.get('paper-workspace'),{key:'z',ctrlKey:true});
   assert.equal(v.ws.getEditSnapshot().edits.length,0);assert.equal(v.get('paper-undo').disabled,true);assert.equal(v.get('paper-redo').disabled,false);
   v.get('paper-redo').click();assert.equal(v.ws.getEditSnapshot().edits.length,1);assert.equal(v.ws.getEditSnapshot().edits[0].origin,'human');
@@ -359,8 +383,9 @@ test('draft: opt-in 12h storage, no automatic restore, expiry, and delete',async
   v.get('paper-draft-save').click();assert.equal(v.storage.keys().length,0);assert.match(v.get('paper-draft-status').textContent,/비밀/);
   v.edits.draft=original;const savedAt=v.clock.value;v.get('paper-draft-save').click();
   const key='falsify.paper-draft.v1.'+v.ws.getSource().fileHash;const raw=v.storage.getItem(key);const envelope=JSON.parse(raw);
+  assert.equal(envelope.schema,'falsify.paper-edits-draft.v1');
   assert.equal(envelope.expiresAt-envelope.savedAt,api.TTL);assert.equal(envelope.savedAt,savedAt);
-  assert.doesNotMatch(raw,/token|password|bytes|%PDF/);assert.equal(envelope.edits.length,1);
+  assert.doesNotMatch(raw,/token|password|bytes|%PDF/);assert.equal(envelope.snapshot.edits.length,1);assert.equal(Number.isInteger(envelope.snapshot.revision),true);
   v.document.dispatchEvent(new CustomEvent('falsify:document-clear'));
   v.file(file);await until(()=>v.ws.getSource(),'reopened');
   assert.equal(v.get('paper-draft-restore').hidden,false);assert.match(textOf(v.get('paper-edits')),/아직 편집이 없습니다/);assert.equal(v.edits.restores,0);
@@ -368,6 +393,7 @@ test('draft: opt-in 12h storage, no automatic restore, expiry, and delete',async
   assert.match(v.get('paper-draft-status').textContent,/만료/);assert.match(textOf(v.get('paper-edits')),/아직 편집이 없습니다/);assert.equal(v.edits.restores,1);
   v.clock.value=savedAt+1000;v.get('paper-draft-restore').click();
   assert.equal(v.ws.getEditSnapshot().edits.length,1);assert.equal(v.ws.getEditSnapshot().edits[0].origin,'human');
+  assert.equal(v.ws.getEditSnapshot().revision,envelope.snapshot.revision);assert.equal(v.ws.getEditSnapshot().canUndo,false);
   assert.match(v.get('paper-draft-status').textContent,/실행 취소 기록은 복구 이후부터/);
   v.get('paper-draft-delete').click();assert.equal(v.storage.getItem(key),null);assert.equal(v.get('paper-draft-restore').hidden,true);
 });
@@ -427,8 +453,37 @@ test('coordinates: a rotated page stays visible and refuses a box; a unique upri
   v.ws.acceptProposals([{segmentId:'s0',before:'Alpha',after:'Beta',status:'matched'}],{origin:'external-ai-import'});
   v.get('paper-proposal-list').querySelectorAll('button')[0].click();
   const anchor=v.edits.added.at(-1).anchor;
-  assert.equal(v.edits.added.at(-1).after,'Beta');assert.equal(anchor.coordinate,'top-left');assert.equal(anchor.rotation,0);
-  assert.deepEqual(anchor.bbox,[10,680,50,692]);assert.equal(anchor.pageWidth,612);assert.equal(anchor.pageHeight,792);
+  assert.equal(v.edits.added.at(-1).after,'Beta');assert.equal(v.edits.added.at(-1).segmentId,'s0');
+  assert.deepEqual(anchor,{start:0,end:5,occurrence:0,bbox:[10,680,50,692]});
+  assert.equal('coordinate' in anchor,false);assert.equal('pageWidth' in anchor,false);assert.equal('rotation' in anchor,false);assert.equal('style' in anchor,false);
+});
+
+test('draft: metadata asks for the matching PDF, and a consented blob stays local',async()=>{
+  const v=mount();
+  const file=pdfFile(pdfBytes('MARKER-A'),'scan.pdf');
+  v.file(file);await until(()=>v.ws.getSource()&&v.edits.last,'hashed');
+  const hash=v.ws.getSource().fileHash;
+  v.edits.last.add({pageIndex:0,segmentId:'s0',before:'Alpha',after:'Beta',origin:'human',anchor:{start:0,end:5,occurrence:0}});
+  v.get('paper-draft-opt').checked=true;v.get('paper-draft-opt').dispatchEvent(new Event('change'));
+  v.get('paper-draft-save').click();await settle();
+  assert.equal(v.sourceBlobs.box.size,0);
+  assert.doesNotMatch(v.storage.getItem('falsify.paper-draft.v1.'+hash),/%PDF/);
+  v.document.dispatchEvent(new CustomEvent('falsify:document-clear'));
+  assert.match(v.get('paper-draft-status').textContent,/다시 선택/);assert.match(v.get('paper-draft-status').textContent,new RegExp(hash.slice(0,12)));
+  const other=pdfFile(pdfBytes('MARKER-B'),'other.pdf');
+  v.file(other);await until(()=>v.ws.getSource()&&v.ws.getSource().file===other,'other');
+  v.get('paper-draft-restore').click();await settle();
+  assert.equal(v.ws.getEditSnapshot().edits.length,0);assert.match(v.get('paper-draft-status').textContent,/다시 선택/);assert.equal(v.edits.restores,0);
+  v.file(file);await until(()=>v.ws.getSource()&&v.ws.getSource().fileHash===hash,'reselect');
+  v.get('paper-draft-source').checked=true;
+  v.edits.last.add({pageIndex:0,segmentId:'s0',before:'Alpha',after:'Beta',origin:'human',anchor:{start:0,end:5,occurrence:0}});
+  v.get('paper-draft-save').click();await settle();
+  assert.equal(v.sourceBlobs.box.get(hash).blob,file);assert.equal(v.sourceBlobs.box.get(hash).expiresAt-v.sourceBlobs.box.get(hash).savedAt,api.TTL);
+  v.document.dispatchEvent(new CustomEvent('falsify:document-clear'));
+  v.get('paper-draft-restore').click();
+  await until(()=>v.ws.getSource()&&v.ws.getSource().file===file&&v.ws.getEditSnapshot().edits.length===1,'blob reopen');
+  assert.match(v.get('paper-draft-status').textContent,/서버로 올리지 않습니다|원본 PDF 바이트가 없습니다/);
+  assert.equal(v.downloads.length,0);
 });
 
 (async()=>{let passed=0;for(const [name,fn] of tests){try{await fn();passed++;console.log('PASS '+name);}catch(e){console.error('FAIL '+name+'\n'+(e.stack||e));process.exitCode=1;}}
