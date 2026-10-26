@@ -4,7 +4,9 @@ Updated 2026-10-26. Operator: Shinick Han. Support and deletion requests: [repos
 
 ## Local use
 
-The static web app parses documents in your browser. Experiment text, model responses, Harness definitions, review names and notes are saved in that browser's local storage and explicit JSON backups. Browser sites/origins have separate local records. Clearing site data can erase local records; download a backup first.
+The static web app parses documents in your browser. Locally created experiment text, model responses, Harness definitions, review names and notes are saved in that browser's local storage and explicit JSON backups. Browser sites/origins have separate local records. Clearing site data can erase local records; download a backup first. Existing local records are preserved during this storage transition.
+
+Records fetched from Confluence are opened in a separate temporary memory view, not automatically copied into persistent browser storage. That view and its draft reviews end on reload, disconnect, explicit close or after at most 12 hours. Publish draft reviews explicitly to retain them in Confluence. Normal local backups contain the original local ledger, not that temporary remote view. Explicitly previewing a shared Harness does not register or execute it; registration remains the user's separate action.
 
 ## Optional team publication
 
@@ -14,9 +16,9 @@ Published records are stored as pages and JSON attachments in the Falsify Conflu
 
 ## Connection and execution
 
-Atlassian OAuth authorizes the relay to access the configured site, space and archive parent using your permissions. The browser caches an expiring encrypted connection envelope; access and refresh tokens are handled by the relay and are not placed in public code, URLs, experiment archives or model input. The relay processes archive contents in transit. Operational errors use bounded codes without paper text, credentials or request bodies; hosting providers may retain platform operational metadata under their own policies.
+Atlassian OAuth authorizes the relay to access the configured site, space and archive parent using your permissions. The browser caches an encrypted connection envelope for at most 12 hours; access and refresh tokens are handled by the relay and are not placed in public code, URLs, experiment archives or model input. The relay does not persist Atlassian account profiles, names, email addresses or account identifiers in an application database. It processes archive contents in transit. Operational errors use bounded codes without paper text, credentials or request bodies; hosting providers may retain platform operational metadata under their own policies.
 
-Disconnecting clears this browser's connection, not your local experiments, published records or Atlassian-wide authorization. Revoke the integration in your Atlassian account to withdraw its grant. Delete or restrict team archives using Confluence permissions; downloaded copies cannot be recalled.
+Disconnecting clears this browser's connection and temporary remote view, not your original local experiments, published records or Atlassian-wide authorization. Revoke the integration in your Atlassian account to withdraw its grant. Delete or restrict team archives using Confluence permissions; downloaded copies cannot be recalled.
 
 Connecting or restoring an archive does not execute a model. Explicit RED/BLUE execution uses your local companion and selected CLI or trusted Harness; the configured model provider receives the supplied input according to that provider's policies. Custom Harness programs may access resources allowed on your computer.
 
