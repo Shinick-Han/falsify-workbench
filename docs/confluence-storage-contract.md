@@ -2,11 +2,11 @@
 
 ## Product decision
 
-**2026-10-26 user amendment (takes precedence over the earlier permanent-restore wording below):** Confluence-loaded experiments use a temporary in-memory native review view, not an automatic persistent merge into browser localStorage. Preserve all preexisting local records and backups. Remote view and its draft reviews end on reload, disconnect/explicit close, or at most 12 hours. Explicit publication writes the chosen case and new reviews back to Confluence. Do not claim any privacy-reporting exemption before operator verification.
+**2026-10-26 user decision:** Confluence-loaded experiments use a temporary in-memory native review view, not an automatic persistent merge into browser localStorage. Preserve all preexisting local records and backups. Remote view and its draft reviews end on reload, disconnect/explicit close, or at most 12 hours. Explicit publication writes the chosen case and new reviews back to Confluence. Do not claim any privacy-reporting exemption before operator verification.
 
 Ledger exposes `FalsifyLab.openArchive(archive)` (validated temporary view, experiment returns `{kind:'experiment',runId}`, Harness preview only), `reviewSnapshot()` (active review source clone for experiment publication), `closeArchive()` (remote view only). `cloudSnapshot()` stays local-only for Harness/library publication. A compatibility `restoreArchive` must not silently persist fetched records. Native review uses the temporary source while all local persistence, Harness selection, result metrics and JSON backup keep their original local target. Same IDs in the remote view do not overwrite local records. Remote item judgments remain memory-only until explicit team publication. UI calls `openArchive`, navigates to the existing native route, labels the temporary state and expiry, and clears remote view/list when disconnecting. No auto-execution, registration, whole-ledger upload or historical republishing.
 
-Confluence is the ONLY remote record store. Publishing means sharing with all Falsify space members; there is no private/shared selector, Workbench username/password signup, or alternate D1/R2/KV record backend in the new UI. GitHub Pages remains the static frontend. Local browser drafts/cache and explicit JSON backup/import stay available and are labelled local. Existing data is preserved; no database/resource deletion or automatic republication of historical private records.
+Confluence is the ONLY remote record store. Publishing means sharing with all Falsify space members; there is no private/shared selector, Workbench username/password signup, or alternate D1/R2/KV record backend in the new UI. GitHub Pages remains the static frontend. Original browser-local drafts and explicit JSON backup/import stay available and are labelled local. Fetched archives and list metadata stay memory-only for at most 12 hours. Existing data is preserved; no database/resource deletion or automatic republication of historical private records.
 
 The existing Cloudflare Worker becomes a thin OAuth and Confluence API relay. It stores NO paper, run, harness, review or OAuth session in a database/object store. No new paid storage, paid plan or automatic upgrade. Actual plan/account limits must be checked separately; absence of record storage is not a promise that every provider has unlimited free compute.
 
@@ -26,7 +26,7 @@ All remote operations use the user's Atlassian permission and are confined to th
 {"schema":"falsify.review-bundle.v1","selectedRunId":"...","ledger":{"schema":"falsify.experiment-ledger.v1","harnesses":[],"runs":[],"reviews":[]}}
 ```
 
-Copy the minimal selected-case dependency closure without mutating raw runs: selected run, snapshot/sourceRunId ancestors, matching RED final output plus parent for independent BLUE, and RED sources referenced by included review comparisons. Include used harness versions and reviews, preserving findingAssessments/reviewContext. Unknown remains unknown. Reject malformed hashes, dangling/cyclic references, conflicting IDs and size/count limits; never truncate. Restores use existing full ledger validation and atomic merge. Existing local execution records retain provenance; newly restored remote records are imported-unverified, never new executions. No model execution, CLI consent or code installation during restore.
+Copy the minimal selected-case dependency closure without mutating raw runs: selected run, snapshot/sourceRunId ancestors, matching RED final output plus parent for independent BLUE, and RED sources referenced by included review comparisons. Include used harness versions and reviews, preserving findingAssessments/reviewContext. Unknown remains unknown. Reject malformed hashes, dangling/cyclic references, conflicting IDs and size/count limits; never truncate. Opening archives uses existing full ledger validation and an isolated memory view, never a persistent merge. Existing local execution records retain provenance; remote records are imported-unverified, never new executions. No model execution, CLI consent or code installation during restore.
 
 `falsify.confluence-archive.v1`:
 
@@ -45,7 +45,7 @@ Pure ESM `app/dist/review-bundle.mjs` exports:
 
 `validators` accepts `{harness, red, blue, review}` using existing validators; browser defaults may use existing globals. No DOM, storage, fetch, new framework or API credentials in this module. Reuse established validators and limits. Gateway supplies validators explicitly. Preserve exact raw response objects; no fabricated findings, approvals, coverage or scores.
 
-Ledger exposes `FalsifyLab.restoreArchive(archive)` -> Promise of `{kind:'experiment',runId}` or `{kind:'harness',hash}`. Experiment restoration selects the local run for native review; caller owns navigation. Harness restoration previews without execution. Strip archive/bundle/Confluence auth material from model bind requests.
+The compatibility alias `FalsifyLab.restoreArchive(archive)` uses the same temporary view as `openArchive`, never persistent restoration. Experiment opening selects the remote run in native review; caller owns navigation. Harness opening previews without registration or execution. Strip archive/bundle/Confluence auth material from model bind requests.
 
 ## Gateway contract (backend owner)
 
@@ -67,7 +67,7 @@ Page body holds a short escaped human summary; lossless JSON archive is an immut
 
 ## Native interface (frontend owner)
 
-Replace old shared-record login/upload UI with Confluence-only controls, preserving airport design and independent RED/BLUE/review/Harness workflows. Place `Confluence에 연결`, `Confluence에 팀 공유`, `팀 기록 불러오기` near saved run review and Harness management. All uploads explicitly mean Falsify team access. No pretend personal private mode and no requirement to repeat models after browser changes. Show connection/missing-config/permission/empty/archive-too-large/unknown-write/conflict states. Restore into existing browser records, retain local backup/import, never clear them on logout. Standalone Harness import remains preview -> explicit registration. Never auto-publish every local record or operate a CLI on login/restore.
+Replace old shared-record login/upload UI with Confluence-only controls, preserving airport design and independent RED/BLUE/review/Harness workflows. Place `Confluence에 연결`, `Confluence에 팀 공유`, `팀 기록 불러오기` near saved run review and Harness management. All uploads explicitly mean Falsify team access. No pretend personal private mode and no requirement to repeat models after browser changes. Show connection/missing-config/permission/empty/archive-too-large/unknown-write/conflict states. Open archives in a separate temporary native review view; retain existing local records and backup/import, never clear them on disconnect. Standalone Harness import remains preview -> explicit registration. Never auto-publish every local record or operate a CLI on login/restore.
 
 ## Acceptance boundary
 
