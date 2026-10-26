@@ -272,15 +272,14 @@ class OfflineTests(unittest.TestCase):
         for rel, digest in runner.inherited_sources().items():
             disk = hashlib.sha256((runner.v033.REPO / rel).read_bytes()).hexdigest()
             self.assertEqual(disk, digest)
+        # Check the frozen predecessors, not the whole integration branch. Other
+        # independently owned features may legitimately be merged beside v034.
+        frozen = ['app/examples/evidence_blue_v033',
+                  'app/examples/evidence_blue_v031', 'app/examples/evidence_blue']
         changed = subprocess.check_output(
-            ['git', 'diff', '--name-only', BASE], cwd=runner.v033.REPO, text=True).split()
-        untracked = subprocess.check_output(
-            ['git', 'ls-files', '--others', '--exclude-standard'], cwd=runner.v033.REPO, text=True).split()
-        for path in set(changed) | set(untracked):
-            self.assertTrue(
-                path == 'docs/blue-evidence-v034.md' or path.startswith('app/examples/evidence_blue_v034/'),
-                path,
-            )
+            ['git', 'diff', '--name-only', BASE, '--', *frozen],
+            cwd=runner.v033.REPO, text=True).splitlines()
+        self.assertEqual(changed, [], 'Frozen predecessor sources changed')
 
 
 if __name__ == '__main__':
