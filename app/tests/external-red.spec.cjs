@@ -259,10 +259,8 @@ test('conflicting replacements are ambiguous and the parser source stays local',
 });
 
 test('real paper-edits accepts overlap, CRLF slices, the selected occurrence, and empty After',()=>{
-  const {execFileSync}=require('node:child_process');
   const vm=require('node:vm');
-  const src=execFileSync('git',['show','origin/feature/paper-workspace-20261026:app/dist/paper-edits.js'],{encoding:'utf8'});
-  assert.equal(fs.existsSync(path.resolve(__dirname,'../dist/paper-edits.js')),false);
+  const src=fs.readFileSync(path.resolve(__dirname,'../dist/paper-edits.js'),'utf8');
   const sandbox={module:{exports:{}},exports:{}};
   vm.createContext(sandbox);
   vm.runInContext(src,sandbox,{filename:'paper-edits.js'});

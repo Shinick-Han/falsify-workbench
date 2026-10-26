@@ -234,8 +234,7 @@ test('accept without a workspace API does not throw or invent a run',async()=>{
 });
 
 test('the second alpha match is the occurrence the real edit core accepts',async()=>{
-  const {execFileSync}=require('node:child_process');
-  const src=execFileSync('git',['show','origin/feature/paper-workspace-20261026:app/dist/paper-edits.js'],{encoding:'utf8'});
+  const src=fs.readFileSync(path.resolve(__dirname,'../dist/paper-edits.js'),'utf8');
   const sandbox={module:{exports:{}},exports:{}};
   vm.createContext(sandbox);
   vm.runInContext(src,sandbox,{filename:'paper-edits.js'});
