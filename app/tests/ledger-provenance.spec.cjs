@@ -163,5 +163,32 @@ test('BLUE visual record retains bound metadata without bytes across import and 
 });
 test('comparison UI renders actual ledger records and exclusion reasons in VM',async()=>{const {w,ids}=await populated();w.get('harness-comparison-reference').value=ids.live;w.renderComparison();await flush();assert.match(w.get('harness-comparison-summary').textContent,/누락 시도 수 \/ 비용 미상/);const rows=w.get('harness-comparison-body').children;assert.ok(rows.length>=4);assert.match(shown(rows[0]),/portable 전략 미선언/);assert.match(shown(rows.at(-1)),/출처/);});
 
+test('real bind, record, reload, archive and import preserve input identity and exclusions',async()=>{
+  // Synthetic responses only: no broker or model is invoked or claimed as test evidence.
+  const w=ledger();await w.lab.ready;await flush();const B=require('../dist/document-blue-core.js'),C=require('../dist/harness-comparison.js');
+  const config={...H.builtin('blue'),settings:{portableStrategy:{schema:'falsify.portable-strategy.v1',name:'fixture',version:'1',parameters:{}},comparisonRubric:'fixture'}};
+  w.get('harness-editor').value=JSON.stringify(config);w.get('harness-register').dispatchEvent(new Event('click'));await until(()=>w.get('harness-status').textContent.includes('새 버전 등록'),'registered');
+  w.get('blue-harness').value=await H.hash(config);w.get('blue-harness').dispatchEvent(new Event('change'));
+  const doc=await paper();
+  async function save(d,visual,tag,origin='local-codex'){
+    const q=plain(await w.lab.bind('blue',B.request(d,8)));q.requestId=tag;
+    if(visual){const bytes=Buffer.from(visual),hash=await sha(visual);Object.assign(q,{fileHash:d.fileHash,visualConsent:true,visualEvidence:[{fileHash:d.fileHash,sourceHash:d.sourceHash,page:1,bbox:[0,0,10,10],rotation:0,width:20,height:20,mime:'image/png',sha256:hash,base64:bytes.toString('base64')}]});}
+    const response={schema:B.VERSION,revision:d.revision,sourceHash:d.sourceHash,status:'ok',findings:[],harness:q.harness,harnessHash:await H.hash(q.harness),model:'synthetic-model'};
+    if(visual)response.visualObservations=[{id:'v1',sha256:q.visualEvidence[0].sha256,page:1,bbox:[0,0,10,10],observation:'Synthetic observation.',uncertainty:'Synthetic.'}];
+    return w.lab.record('blue',d,q,response,origin);
+  }
+  const ids=await Promise.all([save(doc,null,'text-a'),save(doc,null,'text-b'),save({...doc,fileHash:'a'.repeat(64)},null,'other-file'),save(doc,'image-a','visual-a'),save(doc,'image-a','visual-b'),save(doc,'image-b','visual-changed'),save(doc,null,'manual','manual-unverified')]);
+  const backup=w.db(),by=id=>backup.runs.find(r=>r.id===id),[a,b,file,v,v2,changed,manual]=ids.map(by);
+  assert.equal(a.inputMode,'text');assert.equal(v.inputMode,'visual');assert.ok(!JSON.stringify(v).includes(Buffer.from('image-a').toString('base64')));
+  assert.deepEqual(C.differences(a,b),[]);assert.deepEqual(C.differences(v,v2),[]);
+  for(const x of [file,v,manual])assert.ok(C.differences(a,x).length);assert.ok(C.differences(v,changed).length);
+  const raw=w.store.get(KEY),reload=ledger([[KEY,raw]]);await reload.lab.ready;await flush();assert.equal(reload.store.get(KEY),raw);assert.deepEqual(C.differences(reload.db().runs.find(r=>r.id===ids[0]),reload.db().runs.find(r=>r.id===ids[1])),[]);
+  const legacy=plain(backup);for(const r of legacy.runs)delete r.inputMode;const legacyRaw=JSON.stringify(legacy),old=ledger([[KEY,legacyRaw]]);await old.lab.ready;await flush();assert.equal(old.store.get(KEY),legacyRaw);assert.ok(C.differences(old.db().runs.find(r=>r.id===ids[3]),old.db().runs.find(r=>r.id===ids[4])).length);
+  const codec=await import('../dist/review-bundle.mjs'),V={harness:H,red:R,blue:B,review:require('../dist/review-workbench.js')};const archive=await codec.buildExperimentArchive(backup,ids[3],V),checked=await codec.validateArchive(archive,V);assert.equal(checked.data.ledger.runs[0].inputMode,'visual');
+  const target=ledger();await target.lab.ready;await flush();assert.match(await target.restore(backup),/백업을 병합/);const imported=target.db().runs;assert.ok(imported.every(r=>r.provenance==='imported-unverified'));assert.ok(C.differences(imported.find(r=>r.id===ids[0]),imported.find(r=>r.id===ids[1])).length);
+  for(const mode of ['text','bogus',null]){const bad=plain(backup);bad.runs.find(r=>r.id===ids[3]).inputMode=mode;const fresh=ledger();await fresh.lab.ready;await flush();assert.match(await fresh.restore(bad),/복원 차단/);await assert.rejects(codec.buildExperimentArchive(bad,ids[3],V));}
+  const badText=plain(backup);badText.runs.find(r=>r.id===ids[0]).inputMode='visual';const fresh=ledger();await fresh.lab.ready;await flush();assert.match(await fresh.restore(badText),/복원 차단/);await assert.rejects(codec.buildExperimentArchive(badText,ids[0],V));
+});
+
 (async()=>{let passed=0;for(const [name,fn] of tests){try{await fn();passed++;console.log('PASS '+name);}catch(e){console.error('FAIL '+name+'\n'+(e.stack||e));process.exitCode=1;}}
   console.log(JSON.stringify({passed,total:tests.length}));if(passed!==tests.length)process.exit(1);})();

@@ -14,7 +14,7 @@
   // A missing visual field is legacy/unknown, not proof that only text was sent.
   function inputIdentity(r){
     if(r?.inputMode==='text' && !Object.hasOwn(r,'visualEvidence'))return 'text';
-    if(r?.inputMode!=null && r.inputMode!=='visual')return null;
+    if(r?.inputMode!=='visual')return null;
     const items=r?.visualEvidence;
     if(!Array.isArray(items)||!items.length||items.length>2)return null;
     const refs=[];
@@ -27,6 +27,7 @@
   function differences(a,b){const out=[];for(const [name,x,y] of [['입력 텍스트 해시',a.sourceHash,b.sourceHash],['입력 파일 해시',a.fileHash,b.fileHash],['역할',a.role,b.role],['출처',a.provenance,b.provenance],['예산',a.maxCalls,b.maxCalls],['RED 난이도',a.level??null,b.level??null]])if((name!=='RED 난이도'&&(x==null||y==null))||x!==y)out.push(name);
     if(!hex(a.sourceHash)||!hex(b.sourceHash))out.push('입력 텍스트 해시 미상');
     if(!hex(a.fileHash)||!hex(b.fileHash))out.push('입력 파일 해시 미상');
+    if(a.provenance!=='local-codex'||b.provenance!=='local-codex')out.push('출처 미검증');
     const ai=inputIdentity(a),bi=inputIdentity(b);if(!ai||!bi||ai!==bi)out.push('입력 방식 또는 시각 증거 미상 / 불일치');
     if(!knownModel(a.model)||!knownModel(b.model)||a.model!==b.model)out.push('모델 표기 미상 또는 불일치');
     if(!rubric(a)||!rubric(b)||rubric(a)!==rubric(b))out.push('사람 rubric 미선언 또는 불일치');

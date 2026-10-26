@@ -9,7 +9,7 @@ export const LEDGER_CHAR_LIMIT=4500000;
 export const LIMITS=Object.freeze({harnesses:100,runs:100,reviews:1000,title:500,runId:160,segments:10000,source:1000000,verification:20000,paperEdits:200,paperReviews:100,editText:8000});
 
 const HEX=/^[a-f0-9]{64}$/;
-const RUN_KEYS=['id','createdAt','role','revision','fileHash','sourceHash','segments','harness','harnessHash','maxCalls','level','model','provenance','response','sourceName','format','finalState','sourceRunId','snapshotOf','requestId','visualEvidence'];
+const RUN_KEYS=['id','createdAt','role','revision','fileHash','sourceHash','segments','harness','harnessHash','maxCalls','level','model','provenance','response','sourceName','format','finalState','sourceRunId','snapshotOf','requestId','visualEvidence','inputMode'];
 const PATCH_KEYS=['id','segmentId','label','before','after','offset','edited'];
 const MESSAGES={
   malformed:'Archive shape is not falsify.confluence-archive.v1.',
@@ -77,6 +77,7 @@ async function checkRun(r,harnesses,prior,V){
   if(!Array.isArray(r.segments)||!r.segments.length||r.segments.length>LIMITS.segments||r.segments.some(s=>!plain(s)||typeof s.id!=='string'||!s.id||s.id.length>80||typeof s.label!=='string'||s.label.length>200||typeof s.text!=='string'||!s.text.trim())||new Set(r.segments.map(s=>s.id)).size!==r.segments.length)fail('malformed','Run source segments are malformed.');
   const source=r.segments.map(s=>s.text).join('\n\n');if(source.length>LIMITS.source||await sha256(source)!==r.sourceHash)fail('hash_mismatch');
   const doc={revision:r.revision,sourceHash:r.sourceHash,segments:r.segments};
+  if('inputMode' in r&&(!['text','visual'].includes(r.inputMode)||(r.inputMode==='visual')!==('visualEvidence' in r)))fail('malformed','Input mode and visual evidence do not match.');
   if('visualEvidence' in r)checkVisualRefs(r.visualEvidence,r);
   try{if(r.role==='blue')V.blue.validateResponse(doc,r.response,'visualEvidence' in r?{visualEvidence:r.visualEvidence}:undefined);else{if(![1,2,3].includes(r.level))fail('malformed','RED level is malformed.');V.red.validateResponse(doc,r.response);}}catch(e){if(e instanceof ReviewBundleError)throw e;fail('malformed','Stored model response failed validation.');}
   if('finalState' in r&&(r.role!=='red'||stable(finalState(r,r.finalState,V.red))!==stable(r.finalState)))fail('conflict','RED final state does not match the stored response.');

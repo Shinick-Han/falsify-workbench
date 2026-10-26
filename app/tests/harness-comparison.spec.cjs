@@ -12,9 +12,11 @@ test('exact file and known input footprint are required',()=>{
  const a=run('a');
  for(const b of [run('b',{fileHash:'a'.repeat(64)}),run('b',{fileHash:null}),run('b',{inputMode:undefined}),run('b',{sourceHash:'bad'})])assert.ok(C.differences(a,b).length);
  const ref={fileHash:a.fileHash,sourceHash:a.sourceHash,page:1,bbox:[0,0,10,20],rotation:0,width:20,height:40,mime:'image/png',sha256:'a'.repeat(64),provenance:'client-declared-pdf-association',artifact:'unavailable'};
- const v=run('v',{inputMode:undefined,visualEvidence:[ref,{...ref,page:2}]});
- assert.deepEqual(C.differences(v,run('w',{inputMode:undefined,visualEvidence:[{...ref,page:2},ref]})),[]);
- assert.ok(C.differences(v,run('w',{inputMode:undefined,visualEvidence:[{...ref,sha256:'b'.repeat(64)},{...ref,page:2}]})).length);
+ const v=run('v',{inputMode:'visual',visualEvidence:[ref,{...ref,page:2}]});
+ assert.deepEqual(C.differences(v,run('w',{inputMode:'visual',visualEvidence:[{...ref,page:2},ref]})),[]);
+ assert.ok(C.differences(v,run('w',{inputMode:'visual',visualEvidence:[{...ref,sha256:'b'.repeat(64)},{...ref,page:2}]})).length);
  assert.ok(C.differences(v,a).length);
- assert.ok(C.differences(v,run('w',{inputMode:undefined,visualEvidence:[{...ref,width:1}]})).length);
+ assert.ok(C.differences({...v,inputMode:undefined},{...v,inputMode:undefined}).length);
+ assert.ok(C.differences({...a,provenance:'imported-unverified'},{...a,provenance:'imported-unverified'}).length);
+ assert.ok(C.differences(v,run('w',{inputMode:'visual',visualEvidence:[{...ref,width:1}]})).length);
 });
