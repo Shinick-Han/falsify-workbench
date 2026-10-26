@@ -1,6 +1,6 @@
 (function(){
   'use strict';const C=FalsifyDocumentBlue,B=FalsifyLocalBridge,$=s=>document.querySelector(s);
-  let sourceFile=null;
+  let sourceFile=null, visualPicker=null;
   let generation=0,doc=null,result=null,findings=[],request=null,busy=false,job=null,jobLink=null,abort=null;
   const P=globalThis.FalsifyPendingJobs||null;let recovering=false;
   function shippedHelper(){try{const nodes=document.scripts?[...document.scripts]:[];return nodes.some(s=>{const src=String(s&&(typeof s.getAttribute==='function'?s.getAttribute('src'):s.src)||'');return src==='pending-job.js'||src.endsWith('/pending-job.js');});}catch{return false;}}
@@ -22,7 +22,7 @@
   function controls(){const active=!!doc&&!busy;B.busy('blue',busy);$('#doc-blue-start').disabled=!active||!B.capabilities()?.blue||!$('#doc-blue-consent').checked||!FalsifyLab.allowed('blue');$('#doc-blue-request').disabled=!active;$('#doc-blue-apply').disabled=!active;$('#doc-blue-cancel').hidden=!job;$('#doc-blue-budget').disabled=busy;$('#doc-blue-record').disabled=!active||!result||saving;FalsifyLab.busy('blue',busy||saving);renderRecord();document.dispatchEvent(new CustomEvent('falsify:blue-state',{detail:{name:doc?.name||'',busy,hasResult:!!result}}));}
   function cancel(){const old=job,l=jobLink;job=null;jobLink=null;if(old&&l)void l.request('/api/blue/jobs/'+encodeURIComponent(old)+'/cancel',{}).catch(()=>{});}
   function invalidate(){epoch++;savedId=null;saving=false;failure=null;result=null;findings=[];request=null;$('#doc-blue-findings').replaceChildren();$('#doc-blue-result-summary').textContent='';$('#doc-blue-record-status').textContent='';}
-  function clear(keepFile=false){generation++;cancel();abort?.abort();abort=null;doc=null;sourceFile=null;relation=null;busy=false;clearSticky();invalidate();if(keepFile!==true)$('#doc-blue-file').value='';$('#doc-blue-response').value='';$('#doc-blue-consent').checked=false;$('#blue-harness-consent').checked=false;if($('#blue-visual-select'))$('#blue-visual-select').checked=false;if($('#blue-visual-consent'))$('#blue-visual-consent').checked=false;if($('#blue-visual-regions'))$('#blue-visual-regions').value='';$('#doc-blue-summary').textContent='아직 파일을 입력하지 않았습니다. 수정 파일 또는 원본/대조군을 직접 선택하세요.';msg('');controls();restorePending();}
+  function clear(keepFile=false){visualPicker?.clear();generation++;cancel();abort?.abort();abort=null;doc=null;sourceFile=null;relation=null;busy=false;clearSticky();invalidate();if(keepFile!==true)$('#doc-blue-file').value='';$('#doc-blue-response').value='';$('#doc-blue-consent').checked=false;$('#blue-harness-consent').checked=false;if($('#blue-visual-select'))$('#blue-visual-select').checked=false;if($('#blue-visual-consent'))$('#blue-visual-consent').checked=false;if($('#blue-visual-regions'))$('#blue-visual-regions').value='';$('#doc-blue-summary').textContent='아직 파일을 입력하지 않았습니다. 수정 파일 또는 원본/대조군을 직접 선택하세요.';msg('');controls();restorePending();}
   document.addEventListener('falsify:workspace-reset',clear);$('#doc-blue-clear').addEventListener('click',clear);
   // A user-chosen file is an independent BLUE input: clear() drops any RED relation.
   // Replacing the input asks first while a BLUE job runs or a result has not been recorded.
@@ -36,15 +36,14 @@
       doc={revision:crypto.randomUUID(),sourceHash,fileHash,name:file.name.slice(0,160),format:String(imported.format).slice(0,40),segments:imported.segments.map((s,i)=>({id:'s'+i,label:s.label,text:s.text}))};$('#doc-blue-summary').textContent=(origin||'')+file.name+' · '+doc.segments.length+'개 페이지/문단 · '+imported.text.length.toLocaleString()+'자';msg('추출 완료. '+(imported.warnings||[]).join(' ')+' RED 계획·검수 기록은 모델 입력에 포함하지 않습니다.'+(origin?' 실행하려면 아래에서 다시 동의하세요.':''));
     }catch(e){if(current===generation)msg('파일 입력 실패: '+e.message,true);}finally{if(current===generation){busy=false;abort=null;controls();}}}
   async function makeRequest(){
-    const frozen=doc, current=generation;
+    const frozen=doc, current=generation, visualFile=sourceFile, visualEnabled=!!$('#blue-visual-select')?.checked, visualConsented=!!$('#blue-visual-consent')?.checked, selections=visualEnabled?visualPicker?.selection():null;
     const body=await FalsifyLab.bind('blue',C.request(frozen,Number($('#doc-blue-budget').value)));
-    if($('#blue-visual-select')?.checked){
-      if(!$('#blue-visual-consent').checked)throw new Error('시각 이미지 전송 동의가 필요합니다.');
-      if(!sourceFile||!globalThis.FalsifyBlueVisual)throw new Error('선택한 PDF 또는 시각 렌더러가 없습니다. PDF를 다시 선택하세요.');
-      const lines=$('#blue-visual-regions').value.trim().split(/\n/).map(s=>s.trim()).filter(Boolean);
-      const selections=lines.map(line=>{const n=line.split(',').map(x=>Number(x.trim()));if(n.length!==5||n.some(x=>!Number.isFinite(x)))throw new Error('페이지, x, y, 너비, 높이를 쉼표로 입력하세요.');return {page:n[0],bbox:n.slice(1)};});
-      body.visualEvidence=await FalsifyBlueVisual.renderBlueVisuals({file:sourceFile,fileHash:frozen.fileHash,sourceHash:frozen.sourceHash,selections});
-      if(current!==generation||doc!==frozen)throw new Error('입력 문서가 바뀌어 시각 증거를 보내지 않았습니다.');
+    if(visualEnabled){
+      if(!visualConsented)throw new Error('시각 이미지 전송 동의가 필요합니다.');
+      if(!visualFile||!globalThis.FalsifyBlueVisual)throw new Error('선택한 PDF 또는 시각 렌더러가 없습니다.');
+      if(!selections?.length)throw new Error('미리보기에서 이 쪽 또는 영역을 선택하세요.');
+      body.visualEvidence=await FalsifyBlueVisual.renderBlueVisuals({file:visualFile,fileHash:frozen.fileHash,sourceHash:frozen.sourceHash,selections});
+      if(current!==generation||doc!==frozen||sourceFile!==visualFile)throw new Error('입력 문서가 바뀌어 시각 증거를 보내지 않았습니다.');
       body.fileHash=frozen.fileHash;body.visualConsent=true;
       if(new TextEncoder().encode(JSON.stringify(body)).length>4000000)throw new Error('요청 크기 상한을 넘었습니다.');
     }
@@ -72,17 +71,28 @@
     const scope=provenance==='local-codex'?'앱 adapter 호출 '+(res.coverage?.calls||'?')+'회. '+(res.coverage?.complete?'전체 추출 텍스트 전달 완료(탐지 보장 아님).':'전달 미완료.'):'수동 응답의 실행·전달 여부 미검증.';
     msg((res.status==='refusal'?'BLUE 요청 거절. 우회·자동 재시도하지 않습니다.':res.status==='abstain'?'BLUE 판단 유보. 탐지 실패로 변환하지 않습니다.':findings.length+'개 지적 · 입력 인용 일치 확인.')+' '+scope+reread(res,provenance));controls();void saveRecord();}
   if(globalThis.FalsifyBlueVisual){
-    const visualBox=document.createElement('div');visualBox.className='mode-note';
-    function check(id,text){const label=document.createElement('label'),input=document.createElement('input');input.type='checkbox';input.id=id;label.append(input,document.createTextNode(' '+text));visualBox.append(label);return input;}
-    function hint(text){const p=document.createElement('p');p.className='muted';p.textContent=text;visualBox.append(p);}
-    const select=check('blue-visual-select','시각 증거 선택');
-    hint('BLUE PDF에서 최대 2개 영역을 PNG로 렌더링합니다. 회전된 PDF.js 좌표(배율 1)로 한 줄에 페이지, x, y, 너비, 높이를 입력하세요.');
-    const label=document.createElement('label');label.htmlFor='blue-visual-regions';label.textContent='영역 좌표';visualBox.append(label);
-    const regions=document.createElement('textarea');regions.id='blue-visual-regions';regions.rows=2;regions.placeholder='1, 0, 0, 300, 200';visualBox.append(regions);
-    const consent=check('blue-visual-consent','선택한 이미지와 추출 텍스트를 모델에 전송하는 데 동의합니다.');
-    hint('이미지는 이 브라우저의 대기 기록에도 저장됩니다. 원본 PDF는 저장하지 않습니다.');
-    $('#doc-blue-consent').closest('label').after(visualBox);
-    for(const el of [select,regions,consent])el.addEventListener('change',()=>{generation++;if(doc)doc.revision=crypto.randomUUID();invalidate();controls();});
+    const box=document.createElement('div');box.className='mode-note blue-picker';
+    const create=(tag,id,text,parent=box)=>{const el=document.createElement(tag);if(id)el.id='blue-'+id;if(text)el.textContent=text;parent.append(el);return el;};
+    const selectLabel=create('label'),selectInput=create('input','visual-select','',selectLabel);selectInput.type='checkbox';selectLabel.append(document.createTextNode(' ▣ PDF 시각 증거 사용'));
+    const pickerNode=create('div','picker');pickerNode.hidden=true;create('p',null,'쪽을 고르고 전체 쪽을 사용하거나 미리보기에서 영역을 드래그하세요.',pickerNode);
+    const nav=create('div',null,'',pickerNode);nav.className='blue-picker-nav';for(const [id,text] of [['visual-prev','← 이전'],['visual-page',''],['visual-next','다음 →'],['visual-whole','▣ 이 쪽 사용']]){const el=create(id==='visual-page'?'span':'button',id,text,nav);if(el.tagName==='BUTTON')el.type='button';if(id==='visual-page')el.setAttribute('aria-live','polite');}
+    create('div','visual-stage','',pickerNode).className='blue-picker-stage';create('p','visual-status','',pickerNode).setAttribute('aria-live','polite');
+    const consentLabel=create('label'),consentInput=create('input','visual-consent','',consentLabel);consentInput.type='checkbox';consentLabel.append(document.createTextNode(' 선택한 이미지와 추출 텍스트를 모델에 전송하는 데 동의합니다.'));
+    create('p',null,'이미지는 이 브라우저의 대기 기록에도 저장됩니다. 원본 PDF는 저장하지 않습니다.').className='muted';
+    $('#doc-blue-consent').closest('label').after(box);
+    const q=id=>box.querySelector('#blue-'+id), select=q('visual-select'),consent=q('visual-consent'),picker=q('picker'),stage=q('visual-stage'),status=q('visual-status'),pageLabel=q('visual-page'),prev=q('visual-prev'),next=q('visual-next'),whole=q('visual-whole');
+    let serial=0,view=null,chosen=null,drag=null;
+    function changed(){generation++;if(doc)doc.revision=crypto.randomUUID();invalidate();controls();}
+    function clearPicker(){serial++;view=null;chosen=null;drag=null;stage.replaceChildren();status.textContent='';pageLabel.textContent='';picker.hidden=true;}
+    function choose(b){chosen={page:view.page,bbox:b};status.textContent=view.page+'쪽 · '+(b[0]===0&&b[1]===0&&b[2]===view.width&&b[3]===view.height?'전체 쪽':'선택 영역')+' 선택됨';changed();}
+    async function draw(n){const mine=++serial,file=sourceFile,current=doc;view=null;chosen=null;stage.replaceChildren();status.textContent='미리보기를 준비 중입니다.';prev.disabled=next.disabled=whole.disabled=true;changed();
+      try{const v=await FalsifyBlueVisual.previewBluePage({file,fileHash:current.fileHash,page:n});if(mine!==serial||file!==sourceFile||current!==doc)return;view=v;stage.append(v.canvas);pageLabel.textContent=v.page+' / '+v.pages+'쪽';prev.disabled=v.page<=1;next.disabled=v.page>=v.pages;whole.disabled=!v.wholeFits;if(v.wholeFits)choose([0,0,v.width,v.height]);else status.textContent='전체 쪽이 크기 제한을 넘어갑니다. 미리보기에서 영역을 드래그하세요.';
+      }catch(e){if(mine===serial)status.textContent='PDF 미리보기를 열지 못했습니다. PDF 파일을 확인하세요.';}}
+    select.addEventListener('change',()=>{clearPicker();changed();if(select.checked){picker.hidden=false;if(doc&&sourceFile)void draw(1);else status.textContent='먼저 PDF를 선택하세요.';}});
+    prev.addEventListener('click',()=>{if(view&&view.page>1)void draw(view.page-1);});next.addEventListener('click',()=>{if(view&&view.page<view.pages)void draw(view.page+1);});whole.addEventListener('click',()=>{if(view?.wholeFits)choose([0,0,view.width,view.height]);});
+    stage.addEventListener('pointerdown',e=>{if(!view||e.target!==view.canvas)return;const r=view.canvas.getBoundingClientRect();drag={x:Math.max(0,Math.min(view.width,(e.clientX-r.left)/r.width*view.width)),y:Math.max(0,Math.min(view.height,(e.clientY-r.top)/r.height*view.height))};stage.setPointerCapture(e.pointerId);});
+    stage.addEventListener('pointerup',e=>{if(!view||!drag)return;const r=view.canvas.getBoundingClientRect(),x=Math.max(0,Math.min(view.width,(e.clientX-r.left)/r.width*view.width)),y=Math.max(0,Math.min(view.height,(e.clientY-r.top)/r.height*view.height));const b=[Math.min(x,drag.x),Math.min(y,drag.y),Math.abs(x-drag.x),Math.abs(y-drag.y)];drag=null;if(b[2]>=1&&b[3]>=1)choose(b);});
+    consent.addEventListener('change',changed);visualPicker={clear:clearPicker,selection:()=>chosen?[{page:chosen.page,bbox:[...chosen.bbox]}]:[]};
   }
   $('#doc-blue-consent').addEventListener('change',controls);document.addEventListener('falsify:harness-consent',controls);
   document.addEventListener('falsify:harness-change',e=>{if(e.detail.role!=='blue')return;generation++;if(doc)doc.revision=crypto.randomUUID();invalidate();controls();msg('harness 변경: 이전 응답 무효화. 저장한 실행 기록은 보존됩니다.');});

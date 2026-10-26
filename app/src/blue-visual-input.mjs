@@ -46,3 +46,21 @@ export async function renderBlueVisuals({file, fileHash, sourceHash, selections,
     return out;
   } finally {await task.destroy();}
 }
+
+// Preview uses the same local PDF.js and verified source bytes; it is not evidence.
+export async function previewBluePage({file,fileHash,page=1,baseURI=globalThis.document.baseURI,importPdf=defaultImport,subtle=globalThis.crypto.subtle,document=globalThis.document}) {
+  if(!file || !HEX.test(fileHash) || !(file.size>0 && file.size<=MAX_BYTES)) throw new Error('visual_input_invalid');
+  const bytes=new Uint8Array(await file.arrayBuffer());
+  if(bytes.length!==file.size || await hash(bytes,subtle)!==fileHash)throw new Error('visual_file_hash_mismatch');
+  if(!new TextDecoder().decode(bytes.subarray(0,1024)).includes('%PDF-'))throw new Error('visual_not_pdf');
+  const lib=await importPdf();if(lib.GlobalWorkerOptions)lib.GlobalWorkerOptions.workerSrc=new URL('./vendor/pdf.worker.mjs',baseURI).href;
+  const task=lib.getDocument(pdfParams(bytes,baseURI));
+  try {const pdf=await task.promise;if(!Number.isSafeInteger(page)||page<1||page>pdf.numPages)throw new Error('visual_selection_invalid');
+    const p=await pdf.getPage(page);try {const v=p.getViewport({scale:1}),scale=Math.min(1,600/v.width,700/v.height);
+      if(!Number.isFinite(scale)||scale<=0)throw new Error('visual_selection_invalid');
+      const canvas=document.createElement('canvas'),display=p.getViewport({scale});canvas.width=Math.ceil(display.width);canvas.height=Math.ceil(display.height);
+      await p.render({canvasContext:canvas.getContext('2d'),canvas,viewport:display}).promise;
+      return {canvas,page,pages:pdf.numPages,width:v.width,height:v.height,wholeFits:Math.ceil(v.width*SCALE)<=MAX_SIDE&&Math.ceil(v.height*SCALE)<=MAX_SIDE&&Math.ceil(v.width*SCALE)*Math.ceil(v.height*SCALE)<=MAX_PIXELS};
+    } finally {p.cleanup();}
+  } finally {await task.destroy();}
+}
