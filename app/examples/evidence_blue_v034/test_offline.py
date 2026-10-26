@@ -2,7 +2,6 @@
 import copy
 import hashlib
 import json
-import subprocess
 import sys
 import tempfile
 import threading
@@ -14,7 +13,6 @@ sys.path.insert(0, str(HERE))
 import build_profile
 import runner
 
-BASE = 'ef6c9678bb0258b182d1f7ecb22e2c70ff7b436d'
 ID_SELECTION = {
     'type': 'object', 'additionalProperties': False, 'required': ['status', 'targets'],
     'properties': {
@@ -272,14 +270,12 @@ class OfflineTests(unittest.TestCase):
         for rel, digest in runner.inherited_sources().items():
             disk = hashlib.sha256((runner.v033.REPO / rel).read_bytes()).hexdigest()
             self.assertEqual(disk, digest)
-        # Check the frozen predecessors, not the whole integration branch. Other
-        # independently owned features may legitimately be merged beside v034.
-        frozen = ['app/examples/evidence_blue_v033',
-                  'app/examples/evidence_blue_v031', 'app/examples/evidence_blue']
-        changed = subprocess.check_output(
-            ['git', 'diff', '--name-only', BASE, '--', *frozen],
-            cwd=runner.v033.REPO, text=True).splitlines()
-        self.assertEqual(changed, [], 'Frozen predecessor sources changed')
+        # Source ZIPs have no Git history. Pin frozen predecessor content while
+        # allowing Windows checkout line endings and unrelated integration work.
+        frozen = json.loads((HERE / 'frozen-source-sha256.json').read_text(encoding='utf-8'))
+        for rel, expected in frozen['files'].items():
+            raw = (runner.v033.REPO / rel).read_bytes().replace(b'\r\n', b'\n')
+            self.assertEqual(hashlib.sha256(raw).hexdigest(), expected, rel)
 
 
 if __name__ == '__main__':
