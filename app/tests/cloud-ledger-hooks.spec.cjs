@@ -1,6 +1,7 @@
 'use strict';
 // Node VM regression for the ledger cloud hooks: FalsifyLab.cloudSnapshot(), FalsifyLab.previewSharedHarness()
-// and FalsifyLab.restoreArchive(). Synthetic DOM and storage, synthetic paper and responses; no browser, network, server, CLI or model calls.
+// FalsifyLab.openArchive(), FalsifyLab.reviewSnapshot() and FalsifyLab.restoreArchive() (memory-only alias).
+// Synthetic DOM and storage, synthetic paper and responses; no browser, network, server, CLI or model calls.
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
 const H=require('../dist/harness-core.js'),R=require('../dist/document-red-core.js'),dist=path.resolve(__dirname,'../dist'),KEY='falsify.experiment-ledger.v1';
 const tests=[];const test=(name,fn)=>tests.push([name,fn]);let ReviewBundle=null;
@@ -23,7 +24,7 @@ function ledger(stored,opts={}){
   const ctx=vm.createContext({document,FalsifyReview:require('../dist/review-workbench.js'),FalsifyHarness:H,FalsifyReviewBundle:ReviewBundle,FalsifyLocalBridge:{capabilities:()=>null,state:()=>({status:'manual',connected:false,cap:null})},FalsifyDocumentRed:R,FalsifyDocumentBlue:require('../dist/document-blue-core.js'),
     localStorage:{getItem:k=>store.get(k)??null,setItem:(k,v)=>{if(opts.failWrite?.()){const e=Error('QuotaExceededError');e.name='QuotaExceededError';throw e;}writes.push(k);store.set(k,v);}},
     fetch(){network.push('fetch');throw Error('network disabled');},WebSocket(){network.push('WebSocket');throw Error('network disabled');},
-    crypto:globalThis.crypto,TextEncoder,CustomEvent,Event,URL,Blob,setTimeout,clearTimeout});
+    crypto:globalThis.crypto,TextEncoder,CustomEvent,Event,URL,Blob,setTimeout,clearTimeout,Date:opts.Date||Date});
   vm.runInContext(fs.readFileSync(path.join(dist,'experiment-ledger.js'),'utf8'),ctx,{filename:'experiment-ledger.js'});
   return {get,lab:ctx.FalsifyLab,store,writes,events,network};
 }
@@ -140,105 +141,142 @@ test('bind strips archive, bundle and Confluence auth material before a model re
   for(const k of ['archive','bundle','reviewBundle','restoreBundle','confluence','confluenceSession','oauth','accessToken','refreshToken','authorization','bearer','clientSecret','archiveSha256','archiveHash','teamShare','nonce','session','finalState','gold'])assert.equal(k in request,false,k);
   assert.equal(request.schema,R.VERSION);assert.ok(request.harness);assert.equal(request.segments.length,2);assert.equal(w.network.length,0);
 });
-test('restoreArchive opens a five-finding RED+BLUE review and reloads item judgments without executing',async()=>{
+const validators={harness:H,red:R,blue:require('../dist/document-blue-core.js'),review:require('../dist/review-workbench.js')};
+function fillRemoteReview(w){
+  for(let i=0;i<5;i++){w.get('evaluation-finding-'+i).value='supported';w.get('evaluation-finding-'+i).dispatchEvent(new Event('change'));w.get('evaluation-finding-note-'+i).value='Synthetic memory note F'+(i+1)+'.';w.get('evaluation-finding-note-'+i).dispatchEvent(new Event('input'));}
+  w.get('evaluation-patch-0').value='detected';w.get('evaluation-patch-0').dispatchEvent(new Event('change'));
+  w.get('evaluation-patch-note-0').value='Synthetic memory conflict.';w.get('evaluation-patch-note-0').dispatchEvent(new Event('input'));
+  w.get('evaluation-reviewer').value='Synthetic reviewer';w.get('evaluation-case').value='Synthetic memory case';w.get('evaluation-verdict').value='supported';w.get('evaluation-score').value='4';w.get('evaluation-note').value='Synthetic memory overall note.';
+  w.get('evaluation-form').dispatchEvent(new Event('submit',{cancelable:true}));
+}
+test('openArchive shows a five-finding RED+BLUE review in memory and does not write localStorage',async()=>{
   const {w,snap,archive,rootId,snapId,blueId,laterId,unrelatedId}=await fiveArchive();
   assert.deepEqual(archive.data.ledger.runs.map(r=>r.id),[rootId,snapId,blueId,laterId]);
   assert.equal(archive.data.ledger.reviews[0].findingAssessments.length,5);
   assert.equal(archive.data.ledger.reviews[0].comparison.sourceRunId,snapId);
-  assert.deepEqual(plain(archive.data.ledger.runs.find(r=>r.id===blueId).response),plain(snap.runs.find(r=>r.id===blueId).response));
-  const fresh=ledger();await fresh.lab.ready;const selected=fresh.get('red-harness').value;
-  const restored=await fresh.lab.restoreArchive(archive);
-  assert.equal(restored.kind,'experiment');assert.equal(restored.runId,blueId);
+  const fresh=ledger();await fresh.lab.ready;const selected=fresh.get('red-harness').value,writes=fresh.writes.length,stored=fresh.store.get(KEY);
+  const opened=await fresh.lab.openArchive(archive);
+  assert.equal(opened.kind,'experiment');assert.equal(opened.runId,blueId);
+  assert.equal(fresh.writes.length,writes);assert.equal(fresh.store.get(KEY),stored);assert.equal(fresh.network.length,0);
   assert.equal(fresh.get('evaluation-run').value,blueId);assert.equal(fresh.get('red-harness').value,selected);
-  assert.equal(fresh.get('red-harness-consent').checked,false);assert.equal(fresh.get('blue-harness-consent').checked,false);assert.equal(fresh.network.length,0);
-  const got=await fresh.lab.cloudSnapshot();
-  assert.ok(got.runs.every(r=>r.provenance==='imported-unverified'));assert.ok(!got.runs.some(r=>r.id===unrelatedId));
-  assert.equal(got.runs.find(r=>r.id===snapId).snapshotOf,rootId);assert.equal(got.runs.find(r=>r.id===rootId).snapshotOf,undefined);
-  assert.deepEqual(plain(got.runs.find(r=>r.id===blueId).response),plain(snap.runs.find(r=>r.id===blueId).response));
-  assert.equal(got.reviews[0].findingAssessments.length,5);assert.equal(got.reviews[0].reviewContext.mode,'red-assisted');assert.equal(got.reviews[0].comparison.sourceRunId,snapId);
-  assert.match(fresh.get('ledger-summary').textContent,/로컬 broker 실행 0건/);assert.match(fresh.get('ledger-summary').textContent,/가져온 기록/);
+  assert.equal(fresh.get('red-harness-consent').checked,false);assert.equal(fresh.get('blue-harness-consent').checked,false);
+  const local=await fresh.lab.cloudSnapshot();
+  assert.equal(local.runs.length,0);assert.equal(local.reviews.length,0);
+  assert.match(fresh.get('ledger-summary').textContent,/로컬 broker 실행 0건/);assert.match(fresh.get('ledger-summary').textContent,/가져온 기록 0건/);
+  const view=await fresh.lab.reviewSnapshot();
+  assert.ok(view.runs.every(r=>r.provenance==='imported-unverified'));assert.ok(!view.runs.some(r=>r.id===unrelatedId));
+  assert.equal(view.runs.find(r=>r.id===snapId).snapshotOf,rootId);assert.equal(view.runs.find(r=>r.id===rootId).snapshotOf,undefined);
+  assert.deepEqual(plain(view.runs.find(r=>r.id===blueId).response),plain(snap.runs.find(r=>r.id===blueId).response));
+  assert.equal(view.reviews[0].findingAssessments.length,5);assert.equal(view.reviews[0].reviewContext.mode,'red-assisted');assert.equal(view.reviews[0].comparison.sourceRunId,snapId);
+  assert.equal(view.runs.find(r=>r.id===snapId).finalState.selected[0].after,changed);
   assert.ok(tags(fresh.get('evaluation-output'),'INS').includes('show benefit'));
-  assert.equal((await fresh.lab.cloudSnapshot()).runs.find(r=>r.id===snapId).finalState.selected[0].after,changed);
-  const loaded=ledger([[KEY,fresh.store.get(KEY)]]);assert.equal((await loaded.lab.cloudSnapshot()).reviews[0].findingAssessments.length,5);
-  assert.equal(await loaded.lab.review(blueId),true);assert.ok(tags(loaded.get('evaluation-output'),'INS').includes('show benefit'));
-  const writes=w.writes.length;const repeat=await w.lab.restoreArchive(archive);assert.equal(repeat.kind,'experiment');assert.equal(repeat.runId,blueId);
-  assert.equal(w.writes.length,writes);assert.equal((await w.lab.cloudSnapshot()).runs.find(r=>r.id===rootId).provenance,'local-codex');
+  fillRemoteReview(fresh);
+  assert.equal(fresh.writes.length,writes);assert.equal(fresh.store.get(KEY),stored);
+  const published=await fresh.lab.reviewSnapshot();
+  assert.equal(published.reviews.length,2);assert.equal(published.reviews[1].findingAssessments.length,5);
+  assert.equal(published.reviews[1].reviewContext.mode,'red-assisted');assert.ok(published.reviews[1].comparison.sourceRunId);
+  const rebuilt=await ReviewBundle.buildExperimentArchive(published,blueId,validators);
+  assert.equal(rebuilt.data.ledger.reviews.length,2);
+  assert.equal(rebuilt.data.ledger.runs.find(r=>r.id===snapId).snapshotOf,rootId);
+  assert.ok(rebuilt.data.ledger.runs.every(r=>r.provenance==='imported-unverified'));
+  assert.equal(await fresh.lab.closeArchive(),true);
+  assert.equal(fresh.get('evaluation-run').value,'');assert.equal((await fresh.lab.reviewSnapshot()).runs.length,0);
+  assert.equal(fresh.writes.length,writes);assert.equal(fresh.store.get(KEY),stored);
+  const reloaded=ledger([[KEY,stored]]);await reloaded.lab.ready;
+  assert.equal((await reloaded.lab.cloudSnapshot()).runs.length,0);assert.equal(await reloaded.lab.review(blueId),false);
+  assert.equal(await w.lab.review(rootId),true);const localRaw=w.store.get(KEY),localWrites=w.writes.length;
+  const alias=await w.lab.restoreArchive(archive);
+  assert.equal(alias.kind,'experiment');assert.equal(alias.runId,blueId);
+  assert.equal(w.writes.length,localWrites);assert.equal(w.store.get(KEY),localRaw);
+  assert.equal((await w.lab.cloudSnapshot()).runs.find(r=>r.id===rootId).provenance,'local-codex');
   assert.equal((await w.lab.cloudSnapshot()).runs.find(r=>r.id===unrelatedId).provenance,'local-codex');
+  assert.ok(!(await w.lab.cloudSnapshot()).runs.some(r=>r.provenance==='imported-unverified'));
+  assert.ok((await w.lab.reviewSnapshot()).runs.every(r=>r.provenance==='imported-unverified'));
+  assert.ok(!(await w.lab.reviewSnapshot()).runs.some(r=>r.id===unrelatedId));
+  assert.equal(await w.lab.closeArchive(),true);assert.equal(w.get('evaluation-run').value,rootId);
+  assert.equal((await w.lab.cloudSnapshot()).runs.find(r=>r.id===rootId).provenance,'local-codex');
 });
-test('repeat restore, tamper, collision and storage failure do not partially write or upgrade provenance',async()=>{
-  const {w,archive,blueId,unrelatedId}=await fiveArchive();
-  const fresh=ledger();await fresh.lab.restoreArchive(archive);const once=fresh.store.get(KEY),n=fresh.writes.length;
-  const repeat=await fresh.lab.restoreArchive(archive);assert.equal(repeat.kind,'experiment');assert.equal(repeat.runId,blueId);
-  assert.equal(fresh.writes.length,n);assert.equal(fresh.store.get(KEY),once);assert.ok((await fresh.lab.cloudSnapshot()).runs.every(r=>r.provenance==='imported-unverified'));
+test('tamper, conflicting parent and harness preview do not write or register',async()=>{
+  const {w,archive,rootId,snapId,blueId,unrelatedId}=await fiveArchive();
+  const fresh=ledger();await fresh.lab.openArchive(archive);const once=fresh.store.get(KEY),n=fresh.writes.length;
   const tampered=plain(archive);tampered.data.ledger.runs.find(r=>r.id===blueId).sourceHash='0'.repeat(64);
-  const raw=fresh.store.get(KEY);await assert.rejects(fresh.lab.restoreArchive(tampered));assert.equal(fresh.store.get(KEY),raw);assert.match(fresh.get('ledger-status').textContent,/아카이브 복원 차단/);
-  const host=ledger([[KEY,w.store.get(KEY)]]);await host.lab.ready;const hostRaw=host.store.get(KEY);
-  const bad=plain(archive);bad.data.ledger.runs.find(r=>r.id===blueId).response.findings[0].rationale='Tampered synthetic rationale.';
-  await assert.rejects(host.lab.restoreArchive(bad),/같은 실행 ID|형식|malformed|응답/);assert.equal(host.store.get(KEY),hostRaw);
+  await assert.rejects(fresh.lab.openArchive(tampered));assert.equal(fresh.store.get(KEY),once);assert.equal(fresh.writes.length,n);
+  assert.match(fresh.get('ledger-status').textContent,/아카이브 열기 차단/);
+  assert.equal((await fresh.lab.cloudSnapshot()).runs.length,0);
+  const host=ledger([[KEY,w.store.get(KEY)]]);await host.lab.ready;const hostRaw=host.store.get(KEY),hostWrites=host.writes.length;
+  const bad=plain(archive);bad.data.ledger.runs.find(r=>r.id===blueId).response.findings[0].quote='This quote is not in the source.';
+  await assert.rejects(host.lab.openArchive(bad),e=>e.code==='malformed');
+  assert.equal(host.store.get(KEY),hostRaw);assert.equal(host.writes.length,hostWrites);
   assert.equal((await host.lab.cloudSnapshot()).runs.find(r=>r.id===unrelatedId).provenance,'local-codex');
+  assert.equal((await host.lab.reviewSnapshot()).runs.find(r=>r.id===unrelatedId).provenance,'local-codex');
   const gate={fail:false},dest=ledger(undefined,{failWrite:()=>gate.fail});await dest.lab.ready;gate.fail=true;
-  await assert.rejects(dest.lab.restoreArchive(archive),/기존 기록은 그대로입니다/);assert.equal(dest.store.get(KEY),undefined);assert.equal((await dest.lab.cloudSnapshot()).runs.length,0);assert.deepEqual(dest.writes,[]);assert.equal(dest.network.length,0);
+  const opened=await dest.lab.openArchive(archive);
+  assert.equal(opened.runId,blueId);assert.equal(dest.store.get(KEY),undefined);assert.deepEqual(dest.writes,[]);assert.equal(dest.network.length,0);
+  assert.equal((await dest.lab.cloudSnapshot()).runs.length,0);assert.equal((await dest.lab.reviewSnapshot()).runs.find(r=>r.id===blueId).provenance,'imported-unverified');
   const config={...H.builtin('blue'),id:'archive-blue',name:'Archive BLUE'},hash=await H.hash(config);
   const harnessArchive=await ReviewBundle.buildHarnessArchive({config,hash},{harness:H});
   const box=ledger();await box.lab.ready;const stored=box.store.get(KEY),menu=box.get('blue-harness').value;
-  const loaded=await box.lab.restoreArchive(harnessArchive);assert.equal(loaded.kind,'harness');assert.equal(loaded.hash,hash);
+  const loaded=await box.lab.openArchive(harnessArchive);assert.equal(loaded.kind,'harness');assert.equal(loaded.hash,hash);
   assert.equal(box.store.get(KEY),stored);assert.equal(box.get('blue-harness').value,menu);assert.equal(box.get('blue-harness-consent').checked,false);
   assert.equal(JSON.parse(box.get('harness-editor').value).id,'archive-blue');assert.match(box.get('harness-status').textContent,/등록·선택·실행은 하지 않았습니다/);assert.equal(box.network.length,0);
-});
-test('preexisting local RED root gains an imported snapshot, reloads and re-exports; a conflicting parent writes nothing',async()=>{
-  const {archive,rootId,snapId,blueId}=await fiveArchive();
   const rootRun=archive.data.ledger.runs.find(r=>r.id===rootId);
-  const rootOnly={schema:KEY,harnesses:archive.data.ledger.harnesses.filter(h=>h.hash===rootRun.harnessHash),runs:[plain(rootRun)],reviews:[]};
+  const conflicted=plain(rootRun);conflicted.response=plain(conflicted.response);conflicted.response.candidates[0].rationale='Local rationale stays local.';
+  const rootOnly={schema:KEY,harnesses:archive.data.ledger.harnesses.filter(h=>h.hash===rootRun.harnessHash),runs:[conflicted],reviews:[]};
   const local=ledger([[KEY,JSON.stringify(rootOnly)]]);await local.lab.ready;
-  const before=await local.lab.cloudSnapshot(),beforeCounts=H.counts(before.runs);
-  assert.equal(before.runs.length,1);assert.equal(before.runs[0].id,rootId);assert.equal(before.runs[0].provenance,'local-codex');
-  assert.equal(beforeCounts.executed,1);assert.equal(beforeCounts.snapshots,0);assert.equal(beforeCounts.calls,2);
-  const restored=await local.lab.restoreArchive(archive);
-  assert.equal(restored.kind,'experiment');assert.equal(restored.runId,blueId);
-  const got=await local.lab.cloudSnapshot(),counts=H.counts(got.runs);
-  assert.equal(got.runs.find(r=>r.id===rootId).provenance,'local-codex');
-  assert.deepEqual(plain(got.runs.find(r=>r.id===rootId).response),plain(rootRun.response));
-  assert.equal(got.runs.find(r=>r.id===snapId).provenance,'imported-unverified');
-  assert.equal(got.runs.find(r=>r.id===snapId).snapshotOf,rootId);
-  assert.deepEqual(plain(got.runs.find(r=>r.id===snapId).response),plain(rootRun.response));
-  assert.equal(counts.executed,1);assert.equal(counts.calls,2);assert.equal(counts.snapshots,1);
+  const before=await local.lab.cloudSnapshot(),raw=local.store.get(KEY),writes=local.writes.length;
+  assert.equal(H.counts(before.runs).executed,1);assert.equal(H.counts(before.runs).calls,2);assert.equal(H.counts(before.runs).snapshots,0);
+  assert.equal(await local.lab.review(rootId),true);
+  const viewed=await local.lab.restoreArchive(archive);
+  assert.equal(viewed.runId,blueId);assert.equal(local.writes.length,writes);assert.equal(local.store.get(KEY),raw);
+  assert.equal((await local.lab.cloudSnapshot()).runs.length,1);
+  assert.equal((await local.lab.cloudSnapshot()).runs[0].provenance,'local-codex');
+  assert.equal((await local.lab.cloudSnapshot()).runs[0].response.candidates[0].rationale,'Local rationale stays local.');
+  assert.equal(H.counts((await local.lab.cloudSnapshot()).runs).executed,1);assert.equal(H.counts((await local.lab.cloudSnapshot()).runs).snapshots,0);
   assert.match(local.get('ledger-summary').textContent,/로컬 broker 실행 1건/);
-  const stored=local.store.get(KEY),writes=local.writes.length;
-  const repeat=await local.lab.restoreArchive(archive);
-  assert.equal(repeat.kind,'experiment');assert.equal(repeat.runId,blueId);
-  assert.equal(local.writes.length,writes);assert.equal(local.store.get(KEY),stored);
-  assert.equal((await local.lab.cloudSnapshot()).runs.find(r=>r.id===rootId).provenance,'local-codex');
-  const loaded=ledger([[KEY,stored]]);
-  const exported=await loaded.lab.cloudSnapshot();
-  assert.equal(exported.runs.find(r=>r.id===rootId).provenance,'local-codex');
-  assert.equal(exported.runs.find(r=>r.id===snapId).provenance,'imported-unverified');
-  assert.equal(H.counts(exported.runs).executed,1);assert.equal(H.counts(exported.runs).calls,2);
-  const validators={harness:H,red:R,blue:require('../dist/document-blue-core.js'),review:require('../dist/review-workbench.js')};
-  const rebuilt=await ReviewBundle.buildExperimentArchive(exported,blueId,validators);
-  const norm=await ReviewBundle.validateArchive(rebuilt,validators);
-  assert.equal(norm.data.ledger.runs.find(r=>r.id===rootId).provenance,'local-codex');
-  assert.equal(norm.data.ledger.runs.find(r=>r.id===snapId).provenance,'imported-unverified');
-  assert.deepEqual(plain(norm.data.ledger.runs.find(r=>r.id===rootId).response),plain(rootRun.response));
-  assert.equal((await loaded.lab.restoreArchive(rebuilt)).runId,blueId);
-  assert.equal(loaded.store.get(KEY),stored);assert.deepEqual(loaded.writes,[]);
+  const remoteView=await local.lab.reviewSnapshot();
+  assert.equal(remoteView.runs.find(r=>r.id===rootId).provenance,'imported-unverified');
+  assert.equal(remoteView.runs.find(r=>r.id===rootId).response.candidates[0].rationale,'Synthetic contradiction.');
+  assert.equal(remoteView.runs.find(r=>r.id===snapId).snapshotOf,rootId);
+  assert.equal(remoteView.runs.find(r=>r.id===snapId).provenance,'imported-unverified');
+  assert.equal(await local.lab.closeArchive(),true);assert.equal(local.get('evaluation-run').value,rootId);
+  assert.equal((await local.lab.reviewSnapshot()).runs[0].provenance,'local-codex');
+  assert.equal((await local.lab.reviewSnapshot()).runs[0].response.candidates[0].rationale,'Local rationale stays local.');
+  assert.equal(local.writes.length,writes);assert.equal(local.store.get(KEY),raw);
+  const reloaded=ledger([[KEY,raw]]);
+  assert.equal((await reloaded.lab.cloudSnapshot()).runs.length,1);assert.equal(await reloaded.lab.review(snapId),false);
   const parent=ledger([[KEY,JSON.stringify(rootOnly)]]);await parent.lab.ready;const parentRaw=parent.store.get(KEY);
   const flipped=plain(archive);
   flipped.data.ledger.runs.find(r=>r.id===rootId).provenance='imported-unverified';
   flipped.data.ledger.runs.find(r=>r.id===snapId).provenance='local-codex';
-  await assert.rejects(parent.lab.restoreArchive(flipped),e=>e.code==='missing_ref');
+  await assert.rejects(parent.lab.openArchive(flipped),e=>e.code==='missing_ref');
   assert.equal(parent.store.get(KEY),parentRaw);assert.equal((await parent.lab.cloudSnapshot()).runs.length,1);
-  assert.equal((await parent.lab.cloudSnapshot()).runs[0].provenance,'local-codex');assert.ok(!(await parent.lab.cloudSnapshot()).runs.some(r=>r.snapshotOf));
-  const forged=plain(archive);forged.data.ledger.runs.find(r=>r.id===snapId).response.candidates[0].rationale='Forged parent rationale.';
+  assert.equal((await parent.lab.cloudSnapshot()).runs[0].provenance,'local-codex');assert.ok(!(await parent.lab.reviewSnapshot()).runs.some(r=>r.snapshotOf));
+  const forged=plain(archive);forged.data.ledger.runs.find(r=>r.id===snapId).response=plain(forged.data.ledger.runs.find(r=>r.id===snapId).response);forged.data.ledger.runs.find(r=>r.id===snapId).response.candidates[0].rationale='Forged parent rationale.';
   const forgeHost=ledger([[KEY,JSON.stringify(rootOnly)]]);await forgeHost.lab.ready;const forgeRaw=forgeHost.store.get(KEY);
-  await assert.rejects(forgeHost.lab.restoreArchive(forged),e=>e.code==='missing_ref');
+  await assert.rejects(forgeHost.lab.openArchive(forged),e=>e.code==='missing_ref');
   assert.equal(forgeHost.store.get(KEY),forgeRaw);assert.equal((await forgeHost.lab.cloudSnapshot()).runs.length,1);assert.equal((await forgeHost.lab.cloudSnapshot()).runs[0].provenance,'local-codex');
-  const corrupt=plain(got);
+  const corrupt=plain(archive.data.ledger);
   corrupt.runs.find(r=>r.id===rootId).provenance='imported-unverified';
   corrupt.runs.find(r=>r.id===snapId).provenance='local-codex';
   const rawCorrupt=JSON.stringify(corrupt);
   const refused=ledger([[KEY,rawCorrupt]]);
   await assert.rejects(refused.lab.cloudSnapshot(),/백업 JSON을 복원/);
   assert.equal(refused.store.get(KEY),rawCorrupt);assert.deepEqual(refused.writes,[]);
+});
+test('archive view expires after 12 hours without writing, including a long-lived tab',async()=>{
+  const {archive,blueId}=await fiveArchive();
+  let now=Date.parse('2026-10-26T00:00:00.000Z');
+  function Clock(...args){return new Date(...(args.length?args:[now]));}
+  Clock.now=()=>now;Clock.parse=Date.parse;Clock.UTC=Date.UTC;Clock.prototype=Date.prototype;
+  const w=ledger(undefined,{Date:Clock});await w.lab.ready;const stored=w.store.get(KEY),writes=w.writes.length;
+  assert.equal((await w.lab.openArchive(archive)).runId,blueId);
+  now+=12*60*60*1000-1;
+  assert.equal((await w.lab.reviewSnapshot()).runs.find(r=>r.id===blueId).provenance,'imported-unverified');
+  now+=1;
+  const after=await w.lab.reviewSnapshot();
+  assert.ok(!after.runs.some(r=>r.id===blueId));assert.equal(after.runs.length,0);
+  assert.equal(w.store.get(KEY),stored);assert.equal(w.writes.length,writes);assert.equal(w.network.length,0);
+  assert.match(w.get('ledger-status').textContent,/12시간/);
 });
 
 (async()=>{ReviewBundle=await import('../dist/review-bundle.mjs');let passed=0;for(const [name,fn] of tests){try{await fn();passed++;console.log('PASS '+name);}catch(e){console.error('FAIL '+name+'\n'+(e.stack||e));process.exitCode=1;}}
