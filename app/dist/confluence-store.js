@@ -272,13 +272,14 @@
       finally{if(stamp===state.stamp) release();}
     }
     async function disconnect(){
-      const popup=state.inflight, pendingPopup=state.pending?.popup, hadTemp=!!state.temp;
+      const popup=state.inflight, pendingPopup=state.pending?.popup;
       state.stamp++; state.busy=false; clearPending(); closePopup(popup); if(pendingPopup&&pendingPopup!==popup) closePopup(pendingPopup); state.inflight=null;
       state.session=null; try{storage.removeItem(SESSION_KEY);}catch{}
       state.temp=null; clearConsent('review'); clearConsent('harness'); clearRemoteView();
-      let closeFailed=false;
-      if(hadTemp){try{if(typeof lab?.closeArchive==='function') await lab.closeArchive();}catch{closeFailed=true;}}
-      say(closeFailed?'이 브라우저의 Confluence 연결은 지웠습니다. 임시 열람을 닫지 못했습니다. Atlassian에 부여한 권한 전체가 취소된 것은 아닙니다. 로컬 기록은 그대로입니다.':'이 브라우저의 Confluence 연결만 지웠습니다. 임시 열람이 있으면 함께 닫았습니다. Atlassian에 부여한 권한 전체가 취소된 것은 아닙니다. 로컬 기록은 그대로입니다.', closeFailed);
+      let closeNote='임시 열람을 닫았습니다.';
+      if(typeof lab?.closeArchive==='function'){try{await lab.closeArchive();}catch{closeNote='임시 열람을 닫지 못했습니다.';}}
+      else closeNote='이 작업대는 임시 열람 닫기를 지원하지 않습니다.';
+      say('이 브라우저의 Confluence 연결만 지웠습니다. '+closeNote+' Atlassian에 부여한 권한 전체가 취소된 것은 아닙니다. 로컬 기록은 그대로입니다.', closeNote!=='임시 열람을 닫았습니다.');
       paint();
     }
     async function refreshSession(stamp){
@@ -390,7 +391,7 @@
           state.temp={pageId,kind:'experiment',id:opened.runId,expiresAt:Date.now()+TEMP_MS};
           clearConsent('review'); clearConsent('harness');
           showView('review');
-          say('팀 보관을 임시 열람으로 열었습니다. 검수 화면으로 이동했습니다. 로컬 기록에 합치지 않았고 모델을 부르지 않았습니다. 보내지 않은 검수는 이 브라우저 메모리에만 있습니다. JSON이며 원본 PDF가 아닙니다.');
+          say('팀 보관을 임시 열람으로 열었습니다. 검수 화면으로 이동했습니다. 로컬 기록에 합치지 않았고 모델을 부르지 않았습니다. 보내지 않은 사람 검수는 Confluence에 팀 공유를 누르기 전에는 저장되지 않습니다. JSON이며 원본 PDF가 아닙니다.');
         }else if(normalized.kind==='harness'){
           const config=normalized.data&&normalized.data.config, hashId=normalized.data&&normalized.data.hash;
           const role=config&&(config.role==='red'||config.role==='blue')?config.role:'';
@@ -420,8 +421,8 @@
       const intro=mode==='harness'?'선택한 등록 Harness 정의만 팀 공간에 올립니다. 실행하거나 자동 등록하지 않습니다.':mode==='results'?'검수 화면에서 고른 실행과 그 사람 검수를 팀 공간에 올립니다. 결과표의 로컬 백업은 그대로입니다.':'지금 고른 실행과 사람 검수를 팀 공간에 올립니다. RED와 BLUE는 있는 쪽만 포함됩니다.';
       const kids=[
         el('h3',{id:'confluence-'+mode+'-title',textContent:'Falsify Confluence 팀 보관'}),
-        el('p',{className:'confluence-temporary',textContent:'임시 열람. Confluence만 영구 보관. 새로고침·연결 해제·12시간 후 임시 기록 소멸.'}),
-        el('p',{className:'muted',textContent:'원격 저장은 Falsify Confluence 팀 공간 하나입니다. 작업대 가입과 보관 범위 선택은 없습니다. '+intro+' 첫 보관은 JSON입니다. 추출문이 들어 있어도 원본 PDF 바이트를 저장한 것이 아닙니다. 보내지 않은 검수는 메모리에만 있습니다.'}),
+        el('p',{className:'confluence-temporary',textContent:'임시 열람. Confluence만 영구 보관. 새로고침·연결 해제·12시간 후 임시 기록 소멸. 보내지 않은 사람 검수는 Confluence에 팀 공유를 누르기 전에는 저장되지 않습니다.'}),
+        el('p',{className:'muted',textContent:'원격 저장은 Falsify Confluence 팀 공간 하나입니다. 작업대 가입과 보관 범위 선택은 없습니다. '+intro+' 첫 보관은 JSON입니다. 추출문이 들어 있어도 원본 PDF 바이트를 저장한 것이 아닙니다. 보내지 않은 사람 검수는 Confluence에 팀 공유를 누르기 전에는 저장되지 않습니다.'}),
         connection,
         el('div',{className:'button-row'}, connectBtn, disconnectBtn)
       ];
