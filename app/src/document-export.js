@@ -23,3 +23,5 @@ export async function textFile(file, patches){
 }
 
 export {docxFile} from './document-docx-export.js';
+
+export {htmlFile} from './document-html-export.js';
