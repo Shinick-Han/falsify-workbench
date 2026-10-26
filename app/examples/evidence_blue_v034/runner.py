@@ -169,7 +169,8 @@ def _merge_pipeline_audit(audit, inner, settings):
         'errorCode', 'result', 'finishedAt', 'appCall', 'appMaxCalls',
     ):
         if key in inner:
-            audit[key] = inner[key]
+            # modelCalls carries the raw response; copy it so the inner file object stays untouched.
+            audit[key] = copy.deepcopy(inner[key]) if key == 'modelCalls' else inner[key]
     audit['schema'] = AUDIT_SCHEMA
     audit['diagnosticVersion'] = VERSION
     audit['bundleSha256'] = settings.get('bundleSha256')
@@ -177,13 +178,27 @@ def _merge_pipeline_audit(audit, inner, settings):
     audit['helperSha256'] = settings.get('helperSha256')
 
 
-def _take_inner(folder, before, ours):
-    found = [path for path in folder.glob('*.json') if path not in before and path != ours]
-    if len(found) != 1:
+def _owned_inner_dir(folder, outer_id):
+    """One directory per outer invocation. Never the shared audit folder."""
+    path = folder / 'inherited' / outer_id
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _read_owned_inner(inner_dir, outer_folder):
+    """Read the single inherited audit in this invocation's directory. Do not delete it."""
+    files = [item for item in inner_dir.iterdir() if item.is_file() and item.suffix == '.json']
+    if len(files) != 1:
         raise ValueError('inherited_source_missing')
-    data = json.loads(found[0].read_text(encoding='utf-8'))
-    found[0].unlink()
-    return data
+    path = files[0]
+    blob = path.read_bytes()
+    data = json.loads(blob.decode('utf-8'))
+    link = {
+        'path': path.relative_to(outer_folder).as_posix(),
+        'fileSha256': hashlib.sha256(blob).hexdigest(),
+        'inputSha256': data['inputSha256'],
+    }
+    return data, link
 
 
 def execute(raw, backend_factory=None, search=None, audit_dir=None):
@@ -207,16 +222,18 @@ def execute(raw, backend_factory=None, search=None, audit_dir=None):
         _save(path, audit)
         rewritten = copy.deepcopy(invocation)
         rewritten['settings']['bundleSha256'] = v033.bundle_identity()
-        before = set(folder.glob('*.json'))
+        inner_dir = _owned_inner_dir(folder, audit['id'])
         try:
-            answer = v033.execute(json.dumps(rewritten).encode(), backend_factory, search, folder)
+            answer = v033.execute(json.dumps(rewritten).encode(), backend_factory, search, inner_dir)
         except v033.AuditFailure as error:
-            _merge_pipeline_audit(audit, error.audit, settings)
-            _take_inner(folder, before, path)
+            inner, link = _read_owned_inner(inner_dir, folder)
+            _merge_pipeline_audit(audit, inner, settings)
+            audit['inheritedAudits'] = [link]
             _save(path, audit)
             raise AuditFailure(error.code, audit) from None
-        inner = _take_inner(folder, before, path)
+        inner, link = _read_owned_inner(inner_dir, folder)
         _merge_pipeline_audit(audit, inner, settings)
+        audit['inheritedAudits'] = [link]
         _save(path, audit)
         return answer
     except AuditFailure:

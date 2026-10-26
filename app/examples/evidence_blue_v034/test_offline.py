@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -184,6 +185,88 @@ class OfflineTests(unittest.TestCase):
         response['targets'][0]['reason'] = 'mutated after return'
         self.assertEqual(audit['modelCalls'][0]['response'], raw)
         self.assertEqual(audit['modelCalls'][0]['response']['targets'][0]['referenceId'], 'er000000000001')
+
+    def _linked_inner(self, folder, audit):
+        self.assertEqual(len(audit.get('inheritedAudits', [])), 1)
+        link = audit['inheritedAudits'][0]
+        self.assertEqual(link['path'].split('/'), ['inherited', audit['id'], link['path'].split('/')[-1]])
+        file = folder / link['path']
+        self.assertTrue(file.is_file())
+        self.assertNotEqual(file.parent, folder)
+        blob = file.read_bytes()
+        inner = json.loads(blob.decode('utf-8'))
+        self.assertEqual(link['fileSha256'], hashlib.sha256(blob).hexdigest())
+        self.assertEqual(link['inputSha256'], inner['inputSha256'])
+        self.assertEqual(audit['modelCalls'][0]['response'], inner['modelCalls'][0]['response'])
+        return blob, inner
+
+    def test_concurrent_calls_keep_separate_immutable_inner_audits(self):
+        barrier = threading.Barrier(2)
+        settings = runner.contract_settings()
+        responses = [
+            {'status': 'ok', 'targets': [{'referenceId': 'er000000000001', 'reason': 'left span'}]},
+            {'status': 'ok', 'targets': [{'referenceId': 'er000000000002', 'reason': 'right span'}]},
+        ]
+        payload = json.dumps(self.invocation(
+            settings, ID_SELECTION, {'segments': [{'id': 's1', 'text': 'Alpha'}]})).encode()
+        results = [None, None]
+
+        def run_one(index):
+            def fixture(stage, prompt, out_schema, remaining):
+                self.assertEqual(stage, 'document-stage')
+                barrier.wait(5)
+                return {'status': 'ok', 'response': responses[index], 'observed_tool_calls': 0}
+
+            try:
+                answer = runner.execute(payload, fixture, no_network, folder)
+                results[index] = answer
+            except Exception as error:
+                results[index] = error
+
+        with tempfile.TemporaryDirectory() as folder_name:
+            folder = Path(folder_name)
+            threads = [threading.Thread(target=run_one, args=(index,)) for index in (0, 1)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(10)
+                self.assertFalse(thread.is_alive())
+            self.assertEqual([type(item) for item in results], [dict, dict])
+            self.assertEqual(sorted(item['targets'][0]['referenceId'] for item in results),
+                             ['er000000000001', 'er000000000002'])
+            outers = [json.loads(path.read_text(encoding='utf-8')) for path in folder.glob('*.json')]
+            self.assertEqual(len(outers), 2)
+            blobs = []
+            for audit in outers:
+                blob, inner = self._linked_inner(folder, audit)
+                blobs.append(blob)
+                self.assertEqual(inner['state'], 'completed')
+                self.assertEqual(audit['modelCalls'][0]['response']['targets'][0]['referenceId'],
+                                 inner['modelCalls'][0]['response']['targets'][0]['referenceId'])
+            self.assertEqual(len({hashlib.sha256(blob).hexdigest() for blob in blobs}), 2)
+            self.assertEqual(len({audit['inheritedAudits'][0]['path'] for audit in outers}), 2)
+            kept = {audit['inheritedAudits'][0]['path']: (folder / audit['inheritedAudits'][0]['path']).read_bytes()
+                    for audit in outers}
+
+            def failing(stage, prompt, out_schema, remaining):
+                self.assertEqual(stage, 'document-stage')
+                return {'status': 'error', 'error_code': 'backend', 'response': {'marker': 'raw-failure', 'kept': True}}
+
+            with self.assertRaises(runner.AuditFailure) as caught:
+                runner.execute(payload, failing, no_network, folder)
+            self.assertEqual(caught.exception.code, 'model_stage_failed')
+            failed = [json.loads(path.read_text(encoding='utf-8'))
+                      for path in folder.glob('*.json') if json.loads(path.read_text(encoding='utf-8')).get('state') == 'failed']
+            self.assertEqual(len(failed), 1)
+            failed_blob, failed_inner = self._linked_inner(folder, failed[0])
+            self.assertEqual(failed[0]['errorCode'], 'model_stage_failed')
+            self.assertEqual(failed_inner['errorCode'], 'model_stage_failed')
+            self.assertEqual(failed[0]['modelCalls'][0]['response'], {'marker': 'raw-failure', 'kept': True})
+            self.assertEqual(hashlib.sha256(failed_blob).hexdigest(), failed[0]['inheritedAudits'][0]['fileSha256'])
+            for rel, previous in kept.items():
+                self.assertEqual((folder / rel).read_bytes(), previous)
+            self.assertEqual(len(list(folder.glob('*.json'))), 3)
+            self.assertEqual(len(list((folder / 'inherited').glob('*/*.json'))), 3)
 
     def test_old_source_files_unchanged(self):
         for rel, digest in runner.inherited_sources().items():
