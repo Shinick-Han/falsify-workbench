@@ -151,3 +151,24 @@ test('absent Names/Dests allow URI and proved-missing links; legacy-only catalog
   for(const kind of ['uri','missing','legacy']){const src=make(kind),model=await inspect(src);assert.equal(model.annotations[0].eligible,true);assert.equal(model.annotations[0].preservedMissingDestination===true,kind==='missing');const request={model,sourceBytes:src,outputBytes:src,sourcePageMap:[{sourcePageIndex:0,outputPageIndex:0},{sourcePageIndex:1,outputPageIndex:1}],moves:[{sourcePageIndex:0,annotationIndex:0,outputPageIndex:1,dx:20,dy:-80}],reflowedSourcePages:[0]};const out=await api.transport(request);assert.equal((await api.validate({...request,outputBytes:out.pdf})).ok,true);}
   const malformed=mutate(make('uri'),d=>d.getTrailer().get('Root').put('Names',[]));await assert.rejects(()=>inspect(malformed),{code:'annotation-destination-invalid'});
 });
+
+test('bounded internal descriptors identify shared named targets without exposing names or actions',async()=>{
+  const src=mutate(source(),d=>{
+    const names=d.getTrailer().get('Root','Names','Dests','Kids',0,'Names');
+    const target=d.addObject([d.findPage(2),'XYZ',25,375,null]);
+    names.put(1,{D:target});names.push(d.newString('privateAlias'));names.push(target);
+    d.findPage(0).get('Annots',0).put('A',{S:'GoTo',D:d.newString('privateAlias')});
+  });
+  const model=await inspect(src),first=model.annotations[0].internalDestinations[0],second=model.annotations[1].internalDestinations[0];
+  assert.deepEqual(first,{id:second.id,kind:'XYZ',targetSourcePageIndex:2,operands:[25,375,null]});
+  assert.ok(!JSON.stringify(model).includes('privateAlias'));
+  const changed=mutate(src,d=>d.getTrailer().get('Root','Names','Dests','Kids',0,'Names',1,'D').put(3,374));
+  const check=await api.validate(args(model,src,{outputBytes:changed,moves:[],reflowedSourcePages:[]}));
+  assert.equal(check.ok,false);
+});
+
+test('out-of-bound destination operands are never exposed or treated as an anchor',async()=>{
+  const src=mutate(source(),d=>d.getTrailer().get('Root','Names','Dests','Kids',0,'Names').put(1,{D:[d.findPage(2),'XYZ',100001,375,null]}));
+  const model=await inspect(src);assert.deepEqual(model.annotations[1].internalDestinations,[]);
+  await assert.rejects(()=>api.transport(args(model,src,{reflowedSourcePages:[0,1,2]})),{code:'annotation-destination-reflowed'});
+});

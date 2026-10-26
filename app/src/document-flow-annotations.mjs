@@ -92,7 +92,8 @@ function nameDestinations(c){
   const namesRoot=c.get(catalog,'Names');if(!namesRoot.isNull()&&!namesRoot.isDictionary())fail('annotation-destination-invalid');if(!namesRoot.isNull())visit(c.get(namesRoot,'Dests'),0);return lookup;
 }
 function destinationReader(c,refs,names){
-  let usedValues=[],missingNames=[];
+  let usedValues=[],missingNames=[],destinations=[];
+  const destinationIds=new Map();
   function resolve(value,seen=new Set(),depth=0){
     if(depth>ANNOTATION_LIMITS.depth)fail('annotation-destination-invalid');
     usedValues.push(value);
@@ -104,7 +105,11 @@ function destinationReader(c,refs,names){
     const page=c.get(value,0),mode=c.get(value,1),length={XYZ:5,Fit:2,FitB:2,FitH:3,FitBH:3,FitV:3,FitBV:3,FitR:6}[mode.asName()];
     if(!page.isIndirect()||!refs.has(page.asIndirect())||!length||value.length!==length)fail('annotation-destination-unresolved');
     for(let i=2;i<value.length;i++){const n=c.get(value,i);if(!n.isNull()&&(!n.isNumber()||!Number.isFinite(n.asNumber())))fail('annotation-destination-invalid');}
-    return refs.get(page.asIndirect())[1];
+    const targetSourcePageIndex=refs.get(page.asIndirect())[1], id=identity(value);
+    if(!destinationIds.has(id))destinationIds.set(id,destinationIds.size);
+    const operands=Array.from({length:value.length-2},(_,i)=>{const n=c.get(value,i+2);return n.isNull()?null:n.asNumber();});
+    if(operands.every(n=>n===null||Math.abs(n)<=100000))destinations.push({id:destinationIds.get(id),kind:mode.asName(),targetSourcePageIndex,operands});
+    return targetSourcePageIndex;
   }
   function actions(action,targets,visited=new Set(),depth=0){
     if(depth>ANNOTATION_LIMITS.depth)fail('annotation-destination-invalid');
@@ -119,12 +124,12 @@ function destinationReader(c,refs,names){
     return destination;
   }
   return annotation=>{
-    usedValues=[];missingNames=[];const targets=[],dest=c.get(annotation,'Dest'),action=c.get(annotation,'A');let destination;
+    usedValues=[];missingNames=[];destinations=[];const targets=[],dest=c.get(annotation,'Dest'),action=c.get(annotation,'A');let destination;
     if(!dest.isNull()&&!action.isNull())fail('annotation-destination-ambiguous');
     if(!dest.isNull()){const target=resolve(dest);if(target!==null)targets.push(target);destination=target===null?{type:'internal'}:{type:'internal',targetSourcePageIndex:target};}
     else if(!action.isNull())destination=actions(action,targets);
     else fail('annotation-destination-unresolved');
-    return {destination,targets:[...new Set(targets)],values:usedValues,missingNames:[...new Set(missingNames)]};
+    return {destination,targets:[...new Set(targets)],destinations,values:usedValues,missingNames:[...new Set(missingNames)]};
   };
 }
 function unsupportedDocumentActions(c,pages){const catalog=c.get(c.doc.getTrailer(),'Root');return !c.get(catalog,'AA').isNull()||!c.get(catalog,'OpenAction').isNull()||pages.some(page=>!c.get(page,'AA').isNull());}
@@ -165,9 +170,9 @@ export async function inspect({mupdf,sourceBytes,sourceSha256}={}){
         const owner=c.get(annotation,'P');record.hadP=!owner.isNull();if(record.hadP&&(!owner.isIndirect()||owner.asIndirect()!==pages[record.sourcePageIndex].asIndirect()))fail('annotation-page-owner-invalid');
         if(record.shared)fail('annotation-shared-object');
         if(tagged||!c.get(annotation,'StructParent').isNull()||!c.get(annotation,'StructParents').isNull()||!c.get(pages[record.sourcePageIndex],'StructParents').isNull())fail('annotation-tagged-ownership');
-        const resolved=readDestination(annotation);record.destinationFingerprints=await Promise.all(resolved.values.map(value=>fingerprint(c,value,refs,true,destinationBudget)));record.missingDestinationNames=resolved.missingNames;if(resolved.missingNames.length)descriptor.preservedMissingDestination=true;descriptor.destination=resolved.destination;descriptor.internalDestinationSourcePageIndices=resolved.targets;
+        const resolved=readDestination(annotation);record.destinationFingerprints=await Promise.all(resolved.values.map(value=>fingerprint(c,value,refs,true,destinationBudget)));record.missingDestinationNames=resolved.missingNames;if(resolved.missingNames.length)descriptor.preservedMissingDestination=true;descriptor.destination=resolved.destination;descriptor.internalDestinationSourcePageIndices=resolved.targets;descriptor.internalDestinations=resolved.destinations;
       }catch(error){descriptor.eligible=false;descriptor.reason=error?.code||'annotation-object-invalid';}
-      if(!descriptor.destination){const hasTarget=!c.get(annotation,'Dest').isNull()||!c.get(annotation,'A').isNull();if(hasTarget||descriptor.kind==='link')try{const resolved=readDestination(annotation);record.destinationFingerprints=await Promise.all(resolved.values.map(value=>fingerprint(c,value,refs,true,destinationBudget)));record.missingDestinationNames=resolved.missingNames;if(resolved.missingNames.length)descriptor.preservedMissingDestination=true;descriptor.destination=resolved.destination;descriptor.internalDestinationSourcePageIndices=resolved.targets;}catch{record.destinationUnsafe=true;descriptor.destinationUnresolved=true;}}
+      if(!descriptor.destination){const hasTarget=!c.get(annotation,'Dest').isNull()||!c.get(annotation,'A').isNull();if(hasTarget||descriptor.kind==='link')try{const resolved=readDestination(annotation);record.destinationFingerprints=await Promise.all(resolved.values.map(value=>fingerprint(c,value,refs,true,destinationBudget)));record.missingDestinationNames=resolved.missingNames;if(resolved.missingNames.length)descriptor.preservedMissingDestination=true;descriptor.destination=resolved.destination;descriptor.internalDestinationSourcePageIndices=resolved.targets;descriptor.internalDestinations=resolved.destinations;}catch{record.destinationUnsafe=true;descriptor.destinationUnresolved=true;}}
       record.descriptor=descriptor;annotations.push(descriptor);
     }
     // Unsupported annotation geometry is still retained privately for no-op validation.
