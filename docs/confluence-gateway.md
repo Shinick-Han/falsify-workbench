@@ -104,7 +104,7 @@ v2 OpenAPI에는 `POST /pages/{id}/attachments`와 `POST /pages/{id}/labels`가 
 
 클라이언트 시크릿, 세션 키, 콜백의 전체 URL이 없으면 `configured:false`가 정상이다. 이 상태는 연결된 세션을 만들지 않는다.
 
-1. 중앙 3LO 앱은 하나다. 비공개가 아닌 클라이언트 ID `db5aa4f3-b807-43bd-95fa-4bdda751406e`는 `wrangler.jsonc`의 `ATLASSIAN_CLIENT_ID`에 있다.
+1. 중앙 3LO 앱은 하나다. 비공개가 아닌 클라이언트 ID `LQL1zmOGHXyk8V4ShnSdPJCc5MzJWYDN`는 `wrangler.jsonc`의 `ATLASSIAN_CLIENT_ID`에 있다.
 2. 운영자가 저장한 프로덕션 콜백 경로는 `/v1/confluence/auth/callback`이다. 쿼리, 해시, 사용자 정보는 없다. 워커 호스트를 포함한 전체 URL은 시크릿 `ATLASSIAN_CALLBACK_URL`에 넣는다. `http`는 `localhost` 또는 `127.0.0.1`에서만 받는다.
 3. 개발자 콘솔의 동의 스코프는 위 표의 9개와 같게 둔다. `read:content.metadata:confluence`는 조상 id를 읽기 위한 것이며 본문 읽기 권한을 넓히지 않는다. 제한 목록을 읽는 classic `read:confluence-content.all`은 요청하지 않는다.
 4. 시크릿은 `ATLASSIAN_CLIENT_SECRET`과 `CONFLUENCE_SESSION_KEY`뿐이다. 세션 키는 32바이트를 base64로 둔다. `openssl rand -base64 32`

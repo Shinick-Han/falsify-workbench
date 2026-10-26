@@ -187,7 +187,7 @@ function mockUpstream(options = {}) {
     }
     if (method === 'GET' && wiki === '/wiki/api/v2/pages/9001/attachments') {
       const title = store.fileName || `${HASH}.json`;
-      return jsonResponse(200, { results: store.file ? [{ id: '77', title }] : [] });
+      return jsonResponse(200, { results: store.file ? [{ id: options.attachmentId || 'att77', title }] : [] });
     }
     if (method === 'POST' && wiki === '/wiki/rest/api/content/9001/child/attachment') {
       if (options.attachmentStatus) return new Response('err', { status: options.attachmentStatus, headers: options.attachmentHeaders || {} });
@@ -197,7 +197,7 @@ function mockUpstream(options = {}) {
       assert.ok(named);
       store.fileName = named[1];
       assert.match(String(init.headers['Content-Type']), /multipart\/form-data/);
-      return jsonResponse(200, { results: [{ id: '77', title: store.fileName }] });
+      return jsonResponse(200, { results: [{ id: options.attachmentId || 'att77', title: store.fileName }] });
     }
     if (u.hostname === 'api.media.atlassian.com') {
       assert.equal(init.headers.Authorization, undefined);
@@ -897,7 +897,7 @@ describe('confluence gateway', { concurrency: false }, () => {
     assert.equal(wrangler.includes('CONFLUENCE_SESSION_KEY'), false);
     assert.equal(wrangler.includes('424242'), false);
     assert.equal(wrangler.split('"CONFLUENCE_PARENT_PAGE_ID": "8355842"').length, 3);
-    assert.equal(wrangler.split('"ATLASSIAN_CLIENT_ID": "db5aa4f3-b807-43bd-95fa-4bdda751406e"').length, 3);
+    assert.equal(wrangler.split('"ATLASSIAN_CLIENT_ID": "LQL1zmOGHXyk8V4ShnSdPJCc5MzJWYDN"').length, 3);
     assert.equal(wrangler.split('"CONFLUENCE_ONLY": "true"').length, 3);
     assert.equal(wrangler.includes('"CONFLUENCE_ONLY": "false"'), false);
     assert.match(wrangler, /"REMOTE_PROVIDER": "confluence"/);
@@ -931,7 +931,7 @@ describe('confluence gateway', { concurrency: false }, () => {
     assert.equal(bad.json.error.code, 'redirect_refused');
     assert.equal(badPath.calls.some(call => call.host === 'api.media.atlassian.com'), false);
     assert.equal(JSON.stringify(bad.json).includes('signed-token'), false);
-    const loopUrl = `https://api.atlassian.com/ex/confluence/${CLOUD}/wiki/rest/api/content/9001/child/attachment/77/download`;
+    const loopUrl = `https://api.atlassian.com/ex/confluence/${CLOUD}/wiki/rest/api/content/9001/child/attachment/att77/download`;
     const loop = mockUpstream({ listHash: true, downloadLocation: loopUrl });
     const looped = await read(await gateway('/v1/confluence/archives/9001', { headers: auth, fetchImpl: loop.fetchImpl }));
     assert.equal(looped.status, 502);
@@ -984,6 +984,24 @@ describe('confluence gateway', { concurrency: false }, () => {
     }));
     assert.equal(control.status, 422);
     assert.equal(control.json.error.code, 'invalid_archive');
+  });
+
+  test('permission failures, restricted child pages, and cross-origin OAuth state are rejected', async () => {
+    installBundle();
+    const minted = await mint();
+    const auth = { 'Content-Type': 'application/json', Authorization: `Bearer ${minted.session}` };
+    const denied = mockUpstream({pageStatus:403});
+    const attempt = await read(await gateway('/v1/confluence/archives',{method:'POST',headers:auth,body:{archive,teamShare:true},fetchImpl:denied.fetchImpl}));
+    assert.equal(attempt.status,403);assert.equal(attempt.json.error.code,'permission_denied');
+    assert.equal(denied.calls.some(c=>c.path.endsWith('/child/attachment')),false);
+    const privateChild=mockUpstream({listHash:true,restrictionById:{9001:'VIEW_RESTRICTED'}});
+    const hidden=await read(await gateway('/v1/confluence/archives/9001',{headers:auth,fetchImpl:privateChild.fetchImpl}));
+    assert.equal(hidden.status,403);
+    const mixup=await read(await gateway('/v1/confluence/auth/start',{method:'POST',headers:{'Content-Type':'application/json',Origin:ORIGIN},body:{nonce:'n'.repeat(16),returnOrigin:OTHER},fetchImpl:denied.fetchImpl}));
+    assert.equal(mixup.status,403);
+    const alternatePort=mockUpstream({listHash:true,downloadLocation:'https://api.media.atlassian.com:8443/file/12345678-1234-1234-1234-123456789012/binary?token=synthetic'});
+    const unsafe=await read(await gateway('/v1/confluence/archives/9001',{headers:auth,fetchImpl:alternatePort.fetchImpl}));
+    assert.equal(unsafe.status,502);assert.equal(alternatePort.calls.some(c=>new URL(c.url).port==='8443'),false);
   });
 
   test('publish and read use the static review bundle codec', async () => {

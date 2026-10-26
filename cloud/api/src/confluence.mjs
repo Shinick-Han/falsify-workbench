@@ -28,6 +28,7 @@ const MEDIA_BINARY = /^\/file\/[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{
 const MAX_DOWNLOAD_REDIRECTS = 3;
 const MAX_ANCESTORS = 32;
 const PAGE_ID = /^[0-9]{1,20}$/;
+const ATTACHMENT_ID = /^(?:att)?[0-9]{1,20}$/;
 const HEX = /^[a-f0-9]{64}$/;
 const NONCE = /^[A-Za-z0-9_-]{16,128}$/;
 // Scopes required by the operations this gateway calls. v2 entries come from
@@ -66,6 +67,7 @@ const MESSAGES = {
   archive_conflict: 'An existing page blocks this archive. It was not overwritten.',
   redirect_refused: 'An upstream redirect was refused.',
   upstream_unavailable: 'Confluence could not be reached.',
+  permission_denied: 'Your Atlassian account does not have the required Confluence permission.',
   upstream_invalid: 'Confluence returned a response this gateway will not follow.',
   archive_validator_unavailable: 'Archive validation is not available.',
   invalid_archive: 'The archive failed validation.',
@@ -326,6 +328,7 @@ function promote(error, pageId) {
 }
 
 async function readUpstreamJson(response, writeStarted = false) {
+  if (response.status === 401 || response.status === 403) fail(403, 'permission_denied');
   if (response.status < 200 || response.status >= 300) fail(writeStarted ? 409 : 502, writeStarted ? 'write_unknown' : 'upstream_unavailable');
   const bytes = await readBounded(response, 1024 * 1024);
   if (!bytes) fail(502, 'upstream_invalid');
@@ -441,14 +444,14 @@ async function assertParentReadable(fetchImpl, base, token, parent, cloudId) {
 
 function downloadTarget(url, cloudId, pageId, attachmentId) {
   if (url.protocol !== 'https:' || url.username || url.password || url.hash) return false;
-  if (url.hostname === 'api.atlassian.com') {
+  if (url.origin === 'https://api.atlassian.com') {
     const expected = `/ex/confluence/${cloudId}/wiki/rest/api/content/${pageId}/child/attachment/${attachmentId}/download`;
     return url.pathname === expected && url.search === '';
   }
   // Exact host named as an internal Atlassian API redirect domain in the Forge
   // runtime egress permissions page. The binary path is the one Media Services
   // serves for that redirect. No other host, subdomain, or path is fetched.
-  if (url.hostname === MEDIA_HOST) return MEDIA_BINARY.test(url.pathname) && url.search.length <= 2048;
+  if (url.origin === `https://${MEDIA_HOST}`) return MEDIA_BINARY.test(url.pathname) && url.search.length <= 2048;
   return false;
 }
 
@@ -661,6 +664,7 @@ async function publish(ctx, session) {
   let page = sameTitle[0] ? await getPage(ctx.fetchImpl, base, session.accessToken, String(sameTitle[0].id)) : null;
   if (page && (String(page.parentId) !== parent || String(page.spaceId) !== SPACE_ID)) fail(409, 'archive_conflict');
   if (page && readyLabel(page)) {
+    await assertReadOpen(ctx.fetchImpl, base, session.accessToken, String(page.id));
     const prop = propertyValue(page);
     if (prop && prop.ready === true && prop.archiveSha256 === archiveSha256 && prop.id === normalized.id && prop.kind === normalized.kind) {
       const url = webUrl(page);
@@ -699,6 +703,7 @@ async function publish(ctx, session) {
     await ensureProperty(ctx, base, session.accessToken, pageId, normalized, archiveSha256);
     await ensureLabel(ctx, base, session.accessToken, pageId);
     const fresh = await getPage(ctx.fetchImpl, base, session.accessToken, pageId, true);
+    await assertReadOpen(ctx.fetchImpl, base, session.accessToken, pageId);
     const url = webUrl(fresh);
     const prop = propertyValue(fresh);
     if (!url || !readyLabel(fresh) || !prop || prop.ready !== true || prop.archiveSha256 !== archiveSha256 || prop.id !== normalized.id) {
@@ -739,7 +744,7 @@ async function ensureAttachment(ctx, base, token, cloudId, pageId, archiveSha256
     const results = created?.results || (created?.id ? [created] : null);
     attachment = Array.isArray(results) ? results.find(item => item && item.title === filename) : null;
   }
-  if (!attachment || !PAGE_ID.test(String(attachment.id))) fail(409, 'write_partial', {}, { pageId, readBack: true });
+  if (!attachment || !ATTACHMENT_ID.test(String(attachment.id))) fail(409, 'write_partial', {}, { pageId, readBack: true });
   const download = await downloadAttachment(ctx.fetchImpl, `${base}/wiki/rest/api/content/${pageId}/child/attachment/${attachment.id}/download`, token, cloudId, pageId, String(attachment.id), true);
   const downloaded = await readBounded(download, MAX_ARCHIVE_BYTES);
   if (download.status < 200 || download.status >= 300) fail(409, 'write_partial', {}, { pageId, readBack: true });
@@ -799,6 +804,8 @@ async function listArchives(ctx, session) {
     if (!child || !PAGE_ID.test(String(child.id)) || String(child.parentId || config.parent) !== config.parent) continue;
     const page = await getPage(ctx.fetchImpl, base, session.accessToken, String(child.id));
     if (!page || String(page.parentId) !== config.parent || String(page.spaceId) !== SPACE_ID || !readyLabel(page)) continue;
+    try { await assertReadOpen(ctx.fetchImpl, base, session.accessToken, String(page.id)); }
+    catch (error) { if (error instanceof GatewayError && error.status === 403) continue; throw error; }
     const prop = propertyValue(page);
     if (!prop || prop.ready !== true || typeof prop.archiveSha256 !== 'string' || !HEX.test(prop.archiveSha256)) continue;
     const updatedAt = page.version?.createdAt || page.createdAt;
@@ -820,6 +827,7 @@ async function readArchive(ctx, session, pageId) {
   const base = cloudBase(session.cloudId);
   const page = await getPage(ctx.fetchImpl, base, session.accessToken, pageId);
   if (!page || String(page.parentId) !== config.parent || String(page.spaceId) !== SPACE_ID || !readyLabel(page)) fail(404, 'not_found');
+  await assertReadOpen(ctx.fetchImpl, base, session.accessToken, pageId);
   const prop = propertyValue(page);
   if (!prop || prop.ready !== true || !HEX.test(prop.archiveSha256 || '')) fail(404, 'not_found');
   const listResponse = await callUpstream(ctx.fetchImpl, `${base}/wiki/api/v2/pages/${pageId}/attachments?limit=25`, {
@@ -828,7 +836,7 @@ async function readArchive(ctx, session, pageId) {
   const list = await readUpstreamJson(listResponse);
   const filename = `${prop.archiveSha256}.json`;
   const attachments = Array.isArray(list?.results) ? list.results.filter(item => item && item.title === filename) : [];
-  if (attachments.length !== 1 || !PAGE_ID.test(String(attachments[0].id))) fail(422, 'invalid_archive');
+  if (attachments.length !== 1 || !ATTACHMENT_ID.test(String(attachments[0].id))) fail(422, 'invalid_archive');
   const download = await downloadAttachment(ctx.fetchImpl, `${base}/wiki/rest/api/content/${pageId}/child/attachment/${attachments[0].id}/download`, session.accessToken, session.cloudId, pageId, String(attachments[0].id), false);
   if (download.status < 200 || download.status >= 300) fail(422, 'invalid_archive');
   const bytes = await readBounded(download, MAX_ARCHIVE_BYTES);
@@ -854,7 +862,7 @@ async function startAuth(ctx) {
   if (typeof body.nonce !== 'string' || !NONCE.test(body.nonce)) fail(400, 'invalid_request');
   let returnOrigin;
   try { returnOrigin = new URL(body.returnOrigin).origin; } catch { fail(400, 'invalid_request'); }
-  if (returnOrigin !== body.returnOrigin || !origins(ctx.settings).has(returnOrigin)) fail(403, 'origin_not_allowed');
+  if (returnOrigin !== origin || returnOrigin !== body.returnOrigin || !origins(ctx.settings).has(returnOrigin)) fail(403, 'origin_not_allowed');
   const key = await aesKey(ctx.env);
   const state = await seal(key, STATE_PURPOSE, {
     purpose: STATE_PURPOSE,

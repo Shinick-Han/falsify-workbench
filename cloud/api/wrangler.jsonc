@@ -21,7 +21,7 @@
     "CONFLUENCE_SPACE_ID": "65737",
     // Operator-supplied archive parent in space 65737. Created under workspace page 66042.
     "CONFLUENCE_PARENT_PAGE_ID": "8355842",
-    "ATLASSIAN_CLIENT_ID": "db5aa4f3-b807-43bd-95fa-4bdda751406e",
+    "ATLASSIAN_CLIENT_ID": "LQL1zmOGHXyk8V4ShnSdPJCc5MzJWYDN",
     "CONFLUENCE_ONLY": "true"
   },
   // Platform invocation logs are off (they carry client request metadata); the Worker emits one
@@ -42,7 +42,7 @@
         "CONFLUENCE_SPACE_KEY": "Falsify",
         "CONFLUENCE_SPACE_ID": "65737",
         "CONFLUENCE_PARENT_PAGE_ID": "8355842",
-        "ATLASSIAN_CLIENT_ID": "db5aa4f3-b807-43bd-95fa-4bdda751406e",
+        "ATLASSIAN_CLIENT_ID": "LQL1zmOGHXyk8V4ShnSdPJCc5MzJWYDN",
         "CONFLUENCE_ONLY": "true"
       },
       "d1_databases": [{ "binding": "DB", "database_name": "falsify-harness-records-staging", "database_id": "43f6eef6-84a4-4039-9cd5-4e3520cea4e6", "migrations_dir": "migrations" }]
