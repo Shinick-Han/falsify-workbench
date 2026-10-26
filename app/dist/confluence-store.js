@@ -7,7 +7,7 @@
   const EXPECTED_SITE='https://falsify.atlassian.net',EXPECTED_SPACE='Falsify',EXPECTED_ID='65737';
   const AUTH_HOSTS=new Set(['auth.atlassian.com','login.atlassian.com','falsify.atlassian.net']);
   const SESSION_HEADER='x-falsify-confluence-session',EXPIRES_HEADER='x-falsify-confluence-session-expires';
-  const PAGE_ID=/^[A-Za-z0-9_-]{1,128}$/,CURSOR=/^[A-Za-z0-9_-]{1,512}$/;
+  const PAGE_ID=/^[A-Za-z0-9_-]{1,128}$/,CURSOR=/^[A-Za-z0-9_-]{1,2048}$/;
   const local=message=>Object.assign(Error(message),{code:'local'});
   const clone=x=>JSON.parse(JSON.stringify(x));
   const script=document.currentScript;
@@ -39,6 +39,8 @@
       return 'Confluence 게이트웨이 응답을 확인하지 못했습니다. 자동으로 다시 시도하지 않습니다. 로컬 기록은 그대로입니다.';
     }
     const s=e?.status, code=e?.errorCode;
+    if(code==='write_unknown') return '팀 보관이 저장되었는지 확인하지 못했습니다. 자동으로 다시 보내지 않습니다. Confluence의 Workbench 실험 기록에서 먼저 확인하세요. 로컬 기록은 그대로입니다.';
+    if(code==='write_partial') return '팀 보관을 끝내지 못해 미완성 상태일 수 있습니다. 자동으로 다시 보내지 않습니다. Confluence의 Workbench 실험 기록에서 먼저 확인하세요. 로컬 기록은 그대로입니다.';
     if(s===401) return '세션이 끝났습니다. Confluence에 다시 연결하세요. 로컬 기록은 그대로입니다.';
     if(s===403) return '이 Atlassian 계정으로는 Falsify 팀 보관을 쓸 권한이 없습니다. 운영자에게 공간 권한을 확인하세요. 로컬 기록은 그대로입니다.';
     if(s===404) return '보관을 찾지 못했습니다. 팀 목록을 다시 불러오세요. 로컬 기록은 그대로입니다.';
@@ -71,26 +73,38 @@
     const lab=deps.lab??globalThis.FalsifyLab, win=deps.window??globalThis.window, loc=deps.location??globalThis.location;
     const base=parseBase(cfg.apiBase), gatewayOrigin=base?new URL(base).origin:'';
     const misconfigured=cfg.provider!=='confluence'||!base;
-    const state={session:null,stamp:0,pending:null,inflight:null,temp:null,caps:null,busy:false,cursor:null,items:[],banner:{text:'',error:false}};
+    const state={session:null,stamp:0,pending:null,inflight:null,temp:null,caps:null,busy:false,expiring:false,expiryFailed:false,cacheDeadline:0,cursor:null,items:[],banner:{text:'',error:false}};
     const CACHE_FAILURE='이 브라우저에 연결 정보를 저장하지 못했습니다. 연결되었다고 보지 않습니다. 브라우저 저장 공간을 확인한 뒤 다시 연결하세요. 로컬 기록은 그대로입니다.';
     const panels=[];
-    let harnessPick=null;
+    let harnessPick=null,teamTimer=0;
+
+    function teamExpired(){return !state.expiryFailed&&!!(state.cacheDeadline&&Date.now()>=state.cacheDeadline||state.temp&&Date.now()>=state.temp.expiresAt);}
+    function armTeamTimer(){
+      state.expiryFailed=false;
+      if(!state.cacheDeadline) state.cacheDeadline=Date.now()+TEMP_MS;
+      if(teamTimer) clearTimeout(teamTimer);
+      const deadline=Math.min(state.cacheDeadline,state.temp?.expiresAt||Infinity);
+      teamTimer=setTimeout(()=>{teamTimer=0; if(teamExpired()) void expireTemp(); else armTeamTimer();},Math.max(0,deadline-Date.now()));
+      if(teamTimer&&typeof teamTimer.unref==='function') teamTimer.unref();
+    }
 
     function say(text,error=false){state.banner={text,error}; for(const p of panels){p.status.textContent=text; p.status.classList.toggle('error',!!error);}}
     function paint(){
-      if(state.temp&&!state.temp.closing&&Date.now()>=state.temp.expiresAt) void expireTemp();
+      if(!state.expiring&&teamExpired()) void expireTemp();
       const connected=!!state.session&&Date.parse(state.session.expiresAt)>Date.now();
+      const blocked=state.busy||state.expiring;
       for(const p of panels){
+        if(p.tempNotice) p.tempNotice.textContent=state.temp?'임시 열람 중 · 새 검수는 Confluence에 팀 공유해야 보관됩니다. 새로고침·연결 해제·닫기 또는 최대 12시간 후 임시 기록이 사라집니다.':'팀 기록은 Confluence에 보관합니다. 불러온 사례는 임시로 열며, 기존 로컬 기록과 백업은 유지합니다.';
         p.connection.textContent=misconfigured?'원격 보관 설정이 Confluence가 아니어서 꺼 두었습니다. 로컬 기록은 그대로입니다.':connected?'Falsify Confluence 팀 공간에 연결됨 · 이 표시는 모델 실행이나 과학적 결론이 아닙니다.':'원격 연결 없음 · 로컬 기록만 사용';
-        p.connect.disabled=state.busy||misconfigured;
+        p.connect.disabled=blocked||misconfigured;
         p.disconnect.disabled=!(connected||state.pending||state.inflight);
-        p.load.disabled=state.busy||misconfigured||!connected;
+        p.load.disabled=blocked||misconfigured||!connected;
         p.more.hidden=!state.cursor;
-        p.more.disabled=state.busy||!state.cursor;
-        if(p.closeTemp){p.closeTemp.hidden=!state.temp; p.closeTemp.disabled=state.busy||!state.temp;}
+        p.more.disabled=blocked||!state.cursor;
+        if(p.closeTemp){p.closeTemp.hidden=!state.temp; p.closeTemp.disabled=blocked||!state.temp;}
         const key=consentIdentity(p.mode);
-        p.share.disabled=state.busy||misconfigured||!connected||!p.consent.checked||!key||key!==p.consentFor;
-        p.consent.disabled=state.busy||misconfigured||!connected;
+        p.share.disabled=blocked||misconfigured||!connected||!p.consent.checked||!key||key!==p.consentFor;
+        p.consent.disabled=blocked||misconfigured||!connected;
       }
     }
     function targetId(mode){
@@ -106,13 +120,15 @@
       return same?state.temp.pageId+'|'+id:id;
     }
     async function expireTemp(){
-      if(!state.temp||state.temp.closing||Date.now()<state.temp.expiresAt) return;
-      state.temp.closing=true;
+      if(state.expiring||!teamExpired()) return;
+      state.expiring=true;
       try{
-        if(typeof lab?.closeArchive==='function') await lab.closeArchive();
-        state.temp=null; clearConsent('review'); clearConsent('harness');
-        say('12시간이 지나 임시 열람을 닫았습니다. Confluence에 있는 팀 보관은 그대로입니다. 로컬 기록은 지우지 않았습니다.');
-      }catch{say('12시간이 지났지만 임시 열람을 닫지 못했습니다. 임시 열람 닫기를 다시 누르세요. 로컬 기록은 그대로입니다.', true);}
+        if(typeof lab?.closeArchive!=='function') throw local('temporary-view-unavailable');
+        await lab.closeArchive();
+        state.temp=null; clearRemoteView(); clearConsent('review'); clearConsent('harness');
+        say('12시간이 지나 임시 열람과 팀 목록을 닫았습니다. Confluence에 있는 팀 보관은 그대로입니다. 로컬 기록은 지우지 않았습니다.');
+      }catch{state.expiryFailed=true;clearRemoteView();say('임시 열람 만료 처리에 실패했습니다. 새로고침하여 임시 내용을 지우세요. 자동으로 다시 시도하지 않습니다. 기존 로컬 기록은 그대로입니다.', true);}
+      state.expiring=false;
       paint();
     }
     async function cacheKey(){
@@ -155,7 +171,7 @@
       if(state.inflight===popup) state.inflight=null;
       closePopup(popup);
     }
-    function clearRemoteView(){state.items=[]; state.cursor=null; state.items.loaded=false; state.caps=null; renderItems();}
+    function clearRemoteView(){if(teamTimer)clearTimeout(teamTimer);teamTimer=0;state.cacheDeadline=0;state.items=[]; state.cursor=null; state.items.loaded=false; state.caps=null; renderItems();}
     function header(res,name){try{return res.headers&&typeof res.headers.get==='function'?res.headers.get(name):null;}catch{return null;}}
     function budget(method,path){const bare=String(path||'').split('?')[0]; if(bare.startsWith('/v1/confluence/auth/')) return AUTH_MS; if(method==='POST'&&bare==='/v1/confluence/archives') return PUBLISH_MS; return READ_MS;}
     async function api(method,path,{body,auth=false,stamp=state.stamp,phase='read'}={}){
@@ -361,6 +377,7 @@
         if(!append) state.items=[];
         for(const item of good){state.items=state.items.filter(x=>x.pageId!==item.pageId); state.items.push(item);}
         state.items.loaded=true;
+        armTeamTimer();
         if(typeof data.nextCursor==='string'&&data.nextCursor){if(!CURSOR.test(data.nextCursor)){state.cursor=null; renderItems(); throw local('다음 목록 주소가 허용된 형식이 아니어서 따라가지 않았습니다. 이미 받은 목록은 그대로 둡니다.');} state.cursor=data.nextCursor;} else state.cursor=null;
         renderItems();
         say('팀 보관 '+state.items.length+'건을 표시합니다.'+(state.cursor?' 다음 페이지는 더 불러오기를 누를 때만 받습니다.':'')+(skipped.length?' 형식이 맞지 않는 '+skipped.length+'건은 열지 않았습니다.':'')+(state.items.length?'':' 이 팀 공간에 표시할 보관이 없습니다.')+' JSON 목록이며 원본 PDF가 아닙니다.');
@@ -389,6 +406,7 @@
         if(normalized.kind==='experiment'){
           if(!opened||opened.kind!=='experiment'||typeof opened.runId!=='string'||!opened.runId) throw local('실험 임시 열람 결과가 아니어서 검수로 열지 않았습니다. 로컬 기록은 그대로입니다.');
           state.temp={pageId,kind:'experiment',id:opened.runId,expiresAt:Date.now()+TEMP_MS};
+          armTeamTimer();
           clearConsent('review'); clearConsent('harness');
           showView('review');
           say('팀 보관을 임시 열람으로 열었습니다. 검수 화면으로 이동했습니다. 로컬 기록에 합치지 않았고 모델을 부르지 않았습니다. 보내지 않은 사람 검수는 Confluence에 팀 공유를 누르기 전에는 저장되지 않습니다. JSON이며 원본 PDF가 아닙니다.');
@@ -397,6 +415,7 @@
           const role=config&&(config.role==='red'||config.role==='blue')?config.role:'';
           if(!opened||opened.kind!=='harness'||opened.hash!==hashId) throw local('Harness 임시 열람 결과가 아니어서 열지 않았습니다. 등록하거나 실행하지 않았습니다.');
           state.temp={pageId,kind:'harness',id:role?role+':'+hashId:hashId,expiresAt:Date.now()+TEMP_MS};
+          armTeamTimer();
           clearConsent('harness');
           showView('agents');
           say('Harness를 임시 열람으로 열었습니다. Harness 화면으로 이동했습니다. 등록하거나 실행하지 않았고 로컬 기록에 넣지 않았습니다. 원본 PDF가 아닙니다.');
@@ -419,9 +438,10 @@
       const status=el('p',{id:'confluence-'+mode+'-status',className:'confluence-status',role:'status'});
       const list=el('div',{id:'confluence-'+mode+'-list',className:'confluence-list'});
       const intro=mode==='harness'?'선택한 등록 Harness 정의만 팀 공간에 올립니다. 실행하거나 자동 등록하지 않습니다.':mode==='results'?'검수 화면에서 고른 실행과 그 사람 검수를 팀 공간에 올립니다. 결과표의 로컬 백업은 그대로입니다.':'지금 고른 실행과 사람 검수를 팀 공간에 올립니다. RED와 BLUE는 있는 쪽만 포함됩니다.';
+      const tempNotice=el('p',{className:'confluence-temporary'});
       const kids=[
         el('h3',{id:'confluence-'+mode+'-title',textContent:'Falsify Confluence 팀 보관'}),
-        el('p',{className:'confluence-temporary',textContent:'임시 열람. Confluence만 영구 보관. 새로고침·연결 해제·12시간 후 임시 기록 소멸. 보내지 않은 사람 검수는 Confluence에 팀 공유를 누르기 전에는 저장되지 않습니다.'}),
+        tempNotice,
         el('p',{className:'muted',textContent:'원격 저장은 Falsify Confluence 팀 공간 하나입니다. 작업대 가입과 보관 범위 선택은 없습니다. '+intro+' 첫 보관은 JSON입니다. 추출문이 들어 있어도 원본 PDF 바이트를 저장한 것이 아닙니다. 보내지 않은 사람 검수는 Confluence에 팀 공유를 누르기 전에는 저장되지 않습니다.'}),
         connection,
         el('div',{className:'button-row'}, connectBtn, disconnectBtn)
@@ -430,7 +450,7 @@
       kids.push(el('label',{className:'check-row'}, consent, consentText), el('div',{className:'button-row'}, shareBtn, loadBtn, moreBtn, closeTempBtn), status, list);
       const section=el('section',{id:'confluence-panel-'+mode,className:'confluence-store','data-confluence-mode':mode,'data-provider':'confluence','aria-labelledby':'confluence-'+mode+'-title'}, ...kids);
       host.append(section);
-      const panel={mode,consent,consentFor:'',connect:connectBtn,disconnect:disconnectBtn,share:shareBtn,load:loadBtn,more:moreBtn,closeTemp:closeTempBtn,connection,status,list};
+      const panel={mode,consent,consentFor:'',connect:connectBtn,disconnect:disconnectBtn,share:shareBtn,load:loadBtn,more:moreBtn,closeTemp:closeTempBtn,connection,status,list,tempNotice};
       panels.push(panel);
       consent.addEventListener('change',()=>{panel.consentFor=consent.checked?consentIdentity(mode):''; paint();});
       connectBtn.addEventListener('click',connect);

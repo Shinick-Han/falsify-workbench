@@ -757,7 +757,7 @@ async function ensureAttachment(ctx, base, token, cloudId, pageId, archiveSha256
 }
 
 async function ensureProperty(ctx, base, token, pageId, archive, archiveSha256) {
-  const value = { kind: archive.kind, id: archive.id, archiveSha256, ready: true };
+  const value = { kind: archive.kind, id: archive.id, title: archive.title, archiveSha256, ready: true };
   const response = await callUpstream(ctx.fetchImpl, `${base}/wiki/api/v2/pages/${pageId}/properties`, {
     method: 'POST',
     headers: authHeaders(token, { 'Content-Type': 'application/json' }),
@@ -811,7 +811,8 @@ async function listArchives(ctx, session) {
     const updatedAt = page.version?.createdAt || page.createdAt;
     const url = webUrl(page);
     if (typeof updatedAt !== 'string' || !url) fail(502, 'upstream_invalid');
-    items.push({ pageId: String(page.id), title: String(page.title || ''), updatedAt, webUrl: url });
+    const displayTitle = typeof prop.title === 'string' && prop.title.trim() && prop.title.length <= 500 && !/[\u0000-\u001f\u007f]/.test(prop.title) ? prop.title : String(page.title || '');
+    items.push({ pageId: String(page.id), title: displayTitle, updatedAt, webUrl: url });
   }
   const nextRaw = cursorFromNext(payload?._links?.next, pathname);
   const nextCursor = nextRaw && key ? await seal(key, CURSOR_PURPOSE, { purpose: CURSOR_PURPOSE, cloudId: session.cloudId, parent: config.parent, cursor: nextRaw }) : null;

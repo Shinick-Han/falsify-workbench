@@ -550,7 +550,7 @@ describe('confluence gateway', { concurrency: false }, () => {
     assert.ok(upstream.calls.indexOf(property) < upstream.calls.indexOf(label));
     assert.deepEqual(JSON.parse(property.init.body), {
       key: 'falsify-archive',
-      value: { kind: 'experiment', id: archive.id, archiveSha256: HASH, ready: true },
+      value: { kind: 'experiment', id: archive.id, title: archive.title, archiveSha256: HASH, ready: true },
     });
     assert.equal(dbCalls, 0);
     for (const call of upstream.calls) {
@@ -1031,6 +1031,9 @@ describe('confluence gateway', { concurrency: false }, () => {
     assert.equal(readBack.status, 200);
     assert.equal(readBack.json.archive.kind, 'harness');
     assert.equal(readBack.json.archiveSha256, semantic);
+    const listed=await read(await gateway('/v1/confluence/archives',{headers:{Authorization:`Bearer ${minted.session}`},fetchImpl:upstream.fetchImpl}));
+    assert.equal(listed.status,200);
+    assert.equal(listed.json.items[0].title,built.title,'the team picker shows the human case title instead of only the storage hash');
     assert.equal(upstream.calls.some(call => call.host !== 'api.atlassian.com' && call.host !== 'auth.atlassian.com'), false);
   });
 });

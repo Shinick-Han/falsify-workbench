@@ -137,7 +137,7 @@ test('startup does not upload, and the local ledger tools stay on the results bo
   assert.match(t.$('confluence-panel-review').textContent,/원본 PDF/);
   const banners=[...t.body.walk()].filter(n=>n.classList.contains('confluence-temporary')).map(n=>n.textContent);
   assert.ok(banners.length>=3);
-  for(const text of banners) assert.match(text,/임시 열람\. Confluence만 영구 보관\. 새로고침·연결 해제·12시간 후 임시 기록 소멸\. 보내지 않은 사람 검수는 Confluence에 팀 공유를 누르기 전에는 저장되지 않습니다\./);
+  for(const text of banners) assert.match(text,/팀 기록은 Confluence에 보관.*기존 로컬 기록과 백업은 유지/);
   assert.equal(t.$('confluence-review-close-temp').textContent,'임시 열람 닫기'); assert.equal(t.$('confluence-review-close-temp').hidden,true);
   assert.ok(!/면제|정책상 허용|exempt/i.test(t.body.textContent));
   assert.ok(!/과학적 결론이 아닙니다/.test('')&&!/gold|정확도 검증|온라인 표시/.test(t.body.textContent));
@@ -237,6 +237,7 @@ test('unknown write, conflict, oversize, permission and empty list are actionabl
     if(m==='POST'&&p==='/v1/confluence/archives'){
       if(mode==='hang') return 'hang';
       if(mode==='conflict') return {status:409,body:{error:{code:'conflict',message:'<html>secret</html>'}}};
+      if(mode==='serverUnknown'||mode==='serverPartial') return {status:409,body:{error:{code:mode==='serverUnknown'?'write_unknown':'write_partial'}}};
       if(mode==='partial') return {status:200,body:{stored:false,pageId:'1001'}};
       if(mode==='forbidden') return {status:403,body:'<html>nope</html>'};
     }
@@ -257,6 +258,9 @@ test('unknown write, conflict, oversize, permission and empty list are actionabl
   mode='conflict'; arm(t); t.$('confluence-review-share').click(); await until(()=>/충돌했습니다/.test(t.$('confluence-review-status').textContent),'conflict');
   assert.ok(!t.body.textContent.includes('secret')); assert.equal(t.calls.filter(c=>c.method==='POST'&&c.path==='/v1/confluence/archives').length,2,'no automatic replay');
   mode='partial'; arm(t); t.$('confluence-review-share').click(); await until(()=>/확인하지 못했습니다/.test(t.$('confluence-review-status').textContent),'partial');
+  mode='serverUnknown'; arm(t); t.$('confluence-review-share').click(); await until(()=>/저장되었는지 확인하지 못했습니다/.test(t.$('confluence-review-status').textContent),'server unknown');
+  assert.ok(!/충돌했습니다/.test(t.$('confluence-review-status').textContent));
+  mode='serverPartial'; arm(t); t.$('confluence-review-share').click(); await until(()=>/미완성 상태/.test(t.$('confluence-review-status').textContent),'server partial');
   mode='forbidden'; arm(t); t.$('confluence-review-share').click(); await until(()=>/권한이 없습니다/.test(t.$('confluence-review-status').textContent),'permission');
   assert.ok(!t.body.textContent.includes('nope'));
   mode='oversize'; const postsBefore=t.calls.filter(c=>c.path==='/v1/confluence/archives'&&c.method==='POST').length; arm(t); t.$('confluence-review-share').click(); await until(()=>/UTF-8 크기 한도/.test(t.$('confluence-review-status').textContent),'oversize');
@@ -398,6 +402,7 @@ test('temporary view stays out of the ledger until explicit close, disconnect or
   const before=JSON.stringify(t.lab.db); openSaved(t,'confluence-review-list');
   await until(()=>t.lab.calls.includes('closeArchive')===false&&t.lab.calls.some(c=>c[0]==='open')&&t.$('confluence-review-close-temp').hidden===false,'opened');
   assert.match(t.$('confluence-review-status').textContent,/팀 공유를 누르기 전에는 저장되지 않습니다/);
+  assert.ok([...t.body.walk()].some(n=>n.classList.contains('confluence-temporary')&&n.textContent.includes('임시 열람 중')));
   assert.equal(t.location.hash,'#review');
   assert.equal(JSON.stringify(t.lab.db),before); assert.equal(t.store.get(LEDGER_KEY).includes('blue-1'),false);
   t.$('evaluation-run').value='blue-1'; t.$('confluence-review-consent').checked=true; t.$('confluence-review-consent').change();
@@ -414,6 +419,8 @@ test('temporary view stays out of the ledger until explicit close, disconnect or
     await until(()=>t.lab.calls.filter(c=>c==='closeArchive').length>=2&&t.$('confluence-review-close-temp').hidden===true,'expired');
   }finally{t.ctx.Date.now=realNow;}
   assert.equal(JSON.stringify(t.lab.db),before); assert.equal(t.location.hash,'#review');
+  assert.ok(!t.$('confluence-review-list').textContent.includes('Synthetic blue'),'expired team metadata is cleared too');
+  t.$('confluence-review-load').click(); await until(()=>t.$('confluence-review-list').textContent.includes('Synthetic blue'),'fetch fresh list after expiry');
   openSaved(t,'confluence-review-list');
   await until(()=>t.lab.calls.filter(c=>c[0]==='open').length===3,'opened again');
   assert.equal(t.$('confluence-review-close-temp').hidden,false);
@@ -447,6 +454,23 @@ test('list and auth aborts use their own budgets and do not publish',async()=>{
   await until(()=>auth.opened.length===1&&/확인하지 못했습니다|자동으로 다시 시도하지 않습니다/.test(auth.$('confluence-review-status').textContent),'auth timeout');
   assert.ok(auth.timers.includes(15000)); assert.equal(auth.timers.includes(90000),false);
   assert.equal(auth.opened[0].closed,true); assert.equal(auth.store.has(SESSION_KEY),false); assert.equal(auth.$('confluence-review-connect').disabled,false);
+});
+
+test('sealed pagination cursors survive and team-list metadata expires without an open case',async()=>{
+  const api=teamApi(),cursor='A'.repeat(700);
+  const t=setup({routes:(m,p,init)=>{
+    if(m==='GET'&&p==='/v1/confluence/archives')return {status:200,body:{items:[{pageId:'1001',title:'Cached team title',webUrl:'https://falsify.atlassian.net/wiki/spaces/Falsify/pages/1001'}],nextCursor:cursor}};
+    if(m==='GET'&&p.startsWith('/v1/confluence/archives?')){assert.equal(new URL(BASE+p).searchParams.get('cursor'),cursor);return {status:200,body:{items:[],nextCursor:null}};}
+    return api.routes(m,p,init);
+  }});
+  await t.ready;await connect(t);t.$('confluence-review-load').click();
+  await until(()=>!t.$('confluence-review-more').hidden,'sealed next page');
+  t.$('confluence-review-more').click();await until(()=>t.calls.some(c=>c.path.includes('?cursor='))&&t.$('confluence-review-more').hidden,'next page');
+  const realNow=t.ctx.Date.now.bind(t.ctx.Date),start=realNow();
+  t.ctx.Date.now=()=>start+12*60*60*1000+50;
+  try{t.$('confluence-review-consent').change();await until(()=>!t.$('confluence-review-list').textContent.includes('Cached team title'),'cache cleared');}
+  finally{t.ctx.Date.now=realNow;}
+  assert.ok(t.lab.calls.includes('closeArchive'));assert.equal(t.store.get(LEDGER_KEY).includes('keep-local'),true);
 });
 
 test('styles keep the airport tokens and do not paint an online lamp',()=>{
