@@ -29,9 +29,11 @@ class ParserTests(unittest.TestCase):
     def test_port_only_and_pairing_form(self):
         self.assertEqual(pairing.parse_connect_uri('falsify://connect?port=7816')['port'], 7816)
         self.assertFalse(pairing.parse_connect_uri('falsify://connect/?port=65535')['pairing'])
+        link_proof = pairing.proof_commitment(PROOF)
         parsed = pairing.parse_connect_uri(
-            'falsify://connect?port=7816&challenge=%s&state=%s&proof=%s' % (CHALLENGE, STATE, PROOF))
-        self.assertEqual(parsed, {'port': 7816, 'challenge': CHALLENGE, 'state': STATE, 'proof': PROOF, 'pairing': True})
+            'falsify://connect?port=7816&challenge=%s&state=%s&proof=%s' % (CHALLENGE, STATE, link_proof))
+        self.assertEqual(parsed, {'port': 7816, 'challenge': CHALLENGE, 'state': STATE, 'proof': link_proof, 'pairing': True})
+        self.assertNotIn(PROOF, 'falsify://connect?port=7816&challenge=%s&state=%s&proof=%s' % (CHALLENGE, STATE, link_proof))
         parsed = pairing.parse_connect_uri(
             'falsify://connect/?port=1024&challenge=%s&state=%s&proof=%s' % (CHALLENGE, STATE, PROOF))
         self.assertTrue(parsed['pairing'])
@@ -74,31 +76,59 @@ class StoreTests(unittest.TestCase):
             pairing.PairingStore(repo / 'app' / 'dist' / 'pairing')
         with tempfile.TemporaryDirectory() as tmp:
             store = pairing.PairingStore(Path(tmp) / 'pair').ensure_key()
-            self.assertEqual(stat.S_IMODE(store.key_path.stat().st_mode), 0o600)
-            self.assertEqual(stat.S_IMODE(store.directory.stat().st_mode), 0o700)
             self.assertEqual(len(store.key_path.read_bytes()), 32)
-            os.chmod(store.key_path, 0o644)
-            with self.assertRaises(pairing.PairingError):
-                pairing.PairingStore(store.directory).ensure_key()
+            if os.name == 'nt':
+                sid = pairing._windows_user_sid()
+                self.assertTrue(pairing.windows_dacl_is_current_user(pairing._windows_saved_dacl(store.key_path), sid, False))
+                self.assertTrue(pairing.windows_dacl_is_current_user(pairing._windows_saved_dacl(store.directory), sid, True))
+                import subprocess
+                completed = subprocess.run(['icacls', str(store.key_path), '/grant', '*S-1-1-0:R'], check=False, capture_output=True, text=True)
+                self.assertEqual(completed.returncode, 0)
+                with self.assertRaises(pairing.PairingError):
+                    pairing.PairingStore(store.directory).ensure_key()
+            else:
+                self.assertEqual(stat.S_IMODE(store.key_path.stat().st_mode), 0o600)
+                self.assertEqual(stat.S_IMODE(store.directory.stat().st_mode), 0o700)
+                os.chmod(store.key_path, 0o644)
+                with self.assertRaises(pairing.PairingError):
+                    pairing.PairingStore(store.directory).ensure_key()
+
+    def test_windows_acl_parser_requires_only_the_current_user(self):
+        sid = 'S-1-5-21-1-2-3-1001'
+        self.assertTrue(pairing.windows_dacl_is_current_user('D:P(A;;FA;;;%s)' % sid, sid, False))
+        self.assertTrue(pairing.windows_dacl_is_current_user('D:P(A;OICI;FA;;;%s)' % sid, sid, True))
+        self.assertFalse(pairing.windows_dacl_is_current_user('D:P(A;;FA;;;%s)' % sid, sid, True))
+        self.assertFalse(pairing.windows_dacl_is_current_user('D:P(A;;FA;;;%s)(A;;FR;;;WD)' % sid, sid, False))
+        self.assertFalse(pairing.windows_dacl_is_current_user('D:AI(A;ID;FA;;;%s)' % sid, sid, False))
+        self.assertFalse(pairing.windows_dacl_is_current_user('D:P(A;ID;FA;;;%s)' % sid, sid, False))
+        self.assertFalse(pairing.windows_dacl_is_current_user('D:P(A;;FA;;;SY)', sid, False))
+        self.assertFalse(pairing.windows_dacl_is_current_user('D:(A;;FA;;;%s)' % sid, sid, False))
+        self.assertEqual(pairing.RECONNECT_TTL, 12 * 60 * 60)
 
     def test_restart_keeps_credential_and_drops_pending(self):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp) / 'pair'
             clock = {'now': 1_000_000.0}
             store = pairing.PairingStore(directory, clock=lambda: clock['now']).ensure_key()
-            store.register(CHALLENGE, STATE, PROOF, WEB, 7816)
+            link_proof = pairing.proof_commitment(PROOF)
+            self.assertNotEqual(link_proof, PROOF)
+            store.register(CHALLENGE, STATE, link_proof, WEB, 7816)
             clock['now'] += 10
+            issued_at = clock['now']
             issued = store.redeem(CHALLENGE, STATE, PROOF, WEB, 7816)
+            self.assertNotIn(PROOF, issued['credential'])
             pending = pairing.PairingStore(directory, clock=lambda: clock['now']).ensure_key()
-            pending.register(OTHER, STATE, PROOF, WEB, 7816)
+            pending.register(OTHER, STATE, pairing.proof_commitment(OTHER), WEB, 7816)
             restarted = pairing.PairingStore(directory, clock=lambda: clock['now']).ensure_key()
             status = restarted.status(issued['credential'], WEB, 7816)
             self.assertTrue(status['paired'])
             self.assertEqual(status['via'], 'reconnect')
             with self.assertRaises(pairing.PairingError) as pending_error:
-                restarted.redeem(OTHER, STATE, PROOF, WEB, 7816)
+                restarted.redeem(OTHER, STATE, OTHER, WEB, 7816)
             self.assertEqual(pending_error.exception.code, 'unknown_challenge')
-            clock['now'] += pairing.RECONNECT_TTL
+            clock['now'] = issued_at + 60 * 60
+            self.assertTrue(restarted.status(issued['credential'], WEB, 7816)['paired'])
+            clock['now'] = issued_at + pairing.RECONNECT_TTL
             with self.assertRaises(pairing.PairingError) as expired:
                 restarted.status(issued['credential'], WEB, 7816)
             self.assertEqual(expired.exception.code, 'expired')
@@ -145,7 +175,9 @@ class HttpPairingTests(Client, unittest.TestCase):
         self.thread.join(timeout=5)
         self.tmp.cleanup()
 
-    def launcher(self, challenge=CHALLENGE, state=STATE, proof=PROOF, token=True):
+    def launcher(self, challenge=CHALLENGE, state=STATE, proof=None, token=True):
+        if proof is None:
+            proof = pairing.proof_commitment(PROOF)
         return self.call(pairing.REGISTER_PATH, 'POST', {
             'schema': pairing.REGISTER_SCHEMA, 'challenge': challenge, 'state': state, 'proof': proof,
         }, headers={'X-Falsify-Launcher': '1'}, origin=None, token=token)
@@ -166,6 +198,8 @@ class HttpPairingTests(Client, unittest.TestCase):
         self.assertNotIn(server.TOKEN, json.dumps(data))
         self.assertTrue(data['registered'])
         status, _, data = self.redeem(proof=OTHER)
+        self.assertEqual((status, data['error']), (403, 'wrong_proof'))
+        status, _, data = self.redeem(proof=pairing.proof_commitment(PROOF))
         self.assertEqual((status, data['error']), (403, 'wrong_proof'))
         status, headers, data = self.redeem(origin='https://attacker.example')
         self.assertEqual((status, data['error']), (403, 'wrong_origin'))
@@ -217,7 +251,7 @@ class HttpPairingTests(Client, unittest.TestCase):
             restarted.status(credential, WEB, self.port)
         self.assertEqual(error.exception.code, 'revoked')
         self.http.pairing.clock = lambda: 10_000_000_000
-        self.assertEqual(self.launcher(challenge=OTHER)[0], 200)
+        self.assertEqual(self.launcher(challenge=OTHER, proof=pairing.proof_commitment(OTHER))[0], 200)
         self.http.pairing.clock = lambda: 10_000_000_000 + pairing.PENDING_TTL + 1
         status, _, data = self.redeem(challenge=OTHER)
         self.assertEqual((status, data['error']), (403, 'expired'))

@@ -1,9 +1,11 @@
 """One-time click pairing for the fixed hosted origin.
 
-The custom protocol carries a port and three one-time nonces (challenge, state, proof).
-It never carries a bearer token, password, or command. The local launcher approves the
-fixed web origin, then registers that exact triple. Only a browser request from that
-origin can redeem it, once, for a short-lived reconnect credential.
+The custom protocol carries a port, challenge, state, and the SHA-256 commitment of a
+proof verifier. It never carries the raw verifier, a bearer token, a password, or a
+command. The local launcher approves the fixed web origin, then registers that
+commitment. Only a browser request from that origin can redeem it, once, by presenting
+the raw verifier. The reconnect credential lasts 12 hours in the same tab and is revoked
+explicitly. It does not start a model.
 
 The reconnect credential is not the server process token. The process token stays on
 the loopback launcher channel. The signing key lives outside the repository checkout.
@@ -33,7 +35,7 @@ REDEEM_SCHEMA = 'falsify.pair-redeem.v1'
 STATUS_SCHEMA = 'falsify.pair-status.v1'
 REVOKE_SCHEMA = 'falsify.pair-revoke.v1'
 PENDING_TTL = 120
-RECONNECT_TTL = 900
+RECONNECT_TTL = 12 * 60 * 60
 NONCE_RE = re.compile(r'[A-Za-z0-9_-]{43}')
 PORT_RE = r'([1-9][0-9]{3,4})'
 # Fixed query order. No percent-decoding, extra keys, fragments, userinfo or commands.
@@ -79,6 +81,21 @@ def _no_duplicates(items):
 
 def _nonce(value):
     return isinstance(value, str) and NONCE_RE.fullmatch(value) is not None
+
+
+def proof_commitment(verifier):
+    """Unpadded base64url SHA-256 of the redeem verifier.
+
+    The link and /api/pair/register carry only this commitment. The raw verifier stays
+    in the page and is sent once to /api/pair/redeem. Query names and length stay the
+    strict 43-character form so existing parsers keep accepting the link.
+    """
+    if not _nonce(verifier):
+        raise PairingError('invalid_request')
+    text = _b64url(hashlib.sha256(verifier.encode('ascii')).digest())
+    if not _nonce(text) or text == verifier:
+        raise PairingError('invalid_request')
+    return text
 
 
 def _port(value):
@@ -136,18 +153,132 @@ def _mode(path):
     return stat.S_IMODE(path.stat().st_mode)
 
 
-def _tighten(path, directory):
+# SDDL aliases icacls may emit. Unknown principals fail closed rather than being trusted.
+_SDDL_ALIASES = {
+    'AN': 'S-1-5-7', 'AO': 'S-1-5-32-548', 'AU': 'S-1-5-11', 'BA': 'S-1-5-32-544',
+    'BG': 'S-1-5-32-546', 'BU': 'S-1-5-32-545', 'CG': 'S-1-3-1', 'CO': 'S-1-3-0',
+    'IU': 'S-1-5-4', 'LS': 'S-1-5-19', 'NS': 'S-1-5-20', 'NU': 'S-1-5-2',
+    'OW': 'S-1-3-4', 'RC': 'S-1-5-12', 'SU': 'S-1-5-6', 'SY': 'S-1-5-18', 'WD': 'S-1-1-0',
+}
+_ACE_RE = re.compile(r'\(([A-Z]+);([^;]*);([^;]*);([^;]*);([^;]*);([^)]+)\)')
+
+
+def windows_dacl_is_current_user(sddl, user_sid, directory):
+    """True only for one protected allow ACE granting the current user full control."""
+    if not isinstance(sddl, str) or not isinstance(user_sid, str) or not user_sid.startswith('S-1-'):
+        return False
+    if not sddl.startswith('D:'):
+        return False
+    rest = sddl[2:]
+    flags = []
+    while rest and rest[0] != '(':
+        flags.append(rest[0])
+        rest = rest[1:]
+    if 'P' not in flags:
+        return False
+    aces = list(_ACE_RE.finditer(rest))
+    if len(aces) != 1 or aces[0].end() != len(rest):
+        return False
+    ace_type, ace_flags, rights, _obj, _inherit, sid = aces[0].groups()
+    if ace_type != 'A' or 'ID' in ace_flags:
+        return False
+    if sid != user_sid:
+        return False
+    if rights not in ('FA', '0x1f01ff', '0X1F01FF'):
+        return False
+    if directory and ('OI' not in ace_flags or 'CI' not in ace_flags):
+        return False
+    if not directory and ('OI' in ace_flags or 'CI' in ace_flags):
+        return False
+    return True
+
+
+def _sddl_aces(sddl):
+    if not isinstance(sddl, str) or not sddl.startswith('D:'):
+        return []
+    rest = sddl[2:]
+    while rest and rest[0] != '(':
+        rest = rest[1:]
+    found = []
+    for ace in _ACE_RE.finditer(rest):
+        sid = ace.group(6)
+        found.append(_SDDL_ALIASES.get(sid, sid))
+    return found
+
+
+def _run_icacls(args):
+    import subprocess
+    completed = subprocess.run(['icacls', *args], check=False, capture_output=True, text=True)
+    if completed.returncode != 0:
+        raise PairingError('pairing_store_permissions')
+    return completed.stdout or ''
+
+
+def _windows_user_sid():
+    import csv
+    import subprocess
+    completed = subprocess.run(['whoami', '/user', '/fo', 'csv', '/nh'], check=False, capture_output=True, text=True)
+    if completed.returncode != 0 or not completed.stdout.strip():
+        raise PairingError('pairing_store_permissions')
+    try:
+        row = next(csv.reader([completed.stdout.strip().splitlines()[-1]]))
+    except (StopIteration, csv.Error):
+        raise PairingError('pairing_store_permissions') from None
+    sid = row[-1].strip() if row else ''
+    if not sid.startswith('S-1-') or sid in _SDDL_ALIASES.values():
+        raise PairingError('pairing_store_permissions')
+    return sid
+
+
+def _windows_saved_dacl(path):
+    tmp = Path(str(path) + '.acl')
+    try:
+        _run_icacls([str(path), '/save', str(tmp), '/Q'])
+        raw = tmp.read_bytes()
+        for encoding in ('utf-16', 'utf-8-sig', 'utf-8'):
+            try:
+                text = raw.decode(encoding)
+            except UnicodeError:
+                continue
+            for line in text.splitlines():
+                line = line.strip()
+                if line.startswith('D:'):
+                    return line
+        raise PairingError('pairing_store_permissions')
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+def _windows_restrict(path, directory, sid):
+    """Replace the DACL with the current user only, then require that result."""
+    _run_icacls([str(path), '/inheritance:r', '/Q'])
+    rights = ':(OI)(CI)F' if directory else ':F'
+    _run_icacls([str(path), '/grant:r', '*' + sid + rights, '/Q'])
+    for other in _sddl_aces(_windows_saved_dacl(path)):
+        if other != sid:
+            _run_icacls([str(path), '/remove', '*' + other, '/Q'])
+    if not windows_dacl_is_current_user(_windows_saved_dacl(path), sid, directory):
+        raise PairingError('pairing_store_permissions')
+
+
+def _assert_private(path, directory):
     if os.name == 'nt':
-        os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
-        user = os.environ.get('USERNAME')
-        if user:
-            grant = f'{user}:(OI)(CI)F' if directory else f'{user}:F'
-            import subprocess
-            subprocess.run(['icacls', str(path), '/inheritance:r', '/grant:r', grant], check=False, capture_output=True)
+        if not windows_dacl_is_current_user(_windows_saved_dacl(path), _windows_user_sid(), directory):
+            raise PairingError('pairing_store_permissions')
         return
-    os.chmod(path, 0o700 if directory else 0o600)
     if _mode(path) & 0o077:
         raise PairingError('pairing_store_permissions')
+
+
+def _restrict_new(path, directory):
+    if os.name == 'nt':
+        _windows_restrict(path, directory, _windows_user_sid())
+        return
+    os.chmod(path, 0o700 if directory else 0o600)
+    _assert_private(path, directory)
 
 
 class PairingStore:
@@ -167,24 +298,24 @@ class PairingStore:
     def ensure_key(self):
         existed = self.directory.exists()
         self.directory.mkdir(parents=True, exist_ok=True)
-        if existed and os.name != 'nt' and _mode(self.directory) & 0o077:
-            raise PairingError('pairing_store_permissions')
-        _tighten(self.directory, True)
+        if existed:
+            _assert_private(self.directory, True)
+        else:
+            _restrict_new(self.directory, True)
         if self.key_path.exists():
-            if os.name != 'nt' and _mode(self.key_path) & 0o077:
-                raise PairingError('pairing_store_permissions')
+            _assert_private(self.key_path, False)
         else:
             fd = os.open(self.key_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             try:
                 os.write(fd, os.urandom(32))
             finally:
                 os.close(fd)
-        _tighten(self.key_path, False)
+            _restrict_new(self.key_path, False)
         key = self.key_path.read_bytes()
         if len(key) != 32:
             raise PairingError('pairing_store_permissions')
-        if os.name != 'nt' and _mode(self.key_path) & 0o077:
-            raise PairingError('pairing_store_permissions')
+        _assert_private(self.key_path, False)
+        _assert_private(self.directory, True)
         self._key = key
         self._load_revocations()
         return self
@@ -193,7 +324,7 @@ class PairingStore:
         if not self.revoke_path.exists():
             self._revoked = {}
             return
-        _tighten(self.revoke_path, False)
+        _assert_private(self.revoke_path, False)
         try:
             data = json.loads(self.revoke_path.read_text(encoding='utf-8'), object_pairs_hook=_no_duplicates)
         except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
@@ -214,7 +345,7 @@ class PairingStore:
         finally:
             os.close(fd)
         os.replace(tmp, self.revoke_path)
-        _tighten(self.revoke_path, False)
+        _restrict_new(self.revoke_path, False)
 
     def _prune(self, now):
         # Pending records stay until redeem classifies them as expired. Used and revoked ids age out.
@@ -265,7 +396,7 @@ class PairingStore:
                 raise PairingError('wrong_origin')
             if current['port'] != port:
                 raise PairingError('port_mismatch')
-            if not hmac.compare_digest(current['proof'], proof):
+            if not hmac.compare_digest(current['proof'], proof_commitment(proof)):
                 raise PairingError('wrong_proof')
             if not hmac.compare_digest(current['state'], state):
                 raise PairingError('wrong_state')

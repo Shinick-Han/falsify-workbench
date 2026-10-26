@@ -23,18 +23,13 @@ pairing=$2
 challenge=${3-}
 state=${4-}
 proof=${5-}
-py=$root/.venv/bin/python
-if [ ! -x "$py" ]; then
-  py=$(command -v python3 || true)
-fi
 
 if [ "$pairing" = 0 ]; then
   if [ "${FALSIFY_CONNECT_DRY_RUN:-}" = 1 ]; then
     echo "DRY-RUN start-companion port=$port"
     exit 0
   fi
-  if [ -z "$py" ]; then
-    echo 'Python 3 is not available. Nothing was started.' >&2
+  if ! py=$(falsify_project_python "$root"); then
     exit 1
   fi
   exec "$py" "$root/app/local/server.py" --port "$port" --web-origin "$(falsify_fixed_origin)"
@@ -60,8 +55,7 @@ if [ "${FALSIFY_CONNECT_DRY_RUN:-}" = 1 ]; then
   echo "DRY-RUN start-companion port=$port pairing=1"
   exit 0
 fi
-if [ -z "$py" ]; then
-  echo 'Python 3 is not available. Nothing was started.' >&2
+if ! py=$(falsify_project_python "$root"); then
   exit 1
 fi
 
@@ -96,6 +90,10 @@ if [ "$ready" != 1 ]; then
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) companion not ready on port $port. No credential was issued." >> "$logfile"
   chmod 600 "$logfile" || true
   rm -f "$err"
+  if kill -0 "$server_pid" 2>/dev/null; then
+    kill "$server_pid" 2>/dev/null || true
+    wait "$server_pid" 2>/dev/null || true
+  fi
   echo 'Companion did not become ready. The error was recorded without credentials.' >&2
   exit 1
 fi

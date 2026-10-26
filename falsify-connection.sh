@@ -43,6 +43,42 @@ falsify_ask_visible() {
   return 1
 }
 
+# Prints the project .venv interpreter. Creates the venv when it is missing.
+# Does not install packages, does not kill processes, and does not claim the companion is ready.
+# When FALSIFY_PYTHON is set, including empty, it is the only base interpreter used.
+falsify_project_python() {
+  local root py base
+  root=$1
+  py=$root/.venv/bin/python
+  if [ ! -x "$py" ]; then
+    if [ -n "${FALSIFY_PYTHON+x}" ]; then
+      base=$FALSIFY_PYTHON
+    else
+      base=$(command -v python3 || true)
+    fi
+    if [ -z "$base" ] || [ ! -x "$base" ]; then
+      echo 'Python 3 was not found. Install Python 3, then run: python3 -m venv .venv && .venv/bin/python -m pip install -r app/local/requirements.txt' >&2
+      echo 'The companion was not started.' >&2
+      return 1
+    fi
+    echo "Setup: creating project-local virtual environment $root/.venv" >&2
+    if ! "$base" -m venv "$root/.venv"; then
+      echo 'Could not create .venv. The companion was not started.' >&2
+      return 1
+    fi
+  fi
+  if [ ! -x "$py" ]; then
+    echo 'The project virtual environment has no interpreter. The companion was not started.' >&2
+    return 1
+  fi
+  if ! "$py" -c 'import jsonschema' >/dev/null 2>&1; then
+    echo 'Python dependency jsonschema is missing from .venv. Run: .venv/bin/python -m pip install -r app/local/requirements.txt' >&2
+    echo 'The companion was not started and is not ready.' >&2
+    return 1
+  fi
+  printf '%s\n' "$py"
+}
+
 # Prints "port pairing" or "port pairing challenge state proof". pairing is 0 or 1.
 falsify_parse_uri() {
   uri=$1
