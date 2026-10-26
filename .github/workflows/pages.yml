@@ -35,6 +35,20 @@ jobs:
           ui_server_pid=$!
           trap 'kill "$ui_server_pid"' EXIT
           npm run test:browser --prefix app
+      - name: Browser PDF MuPDF contracts
+        working-directory: app
+        run: |
+          set -euo pipefail
+          npm ci
+          npx playwright install chromium
+          chrome="$(node --input-type=module -e "import {chromium} from 'playwright'; const path=chromium.executablePath(); if(!path) process.exit(1); process.stdout.write(path);")"
+          test -x "$chrome"
+          if [ ! -x /usr/bin/google-chrome ]; then
+            sudo ln -sfn "$chrome" /usr/bin/google-chrome
+          fi
+          export FALSIFY_CHROME_EXECUTABLE="${FALSIFY_CHROME_EXECUTABLE:-/usr/bin/google-chrome}"
+          node --test --test-reporter=tap tests/browser-pdf.spec.mjs | tee "$RUNNER_TEMP/browser-pdf.tap"
+          node ../scripts/assert-browser-pdf-executed.mjs "$RUNNER_TEMP/browser-pdf.tap"
       - name: Portable BLUE sources (offline only)
         run: |
           python app/examples/evidence_blue_v033/build_profile.py
@@ -68,7 +82,7 @@ jobs:
       - name: Companion restart and reconnect contracts (PowerShell 7)
         shell: pwsh
         run: ./scripts/test-companion-lifecycle.ps1
-      - name: Connection launcher dry-run contracts (Windows PowerShell)
+      - name: Connection launcher dry-run contracts (Windows PowerShell 5.1)
         shell: powershell
         run: ./scripts/test-connection.ps1
       - name: PDF editor startup configuration (Windows PowerShell)
@@ -77,8 +91,59 @@ jobs:
       - name: Companion restart and reconnect contracts (Windows PowerShell)
         shell: powershell
         run: ./scripts/test-companion-lifecycle.ps1
+  verify-macos-arm:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Portable POSIX connection tests
+        run: bash scripts/test-posix-connection.sh
+      - name: Real macOS handler bundle, only when the script exists
+        id: macos-bundle
+        run: |
+          set -euo pipefail
+          if [ -f scripts/test-macos-handler-bundle.sh ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "scripts/test-macos-handler-bundle.sh is absent; this does not record a bundle-test pass."
+          fi
+      - name: Run real macOS handler bundle test
+        if: steps.macos-bundle.outputs.present == 'true'
+        run: bash scripts/test-macos-handler-bundle.sh
+  verify-macos-intel:
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Portable POSIX connection tests
+        run: bash scripts/test-posix-connection.sh
+      - name: Real macOS handler bundle, only when the script exists
+        id: macos-bundle
+        run: |
+          set -euo pipefail
+          if [ -f scripts/test-macos-handler-bundle.sh ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "scripts/test-macos-handler-bundle.sh is absent; this does not record a bundle-test pass."
+          fi
+      - name: Run real macOS handler bundle test
+        if: steps.macos-bundle.outputs.present == 'true'
+        run: bash scripts/test-macos-handler-bundle.sh
   deploy:
-    needs: [verify, verify-windows-launcher]
+    if: github.ref == 'refs/heads/main'
+    needs: [verify, verify-windows-launcher, verify-macos-arm, verify-macos-intel]
     runs-on: ubuntu-latest
     permissions:
       pages: write
