@@ -1,4 +1,4 @@
-/* Optional team records on the configured server, readable only by signed-in invited members. The local ledger stays authoritative: nothing uploads, migrates or clears automatically, and server records never enter RED/BLUE requests. */
+/* Optional team records on the configured server, readable only by signed-in invited members. The local ledger stays authoritative: nothing uploads, migrates or clears automatically, and server records never enter RED/BLUE requests. A separate control inside #human-evaluation can privately store one selected run's restore bundle for the same account; it never uploads the whole ledger on sign-in. */
 (function(){
   'use strict';
   // INVITE is the operator-issued single-use code (fsi_ + 32 random bytes base64url). It is only ever held in its field and the one register body.
@@ -39,15 +39,16 @@
     if(s>=500)return '공유 서버 오류입니다. 잠시 후 다시 시도하세요.';
     return '공유 서버 응답을 해석하지 못했습니다.';}
   const validRecord=r=>!!r&&typeof r==='object'&&typeof r.id==='string'&&!!r.id&&r.id.length<=80&&Object.hasOwn(KINDS,r.kind)&&['private','shared'].includes(r.visibility)&&!!r.owner&&typeof r.owner==='object'&&typeof r.owner.id==='string'&&Number.isInteger(r.revision)&&!!r.payload&&typeof r.payload==='object'&&!Array.isArray(r.payload);
+  const hasBundle=r=>validRecord(r)&&r.kind==='run'&&Object.hasOwn(r.payload,'restoreBundle');
 
   function create(host,deps){
     const cfg=deps.config??globalThis.FalsifyCloudConfig,storage=deps.storage??globalThis.localStorage,fetcher=deps.fetch??globalThis.fetch?.bind(globalThis),lab=deps.lab??globalThis.FalsifyLab;
     const base=parseBase(cfg?.apiBase),hostName=base?new URL(base).host:'';
     // epoch changes whenever server-derived state is purged, so a response that arrives after sign-out is dropped instead of re-filling the screen.
-    let session=null,expired=false,denied=false,memoryOnly=false,lastUser='',scope='shared',kind='',shown=[],cursor=null,loaded=false,snapshot=null,confirming=null,confirmingRevoke=false,previewed=null,reviewTarget=null,uploadSeq=0,reviewSeq=0,coreP=null,compared=false,userField=null,fields=null,passwordFields=null,epoch=0;
+    let session=null,expired=false,denied=false,memoryOnly=false,lastUser='',scope='shared',kind='',shown=[],cursor=null,loaded=false,snapshot=null,confirming=null,confirmingRevoke=false,previewed=null,reviewTarget=null,uploadSeq=0,reviewSeq=0,coreP=null,compared=false,userField=null,fields=null,passwordFields=null,epoch=0,accountReview=null,accountRuns=[],accountCursor=null,accountLoaded=false,consentedId='';
     // localIds keeps only my runs' local IDs (absent from list projections) so a local review can link to a run uploaded elsewhere.
     // controls maps 'recordId action' to the buttons of the current render so focus can follow a re-render.
-    const seen=new Map(),localIds=new Map(),controls=new Map(),busy={list:false,auth:false,upload:false,review:false,op:false},upload={body:null},review={body:null};
+    const seen=new Map(),localIds=new Map(),controls=new Map(),busy={list:false,auth:false,upload:false,review:false,op:false,accountList:false,accountSave:false,accountRestore:false},upload={body:null},review={body:null};
     const core=()=>coreP??=(deps.core?Promise.resolve(deps.core):globalThis.FalsifyCloudCore?Promise.resolve(globalThis.FalsifyCloudCore):import(new URL('cloud-records-core.mjs',script?.src||location.href).href)).catch(()=>{coreP=null;throw local('공유 기록 검증 모듈을 불러오지 못했습니다. 새로고침 후 다시 시도하세요.');});
     const ownedBy=r=>!!session&&r.owner.id===session.author.id;
 
@@ -59,7 +60,7 @@
     // Team records are member-only, so signing out or losing the session drops every server record held in memory with the
     // comparison, the review composer and any upload preview built from them. The local ledger is never touched.
     function forget(){session=null;confirmingRevoke=false;passwordFields=null;try{storage.removeItem(SESSION_KEY);}catch{}epoch++;seen.clear();localIds.clear();shown=[];cursor=null;loaded=false;scope='shared';confirming=null;previewed=null;compared=false;
-      compareOut.replaceChildren();closeReview();fillItems();connection.textContent='서버 '+hostName+' · 아직 불러오지 않음';}
+      compareOut.replaceChildren();closeReview();fillItems();connection.textContent='서버 '+hostName+' · 아직 불러오지 않음';accountReview?.clear();}
     function onSignedOut(flag){if(!session)return;forget();if(flag==='denied')denied=true;else expired=true;account.open=true;renderAccount();setBusy();renderList();}
     const live=at=>at===epoch&&!!session;
 
@@ -133,7 +134,7 @@
     if(!base){connection.textContent=base===null?'꺼짐 · 서버 주소 설정 오류':'꺼짐 · 서버 미설정';for(const e of [toolbar,account,more,uploadBox,compareBox])e.hidden=true;
       say(base===null?'공유 서버 주소 설정이 올바르지 않아 꺼 두었습니다. 로컬 기록은 그대로 사용합니다.':'공유 서버가 설정되지 않아 꺼져 있습니다. 로컬 기록은 그대로 사용합니다.');return {root,enabled:false};}
 
-    function setBusy(){refresh.disabled=more.disabled=kindSelect.disabled=busy.list;refreshTabs();refreshSend();refreshReview();}
+    function setBusy(){refresh.disabled=more.disabled=kindSelect.disabled=busy.list;refreshTabs();refreshSend();refreshReview();accountReview?.refresh();}
     function refreshTabs(){if(!session&&scope==='mine'){scope='shared';shown=[];cursor=null;loaded=false;renderList();}
       tabShared.setAttribute('aria-pressed',String(scope==='shared'));tabMine.setAttribute('aria-pressed',String(scope==='mine'));tabShared.disabled=tabMine.disabled=busy.list;}
     // Signed out, '내 기록' stays reachable and explains itself: it opens the sign-in form and requests nothing.
@@ -146,7 +147,7 @@
       const q=new URLSearchParams({scope});if(kind)q.set('kind',kind);if(append&&cursor)q.set('cursor',cursor);
       const at=epoch;busy.list=true;setBusy();say(append?'더 불러오는 중…':'불러오는 중…');
       try{const data=await api('GET','/v1/records?'+q,{auth:true});if(!live(at))return;const raw=Array.isArray(data.records)?data.records.slice(0,200):[],good=raw.filter(validRecord);
-        if(!append)shown=[];for(const r of good){shown=shown.filter(x=>x.id!==r.id);shown.push(r);seen.set(r.id,r);}
+        if(!append)shown=[];for(const r of good){const merged=remember(r);shown=shown.filter(x=>x.id!==merged.id);shown.push(merged);}
         cursor=typeof data.nextCursor==='string'&&data.nextCursor&&data.nextCursor.length<=512?data.nextCursor:null;loaded=true;
         connection.textContent='서버 '+hostName+' · '+new Date().toLocaleTimeString('ko-KR',{hour:'2-digit',minute:'2-digit'})+' 불러옴';
         say((scope==='mine'?'내':'공유')+' 기록 '+shown.length+'건'+(cursor?' · 더 있음':'')+(good.length<raw.length?' · 형식이 맞지 않는 '+(raw.length-good.length)+'건 제외':''));
@@ -158,7 +159,7 @@
     function recordView(r){
       const p=r.payload,mine=ownedBy(r),rows=[['작성자',str(r.owner.displayName,80)+(r.owner.username?' (@'+str(r.owner.username,40)+')':'')+' · 자기 보고 이름'],['서버 기록',[when(r.createdAt),' · 버전 '+r.revision]]];let title;
       if(r.kind==='harness'){const c=p.config&&typeof p.config==='object'?p.config:{};title=str(c.name,120)+' · '+str(c.role,10).toUpperCase()+' · v'+str(c.version,40);rows.push(['내용 해시',short(p.hash)]);if(p.parentHash)rows.push(['이전 버전',short(p.parentHash)]);}
-      else if(r.kind==='run'){title=str(p.role,10).toUpperCase()+' 실행 · '+str(p.model,120);rows.push(['결과',(STATUSES[p.status]||str(p.status,20))+' · 호출 '+str(p.calls)+' / 예산 '+str(p.maxCalls)],['조건','입력 '+short(p.sourceHash)+' · 난이도 '+str(p.level)+' · 프로토콜 '+str(p.protocolVersion,80)+' · 사례 '+str(p.caseLabel,160)],['Harness',short(p.harnessHash)],['출처(보고)',str(p.provenance,60)],['실행 시각(보고)',when(p.createdAt)]);if(p.evidence)rows.push(['증거','비공개 원문 포함 · 작성자만 봄']);}
+      else if(r.kind==='run'){title=str(p.role,10).toUpperCase()+' 실행 · '+str(p.model,120);rows.push(['결과',(STATUSES[p.status]||str(p.status,20))+' · 호출 '+str(p.calls)+' / 예산 '+str(p.maxCalls)],['조건','입력 '+short(p.sourceHash)+' · 난이도 '+str(p.level)+' · 프로토콜 '+str(p.protocolVersion,80)+' · 사례 '+str(p.caseLabel,160)],['Harness',short(p.harnessHash)],['출처(보고)',str(p.provenance,60)],['실행 시각(보고)',when(p.createdAt)]);if(p.evidence)rows.push(['증거','비공개 원문 포함 · 작성자만 봄']);if(hasBundle(r))rows.push(['검수 복원','비공개 묶음이 있습니다. 원문은 이 목록에 표시하지 않으며 팀 공유로 바꿀 수 없습니다.']);}
       else{title='검수 · '+(VERDICTS[p.verdict]||str(p.verdict,20))+' · '+(p.score===null||p.score===undefined?'점수 없음':'점수 '+str(p.score)+' / 5');rows.push(['대상 실행',short(p.runId)],['조건','사례 '+str(p.caseLabel,160)+' · 프로토콜 '+str(p.protocolVersion,80)]);if(p.supersedes)rows.push(['대체한 검수',short(p.supersedes)]);}
       const dl=el('dl');for(const [k,v] of rows)dl.append(el('dt',{},k),el('dd',{},...[v].flat()));
       const selfReview=r.kind==='review'&&seen.get(p.runId)?.owner.id===r.owner.id;
@@ -171,7 +172,7 @@
       if(mine&&confirming?.id===r.id){const act=confirming.action;
         a.append(el('p',{className:'cloud-confirm'},act==='delete'?'서버에서 이 기록을 지웁니다. 로컬 기록은 그대로입니다.':act==='shared'?'공유하면 로그인한 팀 멤버 모두가 읽습니다. 인터넷 공개는 아닙니다. 실행의 비공개 증거와 로컬 ID는 공유본에서 빠집니다.':'비공개로 바꿔도 팀 멤버가 이미 받아 간 사본은 회수할 수 없습니다.'));
         actions.push(button(act==='delete'?'삭제 확인':act==='shared'?'공유 확인':'비공개 전환 확인','primary',()=>act==='delete'?remove(r):setVisibility(r,act),{disabled:busy.op,dataset:{action:'confirm'}}),button('취소','secondary',()=>cancel(r),{dataset:{action:'cancel'}}));}
-      else if(mine)actions.push(button(r.visibility==='shared'?'비공개로 전환':'공유하기','secondary',()=>ask(r,r.visibility==='shared'?'private':'shared'),{disabled:busy.op,dataset:{action:'visibility'}}),button('삭제','secondary',()=>ask(r,'delete'),{disabled:busy.op,dataset:{action:'delete'}}));
+      else if(mine){if(!(hasBundle(r)&&r.visibility==='private'))actions.push(button(r.visibility==='shared'?'비공개로 전환':'공유하기','secondary',()=>ask(r,r.visibility==='shared'?'private':'shared'),{disabled:busy.op,dataset:{action:'visibility'}}));actions.push(button('삭제','secondary',()=>ask(r,'delete'),{disabled:busy.op,dataset:{action:'delete'}}));}
       for(const b of actions)if(b.dataset.action)controls.set(r.id+' '+b.dataset.action,b);
       if(actions.length)a.append(el('div',{className:'button-row'},...actions));
       return a;}
@@ -185,7 +186,7 @@
     const recordPath=r=>'/v1/records/'+encodeURIComponent(r.id);
     async function mutate(r,origin,work,done){if(busy.op)return;const at=shown.findIndex(x=>x.id===r.id),era=epoch;busy.op=true;confirming=null;renderList();say('서버에 반영하는 중…');
       try{await work(era);say(done);}catch(e){say(explain(e,'write'),true);}finally{busy.op=false;renderList();refocus(r.id,[origin],at);}}
-    function setVisibility(r,visibility){return mutate(r,'visibility',async era=>{const data=await api('PATCH',recordPath(r),{auth:true,body:{expectedRevision:r.revision,visibility}});const rec=data.record;
+    function setVisibility(r,visibility){if(visibility==='shared'&&hasBundle(r)){confirming=null;renderList();say('비공개 검수 복원 묶음이 있는 기록은 공유할 수 없습니다. 요청하지 않았습니다. 로컬 기록은 그대로입니다.',true);return;}return mutate(r,'visibility',async era=>{const data=await api('PATCH',recordPath(r),{auth:true,body:{expectedRevision:r.revision,visibility}});const rec=data.record;
       if(!validRecord(rec)||rec.id!==r.id)throw local('서버 응답 형식이 맞지 않습니다. 다시 불러와 확인하세요.');if(!live(era))return;seen.set(rec.id,rec);shown=shown.flatMap(x=>x.id!==rec.id?[x]:scope==='shared'&&rec.visibility!=='shared'?[]:[rec]);},visibility==='shared'?'공유했습니다. 이제 로그인한 팀 멤버 모두가 읽을 수 있습니다.':'비공개로 바꿨습니다.');}
     function remove(r){return mutate(r,'delete',async era=>{await api('DELETE',recordPath(r),{auth:true,ifMatch:r.revision});if(!live(era))return;seen.delete(r.id);shown=shown.filter(x=>x.id!==r.id);},'서버에서 삭제했습니다. 로컬 기록은 그대로입니다.');}
     // One record per explicit click, always signed in: the owner gets the full private payload, other members the server's shared projection.
@@ -273,7 +274,7 @@
       if(k==='run')return str(x.role,10).toUpperCase()+' · '+str(x.model,60)+' · '+str(x.createdAt,16)+' · '+str(x.provenance,40);return (VERDICTS[x.verdict]||str(x.verdict,20))+' · '+str(x.caseLabel,60)+' · '+str(x.createdAt,16);}
     function fillItems(){const k=upKind.value,items=snapshot?.[COLLECTION[k]]||[];upRvProtocol.checked=false;
       upItem.replaceChildren(el('option',{value:''},!snapshot?'먼저 로컬 기록 읽기를 누르세요':items.length?'기록 선택':'이 종류의 로컬 기록 없음'),...items.map((x,i)=>[x,i]).reverse().map(([x,i])=>el('option',{value:String(i)},itemLabel(k,x))));upItem.value='';rebuildUpload();}
-    async function validate(c,k,payload){const v=await c.validatePayload(k,payload);if(v&&typeof v==='object'&&(v.ok===false||Array.isArray(v.errors)&&v.errors.length))throw local('올리기 전 검증 실패: '+(Array.isArray(v.errors)?v.errors.slice(0,5).map(x=>str(x,120)).join(', '):'형식 오류'));}
+    async function validate(c,k,payload,opts){const v=await c.validatePayload(k,payload,opts);if(v&&typeof v==='object'&&(v.ok===false||Array.isArray(v.errors)&&v.errors.length))throw local('올리기 전 검증 실패: '+(Array.isArray(v.errors)?v.errors.slice(0,5).map(x=>str(x,120)).join(', '):'형식 오류'));}
     // Every change rebuilds the exact body and clears consent, so consent always refers to the preview on screen.
     async function rebuildUpload(){const seq=++uploadSeq,k=upKind.value,vis=upVis.value==='shared'?'shared':'private';upload.body=null;upConsent.checked=false;upPreview.textContent='';
       runFields.hidden=k!=='run';reviewFields.hidden=k!=='review';upRvCond.textContent='';upEvidence.disabled=k!=='run'||vis!=='private';if(upEvidence.disabled)upEvidence.checked=false;
@@ -348,13 +349,99 @@
       for(const w of warnings.slice(0,20))out.push(el('p',{className:'cloud-warning'},'주의: '+(WARNINGS[w?.code]||'기타 주의 사항이 있습니다.')+(Array.isArray(w?.recordIds)&&w.recordIds.length?' ('+w.recordIds.length+'건)':'')));
       compareOut.replaceChildren(...out);}
 
+    // A listed projection omits restoreBundle. Keep a same-revision copy already read in this session so Share stays unavailable.
+    function remember(r){const prev=seen.get(r.id);let next=r;if(prev&&prev.kind===r.kind&&prev.owner?.id===r.owner?.id&&prev.revision===r.revision&&hasBundle(prev)&&!hasBundle(r))next={...r,payload:{...r.payload,restoreBundle:prev.payload.restoreBundle}};seen.set(next.id,next);if(next.kind==='run'&&typeof next.payload.localId==='string')localIds.set(next.id,next.payload.localId);return next;}
+    function bundleShape(b,selectedId){if(!b||typeof b!=='object'||Array.isArray(b)||b.schema!=='falsify.private-review-bundle.v1')return '복원 묶음 형식이 맞지 않습니다.';if(typeof b.selectedRunId!=='string'||!b.selectedRunId||b.selectedRunId.length>160||(selectedId&&b.selectedRunId!==selectedId))return '복원 묶음의 선택 실행이 고른 기록과 다릅니다.';const L=b.ledger;if(!L||typeof L!=='object'||Array.isArray(L)||L.schema!=='falsify.experiment-ledger.v1'||!Array.isArray(L.harnesses)||!Array.isArray(L.runs)||!Array.isArray(L.reviews))return '복원 묶음의 기록 형식이 맞지 않습니다.';if(L.harnesses.length>100||L.runs.length>100||L.reviews.length>1000)return '복원 묶음이 로컬 기록 수량 한도를 넘습니다. 잘라서 보내지 않습니다.';if(!L.runs.some(r=>r&&typeof r==='object'&&r.id===b.selectedRunId))return '복원 묶음에 고른 실행이 없습니다.';return '';}
+    function safeThrown(e){const m=typeof e?.message==='string'?e.message:'';if(!m||m.length>300||m.includes('<')||m==='http'||m==='request'||m==='response')return '';return m;}
+    function accountFailure(e){if(e?.code==='local')return e.message;if(e?.code==='payload_too_large'||e?.status===413)return '보낼 내용이 256KiB를 넘습니다. 잘라서 보내지 않았고 자동으로 다시 보내지 않습니다. 원 브라우저에서 범위를 줄여 다시 보관하세요. 로컬 기록은 그대로입니다.';if(e?.status===409||e?.status===412)return '같은 비공개 보관이 다른 곳에서 먼저 바뀌었거나 충돌했습니다. 자동으로 다시 보내지 않습니다. 내 실행 목록을 불러와 확인하세요. 로컬 기록은 그대로입니다.';if(e?.code==='timeout'||e?.code==='network')return '서버 응답을 확인하지 못했습니다. 보관됐는지 알 수 없어 자동으로 다시 보내지 않습니다. 내 실행 목록을 불러와 확인한 뒤, 없을 때만 다시 동의하고 보관하세요. 로컬 기록은 그대로입니다.';if(e?.status)return explain(e,'write')+' 자동으로 다시 보내지 않습니다. 로컬 기록은 그대로입니다.';const detail=safeThrown(e);return (detail||'계정 보관 형식이 검증을 통과하지 못해 보내지 않았습니다.')+' 자동으로 다시 보내지 않습니다. 로컬 기록은 그대로입니다.';}
+    function selectedRunId(){const node=document.querySelector('#evaluation-run');const id=node&&typeof node.value==='string'?node.value.trim():'';return id&&id.length<=160?id:'';}
+    function mountAccountReview(){const host=document.querySelector('#human-evaluation');if(!host||host.querySelector('#private-review-account'))return;
+      const selection=el('p',{id:'private-review-selected',className:'muted'}),consent=el('input',{type:'checkbox',id:'private-review-consent'}),consentText=el('span',{id:'private-review-consent-text'},'고른 실행의 논문 추출문, 모델 원응답, 짝이 되는 RED 기록과 그 부모, 사람 검수(항목 판정·노출·대조·comparison의 RED sourceRunId)를 이 계정에만 비공개로 보관하는 데 동의합니다. 팀과 공유하지 않고, 원장 전체를 올리지 않으며, 모델을 실행하지 않습니다.');
+      const saveBtn=el('button',{type:'button',id:'private-review-save',className:'button primary'},'내 계정에 비공개 보관'),saveStatus=el('p',{id:'private-review-save-status',className:'ledger-status',role:'status'});
+      const listBtn=el('button',{type:'button',id:'private-review-refresh',className:'button secondary'},'내 실행 목록 불러오기'),moreBtn=el('button',{type:'button',id:'private-review-more',className:'button secondary',hidden:true},'내 실행 더 불러오기'),openLogin=el('button',{type:'button',id:'private-review-open-login',className:'button secondary'},'계정 로그인 열기');
+      const listBox=el('div',{id:'private-review-list',className:'cloud-list'}),listStatus=el('p',{id:'private-review-status',className:'ledger-status',role:'status'});
+      const section=el('section',{id:'private-review-account',className:'cloud-records private-review-account','aria-labelledby':'private-review-account-title'},
+        el('h3',{id:'private-review-account-title'},'내 계정에 이 검수 보관'),
+        el('p',{className:'muted'},'같은 계정으로 연 다른 브라우저에서 고른 실행의 검수를 다시 엽니다. 로그인해도 로컬 원장은 올라가지 않습니다. 지금 고른 실행만, 아래 동의 뒤에 비공개로 보관합니다. JSON을 직접 옮기지 않습니다.'),
+        selection,el('label',{className:'check-row'},consent,consentText),el('div',{className:'button-row'},saveBtn,openLogin),saveStatus,
+        el('h3',{},'이 계정의 실행'),el('p',{className:'muted'},'목록은 이 계정의 실행 요약만 받습니다. 다른 계정의 비공개 기록은 열지 않습니다. 불러와 검수는 복원이며 업로드나 CLI 실행이 아니고, 설치된 모델·harness 검증이나 실행 증명이 아닙니다.'),
+        el('div',{className:'button-row'},listBtn,moreBtn),listBox,listStatus);
+      host.append(section);
+      const saveSay=(message,error=false)=>{saveStatus.textContent=message;saveStatus.classList.toggle('error',!!error);};
+      const listSay=(message,error=false)=>{listStatus.textContent=message;listStatus.classList.toggle('error',!!error);};
+      function renderSelection(){const id=selectedRunId();selection.textContent=id?'선택한 로컬 기록: '+str(id,160)+'. 동의하기 전에는 보내지 않습니다.':'보관할 실행이 없습니다. 위에서 저장된 RED 또는 BLUE 기록을 고르세요. 로그인해도 원장은 올라가지 않습니다.';}
+      function renderAccountRuns(){const mine=session?.author?.id;listBox.replaceChildren(...(accountRuns.length?accountRuns.map(row=>{
+        const title=str((row.role||'').toUpperCase(),10)+' 실행 · '+str(row.model,120),meta=(row.visibility==='private'?'비공개':'공유')+' · 사례 '+str(row.caseLabel,160)+' · '+str(row.status,20);
+        const article=el('article',{className:'cloud-record',dataset:{recordId:row.id}},el('h3',{},title),el('p',{className:'muted'},meta));
+        if(mine&&row.ownerId===mine)article.append(el('div',{className:'button-row'},button('불러와 검수','primary',()=>restoreAccountRun(row),{disabled:busy.accountRestore||busy.accountList,dataset:{action:'restore-review'}})));
+        else article.append(el('p',{className:'muted'},'이 항목은 지금 로그인한 계정의 실행이 아니어서 검수로 열지 않습니다.'));
+        return article;}):[el('p',{className:'muted'},session?(accountLoaded?'이 계정에 저장된 실행 요약이 없습니다.':'아직 불러오지 않았습니다. 목록 불러오기는 업로드하지 않습니다.'):'로그인한 뒤 내 실행 목록을 불러올 수 있습니다. 로그인해도 로컬 원장은 올라가지 않습니다.')]));moreBtn.hidden=!accountCursor;}
+      function refresh(){const id=selectedRunId(),agreed=!!session&&consent.checked&&!!id&&id===consentedId;saveBtn.disabled=!agreed||busy.accountSave;consent.disabled=!session||busy.accountSave;listBtn.disabled=!session||busy.accountList||busy.accountRestore;moreBtn.disabled=!session||busy.accountList||!accountCursor;openLogin.hidden=!!session;renderSelection();renderAccountRuns();}
+      function resetAccount(){accountRuns=[];accountCursor=null;accountLoaded=false;consentedId='';consent.checked=false;saveSay('');listSay('');refresh();}
+      accountReview={clear:resetAccount,refresh};
+      consent.addEventListener('change',()=>{consentedId=consent.checked?selectedRunId():'';refresh();});
+      document.querySelector('#evaluation-run')?.addEventListener('change',()=>{if(selectedRunId()!==consentedId){consent.checked=false;consentedId='';}refresh();});
+      openLogin.addEventListener('click',()=>{if(!session)signInFirst('내 계정에 보관하거나 불러오려면 로그인한 뒤 사용하세요.');});
+      saveBtn.addEventListener('click',saveAccountRun);listBtn.addEventListener('click',()=>loadAccountRuns(false));moreBtn.addEventListener('click',()=>loadAccountRuns(true));
+      async function saveAccountRun(){if(busy.accountSave)return;if(!session){signInFirst('내 계정에 보관하려면 로그인한 뒤 고른 실행에 동의하세요.');return;}
+        const id=selectedRunId();if(!id){saveSay('저장된 실행을 먼저 고르세요. 원장은 올리지 않습니다.',true);return;}
+        if(!consent.checked||id!==consentedId){consent.checked=false;consentedId='';refresh();saveSay('논문 추출문, 모델 원응답, 짝이 되는 RED와 사람 검수를 이 계정에 비공개로 보관하는 데 동의해야 합니다. 아직 보내지 않았습니다.',true);return;}
+        const era=epoch,author=session.author.id;busy.accountSave=true;consent.checked=false;consentedId='';refresh();saveSay('고른 실행만 준비하는 중… 원장 전체는 올리지 않습니다.');
+        try{if(typeof lab?.cloudSnapshot!=='function')throw local('이 작업대는 로컬 기록 읽기를 지원하지 않습니다. 보내지 않았습니다.');
+          const snapshot=await lab.cloudSnapshot();if(!live(era)||session.author.id!==author)return;
+          const c=await core();if(typeof c.privateRunFromSnapshot!=='function')throw local('이 작업대는 비공개 검수 보관을 아직 지원하지 않습니다. 보내지 않았습니다. 로컬 기록은 그대로입니다.');
+          const harness=deps.harness??globalThis.FalsifyHarness,built=await c.privateRunFromSnapshot(clone(snapshot),id,{harness});if(!live(era)||session.author.id!==author)return;
+          if(!built||typeof built!=='object'||Array.isArray(built))throw local('보관 페이로드 형식이 맞지 않아 보내지 않았습니다.');
+          if(!built.restoreBundle)throw local('복원 묶음이 없어 보관하지 않았습니다. 원장 전체를 올리지 않습니다.');
+          if(Object.hasOwn(built,'evidence'))throw local('복원 묶음과 별도로 증거 원문이 들어 있어 보내지 않았습니다. 원문은 복원 묶음에만 둘 수 있으며 잘라서 보내지 않습니다.');
+          const shape=bundleShape(built.restoreBundle,id);if(shape)throw local(shape+' 보내지 않았습니다.');
+          const validated=await c.validatePayload('run',built,{harness});if(!live(era)||session.author.id!==author)return;
+          const payload=clone(validated&&typeof validated==='object'&&!Array.isArray(validated)&&validated.restoreBundle?validated:built);
+          if(!payload?.restoreBundle)throw local('검증 결과가 복원 묶음을 보존하지 않아 보내지 않았습니다.');
+          if(Object.hasOwn(payload,'evidence'))throw local('복원 묶음과 별도로 증거 원문이 들어 있어 보내지 않았습니다. 원문은 복원 묶음에만 둘 수 있으며 잘라서 보내지 않습니다.');
+          const body={kind:'run',visibility:'private',payload};if(new TextEncoder().encode(JSON.stringify(body)).length>MAX_BODY)throw local('보낼 내용이 256KiB를 넘습니다. 잘라서 보내지 않았고 자동으로 다시 보내지 않습니다. 원 브라우저에서 범위를 줄여 다시 보관하세요. 로컬 기록은 그대로입니다.');
+          if(!live(era)||session.author.id!==author)return;saveSay('이 계정에 비공개로 보관하는 중…');
+          const data=await api('POST','/v1/records',{auth:true,body});if(!live(era)||session.author.id!==author)return;
+          if(!validRecord(data.record)||data.record.kind!=='run'||data.record.owner.id!==author||data.record.visibility!=='private')throw local('서버 응답이 비공개 실행 확인이 아닙니다. 보관됐는지 알 수 없으니 자동으로 다시 보내지 않습니다. 내 실행 목록을 불러와 확인하세요. 로컬 기록은 그대로입니다.');
+          adoptRecord(remember(data.record),era);
+          saveSay((data.deduplicated?'같은 내용의 비공개 기록이 이미 이 계정에 있습니다. 다시 만들지 않았습니다. ':'이 계정에 비공개로 보관했습니다. ')+'서버 ID '+short(data.record.id)+'. 다른 브라우저에서는 같은 계정으로 불러와 검수하면 됩니다. 팀과 공유하지 않았고 모델을 실행하지 않았습니다. 로컬 기록은 그대로입니다.');}
+        catch(e){if(!live(era)||!session||session.author.id!==author)return;saveSay(accountFailure(e),true);}
+        finally{busy.accountSave=false;accountReview?.refresh();}}
+      async function loadAccountRuns(append){if(busy.accountList)return;if(!session){signInFirst(MINE_LOGIN);return;}
+        const q=new URLSearchParams({scope:'mine',kind:'run'});if(append&&accountCursor)q.set('cursor',accountCursor);
+        const era=epoch,author=session.author.id;busy.accountList=true;refresh();listSay(append?'내 실행을 더 불러오는 중… 업로드하지 않습니다.':'내 실행 요약을 불러오는 중… 업로드하거나 모델을 실행하지 않습니다.');
+        try{const data=await api('GET','/v1/records?'+q,{auth:true});if(!live(era)||session.author.id!==author)return;
+          const raw=Array.isArray(data.records)?data.records:[];if(raw.length>200)throw local('실행 목록 한 응답이 200건을 넘습니다. 초과분을 조용히 버리지 않았습니다. 페이지를 나눠 다시 불러오세요.');
+          const skipped=raw.filter(r=>!validRecord(r)||r.kind!=='run'||r.owner.id!==author).length,good=raw.filter(r=>validRecord(r)&&r.kind==='run'&&r.owner.id===author).map(accountSummary);
+          if(!append)accountRuns=[];for(const row of good){accountRuns=accountRuns.filter(x=>x.id!==row.id);accountRuns.push(row);}
+          accountCursor=typeof data.nextCursor==='string'&&data.nextCursor&&data.nextCursor.length<=512?data.nextCursor:null;accountLoaded=true;
+          listSay('내 실행 '+accountRuns.length+'건.'+(accountCursor?' 다음 페이지가 있습니다. 더 불러오기를 누르기 전에는 나머지를 표시하지 않은 채 기다립니다.':'')+(skipped?' 형식이 다르거나 다른 계정 것으로 보여 '+skipped+'건은 열지 않았습니다.':''));}
+        catch(e){if(!live(era)||!session||session.author.id!==author)return;listSay(e?.code==='local'?e.message:explain(e,'read'),true);}
+        finally{busy.accountList=false;accountReview?.refresh();}}
+      async function restoreAccountRun(row){if(busy.accountRestore||!row)return;if(!session){signInFirst(MINE_LOGIN);return;}
+        if(row.ownerId!==session.author.id){listSay('이 기록은 지금 로그인한 계정의 것이 아니어서 검수로 열지 않았습니다. 다른 계정의 비공개 기록은 받지 않습니다.',true);return;}
+        const era=epoch,author=session.author.id,id=row.id;busy.accountRestore=true;refresh();listSay('내 기록을 확인하는 중… 업로드하거나 모델을 실행하지 않습니다.');
+        try{const data=await api('GET','/v1/records/'+encodeURIComponent(id),{auth:true});if(!live(era)||session.author.id!==author)return;
+          const rec=data.record;if(!validRecord(rec)||rec.id!==id||rec.kind!=='run'||rec.owner.id!==author)throw local('받은 기록이 고른 계정의 실행과 맞지 않아 검수로 열지 않았습니다.');
+          const bundle=rec.payload.restoreBundle;if(!bundle)throw local('이 계정 기록에는 검수 복원 묶음이 없습니다. 전체 검수를 열 수 없습니다. 기록을 저장한 원래 브라우저에서 다시 ‘내 계정에 비공개 보관’을 해 주세요. 없는 항목은 만들지 않습니다.');
+          const shape=bundleShape(bundle);if(shape)throw local(shape+' 검수로 열지 않았습니다. 없는 항목은 만들지 않습니다.');
+          const c=await core(),harness=deps.harness??globalThis.FalsifyHarness;await c.validatePayload('run',rec.payload,{harness});if(!live(era)||session.author.id!==author)return;
+          if(typeof lab?.restorePrivateBundle!=='function')throw local('이 작업대는 비공개 검수 복원을 지원하지 않습니다. 검수 화면의 로컬 기록은 그대로입니다.');
+          await lab.restorePrivateBundle(clone(bundle));if(!live(era)||session.author.id!==author)return;
+          listSay('이 브라우저의 검수 화면에 불러왔습니다. 원래 있던 로컬 기록은 지우지 않았습니다. 모델을 실행하지 않았고 CLI를 부르지 않았습니다. 복원은 실행 증명이 아닙니다.');}
+        catch(e){if(!live(era)||!session||session.author.id!==author)return;listSay(e?.code==='local'?e.message:(e?.status?explain(e,'read'):(safeThrown(e)||'검수로 열지 못했습니다. 자동으로 다시 시도하지 않습니다. 로컬 기록은 그대로입니다.')),true);}
+        finally{busy.accountRestore=false;accountReview?.refresh();}}
+      refresh();
+    }
+    function accountSummary(r){const p=r.payload||{};return {id:r.id,visibility:r.visibility,ownerId:r.owner.id,revision:r.revision,createdAt:typeof r.createdAt==='string'?r.createdAt:'',role:typeof p.role==='string'?p.role:'',model:typeof p.model==='string'?p.model:'',caseLabel:typeof p.caseLabel==='string'?p.caseLabel:'',status:typeof p.status==='string'?p.status:'',protocolVersion:typeof p.protocolVersion==='string'?p.protocolVersion:''};}
+
     tabShared.addEventListener('click',()=>choose('shared'));tabMine.addEventListener('click',()=>choose('mine'));
     kindSelect.addEventListener('change',()=>{kind=Object.hasOwn(KINDS,kindSelect.value)?kindSelect.value:'';shown=[];cursor=null;loaded=false;load(false);});
     refresh.addEventListener('click',()=>load(false));more.addEventListener('click',()=>load(true));
     upKind.addEventListener('change',fillItems);upItem.addEventListener('change',()=>{upRvProtocol.checked=false;rebuildUpload();});for(const e of [upVis,upEvidence,upRvProtocol])e.addEventListener('change',rebuildUpload);for(const e of [upCase,upProtocol])e.addEventListener('input',rebuildUpload);upConsent.addEventListener('change',refreshSend);upSend.addEventListener('click',sendUpload);
     for(const e of [rvVerdict,rvScore,rvVis])e.addEventListener('change',rebuildReview);for(const e of [rvNote,rvCase])e.addEventListener('input',rebuildReview);rvConsent.addEventListener('change',refreshReview);rvSend.addEventListener('click',sendReview);
     session=loadSession();connection.textContent='서버 '+hostName+' · 아직 불러오지 않음';
-    renderAccount();if(expired)account.open=true;renderList();fillItems();setBusy();
+    mountAccountReview();renderAccount();if(expired)account.open=true;renderList();fillItems();setBusy();
     return {root,enabled:true,refresh:()=>load(false)};
   }
 
