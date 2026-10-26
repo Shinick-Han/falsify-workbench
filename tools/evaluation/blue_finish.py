@@ -43,7 +43,7 @@ def finish_harness():
     }
 
 
-def capture_result(text=FINISH_TEXT, revision='rev-original', request_id='req-finish-original'):
+def capture_result(text=FINISH_TEXT, revision='rev-original', request_id='req-finish-original', harness_canonical=None):
     blue = _blue_module()
     source = hashlib.sha256(text.encode('utf-8')).hexdigest()
     data = {
@@ -57,14 +57,16 @@ def capture_result(text=FINISH_TEXT, revision='rev-original', request_id='req-fi
         'executionConsent': True,
         'harness': finish_harness(),
     }
+    if harness_canonical is not None:
+        data['harnessCanonical'] = harness_canonical
     return blue.run_review(data, lambda _progress: None, threading.Event(), _FakeBackend)
 
 
-def packet_with_live_results():
+def packet_with_live_results(harness_canonical=None):
     """Three arms. ORIGINAL carries the captured finish object unchanged."""
-    original = capture_result()
-    epsilon = capture_result('Synthetic finish epsilon states the count is four.', 'rev-e1', 'req-finish-e1')
-    eta = capture_result('Synthetic finish eta states the count is five.', 'rev-h1', 'req-finish-h1')
+    original = capture_result(harness_canonical=harness_canonical)
+    epsilon = capture_result('Synthetic finish epsilon states the count is four.', 'rev-e1', 'req-finish-e1', harness_canonical)
+    eta = capture_result('Synthetic finish eta states the count is five.', 'rev-h1', 'req-finish-h1', harness_canonical)
     results = {'ORIGINAL': original, 'E1': epsilon, 'H1': eta}
     texts = {
         'ORIGINAL': FINISH_TEXT,
@@ -108,6 +110,7 @@ def packet_with_live_results():
                 'consent': True,
                 'executionConsent': True,
                 'harness': result['harness'],
+                **({'harnessCanonical': harness_canonical} if harness_canonical is not None else {}),
             },
             'result': result,
             'rawResponseSha256': canonical_digest(result),

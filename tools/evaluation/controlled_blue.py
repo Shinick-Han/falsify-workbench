@@ -34,10 +34,15 @@ OK_CLASSES = (
     'completed-zero-findings', 'human-unreviewed', 'matched-findings',
     'human-reviewed-no-match', 'gold-unknown',
 )
-REQUEST_KEYS = {
+# Same allow-list as pending-job BLUE_KEYS. harnessCanonical is the browser's exact
+# canonical string; harness.resolve hashes those bytes and does not re-encode them.
+REQUEST_REQUIRED = (
     'schema', 'revision', 'requestId', 'sourceHash', 'segments', 'maxCalls',
     'consent', 'harness', 'executionConsent',
-}
+)
+REQUEST_OPTIONAL = ('harnessCanonical',)
+REQUEST_KEYS = set(REQUEST_REQUIRED) | set(REQUEST_OPTIONAL)
+CANONICAL_LIMIT = 60000
 SEGMENT_KEYS = {'id', 'label', 'text'}
 FINDING_KEYS = {'id', 'segmentId', 'quote', 'rationale', 'uncertainty', 'evidence'}
 EVIDENCE_KEYS = {'segmentId', 'quote', 'relation'}
@@ -409,12 +414,16 @@ def _check_trial_shape(trial, index, errors):
     request = trial['request']
     if isinstance(request, dict):
         _forbidden_request(request, errors)
-        if not _exact(request, ('schema', 'revision', 'requestId', 'sourceHash', 'segments', 'maxCalls', 'consent', 'harness', 'executionConsent'), (), field + '.request', errors):
+        if not _exact(request, REQUEST_REQUIRED, REQUEST_OPTIONAL, field + '.request', errors):
             pass
         elif request['schema'] != BLUE_SCHEMA or request['consent'] is not True:
             errors.append(field + '.request.contract')
         else:
             _check_segments(request['segments'], field + '.request.segments', errors)
+            if 'harnessCanonical' in request:
+                canonical = request['harnessCanonical']
+                if not isinstance(canonical, str) or not canonical.strip() or len(canonical) > CANONICAL_LIMIT or '\x00' in canonical:
+                    errors.append(field + '.request.harnessCanonical')
     else:
         errors.append(field + '.request')
     model = trial['model']
@@ -616,6 +625,29 @@ def _harness_requested_model(harness, label):
     return None
 
 
+def _recorded_machine_hash(trial):
+    """Hash the service records for this harness.
+
+    With no harnessCanonical, that is harness.digest of the stored object.
+    With a canonical string, harness.resolve hashes that exact UTF-8 text.
+    Re-dumping the object is a different hash when spacing or key order differs.
+    """
+    request = trial['request'] if isinstance(trial.get('request'), dict) else {}
+    if 'harnessCanonical' not in request:
+        try:
+            return canonical_digest(trial.get('harness')), False
+        except (TypeError, ValueError):
+            return None, False
+    try:
+        _resolved, recorded = _harness_module().resolve(
+            {'harness': request.get('harness'), 'harnessCanonical': request['harnessCanonical']},
+            'blue',
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None, True
+    return recorded, False
+
+
 def _condition_reasons(trial, strategy, fixed, arms):
     reasons = []
     harness = trial['harness']
@@ -644,11 +676,10 @@ def _condition_reasons(trial, strategy, fixed, arms):
         reasons.append('file_hash')
     if not isinstance(arm, dict) or job.get('revision') != arm['revision'] or request.get('revision') != arm['revision']:
         reasons.append('revision')
-    try:
-        machine = canonical_digest(harness)
-    except (TypeError, ValueError):
-        machine = None
-    if machine is None or job.get('harnessHash') != machine:
+    machine, canonical_failed = _recorded_machine_hash(trial)
+    if canonical_failed or ('harnessCanonical' in request and job.get('harnessHash') != machine):
+        reasons.append('harness_canonical')
+    elif machine is None or job.get('harnessHash') != machine:
         reasons.append('machine_hash_unverified')
     if request.get('harness') != harness:
         reasons.append('harness_not_frozen')
@@ -902,6 +933,7 @@ def _summarize(packet, rows, warnings, usable, duplicate):
         'repeat_replay': 'The same request id or request-byte digest was repeated. Those trials are replays and are outside the denominators.',
         'independence_unknown': 'Final response hashes match across separate request ids. Deterministic or zero-finding runs can match. The trials stay counted and independence is unknown.',
         'machine_config_not_strategy_identity': 'Machine config hashes differ. They are not a second strategy. Portable id, version and bundle hash are unchanged.',
+        'incompatible_condition:harness_canonical': 'harnessCanonical is not JSON-equal to the request harness, or the recorded harness hash is not the SHA-256 of that exact string. The string is not re-encoded.',
         'arm_missing': 'An arm has no included trial. Side-by-side preparation is not ready.',
     }
     warning_rows = []

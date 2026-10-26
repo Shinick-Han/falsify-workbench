@@ -319,6 +319,65 @@ class GoldAndModelTests(unittest.TestCase):
         self.assertEqual(row['class'], 'completed-zero-findings')
         self.assertEqual(summary['arms']['ORIGINAL']['counts']['completed-zero-findings'], 1)
 
+    def test_browser_harness_canonical_uses_resolve_hash(self):
+        harness = blue_finish.finish_harness()
+        compact = json.dumps(harness, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+        spaced = compact.replace(':', ': ', 1)
+        self.assertEqual(json.loads(spaced), harness)
+        self.assertNotEqual(spaced, compact)
+        recorded = hashlib.sha256(spaced.encode()).hexdigest()
+        self.assertNotEqual(recorded, prep.canonical_digest(harness))
+        live = blue_finish.capture_result(harness_canonical=spaced)
+        self.assertEqual(live['harnessHash'], recorded)
+        self.assertNotEqual(live['harnessHash'], prep.canonical_digest(live['harness']))
+        self.assertEqual(live['isolation'], prep._blue_module().ISOLATION)
+        self.assertEqual(live['cliSelection'], prep._harness_module().record(live['harness'])['cliSelection'])
+        self.assertTrue(set(live) <= prep.RESULT_REQUIRED | prep.RESULT_OPTIONAL)
+        for invented in ('executionProvider', 'executionMethod', 'requestedModel'):
+            self.assertNotIn(invented, live)
+        packet = blue_finish.packet_with_live_results(harness_canonical=spaced)
+        request = packet['trials'][0]['request']
+        self.assertIs(request['harnessCanonical'], spaced)
+        snapshot = json.loads(json.dumps(packet['trials'][0]['result']))
+        summary = prep.prepare(packet)
+        self.assertEqual(request['harnessCanonical'], spaced)
+        self.assertEqual(packet['trials'][0]['result'], snapshot)
+        row = next(item for item in summary['trials'] if item['id'] == 'original-finish')
+        self.assertTrue(row['included'])
+        self.assertEqual(row['machineConfigHash'], recorded)
+        self.assertNotIn('incompatible_condition:harness_canonical', codes(summary))
+        self.assertNotIn('incompatible_condition:machine_hash_unverified', codes(summary))
+        self.assertTrue(summary['comparisonReady'])
+        compact_summary = prep.prepare(blue_finish.packet_with_live_results(harness_canonical=compact))
+        compact_row = next(item for item in compact_summary['trials'] if item['id'] == 'original-finish')
+        self.assertTrue(compact_row['included'])
+        self.assertEqual(compact_row['machineConfigHash'], hashlib.sha256(compact.encode()).hexdigest())
+        mismatched = blue_finish.packet_with_live_results(harness_canonical=spaced)
+        bad = spaced.replace('Synthetic BLUE fixed', 'Synthetic BLUE other', 1)
+        self.assertNotEqual(json.loads(bad), harness)
+        for trial in mismatched['trials']:
+            trial['request']['harnessCanonical'] = bad
+        rejected = prep.prepare(mismatched)
+        self.assertIn('incompatible_condition:harness_canonical', codes(rejected))
+        self.assertNotIn('incompatible_condition:machine_hash_unverified', codes(rejected))
+        self.assertTrue(all(not item['included'] for item in rejected['trials']))
+        recoded = blue_finish.packet_with_live_results(harness_canonical=spaced)
+        digest = prep.canonical_digest(recoded['trials'][0]['harness'])
+        self.assertNotEqual(digest, recorded)
+        for trial in recoded['trials']:
+            trial['job']['harnessHash'] = digest
+            trial['result']['harnessHash'] = digest
+            trial['rawResponseSha256'] = prep.canonical_digest(trial['result'])
+        recoded_summary = prep.prepare(recoded)
+        self.assertIn('incompatible_condition:harness_canonical', codes(recoded_summary))
+        self.assertNotIn('incompatible_condition:machine_hash_unverified', codes(recoded_summary))
+        self.assertFalse(any(item['included'] for item in recoded_summary['trials']))
+        broken = synthetic.comparable_packet()
+        broken['trials'][0]['request']['harnessCanonical'] = {'not': 'a string'}
+        with self.assertRaises(prep.PrepError) as caught:
+            prep.prepare(broken)
+        self.assertIn('trials[0].request.harnessCanonical', caught.exception.errors)
+
     def test_three_by_three_full_paper_packet(self):
         trials = []
         for arm in ('ORIGINAL', 'E1', 'H1'):

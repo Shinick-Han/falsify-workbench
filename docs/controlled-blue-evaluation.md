@@ -25,7 +25,7 @@ A packet may name an explicit `strategy.pathMap`. Each entry replaces one whole 
 
 `strategy.machineSettingKeys` may list only `auditDirectory`. That settings key is removed from the projection because it is an install path. No other settings key is removed.
 
-The machine config hash is `harness.digest` of the full stored harness (the same canonical JSON digest as `app/local/harness.py`). It still includes the unmapped paths. Repeats that share a portable projection and differ only by mapped paths or `auditDirectory` stay on the same strategy. The summary sets `machineConfigIsStrategyIdentity` to false and warns `machine_config_not_strategy_identity` when more than one machine hash appears inside an arm.
+When the request has no `harnessCanonical`, the machine config hash is `harness.digest` of the full stored harness (the same canonical JSON digest as `app/local/harness.py`). It still includes the unmapped paths. When the request includes `harnessCanonical`, the recorded hash is the SHA-256 of that exact UTF-8 string, the same rule as `harness.resolve`. The string must parse to the request harness. The preparer does not re-serialize it before hashing, so a JSON-equal string with different spacing or key order is a different hash. A mismatch is `incompatible_condition:harness_canonical` and is not rewritten into `harness.digest`. Repeats that share a portable projection and differ only by mapped paths or `auditDirectory` stay on the same strategy. The summary sets `machineConfigIsStrategyIdentity` to false and warns `machine_config_not_strategy_identity` when more than one machine hash appears inside an arm.
 
 Different flags, a different mapped program, or a different bundle are different strategies even when the machine hash or companion instance is reused.
 
@@ -75,7 +75,7 @@ Quote overlap is not used to create a match. A `matched` judgment counts only wh
 
 ## Blind inputs, frozen responses, human validation
 
-A BLUE request may contain only the document-blue request fields: schema, revision, request id, source hash, segments (`id`, `label`, `text`), maxCalls, consent, the harness, and execution consent. Keys for gold, plans, reviews, filenames, prior findings or secrets are a blind-protocol violation and fail the packet. Segment text in fixtures must be synthetic. Do not commit private papers.
+A BLUE request may contain only the pending-job BLUE fields: schema, revision, request id, source hash, segments (`id`, `label`, `text`), maxCalls, consent, the harness, optional `harnessCanonical`, and execution consent. The browser attaches `harnessCanonical` as `harness-core` canonical JSON of the harness. Keys for gold, plans, reviews, filenames, prior findings or secrets are a blind-protocol violation and fail the packet. Segment text in fixtures must be synthetic. Do not commit private papers.
 
 A completed result is immutable: `rawResponseSha256` must be the canonical digest of the stored result object, and `result.harness` must be the same object as the trial harness. A mismatch is `response_not_immutable` or `harness_not_frozen` and the trial is outside the denominators. The tool does not rewrite the harness or the response. The digest covers the stored final response, not an unseen provider event stream.
 
