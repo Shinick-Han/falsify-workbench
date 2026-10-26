@@ -276,7 +276,7 @@ test('postMessage failure rejects engine and the next prepare uses a new worker'
   } finally { loaded.restore(); }
 });
 
-test('abort before the job is linked terminates the idle worker', async () => {
+test('abort before the job is linked preserves the unrelated idle worker', async () => {
   const harness = createHarness();
   const loaded = install(harness.Worker);
   const signal = controllableSignal();
@@ -287,11 +287,11 @@ test('abort before the job is linked terminates the idle worker', async () => {
     const cancelled = withTimeout(loaded.api.prepare({file: pdfFile(), edits: {}, signal: signal.signal}));
     signal.signal.abort();
     await assert.rejects(cancelled, error => error.code === 'aborted');
-    assert.equal(harness.workers[0].terminated, true);
+    assert.equal(harness.workers[0].terminated, false);
     assert.equal(harness.workers.length, 1);
     const again = await withTimeout(loaded.api.prepare({file: pdfFile(), edits: {}}));
-    assert.equal(harness.workers.length, 2);
-    assert.equal(harness.workers[1].terminated, false);
+    assert.equal(harness.workers.length, 1);
+    assert.equal(harness.workers[0].terminated, false);
     assert.equal(again.verification.status, 'failed');
     assert.equal(again.sha256, FAILED_SHA);
     assert.equal(loaded.state.fetches, 0);

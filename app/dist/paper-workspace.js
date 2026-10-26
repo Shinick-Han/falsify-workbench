@@ -1066,6 +1066,7 @@
       if(nav&&typeof nav.click==='function')nav.click();
     }
     function onKey(e){
+      if(e.defaultPrevented)return;
       if(e.key==='Escape'&&inline){e.preventDefault();inline=null;renderInline();ui.beforeStage.focus();return;}
       if(fieldTarget(e.target))return;
       if((e.ctrlKey||e.metaKey)&&(e.key==='z'||e.key==='Z')){

@@ -3,7 +3,7 @@ import {createHash} from 'node:crypto';
 import {execFileSync, spawnSync} from 'node:child_process';
 import {existsSync, readFileSync} from 'node:fs';
 import http from 'node:http';
-import {extname, join} from 'node:path';
+import {extname, join, relative as pathRelative, isAbsolute, sep} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {test} from 'node:test';
 import * as mupdf from 'mupdf';
@@ -610,7 +610,8 @@ function listen(root) {
       return;
     }
     const path = join(root, relative);
-    if (path !== root && !path.startsWith(root + '/')) { res.writeHead(403); res.end(); return; }
+    const fromRoot = pathRelative(root, path);
+    if (fromRoot === '..' || fromRoot.startsWith('..' + sep) || isAbsolute(fromRoot)) { res.writeHead(403); res.end(); return; }
     try {
       const body = readFileSync(path);
       res.writeHead(200, {'content-type': types[extname(path)] || 'application/octet-stream'});
@@ -629,7 +630,7 @@ test('chrome classic loader runs the vendored WASM edit', async (t) => {
     t.skip('browser executable not found; set BROWSER_EXECUTABLE');
     return;
   }
-  const server = await listen(new URL('..', import.meta.url).pathname.replace(/\/$/, ''));
+  const server = await listen(fileURLToPath(new URL('..', import.meta.url)));
   const port = server.address().port;
   let browser;
   try {
@@ -645,12 +646,18 @@ test('chrome classic loader runs the vendored WASM edit', async (t) => {
     const produced = await Promise.race([
       page.evaluate(async (b64) => {
       const workers = [];
+      let nextPost = null;
       const NativeWorker = window.Worker;
       window.Worker = function (...args) {
         const worker = new NativeWorker(...args);
         const record = {terminated: false};
         const stop = worker.terminate.bind(worker);
         worker.terminate = () => { record.terminated = true; return stop(); };
+        const post = worker.postMessage.bind(worker);
+        worker.postMessage = (...message) => {
+          post(...message);
+          if (nextPost) { const ready = nextPost; nextPost = null; ready(); }
+        };
         workers.push(record);
         return worker;
       };
@@ -677,11 +684,13 @@ test('chrome classic loader runs the vendored WASM edit', async (t) => {
       });
       const sourceStill = bytes.length === kept.length && bytes.every((value, index) => value === kept[index]);
       const controller = new AbortController();
+      const posted = new Promise(resolve => { nextPost = resolve; });
       const cancelled = FalsifyBrowserPdf.prepare({
         file,
         edits: {schema: 'falsify.paper-edits.v1', fileHash, edits: [{id: 'word', enabled: true, pageIndex: 0, before: 'REPLACE', after: 'AFTER', origin: 'human'}]},
         signal: controller.signal,
       });
+      await posted;
       controller.abort();
       let cancelCode = '';
       try { await cancelled; } catch (error) { cancelCode = error.code; }
