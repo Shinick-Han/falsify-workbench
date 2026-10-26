@@ -107,3 +107,86 @@ falsify_parse_uri() {
   fi
   return 1
 }
+
+falsify_owner_marker() {
+  printf '%s\n' 'falsify-workbench/connect-launcher/v1'
+}
+
+# Directory that receives a per-user handler. Reads the real HOME only when no override is set.
+falsify_install_home() {
+  if [ -n "${FALSIFY_CONNECT_HOME:-}" ]; then
+    printf '%s\n' "$FALSIFY_CONNECT_HOME"
+  else
+    printf '%s\n' "$HOME"
+  fi
+}
+
+falsify_xml_escape() {
+  printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+}
+
+# GNU stat -c and BSD stat -f both report the permission bits.
+falsify_mode() {
+  local target mode
+  target=$1
+  if mode=$(stat -c '%a' "$target" 2>/dev/null); then
+    printf '%s\n' "$mode"
+    return 0
+  fi
+  stat -f '%OLp' "$target"
+}
+
+falsify_darwin_app() {
+  printf '%s\n' "$1/Library/Application Support/falsify-workbench/Falsify Connect.app"
+}
+
+falsify_lsregister_path() {
+  if [ -n "${FALSIFY_LSREGISTER:-}" ]; then
+    printf '%s\n' "$FALSIFY_LSREGISTER"
+    return 0
+  fi
+  for candidate in \
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+    /System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister \
+    /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister
+  do
+    if [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Print bundle paths whose Launch Services dump claims this exact scheme.
+# Accepts the real lsregister -dump shape (path plus claimed schemes) and the test stub.
+falsify_scheme_handlers() {
+  local scheme dump_file
+  scheme=$1
+  dump_file=$2
+  # path: lines follow lsregister -dump. A scheme matches only as its own token,
+  # so falsify-test: and notfalsify: are not claims for falsify.
+  awk -v scheme="$scheme" '
+    function claims(line, needle, rest, pos, pre) {
+      needle = scheme ":"
+      rest = line
+      while ((pos = index(rest, needle)) > 0) {
+        if (pos == 1) return 1
+        pre = substr(rest, pos - 1, 1)
+        if (pre !~ /[A-Za-z0-9-]/) return 1
+        rest = substr(rest, pos + 1)
+      }
+      return 0
+    }
+    /^path:/ {
+      path = $0
+      sub(/^path:[[:space:]]*/, "", path)
+      sub(/[[:space:]]*\(0x[0-9A-Fa-f]+\)[[:space:]]*$/, "", path)
+      next
+    }
+    path != "" && claims($0) {
+      print path
+      path = ""
+    }
+  ' "$dump_file" | awk '!seen[$0]++'
+}

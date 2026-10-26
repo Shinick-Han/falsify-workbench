@@ -68,17 +68,20 @@ python3 -m venv .venv
 
 Windows equivalent after creating a venv: `.venv\Scripts\python.exe ...`. Add `--port 7817` if needed. This foreground process prints the process token for paste. To use the entirely local website instead, omit `--web-origin` and open the printed `http://127.0.0.1:<port>/` address. Local-only mode has no remote origin permission.
 
-Optional click-to-launch on Linux writes a per-user desktop entry and does not use sudo:
+Optional click-to-launch does not use sudo, a login item, or a LaunchAgent.
+
+On Linux, `./install-connection.sh` writes a per-user desktop entry whose `Exec` is this checkout's `open-connection.sh`. On macOS, the same script compiles `FalsifyConnect.applescript` with `osacompile` into `~/Library/Application Support/falsify-workbench/Falsify Connect.app` and registers that bundle with Launch Services (`lsregister -f`). The applet's `Info.plist` declares `CFBundleURLTypes` (`CFBundleTypeRole` `Viewer`, scheme `falsify`) and `LSMinimumSystemVersionByArchitecture` for Intel (`x86_64` 10.6) and Apple silicon (`arm64` 11.0). `on open location` reads `Contents/Resources/falsify-script-path.txt` and runs the original checkout's `open-connection.sh` with `quoted form of`. The shell script is not copied into Application Support, so its directory stays the checkout that contains `server.py`. Reinstall after moving the checkout. `FALSIFY_CONNECT_DRY_RUN=1` prints that plan even when `osacompile` or `lsregister` is absent. A real install stops without registering if either tool is missing, if another bundle already claims the scheme, or if the applet already at that path is not this launcher. The installer does not pass `-trusted` and does not click the browser or macOS approval dialogs.
 
 ```sh
-sh ./install-connection.sh    # or: FALSIFY_CONNECT_DRY_RUN=1 sh ./install-connection.sh
+./install-connection.sh
+FALSIFY_CONNECT_DRY_RUN=1 ./install-connection.sh
 ```
 
 `open-connection.sh` accepts the same port-only and challenge/state/proof links as Windows. The `proof` value in the link is the SHA-256 commitment. The first real launch creates this checkout's `.venv` when Python 3 is available, then requires `jsonschema` in that venv. If Python or `jsonschema` is missing it prints the install command and exits. It does not say the companion is ready, and it does not kill unrelated processes. Approval is a visible dialog only when a native prompt exists (`osascript` on macOS). Otherwise the script stops and tells you to use the manual token. It does not treat a missing dialog as approval. After approval it starts the companion in the background with `--token-display hidden` and registers the commitment. The signing key is `$XDG_DATA_HOME/falsify-workbench/pairing` or `~/.local/share/falsify-workbench/pairing` (macOS: `~/Library/Application Support/falsify-workbench/pairing`), directory mode `0700`, key mode `0600`. The hosted page shows the macOS and Linux install and start commands (`./install-connection.sh`, `./open-connection.sh`) and keeps the launch button available after disconnect. The browser still cannot tell whether the handler is installed.
 
-macOS handler files can be copied by `FALSIFY_CONNECT_OS=Darwin ./install-connection.sh`. That copy does not call Launch Services (`lsregister`) and does not click through an `osascript` dialog. The Linux cloud agent that produced this change cannot execute the macOS UI, so nothing here is a macOS certification. A participant on macOS still has to allow the browser protocol prompt, the approval dialog, and local-network access themselves.
+`./uninstall-connection.sh` removes only this checkout's handler. On macOS that is `lsregister -u` plus deletion of that one applet, and only when the owner marker and the recorded script path both match. A desktop entry or applet that points somewhere else is left in place. The pairing key is not deleted.
 
-Remove a handler this checkout installed with `./uninstall-connection.sh`. A desktop entry that points somewhere else is left in place. The pairing key is not deleted.
+Linux can rehearse the macOS bundle with stand-in `osacompile` and `lsregister` programs (`scripts/test-macos-handler.sh`). That rehearsal does not click a dialog. GUI approval was not tested on Linux, and a Linux pass is not a macOS certification. When both real tools exist, the same test compiles, checks, and `lsregister`s only an isolated scheme under `FALSIFY_CONNECT_HOME`, then unregisters it. On a Mac, the person using the computer still has to allow the browser protocol prompt, the approval dialog, and local-network access.
 
 ## Optional PDF preflight (0.2.0-alpha.1+)
 
