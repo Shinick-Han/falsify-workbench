@@ -307,15 +307,7 @@ test('ledger bridge opens a paper-edit without writing the AI ledger or copying 
 
 test('real paper-edits core captures null style, duplicate ranges, history, and review binding',async()=>{
   const bundle=await bundlePromise;
-  const {execFileSync}=require('node:child_process');
-  const os=require('node:os');
-  const coreFile=path.join(os.tmpdir(),'falsify-paper-edits-ebb7b21.js');
-  const coreSource=execFileSync('git',['show','origin/feature/paper-workspace-20261026:app/dist/paper-edits.js'],{encoding:'utf8'});
-  assert.match(coreSource,/FalsifyPaperEdits/);
-  fs.writeFileSync(coreFile,coreSource);
-  assert.equal(fs.existsSync(path.join(dist,'paper-edits.js')),false);
-  assert.equal(coreFile.startsWith(path.resolve(dist,'..','..')),false);
-  const E=require(coreFile);
+  const E=require('../dist/paper-edits.js');
   let tick=1700000000000;
   const segments=[{id:'s0',label:'p1',text:'alpha alpha',pageIndex:0}];
   const session=E.create({fileHash:SOURCE,name:'synthetic.txt',segments,now:()=>tick++});
