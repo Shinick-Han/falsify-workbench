@@ -240,10 +240,63 @@
     const walk=o=>{if(!o||typeof o!=='object')return;for(const v of Object.values(o))walk(v);Object.freeze(o);};
     walk(copy);return copy;
   }
-  function diagnosticText(warnings){
-    if(!Array.isArray(warnings))return '';
-    const parts=warnings.filter(s=>typeof s==='string'&&s.trim()&&s.length<=180&&!/[<>]/.test(s)).slice(0,4);
+  const CAUSE_TEXT={
+    'font-substituted':'글꼴을 대체함',
+    'wrapped-after':'After가 여러 줄로 바뀜',
+    'extraction-gap':'추출 공백이 있어 줄이 어긋날 수 있음',
+    'after-extraction-order':'After 단어는 있으나 추출 순서가 다름',
+    'page-count':'쪽 수가 원본과 다름',
+    'figure-changed':'그림이 바뀜',
+    'untouched-text':'편집하지 않은 쪽의 글이 바뀜',
+    'present-after':'After가 출력에서 확인되지 않음',
+    'removed-before':'Before가 출력에 남아 있음',
+    'unchanged-output':'출력 바이트가 원본과 같음'
+  };
+  function readableCode(code){
+    const c=String(code||'');
+    return /^[a-z0-9-]{1,64}$/.test(c)?(CAUSE_TEXT[c]||c):'';
+  }
+  function causePhrase(item){
+    if(!item||typeof item!=='object')return '';
+    const code=readableCode(item.code);
+    if(!code)return '';
+    const sev=item.severity==='warning'?'주의':item.severity==='info'?'정보':item.status==='failed'?'실패':'';
+    return sev?sev+' '+code:code;
+  }
+  function diagnosticLine(item){
+    if(typeof item==='string'){
+      const s=item.trim();
+      return s&&s.length<=180&&!/[<>]/.test(s)?s:'';
+    }
+    const phrase=causePhrase(item);
+    if(!phrase)return '';
+    const page=Number.isInteger(item.pageIndex)?(item.pageIndex+1)+'쪽':'';
+    const raw=typeof item.editId==='string'?item.editId:typeof item.id==='string'?item.id:'';
+    const id=/^[A-Za-z0-9._:-]{1,80}$/.test(raw)?raw:'';
+    return [phrase,page,id].filter(Boolean).join(' ');
+  }
+  function diagnosticItems(warnings,verification){
+    const items=[];
+    if(Array.isArray(warnings))items.push(...warnings);
+    if(verification&&Array.isArray(verification.warnings))items.push(...verification.warnings);
+    if(verification&&Array.isArray(verification.checks))items.push(...verification.checks);
+    return items;
+  }
+  function diagnosticText(warnings,verification){
+    const parts=[];
+    for(const item of diagnosticItems(warnings,verification)){
+      const line=diagnosticLine(item);
+      if(!line||parts.includes(line))continue;
+      parts.push(line);
+      if(parts.length===6)break;
+    }
     return parts.length?'진단: '+parts.join(' · ')+'. PDF 내용에는 넣지 않습니다.':'';
+  }
+  function generationLead(verification,stale){
+    const status=verification&&typeof verification.status==='string'?verification.status:'';
+    if(status==='failed'||status==='warning')return (stale?'그 사이 편집이 바뀌어 마지막 생성본으로만 표시합니다. ':'')+'검증 상태는 '+status+'입니다. 이 파일은 받을 수 있습니다.';
+    if(status==='applied')return stale?'생성본을 받았지만 그 사이 편집이 바뀌어 마지막 생성본으로만 표시합니다. 검증 상태는 applied입니다.':'검증 상태는 applied입니다. 미리보기와 다운로드는 이 파일의 바이트입니다.';
+    return stale?'생성본을 받았지만 그 사이 편집이 바뀌어 마지막 생성본으로만 표시합니다.':'생성본을 받았습니다. 미리보기와 다운로드는 이 파일의 바이트입니다.';
   }
   function scrub(value,depth){
     if(depth>5)return null;
@@ -505,11 +558,12 @@
         const change=doc.createElement('button');change.type='button';change.className='button secondary';change.dataset.edit=edit.id;change.dataset.act='edit';change.textContent='After 수정';
         const del=doc.createElement('button');del.type='button';del.className='button secondary';del.dataset.edit=edit.id;del.dataset.act='delete';del.textContent='삭제';
         const note=doc.createElement('span');note.className='paper-edit-origin';note.textContent=originText(edit.origin,modelById.get(edit.id));
+        const cause=editCause(edit.id);
         jump.addEventListener('click',()=>onJump(edit));
         toggle.addEventListener('click',()=>{if(session)session.setEnabled(edit.id,edit.enabled===false);});
         change.addEventListener('click',()=>loadInline(edit));
         del.addEventListener('click',()=>onDelete(edit));
-        li.append(jump,toggle,change,del,note);ui.edits.append(li);
+        li.append(jump,toggle,change,del,note);if(cause)li.append(cause);ui.edits.append(li);
       }
       ui.undo.disabled=!snapshot||!snapshot.canUndo;
       ui.redo.disabled=!snapshot||!snapshot.canRedo;
@@ -519,6 +573,26 @@
         if(found)found.focus();else ui.undo.focus();
       }
       renderChrome();
+    }
+    function editCause(id){
+      if(!output||output.blocked||!id)return null;
+      const verification=output.verification,phrases=[];let failed=false;
+      const add=(phrase,isFailed)=>{if(!phrase||phrases.includes(phrase)||phrases.length>=4)return;phrases.push(phrase);if(isFailed)failed=true;};
+      const warnings=[];
+      if(Array.isArray(output.warnings))warnings.push(...output.warnings);
+      if(verification&&Array.isArray(verification.warnings))warnings.push(...verification.warnings);
+      for(const item of warnings){if(!item||typeof item!=='object'||item.editId!==id)continue;add(causePhrase(item),false);}
+      const rows=verification&&Array.isArray(verification.edits)?verification.edits.filter(row=>row&&row.id===id):[];
+      if(rows.some(row=>row.status==='failed'))failed=true;
+      const checks=[];
+      if(verification&&Array.isArray(verification.checks))checks.push(...verification.checks);
+      for(const row of rows)if(Array.isArray(row.checks))checks.push(...row.checks);
+      for(const item of checks){if(!item||typeof item!=='object'||item.id!==id)continue;add(causePhrase(item),item.status==='failed');}
+      if(!phrases.length)return null;
+      const span=doc.createElement('span');span.className=failed?'paper-edit-cause is-failed':'paper-edit-cause';
+      const status=verification&&typeof verification.status==='string'?verification.status:'';
+      span.textContent=(status==='failed'||status==='warning'?'검증 '+status:'검증')+' · '+phrases.join(' · ');
+      return span;
     }
     function paintProposals(){
       const queue=proposalQueue;
@@ -942,10 +1016,11 @@
         if(mine!==genId||epoch!==epochAt)return;
         if(await sha256Hex(bytes)!==result.sha256)throw new Error('생성 파일의 바이트와 해시가 달라 받지 않았습니다.');
         if(new TextDecoder().decode(bytes.subarray(0,1024)).indexOf('%PDF-')<0)throw new Error('생성 결과에 PDF 서명이 없어 받지 않았습니다.');
-        output={file:result.file,sha256:result.sha256,verification:result.verification==null?null:result.verification,revision,blocked:false};
-        const noted=diagnosticText(result.warnings);
+        output={file:result.file,sha256:result.sha256,verification:result.verification==null?null:result.verification,warnings:Array.isArray(result.warnings)?result.warnings:null,revision,blocked:false};
+        const noted=diagnosticText(output.warnings,output.verification);
         emit('falsify:paper-workspace-output',published({sha256:output.sha256,revision:output.revision,verification:scrub(output.verification,0)}));
-        setGenStatus((stale()?'생성본을 받았지만 그 사이 편집이 바뀌어 마지막 생성본으로만 표시합니다.':'생성본을 받았습니다. 미리보기와 다운로드는 이 파일의 바이트입니다.')+(noted?' '+noted:''));
+        setGenStatus(generationLead(output.verification,stale())+(noted?' '+noted:''));
+        renderEdits();
         await drawAfter();
       }catch(e){
         if(mine!==genId||epoch!==epochAt||!source||source.fileHash!==hash)return;
