@@ -258,11 +258,48 @@ test('conflicting replacements are ambiguous and the parser source stays local',
   assert.match(doc,/AGPL-3\.0-only/);
 });
 
+test('edits is a strict alias and an empty or unknown payload stays at zero',()=>{
+  const edits=run(JSON.stringify({edits:[{segmentId:'s0',pageIndex:0,before:ALPHA,after:'Changed.'}]}));
+  const changes=run(change());
+  assert.equal(edits.proposals.length,1);
+  assert.equal(edits.proposals[0].status,'matched');
+  assert.deepEqual(edits.proposals[0],changes.proposals[0]);
+  const overlap=run(JSON.stringify({edits:[{segmentId:'s0',pageIndex:0,before:'aa',after:'bb'}]}),[{id:'s0',label:'PDF p. 1',pageIndex:0,text:'aaa'}]);
+  assert.equal(overlap.proposals[0].status,'ambiguous');
+  assert.deepEqual(overlap.proposals[0].matches.map(match=>[match.start,match.occurrence]),[[0,0],[1,1]]);
+  const crlf=run(JSON.stringify({edits:[{segmentId:'s0',pageIndex:0,before:'Alpha\nunique',after:'Changed.'}]}),[{id:'s0',label:'PDF p. 1',pageIndex:0,text:'Alpha\r\nunique'}]);
+  assert.equal(crlf.proposals[0].status,'matched');
+  assert.equal(crlf.proposals[0].before,'Alpha\r\nunique');
+  assert.equal(crlf.proposals[0].anchor.end-crlf.proposals[0].anchor.start,crlf.proposals[0].before.length);
+  const tooLong='A'.repeat(R.LIMITS.beforeChars+1);
+  const limited=run(JSON.stringify({edits:[{segmentId:'s0',pageIndex:0,before:tooLong,after:'B'}]}),[{id:'s0',label:'PDF p. 1',pageIndex:0,text:tooLong}]);
+  assert.equal(limited.proposals.length,0);
+  assert.ok(codes(limited).includes('field-limit'));
+  const many={edits:Array.from({length:R.LIMITS.changes+1},()=>({segmentId:'s0',pageIndex:0,before:ALPHA,after:'Changed.'}))};
+  const capped=run(JSON.stringify(many));
+  assert.equal(capped.proposals.length,0);
+  assert.ok(codes(capped).includes('change-limit'));
+  const empty=run(JSON.stringify({edits:[]}));
+  assert.deepEqual(empty.proposals,[]);
+  assert.ok(codes(empty).includes('empty'));
+  const same=run(JSON.stringify({edits:[{segmentId:'s0',pageIndex:0,before:ALPHA,after:ALPHA}]}));
+  assert.deepEqual(same.proposals,[]);
+  assert.ok(codes(same).includes('unchanged'));
+  const unknown=run(JSON.stringify({notes:'no edits'}));
+  assert.deepEqual(unknown.proposals,[]);
+  assert.ok(codes(unknown).includes('malformed'));
+  assert.equal(unknown.diagnostics.some(item=>item.code==='empty'),false);
+  const notArray=run(JSON.stringify({edits:{before:ALPHA,after:'Changed.'}}));
+  assert.deepEqual(notArray.proposals,[]);
+  assert.ok(codes(notArray).includes('malformed'));
+  const both=run(JSON.stringify({changes:[{segmentId:'s0',pageIndex:0,before:ALPHA,after:'One.'}],edits:[{segmentId:'s0',pageIndex:0,before:ALPHA,after:'Two.'}]}));
+  assert.deepEqual(both.proposals,[]);
+  assert.ok(codes(both).includes('malformed'));
+});
+
 test('real paper-edits accepts overlap, CRLF slices, the selected occurrence, and empty After',()=>{
-  const {execFileSync}=require('node:child_process');
   const vm=require('node:vm');
-  const src=execFileSync('git',['show','origin/feature/paper-workspace-20261026:app/dist/paper-edits.js'],{encoding:'utf8'});
-  assert.equal(fs.existsSync(path.resolve(__dirname,'../dist/paper-edits.js')),false);
+  const src=fs.readFileSync(path.resolve(__dirname,'../dist/paper-edits.js'),'utf8');
   const sandbox={module:{exports:{}},exports:{}};
   vm.createContext(sandbox);
   vm.runInContext(src,sandbox,{filename:'paper-edits.js'});
