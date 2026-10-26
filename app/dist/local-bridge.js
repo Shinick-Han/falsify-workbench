@@ -6,9 +6,11 @@
   // Strict decimal port only; host and scheme are never user input.
   function parsePort(value){const s=String(value??'').trim();if(s==='')return DEFAULT_PORT;if(!/^[1-9][0-9]{3,4}$/.test(s))return null;const n=Number(s);return n>=1024&&n<=65535?n:null;}
   function validToken(t){return typeof t==='string'&&t.length>=16&&t.length<=512&&/^[A-Za-z0-9._~+/-]+=*$/.test(t);}
-  function command(port){return 'python app/local/server.py --web-origin '+WEB_ORIGIN+(port&&port!==DEFAULT_PORT?' --port '+port:'');}
-  function launcher(port){return 'powershell -NoProfile -ExecutionPolicy Bypass -File ./start-companion.ps1'+(port&&port!==DEFAULT_PORT?' -Port '+port:'');}
+  function platformKind(platform){const p=String(platform||'').toLowerCase();if(p.includes('win'))return 'windows';if(p.includes('mac'))return 'mac';if(p.includes('linux')||p.includes('x11')||p.includes('cros'))return 'linux';return 'other';}
+  function command(port,kind){const extra=port&&port!==DEFAULT_PORT?' --port '+port:'';if(kind==='mac'||kind==='linux')return 'python3 -m venv .venv && .venv/bin/python -m pip install -r app/local/requirements.txt && .venv/bin/python app/local/server.py --web-origin '+WEB_ORIGIN+extra;return 'python app/local/server.py --web-origin '+WEB_ORIGIN+extra;}
+  function launcher(port,kind){if(kind==='mac'||kind==='linux')return './open-connection.sh';return 'powershell -NoProfile -ExecutionPolicy Bypass -File ./start-companion.ps1'+(port&&port!==DEFAULT_PORT?' -Port '+port:'');}
   const INSTALL='powershell -NoProfile -ExecutionPolicy Bypass -File .\\install-connection.ps1';
+  function installCommand(kind){return kind==='mac'||kind==='linux'?'./install-connection.sh':INSTALL;}
   // The only URI this page opens: fixed scheme, host and path plus a strict port. Never a token, model, origin or command.
   function launchUri(value){const p=typeof value==='number'?(Number.isInteger(value)&&value>=1024&&value<=65535?value:null):parsePort(value);return p===null?null:'falsify://connect?port='+p;}
   const MODEL=/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,119}$/,EFFORTS=['low','medium','high'];
@@ -123,8 +125,8 @@
     function disconnect(){if(local)return {ok:false,error:'로컬 작업대 세션은 끊지 않습니다.'};if(frozen()){error='RED/BLUE 작업 중에는 연결을 끊을 수 없습니다.';changed();return {ok:false,error};}
       const revoke=link&&link.remote&&typeof link.token==='string'&&link.token.startsWith('rc1.')?{token:link.token,base:link.base}:null;
       attempt++;drop(link);link=null;cap=null;status='manual';error='';
-      if(revoke)void fetchImpl(revoke.base+'/api/pair/revoke',{method:'POST',headers:{Authorization:'Bearer '+revoke.token,'Content-Type':'application/json'},body:JSON.stringify({schema:'falsify.pair-revoke.v1'}),credentials:'omit',redirect:'error',cache:'no-store',mode:'cors',targetAddressSpace:'loopback'}).catch(()=>{});
-      try{forget();}catch{}
+      let forgotten=null;try{forgotten=forget();}catch{forgotten=null;}
+      if(revoke&&revoke.token!==forgotten)void fetchImpl(revoke.base+'/api/pair/revoke',{method:'POST',headers:{Authorization:'Bearer '+revoke.token,'Content-Type':'application/json'},body:JSON.stringify({schema:'falsify.pair-revoke.v1'}),credentials:'omit',redirect:'error',cache:'no-store',mode:'cors',targetAddressSpace:'loopback'}).catch(()=>{});
       changed();return {ok:true};}
     // Click-pairing holds the panel in 'connecting' until redeem finishes. It does not open a model request.
     function hold(rawPort){
@@ -160,10 +162,10 @@
     const $=id=>doc.getElementById(id),panel=$('local-bridge');if(!panel)return;
     const statusEl=$('bridge-status'),pairEl=$('bridge-pair'),portEl=$('bridge-port'),tokenEl=$('bridge-token'),connectEl=$('bridge-connect'),disconnectEl=$('bridge-disconnect'),commandEl=$('bridge-command'),launcherEl=$('bridge-launcher'),feedbackEl=$('bridge-feedback');
     const launchEl=$('bridge-launch'),launchStatusEl=$('bridge-launch-status'),otherOsEl=$('bridge-other-os'),installEl=$('bridge-install');
-    // The terminal handler is installed by the Windows connection app; other platforms keep the manual path.
-    const nav=doc.defaultView?.navigator,windows=/win/i.test(String(options.platform??nav?.userAgentData?.platform??nav?.platform??''));
+    // Windows, macOS and Linux keep the click handler visible after disconnect. The browser still cannot detect whether it is installed.
+    const nav=doc.defaultView?.navigator,kind=platformKind(options.platform??nav?.userAgentData?.platform??nav?.platform??''),handler=kind==='windows'||kind==='mac'||kind==='linux';
     const open=options.open||(uri=>{const a=doc.createElement('a');a.href=uri;a.rel='noopener noreferrer';a.click();});
-    if(installEl)installEl.textContent=INSTALL;
+    if(installEl)installEl.textContent=installCommand(kind);
     function text(s){const c=s.cap,detail=c?versionText(c)+' · RED '+(c.red?'가능':'불가')+' · BLUE '+(c.blue?'가능':'불가')+pdfText(c)+' · CLI 선택 '+(c.cliSelection?'가능':'미지원(구버전 companion)'):'';
       if(s.status==='checking')return '로컬 작업대 세션 확인 중';
       if(s.status==='local')return '로컬 작업대 · same-origin 세션 (페어링 불필요)'+detail;
@@ -178,9 +180,9 @@
       const linked=s.status==='paired'||s.status==='connecting';
       if(portEl)portEl.disabled=s.frozen||linked;if(tokenEl)tokenEl.disabled=s.frozen||linked;
       if(connectEl)connectEl.disabled=s.frozen||linked;if(disconnectEl){disconnectEl.hidden=!linked;disconnectEl.disabled=s.frozen;}
-      if(launchEl){launchEl.hidden=s.mode==='local'||!windows;launchEl.disabled=s.frozen||linked;}if(otherOsEl)otherOsEl.hidden=s.mode==='local'||windows;
+      if(launchEl){launchEl.hidden=s.mode==='local'||!handler;launchEl.disabled=s.frozen||linked;}if(otherOsEl)otherOsEl.hidden=s.mode==='local'||handler;
       if(launchStatusEl)launchStatusEl.textContent=s.launched&&s.status==='manual'?'포트 '+s.port+'로 연결 앱 열기를 요청했습니다. 브라우저와 로컬 승인 창이 뜨면 고정 웹 출처만 허용하세요. 승인 뒤에는 새로고침이 상태만 다시 확인합니다. 창이 없거나 취소하면 아래 수동 토큰을 쓰세요. 브라우저는 설치 여부를 알려주지 않습니다.':'';
-      const p=linked?s.port:parsePort(portEl?.value)??s.port;if(commandEl)commandEl.textContent=command(p);if(launcherEl)launcherEl.textContent=launcher(p);
+      const p=linked?s.port:parsePort(portEl?.value)??s.port;if(commandEl)commandEl.textContent=command(p,kind);if(launcherEl)launcherEl.textContent=launcher(p,kind);
       for(const a of doc.querySelectorAll?.('[data-bridge-local]')||[])a.href='http://127.0.0.1:'+(s.mode==='local'?s.port:p)+'/';
     }
     render();
@@ -193,7 +195,7 @@
     disconnectEl?.addEventListener('click',()=>bridge.disconnect());
   }
 
-  if(typeof module==='object'&&module.exports){module.exports={create,mount,parsePort,validToken,command,launcher,launchUri,pdfEditor,paperAnalysis,imageEditor,profileProposal,workbenchVersion,companionInstance,INSTALL,DEFAULT_PORT,IMAGE_ERRORS,IMAGE_REASONS};return;}
+  if(typeof module==='object'&&module.exports){module.exports={create,mount,parsePort,validToken,command,launcher,launchUri,pdfEditor,paperAnalysis,imageEditor,profileProposal,workbenchVersion,companionInstance,platformKind,installCommand,INSTALL,DEFAULT_PORT,IMAGE_ERRORS,IMAGE_REASONS};return;}
   const bridge=create({fetch:(...args)=>root.fetch(...args),location:root.location,emit:detail=>root.document.dispatchEvent(new CustomEvent('falsify:local-bridge',{detail})),forget:()=>{const auto=root.FalsifyAutoPair;if(auto&&typeof auto.forget==='function')auto.forget();}});
   root.FalsifyLocalBridge=bridge;mount(bridge,root.document);
   if(root.FalsifyAutoPair&&typeof root.FalsifyAutoPair.attach==='function')root.FalsifyAutoPair.attach(bridge);

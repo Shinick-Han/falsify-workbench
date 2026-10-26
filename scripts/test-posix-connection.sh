@@ -64,6 +64,42 @@ if [ -f "$home/.local/share/applications/falsify-connect.desktop" ]; then
 else
   check 'uninstall removes own handler' 1
 fi
+work=$(mktemp -d)
+if FALSIFY_PYTHON= falsify_project_python "$work" >"$work/out" 2>"$work/err"; then
+  check 'missing python fails closed' 0
+else
+  msg=$(cat "$work/err")
+  check 'missing python fails closed' "$(printf '%s' "$msg" | grep -q 'Python 3' && ! printf '%s' "$msg" | grep -q 'Approved' && echo 1 || echo 0)"
+fi
+bindir=$work/bin
+mkdir -p "$bindir"
+cat > "$bindir/python3" << 'EOF'
+#!/bin/sh
+if [ "$1" = -m ] && [ "$2" = venv ]; then
+  mkdir -p "$3/bin"
+  printf '%s\n' '#!/bin/sh' 'exit 1' > "$3/bin/python"
+  chmod +x "$3/bin/python"
+  exit 0
+fi
+exit 1
+EOF
+chmod +x "$bindir/python3"
+if FALSIFY_PYTHON="$bindir/python3" falsify_project_python "$work" >"$work/out2" 2>"$work/err2"; then
+  check 'missing jsonschema fails closed' 0
+else
+  err=$(cat "$work/err2")
+  check 'missing jsonschema fails closed' "$(printf '%s' "$err" | grep -q jsonschema && ! printf '%s' "$err" | grep -q Approved && [ -x "$work/.venv/bin/python" ] && echo 1 || echo 0)"
+fi
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$work/.venv/bin/python"
+chmod +x "$work/.venv/bin/python"
+got=$(FALSIFY_PYTHON="$bindir/python3" falsify_project_python "$work")
+check 'first install uses project venv' "$([ "$got" = "$work/.venv/bin/python" ] && echo 1 || echo 0)"
+if grep -E 'kill -9|pkill|killall' "$root/open-connection.sh" "$root/install-connection.sh" "$root/falsify-connection.sh" >/dev/null; then
+  check 'no arbitrary force kill' 0
+else
+  check 'no arbitrary force kill' 1
+fi
+rm -rf "$work"
 out=$(FALSIFY_CONNECT_OS=Darwin FALSIFY_CONNECT_DRY_RUN=1 FALSIFY_CONNECT_HOME="$home" "$root/install-connection.sh")
 check 'darwin dry-run is not certification' "$(printf '%s' "$out" | grep -q 'not a macOS certification' && printf '%s' "$out" | grep -q 'DRY-RUN install darwin' && echo 1 || echo 0)"
 rm -rf "$home"

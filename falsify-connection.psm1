@@ -88,13 +88,22 @@ function Resolve-FalsifyPowerShellPath {
 
 # The registered command line. Both paths are fixed and quoted; %1 is the only browser-supplied
 # token and is passed as one quoted script argument after -File (never as PowerShell code).
+# The click host is hidden and exits. Approval and failures use a visible dialog and the error log.
+# Manual start-companion.ps1 is a separate foreground window and is not this command.
 function New-FalsifyProtocolCommand {
     param([Parameter(Mandatory)][string]$PowerShellPath, [Parameter(Mandatory)][string]$ScriptPath)
     if ([System.IO.Path]::GetFileName($PowerShellPath) -notin @('powershell.exe', 'pwsh.exe')) { throw "Not a PowerShell executable: $PowerShellPath" }
     if ([System.IO.Path]::GetFileName($ScriptPath) -ne 'open-connection.ps1') { throw "Not the connect launcher: $ScriptPath" }
     Assert-FalsifyLocalPath -Path $PowerShellPath -Label 'PowerShell executable'
     Assert-FalsifyLocalPath -Path $ScriptPath -Label 'Launcher script'
-    return ('"{0}" -NoLogo -NoProfile -ExecutionPolicy Bypass -NoExit -File "{1}" "%1"' -f $PowerShellPath, $ScriptPath)
+    return ('"{0}" -NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{1}" "%1"' -f $PowerShellPath, $ScriptPath)
+}
+
+function Get-FalsifyOwnedProtocolCommands {
+    param([Parameter(Mandatory)][string]$PowerShellPath, [Parameter(Mandatory)][string]$ScriptPath)
+    $hidden = '"{0}" -NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{1}" "%1"' -f $PowerShellPath, $ScriptPath
+    $legacy = '"{0}" -NoLogo -NoProfile -ExecutionPolicy Bypass -NoExit -File "{1}" "%1"' -f $PowerShellPath, $ScriptPath
+    return @($hidden, $legacy)
 }
 
 # Read-only snapshot of the registry state that install/uninstall decisions are made from.
@@ -142,8 +151,8 @@ function Test-FalsifyOwnedRegistration {
     $command = $State.Subkeys['shell\open\command']
     if ($command.Count -ne 1 -or -not $command.ContainsKey('(default)')) { return $false }
     if ([string]::IsNullOrEmpty($root['FalsifyPowerShellPath']) -or [string]::IsNullOrEmpty($root['FalsifyScriptPath'])) { return $false }
-    $expected = '"{0}" -NoLogo -NoProfile -ExecutionPolicy Bypass -NoExit -File "{1}" "%1"' -f $root['FalsifyPowerShellPath'], $root['FalsifyScriptPath']
-    return ($command['(default)'] -ceq $expected)
+    $owned = Get-FalsifyOwnedProtocolCommands -PowerShellPath $root['FalsifyPowerShellPath'] -ScriptPath $root['FalsifyScriptPath']
+    return ($owned -contains $command['(default)'])
 }
 
 function Get-FalsifyInstallDecision {
@@ -187,5 +196,5 @@ function Get-FalsifyCliStatus {
 
 Export-ModuleMember -Function Get-FalsifyConnectionConstants, ConvertFrom-FalsifyConnectUri, ConvertFrom-FalsifyConnectLink,
     Get-FalsifyApprovalDecision, Get-FalsifyPairingDirectory, Resolve-FalsifyPowerShellPath,
-    New-FalsifyProtocolCommand, Get-FalsifyProtocolState, Test-FalsifyOwnedRegistration, Get-FalsifyInstallDecision,
+    New-FalsifyProtocolCommand, Get-FalsifyOwnedProtocolCommands, Get-FalsifyProtocolState, Test-FalsifyOwnedRegistration, Get-FalsifyInstallDecision,
     Get-FalsifyUninstallDecision, Test-FalsifyPortAvailable, Get-FalsifyCliStatus

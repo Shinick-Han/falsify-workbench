@@ -128,7 +128,7 @@ try {
     Copy-Item -LiteralPath $openScript -Destination $percentDirectory
     $spacedScript = Join-Path $spacedDirectory 'open-connection.ps1'
     $command = New-FalsifyProtocolCommand -PowerShellPath $powerShell -ScriptPath $spacedScript
-    Check 'command exact format' ($command -ceq ('"' + $powerShell + '" -NoLogo -NoProfile -ExecutionPolicy Bypass -NoExit -File "' + $spacedScript + '" "%1"'))
+    Check 'command exact format' ($command -ceq ('"' + $powerShell + '" -NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $spacedScript + '" "%1"'))
     Check 'command has no remote or eval surface' ($command -notmatch '(?i)http|-Command|-EncodedCommand|Invoke-|iex|\$\(')
     Add-Type -Namespace FalsifyTest -Name Native -MemberDefinition '[DllImport("shell32.dll", SetLastError = true, CharSet = CharSet.Unicode)] public static extern IntPtr CommandLineToArgvW(string cmd, out int count); [DllImport("kernel32.dll")] public static extern IntPtr LocalFree(IntPtr p);'
     function Split-CommandLine([string]$Line) {
@@ -136,13 +136,13 @@ try {
         try { 0..($count - 1) | ForEach-Object { [System.Runtime.InteropServices.Marshal]::PtrToStringUni([System.Runtime.InteropServices.Marshal]::ReadIntPtr($pointer, $_ * [IntPtr]::Size)) } }
         finally { $null = [FalsifyTest.Native]::LocalFree($pointer) }
     }
-    $prefix = @($powerShell, '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-NoExit', '-File', $spacedScript)
+    $prefix = @($powerShell, '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', $spacedScript)
     $argv = @(Split-CommandLine ($command.Replace('%1', 'falsify://connect?port=7816')))
     Check 'argv keeps spaced paths intact' (($argv -join '|') -ceq (($prefix + 'falsify://connect?port=7816') -join '|'))
     $argv = @(Split-CommandLine ($command.Replace('%1', 'falsify://connect/?port=7816')))
     Check 'argv keeps root-slash link as one argument' (($argv -join '|') -ceq (($prefix + 'falsify://connect/?port=7816') -join '|'))
     $argv = @(Split-CommandLine ($command.Replace('%1', 'falsify://connect?port=7816" -Command "calc')))
-    Check 'quote injection cannot add PowerShell options before -File' ((($argv[0..7]) -join '|') -ceq ($prefix -join '|'))
+    Check 'quote injection cannot add PowerShell options before -File' ((($argv[0..($prefix.Length - 1)]) -join '|') -ceq ($prefix -join '|'))
     $result = Invoke-Child @('-File', $spacedScript, 'falsify://connect?port=7816" -Command "calc') $dryRun
     Check 'quote injection becomes rejected script arguments' ($result.ExitCode -ne 0 -and $result.Output -notmatch 'DRY-RUN')
     $result = Invoke-Child @('-File', $spacedScript, 'falsify://connect?port=7818') $dryRun
@@ -179,7 +179,9 @@ $foreign = [pscustomobject]@{ UserKeyExists = $true; MachineKeyExists = $false; 
 Check 'install creates when absent' ((Get-FalsifyInstallDecision $absent $ownCommand).Action -eq 'Create')
 Check 'install refuses machine-wide owner' ((Get-FalsifyInstallDecision $machineOnly $ownCommand).Action -eq 'Refuse')
 Check 'install refuses foreign per-user owner' ((Get-FalsifyInstallDecision $foreign $ownCommand).Action -eq 'Refuse')
-Check 'install idempotent for own exact registration' ((Get-FalsifyInstallDecision (New-State) $ownCommand).Action -eq 'AlreadyInstalled')
+Check 'install idempotent for own exact registration' ((Get-FalsifyInstallDecision (New-State -Command $ownCommand) $ownCommand).Action -eq 'AlreadyInstalled')
+Check 'legacy NoExit command stays owned and upgrades to hidden exit' ((Test-FalsifyOwnedRegistration (New-State)) -and (Get-FalsifyInstallDecision (New-State) $ownCommand).Action -eq 'Update')
+Check 'new protocol command is hidden and exits' ($ownCommand -match '-WindowStyle Hidden -File "' -and $ownCommand -notmatch '-NoExit')
 Check 'install re-points own registration from moved checkout' ((Get-FalsifyInstallDecision (New-State -ScriptPath 'C:\Old Place\open-connection.ps1') $ownCommand).Action -eq 'Update')
 Check 'install refuses own registration when machine key appears' ((Get-FalsifyInstallDecision (New-State -Machine $true) $ownCommand).Action -eq 'Refuse')
 $tampered = @(
@@ -207,7 +209,7 @@ Check 'uninstall removes own registration from moved checkout' ((Get-FalsifyUnin
 function Get-RegistryFingerprint { (Get-FalsifyProtocolState | ConvertTo-Json -Depth 5 -Compress) }
 $before = Get-RegistryFingerprint
 $result = Invoke-Child @('-File', (Join-Path $root 'install-connection.ps1'), '-WhatIf')
-Check 'install -WhatIf shows fixed command' ($result.Output.Contains('-NoExit -File "' + $openScript + '" "%1"'))
+Check 'install -WhatIf shows fixed command' ($result.Output.Contains('-WindowStyle Hidden -File "' + $openScript + '" "%1"') -and $result.Output -notmatch '-NoExit')
 Check 'install -WhatIf leaves registry unchanged' ((Get-RegistryFingerprint) -ceq $before)
 $result = Invoke-Child @('-File', (Join-Path $root 'uninstall-connection.ps1'), '-WhatIf')
 Check 'uninstall -WhatIf leaves registry unchanged' ((Get-RegistryFingerprint) -ceq $before)
