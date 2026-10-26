@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-import {execFileSync} from 'node:child_process';
-import {readFileSync} from 'node:fs';
+import {execFileSync, spawnSync} from 'node:child_process';
+import {existsSync, readFileSync} from 'node:fs';
 import http from 'node:http';
 import {extname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -152,13 +152,23 @@ function assertNoVisibleStamps(streams, texts) {
   const visible = [...streams, ...texts].join('\n');
   for (const pattern of VISIBLE_STAMPS) assert.equal(pattern.test(visible), false, pattern.source);
 }
-function pymupdfAvailable() {
-  try {
-    execFileSync('python3', ['-c', 'import pymupdf'], {stdio: 'ignore'});
-    return true;
-  } catch {
-    return false;
+let resolvedPython;
+function pythonExecutable() {
+  if (resolvedPython !== undefined) return resolvedPython;
+  const requested = process.env.PYTHON_EXECUTABLE;
+  const candidates = requested ? [requested] : (process.platform === 'win32' ? ['py', 'python', 'python3'] : ['python3', 'python']);
+  for (const command of candidates) {
+    try {
+      execFileSync(command, ['-c', 'import pymupdf'], {stdio: 'ignore'});
+      resolvedPython = command;
+      return command;
+    } catch { /* try the next installed interpreter */ }
   }
+  resolvedPython = '';
+  return '';
+}
+function pymupdfAvailable() {
+  return Boolean(pythonExecutable());
 }
 function pymupdfInspect(source, output) {
   const script = `
@@ -179,11 +189,16 @@ print(json.dumps({
   'version': pymupdf.version[1] if isinstance(pymupdf.version, tuple) else str(pymupdf.version),
 }))
 `;
-  return JSON.parse(execFileSync('python3', ['-c', script], {
+  return JSON.parse(execFileSync(pythonExecutable(), ['-c', script], {
     input: JSON.stringify({source: Buffer.from(source).toString('base64'), output: Buffer.from(output).toString('base64')}),
     maxBuffer: 32 * 1024 * 1024,
   }).toString());
 }
+
+test('browser-pdf loader lifecycle', () => {
+  const result = spawnSync(process.execPath, ['--test', fileURLToPath(new URL('./browser-pdf-loader.spec.mjs', import.meta.url))], {encoding: 'utf8'});
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+});
 
 test('vendored engine pin and global', () => {
   const manifest = JSON.parse(readFileSync(new URL('../dist/browser-pdf-vendor/manifest.json', import.meta.url), 'utf8'));
@@ -276,7 +291,7 @@ test('replaces one word, keeps unrelated text, figures, and page count', async (
 
 test('pymupdf extraction and untouched-page render when installed', async (t) => {
   if (!pymupdfAvailable()) {
-    t.skip('pymupdf is not installed');
+    t.skip('pymupdf is not importable; set PYTHON_EXECUTABLE');
     return;
   }
   const result = await prepare({
@@ -553,6 +568,35 @@ test('ambiguous, stale, and aborted requests do not return a file', async () => 
   }), error => error.code === 'aborted');
 });
 
+function browserExecutable() {
+  if (process.env.BROWSER_EXECUTABLE) return process.env.BROWSER_EXECUTABLE;
+  const candidates = [];
+  if (process.platform === 'win32') {
+    const roots = [process.env.PROGRAMFILES, process.env['PROGRAMFILES(X86)'], process.env.LOCALAPPDATA].filter(Boolean);
+    for (const root of roots) {
+      candidates.push(
+        join(root, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+        join(root, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      );
+    }
+  } else if (process.platform === 'darwin') {
+    candidates.push(
+      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    );
+  } else {
+    candidates.push(
+      '/usr/bin/microsoft-edge',
+      '/usr/bin/microsoft-edge-stable',
+      '/usr/bin/google-chrome',
+      '/usr/bin/google-chrome-stable',
+      '/usr/bin/chromium',
+      '/usr/bin/chromium-browser',
+    );
+  }
+  return candidates.find(candidate => existsSync(candidate)) || '';
+}
+
 function listen(root) {
   const types = {'.js': 'text/javascript', '.mjs': 'text/javascript', '.wasm': 'application/wasm', '.json': 'application/json'};
   const hits = [];
@@ -580,11 +624,16 @@ test('chrome classic loader runs the vendored WASM edit', async (t) => {
   let chromium;
   try { ({chromium} = await import('playwright')); }
   catch { t.skip('playwright is not installed'); return; }
+  const executablePath = browserExecutable();
+  if (!executablePath) {
+    t.skip('browser executable not found; set BROWSER_EXECUTABLE');
+    return;
+  }
   const server = await listen(new URL('..', import.meta.url).pathname.replace(/\/$/, ''));
   const port = server.address().port;
   let browser;
   try {
-    browser = await chromium.launch({executablePath: '/usr/bin/google-chrome', headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage']});
+    browser = await chromium.launch({executablePath, headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage']});
     const page = await browser.newPage();
     const errors = [];
     page.on('pageerror', error => errors.push(String(error)));

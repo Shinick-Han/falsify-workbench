@@ -111,10 +111,17 @@ No MuPDF source build and no falsify-pdf-editor candidate runtime is downloaded.
 
 Browser cancellation: the worker posts `{ready: true}` after its message handler is installed. The loader then sends one numeric `id`. The loader copies the
 file into a fresh `ArrayBuffer` and transfers that copy, so the caller's bytes
-stay intact. `AbortSignal` abort terminates the worker. In-flight work on that
-worker rejects with `aborted` and returns no file. The next `prepare` starts a
-new worker. Node tests import `dist/browser-pdf.mjs` and run MuPDF on the
-main thread; they do not start the worker.
+stay intact. One `finish` function settles every success and failure: it marks
+the request settled, removes that request's `AbortSignal` listener, and deletes
+the job. Aborting a signal after `finish` does not terminate the worker a later
+`prepare` is using. A `Worker` constructor failure or a `postMessage` failure
+rejects `prepare` with `engine` immediately and resets that worker. A worker
+`error` or reset terminates it, settles its ready promise, and finishes every
+job still recorded for it. In-flight abort still rejects with `aborted`,
+returns no file, and the next `prepare` starts a new worker. Node engine tests
+import `dist/browser-pdf.mjs` and run MuPDF on the main thread. The loader
+lifecycle tests stub `Worker`, run in their own process, and do not import the
+engine or fetch the WASM.
 
 License: MuPDF.js is AGPL-3.0-or-later. Corresponding source is the upstream
 1.28.1 tag recorded in the manifest. The workbench itself is AGPL-3.0-only.
@@ -131,5 +138,9 @@ MuPDF's save. Tests cover a synthetic multi-page file with pdf.js and, when
 `pymupdf` imports, PyMuPDF, including the exact top-left unrotated bbox, a
 rejected bottom-left bbox, a rejected rotated page, overlapping hits, empty
 After deletion, a failed check that still returns the candidate, Korean
-UTF-16 text, and browser-worker cancellation. They are candidate evidence,
-not a release certification.
+UTF-16 text, and browser-worker cancellation. The browser launch uses
+`BROWSER_EXECUTABLE` when that environment variable is set, otherwise the
+installed Edge, Chrome, or Chromium for the platform. PyMuPDF uses
+`PYTHON_EXECUTABLE` when set, otherwise `python3`, `python`, or the Windows
+`py` launcher. A missing browser or interpreter skips only that check. These
+tests are candidate evidence, not a release certification.
