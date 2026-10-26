@@ -134,8 +134,17 @@ test('review shows text, accept sends only a checked unique match, and ambiguous
   assert.equal(ui.input('external-red-accept').disabled,true);
   ui.input('external-red-accept').click();
   assert.equal(ui.calls.length,0);
+  assert.equal(ui.input('external-red-review').textContent,'변경 찾기');
+  assert.equal(ui.input('external-red-accept').textContent,'선택한 변경 가져오기');
+  assert.match(textOf(ui.section()),/PDF p\.1/);
+  assert.match(textOf(ui.section()),/PDF p\.2/);
+  assert.doesNotMatch(textOf(ui.section()),/pageIndex/);
+  assert.doesNotMatch(textOf(ui.section()),/워크스페이스/);
+  assert.doesNotMatch(textOf(ui.section()),/대응/);
   const radios=queryAll(cards[1],'input').filter(node=>node.type==='radio');
   assert.equal(radios.length,2);
+  assert.ok(radios.every(radio=>radio.checked===false));
+  assert.match(textOf(cards[1]),/\[Beta appears\.\]/);
   radios[1].checked=true;
   radios[1].dispatchEvent(new Event('change'));
   queryAll(cards[1],'button')[0].click();
@@ -158,6 +167,9 @@ test('review shows text, accept sends only a checked unique match, and ambiguous
   assert.equal(ui.calls[0].proposals[0].pageIndex,1);
   assert.equal(ui.calls[0].proposals[0].matches.length,1);
   assert.equal(ui.calls[0].proposals[0].matches[0].start,'Beta appears. Beta appears.'.indexOf('Beta appears.','Beta appears.'.length));
+  assert.equal(ui.calls[0].proposals[0].before,'Beta appears.');
+  assert.equal(ui.calls[0].proposals[0].anchor.occurrence,1);
+  assert.equal(ui.calls[0].proposals[0].anchor.start,ui.calls[0].proposals[0].matches[0].start);
   assert.equal(ui.calls[0].proposals[0].origin,'external-ai-import');
   assert.match(ui.input('external-red-accept-status').textContent,/검증된 실행으로 기록하지 않았습니다/);
   assert.equal(ui.calls[0].proposals.some(item=>item.segmentId==='missing'),false);
@@ -188,12 +200,23 @@ test('two confirmed replacements of the same span are not sent together',async()
   ui.input('external-red-review').click();
   const cards=queryAll(ui.section(),'article');
   assert.ok(cards.every(card=>card['data-status']==='ambiguous'));
+  for(const card of cards){
+    const radio=queryAll(card,'input').find(node=>node.type==='radio');
+    assert.equal(radio.checked,false);
+    queryAll(card,'button')[0].click();
+    assert.equal(card['data-status'],'ambiguous');
+  }
+  for(const card of cards){
+    const radio=queryAll(card,'input').find(node=>node.type==='radio');
+    radio.checked=true;
+    radio.dispatchEvent(new Event('change'));
+  }
   for(const card of cards)queryAll(card,'button')[0].click();
   for(const box of queryAll(ui.section(),'input').filter(node=>node.type==='checkbox')){box.checked=true;box.dispatchEvent(new Event('change'));}
   ui.input('external-red-accept').click();
   await flush();
   assert.equal(ui.calls.length,0);
-  assert.match(ui.input('external-red-accept-status').textContent,/겹치는 대응은 함께 보내지 않습니다/);
+  assert.match(ui.input('external-red-accept-status').textContent,/겹치는 변경은 함께 가져오지 않습니다/);
 });
 
 test('accept without a workspace API does not throw or invent a run',async()=>{
@@ -206,8 +229,60 @@ test('accept without a workspace API does not throw or invent a run',async()=>{
   box.dispatchEvent(new Event('change'));
   ui.input('external-red-accept').click();
   await flush();
-  assert.match(ui.input('external-red-accept-status').textContent,/워크스페이스 API가 없어/);
+  assert.match(ui.input('external-red-accept-status').textContent,/편집 화면이 없어 가져오지 못했습니다/);
   assert.equal(ui.calls.length,0);
+});
+
+test('the second alpha match is the occurrence the real edit core accepts',async()=>{
+  const {execFileSync}=require('node:child_process');
+  const src=execFileSync('git',['show','origin/feature/paper-workspace-20261026:app/dist/paper-edits.js'],{encoding:'utf8'});
+  const sandbox={module:{exports:{}},exports:{}};
+  vm.createContext(sandbox);
+  vm.runInContext(src,sandbox,{filename:'paper-edits.js'});
+  sandbox.core=sandbox.module.exports;
+  const ui=world();
+  ui.source={file:null,fileHash:HASH,segments:[{id:'s0',label:'PDF p. 1',text:'alpha alpha',pageIndex:0}]};
+  ui.input('external-red-paste').value=JSON.stringify({changes:[{segmentId:'s0',pageIndex:0,before:'alpha',after:'BETA'}]});
+  ui.input('external-red-review').click();
+  const card=queryAll(ui.section(),'article')[0];
+  assert.equal(card['data-status'],'ambiguous');
+  const radios=queryAll(card,'input').filter(node=>node.type==='radio');
+  assert.equal(radios.length,2);
+  assert.ok(radios.every(radio=>radio.checked===false));
+  assert.match(textOf(card),/PDF p\.1/);
+  assert.match(textOf(card),/alpha \[alpha\]/);
+  queryAll(card,'button')[0].click();
+  assert.equal(queryAll(ui.section(),'article')[0]['data-status'],'ambiguous');
+  radios[1].checked=true;
+  radios[1].dispatchEvent(new Event('change'));
+  queryAll(card,'button')[0].click();
+  const box=queryAll(ui.section(),'input').find(node=>node.type==='checkbox');
+  box.checked=true;
+  box.dispatchEvent(new Event('change'));
+  ui.input('external-red-accept').click();
+  await flush();
+  const proposal=ui.calls[0].proposals[0];
+  assert.equal(proposal.before,'alpha');
+  assert.equal(proposal.anchor.start,6);
+  assert.equal(proposal.anchor.end,11);
+  assert.equal(proposal.anchor.occurrence,1);
+  sandbox.before=proposal.before;
+  sandbox.after=proposal.after;
+  sandbox.pageIndex=proposal.pageIndex;
+  sandbox.segmentId=proposal.segmentId;
+  sandbox.start=proposal.anchor.start;
+  sandbox.end=proposal.anchor.end;
+  sandbox.occurrence=proposal.anchor.occurrence;
+  const stored=vm.runInContext(`(()=>{
+    const session=core.create({fileHash:'${'ab'.repeat(32)}',name:'fixture.txt',segments:[{id:'s0',label:'PDF p. 1',text:'alpha alpha',pageIndex:0}],now:()=>1});
+    const id=session.add({pageIndex:pageIndex,segmentId:segmentId,before:before,after:after,origin:'external-ai-import',anchor:{start:start,end:end,occurrence:occurrence}});
+    const edit=session.snapshot().edits.find(item=>item.id===id);
+    return {before:edit.before,start:edit.anchor.start,end:edit.anchor.end,occurrence:edit.anchor.occurrence};
+  })()`,sandbox);
+  assert.equal(stored.before,'alpha');
+  assert.equal(stored.start,6);
+  assert.equal(stored.occurrence,1);
+  assert.equal('alpha alpha'.slice(stored.start,stored.end),stored.before);
 });
 
 (async()=>{
