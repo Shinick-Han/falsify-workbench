@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { describe, test } from 'node:test';
+import harnessCore from '../../../app/dist/harness-core.js';
+import { archiveHash, validateArchive, buildHarnessArchive } from '../../../app/dist/review-bundle.mjs';
 import worker from '../src/index.js';
 import {
   SESSION_HEADER,
@@ -104,16 +106,17 @@ function mockUpstream(options = {}) {
   const store = {
     page: null,
     labeled: false,
-    file: options.downloadText || options.listHash || options.downloadStatus
+    file: options.downloadText || options.listHash || options.downloadStatus || options.downloadLocation || options.redirectChain
       ? (options.downloadText ?? JSON.stringify(canonical(archive)))
       : null,
+    hops: 0,
   };
   const fetchImpl = async (url, init = {}) => {
     const method = String(init.method || 'GET').toUpperCase();
     const u = new URL(url);
     calls.push({ url: u.toString(), method, init, host: u.hostname, path: u.pathname, search: u.search });
     assert.equal(init.redirect, 'manual');
-    assert.ok(u.hostname === 'api.atlassian.com' || u.hostname === 'auth.atlassian.com');
+    assert.ok(u.hostname === 'api.atlassian.com' || u.hostname === 'auth.atlassian.com' || u.hostname === 'api.media.atlassian.com');
     assert.equal(u.protocol, 'https:');
     const wiki = u.pathname.includes('/wiki/') ? u.pathname.slice(u.pathname.indexOf('/wiki/')) : u.pathname;
     if (u.hostname === 'auth.atlassian.com' && u.pathname === '/oauth/token') {
@@ -134,6 +137,17 @@ function mockUpstream(options = {}) {
     if (method === 'GET' && wiki === `/wiki/api/v2/pages/${PARENT}` && u.search === '') {
       if (options.parentStatus) return new Response('no', { status: options.parentStatus });
       return jsonResponse(200, options.parent ?? { id: PARENT, spaceId: '65737' });
+    }
+    if (method === 'GET' && /\/wiki\/api\/v2\/pages\/[0-9]+\/ancestors$/.test(wiki)) {
+      if (options.ancestorStatus) return new Response('no', { status: options.ancestorStatus });
+      if (options.evilAncestors) return jsonResponse(200, { results: [{ id: '1001', type: 'page' }], _links: { next: 'https://evil.example/ancestors' } });
+      return jsonResponse(200, { results: options.ancestors ?? [] });
+    }
+    if (method === 'GET' && /\/wiki\/api\/v2\/pages\/([0-9]+)\/restriction-state$/.test(wiki)) {
+      const id = wiki.split('/')[5];
+      if (options.restrictionStatus) return new Response('no', { status: options.restrictionStatus });
+      const state = options.restrictionById?.[id] || 'OPEN';
+      return jsonResponse(200, { state });
     }
     if (method === 'GET' && wiki === '/wiki/api/v2/pages' && u.searchParams.has('title')) {
       if (options.foreignTitle) return jsonResponse(200, { results: [{ id: '9001', title: u.searchParams.get('title'), status: 'current' }] });
@@ -160,30 +174,62 @@ function mockUpstream(options = {}) {
       }
       if (options.hideLabel) return jsonResponse(200, readyPage({ labels: { results: [] } }));
       if (options.listBroken) return jsonResponse(200, readyPage({ version: {}, _links: {} }));
-      if (store.page || options.listHash) return jsonResponse(200, readyPage(store.labeled || options.listHash ? {} : { labels: { results: [] }, properties: { results: [] } }));
+      if (store.page || options.listHash) {
+        const page = readyPage(store.labeled || options.listHash ? {} : { labels: { results: [] }, properties: { results: [] } });
+        if (store.property) page.properties = { results: [{ key: 'falsify-archive', value: store.property }] };
+        if (store.page?.title) page.title = store.page.title;
+        return jsonResponse(200, page);
+      }
       return jsonResponse(404, {});
     }
     if (method === 'GET' && wiki === '/wiki/api/v2/pages/9003') {
       return jsonResponse(200, { id: '9003', parentId: PARENT, spaceId: '65737', title: 'draft', status: 'current', labels: { results: [] }, properties: { results: [] } });
     }
     if (method === 'GET' && wiki === '/wiki/api/v2/pages/9001/attachments') {
-      return jsonResponse(200, { results: store.file ? [{ id: '77', title: `${HASH}.json` }] : [] });
+      const title = store.fileName || `${HASH}.json`;
+      return jsonResponse(200, { results: store.file ? [{ id: '77', title }] : [] });
     }
     if (method === 'POST' && wiki === '/wiki/rest/api/content/9001/child/attachment') {
       if (options.attachmentStatus) return new Response('err', { status: options.attachmentStatus, headers: options.attachmentHeaders || {} });
       assert.equal(init.headers['X-Atlassian-Token'], 'nocheck');
       store.file = options.tamperDownload ? extractFile(init.body).replace('RAW-MARKER-DO-NOT-LEAK', 'TAMPERED-MARKER') : extractFile(init.body);
+      const named = /filename="([a-f0-9]{64}\.json)"/.exec(Buffer.from(init.body).toString('utf8'));
+      assert.ok(named);
+      store.fileName = named[1];
       assert.match(String(init.headers['Content-Type']), /multipart\/form-data/);
-      assert.match(Buffer.from(init.body).toString('utf8'), new RegExp(`name="file"; filename="${HASH}\\.json"`));
-      return jsonResponse(200, { results: [{ id: '77', title: `${HASH}.json` }] });
+      return jsonResponse(200, { results: [{ id: '77', title: store.fileName }] });
+    }
+    if (u.hostname === 'api.media.atlassian.com') {
+      assert.equal(init.headers.Authorization, undefined);
+      assert.equal(init.headers.authorization, undefined);
+      assert.equal(init.headers.Cookie, undefined);
+      assert.equal(init.headers.cookie, undefined);
+      if (options.redirectChain) {
+        const next = options.redirectChain[store.hops++];
+        if (next) return new Response(null, { status: 302, headers: { Location: next } });
+      }
+      if (options.mediaStatus) return new Response(options.mediaBody ?? null, { status: options.mediaStatus, headers: options.mediaHeaders || {} });
+      return new Response(options.downloadText ?? store.file, { status: 200, headers: { 'Content-Type': 'application/json' } });
     }
     if (wiki.includes('/child/attachment/') && wiki.endsWith('/download')) {
+      if (options.redirectChain) {
+        const next = options.redirectChain[store.hops++];
+        if (next) return new Response(null, { status: 302, headers: { Location: next } });
+        return new Response(options.downloadText ?? store.file, { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      if (options.downloadLocation) {
+        return new Response(null, { status: options.downloadStatus || 302, headers: { Location: options.downloadLocation } });
+      }
       if (options.downloadStatus) {
         return new Response(null, { status: options.downloadStatus, headers: { Location: 'https://evil.example/secret-file' } });
       }
+      if (options.downloadBytes) return new Response(new Uint8Array(options.downloadBytes), { status: 200 });
       return new Response(options.downloadText ?? store.file, { status: 200, headers: { 'Content-Type': 'application/json' } });
     }
-    if (method === 'POST' && wiki === '/wiki/api/v2/pages/9001/properties') return jsonResponse(200, { key: 'falsify-archive' });
+    if (method === 'POST' && wiki === '/wiki/api/v2/pages/9001/properties') {
+      store.property = JSON.parse(init.body).value;
+      return jsonResponse(200, { key: 'falsify-archive' });
+    }
     if (method === 'POST' && wiki === '/wiki/rest/api/content/9001/label') {
       store.labeled = true;
       return jsonResponse(200, { results: [{ name: 'falsify-archive-ready' }] });
@@ -197,7 +243,7 @@ function mockUpstream(options = {}) {
           { id: '9001', parentId: PARENT },
           { id: '9003', parentId: PARENT },
         ],
-        _links: { next: `https://api.atlassian.com/ex/confluence/${CLOUD}/wiki/api/v2/pages/${PARENT}/children?limit=25&cursor=safe_CURSOR-1` },
+        _links: { next: `https://api.atlassian.com/ex/confluence/${CLOUD}/wiki/api/v2/pages/${PARENT}/children?limit=25&cursor=${encodeURIComponent('safe_CURSOR=')}` },
       });
     }
     throw new Error(`unmocked ${method} ${u.pathname}${u.search}`);
@@ -313,6 +359,7 @@ describe('confluence gateway', { concurrency: false }, () => {
       'offline_access',
       'read:space:confluence',
       'read:page:confluence',
+      'read:content.metadata:confluence',
       'write:page:confluence',
       'read:attachment:confluence',
       'write:confluence-file',
@@ -571,6 +618,25 @@ describe('confluence gateway', { concurrency: false }, () => {
     assert.equal(parentDenied.status, 403);
     assert.equal(parentDenied.json.error.code, 'parent_not_allowed');
     assert.equal(parent.calls.some(call => call.method === 'POST' && call.path.includes('/pages')), false);
+    const viewRestricted = mockUpstream({ restrictionById: { [PARENT]: 'VIEW_RESTRICTED' } });
+    const restrictedParent = await publish(viewRestricted);
+    assert.equal(restrictedParent.status, 403);
+    assert.equal(restrictedParent.json.error.code, 'parent_not_allowed');
+    assert.equal(viewRestricted.calls.some(call => call.method === 'POST'), false);
+    const inherited = mockUpstream({
+      ancestors: [{ id: '1001', type: 'page' }],
+      restrictionById: { [PARENT]: 'EDIT_RESTRICTED', 1001: 'VIEW_RESTRICTED' },
+    });
+    const restrictedAncestor = await publish(inherited);
+    assert.equal(restrictedAncestor.status, 403);
+    assert.equal(restrictedAncestor.json.error.code, 'parent_not_allowed');
+    assert.equal(inherited.calls.some(call => call.path.endsWith('/pages/1001/restriction-state')), true);
+    assert.equal(inherited.calls.some(call => call.method === 'POST'), false);
+    const evilAncestors = mockUpstream({ evilAncestors: true });
+    const leakedAncestors = await publish(evilAncestors);
+    assert.equal(leakedAncestors.status, 403);
+    assert.equal(leakedAncestors.json.error.code, 'parent_not_allowed');
+    assert.equal(evilAncestors.calls.some(call => call.host === 'evil.example'), false);
     const foreign = mockUpstream({ foreignTitle: true });
     const conflict = await publish(foreign);
     assert.equal(conflict.status, 409);
@@ -635,7 +701,7 @@ describe('confluence gateway', { concurrency: false }, () => {
     const auth = { Authorization: `Bearer ${minted.session}` };
     const upstream = mockUpstream({ listHash: true });
     upstream.store.file = JSON.stringify(canonical(archive));
-    const listed = await read(await gateway('/v1/confluence/archives?cursor=safe_CURSOR-1', {
+    const listed = await read(await gateway('/v1/confluence/archives', {
       headers: auth,
       fetchImpl: upstream.fetchImpl,
     }));
@@ -643,13 +709,28 @@ describe('confluence gateway', { concurrency: false }, () => {
     assert.equal(listed.json.items.length, 1);
     assert.equal(listed.json.items[0].pageId, '9001');
     assert.equal(listed.json.items[0].webUrl, `${SITE}/wiki/spaces/Falsify/pages/9001/Falsify`);
-    assert.equal(listed.json.nextCursor, 'safe_CURSOR-1');
+    assert.match(listed.json.nextCursor, /^[A-Za-z0-9_-]+$/);
+    assert.equal(listed.json.nextCursor.includes('='), false);
+    assert.notEqual(listed.json.nextCursor, 'safe_CURSOR=');
     assert.equal(listed.json.items.some(item => item.pageId === '9003'), false);
+    const followed = await read(await gateway(`/v1/confluence/archives?cursor=${encodeURIComponent(listed.json.nextCursor)}`, {
+      headers: auth,
+      fetchImpl: upstream.fetchImpl,
+    }));
+    assert.equal(followed.status, 200);
     const childCalls = upstream.calls.filter(call => call.path.endsWith('/children'));
-    assert.equal(childCalls.length, 1);
+    assert.equal(childCalls.length, 2);
     assert.equal(childCalls[0].host, 'api.atlassian.com');
-    assert.equal(childCalls[0].url.includes('cursor=safe_CURSOR-1'), true);
-    assert.equal(upstream.calls.filter(call => call.url.includes('safe_CURSOR-1')).length, 1);
+    assert.equal(childCalls[0].url.includes('cursor='), false);
+    assert.equal(childCalls[1].url.includes('cursor=safe_CURSOR%3D') || childCalls[1].url.includes('cursor=safe_CURSOR='), true);
+    const rawEquals = mockUpstream();
+    const rawCursor = await read(await gateway(`/v1/confluence/archives?cursor=${encodeURIComponent('safe_CURSOR=')}`, {
+      headers: auth,
+      fetchImpl: rawEquals.fetchImpl,
+    }));
+    assert.equal(rawCursor.status, 400);
+    assert.equal(rawCursor.json.error.code, 'invalid_cursor');
+    assert.equal(rawEquals.calls.length, 0);
     const missing = await read(await gateway('/v1/confluence/archives/9003', { headers: auth, fetchImpl: upstream.fetchImpl }));
     assert.equal(missing.status, 404);
     assert.equal(missing.json.error.code, 'not_found');
@@ -817,11 +898,121 @@ describe('confluence gateway', { concurrency: false }, () => {
     assert.equal(wrangler.includes('424242'), false);
     assert.equal(wrangler.split('"CONFLUENCE_PARENT_PAGE_ID": "8355842"').length, 3);
     assert.equal(wrangler.split('"ATLASSIAN_CLIENT_ID": "db5aa4f3-b807-43bd-95fa-4bdda751406e"').length, 3);
-    assert.match(wrangler, /"CONFLUENCE_ONLY": "false"/);
+    assert.equal(wrangler.split('"CONFLUENCE_ONLY": "true"').length, 3);
+    assert.equal(wrangler.includes('"CONFLUENCE_ONLY": "false"'), false);
     assert.match(wrangler, /"REMOTE_PROVIDER": "confluence"/);
     assert.match(wrangler, /"database_name": "falsify-harness-records"/);
     assert.match(wrangler, /"database_name": "falsify-harness-records-staging"/);
     assert.match(wrangler, /"compatibility_date": "2026-10-19"/);
     assert.match(wrangler, /"name": "falsify-cloud-api"/);
+  });
+
+  test('follows one documented media redirect and refuses foreign, loop, and oversize downloads', async () => {
+    installBundle();
+    const minted = await mint();
+    const auth = { Authorization: `Bearer ${minted.session}` };
+    const media = 'https://api.media.atlassian.com/file/ff4a5337-ab17-4572-ac66-04e3d869d92a/binary?token=signed-token&client=abc&dl=true';
+    const body = JSON.stringify(canonical(archive));
+    const followed = mockUpstream({ listHash: true, redirectChain: [media], downloadText: body });
+    const loaded = await read(await gateway('/v1/confluence/archives/9001', { headers: auth, fetchImpl: followed.fetchImpl }));
+    assert.equal(loaded.status, 200);
+    assert.equal(loaded.json.archiveSha256, HASH);
+    assert.equal(JSON.stringify(loaded.json).includes('signed-token'), false);
+    const mediaCall = followed.calls.find(call => call.host === 'api.media.atlassian.com');
+    const first = followed.calls.find(call => call.path.endsWith('/download'));
+    assert.ok(mediaCall);
+    assert.equal(mediaCall.init.headers.Authorization, undefined);
+    assert.equal(mediaCall.init.headers.Cookie, undefined);
+    assert.equal(first.init.headers.Authorization.startsWith('Bearer '), true);
+    assert.equal(first.init.headers.Cookie, undefined);
+    const badPath = mockUpstream({ listHash: true, downloadLocation: 'https://api.media.atlassian.com/file/not-a-uuid/binary?token=signed-token' });
+    const bad = await read(await gateway('/v1/confluence/archives/9001', { headers: auth, fetchImpl: badPath.fetchImpl }));
+    assert.equal(bad.status, 502);
+    assert.equal(bad.json.error.code, 'redirect_refused');
+    assert.equal(badPath.calls.some(call => call.host === 'api.media.atlassian.com'), false);
+    assert.equal(JSON.stringify(bad.json).includes('signed-token'), false);
+    const loopUrl = `https://api.atlassian.com/ex/confluence/${CLOUD}/wiki/rest/api/content/9001/child/attachment/77/download`;
+    const loop = mockUpstream({ listHash: true, downloadLocation: loopUrl });
+    const looped = await read(await gateway('/v1/confluence/archives/9001', { headers: auth, fetchImpl: loop.fetchImpl }));
+    assert.equal(looped.status, 502);
+    assert.equal(looped.json.error.code, 'redirect_refused');
+    assert.equal(loop.calls.filter(call => call.path.endsWith('/download')).length, 1);
+    const ids = [
+      '11111111-1111-4111-8111-111111111111',
+      '22222222-2222-4222-8222-222222222222',
+      '33333333-3333-4333-8333-333333333333',
+      '44444444-4444-4444-8444-444444444444',
+    ];
+    const chain = ids.map(id => `https://api.media.atlassian.com/file/${id}/binary?token=hop`);
+    const hops = mockUpstream({ listHash: true, redirectChain: chain, downloadText: body });
+    const tooMany = await read(await gateway('/v1/confluence/archives/9001', { headers: auth, fetchImpl: hops.fetchImpl }));
+    assert.equal(tooMany.status, 502);
+    assert.equal(tooMany.json.error.code, 'redirect_refused');
+    assert.equal(hops.calls.filter(call => call.host === 'api.media.atlassian.com').length, 3);
+    assert.equal(hops.calls.some(call => call.url.includes(ids[3])), false);
+    const huge = mockUpstream({ listHash: true, downloadBytes: 6 * 1024 * 1024 + 1 });
+    const oversize = await read(await gateway('/v1/confluence/archives/9001', { headers: auth, fetchImpl: huge.fetchImpl }));
+    assert.equal(oversize.status, 413);
+    assert.equal(oversize.json.error.code, 'payload_too_large');
+  });
+
+  test('accepts a 500 character title and rejects a longer or control title', async () => {
+    installBundle();
+    const minted = await mint();
+    const auth = { 'Content-Type': 'application/json', Authorization: `Bearer ${minted.session}` };
+    const longArchive = { ...archive, title: 'T'.repeat(500) };
+    const accepted = await read(await gateway('/v1/confluence/archives', {
+      method: 'POST',
+      headers: auth,
+      body: { archive: longArchive, teamShare: true },
+      fetchImpl: mockUpstream().fetchImpl,
+    }));
+    assert.equal(accepted.status, 201);
+    const tooLong = await read(await gateway('/v1/confluence/archives', {
+      method: 'POST',
+      headers: auth,
+      body: { archive: { ...archive, title: 'T'.repeat(501) }, teamShare: true },
+      fetchImpl: mockUpstream().fetchImpl,
+    }));
+    assert.equal(tooLong.status, 422);
+    assert.equal(tooLong.json.error.code, 'invalid_archive');
+    const control = await read(await gateway('/v1/confluence/archives', {
+      method: 'POST',
+      headers: auth,
+      body: { archive: { ...archive, title: 'bad\u007f' }, teamShare: true },
+      fetchImpl: mockUpstream().fetchImpl,
+    }));
+    assert.equal(control.status, 422);
+    assert.equal(control.json.error.code, 'invalid_archive');
+  });
+
+  test('publish and read use the static review bundle codec', async () => {
+    setReviewBundleForTests(null);
+    const config = harnessCore.builtin('red');
+    const hash = await harnessCore.hash(config);
+    const built = await buildHarnessArchive({ config, hash }, { harness: harnessCore });
+    const minted = await mint();
+    const auth = { 'Content-Type': 'application/json', Authorization: `Bearer ${minted.session}` };
+    const upstream = mockUpstream();
+    const published = await read(await gateway('/v1/confluence/archives', {
+      method: 'POST',
+      headers: auth,
+      body: { archive: built, teamShare: true },
+      fetchImpl: upstream.fetchImpl,
+    }));
+    assert.equal(published.status, 201);
+    const validated = await validateArchive(JSON.parse(upstream.store.file), { harness: harnessCore });
+    const semantic = await archiveHash(validated);
+    assert.equal(published.json.archiveSha256, semantic);
+    assert.equal(validated.kind, 'harness');
+    assert.equal(validated.title.length <= 500, true);
+    const readBack = await read(await gateway('/v1/confluence/archives/9001', {
+      headers: { Authorization: `Bearer ${minted.session}` },
+      fetchImpl: upstream.fetchImpl,
+    }));
+    assert.equal(readBack.status, 200);
+    assert.equal(readBack.json.archive.kind, 'harness');
+    assert.equal(readBack.json.archiveSha256, semantic);
+    assert.equal(upstream.calls.some(call => call.host !== 'api.atlassian.com' && call.host !== 'auth.atlassian.com'), false);
   });
 });

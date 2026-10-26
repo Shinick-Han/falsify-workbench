@@ -14,7 +14,7 @@
     // Exact origins only; local test origins belong in .dev.vars or test bindings, never here.
     "ALLOWED_ORIGINS": "https://shinick-han.github.io,http://127.0.0.1:7816,http://localhost:7816",
     // Fixed Falsify site and space. Client secret, session key, and the full callback URL stay secrets.
-    // CONFLUENCE_ONLY stays false here so existing account/record tests keep the non-retired path.
+    // Shipped default is Confluence-only. Legacy suites must set CONFLUENCE_ONLY to false explicitly.
     "REMOTE_PROVIDER": "confluence",
     "CONFLUENCE_SITE_URL": "https://falsify.atlassian.net",
     "CONFLUENCE_SPACE_KEY": "Falsify",
@@ -22,7 +22,7 @@
     // Operator-supplied archive parent in space 65737. Created under workspace page 66042.
     "CONFLUENCE_PARENT_PAGE_ID": "8355842",
     "ATLASSIAN_CLIENT_ID": "db5aa4f3-b807-43bd-95fa-4bdda751406e",
-    "CONFLUENCE_ONLY": "false"
+    "CONFLUENCE_ONLY": "true"
   },
   // Platform invocation logs are off (they carry client request metadata); the Worker emits one
   // structured line per request with route template, method, status and duration only.
@@ -43,7 +43,7 @@
         "CONFLUENCE_SPACE_ID": "65737",
         "CONFLUENCE_PARENT_PAGE_ID": "8355842",
         "ATLASSIAN_CLIENT_ID": "db5aa4f3-b807-43bd-95fa-4bdda751406e",
-        "CONFLUENCE_ONLY": "false"
+        "CONFLUENCE_ONLY": "true"
       },
       "d1_databases": [{ "binding": "DB", "database_name": "falsify-harness-records-staging", "database_id": "43f6eef6-84a4-4039-9cd5-4e3520cea4e6", "migrations_dir": "migrations" }]
     }
