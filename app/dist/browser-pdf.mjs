@@ -398,13 +398,14 @@ function layout(plan, model, page) {
   return placed(lines);
 }
 var REDACTION_GAP = 0.05;
-function quadBounds(quad) {
+var GLYPH_ORIGIN = 0.01;
+function quadBounds(points) {
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-  for (let i = 0; i < 8; i += 2) {
-    x0 = Math.min(x0, quad[i]);
-    y0 = Math.min(y0, quad[i + 1]);
-    x1 = Math.max(x1, quad[i]);
-    y1 = Math.max(y1, quad[i + 1]);
+  for (let i = 0; i + 1 < points.length; i += 2) {
+    x0 = Math.min(x0, points[i]);
+    y0 = Math.min(y0, points[i + 1]);
+    x1 = Math.max(x1, points[i]);
+    y1 = Math.max(y1, points[i + 1]);
   }
   return [x0, y0, x1, y1];
 }
@@ -523,7 +524,11 @@ function verify(sourceBytes, outBytes, plans, models, unchanged) {
       const page = check.loadPage(i);
       const again = readPage(page);
       if (!sameImages(models[i].images, again.images)) checks.push({ pageIndex: i, status: "failed", code: "figure-changed" });
-      if (!edited.has(i) && normalizeText(again.chars) !== normalizeText(models[i].chars)) checks.push({ pageIndex: i, status: "failed", code: "untouched-text" });
+      if (!edited.has(i)) {
+        if (normalizeText(again.chars) !== normalizeText(models[i].chars)) checks.push({ pageIndex: i, status: "failed", code: "untouched-text" });
+      } else if (!keptOutsideSelection(models[i].chars, again.chars, selectedCharIndexes(plans, i))) {
+        checks.push({ pageIndex: i, status: "failed", code: "untouched-text" });
+      }
     }
     for (const plan of plans) {
       const text = normalizeText(readPage(check.loadPage(plan.pageIndex)).chars);
@@ -548,6 +553,34 @@ function verify(sourceBytes, outBytes, plans, models, unchanged) {
     }
   }
   return { warnings, checks };
+}
+function selectedCharIndexes(plans, pageIndex) {
+  const selected = /* @__PURE__ */ new Set();
+  for (const plan of plans) {
+    if (plan.pageIndex !== pageIndex) continue;
+    for (const index of plan.charIndex) selected.add(index);
+  }
+  return selected;
+}
+function keptOutsideSelection(sourceChars, outputChars, selected) {
+  const pool = outputChars.map((ch) => ({ c: ch.c, x: ch.pdf[0], y: ch.pdf[1], used: false }));
+  for (let index = 0; index < sourceChars.length; index++) {
+    if (selected.has(index)) continue;
+    const ch = sourceChars[index];
+    if (!ch.c.trim()) continue;
+    let found = -1;
+    for (let i = 0; i < pool.length; i++) {
+      const item = pool[i];
+      if (item.used || item.c !== ch.c) continue;
+      if (Math.abs(item.x - ch.pdf[0]) <= GLYPH_ORIGIN && Math.abs(item.y - ch.pdf[1]) <= GLYPH_ORIGIN) {
+        found = i;
+        break;
+      }
+    }
+    if (found < 0) return false;
+    pool[found].used = true;
+  }
+  return true;
 }
 function unsupported(failures, models) {
   const indexes = [...new Set(failures.map((item) => item.pageIndex).filter((index) => Number.isInteger(index)))];

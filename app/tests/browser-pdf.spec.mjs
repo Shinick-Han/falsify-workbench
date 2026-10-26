@@ -543,6 +543,25 @@ function glyphRecords(bytes) {
     });
   } finally { doc.destroy(); }
 }
+function consumeGlyphs(source, output, tolerance) {
+  const pool = output.map(ch => ({ch: ch.ch, x: ch.x, y: ch.y, used: false}));
+  const missing = [];
+  for (const ch of source) {
+    if (!String(ch.ch).trim()) continue;
+    let found = -1;
+    for (let i = 0; i < pool.length; i++) {
+      const item = pool[i];
+      if (item.used || item.ch !== ch.ch) continue;
+      if (Math.abs(item.x - ch.x) <= tolerance && Math.abs(item.y - ch.y) <= tolerance) {
+        found = i;
+        break;
+      }
+    }
+    if (found < 0) missing.push({ch: ch.ch, x: ch.x, y: ch.y});
+    else pool[found].used = true;
+  }
+  return missing;
+}
 function phraseGlyphs(chars, phrase) {
   const lines = new Map();
   for (const ch of chars) {
@@ -577,7 +596,7 @@ for page in doc:
         for line in block.get('lines', []):
             for span in line.get('spans', []):
                 for ch in span.get('chars', []):
-                    chars.append({'c': ch['c'], 'x': ch['origin'][0], 'y': ch['origin'][1]})
+                    chars.append({'c': ch['c'], 'x': ch['origin'][0], 'y': ch['origin'][1], 'bbox': list(ch['bbox'])})
     pages.append({'text': page.get_text('text'), 'chars': chars, 'count': page.page_count if False else doc.page_count})
 print(json.dumps({'count': doc.page_count, 'pages': pages}))
 `;
@@ -585,6 +604,45 @@ print(json.dumps({'count': doc.page_count, 'pages': pages}))
     input: Buffer.from(bytes).toString('base64'),
     maxBuffer: 32 * 1024 * 1024,
   }).toString());
+}
+function pymupdfInk(bytes, clips) {
+  const command = pythonExecutable();
+  assert.ok(command, 'independent PyMuPDF extraction is required');
+  const script = `
+import json, sys, pymupdf
+body = json.load(sys.stdin)
+doc = pymupdf.open(stream=bytes.fromhex(body['pdf']), filetype='pdf')
+page = doc[0]
+out = []
+for clip in body['clips']:
+    pix = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), clip=pymupdf.Rect(clip['box']), alpha=False, colorspace=pymupdf.csRGB)
+    data = pix.samples
+    n = pix.n
+    dark = 0
+    for i in range(0, len(data), n):
+        if data[i] < 200 or data[i + 1] < 200 or data[i + 2] < 200:
+            dark += 1
+    out.append({'name': clip['name'], 'dark': dark})
+print(json.dumps(out))
+`;
+  return JSON.parse(execFileSync(command, ['-c', script], {
+    input: JSON.stringify({pdf: Buffer.from(bytes).toString('hex'), clips}),
+    maxBuffer: 32 * 1024 * 1024,
+  }).toString());
+}
+function phraseInkBox(chars, phrase) {
+  const found = phraseGlyphs(chars.map(item => ({ch: item.c, x: item.x, y: item.y, bbox: item.bbox})), phrase);
+  if (found.length !== phrase.length) return null;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const ch of found) {
+    x0 = Math.min(x0, ch.bbox[0]);
+    y0 = Math.min(y0, ch.bbox[1]);
+    x1 = Math.max(x1, ch.bbox[2]);
+    y1 = Math.max(y1, ch.bbox[3]);
+  }
+  let padY = Math.min(1.5, (y1 - y0) * 0.12);
+  if (y1 - y0 - padY * 2 < 2) padY = 0;
+  return [x0, y0 + padY, x1, y1 - padY];
 }
 
 test('dense large title redacts only the selected glyphs', async () => {
@@ -603,10 +661,14 @@ test('dense large title redacts only the selected glyphs', async () => {
     'pluripotent stem cells tail',
   ]);
   const selected = new Set();
+  const selectedGlyphs = new Set();
   for (const phrase of ['differentiation potential', 'stem cells']) {
     const found = phraseGlyphs(sourceGlyphs[0], phrase);
     assert.equal(found.length, phrase.length, phrase);
-    for (const ch of found) selected.add(`${ch.ch}@${ch.x.toFixed(2)},${ch.y.toFixed(2)}`);
+    for (const ch of found) {
+      selected.add(`${ch.ch}@${ch.x.toFixed(2)},${ch.y.toFixed(2)}`);
+      selectedGlyphs.add(ch);
+    }
   }
   assert.equal(selected.size, 'differentiation potential'.length + 'stem cells'.length);
   const pdfBefore = await pdfText(denseTitle);
@@ -633,6 +695,10 @@ test('dense large title redacts only the selected glyphs', async () => {
     if (!outputGlyphs[0].some(item => item.ch === ch.ch && Math.abs(item.x - ch.x) < 0.15 && Math.abs(item.y - ch.y) < 0.15)) missing.push(id);
   }
   assert.deepEqual(missing, []);
+  assert.deepEqual(consumeGlyphs(sourceGlyphs[0].filter(ch => !selectedGlyphs.has(ch)), outputGlyphs[0], 0.01), []);
+  assert.equal(result.verification.quality.untouchedText, true);
+  assert.equal(result.verification.quality.presentAfter, true);
+  assert.equal(result.verification.checks.some(item => item.code === 'untouched-text'), false);
   for (const ch of sourceGlyphs[1]) {
     assert.ok(outputGlyphs[1].some(item => item.ch === ch.ch && Math.abs(item.x - ch.x) < 0.15 && Math.abs(item.y - ch.y) < 0.15), ch.ch);
   }
@@ -676,6 +742,16 @@ test('dense large title redacts only the selected glyphs', async () => {
     if (!pyAfter.pages[0].chars.some(item => item.c === ch.c && Math.abs(item.x - ch.x) < 0.2 && Math.abs(item.y - ch.y) < 0.2)) pyMissing.push(id);
   }
   assert.deepEqual(pyMissing, []);
+  const pyView = pyBefore.pages[0].chars.map(item => ({ch: item.c, x: item.x, y: item.y, raw: item}));
+  const pyChosen = new Set();
+  for (const phrase of ['differentiation potential', 'stem cells']) {
+    for (const ch of phraseGlyphs(pyView, phrase)) pyChosen.add(ch.raw);
+  }
+  assert.deepEqual(consumeGlyphs(
+    pyBefore.pages[0].chars.filter(ch => !pyChosen.has(ch)).map(item => ({ch: item.c, x: item.x, y: item.y})),
+    pyAfter.pages[0].chars.map(item => ({ch: item.c, x: item.x, y: item.y})),
+    0.01,
+  ), []);
   const stream = contentStreams(out)[0];
   assert.equal(/40 40 30 20 re/.test(stream), true);
   assert.equal(stream.includes('/Im1 Do'), true);
@@ -691,6 +767,153 @@ test('metric boxes that swallow the selected glyph are not redacted', async () =
   }), error => error instanceof BrowserPdfError && error.code === 'unsupported' && error.details.code === 'glyph-overlap');
   assert.equal(before.includes('epiblast regionalization'), true);
   assert.equal(before.includes('pluripotent'), true);
+});
+
+test('overlapping 26pt rows keep unselected glyphs at occurrence 0', async () => {
+  const bytes = denseTitlePdf(972, -252);
+  const doc = mupdf.Document.openDocument(new Uint8Array(bytes), 'application/pdf').asPDF();
+  let chars;
+  try {
+    chars = [];
+    doc.loadPage(0).toStructuredText('preserve-whitespace').walk({
+      onChar(ch, origin, _font, size, quad) {
+        chars.push({ch, x: origin[0], y: origin[1], size, quad: [...quad]});
+      },
+    });
+  } finally { doc.destroy(); }
+  const bands = [];
+  for (const ch of chars) {
+    if (!ch.ch.trim()) continue;
+    let band = bands.find(item => Math.abs(item.y - ch.y) < 0.5);
+    if (!band) {
+      band = {y: ch.y, y0: Infinity, y1: -Infinity};
+      bands.push(band);
+    }
+    for (let i = 1; i < 8; i += 2) {
+      band.y0 = Math.min(band.y0, ch.quad[i]);
+      band.y1 = Math.max(band.y1, ch.quad[i]);
+    }
+  }
+  bands.sort((a, b) => a.y - b.y);
+  assert.equal(bands.length, 3);
+  assert.ok(Math.abs(bands[1].y - bands[0].y - 28) < 0.05, bands.map(item => item.y).join(','));
+  assert.ok(Math.abs(bands[2].y - bands[1].y - 28) < 0.05, bands.map(item => item.y).join(','));
+  const height = bands[0].y1 - bands[0].y0;
+  assert.ok(Math.abs(height - 31.824) < 0.05, 'quad height ' + height);
+  const overlap = bands[0].y1 - bands[1].y0;
+  assert.ok(overlap > 3.5 && overlap < 4.5, 'overlap ' + overlap);
+  const edits = [
+    {id: 'line2', pageIndex: 0, before: 'differentiation potential', after: 'differentiation potentia', origin: 'human', anchor: {occurrence: 0}},
+    {id: 'line3', pageIndex: 0, before: 'stem cells', after: 'stem cell', origin: 'human', anchor: {occurrence: 0}},
+  ];
+  assert.equal(edits.every(edit => edit.anchor.occurrence === 0 && !Object.hasOwn(edit.anchor, 'bbox')), true);
+  const result = await prepare({file: fileOf(bytes, 'overlap-title.pdf'), edits: snapshot(bytes, edits)});
+  const out = await bytesOf(result.file);
+  assert.equal(String.fromCharCode(...out.slice(0, 5)), '%PDF-');
+  assert.equal(result.sha256, sha(out));
+  assert.equal(result.verification.pageCount.output, 2);
+  const chosen = new Set();
+  for (const phrase of ['differentiation potential', 'stem cells']) {
+    for (const ch of phraseGlyphs(chars, phrase)) chosen.add(ch);
+  }
+  assert.deepEqual(consumeGlyphs(chars.filter(ch => !chosen.has(ch)), glyphRecords(out)[0], 0.01), []);
+  const pyBefore = pymupdfPages(bytes);
+  const pyAfter = pymupdfPages(out);
+  const pyView = pyBefore.pages[0].chars.map(item => ({ch: item.c, x: item.x, y: item.y, raw: item}));
+  const pyChosen = new Set();
+  for (const phrase of ['differentiation potential', 'stem cells']) {
+    for (const ch of phraseGlyphs(pyView, phrase)) pyChosen.add(ch.raw);
+  }
+  assert.deepEqual(consumeGlyphs(
+    pyBefore.pages[0].chars.filter(ch => !pyChosen.has(ch)).map(item => ({ch: item.c, x: item.x, y: item.y})),
+    pyAfter.pages[0].chars.map(item => ({ch: item.c, x: item.x, y: item.y})),
+    0.01,
+  ), []);
+  assert.equal(pyAfter.pages[0].text.includes('epiblast regionalization'), true);
+  assert.equal(pyAfter.pages[0].text.includes('pluripotent'), true);
+  assert.equal(pyAfter.pages[0].text.includes(' stays'), true);
+  assert.equal(pyAfter.pages[0].text.includes('tail'), true);
+  assert.equal(pyAfter.pages[1].text, pyBefore.pages[1].text);
+  const clips = ['epiblast regionalization', 'pluripotent', 'stays', 'tail'].map(phrase => {
+    const box = phraseInkBox(pyBefore.pages[0].chars, phrase);
+    assert.ok(box, phrase);
+    return {name: phrase, box};
+  });
+  const inkBefore = pymupdfInk(bytes, clips);
+  const inkAfter = pymupdfInk(out, clips);
+  for (let i = 0; i < clips.length; i++) {
+    assert.ok(inkBefore[i].dark > 20, clips[i].name + ' before ' + inkBefore[i].dark);
+    assert.ok(inkAfter[i].dark >= inkBefore[i].dark * 0.6, clips[i].name + ' after ' + inkAfter[i].dark + ' before ' + inkBefore[i].dark);
+  }
+  assert.equal(result.verification.quality.untouchedText, true);
+  assert.equal(result.verification.quality.presentAfter, true);
+  assert.equal(result.verification.checks.some(item => item.code === 'untouched-text'), false);
+  assert.equal(result.verification.status === 'failed', false);
+  const stream = contentStreams(out)[0];
+  assert.equal(stream.includes('/Im1 Do'), true);
+  assert.equal(/40 40 30 20 re/.test(stream), true);
+});
+
+test('redaction rect encloses every selected quad', () => {
+  const appDir = fileURLToPath(new URL('..', import.meta.url));
+  const script = `
+import {readFileSync} from 'node:fs';
+import {createHash} from 'node:crypto';
+import {PDFPage} from './dist/browser-pdf-vendor/mupdf.js';
+import {prepare} from './dist/browser-pdf.mjs';
+const bytes = new Uint8Array(readFileSync(0));
+const digest = createHash('sha256').update(bytes).digest('hex');
+const seen = [];
+const original = PDFPage.prototype.applyRedactions;
+PDFPage.prototype.applyRedactions = function (...args) {
+  for (const annot of this.getAnnotations()) {
+    if (annot.getType() !== 'Redact') continue;
+    seen.push({rect: annot.getRect(), quads: annot.getQuadPoints()});
+  }
+  return original.apply(this, args);
+};
+const result = await prepare({
+  file: new File([bytes], 'fixture.pdf', {type: 'application/pdf'}),
+  edits: {schema: 'falsify.paper-edits.v1', fileHash: digest, revision: 1, edits: [
+    {id: 'word', pageIndex: 0, before: 'REPLACE', after: 'AFTER', origin: 'human', anchor: {occurrence: 0}},
+  ]},
+});
+const out = new Uint8Array(await result.file.arrayBuffer());
+console.log(JSON.stringify({
+  seen,
+  head: String.fromCharCode(...out.slice(0, 5)),
+  untouchedText: result.verification.quality.untouchedText,
+  presentAfter: result.verification.quality.presentAfter,
+  checks: result.verification.checks.map(item => item.code),
+}));
+`;
+  const run = execFileSync(process.execPath, ['--input-type=module', '-e', script], {
+    cwd: appDir,
+    input: Buffer.from(multi),
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  const report = JSON.parse(run.toString());
+  assert.equal(report.head, '%PDF-');
+  assert.equal(report.untouchedText, true);
+  assert.equal(report.presentAfter, true);
+  assert.equal(report.checks.includes('untouched-text'), false);
+  assert.ok(report.seen.length >= 1);
+  for (const item of report.seen) {
+    assert.ok(item.quads.length > 1, 'quads ' + item.quads.length);
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, firstX1 = -Infinity;
+    item.quads.forEach((quad, index) => {
+      for (let i = 0; i < 8; i += 2) {
+        x0 = Math.min(x0, quad[i]);
+        y0 = Math.min(y0, quad[i + 1]);
+        x1 = Math.max(x1, quad[i]);
+        y1 = Math.max(y1, quad[i + 1]);
+        if (index === 0) firstX1 = Math.max(firstX1, quad[i]);
+      }
+    });
+    assert.ok(item.rect[0] <= x0 + 0.02 && item.rect[1] <= y0 + 0.02, item.rect.join(','));
+    assert.ok(item.rect[2] >= x1 - 0.02 && item.rect[3] >= y1 - 0.02, item.rect.join(','));
+    assert.ok(item.rect[2] > firstX1 + 1, 'rect ' + item.rect.join(',') + ' first ' + firstX1);
+  }
 });
 
 test('exact top-left unrotated coordinates', async () => {

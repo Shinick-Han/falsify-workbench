@@ -370,14 +370,15 @@ function layout(plan, model, page) {
  * here stays inside the selected glyph's inset box and outside every other
  * glyph's inset box. */
 const REDACTION_GAP = 0.05;
+const GLYPH_ORIGIN = 0.01;
 
-function quadBounds(quad) {
+function quadBounds(points) {
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-  for (let i = 0; i < 8; i += 2) {
-    x0 = Math.min(x0, quad[i]);
-    y0 = Math.min(y0, quad[i + 1]);
-    x1 = Math.max(x1, quad[i]);
-    y1 = Math.max(y1, quad[i + 1]);
+  for (let i = 0; i + 1 < points.length; i += 2) {
+    x0 = Math.min(x0, points[i]);
+    y0 = Math.min(y0, points[i + 1]);
+    x1 = Math.max(x1, points[i]);
+    y1 = Math.max(y1, points[i + 1]);
   }
   return [x0, y0, x1, y1];
 }
@@ -452,6 +453,7 @@ function redact(page, chars, protectedBoxes) {
   }
   if (!quads.length) return;
   const annot = page.createAnnotation('Redact');
+  /* quads.flat() is 8 numbers per glyph. The Rect has to cover every one. */
   const box = quadBounds(quads.flat());
   annot.setRect(box);
   annot.setQuadPoints(quads);
@@ -498,7 +500,11 @@ function verify(sourceBytes, outBytes, plans, models, unchanged) {
       const page = check.loadPage(i);
       const again = readPage(page);
       if (!sameImages(models[i].images, again.images)) checks.push({pageIndex: i, status: 'failed', code: 'figure-changed'});
-      if (!edited.has(i) && normalizeText(again.chars) !== normalizeText(models[i].chars)) checks.push({pageIndex: i, status: 'failed', code: 'untouched-text'});
+      if (!edited.has(i)) {
+        if (normalizeText(again.chars) !== normalizeText(models[i].chars)) checks.push({pageIndex: i, status: 'failed', code: 'untouched-text'});
+      } else if (!keptOutsideSelection(models[i].chars, again.chars, selectedCharIndexes(plans, i))) {
+        checks.push({pageIndex: i, status: 'failed', code: 'untouched-text'});
+      }
     }
     for (const plan of plans) {
       const text = normalizeText(readPage(check.loadPage(plan.pageIndex)).chars);
@@ -520,6 +526,39 @@ function verify(sourceBytes, outBytes, plans, models, unchanged) {
     try { check.destroy(); } catch { /* ignore */ }
   }
   return {warnings, checks};
+}
+
+function selectedCharIndexes(plans, pageIndex) {
+  const selected = new Set();
+  for (const plan of plans) {
+    if (plan.pageIndex !== pageIndex) continue;
+    for (const index of plan.charIndex) selected.add(index);
+  }
+  return selected;
+}
+
+/* Saved bytes of an edited page: every unselected drawn glyph must come back
+ * once, same character, within GLYPH_ORIGIN of its PDF origin. A miss is a
+ * failed check on the returned candidate. Spaces are outside the selection map. */
+function keptOutsideSelection(sourceChars, outputChars, selected) {
+  const pool = outputChars.map(ch => ({c: ch.c, x: ch.pdf[0], y: ch.pdf[1], used: false}));
+  for (let index = 0; index < sourceChars.length; index++) {
+    if (selected.has(index)) continue;
+    const ch = sourceChars[index];
+    if (!ch.c.trim()) continue;
+    let found = -1;
+    for (let i = 0; i < pool.length; i++) {
+      const item = pool[i];
+      if (item.used || item.c !== ch.c) continue;
+      if (Math.abs(item.x - ch.pdf[0]) <= GLYPH_ORIGIN && Math.abs(item.y - ch.pdf[1]) <= GLYPH_ORIGIN) {
+        found = i;
+        break;
+      }
+    }
+    if (found < 0) return false;
+    pool[found].used = true;
+  }
+  return true;
 }
 
 function unsupported(failures, models) {
