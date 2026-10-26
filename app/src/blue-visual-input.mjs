@@ -4,7 +4,7 @@
 import {defaultImport, pdfParams, MAX_BYTES} from './document-preview.js';
 
 const HEX = /^[0-9a-f]{64}$/;
-const SCALE = 2, MAX_SIDE = 4096, MAX_PIXELS = 16000000, MAX_IMAGE_BYTES = 1500000, MAX_COUNT = 3;
+const SCALE = 2, MAX_SIDE = 4096, MAX_PIXELS = 8000000, MAX_IMAGE_BYTES = 524288, MAX_COUNT = 2;
 const hex = b => Array.from(new Uint8Array(b), x => x.toString(16).padStart(2, '0')).join('');
 const hash = async (bytes, subtle) => hex(await subtle.digest('SHA-256', bytes));
 
@@ -46,4 +46,3 @@ export async function renderBlueVisuals({file, fileHash, sourceHash, selections,
     return out;
   } finally {await task.destroy();}
 }
-
