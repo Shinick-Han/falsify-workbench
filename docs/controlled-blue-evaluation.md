@@ -19,13 +19,15 @@ The recorded `sourceHash` must be the SHA-256 of the supplied segment texts join
 
 ## Portable strategy versus machine config
 
-Strategy identity is the portable projection: harness id, version, bundle hash, instructions, budgets, requested model and scope. These fields are removed before that projection, because they are machine config:
+Strategy identity is the portable projection: harness id, version, bundle hash, instructions, budgets, requested model, scope, and the adapter program. `adapter.executable` and `adapter.args` are part of that identity. Flags are never stripped.
 
-- `adapter.executable`
-- `adapter.args`
-- `settings.auditDirectory`
+A packet may name an explicit `strategy.pathMap`. Each entry replaces one whole executable or argument string with a portable token. Only those exact strings are rewritten. An argument that starts with `-` cannot be a map key, so a flag cannot be mapped away. A path-like executable or argument that is not in the map stays in the projection and is an `unmapped_adapter_path` condition, not a silent match.
 
-The machine config hash is `harness.digest` of the full stored harness (the same canonical JSON digest as `app/local/harness.py`). It is the hash a local profile gets when absolute paths differ. Repeats that share a portable projection and differ only by those machine fields stay on the same strategy. The summary sets `machineConfigIsStrategyIdentity` to false and warns `machine_config_not_strategy_identity` when more than one machine hash appears inside an arm.
+`strategy.machineSettingKeys` may list only `auditDirectory`. That settings key is removed from the projection because it is an install path. No other settings key is removed.
+
+The machine config hash is `harness.digest` of the full stored harness (the same canonical JSON digest as `app/local/harness.py`). It still includes the unmapped paths. Repeats that share a portable projection and differ only by mapped paths or `auditDirectory` stay on the same strategy. The summary sets `machineConfigIsStrategyIdentity` to false and warns `machine_config_not_strategy_identity` when more than one machine hash appears inside an arm.
+
+Different flags, a different mapped program, or a different bundle are different strategies even when the machine hash or companion instance is reused.
 
 A different bundle, instruction, budget or requested model is an incompatible condition even if a companion instance string is reused. Machine hashes are not compared as strategy identity.
 
@@ -77,11 +79,13 @@ A BLUE request may contain only the document-blue request fields: schema, revisi
 
 A completed result is immutable: `rawResponseSha256` must be the canonical digest of the stored result object, and `result.harness` must be the same object as the trial harness. A mismatch is `response_not_immutable` or `harness_not_frozen` and the trial is outside the denominators. The tool does not rewrite the harness or the response. The digest covers the stored final response, not an unseen provider event stream.
 
+`blue_service.finish` metadata is kept on that object. Current keys besides the findings contract are `coverage`, `isolation`, and, when `harness.record` returns it, `cliSelection` (`provider`, `model`, `effort`). `fixtures/blue_finish_result.json` is that object from `run_review` with a fake backend and no model call. The preparer does not drop those fields before the hash. `cliSelection`, when present, must match `harness.record` for the frozen harness. The service does not currently emit separate `executionProvider`, `executionMethod`, or `requestedModel` result keys; the requested id remains `model` / `cliSelection.model`, and the provider is `cliSelection.provider`.
+
 Findings are checked with `blue_service.validate_findings`: exact unique finding quotes, evidence present in the supplied segment, and no findings on refusal or abstention. A failed check is `evidence_rejected`. Passing that check does not mean the finding is scientifically correct.
 
 Human reviews count only when `caseLabel` and `protocolVersion` match the fixed conditions. A mismatched review does not hide the trial; the trial stays `human-unreviewed`. Two matching reviews on one trial are not applied.
 
-Repeats are separate trials. Two included repeats in one arm that share `requestBytesDigest` or `rawResponseSha256` are not independent and are removed from denominators.
+Repeats are separate trials. The same request id or the same `requestBytesDigest` is a replay (`repeat_replay`) and those trials leave the denominators. An identical final response hash is not proof that the runs were dependent: deterministic or zero-finding runs can match. Separate request ids and digests stay counted, and `independence` is `unknown`.
 
 ## CLI
 
@@ -92,7 +96,7 @@ python tools/evaluation/cli.py tools/evaluation/fixtures/comparable.json
 python -m unittest discover -s tools/evaluation -p "test_*.py" -q
 ```
 
-Exit 0 prints a `falsify.controlled-blue-summary.v1` object. The packet can still carry warnings. `comparisonReady` is true only when every arm has an included trial, gold version is present, gold ids are unique, and no trial was removed for an incompatible condition or a non-independent repeat.
+Exit 0 prints a `falsify.controlled-blue-summary.v1` object. The packet can still carry warnings. `comparisonReady` is true only when every arm has an included trial, gold version is present, gold ids are unique, and no trial was removed for an incompatible condition or a request replay. A shared final-response hash does not by itself clear readiness.
 
 Exit 2 prints `ok: false` and `errors`. That is a structural refusal (schema, blind-input key, scientific-gold flag, unreadable file), not a model failure.
 
@@ -100,11 +104,13 @@ Exit 2 prints `ok: false` and `errors`. That is a structural refusal (schema, bl
 
 ## Limits
 
+Supplied text uses the app document bound: up to 10,000 segments and 1,000,000 characters joined with a blank line, the same check as `red_service.validate_request`. There is no 8,000-character segment cap. The packet itself may be 16 MiB, which covers three arms and three repeats of a 50KB synthetic paper plus harness and result copies. A shared-record payload cap of 240KB does not apply here, because this packet keeps the supplied text on every repeat.
+
 - No model call, provider login, deployment, or production database.
-- No private paper, gold set, or user record. The committed fixture is synthetic text.
+- No private paper, gold set, or user record. Committed fixtures are synthetic text, including the captured `run_review` result.
 - Bundle hash and file hash are taken from the packet, not recomputed from a tree or a PDF.
-- Provider raw event streams are not in the packet. Immutability is the stored final response.
+- Provider raw event streams are not in the packet. Immutability is the stored final response, including finish metadata.
 - Cost is not representable here and stays unknown.
 - A local-codex observation is still not a certified model id.
-- Identical final responses on different arms are not removed.
+- Identical final responses stay in the denominators. Independence is unknown unless the request id or request-byte digest shows a replay.
 - This is preparation for a controlled comparison, not a performance claim.

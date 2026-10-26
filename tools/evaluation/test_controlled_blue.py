@@ -7,11 +7,13 @@ import unittest
 from copy import deepcopy
 from pathlib import Path
 
+import blue_finish
 import controlled_blue as prep
 import synthetic_packet as synthetic
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = Path(__file__).resolve().parent / 'fixtures' / 'comparable.json'
+FINISH_FIXTURE = Path(__file__).resolve().parent / 'fixtures' / 'blue_finish_result.json'
 CLI = Path(__file__).resolve().parent / 'cli.py'
 
 
@@ -104,6 +106,7 @@ class ConditionTests(unittest.TestCase):
             executable='/opt/synthetic/other-pc/python',
             audit='/var/synthetic/other-pc/audits',
         )
+        synthetic.note_paths(packet, second)
         packet['trials'].append(second)
         summary = prep.prepare(packet)
         self.assertIn('machine_config_not_strategy_identity', codes(summary))
@@ -113,9 +116,26 @@ class ConditionTests(unittest.TestCase):
         self.assertNotIn(summary['fixed']['portableHash'], hashes)
         self.assertEqual(summary['arms']['ORIGINAL']['counts']['refusal'], 1)
         self.assertEqual(summary['arms']['ORIGINAL']['counts']['matched-findings'], 1)
-        projected = prep.portable_projection(second['harness'])
+        projected = prep.portable_projection(second['harness'], packet['strategy']['pathMap'], packet['strategy']['machineSettingKeys'])
         self.assertEqual(projected, packet['strategy']['portable'])
+        self.assertIn('--diagnostic', projected['adapter']['args'])
         self.assertNotEqual(prep.canonical_digest(second['harness']), prep.canonical_digest(packet['trials'][0]['harness']))
+
+    def test_adapter_flags_stay_in_the_strategy(self):
+        packet = synthetic.comparable_packet()
+        trial = packet['trials'][1]
+        trial['harness']['adapter']['args'] = [*trial['harness']['adapter']['args'], '--effort', 'high']
+        trial['request']['harness'] = trial['harness']
+        trial['result']['harness'] = trial['harness']
+        trial['result']['harnessHash'] = prep.canonical_digest(trial['harness'])
+        trial['job']['harnessHash'] = trial['result']['harnessHash']
+        trial['rawResponseSha256'] = prep.canonical_digest(trial['result'])
+        projected = prep.portable_projection(trial['harness'], packet['strategy']['pathMap'], packet['strategy']['machineSettingKeys'])
+        self.assertEqual(projected['adapter']['args'][-2:], ['--effort', 'high'])
+        self.assertNotEqual(projected, packet['strategy']['portable'])
+        summary = prep.prepare(packet)
+        self.assertIn('incompatible_condition:portable_strategy', codes(summary))
+        self.assertEqual(summary['arms']['E1']['excluded'], 1)
 
     def test_same_machine_hash_does_not_merge_a_different_bundle(self):
         packet = synthetic.comparable_packet()
@@ -133,7 +153,7 @@ class ConditionTests(unittest.TestCase):
         self.assertEqual(summary['arms']['E1']['excluded'], 1)
         self.assertFalse(summary['machineConfigIsStrategyIdentity'])
 
-    def test_repeat_sharing_a_response_is_removed(self):
+    def test_same_request_digest_is_a_replay(self):
         packet = synthetic.comparable_packet()
         copy = deepcopy(packet['trials'][0])
         copy['id'] = 'original-r2'
@@ -142,9 +162,26 @@ class ConditionTests(unittest.TestCase):
         copy['request']['requestId'] = 'req-original-2'
         packet['trials'].append(copy)
         summary = prep.prepare(packet)
-        self.assertIn('repeat_not_independent', codes(summary))
+        self.assertIn('repeat_replay', codes(summary))
+        self.assertNotIn('independence_unknown', codes(summary))
         self.assertEqual(summary['arms']['ORIGINAL']['attempts'], 0)
         self.assertFalse(summary['comparisonReady'])
+
+    def test_identical_outputs_from_separate_requests_stay_counted(self):
+        packet = synthetic.comparable_packet()
+        second = synthetic.make_trial('E1', 2, 'completed', 'ok', findings=[])
+        packet['trials'].append(second)
+        first = next(trial for trial in packet['trials'] if trial['id'] == 'e1-r1')
+        self.assertNotEqual(first['job']['id'], second['job']['id'])
+        self.assertNotEqual(first['job']['requestBytesDigest'], second['job']['requestBytesDigest'])
+        self.assertEqual(first['rawResponseSha256'], second['rawResponseSha256'])
+        summary = prep.prepare(packet)
+        self.assertIn('independence_unknown', codes(summary))
+        self.assertNotIn('repeat_replay', codes(summary))
+        self.assertEqual(summary['arms']['E1']['counts']['completed-zero-findings'], 2)
+        self.assertEqual(summary['arms']['E1']['attempts'], 2)
+        self.assertEqual(summary['arms']['E1']['independence'], 'unknown')
+        self.assertTrue(summary['comparisonReady'])
 
 
 class GoldAndModelTests(unittest.TestCase):
@@ -260,6 +297,46 @@ class GoldAndModelTests(unittest.TestCase):
         with self.assertRaises(prep.PrepError) as caught:
             prep.prepare(packet)
         self.assertIn('gold.scientificGold', caught.exception.errors)
+
+    def test_real_finish_metadata_is_kept(self):
+        live = blue_finish.capture_result()
+        saved = json.loads(FINISH_FIXTURE.read_text(encoding='utf-8'))
+        self.assertEqual(saved, live)
+        self.assertIn('isolation', live)
+        self.assertEqual(set(live['cliSelection']), {'provider', 'model', 'effort'})
+        packet = blue_finish.packet_with_live_results()
+        original = packet['trials'][0]['result']
+        self.assertEqual(original, live)
+        snapshot = json.loads(json.dumps(original))
+        digest = packet['trials'][0]['rawResponseSha256']
+        summary = prep.prepare(packet)
+        self.assertEqual(original, snapshot)
+        self.assertEqual(digest, prep.canonical_digest(original))
+        self.assertIn('isolation', snapshot)
+        self.assertIn('cliSelection', snapshot)
+        row = next(item for item in summary['trials'] if item['id'] == 'original-finish')
+        self.assertTrue(row['included'])
+        self.assertEqual(row['class'], 'completed-zero-findings')
+        self.assertEqual(summary['arms']['ORIGINAL']['counts']['completed-zero-findings'], 1)
+
+    def test_three_by_three_full_paper_packet(self):
+        trials = []
+        for arm in ('ORIGINAL', 'E1', 'H1'):
+            sentence = f'Synthetic {arm} paragraph states a fixed count. '
+            text = (sentence * ((50000 // len(sentence)) + 1))[:50000]
+            self.assertGreater(len(text), 8000)
+            for repeat in (1, 2, 3):
+                trials.append(synthetic.make_trial(arm, repeat, 'completed', 'ok', findings=[], text=text))
+        packet = synthetic.base_packet(trials, reviews=[])
+        raw = json.dumps(packet).encode('utf-8')
+        self.assertGreater(len(raw), 256 * 1024)
+        summary = prep.prepare_bytes(raw)
+        self.assertTrue(summary['ok'])
+        for arm in ('ORIGINAL', 'E1', 'H1'):
+            self.assertEqual(summary['arms'][arm]['attempts'], 3)
+            self.assertEqual(summary['arms'][arm]['counts']['completed-zero-findings'], 3)
+            self.assertEqual(summary['arms'][arm]['independence'], 'unknown')
+        self.assertTrue(summary['comparisonReady'])
 
     def test_fixture_file_and_cli(self):
         self.assertEqual(json.loads(FIXTURE.read_text(encoding='utf-8')), synthetic.comparable_packet())

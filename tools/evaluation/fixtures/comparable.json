@@ -13,7 +13,13 @@
       "instructions": "Review only the supplied synthetic text. Do not use an answer key.",
       "maxCalls": 8,
       "adapter": {
-        "type": "stdio"
+        "type": "stdio",
+        "executable": "portable-python",
+        "args": [
+          "portable-runner.py",
+          "--diagnostic",
+          "0.3.3"
+        ]
       },
       "settings": {
         "strategy": "fixed-synthetic",
@@ -22,7 +28,18 @@
         "internalMaxCalls": 4,
         "scope": "document-only-synthetic"
       }
-    }
+    },
+    "pathMap": {
+      "/opt/synthetic/original-python": "portable-python",
+      "/opt/synthetic/original-python-runner.py": "portable-runner.py",
+      "/opt/synthetic/e1-python": "portable-python",
+      "/opt/synthetic/e1-python-runner.py": "portable-runner.py",
+      "/opt/synthetic/h1-python": "portable-python",
+      "/opt/synthetic/h1-python-runner.py": "portable-runner.py"
+    },
+    "machineSettingKeys": [
+      "auditDirectory"
+    ]
   },
   "fixed": {
     "requestedModel": "claude-opus-5-5",
@@ -67,7 +84,9 @@
           "type": "stdio",
           "executable": "/opt/synthetic/original-python",
           "args": [
-            "/opt/synthetic/original-python-runner.py"
+            "/opt/synthetic/original-python-runner.py",
+            "--diagnostic",
+            "0.3.3"
           ]
         },
         "settings": {
@@ -86,7 +105,7 @@
         "sourceHash": "880fed69db9fe9afbd0743b02db539758e1b09e11622c741229b6656a333138b",
         "fileHash": "98a5d9681e6be869ec81e711a9b3e1107adfa34ba19fa263b1f4c4ba2bcddd0e",
         "revision": "rev-original",
-        "harnessHash": "3e3a276fa5a19402e57722c717135d5b94cea3cb152ec6b4c4ab51f6f10fb209",
+        "harnessHash": "ab5200feba677b4aa5e77aca19d6c5071ba6a142ac02ea51be788e6f9cfddc3b",
         "requestBytesDigest": "6c43e610b975899a4beeb9b52a9ac443d61e344bc1f06d484ad842c72452226e",
         "companionInstance": "ci1.c305bc3aad692c05a1d32444a43cbae052ea473b6944cedc6f1e13e0e8b414ca"
       },
@@ -117,7 +136,9 @@
             "type": "stdio",
             "executable": "/opt/synthetic/original-python",
             "args": [
-              "/opt/synthetic/original-python-runner.py"
+              "/opt/synthetic/original-python-runner.py",
+              "--diagnostic",
+              "0.3.3"
             ]
           },
           "settings": {
@@ -151,7 +172,7 @@
             ]
           }
         ],
-        "harnessHash": "3e3a276fa5a19402e57722c717135d5b94cea3cb152ec6b4c4ab51f6f10fb209",
+        "harnessHash": "ab5200feba677b4aa5e77aca19d6c5071ba6a142ac02ea51be788e6f9cfddc3b",
         "model": "custom-stdio-model-unverified",
         "harness": {
           "schema": "falsify.harness.v1",
@@ -165,7 +186,9 @@
             "type": "stdio",
             "executable": "/opt/synthetic/original-python",
             "args": [
-              "/opt/synthetic/original-python-runner.py"
+              "/opt/synthetic/original-python-runner.py",
+              "--diagnostic",
+              "0.3.3"
             ]
           },
           "settings": {
@@ -184,7 +207,7 @@
           "completedChunks": 1
         }
       },
-      "rawResponseSha256": "ac7f142ae54e28d905d5d1a4e15980e7026704454cd0e10fdb90cbac06ea5d2c",
+      "rawResponseSha256": "6ccaa15c70352c49e3feb6e9c244084c89bfbc44ffd7c0246a05f02315ca634a",
       "model": {
         "requested": "claude-opus-5-5",
         "verified": null
@@ -209,7 +232,9 @@
           "type": "stdio",
           "executable": "/opt/synthetic/e1-python",
           "args": [
-            "/opt/synthetic/e1-python-runner.py"
+            "/opt/synthetic/e1-python-runner.py",
+            "--diagnostic",
+            "0.3.3"
           ]
         },
         "settings": {
@@ -228,7 +253,7 @@
         "sourceHash": "baa7738ab80cbe5497b0626555caf33b1924ebd27429fd14627789ab402b4a4f",
         "fileHash": "0296ff135b71ce3bb3342af2d42a2019eaf805a11a2e0dfb54e0749631323620",
         "revision": "rev-e1",
-        "harnessHash": "01224456554e7f35ee850ebe1e24adde8d9b86fde709efbf8850832b89c43a4e",
+        "harnessHash": "545382a33d4c8b4d2f9891941bf8105ee8a573ab1a50b60be929a8289d3f0954",
         "requestBytesDigest": "38a82d6172ef40fc4bbd03b573cc6dc6f0a3fbdb676020c5a30500004ef5b4c6",
         "companionInstance": "ci1.ded311449868ca5b8e17f73ce1cefe7d649028c16f818e56eb53412332d109a2"
       },
@@ -259,7 +284,9 @@
             "type": "stdio",
             "executable": "/opt/synthetic/e1-python",
             "args": [
-              "/opt/synthetic/e1-python-runner.py"
+              "/opt/synthetic/e1-python-runner.py",
+              "--diagnostic",
+              "0.3.3"
             ]
           },
           "settings": {
@@ -278,7 +305,7 @@
         "sourceHash": "baa7738ab80cbe5497b0626555caf33b1924ebd27429fd14627789ab402b4a4f",
         "status": "ok",
         "findings": [],
-        "harnessHash": "01224456554e7f35ee850ebe1e24adde8d9b86fde709efbf8850832b89c43a4e",
+        "harnessHash": "545382a33d4c8b4d2f9891941bf8105ee8a573ab1a50b60be929a8289d3f0954",
         "model": "custom-stdio-model-unverified",
         "harness": {
           "schema": "falsify.harness.v1",
@@ -292,7 +319,9 @@
             "type": "stdio",
             "executable": "/opt/synthetic/e1-python",
             "args": [
-              "/opt/synthetic/e1-python-runner.py"
+              "/opt/synthetic/e1-python-runner.py",
+              "--diagnostic",
+              "0.3.3"
             ]
           },
           "settings": {
@@ -311,7 +340,7 @@
           "completedChunks": 1
         }
       },
-      "rawResponseSha256": "6b5679968c54f809f0dbb2195d772e6dfd892312c174bbe93b2c3933072b51f1",
+      "rawResponseSha256": "fffe7ac30853a7939b01673f595bafa8167224f06731db8bc6f2b45cd3e56bfb",
       "model": {
         "requested": "claude-opus-5-5",
         "verified": null
@@ -336,7 +365,9 @@
           "type": "stdio",
           "executable": "/opt/synthetic/h1-python",
           "args": [
-            "/opt/synthetic/h1-python-runner.py"
+            "/opt/synthetic/h1-python-runner.py",
+            "--diagnostic",
+            "0.3.3"
           ]
         },
         "settings": {
@@ -355,7 +386,7 @@
         "sourceHash": "11e7d98734dee515efcdd549cc7fa59f34f4734f5d45b1d841d4654b4829b2d5",
         "fileHash": "3aa147e49a7f7cbe8e0ec8b66f3474a709eeb63bf23657efb8b84e0238239f75",
         "revision": "rev-h1",
-        "harnessHash": "d0bd90fa4c652316ddb407e7a9ad77067a1dcfe5ed2c9ce0532a22a29c3c42c8",
+        "harnessHash": "b5bd1805b27f55923c15fefb8964222c461c272d741e1c512ef21aed656fe6ce",
         "requestBytesDigest": "519dc7a87b781f09512037d9cec5f3f743c8e4e9e8f5c6055c96e576ac4c5056",
         "companionInstance": "ci1.37fef3f5d06a35a12f3a47fe8c51755540fe7f59d1df1b4f65fff6723d22f9fe"
       },
@@ -386,7 +417,9 @@
             "type": "stdio",
             "executable": "/opt/synthetic/h1-python",
             "args": [
-              "/opt/synthetic/h1-python-runner.py"
+              "/opt/synthetic/h1-python-runner.py",
+              "--diagnostic",
+              "0.3.3"
             ]
           },
           "settings": {
@@ -405,7 +438,7 @@
         "sourceHash": "11e7d98734dee515efcdd549cc7fa59f34f4734f5d45b1d841d4654b4829b2d5",
         "status": "abstain",
         "findings": [],
-        "harnessHash": "d0bd90fa4c652316ddb407e7a9ad77067a1dcfe5ed2c9ce0532a22a29c3c42c8",
+        "harnessHash": "b5bd1805b27f55923c15fefb8964222c461c272d741e1c512ef21aed656fe6ce",
         "model": "custom-stdio-model-unverified",
         "harness": {
           "schema": "falsify.harness.v1",
@@ -419,7 +452,9 @@
             "type": "stdio",
             "executable": "/opt/synthetic/h1-python",
             "args": [
-              "/opt/synthetic/h1-python-runner.py"
+              "/opt/synthetic/h1-python-runner.py",
+              "--diagnostic",
+              "0.3.3"
             ]
           },
           "settings": {
@@ -438,7 +473,7 @@
           "completedChunks": 1
         }
       },
-      "rawResponseSha256": "ffb990d6aff51fcbde0d720d2eae20f8ac437505dfe29660e660bb28dd151c14",
+      "rawResponseSha256": "1d9a1f8fb0a0af912142cbf7225896ed59d92788eaa31448e4b7d15a509a882c",
       "model": {
         "requested": "claude-opus-5-5",
         "verified": null

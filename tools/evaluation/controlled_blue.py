@@ -42,9 +42,16 @@ SEGMENT_KEYS = {'id', 'label', 'text'}
 FINDING_KEYS = {'id', 'segmentId', 'quote', 'rationale', 'uncertainty', 'evidence'}
 EVIDENCE_KEYS = {'segmentId', 'quote', 'relation'}
 RESULT_REQUIRED = {'schema', 'revision', 'sourceHash', 'status', 'findings', 'harnessHash', 'model', 'harness'}
-RESULT_OPTIONAL = {'coverage'}
-MACHINE_ADAPTER = {'executable', 'args'}
+# Keys blue_service.finish adds beyond the findings contract. cliSelection is harness.record
+# for an explicit CLI selection (provider, model, effort). isolation is always set.
+# coverage is the call record. These are kept verbatim; the preparer does not drop them before hashing.
+RESULT_OPTIONAL = {'coverage', 'isolation', 'cliSelection'}
 MACHINE_SETTINGS = {'auditDirectory'}
+# Joined supplied text and segment count match app/local/red_service.py validate_request,
+# which BLUE reuses. A packet holds several full copies, so it is larger than one paper.
+MAX_SOURCE_CHARS = 1_000_000
+MAX_SEGMENTS = 10000
+MAX_PACKET = 16 * 1024 * 1024
 FORBIDDEN_REQUEST_KEYS = {
     'gold', 'plan', 'comparison', 'reviews', 'assessments', 'answer', 'answerkey',
     'redplan', 'priorresponse', 'filename', 'sourcename', 'file', 'bytes', 'pdf',
@@ -53,7 +60,6 @@ FORBIDDEN_REQUEST_KEYS = {
 }
 SECRET_KEYS = {'token', 'authorization', 'secret', 'password', 'apikey', 'api_key', 'bearer', 'cookie', 'session'}
 HEX64 = 64
-MAX_PACKET = 256 * 1024
 NOTICE = (
     'Preparation only. Successful execution is not detection. '
     'A failed or cancelled job with no final findings is not completed-zero-findings. '
@@ -123,15 +129,42 @@ def outcome_class(job_state, status, finding_count, reviewed, matched):
     return 'human-reviewed-no-match'
 
 
-def portable_projection(harness):
+def portable_projection(harness, path_map=None, machine_setting_keys=None):
+    """Map only exact path tokens named in path_map. Flags and unmapped args stay."""
+    path_map = {} if path_map is None else path_map
+    if machine_setting_keys is None:
+        machine_setting_keys = ('auditDirectory',)
     projected = json.loads(json.dumps(harness))
     adapter = projected.get('adapter')
     if isinstance(adapter, dict):
-        projected['adapter'] = {key: value for key, value in adapter.items() if key not in MACHINE_ADAPTER}
+        if isinstance(adapter.get('executable'), str) and adapter['executable'] in path_map:
+            adapter['executable'] = path_map[adapter['executable']]
+        args = adapter.get('args')
+        if isinstance(args, list):
+            adapter['args'] = [path_map[arg] if isinstance(arg, str) and arg in path_map else arg for arg in args]
     settings = projected.get('settings')
     if isinstance(settings, dict):
-        projected['settings'] = {key: value for key, value in settings.items() if key not in MACHINE_SETTINGS}
+        for key in machine_setting_keys:
+            settings.pop(key, None)
     return projected
+
+
+def unmapped_adapter_paths(harness, path_map):
+    """Path-like executable/args that the packet did not explicitly map. Flags are never listed."""
+    adapter = harness.get('adapter') if isinstance(harness.get('adapter'), dict) else {}
+    tokens = []
+    if isinstance(adapter.get('executable'), str):
+        tokens.append(adapter['executable'])
+    args = adapter.get('args')
+    if isinstance(args, list):
+        tokens.extend(arg for arg in args if isinstance(arg, str))
+    missing = []
+    for token in tokens:
+        if token in path_map or token.startswith('-'):
+            continue
+        if '/' in token or '\\' in token or (len(token) > 2 and token[1] == ':'):
+            missing.append(token)
+    return missing
 
 
 def _reject_constants(text):
@@ -223,7 +256,7 @@ def _forbidden_request(value, errors, depth=0):
 
 def _check_strategy(packet, errors):
     strategy = packet.get('strategy')
-    if not _exact(strategy, ('id', 'version', 'bundleSha256', 'portable'), (), 'strategy', errors):
+    if not _exact(strategy, ('id', 'version', 'bundleSha256', 'portable'), ('pathMap', 'machineSettingKeys'), 'strategy', errors):
         return None
     if not isinstance(strategy['id'], str) or not strategy['id'].strip() or len(strategy['id']) > 80:
         errors.append('strategy.id')
@@ -243,10 +276,22 @@ def _check_strategy(packet, errors):
     if not isinstance(settings, dict) or settings.get('bundleSha256') != strategy['bundleSha256']:
         errors.append('strategy.bundle')
     adapter = portable.get('adapter')
-    if not isinstance(adapter, dict) or set(adapter) & MACHINE_ADAPTER:
+    if not isinstance(adapter, dict):
+        errors.append('strategy.portable.adapter')
+    keys = strategy.get('machineSettingKeys', ['auditDirectory'])
+    if not isinstance(keys, list) or any(key != 'auditDirectory' for key in keys):
+        errors.append('strategy.machineSettingKeys')
+    elif isinstance(settings, dict) and any(key in settings for key in keys):
         errors.append('strategy.portable.machine')
-    if isinstance(settings, dict) and set(settings) & MACHINE_SETTINGS:
-        errors.append('strategy.portable.machine')
+    path_map = strategy.get('pathMap', {})
+    if not isinstance(path_map, dict) or len(path_map) > 64:
+        errors.append('strategy.pathMap')
+    else:
+        for source, target in path_map.items():
+            if not isinstance(source, str) or not source or source.startswith('-') or len(source) > 2000:
+                errors.append('strategy.pathMap')
+            if not isinstance(target, str) or not target.strip() or target.startswith('-') or len(target) > 200:
+                errors.append('strategy.pathMap')
     return strategy
 
 
@@ -284,11 +329,11 @@ def _check_arms(packet, errors):
 
 
 def _check_segments(segments, field, errors):
-    if not isinstance(segments, list) or not 1 <= len(segments) <= 32:
+    if not isinstance(segments, list) or not 1 <= len(segments) <= MAX_SEGMENTS:
         errors.append(field)
         return None
     ids = set()
-    cleaned = []
+    total = 0
     for index, segment in enumerate(segments):
         where = f'{field}[{index}]'
         if not isinstance(segment, dict) or set(segment) != SEGMENT_KEYS:
@@ -299,10 +344,14 @@ def _check_segments(segments, field, errors):
         ids.add(segment['id'])
         if not isinstance(segment['label'], str) or len(segment['label']) > 200:
             errors.append(where + '.label')
-        if not isinstance(segment['text'], str) or not segment['text'].strip() or len(segment['text']) > 8000:
+        text = segment.get('text')
+        if not isinstance(text, str) or not text.strip() or '\x00' in text:
             errors.append(where + '.text')
-        cleaned.append({'id': segment['id'], 'label': segment['label'], 'text': segment['text']})
-    return cleaned
+            continue
+        total += len(text) + (2 if index else 0)
+    if total > MAX_SOURCE_CHARS:
+        errors.append(field + '.source')
+    return segments
 
 
 def _check_findings(findings, errors):
@@ -391,6 +440,14 @@ def _check_trial_shape(trial, index, errors):
             coverage = result.get('coverage')
             if coverage is not None and (not isinstance(coverage, dict) or not isinstance(coverage.get('complete'), bool)):
                 errors.append(field + '.result.coverage')
+            if 'isolation' in result and (not isinstance(result['isolation'], str) or not result['isolation'].strip() or len(result['isolation']) > 300):
+                errors.append(field + '.result.isolation')
+            if 'cliSelection' in result:
+                selection = result['cliSelection']
+                if not isinstance(selection, dict) or set(selection) != {'provider', 'model', 'effort'}:
+                    errors.append(field + '.result.cliSelection')
+                elif any(not isinstance(selection[key], str) or not selection[key].strip() for key in ('provider', 'model', 'effort')):
+                    errors.append(field + '.result.cliSelection')
     return True
 
 
@@ -547,14 +604,30 @@ def _accepted_judgments(review, finding_ids, usable, duplicate, warnings, trial_
     return matched, unmatched, duplicates
 
 
+def _harness_requested_model(harness, label):
+    settings = harness.get('settings') if isinstance(harness.get('settings'), dict) else {}
+    if isinstance(settings.get('model'), str):
+        return settings['model']
+    adapter = harness.get('adapter') if isinstance(harness.get('adapter'), dict) else {}
+    if isinstance(adapter.get('model'), str):
+        return adapter['model']
+    if isinstance(label, str) and not label.endswith('model-unverified'):
+        return label
+    return None
+
+
 def _condition_reasons(trial, strategy, fixed, arms):
     reasons = []
     harness = trial['harness']
-    projected = portable_projection(harness)
+    path_map = strategy.get('pathMap') or {}
+    machine_keys = strategy.get('machineSettingKeys', ['auditDirectory'])
+    projected = portable_projection(harness, path_map, machine_keys)
     if projected != strategy['portable']:
         reasons.append('portable_strategy')
+    if unmapped_adapter_paths(harness, path_map):
+        reasons.append('unmapped_adapter_path')
     settings = harness.get('settings') if isinstance(harness.get('settings'), dict) else {}
-    if settings.get('model') != fixed['requestedModel'] or trial['model']['requested'] != fixed['requestedModel']:
+    if _harness_requested_model(harness, None) != fixed['requestedModel'] or trial['model']['requested'] != fixed['requestedModel']:
         reasons.append('requested_model')
     if harness.get('maxCalls') != fixed['maxCalls'] or trial['request'].get('maxCalls') != fixed['maxCalls']:
         reasons.append('budget')
@@ -597,6 +670,9 @@ def _result_reasons(trial, machine, label):
         reasons.append('result_binding')
     if result.get('model') != label:
         reasons.append('app_model_label')
+    recorded = _harness_module().record(trial['harness'])
+    if ('cliSelection' in result or 'cliSelection' in recorded) and result.get('cliSelection') != recorded.get('cliSelection'):
+        reasons.append('recorded_metadata')
     if result['status'] != 'ok' and result['findings']:
         reasons.append('non_ok_findings')
         return reasons
@@ -700,35 +776,48 @@ def evaluate(packet):
             'duplicateJudgments': duplicates if not reasons else 0,
             'findingCount': finding_count if not reasons else 0,
             'appModelLabel': label,
+            'requestId': trial['job'].get('id'),
             'requestBytesDigest': trial['job']['requestBytesDigest'],
             'rawResponseSha256': trial['rawResponseSha256'],
             'companionInstance': trial['job']['companionInstance'],
+            'independence': 'distinct-request',
         })
     _mark_repeats(rows, warnings)
     return _summarize(packet, rows, warnings, usable, duplicate)
 
 
+def _exclude_replay(row):
+    row['included'] = False
+    row['countedClass'] = None
+    row['class'] = 'excluded'
+    row['independence'] = 'replay'
+    row['reasons'] = list(dict.fromkeys([*row['reasons'], 'repeat_replay']))
+    row['matchedJudgments'] = 0
+    row['unmatchedJudgments'] = 0
+    row['duplicateJudgments'] = 0
+
+
 def _mark_repeats(rows, warnings):
     included = [row for row in rows if row['included']]
+    replay_ids = set()
     for left in included:
         for right in included:
-            if left['id'] >= right['id'] or left['arm'] != right['arm']:
+            if left['id'] >= right['id']:
                 continue
-            shared = (
-                left['requestBytesDigest'] == right['requestBytesDigest']
-                or (left['rawResponseSha256'] and left['rawResponseSha256'] == right['rawResponseSha256'])
-            )
-            if shared:
-                _warn(warnings, 'repeat_not_independent', left['id'])
-                _warn(warnings, 'repeat_not_independent', right['id'])
-                left['included'] = right['included'] = False
-                left['countedClass'] = right['countedClass'] = None
-                left['class'] = right['class'] = 'excluded'
-                left['reasons'] = list(dict.fromkeys([*left['reasons'], 'repeat_not_independent']))
-                right['reasons'] = list(dict.fromkeys([*right['reasons'], 'repeat_not_independent']))
-                left['matchedJudgments'] = right['matchedJudgments'] = 0
-                left['unmatchedJudgments'] = right['unmatchedJudgments'] = 0
-                left['duplicateJudgments'] = right['duplicateJudgments'] = 0
+            same_request = left['requestId'] == right['requestId'] or left['requestBytesDigest'] == right['requestBytesDigest']
+            if same_request:
+                _warn(warnings, 'repeat_replay', left['id'])
+                _warn(warnings, 'repeat_replay', right['id'])
+                replay_ids.add(left['id'])
+                replay_ids.add(right['id'])
+            elif left['rawResponseSha256'] and left['rawResponseSha256'] == right['rawResponseSha256']:
+                _warn(warnings, 'independence_unknown', left['id'])
+                _warn(warnings, 'independence_unknown', right['id'])
+                left['independence'] = 'unknown'
+                right['independence'] = 'unknown'
+    for row in included:
+        if row['id'] in replay_ids:
+            _exclude_replay(row)
 
 
 def _calls_report(rows):
@@ -792,11 +881,12 @@ def _summarize(packet, rows, warnings, usable, duplicate):
             'calls': _calls_report(included),
             'cost': 'unknown',
             'machineConfigHashes': hashes,
+            'independence': 'unknown' if any(row['independence'] == 'unknown' for row in included) else ('replay' if any(row['independence'] == 'replay' for row in group) and not included else 'distinct-request'),
         }
         if not included:
             _warn(warnings, 'arm_missing', None)
     sources = [packet['arms'][arm]['sourceHash'] for arm in ARMS]
-    blocking = ('repeat_not_independent', 'gold_missing', 'arm_missing', 'duplicate_gold')
+    blocking = ('repeat_replay', 'gold_missing', 'arm_missing', 'duplicate_gold')
     ready = all(arm_reports[arm]['attempts'] for arm in ARMS) and fixed['goldVersion'] is not None
     ready = ready and not any(code.startswith('incompatible_condition') or code in blocking for code in warnings)
     messages = {
@@ -809,7 +899,8 @@ def _summarize(packet, rows, warnings, usable, duplicate):
         'multiple_reviews': 'More than one condition-matched review exists for a trial. None was applied.',
         'review_run_missing': 'A review names a trial that is not in this packet and was ignored.',
         'unverified_model': 'A verified model was claimed without local-codex provenance and is reported unknown.',
-        'repeat_not_independent': 'Repeats share a request-byte digest or a final response hash and were removed from denominators.',
+        'repeat_replay': 'The same request id or request-byte digest was repeated. Those trials are replays and are outside the denominators.',
+        'independence_unknown': 'Final response hashes match across separate request ids. Deterministic or zero-finding runs can match. The trials stay counted and independence is unknown.',
         'machine_config_not_strategy_identity': 'Machine config hashes differ. They are not a second strategy. Portable id, version and bundle hash are unchanged.',
         'arm_missing': 'An arm has no included trial. Side-by-side preparation is not ready.',
     }
@@ -856,7 +947,7 @@ def _summarize(packet, rows, warnings, usable, duplicate):
             'class': row['class'], 'reasons': row['reasons'], 'verifiedModel': row['verifiedModel'],
             'calls': row['calls'] if row['included'] else 'unknown', 'cost': 'unknown',
             'appModelLabel': row['appModelLabel'], 'machineConfigHash': row['machineConfigHash'],
-            'sourceComparedAsTextHash': True,
+            'independence': row['independence'], 'sourceComparedAsTextHash': True,
         } for row in rows],
         'warnings': warning_rows,
     }
