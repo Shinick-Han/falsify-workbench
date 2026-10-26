@@ -175,11 +175,10 @@ async function prepareExclusive(request) {
       throw new BrowserPdfError("verification-failed", "\uC800\uC7A5\uB41C \uCD9C\uB825\uC774 PDF\uAC00 \uC544\uB2D9\uB2C8\uB2E4. \uD30C\uC77C\uC744 \uBC18\uD658\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
     }
     const outputSha256 = await sha256(out);
-    if (outputSha256 === sourceSha256) {
-      throw new BrowserPdfError("unchanged-output", "\uCD9C\uB825\uC774 \uC6D0\uBCF8\uACFC \uAC19\uC2B5\uB2C8\uB2E4. \uC6D0\uBCF8\uC744 \uBCC0\uACBD\uB41C \uD30C\uC77C\uB85C \uBC18\uD658\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
-    }
-    const quality = verify(bytes, out, plans, models);
+    const quality = verify(bytes, out, plans, models, outputSha256 === sourceSha256);
     warnings.push(...quality.warnings);
+    const checks = quality.checks;
+    const status = checks.length ? "failed" : warnings.some((item) => item.severity === "warning") ? "warning" : "applied";
     const file = new File([out], editedName(parsed.name), { type: "application/pdf" });
     const pageMap = models.map((model, index) => pageMapEntry(model, index));
     const verification = {
@@ -191,30 +190,36 @@ async function prepareExclusive(request) {
       coordinateSpace: COORDINATE_SPACE,
       sourceSha256,
       outputSha256,
-      status: "applied",
-      layoutVerified: warnings.every((item) => item.severity === "info"),
+      status,
+      layoutVerified: status === "applied",
       independent: false,
       pageCount: { source: pageCount, output: pageCount },
       pages: models.map((model, index) => verificationPage(model, index)),
-      edits: plans.map((plan) => ({
-        id: plan.edit.id,
-        pageIndex: plan.pageIndex,
-        status: "applied",
-        font: plan.layout.font,
-        sourceFont: plan.sourceFont,
-        fontSubstituted: plan.layout.substituted,
-        size: plan.size,
-        color: plan.color,
-        wrappedLines: plan.layout.lines.length
-      })),
+      edits: plans.map((plan) => {
+        const editChecks = checks.filter((item) => item.id === plan.edit.id);
+        return {
+          id: plan.edit.id,
+          pageIndex: plan.pageIndex,
+          status: editChecks.length ? "failed" : "applied",
+          font: plan.layout.font,
+          sourceFont: plan.sourceFont,
+          fontSubstituted: plan.layout.substituted,
+          encoding: plan.layout.encoding,
+          size: plan.size,
+          color: plan.color,
+          wrappedLines: plan.layout.lines.length,
+          checks: editChecks
+        };
+      }),
+      checks,
       quality: {
         independent: false,
         method: "mupdf.js structured text, same engine",
-        removedBefore: true,
-        presentAfter: true,
-        untouchedText: true,
-        figures: quality.figures,
-        limitations: "Same-engine structural check only. Not typography, pixel identity, independent QA, or scientific verification."
+        removedBefore: !checks.some((item) => item.code === "removed-before"),
+        presentAfter: !checks.some((item) => item.code === "present-after"),
+        untouchedText: !checks.some((item) => item.code === "untouched-text"),
+        figures: !checks.some((item) => item.code === "figure-changed"),
+        limitations: "Same-engine structural check only. A failed check still returns this readable candidate. Not typography, pixel identity, independent QA, or scientific verification."
       },
       warnings
     };
@@ -332,7 +337,6 @@ function locate(edit, index, models, pageCount) {
   }
   let pool = hits;
   if (anchor?.bbox) pool = pool.filter((hit) => contains(union(hit.chars), anchor.bbox, 4));
-  if (anchor && anchor.start !== void 0) pool = pool.filter((hit) => hit.at === anchor.start && hit.at + needle.length === anchor.end);
   if (anchor && anchor.occurrence !== void 0) pool = pool[anchor.occurrence] ? [pool[anchor.occurrence]] : [];
   if (!pool.length) return fail(hits.length ? "anchor-mismatch" : "not-found");
   if (pool.length > 1) return fail("ambiguous");
@@ -346,9 +350,8 @@ function locate(edit, index, models, pageCount) {
   if (fontsUsed.length !== 1 || sizes.length !== 1 || colors.length !== 1 || colors[0] === "none") return fail(colors[0] === "none" ? "unsupported-color" : "mixed-style");
   const face = base14(fontsUsed[0], drawn[0].font);
   if (!face) return fail("font-unavailable");
-  const sample = metrics(face.name);
-  for (const ch of edit.after) if (!sample.encodeCharacter(ch)) return fail("missing-glyphs");
-  if (edit.after && winAnsi(edit.after) === null) return fail("missing-glyphs");
+  const encoded = textEncoding(face, edit.after);
+  if (encoded.error) return fail(encoded.error);
   const box = pdfSpan(model.transform, chars.filter((ch) => ch.lineId === chars[0].lineId));
   const partialLine = model.chars.some((ch) => ch.lineId === chars[0].lineId && !chars.includes(ch) && ch.c.trim());
   return { ok: true, plan: {
@@ -358,6 +361,8 @@ function locate(edit, index, models, pageCount) {
     charIndex: new Set(chars.map((ch) => model.chars.indexOf(ch))),
     sourceFont: fontsUsed[0],
     face,
+    encoding: encoded.encoding,
+    substituted: encoded.substituted,
     size: sizes[0],
     color: drawn[0].color,
     origin: chars[0].pdf,
@@ -367,21 +372,23 @@ function locate(edit, index, models, pageCount) {
   } };
 }
 function layout(plan, model, page) {
-  const font = metrics(plan.face.name);
+  const font = plan.encoding === "uniks-utf16" ? cjkFont() : metrics(plan.face.name);
+  const fontName = plan.encoding === "uniks-utf16" ? "ko" : plan.face.name;
   const after = plan.edit.after;
-  if (!after) return { lines: [], font: plan.face.name, substituted: plan.face.substituted };
+  const placed = (lines2) => ({ lines: lines2, font: fontName, substituted: plan.substituted, encoding: plan.encoding });
+  if (!after) return placed([]);
   const width = measure(font, plan.size, after);
   if (width === null) return { error: "missing-glyphs" };
-  if (width <= plan.hole + 0.8) return { lines: [after], font: plan.face.name, substituted: plan.face.substituted };
+  if (width <= plan.hole + 0.8) return placed([after]);
   if (plan.rotation !== 0) return { error: "long-after-no-room" };
   const room = roomRight(plan, model, page);
-  if (width <= room + 0.8) return { lines: [after], font: plan.face.name, substituted: plan.face.substituted };
+  if (width <= room + 0.8) return placed([after]);
   const wrapWidth = Math.max(36, Math.min(room, 468));
   const lines = wrap(font, plan.size, after, wrapWidth);
   if (!lines) return { error: "missing-glyphs" };
   if (lines.length > LIMITS.maxWrapLines) return { error: "long-after-no-room" };
   if (!clear(lines, plan, model, font)) return { error: "long-after-no-room" };
-  return { lines, font: plan.face.name, substituted: plan.face.substituted };
+  return placed(lines);
 }
 function redact(page, chars) {
   const quads = chars.map((ch) => ch.quad);
@@ -393,13 +400,15 @@ function redact(page, chars) {
 }
 function showText(doc, page, plan) {
   if (!plan.layout.lines.length) return "";
-  const resource = ensureFont(doc, page, plan.layout.font);
+  const cjk = plan.layout.encoding === "uniks-utf16";
+  const resource = cjk ? ensureCjkFont(doc, page) : ensureFont(doc, page, plan.layout.font);
   const [r, g, b] = plan.color;
   const leading = plan.size * 1.2;
   let body = `q BT /${resource} ${num(plan.size)} Tf ${num(r)} ${num(g)} ${num(b)} rg
 `;
   plan.layout.lines.forEach((line, index) => {
-    body += `1 0 0 1 ${num(plan.origin[0])} ${num(plan.origin[1] - index * leading)} Tm ${winAnsi(line)} Tj
+    const literal = cjk ? utf16hex(line) : winAnsi(line);
+    body += `1 0 0 1 ${num(plan.origin[0])} ${num(plan.origin[1] - index * leading)} Tm ${literal} Tj
 `;
   });
   return body + "ET Q\n";
@@ -417,26 +426,23 @@ function appendStream(doc, page, text) {
   array.push(stream);
   obj.put("Contents", array);
 }
-function verify(sourceBytes, outBytes, plans, models) {
+function verify(sourceBytes, outBytes, plans, models, unchanged) {
   const warnings = [];
+  const checks = [];
   let check;
   try {
     check = mupdf.Document.openDocument(outBytes, "application/pdf").asPDF();
   } catch {
-    throw new BrowserPdfError("verification-failed", "\uC800\uC7A5 \uACB0\uACFC\uB97C \uB2E4\uC2DC \uC5F4 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. \uD30C\uC77C\uC744 \uBC18\uD658\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
+    throw new BrowserPdfError("engine", "\uC800\uC7A5 \uACB0\uACFC\uB97C \uB2E4\uC2DC \uC5F4 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. \uD30C\uC77C\uC744 \uBC18\uD658\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
   }
   try {
-    if (check.countPages() !== models.length) throw new BrowserPdfError("verification-failed", "\uD398\uC774\uC9C0 \uC218\uAC00 \uBC14\uB00C\uC5C8\uC2B5\uB2C8\uB2E4. \uD30C\uC77C\uC744 \uBC18\uD658\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.", { edits: [{ status: "unknown", code: "page-count" }] });
+    if (check.countPages() !== models.length) checks.push({ pageIndex: null, status: "failed", code: "page-count" });
     const edited = new Set(plans.map((plan) => plan.pageIndex));
     for (let i = 0; i < models.length; i++) {
       const page = check.loadPage(i);
       const again = readPage(page);
-      if (!sameImages(models[i].images, again.images)) {
-        throw new BrowserPdfError("verification-failed", "\uADF8\uB9BC \uC704\uCE58\uAC00 \uBC14\uB00C\uC5C8\uC2B5\uB2C8\uB2E4. \uD30C\uC77C\uC744 \uBC18\uD658\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.", { edits: [{ pageIndex: i, status: "unknown", code: "figure-changed" }] });
-      }
-      if (!edited.has(i) && normalizeText(again.chars) !== normalizeText(models[i].chars)) {
-        throw new BrowserPdfError("verification-failed", "\uD3B8\uC9D1\uD558\uC9C0 \uC54A\uC740 \uD398\uC774\uC9C0\uC758 \uD14D\uC2A4\uD2B8\uAC00 \uBC14\uB00C\uC5C8\uC2B5\uB2C8\uB2E4. \uD30C\uC77C\uC744 \uBC18\uD658\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.", { edits: [{ pageIndex: i, status: "unknown", code: "untouched-text" }] });
-      }
+      if (!sameImages(models[i].images, again.images)) checks.push({ pageIndex: i, status: "failed", code: "figure-changed" });
+      if (!edited.has(i) && normalizeText(again.chars) !== normalizeText(models[i].chars)) checks.push({ pageIndex: i, status: "failed", code: "untouched-text" });
     }
     for (const plan of plans) {
       const text = normalizeText(readPage(check.loadPage(plan.pageIndex)).chars);
@@ -446,15 +452,13 @@ function verify(sourceBytes, outBytes, plans, models) {
       if (after && !text.includes(after)) {
         const words = after.split(" ").filter(Boolean);
         if (words.length && words.every((word) => text.includes(word))) warnings.push(warn("after-extraction-order", "warning", plan.pageIndex, plan.edit.id));
-        else throw new BrowserPdfError("verification-failed", "\uBC14\uAFBC \uBB38\uAD6C\uB97C \uC800\uC7A5 \uACB0\uACFC\uC5D0\uC11C \uD655\uC778\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uD30C\uC77C\uC744 \uBC18\uD658\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.", { edits: [{ id: plan.edit.id, pageIndex: plan.pageIndex, status: "unknown", code: "present-after" }] });
+        else checks.push({ id: plan.edit.id, pageIndex: plan.pageIndex, status: "failed", code: "present-after" });
       }
       const expected = Math.max(0, count(sourceText, before) - 1 + count(after, before));
-      if (count(text, before) > expected) {
-        throw new BrowserPdfError("verification-failed", "\uBE7C\uC57C \uD560 \uBB38\uAD6C\uAC00 \uACB0\uACFC\uC5D0 \uB0A8\uC544 \uC788\uC2B5\uB2C8\uB2E4. \uD30C\uC77C\uC744 \uBC18\uD658\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.", { edits: [{ id: plan.edit.id, pageIndex: plan.pageIndex, status: "unknown", code: "removed-before" }] });
-      }
+      if (count(text, before) > expected) checks.push({ id: plan.edit.id, pageIndex: plan.pageIndex, status: "failed", code: "removed-before" });
     }
-    if (outBytes.length === sourceBytes.length && outBytes.every((byte, index) => byte === sourceBytes[index])) {
-      throw new BrowserPdfError("unchanged-output", "\uCD9C\uB825\uC774 \uC6D0\uBCF8\uACFC \uAC19\uC2B5\uB2C8\uB2E4. \uC6D0\uBCF8\uC744 \uBCC0\uACBD\uB41C \uD30C\uC77C\uB85C \uBC18\uD658\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
+    if (unchanged || outBytes.length === sourceBytes.length && outBytes.every((byte, index) => byte === sourceBytes[index])) {
+      checks.push({ status: "failed", code: "unchanged-output" });
     }
   } finally {
     try {
@@ -462,7 +466,7 @@ function verify(sourceBytes, outBytes, plans, models) {
     } catch {
     }
   }
-  return { warnings, figures: true };
+  return { warnings, checks };
 }
 function unsupported(failures, models) {
   const indexes = [...new Set(failures.map((item) => item.pageIndex).filter((index) => Number.isInteger(index)))];
@@ -585,6 +589,30 @@ function metrics(name) {
   if (!fonts.has(name)) fonts.set(name, new mupdf.Font(name));
   return fonts.get(name);
 }
+function cjkFont() {
+  return metrics("ko");
+}
+function textEncoding(face, after) {
+  if (!after) return { encoding: "winansi", substituted: face.substituted };
+  const latin = metrics(face.name);
+  const latinOk = [...after].every((ch) => latin.encodeCharacter(ch)) && winAnsi(after) !== null;
+  if (latinOk) return { encoding: "winansi", substituted: face.substituted };
+  const ko = cjkFont();
+  if ([...after].every((ch) => ko.encodeCharacter(ch))) return { encoding: "uniks-utf16", substituted: true };
+  return { error: "missing-glyphs" };
+}
+function utf16hex(text) {
+  let hex = "";
+  for (const ch of text) {
+    const code = ch.codePointAt(0);
+    if (code > 65535) {
+      const unit = code - 65536;
+      hex += (55296 + (unit >> 10)).toString(16).padStart(4, "0");
+      hex += (56320 + (unit & 1023)).toString(16).padStart(4, "0");
+    } else hex += code.toString(16).padStart(4, "0");
+  }
+  return "<" + hex + ">";
+}
 function measure(font, size, text) {
   let width = 0;
   for (const ch of text) {
@@ -661,6 +689,28 @@ function clear(lines, plan, model, font) {
     }
   }
   return true;
+}
+function ensureCjkFont(doc, page) {
+  const resources = ownResources(doc, page);
+  let fontsDict = resources.get("Font");
+  if (fontsDict.isNull()) {
+    fontsDict = doc.newDictionary();
+    resources.put("Font", fontsDict);
+  } else fontsDict = fontsDict.resolve();
+  let existing = null;
+  fontsDict.forEach((value, key) => {
+    if (existing) return;
+    const item = value.resolve();
+    const encoding = item.get("Encoding");
+    if (!encoding.isNull() && encoding.asName() === "UniKS-UTF16-H") existing = String(key);
+  });
+  if (existing) return existing;
+  let name = "FwKorea";
+  const taken = /* @__PURE__ */ new Set();
+  fontsDict.forEach((_value, key) => taken.add(String(key)));
+  while (taken.has(name)) name += "x";
+  fontsDict.put(name, doc.addCJKFont(cjkFont(), "ko", 0, false));
+  return name;
 }
 function ensureFont(doc, page, baseName) {
   const resources = ownResources(doc, page);
