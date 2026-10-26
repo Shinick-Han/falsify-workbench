@@ -83,6 +83,36 @@ test('archive build rejects cycles, dangling parents, bad hashes and non-minimal
   await assert.rejects(validateArchive(many,V),e=>e.code==='oversize');
 });
 
+test('an imported snapshot may cite a local root with the same identity, and a conflicting parent is rejected',async()=>{
+  const {snapshot,root,snap}=await fiveCase();
+  const pair=structuredClone(snapshot);
+  pair.runs=pair.runs.filter(r=>r.id===root.id||r.id===snap.id);
+  pair.reviews=[];
+  pair.harnesses=pair.harnesses.filter(h=>h.hash===root.harnessHash);
+  pair.runs.find(r=>r.id===snap.id).provenance='imported-unverified';
+  const archive=await buildExperimentArchive(pair,snap.id,V);
+  assert.equal(archive.data.ledger.runs.find(r=>r.id===root.id).provenance,'local-codex');
+  assert.equal(archive.data.ledger.runs.find(r=>r.id===snap.id).provenance,'imported-unverified');
+  assert.deepEqual(archive.data.ledger.runs.find(r=>r.id===snap.id).response,root.response);
+  assert.equal((await validateArchive(archive,V)).data.ledger.runs.find(r=>r.id===snap.id).snapshotOf,root.id);
+  const manual=structuredClone(pair);manual.runs.find(r=>r.id===snap.id).provenance='manual-unverified';
+  await assert.rejects(buildExperimentArchive(manual,snap.id,V),e=>e.code==='missing_ref');
+  const reversed=structuredClone(pair);
+  reversed.runs.find(r=>r.id===root.id).provenance='imported-unverified';
+  reversed.runs.find(r=>r.id===snap.id).provenance='local-codex';
+  await assert.rejects(buildExperimentArchive(reversed,snap.id,V),e=>e.code==='missing_ref');
+  const forged=structuredClone(pair);
+  const forgedRoot=forged.runs.find(r=>r.id===root.id);
+  forgedRoot.response=structuredClone(forgedRoot.response);
+  forgedRoot.response.candidates[0].rationale='Forged parent rationale.';
+  await assert.rejects(buildExperimentArchive(forged,snap.id,V),e=>e.code==='missing_ref');
+  const relinked=structuredClone(pair);
+  const parent=relinked.runs.find(r=>r.id===root.id);
+  parent.id='other-root';parent.requestId='synthetic-other-root';
+  relinked.runs.find(r=>r.id===snap.id).snapshotOf='other-root';
+  await assert.rejects(buildExperimentArchive(relinked,snap.id,V),e=>e.code==='missing_ref');
+});
+
 test('standalone harness archive validates the content hash and does not carry runs',async()=>{
   const config={...H.builtin('blue'),id:'archive-blue',name:'Archive BLUE'};
   const hash=await H.hash(config);

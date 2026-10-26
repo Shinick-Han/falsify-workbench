@@ -170,8 +170,9 @@
     return {...clone(r),harness,provenance:imported?'imported-unverified':r.provenance};
   }
   // Links are checked once every run is known, so backup order never matters. Snapshots point only at roots: no chains or cycles.
+  // An imported-unverified snapshot may cite a validated root that keeps its own provenance when file, harness, model, revision, budget, request id and raw response match. Any other provenance mismatch still fails. The root record is not rewritten.
   function checkLinks(r,all){
-    if('snapshotOf' in r){const root=typeof r.snapshotOf==='string'&&all.find(x=>x.id===r.snapshotOf);if(r.role!=='red'||!r.finalState||!root||root.id===r.id||'snapshotOf' in root||root.role!=='red'||root.sourceHash!==r.sourceHash||root.fileHash!==r.fileHash||root.model!==r.model||root.provenance!==r.provenance||root.revision!==r.revision||root.harnessHash!==r.harnessHash||'requestId' in root&&root.requestId!==r.requestId||root.level!==r.level||root.maxCalls!==r.maxCalls||stable(root.response)!==stable(r.response))fail('최종 스냅샷의 원 모델 실행 기록이 없거나 입력 파일·Harness·모델·출처·응답이 다릅니다.');}
+    if('snapshotOf' in r){const root=typeof r.snapshotOf==='string'&&all.find(x=>x.id===r.snapshotOf);if(r.role!=='red'||!r.finalState||!root||root.id===r.id||'snapshotOf' in root||root.role!=='red'||root.sourceHash!==r.sourceHash||root.fileHash!==r.fileHash||root.model!==r.model||(root.provenance!==r.provenance&&r.provenance!=='imported-unverified')||root.revision!==r.revision||root.harnessHash!==r.harnessHash||'requestId' in root&&root.requestId!==r.requestId||root.level!==r.level||root.maxCalls!==r.maxCalls||stable(root.response)!==stable(r.response))fail('최종 스냅샷의 원 모델 실행 기록이 없거나 입력 파일·Harness·모델·출처·응답이 다릅니다.');}
     if('sourceRunId' in r){const red=typeof r.sourceRunId==='string'&&all.find(x=>x.id===r.sourceRunId);if(r.role!=='blue'||red?.role!=='red'||red.finalState?.outputFileHash!==r.fileHash)fail('인계한 RED 기록이 없거나 출력 파일 해시가 다릅니다.');}
   }
   async function validateDatabase(value,imported=false,known=[]){

@@ -73,8 +73,9 @@ async function checkRun(r,harnesses,prior,V){
   if('finalState' in r&&(r.role!=='red'||stable(finalState(r,r.finalState,V.red))!==stable(r.finalState)))fail('conflict','RED final state does not match the stored response.');
   return copy(r);
 }
+// An imported-unverified snapshot may cite a root that keeps another provenance. Parent identity still has to match, and a non-imported snapshot may not.
 function checkLinks(r,all){
-  if('snapshotOf' in r){const root=typeof r.snapshotOf==='string'&&all.find(x=>x.id===r.snapshotOf);if(r.role!=='red'||!r.finalState||!root||root.id===r.id||'snapshotOf' in root||root.role!=='red'||root.sourceHash!==r.sourceHash||root.fileHash!==r.fileHash||root.model!==r.model||root.provenance!==r.provenance||root.revision!==r.revision||root.harnessHash!==r.harnessHash||'requestId' in root&&root.requestId!==r.requestId||root.level!==r.level||root.maxCalls!==r.maxCalls||stable(root.response)!==stable(r.response))fail('missing_ref','Snapshot parent is missing or does not match the stored response.');}
+  if('snapshotOf' in r){const root=typeof r.snapshotOf==='string'&&all.find(x=>x.id===r.snapshotOf);if(r.role!=='red'||!r.finalState||!root||root.id===r.id||'snapshotOf' in root||root.role!=='red'||root.sourceHash!==r.sourceHash||root.fileHash!==r.fileHash||root.model!==r.model||(root.provenance!==r.provenance&&r.provenance!=='imported-unverified')||root.revision!==r.revision||root.harnessHash!==r.harnessHash||'requestId' in root&&root.requestId!==r.requestId||root.level!==r.level||root.maxCalls!==r.maxCalls||stable(root.response)!==stable(r.response))fail('missing_ref','Snapshot parent is missing or does not match the stored response.');}
   if('sourceRunId' in r){const red=typeof r.sourceRunId==='string'&&all.find(x=>x.id===r.sourceRunId);if(r.role!=='blue'||red?.role!=='red'||red.finalState?.outputFileHash!==r.fileHash)fail('missing_ref','BLUE source RED run is missing or its output hash differs.');}
 }
 const REVIEW_KEYS=['id','runId','createdAt','reviewer','caseLabel','verdict','score','note','comparison','findingAssessments','reviewContext'];
