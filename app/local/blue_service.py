@@ -18,8 +18,12 @@ MAX_CONTEXT = 48000          # raw supplied text re-delivered to the final pass
 MAX_TARGETS, MAX_ANCHOR, MAX_REASON = 8, 300, 600
 WINDOW = MAX_CONTEXT // MAX_TARGETS
 INDEX_BUDGET, INDEX_PART = 30000, 6000
+# Top-level key stays "targets". evidence_blue_v031 non-findings dispatch accepts a schema only when
+# properties contain summary or targets; renaming that key makes the frozen v033 wrapper reject the stage.
 TARGET = strict_object({'segmentId': STRING, 'anchor': STRING, 'reason': STRING})
-SELECTION = strict_object({'status': STATUS, 'targets': {'type': 'array', 'items': TARGET, 'maxItems': MAX_TARGETS}})
+REFERENCE_TARGET = strict_object({'referenceId': STRING, 'reason': STRING})
+SELECTION = strict_object({'status': STATUS, 'targets': {'type': 'array', 'maxItems': MAX_TARGETS,
+    'items': {'oneOf': [REFERENCE_TARGET, TARGET]}}})
 REREAD = {
     'not-needed': '단일 청크: 한 번의 호출에 전체 추출 원문이 그대로 전달되어 별도 재독이 필요 없음.',
     'completed': '선택된 문단의 기준 인용 주변 원문 창(대상당 최대 6,000자)을 최종 판단 직전에 그대로 다시 전달함. 대상 선택은 모델 판단이며 전체 원문 재독·결함 전수 탐지 보증 아님.',
@@ -103,23 +107,43 @@ def validate_targets(selection, source, visible, catalog=None, delivered_spans=(
         raise ValueError('BLUE 재독 대상 수 제한 초과')
     targets, seen = [], set()
     for t in selection['targets']:
-        if t['segmentId'] not in source: raise ValueError('BLUE 재독 대상 문단 ID가 입력에 없습니다.')
-        text = source[t['segmentId']]
-        if is_evidence_ref_id(t['anchor']):
-            offset, anchor = resolve_evidence_ref(t['anchor'], t['segmentId'], text, visible.get(t['segmentId'], ()),
-                                                   catalog, delivered_spans)
+        if not isinstance(t, dict) or not isinstance(t.get('reason'), str) or not t['reason'].strip() or len(t['reason']) > MAX_REASON:
+            raise ValueError('BLUE 재독 사유 제한 초과')
+        if 'referenceId' in t:
+            if set(t) - {'referenceId', 'reason', 'segmentId'}:
+                raise ValueError('BLUE 재독 대상에 참조 ID와 인용을 함께 넣을 수 없습니다.')
+            sid, offset, anchor = _resolve_reference(t, source, visible, catalog, delivered_spans)
         else:
-            if not t['anchor'].strip() or len(t['anchor']) > MAX_ANCHOR or text.count(t['anchor']) != 1:
-                raise ValueError('BLUE 재독 기준 인용이 해당 문단에 없거나 중복됩니다.')
-            if not any(t['anchor'] in v for v in visible.get(t['segmentId'], ())):
-                raise ValueError('BLUE 재독 기준 인용이 선택 단계에 전달된 미리보기/스캔 인용에 없습니다.')
-            # count == 1, so find is the only offset and not a multi-match fallback.
-            offset, anchor = text.find(t['anchor']), t['anchor']
-        if not t['reason'].strip() or len(t['reason']) > MAX_REASON: raise ValueError('BLUE 재독 사유 제한 초과')
-        key = (t['segmentId'], offset, len(anchor))
+            if t.get('segmentId') not in source: raise ValueError('BLUE 재독 대상 문단 ID가 입력에 없습니다.')
+            sid, text = t['segmentId'], source[t['segmentId']]
+            anchor = t.get('anchor')
+            if is_evidence_ref_id(anchor):
+                offset, anchor = resolve_evidence_ref(anchor, sid, text, visible.get(sid, ()), catalog, delivered_spans)
+            else:
+                if not isinstance(anchor, str) or not anchor.strip() or len(anchor) > MAX_ANCHOR or text.count(anchor) != 1:
+                    raise ValueError('BLUE 재독 기준 인용이 해당 문단에 없거나 중복됩니다.')
+                if not any(anchor in v for v in visible.get(sid, ())):
+                    raise ValueError('BLUE 재독 기준 인용이 선택 단계에 전달된 미리보기/스캔 인용에 없습니다.')
+                # count == 1, so find is the only offset and not a multi-match fallback.
+                offset = text.find(anchor)
+        key = (sid, offset, len(anchor))
         if key not in seen:
-            seen.add(key); targets.append({'segmentId': t['segmentId'], 'offset': offset, 'anchor': anchor})
+            seen.add(key); targets.append({'segmentId': sid, 'offset': offset, 'anchor': anchor})
     return targets
+
+def _resolve_reference(target, source, visible, catalog, delivered_spans):
+    """Resolve {referenceId, reason} from the catalog only. segmentId, when present, must already match."""
+    ref_id = target.get('referenceId')
+    ref = catalog.get(ref_id) if isinstance(ref_id, str) else None
+    if isinstance(ref, dict):
+        sid = ref.get('segmentId')
+        if 'segmentId' in target and target.get('segmentId') != sid:
+            raise ValueError('BLUE 재독 근거 참조 ID의 문단이 대상과 다릅니다.')
+        if sid not in source: raise ValueError('BLUE 재독 대상 문단 ID가 입력에 없습니다.')
+        offset, text = resolve_evidence_ref(ref_id, sid, source[sid], visible.get(sid, ()), catalog, delivered_spans)
+        return sid, offset, text
+    resolve_evidence_ref(ref_id if isinstance(ref_id, str) else '', '', '', (), catalog, delivered_spans)
+    raise ValueError('BLUE 재독 근거 참조 ID가 이번 선택에 전달된 목록에 없습니다.')
 
 def reread_windows(targets, segments, budget):
     """Deterministic raw windows centred on each validated anchor. Each target wants min(segment, WINDOW)
@@ -228,9 +252,9 @@ def run_review(data, progress, cancelled, backend_factory=CodexBackend, claude_f
         f'Choose up to {MAX_TARGETS} places whose RAW supplied text must be reread before the final judgment, '
         'including cross-section conditions (Methods/Results qualifiers, limitations) the notes may have omitted. '
         'evidenceRefs lists only exact text already in this prompt. Each id binds one source span [start,end) '
-        'and before/after context from that delivered text. A repeated literal has one id per offset; '
-        'set anchor to the id of the intended span and segmentId to the ref segmentId. '
-        f'Reason <={MAX_REASON} chars. Never invent ids or text. '
+        'and before/after context from that delivered text. A repeated literal has one id per offset. '
+        'Return targets as {"referenceId","reason"} only and copy referenceId from evidenceRefs. '
+        f'The host resolves the segment and span. Reason <={MAX_REASON} chars. Never invent ids or text. '
         'evidenceRefsTruncated means later spans were omitted and cannot be selected. '
         'An ok response must select at least one target; otherwise the review abstains. ')
     base = {'allChunkNotes': notes, 'indexTruncated': False, 'segmentIndex': [],

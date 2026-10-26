@@ -100,7 +100,7 @@ def num_refs(catalog, start=None):
 
 
 def target(ref, reason='reread this span'):
-    return {'segmentId': ref['segmentId'], 'anchor': ref['id'], 'reason': reason}
+    return {'referenceId': ref['id'], 'reason': reason}
 
 
 def finding(quote, evidence_quote):
@@ -272,6 +272,24 @@ class ResolveTests(unittest.TestCase):
         self.assertEqual(legacy, before)
         self.assertEqual(got, [{'segmentId': 's7', 'offset': text.index('LEFT'), 'anchor': 'LEFT'}])
 
+    def test_reference_id_item_resolves_its_own_offset(self):
+        text, hits, catalog, spans, visible = self.catalog()
+        raw = {'status': 'ok', 'targets': [{'referenceId': hits[1]['id'], 'reason': 'second value'}]}
+        snapshot = copy.deepcopy(raw)
+        got = blue.validate_targets(raw, {'s7': text}, visible, catalog, spans)
+        self.assertEqual(raw, snapshot)
+        self.assertEqual(got, [{'segmentId': 's7', 'offset': hits[1]['start'], 'anchor': NUM}])
+        self.assertNotEqual(got[0]['offset'], text.find(NUM))
+        with self.assertRaisesRegex(ValueError, '문단이 대상과 다릅니다'):
+            blue.validate_targets({'status': 'ok', 'targets': [{'referenceId': hits[1]['id'], 'segmentId': 's0', 'reason': 'no'}]},
+                                  {'s7': text, 's0': 'other segment'}, {'s7': [text], 's0': ['other segment']}, catalog, spans)
+        with self.assertRaisesRegex(ValueError, '함께'):
+            blue.validate_targets({'status': 'ok', 'targets': [{'referenceId': hits[1]['id'], 'anchor': NUM, 'reason': 'both'}]},
+                                  {'s7': text}, visible, catalog, spans)
+        with self.assertRaisesRegex(ValueError, '형식'):
+            blue.validate_targets({'status': 'ok', 'targets': [{'referenceId': NUM, 'reason': 'literal'}]},
+                                  {'s7': text}, visible, catalog, spans)
+
     def test_invalid_id_is_not_dropped_from_a_mixed_selection(self):
         text, hits, catalog, spans, visible = self.catalog()
         selection = {'status': 'ok', 'targets': [target(hits[0]), {'segmentId': 's7', 'anchor': 'er0000', 'reason': 'stale'}]}
@@ -366,17 +384,18 @@ class SelectionFlowTests(unittest.TestCase):
     def test_bad_ids_and_repeated_literals_do_not_reach_final(self):
         data, _ = repeated_document()
 
-        def prompts(anchor, segment='s7'):
+        def prompts(reference_id, segment=None):
             def select(prompt):
-                return ok(targets=[{'segmentId': segment, 'anchor': anchor, 'reason': 'bad'}])
+                item = {'referenceId': reference_id, 'reason': 'bad'}
+                if segment is not None:
+                    item['segmentId'] = segment
+                return ok(targets=[item])
             return select
 
-        real = {}
-
         def capture(prompt):
-            real['id'] = num_refs(payload_of(prompt)['evidenceRefs'], 0)[0]['id']
-            return ok(targets=[{'segmentId': 's8', 'anchor': real['id'], 'reason': 'wrong segment'},
-                               {'segmentId': 's7', 'anchor': real['id'], 'reason': 'would have been valid'}])
+            ref_id = num_refs(payload_of(prompt)['evidenceRefs'], 0)[0]['id']
+            return ok(targets=[{'referenceId': ref_id, 'segmentId': 's8', 'reason': 'wrong segment'},
+                               {'referenceId': ref_id, 'reason': 'would have been valid'}])
 
         for name, select in [('malformed', prompts('er12')), ('unknown', prompts('er0000')),
                              ('literal', prompts(NUM)), ('mismatch', capture)]:
@@ -412,6 +431,45 @@ class SelectionFlowTests(unittest.TestCase):
         self.assertTrue(all(len(p) <= blue.MAX_PROMPT for _, p in log['calls']))
         self.assertEqual(result['coverage']['reread']['selectedSegments'], [f's{k}' for k in range(8)])
         self.assertLessEqual(result['coverage']['calls'], data['maxCalls'])
+
+
+def non_findings_stage(schema):
+    """Same gate as frozen evidence_blue_v031/core.py. This test does not import or edit that file."""
+    props = schema.get('properties', {}) if isinstance(schema, dict) else {}
+    if 'findings' not in props:
+        if not ({'summary', 'targets'} & set(props)):
+            raise ValueError('unsupported_stage')
+        return 'document-stage'
+    return 'final'
+
+
+class FrozenWrapperContractTests(unittest.TestCase):
+    def test_selection_keeps_top_level_targets_key(self):
+        self.assertEqual(set(blue.SELECTION['properties']), {'status', 'targets'})
+        self.assertEqual(non_findings_stage(blue.SELECTION), 'document-stage')
+        self.assertEqual(non_findings_stage(blue.SCAN), 'document-stage')
+        self.assertEqual(non_findings_stage(blue.RESULT), 'final')
+        with self.assertRaisesRegex(ValueError, 'unsupported_stage'):
+            non_findings_stage({'type': 'object', 'properties': {'status': {}, 'references': {}}})
+
+    def test_synthetic_wrapper_accepts_reference_and_legacy_targets(self):
+        import jsonschema
+        validator = jsonschema.Draft202012Validator(blue.SELECTION)
+        legacy = {'status': 'ok', 'targets': [{'segmentId': 's1', 'anchor': 'Different anchor', 'reason': 'Why'}]}
+        picks = [{'para': 's1', 'anchor': 'The method always works.', 'why': 'reread around legacy marker'}]
+        mapped = {'status': 'ok', 'targets': [{'segmentId': p['para'], 'anchor': p['anchor'], 'reason': p['why']} for p in picks]}
+        referenced = {'status': 'ok', 'targets': [{'referenceId': 'er000000000001', 'reason': 'second span'}]}
+        validator.validate(legacy)
+        validator.validate(mapped)
+        validator.validate(referenced)
+        self.assertEqual(non_findings_stage(blue.SELECTION), 'document-stage')
+        for rejected in (
+            {'status': 'ok', 'references': [{'referenceId': 'er000000000001', 'reason': 'renamed key'}]},
+            {'status': 'ok', 'targets': [{'referenceId': 'er000000000001', 'anchor': '0.003   0.001', 'reason': 'both'}]},
+            {'status': 'ok', 'targets': [{'segmentId': 's1', 'anchor': 'quote', 'reason': 'Why', 'referenceId': 'er000000000001'}]},
+        ):
+            with self.assertRaises(jsonschema.ValidationError):
+                validator.validate(rejected)
 
 
 if __name__ == '__main__':
