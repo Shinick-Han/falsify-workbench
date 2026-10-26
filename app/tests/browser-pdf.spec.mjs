@@ -7,7 +7,7 @@ import {extname, join} from 'node:path';
 import {test} from 'node:test';
 import * as mupdf from 'mupdf';
 import * as pdfjs from '../node_modules/pdfjs-dist/legacy/build/pdf.mjs';
-import {BrowserPdfError, ENGINE, prepare} from '../dist/browser-pdf.mjs';
+import {BrowserPdfError, COORDINATE_SPACE, COORDINATES, ENGINE, prepare} from '../dist/browser-pdf.mjs';
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL('../node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs', import.meta.url).href;
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -70,6 +70,10 @@ const multi = buildPdf([
 const rotated = buildPdf([
   'BT /F1 12 Tf 0 0 0 rg 1 0 0 1 72 400 Tm (Rotate BEFORE here.) Tj ET\n',
 ], {rotate: [90]});
+const mixedRotation = buildPdf([
+  'BT /F1 12 Tf 0 0 0 rg 1 0 0 1 72 700 Tm (Keep alpha REPLACE me and beta.) Tj ET\n',
+  'BT /F1 12 Tf 0 0 0 rg 1 0 0 1 72 400 Tm (Rotate BEFORE here.) Tj ET\n',
+], {rotate: [0, 90]});
 const longPage = buildPdf([
   'BT /F1 12 Tf 0 0 0 rg 1 0 0 1 72 700 Tm (HOOK) Tj 1 0 0 1 360 700 Tm (BLOCKER stays to the right.) Tj ET\n',
 ]);
@@ -112,6 +116,8 @@ async function operators(bytes, pageNumber) {
   if (typeof doc.cleanup === 'function') await doc.cleanup();
   return names;
 }
+const VISIBLE_STAMPS = [/Falsify/i, /provenance/i, /layoutVerified/, /\battack\b/i, /\bquality\b/i];
+
 function contentStreams(bytes) {
   const doc = mupdf.Document.openDocument(new Uint8Array(bytes), 'application/pdf').asPDF();
   try {
@@ -123,6 +129,20 @@ function contentStreams(bytes) {
       return parts.join('\n');
     });
   } finally { doc.destroy(); }
+}
+function annotationTypes(bytes) {
+  const doc = mupdf.Document.openDocument(new Uint8Array(bytes), 'application/pdf').asPDF();
+  try {
+    const names = [];
+    for (let index = 0; index < doc.countPages(); index++) {
+      for (const annot of doc.loadPage(index).getAnnotations()) names.push(annot.getType());
+    }
+    return names;
+  } finally { doc.destroy(); }
+}
+function assertNoVisibleStamps(streams, texts) {
+  const visible = [...streams, ...texts].join('\n');
+  for (const pattern of VISIBLE_STAMPS) assert.equal(pattern.test(visible), false, pattern.source);
 }
 function pymupdfAvailable() {
   try {
@@ -164,6 +184,9 @@ test('vendored engine pin and global', () => {
   assert.equal(manifest.license, 'AGPL-3.0-or-later');
   assert.equal(manifest.files['mupdf-wasm.wasm'].sha256, sha(wasm));
   assert.equal(ENGINE.version, '1.28.1');
+  assert.equal(COORDINATE_SPACE, 'top-left-page');
+  assert.deepEqual(COORDINATES, {space: 'top-left-page', origin: 'top-left', yAxis: 'down', unit: 'pt'});
+  assert.equal(globalThis.FalsifyBrowserPdf.COORDINATE_SPACE, COORDINATE_SPACE);
   assert.equal(typeof globalThis.FalsifyBrowserPdf.prepare, 'function');
   assert.match(readFileSync(new URL('../dist/browser-pdf.js', import.meta.url), 'utf8'), /FalsifyBrowserPdf/);
   assert.match(readFileSync(new URL('../dist/browser-pdf-vendor/NOTICE.md', import.meta.url), 'utf8'), /AGPL/);
@@ -173,7 +196,7 @@ test('replaces one word, keeps unrelated text, figures, and page count', async (
   const result = await prepare({
     file: fileOf(multi, 'paper.pdf'),
     edits: snapshot(multi, [
-      {id: 'word', enabled: true, pageIndex: 0, before: 'REPLACE', after: 'AFTER', origin: 'human', anchor: {bbox: [120, 60, 210, 110]}},
+      {id: 'word', enabled: true, pageIndex: 0, before: 'REPLACE', after: 'AFTER', origin: 'human', anchor: {coordinateSpace: 'top-left-page', origin: 'top-left', yAxis: 'down', unit: 'pt', bbox: [120, 60, 210, 110]}},
       {id: 'same', enabled: true, pageIndex: 0, before: 'line', after: 'line', origin: 'human'},
       {id: 'off', enabled: false, pageIndex: 0, before: 'alpha', after: 'zzzz', origin: 'human'},
     ]),
@@ -186,7 +209,21 @@ test('replaces one word, keeps unrelated text, figures, and page count', async (
   assert.equal(result.file.type, 'application/pdf');
   assert.equal(String.fromCharCode(...out.slice(0, 5)), '%PDF-');
   assert.equal(result.pageMap.length, 2);
-  assert.deepEqual(result.pageMap[1], {sourcePageIndex: 1, outputPageIndex: 1, continuationPageIndices: []});
+  assert.deepEqual(result.pageMap[0], {
+    sourcePageIndex: 0, outputPageIndex: 0, continuationPageIndices: [],
+    coordinateSpace: 'top-left-page', origin: 'top-left', yAxis: 'down', unit: 'pt',
+    width: 612, height: 792, rotation: 0,
+  });
+  assert.deepEqual(result.pageMap[1], {
+    sourcePageIndex: 1, outputPageIndex: 1, continuationPageIndices: [],
+    coordinateSpace: 'top-left-page', origin: 'top-left', yAxis: 'down', unit: 'pt',
+    width: 612, height: 792, rotation: 0,
+  });
+  assert.equal(result.verification.coordinateSpace, 'top-left-page');
+  assert.equal(result.verification.pages[0].editable, true);
+  assert.equal(result.verification.pages[0].width, 612);
+  assert.equal(result.verification.pages[0].height, 792);
+  assert.equal(result.verification.pages[0].rotation, 0);
   assert.equal(result.verification.status, 'applied');
   assert.equal(result.verification.independent, false);
   assert.equal(result.verification.edits.every(edit => edit.status === 'applied'), true);
@@ -212,6 +249,8 @@ test('replaces one word, keeps unrelated text, figures, and page count', async (
   assert.equal(pages[0].includes('Second'), true);
   assert.equal(pages[0].includes('zzzz'), false);
   assert.equal(pages[1].includes('Untouched control page figure-text'), true);
+  assertNoVisibleStamps(streams, pages);
+  assert.deepEqual(annotationTypes(out), []);
   const ops = await operators(out, 1);
   assert.ok(ops.includes('rectangle') || ops.includes('constructPath'), ops.filter(Boolean).join(','));
   assert.ok(ops.some(name => /paintImage|paintXObject/.test(name || '')), ops.filter(Boolean).join(','));
@@ -278,20 +317,70 @@ test('non-ASCII WinAnsi replacement and missing Hangul glyphs', async () => {
   }), error => error instanceof BrowserPdfError && error.code === 'unsupported' && error.details.edits[0].code === 'missing-glyphs');
 });
 
-test('rotated page removes Before in user space', async () => {
-  const result = await prepare({
+test('top-left bbox edits and a bottom-left bbox does not', async () => {
+  const top = await prepare({
+    file: fileOf(multi),
+    edits: snapshot(multi, [{id: 'word', pageIndex: 0, before: 'REPLACE', after: 'AFTER', origin: 'human', anchor: {bbox: [136, 79, 193, 96]}}]),
+  });
+  const topText = (await pdfText(await bytesOf(top.file)))[0];
+  assert.equal(topText.includes('REPLACE'), false);
+  assert.equal(topText.includes('AFTER'), true);
+  await assert.rejects(() => prepare({
+    file: fileOf(multi),
+    edits: snapshot(multi, [{id: 'word', pageIndex: 0, before: 'REPLACE', after: 'AFTER', origin: 'human', anchor: {bbox: [120, 690, 210, 720]}}]),
+  }), error => error instanceof BrowserPdfError && error.code === 'unsupported' && error.details.edits[0].code === 'anchor-mismatch' && error.details.coordinateSpace === 'top-left-page' && error.details.pages[0].origin === 'top-left' && error.details.pages[0].yAxis === 'down');
+  for (const anchor of [
+    {coordinateSpace: 'bottom-left', bbox: [120, 690, 210, 720]},
+    {origin: 'bottom-left', bbox: [136, 79, 193, 96]},
+    {yAxis: 'up', bbox: [136, 79, 193, 96]},
+  ]) {
+    await assert.rejects(() => prepare({
+      file: fileOf(multi),
+      edits: snapshot(multi, [{id: 'word', pageIndex: 0, before: 'REPLACE', after: 'AFTER', origin: 'human', anchor}]),
+    }), error => error instanceof BrowserPdfError && error.code === 'unsupported' && error.details.edits[0].code === 'invalid-anchor');
+  }
+});
+
+test('rotated page is rejected and the source is not returned', async () => {
+  await assert.rejects(() => prepare({
     file: fileOf(rotated),
-    edits: snapshot(rotated, [{id: 'turn', pageIndex: 0, before: 'BEFORE', after: 'AFTER', origin: 'human'}]),
+    edits: snapshot(rotated, [{id: 'turn', pageIndex: 0, before: 'BEFORE', after: 'AFTER', origin: 'human', anchor: {bbox: [120, 60, 210, 110]}}]),
+  }), error => {
+    assert.ok(error instanceof BrowserPdfError);
+    assert.equal(error.code, 'unsupported');
+    assert.equal(error.file, undefined);
+    assert.equal(error.details.edits[0].code, 'rotated-page');
+    assert.equal(error.details.coordinateSpace, 'top-left-page');
+    assert.deepEqual(error.details.pages[0], {
+      pageIndex: 0, coordinateSpace: 'top-left-page', origin: 'top-left', yAxis: 'down', unit: 'pt',
+      width: 792, height: 612, rotation: 90, editable: false,
+    });
+    return true;
+  });
+});
+
+test('an unrotated page can change while a rotated page stays untouched', async () => {
+  const result = await prepare({
+    file: fileOf(mixedRotation),
+    edits: snapshot(mixedRotation, [{id: 'word', pageIndex: 0, before: 'REPLACE', after: 'AFTER', origin: 'human', anchor: {bbox: [120, 60, 210, 110]}}]),
   });
   const out = await bytesOf(result.file);
-  const stream = contentStreams(out)[0];
-  assert.equal(stream.includes('BEFORE'), false);
-  assert.equal(stream.includes('Rotate'), true);
-  assert.equal(stream.includes('here'), true);
-  const text = (await pdfText(out))[0];
-  assert.equal(text.includes('BEFORE'), false);
-  assert.equal(text.includes('AFTER'), true);
-  assert.equal(text.includes('Rotate'), true);
+  assert.equal(result.sha256, sha(out));
+  assert.notEqual(result.sha256, sha(mixedRotation));
+  assert.equal(result.pageMap[0].rotation, 0);
+  assert.equal(result.pageMap[0].width, 612);
+  assert.equal(result.pageMap[0].height, 792);
+  assert.equal(result.verification.pages[0].editable, true);
+  assert.equal(result.pageMap[1].rotation, 90);
+  assert.equal(result.pageMap[1].width, 792);
+  assert.equal(result.pageMap[1].height, 612);
+  assert.equal(result.verification.pages[1].editable, false);
+  const pages = await pdfText(out);
+  assert.equal(pages[0].includes('AFTER'), true);
+  assert.equal(pages[0].includes('REPLACE'), false);
+  assert.equal(pages[1].includes('BEFORE'), true);
+  assert.equal(pages[1].includes('AFTER'), false);
+  assertNoVisibleStamps(contentStreams(out), pages);
 });
 
 test('ambiguous, stale, and aborted requests do not return a file', async () => {
@@ -369,11 +458,21 @@ test('chrome classic loader runs the vendored WASM edit', async (t) => {
       const out = new Uint8Array(await result.file.arrayBuffer());
       let text = '';
       for (let i = 0; i < out.length; i += 0x8000) text += String.fromCharCode(...out.subarray(i, i + 0x8000));
-      return {b64: btoa(text), sha256: result.sha256, status: result.verification.status, pages: result.pageMap.length, head: text.slice(0, 5)};
+      return {
+        b64: btoa(text), sha256: result.sha256, status: result.verification.status, pages: result.pageMap.length, head: text.slice(0, 5),
+        coordinateSpace: result.pageMap[0].coordinateSpace, origin: result.pageMap[0].origin, yAxis: result.pageMap[0].yAxis,
+        width: result.pageMap[0].width, height: result.pageMap[0].height, rotation: result.pageMap[0].rotation,
+      };
     }, encoded);
     assert.deepEqual(errors, []);
     assert.equal(produced.status, 'applied');
     assert.equal(produced.pages, 2);
+    assert.equal(produced.coordinateSpace, 'top-left-page');
+    assert.equal(produced.origin, 'top-left');
+    assert.equal(produced.yAxis, 'down');
+    assert.equal(produced.width, 612);
+    assert.equal(produced.height, 792);
+    assert.equal(produced.rotation, 0);
     assert.equal(produced.head, '%PDF-');
     const out = Uint8Array.from(Buffer.from(produced.b64, 'base64'));
     assert.equal(produced.sha256, sha(out));
