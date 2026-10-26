@@ -49,3 +49,5 @@
 @media(prefers-reduced-motion:reduce){.visual-drop{transition:none}}
 
 .blue-picker-nav{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:12px 0}.blue-picker-nav button{min-height:40px}.blue-picker-stage{max-height:480px;overflow:auto;background:var(--surface);border:1px solid var(--line);touch-action:none}.blue-picker-stage canvas{display:block;max-width:100%;height:auto;cursor:crosshair}.blue-picker button:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+
+.blue-picker-frame{position:relative;display:inline-block;max-width:100%;vertical-align:top}.blue-picker-selection{position:absolute;box-sizing:border-box;border:2px solid #d2391f;background:rgba(255,80,40,.18);pointer-events:none}.blue-picker-selection[hidden]{display:none}
