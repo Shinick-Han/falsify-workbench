@@ -1,0 +1,190 @@
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
+const E=require('../dist/paper-edits.js');
+const HASH='a'.repeat(64),OTHER='b'.repeat(64),NOW=1700000000000;
+let passed=0;const checks=[];
+function check(name,fn){fn();checks.push(name);passed++;}
+const seg=(id,text,pageIndex)=>({id,label:'PDF p. '+(pageIndex+1),text,pageIndex});
+function session(segments,over={}){return E.create({fileHash:HASH,name:'synthetic.txt',segments,now:NOW,...over});}
+function edit(over={}){return {pageIndex:0,segmentId:'s0',before:'unique claim',after:'altered claim',origin:'human',...over};}
+
+check('update then undo then redo keeps the original Before and final After',()=>{
+  const s=session([seg('s0','unique claim in the source',0)]);
+  const id=s.add(edit());
+  assert.equal(id,'e1');
+  s.update(id,{after:'second claim'});
+  let snap=s.snapshot();
+  assert.equal(snap.schema,E.SCHEMA);
+  assert.deepEqual(Object.keys(snap),['schema','fileHash','name','revision','edits','canUndo','canRedo']);
+  assert.equal(snap.revision,2);assert.equal(snap.canUndo,true);assert.equal(snap.canRedo,false);
+  assert.equal(snap.edits[0].before,'unique claim');assert.equal(snap.edits[0].after,'second claim');
+  assert.equal(snap.edits[0].history[0].after,'altered claim');assert.equal(snap.edits[0].history[1].after,'second claim');
+  assert.equal(snap.edits[0].history[0].revision,1);assert.equal(snap.edits[0].history[1].revision,2);
+  s.undo();snap=s.snapshot();
+  assert.equal(snap.revision,1);assert.equal(snap.edits[0].before,'unique claim');assert.equal(snap.edits[0].after,'altered claim');
+  assert.equal(snap.edits[0].history.length,1);assert.equal(snap.canRedo,true);
+  s.redo();snap=s.snapshot();
+  assert.equal(snap.revision,2);assert.equal(snap.edits[0].after,'second claim');assert.equal(snap.edits[0].before,'unique claim');
+  assert.equal(snap.edits[0].history.length,2);assert.equal(snap.edits[0].origin,'human');
+});
+
+check('enable and remove participate in undo and redo',()=>{
+  const s=session([seg('s0','unique claim in the source',0)]);
+  const id=s.add(edit()),seen=[];
+  const unsub=s.subscribe(snap=>seen.push(snap));
+  s.setEnabled(id,false);
+  assert.equal(s.snapshot().edits[0].enabled,false);assert.equal(s.snapshot().edits[0].history.at(-1).enabled,false);
+  s.undo();assert.equal(s.snapshot().edits[0].enabled,true);
+  s.redo();assert.equal(s.snapshot().edits[0].enabled,false);
+  s.setEnabled(id,false);assert.equal(s.snapshot().revision,2,'same enabled value does not move revision');
+  s.remove(id);assert.deepEqual(s.snapshot().edits,[]);assert.equal(s.snapshot().canUndo,true);
+  s.undo();assert.equal(s.snapshot().edits[0].id,id);assert.equal(s.snapshot().edits[0].enabled,false);
+  s.redo();assert.equal(s.snapshot().edits.length,0);
+  unsub();s.undo();assert.equal(seen.length,6);
+});
+
+check('a new edit after undo invalidates redo and does not reuse that revision',()=>{
+  const s=session([seg('s0','unique claim in the source',0)]);
+  const id=s.add(edit());
+  s.update(id,{after:'second claim'});s.undo();
+  assert.equal(s.snapshot().canRedo,true);assert.equal(s.snapshot().revision,1);
+  s.update(id,{after:'third claim'});
+  const snap=s.snapshot();
+  assert.equal(snap.canRedo,false);assert.equal(snap.revision,3);assert.equal(snap.edits[0].after,'third claim');
+  assert.throws(()=>s.redo(),e=>e.code==='redo-empty'&&e.paperEdits===true);
+  assert.equal(s.snapshot().edits[0].after,'third claim');assert.equal(s.snapshot().edits[0].before,'unique claim');
+});
+
+check('duplicate text is not anchored at the first hit',()=>{
+  const text='alpha beta alpha';
+  const s=session([seg('s0',text,0),seg('s1','alpha only here',1)]);
+  const base={pageIndex:0,segmentId:'s0',before:'alpha',after:'omega',origin:'human'};
+  assert.throws(()=>s.add(base),e=>e.code==='duplicate-anchor');
+  assert.throws(()=>s.add({...base,anchor:{bbox:[0,0,12,8]}}),e=>e.code==='duplicate-anchor');
+  assert.equal(s.snapshot().revision,0);
+  const first=s.add({...base,anchor:{occurrence:0,bbox:[1,2,11,8],style:{font:'Times',size:10.5,color:0x112233}}});
+  const second=s.add({...base,anchor:{start:11,end:16}});
+  const snap=s.snapshot();
+  assert.deepEqual(snap.edits.map(e=>[e.id,e.anchor.start,e.anchor.end,e.anchor.occurrence]),[[first,0,5,0],[second,11,16,1]]);
+  assert.deepEqual(snap.edits[0].anchor.bbox,[1,2,11,8]);assert.equal(snap.edits[0].anchor.style.font,'Times');
+  assert.throws(()=>s.add({...base,anchor:{occurrence:2}}),e=>e.code==='invalid');
+  assert.throws(()=>s.add({pageIndex:0,before:'alpha',after:'omega',origin:'external-ai-import'}),e=>e.code==='duplicate-anchor');
+  assert.throws(()=>s.add({...base,anchor:{occurrence:0}}),e=>e.code==='overlap');
+});
+
+check('unknown ids do not change revision or notify',()=>{
+  const s=session([seg('s0','unique claim in the source',0)]);
+  let calls=0;s.subscribe(()=>{calls++;});
+  s.add(edit());calls=0;
+  for(const act of [()=>s.update('missing',{after:'other claim'}),()=>s.remove('e9'),()=>s.setEnabled('e9',false)])assert.throws(act,e=>e.code==='unknown-id');
+  assert.equal(calls,0);assert.equal(s.snapshot().revision,1);assert.equal(s.snapshot().edits.length,1);
+});
+
+check('human and imported edits may change numbers and citations',()=>{
+  const before='The rate was 0.04 in the treated cohort [12] (https://example.test/a).';
+  const after='The rate was 0.40 in every cohort [3] (https://example.test/b).';
+  const s=session([seg('s0',before,0)]);
+  for(const origin of ['human','external-ai-import','ai-proposal']){
+    const id=s.add({pageIndex:0,segmentId:'s0',before,after,origin});
+    const row=s.snapshot().edits.find(e=>e.id===id);
+    assert.equal(row.origin,origin);assert.equal(row.before,before);assert.equal(row.after,after);
+    s.remove(id);
+  }
+  assert.equal(s.snapshot().edits.length,0);
+});
+
+check('drafts bind the file hash and a 12 hour TTL',()=>{
+  const marker='SEGMENT-ONLY-MARKER';
+  const s=session([seg('s0','unique claim '+marker,0)]);
+  const id=s.add(edit({anchor:{occurrence:0}}));
+  const env=E.draft({snapshot:s.snapshot(),now:NOW});
+  assert.equal(env.schema,E.DRAFT_SCHEMA);assert.equal(env.fileHash,HASH);
+  assert.equal(env.expiresAt-env.savedAt,E.TTL_MS);assert.equal(E.TTL_MS,12*60*60*1000);
+  assert.equal(JSON.stringify(env).includes(marker),false);
+  assert.equal(JSON.stringify(env).includes('token'),false);
+  env.snapshot.edits[0].after='mutated envelope';
+  assert.equal(s.snapshot().edits[0].after,'altered claim');
+  const restored=E.restoreDraft(env,{fileHash:HASH,now:NOW+E.TTL_MS-1});
+  assert.equal(restored.edits[0].id,id);assert.equal(restored.revision,1);
+  restored.edits[0].before='tamper';
+  assert.equal(E.restoreDraft(JSON.stringify(env),{fileHash:HASH,now:NOW+1}).edits[0].before,'unique claim');
+  assert.throws(()=>E.restoreDraft(env,{fileHash:OTHER,now:NOW+1}),e=>e.code==='hash-mismatch');
+  const wrong=JSON.parse(JSON.stringify(env));wrong.fileHash=OTHER;
+  assert.throws(()=>E.restoreDraft(wrong,{fileHash:HASH,now:NOW+1}),e=>e.code==='hash-mismatch');
+  assert.throws(()=>E.restoreDraft(env,{fileHash:HASH,now:NOW+E.TTL_MS}),e=>e.code==='expired');
+  assert.throws(()=>E.restoreDraft('{',{fileHash:HASH,now:NOW}),e=>e.code==='malformed');
+  assert.throws(()=>E.restoreDraft(null,{fileHash:HASH,now:NOW}),e=>e.code==='malformed');
+  const cred=JSON.parse(JSON.stringify(env));cred.snapshot.token='sekret';
+  assert.throws(()=>E.restoreDraft(cred,{fileHash:HASH,now:NOW+1}),e=>e.code==='malformed');
+  const extra=JSON.parse(JSON.stringify(env));extra.password='nope';
+  assert.throws(()=>E.restoreDraft(extra,{fileHash:HASH,now:NOW+1}),e=>e.code==='malformed');
+  const badTime=JSON.parse(JSON.stringify(env));badTime.expiresAt=badTime.savedAt+1000;
+  assert.throws(()=>E.restoreDraft(badTime,{fileHash:HASH,now:NOW+1}),e=>e.code==='malformed');
+  const resumed=session([seg('s0','unique claim '+marker,0)],{resume:E.restoreDraft(env,{fileHash:HASH,now:NOW+5})});
+  assert.equal(resumed.snapshot().edits[0].id,id);assert.equal(resumed.snapshot().canUndo,false);
+  assert.equal(resumed.snapshot().revision,1);assert.equal(s.snapshot().edits[0].after,'altered claim');
+  resumed.update(id,{after:'resumed claim'});
+  assert.equal(resumed.snapshot().edits[0].before,'unique claim');assert.equal(s.snapshot().revision,1);
+});
+
+check('clones and sessions do not share mutable aliases',()=>{
+  const segments=[seg('s0','unique claim in the source',0)];
+  const a=session(segments),b=session(segments.map(s=>({...s})));
+  const input=edit({anchor:{bbox:[1,2,20,9]}});
+  const id=a.add(input);
+  input.after='hacked';input.anchor.bbox[0]=99;segments[0].text='rewritten source';segments.push(seg('s1','another claim',1));
+  const first=a.snapshot(),second=a.snapshot();
+  first.edits[0].after='alias';first.edits[0].anchor.bbox[0]=50;first.edits.push({id:'x'});first.history=[{}];
+  assert.equal(second.edits[0].after,'altered claim');assert.equal(second.edits[0].anchor.bbox[0],1);assert.equal(second.edits.length,1);
+  assert.equal(a.snapshot().edits[0].after,'altered claim');assert.equal(a.snapshot().edits[0].before,'unique claim');
+  let left,right;a.subscribe(snap=>{left=snap;});a.subscribe(snap=>{right=snap;});
+  a.setEnabled(id,false);
+  assert.notEqual(left,right);left.edits[0].after='subscriber alias';
+  assert.equal(right.edits[0].after,'altered claim');assert.equal(a.snapshot().edits[0].after,'altered claim');
+  assert.equal(b.snapshot().edits.length,0);assert.equal(b.snapshot().revision,0);
+  b.add(edit({after:'other session'}));
+  assert.equal(a.snapshot().edits.length,1);assert.equal(b.snapshot().edits[0].after,'other session');
+});
+
+check('non-finite, unknown and unbounded input is rejected',()=>{
+  const good=[seg('s0','unique claim in the source',0)];
+  assert.throws(()=>session(good,{fileHash:'A'.repeat(64)}));
+  assert.throws(()=>session(good,{name:'  padded'}));
+  assert.throws(()=>session([{...good[0],pageIndex:1.5}]));
+  assert.throws(()=>session([{...good[0],pageIndex:Number.POSITIVE_INFINITY}]));
+  const s=session(good);
+  assert.throws(()=>s.add(edit({after:'unique claim'})));
+  assert.throws(()=>s.add(edit({origin:'manual-unverified'})));
+  assert.throws(()=>s.add(edit({pageIndex:1})));
+  assert.throws(()=>s.add({...edit(),token:'x'}));
+  assert.throws(()=>s.add(edit({anchor:{occurrence:0,bbox:[0,0,Infinity,2]}})));
+  assert.throws(()=>s.add(edit({before:'missing quote'})));
+  assert.throws(()=>s.undo(),e=>e.code==='undo-empty');
+  assert.throws(()=>s.redo(),e=>e.code==='redo-empty');
+  assert.throws(()=>s.subscribe(null));
+  const id=s.add(edit());
+  assert.throws(()=>s.update(id,{before:'unique claim'}));
+  assert.throws(()=>s.update(id,{after:'unique claim'}));
+  assert.throws(()=>s.update(id,{anchor:{start:0,end:1}}));
+  assert.throws(()=>s.setEnabled(id,'false'));
+  const many=Array.from({length:E.LIMITS.maxEdits+1},(_,i)=>seg('s'+i,'word'+i+' tail',i));
+  const full=session(many);
+  for(let i=0;i<E.LIMITS.maxEdits;i++)full.add({pageIndex:i,segmentId:'s'+i,before:'word'+i,after:'WORD'+i,origin:'human'});
+  assert.throws(()=>full.add({pageIndex:E.LIMITS.maxEdits,segmentId:'s'+E.LIMITS.maxEdits,before:'word'+E.LIMITS.maxEdits,after:'WORD',origin:'human'}));
+});
+
+check('browser global export does not touch storage, DOM or network',()=>{
+  const code=fs.readFileSync(path.join(__dirname,'../dist/paper-edits.js'),'utf8');
+  for(const banned of ['localStorage','sessionStorage','indexedDB','XMLHttpRequest','WebSocket','fetch(','document.','window.'])assert.equal(code.includes(banned),false,banned);
+  assert.equal(globalThis.FalsifyPaperEdits,undefined);
+  const sandbox={};sandbox.globalThis=sandbox;
+  vm.runInNewContext(code,sandbox,{filename:'paper-edits.js'});
+  assert.equal(typeof sandbox.FalsifyPaperEdits.create,'function');
+  const s=sandbox.FalsifyPaperEdits.create({fileHash:HASH,name:'synthetic.txt',segments:[seg('s0','unique claim',0)]});
+  s.add(edit());
+  const env=sandbox.FalsifyPaperEdits.draft({snapshot:s.snapshot(),now:NOW});
+  assert.equal(sandbox.FalsifyPaperEdits.restoreDraft(env,{fileHash:HASH,now:NOW+1}).edits.length,1);
+  assert.equal(sandbox.localStorage,undefined);assert.equal(sandbox.document,undefined);assert.equal(sandbox.fetch,undefined);
+});
+
+try{console.log(JSON.stringify({passed,checks},null,2));}
+catch(e){console.error(e);process.exitCode=1;}
