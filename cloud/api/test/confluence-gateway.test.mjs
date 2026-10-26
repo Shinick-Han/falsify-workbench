@@ -169,8 +169,9 @@ function mockUpstream(options = {}) {
     if (method === 'GET' && wiki === '/wiki/api/v2/pages/9001/attachments') {
       return jsonResponse(200, { results: store.file ? [{ id: '77', title: `${HASH}.json` }] : [] });
     }
-    if (method === 'POST' && wiki === '/wiki/api/v2/pages/9001/attachments') {
+    if (method === 'POST' && wiki === '/wiki/rest/api/content/9001/child/attachment') {
       if (options.attachmentStatus) return new Response('err', { status: options.attachmentStatus, headers: options.attachmentHeaders || {} });
+      assert.equal(init.headers['X-Atlassian-Token'], 'nocheck');
       store.file = options.tamperDownload ? extractFile(init.body).replace('RAW-MARKER-DO-NOT-LEAK', 'TAMPERED-MARKER') : extractFile(init.body);
       assert.match(String(init.headers['Content-Type']), /multipart\/form-data/);
       assert.match(Buffer.from(init.body).toString('utf8'), new RegExp(`name="file"; filename="${HASH}\\.json"`));
@@ -183,7 +184,7 @@ function mockUpstream(options = {}) {
       return new Response(options.downloadText ?? store.file, { status: 200, headers: { 'Content-Type': 'application/json' } });
     }
     if (method === 'POST' && wiki === '/wiki/api/v2/pages/9001/properties') return jsonResponse(200, { key: 'falsify-archive' });
-    if (method === 'POST' && wiki === '/wiki/api/v2/pages/9001/labels') {
+    if (method === 'POST' && wiki === '/wiki/rest/api/content/9001/label') {
       store.labeled = true;
       return jsonResponse(200, { results: [{ name: 'falsify-archive-ready' }] });
     }
@@ -308,9 +309,16 @@ describe('confluence gateway', { concurrency: false }, () => {
     assert.equal(url.searchParams.get('response_type'), 'code');
     assert.equal(url.searchParams.get('prompt'), 'consent');
     assert.equal(url.searchParams.get('audience'), 'api.atlassian.com');
-    for (const scope of ['offline_access', 'read:page:confluence', 'write:page:confluence', 'write:attachment:confluence', 'readonly:content.attachment:confluence']) {
-      assert.equal(url.searchParams.get('scope').split(' ').includes(scope), true);
-    }
+    assert.deepEqual(url.searchParams.get('scope').split(' '), [
+      'offline_access',
+      'read:space:confluence',
+      'read:page:confluence',
+      'write:page:confluence',
+      'read:attachment:confluence',
+      'write:confluence-file',
+      'readonly:content.attachment:confluence',
+      'write:confluence-content',
+    ]);
     assert.equal(ok.authorizeUrl.includes(SECRET), false);
     assert.equal(ok.message.message.type, 'falsify.confluence.session.v1');
     assert.equal(ok.message.message.nonce, 'n'.repeat(16));
@@ -347,7 +355,8 @@ describe('confluence gateway', { concurrency: false }, () => {
     assert.equal(b.message.origin, OTHER);
     assert.equal(a.message.message.session === b.message.message.session, false);
     const tamperMock = mockUpstream();
-    const tampered = `${a.state.slice(0, -1)}${a.state.endsWith('a') ? 'b' : 'a'}`;
+    const flipped = a.state[20] === 'A' ? 'B' : 'A';
+    const tampered = `${a.state.slice(0, 20)}${flipped}${a.state.slice(21)}`;
     const tamper = await read(await gateway(`/v1/confluence/auth/callback?code=auth-code-1&state=${encodeURIComponent(tampered)}`, { fetchImpl: tamperMock.fetchImpl }));
     assert.equal(posted(tamper.text), null);
     assert.equal(tamper.text.includes('postMessage'), false);
@@ -486,10 +495,10 @@ describe('confluence gateway', { concurrency: false }, () => {
     assert.equal(typeof seenValidators.blue, 'object');
     assert.equal(typeof seenValidators.review, 'object');
     const posts = upstream.calls.filter(call => call.method === 'POST' && call.path.includes('/wiki/'));
-    assert.equal(posts.at(-1).path.endsWith('/labels'), true);
+    assert.equal(posts.at(-1).path.endsWith('/label'), true);
     const property = posts.find(call => call.path.endsWith('/properties'));
-    const label = posts.find(call => call.path.endsWith('/labels'));
-    const attachment = posts.find(call => call.path.endsWith('/attachments'));
+    const label = posts.find(call => call.method === 'POST' && call.path.endsWith('/label'));
+    const attachment = posts.find(call => call.method === 'POST' && call.path.endsWith('/child/attachment'));
     assert.ok(upstream.calls.indexOf(attachment) < upstream.calls.indexOf(property));
     assert.ok(upstream.calls.indexOf(property) < upstream.calls.indexOf(label));
     assert.deepEqual(JSON.parse(property.init.body), {
@@ -593,14 +602,14 @@ describe('confluence gateway', { concurrency: false }, () => {
     assert.equal(half.json.error.code, 'write_unknown');
     assert.equal(half.json.pageId, '9001');
     assert.equal(half.json.readBack, true);
-    assert.equal(partial.calls.some(call => call.path.endsWith('/labels')), false);
+    assert.equal(partial.calls.some(call => call.method === 'POST' && call.path.endsWith('/label')), false);
     const laterLimit = mockUpstream({ attachmentStatus: 429, attachmentHeaders: { 'Retry-After': '5' } });
     const later = await publish(laterLimit);
     assert.equal(later.status, 409);
     assert.equal(later.json.error.code, 'write_partial');
     assert.equal(later.json.pageId, '9001');
     assert.equal(later.headers.get('retry-after'), '5');
-    assert.equal(laterLimit.calls.some(call => call.path.endsWith('/labels')), false);
+    assert.equal(laterLimit.calls.some(call => call.method === 'POST' && call.path.endsWith('/label')), false);
     const redirected = mockUpstream({ downloadStatus: 302 });
     const redirect = await publish(redirected);
     assert.equal(redirect.status, 409);
@@ -612,7 +621,7 @@ describe('confluence gateway', { concurrency: false }, () => {
     assert.equal(badFile.status, 409);
     assert.equal(badFile.json.error.code, 'write_partial');
     assert.equal(badFile.json.pageId, '9001');
-    assert.equal(tampered.calls.some(call => call.path.endsWith('/labels')), false);
+    assert.equal(tampered.calls.some(call => call.method === 'POST' && call.path.endsWith('/label')), false);
     const unlabeled = mockUpstream({ hideLabel: true });
     const unfinished = await publish(unlabeled);
     assert.equal(unfinished.status, 409);
@@ -805,8 +814,9 @@ describe('confluence gateway', { concurrency: false }, () => {
     const wrangler = readFileSync(new URL('../wrangler.jsonc', import.meta.url), 'utf8');
     assert.equal(wrangler.includes('ATLASSIAN_CLIENT_SECRET'), false);
     assert.equal(wrangler.includes('CONFLUENCE_SESSION_KEY'), false);
-    assert.equal(wrangler.includes('CONFLUENCE_PARENT_PAGE_ID'), false);
-    assert.equal(wrangler.includes(PARENT), false);
+    assert.equal(wrangler.includes('424242'), false);
+    assert.equal(wrangler.split('"CONFLUENCE_PARENT_PAGE_ID": "8355842"').length, 3);
+    assert.equal(wrangler.split('"ATLASSIAN_CLIENT_ID": "db5aa4f3-b807-43bd-95fa-4bdda751406e"').length, 3);
     assert.match(wrangler, /"CONFLUENCE_ONLY": "false"/);
     assert.match(wrangler, /"REMOTE_PROVIDER": "confluence"/);
     assert.match(wrangler, /"database_name": "falsify-harness-records"/);

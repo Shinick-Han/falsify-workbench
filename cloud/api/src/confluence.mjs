@@ -23,16 +23,18 @@ const CURSOR = /^[A-Za-z0-9_=-]{1,256}$/;
 const PAGE_ID = /^[0-9]{1,20}$/;
 const HEX = /^[a-f0-9]{64}$/;
 const NONCE = /^[A-Za-z0-9_-]{16,128}$/;
+// Scopes required by the operations this gateway calls. v2 entries come from
+// x-atlassian-oauth2-scopes in openapi-v2.v3.json. v1 entries use the classic
+// scope marked RECOMMENDED on that operation page.
 const SCOPES = [
   'offline_access',
   'read:space:confluence',
   'read:page:confluence',
   'write:page:confluence',
   'read:attachment:confluence',
-  'write:attachment:confluence',
-  'read:label:confluence',
-  'write:label:confluence',
+  'write:confluence-file',
   'readonly:content.attachment:confluence',
+  'write:confluence-content',
 ];
 
 const MESSAGES = {
@@ -610,9 +612,12 @@ async function ensureAttachment(ctx, base, token, pageId, archiveSha256, bytes) 
     body.set(head, 0);
     body.set(bytes, head.length);
     body.set(tail, head.length + bytes.length);
-    const uploaded = await callUpstream(ctx.fetchImpl, `${base}/wiki/api/v2/pages/${pageId}/attachments`, {
+    const uploaded = await callUpstream(ctx.fetchImpl, `${base}/wiki/rest/api/content/${pageId}/child/attachment`, {
       method: 'POST',
-      headers: authHeaders(token, { 'Content-Type': `multipart/form-data; boundary=${boundary}` }),
+      headers: authHeaders(token, {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'X-Atlassian-Token': 'nocheck',
+      }),
       body,
     }, true);
     const created = await readUpstreamJson(uploaded, true);
@@ -644,7 +649,7 @@ async function ensureProperty(ctx, base, token, pageId, archive, archiveSha256) 
 }
 
 async function ensureLabel(ctx, base, token, pageId) {
-  const response = await callUpstream(ctx.fetchImpl, `${base}/wiki/api/v2/pages/${pageId}/labels`, {
+  const response = await callUpstream(ctx.fetchImpl, `${base}/wiki/rest/api/content/${pageId}/label`, {
     method: 'POST',
     headers: authHeaders(token, { 'Content-Type': 'application/json' }),
     body: JSON.stringify([{ prefix: 'global', name: READY_LABEL }]),
