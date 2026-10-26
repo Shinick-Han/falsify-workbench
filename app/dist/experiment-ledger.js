@@ -6,7 +6,7 @@
   // Per-role built-in CLI choice: cli = explicit selection (null = harness value), effective = config/hash actually bound, deriving = pending hash job.
   const cli={red:null,blue:null},effective={red:null,blue:null},deriving={red:null,blue:null},locked={red:false,blue:false},cliError={red:'',blue:''},cliEls={};
   const HEX=/^[a-f0-9]{64}$/,RUN_KEYS=['id','createdAt','role','revision','fileHash','sourceHash','segments','harness','harnessHash','maxCalls','level','model','provenance','response','sourceName','format','finalState','sourceRunId','snapshotOf','requestId'],PATCH_KEYS=['id','segmentId','label','before','after','offset','edited'],PRIVATE=['finalState','sourceRunId','snapshotOf','plan','comparison','reviews','assessments','gold','findingAssessments','reviewContext','archive','bundle','reviewBundle','restoreBundle','confluence','confluenceSession','oauth','accessToken','refreshToken','authorization','bearer','clientSecret','archiveSha256','archiveHash','teamShare','nonce','session'];
-  const LEDGER_CHARS=4500000,ARCHIVE_TTL=12*60*60*1000,ARCHIVE_URL=document.currentScript?.src?new URL('./review-bundle.mjs',document.currentScript.src).href:null;let archiveModule=null,remote=null,remoteTimer=0,heldSelection=null,harnessLease=null,harnessTimer=0,ending=false,viewGen=0;
+  const LEDGER_CHARS=4500000,ARCHIVE_TTL=12*60*60*1000,ARCHIVE_URL=document.currentScript?.src?new URL('./review-bundle.mjs',document.currentScript.src).href:null;let archiveModule=null,remote=null,remoteTimer=0,heldSelection=null,harnessLease=null,harnessTimer=0,ending=false,viewGen=0,openEpoch=0;
   const fail=s=>{throw Error(s);},plain=v=>!!v&&typeof v==='object'&&!Array.isArray(v);
   const stable=v=>Array.isArray(v)?'['+v.map(stable).join(',')+']':plain(v)?'{'+Object.keys(v).sort().map(k=>JSON.stringify(k)+':'+stable(v[k])).join(',')+'}':JSON.stringify(v);
   const when=s=>new Date(s).toLocaleString('ko-KR',{dateStyle:'medium',timeStyle:'short'});
@@ -111,7 +111,9 @@
   }
   function executor(c){const a=c.adapter;if(!a)return 'broker 기본 실행기 (Codex CLI)';if(Object.hasOwn(H.CLI,a.type))return H.CLI[a.type].name+(a.model||a.effort?' · '+(a.model||'기본 모델')+' · effort '+(a.effort||'기본'):' (broker 기본 모델)');if(a.type==='wrapper')return '연결 wrapper · '+(a.target.type==='stdio'?'로컬 프로그램':'HTTPS 서버')+' · '+a.input.mode;return a.type==='stdio'?'로컬 코드 '+a.executable+(a.args?.length?' '+a.args.join(' '):''):'외부 서버 '+a.url;}
   // Standalone review of an imported Harness before any registration or execution.
-  async function previewHarness(config,heading='불러온 Harness 검토'){const box=$('#harness-preview'),hash=await H.hash(config),known=db.harnesses.some(h=>h.hash===hash);box.replaceChildren(text('h3',heading));const dl=document.createElement('dl');for(const [k,v] of [['이름',config.name],['역할',config.role.toUpperCase()],['버전',config.version],['실행기',executor(config)],['호출 상한',config.maxCalls+'회'],['설정 키',Object.keys(config.settings||{}).join(', ')||'없음'],['등록 상태',known?'이미 등록된 내용':'미등록 · 등록 전에는 실행 선택 메뉴에 나타나지 않습니다']])dl.append(text('dt',k),text('dd',v));const ins=document.createElement('details');ins.append(text('summary','지침 · 내용 해시'),text('p',config.instructions),text('code',hash));box.append(dl,ins);box.hidden=false;return hash;}
+  function showHarnessPreview(config,hash,heading){const box=$('#harness-preview'),known=db.harnesses.some(h=>h.hash===hash);box.replaceChildren(text('h3',heading));const dl=document.createElement('dl');for(const [k,v] of [['이름',config.name],['역할',config.role.toUpperCase()],['버전',config.version],['실행기',executor(config)],['호출 상한',config.maxCalls+'회'],['설정 키',Object.keys(config.settings||{}).join(', ')||'없음'],['등록 상태',known?'이미 등록된 내용':'미등록 · 등록 전에는 실행 선택 메뉴에 나타나지 않습니다']])dl.append(text('dt',k),text('dd',v));const ins=document.createElement('details');ins.append(text('summary','지침 · 내용 해시'),text('p',config.instructions),text('code',hash));box.append(dl,ins);box.hidden=false;}
+  async function previewHarness(config,heading='불러온 Harness 검토',alive){const hash=await H.hash(config);if(typeof alive==='function'&&!alive())throw staleOpen();showHarnessPreview(config,hash,heading);return hash;}
+  function staleOpen(){const e=Error('이전 아카이브 열기가 닫혀 원격 보기에 반영하지 않았습니다.');e.code='stale';return e;}
   let shown=null,shownRemote=false;
   // Remote Confluence view is a separate ledger. db stays the only persist target, board and harness library.
   function dropRemote(){if(remoteTimer){clearTimeout(remoteTimer);remoteTimer=0;}remote=null;exposedRemote.clear();}
@@ -222,31 +224,38 @@
     async reviewSnapshot(){await ready;sweep();if(remote)return clone(remote.ledger);if(recoveryRequired)throw Error('저장된 기록을 읽지 못해 내보내기를 막았습니다. 먼저 백업 JSON을 복원하세요.');return clone(db);},
     // Validated team archive in memory only. Does not merge, register, execute, or write localStorage.
     async openArchive(archive){
+      const epoch=++openEpoch,live=()=>epoch===openEpoch;
       await ready;
+      if(!live())throw staleOpen();
       const codec=await reviewBundle();
-      let normalized;try{normalized=await codec.validateArchive(archive,{harness:H,red:FalsifyDocumentRed,blue:FalsifyDocumentBlue,review:FalsifyReview});}catch(e){status('#ledger-status','아카이브 열기 차단: '+(e.message||'형식 오류'),true);throw e;}
-      if(normalized.kind==='harness'){const box=$('#harness-preview'),prior=harnessLease&&$('#harness-editor').value===harnessLease.shownEditor&&!harnessLease.pinned?{editor:harnessLease.priorEditor,hidden:harnessLease.priorHidden,nodes:harnessLease.priorNodes}:{editor:$('#harness-editor').value,hidden:box.hidden,nodes:[...box.children]};const hash=await this.previewSharedHarness(normalized.data.config,normalized.data.hash);if(harnessTimer)clearTimeout(harnessTimer);harnessLease={priorEditor:prior.editor,priorHidden:prior.hidden,priorNodes:prior.nodes,hash,shownEditor:$('#harness-editor').value,pinned:false,expiresAt:Date.now()+ARCHIVE_TTL};harnessTimer=setTimeout(()=>{harnessTimer=0;if(harnessLease&&Date.now()>=harnessLease.expiresAt)releaseHarnessLease('expire');},Math.max(0,harnessLease.expiresAt-Date.now()));if(harnessTimer&&typeof harnessTimer.unref==='function')harnessTimer.unref();return {kind:'harness',hash};}
+      if(!live())throw staleOpen();
+      let normalized;try{normalized=await codec.validateArchive(archive,{harness:H,red:FalsifyDocumentRed,blue:FalsifyDocumentBlue,review:FalsifyReview});}catch(e){if(!live())throw staleOpen();status('#ledger-status','아카이브 열기 차단: '+(e.message||'형식 오류'),true);throw e;}
+      if(!live())throw staleOpen();
+      if(normalized.kind==='harness'){const box=$('#harness-preview'),prior=harnessLease&&$('#harness-editor').value===harnessLease.shownEditor&&!harnessLease.pinned?{editor:harnessLease.priorEditor,hidden:harnessLease.priorHidden,nodes:harnessLease.priorNodes}:{editor:$('#harness-editor').value,hidden:box.hidden,nodes:[...box.children]};const hash=await this.previewSharedHarness(normalized.data.config,normalized.data.hash,live);if(!live())throw staleOpen();if(harnessTimer)clearTimeout(harnessTimer);harnessLease={priorEditor:prior.editor,priorHidden:prior.hidden,priorNodes:prior.nodes,hash,shownEditor:$('#harness-editor').value,pinned:false,expiresAt:Date.now()+ARCHIVE_TTL};harnessTimer=setTimeout(()=>{harnessTimer=0;if(harnessLease&&Date.now()>=harnessLease.expiresAt)releaseHarnessLease('expire');},Math.max(0,harnessLease.expiresAt-Date.now()));if(harnessTimer&&typeof harnessTimer.unref==='function')harnessTimer.unref();return {kind:'harness',hash};}
+      let installed=false;
       try{
         const imported=await validateDatabase(normalized.data.ledger,true,[]);
+        if(!live())throw staleOpen();
         if(!imported.runs.some(r=>r.id===normalized.id))throw Error('아카이브에 선택한 실행 기록이 없습니다.');
         await validateDatabase(imported);
+        if(!live())throw staleOpen();
         if(heldSelection===null)heldSelection=$('#evaluation-run').value||'';
         const openedAt=Date.now();
         remote={ledger:imported,openedAt,expiresAt:openedAt+ARCHIVE_TTL};
-        let opened=false;
-        try{armRemoteTimer();refreshRuns(normalized.id);opened=await openReview(normalized.id);}catch(e){dropRemote();throw e;}
-        if(!opened){dropRemote();throw Error('아카이브 기록을 검수 화면에서 열지 못했습니다.');}
+        installed=true;
+        armRemoteTimer();refreshRuns(normalized.id);renderEvaluation();
+        if($('#evaluation-run').value!==normalized.id){dropRemote();throw Error('아카이브 기록을 검수 화면에서 열지 못했습니다.');}
         status('#ledger-status','팀 아카이브를 이 브라우저 메모리에서만 열었습니다. 로컬 기록·Harness 라이브러리·결과 표에는 넣지 않습니다. 12시간이 지나거나 닫으면 사라지며, 팀 발행은 별도입니다.');
         return {kind:'experiment',runId:normalized.id};
-      }catch(e){status('#ledger-status','아카이브 열기 차단: '+e.message,true);throw e;}
+      }catch(e){if(!live()||e.code==='stale')throw e.code==='stale'?e:staleOpen();if(installed)dropRemote();status('#ledger-status','아카이브 열기 차단: '+e.message,true);throw e;}
     },
     // Compatibility name for openArchive. It does not permanently merge a fetched archive.
     async restoreArchive(archive){return this.openArchive(archive);},
     // Drops only the remote view and its unsaved reviews, then selects the local record again.
-    async closeArchive(){await ready;const had=!!remote,back=heldSelection;heldSelection=null;if(had)dropRemote();releaseHarnessLease('close');if(had)refreshRuns(back||'');status('#ledger-status','원격 아카이브 보기를 닫았습니다. 로컬 기록은 그대로이며 다시 선택했습니다.');return true;},
+    async closeArchive(){openEpoch++;await ready;const had=!!remote,back=heldSelection;heldSelection=null;if(had)dropRemote();releaseHarnessLease('close');if(had)refreshRuns(back||'');status('#ledger-status','원격 아카이브 보기를 닫았습니다. 로컬 기록은 그대로이며 다시 선택했습니다.');return true;},
     // A shared harness only fills the editor and the review panel: never registered, selected or executed. Navigation stays with the caller.
-    async previewSharedHarness(config,expectedHash){await ready;let valid,hash;try{valid=H.validate(config);hash=await H.hash(valid);if(expectedHash!==undefined&&expectedHash!==hash)throw Error('공유 harness의 내용 해시가 기록과 다릅니다.');}catch(e){$('#harness-preview').hidden=true;status('#harness-status','공유 harness를 불러오지 못했습니다: '+e.message,true);throw e;}
-      $('#harness-editor').value=JSON.stringify(valid,null,2);await previewHarness(valid,'공유 Harness 검토');status('#harness-status','공유 기록의 harness를 편집기에 불러왔습니다. 등록·선택·실행은 하지 않았습니다. 내용을 검토한 뒤 직접 등록하세요.');return hash;},
+    async previewSharedHarness(config,expectedHash,alive){await ready;if(typeof alive==='function'&&!alive())throw staleOpen();let valid,hash;try{valid=H.validate(config);hash=await H.hash(valid);if(expectedHash!==undefined&&expectedHash!==hash)throw Error('공유 harness의 내용 해시가 기록과 다릅니다.');}catch(e){if(typeof alive==='function'&&!alive())throw staleOpen();$('#harness-preview').hidden=true;status('#harness-status','공유 harness를 불러오지 못했습니다: '+e.message,true);throw e;}
+      if(typeof alive==='function'&&!alive())throw staleOpen();$('#harness-editor').value=JSON.stringify(valid,null,2);showHarnessPreview(valid,hash,'공유 Harness 검토');status('#harness-status','공유 기록의 harness를 편집기에 불러왔습니다. 등록·선택·실행은 하지 않았습니다. 내용을 검토한 뒤 직접 등록하세요.');return hash;},
     // extras: finalState (RED), sourceRunId (BLUE) are stored; isCurrent is a live-only guard checked right before the synchronous persist.
     async record(role,doc,request,response,provenance,extras={}){const isCurrent=extras?.isCurrent;if(!plain(extras??{})||Object.keys(extras??{}).some(k=>!['finalState','sourceRunId','snapshotOf','isCurrent'].includes(k))||isCurrent!==undefined&&typeof isCurrent!=='function')throw Error('기록 추가 정보 형식 오류');const {finalState:final=null,sourceRunId=null,snapshotOf=null}=clone({...(extras??{}),isCurrent:undefined});doc=clone(doc);request=clone(request);response=clone(response);await ready;if(!request?.harness)throw Error('현재 harness 요청을 먼저 저장하거나 실행하세요.');const harness=H.validate(request.harness,role),harnessHash=await H.hash(harness);
       // A CLI selection derived from a registered version is registered as its own version on first record; stored versions are never edited.

@@ -21,7 +21,7 @@ function ledger(stored,opts={}){
   const get=id=>{if(!els.has(id))element('div').id=id;return els.get(id);};
   const document=new EventTarget();Object.assign(document,{readyState:'complete',createElement:element,querySelector:s=>s.startsWith('#')?get(s.slice(1)):null,querySelectorAll:()=>[],body:element('body')});
   for(const type of ['falsify:harness-change','falsify:harness-consent'])document.addEventListener(type,e=>events.push(type+':'+e.detail.role));
-  const ctx=vm.createContext({document,FalsifyReview:require('../dist/review-workbench.js'),FalsifyHarness:H,FalsifyReviewBundle:ReviewBundle,FalsifyLocalBridge:{capabilities:()=>null,state:()=>({status:'manual',connected:false,cap:null})},FalsifyDocumentRed:R,FalsifyDocumentBlue:require('../dist/document-blue-core.js'),
+  const ctx=vm.createContext({document,FalsifyReview:require('../dist/review-workbench.js'),FalsifyHarness:opts.harness||H,FalsifyReviewBundle:opts.bundle||ReviewBundle,FalsifyLocalBridge:{capabilities:()=>null,state:()=>({status:'manual',connected:false,cap:null})},FalsifyDocumentRed:R,FalsifyDocumentBlue:require('../dist/document-blue-core.js'),
     localStorage:{getItem:k=>store.get(k)??null,setItem:(k,v)=>{if(opts.failWrite?.()){const e=Error('QuotaExceededError');e.name='QuotaExceededError';throw e;}writes.push(k);store.set(k,v);}},
     fetch(){network.push('fetch');throw Error('network disabled');},WebSocket(){network.push('WebSocket');throw Error('network disabled');},
     crypto:globalThis.crypto,TextEncoder,CustomEvent,Event,URL,Blob,setTimeout,clearTimeout,Date:opts.Date||Date});
@@ -348,8 +348,9 @@ test('harness preview expires and restores the previous draft without touching a
   w.get('harness-editor').value=draft;
   assert.equal((await w.lab.openArchive(harnessArchive)).hash,hash);
   w.get('harness-register').dispatchEvent(new Event('click'));
-  await flush();
-  assert.ok((await w.lab.cloudSnapshot()).harnesses.some(h=>h.hash===hash));
+  let registeredHash=false;
+  for(let i=0;i<20 && !registeredHash;i++){await flush();registeredHash=(await w.lab.cloudSnapshot()).harnesses.some(h=>h.hash===hash);}
+  assert.equal(registeredHash,true,w.get('harness-status').textContent);
   const registered=w.store.get(KEY);
   assert.equal(await w.lab.closeArchive(),true);
   assert.equal(JSON.parse(w.get('harness-editor').value).id,'archive-blue');
@@ -384,6 +385,111 @@ test('archive view expires after 12 hours without writing, including a long-live
   assert.ok(!after.runs.some(r=>r.id===blueId));assert.equal(after.runs.length,0);
   assert.equal(w.store.get(KEY),stored);assert.equal(w.writes.length,writes);assert.equal(w.network.length,0);
   assert.match(w.get('ledger-status').textContent,/12시간/);
+});
+function latch(){let open=false,waiters=[];return {wait:()=>open?Promise.resolve():new Promise(r=>waiters.push(r)),release(){open=true;for(const r of waiters)r();waiters=[];}};}
+function gatedBundle(latches){return {validateArchive:(archive,validators)=>{const gate=latches.shift();return Promise.resolve(gate?gate.wait():undefined).then(()=>ReviewBundle.validateArchive(archive,validators));}};}
+test('close during pending archive validation leaves no remote experiment or harness preview',async()=>{
+  const {archive,blueId}=await fiveArchive();
+  const localBlue=plain(archive.data.ledger.runs.find(r=>r.id===blueId));
+  localBlue.response.findings[0].rationale='LOCAL-RATIONALE-TOKEN';
+  const stored={schema:KEY,harnesses:archive.data.ledger.harnesses.filter(h=>h.hash===localBlue.harnessHash),runs:[localBlue],reviews:[]};
+  const gate=latch();
+  const w=ledger([[KEY,JSON.stringify(stored)]],{bundle:gatedBundle([gate])});
+  await w.lab.ready;
+  const raw=w.store.get(KEY),writes=w.writes.length;
+  assert.equal(await w.lab.review(blueId),true);
+  const opening=w.lab.openArchive(archive);
+  await flush();
+  assert.match(tree(w.get('evaluation-output')),/LOCAL-RATIONALE-TOKEN/);
+  assert.equal(/Synthetic finding 1\./.test(tree(w.get('evaluation-output'))),false);
+  assert.equal(await w.lab.closeArchive(),true);
+  gate.release();
+  await assert.rejects(opening,e=>e.code==='stale');
+  assert.match(tree(w.get('evaluation-output')),/LOCAL-RATIONALE-TOKEN/);
+  assert.equal(/Synthetic finding 1\./.test(tree(w.get('evaluation-output'))),false);
+  assert.equal(/does not show benefit/.test(tree(w.get('evaluation-output'))),false);
+  assert.match(w.get('ledger-status').textContent,/원격 아카이브 보기를 닫았습니다/);
+  assert.equal(w.writes.length,writes);assert.equal(w.store.get(KEY),raw);
+  assert.equal((await w.lab.reviewSnapshot()).runs[0].response.findings[0].rationale,'LOCAL-RATIONALE-TOKEN');
+  assert.equal((await w.lab.cloudSnapshot()).runs[0].provenance,'manual-unverified');
+  const config={...H.builtin('blue'),id:'archive-blue',name:'Archive BLUE'},hash=await H.hash(config);
+  const harnessArchive=await ReviewBundle.buildHarnessArchive({config,hash},{harness:H});
+  let seen=0,hold=latch();
+  const harness=Object.assign({},H,{hash:async c=>{if(c.id==='archive-blue'&&++seen>=2)await hold.wait();return H.hash(c);}});
+  const box=ledger(undefined,{harness});await box.lab.ready;
+  const draft='{"localDraft":"keep-me"}';
+  box.get('harness-editor').value=draft;const boxRaw=box.store.get(KEY),boxWrites=box.writes.length;
+  const previewing=box.lab.openArchive(harnessArchive);
+  await flush();
+  assert.equal(box.get('harness-editor').value,draft);
+  assert.equal(box.get('harness-preview').children.length,0);
+  assert.equal(await box.lab.closeArchive(),true);
+  hold.release();
+  await assert.rejects(previewing,e=>e.code==='stale');
+  assert.equal(box.get('harness-editor').value,draft);
+  assert.equal(box.get('harness-preview').children.length,0);
+  assert.equal(/archive-blue/.test(tree(box.get('harness-preview'))),false);
+  assert.equal(box.writes.length,boxWrites);assert.equal(box.store.get(KEY),boxRaw);assert.equal(box.network.length,0);
+});
+test('newest archive view survives an older completion and an older failure',async()=>{
+  const olderConfig={...H.builtin('blue'),id:'older-blue',name:'Older BLUE'},newerConfig={...H.builtin('blue'),id:'newer-blue',name:'Newer BLUE'};
+  const olderHash=await H.hash(olderConfig),newerHash=await H.hash(newerConfig);
+  const older=await ReviewBundle.buildHarnessArchive({config:olderConfig,hash:olderHash},{harness:H});
+  const newer=await ReviewBundle.buildHarnessArchive({config:newerConfig,hash:newerHash},{harness:H});
+  const first=latch(),second=latch();
+  const w=ledger(undefined,{bundle:gatedBundle([first,second])});await w.lab.ready;
+  const draft='{"localDraft":"keep-me"}',raw=w.store.get(KEY),writes=w.writes.length;
+  w.get('harness-editor').value=draft;
+  const openOlder=w.lab.openArchive(older);await flush();
+  const openNewer=w.lab.openArchive(newer);await flush();
+  second.release();
+  assert.equal((await openNewer).hash,newerHash);
+  assert.equal(JSON.parse(w.get('harness-editor').value).id,'newer-blue');
+  first.release();
+  await assert.rejects(openOlder,e=>e.code==='stale');
+  assert.equal(JSON.parse(w.get('harness-editor').value).id,'newer-blue');
+  assert.match(tree(w.get('harness-preview')),/Newer BLUE/);
+  assert.equal(/Older BLUE/.test(tree(w.get('harness-preview'))),false);
+  assert.equal(w.writes.length,writes);assert.equal(w.store.get(KEY),raw);
+  const {archive,blueId}=await fiveArchive();
+  const bad=plain(archive);bad.id='0'.repeat(64);
+  const localBlue=plain(archive.data.ledger.runs.find(r=>r.id===blueId));
+  localBlue.response.findings[0].rationale='LOCAL-RATIONALE-TOKEN';
+  const stored={schema:KEY,harnesses:archive.data.ledger.harnesses.filter(h=>h.hash===localBlue.harnessHash),runs:[localBlue],reviews:[]};
+  const slowFail=latch(),fastOk=latch();
+  const again=ledger([[KEY,JSON.stringify(stored)]],{bundle:gatedBundle([slowFail,fastOk])});await again.lab.ready;
+  const againRaw=again.store.get(KEY),againWrites=again.writes.length;
+  assert.equal(await again.lab.review(blueId),true);
+  const openBad=again.lab.openArchive(bad);await flush();
+  const openGood=again.lab.openArchive(archive);await flush();
+  fastOk.release();
+  assert.equal((await openGood).runId,blueId);
+  assert.match(tree(again.get('evaluation-output')),/Synthetic finding 1\./);
+  assert.match(tree(again.get('evaluation-output')),/does not show benefit/);
+  slowFail.release();
+  await assert.rejects(openBad,e=>e.code==='stale');
+  assert.match(tree(again.get('evaluation-output')),/Synthetic finding 1\./);
+  assert.match(tree(again.get('evaluation-output')),/does not show benefit/);
+  assert.equal(/LOCAL-RATIONALE-TOKEN/.test(tree(again.get('evaluation-output'))),false);
+  assert.match(again.get('ledger-status').textContent,/메모리에서만/);
+  assert.equal(/열기 차단/.test(again.get('ledger-status').textContent),false);
+  assert.equal((await again.lab.reviewSnapshot()).runs.find(r=>r.id===blueId).provenance,'imported-unverified');
+  assert.equal((await again.lab.cloudSnapshot()).runs[0].response.findings[0].rationale,'LOCAL-RATIONALE-TOKEN');
+  assert.equal(again.writes.length,againWrites);assert.equal(again.store.get(KEY),againRaw);assert.equal(again.network.length,0);
+  const third=latch(),fourth=latch();
+  const overlap=ledger([[KEY,JSON.stringify(stored)]],{bundle:gatedBundle([third,fourth])});await overlap.lab.ready;
+  const overlapRaw=overlap.store.get(KEY),overlapWrites=overlap.writes.length;
+  assert.equal(await overlap.lab.review(blueId),true);
+  const openFirst=overlap.lab.openArchive(archive);await flush();
+  const openSecond=overlap.lab.openArchive(archive);await flush();
+  fourth.release();
+  assert.equal((await openSecond).runId,blueId);
+  third.release();
+  await assert.rejects(openFirst,e=>e.code==='stale');
+  assert.match(tree(overlap.get('evaluation-output')),/Synthetic finding 1\./);
+  assert.equal(/LOCAL-RATIONALE-TOKEN/.test(tree(overlap.get('evaluation-output'))),false);
+  assert.equal((await overlap.lab.reviewSnapshot()).runs.find(r=>r.id===blueId).provenance,'imported-unverified');
+  assert.equal(overlap.writes.length,overlapWrites);assert.equal(overlap.store.get(KEY),overlapRaw);
 });
 
 (async()=>{ReviewBundle=await import('../dist/review-bundle.mjs');let passed=0;for(const [name,fn] of tests){try{await fn();passed++;console.log('PASS '+name);}catch(e){console.error('FAIL '+name+'\n'+(e.stack||e));process.exitCode=1;}}
