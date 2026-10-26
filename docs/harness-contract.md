@@ -113,3 +113,9 @@ targets는 최대 8개, strict(추가 필드 금지). 선택 prompt에는 청크
 ## 확인 범위
 
 tests/test_harness.py는 strict 역할/필드, 호출한도, 정규화 해시, 별도 실행 동의, 실제 합성 stdio 프로세스, BLUE 누출 금지, 출력 shape, 사설 HTTPS 거절을 확인한다. tests/harness-ledger.spec.cjs는 두 버전 등록·실제 요청 반영·기록 고정·reload·사람 평가·결과 그룹·별도 동의·실제 로컬 합성프로세스·RED/BLUE 분리·desktop/mobile을 확인한다. tests/ledger-import.spec.cjs는 정상 백업·중복 병합·손상된 저장소 복구와 내용 해시/대조 기록/동일 ID의 수정 차단을 확인한다. tests/harness-core.spec.cjs는 브라우저 계약과 조건별 요약을 확인한다. tests/cloud-records-ui.spec.cjs는 합성 DOM과 가짜 서버 응답으로 로그아웃 상태의 무요청, 멤버 세션 열람·다운로드, 초대 코드 전송·삭제, 로그아웃 시 서버 기록 정리를 확인하며 실제 서버 인증은 API 시험의 범위다. 실제 외부 서버/유료 모델/AMAS 과학적 성능은 이번 기능 시험에서 호출·평가하지 않는다.
+
+## 선언된 portable 전략과 비교
+
+선택적으로 harness `settings`에 `portableStrategy`를 넣는다: `{"schema":"falsify.portable-strategy.v1","name":"claim-evidence","version":"1","parameters":{"threshold":0.2},"sourceDigest":"<lowercase SHA-256>"}`. `sourceDigest`는 선택이며 나머지는 필수다. 정확히 선언한 JSON을 정렬해 SHA-256으로 식별한다. 실행 경로나 다른 설정을 자동으로 제거하지 않는다. 전체 harness 해시는 별도로 보존한다. 같은 선언이라도 실행 코드, 실제 모델 및 소스의 독립 인증이 아니다. 등록된 요청 설정은 기록 당시 고정되며 이전 프로필은 추정하지 않는다.
+
+비교를 위해 같은 설정에 `comparisonRubric` 문자열을 명시한다. 이는 요청에 포함된 사람 rubric의 식별자이며, 과거 검수가 실제로 그 rubric을 따랐다는 증거는 아니다. 결과 화면에서 기준 기록을 선택하면 입력 해시, 역할, 알려진 모델 표기, 예산, RED 난이도, 출처와 rubric이 일치하는 기록을 표시한다. 전략이 선언되지 않은 기록은 제외한다. 수동·가져온·broker 출처는 섞지 않으며 RED 최종 스냅샷은 별도 실행으로 세지 않는다. 미검수와 판단 불가도 표시한다. 성공하지 않아 ledger에 들어오지 않은 요청 수와 비용은 알 수 없으므로 비율이나 정확도를 계산하지 않는다. 이 비교는 관찰을 정리할 뿐 인과 효과나 과학적 정확도를 주장하지 않는다.

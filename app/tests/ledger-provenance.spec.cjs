@@ -18,19 +18,19 @@ function ledger(stored){
     Object.assign(e,{tagName:String(tag).toUpperCase(),disabled:false,hidden:false,checked:false,value:'',textContent:'',placeholder:'',children:[],files:[],parent:null,dataset:{},attrs:{},
       classList:{toggle:(c,on)=>{(on??!classes.has(c))?classes.add(c):classes.delete(c);},contains:c=>classes.has(c)},
       setAttribute(k,v){this.attrs[k]=v;},append(...c){for(const x of c){if(x&&typeof x==='object')x.parent=this;this.children.push(x);}},replaceChildren(...c){this.children=[];this.append(...c);},prepend(...c){this.children.unshift(...c);},after(){},remove(){},reset(){},focus(){},
-      closest(sel){let n=this;while(n){if(n.tagName===sel.toUpperCase())return n;n=n.parent;}return this;}});
-    Object.defineProperty(e,'innerHTML',{set(){}});Object.defineProperty(e,'firstChild',{get(){return this.children[0]??null;}});return e;}
+      closest(sel){let n=this;while(n){if(n.tagName===sel.toUpperCase())return n;n=n.parent;}return null;}});
+    Object.defineProperty(e,'innerHTML',{set(){}});Object.defineProperty(e,'firstChild',{get(){return this.children[0]??null;}});Object.defineProperty(e,'lastChild',{get(){return this.children.at(-1)??null;}});return e;}
   const get=id=>{if(!els.has(id))element('div').id=id;return els.get(id);};
   const document=new EventTarget();Object.assign(document,{readyState:'complete',createElement:element,createTextNode:s=>({textContent:s}),querySelector:s=>s.startsWith('#')?get(s.slice(1)):null,querySelectorAll:()=>[],body:element('body')});
-  const ctx=vm.createContext({document,FalsifyReview:require('../dist/review-workbench.js'),FalsifyHarness:H,FalsifyLocalBridge:{busy(){},capabilities:()=>null,state:()=>({status:'manual',connected:false,cap:null})},FalsifyDocumentRed:R,FalsifyDocumentBlue:require('../dist/document-blue-core.js'),
+  const ctx=vm.createContext({document,FalsifyComparison:require('../dist/harness-comparison.js'),FalsifyReview:require('../dist/review-workbench.js'),FalsifyHarness:H,FalsifyLocalBridge:{busy(){},capabilities:()=>null,state:()=>({status:'manual',connected:false,cap:null})},FalsifyDocumentRed:R,FalsifyDocumentBlue:require('../dist/document-blue-core.js'),
     localStorage:{getItem:k=>store.get(k)??null,setItem:(k,v)=>store.set(k,v)},crypto:globalThis.crypto,atob,Uint8Array,TextEncoder,CustomEvent,Event,URL,Blob,setTimeout,clearTimeout});
-  vm.runInContext(fs.readFileSync(path.join(dist,'experiment-ledger.js'),'utf8'),ctx,{filename:'experiment-ledger.js'});
+  vm.runInContext(fs.readFileSync(path.join(dist,'experiment-ledger.js'),'utf8').replace('  function finalState(run,f){','  globalThis.__renderComparison=renderHarnessComparison;\n  function finalState(run,f){'),ctx,{filename:'experiment-ledger.js'});
   const lab=ctx.FalsifyLab,db=()=>JSON.parse(store.get(KEY));
   const rows=()=>get('ledger-table-body').children.map(tr=>tr.children.map(td=>[td.textContent,...td.children.map(s=>s.textContent)].join(' | ')));
   async function restore(data){get('ledger-status').textContent='';const raw=JSON.stringify(data);get('ledger-import').files=[{size:raw.length,text:async()=>raw}];get('ledger-import').dispatchEvent(new Event('change'));await until(()=>get('ledger-status').textContent!=='','import settled');return get('ledger-status').textContent;}
   async function review(id,verdict,score){assert.equal(await lab.review(id),true);get('evaluation-reviewer').value='Synthetic reviewer';get('evaluation-verdict').value=verdict;get('evaluation-score').value=score==null?'':String(score);get('evaluation-note').value='Synthetic test only.';
     get('evaluation-form').dispatchEvent(new Event('submit',{cancelable:true}));assert.match(get('evaluation-status').textContent,/검수 이력을 추가/);}
-  return {get,lab,store,db,rows,restore,review,ctx,document,summary:()=>get('ledger-summary').textContent};
+  return {get,lab,store,db,rows,restore,review,ctx,document,renderComparison:()=>ctx.__renderComparison(),summary:()=>get('ledger-summary').textContent};
 }
 const segments=[{id:'s0',label:'p1',text:'Study does not show benefit.'},{id:'s1',label:'p2',text:'Only an association was observed.'}];
 const evidence=[{segmentId:'s1',quote:'Only an association was observed.',relation:'Synthetic qualification.'}];
@@ -161,6 +161,7 @@ test('BLUE visual record retains bound metadata without bytes across import and 
   const bad=plain(backup);bad.runs[0].visualEvidence[0].sha256='0'.repeat(64);const fresh=ledger();await fresh.lab.ready;await flush();assert.match(await fresh.restore(bad),/복원 차단/);
   const forged=plain(q);forged.visualEvidence[0].sha256='0'.repeat(64);await assert.rejects(w.lab.record('blue',doc,forged,result,'local-codex'),/해시 불일치/);
 });
+test('comparison UI renders actual ledger records and exclusion reasons in VM',async()=>{const {w,ids}=await populated();w.get('harness-comparison-reference').value=ids.live;w.renderComparison();await flush();assert.match(w.get('harness-comparison-summary').textContent,/누락 시도 수 \/ 비용 미상/);const rows=w.get('harness-comparison-body').children;assert.ok(rows.length>=4);assert.match(shown(rows[0]),/portable 전략 미선언/);assert.match(shown(rows.at(-1)),/출처/);});
 
 (async()=>{let passed=0;for(const [name,fn] of tests){try{await fn();passed++;console.log('PASS '+name);}catch(e){console.error('FAIL '+name+'\n'+(e.stack||e));process.exitCode=1;}}
   console.log(JSON.stringify({passed,total:tests.length}));if(passed!==tests.length)process.exit(1);})();
