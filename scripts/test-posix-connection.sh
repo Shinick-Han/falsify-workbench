@@ -43,12 +43,33 @@ else
   check 'open rejects password' 1
 fi
 
+echo 'Linux mock desktop installer (FALSIFY_CONNECT_OS=Linux; host uname is not consulted)'
 test_home_dir=$(mktemp -d)
-FALSIFY_CONNECT_OS=Linux FALSIFY_CONNECT_HOME="$test_home_dir" FALSIFY_CONNECT_DRY_RUN=1 "$root/install-connection.sh" | grep -q 'DRY-RUN install linux'
-FALSIFY_CONNECT_OS=Linux FALSIFY_CONNECT_HOME="$test_home_dir" "$root/install-connection.sh" >/dev/null
-mode=$(falsify_mode "$test_home_dir/.local/share/applications")
-check 'linux applications dir is private' "$([ "$mode" = 700 ] && echo 1 || echo 0)"
-grep -q "Exec=$root/open-connection.sh %u" "$test_home_dir/.local/share/applications/falsify-connect.desktop"
+if out=$(FALSIFY_CONNECT_OS=Linux FALSIFY_CONNECT_HOME="$test_home_dir" FALSIFY_CONNECT_DRY_RUN=1 "$root/install-connection.sh" 2>&1); then
+  check 'linux mock dry-run stays on the desktop plan' "$(
+    printf '%s' "$out" | grep -q 'DRY-RUN install linux' &&
+    ! printf '%s' "$out" | grep -q 'DRY-RUN install darwin' &&
+    echo 1 || echo 0
+  )"
+else
+  printf '%s\n' "$out" >&2
+  check 'linux mock dry-run stays on the desktop plan' 0
+fi
+if FALSIFY_CONNECT_OS=Linux FALSIFY_CONNECT_HOME="$test_home_dir" "$root/install-connection.sh" >"$test_home_dir/install.out" 2>&1; then
+  check 'linux mock install writes the desktop entry' "$(
+    grep -F "Exec=$root/open-connection.sh %u" "$test_home_dir/.local/share/applications/falsify-connect.desktop" >/dev/null &&
+    echo 1 || echo 0
+  )"
+else
+  cat "$test_home_dir/install.out" >&2
+  check 'linux mock install writes the desktop entry' 0
+fi
+if mode=$(falsify_mode "$test_home_dir/.local/share/applications" 2>"$test_home_dir/mode.err"); then
+  check 'linux applications dir is private' "$([ "$mode" = 700 ] && echo 1 || echo 0)"
+else
+  cat "$test_home_dir/mode.err" >&2
+  check 'linux applications dir is private' 0
+fi
 # A foreign handler is not removed.
 foreign=$test_home_dir/.local/share/applications/falsify-connect.desktop
 printf 'Exec=/other/open-connection.sh %%u\n' > "$foreign"
@@ -102,7 +123,12 @@ fi
 private_file=$work/private-mode
 printf 'x\n' > "$private_file"
 chmod 600 "$private_file"
-check 'gnu stat mode' "$([ "$(falsify_mode "$private_file")" = 600 ] && echo 1 || echo 0)"
+if host_mode=$(falsify_mode "$private_file" 2>"$work/host-stat.err"); then
+  check 'host stat mode' "$([ "$host_mode" = 600 ] && echo 1 || echo 0)"
+else
+  cat "$work/host-stat.err" >&2
+  check 'host stat mode' 0
+fi
 real_stat=$(command -v stat)
 stat_dir=$work/stat-bsd
 mkdir -p "$stat_dir"
@@ -113,14 +139,23 @@ if [ "\$1" = -c ]; then
   exit 1
 fi
 if [ "\$1" = -f ] && [ "\$2" = %OLp ]; then
-  exec $(printf '%q' "$real_stat") -c '%a' "\$3"
+  if mode=\$($(printf '%q' "$real_stat") -c '%a' "\$3" 2>/dev/null); then
+    printf '%s\\n' "\$mode"
+  else
+    exec $(printf '%q' "$real_stat") -f '%OLp' "\$3"
+  fi
+  exit 0
 fi
 echo "unexpected stat \$*" >&2
 exit 1
 EOF
 chmod +x "$stat_dir/stat"
-bsd_mode=$(PATH="$stat_dir:$PATH" falsify_mode "$private_file")
-check 'bsd stat mode fallback' "$([ "$bsd_mode" = 600 ] && echo 1 || echo 0)"
+if bsd_mode=$(PATH="$stat_dir:$PATH" falsify_mode "$private_file" 2>"$work/bsd-stat.err"); then
+  check 'bsd stat mode fallback' "$([ "$bsd_mode" = 600 ] && echo 1 || echo 0)"
+else
+  cat "$work/bsd-stat.err" >&2
+  check 'bsd stat mode fallback' 0
+fi
 rm -rf "$work"
 rm -rf "$test_home_dir"
 

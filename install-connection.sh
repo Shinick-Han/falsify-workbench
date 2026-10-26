@@ -32,8 +32,41 @@ falsify_plist_add_claim() {
     return 1
   fi
   if command -v plutil >/dev/null 2>&1; then
-    plutil -convert xml1 "$plist"
+    falsify_plist_add_claim_plutil "$plist"
+    return
   fi
+  falsify_plist_add_claim_xml "$plist"
+}
+
+# macOS plutil edits a binary or XML applet plist and leaves XML for checks.
+# An existing architecture dict from osacompile is replaced so arm64 is present.
+falsify_plist_add_claim_plutil() {
+  plist=$1
+  if ! plutil -convert xml1 "$plist"; then
+    echo 'Refused: Info.plist could not be converted to XML.' >&2
+    return 1
+  fi
+  if grep -q '<key>CFBundleURLTypes</key>' "$plist"; then
+    echo 'Refused: the applet already declares URL types.' >&2
+    return 1
+  fi
+  url_json=$(printf '[{"CFBundleTypeRole":"Viewer","CFBundleURLName":"io.github.shinick-han.falsify-workbench.connect","CFBundleURLSchemes":["%s"]}]' "$scheme")
+  plutil -insert CFBundleURLTypes -json "$url_json" "$plist"
+  if ! plutil -insert FalsifyOwner -string "$marker" "$plist" 2>/dev/null; then
+    plutil -replace FalsifyOwner -string "$marker" "$plist"
+  fi
+  if ! plutil -insert FalsifyScriptPath -string "$handler" "$plist" 2>/dev/null; then
+    plutil -replace FalsifyScriptPath -string "$handler" "$plist"
+  fi
+  arch_json='{"x86_64":"10.6","arm64":"11.0"}'
+  if ! plutil -insert LSMinimumSystemVersionByArchitecture -json "$arch_json" "$plist" 2>/dev/null; then
+    plutil -replace LSMinimumSystemVersionByArchitecture -json "$arch_json" "$plist"
+  fi
+  plutil -convert xml1 "$plist"
+}
+
+falsify_plist_add_claim_xml() {
+  plist=$1
   if ! grep -q '<plist' "$plist"; then
     echo 'Refused: Info.plist is not XML. plutil is required to edit a binary plist.' >&2
     return 1

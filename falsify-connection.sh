@@ -125,15 +125,23 @@ falsify_xml_escape() {
   printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
 }
 
-# GNU stat -c and BSD stat -f both report the permission bits.
+# GNU stat -c '%a' and BSD stat -f '%OLp' both report the permission bits.
+# A leading zero from BSD (0700) is removed so callers compare 700.
 falsify_mode() {
   local target mode
   target=$1
-  if mode=$(stat -c '%a' "$target" 2>/dev/null); then
-    printf '%s\n' "$mode"
-    return 0
+  if ! mode=$(stat -c '%a' "$target" 2>/dev/null); then
+    if ! mode=$(stat -f '%OLp' "$target" 2>/dev/null); then
+      echo 'Refused: could not read the file mode with GNU stat or BSD stat.' >&2
+      return 1
+    fi
   fi
-  stat -f '%OLp' "$target"
+  mode=$(printf '%s' "$mode" | tr -cd '0-9')
+  mode=${mode#0}
+  if [ -z "$mode" ]; then
+    return 1
+  fi
+  printf '%s\n' "$mode"
 }
 
 falsify_darwin_app() {

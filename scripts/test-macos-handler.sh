@@ -301,19 +301,27 @@ bare_home=$work/home-bare
 mkdir -p "$bare_home"
 bare_app=$(falsify_darwin_app "$bare_home")
 if out=$(env -u FALSIFY_OSACOMPILE -u FALSIFY_LSREGISTER FALSIFY_CONNECT_OS=Darwin FALSIFY_CONNECT_DRY_RUN=1 FALSIFY_CONNECT_HOME="$bare_home" "$root/install-connection.sh" 2>&1); then
-  check 'dry-run without macOS tools' "$(
+  check 'darwin dry-run does not register or click approval' "$(
     printf '%s' "$out" | grep -q 'DRY-RUN install darwin' &&
-    printf '%s' "$out" | grep -q 'osacompile-missing' &&
-    printf '%s' "$out" | grep -q 'lsregister-missing' &&
     printf '%s' "$out" | grep -q 'GUI approval was not tested' &&
     ! printf '%s' "$out" | grep -q -- '-trusted' &&
     [ ! -e "$bare_app" ] &&
     echo 1 || echo 0
   )"
 else
-  check 'dry-run without macOS tools' 0
+  printf '%s\n' "$out" >&2
+  check 'darwin dry-run does not register or click approval' 0
 fi
-if out=$(env -u FALSIFY_OSACOMPILE -u FALSIFY_LSREGISTER FALSIFY_CONNECT_OS=Darwin FALSIFY_CONNECT_HOME="$bare_home" "$root/install-connection.sh" 2>&1); then
+if ! command -v osacompile >/dev/null 2>&1 && ! falsify_lsregister_path >/dev/null 2>&1; then
+  check 'darwin dry-run names missing tools' "$(
+    printf '%s' "$out" | grep -q 'osacompile-missing' &&
+    printf '%s' "$out" | grep -q 'lsregister-missing' &&
+    echo 1 || echo 0
+  )"
+fi
+missing_compiler=$work/missing-osacompile
+missing_registrar=$work/missing-lsregister
+if out=$(FALSIFY_OSACOMPILE="$missing_compiler" FALSIFY_LSREGISTER="$missing_registrar" FALSIFY_CONNECT_OS=Darwin FALSIFY_CONNECT_HOME="$bare_home" "$root/install-connection.sh" 2>&1); then
   check 'real install without tools fails closed' 0
 else
   check 'real install without tools fails closed' "$(printf '%s' "$out" | grep -q 'osacompile is not available' && [ ! -e "$bare_app" ] && echo 1 || echo 0)"
@@ -346,8 +354,8 @@ do
   fi
 done
 if [ "$(uname -s)" = Darwin ] && [ -n "$real_compile" ] && [ -x "$real_compile" ] && [ -n "$real_ls" ]; then
-  real_home=$work/home-real
-  mkdir -p "$real_home"
+  real_home=$(mktemp -d "$work/home-real.XXXXXX")
+  real_home=$(CDPATH= cd -- "$real_home" && pwd -P)
   real_app=$(falsify_darwin_app "$real_home")
   if env -u FALSIFY_OSACOMPILE -u FALSIFY_LSREGISTER -u FALSIFY_LSREGISTER_DB \
     FALSIFY_CONNECT_OS=Darwin FALSIFY_CONNECT_ISOLATED=1 \
