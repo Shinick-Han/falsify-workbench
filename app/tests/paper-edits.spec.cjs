@@ -191,6 +191,53 @@ check('non-finite, unknown and unbounded input is rejected',()=>{
   assert.throws(()=>full.add({pageIndex:E.LIMITS.maxEdits,segmentId:'s'+E.LIMITS.maxEdits,before:'word'+E.LIMITS.maxEdits,after:'WORD',origin:'human'}));
 });
 
+check('empty After deletes the quote and still round-trips',()=>{
+  const s=session([seg('s0','unique claim in the source',0)]);
+  const id=s.add(edit({after:''}));
+  let row=s.snapshot().edits[0];
+  assert.equal(row.before,'unique claim');assert.equal(row.after,'');assert.equal(row.history[0].after,'');
+  s.update(id,{after:'restored words'});
+  s.update(id,{after:''});
+  row=s.snapshot().edits[0];
+  assert.equal(row.after,'');assert.equal(row.before,'unique claim');assert.equal(row.history.at(-1).after,'');
+  assert.throws(()=>s.add(edit()),e=>e.code==='overlap');
+  assert.throws(()=>s.update(id,{after:'unique claim'}),e=>e.code==='invalid');
+  assert.throws(()=>s.update(id,{after:''}),e=>e.code==='invalid');
+  assert.throws(()=>session([seg('s0','unique claim',0)]).add(edit({before:'',after:'x'})));
+  const env=E.draft({snapshot:s.snapshot(),now:NOW});
+  const restored=E.restoreDraft(JSON.stringify(env),{fileHash:HASH,now:NOW+1});
+  assert.equal(restored.edits[0].after,'');assert.equal(restored.edits[0].history.at(-1).after,'');
+  const resumed=session([seg('s0','unique claim in the source',0)],{resume:restored});
+  assert.equal(resumed.snapshot().edits[0].after,'');assert.equal(resumed.snapshot().edits[0].before,'unique claim');
+});
+
+check('a failing listener does not hide the committed edit from the next listener',()=>{
+  const s=session([seg('s0','unique claim in the source',0)]);
+  const errors=[];let second=0;
+  s.subscribe(()=>{throw new Error('listener failed');},error=>{errors.push(error);throw new Error('callback failed');});
+  s.subscribe(()=>{second++;});
+  const id=s.add(edit());
+  assert.equal(id,'e1');assert.equal(second,1);assert.equal(errors.length,1);assert.equal(errors[0].message,'listener failed');
+  assert.equal(s.snapshot().edits[0].id,id);assert.equal(s.snapshot().revision,1);
+  assert.doesNotThrow(()=>s.update(id,{after:'still committed'}));
+  assert.equal(second,2);assert.equal(s.snapshot().edits[0].after,'still committed');
+});
+
+check('failed adds do not consume ids and remove/re-add stays available',()=>{
+  const s=session([seg('s0','alpha beta alpha',0),seg('s1','other unique quote',0)]);
+  const first=s.add({pageIndex:0,segmentId:'s0',before:'alpha',after:'A',origin:'human',anchor:{occurrence:0}});
+  assert.equal(first,'e1');
+  for(let i=0;i<40;i++)assert.throws(()=>s.add({pageIndex:0,segmentId:'s0',before:'alpha',after:'B',origin:'human',anchor:{occurrence:0}}),e=>e.code==='overlap');
+  const second=s.add({pageIndex:0,segmentId:'s1',before:'other unique quote',after:'changed quote',origin:'human'});
+  assert.equal(second,'e2');
+  const cycle=session([seg('s0','unique claim in the source',0)]);
+  let last;
+  for(let i=0;i<321;i++){last=cycle.add(edit());cycle.remove(last);}
+  assert.equal(last,'e321');
+  assert.equal(cycle.add(edit()),'e322');
+  assert.equal(cycle.snapshot().edits.length,1);
+});
+
 check('browser global export does not touch storage, DOM or network',()=>{
   const code=fs.readFileSync(path.join(__dirname,'../dist/paper-edits.js'),'utf8');
   for(const banned of ['localStorage','sessionStorage','indexedDB','XMLHttpRequest','WebSocket','fetch(','document.','window.'])assert.equal(code.includes(banned),false,banned);

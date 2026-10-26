@@ -51,6 +51,11 @@
     if(typeof value!=='string'||value.length<1||value.length>max||hasCtl(value)||!value.trim())fail(code||'invalid',label+' 형식/길이가 올바르지 않습니다.');
     return value;
   }
+  // "" is a real deletion. Any other blank After is still rejected, and After === Before stays a no-op.
+  function afterText(value,code){
+    if(typeof value!=='string'||value.length>LIMITS.maxText||hasCtl(value)||(value.length>0&&!value.trim()))fail(code||'invalid','After 형식/길이가 올바르지 않습니다.');
+    return value;
+  }
   function labelOf(value){if(typeof value!=='string'||value.length<1||value.length>LIMITS.maxLabel||hasCtl(value)||value.trim()!==value)fail('invalid','문단 이름이 올바르지 않습니다.');return value;}
   function idOf(value,label,code){if(typeof value!=='string'||value.length<1||value.length>LIMITS.maxId||hasCtl(value)||value.trim()!==value)fail(code||'invalid',label+'가 올바르지 않습니다.');return value;}
   function pageOf(value,code){if(!integer(value,0,LIMITS.maxPageIndex))fail(code||'invalid','쪽 번호가 올바르지 않습니다.');return value;}
@@ -110,7 +115,7 @@
   function historyEntry(entry,edit,code){
     allowKeys(entry,HISTORY_KEYS,HISTORY_KEYS,code,'이력');
     if(!integer(entry.revision,0,LIMITS.maxTime)||!integer(entry.at,0,LIMITS.maxTime))fail(code,'이력 시각/리비전이 올바르지 않습니다.');
-    text(entry.after,LIMITS.maxText,'After',code);
+    afterText(entry.after,code);
     if(entry.after===edit.before)fail(code,'Before와 After가 같습니다.');
     if(typeof entry.enabled!=='boolean')fail(code,'enabled는 true 또는 false여야 합니다.');
     const anchor=storedAnchor(entry.anchor,code);
@@ -119,7 +124,7 @@
   }
   function storedEdit(edit,code){
     allowKeys(edit,EDIT_KEYS,EDIT_KEYS,code,'편집');
-    const id=idOf(edit.id,'편집 ID',code),before=text(edit.before,LIMITS.maxText,'Before',code),after=text(edit.after,LIMITS.maxText,'After',code);
+    const id=idOf(edit.id,'편집 ID',code),before=text(edit.before,LIMITS.maxText,'Before',code),after=afterText(edit.after,code);
     if(before===after)fail(code,'Before와 After가 같습니다.');
     if(typeof edit.enabled!=='boolean')fail(code,'enabled는 true 또는 false여야 합니다.');
     const anchor=storedAnchor(edit.anchor,code),origin=originOf(edit.origin,code),pageIndex=pageOf(edit.pageIndex,code),segmentId=idOf(edit.segmentId,'문단 ID',code);
@@ -176,9 +181,12 @@
   function publicEdit(edit){return clone(edit);}
   function viewOf(state){return {schema:SCHEMA,fileHash:state.fileHash,name:state.name,revision:state.revision,edits:state.edits.map(publicEdit),canUndo:state.past.length>0,canRedo:state.future.length>0};}
   function emit(state){
-    const listeners=[...state.subs];let error=null;
-    for(const fn of listeners){if(!state.subs.has(fn))continue;try{fn(clone(viewOf(state)));}catch(e){if(!error)error=e;}}
-    if(error)throw error;
+    const listeners=[...state.subs];
+    for(const sub of listeners){
+      if(!state.subs.has(sub))continue;
+      try{sub.fn(clone(viewOf(state)));}
+      catch(error){try{if(sub.onError)sub.onError(error);}catch{/* a notifier must not fail the committed edit */}}
+    }
   }
   function commit(state,nextEdits){
     if(state.past.length>=LIMITS.maxUndo)state.past.shift();
@@ -197,7 +205,7 @@
   }
   function locate(segments,input){
     allowKeys(input,ADD_KEYS,['pageIndex','before','after','origin'],'invalid','편집');
-    const pageIndex=pageOf(input.pageIndex),before=text(input.before,LIMITS.maxText,'Before'),after=text(input.after,LIMITS.maxText,'After'),origin=originOf(input.origin);
+    const pageIndex=pageOf(input.pageIndex),before=text(input.before,LIMITS.maxText,'Before'),after=afterText(input.after),origin=originOf(input.origin);
     if(before===after)fail('invalid','Before와 After가 같습니다.');
     const hinted=inputAnchor(Object.hasOwn(input,'anchor')?input.anchor:null,before);
     let segmentId=null;
@@ -237,7 +245,13 @@
   }
   function nextIdFrom(edits){
     let next=1;
-    for(const edit of edits){const m=/^e(\d+)$/.exec(edit.id);if(m)next=Math.max(next,Number(m[1])+1);}
+    for(const edit of edits){
+      const m=/^e(\d+)$/.exec(edit.id);if(!m)continue;
+      const n=Number(m[1]);
+      if(!Number.isSafeInteger(n)||n<1)continue;
+      if(n>=Number.MAX_SAFE_INTEGER-1)return Number.MAX_SAFE_INTEGER;
+      if(n+1>next)next=n+1;
+    }
     return next;
   }
   function create(input){
@@ -253,21 +267,28 @@
       revision=resumed.revision;nextRevision=revision+1;
     }
     const state={fileHash,name,segments,edits,revision,nextRevision,nextId:nextIdFrom(edits),past:[],future:[],subs:new Set()};
-    function allocate(){if(state.nextId>LIMITS.maxEdits*10)fail('invalid','편집 ID 한도를 넘었습니다.');const id='e'+state.nextId++;return id;}
+    function allocate(){
+      if(!Number.isSafeInteger(state.nextId)||state.nextId<1||state.nextId>=Number.MAX_SAFE_INTEGER)fail('invalid','편집 ID 한도를 넘었습니다.');
+      return 'e'+state.nextId++;
+    }
     function snapshot(){return clone(viewOf(state));}
     function add(edit){
       if(state.edits.length>=LIMITS.maxEdits)fail('invalid','편집 수가 한도를 벗어납니다.');
-      const located=locate(state.segments,edit),at=clock(),id=allocate();
-      const row={id,enabled:true,before:located.before,after:located.after,anchor:located.anchor,origin:located.origin,pageIndex:located.pageIndex,segmentId:located.segmentId,createdAt:at,updatedAt:at,
+      const located=locate(state.segments,edit),at=clock();
+      const row={id:'',enabled:true,before:located.before,after:located.after,anchor:located.anchor,origin:located.origin,pageIndex:located.pageIndex,segmentId:located.segmentId,createdAt:at,updatedAt:at,
         history:[{revision:state.nextRevision,at,after:located.after,enabled:true,anchor:clone(located.anchor)}]};
-      const next=state.edits.concat([row]);rangesOverlap(next);commit(state,next);return id;
+      const next=state.edits.concat([row]);
+      rangesOverlap(next);
+      row.id=allocate();
+      commit(state,next);
+      return row.id;
     }
     function update(id,changes){
       const current=findEdit(state,id);
       allowKeys(changes,UPDATE_KEYS,[], 'invalid','변경');
       if(!Object.keys(changes).length)fail('invalid','변경 내용이 없습니다.');
       let after=current.after,anchor=clone(current.anchor);
-      if(Object.hasOwn(changes,'after')){after=text(changes.after,LIMITS.maxText,'After');if(after===current.before)fail('invalid','Before와 After가 같습니다.');}
+      if(Object.hasOwn(changes,'after')){after=afterText(changes.after);if(after===current.before)fail('invalid','Before와 After가 같습니다.');}
       if(Object.hasOwn(changes,'anchor')){
         if(!isPlain(changes.anchor))fail('invalid','anchor 형식이 올바르지 않습니다.');
         const hinted=inputAnchor(changes.anchor,current.before);
@@ -290,10 +311,12 @@
     }
     function undo(){if(!state.past.length)fail('undo-empty','되돌릴 편집이 없습니다.');state.future.push({revision:state.revision,edits:clone(state.edits)});const prev=state.past.pop();state.revision=prev.revision;state.edits=prev.edits;emit(state);}
     function redo(){if(!state.future.length)fail('redo-empty','다시 실행할 편집이 없습니다.');state.past.push({revision:state.revision,edits:clone(state.edits)});const nxt=state.future.pop();state.revision=nxt.revision;state.edits=nxt.edits;emit(state);}
-    function subscribe(fn){
+    function subscribe(fn,onError){
       if(typeof fn!=='function')fail('invalid','구독 함수가 필요합니다.');
-      state.subs.add(fn);let dead=false;
-      return function unsubscribe(){if(dead)return;dead=true;state.subs.delete(fn);};
+      if(onError!=null&&typeof onError!=='function')fail('invalid','구독 오류 콜백은 함수여야 합니다.');
+      const sub={fn,onError:onError||null};
+      state.subs.add(sub);let dead=false;
+      return function unsubscribe(){if(dead)return;dead=true;state.subs.delete(sub);};
     }
     return Object.freeze({id:sessionId,snapshot,add,update,remove,setEnabled,undo,redo,subscribe});
   }

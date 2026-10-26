@@ -21,7 +21,7 @@ const session = FalsifyPaperEdits.create({fileHash, name, segments, now, id, res
 
 `segments` are copied. Later edits of the caller's array or objects do not change the session.
 
-Methods: `snapshot()`, `add(edit)`, `update(id, changes)`, `remove(id)`, `setEnabled(id, enabled)`, `undo()`, `redo()`, `subscribe(fn)`. `add` returns the new edit id (`e1`, `e2`, …). Ids are not reused. `subscribe` returns an unsubscribe function and is called only after a committed change, with its own snapshot. `setEnabled` with the current value does not move the revision.
+Methods: `snapshot()`, `add(edit)`, `update(id, changes)`, `remove(id)`, `setEnabled(id, enabled)`, `undo()`, `redo()`, `subscribe(fn, onError?)`. `add` returns the new edit id (`e1`, `e2`, …). An id is allocated only after range and overlap checks succeed, and it is not reused. The counter stops at `Number.MAX_SAFE_INTEGER`. A rejected add does not consume an id, and removing then adding again does not exhaust the session. `subscribe` returns an unsubscribe function and is called only after a committed change, with its own snapshot. A listener exception does not leave the mutation. Later listeners still run, `onError(error)` is called when supplied, and a throwing `onError` is ignored. `add`, `update`, `remove`, `setEnabled`, `undo` and `redo` still return normally. `setEnabled` with the current value does not move the revision.
 
 ## Snapshot
 
@@ -53,7 +53,7 @@ Matching is exact and case-sensitive. Whitespace is not folded and the first hit
 
 ## Numbers and citations
 
-Human, imported and `ai-proposal` edits may change digits, bracket citations and URLs. This session does not call `FalsifyDocumentRed.validateAfter`. The legacy RED route still has that restriction; it is not copied here. `after` must differ from `before` and both must be non-empty text within 4000 characters.
+Human, imported and `ai-proposal` edits may change digits, bracket citations and URLs. This session does not call `FalsifyDocumentRed.validateAfter`. The legacy RED route still has that restriction; it is not copied here. `before` stays non-empty text within 4000 characters. `after` may be `""`, which deletes that quote. Any other blank After is rejected. `after === before` is a no-op and is rejected on add, update, stored history and draft restore.
 
 ## Draft envelope
 
@@ -70,7 +70,7 @@ const snapshot = FalsifyPaperEdits.restoreDraft(envelope, {fileHash, now});
 
 ## Limits
 
-See `FalsifyPaperEdits.LIMITS`. Counts that matter to the UI: 32 edits, 12 history entries, 100 undo checkpoints, 2000 segments, 1,000,000 total segment characters, 4000 characters for Before/After, page index 0–9999, draft JSON text up to 4,000,000 characters. Input must be finite JSON: no `NaN`, `Infinity`, sparse arrays, functions, or extra fields.
+See `FalsifyPaperEdits.LIMITS`. Counts that matter to the UI: 32 edits, 12 history entries, 100 undo checkpoints, 2000 segments, 1,000,000 total segment characters, 4000 characters for Before and for a non-empty After, page index 0–9999, draft JSON text up to 4,000,000 characters. Edit ids stay inside the safe-integer range. Input must be finite JSON: no `NaN`, `Infinity`, sparse arrays, functions, or extra fields.
 
 ## Errors
 
