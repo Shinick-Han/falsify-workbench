@@ -47,15 +47,35 @@ const PHRASES = [
   '레이아웃'
 ];
 
-test('quick three steps come before the collapsed reference', () => {
+function visible(html) {
+  return html.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+}
+
+test('quick three steps stay short and precede the collapsed reference', () => {
   const quickAt = guide.indexOf('id="quick"');
   const stepsAt = guide.indexOf('<ol id="quick-steps">');
   const referenceAt = guide.indexOf('<details id="reference"');
   assert.ok(quickAt >= 0 && stepsAt > quickAt && referenceAt > stepsAt);
   assert.equal((guide.match(/<details id="reference"[^>]*\sopen\b/) || []).length, 0);
-  const ol = guide.slice(stepsAt, referenceAt).match(/<ol id="quick-steps">[\s\S]*?<\/ol>/);
+  const quick = guide.slice(quickAt, referenceAt);
+  const ol = quick.match(/<ol id="quick-steps">[\s\S]*?<\/ol>/);
   assert.ok(ol, 'quick steps list');
-  assert.equal(ol[0].match(/<li[\s>]/g).length, 3);
+  const items = [...ol[0].matchAll(/<li>([\s\S]*?)<\/li>/g)].map(match => visible(match[1]));
+  assert.equal(items.length, 3);
+  assert.match(items[0], /PDF를 넣습니다/);
+  assert.match(items[1], /글자를 선택하고 After를 수정/);
+  assert.match(items[2], /미리보고/);
+  assert.match(items[2], /다운로드/);
+  for (const text of items) {
+    const sentences = text.split(/[.!?。]/).map(part => part.trim()).filter(Boolean);
+    assert.ok(sentences.length <= 2, text);
+    assert.ok(text.length <= 80, text.length + ' ' + text);
+  }
+  const links = quick.slice(quick.indexOf(ol[0]) + ol[0].length);
+  for (const href of ['#external-ai', '#red', '#blue', '#review']) assert.ok(links.includes('href="' + href + '"'), href);
+  for (const phrase of ['12시간 초안', '팀에 공개', '과학적 정확도', '고른 위치로 확정', 'PowerShell 5.1']) {
+    assert.equal(quick.includes(phrase), false, phrase);
+  }
   assert.ok(guide.indexOf('id="paper"') > referenceAt);
   assert.ok(guide.indexOf('</details>') > guide.indexOf('id="docs"'));
 });
@@ -79,13 +99,14 @@ test('in-page guide links resolve and external links stay public https', () => {
   }
 });
 
-test('guide describes the visible paper workspace without a release version', () => {
-  for (const phrase of PHRASES) assert.ok(guide.includes(phrase), phrase);
-  assert.match(guide, /회전/);
-  assert.match(guide, /1단/);
+test('required anchors and terms stay inside the collapsed reference', () => {
+  const detail = guide.slice(guide.indexOf('<details id="reference"'), guide.indexOf('</details>'));
+  for (const phrase of PHRASES) assert.ok(detail.includes(phrase), phrase);
+  assert.match(detail, /회전/);
+  assert.match(detail, /1단/);
+  assert.match(detail, /동의 체크가 화면에 하나뿐이면 그 체크와 저장 버튼을 따릅니다/);
   assert.doesNotMatch(guide, /0\.2\.0-alpha(?:\.\d+)?/);
   assert.doesNotMatch(guide.slice(0, guide.indexOf('id="reference"')), /alpha\.\d+/);
-  assert.match(guide, /동의 체크가 화면에 하나뿐이면 그 체크와 저장 버튼을 따릅니다/);
 });
 
 test('guide and the main app page contain no private data', () => {
