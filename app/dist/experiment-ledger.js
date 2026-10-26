@@ -5,7 +5,7 @@
   const exposedLocal=new Set(),exposedRemote=new Set();
   // Per-role built-in CLI choice: cli = explicit selection (null = harness value), effective = config/hash actually bound, deriving = pending hash job.
   const cli={red:null,blue:null},effective={red:null,blue:null},deriving={red:null,blue:null},locked={red:false,blue:false},cliError={red:'',blue:''},cliEls={};
-  const HEX=/^[a-f0-9]{64}$/,RUN_KEYS=['id','createdAt','role','revision','fileHash','sourceHash','segments','harness','harnessHash','maxCalls','level','model','provenance','response','sourceName','format','finalState','sourceRunId','snapshotOf','requestId'],PATCH_KEYS=['id','segmentId','label','before','after','offset','edited'],PRIVATE=['finalState','sourceRunId','snapshotOf','plan','comparison','reviews','assessments','gold','findingAssessments','reviewContext','archive','bundle','reviewBundle','restoreBundle','confluence','confluenceSession','oauth','accessToken','refreshToken','authorization','bearer','clientSecret','archiveSha256','archiveHash','teamShare','nonce','session'];
+  const HEX=/^[a-f0-9]{64}$/,RUN_KEYS=['id','createdAt','role','revision','fileHash','sourceHash','segments','harness','harnessHash','maxCalls','level','model','provenance','response','sourceName','format','finalState','sourceRunId','snapshotOf','requestId','visualEvidence'],PATCH_KEYS=['id','segmentId','label','before','after','offset','edited'],PRIVATE=['finalState','sourceRunId','snapshotOf','plan','comparison','reviews','assessments','gold','findingAssessments','reviewContext','archive','bundle','reviewBundle','restoreBundle','confluence','confluenceSession','oauth','accessToken','refreshToken','authorization','bearer','clientSecret','archiveSha256','archiveHash','teamShare','nonce','session'];
   const LEDGER_CHARS=4500000,ARCHIVE_TTL=12*60*60*1000,ARCHIVE_URL=document.currentScript?.src?new URL('./review-bundle.mjs',document.currentScript.src).href:null;let archiveModule=null,remote=null,remoteTimer=0,heldSelection=null,harnessLease=null,harnessTimer=0,ending=false,viewGen=0,openEpoch=0;
   const fail=s=>{throw Error(s);},plain=v=>!!v&&typeof v==='object'&&!Array.isArray(v);
   const stable=v=>Array.isArray(v)?'['+v.map(stable).join(',')+']':plain(v)?'{'+Object.keys(v).sort().map(k=>JSON.stringify(k)+':'+stable(v[k])).join(',')+'}':JSON.stringify(v);
@@ -164,6 +164,15 @@
   }
   // requestId is the per-execution identity: identical responses from separate executions stay separate runs.
   const validRequestId=v=>typeof v==='string'&&!!v.trim()&&v.length<=200;
+  // Only client-declared metadata survives; image bytes are never archived here.
+  function visualRefs(items,r){
+    if(r.role!=='blue'||!Array.isArray(items)||items.length<1||items.length>2)fail('시각 증거 형식 오류');
+    const hasGold=x=>x&&typeof x==='object'&&(Object.hasOwn(x,'gold')||Object.values(x).some(hasGold));if(hasGold(r.response))fail('BLUE 응답에 RED gold를 넣을 수 없습니다.');
+    for(const v of items){
+      if(!plain(v)||Object.keys(v).sort().join(',')!==['fileHash','sourceHash','page','bbox','rotation','width','height','mime','sha256','provenance','artifact'].sort().join(',')||v.fileHash!==r.fileHash||v.sourceHash!==r.sourceHash||!HEX.test(v.sha256)||v.mime!=='image/png'||v.provenance!=='client-declared-pdf-association'||v.artifact!=='unavailable'||!Number.isSafeInteger(v.page)||v.page<1||![0,90,180,270].includes(v.rotation)||!Array.isArray(v.bbox)||v.bbox.length!==4||!v.bbox.every(Number.isFinite)||v.bbox[0]<0||v.bbox[1]<0||v.bbox[2]<=0||v.bbox[3]<=0||!Number.isInteger(v.width)||!Number.isInteger(v.height)||v.width!==Math.ceil(v.bbox[2]*2)||v.height!==Math.ceil(v.bbox[3]*2)||v.width>4096||v.height>4096||v.width*v.height>8000000)fail('시각 증거 참조 오류');
+    }
+    return items;
+  }
   // One run check shared by live recording and backup import, so storage never holds what a reload would reject.
   async function checkRun(r,harnesses,prior,imported){
     if(!plain(r)||Object.keys(r).some(k=>!RUN_KEYS.includes(k)))fail('실행 기록에 알 수 없는 항목이 있습니다.');
@@ -173,7 +182,7 @@
     const harness=H.validate(r.harness,r.role);if(await H.hash(harness)!==r.harnessHash||!harnesses.some(h=>h.hash===r.harnessHash))fail('실행 harness 해시 불일치');
     if(!Array.isArray(r.segments)||!r.segments.length||r.segments.length>10000||r.segments.some(s=>!s||typeof s.id!=='string'||s.id.length>80||typeof s.label!=='string'||s.label.length>200||typeof s.text!=='string'||!s.text.trim())||new Set(r.segments.map(s=>s.id)).size!==r.segments.length)fail('실행 논문 입력 오류');
     const source=r.segments.map(s=>s.text).join('\n\n');if(source.length>1000000||await sha(source)!==r.sourceHash)fail('실행 논문 해시 불일치');
-    const doc={revision:r.revision,sourceHash:r.sourceHash,segments:r.segments};if(r.role==='blue')FalsifyDocumentBlue.validateResponse(doc,r.response);else{if(![1,2,3].includes(r.level))fail('RED 난이도 오류');FalsifyDocumentRed.validateResponse(doc,r.response);}
+    const doc={revision:r.revision,sourceHash:r.sourceHash,segments:r.segments};if('visualEvidence' in r)visualRefs(r.visualEvidence,r);if(r.role==='blue')FalsifyDocumentBlue.validateResponse(doc,r.response,'visualEvidence' in r?{visualEvidence:r.visualEvidence}:undefined);else{if(![1,2,3].includes(r.level))fail('RED 난이도 오류');FalsifyDocumentRed.validateResponse(doc,r.response);}
     if('finalState' in r&&(r.role!=='red'||stable(finalState(r,r.finalState))!==stable(r.finalState)))fail('RED 최종 상태가 원래 후보 검증과 일치하지 않습니다.');
     return {...clone(r),harness,provenance:imported?'imported-unverified':r.provenance};
   }
@@ -265,6 +274,7 @@
       let derived=false;if(!db.harnesses.some(h=>h.hash===harnessHash)){if(!db.harnesses.some(h=>h.config.role===role&&H.derivedFrom(harness,h.config)))throw Error('등록되지 않은 harness로 만든 요청입니다. 기록 차단');derived=true;}
       if(provenance==='local-codex'&&(response.harnessHash!==harnessHash||H.canonical(response.harness)!==H.canonical(harness)))throw Error('실행 harness가 요청과 일치하지 않습니다. 기록 차단');
       const r={id:crypto.randomUUID(),createdAt:new Date().toISOString(),role,revision:doc.revision,fileHash:doc.fileHash,sourceHash:doc.sourceHash,segments:clone(doc.segments),harness,harnessHash,maxCalls:request.maxCalls,level:role==='red'?request.level:null,model:provenance==='local-codex'?response.model:'manual-model-unverified',provenance,response:clone(response)};
+      if(request.visualEvidence!==undefined){if(role!=='blue'||request.visualConsent!==true||request.fileHash!==doc.fileHash||!Array.isArray(request.visualEvidence))throw Error('시각 증거 동의 또는 문서 식별 오류');r.visualEvidence=[];for(const v of request.visualEvidence){if(!plain(v)||Object.keys(v).sort().join(',')!==['base64','bbox','fileHash','height','mime','page','rotation','sha256','sourceHash','width'].sort().join(',')||typeof v.base64!=='string'||v.base64.length>699052)throw Error('시각 요청 형식 오류');let bytes;try{bytes=Uint8Array.from(atob(v.base64),c=>c.charCodeAt(0));}catch{throw Error('시각 이미지 인코딩 오류');}if(!bytes.length||bytes.length>524288||Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),b=>b.toString(16).padStart(2,'0')).join('')!==v.sha256)throw Error('시각 이미지 해시 불일치');const {base64,...ref}=v;r.visualEvidence.push({...ref,provenance:'client-declared-pdf-association',artifact:'unavailable'});}}
       if(typeof doc.name==='string'&&doc.name.trim())r.sourceName=doc.name.trim().slice(0,200);if(typeof doc.format==='string'&&doc.format.trim())r.format=doc.format.trim().slice(0,40);
       if(final!==null){if(role!=='red')throw Error('최종 상태는 RED 기록에만 둘 수 있습니다.');r.finalState=finalState(r,final);}
       if(sourceRunId!==null){if(role!=='blue')throw Error('인계 관계는 BLUE 기록에만 둘 수 있습니다.');r.sourceRunId=sourceRunId;}

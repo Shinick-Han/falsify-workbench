@@ -18,19 +18,19 @@ function ledger(stored){
     Object.assign(e,{tagName:String(tag).toUpperCase(),disabled:false,hidden:false,checked:false,value:'',textContent:'',placeholder:'',children:[],files:[],parent:null,dataset:{},attrs:{},
       classList:{toggle:(c,on)=>{(on??!classes.has(c))?classes.add(c):classes.delete(c);},contains:c=>classes.has(c)},
       setAttribute(k,v){this.attrs[k]=v;},append(...c){for(const x of c){if(x&&typeof x==='object')x.parent=this;this.children.push(x);}},replaceChildren(...c){this.children=[];this.append(...c);},prepend(...c){this.children.unshift(...c);},after(){},remove(){},reset(){},focus(){},
-      closest(sel){let n=this;while(n){if(n.tagName===sel.toUpperCase())return n;n=n.parent;}return null;}});
+      closest(sel){let n=this;while(n){if(n.tagName===sel.toUpperCase())return n;n=n.parent;}return this;}});
     Object.defineProperty(e,'innerHTML',{set(){}});Object.defineProperty(e,'firstChild',{get(){return this.children[0]??null;}});return e;}
   const get=id=>{if(!els.has(id))element('div').id=id;return els.get(id);};
-  const document=new EventTarget();Object.assign(document,{readyState:'complete',createElement:element,querySelector:s=>s.startsWith('#')?get(s.slice(1)):null,querySelectorAll:()=>[],body:element('body')});
-  const ctx=vm.createContext({document,FalsifyReview:require('../dist/review-workbench.js'),FalsifyHarness:H,FalsifyLocalBridge:{capabilities:()=>null,state:()=>({status:'manual',connected:false,cap:null})},FalsifyDocumentRed:R,FalsifyDocumentBlue:require('../dist/document-blue-core.js'),
-    localStorage:{getItem:k=>store.get(k)??null,setItem:(k,v)=>store.set(k,v)},crypto:globalThis.crypto,TextEncoder,CustomEvent,Event,URL,Blob,setTimeout,clearTimeout});
+  const document=new EventTarget();Object.assign(document,{readyState:'complete',createElement:element,createTextNode:s=>({textContent:s}),querySelector:s=>s.startsWith('#')?get(s.slice(1)):null,querySelectorAll:()=>[],body:element('body')});
+  const ctx=vm.createContext({document,FalsifyReview:require('../dist/review-workbench.js'),FalsifyHarness:H,FalsifyLocalBridge:{busy(){},capabilities:()=>null,state:()=>({status:'manual',connected:false,cap:null})},FalsifyDocumentRed:R,FalsifyDocumentBlue:require('../dist/document-blue-core.js'),
+    localStorage:{getItem:k=>store.get(k)??null,setItem:(k,v)=>store.set(k,v)},crypto:globalThis.crypto,atob,Uint8Array,TextEncoder,CustomEvent,Event,URL,Blob,setTimeout,clearTimeout});
   vm.runInContext(fs.readFileSync(path.join(dist,'experiment-ledger.js'),'utf8'),ctx,{filename:'experiment-ledger.js'});
   const lab=ctx.FalsifyLab,db=()=>JSON.parse(store.get(KEY));
   const rows=()=>get('ledger-table-body').children.map(tr=>tr.children.map(td=>[td.textContent,...td.children.map(s=>s.textContent)].join(' | ')));
   async function restore(data){get('ledger-status').textContent='';const raw=JSON.stringify(data);get('ledger-import').files=[{size:raw.length,text:async()=>raw}];get('ledger-import').dispatchEvent(new Event('change'));await until(()=>get('ledger-status').textContent!=='','import settled');return get('ledger-status').textContent;}
   async function review(id,verdict,score){assert.equal(await lab.review(id),true);get('evaluation-reviewer').value='Synthetic reviewer';get('evaluation-verdict').value=verdict;get('evaluation-score').value=score==null?'':String(score);get('evaluation-note').value='Synthetic test only.';
     get('evaluation-form').dispatchEvent(new Event('submit',{cancelable:true}));assert.match(get('evaluation-status').textContent,/검수 이력을 추가/);}
-  return {get,lab,store,db,rows,restore,review,summary:()=>get('ledger-summary').textContent};
+  return {get,lab,store,db,rows,restore,review,ctx,document,summary:()=>get('ledger-summary').textContent};
 }
 const segments=[{id:'s0',label:'p1',text:'Study does not show benefit.'},{id:'s1',label:'p2',text:'Only an association was observed.'}];
 const evidence=[{segmentId:'s1',quote:'Only an association was observed.',relation:'Synthetic qualification.'}];
@@ -137,6 +137,30 @@ test('RED page: refusal and live complete keep their own outcome and coverage',a
 test('RED page: a pasted manual response never reads as executed, whatever coverage it claims',async()=>{let p=redPage();await p.load();await p.manual('ok',COMPLETE);
   assert.match(p.progress(),/^1개 후보 · 인용 위치 확인 완료, 과학적 타당성 미검증\. 결과 완료 · 수동 응답이라 실행·검토 범위 미검증\.$/);assert.doesNotMatch(p.progress(),/전체 추출 텍스트 전달 완료|앱 adapter 호출|forged/);
   p=redPage();await p.load();await p.manual('abstain',SCAN_ABSTAIN);assert.equal(p.empty().textContent,'후보 없음 · 모델이 유보했습니다 · 결과 유보 · 수동 응답이라 실행·검토 범위 미검증. 자동 재시도하지 않았습니다.');assert.deepEqual(p.calls,[],'no broker call');});
+
+test('BLUE UI VM source file to visual request, mocked response, record, import and native view',async()=>{
+  const w=ledger();await w.lab.ready;await flush();const {ctx,get}=w;let savedBlob;
+  Object.assign(ctx,{AbortController,File:globalThis.File,URL:{createObjectURL(b){savedBlob=b;return 'blob:fixture';},revokeObjectURL(){}},confirm:()=>true,
+    FalsifyImport:{extract:async()=>({text:'The claim is absolute.',format:'PDF',warnings:[],segments:[{label:'p1',text:'The claim is absolute.'}]})},
+    FalsifyBlueVisual:{renderBlueVisuals:async({file,fileHash,sourceHash,selections})=>{assert.equal(file.name,'fixture.pdf');const raw=Buffer.from('mock pixels');return [{fileHash,sourceHash,page:selections[0].page,bbox:selections[0].bbox,rotation:0,width:20,height:20,mime:'image/png',sha256:await sha('mock pixels'),base64:raw.toString('base64')}];}}});
+  get('doc-blue-budget').value='8';vm.runInContext(fs.readFileSync(path.join(dist,'document-blue.js'),'utf8'),ctx,{filename:'document-blue.js'});
+  get('doc-blue-file').files=[new File(['synthetic pdf'],'fixture.pdf',{type:'application/pdf'})];get('doc-blue-file').dispatchEvent(new Event('change'));await until(()=>get('doc-blue-progress').textContent.includes('추출 완료'),'file extracted');
+  get('blue-visual-select').checked=true;get('blue-visual-consent').checked=true;get('blue-visual-regions').value='1, 0, 0, 10, 10';get('doc-blue-request').dispatchEvent(new Event('click'));await until(()=>!!savedBlob,'request downloaded');const q=JSON.parse(await savedBlob.text()),v=q.visualEvidence[0];
+  get('doc-blue-response').value=JSON.stringify({schema:'falsify.document-blue.v1',revision:q.revision,sourceHash:q.sourceHash,status:'ok',findings:[],visualObservations:[{id:'v1',sha256:v.sha256,page:v.page,bbox:v.bbox,observation:'Mock chart observation',uncertainty:'Unverified.'}]});get('doc-blue-apply').dispatchEvent(new Event('click'));await until(()=>get('doc-blue-record-status').textContent.includes('기록됨'),'visual result saved');
+  const backup=w.db(),run=backup.runs[0];assert.equal(run.visualEvidence[0].artifact,'unavailable');const target=ledger();await target.lab.ready;await flush();assert.match(await target.restore(backup),/백업을 병합/);await target.lab.review(run.id);assert.match(shown(target.get('evaluation-output')),/Mock chart observation/);assert.equal(target.db().runs[0].provenance,'imported-unverified');
+});
+
+test('BLUE visual record retains bound metadata without bytes across import and rejects forged references',async()=>{
+  const w=ledger();await w.lab.ready;await flush();const doc=await paper(),B=require('../dist/document-blue-core.js');
+  const q=plain(await w.lab.bind('blue',B.request(doc,8))),bytes=Buffer.from('synthetic image bytes'),hash=await sha('synthetic image bytes');
+  Object.assign(q,{fileHash:doc.fileHash,visualConsent:true,visualEvidence:[{fileHash:doc.fileHash,sourceHash:doc.sourceHash,page:1,bbox:[0,0,10,10],rotation:0,width:20,height:20,mime:'image/png',sha256:hash,base64:bytes.toString('base64')}]});
+  const result={schema:B.VERSION,revision:doc.revision,sourceHash:doc.sourceHash,status:'ok',findings:[],visualObservations:[{id:'v1',sha256:hash,page:1,bbox:[0,0,10,10],observation:'A chart.',uncertainty:'Synthetic.'}],harness:q.harness,harnessHash:await H.hash(q.harness),model:'gpt-6.1-sol'};
+  const id=await w.lab.record('blue',doc,q,result,'local-codex'),backup=w.db(),stored=backup.runs.find(r=>r.id===id);assert.equal(stored.visualEvidence[0].artifact,'unavailable');assert.equal(stored.visualEvidence[0].provenance,'client-declared-pdf-association');assert.ok(!JSON.stringify(stored).includes(q.visualEvidence[0].base64));
+  const t=ledger();await t.lab.ready;await flush();assert.match(await t.restore(backup),/백업을 병합/);assert.equal(t.db().runs[0].provenance,'imported-unverified');await t.lab.review(id);assert.match(shown(t.get('evaluation-output')),/A chart/);
+  const gold=plain(backup);gold.runs[0].response.gold={secret:'red'};const goldTarget=ledger();await goldTarget.lab.ready;await flush();assert.match(await goldTarget.restore(gold),/복원 차단/);
+  const bad=plain(backup);bad.runs[0].visualEvidence[0].sha256='0'.repeat(64);const fresh=ledger();await fresh.lab.ready;await flush();assert.match(await fresh.restore(bad),/복원 차단/);
+  const forged=plain(q);forged.visualEvidence[0].sha256='0'.repeat(64);await assert.rejects(w.lab.record('blue',doc,forged,result,'local-codex'),/해시 불일치/);
+});
 
 (async()=>{let passed=0;for(const [name,fn] of tests){try{await fn();passed++;console.log('PASS '+name);}catch(e){console.error('FAIL '+name+'\n'+(e.stack||e));process.exitCode=1;}}
   console.log(JSON.stringify({passed,total:tests.length}));if(passed!==tests.length)process.exit(1);})();

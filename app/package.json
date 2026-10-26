@@ -4,6 +4,7 @@
   "license": "AGPL-3.0-only",
   "private": true,
   "scripts": {
+    "build:blue-visual": "node scripts/build-blue-visual.mjs",
     "build:import": "node scripts/build-import.mjs",
     "build:preview": "node scripts/build-preview.mjs",
     "build:browser-pdf": "node scripts/build-browser-pdf.mjs",
