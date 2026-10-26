@@ -32,7 +32,7 @@
     section.id='external-red';
     section.setAttribute('aria-label','외부 모델 응답 가져오기');
     section.append(el(doc,'h2',null,'외부 모델 응답 가져오기'));
-    section.append(el(doc,'p','muted','이 가져오기는 검증된 RED 실행이 아닙니다. Falsify가 모델을 호출하지 않으며, 응답을 자동으로 적용하지 않습니다. 프롬프트를 외부 모델에 직접 붙여넣고, 응답은 여기서 검토한 뒤 고른 유일한 대응만 워크스페이스에 올립니다.'));
+    section.append(el(doc,'p','muted','이 가져오기는 검증된 RED 실행이 아닙니다. Falsify가 모델을 호출하지 않으며, 응답을 자동으로 적용하지 않습니다. 프롬프트를 외부 모델에 직접 붙여넣고, 여기서 위치를 확인한 뒤 고른 변경만 편집 목록에 올립니다.'));
     const modelLabel=el(doc,'label',null,'모델 이름 (선택, 검증되지 않은 표시)');
     const modelInput=el(doc,'input');
     modelInput.id='external-red-model';
@@ -55,14 +55,14 @@
     paste.id='external-red-paste';
     paste.rows=8;
     pasteLabel.append(paste);
-    const reviewButton=el(doc,'button','button secondary','대응 검토');
+    const reviewButton=el(doc,'button','button secondary','변경 찾기');
     reviewButton.id='external-red-review';
     reviewButton.type='button';
     const diagnostics=el(doc,'div','external-red-diagnostics');
     diagnostics.id='external-red-diagnostics';
     const proposals=el(doc,'div','external-red-proposals');
     proposals.id='external-red-proposals';
-    const acceptButton=el(doc,'button','button primary','선택한 대응만 워크스페이스에 제안');
+    const acceptButton=el(doc,'button','button primary','선택한 변경 가져오기');
     acceptButton.id='external-red-accept';
     acceptButton.type='button';
     acceptButton.disabled=true;
@@ -73,6 +73,30 @@
     let state=[],notes=[],mapped=null;
     function say(node,message,error){node.textContent=message||'';node.className='external-red-status'+(error?' error':'');}
     function sync(){acceptButton.disabled=!state.some(item=>item.status==='matched'&&item.checked);}
+    function pageLabel(pageIndex){return Number.isInteger(pageIndex)&&pageIndex>=0?'PDF p.'+(pageIndex+1):'쪽 미정';}
+    function copyMatch(match){
+      const out={segmentId:match.segmentId,pageIndex:match.pageIndex,start:match.start,end:match.end};
+      if(Number.isInteger(match.occurrence)&&match.occurrence>=0)out.occurrence=match.occurrence;
+      return out;
+    }
+    function copyAnchor(anchor){
+      if(!anchor)return null;
+      const out={start:anchor.start,end:anchor.end};
+      if(Number.isInteger(anchor.occurrence)&&anchor.occurrence>=0)out.occurrence=anchor.occurrence;
+      return out;
+    }
+    function sourceText(segmentId){
+      const source=currentSource();
+      const segment=source&&Array.isArray(source.segments)?source.segments.find(part=>part&&part.id===segmentId):null;
+      return segment&&typeof segment.text==='string'?segment.text:null;
+    }
+    function snippetFor(match){
+      const text=sourceText(match.segmentId);
+      if(text===null||!Number.isInteger(match.start)||!Number.isInteger(match.end)||match.end>text.length)return '';
+      const pad=16,from=Math.max(0,match.start-pad),to=Math.min(text.length,match.end+pad);
+      const show=value=>value.replace(/\r\n/g,'\n').replace(/\r/g,'\n');
+      return (from>0?'…':'')+show(text.slice(from,match.start))+'['+show(text.slice(match.start,match.end))+']'+show(text.slice(match.end,to))+(to<text.length?'…':'');
+    }
     function render(){
       diagnostics.replaceChildren();
       for(const note of notes){
@@ -84,9 +108,8 @@
       state.forEach((item,index)=>{
         const card=el(doc,'article','external-red-proposal');
         card.setAttribute('data-status',item.status);
-        const page=item.pageIndex===null||item.pageIndex===undefined?'미정':String(item.pageIndex);
-        const label=item.status==='matched'?'유일한 대응':item.status==='ambiguous'?'위치가 여러 곳이거나 확정이 필요함':'원문에 없음';
-        card.append(el(doc,'h3',null,label+' · '+(item.segmentId||'문단 미정')+' · pageIndex '+page));
+        const label=item.status==='matched'?'한 곳':item.status==='ambiguous'?'여러 곳':'원문에 없음';
+        card.append(el(doc,'h3',null,label+' · '+(item.segmentId||'문단 미정')+' · '+pageLabel(item.pageIndex)));
         card.append(el(doc,'p','external-red-before','Before: '+item.before));
         card.append(el(doc,'p','external-red-after','After: '+item.after));
         if(item.status==='matched'){
@@ -95,31 +118,38 @@
           box.type='checkbox';
           box.checked=!!item.checked;
           box.addEventListener('change',()=>{item.checked=!!box.checked;sync();});
-          choice.append(box,el(doc,'span',null,'이 대응을 워크스페이스 제안 목록에 넣기'));
+          choice.append(box,el(doc,'span',null,'이 변경을 가져오기'));
           card.append(choice);
         }else if(item.status==='ambiguous'&&item.listComplete&&item.matches.length){
-          card.append(el(doc,'p',null,'위치가 한 곳으로 확정되기 전에는 보내지 않습니다.'));
-          let selected=0;
+          card.append(el(doc,'p',null,'위치를 하나 고르기 전에는 가져오지 않습니다.'));
+          let selected=null;
           item.matches.forEach((match,matchIndex)=>{
             const choice=el(doc,'label','check-row');
             const radio=el(doc,'input');
             radio.type='radio';
             radio.name='external-red-match-'+index;
-            radio.checked=matchIndex===0;
+            radio.checked=false;
             radio.addEventListener('change',()=>{if(radio.checked)selected=matchIndex;});
-            choice.append(radio,el(doc,'span',null,'위치 '+(matchIndex+1)+' · '+match.segmentId+' · pageIndex '+match.pageIndex+' · '+match.start+'-'+match.end));
+            choice.append(radio,el(doc,'span',null,'위치 '+(matchIndex+1)+' · '+match.segmentId+' · '+pageLabel(match.pageIndex)));
             card.append(choice);
+            const snippet=snippetFor(match);
+            if(snippet)card.append(el(doc,'p','external-red-snippet',snippet));
           });
           const pick=el(doc,'button','button secondary','고른 위치로 확정');
           pick.type='button';
           pick.addEventListener('click',()=>{
+            if(selected===null)return;
             const match=item.matches[selected];
             if(!match)return;
+            const slice=sourceText(match.segmentId);
+            const before=slice===null?null:slice.slice(match.start,match.end);
+            if(before===null||before.length!==match.end-match.start||!before)return;
             item.status='matched';
             item.segmentId=match.segmentId;
             item.pageIndex=match.pageIndex;
-            item.anchor={start:match.start,end:match.end,occurrence:0};
-            item.matches=[{segmentId:match.segmentId,pageIndex:match.pageIndex,start:match.start,end:match.end}];
+            item.before=before;
+            item.anchor=copyAnchor({start:match.start,end:match.end,occurrence:match.occurrence});
+            item.matches=[copyMatch(match)];
             item.checked=false;
             item.listComplete=true;
             render();
@@ -134,7 +164,7 @@
     function clearMapping(message){
       if(mapped===null&&!state.length)return;
       state=[];notes=[];mapped=null;render();
-      say(acceptStatus,message||'원문이 바뀌어 이전 대응을 지웠습니다. 다시 검토하세요.',true);
+      say(acceptStatus,message||'원문이 바뀌어 이전 변경을 지웠습니다. 다시 찾아 보세요.',true);
     }
     clears.set(doc,()=>clearMapping());
     function currentSource(){
@@ -187,28 +217,28 @@
       notes=parsed.diagnostics.map(note=>Object.assign({},note));
       state=parsed.proposals.map(item=>({
         segmentId:item.segmentId,pageIndex:item.pageIndex,before:item.before,after:item.after,
-        anchor:item.anchor?{start:item.anchor.start,end:item.anchor.end,occurrence:item.anchor.occurrence}:null,
+        anchor:copyAnchor(item.anchor),
         origin:ORIGIN,status:item.status,listComplete:item.listComplete!==false,checked:false,
-        matches:item.matches.map(match=>({segmentId:match.segmentId,pageIndex:match.pageIndex,start:match.start,end:match.end}))
+        matches:item.matches.map(copyMatch)
       }));
       render();
-      say(acceptStatus,'대응을 계산했습니다. 검증된 실행이 아니며 아직 보내지 않았습니다.');
+      say(acceptStatus,'변경을 찾았습니다. 검증된 실행이 아니며 아직 가져오지 않았습니다.');
     }
     async function accept(){
       if(acceptButton.disabled)return;
       const chosen=state.filter(item=>item.status==='matched'&&item.checked);
       if(!chosen.length)return;
       const overlap=(left,right)=>left.matches.some(match=>right.matches.some(other=>match.segmentId===other.segmentId&&match.start<other.end&&other.start<match.end));
-      if(chosen.some((item,index)=>chosen.slice(index+1).some(other=>overlap(item,other)))){say(acceptStatus,'겹치는 대응은 함께 보내지 않습니다. 하나만 체크하세요.',true);return;}
+      if(chosen.some((item,index)=>chosen.slice(index+1).some(other=>overlap(item,other)))){say(acceptStatus,'겹치는 변경은 함께 가져오지 않습니다. 하나만 고르세요.',true);return;}
       const apiWorkspace=workspace();
-      if(!apiWorkspace||typeof apiWorkspace.acceptProposals!=='function'){say(acceptStatus,'워크스페이스 API가 없어 제안을 보내지 않았습니다.',true);return;}
+      if(!apiWorkspace||typeof apiWorkspace.acceptProposals!=='function'){say(acceptStatus,'편집 화면이 없어 가져오지 못했습니다.',true);return;}
       const source=currentSource();
       if(!source||source.fileHash!==mapped){clearMapping();return;}
       const payload=chosen.map(item=>({
         segmentId:item.segmentId,pageIndex:item.pageIndex,before:item.before,after:item.after,
-        anchor:item.anchor?{start:item.anchor.start,end:item.anchor.end,occurrence:item.anchor.occurrence}:null,
+        anchor:copyAnchor(item.anchor),
         origin:ORIGIN,status:'matched',
-        matches:item.matches.map(match=>({segmentId:match.segmentId,pageIndex:match.pageIndex,start:match.start,end:match.end}))
+        matches:item.matches.map(copyMatch)
       }));
       const model=modelInput.value.trim().slice(0,modelInput.maxLength||120);
       const options={origin:ORIGIN};
@@ -217,8 +247,8 @@
       try{
         await Promise.resolve().then(()=>apiWorkspace.acceptProposals(payload,options));
         if(mapped!==token){clearMapping();return;}
-        say(acceptStatus,'워크스페이스에 제안을 올렸습니다. 모호한 위치는 보내지 않았고, 검증된 실행으로 기록하지 않았습니다.');
-      }catch{say(acceptStatus,'워크스페이스가 제안을 받지 못해 보내지 못했습니다. 적용하지 않았습니다.',true);}
+        say(acceptStatus,'편집 목록에 올렸습니다. 모호한 위치는 가져오지 않았고, 검증된 실행으로 기록하지 않았습니다.');
+      }catch{say(acceptStatus,'편집 화면이 받지 못해 가져오지 못했습니다. 적용하지 않았습니다.',true);}
     }
     copyButton.addEventListener('click',()=>{if(!copyButton.disabled)void copyPrompt();});
     downloadButton.addEventListener('click',()=>{if(!downloadButton.disabled)downloadPrompt();});

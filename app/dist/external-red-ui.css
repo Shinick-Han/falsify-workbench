@@ -8,7 +8,8 @@
 .external-red textarea{min-height:140px;resize:vertical;line-height:1.6}
 .external-red .button-row{display:flex;flex-wrap:wrap;gap:10px;margin-top:12px}
 .external-red .external-red-proposal{border-top:1px solid var(--line);padding:16px 0}
-.external-red .external-red-before,.external-red .external-red-after,.external-red .external-red-diagnostic{white-space:pre-wrap}
+.external-red .external-red-before,.external-red .external-red-after,.external-red .external-red-diagnostic,.external-red .external-red-snippet{white-space:pre-wrap}
+.external-red .external-red-snippet{background:var(--surface);border-radius:4px;padding:8px;font-family:ui-monospace,monospace}
 .external-red .external-red-status.error{color:var(--red-ink)}
 .external-red .check-row{display:flex;gap:8px;align-items:flex-start;font-weight:400;margin-top:8px}
 .external-red .check-row input{width:17px;height:17px;margin-top:3px;accent-color:var(--ink);flex-shrink:0}

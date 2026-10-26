@@ -26,6 +26,10 @@ test('prompt carries 0-based ids, PDF labels, the minimal contract, and the full
   for(const segment of SEGMENTS)assert.ok(prompt.includes(segment.text),segment.text);
   assert.match(prompt,/0-based/);
   assert.match(prompt,/not a verified run/);
+  assert.match(prompt,/해석이나 논리가 약한/);
+  assert.match(prompt,/겨냥하지 않은 문장은 그대로/);
+  assert.match(prompt,/rationale은 생략해도/);
+  assert.match(prompt,/after를 빈 문자열/);
 });
 
 test('PDF labels convert deterministically and an explicit pageIndex wins',()=>{
@@ -49,7 +53,7 @@ test('fenced JSON and CRLF match a unique quote without executing surrounding pr
   assert.equal(parsed.proposals[0].origin,R.ORIGIN);
   assert.equal(parsed.proposals[0].segmentId,'s0');
   assert.equal(parsed.proposals[0].pageIndex,0);
-  assert.deepEqual(parsed.proposals[0].matches,[{segmentId:'s0',pageIndex:0,start:0,end:ALPHA.length}]);
+  assert.deepEqual(parsed.proposals[0].matches,[{segmentId:'s0',pageIndex:0,start:0,end:ALPHA.length,occurrence:0}]);
   assert.equal(parsed.proposals[0].anchor.occurrence,0);
   assert.ok(codes(parsed).includes('ignored-prose'));
   const crlf='```json\r\n'+change().replace(/\n/g,'\r\n')+'\r\n```\r\n';
@@ -58,6 +62,8 @@ test('fenced JSON and CRLF match a unique quote without executing surrounding pr
   const body=JSON.stringify({changes:[{segmentId:'s0',pageIndex:0,before:'Alpha\nunique',after:'Changed.'}]});
   const located=run(body,source);
   assert.equal(located.proposals[0].status,'matched');
+  assert.equal(located.proposals[0].before,'Alpha\r\nunique');
+  assert.equal(located.proposals[0].anchor.end-located.proposals[0].anchor.start,located.proposals[0].before.length);
   assert.deepEqual(located.proposals[0].anchor,{start:0,end:'Alpha\r\nunique'.length,occurrence:0});
 });
 
@@ -250,6 +256,85 @@ test('conflicting replacements are ambiguous and the parser source stays local',
   assert.match(doc,/external-ai-import/);
   assert.match(doc,new RegExp(String(R.LIMITS.inputChars)));
   assert.match(doc,/AGPL-3\.0-only/);
+});
+
+test('real paper-edits accepts overlap, CRLF slices, the selected occurrence, and empty After',()=>{
+  const {execFileSync}=require('node:child_process');
+  const vm=require('node:vm');
+  const src=execFileSync('git',['show','origin/feature/paper-workspace-20261026:app/dist/paper-edits.js'],{encoding:'utf8'});
+  assert.equal(fs.existsSync(path.resolve(__dirname,'../dist/paper-edits.js')),false);
+  const sandbox={module:{exports:{}},exports:{}};
+  vm.createContext(sandbox);
+  vm.runInContext(src,sandbox,{filename:'paper-edits.js'});
+  sandbox.core=sandbox.module.exports;
+  const hash='ab'.repeat(32);
+  assert.equal(hash.length,64);
+  function one(text,before,after){
+    const parsed=run(JSON.stringify({changes:[{segmentId:'s0',pageIndex:0,before,after}]}),[{id:'s0',label:'PDF p. 1',pageIndex:0,text}],hash);
+    assert.equal(parsed.proposals.length,1);
+    return parsed;
+  }
+  function apply(text,edit){
+    sandbox.text=text;
+    sandbox.before=edit.before;
+    sandbox.after=edit.after;
+    sandbox.useAnchor=!!edit.anchor;
+    sandbox.includeOccurrence=!!(edit.anchor&&Object.hasOwn(edit.anchor,'occurrence'));
+    if(edit.anchor){sandbox.start=edit.anchor.start;sandbox.end=edit.anchor.end;sandbox.occurrence=edit.anchor.occurrence;}
+    return vm.runInContext(`(()=>{
+      const session=core.create({fileHash:${JSON.stringify(hash)},name:'fixture.txt',segments:[{id:'s0',label:'PDF p. 1',text:text,pageIndex:0}],now:()=>1});
+      const input={pageIndex:0,segmentId:'s0',before:before,after:after,origin:'external-ai-import'};
+      if(useAnchor){input.anchor={start:start,end:end};if(includeOccurrence)input.anchor.occurrence=occurrence;}
+      const id=session.add(input);
+      const stored=session.snapshot().edits.find(item=>item.id===id);
+      return {before:stored.before,after:stored.after,start:stored.anchor.start,end:stored.anchor.end,occurrence:stored.anchor.occurrence};
+    })()`,sandbox);
+  }
+  const overlap=one('aaa','aa','bb');
+  assert.equal(overlap.proposals[0].status,'ambiguous');
+  assert.deepEqual(overlap.proposals[0].matches.map(match=>[match.start,match.occurrence]),[[0,0],[1,1]]);
+  sandbox.text='aaa';
+  assert.throws(()=>vm.runInContext(`core.create({fileHash:${JSON.stringify(hash)},name:'fixture.txt',segments:[{id:'s0',label:'PDF p. 1',text:text,pageIndex:0}],now:()=>1}).add({pageIndex:0,segmentId:'s0',before:'aa',after:'bb',origin:'external-ai-import'})`,sandbox),error=>error.code==='duplicate-anchor');
+  const crlfText='first\r\nsecond';
+  const crlf=one(crlfText,'first\nsecond','first\nSECOND');
+  const crlfProposal=crlf.proposals[0];
+  assert.equal(crlfProposal.status,'matched');
+  assert.equal(crlfProposal.before,crlfText);
+  assert.equal(crlfText.slice(crlfProposal.anchor.start,crlfProposal.anchor.end),crlfProposal.before);
+  assert.equal(crlfProposal.anchor.end-crlfProposal.anchor.start,crlfProposal.before.length);
+  const storedCrlf=apply(crlfText,{before:crlfProposal.before,after:crlfProposal.after,anchor:crlfProposal.anchor});
+  assert.equal(storedCrlf.before,crlfText);
+  assert.equal(storedCrlf.end,crlfText.length);
+  const alpha='alpha alpha';
+  const picked=one(alpha,'alpha','BETA');
+  assert.equal(picked.proposals[0].status,'ambiguous');
+  const hit=picked.proposals[0].matches[1];
+  assert.equal(hit.start,6);
+  assert.equal(hit.end,11);
+  assert.equal(hit.occurrence,1);
+  const withOccurrence=apply(alpha,{before:'alpha',after:'BETA',anchor:{start:hit.start,end:hit.end,occurrence:hit.occurrence}});
+  assert.equal(withOccurrence.start,6);
+  assert.equal(withOccurrence.occurrence,1);
+  const omitted=apply(alpha,{before:'alpha',after:'BETA',anchor:{start:hit.start,end:hit.end}});
+  assert.equal(omitted.start,6);
+  assert.equal(omitted.occurrence,1);
+  const erased=one(ALPHA,ALPHA,'');
+  assert.equal(erased.proposals[0].status,'matched');
+  assert.equal(erased.proposals[0].after,'');
+  const storedErase=apply(ALPHA,{before:erased.proposals[0].before,after:'',anchor:erased.proposals[0].anchor});
+  assert.equal(storedErase.after,'');
+  const blank=run(JSON.stringify({changes:[{segmentId:'s0',pageIndex:0,before:ALPHA,after:'   '}]}));
+  assert.equal(blank.proposals.length,0);
+  assert.match(blank.diagnostics.find(item=>item.code==='field-limit').message,/빈 문자열/);
+  const tooLong='A'.repeat(4001);
+  const limited=run(JSON.stringify({changes:[{segmentId:'s0',pageIndex:0,before:tooLong,after:'B'}]}),[{id:'s0',label:'PDF p. 1',pageIndex:0,text:tooLong}],hash);
+  assert.equal(limited.proposals.length,0);
+  assert.match(limited.diagnostics.find(item=>item.code==='field-limit').message,/4000/);
+  const max='B'.repeat(4000);
+  const allowed=one(max,max,'C');
+  assert.equal(allowed.proposals[0].status,'matched');
+  const storedMax=apply(max,{before:allowed.proposals[0].before,after:'C',anchor:allowed.proposals[0].anchor});
+  assert.equal(storedMax.before.length,4000);
 });
 
 console.log(JSON.stringify({passed:checks,scope:'external-red parser'}));
