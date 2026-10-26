@@ -1,15 +1,15 @@
 'use strict';
-// Node VM regression for the ledger cloud hooks: FalsifyLab.cloudSnapshot() and FalsifyLab.previewSharedHarness().
-// Synthetic DOM and storage, synthetic paper and responses; no browser, network, server, CLI or model calls.
+// Node VM regression for the ledger cloud hooks: FalsifyLab.cloudSnapshot(), FalsifyLab.previewSharedHarness()
+// and FalsifyLab.restoreArchive(). Synthetic DOM and storage, synthetic paper and responses; no browser, network, server, CLI or model calls.
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
 const H=require('../dist/harness-core.js'),R=require('../dist/document-red-core.js'),dist=path.resolve(__dirname,'../dist'),KEY='falsify.experiment-ledger.v1';
-const tests=[];const test=(name,fn)=>tests.push([name,fn]);
+const tests=[];const test=(name,fn)=>tests.push([name,fn]);let ReviewBundle=null;
 const flush=async(n=12)=>{for(let i=0;i<n;i++)await new Promise(r=>setImmediate(r));};
 const plain=x=>JSON.parse(JSON.stringify(x));
 const sha=async s=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(s)))).map(x=>x.toString(16).padStart(2,'0')).join('');
 // Same synthetic DOM as ledger-provenance.spec.cjs: elements register by id; querySelector('#id') resolves or creates.
-function ledger(stored){
-  const els=new Map(),store=new Map(stored||[]),writes=[],events=[];
+function ledger(stored,opts={}){
+  const els=new Map(),store=new Map(stored||[]),writes=[],events=[],network=[];
   function element(tag){const e=new EventTarget(),classes=new Set();let id='';
     Object.defineProperty(e,'id',{get:()=>id,set:v=>{id=v;els.set(v,e);}});
     Object.assign(e,{tagName:String(tag).toUpperCase(),disabled:false,hidden:false,checked:false,value:'',textContent:'',placeholder:'',children:[],files:[],parent:null,dataset:{},attrs:{},
@@ -20,10 +20,12 @@ function ledger(stored){
   const get=id=>{if(!els.has(id))element('div').id=id;return els.get(id);};
   const document=new EventTarget();Object.assign(document,{readyState:'complete',createElement:element,querySelector:s=>s.startsWith('#')?get(s.slice(1)):null,querySelectorAll:()=>[],body:element('body')});
   for(const type of ['falsify:harness-change','falsify:harness-consent'])document.addEventListener(type,e=>events.push(type+':'+e.detail.role));
-  const ctx=vm.createContext({document,FalsifyReview:require('../dist/review-workbench.js'),FalsifyHarness:H,FalsifyLocalBridge:{capabilities:()=>null,state:()=>({status:'manual',connected:false,cap:null})},FalsifyDocumentRed:R,FalsifyDocumentBlue:require('../dist/document-blue-core.js'),
-    localStorage:{getItem:k=>store.get(k)??null,setItem:(k,v)=>{writes.push(k);store.set(k,v);}},crypto:globalThis.crypto,TextEncoder,CustomEvent,Event,URL,Blob,setTimeout,clearTimeout});
+  const ctx=vm.createContext({document,FalsifyReview:require('../dist/review-workbench.js'),FalsifyHarness:H,FalsifyReviewBundle:ReviewBundle,FalsifyLocalBridge:{capabilities:()=>null,state:()=>({status:'manual',connected:false,cap:null})},FalsifyDocumentRed:R,FalsifyDocumentBlue:require('../dist/document-blue-core.js'),
+    localStorage:{getItem:k=>store.get(k)??null,setItem:(k,v)=>{if(opts.failWrite?.()){const e=Error('QuotaExceededError');e.name='QuotaExceededError';throw e;}writes.push(k);store.set(k,v);}},
+    fetch(){network.push('fetch');throw Error('network disabled');},WebSocket(){network.push('WebSocket');throw Error('network disabled');},
+    crypto:globalThis.crypto,TextEncoder,CustomEvent,Event,URL,Blob,setTimeout,clearTimeout});
   vm.runInContext(fs.readFileSync(path.join(dist,'experiment-ledger.js'),'utf8'),ctx,{filename:'experiment-ledger.js'});
-  return {get,lab:ctx.FalsifyLab,store,writes,events};
+  return {get,lab:ctx.FalsifyLab,store,writes,events,network};
 }
 const segments=[{id:'s0',label:'p1',text:'Study does not show benefit.'},{id:'s1',label:'p2',text:'Only an association was observed.'}];
 const candidate={id:'c1',segmentId:'s0',level:1,before:'Study does not show benefit.',after:'Study does show benefit.',rationale:'Synthetic contradiction.',evidence:[{segmentId:'s1',quote:'Only an association was observed.',relation:'Synthetic qualification.'}],uncertainty:'Synthetic fixture only.'};
@@ -103,5 +105,91 @@ test('invalid or cancelled RED plan replacement retains displayed comparison, ju
   const v=(await w.lab.cloudSnapshot()).reviews[0];assert.equal(v.comparison.assessments[0].note,'Synthetic preserved reason');assert.equal(v.comparison.assessments[0].verdict,'uncertain');assert.ok(v.comparison.sourceRunId);
 });
 
-(async()=>{let passed=0;for(const [name,fn] of tests){try{await fn();passed++;console.log('PASS '+name);}catch(e){console.error('FAIL '+name+'\n'+(e.stack||e));process.exitCode=1;}}
+const Blue=require('../dist/document-blue-core.js');
+const tags=(e,tag)=>{const out=[];if(e.tagName===tag)out.push(e.textContent);for(const c of e.children||[])if(c&&typeof c==='object')out.push(...tags(c,tag));return out;};
+const redTexts=['Alpha does not show benefit in the cohort.','Only an association was observed in winter.','The sample excluded untreated controls.','Follow-up stopped before the endpoint.','Authors call the result conclusive.'];
+const changed='Alpha does show benefit in the cohort.';
+async function fiveArchive(){
+  const w=ledger();await w.lab.ready;
+  const redSegments=redTexts.map((text,i)=>({id:'s'+i,label:'p'+(i+1),text})),blueSegments=redSegments.map((s,i)=>i===0?{...s,text:changed}:{...s});
+  const redDoc={revision:'synthetic-red',sourceHash:await sha(redSegments.map(s=>s.text).join('\n\n')),fileHash:'f'.repeat(64),name:'synthetic.txt',format:'TXT',segments:redSegments};
+  const blueDoc={revision:'synthetic-blue',sourceHash:await sha(blueSegments.map(s=>s.text).join('\n\n')),fileHash:'a'.repeat(64),name:'synthetic-blue.txt',format:'TXT',segments:blueSegments};
+  const redReq=plain(await w.lab.bind('red',R.request(redDoc,1,4)));redReq.requestId='synthetic-red-exec';
+  const response={schema:R.VERSION,revision:redDoc.revision,sourceHash:redDoc.sourceHash,status:'ok',candidates:[{id:'c1',segmentId:'s0',level:1,before:redTexts[0],after:changed,rationale:'Synthetic contradiction.',evidence:[{segmentId:'s1',quote:redTexts[1],relation:'Synthetic qualification.'}],uncertainty:'Synthetic fixture only.'}],harness:redReq.harness,harnessHash:await H.hash(redReq.harness),model:'gpt-6.1-sol',coverage:{complete:true,completedChunks:1,chunks:1,calls:2}};
+  const rootId=await w.lab.record('red',redDoc,redReq,response,'local-codex');
+  const snapId=await w.lab.record('red',redDoc,redReq,response,'local-codex',{snapshotOf:rootId,finalState:{outputFileHash:blueDoc.fileHash,verification:{synthetic:true},selected:[{id:'c1',segmentId:'s0',label:'p1',before:redTexts[0],after:changed,offset:0,edited:false}]}});
+  const blueReq=plain(await w.lab.bind('blue',Blue.request(blueDoc,4)));
+  const findings=blueSegments.map((s,i)=>({id:'F'+(i+1),segmentId:s.id,quote:s.text,rationale:'Synthetic finding '+(i+1)+'.',evidence:[{segmentId:s.id,quote:s.text.slice(0,20),relation:'Synthetic support.'}],uncertainty:'Synthetic only.'}));
+  const blueId=await w.lab.record('blue',blueDoc,blueReq,{schema:Blue.VERSION,revision:blueDoc.revision,sourceHash:blueDoc.sourceHash,status:'ok',findings},'manual-unverified');
+  await w.lab.review(blueId);
+  for(let i=0;i<5;i++){w.get('evaluation-finding-'+i).value='supported';w.get('evaluation-finding-'+i).dispatchEvent(new Event('change'));w.get('evaluation-finding-note-'+i).value='Synthetic source supports F'+(i+1)+'.';w.get('evaluation-finding-note-'+i).dispatchEvent(new Event('input'));}
+  w.get('evaluation-patch-0').value='detected';w.get('evaluation-patch-0').dispatchEvent(new Event('change'));
+  w.get('evaluation-patch-note-0').value='Synthetic matching conflict.';w.get('evaluation-patch-note-0').dispatchEvent(new Event('input'));
+  w.get('evaluation-reviewer').value='Synthetic reviewer';w.get('evaluation-case').value='Synthetic condition';w.get('evaluation-verdict').value='supported';w.get('evaluation-score').value='4';w.get('evaluation-note').value='Synthetic overall note.';
+  w.get('evaluation-form').dispatchEvent(new Event('submit',{cancelable:true}));
+  const laterReq=plain(await w.lab.bind('red',R.request(redDoc,1,4)));laterReq.requestId='synthetic-red-later';
+  const laterId=await w.lab.record('red',redDoc,laterReq,{...response,harness:laterReq.harness,harnessHash:await H.hash(laterReq.harness)},'manual-unverified',{finalState:{outputFileHash:blueDoc.fileHash,verification:null,selected:[{id:'c1',segmentId:'s0',label:'p1',before:redTexts[0],after:'show benefit',offset:0,edited:true}]}});
+  const unrelatedId=await recordRun(w);
+  const snap=await w.lab.cloudSnapshot();
+  const archive=await ReviewBundle.buildExperimentArchive(snap,blueId,{harness:H,red:R,blue:Blue,review:require('../dist/review-workbench.js')});
+  return {w,snap,archive,rootId,snapId,blueId,laterId,unrelatedId};
+}
+test('bind strips archive, bundle and Confluence auth material before a model request',async()=>{
+  const w=ledger();await w.lab.ready;const doc=await paper();
+  const request=await w.lab.bind('red',{...R.request(doc,1,4),archive:{accessToken:'synthetic-token'},bundle:{schema:'falsify.review-bundle.v1'},reviewBundle:{},restoreBundle:{},confluence:{session:'sealed'},confluenceSession:'sealed',oauth:'synthetic-oauth',accessToken:'synthetic-token',refreshToken:'synthetic-refresh',authorization:'Bearer synthetic',bearer:'synthetic',clientSecret:'synthetic-secret',archiveSha256:'ab',archiveHash:'cd',teamShare:true,nonce:'synthetic-nonce',session:'sealed',finalState:{selected:[]},gold:true});
+  for(const k of ['archive','bundle','reviewBundle','restoreBundle','confluence','confluenceSession','oauth','accessToken','refreshToken','authorization','bearer','clientSecret','archiveSha256','archiveHash','teamShare','nonce','session','finalState','gold'])assert.equal(k in request,false,k);
+  assert.equal(request.schema,R.VERSION);assert.ok(request.harness);assert.equal(request.segments.length,2);assert.equal(w.network.length,0);
+});
+test('restoreArchive opens a five-finding RED+BLUE review and reloads item judgments without executing',async()=>{
+  const {w,snap,archive,rootId,snapId,blueId,laterId,unrelatedId}=await fiveArchive();
+  assert.deepEqual(archive.data.ledger.runs.map(r=>r.id),[rootId,snapId,blueId,laterId]);
+  assert.equal(archive.data.ledger.reviews[0].findingAssessments.length,5);
+  assert.equal(archive.data.ledger.reviews[0].comparison.sourceRunId,snapId);
+  assert.deepEqual(plain(archive.data.ledger.runs.find(r=>r.id===blueId).response),plain(snap.runs.find(r=>r.id===blueId).response));
+  const fresh=ledger();await fresh.lab.ready;const selected=fresh.get('red-harness').value;
+  const restored=await fresh.lab.restoreArchive(archive);
+  assert.equal(restored.kind,'experiment');assert.equal(restored.runId,blueId);
+  assert.equal(fresh.get('evaluation-run').value,blueId);assert.equal(fresh.get('red-harness').value,selected);
+  assert.equal(fresh.get('red-harness-consent').checked,false);assert.equal(fresh.get('blue-harness-consent').checked,false);assert.equal(fresh.network.length,0);
+  const got=await fresh.lab.cloudSnapshot();
+  assert.ok(got.runs.every(r=>r.provenance==='imported-unverified'));assert.ok(!got.runs.some(r=>r.id===unrelatedId));
+  assert.equal(got.runs.find(r=>r.id===snapId).snapshotOf,rootId);assert.equal(got.runs.find(r=>r.id===rootId).snapshotOf,undefined);
+  assert.deepEqual(plain(got.runs.find(r=>r.id===blueId).response),plain(snap.runs.find(r=>r.id===blueId).response));
+  assert.equal(got.reviews[0].findingAssessments.length,5);assert.equal(got.reviews[0].reviewContext.mode,'red-assisted');assert.equal(got.reviews[0].comparison.sourceRunId,snapId);
+  assert.match(fresh.get('ledger-summary').textContent,/로컬 broker 실행 0건/);assert.match(fresh.get('ledger-summary').textContent,/가져온 기록/);
+  assert.ok(tags(fresh.get('evaluation-output'),'INS').includes('show benefit'));
+  assert.equal((await fresh.lab.cloudSnapshot()).runs.find(r=>r.id===snapId).finalState.selected[0].after,changed);
+  const loaded=ledger([[KEY,fresh.store.get(KEY)]]);assert.equal((await loaded.lab.cloudSnapshot()).reviews[0].findingAssessments.length,5);
+  assert.equal(await loaded.lab.review(blueId),true);assert.ok(tags(loaded.get('evaluation-output'),'INS').includes('show benefit'));
+  const writes=w.writes.length;const repeat=await w.lab.restoreArchive(archive);assert.equal(repeat.kind,'experiment');assert.equal(repeat.runId,blueId);
+  assert.equal(w.writes.length,writes);assert.equal((await w.lab.cloudSnapshot()).runs.find(r=>r.id===rootId).provenance,'local-codex');
+  assert.equal((await w.lab.cloudSnapshot()).runs.find(r=>r.id===unrelatedId).provenance,'local-codex');
+});
+test('repeat restore, tamper, collision and storage failure do not partially write or upgrade provenance',async()=>{
+  const {w,archive,blueId,unrelatedId}=await fiveArchive();
+  const fresh=ledger();await fresh.lab.restoreArchive(archive);const once=fresh.store.get(KEY),n=fresh.writes.length;
+  const repeat=await fresh.lab.restoreArchive(archive);assert.equal(repeat.kind,'experiment');assert.equal(repeat.runId,blueId);
+  assert.equal(fresh.writes.length,n);assert.equal(fresh.store.get(KEY),once);assert.ok((await fresh.lab.cloudSnapshot()).runs.every(r=>r.provenance==='imported-unverified'));
+  const tampered=plain(archive);tampered.data.ledger.runs.find(r=>r.id===blueId).sourceHash='0'.repeat(64);
+  const raw=fresh.store.get(KEY);await assert.rejects(fresh.lab.restoreArchive(tampered));assert.equal(fresh.store.get(KEY),raw);assert.match(fresh.get('ledger-status').textContent,/아카이브 복원 차단/);
+  const snapRun=archive.data.ledger.runs.find(r=>r.snapshotOf),rootRun=archive.data.ledger.runs.find(r=>r.id===snapRun.snapshotOf);
+  const clashLedger={schema:KEY,harnesses:archive.data.ledger.harnesses.filter(h=>h.hash===rootRun.harnessHash),runs:[plain(rootRun)],reviews:[]};
+  const clash=ledger([[KEY,JSON.stringify(clashLedger)]]);await clash.lab.ready;const clashRaw=clash.store.get(KEY);
+  await assert.rejects(clash.lab.restoreArchive(archive),/다시 읽기 검증/);assert.equal(clash.store.get(KEY),clashRaw);
+  assert.equal((await clash.lab.cloudSnapshot()).runs.length,1);assert.equal((await clash.lab.cloudSnapshot()).runs[0].provenance,'local-codex');assert.ok(!(await clash.lab.cloudSnapshot()).runs.some(r=>r.snapshotOf));
+  const host=ledger([[KEY,w.store.get(KEY)]]);await host.lab.ready;const hostRaw=host.store.get(KEY);
+  const bad=plain(archive);bad.data.ledger.runs.find(r=>r.id===blueId).response.findings[0].rationale='Tampered synthetic rationale.';
+  await assert.rejects(host.lab.restoreArchive(bad),/같은 실행 ID|형식|malformed|응답/);assert.equal(host.store.get(KEY),hostRaw);
+  assert.equal((await host.lab.cloudSnapshot()).runs.find(r=>r.id===unrelatedId).provenance,'local-codex');
+  const gate={fail:false},dest=ledger(undefined,{failWrite:()=>gate.fail});await dest.lab.ready;gate.fail=true;
+  await assert.rejects(dest.lab.restoreArchive(archive),/기존 기록은 그대로입니다/);assert.equal(dest.store.get(KEY),undefined);assert.equal((await dest.lab.cloudSnapshot()).runs.length,0);assert.deepEqual(dest.writes,[]);assert.equal(dest.network.length,0);
+  const config={...H.builtin('blue'),id:'archive-blue',name:'Archive BLUE'},hash=await H.hash(config);
+  const harnessArchive=await ReviewBundle.buildHarnessArchive({config,hash},{harness:H});
+  const box=ledger();await box.lab.ready;const stored=box.store.get(KEY),menu=box.get('blue-harness').value;
+  const loaded=await box.lab.restoreArchive(harnessArchive);assert.equal(loaded.kind,'harness');assert.equal(loaded.hash,hash);
+  assert.equal(box.store.get(KEY),stored);assert.equal(box.get('blue-harness').value,menu);assert.equal(box.get('blue-harness-consent').checked,false);
+  assert.equal(JSON.parse(box.get('harness-editor').value).id,'archive-blue');assert.match(box.get('harness-status').textContent,/등록·선택·실행은 하지 않았습니다/);assert.equal(box.network.length,0);
+});
+
+(async()=>{ReviewBundle=await import('../dist/review-bundle.mjs');let passed=0;for(const [name,fn] of tests){try{await fn();passed++;console.log('PASS '+name);}catch(e){console.error('FAIL '+name+'\n'+(e.stack||e));process.exitCode=1;}}
   console.log(JSON.stringify({passed,total:tests.length}));if(passed!==tests.length)process.exit(1);})();

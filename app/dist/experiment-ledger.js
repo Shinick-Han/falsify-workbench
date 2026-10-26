@@ -5,7 +5,8 @@
   const exposedRuns=new Set();
   // Per-role built-in CLI choice: cli = explicit selection (null = harness value), effective = config/hash actually bound, deriving = pending hash job.
   const cli={red:null,blue:null},effective={red:null,blue:null},deriving={red:null,blue:null},locked={red:false,blue:false},cliError={red:'',blue:''},cliEls={};
-  const HEX=/^[a-f0-9]{64}$/,RUN_KEYS=['id','createdAt','role','revision','fileHash','sourceHash','segments','harness','harnessHash','maxCalls','level','model','provenance','response','sourceName','format','finalState','sourceRunId','snapshotOf','requestId'],PATCH_KEYS=['id','segmentId','label','before','after','offset','edited'],PRIVATE=['finalState','sourceRunId','snapshotOf','plan','comparison','reviews','assessments','gold','findingAssessments','reviewContext'];
+  const HEX=/^[a-f0-9]{64}$/,RUN_KEYS=['id','createdAt','role','revision','fileHash','sourceHash','segments','harness','harnessHash','maxCalls','level','model','provenance','response','sourceName','format','finalState','sourceRunId','snapshotOf','requestId'],PATCH_KEYS=['id','segmentId','label','before','after','offset','edited'],PRIVATE=['finalState','sourceRunId','snapshotOf','plan','comparison','reviews','assessments','gold','findingAssessments','reviewContext','archive','bundle','reviewBundle','restoreBundle','confluence','confluenceSession','oauth','accessToken','refreshToken','authorization','bearer','clientSecret','archiveSha256','archiveHash','teamShare','nonce','session'];
+  const LEDGER_CHARS=4500000,ARCHIVE_URL=document.currentScript?.src?new URL('./review-bundle.mjs',document.currentScript.src).href:null;let archiveModule=null;
   const fail=s=>{throw Error(s);},plain=v=>!!v&&typeof v==='object'&&!Array.isArray(v);
   const stable=v=>Array.isArray(v)?'['+v.map(stable).join(',')+']':plain(v)?'{'+Object.keys(v).sort().map(k=>JSON.stringify(k)+':'+stable(v[k])).join(',')+'}':JSON.stringify(v);
   const when=s=>new Date(s).toLocaleString('ko-KR',{dateStyle:'medium',timeStyle:'short'});
@@ -21,7 +22,7 @@
   const status=(selector,s,error=false)=>{const e=$(selector);e.textContent=s;e.classList.toggle('error',error);};
   const sha=async s=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(s)))).map(x=>x.toString(16).padStart(2,'0')).join('');
   function saveJSON(data,name){const u=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=u;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(u),1000);}
-  function persist(next,recovery=false){if(recoveryRequired&&!recovery)throw Error('기존 저장 기록에 오류가 있어 덮어쓰기를 막았습니다. 백업 JSON을 복원하세요.');const raw=JSON.stringify(next);if(raw.length>4500000)throw Error('브라우저 기록 용량 초과. JSON으로 백업한 뒤 다른 브라우저/기록 저장소를 사용하세요. 기존 기록은 보존했습니다.');try{localStorage.setItem(KEY,raw);}catch(e){throw Error('브라우저 저장소에 쓰지 못했습니다 ('+(e?.name||'저장 오류')+'). 기존 기록은 그대로입니다. 전체 백업 후 공간을 확보하고 다시 기록하세요.');}db=next;recoveryRequired=false;}
+  function persist(next,recovery=false){if(recoveryRequired&&!recovery)throw Error('기존 저장 기록에 오류가 있어 덮어쓰기를 막았습니다. 백업 JSON을 복원하세요.');const raw=JSON.stringify(next);if(raw.length>LEDGER_CHARS)throw Error('브라우저 기록 용량 초과. JSON으로 백업한 뒤 다른 브라우저/기록 저장소를 사용하세요. 기존 기록은 보존했습니다.');try{localStorage.setItem(KEY,raw);}catch(e){throw Error('브라우저 저장소에 쓰지 못했습니다 ('+(e?.name||'저장 오류')+'). 기존 기록은 그대로입니다. 전체 백업 후 공간을 확보하고 다시 기록하세요.');}db=next;recoveryRequired=false;}
   // Runtime source and judgments are intentionally separate objects.
   function mount(){
     for(const role of ['red','blue']){
@@ -185,19 +186,51 @@
       out.reviews.push(clone(v));}
     return out;
   }
+  // Same collision rule as backup import. Existing records keep their provenance; only content is compared.
+  function mergedCopy(imported){
+    const next=clone(db);
+    for(const h of imported.harnesses)if(!next.harnesses.some(x=>x.hash===h.hash))next.harnesses.push(h);
+    for(const r of imported.runs){const old=next.runs.find(x=>x.id===r.id);if(old&&stable({...old,provenance:r.provenance})!==stable(r))fail('같은 실행 ID의 내용이 달라 병합을 차단했습니다.');if(!old)next.runs.push(r);}
+    for(const v of imported.reviews){const old=next.reviews.find(x=>x.id===v.id);if(old&&stable(old)!==stable(v))fail('같은 검수 ID의 내용이 달라 병합을 차단했습니다.');if(!old)next.reviews.push(v);}
+    if(next.runs.length>100||next.harnesses.length>100||next.reviews.length>1000)fail('병합 후 수량 한도 초과');
+    return next;
+  }
+  function reviewBundle(){const g=globalThis.FalsifyReviewBundle;if(g&&typeof g.validateArchive==='function')return Promise.resolve(g);if(!archiveModule){if(!ARCHIVE_URL)return Promise.reject(Error('검수 아카이브 모듈을 찾지 못했습니다.'));archiveModule=import(ARCHIVE_URL);}return archiveModule;}
   mount();
   const ready=(async()=>{if(document.readyState!=='complete')await new Promise(resolve=>document.addEventListener('DOMContentLoaded',resolve,{once:true}));try{const stored=localStorage.getItem(KEY);if(stored)db=await validateDatabase(JSON.parse(stored));}catch(e){recoveryRequired=true;status('#ledger-status','저장된 기록을 읽지 못했습니다: '+e.message+' 기존 저장본은 덮어쓰지 않고 JSON 복원을 기다립니다.',true);}
     for(const role of ['red','blue']){const config=H.builtin(role),hash=await H.hash(config);if(!db.harnesses.some(h=>h.hash===hash))db.harnesses.unshift({config,hash});}refreshHarness();refreshRuns();$('#harness-editor').value=JSON.stringify(H.builtin('red'),null,2);
   })();ready.catch(()=>{});
+  async function openReview(id){await ready;if(!db.runs.some(r=>r.id===id))return false;$('#evaluation-run').value=id;renderEvaluation();return true;}
   globalThis.FalsifyLab={ready,external,allowed:role=>!deriving[role]&&runnable(role)&&(!external(role)||$('#'+role+'-harness-consent').checked),
     // value covers execution, source binding and record transitions; CLI controls follow the same lock.
     busy(role,value){value=!!value;$('#'+role+'-harness').disabled=value;$('#'+role+'-harness-consent').disabled=value;if(locked[role]!==value){locked[role]=value;renderCli(role);}},
     // Captures the CLI/model/effort actually selected, after any pending derivation, as an immutable copy for this request.
     async bind(role,request){await ready;while(deriving[role])await deriving[role];if(!effective[role])throw Error('실행 harness 선택을 확정하지 못했습니다. CLI 선택을 확인하세요.');const config=clone(effective[role].config),clean=clone(request);for(const k of PRIVATE)delete clean[k];return {...clean,harness:config,harnessCanonical:H.canonical(config),...(external(role)?{executionConsent:$('#'+role+'-harness-consent').checked}:{})};},
     // Selects a saved run in 검수 without navigating; navigation stays with the caller.
-    async review(id){await ready;if(!db.runs.some(r=>r.id===id))return false;$('#evaluation-run').value=id;renderEvaluation();return true;},
+    async review(id){return openReview(id);},
     // Read-only copy of the validated local ledger for an explicit cloud export. Unreadable storage awaiting JSON recovery is never exported.
     async cloudSnapshot(){await ready;if(recoveryRequired)throw Error('저장된 기록을 읽지 못해 내보내기를 막았습니다. 먼저 백업 JSON을 복원하세요.');return clone(db);},
+    // Explicit team archive into this browser. One validated merge, or a harness preview. Not an execution or provenance upgrade.
+    async restoreArchive(archive){
+      await ready;if(recoveryRequired)throw Error('저장된 기록을 읽지 못해 내보내기를 막았습니다. 먼저 백업 JSON을 복원하세요.');
+      const codec=await reviewBundle();
+      let normalized;try{normalized=await codec.validateArchive(archive,{harness:H,red:FalsifyDocumentRed,blue:FalsifyDocumentBlue,review:FalsifyReview});}catch(e){status('#ledger-status','아카이브 복원 차단: '+(e.message||'형식 오류'),true);throw e;}
+      if(normalized.kind==='harness'){const hash=await this.previewSharedHarness(normalized.data.config,normalized.data.hash);return {kind:'harness',hash};}
+      try{
+        const ledger=normalized.data.ledger,raw=JSON.stringify(ledger);
+        if(raw.length>LEDGER_CHARS)throw Error('로컬 기록 한도(4.5M자)를 넘는 아카이브는 자르지 않고 거부했습니다. 기존 기록은 그대로입니다.');
+        const imported=await validateDatabase(ledger,true,db.runs);
+        if(!imported.runs.some(r=>r.id===normalized.id))throw Error('아카이브에 선택한 실행 기록이 없습니다.');
+        const next=mergedCopy(imported);
+        try{await validateDatabase(next);}catch(e){throw Error('병합 결과가 다시 읽기 검증을 통과하지 못해 복원을 중단했습니다. 기존 기록은 그대로입니다. '+e.message);}
+        const added=next.harnesses.length!==db.harnesses.length||next.runs.length!==db.runs.length||next.reviews.length!==db.reviews.length;
+        if(added)persist(next);
+        refreshHarness();refreshRuns();
+        if(!await openReview(normalized.id))throw Error('복원한 기록을 검수 화면에서 열지 못했습니다.');
+        status('#ledger-status',added?'팀 아카이브를 이 브라우저에 병합했습니다. 가져온 기록은 출처 미검증이며 실행으로 세지 않습니다.':'이미 같은 아카이브 기록이 있어 추가하지 않았습니다. 기존 출처와 기록은 그대로입니다.');
+        return {kind:'experiment',runId:normalized.id};
+      }catch(e){status('#ledger-status','아카이브 복원 차단: '+e.message,true);throw e;}
+    },
     // A shared harness only fills the editor and the review panel: never registered, selected or executed. Navigation stays with the caller.
     async previewSharedHarness(config,expectedHash){await ready;let valid,hash;try{valid=H.validate(config);hash=await H.hash(valid);if(expectedHash!==undefined&&expectedHash!==hash)throw Error('공유 harness의 내용 해시가 기록과 다릅니다.');}catch(e){$('#harness-preview').hidden=true;status('#harness-status','공유 harness를 불러오지 못했습니다: '+e.message,true);throw e;}
       $('#harness-editor').value=JSON.stringify(valid,null,2);await previewHarness(valid,'공유 Harness 검토');status('#harness-status','공유 기록의 harness를 편집기에 불러왔습니다. 등록·선택·실행은 하지 않았습니다. 내용을 검토한 뒤 직접 등록하세요.');return hash;},
@@ -230,5 +263,5 @@
   $('#harness-register').addEventListener('click',async()=>{try{await ready;const config=H.validate(JSON.parse($('#harness-editor').value)),hash=await H.hash(config);if(db.harnesses.some(h=>h.hash===hash))throw Error('이미 등록된 내용입니다. 지침/버전/설정을 바꾸세요.');if(db.harnesses.length>=100)throw Error('harness는 최대 100개');const previous=db.harnesses.filter(h=>h.config.id===config.id&&h.config.role===config.role).at(-1);const changed=previous?Object.keys(config).filter(k=>JSON.stringify(previous.config[k])!==JSON.stringify(config[k])).concat(Object.keys(previous.config).filter(k=>!(k in config))):[];persist({...db,harnesses:[...db.harnesses,{config,hash}]});$('#harness-editor').value=JSON.stringify(config,null,2);refreshHarness();status('#harness-status','새 버전 등록: '+hash+(previous?'\n이전 동일 ID에서 변경: '+changed.join(', '):'')+'\nRED / BLUE의 선택 메뉴에서 사용할 버전을 선택하세요. 등록만으로 실행하지 않습니다.');}catch(e){status('#harness-status',e.message,true);}});
   $('#harness-download').addEventListener('click',()=>{try{saveJSON(H.validate(JSON.parse($('#harness-editor').value)),'falsify-harness.json');}catch(e){status('#harness-status',e.message,true);}});
   $('#ledger-export').addEventListener('click',()=>saveJSON(db,'falsify-experiment-ledger.json'));
-  $('#ledger-import').addEventListener('change',async()=>{const f=$('#ledger-import').files[0];if(!f)return;try{if(f.size>4500000)throw Error('백업은 4.5MB 이내');const imported=await validateDatabase(JSON.parse(await f.text()),true,db.runs);const next=clone(db);for(const h of imported.harnesses)if(!next.harnesses.some(x=>x.hash===h.hash))next.harnesses.push(h);for(const r of imported.runs){const old=next.runs.find(x=>x.id===r.id);if(old&&stable({...old,provenance:r.provenance})!==stable(r))throw Error('같은 실행 ID의 내용이 달라 병합을 차단했습니다.');if(!old)next.runs.push(r);}for(const v of imported.reviews){const old=next.reviews.find(x=>x.id===v.id);if(old&&stable(old)!==stable(v))throw Error('같은 검수 ID의 내용이 달라 병합을 차단했습니다.');if(!old)next.reviews.push(v);}if(next.runs.length>100||next.harnesses.length>100||next.reviews.length>1000)throw Error('병합 후 수량 한도 초과');persist(next,true);refreshHarness();refreshRuns();status('#ledger-status','백업을 병합했습니다. 가져온 기록은 출처 미검증이며 실행으로 세지 않습니다.');}catch(e){status('#ledger-status','복원 차단: '+e.message,true);}});
+  $('#ledger-import').addEventListener('change',async()=>{const f=$('#ledger-import').files[0];if(!f)return;try{if(f.size>LEDGER_CHARS)throw Error('백업은 4.5MB 이내');const imported=await validateDatabase(JSON.parse(await f.text()),true,db.runs);persist(mergedCopy(imported),true);refreshHarness();refreshRuns();status('#ledger-status','백업을 병합했습니다. 가져온 기록은 출처 미검증이며 실행으로 세지 않습니다.');}catch(e){status('#ledger-status','복원 차단: '+e.message,true);}});
 })();
