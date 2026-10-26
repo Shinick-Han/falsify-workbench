@@ -35,7 +35,7 @@ Draft storage is `localStorage` key `falsify.paper-draft.v1.<fileHash>`. It is w
 
 ## Provenance
 
-No new dependency and no new network service. PDF.js 6.4.299 and the Lucide sprite are the existing vendored copies (`app/dist/vendor/LICENSE-PDFJS.txt`, Apache-2.0). Text-layer CSS is the small set required by that library's inline custom properties, not a copy of `pdf_viewer.css`. The controller itself is project code under AGPL-3.0-only.
+No new dependency and no new network service. PDF.js 6.4.299 is the existing vendored copy (`app/dist/vendor/LICENSE-PDFJS.txt`, Apache-2.0). The Lucide sprite is the existing vendored copy (`app/dist/vendor/LICENSE-LUCIDE.txt`, ISC). Text-layer CSS is the small set required by PDF.js inline custom properties, not a copy of `pdf_viewer.css`. The controller itself is project code under AGPL-3.0-only.
 
 ## Limits
 
