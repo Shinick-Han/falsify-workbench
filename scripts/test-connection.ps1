@@ -84,6 +84,19 @@ $malformed += @(
 )
 foreach ($uri in $malformed) { Check ('rejects [{0}]' -f ($uri -replace "`r", '\r' -replace "`n", '\n')) (Test-Rejected $uri) }
 Check 'rejects null' (Test-Rejected $null)
+$nonceA = 'A' * 43; $nonceB = 'B' * 43; $nonceC = 'C' * 43
+$pairUri = "falsify://connect?port=7816&challenge=$nonceA&state=$nonceB&proof=$nonceC"
+$pairRoot = "falsify://connect/?port=65535&challenge=$nonceA&state=$nonceB&proof=$nonceC"
+$parsedPair = ConvertFrom-FalsifyConnectLink $pairUri
+Check 'pairing link keeps port and sets pairing' ($parsedPair.Port -eq 7816 -and $parsedPair.Pairing -eq $true -and $parsedPair.Challenge -ceq $nonceA)
+Check 'pairing root-slash link' ((ConvertFrom-FalsifyConnectLink $pairRoot).Port -eq 65535)
+Check 'port-only parser still rejects nonce links' (Test-Rejected $pairUri)
+Check 'pairing link rejects command suffix' (Test-Throws { ConvertFrom-FalsifyConnectLink ($pairUri + '&cmd=calc') })
+Check 'pairing link rejects token key' (Test-Throws { ConvertFrom-FalsifyConnectLink "falsify://connect?port=7816&token=abc&challenge=$nonceA&state=$nonceB&proof=$nonceC" })
+Check 'approval cancel is not launch' ((Get-FalsifyApprovalDecision -Origin 'https://shinick-han.github.io' -Choice 'no') -eq 'Cancel')
+Check 'approval without a choice asks' ((Get-FalsifyApprovalDecision -Origin 'https://shinick-han.github.io' -Choice '') -eq 'Ask')
+Check 'approval of another origin is refused' ((Get-FalsifyApprovalDecision -Origin 'https://evil.example' -Choice 'yes') -eq 'Refuse')
+Check 'approval yes is explicit' ((Get-FalsifyApprovalDecision -Origin 'https://shinick-han.github.io' -Choice 'yes') -eq 'Approve')
 
 # --- open-connection.ps1 fails closed before launching anything --------------------------
 $openScript = Join-Path $root 'open-connection.ps1'
@@ -101,6 +114,10 @@ $result = Invoke-Child @('-File', $openScript, 'falsify://connect?port=7817') $d
 Check 'open-connection valid link reaches launcher with typed port' ($result.ExitCode -eq 0 -and $result.Output -match 'DRY-RUN start-companion port=7817 ')
 $result = Invoke-Child @('-File', $openScript, 'falsify://connect/?port=7817') $dryRun
 Check 'open-connection ShellExecute root-slash link reaches launcher with typed port' ($result.ExitCode -eq 0 -and $result.Output -match 'DRY-RUN start-companion port=7817 ')
+$result = Invoke-Child @('-File', $openScript, $pairUri) @{ FALSIFY_CONNECT_DRY_RUN = '1'; FALSIFY_CONNECT_APPROVAL = 'no' }
+Check 'open-connection user cancel does not launch or print nonces' ($result.ExitCode -ne 0 -and $result.Output -match 'cancelled' -and $result.Output -notmatch [regex]::Escape($nonceA) -and $result.Output -notmatch 'DRY-RUN start-companion')
+$result = Invoke-Child @('-File', $openScript, $pairUri) @{ FALSIFY_CONNECT_DRY_RUN = '1'; FALSIFY_CONNECT_APPROVAL = 'yes' }
+Check 'open-connection approved pairing dry-run hides nonces' ($result.ExitCode -eq 0 -and $result.Output -match 'DRY-RUN start-companion port=7816 pairing=1 ' -and $result.Output -notmatch [regex]::Escape($nonceA))
 
 # --- Registered command quoting with spaces ----------------------------------------------
 $spacedDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ('falsify launcher test ' + [guid]::NewGuid().ToString('N'))
@@ -215,9 +232,11 @@ $sources = @{}
 foreach ($file in @('falsify-connection.psm1', 'companion-lifecycle.psm1', 'install-connection.ps1', 'open-connection.ps1', 'uninstall-connection.ps1', 'start-companion.ps1')) { $sources[$file] = Get-Content -LiteralPath (Join-Path $root $file) -Raw }
 $all = ($sources.Values -join "`n")
 $allCode = $all -replace '(?m)^\s*#.*$', ''
-# The one allowed Start-Process runs the broker inside the connection terminal itself (-NoNewWindow), never detached.
-$brokerLaunch = '$broker = Start-Process -FilePath $venvPython -ArgumentList (Join-FalsifyNativeArguments -Arguments $brokerArguments) -NoNewWindow -PassThru'
-Check 'only Start-Process is the in-terminal broker' (([regex]::Matches($allCode, 'Start-Process')).Count -eq 1 -and $sources['start-companion.ps1'].Contains($brokerLaunch))
+# The one allowed Start-Process is splatted. Foreground stays in this window; background is hidden and still this same call.
+$brokerLaunch = '$broker = Start-Process @brokerStart'
+Check 'only Start-Process is the broker' (([regex]::Matches($allCode, 'Start-Process')).Count -eq 1 -and $sources['start-companion.ps1'].Contains($brokerLaunch))
+Check 'foreground stays in the connection window' ($sources['start-companion.ps1'].Contains('$brokerStart.NoNewWindow = $true'))
+Check 'background is hidden only for approved pairing' ($sources['start-companion.ps1'].Contains("if (`$Background) { `$brokerStart.WindowStyle = 'Hidden' }"))
 Check 'no process termination' ($all -notmatch '(?i)Stop-Process|taskkill|\.Kill\(')
 Check 'no recursive registry delete' ($all -notmatch '(?i)Remove-Item[^\r\n]*-Recurse|Remove-ItemProperty|reg(\.exe)?\s+delete')
 Check 'no machine-wide writes' ($all -notmatch '(?i)(New-Item|Set-ItemProperty|Remove-Item)[^\r\n]*HKLM')
