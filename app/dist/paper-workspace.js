@@ -110,7 +110,19 @@
     }
     return null;
   }
-  function anchorFromSelection(items,viewBox,hitIndexes){
+  function pageRotation(value){
+    const n=Number(value);
+    if(!Number.isFinite(n))return 0;
+    return ((Math.round(n)%360)+360)%360;
+  }
+  function anchorFromSelection(items,viewBox,hitIndexes,geometry){
+    const meta=geometry&&typeof geometry==='object'?geometry:{};
+    const rotation=pageRotation(meta.rotation);
+    if(rotation!==0)return null;
+    const box=Array.isArray(viewBox)&&viewBox.length>=4?viewBox:[0,0,0,0];
+    const pageWidth=Number.isFinite(meta.pageWidth)?meta.pageWidth:box[2]-box[0];
+    const pageHeight=Number.isFinite(meta.pageHeight)?meta.pageHeight:box[3]-box[1];
+    if(!(pageWidth>0&&pageHeight>0))return null;
     if(!Array.isArray(items)||!Array.isArray(hitIndexes)||!hitIndexes.length)return null;
     const index=indexItems(items),wanted=new Set(hitIndexes);
     const ordered=index.spans.filter(s=>wanted.has(s.i));
@@ -131,7 +143,23 @@
       if(!box)return null;
       boxes.push(box);
     }
-    return {before,anchor:{bbox:union(boxes),occurrence,start,end}};
+    return {before,anchor:{bbox:union(boxes),coordinate:'top-left',pageWidth:round(pageWidth),pageHeight:round(pageHeight),rotation:0,occurrence,start,end}};
+  }
+  function visualAnchor(items,viewBox,before,geometry){
+    if(pageRotation(geometry&&geometry.rotation)!==0)return null;
+    const index=indexItems(items);
+    if(typeof before!=='string'||!before)return null;
+    const at=index.text.indexOf(before);
+    if(at<0||index.text.indexOf(before,at+before.length)>=0)return null;
+    const hits=[];
+    for(const span of index.spans){
+      if(span.end<=at||span.start>=at+before.length)continue;
+      if(span.start<at||span.end>at+before.length)return null;
+      hits.push(span.i);
+    }
+    if(!hits.length)return null;
+    const located=anchorFromSelection(items,viewBox,hits,geometry);
+    return located&&located.before===before?located.anchor:null;
   }
   function clampScale(base,stageWidth,factor,fitScale){
     if(!base||typeof fitScale!=='function')return 0;
@@ -146,6 +174,17 @@
   function isFile(f){return !!f&&typeof f.arrayBuffer==='function'&&typeof f.size==='number'&&typeof f.name==='string';}
   function isPdf(file){return String(file&&file.name||'').toLowerCase().endsWith('.pdf')||file&&file.type==='application/pdf';}
   function clone(v){try{return JSON.parse(JSON.stringify(v));}catch{return null;}}
+  function published(value){
+    const copy=clone(value);
+    if(!copy||typeof copy!=='object')return copy;
+    const walk=o=>{if(!o||typeof o!=='object')return;for(const v of Object.values(o))walk(v);Object.freeze(o);};
+    walk(copy);return copy;
+  }
+  function diagnosticText(warnings){
+    if(!Array.isArray(warnings))return '';
+    const parts=warnings.filter(s=>typeof s==='string'&&s.trim()&&s.length<=180&&!/[<>]/.test(s)).slice(0,4);
+    return parts.length?'진단: '+parts.join(' · ')+'. PDF 내용에는 넣지 않습니다.':'';
+  }
   function scrub(value,depth){
     if(depth>5)return null;
     if(Array.isArray(value))return value.slice(0,24).map(v=>scrub(v,depth+1));
@@ -334,7 +373,7 @@
         li.append(title,body,accept);ui.proposalList.append(li);
       });
     }
-    function onSnapshot(snap){snapshot=snap;emit('falsify:paper-workspace-edits',clone(snap));renderEdits();paintProposals();void drawAfter();}
+    function onSnapshot(snap){snapshot=snap;const copy=published(snap);if(copy)emit('falsify:paper-workspace-edits',copy);renderEdits();paintProposals();void drawAfter();}
     function ensureSession(force){
       const api=editsApi();
       if(!api||typeof api.create!=='function'||!source||!source.fileHash)return;
@@ -492,10 +531,12 @@
           const divs=handle.textDivs||[];
           items.forEach((item,i)=>{if(divs[i]&&divs[i].dataset)divs[i].dataset.i=String(i);});
         }
-        pageText={items,viewBox:viewport.viewBox||[0,0,base.width,base.height],pageIndex:n-1,textEl};
+        const viewBox=viewport.viewBox||[0,0,base.width,base.height];
+        const rotation=pageRotation(viewport.rotation);
+        pageText={items,viewBox,pageIndex:n-1,textEl,rotation,pageWidth:viewBox[2]-viewBox[0],pageHeight:viewBox[3]-viewBox[1]};
         clearStage(ui.beforeStage);ui.beforeStage.append(pageEl);
         pdfPage.cleanup&&pdfPage.cleanup();source.render=null;
-        setBeforeStatus(n+' / '+pages+'쪽 · 원본 바이트');
+        setBeforeStatus(n+' / '+pages+'쪽 · 원본 바이트'+(rotation?' · 회전된 쪽이라 좌표 편집은 받지 않습니다':''));
         renderChrome();void drawAfter();
       }catch(e){
         if(!live()||e&&e.name==='RenderingCancelledException')return;
@@ -522,7 +563,8 @@
         if(el&&el.dataset&&el.dataset.i!=null&&inside(el))hits.push(Number(el.dataset.i));
       }
       if(!hits.length){setEditStatus('선택한 글의 위치를 한 곳으로 확정하지 못해 편집으로 넣지 않았습니다.',true);return;}
-      const located=anchorFromSelection(pageText.items,pageText.viewBox,hits);
+      if(pageText.rotation){setEditStatus('회전된 쪽은 위쪽 원점 좌표로 확정할 수 없어 편집으로 넣지 않았습니다.',true);return;}
+      const located=anchorFromSelection(pageText.items,pageText.viewBox,hits,{rotation:0,pageWidth:pageText.pageWidth,pageHeight:pageText.pageHeight});
       if(!located){setEditStatus('선택한 글의 위치를 한 곳으로 확정하지 못해 편집으로 넣지 않았습니다.',true);return;}
       const same=(source.segments||[]).filter(s=>typeof s.text==='string'&&s.text.indexOf(located.before)===s.text.lastIndexOf(located.before)&&s.text.includes(located.before)&&segmentPage(s)===pageText.pageIndex);
       inline={before:located.before,after:'',anchor:located.anchor,pageIndex:pageText.pageIndex,segmentId:same.length===1?same[0].id:undefined,editId:null};
@@ -566,7 +608,12 @@
       if(!item||item.status!=='matched'||accepted.has(index)){setProposalStatus('확정되지 않은 제안은 적용하지 않습니다.',true);return;}
       if(!session){setProposalStatus('편집 코어가 없어 제안을 적용하지 않았습니다.',true);return;}
       try{
-        const id=session.add({pageIndex:item.pageIndex,segmentId:item.segmentId,before:item.before,after:item.after,anchor:item.anchor,origin:proposalQueue.origin});
+        const anchor=Object.assign({},item.anchor||{});
+        const geometry=pageText&&pageText.pageIndex===item.pageIndex?{rotation:pageText.rotation,pageWidth:pageText.pageWidth,pageHeight:pageText.pageHeight}:null;
+        const visual=geometry?visualAnchor(pageText.items,pageText.viewBox,item.before,geometry):null;
+        if(visual)Object.assign(anchor,visual);
+        else if(geometry&&geometry.rotation){anchor.rotation=geometry.rotation;anchor.pageWidth=round(geometry.pageWidth);anchor.pageHeight=round(geometry.pageHeight);delete anchor.bbox;delete anchor.coordinate;}
+        const id=session.add({pageIndex:item.pageIndex,segmentId:item.segmentId,before:item.before,after:item.after,anchor,origin:proposalQueue.origin});
         if(id&&proposalQueue.model)modelById.set(id,proposalQueue.model);
         accepted.add(index);paintProposals();
         setProposalStatus(originText(proposalQueue.origin,proposalQueue.model)+' 제안을 편집 목록에 넣었습니다.');
@@ -639,8 +686,9 @@
         if(await sha256Hex(bytes)!==result.sha256)throw new Error('생성 파일의 바이트와 해시가 달라 받지 않았습니다.');
         if(new TextDecoder().decode(bytes.subarray(0,1024)).indexOf('%PDF-')<0)throw new Error('생성 결과에 PDF 서명이 없어 받지 않았습니다.');
         output={file:result.file,sha256:result.sha256,verification:result.verification==null?null:result.verification,revision,blocked:false};
-        emit('falsify:paper-workspace-output',{sha256:output.sha256,revision:output.revision,verification:scrub(output.verification,0)});
-        setGenStatus(stale()?'생성본을 받았지만 그 사이 편집이 바뀌어 마지막 생성본으로만 표시합니다.':'생성본을 받았습니다. 미리보기와 다운로드는 이 파일의 바이트입니다.');
+        const noted=diagnosticText(result.warnings);
+        emit('falsify:paper-workspace-output',published({sha256:output.sha256,revision:output.revision,verification:scrub(output.verification,0)}));
+        setGenStatus((stale()?'생성본을 받았지만 그 사이 편집이 바뀌어 마지막 생성본으로만 표시합니다.':'생성본을 받았습니다. 미리보기와 다운로드는 이 파일의 바이트입니다.')+(noted?' '+noted:''));
         await drawAfter();
       }catch(e){
         if(mine!==genId||epoch!==epochAt||!source||source.fileHash!==hash)return;
@@ -699,7 +747,7 @@
     }
     function share(){
       if(!output||output.blocked)return;
-      emit('falsify:paper-team-share',{sha256:output.sha256,revision:output.revision,verification:scrub(output.verification,0),name:output.file.name});
+      emit('falsify:paper-team-share',published({sha256:output.sha256,revision:output.revision,verification:scrub(output.verification,0),name:output.file.name}));
       setGenStatus('팀 공개 요청만 보냈습니다. 동의 화면 없이 업로드하지 않으며, 비공개 초안은 포함하지 않습니다.');
     }
     function handoff(){
@@ -775,9 +823,9 @@
     if(ui.file.files&&ui.file.files[0])void openFile(ui.file.files[0]);
     return {
       acceptProposals,
-      getSource(){if(!source||!source.file||!source.fileHash)return null;return {file:source.file,fileHash:source.fileHash,segments:source.segments.map(s=>Object.assign({},s))};},
-      getEditSnapshot(){if(session&&typeof session.snapshot==='function')return session.snapshot();return snapshot?clone(snapshot):null;},
-      getOutput(){if(!output)return null;return {file:output.file,sha256:output.sha256,verification:output.verification,revision:output.revision};}
+      getSource(){if(!source||!source.file||!source.fileHash)return null;return Object.freeze({file:source.file,fileHash:source.fileHash,segments:published(source.segments)||[]});},
+      getEditSnapshot(){const raw=session&&typeof session.snapshot==='function'?session.snapshot():snapshot;return raw?published(raw):null;},
+      getOutput(){if(!output||output.blocked)return null;return Object.freeze({file:output.file,sha256:output.sha256,verification:published(output.verification),revision:output.revision});}
     };
   }
   return {create,pageIndexFromLabel,classifyProposals,anchorFromSelection,clampScale,TTL};

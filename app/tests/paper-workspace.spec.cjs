@@ -61,7 +61,7 @@ function dom(){
   get('paper-draft-opt').type='checkbox';get('paper-file').type='file';
   return {document,get,created};
 }
-function pdfjs({pages=2,hold=false,make,items=ITEMS}={}){
+function pdfjs({pages=2,hold=false,make,items=ITEMS,rotation=0}={}){
   const state={pageCount:pages};
   const log={params:[],received:[],tasks:[],renders:[],setPages(n){state.pageCount=n;}};
   class TextLayer{constructor({textContentSource,container}){this.container=container;this.textDivs=(textContentSource.items||[]).map(()=>make('span'));}
@@ -73,7 +73,7 @@ function pdfjs({pages=2,hold=false,make,items=ITEMS}={}){
     task.destroy=async()=>{task.destroyed=true;reject(Object.assign(new Error('Worker was destroyed'),{name:'AbortException'}));};
     task.open=()=>{if(task.destroyed)return;const count=state.pageCount;resolve({numPages:count,getPage:async n=>{
       if(n<1||n>count)throw new Error('page');
-      return {getViewport:({scale})=>({width:612*scale,height:792*scale,viewBox:[0,0,612,792]}),
+      return {getViewport:({scale})=>({width:612*scale,height:792*scale,viewBox:[0,0,612,792],rotation}),
         getTextContent:async()=>({items:items.map(item=>({...item,transform:item.transform.slice()}))}),cleanup(){},
         render({canvas}){let ok,no;const r={cancelled:false,promise:new Promise((a,b)=>{ok=a;no=b;})};
           r.cancel=()=>{if(r.done)return;r.cancelled=true;r.done=true;no(Object.assign(new Error('Rendering cancelled'),{name:'RenderingCancelledException'}));};
@@ -106,7 +106,7 @@ function editCore(){
 function mount(opts={}){
   const w=dom(),storage=opts.storage||memory(),downloads=[],long=[];
   const timers={setTimeout(fn,ms){if(ms>=1000){long.push(fn);return 1e9+long.length-1;}return setTimeout(fn,ms);},clearTimeout(id){if(id>=1e9){long[id-1e9]=null;return;}clearTimeout(id);}};
-  const {lib,log}=pdfjs({pages:opts.pages??2,hold:!!opts.hold,make:tag=>w.document.createElement(tag),items:opts.items});
+  const {lib,log}=pdfjs({pages:opts.pages??2,hold:!!opts.hold,make:tag=>w.document.createElement(tag),items:opts.items,rotation:opts.rotation||0});
   w.get('paper-before-stage').clientWidth=opts.width||640;w.get('paper-after-stage').clientWidth=opts.width||640;
   const edits=opts.edits===false?null:editCore();
   const exporter=opts.exporter||null;
@@ -125,6 +125,12 @@ test('geometry: the second occurrence keeps its own top-left box and is not coll
   const second=api.anchorFromSelection(ITEMS,[0,0,612,792],[1]);
   assert.equal(second.before,'Alpha');assert.deepEqual(second.anchor.bbox,[10,700,50,712]);
   assert.equal(second.anchor.occurrence,1);assert.equal(second.anchor.start,5);assert.equal(second.anchor.end,10);
+  assert.equal(second.anchor.coordinate,'top-left');assert.equal(second.anchor.rotation,0);
+  assert.equal(second.anchor.pageWidth,612);assert.equal(second.anchor.pageHeight,792);
+  assert.equal(api.anchorFromSelection(ITEMS,[0,0,612,792],[1],{rotation:90}),null);
+  assert.equal(api.anchorFromSelection(ITEMS,[0,0,612,792],[1],{rotation:180}),null);
+  assert.equal(api.anchorFromSelection(ITEMS,[0,0,612,792],[1],{rotation:270}),null);
+  assert.equal(api.anchorFromSelection(ITEMS,[0,0,612,792],[1],{rotation:360}).anchor.rotation,0);
   const first=api.anchorFromSelection(ITEMS,[0,0,612,792],[0]);
   assert.deepEqual(first.anchor.bbox,[10,680,50,692]);assert.equal(first.anchor.occurrence,0);assert.equal(first.anchor.start,0);
   assert.equal(api.pageIndexFromLabel('PDF p. 2'),1);assert.equal(api.pageIndexFromLabel('page 2'),null);
@@ -145,8 +151,9 @@ test('geometry: the second occurrence keeps its own top-left box and is not coll
 
 test('markup: scripts, optional AI disclosure, empty import mount, and bounded stage',()=>{
   const at=s=>HTML.indexOf(s);
-  assert.ok(at('src="app.js')<at('src="paper-edits.js"')&&at('src="paper-edits.js"')<at('src="external-red.js"')&&at('src="external-red.js"')<at('src="browser-pdf.js"')&&at('src="browser-pdf.js"')<at('src="paper-workspace.js"')&&at('src="paper-workspace.js"')<at('src="external-red-ui.js"')&&at('src="external-red-ui.js"')<at('src="document-red.js'));
-  assert.match(HTML,/href="paper-workspace.css"/);assert.match(HTML,/href="external-red-ui.css"/);
+  assert.ok(at('src="local-bridge.js"')<at('src="auto-pair.js"')&&at('src="auto-pair.js"')<at('src="app.js'));
+  assert.ok(at('src="app.js')<at('src="paper-edits.js"')&&at('src="paper-edits.js"')<at('src="external-red.js"')&&at('src="external-red.js"')<at('src="browser-pdf.js"')&&at('src="browser-pdf.js"')<at('src="paper-workspace.js"')&&at('src="paper-workspace.js"')<at('src="external-red-ui.js"')&&at('src="external-red-ui.js"')<at('src="paper-manual-records.js"')&&at('src="paper-manual-records.js"')<at('src="document-red.js'));
+  assert.match(HTML,/href="paper-workspace.css"/);assert.match(HTML,/href="external-red-ui.css"/);assert.match(HTML,/href="paper-manual-records.css"/);
   assert.match(HTML,/<div id="paper-external-mount"><\/div>/);
   assert.match(HTML,/<details class="red-help" id="red-ai-optional"><summary>AI 검토 · 선택 사항<\/summary>/);
   assert.doesNotMatch(HTML,/id="red-ai-optional"[^>]*\sopen/);
@@ -180,6 +187,8 @@ test('reader: file input paints one original page before extraction, and the sec
   v.get('paper-inline-after').value='Beta';v.get('paper-inline-apply').click();
   assert.equal(v.edits.added.at(-1).origin,'human');
   assert.deepEqual(v.edits.added.at(-1).anchor.bbox,[10,700,50,712]);assert.equal(v.edits.added.at(-1).anchor.occurrence,1);
+  assert.equal(v.edits.added.at(-1).anchor.coordinate,'top-left');assert.equal(v.edits.added.at(-1).anchor.rotation,0);
+  assert.equal(v.edits.added.at(-1).anchor.pageWidth,612);assert.equal(v.edits.added.at(-1).anchor.pageHeight,792);
   assert.match(textOf(v.get('paper-edits')),/직접 편집/);assert.doesNotMatch(textOf(v.get('paper-edits')),/AI 제안|gpt-/);
   assert.match(v.get('paper-edit-status').textContent,/모델 실행으로 기록하지 않습니다/);
   v.document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file,result:{segments:[
@@ -202,6 +211,9 @@ test('reader: file input paints one original page before extraction, and the sec
   const off=buttons(v,'toggle',jumped)[0];assert.equal(off.textContent,'켜기');assert.equal(off.getAttribute('aria-pressed'),'false');
   buttons(v,'delete',jumped)[0].click();
   assert.equal(v.ws.getEditSnapshot().edits.some(e=>e.id===jumped),false);
+  const src=v.ws.getSource();const kept=src.segments[0].text;
+  assert.throws(()=>{src.segments[0].text='changed';});
+  assert.equal(v.ws.getSource().segments[0].text,kept);assert.equal(src.file,file);
 });
 
 test('keyboard: arrows move pages except from a field, Escape returns to the stage, and Ctrl+Z undoes',async()=>{
@@ -288,6 +300,12 @@ test('output: preview and download use the generated bytes; failure keeps the la
   exp.fail=false;v.get('paper-generate').click();
   await until(()=>v.ws.getOutput()&&v.get('paper-after-stage').children.some(c=>c.marker==='GEN'),'generated');
   const out=v.ws.getOutput();assert.equal(out.file,exp.files[0]);assert.equal(out.sha256,sha(pdfBytes('MARKER-GEN')));
+  assert.equal(out.revision,outputs[0].revision);assert.equal(out.sha256,outputs[0].sha256);
+  assert.throws(()=>{out.verification.applied=0;});assert.equal(v.ws.getOutput().verification.applied,1);
+  assert.throws(()=>{edits.at(-1).edits[0].after='stamped';});assert.equal(v.ws.getEditSnapshot().edits[0].after,'Beta');
+  for(const call of exp.calls){assert.equal(call.edits[0].after,'Beta');assert.doesNotMatch(JSON.stringify(call.edits),/공격|quality|stamp|provenance/);}
+  assert.match(v.get('paper-generate-status').textContent,/PDF 내용에는 넣지 않습니다/);
+  assert.doesNotMatch(v.get('paper-after-stage').children.find(c=>c.marker==='GEN').getAttribute('aria-label'),/font|진단|secret/);
   assert.equal(out.verification.token,'secret-token');
   assert.equal(outputs.length,1);assert.equal('file' in outputs[0],false);assert.equal('token' in outputs[0].verification,false);
   assert.equal(outputs[0].sha256,out.sha256);assert.equal(outputs[0].verification.applied,1);
@@ -299,7 +317,8 @@ test('output: preview and download use the generated bytes; failure keeps the la
   const beforeTeam=v.downloads.length;v.get('paper-team-share').click();
   assert.equal(v.downloads.length,beforeTeam,'team publication is not a download');
   assert.deepEqual(Object.keys(teams[0]).sort(),['name','revision','sha256','verification']);
-  assert.equal(teams[0].name,'current.pdf');assert.equal('token' in teams[0].verification,false);
+  assert.equal(teams[0].name,'current.pdf');assert.equal(teams[0].sha256,out.sha256);assert.equal(teams[0].revision,out.revision);
+  assert.equal('token' in teams[0].verification,false);assert.doesNotMatch(JSON.stringify(teams[0]),/%PDF/);
   assert.match(v.get('paper-generate-status').textContent,/업로드하지 않으며/);
   let blue=null;v.document.addEventListener('falsify:blue-file',e=>{blue=e.detail;e.preventDefault();});
   v.get('paper-blue-handoff').click();
@@ -387,6 +406,29 @@ test('bridge: manual JSON is not a model run, and a broker result keeps its mode
   await until(()=>/AI 제안 · gpt-test-1/.test(textOf(w.get('paper-proposal-list'))),'broker proposal');
   assert.match(textOf(w.get('paper-edits')),/아직 편집이 없습니다/);
   assert.equal(w.get('paper-proposal-list').querySelectorAll('button')[0].disabled,false);
+});
+
+test('coordinates: a rotated page stays visible and refuses a box; a unique upright match records top-left metadata',async()=>{
+  const turned=mount({pages:1,rotation:90});
+  turned.file(pdfFile(pdfBytes('MARKER-A'),'turn.pdf'));
+  await until(()=>turned.canvas().length===1,'rotated page');
+  assert.match(turned.get('paper-before-status').textContent,/회전된 쪽/);
+  const textEl=turned.get('paper-before-stage').children[0].children.find(c=>String(c.className).includes('textLayer'));
+  const span=textEl.querySelectorAll('span')[1];
+  turned.document.getSelection=()=>({isCollapsed:false,rangeCount:1,anchorNode:span,getRangeAt:()=>({commonAncestorContainer:textEl,intersectsNode:n=>n===span})});
+  turned.get('paper-before-stage').dispatchEvent(new Event('mouseup'));
+  assert.equal(turned.get('paper-inline').hidden,true);assert.equal(turned.edits.added.length,0);
+  assert.match(turned.get('paper-edit-status').textContent,/위쪽 원점 좌표로 확정할 수 없어/);
+  const one=[{str:'Alpha',transform:[1,0,0,1,10,100],width:40,height:12,hasEOL:false}];
+  const v=mount({pages:1,items:one});
+  const file=pdfFile(pdfBytes('MARKER-B'),'flat.pdf');
+  v.file(file);await until(()=>v.canvas().length===1,'upright page');
+  v.document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file,result:{segments:[{id:'s0',label:'PDF p. 1',text:'Alpha'}]}}}));
+  v.ws.acceptProposals([{segmentId:'s0',before:'Alpha',after:'Beta',status:'matched'}],{origin:'external-ai-import'});
+  v.get('paper-proposal-list').querySelectorAll('button')[0].click();
+  const anchor=v.edits.added.at(-1).anchor;
+  assert.equal(v.edits.added.at(-1).after,'Beta');assert.equal(anchor.coordinate,'top-left');assert.equal(anchor.rotation,0);
+  assert.deepEqual(anchor.bbox,[10,680,50,692]);assert.equal(anchor.pageWidth,612);assert.equal(anchor.pageHeight,792);
 });
 
 (async()=>{let passed=0;for(const [name,fn] of tests){try{await fn();passed++;console.log('PASS '+name);}catch(e){console.error('FAIL '+name+'\n'+(e.stack||e));process.exitCode=1;}}
