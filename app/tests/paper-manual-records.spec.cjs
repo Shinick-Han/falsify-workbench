@@ -71,7 +71,7 @@ test('archive hash round-trips and rejects duplicate ids, stale output, PDF byte
   await assert.rejects(bundle.buildPaperEditArchive({...record,output:{sha256:HASH_A,revision:2,verification:{}}}),error=>error.code==='conflict'&&/Stale output/.test(error.message));
   await assert.rejects(bundle.buildPaperEditArchive({...record,segments:[{id:'s0',label:'p1',text:'%PDF-1.7 binary'}]}),error=>error.code==='malformed');
   await assert.rejects(bundle.buildPaperEditArchive({...record,gold:true,red:{marker:'RED-META'}}),error=>error.code==='malformed');
-  const reviews=[{id:'rv',createdAt:'2026-10-26T01:00:00.000Z',reviewer:'Synthetic',caseLabel:'manual',verdict:'supported',score:4,note:'Human reason.',alignment:null}];
+  const reviews=[{id:'rv',createdAt:'2026-10-26T01:00:00.000Z',reviewer:'Synthetic',caseLabel:'manual',verdict:'supported',score:4,note:'Human reason.',alignment:null,editRevision:3,outputHash:HASH_A,stale:false}];
   await assert.rejects(bundle.buildPaperEditArchive({...record,reviews:[reviews[0],reviews[0]]}),error=>error.code==='conflict');
   assert.equal(JSON.stringify(built).includes('local-codex'),false);
   assert.equal(JSON.stringify(built).includes('"harness"'),false);
@@ -303,6 +303,181 @@ test('ledger bridge opens a paper-edit without writing the AI ledger or copying 
   assert.equal(JSON.stringify(choices).includes('sourceRunId'),false);
   assert.equal(JSON.stringify(choices).includes('BLUE-RATIONALE'),true);
   assert.equal(String(storage.get(LEDGER)).includes('MANUAL-ARCHIVE-MARKER'),false);
+});
+
+test('real paper-edits core captures null style, duplicate ranges, history, and review binding',async()=>{
+  const bundle=await bundlePromise;
+  const {execFileSync}=require('node:child_process');
+  const os=require('node:os');
+  const coreFile=path.join(os.tmpdir(),'falsify-paper-edits-ebb7b21.js');
+  const coreSource=execFileSync('git',['show','origin/feature/paper-workspace-20261026:app/dist/paper-edits.js'],{encoding:'utf8'});
+  assert.match(coreSource,/FalsifyPaperEdits/);
+  fs.writeFileSync(coreFile,coreSource);
+  assert.equal(fs.existsSync(path.join(dist,'paper-edits.js')),false);
+  assert.equal(coreFile.startsWith(path.resolve(dist,'..','..')),false);
+  const E=require(coreFile);
+  let tick=1700000000000;
+  const segments=[{id:'s0',label:'p1',text:'alpha alpha',pageIndex:0}];
+  const session=E.create({fileHash:SOURCE,name:'synthetic.txt',segments,now:()=>tick++});
+  const editId=session.add({pageIndex:0,segmentId:'s0',before:'alpha',after:'beta',origin:'human',anchor:{start:6,end:11}});
+  session.update(editId,{anchor:{style:{font:'Times',size:11.5,color:0x102030}}});
+  const first=session.snapshot();
+  assert.equal(first.edits[0].anchor.bbox,null);
+  assert.equal(first.edits[0].anchor.style.font,'Times');
+  assert.equal(first.edits[0].anchor.occurrence,1);
+  assert.equal(first.edits[0].anchor.start,6);
+  assert.equal(first.edits[0].anchor.end,11);
+  const t=boot({bundle}); await t.api.ready;
+  const captured=await t.api.capture({source:{fileHash:SOURCE,name:'synthetic.txt',segments},snapshot:first,output:{sha256:HASH_A,revision:first.revision,verification:{applied:1}},now:tick});
+  const anchor=captured.edits[0].anchor;
+  assert.equal(anchor.start,6);
+  assert.equal(anchor.end,11);
+  assert.equal(anchor.occurrence,1);
+  assert.equal(anchor.bbox,null);
+  assert.equal(anchor.style.font,'Times');
+  assert.equal(anchor.style.size,11.5);
+  assert.equal(anchor.style.color,0x102030);
+  assert.equal(captured.edits[0].history.length,2);
+  assert.equal(captured.edits[0].createdAt<=captured.edits[0].updatedAt,true);
+  assert.equal(captured.edits[0].history[0].at,captured.edits[0].createdAt);
+  assert.equal(captured.edits[0].history[captured.edits[0].history.length-1].after,'beta');
+  const round=await bundle.validateArchive(await bundle.buildPaperEditArchive(captured));
+  assert.equal(round.data.record.edits[0].history.length,2);
+  assert.equal(round.data.record.edits[0].createdAt,captured.edits[0].createdAt);
+  assert.equal(round.data.record.edits[0].updatedAt,captured.edits[0].updatedAt);
+  assert.equal(round.data.record.edits[0].anchor.style.color,0x102030);
+  assert.equal(round.data.record.edits[0].anchor.bbox,null);
+  const located=t.api.locateEdit(captured,captured.edits[0]);
+  assert.equal(located.status,'matched');
+  assert.equal(located.start,6);
+  assert.equal(located.end,11);
+  assert.equal(located.occurrence,1);
+  assert.equal(t.api.locateEdit(captured,{...captured.edits[0],anchor:null}).status,'mismatch');
+  assert.equal(t.api.locateEdit(captured,{...captured.edits[0],anchor:{...anchor,occurrence:0}}).status,'mismatch');
+  assert.equal(t.api.locateEdit(captured,{...captured.edits[0],anchor:{...anchor,start:7,end:12}}).status,'mismatch');
+  const bad=copy(captured); bad.edits[0].anchor={...anchor,style:{font:'Times',size:12,color:'#ffffff'}};
+  await assert.rejects(async()=>bundle.normalizePaperEdit(bad),error=>error.code==='malformed');
+  const extra=copy(captured); extra.edits[0].anchor={...anchor,fontSize:12};
+  await assert.rejects(async()=>bundle.normalizePaperEdit(extra),error=>error.code==='malformed');
+  const review=await t.api.addReview('local:'+captured.id,{reviewer:'Synthetic',caseLabel:'first after',verdict:'supported',score:3,note:'Judged the first After.'});
+  assert.equal(review.editRevision,first.revision);
+  assert.equal(review.outputHash,HASH_A);
+  assert.equal(review.stale,false);
+  assert.match(t.$('paper-manual-history').textContent,/이 리비전 r/);
+  session.update(editId,{after:'gamma'});
+  const second=session.snapshot();
+  const next=await t.api.capture({source:{fileHash:SOURCE,name:'synthetic.txt',segments},snapshot:second,output:null,now:tick});
+  assert.equal(next.editRevision,second.revision);
+  assert.notEqual(next.editRevision,review.editRevision);
+  assert.equal(next.edits[0].after,'gamma');
+  assert.equal(next.edits[0].history.length,3);
+  assert.equal(next.reviews.length,1);
+  assert.equal(next.reviews[0].stale,true);
+  assert.equal(next.reviews[0].verdict,'supported');
+  assert.equal(next.reviews[0].editRevision,review.editRevision);
+  assert.equal(next.reviews[0].outputHash,HASH_A);
+  assert.equal(next.output,null);
+  const kept=await bundle.validateArchive(await bundle.buildPaperEditArchive(next));
+  assert.equal(kept.data.record.edits[0].history.length,3);
+  assert.equal(kept.data.reviews[0].stale,true);
+  assert.equal(kept.data.reviews[0].editRevision,review.editRevision);
+  const lie=copy(next); lie.reviews[0].stale=false;
+  await assert.rejects(async()=>bundle.normalizePaperEdit(lie),error=>error.code==='conflict');
+  assert.match(t.$('paper-manual-history').textContent,/현재 After에 적용하지 않음/);
+  assert.match(t.$('paper-manual-history').textContent,/beta/);
+  assert.equal(t.$('paper-manual-edits').textContent.includes('Judged the first After'),false);
+  assert.match(t.$('paper-manual-edits').textContent,/gamma/);
+  const linked=await t.api.linkOutput({sha256:HASH_B,revision:next.editRevision,verification:{applied:1}});
+  assert.equal(linked.sha256,HASH_B);
+  const current=t.api.records()[0];
+  assert.equal(current.reviews[0].stale,true);
+  assert.equal(current.reviews[0].outputHash,HASH_A);
+  assert.notEqual(current.reviews[0].outputHash,current.output.sha256);
+  const edit=current.edits[0];
+  assert.equal(t.api.overlaps(current,edit,{id:'EXACT',segmentId:'s0',quote:'alpha',start:6,end:11,rationale:'exact'}),'same-position');
+  assert.equal(t.api.overlaps(current,edit,{id:'OTHER',segmentId:'s0',quote:'alpha',start:0,end:5,rationale:'other'}),'same-page');
+  assert.equal(t.api.overlaps(current,edit,{id:'PAGE',segmentId:'s0',quote:'unrelated page text',rationale:'page'}),'same-page');
+  assert.equal(t.api.overlaps(current,edit,{id:'CTX',quote:'gamma',rationale:'context'}),'context');
+  t.ctx.FalsifyLab={blueFileChoices:()=>[{id:'blue-x',fileHash:HASH_B,sourceName:'blue',findings:[
+    {id:'EXACT',segmentId:'s0',quote:'alpha',start:6,end:11,rationale:'exact'},
+    {id:'OTHER',segmentId:'s0',quote:'alpha',start:0,end:5,rationale:'other'},
+    {id:'PAGE',segmentId:'s0',quote:'unrelated page text',rationale:'page'},
+    {id:'CTX',quote:'gamma',rationale:'context'}
+  ]}]};
+  await t.api.refreshBlue();
+  t.$('paper-manual-blue').value='blue-x'; t.$('paper-manual-blue').change();
+  const text=t.$('paper-manual-edits').textContent;
+  const same=text.indexOf('같은 자리의 BLUE 지적');
+  const page=text.indexOf('같은 쪽의 BLUE 지적');
+  const context=text.indexOf('문맥상 가까운 BLUE 지적');
+  assert.equal(same>=0&&text.indexOf('EXACT')>same&&text.indexOf('EXACT')<page,true);
+  assert.equal(text.indexOf('OTHER')>page&&text.indexOf('PAGE')>page&&text.indexOf('OTHER')<context,true);
+  assert.equal(text.indexOf('CTX')>context,true);
+  assert.equal(text.includes('탐지'),false);
+  assert.equal(t.posts.length,0);
+  assert.equal(t.fetches.length,0);
+});
+
+test('a stale capture or output link cannot overwrite a newer source or revision',async()=>{
+  const bundle=await bundlePromise;
+  const gate={hold:null};
+  const wrapped={
+    normalizePaperEdit(record){
+      const hold=gate.hold;
+      if(hold&&!hold.used){
+        hold.used=true;
+        return new Promise((resolve,reject)=>{hold.release=()=>{try{resolve(bundle.normalizePaperEdit(record));}catch(error){reject(error);}};});
+      }
+      return bundle.normalizePaperEdit(record);
+    },
+    buildPaperEditArchive:record=>bundle.buildPaperEditArchive(record),
+    validateArchive:archive=>bundle.validateArchive(archive),
+    archiveHash:archive=>bundle.archiveHash(archive)
+  };
+  const alpha=[{id:'s0',label:'p1',text:'alpha alpha',pageIndex:0}];
+  const omega=[{id:'s0',label:'p1',text:'omega omega',pageIndex:0}];
+  const alphaEdit={id:'e1',enabled:true,pageIndex:0,segmentId:'s0',before:'alpha',after:'OLD',origin:'human',anchor:{start:6,end:11,occurrence:1,bbox:null,style:null}};
+  const omegaEdit={id:'e9',enabled:true,pageIndex:0,segmentId:'s0',before:'omega',after:'NEW',origin:'human',anchor:{start:6,end:11,occurrence:1,bbox:null,style:null}};
+  const t=boot({bundle:wrapped}); await t.api.ready;
+  gate.hold={used:false};
+  const pending=t.api.capture({source:{fileHash:SOURCE,name:'a',segments:alpha},snapshot:snapshot(SOURCE,1,[alphaEdit]),output:{sha256:HASH_A,revision:1,verification:{}},now:1});
+  await flush();
+  assert.equal(typeof gate.hold.release,'function');
+  const kept=await t.api.capture({source:{fileHash:HASH_C,name:'b',segments:omega},snapshot:snapshot(HASH_C,4,[omegaEdit]),output:{sha256:HASH_B,revision:4,verification:{}},now:2});
+  gate.hold.release();
+  const old=await pending;
+  assert.equal(old.captured,false);
+  assert.equal(old.reason,'superseded');
+  assert.equal(t.api.records().length,1);
+  assert.equal(t.api.records()[0].id,kept.id);
+  assert.equal(t.api.records()[0].sourceFileHash,HASH_C);
+  assert.equal(t.api.records()[0].edits[0].after,'NEW');
+  assert.equal(t.api.records()[0].editRevision,4);
+  assert.equal(t.api.downloadLink(t.api.records()[0]).sha256,HASH_B);
+  gate.hold={used:false};
+  const pendingRevision=t.api.capture({source:{fileHash:HASH_C,name:'b',segments:omega},snapshot:snapshot(HASH_C,5,[{...omegaEdit,after:'MID'}]),output:{sha256:HASH_A,revision:5,verification:{}},now:3});
+  await flush();
+  await t.api.capture({source:{fileHash:HASH_C,name:'b',segments:omega},snapshot:snapshot(HASH_C,6,[{...omegaEdit,after:'LATE'}]),output:{sha256:HASH_C,revision:6,verification:{}},now:4});
+  gate.hold.release();
+  const mid=await pendingRevision;
+  assert.equal(mid.captured,false);
+  assert.equal(t.api.records().length,1);
+  assert.equal(t.api.records()[0].editRevision,6);
+  assert.equal(t.api.records()[0].edits[0].after,'LATE');
+  assert.equal(t.api.downloadLink(t.api.records()[0]).sha256,HASH_C);
+  gate.hold={used:false};
+  const pendingLink=t.api.linkOutput({sha256:HASH_A,revision:6,verification:{applied:1}});
+  await flush();
+  await t.api.capture({source:{fileHash:HASH_C,name:'b',segments:omega},snapshot:snapshot(HASH_C,7,[{...omegaEdit,after:'AFTER-LINK'}]),output:null,now:5});
+  gate.hold.release();
+  const linked=await pendingLink;
+  assert.equal(linked.linked,false);
+  assert.equal(linked.reason,'superseded');
+  assert.equal(t.api.records()[0].editRevision,7);
+  assert.equal(t.api.records()[0].edits[0].after,'AFTER-LINK');
+  assert.equal(t.api.downloadLink(t.api.records()[0]),null);
+  assert.equal(t.posts.length,0);
+  assert.equal(t.fetches.length,0);
 });
 
 test('manual record stylesheet keeps the airport tokens',()=>{

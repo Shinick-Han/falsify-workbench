@@ -166,7 +166,13 @@ const PAPER_ORIGINS=['human','external-ai-import','ai-proposal'];
 const PAPER_VERDICTS=['uncertain','supported','unsupported','mixed'];
 const FINDING_VERDICTS=['pending','supported','unsupported','mixed','uncertain'];
 const PAPER_BANNED=/^(pdf|pdfBytes|sourcePdf|sourcePDF|binary|bytes|contentBase64|gold|harness|attestation)$/;
-const ANCHOR_KEYS=['bbox','occurrence','start','end','fontSize','fontName','color'];
+const LEGACY_ANCHOR_KEYS=['bbox','occurrence','start','end','fontSize','fontName','color'];
+const REAL_ANCHOR_KEYS=['bbox','end','occurrence','start','style'];
+const STYLE_KEYS=['color','font','size'];
+const HISTORY_KEYS=['after','anchor','at','enabled','revision'];
+const EDIT_META_KEYS=['createdAt','updatedAt','history'];
+const PAPER_REVIEW_KEYS=['id','createdAt','reviewer','caseLabel','verdict','score','note','alignment','editRevision','outputHash','stale'];
+const MAX_CLOCK=8640000000000000;
 
 function rejectPaperCarrier(v,depth){
   if(v===null||typeof v==='boolean')return;
@@ -179,16 +185,61 @@ function rejectPaperCarrier(v,depth){
   if(keys.length>80)fail('oversize');
   for(const key of keys){if(PAPER_BANNED.test(key))fail('malformed','Paper-edit archive cannot carry PDF bytes, gold, or harness attestation.');rejectPaperCarrier(v[key],depth+1);}
 }
+function clockOf(value){return Number.isSafeInteger(value)&&value>=0&&value<=MAX_CLOCK;}
+function paperStyle(style){
+  if(style===null)return null;
+  if(!exact(style,STYLE_KEYS))fail('malformed','Edit anchor style is malformed.');
+  if(typeof style.font!=='string'||style.font.length<1||style.font.length>128||/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(style.font))fail('malformed','Edit anchor style is malformed.');
+  if(typeof style.size!=='number'||!Number.isFinite(style.size)||style.size<=0||style.size>1000)fail('malformed','Edit anchor style is malformed.');
+  if(!Number.isInteger(style.color)||style.color<0||style.color>0xffffff)fail('malformed','Edit anchor style is malformed.');
+  return {font:style.font,size:style.size,color:style.color};
+}
+function paperBbox(bbox,real){
+  if(bbox===null){if(real)return null;fail('malformed','Edit anchor box is malformed.');}
+  if(!Array.isArray(bbox)||bbox.length!==4)fail('malformed','Edit anchor box is malformed.');
+  const out=[];
+  for(const value of bbox){if(typeof value!=='number'||!Number.isFinite(value)||Math.abs(value)>100000)fail('malformed','Edit anchor box is malformed.');out.push(value);}
+  if(real&&!(out[0]<out[2]&&out[1]<out[3]))fail('malformed','Edit anchor box is malformed.');
+  return out;
+}
 function paperAnchor(anchor){
   if(anchor===null)return null;
-  if(!plain(anchor)||!Object.keys(anchor).length||Object.keys(anchor).some(key=>!ANCHOR_KEYS.includes(key)))fail('malformed','Edit anchor is malformed.');
+  if(!plain(anchor))fail('malformed','Edit anchor is malformed.');
+  if(own(anchor,'style')||own(anchor,'bbox')&&anchor.bbox===null){
+    if(!exact(anchor,REAL_ANCHOR_KEYS))fail('malformed','Edit anchor is malformed.');
+    if(!Number.isInteger(anchor.start)||anchor.start<0||anchor.start>200000)fail('malformed','Edit anchor offset is malformed.');
+    if(!Number.isInteger(anchor.end)||anchor.end<=anchor.start||anchor.end>200000)fail('malformed','Edit anchor offset is malformed.');
+    if(!Number.isInteger(anchor.occurrence)||anchor.occurrence<0||anchor.occurrence>999)fail('malformed','Edit anchor offset is malformed.');
+    return {start:anchor.start,end:anchor.end,occurrence:anchor.occurrence,bbox:paperBbox(anchor.bbox,true),style:paperStyle(anchor.style)};
+  }
+  if(!Object.keys(anchor).length||Object.keys(anchor).some(key=>!LEGACY_ANCHOR_KEYS.includes(key)))fail('malformed','Edit anchor is malformed.');
   const out={};
-  if(own(anchor,'bbox')){if(!Array.isArray(anchor.bbox)||anchor.bbox.length!==4||anchor.bbox.some(n=>typeof n!=='number'||!Number.isFinite(n)))fail('malformed','Edit anchor box is malformed.');out.bbox=anchor.bbox.slice();}
+  if(own(anchor,'bbox'))out.bbox=paperBbox(anchor.bbox,false);
   for(const key of ['occurrence','start','end'])if(own(anchor,key)){if(!Number.isInteger(anchor[key])||anchor[key]<0||anchor[key]>10000000)fail('malformed','Edit anchor offset is malformed.');out[key]=anchor[key];}
   if(own(anchor,'fontSize')){if(typeof anchor.fontSize!=='number'||!Number.isFinite(anchor.fontSize)||anchor.fontSize<=0||anchor.fontSize>512)fail('malformed');out.fontSize=anchor.fontSize;}
   if(own(anchor,'fontName')){if(typeof anchor.fontName!=='string'||!anchor.fontName.trim()||anchor.fontName.length>80)fail('malformed');out.fontName=anchor.fontName;}
   if(own(anchor,'color')){if(typeof anchor.color!=='string'||!/^#[0-9a-fA-F]{3,8}$/.test(anchor.color))fail('malformed');out.color=anchor.color;}
   return out;
+}
+function paperHistory(list,edit){
+  if(!Array.isArray(list)||list.length<1||list.length>12)fail('malformed','Edit history is malformed.');
+  if(!clockOf(edit.createdAt)||!clockOf(edit.updatedAt)||edit.createdAt>edit.updatedAt)fail('malformed','Edit history is malformed.');
+  if(!edit.anchor||!Number.isInteger(edit.anchor.start)||!Number.isInteger(edit.anchor.end)||!Number.isInteger(edit.anchor.occurrence))fail('malformed','Edit history range does not match the edit.');
+  const history=[];
+  for(const entry of list){
+    if(!exact(entry,HISTORY_KEYS))fail('malformed','Edit history is malformed.');
+    if(!clockOf(entry.revision)||!clockOf(entry.at))fail('malformed','Edit history is malformed.');
+    if(typeof entry.after!=='string'||entry.after.length>LIMITS.editText||entry.after===edit.before)fail('malformed','Edit history is malformed.');
+    if(typeof entry.enabled!=='boolean')fail('malformed','Edit history is malformed.');
+    rejectPaperCarrier(entry.after,0);
+    const anchor=paperAnchor(entry.anchor);
+    if(!anchor||anchor.start!==edit.anchor.start||anchor.end!==edit.anchor.end||anchor.occurrence!==edit.anchor.occurrence)fail('malformed','Edit history range does not match the edit.');
+    history.push({revision:entry.revision,at:entry.at,after:entry.after,enabled:entry.enabled,anchor});
+  }
+  const first=history[0],last=history[history.length-1];
+  if(first.at!==edit.createdAt||last.at!==edit.updatedAt||last.after!==edit.after||last.enabled!==edit.enabled)fail('malformed','Edit history does not match the current After.');
+  if(JSON.stringify(last.anchor)!==JSON.stringify(edit.anchor))fail('malformed','Edit history does not match the current After.');
+  return {createdAt:edit.createdAt,updatedAt:edit.updatedAt,history};
 }
 function paperSegments(list){
   if(!Array.isArray(list))fail('malformed','Paper source segments are malformed.');
@@ -212,7 +263,7 @@ function paperEdits(list,segments){
   if(list.length>LIMITS.paperEdits)fail('oversize');
   const ids=new Set(),known=new Set(segments.map(segment=>segment.id)),out=[];
   for(const edit of list){
-    if(!plain(edit)||Object.keys(edit).some(key=>!['id','enabled','pageIndex','segmentId','before','after','anchor','origin'].includes(key)))fail('malformed','Paper edit is malformed.');
+    if(!plain(edit)||Object.keys(edit).some(key=>!['id','enabled','pageIndex','segmentId','before','after','anchor','origin',...EDIT_META_KEYS].includes(key)))fail('malformed','Paper edit is malformed.');
     for(const key of ['id','enabled','pageIndex','before','after','origin'])if(!own(edit,key))fail('malformed','Paper edit is missing captured text or provenance.');
     if(typeof edit.id!=='string'||!edit.id||edit.id.length>80||ids.has(edit.id))fail('conflict','Duplicate edit id.');
     ids.add(edit.id);
@@ -220,8 +271,12 @@ function paperEdits(list,segments){
     if(typeof edit.before!=='string'||typeof edit.after!=='string'||edit.before.length>LIMITS.editText||edit.after.length>LIMITS.editText)fail('malformed','Paper edit text is malformed.');
     if(!PAPER_ORIGINS.includes(edit.origin))fail('malformed','Edit origin is not human, external-ai-import, or ai-proposal.');
     rejectPaperCarrier(edit.before,0);rejectPaperCarrier(edit.after,0);
-    const row={id:edit.id,enabled:edit.enabled,pageIndex:edit.pageIndex,before:edit.before,after:edit.after,origin:edit.origin,anchor:own(edit,'anchor')?paperAnchor(edit.anchor):null};
+    const anchor=own(edit,'anchor')?paperAnchor(edit.anchor):null;
+    if(anchor&&Number.isInteger(anchor.start)&&Number.isInteger(anchor.end)&&anchor.end-anchor.start!==edit.before.length)fail('malformed','Edit anchor offset is malformed.');
+    const row={id:edit.id,enabled:edit.enabled,pageIndex:edit.pageIndex,before:edit.before,after:edit.after,origin:edit.origin,anchor};
     if(own(edit,'segmentId')){if(typeof edit.segmentId!=='string'||!edit.segmentId||edit.segmentId.length>80||!known.has(edit.segmentId))fail('conflict','Edit segment is not in the captured source.');row.segmentId=edit.segmentId;}
+    const meta=EDIT_META_KEYS.filter(key=>own(edit,key));
+    if(meta.length){if(meta.length!==EDIT_META_KEYS.length)fail('malformed','Edit history is malformed.');const history=paperHistory(edit.history,{...row,createdAt:edit.createdAt,updatedAt:edit.updatedAt});row.createdAt=history.createdAt;row.updatedAt=history.updatedAt;row.history=history.history;}
     out.push(row);
   }
   return out;
@@ -237,13 +292,13 @@ function paperOutput(output,editRevision){
   if(utf8Bytes(canonicalJSON(verification))>LIMITS.verification)fail('oversize');
   return {sha256:output.sha256,revision:output.revision,verification};
 }
-function paperReviews(list,output){
+function paperReviews(list,output,editRevision){
   if(!Array.isArray(list))fail('malformed','Paper review notes are malformed.');
   if(list.length>LIMITS.paperReviews)fail('oversize');
-  const ids=new Set(),out=[];
+  const ids=new Set(),out=[],currentHash=output?output.sha256:null;
   for(const review of list){
-    if(!plain(review)||Object.keys(review).some(key=>!['id','createdAt','reviewer','caseLabel','verdict','score','note','alignment'].includes(key)))fail('malformed','Paper review note is malformed.');
-    for(const key of ['id','createdAt','reviewer','caseLabel','verdict','score','note','alignment'])if(!own(review,key))fail('malformed','Paper review note is malformed.');
+    if(!plain(review)||Object.keys(review).some(key=>!PAPER_REVIEW_KEYS.includes(key)))fail('malformed','Paper review note is malformed.');
+    for(const key of PAPER_REVIEW_KEYS)if(!own(review,key))fail('malformed','Paper review note is malformed.');
     if(typeof review.id!=='string'||!review.id||review.id.length>LIMITS.runId||ids.has(review.id))fail('conflict','Duplicate review id.');
     ids.add(review.id);
     if(typeof review.createdAt!=='string'||!Number.isFinite(Date.parse(review.createdAt)))fail('malformed','Paper review time is malformed.');
@@ -251,11 +306,17 @@ function paperReviews(list,output){
     if(!PAPER_VERDICTS.includes(review.verdict))fail('malformed','Paper review verdict is malformed.');
     if(review.verdict==='uncertain'&&review.score!==null||review.score!==null&&(!Number.isInteger(review.score)||review.score<1||review.score>5))fail('malformed','Paper review score is not a human 1–5 score.');
     if(typeof review.note!=='string'||!review.note.trim()||review.note.length>3000)fail('malformed','Paper review needs a human reason.');
+    if(!Number.isInteger(review.editRevision)||review.editRevision<0||review.editRevision>1000000)fail('malformed','Paper review is not bound to an edit revision.');
+    if(!(review.outputHash===null||typeof review.outputHash==='string'&&HEX.test(review.outputHash)))fail('hash_mismatch','Paper review is not bound to an output hash.');
+    if(typeof review.stale!=='boolean')fail('malformed','Paper review staleness is malformed.');
+    const current=review.editRevision===editRevision&&review.outputHash===currentHash;
+    if(current&&review.stale)fail('conflict','A review of this edit revision is marked stale.');
+    if(!current&&!review.stale)fail('conflict','A review of another edit revision cannot apply to the current After.');
     let alignment=null;
     if(review.alignment!==null){
-      if(!output)fail('conflict','A source-only record cannot claim a BLUE file match.');
+      if(review.outputHash===null)fail('conflict','A review without an output hash cannot claim a BLUE file match.');
       if(!plain(review.alignment)||Object.keys(review.alignment).some(key=>!['fileHash','findingNotes'].includes(key))||!own(review.alignment,'fileHash')||!own(review.alignment,'findingNotes'))fail('malformed','Paper review alignment is malformed.');
-      if(review.alignment.fileHash!==output.sha256)fail('hash_mismatch','Review alignment file hash is not the captured output.');
+      if(review.alignment.fileHash!==review.outputHash)fail('hash_mismatch','Review alignment file hash is not the reviewed output.');
       if(!Array.isArray(review.alignment.findingNotes)||review.alignment.findingNotes.length>12)fail('malformed','Paper finding notes are malformed.');
       const seen=new Set(),notes=[];
       for(const note of review.alignment.findingNotes){
@@ -266,9 +327,9 @@ function paperReviews(list,output){
         if(note.verdict!=='pending'&&!note.note.trim())fail('malformed','A human finding judgment needs a reason.');
         notes.push({id:note.id,verdict:note.verdict,note:note.note});
       }
-      alignment={fileHash:output.sha256,findingNotes:notes};
+      alignment={fileHash:review.outputHash,findingNotes:notes};
     }
-    out.push({id:review.id,createdAt:review.createdAt,reviewer:review.reviewer.trim(),caseLabel:review.caseLabel.trim(),verdict:review.verdict,score:review.score,note:review.note.trim(),alignment});
+    out.push({id:review.id,createdAt:review.createdAt,reviewer:review.reviewer.trim(),caseLabel:review.caseLabel.trim(),verdict:review.verdict,score:review.score,note:review.note.trim(),alignment,editRevision:review.editRevision,outputHash:review.outputHash,stale:review.stale});
   }
   return out;
 }
@@ -294,7 +355,7 @@ export function normalizePaperEdit(input){
   const segments=paperSegments(source.segments);
   const edits=paperEdits(source.edits,segments);
   const output=paperOutput(source.output,source.editRevision);
-  const notes=paperReviews(reviews||[],output);
+  const notes=paperReviews(reviews||[],output,source.editRevision);
   rejectPaperCarrier(source.sourceName,0);
   return {schema:PAPER_EDIT_SCHEMA,record:{id:source.id,createdAt:source.createdAt,sourceFileHash:source.sourceFileHash,sourceName:source.sourceName,segments,edits,editRevision:source.editRevision,output},reviews:notes};
 }

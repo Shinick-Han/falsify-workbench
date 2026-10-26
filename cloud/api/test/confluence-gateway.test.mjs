@@ -1053,6 +1053,7 @@ describe('confluence gateway', { concurrency: false }, () => {
         id: 'rv1', createdAt: '2026-10-26T01:00:00.000Z', reviewer: 'Synthetic', caseLabel: 'manual',
         verdict: 'supported', score: 4, note: 'Human reason only.',
         alignment: { fileHash: outputHash, findingNotes: [{ id: 'F1', verdict: 'supported', note: 'Looked at the quote.' }] },
+        editRevision: 2, outputHash, stale: false,
       }],
     });
     assert.equal(built.kind, 'paper-edit');
