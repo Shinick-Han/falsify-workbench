@@ -171,11 +171,12 @@
       msg('BLUE 검토 중 · '+(data.progress&&data.progress.completedCalls||0)+' / '+(data.progress&&data.progress.requiredCalls||'?')+'회 완료'+phase(data.progress&&data.progress.phase));await new Promise(r=>setTimeout(r,1500));
     }
   }
-  function onDiscard(){
+  let displayedPending=null;
+  async function onDiscard(){
     const found=helperReady()?P.read('blue'):null;
     const detail=found&&found.status==='record'&&found.record.disposition==='failed'&&typeof found.record.serverFailure==='string'?found.record.serverFailure:'';
     generation++;cancel();
-    const done=P.discard('blue',{acknowledge:true});
+    const done=await P.discard('blue',{acknowledge:true,...displayedPending});
     if(!done.ok){msg((detail?detail+' ':'')+(done.message||'대기 기록을 지우지 못했습니다.'),true,true);return;}
     clearSticky();busy=false;job=null;jobLink=null;
     msg(P.text({status:'discarded'})+' 다시 시작하려면 BLUE 독립 검토 시작을 직접 누르세요.',false,true);controls();
@@ -192,6 +193,7 @@
   }
   function showRecoveryActions(){ensureButton('doc-blue-pending-discard','이 대기 작업 버리기',onDiscard);ensureButton('doc-blue-failure-diagnostic','진단 정보 저장',exportDiagnostic);ensureButton('doc-blue-failure-request','원래 요청 저장',exportStoredRequest);ensureButton('doc-blue-receipt-check','접수 상태 다시 확인',()=>void recoverBlue());}
   function rememberTerminal(record,opts={}){
+    displayedPending={expectedRequestId:record.requestId};
     const kind=terminalKind(record);if(!kind)return;
     if(!doc&&record.request)adoptBlue(P.docFrom(record));
     request=record.request;sticky=kind;notice=false;
@@ -205,6 +207,7 @@
   }
   function showUnknown(record,reason=''){
     if(sticky)return;
+    displayedPending=record?{expectedRequestId:record.requestId}:null;
     if(record&&record.request)request=record.request;
     notice=true;
     const text='BLUE 상태 미확인. '+(reason||'접수 여부를 확인하지 못했습니다.')+' 성공으로 보지 않았고 자동으로 다시 보내지 않습니다. 「접수 상태 다시 확인」은 조회만 하며 모델을 실행하지 않습니다. 대기 작업은 버릴 때까지 유지됩니다. 다시 시작하려면 「이 대기 작업 버리기」 후 「BLUE 독립 검토 시작」을 직접 누르세요. 진단 정보와 원래 요청은 저장만 하며 실행하지 않습니다.';
@@ -214,6 +217,7 @@
   }
   function showPendingBlue(outcome){
     if(sticky||notice||panelLatched())return;
+    displayedPending=outcome?.record?{expectedRequestId:outcome.record.requestId}:{expectedStatus:outcome?.status};
     msg(P.text(outcome),outcome.status!=='still-running');
     const keep=!!outcome&&outcome.status&&outcome.status!=='absent'&&outcome.status!=='completed'&&outcome.status!=='still-running';
     if(keep)ensureButton('doc-blue-pending-discard','이 대기 작업 버리기',onDiscard);
@@ -284,7 +288,7 @@
       if(!outcome||outcome.status==='absent')return;
       if(outcome.status==='server-restarted'){showUnknown(record,'저장된 요청 이후 로컬 서버가 재시작되어 현재 서버에서는 이전 접수를 확인할 수 없습니다.');return;}
       if(outcome.status==='still-running'){await resumeBlue(outcome);return;}
-      if(outcome.status==='completed'){showRecoveredBlue(outcome);const rec=P.read('blue');if(rec.status==='record')await P.note(rec.record,{disposition:'completed',finishedAt:Date.now()});return;}
+      if(outcome.status==='completed'){showRecoveredBlue(outcome);await P.note(outcome.record,{disposition:'completed',finishedAt:Date.now()});return;}
       if((outcome.status==='failed'||outcome.status==='cancelled')&&outcome.record){
         const patch={disposition:outcome.status,finishedAt:Date.now()};
         if(outcome.status==='failed'){const detail=P.safeFailure(outcome.error);if(detail)patch.serverFailure=detail;}

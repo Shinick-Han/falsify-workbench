@@ -14,6 +14,8 @@ const FILE='11'.repeat(32);
 function memory(){const m=new Map();return {getItem:k=>m.has(k)?m.get(k):null,setItem:(k,v)=>m.set(k,String(v)),removeItem:k=>m.delete(k),dump:()=>m.get(P.storageKey('red'))};}
 function blueMemory(){const m=new Map();return {getItem:k=>m.has(k)?m.get(k):null,setItem:(k,v)=>m.set(k,String(v)),removeItem:k=>m.delete(k)};}
 const hashHarness=h=>H.hash(h);
+const queues=new Map();
+const locks={request(name,fn){const prior=queues.get(name)||Promise.resolve();const next=prior.then(fn,fn);queues.set(name,next.catch(()=>{}));return next;}};
 function doc(over={}){return {revision:'rev-1',sourceHash:'aa'.repeat(32),fileHash:FILE,format:'TXT',name:'notes.txt',segments:[{id:'s0',label:'p',text:'The claim is absolute.'}],...over};}
 function request(d,role,over={}){
   const base=role==='blue'
@@ -23,7 +25,7 @@ function request(d,role,over={}){
 }
 async function hold(storage,over={}){
   const role=over.role||'red',d=over.doc||doc();
-  return P.hold({role,request:over.request||request(d,role,over.requestOver),doc:d,companionInstance:over.instance||INSTANCE,storage,now:over.now||1_700_000_000_000,hashHarness:over.hashHarness||hashHarness});
+  return P.hold({lockProvider:locks,role,request:over.request||request(d,role,over.requestOver),doc:d,companionInstance:over.instance||INSTANCE,storage,now:over.now||1_700_000_000_000,hashHarness:over.hashHarness||hashHarness});
 }
 function job(record,state,extra={}){return {httpStatus:200,body:{id:record.requestId,role:record.role,state,sourceHash:record.sourceHash,revision:record.revision,harnessHash:record.harnessHash,companionInstance:record.companionInstance,requestBytesDigest:record.requestBytesDigest,progress:{completedCalls:0},...extra}};}
 async function sha256Text(text){const buf=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text));return Buffer.from(buf).toString('hex');}
@@ -100,12 +102,12 @@ test('hold does not overwrite unresolved, failed, or unknown records; discard re
   const storage=memory(),held=await hold(storage);assert.equal(held.ok,true);assert.equal(held.record.postReceipt,'pending');
   const dup=await hold(storage,{requestOver:{requestId:'rev-1:job-2'}});assert.equal(dup.ok,false);assert.equal(dup.blocked,'unresolved');
   assert.equal(P.read('red',storage).record.requestId,held.record.requestId);
-  assert.equal(P.discard('red',{storage}).ok,false);assert.equal(P.read('red',storage).status,'record');
+  assert.equal((await P.discard('red',{storage})).ok,false);assert.equal(P.read('red',storage).status,'record');
   await P.note(held.record,{postReceipt:'unknown'},storage);
   const afterThrow=await hold(storage);assert.equal(afterThrow.blocked,'unknown');
   await P.note(P.read('red',storage).record,{postReceipt:'accepted',disposition:'failed',finishedAt:50},storage);
   const afterFail=await hold(storage);assert.equal(afterFail.blocked,'failed');
-  assert.equal(P.discard('red',{acknowledge:true,storage}).ok,true);
+  assert.equal((await P.discard('red',{acknowledge:true,storage,expectedRequestId:held.record.requestId})).ok,true);
   const next=await hold(storage,{requestOver:{requestId:'rev-1:job-2'}});assert.equal(next.ok,true);assert.equal(next.record.requestId,'rev-1:job-2');
 });
 test('a settled completed record can be replaced; the other role cannot',async()=>{
@@ -113,7 +115,7 @@ test('a settled completed record can be replaced; the other role cannot',async()
   const held=await hold(storage);await P.note(held.record,{postReceipt:'accepted',disposition:'completed',finishedAt:10},storage);
   const next=await hold(storage,{requestOver:{requestId:'rev-1:job-2'}});assert.equal(next.ok,true);
   const red=await hold(storage);assert.equal(red.ok,false);
-  const blue=await P.hold({role:'blue',request:request(doc(),'blue'),doc:doc(),companionInstance:INSTANCE,storage:box,hashHarness,now:10});
+  const blue=await P.hold({lockProvider:locks,role:'blue',request:request(doc(),'blue'),doc:doc(),companionInstance:INSTANCE,storage:box,hashHarness,now:10});
   assert.equal(blue.ok,true);assert.equal(P.read('red',storage).record.role,'red');
 });
 test('secrets, PDF bytes, and BLUE gold or filename are rejected and not stored',async()=>{
@@ -123,9 +125,9 @@ test('secrets, PDF bytes, and BLUE gold or filename are rejected and not stored'
   }
   const box=blueMemory();
   const d=doc();
-  const tainted=await P.hold({role:'blue',request:{...request(d,'blue'),gold:['x'],filename:'red-out.pdf'},doc:d,companionInstance:INSTANCE,storage:box,hashHarness});
+  const tainted=await P.hold({lockProvider:locks,role:'blue',request:{...request(d,'blue'),gold:['x'],filename:'red-out.pdf'},doc:d,companionInstance:INSTANCE,storage:box,hashHarness});
   assert.equal(tainted.ok,false);assert.equal(box.getItem(P.storageKey('blue')),null);
-  const clean=await P.hold({role:'blue',request:request(d,'blue'),doc:d,companionInstance:INSTANCE,storage:box,hashHarness,now:10});
+  const clean=await P.hold({lockProvider:locks,role:'blue',request:request(d,'blue'),doc:d,companionInstance:INSTANCE,storage:box,hashHarness,now:10});
   assert.equal(clean.ok,true);
   const saved=JSON.parse(box.getItem(P.storageKey('blue')));
   assert.equal(saved.request.gold,undefined);assert.equal(saved.request.filename,undefined);assert.equal(saved.request.sourceName,undefined);
@@ -206,10 +208,10 @@ test('concurrent hold keeps one unresolved record and does not let the loser rep
   const slow=async h=>{await gate;return H.hash(h);};
   const first=hold(storage,{hashHarness:slow,requestOver:{requestId:'rev-1:job-a',maxCalls:1}});
   const second=hold(storage,{requestOver:{requestId:'rev-1:job-b',maxCalls:8}});
-  const early=await second;
-  assert.equal(early.ok,false);assert.equal(early.blocked,'unresolved');
   release();
   const winner=await first;
+  const early=await second;
+  assert.equal(early.ok,false);assert.equal(early.blocked,'unresolved');
   assert.equal(winner.ok,true);assert.equal(winner.record.requestId,'rev-1:job-a');
   assert.equal(P.read('red',storage).record.requestId,'rev-1:job-a');
   const again=await hold(storage,{requestOver:{requestId:'rev-1:job-b'}});
@@ -218,8 +220,27 @@ test('concurrent hold keeps one unresolved record and does not let the loser rep
 test('a record planted during hashing is not overwritten',async()=>{
   const storage=memory();
   const hashOnce=async h=>{storage.setItem(P.storageKey('red'),'{');return H.hash(h);};
-  const planted=await P.hold({role:'red',request:request(doc(),'red'),doc:doc(),companionInstance:INSTANCE,storage,hashHarness:hashOnce,now:10});
+  const planted=await P.hold({lockProvider:locks,role:'red',request:request(doc(),'red'),doc:doc(),companionInstance:INSTANCE,storage,hashHarness:hashOnce,now:10});
   assert.equal(planted.ok,false);assert.equal(planted.blocked,'corrupt');assert.equal(storage.dump(),'{');
+});
+
+test('missing locks, hash and storage failures refuse admission',async()=>{
+  const storage=memory(),d=doc();
+  const noLocks=await P.hold({lockProvider:{},role:'red',request:request(d,'red'),doc:d,companionInstance:INSTANCE,storage,hashHarness});
+  assert.equal(noLocks.status,'lock-unavailable');assert.equal(P.read('red',storage).status,'absent');
+  const badHash=await hold(storage,{hashHarness:async()=>{throw Error('hash failed');}});
+  assert.equal(badHash.ok,false);assert.equal(P.read('red',storage).status,'absent');
+  const broken={getItem:()=>null,setItem:()=>{throw Error('quota');}};
+  assert.equal((await hold(broken)).status,'write-failed');
+});
+test('stale note and discard cannot change a newer request; roles are independent',async()=>{
+  const storage=memory(),first=await hold(storage),blue=await hold(storage,{role:'blue'});
+  assert.equal(blue.ok,true);
+  await P.note(first.record,{postReceipt:'accepted',disposition:'completed',finishedAt:1},storage);
+  const second=await hold(storage,{requestOver:{requestId:'rev-1:new'}});assert.equal(second.ok,true);
+  assert.equal((await P.note(first.record,{postReceipt:'unknown'},storage)).ok,false);
+  assert.equal((await P.discard('red',{storage,acknowledge:true,expectedRequestId:first.record.requestId})).status,'stale');
+  assert.equal(P.read('red',storage).record.requestId,'rev-1:new');assert.equal(P.read('blue',storage).record.requestId,blue.record.requestId);
 });
 
 let htmlWrites=0;
@@ -242,7 +263,7 @@ async function redPage(storage,hooks,options={}){
   const bridge={busy(){},state:()=>({status:'paired',connected:true,cap}),capabilities:()=>cap,session:()=>({request:async(p,body)=>{calls.push({path:p,body});return hooks.reply(p,body,calls);}})};
   const lab={busy(){},allowed:()=>true,ready:Promise.resolve(),bind:async(role,r)=>({...r,harness:H.builtin(role)}),record:async()=>'run-1'};
   if(options.shipped){const script=element('pending-job.js');script.src='pending-job.js';script.getAttribute=name=>name==='src'?'pending-job.js':null;document.scripts=[script];}
-  const ctx=vm.createContext({document,crypto:globalThis.crypto,localStorage:storage,FalsifyDocumentRed:Red,FalsifyHarness:H,FalsifyLocalBridge:bridge,FalsifyLab:lab,FalsifyExport:{},TextEncoder,TextDecoder,CustomEvent,Event,URL:{createObjectURL:()=>'blob:1',revokeObjectURL(){}},Blob,File,setTimeout,clearTimeout,confirm:()=>true,addEventListener(){},btoa,atob,Uint8Array,Array,Promise,Error,Map,JSON,Number,String,Object,console});
+  const ctx=vm.createContext({document,crypto:globalThis.crypto,localStorage:storage,navigator:{locks},FalsifyDocumentRed:Red,FalsifyHarness:H,FalsifyLocalBridge:bridge,FalsifyLab:lab,FalsifyExport:{},TextEncoder,TextDecoder,CustomEvent,Event,URL:{createObjectURL:()=>'blob:1',revokeObjectURL(){}},Blob,File,setTimeout,clearTimeout,confirm:()=>true,addEventListener(){},btoa,atob,Uint8Array,Array,Promise,Error,Map,JSON,Number,String,Object,console});
   if(options.helper!==false)vm.runInContext(fs.readFileSync(path.join(dist,'pending-job.js'),'utf8'),ctx,{filename:'pending-job.js'});
   vm.runInContext(fs.readFileSync(path.join(dist,'document-red.js'),'utf8'),ctx,{filename:'document-red.js'});
   const text='The claim is absolute.';
@@ -326,7 +347,7 @@ async function bluePage(storage,hooks){
   const bridge={busy(){},state:()=>({status:net.connected?'paired':'manual',connected:net.connected,cap}),capabilities:()=>cap,session:()=>({request:async(p,body)=>{calls.push({path:p,body});if(p==='/api/capabilities')return hooks.liveCap||cap;return hooks.reply(p,body,calls);}})};
   const lab={busy(){},allowed:()=>true,ready:Promise.resolve(),bind:async(role,r)=>({...r,harness:H.builtin(role)}),record:async()=>'run-1'};
   const importer={extract:async()=>({text:'The claim is absolute.',format:'TXT',warnings:[],segments:[{label:'p',text:'The claim is absolute.'}]})};
-  const ctx=vm.createContext({document,crypto:globalThis.crypto,localStorage:storage,FalsifyDocumentBlue:Blue,FalsifyHarness:H,FalsifyLocalBridge:bridge,FalsifyLab:lab,FalsifyImport:importer,TextEncoder,TextDecoder,CustomEvent,Event,AbortController,URL:{createObjectURL(blob){downloads.push(blob);return 'blob:'+downloads.length;},revokeObjectURL(){}},Blob,File,setTimeout,clearTimeout,confirm:()=>true,Uint8Array,Array,Promise,Error,Map,JSON,Number,String,Object,console});
+  const ctx=vm.createContext({document,crypto:globalThis.crypto,localStorage:storage,navigator:{locks},FalsifyDocumentBlue:Blue,FalsifyHarness:H,FalsifyLocalBridge:bridge,FalsifyLab:lab,FalsifyImport:importer,TextEncoder,TextDecoder,CustomEvent,Event,AbortController,URL:{createObjectURL(blob){downloads.push(blob);return 'blob:'+downloads.length;},revokeObjectURL(){}},Blob,File,setTimeout,clearTimeout,confirm:()=>true,Uint8Array,Array,Promise,Error,Map,JSON,Number,String,Object,console});
   vm.runInContext(fs.readFileSync(path.join(dist,'pending-job.js'),'utf8'),ctx,{filename:'pending-job.js'});
   vm.runInContext(fs.readFileSync(path.join(dist,'document-blue.js'),'utf8'),ctx,{filename:'document-blue.js'});
   return {get,calls,downloads,disconnect(){net.connected=false;document.dispatchEvent(new CustomEvent('falsify:local-bridge'));},poke(){document.dispatchEvent(new CustomEvent('falsify:local-bridge'));},async load(){get('doc-blue-file').files=[{name:'notes.txt',arrayBuffer:async()=>new TextEncoder().encode('The claim is absolute.').buffer}];get('doc-blue-file').dispatchEvent(new Event('change'));
@@ -340,7 +361,7 @@ function jobPosts(calls){return calls.filter(c=>c.path==='/api/blue/jobs');}
 async function until(fn,label){for(let i=0;i<80&&!fn();i++)await new Promise(r=>setTimeout(r,25));assert.ok(fn(),label);}
 test('optional serverFailure keeps older records and stores only a bounded safe phrase',async()=>{
   const storage=blueMemory();
-  const held=await P.hold({role:'blue',request:request(doc(),'blue'),doc:doc(),companionInstance:INSTANCE,storage,hashHarness,now:10});
+  const held=await P.hold({lockProvider:locks,role:'blue',request:request(doc(),'blue'),doc:doc(),companionInstance:INSTANCE,storage,hashHarness,now:10});
   assert.equal(held.ok,true);assert.equal(Object.hasOwn(held.record,'serverFailure'),false);
   await P.note(held.record,{postReceipt:'accepted',disposition:'failed',finishedAt:10},storage);
   assert.equal(P.read('blue',storage).record.serverFailure,undefined);
@@ -356,7 +377,7 @@ test('optional serverFailure keeps older records and stores only a bounded safe 
   assert.equal(P.read('blue',storage).status,'corrupt');
   assert.equal(P.safeRequest({request:{token:'x'}}),null);
   assert.equal(P.safeFailure(CITE),CITE);
-  const box=blueMemory(),base=await P.hold({role:'blue',request:request(doc(),'blue'),doc:doc(),companionInstance:INSTANCE,storage:box,hashHarness,now:11});
+  const box=blueMemory(),base=await P.hold({lockProvider:locks,role:'blue',request:request(doc(),'blue'),doc:doc(),companionInstance:INSTANCE,storage:box,hashHarness,now:11});
   await P.note(base.record,{postReceipt:'accepted'},box);
   const mismatched=await P.recover({role:'blue',storage:box,companionInstance:INSTANCE,hashHarness,validate:(d,res)=>Blue.validateResponse(d,res),getJob:async()=>job(base.record,'failed',{error:CITE,id:'rev-1:other'})});
   assert.equal(mismatched.status,'request-mismatch');assert.equal(mismatched.error,undefined);assert.equal(JSON.stringify(mismatched).includes(CITE),false);
@@ -385,7 +406,7 @@ test('BLUE page recovers a completed job with GET only and a double-click posts 
   }});
   await again.load();
   again.get('doc-blue-result-summary').textContent='KEEP-RESULT';
-  await P.hold({role:'blue',request:request(doc(),'blue'),doc:doc(),companionInstance:INSTANCE,storage:fresh,hashHarness,now:10});
+  await P.hold({lockProvider:locks,role:'blue',request:request(doc(),'blue'),doc:doc(),companionInstance:INSTANCE,storage:fresh,hashHarness,now:10});
   again.get('doc-blue-consent').checked=true;again.get('doc-blue-start').click();
   await new Promise(r=>setTimeout(r,30));
   assert.equal(posts,0);assert.equal(again.get('doc-blue-result-summary').textContent,'KEEP-RESULT');

@@ -117,12 +117,14 @@
       await new Promise(resolve=>setTimeout(resolve,1500));
     }
   }
+  let displayedPending=null;
   function showPending(outcome){
+    displayedPending=outcome?.record?{expectedRequestId:outcome.record.requestId}:{expectedStatus:outcome?.status};
     msg(P.text(outcome),outcome.status!=='still-running');
     const keep=!!outcome&&outcome.status&&outcome.status!=='absent'&&outcome.status!=='completed'&&outcome.status!=='still-running';
     let b=$('#red-pending-discard');
     if(keep&&!b){b=document.createElement('button');b.type='button';b.id='red-pending-discard';b.className='button secondary';b.textContent='이 대기 작업 버리기';$('#red-progress').after(b);
-      b.addEventListener('click',()=>{generation++;cancelCurrent();const done=P.discard('red',{acknowledge:true});b.hidden=true;busy=false;job=null;jobLink=null;msg(done.ok?P.text({status:'discarded'}):done.message,!done.ok);controls();});}
+      b.addEventListener('click',async()=>{generation++;cancelCurrent();const done=await P.discard('red',{acknowledge:true,...displayedPending});b.hidden=true;busy=false;job=null;jobLink=null;msg(done.ok?P.text({status:'discarded'}):done.message,!done.ok);controls();});}
     if(b)b.hidden=!keep;
   }
   function adoptRecovered(stored){
@@ -158,7 +160,7 @@
       const outcome=await P.recover({role:'red',companionInstance:B.capabilities()?.companionInstance||null,hashHarness:h=>H.hash(h),validate:(d,res)=>C.validateResponse(d,res),getJob:id=>probe('red',id)});
       if(!outcome||outcome.status==='absent')return;
       if(outcome.status==='still-running'){await resumeRed(outcome);return;}
-      if(outcome.status==='completed'){showRecoveredRed(outcome);const rec=P.read('red');if(rec.status==='record')await P.note(rec.record,{disposition:'completed',finishedAt:Date.now()});return;}
+      if(outcome.status==='completed'){showRecoveredRed(outcome);await P.note(outcome.record,{disposition:'completed',finishedAt:Date.now()});return;}
       if((outcome.status==='failed'||outcome.status==='cancelled')&&outcome.record)await P.note(outcome.record,{disposition:outcome.status,finishedAt:Date.now()});
       showPending(outcome);
     }finally{recovering=false;}

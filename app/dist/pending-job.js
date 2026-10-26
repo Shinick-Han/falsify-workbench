@@ -8,8 +8,6 @@
 (function(root){
   'use strict';
   const SCHEMA='falsify.pending-job.v1',RETENTION_MS=3600*1000,MAX_SECRET_DEPTH=64;
-  // Same page and JavaScript realm only. Not atomic across tabs. Web Locks are not used.
-  const admitting={red:false,blue:false};
   const RETENTION='대기 기록은 이 브라우저에만 있습니다. 추출 텍스트·요청 ID·harness 해시·원본 SHA-256·companion 인스턴스 식별을 보관하고, 원본 바이트와 연결 비밀은 보관하지 않습니다. 실행 중인 작업은 3600초로 지우지 않습니다. companion은 끝난 작업만 3600초 뒤에 메모리에서 지웁니다. 다시 열면 GET으로만 조회하고, 모델을 다시 호출하지 않습니다.';
   // Same request id rule as app/local/red_service.py validate_request.
   const REQUEST_ID=/^[A-Za-z0-9_:-]{1,160}$/;
@@ -115,9 +113,9 @@
   async function hold(options={}){
     const role=options.role;
     if(role!=='red'&&role!=='blue')return {ok:false,status:'rejected',message:'역할이 올바르지 않습니다.'};
-    if(admitting[role])return blockedResult('unresolved',read(role,options.storage));
-    admitting[role]=true;
-    try{
+    const locks=options.lockProvider || (root.navigator && root.navigator.locks);
+    if(!locks || typeof locks.request!=='function')return {ok:false,status:'lock-unavailable',message:'브라우저의 Web Locks를 사용할 수 없어 안전하게 실행하지 않았습니다.'};
+    try{return await locks.request('falsify.pending-job.'+role+'.v1',async()=>{
       const request=options.request,doc=options.doc,instance=options.companionInstance,storage=options.storage;
       const found=read(role,storage),why=blocking(found);
       if(why)return blockedResult(why,found);
@@ -149,11 +147,13 @@
       const raced=read(role,storage),whyPut=blocking(raced);
       if(whyPut)return blockedResult(whyPut,raced);
       return put(role,record,storage);
-    }catch(e){return {ok:false,status:e.status||'rejected',message:e.message||'대기 기록을 만들지 못했습니다.'};}
-    finally{admitting[role]=false;}
+    });}catch(e){return {ok:false,status:e.status||'rejected',message:e.message||'대기 기록을 만들지 못했습니다.'};}
   }
-  function note(record,patch={},storage){
+  async function note(record,patch={},storage,lockProvider){
     if(!record||(record.role!=='red'&&record.role!=='blue'))return {ok:false,status:'rejected',message:'대기 기록이 없습니다.'};
+    const locks=lockProvider || (root.navigator && root.navigator.locks);
+    if(!locks || typeof locks.request!=='function')return {ok:false,status:'lock-unavailable',message:'Web Locks를 사용할 수 없어 기록을 바꾸지 않았습니다.'};
+    try{return await locks.request('falsify.pending-job.'+record.role+'.v1',()=>{
     const found=read(record.role,storage);
     if(found.status==='corrupt')return {ok:false,status:'corrupt',message:'손상된 대기 기록은 덮어쓰지 않았습니다.'};
     if(found.status!=='record'||found.record.requestId!==record.requestId)return {ok:false,status:'absent',message:'저장한 요청 ID를 찾지 못했습니다.'};
@@ -166,13 +166,21 @@
     else if(next.finishedAt==null)return {ok:false,status:'rejected',message:'끝난 작업의 시각이 없습니다. 기록은 바꾸지 않았습니다.'};
     if(!valid(next))return {ok:false,status:'rejected',message:'대기 기록 검사가 통과하지 않아 덮어쓰지 않았습니다.'};
     return put(record.role,next,storage);
+    });}catch{return {ok:false,status:'write-failed',message:'대기 기록을 바꾸지 못했습니다.'};}
   }
-  function discard(role,options={}){
+  async function discard(role,options={}){
     if(options.acknowledge!==true)return {ok:false,status:'rejected',message:'버리려면 확인이 필요합니다. 대기 기록은 그대로입니다.'};
     if(role!=='red'&&role!=='blue')return {ok:false,status:'rejected',message:'역할이 올바르지 않습니다.'};
+    const locks=options.lockProvider || (root.navigator && root.navigator.locks);
+    if(!locks || typeof locks.request!=='function')return {ok:false,status:'lock-unavailable',message:'Web Locks를 사용할 수 없어 기록을 지우지 않았습니다.'};
+    try{return await locks.request('falsify.pending-job.'+role+'.v1',()=>{
     const box=backing(options.storage);if(!box)return {ok:false,status:'write-failed',message:'브라우저 저장소를 쓸 수 없습니다. 대기 기록은 그대로입니다.'};
+    const found=read(role,options.storage);
+    if(found.status==='record' && (!options.expectedRequestId || found.record.requestId!==options.expectedRequestId))return {ok:false,status:'stale',message:'표시한 요청이 바뀌어 대기 기록을 지우지 않았습니다.'};
+    if(found.status==='corrupt' && options.expectedStatus!=='corrupt')return {ok:false,status:'stale',message:'표시한 기록이 바뀌어 지우지 않았습니다.'};
     try{box.removeItem(storageKey(role));}catch{return {ok:false,status:'write-failed',message:'대기 기록을 지우지 못했습니다.'};}
     return {ok:true,status:'discarded'};
+    });}catch{return {ok:false,status:'write-failed',message:'대기 기록을 지우지 못했습니다.'};}
   }
   function bound(record,body){
     if(!body||typeof body!=='object'||Array.isArray(body))return 'unavailable';
