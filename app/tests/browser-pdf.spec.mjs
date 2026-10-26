@@ -435,6 +435,33 @@ test('an unrotated page can change while a rotated page stays untouched', async 
   assertNoVisibleStamps(contentStreams(out), pages);
 });
 
+test('page occurrence precedes bbox filtering and bounded font drift stays a warning', async () => {
+  const doc = mupdf.Document.openDocument(new Uint8Array(repeated), 'application/pdf');
+  const chars = [];
+  try { doc.loadPage(0).toStructuredText('preserve-whitespace').walk({onChar(ch, origin, font, size, quad) { chars.push({ch, quad, origin: [...origin]}); }}); }
+  finally { doc.destroy(); }
+  const text = chars.map(c => c.ch).join('');
+  const start = text.indexOf('beta', text.indexOf('beta') + 1);
+  const points = chars.slice(start, start + 4).flatMap(c => [0, 2, 4, 6].map(i => [c.quad[i], c.quad[i + 1]]));
+  const box = [Math.min(...points.map(p => p[0])), Math.min(...points.map(p => p[1])), Math.max(...points.map(p => p[0])), Math.max(...points.map(p => p[1]))];
+  const edit = {id: 'second', pageIndex: 0, before: 'beta', after: 'B', origin: 'human', anchor: {occurrence: 1, bbox: box}};
+  const result = await prepare({file: fileOf(repeated), edits: snapshot(repeated, [edit])});
+  const outputBytes = await bytesOf(result.file);
+  const extracted = (await pdfText(outputBytes))[0];
+  assert.equal((extracted.match(/beta/g) || []).length, 1);
+  assert.ok(extracted.includes('See beta and') && extracted.includes('B'));
+  const output = mupdf.Document.openDocument(outputBytes, 'application/pdf');
+  let placed;
+  try { output.loadPage(0).toStructuredText('preserve-whitespace').walk({onChar(ch, origin) { if (ch === 'B') placed = [...origin]; }}); }
+  finally { output.destroy(); }
+  assert.ok(placed && Math.abs(placed[0] - chars[start].origin[0]) < 0.02 && Math.abs(placed[1] - chars[start].origin[1]) < 0.02);
+  const shifted = [box[0] + 5, box[1], box[2] + 5, box[3]];
+  const drift = await prepare({file: fileOf(repeated), edits: snapshot(repeated, [{...edit, anchor: {occurrence: 1, bbox: shifted}}])});
+  assert.ok(drift.warnings.some(w => w.code === 'selection-font-metrics'));
+  assert.equal(drift.verification.layoutVerified, false);
+  await assert.rejects(prepare({file: fileOf(repeated), edits: snapshot(repeated, [{...edit, anchor: {occurrence: 0, bbox: box}}])}), e => e.details?.edits?.[0]?.code === 'anchor-mismatch');
+});
+
 test('raw segment offsets do not choose a page hit', async () => {
   const ignored = await prepare({
     file: fileOf(multi),

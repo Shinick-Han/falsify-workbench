@@ -127,6 +127,7 @@ async function prepareExclusive(request) {
       if (laid.error) failures.push(failure(plan.edit, plan.pageIndex, laid.error));
       else {
         plan.layout = laid;
+        if (plan.anchorApproximate) warnings.push(warn('selection-font-metrics', 'warning', plan.pageIndex, plan.edit.id));
         if (laid.substituted) warnings.push(warn('font-substituted', 'warning', plan.pageIndex, plan.edit.id));
         if (laid.lines.length > 1) warnings.push(warn('wrapped-after', 'info', plan.pageIndex, plan.edit.id));
         if (plan.partialLine) warnings.push(warn('extraction-gap', 'info', plan.pageIndex, plan.edit.id));
@@ -306,8 +307,14 @@ function locate(edit, index, models, pageCount) {
     from = at + 1;
   }
   let pool = hits;
-  if (anchor?.bbox) pool = pool.filter(hit => contains(union(hit.chars), anchor.bbox, 4));
+  // The edit core counts occurrences in the whole page segment, before geometry filtering.
   if (anchor && anchor.occurrence !== undefined) pool = pool[anchor.occurrence] ? [pool[anchor.occurrence]] : [];
+  if (anchor?.bbox) pool = pool.filter(hit => {
+    const box = union(hit.chars);
+    // PDF.js may use a browser fallback face for selection; redact the engine's glyphs,
+    // while tolerating at most half a glyph height (capped at 8pt) of metric drift.
+    return contains(box, anchor.bbox, Math.max(4, Math.min(8, (box[3] - box[1]) / 2)));
+  });
   if (!pool.length) return fail(hits.length ? 'anchor-mismatch' : 'not-found');
   if (pool.length > 1) return fail('ambiguous');
   const chars = pool[0].chars;
@@ -326,6 +333,7 @@ function locate(edit, index, models, pageCount) {
   const partialLine = model.chars.some(ch => ch.lineId === chars[0].lineId && !chars.includes(ch) && ch.c.trim());
   return {ok: true, plan: {
     edit: {...edit, id}, pageIndex, chars, charIndex: new Set(chars.map(ch => model.chars.indexOf(ch))),
+    anchorApproximate: !!anchor?.bbox && !contains(union(chars), anchor.bbox, 4),
     sourceFont: fontsUsed[0], face, encoding: encoded.encoding, substituted: encoded.substituted,
     size: sizes[0], color: drawn[0].color,
     origin: chars[0].pdf, hole: box[1] - box[0], partialLine, rotation: model.rotation,

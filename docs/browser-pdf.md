@@ -48,7 +48,12 @@ For each enabled edit it finds one exact whitespace-normalized match of
 the anchor filters, is `ambiguous` (no first-hit guess). The anchor may set
 `bbox` in the agreed top-left page space only (y down, points; the same
 numbers as a PDF.js viewport at scale 1 on an unrotated page), and
-`occurrence` (0-based among the hits that remain). Omit `coordinateSpace` to
+`occurrence` (0-based among all normalized page hits, before bbox filtering).
+Browser selection font metrics may differ from PDF glyph metrics by up to half
+a glyph height, capped at 8pt; a match outside the usual 4pt tolerance is marked
+`selection-font-metrics`, with `layoutVerified: false`. Redaction always uses the
+engine's exact glyph quads, not the browser selection rectangle. A remote bbox or
+an inconsistent occurrence still refuses the edit. Omit `coordinateSpace` to
 use that space. `coordinateSpace: "top-left-page"`, `origin: "top-left"`,
 `yAxis: "down"`, and `unit: "pt"` are accepted. Any other `coordinateSpace`,
 a bottom-left `origin`, or an upward `yAxis` is `invalid-anchor`. Those
