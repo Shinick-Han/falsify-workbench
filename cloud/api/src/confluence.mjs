@@ -4,6 +4,7 @@ import H from '../../../app/dist/harness-core.js';
 import Red from '../../../app/dist/document-red-core.js';
 import Blue from '../../../app/dist/document-blue-core.js';
 import Review from '../../../app/dist/review-workbench.js';
+import * as reviewBundleModule from '../../../app/dist/review-bundle.mjs';
 
 export const SITE_URL = 'https://falsify.atlassian.net';
 export const SPACE_KEY = 'Falsify';
@@ -14,12 +15,18 @@ export const READY_LABEL = 'falsify-archive-ready';
 export const PROPERTY_KEY = 'falsify-archive';
 const STATE_PURPOSE = 'falsify.confluence.oauth-state.v1';
 const SESSION_PURPOSE = 'falsify.confluence.session.v1';
+const CURSOR_PURPOSE = 'falsify.confluence.cursor.v1';
 const STATE_MS = 10 * 60 * 1000;
 const ENVELOPE_MS = 12 * 60 * 60 * 1000;
 const REFRESH_SKEW_MS = 60 * 1000;
 const MAX_ROTATIONS = 16;
 const MAX_SEALED = 8192;
 const CURSOR = /^[A-Za-z0-9_=-]{1,256}$/;
+const CLIENT_CURSOR = /^[A-Za-z0-9_-]{1,2048}$/;
+const MEDIA_HOST = 'api.media.atlassian.com';
+const MEDIA_BINARY = /^\/file\/[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\/binary$/;
+const MAX_DOWNLOAD_REDIRECTS = 3;
+const MAX_ANCESTORS = 32;
 const PAGE_ID = /^[0-9]{1,20}$/;
 const HEX = /^[a-f0-9]{64}$/;
 const NONCE = /^[A-Za-z0-9_-]{16,128}$/;
@@ -30,6 +37,7 @@ const SCOPES = [
   'offline_access',
   'read:space:confluence',
   'read:page:confluence',
+  'read:content.metadata:confluence',
   'write:page:confluence',
   'read:attachment:confluence',
   'write:confluence-file',
@@ -82,19 +90,12 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', { fatal: true });
 
 let injectedReviewBundle = null;
-// Tests inject the data-owner module until app/dist/review-bundle.mjs is integrated.
 export function setReviewBundleForTests(api) { injectedReviewBundle = api; }
 
 const validators = () => ({ harness: H, red: Red, blue: Blue, review: Review });
 
-const REVIEW_BUNDLE_SPECIFIER = '../../../app/dist/review-bundle.mjs';
-async function reviewBundle() {
-  if (injectedReviewBundle) return injectedReviewBundle;
-  try {
-    return await import(REVIEW_BUNDLE_SPECIFIER);
-  } catch {
-    return null;
-  }
+function reviewBundle() {
+  return injectedReviewBundle || reviewBundleModule;
 }
 
 function bytesToBase64url(bytes) {
@@ -380,7 +381,121 @@ async function confine(fetchImpl, accessToken, cloudId, parent) {
   if (pageResponse.status === 403 || pageResponse.status === 404) fail(403, 'parent_not_allowed');
   const page = await readUpstreamJson(pageResponse);
   if (!page || String(page.id) !== parent || String(page.spaceId) !== SPACE_ID) fail(403, 'parent_not_allowed');
+  await assertParentReadable(fetchImpl, base, accessToken, parent, cloudId);
   return page;
+}
+
+async function assertReadOpen(fetchImpl, base, token, pageId) {
+  const response = await callUpstream(fetchImpl, `${base}/wiki/api/v2/pages/${pageId}/restriction-state`, {
+    headers: authHeaders(token),
+  });
+  if (response.status !== 200) fail(403, 'parent_not_allowed');
+  const body = await readUpstreamJson(response);
+  if (!body || (body.state !== 'OPEN' && body.state !== 'EDIT_RESTRICTED')) fail(403, 'parent_not_allowed');
+}
+
+async function assertParentReadable(fetchImpl, base, token, parent, cloudId) {
+  await assertReadOpen(fetchImpl, base, token, parent);
+  const seen = new Set([parent]);
+  let current = parent;
+  for (let hop = 0; hop < 8; hop++) {
+    const response = await callUpstream(fetchImpl, `${base}/wiki/api/v2/pages/${current}/ancestors?limit=25`, {
+      headers: authHeaders(token),
+    });
+    if (response.status !== 200) fail(403, 'parent_not_allowed');
+    const payload = await readUpstreamJson(response);
+    const results = payload?.results;
+    if (!Array.isArray(results) || results.length > 25) fail(403, 'parent_not_allowed');
+    if (!results.length) return;
+    const ids = [];
+    for (const item of results) {
+      if (!item || item.type !== 'page') fail(403, 'parent_not_allowed');
+      const id = String(item.id);
+      if (!PAGE_ID.test(id)) fail(403, 'parent_not_allowed');
+      ids.push(id);
+    }
+    let added = false;
+    for (const id of ids) {
+      if (seen.has(id)) continue;
+      if (seen.size >= MAX_ANCESTORS) fail(403, 'parent_not_allowed');
+      seen.add(id);
+      added = true;
+      await assertReadOpen(fetchImpl, base, token, id);
+    }
+    const next = payload?._links?.next;
+    if (typeof next === 'string' && next) {
+      let url;
+      try { url = new URL(next); } catch { fail(403, 'parent_not_allowed'); }
+      const match = new RegExp(`^/ex/confluence/${cloudId}/wiki/api/v2/pages/([0-9]{1,20})/ancestors$`).exec(url.pathname);
+      if (url.origin !== 'https://api.atlassian.com' || url.username || url.password || !match || !seen.has(match[1])) fail(403, 'parent_not_allowed');
+      if (results.length < 25 && !added) return;
+      current = match[1];
+      continue;
+    }
+    if (!added || results.length < 25) return;
+    if (ids[0] === current) return;
+    current = ids[0];
+  }
+  fail(403, 'parent_not_allowed');
+}
+
+function downloadTarget(url, cloudId, pageId, attachmentId) {
+  if (url.protocol !== 'https:' || url.username || url.password || url.hash) return false;
+  if (url.hostname === 'api.atlassian.com') {
+    const expected = `/ex/confluence/${cloudId}/wiki/rest/api/content/${pageId}/child/attachment/${attachmentId}/download`;
+    return url.pathname === expected && url.search === '';
+  }
+  // Exact host named as an internal Atlassian API redirect domain in the Forge
+  // runtime egress permissions page. The binary path is the one Media Services
+  // serves for that redirect. No other host, subdomain, or path is fetched.
+  if (url.hostname === MEDIA_HOST) return MEDIA_BINARY.test(url.pathname) && url.search.length <= 2048;
+  return false;
+}
+
+async function downloadAttachment(fetchImpl, start, token, cloudId, pageId, attachmentId, writeStarted) {
+  let current = start;
+  let sendBearer = true;
+  const seen = new Set();
+  const refused = () => fail(writeStarted ? 409 : 502, writeStarted ? 'write_unknown' : 'redirect_refused', {}, writeStarted ? { pageId, readBack: true } : null);
+  for (let hop = 0; hop <= MAX_DOWNLOAD_REDIRECTS; hop++) {
+    if (seen.has(current)) refused();
+    seen.add(current);
+    let parsed;
+    try { parsed = new URL(current); } catch { refused(); }
+    if (!downloadTarget(parsed, cloudId, pageId, attachmentId)) refused();
+    const headers = { Accept: 'application/json' };
+    if (sendBearer) headers.Authorization = `Bearer ${token}`;
+    let response;
+    try {
+      response = await fetchImpl(parsed.origin + parsed.pathname + parsed.search, { method: 'GET', headers, redirect: 'manual' });
+    } catch (error) {
+      if (error instanceof GatewayError) throw error;
+      if (writeStarted) fail(409, 'write_unknown', {}, { pageId, readBack: true });
+      fail(502, 'upstream_unavailable');
+    }
+    if (response.status >= 300 && response.status < 400) {
+      if (![301, 302, 303, 307, 308].includes(response.status) || hop === MAX_DOWNLOAD_REDIRECTS) refused();
+      const location = response.headers.get('Location');
+      if (!location) refused();
+      let next;
+      try { next = new URL(location, parsed); } catch { refused(); }
+      if (next.hostname !== parsed.hostname) sendBearer = false;
+      current = next.origin + next.pathname + next.search;
+      continue;
+    }
+    if (response.status === 429) {
+      const retry = response.headers.get('Retry-After');
+      const retryHeaders = retry && /^\d{1,6}$/.test(retry) ? { 'Retry-After': retry } : {};
+      if (writeStarted) fail(409, 'write_partial', retryHeaders, { pageId, readBack: true });
+      fail(429, 'rate_limited', retryHeaders);
+    }
+    if (response.status >= 500) {
+      if (writeStarted) fail(409, 'write_unknown', {}, { pageId, readBack: true });
+      fail(502, 'upstream_unavailable');
+    }
+    return response;
+  }
+  refused();
 }
 
 function needsRefresh(session, now) {
@@ -463,7 +578,7 @@ function propertyValue(page) {
 }
 
 async function loadArchiveModule() {
-  const api = await reviewBundle();
+  const api = reviewBundle();
   if (!api || typeof api.validateArchive !== 'function' || typeof api.archiveHash !== 'function') fail(503, 'archive_validator_unavailable');
   return api;
 }
@@ -481,7 +596,7 @@ async function normalizeArchive(archive) {
   }
   if (!normalized || normalized.schema !== 'falsify.confluence-archive.v1' || !['experiment', 'harness'].includes(normalized.kind)) fail(422, 'invalid_archive');
   if (typeof normalized.id !== 'string' || !normalized.id || normalized.id.length > 200 || /[\u0000-\u001f]/.test(normalized.id)) fail(422, 'invalid_archive');
-  if (typeof normalized.title !== 'string' || !normalized.title.trim() || normalized.title.length > 200 || /[\u0000-\u001f]/.test(normalized.title)) fail(422, 'invalid_archive');
+  if (typeof normalized.title !== 'string' || !normalized.title.trim() || normalized.title.length > 500 || /[\u0000-\u001f\u007f]/.test(normalized.title)) fail(422, 'invalid_archive');
   if (!normalized.data || typeof normalized.data !== 'object' || Array.isArray(normalized.data)) fail(422, 'invalid_archive');
   if (typeof archiveSha256 !== 'string' || !HEX.test(archiveSha256)) fail(422, 'invalid_archive');
   const bytes = encoder.encode(JSON.stringify(normalized));
@@ -580,7 +695,7 @@ async function publish(ctx, session) {
     fail(409, 'archive_conflict');
   }
   try {
-    await ensureAttachment(ctx, base, session.accessToken, pageId, archiveSha256, bytes);
+    await ensureAttachment(ctx, base, session.accessToken, session.cloudId, pageId, archiveSha256, bytes);
     await ensureProperty(ctx, base, session.accessToken, pageId, normalized, archiveSha256);
     await ensureLabel(ctx, base, session.accessToken, pageId);
     const fresh = await getPage(ctx.fetchImpl, base, session.accessToken, pageId, true);
@@ -595,7 +710,7 @@ async function publish(ctx, session) {
   }
 }
 
-async function ensureAttachment(ctx, base, token, pageId, archiveSha256, bytes) {
+async function ensureAttachment(ctx, base, token, cloudId, pageId, archiveSha256, bytes) {
   const filename = `${archiveSha256}.json`;
   const listResponse = await callUpstream(ctx.fetchImpl, `${base}/wiki/api/v2/pages/${pageId}/attachments?limit=25`, {
     headers: authHeaders(token),
@@ -625,11 +740,10 @@ async function ensureAttachment(ctx, base, token, pageId, archiveSha256, bytes) 
     attachment = Array.isArray(results) ? results.find(item => item && item.title === filename) : null;
   }
   if (!attachment || !PAGE_ID.test(String(attachment.id))) fail(409, 'write_partial', {}, { pageId, readBack: true });
-  const download = await callUpstream(ctx.fetchImpl, `${base}/wiki/rest/api/content/${pageId}/child/attachment/${attachment.id}/download`, {
-    headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
-  }, true);
+  const download = await downloadAttachment(ctx.fetchImpl, `${base}/wiki/rest/api/content/${pageId}/child/attachment/${attachment.id}/download`, token, cloudId, pageId, String(attachment.id), true);
   const downloaded = await readBounded(download, MAX_ARCHIVE_BYTES);
-  if (!downloaded || download.status < 200 || download.status >= 300) fail(409, 'write_partial', {}, { pageId, readBack: true });
+  if (download.status < 200 || download.status >= 300) fail(409, 'write_partial', {}, { pageId, readBack: true });
+  if (!downloaded) fail(413, 'payload_too_large');
   try {
     await verifyBytes(downloaded, archiveSha256);
   } catch (error) {
@@ -661,12 +775,21 @@ async function listArchives(ctx, session) {
   await requireReady(ctx);
   const config = confluenceConfig(ctx.env);
   const cursor = ctx.url.searchParams.get('cursor');
-  if (cursor !== null && !CURSOR.test(cursor)) fail(400, 'invalid_cursor');
   if ([...ctx.url.searchParams.keys()].some(key => key !== 'cursor')) fail(400, 'invalid_request');
+  const key = await aesKey(ctx.env);
+  let upstreamCursor = null;
+  if (cursor !== null) {
+    if (!CLIENT_CURSOR.test(cursor)) fail(400, 'invalid_cursor');
+    const opened = key ? await open(key, CURSOR_PURPOSE, cursor) : null;
+    if (!opened || opened.cloudId !== session.cloudId || opened.parent !== config.parent || typeof opened.cursor !== 'string' || !CURSOR.test(opened.cursor)) {
+      fail(400, 'invalid_cursor');
+    }
+    upstreamCursor = opened.cursor;
+  }
   await confine(ctx.fetchImpl, session.accessToken, session.cloudId, config.parent);
   const base = cloudBase(session.cloudId);
   const pathname = `/ex/confluence/${session.cloudId}/wiki/api/v2/pages/${config.parent}/children`;
-  const url = `${base}/wiki/api/v2/pages/${config.parent}/children?limit=25${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
+  const url = `${base}/wiki/api/v2/pages/${config.parent}/children?limit=25${upstreamCursor ? `&cursor=${encodeURIComponent(upstreamCursor)}` : ''}`;
   const response = await callUpstream(ctx.fetchImpl, url, { headers: authHeaders(session.accessToken) });
   const payload = await readUpstreamJson(response);
   const results = Array.isArray(payload?.results) ? payload.results : null;
@@ -683,7 +806,9 @@ async function listArchives(ctx, session) {
     if (typeof updatedAt !== 'string' || !url) fail(502, 'upstream_invalid');
     items.push({ pageId: String(page.id), title: String(page.title || ''), updatedAt, webUrl: url });
   }
-  const nextCursor = cursorFromNext(payload?._links?.next, pathname);
+  const nextRaw = cursorFromNext(payload?._links?.next, pathname);
+  const nextCursor = nextRaw && key ? await seal(key, CURSOR_PURPOSE, { purpose: CURSOR_PURPOSE, cloudId: session.cloudId, parent: config.parent, cursor: nextRaw }) : null;
+  if (nextCursor && !CLIENT_CURSOR.test(nextCursor)) fail(502, 'upstream_invalid');
   return json(200, { items, nextCursor });
 }
 
@@ -704,11 +829,10 @@ async function readArchive(ctx, session, pageId) {
   const filename = `${prop.archiveSha256}.json`;
   const attachments = Array.isArray(list?.results) ? list.results.filter(item => item && item.title === filename) : [];
   if (attachments.length !== 1 || !PAGE_ID.test(String(attachments[0].id))) fail(422, 'invalid_archive');
-  const download = await callUpstream(ctx.fetchImpl, `${base}/wiki/rest/api/content/${pageId}/child/attachment/${attachments[0].id}/download`, {
-    headers: { Authorization: `Bearer ${session.accessToken}`, Accept: 'application/json' },
-  });
+  const download = await downloadAttachment(ctx.fetchImpl, `${base}/wiki/rest/api/content/${pageId}/child/attachment/${attachments[0].id}/download`, session.accessToken, session.cloudId, pageId, String(attachments[0].id), false);
+  if (download.status < 200 || download.status >= 300) fail(422, 'invalid_archive');
   const bytes = await readBounded(download, MAX_ARCHIVE_BYTES);
-  if (!bytes || download.status < 200 || download.status >= 300) fail(422, 'invalid_archive');
+  if (!bytes) fail(413, 'payload_too_large');
   const verified = await verifyBytes(bytes, prop.archiveSha256);
   if (verified.normalized.id !== prop.id || verified.normalized.kind !== prop.kind) fail(422, 'invalid_archive');
   const url = webUrl(page);
