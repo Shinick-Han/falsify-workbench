@@ -178,6 +178,8 @@ class GoldAndModelTests(unittest.TestCase):
         summary = prep.prepare(packet)
         self.assertIn('gold_missing', codes(summary))
         self.assertEqual(summary['fixed']['goldVersion'], 'unknown')
+        self.assertEqual(summary['arms']['ORIGINAL']['counts']['gold-unknown'], 1)
+        self.assertEqual(summary['arms']['ORIGINAL']['counts']['human-unreviewed'], 0)
         self.assertEqual(summary['arms']['ORIGINAL']['counts']['matched-findings'], 'unknown')
         self.assertEqual(summary['arms']['ORIGINAL']['matchedFindingJudgments'], 'unknown')
         self.assertEqual(summary['gold']['usableItems'], 'unknown')

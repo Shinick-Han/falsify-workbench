@@ -45,6 +45,7 @@ Each included trial has one primary class:
 | `human-unreviewed` | Completed status `ok` with findings and no condition-matched human review. |
 | `matched-findings` | A condition-matched human review accepts at least one `matched` judgment. |
 | `human-reviewed-no-match` | A condition-matched review exists and accepts no `matched` judgment. |
+| `gold-unknown` | Completed status `ok` with findings and a review, while gold version is absent. Match counts stay `unknown`. |
 
 `failed` and `cancelled` are in `attempts` and are not in `completedResponses`. They are also outside the zero-findings denominator. A failed job with no final findings is never `completed-zero-findings`. The preparer rejects a failed or cancelled trial that still carries a result object (`discarded_result`), matching the companion rule that cancel drops the result and failure does not store one.
 

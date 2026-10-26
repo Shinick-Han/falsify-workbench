@@ -28,7 +28,11 @@ VERDICTS = ('uncertain', 'supported', 'unsupported', 'mixed')
 JUDGMENTS = ('matched', 'unmatched', 'duplicate')
 PRIMARY = (
     'failed', 'cancelled', 'refusal', 'abstain', 'completed-zero-findings',
-    'human-unreviewed', 'matched-findings', 'human-reviewed-no-match',
+    'human-unreviewed', 'matched-findings', 'human-reviewed-no-match', 'gold-unknown',
+)
+OK_CLASSES = (
+    'completed-zero-findings', 'human-unreviewed', 'matched-findings',
+    'human-reviewed-no-match', 'gold-unknown',
 )
 REQUEST_KEYS = {
     'schema', 'revision', 'requestId', 'sourceHash', 'segments', 'maxCalls',
@@ -672,6 +676,9 @@ def evaluate(packet):
             status = None
             finding_count = 0
         kind = outcome_class(trial['job']['state'], status, finding_count, reviewed, matched > 0)
+        # A stored review cannot become a match, or a claim of no match, while gold is absent.
+        if not reasons and fixed['goldVersion'] is None and review is not None and status == 'ok' and finding_count > 0:
+            kind = 'gold-unknown'
         if reasons:
             kind_for_counts = None
         else:
@@ -755,8 +762,7 @@ def _summarize(packet, rows, warnings, usable, duplicate):
         if len(hashes) > 1:
             for row in included:
                 _warn(warnings, 'machine_config_not_strategy_identity', row['id'])
-        ok_rows = [row for row in included if row['countedClass'] in (
-            'completed-zero-findings', 'human-unreviewed', 'matched-findings', 'human-reviewed-no-match')]
+        ok_rows = [row for row in included if row['countedClass'] in OK_CLASSES]
         failed = counts['failed']
         cancelled = counts['cancelled']
         gold_known = fixed['goldVersion'] is not None
