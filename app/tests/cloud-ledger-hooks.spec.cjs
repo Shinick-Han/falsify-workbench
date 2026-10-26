@@ -26,7 +26,7 @@ function ledger(stored,opts={}){
     fetch(){network.push('fetch');throw Error('network disabled');},WebSocket(){network.push('WebSocket');throw Error('network disabled');},
     crypto:globalThis.crypto,TextEncoder,CustomEvent,Event,URL,Blob,setTimeout,clearTimeout,Date:opts.Date||Date});
   vm.runInContext(fs.readFileSync(path.join(dist,'experiment-ledger.js'),'utf8'),ctx,{filename:'experiment-ledger.js'});
-  return {get,lab:ctx.FalsifyLab,store,writes,events,network};
+  return {get,lab:ctx.FalsifyLab,store,writes,events,network,document};
 }
 const segments=[{id:'s0',label:'p1',text:'Study does not show benefit.'},{id:'s1',label:'p2',text:'Only an association was observed.'}];
 const candidate={id:'c1',segmentId:'s0',level:1,before:'Study does not show benefit.',after:'Study does show benefit.',rationale:'Synthetic contradiction.',evidence:[{segmentId:'s1',quote:'Only an association was observed.',relation:'Synthetic qualification.'}],uncertainty:'Synthetic fixture only.'};
@@ -108,6 +108,7 @@ test('invalid or cancelled RED plan replacement retains displayed comparison, ju
 
 const Blue=require('../dist/document-blue-core.js');
 const tags=(e,tag)=>{const out=[];if(e.tagName===tag)out.push(e.textContent);for(const c of e.children||[])if(c&&typeof c==='object')out.push(...tags(c,tag));return out;};
+const tree=e=>[e.textContent,...(e.children||[]).filter(c=>c&&typeof c==='object').flatMap(tree)].join('\n');
 const redTexts=['Alpha does not show benefit in the cohort.','Only an association was observed in winter.','The sample excluded untreated controls.','Follow-up stopped before the endpoint.','Authors call the result conclusive.'];
 const changed='Alpha does show benefit in the cohort.';
 async function fiveArchive(){
@@ -262,6 +263,112 @@ test('tamper, conflicting parent and harness preview do not write or register',a
   const refused=ledger([[KEY,rawCorrupt]]);
   await assert.rejects(refused.lab.cloudSnapshot(),/백업 JSON을 복원/);
   assert.equal(refused.store.get(KEY),rawCorrupt);assert.deepEqual(refused.writes,[]);
+});
+test('same-ID close and pre-timer expiry redraw the local case and keep exposure apart',async()=>{
+  const {archive,blueId}=await fiveArchive();
+  const localBlue=plain(archive.data.ledger.runs.find(r=>r.id===blueId));
+  localBlue.response.findings[0].rationale='LOCAL-RATIONALE-TOKEN';
+  const stored={schema:KEY,harnesses:archive.data.ledger.harnesses.filter(h=>h.hash===localBlue.harnessHash),runs:[localBlue],reviews:[]};
+  let now=Date.parse('2026-10-26T03:00:00.000Z');
+  function Clock(...args){return new Date(...(args.length?args:[now]));}
+  Clock.now=()=>now;Clock.parse=Date.parse;Clock.UTC=Date.UTC;Clock.prototype=Date.prototype;
+  const w=ledger([[KEY,JSON.stringify(stored)]],{Date:Clock});await w.lab.ready;
+  const raw=w.store.get(KEY),writes=w.writes.length,before=H.counts((await w.lab.cloudSnapshot()).runs);
+  const shown=()=>tree(w.get('evaluation-output'));
+  assert.equal(await w.lab.review(blueId),true);
+  assert.match(shown(),/LOCAL-RATIONALE-TOKEN/);
+  assert.equal(/Synthetic finding 1\./.test(shown()),false);
+  assert.equal(/does not show benefit/.test(shown()),false);
+  assert.equal((await w.lab.openArchive(archive)).runId,blueId);
+  assert.equal(w.get('evaluation-run').value,blueId);
+  assert.match(shown(),/Synthetic finding 1\./);
+  assert.match(shown(),/Synthetic contradiction/);
+  assert.match(shown(),/does not show benefit/);
+  assert.equal(/LOCAL-RATIONALE-TOKEN/.test(shown()),false);
+  assert.equal(w.writes.length,writes);assert.equal(w.store.get(KEY),raw);
+  const stale=w.get('evaluation-finding-note-0');
+  assert.equal(await w.lab.closeArchive(),true);
+  assert.equal(w.get('evaluation-run').value,blueId);
+  assert.match(shown(),/LOCAL-RATIONALE-TOKEN/);
+  assert.equal(/Synthetic finding 1\./.test(shown()),false);
+  assert.equal(/Synthetic contradiction/.test(shown()),false);
+  assert.equal(/does not show benefit/.test(shown()),false);
+  for(let i=0;i<5;i++){const note=w.get('evaluation-finding-note-'+i);note.value='Local finding note '+(i+1)+'.';note.dispatchEvent(new Event('input'));const verdict=w.get('evaluation-finding-'+i);verdict.value='supported';verdict.dispatchEvent(new Event('change'));}
+  stale.value='STALE-REMOTE-NOTE';stale.dispatchEvent(new Event('input'));
+  w.get('evaluation-reviewer').value='Synthetic reviewer';w.get('evaluation-case').value='Synthetic local case';w.get('evaluation-verdict').value='uncertain';w.get('evaluation-note').value='Synthetic local overall note.';
+  w.get('evaluation-form').dispatchEvent(new Event('submit',{cancelable:true}));
+  const saved=(await w.lab.cloudSnapshot()).reviews;
+  assert.equal(saved.length,1);assert.equal(saved[0].reviewContext.mode,'blue-only');assert.equal(saved[0].comparison,null);
+  assert.equal(saved[0].findingAssessments[0].note,'Local finding note 1.');
+  assert.equal(saved[0].findingAssessments.some(a=>a.note==='STALE-REMOTE-NOTE'),false);
+  assert.equal((await w.lab.cloudSnapshot()).runs.length,1);assert.equal(H.counts((await w.lab.cloudSnapshot()).runs).executed,before.executed);
+  const again=ledger([[KEY,JSON.stringify(stored)]],{Date:Clock});await again.lab.ready;const againRaw=again.store.get(KEY),againWrites=again.writes.length;
+  assert.equal(await again.lab.review(blueId),true);
+  assert.equal((await again.lab.openArchive(archive)).runId,blueId);
+  const againShown=()=>tree(again.get('evaluation-output'));
+  assert.match(againShown(),/Synthetic finding 1\./);
+  assert.match(againShown(),/does not show benefit/);
+  now+=12*60*60*1000;
+  again.document.visibilityState='visible';
+  again.document.dispatchEvent(new Event('visibilitychange'));
+  assert.match(againShown(),/LOCAL-RATIONALE-TOKEN/);
+  assert.equal(/Synthetic finding 1\./.test(againShown()),false);
+  assert.equal(/Synthetic contradiction/.test(againShown()),false);
+  assert.equal(/does not show benefit/.test(againShown()),false);
+  assert.match(again.get('ledger-status').textContent,/12시간/);
+  assert.equal((await again.lab.reviewSnapshot()).runs[0].response.findings[0].rationale,'LOCAL-RATIONALE-TOKEN');
+  assert.equal(again.writes.length,againWrites);assert.equal(again.store.get(KEY),againRaw);assert.equal(again.network.length,0);
+});
+test('harness preview expires and restores the previous draft without touching a user edit or registration',async()=>{
+  const config={...H.builtin('blue'),id:'archive-blue',name:'Archive BLUE'},hash=await H.hash(config);
+  const harnessArchive=await ReviewBundle.buildHarnessArchive({config,hash},{harness:H});
+  let now=Date.parse('2026-10-26T04:00:00.000Z');
+  function Clock(...args){return new Date(...(args.length?args:[now]));}
+  Clock.now=()=>now;Clock.parse=Date.parse;Clock.UTC=Date.UTC;Clock.prototype=Date.prototype;
+  const draft='{"localDraft":"keep-me"}';
+  const w=ledger(undefined,{Date:Clock});await w.lab.ready;
+  w.get('harness-editor').value=draft;const raw=w.store.get(KEY),writes=w.writes.length,library=(await w.lab.cloudSnapshot()).harnesses.map(h=>h.hash);
+  assert.equal((await w.lab.openArchive(harnessArchive)).hash,hash);
+  assert.equal(JSON.parse(w.get('harness-editor').value).id,'archive-blue');
+  assert.equal(w.writes.length,writes);assert.equal(w.store.get(KEY),raw);
+  now+=12*60*60*1000-1;
+  assert.equal(JSON.parse(w.get('harness-editor').value).id,'archive-blue');
+  now+=1;
+  await w.lab.reviewSnapshot();
+  assert.equal(w.get('harness-editor').value,draft);
+  assert.equal(w.get('harness-preview').children.length,0);
+  assert.deepEqual((await w.lab.cloudSnapshot()).harnesses.map(h=>h.hash),library);
+  assert.equal(w.writes.length,writes);assert.equal(w.store.get(KEY),raw);
+  w.get('harness-editor').value=draft;
+  assert.equal((await w.lab.openArchive(harnessArchive)).hash,hash);
+  w.get('harness-editor').value='{"userEdited":true}';
+  assert.equal(await w.lab.closeArchive(),true);
+  assert.equal(w.get('harness-editor').value,'{"userEdited":true}');
+  assert.equal(w.writes.length,writes);
+  w.get('harness-editor').value=draft;
+  assert.equal((await w.lab.openArchive(harnessArchive)).hash,hash);
+  w.get('harness-register').dispatchEvent(new Event('click'));
+  await flush();
+  assert.ok((await w.lab.cloudSnapshot()).harnesses.some(h=>h.hash===hash));
+  const registered=w.store.get(KEY);
+  assert.equal(await w.lab.closeArchive(),true);
+  assert.equal(JSON.parse(w.get('harness-editor').value).id,'archive-blue');
+  assert.equal(w.store.get(KEY),registered);
+  assert.ok((await w.lab.cloudSnapshot()).harnesses.some(h=>h.hash===hash));
+  const fresh=ledger(undefined,{Date:Clock});await fresh.lab.ready;
+  fresh.get('harness-editor').value=draft;
+  assert.equal((await fresh.lab.openArchive(harnessArchive)).hash,hash);
+  fresh.document.visibilityState='hidden';
+  fresh.document.dispatchEvent(new Event('visibilitychange'));
+  assert.equal(fresh.get('harness-editor').value,draft);
+  assert.equal(fresh.writes.length,0);assert.equal(fresh.store.get(KEY),undefined);
+  fresh.get('harness-editor').value=draft;
+  assert.equal((await fresh.lab.openArchive(harnessArchive)).hash,hash);
+  fresh.document.dispatchEvent(new Event('pagehide'));
+  assert.equal(fresh.get('harness-editor').value,draft);
+  const reloaded=ledger([[KEY,fresh.store.get(KEY)]]);await reloaded.lab.ready;
+  assert.equal(reloaded.get('harness-editor').value.includes('archive-blue'),false);
+  assert.equal(reloaded.store.get(KEY),fresh.store.get(KEY));
 });
 test('archive view expires after 12 hours without writing, including a long-lived tab',async()=>{
   const {archive,blueId}=await fiveArchive();

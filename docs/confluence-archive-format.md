@@ -39,12 +39,13 @@
 영구 사본은 Confluence에 있다. `FalsifyLab.openArchive(archive)`가 브라우저에서 여는 입구다. `FalsifyLab.restoreArchive(archive)`는 같은 함수의 호환 이름이며, 가져온 아카이브를 로컬 원장에 병합하지 않는다.
 
 - 실험은 코덱으로 검증한 뒤 별도 메모리 원장에서만 연다. `{kind:'experiment', runId}`를 반환하고 기존 검수 경로로 그 실행을 연다. 화면 이동은 호출자가 한다
-- 메모리 안의 실행 출처는 `imported-unverified`다. 로컬 원장, Harness 라이브러리, 결과 표, 실행 횟수는 바꾸지 않는다. 같은 ID가 로컬에 있어도 로컬 기록은 그대로 두고 화면의 원격 기록과 섞지 않는다
+- 메모리 안의 실행 출처는 `imported-unverified`다. 로컬 원장, Harness 라이브러리, 결과 표, 실행 횟수는 바꾸지 않는다. 같은 ID가 로컬에 있어도 로컬 기록은 그대로 두고 화면의 원격 기록과 섞지 않는다. 닫거나 만료되면 선택 ID가 같아도 검수 화면을 로컬 기록으로 다시 그린다. 원격 화면의 판정 콜백은 그 화면이 끝난 뒤 로컬 대조를 바꾸지 않는다
+- 원격에서 RED를 연 사실은 그 원격 보기에만 남는다. 같은 ID의 로컬 검수가 블라인드인지 RED 공개인지는 로컬에서 연 기록만으로 정한다
 - 원격 사례에 대한 사람 검수는 그 메모리 원장에만 쌓인다. 팀 발행 전에는 localStorage에 쓰지 않는다
 - `FalsifyLab.reviewSnapshot()`은 원격 보기가 열려 있으면 그 임시 원장의 복사를, 아니면 로컬 원장의 복사를 반환한다. 선택 사례를 명시적으로 발행할 때 쓴다. `cloudSnapshot()`은 항상 로컬 원장만 반환한다
-- `FalsifyLab.closeArchive()`는 원격 보기와 저장하지 않은 원격 검수만 지우고 이전에 선택했던 로컬 기록을 다시 고른다. 페이지를 다시 불러오면 원격 보기는 없다
-- 원격 보기의 최대 유지 시간은 12시간이다. 탭을 닫지 않아도 그 시간이 지나면 원격 보기만 닫는다
-- Harness 아카이브는 `{kind:'harness', hash}`를 반환하고 `previewSharedHarness`로 편집기에만 올린다. 등록·선택·실행하지 않는다
+- `FalsifyLab.closeArchive()`는 원격 실험 보기와 저장하지 않은 원격 검수, 그리고 원격 Harness 미리보기만 지운다. 이전에 선택했던 로컬 기록을 다시 고른다. 페이지를 다시 불러오면 원격 보기는 없다
+- 원격 실험 보기의 최대 유지 시간은 12시간이다. 타이머 전이라도 다시 보거나 검수 동작을 하면 만료된 화면을 지우고 로컬 화면으로 되돌린다. 탭을 닫지 않아도 같다
+- Harness 아카이브는 `{kind:'harness', hash}`를 반환하고 편집기 미리보기만 한다. 등록·선택·실행하지 않는다. 이 미리보기도 최대 12시간이며 닫기, 페이지를 떠나기, 다시 불러오기로 끝난다. 편집기가 아직 그 원격 미리보기일 때만 이전 로컬 초안과 미리보기를 되돌린다. 사용자가 고쳤거나 직접 등록한 설정은 덮어쓰지 않는다
 
 모델 `bind`는 요청 최상위에서 아카이브·묶음·Confluence 인증 재료를 제거한다. 키는 `archive`, `bundle`, `reviewBundle`, `restoreBundle`, `confluence`, `confluenceSession`, `oauth`, `accessToken`, `refreshToken`, `authorization`, `bearer`, `clientSecret`, `archiveSha256`, `archiveHash`, `teamShare`, `nonce`, `session`이다. 열기, 해시 계산, 검수 화면은 모델 호출이나 업로드가 아니다.
 
