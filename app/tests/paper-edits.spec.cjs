@@ -27,6 +27,22 @@ check('update then undo then redo keeps the original Before and final After',()=
   assert.equal(snap.edits[0].history.length,2);assert.equal(snap.edits[0].origin,'human');
 });
 
+check('history keeps the first After and drops the middle past the cap',()=>{
+  const s=session([seg('s0','unique claim in the source',0)]);
+  const id=s.add(edit());
+  const first=s.snapshot().edits[0].history[0];
+  for(let i=0;i<E.LIMITS.maxHistory+3;i++)s.update(id,{after:'claim '+i+' v'});
+  const row=s.snapshot().edits[0];
+  assert.equal(row.history.length,E.LIMITS.maxHistory);
+  assert.equal(row.before,'unique claim');
+  assert.deepEqual(row.history[0],first);
+  assert.equal(row.after,'claim '+(E.LIMITS.maxHistory+2)+' v');
+  assert.equal(row.history.at(-1).after,row.after);
+  s.undo();
+  assert.equal(s.snapshot().edits[0].before,'unique claim');
+  assert.equal(s.snapshot().edits[0].after,'claim '+(E.LIMITS.maxHistory+1)+' v');
+});
+
 check('enable and remove participate in undo and redo',()=>{
   const s=session([seg('s0','unique claim in the source',0)]);
   const id=s.add(edit()),seen=[];
@@ -101,25 +117,28 @@ check('drafts bind the file hash and a 12 hour TTL',()=>{
   assert.equal(env.expiresAt-env.savedAt,E.TTL_MS);assert.equal(E.TTL_MS,12*60*60*1000);
   assert.equal(JSON.stringify(env).includes(marker),false);
   assert.equal(JSON.stringify(env).includes('token'),false);
+  const copy=JSON.parse(JSON.stringify(env));
   env.snapshot.edits[0].after='mutated envelope';
   assert.equal(s.snapshot().edits[0].after,'altered claim');
-  const restored=E.restoreDraft(env,{fileHash:HASH,now:NOW+E.TTL_MS-1});
+  assert.equal(copy.snapshot.edits[0].after,'altered claim');
+  assert.throws(()=>E.restoreDraft(env,{fileHash:HASH,now:NOW+1}),e=>e.code==='malformed');
+  const restored=E.restoreDraft(copy,{fileHash:HASH,now:NOW+E.TTL_MS-1});
   assert.equal(restored.edits[0].id,id);assert.equal(restored.revision,1);
   restored.edits[0].before='tamper';
-  assert.equal(E.restoreDraft(JSON.stringify(env),{fileHash:HASH,now:NOW+1}).edits[0].before,'unique claim');
-  assert.throws(()=>E.restoreDraft(env,{fileHash:OTHER,now:NOW+1}),e=>e.code==='hash-mismatch');
-  const wrong=JSON.parse(JSON.stringify(env));wrong.fileHash=OTHER;
+  assert.equal(E.restoreDraft(JSON.stringify(copy),{fileHash:HASH,now:NOW+1}).edits[0].before,'unique claim');
+  assert.throws(()=>E.restoreDraft(copy,{fileHash:OTHER,now:NOW+1}),e=>e.code==='hash-mismatch');
+  const wrong=JSON.parse(JSON.stringify(copy));wrong.fileHash=OTHER;
   assert.throws(()=>E.restoreDraft(wrong,{fileHash:HASH,now:NOW+1}),e=>e.code==='hash-mismatch');
-  assert.throws(()=>E.restoreDraft(env,{fileHash:HASH,now:NOW+E.TTL_MS}),e=>e.code==='expired');
+  assert.throws(()=>E.restoreDraft(copy,{fileHash:HASH,now:NOW+E.TTL_MS}),e=>e.code==='expired');
   assert.throws(()=>E.restoreDraft('{',{fileHash:HASH,now:NOW}),e=>e.code==='malformed');
   assert.throws(()=>E.restoreDraft(null,{fileHash:HASH,now:NOW}),e=>e.code==='malformed');
-  const cred=JSON.parse(JSON.stringify(env));cred.snapshot.token='sekret';
+  const cred=JSON.parse(JSON.stringify(copy));cred.snapshot.token='sekret';
   assert.throws(()=>E.restoreDraft(cred,{fileHash:HASH,now:NOW+1}),e=>e.code==='malformed');
-  const extra=JSON.parse(JSON.stringify(env));extra.password='nope';
+  const extra=JSON.parse(JSON.stringify(copy));extra.password='nope';
   assert.throws(()=>E.restoreDraft(extra,{fileHash:HASH,now:NOW+1}),e=>e.code==='malformed');
-  const badTime=JSON.parse(JSON.stringify(env));badTime.expiresAt=badTime.savedAt+1000;
+  const badTime=JSON.parse(JSON.stringify(copy));badTime.expiresAt=badTime.savedAt+1000;
   assert.throws(()=>E.restoreDraft(badTime,{fileHash:HASH,now:NOW+1}),e=>e.code==='malformed');
-  const resumed=session([seg('s0','unique claim '+marker,0)],{resume:E.restoreDraft(env,{fileHash:HASH,now:NOW+5})});
+  const resumed=session([seg('s0','unique claim '+marker,0)],{resume:E.restoreDraft(copy,{fileHash:HASH,now:NOW+5})});
   assert.equal(resumed.snapshot().edits[0].id,id);assert.equal(resumed.snapshot().canUndo,false);
   assert.equal(resumed.snapshot().revision,1);assert.equal(s.snapshot().edits[0].after,'altered claim');
   resumed.update(id,{after:'resumed claim'});
@@ -177,12 +196,14 @@ check('browser global export does not touch storage, DOM or network',()=>{
   for(const banned of ['localStorage','sessionStorage','indexedDB','XMLHttpRequest','WebSocket','fetch(','document.','window.'])assert.equal(code.includes(banned),false,banned);
   assert.equal(globalThis.FalsifyPaperEdits,undefined);
   const sandbox={};sandbox.globalThis=sandbox;
-  vm.runInNewContext(code,sandbox,{filename:'paper-edits.js'});
+  vm.runInNewContext(code+`
+    const s=FalsifyPaperEdits.create({fileHash:${JSON.stringify(HASH)},name:'synthetic.txt',segments:[{id:'s0',label:'PDF p. 1',text:'unique claim',pageIndex:0}]});
+    s.add({pageIndex:0,segmentId:'s0',before:'unique claim',after:'altered claim',origin:'human'});
+    const env=FalsifyPaperEdits.draft({snapshot:s.snapshot(),now:${NOW}});
+    if(FalsifyPaperEdits.restoreDraft(env,{fileHash:${JSON.stringify(HASH)},now:${NOW+1}}).edits.length!==1) throw new Error('draft');
+    if(typeof localStorage!=='undefined'||typeof document!=='undefined'||typeof fetch!=='undefined') throw new Error('host');
+  `,sandbox,{filename:'paper-edits.js'});
   assert.equal(typeof sandbox.FalsifyPaperEdits.create,'function');
-  const s=sandbox.FalsifyPaperEdits.create({fileHash:HASH,name:'synthetic.txt',segments:[seg('s0','unique claim',0)]});
-  s.add(edit());
-  const env=sandbox.FalsifyPaperEdits.draft({snapshot:s.snapshot(),now:NOW});
-  assert.equal(sandbox.FalsifyPaperEdits.restoreDraft(env,{fileHash:HASH,now:NOW+1}).edits.length,1);
   assert.equal(sandbox.localStorage,undefined);assert.equal(sandbox.document,undefined);assert.equal(sandbox.fetch,undefined);
 });
 
