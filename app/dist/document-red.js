@@ -38,7 +38,7 @@
     $('#red-plan').disabled=!active||!candidates.some(c=>c.selected);
     const count=candidates.filter(c=>c.selected).length;
     $('#red-selection-summary').textContent=count+'개 선택 · 처음에는 모두 미선택입니다. After를 바꾸면 이전 다운로드 검증은 무효입니다.';
-    const plain=doc&&/^(TXT|MD|MARKDOWN|TEXT|TEX|CSV|TSV|RST|DOCX|HTML|HTM)$/.test(doc.format);
+    const plain=doc&&/^(TXT|MD|MARKDOWN|TEXT|TEX|CSV|TSV|RST|DOCX|ODT|HTML|HTM)$/.test(doc.format);
     const pdf=doc?.format==='PDF'?pdfMode(cap):null,supported=plain||!!pdf&&pdf.kind!=='none';
     $('#red-download').disabled=!active||!count||!$('#red-export-consent').checked||!supported||sourceFileRequired;
     if(sourceFileRequired)ensureReselect();
@@ -378,6 +378,7 @@
         // Defense in depth: a failed independent check never downloads even if the companion still returned bytes; warning/unavailable do not block.
         const qa=independentQA(v);if(qa.state==='failed'){const items=qaItems(qa.checks);throw new Error('독립 추출·렌더 검사가 실패로 보고되어 받은 파일을 다운로드하지 않았습니다.'+(items?' 실패 항목: '+items+'.':''));}}
       else if(doc.format==='DOCX')output=await FalsifyExport.docxFile(file,patches,doc);
+      else if(doc.format==='ODT')output=await FalsifyExport.odtFile(file,patches,doc);
       else if(doc.format==='HTML'||doc.format==='HTM')output=await FalsifyExport.htmlFile(file,patches,doc);
       else output=await FalsifyExport.textFile(file,patches);
       if(current!==generation)return;
