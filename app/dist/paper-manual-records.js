@@ -7,7 +7,7 @@
   const HEX=/^[a-f0-9]{64}$/;
   const ORIGIN_LABEL={human:'사람 편집', 'external-ai-import':'외부 AI 가져오기', 'ai-proposal':'작업대 AI 제안'};
   const locals=[];
-  let imported=null, activeId='', selectedKey='', consentFor='', sharing=false, shareEpoch=0, blues=[];
+  let imported=null, activeId='', selectedKey='', consentFor='', sharing=false, shareEpoch=0, blues=[], captureEpoch=0;
   const ui={}, state={status:{text:'', error:false}, shareOpen:false};
   let root=null, bundlePromise=null, listening=false;
   const copy=value=>JSON.parse(JSON.stringify(value));
@@ -55,48 +55,100 @@
     if(typeof record.output.sha256!=='string'||!HEX.test(record.output.sha256)) return null;
     return {sha256:record.output.sha256, revision:record.output.revision};
   }
-  function occurrences(text, needle){
-    if(!needle) return 0;
-    let count=0, index=0;
-    while((index=text.indexOf(needle, index))!==-1){count++; index+=needle.length; if(count>2) break;}
-    return count;
+  function hitsOf(text, needle){
+    const hits=[];
+    if(!needle||typeof text!=='string') return hits;
+    let from=0;
+    while(from<=text.length){
+      const index=text.indexOf(needle, from);
+      if(index<0) break;
+      hits.push(index);
+      from=index+1;
+      if(hits.length>1000) break;
+    }
+    return hits;
   }
   function locateEdit(record, edit){
     if(!edit||typeof edit.segmentId!=='string'||!edit.segmentId) return {status:'source-only'};
     const segment=(record.segments||[]).find(item=>item.id===edit.segmentId);
     if(!segment||typeof segment.text!=='string'||typeof edit.before!=='string') return {status:'mismatch'};
-    const count=occurrences(segment.text, edit.before);
-    if(count!==1) return {status:'mismatch'};
-    return {status:'matched', start:segment.text.indexOf(edit.before), segmentId:segment.id};
+    const hits=hitsOf(segment.text, edit.before);
+    const anchor=edit.anchor;
+    if(anchor&&Number.isInteger(anchor.start)&&Number.isInteger(anchor.end)){
+      if(segment.text.slice(anchor.start, anchor.end)!==edit.before) return {status:'mismatch'};
+      const occurrence=Number.isInteger(anchor.occurrence)?anchor.occurrence:hits.indexOf(anchor.start);
+      if(!Number.isInteger(occurrence)||occurrence<0||hits[occurrence]!==anchor.start) return {status:'mismatch'};
+      return {status:'matched', start:anchor.start, end:anchor.end, occurrence, segmentId:segment.id};
+    }
+    if(hits.length!==1) return {status:'mismatch'};
+    return {status:'matched', start:hits[0], end:hits[0]+edit.before.length, occurrence:0, segmentId:segment.id};
   }
   function matchBlue(record, blue){
     const link=downloadLink(record);
     if(!link) return {status:'source-only', findings:[]};
     if(!blue||typeof blue!=='object'||typeof blue.fileHash!=='string') return {status:'absent', findings:[]};
     if(blue.fileHash!==link.sha256) return {status:'mismatch', findings:[]};
-    const findings=Array.isArray(blue.findings)?blue.findings.map(finding=>({
-      id:typeof finding.id==='string'?finding.id:'',
-      segmentId:typeof finding.segmentId==='string'?finding.segmentId:null,
-      label:typeof finding.label==='string'?finding.label:'',
-      quote:typeof finding.quote==='string'?finding.quote:'',
-      rationale:typeof finding.rationale==='string'?finding.rationale:''
-    })).filter(finding=>finding.id):[];
+    const findings=Array.isArray(blue.findings)?blue.findings.map(finding=>{
+      const row={
+        id:typeof finding.id==='string'?finding.id:'',
+        segmentId:typeof finding.segmentId==='string'?finding.segmentId:null,
+        label:typeof finding.label==='string'?finding.label:'',
+        quote:typeof finding.quote==='string'?finding.quote:'',
+        rationale:typeof finding.rationale==='string'?finding.rationale:''
+      };
+      if(Number.isInteger(finding.start)) row.start=finding.start;
+      if(Number.isInteger(finding.end)) row.end=finding.end;
+      if(Number.isInteger(finding.pageIndex)) row.pageIndex=finding.pageIndex;
+      return row;
+    }).filter(finding=>finding.id):[];
     return {status:'matched', fileHash:link.sha256, findings};
   }
   function blueHandoff(record){
     const link=downloadLink(record);
     return link?{fileHash:link.sha256}:null;
   }
-  function overlaps(edit, finding){
-    if(!edit||!finding) return false;
-    if(edit.segmentId&&finding.segmentId&&edit.segmentId===finding.segmentId) return true;
-    return typeof finding.quote==='string'&&!!finding.quote&&typeof edit.after==='string'&&(finding.quote.includes(edit.after)||edit.after.includes(finding.quote));
+  function overlaps(record, edit, finding){
+    if(!edit||!finding) return null;
+    const place=locateEdit(record, edit);
+    const segment=(record&&record.segments||[]).find(item=>item.id===edit.segmentId);
+    const quote=typeof finding.quote==='string'?finding.quote:'';
+    let range=null;
+    if(Number.isInteger(finding.start)&&Number.isInteger(finding.end)&&finding.end>finding.start){
+      if(!segment||!quote||segment.text.slice(finding.start, finding.end)===quote) range={start:finding.start, end:finding.end};
+    }else if(segment&&quote){
+      const hits=hitsOf(segment.text, quote);
+      if(hits.length===1) range={start:hits[0], end:hits[0]+quote.length};
+    }
+    if(place.status==='matched'&&range&&place.start===range.start&&place.end===range.end) return 'same-position';
+    const sameSegment=!!(edit.segmentId&&finding.segmentId&&edit.segmentId===finding.segmentId);
+    const samePage=!!(segment&&Number.isInteger(segment.pageIndex)&&Number.isInteger(finding.pageIndex)&&finding.pageIndex===segment.pageIndex);
+    if(sameSegment||samePage) return 'same-page';
+    const before=typeof edit.before==='string'?edit.before:'';
+    const after=typeof edit.after==='string'?edit.after:'';
+    if(quote&&(before&&(quote.includes(before)||before.includes(quote))||after&&(quote.includes(after)||after.includes(quote)))) return 'context';
+    return null;
   }
   function mapEdit(edit){
     const before=typeof edit.originalBefore==='string'?edit.originalBefore:edit.before;
     const row={id:edit.id, enabled:edit.enabled, pageIndex:edit.pageIndex, before, after:edit.after, origin:edit.origin, anchor:Object.prototype.hasOwnProperty.call(edit,'anchor')?edit.anchor:null};
     if(typeof edit.segmentId==='string'&&edit.segmentId) row.segmentId=edit.segmentId;
+    if(Number.isInteger(edit.createdAt)) row.createdAt=edit.createdAt;
+    if(Number.isInteger(edit.updatedAt)) row.updatedAt=edit.updatedAt;
+    if(Array.isArray(edit.history)) row.history=copy(edit.history);
     return row;
+  }
+  function carryReviews(existing, revision, output){
+    if(!existing||!Array.isArray(existing.reviews)) return [];
+    const hash=output&&typeof output.sha256==='string'?output.sha256:null;
+    return existing.reviews.map(review=>{
+      const row=copy(review);
+      const boundRevision=Number.isInteger(row.editRevision)?row.editRevision:existing.editRevision;
+      const boundHash=Object.prototype.hasOwnProperty.call(review,'outputHash')?row.outputHash:(existing.output&&existing.output.sha256||null);
+      row.editRevision=boundRevision;
+      row.outputHash=boundHash;
+      row.stale=boundRevision!==revision||boundHash!==hash;
+      return row;
+    });
   }
   function mapSegment(segment){
     const row={id:segment.id, label:segment.label, text:segment.text};
@@ -121,6 +173,7 @@
     return api.normalizePaperEdit(record);
   }
   async function capture(input){
+    const ticket=++captureEpoch;
     const source=input&&input.source, snapshot=input&&input.snapshot;
     if(!source||typeof source!=='object'||!snapshot||snapshot.schema!=='falsify.paper-edits.v1') throw Object.assign(Error('원문이나 편집 스냅샷이 없어 수동 기록을 만들지 않았습니다.'),{code:'missing'});
     if(source.fileHash!==snapshot.fileHash) throw Object.assign(Error('원문 해시와 편집 스냅샷 해시가 달라 기록하지 않았습니다.'),{code:'mismatch'});
@@ -139,28 +192,34 @@
       edits:Array.isArray(snapshot.edits)?snapshot.edits.map(mapEdit):[],
       editRevision:revision,
       output,
-      reviews:existing?copy(existing.reviews):[]
+      reviews:carryReviews(existing, revision, output)
     };
     const data=await normalize(draft);
+    if(ticket!==captureEpoch) return {captured:false, reason:'superseded'};
     const record=storeLocal(data);
     render();
     setStatus('수동 편집 기록을 이 브라우저 메모리에 남겼습니다. 모델 실행이나 팀 공유는 하지 않았습니다.');
     return copy(record);
   }
   async function linkOutput(output){
+    const ticket=++captureEpoch;
     const current=locals.find(item=>item.id===activeId);
     if(!current) return {linked:false, reason:'no-record'};
+    const seenRevision=current.editRevision, seenId=current.id;
     const incoming=publicOutput(output);
-    if(!incoming||incoming.revision!==current.editRevision||typeof incoming.sha256!=='string'||!HEX.test(incoming.sha256)) return {linked:false, reason:'stale', download:downloadLink(current)};
+    if(!incoming||incoming.revision!==seenRevision||typeof incoming.sha256!=='string'||!HEX.test(incoming.sha256)) return {linked:false, reason:'stale', download:downloadLink(current)};
+    const nextOutput={sha256:incoming.sha256, revision:incoming.revision, verification:incoming.verification};
     try{
-      const data=await normalize({...current, output:{sha256:incoming.sha256, revision:incoming.revision, verification:incoming.verification}});
+      const data=await normalize({...current, reviews:carryReviews(current, seenRevision, nextOutput), output:nextOutput});
+      const latest=locals.find(item=>item.id===seenId);
+      if(ticket!==captureEpoch||!latest||latest.editRevision!==seenRevision) return {linked:false, reason:'superseded', download:downloadLink(latest||current)};
       const record=storeLocal(data);
       render();
       setStatus('생성 PDF SHA-256 '+record.output.sha256.slice(0,12)+'… 를 이 편집 리비전에 연결했습니다. PDF 바이너리는 저장하지 않았습니다.');
       return {linked:true, sha256:record.output.sha256, download:downloadLink(record)};
     }catch(error){
       setStatus(explain(error), true);
-      return {linked:false, reason:error.code||'rejected', download:downloadLink(current)};
+      return {linked:false, reason:error.code||'rejected', download:downloadLink(locals.find(item=>item.id===seenId)||current)};
     }
   }
   function readGet(name){
@@ -176,6 +235,7 @@
   async function onOutput(event){
     const detail=event&&event.detail?event.detail:readGet('getOutput');
     const result=await linkOutput(detail);
+    if(!result.linked&&result.reason==='superseded') return;
     if(!result.linked&&result.reason==='stale') setStatus('생성 파일 리비전이나 해시가 현재 편집과 달라 다운로드 해시를 바꾸지 않았습니다.', true);
     if(!result.linked&&result.reason==='binary') setStatus('생성 결과에 PDF 바이너리가 섞여 있어 해시만 연결하지 않았습니다.', true);
   }
@@ -277,7 +337,8 @@
       })};
     }
     const score=input.verdict==='uncertain'||input.score===''||input.score===undefined?null:input.score;
-    const review={id:crypto.randomUUID(), createdAt:new Date((extras&&extras.now)||Date.now()).toISOString(), reviewer:input.reviewer, caseLabel:input.caseLabel, verdict:input.verdict, score, note:input.note, alignment};
+    const link=downloadLink(view.record);
+    const review={id:crypto.randomUUID(), createdAt:new Date((extras&&extras.now)||Date.now()).toISOString(), reviewer:input.reviewer, caseLabel:input.caseLabel, verdict:input.verdict, score, note:input.note, alignment, editRevision:view.record.editRevision, outputHash:link?link.sha256:null, stale:false};
     const data=await normalize({...view.record, reviews:view.reviews.concat([review])});
     if(view.imported){imported.record=data.record; imported.reviews=data.reviews;}
     else storeLocal(data);
@@ -287,7 +348,7 @@
   }
   function editArticle(record, edit, findings){
     const place=locateEdit(record, edit);
-    const placeText=place.status==='matched'?'원문 한 곳과 같습니다.':place.status==='source-only'?'위치 단서가 없어 원문 위치로 확정하지 않습니다.':'원문에서 유일한 Before를 찾지 못해 위치로 확정하지 않습니다.';
+    const placeText=place.status==='matched'?'검증된 원문 범위와 같습니다.':place.status==='source-only'?'위치 단서가 없어 원문 위치로 확정하지 않습니다.':'검증된 범위가 없거나 중복 인용을 한 곳으로 확정하지 않습니다.';
     const anchor=edit.anchor?JSON.stringify(edit.anchor):'없음';
     const article=el('article',{className:'paper-manual-edit'},
       el('h4',{textContent:(edit.pageIndex+1)+'쪽 · '+(ORIGIN_LABEL[edit.origin]||edit.origin)+' · '+(edit.enabled?'사용':'사용 안 함')}),
@@ -297,10 +358,28 @@
       el('p',{className:'paper-manual-label', textContent:'After'}),
       el('pre',{textContent:edit.after})
     );
-    if(findings&&findings.length){
-      const related=findings.filter(finding=>overlaps(edit, finding));
-      if(related.length) article.append(el('div',{className:'paper-manual-findings'}, el('p',{className:'paper-manual-label', textContent:'같은 자리의 BLUE 지적'}), ...related.map(finding=>el('p',{textContent:finding.id+' · '+(finding.label||'')+' · '+finding.quote}))));
+    const groups={'same-position':[], 'same-page':[], context:[]};
+    for(const finding of findings||[]){const kind=overlaps(record, edit, finding); if(kind) groups[kind].push(finding);}
+    const labels={'same-position':'같은 자리의 BLUE 지적', 'same-page':'같은 쪽의 BLUE 지적', context:'문맥상 가까운 BLUE 지적'};
+    for(const kind of ['same-position','same-page','context']){
+      if(!groups[kind].length) continue;
+      article.append(el('div',{className:'paper-manual-findings', 'data-relation':kind}, el('p',{className:'paper-manual-label', textContent:labels[kind]}), ...groups[kind].map(finding=>el('p',{textContent:finding.id+' · '+(finding.label||'')+' · '+finding.quote}))));
     }
+    return article;
+  }
+  function reviewArticle(record, review){
+    const hash=record.output?record.output.sha256:null;
+    const current=review.stale!==true&&review.editRevision===record.editRevision&&review.outputHash===hash;
+    const prior=(record.edits||[]).flatMap(edit=>{
+      const hit=Array.isArray(edit.history)?edit.history.find(item=>item.revision===review.editRevision):null;
+      return hit?[edit.id+' · '+hit.after]:[];
+    });
+    const heading=current
+      ?review.reviewer+' · 이 리비전 r'+review.editRevision+' · '+review.verdict+' · '+(review.score??'미평가')
+      :review.reviewer+' · 이전 리비전 r'+review.editRevision+' · 현재 After에 적용하지 않음 · '+review.verdict+' · '+(review.score??'미평가');
+    const article=el('article',{'data-review-current':current?'true':'false'}, el('h4',{textContent:heading}), el('p',{textContent:review.note}));
+    if(!current) article.append(el('p',{className:'muted', textContent:'이 사람 판정은 리비전 '+review.editRevision+(review.outputHash?' · SHA-256 '+review.outputHash.slice(0,12)+'…':' · 생성 해시 없음')+' 에만 묶여 있습니다.'+(prior.length?' 당시 After '+prior.join(' / '):'')}));
+    else article.append(el('p',{className:'muted', textContent:review.alignment?'BLUE 해시 '+review.alignment.fileHash.slice(0,12)+'… 와 사람 메모':'BLUE를 맞추지 않은 검수'}));
     return article;
   }
   function render(){
@@ -329,7 +408,7 @@
     if(record) for(const edit of record.edits) edits.append(editArticle(record, edit, findings));
     else edits.append(el('p',{className:'muted', textContent:'논문 작업대의 편집 스냅샷이 오면 Before와 After를 여기 남깁니다. 위치와 원문을 다시 입력하지 않아도 됩니다.'}));
     const history=el('div',{id:'paper-manual-history'});
-    for(const review of (view&&view.reviews)||[]) history.append(el('article',{}, el('h4',{textContent:review.reviewer+' · '+review.verdict+' · '+(review.score??'미평가')}), el('p',{textContent:review.note}), el('p',{className:'muted', textContent:review.alignment?'BLUE 해시 '+review.alignment.fileHash.slice(0,12)+'… 와 사람 메모':'BLUE를 맞추지 않은 검수'})));
+    for(const review of (view&&view.reviews)||[]) history.append(reviewArticle(record, review));
     ui.consent=el('input',{type:'checkbox', id:'paper-manual-consent'});
     ui.consent.addEventListener('change',()=>{consentFor=ui.consent.checked?selectedKey:''; paintShare();});
     ui.publish=el('button',{type:'button', id:'paper-manual-publish', className:'button primary', textContent:'공개하고 저장'});
@@ -429,7 +508,7 @@
   }
   const api={
     ready:null, TTL_MS:TTL,
-    capture, linkOutput, downloadLink, locateEdit, matchBlue, blueHandoff, addReview, openConsent, cancelShare, share, openImported, closeImported, sweep, refreshBlue, mount,
+    capture, linkOutput, downloadLink, locateEdit, overlaps, matchBlue, blueHandoff, addReview, openConsent, cancelShare, share, openImported, closeImported, sweep, refreshBlue, mount,
     records(){return copy(locals);},
     imported(now){sweep(now); return imported?{record:copy(imported.record), reviews:copy(imported.reviews), openedAt:imported.openedAt, expiresAt:imported.expiresAt}:null;}
   };

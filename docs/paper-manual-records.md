@@ -19,15 +19,17 @@
 
 이벤트는 `falsify:paper-workspace-edits`, `falsify:paper-workspace-output`, `falsify:paper-workspace-source`, `falsify:paper-team-share`다. 편집 이벤트만 메모리 기록을 만든다. 팀 공유 이벤트는 동의 화면만 연다.
 
-기록은 원문, 최종 문장, 쪽, 앵커, 출처(`human`, `external-ai-import`, `ai-proposal`), 사용 여부, 편집 리비전, 그 리비전과 같은 생성 해시만 담는다. 사람이 Before나 위치를 다시 치지 않아도 된다. 원문 해시와 스냅샷 해시가 다르면 기록을 만들지 않는다. 리비전이 다른 생성 해시는 현재 다운로드 해시로 연결하지 않는다.
+기록은 원문, 최종 문장, 쪽, 앵커, 출처(`human`, `external-ai-import`, `ai-proposal`), 사용 여부, 편집 리비전, 그 리비전과 같은 생성 해시만 담는다. 코어 앵커는 `start`, `end`, `occurrence`, `bbox`, `style`이다. `bbox`와 `style`은 null일 수 있고, style이 있으면 `font`, `size`, `color`(0–0xffffff 정수)만 둔다. 편집의 `createdAt`, `updatedAt`, `history`(최대 12)는 검증 후 그대로 아카이브에 남긴다. 사람이 Before나 위치를 다시 치지 않아도 된다. 원문 해시와 스냅샷 해시가 다르면 기록을 만들지 않는다. 리비전이 다른 생성 해시는 현재 다운로드 해시로 연결하지 않는다. 진행 중인 이전 캡처나 출력 연결은 더 새로운 원문·리비전을 덮어쓰지 않는다.
 
 ## 검수
 
 화면은 기존 `#human-evaluation` 검수 경로에 붙는다. 점수 1–5와 이유는 사람이 적는다. 맞춘 BLUE가 없어도 수동 검수와 가져온 보관 검수는 저장된다.
 
-BLUE는 `FalsifyLab.blueFileChoices()`의 로컬 BLUE 파일 해시와 지적만 본다. 생성 PDF SHA-256과 같은 파일을 골랐을 때만 Before/After 옆에 지적을 둔다. 원문만 있거나 해시가 다르면 일치로 표시하지 않는다. 선택 결과에는 RED 실행, Harness, gold가 들어가지 않는다. BLUE로 넘기는 값은 생성 파일 해시뿐이다.
+BLUE는 `FalsifyLab.blueFileChoices()`의 로컬 BLUE 파일 해시와 지적만 본다. 생성 PDF SHA-256과 같은 파일을 골랐을 때만 Before/After 옆에 지적을 둔다. 원문만 있거나 해시가 다르면 일치로 표시하지 않는다. 선택 결과에는 RED 실행, Harness, gold가 들어가지 않는다. BLUE로 넘기는 값은 생성 파일 해시뿐이다. 같은 자리라고 부르는 것은 검증된 인용 범위가 같을 때뿐이다. 같은 세그먼트·쪽의 더 넓은 일치는 같은 쪽, 그 밖의 문장 겹침은 문맥이다. 자동 탐지 점수는 없다.
 
-세그먼트 ID가 없거나 Before가 그 세그먼트에 정확히 한 번이 아니면 원문 위치로 확정하지 않는다.
+세그먼트 ID가 없으면 원문 위치로 확정하지 않는다. 검증된 `start`/`end`/`occurrence`가 문단 텍스트와 맞으면, 같은 인용이 여러 번이어도 그 한 곳으로 둔다. 범위가 없고 인용이 한 번이 아니면 위치로 확정하지 않는다.
+
+사람 검수는 `editRevision`과 `outputHash`에 묶인다. 이후 편집이나 다른 생성 해시가 오면 이전 판정은 그 리비전의 After로 따로 남고 `stale`이 된다. 이전 판정을 새 After의 판정으로 옮기지 않는다.
 
 ## 팀 보관
 
