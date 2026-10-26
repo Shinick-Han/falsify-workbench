@@ -109,10 +109,11 @@
   async function watchRed(current,l,strict){
     while(current===generation&&job){
       const data=await l.request('/api/red/jobs/'+encodeURIComponent(job));if(current!==generation||!job)return;
-      if(strict){const found=P.read('red');if(found.status!=='record'||found.record.requestId!==job||!P.matches(found.record,data))throw new Error('조회한 작업의 식별이 저장한 요청과 달라 적용하지 않았습니다.');}
-      if(data.state==='completed'){applyResponse(data.result,'local-codex');if(strict){const found=P.read('red');if(found.status==='record')await P.note(found.record,{disposition:'completed',finishedAt:Date.now()});}break;}
-      if(['failed','cancelled'].includes(data.state)){if(strict){const found=P.read('red');if(found.status==='record'){await P.note(found.record,{disposition:data.state==='failed'?'failed':'cancelled',finishedAt:Date.now()});showPending({status:data.state==='failed'?'failed':'cancelled',record:found.record});}}throw new Error(data.error||'검토 취소됨');}
-      if(strict){const found=P.read('red');if(found.status==='record'&&found.record.disposition!=='running')await P.note(found.record,{disposition:'running'});}
+      let matched=null;
+      if(strict){const found=P.read('red');if(found.status!=='record'||found.record.requestId!==job||!P.matches(found.record,data))throw new Error('조회한 작업의 식별이 저장한 요청과 달라 적용하지 않았습니다.');matched=found.record;}
+      if(data.state==='completed'){applyResponse(data.result,'local-codex');if(strict){const found={status:'record',record:matched};if(found.status==='record')await P.note(found.record,{disposition:'completed',finishedAt:Date.now()});}break;}
+      if(['failed','cancelled'].includes(data.state)){if(strict){const found={status:'record',record:matched};if(found.status==='record'){await P.note(found.record,{disposition:data.state==='failed'?'failed':'cancelled',finishedAt:Date.now()});showPending({status:data.state==='failed'?'failed':'cancelled',record:found.record});}}throw new Error(data.error||'검토 취소됨');}
+      if(strict){const found={status:'record',record:matched};if(found.status==='record'&&found.record.disposition!=='running')await P.note(found.record,{disposition:'running'});}
       msg('Harness 검토 중 · '+(data.progress.completedCalls||0)+' / '+(data.progress.requiredCalls||'?')+'회 완료 · 사용자 harness 내부 호출량은 별도입니다.');
       await new Promise(resolve=>setTimeout(resolve,1500));
     }

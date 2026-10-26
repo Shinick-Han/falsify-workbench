@@ -155,19 +155,20 @@
   async function watchBlue(current,l,strict){
     while(current===generation&&job){
       const data=await l.request('/api/blue/jobs/'+encodeURIComponent(job));if(current!==generation||!job)return;
-      if(strict){const found=P.read('blue');if(found.status!=='record'||found.record.requestId!==job||!P.matches(found.record,data))throw new Error('조회한 작업의 식별이 저장한 요청과 달라 적용하지 않았습니다.');}
-      if(data.state==='completed'){clearSticky();apply(data.result,'local-codex');if(strict){const found=P.read('blue');if(found.status==='record')await P.note(found.record,{disposition:'completed',finishedAt:Date.now()});}break;}
+      let matched=null;
+      if(strict){const found=P.read('blue');if(found.status!=='record'||found.record.requestId!==job||!P.matches(found.record,data))throw new Error('조회한 작업의 식별이 저장한 요청과 달라 적용하지 않았습니다.');matched=found.record;}
+      if(data.state==='completed'){clearSticky();apply(data.result,'local-codex');if(strict){const found={status:'record',record:matched};if(found.status==='record')await P.note(found.record,{disposition:'completed',finishedAt:Date.now()});}break;}
       if(data.state==='failed'||data.state==='cancelled'){
         if(!strict)throw new Error(typeof data.error==='string'?data.error.slice(0,300):'BLUE 취소됨');
-        const found=P.read('blue');if(found.status==='record')await persistWatch(found.record,data);
-        const saved=P.read('blue');if(saved.status==='record')rememberTerminal(saved.record);return;
+        const found={status:'record',record:matched};if(found.status==='record')await persistWatch(found.record,data);
+        const saved=P.read('blue');if(saved.status==='record'&&saved.record.requestId===matched.requestId)rememberTerminal(saved.record);return;
       }
       if(strict&&data.state!=='running'){
-        const found=P.read('blue');
+        const found={status:'record',record:matched};
         if(found.status==='record'){await P.note(found.record,{disposition:'unknown',finishedAt:Date.now()});const saved=P.read('blue');if(saved.status==='record')showUnknown(saved.record);}
         return;
       }
-      if(strict){const found=P.read('blue');if(found.status==='record'&&found.record.disposition!=='running')await P.note(found.record,{disposition:'running'});}
+      if(strict){const found={status:'record',record:matched};if(found.status==='record'&&found.record.disposition!=='running')await P.note(found.record,{disposition:'running'});}
       msg('BLUE 검토 중 · '+(data.progress&&data.progress.completedCalls||0)+' / '+(data.progress&&data.progress.requiredCalls||'?')+'회 완료'+phase(data.progress&&data.progress.phase));await new Promise(r=>setTimeout(r,1500));
     }
   }
