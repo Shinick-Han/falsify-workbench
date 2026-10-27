@@ -326,7 +326,15 @@ export function buildPaperFlow(document, {drawings=document?.drawings || [], lin
     };
     const bounds=e=>e.blockIds.map(id=>blockMap.get(id)?.source?.range).filter(Boolean);
     const start=e=>Math.min(...bounds(e).map(r=>r.start));
-    const end=e=>Math.max(...bounds(e).filter(r=>r.start<start(e)+2 || r.start===start(e)).map(r=>r.end));
+    // Inline inserts can have independent native ranges far from the host.
+    // Advance only through the host's contiguous source ranges, including all
+    // fragments after such an insert, without treating the insert as an end.
+    const end=e=>{
+      const ranges=bounds(e).sort((a,b)=>a.start-b.start || a.end-b.end);
+      let last=ranges[0]?.end;
+      for(const r of ranges.slice(1)) {if(r.start>last) break; last=Math.max(last,r.end);}
+      return last;
+    };
     const lineCount=e=>e.blockIds.reduce((n,id)=>n+(blockMap.get(id)?.source?.lines?.length || 0),0);
     for(const caption of entries.filter(e=>e.kind==='caption' && boxOK(e.box))) {
       let last=caption;
