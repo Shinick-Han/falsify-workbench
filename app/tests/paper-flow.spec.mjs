@@ -19,3 +19,33 @@ test('mixed source block splits into exact line ranges and caption band follows 
   assert.equal(f.items[2].kind,'caption');assert.deepEqual(f.fragments.map(x=>x.source.range),[{start:0,end:16},{start:16,end:34},{start:34,end:48},{start:48,end:65}]);
   assert.equal(f.fragments.map(x=>x.text).join(''),raw.text);assert.ok(f.fragments.every(x=>x.parentBlockId==='raw'));assert.equal(f.fragments.flatMap(x=>x.source.characters).length,characters.length);
 });
+test('inserts an overlapping observed run at its character boundary without losing source',()=>{
+ const text='ABCD', chars=[...text].map((_,i)=>({start:i,end:i+1,bbox:[20+i*10,50,30+i*10,60],styleId:'body'}));
+ const host={id:'host',kind:'paragraph',text,assetIds:[],source:{pageIndex:0,bbox:[20,50,60,60],range:{start:0,end:4},readerPosition:0,characters:chars,lines:[{bbox:[20,50,60,60],range:{start:0,end:4}}]}};
+ const guest={id:'guest',kind:'paragraph',text:'2',assetIds:[],source:{pageIndex:0,bbox:[39,50,41,58],range:{start:4,end:5},readerPosition:1,characters:[{start:4,end:5,bbox:[39,50,41,58],styleId:'sup'}],lines:[{bbox:[39,50,41,58],range:{start:4,end:5}}]}};
+ const d=model([host,guest]), f=buildPaperFlow(d), item=f.items.find(x=>x.inline), byId=new Map([...d.blocks,...f.fragments].map(x=>[x.id,x]));
+ assert.ok(item); assert.equal(item.blockIds.map(id=>byId.get(id).text).join(''),'AB2CD'); assert.deepEqual(item.joiners,['','']);
+ assert.deepEqual(f.fragments.map(x=>x.source.range),[{start:0,end:2},{start:2,end:4}]);
+});
+test('repeated DOI header precedes both caption columns',()=>{
+ const d=model([block('left','Fig. 2 caption',[20,48,180,80],0),block('right','continuation',[220,48,380,80],1),block('h','https://doi.org/example',[220,20,380,30],2)]);
+ d.pages.push({sourcePageIndex:1,width:400,height:600});
+ const h=block('h2','https://doi.org/example',[220,20,380,30],0);h.source.pageIndex=1;d.blocks.push(h);
+ const f=buildPaperFlow(d);assert.deepEqual(f.items.filter(i=>i.source.pageIndex===0).map(i=>i.blockIds[0]),['h','left','right']);
+});
+test('connected vector grid owns cells while caption and body remain separate',()=>{
+ const d=model([block('cap','Table 1. Results',[20,30,140,40],0),block('a','A',[25,55,35,60],1),block('b','B',[65,55,75,60],2),block('c','C',[25,75,35,80],3),block('d','D',[65,75,75,80],4),block('note','Notes',[20,110,90,120],5),block('body','Body',[20,150,180,160],6)]);
+ const drawings=[];for(const y of [50,70,90]) drawings.push({pageIndex:0,bbox:[20,y,100,y+0.5]});for(const x of [20,40,60,80,100]) drawings.push({pageIndex:0,bbox:[x,50,x+0.5,90.5]});
+ // Additional grid lines share endpoints, demonstrating observed connected paths.
+ for(const x of [30,50,70,90]) drawings.push({pageIndex:0,bbox:[x,50,x+0.5,90.5]});
+ const f=buildPaperFlow(d,{drawings}),region=f.regions[0],asset=f.items.find(i=>i.renderAssetId===region?.id);
+ assert.ok(region);assert.deepEqual(asset.blockIds,['a','b','c','d']);assert.deepEqual(f.items.map(i=>i.kind),['caption','asset','paragraph','paragraph']);assert.deepEqual(f.items.flatMap(i=>i.blockIds).sort(),d.blocks.map(b=>b.id).sort());
+});
+test('dense plot owns its labels and image while leaving caption and body outside',()=>{
+ const labels=Array.from({length:20},(_,i)=>block(`label${i}`,`p${i}`,[30+i*5,60+i*4,34+i*5,64+i*4],i));
+ const d=model([...labels,block('fig','',[40,60,80,100],20,{kind:'figure',assetIds:['img']}),block('caption','Figure 1. Plot',[20,300,180,315],21),block('body','Body below caption',[20,340,180,355],22)]);
+ d.assets=[{id:'img',source:{pageIndex:0,bbox:[40,60,80,100],readerPosition:20}}];
+ const drawings=Array.from({length:1000},(_,i)=>({pageIndex:0,bbox:[25+(i%200),50+2*Math.floor(i/10),26+(i%200),51+2*Math.floor(i/10)]}));
+ const f=buildPaperFlow(d,{drawings}),r=f.regions[0],asset=f.items.find(i=>i.renderAssetId===r?.id);
+ assert.ok(r);assert.equal(asset.blockIds.length,21);assert.deepEqual(asset.assetIds,['img']);assert.deepEqual(f.items.map(i=>i.kind),['asset','caption','paragraph']);assert.equal(new Set(f.items.flatMap(i=>i.blockIds)).size,d.blocks.length);
+});

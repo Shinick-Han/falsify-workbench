@@ -33,12 +33,53 @@ function splitBlock(b, hash, styles) {
   });
 }
 
+// Split a parent only at observed character boundaries when another source run
+// lies inside one of its lines. All fragments remain exact views of source text.
+function inlineFragments(blocks, hash) {
+  const replacements=new Map(), groups=[];
+  for (const host of blocks) {
+    const lines=host.source?.lines, chars=host.source?.characters, range=host.source?.range;
+    if (replacements.has(host.id) || !host.text || !Array.isArray(lines) || !Array.isArray(chars) || !range || lines.length<1 || !boxOK(host.source?.bbox)) continue;
+    const inserts=[];
+    for (const guest of blocks) {
+      if (guest===host || replacements.has(guest.id) || !guest.text || guest.text.length>80 || !boxOK(guest.source?.bbox) || guest.source.pageIndex!==host.source.pageIndex) continue;
+      const gb=guest.source.bbox;
+      if (!contains(host.source.bbox,gb) || gb[2]-gb[0] > (host.source.bbox[2]-host.source.bbox[0])*.45) continue;
+      const line=lines.filter(l=>boxOK(l.bbox) && l.range && gb[1]<l.bbox[3] && gb[3]>l.bbox[1] && gb[2]>=l.bbox[0]-20 && gb[0]<=l.bbox[2]+3).sort((a,b)=>Math.min(gb[3],b.bbox[3])-Math.max(gb[1],b.bbox[1])-(Math.min(gb[3],a.bbox[3])-Math.max(gb[1],a.bbox[1])))[0];
+      if (!line) continue;
+      const lc=chars.filter(c=>c.start>=line.range.start && c.end<=line.range.end && boxOK(c.bbox));
+      const next=lc.find(c=>(c.bbox[0]+c.bbox[2])/2 >= (gb[0]+gb[2])/2);
+      const at=next?.start ?? line.range.end;
+      if (at<range.start || at>=range.end) continue;
+      inserts.push({guest,at});
+    }
+    if (!inserts.length) continue;
+    inserts.sort((a,b)=>a.at-b.at || a.guest.source.bbox[0]-b.guest.source.bbox[0]);
+    const cuts=[range.start,...new Set(inserts.map(x=>x.at).filter(at=>at>range.start)),range.end], parts=[];
+    for(let i=0;i<cuts.length-1;i++) {
+      const start=cuts[i],end=cuts[i+1], partChars=chars.filter(c=>c.start>=start && c.end<=end);
+      const partLines=lines.filter(l=>l.range && l.range.start<end && l.range.end>start).map(l=>({...l,range:{start:Math.max(start,l.range.start),end:Math.min(end,l.range.end)},bbox:union(partChars.filter(c=>c.start<l.range.end && c.end>l.range.start && boxOK(c.bbox)).map(c=>c.bbox))})).filter(l=>boxOK(l.bbox));
+      if (!partLines.length) {parts.length=0;break;}
+      const id=`fragment-${hex(new TextEncoder().encode(JSON.stringify([hash,host.source.pageIndex,start,end]))).slice(0,24)}`;
+      parts.push({...host,id,parentBlockId:host.parentBlockId || host.id,text:host.text.slice(start-range.start,end-range.start),source:{...host.source,bbox:union(partLines.map(l=>l.bbox)),range:{start,end},characters:partChars,lines:partLines}});
+    }
+    if (!parts.length) continue;
+    const order=inserts.filter(x=>x.at===range.start).map(x=>x.guest); for(let i=0;i<parts.length;i++){order.push(parts[i]);order.push(...inserts.filter(x=>x.at===cuts[i+1]).map(x=>x.guest));}
+    replacements.set(host.id,parts); for(const x of inserts) replacements.set(x.guest.id,null);
+    groups.push(order);
+  }
+  return {replacements,groups};
+}
+
 /** Produce a deterministic, source-bound reading order and ownership proposal. */
-export function buildPaperFlow(document) {
+export function buildPaperFlow(document, {drawings=document?.drawings || []} = {}) {
   if (document?.schema !== 'falsify.paper-document.v1' || !Array.isArray(document.pages) || !Array.isArray(document.blocks) || !Array.isArray(document.assets)) throw new TypeError('Expected falsify.paper-document.v1');
-  const items=[],relations=[],diagnostics=[],fragments=[];
+  const items=[],relations=[],diagnostics=[],fragments=[],regions=[];
   const styles=new Map((document.styles || []).map(s=>[s.id,s]));
-  const flowBlocks=document.blocks.flatMap(b=>{const parts=splitBlock(b,document.sourceSha256,styles);if(parts[0]!==b) fragments.push(...parts);return parts;});
+  let flowBlocks=document.blocks.flatMap(b=>splitBlock(b,document.sourceSha256,styles));
+  const inline=inlineFragments(flowBlocks,document.sourceSha256);
+  flowBlocks=flowBlocks.flatMap(b=>inline.replacements.has(b.id) ? (inline.replacements.get(b.id) || [b]) : [b]);
+  fragments.push(...flowBlocks.filter(b=>b.parentBlockId));
   const textBlocks=flowBlocks.filter(b=>b.text);
   const sizeOf=b=>median((b.source?.characters || []).map(c=>styles.get(c.styleId)?.size).filter(Number.isFinite)) || styles.get(b.styleId)?.size || 0;
   const bodySize=median(textBlocks.flatMap(b=>(b.source?.characters || []).map(c=>styles.get(c.styleId)?.size).filter(Number.isFinite))) || median(textBlocks.map(sizeOf).filter(Boolean));
@@ -51,6 +92,55 @@ export function buildPaperFlow(document) {
     const owned=new Set(), represented=new Set(); let serial=0;
     const make=(kind,bs,as,box,pos,index)=>({id:`flow-${pi}-${serial++}`,kind,blockIds:bs.map(x=>x.b.id),assetIds:as.map(x=>x.a.id),source:{pageIndex:pi,bbox:boxOK(box)?[...box]:null},columns:1,span:'page',captionIds:[],box,pos,index});
     const entries=[];
+    // Connected line grids are evidence of a vector table. Keep captions and
+    // notes outside the measured grid and capture the grid with its cell text.
+    const paths=drawings.filter(d=>d.pageIndex===pi && boxOK(d.bbox)).map(d=>d.bbox);
+    const captions=blocks.filter(x=>boxOK(x.box) && /^\s*(?:extended\s+data\s+)?(?:fig(?:ure)?\.?|table)\s*\d/i.test(x.b.text || ''));
+    const plotBottom=Math.min(page.height*.9,...captions.map(x=>x.box[1]));
+    const plotBlocks=blocks.filter(x=>x.b.text && boxOK(x.box) && x.box[1]>=page.height*.05 && x.box[3]<=plotBottom);
+    const plotPaths=paths.filter(b=>b[0]>=0 && b[1]>=page.height*.05 && b[2]<=page.width && b[3]<=plotBottom);
+    let plot=false;
+    if(plotPaths.length>=1000 && plotBlocks.length>=20 && plotBlocks.every(x=>x.b.text.length<=200 && !/^\s*(?:fig(?:ure)?\.?|table)\s*\d/i.test(x.b.text)) && plotBlocks.filter(x=>x.b.text.length<=100).length/plotBlocks.length>=.95) {
+      let box=union([...plotPaths,...plotBlocks.map(x=>x.box)]);
+      const touching=assets.filter(x=>boxOK(x.box) && overlap(box,x.box));
+      if(touching.every(x=>x.box[0]>=0 && x.box[1]>=page.height*.05 && x.box[2]<=page.width && x.box[3]<=plotBottom)) box=union([box,...touching.map(x=>x.box)]);
+      if(touching.every(x=>contains(box,x.box)) && box[2]-box[0]>page.width*.4 && box[3]-box[1]>page.height*.2) {
+        const as=assets.filter(x=>boxOK(x.box) && contains(box,x.box));
+        const figureBlocks=blocks.filter(x=>(x.b.assetIds || []).some(id=>as.some(a=>a.a.id===id)));
+        plotBlocks.push(...figureBlocks.filter(x=>!plotBlocks.includes(x)));
+        plotBlocks.forEach(x=>owned.add(x.b.id)); as.forEach(x=>represented.add(x.a.id));
+        const id=`region-${hex(new TextEncoder().encode(JSON.stringify([document.sourceSha256,pi,box]))).slice(0,24)}`;
+        const entry=make('asset',plotBlocks,as,box,Math.min(...plotBlocks.map(x=>x.pos ?? Infinity)),plotBlocks[0].index);
+        entry.renderAssetId=id;entries.push(entry);
+        regions.push({id,pageIndex:pi,bbox:[...box],blockIds:plotBlocks.map(x=>x.b.id),assetIds:as.map(x=>x.a.id)});
+        plot=true;
+      }
+    }
+    if(!plot && paths.length>2000) diagnostics.push({code:'dense-vector-region-unresolved',pageIndex:pi});
+    const seen=new Set();
+    for(let n=0;n<(plot || paths.length>2000?0:paths.length);n++) {
+      if(seen.has(n)) continue;
+      const cluster=[n];seen.add(n);
+      for(let k=0;k<cluster.length;k++) for(let j=0;j<paths.length;j++) {
+        if(seen.has(j)) continue;
+        const a=paths[cluster[k]],b=paths[j];
+        if(a[0]<=b[2]+1 && b[0]<=a[2]+1 && a[1]<=b[3]+1 && b[1]<=a[3]+1) {seen.add(j);cluster.push(j);}
+      }
+      if(cluster.length<10) continue;
+      const boxes=cluster.map(i=>paths[i]), box=union(boxes);
+      const horizontal=boxes.filter(b=>b[2]-b[0]>10 && b[3]-b[1]<3).length;
+      const vertical=boxes.filter(b=>b[3]-b[1]>10 && b[2]-b[0]<3).length;
+      if(horizontal<3 || vertical<3 || box[2]-box[0]<40 || box[3]-box[1]<20) continue;
+      const bs=blocks.filter(x=>x.b.text && !owned.has(x.b.id) && boxOK(x.box) && contains(box,x.box));
+      if(bs.length<4 || blocks.some(x=>x.b.text && boxOK(x.box) && overlap(box,x.box) && !bs.includes(x)) || assets.some(x=>boxOK(x.box) && overlap(box,x.box) && !contains(box,x.box))) continue;
+      const as=assets.filter(x=>!represented.has(x.a.id) && boxOK(x.box) && contains(box,x.box));
+      bs.push(...blocks.filter(x=>!owned.has(x.b.id) && !bs.includes(x) && (x.b.assetIds || []).some(id=>as.some(a=>a.a.id===id))));
+      bs.forEach(x=>owned.add(x.b.id)); as.forEach(x=>represented.add(x.a.id));
+      const id=`region-${hex(new TextEncoder().encode(JSON.stringify([document.sourceSha256,pi,box]))).slice(0,24)}`;
+      const entry=make('asset',bs,as,box,Math.min(...bs.map(x=>x.pos ?? Infinity)),bs[0].index);
+      entry.renderAssetId=id; entries.push(entry);
+      regions.push({id,pageIndex:pi,bbox:[...box],blockIds:bs.map(x=>x.b.id),assetIds:as.map(x=>x.a.id)});
+    }
     // Group overlapping image occurrences. Only fully contained text is owned as artwork.
     for(const a of assets) {
       if(represented.has(a.a.id)) continue;
@@ -72,12 +162,39 @@ export function buildPaperFlow(document) {
       else if(b.kind==='heading' || (bodySize>0 && sizeOf(b)>bodySize*1.3 && (b.text || '').trim().length>=12 && (b.text || '').length<150)) kind='heading';
       entries.push(make(kind,[x],[],box,x.pos,x.index));
     }
+    // Short adjacent fragments from one parent often describe styled runs of
+    // a single line cluster (for example, an author list and superscripts).
+    const parentGroups=new Map();
+    for(const b of flowBlocks.filter(b=>b.parentBlockId && b.source.pageIndex===pi)) {
+      if(!parentGroups.has(b.parentBlockId)) parentGroups.set(b.parentBlockId,[]);
+      parentGroups.get(b.parentBlockId).push(b);
+    }
+    for(const group of parentGroups.values()) {
+      if(group.length<3 || group.some(b=>inline.groups.some(g=>g.includes(b)))) continue;
+      group.sort((a,b)=>a.source.range.start-b.source.range.start);
+      const box=union(group.map(b=>b.source.bbox));
+      if(!boxOK(box) || box[3]-box[1]>60 || group.some((b,i)=>i && group[i-1].source.range.end!==b.source.range.start)) continue;
+      const members=group.map(b=>entries.find(e=>e.blockIds.length===1 && e.blockIds[0]===b.id));
+      if(members.some(x=>!x || x.kind!=='paragraph')) continue;
+      const first=members[0]; first.blockIds=group.map(b=>b.id); first.inline=true; first.joiners=Array(group.length-1).fill('');
+      first.box=box; first.source.bbox=[...box];
+      for(const member of members.slice(1)) entries.splice(entries.indexOf(member),1);
+    }
+    for(const group of inline.groups) {
+      const members=group.map(b=>entries.find(e=>e.blockIds.length===1 && e.blockIds[0]===b.id));
+      if(members.some(x=>!x || x.kind!=='paragraph')) continue;
+      const first=members[0]; first.blockIds=group.map(b=>b.id); first.inline=true; first.joiners=Array(group.length-1).fill('');
+      first.box=union(members.map(x=>x.box)); first.source.bbox=[...first.box];
+      for(const member of members.slice(1)) entries.splice(entries.indexOf(member),1);
+    }
     // Link only an unambiguous nearby caption, never absorb it into the image.
     for(const caption of entries.filter(x=>x.kind==='caption' && boxOK(x.box))) {
       const near=entries.filter(x=>x.kind==='asset' && boxOK(x.box) && x.box[0]<caption.box[2] && caption.box[0]<x.box[2] && Math.abs(caption.box[1]-x.box[3])<=Math.max(30,page.height*.05)).sort((a,b)=>Math.abs(caption.box[1]-a.box[3])-Math.abs(caption.box[1]-b.box[3]));
       if(near.length===1 || (near.length>1 && Math.abs(caption.box[1]-near[1].box[3])-Math.abs(caption.box[1]-near[0].box[3])>10)) {near[0].captionIds.push(...caption.blockIds);relations.push({kind:'caption',assetItemId:near[0].id,captionItemId:caption.id});}
       else diagnostics.push({code:'caption-association-unresolved',pageIndex:pi,itemId:caption.id});
     }
+    const headers=entries.filter(x=>x.kind==='header').sort(geom), footers=entries.filter(x=>x.kind==='footer').sort(geom);
+    for(const edge of [...headers,...footers]) entries.splice(entries.indexOf(edge),1);
     if(entries.some(x=>!boxOK(x.box)) || !Number.isFinite(page.width)) {
       diagnostics.push({code:'reading-order-fallback',pageIndex:pi,detail:'Missing geometry; reader order retained.'}); entries.sort(reading);
     } else {
@@ -108,8 +225,12 @@ export function buildPaperFlow(document) {
         diagnostics.push({code:'geometry-order-heuristic',pageIndex:pi,gutter:[g.l,g.r]});
       }
     }
-    items.push(...entries.map(({box,pos,index,...item})=>item));
+    for(const header of headers) {
+      const at=entries.findIndex(e=>boxOK(e.box) && e.box[1]>=header.box[1]);
+      entries.splice(at<0?entries.length:at,0,header);
+    }
+    items.push(...[...entries,...footers].map(({box,pos,index,...item})=>item));
   }
-  return {schema:'falsify.paper-flow.v1',sourceSha256:document.sourceSha256,items,relations,diagnostics,fragments};
+  return {schema:'falsify.paper-flow.v1',sourceSha256:document.sourceSha256,items,relations,diagnostics,fragments,regions};
 }
 function ownedByAsset(x,entries) {return entries.some(e=>e.kind==='asset' && e.blockIds.includes(x.b.id));}
