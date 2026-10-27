@@ -486,7 +486,7 @@
         }))
       };
     }
-    let epoch=0,source=null,session=null,unsub=null,snapshot=null,output=null,inline=null,pageText=null,directEditor=null;
+    let epoch=0,source=null,session=null,unsub=null,snapshot=null,output=null,inline=null,pageText=null,directEditor=null,committingDirect=false,selectionClickPending=false;
     let fontRevision=0,fontBusy=false;
     let proposalQueue=null,accepted=new Set(),modelById=new Map(),draftRaw=null,pendingFocus=null,pendingResume=null;
     let editMode='text',tableCtl=null,tableSeq=0,tableBindings=new Map();
@@ -732,7 +732,8 @@
     function onSnapshot(snap){
       try{
         const changed=snapshot&&snapshot.revision!==snap.revision;
-        snapshot=snap;if(changed){clearTables(true);if(editMode==='table'&&pageText)void inspectTables(pageText,epoch,drawSeq);}
+        snapshot=snap;if(changed&&inline?.editId&&!(snap.edits||[]).some(e=>e.id===inline.editId))closeInline();
+        if(changed){clearTables(true);if(editMode==='table'&&pageText)void inspectTables(pageText,epoch,drawSeq);}
         const copy=published(snap);if(copy)emit('falsify:paper-workspace-edits',copy);renderEdits();paintProposals();void drawAfter();
       }catch(e){setEditStatus('편집 목록을 그리지 못했습니다. '+safeMessage(e),true);}
     }
@@ -786,7 +787,7 @@
     function clearSource(){
       epoch++;tableBindings.clear();abortGen();stopPdf();closeAfter();
       if(typeof unsub==='function')unsub();
-      if(directEditor){directEditor.remove();directEditor=null;}
+      if(directEditor){const editor=directEditor;directEditor=null;editor.remove();}
       unsub=null;session=null;snapshot=null;output=null;inline=null;pageText=null;proposalQueue=null;accepted=new Set();draftRaw=null;pendingResume=null;
       source=null;pages=0;page=1;zoom=1;
       clearStage(ui.beforeStage);clearStage(ui.afterStage);
@@ -825,7 +826,7 @@
       const mine=++epoch;tableBindings.clear();
       abortGen();stopPdf();closeAfter();
       if(typeof unsub==='function')unsub();
-      if(directEditor){directEditor.remove();directEditor=null;}
+      if(directEditor){const editor=directEditor;directEditor=null;editor.remove();}
       unsub=null;session=null;snapshot=null;output=null;inline=null;pageText=null;proposalQueue=null;accepted=new Set();draftRaw=null;pendingResume=null;
       pages=0;page=1;zoom=1;
       source={file,fileHash:null,name:sessionName(file.name),segments:[],pdf:isPdf(file),doc:null,lib:null,render:null,paragraphPages:new Map()};
@@ -930,7 +931,7 @@
         }
         const viewBox=viewport.viewBox||[0,0,base.width,base.height];
         const rotation=pageRotation(viewport.rotation);
-        pageText={items,viewBox,pageIndex:n-1,textEl,pageEl,rotation,pageWidth:viewBox[2]-viewBox[0],pageHeight:viewBox[3]-viewBox[1],scale};
+        pageText={items,styles:content.styles||{},viewBox,pageIndex:n-1,textEl,pageEl,rotation,pageWidth:viewBox[2]-viewBox[0],pageHeight:viewBox[3]-viewBox[1],scale};
         clearStage(ui.beforeStage);ui.beforeStage.append(pageEl);
         pdfPage.cleanup&&pdfPage.cleanup();source.render=null;
         setBeforeStatus(n+' / '+pages+'쪽 · 원본 바이트'+(rotation?' · 회전된 쪽이라 좌표 편집은 받지 않습니다':''));
@@ -1000,7 +1001,7 @@
       tableSeq++;if(tableCtl){tableCtl.abort();tableCtl=null;}
       if(pageText?.tableLayer){pageText.tableLayer.remove();pageText.tableLayer=null;}
       if(pageText)pageText.tableCells=null;
-      if(closeInline&&inline?.table&&ui.inlineAfter.value===inline.after){inline=null;renderInline();}
+      if(closeInline&&inline?.table&&ui.inlineAfter.value===inline.after){if(directEditor){const editor=directEditor;directEditor=null;editor.remove();}inline=null;renderInline();}
       say(ui.tableStatus,'');
     }
     function setEditMode(mode){
@@ -1043,7 +1044,7 @@
             const existing=(snapshot?.edits||[]).find(e=>e.segmentId===row.id),rect=display.pageEl.getBoundingClientRect(),anchor={start:0,end:selection.before.length,bbox:selection.anchor.bbox.slice(),coordinate:'top-left',rotation:0};
             inline={table:true,before:selection.before,after:existing?existing.after:selection.before,anchor,pageIndex:display.pageIndex,segmentId:row.id,editId:existing?.id||null,
               clientRect:{left:rect.left+b[0]*rect.width/found.width,bottom:rect.top+b[3]*rect.height/found.height,width:(b[2]-b[0])*rect.width/found.width}};
-            renderInline();focusInline();
+            renderInline();openDirectEditor(display,{bbox:selection.anchor.bbox,width:found.width,height:found.height});
           });layer.append(button);
         }
         display.pageEl.append(layer);
@@ -1052,6 +1053,7 @@
       finally{if(tableCtl===ctl)tableCtl=null;}
     }
     function openParagraph(event){
+      if(selectionClickPending){selectionClickPending=false;return;}
       if(editMode!=='text'||!pageText||!pageText.paragraphs||event.detail>1||fieldTarget(event.target))return;
       const sel=typeof doc.getSelection==='function'?doc.getSelection():null;
       if(sel&&!sel.isCollapsed)return;
@@ -1071,24 +1073,32 @@
       const anchor={start:0,end:p.text.length,occurrence:0,bbox:p.bbox.slice(),coordinate:'top-left',rotation:0};
       inline={before:p.text,after:existing?existing.after:p.text,anchor,pageIndex:pageText.pageIndex,segmentId:id,editId:existing?existing.id:null,
         clientRect:{left:rect.left+p.bbox[0]*rect.width/pageText.paragraphWidth,bottom:rect.top+p.bbox[3]*rect.height/pageText.paragraphHeight,width:(p.bbox[2]-p.bbox[0])*rect.width/pageText.paragraphWidth}};
-      renderInline();openDirectEditor(display,p);
+      renderInline();openDirectEditor(display,{bbox:p.bbox,width:display.paragraphWidth,height:display.paragraphHeight,source:p});
     }
-    function openDirectEditor(display,p){
-      const editor=doc.createElement('textarea'),b=p.bbox;
+    function openDirectEditor(display,geometry){
+      const b=geometry?.bbox,w=geometry?.width||display?.pageWidth,h=geometry?.height||display?.pageHeight;
+      if(!display||!validBbox(b)||!(w>0&&h>0)){focusInline();return;}
+      const editor=doc.createElement('textarea');
       editor.value=inline.after;editor.maxLength=4000;editor.spellcheck=false;
-      editor.setAttribute('aria-label',(display.pageIndex+1)+'쪽 문단 직접 편집');
-      Object.assign(editor.style,{position:'absolute',zIndex:'4',left:(b[0]/display.paragraphWidth*100)+'%',top:(b[1]/display.paragraphHeight*100)+'%',width:(b[2]-b[0])/display.paragraphWidth*100+'%',minHeight:Math.max(48,(b[3]-b[1])*display.scale)+'px',height:Math.max(48,(b[3]-b[1])*display.scale)+'px',boxSizing:'border-box',resize:'vertical',background:'white',color:'black',lineHeight:'1.3'});
+      editor.setAttribute('aria-label',(display.pageIndex+1)+'쪽 직접 편집');
+      const source=geometry.source,hit=(display.items||[]).find(item=>{const box=sliceBox(item,display.viewBox,0,String(item.str||'').length);return box&&box[0]<b[2]&&box[2]>b[0]&&box[1]<b[3]&&box[3]>b[1];});
+      const size=Number(source?.fontSize||source?.runs?.[0]?.fontSize||hit?.height||Math.abs(hit?.transform?.[3]||0));
+      const font=(hit&&display.styles?.[hit.fontName]?.fontFamily)||'serif';
+      const width=Math.min(100-b[0]/w*100,Math.max((b[2]-b[0])/w*100,140/(w*display.scale)*100));
+      Object.assign(editor.style,{position:'absolute',zIndex:'4',left:(b[0]/w*100)+'%',top:(b[1]/h*100)+'%',width:width+'%',minHeight:Math.max(32,(b[3]-b[1])*display.scale)+'px',height:Math.max(32,(b[3]-b[1])*display.scale)+'px',boxSizing:'border-box',resize:'vertical',background:'white',color:'black',padding:'2px',fontFamily:font,fontSize:(Number.isFinite(size)&&size>0?Math.max(8,size*display.scale):14)+'px',lineHeight:'1.25'});
       directEditor=editor;display.pageEl.append(editor);ui.inline.hidden=true;
       editor.addEventListener('input',()=>{ui.inlineAfter.value=editor.value;renderChrome();});
       editor.addEventListener('blur',()=>{if(directEditor===editor)commitDirect();});
       editor.addEventListener('keydown',e=>{if(e.key==='Escape'){e.preventDefault();closeInline();}});
-      editor.focus();
+      doc.getSelection?.()?.removeAllRanges?.();editor.focus();
+      if(geometry.selectAll)editor.select?.();
     }
     function commitDirect(){
       if(!directEditor||!inline)return;
       ui.inlineAfter.value=directEditor.value;
-      if(ui.inlineAfter.value===inline.after){closeInline();return;}
-      applyInline();
+      committingDirect=true;
+      try{if(ui.inlineAfter.value===inline.after){closeInline();return;}
+      applyInline();}finally{committingDirect=false;}
       if(inline&&directEditor)directEditor.focus();
     }
     function itemElement(node,textEl){
@@ -1130,7 +1140,7 @@
       const box=[round((rect.left-pageRect.left)/pageText.scale),round((rect.top-pageRect.top)/pageText.scale),round((rect.right-pageRect.left)/pageText.scale),round((rect.bottom-pageRect.top)/pageText.scale)];
       return validBbox(box)?box:null;
     }
-    function captureSelection(){
+    function captureSelection(event){
       if(editMode!=='text')return;
       if(inline&&ui.inlineAfter.value!==inline.after){canLeaveInline();return;}
       const sel=typeof doc.getSelection==='function'?doc.getSelection():null;
@@ -1176,14 +1186,15 @@
       const segment=segmentFor(located.before,located.anchor,pageText.pageIndex);
       const existing=(snapshot?.edits||[]).find(e=>e.pageIndex===pageText.pageIndex&&e.before===located.before&&JSON.stringify(e.anchor?.bbox)===JSON.stringify(located.anchor?.bbox));
       inline={before:located.before,after:existing?existing.after:located.before,anchor:existing?existing.anchor:located.anchor,pageIndex:pageText.pageIndex,segmentId:existing?existing.segmentId:segment?segment.id:undefined,editId:existing?existing.id:null,clientRect:clientBox(range)};
-      renderInline();focusInline();
+      if(event?.type==='pointerup'||event?.type==='mouseup'){selectionClickPending=true;timers.setTimeout(()=>{selectionClickPending=false;},0);}
+      renderInline();openDirectEditor(pageText,{bbox:located.anchor.bbox,selectAll:true});
     }
     function loadInline(edit){
       if(!canLeaveInline())return;
       const mine=epoch,open=()=>{
         if(epoch!==mine||!(snapshot?.edits||[]).some(e=>e.id===edit.id)||!canLeaveInline())return;
         inline={table:String(edit.segmentId||'').startsWith('table:'),before:edit.before,after:edit.after,anchor:edit.anchor,pageIndex:edit.pageIndex,segmentId:edit.segmentId,editId:edit.id};
-        renderInline();focusInline();
+        renderInline();openDirectEditor(pageText,{bbox:edit.anchor?.bbox});
       };
       if(page===edit.pageIndex+1&&pageText)open();else void drawBefore(edit.pageIndex+1).then(open);
     }
@@ -1196,10 +1207,10 @@
       });
     }
     function closeInline(){
-      if(directEditor){directEditor.remove();directEditor=null;}
+      if(directEditor){const editor=directEditor;directEditor=null;editor.remove();}
       const id=inline?.editId;inline=null;renderInline();
       const target=id&&buttons(ui.edits).find(b=>b.dataset.edit===id&&b.dataset.act==='edit');
-      (target||ui.beforeStage).focus();
+      if(!committingDirect)(target||ui.beforeStage).focus();
     }
     function applyInline(){
       const api=editsApi();
@@ -1310,7 +1321,8 @@
         afterTask=task;
         const pdf=await task.promise;
         if(seq!==afterSeq||epoch!==mine||output!==current)return;
-        const mapped=mappedPages(current,pdf.numPages);
+        const independent=current.recomposition&&current.pageMap==null;
+        const mapped=independent?Array.from({length:pdf.numPages},(_,i)=>i):mappedPages(current,pdf.numPages);
         if(!mapped){clearStage(ui.afterStage);setAfterStatus('원본 '+page+'쪽의 출력 위치를 확인할 페이지 대응이 없습니다. 해시가 맞는 파일은 다운로드할 수 있습니다.',true);return;}
         if(afterSourcePage!==page){afterSourcePage=page;afterPart=0;}
         afterPart=Math.max(0,Math.min(afterPart,mapped.length-1));
@@ -1329,8 +1341,8 @@
         if(seq!==afterSeq||epoch!==mine||output!==current){canvas.width=0;canvas.height=0;return;}
         clearStage(ui.afterStage);ui.afterStage.append(canvas);pdfPage.cleanup&&pdfPage.cleanup();
         afterNav.hidden=mapped.length<2;afterPrev.disabled=afterPart===0;afterNext.disabled=afterPart===mapped.length-1;
-        afterPosition.textContent='원본 '+page+'쪽 → 출력 '+outputPage+'쪽 · '+(afterPart+1)+' / '+mapped.length;
-        setAfterStatus((stale()?'마지막 생성본':'현재 생성본')+' · 받은 파일 바이트 · 출력 '+outputPage+'쪽'+(afterPart?' · 이어지는 쪽':''));
+        afterPosition.textContent=independent?'출력 '+outputPage+' / '+mapped.length+'쪽':'원본 '+page+'쪽 → 출력 '+outputPage+'쪽 · '+(afterPart+1)+' / '+mapped.length;
+        setAfterStatus((stale()?'마지막 생성본':'현재 생성본')+' · 받은 파일 바이트 · 출력 '+outputPage+'쪽'+(independent?' · 원본과 쪽 대응 없음':afterPart?' · 이어지는 쪽':''));
       }catch(e){
         if(seq!==afterSeq||epoch!==mine||e&&e.name==='RenderingCancelledException')return;
         if(canvas){canvas.width=0;canvas.height=0;}
@@ -1452,7 +1464,7 @@
         if(mine!==genId||epoch!==epochAt||!source||source.file!==file||source.fileHash!==hash||ctl.signal?.aborted||snapshot?.revision!==revision)return;
         if(actualHash!==result.sha256)throw new Error('생성 파일의 바이트와 해시가 달라 받지 않았습니다.');
         if(new TextDecoder().decode(bytes.subarray(0,1024)).indexOf('%PDF-')<0)throw new Error('생성 결과에 PDF 서명이 없어 받지 않았습니다.');
-        const candidate={file:result.file,sha256:result.sha256,originalSourceSha256:HEX.test(result.originalSourceSha256||'')?result.originalSourceSha256:hash,verification:result.verification==null?null:result.verification,warnings:Array.isArray(result.warnings)?result.warnings:null,pageMap:clone(result.pageMap)||null,revision,fontRevision,blocked:false};
+        const candidate={file:result.file,sha256:result.sha256,originalSourceSha256:HEX.test(result.originalSourceSha256||'')?result.originalSourceSha256:hash,verification:result.verification==null?null:result.verification,warnings:Array.isArray(result.warnings)?result.warnings:null,pageMap:clone(result.pageMap)||null,recomposition:recompose,revision,fontRevision,blocked:false};
         let tableNote='';
         const tableEdits=edits.filter(e=>String(e.segmentId||'').startsWith('table:'));
         if(tableEdits.length&&!recompose){
