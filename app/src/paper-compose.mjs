@@ -61,7 +61,7 @@ function ambiguousBoundaries(block, changes) {
     !/\s/u.test(raw[i-1]) && !/\s/u.test(raw[i]) && raw[i-1]!=='-' &&
     !(raw[i-1]==='−' && /[0-9]/u.test(raw[i])));
 }
-export async function composeDocument({document, edits=[], flow, assets, links, signal, sourceBytes, runningFurniture=false, layoutPolicy, layoutMode}={}, {compile, fonts={}, outputCheck, furniturePlanner}={}) {
+export async function composeDocument({document, edits=[], flow, assets, links, signal, sourceBytes, runningFurniture=false, layoutPolicy, layoutMode, figurePlacement='float'}={}, {compile, fonts={}, outputCheck, furniturePlanner}={}) {
   abort(signal);
   // Own the data used by this attempt before any asynchronous operation.
   if (document) document = structuredClone(document);
@@ -195,12 +195,13 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
     if(!sourceProfile.bodyFontSize || (key==='lineHeightScale' && !sourceProfile.bodyLineHeight)) fail('Layout policy requires source measurements: '+key);
   }
   if(layoutMode != null && layoutMode !== 'measured-continuous') fail('Invalid layout mode');
+  if(!['float','page'].includes(figurePlacement)) fail('Invalid figure placement');
   // Require explicit column evidence; never promote an original single-column paper.
   const flowBlockText=new Map(document.blocks.map(b=>[b.id,b.text || '']));
   const firstBodyIndex=flow?.items.findIndex(i=>i.columns===2 && i.span!=='page' && i.kind==='paragraph' && (i.blockIds||[]).reduce((n,id)=>n+(flowBlockText.get(id)?.length||0),0)>=150) ?? -1;
   const lastBodyIndex=flow?.items.findLastIndex(i=>i.columns===2 && i.span!=='page' && i.kind==='paragraph' && (i.blockIds||[]).reduce((n,id)=>n+(flowBlockText.get(id)?.length||0),0)>=150) ?? -1;
   const measuredContinuous=layoutMode==='measured-continuous' && firstBodyIndex>=0;
-  const enginePlan={requested:layoutMode || 'existing',actual:measuredContinuous ? 'measured-continuous' : 'existing',reason:layoutMode && !measuredContinuous ? 'no explicit two-column body' : null};
+  const enginePlan={requested:layoutMode || 'existing',actual:measuredContinuous ? 'measured-continuous' : 'existing',figurePlacement:measuredContinuous ? figurePlacement : null,reason:layoutMode && !measuredContinuous ? 'no explicit two-column body' : null};
   // Page-level flow is safe only when every item belongs to the same
   // two-column stream; mixed spanning material stays in ordered bands.
   const continuousColumns=measuredContinuous || (!!flow?.items.length && flow.items.every(i=>i.columns===2 && i.span!=='page' && i.kind!=='asset'));
@@ -454,7 +455,7 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
           flush();
           // An unpaired full-width figure cannot float through the preceding
           // caption. Finish that column stream before its source artwork page.
-          source+=(item.captionIds?.length && itemIndex<=lastBodyIndex ? measured(result) : `#page(columns: 1)[${result}]`)+'\n';
+          source+=(figurePlacement==='float' && item.captionIds?.length && itemIndex<=lastBodyIndex ? measured(result) : `#page(columns: 1)[${result}]`)+'\n';
         }
         else group.push(result);}
 
