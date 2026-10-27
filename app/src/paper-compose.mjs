@@ -1,3 +1,4 @@
+import {deriveLayoutProfile} from './paper-style-profile.mjs';
 import {buildLinkPlan} from './paper-link-plan.mjs';
 import {readSourceGlyphs} from './paper-source-glyphs.mjs';
 import {inspectFonts} from './paper-fonts.mjs';
@@ -170,12 +171,19 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
   if(linkPlan) for(const label of suppressedLabels) linkPlan.diagnostics.push({code:'target-furniture-unresolved',label});
   if(linkPlan) for(const id of new Set(linkPlan.sourceAssets.map(a=>a.assetItemId))) { const candidates=linkPlan.sourceAssets.filter(a=>a.assetItemId===id); const destinations=new Set(candidates.map(a=>JSON.stringify([a.destinationLabel||null,a.destinationLabel?null:a.uri,a.destinationStatus||null]))); if(destinations.size>1) linkPlan.diagnostics.push({code:'source-asset-link-conflict',assetItemId:id,linkIds:[...new Set(candidates.flatMap(a=>a.linkIds))]}); }
   const margins=plan?.margins || {top:36,right:36,bottom:36,left:36};
+  const layoutProfile=deriveLayoutProfile(document,flow);
+  // Page-level flow is safe only when every item belongs to the same
+  // two-column stream; mixed spanning material stays in ordered bands.
+  const continuousColumns=!!flow?.items.length && flow.items.every(i=>i.columns===2 && i.span!=='page' && i.kind!=='asset');
   // Every paper string remains an argument to text(), never executable markup.
-  let source=`#set page(width: ${page.width}pt, height: ${page.height}pt, margin: (top: ${margins.top}pt, right: ${margins.right}pt, bottom: ${margins.bottom}pt, left: ${margins.left}pt))\n`;
+  let source=`#set page(width: ${page.width}pt, height: ${page.height}pt, margin: (top: ${margins.top}pt, right: ${margins.right}pt, bottom: ${margins.bottom}pt, left: ${margins.left}pt)${continuousColumns ? ", columns: 2" : ""})\n`;
   const candidates = fonts.candidates?.filter(c=>c.getBytes?.()) || [];
   const families = [...new Set([fonts.selected?.family, ...candidates.map(c=>c.family)].filter(Boolean))];
   if (!families.length && fonts.family) families.push(String(fonts.family));
-  if (families.length) source+=`#set text(font: (${families.map(typstString).join(', ')},), size: 10pt)\n`;
+  const bodySize=layoutProfile.bodyFontSize;
+  if (families.length || bodySize) source+=`#set text(${families.length ? `font: (${families.map(typstString).join(', ')},)` : ''}${families.length && bodySize ? ', ' : ''}${bodySize ? `size: ${bodySize}pt` : ''})\n`;
+  const leading=bodySize && layoutProfile.bodyLineHeight ? layoutProfile.bodyLineHeight-bodySize : null;
+  source+=`#set par(justify: true${leading!==null && leading>=0 && leading<=bodySize ? `, leading: ${leading}pt` : ''})\n#set text(hyphenate: true)\n`;
   const files = {};
   const assetList = Array.isArray(assets) ? assets : assets?.assets || document.assets || [];
   // Targets on unavailable assets must not produce dangling Typst labels.
@@ -328,7 +336,7 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
   if (flow) {
     if(flow.schema!=='falsify.paper-flow.v1' || flow.sourceSha256!==document.sourceSha256 || !Array.isArray(flow.items)) fail('Invalid paper flow');
     let group=[], groupItems=[], columns=0;
-    const flush=next=>{if(!group.length)return; source+=columns===2 ? `#columns(2)[\n${group.join('\n\n')}\n]\n` : group.join('\n\n')+'\n';if(columns===2 && next?.kind==='asset' && next.span==='page') balanceGroups.push(groupItems);group=[];groupItems=[];};
+    const flush=next=>{if(!group.length)return; source+=columns===2 && !continuousColumns ? `#columns(2)[\n${group.join('\n\n')}\n]\n` : group.join('\n\n')+'\n';if(columns===2 && next?.kind==='asset' && next.span==='page') balanceGroups.push(groupItems);group=[];groupItems=[];};
     const captionById=new Map(flow.items.filter(i=>i.kind==='caption').flatMap(i=>(i.blockIds||[]).map(id=>[id,i]))), linkedCaptions=new Set();
     for(const item of flow.items) if(item.kind==='asset') for(const id of item.captionIds||[]) {if(!captionById.has(id) || linkedCaptions.has(id)) fail('Unknown or duplicate caption link'); linkedCaptions.add(id);}
     for(const item of flow.items) {
@@ -392,7 +400,7 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
   if(coverage.status!=='covered') warnings.push(`Font coverage ${coverage.status}; output may lose glyphs.`);
   let outputTextCheck='unavailable', checkReport=null;
   if (typeof outputCheck==='function') {
-    try { checkReport=await outputCheck({bytes:new Uint8Array(bytes), expectedBlocks:expectedBlocks.map(b=>({...b})), expectedFurniture:structuredClone(furniture.templates), outputFurniture:structuredClone(compiled?.furnitureMap ?? null),blockSpans:structuredClone(compiled?.blockSpans ?? null),bodyFrame:{left:margins.left,top:margins.top,right:page.width-margins.right,bottom:page.height-margins.bottom}}); abort(signal);
+    try { checkReport=await outputCheck({bytes:new Uint8Array(bytes), expectedBlocks:expectedBlocks.map(b=>({...b})), expectedFurniture:structuredClone(furniture.templates), outputFurniture:structuredClone(compiled?.furnitureMap ?? null),blockSpans:structuredClone(compiled?.blockSpans ?? null),bodyFrame:{left:margins.left,top:margins.top,right:page.width-margins.right,bottom:page.height-margins.bottom},layoutProfile:structuredClone(layoutProfile)}); abort(signal);
       outputTextCheck=checkReport?.findings?.some(f=>f.code==='content-mismatch') ? 'finding' : checkReport?.checks?.content?.status || 'unavailable';
     } catch (error) { abort(signal); warnings.push(`Output text check unavailable: ${error.message}`); }
   }
@@ -401,5 +409,5 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
   }
   if (outputTextCheck==='finding') warnings.push('Output text check found content loss or mismatch.');
   const verification={status:outputTextCheck==='finding' || assetFindings.length?'finding':'warning', sourceSha256:document.sourceSha256, contentVerified:outputTextCheck==='pass' && !furniture.templates.length && !ambiguous.length && !assetOwned.size && !assetFindings.length && !sourceGlyphResult.glyphs.length && !sourceGlyphResult.unavailable.length, sourceGlyphs:sourceGlyphResult, layoutVerified:false, coverage, outputTextCheck, checkReport, artworkBlocks, assetFindings, ambiguousBoundaries:ambiguous, furniture:{...furniture,margins:{...margins},output:compiled?.furnitureMap ?? null}, edits:edits.map(e=>({blockId:e.blockId,start:e.start,end:e.end,status:'bound'}))};
-  return {linkPlan,file:new File([bytes],'recomposed.pdf',{type:'application/pdf'}),sha256,verification,pageMap:null,blockMap:compiled?.blockMap ?? null,blockSpans:compiled?.blockSpans ?? null,furnitureMap:compiled?.furnitureMap ?? null,warnings};
+  return {linkPlan,layoutProfile,file:new File([bytes],'recomposed.pdf',{type:'application/pdf'}),sha256,verification,pageMap:null,blockMap:compiled?.blockMap ?? null,blockSpans:compiled?.blockSpans ?? null,furnitureMap:compiled?.furnitureMap ?? null,warnings};
 }
