@@ -58,7 +58,7 @@ export function verifyRecompositionRuntime(rootDir) {
       || !readFileSync(join(vendor, 'notoserif-OFL.txt'), 'utf8').includes('SIL OPEN FONT LICENSE')
       || !readFileSync(join(vendor, 'notosans-OFL.txt'), 'utf8').includes('SIL OPEN FONT LICENSE')
       || !readFileSync(join(vendor, 'LICENSE_LIBERATION'), 'utf8').includes('LIBERATION FONT SOFTWARE')) throw new Error('Recomposition licenses are missing.');
-  for (const name of ['paper-recompose-runtime.mjs', 'paper-recompose-worker.mjs', 'recomposition-typst.mjs']) readFileSync(join(rootDir, 'app/dist', name));
+  for (const name of ['paper-recompose-runtime.mjs', 'paper-recompose-worker.mjs', 'paper-recompose-worker-core.mjs', 'recomposition-typst.mjs']) readFileSync(join(rootDir, 'app/dist', name));
   return {compilerVersion: '0.7.0', wasmSha256: RECOMPOSITION_WASM_SHA256, fonts: manifest.fonts.length};
 }
 

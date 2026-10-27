@@ -55,5 +55,9 @@ writeFileSync(join(vendor,'manifest.json'),JSON.stringify({version:'falsify.reco
 const common={bundle:true,format:'esm',platform:'neutral',target:'es2022',legalComments:'eof',nodePaths:[modules]};
 await build({...common,entryPoints:[join(app,'src/recomposition-typst.mjs')],outfile:join(app,'dist/recomposition-typst.mjs')});
 await build({...common,entryPoints:[join(app,'src/paper-recompose-runtime.mjs')],outfile:join(app,'dist/paper-recompose-runtime.mjs')});
-await build({...common,entryPoints:[join(app,'src/paper-recompose-worker.mjs')],outfile:join(app,'dist/paper-recompose-worker.mjs'),external:['../dist/blind-pdf.mjs'],plugins:[{name:'mupdf-vendor',setup(b){b.onResolve({filter:/^mupdf$/},()=>({path:'./browser-pdf-vendor/mupdf.js',external:true}));}}]});
+await build({...common,entryPoints:[join(app,'src/paper-recompose-worker.mjs')],outfile:join(app,'dist/paper-recompose-worker-core.mjs'),plugins:[{name:'local-vendors',setup(b){
+ b.onResolve({filter:/^mupdf$/},()=>({path:'./browser-pdf-vendor/mupdf.js',external:true}));
+ b.onResolve({filter:/^\.\.\/dist\/blind-pdf\.mjs$/},()=>({path:'./blind-pdf.mjs',external:true}));
+}}]});
+await build({...common,entryPoints:[join(app,'src/paper-recompose-worker-entry.mjs')],outfile:join(app,'dist/paper-recompose-worker.mjs'),external:['./paper-recompose-worker-core.mjs']});
 console.log('Built recomposition runtime',wasm.sha256);
