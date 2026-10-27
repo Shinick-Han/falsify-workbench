@@ -308,5 +308,25 @@ test('declared floating caption preserves exact body sequence and requires obser
   assert.equal((await run(undefined,{flowExpectations:undefined})).checks.content.status,'finding');
   for(const body of [['First body.'],['First changed.','Second body.'],['First body.','First body.','Second body.'],['Second body.','First body.']]) assert.equal((await run(body)).checks.content.status,'finding');
   const duplicateCaption=await run(['First body.','Figure 1. A useful illustration','Second body.']);assert.equal(duplicateCaption.checks.flow.status,'unavailable');assert.equal(duplicateCaption.checks.content.status,'finding');
+  // Keep the real asset/caption geometry and substitute only the PDF.js body text.
+  const bodyReader = text => ({getDocument(options) {
+    const task=pdfjs.getDocument(options);
+    return {destroy:()=>task.destroy(),promise:task.promise.then(doc=>({numPages:doc.numPages,async getPage(n) {
+      const page=await doc.getPage(n);
+      return {getViewport:o=>page.getViewport(o),cleanup:()=>page.cleanup(),async getTextContent() {
+        const content=await page.getTextContent();
+        for(const item of content.items) if(item.str==='First body.') item.str=text;
+        return content;
+      }};
+    }}))};
+  }});
+  const represented=async (source,output)=>run(undefined,{expectedBlocks:[{id:'a',text:source},expectedBlocks[1],expectedBlocks[2]],pdfjs:bodyReader(output)});
+  const normalized=await represented('1 µM ki\u00adnase','1 μM kinase');
+  assert.equal(normalized.checks.flow.status,'checked');
+  assert.equal(normalized.checks.content.status,'normalized');
+  assert.deepEqual(normalized.checks.content.representationDifferences.map(d=>[d.kind,d.scope,d.sourceOffset,d.outputOffset]),[['micro-sign-to-greek-mu','body-after-caption-removal',2,2],['discretionary-soft-hyphen-omitted','body-after-caption-removal',7,7]]);
+  for(const [source,output] of [['2 µM ki\u00adnase','1 μM kinase'],['1 µM ki\u00adnase','1 μMkinase'],['1 μM kinase','1 µM kinase'],['1 µM kinase','1 μM ki\u00adnase']]) {
+    const result=await represented(source,output);assert.equal(result.checks.content.status,'finding',`${source} / ${output}`);
+  }
   const unknown=await run(undefined,{layoutProfile:{coordinateSpace:'output',captions:[{...layoutProfile.captions[0],assetBbox:[1,1,10,10]}]}});assert.equal(unknown.checks.flow.status,'unavailable');assert.equal(unknown.checks.content.status,'finding');
 });
