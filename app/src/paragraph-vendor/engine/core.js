@@ -1,3 +1,4 @@
+import { removeForeignObjectGapSpaces } from './foreign-gap.mjs';
 import { createEngineModule, ENGINE_BUILD } from './engine-loader.js';
 
 export const EC_BUILD = ENGINE_BUILD;
@@ -679,6 +680,10 @@ export class PdfEngine {
     }
   }
 
+  retainDetachedObject(handle) {
+    (this._detachedObjects ||= new Set()).add(handle >>> 0);
+  }
+
   close() {
     const M = this.M;
     if (this._pageCache) {
@@ -688,6 +693,10 @@ export class PdfEngine {
     }
     if (this.page) M._FPDF_ClosePage(this.page);
     if (this.session) M._ec_session_destroy(this.session);
+    // Layout/history may still reference removed source objects until the
+    // edit session closes. The page no longer owns these objects.
+    for (const handle of this._detachedObjects || []) M._FPDFPageObj_Destroy(handle);
+    this._detachedObjects?.clear();
     if (this.doc) M._FPDF_CloseDocument(this.doc);
     if (this._docBuf) M._free(this._docBuf);
     this.page = this.session = this.doc = this._docBuf = 0;
@@ -832,7 +841,9 @@ export class PdfEngine {
     const json = M.UTF8ToString(ptr);
     M._ec_string_free(ptr);
     this._readPageTransform();
-    return JSON.parse(json).paragraphs;
+    const paragraphs = JSON.parse(json).paragraphs;
+    this._gapModel = { pageIndex: this.pageIndex, paragraphs: paragraphs.map(p => ({id: p.id, runs: p.runs.map(r => ({text: r.text}))})) };
+    return paragraphs;
   }
 
   _readPageTransform() {
@@ -927,8 +938,29 @@ export class PdfEngine {
     return JSON.parse(j);
   }
 
+  _sourceGapRuns(id, runs) {
+    const model = this._gapModel?.pageIndex === this.pageIndex && this._gapModel.paragraphs.find(p => p.id === id);
+    const M = this.M;
+    const required = ['_FPDFText_LoadPage', '_FPDFText_CountChars', '_FPDFText_GetUnicode', '_FPDFText_GetTextObject', '_FPDFText_GetCharBox', '_FPDFText_ClosePage'];
+    if (!model || required.some(f => typeof M[f] !== 'function')) return runs;
+    const owned = new Set((this.paragraphObjects(id) || []).map(h => h >>> 0));
+    if (!owned.size) return runs;
+    const tp = M._FPDFText_LoadPage(this.page);
+    if (!tp) return runs;
+    const ptr = M._malloc(32), chars = [];
+    try {
+      const n = M._FPDFText_CountChars(tp);
+      for (let i = 0; i < n; i++) {
+        const u = M._FPDFText_GetUnicode(tp, i), obj = M._FPDFText_GetTextObject(tp, i) >>> 0;
+        const ok = M._FPDFText_GetCharBox(tp, i, ptr, ptr + 8, ptr + 16, ptr + 24);
+        chars.push({index: i, ch: String.fromCharCode(u), obj, box: ok ? [0, 8, 16, 24].map(k => M.HEAPF64[(ptr + k) >> 3]) : null});
+      }
+      return removeForeignObjectGapSpaces(model.runs, runs, chars, owned);
+    } finally { M._free(ptr); M._FPDFText_ClosePage(tp); }
+  }
+
   previewParagraph(id, runs, fmt) {
-    const a = this._writeRuns(runs);
+    const a = this._writeRuns(this._sourceGapRuns(id, runs));
     const f = this._writeFmt(fmt);
     const ptr = this.M._ec_preview_paragraph(
       this.session,
@@ -952,7 +984,7 @@ export class PdfEngine {
 
   commitParagraph(id, runs, fmt) {
     this._pageDirty = true;
-    const a = this._writeRuns(runs);
+    const a = this._writeRuns(this._sourceGapRuns(id, runs));
     const f = this._writeFmt(fmt);
     const out = this._decode(
       this.M._ec_commit_paragraph(
