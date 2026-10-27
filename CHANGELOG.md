@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0-alpha.16
+
+- Add PDF page and region selection for optional visual BLUE input through built-in Codex, with separate observations and bound image references.
+- Compare recorded Harness observations only when file, text, visual input, model, budget, rubric and provenance match. Unknown attempts and costs remain unknown.
+- Add bounded original-format DOCX, HTML and ODT exports; ODT visual rendering remains unverified.
+- Serialize pending admission and updates across tabs with Web Locks; preserve request-bound, GET-only recovery.
+- Fix table painted-bounds warnings and transport source-proven FitR destinations through supported document flow.
+- Clarify Korean guidance and align Confluence, connection and recovery documentation.
+
 ## 0.2.0-alpha.10
 
 - Version the changed role, navigation and Confluence entry assets so browsers load the matching visual workflow implementation after an upgrade. Release packaging rejects stale asset version suffixes.
