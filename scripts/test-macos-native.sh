@@ -10,6 +10,49 @@ python3 -m venv "$work/venv"
 "$work/venv/bin/python" -m pip install -r app/local/requirements.txt
 "$work/venv/bin/python" -m unittest discover -s app/tests -p test_document_red.py -v
 "$work/venv/bin/python" -m unittest discover -s app/tests -p test_blue_visual.py -v
+"$work/venv/bin/python" -m unittest discover -s app/tests -p test_macos_runtime.py -v
+"$work/venv/bin/python" -m unittest discover -s app/tests -p test_cli_selection.py -v
+"$work/venv/bin/python" -m unittest discover -s app/tests -p test_harness_wrapper.py -v
+"$work/venv/bin/python" -m unittest discover -s app/tests -p test_web_bridge.py -v
+"$work/venv/bin/python" -m unittest discover -s app/tests -p test_port_binding.py -v
+"$work/venv/bin/python" - "$work" <<'PY'
+import http.client, json, os, pathlib, socket, subprocess, sys, time
+work = pathlib.Path(sys.argv[1]); fakebin = work / 'bin'; fakebin.mkdir()
+for name in ('codex', 'claude'):
+    path = fakebin / name
+    path.write_text('#!/bin/sh\nexit 0\n'); path.chmod(0o755)
+env = {'HOME': str(work), 'PATH': str(fakebin) + ':/usr/bin:/bin', 'TMPDIR': str(work)}
+with socket.socket() as s:
+    s.bind(('127.0.0.1', 0)); port = s.getsockname()[1]
+assert port != 7816
+p = subprocess.Popen([sys.executable, 'app/local/server.py', '--port', str(port), '--token-display', 'hidden'],
+                     env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+def request(path, headers):
+    conn = http.client.HTTPConnection('127.0.0.1', port, timeout=2)
+    try:
+        conn.request('GET', path, headers=headers); response = conn.getresponse()
+        return response.status, json.loads(response.read())
+    finally: conn.close()
+try:
+    for _ in range(100):
+        if p.poll() is not None: raise RuntimeError('companion exited during startup')
+        try:
+            status, session = request('/api/session', {'Sec-Fetch-Site': 'same-origin'})
+            break
+        except (OSError, http.client.HTTPException): time.sleep(0.1)
+    else: raise RuntimeError('companion startup timed out')
+    assert status == 200
+    status, capabilities = request('/api/capabilities', {'Authorization': 'Bearer ' + session['token']})
+    assert status == 200 and capabilities['red'] and capabilities['blue'] and capabilities['pdf']
+    assert capabilities['cliSelection'] and capabilities['harnessWrapper']
+    assert {item['id'] for item in capabilities['cliAgents'] if item['installed']} >= {'codex', 'claude'}
+    assert p.poll() is None
+    print('Synthetic companion started on an ephemeral loopback port; capabilities verified.')
+finally:
+    if p.poll() is None: p.terminate()
+    try: p.wait(timeout=5)
+    except subprocess.TimeoutExpired: p.kill(); p.wait()
+PY
 node --test scripts/packaging.spec.mjs
 node scripts/package-release.mjs --out-dir "$work/release"
 "$work/venv/bin/python" - "$work/release" <<'PY'
