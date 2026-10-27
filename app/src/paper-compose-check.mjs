@@ -58,7 +58,7 @@ export async function checkRecomposition({bytes, expectedBlocks, edits = {}, pdf
       const page = await doc.getPage(n), viewport = page.getViewport({scale: 1});
       const content = await page.getTextContent();
       const parts = [];
-      let previous = null, ordinal = 0, pendingQuoteSpace = null;
+      let previous = null, ordinal = 0, pendingQuoteSpace = null, lineHeight = 0;
       const boundaries = [], itemScalars = [];
       const frame = viewport.transform;
       const frameSupported = viewport.rotation === 0 && Array.isArray(frame) && frame.length === 6 && frame.every(Number.isFinite) &&
@@ -184,9 +184,9 @@ export async function checkRecomposition({bytes, expectedBlocks, edits = {}, pdf
             // PDF.js can discard an encoded trailing space before EOL. Resolve
             // hyphenated words and wrapped citations from encoded glyphs.
             const recent=parts.slice(-8).join('');
-            const paragraphGap=position && previous.position && Math.abs(position.y-previous.position.y)>Math.max(position.height,previous.position.height)*1.9;
+            const paragraphGap=position && previous.position && Math.abs(position.y-previous.position.y)>Math.max(position.height,previous.position.height,lineHeight)*1.9;
             const url=/(?:https?:\/\/|www\.)[^\s]*$/iu.test(recent) && (/[./?=&-]$/u.test(recent) || (/\p{L}$/u.test(recent) && /^\p{N}/u.test(item.str)) || /^[\p{L}\p{N}_-]+[./]/u.test(item.str));
-            if (!paragraphGap && ((/[\p{L}\p{N}+][–\-/]$/u.test(recent) && /^[\p{L}\p{N}_−]/u.test(item.str)) || (/(?:^|\s)-$/u.test(recent) && /^\p{L}/u.test(item.str)) || (/\S$/u.test(previous.str) && /^\[/u.test(item.str)) || (/\S*\/\S*[?=&]$/u.test(previous.str) && /^[\p{L}\p{N}]/u.test(item.str)) || (url && /^[\p{L}\p{N}]/u.test(item.str)))) {
+            if (!paragraphGap && ((/\S[–\-/]$/u.test(recent) && /^[\p{L}\p{N}_−]/u.test(item.str)) || (/(?:^|\s)-$/u.test(recent) && /^\p{L}/u.test(item.str)) || (/\S$/u.test(previous.str) && /^\[/u.test(item.str)) || (/\S*\/\S*[?=&]$/u.test(previous.str) && /^[\p{L}\p{N}]/u.test(item.str)) || (url && /^[\p{L}\p{N}]/u.test(item.str)))) {
               boundaries.push({part:parts.length, ordinal, leftPosition:previous.position, rightPosition:position});
             }
             parts.push(' ');
@@ -201,6 +201,8 @@ export async function checkRecomposition({bytes, expectedBlocks, edits = {}, pdf
             else if (gap >= height * 0.3) parts.push(' ');
           }
         }
+        if (previous?.hasEOL && item.str) lineHeight = 0;
+        if (position) lineHeight = Math.max(lineHeight, position.height);
         parts.push(item.str);
         for (const scalar of item.str) if (!/\s/u.test(scalar)) { itemScalars.push(scalar); ordinal++; }
         if (item.str) previous = {str:item.str, hasEOL:item.hasEOL, position};
