@@ -162,6 +162,34 @@ function findAll(norm, needle) {
   return hits;
 }
 
+// Join only adjacent, same-column source paragraphs whose baselines prove a
+// normal line continuation. Each virtual character retains its original page
+// index; intervening objects never become part of the source span.
+function geometricVariants(paras, chars) {
+  const byPara = paras.map((_, pi) => chars.flatMap((c, i) => c.pi === pi ? [{ ...c, source: i }] : []));
+  const variants = [];
+  for (let i = 0; i < paras.length; i++) {
+    const a = paras[i], lines = a.lines || [], box = a.box;
+    if (!box || lines.length < 2 || !byPara[i].length) continue;
+    const steps = lines.slice(1).map((l, k) => lines[k].y - l.y);
+    const step = steps[0];
+    if (!(step > 0) || steps.some((d) => Math.abs(d - step) > 0.5)) continue;
+    for (let j = 0; j < paras.length; j++) {
+      if (i === j) continue;
+      const b = paras[j], first = b.lines?.[0], bb = b.box;
+      if (!bb || !first || !byPara[j].length || ![box.x, box.w, bb.x, bb.w, first.y].every(Number.isFinite)) continue;
+      if (Math.abs(box.x - bb.x) > 1 || Math.abs(box.w - bb.w) > Math.max(2, box.w * 0.03) || Math.abs(lines.at(-1).y - first.y - step) > 0.5) continue;
+      // A competing paragraph on the next baseline in the same column makes
+      // the relation uncertain, even if its text would not match the query.
+      const competitors = paras.filter((p, k) => k !== i && k !== j && p.box && p.lines?.some((l) => Math.abs(l.y - first.y) <= 0.5) && Math.abs(p.box.x - box.x) <= 1 && p.box.w >= box.w * 0.5);
+      if (competitors.length) continue;
+      const joined = [...byPara[i], { ch: "\n", pi: -1, source: null }, ...byPara[j]];
+      for (const logical of [false, true]) variants.push({ chars: joined, ...normalizeChars(joined, logical) });
+    }
+  }
+  return variants;
+}
+
 // breaks: optional "ri:o" keys of source whitespace written as hard breaks.
 export function rebuildRuns(para, del, inserts, breaks = null) {
   const out = [];
@@ -192,8 +220,10 @@ export function rebuildRuns(para, del, inserts, breaks = null) {
 // Returns { failures, plans, perPara }; failures carry no document text.
 export function planPageEdits(paras, edits) {
   const chars = pageIndexMap(paras);
-  const visible = normalizeChars(chars);
-  const logical = normalizeChars(chars, true);
+  chars.forEach((c, i) => { c.source = i; });
+  const visible = { chars, ...normalizeChars(chars) };
+  const logical = { chars, ...normalizeChars(chars, true) };
+  const geometry = geometricVariants(paras, chars);
   const failures = [];
   const spans = [];
   const plans = [];
@@ -203,26 +233,28 @@ export function planPageEdits(paras, edits) {
     // choosing a target: an exact visible hit must not hide a second
     // paragraph whose source-proven discretionary spelling is equivalent.
     const candidates = new Map();
-    for (const variant of [visible, logical]) {
+    for (const variant of [visible, logical, ...geometry]) {
       for (const hit of findAll(variant.norm, needle)) {
         const a = variant.map[hit][0], b = variant.map[hit + needle.length - 1][1];
-        const key = a + ":" + b;
-        if (!candidates.has(key)) candidates.set(key, { ...variant, hit, a, b });
+        const source = variant.chars.slice(a, b + 1).filter((c) => c.source != null && c.pi >= 0).map((c) => c.source);
+        const key = source.join(":");
+        if (!candidates.has(key)) candidates.set(key, { ...variant, hit, a, b, source });
       }
     }
     if (candidates.size !== 1) {
       failures.push({ id: e.id, pageIndex: e.pageIndex, code: candidates.size ? "AMBIGUOUS_MATCH" : "NOT_FOUND", hits: candidates.size });
       continue;
     }
-    const { map, hit, a, b } = candidates.values().next().value;
+    const { map, hit, a, b, source, chars: matchedChars } = candidates.values().next().value;
     const hits = [hit];
-    const overlap = spans.find((s) => !(b < s.a || a > s.b));
+    const sourceSet = new Set(source);
+    const overlap = spans.find((s) => s.source.some((i) => sourceSet.has(i)));
     if (overlap) {
       failures.push({ id: e.id, pageIndex: e.pageIndex, code: "OVERLAPPING_EDITS", with: overlap.id });
       continue;
     }
-    spans.push({ a, b, id: e.id });
-    const span = chars.slice(a, b + 1).filter((c) => c.pi >= 0);
+    spans.push({ source, id: e.id });
+    const span = matchedChars.slice(a, b + 1).filter((c) => c.pi >= 0);
     const touched = [...new Set(span.map((c) => c.pi))];
     const locked = touched.filter((pi) => paras[pi].editable === false);
     if (locked.length) {
@@ -231,12 +263,20 @@ export function planPageEdits(paras, edits) {
     }
     const lastPi = touched[touched.length - 1];
     const noop = normalizeText(e.after) === needle;
-    const change = noop ? null : planInlineChange(paras, chars, map, hits[0], needle, e.after);
+    const change = noop ? null : planInlineChange(paras, matchedChars, map, hits[0], needle, e.after);
     if (change?.failure) {
       failures.push({ id: e.id, pageIndex: e.pageIndex, code: change.failure });
       continue;
     }
-    plans.push({ edit: e, span, touched, insertAt: span.find((c) => c.pi === lastPi), noop, change, start: a, sourceHyphenNormalization: span.some((c) => c.lineEndHyphen) });
+    // The inline planner merges a multi-paragraph replacement into the last
+    // paragraph. For a discontiguous geometric chain that can overlap later
+    // lines or unrelated objects, so reject until placement is proven safe.
+    const discontiguous = source.some((v, k) => k > 0 && v > source[k - 1] + 2);
+    if (discontiguous && new Set((change?.del || []).map((c) => c.pi)).size > 1) {
+      failures.push({ id: e.id, pageIndex: e.pageIndex, code: "UNSUPPORTED_GEOMETRIC_CHANGE" });
+      continue;
+    }
+    plans.push({ edit: e, span, touched, insertAt: span.find((c) => c.pi === lastPi), noop, change, start: Math.min(...source), sourceHyphenNormalization: span.some((c) => c.lineEndHyphen) });
   }
   // Paragraph mutations, built only from accepted, non-noop plans.
   const perPara = new Map();
@@ -638,3 +678,4 @@ export async function editPdf(request, options = {}) {
   report.status = "self-check-passed";
   return { pdf, report };
 }
+
