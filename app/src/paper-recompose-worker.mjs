@@ -95,7 +95,7 @@ export async function runRequest(request, deps={}) {
   const compile=deps.compile || createTypstCompile({...facade,getModule:()=>module});
   const pdfjs=deps.pdfjs || await import(new URL('./vendor/pdf.mjs',import.meta.url).href);
   if(pdfjs.GlobalWorkerOptions) pdfjs.GlobalWorkerOptions.workerSrc=new URL('./vendor/pdf.worker.mjs',import.meta.url).href;
-  const result=await (deps.recompose || recompose)({file:bytes,fileHash:preparedHash,edits:{...snapshot,fileHash:preparedHash,revision:request.revision},bindings,revision:request.revision},{compile,fonts:assets.fonts,mupdf,pdfjs});
+  const result=await (deps.recompose || recompose)({file:bytes,fileHash:preparedHash,edits:{...snapshot,fileHash:preparedHash,revision:request.revision},bindings,revision:request.revision},{compile,fonts:assets.fonts,mupdf,pdfjs,runningFurniture:true});
   return {...result,sourceBinding:{...result.sourceBinding,originalSha256:originalHash,preparedSha256:preparedHash,cleanup:cleaned.verification}};
 }
 
