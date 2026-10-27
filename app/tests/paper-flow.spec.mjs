@@ -49,3 +49,9 @@ test('dense plot owns its labels and image while leaving caption and body outsid
  const f=buildPaperFlow(d,{drawings}),r=f.regions[0],asset=f.items.find(i=>i.renderAssetId===r?.id);
  assert.ok(r);assert.equal(asset.blockIds.length,21);assert.deepEqual(asset.assetIds,['img']);assert.deepEqual(f.items.map(i=>i.kind),['asset','caption','paragraph']);assert.equal(new Set(f.items.flatMap(i=>i.blockIds)).size,d.blocks.length);
 });
+test('outline artwork is captured only when central editable text is absent',()=>{
+ const drawings=Array.from({length:2200},(_,i)=>({pageIndex:0,bbox:[20+(i%350),10+(i%570),21+(i%350),11+(i%570)]}));
+ const d=model([block('footer','edge marker',[30,570,180,580],0),block('fig','',[20,40,100,70],1,{kind:'figure',assetIds:['img']})]);d.assets=[{id:'img',source:{pageIndex:0,bbox:[20,40,100,70]}}];
+ const f=buildPaperFlow(d,{drawings}), r=f.regions[0];assert.equal(r.classification,'outline-artwork'); assert.deepEqual(r.blockIds,['footer','fig']);assert.deepEqual(r.assetIds,['img']);assert.equal(f.items.length,1);assert.equal(f.items[0].renderAssetId,r.id);
+ d.blocks.push(block('body','ordinary editable body text',[30,100,300,120],2));const g=buildPaperFlow(d,{drawings});assert.equal(g.regions.some(x=>x.classification==='outline-artwork'),false);assert.equal(g.items.find(x=>x.blockIds.includes('body')).kind,'paragraph');
+});

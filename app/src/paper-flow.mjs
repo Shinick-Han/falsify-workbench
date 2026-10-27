@@ -95,12 +95,28 @@ export function buildPaperFlow(document, {drawings=document?.drawings || []} = {
     // Connected line grids are evidence of a vector table. Keep captions and
     // notes outside the measured grid and capture the grid with its cell text.
     const paths=drawings.filter(d=>d.pageIndex===pi && boxOK(d.bbox)).map(d=>d.bbox);
+    // Outline-heavy forms may have no extractable labels at all. Restrict this
+    // classification to pages without ordinary central body text, and include
+    // every observed occurrence in the measured crop.
+    const centralText=blocks.filter(x=>x.b.text?.trim() && (!boxOK(x.box) || (x.box[1]<page.height*.9 && x.box[3]>page.height*.1)));
+    let form=false;
+    if(paths.length>=2000 && centralText.length===0 && blocks.every(x=>boxOK(x.box)) && assets.every(x=>boxOK(x.box))) {
+      const raw=union([...paths,...blocks.map(x=>x.box),...assets.map(x=>x.box)]);
+      const box=[Math.max(0,raw[0]-1),Math.max(0,raw[1]-1),Math.min(page.width,raw[2]+1),Math.min(page.height,raw[3]+1)];
+      if(boxOK(box) && box[2]-box[0]>page.width*.5 && box[3]-box[1]>page.height*.5 && [...paths,...blocks.map(x=>x.box),...assets.map(x=>x.box)].every(b=>contains(box,b))) {
+        const id=`region-${hex(new TextEncoder().encode(JSON.stringify([document.sourceSha256,pi,box]))).slice(0,24)}`;
+        const entry=make('asset',blocks,assets,box,Math.min(...blocks.map(x=>x.pos ?? Infinity)),0);
+        entry.renderAssetId=id; entries.push(entry);
+        regions.push({id,pageIndex:pi,bbox:[...box],blockIds:blocks.map(x=>x.b.id),assetIds:assets.map(x=>x.a.id),classification:'outline-artwork'});
+        blocks.forEach(x=>owned.add(x.b.id)); assets.forEach(x=>represented.add(x.a.id)); form=true;
+      }
+    }
     const captions=blocks.filter(x=>boxOK(x.box) && /^\s*(?:extended\s+data\s+)?(?:fig(?:ure)?\.?|table)\s*\d/i.test(x.b.text || ''));
     const plotBottom=Math.min(page.height*.9,...captions.map(x=>x.box[1]));
     const plotBlocks=blocks.filter(x=>x.b.text && boxOK(x.box) && x.box[1]>=page.height*.05 && x.box[3]<=plotBottom);
     const plotPaths=paths.filter(b=>b[0]>=0 && b[1]>=page.height*.05 && b[2]<=page.width && b[3]<=plotBottom);
     let plot=false;
-    if(plotPaths.length>=1000 && plotBlocks.length>=20 && plotBlocks.every(x=>x.b.text.length<=200 && !/^\s*(?:fig(?:ure)?\.?|table)\s*\d/i.test(x.b.text)) && plotBlocks.filter(x=>x.b.text.length<=100).length/plotBlocks.length>=.95) {
+    if(!form && plotPaths.length>=1000 && plotBlocks.length>=20 && plotBlocks.every(x=>x.b.text.length<=200 && !/^\s*(?:fig(?:ure)?\.?|table)\s*\d/i.test(x.b.text)) && plotBlocks.filter(x=>x.b.text.length<=100).length/plotBlocks.length>=.95) {
       let box=union([...plotPaths,...plotBlocks.map(x=>x.box)]);
       const touching=assets.filter(x=>boxOK(x.box) && overlap(box,x.box));
       if(touching.every(x=>x.box[0]>=0 && x.box[1]>=page.height*.05 && x.box[2]<=page.width && x.box[3]<=plotBottom)) box=union([box,...touching.map(x=>x.box)]);
@@ -116,9 +132,9 @@ export function buildPaperFlow(document, {drawings=document?.drawings || []} = {
         plot=true;
       }
     }
-    if(!plot && paths.length>2000) diagnostics.push({code:'dense-vector-region-unresolved',pageIndex:pi});
+    if(!form && !plot && paths.length>2000) diagnostics.push({code:'dense-vector-region-unresolved',pageIndex:pi});
     const seen=new Set();
-    for(let n=0;n<(plot || paths.length>2000?0:paths.length);n++) {
+    for(let n=0;n<(form || plot || paths.length>2000?0:paths.length);n++) {
       if(seen.has(n)) continue;
       const cluster=[n];seen.add(n);
       for(let k=0;k<cluster.length;k++) for(let j=0;j<paths.length;j++) {
