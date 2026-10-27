@@ -123,7 +123,6 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
     document.blocks=document.blocks.flatMap(b=>groups.get(b.id)||[b]);
     for(const id of groups.keys()) ids.delete(id);
   }
-  const balanceGroups=[];
   if (flow) {
     if(flow.schema!=='falsify.paper-flow.v1' || flow.sourceSha256!==document.sourceSha256 || !Array.isArray(flow.items)) fail('Invalid paper flow');
     const owners=new Set();
@@ -196,7 +195,8 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
   if (families.length || bodySize) source+=`#set text(${families.length ? `font: (${families.map(typstString).join(', ')},)` : ''}${families.length && bodySize ? ', ' : ''}${bodySize ? `size: ${bodySize}pt` : ''})\n`;
   // Source baseline minus font size is not Typst leading: font ascent and
   // descent differ across fonts. Let Typst use its natural leading by default.
-  source+=`#set par(justify: true${policy.paragraphSpacingEm!==undefined ? `, spacing: ${policy.paragraphSpacingEm*bodySize}pt` : ''})\n#set text(hyphenate: true)\n`;
+  // Generated hard hyphens have no source provenance; keep literal source hyphens.
+  source+=`#set par(justify: true${policy.paragraphSpacingEm!==undefined ? `, spacing: ${policy.paragraphSpacingEm*bodySize}pt` : ''})\n#set text(hyphenate: false)\n`;
   if(policy.columnGutterEm!==undefined) source+=`#set columns(gutter: ${policy.columnGutterEm*bodySize}pt)\n`;
   const files = {};
   const assetList = Array.isArray(assets) ? assets : assets?.assets || document.assets || [];
@@ -367,8 +367,8 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
   }
   if (flow) {
     if(flow.schema!=='falsify.paper-flow.v1' || flow.sourceSha256!==document.sourceSha256 || !Array.isArray(flow.items)) fail('Invalid paper flow');
-    let group=[], groupItems=[], columns=0;
-    const flush=next=>{if(!group.length)return; source+=columns===2 && !continuousColumns ? `#columns(2)[\n${group.join('\n\n')}\n]\n` : group.join('\n\n')+'\n';if(columns===2 && next?.kind==='asset' && next.span==='page') balanceGroups.push(groupItems);group=[];groupItems=[];};
+    let group=[], columns=0;
+    const flush=()=>{if(!group.length)return; source+=columns===2 && !continuousColumns ? `#columns(2)[\n${group.join('\n\n')}\n]\n` : group.join('\n\n')+'\n';group=[];};
     const captionById=new Map(flow.items.filter(i=>i.kind==='caption').flatMap(i=>(i.blockIds||[]).map(id=>[id,i]))), linkedCaptions=new Set();
     for(const item of flow.items) if(item.kind==='asset') for(const id of item.captionIds||[]) {if(!captionById.has(id) || linkedCaptions.has(id)) fail('Unknown or duplicate caption link'); linkedCaptions.add(id);}
     for(const item of flow.items) {
@@ -391,34 +391,15 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
         parts=(item.blockIds||[]).filter(id=>!linkedCaptions.has(id)).map(id=>blockById.get(id)).filter(Boolean).map(b=>renderBlock(b));
         if(!item.inline) parts=parts.filter(Boolean);
       }
-      if(parts.length) {const rendered=item.inline ? parts.map((p,i)=>p+(i<parts.length-1 ? `#text(${typstString(item.joiners[i])})` : '')).join('') : parts.join(item.kind==='asset'?'\n\n':'\n'); const scoped=item.kind==='asset' ? rendered : paragraphContext((item.blockIds||[]).map(id=>blockById.get(id)),item.kind,rendered); group.push(item.kind==='heading' ? `#block(sticky: true)[${scoped}]` : scoped);groupItems.push({kind:item.kind,inline:!!item.inline,ids:[...(item.blockIds||[])]});}
+      if(parts.length) {const rendered=item.inline ? parts.map((p,i)=>p+(i<parts.length-1 ? `#text(${typstString(item.joiners[i])})` : '')).join('') : parts.join(item.kind==='asset'?'\n\n':'\n'); const scoped=item.kind==='asset' ? rendered : paragraphContext((item.blockIds||[]).map(id=>blockById.get(id)),item.kind,rendered); group.push(item.kind==='heading' ? `#block(sticky: true)[${scoped}]` : scoped);}
     }
     flush();
   } else {
     source+=`#columns(2)[\n${document.blocks.map(b=>paragraphContext([b],b.kind || 'paragraph',renderBlock(b))).filter(Boolean).join('\n\n')}\n]`;
   }
-  let compiled=await compile({source, fonts, files, signal}); abort(signal);
-  // A full-width figure ends a column group. Balance a left-only final page
-  // at an existing paragraph boundary, using the measured output.
-  if(Array.isArray(compiled?.blockSpans) && balanceGroups.length) {
-    const spans=new Map(compiled.blockSpans.map(s=>[s.id,s])); let revised=source;
-    for(const items of balanceGroups) {
-      const all=items.flatMap(item=>item.ids.map(id=>spans.get(id)));
-      if(!all.length || all.some(s=>!s?.start || !s.end || !Number.isInteger(s.end.page))) continue;
-      const last=Math.max(...all.map(s=>s.end.page));
-      const onPage=all.filter(s=>s.start.page<=last && s.end.page>=last);
-      const splitX=margins.left+(page.width-margins.left-margins.right)/2;
-      if(onPage.some(s=>(s.start.page===last && s.start.x>=splitX) || (s.end.page===last && s.end.x>=splitX))) continue;
-      const bottom=Math.max(...onPage.filter(s=>s.end.page===last).map(s=>s.end.y));
-      if(!Number.isFinite(bottom) || bottom>page.height-margins.bottom) continue;
-      const target=(margins.top+bottom)/2;
-      const eligible=items.filter(item=>!item.inline && ['paragraph','caption'].includes(item.kind) && item.ids.length===1).map(item=>spans.get(item.ids[0])).filter(s=>s?.start?.page===last && s.start.y>margins.top+25 && s.start.y<bottom-25).sort((a,b)=>Math.abs(a.start.y-target)-Math.abs(b.start.y-target));
-      const chosen=eligible[0]; if(!chosen) continue;
-      const marker=spanMarker(chosen.id,chosen.sourcePage,'start');
-      if(revised.includes(marker)) revised=revised.replace(marker,`#colbreak()${marker}`);
-    }
-    if(revised!==source) {source=revised;compiled=await compile({source,fonts,files,signal});abort(signal);}
-  }
+  // Forced column breaks after a measurement pass can create empty pages when
+  // the preceding group repaginates around full-width artwork.
+  const compiled=await compile({source, fonts, files, signal}); abort(signal);
   const returnedBytes=compiled instanceof Uint8Array ? compiled : compiled?.bytes;
   const bytes=returnedBytes instanceof Uint8Array ? new Uint8Array(returnedBytes) : returnedBytes;
   if (!(bytes instanceof Uint8Array) || new TextDecoder().decode(bytes.subarray(0,5))!=='%PDF-') fail('Compiler did not return PDF bytes');
