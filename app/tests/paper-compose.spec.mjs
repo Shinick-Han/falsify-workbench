@@ -29,7 +29,9 @@ test('captions above and below an asset follow source position in output and che
  await composeDocument({document:d,sourceBytes:src,flow},{compile:async p=>(source=p.source,pdf),outputCheck:async p=>(expected=p.expectedBlocks,{checks:{content:{status:'pass'}},findings:[]})});
  assert.ok(source.indexOf(typstString('Table 1'))<source.indexOf('#image('));
  assert.ok(source.indexOf('#image(')<source.indexOf(typstString('Footnote')));
- assert.match(source,/\]\n\n#block\(sticky: true\)\[#box\[/);
+ assert.match(source,/\]\n\n#block\(sticky: true\)\[#box\(width: 300pt, height: 100pt, baseline: 100pt\)\[/);
+ assert.match(source,/#place\(top \+ left\)\[#box\(width: 0pt, height: 0pt\)/);
+ assert.match(source,/#place\(bottom \+ left\)\[#box\(width: 0pt, height: 0pt\)/);
  assert.match(source,/\]\]\n\n#context \[/);
  assert.deepEqual(expected.map(b=>b.text),['Table 1','Footnote']);assert.deepEqual(d,original);
 });

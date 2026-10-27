@@ -334,6 +334,12 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
     const unique=new Map(candidates.map(a=>[JSON.stringify([a.destinationLabel||null,a.destinationLabel?null:a.uri,a.destinationStatus||null]),a])); const only=unique.size===1 ? [...unique.values()][0] : null; const dest=only && !only.destinationStatus && !suppressedLabels.has(only.destinationLabel) ? only : null;
     const image=`#image(${typstString(path)}, width: ${width})`;
     const linked=dest?.destinationLabel ? `#link(label(${typstString(dest.destinationLabel)}))[${image}]` : dest?.uri ? `#link(${typstString(dest.uri)})[${image}]` : image;
+    if(Number.isFinite(sourceWidth) && sourceWidth>0 && Number.isFinite(sourceHeight) && sourceHeight>0) {
+      const w=Math.min(sourceWidth,available,heightLimited),h=w*sourceHeight/sourceWidth;
+      // The image owns a measured frame. Zero-size anchors cannot wrap onto a
+      // preceding text line when an image fills the available width.
+      return `#box(width: ${w}pt, height: ${h}pt, baseline: ${h}pt)[#place(top + left)[${linked}]#place(top + left)[#box(width: 0pt, height: 0pt)[${marker}${labels}]]#place(bottom + left)[#box(width: 0pt, height: 0pt)[${endMarker}]]]`;
+    }
     return `#box[${marker}${labels}${linked}${endMarker}]`;
   }
   if(plan) {
