@@ -29,6 +29,7 @@ import cli_backend
 import editor_service
 import paper_analysis_service
 import image_edit_service
+import harness_adapter
 import harness_profile
 import pairing
 from build_info import WORKBENCH_VERSION
@@ -168,7 +169,22 @@ def work(job, data):
     except Exception as error:
         with LOCK:
             job['state'] = 'cancelled' if job['cancel'].is_set() else 'failed'
-            job['error'] = str(error) if isinstance(error, ValueError) else '로컬 실행 오류. CLI 로그인·설치 상태를 확인하세요.'
+            if isinstance(error, harness_adapter.AdapterFailure):
+                failure = error
+            else:
+                # Only exact first-party service labels are recognized; no stderr parsing.
+                message = str(error) if isinstance(error, ValueError) else ''
+                cli_codes = {'subscription_login_required': 'auth_required', 'FileNotFoundError': 'executable_missing',
+                             'timeout': 'timeout', 'output_limit': 'invalid_output',
+                             'response_not_object': 'invalid_output', 'protocol_violation': 'invalid_output'}
+                prefixes = ('CLI 검토 중단: ', 'CLI BLUE 중단: ')
+                cli_code = next((message[len(prefix):] for prefix in prefixes if message.startswith(prefix)), None)
+                failure = harness_adapter.AdapterFailure(cli_codes.get(cli_code, 'unknown')) if cli_code is not None else None
+            if failure:
+                job['failure'] = failure.payload()
+                job['error'] = str(failure)
+            else:
+                job['error'] = str(error) if isinstance(error, ValueError) else '로컬 실행 오류. CLI 로그인·설치 상태를 확인하세요.'
     finally:
         with LOCK: job['finished'] = time.monotonic()
         ACTIVE.release()
