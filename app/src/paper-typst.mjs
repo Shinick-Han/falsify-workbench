@@ -10,6 +10,7 @@ export function createTypstCompile({createTypstCompiler, createTypstFontBuilder,
       for(const candidate of fonts.candidates || []) {const bytes=candidate.getBytes?.(); if(bytes) await builder.addFontData(bytes);}
       // Use the pinned underlying objects: the public 0.7.0 build/compile helpers
       // do not free their resolver/world if a callback fails.
+      // The 0.7.0 WASM wrapper consumes the builder before invoking build, even on rejection.
       const rawBuilder=builder.fontBuilder; builder.fontBuilder=null; resolver=await rawBuilder.build(); abort(); compiler.setFonts(resolver);
       compiler.addSource('/main.typ',source);
       for(const [path, bytes] of Object.entries(files)) compiler.mapShadow('/'+path, bytes);

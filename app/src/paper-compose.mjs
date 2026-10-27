@@ -162,9 +162,12 @@ export async function composeDocument({document, edits=[], flow, assets, signal,
     let result='', mapped=[], cursor=0;
     for(const edit of [...(changes.get(block.id)||[])].sort((a,b)=>a.start-b.start)) {
       const a=after[edit.start], b=before[edit.end]; result+=logical.slice(cursor,a)+edit.after;
-      mapped.push(...styles.slice(cursor,a),...Array(edit.after.length).fill(styleAt(edit.start))); cursor=b;
+      for(let i=cursor;i<a;i++) mapped.push(styles[i]);
+      const editStyle=styleAt(edit.start);
+      for(let i=0;i<edit.after.length;i++) mapped.push(editStyle);
+      cursor=b;
     }
-    result+=logical.slice(cursor); mapped.push(...styles.slice(cursor));
+    result+=logical.slice(cursor); for(let i=cursor;i<styles.length;i++) mapped.push(styles[i]);
     const familyAt=i=>fonts.fallback?.find(entry=>entry.codepoint===result.codePointAt(i) && entry.kind==='glyph')?.family || null;
     const runs=[]; for(let i=0;i<result.length;) {let j=i+(result.codePointAt(i)>0xffff?2:1); const family=familyAt(i); while(j<result.length && mapped[j]===mapped[i] && familyAt(j)===family) j+=result.codePointAt(j)>0xffff?2:1; runs.push([result.slice(i,j),styleById.get(mapped[i]),family]); i=j;}
     return marker+runs.map(([value,style,family])=>{const size=style?.size; let opts=Number.isFinite(size)&&size>0 ? `size: ${size}pt, ` : ''; if(family) opts+=`font: ${typstString(family)}, `; const name=style?.fontName || ''; if(/bold/i.test(name)) opts+='weight: "bold", '; if(/italic|oblique/i.test(name)) opts+='style: "italic", '; return `#text(${opts}${typstString(value)})`;}).join('');
@@ -205,7 +208,10 @@ export async function composeDocument({document, edits=[], flow, assets, signal,
         else parts=(item.assetIds||[]).map(id=>renderAsset(id,item)).filter(Boolean);
         const captions=(item.captionIds||[]).map(id=>renderBlock(blockById.get(id))).filter(Boolean);
         if(parts.length && captions.length) parts=[`#block(breakable: false)[${parts.join('\n')}\n${captions.join('\n')}]`]; else parts.push(...captions);
-      } else parts=(item.blockIds||[]).filter(id=>!linkedCaptions.has(id)).map(id=>blockById.get(id)).filter(Boolean).map(renderBlock).filter(Boolean);
+      } else {
+        parts=(item.blockIds||[]).filter(id=>!linkedCaptions.has(id)).map(id=>blockById.get(id)).filter(Boolean).map(renderBlock);
+        if(!item.inline) parts=parts.filter(Boolean);
+      }
       if(parts.length) group.push(item.inline ? parts.map((p,i)=>p+(i<parts.length-1 ? `#text(${typstString(item.joiners[i])})` : '')).join('') : parts.join('\n'));
     }
     flush();

@@ -121,6 +121,32 @@ test('fragment crossing edit and inline joiners preserve exact output sequence',
  await composeDocument({document:d,sourceBytes:src,flow,edits:[{...edit,start:27,end:31,before:'epea',after:'X'}]},{compile:async p=>(source=p.source,pdf),outputCheck:async p=>(expected=p.expectedBlocks,{checks:{content:{status:'pass'}},findings:[]})});
  assert.equal(expected[1].text,'rXt'); assert.ok(source.includes(typstString('rX'))); assert.ok(source.includes(typstString('t')));
 });
+
+test('inline joiners retain their original positions when fragments are deleted',async()=>{
+ for(const [start,end,after,expected,rendered] of [
+  [1,2,'','a-+c','#text("a")#text("-")#text("+")'],
+  [0,1,'','-b+c','#text("-")'],
+  [2,3,'','a-b+','#text("+")'],
+  [0,3,'','-+','#text("-")#text("+")'],
+  [0,2,'X −12','X −12-+c','#text("X −12")#text("-")#text("+")'],
+ ]) {
+  const d=make();d.blocks=[{id:'p',text:'abc',source:{pageIndex:0,range:{start:0,end:3},lines:[]}}];
+  const fragments=['a','b','c'].map((text,i)=>({id:`f${i}`,parentBlockId:'p',text,source:{pageIndex:0,range:{start:i,end:i+1},lines:[]}}));
+  const flow={schema:'falsify.paper-flow.v1',sourceSha256:d.sourceSha256,fragments,items:[{kind:'paragraph',inline:true,blockIds:fragments.map(f=>f.id),joiners:['-','+']}]};
+  let source,checked;
+  await composeDocument({document:d,sourceBytes:src,flow,edits:[{blockId:'p',pageIndex:0,start,end,before:'abc'.slice(start,end),after}]},{compile:async p=>(source=p.source,pdf),outputCheck:async p=>(checked=p.expectedBlocks,{checks:{content:{status:'pass'}},findings:[]})});
+  assert.equal(checked[0].text,expected);assert.ok(source.includes(rendered),source);
+  const literalText=[...source.matchAll(/#text\("([^"\\]*)"\)/g)].map(m=>m[1]).join('');
+  assert.equal(literalText,expected);
+ }
+});
+
+test('200000-character styled replacement appears literally in generated source',async()=>{
+ const d=make();d.blocks=[{id:'p',text:'repeat',source:{pageIndex:0,range:{start:0,end:6},lines:[],characters:[{start:0,end:6,styleId:'s'}]}}];d.styles=[{id:'s',size:10}];
+ const after='a'.repeat(200000);let source,checked;
+ await composeDocument({document:d,sourceBytes:src,edits:[{blockId:'p',pageIndex:0,start:0,end:6,before:'repeat',after}]},{compile:async p=>(source=p.source,pdf),outputCheck:async p=>(checked=p.expectedBlocks,{checks:{content:{status:'pass'}},findings:[]})});
+ assert.equal(checked[0].text,after);assert.ok(source.includes(`#text(size: 10pt, "${after}")`));
+});
 import {createTypstCompile} from '../src/paper-typst.mjs';
 test('Typst owned world, compiler and font resources are released on success and failure',async()=>{
  for(const mode of ['success','compile-error','abort']) {
@@ -132,4 +158,12 @@ test('Typst owned world, compiler and font resources are released on success and
   if(mode==='success') {const result=await compile({source:'x'});assert.equal(result.blockMap[0].id,'a');} else await assert.rejects(compile({source:'x',signal:controller.signal}));
   assert.deepEqual(freed,['world','shadow','compiler','resolver']);
  }
+});
+
+test('Typst build rejection leaves the moved builder to the build operation',async()=>{
+ const freed=[];let moved=false;
+ const compiler={init:async()=>{compiler.compiler={free:()=>freed.push('compiler')}},resetShadow(){freed.push('shadow')}};
+ const builder={init:async()=>{builder.fontBuilder={build(){moved=true;return Promise.reject(Error('build failed'))},free(){assert.equal(moved,false);freed.push('builder')}}}};
+ const compile=createTypstCompile({createTypstCompiler:()=>compiler,createTypstFontBuilder:()=>builder,loadFonts:()=>()=>{}});
+ await assert.rejects(compile({source:'x'}),/build failed/);assert.equal(moved,true);assert.deepEqual(freed,['shadow','compiler']);
 });
