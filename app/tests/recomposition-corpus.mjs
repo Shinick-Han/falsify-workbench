@@ -23,3 +23,24 @@ export function corpus(variant = 'baseline') {
   const buf=d.saveToBuffer(), bytes=buf.asUint8Array().slice(); buf.destroy(); d.destroy(); return bytes;
 }
 
+
+// Separate text objects and fonts force styled PDF.js runs from real PDF bytes.
+export function geometryCorpus(variant) {
+  const d = new mupdf.PDFDocument();
+  const f = d.addSimpleFont(new mupdf.Font('Helvetica'));
+  const g = d.addSimpleFont(new mupdf.Font('Helvetica-Bold'));
+  const line = (font, text, x, y, matrix = '1 0 0 1') => `BT /${font} 12 Tf ${matrix} ${x} ${y} Tm (${esc(text)}) Tj ET\n`;
+  let stream;
+  if (variant === 'split' || variant === 'gap' || variant === 'ambiguous' || variant === 'internal-space') {
+    // Helvetica "regul" is 26.676 points at 12pt.
+    const x = variant === 'gap' ? 66 : variant === 'ambiguous' ? 55 : 56.676;
+    stream = line('F','regul',30,350) + line('G',variant === 'internal-space' ? ' ation' : 'ation',x,350);
+  } else if (variant === 'wrap') stream = line('F','hello',30,350) + line('G','world',30,330);
+  else if (variant === 'bottom') stream = line('F','control',30,0);
+  else if (variant === 'top') stream = line('F','control',30,399);
+  else if (variant === 'right') stream = line('F','control',290,350);
+  else if (variant === 'rotated') stream = line('F','control',30,350,'0 1 -1 0');
+  else stream = line('F','control',30,350);
+  d.insertPage(-1,d.addPage([0,0,300,400],0,{Font:{F:f,G:g}},stream));
+  const buf=d.saveToBuffer(), bytes=buf.asUint8Array().slice(); buf.destroy(); d.destroy(); return bytes;
+}
