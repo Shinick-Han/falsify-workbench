@@ -85,7 +85,11 @@ def run_stdio(argv, stdin, cwd, stdout_path):
     """Run argv once (no shell, no retry) in cwd with stdout captured to stdout_path; returns raw stdout."""
     # No shell interpolation, no inherited account tokens, disposable cwd.
     # This is not isolation: trusted code can access the user's filesystem/network.
-    env = {k:v for k,v in os.environ.items() if k.upper() in {'PATH','SYSTEMROOT','WINDIR','TEMP','TMP','PATHEXT'}}
+    env = {k:v for k,v in os.environ.items() if k.upper() in {
+        'PATH', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'PATHEXT',
+        'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'APPDATA', 'LOCALAPPDATA',
+        'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR',
+    }}
     if sys.platform == 'darwin': env['PATH'] = macos_runtime_path()
     # A file avoids pipe backpressure and retains EOF across timed wait polls.
     with tempfile.TemporaryFile() as input_file, open(stdout_path, 'wb') as stdout:
