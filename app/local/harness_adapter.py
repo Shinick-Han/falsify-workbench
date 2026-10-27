@@ -42,19 +42,21 @@ def run_stdio(argv, stdin, cwd, stdout_path):
     # This is not isolation: trusted code can access the user's filesystem/network.
     env = {k:v for k,v in os.environ.items() if k.upper() in {'PATH','SYSTEMROOT','WINDIR','TEMP','TMP','PATHEXT'}}
     if sys.platform == 'darwin': env['PATH'] = macos_runtime_path()
-    with open(stdout_path, 'wb') as stdout:
-        p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=stdout,
+    # A file avoids pipe backpressure and retains EOF across timed wait polls.
+    with tempfile.TemporaryFile() as input_file, open(stdout_path, 'wb') as stdout:
+        input_file.write(stdin)
+        input_file.seek(0)
+        p = subprocess.Popen(argv, stdin=input_file, stdout=stdout,
             stderr=subprocess.DEVNULL, cwd=cwd, env=env,
             **({'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {'start_new_session': True}))
         try:
             deadline = time.monotonic() + TIMEOUT_SECONDS
-            initial = True
             while True:
                 if time.monotonic() > deadline or os.path.getsize(stdout_path) > MAX_OUTPUT_BYTES: raise ValueError('adapter 실행 시간/출력 제한 초과')
                 try:
-                    p.communicate(input=stdin if initial else None, timeout=.1)
+                    p.wait(timeout=.1)
                     break
-                except subprocess.TimeoutExpired: initial = False
+                except subprocess.TimeoutExpired: pass
             if p.returncode == 124:
                 raise ValueError('adapter 응답 시간 초과. 출력/비밀정보는 기록하지 않았습니다. 자동으로 재시도하지 않습니다.')
             if p.returncode != 0: raise ValueError('adapter 종료 오류. 출력/비밀정보는 기록하지 않았습니다.')
