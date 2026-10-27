@@ -433,7 +433,7 @@
       inlineApply:need('paper-inline-apply'),inlineCancel:need('paper-inline-cancel'),
       coreNote:need('paper-core-note'),editStatus:need('paper-edit-status'),undo:need('paper-undo'),redo:need('paper-redo'),edits:need('paper-edits'),
       fontLocal:doc.querySelector('#paper-font-local'),fontAdd:doc.querySelector('#paper-font-add'),fontFiles:doc.querySelector('#paper-font-files'),fontStatus:doc.querySelector('#paper-font-status'),
-      exportNote:need('paper-export-note'),generate:need('paper-generate'),genStatus:need('paper-generate-status'),hash:need('paper-output-hash'),
+      exportNote:need('paper-export-note'),generate:need('paper-generate'),generateCancel:doc.querySelector('#paper-generate-cancel'),genStatus:need('paper-generate-status'),hash:need('paper-output-hash'),outputNotes:doc.querySelector('#paper-output-notes'),
       current:need('paper-current-download'),team:need('paper-team-share'),blue:need('paper-blue-handoff'),
       draftOpt:need('paper-draft-opt'),draftSource:need('paper-draft-source'),draftSave:need('paper-draft-save'),draftRestore:need('paper-draft-restore'),draftDelete:need('paper-draft-delete'),draftStatus:need('paper-draft-status'),
       proposals:need('paper-proposals'),proposalList:need('paper-proposal-list'),proposalStatus:need('paper-proposal-status')
@@ -610,6 +610,7 @@
       ui.coreNote.textContent=editsApi()?'':'편집 코어가 아직 없습니다. 쪽 보기와 원본 다운로드는 사용할 수 있지만 편집은 저장되지 않습니다.';
       ui.exportNote.textContent=!pdf&&source?'PDF가 아니라 브라우저에서 생성본을 만들지 않습니다.':exporterApi()?'':'브라우저 PDF 편집 모듈이 아직 없습니다. 생성본을 만들지 않으며, 성공으로 표시하지 않습니다.';
       ui.generate.disabled=generating||fontBusy||!exporterApi()||!pdf||(!enabledEdits().length&&!(directEditor&&inline&&directEditor.value!==inline.after));
+      if(ui.generateCancel)ui.generateCancel.hidden=!generating;
       ui.draftSave.disabled=!(ui.draftOpt.checked&&session&&ready);
       const hasDraft=!!draftRaw||readIndex().length>0;
       ui.draftRestore.hidden=!hasDraft;
@@ -620,6 +621,7 @@
       ui.team.disabled=blocked;
       ui.blue.disabled=blocked;
       ui.hash.textContent=output&&!output.blocked?'SHA-256 '+output.sha256:'';
+      if(ui.outputNotes)ui.outputNotes.textContent=output&&!output.blocked?diagnosticText(output.warnings,output.verification):'';
       ui.afterLabel.textContent=!output?'아직 생성본이 없습니다':stale()?'마지막 생성본 · 현재 편집과 다름':'현재 생성본';
       syncNav();
     }
@@ -1419,7 +1421,7 @@
       if(genCtl)genCtl.abort();
       const ctl=typeof AbortController==='function'?new AbortController():{abort(){},signal:undefined};
       genCtl=ctl;generating=true;renderChrome();
-      setGenStatus('생성 중입니다. 끝나기 전에 성공으로 표시하지 않습니다.');
+      setGenStatus('PDF를 만들고 있습니다.');
       try{
         const exportEdits=JSON.parse(JSON.stringify(edits));
         const recompose=useRecomposition()&&api===recompositionApi();
@@ -1489,7 +1491,8 @@
         output=candidate;afterPart=0;afterSourcePage=page;
         const noted=diagnosticText(output.warnings,output.verification);
         emit('falsify:paper-workspace-output',published({sha256:output.sha256,revision:output.revision,verification:scrub(output.verification,0)}));
-        setGenStatus(generationLead(output.verification,stale())+(noted?' '+noted:'')+tableNote);
+        if(recompose)setGenStatus(output.verification?.status==='finding'?'PDF를 만들었습니다. 내용 확인 항목은 파일 정보에서 볼 수 있습니다.':'PDF를 만들었습니다.');
+        else setGenStatus(generationLead(output.verification,stale())+(noted?' '+noted:'')+tableNote);
         renderEdits();
         await drawAfter();
       }catch(e){
@@ -1737,7 +1740,9 @@
     ui.original.addEventListener('click',()=>{if(source)download(source.file);});
     ui.current.addEventListener('click',()=>{if(output&&!output.blocked)download(output.file,true);});
     doc.querySelector('#paper-recompose')?.addEventListener('change',renderChrome);
+    doc.addEventListener('falsify:recomposition-ready',renderChrome);
     ui.generate.addEventListener('click',()=>{if(!ui.generate.disabled)void generate();});
+    ui.generateCancel?.addEventListener('click',()=>{if(!generating)return;abortGen();renderChrome();setGenStatus('생성을 취소했습니다.');});
     ui.fontLocal?.addEventListener('click',()=>{void importFonts(true);});
     ui.fontAdd?.addEventListener('click',()=>{ui.fontFiles?.click();});
     ui.fontFiles?.addEventListener('change',()=>{if(ui.fontFiles.files?.length)void importFonts(false);});

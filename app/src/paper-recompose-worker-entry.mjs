@@ -15,5 +15,9 @@ scope.onmessage = async ({data}) => {
 };
 }
 if (typeof WorkerGlobalScope !== 'undefined' && globalThis instanceof WorkerGlobalScope) {
-  installMessageHandler(globalThis, () => import('./paper-recompose-worker-core.mjs'));
+  installMessageHandler(globalThis, () => {
+    const url=new URL('./paper-recompose-worker-core.mjs',import.meta.url);
+    url.search=new URL(import.meta.url).search;
+    return import(url.href);
+  });
 }

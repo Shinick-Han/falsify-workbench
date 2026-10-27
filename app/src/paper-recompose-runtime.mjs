@@ -1,7 +1,11 @@
 // Each request owns its worker and its byte buffer.
 let nextId = 0;
 const aborted = () => new DOMException('Recomposition cancelled', 'AbortError');
-export function createRuntime({workerFactory = () => new Worker(new URL('./paper-recompose-worker.mjs', import.meta.url), {type:'module'})} = {}) {
+export function createRuntime({workerFactory = () => {
+  const url=new URL('./paper-recompose-worker.mjs',import.meta.url);
+  url.search=new URL(import.meta.url).search;
+  return new Worker(url,{type:'module'});
+}} = {}) {
   return {prepare(request = {}) {
     const signal=request.signal;
     if(signal?.aborted) return Promise.reject(aborted());

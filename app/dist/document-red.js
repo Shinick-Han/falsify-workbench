@@ -13,6 +13,7 @@
   const IMG=globalThis.FalsifyImageEditor?.mount?.({hold:imageHold})||null;
   const P=globalThis.FalsifyPendingJobs||null;let recovering=false,sourceFileRequired=false;
   function shippedHelper(){try{const nodes=document.scripts?[...document.scripts]:[];return nodes.some(s=>{const src=String(s&&(typeof s.getAttribute==='function'?s.getAttribute('src'):s.src)||'');return src==='pending-job.js'||src.endsWith('/pending-job.js');});}catch{return false;}}
+  function observedCalls(job){const n=job?.state==='completed'?job.result?.coverage?.calls:job?.progress?.completedCalls;return Number.isSafeInteger(n)&&n>=0?{observedCalls:n}:{};}
   function helperReady(){return !!(P&&typeof P.hold==='function'&&typeof P.note==='function'&&typeof P.read==='function'&&typeof P.matches==='function'&&typeof P.recover==='function');}
   function expectsHelper(){return !!(P||shippedHelper());}
   const hash=async bytes=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))).map(x=>x.toString(16).padStart(2,'0')).join('');
@@ -113,8 +114,8 @@
       const data=await l.request('/api/red/jobs/'+encodeURIComponent(job));if(current!==generation||!job)return;
       let matched=null;
       if(strict){const found=P.read('red');if(found.status!=='record'||found.record.requestId!==job||!P.matches(found.record,data))throw new Error('조회한 작업의 식별이 저장한 요청과 달라 적용하지 않았습니다.');matched=found.record;}
-      if(data.state==='completed'){applyResponse(data.result,'local-codex');if(strict){const found={status:'record',record:matched};if(found.status==='record')await P.note(found.record,{disposition:'completed',finishedAt:Date.now()});}break;}
-      if(['failed','cancelled'].includes(data.state)){if(strict){const found={status:'record',record:matched};if(found.status==='record'){const f=P.structuredFailure(data.failure),detail=P.safeFailure(data.error);await P.note(found.record,{disposition:data.state,finishedAt:Date.now(),...(detail?{serverFailure:detail}:{}),...(f?{adapterFailure:f}:{})});showPending({status:data.state,record:P.read('red').record});}}return;}
+      if(data.state==='completed'){applyResponse(data.result,'local-codex');if(strict){const found={status:'record',record:matched};if(found.status==='record')await P.note(found.record,{disposition:'completed',finishedAt:Date.now(),...observedCalls(data)});}break;}
+      if(['failed','cancelled'].includes(data.state)){if(strict){const found={status:'record',record:matched};if(found.status==='record'){const f=P.structuredFailure(data.failure),detail=P.safeFailure(data.error);await P.note(found.record,{disposition:data.state,finishedAt:Date.now(),...observedCalls(data),...(detail?{serverFailure:detail}:{}),...(f?{adapterFailure:f}:{})});showPending({status:data.state,record:P.read('red').record});}}return;}
       if(strict){const found={status:'record',record:matched};if(found.status==='record'&&found.record.disposition!=='running')await P.note(found.record,{disposition:'running'});}
       msg('Harness 검토 중 · '+(data.progress.completedCalls||0)+' / '+(data.progress.requiredCalls||'?')+'회 완료 · 사용자 harness 내부 호출량은 별도입니다.');
       await new Promise(resolve=>setTimeout(resolve,1500));
@@ -174,8 +175,8 @@
       if(current!==generation||doc!==existingDoc||response||candidates.length)return;
       if(!outcome||outcome.status==='absent')return;
       if(outcome.status==='still-running'){await resumeRed(outcome);return;}
-      if(outcome.status==='completed'){showRecoveredRed(outcome);await P.note(outcome.record,{disposition:'completed',finishedAt:Date.now()});return;}
-      if((outcome.status==='failed'||outcome.status==='cancelled')&&outcome.record){await P.note(outcome.record,{postReceipt:'accepted',disposition:outcome.status,finishedAt:Date.now(),...(outcome.error?{serverFailure:outcome.error}:{}),...(outcome.failure?{adapterFailure:outcome.failure}:{})});outcome.record=P.read('red').record;}
+      if(outcome.status==='completed'){showRecoveredRed(outcome);await P.note(outcome.record,{disposition:'completed',finishedAt:Date.now(),...observedCalls(outcome.job)});return;}
+      if((outcome.status==='failed'||outcome.status==='cancelled')&&outcome.record){await P.note(outcome.record,{postReceipt:'accepted',disposition:outcome.status,finishedAt:Date.now(),...observedCalls(outcome.job),...(outcome.error?{serverFailure:outcome.error}:{}),...(outcome.failure?{adapterFailure:outcome.failure}:{})});outcome.record=P.read('red').record;}
       showPending(outcome);
     }finally{recovering=false;}
   }

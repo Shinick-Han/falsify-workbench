@@ -4,6 +4,7 @@
   let generation=0,doc=null,result=null,findings=[],request=null,busy=false,job=null,jobLink=null,abort=null;
   const P=globalThis.FalsifyPendingJobs||null;let recovering=false;
   function shippedHelper(){try{const nodes=document.scripts?[...document.scripts]:[];return nodes.some(s=>{const src=String(s&&(typeof s.getAttribute==='function'?s.getAttribute('src'):s.src)||'');return src==='pending-job.js'||src.endsWith('/pending-job.js');});}catch{return false;}}
+  function observedCalls(job){const n=job?.state==='completed'?job.result?.coverage?.calls:job?.progress?.completedCalls;return Number.isSafeInteger(n)&&n>=0?{observedCalls:n}:{};}
   function helperReady(){return !!(P&&typeof P.hold==='function'&&typeof P.note==='function'&&typeof P.read==='function'&&typeof P.matches==='function'&&typeof P.recover==='function');}
   function expectsHelper(){return !!(P||shippedHelper());}
   // relation is operator-only metadata (RED handoff run ID); it never enters the BLUE request packet.
@@ -203,7 +204,7 @@
   }
   async function persistWatch(record,data){
     const kind=data.state==='failed'?'failed':'cancelled';
-    const patch={disposition:kind,finishedAt:Date.now()};
+    const patch={disposition:kind,finishedAt:Date.now(),...observedCalls(data)};
     if(kind==='failed'){const detail=P.safeFailure(data.error);if(detail)patch.serverFailure=detail;const f=P.structuredFailure(data.failure);if(f)patch.adapterFailure=f;}
     await P.note(record,patch);
   }
@@ -212,7 +213,7 @@
       const data=await l.request('/api/blue/jobs/'+encodeURIComponent(job));if(current!==generation||!job)return;
       let matched=null;
       if(strict){const found=P.read('blue');if(found.status!=='record'||found.record.requestId!==job||!P.matches(found.record,data))throw new Error('조회한 작업의 식별이 저장한 요청과 달라 적용하지 않았습니다.');matched=found.record;}
-      if(data.state==='completed'){clearSticky();apply(data.result,'local-codex');if(strict){const found={status:'record',record:matched};if(found.status==='record')await P.note(found.record,{disposition:'completed',finishedAt:Date.now()});}break;}
+      if(data.state==='completed'){clearSticky();apply(data.result,'local-codex');if(strict){const found={status:'record',record:matched};if(found.status==='record')await P.note(found.record,{disposition:'completed',finishedAt:Date.now(),...observedCalls(data)});}break;}
       if(data.state==='failed'||data.state==='cancelled'){
         if(!strict)throw new Error(typeof data.error==='string'?data.error.slice(0,300):'BLUE 취소됨');
         const found={status:'record',record:matched};if(found.status==='record')await persistWatch(found.record,data);
@@ -345,7 +346,7 @@
       if(!outcome||outcome.status==='absent')return;
       if(outcome.status==='server-restarted'){showUnknown(record,'저장된 요청 이후 로컬 서버가 재시작되어 현재 서버에서는 이전 접수를 확인할 수 없습니다.');return;}
       if(outcome.status==='still-running'){await resumeBlue(outcome);return;}
-      if(outcome.status==='completed'){showRecoveredBlue(outcome);await P.note(outcome.record,{disposition:'completed',finishedAt:Date.now()});return;}
+      if(outcome.status==='completed'){showRecoveredBlue(outcome);await P.note(outcome.record,{disposition:'completed',finishedAt:Date.now(),...observedCalls(outcome.job)});return;}
       if((outcome.status==='failed'||outcome.status==='cancelled')&&outcome.record){
         const patch={postReceipt:'accepted',disposition:outcome.status,finishedAt:Date.now()};
         if(outcome.status==='failed'){const detail=P.safeFailure(outcome.error);if(detail)patch.serverFailure=detail;if(outcome.failure)patch.adapterFailure=outcome.failure;}

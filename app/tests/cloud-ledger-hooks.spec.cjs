@@ -384,7 +384,7 @@ test('harness preview expires and restores the previous draft without touching a
   assert.equal((await fresh.lab.openArchive(harnessArchive)).hash,hash);
   fresh.document.visibilityState='hidden';
   fresh.document.dispatchEvent(new Event('visibilitychange'));
-  assert.equal(fresh.get('harness-editor').value,draft);
+  assert.equal(JSON.parse(fresh.get('harness-editor').value).id,'archive-blue','tab switching retains the transient preview until its TTL or an explicit close');
   assert.equal(fresh.writes.length,0);assert.equal(fresh.store.get(KEY),undefined);
   fresh.get('harness-editor').value=draft;
   assert.equal((await fresh.lab.openArchive(harnessArchive)).hash,hash);

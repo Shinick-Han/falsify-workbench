@@ -1183,6 +1183,19 @@ test('direct editing and chosen recomposition keep multiple page edits and exact
   v.get('paper-generate').click();await until(()=>v.ws.getOutput(),'recomposition output');assert.equal(calls.length,1);assert.equal(calls[0].revision,snap.revision);assert.equal(calls[0].file,original);assert.equal(calls[0].edits[0].after.length,1900);
   await until(()=>v.log.received.some(b=>b.equals(bytes)),'preview bytes');v.get('paper-current-download').click();assert.equal(v.downloads.at(-1),result);assert.deepEqual(Buffer.from(await v.downloads.at(-1).arrayBuffer()),bytes);assert.deepEqual(Buffer.from(await original.arrayBuffer()),pdfBytes('MARKER-A'));
 });
+test('generation cancel aborts the worker request and preserves the draft',async()=>{
+  let request;
+  const v=mount({edits:require('../dist/paper-edits.js'),paragraphPdf:paragraphMock('Original paragraph.'),recompositionPdf:{prepare:r=>{request=r;return new Promise((resolve,reject)=>r.signal.addEventListener('abort',()=>reject(Object.assign(Error('cancelled'),{name:'AbortError'})),{once:true}));}}});
+  v.get('paper-recompose').checked=true;v.file(pdfFile(pdfBytes('MARKER-A')));
+  await until(()=>/문단을 클릭/.test(v.get('paper-before-status').textContent),'source');
+  clickParagraph(v);const editor=v.document.activeElement;editor.value='Keep this draft';editor.dispatchEvent(new Event('input'));editor.dispatchEvent(new Event('blur'));
+  v.get('paper-generate').click();await until(()=>request,'worker request');assert.equal(v.get('paper-generate-cancel').hidden,false);
+  v.get('paper-generate-cancel').click();await settle();
+  assert.equal(request.signal.aborted,true);assert.equal(v.get('paper-generate-cancel').hidden,true);
+  assert.equal(v.ws.getEditSnapshot().edits[0].after,'Keep this draft');assert.equal(v.ws.getOutput(),null);
+  assert.match(v.get('paper-generate-status').textContent,/취소/);
+});
+
 test('recomposition discards late revision and preserves last real output after failure',async()=>{
   const bytes=pdfBytes('MARKER-GEN'),file=pdfFile(bytes);let release,calls=0;
   const v=mount({edits:require('../dist/paper-edits.js'),paragraphPdf:paragraphMock('Original paragraph.'),recompositionPdf:{prepare:req=>{calls++;if(calls===1)return Promise.resolve({file,sha256:sha(bytes),revision:req.revision});return new Promise(ok=>{release=()=>ok({file,sha256:sha(bytes),revision:req.revision});});}}});

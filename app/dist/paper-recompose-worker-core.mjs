@@ -1788,6 +1788,7 @@ async function composeDocument({ document, edits = [], flow, assets, links, sign
     document.blocks = document.blocks.flatMap((b) => groups.get(b.id) || [b]);
     for (const id2 of groups.keys()) ids.delete(id2);
   }
+  const balanceGroups = [];
   if (flow) {
     if (flow.schema !== "falsify.paper-flow.v1" || flow.sourceSha256 !== document.sourceSha256 || !Array.isArray(flow.items)) fail("Invalid paper flow");
     const owners = /* @__PURE__ */ new Set();
@@ -1833,6 +1834,7 @@ async function composeDocument({ document, edits = [], flow, assets, links, sign
   if (runningFurniture === true && flow) {
     const build = furniturePlanner || (await Promise.resolve().then(() => (init_paper_furniture(), paper_furniture_exports))).buildFurniturePlan;
     plan = build({ document: { ...plannerDocument, assets: plannerDocument.assets || [] }, flow, editedBlockIds: edits.map((e) => e.blockId) });
+    for (const id2 of plan.excludedBlockIds || []) projectedSpaces.get(id2)?.delete(0);
   }
   const suppressedLabels = new Set((linkPlan?.targets || []).filter((t) => t.label && (t.blockId && plan?.excludedBlockIds?.includes(t.blockId) || t.assetItemId && plan?.excludedItemIds?.includes(t.assetItemId))).map((t) => t.label));
   if (linkPlan) for (const label of suppressedLabels) linkPlan.diagnostics.push({ code: "target-furniture-unresolved", label });
@@ -1893,7 +1895,7 @@ async function composeDocument({ document, edits = [], flow, assets, links, sign
     const marker = mark ? spanMarker(block.id, block.source?.pageIndex, "start") : "";
     const endMarker = mark ? spanMarker(block.id, block.source?.pageIndex, "end") : "";
     const chars = block.source?.characters || [];
-    if (!linkPlan && (!chars.length || !styleById.size) && !fonts.fallback?.length && !(glyphsByBlock.get(block.id) || []).length) return marker + `#text(${typstString(text)})` + endMarker;
+    if (!linkPlan && (!chars.length || !styleById.size) && !fonts.fallback?.length && !(glyphsByBlock.get(block.id) || []).length && !(changes.get(block.id) || []).some((e) => e.after.includes("\n"))) return marker + `#text(${typstString(text)})` + endMarker;
     const raw = block.text, spaces = spacesFor(block);
     let logical = "", styles = [], glyphMap = [], destinations = [], offsets = [], before = [], after = [];
     const destinationAt = (offset) => {
@@ -1967,7 +1969,8 @@ async function composeDocument({ document, edits = [], flow, assets, links, sign
     for (let i = 0; i < result.length; ) {
       let j = i + (result.codePointAt(i) > 65535 ? 2 : 1);
       const family = familyAt(i), glyph = mappedGlyphs[i];
-      while (!glyph && j < result.length && !labels.has(j) && !mappedGlyphs[j] && mapped[j] === mapped[i] && familyAt(j) === family && key(mappedDest[j]) === key(mappedDest[i])) j += result.codePointAt(j) > 65535 ? 2 : 1;
+      const editLineBreak = result[i] === "\n" && mappedOffsets[i] === null;
+      while (!glyph && !editLineBreak && j < result.length && !(result[j] === "\n" && mappedOffsets[j] === null) && !labels.has(j) && !mappedGlyphs[j] && mapped[j] === mapped[i] && familyAt(j) === family && key(mappedDest[j]) === key(mappedDest[i])) j += result.codePointAt(j) > 65535 ? 2 : 1;
       let content;
       if (glyph) {
         const path = `source-glyphs/${glyph.pageIndex}-${glyph.start}.svg`;
@@ -1980,7 +1983,7 @@ async function composeDocument({ document, edits = [], flow, assets, links, sign
         const name = style?.fontName || "";
         if (/bold/i.test(name)) opts += 'weight: "bold", ';
         if (/italic|oblique/i.test(name)) opts += 'style: "italic", ';
-        content = `#text(${opts}${typstString(result.slice(i, j))})`;
+        content = editLineBreak ? `#text(${opts}${typstString(" ")})#linebreak()` : `#text(${opts}${typstString(result.slice(i, j))})`;
       }
       runs.push(emitLabels(i) + wrap(content, mappedDest[i]));
       i = j;
@@ -2088,14 +2091,16 @@ async function composeDocument({ document, edits = [], flow, assets, links, sign
   }
   if (flow) {
     if (flow.schema !== "falsify.paper-flow.v1" || flow.sourceSha256 !== document.sourceSha256 || !Array.isArray(flow.items)) fail("Invalid paper flow");
-    let group = [], columns = 0;
-    const flush = () => {
+    let group = [], groupItems = [], columns = 0;
+    const flush = (next) => {
       if (!group.length) return;
       source += columns === 2 ? `#columns(2)[
 ${group.join("\n\n")}
 ]
 ` : group.join("\n\n") + "\n";
+      if (columns === 2 && next?.kind === "asset" && next.span === "page") balanceGroups.push(groupItems);
       group = [];
+      groupItems = [];
     };
     const captionById = new Map(flow.items.filter((i) => i.kind === "caption").flatMap((i) => (i.blockIds || []).map((id2) => [id2, i]))), linkedCaptions = /* @__PURE__ */ new Set();
     for (const item of flow.items) if (item.kind === "asset") for (const id2 of item.captionIds || []) {
@@ -2106,7 +2111,7 @@ ${group.join("\n\n")}
       if (plan?.excludedItemIds.includes(item.id)) continue;
       const count = item.span === "page" ? 1 : item.columns === 2 ? 2 : 1;
       if (count !== columns) {
-        flush();
+        flush(item);
         columns = count;
       }
       let parts = [];
@@ -2130,8 +2135,9 @@ ${group.join("\n\n")}
         if (!item.inline) parts = parts.filter(Boolean);
       }
       if (parts.length) {
-        const rendered = item.inline ? parts.map((p, i) => p + (i < parts.length - 1 ? `#text(${typstString(item.joiners[i])})` : "")).join("") : parts.join("\n");
+        const rendered = item.inline ? parts.map((p, i) => p + (i < parts.length - 1 ? `#text(${typstString(item.joiners[i])})` : "")).join("") : parts.join(item.kind === "asset" ? "\n\n" : "\n");
         group.push(item.kind === "heading" ? `#block(sticky: true)[${rendered}]` : rendered);
+        groupItems.push({ kind: item.kind, inline: !!item.inline, ids: [...item.blockIds || []] });
       }
     }
     flush();
@@ -2140,8 +2146,34 @@ ${group.join("\n\n")}
 ${document.blocks.map((b) => renderBlock(b)).filter(Boolean).join("\n\n")}
 ]`;
   }
-  const compiled = await compile({ source, fonts, files, signal });
+  let compiled = await compile({ source, fonts, files, signal });
   abort4(signal);
+  if (Array.isArray(compiled?.blockSpans) && balanceGroups.length) {
+    const spans = new Map(compiled.blockSpans.map((s) => [s.id, s]));
+    let revised = source;
+    for (const items of balanceGroups) {
+      const all = items.flatMap((item) => item.ids.map((id2) => spans.get(id2)));
+      if (!all.length || all.some((s) => !s?.start || !s.end || !Number.isInteger(s.end.page))) continue;
+      const last = Math.max(...all.map((s) => s.end.page));
+      const onPage = all.filter((s) => s.start.page <= last && s.end.page >= last);
+      const starts = onPage.filter((s) => s.start.page === last);
+      const splitX = margins.left + (page.width - margins.left - margins.right) / 2;
+      if (starts.length < 3 || onPage.some((s) => s.start.page === last && s.start.x >= splitX || s.end.page === last && s.end.x >= splitX)) continue;
+      const bottom = Math.max(...onPage.filter((s) => s.end.page === last).map((s) => s.end.y));
+      if (!Number.isFinite(bottom) || bottom > margins.top + (page.height - margins.top - margins.bottom) * 0.7) continue;
+      const target = (margins.top + bottom) / 2;
+      const eligible = items.filter((item) => !item.inline && ["paragraph", "caption"].includes(item.kind) && item.ids.length === 1).map((item) => spans.get(item.ids[0])).filter((s) => s?.start?.page === last && s.start.y > margins.top + 25 && s.start.y < bottom - 25).sort((a, b) => Math.abs(a.start.y - target) - Math.abs(b.start.y - target));
+      const chosen = eligible[0];
+      if (!chosen) continue;
+      const marker = spanMarker(chosen.id, chosen.sourcePage, "start");
+      if (revised.includes(marker)) revised = revised.replace(marker, `#colbreak()${marker}`);
+    }
+    if (revised !== source) {
+      source = revised;
+      compiled = await compile({ source, fonts, files, signal });
+      abort4(signal);
+    }
+  }
   const returnedBytes = compiled instanceof Uint8Array ? compiled : compiled?.bytes;
   const bytes = returnedBytes instanceof Uint8Array ? new Uint8Array(returnedBytes) : returnedBytes;
   if (!(bytes instanceof Uint8Array) || new TextDecoder().decode(bytes.subarray(0, 5)) !== "%PDF-") fail("Compiler did not return PDF bytes");
@@ -2271,7 +2303,7 @@ async function checkRecomposition({ bytes, expectedBlocks, edits = {}, pdfjs, ex
       const page = await doc.getPage(n), viewport = page.getViewport({ scale: 1 });
       const content = await page.getTextContent();
       const parts = [];
-      let previous = null, ordinal = 0;
+      let previous = null, ordinal = 0, pendingQuoteSpace = null;
       const boundaries = [], itemScalars = [];
       const frame = viewport.transform;
       const frameSupported = viewport.rotation === 0 && Array.isArray(frame) && frame.length === 6 && frame.every(Number.isFinite) && frame[0] === 1 && frame[1] === 0 && frame[2] === 0 && frame[3] === -1 && Number.isFinite(viewport.width) && Number.isFinite(viewport.height) && viewport.width > 0 && viewport.height > 0;
@@ -2291,7 +2323,7 @@ async function checkRecomposition({ bytes, expectedBlocks, edits = {}, pdfjs, ex
           const templates = group.map((m) => expectedFurniture.filter((t) => t.sourcePage === m.sourcePage && t.kind === m.kind && t.occurrences?.some((o) => (o.blockId || o.itemId) === m.id)));
           if (templates.some((ts) => ts.length !== 1 || !["text", "counter"].includes(ts[0].entryKind))) continue;
           const expected2 = templates.map((ts) => ts[0].entryKind === "counter" ? `${n} / ${doc.numPages}` : ts[0].text);
-          if (expected2.some((t) => typeof t !== "string") || normalize(expected2.join(" ")) !== normalize(run.item.str)) continue;
+          if (expected2.some((t) => typeof t !== "string") || ![expected2.join(" "), expected2.join("")].some((text) => normalize(text) === normalize(run.item.str))) continue;
           if (group[0].kind === "header" ? run.top < 0 || run.bottom > bodyFrame.top : run.top < bodyFrame.bottom || run.bottom > viewport.height) continue;
           excluded.add(run.index);
           claimed.add(run.index);
@@ -2393,9 +2425,19 @@ async function checkRecomposition({ bytes, expectedBlocks, edits = {}, pdfjs, ex
           previous = null;
           continue;
         }
+        if (pendingQuoteSpace && item.str && !/^\s+$/u.test(item.str)) {
+          if (/^[”’]/u.test(item.str)) {
+            pendingQuoteSpace.rightPosition = position;
+            boundaries.push(pendingQuoteSpace);
+          }
+          pendingQuoteSpace = null;
+        }
+        if (item.str === " " && item.height === 0 && previous?.position && !previous.hasEOL && /^[”’]/u.test(content.items[itemIndex + 1]?.str || "")) {
+          pendingQuoteSpace = { part: parts.length, ordinal, leftPosition: previous.position };
+        }
         if (previous && item.str && !/\s$/u.test(previous.str) && !/^\s/u.test(item.str)) {
           if (previous.hasEOL) {
-            if (/\p{L}-$/u.test(previous.str) && /^\p{L}/u.test(item.str)) {
+            if (/[\p{L}\p{N}]-$/u.test(previous.str) && /^\p{L}/u.test(item.str) || /\p{N}–$/u.test(previous.str) && /^\p{N}/u.test(item.str) || /\S$/u.test(previous.str) && /^\[/u.test(item.str) || /\S*\/\S*[?=&]$/u.test(previous.str) && /^[\p{L}\p{N}]/u.test(item.str)) {
               boundaries.push({ part: parts.length, ordinal, leftPosition: previous.position, rightPosition: position });
             }
             parts.push(" ");
@@ -2429,14 +2471,15 @@ async function checkRecomposition({ bytes, expectedBlocks, edits = {}, pdfjs, ex
             }
           }
         }
-        const aligned = encoded.length === itemScalars.length && encoded.every((char, i) => char === itemScalars[i]);
+        const glyphKey = (char) => char === "\xB5" ? "\u03BC" : char;
+        const aligned = encoded.length === itemScalars.length && encoded.every((char, i) => glyphKey(char) === glyphKey(itemScalars[i]));
         for (const boundary of boundaries) {
           const left = mapped[boundary.ordinal - 1], right = mapped[boundary.ordinal];
           const near2 = (glyph, pos) => pos && glyph && Math.abs(glyph.origin[1] - pos.y) < Math.max(1, pos.height * 0.2) && glyph.origin[0] >= pos.x - 1 && glyph.origin[0] <= pos.x + pos.width + 1;
           if (aligned && left !== void 0 && right !== void 0 && left < right && near2(glyphs[left], boundary.leftPosition) && near2(glyphs[right], boundary.rightPosition)) {
             parts[boundary.part] = glyphs.slice(left + 1, right).some((g) => /\s/u.test(String.fromCodePoint(g.scalar))) ? " " : "";
           } else {
-            findings.push({ code: "ambiguous-text-geometry", pageIndex: n - 1, reason: "PDF.js may discard an encoded space after a line-final hyphen; glyph stream unavailable or misaligned." });
+            findings.push({ code: "ambiguous-text-geometry", pageIndex: n - 1, reason: "PDF.js may discard an encoded space at a line-final hyphen or citation boundary, or infer one before a closing quote; glyph stream unavailable or misaligned." });
           }
         }
       }
