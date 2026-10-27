@@ -29,7 +29,10 @@ jobs:
           npx playwright install chromium
       - name: Browser contracts
         working-directory: app
-        run: npm test
+        run: |
+          npm run build:fonts
+          node --test tests/browser-fonts.spec.mjs tests/bundled-fonts.spec.mjs tests/paragraph-fonts.spec.mjs tests/browser-pdf-fonts.spec.mjs
+          npm test
       - name: File intake and human verdict browser regression (synthetic only)
         run: |
           python -m http.server 7851 --bind 127.0.0.1 --directory app/dist > "$RUNNER_TEMP/falsify-ui.log" 2>&1 &

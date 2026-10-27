@@ -1,5 +1,72 @@
 // app/src/browser-pdf.mjs
 import * as mupdf from "./browser-pdf-vendor/mupdf.js";
+
+// app/src/browser-fonts.mjs
+var error = (message) => new Error(message);
+var key = (value) => String(value || "").replace(/^[A-Z]{6}\+/, "").toLowerCase().replace(/[\s_-]+/g, "");
+function parseFont(bytes) {
+  const bad = () => {
+    throw error("\uC62C\uBC14\uB978 TTF \uB610\uB294 OTF \uAE00\uAF34 \uD30C\uC77C\uC744 \uC120\uD0DD\uD574 \uC8FC\uC138\uC694.");
+  };
+  if (!(bytes instanceof Uint8Array) || bytes.length < 12) bad();
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const u16 = (o) => {
+    if (o < 0 || o + 2 > bytes.length) bad();
+    return view.getUint16(o);
+  };
+  const u32 = (o) => {
+    if (o < 0 || o + 4 > bytes.length) bad();
+    return view.getUint32(o);
+  };
+  const tag = (o) => String.fromCharCode(...bytes.subarray(o, o + 4));
+  const sig = u32(0);
+  if (sig === 1953784678) throw error("\uAE00\uAF34 \uCEEC\uB809\uC158(TTC/OTC)\uC740 \uC9C0\uC6D0\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. \uB2E8\uC77C TTF \uB610\uB294 OTF\uB97C \uC120\uD0DD\uD574 \uC8FC\uC138\uC694.");
+  if (sig !== 65536 && sig !== 1330926671 && sig !== 1953658213) bad();
+  const count2 = u16(4), tables = /* @__PURE__ */ new Map();
+  if (!count2 || 12 + count2 * 16 > bytes.length) bad();
+  for (let i = 0; i < count2; i++) {
+    const p = 12 + i * 16, name = tag(p), offset = u32(p + 8), length = u32(p + 12);
+    if (offset > bytes.length || length > bytes.length - offset || tables.has(name)) bad();
+    tables.set(name, { offset, length });
+  }
+  if (tables.has("fvar")) throw error("\uAC00\uBCC0 \uAE00\uAF34\uC740 \uC9C0\uC6D0\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. \uACE0\uC815 \uAD75\uAE30\uC758 TTF \uB610\uB294 OTF\uB97C \uC120\uD0DD\uD574 \uC8FC\uC138\uC694.");
+  const names = tables.get("name"), os2 = tables.get("OS/2"), head = tables.get("head");
+  if (!names || names.length < 6 || !os2 || os2.length < 64 || !head || head.length < 46) bad();
+  const n = names.offset, entries = u16(n + 2), strings = n + u16(n + 4), end = n + names.length;
+  if (n + 6 + entries * 12 > end || strings > end) bad();
+  const values = /* @__PURE__ */ new Map();
+  for (let i = 0; i < entries; i++) {
+    const p = n + 6 + i * 12, platform = u16(p), encoding = u16(p + 2), language = u16(p + 4), id = u16(p + 6), length = u16(p + 8), start = strings + u16(p + 10);
+    if (start > end || length > end - start) bad();
+    if (![1, 2, 6, 16, 17].includes(id)) continue;
+    let text;
+    if (platform === 0 || platform === 3) {
+      if (length % 2) bad();
+      text = "";
+      for (let j = 0; j < length; j += 2) text += String.fromCharCode(u16(start + j));
+    } else if (platform === 1 && encoding === 0) text = String.fromCharCode(...bytes.subarray(start, start + length));
+    else continue;
+    text = text.replace(/\0/g, "").trim();
+    const score = (platform === 3 ? 4 : platform === 0 ? 3 : 1) + (language === 1033 ? 2 : 0);
+    if (text && (!values.has(id) || values.get(id).score < score)) values.set(id, { text, score });
+  }
+  const get = (id) => values.get(id)?.text;
+  const family = get(16) || get(1), postscriptName = get(6);
+  if (!family) bad();
+  const weight = u16(os2.offset + 4), fsType = u16(os2.offset + 8), selection = u16(os2.offset + 62), macStyle = u16(head.offset + 44);
+  if (weight < 1 || weight > 1e3) bad();
+  if (fsType & 512 || fsType & 2 && !(fsType & 12)) throw error("\uC774 \uAE00\uAF34\uC740 \uC784\uBCA0\uB529 \uC81C\uD55C \uB610\uB294 \uBE44\uD2B8\uB9F5 \uC804\uC6A9 \uC81C\uD55C\uC774 \uC788\uC5B4 PDF\uC5D0 \uC0AC\uC6A9\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. \uB2E4\uB978 \uAE00\uAF34\uC744 \uC120\uD0DD\uD574 \uC8FC\uC138\uC694.");
+  return { family, ...postscriptName ? { postscriptName } : {}, weight, italic: Boolean(selection & 1 || macStyle & 2), fsType };
+}
+function familyKey(value) {
+  let name = String(value || "").replace(/^[A-Z]{6}\+/, "");
+  name = name.replace(/^(TimesNewRomanPS|Arial)-(BoldItalic|BoldOblique|Bold|Italic|Oblique)MT$/i, (_, family, variant) => `${/^arial$/i.test(family) ? "Arial" : "TimesNewRoman"}-${variant}`);
+  name = name.replace(/[-,](?:bolditalic|boldoblique|bold|italic|oblique|regular|roman)$/i, "");
+  const normalized2 = key(name);
+  return { timesnewromanpsmt: "timesnewroman", arialmt: "arial" }[normalized2] || normalized2;
+}
+
+// app/src/browser-pdf.mjs
 var ENGINE = Object.freeze({
   name: "mupdf.js",
   version: "1.28.1",
@@ -99,7 +166,9 @@ function checkAbort(signal) {
   if (signal?.aborted) throw aborted();
 }
 async function prepare(request) {
-  return exclusive(() => prepareExclusive(request || {}));
+  request ||= {};
+  const snapshot = captureFontSnapshot(request.fontSnapshot);
+  return exclusive(() => prepareExclusive({ ...request, fontSnapshot: snapshot }));
 }
 async function prepareExclusive(request) {
   checkAbort(request.signal);
@@ -228,9 +297,9 @@ async function prepareExclusive(request) {
       warnings
     };
     return { file, sha256: outputSha256, verification, pageMap, warnings };
-  } catch (error) {
-    if (error instanceof BrowserPdfError) throw error;
-    throw new BrowserPdfError("engine", "PDF \uD3B8\uC9D1 \uC911 \uC5D4\uC9C4 \uC624\uB958\uAC00 \uB0AC\uC2B5\uB2C8\uB2E4. \uCD9C\uB825 \uD30C\uC77C\uC740 \uB9CC\uB4E4\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.", { reason: error?.name || "Error" });
+  } catch (error2) {
+    if (error2 instanceof BrowserPdfError) throw error2;
+    throw new BrowserPdfError("engine", "PDF \uD3B8\uC9D1 \uC911 \uC5D4\uC9C4 \uC624\uB958\uAC00 \uB0AC\uC2B5\uB2C8\uB2E4. \uCD9C\uB825 \uD30C\uC77C\uC740 \uB9CC\uB4E4\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.", { reason: error2?.name || "Error" });
   } finally {
     try {
       doc?.destroy();
@@ -703,6 +772,15 @@ function horizontalLine(chars) {
   for (let i = 1; i < chars.length; i++) if (chars[i].pdf[0] + 0.4 < chars[i - 1].pdf[0]) return false;
   return true;
 }
+function captureFontSnapshot(snapshot) {
+  if (snapshot == null) return null;
+  if (!Array.isArray(snapshot.fonts) || !Number.isSafeInteger(snapshot.revision) || snapshot.revision < 0 || typeof snapshot.digest !== "string")
+    throw new BrowserPdfError("invalid", "Invalid font snapshot.");
+  return { ...snapshot, fonts: snapshot.fonts.map((face) => {
+    if (!face || !(face.bytes instanceof Uint8Array)) throw new BrowserPdfError("invalid", "Invalid font snapshot bytes.");
+    return { ...face, bytes: face.bytes.slice() };
+  }) };
+}
 async function validateFontSnapshot(snapshot) {
   if (snapshot == null) return null;
   if (!Array.isArray(snapshot.fonts) || !Number.isInteger(snapshot.revision) || typeof snapshot.digest !== "string")
@@ -714,9 +792,14 @@ async function validateFontSnapshot(snapshot) {
     const bytes = face.bytes.slice();
     if (await sha256(bytes) !== face.sha256.toLowerCase())
       throw new BrowserPdfError("invalid", "Font snapshot bytes do not match their SHA-256.");
-    const actualFsType = fontFsType(bytes);
-    if (!Number.isInteger(face.fsType) || face.fsType !== actualFsType || actualFsType & 514)
-      throw new BrowserPdfError("unsupported", "Font embedding is restricted or its license flags are missing.");
+    let parsed;
+    try {
+      parsed = parseFont(bytes);
+    } catch {
+      throw new BrowserPdfError("unsupported", "Font is invalid or embedding is restricted.");
+    }
+    if (typeof face.id !== "string" || !["local", "file", "bundled"].includes(face.source) || ["family", "postscriptName", "weight", "italic", "fsType"].some((field) => face[field] !== parsed[field]))
+      throw new BrowserPdfError("invalid", "Font snapshot metadata does not match its bytes.");
     faces.push({ ...face, bytes });
   }
   const metadata = snapshot.fonts.map(({ bytes, ...rest }) => rest);
@@ -724,26 +807,9 @@ async function validateFontSnapshot(snapshot) {
     throw new BrowserPdfError("invalid", "Font snapshot metadata digest does not match.");
   return faces;
 }
-function fontFsType(bytes) {
-  if (bytes.length < 12) return null;
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const signature = view.getUint32(0), count2 = view.getUint16(4);
-  if (![65536, 1330926671, 1953658213].includes(signature) || 12 + count2 * 16 > bytes.length) return null;
-  for (let i = 0; i < count2; i++) {
-    const pos = 12 + i * 16;
-    if (view.getUint32(pos) !== 1330851634) continue;
-    const offset = view.getUint32(pos + 8), length = view.getUint32(pos + 12);
-    if (length < 10 || offset > bytes.length || length > bytes.length - offset) return null;
-    return view.getUint16(offset + 8);
-  }
-  return null;
-}
-function fontKey(name) {
-  return String(name || "").replace(/^[A-Z]{6}\+/, "").toLowerCase().replace(/[\s_-]+/g, "");
-}
 function chooseSnapshotFont(faces, sourceName, sourceFont, text) {
-  const source = fontKey(sourceName);
-  const matches = (face) => source === fontKey(face.postscriptName) || source === fontKey(face.family) || source === fontKey(face.family) + (sourceFont.isBold() ? "bold" : "") + (sourceFont.isItalic() ? "italic" : "");
+  const source = familyKey(sourceName);
+  const matches = (face) => source && (source === familyKey(face.postscriptName) || source === familyKey(face.family));
   const ranked = faces.filter((face) => matches(face) || face.source === "bundled").sort((a, b) => (matches(a) ? 0 : 1e4) - (matches(b) ? 0 : 1e4) + (a.italic === sourceFont.isItalic() ? 0 : 1e3) - (b.italic === sourceFont.isItalic() ? 0 : 1e3) + Math.abs(a.weight - (sourceFont.isBold() ? 700 : 400)) - Math.abs(b.weight - (sourceFont.isBold() ? 700 : 400)));
   for (const face of ranked) {
     let font;
@@ -771,7 +837,7 @@ function ensureSnapshotFont(doc, page, plan) {
     resources.put("Font", dict);
   } else dict = dict.resolve();
   const taken = /* @__PURE__ */ new Set();
-  dict.forEach((_value, key) => taken.add(String(key)));
+  dict.forEach((_value, key2) => taken.add(String(key2)));
   let name = "FwEmbedded";
   while (taken.has(name)) name += "x";
   const pdfFont = doc.addFont(plan.supplied.font);
@@ -919,16 +985,16 @@ function ensureCjkFont(doc, page) {
     resources.put("Font", fontsDict);
   } else fontsDict = fontsDict.resolve();
   let existing = null;
-  fontsDict.forEach((value, key) => {
+  fontsDict.forEach((value, key2) => {
     if (existing) return;
     const item = value.resolve();
     const encoding = item.get("Encoding");
-    if (!encoding.isNull() && encoding.asName() === "UniKS-UTF16-H") existing = String(key);
+    if (!encoding.isNull() && encoding.asName() === "UniKS-UTF16-H") existing = String(key2);
   });
   if (existing) return existing;
   let name = "FwKorea";
   const taken = /* @__PURE__ */ new Set();
-  fontsDict.forEach((_value, key) => taken.add(String(key)));
+  fontsDict.forEach((_value, key2) => taken.add(String(key2)));
   while (taken.has(name)) name += "x";
   fontsDict.put(name, doc.addCJKFont(cjkFont(), "ko", 0, false));
   return name;
@@ -941,17 +1007,17 @@ function ensureFont(doc, page, baseName) {
     resources.put("Font", fontsDict);
   } else fontsDict = fontsDict.resolve();
   let existing = null;
-  fontsDict.forEach((value, key) => {
+  fontsDict.forEach((value, key2) => {
     if (existing) return;
     const item = value.resolve();
     const base = item.get("BaseFont");
     const encoding = item.get("Encoding");
-    if (!base.isNull() && base.asName() === baseName && !encoding.isNull() && encoding.asName() === "WinAnsiEncoding") existing = String(key);
+    if (!base.isNull() && base.asName() === baseName && !encoding.isNull() && encoding.asName() === "WinAnsiEncoding") existing = String(key2);
   });
   if (existing) return existing;
   let name = "Fw" + baseName.replace(/[^A-Za-z0-9]/g, "");
   const taken = /* @__PURE__ */ new Set();
-  fontsDict.forEach((_value, key) => taken.add(String(key)));
+  fontsDict.forEach((_value, key2) => taken.add(String(key2)));
   while (taken.has(name)) name += "x";
   fontsDict.put(name, doc.addObject({ Type: "Font", Subtype: "Type1", BaseFont: baseName, Encoding: "WinAnsiEncoding" }));
   return name;
@@ -962,7 +1028,7 @@ function ownResources(doc, page) {
   if (!own.isNull()) return own.resolve();
   const copy = doc.newDictionary();
   const inherited = obj.getInheritable("Resources");
-  if (!inherited.isNull()) inherited.resolve().forEach((value, key) => copy.put(key, value));
+  if (!inherited.isNull()) inherited.resolve().forEach((value, key2) => copy.put(key2, value));
   obj.put("Resources", copy);
   return copy;
 }
@@ -1045,9 +1111,9 @@ function num(value) {
 }
 function sameImages(a, b) {
   if (a.length !== b.length) return false;
-  const key = (box) => box.map((value) => Math.round(value * 10) / 10).join(",");
-  const left = a.map(key).sort();
-  const right = b.map(key).sort();
+  const key2 = (box) => box.map((value) => Math.round(value * 10) / 10).join(",");
+  const left = a.map(key2).sort();
+  const right = b.map(key2).sort();
   return left.every((value, index) => value === right[index]);
 }
 function editedName(name) {

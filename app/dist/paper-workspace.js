@@ -439,6 +439,7 @@
     const legacyExporterApi=()=>deps.exporter||globalThis.FalsifyBrowserPdf||null;
     const pipelineApi=()=>deps.pipeline||globalThis.FalsifyPdfEditPipeline||null;
     const tableEdit=e=>String(e.segmentId||'').startsWith('table:');
+    const fullFontEmbedding=fonts=>fonts?.fonts?.some(f=>(f.fsType&0x100)!==0);
     function bodyExporter(edits){
       const flow=paragraphApi();
       if(fontsApi()&&flow)return flow;
@@ -1343,11 +1344,12 @@
         if(built.error)throw new Error(built.error);
         isolated.add({pageIndex:item.pageIndex,segmentId:item.segmentId,before:item.before,after:item.after,anchor:built.anchor,origin:'external-ai-import'});
       }
-      const batch=isolated.snapshot(), edits=batch.edits.filter(e=>e.enabled!==false), api=bodyExporter(edits);
+      const batch=isolated.snapshot(), edits=batch.edits.filter(e=>e.enabled!==false);let api=bodyExporter(edits);
       if(!api?.prepare)throw new Error('브라우저 PDF 편집 모듈이 없습니다.');
       const mine=++genId,ctl=new AbortController();genCtl=ctl;generating=true;renderChrome();
       try{
         const fontSnapshot=await resolveFonts(edits,ctl.signal);
+        if(fullFontEmbedding(fontSnapshot)&&legacyExporterApi()?.prepare)api=legacyExporterApi();
         const prepared=await benchmarkSource({file,fileHash,edits:clone(edits),fontSnapshot,signal:ctl.signal});
         if(!live()||mine!==genId||ctl.signal.aborted)throw new Error('원본 또는 편집이 바뀌어 생성을 취소했습니다.');
         const result=bindBenchmarkResult(await api.prepare(prepared.request),prepared,fileHash);
@@ -1360,7 +1362,7 @@
       }finally{if(genCtl===ctl)genCtl=null;if(mine===genId&&epoch===epochAt){generating=false;renderChrome();}}
     }
     async function generate(){
-      const api=exporterApi();
+      let api=exporterApi();
       if(!api||typeof api.prepare!=='function'){setGenStatus('브라우저 PDF 편집 모듈이 없어 생성하지 않았습니다. 원본 다운로드는 사용할 수 있습니다.',true);return;}
       if(!source||!source.pdf||!source.fileHash){setGenStatus('PDF 원본이 없어 생성하지 않았습니다.',true);return;}
       const edits=enabledEdits();
@@ -1375,17 +1377,18 @@
         const mixed=exportEdits.some(tableEdit)&&exportEdits.some(e=>!tableEdit(e));
         if(!mixed)for(const edit of exportEdits)if(tableEdit(edit)&&edit.anchor)delete edit.anchor.occurrence;
         const fontSnapshot=await resolveFonts(exportEdits,ctl.signal);
+        if(!mixed&&fullFontEmbedding(fontSnapshot)&&legacyExporterApi()?.prepare)api=legacyExporterApi();
         const prepared=await benchmarkSource({file,fileHash:hash,edits:exportEdits,fontSnapshot,signal:ctl.signal}),request=prepared.request;
         if(mine!==genId||epoch!==epochAt||ctl.signal.aborted)return;
         let result;
         try{
           if(mixed){
-            const bodyApi=bodyExporter(edits.filter(e=>!tableEdit(e)));
+            const bodyApi=fullFontEmbedding(fontSnapshot)&&legacyExporterApi()?.prepare?legacyExporterApi():bodyExporter(edits.filter(e=>!tableEdit(e)));
             const bodyAdapter={prepare:async bodyRequest=>{
               try{return await bodyApi.prepare(bodyRequest);}
               catch(e){
                 const rows=Array.isArray(bodyRequest.edits)?bodyRequest.edits:bodyRequest.edits?.edits,failures=e?.details?.edits;
-                const canFlow=bodyApi===legacyExporterApi()&&paragraphApi()&&Array.isArray(rows)&&!rows.some(tableEdit)&&e.code==='unsupported'&&Array.isArray(failures)&&failures.length&&failures.every(f=>f.code==='long-after-no-room');
+                const canFlow=!fullFontEmbedding(fontSnapshot)&&bodyApi===legacyExporterApi()&&paragraphApi()&&Array.isArray(rows)&&!rows.some(tableEdit)&&e.code==='unsupported'&&Array.isArray(failures)&&failures.length&&failures.every(f=>f.code==='long-after-no-room');
                 if(!canFlow||ctl.signal?.aborted||mine!==genId||epoch!==epochAt||!source||source.fileHash!==hash||snapshot?.revision!==revision)throw e;
                 setGenStatus('표 편집을 유지한 파일에서 본문만 문단 흐름으로 생성하는 중입니다.');
                 return paragraphApi().prepare(bodyRequest);
@@ -1396,7 +1399,7 @@
         }
         catch(e){
           const failures=e&&e.details&&e.details.edits;
-          const canFlow=!edits.some(e=>String(e.segmentId||'').startsWith('table:'))&&api===legacyExporterApi()&&paragraphApi()&&e.code==='unsupported'&&Array.isArray(failures)&&failures.length&&failures.every(f=>f.code==='long-after-no-room');
+          const canFlow=!fullFontEmbedding(request.fontSnapshot)&&!edits.some(e=>String(e.segmentId||'').startsWith('table:'))&&api===legacyExporterApi()&&paragraphApi()&&e.code==='unsupported'&&Array.isArray(failures)&&failures.length&&failures.every(f=>f.code==='long-after-no-room');
           if(!canFlow||ctl.signal?.aborted||mine!==genId||epoch!==epochAt||!source||source.fileHash!==hash||snapshot?.revision!==revision)throw e;
           setGenStatus('선택 편집이 원래 공간에 들어가지 않아 전체 편집을 문단 흐름으로 생성하는 중입니다.');
           result=await paragraphApi().prepare({...request,edits:JSON.parse(JSON.stringify(edits))});

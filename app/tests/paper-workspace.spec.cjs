@@ -1129,6 +1129,17 @@ test('paragraph preparation is reused for the same original page and reset for a
   assert.equal(v.ws.getEditSnapshot().edits.length,0);
 });
 
+test('a font requiring complete embedding uses the full-font writer',async()=>{
+  let paragraphCalls=0;const selected=[],bytes=pdfBytes('FULL-FONT');
+  const fonts={revision:0,list:()=>[],resolve:async()=>({revision:0,digest:'full-font',fonts:[{fsType:256,bytes:new Uint8Array([1])}]})};
+  const adapter=paragraphMock('Original paragraph.',{prepare:async()=>{paragraphCalls++;throw new Error('wrong writer');}});
+  const v=mount({fonts,paragraphPdf:adapter,exporter:{prepare:async r=>{selected.push(r);return {file:pdfFile(bytes),sha256:sha(bytes),verification:{status:'applied'}};}}});
+  v.file(pdfFile(pdfBytes('MARKER-A')));await until(()=>/문단을 클릭/.test(v.get('paper-before-status').textContent),'full-font source');
+  clickParagraph(v);v.get('paper-inline-after').value='Edited paragraph.';v.get('paper-inline-apply').click();
+  v.get('paper-generate').click();await until(()=>v.ws.getOutput()&&!v.get('paper-generate').disabled,'full-font output');
+  assert.equal(paragraphCalls,0);assert.equal(selected.length,1);assert.equal(selected[0].fontSnapshot.fonts[0].fsType,256);
+});
+
 test('font buttons pass a frozen font snapshot to PDF generation and mark the previous file stale',async()=>{
   let revision=0,localCalls=0;const requests=[],bytes=pdfBytes('FONT-GENERATED');
   const fonts={get revision(){return revision;},list:()=>[{family:'Example',source:'local'}],requestLocalFonts:async()=>{localCalls++;revision++;},resolve:async requirements=>{assert.ok(requirements.length);return {revision,digest:'fonts-'+revision,fonts:[{id:'private-font',bytes:new Uint8Array([4,5,6])}]};}};

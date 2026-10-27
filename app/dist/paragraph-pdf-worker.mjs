@@ -4049,7 +4049,12 @@ var PdfEngine = class _PdfEngine {
         const want = [];
         for (let i = 0; i < n; i++) want.push(M.HEAPU32[(cps >> 2) + i]);
         if (this.fontSnapshot) {
-          const key2 = (s) => String(s || "").replace(/^[A-Z]{6}\+/, "").toLowerCase().replace(/[\s_-]+/g, "");
+          const key2 = (s) => {
+            let name = String(s || "").replace(/^[A-Z]{6}\+/, "");
+            name = name.replace(/^(TimesNewRomanPS|Arial)-(BoldItalic|BoldOblique|Bold|Italic|Oblique)MT$/i, (_, family, variant) => `${/^arial$/i.test(family) ? "Arial" : "TimesNewRoman"}-${variant}`);
+            name = name.replace(/[-,](?:bolditalic|boldoblique|bold|italic|oblique|regular|roman)$/i, "").toLowerCase().replace(/[\s_-]+/g, "");
+            return { timesnewromanpsmt: "timesnewroman", arialmt: "arial" }[name] || name;
+          };
           const target = key2(fam);
           const faces = this.fontSnapshot.fonts;
           const matches = (f) => target && (key2(f.family) === target || key2(f.postscriptName) === target);
@@ -8083,6 +8088,7 @@ function captureFonts(snapshot) {
     } catch {
       invalid();
     }
+    if (parsed.fsType & 256) throw new ParagraphPdfError("unsupported-font-license", "Paragraph editing cannot guarantee full embedding for this font.");
     for (const field of ["family", "postscriptName", "weight", "italic", "fsType"]) {
       if (face[field] !== parsed[field]) invalid();
     }
