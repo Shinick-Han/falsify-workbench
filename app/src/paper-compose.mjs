@@ -1,3 +1,4 @@
+import {readSourceGlyphs} from './paper-source-glyphs.mjs';
 import {inspectFonts} from './paper-fonts.mjs';
 const abort = signal => { if (signal?.aborted) throw new DOMException('Composition cancelled', 'AbortError'); };
 const fail = message => { throw new Error(message); };
@@ -24,7 +25,7 @@ function lineBoundaries(block) {
   if (lines.length && prev!==range.end) fail('Incomplete line ranges');
   return bounds;
 }
-function logicalText(block, changes) {
+function logicalText(block, changes, omitted = new Set()) {
   const raw=block.text, bounds=new Set(lineBoundaries(block));
   let logical=''; const before=[], after=[];
   // Map each source offset to both sides of any inserted line separator.
@@ -32,7 +33,7 @@ function logicalText(block, changes) {
     before[i]=logical.length;
     if (bounds.has(i) && i>0 && i<raw.length && !/\s/u.test(raw[i-1]) && !/\s/u.test(raw[i]) && raw[i-1]!=='-' && !(raw[i-1]==='−' && /[0-9]/u.test(raw[i]))) logical+=' ';
     after[i]=logical.length;
-    if (i<raw.length) logical+=raw[i];
+    if (i<raw.length && !omitted.has(i)) logical+=raw[i];
   }
   let out='', cursor=0;
   for (const edit of [...changes].sort((a,b)=>a.start-b.start)) {
@@ -114,7 +115,11 @@ export async function composeDocument({document, edits=[], flow, assets, signal,
   const orderedById=new Map(document.blocks.map(b=>[b.id,b]));
   const linked=new Set((flow?.items||[]).filter(i=>i.kind==='asset').flatMap(i=>i.captionIds||[]));
   const orderedBlocks=flow ? flow.items.flatMap(i=>i.kind==='asset' ? (i.captionIds||[]).map(id=>orderedById.get(id)) : (i.blockIds||[]).filter(id=>!linked.has(id)).map(id=>orderedById.get(id))) : document.blocks;
-  let expectedBlocks=orderedBlocks.filter(b=>typeof b?.text==='string' && b.text.length).map(b=>({id:b.id,text:logicalText(b,changes.get(b.id)||[])}));
+  const sourceGlyphResult=readSourceGlyphs({bytes:sourceBytes,document:{...document,blocks:document.blocks.filter(b=>!assetOwned.has(b.id))},changes});
+  const glyphsByBlock=new Map();
+  for(const glyph of sourceGlyphResult.glyphs) {const list=glyphsByBlock.get(glyph.blockId)||[]; list.push(glyph); glyphsByBlock.set(glyph.blockId,list);}
+  const omittedFor=b=>new Set((glyphsByBlock.get(b.id)||[]).flatMap(g=>Array.from({length:g.end-g.start},(_,i)=>g.start-b.source.range.start+i)));
+  let expectedBlocks=orderedBlocks.filter(b=>typeof b?.text==='string' && b.text.length).map(b=>({id:b.id,text:logicalText(b,changes.get(b.id)||[],omittedFor(b))}));
   if(flow) for(const item of flow.items.filter(i=>i.inline)) {
     if(!Array.isArray(item.joiners) || item.joiners.length!==(item.blockIds||[]).length-1 || item.joiners.some(j=>typeof j!=='string')) fail('Invalid inline joiners');
     const indexes=item.blockIds.map(id=>expectedBlocks.findIndex(b=>b.id===id));
@@ -148,29 +153,30 @@ export async function composeDocument({document, edits=[], flow, assets, signal,
     const marker=`#context [#let p = here().position(); #metadata((id: ${typstString(block.id)}, page: p.page, x: p.x / 1pt, y: p.y / 1pt)) <paper-block>]`;
 
     const chars=block.source?.characters || [];
-    if ((!chars.length || !styleById.size) && !fonts.fallback?.length) return marker+`#text(${typstString(text)})`;
+    if ((!chars.length || !styleById.size) && !fonts.fallback?.length && !(glyphsByBlock.get(block.id)||[]).length) return marker+`#text(${typstString(text)})`;
     // Build source-indexed styles, then apply the same line separators and edits.
     const raw=block.text, bounds=new Set(lineBoundaries(block));
-    let logical='', styles=[], before=[], after=[];
+    let logical='', styles=[], glyphMap=[], before=[], after=[];
+    const sourceGlyphs=new Map((glyphsByBlock.get(block.id)||[]).map(g=>[g.start-block.source.range.start,g]));
     const styleAt=i=>chars.find(c=>c.start<=i+block.source.range.start && c.end>i+block.source.range.start)?.styleId || block.styleId;
     for(let i=0;i<=raw.length;i++) {
       before[i]=logical.length;
-      if(bounds.has(i) && i>0 && i<raw.length && !/\s/u.test(raw[i-1]) && !/\s/u.test(raw[i]) && raw[i-1]!=='-' && !(raw[i-1]==='−' && /[0-9]/u.test(raw[i]))) {logical+=' ';styles.push(styleAt(i-1));}
+      if(bounds.has(i) && i>0 && i<raw.length && !/\s/u.test(raw[i-1]) && !/\s/u.test(raw[i]) && raw[i-1]!=='-' && !(raw[i-1]==='−' && /[0-9]/u.test(raw[i]))) {logical+=' ';styles.push(styleAt(i-1));glyphMap.push(null);}
       after[i]=logical.length;
-      if(i<raw.length) {logical+=raw[i];styles.push(styleAt(i));}
+      if(i<raw.length) {logical+=raw[i];styles.push(styleAt(i));glyphMap.push(sourceGlyphs.get(i)||null);}
     }
-    let result='', mapped=[], cursor=0;
+    let result='', mapped=[], mappedGlyphs=[], cursor=0;
     for(const edit of [...(changes.get(block.id)||[])].sort((a,b)=>a.start-b.start)) {
       const a=after[edit.start], b=before[edit.end]; result+=logical.slice(cursor,a)+edit.after;
-      for(let i=cursor;i<a;i++) mapped.push(styles[i]);
+      for(let i=cursor;i<a;i++) {mapped.push(styles[i]);mappedGlyphs.push(glyphMap[i]);}
       const editStyle=styleAt(edit.start);
-      for(let i=0;i<edit.after.length;i++) mapped.push(editStyle);
+      for(let i=0;i<edit.after.length;i++) {mapped.push(editStyle);mappedGlyphs.push(null);}
       cursor=b;
     }
-    result+=logical.slice(cursor); for(let i=cursor;i<styles.length;i++) mapped.push(styles[i]);
+    result+=logical.slice(cursor); for(let i=cursor;i<styles.length;i++) {mapped.push(styles[i]);mappedGlyphs.push(glyphMap[i]);}
     const familyAt=i=>fonts.fallback?.find(entry=>entry.codepoint===result.codePointAt(i) && entry.kind==='glyph')?.family || null;
-    const runs=[]; for(let i=0;i<result.length;) {let j=i+(result.codePointAt(i)>0xffff?2:1); const family=familyAt(i); while(j<result.length && mapped[j]===mapped[i] && familyAt(j)===family) j+=result.codePointAt(j)>0xffff?2:1; runs.push([result.slice(i,j),styleById.get(mapped[i]),family]); i=j;}
-    return marker+runs.map(([value,style,family])=>{const size=style?.size; let opts=Number.isFinite(size)&&size>0 ? `size: ${size}pt, ` : ''; if(family) opts+=`font: ${typstString(family)}, `; const name=style?.fontName || ''; if(/bold/i.test(name)) opts+='weight: "bold", '; if(/italic|oblique/i.test(name)) opts+='style: "italic", '; return `#text(${opts}${typstString(value)})`;}).join('');
+    const runs=[]; for(let i=0;i<result.length;) {if(mappedGlyphs[i]) {runs.push([null,null,null,mappedGlyphs[i]]);i++;continue;} let j=i+(result.codePointAt(i)>0xffff?2:1); const family=familyAt(i); while(j<result.length && !mappedGlyphs[j] && mapped[j]===mapped[i] && familyAt(j)===family) j+=result.codePointAt(j)>0xffff?2:1; runs.push([result.slice(i,j),styleById.get(mapped[i]),family]); i=j;}
+    return marker+runs.map(([value,style,family,glyph])=>{if(glyph) {const path=`source-glyphs/${glyph.pageIndex}-${glyph.start}.svg`;files[path]=new Uint8Array(glyph.bytes);return `#box(width: ${glyph.advance}pt, height: ${glyph.height}pt, baseline: ${glyph.baselineShift}pt)[#move(dx: ${glyph.offsetX}pt)[#image(${typstString(path)}, width: ${glyph.width}pt)]]`;} const size=style?.size; let opts=Number.isFinite(size)&&size>0 ? `size: ${size}pt, ` : ''; if(family) opts+=`font: ${typstString(family)}, `; const name=style?.fontName || ''; if(/bold/i.test(name)) opts+='weight: "bold", '; if(/italic|oblique/i.test(name)) opts+='style: "italic", '; return `#text(${opts}${typstString(value)})`;}).join('');
   }
   function renderAsset(id, item) {
     const asset=assetList.find(a=>a.id===id); const original=(document.assets||[]).find(a=>a.id===id);
@@ -229,6 +235,8 @@ export async function composeDocument({document, edits=[], flow, assets, signal,
   if (!(bytes instanceof Uint8Array) || new TextDecoder().decode(bytes.subarray(0,5))!=='%PDF-') fail('Compiler did not return PDF bytes');
   const sha256=await hash(bytes); abort(signal);
   const warnings=['Content, layout and asset preservation have not been independently verified.'];
+  if(sourceGlyphResult.glyphs.length) warnings.push('Source glyph artwork has unknown Unicode and is excluded from searchable-text expectations.');
+  if(sourceGlyphResult.unavailable.length) warnings.push('Source glyph artwork unavailable for '+sourceGlyphResult.unavailable.length+' character(s).');
   if(compiled?.queryError) warnings.push(`Output location query failed: ${compiled.queryError}`);
   if(document.assets?.some(a=>!placedAssets.has(a.id)) || document.blocks.some(b=>(b.assetIds?.length || b.kind==='figure' || b.kind==='table' || b.kind==='formula') && !(b.assetIds?.length && b.assetIds.every(id=>placedAssets.has(id))))) warnings.push('Source assets and non-text figure, table or formula content are not placed by this candidate, including image blocks without source ranges.');
   if(assetFindings.length) warnings.push('Source asset findings: '+assetFindings.map(f=>`${f.code} (${f.assetId || f.assetIds.join(', ')})`).join('; '));
@@ -243,6 +251,6 @@ export async function composeDocument({document, edits=[], flow, assets, signal,
     warnings.push('Ambiguous source line boundaries use a spacing convention; content verification is unavailable.');
   }
   if (outputTextCheck==='finding') warnings.push('Output text check found content loss or mismatch.');
-  const verification={status:outputTextCheck==='finding' || assetFindings.length?'finding':'warning', sourceSha256:document.sourceSha256, contentVerified:outputTextCheck==='pass' && !ambiguous.length && !assetOwned.size && !assetFindings.length, layoutVerified:false, coverage, outputTextCheck, checkReport, artworkBlocks, assetFindings, ambiguousBoundaries:ambiguous, edits:edits.map(e=>({blockId:e.blockId,start:e.start,end:e.end,status:'bound'}))};
+  const verification={status:outputTextCheck==='finding' || assetFindings.length?'finding':'warning', sourceSha256:document.sourceSha256, contentVerified:outputTextCheck==='pass' && !ambiguous.length && !assetOwned.size && !assetFindings.length && !sourceGlyphResult.glyphs.length && !sourceGlyphResult.unavailable.length, sourceGlyphs:sourceGlyphResult, layoutVerified:false, coverage, outputTextCheck, checkReport, artworkBlocks, assetFindings, ambiguousBoundaries:ambiguous, edits:edits.map(e=>({blockId:e.blockId,start:e.start,end:e.end,status:'bound'}))};
   return {file:new File([bytes],'recomposed.pdf',{type:'application/pdf'}),sha256,verification,pageMap:null,blockMap:compiled?.blockMap ?? null,warnings};
 }
