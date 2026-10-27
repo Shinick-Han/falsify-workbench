@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0-alpha.22
+
+- PDF direct editing, whole-paper recomposition, transparent figure replacement.
+- Explicit failure recovery, stable local harness binding and Confluence attempt records.
+- [Release notes](docs/release-alpha22.md)
+
 ## 0.2.0-alpha.18
 
 - RED 선택 후보를 버튼 한 번으로 PDF에 적용하고 바로 다운로드합니다.

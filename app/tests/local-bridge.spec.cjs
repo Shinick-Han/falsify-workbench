@@ -35,6 +35,16 @@ test('wrapper capability requires an explicit authenticated boolean',async()=>{f
 
 test('POST requests keep JSON body, bearer token and no manual Origin/cookies',async()=>{const h=hosted();h.queue.push(reply(CAP),reply({id:'r1',state:'running'},202));await h.bridge.pair(TOKEN,'7816');const out=await h.bridge.session().request('/api/red/jobs',{requestId:'r1'});assert.equal(out.id,'r1');
   const c=h.calls[1];assert.equal(c.url,'http://127.0.0.1:7816/api/red/jobs');assert.equal(c.init.method,'POST');assert.equal(c.init.body,'{"requestId":"r1"}');assert.deepEqual(Object.keys(c.init.headers).sort(),['Authorization','Content-Type']);assert.equal(c.init.credentials,'omit');assert.equal(c.init.redirect,'error');});
+
+test('local harness preparation uses the authenticated fixed route and explicit capability',async()=>{
+  const h=hosted(),request={schema:'falsify.harness-deployment-request.v1',family:'evidence-blue-v035'};
+  h.queue.push(reply({...CAP,harnessDeployment:true}),reply({schema:'falsify.harness-deployment.v1',sourceDigest:'a'.repeat(64),profile:{}}));
+  await h.bridge.pair(TOKEN,'7816');assert.equal(h.bridge.capabilities().harnessDeployment,true);
+  await h.bridge.session().request('/api/harness/deploy',request);
+  assert.equal(h.calls[1].init.body,JSON.stringify(request));assert.equal(h.calls[1].init.method,'POST');
+  assert.equal(h.calls[1].url,'http://127.0.0.1:7816/api/harness/deploy');
+  for(const value of [undefined,'true',1,false]){const older=hosted();older.queue.push(reply({...CAP,harnessDeployment:value}));await older.bridge.pair(TOKEN,'7816');assert.equal(older.bridge.capabilities().harnessDeployment,false);}
+});
 test('empty and malformed tokens never touch the network',async()=>{for(const t of ['','   ',null,undefined,'short','has space inside token value','tok\nen'+'x'.repeat(20),'<script>alert(1)</script>xxxxxxxx','x'.repeat(513),{toString:()=>TOKEN}]){const h=hosted();const r=await h.bridge.pair(t,'7816');assert.equal(r.ok,false,String(t));assert.equal(h.calls.length,0);assert.equal(h.bridge.state().status,'manual');}});
 test('port input is strict and cannot change host or scheme',async()=>{
   for(const bad of ['7816/evil','127.0.0.1:7816','http://evil.example','evil.example','80','1023','65536','99999','07816','7816.0','1e4','0x1E90','-7816','+7816','７８１６','7816#','7816?x','@evil.example','7816 7817']){assert.equal(L.parsePort(bad),null,bad);const h=hosted();const r=await h.bridge.pair(TOKEN,bad);assert.equal(r.ok,false,bad);assert.equal(h.calls.length,0,bad);}

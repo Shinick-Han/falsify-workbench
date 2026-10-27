@@ -247,7 +247,7 @@ let htmlWrites=0;
 function element(id){
   const e=new EventTarget();
   Object.assign(e,{id,disabled:false,hidden:false,checked:false,value:'',textContent:'',children:[],files:[],className:'',
-    classList:{toggle(){}},replaceChildren(){},append(){},after(){},remove(){},click(){this.dispatchEvent(new Event('click'));},
+    classList:{toggle(){}},replaceChildren(){this.children=[];},append(...nodes){this.children.push(...nodes);},after(){},remove(){},click(){this.dispatchEvent(new Event('click'));},
     getClientRects:()=>[],addEventListener(t,f){EventTarget.prototype.addEventListener.call(this,t,f);}});
   Object.defineProperty(e,'innerHTML',{set(){htmlWrites++;},get(){return e.textContent||'';}});
   return e;
@@ -256,18 +256,18 @@ function vmStorage(){const m=new Map();return {getItem:k=>m.has(k)?m.get(k):null
 async function redPage(storage,hooks,options={}){
   const els=new Map(),get=id=>{if(!els.has(id))els.set(id,element(id));return els.get(id);};
   const document=new EventTarget();
-  Object.assign(document,{querySelector:s=>s.startsWith('#')?(s==='#red-receipt-check'||s==='#red-pending-discard'?els.get(s.slice(1))||null:get(s.slice(1))):null,querySelectorAll:()=>[],createElement:tag=>{const e=element(tag);Object.defineProperty(e,'id',{get(){return this._id;},set(v){this._id=v;els.set(v,this);}});return e;},body:element('body')});
+  Object.assign(document,{querySelector:s=>s.startsWith('#')?(['#red-receipt-check','#red-pending-discard','#red-recovery-details','#red-previous-failure'].includes(s)?els.get(s.slice(1))||null:get(s.slice(1))):null,querySelectorAll:()=>[],createElement:tag=>{const e=element(tag);Object.defineProperty(e,'id',{get(){return this._id;},set(v){this._id=v;els.set(v,this);}});return e;},body:element('body')});
   get('red-level').value='1';get('red-budget').value='8';get('red-empty').textContent='empty';
-  const calls=[];
+  const calls=[],downloads=[];
   const cap={red:true,pdf:false,companionInstance:INSTANCE};
   const bridge={busy(){},state:()=>({status:'paired',connected:true,cap}),capabilities:()=>cap,session:()=>({request:async(p,body)=>{calls.push({path:p,body});return hooks.reply(p,body,calls);}})};
-  const lab={busy(){},allowed:()=>true,ready:Promise.resolve(),bind:async(role,r)=>({...r,harness:H.builtin(role)}),record:async()=>'run-1'};
+  const lab={busy(){},allowed:()=>true,ready:Promise.resolve(),bind:async(role,r)=>({...r,harness:hooks.harness||H.builtin(role)}),record:async()=>'run-1'};
   if(options.shipped){const script=element('pending-job.js');script.src='pending-job.js';script.getAttribute=name=>name==='src'?'pending-job.js':null;document.scripts=[script];}
-  const ctx=vm.createContext({document,crypto:globalThis.crypto,localStorage:storage,navigator:{locks},FalsifyDocumentRed:Red,FalsifyHarness:H,FalsifyLocalBridge:bridge,FalsifyLab:lab,FalsifyExport:{},TextEncoder,TextDecoder,CustomEvent,Event,URL:{createObjectURL:()=>'blob:1',revokeObjectURL(){}},Blob,File,setTimeout,clearTimeout,confirm:()=>true,addEventListener(){},btoa,atob,Uint8Array,Array,Promise,Error,Map,JSON,Number,String,Object,console});
+  const ctx=vm.createContext({document,crypto:globalThis.crypto,localStorage:storage,navigator:{locks},FalsifyDocumentRed:Red,FalsifyHarness:H,FalsifyLocalBridge:bridge,FalsifyLab:lab,FalsifyExport:{},TextEncoder,TextDecoder,CustomEvent,Event,URL:{createObjectURL(blob){downloads.push(blob);return 'blob:1';},revokeObjectURL(){}},Blob,File,setTimeout,clearTimeout,confirm:()=>true,addEventListener(){},btoa,atob,Uint8Array,Array,Promise,Error,Map,JSON,Number,String,Object,console});
   if(options.helper!==false)vm.runInContext(fs.readFileSync(path.join(dist,'pending-job.js'),'utf8'),ctx,{filename:'pending-job.js'});
   vm.runInContext(fs.readFileSync(path.join(dist,'document-red.js'),'utf8'),ctx,{filename:'document-red.js'});
   const text='The claim is absolute.';
-  return {get,find:id=>els.get(id),calls,async load(name='notes.txt',content=text){document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file:{name,arrayBuffer:async()=>new TextEncoder().encode(content).buffer},result:{text:content,format:'TXT',segments:[{label:'p',text:content}]}}}));
+  return {get,find:id=>els.get(id),calls,downloads,async load(name='notes.txt',content=text){document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file:{name,arrayBuffer:async()=>new TextEncoder().encode(content).buffer},result:{text:content,format:'TXT',segments:[{label:'p',text:content}]}}}));
     for(let i=0;i<100&&!get('red-document-summary').textContent.startsWith(name+' ·');i++)await new Promise(r=>setTimeout(r,5));
     assert.match(get('red-document-summary').textContent,new RegExp('^'+name.replace('.', '\\.')+' ·'));}};
 }
@@ -372,13 +372,13 @@ test('shipped RED page fails safe without the helper; an unshipped VM may post o
 async function bluePage(storage,hooks){
   const els=new Map(),get=id=>{if(!els.has(id))els.set(id,element(id));return els.get(id);};
   const document=new EventTarget();
-  Object.assign(document,{querySelector:s=>s.startsWith('#')?get(s.slice(1)):null,querySelectorAll:()=>[],createElement:tag=>element(tag),body:element('body')});
+  Object.assign(document,{querySelector:s=>s.startsWith('#')?(s==='#doc-blue-retry-previous'||s==='#doc-blue-recovery-details'?els.get(s.slice(1))||null:get(s.slice(1))):null,querySelectorAll:()=>[],createElement:tag=>{const e=element(tag);Object.defineProperty(e,'id',{get(){return this._id;},set(v){this._id=v;els.set(v,this);}});return e;},body:element('body')});
   get('doc-blue-budget').value='4';
   const calls=[],downloads=[];
   const cap={red:true,blue:true,pdf:false,companionInstance:INSTANCE};
   const net={connected:true};
   const bridge={busy(){},state:()=>({status:net.connected?'paired':'manual',connected:net.connected,cap}),capabilities:()=>cap,session:()=>({request:async(p,body)=>{calls.push({path:p,body});if(p==='/api/capabilities')return hooks.liveCap||cap;return hooks.reply(p,body,calls);}})};
-  const lab={busy(){},allowed:()=>true,ready:Promise.resolve(),bind:async(role,r)=>({...r,harness:H.builtin(role)}),record:async()=>'run-1'};
+  const lab={busy(){},allowed:()=>true,ready:Promise.resolve(),bind:async(role,r)=>({...r,harness:hooks.harness||H.builtin(role)}),record:async()=>'run-1'};
   const importer={extract:async()=>({text:'The claim is absolute.',format:'TXT',warnings:[],segments:[{label:'p',text:'The claim is absolute.'}]})};
   const ctx=vm.createContext({document,crypto:globalThis.crypto,localStorage:storage,navigator:{locks},FalsifyDocumentBlue:Blue,FalsifyHarness:H,FalsifyLocalBridge:bridge,FalsifyLab:lab,FalsifyImport:importer,TextEncoder,TextDecoder,CustomEvent,Event,AbortController,URL:{createObjectURL(blob){downloads.push(blob);return 'blob:'+downloads.length;},revokeObjectURL(){}},Blob,File,setTimeout,clearTimeout,confirm:()=>true,Uint8Array,Array,Promise,Error,Map,JSON,Number,String,Object,console});
   vm.runInContext(fs.readFileSync(path.join(dist,'pending-job.js'),'utf8'),ctx,{filename:'pending-job.js'});
@@ -387,6 +387,30 @@ async function bluePage(storage,hooks){
     for(let i=0;i<50&&!/추출 완료/.test(get('doc-blue-progress').textContent);i++)await new Promise(r=>setTimeout(r,5));
     assert.match(get('doc-blue-progress').textContent,/추출 완료/);}};
 }
+
+for(const role of ['red','blue'])test(role.toUpperCase()+' failed attempt identity and exports survive one explicit retry with a new harness',async()=>{
+  const storage=vmStorage(), a={...H.builtin(role),name:'Attempt A',version:'A1'}, b={...H.builtin(role),name:'Selected B',version:'B2'};
+  const hooks={harness:a,reply:async(p,body)=>{
+    if(p==='/api/'+role+'/jobs')return {id:body.requestId};
+    const r=P.read(role,storage).record;
+    if(r.request.harness.name==='Attempt A')return {...job(r,'failed',{failure:{schema:'falsify.adapter-failure.v1',code:'timeout',stage:'execute',recovery:'retry'}}).body};
+    return completedBody(r);
+  }};
+  const page=role==='red'?await redPage(storage,hooks):await bluePage(storage,hooks);
+  await page.load();const prefix=role==='red'?'red':'doc-blue';page.get(prefix+'-consent').checked=true;page.get(prefix+'-start').click();
+  await until(()=>P.read(role,storage).record?.disposition==='failed','first failure');
+  await until(()=>page.get(prefix+'-progress').textContent.includes('Attempt A'),'failure identity');
+  const old=P.read(role,storage).record, text=page.get(prefix+'-progress').textContent;
+  assert.ok(text.includes('A1')&&text.includes(old.harnessHash));
+  hooks.harness=b;page.get(prefix+'-start').click();page.get(prefix+'-start').click();
+  await until(()=>P.read(role,storage).record?.disposition==='completed','retry completion');
+  const posts=page.calls.filter(c=>c.path==='/api/'+role+'/jobs');assert.equal(posts.length,2);assert.equal(posts[1].body.harness.name,'Selected B');
+  const details=page.get(role==='red'?'red-previous-failure':'doc-blue-retry-previous');assert.equal(details.hidden,false);
+  details.children[1].click();details.children[2].click();
+  const diagnostic=JSON.parse(await page.downloads.at(-2).text()), original=JSON.parse(await page.downloads.at(-1).text());
+  assert.equal(diagnostic.harnessName,'Attempt A');assert.equal(diagnostic.harnessVersion,'A1');assert.equal(diagnostic.harnessHash,old.harnessHash);assert.equal(original.harness.name,'Attempt A');
+});
+
 const CITE='BLUE 재독 기준 인용이 해당 문단에 없거나 중복됩니다.';
 function storedBlue(storage){return JSON.parse(storage.raw.get(P.storageKey('blue')));}
 function matchedJob(storage,state,extra={}){const record=storedBlue(storage);return {id:record.requestId,role:'blue',state,sourceHash:record.sourceHash,revision:record.revision,harnessHash:record.harnessHash,companionInstance:record.companionInstance,requestBytesDigest:record.requestBytesDigest,progress:{completedCalls:1,requiredCalls:1,phase:'reread'},...extra};}
@@ -495,7 +519,7 @@ test('BLUE failure stays visible across live poll, reload, and connection and do
   await new Promise(r=>setTimeout(r,20));
   assert.equal(page.downloads.length,before+2);
   const diagnostic=JSON.parse(await page.downloads[before].text()),exported=JSON.parse(await page.downloads[before+1].text());
-  assert.deepEqual(Object.keys(diagnostic).sort(),['companionInstance','disposition','fileHash','harnessHash','postReceipt','requestBytesDigest','requestFingerprint','requestId','revision','role','schema','serverFailure','sourceHash']);
+  assert.deepEqual(Object.keys(diagnostic).sort(),['adapterFailure','companionInstance','disposition','fileHash','harnessHash','harnessName','harnessVersion','postReceipt','requestBytesDigest','requestFingerprint','requestId','revision','role','schema','serverFailure','sourceHash']);
   assert.equal(diagnostic.serverFailure,cite);assert.equal(JSON.stringify(diagnostic).includes('SHOULD-NOT-APPEAR'),false);assert.equal(JSON.stringify(diagnostic).includes('Bearer'),false);
   assert.deepEqual(exported,JSON.parse(requestSnap));assert.equal(JSON.stringify(exported).includes('"token"'),false);
   let reloadStep='same';
@@ -559,7 +583,31 @@ test('unknown BLUE receipt survives reload and does not show a foreign server ph
   assert.equal(jobPosts(reloaded.calls).length,0);assert.equal(reloaded.get('doc-blue-failure').textContent.includes(CITE),false);
   assert.equal(JSON.stringify(storedBlue(storage).request),snap);
 });
-test('BLUE known HTTP rejection is not an unknown receipt and never reposts',async()=>{
+test('structured failure is bound to the original BLUE attempt, survives reload and explicit double click retries once',async()=>{
+  const storage=vmStorage(),failure={schema:'falsify.adapter-failure.v1',code:'settings_mismatch',stage:'preflight',recovery:'refresh_harness'};
+  const page=await bluePage(storage,{reply:async(p,body)=>p==='/api/blue/jobs'?{id:body.requestId}:matchedJob(storage,'failed',{error:'generic',failure})});
+  await page.load();page.get('doc-blue-consent').checked=true;page.get('doc-blue-start').click();
+  await until(()=>P.read('blue',storage).record?.adapterFailure,'structured failure');
+  const old=storedBlue(storage);assert.deepEqual(old.adapterFailure,failure);assert.match(page.get('doc-blue-progress').textContent,/설정이 저장된 harness와/);
+  const reloaded=await bluePage(storage,{reply:async()=>matchedJob(storage,'failed',{error:'generic',failure})});
+  await until(()=>reloaded.get('doc-blue-progress').textContent.includes('저장된 harness'),'reload');
+  assert.equal(storedBlue(storage).harnessHash,old.harnessHash);
+  page.get('doc-blue-start').click();page.get('doc-blue-start').click();await until(()=>jobPosts(page.calls).length===2,'explicit retry');
+  await new Promise(r=>setTimeout(r,30));assert.equal(jobPosts(page.calls).length,2);assert.notEqual(storedBlue(storage).requestId,old.requestId);
+});
+test('invalid structured failure falls back to the legacy error',async()=>{
+  const storage=vmStorage();const page=await bluePage(storage,{reply:async(p,body)=>p==='/api/blue/jobs'?{id:body.requestId}:matchedJob(storage,'failed',{error:'legacy failure',failure:{schema:'falsify.adapter-failure.v1',code:'forged',stage:'preflight',recovery:'refresh_harness'}})});
+  await page.load();page.get('doc-blue-consent').checked=true;page.get('doc-blue-start').click();await until(()=>P.read('blue',storage).record?.disposition==='failed','failed');
+  assert.equal(storedBlue(storage).adapterFailure,undefined);assert.match(page.get('doc-blue-progress').textContent,/legacy failure/);
+});
+test('RED records structured failure and retries only on a deliberate click',async()=>{
+  const storage=vmStorage(),failure={schema:'falsify.adapter-failure.v1',code:'auth_required',stage:'preflight',recovery:'sign_in'};
+  const page=await redPage(storage,{reply:async(p,body)=>{if(p==='/api/red/jobs')return {id:body.requestId};const r=P.read('red',storage).record;return {id:r.requestId,role:'red',state:'failed',sourceHash:r.sourceHash,revision:r.revision,harnessHash:r.harnessHash,requestBytesDigest:r.requestBytesDigest,companionInstance:r.companionInstance,error:'generic',failure};}});
+  await page.load();page.get('red-consent').checked=true;page.get('red-start').click();await until(()=>P.read('red',storage).record?.adapterFailure,'RED failure');
+  const old=P.read('red',storage).record;assert.deepEqual(old.adapterFailure,failure);assert.match(page.get('red-progress').textContent,/로그인/);
+  page.get('red-start').click();page.get('red-start').click();await until(()=>page.calls.filter(c=>c.path==='/api/red/jobs').length===2,'RED retry');await new Promise(r=>setTimeout(r,30));assert.equal(page.calls.filter(c=>c.path==='/api/red/jobs').length,2);assert.notEqual(P.read('red',storage).record.requestId,old.requestId);
+});
+test('BLUE known HTTP rejection allows one explicit retry',async()=>{
   const storage=vmStorage();
   const page=await bluePage(storage,{reply:async()=>{const e=new Error('이미 실행 중입니다.');e.httpStatus=409;throw e;}});
   await page.load();page.get('doc-blue-consent').checked=true;page.get('doc-blue-start').click();
@@ -568,7 +616,7 @@ test('BLUE known HTTP rejection is not an unknown receipt and never reposts',asy
   assert.match(storedBlue(storage).serverFailure,/HTTP 409/);
   assert.equal(jobPosts(page.calls).length,1);
   page.get('doc-blue-start').click();await new Promise(r=>setTimeout(r,20));
-  assert.equal(jobPosts(page.calls).length,1);
+  assert.equal(jobPosts(page.calls).length,2);
 });
 test('BLUE changed live companion rejects before any POST',async()=>{
   const storage=vmStorage();const page=await bluePage(storage,{liveCap:{companionInstance:OTHER},reply:async()=>{throw new Error('must not post');}});
