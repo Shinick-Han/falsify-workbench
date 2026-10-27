@@ -32,7 +32,7 @@ test('missing engine and unmatched caption never claim verification',()=>{
   assert.equal(inspectLayoutQuality({bytes:fixture()}).status,'unavailable');
   const r=inspectLayoutQuality({bytes:fixture(),mupdf,profile:{captions:[{text:'Invented caption',assetPageIndex:0,assetBbox:[80,120,180,200]}]}});
   assert.ok(r.limitations.some(x=>x.includes('could not be uniquely observed')));
-  assert.equal(r.coverage.clipping,'unverified');
+  assert.equal(r.coverage.clipping,'partial: axis-aligned rectangular paths only');
 });
 test('profiled headings and columns report observable orphan and empty column candidates',()=>{
   const r=inspectLayoutQuality({bytes:fixture(),mupdf,profile:{headings:[{text:'This is normal body text with enough characters.'}],columns:[{pageIndex:0,bbox:[220,20,290,80]}]}});
@@ -41,8 +41,27 @@ test('profiled headings and columns report observable orphan and empty column ca
 });
 
 
-test('a real clipped paint operation is explicitly unverified',()=>{
+test('a real rectangular clip detects clipped text',()=>{
   const r=inspectLayoutQuality({bytes:fixture({clip:true}),mupdf});
-  assert.equal(r.coverage.clipping,'unverified');
-  assert.ok(r.limitations.some(x=>x.includes('Clip paths')));
+  assert.equal(r.coverage.clipping,'partial: axis-aligned rectangular paths only');
+  assert.ok(r.issues.some(x=>x.type==='text-clipped'),JSON.stringify(r));
+});
+
+test('clipped image is permitted and long caption ink outside page is detected',()=>{
+  const make=(oversized=false)=>{
+    const d=new mupdf.PDFDocument(),font=d.addSimpleFont(new mupdf.Font('Helvetica'));
+    const pix=new mupdf.Pixmap(mupdf.ColorSpace.DeviceRGB,[0,0,2,2],true);pix.clear(128);const image=new mupdf.Image(pix),im=d.addImage(image);
+    const stream=`q 80 200 50 50 re W n 100 0 0 80 80 200 cm /Im Do Q\nBT /F 12 Tf 30 ${oversized?-5:30} Td (Figure 1. Long caption ending at the page edge) Tj ET`;
+    d.insertPage(-1,d.addPage([0,0,300,400],0,{Font:{F:font},XObject:{Im:im}},stream));const buf=d.saveToBuffer(),bytes=buf.asUint8Array().slice();buf.destroy();image.destroy();pix.destroy();d.destroy();return bytes;
+  };
+  const good=inspectLayoutQuality({bytes:make(),mupdf}),bad=inspectLayoutQuality({bytes:make(true),mupdf});
+  assert.ok(!good.issues.some(i=>i.type==='text-clipped'||i.type==='ink-outside-page'),JSON.stringify(good));
+  assert.ok(bad.issues.some(i=>i.type==='ink-outside-page'),JSON.stringify(bad));
+});
+test('font, column and heading profiles have meaningful positive and negative examples',()=>{
+  const bytes=fixture();
+  const bad=inspectLayoutQuality({bytes,mupdf,profile:{bodyFontNames:['NotHelvetica'],columns:[{pageIndex:0,bbox:[220,20,290,80]}],headings:[{text:'This is normal body text with enough characters.'}]}});
+  for(const type of ['body-font-deviation','blank-column','heading-orphan']) assert.ok(bad.issues.some(i=>i.type===type),type);
+  const good=inspectLayoutQuality({bytes,mupdf,profile:{bodyFontNames:['Helvetica'],columns:[{pageIndex:0,bbox:[20,240,200,280]}],headings:[{text:'Figure 1. A useful illustration'}]}});
+  for(const type of ['body-font-deviation','blank-column','heading-orphan']) assert.ok(!good.issues.some(i=>i.type===type),JSON.stringify(good));
 });
