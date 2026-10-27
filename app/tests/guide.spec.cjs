@@ -106,7 +106,7 @@ test('required anchors and terms stay inside the collapsed reference', () => {
   assert.match(detail, /1단/);
   assert.match(detail, /동의 체크가 화면에 하나뿐이면 그 체크와 저장 버튼을 따릅니다/);
   assert.match(detail, /설치된 alpha\.15/);
-  for (const term of ['Web Locks', 'GET으로만', '서버 재시작 영속성', '한 영역', 'ODT 내보내기는 작업 중', '비용은 알 수 없습니다']) assert.ok(detail.includes(term), term);
+  for (const term of ['Web Locks', 'GET으로만', '서버 재시작 영속성', '한 영역', 'ODT도 단순 문단의 작은 수정만 지원', '비용은 알 수 없습니다']) assert.ok(detail.includes(term), term);
   assert.doesNotMatch(guide.slice(0, guide.indexOf('id="reference"')), /alpha\.\d+/);
 });
 
