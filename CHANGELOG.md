@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0-alpha.17
+
+- 원문·변경 항목에서 바로 편집하고 키보드로 문단을 선택합니다.
+- 편집창 배치, 문단 준비, 실패 복구와 보조 도구 노출을 정리했습니다.
+- [변경 내용](docs/release-alpha17.md) · [UX 판단 근거](docs/ux-editor-refinement.md)
+
 ## 0.2.0-alpha.16
 
 - Add PDF page and region selection for optional visual BLUE input through built-in Codex, with separate observations and bound image references.

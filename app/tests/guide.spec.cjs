@@ -25,11 +25,11 @@ function anchors(html) {
 }
 
 const PHRASES = [
-  '편집 반영',
+  '적용',
   '원문과 과제 프롬프트 복사',
   '붙여넣은 응답',
   '고른 위치로 확정',
-  '현재 편집으로 생성',
+  '수정본 미리보기 만들기',
   '마지막 생성본 · 현재 편집과 다름',
   '원본 다운로드',
   'BLUE 검토 파일',
@@ -63,7 +63,7 @@ test('quick three steps stay short and precede the collapsed reference', () => {
   const items = [...ol[0].matchAll(/<li>([\s\S]*?)<\/li>/g)].map(match => visible(match[1]));
   assert.equal(items.length, 3);
   assert.match(items[0], /PDF를 넣습니다/);
-  assert.match(items[1], /글자를 선택하고 After를 수정/);
+  assert.match(items[1], /글자를 선택하고 내용을 수정/);
   assert.match(items[2], /미리보고/);
   assert.match(items[2], /다운로드/);
   for (const text of items) {

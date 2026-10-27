@@ -36,6 +36,7 @@ jobs:
           ui_server_pid=$!
           trap 'kill "$ui_server_pid"' EXIT
           npm run test:browser --prefix app
+          node app/tests/paper-editor-ux.browser.cjs
       - name: Browser PDF MuPDF contracts
         working-directory: app
         run: |

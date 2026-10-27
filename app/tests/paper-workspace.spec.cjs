@@ -224,7 +224,7 @@ test('reader: file input paints one original page before extraction, and the sec
   v.get('paper-before-stage').dispatchEvent(new Event('mouseup'));
   assert.equal(v.get('paper-inline-before').textContent,'Alpha');
   assert.equal(v.get('paper-inline-after').value,'Alpha');
-  assert.match(v.get('paper-inline-meta').textContent,/occurrence 1/);assert.match(v.get('paper-inline-meta').textContent,/10, 700, 50, 712/);
+  assert.equal(v.get('paper-inline-meta').textContent,'1쪽 · 선택한 구간');
   v.get('paper-inline-after').value='Beta';v.get('paper-inline-apply').click();
   assert.equal(v.edits.added.length,0);assert.match(v.get('paper-edit-status').textContent,/원문 구간이 아직 없어/);
   v.document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file,result:{segments:[
@@ -235,7 +235,7 @@ test('reader: file input paints one original page before extraction, and the sec
   assert.deepEqual(human.anchor,{start:6,end:11,occurrence:1,bbox:[10,700,50,712]});
   assert.equal('coordinate' in human.anchor,false);assert.equal('style' in human.anchor,false);
   assert.match(textOf(v.get('paper-edits')),/직접 편집/);assert.doesNotMatch(textOf(v.get('paper-edits')),/AI 제안|gpt-/);
-  assert.match(v.get('paper-edit-status').textContent,/모델 실행으로 기록하지 않습니다/);
+  assert.match(v.get('paper-edit-status').textContent,/직접 편집을 기록/);
   v.get('paper-inline-after').value='';v.get('paper-before-stage').dispatchEvent(new Event('mouseup'));
   assert.equal(v.get('paper-inline-after').value,'Beta');
   v.get('paper-inline-after').value='';v.get('paper-inline-apply').click();
@@ -591,7 +591,7 @@ test('selection: one word keeps its own range, and the editor sits on that rect'
   v.get('paper-before-stage').dispatchEvent(new Event('mouseup'));
   assert.equal(v.get('paper-inline-before').textContent,'words');
   assert.equal(v.get('paper-inline-after').value,'words');
-  assert.match(v.get('paper-inline-meta').textContent,/70, 20, 130, 32/);
+  assert.match(v.get('paper-inline-meta').textContent,/1쪽 · 선택한 구간/);
   assert.equal(v.get('paper-inline').classList.contains('is-open'),true);
   assert.equal(v.get('paper-inline').classList.contains('is-docked'),true);
   assert.equal(v.document.activeElement,v.get('paper-inline-after'));
@@ -820,7 +820,8 @@ test('wayfinding: an uploaded RED file points at manual editing',async()=>{
   title.textContent='RED 실행 설정을 확인하세요';
   document.dispatchEvent(new CustomEvent('falsify:document-state',{detail:{name:'paper.pdf',busy:false,hasResult:false,count:0}}));
   assert.equal(title.textContent,'원본에서 직접 고치세요');
-  assert.equal(made.find(e=>e.className==='visual-next'&&/직접 고칠 수 있습니다/.test(e.textContent)).textContent,'원본 쪽에서 직접 고칠 수 있습니다. AI 실행은 선택입니다.');
+  assert.equal(made.find(e=>e.className==='visual-next').hidden,true,'the manual edit sign does not add another instruction paragraph');
+  assert.equal(made.filter(e=>e.tagName==='BUTTON'&&e.children.some(c=>c.textContent==='내 PC 연결')).length,2,'each role has a direct connection action');
   let bubbled=0;action.addEventListener('click',()=>{bubbled++;get('document-red').focus();});
   action.dispatchEvent(new Event('click',{bubbles:true,cancelable:true}));
   assert.equal(bubbled,0);assert.equal(document.activeElement,get('paper-before-stage'));assert.equal(get('paper-before-stage').scrolled,true);
@@ -1137,6 +1138,19 @@ test('export intent: an eight-item external rewrite batch with source-proven hyp
   assert.ok(calls[0].edits.every(e=>e.origin==='external-ai-import'));assert.equal(v.ws.getOutput().verification.status,'applied');
 });
 
+test('paragraph preparation is reused for the same original page and reset for a different file',async()=>{
+  const calls=[],adapter=paragraphMock('Cached paragraph.');
+  const v=mount({paragraphPdf:paragraphMock('Cached paragraph.',{inspectPage:async request=>{calls.push(request);return adapter.inspectPage(request);}})});
+  v.file(pdfFile(pdfBytes('MARKER-A')));await until(()=>/문단을 클릭/.test(v.get('paper-before-status').textContent),'first prepared page');
+  assert.equal(calls.length,1);
+  v.get('paper-zoom-in').click();await settle();
+  assert.equal(calls.length,1,'zoom reuses page-point source geometry');
+  v.get('paper-mode-text').click();await settle();assert.equal(calls.length,1,'reopening text tools reuses source geometry');
+  v.file(pdfFile(pdfBytes('MARKER-B')));await until(()=>calls.length===2&&/문단을 클릭/.test(v.get('paper-before-status').textContent),'new original inspected');
+  assert.notEqual(calls[0].fileHash,calls[1].fileHash);
+  assert.equal(v.ws.getEditSnapshot().edits.length,0);
+});
+
 (async()=>{let passed=0;for(const [name,fn] of tests){try{await fn();passed++;console.log('PASS '+name);}catch(e){console.error('FAIL '+name+'\n'+(e.stack||e));process.exitCode=1;}}
   console.log(JSON.stringify({file:'paper-workspace.spec.cjs',passed,failed:tests.length-passed,total:tests.length}));})();
 
@@ -1147,7 +1161,7 @@ test('paragraph and change item reopen saved text and protect an unfinished edit
   const id=v.ws.getEditSnapshot().edits[0].id;
   clickParagraph(v);assert.equal(v.get('paper-inline-after').value,'Saved replacement.');
   v.get('paper-inline-after').value='Unfinished replacement.';buttons(v,'edit',id)[0].click();
-  assert.equal(v.get('paper-inline-after').value,'Unfinished replacement.');assert.match(v.get('paper-edit-status').textContent,/적용하거나 취소/);assert.match(v.get('paper-inline-meta').textContent,/적용하거나 취소/);
+  assert.equal(v.get('paper-inline-after').value,'Unfinished replacement.');assert.doesNotMatch(v.get('paper-edit-status').textContent,/적용하거나/);assert.match(v.get('paper-inline-meta').textContent,/적용하거나.*취소/);
   v.get('paper-inline-cancel').click();assert.equal(v.document.activeElement,buttons(v,'edit',id)[0]);buttons(v,'edit',id)[0].click();
   assert.equal(v.get('paper-inline-after').value,'Saved replacement.');
   assert.doesNotMatch(textOf(v.get('paper-edits')),/After 수정/);

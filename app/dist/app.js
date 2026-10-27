@@ -95,7 +95,7 @@
       const result=await FalsifyImport.extract(file,{signal:importController.signal,onProgress:message=>{if(epoch===importEpoch)$('#import-status').textContent=message;}});
       if(epoch!==importEpoch)return;showImport(result);
       document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file,result}}));
-      $('#import-status').textContent='추출 완료. 2단계에서 전체 텍스트로 RED를 실행합니다.';
+      $('#import-status').textContent='논문을 열었습니다. 아래 원문에서 편집할 수 있습니다.';
     }catch(error){if(epoch===importEpoch){$('#paper-file').value='';importedFile=null;$('#import-status').classList.add('error');$('#import-status').textContent='파일 입력 실패: '+error.message+' 다른 파일을 선택하세요.';}}
     finally{if(epoch===importEpoch){importController=null;$('#import-cancel').hidden=true;}}
   });

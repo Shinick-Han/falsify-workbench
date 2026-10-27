@@ -566,8 +566,8 @@
     }
     function canLeaveInline(){
       if(!inline||ui.inlineAfter.value===inline.after)return true;
-      const message='현재 편집을 적용하거나 취소한 뒤 다른 위치를 선택하세요.';
-      setEditStatus(message,true);ui.inlineMeta.textContent=message;
+      const message='입력한 내용을 적용하거나 「닫기」로 취소한 뒤 다른 구간을 선택하세요.';
+      ui.inlineMeta.textContent=message;
       ui.inlineAfter.focus();
       return false;
     }
@@ -576,8 +576,7 @@
       if(!inline){ui.inlineBefore.textContent='';ui.inlineMeta.textContent='';ui.inlineAfter.value='';placeInline();return;}
       ui.inlineBefore.textContent=inline.before;
       ui.inlineAfter.value=typeof inline.after==='string'?inline.after:'';
-      const box=inline.anchor&&inline.anchor.bbox;
-      ui.inlineMeta.textContent='쪽 '+(inline.pageIndex+1)+(Number.isSafeInteger(inline.anchor&&inline.anchor.occurrence)?' · occurrence '+inline.anchor.occurrence:'')+(box?' · 좌표 '+box.map(round).join(', '):'');
+      ui.inlineMeta.textContent=(inline.pageIndex+1)+'쪽 · 선택한 구간';
       placeInline();
     }
     function focusInline(){
@@ -762,7 +761,7 @@
       if(typeof unsub==='function')unsub();
       unsub=null;session=null;snapshot=null;output=null;inline=null;pageText=null;proposalQueue=null;accepted=new Set();draftRaw=null;pendingResume=null;
       pages=0;page=1;zoom=1;
-      source={file,fileHash:null,name:sessionName(file.name),segments:[],pdf:isPdf(file),doc:null,lib:null,render:null};
+      source={file,fileHash:null,name:sessionName(file.name),segments:[],pdf:isPdf(file),doc:null,lib:null,render:null,paragraphPages:new Map()};
       clearStage(ui.beforeStage);clearStage(ui.afterStage);renderInline();renderEdits();paintProposals();renderChrome();
       setStatus('원본 파일을 확인하는 중입니다.');
       try{
@@ -881,10 +880,12 @@
       const ctl=typeof AbortController==='function'?new AbortController():{abort(){},signal:undefined};
       inspectCtl=ctl;
       const file=source.file,hash=source.fileHash;
+      setBeforeStatus((display.pageIndex+1)+' / '+pages+'쪽 · 편집할 문단을 찾는 중… 글자 선택은 바로 사용할 수 있습니다.');
       try{
-        const found=await api.inspectPage({file,fileHash:hash,pageIndex:display.pageIndex,signal:ctl.signal});
+        const found=source.paragraphPages.get(display.pageIndex)||await api.inspectPage({file,fileHash:hash,pageIndex:display.pageIndex,signal:ctl.signal});
         if(epoch!==mine||seq!==drawSeq||pageText!==display||!source||source.file!==file||ctl.signal?.aborted||editMode!=='text')return;
         if(found.fileHash!==hash||found.pageIndex!==display.pageIndex||found.rotation||!(found.width>0)||!(found.height>0))throw new Error('문단 위치가 원본과 맞지 않습니다.');
+        source.paragraphPages.set(display.pageIndex,found);
         display.paragraphs=(Array.isArray(found.paragraphs)?found.paragraphs:[]).filter(p=>p&&typeof p.id==='string'&&('paragraph:'+display.pageIndex+':'+p.id).length<=80&&typeof p.text==='string'&&p.text.trim()&&validBbox(p.bbox));
         display.paragraphWidth=found.width;display.paragraphHeight=found.height;
         const rows=display.paragraphs.map(p=>({id:'paragraph:'+display.pageIndex+':'+p.id,text:p.text,pageIndex:display.pageIndex,label:'PDF p. '+(display.pageIndex+1)}));
@@ -1134,7 +1135,7 @@
           session.add({pageIndex:inline.pageIndex,segmentId:segment.id,before:inline.before,after,anchor:built.anchor,origin:'human'});
         }
         closeInline();
-        setEditStatus('직접 편집으로 기록했습니다. 모델 실행으로 기록하지 않습니다.');
+        setEditStatus('직접 편집을 기록했습니다.');
       }catch(e){setEditStatus('편집을 저장하지 않았습니다. '+safeMessage(e),true);}
     }
     function onJump(edit){
