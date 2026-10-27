@@ -198,6 +198,7 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
   // Require explicit column evidence; never promote an original single-column paper.
   const flowBlockText=new Map(document.blocks.map(b=>[b.id,b.text || '']));
   const firstBodyIndex=flow?.items.findIndex(i=>i.columns===2 && i.span!=='page' && i.kind==='paragraph' && (i.blockIds||[]).reduce((n,id)=>n+(flowBlockText.get(id)?.length||0),0)>=150) ?? -1;
+  const lastBodyIndex=flow?.items.findLastIndex(i=>i.columns===2 && i.span!=='page' && i.kind==='paragraph' && (i.blockIds||[]).reduce((n,id)=>n+(flowBlockText.get(id)?.length||0),0)>=150) ?? -1;
   const measuredContinuous=layoutMode==='measured-continuous' && firstBodyIndex>=0;
   const enginePlan={requested:layoutMode || 'existing',actual:measuredContinuous ? 'measured-continuous' : 'existing',reason:layoutMode && !measuredContinuous ? 'no explicit two-column body' : null};
   // Page-level flow is safe only when every item belongs to the same
@@ -441,7 +442,7 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
           flush();
           // An unpaired full-width figure cannot float through the preceding
           // caption. Finish that column stream before its source artwork page.
-          source+=(item.captionIds?.length ? measured(result) : `#page(columns: 1)[${result}]`)+'\n';
+          source+=(item.captionIds?.length && itemIndex<=lastBodyIndex ? measured(result) : `#page(columns: 1)[${result}]`)+'\n';
         }
         else group.push(result);}
 
