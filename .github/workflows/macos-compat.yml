@@ -27,3 +27,6 @@ jobs:
       - name: Isolated macOS handler (system Bash)
         if: always()
         run: /bin/bash scripts/test-macos-handler.sh
+      - name: Synthetic PDF, fake CLI and source archive
+        if: always()
+        run: /bin/bash scripts/test-macos-native.sh
