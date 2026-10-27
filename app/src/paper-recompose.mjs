@@ -7,6 +7,7 @@ import {createFontPlan} from './paper-fonts.mjs';
 import {composeDocument} from './paper-compose.mjs';
 import {checkRecomposition} from './paper-compose-check.mjs';
 import {buildOutputProfile} from './paper-output-profile.mjs';
+import {resolveOutputAssetSpans} from './paper-asset-spans.mjs';
 import {hex} from './paragraph-pdf-crypto.mjs';
 
 const abort = signal => { if (signal?.aborted) throw new DOMException('Recomposition cancelled', 'AbortError'); };
@@ -182,9 +183,13 @@ export async function prepare(request={}, options={}) {
   const fontPlan=await createFontPlan({text:document.blocks.map(b=>b.text||'').join('\n')+edits.filter(e=>e?.enabled!==false).map(e=>e.after).join('\n'),fonts:candidates},{mupdf:options.mupdf}); abort(signal);
   const result=await composeDocument({document,sourceBytes:bytes,flow,assets:captured,links,edits:changes,signal,runningFurniture:options.runningFurniture===true,layoutMode},{compile:options.compile,fonts:fontPlan,outputCheck:async args=>{
     if(!options.pdfjs?.getDocument || !options.mupdf?.Document) return checkRecomposition({...args,pdfjs:options.pdfjs,mupdf:options.mupdf,exporter:'Typst'});
-    const {profile,evidence}=buildOutputProfile({bytes:args.bytes,mupdf:options.mupdf,document:{...document,blocks:[...document.blocks,...(flow.fragments||[])]},flow,expectedBlocks:args.expectedBlocks,fontPlan,assetSpans:args.assetSpans||[]});
-    const report=await checkRecomposition({...args,layoutProfile:{...args.layoutProfile,...profile},pdfjs:options.pdfjs,mupdf:options.mupdf,exporter:'Typst'});
-    return {...report,outputProfileEvidence:evidence};
+    const outputFlow=args.flow||flow;
+    const assets=resolveOutputAssetSpans({bytes:args.bytes,mupdf:options.mupdf,flow:outputFlow,blockSpans:args.blockSpans});
+    const {profile,evidence}=buildOutputProfile({bytes:args.bytes,mupdf:options.mupdf,document:args.document||{...document,blocks:[...document.blocks,...(flow.fragments||[])]},flow:outputFlow,expectedBlocks:args.expectedBlocks,fontPlan,assetSpans:assets.spans});
+    const floatingCaptionBlockIds=profile.captions.map(c=>c.id);
+    const flowExpectations=layoutMode==='measured-continuous' && floatingCaptionBlockIds.length ? {floatingCaptionBlockIds} : undefined;
+    const report=await checkRecomposition({...args,flowExpectations,layoutProfile:{...args.layoutProfile,...profile},pdfjs:options.pdfjs,mupdf:options.mupdf,exporter:'Typst'});
+    return {...report,outputProfileEvidence:{...evidence,assets:assets.evidence}};
   }}); abort(signal);
   const actual=new Uint8Array(await result.file.arrayBuffer()); abort(signal);
   if(hex(actual)!==result.sha256) fail('output-hash','Output bytes do not match their hash.');

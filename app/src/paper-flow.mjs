@@ -351,7 +351,7 @@ export function buildPaperFlow(document, {drawings=document?.drawings || [], lin
       }
       if(members.length>1) {
         const ids=[],joiners=[];
-        for(const member of members) {if(ids.length) joiners.push('');ids.push(...member.blockIds);if(member.inline) joiners.push(...member.joiners); else for(let i=1;i<member.blockIds.length;i++) joiners.push('');}
+        for(const member of members) {if(ids.length) joiners.push(' ');ids.push(...member.blockIds);if(member.inline) joiners.push(...member.joiners); else for(let i=1;i<member.blockIds.length;i++) joiners.push('');}
         caption.blockIds=ids; caption.inline=true;caption.joiners=joiners;
         caption.box=union(members.map(e=>e.box));caption.source.bbox=[...caption.box];
         for(const member of members.slice(1)) entries.splice(entries.indexOf(member),1);

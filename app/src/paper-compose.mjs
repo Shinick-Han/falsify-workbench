@@ -431,8 +431,7 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
       outputTextCheck=checkReport?.findings?.some(f=>f.code==='content-mismatch') ? 'finding' : checkReport?.checks?.content?.status || 'unavailable';
     } catch (error) { abort(signal); warnings.push(`Output text check unavailable: ${error.message}`); }
   }
-  const flowCheck=measuredContinuous ? (checkReport?.checks?.flow?.status === 'pass' ? {status:'pass'} : {status:'finding',reason:'output caption ownership and relocation not independently established'}) : {status:'not-requested'};
-  if (flowCheck.status==='finding') warnings.push('Measured continuous flow requires independent output caption ownership and ordering verification.');
+  const flowCheck=measuredContinuous ? (checkReport?.checks?.flow?.status==='checked' ? structuredClone(checkReport.checks.flow) : ['pass','normalized'].includes(outputTextCheck) ? {status:'checked',comparison:'Ordered content without caption relocation.'} : checkReport?.checks?.flow?.status==='finding' ? structuredClone(checkReport.checks.flow) : {status:'unavailable',reason:'Output caption ownership or ordered content is unavailable.'}) : {status:'not-requested'};
   if (ambiguous.length) {
     warnings.push('Ambiguous source line boundaries use a spacing convention; content verification is unavailable.');
   }

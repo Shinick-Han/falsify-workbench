@@ -4,11 +4,12 @@ import * as mupdf from '../dist/browser-pdf-vendor/mupdf.js';
 import {buildOutputProfile} from '../src/paper-output-profile.mjs';
 import {inspectLayoutQuality} from '../src/paper-layout-quality.mjs';
 
-function pdf({duplicate=false,image=true,font='Courier',size=6}={}) {
+function pdf({duplicate=false,image=true,duplicateImage=false,font='Courier',size=6}={}) {
  const d=new mupdf.PDFDocument(),f=d.addSimpleFont(new mupdf.Font(font)); const pix=new mupdf.Pixmap(mupdf.ColorSpace.DeviceRGB,[0,0,2,2],true);pix.clear(128);const im=new mupdf.Image(pix), ref=d.addImage(im);
  const line=(t,y)=>`BT /F ${size} Tf 30 ${y} Td (${t}) Tj ET\n`;
  d.insertPage(-1,d.addPage([0,0,300,400],0,{Font:{F:f}},line('Unrelated page',350)));
  let stream=(image?'q 100 0 0 80 80 200 cm /Im Do Q\n':'80 200 100 80 re f\n')+line('Figure 1. An image',185)+line('Scientific value p < 0.05 remains.',120);
+ if(duplicateImage)stream+='q 100 0 0 80 80 200 cm /Im Do Q\n';
  if(duplicate)stream+=line('Scientific value p < 0.05 remains.',90);
  d.insertPage(-1,d.addPage([0,0,300,400],0,{Font:{F:f},XObject:{Im:ref}},stream)); const buffer=d.saveToBuffer(),bytes=buffer.asUint8Array().slice();buffer.destroy();im.destroy();pix.destroy();d.destroy();return bytes;
 }
@@ -35,4 +36,10 @@ test('a small source paragraph is checked against its own source size',()=>{
  const q=inspectLayoutQuality({bytes:pdf(),mupdf,profile});
  assert.equal(q.coverage.profile.bodyLines.checked,1);
  assert.ok(!q.issues.some(x=>x.type==='small-body-text'));
+});
+test('multiple resource aliases nominate one actual capture without hiding duplicate placements',()=>{
+ const grouped={...flow,items:flow.items.map(item=>item.kind==='asset'?{...item,renderAssetId:'capture',assetIds:['im','panel']}:item)};
+ const assetSpans=['capture','im','panel'].map(id=>({id,pageIndex:1,bbox:[80,120,180,200]}));
+ assert.equal(run({}, {flow:grouped,assetSpans}).profile.captions.length,1);
+ assert.equal(run({duplicateImage:true}, {flow:grouped,assetSpans}).profile.captions.length,0);
 });
