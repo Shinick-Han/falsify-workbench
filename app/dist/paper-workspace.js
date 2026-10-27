@@ -320,7 +320,7 @@
     const status=verification&&typeof verification.status==='string'?verification.status:'';
     if(verification?.bodyPending===true)return (stale?'그 사이 편집이 바뀌어 마지막 부분 생성본으로 표시합니다. ':'')+'표 편집 단계가 검증을 통과하지 못해 본문 편집은 실행하지 않았습니다. 받은 부분 생성본만 표시하며 다운로드할 수 있습니다.';
     if(status==='draft')return '검증을 통과하지 못한 초안입니다. 진단과 실제 생성본을 확인하세요. 이 파일은 다운로드할 수 있습니다.';
-    if(status==='failed'||status==='warning')return (stale?'그 사이 편집이 바뀌어 마지막 생성본으로만 표시합니다. ':'')+'검증 상태는 '+status+'입니다. 이 파일은 받을 수 있습니다.';
+    if(status==='failed'||status==='warning'||status==='finding')return (stale?'그 사이 편집이 바뀌어 마지막 생성본으로만 표시합니다. ':'')+'검증 상태는 '+status+'입니다. 이 파일은 받을 수 있습니다.';
     if(status==='applied')return stale?'생성본을 받았지만 그 사이 편집이 바뀌어 마지막 생성본으로만 표시합니다. 검증 상태는 applied입니다.':'검증 상태는 applied입니다. 미리보기와 다운로드는 이 파일의 바이트입니다.';
     return stale?'생성본을 받았지만 그 사이 편집이 바뀌어 마지막 생성본으로만 표시합니다.':'생성본을 받았습니다. 미리보기와 다운로드는 이 파일의 바이트입니다.';
   }
@@ -436,6 +436,11 @@
     const paragraphApi=()=>deps.paragraphPdf||globalThis.FalsifyParagraphPdf||null;
     const legacyExporterApi=()=>deps.exporter||globalThis.FalsifyBrowserPdf||null;
     const pipelineApi=()=>deps.pipeline||globalThis.FalsifyPdfEditPipeline||null;
+    const recompositionApi=()=>deps.recompositionPdf||globalThis.FalsifyRecompositionPdf||null;
+    function recompositionRequest(request,revision){
+      const bindings=typeof deps.recompositionBindings==='function'?deps.recompositionBindings(request):null;
+      return {...request,revision,...(bindings==null?{}:{bindings:clone(bindings)})};
+    }
     const tableEdit=e=>String(e.segmentId||'').startsWith('table:');
     function bodyExporter(edits){
       const flow=paragraphApi();
@@ -444,6 +449,7 @@
       return legacyExporterApi()||flow;
     }
     const exporterApi=()=>{
+      if(recompositionApi())return recompositionApi();
       const edits=enabledEdits(),tables=edits.filter(tableEdit),body=edits.filter(e=>!tableEdit(e));
       if(tables.length&&body.length)return pipelineApi()?.prepare&&legacyExporterApi()?.prepare&&bodyExporter(body)?.prepare?pipelineApi():null;
       return tables.length?legacyExporterApi():bodyExporter(body);
@@ -1292,19 +1298,21 @@
         if(built.error)throw new Error(built.error);
         isolated.add({pageIndex:item.pageIndex,segmentId:item.segmentId,before:item.before,after:item.after,anchor:built.anchor,origin:'external-ai-import'});
       }
-      const batch=isolated.snapshot(), edits=batch.edits.filter(e=>e.enabled!==false), api=bodyExporter(edits);
+      const batch=isolated.snapshot(), edits=batch.edits.filter(e=>e.enabled!==false), recomposition=recompositionApi(), api=recomposition?recomposition:bodyExporter(edits);
       if(!api?.prepare)throw new Error('브라우저 PDF 편집 모듈이 없습니다.');
       const mine=++genId,ctl=new AbortController();genCtl=ctl;generating=true;renderChrome();
       try{
-        const prepared=await benchmarkSource({file,fileHash,edits:clone(edits),signal:ctl.signal});
+        const request={file,fileHash,edits:clone(edits),signal:ctl.signal};
+        const prepared=recomposition?{request:recompositionRequest(request,batch.revision),blinding:null}:await benchmarkSource(request);
         if(!live()||mine!==genId||ctl.signal.aborted)throw new Error('원본 또는 편집이 바뀌어 생성을 취소했습니다.');
-        const result=bindBenchmarkResult(await api.prepare(prepared.request),prepared,fileHash);
+        const raw=await api.prepare(prepared.request),result=recomposition?raw:bindBenchmarkResult(raw,prepared,fileHash);
+        if(recomposition&&result?.revision!==batch.revision)throw new Error('생성 결과의 편집 revision이 다릅니다.');
         if(!live()||mine!==genId||ctl.signal.aborted)throw new Error('원본 또는 편집이 바뀌어 생성을 취소했습니다.');
         if(!isFile(result?.file)||!HEX.test(result.sha256||''))throw new Error('생성 결과가 실제 파일이 아닙니다.');
         const bytes=new Uint8Array(await result.file.arrayBuffer()),actual=await sha256Hex(bytes);
         if(!live()||mine!==genId||ctl.signal.aborted)throw new Error('원본 또는 편집이 바뀌어 생성을 취소했습니다.');
         if(actual!==result.sha256||new TextDecoder().decode(bytes.subarray(0,1024)).indexOf('%PDF-')<0)throw new Error('생성 파일을 확인하지 못했습니다.');
-        return {file:result.file,bytes,sha256:actual,verification:result.verification??null,revision,workspaceRevision,batch:published(batch)};
+        return {file:result.file,bytes,sha256:actual,verification:result.verification??null,warnings:result.warnings??null,revision,workspaceRevision,batch:published(batch)};
       }finally{if(genCtl===ctl)genCtl=null;if(mine===genId&&epoch===epochAt){generating=false;renderChrome();}}
     }
     async function generate(){
@@ -1319,14 +1327,17 @@
       genCtl=ctl;generating=true;renderChrome();
       setGenStatus('생성 중입니다. 끝나기 전에 성공으로 표시하지 않습니다.');
       try{
+        const recomposition=recompositionApi(),useRecomposition=api===recomposition&&!!recomposition;
         const exportEdits=JSON.parse(JSON.stringify(edits));
         const mixed=exportEdits.some(tableEdit)&&exportEdits.some(e=>!tableEdit(e));
-        if(!mixed)for(const edit of exportEdits)if(tableEdit(edit)&&edit.anchor)delete edit.anchor.occurrence;
-        const prepared=await benchmarkSource({file,fileHash:hash,edits:exportEdits,signal:ctl.signal}),request=prepared.request;
+        if(!useRecomposition&&!mixed)for(const edit of exportEdits)if(tableEdit(edit)&&edit.anchor)delete edit.anchor.occurrence;
+        const input={file,fileHash:hash,edits:exportEdits,signal:ctl.signal};
+        const prepared=useRecomposition?{request:recompositionRequest(input,revision),blinding:null}:await benchmarkSource(input),request=prepared.request;
         if(mine!==genId||epoch!==epochAt||ctl.signal.aborted)return;
         let result;
         try{
-          if(mixed){
+          if(useRecomposition)result=await api.prepare(request);
+          else if(mixed){
             const bodyApi=bodyExporter(edits.filter(e=>!tableEdit(e)));
             const bodyAdapter={prepare:async bodyRequest=>{
               try{return await bodyApi.prepare(bodyRequest);}
@@ -1343,24 +1354,25 @@
         }
         catch(e){
           const failures=e&&e.details&&e.details.edits;
-          const canFlow=!edits.some(e=>String(e.segmentId||'').startsWith('table:'))&&api===legacyExporterApi()&&paragraphApi()&&e.code==='unsupported'&&Array.isArray(failures)&&failures.length&&failures.every(f=>f.code==='long-after-no-room');
+          const canFlow=!useRecomposition&&!edits.some(e=>String(e.segmentId||'').startsWith('table:'))&&api===legacyExporterApi()&&paragraphApi()&&e.code==='unsupported'&&Array.isArray(failures)&&failures.length&&failures.every(f=>f.code==='long-after-no-room');
           if(!canFlow||ctl.signal?.aborted||mine!==genId||epoch!==epochAt||!source||source.fileHash!==hash||snapshot?.revision!==revision)throw e;
           setGenStatus('선택 편집이 원래 공간에 들어가지 않아 전체 편집을 문단 흐름으로 생성하는 중입니다.');
           result=await paragraphApi().prepare({...request,edits:JSON.parse(JSON.stringify(edits))});
         }
-        result=bindBenchmarkResult(result,prepared,hash);
+        if(!useRecomposition)result=bindBenchmarkResult(result,prepared,hash);
+        if(useRecomposition&&result?.revision!==revision)throw new Error('생성 결과의 편집 revision이 다릅니다.');
         if(mine!==genId||epoch!==epochAt||!source||source.fileHash!==hash)return;
         if(!isFile(result&&result.file)||typeof result.sha256!=='string'||!HEX.test(result.sha256))throw new Error('생성 결과가 실제 파일이 아닙니다.');
         const bytes=new Uint8Array(await result.file.arrayBuffer());
         if(mine!==genId||epoch!==epochAt)return;
         const actualHash=await sha256Hex(bytes);
-        if(mine!==genId||epoch!==epochAt||!source||source.file!==file||source.fileHash!==hash||ctl.signal?.aborted)return;
+        if(mine!==genId||epoch!==epochAt||!source||source.file!==file||source.fileHash!==hash||ctl.signal?.aborted||snapshot?.revision!==revision)return;
         if(actualHash!==result.sha256)throw new Error('생성 파일의 바이트와 해시가 달라 받지 않았습니다.');
         if(new TextDecoder().decode(bytes.subarray(0,1024)).indexOf('%PDF-')<0)throw new Error('생성 결과에 PDF 서명이 없어 받지 않았습니다.');
-        const candidate={file:result.file,sha256:result.sha256,originalSourceSha256:HEX.test(result.originalSourceSha256||'')?result.originalSourceSha256:hash,verification:result.verification==null?null:result.verification,warnings:Array.isArray(result.warnings)?result.warnings:null,pageMap:clone(result.pageMap)||null,revision,blocked:false};
+        const candidate={file:result.file,sha256:result.sha256,originalSourceSha256:HEX.test(result.originalSourceSha256||'')?result.originalSourceSha256:hash,verification:result.verification==null?null:result.verification,warnings:Array.isArray(result.warnings)?result.warnings:null,pageMap:clone(result.pageMap)||null,inspection:useRecomposition?clone({bindings:result.bindings,sourceBinding:result.sourceBinding,sourceAssets:result.sourceAssets,sourceLinks:result.sourceLinks,linkPlan:result.linkPlan,blockMap:result.blockMap,blockSpans:result.blockSpans,furnitureMap:result.furnitureMap}):null,revision,blocked:false};
         let tableNote='';
         const tableEdits=edits.filter(e=>String(e.segmentId||'').startsWith('table:'));
-        if(tableEdits.length){
+        if(tableEdits.length&&!useRecomposition){
           tableNote=' 표의 원래 칸과 생성 글자를 확인하세요. 셀 크기는 자동으로 늘리지 않습니다.';
           const mapping=tableOutputPages(result),cells=tableEdits.map(e=>({id:e.id,pageIndex:mapping?.get(e.pageIndex),after:e.after,bbox:tableBindings.get(e.segmentId)?.cellBbox}));
           if(!mapping){
@@ -1378,7 +1390,7 @@
             }catch(e){if(ctl.signal.aborted)return;tableNote=' 표 셀 안의 배치를 확인하지 못했습니다. 생성본에서 칸 경계를 확인하세요.';}
           }
         }
-        if(mine!==genId||epoch!==epochAt||!source||source.file!==file||source.fileHash!==hash||ctl.signal?.aborted)return;
+        if(mine!==genId||epoch!==epochAt||!source||source.file!==file||source.fileHash!==hash||ctl.signal?.aborted||snapshot?.revision!==revision)return;
         output=candidate;afterPart=0;afterSourcePage=page;
         const noted=diagnosticText(output.warnings,output.verification);
         emit('falsify:paper-workspace-output',published({sha256:output.sha256,revision:output.revision,verification:scrub(output.verification,0)}));
@@ -1658,7 +1670,7 @@
       acceptProposals,exportRedBatch,
       getSource(){if(!source||!source.file||!source.fileHash)return null;return Object.freeze({file:source.file,fileHash:source.fileHash,segments:published(source.segments)||[]});},
       getEditSnapshot(){const raw=session&&typeof session.snapshot==='function'?session.snapshot():snapshot;return raw?published(raw):null;},
-      getOutput(){if(!output||output.blocked)return null;return Object.freeze({file:output.file,sha256:output.sha256,originalSourceSha256:output.originalSourceSha256,verification:published(output.verification),revision:output.revision,pageMap:published(output.pageMap)});}
+      getOutput(){if(!output||output.blocked)return null;return Object.freeze({file:output.file,sha256:output.sha256,originalSourceSha256:output.originalSourceSha256,verification:published(output.verification),warnings:published(output.warnings),inspection:published(output.inspection),revision:output.revision,pageMap:published(output.pageMap)});}
     };
   }
   return {create,pageIndexFromLabel,classifyProposals,anchorFromSelection,clampScale,TTL};

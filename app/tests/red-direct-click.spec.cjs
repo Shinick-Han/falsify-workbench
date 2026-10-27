@@ -21,7 +21,7 @@ function element(id){
     replaceChildren(...c){this.children=c;},append(...c){this.children.push(...c);},after(){},remove(){},click(){this.dispatchEvent(new Event('click'));},getClientRects:()=>[]});
   return e;
 }
-function world(cap, workspace){
+function world(cap, workspace, preview){
   const els=new Map(),get=id=>{if(!els.has(id))els.set(id,element(id));return els.get(id);},created=[],downloads=[],calls=[],handoffs=[];
   const document=new EventTarget();
   Object.assign(document,{querySelector:s=>s.startsWith('#')?get(s.slice(1)):null,querySelectorAll:()=>[],createElement:()=>{const e=element('');created.push(e);return e;},body:element('body')});
@@ -31,7 +31,7 @@ function world(cap, workspace){
   const bridge={busyCalls:[],busy(role,v){if(role==='red')bridge.busyCalls.push(!!v);},state:()=>({status:'paired',connected:true,cap}),capabilities:()=>cap,
     session:()=>({request:(p,body)=>{calls.push({path:p,body});const out=Promise.resolve().then(()=>reply(p,body));w.inflight++;out.then(()=>{w.inflight--;},()=>{w.inflight--;});return out;}})};
   const URLmock={createObjectURL:blob=>{downloads.push(blob);return 'blob:'+downloads.length;},revokeObjectURL(){}};
-  const ctx=vm.createContext({document,crypto:globalThis.crypto,FalsifyDocumentRed:C,FalsifyHarness:require('../dist/harness-core.js'),FalsifyLocalBridge:bridge,FalsifyLab:lab,FalsifyExport:{},FalsifyPaperWorkspace:workspace,TextEncoder,TextDecoder,CustomEvent,Event,URL:URLmock,Blob,File,setTimeout,clearTimeout,confirm:()=>true,addEventListener(){},btoa,atob,Uint8Array,Array,Promise,Error,Map,JSON,Number,String,Object});
+  const ctx=vm.createContext({document,crypto:globalThis.crypto,FalsifyDocumentRed:C,FalsifyHarness:require('../dist/harness-core.js'),FalsifyLocalBridge:bridge,FalsifyLab:lab,FalsifyExport:{},FalsifyPaperWorkspace:workspace,FalsifyPreview:preview,TextEncoder,TextDecoder,CustomEvent,Event,URL:URLmock,Blob,File,setTimeout,clearTimeout,confirm:()=>true,addEventListener(){},btoa,atob,Uint8Array,Array,Promise,Error,Map,JSON,Number,String,Object});
   vm.runInContext(SOURCE,ctx,{filename:'document-red.js'});
   document.addEventListener('falsify:blue-file',e=>handoffs.push(e.detail));
   const fire=(type,detail)=>document.dispatchEvent(new CustomEvent(type,{cancelable:true,detail}));
@@ -75,5 +75,9 @@ test('a workspace source change during generation never downloads stale bytes',a
   let release,sourceHash=sha(SRC);const ws={getSource:()=>({fileHash:sourceHash}),getEditSnapshot:()=>({revision:7}),acceptProposals(){},exportRedBatch:()=>new Promise(r=>release=r)};
   const w=world({red:false,blue:false,pdf:false},ws);await w.ready();w.get('red-download').click();await flush();sourceHash='a'.repeat(64);
   release({bytes:new Uint8Array(OUT),sha256:sha(OUT),verification:{status:'passed'},workspaceRevision:7});await flush();assert.equal(w.downloads.length,0);assert.match(w.status(),/다운로드 차단/);
+});
+test('RED preview and download share the runtime File with findings',async()=>{
+ const output=new File([OUT],'generated.pdf',{type:'application/pdf'}),shown=[];const ws={getSource:()=>({fileHash:sha(SRC)}),getEditSnapshot:()=>({revision:7}),async exportRedBatch(){return {file:output,bytes:new Uint8Array(OUT),sha256:sha(OUT),verification:{status:'finding'},warnings:['content mismatch'],workspaceRevision:7};}};
+ const w=world({red:false,blue:false,pdf:false},ws,{createPreview:()=>({clear(){},show:async value=>shown.push(value)})});await w.ready();w.get('red-download').click();await flush();assert.equal(w.downloads[0],output);assert.equal(shown[0].file,output);assert.match(w.status(),/content mismatch/);
 });
 (async()=>{let failed=0;for(const [name,fn] of tests){try{await fn();console.log('PASS '+name);}catch(e){failed++;console.error('FAIL '+name,e);}}if(failed)process.exitCode=1;})();

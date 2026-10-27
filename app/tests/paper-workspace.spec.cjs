@@ -129,7 +129,7 @@ function mount(opts={}){
   const sourceBlobs=opts.sourceBlobs||blobMemory();
   const clock={value:opts.clock??1_700_000_000_000};
   const ws=api.create({document:w.document,preview:opts.preview===false?undefined:{pdfParams:Preview.pdfParams,fitScale:Preview.fitScale,defaultImport:async()=>lib},
-    edits:edits||undefined,exporter:exporter||undefined,paragraphPdf:opts.paragraphPdf,tablePdf:opts.tablePdf,pipeline:opts.pipeline,storage,sourceBlobs,urls:{createObjectURL(file){downloads.push(file);return 'blob:'+downloads.length;},revokeObjectURL(){}},
+    edits:edits||undefined,exporter:exporter||undefined,paragraphPdf:opts.paragraphPdf,tablePdf:opts.tablePdf,pipeline:opts.pipeline,recompositionPdf:opts.recompositionPdf,recompositionBindings:opts.recompositionBindings,storage,sourceBlobs,urls:{createObjectURL(file){downloads.push(file);return 'blob:'+downloads.length;},revokeObjectURL(){}},
     timers,subtle:opts.subtle||crypto.subtle,now:()=>clock.value});
   const file=f=>{w.get('paper-file').files=[f];w.get('paper-file').dispatchEvent(new Event('change'));};
   const canvas=()=>w.get('paper-before-stage').children.flatMap(page=>(page.children||[]).filter(c=>c.tagName==='canvas'));
@@ -1127,6 +1127,20 @@ test('paragraph preparation is reused for the same original page and reset for a
   v.file(pdfFile(pdfBytes('MARKER-B')));await until(()=>calls.length===2&&/문단을 클릭/.test(v.get('paper-before-status').textContent),'new original inspected');
   assert.notEqual(calls[0].fileHash,calls[1].fileHash);
   assert.equal(v.ws.getEditSnapshot().edits.length,0);
+});
+
+test('recomposition request and failure retain real output without fallback',async()=>{
+  const bytes=pdfBytes('MARKER-GEN'),generated=pdfFile(bytes),calls=[];let mode='ok',legacy=0;
+  const v=mount({pages:1,recompositionPdf:{prepare:async req=>{calls.push(req);if(mode==='fail')throw Object.assign(new Error('no room'),{code:'unsupported',details:{edits:[{code:'long-after-no-room'}]}});return {file:generated,sha256:sha(bytes),revision:mode==='wrong'?req.revision+1:req.revision,verification:{status:'finding',edits:[{status:'bound'}]},warnings:['Output text check found content loss or mismatch.']};}},exporter:{prepare:async()=>{legacy++;throw Error('legacy');}},paragraphPdf:{prepare:async()=>{legacy++;throw Error('fallback');}},recompositionBindings:()=>[{id:'exact'}]});
+  const source=pdfFile(pdfBytes('MARKER-A'));v.file(source);await until(()=>v.ws.getSource()&&v.edits.last,'source');v.edits.last.add({pageIndex:0,segmentId:'s0',before:'Alpha',after:'Beta',anchor:{start:0,end:5},origin:'human'});
+  v.get('paper-generate').click();await until(()=>v.ws.getOutput()&&!v.get('paper-generate').disabled,'recomposition');
+  const req=calls[0],out=v.ws.getOutput();assert.equal(req.file,source);assert.equal(req.fileHash,sha(pdfBytes('MARKER-A')));assert.equal(req.revision,v.ws.getEditSnapshot().revision);assert.equal(req.edits[0].after,'Beta');assert.deepEqual(req.edits[0].anchor,{start:0,end:5});assert.ok(req.signal);assert.equal(req.bindings[0].id,'exact');assert.equal(out.file,generated);assert.equal(out.verification.status,'finding');assert.match(v.get('paper-generate-status').textContent,/content loss/);v.get('paper-current-download').click();assert.equal(v.downloads.at(-1),generated);assert.equal(legacy,0);
+  mode='fail';v.get('paper-generate').click();await until(()=>/생성하지 못했습니다/.test(v.get('paper-generate-status').textContent),'failure');assert.equal(v.ws.getOutput().file,generated);assert.equal(legacy,0);
+  mode='wrong';v.get('paper-generate').click();await until(()=>!v.get('paper-generate').disabled,'wrong revision');assert.equal(v.ws.getOutput().file,generated);assert.equal(legacy,0);
+});
+test('recomposition stale edit cannot become latest result',async()=>{
+  const bytes=pdfBytes('MARKER-GEN'),file=pdfFile(bytes);let release,started=false;const v=mount({pages:1,recompositionPdf:{prepare:async req=>{started=true;await new Promise(r=>release=r);return {file,sha256:sha(bytes),revision:req.revision};}}});
+  v.file(pdfFile(pdfBytes('MARKER-A')));await until(()=>v.ws.getSource()&&v.edits.last,'source');v.edits.last.add({pageIndex:0,before:'Alpha',after:'Beta',origin:'human'});v.get('paper-generate').click();await until(()=>started,'held');v.edits.last.update('e1',{after:'Gamma'});release();await until(()=>!v.get('paper-generate').disabled,'completed');assert.equal(v.ws.getOutput(),null);
 });
 
 (async()=>{let passed=0;for(const [name,fn] of tests){try{await fn();passed++;console.log('PASS '+name);}catch(e){console.error('FAIL '+name+'\n'+(e.stack||e));process.exitCode=1;}}

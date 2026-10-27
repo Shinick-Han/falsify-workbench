@@ -129,7 +129,7 @@ function mount(opts={}){
   const sourceBlobs=opts.sourceBlobs||blobMemory();
   const clock={value:opts.clock??1_700_000_000_000};
   const ws=api.create({document:w.document,preview:opts.preview===false?undefined:{pdfParams:Preview.pdfParams,fitScale:Preview.fitScale,defaultImport:async()=>lib},
-    edits:edits||undefined,exporter:exporter||undefined,paragraphPdf:opts.paragraphPdf,tablePdf:opts.tablePdf,pipeline:opts.pipeline,blindPdf:opts.blindPdf,storage,sourceBlobs,urls:{createObjectURL(file){downloads.push(file);return 'blob:'+downloads.length;},revokeObjectURL(){}},
+    edits:edits||undefined,exporter:exporter||undefined,paragraphPdf:opts.paragraphPdf,tablePdf:opts.tablePdf,pipeline:opts.pipeline,blindPdf:opts.blindPdf,recompositionPdf:opts.recompositionPdf,storage,sourceBlobs,urls:{createObjectURL(file){downloads.push(file);return 'blob:'+downloads.length;},revokeObjectURL(){}},
     timers,subtle:opts.subtle||crypto.subtle,now:()=>clock.value});
   const file=f=>{w.get('paper-file').files=[f];w.get('paper-file').dispatchEvent(new Event('change'));};
   const canvas=()=>w.get('paper-before-stage').children.flatMap(page=>(page.children||[]).filter(c=>c.tagName==='canvas'));
@@ -167,5 +167,11 @@ test('clean source hashes bind to original provenance and a mismatched engine so
   const originalHash=v.ws.getSource().fileHash,args={fileHash:originalHash,revision:'red-rev',patches:[{segmentId:'s0',before:'Alpha',after:'Edited After',offset:0}],isCurrent:()=>true};
   const result=await v.ws.exportRedBatch(args);assert.equal(result.verification.blinding.originalSourceSha256,originalHash);assert.equal(result.verification.blinding.cleanSourceSha256,cleanHash);assert.equal(result.verification.sourceSha256,cleanHash);assert.equal(v.ws.getSource().fileHash,originalHash);
   mismatch=true;await assert.rejects(v.ws.exportRedBatch(args),/원본 해시/);assert.equal(calls,2);assert.equal(v.ws.getOutput(),null);
+});
+test('recomposition RED batch uses selected edits and preserves manual session',async()=>{
+ const calls=[],bytes=pdfBytes('MARKER-GEN'),out=pdfFile(bytes);const runtime={prepare:async req=>{calls.push(req);return {file:out,sha256:sha(bytes),revision:req.revision,verification:{status:'finding'},warnings:['finding']};}};
+ const v=mount({pages:1,recompositionPdf:runtime,edits:require('../dist/paper-edits.js')});const file=pdfFile(pdfBytes('MARKER-A'));v.file(file);await until(()=>v.ws.getSource(),'source');v.document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file,result:{segments:[{label:'PDF p. 1',text:'Alpha Beta Gamma'}]}}}));await settle();
+ v.ws.acceptProposals([{segmentId:'s0',before:'Gamma',after:'Manual',anchor:{start:11,end:16}}],{origin:'external-ai-import',confirmed:true});const before=v.ws.getEditSnapshot();const result=await v.ws.exportRedBatch({fileHash:v.ws.getSource().fileHash,revision:'red-rev',patches:[{segmentId:'s0',before:'Alpha',after:'Current After',offset:0}],isCurrent:()=>true});
+ assert.equal(result.file,out);assert.equal(result.verification.status,'finding');assert.equal(calls[0].file,file);assert.equal(calls[0].edits.length,1);assert.equal(calls[0].edits[0].after,'Current After');assert.deepEqual(v.ws.getEditSnapshot(),before);
 });
 (async()=>{let failed=0;for(const [name,fn] of tests){try{await fn();console.log('PASS '+name);}catch(e){failed++;console.error('FAIL '+name,e);}}if(failed)process.exitCode=1;})();
