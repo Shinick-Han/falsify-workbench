@@ -6,13 +6,7 @@ Public API (contract: falsify coordination image-occurrence-contract, v1):
   replace_occurrence(source, occurrence_id, replacement_png) -> (output_pdf_bytes, report)
 Failures raise ValueError(fixed_code); a missing dependency raises ValueError('dependency-unavailable').
 
-What is editable: a page-level or simple Form-nested `/Name Do` that paints an opaque raster Image XObject on an unrotated, uncropped page with
-an axis-aligned positive-scale CTM, no clip that cuts the image, no transparency (ExtGState alpha/soft mask/blend, image
-SMask/Mask/ImageMask), no later-painted content intersecting its box, inside a page whose image paints line up one-to-one
-with MuPDF's paint log. The same xref may be painted elsewhere (twice on a page, on other pages, via inherited shared
-Resources or repeated Forms): only the selected operator invocation is changed. Form ancestry is limited to three levels,
-with rectangular containing BBoxes, no transparency group/masks and a positive axis-aligned final CTM. Inline, clipped,
-transparent, rotated or overlapped images remain non-editable; nothing is guessed.
+What is editable: a page-level or simple Form-nested `/Name Do` raster Image XObject on an unrotated, uncropped page with a positive near-axis-aligned CTM and rectangular clipping. Operator-local surgery preserves clipping and subsequent paints. Graphics-state transparency, complex clips, image stencils, explicit masks, soft masks with matte, optional content and tagged structures remain unsupported. RGB PNG retains a compatible original soft mask; RGBA PNG supplies its own alpha in place of the original mask. Other occurrences of shared resources remain unchanged.
 
 Occurrence id = sha256(source sha256, page index, painting operator path). The path is (content stream index, operator
 index) for the page-level Do, extended by (form object, operator index) for nested paints, so two paints of one xref at
@@ -103,7 +97,7 @@ def _mul(m, n):
     return (a * A + b * C, a * B + b * D, c * A + d * C, c * B + d * D, e * A + f * C + E, e * B + f * D + F)
 
 
-def _axis(m): return abs(m[1]) <= 1e-9 and abs(m[2]) <= 1e-9
+def _axis(m): return abs(m[1]) <= max(abs(m[0]), abs(m[3]), 1.0) * 1e-6 and abs(m[2]) <= max(abs(m[0]), abs(m[3]), 1.0) * 1e-6
 
 
 def _rect_through(m, x0, y0, x1, y1):
@@ -220,7 +214,12 @@ def _image_opaque_issue(pk, image):
     # structure-tree associations. A normal visible render cannot prove these.
     if any(key in image for key in ('/OC', '/StructParent', '/StructParents')):
         return 'form-image'
-    if image.get('/ImageMask') is True or image.get('/SMask') is not None or image.get('/Mask') is not None:
+    if image.get('/ImageMask') is True or image.get('/Mask') is not None:
+        return 'transparency'
+    mask = image.get('/SMask')
+    if mask is not None and (not isinstance(mask, pk.Stream) or '/Matte' in mask
+            or mask.get('/Subtype') != pk.Name('/Image') or mask.get('/ColorSpace') != pk.Name('/DeviceGray')
+            or mask.get('/SMask') is not None or mask.get('/Mask') is not None):
         return 'transparency'
     smid = image.get('/SMaskInData')
     if smid is not None and int(smid) != 0: return 'transparency'
@@ -383,12 +382,13 @@ class _Scanner:
         if reason is None and not (_axis(ctm) and ctm[0] > 0 and ctm[3] > 0 and bbox[2] - bbox[0] > TOL
                 and bbox[3] - bbox[1] > TOL and width > 0 and height > 0):
             reason = 'unsupported-transform'
-        if reason is None and (state['clip'] == 'complex' or (state['clip'] is not None
-                and not _contains(state['clip'], bbox)) or not _contains(self.mediabox, bbox)):
+        if reason is None and state['clip'] == 'complex':
             reason = 'clipped-image'
         if reason is None and state['trans']: reason = 'transparency'
         self.events.append({'kind': kind, 'path': path, 'name': name, 'xref': xref, 'width': width, 'height': height,
-            'pdfBox': bbox, 'reason': reason, 'surgery': surgery})
+            'pdfBox': bbox, 'visibleBox': _intersect(_intersect(bbox, self.mediabox), state['clip'])
+                if state['clip'] not in (None, 'complex') else _intersect(bbox, self.mediabox),
+            'reason': reason, 'surgery': surgery})
 
 
 def _page_geometry(pk, page):
@@ -450,7 +450,7 @@ def _open_mu(mu, data):
 
 
 def _align(mu_page, page_events, mediabox):
-    """Line page image paints up with MuPDF's ordered paint log and apply the overlap rule. Mutates reasons."""
+    """Line page image paints up with MuPDF's ordered paint log. Mutates reasons."""
     try:
         log = mu_page.get_bboxlog()
     except Exception:
@@ -465,11 +465,7 @@ def _align(mu_page, page_events, mediabox):
         x0, y0, x1, y1 = _top_left(mediabox, e['pdfBox'])
         if max(abs(x0 - rect[0]), abs(y0 - rect[1]), abs(x1 - rect[2]), abs(y1 - rect[3])) > 0.5:
             e['reason'] = 'scan-limit'; continue
-        for kind, r in log[li + 1:]:
-            if kind == 'ignore-text': continue
-            ix0, iy0, ix1, iy1 = max(x0, r[0]), max(y0, r[1]), min(x1, r[2]), min(y1, r[3])
-            if ix1 - ix0 > TOL and iy1 - iy0 > TOL:
-                e['reason'] = 'overlapping-content'; break
+
 
 
 def _scan(pk, mu, source):
@@ -612,10 +608,8 @@ def _decode_png(Image, data, size):
             if img.size != size or img.mode not in ('RGB', 'RGBA') or getattr(img, 'is_animated', False):
                 raise ValueError('replacement-invalid')
             img.load()
-            if img.mode == 'RGBA':
-                if img.getchannel('A').getextrema() != (255, 255): raise ValueError('transparency')
-                img = img.convert('RGB')
-            return img.tobytes()
+            alpha = img.getchannel('A').tobytes() if img.mode == 'RGBA' else None
+            return img.convert('RGB').tobytes(), alpha
     except ValueError:
         raise
     except Exception:
@@ -686,6 +680,7 @@ def _rewrite(pk, source, target, rgb, size):
             datas = [_stream_bytes(pk, s) for s in streams]
         except _PageStop as exc:
             raise ValueError(exc.reason) from None
+        rgb, alpha = rgb
         image = pdf.make_stream(zlib.compress(rgb, 9))
         image.Type, image.Subtype = pk.Name('/XObject'), pk.Name('/Image')
         image.Width, image.Height = size
@@ -700,6 +695,14 @@ def _rewrite(pk, source, target, rgb, size):
             if not isinstance(original, pk.Stream): raise ValueError('malformed-pdf')
             if level + 1 == len(steps):
                 if original.get('/Subtype') != pk.Name.Image: raise ValueError('malformed-pdf')
+                if alpha is None:
+                    if original.get('/SMask') is not None: image.SMask = original.SMask
+                else:
+                    mask = pdf.make_stream(zlib.compress(alpha, 9))
+                    mask.Type, mask.Subtype = pk.Name('/XObject'), pk.Name('/Image')
+                    mask.Width, mask.Height = size
+                    mask.ColorSpace, mask.BitsPerComponent, mask.Filter = pk.Name('/DeviceGray'), 8, pk.Name('/FlateDecode')
+                    image.SMask = mask
                 replacement = image
             else:
                 if original.get('/Subtype') != pk.Name.Form: raise ValueError('malformed-pdf')
@@ -843,7 +846,7 @@ def _verify(pk, mu, Image, ImageChops, source, output, scan, target, expected_st
             ia = Image.frombytes('RGB', (ra.width, ra.height), ra.samples)
             ib = Image.frombytes('RGB', (rb.width, rb.height), rb.samples)
             diff = ImageChops.difference(ia, ib)
-            x0, y0, x1, y1 = target['bbox']
+            x0, y0, x1, y1 = _top_left(tuple(pa.mediabox), target['visibleBox'])
             roi = (max(0, math.floor(x0 * zoom) - BLEED_PX), max(0, math.floor(y0 * zoom) - BLEED_PX),
                 min(ra.width, math.ceil(x1 * zoom) + BLEED_PX), min(ra.height, math.ceil(y1 * zoom) + BLEED_PX))
             changed = diff.getbbox()
