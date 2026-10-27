@@ -4,6 +4,11 @@
 # A pairing link requires visible approval, then starts the companion in the background.
 # The link never carries a bearer, password, or command. Errors are logged without credentials.
 set -euo pipefail
+# Finder/Launch Services supplies a reduced PATH; retain Homebrew and user CLI discovery.
+if [ "$(uname -s)" = Darwin ]; then
+  PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+  export PATH
+fi
 root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 # shellcheck disable=SC1091
 . "$root/falsify-connection.sh"
