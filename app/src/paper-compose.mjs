@@ -358,8 +358,8 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
     source+=`#columns(2)[\n${document.blocks.map(b=>renderBlock(b)).filter(Boolean).join('\n\n')}\n]`;
   }
   let compiled=await compile({source, fonts, files, signal}); abort(signal);
-  // A full-width figure ends a column group. Balance a sparsely filled final
-  // page only at an existing paragraph boundary, using the measured output.
+  // A full-width figure ends a column group. Balance a left-only final page
+  // at an existing paragraph boundary, using the measured output.
   if(Array.isArray(compiled?.blockSpans) && balanceGroups.length) {
     const spans=new Map(compiled.blockSpans.map(s=>[s.id,s])); let revised=source;
     for(const items of balanceGroups) {
@@ -367,11 +367,10 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
       if(!all.length || all.some(s=>!s?.start || !s.end || !Number.isInteger(s.end.page))) continue;
       const last=Math.max(...all.map(s=>s.end.page));
       const onPage=all.filter(s=>s.start.page<=last && s.end.page>=last);
-      const starts=onPage.filter(s=>s.start.page===last);
       const splitX=margins.left+(page.width-margins.left-margins.right)/2;
-      if(starts.length<3 || onPage.some(s=>(s.start.page===last && s.start.x>=splitX) || (s.end.page===last && s.end.x>=splitX))) continue;
+      if(onPage.some(s=>(s.start.page===last && s.start.x>=splitX) || (s.end.page===last && s.end.x>=splitX))) continue;
       const bottom=Math.max(...onPage.filter(s=>s.end.page===last).map(s=>s.end.y));
-      if(!Number.isFinite(bottom) || bottom>margins.top+(page.height-margins.top-margins.bottom)*.7) continue;
+      if(!Number.isFinite(bottom) || bottom>page.height-margins.bottom) continue;
       const target=(margins.top+bottom)/2;
       const eligible=items.filter(item=>!item.inline && ['paragraph','caption'].includes(item.kind) && item.ids.length===1).map(item=>spans.get(item.ids[0])).filter(s=>s?.start?.page===last && s.start.y>margins.top+25 && s.start.y<bottom-25).sort((a,b)=>Math.abs(a.start.y-target)-Math.abs(b.start.y-target));
       const chosen=eligible[0]; if(!chosen) continue;

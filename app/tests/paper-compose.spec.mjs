@@ -151,6 +151,17 @@ test('sparse last column page before a full-width figure balances at a paragraph
  }
 });
 
+test('last left column balances across the old cutoff with only two starts',async()=>{
+ const d=make();d.blocks=Array.from({length:3},(_,i)=>({id:`p${i}`,text:`Paragraph ${i}`,source:{pageIndex:0,range:{start:i*20,end:i*20+11},lines:[]}}));
+ const box=[0,0,100,100],svg=new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"></svg>');
+ const flow={schema:'falsify.paper-flow.v1',sourceSha256:d.sourceSha256,items:[...d.blocks.map(b=>({kind:'paragraph',columns:2,blockIds:[b.id]})),{kind:'asset',span:'page',assetIds:['pic'],blockIds:[],source:{pageIndex:0,bbox:box}}]};
+ for(const [bottom,expectedCalls] of [[404,2],[406,2],[500,2],[565,1]]) {
+  const spans=[{id:'p0',sourcePage:0,start:{page:1,x:36,y:300},end:{page:2,x:36,y:60}},{id:'p1',sourcePage:0,start:{page:2,x:36,y:60},end:{page:2,x:36,y:250}},{id:'p2',sourcePage:0,start:{page:2,x:36,y:250},end:{page:2,x:36,y:bottom}}];let sources=[],checked;
+  await composeDocument({document:d,sourceBytes:src,flow,assets:[{id:'pic',source:{pageIndex:0,bbox:box},content:{representation:'svg',bytes:svg}}]},{compile:async p=>(sources.push(p.source),{bytes:pdf,blockSpans:spans}),outputCheck:async p=>(checked=p.expectedBlocks,{checks:{content:{status:'pass'}},findings:[]})});
+  assert.equal(sources.length,expectedCalls,`bottom ${bottom}`);assert.equal(sources.at(-1).includes('#colbreak()'),expectedCalls===2);assert.deepEqual(checked.map(x=>x.text),d.blocks.map(x=>x.text));
+ }
+});
+
 test('union capture owns panels and rejects missing or malformed occurrences',async()=>{
  const d=make(), source={pageIndex:0,bbox:[0,0,20,10]}; d.assets=[{id:'p1'},{id:'p2'}];
  const f={schema:'falsify.paper-flow.v1',sourceSha256:d.sourceSha256,items:[{kind:'asset',assetIds:['p1','p2'],blockIds:[],renderAssetId:'union',source},{kind:'paragraph',blockIds:['a','b']}]};
