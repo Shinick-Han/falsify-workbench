@@ -408,7 +408,12 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
     for(const [itemIndex,item] of flow.items.entries()) {
       if(plan?.excludedItemIds.includes(item.id)) continue;
       if(item.kind==='caption' && (item.blockIds||[]).every(id=>linkedCaptions.has(id))) continue;
-      const count=measuredContinuous && itemIndex<firstBodyIndex ? 1 : measuredContinuous && item.measuredColumns===2 ? 2 : item.span==='page'?1:(item.columns===2?2:1); if(count!==columns){flush();columns=count;}
+      // Small, bottom-of-title-page notes may span both source columns but
+      // remain ordinary sequential text in the reflowed column stream.
+      const box=item.source?.bbox, noteBlocks=(item.blockIds||[]).map(id=>blockById.get(id));
+      const noteSizes=noteBlocks.flatMap(b=>(b?.source?.characters||[]).map(c=>styleById.get(c.styleId)?.size));
+      const titlePageNote=measuredContinuous && itemIndex>=firstBodyIndex && item.kind==='paragraph' && item.span==='page' && item.source?.pageIndex===0 && Array.isArray(box) && box.length===4 && box.every(Number.isFinite) && box[0]>=0 && box[2]<=page.width && box[2]>box[0] && box[1]>=page.height*0.8 && box[3]<=page.height && box[3]>box[1] && box[3]-box[1]<=page.height*0.08 && noteSizes.length>0 && Number.isFinite(bodySize) && noteSizes.every(size=>Number.isFinite(size) && size>0 && size<=bodySize*0.95);
+      const count=measuredContinuous && itemIndex<firstBodyIndex ? 1 : titlePageNote || (measuredContinuous && item.measuredColumns===2) ? 2 : item.span==='page'?1:(item.columns===2?2:1); if(count!==columns){flush();columns=count;}
       let parts=[];
       if(item.kind==='asset') {
         if(item.renderAssetId) {
