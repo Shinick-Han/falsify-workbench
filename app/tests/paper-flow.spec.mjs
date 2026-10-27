@@ -89,7 +89,7 @@ test('dense vector plot excludes adjacent editable body and retains axis labels 
  assert.equal(f.items.find(x=>x.blockIds.includes('body')).kind,'paragraph'); assert.equal(f.items.find(x=>x.blockIds.includes('caption')).kind,'caption');
  assert.ok(region.bbox[2]<body.source.bbox[0]); assert.equal(new Set(f.items.flatMap(x=>x.blockIds)).size,d.blocks.length);
  let captured,expected; const pdf=new TextEncoder().encode('%PDF-1.7\n');
- await composeDocument({document:d,sourceBytes:src,edits:[{blockId:'body',pageIndex:0,start:body.source.range.start,end:body.source.range.start+4,before:'This',after:'That'}]},{compile:async p=>(captured=p.source,pdf),outputCheck:async p=>(expected=p.expectedBlocks,{checks:{content:{status:'pass'}},findings:[]})});
+ await composeDocument({document:d,flow:f,sourceBytes:src,edits:[{blockId:'body',pageIndex:0,start:body.source.range.start,end:body.source.range.start+4,before:'This',after:'That'}]},{compile:async p=>(captured=p.source,pdf),outputCheck:async p=>(expected=p.expectedBlocks,{checks:{content:{status:'pass'}},findings:[]})});
  assert.ok(captured.includes(typstString('That is ordinary editable body.'))); assert.equal(expected.find(x=>x.id==='body').text,'That is ordinary editable body.');
- assert.deepEqual(expected.filter(x=>x.id!=='body').map(x=>x.text),d.blocks.filter(x=>x.id!=='body').map(x=>x.text));
+ assert.deepEqual(expected.filter(x=>x.id!=='body').map(x=>x.text),[caption.text]);
 });
