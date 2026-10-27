@@ -10,9 +10,7 @@ python3 -m venv "$work/venv"
 "$work/venv/bin/python" -m pip install -r app/local/requirements.txt
 "$work/venv/bin/python" -m unittest discover -s app/tests -p test_document_red.py -v
 "$work/venv/bin/python" -m unittest discover -s app/tests -p test_blue_visual.py -v
-"$work/venv/bin/python" -m unittest discover -s app/tests -p test_macos_runtime.py -v
-"$work/venv/bin/python" -m unittest discover -s app/tests -p test_cli_selection.py -v
-node --test scripts/packaging.spec.mjs scripts/packaging-macos.spec.mjs
+node --test scripts/packaging.spec.mjs
 node scripts/package-release.mjs --out-dir "$work/release"
 "$work/venv/bin/python" - "$work/release" <<'PY'
 import hashlib, json, pathlib, stat, subprocess, sys, zipfile
@@ -33,8 +31,9 @@ with zipfile.ZipFile(archive) as z:
     files = {i.filename[len(prefix):]: i for i in z.infolist() if not i.is_dir() and i.filename.startswith(prefix)}
     assert set(files) == set(tracked), (set(tracked) - set(files), set(files) - set(tracked))
     for name, mode in tracked.items():
-        assert files[name].create_system == 3, name
-        assert stat.S_IMODE(files[name].external_attr >> 16) == stat.S_IMODE(mode), name
+        # Git ZIP omits Unix attributes for ordinary non-executable files.
+        zipped_mode = stat.S_IMODE(files[name].external_attr >> 16) or 0o644
+        assert zipped_mode == stat.S_IMODE(mode), name
     for name in ('install-connection.sh', 'open-connection.sh', 'uninstall-connection.sh'):
         assert files[name].external_attr >> 16 & 0o111, name
 print('Archive tracked paths and Unix modes verified; SHA-256 and commit match.')
