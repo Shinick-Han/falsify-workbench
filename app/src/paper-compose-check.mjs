@@ -185,8 +185,11 @@ export async function checkRecomposition({bytes, expectedBlocks, edits = {}, pdf
             // hyphenated words and wrapped citations from encoded glyphs.
             const recent=parts.slice(-8).join('');
             const paragraphGap=position && previous.position && Math.abs(position.y-previous.position.y)>Math.max(position.height,previous.position.height,lineHeight)*1.9;
+            // A hyphen at a bottom-to-top right-column transition can be a
+            // wrapped word. Require glyph alignment and encoded whitespace below.
+            const columnTurn=/\S[–\-/]$/u.test(recent) && /^[\p{L}\p{N}_−]/u.test(item.str) && position && previous.position && previous.position.y > viewport.height * 0.8 && position.y < viewport.height * 0.2 && position.x > previous.position.x + previous.position.width;
             const url=/(?:https?:\/\/|www\.)[^\s]*$/iu.test(recent) && (/[./?=&-]$/u.test(recent) || (/\p{L}$/u.test(recent) && /^\p{N}/u.test(item.str)) || /^[\p{L}\p{N}_-]+[./]/u.test(item.str));
-            if (!paragraphGap && ((/\S[–\-/]$/u.test(recent) && /^[\p{L}\p{N}_−]/u.test(item.str)) || (/(?:^|\s)-$/u.test(recent) && /^\p{L}/u.test(item.str)) || (/\S$/u.test(previous.str) && /^\[/u.test(item.str)) || (/\S*\/\S*[?=&]$/u.test(previous.str) && /^[\p{L}\p{N}]/u.test(item.str)) || (url && /^[\p{L}\p{N}]/u.test(item.str)))) {
+            if ((!paragraphGap || columnTurn) && ((/\S[–\-/]$/u.test(recent) && /^[\p{L}\p{N}_−]/u.test(item.str)) || (/(?:^|\s)-$/u.test(recent) && /^\p{L}/u.test(item.str)) || (/\S$/u.test(previous.str) && /^\[/u.test(item.str)) || (/\S*\/\S*[?=&]$/u.test(previous.str) && /^[\p{L}\p{N}]/u.test(item.str)) || (url && /^[\p{L}\p{N}]/u.test(item.str)))) {
               boundaries.push({part:parts.length, ordinal, leftPosition:previous.position, rightPosition:position});
             }
             parts.push(' ');

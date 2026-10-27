@@ -139,6 +139,25 @@ test('encoded glyphs resolve only the matching hard-hyphen boundary', async () =
 });
 
 
+test('column-turn hyphens use encoded whitespace without hiding content changes', async () => {
+  const make = (left, right, x=160, y=370) => {
+    const d=new mupdf.PDFDocument(), f=d.addSimpleFont(new mupdf.Font('Helvetica'));
+    const stream=`BT /F 12 Tf 1 0 0 1 30 30 Tm (${left}) Tj ET\nBT /F 12 Tf 1 0 0 1 ${x} ${y} Tm (${right}) Tj ET\n`;
+    d.insertPage(-1,d.addPage([0,0,300,400],0,{Font:{F:f}},stream));
+    const buf=d.saveToBuffer(), bytes=buf.asUint8Array().slice(); buf.destroy(); d.destroy(); return bytes;
+  };
+  const run=(left,right,expected,x,y,reader=mupdf)=>checkRecomposition({bytes:make(left,right,x,y),expectedBlocks:[{id:'x',text:expected}],pdfjs,mupdf:reader});
+  const joined=await run('donor-','level 12','donor-level 12');
+  assert.equal(joined.checks.content.status,'pass');
+  assert.deepEqual(joined.checks.content.spacingEvidence.map(e=>[e.action,e.leftScalar,e.rightScalar,e.encodedWhitespace]),[['remove-inferred-space',45,108,[]]]);
+  assert.equal((await run('donor- ','level 12','donor- level 12')).checks.content.status,'pass');
+  for (const [left,right,expected] of [['donor- ','level 12','donor-level 12'],['donor-','level 12','donor- level 12'],['donor-','level 13','donor-level 12'],['donor-','levle 12','donor-level 12']])
+    assert.equal((await run(left,right,expected)).checks.content.status,'finding');
+  assert.equal((await run('donor-','level 12','donor-level 12',30,370)).checks.content.status,'finding');
+  assert.equal((await run('donor-','level 12','donor-level 12',160,300)).checks.content.status,'finding');
+  assert.equal((await run('donor-','level 12','donor-level 12',160,370,{})).checks.content.status,'unavailable');
+});
+
 test('glyph-resolved boundaries retain page movement and reject unknown scalars', async () => {
   const bytes = geometryCorpus('hyphen-page');
   const expectedBlocks = [{id:'a',text:'first'},{id:'b',text:'antero-posterior'}];
