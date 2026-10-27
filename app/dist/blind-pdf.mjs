@@ -1,12 +1,13 @@
 const MARKER = 'FALSIFY RED TEAM TRAINING COPY | INTENTIONALLY ALTERED | NOT ORIGINAL';
 const MARKER_ID = 'falsify-red-training-copy';
 const markerHex = '46414c5349465920524544205445414d20545241494e494e4720434f505920207c2020494e54454e54494f4e414c4c5920414c544552454420207c20204e4f54204f524947494e414c';
-const markerStream = new RegExp('^\\s*q\\s+BT\\s+1 0 0 1 30 17\\.8 Tm\\s+/helv 7\\.1 Tf \\.55 \\.25 \\.14 RG \\.55 \\.25 \\.14 rg \\[<' + markerHex + '>\\]TJ\\s+ET\\s+Q\\s*$', 'i');
+const markerStream = /^\s*q\s+BT\s+1 0 0 1 30 17\.8 Tm\s+\/helv 7\.1 Tf \.55 \.25 \.14 RG \.55 \.25 \.14 rg \[<([a-f\d]+)>\]TJ\s+ET\s+Q\s*$/i;
 const bannerStream = /^\s*q\s+25 13 (?:545\.276|562) 14 re\s+h\s+\.98 \.94 \.87 rg f\s+Q\s*$/;
 const decoder = new TextDecoder('latin1');
 function abort(signal) { if (signal?.aborted) throw new DOMException('Aborted', 'AbortError'); }
 function fail(message) { const e = new Error(message); e.code = 'unsafe-marker-stream'; throw e; }
 function normalize(text) { return text.replace(/\s+/g, ' ').trim(); }
+function isMarkerStream(text){const match=markerStream.exec(text);return !!match&&match[1].length%2===0&&normalize(decoder.decode(Uint8Array.from(match[1].match(/../g),h=>parseInt(h,16))))===MARKER;}
 function withoutMarker(text) { return normalize(text).replace(MARKER, '').trim(); }
 function streams(doc, index) {
   const obj = doc.findPage(index).get('Contents');
@@ -30,7 +31,7 @@ function comparePixels(a, b, engine) {
 }
 export async function prepare({file, signal}) {
   abort(signal);
-  const bytes = file.bytes ? new Uint8Array(file.bytes) : new Uint8Array(await file.arrayBuffer());
+  const bytes = file.bytes instanceof Uint8Array ? new Uint8Array(file.bytes) : new Uint8Array(await file.arrayBuffer());
   abort(signal);
   const shaOriginal = await hash(bytes); abort(signal);
   const engine = await import('./browser-pdf-vendor/mupdf.js'); abort(signal);
@@ -44,7 +45,7 @@ export async function prepare({file, signal}) {
     abort(signal);
     const text = normalize(textOf(source, i)); beforeText.push(text);
     const refs = streams(source, i), data = refs.map(decoded), raw = data.map(x => decoder.decode(x));
-    const marks = raw.map((s, n) => markerStream.test(s) ? n : -1).filter(n => n >= 0);
+    const marks = raw.map((s, n) => isMarkerStream(s) ? n : -1).filter(n => n >= 0);
     const bands = raw.map((s, n) => bannerStream.test(s) ? n : -1).filter(n => n >= 0);
     const hasText = text.includes(MARKER);
     const suspicious = raw.some(s => s.toLowerCase().includes(markerHex) || s.includes(MARKER));

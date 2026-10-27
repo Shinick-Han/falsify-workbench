@@ -47,9 +47,8 @@ function world(cap, workspace){
     boxes:()=>created.filter(e=>e.type==='checkbox'),area:i=>created.find(e=>e.id==='red-after-'+i),
     check(i){const b=w.boxes()[i];b.checked=true;b.dispatchEvent(new Event('change'));},
     edit(i,v){const a=w.area(i);a.value=v;a.dispatchEvent(new Event('input'));},
-    consent(){const c=get('red-export-consent');c.checked=true;c.dispatchEvent(new Event('change'));},
     clickDoc(sel){const ev=new Event('click');Object.defineProperty(ev,'target',{value:{closest:s=>s===sel?{}:null}});document.dispatchEvent(ev);},
-    async ready(){await w.load();await w.candidates();w.check(1);w.edit(1,'in every cohort, including the untreated one');w.consent();}};
+    async ready(){await w.load();await w.candidates();w.check(1);w.edit(1,'in every cohort, including the untreated one');}};
   w.inflight=0;current=w;return w;
 }
 const ok=(verification,file=OUT)=>async()=>({file:file.toString('base64'),sourceFileHash:sha(SRC),outputFileHash:sha(file),verification});
@@ -67,8 +66,8 @@ test('one RED click downloads exactly the selected edited batch and saves its ou
   const ws={getSource:()=>({fileHash:sha(SRC)}),getEditSnapshot:()=>({revision:7}),acceptProposals(){},async exportRedBatch(req){calls.push(req);if(fail)throw new Error('synthetic failure');return {bytes:new Uint8Array(OUT),sha256:sha(OUT),verification:{status:'passed'},workspaceRevision:7};}};
   const w=world({red:false,blue:false,pdf:false},ws);await w.ready();assert.equal(w.get('red-download').disabled,false);
   w.get('red-download').click();await flush();assert.equal(calls.length,1);assert.equal(calls[0].patches.length,1);assert.equal(calls[0].patches[0].after,'in every cohort, including the untreated one');
-  assert.equal(w.calls.length,0);assert.equal(w.downloads.length,2);assert.deepEqual(Buffer.from(await w.downloads[0].arrayBuffer()),OUT);
-  const plan=JSON.parse(await w.downloads[1].text());assert.equal(plan.outputFileHash,sha(OUT));assert.equal(plan.selected.length,1);assert.match(w.status(),/다운로드했습니다/);
+  assert.equal(w.calls.length,0);assert.equal(w.downloads.length,1);assert.deepEqual(Buffer.from(await w.downloads[0].arrayBuffer()),OUT);
+  assert.match(w.status(),/다운로드했습니다/);w.get('red-plan').click();await flush();assert.equal(w.downloads.length,2);const plan=JSON.parse(await w.downloads[1].text());assert.equal(plan.outputFileHash,sha(OUT));assert.equal(plan.selected.length,1);
   fail=true;w.get('red-download').click();await flush();assert.match(w.status(),/다운로드 차단/);assert.equal(w.downloads.length,2);assert.equal(w.area(1).value,'in every cohort, including the untreated one');
 });
 

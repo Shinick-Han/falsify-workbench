@@ -1264,6 +1264,18 @@
       }
       return owned.size===count?lookup:null;
     }
+    async function benchmarkSource(request){
+      const helper=deps.blindPdf||globalThis.FalsifyBlindPdf;
+      if(!helper?.prepare)return {request,blinding:null};
+      const clean=await helper.prepare({file:request.file,signal:request.signal});
+      if(request.signal?.aborted)throw new Error('PDF 생성을 취소했습니다.');
+      if(!isFile(clean?.file)||!HEX.test(clean.sha256||'')||await sha256Hex(await clean.file.arrayBuffer())!==clean.sha256)throw new Error('실험 표시 정리 결과를 확인하지 못했습니다.');
+      return {request:{...request,file:clean.file,fileHash:clean.sha256},blinding:clean.changed?{originalSourceSha256:request.fileHash,cleanSourceSha256:clean.sha256,removed:clean.removed,verification:clean.verification}:null};
+    }
+    function bindBenchmarkResult(result,prepared,originalHash){
+      if(result.verification?.sourceSha256&&result.verification.sourceSha256!==prepared.request.fileHash)throw new Error('생성 결과의 원본 해시가 다릅니다.');
+      return prepared.blinding?{...result,originalSourceSha256:originalHash,verification:{...(result.verification||{}),blinding:prepared.blinding}}:result;
+    }
     // Render RED's frozen selected batch in an isolated edit session. Workspace edits and undo stay untouched.
     async function exportRedBatch({fileHash,revision,patches,isCurrent}){
       if(!source||!source.pdf||source.fileHash!==fileHash||!snapshot||!editsApi()?.create)throw new Error('현재 PDF 원본을 확인할 수 없습니다.');
@@ -1284,11 +1296,11 @@
       if(!api?.prepare)throw new Error('브라우저 PDF 편집 모듈이 없습니다.');
       const mine=++genId,ctl=new AbortController();genCtl=ctl;generating=true;renderChrome();
       try{
-        const result=await api.prepare({file,fileHash,edits:clone(edits),signal:ctl.signal});
+        const prepared=await benchmarkSource({file,fileHash,edits:clone(edits),signal:ctl.signal});
+        if(!live()||mine!==genId||ctl.signal.aborted)throw new Error('원본 또는 편집이 바뀌어 생성을 취소했습니다.');
+        const result=bindBenchmarkResult(await api.prepare(prepared.request),prepared,fileHash);
         if(!live()||mine!==genId||ctl.signal.aborted)throw new Error('원본 또는 편집이 바뀌어 생성을 취소했습니다.');
         if(!isFile(result?.file)||!HEX.test(result.sha256||''))throw new Error('생성 결과가 실제 파일이 아닙니다.');
-        if(result.verification?.sourceSha256&&result.verification.sourceSha256!==fileHash)throw new Error('생성 결과의 원본 해시가 다릅니다.');
-        if(result.verification?.status==='failed')throw new Error('생성 파일 검사가 실패했습니다.');
         const bytes=new Uint8Array(await result.file.arrayBuffer()),actual=await sha256Hex(bytes);
         if(!live()||mine!==genId||ctl.signal.aborted)throw new Error('원본 또는 편집이 바뀌어 생성을 취소했습니다.');
         if(actual!==result.sha256||new TextDecoder().decode(bytes.subarray(0,1024)).indexOf('%PDF-')<0)throw new Error('생성 파일을 확인하지 못했습니다.');
@@ -1310,7 +1322,8 @@
         const exportEdits=JSON.parse(JSON.stringify(edits));
         const mixed=exportEdits.some(tableEdit)&&exportEdits.some(e=>!tableEdit(e));
         if(!mixed)for(const edit of exportEdits)if(tableEdit(edit)&&edit.anchor)delete edit.anchor.occurrence;
-        const request={file,fileHash:hash,edits:exportEdits,signal:ctl.signal};
+        const prepared=await benchmarkSource({file,fileHash:hash,edits:exportEdits,signal:ctl.signal}),request=prepared.request;
+        if(mine!==genId||epoch!==epochAt||ctl.signal.aborted)return;
         let result;
         try{
           if(mixed){
@@ -1335,6 +1348,7 @@
           setGenStatus('선택 편집이 원래 공간에 들어가지 않아 전체 편집을 문단 흐름으로 생성하는 중입니다.');
           result=await paragraphApi().prepare({...request,edits:JSON.parse(JSON.stringify(edits))});
         }
+        result=bindBenchmarkResult(result,prepared,hash);
         if(mine!==genId||epoch!==epochAt||!source||source.fileHash!==hash)return;
         if(!isFile(result&&result.file)||typeof result.sha256!=='string'||!HEX.test(result.sha256))throw new Error('생성 결과가 실제 파일이 아닙니다.');
         const bytes=new Uint8Array(await result.file.arrayBuffer());
@@ -1377,10 +1391,10 @@
         setGenStatus('생성하지 못했습니다. 마지막 생성본은 그대로입니다. '+safeMessage(e),true);
       }finally{if(genCtl===ctl)genCtl=null;if(mine===genId&&epoch===epochAt){generating=false;renderChrome();}}
     }
-    function download(file){
+    function download(file,neutral=false){
       if(!isFile(file))return;
       const url=urls.createObjectURL(file),a=doc.createElement('a');
-      a.href=url;a.download=file.name||'download.pdf';(doc.body||ui.root).append(a);a.click();a.remove();
+      a.href=url;a.download=neutral?'paper.pdf':file.name||'download.pdf';(doc.body||ui.root).append(a);a.click();a.remove();
       timers.setTimeout(()=>urls.revokeObjectURL(url),1000);
     }
     async function saveDraft(){
@@ -1552,7 +1566,7 @@
     }
     function handoff(){
       if(!output||output.blocked)return;
-      const ev=new CustomEvent('falsify:blue-file',{cancelable:true,detail:{file:output.file}});
+      const ev=new CustomEvent('falsify:blue-file',{cancelable:true,detail:{file:new File([output.file],'paper.pdf',{type:'application/pdf'})}});
       if(!doc.dispatchEvent(ev)){setGenStatus('BLUE가 인계를 받지 않았습니다. 생성본은 그대로입니다.');return;}
       const nav=[...doc.querySelectorAll('[data-view="blue"]')].find(b=>b.getClientRects&&b.getClientRects().length)||doc.querySelector('[data-view="blue"]');
       if(nav&&typeof nav.click==='function')nav.click();
@@ -1614,7 +1628,7 @@
     ui.zoomIn.addEventListener('click',()=>{const i=ZOOMS.indexOf(zoom);if(i<0||i>=ZOOMS.length-1)return;zoom=ZOOMS[i+1];syncNav();if(source&&source.doc)void drawBefore(page);});
     ui.zoomOut.addEventListener('click',()=>{const i=ZOOMS.indexOf(zoom);if(i<=0)return;zoom=ZOOMS[i-1];syncNav();if(source&&source.doc)void drawBefore(page);});
     ui.original.addEventListener('click',()=>{if(source)download(source.file);});
-    ui.current.addEventListener('click',()=>{if(output&&!output.blocked)download(output.file);});
+    ui.current.addEventListener('click',()=>{if(output&&!output.blocked)download(output.file,true);});
     ui.generate.addEventListener('click',()=>{if(!ui.generate.disabled)void generate();});
     ui.team.addEventListener('click',share);
     ui.blue.addEventListener('click',handoff);

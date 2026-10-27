@@ -89,7 +89,7 @@ details.reference > *{display:block}
 
 <details id="reference" class="reference">
 <summary>자세한 안내</summary>
-<p class="note">이 안내는 0.2.0-alpha.17을 기준으로 합니다. PC 연결 기능은 같은 버전의 companion을 사용하세요. 각 기능의 지원 범위와 검수 한계는 아래에 적었습니다. sourceBuildVerified는 false입니다.</p>
+<p class="note">이 안내는 0.2.0-alpha.18을 기준으로 합니다. PC 연결 기능은 같은 버전의 companion을 사용하세요. 각 기능의 지원 범위와 검수 한계는 아래에 적었습니다. sourceBuildVerified는 false입니다.</p>
 
 <section id="paper" aria-labelledby="paper-title">
 <h2 id="paper-title">논문 작업대</h2>
@@ -205,7 +205,7 @@ python3 -m venv .venv
 <li><strong>예산</strong>: <b class="ui">고급 설정 · 최대 모델 호출</b>(1–32)과 harness의 호출 상한 중 작은 값이 실제 상한입니다. 긴 추출문은 여러 묶음으로 나뉘어 전달되며, 전체를 전달할 예산이 모자라면 모델을 부르기 전에 시작하지 않습니다.</li>
 <li><strong>실행</strong>: 전체 추출 텍스트 전송 동의를 체크하고 <b class="ui">실행</b>. <b class="ui">검토 취소</b>는 결과를 버립니다. 이미 시작된 CLI 호출은 최대 180초까지 이어질 수 있습니다.</li>
 <li><strong>후보 선택</strong>: <b class="ui">결과 · 후보 선택과 사본</b>에서 각 후보의 Before(원본 인용)와 After를 읽습니다. 처음에는 모두 미선택이며, After는 직접 고칠 수 있습니다. After를 바꾸면 이전 다운로드의 검증은 무효가 됩니다. 현재 기본 텍스트 경로에서는 Before에 있는 숫자 토큰, 대괄호 인용(<code>[12]</code> 등), URL을 After에서 그대로 유지해야 하며, 바꾸면 "이번 범위에서는 수치·대괄호 인용·URL을 변경할 수 없습니다."로 거부됩니다.</li>
-<li><strong>저장</strong>: 실험용 사본 동의 후 <b class="ui">보존 검사 후 완성본 다운로드</b>. 검사에 실패하면 다운로드가 막힙니다. <b class="ui">변경 계획 JSON 저장</b>은 변경 근거를 따로 남기며 <strong>BLUE에 넣지 않습니다</strong>. 계획은 검수에서만 대조합니다. PDF는 <b class="ui">다운로드한 사본 미리보기</b>로 받은 바이트를 다시 확인해 그려 볼 수 있습니다(화면 확인용).</li>
+<li><strong>저장</strong>: <b class="ui">PDF 다운로드</b>를 누르면 선택한 후보와 현재 After를 적용한 파일을 바로 받습니다. PDF 하나만 내려받으며, 변경 계획은 별도 버튼으로 저장합니다. <b class="ui">변경 계획 JSON 저장</b>은 변경 근거를 따로 남기며 <strong>BLUE에 넣지 않습니다</strong>. 계획은 검수에서만 대조합니다. PDF는 <b class="ui">다운로드한 사본 미리보기</b>로 받은 바이트를 다시 확인해 그려 볼 수 있습니다(화면 확인용).</li>
 </ol>
 <p>유효한 모델 응답은 자동 기록됩니다. 고른 후보·편집 After는 완성본 다운로드나 <b class="ui">RED 실행 결과 기록</b>으로 저장됩니다. 근거 인용은 앱이 원문과 다시 대조합니다. 모델이 유보하거나 거절하면 후보를 강제로 만들거나 자동 재시도하지 않습니다.</p>
 <p class="note">이 제한은 숫자·대괄호·URL 문자열을 정규식으로 비교하는 좁은 검사입니다. 저자명이나 다른 서지 표기 변경을 의미적으로 막지 않으며, 팀의 과학적 변경 규칙은 이것과 별도로 정합니다. <b class="ui">공격 단계</b> 지침은 해석 왜곡만 다루며 프로젝트 전체의 D1·D2 설계를 구현한 것이 아닙니다.</p>
@@ -388,7 +388,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\start-companion.ps1 -NoIns
 <ol>
 <li>직접 만든 짧은 시험용 TXT를 <b class="ui">RED 논문 파일</b>에 올립니다.</li>
 <li><b class="ui">L1 · 명시적 모순</b>, <b class="ui">Codex CLI</b>를 고르고 동의 후 <b class="ui">실행</b>.</li>
-<li>후보 하나만 체크하고 After를 다듬은 뒤 <b class="ui">보존 검사 후 완성본 다운로드</b>와 <b class="ui">변경 계획 JSON 저장</b>.</li>
+<li>후보 하나만 체크하고 After를 다듬은 뒤 <b class="ui">수정본 다운로드</b>와 <b class="ui">변경 계획 JSON 저장</b>.</li>
 </ol>
 <h3>BLUE만 쓰기 (다른 harness)</h3>
 <ol>

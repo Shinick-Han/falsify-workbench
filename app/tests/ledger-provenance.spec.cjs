@@ -164,7 +164,7 @@ test('BLUE visual record retains bound metadata without bytes across import and 
 });
 test('comparison UI renders actual ledger records and exclusion reasons in VM',async()=>{const {w,ids}=await populated();w.get('harness-comparison-reference').value=ids.live;w.renderComparison();await flush();assert.match(w.get('harness-comparison-summary').textContent,/누락 시도 수 \/ 비용 미상/);const rows=w.get('harness-comparison-body').children;assert.ok(rows.length>=4);assert.match(shown(rows[0]),/portable 전략 미선언/);assert.match(shown(rows.at(-1)),/출처/);});
 
-test('archive module follows the entry script release version instead of reusing a cached module',async()=>{const w=ledger([], 'https://example.invalid/app/experiment-ledger.js?v=0.2.0-alpha.17');await w.lab.ready;assert.equal(w.archiveUrl,'https://example.invalid/app/review-bundle.mjs?v=0.2.0-alpha.17');const bare=ledger([], 'https://example.invalid/app/experiment-ledger.js');await bare.lab.ready;assert.equal(bare.archiveUrl,'https://example.invalid/app/review-bundle.mjs');});
+test('archive module follows the entry script release version instead of reusing a cached module',async()=>{const w=ledger([], 'https://example.invalid/app/experiment-ledger.js?v=0.2.0-alpha.18');await w.lab.ready;assert.equal(w.archiveUrl,'https://example.invalid/app/review-bundle.mjs?v=0.2.0-alpha.18');const bare=ledger([], 'https://example.invalid/app/experiment-ledger.js');await bare.lab.ready;assert.equal(bare.archiveUrl,'https://example.invalid/app/review-bundle.mjs');});
 
 test('real bind, record, reload, archive and import preserve input identity and exclusions',async()=>{
   // Synthetic responses only: no broker or model is invoked or claimed as test evidence.

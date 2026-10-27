@@ -129,7 +129,7 @@ function mount(opts={}){
   const sourceBlobs=opts.sourceBlobs||blobMemory();
   const clock={value:opts.clock??1_700_000_000_000};
   const ws=api.create({document:w.document,preview:opts.preview===false?undefined:{pdfParams:Preview.pdfParams,fitScale:Preview.fitScale,defaultImport:async()=>lib},
-    edits:edits||undefined,exporter:exporter||undefined,paragraphPdf:opts.paragraphPdf,tablePdf:opts.tablePdf,pipeline:opts.pipeline,storage,sourceBlobs,urls:{createObjectURL(file){downloads.push(file);return 'blob:'+downloads.length;},revokeObjectURL(){}},
+    edits:edits||undefined,exporter:exporter||undefined,paragraphPdf:opts.paragraphPdf,tablePdf:opts.tablePdf,pipeline:opts.pipeline,blindPdf:opts.blindPdf,storage,sourceBlobs,urls:{createObjectURL(file){downloads.push(file);return 'blob:'+downloads.length;},revokeObjectURL(){}},
     timers,subtle:opts.subtle||crypto.subtle,now:()=>clock.value});
   const file=f=>{w.get('paper-file').files=[f];w.get('paper-file').dispatchEvent(new Event('change'));};
   const canvas=()=>w.get('paper-before-stage').children.flatMap(page=>(page.children||[]).filter(c=>c.tagName==='canvas'));
@@ -141,7 +141,7 @@ function buttons(v,act,id){return v.get('paper-edits').querySelectorAll('button'
 
 test('isolated RED batch uses only selected current After and preserves workspace edits and output on failure or stale source',async()=>{
   const calls=[];let release, mode='ok';
-  const exporter={prepare:async req=>{calls.push(req);if(mode==='fail')throw new Error('failed');if(mode==='hold')await new Promise(r=>release=r);const bytes=pdfBytes('MARKER-GEN');return {file:pdfFile(bytes,'out.pdf'),sha256:sha(bytes),verification:{status:'passed'}};}};
+  const exporter={prepare:async req=>{calls.push(req);if(mode==='fail')throw new Error('failed');if(mode==='hold')await new Promise(r=>release=r);const bytes=pdfBytes('MARKER-GEN');return {file:pdfFile(bytes,'out.pdf'),sha256:sha(bytes),verification:{status:mode==='draft'?'failed':'passed'}};}};
   const v=mount({pages:1,paragraphPdf:exporter,edits:require('../dist/paper-edits.js')});
   const file=pdfFile(pdfBytes('MARKER-A'));
   v.file(file);await until(()=>v.ws.getSource(),'source');
@@ -153,7 +153,19 @@ test('isolated RED batch uses only selected current After and preserves workspac
   const result=await v.ws.exportRedBatch(args);assert.equal(result.revision,'red-rev');assert.equal(result.workspaceRevision,before.revision);
   assert.equal(calls[0].edits.length,1);assert.equal(calls[0].edits[0].after,'Edited After');assert.deepEqual(v.ws.getEditSnapshot(),before);
   assert.equal(result.sha256,sha(Buffer.from(await result.file.arrayBuffer())));assert.equal(v.ws.getOutput().sha256,previous.sha256);
+  mode='draft';const draft=await v.ws.exportRedBatch(args);assert.equal(draft.verification.status,'failed');assert.equal(draft.sha256,sha(Buffer.from(await draft.file.arrayBuffer())));assert.equal(v.ws.getOutput().sha256,previous.sha256,'readable draft preserves actual status and the last workspace file');
   mode='fail';await assert.rejects(v.ws.exportRedBatch(args),/failed/);assert.deepEqual(v.ws.getEditSnapshot(),before);assert.equal(v.ws.getOutput().sha256,previous.sha256);
   mode='hold';const pending=v.ws.exportRedBatch(args);await until(()=>release,'held');v.file(pdfFile(pdfBytes('MARKER-B')));await until(()=>v.ws.getSource()?.fileHash!==args.fileHash,'replacement');release();await assert.rejects(pending,/취소/);assert.equal(v.ws.getOutput(),null);
+});
+test('clean source hashes bind to original provenance and a mismatched engine source cannot be returned',async()=>{
+  const original=pdfFile(pdfBytes('MARKER-A')),clean=pdfFile(pdfBytes('CLEAN')),cleanHash=sha(Buffer.from(await clean.arrayBuffer()));
+  let mismatch=false,calls=0;
+  const exporter={prepare:async req=>{calls++;assert.equal(req.file,clean);assert.equal(req.fileHash,cleanHash);const bytes=pdfBytes('MARKER-GEN');return {file:pdfFile(bytes),sha256:sha(bytes),verification:{status:'passed',sourceSha256:mismatch?'0'.repeat(64):cleanHash}};}};
+  const blindPdf={prepare:async()=>({file:clean,sha256:cleanHash,changed:true,removed:[{pageIndex:0,markerId:'falsify-red-training-copy'}],verification:{status:'passed'}})};
+  const v=mount({pages:1,paragraphPdf:exporter,blindPdf,edits:require('../dist/paper-edits.js')});v.file(original);await until(()=>v.ws.getSource(),'source');
+  v.document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file:original,result:{segments:[{label:'PDF p. 1',text:'Alpha Beta Gamma'}]}}}));await settle();
+  const originalHash=v.ws.getSource().fileHash,args={fileHash:originalHash,revision:'red-rev',patches:[{segmentId:'s0',before:'Alpha',after:'Edited After',offset:0}],isCurrent:()=>true};
+  const result=await v.ws.exportRedBatch(args);assert.equal(result.verification.blinding.originalSourceSha256,originalHash);assert.equal(result.verification.blinding.cleanSourceSha256,cleanHash);assert.equal(result.verification.sourceSha256,cleanHash);assert.equal(v.ws.getSource().fileHash,originalHash);
+  mismatch=true;await assert.rejects(v.ws.exportRedBatch(args),/원본 해시/);assert.equal(calls,2);assert.equal(v.ws.getOutput(),null);
 });
 (async()=>{let failed=0;for(const [name,fn] of tests){try{await fn();console.log('PASS '+name);}catch(e){failed++;console.error('FAIL '+name,e);}}if(failed)process.exitCode=1;})();
