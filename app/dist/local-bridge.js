@@ -2,7 +2,7 @@
 (function(root){
   'use strict';
   const HOST='127.0.0.1',DEFAULT_PORT=7816,WEB_ORIGIN='https://shinick-han.github.io';
-  const PATH=/^\/api\/(?:capabilities|export|paper\/(?:inspect|images(?:\/export)?)|harness\/(?:profile\/propose|deploy)|(?:red|blue)\/jobs(?:\/[A-Za-z0-9%._~-]+(?:\/cancel)?)?)$/;
+  const PATH=/^\/api\/(?:capabilities|export|paper\/(?:inspect|images(?:\/export)?)|harness\/profile\/propose|harness\/deploy|(?:red|blue)\/jobs(?:\/[A-Za-z0-9%._~-]+(?:\/cancel)?)?)$/;
   // Strict decimal port only; host and scheme are never user input.
   function parsePort(value){const s=String(value??'').trim();if(s==='')return DEFAULT_PORT;if(!/^[1-9][0-9]{3,4}$/.test(s))return null;const n=Number(s);return n>=1024&&n<=65535?n:null;}
   function validToken(t){return typeof t==='string'&&t.length>=16&&t.length<=512&&/^[A-Za-z0-9._~+/-]+=*$/.test(t);}
