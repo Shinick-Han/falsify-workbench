@@ -72,3 +72,38 @@ test('all font bytes are snapshotted before asynchronous hashing', async () => {
   assert.equal(plan.candidates[1].sha256,hash);
   assert.equal(plan.candidates[1].hasGlyph(0x2701),true);
 });
+
+
+test('paragraph union distinguishes layout controls from actual missing glyphs', async () => {
+  const text = 'Source line\nAfter\tΩ\rEnd';
+  const plan = await createFontPlan({text, fonts:[regular()]}, {mupdf});
+  assert.equal(plan.status, 'covered');
+  assert.equal(plan.selected.id, 'regular');
+  assert.deepEqual(plan.layoutControls, [10, 9, 13]);
+  assert.deepEqual(plan.codepoints, [...new Set(Array.from(text, c => c.codePointAt(0)))]);
+  assert.deepEqual(plan.fallback.filter(x => x.kind === 'layout-control').map(x => x.codepoint), [10, 9, 13]);
+  assert.equal(plan.hasGlyph(10), null);
+  assert.equal(plan.candidates[0].hasGlyph(10), null);
+  assert.deepEqual(plan.missing, []);
+  const missing = await createFontPlan({text:text+'\0'+String.fromCodePoint(0x10ffff), fonts:[regular()]}, {mupdf});
+  assert.equal(missing.status, 'missing');
+  assert.deepEqual(missing.missing, [0, 0x10ffff]);
+});
+
+test('all candidate descriptors are captured before the first asynchronous hash', async () => {
+  const first=regular(), second={id:'ding',family:'Dingbats',bytes:fixture('FoxitDingbats.pfb')};
+  const firstHash=createHash('sha256').update(first.bytes).digest('hex');
+  const secondHash=createHash('sha256').update(second.bytes).digest('hex');
+  const pending=createFontPlan({text:'A✁',fonts:[first,second]},{mupdf});
+  first.id='changed'; first.family='changed'; first.bytes.fill(0);
+  second.id='changed'; second.family='changed'; second.bytes.fill(0);
+  const plan=await pending;
+  assert.deepEqual(plan.candidates.map(({id,family,sha256})=>({id,family,sha256})), [
+    {id:'regular',family:'Liberation Sans',sha256:firstHash},
+    {id:'ding',family:'Dingbats',sha256:secondHash},
+  ]);
+  assert.deepEqual(plan.fallback.map(({fontId,family})=>({fontId,family})), [
+    {fontId:'regular',family:'Liberation Sans'}, {fontId:'ding',family:'Dingbats'},
+  ]);
+  assert.equal(plan.status,'covered');
+});

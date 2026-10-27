@@ -10,6 +10,7 @@ export async function inspectFonts(text, fonts = {}) {
 }
 
 const isScalar = cp => Number.isInteger(cp) && cp >= 0 && cp <= 0x10ffff && !(cp >= 0xd800 && cp <= 0xdfff);
+const isLayoutControl = cp => cp === 0x09 || cp === 0x0a || cp === 0x0d;
 const hex = bytes => Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
 
 // The supplied text must be the union of all comparison variants.
@@ -17,13 +18,18 @@ export async function createFontPlan({text, fonts = []}, {mupdf} = {}) {
   if (typeof text !== 'string' || !Array.isArray(fonts)) throw new TypeError('Expected text and fonts array');
   const codepoints = [...new Set(Array.from(text, c => c.codePointAt(0)))];
   if (!codepoints.every(isScalar)) throw new TypeError('Text contains an invalid Unicode scalar');
+  const glyphCodepoints = codepoints.filter(cp => !isLayoutControl(cp));
+  const layoutControls = codepoints.filter(isLayoutControl);
   const ids = new Set();
-  // Snapshot every input before the first await, including later candidates.
-  const snapshots = fonts.map(input => ({input, bytes: input?.bytes instanceof ArrayBuffer ? new Uint8Array(input.bytes.slice(0)) : input?.bytes instanceof Uint8Array ? Uint8Array.from(input.bytes) : null}));
+  // Capture and validate every descriptor before asynchronous work begins.
+  const snapshots = fonts.map(input => {
+    const id = input?.id, family = input?.family, source = input?.bytes;
+    if (typeof id !== 'string' || !id || ids.has(id) || typeof family !== 'string' || !family) throw new TypeError('Each font needs a unique id and family');
+    ids.add(id);
+    return {id, family, bytes: source instanceof ArrayBuffer ? new Uint8Array(source.slice(0)) : source instanceof Uint8Array ? Uint8Array.from(source) : null};
+  });
   const candidates = [];
-  for (const {input, bytes: snapshot} of snapshots) {
-    if (!input || typeof input.id !== 'string' || !input.id || ids.has(input.id) || typeof input.family !== 'string' || !input.family) throw new TypeError('Each font needs a unique id and family');
-    ids.add(input.id);
+  for (const {id, family, bytes: snapshot} of snapshots) {
     let bytes, sha256 = null, buffer, font;
     const glyphs = new Map();
     let detail = null;
@@ -33,8 +39,8 @@ export async function createFontPlan({text, fonts = []}, {mupdf} = {}) {
       sha256 = hex(new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', bytes)));
       if (!mupdf?.Buffer || !mupdf?.Font) throw new Error('MuPDF font API unavailable');
       buffer = new mupdf.Buffer(bytes);
-      font = new mupdf.Font(input.id, buffer);
-      for (const cp of codepoints) {
+      font = new mupdf.Font(id, buffer);
+      for (const cp of glyphCodepoints) {
         const gid = font.encodeCharacter(cp);
         if (!Number.isInteger(gid) || gid < 0) throw new Error('Invalid glyph result');
         glyphs.set(cp, gid !== 0);
@@ -45,19 +51,20 @@ export async function createFontPlan({text, fonts = []}, {mupdf} = {}) {
     } finally {
       try { font?.destroy(); } finally { buffer?.destroy(); }
     }
-    const coverage = detail ? {status:'unavailable', missing:[], detail} : {status:codepoints.every(cp => glyphs.get(cp)) ? 'covered' : 'missing', missing:codepoints.filter(cp => !glyphs.get(cp))};
-    candidates.push(Object.freeze({id:input.id, family:input.family, sha256, coverage: Object.freeze({...coverage, missing:Object.freeze(coverage.missing)}),
+    const coverage = detail ? {status:'unavailable', missing:[], detail} : {status:glyphCodepoints.every(cp => glyphs.get(cp)) ? 'covered' : 'missing', missing:glyphCodepoints.filter(cp => !glyphs.get(cp))};
+    candidates.push(Object.freeze({id, family, sha256, coverage: Object.freeze({...coverage, missing:Object.freeze(coverage.missing)}),
       getBytes: () => bytes?.slice() ?? null,
       hasGlyph: cp => isScalar(cp) && glyphs.has(cp) ? glyphs.get(cp) : null}));
   }
   const selected = candidates.find(c => c.coverage.status === 'covered') || null;
   const fallback = codepoints.map(codepoint => {
+    if (isLayoutControl(codepoint)) return Object.freeze({codepoint, kind:'layout-control', fontId:null, family:null});
     const candidate = selected || candidates.find(c => c.hasGlyph(codepoint) === true);
-    return Object.freeze({codepoint, fontId:candidate?.id ?? null, family:candidate?.family ?? null});
+    return Object.freeze({codepoint, kind:'glyph', fontId:candidate?.id ?? null, family:candidate?.family ?? null});
   });
-  const missing = fallback.filter(x => x.fontId === null).map(x => x.codepoint);
+  const missing = fallback.filter(x => x.kind === 'glyph' && x.fontId === null).map(x => x.codepoint);
   const unavailable = missing.length > 0 && candidates.some(c => c.coverage.status === 'unavailable') || candidates.length === 0;
   const status = unavailable ? 'unavailable' : missing.length ? 'missing' : 'covered';
-  return Object.freeze({status, selected, candidates:Object.freeze(candidates), codepoints:Object.freeze(codepoints), missing:Object.freeze(missing), fallback:Object.freeze(fallback),
-    hasGlyph: cp => isScalar(cp) && codepoints.includes(cp) ? (fallback.find(x => x.codepoint === cp).fontId !== null ? true : unavailable ? null : false) : null});
+  return Object.freeze({status, selected, candidates:Object.freeze(candidates), codepoints:Object.freeze(codepoints), layoutControls:Object.freeze(layoutControls), missing:Object.freeze(missing), fallback:Object.freeze(fallback),
+    hasGlyph: cp => isScalar(cp) && codepoints.includes(cp) && !isLayoutControl(cp) ? (fallback.find(x => x.codepoint === cp).fontId !== null ? true : unavailable ? null : false) : null});
 }
