@@ -35,7 +35,11 @@ export function geometryCorpus(variant) {
     // Helvetica "regul" is 26.676 points at 12pt.
     const x = variant === 'gap' ? 66 : variant === 'ambiguous' ? 55 : 56.676;
     stream = line('F','regul',30,350) + line('G',variant === 'internal-space' ? ' ation' : 'ation',x,350);
-  } else if (variant === 'wrap') stream = line('F','hello',30,350) + line('G','world',30,330);
+  } else if (variant === 'hyphen-wrap') stream = line('F','antero-',30,350) + line('G','posterior',30,330);
+  else if (variant === 'hyphen-space') stream = line('F','antero- ',30,350) + line('G','posterior',30,330);
+  else if (variant === 'minus-wrap') stream = line('F','value -',30,350) + line('G','12',30,330);
+  else if (variant === 'soft-wrap') stream = `BT /F 12 Tf 1 0 0 1 30 350 Tm (soft\\255) Tj ET\n` + line('G','ware',30,330);
+  else if (variant === 'wrap') stream = line('F','hello',30,350) + line('G','world',30,330);
   else if (variant === 'bottom') stream = line('F','control',30,0);
   else if (variant === 'top') stream = line('F','control',30,399);
   else if (variant === 'right') stream = line('F','control',290,350);

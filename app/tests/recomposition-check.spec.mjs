@@ -87,3 +87,26 @@ test('validated sequence locates repeats, edits, deletions and empty pages deter
   assert.equal(missing.checks.content.status,'finding');
   assert.equal(missing.checks.movement.locations,null);
 });
+
+
+test('line ends preserve encoded hyphens, spaces and minus signs', async () => {
+  const extract = async variant => {
+    const task = pdfjs.getDocument({data:geometryCorpus(variant)});
+    try {
+      const doc = await task.promise;
+      const content = await (await doc.getPage(1)).getTextContent();
+      return content.items.map(({str, hasEOL, transform, width, height}) => ({str, hasEOL, transform, width, height}));
+    } finally { await task.destroy(); }
+  };
+  assert.deepEqual(await extract('hyphen-wrap'), await extract('hyphen-space'));
+  const ambiguous = await geometryCheck('hyphen-wrap','antero-posterior');
+  assert.ok(ambiguous.findings.some(f => f.reason?.includes('discard an encoded space')));
+  assert.equal(ambiguous.checks.movement.status,'unavailable');
+  assert.equal((await geometryCheck('hyphen-wrap','antero-posterior')).checks.content.status,'unavailable');
+  assert.equal((await geometryCheck('hyphen-wrap','antero- posterior')).checks.content.status,'unavailable');
+  assert.equal((await geometryCheck('hyphen-space','antero- posterior')).checks.content.status,'unavailable');
+  assert.equal((await geometryCheck('hyphen-space','antero-posterior')).checks.content.status,'unavailable');
+  assert.equal((await geometryCheck('minus-wrap','value - 12')).checks.content.status,'pass');
+  assert.equal((await geometryCheck('minus-wrap','value 12')).checks.content.status,'finding');
+  assert.notEqual((await geometryCheck('soft-wrap','software')).checks.content.status,'pass');
+});

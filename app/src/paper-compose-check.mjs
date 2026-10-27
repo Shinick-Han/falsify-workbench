@@ -44,7 +44,13 @@ export async function checkRecomposition({bytes, expectedBlocks, edits = {}, pdf
           }
         }
         if (previous && item.str && !/\s$/u.test(previous.str) && !/^\s/u.test(item.str)) {
-          if (previous.hasEOL) parts.push(' ');
+          if (previous.hasEOL) {
+            // PDF.js can discard an encoded trailing space before EOL, so a
+            // wrapped hyphen cannot establish whether that space existed.
+            if (/\p{L}-$/u.test(previous.str) && /^\p{L}/u.test(item.str))
+              findings.push({code:'ambiguous-text-geometry', pageIndex:n - 1, reason:'PDF.js may discard an encoded space after a line-final hyphen.'});
+            parts.push(' ');
+          }
           else if (!position || !previous.position) findings.push({code:'ambiguous-text-geometry', pageIndex:n - 1});
           else {
             const height = Math.max(position.height, previous.position.height);
