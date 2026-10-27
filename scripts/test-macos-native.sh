@@ -31,7 +31,9 @@ with zipfile.ZipFile(archive) as z:
     files = {i.filename[len(prefix):]: i for i in z.infolist() if not i.is_dir() and i.filename.startswith(prefix)}
     assert set(files) == set(tracked), (set(tracked) - set(files), set(files) - set(tracked))
     for name, mode in tracked.items():
-        assert stat.S_IMODE(files[name].external_attr >> 16) == stat.S_IMODE(mode), name
+        # Git ZIP omits Unix attributes for ordinary non-executable files.
+        zipped_mode = stat.S_IMODE(files[name].external_attr >> 16) or 0o644
+        assert zipped_mode == stat.S_IMODE(mode), name
     for name in ('install-connection.sh', 'open-connection.sh', 'uninstall-connection.sh'):
         assert files[name].external_attr >> 16 & 0o111, name
 print('Archive tracked paths and Unix modes verified; SHA-256 and commit match.')
