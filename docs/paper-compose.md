@@ -1,0 +1,13 @@
+# Typst recomposition adapter candidate
+
+`composeDocument` accepts a `falsify.paper-document.v1` model, source bytes, exact edits and an injected compiler. It verifies the source SHA-256, binds each edit to a unique block, page and UTF-16 range with matching before text, builds fixed Typst source using string literals, and returns actual PDF bytes, SHA-256, warnings and unavailable mappings. It does not mutate the model. `compileInWorker` terminates its owned worker on completion or abort; an arbitrary injected compiler cannot be interrupted by this adapter, though cancellation is checked before and after it.
+
+The adapter inserts spaces at observed line boundaries when neither neighboring character is whitespace; it does not remove hyphens or change scientific text. It uses the first page size, a fixed two-column layout and an optional supplied font family. The host must provide compiler and font bytes explicitly. The font coverage hook `fonts.hasGlyph(codepoint)` can report missing characters; when absent or failing coverage is unavailable. It does not verify the PDF's extracted text. `contentVerified` is always false and `outputTextCheck` unavailable, even when a coverage hook reports covered. These decisions apply equally to edited and unedited calls.
+
+Images, vector artwork, formula and table assets are not placed; image blocks without source ranges are retained as unsupported findings, not treated as preserved. Styles, captions, reading order, links, page and block destination mappings, full source font recovery and real-paper fidelity are not established. This is a development candidate, not a production or default engine. The browser test uses a locally supplied Arial font only; it is not redistributed here.
+
+## Focused proof
+
+Run `node --test app/tests/paper-compose.spec.mjs`. The synthetic browser harness in `app/tests/recomposition-compose/` expects the S0 Typst 0.7.0 scratch package and font at `../typesetter/.local/spike`, starts with `python app/tests/recomposition-compose/server.py`, and writes only `.local/compose-proof/output.pdf`. It must be opened at `http://127.0.0.1:18766/app/tests/recomposition-compose/index.html`. The harness is local evidence, not application integration.
+
+On 2026-10-27 a browser compiled a 22,020-byte PDF (SHA-256 `09d75952bc5047019be554a5cf25689f8409a6fb95eeec4c1206de228bf6b09d`). Independent PyMuPDF extraction retained literal `#import`, quotes, backslash, minus, citation and Ω, but U+10FFFF became NUL. Font coverage and output-text verification were unavailable in that run, and the candidate returned a warning with `contentVerified: false`. A downloadable PDF is therefore not evidence of text preservation.
