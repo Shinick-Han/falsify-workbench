@@ -85,3 +85,14 @@ test('ambiguous line break cannot claim content verification from a guessed sepa
  const out=await composeDocument({document:d,sourceBytes:src},{compile:async()=>pdf,outputCheck:async ({expectedBlocks})=>{checkedText=expectedBlocks[0].text;return {checks:{content:{status:'pass'}},findings:[]}}});
  assert.equal(checkedText,'hello world');assert.equal(out.verification.contentVerified,false);assert.equal(out.verification.outputTextCheck,'pass');assert.deepEqual(out.verification.ambiguousBoundaries,[{blockId:'x',offset:5}]);
 });
+
+test('ordered flow carries mixed styles, long edit and image bytes without mutating inputs',async()=>{
+ const d=make();d.styles=[{id:'small',size:9},{id:'large',size:18}];d.blocks[0].source.characters=[{start:0,end:6,styleId:'large'},{start:6,end:26,styleId:'small'}];
+ const long='After −12 [1] '.repeat(1000); const png=new Uint8Array([137,80,78,71]);
+ const flow={schema:'falsify.paper-flow.v1',sourceSha256:d.sourceSha256,items:[{kind:'heading',columns:1,span:'page',blockIds:['a']},{kind:'asset',columns:2,assetIds:['pic']},{kind:'caption',columns:2,blockIds:['b']}]};
+ const assets=[{id:'pic',content:{representation:'png',bytes:png}}]; const snapshot=structuredClone({d,flow,assets});let payload;
+ await composeDocument({document:d,sourceBytes:src,flow,assets,edits:[{...edit,after:long}]},{compile:async p=>(payload=p,pdf)});
+ assert.ok(payload.source.indexOf('18pt')<payload.source.indexOf('#image('));assert.ok(payload.source.indexOf('#image(')<payload.source.indexOf(typstString(long)));assert.deepEqual(payload.files['assets/0.png'],png);assert.deepEqual({d,flow,assets},snapshot);
+});
+
+test('font coverage ignores layout controls',async()=>{const {inspectFonts}=await import('../src/paper-fonts.mjs');const result=await inspectFonts('a\t\n\r',{hasGlyph:cp=>cp===97});assert.equal(result.status,'covered');});

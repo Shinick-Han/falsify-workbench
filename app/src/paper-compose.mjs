@@ -51,10 +51,12 @@ function ambiguousBoundaries(block, changes) {
     !/\s/u.test(raw[i-1]) && !/\s/u.test(raw[i]) && raw[i-1]!=='-' &&
     !(raw[i-1]==='−' && /[0-9]/u.test(raw[i])));
 }
-export async function composeDocument({document, edits=[], signal, sourceBytes}={}, {compile, fonts={}, outputCheck}={}) {
+export async function composeDocument({document, edits=[], flow, assets, signal, sourceBytes}={}, {compile, fonts={}, outputCheck}={}) {
   abort(signal);
   // Own the data used by this attempt before any asynchronous operation.
-  document = document == null ? document : {schema:document.schema, sourceSha256:document.sourceSha256, pages:document.pages?.map(p=>({...p})), blocks:document.blocks?.map(b=>({...b, assetIds:b.assetIds?.slice(), source:b.source && {...b.source, range:b.source.range && {...b.source.range}, lines:b.source.lines?.map(l=>({...l, range:l.range && {...l.range}}))}})), assets:document.assets?.slice()};
+  if (document) document = structuredClone(document);
+  flow = flow == null ? null : structuredClone(flow);
+  assets = assets == null ? null : structuredClone(assets);
   edits = edits.map(e=>({...e}));
   sourceBytes = sourceBytes instanceof Uint8Array ? new Uint8Array(sourceBytes) : sourceBytes;
   fonts = {...fonts};
@@ -72,22 +74,88 @@ export async function composeDocument({document, edits=[], signal, sourceBytes}=
     const list=changes.get(b.id)||[]; if(list.some(e=>start<e.end && end>e.start)) fail('Overlapping edit targets');
     list.push({start,end,after:edit.after}); changes.set(b.id,list);
   }
-  const expectedBlocks=document.blocks.filter(b=>typeof b.text==='string' && b.text.length).map(b=>({id:b.id,text:logicalText(b,changes.get(b.id)||[])}));
+  if (flow) {
+    if(flow.schema!=='falsify.paper-flow.v1' || flow.sourceSha256!==document.sourceSha256 || !Array.isArray(flow.items)) fail('Invalid paper flow');
+    const owners=new Set();
+    for(const item of flow.items) for(const id of item.blockIds || []) {
+      if(!ids.has(id) || owners.has(id)) fail('Unknown or duplicate flow block');
+      owners.add(id);
+      if(item.kind==='asset' && changes.has(id)) fail('Cannot edit text owned by a source asset');
+    }
+    for(const block of document.blocks) if(block.text && !owners.has(block.id)) fail('Flow omits text block');
+  }
+  const assetOwned = new Set((flow?.items || []).filter(item=>item.kind==='asset').flatMap(item=>item.blockIds || []));
+  const expectedBlocks=document.blocks.filter(b=>typeof b.text==='string' && b.text.length && !assetOwned.has(b.id)).map(b=>({id:b.id,text:logicalText(b,changes.get(b.id)||[])}));
   const texts=expectedBlocks.map(b=>b.text);
   const ambiguous=document.blocks.filter(b=>typeof b.text==='string' && b.text.length).flatMap(b=>ambiguousBoundaries(b,changes.get(b.id)||[]).map(offset=>({blockId:b.id,offset:offset+b.source.range.start})));
   const coverage=await inspectFonts(texts.join('\n'),fonts); abort(signal);
   const page=document.pages[0]; if(!Number.isFinite(page.width)||!Number.isFinite(page.height)||page.width<=0||page.height<=0) fail('Invalid page size');
-  // Fixed program; paper and supplied font names occur only as string values.
-  let source=`#set page(width: ${page.width}pt, height: ${page.height}pt, margin: 36pt, columns: 2)\n`;
-  if (fonts.family) source+=`#set text(font: ${typstString(String(fonts.family))}, size: 10pt)\n`;
-  source+=texts.map(t=>`#text(${typstString(t)})`).join('\n\n');
-  const compiled=await compile({source, fonts, signal}); abort(signal);
+  // Every paper string remains an argument to text(), never executable markup.
+  let source=`#set page(width: ${page.width}pt, height: ${page.height}pt, margin: 36pt)\n`;
+  const candidates = fonts.candidates?.filter(c=>c.getBytes?.()) || [];
+  const families = [...new Set([fonts.selected?.family, ...candidates.map(c=>c.family)].filter(Boolean))];
+  if (!families.length && fonts.family) families.push(String(fonts.family));
+  if (families.length) source+=`#set text(font: (${families.map(typstString).join(', ')},), size: 10pt)\n`;
+  const files = {};
+  const assetList = Array.isArray(assets) ? assets : assets?.assets || document.assets || [];
+  const blockById = new Map(document.blocks.map(b=>[b.id,b]));
+  const styleById = new Map((document.styles || []).map(s=>[s.id,s]));
+  const textById = new Map(expectedBlocks.map(b=>[b.id,b.text]));
+  const placedAssets = new Set();
+  function renderBlock(block) {
+    const text=textById.get(block.id); if (!text) return '';
+    const chars=block.source?.characters || [];
+    if ((!chars.length || !styleById.size) && !fonts.fallback?.length) return `#text(${typstString(text)})`;
+    // Build source-indexed styles, then apply the same line separators and edits.
+    const raw=block.text, bounds=new Set(lineBoundaries(block));
+    let logical='', styles=[], before=[], after=[];
+    const styleAt=i=>chars.find(c=>c.start<=i+block.source.range.start && c.end>i+block.source.range.start)?.styleId || block.styleId;
+    for(let i=0;i<=raw.length;i++) {
+      before[i]=logical.length;
+      if(bounds.has(i) && i>0 && i<raw.length && !/\s/u.test(raw[i-1]) && !/\s/u.test(raw[i]) && raw[i-1]!=='-' && !(raw[i-1]==='−' && /[0-9]/u.test(raw[i]))) {logical+=' ';styles.push(styleAt(i-1));}
+      after[i]=logical.length;
+      if(i<raw.length) {logical+=raw[i];styles.push(styleAt(i));}
+    }
+    let result='', mapped=[], cursor=0;
+    for(const edit of [...(changes.get(block.id)||[])].sort((a,b)=>a.start-b.start)) {
+      const a=after[edit.start], b=before[edit.end]; result+=logical.slice(cursor,a)+edit.after;
+      mapped.push(...styles.slice(cursor,a),...Array(edit.after.length).fill(styleAt(edit.start))); cursor=b;
+    }
+    result+=logical.slice(cursor); mapped.push(...styles.slice(cursor));
+    const familyAt=i=>fonts.fallback?.find(entry=>entry.codepoint===result.codePointAt(i) && entry.kind==='glyph')?.family || null;
+    const runs=[]; for(let i=0;i<result.length;) {let j=i+(result.codePointAt(i)>0xffff?2:1); const family=familyAt(i); while(j<result.length && mapped[j]===mapped[i] && familyAt(j)===family) j+=result.codePointAt(j)>0xffff?2:1; runs.push([result.slice(i,j),styleById.get(mapped[i]),family]); i=j;}
+    return runs.map(([value,style,family])=>{const size=style?.size; let opts=Number.isFinite(size)&&size>0 ? `size: ${size}pt, ` : ''; if(family) opts+=`font: ${typstString(family)}, `; const name=style?.fontName || ''; if(/bold/i.test(name)) opts+='weight: "bold", '; if(/italic|oblique/i.test(name)) opts+='style: "italic", '; return `#text(${opts}${typstString(value)})`;}).join('');
+  }
+  function renderAsset(id) {
+    const asset=assetList.find(a=>a.id===id); const content=asset?.content; const bytes=content?.bytes;
+    const rep=String(content?.representation || '').toLowerCase();
+    const ext=rep.includes('svg')?'svg':rep.includes('png')?'png':null;
+    if(!ext || !(bytes instanceof Uint8Array) || !bytes.length) return '';
+    const path=`assets/${placedAssets.size}.${ext}`; files[path]=new Uint8Array(bytes); placedAssets.add(id);
+    return `#image(${typstString(path)}, width: 100%)`;
+  }
+  if (flow) {
+    if(flow.schema!=='falsify.paper-flow.v1' || flow.sourceSha256!==document.sourceSha256 || !Array.isArray(flow.items)) fail('Invalid paper flow');
+    let group=[], columns=0;
+    const flush=()=>{if(!group.length)return; source+=columns===2 ? `#columns(2)[\n${group.join('\n\n')}\n]\n` : group.join('\n\n')+'\n';group=[];};
+    for(const item of flow.items) {
+      const count=item.span==='page'?1:(item.columns===2?2:1); if(count!==columns){flush();columns=count;}
+      let parts=[];
+      if(item.kind==='asset') parts=(item.assetIds||[]).map(renderAsset).filter(Boolean);
+      else parts=(item.blockIds||[]).map(id=>blockById.get(id)).filter(Boolean).map(renderBlock).filter(Boolean);
+      if(parts.length) group.push(parts.join('\n'));
+    }
+    flush();
+  } else {
+    source+=`#columns(2)[\n${document.blocks.map(renderBlock).filter(Boolean).join('\n\n')}\n]`;
+  }
+  const compiled=await compile({source, fonts, files, signal}); abort(signal);
   const returnedBytes=compiled instanceof Uint8Array ? compiled : compiled?.bytes;
   const bytes=returnedBytes instanceof Uint8Array ? new Uint8Array(returnedBytes) : returnedBytes;
   if (!(bytes instanceof Uint8Array) || new TextDecoder().decode(bytes.subarray(0,5))!=='%PDF-') fail('Compiler did not return PDF bytes');
   const sha256=await hash(bytes); abort(signal);
   const warnings=['Content, layout, output mappings and asset preservation have not been independently verified.'];
-  if(document.assets?.length || document.blocks.some(b=>b.assetIds?.length || b.kind==='figure' || b.kind==='table' || b.kind==='formula')) warnings.push('Source assets and non-text figure, table or formula content are not placed by this candidate, including image blocks without source ranges.');
+  if(document.assets?.some(a=>!placedAssets.has(a.id)) || document.blocks.some(b=>(b.assetIds?.length || b.kind==='figure' || b.kind==='table' || b.kind==='formula') && !(b.assetIds?.length && b.assetIds.every(id=>placedAssets.has(id))))) warnings.push('Source assets and non-text figure, table or formula content are not placed by this candidate, including image blocks without source ranges.');
   if(coverage.status!=='covered') warnings.push(`Font coverage ${coverage.status}; output may lose glyphs.`);
   let outputTextCheck='unavailable', checkReport=null;
   if (typeof outputCheck==='function') {

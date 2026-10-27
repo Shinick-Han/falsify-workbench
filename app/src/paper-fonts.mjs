@@ -1,6 +1,6 @@
 // Coverage is supplied by the host's font parser, not inferred from family names.
 export async function inspectFonts(text, fonts = {}) {
-  const codepoints = [...new Set(Array.from(text, c => c.codePointAt(0)))];
+  const codepoints = [...new Set(Array.from(text, c => c.codePointAt(0)))].filter(cp => cp !== 9 && cp !== 10 && cp !== 13);
   if (typeof fonts.hasGlyph !== 'function') return {status:'unavailable', missing:[], detail:'Font coverage API unavailable; full-font coverage and fallback are unverified.'};
   try {
     const missing = [];
