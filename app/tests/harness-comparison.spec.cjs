@@ -20,3 +20,4 @@ test('exact file and known input footprint are required',()=>{
  assert.ok(C.differences({...a,provenance:'imported-unverified'},{...a,provenance:'imported-unverified'}).length);
  assert.ok(C.differences(v,run('w',{inputMode:'visual',visualEvidence:[{...ref,width:1}]})).length);
 });
+test('comparison exposes parameter differences and human notes without ranking',()=>{const a=run('a'),b=run('b',{harness:h('/b',{...strategy,parameters:{threshold:0.3}})});const result=C.compare([a,b],[{runId:'b',verdict:'mixed',note:'Needs human review'}],a);assert.deepEqual(result.rows[1].parameterDifferences,['threshold']);assert.equal(result.rows[1].reviewNote,'Needs human review');assert.equal(result.groups.length,2);});
