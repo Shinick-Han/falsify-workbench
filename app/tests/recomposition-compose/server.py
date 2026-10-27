@@ -4,10 +4,13 @@ root=Path.cwd().resolve()
 spike=(root/'../typesetter/.local/spike').resolve()
 class Handler(SimpleHTTPRequestHandler):
  def translate_path(self,path):
-  path=path.split('?')[0]
+  from urllib.parse import unquote, urlsplit
+  path=unquote(urlsplit(path).path)
   if path.startswith('/spike/'):
-   return str(spike / path.removeprefix('/spike/'))
-  return super().translate_path(path)
+   candidate=(spike / path.removeprefix('/spike/')).resolve()
+   return str(candidate if candidate.is_relative_to(spike) else root/'__denied__')
+  allowed={'/app/tests/recomposition-compose/index.html','/app/src/paper-compose.mjs','/app/src/paper-fonts.mjs','/app/src/paper-compose-check.mjs','/app/dist/vendor/pdf.mjs','/app/dist/vendor/pdf.worker.mjs'}
+  return str(root/path.lstrip('/') if path in allowed else root/'__denied__')
  def do_POST(self):
   if self.path != '/result' or self.headers.get('Origin') != 'http://127.0.0.1:18766': self.send_error(403); return
   data=self.rfile.read(int(self.headers.get('Content-Length','0')))

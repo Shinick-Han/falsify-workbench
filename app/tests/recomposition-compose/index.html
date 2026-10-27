@@ -2,15 +2,18 @@
 <script type="importmap">{"imports":{"@myriaddreamin/typst.ts/compiler":"/spike/node_modules/@myriaddreamin/typst.ts/dist/esm/compiler.mjs","@myriaddreamin/typst.ts/contrib/global-compiler":"/spike/node_modules/@myriaddreamin/typst.ts/dist/esm/contrib/global-compiler.mjs","@myriaddreamin/typst-ts-web-compiler":"/spike/node_modules/@myriaddreamin/typst-ts-web-compiler/pkg/typst_ts_web_compiler.mjs"}}</script>
 <pre id="status">starting</pre><script type="module">
 import {composeDocument} from '/app/src/paper-compose.mjs';
+import {checkRecomposition} from '/app/src/paper-compose-check.mjs';
+import * as pdfjs from '/app/dist/vendor/pdf.mjs';
+pdfjs.GlobalWorkerOptions.workerSrc='/app/dist/vendor/pdf.worker.mjs';
 import {$typst} from '/spike/node_modules/@myriaddreamin/typst.ts/dist/esm/contrib/snippet.mjs';
 import {loadFonts} from '/spike/node_modules/@myriaddreamin/typst.ts/dist/esm/options.init.mjs';
 try {
  $typst.setCompilerInitOptions({getModule:()=>'/spike/node_modules/@myriaddreamin/typst-ts-web-compiler/pkg/typst_ts_web_compiler_bg.wasm',beforeBuild:[loadFonts(['/spike/arial.ttf'],{assets:false})]});
  const sourceBytes=new TextEncoder().encode('synthetic source');
  const hash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',sourceBytes)),x=>x.toString(16).padStart(2,'0')).join('');
- const text='Literal #import "https://invalid.test" \\ [x] −12 [1] Ω '+String.fromCodePoint(0x10ffff);
+ const text='Literal #import "https://invalid.test" \\ [x] −12 [1] Ω'+(new URLSearchParams(location.search).has('supported')?'':' '+String.fromCodePoint(0x10ffff));
  const model={schema:'falsify.paper-document.v1',sourceSha256:hash,pages:[{width:595,height:842}],blocks:[{id:'a',kind:'paragraph',text,source:{pageIndex:0,range:{start:0,end:text.length},lines:[]}},{id:'image',kind:'figure',text:'',source:{pageIndex:0},assetIds:['image1']}],assets:[{id:'image1'}]};
- const result=await composeDocument({document:model,sourceBytes},{fonts:{family:'Arial'},compile:async ({source})=>$typst.pdf({mainContent:source})});
+ const result=await composeDocument({document:model,sourceBytes},{fonts:{family:'Arial'},outputCheck:args=>checkRecomposition({...args,pdfjs,exporter:'Typst'}),compile:async ({source})=>$typst.pdf({mainContent:source})});
  const bytes=new Uint8Array(await result.file.arrayBuffer());
  const response=await fetch('/result',{method:'POST',body:bytes}); if(!response.ok)throw Error('save failed');
  document.querySelector('#status').textContent=JSON.stringify({sha256:result.sha256,bytes:bytes.length,verification:result.verification,warnings:result.warnings});

@@ -30,13 +30,18 @@ function logicalText(block, changes) {
     const edit=changes.find(e=>e.start===i);
     if (edit) { out+=edit.after; i=edit.end; if(edit.start===edit.end) fail('Empty edit ranges are unsupported'); continue; }
     if (i===raw.length) break;
-    if (bounds.includes(i) && i>0 && !/\s/u.test(raw[i-1]) && !/\s/u.test(raw[i])) out+=' ';
+    if (bounds.includes(i) && i>0 && raw[i-1]!=='-' && !/\s/u.test(raw[i-1]) && !/\s/u.test(raw[i])) out+=' ';
     out+=raw[i++];
   }
   return out;
 }
-export async function composeDocument({document, edits=[], signal, sourceBytes}={}, {compile, fonts={}}={}) {
+export async function composeDocument({document, edits=[], signal, sourceBytes}={}, {compile, fonts={}, outputCheck}={}) {
   abort(signal);
+  // Own the data used by this attempt before any asynchronous operation.
+  document = document == null ? document : {schema:document.schema, sourceSha256:document.sourceSha256, pages:document.pages?.map(p=>({...p})), blocks:document.blocks?.map(b=>({...b, assetIds:b.assetIds?.slice(), source:b.source && {...b.source, range:b.source.range && {...b.source.range}, lines:b.source.lines?.map(l=>({...l, range:l.range && {...l.range}}))}})), assets:document.assets?.slice()};
+  edits = edits.map(e=>({...e}));
+  sourceBytes = sourceBytes instanceof Uint8Array ? sourceBytes.slice() : sourceBytes;
+  fonts = {...fonts};
   if (document?.schema!=='falsify.paper-document.v1' || !/^[a-f0-9]{64}$/.test(document.sourceSha256) || !Array.isArray(document.blocks) || !Array.isArray(document.pages) || !document.pages.length) fail('Invalid paper document');
   if (!(sourceBytes instanceof Uint8Array) || await hash(sourceBytes)!==document.sourceSha256) fail('Source hash mismatch or source bytes unavailable');
   abort(signal);
@@ -51,7 +56,8 @@ export async function composeDocument({document, edits=[], signal, sourceBytes}=
     const list=changes.get(b.id)||[]; if(list.some(e=>start<e.end && end>e.start)) fail('Overlapping edit targets');
     list.push({start,end,after:edit.after}); changes.set(b.id,list);
   }
-  const texts=document.blocks.filter(b=>typeof b.text==='string' && b.text.length).map(b=>logicalText(b,changes.get(b.id)||[]));
+  const expectedBlocks=document.blocks.filter(b=>typeof b.text==='string' && b.text.length).map(b=>({id:b.id,text:logicalText(b,changes.get(b.id)||[])}));
+  const texts=expectedBlocks.map(b=>b.text);
   const coverage=await inspectFonts(texts.join('\n'),fonts); abort(signal);
   const page=document.pages[0]; if(!Number.isFinite(page.width)||!Number.isFinite(page.height)||page.width<=0||page.height<=0) fail('Invalid page size');
   // Fixed program; paper and supplied font names occur only as string values.
@@ -59,12 +65,20 @@ export async function composeDocument({document, edits=[], signal, sourceBytes}=
   if (fonts.family) source+=`#set text(font: ${typstString(String(fonts.family))}, size: 10pt)\n`;
   source+=texts.map(t=>`#text(${typstString(t)})`).join('\n\n');
   const compiled=await compile({source, fonts, signal}); abort(signal);
-  const bytes=compiled instanceof Uint8Array ? compiled : compiled?.bytes;
+  const returnedBytes=compiled instanceof Uint8Array ? compiled : compiled?.bytes;
+  const bytes=returnedBytes instanceof Uint8Array ? returnedBytes.slice() : returnedBytes;
   if (!(bytes instanceof Uint8Array) || new TextDecoder().decode(bytes.subarray(0,5))!=='%PDF-') fail('Compiler did not return PDF bytes');
   const sha256=await hash(bytes); abort(signal);
   const warnings=['Content, layout, output mappings and asset preservation have not been independently verified.'];
   if(document.assets?.length || document.blocks.some(b=>b.assetIds?.length || b.kind==='figure' || b.kind==='table' || b.kind==='formula')) warnings.push('Source assets and non-text figure, table or formula content are not placed by this candidate, including image blocks without source ranges.');
   if(coverage.status!=='covered') warnings.push(`Font coverage ${coverage.status}; output may lose glyphs.`);
-  const verification={status:'warning', sourceSha256:document.sourceSha256, contentVerified:false, layoutVerified:false, coverage, outputTextCheck:'unavailable', edits:edits.map(e=>({blockId:e.blockId,start:e.start,end:e.end,status:'bound'}))};
+  let outputTextCheck='unavailable', checkReport=null;
+  if (typeof outputCheck==='function') {
+    try { checkReport=await outputCheck({bytes:bytes.slice(), expectedBlocks:expectedBlocks.map(b=>({...b}))}); abort(signal);
+      outputTextCheck=checkReport?.findings?.some(f=>f.code==='content-mismatch') ? 'finding' : checkReport?.checks?.content?.status || 'unavailable';
+    } catch (error) { abort(signal); warnings.push(`Output text check unavailable: ${error.message}`); }
+  }
+  if (outputTextCheck==='finding') warnings.push('Output text check found content loss or mismatch.');
+  const verification={status:outputTextCheck==='finding'?'finding':'warning', sourceSha256:document.sourceSha256, contentVerified:outputTextCheck==='pass', layoutVerified:false, coverage, outputTextCheck, checkReport, edits:edits.map(e=>({blockId:e.blockId,start:e.start,end:e.end,status:'bound'}))};
   return {file:new File([bytes],'recomposed.pdf',{type:'application/pdf'}),sha256,verification,pageMap:null,blockMap:null,warnings};
 }
