@@ -1264,6 +1264,37 @@
       }
       return owned.size===count?lookup:null;
     }
+    // Render RED's frozen selected batch in an isolated edit session. Workspace edits and undo stay untouched.
+    async function exportRedBatch({fileHash,revision,patches,isCurrent}){
+      if(!source||!source.pdf||source.fileHash!==fileHash||!snapshot||!editsApi()?.create)throw new Error('현재 PDF 원본을 확인할 수 없습니다.');
+      if(generating)throw new Error('다른 PDF 생성이 진행 중입니다.');
+      const file=source.file, epochAt=epoch, workspaceRevision=snapshot.revision;
+      const live=()=>epoch===epochAt&&source?.file===file&&source?.fileHash===fileHash&&snapshot?.revision===workspaceRevision&&(!isCurrent||isCurrent());
+      if(!Array.isArray(patches)||!patches.length)throw new Error('선택한 후보가 없습니다.');
+      const isolated=editsApi().create({fileHash,name:sessionName(source.name),segments:coreSegments(source.segments),now:now()});
+      const proposals=patches.map(p=>({segmentId:p.segmentId,before:p.before,after:p.after,anchor:{start:p.offset,end:p.offset+p.before.length}}));
+      const items=classifyProposals(proposals,source.segments,{origin:'external-ai-import'}).items;
+      for(const item of items){
+        if(item.status!=='matched')throw new Error('선택 후보의 원본 위치를 확인하지 못했습니다. '+item.reason);
+        const segment=coreSegments(source.segments).find(s=>s.id===item.segmentId),built=coreAnchor(item.anchor,segment,item.before);
+        if(built.error)throw new Error(built.error);
+        isolated.add({pageIndex:item.pageIndex,segmentId:item.segmentId,before:item.before,after:item.after,anchor:built.anchor,origin:'external-ai-import'});
+      }
+      const batch=isolated.snapshot(), edits=batch.edits.filter(e=>e.enabled!==false), api=bodyExporter(edits);
+      if(!api?.prepare)throw new Error('브라우저 PDF 편집 모듈이 없습니다.');
+      const mine=++genId,ctl=new AbortController();genCtl=ctl;generating=true;renderChrome();
+      try{
+        const result=await api.prepare({file,fileHash,edits:clone(edits),signal:ctl.signal});
+        if(!live()||mine!==genId||ctl.signal.aborted)throw new Error('원본 또는 편집이 바뀌어 생성을 취소했습니다.');
+        if(!isFile(result?.file)||!HEX.test(result.sha256||''))throw new Error('생성 결과가 실제 파일이 아닙니다.');
+        if(result.verification?.sourceSha256&&result.verification.sourceSha256!==fileHash)throw new Error('생성 결과의 원본 해시가 다릅니다.');
+        if(result.verification?.status==='failed')throw new Error('생성 파일 검사가 실패했습니다.');
+        const bytes=new Uint8Array(await result.file.arrayBuffer()),actual=await sha256Hex(bytes);
+        if(!live()||mine!==genId||ctl.signal.aborted)throw new Error('원본 또는 편집이 바뀌어 생성을 취소했습니다.');
+        if(actual!==result.sha256||new TextDecoder().decode(bytes.subarray(0,1024)).indexOf('%PDF-')<0)throw new Error('생성 파일을 확인하지 못했습니다.');
+        return {file:result.file,bytes,sha256:actual,verification:result.verification??null,revision,workspaceRevision,batch:published(batch)};
+      }finally{if(genCtl===ctl)genCtl=null;if(mine===genId&&epoch===epochAt){generating=false;renderChrome();}}
+    }
     async function generate(){
       const api=exporterApi();
       if(!api||typeof api.prepare!=='function'){setGenStatus('브라우저 PDF 편집 모듈이 없어 생성하지 않았습니다. 원본 다운로드는 사용할 수 있습니다.',true);return;}
@@ -1610,7 +1641,7 @@
     try{const blobs=blobApi();if(blobs?.purgeExpired)void blobs.purgeExpired(now()).catch(()=>{});}catch{}
     if(ui.file.files&&ui.file.files[0])void openFile(ui.file.files[0]);
     return {
-      acceptProposals,
+      acceptProposals,exportRedBatch,
       getSource(){if(!source||!source.file||!source.fileHash)return null;return Object.freeze({file:source.file,fileHash:source.fileHash,segments:published(source.segments)||[]});},
       getEditSnapshot(){const raw=session&&typeof session.snapshot==='function'?session.snapshot():snapshot;return raw?published(raw):null;},
       getOutput(){if(!output||output.blocked)return null;return Object.freeze({file:output.file,sha256:output.sha256,originalSourceSha256:output.originalSourceSha256,verification:published(output.verification),revision:output.revision,pageMap:published(output.pageMap)});}

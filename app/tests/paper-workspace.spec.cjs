@@ -704,28 +704,6 @@ test('core: second alpha, CRLF, deletion, and resume keep the real edit id',asyn
   assert.match(v.get('paper-draft-status').textContent,/실행 취소 기록은 복구 이후부터/);
 });
 
-test('download: an open PDF workspace skips the companion layout gate',async()=>{
-  const v=mount({pages:1}),calls=[];
-  const file=pdfFile(pdfBytes('MARKER-A'),'scan.pdf');
-  v.file(file);await until(()=>v.ws.getSource(),'pdf source');
-  const ctx=vm.createContext({document:v.document,crypto,CustomEvent,Event,URL,Blob,File,TextEncoder,TextDecoder,Uint8Array,Array,Promise,Error,Map,JSON,Number,String,setTimeout,clearTimeout,confirm:()=>true,btoa,atob,
-    FalsifyDocumentRed:require('../dist/document-red-core.js'),FalsifyHarness:require('../dist/harness-core.js'),
-    FalsifyLocalBridge:{busy(){},session(){calls.push('session');return null;},state:()=>({status:'manual',connected:false,cap:null}),capabilities:()=>({red:false,pdf:false})},
-    FalsifyLab:{busy(){},allowed:()=>false,ready:Promise.resolve(),bind:(_,r)=>r,record:async()=>'run1'},FalsifyPaperWorkspace:v.ws,addEventListener(){}});
-  vm.runInContext(RED,ctx,{filename:'document-red.js'});
-  v.document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file,result:{text:'Alpha',format:'PDF',segments:[{label:'PDF p. 1',text:'Alpha'}]}}}));
-  await until(()=>v.get('document-red').hidden===false,'red bound');
-  v.get('red-export-consent').checked=true;v.get('red-download').click();await until(()=>/현재 편집으로 생성/.test(v.get('red-export-status').textContent),'PDF workspace export handoff');
-  assert.equal(calls.length,0);assert.match(v.get('red-export-status').textContent,/현재 편집으로 생성/);
-  assert.equal(v.document.activeElement,v.get('paper-generate'));
-  const txt={name:'note.txt',type:'text/plain',size:5,arrayBuffer:async()=>new TextEncoder().encode('Alpha').buffer};
-  v.document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file:txt,result:{text:'Alpha',format:'TXT',segments:[{label:'문단 1',text:'Alpha'}]}}}));
-  await until(()=>v.get('document-red').hidden===false,'txt bound');
-  v.get('red-export-consent').checked=true;v.get('red-download').click();await settle();
-  assert.doesNotMatch(v.get('red-export-status').textContent,/현재 편집으로 생성/);
-  assert.equal(calls.length,0);
-});
-
 test('output: object warnings and failed checks name the candidate without claiming success',async()=>{
   const exp={mode:'warning'};
   exp.prepare=async req=>{

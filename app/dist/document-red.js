@@ -37,15 +37,14 @@
     $('#red-cancel').hidden=!busy||!job;
     $('#red-plan').disabled=!active||!candidates.some(c=>c.selected);
     const count=candidates.filter(c=>c.selected).length;
-    $('#red-selection-summary').textContent=count+'개 선택 · 처음에는 모두 미선택입니다. After를 바꾸면 이전 다운로드 검증은 무효입니다.';
+    $('#red-selection-summary').textContent=count+'개 선택';
     const plain=doc&&/^(TXT|MD|MARKDOWN|TEXT|TEX|CSV|TSV|RST|DOCX|ODT|HTML|HTM)$/.test(doc.format);
-    const pdf=doc?.format==='PDF'?pdfMode(cap):null,supported=plain||!!pdf&&pdf.kind!=='none';
+    const pdf=doc?.format==='PDF'?pdfMode(cap):null,ws=globalThis.FalsifyPaperWorkspace, browserPdf=doc?.format==='PDF'&&typeof ws?.exportRedBatch==='function'&&ws.getSource?.()?.fileHash===doc.fileHash,supported=plain||browserPdf||!!pdf&&pdf.kind!=='none';
     $('#red-download').disabled=!active||!count||!$('#red-export-consent').checked||!supported||sourceFileRequired;
     if(sourceFileRequired)ensureReselect();
-    const mode=$('#red-export-mode');mode.hidden=!supported||!pdf;mode.replaceChildren();if(supported&&pdf)mode.append(...pdfModeText(pdf));
-    // Reflow deliberately changes pagination, so its action never promises preservation or a finished copy.
-    $('#red-download').textContent=pdf?.kind==='reflow'?'재배치·자체검사 후 실험용 사본 다운로드':'보존 검사 후 완성본 다운로드';
-    if(doc&&!supported)statusText(doc.format==='PDF'?(cap?(pdf.engine?MISSING_ENGINE+' 후보와 편집한 After는 그대로 남고, 변경 계획 JSON은 지금 저장할 수 있습니다.':'PDF 보존 검사는 PyMuPDF가 설치된 로컬 broker가 필요합니다.'):'PDF 보존 검사는 연결된 로컬 broker가 필요합니다. 변경 계획 JSON은 저장할 수 있습니다.'):'이 형식은 레이아웃 검증 렌더러가 아직 없습니다. 완성본 다운로드를 차단하고 변경 계획만 저장합니다.');
+    const mode=$('#red-export-mode');mode.hidden=!supported||!pdf;mode.replaceChildren();if(browserPdf)mode.textContent='선택한 후보만 원본 PDF에 적용합니다. 작업대의 별도 편집은 유지되며 이 파일에는 포함되지 않습니다.';else if(supported&&pdf)mode.append(...pdfModeText(pdf));
+    $('#red-download').textContent=doc?.format==='PDF'?'PDF 다운로드':'수정본 다운로드';
+    if(doc&&!supported&&!$('#red-export-status').classList.contains('error'))statusText(doc.format==='PDF'?(cap?(pdf.engine?MISSING_ENGINE+' 후보와 편집한 After는 그대로 남고, 변경 계획 JSON은 지금 저장할 수 있습니다.':'PDF 보존 검사는 PyMuPDF가 설치된 로컬 broker가 필요합니다.'):'PDF 보존 검사는 연결된 로컬 broker가 필요합니다. 변경 계획 JSON은 저장할 수 있습니다.'):'이 형식은 레이아웃 검증 렌더러가 아직 없습니다. 완성본 다운로드를 차단하고 변경 계획만 저장합니다.');
     document.querySelectorAll('#red-candidates input,#red-candidates textarea').forEach(e=>e.disabled=busy);
     analysisControls(cap,active,count);IMG?.sync(busy);renderRecord();renderHandoff();
     document.dispatchEvent(new CustomEvent('falsify:document-state',{detail:doc?{name:doc.name,count:candidates.length,selected:count,busy,hasResult:!!response}:null}));
@@ -53,6 +52,7 @@
   function cancelCurrent(){const old=job,l=jobLink;job=null;jobLink=null;if(old&&l)void l.request('/api/red/jobs/'+encodeURIComponent(old)+'/cancel',{}).catch(()=>{});}
   function clear(){generation++;cancelCurrent();analysisReset();IMG?.source(null);binding=null;doc=null;file=null;sourceFileRequired=false;candidates=[];response=null;request=null;busy=false;invalidate();$('#document-red').hidden=true;$('#red-candidates').replaceChildren();$('#red-empty').textContent=EMPTY;$('#red-response').value='';$('#red-record-status').textContent='';$('#red-export').hidden=true;$('#red-consent').checked=false;$('#red-harness-consent').checked=false;$('#red-export-consent').checked=false;statusText('');msg('');controls();}
   document.addEventListener('falsify:document-clear',clear);
+  document.addEventListener('falsify:paper-workspace-source',()=>{if(doc&&typeof globalThis.FalsifyPaperWorkspace?.exportRedBatch==='function')controls();});
   // The shell asks before replacing/closing the source; cancelling the discard confirmation keeps everything.
   document.addEventListener('falsify:before-document-change',e=>{if(e.detail?.role==='red'&&!keepEdits())e.preventDefault();});
   // Source binding is a busy phase keyed by its own identity: only clear() (reset/replacement) abandons it, so a harness-change
@@ -354,27 +354,19 @@
   function recovery(kind){if(!kind)return '';const keep=' 선택한 후보와 직접 편집한 After는 그대로 남아 있습니다.';
     if(kind==='reflow')return keep+' 긴 After의 재배치는 1단·회전 없음·잘림 없음인 최상위 본문 텍스트에서만 됩니다. 해당 후보 선택을 해제하거나 After를 직접 조정해 다시 시도하거나, 변경 계획 JSON만 저장할 수 있습니다. 엔진·연결 오류라면 위 연결 패널에서 companion을 다시 실행·연결하세요.';
     return keep+' 이 companion은 원래 줄 공간에 들어가는 변경만 지원합니다. 줄바꿈 재배치 엔진이 있는 companion으로 다시 연결하거나, 다른 후보를 고르거나, 변경 계획 JSON만 저장할 수 있습니다.';}
-  function workspacePdfOpen(){
-    const ws=globalThis.FalsifyPaperWorkspace;
-    if(!ws||typeof ws.getSource!=='function')return false;
-    let src=null;
-    try{src=ws.getSource();}catch{return false;}
-    const chosen=src&&src.file;
-    if(!chosen)return false;
-    return String(chosen.name||'').toLowerCase().endsWith('.pdf')||chosen.type==='application/pdf';
-  }
   $('#red-download').addEventListener('click',async()=>{
     if(busy||!doc||!$('#red-export-consent').checked)return;
     if(sourceFileRequired||!file){exportStatus('복구된 검토는 원본 파일을 다시 고르고 SHA-256이 같을 때만 내보냅니다.',true);return;}
-    if(doc.format==='PDF'&&workspacePdfOpen()){
-      exportStatus('PDF 작업대가 이 원본을 열고 있습니다. companion과 레이아웃 검증 없이, 위쪽 「현재 편집으로 생성」으로 생성본을 만든 뒤 그 파일을 받으세요.',true);
-      const gen=$('#paper-generate');if(gen&&typeof gen.focus==='function')gen.focus();
-      return;
-    }
-    const current=generation,pdf=doc.format==='PDF'?pdfMode(B.capabilities()):null;busy=true;preview?.clear();controls();exportStatus(pdf?.kind==='reflow'?'선택 변경만 적용하고 재배치·자체검사 중':'선택 변경만 적용하고 보존 검사 중');
-    try{const patches=C.patches(doc,candidates);let output,reported=null;
+    const current=generation,pdf=doc.format==='PDF'?pdfMode(B.capabilities()):null;busy=true;controls();exportStatus(pdf?.kind==='reflow'?'선택 변경만 적용하고 재배치·자체검사 중':'선택 변경만 적용하고 보존 검사 중');
+    try{const patches=C.patches(doc,candidates);let output,reported=null,browserGuard=null;
       // Same request body as before: only checked candidates' Before plus the user's current After; progress is staged text, never an invented percentage.
-      if(pdf){exportStatus('원본 PDF와 선택 변경 '+patches.length+'개를 companion에서 '+(pdf.kind==='reflow'?'교체·줄바꿈 재배치·엔진 자체검사':'한 줄 교체·보존 검사')+'하는 중입니다. 엔진이 진행률을 알려주지 않아 퍼센트는 표시하지 않습니다.');
+      if(doc.format==='PDF'&&typeof globalThis.FalsifyPaperWorkspace?.exportRedBatch==='function'&&globalThis.FalsifyPaperWorkspace.getSource()?.fileHash===doc.fileHash){
+        const sourceDoc=doc, sourceFile=file, ws=globalThis.FalsifyPaperWorkspace;
+        const result=await ws.exportRedBatch({fileHash:doc.fileHash,revision:doc.revision,patches,isCurrent:()=>current===generation&&doc===sourceDoc&&file===sourceFile});
+        if(current!==generation)return;
+        output={bytes:result.bytes,verification:result.verification};reported=result.sha256;
+        browserGuard=()=>current===generation&&doc===sourceDoc&&file===sourceFile&&ws.getSource()?.fileHash===sourceDoc.fileHash&&ws.getEditSnapshot()?.revision===result.workspaceRevision;
+      }else if(pdf){exportStatus('원본 PDF와 선택 변경 '+patches.length+'개를 companion에서 '+(pdf.kind==='reflow'?'교체·줄바꿈 재배치·엔진 자체검사':'한 줄 교체·보존 검사')+'하는 중입니다. 엔진이 진행률을 알려주지 않아 퍼센트는 표시하지 않습니다.');
         const result=await link().request('/api/export',{format:doc.format,fileHash:doc.fileHash,file:base64(new Uint8Array(await file.arrayBuffer())),patches});if(current!==generation)return;
         exportStatus('companion 결과 수신 · 출력 파일과 레이아웃 검증 확인 중');reported=typeof result.outputFileHash==='string'?result.outputFileHash:null;
         output={bytes:Uint8Array.from(atob(result.file),x=>x.charCodeAt(0)),verification:result.verification};
@@ -389,13 +381,15 @@
       else output=await FalsifyExport.textFile(file,patches);
       if(current!==generation)return;
       const outputFileHash=await hash(output.bytes);if(current!==generation)return;
+      if(browserGuard&&!browserGuard())throw new Error('원본 또는 편집이 바뀌어 생성을 취소했습니다.');
       if(reported&&reported!==outputFileHash)throw new Error('companion이 보고한 출력 해시와 받은 파일이 달라 다운로드하지 않았습니다.');
       const name=file.name.replace(/(\.[^.]+)$/,'-falsify-research$1'),type=file.type||'application/octet-stream';download(output.bytes,name,type);jsonDownload(plan(patches,{outputFileHash,verification:output.verification}),'falsify-document-edit-plan.json');
       exported={outputFileHash,verification:output.verification,file:new File([output.bytes],name,{type})};const final={selected:patches,outputFileHash,verification:output.verification};exported.key=key(final);void save(final);
-      successStatus(pdf?layoutReport(output.verification,styled(pdf.engine)):{facts:[]},typeof output.verification?.limits==='string'?output.verification.limits.slice(0,400):'');
+      if(browserGuard)exportStatus('선택한 후보 '+patches.length+'개를 적용해 다운로드했습니다. 작업대의 별도 편집은 이 파일에 포함되지 않습니다.');
+      else successStatus(pdf?layoutReport(output.verification,styled(pdf.engine)):{facts:[]},typeof output.verification?.limits==='string'?output.verification.limits.slice(0,400):'');
       // Preview the exact File just downloaded and handed to BLUE, only for PDF; a preview failure never touches `exported` or the download.
-      if(pdf)void preview?.show({file:exported.file,sha256:outputFileHash});
-    }catch(e){if(current===generation)exportStatus('다운로드 차단: '+e.message+recovery(pdf?.kind),true);}
+      if(doc.format==='PDF')void preview?.show({file:exported.file,sha256:outputFileHash});
+    }catch(e){if(current===generation)exportStatus('다운로드 차단: '+e.message,true);}
     finally{if(current===generation){busy=false;controls();}}
   });
   // Final snapshot = what the user actually selected/edited; output hash only while the exported bytes still match.
