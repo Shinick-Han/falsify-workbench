@@ -2376,6 +2376,7 @@ __export(quality_exports, {
   inspectSavedPdf: () => inspectSavedPdf,
   joinFlowParts: () => joinFlowParts,
   matchesGeneratedWhitespace: () => matchesGeneratedWhitespace,
+  matchesStationaryReorderedGlyphs: () => matchesStationaryReorderedGlyphs,
   normalizePageMap: () => normalizePageMap,
   repairPageLayout: () => repairPageLayout,
   restoreSourceOrder: () => restoreSourceOrder,
@@ -2954,6 +2955,67 @@ function expectedPageText(sourceText, pageEdits, options = {}) {
   }
   return { ok: true, text: normStr(out + norm.slice(at)), ...options.includeSpans ? { spans: spans.map((s) => ({ ...s })) } : {} };
 }
+function normalizedSourceChars(chars) {
+  const out = [];
+  for (let i = 0; i < chars.length; i++) {
+    const ch = String.fromCharCode(chars[i].u);
+    if (/\s/.test(ch)) {
+      if (out.length && out.at(-1).ch !== " ") out.push({ ch: " " });
+    } else out.push({ ch, sourceIndex: i });
+  }
+  if (out.at(-1)?.ch === " ") out.pop();
+  return out;
+}
+function matchesStationaryReorderedGlyphs(source2, output, edits) {
+  if (!source2.styled || !output.styled) return false;
+  const normalized = normalizedSourceChars(source2.chars);
+  const exp = expectedPageText(source2.text, edits, { includeSpans: true });
+  if (!exp.ok) return false;
+  const expected = [];
+  let at = 0;
+  for (const span of exp.spans) {
+    expected.push(...normalized.slice(at, span.a), ...span.after.split("").map((ch) => ({ ch })));
+    at = span.b;
+  }
+  expected.push(...normalized.slice(at));
+  if (expected.map((x) => x.ch).join("") !== exp.text) return false;
+  const sg = new Map(source2.glyphs.map((g) => [g.i, g]));
+  const og = new Map(output.glyphs.map((g) => [g.i, g]));
+  const actual = [];
+  for (let i = 0; i < output.chars.length; i++) {
+    const c = output.chars[i], ch = String.fromCharCode(c.u);
+    if (/\s/.test(ch)) {
+      if (!actual.length) continue;
+      if (actual.at(-1).ch === " ") actual.at(-1).optional &&= c.generated === true;
+      else actual.push({ ch: " ", optional: c.generated === true });
+    } else actual.push({ ch, index: i });
+  }
+  if (actual.at(-1)?.ch === " ") actual.pop();
+  const sameStationary = (a, b) => a.u === b.u && ["l", "r", "b", "t"].every((k) => Math.abs(a[k] - b[k]) <= 0.01) && sameStyle(a.style, b.style);
+  const moved = /* @__PURE__ */ new Set();
+  let pos = 0, relocations = 0;
+  for (const e of expected) {
+    while (moved.has(pos)) pos++;
+    while (actual[pos]?.ch === " " && actual[pos].optional && e.ch !== " ") pos++;
+    if (actual[pos]?.ch === e.ch) {
+      pos++;
+      continue;
+    }
+    const src = sg.get(e.sourceIndex);
+    if (!src || source2.glyphs.filter((g) => sameStationary(src, g)).length !== 1) return false;
+    const candidates = [];
+    for (let j = pos + 1; j < actual.length; j++) {
+      if (moved.has(j) || actual[j].ch !== e.ch) continue;
+      const dst = og.get(actual[j].index);
+      if (dst && sameStationary(src, dst)) candidates.push(j);
+    }
+    if (candidates.length !== 1) return false;
+    moved.add(candidates[0]);
+    relocations++;
+  }
+  while (pos < actual.length && (moved.has(pos) || actual[pos].ch === " " && actual[pos].optional)) pos++;
+  return pos === actual.length && relocations > 0;
+}
 async function inspectSavedPdf(engineFactory, sourceBytes, outputBytes, edits, options = {}) {
   const failures = [];
   const warnings = [];
@@ -3012,6 +3074,11 @@ async function inspectSavedPdf(engineFactory, sourceBytes, outputBytes, edits, o
         failures.push({ code: "expected_text_uncomputable", pageIndex: i, id: exp.id, reason: exp.reason });
       } else {
         row.text_equal = exp.text === normStr(o.text);
+        if (!row.text_equal && matchesStationaryReorderedGlyphs(s, o, pageEdits)) {
+          row.text_equal = true;
+          row.stationary_glyph_order_normalized = true;
+          warnings.push({ code: "stationary_glyph_order_normalized", pageIndex: i, severity: "warning" });
+        }
         row.expected_text = digest(exp.text, options.includeText);
         if (!row.text_equal) failures.push({ code: "edited_page_text_or_order_mismatch", pageIndex: i });
         for (const e of pageEdits) {
@@ -3503,6 +3570,41 @@ var init_quality = __esm({
 
 // app/src/paragraph-vendor/editor.mjs
 init_paragraph_pdf_crypto();
+
+// app/src/paragraph-vendor/engine/foreign-gap.mjs
+function removeForeignObjectGapSpaces(modelRuns, runs, chars, owned) {
+  const original = modelRuns.map((r) => r.text).join("");
+  const replacement = runs.map((r) => r.text).join("");
+  let prefix = 0;
+  while (prefix < original.length && prefix < replacement.length && original[prefix] === replacement[prefix]) prefix++;
+  const source2 = chars.filter((c) => owned.has(c.obj) && c.ch && !/\s/.test(c.ch));
+  const model = [...original].filter((ch) => !/\s/.test(ch));
+  if (model.length !== source2.length || model.some((ch, i) => ch !== source2[i].ch)) return runs;
+  const positions = [];
+  let gi = 0;
+  for (let i = 0; i < original.length; i++) if (!/\s/.test(original[i])) positions[i] = gi++;
+  const drops = [];
+  for (let i = 1; i + 1 < Math.min(prefix, original.length); i++) {
+    if (original[i] !== " " || /\s/.test(original[i - 1]) || /\s/.test(original[i + 1])) continue;
+    const a = source2[positions[i - 1]], b = source2[positions[i + 1]];
+    if (!a?.box || !b?.box || a.obj === b.obj || a.index >= b.index) continue;
+    const between = chars.slice(a.index + 1, b.index);
+    if (!between.length || between.some((c) => !c.ch || /\s/.test(c.ch) || owned.has(c.obj) || !c.box)) continue;
+    const [al, ar, ab, at] = a.box, [bl, br, bb, bt] = b.box;
+    if (!(ar <= bl && Math.min(at, bt) >= Math.max(ab, bb))) continue;
+    if (between.some((c) => c.box[0] < ar - 0.1 || c.box[1] > bl + 0.1 || c.box[3] < Math.min(ab, bb) || c.box[2] > Math.max(at, bt))) continue;
+    drops.push(i);
+  }
+  if (!drops.length) return runs;
+  let offset = 0;
+  return runs.map((r) => {
+    const start = offset;
+    offset += r.text.length;
+    const local = drops.filter((i) => i >= start && i < offset).map((i) => i - start);
+    if (!local.length) return r;
+    return { ...r, text: [...r.text].filter((_, i) => !local.includes(i)).join("") };
+  });
+}
 
 // app/src/paragraph-pdf-engine-loader.mjs
 function createEngineModule() {
@@ -4326,6 +4428,9 @@ var PdfEngine = class _PdfEngine {
       if (hit) anchors[o.font] = hit.font;
     }
   }
+  retainDetachedObject(handle) {
+    (this._detachedObjects ||= /* @__PURE__ */ new Set()).add(handle >>> 0);
+  }
   close() {
     const M = this.M;
     if (this._pageCache) {
@@ -4335,6 +4440,8 @@ var PdfEngine = class _PdfEngine {
     }
     if (this.page) M._FPDF_ClosePage(this.page);
     if (this.session) M._ec_session_destroy(this.session);
+    for (const handle of this._detachedObjects || []) M._FPDFPageObj_Destroy(handle);
+    this._detachedObjects?.clear();
     if (this.doc) M._FPDF_CloseDocument(this.doc);
     if (this._docBuf) M._free(this._docBuf);
     this.page = this.session = this.doc = this._docBuf = 0;
@@ -4470,7 +4577,9 @@ var PdfEngine = class _PdfEngine {
     const json = M.UTF8ToString(ptr);
     M._ec_string_free(ptr);
     this._readPageTransform();
-    return JSON.parse(json).paragraphs;
+    const paragraphs = JSON.parse(json).paragraphs;
+    this._gapModel = { pageIndex: this.pageIndex, paragraphs: paragraphs.map((p) => ({ id: p.id, runs: p.runs.map((r) => ({ text: r.text })) })) };
+    return paragraphs;
   }
   _readPageTransform() {
     const M = this.M;
@@ -4556,8 +4665,31 @@ var PdfEngine = class _PdfEngine {
     this.M._ec_string_free(ptr);
     return JSON.parse(j);
   }
+  _sourceGapRuns(id, runs) {
+    const model = this._gapModel?.pageIndex === this.pageIndex && this._gapModel.paragraphs.find((p) => p.id === id);
+    const M = this.M;
+    const required = ["_FPDFText_LoadPage", "_FPDFText_CountChars", "_FPDFText_GetUnicode", "_FPDFText_GetTextObject", "_FPDFText_GetCharBox", "_FPDFText_ClosePage"];
+    if (!model || required.some((f) => typeof M[f] !== "function")) return runs;
+    const owned = new Set((this.paragraphObjects(id) || []).map((h) => h >>> 0));
+    if (!owned.size) return runs;
+    const tp = M._FPDFText_LoadPage(this.page);
+    if (!tp) return runs;
+    const ptr = M._malloc(32), chars = [];
+    try {
+      const n = M._FPDFText_CountChars(tp);
+      for (let i = 0; i < n; i++) {
+        const u = M._FPDFText_GetUnicode(tp, i), obj = M._FPDFText_GetTextObject(tp, i) >>> 0;
+        const ok = M._FPDFText_GetCharBox(tp, i, ptr, ptr + 8, ptr + 16, ptr + 24);
+        chars.push({ index: i, ch: String.fromCharCode(u), obj, box: ok ? [0, 8, 16, 24].map((k) => M.HEAPF64[ptr + k >> 3]) : null });
+      }
+      return removeForeignObjectGapSpaces(model.runs, runs, chars, owned);
+    } finally {
+      M._free(ptr);
+      M._FPDFText_ClosePage(tp);
+    }
+  }
   previewParagraph(id, runs, fmt2) {
-    const a = this._writeRuns(runs);
+    const a = this._writeRuns(this._sourceGapRuns(id, runs));
     const f = this._writeFmt(fmt2);
     const ptr = this.M._ec_preview_paragraph(
       this.session,
@@ -4580,7 +4712,7 @@ var PdfEngine = class _PdfEngine {
   }
   commitParagraph(id, runs, fmt2) {
     this._pageDirty = true;
-    const a = this._writeRuns(runs);
+    const a = this._writeRuns(this._sourceGapRuns(id, runs));
     const f = this._writeFmt(fmt2);
     const out = this._decode(
       this.M._ec_commit_paragraph(
@@ -5949,6 +6081,7 @@ async function compactDocumentFlow(engineFactory, sourceBytes, intermediatePdf, 
 }
 
 // app/src/paragraph-vendor/inline-preservation.mjs
+init_shadingsurgery();
 var WS = /^\s+$/;
 var tokens = (s) => s.match(/\s+|\S+/g) || [];
 var isWs = (c) => /\s/.test(c.ch);
@@ -6030,6 +6163,175 @@ function planInlineChange(paras, chars, map, hit, needle, after) {
   }
   const ins = [rk ? viaRight : null, lk ? viaLeft : null, viaRight, viaLeft].find((c) => c && style(c) === want);
   return ins ? { del, inserts: [ins] } : { failure: "AMBIGUOUS_STYLE" };
+}
+function planGeometricShortening(chars, map, hit, before, after) {
+  let n = 0;
+  while (n < before.length && n < after.length && before[n] === after[n]) n++;
+  const punctuation = after.slice(n);
+  if (!n || n >= before.length || !/^\p{P}{1,2}$/u.test(punctuation)) return null;
+  if (/\s/.test(before[n - 1]) || /\p{L}|\p{N}/u.test(before[n - 1]) && /\p{L}|\p{N}/u.test(before[n] || "")) return null;
+  const last = map[hit + n - 1];
+  const anchor = chars[last[1]];
+  if (!anchor || anchor.pi < 0 || /\s/.test(anchor.ch)) return null;
+  const start = map[hit + n][0], end = map[hit + before.length - 1][1];
+  const del = chars.slice(start, end + 1).filter((c) => c.pi >= 0);
+  return { del, inserts: [{ pi: anchor.pi, ri: anchor.ri, o: anchor.o + 1, text: punctuation }] };
+}
+async function sourceLineCodes(engine, x, y) {
+  const bytes2 = engine._originalBytes;
+  if (!bytes2) return null;
+  const src = latin(bytes2);
+  let pdf = parsePdf(src);
+  if (!pdf) return null;
+  pdf = await withObjStm(bytes2, src, pdf);
+  if (!pdf) return null;
+  const page = pdf.objBody(pdf.pageNum(engine.pageIndex));
+  if (!page) return null;
+  const arr = page.body.match(/\/Contents\s*\[([^\]]*)\]/), single = page.body.match(/\/Contents\s+(\d+)\s+\d+\s+R/);
+  const refs = arr ? [...arr[1].matchAll(/(\d+)\s+\d+\s+R/g)].map((m) => +m[1]) : single ? [+single[1]] : [];
+  const matches = [], num = "[-+]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)";
+  for (const id of refs) {
+    const rec = pdf.objBody(id);
+    if (!rec) return null;
+    const raw = await streamData(bytes2, src, { num: id, ...rec });
+    if (raw == null) return null;
+    const text = typeof raw === "string" ? raw : latin(raw);
+    const re = new RegExp(`(${num})\\s+(${num})\\s+(${num})\\s+(${num})\\s+(${num})\\s+(${num})\\s+Tm\\b`, "g");
+    for (const m of text.matchAll(re)) {
+      if (Math.abs(+m[5] - x) > 0.02 || Math.abs(+m[6] - y) > 0.02) continue;
+      const tail = text.slice(m.index + m[0].length);
+      const show = tail.match(/^\s*(\[(?:[^\[\]]|\\.)*\]\s*TJ|\((?:[^()\\]|\\.)*\)\s*Tj)/);
+      if (!show) continue;
+      const op = show[1], codes = [];
+      let valid = true;
+      for (let i = 0; i < op.length; i++) {
+        if (op[i] !== "(") continue;
+        let depth = 1;
+        for (i++; i < op.length && depth; i++) {
+          const ch = op[i];
+          if (ch === "\\") {
+            const oct = op.slice(i + 1).match(/^[0-7]{1,3}/);
+            if (oct) {
+              codes.push(parseInt(oct[0], 8));
+              i += oct[0].length;
+            } else {
+              const v = op[++i];
+              if (v === "\n" || v === "\r" || v === void 0) {
+                valid = false;
+                break;
+              }
+              codes.push({ n: 10, r: 13, t: 9, b: 8, f: 12 }[v] ?? v.charCodeAt(0));
+            }
+          } else if (ch === "(") {
+            depth++;
+            codes.push(40);
+          } else if (ch === ")") {
+            if (--depth) codes.push(41);
+          } else codes.push(ch.charCodeAt(0));
+        }
+        if (depth) valid = false;
+      }
+      if (valid) matches.push(codes);
+    }
+  }
+  return matches.length === 1 ? matches[0] : null;
+}
+async function commitGeometricPrefix(engine, para, del, inserts) {
+  const M = engine.M, lines = para.lines || [];
+  const api = ["_FPDFText_LoadPage", "_FPDFText_CountChars", "_FPDFText_GetUnicode", "_FPDFText_GetTextObject", "_FPDFText_GetCharOrigin", "_FPDFText_GetCharBox", "_FPDFText_ClosePage", "_FPDFText_SetCharcodes", "_FPDFText_SetPositions", "_FPDFPageObj_GetMatrix"];
+  if (!lines.length || inserts.length !== 1 || !api.every((k) => typeof M?.[k] === "function")) return null;
+  const flat = para.runs.map((r) => r.text).join(""), start = lines.at(-1).off, offsets = [];
+  let offset = 0;
+  para.runs.forEach((r, ri) => {
+    for (let o = 0; o < r.text.length; o++, offset++) if (del.has(ri + ":" + o)) offsets.push(offset);
+  });
+  const ins = inserts[0], at = para.runs.slice(0, ins.ri).reduce((n, r) => n + r.text.length, 0) + ins.o;
+  if (!offsets.length || at !== offsets[0] || offsets.some((v, k) => v !== at + k) || offsets.at(-1) !== flat.length - 1 || at <= start || !/^\p{P}$/u.test(ins.text)) return null;
+  const line = flat.slice(start), keep = at - start, handles = new Set((engine.paragraphObjects(para.id) || []).map((h) => h >>> 0)), buf = M._malloc(64);
+  const read = () => {
+    const tp = M._FPDFText_LoadPage(engine.page), rows = [];
+    if (!tp) throw new LineRetentionError("glyph_read_failed");
+    try {
+      for (let i = 0; i < M._FPDFText_CountChars(tp); i++) {
+        const h = M._FPDFText_GetTextObject(tp, i) >>> 0;
+        if (!handles.has(h) || !M._FPDFText_GetCharOrigin(tp, i, buf, buf + 8)) continue;
+        const y = M.HEAPF64[buf + 8 >> 3];
+        if (Math.abs(y - lines.at(-1).y) <= 0.5) {
+          const x = M.HEAPF64[buf >> 3];
+          if (!M._FPDFText_GetCharBox(tp, i, buf + 16, buf + 24, buf + 32, buf + 40)) throw new LineRetentionError("glyph_box_unavailable");
+          rows.push({ h, u: M._FPDFText_GetUnicode(tp, i), x, y, box: [0, 1, 2, 3].map((k) => M.HEAPF64[(buf + 16 >> 3) + k]) });
+        }
+      }
+      return rows;
+    } finally {
+      M._FPDFText_ClosePage(tp);
+    }
+  };
+  try {
+    const before = read();
+    if (before.length !== line.length || before.some((g, i) => g.u !== line.charCodeAt(i) || g.h !== before[0]?.h)) return null;
+    const h = before[0].h;
+    if (!M._FPDFPageObj_GetMatrix(h, buf)) return null;
+    const [a, b, c, d, x, y] = [0, 1, 2, 3, 4, 5].map((i) => M.HEAPF32[(buf >> 2) + i]);
+    if (!(a > 0 && d > 0) || Math.abs(b) > 1e-4 || Math.abs(c) > 1e-4) return null;
+    const codes = await sourceLineCodes(engine, x, y);
+    if (!codes || codes.length < line.length || codes.length > line.length + 1 || ins.text !== ".") return null;
+    const text = line.slice(0, keep) + ins.text, tp = M._malloc(text.length * 4), pp = M._malloc(keep * 4);
+    try {
+      for (let i = 0; i < keep; i++) M.HEAPU32[(tp >> 2) + i] = codes[i];
+      M.HEAPU32[(tp >> 2) + keep] = 46;
+      for (let i = 1; i <= keep; i++) M.HEAPF32[(pp >> 2) + i - 1] = (before[i].x - before[0].x) / a;
+      if (!M._FPDFText_SetCharcodes(h, tp, text.length) || !M._FPDFText_SetPositions(h, pp, keep)) throw new LineRetentionError("geometric_prefix_write_failed");
+    } finally {
+      M._free(tp);
+      M._free(pp);
+    }
+    engine._pageDirty = true;
+    engine._spliceOk = false;
+    const after = read();
+    if (after.length !== text.length || after.some((g, i) => g.h !== h || g.u !== text.charCodeAt(i) || Math.abs(g.x - before[i].x) > 0.02 || Math.abs(g.y - before[i].y) > 0.02 || i < keep && g.box.some((v, k) => Math.abs(v - before[i].box[k]) > 0.02))) throw new LineRetentionError("geometric_prefix_proof_failed");
+    return { upd: { id: para.id, surgical: true, lines }, lines: { status: "geometric_prefix", keptGlyphs: keep } };
+  } finally {
+    M._free(buf);
+  }
+}
+function removeGeometricFirstLine(engine, para, del, inserts) {
+  const M = engine.M, lines = para.lines || [];
+  if (inserts.length || lines.length < 2 || typeof M?._FPDFPage_RemoveObject !== "function" || typeof M._FPDFPageObj_Destroy !== "function" || typeof engine.retainDetachedObject !== "function") return false;
+  const flat = para.runs.map((r) => r.text).join(""), end = lines[1].off, line = flat.slice(0, end), visible = line.replace(/\s+$/, "");
+  if (!visible || !/^\s*$/.test(line.slice(visible.length))) return false;
+  const offsets = [];
+  let n = 0;
+  para.runs.forEach((r, ri) => {
+    for (let o = 0; o < r.text.length; o++, n++) if (del.has(ri + ":" + o)) offsets.push(n);
+  });
+  if (offsets.length !== visible.length || offsets.some((v, i) => v !== i)) return false;
+  const handles = new Set((engine.paragraphObjects(para.id) || []).map((h2) => h2 >>> 0)), buf = M._malloc(16), tp = M._FPDFText_LoadPage(engine.page), rows = [], other = [];
+  if (!tp) {
+    M._free(buf);
+    return false;
+  }
+  try {
+    for (let i = 0; i < M._FPDFText_CountChars(tp); i++) {
+      const h2 = M._FPDFText_GetTextObject(tp, i) >>> 0;
+      if (!handles.has(h2) || !M._FPDFText_GetCharOrigin(tp, i, buf, buf + 8)) continue;
+      const y = M.HEAPF64[buf + 8 >> 3];
+      if (Math.abs(y - lines[0].y) <= 0.5) rows.push({ h: h2, u: M._FPDFText_GetUnicode(tp, i) });
+      else other.push(h2);
+    }
+  } finally {
+    M._FPDFText_ClosePage(tp);
+    M._free(buf);
+  }
+  if (rows.length !== visible.length || other.includes(rows[0]?.h) || rows.some((g, i) => g.h !== rows[0]?.h || g.u !== visible.charCodeAt(i))) return false;
+  const h = rows[0].h, before = pageObjectList(engine);
+  if (!M._FPDFPage_RemoveObject(engine.page, h)) throw new LineRetentionError("geometric_remove_failed");
+  engine.retainDetachedObject(h);
+  engine._pageDirty = true;
+  engine._spliceOk = false;
+  const after = pageObjectList(engine);
+  if (before.filter((x) => x !== h).join(",") !== after.join(",")) throw new LineRetentionError("geometric_remove_proof_failed");
+  return true;
 }
 function sourceLinePlan(para, del, inserts) {
   const lines = para.lines || [];
@@ -6996,6 +7298,28 @@ function findAll(norm, needle) {
   for (let k = norm.indexOf(needle); k >= 0; k = norm.indexOf(needle, k + 1)) hits.push(k);
   return hits;
 }
+function geometricVariants(paras, chars) {
+  const byPara = paras.map((_, pi) => chars.flatMap((c, i) => c.pi === pi ? [{ ...c, source: i }] : []));
+  const variants = [];
+  for (let i = 0; i < paras.length; i++) {
+    const a = paras[i], lines = a.lines || [], box = a.box;
+    if (!box || lines.length < 2 || !byPara[i].length) continue;
+    const steps = lines.slice(1).map((l, k) => lines[k].y - l.y);
+    const step = steps[0];
+    if (!(step > 0) || steps.some((d) => Math.abs(d - step) > 0.5)) continue;
+    for (let j = 0; j < paras.length; j++) {
+      if (i === j) continue;
+      const b = paras[j], first = b.lines?.[0], bb = b.box;
+      if (!bb || !first || !byPara[j].length || ![box.x, box.w, bb.x, bb.w, first.y].every(Number.isFinite)) continue;
+      if (Math.abs(box.x - bb.x) > 1 || Math.abs(box.w - bb.w) > Math.max(2, box.w * 0.03) || Math.abs(lines.at(-1).y - first.y - step) > 0.5) continue;
+      const competitors = paras.filter((p, k) => k !== i && k !== j && p.box && p.lines?.some((l) => Math.abs(l.y - first.y) <= 0.5) && Math.abs(p.box.x - box.x) <= 1 && p.box.w >= box.w * 0.5);
+      if (competitors.length) continue;
+      const joined = [...byPara[i], { ch: "\n", pi: -1, source: null }, ...byPara[j]];
+      for (const logical of [false, true]) variants.push({ chars: joined, ...normalizeChars(joined, logical) });
+    }
+  }
+  return variants;
+}
 function rebuildRuns(para, del, inserts, breaks = null) {
   const out = [];
   const sourceChars = !breaks ? pageIndexMap([para]) : [];
@@ -7019,34 +7343,40 @@ function rebuildRuns(para, del, inserts, breaks = null) {
 }
 function planPageEdits(paras, edits) {
   const chars = pageIndexMap(paras);
-  const visible = normalizeChars(chars);
-  const logical = normalizeChars(chars, true);
+  chars.forEach((c, i) => {
+    c.source = i;
+  });
+  const visible = { chars, ...normalizeChars(chars) };
+  const logical = { chars, ...normalizeChars(chars, true) };
+  const geometry2 = geometricVariants(paras, chars);
   const failures = [];
   const spans = [];
   const plans = [];
   for (const e of edits) {
     const needle = normalizeText(e.before);
     const candidates = /* @__PURE__ */ new Map();
-    for (const variant of [visible, logical]) {
+    for (const variant of [visible, logical, ...geometry2]) {
       for (const hit2 of findAll(variant.norm, needle)) {
         const a2 = variant.map[hit2][0], b2 = variant.map[hit2 + needle.length - 1][1];
-        const key2 = a2 + ":" + b2;
-        if (!candidates.has(key2)) candidates.set(key2, { ...variant, hit: hit2, a: a2, b: b2 });
+        const source3 = variant.chars.slice(a2, b2 + 1).filter((c) => c.source != null && c.pi >= 0).map((c) => c.source);
+        const key2 = source3.join(":");
+        if (!candidates.has(key2)) candidates.set(key2, { ...variant, hit: hit2, a: a2, b: b2, source: source3 });
       }
     }
     if (candidates.size !== 1) {
       failures.push({ id: e.id, pageIndex: e.pageIndex, code: candidates.size ? "AMBIGUOUS_MATCH" : "NOT_FOUND", hits: candidates.size });
       continue;
     }
-    const { map, hit, a, b } = candidates.values().next().value;
+    const { map, hit, a, b, source: source2, chars: matchedChars } = candidates.values().next().value;
     const hits = [hit];
-    const overlap = spans.find((s) => !(b < s.a || a > s.b));
+    const sourceSet = new Set(source2);
+    const overlap = spans.find((s) => s.source.some((i) => sourceSet.has(i)));
     if (overlap) {
       failures.push({ id: e.id, pageIndex: e.pageIndex, code: "OVERLAPPING_EDITS", with: overlap.id });
       continue;
     }
-    spans.push({ a, b, id: e.id });
-    const span = chars.slice(a, b + 1).filter((c) => c.pi >= 0);
+    spans.push({ source: source2, id: e.id });
+    const span = matchedChars.slice(a, b + 1).filter((c) => c.pi >= 0);
     const touched = [...new Set(span.map((c) => c.pi))];
     const locked = touched.filter((pi) => paras[pi].editable === false);
     if (locked.length) {
@@ -7055,12 +7385,18 @@ function planPageEdits(paras, edits) {
     }
     const lastPi = touched[touched.length - 1];
     const noop = normalizeText(e.after) === needle;
-    const change = noop ? null : planInlineChange(paras, chars, map, hits[0], needle, e.after);
+    const discontiguous = source2.some((v, k) => k > 0 && v > source2[k - 1] + 2);
+    const geometricShortening = !noop && discontiguous ? planGeometricShortening(matchedChars, map, hit, needle, e.after) : null;
+    const change = noop ? null : geometricShortening || planInlineChange(paras, matchedChars, map, hits[0], needle, e.after);
     if (change?.failure) {
       failures.push({ id: e.id, pageIndex: e.pageIndex, code: change.failure });
       continue;
     }
-    plans.push({ edit: e, span, touched, insertAt: span.find((c) => c.pi === lastPi), noop, change, start: a, sourceHyphenNormalization: span.some((c) => c.lineEndHyphen) });
+    if (discontiguous && new Set((change?.del || []).map((c) => c.pi)).size > 1 && !geometricShortening) {
+      failures.push({ id: e.id, pageIndex: e.pageIndex, code: "UNSUPPORTED_GEOMETRIC_CHANGE" });
+      continue;
+    }
+    plans.push({ edit: e, span, touched, geometricShortening: !!geometricShortening, insertAt: span.find((c) => c.pi === lastPi), noop, change, start: Math.min(...source2), sourceHyphenNormalization: span.some((c) => c.lineEndHyphen) });
   }
   const perPara = /* @__PURE__ */ new Map();
   const entry = (pi) => {
@@ -7225,8 +7561,18 @@ async function editPdf(request, options = {}) {
       if (snapshotKey(paras) !== key2) throw fail6("STATE_DRIFT", "Page model changed between planning and commit", { pageIndex });
       const context2 = quality.capturePageLayout(engine, at, paras);
       const touched = [];
-      for (const [pi, { del, inserts }] of [...plan.perPara.entries()].sort((x, y) => x[0] - y[0])) {
+      const mutations = [...plan.perPara.entries()].sort((x, y) => x[0] - y[0]);
+      for (const [mutationIndex, [pi, { del, inserts }]] of mutations.entries()) {
         const para = paras[pi];
+        const geometric = plan.plans.some((p) => p.geometricShortening && p.touched.includes(pi));
+        if (geometric && !inserts.length) {
+          if (mutationIndex !== mutations.length - 1 || plan.plans.filter((p) => p.touched.includes(pi) && !p.noop).length !== 1 || !removeGeometricFirstLine(engine, para, del, inserts)) {
+            throw fail6("LAYOUT_UNSUPPORTED", "Geometric deletion could not preserve the source objects", { pageIndex, paragraphIndex: pi });
+          }
+          mutated = true;
+          pageReport.paragraphs.push({ index: pi, surgical: true, lineRetention: { status: "geometric_first_line_removed" } });
+          continue;
+        }
         const runs = rebuildRuns(para, del, inserts);
         const linePlan = sourceLinePlan(para, del, inserts);
         if (linePlan?.breaks) linePlan.lineRuns = rebuildRuns(para, del, inserts, linePlan.breaks);
@@ -7236,7 +7582,12 @@ async function editPdf(request, options = {}) {
         let publishedId = null;
         try {
           const pre = linePlan?.breaks && localStable ? pageObjectList(engine) : null;
-          committed = commitRetainingLines(engine, para, runs, linePlan);
+          const prefix = plan.plans.some((p) => p.geometricShortening && p.change.inserts.some((ins) => ins.pi === pi));
+          if (prefix) {
+            if (plan.plans.filter((p) => p.touched.includes(pi) && !p.noop).length !== 1) throw new LineRetentionError("geometric_prefix_shared");
+            committed = await commitGeometricPrefix(engine, para, del, inserts);
+            if (!committed) throw new LineRetentionError("geometric_prefix_unsupported");
+          } else committed = commitRetainingLines(engine, para, runs, linePlan);
           const lost = committed.lines?.status === "reflowed";
           if (lost && linePlan?.breaks && objectsBefore !== null && !localStable) lineLocal = { status: "declined", reason: "page_model_unstable" };
           if (pre && lost) {

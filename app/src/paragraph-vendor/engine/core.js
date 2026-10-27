@@ -680,6 +680,10 @@ export class PdfEngine {
     }
   }
 
+  retainDetachedObject(handle) {
+    (this._detachedObjects ||= new Set()).add(handle >>> 0);
+  }
+
   close() {
     const M = this.M;
     if (this._pageCache) {
@@ -689,6 +693,10 @@ export class PdfEngine {
     }
     if (this.page) M._FPDF_ClosePage(this.page);
     if (this.session) M._ec_session_destroy(this.session);
+    // Layout/history may still reference removed source objects until the
+    // edit session closes. The page no longer owns these objects.
+    for (const handle of this._detachedObjects || []) M._FPDFPageObj_Destroy(handle);
+    this._detachedObjects?.clear();
     if (this.doc) M._FPDF_CloseDocument(this.doc);
     if (this._docBuf) M._free(this._docBuf);
     this.page = this.session = this.doc = this._docBuf = 0;

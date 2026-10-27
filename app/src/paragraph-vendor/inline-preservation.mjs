@@ -186,7 +186,7 @@ export async function commitGeometricPrefix(engine, para, del, inserts) {
 // the deleted source characters. The following source lines remain untouched.
 export function removeGeometricFirstLine(engine, para, del, inserts) {
   const M=engine.M,lines=para.lines||[];
-  if(inserts.length || lines.length<2 || typeof M?._FPDFPage_RemoveObject!=='function')return false;
+  if(inserts.length || lines.length<2 || typeof M?._FPDFPage_RemoveObject!=='function' || typeof M._FPDFPageObj_Destroy!=='function' || typeof engine.retainDetachedObject!=='function')return false;
   const flat=para.runs.map(r=>r.text).join(''), end=lines[1].off, line=flat.slice(0,end), visible=line.replace(/\s+$/,'');
   if(!visible || !/^\s*$/.test(line.slice(visible.length)))return false;
   const offsets=[];let n=0;para.runs.forEach((r,ri)=>{for(let o=0;o<r.text.length;o++,n++)if(del.has(ri+':'+o))offsets.push(n);});
@@ -198,6 +198,7 @@ export function removeGeometricFirstLine(engine, para, del, inserts) {
   if(rows.length!==visible.length||other.includes(rows[0]?.h)||rows.some((g,i)=>g.h!==rows[0]?.h||g.u!==visible.charCodeAt(i)))return false;
   const h=rows[0].h, before=pageObjectList(engine);
   if(!M._FPDFPage_RemoveObject(engine.page,h))throw new LineRetentionError('geometric_remove_failed');
+  engine.retainDetachedObject(h);
   engine._pageDirty=true;engine._spliceOk=false;
   const after=pageObjectList(engine);
   if(before.filter(x=>x!==h).join(',')!==after.join(','))throw new LineRetentionError('geometric_remove_proof_failed');
