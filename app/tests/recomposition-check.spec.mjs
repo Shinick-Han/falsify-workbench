@@ -302,11 +302,11 @@ test('declared floating caption preserves exact body sequence and requires obser
     d.insertPage(-1,d.addPage([0,0,300,400],0,{Font:{F:font},XObject:{Im:im}},stream));const buf=d.saveToBuffer(),bytes=buf.asUint8Array().slice();buf.destroy();image.destroy();pix.destroy();d.destroy();return bytes;
   };
   const expectedBlocks=[{id:'a',text:'First body.'},{id:'cap',text:'Figure 1. A useful illustration'},{id:'b',text:'Second body.'}];
-  const layoutProfile={captions:[{id:'cap',text:expectedBlocks[1].text,assetPageIndex:0,assetBbox:[80,120,180,200]}]};
+  const layoutProfile={coordinateSpace:'output',captions:[{id:'cap',text:expectedBlocks[1].text,assetPageIndex:0,assetBbox:[80,120,180,200]}]};
   const run=(body,extra={})=>checkRecomposition({bytes:make(body),expectedBlocks,pdfjs,mupdf,layoutProfile,flowExpectations:{floatingCaptionBlockIds:['cap']},...extra});
   const good=await run();assert.equal(good.checks.content.status,'pass',JSON.stringify(good));assert.equal(good.checks.flow.status,'checked');
   assert.equal((await run(undefined,{flowExpectations:undefined})).checks.content.status,'finding');
   for(const body of [['First body.'],['First changed.','Second body.'],['First body.','First body.','Second body.'],['Second body.','First body.']]) assert.equal((await run(body)).checks.content.status,'finding');
   const duplicateCaption=await run(['First body.','Figure 1. A useful illustration','Second body.']);assert.equal(duplicateCaption.checks.flow.status,'unavailable');assert.equal(duplicateCaption.checks.content.status,'finding');
-  const unknown=await run(undefined,{layoutProfile:{captions:[{...layoutProfile.captions[0],assetBbox:[1,1,10,10]}]}});assert.equal(unknown.checks.flow.status,'unavailable');assert.equal(unknown.checks.content.status,'finding');
+  const unknown=await run(undefined,{layoutProfile:{coordinateSpace:'output',captions:[{...layoutProfile.captions[0],assetBbox:[1,1,10,10]}]}});assert.equal(unknown.checks.flow.status,'unavailable');assert.equal(unknown.checks.content.status,'finding');
 });

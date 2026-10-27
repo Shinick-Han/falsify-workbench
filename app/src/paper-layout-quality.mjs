@@ -13,7 +13,7 @@ export function inspectLayoutQuality({bytes,mupdf,profile={}}={}) {
     'Text paint bounds are glyph ink extents; structured text character boxes are font metrics.',
     'Only axis-aligned rectangular clip paths are checked; arbitrary clips, transparency, occlusion, rotated text, vector figure ownership, and reading order remain unverified.',
     'Scores measure detected defects only; they are not proof of visual quality.'
-  ];
+  ], profileCoverage={coordinateSpace:profile.coordinateSpace || 'unspecified',bodyLines:{checked:0,skipped:0},fontNames:{checked:0,skipped:0},captions:{checked:0,skipped:0},columns:{checked:0,skipped:0},headings:{checked:0,skipped:0}};
   const add=(type,pageIndex,bbox,penalty,evidence)=>issues.push({type,pageIndex,bbox:bbox.map(x=>Math.round(x*100)/100),penalty,evidence});
   if (!mupdf?.Document || !mupdf?.Device) return {schema:'falsify.layout-quality.v1',status:'unavailable',score:null,penaltyTerms:{},issues,limitations:[...limitations,'MuPDF unavailable.']};
   let doc;
@@ -44,14 +44,26 @@ export function inspectLayoutQuality({bytes,mupdf,profile={}}={}) {
         }
         for(const line of lines) if(line.horizontal) {
           for(const b of images) {const overlap=intersection(line.bbox,b), n=area(overlap); if(n>4 && n/area(line.bbox)>0.2 && !contains(b,line.bbox)) add('text-image-overlap',p,overlap,8,{text:line.text,image:b,overlapArea:n,source:'structured-text-and-image'});}
-          const sizes=line.chars.map(c=>c.size).filter(Number.isFinite), size=sizes.length?sizes.sort((a,b)=>a-b)[Math.floor(sizes.length/2)]:null;
-          if(Number.isFinite(profile.bodyFontSize) && norm(line.text).length>=20 && size && size<profile.bodyFontSize*0.8) add('small-body-text',p,line.bbox,5,{text:line.text,size,expectedSize:profile.bodyFontSize});
-          if(Array.isArray(profile.bodyFontNames) && profile.bodyFontNames.length && norm(line.text).length>=40 && !line.chars.some(c=>profile.bodyFontNames.includes(c.font))) add('body-font-deviation',p,line.bbox,3,{text:line.text,fonts:[...new Set(line.chars.map(c=>c.font))],expectedFonts:profile.bodyFontNames});
+
         }
         pages.push({pageIndex:p,bounds,lines,images,vectorCount:vectors.length,unsupportedClips});
       } finally {dev?.destroy();st?.destroy();page.destroy();}
     }
+    // Source text is a nomination only: unique actual output text establishes the candidate.
+    for(const body of profile.bodyLines || []) {
+      const target=norm(body?.text || '');
+      const matches=target ? pages.flatMap(page=>page.lines.filter(line=>line.horizontal && norm(line.text)===target).map(line=>({page,line}))) : [];
+      if(matches.length!==1) {profileCoverage.bodyLines.skipped++;continue;}
+      const {page,line}=matches[0];profileCoverage.bodyLines.checked++;
+      const sizes=line.chars.map(c=>c.size).filter(Number.isFinite).sort((a,b)=>a-b),size=sizes.length?sizes[Math.floor(sizes.length/2)]:null;
+      if(Number.isFinite(profile.bodyFontSize) && size && size<profile.bodyFontSize*0.8) add('small-body-text',page.pageIndex,line.bbox,5,{text:line.text,size,expectedSize:profile.bodyFontSize,source:'unique-output-body-line'});
+      const aliases=profile.outputBodyFontNames;
+      if(Array.isArray(aliases) && aliases.length) {profileCoverage.fontNames.checked++;if(!line.chars.some(c=>aliases.includes(c.font))) add('body-font-deviation',page.pageIndex,line.bbox,3,{text:line.text,fonts:[...new Set(line.chars.map(c=>c.font))],expectedFonts:aliases,source:'unique-output-body-line'});}
+      else if(profile.bodyFontNames?.length) profileCoverage.fontNames.skipped++;
+    }
+    if(!(profile.bodyLines || []).length && (profile.bodyFontSize || profile.bodyFontNames?.length || profile.outputBodyFontNames?.length)) {profileCoverage.bodyLines.skipped++;if(profile.bodyFontNames?.length || profile.outputBodyFontNames?.length) profileCoverage.fontNames.skipped++;}
     for(const caption of profile.captions || []) {
+      if(profile.coordinateSpace!=='output') {profileCoverage.captions.skipped++;captionObservations.push({id:caption.id,status:'unavailable'});continue;}
       const target=norm(caption.text || '');
       const matches=[];
       if(target) for(const page of pages) for(let i=0;i<page.lines.length;i++) {
@@ -63,8 +75,8 @@ export function inspectLayoutQuality({bytes,mupdf,profile={}}={}) {
         }
       }
       const owner=pages[caption.assetPageIndex], assets=owner?.images.filter(b=>valid(caption.assetBbox) && area(intersection(b,caption.assetBbox))/area(b)>0.9 && area(intersection(b,caption.assetBbox))/area(caption.assetBbox)>0.9);
-      if(matches.length!==1 || assets?.length!==1) {captionObservations.push({id:caption.id,status:'unavailable'});limitations.push('Caption or associated image could not be uniquely observed: '+String(caption.text || '').slice(0,80));continue;}
-      const {page,line}=matches[0], asset=assets[0];
+      if(matches.length!==1 || assets?.length!==1) {profileCoverage.captions.skipped++;captionObservations.push({id:caption.id,status:'unavailable'});limitations.push('Caption or associated image could not be uniquely observed: '+String(caption.text || '').slice(0,80));continue;}
+      profileCoverage.captions.checked++;const {page,line}=matches[0], asset=assets[0];
       const gap=page.pageIndex===owner.pageIndex ? Math.max(0,line.bbox[1]-asset[3],asset[1]-line.bbox[3]) : Infinity;
       const horizontalOverlap=Math.min(line.bbox[2],asset[2])-Math.max(line.bbox[0],asset[0]);
       const attached=page.pageIndex===owner.pageIndex && gap<=Math.max(36,(line.bbox[3]-line.bbox[1])*3) && horizontalOverlap>0;
@@ -74,18 +86,21 @@ export function inspectLayoutQuality({bytes,mupdf,profile={}}={}) {
     // A source profile nominates the heading and column, but the output must contain it uniquely.
     for(const heading of profile.headings || []) {
       const matches=pages.flatMap(p=>p.lines.filter(l=>norm(l.text)===norm(heading.text || '')).map(line=>({page:p,line})));
-      if(matches.length!==1) {limitations.push('Heading could not be uniquely observed: '+String(heading.text || '').slice(0,80));continue;}
-      const {page,line}=matches[0], next=page.lines.filter(l=>l!==line && l.bbox[1]>=line.bbox[3]-1 && Math.min(l.bbox[2],line.bbox[2])-Math.max(l.bbox[0],line.bbox[0])>0).sort((a,b)=>a.bbox[1]-b.bbox[1])[0];
+      if(matches.length!==1) {profileCoverage.headings.skipped++;limitations.push('Heading could not be uniquely observed: '+String(heading.text || '').slice(0,80));continue;}
+      profileCoverage.headings.checked++;const {page,line}=matches[0], next=page.lines.filter(l=>l!==line && l.bbox[1]>=line.bbox[3]-1 && Math.min(l.bbox[2],line.bbox[2])-Math.max(l.bbox[0],line.bbox[0])>0).sort((a,b)=>a.bbox[1]-b.bbox[1])[0];
       if(!next || next.bbox[1]-line.bbox[3]>Math.max(36,(line.bbox[3]-line.bbox[1])*3)) add('heading-orphan',page.pageIndex,line.bbox,4,{text:line.text,nextGap:next?next.bbox[1]-line.bbox[3]:null});
     }
     for(const column of profile.columns || []) {
+      if(profile.coordinateSpace!=='output') {profileCoverage.columns.skipped++;continue;}
       const page=pages[column.pageIndex], box=column.bbox;
-      if(!page || !valid(box) || !contains(page.bounds,box)) {limitations.push('Column geometry is invalid or unavailable.');continue;}
-      const occupied=page.lines.some(l=>area(intersection(l.bbox,box))>4) || page.images.some(b=>area(intersection(b,box))>4);
+      if(!page || !valid(box) || !contains(page.bounds,box)) {profileCoverage.columns.skipped++;limitations.push('Column geometry is invalid or unavailable.');continue;}
+      const anchor=norm(column.anchorText || ''), anchorMatches=anchor ? pages.flatMap(p=>p.lines.filter(l=>norm(l.text)===anchor).map(line=>({page:p,line}))) : [];
+      if(anchorMatches.length!==1 || anchorMatches[0].page.pageIndex!==page.pageIndex || area(intersection(anchorMatches[0].line.bbox,box))>4) {profileCoverage.columns.skipped++;limitations.push('Column anchor is unavailable, ambiguous, on another page, or inside the candidate column.');continue;}
+      profileCoverage.columns.checked++;const occupied=page.lines.some(l=>area(intersection(l.bbox,box))>4) || page.images.some(b=>area(intersection(b,box))>4);
       if(!occupied) add('blank-column',column.pageIndex,box,4,{source:'profile-column-with-no-observed-text-or-image',vectorInk:'unverified'});
     }
     const penaltyTerms={};for(const issue of issues) penaltyTerms[issue.type]=(penaltyTerms[issue.type]||0)+issue.penalty;
-    return {schema:'falsify.layout-quality.v1',status:'partial',score:Math.max(0,100-Object.values(penaltyTerms).reduce((a,b)=>a+b,0)),penaltyTerms,issues,captionObservations,coverage:{pages:pages.length,textPaint:true,images:true,vectorPlacements:pages.reduce((n,p)=>n+p.vectorCount,0),captionOwnership:'only unique text and image matches',clipping:'partial: axis-aligned rectangular paths only',unsupportedClipOperations:pages.reduce((n,p)=>n+p.unsupportedClips,0)},limitations};
+    return {schema:'falsify.layout-quality.v1',status:'partial',score:null,detectedIssuesScore:Math.max(0,100-Object.values(penaltyTerms).reduce((a,b)=>a+b,0)),penaltyTerms,issues,captionObservations,coverage:{profile:profileCoverage,pages:pages.length,textPaint:true,images:true,vectorPlacements:pages.reduce((n,p)=>n+p.vectorCount,0),captionOwnership:'only unique text and image matches',clipping:'partial: axis-aligned rectangular paths only',unsupportedClipOperations:pages.reduce((n,p)=>n+p.unsupportedClips,0)},limitations};
   } catch(error) {return {schema:'falsify.layout-quality.v1',status:'unavailable',score:null,penaltyTerms:{},issues:[],limitations:[...limitations,String(error?.message || error)]};}
   finally {doc?.destroy();}
 }
