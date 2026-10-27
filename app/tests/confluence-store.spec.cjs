@@ -54,6 +54,7 @@ function codecStub(){
       last={schema:'falsify.confluence-archive.v1',kind:'experiment',id:selectedRunId,title:'Synthetic '+((included.find(r=>r.id===selectedRunId)||{}).role||'run'),data:{schema:'falsify.review-bundle.v1',selectedRunId,ledger:{schema:'falsify.experiment-ledger.v1',harnesses:(snapshot.harnesses||[]).filter(h=>included.some(r=>r.harnessHash===h.hash)),runs:included,reviews:reviews.filter(v=>want.has(v.runId))}}};
       return JSON.parse(JSON.stringify(last));},
     buildHarnessArchive:async(record)=>{calls.push(['buildHarness',record.hash]); last={schema:'falsify.confluence-archive.v1',kind:'harness',id:record.hash,title:record.config.name,data:{config:record.config,hash:record.hash}}; return JSON.parse(JSON.stringify(last));},
+    buildAttemptArchive:async(record)=>{calls.push(['buildAttempt',record.id]); last={schema:'falsify.confluence-archive.v1',kind:'attempt',id:record.id,title:'Synthetic attempt',data:record}; return JSON.parse(JSON.stringify(last));},
     buildPaperEditArchive:async(record)=>{calls.push(['buildPaper',record&&record.id]); last={schema:'falsify.confluence-archive.v1',kind:'paper-edit',id:record.id,title:'Synthetic paper',data:{schema:'falsify.paper-edit-record.v1',record:{id:record.id},reviews:record.reviews||[]}}; return JSON.parse(JSON.stringify(last));},
     validateArchive:async(archive)=>{calls.push(['validate',archive.kind]); if(archive.schema!=='falsify.confluence-archive.v1'||!archive.kind) throw Error('bad archive'); last=JSON.parse(JSON.stringify(archive)); return JSON.parse(JSON.stringify(last));},
     archiveHash:async()=>HASH};}
@@ -522,6 +523,15 @@ test('paper-edit uses the existing team session, keeps local ledger bytes, and d
   await broken.ready; await connect(broken);
   await assert.rejects((await broken.ready).publishPaperEdit({id:'pmr-2',reviews:[]},{teamShare:true}),/다시 보내지/);
   assert.equal(unknown,1); assert.equal(broken.store.get(LEDGER_KEY).includes('keep-local'),true);
+});
+
+test('attempt publication is explicit and never retries an unknown write',async()=>{
+  const api=teamApi(),t=setup({routes:api.routes});await t.ready;await connect(t);const app=await t.ready;
+  await assert.rejects(app.publishAttempt({id:'attempt-1'},{}),/동의/);
+  assert.equal(t.calls.some(c=>c.method==='POST'&&c.path==='/v1/confluence/archives'),false);
+  const result=await app.publishAttempt({id:'attempt-1'},{teamShare:true});assert.equal(result.stored,true);
+  const posts=t.calls.filter(c=>c.method==='POST'&&c.path==='/v1/confluence/archives');assert.equal(posts.length,1);assert.equal(posts[0].body.archive.kind,'attempt');
+  let count=0;const broken=setup({routes:(method,path,init)=>{if(method==='POST'&&path==='/v1/confluence/archives'){count++;return {status:502,body:{error:{code:'write_unknown'}}};}return api.routes(method,path,init);}});await broken.ready;await connect(broken);await assert.rejects((await broken.ready).publishAttempt({id:'attempt-2'},{teamShare:true}),/다시 보내지/);assert.equal(count,1);
 });
 
 (async()=>{let failed=0; for(const [name,fn] of tests){try{await fn(); console.log('ok - '+name);}catch(e){failed++; console.error('not ok - '+name+'\n'+(e.stack||e));}}
