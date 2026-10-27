@@ -43,7 +43,9 @@ assert all(0<=z[0]<z[2]<=400 and 530<=z[1]<z[3]<=600 for z in (a,b,c,d))
   const run=spawnSync(python,['-c',script,path],{encoding:'utf8'});assert.equal(run.status,0,run.stderr);
  }finally{await rm(dir,{recursive:true,force:true});}
 });
-test('unfit width and colliding rows are rejected explicitly', {skip:!(root&&wasm&&font)},async()=>{
- await assert.rejects(render([{id:'a',text:'W'.repeat(100),bbox:[36,550,100,560]}]),/Typst PDF compilation failed/);
- await assert.rejects(render([{id:'a',text:'First',bbox:[36,550,100,554]},{id:'b',text:'Second',bbox:[36,555,100,559]}]),/Typst PDF compilation failed/);
+test('unfit rows keep source placement and expose the fallback without blocking PDF output', {skip:!(root&&wasm&&font)},async()=>{
+ for(const fields of [[{id:'a',text:'W'.repeat(100),bbox:[36,550,100,560]}],[{id:'a',text:'First',bbox:[36,550,100,554]},{id:'b',text:'Second',bbox:[36,555,100,559]}]]) {
+  const out=await render(fields);assert.ok(out.file.size>0);assert.ok(out.verification.furniture.spacing.some(x=>x.status==='source-position-fallback'));
+  assert.ok(out.warnings.some(x=>x.includes('원래 위치')));assert.equal(out.furnitureMap.find(x=>x.id==='a').x,36);
+ }
 });

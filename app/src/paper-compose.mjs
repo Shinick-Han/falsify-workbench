@@ -407,15 +407,15 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
             const bandTop=kind==='header' ? 0 : page.height-margins.bottom;
             const bandBottom=kind==='header' ? margins.top : page.height;
             const limit=Math.min(bandBottom, rows[ri+1]?.top ?? bandBottom);
-            return `let c${i} = box[${content}]; let size${i} = measure(c${i}); let w${i} = size${i}.width; assert(${entry.bbox[1]}pt >= ${bandTop}pt and ${entry.bbox[1]}pt + size${i}.height <= ${limit}pt, message: "unsupported furniture row: measured height exceeds reserved band or next row"); let x${i} = ${i ? `calc.max(${x}pt, x${i-1} + w${i-1} + 3pt)` : `calc.max(0pt, ${x}pt)`};`;
+            return `let c${i} = box[${content}]; let size${i} = measure(c${i}); let w${i} = size${i}.width; let fits${i} = ${entry.bbox[1]}pt >= ${bandTop}pt and ${entry.bbox[1]}pt + size${i}.height <= ${limit}pt; let x${i} = ${i ? `calc.max(${x}pt, x${i-1} + w${i-1} + 3pt)` : `calc.max(0pt, ${x}pt)`};`;
           }).join(' ');
           const last=entries.length-1;
           const placements=entries.map((entry,i)=>{
             const y=entry.bbox[1], dy=kind==='header' ? y : y-(page.height-margins.bottom);
             const id=entry.blockId || entry.itemId;
-            return `place(top + left, dx: x${i} - shift - ${margins.left}pt, dy: ${dy}pt)[#context [#let p = here().position();#box(width: 0pt, height: 0pt)[#metadata((id: ${typstString(id)}, sourcePage: ${pg.sourcePage}, page: p.page, x: p.x / 1pt, y: p.y / 1pt, kind: ${typstString(kind)}))#label("paper-furniture")]]#c${i}];`;
+            return `place(top + left, dx: (if fits { x${i} - shift } else { ${entry.bbox[0]}pt }) - ${margins.left}pt, dy: ${dy}pt)[#context [#let p = here().position();#box(width: 0pt, height: 0pt)[#metadata((id: ${typstString(id)}, sourcePage: ${pg.sourcePage}, page: p.page, x: p.x / 1pt, y: p.y / 1pt, kind: ${typstString(kind)}))#label("paper-furniture")]]#c${i}];`;
           }).join(' ');
-          return `#context { ${defs} let shift = calc.max(0pt, x${last} + w${last} - ${page.width}pt); assert(x0 - shift >= 0pt, message: "unsupported furniture row: measured fields exceed page width"); ${placements} }`;
+          return `#context { ${defs} let shift = calc.max(0pt, x${last} + w${last} - ${page.width}pt); let fits = x0 - shift >= 0pt and ${entries.map((_,i)=>`fits${i}`).join(' and ')}; box(width: 0pt, height: 0pt)[#metadata((sourcePage: ${pg.sourcePage}, kind: ${typstString(kind)}, row: ${ri}, status: if fits { "measured" } else { "source-position-fallback" }))#label("paper-furniture-layout")]; ${placements} }`;
         });
         return `if sp == ${pg.sourcePage} [${parts.join('')}]`;
       });
@@ -527,6 +527,7 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
   if(sourceGlyphResult.glyphs.length) warnings.push('Source glyph artwork has unknown Unicode and is excluded from searchable-text expectations.');
   if(sourceGlyphResult.unavailable.length) warnings.push('Source glyph artwork unavailable for '+sourceGlyphResult.unavailable.length+' character(s).');
   if(compiled?.queryError) warnings.push(`Output location query failed: ${compiled.queryError}`);
+  if(compiled?.furnitureLayout?.some(x=>x.status==='source-position-fallback')) warnings.push('일부 머리말·꼬리말은 여유 공간이 부족해 원래 위치를 유지했습니다.');
   if(document.assets?.some(a=>!placedAssets.has(a.id)) || document.blocks.some(b=>(b.assetIds?.length || b.kind==='figure' || b.kind==='table' || b.kind==='formula') && !(b.assetIds?.length && b.assetIds.every(id=>placedAssets.has(id))))) warnings.push('Source assets and non-text figure, table or formula content are not placed by this candidate, including image blocks without source ranges.');
   if(assetFindings.length) warnings.push('Source asset findings: '+assetFindings.map(f=>`${f.code} (${f.assetId || f.assetIds.join(', ')})`).join('; '));
   if(coverage.status!=='covered') warnings.push(`Font coverage ${coverage.status}; output may lose glyphs.`);
@@ -543,5 +544,6 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
   if (outputTextCheck==='finding') warnings.push('Output text check found content loss or mismatch.');
   const verification={flowCheck,status:outputTextCheck==='finding' || assetFindings.length || flowCheck.status==='finding'?'finding':'warning', sourceSha256:document.sourceSha256, contentVerified:flowCheck.status!=='finding' && outputTextCheck==='pass' && !furniture.templates.length && !ambiguous.length && !assetOwned.size && !assetFindings.length && !sourceGlyphResult.glyphs.length && !sourceGlyphResult.unavailable.length, sourceGlyphs:sourceGlyphResult, layoutVerified:false, coverage, outputTextCheck, checkReport, artworkBlocks, assetFindings, ambiguousBoundaries:ambiguous, furniture:{...furniture,margins:{...margins},output:compiled?.furnitureMap ?? null}, edits:edits.map(e=>({blockId:e.blockId,start:e.start,end:e.end,status:'bound'}))};
   verification.sourceNormalization={sourceSha256:sourceWrap.sourceSha256,lineWrapHyphens:wrapOmissions.map(o=>({pageIndex:o.pageIndex,start:o.start,end:o.end,corroboration:o.evidence.corroboration}))};
+  verification.furniture.spacing=Array.isArray(compiled?.furnitureLayout)?compiled.furnitureLayout:null;
   return {linkPlan,layoutProfile,enginePlan,layoutPolicy:{...policy},file:new File([bytes],'recomposed.pdf',{type:'application/pdf'}),sha256,verification,pageMap:null,blockMap:compiled?.blockMap ?? null,blockSpans:compiled?.blockSpans ?? null,furnitureMap:compiled?.furnitureMap ?? null,warnings};
 }

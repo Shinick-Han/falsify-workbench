@@ -21,6 +21,8 @@ test('unsupported geometry, incomplete characters, source frames and stale hashe
 
 test('ambiguous short prefixes, URLs and email labels stay literal',()=>{
  for(const [parts,other] of [[['re-','sign'],['resign']],[['https://host/simi-','lar'],['similar']],[['simi-','lar@example.org'],['similar']],[['simi-','lar'],['https://host/similar']]]) assert.equal(run(model(parts,other)).length,0);
+ assert.equal(run(model(['data/simi-','lar'],['similar'])).length,0);
+ const code=model(['simi-','lar'],['similar']);code.styles=[{id:'code',fontName:'Courier',size:10}];for(const c of code.blocks[0].source.characters)c.styleId='code';assert.equal(run(code).length,0);
 });
 
 test('composition projects only unchanged source words and preserves literal After',async()=>{
