@@ -391,10 +391,31 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
     source+=`#let paper-source-page() = { let p = here().page(); let starts = query(<paper-block>).filter(m => m.value.sourcePage != none); let ends = query(<paper-block-end>); let covering = starts.filter(s => { let e = ends.find(x => x.value.id == s.value.id); e != none and s.value.page <= p and e.value.page >= p }); if covering.len() > 0 { covering.first().value.sourcePage } else { none } }\n`;
     for(const kind of ['header','footer']) {
       const cases=plan.pages.filter(pg=>pg[kind].some(e=>rendered.has(e))).map(pg=>{
-        const parts=pg[kind].filter(e=>rendered.has(e)).map(entry=>{
-          const [x,y]=entry.bbox, dy=kind==='header' ? y : y-(page.height-margins.bottom);
-          const id=entry.blockId || entry.itemId;
-          return `#place(top + left, dx: ${x-margins.left}pt, dy: ${dy}pt)[#context [#let p = here().position();#metadata((id: ${typstString(id)}, sourcePage: ${pg.sourcePage}, page: p.page, x: p.x / 1pt, y: p.y / 1pt, kind: ${typstString(kind)}))#label("paper-furniture")]${rendered.get(entry)}]`;
+        // Group by source vertical overlap, then measure each actual Typst box.
+        // Source widths are not valid after font substitution. Keep source x when
+        // possible, shifting a whole packed row left only when it exceeds the page.
+        const rows=[];
+        for(const entry of pg[kind].filter(e=>rendered.has(e)).sort((a,b)=>a.bbox[1]-b.bbox[1] || a.bbox[0]-b.bbox[0])) {
+          const row=rows.find(r=>Math.min(r.bottom,entry.bbox[3])-Math.max(r.top,entry.bbox[1])>0);
+          if(row) {row.entries.push(entry); row.top=Math.min(row.top,entry.bbox[1]); row.bottom=Math.max(row.bottom,entry.bbox[3]);}
+          else rows.push({top:entry.bbox[1],bottom:entry.bbox[3],entries:[entry]});
+        }
+        const parts=rows.map((row,ri)=>{
+          const entries=row.entries.sort((a,b)=>a.bbox[0]-b.bbox[0]);
+          const defs=entries.map((entry,i)=>{
+            const content=rendered.get(entry), x=entry.bbox[0];
+            const bandTop=kind==='header' ? 0 : page.height-margins.bottom;
+            const bandBottom=kind==='header' ? margins.top : page.height;
+            const limit=Math.min(bandBottom, rows[ri+1]?.top ?? bandBottom);
+            return `let c${i} = box[${content}]; let size${i} = measure(c${i}); let w${i} = size${i}.width; assert(${entry.bbox[1]}pt >= ${bandTop}pt and ${entry.bbox[1]}pt + size${i}.height <= ${limit}pt, message: "unsupported furniture row: measured height exceeds reserved band or next row"); let x${i} = ${i ? `calc.max(${x}pt, x${i-1} + w${i-1} + 3pt)` : `calc.max(0pt, ${x}pt)`};`;
+          }).join(' ');
+          const last=entries.length-1;
+          const placements=entries.map((entry,i)=>{
+            const y=entry.bbox[1], dy=kind==='header' ? y : y-(page.height-margins.bottom);
+            const id=entry.blockId || entry.itemId;
+            return `place(top + left, dx: x${i} - shift - ${margins.left}pt, dy: ${dy}pt)[#context [#let p = here().position();#box(width: 0pt, height: 0pt)[#metadata((id: ${typstString(id)}, sourcePage: ${pg.sourcePage}, page: p.page, x: p.x / 1pt, y: p.y / 1pt, kind: ${typstString(kind)}))#label("paper-furniture")]]#c${i}];`;
+          }).join(' ');
+          return `#context { ${defs} let shift = calc.max(0pt, x${last} + w${last} - ${page.width}pt); assert(x0 - shift >= 0pt, message: "unsupported furniture row: measured fields exceed page width"); ${placements} }`;
         });
         return `if sp == ${pg.sourcePage} [${parts.join('')}]`;
       });
