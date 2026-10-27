@@ -18,7 +18,7 @@ function representationComparison(expected, observed) {
   return {matches:i===expected.length && j===observed.length,differences};
 }
 
-export async function checkRecomposition({bytes, expectedBlocks, edits = {}, pdfjs, exporter, mupdf, expectedFurniture, outputFurniture, bodyFrame, blockSpans, layoutProfile, flowExpectations} = {}) {
+export async function checkRecomposition({bytes, expectedBlocks, edits = {}, pdfjs, exporter, mupdf, expectedFurniture, outputFurniture, bodyFrame, blockSpans, layoutProfile, flowExpectations, sourceBytes, sourcePageIndexes} = {}) {
   if (!(bytes instanceof Uint8Array) || !bytes.length || !pdfjs?.getDocument) throw new TypeError('PDF bytes and PDF.js are required');
   if (!Array.isArray(expectedBlocks) || !expectedBlocks.length || expectedBlocks.some(b => typeof b.id !== 'string' || typeof b.text !== 'string') || new Set(expectedBlocks.map(b => b.id)).size !== expectedBlocks.length) throw new TypeError('unique expected blocks are required');
   if (Object.keys(edits).some(id => !expectedBlocks.some(b => b.id === id) || typeof edits[id] !== 'string')) throw new TypeError('invalid edit');
@@ -245,7 +245,7 @@ export async function checkRecomposition({bytes, expectedBlocks, edits = {}, pdf
   }
   const observed = normalize(pages.join(' '));
   const expected = normalize(expectedBlocks.map(b => Object.hasOwn(edits,b.id) ? edits[b.id] : b.text).join(' '));
-  const layoutQuality=inspectLayoutQuality({bytes,mupdf,profile:layoutProfile});
+  const layoutQuality=inspectLayoutQuality({bytes,mupdf,profile:layoutProfile,sourceBytes,sourcePageIndexes});
   let flow={status:'not-requested'}, flowMatches=false;
   if(flowExpectations !== undefined) {
     const ids=flowExpectations?.floatingCaptionBlockIds, captions=layoutProfile?.captions;

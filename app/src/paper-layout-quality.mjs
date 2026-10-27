@@ -8,7 +8,7 @@ const norm = s => s.replace(/\s+/gu,' ').trim();
 
 /** Optional profile: bodyFontSize, bodyFontNames, captions [{text, assetPageIndex, assetBbox}], columns.
  * Metadata nominates a relationship; both caption text and an image placement must be observed independently. */
-export function inspectLayoutQuality({bytes,mupdf,profile={}}={}) {
+export function inspectLayoutQuality({bytes,mupdf,profile={},sourceBytes,sourcePageIndexes}={}) {
   const issues=[], pages=[], captionObservations=[], limitations=[
     'Text paint bounds are glyph ink extents; structured text character boxes are font metrics.',
     'Only axis-aligned rectangular clip paths are checked; arbitrary clips, transparency, occlusion, rotated text, vector figure ownership, and reading order remain unverified.',
@@ -99,8 +99,28 @@ export function inspectLayoutQuality({bytes,mupdf,profile={}}={}) {
       profileCoverage.columns.checked++;const occupied=page.lines.some(l=>area(intersection(l.bbox,box))>4) || page.images.some(b=>area(intersection(b,box))>4);
       if(!occupied) add('blank-column',column.pageIndex,box,4,{source:'profile-column-with-no-observed-text-or-image',vectorInk:'unverified'});
     }
+    // Sparse-page evidence is separate from defect penalties. The ratio measures
+    // structured text box area, not visible ink or whitespace by itself. Source
+    // comparison requires an explicit output-to-source mapping and source bytes.
+    const measure = page => ({pageIndex:page.pageIndex, textCharacters:page.lines.reduce((n,l)=>n+l.chars.length,0), textAreaRatio:Math.min(1,page.lines.reduce((n,l)=>n+area(intersection(l.bbox,page.bounds)),0)/area(page.bounds)), imageCount:page.images.length, vectorCount:page.vectorCount});
+    const measurements=pages.map(measure);
+    const source = sourceBytes && Array.isArray(sourcePageIndexes) ? inspectLayoutQuality({bytes:sourceBytes,mupdf}) : null;
+    const sparsePages=measurements.map((m,i)=>{
+      const sparse=m.textAreaRatio<0.08 && m.textCharacters<1200;
+      const sourceIndex=sourcePageIndexes?.[i], sm=Number.isInteger(sourceIndex) ? source?.sparsePageEvidence?.pages?.[sourceIndex] : null;
+      let classification='not-sparse';
+      if(sparse) {
+        if(m.textCharacters<40 && (m.imageCount>0 || m.vectorCount>0)) classification='artwork-only';
+        else if(i===measurements.length-1) classification='document-final';
+        else if(sm && sm.textAreaRatio<0.08 && sm.textCharacters<1200 && sm.textAreaRatio<=Math.max(m.textAreaRatio*1.5,m.textAreaRatio+0.01)) classification='source-equally-sparse';
+        else if(sm) classification='candidate';
+        else classification='source-context-unavailable';
+      }
+      return {...m,classification,sourcePageIndex:sm ? sourceIndex : null,sourceTextAreaRatio:sm?.textAreaRatio ?? null};
+    });
+    const sparsePageEvidence={status:'partial',pages:sparsePages,threshold:{textAreaRatioBelow:0.08,textCharactersBelow:1200},limitation:'Text box area is an approximate occupancy indicator; includes furniture, omits vector/image occupancy and can overlap. Source comparison requires caller-provided page mapping; mappings are not verified ownership. Candidates need visual review.'};
     const penaltyTerms={};for(const issue of issues) penaltyTerms[issue.type]=(penaltyTerms[issue.type]||0)+issue.penalty;
-    return {schema:'falsify.layout-quality.v1',status:'partial',score:null,detectedIssuesScore:Math.max(0,100-Object.values(penaltyTerms).reduce((a,b)=>a+b,0)),penaltyTerms,issues,captionObservations,coverage:{profile:profileCoverage,pages:pages.length,textPaint:true,images:true,vectorPlacements:pages.reduce((n,p)=>n+p.vectorCount,0),captionOwnership:'only unique text and image matches',clipping:'partial: axis-aligned rectangular paths only',unsupportedClipOperations:pages.reduce((n,p)=>n+p.unsupportedClips,0)},limitations};
+    return {schema:'falsify.layout-quality.v1',status:'partial',score:null,detectedIssuesScore:Math.max(0,100-Object.values(penaltyTerms).reduce((a,b)=>a+b,0)),penaltyTerms,issues,captionObservations,sparsePageEvidence,coverage:{profile:profileCoverage,pages:pages.length,textPaint:true,images:true,vectorPlacements:pages.reduce((n,p)=>n+p.vectorCount,0),captionOwnership:'only unique text and image matches',clipping:'partial: axis-aligned rectangular paths only',unsupportedClipOperations:pages.reduce((n,p)=>n+p.unsupportedClips,0)},limitations};
   } catch(error) {return {schema:'falsify.layout-quality.v1',status:'unavailable',score:null,penaltyTerms:{},issues:[],limitations:[...limitations,String(error?.message || error)]};}
   finally {doc?.destroy();}
 }
