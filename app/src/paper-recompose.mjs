@@ -155,7 +155,7 @@ export async function prepare(request={}, options={}) {
   const hash=request.fileHash||snapshot.fileHash;
   if(request.fileHash && snapshot.fileHash && request.fileHash.toLowerCase()!==snapshot.fileHash.toLowerCase()) fail('stale-source','Request and snapshot hashes differ.');
   const input=request.file;
-  const bytes=input instanceof Uint8Array?Uint8Array.from(input):input?.bytes instanceof Uint8Array?Uint8Array.from(input.bytes):typeof input?.arrayBuffer==='function'?new Uint8Array(await input.arrayBuffer()):null;
+  const bytes=input instanceof Uint8Array?Uint8Array.from(input):input?.bytes instanceof Uint8Array?Uint8Array.from(input.bytes):typeof input?.arrayBuffer==='function'?new Uint8Array(await input.arrayBuffer()).slice():null;
   abort(signal); if(!bytes?.length) fail('invalid','Source PDF is required.');
   const observed=await readDocument({file:bytes,fileHash:hash,signal}); abort(signal);
   const spacing=await recoverSourceSpaces({bytes,document:observed,pdfjs:options.pdfjs,signal}); const document=spacing.document; abort(signal);

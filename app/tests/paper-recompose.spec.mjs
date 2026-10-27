@@ -80,6 +80,17 @@ test('duplicate flow ownership is rejected for explicit selection',()=>{
   assert.throws(()=>bindEdits(d,flow,[{pageIndex:0,before:'other',after:'x'}],[{index:0,sourceSha256:d.sourceSha256,parts:[part]}]),e=>e.details.code==='AMBIGUOUS_EXPLICIT');
 });
 
+test('File-like input bytes remain owned through subsequent readers',async()=>{
+  const bytes=fixture(), borrowed=bytes.slice().buffer;
+  const pdfjs={getDocument(){new Uint8Array(borrowed).fill(0);return {promise:Promise.resolve({numPages:0}),destroy:async()=>{}};}};
+  let compiled;
+  const result=await prepare({file:{arrayBuffer:async()=>borrowed},edits:[]},{mupdf,pdfjs,compile:async p=>(compiled=p.source,fakePdf)});
+  assert.equal(result.sourceBinding.sourceSha256,sha(bytes));
+  assert.ok(compiled.includes('First value'));
+  assert.ok(new Uint8Array(borrowed).every(value=>value===0));
+  assert.ok(result.file.size);
+});
+
 
 test('explicit parts cannot split a surrogate pair',()=>{
   const {d,flow}=synthetic(), b=d.blocks[0], start=b.source.range.start;
