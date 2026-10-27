@@ -46,7 +46,7 @@
         }catch{if(current===epoch)portrait.replaceChildren(icon('file-text'));} // Picking and extraction remain usable if thumbnail rendering fails.
       }
       let shown=null;
-      function sync(){const file=input.files?.[0]||null;if(file===shown)return;shown=file;drop.classList.toggle('has-file',!!file);title.textContent=file?file.name:'논문 놓기';meta.textContent=file?(file.size/1024/1024).toFixed(1)+' MB · 다른 파일로 바꾸기':'PDF · Word · 텍스트';error.textContent='';void thumbnail(file);}
+      function sync(supplied){const file=supplied instanceof File?supplied:input.files?.[0]||null;if(file===shown)return;shown=file;drop.classList.toggle('has-file',!!file);title.textContent=file?file.name:'논문 놓기';meta.textContent=file?(file.size/1024/1024).toFixed(1)+' MB · 다른 파일로 바꾸기':'PDF · Word · 텍스트';error.textContent='';void thumbnail(file);}
       drop.addEventListener('filedrop',event=>{
         const files=event.files||[];if(!files.length)return;
         if(files.length!==1){error.textContent='논문 한 개만 놓아주세요.';return;}
@@ -57,7 +57,7 @@
       });
       input.addEventListener('change',sync);
       document.addEventListener('falsify:workspace-reset',()=>{shown=null;sync();clearPreview();});
-      document.addEventListener(role==='red'?'falsify:document-clear':'falsify:blue-state',()=>{sync();});
+      document.addEventListener(role==='red'?'falsify:document-clear':'falsify:blue-state',e=>{sync(e.detail?.file);});
       // Read-only follow-up of extraction errors and declined replacement.
       const status=$(role==='red'?'#import-status':'#doc-blue-summary');if(status)new MutationObserver(sync).observe(status,{childList:true,subtree:true});
       sync();

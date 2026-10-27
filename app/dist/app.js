@@ -24,6 +24,7 @@
     if(view==='blue'){
       if(blueProgress?.busy)return {gate:'B1',title:'BLUE 검토 중입니다',detail:blueProgress.name,label:'진행 상태 보기',action:()=>focusTarget($('#doc-blue-progress'))};
       if(blueProgress?.hasResult)return {gate:'B1',title:'BLUE 결과를 확인하세요',detail:blueProgress.name,label:'결과 보기',action:()=>$('#doc-blue-findings').closest('.role-step').scrollIntoView({block:'start'})};
+      if(blueProgress?.handoff&&blueProgress.name&&$('#doc-blue-next'))return {gate:'B1',title:$('#doc-blue-handoff-state').textContent,detail:blueProgress.name,label:$('#doc-blue-next').textContent,action:()=>$('#doc-blue-next').click()};
       if(blueProgress?.name)return {gate:'B1',title:'논문을 검토할 준비가 됐습니다',detail:blueProgress.name,label:'실행으로',action:()=>$('#doc-blue-start').closest('.role-step').scrollIntoView({block:'start'})};
       return {gate:'B1',title:'BLUE 검토 파일을 입력하세요',detail:'검토할 논문을 직접 고르세요.',label:'BLUE 파일 입력',action:()=>focusTarget($('#doc-blue-file'))};
     }

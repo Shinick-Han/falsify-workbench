@@ -446,9 +446,9 @@
   }
   function renderHandoff(){
     // No handoff while the final snapshot is still being saved; a failed save hands off with an explicitly unrecorded relation.
-    const status=$('#red-export-status'),ready=!!exported&&!busy&&exported.key===currentKey()&&!pending.has(exported.key),b=action('red-handoff','이 사본으로 BLUE 실행',$('#red-preview')||status,'button secondary');b.hidden=!ready;
+    const status=$('#red-export-status'),ready=!!exported&&!busy&&exported.key===currentKey()&&!pending.has(exported.key),b=action('red-handoff','이 변경본을 BLUE에서 검토',$('#red-preview')||status,'button secondary');b.hidden=!ready;
     let note=$('#red-handoff-note');if(!note){note=document.createElement('p');note.id='red-handoff-note';note.className='muted';b.after(note);}note.hidden=!ready;
-    if(ready)note.textContent='BLUE에는 이 사본 파일만 전달합니다. 변경 계획·후보·근거는 보내지 않으며, BLUE 동의와 실행은 BLUE 화면에서 따로 합니다.'+(saved.has(exported.key)?'':' 최종 선택이 기록되지 않아 BLUE 결과와 이 RED 실행의 인계 관계는 기록되지 않습니다. 먼저 「RED 실행 결과 기록」으로 다시 시도할 수 있습니다.');
+    if(ready)note.textContent='이 변경본을 BLUE에 불러옵니다. 검토는 BLUE 화면에서 시작하세요.'+(saved.has(exported.key)?'':' 최종 선택이 기록되지 않아 BLUE 결과와 이 RED 실행의 인계 관계는 기록되지 않습니다. 먼저 「RED 실행 결과 기록」으로 다시 시도할 수 있습니다.');
   }
   document.addEventListener('click',e=>{
     if(e.target.closest?.('#red-evaluate')){if(!lastSaved)return;const select=$('#evaluation-run');if(select&&[...select.options].some(o=>o.value===lastSaved)){select.value=lastSaved;select.dispatchEvent(new Event('change'));}visibleNav('review')?.click();}
