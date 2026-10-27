@@ -495,7 +495,7 @@ test('BLUE failure stays visible across live poll, reload, and connection and do
   await new Promise(r=>setTimeout(r,20));
   assert.equal(page.downloads.length,before+2);
   const diagnostic=JSON.parse(await page.downloads[before].text()),exported=JSON.parse(await page.downloads[before+1].text());
-  assert.deepEqual(Object.keys(diagnostic).sort(),['companionInstance','disposition','fileHash','harnessHash','postReceipt','requestBytesDigest','requestFingerprint','requestId','revision','role','schema','serverFailure','sourceHash']);
+  assert.deepEqual(Object.keys(diagnostic).sort(),['adapterFailure','companionInstance','disposition','fileHash','harnessHash','postReceipt','requestBytesDigest','requestFingerprint','requestId','revision','role','schema','serverFailure','sourceHash']);
   assert.equal(diagnostic.serverFailure,cite);assert.equal(JSON.stringify(diagnostic).includes('SHOULD-NOT-APPEAR'),false);assert.equal(JSON.stringify(diagnostic).includes('Bearer'),false);
   assert.deepEqual(exported,JSON.parse(requestSnap));assert.equal(JSON.stringify(exported).includes('"token"'),false);
   let reloadStep='same';
@@ -559,7 +559,31 @@ test('unknown BLUE receipt survives reload and does not show a foreign server ph
   assert.equal(jobPosts(reloaded.calls).length,0);assert.equal(reloaded.get('doc-blue-failure').textContent.includes(CITE),false);
   assert.equal(JSON.stringify(storedBlue(storage).request),snap);
 });
-test('BLUE known HTTP rejection is not an unknown receipt and never reposts',async()=>{
+test('structured failure is bound to the original BLUE attempt, survives reload and explicit double click retries once',async()=>{
+  const storage=vmStorage(),failure={schema:'falsify.adapter-failure.v1',code:'settings_mismatch',stage:'preflight',recovery:'refresh_harness'};
+  const page=await bluePage(storage,{reply:async(p,body)=>p==='/api/blue/jobs'?{id:body.requestId}:matchedJob(storage,'failed',{error:'generic',failure})});
+  await page.load();page.get('doc-blue-consent').checked=true;page.get('doc-blue-start').click();
+  await until(()=>P.read('blue',storage).record?.adapterFailure,'structured failure');
+  const old=storedBlue(storage);assert.deepEqual(old.adapterFailure,failure);assert.match(page.get('doc-blue-progress').textContent,/설정이 저장된 harness와/);
+  const reloaded=await bluePage(storage,{reply:async()=>matchedJob(storage,'failed',{error:'generic',failure})});
+  await until(()=>reloaded.get('doc-blue-progress').textContent.includes('저장된 harness'),'reload');
+  assert.equal(storedBlue(storage).harnessHash,old.harnessHash);
+  page.get('doc-blue-start').click();page.get('doc-blue-start').click();await until(()=>jobPosts(page.calls).length===2,'explicit retry');
+  await new Promise(r=>setTimeout(r,30));assert.equal(jobPosts(page.calls).length,2);assert.notEqual(storedBlue(storage).requestId,old.requestId);
+});
+test('invalid structured failure falls back to the legacy error',async()=>{
+  const storage=vmStorage();const page=await bluePage(storage,{reply:async(p,body)=>p==='/api/blue/jobs'?{id:body.requestId}:matchedJob(storage,'failed',{error:'legacy failure',failure:{schema:'falsify.adapter-failure.v1',code:'forged',stage:'preflight',recovery:'refresh_harness'}})});
+  await page.load();page.get('doc-blue-consent').checked=true;page.get('doc-blue-start').click();await until(()=>P.read('blue',storage).record?.disposition==='failed','failed');
+  assert.equal(storedBlue(storage).adapterFailure,undefined);assert.match(page.get('doc-blue-progress').textContent,/legacy failure/);
+});
+test('RED records structured failure and retries only on a deliberate click',async()=>{
+  const storage=vmStorage(),failure={schema:'falsify.adapter-failure.v1',code:'auth_required',stage:'preflight',recovery:'sign_in'};
+  const page=await redPage(storage,{reply:async(p,body)=>{if(p==='/api/red/jobs')return {id:body.requestId};const r=P.read('red',storage).record;return {id:r.requestId,role:'red',state:'failed',sourceHash:r.sourceHash,revision:r.revision,harnessHash:r.harnessHash,requestBytesDigest:r.requestBytesDigest,companionInstance:r.companionInstance,error:'generic',failure};}});
+  await page.load();page.get('red-consent').checked=true;page.get('red-start').click();await until(()=>P.read('red',storage).record?.adapterFailure,'RED failure');
+  const old=P.read('red',storage).record;assert.deepEqual(old.adapterFailure,failure);assert.match(page.get('red-progress').textContent,/로그인/);
+  page.get('red-start').click();page.get('red-start').click();await until(()=>page.calls.filter(c=>c.path==='/api/red/jobs').length===2,'RED retry');await new Promise(r=>setTimeout(r,30));assert.equal(page.calls.filter(c=>c.path==='/api/red/jobs').length,2);assert.notEqual(P.read('red',storage).record.requestId,old.requestId);
+});
+test('BLUE known HTTP rejection allows one explicit retry',async()=>{
   const storage=vmStorage();
   const page=await bluePage(storage,{reply:async()=>{const e=new Error('이미 실행 중입니다.');e.httpStatus=409;throw e;}});
   await page.load();page.get('doc-blue-consent').checked=true;page.get('doc-blue-start').click();
@@ -568,7 +592,7 @@ test('BLUE known HTTP rejection is not an unknown receipt and never reposts',asy
   assert.match(storedBlue(storage).serverFailure,/HTTP 409/);
   assert.equal(jobPosts(page.calls).length,1);
   page.get('doc-blue-start').click();await new Promise(r=>setTimeout(r,20));
-  assert.equal(jobPosts(page.calls).length,1);
+  assert.equal(jobPosts(page.calls).length,2);
 });
 test('BLUE changed live companion rejects before any POST',async()=>{
   const storage=vmStorage();const page=await bluePage(storage,{liveCap:{companionInstance:OTHER},reply:async()=>{throw new Error('must not post');}});

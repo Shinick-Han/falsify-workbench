@@ -48,6 +48,9 @@
     if(!s)return null;
     return s.slice(0,300);
   }
+  const FAILURE_MAP=Object.freeze({settings_mismatch:['preflight','refresh_harness','실행 설정이 저장된 harness와 다릅니다. harness를 새로 고르세요.'],executable_missing:['launch','install_executable','실행 파일을 찾지 못했습니다. 실행 파일 경로를 확인하세요.'],auth_required:['preflight','sign_in','인증이 필요합니다. 해당 CLI에 로그인하세요.'],timeout:['execution','retry_manually','실행 시간이 초과됐습니다. 다시 시도하세요.'],invalid_output:['output','check_adapter','adapter 출력 형식이 올바르지 않습니다. adapter 설정을 확인하세요.'],process_exit:['execution','check_adapter','adapter가 오류로 종료됐습니다. adapter 설정을 확인하세요.'],unknown:['unknown','inspect_configuration','실행에 실패했습니다. 설정을 확인하세요.']});
+  function structuredFailure(v){if(!v||typeof v!=='object'||Array.isArray(v)||Object.keys(v).sort().join(',')!=='code,recovery,schema,stage'||v.schema!=='falsify.adapter-failure.v1'||!Object.hasOwn(FAILURE_MAP,v.code))return null;const spec=FAILURE_MAP[v.code];if(v.stage!==spec[0]||v.recovery!==spec[1])return null;return {schema:v.schema,code:v.code,stage:v.stage,recovery:v.recovery};}
+  function failureText(record){const f=structuredFailure(record?.adapterFailure);return f?FAILURE_MAP[f.code][2]:(safeFailure(record?.serverFailure)||'실행에 실패했습니다. 설정을 확인한 뒤 다시 시도하세요.');}
   function safeRequest(record){
     if(!record||typeof record!=='object'||!record.request||typeof record.request!=='object')return null;
     let copy;try{copy=clone(record.request);secrets(copy,0);}catch{return null;}
@@ -92,6 +95,7 @@
     if(x.role==='blue'&&Object.keys(x.request).some(k=>!BLUE_KEYS.includes(k)))return false;
     // Optional, added only after a matched failure. Older records omit it and stay valid.
     if(Object.hasOwn(x,'serverFailure')&&(typeof x.serverFailure!=='string'||x.serverFailure.length<1||x.serverFailure.length>300||x.serverFailure!==safeFailure(x.serverFailure)))return false;
+    if(Object.hasOwn(x,'adapterFailure')&&!structuredFailure(x.adapterFailure))return false;
     return true;
   }
   function blocking(found){
@@ -161,6 +165,7 @@
     if(Object.hasOwn(patch,'postReceipt')){if(!RECEIPTS.includes(patch.postReceipt))return {ok:false,status:'rejected',message:'접수 상태가 올바르지 않습니다.'};next.postReceipt=patch.postReceipt;}
     if(Object.hasOwn(patch,'disposition')){if(!DISPOSITIONS.includes(patch.disposition))return {ok:false,status:'rejected',message:'대기 상태가 올바르지 않습니다.'};next.disposition=patch.disposition;}
     if(Object.hasOwn(patch,'serverFailure')){const safe=safeFailure(patch.serverFailure);if(!safe)return {ok:false,status:'rejected',message:'서버 실패 문구를 보관하지 못했습니다. 기록은 바꾸지 않았습니다.'};next.serverFailure=safe;}
+    if(Object.hasOwn(patch,'adapterFailure')){const f=structuredFailure(patch.adapterFailure);if(!f)return {ok:false,status:'rejected',message:'실패 정보 형식이 올바르지 않습니다.'};next.adapterFailure=f;}
     if(next.disposition==='open'||next.disposition==='running'){next.finishedAt=null;next.expiresAt=null;}
     else if(Object.hasOwn(patch,'finishedAt')){if(!Number.isFinite(patch.finishedAt))return {ok:false,status:'rejected',message:'완료 시각이 올바르지 않습니다.'};next.finishedAt=patch.finishedAt;next.expiresAt=patch.finishedAt+RETENTION_MS;}
     else if(next.finishedAt==null)return {ok:false,status:'rejected',message:'끝난 작업의 시각이 없습니다. 기록은 바꾸지 않았습니다.'};
@@ -218,7 +223,7 @@
     if(mismatch)return {status:mismatch,record,gets:1};
     const doc=docFrom(record);
     if(body.state==='running')return {status:'still-running',record,gets:1,job:body,doc};
-    if(body.state==='failed')return {status:'failed',record,gets:1,job:body,doc,error:safeFailure(body.error)||'실패'};
+    if(body.state==='failed')return {status:'failed',record,gets:1,job:body,doc,error:safeFailure(body.error)||'실패',failure:structuredFailure(body.failure)};
     if(body.state==='cancelled')return {status:'cancelled',record,gets:1,job:body,doc};
     if(body.state==='completed'){
       try{if(typeof options.validate!=='function')fail('invalid-result','검증기가 없습니다.');options.validate(doc,body.result);}
@@ -258,7 +263,7 @@
     };
     return base[outcome&&outcome.status]||base.unavailable;
   }
-  const api=Object.freeze({SCHEMA,RETENTION_MS,RETENTION,REQUEST_ID,storageKey,canonical,read,hold,note,discard,recover,matches:(record,body)=>!!record&&bound(record,body)===null,text,docFrom,safeFailure,safeRequest});
+  const api=Object.freeze({SCHEMA,RETENTION_MS,RETENTION,REQUEST_ID,storageKey,canonical,read,hold,note,discard,recover,matches:(record,body)=>!!record&&bound(record,body)===null,text,docFrom,safeFailure,safeRequest,structuredFailure,failureText});
   if(typeof module==='object'&&module.exports){module.exports=api;return;}
   root.FalsifyPendingJobs=api;
 })(typeof globalThis==='object'?globalThis:this);

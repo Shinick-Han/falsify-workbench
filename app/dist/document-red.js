@@ -114,7 +114,7 @@
       let matched=null;
       if(strict){const found=P.read('red');if(found.status!=='record'||found.record.requestId!==job||!P.matches(found.record,data))throw new Error('조회한 작업의 식별이 저장한 요청과 달라 적용하지 않았습니다.');matched=found.record;}
       if(data.state==='completed'){applyResponse(data.result,'local-codex');if(strict){const found={status:'record',record:matched};if(found.status==='record')await P.note(found.record,{disposition:'completed',finishedAt:Date.now()});}break;}
-      if(['failed','cancelled'].includes(data.state)){if(strict){const found={status:'record',record:matched};if(found.status==='record'){await P.note(found.record,{disposition:data.state==='failed'?'failed':'cancelled',finishedAt:Date.now()});showPending({status:data.state==='failed'?'failed':'cancelled',record:found.record});}}throw new Error(data.error||'검토 취소됨');}
+      if(['failed','cancelled'].includes(data.state)){if(strict){const found={status:'record',record:matched};if(found.status==='record'){const f=P.structuredFailure(data.failure),detail=P.safeFailure(data.error);await P.note(found.record,{disposition:data.state,finishedAt:Date.now(),...(detail?{serverFailure:detail}:{}),...(f?{adapterFailure:f}:{})});showPending({status:data.state,record:P.read('red').record});}}return;}
       if(strict){const found={status:'record',record:matched};if(found.status==='record'&&found.record.disposition!=='running')await P.note(found.record,{disposition:'running'});}
       msg('Harness 검토 중 · '+(data.progress.completedCalls||0)+' / '+(data.progress.requiredCalls||'?')+'회 완료 · 사용자 harness 내부 호출량은 별도입니다.');
       await new Promise(resolve=>setTimeout(resolve,1500));
@@ -123,7 +123,7 @@
   let displayedPending=null;
   function showPending(outcome){
     displayedPending=outcome?.record?{expectedRequestId:outcome.record.requestId}:{expectedStatus:outcome?.status};
-    msg(P.text(outcome),outcome.status!=='still-running');
+    msg(outcome.record?.disposition==='failed'?'RED 실패. '+P.failureText(outcome.record)+' RED 실행을 누르면 새 요청을 보냅니다.':P.text(outcome),outcome.status!=='still-running');
     const keep=!!outcome&&outcome.status&&outcome.status!=='absent'&&outcome.status!=='completed'&&outcome.status!=='still-running';
     let b=$('#red-pending-discard');
     if(keep&&!b){b=document.createElement('button');b.type='button';b.id='red-pending-discard';b.className='button secondary';b.textContent='이 대기 작업 버리기';$('#red-progress').after(b);
@@ -132,6 +132,7 @@
     let check=$('#red-receipt-check');
     if(keep&&outcome.record&&!check){check=document.createElement('button');check.type='button';check.id='red-receipt-check';check.className='button secondary';check.textContent='접수 상태 다시 확인';$('#red-progress').after(check);check.addEventListener('click',()=>void recoverRed());}
     if(check)check.hidden=!(keep&&outcome.record);
+    let details=$('#red-recovery-details');if(keep&&outcome.record&&!details){details=document.createElement('details');details.id='red-recovery-details';const summary=document.createElement('summary');summary.textContent='요청과 진단 정보';details.append(summary);const diag=document.createElement('button'),req=document.createElement('button');diag.type=req.type='button';diag.textContent='진단 정보 저장';req.textContent='원래 요청 저장';diag.addEventListener('click',()=>{const r=P.read('red').record;if(r)jsonDownload({schema:'falsify.red-failure-diagnostic.v1',role:r.role,requestId:r.requestId,disposition:r.disposition,postReceipt:r.postReceipt,sourceHash:r.sourceHash,fileHash:r.fileHash,revision:r.revision,harnessHash:r.harnessHash,requestBytesDigest:r.requestBytesDigest,requestFingerprint:r.requestFingerprint,companionInstance:r.companionInstance,serverFailure:r.serverFailure||null,adapterFailure:P.structuredFailure(r.adapterFailure)},'falsify-red-failure-diagnostic.json');});req.addEventListener('click',()=>{const r=P.read('red').record,body=r&&P.safeRequest(r);if(body)jsonDownload(body,'falsify-document-red-request.json');});details.append(diag,req);$('#red-progress').after(details);}if(details)details.hidden=!(keep&&outcome.record);
   }
   function adoptRecovered(stored){
     doc={revision:stored.revision,sourceHash:stored.sourceHash,fileHash:stored.fileHash,format:stored.format,name:stored.name,segments:stored.segments.map(s=>({...s}))};
@@ -162,7 +163,7 @@
     if(doc){const same=found.status==='record'&&doc.sourceHash===found.record.sourceHash&&doc.fileHash===found.record.fileHash&&doc.revision===found.record.revision;
       if(same&&(job||found.record.disposition==='completed'))return;
       if(!same||response||candidates.length){showPending(found.status==='record'?{status:'unresolved',record:found.record}:found);return;}}
-    if(!B.state().connected){showPending(found.status==='record'?{status:'unpaired',record:found.record}:found);return;}
+    if(!B.state().connected){showPending(found.status==='record'?{status:['failed','cancelled'].includes(found.record.disposition)?found.record.disposition:'unpaired',record:found.record}:found);return;}
     recovering=true;const current=generation,existingDoc=doc;
     try{
       const outcome=await P.recover({role:'red',companionInstance:B.capabilities()?.companionInstance||null,hashHarness:h=>H.hash(h),validate:(d,res)=>C.validateResponse(d,res),getJob:id=>probe('red',id),currentDoc:doc||undefined});
@@ -170,7 +171,7 @@
       if(!outcome||outcome.status==='absent')return;
       if(outcome.status==='still-running'){await resumeRed(outcome);return;}
       if(outcome.status==='completed'){showRecoveredRed(outcome);await P.note(outcome.record,{disposition:'completed',finishedAt:Date.now()});return;}
-      if((outcome.status==='failed'||outcome.status==='cancelled')&&outcome.record)await P.note(outcome.record,{disposition:outcome.status,finishedAt:Date.now()});
+      if((outcome.status==='failed'||outcome.status==='cancelled')&&outcome.record){await P.note(outcome.record,{postReceipt:'accepted',disposition:outcome.status,finishedAt:Date.now(),...(outcome.error?{serverFailure:outcome.error}:{}),...(outcome.failure?{adapterFailure:outcome.failure}:{})});outcome.record=P.read('red').record;}
       showPending(outcome);
     }finally{recovering=false;}
   }
@@ -194,6 +195,7 @@
     if(expectsHelper()){
       if(!helperReady()){msg('대기 기록 도우미가 없거나 손상되어 실행하지 않았습니다. 요청을 보내지 않습니다.',true);return;}
       busy=true;controls();
+      const old=P.read('red');if(old.status==='record'&&['failed','cancelled'].includes(old.record.disposition)&&old.record.postReceipt!=='unknown'){if(!B.state().connected||!B.session()){busy=false;showPending({status:old.record.disposition,record:old.record});controls();return;}const removed=await P.discard('red',{acknowledge:true,expectedRequestId:old.record.requestId});if(!removed.ok){busy=false;msg(removed.message,true);controls();return;}}
       let l,held=null;
       try{l=link();request=await makeRequest();if(current!==generation)return;held=await holdRed();}
       catch(e){if(current===generation)msg(e.message+' 자동 재시도하지 않았습니다.',true);}

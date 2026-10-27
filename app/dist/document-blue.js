@@ -14,7 +14,7 @@
   function reportCaught(e){if(sticky||notice)return;msg(e.message+' 자동 재시도하지 않습니다.',true);}
   function panelLatched(){const n=document.querySelector('#doc-blue-failure');return !!(n&&!n.hidden&&n.textContent);}
   function terminalKind(record){if(!record)return null;if(record.disposition==='failed')return 'failed';if(record.disposition==='cancelled')return 'cancelled';return null;}
-  function clearSticky(){sticky=null;notice=false;for(const id of ['doc-blue-failure','doc-blue-pending-discard','doc-blue-failure-diagnostic','doc-blue-failure-request','doc-blue-receipt-check']){const node=document.querySelector('#'+id);if(!node)continue;if(id==='doc-blue-failure')node.textContent='';node.hidden=true;}}
+  function clearSticky(){sticky=null;notice=false;for(const id of ['doc-blue-failure','doc-blue-pending-discard','doc-blue-failure-diagnostic','doc-blue-failure-request','doc-blue-receipt-check','doc-blue-recovery-details']){const node=document.querySelector('#'+id);if(!node)continue;if(id==='doc-blue-failure')node.textContent='';node.hidden=true;}}
   function ensurePanel(){let n=document.querySelector('#doc-blue-failure');if(!n){n=document.createElement('p');n.id='doc-blue-failure';n.className='form-feedback error';$('#doc-blue-progress').after(n);}return n;}
   function ensureButton(id,label,onClick){let b=document.querySelector('#'+id);if(!b){b=document.createElement('button');b.type='button';b.id=id;b.className='button secondary';$('#doc-blue-progress').after(b);}if(!b.__recoveryBound){b.type='button';b.className=b.className||'button secondary';b.addEventListener('click',onClick);b.__recoveryBound=true;}b.textContent=label;b.hidden=false;return b;}
   function saveJSON(data,name){const url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
@@ -204,7 +204,7 @@
   async function persistWatch(record,data){
     const kind=data.state==='failed'?'failed':'cancelled';
     const patch={disposition:kind,finishedAt:Date.now()};
-    if(kind==='failed'){const detail=P.safeFailure(data.error);if(detail)patch.serverFailure=detail;}
+    if(kind==='failed'){const detail=P.safeFailure(data.error);if(detail)patch.serverFailure=detail;const f=P.structuredFailure(data.failure);if(f)patch.adapterFailure=f;}
     await P.note(record,patch);
   }
   async function watchBlue(current,l,strict){
@@ -241,22 +241,22 @@
     const found=P.read('blue');if(!found||found.status!=='record')return;
     saveJSON(diagnosticFor(found.record),'falsify-blue-failure-diagnostic.json');
   }
-  function diagnosticFor(r){return {schema:'falsify.blue-failure-diagnostic.v1',role:r.role,requestId:r.requestId,disposition:r.disposition,postReceipt:r.postReceipt,sourceHash:r.sourceHash,fileHash:r.fileHash,revision:r.revision,harnessHash:r.harnessHash,requestBytesDigest:r.requestBytesDigest,requestFingerprint:r.requestFingerprint,companionInstance:r.companionInstance,serverFailure:typeof r.serverFailure==='string'?r.serverFailure:null};}
+  function diagnosticFor(r){return {schema:'falsify.blue-failure-diagnostic.v1',role:r.role,requestId:r.requestId,disposition:r.disposition,postReceipt:r.postReceipt,sourceHash:r.sourceHash,fileHash:r.fileHash,revision:r.revision,harnessHash:r.harnessHash,requestBytesDigest:r.requestBytesDigest,requestFingerprint:r.requestFingerprint,companionInstance:r.companionInstance,serverFailure:typeof r.serverFailure==='string'?r.serverFailure:null,adapterFailure:P.structuredFailure(r.adapterFailure)};}
   function exportStoredRequest(){
     const found=P.read('blue');if(!found||found.status!=='record')return;
     const body=P.safeRequest(found.record);if(!body){msg('원래 요청을 저장하지 못했습니다. 실행하지 않았습니다.',true,true);return;}
     saveJSON(body,'falsify-document-blue-request.json');
   }
-  function showRecoveryActions(){ensureButton('doc-blue-pending-discard','이 대기 작업 버리기',onDiscard);ensureButton('doc-blue-failure-diagnostic','진단 정보 저장',exportDiagnostic);ensureButton('doc-blue-failure-request','원래 요청 저장',exportStoredRequest);ensureButton('doc-blue-receipt-check','접수 상태 다시 확인',()=>void recoverBlue());}
+  function showRecoveryActions(){ensureButton('doc-blue-pending-discard','이 대기 작업 버리기',onDiscard);const d=ensureButton('doc-blue-failure-diagnostic','진단 정보 저장',exportDiagnostic),r=ensureButton('doc-blue-failure-request','원래 요청 저장',exportStoredRequest);let details=document.querySelector('#doc-blue-recovery-details');if(!details){details=document.createElement('details');details.id='doc-blue-recovery-details';const summary=document.createElement('summary');summary.textContent='요청과 진단 정보';details.append(summary);$('#doc-blue-progress').after(details);}details.append(d,r);details.hidden=false;ensureButton('doc-blue-receipt-check','접수 상태 다시 확인',()=>void recoverBlue());}
   function rememberTerminal(record,opts={}){
     displayedPending={expectedRequestId:record.requestId};
     const kind=terminalKind(record);if(!kind)return;
     if(!doc&&record.request)adoptBlue(P.docFrom(record));
     request=record.request;sticky=kind;notice=false;
-    const detail=kind==='failed'&&typeof record.serverFailure==='string'?record.serverFailure:'';
+    const detail=kind==='failed'?P.failureText(record):'';
     const head=kind==='failed'?(record.postReceipt==='rejected'?'BLUE 요청이 거부됐습니다.':'BLUE 실패.'):'BLUE 취소.';
     const foreign=opts.foreign?' 이번 조회는 저장된 요청·인스턴스·해시와 달라 서버 문구를 바꾸지 않았습니다.':'';
-    msg(head+(detail?' '+detail:'')+foreign+' 다시 시작하려면 대기 작업을 버린 뒤 BLUE를 실행하세요.',true,true);
+    msg(head+(detail?' '+detail:'')+foreign+' BLUE 독립 검토 시작을 누르면 새 요청을 보냅니다.',true,true);
     const box=ensurePanel();box.textContent=detail+foreign;box.hidden=true;
     showRecoveryActions();
   }
@@ -310,7 +310,7 @@
     const mismatch=outcome&&['request-mismatch','hash-mismatch','role-mismatch','server-restarted','instance-unverified'].includes(outcome.status);
     if(mismatch){rememberTerminal(record,{foreign:true});return;}
     if(outcome&&record.disposition==='failed'&&outcome.status==='failed'){
-      const detail=P.safeFailure(outcome.error);if(detail)await P.note(record,{serverFailure:detail});
+      const detail=P.safeFailure(outcome.error);if(detail||outcome.failure)await P.note(record,{...(detail?{serverFailure:detail}:{}),...(outcome.failure?{adapterFailure:outcome.failure}:{})});
       const saved=P.read('blue');rememberTerminal(saved.status==='record'?saved.record:record);return;
     }
     if(outcome&&record.disposition==='cancelled'&&outcome.status==='cancelled'){rememberTerminal(record);return;}
@@ -345,8 +345,8 @@
       if(outcome.status==='still-running'){await resumeBlue(outcome);return;}
       if(outcome.status==='completed'){showRecoveredBlue(outcome);await P.note(outcome.record,{disposition:'completed',finishedAt:Date.now()});return;}
       if((outcome.status==='failed'||outcome.status==='cancelled')&&outcome.record){
-        const patch={disposition:outcome.status,finishedAt:Date.now()};
-        if(outcome.status==='failed'){const detail=P.safeFailure(outcome.error);if(detail)patch.serverFailure=detail;}
+        const patch={postReceipt:'accepted',disposition:outcome.status,finishedAt:Date.now()};
+        if(outcome.status==='failed'){const detail=P.safeFailure(outcome.error);if(detail)patch.serverFailure=detail;if(outcome.failure)patch.adapterFailure=outcome.failure;}
         await P.note(outcome.record,patch);
         const saved=P.read('blue');rememberTerminal(saved.status==='record'?saved.record:outcome.record);return;
       }
@@ -358,7 +358,7 @@
     if(expectsHelper()){
       if(!helperReady()){msg('대기 기록 도우미가 없거나 손상되어 실행하지 않았습니다. 요청을 보내지 않습니다.',true);return;}
       const pending=P.read('blue');
-      if(pending.status==='record'&&terminalKind(pending.record)){rememberTerminal(pending.record);return;}
+      if(pending.status==='record'&&terminalKind(pending.record)&&pending.record.postReceipt!=='unknown'){if(!B.state().connected||!B.session()){rememberTerminal(pending.record);return;}busy=true;controls();const removed=await P.discard('blue',{acknowledge:true,expectedRequestId:pending.record.requestId});if(!removed.ok||current!==generation){busy=false;if(!removed.ok)msg(removed.message,true,true);controls();return;}previousFailure=pending.record;clearSticky();}
       if(pending.status==='record'&&(pending.record.disposition==='unknown'||pending.record.postReceipt==='unknown')){showUnknown(pending.record);return;}
       busy=true;controls();
       let l,held=null;
