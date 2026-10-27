@@ -133,6 +133,17 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
     }
     for(const block of document.blocks) if(block.text && !owners.has(block.id)) fail('Flow omits text block');
   }
+  // The measured alternative is opt-in; retain default source order and
+  // column decisions when continuous layout has no qualifying body.
+  const bodyText=new Map(document.blocks.map(b=>[b.id,b.text||'']));
+  if(layoutMode==='measured-continuous' && flow?.items.some(i=>i.columns===2 && i.span!=='page' && i.kind==='paragraph' && (i.blockIds||[]).reduce((n,id)=>n+(bodyText.get(id)?.length||0),0)>=150)) {
+    const pages=new Map(); for(const item of flow.items) {const page=item.source?.pageIndex; if(!pages.has(page)) pages.set(page,[]);pages.get(page).push(item);}
+    for(const group of pages.values()) if(group.length && group.every(i=>Number.isInteger(i.continuousPosition))) {
+      const ordered=[...group].sort((a,b)=>a.continuousPosition-b.continuousPosition);let n=0;
+      flow.items=flow.items.map(i=>group.includes(i)?ordered[n++]:i);
+      for(const item of ordered) if(item.continuousColumns) {item.columns=item.continuousColumns;item.span=item.continuousColumns===2?'column':'page';}
+    }
+  }
   // An inline joiner already ending in whitespace supplies a fragment's leading separator.
   for(const item of flow?.items || []) if(item.inline && Array.isArray(item.joiners)) for(let i=1;i<(item.blockIds||[]).length;i++) {
     if (/\s$/u.test(item.joiners[i-1] || '')) projectedSpaces.get(item.blockIds[i])?.delete(0);
@@ -382,9 +393,16 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
       if(columns===2) bodyStarted=true; group=[];};
     const captionById=new Map(flow.items.filter(i=>i.kind==='caption').flatMap(i=>(i.blockIds||[]).map(id=>[id,i]))), linkedCaptions=new Set();
     for(const item of flow.items) if(item.kind==='asset') for(const id of item.captionIds||[]) {if(!captionById.has(id) || linkedCaptions.has(id)) fail('Unknown or duplicate caption link'); linkedCaptions.add(id);}
+    const renderCaption=item=>{
+      const blocks=(item.blockIds||[]).map(id=>blockById.get(id));
+      const parts=blocks.map(b=>renderBlock(b));
+      const rendered=item.inline ? parts.map((p,i)=>p+(i<parts.length-1 ? `#text(${typstString(item.joiners[i])})` : '')).join('') : parts.filter(Boolean).join('\n');
+      return paragraphContext(blocks,'caption',rendered);
+    };
     for(const [itemIndex,item] of flow.items.entries()) {
       if(plan?.excludedItemIds.includes(item.id)) continue;
-      const count=measuredContinuous && itemIndex<firstBodyIndex ? 1 : item.span==='page'?1:(item.columns===2?2:1); if(count!==columns){flush();columns=count;}
+      if(item.kind==='caption' && (item.blockIds||[]).every(id=>linkedCaptions.has(id))) continue;
+      const count=measuredContinuous && itemIndex<firstBodyIndex ? 1 : measuredContinuous && item.measuredColumns===2 ? 2 : item.span==='page'?1:(item.columns===2?2:1); if(count!==columns){flush();columns=count;}
       let parts=[];
       if(item.kind==='asset') {
         if(item.renderAssetId) {
@@ -394,8 +412,13 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
           else {parts=[renderAsset(item.renderAssetId,item)].filter(Boolean); if(parts.length) for(const id of item.assetIds||[]) placedAssets.add(id);}
         } else if((item.assetIds||[]).length>1) assetFindings.push({code:'asset-union-required',assetIds:[...item.assetIds]});
         else parts=(item.assetIds||[]).map(id=>renderAsset(id,item)).filter(Boolean);
-        const above=captionOrder(item).filter(id=>item.captionPositions?.[id]==='above').map(id=>paragraphContext([blockById.get(id)],'caption',renderBlock(blockById.get(id)))).filter(Boolean);
-        const below=captionOrder(item).filter(id=>item.captionPositions?.[id]!=='above').map(id=>paragraphContext([blockById.get(id)],'caption',renderBlock(blockById.get(id)))).filter(Boolean);
+        const captionItems=[...new Set(captionOrder(item).map(id=>captionById.get(id)))];
+        for(const caption of captionItems) {
+          const ids=caption.blockIds||[], position=id=>item.captionPositions?.[id]==='above'?'above':'below';
+          if(ids.some(id=>!(item.captionIds||[]).includes(id) || position(id)!==position(ids[0]))) fail('Incomplete or inconsistent caption link');
+        }
+        const above=captionItems.filter(c=>item.captionPositions?.[c.blockIds[0]]==='above').map(renderCaption).filter(Boolean);
+        const below=captionItems.filter(c=>item.captionPositions?.[c.blockIds[0]]!=='above').map(renderCaption).filter(Boolean);
         if(parts.length && below.length) parts=[`#block(sticky: true)[${parts.join('\n')}]`];
         parts=[...above.map(caption=>`#block(sticky: true)[${caption}]`),...parts,...below];
       } else {

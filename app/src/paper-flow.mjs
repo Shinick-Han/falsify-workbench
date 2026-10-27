@@ -353,15 +353,14 @@ export function buildPaperFlow(document, {drawings=document?.drawings || [], lin
         const ids=[],joiners=[];
         for(const member of members) {if(ids.length) joiners.push(' ');ids.push(...member.blockIds);if(member.inline) joiners.push(...member.joiners); else for(let i=1;i<member.blockIds.length;i++) joiners.push('');}
         caption.blockIds=ids; caption.inline=true;caption.joiners=joiners;
-        caption.box=union(members.map(e=>e.box));caption.source.bbox=[...caption.box];
+        caption.memberBoxes=members.map(e=>[...e.box]);
+        caption.box=union(caption.memberBoxes);caption.source.bbox=[...caption.box];
         for(const member of members.slice(1)) entries.splice(entries.indexOf(member),1);
         diagnostics.push({code:'caption-continuation-grouped',pageIndex:pi,itemId:caption.id,memberItemIds:members.map(e=>e.id),blockIds:[...ids]});
       }
     }
     // Match measured caption direction and distance; retain each caption as text.
     for(const caption of entries.filter(x=>x.kind==='caption' && boxOK(x.box))) {
-      // The compositor cannot yet preserve inline joiners when moving linked captions.
-      if(caption.inline) {diagnostics.push({code:'caption-association-unresolved',pageIndex:pi,itemId:caption.id,detail:'Grouped inline caption requires compositor support.'});continue;}
       const text=caption.blockIds.map(id=>flowBlocks.find(b=>b.id===id)?.text || '').join('');
       const table=/^\s*(?:extended\s+data\s+)?table\s*\d/i.test(text);
       const near=entries.filter(x=>x.kind==='asset' && boxOK(x.box) && x.box[0]<caption.box[2] && caption.box[0]<x.box[2]).map(x=>{
@@ -380,6 +379,7 @@ export function buildPaperFlow(document, {drawings=document?.drawings || [], lin
     }
     const headers=entries.filter(x=>x.kind==='header').sort(geom), footers=entries.filter(x=>x.kind==='footer').sort(geom);
     for(const edge of [...headers,...footers]) entries.splice(entries.indexOf(edge),1);
+    let continuousOrder=null;
     if(entries.some(x=>!boxOK(x.box)) || !Number.isFinite(page.width)) {
       diagnostics.push({code:'reading-order-fallback',pageIndex:pi,detail:'Missing geometry; reader order retained.'}); entries.sort(reading);
     } else {
@@ -396,6 +396,21 @@ export function buildPaperFlow(document, {drawings=document?.drawings || [], lin
       const g=candidates[0];
       if(!g) {entries.sort(geom); diagnostics.push({code:'single-column-or-unresolved',pageIndex:pi});}
       else {
+        // A union across two measured caption columns is not a single wide
+        // source line. Keep its first member as the reading-order anchor.
+        const splitCaption=x=>x.kind==='caption' && x.memberBoxes?.length>1 && x.memberBoxes.every(b=>b[2]<=g.mid || b[0]>=g.mid) && x.memberBoxes.some(b=>b[2]<=g.mid) && x.memberBoxes.some(b=>b[0]>=g.mid);
+        for(const item of entries.filter(splitCaption)) item.measuredColumns=2;
+        if(entries.some(splitCaption)) {
+          const layoutBox=x=>splitCaption(x)?x.memberBoxes[0]:x.box;
+          const spans2=entries.filter(x=>!splitCaption(x) && x.box[0]<g.mid && x.box[2]>g.mid).sort(geom);
+          const side2=entries.filter(x=>!spans2.includes(x)), groups2=[];
+          for(const s of spans2) {const last=groups2.at(-1); if(last && s.box[1]<last.bottom) {last.items.push(s);last.bottom=Math.max(last.bottom,s.box[3]);} else groups2.push({items:[s],top:s.box[1],bottom:s.box[3]});}
+          for(const c of side2.filter(x=>x.kind==='caption')) if(side2.some(x=>x!==c && x.kind==='paragraph' && x.box[3]<c.box[1]-5) && !groups2.some(g=>c.box[1]>=g.top && c.box[1]<g.bottom)) groups2.push({items:[],top:c.box[1],bottom:c.box[1]});
+          groups2.sort((a,b)=>a.top-b.top); const bands2=Array.from({length:groups2.length+1},()=>[]);
+          for(const x of side2) {let n=groups2.findIndex(g=>x.box[1]<g.bottom && x.box[3]>g.top);if(n>=0) groups2[n].items.push(x);else {n=groups2.findIndex(g=>x.box[3]<=g.top);bands2[n<0?groups2.length:n].push(x);}}
+          continuousOrder=[];
+          for(let i=0;i<bands2.length;i++) {const xs=bands2[i],left=xs.filter(x=>layoutBox(x)[2]<=g.mid).sort(geom),right=xs.filter(x=>layoutBox(x)[0]>=g.mid).sort(geom),both=(left.length && right.length)||xs.some(splitCaption);for(const x of xs) x.continuousColumns=both?2:1;continuousOrder.push(...left,...right);if(groups2[i]) continuousOrder.push(...groups2[i].items.sort(geom));}
+        }
         const spans=entries.filter(x=>x.box[0]<g.mid && x.box[2]>g.mid).sort(geom);
         const side=entries.filter(x=>!spans.includes(x));
         // Spanning objects define local bands; overlapping side objects stay in the same band.
@@ -413,8 +428,10 @@ export function buildPaperFlow(document, {drawings=document?.drawings || [], lin
     for(const header of headers) {
       const at=entries.findIndex(e=>boxOK(e.box) && e.box[1]>=header.box[1]);
       entries.splice(at<0?entries.length:at,0,header);
+      if(continuousOrder) {const n=continuousOrder.findIndex(e=>boxOK(e.box) && e.box[1]>=header.box[1]);continuousOrder.splice(n<0?continuousOrder.length:n,0,header);}
     }
-    items.push(...[...entries,...footers].map(({box,pos,index,...item})=>item));
+    if(continuousOrder) [...continuousOrder,...footers].forEach((item,i)=>item.continuousPosition=i);
+    items.push(...[...entries,...footers].map(({box,pos,index,memberBoxes,...item})=>item));
   }
   return {schema:'falsify.paper-flow.v1',sourceSha256:document.sourceSha256,items,relations,diagnostics,fragments,regions};
 }
