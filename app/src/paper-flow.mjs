@@ -313,8 +313,55 @@ export function buildPaperFlow(document, {drawings=document?.drawings || [], lin
       first.box=union(members.map(x=>x.box)); first.source.bbox=[...first.box];
       for(const member of members.slice(1)) entries.splice(entries.indexOf(member),1);
     }
+    // Group only source-adjacent caption runs with matching measured font and
+    // line geometry. Inline runs retain their exact order and joiners. A column
+    // wrap requires aligned tops and a clear target column; other text is a
+    // barrier even when it happens to use the same small font.
+    const blockMap=new Map(flowBlocks.map(b=>[b.id,b]));
+    const signature=e=>{
+      const chars=e.blockIds.flatMap(id=>blockMap.get(id)?.source?.characters || []);
+      const counts=new Map();
+      for(const c of chars) {const s=styles.get(c.styleId); if(!s?.fontName || !Number.isFinite(s.size)) continue; const key=`${s.fontName.replace(/(?:Bold|Semibold|Italic|Oblique)/gi,'')}|${Math.round(s.size*10)/10}`; counts.set(key,(counts.get(key)||0)+1);}
+      return [...counts].sort((a,b)=>b[1]-a[1])[0]?.[0];
+    };
+    const bounds=e=>e.blockIds.map(id=>blockMap.get(id)?.source?.range).filter(Boolean);
+    const start=e=>Math.min(...bounds(e).map(r=>r.start));
+    const end=e=>Math.max(...bounds(e).filter(r=>r.start<start(e)+2 || r.start===start(e)).map(r=>r.end));
+    const lineCount=e=>e.blockIds.reduce((n,id)=>n+(blockMap.get(id)?.source?.lines?.length || 0),0);
+    for(const caption of entries.filter(e=>e.kind==='caption' && boxOK(e.box))) {
+      let last=caption;
+      const members=[caption];
+      while(true) {
+        const lastEnd=end(last), sig=signature(last);
+        if(!Number.isFinite(lastEnd) || !sig) break;
+        const next=entries.filter(e=>e.kind==='paragraph' && !members.includes(e) && boxOK(e.box) && start(e)===lastEnd && signature(e)===sig && lineCount(e)>=1);
+        const eligible=next.filter(e=>{
+          const h=median(last.blockIds.flatMap(id=>(blockMap.get(id)?.source?.lines || []).map(l=>boxOK(l.bbox)?l.bbox[3]-l.bbox[1]:0)).filter(Boolean));
+          if(!h) return false;
+          const sameColumn=Math.min(last.box[2],e.box[2])-Math.max(last.box[0],e.box[0])>Math.min(last.box[2]-last.box[0],e.box[2]-e.box[0])*.5;
+          const gap=e.box[1]-last.box[3];
+          const adjacent=sameColumn && gap>=-h && gap<=h;
+          const wrap=!sameColumn && e.box[0]>last.box[2] && lineCount(last)>=2 && lineCount(e)>=2 && Math.abs(e.box[1]-caption.box[1])<=h && last.box[3]>e.box[1]+2*h;
+          if(!adjacent && !wrap) return false;
+          const corridor=wrap ? [e.box[0],e.box[1],e.box[2],e.box[1]+h] : [Math.min(last.box[0],e.box[0]),Math.min(last.box[3],e.box[1]),Math.max(last.box[2],e.box[2]),Math.max(last.box[3],e.box[1])];
+          return !entries.some(x=>x!==last && x!==e && !members.includes(x) && !['header','footer'].includes(x.kind) && boxOK(x.box) && overlap(corridor,x.box));
+        });
+        if(eligible.length!==1) break;
+        last=eligible[0]; members.push(last);
+      }
+      if(members.length>1) {
+        const ids=[],joiners=[];
+        for(const member of members) {if(ids.length) joiners.push('');ids.push(...member.blockIds);if(member.inline) joiners.push(...member.joiners); else for(let i=1;i<member.blockIds.length;i++) joiners.push('');}
+        caption.blockIds=ids; caption.inline=true;caption.joiners=joiners;
+        caption.box=union(members.map(e=>e.box));caption.source.bbox=[...caption.box];
+        for(const member of members.slice(1)) entries.splice(entries.indexOf(member),1);
+        diagnostics.push({code:'caption-continuation-grouped',pageIndex:pi,itemId:caption.id,memberItemIds:members.map(e=>e.id),blockIds:[...ids]});
+      }
+    }
     // Match measured caption direction and distance; retain each caption as text.
     for(const caption of entries.filter(x=>x.kind==='caption' && boxOK(x.box))) {
+      // The compositor cannot yet preserve inline joiners when moving linked captions.
+      if(caption.inline) {diagnostics.push({code:'caption-association-unresolved',pageIndex:pi,itemId:caption.id,detail:'Grouped inline caption requires compositor support.'});continue;}
       const text=caption.blockIds.map(id=>flowBlocks.find(b=>b.id===id)?.text || '').join('');
       const table=/^\s*(?:extended\s+data\s+)?table\s*\d/i.test(text);
       const near=entries.filter(x=>x.kind==='asset' && boxOK(x.box) && x.box[0]<caption.box[2] && caption.box[0]<x.box[2]).map(x=>{
