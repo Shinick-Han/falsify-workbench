@@ -43,7 +43,7 @@ export async function checkRecomposition({bytes, expectedBlocks, edits = {}, pdf
       const page = await doc.getPage(n), viewport = page.getViewport({scale: 1});
       const content = await page.getTextContent();
       const parts = [];
-      let previous = null, ordinal = 0;
+      let previous = null, ordinal = 0, pendingQuoteSpace = null;
       const boundaries = [], itemScalars = [];
       const frame = viewport.transform;
       const frameSupported = viewport.rotation === 0 && Array.isArray(frame) && frame.length === 6 && frame.every(Number.isFinite) &&
@@ -71,7 +71,9 @@ export async function checkRecomposition({bytes, expectedBlocks, edits = {}, pdf
           const templates=group.map(m=>expectedFurniture.filter(t=>t.sourcePage===m.sourcePage && t.kind===m.kind && t.occurrences?.some(o=>(o.blockId||o.itemId)===m.id)));
           if (templates.some(ts=>ts.length!==1 || !['text','counter'].includes(ts[0].entryKind))) continue;
           const expected=templates.map(ts=>ts[0].entryKind==='counter' ? `${n} / ${doc.numPages}` : ts[0].text);
-          if (expected.some(t=>typeof t!=='string') || normalize(expected.join(' '))!==normalize(run.item.str)) continue;
+          // Independently anchored furniture can be merged by PDF.js with or
+          // without a synthetic separator. Verify all member text either way.
+          if (expected.some(t=>typeof t!=='string') || ![expected.join(' '),expected.join('')].some(text=>normalize(text)===normalize(run.item.str))) continue;
           if (group[0].kind==='header' ? run.top<0 || run.bottom>bodyFrame.top : run.top<bodyFrame.bottom || run.bottom>viewport.height) continue;
           excluded.add(run.index); claimed.add(run.index);
           group.forEach(m=>mergedMarkers.add(m));
@@ -153,11 +155,20 @@ export async function checkRecomposition({bytes, expectedBlocks, edits = {}, pdf
           for (const scalar of item.str) if (!/\s/u.test(scalar)) { itemScalars.push(scalar); ordinal++; }
           previous = null; continue;
         }
+        if (pendingQuoteSpace && item.str && !/^\s+$/u.test(item.str)) {
+          if (/^[”’]/u.test(item.str)) { pendingQuoteSpace.rightPosition=position; boundaries.push(pendingQuoteSpace); }
+          pendingQuoteSpace=null;
+        }
+        // PDF.js may synthesize a zero-height space item from glyph positioning
+        // immediately before a closing quote. Resolve it from encoded glyphs.
+        if (item.str === ' ' && item.height === 0 && previous?.position && !previous.hasEOL && /^[”’]/u.test(content.items[itemIndex+1]?.str || '')) {
+          pendingQuoteSpace={part:parts.length,ordinal,leftPosition:previous.position};
+        }
         if (previous && item.str && !/\s$/u.test(previous.str) && !/^\s/u.test(item.str)) {
           if (previous.hasEOL) {
             // PDF.js can discard an encoded trailing space before EOL. Resolve
             // hyphenated words and wrapped citations from encoded glyphs.
-            if ((/[\p{L}\p{N}]-$/u.test(previous.str) && /^\p{L}/u.test(item.str)) || (/\S$/u.test(previous.str) && /^\[/u.test(item.str))) {
+            if ((/[\p{L}\p{N}]-$/u.test(previous.str) && /^\p{L}/u.test(item.str)) || (/\p{N}–$/u.test(previous.str) && /^\p{N}/u.test(item.str)) || (/\S$/u.test(previous.str) && /^\[/u.test(item.str)) || (/\S*\/\S*[?=&]$/u.test(previous.str) && /^[\p{L}\p{N}]/u.test(item.str))) {
               boundaries.push({part:parts.length, ordinal, leftPosition:previous.position, rightPosition:position});
             }
             parts.push(' ');
@@ -199,7 +210,7 @@ export async function checkRecomposition({bytes, expectedBlocks, edits = {}, pdf
               near(glyphs[left], boundary.leftPosition) && near(glyphs[right], boundary.rightPosition)) {
             parts[boundary.part] = glyphs.slice(left + 1, right).some(g => /\s/u.test(String.fromCodePoint(g.scalar))) ? ' ' : '';
           } else {
-            findings.push({code:'ambiguous-text-geometry', pageIndex:n - 1, reason:'PDF.js may discard an encoded space at a line-final hyphen or citation boundary; glyph stream unavailable or misaligned.'});
+            findings.push({code:'ambiguous-text-geometry', pageIndex:n - 1, reason:'PDF.js may discard an encoded space at a line-final hyphen or citation boundary, or infer one before a closing quote; glyph stream unavailable or misaligned.'});
           }
         }
       }

@@ -173,6 +173,24 @@ test('wrapped citations use encoded spaces rather than inventing a separator', a
   assert.equal((await run('citation-wrap','modulation.[3]',{})).checks.content.status,'unavailable');
   assert.equal((await run('number-hyphen','7-point')).checks.content.status,'pass');
   assert.equal((await run('number-hyphen','7- point')).checks.content.status,'finding');
+  assert.equal((await run('range-wrap','337–41')).checks.content.status,'pass');
+  assert.equal((await run('range-wrap','337– 41')).checks.content.status,'finding');
+  assert.equal((await run('url-wrap','site/path/?key=value')).checks.content.status,'pass');
+  assert.equal((await run('url-wrap','site/path/? key=value')).checks.content.status,'finding');
+});
+
+test('synthetic PDF.js quote gaps require matching encoded glyph evidence', async () => {
+  const run=async (variant,expected,reader=mupdf)=>{
+    const bytes=geometryCorpus(variant), glyphs=readOutputGlyphs({bytes,mupdf}), quote=glyphs[0].find(g=>g.scalar===41);
+    const wrapped={getDocument(options) {const task=pdfjs.getDocument(options);return {destroy:()=>task.destroy(),promise:task.promise.then(doc=>({numPages:doc.numPages,async getPage(n){const p=await doc.getPage(n);return {getViewport:o=>p.getViewport(o),cleanup:()=>p.cleanup(),async getTextContent(){const c=await p.getTextContent(), item=c.items[0], x=quote.origin[0];c.items=[{...item,str:'bath',width:x-item.transform[4]},{...item,str:' ',width:0,height:0},{...item,str:'”',transform:[...item.transform.slice(0,4),x,item.transform[5]],width:4}];return c;}};}}))};}};
+    const glyphReader={...reader,Device:class extends mupdf.Device {constructor(callbacks){super({...callbacks,fillText(text,ctm,cs){callbacks.fillText({walk(walker){text.walk({showGlyph(font,trm,gid,scalar){walker.showGlyph(font,trm,gid,scalar===41?0x201d:scalar);}});},destroy(){text.destroy();}},ctm,cs);}});}}};
+    return checkRecomposition({bytes,expectedBlocks:[{id:'x',text:expected}],pdfjs:wrapped,mupdf:reader===mupdf?glyphReader:{}});
+  };
+  assert.equal((await run('quote','bath”')).checks.content.status,'pass');
+  assert.equal((await run('quote','bath ”')).checks.content.status,'finding');
+  assert.equal((await run('quote-space','bath ”')).checks.content.status,'pass');
+  assert.equal((await run('quote-space','bath”')).checks.content.status,'finding');
+  assert.equal((await run('quote','bath”',{})).checks.content.status,'unavailable');
 });
 
 // Real PDF bytes with independently placed body and running furniture.
@@ -199,6 +217,18 @@ test('furniture is removed only after matching bytes and reserved-band geometry'
   const crossing=await run('crossing');assert.ok(crossing.findings.some(f=>f.code==='content-mismatch' && f.observed.includes('Edge')));assert.equal(crossing.checks.furniture.status,'checked');
   assert.equal((await run('valid',{outputFurniture:null})).checks.furniture.status,'unavailable');
   assert.ok((await run('valid',{outputFurniture:outputFurniture.filter(m=>!(m.page===2 && m.id==='c'))})).findings.some(f=>f.code==='missing-furniture'));
+});
+
+test('adjacent furniture merged by PDF.js retains each anchored member', async () => {
+  const d=new mupdf.PDFDocument(), font=d.addSimpleFont(new mupdf.Font('Helvetica'));
+  const stream='BT /F 12 Tf 30 380 Td (JournalDate) Tj ET\nBT /F 12 Tf 30 300 Td (Body) Tj ET\n';
+  d.insertPage(-1,d.addPage([0,0,300,400],0,{Font:{F:font}},stream));
+  const buffer=d.saveToBuffer(), bytes=buffer.asUint8Array().slice(); buffer.destroy();d.destroy();
+  const expectedFurniture=['Journal','Date'].map((text,i)=>({kind:'header',entryKind:'text',sourcePage:0,text,occurrences:[{blockId:`h${i}`}]}));
+  const outputFurniture=[{id:'h0',sourcePage:0,page:1,x:30,y:20,kind:'header'},{id:'h1',sourcePage:0,page:1,x:69.35,y:20,kind:'header'}];
+  const args={bytes,pdfjs,expectedBlocks:[{id:'body',text:'Body'}],expectedFurniture,outputFurniture,blockSpans:[{id:'body',sourcePage:0,start:{page:1,x:30,y:100},end:{page:1,x:50,y:100}}],bodyFrame:{left:20,top:55,right:280,bottom:360}};
+  assert.equal((await checkRecomposition(args)).checks.furniture.status,'checked');
+  assert.notEqual((await checkRecomposition({...args,expectedFurniture:[expectedFurniture[0],{...expectedFurniture[1],text:'Changed'}]})).checks.furniture.status,'checked');
 });
 
 

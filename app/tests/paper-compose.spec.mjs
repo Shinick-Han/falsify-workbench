@@ -9,6 +9,12 @@ const src=new TextEncoder().encode('source'); const sha=b=>createHash('sha256').
 const make=()=>({schema:'falsify.paper-document.v1',sourceSha256:sha(src),pages:[{sourcePageIndex:0,width:400,height:600}],blocks:[{id:'a',text:'repeat hard-repeat −12 [1]',source:{pageIndex:0,range:{start:0,end:26},lines:[{range:{start:0,end:12}},{range:{start:12,end:26}}]}},{id:'b',text:'repeat',source:{pageIndex:0,range:{start:26,end:32},lines:[]}}],assets:[]});
 const pdf=new TextEncoder().encode('%PDF-1.7\nactual bytes');
 const edit={blockId:'b',pageIndex:0,start:26,end:32,before:'repeat',after:'changed'};
+test('explicit After line breaks retain an encoded separator and the full replacement',async()=>{
+ const d=make(), after='exact expres-\nsion continues';let source,checked;
+ await composeDocument({document:d,sourceBytes:src,edits:[{...edit,after}]},{compile:async p=>(source=p.source,pdf),outputCheck:async p=>(checked=p.expectedBlocks,{checks:{content:{status:'pass'}},findings:[]})});
+ assert.match(source,/#text\("exact expres-"\)#text\(" "\)#linebreak\(\)#text\("sion continues"\)/);
+ assert.equal(checked[1].text,after);
+});
 test('captions above and below an asset follow source position in output and checks',async()=>{
  const d=make(), bounds=[50,100,350,200];
  d.blocks=[{id:'top',text:'Table 1',source:{pageIndex:0,range:{start:0,end:7},lines:[]}},{id:'bottom',text:'Footnote',source:{pageIndex:0,range:{start:7,end:15},lines:[]}},{id:'picture',text:'',source:{pageIndex:0,bbox:bounds},assetIds:['image']}];
@@ -18,9 +24,11 @@ test('captions above and below an asset follow source position in output and che
  await composeDocument({document:d,sourceBytes:src,flow},{compile:async p=>(source=p.source,pdf),outputCheck:async p=>(expected=p.expectedBlocks,{checks:{content:{status:'pass'}},findings:[]})});
  assert.ok(source.indexOf(typstString('Table 1'))<source.indexOf('#image('));
  assert.ok(source.indexOf('#image(')<source.indexOf(typstString('Footnote')));
+ assert.match(source,/\]\n\n#block\(sticky: true\)\[#box\[/);
+ assert.match(source,/\]\]\n\n#context \[/);
  assert.deepEqual(expected.map(b=>b.text),['Table 1','Footnote']);assert.deepEqual(d,original);
 });
-test('literal source, unique edits, line boundaries and immutable model',async()=>{const d=make(),original=structuredClone(d);let source;const malicious='#import "https://bad"\n\\" ] #panic() Ω';const out=await composeDocument({document:d,sourceBytes:src,edits:[{...edit,after:malicious}]},{compile:async p=>(source=p.source,pdf)});assert.deepEqual(d,original);assert.ok(source.includes(typstString(malicious)));assert.ok(source.includes(typstString('repeat hard-repeat −12 [1]')));assert.equal(out.sha256,sha(pdf));assert.deepEqual(new Uint8Array(await out.file.arrayBuffer()),pdf);assert.equal(out.verification.contentVerified,false);assert.equal(out.pageMap,null);assert.equal(out.blockMap,null);assert.equal(out.verification.coverage.status,'unavailable');});
+test('literal source, unique edits, line boundaries and immutable model',async()=>{const d=make(),original=structuredClone(d);let source;const malicious='#import "https://bad"\n\\" ] #panic() Ω';const out=await composeDocument({document:d,sourceBytes:src,edits:[{...edit,after:malicious}]},{compile:async p=>(source=p.source,pdf)});assert.deepEqual(d,original);for (const part of malicious.split('\n')) assert.ok(source.includes(typstString(part)));assert.ok(source.includes(typstString('repeat hard-repeat −12 [1]')));assert.equal(out.sha256,sha(pdf));assert.deepEqual(new Uint8Array(await out.file.arrayBuffer()),pdf);assert.equal(out.verification.contentVerified,false);assert.equal(out.pageMap,null);assert.equal(out.blockMap,null);assert.equal(out.verification.coverage.status,'unavailable');});
 test('rejects mismatched, duplicate and overlapping edit targets',async()=>{const d=make(),compile=async()=>pdf;for(const edits of [[{...edit,before:'wrong'}],[edit,edit],[{...edit,blockId:'missing'}]])await assert.rejects(composeDocument({document:d,sourceBytes:src,edits},{compile}));d.blocks.push({...d.blocks[1]});await assert.rejects(composeDocument({document:d,sourceBytes:src,edits:[edit]},{compile}));});
 test('checks source hash and cancellation after async compile',async()=>{const d=make();await assert.rejects(composeDocument({document:d,sourceBytes:new Uint8Array([1])},{compile:async()=>pdf}),/hash/);const c=new AbortController();await assert.rejects(composeDocument({document:d,sourceBytes:src,signal:c.signal},{compile:async()=>{c.abort();return pdf;}}),{name:'AbortError'});});
 test('coverage reports Omega and unsupported character without claiming preservation',async()=>{const d=make();d.blocks[1].text='Ω'+String.fromCodePoint(0x10ffff);d.blocks[1].source.range.end=29;const result=await composeDocument({document:d,sourceBytes:src},{compile:async()=>pdf,fonts:{hasGlyph:cp=>cp!==0x10ffff}});assert.deepEqual(result.verification.coverage.missing,[0x10ffff]);assert.equal(result.verification.contentVerified,false);});
@@ -124,6 +132,18 @@ test('tall source artwork fits page height with a separate flowing caption',asyn
  await composeDocument({document:d,sourceBytes:src,flow,assets:[{id:'pic',source,content:{representation:'svg',bytes:svg}}]},{compile:async p=>(generated=p.source,pdf)});
  assert.match(generated,/#block\(sticky: true\)\[.*#image\("assets\/0.svg", width: 101.6pt\)/);
  assert.ok(generated.indexOf('#text("repeat hard-repeat')>generated.indexOf('width: 101.6pt)'));
+});
+
+test('sparse last column page before a full-width figure balances at a paragraph boundary',async()=>{
+ const d=make(); d.blocks=Array.from({length:4},(_,i)=>({id:`p${i}`,text:`Paragraph ${i}`,source:{pageIndex:0,range:{start:i*20,end:i*20+11},lines:[]}}));
+ const box=[0,0,100,100], svg=new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"></svg>');
+ const flow={schema:'falsify.paper-flow.v1',sourceSha256:d.sourceSha256,items:[...d.blocks.map(b=>({kind:'paragraph',columns:2,blockIds:[b.id]})),{kind:'asset',span:'page',assetIds:['pic'],blockIds:[],source:{pageIndex:0,bbox:box}}]};
+ const spans=d.blocks.map((b,i)=>({id:b.id,sourcePage:0,start:{page:1,x:36,y:50+i*60},end:{page:1,x:36,y:100+i*60}}));
+ for(const [rightColumn,expectedCalls] of [[false,2],[true,1]]) {
+  let sources=[], expected;const mapped=structuredClone(spans);if(rightColumn) mapped[3].start.x=250;
+  await composeDocument({document:d,sourceBytes:src,flow,assets:[{id:'pic',source:{pageIndex:0,bbox:box},content:{representation:'svg',bytes:svg}}]},{compile:async p=>(sources.push(p.source),{bytes:pdf,blockSpans:mapped}),outputCheck:async p=>(expected=p.expectedBlocks,{checks:{content:{status:'pass'}},findings:[]})});
+  assert.equal(sources.length,expectedCalls);assert.equal(sources.at(-1).includes('#colbreak()'),!rightColumn);assert.deepEqual(expected.map(x=>x.text),d.blocks.map(x=>x.text));
+ }
 });
 
 test('union capture owns panels and rejects missing or malformed occurrences',async()=>{

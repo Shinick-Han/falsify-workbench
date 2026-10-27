@@ -121,6 +121,7 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
     document.blocks=document.blocks.flatMap(b=>groups.get(b.id)||[b]);
     for(const id of groups.keys()) ids.delete(id);
   }
+  const balanceGroups=[];
   if (flow) {
     if(flow.schema!=='falsify.paper-flow.v1' || flow.sourceSha256!==document.sourceSha256 || !Array.isArray(flow.items)) fail('Invalid paper flow');
     const owners=new Set();
@@ -210,7 +211,7 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
     const endMarker=mark ? spanMarker(block.id,block.source?.pageIndex,'end') : '';
 
     const chars=block.source?.characters || [];
-    if (!linkPlan && (!chars.length || !styleById.size) && !fonts.fallback?.length && !(glyphsByBlock.get(block.id)||[]).length) return marker+`#text(${typstString(text)})`+endMarker;
+    if (!linkPlan && (!chars.length || !styleById.size) && !fonts.fallback?.length && !(glyphsByBlock.get(block.id)||[]).length && !(changes.get(block.id)||[]).some(e=>e.after.includes('\n'))) return marker+`#text(${typstString(text)})`+endMarker;
     // Build source-indexed styles, then apply the same line separators and edits.
     const raw=block.text, spaces=spacesFor(block);
     let logical='', styles=[], glyphMap=[], destinations=[], offsets=[], before=[], after=[];
@@ -240,10 +241,11 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
     const emitLabels=i=>(labels.get(i)||[]).map(l=>`#box[]#label(${typstString(l)})`).join('');
     const runs=[]; for(let i=0;i<result.length;) {
       let j=i+(result.codePointAt(i)>0xffff?2:1); const family=familyAt(i), glyph=mappedGlyphs[i];
-      while(!glyph && j<result.length && !labels.has(j) && !mappedGlyphs[j] && mapped[j]===mapped[i] && familyAt(j)===family && key(mappedDest[j])===key(mappedDest[i])) j+=result.codePointAt(j)>0xffff?2:1;
+      const editLineBreak=result[i]==='\n' && mappedOffsets[i]===null;
+      while(!glyph && !editLineBreak && j<result.length && !(result[j]==='\n' && mappedOffsets[j]===null) && !labels.has(j) && !mappedGlyphs[j] && mapped[j]===mapped[i] && familyAt(j)===family && key(mappedDest[j])===key(mappedDest[i])) j+=result.codePointAt(j)>0xffff?2:1;
       let content;
       if(glyph) {const path=`source-glyphs/${glyph.pageIndex}-${glyph.start}.svg`;files[path]=new Uint8Array(glyph.bytes);content=`#box(width: ${glyph.advance}pt, height: ${glyph.height}pt, baseline: ${glyph.baselineShift}pt)[#move(dx: ${glyph.offsetX}pt)[#image(${typstString(path)}, width: ${glyph.width}pt)]]`;}
-      else {const style=styleById.get(mapped[i]), size=style?.size; let opts=Number.isFinite(size)&&size>0 ? `size: ${size}pt, ` : ''; if(family) opts+=`font: ${typstString(family)}, `; const name=style?.fontName || ''; if(/bold/i.test(name)) opts+='weight: "bold", '; if(/italic|oblique/i.test(name)) opts+='style: "italic", '; content=`#text(${opts}${typstString(result.slice(i,j))})`;}
+      else {const style=styleById.get(mapped[i]), size=style?.size; let opts=Number.isFinite(size)&&size>0 ? `size: ${size}pt, ` : ''; if(family) opts+=`font: ${typstString(family)}, `; const name=style?.fontName || ''; if(/bold/i.test(name)) opts+='weight: "bold", '; if(/italic|oblique/i.test(name)) opts+='style: "italic", '; content=editLineBreak ? `#text(${opts}${typstString(' ')})#linebreak()` : `#text(${opts}${typstString(result.slice(i,j))})`;}
       runs.push(emitLabels(i)+wrap(content,mappedDest[i])); i=j;
     }
     return marker+runs.join('')+endMarker;
@@ -325,13 +327,13 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
   }
   if (flow) {
     if(flow.schema!=='falsify.paper-flow.v1' || flow.sourceSha256!==document.sourceSha256 || !Array.isArray(flow.items)) fail('Invalid paper flow');
-    let group=[], columns=0;
-    const flush=()=>{if(!group.length)return; source+=columns===2 ? `#columns(2)[\n${group.join('\n\n')}\n]\n` : group.join('\n\n')+'\n';group=[];};
+    let group=[], groupItems=[], columns=0;
+    const flush=next=>{if(!group.length)return; source+=columns===2 ? `#columns(2)[\n${group.join('\n\n')}\n]\n` : group.join('\n\n')+'\n';if(columns===2 && next?.kind==='asset' && next.span==='page') balanceGroups.push(groupItems);group=[];groupItems=[];};
     const captionById=new Map(flow.items.filter(i=>i.kind==='caption').flatMap(i=>(i.blockIds||[]).map(id=>[id,i]))), linkedCaptions=new Set();
     for(const item of flow.items) if(item.kind==='asset') for(const id of item.captionIds||[]) {if(!captionById.has(id) || linkedCaptions.has(id)) fail('Unknown or duplicate caption link'); linkedCaptions.add(id);}
     for(const item of flow.items) {
       if(plan?.excludedItemIds.includes(item.id)) continue;
-      const count=item.span==='page'?1:(item.columns===2?2:1); if(count!==columns){flush();columns=count;}
+      const count=item.span==='page'?1:(item.columns===2?2:1); if(count!==columns){flush(item);columns=count;}
       let parts=[];
       if(item.kind==='asset') {
         if(item.renderAssetId) {
@@ -349,13 +351,35 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
         parts=(item.blockIds||[]).filter(id=>!linkedCaptions.has(id)).map(id=>blockById.get(id)).filter(Boolean).map(b=>renderBlock(b));
         if(!item.inline) parts=parts.filter(Boolean);
       }
-      if(parts.length) {const rendered=item.inline ? parts.map((p,i)=>p+(i<parts.length-1 ? `#text(${typstString(item.joiners[i])})` : '')).join('') : parts.join('\n'); group.push(item.kind==='heading' ? `#block(sticky: true)[${rendered}]` : rendered);}
+      if(parts.length) {const rendered=item.inline ? parts.map((p,i)=>p+(i<parts.length-1 ? `#text(${typstString(item.joiners[i])})` : '')).join('') : parts.join(item.kind==='asset'?'\n\n':'\n'); group.push(item.kind==='heading' ? `#block(sticky: true)[${rendered}]` : rendered);groupItems.push({kind:item.kind,inline:!!item.inline,ids:[...(item.blockIds||[])]});}
     }
     flush();
   } else {
     source+=`#columns(2)[\n${document.blocks.map(b=>renderBlock(b)).filter(Boolean).join('\n\n')}\n]`;
   }
-  const compiled=await compile({source, fonts, files, signal}); abort(signal);
+  let compiled=await compile({source, fonts, files, signal}); abort(signal);
+  // A full-width figure ends a column group. Balance a sparsely filled final
+  // page only at an existing paragraph boundary, using the measured output.
+  if(Array.isArray(compiled?.blockSpans) && balanceGroups.length) {
+    const spans=new Map(compiled.blockSpans.map(s=>[s.id,s])); let revised=source;
+    for(const items of balanceGroups) {
+      const all=items.flatMap(item=>item.ids.map(id=>spans.get(id)));
+      if(!all.length || all.some(s=>!s?.start || !s.end || !Number.isInteger(s.end.page))) continue;
+      const last=Math.max(...all.map(s=>s.end.page));
+      const onPage=all.filter(s=>s.start.page<=last && s.end.page>=last);
+      const starts=onPage.filter(s=>s.start.page===last);
+      const splitX=margins.left+(page.width-margins.left-margins.right)/2;
+      if(starts.length<3 || onPage.some(s=>(s.start.page===last && s.start.x>=splitX) || (s.end.page===last && s.end.x>=splitX))) continue;
+      const bottom=Math.max(...onPage.filter(s=>s.end.page===last).map(s=>s.end.y));
+      if(!Number.isFinite(bottom) || bottom>margins.top+(page.height-margins.top-margins.bottom)*.7) continue;
+      const target=(margins.top+bottom)/2;
+      const eligible=items.filter(item=>!item.inline && ['paragraph','caption'].includes(item.kind) && item.ids.length===1).map(item=>spans.get(item.ids[0])).filter(s=>s?.start?.page===last && s.start.y>margins.top+25 && s.start.y<bottom-25).sort((a,b)=>Math.abs(a.start.y-target)-Math.abs(b.start.y-target));
+      const chosen=eligible[0]; if(!chosen) continue;
+      const marker=spanMarker(chosen.id,chosen.sourcePage,'start');
+      if(revised.includes(marker)) revised=revised.replace(marker,`#colbreak()${marker}`);
+    }
+    if(revised!==source) {source=revised;compiled=await compile({source,fonts,files,signal});abort(signal);}
+  }
   const returnedBytes=compiled instanceof Uint8Array ? compiled : compiled?.bytes;
   const bytes=returnedBytes instanceof Uint8Array ? new Uint8Array(returnedBytes) : returnedBytes;
   if (!(bytes instanceof Uint8Array) || new TextDecoder().decode(bytes.subarray(0,5))!=='%PDF-') fail('Compiler did not return PDF bytes');

@@ -42,6 +42,9 @@ export function geometryCorpus(variant) {
   else if (variant === 'citation-wrap') stream = line('F','modulation.',30,350) + line('G','[3]',30,330);
   else if (variant === 'citation-space') stream = line('F','modulation. ',30,350) + line('G','[3]',30,330);
   else if (variant === 'number-hyphen') stream = line('F','7-',30,350) + line('G','point',30,330);
+  else if (variant === 'range-wrap') stream = `BT /F 12 Tf 1 0 0 1 30 350 Tm (337\\226) Tj ET\n` + line('G','41',30,330);
+  else if (variant === 'url-wrap') stream = line('F','site/path/?',30,350) + line('G','key=value',30,330);
+  else if (variant === 'quote' || variant === 'quote-space') stream = line('F',variant === 'quote' ? 'bath)' : 'bath )',30,350);
   else if (variant === 'minus-wrap') stream = line('F','value -',30,350) + line('G','12',30,330);
   else if (variant === 'soft-wrap') stream = `BT /F 12 Tf 1 0 0 1 30 350 Tm (soft\\255) Tj ET\n` + line('G','ware',30,330);
   else if (variant === 'hyphen-page') stream = line('F','antero-',30,350) + line('G','posterior',30,330);
