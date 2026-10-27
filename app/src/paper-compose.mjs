@@ -61,7 +61,7 @@ function ambiguousBoundaries(block, changes) {
     !/\s/u.test(raw[i-1]) && !/\s/u.test(raw[i]) && raw[i-1]!=='-' &&
     !(raw[i-1]==='−' && /[0-9]/u.test(raw[i])));
 }
-export async function composeDocument({document, edits=[], flow, assets, links, signal, sourceBytes, runningFurniture=false, layoutPolicy}={}, {compile, fonts={}, outputCheck, furniturePlanner}={}) {
+export async function composeDocument({document, edits=[], flow, assets, links, signal, sourceBytes, runningFurniture=false, layoutPolicy, layoutMode}={}, {compile, fonts={}, outputCheck, furniturePlanner}={}) {
   abort(signal);
   // Own the data used by this attempt before any asynchronous operation.
   if (document) document = structuredClone(document);
@@ -183,9 +183,15 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
     if(!limit || !Number.isFinite(value) || value<limit[0] || value>limit[1]) fail('Invalid layout policy: '+key);
     if(!sourceProfile.bodyFontSize || (key==='lineHeightScale' && !sourceProfile.bodyLineHeight)) fail('Layout policy requires source measurements: '+key);
   }
+  if(layoutMode != null && layoutMode !== 'measured-continuous') fail('Invalid layout mode');
+  // Require explicit column evidence; never promote an original single-column paper.
+  const flowBlockText=new Map(document.blocks.map(b=>[b.id,b.text || '']));
+  const firstBodyIndex=flow?.items.findIndex(i=>i.columns===2 && i.span!=='page' && i.kind==='paragraph' && (i.blockIds||[]).reduce((n,id)=>n+(flowBlockText.get(id)?.length||0),0)>=150) ?? -1;
+  const measuredContinuous=layoutMode==='measured-continuous' && firstBodyIndex>=0;
+  const enginePlan={requested:layoutMode || 'existing',actual:measuredContinuous ? 'measured-continuous' : 'existing',reason:layoutMode && !measuredContinuous ? 'no explicit two-column body' : null};
   // Page-level flow is safe only when every item belongs to the same
   // two-column stream; mixed spanning material stays in ordered bands.
-  const continuousColumns=!!flow?.items.length && flow.items.every(i=>i.columns===2 && i.span!=='page' && i.kind!=='asset');
+  const continuousColumns=measuredContinuous || (!!flow?.items.length && flow.items.every(i=>i.columns===2 && i.span!=='page' && i.kind!=='asset'));
   // Every paper string remains an argument to text(), never executable markup.
   let source=`#set page(width: ${page.width}pt, height: ${page.height}pt, margin: (top: ${margins.top}pt, right: ${margins.right}pt, bottom: ${margins.bottom}pt, left: ${margins.left}pt)${continuousColumns ? ", columns: 2" : ""})\n`;
   const candidates = fonts.candidates?.filter(c=>c.getBytes?.()) || [];
@@ -367,13 +373,18 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
   }
   if (flow) {
     if(flow.schema!=='falsify.paper-flow.v1' || flow.sourceSha256!==document.sourceSha256 || !Array.isArray(flow.items)) fail('Invalid paper flow');
-    let group=[], columns=0;
-    const flush=()=>{if(!group.length)return; source+=columns===2 && !continuousColumns ? `#columns(2)[\n${group.join('\n\n')}\n]\n` : group.join('\n\n')+'\n';group=[];};
+    let group=[], columns=0, bodyStarted=false;
+    const fullWidth=page.width-margins.left-margins.right, fullHeight=page.height-margins.top-margins.bottom;
+    const measured=content=>`#context { let group = [${content}]; if measure(block(width: ${fullWidth}pt, group)).height > ${Math.max(1,fullHeight-20)}pt { page(columns: 1, group) } else { place(top, float: true, scope: "parent", block(width: 100%, group)) } }`;
+    const flush=()=>{if(!group.length)return; const content=group.join('\n\n');
+      if(measuredContinuous && columns===1) source+=bodyStarted ? `#page(columns: 1)[${content}]\n` : measured(content)+'\n';
+      else source+=columns===2 && !continuousColumns ? `#columns(2)[\n${content}\n]\n` : content+'\n';
+      if(columns===2) bodyStarted=true; group=[];};
     const captionById=new Map(flow.items.filter(i=>i.kind==='caption').flatMap(i=>(i.blockIds||[]).map(id=>[id,i]))), linkedCaptions=new Set();
     for(const item of flow.items) if(item.kind==='asset') for(const id of item.captionIds||[]) {if(!captionById.has(id) || linkedCaptions.has(id)) fail('Unknown or duplicate caption link'); linkedCaptions.add(id);}
-    for(const item of flow.items) {
+    for(const [itemIndex,item] of flow.items.entries()) {
       if(plan?.excludedItemIds.includes(item.id)) continue;
-      const count=item.span==='page'?1:(item.columns===2?2:1); if(count!==columns){flush(item);columns=count;}
+      const count=measuredContinuous && itemIndex<firstBodyIndex ? 1 : item.span==='page'?1:(item.columns===2?2:1); if(count!==columns){flush();columns=count;}
       let parts=[];
       if(item.kind==='asset') {
         if(item.renderAssetId) {
@@ -391,7 +402,10 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
         parts=(item.blockIds||[]).filter(id=>!linkedCaptions.has(id)).map(id=>blockById.get(id)).filter(Boolean).map(b=>renderBlock(b));
         if(!item.inline) parts=parts.filter(Boolean);
       }
-      if(parts.length) {const rendered=item.inline ? parts.map((p,i)=>p+(i<parts.length-1 ? `#text(${typstString(item.joiners[i])})` : '')).join('') : parts.join(item.kind==='asset'?'\n\n':'\n'); const scoped=item.kind==='asset' ? rendered : paragraphContext((item.blockIds||[]).map(id=>blockById.get(id)),item.kind,rendered); group.push(item.kind==='heading' ? `#block(sticky: true)[${scoped}]` : scoped);}
+      if(parts.length) {const rendered=item.inline ? parts.map((p,i)=>p+(i<parts.length-1 ? `#text(${typstString(item.joiners[i])})` : '')).join('') : parts.join(item.kind==='asset'?'\n\n':'\n'); const scoped=item.kind==='asset' ? rendered : paragraphContext((item.blockIds||[]).map(id=>blockById.get(id)),item.kind,rendered); const result=item.kind==='heading' ? `#block(sticky: true)[${scoped}]` : scoped;
+        if(measuredContinuous && itemIndex>=firstBodyIndex && item.kind==='asset' && item.span==='page') {flush(); source+=measured(result)+'\n';}
+        else group.push(result);}
+
     }
     flush();
   } else {
@@ -413,14 +427,16 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
   if(coverage.status!=='covered') warnings.push(`Font coverage ${coverage.status}; output may lose glyphs.`);
   let outputTextCheck='unavailable', checkReport=null;
   if (typeof outputCheck==='function') {
-    try { checkReport=await outputCheck({bytes:new Uint8Array(bytes), expectedBlocks:expectedBlocks.map(b=>({...b})), expectedFurniture:structuredClone(furniture.templates), outputFurniture:structuredClone(compiled?.furnitureMap ?? null),blockSpans:structuredClone(compiled?.blockSpans ?? null),bodyFrame:{left:margins.left,top:margins.top,right:page.width-margins.right,bottom:page.height-margins.bottom},layoutProfile:structuredClone(layoutProfile)}); abort(signal);
+    try { checkReport=await outputCheck({bytes:new Uint8Array(bytes), document:structuredClone(document), flow:structuredClone(flow), fontPlan:fonts, assetSpans:structuredClone(compiled?.blockSpans ?? null), expectedBlocks:expectedBlocks.map(b=>({...b})), expectedFurniture:structuredClone(furniture.templates), outputFurniture:structuredClone(compiled?.furnitureMap ?? null),blockSpans:structuredClone(compiled?.blockSpans ?? null),bodyFrame:{left:margins.left,top:margins.top,right:page.width-margins.right,bottom:page.height-margins.bottom},layoutProfile:structuredClone(layoutProfile)}); abort(signal);
       outputTextCheck=checkReport?.findings?.some(f=>f.code==='content-mismatch') ? 'finding' : checkReport?.checks?.content?.status || 'unavailable';
     } catch (error) { abort(signal); warnings.push(`Output text check unavailable: ${error.message}`); }
   }
+  const flowCheck=measuredContinuous ? (checkReport?.checks?.flow?.status === 'pass' ? {status:'pass'} : {status:'finding',reason:'output caption ownership and relocation not independently established'}) : {status:'not-requested'};
+  if (flowCheck.status==='finding') warnings.push('Measured continuous flow requires independent output caption ownership and ordering verification.');
   if (ambiguous.length) {
     warnings.push('Ambiguous source line boundaries use a spacing convention; content verification is unavailable.');
   }
   if (outputTextCheck==='finding') warnings.push('Output text check found content loss or mismatch.');
-  const verification={status:outputTextCheck==='finding' || assetFindings.length?'finding':'warning', sourceSha256:document.sourceSha256, contentVerified:outputTextCheck==='pass' && !furniture.templates.length && !ambiguous.length && !assetOwned.size && !assetFindings.length && !sourceGlyphResult.glyphs.length && !sourceGlyphResult.unavailable.length, sourceGlyphs:sourceGlyphResult, layoutVerified:false, coverage, outputTextCheck, checkReport, artworkBlocks, assetFindings, ambiguousBoundaries:ambiguous, furniture:{...furniture,margins:{...margins},output:compiled?.furnitureMap ?? null}, edits:edits.map(e=>({blockId:e.blockId,start:e.start,end:e.end,status:'bound'}))};
-  return {linkPlan,layoutProfile,layoutPolicy:{...policy},file:new File([bytes],'recomposed.pdf',{type:'application/pdf'}),sha256,verification,pageMap:null,blockMap:compiled?.blockMap ?? null,blockSpans:compiled?.blockSpans ?? null,furnitureMap:compiled?.furnitureMap ?? null,warnings};
+  const verification={flowCheck,status:outputTextCheck==='finding' || assetFindings.length || flowCheck.status==='finding'?'finding':'warning', sourceSha256:document.sourceSha256, contentVerified:flowCheck.status!=='finding' && outputTextCheck==='pass' && !furniture.templates.length && !ambiguous.length && !assetOwned.size && !assetFindings.length && !sourceGlyphResult.glyphs.length && !sourceGlyphResult.unavailable.length, sourceGlyphs:sourceGlyphResult, layoutVerified:false, coverage, outputTextCheck, checkReport, artworkBlocks, assetFindings, ambiguousBoundaries:ambiguous, furniture:{...furniture,margins:{...margins},output:compiled?.furnitureMap ?? null}, edits:edits.map(e=>({blockId:e.blockId,start:e.start,end:e.end,status:'bound'}))};
+  return {linkPlan,layoutProfile,enginePlan,layoutPolicy:{...policy},file:new File([bytes],'recomposed.pdf',{type:'application/pdf'}),sha256,verification,pageMap:null,blockMap:compiled?.blockMap ?? null,blockSpans:compiled?.blockSpans ?? null,furnitureMap:compiled?.furnitureMap ?? null,warnings};
 }
