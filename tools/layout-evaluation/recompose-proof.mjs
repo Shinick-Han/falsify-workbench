@@ -12,11 +12,12 @@ const fail=message=>{throw new Error(message)};
 function options(argv) {
  const values={};
  for(let i=0;i<argv.length;i+=2) {
-  const k=argv[i]; if(!['--matrix','--case','--output-dir','--layout-mode','--source-tree'].includes(k)||!argv[i+1]||values[k]) fail('Invalid or duplicate argument: '+k);
+  const k=argv[i]; if(!['--matrix','--case','--output-dir','--layout-mode','--source-tree','--runtime'].includes(k)||!argv[i+1]||values[k]) fail('Invalid or duplicate argument: '+k);
   values[k]=argv[i+1];
  }
  for(const k of ['--matrix','--case','--output-dir']) if(!values[k]) fail('Required: '+k);
  if(values['--layout-mode'] && values['--layout-mode']!=='measured-continuous') fail('Invalid layout mode');
+ if(values['--runtime'] && !['source','bundled'].includes(values['--runtime'])) fail('Invalid runtime');
  return values;
 }
 async function main() {
@@ -42,7 +43,26 @@ async function main() {
  // Reserve a new directory atomically before running; existing evidence is never overwritten.
  await mkdir(output);
  globalThis.File ||= File;
- const {runRequest,loadAssets}=await import(pathToFileURL(join(root,'app/src/paper-recompose-worker.mjs')));
+ const runtime=args['--runtime']||'source';
+ const {build}=await import(pathToFileURL(join(root,'app/node_modules/esbuild/lib/main.js')));
+ const enginePath=join(output,'proof-engine.mjs');
+ const entry=`export {runRequest,loadAssets} from './paper-recompose-worker.mjs';
+export {readDocument} from './paper-document.mjs';
+export {recoverSourceSpaces} from './paper-source-spacing.mjs';
+export {readSourceAssets} from './paper-source-assets.mjs';
+export {readSourceLinks} from './paper-source-links.mjs';
+export {buildPaperFlow} from './paper-flow.mjs';`;
+ // Match the application's build aliases: the proof and footer cleaner must
+ // share one MuPDF module, rather than mixing npm and vendored WASM instances.
+ const built=await build({stdin:{contents:entry,resolveDir:join(root,'app/src'),loader:'js'},bundle:true,write:false,format:'esm',platform:'neutral',target:'es2022',legalComments:'eof',plugins:[{name:'application-vendors',setup(b){
+  b.onResolve({filter:/^mupdf$/},()=>({path:pathToFileURL(join(root,'app/dist/browser-pdf-vendor/mupdf.js')).href,external:true}));
+  b.onResolve({filter:/^\.\.\/dist\/blind-pdf\.mjs$/},()=>({path:pathToFileURL(join(root,'app/dist/blind-pdf.mjs')).href,external:true}));
+ }}]});
+ await writeFile(enginePath,built.outputFiles[0].contents,{flag:'wx'});
+ const readers=await import(pathToFileURL(enginePath));
+ const runtimePath=runtime==='bundled'?join(root,'app/dist/paper-recompose-worker-core.mjs'):enginePath;
+ const runtimeSha256=digest(await readFile(runtimePath));
+ const {runRequest,loadAssets}=await import(pathToFileURL(runtimePath));
  const {createTypstCompile}=await import(pathToFileURL(join(root,'app/src/paper-typst.mjs')));
  const clean=(await import(pathToFileURL(join(root,'app/dist/blind-pdf.mjs')))).prepare;
  const manifestPath=join(root,'app/dist/recomposition-vendor/manifest.json');
@@ -63,9 +83,7 @@ async function main() {
  if(digest(await readFile(source))!==item.fileHash) fail('Original source changed during run');
  const {file,...metadata}=result, pdf=await bytes(file);
  if(digest(pdf)!==result.sha256) fail('Output hash mismatch');
- const load=path=>import(pathToFileURL(join(root,'app/src',path)));
- const {readDocument}=await load('paper-document.mjs'),{recoverSourceSpaces}=await load('paper-source-spacing.mjs');
- const {readSourceAssets}=await load('paper-source-assets.mjs'),{readSourceLinks}=await load('paper-source-links.mjs'),{buildPaperFlow}=await load('paper-flow.mjs');
+ const {readDocument,recoverSourceSpaces,readSourceAssets,readSourceLinks,buildPaperFlow}=readers;
  const observed=await readDocument({file:prepared,fileHash:digest(prepared)});
  const {document}=await recoverSourceSpaces({bytes:prepared,document:observed,pdfjs});
  const inventory=await readSourceAssets({bytes:prepared,document}),links=await readSourceLinks({bytes:prepared,document});
@@ -80,10 +98,11 @@ async function main() {
  const sourceFlow={preparedSha256:digest(prepared),method:'Deterministic replay of prepared-source parsing and prepare capture-ID assignment; output geometry is independently observed.',flow};
  if(await fingerprint()!==sourceFingerprint) fail('Source code changed during the proof run');
  const manifest={schema:'falsify.recompose-proof.v1',caseId:item.id,layoutMode:args['--layout-mode']||'existing',sourceTree:root,sourceFingerprint,sourceTreeDirty:!!execFileSync('git',['status','--porcelain'],{cwd:root,encoding:'utf8'}).trim(),codeVersion:execFileSync('git',['rev-parse','HEAD'],{cwd:root,encoding:'utf8'}).trim(),toolSha256:digest(await readFile(fileURLToPath(import.meta.url))),matrixSha256:digest(matrixBytes),originalSha256:item.fileHash,preparedSha256:digest(prepared),outputSha256:digest(pdf),wasmSha256:digest(wasm),node:process.version,files:['prepared.pdf','output.pdf','metadata.json','plan.json']};
- manifest.files.push('source-flow.json');
+ Object.assign(manifest,{runtime,runtimeSha256,pdfjsVersion:pdfjsModule.version,readerDistribution:'legacy-node'});
+ manifest.files.push('source-flow.json','proof-engine.mjs');
  for(const [name,data] of [['prepared.pdf',prepared],['output.pdf',pdf],['metadata.json',JSON.stringify(metadata,null,2)],['source-flow.json',JSON.stringify(sourceFlow,null,2)],['plan.json',JSON.stringify(item,null,2)],['manifest.json',JSON.stringify(manifest,null,2)]]) await writeFile(join(output,name),data,{flag:'wx'});
  console.log(JSON.stringify(manifest));
 }
-main().catch(e=>{console.error(e.stack||String(e));process.exitCode=1});
+main().catch(e=>{console.error(`${e.name||'Error'}: ${e.message||String(e)}`);if(e.stack)console.error(e.stack);process.exitCode=1});
 
 
