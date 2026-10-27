@@ -1,6 +1,6 @@
 import {spawnSync} from 'node:child_process';
 
-for (const file of ['paper-academic-flow.spec.mjs', 'paper-layout-quality.spec.mjs', 'paper-sparse-evidence.spec.mjs', 'paper-float-ownership.spec.mjs', 'line-identity.spec.mjs', 'paper-output-profile.spec.mjs', 'paper-output-profile-pipeline.spec.mjs', 'paper-asset-spans.spec.mjs', 'paper-native-flow.spec.mjs', 'paper-caption-flow.spec.mjs']) {
+for (const file of ['paper-academic-flow.spec.mjs', 'paper-layout-quality.spec.mjs', 'paper-sparse-evidence.spec.mjs', 'paper-float-ownership.spec.mjs', 'line-identity.spec.mjs', 'paper-output-profile.spec.mjs', 'paper-output-profile-pipeline.spec.mjs', 'paper-asset-spans.spec.mjs', 'paper-native-flow.spec.mjs', 'paper-caption-flow.spec.mjs', 'paper-caption-columns.spec.mjs']) {
   const result = spawnSync(process.execPath, ['--test', 'tests/' + file], {stdio: 'inherit'});
   if (result.error || result.status !== 0) process.exit(result.status || 1);
 }
