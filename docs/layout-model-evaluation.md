@@ -11,12 +11,12 @@ The unchanged public [cold-shower paper](https://journals.plos.org/plosone/artic
 | Model | `docling-project/docling-layout-heron` |
 | Revision | `8f39ad3c0b4c58e9c2d2c84a38465abf757272d8` |
 | Verified weights SHA-256 | `00333a43451945aaf89db8ca9c0a17e75d1537c17db60fdb91aa95f4c7929e0c` |
-| Runtime | Python3.14.4, Transformers4.51.3, pypdfium2 4.30.1, Torch2.10.0+cu128, NumPy2.4.1; CPU, CUDA unavailable |
-| Scope | First2 pages; confidence threshold0.6; top-left page-point boxes |
+| Runtime | Python 3.14.4, Transformers 4.51.3, pypdfium2 4.30.1, Torch 2.10.0+cu128, NumPy 2.4.1; CPU, CUDA unavailable |
+| Scope | First 2 pages; confidence threshold 0.6; top-left page-point boxes |
 
-The detector returned36 and14 regions. In an exploratory sample of11 title/heading anchors selected **after seeing the detections**, all11 had a box with IoU≥0.5 and10 had the expected label. The article title was labeled `Section-header` with confidence0.919. The first page included the same email box labeled both `Text` and `Footnote`, plus nested metadata regions. This sample is neither exhaustive nor an independent accuracy benchmark.
+The detector returned 36 and 14 regions. In an exploratory sample of 11 title/heading anchors selected **after seeing the detections**, all 11 had a box with IoU≥0.5 and 10 had the expected label. The article title was labeled `Section-header` with confidence 0.919. The first page included the same email box labeled both `Text` and `Footnote`, plus nested metadata regions. This sample is neither exhaustive nor an independent accuracy benchmark.
 
-The existing parser returned65 and55 text-line boxes. All120 overlapped some model region by at least half their line area. This measures geometric coverage across different granularities; it does not measure semantic correctness, caption ownership or reading order. The inspected pages had no figure captions.
+The existing parser returned 65 and 55 text-line boxes. All 120 overlapped some model region by at least half their line area. This measures geometric coverage across different granularities; it does not measure semantic correctness, caption ownership or reading order. The inspected pages had no figure captions.
 
 ## Reproduce and interpret
 
@@ -34,4 +34,4 @@ The initial full Docling package install exceeded the sandbox disk. The minimal 
 
 Keep native text and the existing deterministic inventory authoritative. Model boxes could later nominate paragraph/figure regions after source-glyph binding and conflict handling. Do not use confidence as proof or replace native text with OCR output. No inactive model adapter is added to the production application.
 
-[Docling code](https://github.com/docling-project/docling/blob/v2.143.1/LICENSE) is MIT; the [Heron model card](https://huggingface.co/docling-project/docling-layout-heron) declares Apache-2.0 separately. [LayoutFlow](https://github.com/Shinick-Han/LayoutFlow), fork commit`8e0b8b697540c32bcfc10f21125c1dd3ce8df287`, is a box-proposal research reference. Its checkpoint metadata was inspected, but inference and download hashes were not verified. It is not a typography or content-preservation validator. No executable/checkpoint was verified for OmniDocLayout.
+[Docling code](https://github.com/docling-project/docling/blob/v2.143.1/LICENSE) is MIT; the [Heron model card](https://huggingface.co/docling-project/docling-layout-heron) declares Apache-2.0 separately. [LayoutFlow](https://github.com/Shinick-Han/LayoutFlow), fork commit `8e0b8b697540c32bcfc10f21125c1dd3ce8df287`, is a box-proposal research reference. Its checkpoint metadata was inspected, but inference and download hashes were not verified. It is not a typography or content-preservation validator. No executable/checkpoint was verified for OmniDocLayout.

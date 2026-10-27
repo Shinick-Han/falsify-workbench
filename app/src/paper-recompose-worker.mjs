@@ -67,6 +67,8 @@ export function remapBindings(original, prepared, selections) {
 }
 
 export async function runRequest(request, deps={}) {
+  const layoutMode=request.layoutMode;
+  if(layoutMode !== undefined && layoutMode !== 'measured-continuous') fail('invalid','Unknown layout mode');
   const input=request.file instanceof Uint8Array?request.file:request.file instanceof ArrayBuffer?new Uint8Array(request.file):request.file?.bytes instanceof Uint8Array?request.file.bytes:new Uint8Array(await request.file.arrayBuffer());
   const original=Uint8Array.from(input), originalHash=await digest(original);
   const snapshot=Array.isArray(request.edits)?{edits:request.edits}:structuredClone(request.edits);
@@ -100,7 +102,7 @@ export async function runRequest(request, deps={}) {
   const compile=deps.compile || createTypstCompile({...facade,getModule:()=>module});
   pdfjs ||= await import(new URL('./vendor/pdf.mjs',import.meta.url).href);
   if(pdfjs.GlobalWorkerOptions) pdfjs.GlobalWorkerOptions.workerSrc=new URL('./vendor/pdf.worker.mjs',import.meta.url).href;
-  const result=await (deps.recompose || recompose)({file:bytes,fileHash:preparedHash,edits:{...snapshot,fileHash:preparedHash,revision:request.revision},bindings,revision:request.revision},{compile,fonts:assets.fonts,mupdf,pdfjs,runningFurniture:true});
+  const result=await (deps.recompose || recompose)({file:bytes,fileHash:preparedHash,edits:{...snapshot,fileHash:preparedHash,revision:request.revision},bindings,revision:request.revision,layoutMode},{compile,fonts:assets.fonts,mupdf,pdfjs,runningFurniture:true});
   return {...result,sourceBinding:{...result.sourceBinding,originalSha256:originalHash,preparedSha256:preparedHash,cleanup:cleaned.verification}};
 }
 

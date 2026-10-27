@@ -36,3 +36,13 @@ test('cleanup prebinding uses byte-proven word gaps before remapping native glyp
 });
 test('postMessage failure and stale result terminate',async()=>{const w=mock();w.postMessage=()=>{throw Error('transfer failed');};await assert.rejects(createRuntime({workerFactory:()=>w}).prepare({file:new Uint8Array([1]),edits:[]}),/transfer failed/);assert.equal(w.terminated,1);const x=mock(),p=createRuntime({workerFactory:()=>x}).prepare({file:new Uint8Array([1]),edits:[],revision:1});x.send({id:x.data.id,type:'result',result:{file:new File(['x'],'x'),sha256:sha(Buffer.from('x')),revision:2}});await assert.rejects(p,/Invalid recomposition/);assert.equal(x.terminated,1);});
 
+test('an opted-in layout mode survives footer cleanup and the worker boundary',async()=>{
+ const bytes=fixture(true);let observed;
+ await runRequest({file:bytes,fileHash:sha(bytes),edits:[],revision:3,layoutMode:'measured-continuous'},{assets:{fonts:[]},pdfjs:{},facade:{},compile:()=>{},recompose:async req=>{observed=req;return {revision:3,sourceBinding:{}};}});
+ assert.equal(observed.layoutMode,'measured-continuous');assert.notEqual(observed.fileHash,sha(bytes));
+ let started=0;
+ await assert.rejects(createRuntime({workerFactory:()=>{started++;return mock();}}).prepare({file:bytes,edits:[],layoutMode:'execute-text'}),/Unknown layout mode/);
+ assert.equal(started,0);
+ await assert.rejects(runRequest({file:bytes,edits:[],layoutMode:{value:'measured-continuous'}}),/Unknown layout mode/);
+});
+
