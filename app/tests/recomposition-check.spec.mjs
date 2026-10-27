@@ -156,6 +156,25 @@ test('glyph-resolved boundaries retain page movement and reject unknown scalars'
   assert.equal(invalid.checks.movement.locations,null);
 });
 
+test('PDF.js micro sign normalization permits glyph alignment without changing compared text', async () => {
+  const pdfReader={getDocument(options) { const task=pdfjs.getDocument(options); return {destroy:()=>task.destroy(),promise:task.promise.then(doc=>({numPages:doc.numPages,async getPage(n) {const page=await doc.getPage(n); return {getViewport:o=>page.getViewport(o),cleanup:()=>page.cleanup(),async getTextContent() {const content=await page.getTextContent();content.items[0].str=content.items[0].str.replace('a','μ');return content;}};}}))}; }};
+  const glyphReader={...mupdf,Device:class extends mupdf.Device {constructor(callbacks) {super({...callbacks,fillText(text,ctm,cs) {callbacks.fillText({walk(walker) {text.walk({showGlyph(font,trm,gid,scalar) {walker.showGlyph(font,trm,gid,scalar===97?0xb5:scalar);}});},destroy(){text.destroy();}},ctm,cs);}});}}};
+  const run=text=>checkRecomposition({bytes:geometryCorpus('hyphen-wrap'),expectedBlocks:[{id:'x',text}],pdfjs:pdfReader,mupdf:glyphReader});
+  assert.equal((await run('μntero-posterior')).checks.content.status,'pass');
+  assert.equal((await run('μntero- posterior')).checks.content.status,'finding');
+});
+
+test('wrapped citations use encoded spaces rather than inventing a separator', async () => {
+  const run=(variant,text,reader=mupdf)=>checkRecomposition({bytes:geometryCorpus(variant),expectedBlocks:[{id:'x',text}],pdfjs,mupdf:reader});
+  assert.equal((await run('citation-wrap','modulation.[3]')).checks.content.status,'pass');
+  assert.equal((await run('citation-wrap','modulation. [3]')).checks.content.status,'finding');
+  assert.equal((await run('citation-space','modulation. [3]')).checks.content.status,'pass');
+  assert.equal((await run('citation-space','modulation.[3]')).checks.content.status,'finding');
+  assert.equal((await run('citation-wrap','modulation.[3]',{})).checks.content.status,'unavailable');
+  assert.equal((await run('number-hyphen','7-point')).checks.content.status,'pass');
+  assert.equal((await run('number-hyphen','7- point')).checks.content.status,'finding');
+});
+
 // Real PDF bytes with independently placed body and running furniture.
 test('furniture is removed only after matching bytes and reserved-band geometry', async () => {
   const make = (variant='valid') => {

@@ -221,6 +221,16 @@ test('running furniture keeps source occurrences separate from body expectations
  d.blocks[2].text='Another';out=await run([]);assert.equal(out.verification.furniture.templates.length,2);assert.equal(checked.expectedBlocks.length,2);assert.ok(source.includes('Another'));
 });
 
+test('separately placed furniture does not inherit a parent fragment separator',async()=>{
+ const d=make(); d.pages=[{sourcePageIndex:0,width:600,height:800}];
+ d.blocks=[{id:'p',text:'Journalhttps://doi.org/x',source:{pageIndex:0,range:{start:0,end:24},lines:[{range:{start:0,end:7}},{range:{start:7,end:24}}]}}];
+ const fragments=[{id:'body',parentBlockId:'p',text:'Journal',source:{pageIndex:0,range:{start:0,end:7},lines:[]}},{id:'doi',parentBlockId:'p',text:'https://doi.org/x',source:{pageIndex:0,range:{start:7,end:24},lines:[],bbox:[390,10,500,20]}}];
+ const flow={schema:'falsify.paper-flow.v1',sourceSha256:d.sourceSha256,fragments,items:[{id:'body-item',kind:'paragraph',blockIds:['body']},{id:'doi-item',kind:'header',blockIds:['doi'],source:{pageIndex:0,bbox:[390,10,500,20]}}]};
+ const planner=()=>({sourceSha256:d.sourceSha256,margins:{top:60,right:36,bottom:36,left:36},pages:[{sourcePage:0,header:[{kind:'text',itemId:'doi-item',blockId:'doi',bbox:[390,10,500,20],source:fragments[1].source,text:fragments[1].text}],footer:[]}],excludedBlockIds:['doi'],excludedItemIds:['doi-item'],diagnostics:[]});
+ let source,checked; await composeDocument({document:d,sourceBytes:src,flow,runningFurniture:true},{furniturePlanner:planner,compile:async p=>(source=p.source,pdf),outputCheck:async p=>(checked=p,{checks:{content:{status:'pass'}},findings:[]})});
+ assert.equal(checked.expectedFurniture[0].text,'https://doi.org/x'); assert.match(source,/#text\("https:\/\/doi\.org\/x"\)/);
+});
+
 test('first block carries a source marker in default and flow layouts',async()=>{
  const d=make();
  for(const flow of [undefined,{schema:'falsify.paper-flow.v1',sourceSha256:d.sourceSha256,items:d.blocks.map(b=>({kind:'paragraph',blockIds:[b.id],columns:2}))}]) {

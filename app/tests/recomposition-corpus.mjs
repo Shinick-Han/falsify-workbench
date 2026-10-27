@@ -39,6 +39,9 @@ export function geometryCorpus(variant) {
   else if (variant === 'unrelated-space') stream = line('F','other space antero-',30,350) + line('G','posterior',30,330);
   else if (variant === 'hyphen-wrap') stream = line('F','antero-',30,350) + line('G','posterior',30,330);
   else if (variant === 'hyphen-space') stream = line('F','antero- ',30,350) + line('G','posterior',30,330);
+  else if (variant === 'citation-wrap') stream = line('F','modulation.',30,350) + line('G','[3]',30,330);
+  else if (variant === 'citation-space') stream = line('F','modulation. ',30,350) + line('G','[3]',30,330);
+  else if (variant === 'number-hyphen') stream = line('F','7-',30,350) + line('G','point',30,330);
   else if (variant === 'minus-wrap') stream = line('F','value -',30,350) + line('G','12',30,330);
   else if (variant === 'soft-wrap') stream = `BT /F 12 Tf 1 0 0 1 30 350 Tm (soft\\255) Tj ET\n` + line('G','ware',30,330);
   else if (variant === 'hyphen-page') stream = line('F','antero-',30,350) + line('G','posterior',30,330);

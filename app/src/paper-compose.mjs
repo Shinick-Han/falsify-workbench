@@ -161,6 +161,9 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
   if(runningFurniture===true && flow) {
     const build=furniturePlanner || (await import('./paper-furniture.mjs')).buildFurniturePlan;
     plan=build({document:{...plannerDocument,assets:plannerDocument.assets || []},flow,editedBlockIds:edits.map(e=>e.blockId)});
+    // A separator projected from a parent line belongs between fragments. A
+    // separately positioned furniture fragment has its own source anchor.
+    for(const id of plan.excludedBlockIds || []) projectedSpaces.get(id)?.delete(0);
   }
   const suppressedLabels=new Set((linkPlan?.targets||[]).filter(t=>t.label && ((t.blockId && plan?.excludedBlockIds?.includes(t.blockId)) || (t.assetItemId && plan?.excludedItemIds?.includes(t.assetItemId)))).map(t=>t.label));
   if(linkPlan) for(const label of suppressedLabels) linkPlan.diagnostics.push({code:'target-furniture-unresolved',label});

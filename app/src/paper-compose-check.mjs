@@ -155,9 +155,9 @@ export async function checkRecomposition({bytes, expectedBlocks, edits = {}, pdf
         }
         if (previous && item.str && !/\s$/u.test(previous.str) && !/^\s/u.test(item.str)) {
           if (previous.hasEOL) {
-            // PDF.js can discard an encoded trailing space before EOL, so a
-            // wrapped hyphen cannot establish whether that space existed.
-            if (/\p{L}-$/u.test(previous.str) && /^\p{L}/u.test(item.str)) {
+            // PDF.js can discard an encoded trailing space before EOL. Resolve
+            // hyphenated words and wrapped citations from encoded glyphs.
+            if ((/[\p{L}\p{N}]-$/u.test(previous.str) && /^\p{L}/u.test(item.str)) || (/\S$/u.test(previous.str) && /^\[/u.test(item.str))) {
               boundaries.push({part:parts.length, ordinal, leftPosition:previous.position, rightPosition:position});
             }
             parts.push(' ');
@@ -186,7 +186,11 @@ export async function checkRecomposition({bytes, expectedBlocks, edits = {}, pdf
             if (!/\s/u.test(char)) { mapped.push(i); encoded.push(char); }
           }
         }
-        const aligned = encoded.length === itemScalars.length && encoded.every((char, i) => char === itemScalars[i]);
+        // PDF.js normalizes U+00B5 MICRO SIGN to U+03BC GREEK SMALL LETTER MU.
+        // This equivalence is used only to align the independent glyph stream;
+        // content comparison still uses the extracted text unchanged.
+        const glyphKey = char => char === '\u00b5' ? '\u03bc' : char;
+        const aligned = encoded.length === itemScalars.length && encoded.every((char, i) => glyphKey(char) === glyphKey(itemScalars[i]));
         for (const boundary of boundaries) {
           const left = mapped[boundary.ordinal - 1], right = mapped[boundary.ordinal];
           const near = (glyph, pos) => pos && glyph && Math.abs(glyph.origin[1] - pos.y) < Math.max(1, pos.height * 0.2) &&
@@ -195,7 +199,7 @@ export async function checkRecomposition({bytes, expectedBlocks, edits = {}, pdf
               near(glyphs[left], boundary.leftPosition) && near(glyphs[right], boundary.rightPosition)) {
             parts[boundary.part] = glyphs.slice(left + 1, right).some(g => /\s/u.test(String.fromCodePoint(g.scalar))) ? ' ' : '';
           } else {
-            findings.push({code:'ambiguous-text-geometry', pageIndex:n - 1, reason:'PDF.js may discard an encoded space after a line-final hyphen; glyph stream unavailable or misaligned.'});
+            findings.push({code:'ambiguous-text-geometry', pageIndex:n - 1, reason:'PDF.js may discard an encoded space at a line-final hyphen or citation boundary; glyph stream unavailable or misaligned.'});
           }
         }
       }
