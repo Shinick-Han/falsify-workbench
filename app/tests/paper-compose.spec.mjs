@@ -44,25 +44,27 @@ test('source-to-logical edit mapping keeps boundaries and literal neighbors',asy
  for(const [raw,bounds,start,end,after,expected] of cases){
   const d=make(); const points=[0,...bounds,raw.length];
   d.blocks=[{id:'x',text:raw,source:{pageIndex:0,range:{start:0,end:raw.length},lines:points.slice(1).map((end,i)=>({range:{start:points[i],end}}))}}];
-  const original=structuredClone(d); let captured;
-  const out=await composeDocument({document:d,sourceBytes:src,edits:[{blockId:'x',pageIndex:0,start,end,before:raw.slice(start,end),after}]},{compile:async p=>(captured=p.source,pdf),outputCheck:async ({expectedBlocks})=>{assert.equal(expectedBlocks[0].text,expected);return {checks:{content:{status:'pass'}},findings:[]}}});
-  assert.ok(captured.includes(typstString(expected)),raw); assert.deepEqual(d,original); assert.equal(out.verification.contentVerified, !out.verification.ambiguousBoundaries.length);
+  const original=structuredClone(d); let captured, checkedText;
+  const out=await composeDocument({document:d,sourceBytes:src,edits:[{blockId:'x',pageIndex:0,start,end,before:raw.slice(start,end),after}]},{compile:async p=>(captured=p.source,pdf),outputCheck:async ({expectedBlocks})=>{checkedText=expectedBlocks[0].text;return {checks:{content:{status:'pass'}},findings:[]}}});
+  assert.equal(checkedText,expected); assert.ok(captured.includes(typstString(expected)),raw); assert.deepEqual(d,original); assert.equal(out.verification.contentVerified, !out.verification.ambiguousBoundaries.length);
  }
 });
 
 test('signed numeric boundaries preserve independent literal expectations',async()=>{
  for(const [raw,cut,expected] of [['−12',1,'−12'],['-12',1,'-12'],['hard-repeat',5,'hard-repeat'],['helloWorld',5,'hello World']]){
   const d=make();d.blocks=[{id:'x',text:raw,source:{pageIndex:0,range:{start:0,end:raw.length},lines:[{range:{start:0,end:cut}},{range:{start:cut,end:raw.length}}]}}];
-  await composeDocument({document:d,sourceBytes:src},{compile:async ({source})=>{assert.ok(source.includes(typstString(expected)));return pdf},outputCheck:async ({expectedBlocks})=>{assert.equal(expectedBlocks[0].text,expected);return {checks:{content:{status:'pass'}},findings:[]}}});
+  let checkedText;
+  await composeDocument({document:d,sourceBytes:src},{compile:async ({source})=>{assert.ok(source.includes(typstString(expected)));return pdf},outputCheck:async ({expectedBlocks})=>{checkedText=expectedBlocks[0].text;return {checks:{content:{status:'pass'}},findings:[]}}});
+  assert.equal(checkedText,expected);
  }
 });
 
 test('Buffer snapshots own source, compiler result and checker bytes',async()=>{
- const input=Buffer.from(src), bytes=Buffer.from(pdf), inputOriginal=Buffer.from(input), bytesOriginal=Buffer.from(bytes), d=make(); let release;
+ const input=Buffer.from(src), bytes=Buffer.from(pdf), inputOriginal=Buffer.from(input), bytesOriginal=Buffer.from(bytes), d=make(); let release, checkedSnapshot;
  const gate=new Promise(r=>release=r);
- const pending=composeDocument({document:d,sourceBytes:input},{fonts:{hasGlyph:async()=>{await gate;return true}},compile:async()=>bytes,outputCheck:async ({bytes:checked})=>{assert.deepEqual(checked,new Uint8Array(bytesOriginal));checked.fill(1);bytes.fill(2);return {checks:{content:{status:'pass'}},findings:[]}}});
+ const pending=composeDocument({document:d,sourceBytes:input},{fonts:{hasGlyph:async()=>{await gate;return true}},compile:async()=>bytes,outputCheck:async ({bytes:checked})=>{checkedSnapshot=new Uint8Array(checked);checked.fill(1);bytes.fill(2);return {checks:{content:{status:'pass'}},findings:[]}}});
  input.fill(3);release(); const out=await pending;
- assert.equal(out.verification.sourceSha256,sha(inputOriginal)); assert.equal(out.sha256,sha(bytesOriginal));
+ assert.deepEqual(checkedSnapshot,new Uint8Array(bytesOriginal)); assert.equal(out.verification.sourceSha256,sha(inputOriginal)); assert.equal(out.sha256,sha(bytesOriginal));
  const fileBytes=new Uint8Array(await out.file.arrayBuffer());assert.deepEqual(fileBytes,new Uint8Array(bytesOriginal));assert.equal(sha(fileBytes),out.sha256);
  assert.deepEqual(input,Buffer.alloc(input.length,3));assert.deepEqual(bytes,Buffer.alloc(bytes.length,2));
 });
@@ -79,6 +81,7 @@ test('worker settles and cleans handlers on each completion path',async()=>{
 
 test('ambiguous line break cannot claim content verification from a guessed separator',async()=>{
  const d=make();d.blocks=[{id:'x',text:'helloworld',source:{pageIndex:0,range:{start:0,end:10},lines:[{range:{start:0,end:5}},{range:{start:5,end:10}}]}}];
- const out=await composeDocument({document:d,sourceBytes:src},{compile:async()=>pdf,outputCheck:async ({expectedBlocks})=>{assert.equal(expectedBlocks[0].text,'hello world');return {checks:{content:{status:'pass'}},findings:[]}}});
- assert.equal(out.verification.contentVerified,false);assert.equal(out.verification.outputTextCheck,'pass');assert.deepEqual(out.verification.ambiguousBoundaries,[{blockId:'x',offset:5}]);
+ let checkedText;
+ const out=await composeDocument({document:d,sourceBytes:src},{compile:async()=>pdf,outputCheck:async ({expectedBlocks})=>{checkedText=expectedBlocks[0].text;return {checks:{content:{status:'pass'}},findings:[]}}});
+ assert.equal(checkedText,'hello world');assert.equal(out.verification.contentVerified,false);assert.equal(out.verification.outputTextCheck,'pass');assert.deepEqual(out.verification.ambiguousBoundaries,[{blockId:'x',offset:5}]);
 });
