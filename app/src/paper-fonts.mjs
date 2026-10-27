@@ -13,6 +13,24 @@ const isScalar = cp => Number.isInteger(cp) && cp >= 0 && cp <= 0x10ffff && !(cp
 const isLayoutControl = cp => cp === 0x09 || cp === 0x0a || cp === 0x0d;
 const hex = bytes => Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
 
+// Read the typographic family from the actual SFNT name table when available.
+function fontFamily(bytes) {
+  try {
+    const v=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength), tables=v.getUint16(4), decoder=new TextDecoder('utf-16be');
+    for(let i=0;i<tables;i++) {
+      const t=12+i*16; if(v.getUint32(t)!==0x6e616d65) continue;
+      const base=v.getUint32(t+8), count=v.getUint16(base+2), strings=base+v.getUint16(base+4), names=[];
+      for(let j=0;j<count;j++) {
+        const n=base+6+j*12, platform=v.getUint16(n), language=v.getUint16(n+4), id=v.getUint16(n+6), len=v.getUint16(n+8), off=v.getUint16(n+10);
+        if((id!==1 && id!==16) || (platform!==0 && platform!==3)) continue;
+        const value=decoder.decode(bytes.subarray(strings+off,strings+off+len)).replace(/\0/g,'').trim();
+        if(value) names.push({value,rank:(id===16?4:0)+(language===0x409?2:0)+(platform===3?1:0)});
+      }
+      return names.sort((a,b)=>b.rank-a.rank)[0]?.value || null;
+    }
+  } catch {} return null;
+}
+
 // The supplied text must be the union of all comparison variants.
 export async function createFontPlan({text, fonts = []}, {mupdf} = {}) {
   if (typeof text !== 'string' || !Array.isArray(fonts)) throw new TypeError('Expected text and fonts array');
@@ -29,8 +47,9 @@ export async function createFontPlan({text, fonts = []}, {mupdf} = {}) {
     return {id, family, bytes: source instanceof ArrayBuffer ? new Uint8Array(source.slice(0)) : source instanceof Uint8Array ? Uint8Array.from(source) : null};
   });
   const candidates = [];
-  for (const {id, family, bytes: snapshot} of snapshots) {
+  for (const {id, family: suppliedFamily, bytes: snapshot} of snapshots) {
     let bytes, sha256 = null, buffer, font;
+    const family=fontFamily(snapshot || new Uint8Array()) || suppliedFamily;
     const glyphs = new Map();
     let detail = null;
     try {

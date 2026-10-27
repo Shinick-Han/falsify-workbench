@@ -88,7 +88,7 @@ test('ambiguous line break cannot claim content verification from a guessed sepa
 
 test('ordered flow carries mixed styles, long edit and image bytes without mutating inputs',async()=>{
  const d=make();d.styles=[{id:'small',size:9},{id:'large',size:18}];d.blocks[0].source.characters=[{start:0,end:6,styleId:'large'},{start:6,end:26,styleId:'small'}];
- const long='After −12 [1] '.repeat(1000); const png=new Uint8Array([137,80,78,71]);
+ const long='After −12 [1] '.repeat(1000); const png=new Uint8Array([137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,...Array(21).fill(0),73,69,78,68,174,66,96,130]);
  const flow={schema:'falsify.paper-flow.v1',sourceSha256:d.sourceSha256,items:[{kind:'heading',columns:1,span:'page',blockIds:['a']},{kind:'asset',columns:2,assetIds:['pic']},{kind:'caption',columns:2,blockIds:['b']}]};
  const assets=[{id:'pic',content:{representation:'png',bytes:png}}]; const snapshot=structuredClone({d,flow,assets});let payload;
  await composeDocument({document:d,sourceBytes:src,flow,assets,edits:[{...edit,after:long}]},{compile:async p=>(payload=p,pdf)});
@@ -96,3 +96,40 @@ test('ordered flow carries mixed styles, long edit and image bytes without mutat
 });
 
 test('font coverage ignores layout controls',async()=>{const {inspectFonts}=await import('../src/paper-fonts.mjs');const result=await inspectFonts('a\t\n\r',{hasGlyph:cp=>cp===97});assert.equal(result.status,'covered');});
+
+
+test('flow order, linked caption and artwork ownership set the checker expectation',async()=>{
+ const d=make(); d.blocks.push({id:'inside',text:'panel',source:{pageIndex:0,range:{start:32,end:37},lines:[]}});
+ const f={schema:'falsify.paper-flow.v1',sourceSha256:d.sourceSha256,items:[{kind:'paragraph',blockIds:['b']},{kind:'asset',assetIds:['pic'],blockIds:['inside'],captionIds:['a']},{kind:'caption',blockIds:['a']}]};
+ const svg=new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg" width="4" height="2"></svg>'); let checked, payload;
+ const out=await composeDocument({document:d,sourceBytes:src,flow:f,assets:[{id:'pic',content:{representation:'svg',bytes:svg}}]},{compile:async p=>(payload=p,pdf),outputCheck:async x=>(checked=x.expectedBlocks,{checks:{content:{status:'pass'}},findings:[]})});
+ assert.deepEqual(checked.map(x=>x.id),['b','a']); assert.deepEqual(out.verification.artworkBlocks.map(x=>x.id),['inside']); assert.equal(out.verification.contentVerified,false); assert.match(payload.source,/#block\(breakable: false\)/); assert.equal(payload.source.split('repeat hard-repeat').length-1,1);
+});
+
+test('union capture owns panels and rejects missing or malformed occurrences',async()=>{
+ const d=make(), source={pageIndex:0,bbox:[0,0,20,10]}; d.assets=[{id:'p1'},{id:'p2'}];
+ const f={schema:'falsify.paper-flow.v1',sourceSha256:d.sourceSha256,items:[{kind:'asset',assetIds:['p1','p2'],blockIds:[],renderAssetId:'union',source},{kind:'paragraph',blockIds:['a','b']}]};
+ const svg=new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"></svg>'); let payload;
+ const asset={id:'union',source:{...source,assetIds:['p1','p2'],blockIds:[]},content:{representation:'svg',bytes:svg}};
+ let out=await composeDocument({document:d,sourceBytes:src,flow:f,assets:{sourceSha256:d.sourceSha256,assets:[asset]}},{compile:async p=>(payload=p,pdf)}); assert.equal(out.verification.assetFindings.length,0); assert.equal(Object.keys(payload.files).length,1);
+ asset.content.bytes=new TextEncoder().encode('not svg'); out=await composeDocument({document:d,sourceBytes:src,flow:f,assets:{sourceSha256:d.sourceSha256,assets:[asset]}},{compile:async()=>pdf}); assert.equal(out.verification.assetFindings[0].code,'asset-invalid-format'); assert.equal(out.verification.contentVerified,false);
+});
+
+test('fragment crossing edit and inline joiners preserve exact output sequence',async()=>{
+ const d=make(), parent=d.blocks[1], a={...structuredClone(parent),id:'b1',parentBlockId:'b',text:'rep',source:{pageIndex:0,range:{start:26,end:29},lines:[]}}, b={...structuredClone(parent),id:'b2',parentBlockId:'b',text:'eat',source:{pageIndex:0,range:{start:29,end:32},lines:[]}};
+ const flow={schema:'falsify.paper-flow.v1',sourceSha256:d.sourceSha256,fragments:[a,b],items:[{kind:'paragraph',blockIds:['a']},{kind:'paragraph',inline:true,blockIds:['b1','b2'],joiners:['']}]}; let expected, source;
+ await composeDocument({document:d,sourceBytes:src,flow,edits:[{...edit,start:27,end:31,before:'epea',after:'X'}]},{compile:async p=>(source=p.source,pdf),outputCheck:async p=>(expected=p.expectedBlocks,{checks:{content:{status:'pass'}},findings:[]})});
+ assert.equal(expected[1].text,'rXt'); assert.ok(source.includes(typstString('rX'))); assert.ok(source.includes(typstString('t')));
+});
+import {createTypstCompile} from '../src/paper-typst.mjs';
+test('Typst owned world, compiler and font resources are released on success and failure',async()=>{
+ for(const mode of ['success','compile-error','abort']) {
+  const freed=[], controller=new AbortController();
+  const world={get_artifact(){if(mode==='abort')controller.abort(); if(mode==='compile-error')throw Error('failure'); return {result:pdf}},query(){return JSON.stringify([{id:'a',page:1,x:36,y:36}])},free(){freed.push('world')}};
+  const compiler={init:async()=>{compiler.compiler={snapshot:()=>world,free:()=>freed.push('compiler')}},setFonts(){},addSource(){},mapShadow(){},resetShadow(){freed.push('shadow')}};
+  const builder={init:async()=>{builder.fontBuilder={build:async()=>({free:()=>freed.push('resolver')}),free:()=>freed.push('builder')}},addFontData:async()=>{}};
+  const compile=createTypstCompile({createTypstCompiler:()=>compiler,createTypstFontBuilder:()=>builder,loadFonts:()=>()=>{}});
+  if(mode==='success') {const result=await compile({source:'x'});assert.equal(result.blockMap[0].id,'a');} else await assert.rejects(compile({source:'x',signal:controller.signal}));
+  assert.deepEqual(freed,['world','shadow','compiler','resolver']);
+ }
+});
