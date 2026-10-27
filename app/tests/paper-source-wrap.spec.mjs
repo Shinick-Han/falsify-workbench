@@ -37,3 +37,11 @@ test('composition projects only unchanged source words and preserves literal Aft
   if(edited) {assert.match(source,/#text\("typed-"\)/);assert.match(source,/#linebreak\(\)/);}else {assert.match(source,/#text\("similar text"\)/);assert.doesNotMatch(source,/simi-lar text/);}
  }
 });
+
+test('words captured as artwork are not reported as text normalization',async()=>{
+ const bytes=new TextEncoder().encode('source'), document=model(['simi-','lar text']);document.sourceSha256=createHash('sha256').update(bytes).digest('hex');
+ const [art,body]=document.blocks, asset={id:'picture',source:{pageIndex:0,bbox:art.source.bbox},content:{representation:'svg',bytes:new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"></svg>')}};
+ const flow={schema:'falsify.paper-flow.v1',sourceSha256:document.sourceSha256,items:[{kind:'asset',assetIds:['picture'],blockIds:[art.id],source:art.source},{kind:'paragraph',blockIds:[body.id]}]};
+ const out=await composeDocument({document,sourceBytes:bytes,flow,assets:[asset]},{compile:async()=>new TextEncoder().encode('%PDF-1.7\n')});
+ assert.deepEqual(out.verification.sourceNormalization.lineWrapHyphens,[]);
+});

@@ -99,7 +99,7 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
   const sourceWrap=findSourceWrapOmissions({document,bytes:sourceBytes});
   // Keep replacements literal, and leave link labels/URLs intact. This projects
   // only unchanged source words, using their original source ranges.
-  const wrapOmissions=sourceWrap.omissions.filter(o=>{
+  const sourceWrapCandidates=sourceWrap.omissions.filter(o=>{
     const r=o.evidence.sourceRange;
     return !edits.some(e=>e.blockId===o.blockId && e.pageIndex===o.pageIndex && e.start<r.end && e.end>r.start) &&
       !(links?.links||[]).some(l=>l.source?.pageIndex===o.pageIndex && l.relation?.ranges?.some(x=>x.blockId===o.blockId && x.start<r.end && x.end>r.start));
@@ -159,6 +159,7 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
   }
   const spacesFor=b=>projectedSpaces.get(b.id) || separators(b);
   const assetOwned = new Set((flow?.items || []).filter(item=>item.kind==='asset').flatMap(item=>item.blockIds || []));
+  const wrapOmissions=sourceWrapCandidates.filter(o=>document.blocks.some(b=>!assetOwned.has(b.id) && sourceWrapOffsetsForBlock(b,[o]).length));
   const orderedById=new Map(document.blocks.map(b=>[b.id,b]));
   const linked=new Set((flow?.items||[]).filter(i=>i.kind==='asset').flatMap(i=>i.captionIds||[]));
   const orderedBlocks=flow ? flow.items.flatMap(i=>i.kind==='asset' ? captionOrder(i).map(id=>orderedById.get(id)) : (i.blockIds||[]).filter(id=>!linked.has(id)).map(id=>orderedById.get(id))) : document.blocks;
