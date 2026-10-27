@@ -4,6 +4,7 @@
  * Vendor notices: dist/browser-pdf-vendor/NOTICE.md
  */
 import * as mupdf from 'mupdf';
+import {parseFont, familyKey} from './browser-fonts.mjs';
 
 export const ENGINE = Object.freeze({
   name: 'mupdf.js',
@@ -78,7 +79,9 @@ function checkAbort(signal) {
 }
 
 export async function prepare(request) {
-  return exclusive(() => prepareExclusive(request || {}));
+  request ||= {};
+  const snapshot = captureFontSnapshot(request.fontSnapshot);
+  return exclusive(() => prepareExclusive({...request, fontSnapshot: snapshot}));
 }
 
 async function prepareExclusive(request) {
@@ -684,6 +687,15 @@ function horizontalLine(chars) {
 
 
 // A snapshot is immutable input to this request, never stored in the global metrics cache.
+function captureFontSnapshot(snapshot) {
+  if (snapshot == null) return null;
+  if (!Array.isArray(snapshot.fonts) || !Number.isSafeInteger(snapshot.revision) || snapshot.revision < 0 || typeof snapshot.digest !== 'string')
+    throw new BrowserPdfError('invalid', 'Invalid font snapshot.');
+  return {...snapshot, fonts: snapshot.fonts.map(face => {
+    if (!face || !(face.bytes instanceof Uint8Array)) throw new BrowserPdfError('invalid', 'Invalid font snapshot bytes.');
+    return {...face, bytes: face.bytes.slice()};
+  })};
+}
 async function validateFontSnapshot(snapshot) {
   if (snapshot == null) return null;
   if (!Array.isArray(snapshot.fonts) || !Number.isInteger(snapshot.revision) || typeof snapshot.digest !== 'string')
@@ -695,9 +707,11 @@ async function validateFontSnapshot(snapshot) {
     const bytes = face.bytes.slice();
     if (await sha256(bytes) !== face.sha256.toLowerCase())
       throw new BrowserPdfError('invalid', 'Font snapshot bytes do not match their SHA-256.');
-    const actualFsType = fontFsType(bytes);
-    if (!Number.isInteger(face.fsType) || face.fsType !== actualFsType || (actualFsType & 0x202))
-      throw new BrowserPdfError('unsupported', 'Font embedding is restricted or its license flags are missing.');
+    let parsed;
+    try { parsed = parseFont(bytes); } catch { throw new BrowserPdfError('unsupported', 'Font is invalid or embedding is restricted.'); }
+    if (typeof face.id !== 'string' || !['local', 'file', 'bundled'].includes(face.source) ||
+        ['family', 'postscriptName', 'weight', 'italic', 'fsType'].some(field => face[field] !== parsed[field]))
+      throw new BrowserPdfError('invalid', 'Font snapshot metadata does not match its bytes.');
     // MuPDF addFont embeds the complete font. Never invoke save-time font subsetting.
     faces.push({...face, bytes});
   }
@@ -707,27 +721,9 @@ async function validateFontSnapshot(snapshot) {
   return faces;
 }
 
-function fontFsType(bytes) {
-  if (bytes.length < 12) return null;
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const signature = view.getUint32(0), count = view.getUint16(4);
-  if (![0x00010000, 0x4f54544f, 0x74727565].includes(signature) || 12 + count * 16 > bytes.length) return null;
-  for (let i = 0; i < count; i++) {
-    const pos = 12 + i * 16;
-    if (view.getUint32(pos) !== 0x4f532f32) continue;
-    const offset = view.getUint32(pos + 8), length = view.getUint32(pos + 12);
-    if (length < 10 || offset > bytes.length || length > bytes.length - offset) return null;
-    return view.getUint16(offset + 8);
-  }
-  return null;
-}
-function fontKey(name) {
-  return String(name || '').replace(/^[A-Z]{6}\+/, '').toLowerCase().replace(/[\s_-]+/g, '');
-}
 function chooseSnapshotFont(faces, sourceName, sourceFont, text) {
-  const source = fontKey(sourceName);
-  const matches = face => source === fontKey(face.postscriptName) || source === fontKey(face.family) ||
-    source === fontKey(face.family) + (sourceFont.isBold() ? 'bold' : '') + (sourceFont.isItalic() ? 'italic' : '');
+  const source = familyKey(sourceName);
+  const matches = face => source && (source === familyKey(face.postscriptName) || source === familyKey(face.family));
   const ranked = faces.filter(face => matches(face) || face.source === 'bundled').sort((a, b) =>
     (matches(a) ? 0 : 10000) - (matches(b) ? 0 : 10000) +
     (a.italic === sourceFont.isItalic() ? 0 : 1000) - (b.italic === sourceFont.isItalic() ? 0 : 1000) +

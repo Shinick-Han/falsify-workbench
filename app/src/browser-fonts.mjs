@@ -53,7 +53,7 @@ async function sha256(bytes) {
   const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
   return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
 }
-function familyKey(value) {
+export function familyKey(value) {
   let name = String(value || '').replace(/^[A-Z]{6}\+/, '');
   name = name.replace(/^(TimesNewRomanPS|Arial)-(BoldItalic|BoldOblique|Bold|Italic|Oblique)MT$/i, (_, family, variant) => `${/^arial$/i.test(family) ? 'Arial' : 'TimesNewRoman'}-${variant}`);
   name = name.replace(/[-,](?:bolditalic|boldoblique|bold|italic|oblique|regular|roman)$/i, '');

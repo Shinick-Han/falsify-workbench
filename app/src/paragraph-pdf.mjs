@@ -40,6 +40,9 @@ function captureFonts(snapshot) {
     if (hex(bytes) !== face.sha256) invalid();
     let parsed;
     try { parsed = parseFont(bytes); } catch { invalid(); }
+    // PDFium may rewrite/subset the supplied program; do not use a face that
+    // requires complete embedding until the engine can guarantee that contract.
+    if (parsed.fsType & 0x100) throw new ParagraphPdfError('unsupported-font-license', 'Paragraph editing cannot guarantee full embedding for this font.');
     for (const field of ['family', 'postscriptName', 'weight', 'italic', 'fsType']) {
       if (face[field] !== parsed[field]) invalid();
     }

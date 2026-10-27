@@ -27,7 +27,7 @@ for (const [name, replacement] of [['LiberationSerif-Regular.ttf', 'Omega Ω'], 
     assert.equal(result.verification.edits[0].fontSubstituted, true);
     const d = new mupdf.PDFDocument(bytes);
     try { const fonts = d.loadPage(0).getObject().get('Resources').get('Font'); let embedded = false;
-      fonts.forEach(value => { const item = value.resolve(); if (item.get('Subtype').asName() === 'Type0') { const desc = item.get('DescendantFonts').get(0).get('FontDescriptor'); const stream = !desc.get('FontFile2').isNull() ? desc.get('FontFile2') : desc.get('FontFile3'); if (!stream.isNull()) { const buffer = stream.readStream(); const actual = buffer.asUint8Array().slice(); buffer.destroy(); assert.deepEqual(actual, fontSnapshot.fonts[0].bytes); embedded = true; } } });
+      fonts.forEach(value => { const item = value.resolve(); if (item.get('Subtype').asName() === 'Type0') { assert.equal(item.get('ToUnicode').isStream(), true); const desc = item.get('DescendantFonts').get(0).get('FontDescriptor'); const stream = !desc.get('FontFile2').isNull() ? desc.get('FontFile2') : desc.get('FontFile3'); if (!stream.isNull()) { const buffer = stream.readStream(); const actual = buffer.asUint8Array().slice(); buffer.destroy(); assert.deepEqual(actual, fontSnapshot.fonts[0].bytes); embedded = true; } } });
       assert.equal(embedded, true);
     } finally { d.destroy(); }
   });
@@ -71,4 +71,45 @@ test('no-subsetting flag embeds the complete font bytes', async () => {
     const item = value.resolve(); if (item.get('Subtype').asName() !== 'Type0') return;
     const b = item.get('DescendantFonts').get(0).get('FontDescriptor').get('FontFile2').readStream(); actual = b.asUint8Array().slice(); b.destroy();
   }); assert.deepEqual(actual, face.bytes); } finally { doc.destroy(); }
+});
+
+test('least restrictive fsType bits are accepted and metadata must describe the font', async () => {
+  const {createHash} = await import('node:crypto');
+  const sha = data => createHash('sha256').update(data).digest('hex');
+  const fonts = await snapshot('LiberationSerif-Regular.ttf'), face = fonts.fonts[0];
+  const v = new DataView(face.bytes.buffer, face.bytes.byteOffset, face.bytes.byteLength);
+  for (let i = 0; i < v.getUint16(4); i++) { const p = 12 + i * 16; if (v.getUint32(p) === 0x4f532f32) { v.setUint16(v.getUint32(p + 8) + 8, 0x106); break; } }
+  face.fsType = 0x106; face.sha256 = sha(face.bytes);
+  const digest = () => sha(new TextEncoder().encode(JSON.stringify(fonts.fonts.map(({bytes, ...rest}) => rest))));
+  fonts.digest = digest();
+  const edit = {pageIndex:0,before:'BEFORE',after:'Ω'};
+  const out = await prepare({file:fixture(), edits:[edit], fontSnapshot:fonts});
+  assert.match(text(new Uint8Array(await out.file.arrayBuffer())), /Ω/);
+  face.family = 'Forged'; fonts.digest = digest();
+  await assert.rejects(prepare({file:fixture(), edits:[edit], fontSnapshot:fonts}), {code:'invalid'});
+});
+
+test('queued requests capture font bytes and metadata before caller mutation', async () => {
+  const fonts = await snapshot('LiberationSerif-Regular.ttf');
+  const edit = {pageIndex:0,before:'BEFORE',after:'Ω'};
+  const pending = prepare({file:fixture(), edits:[edit], fontSnapshot:fonts});
+  fonts.fonts[0].bytes.fill(0); fonts.fonts[0].family = 'Changed'; fonts.digest = 'changed';
+  const out = await pending;
+  assert.match(text(new Uint8Array(await out.file.arrayBuffer())), /Ω/);
+});
+
+test('concurrent requests retain separate snapshots', async () => {
+  const a = await snapshot('LiberationSerif-Regular.ttf'), b = await snapshot('STIXTwoMath-Regular.otf');
+  const edit = {pageIndex:0,before:'BEFORE',after:'Ω'};
+  const outputs = await Promise.all([a,b].map(fontSnapshot => prepare({file:fixture(), edits:[edit], fontSnapshot})));
+  for (let i=0;i<outputs.length;i++) {
+    const bytes=new Uint8Array(await outputs[i].file.arrayBuffer()); assert.match(text(bytes), /Ω/);
+    const doc=new mupdf.PDFDocument(bytes); let embedded;
+    try {doc.loadPage(0).getObject().get('Resources').get('Font').forEach(value => {
+      const font=value.resolve(); if(font.get('Subtype').asName()!=='Type0') return;
+      const desc=font.get('DescendantFonts').get(0).get('FontDescriptor');
+      const stream=!desc.get('FontFile2').isNull()?desc.get('FontFile2'):desc.get('FontFile3');
+      const buffer=stream.readStream(); embedded=buffer.asUint8Array().slice(); buffer.destroy();
+    }); assert.deepEqual(embedded,[a,b][i].fonts[0].bytes);} finally {doc.destroy();}
+  }
 });

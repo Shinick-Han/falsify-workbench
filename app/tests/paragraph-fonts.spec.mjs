@@ -97,3 +97,12 @@ test('static CFF OTF fallbacks preserve Korean and math glyphs', async () => {
   } finally {globalThis.fetch=prev;}
 });
 
+test('no-subsetting flag is rejected before PDFium can subset the font', async () => {
+  const prev=globalThis.fetch; globalThis.fetch=localFetch;
+  try {
+    const bytes=fontBytes.slice(), view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+    for(let i=0;i<view.getUint16(4);i++){const p=12+i*16;if(view.getUint32(p)===0x4f532f32){const o=view.getUint32(p+8)+8;view.setUint16(o,view.getUint16(o)|0x100);break;}}
+    await assert.rejects(prepare({file:fixture(),fontSnapshot:snapshot(bytes),edits:[{pageIndex:0,before:'Original paragraph has enough words to edit safely.',after:'Original paragraph has enough words to edit safely Ω.'}]}),{code:'unsupported-font-license'});
+  } finally {globalThis.fetch=prev;}
+});
+

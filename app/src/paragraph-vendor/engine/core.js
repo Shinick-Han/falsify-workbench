@@ -385,7 +385,12 @@ export class PdfEngine {
         const want = [];
         for (let i = 0; i < n; i++) want.push(M.HEAPU32[(cps >> 2) + i]);
         if (this.fontSnapshot) {
-          const key = s => String(s || '').replace(/^[A-Z]{6}\+/, '').toLowerCase().replace(/[\s_-]+/g, '');
+          const key = s => {
+            let name = String(s || '').replace(/^[A-Z]{6}\+/, '');
+            name = name.replace(/^(TimesNewRomanPS|Arial)-(BoldItalic|BoldOblique|Bold|Italic|Oblique)MT$/i, (_, family, variant) => `${/^arial$/i.test(family) ? 'Arial' : 'TimesNewRoman'}-${variant}`);
+            name = name.replace(/[-,](?:bolditalic|boldoblique|bold|italic|oblique|regular|roman)$/i, '').toLowerCase().replace(/[\s_-]+/g, '');
+            return ({timesnewromanpsmt: 'timesnewroman', arialmt: 'arial'})[name] || name;
+          };
           const target = key(fam);
           const faces = this.fontSnapshot.fonts;
           const matches = f => target && (key(f.family) === target || key(f.postscriptName) === target);
