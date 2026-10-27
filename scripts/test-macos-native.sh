@@ -5,7 +5,9 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 [ "$(uname -s)" = Darwin ] || { echo 'This smoke test requires Darwin.' >&2; exit 1; }
 work=$(mktemp -d "${TMPDIR:-/tmp}/falsify-native.XXXXXXXX")
+work=$(CDPATH= cd -- "$work" && pwd -P)
 trap 'rm -rf "$work"' EXIT
+export TMPDIR="$work"
 python3 -m venv "$work/venv"
 "$work/venv/bin/python" -m pip install -r app/local/requirements.txt
 "$work/venv/bin/python" -m unittest discover -s app/tests -p test_document_red.py -v
