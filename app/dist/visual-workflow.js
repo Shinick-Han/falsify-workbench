@@ -171,9 +171,10 @@
     const manager=$('#harness-manager');if(manager){
       const library=$('#harness-library'),imported=$('#harness-preview'),feedback=$('#harness-status'),heading=el('h3','','내 도구'),author=disclosure('새 도구 만들기 · 파일 가져오기',[]);author.id='visual-harness-author';
       const introduction=manager.querySelector('p');if(introduction)introduction.hidden=true;
-      const keep=new Set([manager.querySelector('h2'),introduction,library,imported,feedback]);
+      const libraryTools=$('#harness-library-tools');
+      const keep=new Set([manager.querySelector('h2'),introduction,library,imported,feedback,libraryTools]);
       for(const n of [...manager.children])if(!keep.has(n)&&!n.matches('.confluence-store'))author.append(n);
-      manager.append(imported,feedback,heading,library,author);
+      manager.append(imported,feedback,heading,libraryTools,library,author);
       function libraryActions(){for(const a of library.children){if(a.dataset.visualReady)continue;a.dataset.visualReady='true';
         const hash=a.querySelector('code')?.textContent,match=a.querySelector('h4')?.textContent.match(/ · (RED|BLUE) · /),role=match?.[1].toLowerCase();if(!role||!hash)continue;
         const paragraphs=[...a.querySelectorAll(':scope > p')];if(paragraphs[1]){const more=disclosure('지침 보기',[paragraphs[1]]);a.append(more);}
