@@ -36,5 +36,10 @@
     for(const r of root){const reasons=differences(reference,r),latest=mapped.filter(v=>v.runId===r.id).at(-1);const a=reference.harness?.settings?.portableStrategy?.parameters,b=r.harness?.settings?.portableStrategy?.parameters;const parameterDifferences=plain(a)&&plain(b)?[...new Set([...Object.keys(a),...Object.keys(b)])].filter(k=>JSON.stringify(sorted(a[k]))!==JSON.stringify(sorted(b[k]))):[];rows.push({run:r,reasons,comparable:!reasons.length,review:latest?latest.verdict:'unreviewed',reviewNote:latest?.note||'',parameterDifferences,parameterValues:parameterDifferences.map(k=>({key:k,reference:a[k]??null,observed:b[k]??null})),strategy:identity(r.harness)});}
     const groups=new Map();for(const row of rows.filter(x=>x.comparable)){let g=groups.get(row.strategy);if(!g){g={strategy:row.strategy,runs:[],unreviewed:0,uncertain:0};groups.set(row.strategy,g);}g.runs.push(row.run);if(row.review==='unreviewed')g.unreviewed++;if(row.review==='uncertain')g.uncertain++;}
     return {rows,groups:[...groups.values()],observed:rows.filter(x=>x.comparable).length,excluded:rows.filter(x=>!x.comparable).length,unreviewed:rows.filter(x=>x.comparable&&x.review==='unreviewed').length,uncertain:rows.filter(x=>x.comparable&&x.review==='uncertain').length,missingAttempts:null,cost:null};}
-  return {identity,strategyHash,differences,compare};
+  function observedAttempts(attempts,reference){
+    const matching=attempts.filter(a=>a.role===reference.role&&a.sourceHash===reference.sourceHash&&a.fileHash===reference.fileHash&&a.budget===reference.maxCalls&&(a.level??null)===(reference.level??null)&&knownModel(a.model)&&knownModel(reference.model)&&a.model===reference.model);
+    const groups=new Map();for(const a of matching){let g=groups.get(a.harnessHash);if(!g){g={harnessHash:a.harnessHash,name:a.harnessName,version:a.harnessVersion,effort:a.effort,counts:{completed:0,failed:0,cancelled:0,unknown:0},observedMs:0,calls:0,callsUnknown:0};groups.set(a.harnessHash,g);}g.counts[a.status]++;g.observedMs+=a.durationMs;if(a.calls===null)g.callsUnknown++;else g.calls+=a.calls;}
+    return {groups:[...groups.values()],matched:matching.length,unmatched:attempts.length-matching.length};
+  }
+  return {identity,strategyHash,differences,compare,observedAttempts};
 });
