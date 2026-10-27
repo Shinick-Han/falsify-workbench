@@ -33,7 +33,7 @@ test('overlapping distinct source figures cannot claim geometry',()=>{
 
 // Device events mimic MuPDF's mask lifecycle, including the pop of the resulting clip.
 function maskEvents(events) {
- const image=()=>({destroy(){}});
+ const image=()=>({destroy(){},getMask(){return null;}});
  const fake={Matrix:{identity:[]},Device:class {constructor(cb){this.cb=cb;} close(){} destroy(){}},Document:{openDocument(){return {countPages:()=>1,loadPage:()=>({getBounds:()=>[0,0,300,400],run(dev){events(dev.cb,image);},destroy(){}}),destroy(){}};}}};
  return resolve({bytes:new Uint8Array([1]),mupdf:fake,flow,blockSpans:[marker]});
 }
@@ -49,4 +49,17 @@ test('image masks elsewhere do not invalidate a page but overlapping masks do',(
  assert.equal(unrelated.evidence[0].reason,'resolved');
  const overlap=maskEvents((d,image)=>{d.fillImageMask(image(),[10,0,0,10,30,110]);d.fillImage(image(),[100,0,0,50,20,100],1);});
  assert.equal(overlap.evidence[0].reason,'overlapping-placement');
+});
+
+
+test('real PDF intrinsic soft mask preserves image placement geometry',()=>{
+ const d=new mupdf.PDFDocument(), pix=new mupdf.Pixmap(mupdf.ColorSpace.DeviceRGB,[0,0,2,2],false), alpha=new mupdf.Pixmap(mupdf.ColorSpace.DeviceGray,[0,0,2,2],false);
+ alpha.getPixels().set([0,255,128,255]);
+ const mask=new mupdf.Image(alpha), image=new mupdf.Image(pix,mask);
+ try {const ref=d.addImage(image);d.insertPage(-1,d.addPage([0,0,300,400],0,{XObject:{im:ref}},placement));const buf=d.saveToBuffer();try {const r=resolve({bytes:buf.asUint8Array().slice(),mupdf,flow,blockSpans:[marker]});assert.equal(r.evidence[0].reason,'resolved');} finally {buf.destroy();}} finally {image.destroy();mask.destroy();alpha.destroy();pix.destroy();d.destroy();}
+});
+test('separate image mask remains unavailable even at the same transform',()=>{
+ const fakeMask={pointer:10,destroy(){}};
+ const r=maskEvents((d,image)=>{d.clipImageMask(fakeMask,[100,0,0,50,20,100]);d.fillImage(image(),[100,0,0,50,20,100],1);d.popClip();});
+ assert.equal(r.evidence[0].reason,'masked-or-clipped-placement');
 });

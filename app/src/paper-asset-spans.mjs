@@ -26,16 +26,16 @@ export function resolveOutputAssetSpans({bytes,mupdf,flow,blockSpans}={}) {
           clipStrokePath(path,stroke){path.destroy();stroke.destroy();clips.push(null);},
           clipText(text){text.destroy();clips.push(null);},
           clipStrokeText(text,stroke){text.destroy();stroke.destroy();clips.push(null);},
-          clipImageMask(image){image.destroy();clips.push(null);},
-          popClip(){if(clips.length) clips.pop(); else failed=true;},
-          fillImage(image,ctm,alpha) { try { const [a,b,c,d,e,f]=ctm; const bbox=[Math.min(e,e+a,e+c,e+a+c),Math.min(f,f+b,f+d,f+b+d),Math.max(e,e+a,e+c,e+a+c),Math.max(f,f+b,f+d,f+b+d)]; if (!maskDepth) placements.push({bbox,valid:ctm.every(Number.isFinite) && a>0 && d>0 && Math.abs(b)<1e-5 && Math.abs(c)<1e-5 && alpha===1 && box(bbox) && inside(bbox,bounds) && clips.every(clip=>clip && inside(bbox,clip)), uncertainClip:clips.some(clip=>!clip || !inside(bbox,clip))}); } finally {image.destroy();} },
+          clipImageMask(image,ctm){clips.push({mask:image,ctm:[...ctm]});},
+          popClip(){if(clips.length) clips.pop()?.mask?.destroy(); else failed=true;},
+          fillImage(image,ctm,alpha) { try { const [a,b,c,d,e,f]=ctm; const bbox=[Math.min(e,e+a,e+c,e+a+c),Math.min(f,f+b,f+d,f+b+d),Math.max(e,e+a,e+c,e+a+c),Math.max(f,f+b,f+d,f+b+d)]; if (!maskDepth) { const mask=image.getMask(); let intrinsicMasks=0; const clipOK=clips.every(clip=>{if (clip?.mask) {intrinsicMasks++; return intrinsicMasks===1 && mask && mask.pointer===clip.mask.pointer && clip.ctm.every((v,i)=>Math.abs(v-ctm[i])<1e-5);} return clip && inside(bbox,clip);}); mask?.destroy(); placements.push({bbox,valid:ctm.every(Number.isFinite) && a>0 && d>0 && Math.abs(b)<1e-5 && Math.abs(c)<1e-5 && alpha===1 && box(bbox) && inside(bbox,bounds) && clipOK, uncertainClip:!clipOK}); } } finally {image.destroy();} },
           fillImageMask(image,ctm) { try { if (!maskDepth) { const [a,b,c,d,e,f]=ctm; placements.push({bbox:[Math.min(e,e+a,e+c,e+a+c),Math.min(f,f+b,f+d,f+b+d),Math.max(e,e+a,e+c,e+a+c),Math.max(f,f+b,f+d,f+b+d)],valid:false}); } } finally {image.destroy();} },
           beginMask(area,luminosity,colorspace) {maskDepth++; colorspace?.destroy();},
           endMask(){if (maskDepth) {maskDepth--; clips.push(null);} else failed=true;}
         });
         page.run(dev,mupdf.Matrix.identity); dev.close();
         pages.push({bounds,placements,failed});
-      } catch {pages.push({bounds:null,placements:[],failed:true});} finally {dev?.destroy();page.destroy();}
+      } catch {pages.push({bounds:null,placements:[],failed:true});} finally {for (const clip of clips) clip?.mask?.destroy(); dev?.destroy();page.destroy();}
     }
     const claims=[];
     for(const item of items) {
