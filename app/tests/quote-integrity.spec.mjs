@@ -39,3 +39,26 @@ test('a literal word gap after a stationary citation relocation is rejected',()=
   out.chars[1].generated=false;
   assert.equal(matchesStationaryReorderedGlyphs(source,out,edits),false);
 });
+import {removeForeignObjectGapSpaces} from '../src/paragraph-vendor/engine/foreign-gap.mjs';
+const owned = new Set([1, 2]);
+const foreignChars = () => [
+  {index:0,ch:'A',obj:1,box:[0,1,0,2]},
+  {index:1,ch:'1',obj:3,box:[1.1,1.9,1,2.5]},
+  {index:2,ch:'.',obj:2,box:[2,3,0,1]},
+  {index:3,ch:'B',obj:2,box:[3,4,0,2]},
+];
+test('writer removes only a model space across an intervening foreign glyph',()=>{
+  const model=[{text:'A .B'}], runs=[{text:'A .C',sourceIndex:0}];
+  assert.equal(removeForeignObjectGapSpaces(model,runs,foreignChars(),owned)[0].text,'A.C');
+  assert.equal(runs[0].text,'A .C');
+});
+test('writer preserves spaces without exact source ownership and geometry proof',()=>{
+  const model=[{text:'A .B'}], runs=[{text:'A .C'}];
+  const check=chars=>assert.equal(removeForeignObjectGapSpaces(model,runs,chars,owned)[0].text,'A .C');
+  let chars=foreignChars(); chars[1].box=[8,9,1,2.5]; check(chars);
+  chars=foreignChars(); chars[1].obj=1; check(chars);
+  chars=foreignChars(); chars[1].ch=' '; check(chars);
+  chars=foreignChars(); chars[0].ch='Z'; check(chars);
+  assert.equal(removeForeignObjectGapSpaces(model,[{text:'Z .C'}],foreignChars(),owned)[0].text,'Z .C');
+  assert.equal(removeForeignObjectGapSpaces(model,[{text:'A X.C'}],foreignChars(),owned)[0].text,'A X.C');
+});
