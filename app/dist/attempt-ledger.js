@@ -13,13 +13,13 @@
     return Object.fromEntries(fields.map(k=>[k,x[k]]));
   }
   function fromPending(r,observedAt){
-    const h=r.request.harness,adapter=h.adapter||{},finished=Number.isSafeInteger(r.finishedAt)?r.finishedAt:observedAt;
-    return normalize({id:r.requestId,role:r.role,harnessHash:r.harnessHash,harnessName:h.name||null,harnessVersion:h.version||null,model:adapter.model||null,effort:adapter.effort||null,budget:r.request.maxCalls,level:r.role==='red'?(r.request.level??null):null,fileHash:r.fileHash,sourceHash:r.sourceHash,startedAt:r.createdAt,finishedAt:finished,durationMs:finished-r.createdAt,calls:Number.isSafeInteger(r.observedCalls)&&r.observedCalls>=0?r.observedCalls:null,status:statuses.includes(r.disposition)?r.disposition:'unknown'});
+    const h=r.request.harness,adapter=h.adapter||{},settings=h.settings||{},finished=Number.isSafeInteger(r.finishedAt)?r.finishedAt:observedAt;
+    return normalize({id:r.requestId,role:r.role,harnessHash:r.harnessHash,harnessName:h.name||null,harnessVersion:h.version||null,model:adapter.model||settings.model||null,effort:adapter.effort||settings.effort||null,budget:r.request.maxCalls,level:r.role==='red'?(r.request.level??null):null,fileHash:r.fileHash,sourceHash:r.sourceHash,startedAt:r.createdAt,finishedAt:finished,durationMs:finished-r.createdAt,calls:Number.isSafeInteger(r.observedCalls)&&r.observedCalls>=0?r.observedCalls:null,status:statuses.includes(r.disposition)?r.disposition:'unknown'});
   }
   function read(storage){const box=storage||root.localStorage,raw=box.getItem(KEY);if(!raw)return [];const data=JSON.parse(raw);if(!data||data.schema!==KEY||!Array.isArray(data.attempts)||Object.keys(data).sort().join()!=='attempts,schema')throw Error('Invalid attempt ledger');const rows=data.attempts.map(normalize);if(new Set(rows.map(x=>x.role+':'+x.id)).size!==rows.length)throw Error('Duplicate attempt');return rows;}
   function capture(record,storage,now=Date.now()){
     const box=storage||root.localStorage,attempt=fromPending(record,now),rows=read(box),index=rows.findIndex(x=>x.id===attempt.id&&x.role===attempt.role);
-    if(index>=0){const old=rows[index];for(const k of ['id','role','harnessHash','harnessName','harnessVersion','model','effort','budget','level','fileHash','sourceHash','startedAt'])if(old[k]!==attempt[k])throw Error('Attempt identity changed');if(old.status!=='unknown'&&JSON.stringify(old)!==JSON.stringify(attempt))throw Error('Terminal attempt changed');rows[index]=attempt;}else rows.push(attempt);
+    if(index>=0){const old=rows[index];for(const k of ['id','role','harnessHash','harnessName','harnessVersion','model','effort','budget','level','fileHash','sourceHash','startedAt'])if(old[k]!==attempt[k])throw Error('Attempt identity changed');if(old.status!=='unknown'){if(old.status!==attempt.status)throw Error('Terminal attempt changed');return old;}rows[index]=attempt;}else rows.push(attempt);
     box.setItem(KEY,JSON.stringify({schema:KEY,attempts:rows}));return attempt;
   }
   return Object.freeze({KEY,normalize,fromPending,read,capture});

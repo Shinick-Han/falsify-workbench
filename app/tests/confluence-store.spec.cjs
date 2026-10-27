@@ -87,7 +87,7 @@ function appRoutes(){
   assert.equal(found.review,'review'); assert.equal(found.agents,'harness');
   return found;
 }
-function setup({store=new Map(),routes,lab,codec,config,trace,sessionWrite}={}){
+function setup({store=new Map(),routes,lab,codec,config,trace,sessionWrite,clock=Date}={}){
   const body=new El('body'), review=new El('section'), results=new El('section'), agents=new El('section'), manager=new El('section'), board=new El('section');
   review.id='human-evaluation'; const run=new El('select'); run.id='evaluation-run'; review.append(run);
   results.id='view-results'; board.id='ledger-board'; const exp=new El('button'); exp.id='ledger-export'; exp.textContent='전체 기록 JSON 백업'; const imp=new El('input'); imp.id='ledger-import'; board.append(exp,imp); results.append(board);
@@ -104,7 +104,7 @@ function setup({store=new Map(),routes,lab,codec,config,trace,sessionWrite}={}){
   store.set(LEDGER_KEY,'{"schema":"falsify.experiment-ledger.v1","runs":[{"id":"keep-local"}]}');
   const document=new EventTarget(); Object.assign(document,{readyState:'complete',body,currentScript:null,createElement:t=>{const e=new El(t); e.ownerDocument=document; return e;},querySelector:s=>s.startsWith('#')?body.find(n=>n.id===s.slice(1)):null,querySelectorAll(sel){const m=String(sel).match(/^\[data-view="([^"]+)"\]$/); return m?[...body.walk()].filter(n=>n.getAttribute&&n.getAttribute('data-view')===m[1]):[];}});
   body.ownerDocument=document;
-  const ctx=vm.createContext({document,window,location,localStorage,fetch,crypto:globalThis.crypto,Date,FalsifyCloudConfig:config||{apiBase:BASE,provider:'confluence'},FalsifyLab:lab||labStub(),FalsifyReviewBundle:codec||codecStub(),URL,URLSearchParams,TextEncoder,TextDecoder,AbortController,Event,Uint8Array,btoa:b64,atob:ub64,setTimeout:(f,ms)=>{timers.push(ms); return setTimeout(f,ms>=15000?30:ms);},clearTimeout,setInterval:(fn,ms)=>{const id=setInterval(fn,ms); liveIntervals.add(id); return id;},clearInterval:(id)=>{liveIntervals.delete(id); return clearInterval(id);},console});
+  const ctx=vm.createContext({document,window,location,localStorage,fetch,crypto:globalThis.crypto,Date:clock,FalsifyCloudConfig:config||{apiBase:BASE,provider:'confluence'},FalsifyLab:lab||labStub(),FalsifyReviewBundle:codec||codecStub(),URL,URLSearchParams,TextEncoder,TextDecoder,AbortController,Event,Uint8Array,btoa:b64,atob:ub64,setTimeout:(f,ms)=>{timers.push(ms); return setTimeout(f,ms>=15000?30:ms);},clearTimeout,setInterval:(fn,ms)=>{const id=setInterval(fn,ms); liveIntervals.add(id); return id;},clearInterval:(id)=>{liveIntervals.delete(id); return clearInterval(id);},console});
   vm.runInContext(src,ctx,{filename:'confluence-store.js'});
   const $=id=>body.find(n=>n.id===id);
   return {ctx,calls,timers,store,body,window,opened,location,nav,$,registered:()=>registered,lab:ctx.FalsifyLab,codec:ctx.FalsifyReviewBundle,ready:ctx.FalsifyConfluenceStore.ready};
@@ -523,6 +523,12 @@ test('paper-edit uses the existing team session, keeps local ledger bytes, and d
   await broken.ready; await connect(broken);
   await assert.rejects((await broken.ready).publishPaperEdit({id:'pmr-2',reviews:[]},{teamShare:true}),/다시 보내지/);
   assert.equal(unknown,1); assert.equal(broken.store.get(LEDGER_KEY).includes('keep-local'),true);
+});
+
+test('attempt remote view expires after twelve hours on injected clock and timer without touching local ledger',async()=>{
+  let now=Date.now();class Clock extends Date{static now(){return now;}}const api=teamApi(),t=setup({routes:api.routes,clock:Clock});await t.ready;await connect(t);const app=await t.ready;
+  await app.publishAttempt({id:'attempt-expiry'},{teamShare:true});const local=t.store.get(LEDGER_KEY);t.$('confluence-review-load').click();await until(()=>/Synthetic attempt/.test(t.$('confluence-review-list').textContent),'attempt listed');openSaved(t,'confluence-review-list');await until(()=>t.lab.calls.some(c=>c[0]==='open'&&c[1]==='attempt')&&!t.$('confluence-review-close-temp').hidden,'attempt open');
+  now+=12*60*60*1000+1;await until(()=>t.lab.calls.includes('closeArchive')&&t.$('confluence-review-close-temp').hidden,'attempt timer expired');assert.equal(t.store.get(LEDGER_KEY),local);assert.ok(!t.$('confluence-review-list').textContent.includes('Synthetic attempt'));
 });
 
 test('attempt publication is explicit and never retries an unknown write',async()=>{

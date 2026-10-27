@@ -110,6 +110,7 @@
     if(r.postReceipt==='unknown'||r.disposition==='unknown')return 'unknown';
     return 'unresolved';
   }
+  function captureAttempt(record,storage){try{root.FalsifyAttemptLedger?.capture(record,storage);return null;}catch(e){return e?.message||'시도 기록을 저장하지 못했습니다.';}}
   function docFrom(record){return {revision:record.revision,sourceHash:record.sourceHash,fileHash:record.fileHash,format:record.format,name:record.name,segments:record.request.segments.map(s=>({id:s.id,label:s.label,text:s.text}))};}
   function blockedResult(why,found){
     const corrupt=why==='corrupt';
@@ -124,7 +125,7 @@
       const request=options.request,doc=options.doc,instance=options.companionInstance,storage=options.storage;
       const found=read(role,storage),why=blocking(found);
       if(why)return blockedResult(why,found);
-      if(found.status==='record' && root.FalsifyAttemptLedger)root.FalsifyAttemptLedger.capture(found.record,storage);
+      if(found.status==='record')captureAttempt(found.record,storage);
       if(!INSTANCE.test(instance))fail('rejected','연결된 companion의 인스턴스 식별이 없어 실행하지 않았습니다.');
       if(!request||typeof request!=='object'||!doc||typeof doc!=='object')fail('rejected','요청 식별이 없어 실행하지 않았습니다.');
       if(typeof options.hashHarness!=='function')fail('rejected','harness 검증을 재사용하지 못해 실행하지 않았습니다.');
@@ -164,17 +165,20 @@
     if(found.status==='corrupt')return {ok:false,status:'corrupt',message:'손상된 대기 기록은 덮어쓰지 않았습니다.'};
     if(found.status!=='record'||found.record.requestId!==record.requestId)return {ok:false,status:'absent',message:'저장한 요청 ID를 찾지 못했습니다.'};
     const next={...found.record,request:found.record.request};
+    const terminal=['completed','failed','cancelled'];
+    if(terminal.includes(next.disposition)&&Object.hasOwn(patch,'disposition')&&patch.disposition!==next.disposition)return {ok:false,status:'integrity-error',message:'이미 관찰한 종료 상태와 다른 상태입니다. 기존 대기 기록은 그대로입니다.'};
+    const repeated=terminal.includes(next.disposition)&&(!Object.hasOwn(patch,'disposition')||patch.disposition===next.disposition);
     if(Object.hasOwn(patch,'postReceipt')){if(!RECEIPTS.includes(patch.postReceipt))return {ok:false,status:'rejected',message:'접수 상태가 올바르지 않습니다.'};next.postReceipt=patch.postReceipt;}
     if(Object.hasOwn(patch,'disposition')){if(!DISPOSITIONS.includes(patch.disposition))return {ok:false,status:'rejected',message:'대기 상태가 올바르지 않습니다.'};next.disposition=patch.disposition;}
     if(Object.hasOwn(patch,'serverFailure')){const safe=safeFailure(patch.serverFailure);if(!safe)return {ok:false,status:'rejected',message:'서버 실패 문구를 보관하지 못했습니다. 기록은 바꾸지 않았습니다.'};next.serverFailure=safe;}
     if(Object.hasOwn(patch,'observedCalls')){if(!Number.isSafeInteger(patch.observedCalls)||patch.observedCalls<0)return {ok:false,status:'rejected',message:'관찰한 호출 수가 올바르지 않습니다.'};next.observedCalls=patch.observedCalls;}
     if(Object.hasOwn(patch,'adapterFailure')){const f=structuredFailure(patch.adapterFailure);if(!f)return {ok:false,status:'rejected',message:'실패 정보 형식이 올바르지 않습니다.'};next.adapterFailure=f;}
     if(next.disposition==='open'||next.disposition==='running'){next.finishedAt=null;next.expiresAt=null;}
-    else if(Object.hasOwn(patch,'finishedAt')){if(!Number.isFinite(patch.finishedAt))return {ok:false,status:'rejected',message:'완료 시각이 올바르지 않습니다.'};next.finishedAt=patch.finishedAt;next.expiresAt=patch.finishedAt+RETENTION_MS;}
+    else if(Object.hasOwn(patch,'finishedAt')&&!repeated){if(!Number.isFinite(patch.finishedAt))return {ok:false,status:'rejected',message:'완료 시각이 올바르지 않습니다.'};next.finishedAt=patch.finishedAt;next.expiresAt=patch.finishedAt+RETENTION_MS;}
     else if(next.finishedAt==null)return {ok:false,status:'rejected',message:'끝난 작업의 시각이 없습니다. 기록은 바꾸지 않았습니다.'};
     if(!valid(next))return {ok:false,status:'rejected',message:'대기 기록 검사가 통과하지 않아 덮어쓰지 않았습니다.'};
     const saved=put(record.role,next,storage);
-    if(saved.ok && !['open','running'].includes(next.disposition) && root.FalsifyAttemptLedger)root.FalsifyAttemptLedger.capture(next,storage);
+    if(saved.ok && !['open','running'].includes(next.disposition)){const historyError=captureAttempt(next,storage);if(historyError)saved.historyError=historyError;}
     return saved;
     });}catch{return {ok:false,status:'write-failed',message:'대기 기록을 바꾸지 못했습니다.'};}
   }
@@ -188,9 +192,9 @@
     const found=read(role,options.storage);
     if(found.status==='record' && (!options.expectedRequestId || found.record.requestId!==options.expectedRequestId))return {ok:false,status:'stale',message:'표시한 요청이 바뀌어 대기 기록을 지우지 않았습니다.'};
     if(found.status==='corrupt' && options.expectedStatus!=='corrupt')return {ok:false,status:'stale',message:'표시한 기록이 바뀌어 지우지 않았습니다.'};
-    if(found.status==='record' && root.FalsifyAttemptLedger){try{root.FalsifyAttemptLedger.capture(found.record,options.storage);}catch{return {ok:false,status:'write-failed',message:'시도 기록을 저장하지 못해 대기 기록을 보존했습니다.'};}}
+    const historyError=found.status==='record'?captureAttempt(found.record,options.storage):null;
     try{box.removeItem(storageKey(role));}catch{return {ok:false,status:'write-failed',message:'대기 기록을 지우지 못했습니다.'};}
-    return {ok:true,status:'discarded'};
+    return {ok:true,status:'discarded',...(historyError?{historyError}:{})};
     });}catch{return {ok:false,status:'write-failed',message:'대기 기록을 지우지 못했습니다.'};}
   }
   function bound(record,body){
