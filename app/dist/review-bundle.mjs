@@ -375,11 +375,27 @@ export async function buildPaperEditArchive(record){
   return archive;
 }
 
+function attemptOf(value,validators){
+  const A=validators?.attempt||globalThis.FalsifyAttemptLedger;
+  if(!A||typeof A.normalize!=='function')fail('validators','Attempt validator is unavailable.');
+  try{return A.normalize(value);}catch{fail('malformed','Attempt metadata is malformed.');}
+}
+export async function buildAttemptArchive(record,validators){
+  const attempt=attemptOf(copy(record),validators);
+  const id=attempt.role+':'+attempt.id;
+  const title=assertTitle(`${attempt.role.toUpperCase()} 시도 · ${attempt.harnessName||'이름 미상'} · ${attempt.status} · ${attempt.id}`);
+  return boundedJSON({schema:ARCHIVE_SCHEMA,kind:'attempt',id,title,data:attempt});
+}
 export async function validateArchive(archive,validators){
   const value=copy(archive);
   boundedJSON(value);
   if(!exact(value,['schema','kind','id','title','data'])||value.schema!==ARCHIVE_SCHEMA)fail('malformed');
   assertTitle(value.title);
+  if(value.kind==='attempt'){
+    const attempt=attemptOf(value.data,validators);
+    if(value.id!==attempt.role+':'+attempt.id)fail('conflict','Attempt archive identity differs.');
+    return {schema:ARCHIVE_SCHEMA,kind:'attempt',id:value.id,title:value.title,data:attempt};
+  }
   if(value.kind==='harness'){
     const V=validatorsOf(validators,'harness');
     if(typeof value.id!=='string'||!HEX.test(value.id)||!exact(value.data,['config','hash']))fail('malformed','Harness archive shape is malformed.');
