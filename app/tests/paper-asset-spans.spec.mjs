@@ -63,3 +63,14 @@ test('separate image mask remains unavailable even at the same transform',()=>{
  const r=maskEvents((d,image)=>{d.clipImageMask(fakeMask,[100,0,0,50,20,100]);d.fillImage(image(),[100,0,0,50,20,100],1);d.popClip();});
  assert.equal(r.evidence[0].reason,'masked-or-clipped-placement');
 });
+
+test('real PDF global soft mask is not confused with intrinsic alpha',()=>{
+ const d=new mupdf.PDFDocument(), pix=new mupdf.Pixmap(mupdf.ColorSpace.DeviceRGB,[0,0,2,2],false), image=new mupdf.Image(pix);
+ try {
+  const ref=d.addImage(image);
+  const group=d.addStream('0.5 g 0 0 300 400 re f',{Type:'XObject',Subtype:'Form',BBox:[0,0,300,400],Group:{S:'Transparency',CS:'DeviceGray'}});
+  const gs=d.addObject({Type:'ExtGState',SMask:{S:'Luminosity',G:group}});
+  d.insertPage(-1,d.addPage([0,0,300,400],0,{XObject:{im:ref},ExtGState:{gs}},'q /gs gs '+placement+' Q'));
+  const buf=d.saveToBuffer();try {const r=resolve({bytes:buf.asUint8Array().slice(),mupdf,flow,blockSpans:[marker]});assert.equal(r.evidence[0].reason,'masked-or-clipped-placement');assert.deepEqual(r.spans,[]);} finally {buf.destroy();}
+ } finally {image.destroy();pix.destroy();d.destroy();}
+});
