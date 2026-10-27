@@ -125,8 +125,11 @@
     const keep=!!outcome&&outcome.status&&outcome.status!=='absent'&&outcome.status!=='completed'&&outcome.status!=='still-running';
     let b=$('#red-pending-discard');
     if(keep&&!b){b=document.createElement('button');b.type='button';b.id='red-pending-discard';b.className='button secondary';b.textContent='이 대기 작업 버리기';$('#red-progress').after(b);
-      b.addEventListener('click',async()=>{generation++;cancelCurrent();const done=await P.discard('red',{acknowledge:true,...displayedPending});b.hidden=true;busy=false;job=null;jobLink=null;msg(done.ok?P.text({status:'discarded'}):done.message,!done.ok);controls();});}
+      b.addEventListener('click',async()=>{generation++;cancelCurrent();const done=await P.discard('red',{acknowledge:true,...displayedPending});if(done.ok){b.hidden=true;const check=$('#red-receipt-check');if(check)check.hidden=true;}busy=false;job=null;jobLink=null;msg(done.ok?P.text({status:'discarded'}):done.message,!done.ok);controls();});}
     if(b)b.hidden=!keep;
+    let check=$('#red-receipt-check');
+    if(keep&&outcome.record&&!check){check=document.createElement('button');check.type='button';check.id='red-receipt-check';check.className='button secondary';check.textContent='접수 상태 다시 확인';$('#red-progress').after(check);check.addEventListener('click',()=>void recoverRed());}
+    if(check)check.hidden=!(keep&&outcome.record);
   }
   function adoptRecovered(stored){
     doc={revision:stored.revision,sourceHash:stored.sourceHash,fileHash:stored.fileHash,format:stored.format,name:stored.name,segments:stored.segments.map(s=>({...s}))};
@@ -144,21 +147,24 @@
   }
   async function resumeRed(outcome){
     const l=B.session();if(!l){showPending({status:'unpaired',record:outcome.record});return;}
-    adoptRecovered(outcome.doc);request=outcome.record.request;
+    showPending({status:'still-running'});if(!doc)adoptRecovered(outcome.doc);request=outcome.record.request;
     if(outcome.record.postReceipt!=='accepted')await P.note(outcome.record,{postReceipt:'accepted'});
     const current=generation;busy=true;job=outcome.record.requestId;jobLink=l;controls();msg(P.text(outcome));
     try{await watchRed(current,l,true);}catch(e){if(current===generation)msg(e.message+' 자동 재시도하지 않았습니다.',true);}
     finally{if(current===generation){busy=false;job=null;jobLink=null;controls();}}
   }
-  function showRecoveredRed(outcome){adoptRecovered(outcome.doc);request=outcome.record.request;applyResponse(outcome.result,'local-codex');msg(P.text(outcome)+' '+$('#red-progress').textContent);}
+  function showRecoveredRed(outcome){showPending({status:'completed'});if(!doc)adoptRecovered(outcome.doc);request=outcome.record.request;applyResponse(outcome.result,'local-codex');msg(P.text(outcome)+' '+$('#red-progress').textContent);}
   async function recoverRed(){
     if(!helperReady()||recovering||busy)return;
     const found=P.read('red');if(found.status==='absent')return;
-    if(doc){if(found.status==='record'&&doc.sourceHash===found.record.sourceHash&&doc.fileHash===found.record.fileHash&&doc.revision===found.record.revision&&(job||found.record.disposition==='completed'))return;showPending(found.status==='record'?{status:'unresolved',record:found.record}:found);return;}
+    if(doc){const same=found.status==='record'&&doc.sourceHash===found.record.sourceHash&&doc.fileHash===found.record.fileHash&&doc.revision===found.record.revision;
+      if(same&&(job||found.record.disposition==='completed'))return;
+      if(!same||response||candidates.length){showPending(found.status==='record'?{status:'unresolved',record:found.record}:found);return;}}
     if(!B.state().connected){showPending(found.status==='record'?{status:'unpaired',record:found.record}:found);return;}
-    recovering=true;
+    recovering=true;const current=generation,existingDoc=doc;
     try{
-      const outcome=await P.recover({role:'red',companionInstance:B.capabilities()?.companionInstance||null,hashHarness:h=>H.hash(h),validate:(d,res)=>C.validateResponse(d,res),getJob:id=>probe('red',id)});
+      const outcome=await P.recover({role:'red',companionInstance:B.capabilities()?.companionInstance||null,hashHarness:h=>H.hash(h),validate:(d,res)=>C.validateResponse(d,res),getJob:id=>probe('red',id),currentDoc:doc||undefined});
+      if(current!==generation||doc!==existingDoc||response||candidates.length)return;
       if(!outcome||outcome.status==='absent')return;
       if(outcome.status==='still-running'){await resumeRed(outcome);return;}
       if(outcome.status==='completed'){showRecoveredRed(outcome);await P.note(outcome.record,{disposition:'completed',finishedAt:Date.now()});return;}
@@ -196,7 +202,7 @@
       try{msg('전체 검토 예산 확인 후 선택 harness를 실행합니다.');const started=await postRed(l,held);
         if(current!==generation){void l.request('/api/red/jobs/'+encodeURIComponent(started.id)+'/cancel',{}).catch(()=>{});return;}
         job=started.id;jobLink=l;controls();await watchRed(current,l,true);
-      }catch(e){if(current===generation)msg(e.message+' 자동 재시도하지 않았습니다.',true);}
+      }catch(e){if(current===generation){const found=P.read('red');if(found.status==='record'&&found.record.postReceipt==='unknown')showPending({status:'receipt-unknown',record:found.record});else msg(e.message+' 자동 재시도하지 않았습니다.',true);}}
       finally{if(current===generation){busy=false;job=null;jobLink=null;controls();}}
       return;
     }

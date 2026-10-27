@@ -199,11 +199,10 @@
     if(!doc&&record.request)adoptBlue(P.docFrom(record));
     request=record.request;sticky=kind;notice=false;
     const detail=kind==='failed'&&typeof record.serverFailure==='string'?record.serverFailure:'';
-    const head=kind==='failed'?(record.postReceipt==='rejected'?'BLUE 요청이 접수되지 않았습니다. ':'BLUE 실패. ')+(detail?detail+' ':'')+'자동으로 다시 보내지 않습니다.':'BLUE 취소. 자동으로 다시 보내지 않습니다.';
+    const head=kind==='failed'?(record.postReceipt==='rejected'?'BLUE 요청이 거부됐습니다.':'BLUE 실패.'):'BLUE 취소.';
     const foreign=opts.foreign?' 이번 조회는 저장된 요청·인스턴스·해시와 달라 서버 문구를 바꾸지 않았습니다.':'';
-    const guidance=' 대기 작업은 다시 열거나 연결과 조회가 바뀌어도 버릴 때까지 유지됩니다. 다시 시작하려면 「이 대기 작업 버리기」를 누른 뒤 「BLUE 독립 검토 시작」을 직접 누르세요. 진단 정보와 원래 요청은 저장만 하며 실행하지 않습니다.';
-    msg(head+foreign,true,true);
-    const box=ensurePanel();box.hidden=false;box.textContent=head+foreign+guidance;
+    msg(head+(detail?' '+detail:'')+foreign+' 다시 시작하려면 대기 작업을 버린 뒤 BLUE를 실행하세요.',true,true);
+    const box=ensurePanel();box.textContent=detail+foreign;box.hidden=true;
     showRecoveryActions();
   }
   function showUnknown(record,reason=''){
@@ -211,9 +210,9 @@
     displayedPending=record?{expectedRequestId:record.requestId}:null;
     if(record&&record.request)request=record.request;
     notice=true;
-    const text='BLUE 상태 미확인. '+(reason||'접수 여부를 확인하지 못했습니다.')+' 성공으로 보지 않았고 자동으로 다시 보내지 않습니다. 「접수 상태 다시 확인」은 조회만 하며 모델을 실행하지 않습니다. 대기 작업은 버릴 때까지 유지됩니다. 다시 시작하려면 「이 대기 작업 버리기」 후 「BLUE 독립 검토 시작」을 직접 누르세요. 진단 정보와 원래 요청은 저장만 하며 실행하지 않습니다.';
+    const text='BLUE 접수 상태를 확인하지 못했습니다. '+(reason||'접수 상태를 다시 확인하세요.');
     msg(text,true,true);
-    const box=ensurePanel();box.hidden=false;box.textContent=text;
+    const box=ensurePanel();box.textContent='BLUE 상태 미확인. '+reason;box.hidden=true;
     showRecoveryActions();
   }
   function showPendingBlue(outcome){
