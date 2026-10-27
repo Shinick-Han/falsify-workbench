@@ -1,0 +1,18 @@
+<!doctype html><meta charset="utf-8"><title>Typst browser spike</title>
+<script type="importmap">{"imports":{"@myriaddreamin/typst.ts/compiler":"/.local/spike/node_modules/@myriaddreamin/typst.ts/dist/esm/compiler.mjs","@myriaddreamin/typst.ts/contrib/global-compiler":"/.local/spike/node_modules/@myriaddreamin/typst.ts/dist/esm/contrib/global-compiler.mjs","@myriaddreamin/typst-ts-web-compiler":"/.local/spike/node_modules/@myriaddreamin/typst-ts-web-compiler/pkg/typst_ts_web_compiler.mjs"}}</script>
+<pre id="status">starting</pre>
+<script type="module">
+import { $typst } from '/.local/spike/node_modules/@myriaddreamin/typst.ts/dist/esm/contrib/snippet.mjs';
+import { loadFonts } from '/.local/spike/node_modules/@myriaddreamin/typst.ts/dist/esm/options.init.mjs';
+const status = document.querySelector('#status');
+try {
+  const start = performance.now();
+  $typst.setCompilerInitOptions({getModule: () => '/.local/spike/node_modules/@myriaddreamin/typst-ts-web-compiler/pkg/typst_ts_web_compiler_bg.wasm', beforeBuild: [loadFonts(['/.local/spike/arial.ttf'], {assets:false})]});
+  const para = i => `Paragraph ${i}: The deliberately lengthened synthetic text continues across columns and pages while preserving sequence and scientific notation 12.5 mg. `.repeat(new URLSearchParams(location.search).has("short") ? 1 : 4);
+  const source = `#set page(width: 210mm, height: 297mm, margin: 18mm, columns: 2)\n#set text(font: "Arial", size: 10pt)\n= Synthetic heading\nGlyph probe: Omega Ω; unsupported 􏿿.\n\n${para(1)}\n\n#figure(rect(width: 80%, height: 25mm, fill: luma(220)), caption: [Synthetic figure caption])\n\n${Array.from({length: 30}, (_, i) => para(i + 2)).join('\n\n')}\n\nFinal marker.`;
+  const pdf = await $typst.pdf({mainContent: source});
+  if (!(pdf instanceof Uint8Array)) throw new Error('No PDF bytes: ' + String(pdf));
+  window.spikePdf = Array.from(pdf);
+  status.textContent = JSON.stringify({bytes:pdf.length, elapsedMs:performance.now()-start, heap:performance.memory?.usedJSHeapSize ?? null, userAgent:navigator.userAgent});
+} catch (e) { status.textContent = 'ERROR ' + (e.stack || e); }
+</script>
