@@ -123,6 +123,7 @@
       const request=options.request,doc=options.doc,instance=options.companionInstance,storage=options.storage;
       const found=read(role,storage),why=blocking(found);
       if(why)return blockedResult(why,found);
+      if(found.status==='record' && root.FalsifyAttemptLedger)root.FalsifyAttemptLedger.capture(found.record,storage);
       if(!INSTANCE.test(instance))fail('rejected','연결된 companion의 인스턴스 식별이 없어 실행하지 않았습니다.');
       if(!request||typeof request!=='object'||!doc||typeof doc!=='object')fail('rejected','요청 식별이 없어 실행하지 않았습니다.');
       if(typeof options.hashHarness!=='function')fail('rejected','harness 검증을 재사용하지 못해 실행하지 않았습니다.');
@@ -170,7 +171,9 @@
     else if(Object.hasOwn(patch,'finishedAt')){if(!Number.isFinite(patch.finishedAt))return {ok:false,status:'rejected',message:'완료 시각이 올바르지 않습니다.'};next.finishedAt=patch.finishedAt;next.expiresAt=patch.finishedAt+RETENTION_MS;}
     else if(next.finishedAt==null)return {ok:false,status:'rejected',message:'끝난 작업의 시각이 없습니다. 기록은 바꾸지 않았습니다.'};
     if(!valid(next))return {ok:false,status:'rejected',message:'대기 기록 검사가 통과하지 않아 덮어쓰지 않았습니다.'};
-    return put(record.role,next,storage);
+    const saved=put(record.role,next,storage);
+    if(saved.ok && !['open','running'].includes(next.disposition) && root.FalsifyAttemptLedger)root.FalsifyAttemptLedger.capture(next,storage);
+    return saved;
     });}catch{return {ok:false,status:'write-failed',message:'대기 기록을 바꾸지 못했습니다.'};}
   }
   async function discard(role,options={}){
@@ -183,6 +186,7 @@
     const found=read(role,options.storage);
     if(found.status==='record' && (!options.expectedRequestId || found.record.requestId!==options.expectedRequestId))return {ok:false,status:'stale',message:'표시한 요청이 바뀌어 대기 기록을 지우지 않았습니다.'};
     if(found.status==='corrupt' && options.expectedStatus!=='corrupt')return {ok:false,status:'stale',message:'표시한 기록이 바뀌어 지우지 않았습니다.'};
+    if(found.status==='record' && root.FalsifyAttemptLedger){try{root.FalsifyAttemptLedger.capture(found.record,options.storage);}catch{return {ok:false,status:'write-failed',message:'시도 기록을 저장하지 못해 대기 기록을 보존했습니다.'};}}
     try{box.removeItem(storageKey(role));}catch{return {ok:false,status:'write-failed',message:'대기 기록을 지우지 못했습니다.'};}
     return {ok:true,status:'discarded'};
     });}catch{return {ok:false,status:'write-failed',message:'대기 기록을 지우지 못했습니다.'};}
