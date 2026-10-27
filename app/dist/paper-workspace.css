@@ -20,8 +20,7 @@
 .paper-text-layer ::selection{background:var(--yellow)}
 .paper-after-label{font-size:13px;font-weight:600;margin:0 0 8px}
 .paper-inline{margin:12px 0;padding:12px 0;border-top:1px solid var(--line)}
-.paper-inline.is-open{position:absolute;z-index:5;width:min(360px,calc(100% - 16px));margin:0;padding:12px;background:var(--paper);border:1px solid var(--line);border-radius:var(--radius)}
-.paper-inline.is-open.is-docked{position:fixed;left:8px;right:8px;bottom:8px;top:auto;width:auto}
+.paper-inline.is-open{position:fixed;z-index:5;right:16px;top:88px;width:min(360px,calc(100% - 32px));max-height:calc(100vh - 104px);overflow:auto;margin:0;padding:12px;background:var(--paper);border:1px solid var(--line);border-radius:var(--radius)}
 .paper-inline-before{white-space:pre-wrap;background:var(--surface);padding:10px 12px;border-radius:var(--radius)}
 .paper-inline label{font-weight:600}
 .paper-edits{list-style:none;margin:8px 0 16px;padding:0}
@@ -39,7 +38,7 @@
 .paper-toolbar{flex-wrap:wrap}
 .paper-workspace .button-row button{width:100%}
 .paper-stage{max-height:min(70vh,720px)}
-.paper-inline.is-open{position:fixed;left:8px;right:8px;bottom:8px;top:auto;width:auto}
+.paper-inline.is-open{left:8px;right:8px;bottom:8px;top:auto;width:auto;max-height:55vh}
 }
 
 .paper-after-nav{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;margin:6px 0}.paper-after-nav[hidden]{display:none}

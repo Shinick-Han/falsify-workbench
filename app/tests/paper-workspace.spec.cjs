@@ -197,7 +197,7 @@ test('markup: scripts, optional AI disclosure, empty import mount, and bounded s
   assert.match(fs.readFileSync(path.resolve(__dirname,'../dist/visual-workflow.js'),'utf8'),/#red-ai-optional > summary/);
   assert.match(RED,/origin:'external-ai-import'/);assert.match(RED,/origin:'ai-proposal'/);
   assert.match(CSS,/max-height:\s*min\(70vh,\s*720px\)/);assert.match(CSS,/@media\(max-width:700px\)/);
-  assert.match(HTML,/id="paper-page-jump"/);assert.match(CSS,/\.paper-inline\.is-open\{position:absolute/);
+  assert.match(HTML,/id="paper-page-jump"/);assert.match(CSS,/\.paper-inline\.is-open\{position:fixed/);
   assert.match(CSS,/\.paper-inline\.is-open\{position:fixed|\.paper-inline\.is-open.is-docked\{position:fixed/);
   assert.doesNotMatch(CSS,/box-shadow/);
   assert.doesNotMatch(WS+CSS,/\p{Extended_Pictographic}/u);
@@ -237,12 +237,12 @@ test('reader: file input paints one original page before extraction, and the sec
   assert.match(textOf(v.get('paper-edits')),/직접 편집/);assert.doesNotMatch(textOf(v.get('paper-edits')),/AI 제안|gpt-/);
   assert.match(v.get('paper-edit-status').textContent,/모델 실행으로 기록하지 않습니다/);
   v.get('paper-inline-after').value='';v.get('paper-before-stage').dispatchEvent(new Event('mouseup'));
-  assert.equal(v.get('paper-inline-after').value,'Alpha');
+  assert.equal(v.get('paper-inline-after').value,'Beta');
   v.get('paper-inline-after').value='';v.get('paper-inline-apply').click();
-  assert.equal(v.edits.added.at(-1).after,'');assert.equal(v.edits.added.at(-1).before,'Alpha');
+  assert.equal(v.ws.getEditSnapshot().edits[0].after,'');assert.equal(v.edits.added.at(-1).before,'Alpha');
   v.get('paper-before-stage').dispatchEvent(new Event('mouseup'));
   v.get('paper-inline-after').value='   ';v.get('paper-inline-apply').click();
-  assert.match(v.get('paper-edit-status').textContent,/공백만/);assert.equal(v.edits.added.at(-1).after,'');
+  assert.match(v.get('paper-edit-status').textContent,/공백만/);assert.equal(v.ws.getEditSnapshot().edits[0].after,'');
   v.document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file,result:{segments:[
     {id:'s0',label:'PDF p. 1',text:'Unique claim stays.'},{id:'s1',label:'PDF p. 2',text:'Alpha shared'},{id:'s2',label:'PDF p. 2',text:'Alpha shared'}]}}}));
   v.ws.acceptProposals([
@@ -257,7 +257,7 @@ test('reader: file input paints one original page before extraction, and the sec
   assert.equal(v.edits.added.length,before,'ambiguous and missing proposals are not applied');
   proposals[0].click();assert.equal(v.edits.added.at(-1).origin,'external-ai-import');
   const jumped=v.edits.last.add({pageIndex:1,before:'Later',after:'Now',origin:'human'});
-  buttons(v,'jump',jumped)[0].click();
+  v.get('paper-inline-cancel').click();buttons(v,'edit',jumped)[0].click();
   assert.equal(v.get('paper-page-label').textContent,'2 / 2쪽');
   buttons(v,'toggle',jumped)[0].click();
   const off=buttons(v,'toggle',jumped)[0];assert.equal(off.textContent,'켜기');assert.equal(off.getAttribute('aria-pressed'),'false');
@@ -593,8 +593,7 @@ test('selection: one word keeps its own range, and the editor sits on that rect'
   assert.equal(v.get('paper-inline-after').value,'words');
   assert.match(v.get('paper-inline-meta').textContent,/70, 20, 130, 32/);
   assert.equal(v.get('paper-inline').classList.contains('is-open'),true);
-  assert.equal(v.get('paper-inline').classList.contains('is-docked'),false);
-  assert.equal(v.get('paper-inline').style.left,'80px');assert.equal(v.get('paper-inline').style.top,'70px');
+  assert.equal(v.get('paper-inline').classList.contains('is-docked'),true);
   assert.equal(v.document.activeElement,v.get('paper-inline-after'));
   v.document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file,result:{segments:[{id:'s0',label:'PDF p. 1',text:'Alpha words stay'}]}}}));
   v.get('paper-inline-after').value='terms';v.get('paper-inline-apply').click();
@@ -608,7 +607,7 @@ test('selection: one word keeps its own range, and the editor sits on that rect'
     v.get('paper-before-stage').dispatchEvent(new Event('mouseup'));
     assert.equal(v.get('paper-inline').classList.contains('is-docked'),true);
     keydown(v.get('paper-inline'),{key:'Escape'});
-    assert.equal(v.get('paper-inline').hidden,true);assert.equal(v.document.activeElement,v.get('paper-before-stage'));
+    assert.equal(v.get('paper-inline').hidden,true);assert.equal(v.document.activeElement,buttons(v,'edit')[0]);
   }finally{global.matchMedia=prior;}
 });
 
@@ -1122,3 +1121,18 @@ test('export intent: an eight-item external rewrite batch with source-proven hyp
 
 (async()=>{let passed=0;for(const [name,fn] of tests){try{await fn();passed++;console.log('PASS '+name);}catch(e){console.error('FAIL '+name+'\n'+(e.stack||e));process.exitCode=1;}}
   console.log(JSON.stringify({file:'paper-workspace.spec.cjs',passed,failed:tests.length-passed,total:tests.length}));})();
+
+test('paragraph and change item reopen saved text and protect an unfinished edit',async()=>{
+  const v=mount({paragraphPdf:paragraphMock('Original paragraph.')});
+  v.file(pdfFile(pdfBytes('MARKER-A')));await until(()=>/문단을 클릭/.test(v.get('paper-before-status').textContent),'paragraph');
+  clickParagraph(v);v.get('paper-inline-after').value='Saved replacement.';v.get('paper-inline-apply').click();
+  const id=v.ws.getEditSnapshot().edits[0].id;
+  clickParagraph(v);assert.equal(v.get('paper-inline-after').value,'Saved replacement.');
+  v.get('paper-inline-after').value='Unfinished replacement.';buttons(v,'edit',id)[0].click();
+  assert.equal(v.get('paper-inline-after').value,'Unfinished replacement.');assert.match(v.get('paper-edit-status').textContent,/적용하거나 취소/);assert.match(v.get('paper-inline-meta').textContent,/적용하거나 취소/);
+  v.get('paper-inline-cancel').click();assert.equal(v.document.activeElement,buttons(v,'edit',id)[0]);buttons(v,'edit',id)[0].click();
+  assert.equal(v.get('paper-inline-after').value,'Saved replacement.');
+  assert.doesNotMatch(textOf(v.get('paper-edits')),/After 수정/);
+  v.get('paper-inline-after').value='Revised replacement.';v.get('paper-inline-apply').click();
+  assert.equal(v.ws.getEditSnapshot().edits[0].after,'Revised replacement.');
+});

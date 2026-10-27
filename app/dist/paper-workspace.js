@@ -559,20 +559,17 @@
       ui.afterLabel.textContent=!output?'아직 생성본이 없습니다':stale()?'마지막 생성본 · 현재 편집과 다름':'현재 생성본';
       syncNav();
     }
-    function narrowViewport(){
-      try{return typeof matchMedia==='function'&&!!matchMedia('(max-width:700px)').matches;}catch{return false;}
-    }
     function placeInline(){
       ui.inline.classList.remove('is-open','is-docked');
-      if(ui.inline.style){ui.inline.style.left='';ui.inline.style.top='';}
       if(!inline)return;
-      ui.inline.classList.add('is-open');
-      const rect=inline.clientRect;
-      let rootRect=null;
-      try{rootRect=typeof ui.root.getBoundingClientRect==='function'?ui.root.getBoundingClientRect():null;}catch{rootRect=null;}
-      if(narrowViewport()||!rect||!(rect.width>0)||!rootRect||!(rootRect.width>0)){ui.inline.classList.add('is-docked');return;}
-      ui.inline.style.left=round(Math.max(8,rect.left-rootRect.left))+'px';
-      ui.inline.style.top=round(Math.max(8,rect.bottom-rootRect.top+8))+'px';
+      ui.inline.classList.add('is-open');ui.inline.classList.add('is-docked');
+    }
+    function canLeaveInline(){
+      if(!inline||ui.inlineAfter.value===inline.after)return true;
+      const message='현재 편집을 적용하거나 취소한 뒤 다른 위치를 선택하세요.';
+      setEditStatus(message,true);ui.inlineMeta.textContent=message;
+      ui.inlineAfter.focus();
+      return false;
     }
     function renderInline(){
       ui.inline.hidden=!inline;
@@ -607,19 +604,17 @@
       if(!edits.length){const li=doc.createElement('li');li.textContent='아직 편집이 없습니다.';ui.edits.append(li);}
       for(const edit of edits){
         const li=doc.createElement('li');
-        const jump=doc.createElement('button');jump.type='button';jump.className='button secondary';jump.dataset.edit=edit.id;jump.dataset.act='jump';
+        const jump=doc.createElement('button');jump.type='button';jump.className='button secondary';jump.dataset.edit=edit.id;jump.dataset.act='edit';
         jump.textContent='쪽 '+(Number(edit.pageIndex)+1)+' · '+String(edit.before||'').slice(0,40)+' → '+String(edit.after||'').slice(0,40);
         const toggle=doc.createElement('button');toggle.type='button';toggle.className='button secondary';toggle.dataset.edit=edit.id;toggle.dataset.act='toggle';
         toggle.textContent=edit.enabled===false?'켜기':'끄기';toggle.setAttribute('aria-pressed',String(edit.enabled!==false));
-        const change=doc.createElement('button');change.type='button';change.className='button secondary';change.dataset.edit=edit.id;change.dataset.act='edit';change.textContent='After 수정';
         const del=doc.createElement('button');del.type='button';del.className='button secondary';del.dataset.edit=edit.id;del.dataset.act='delete';del.textContent='삭제';
         const note=doc.createElement('span');note.className='paper-edit-origin';note.textContent=originText(edit.origin,modelById.get(edit.id));
         const cause=editCause(edit.id);
-        jump.addEventListener('click',()=>onJump(edit));
+        jump.addEventListener('click',()=>loadInline(edit));
         toggle.addEventListener('click',()=>{if(session)session.setEnabled(edit.id,edit.enabled===false);});
-        change.addEventListener('click',()=>loadInline(edit));
         del.addEventListener('click',()=>onDelete(edit));
-        li.append(jump,toggle,change,del,note);if(cause)li.append(cause);ui.edits.append(li);
+        li.append(jump,toggle,del,note);if(cause)li.append(cause);ui.edits.append(li);
       }
       ui.undo.disabled=!snapshot||!snapshot.canUndo;
       ui.redo.disabled=!snapshot||!snapshot.canRedo;
@@ -906,11 +901,12 @@
       tableSeq++;if(tableCtl){tableCtl.abort();tableCtl=null;}
       if(pageText?.tableLayer){pageText.tableLayer.remove();pageText.tableLayer=null;}
       if(pageText)pageText.tableCells=null;
-      if(closeInline&&inline?.table){inline=null;renderInline();}
+      if(closeInline&&inline?.table&&ui.inlineAfter.value===inline.after){inline=null;renderInline();}
       say(ui.tableStatus,'');
     }
     function setEditMode(mode){
       if(mode==='table'&&ui.modeTable.disabled)return;
+      if(!canLeaveInline())return;
       clearTables(true);if(inspectCtl){inspectCtl.abort();inspectCtl=null;}
       editMode=mode;ui.modeText.setAttribute('aria-pressed',String(mode==='text'));ui.modeTable.setAttribute('aria-pressed',String(mode==='table'));
       ui.modeHelp.textContent=mode==='table'?'셀을 눌러 값을 고치세요. 점선 셀은 지원 범위를 확인하세요.':'문단을 누르거나 글자를 드래그하세요.';
@@ -938,7 +934,7 @@
           button.setAttribute('aria-label',(cell.row+1)+'행 '+(cell.col+1)+'열'+(ready?' · '+selection.before:' · '+tableReason(selection?.reason)));
           button.setAttribute('aria-disabled',String(!ready));button.title=ready?'이 셀 편집':tableReason(selection?.reason);
           button.addEventListener('click',()=>{
-            if(!live())return;
+            if(!live()||!canLeaveInline())return;
             if(!ready){say(ui.tableStatus,tableReason(selection?.reason),true);return;}
             if(selection.sourceSha256!==hash||selection.revision!==revision||selection.pageIndex!==display.pageIndex||!validBbox(selection.anchor?.bbox)||!String(cell.alias||'').startsWith('table:'))return;
             tableBindings.set(cell.alias,{fileHash:hash,cellBbox:cell.cellBbox.slice()});
@@ -957,7 +953,7 @@
       finally{if(tableCtl===ctl)tableCtl=null;}
     }
     function openParagraph(event){
-      if(editMode!=='text'||!pageText||!pageText.paragraphs||inline||event.detail>1||fieldTarget(event.target))return;
+      if(editMode!=='text'||!pageText||!pageText.paragraphs||event.detail>1||fieldTarget(event.target))return;
       const sel=typeof doc.getSelection==='function'?doc.getSelection():null;
       if(sel&&!sel.isCollapsed)return;
       const rect=pageText.pageEl.getBoundingClientRect();
@@ -966,6 +962,7 @@
       const y=(event.clientY-rect.top)*pageText.paragraphHeight/rect.height;
       const hits=pageText.paragraphs.filter(p=>x>=p.bbox[0]&&x<=p.bbox[2]&&y>=p.bbox[1]&&y<=p.bbox[3]);
       if(hits.length!==1)return;
+      if(!canLeaveInline())return;
       const p=hits[0],id='paragraph:'+pageText.pageIndex+':'+p.id;
       if(p.editable===false){setEditStatus('이 문단은 흐름 편집을 지원하지 않습니다. 글 선택 편집으로 위치를 확인할 수 있습니다.',true);return;}
       const existing=(snapshot&&snapshot.edits||[]).find(e=>e.segmentId===id&&e.before===p.text);
@@ -1015,7 +1012,7 @@
     }
     function captureSelection(){
       if(editMode!=='text')return;
-      if(inline&&ui.inlineAfter.value!==inline.after)return;
+      if(inline&&ui.inlineAfter.value!==inline.after){canLeaveInline();return;}
       const sel=typeof doc.getSelection==='function'?doc.getSelection():null;
       if(!sel||sel.isCollapsed||!sel.rangeCount||!pageText||!pageText.textEl)return;
       const textEl=pageText.textEl;
@@ -1057,16 +1054,18 @@
       const located=anchorFromSelection(pageText.items,pageText.viewBox,hits,geometry);
       if(!located){setEditStatus('선택한 글의 위치를 한 곳으로 확정하지 못해 편집으로 넣지 않았습니다.',true);return;}
       const segment=segmentFor(located.before,located.anchor,pageText.pageIndex);
-      inline={before:located.before,after:located.before,anchor:located.anchor,pageIndex:pageText.pageIndex,segmentId:segment?segment.id:undefined,editId:null,clientRect:clientBox(range)};
+      const existing=(snapshot?.edits||[]).find(e=>e.pageIndex===pageText.pageIndex&&e.before===located.before&&JSON.stringify(e.anchor?.bbox)===JSON.stringify(located.anchor?.bbox));
+      inline={before:located.before,after:existing?existing.after:located.before,anchor:existing?existing.anchor:located.anchor,pageIndex:pageText.pageIndex,segmentId:existing?existing.segmentId:segment?segment.id:undefined,editId:existing?existing.id:null,clientRect:clientBox(range)};
       renderInline();ui.inlineAfter.focus();
     }
     function loadInline(edit){
-      if(String(edit.segmentId||'').startsWith('table:')){
-        const mine=epoch,open=()=>{if(epoch!==mine||!(snapshot?.edits||[]).some(e=>e.id===edit.id))return;inline={table:true,before:edit.before,after:edit.after,anchor:edit.anchor,pageIndex:edit.pageIndex,segmentId:edit.segmentId,editId:edit.id};renderInline();ui.inlineAfter.focus();};
-        if(page===edit.pageIndex+1&&pageText)open();else void drawBefore(edit.pageIndex+1).then(open);return;
-      }
-      inline={before:edit.before,after:edit.after,anchor:edit.anchor,pageIndex:edit.pageIndex,segmentId:edit.segmentId,editId:edit.id};
-      onJump(edit);renderInline();ui.inlineAfter.focus();
+      if(!canLeaveInline())return;
+      const mine=epoch,open=()=>{
+        if(epoch!==mine||!(snapshot?.edits||[]).some(e=>e.id===edit.id)||!canLeaveInline())return;
+        inline={table:String(edit.segmentId||'').startsWith('table:'),before:edit.before,after:edit.after,anchor:edit.anchor,pageIndex:edit.pageIndex,segmentId:edit.segmentId,editId:edit.id};
+        renderInline();ui.inlineAfter.focus();
+      };
+      if(page===edit.pageIndex+1&&pageText)open();else void drawBefore(edit.pageIndex+1).then(open);
     }
     function crossAliasOverlap(candidate){
       const box=candidate.anchor&&candidate.anchor.bbox;
@@ -1075,6 +1074,11 @@
         const other=e.anchor&&e.anchor.bbox;
         return validBbox(box)&&validBbox(other)?box[0]<other[2]&&box[2]>other[0]&&box[1]<other[3]&&box[3]>other[1]:candidate.before.includes(e.before)||e.before.includes(candidate.before);
       });
+    }
+    function closeInline(){
+      const id=inline?.editId;inline=null;renderInline();
+      const target=id&&buttons(ui.edits).find(b=>b.dataset.edit===id&&b.dataset.act==='edit');
+      (target||ui.beforeStage).focus();
     }
     function applyInline(){
       const api=editsApi();
@@ -1096,7 +1100,7 @@
           if(built.error){setEditStatus(built.error,true);return;}
           session.add({pageIndex:inline.pageIndex,segmentId:segment.id,before:inline.before,after,anchor:built.anchor,origin:'human'});
         }
-        inline=null;renderInline();ui.beforeStage.focus();
+        closeInline();
         setEditStatus('직접 편집으로 기록했습니다. 모델 실행으로 기록하지 않습니다.');
       }catch(e){setEditStatus('편집을 저장하지 않았습니다. '+safeMessage(e),true);}
     }
@@ -1109,7 +1113,7 @@
       if(!session||!snapshot)return;
       const items=snapshot.edits||[],idx=items.findIndex(e=>e.id===edit.id);
       const neighbor=items[idx+1]||items[idx-1];
-      pendingFocus=neighbor?{id:neighbor.id,act:'jump'}:{act:'undo'};
+      pendingFocus=neighbor?{id:neighbor.id,act:'edit'}:{act:'undo'};
       session.remove(edit.id);
     }
     function acceptOne(index){
@@ -1490,7 +1494,7 @@
     }
     function onKey(e){
       if(e.defaultPrevented)return;
-      if(e.key==='Escape'&&inline){e.preventDefault();inline=null;renderInline();ui.beforeStage.focus();return;}
+      if(e.key==='Escape'&&inline){e.preventDefault();closeInline();return;}
       if(fieldTarget(e.target))return;
       if((e.ctrlKey||e.metaKey)&&(e.key==='z'||e.key==='Z')){
         e.preventDefault();
@@ -1554,7 +1558,7 @@
     ui.modeText.addEventListener('click',()=>setEditMode('text'));
     ui.modeTable.addEventListener('click',()=>setEditMode('table'));
     ui.inlineApply.addEventListener('click',applyInline);
-    ui.inlineCancel.addEventListener('click',()=>{inline=null;renderInline();ui.beforeStage.focus();});
+    ui.inlineCancel.addEventListener('click',closeInline);
     ui.draftOpt.addEventListener('change',renderChrome);
     ui.draftSave.addEventListener('click',saveDraft);
     ui.draftRestore.addEventListener('click',restoreDraft);
