@@ -35,7 +35,41 @@ test('layout policy is bounded, source-relative and rejects missing evidence',as
  const flow={schema:'falsify.paper-flow.v1',sourceSha256,items:[{kind:'paragraph',columns:2,blockIds:['p']}]};let source;
  const compile=async p=>(source=p.source,new TextEncoder().encode('%PDF-1.4'));
  const result=await composeDocument({document,flow,sourceBytes:src,layoutPolicy:{lineHeightScale:1.05,paragraphSpacingEm:0.5,columnGutterEm:1.2}},{compile});
- assert.match(source,/leading: 2\.6[0-9]*pt/);assert.match(source,/spacing: 5pt/);assert.match(source,/gutter: 12pt/);assert.equal(result.layoutPolicy.lineHeightScale,1.05);
+ assert.match(source,/leading: 0\.6825[0-9]*em/);assert.match(source,/spacing: 5pt/);assert.match(source,/gutter: 12pt/);assert.equal(result.layoutPolicy.lineHeightScale,1.05);
  for(const layoutPolicy of [{lineHeightScale:0.5},{fontScale:0.9},{columnGutterEm:3},{paragraphSpacingEm:NaN}]) await assert.rejects(composeDocument({document,flow,sourceBytes:src,layoutPolicy},{compile}),/Invalid layout policy/);
  const noEvidence=structuredClone(document);noEvidence.styles=[];await assert.rejects(composeDocument({document:noEvidence,flow,sourceBytes:src,layoutPolicy:{columnGutterEm:1}},{compile}),/requires source measurements/);
+});
+import {readFile,writeFile,mkdtemp,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {pathToFileURL} from 'node:url';
+import {spawnSync} from 'node:child_process';
+const compilerRoot=process.env.FALSIFY_TYPST_MODULES, wasmPath=process.env.FALSIFY_TYPST_WASM, fontPath=process.env.FALSIFY_TYPST_FONT, python=process.env.FALSIFY_PYMUPDF_PYTHON;
+test('compiled title and body have no interline ink overlap', {skip:!(compilerRoot && wasmPath && fontPath && python)},async()=>{
+ const {createTypstCompiler,createTypstFontBuilder}=await import(pathToFileURL(join(compilerRoot,'@myriaddreamin/typst.ts/dist/esm/compiler.mjs')));
+ const {loadFonts}=await import(pathToFileURL(join(compilerRoot,'@myriaddreamin/typst.ts/dist/esm/options.init.mjs')));
+ const {createTypstCompile}=await import('../src/paper-typst.mjs');
+ const wasm=await readFile(wasmPath), font=await readFile(fontPath), compile=createTypstCompile({createTypstCompiler,createTypstFontBuilder,loadFonts,getModule:()=>wasm});
+ const src=new TextEncoder().encode('source'), sourceSha256=createHash('sha256').update(src).digest('hex');
+ const title='Reversible epiblast regionalization determines differentiation potential of human pluripotent stem cells', body='The scientific paragraph describes measurements and experimental observations without changing any source content. '.repeat(14);
+ const make=(id,text,style,start)=>({id,text,source:{pageIndex:0,range:{start,end:start+text.length},characters:[{start,end:start+text.length,styleId:style}],lines:[]}});
+ const document={schema:'falsify.paper-document.v1',sourceSha256,pages:[{sourcePageIndex:0,width:400,height:600}],styles:[{id:'title',size:26,fontName:'Serif Bold'},{id:'body',size:10,fontName:'Serif'}],blocks:[make('title',title,'title',0),make('body',body,'body',title.length)]};
+ const flow={schema:'falsify.paper-flow.v1',sourceSha256,items:[{kind:'heading',span:'page',blockIds:['title']},{kind:'paragraph',columns:2,span:'column',blockIds:['body']}]};
+ const out=await composeDocument({document,flow,sourceBytes:src},{compile,fonts:{family:'Noto Serif',candidates:[{family:'Noto Serif',getBytes:()=>font}]}});
+ const temp=await mkdtemp(join(tmpdir(),'falsify-ink-'));try {
+  const path=join(temp,'proof.pdf');await writeFile(path,new Uint8Array(await out.file.arrayBuffer()));
+  const script=String.raw`import pymupdf,sys
+p=pymupdf.open(sys.argv[1])[0]
+log=p.get_bboxlog()
+for target in (26,10):
+ spans=[t for t in p.get_texttrace() if abs(t['size']-target)<.1 and t['type']==0 and len(t['chars'])>4]
+ assert len(spans)>=2, (target,len(spans))
+ boxes=[log[t['seqno']][1] for t in spans]
+ for i,a in enumerate(boxes):
+  for b in boxes[i+1:]:
+   if abs(a[1]-b[1])<1: continue
+   assert min(a[2],b[2])-max(a[0],b[0])<=0 or min(a[3],b[3])-max(a[1],b[1])<=0, (target,a,b)
+print('title and body paint bounds: no interline overlap')`;
+  const run=spawnSync(python,['-c',script,path],{encoding:'utf8'});assert.equal(run.status,0,run.stderr || run.stdout);
+ } finally {await rm(temp,{recursive:true,force:true});}
 });

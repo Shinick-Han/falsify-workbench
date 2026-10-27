@@ -194,9 +194,9 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
   if (!families.length && fonts.family) families.push(String(fonts.family));
   const bodySize=sourceProfile.bodyFontSize;
   if (families.length || bodySize) source+=`#set text(${families.length ? `font: (${families.map(typstString).join(', ')},)` : ''}${families.length && bodySize ? ', ' : ''}${bodySize ? `size: ${bodySize}pt` : ''})\n`;
-  const leading=bodySize && sourceProfile.bodyLineHeight ? sourceProfile.bodyLineHeight*(policy.lineHeightScale ?? 1)-bodySize : null;
-  if(policy.lineHeightScale!==undefined && (leading<0 || leading>bodySize)) fail('Layout policy exceeds supported source line rhythm');
-  source+=`#set par(justify: true${leading!==null && leading>=0 && leading<=bodySize ? `, leading: ${leading}pt` : ''}${policy.paragraphSpacingEm!==undefined ? `, spacing: ${policy.paragraphSpacingEm*bodySize}pt` : ''})\n#set text(hyphenate: true)\n`;
+  // Source baseline minus font size is not Typst leading: font ascent and
+  // descent differ across fonts. Let Typst use its natural leading by default.
+  source+=`#set par(justify: true${policy.paragraphSpacingEm!==undefined ? `, spacing: ${policy.paragraphSpacingEm*bodySize}pt` : ''})\n#set text(hyphenate: true)\n`;
   if(policy.columnGutterEm!==undefined) source+=`#set columns(gutter: ${policy.columnGutterEm*bodySize}pt)\n`;
   const files = {};
   const assetList = Array.isArray(assets) ? assets : assets?.assets || document.assets || [];
@@ -216,6 +216,24 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
   const blockById = new Map(document.blocks.map(b=>[b.id,b]));
   const styleById = new Map((document.styles || []).map(s=>[s.id,s]));
   const textById = new Map(document.blocks.filter(b=>typeof b.text==='string' && b.text.length && !assetOwned.has(b.id)).map(b=>[b.id,logicalText(b,changes.get(b.id)||[],new Set(),spacesFor(b))]));
+  // Set each paragraph's dominant source size as its local text context so
+  // natural em-based leading follows titles, body and captions independently.
+  function paragraphContext(blocks, kind, rendered) {
+    if(!rendered) return '';
+    const sizes=[];
+    for(const block of blocks) {
+      if(!block) continue;
+      const chars=block.source?.characters || [];
+      if(chars.length) for(const c of chars) {
+        const size=styleById.get(c.styleId)?.size;
+        if(Number.isFinite(size) && size>0) for(let n=0;n<Math.min(256,Math.max(1,(c.end||0)-(c.start||0)));n++) sizes.push(size);
+      } else {const size=styleById.get(block.styleId)?.size;if(Number.isFinite(size) && size>0) sizes.push(size);}
+    }
+    sizes.sort((a,b)=>a-b); const size=sizes[Math.floor(sizes.length/2)];
+    const heading=kind==='heading';
+    const settings=[size ? `#set text(size: ${size}pt)` : '',heading ? '#set par(justify: false)\n#set text(hyphenate: false)' : '',kind==='paragraph' && policy.lineHeightScale!==undefined ? `#set par(leading: ${0.65*policy.lineHeightScale}em)` : ''].filter(Boolean).join('\n');
+    return settings ? `#block[${settings}\n${rendered}]` : rendered;
+  }
   const furniture={enabled:runningFurniture===true, templates:[], retained:[]};
   const furnitureIds=new Set();
   furniture.plan=plan;
@@ -365,19 +383,19 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
           else {parts=[renderAsset(item.renderAssetId,item)].filter(Boolean); if(parts.length) for(const id of item.assetIds||[]) placedAssets.add(id);}
         } else if((item.assetIds||[]).length>1) assetFindings.push({code:'asset-union-required',assetIds:[...item.assetIds]});
         else parts=(item.assetIds||[]).map(id=>renderAsset(id,item)).filter(Boolean);
-        const above=captionOrder(item).filter(id=>item.captionPositions?.[id]==='above').map(id=>renderBlock(blockById.get(id))).filter(Boolean);
-        const below=captionOrder(item).filter(id=>item.captionPositions?.[id]!=='above').map(id=>renderBlock(blockById.get(id))).filter(Boolean);
+        const above=captionOrder(item).filter(id=>item.captionPositions?.[id]==='above').map(id=>paragraphContext([blockById.get(id)],'caption',renderBlock(blockById.get(id)))).filter(Boolean);
+        const below=captionOrder(item).filter(id=>item.captionPositions?.[id]!=='above').map(id=>paragraphContext([blockById.get(id)],'caption',renderBlock(blockById.get(id)))).filter(Boolean);
         if(parts.length && below.length) parts=[`#block(sticky: true)[${parts.join('\n')}]`];
         parts=[...above.map(caption=>`#block(sticky: true)[${caption}]`),...parts,...below];
       } else {
         parts=(item.blockIds||[]).filter(id=>!linkedCaptions.has(id)).map(id=>blockById.get(id)).filter(Boolean).map(b=>renderBlock(b));
         if(!item.inline) parts=parts.filter(Boolean);
       }
-      if(parts.length) {const rendered=item.inline ? parts.map((p,i)=>p+(i<parts.length-1 ? `#text(${typstString(item.joiners[i])})` : '')).join('') : parts.join(item.kind==='asset'?'\n\n':'\n'); group.push(item.kind==='heading' ? `#block(sticky: true)[${rendered}]` : rendered);groupItems.push({kind:item.kind,inline:!!item.inline,ids:[...(item.blockIds||[])]});}
+      if(parts.length) {const rendered=item.inline ? parts.map((p,i)=>p+(i<parts.length-1 ? `#text(${typstString(item.joiners[i])})` : '')).join('') : parts.join(item.kind==='asset'?'\n\n':'\n'); const scoped=item.kind==='asset' ? rendered : paragraphContext((item.blockIds||[]).map(id=>blockById.get(id)),item.kind,rendered); group.push(item.kind==='heading' ? `#block(sticky: true)[${scoped}]` : scoped);groupItems.push({kind:item.kind,inline:!!item.inline,ids:[...(item.blockIds||[])]});}
     }
     flush();
   } else {
-    source+=`#columns(2)[\n${document.blocks.map(b=>renderBlock(b)).filter(Boolean).join('\n\n')}\n]`;
+    source+=`#columns(2)[\n${document.blocks.map(b=>paragraphContext([b],b.kind || 'paragraph',renderBlock(b))).filter(Boolean).join('\n\n')}\n]`;
   }
   let compiled=await compile({source, fonts, files, signal}); abort(signal);
   // A full-width figure ends a column group. Balance a left-only final page
