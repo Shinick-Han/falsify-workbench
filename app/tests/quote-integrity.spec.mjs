@@ -10,7 +10,7 @@ function page(chars) {
 }
 const source = page([{ch:'A',x:1},{ch:'1',x:2},{ch:'.',x:3},{ch:' ',x:4},{ch:'B',x:5}]);
 const edits = [{id:'edit',before:'B',after:'C'}];
-const output = (citation = {ch:'1',x:2}) => page([{ch:'A',x:1},{ch:' ',x:2.5},{ch:'.',x:3},{ch:' ',x:4},{ch:'C',x:5}, {ch:' ',generated:true}, citation]);
+const output = (citation = {ch:'1',x:2}) => page([{ch:'A',x:1},{ch:' ',x:2.5,generated:true},{ch:'.',x:3},{ch:' ',x:4},{ch:'C',x:5}, {ch:' ',generated:true}, citation]);
 test('stationary citation can return to source reading order after an edit',()=>{
   assert.equal(matchesStationaryReorderedGlyphs(source,output(),edits),true);
 });
@@ -32,4 +32,10 @@ test('unchanged text cannot move through the reordered citation or be duplicated
   const duplicate=output(); duplicate.chars.push({u:49}); duplicate.text+='1'; assert.equal(matchesStationaryReorderedGlyphs(source,duplicate,edits),false);
   const ambiguous=page([{ch:'A',x:1},{ch:'1',x:2},{ch:'1',x:2},{ch:'.',x:3},{ch:' ',x:4},{ch:'B',x:5}]);
   assert.equal(matchesStationaryReorderedGlyphs(ambiguous,output(),edits),false);
+});
+
+test('a literal word gap after a stationary citation relocation is rejected',()=>{
+  const out=output();
+  out.chars[1].generated=false;
+  assert.equal(matchesStationaryReorderedGlyphs(source,out,edits),false);
 });
