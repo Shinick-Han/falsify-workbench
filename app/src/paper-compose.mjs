@@ -308,7 +308,7 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
     }
     return marker+runs.join('')+endMarker;
   }
-  function renderAsset(id, item, mark=true) {
+  function renderAsset(id, item, mark=true, fit=null) {
     const asset=assetList.find(a=>a.id===id); const original=(document.assets||[]).find(a=>a.id===id);
     if(original?.source && (!asset?.source || asset.source.pageIndex!==original.source.pageIndex || JSON.stringify(asset.source.bbox)!==JSON.stringify(original.source.bbox))) {assetFindings.push({code:'asset-source-mismatch',assetId:id}); return '';}
     const content=asset?.content; const bytes=content?.bytes;
@@ -327,7 +327,7 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
     // Scaling the width from the source rectangle preserves the capture's ratio.
     const maxHeight=Math.max(1,page.height-margins.top-margins.bottom-((item?.captionIds || []).length ? 20 : 0));
     const heightLimited=Number.isFinite(sourceHeight) && sourceHeight>0 && Number.isFinite(sourceWidth) && sourceWidth>0 ? maxHeight*sourceWidth/sourceHeight : Infinity;
-    const width=Number.isFinite(sourceWidth) && sourceWidth>0 ? `${Math.min(sourceWidth,available,heightLimited)}pt` : '100%';
+    const width=Number.isFinite(sourceWidth) && sourceWidth>0 ? (fit && Number.isFinite(sourceHeight) && sourceHeight>0 ? 'paper-fit-width' : `${Math.min(sourceWidth,available,heightLimited)}pt`) : '100%';
     const sourcePage=asset.source?.pageIndex ?? item?.source?.pageIndex;
     const marker=mark ? spanMarker(id,sourcePage,'start') : '', endMarker=mark ? spanMarker(id,sourcePage,'end') : '';
     const labels=mark ? (linkPlan?.targets||[]).filter(t=>t.label && !suppressedLabels.has(t.label) && t.assetItemId===item?.id).map(t=>`#box[]#label(${typstString(t.label)})`).join('') : '';
@@ -337,9 +337,11 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
     const linked=dest?.destinationLabel ? `#link(label(${typstString(dest.destinationLabel)}))[${image}]` : dest?.uri ? `#link(${typstString(dest.uri)})[${image}]` : image;
     if(Number.isFinite(sourceWidth) && sourceWidth>0 && Number.isFinite(sourceHeight) && sourceHeight>0) {
       const w=Math.min(sourceWidth,available,heightLimited),h=w*sourceHeight/sourceWidth;
+      if(fit) Object.assign(fit,{width:w,height:h,ratio:sourceWidth/sourceHeight});
+      const frameWidth=fit ? width : `${w}pt`, frameHeight=fit ? `(${width} * ${sourceHeight/sourceWidth})` : `${h}pt`;
       // The image owns a measured frame. Zero-size anchors cannot wrap onto a
       // preceding text line when an image fills the available width.
-      return `#box(width: ${w}pt, height: ${h}pt, baseline: ${h}pt)[#place(top + left)[${linked}]#place(top + left)[#box(width: 0pt, height: 0pt)[${marker}${labels}]]#place(bottom + left)[#box(width: 0pt, height: 0pt)[${endMarker}]]]`;
+      return `#box(width: ${frameWidth}, height: ${frameHeight}, baseline: ${frameHeight})[#place(top + left)[${linked}]#place(top + left)[#box(width: 0pt, height: 0pt)[${marker}${labels}]]#place(bottom + left)[#box(width: 0pt, height: 0pt)[${endMarker}]]]`;
     }
     return `#box[${marker}${labels}${linked}${endMarker}]`;
   }
@@ -415,15 +417,16 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
       const noteSizes=noteBlocks.flatMap(b=>(b?.source?.characters||[]).map(c=>styleById.get(c.styleId)?.size));
       const titlePageNote=measuredContinuous && itemIndex>=firstBodyIndex && item.kind==='paragraph' && item.span==='page' && item.source?.pageIndex===0 && Array.isArray(box) && box.length===4 && box.every(Number.isFinite) && box[0]>=0 && box[2]<=page.width && box[2]>box[0] && box[1]>=page.height*0.8 && box[3]<=page.height && box[3]>box[1] && box[3]-box[1]<=page.height*0.08 && noteSizes.length>0 && Number.isFinite(bodySize) && noteSizes.every(size=>Number.isFinite(size) && size>0 && size<=bodySize*0.95);
       const count=measuredContinuous && itemIndex<firstBodyIndex ? 1 : titlePageNote || (measuredContinuous && item.measuredColumns===2) ? 2 : item.span==='page'?1:(item.columns===2?2:1); if(count!==columns){flush();columns=count;}
-      let parts=[];
+      let parts=[], fit=null;
       if(item.kind==='asset') {
+        if(measuredContinuous && itemIndex>=firstBodyIndex && item.span==='page' && item.captionIds?.length) fit={};
         if(item.renderAssetId) {
           const capture=assetList.find(a=>a.id===item.renderAssetId), owned=capture?.source?.assetIds || [], blocks=capture?.source?.blockIds || [];
           const same=(a,b)=>a.length===b.length && a.every(x=>b.includes(x));
           if(!capture || !same(owned,item.assetIds||[]) || !same(blocks,item.blockIds||[]) || capture.source.pageIndex!==item.source?.pageIndex || JSON.stringify(capture.source.bbox)!==JSON.stringify(item.source?.bbox)) assetFindings.push({code:'asset-capture-mismatch',assetId:item.renderAssetId});
-          else {parts=[renderAsset(item.renderAssetId,item)].filter(Boolean); if(parts.length) for(const id of item.assetIds||[]) placedAssets.add(id);}
+          else {parts=[renderAsset(item.renderAssetId,item,true,fit)].filter(Boolean); if(parts.length) for(const id of item.assetIds||[]) placedAssets.add(id);}
         } else if((item.assetIds||[]).length>1) assetFindings.push({code:'asset-union-required',assetIds:[...item.assetIds]});
-        else parts=(item.assetIds||[]).map(id=>renderAsset(id,item)).filter(Boolean);
+        else parts=(item.assetIds||[]).map(id=>renderAsset(id,item,true,fit)).filter(Boolean);
         const captionItems=[...new Set(captionOrder(item).map(id=>captionById.get(id)))];
         for(const caption of captionItems) {
           const ids=caption.blockIds||[], position=id=>item.captionPositions?.[id]==='above'?'above':'below';
@@ -432,7 +435,16 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
         const above=captionItems.filter(c=>item.captionPositions?.[c.blockIds[0]]==='above').map(renderCaption).filter(Boolean);
         const below=captionItems.filter(c=>item.captionPositions?.[c.blockIds[0]]!=='above').map(renderCaption).filter(Boolean);
         if(parts.length && below.length) parts=[`#block(sticky: true)[${parts.join('\n')}]`];
-        parts=[...above.map(caption=>`#block(sticky: true)[${caption}]`),...parts,...below];
+        const aboveParts=above.map(caption=>`#block(sticky: true)[${caption}]`);
+        if(fit?.width && parts.length===1) {
+          // Measure caption and paragraph spacing with a zero-height frame.
+          // Keep at least half the original size or use the breakable page path.
+          const emptyFrame=`#box(width: ${fit.width}pt, height: 0pt)[]`;
+          const probe=[...aboveParts,below.length ? `#block(sticky: true)[${emptyFrame}]` : emptyFrame,...below].join('\n\n');
+          const content=[...aboveParts,...parts,...below].join('\n\n');
+          const budget=Math.max(1,fullHeight-20);
+          parts=[`#context { let overhead = measure(block(width: ${fullWidth}pt, [${probe}])).height; let remaining = ${budget}pt - overhead; let paper-fit-width = if remaining >= ${fit.height/2}pt { calc.min(${fit.width}pt, remaining * ${fit.ratio}) } else { ${fit.width}pt }; [${content}] }`];
+        } else parts=[...aboveParts,...parts,...below];
       } else {
         parts=(item.blockIds||[]).filter(id=>!linkedCaptions.has(id)).map(id=>blockById.get(id)).filter(Boolean).map(b=>renderBlock(b));
         if(!item.inline) parts=parts.filter(Boolean);
