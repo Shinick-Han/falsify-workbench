@@ -176,3 +176,14 @@ test('Typst build rejection leaves the moved builder to the build operation',asy
  const compile=createTypstCompile({createTypstCompiler:()=>compiler,createTypstFontBuilder:()=>builder,loadFonts:()=>()=>{}});
  await assert.rejects(compile({source:'x'}),/build failed/);assert.equal(moved,true);assert.deepEqual(freed,['shadow','compiler']);
 });
+
+test('source spacing survives styles, fragments, joiners and edits without changing offsets',async()=>{
+ for(const [start,end,after,joiner,expected] of [[null,null,'','','hello world'],[null,null,'',' ','hello world'],[3,7,'X','','helXrld'],[5,10,'earth','','hello earth'],[0,5,'hi','','hi world'],[3,7,'😀 long  After','','hel😀 long  Afterrld']]) {
+  const d=make();d.styles=[{id:'a',size:10},{id:'b',size:12}];d.blocks=[{id:'p',text:'helloworld',source:{pageIndex:0,range:{start:10,end:20},lines:[],wordSpaceOffsets:[15],characters:[{start:10,end:15,styleId:'a'},{start:15,end:20,styleId:'b'}]}}];
+  const fragments=[{id:'f1',parentBlockId:'p',text:'hello',source:{pageIndex:0,range:{start:10,end:15},lines:[],characters:[{start:10,end:15,styleId:'a'}]}},{id:'f2',parentBlockId:'p',text:'world',source:{pageIndex:0,range:{start:15,end:20},lines:[],characters:[{start:15,end:20,styleId:'b'}]}}];
+  const flow={schema:'falsify.paper-flow.v1',sourceSha256:d.sourceSha256,fragments,items:[{kind:'paragraph',inline:true,blockIds:['f1','f2'],joiners:[joiner]}]};const snapshot=structuredClone({d,flow});let source,checked;
+  const edits=start===null?[]:[{blockId:'p',pageIndex:0,start:start+10,end:end+10,before:'helloworld'.slice(start,end),after}];
+  await composeDocument({document:d,sourceBytes:src,flow,edits},{compile:async p=>(source=p.source,pdf),outputCheck:async p=>(checked=p.expectedBlocks,{checks:{content:{status:'pass'}},findings:[]})});
+  assert.equal(checked[0].text,expected); const rendered=[...source.matchAll(/#text\((?:size: \d+pt, )?"([^"\\]*)"\)/g)].map(m=>m[1]).join('');assert.equal(rendered,expected);assert.deepEqual({d,flow},snapshot);
+ }
+});

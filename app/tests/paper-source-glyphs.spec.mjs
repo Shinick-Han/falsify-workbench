@@ -19,3 +19,15 @@ test('unmatched and ambiguous source geometry is unavailable; new unsupported te
  const result=readSourceGlyphs({bytes,document:doc});assert.equal(result.glyphs.length,1);assert.equal(result.unavailable.length,2);assert.ok(result.unavailable.every(x=>x.reason==='ambiguous-paint-match'));
  let generated;const out=await composeDocument({document:doc,sourceBytes:bytes,edits:[{blockId:block.id,pageIndex:0,start:glyph.start,end:glyph.end,before:'\ufffd',after:'\u{10ffff}'}]},{compile:async p=>(generated=p,new TextEncoder().encode('%PDF-1.4\n'))});assert.equal(Object.keys(generated.files).length,1);assert.ok(generated.source.includes('\u{10ffff}'));assert.equal(out.verification.sourceGlyphs.glyphs.length,1);
 });
+
+test('fragmented source glyphs preserve untargeted artwork across replacement and deletion',async()=>{
+ const bytes=fixture(),doc=await readDocument({file:bytes}),block=doc.blocks.find(b=>b.text.includes('\ufffd')),glyphs=readSourceGlyphs({bytes,document:doc}).glyphs;
+ const cut=glyphs[0].end,range=block.source.range;
+ const fragments=[[range.start,cut],[cut,range.end]].map(([start,end],i)=>({...structuredClone(block),id:`part${i}`,parentBlockId:block.id,text:block.text.slice(start-range.start,end-range.start),source:{...structuredClone(block.source),range:{start,end},characters:block.source.characters.filter(c=>c.start>=start && c.end<=end),lines:block.source.lines.filter(l=>l.range.start<end && l.range.end>start).map(l=>({...l,range:{start:Math.max(start,l.range.start),end:Math.min(end,l.range.end)}}))}}));
+ const flow={schema:'falsify.paper-flow.v1',sourceSha256:doc.sourceSha256,fragments,items:doc.blocks.map(b=>b.id===block.id?{kind:'paragraph',inline:true,blockIds:fragments.map(f=>f.id),joiners:['']}:{kind:'paragraph',blockIds:[b.id]})};const snapshot=structuredClone({doc,flow});
+ for(const after of ['X','']) {let payload,expected; const start=glyphs[0].start,end=cut+1;
+  const out=await composeDocument({document:doc,sourceBytes:bytes,flow,edits:[{blockId:block.id,pageIndex:0,start,end,before:block.text.slice(start-range.start,end-range.start),after}]},{compile:async p=>(payload=p,new TextEncoder().encode('%PDF-1.4\n')),outputCheck:async p=>(expected=p.expectedBlocks,{checks:{content:{status:'pass'}},findings:[]})});
+  assert.equal(out.verification.sourceGlyphs.glyphs.length,1);assert.equal(out.verification.sourceGlyphs.glyphs[0].start,glyphs[1].start);assert.equal(Object.keys(payload.files).length,1);assert.ok(!expected.map(x=>x.text).join('').includes('\ufffd'));
+ }
+ assert.deepEqual({doc,flow},snapshot);
+});

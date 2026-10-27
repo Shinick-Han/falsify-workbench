@@ -25,13 +25,19 @@ function lineBoundaries(block) {
   if (lines.length && prev!==range.end) fail('Incomplete line ranges');
   return bounds;
 }
-function logicalText(block, changes, omitted = new Set()) {
-  const raw=block.text, bounds=new Set(lineBoundaries(block));
+function separators(block) {
+  const raw=block.text, base=block.source.range.start;
+  const hints=new Set((block.source.wordSpaceOffsets || []).filter(x=>Number.isInteger(x) && x>base && x<base+raw.length).map(x=>x-base));
+  const guessed=lineBoundaries(block).filter(i=>i>0 && i<raw.length && !/\s/u.test(raw[i-1]) && !/\s/u.test(raw[i]) && raw[i-1]!=='-' && !(raw[i-1]==='−' && /[0-9]/u.test(raw[i])));
+  return new Set([...guessed,...hints].filter(i=>! /\s/u.test(raw[i-1]) && ! /\s/u.test(raw[i])));
+}
+function logicalText(block, changes, omitted = new Set(), spaces = separators(block)) {
+  const raw=block.text;
   let logical=''; const before=[], after=[];
   // Map each source offset to both sides of any inserted line separator.
   for (let i=0;i<=raw.length;i++) {
     before[i]=logical.length;
-    if (bounds.has(i) && i>0 && i<raw.length && !/\s/u.test(raw[i-1]) && !/\s/u.test(raw[i]) && raw[i-1]!=='-' && !(raw[i-1]==='−' && /[0-9]/u.test(raw[i]))) logical+=' ';
+    if (spaces.has(i)) logical+=' ';
     after[i]=logical.length;
     if (i<raw.length && !omitted.has(i)) logical+=raw[i];
   }
@@ -47,7 +53,7 @@ function logicalText(block, changes, omitted = new Set()) {
 // were separate words. The inserted space is a layout convention, not evidence.
 function ambiguousBoundaries(block, changes) {
   const raw=block.text;
-  return lineBoundaries(block).filter(i=>i>0 && i<raw.length &&
+  return lineBoundaries(block).filter(i=>!(block.source.wordSpaceOffsets||[]).includes(i+block.source.range.start) && i>0 && i<raw.length &&
     !changes.some(e=>e.start<i && i<e.end) &&
     !/\s/u.test(raw[i-1]) && !/\s/u.test(raw[i]) && raw[i-1]!=='-' &&
     !(raw[i-1]==='−' && /[0-9]/u.test(raw[i])));
@@ -63,7 +69,7 @@ export async function composeDocument({document, edits=[], flow, assets, signal,
   const originalFonts=fonts, glyphLookup=fonts.hasGlyph;
   const snapshots=(fonts.candidates || []).map(c=>{const b=c.getBytes?.(); const bytes=b instanceof Uint8Array ? Uint8Array.from(b) : null; return {id:c.id,family:c.family,sha256:c.sha256,getBytes:()=>bytes?.slice() ?? null};});
   const glyphResults=new Map();
-  if(typeof glyphLookup==='function') for(const cp of new Set(Array.from((document?.blocks||[]).map(b=>b.text||'').join('')+edits.map(e=>e.after||'').join(''), c=>c.codePointAt(0)))) {
+  if(typeof glyphLookup==='function') for(const cp of new Set(Array.from((document?.blocks||[]).map(b=>b.text||'').join('')+edits.map(e=>e.after||'').join('')+' ', c=>c.codePointAt(0)))) {
     if(cp===9 || cp===10 || cp===13) continue;
     try {glyphResults.set(cp,Promise.resolve(glyphLookup.call(originalFonts,cp)));} catch(error) {glyphResults.set(cp,Promise.reject(error));}
   }
@@ -82,6 +88,7 @@ export async function composeDocument({document, edits=[], flow, assets, signal,
     const list=changes.get(b.id)||[]; if(list.some(e=>start<e.end && end>e.start)) fail('Overlapping edit targets');
     list.push({start,end,after:edit.after}); changes.set(b.id,list);
   }
+  const projectedSpaces=new Map(), projectedAmbiguous=[];
   if (flow?.fragments?.length) {
     const parents=new Map(document.blocks.map(b=>[b.id,b])), groups=new Map();
     for(const f of flow.fragments) {
@@ -92,7 +99,15 @@ export async function composeDocument({document, edits=[], flow, assets, signal,
     for(const [id,group] of groups) {
       const parent=parents.get(id), pr=parent.source.range; group.sort((a,b)=>a.source.range.start-b.source.range.start);
       let cursor=pr.start; for(const f of group) {if(f.source.range.start!==cursor) fail('Flow fragments do not cover parent exactly'); cursor=f.source.range.end;} if(cursor!==pr.end) fail('Flow fragments do not cover parent exactly');
-      for(const edit of changes.get(id)||[]) {
+      const parentChanges=changes.get(id)||[], parentSpaces=separators(parent);
+      const ambiguous=new Set(ambiguousBoundaries(parent,parentChanges));
+      for(const f of group) {
+        const start=f.source.range.start-pr.start, end=f.source.range.end-pr.start;
+        const spaces=new Set([...parentSpaces].filter(i=>i>=start && i<end && !parentChanges.some(e=>e.start<i && i<e.end)).map(i=>i-start));
+        projectedSpaces.set(f.id,spaces);
+        for(const i of ambiguous) if(i>=start && i<end) projectedAmbiguous.push({blockId:f.id,offset:pr.start+i});
+      }
+      for(const edit of parentChanges) {
         const a=pr.start+edit.start, b=pr.start+edit.end, overlap=group.filter(x=>a<x.source.range.end && b>x.source.range.start);
         for(const [i,f] of overlap.entries()) {const r=f.source.range, list=changes.get(f.id)||[]; list.push({start:Math.max(a,r.start)-r.start,end:Math.min(b,r.end)-r.start,after:i===0?edit.after:''}); changes.set(f.id,list);}
       }
@@ -111,6 +126,11 @@ export async function composeDocument({document, edits=[], flow, assets, signal,
     }
     for(const block of document.blocks) if(block.text && !owners.has(block.id)) fail('Flow omits text block');
   }
+  // An inline joiner already ending in whitespace supplies a fragment's leading separator.
+  for(const item of flow?.items || []) if(item.inline && Array.isArray(item.joiners)) for(let i=1;i<(item.blockIds||[]).length;i++) {
+    if (/\s$/u.test(item.joiners[i-1] || '')) projectedSpaces.get(item.blockIds[i])?.delete(0);
+  }
+  const spacesFor=b=>projectedSpaces.get(b.id) || separators(b);
   const assetOwned = new Set((flow?.items || []).filter(item=>item.kind==='asset').flatMap(item=>item.blockIds || []));
   const orderedById=new Map(document.blocks.map(b=>[b.id,b]));
   const linked=new Set((flow?.items||[]).filter(i=>i.kind==='asset').flatMap(i=>i.captionIds||[]));
@@ -119,7 +139,7 @@ export async function composeDocument({document, edits=[], flow, assets, signal,
   const glyphsByBlock=new Map();
   for(const glyph of sourceGlyphResult.glyphs) {const list=glyphsByBlock.get(glyph.blockId)||[]; list.push(glyph); glyphsByBlock.set(glyph.blockId,list);}
   const omittedFor=b=>new Set((glyphsByBlock.get(b.id)||[]).flatMap(g=>Array.from({length:g.end-g.start},(_,i)=>g.start-b.source.range.start+i)));
-  let expectedBlocks=orderedBlocks.filter(b=>typeof b?.text==='string' && b.text.length).map(b=>({id:b.id,text:logicalText(b,changes.get(b.id)||[],omittedFor(b))}));
+  let expectedBlocks=orderedBlocks.filter(b=>typeof b?.text==='string' && b.text.length).map(b=>({id:b.id,text:logicalText(b,changes.get(b.id)||[],omittedFor(b),spacesFor(b))}));
   if(flow) for(const item of flow.items.filter(i=>i.inline)) {
     if(!Array.isArray(item.joiners) || item.joiners.length!==(item.blockIds||[]).length-1 || item.joiners.some(j=>typeof j!=='string')) fail('Invalid inline joiners');
     const indexes=item.blockIds.map(id=>expectedBlocks.findIndex(b=>b.id===id));
@@ -127,9 +147,9 @@ export async function composeDocument({document, edits=[], flow, assets, signal,
     const text=indexes.map((idx,i)=>expectedBlocks[idx].text+(item.joiners[i]||'')).join('');
     expectedBlocks.splice(indexes[0],indexes.length,{id:item.blockIds[0],text});
   }
-  const artworkBlocks=document.blocks.filter(b=>assetOwned.has(b.id) && b.text).map(b=>({id:b.id,text:logicalText(b,[])}));
+  const artworkBlocks=document.blocks.filter(b=>assetOwned.has(b.id) && b.text).map(b=>({id:b.id,text:logicalText(b,[],new Set(),spacesFor(b))}));
   const texts=expectedBlocks.map(b=>b.text);
-  const ambiguous=document.blocks.filter(b=>typeof b.text==='string' && b.text.length).flatMap(b=>ambiguousBoundaries(b,changes.get(b.id)||[]).map(offset=>({blockId:b.id,offset:offset+b.source.range.start})));
+  const ambiguous=[...projectedAmbiguous,...document.blocks.filter(b=>!projectedSpaces.has(b.id) && typeof b.text==='string' && b.text.length).flatMap(b=>ambiguousBoundaries(b,changes.get(b.id)||[]).map(offset=>({blockId:b.id,offset:offset+b.source.range.start})))];
   const coverage=await inspectFonts(texts.join('\n'),fonts); abort(signal);
   const page=document.pages[0]; if(!Number.isFinite(page.width)||!Number.isFinite(page.height)||page.width<=0||page.height<=0) fail('Invalid page size');
   // Every paper string remains an argument to text(), never executable markup.
@@ -142,7 +162,7 @@ export async function composeDocument({document, edits=[], flow, assets, signal,
   const assetList = Array.isArray(assets) ? assets : assets?.assets || document.assets || [];
   const blockById = new Map(document.blocks.map(b=>[b.id,b]));
   const styleById = new Map((document.styles || []).map(s=>[s.id,s]));
-  const textById = new Map(document.blocks.filter(b=>typeof b.text==='string' && b.text.length && !assetOwned.has(b.id)).map(b=>[b.id,logicalText(b,changes.get(b.id)||[])]));
+  const textById = new Map(document.blocks.filter(b=>typeof b.text==='string' && b.text.length && !assetOwned.has(b.id)).map(b=>[b.id,logicalText(b,changes.get(b.id)||[],new Set(),spacesFor(b))]));
   const placedAssets = new Set(), assetFindings=[];
   if(assets?.sourceSha256 && assets.sourceSha256!==document.sourceSha256) fail('Asset source hash mismatch');
   const suppliedIds=new Set(); for(const a of assetList) {if(!a?.id || suppliedIds.has(a.id)) fail('Unknown or duplicate asset occurrence ID'); suppliedIds.add(a.id);}
@@ -155,13 +175,13 @@ export async function composeDocument({document, edits=[], flow, assets, signal,
     const chars=block.source?.characters || [];
     if ((!chars.length || !styleById.size) && !fonts.fallback?.length && !(glyphsByBlock.get(block.id)||[]).length) return marker+`#text(${typstString(text)})`;
     // Build source-indexed styles, then apply the same line separators and edits.
-    const raw=block.text, bounds=new Set(lineBoundaries(block));
+    const raw=block.text, spaces=spacesFor(block);
     let logical='', styles=[], glyphMap=[], before=[], after=[];
     const sourceGlyphs=new Map((glyphsByBlock.get(block.id)||[]).map(g=>[g.start-block.source.range.start,g]));
     const styleAt=i=>chars.find(c=>c.start<=i+block.source.range.start && c.end>i+block.source.range.start)?.styleId || block.styleId;
     for(let i=0;i<=raw.length;i++) {
       before[i]=logical.length;
-      if(bounds.has(i) && i>0 && i<raw.length && !/\s/u.test(raw[i-1]) && !/\s/u.test(raw[i]) && raw[i-1]!=='-' && !(raw[i-1]==='−' && /[0-9]/u.test(raw[i]))) {logical+=' ';styles.push(styleAt(i-1));glyphMap.push(null);}
+      if(spaces.has(i)) {logical+=' ';styles.push(styleAt(Math.max(0,i-1)));glyphMap.push(null);}
       after[i]=logical.length;
       if(i<raw.length) {logical+=raw[i];styles.push(styleAt(i));glyphMap.push(sourceGlyphs.get(i)||null);}
     }
