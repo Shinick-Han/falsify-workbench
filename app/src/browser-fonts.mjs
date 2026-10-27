@@ -3,7 +3,7 @@ const key = value => String(value || '').replace(/^[A-Z]{6}\+/, '').toLowerCase(
 const style = value => ({ weight: /bold/i.test(value || '') ? 700 : 400, italic: /italic|oblique/i.test(value || '') });
 
 // Read only bounded SFNT tables; collections and variable fonts are deliberately unsupported.
-function parseFont(bytes) {
+export function parseFont(bytes) {
   const bad = () => { throw error('올바른 TTF 또는 OTF 글꼴 파일을 선택해 주세요.'); };
   if (!(bytes instanceof Uint8Array) || bytes.length < 12) bad();
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -45,7 +45,7 @@ function parseFont(bytes) {
   if (!family) bad();
   const weight = u16(os2.offset + 4), fsType = u16(os2.offset + 8), selection = u16(os2.offset + 62), macStyle = u16(head.offset + 44);
   if (weight < 1 || weight > 1000) bad();
-  if (fsType & 0x202) throw error('이 글꼴은 임베딩 제한 또는 비트맵 전용 제한이 있어 PDF에 사용할 수 없습니다. 다른 글꼴을 선택해 주세요.');
+  if ((fsType & 0x200) || ((fsType & 0x2) && !(fsType & 0xc))) throw error('이 글꼴은 임베딩 제한 또는 비트맵 전용 제한이 있어 PDF에 사용할 수 없습니다. 다른 글꼴을 선택해 주세요.');
   return { family, ...(postscriptName ? { postscriptName } : {}), weight, italic: Boolean((selection & 1) || (macStyle & 2)), fsType };
 }
 
@@ -53,12 +53,21 @@ async function sha256(bytes) {
   const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
   return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
 }
+function familyKey(value) {
+  let name = String(value || '').replace(/^[A-Z]{6}\+/, '');
+  name = name.replace(/^(TimesNewRomanPS|Arial)-(BoldItalic|BoldOblique|Bold|Italic|Oblique)MT$/i, (_, family, variant) => `${/^arial$/i.test(family) ? 'Arial' : 'TimesNewRoman'}-${variant}`);
+  name = name.replace(/[-,](?:bolditalic|boldoblique|bold|italic|oblique|regular|roman)$/i, '');
+  const normalized = key(name);
+  return ({ timesnewromanpsmt: 'timesnewroman', arialmt: 'arial' })[normalized] || normalized;
+}
 function matches(face, req) {
-  const wanted = key(req.family);
-  return !!wanted && (key(face.family) === wanted || key(face.postscriptName) === wanted);
+  const wanted = familyKey(req.family);
+  return !!wanted && (familyKey(face.family) === wanted || familyKey(face.postscriptName) === wanted);
 }
 function rank(face, req) {
-  return (face.italic === !!req.italic ? 0 : 1000) + Math.abs(face.weight - (req.bold ? 700 : 400));
+  const suffix = String(req.family || '').match(/[-,](bolditalic|boldoblique|bold|italic|oblique|regular|roman)(?:mt)?$/i)?.[1] || '';
+  const bold = req.bold || /bold/i.test(suffix), italic = req.italic || /italic|oblique/i.test(suffix);
+  return (face.italic === !!italic ? 0 : 1000) + Math.abs(face.weight - (bold ? 700 : 400));
 }
 function metadata(face) {
   const { id, family, postscriptName, weight, italic, source, fsType } = face;
@@ -66,40 +75,53 @@ function metadata(face) {
 }
 
 export function createBrowserFontStore(options = {}) {
-  let revision = 0, faces = [];
-  const materialize = async face => {
+  let revision = 0, faces = [], epoch = 0, requestSerial = 0;
+  const stale = () => error('글꼴 목록이 변경되었습니다. 다시 시도해 주세요.');
+  const materialize = async (face, expectedEpoch) => {
     if (!face.bytes) {
       let raw;
       try { raw = new Uint8Array(await (await face.fontData.blob()).arrayBuffer()); }
       catch { throw error('로컬 글꼴을 읽지 못했습니다. 권한을 확인하거나 글꼴 파일을 직접 선택해 주세요.'); }
       const parsed = parseFont(raw);
-      Object.assign(face, parsed, { bytes: raw.slice(), sha256: await sha256(raw) });
+      const hash = await sha256(raw);
+      if (epoch !== expectedEpoch) throw stale();
+      Object.assign(face, parsed, { bytes: raw.slice(), sha256: hash });
     }
     return face;
   };
   return {
     get revision() { return revision; },
     list() { return faces.map(metadata); },
-    clear() { if (faces.length) { faces = []; revision++; } },
+    clear() { epoch++; requestSerial++; if (faces.length) { faces = []; revision++; } },
     async requestLocalFonts() {
       const query = options.queryLocalFonts ?? globalThis.queryLocalFonts;
       if (typeof query !== 'function') throw error('이 브라우저는 로컬 글꼴 접근을 지원하지 않습니다. TTF 또는 OTF 파일을 직접 선택해 주세요.');
+      const serial = ++requestSerial, expectedEpoch = ++epoch;
+      if (faces.some(f => f.source === 'local')) {
+        faces = faces.filter(f => f.source !== 'local');
+        revision++;
+      }
       let result;
       try { result = await query(); }
       catch { throw error('로컬 글꼴 접근이 거부되었거나 실패했습니다. 브라우저 권한을 확인한 후 다시 시도하거나 파일을 선택해 주세요.'); }
-      const existing = new Set(faces.filter(f => f.source === 'local').map(f => f.id));
-      let changed = false;
+      if (serial !== requestSerial || epoch !== expectedEpoch) throw stale();
+      const next = [], existing = new Set();
       for (const fontData of result) {
         if (!fontData.family || !fontData.postscriptName || typeof fontData.blob !== 'function') continue;
         const id = `local:${fontData.postscriptName}`;
         if (existing.has(id)) continue;
-        existing.add(id); changed = true;
-        faces.push({ id, family: fontData.family, postscriptName: fontData.postscriptName, ...style(fontData.style), source: 'local', fontData });
+        existing.add(id);
+        next.push({ id, family: fontData.family, postscriptName: fontData.postscriptName, ...style(fontData.style), source: 'local', fontData });
       }
-      if (changed) revision++;
+      const previous = faces.filter(f => f.source === 'local');
+      if (previous.length || next.length) {
+        faces = [...faces.filter(f => f.source !== 'local'), ...next];
+        revision++; epoch++;
+      }
       return faces.map(metadata);
     },
     async addFiles(fileList) {
+      const expectedEpoch = epoch;
       const staged = [];
       for (const file of Array.from(fileList || [])) {
         if (!/\.(ttf|otf)$/i.test(file.name || '')) throw error('TTF 또는 OTF 글꼴 파일을 선택해 주세요.');
@@ -108,19 +130,27 @@ export function createBrowserFontStore(options = {}) {
         const parsed = parseFont(bytes), hash = await sha256(bytes);
         staged.push({ id: `file:${hash}`, ...parsed, source: 'file', bytes: bytes.slice(), sha256: hash });
       }
+      if (epoch !== expectedEpoch) throw stale();
       const ids = new Set(faces.map(f => f.id));
       let changed = false;
       for (const face of staged) if (!ids.has(face.id)) { faces.push(face); ids.add(face.id); changed = true; }
-      if (changed) revision++;
+      if (changed) { revision++; epoch++; }
       return faces.map(metadata);
     },
     async resolve(requirements, { fallbackFonts = [] } = {}) {
-      const selected = [];
+      const selected = [], notes = [], expectedEpoch = epoch, snapshotRevision = revision;
+      const snapshot = faces.slice();
       for (const req of requirements || []) {
-        const candidates = faces.filter(f => matches(f, req)).sort ( (a, b) => rank(a, req) - rank(b, req));
+        const candidates = snapshot.filter(f => matches(f, req)).sort ( (a, b) => rank(a, req) - rank(b, req));
         for (const candidate of candidates) {
-          const face = await materialize(candidate);
-          if (matches(face, req)) { if (!selected.includes(face)) selected.push(face); break; }
+          try {
+            const face = await materialize(candidate, expectedEpoch);
+            if (matches(face, req)) { if (!selected.includes(face)) selected.push(face); break; }
+          } catch (cause) {
+            if (epoch !== expectedEpoch) throw stale();
+            if (candidate.source !== 'local') throw cause;
+            notes.push({ id: candidate.id, message: cause.message });
+          }
         }
       }
       for (const fallback of fallbackFonts) {
@@ -129,7 +159,9 @@ export function createBrowserFontStore(options = {}) {
       }
       const snapshotFaces = selected.map(face => ({ ...metadata(face), sha256: face.sha256, bytes: face.bytes.slice() }));
       const digestInput = new TextEncoder().encode(JSON.stringify(snapshotFaces.map(({ bytes, ...rest }) => rest)));
-      return { revision, digest: await sha256(digestInput), fonts: snapshotFaces };
+      const digest = await sha256(digestInput);
+      if (epoch !== expectedEpoch) throw stale();
+      return { revision: snapshotRevision, digest, fonts: snapshotFaces, notes };
     },
   };
 }
