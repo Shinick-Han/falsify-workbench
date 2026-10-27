@@ -44,3 +44,13 @@ export function geometryCorpus(variant) {
   d.insertPage(-1,d.addPage([0,0,300,400],0,{Font:{F:f,G:g}},stream));
   const buf=d.saveToBuffer(), bytes=buf.asUint8Array().slice(); buf.destroy(); d.destroy(); return bytes;
 }
+
+// One logical text line per page, including deliberately empty pages.
+export function pageCorpus(pageTexts) {
+  const d = new mupdf.PDFDocument(), font = d.addSimpleFont(new mupdf.Font('Helvetica'));
+  for (const text of pageTexts) {
+    const stream = text ? `BT /F 12 Tf 30 350 Td (${esc(text)}) Tj ET\n` : '';
+    d.insertPage(-1,d.addPage([0,0,300,400],0,{Font:{F:font}},stream));
+  }
+  const buf=d.saveToBuffer(), bytes=buf.asUint8Array().slice(); buf.destroy(); d.destroy(); return bytes;
+}

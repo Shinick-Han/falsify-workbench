@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import * as pdfjs from '../node_modules/pdfjs-dist/legacy/build/pdf.mjs';
 import {checkRecomposition} from '../src/paper-compose-check.mjs';
-import {blocks,after,corpus,geometryCorpus} from './recomposition-corpus.mjs';
+import {blocks,after,corpus,geometryCorpus,pageCorpus} from './recomposition-corpus.mjs';
 pdfjs.GlobalWorkerOptions.workerSrc = new URL('../node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs', import.meta.url).href;
 const check = (variant, options={}) => checkRecomposition({bytes:corpus(variant), expectedBlocks:blocks, pdfjs, exporter:'MuPDF', ...options});
 test('byte-derived comparison accepts wrapping and page movement separately', async () => {
@@ -56,4 +56,34 @@ test('nonfinite geometry and a baseline below the viewport cannot pass', async (
   const bad = await checkRecomposition({...base,pdfjs:wrap(item => {item.transform[4] = NaN;})});
   assert.equal(bad.checks.bounds.status,'unavailable');
   assert.equal(bad.checks.content.status,'unavailable');
+});
+
+
+test('locations require complete validated alignment and supported geometry', async () => {
+  const prefix = await geometryCheck('control','con');
+  assert.equal(prefix.checks.content.status,'finding');
+  assert.deepEqual(prefix.checks.movement.locations,null);
+  assert.equal(prefix.checks.movement.status,'unavailable');
+  for (const variant of ['ambiguous','rotated']) {
+    const r = await geometryCheck(variant,variant === 'ambiguous' ? 'regulation' : 'control');
+    assert.equal(r.checks.movement.status,'unavailable',variant);
+    assert.equal(r.checks.movement.locations,null,variant);
+  }
+  const changed = await check('edit',{edits:{c:after+' altered'}});
+  assert.equal(changed.checks.movement.status,'unavailable');
+  assert.equal(changed.checks.movement.locations,null);
+});
+
+test('validated sequence locates repeats, edits, deletions and empty pages deterministically', async () => {
+  const expectedBlocks = [{id:'a',text:'same'},{id:'b',text:'same'},{id:'c',text:'old'},{id:'d',text:'deleted'},{id:'e',text:''}];
+  const result = await checkRecomposition({bytes:pageCorpus(['same','','same replacement']),expectedBlocks,edits:{c:'replacement',d:''},pdfjs});
+  assert.equal(result.checks.content.status,'pass');
+  assert.equal(result.checks.movement.status,'observed');
+  assert.deepEqual(result.checks.movement.locations,[
+    {id:'a',pageIndexes:[0]},{id:'b',pageIndexes:[2]},
+    {id:'c',pageIndexes:[2]},{id:'d',pageIndexes:[]},{id:'e',pageIndexes:[]}
+  ]);
+  const missing = await checkRecomposition({bytes:pageCorpus(['same','replacement']),expectedBlocks,edits:{c:'replacement',d:''},pdfjs});
+  assert.equal(missing.checks.content.status,'finding');
+  assert.equal(missing.checks.movement.locations,null);
 });

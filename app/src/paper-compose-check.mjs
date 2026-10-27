@@ -66,19 +66,29 @@ export async function checkRecomposition({bytes, expectedBlocks, edits = {}, pdf
   const observed = normalize(pages.join(' '));
   const expected = normalize(expectedBlocks.map(b => Object.hasOwn(edits,b.id) ? edits[b.id] : b.text).join(' '));
   if (observed !== expected) findings.push({code:'content-mismatch', expected, observed});
-  let cursor = 0;
-  const pageStarts = []; let offset = 0;
-  for (const page of pages) { pageStarts.push(offset); offset += page.length + 1; }
-  for (const block of expectedBlocks) {
-    const value = normalize(Object.hasOwn(edits,block.id) ? edits[block.id] : block.text);
-    if (!value) { locations.push({id:block.id, pageIndexes:[]}); continue; }
-    const at = observed.indexOf(value, cursor);
-    if (at < 0) { locations.push({id:block.id, pageIndexes:null}); continue; }
-    const end = at + value.length - 1;
-    const indexes = pages.map((p,i) => ({i,start:pageStarts[i],end:pageStarts[i]+p.length-1})).filter(p => p.end >= at && p.start <= end).map(p => p.i);
-    locations.push({id:block.id, pageIndexes:indexes}); cursor = at + value.length;
+  const alignmentAvailable = observed === expected && !findings.some(f => f.code === 'ambiguous-text-geometry' || f.code === 'unsupported-text-geometry');
+  if (alignmentAvailable) {
+    // Both sequences are normalized as a whole, with one separator between
+    // nonempty entries. Offsets therefore follow the validated sequence itself.
+    const pageRanges = []; let offset = 0;
+    for (const page of pages) {
+      if (!page) { pageRanges.push(null); continue; }
+      if (offset) offset++;
+      pageRanges.push({start:offset, end:offset + page.length});
+      offset += page.length;
+    }
+    offset = 0;
+    for (const block of expectedBlocks) {
+      const value = normalize(Object.hasOwn(edits,block.id) ? edits[block.id] : block.text);
+      if (!value) { locations.push({id:block.id, pageIndexes:[]}); continue; }
+      if (offset) offset++;
+      const start = offset, end = start + value.length;
+      const pageIndexes = pageRanges.flatMap((range, i) => range && range.start < end && range.end > start ? [i] : []);
+      locations.push({id:block.id, pageIndexes});
+      offset = end;
+    }
   }
   const independent = typeof exporter === 'string' && exporter.trim() && !/pdf\.?js/i.test(exporter) ? {status:'declared', reader:'PDF.js text extraction', exporter, limitation:'Distinct named engines only; exporter identity is caller supplied.'} : {status:'unavailable', reader:'PDF.js text extraction', reason:'Exporter path not supplied or uses PDF.js.'};
-  return {schema:'falsify.recomposition-check.v1', readable:true, checks:{content:{status:findings.some(f=>f.code==='ambiguous-text-geometry' || f.code==='unsupported-text-geometry') ? 'unavailable' : observed === expected ? 'pass':'finding', comparison:'ordered text with whitespace runs collapsed; ambiguous item geometry is unavailable'}, bounds:{status:findings.some(f=>f.code==='text-outside-page')?'finding':!inspectedItems || findings.some(f=>f.code==='unsupported-text-geometry')?'unavailable':'checked', limitation:'Extracted upright text items only, estimated from font ascent and descent; PDF.js may omit off-page text. Not clipping or ink bounds.'}, movement:{status:'observed', locations}, independent, visual:{status:'unavailable', reason:'No raster or visibility inspection.'}, overlap:{status:'unavailable', reason:'Text and asset ownership not established.'}, captionOwnership:{status:'unavailable', reason:'Relations not established from PDF bytes.'}}, findings};
+  return {schema:'falsify.recomposition-check.v1', readable:true, checks:{content:{status:findings.some(f=>f.code==='ambiguous-text-geometry' || f.code==='unsupported-text-geometry') ? 'unavailable' : observed === expected ? 'pass':'finding', comparison:'ordered text with whitespace runs collapsed; ambiguous item geometry is unavailable'}, bounds:{status:findings.some(f=>f.code==='text-outside-page')?'finding':!inspectedItems || findings.some(f=>f.code==='unsupported-text-geometry')?'unavailable':'checked', limitation:'Extracted upright text items only, estimated from font ascent and descent; PDF.js may omit off-page text. Not clipping or ink bounds.'}, movement:alignmentAvailable ? {status:'observed', locations} : {status:'unavailable', locations:null, reason:'Complete ordered text alignment or supported geometry is unavailable.'}, independent, visual:{status:'unavailable', reason:'No raster or visibility inspection.'}, overlap:{status:'unavailable', reason:'Text and asset ownership not established.'}, captionOwnership:{status:'unavailable', reason:'Relations not established from PDF bytes.'}}, findings};
 }
 
