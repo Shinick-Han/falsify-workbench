@@ -16,7 +16,14 @@ export function buildOutputProfile({bytes,mupdf,document={},flow={},expectedBloc
   const source=deriveLayoutProfile(document,flow); if(source.bodyFontSize>0) profile.bodyFontSize=source.bodyFontSize;
   const aliases=Array.isArray(selectedFamilyAliases) ? selectedFamilyAliases.filter(x=>typeof x==='string' && x.trim()) : [];
   // A resolved plan's selected family is derived from font bytes by createFontPlan.
-  if(!aliases.length && fontPlan?.selected?.getBytes) { try {const meta=parseFont(fontPlan.selected.getBytes()); aliases.push(meta.family); if(meta.postscriptName) aliases.push(meta.postscriptName);} catch {} }
+  if(!aliases.length && fontPlan) {
+    const used=new Set((fontPlan.fallback||[]).filter(x=>x.kind==='glyph' && x.family).map(x=>x.family));
+    if(fontPlan.selected?.family) used.add(fontPlan.selected.family);
+    for(const candidate of [fontPlan.selected,...(fontPlan.candidates||[])].filter(Boolean)) {
+      if(!candidate.getBytes || (candidate!==fontPlan.selected && !used.has(candidate.family))) continue;
+      try {const meta=parseFont(candidate.getBytes());if(candidate!==fontPlan.selected && !used.has(meta.family))continue;aliases.push(meta.family);if(meta.postscriptName)aliases.push(meta.postscriptName);}catch{}
+    }
+  }
   if(aliases.length) {profile.outputBodyFontNames=[...new Set(aliases)];evidence.font={status:'available',aliases:profile.outputBodyFontNames,source:selectedFamilyAliases?.length?'explicit-selected-aliases':'selected-font-plan-family',limitation:'Font family may differ from the name exposed by PDF extraction; supply verified aliases.'};}
   else evidence.font.reason='No independently resolved selected family aliases.';
   let doc; const pages=[];
@@ -33,11 +40,12 @@ export function buildOutputProfile({bytes,mupdf,document={},flow={},expectedBloc
   const occurrence = target => {const found=[]; if(!target)return found; for(let p=0;p<pages.length;p++) {const lines=pages[p].lines; for(let i=0;i<lines.length;i++) {let text=''; for(let j=i;j<lines.length;j++) {text=norm(text+' '+lines[j]); if(text===target){found.push({pageIndex:p,start:i,end:j});break;} if(!target.startsWith(text) || text.length>=target.length) break;}}} return found;};
   const uniqueExpected = target => !!target && [...expected.values()].filter(x=>x===target).length===1;
   const kinds = kind => (flow.items || []).filter(x=>x.kind===kind).flatMap(x=>x.blockIds || []);
-  const allLines=pages.flatMap(p=>p.lines), sourceIds=new Set((document.blocks || []).map(b=>b.id));
+  const allLines=pages.flatMap(p=>p.lines), sourceBlocks=new Map((document.blocks||[]).map(b=>[b.id,b])), sourceIds=new Set(sourceBlocks.keys()),styles=new Map((document.styles||[]).map(s=>[s.id,s]));
+  const sourceSize=id=>{const b=sourceBlocks.get(id),sizes=[];for(const c of b?.source?.characters||[]){const size=styles.get(c.styleId)?.size;if(Number.isFinite(size)&&size>0)for(let n=0;n<Math.min(256,Math.max(1,c.end-c.start));n++)sizes.push(size);}if(!sizes.length){const size=styles.get(b?.styleId)?.size;if(Number.isFinite(size)&&size>0)sizes.push(size);}sizes.sort((a,b)=>a-b);return sizes[Math.floor(sizes.length/2)];};
   for(const id of kinds('paragraph')) {const target=expected.get(id); if(!sourceIds.has(id) || duplicate.has(id) || !uniqueExpected(target)) {evidence.body.push({id,status:'unavailable',reason:'Missing or ambiguous source/expected block.'});continue;}
     const matches=occurrence(target); if(matches.length!==1) {evidence.body.push({id,status:'unavailable',reason:matches.length?'Ambiguous output block.':'Output block not observed.'});continue;}
     const m=matches[0], lines=pages[m.pageIndex].lines.slice(m.start,m.end+1); let count=0;
-    for(const text of lines) if(allLines.filter(x=>x===text).length===1) {profile.bodyLines.push({text});count++;}
+    for(const text of lines) if(allLines.filter(x=>x===text).length===1) {profile.bodyLines.push({text,sourceFontSize:sourceSize(id)});count++;}
     evidence.body.push({id,status:count?'observed':'unavailable',pageIndex:m.pageIndex,matchedLines:lines.length,nominatedLines:count,reason:count<lines.length?'Repeated output lines skipped.':undefined});
   }
   for(const id of kinds('heading')) {const target=expected.get(id), matches=occurrence(target); if(sourceIds.has(id) && !duplicate.has(id) && uniqueExpected(target) && matches.length===1 && matches[0].start===matches[0].end && allLines.filter(x=>x===target).length===1) {profile.headings.push({text:target});evidence.headings.push({id,status:'observed'});} else evidence.headings.push({id,status:'unavailable'});}

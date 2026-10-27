@@ -24,3 +24,15 @@ test('repeated expected source text cannot bind a single output occurrence',()=>
 test('captions over twenty output lines are explicitly unavailable',()=>{const d=new mupdf.PDFDocument(),f=d.addSimpleFont(new mupdf.Font('Helvetica'));const lines=Array.from({length:21},(_,i)=>`part${i}`);const stream=lines.map((t,i)=>`BT /F 8 Tf 30 ${380-i*12} Td (${t}) Tj ET`).join('\n');d.insertPage(-1,d.addPage([0,0,300,400],0,{Font:{F:f}},stream));const b=d.saveToBuffer(),bytes=b.asUint8Array().slice();b.destroy();d.destroy();const r=buildOutputProfile({bytes,mupdf,document,flow,expectedBlocks:[expectedBlocks[0],{id:'c',text:lines.join(' ')}]});assert.match(r.evidence.captions[0].reason,/20-line/);assert.equal(r.profile.captions.length,0);});
 import {readFileSync} from 'node:fs';
 test('selected font aliases come from selected font bytes name table',()=>{const bytes=new Uint8Array(readFileSync(new URL('../dist/font-assets/LiberationSerif-Regular.ttf',import.meta.url)));const r=run({}, {selectedFamilyAliases:undefined,fontPlan:{selected:{family:'misleading',getBytes:()=>bytes}}});assert.ok(r.profile.outputBodyFontNames.includes('Liberation Serif'));assert.ok(r.profile.outputBodyFontNames.includes('LiberationSerif'));assert.ok(!r.profile.outputBodyFontNames.includes('misleading'));});
+
+test('fallback font names come from used candidate bytes when no font covers the whole paper',()=>{
+ const bytes=new Uint8Array(readFileSync(new URL('../dist/font-assets/LiberationSerif-Regular.ttf',import.meta.url)));
+ const r=run({}, {selectedFamilyAliases:undefined,fontPlan:{selected:null,candidates:[{family:'Liberation Serif',getBytes:()=>bytes}],fallback:[{kind:'glyph',family:'Liberation Serif'}]}});
+ assert.ok(r.profile.outputBodyFontNames.includes('LiberationSerif'));
+});
+test('a small source paragraph is checked against its own source size',()=>{
+ const profile={coordinateSpace:'output',bodyFontSize:12,bodyLines:[{text:'Scientific value p < 0.05 remains.',sourceFontSize:6}]};
+ const q=inspectLayoutQuality({bytes:pdf(),mupdf,profile});
+ assert.equal(q.coverage.profile.bodyLines.checked,1);
+ assert.ok(!q.issues.some(x=>x.type==='small-body-text'));
+});

@@ -56,7 +56,8 @@ export function inspectLayoutQuality({bytes,mupdf,profile={},sourceBytes,sourceP
       if(matches.length!==1) {profileCoverage.bodyLines.skipped++;continue;}
       const {page,line}=matches[0];profileCoverage.bodyLines.checked++;
       const sizes=line.chars.map(c=>c.size).filter(Number.isFinite).sort((a,b)=>a-b),size=sizes.length?sizes[Math.floor(sizes.length/2)]:null;
-      if(Number.isFinite(profile.bodyFontSize) && size && size<profile.bodyFontSize*0.8) add('small-body-text',page.pageIndex,line.bbox,5,{text:line.text,size,expectedSize:profile.bodyFontSize,source:'unique-output-body-line'});
+      const expectedSize=Number.isFinite(body.sourceFontSize) && body.sourceFontSize>0 ? body.sourceFontSize : profile.bodyFontSize;
+      if(Number.isFinite(expectedSize) && size && size<expectedSize*0.8) add('small-body-text',page.pageIndex,line.bbox,5,{text:line.text,size,expectedSize,source:'unique-output-body-line'});
       const aliases=profile.outputBodyFontNames;
       if(Array.isArray(aliases) && aliases.length) {profileCoverage.fontNames.checked++;if(!line.chars.some(c=>aliases.includes(c.font))) add('body-font-deviation',page.pageIndex,line.bbox,3,{text:line.text,fonts:[...new Set(line.chars.map(c=>c.font))],expectedFonts:aliases,source:'unique-output-body-line'});}
       else if(profile.bodyFontNames?.length) profileCoverage.fontNames.skipped++;
