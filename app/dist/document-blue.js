@@ -8,6 +8,7 @@
   function expectsHelper(){return !!(P||shippedHelper());}
   // relation is operator-only metadata (RED handoff run ID); it never enters the BLUE request packet.
   let relation=null,epoch=0,savedId=null,saving=false,failure=null,sticky=null,notice=false;
+  let handoffMode=false,previousFailure=null,nextAction=null;
   const hash=async bytes=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))).map(x=>x.toString(16).padStart(2,'0')).join('');
   function msg(s,error=false,force=false){if((sticky||notice)&&!force)return;$('#doc-blue-progress').textContent=s;$('#doc-blue-progress').classList.toggle('error',error);}
   function reportCaught(e){if(sticky||notice)return;msg(e.message+' 자동 재시도하지 않습니다.',true);}
@@ -19,22 +20,76 @@
   function saveJSON(data,name){const url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
   // A BLUE job keeps the bridge link it started with for polls and cancel; the bridge refuses to switch while busy.
   function link(){const l=B.session();if(!l)throw new Error('로컬 broker 연결이 없습니다. 위 연결 패널에서 연결하거나 수동 JSON 교환을 쓰세요.');return l;}
-  function controls(){visualPicker?.setBusy(busy);const active=!!doc&&!busy;B.busy('blue',busy);$('#doc-blue-start').disabled=!active||!B.capabilities()?.blue||!$('#doc-blue-consent').checked||!FalsifyLab.allowed('blue');$('#doc-blue-request').disabled=!active;$('#doc-blue-apply').disabled=!active;$('#doc-blue-cancel').hidden=!job;$('#doc-blue-budget').disabled=busy;$('#doc-blue-record').disabled=!active||!result||saving;FalsifyLab.busy('blue',busy||saving);renderRecord();document.dispatchEvent(new CustomEvent('falsify:blue-state',{detail:{name:doc?.name||'',busy,hasResult:!!result}}));}
+  function controls(){handoffReadiness();visualPicker?.setBusy(busy);const active=!!doc&&!busy;B.busy('blue',busy);$('#doc-blue-start').disabled=!active||!B.capabilities()?.blue||!$('#doc-blue-consent').checked||!FalsifyLab.allowed('blue');$('#doc-blue-request').disabled=!active;$('#doc-blue-apply').disabled=!active;$('#doc-blue-cancel').hidden=!job;$('#doc-blue-budget').disabled=busy;$('#doc-blue-record').disabled=!active||!result||saving;FalsifyLab.busy('blue',busy||saving);renderRecord();document.dispatchEvent(new CustomEvent('falsify:blue-state',{detail:{name:doc?.name||'',busy,hasResult:!!result,file:sourceFile,handoff:handoffMode,phase:busy&&!doc?'import':'review'}}));}
   function cancel(){const old=job,l=jobLink;job=null;jobLink=null;if(old&&l)void l.request('/api/blue/jobs/'+encodeURIComponent(old)+'/cancel',{}).catch(()=>{});}
   function invalidate(){epoch++;savedId=null;saving=false;failure=null;result=null;findings=[];request=null;$('#doc-blue-findings').replaceChildren();$('#doc-blue-result-summary').textContent='';$('#doc-blue-record-status').textContent='';}
-  function clear(keepFile=false){visualPicker?.clear();generation++;cancel();abort?.abort();abort=null;doc=null;sourceFile=null;relation=null;busy=false;clearSticky();invalidate();if(keepFile!==true)$('#doc-blue-file').value='';$('#doc-blue-response').value='';$('#doc-blue-consent').checked=false;$('#blue-harness-consent').checked=false;if($('#blue-visual-select'))$('#blue-visual-select').checked=false;if($('#blue-visual-consent'))$('#blue-visual-consent').checked=false;if($('#blue-visual-regions'))$('#blue-visual-regions').value='';$('#doc-blue-summary').textContent='아직 파일을 입력하지 않았습니다. 수정 파일 또는 원본/대조군을 직접 선택하세요.';msg('');controls();restorePending();}
+  function clear(keepFile=false,restore=true){if(restore)previousFailure=null;handoffMode=false;visualPicker?.clear();generation++;cancel();abort?.abort();abort=null;doc=null;sourceFile=null;relation=null;busy=false;clearSticky();invalidate();if(keepFile!==true)$('#doc-blue-file').value='';$('#doc-blue-response').value='';$('#doc-blue-consent').checked=false;$('#blue-harness-consent').checked=false;if($('#blue-visual-select'))$('#blue-visual-select').checked=false;if($('#blue-visual-consent'))$('#blue-visual-consent').checked=false;if($('#blue-visual-regions'))$('#blue-visual-regions').value='';$('#doc-blue-summary').textContent='아직 파일을 입력하지 않았습니다. 수정 파일 또는 원본/대조군을 직접 선택하세요.';msg('');controls();if(restore)restorePending();}
   document.addEventListener('falsify:workspace-reset',clear);$('#doc-blue-clear').addEventListener('click',clear);
   // A user-chosen file is an independent BLUE input: clear() drops any RED relation.
   // Replacing the input asks first while a BLUE job runs or a result has not been recorded.
   function keepResult(){return !(job||result&&!savedId&&(failure||saving))||confirm('BLUE 검토가 진행 중이거나 결과가 아직 기록되지 않았습니다. 새 파일로 바꾸면 이 작업과 결과가 사라집니다. 계속할까요?');}
-  $('#doc-blue-file').addEventListener('change',()=>{const file=$('#doc-blue-file').files[0];if(file&&!keepResult()){$('#doc-blue-file').value='';msg('새 파일 입력을 취소했습니다. 기존 BLUE 작업과 결과를 유지합니다.');return;}clear(true);if(file)void extract(file,null);});
+  function acceptInput(file,origin,keepFile=false,sourceRunId=null){
+    const approved=$('#blue-harness-consent').checked;
+    clear(keepFile,false);handoffMode=!!origin;relation=sourceRunId;
+    // File consent belongs to this document; harness consent belongs to the unchanged selection.
+    $('#blue-harness-consent').checked=approved;
+    const current=generation;
+    void (async()=>{
+      if(helperReady()){
+        const found=P.read('blue');
+        if(found.status==='record'&&terminalKind(found.record)){
+          const done=await P.discard('blue',{acknowledge:true,expectedRequestId:found.record.requestId});
+          if(current!==generation)return;
+          if(done.ok)previousFailure=found.record;
+        }
+      }
+      if(current!==generation)return;
+      await extract(file,origin);
+      if(current===generation){restorePending();controls();}
+    })().catch(e=>{if(current===generation)msg('파일 준비 실패: '+e.message,true);});
+  }
+  function revealControl(node){
+    if(!node)return;
+    for(let p=node.parentElement;p;p=p.parentElement)if(p.tagName==='DETAILS')p.open=true;
+    node.scrollIntoView?.({block:'center'});node.focus?.({preventScroll:true});
+  }
+  function handoffReadiness(){
+    const panel=$('#doc-blue-handoff-ready'),label=$('#doc-blue-handoff-state'),button=$('#doc-blue-next');
+    if(!panel||!label||!button)return;
+    panel.hidden=!handoffMode;
+    const previous=$('#doc-blue-previous-failure');if(previous)previous.hidden=!previousFailure;
+    if(!handoffMode)return;
+    let text='',action='다음';nextAction=null;
+    const pending=helperReady()?P.read('blue'):null;
+    if(busy){text=doc?'BLUE 검토 중입니다.':'RED 변경본을 읽고 있습니다.';}
+    else if(!doc){text='변경본을 읽지 못했습니다. 파일을 다시 선택하세요.';action='파일 선택';nextAction=()=>$('#doc-blue-file').click();}
+    else if(pending&&pending.status!=='absent'&&pending.status!=='record'){
+      text='변경본이 준비됐습니다. 이전 요청 기록을 확인하세요.';action='이전 기록 확인';nextAction=()=>revealControl($('#doc-blue-pending-discard'));
+    }
+    else if(pending?.status==='record'&&pending.record.disposition!=='completed'){
+      text='변경본이 준비됐습니다. 이전 BLUE 요청을 먼저 확인하세요.';
+      const terminal=terminalKind(pending.record);action=terminal?'이전 요청 정리':'이전 요청 확인';
+      nextAction=terminal?()=>void onDiscard():()=>{void recoverBlue();revealControl($('#doc-blue-pending-discard'));};
+    }
+    else if(!B.capabilities()?.blue){text='변경본이 준비됐습니다. 내 PC를 연결하세요.';action='내 PC 연결';nextAction=()=>revealControl(document.querySelector('.visual-connection-details summary')||$('#bridge-port'));}
+    else if(!FalsifyLab.allowed('blue')){text='변경본이 준비됐습니다. 선택한 BLUE 하네스를 확인하세요.';action='하네스 확인';nextAction=()=>revealControl(!$('#blue-harness-consent').checked?$('#blue-harness-consent'):$('#blue-harness'));}
+    else if(!$('#doc-blue-consent').checked){text='이 변경본을 선택한 BLUE 도구에 보내 검토합니다.';action='이 파일로 BLUE 검토 시작';nextAction=()=>{$('#doc-blue-consent').checked=true;$('#doc-blue-consent').dispatchEvent(new Event('change'));$('#doc-blue-start').click();};}
+    else{text='변경본과 BLUE 도구가 준비됐습니다.';action='BLUE 검토 시작';nextAction=()=>$('#doc-blue-start').click();}
+    if(label.textContent!==text)label.textContent=text;
+    if(button.textContent!==action)button.textContent=action;
+    button.disabled=!nextAction;button.hidden=busy;
+  }
+  $('#doc-blue-next')?.addEventListener('click',()=>nextAction?.());
+  $('#doc-blue-previous-request')?.addEventListener('click',()=>{if(previousFailure){const body=P.safeRequest(previousFailure);if(body)saveJSON(body,'falsify-previous-blue-request.json');}});
+  $('#doc-blue-previous-diagnostic')?.addEventListener('click',()=>{if(previousFailure)saveJSON(diagnosticFor(previousFailure),'falsify-previous-blue-diagnostic.json');});
+  $('#doc-blue-file').addEventListener('change',()=>{const file=$('#doc-blue-file').files[0];if(file&&!keepResult()){$('#doc-blue-file').value='';msg('새 파일 입력을 취소했습니다. 기존 BLUE 작업과 결과를 유지합니다.');return;}if(file)acceptInput(file,null,true);else clear(true);});
   // The RED handoff event is cancelable; RED stays on its view when BLUE keeps its current work.
-  document.addEventListener('falsify:blue-file',e=>{const {file,sourceRunId}=e.detail||{};if(!(file instanceof File))return;if(!keepResult()){e.preventDefault();return;}clear();const linked=typeof sourceRunId==='string'&&!!sourceRunId;if(linked)relation=sourceRunId;void extract(file,linked?'RED 실험 사본 · ':'RED 실험 사본 · 인계 관계 미기록(RED 최종 기록 없음) · ');});
-  async function extract(file,origin){const current=generation;abort=new AbortController();busy=true;controls();msg('BLUE 파일의 텍스트를 로컬 추출 중');
+  document.addEventListener('falsify:blue-file',e=>{const {file,sourceRunId}=e.detail||{};if(!(file instanceof File))return;if(!keepResult()){e.preventDefault();return;}const linked=typeof sourceRunId==='string'&&!!sourceRunId;acceptInput(file,'RED 변경본 · ',false,linked?sourceRunId:null);});
+  async function extract(file,origin){const current=generation;sourceFile=file;abort=new AbortController();busy=true;controls();msg('BLUE 파일의 텍스트를 로컬 추출 중');
     try{const imported=await FalsifyImport.extract(file,{signal:abort.signal,onProgress:s=>{if(current===generation)msg(typeof s==='string'?s:'BLUE 텍스트 추출 중');}});const sourceHash=await hash(new TextEncoder().encode(imported.text)),fileHash=await hash(await file.arrayBuffer());if(current!==generation)return;
       sourceFile=file;
-      doc={revision:crypto.randomUUID(),sourceHash,fileHash,name:file.name.slice(0,160),format:String(imported.format).slice(0,40),segments:imported.segments.map((s,i)=>({id:'s'+i,label:s.label,text:s.text}))};$('#doc-blue-summary').textContent=(origin||'')+file.name+' · '+doc.segments.length+'개 페이지/문단 · '+imported.text.length.toLocaleString()+'자';msg('추출 완료. '+(imported.warnings||[]).join(' ')+' RED 계획·검수 기록은 모델 입력에 포함하지 않습니다.'+(origin?' 실행하려면 아래에서 다시 동의하세요.':''));
-    }catch(e){if(current===generation)msg('파일 입력 실패: '+e.message,true);}finally{if(current===generation){busy=false;abort=null;controls();}}}
+      doc={revision:crypto.randomUUID(),sourceHash,fileHash,name:file.name.slice(0,160),format:String(imported.format).slice(0,40),segments:imported.segments.map((s,i)=>({id:'s'+i,label:s.label,text:s.text}))};$('#doc-blue-summary').textContent=(origin||'')+file.name+' · '+doc.segments.length+'개 페이지/문단 · '+imported.text.length.toLocaleString()+'자';msg('추출 완료. '+(imported.warnings||[]).join(' '));
+    }catch(e){if(current===generation)msg('파일 입력 실패: '+e.message,true);}finally{if(current===generation){busy=false;abort=null;controls();if(handoffMode)$('#doc-blue-next')?.focus?.({preventScroll:true});}}}
   async function makeRequest(){
     const frozen=doc, current=generation, visualFile=sourceFile, visualEnabled=!!$('#blue-visual-select')?.checked, visualConsented=!!$('#blue-visual-consent')?.checked, selections=visualEnabled?visualPicker?.selection():null;
     const body=await FalsifyLab.bind('blue',C.request(frozen,Number($('#doc-blue-budget').value)));
@@ -184,9 +239,9 @@
   }
   function exportDiagnostic(){
     const found=P.read('blue');if(!found||found.status!=='record')return;
-    const r=found.record;
-    saveJSON({schema:'falsify.blue-failure-diagnostic.v1',role:r.role,requestId:r.requestId,disposition:r.disposition,postReceipt:r.postReceipt,sourceHash:r.sourceHash,fileHash:r.fileHash,revision:r.revision,harnessHash:r.harnessHash,requestBytesDigest:r.requestBytesDigest,requestFingerprint:r.requestFingerprint,companionInstance:r.companionInstance,serverFailure:typeof r.serverFailure==='string'?r.serverFailure:null},'falsify-blue-failure-diagnostic.json');
+    saveJSON(diagnosticFor(found.record),'falsify-blue-failure-diagnostic.json');
   }
+  function diagnosticFor(r){return {schema:'falsify.blue-failure-diagnostic.v1',role:r.role,requestId:r.requestId,disposition:r.disposition,postReceipt:r.postReceipt,sourceHash:r.sourceHash,fileHash:r.fileHash,revision:r.revision,harnessHash:r.harnessHash,requestBytesDigest:r.requestBytesDigest,requestFingerprint:r.requestFingerprint,companionInstance:r.companionInstance,serverFailure:typeof r.serverFailure==='string'?r.serverFailure:null};}
   function exportStoredRequest(){
     const found=P.read('blue');if(!found||found.status!=='record')return;
     const body=P.safeRequest(found.record);if(!body){msg('원래 요청을 저장하지 못했습니다. 실행하지 않았습니다.',true,true);return;}

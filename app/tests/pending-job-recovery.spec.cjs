@@ -383,7 +383,7 @@ async function bluePage(storage,hooks){
   const ctx=vm.createContext({document,crypto:globalThis.crypto,localStorage:storage,navigator:{locks},FalsifyDocumentBlue:Blue,FalsifyHarness:H,FalsifyLocalBridge:bridge,FalsifyLab:lab,FalsifyImport:importer,TextEncoder,TextDecoder,CustomEvent,Event,AbortController,URL:{createObjectURL(blob){downloads.push(blob);return 'blob:'+downloads.length;},revokeObjectURL(){}},Blob,File,setTimeout,clearTimeout,confirm:()=>true,Uint8Array,Array,Promise,Error,Map,JSON,Number,String,Object,console});
   vm.runInContext(fs.readFileSync(path.join(dist,'pending-job.js'),'utf8'),ctx,{filename:'pending-job.js'});
   vm.runInContext(fs.readFileSync(path.join(dist,'document-blue.js'),'utf8'),ctx,{filename:'document-blue.js'});
-  return {get,calls,downloads,disconnect(){net.connected=false;document.dispatchEvent(new CustomEvent('falsify:local-bridge'));},poke(){document.dispatchEvent(new CustomEvent('falsify:local-bridge'));},async load(){get('doc-blue-file').files=[{name:'notes.txt',arrayBuffer:async()=>new TextEncoder().encode('The claim is absolute.').buffer}];get('doc-blue-file').dispatchEvent(new Event('change'));
+  return {get,calls,downloads,handoff(file,sourceRunId=null){return document.dispatchEvent(new CustomEvent('falsify:blue-file',{cancelable:true,detail:{file,sourceRunId}}));},disconnect(){net.connected=false;document.dispatchEvent(new CustomEvent('falsify:local-bridge'));},poke(){document.dispatchEvent(new CustomEvent('falsify:local-bridge'));},async load(){get('doc-blue-file').files=[{name:'notes.txt',arrayBuffer:async()=>new TextEncoder().encode('The claim is absolute.').buffer}];get('doc-blue-file').dispatchEvent(new Event('change'));
     for(let i=0;i<50&&!/추출 완료/.test(get('doc-blue-progress').textContent);i++)await new Promise(r=>setTimeout(r,5));
     assert.match(get('doc-blue-progress').textContent,/추출 완료/);}};
 }
@@ -589,5 +589,36 @@ test('BLUE lost POST receipt reconciles matching completed job by GET without re
   assert.match(page.get('doc-blue-result-summary').textContent,/abstain/);
   assert.equal(page.get('doc-blue-failure').hidden,true);
 });
+test('RED handoff retires only a finished failure, preserves harness approval and keeps diagnostic export',async()=>{
+  const storage=vmStorage();
+  const page=await bluePage(storage,{reply:async path=>path==='/api/blue/jobs'?{id:storedBlue(storage).requestId}:matchedJob(storage,'failed',{error:'adapter exit'})});
+  await page.load();page.get('doc-blue-consent').checked=true;page.get('blue-harness-consent').checked=true;page.get('doc-blue-start').click();
+  await until(()=>P.read('blue',storage).record?.disposition==='failed','failure before handoff');
+  const old=storedBlue(storage),file=new File(['the new modified paper'],'changed.txt',{type:'text/plain'});
+  assert.equal(page.handoff(file,'red-source-run'),true);
+  await until(()=>page.get('doc-blue-summary').textContent.includes('RED 변경본')&&P.read('blue',storage).status==='absent','new file ready');
+  assert.equal(page.get('blue-harness-consent').checked,true);assert.equal(page.get('doc-blue-consent').checked,false);
+  assert.equal(jobPosts(page.calls).length,1);assert.equal(page.get('doc-blue-handoff-ready').hidden,false);
+  assert.equal(page.get('doc-blue-next').textContent,'이 파일로 BLUE 검토 시작');assert.equal(page.get('doc-blue-previous-failure').hidden,false);
+  page.get('doc-blue-previous-diagnostic').click();page.get('doc-blue-previous-request').click();
+  assert.equal(page.downloads.length,2);assert.equal(JSON.parse(await page.downloads[0].text()).requestId,old.requestId);
+  assert.deepEqual(JSON.parse(await page.downloads[1].text()),old.request);
+  page.get('doc-blue-next').click();assert.equal(page.get('doc-blue-consent').checked,true);
+  await until(()=>jobPosts(page.calls).length===2,'explicit next action starts new review');
+  const body=jobPosts(page.calls)[1].body;assert.notEqual(body.requestId,old.requestId);assert.equal('sourceRunId' in body,false);assert.equal(JSON.stringify(body).includes('red-source-run'),false);
+  page.get('doc-blue-clear').click();assert.equal(page.get('doc-blue-previous-failure').hidden,true);
+  const downloads=page.downloads.length;page.get('doc-blue-previous-request').click();assert.equal(page.downloads.length,downloads);
+});
+
+test('RED handoff keeps an unknown receipt and never silently posts or cancels it',async()=>{
+  const storage=vmStorage();const page=await bluePage(storage,{reply:async()=>{throw Error('lost receipt');}});
+  await page.load();page.get('doc-blue-consent').checked=true;page.get('doc-blue-start').click();
+  await until(()=>P.read('blue',storage).record?.postReceipt==='unknown','unknown receipt');const old=JSON.stringify(storedBlue(storage));
+  page.handoff(new File(['different paper'],'changed.txt',{type:'text/plain'}));
+  await until(()=>page.get('doc-blue-summary').textContent.includes('RED 변경본'),'new input while receipt unknown');
+  assert.equal(JSON.stringify(storedBlue(storage)),old);assert.equal(jobPosts(page.calls).length,1);assert.equal(page.calls.some(c=>c.path.endsWith('/cancel')),false);
+  assert.equal(page.get('doc-blue-next').textContent,'이전 요청 확인');
+});
+
 (async()=>{let passed=0;for(const [name,fn] of tests){try{await fn();passed++;console.log('PASS '+name);}catch(e){console.error('FAIL '+name);console.error(e);process.exitCode=1;}}
   console.log(JSON.stringify({passed,failed:tests.length-passed}));if(passed!==tests.length)process.exit(1);})();
