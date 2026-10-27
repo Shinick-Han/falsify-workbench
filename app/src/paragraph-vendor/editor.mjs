@@ -13,8 +13,11 @@ import {
   LineRetentionError,
   canCommitLineLocal,
   commitRetainingLines,
+  commitGeometricPrefix,
+  removeGeometricFirstLine,
   pageObjectList,
   planInlineChange,
+  planGeometricShortening,
   replaceReflowWithLineLocal,
   sourceLinePlan,
 } from "./inline-preservation.mjs";
@@ -263,7 +266,9 @@ export function planPageEdits(paras, edits) {
     }
     const lastPi = touched[touched.length - 1];
     const noop = normalizeText(e.after) === needle;
-    const change = noop ? null : planInlineChange(paras, matchedChars, map, hits[0], needle, e.after);
+    const discontiguous = source.some((v, k) => k > 0 && v > source[k - 1] + 2);
+    const geometricShortening = !noop && discontiguous ? planGeometricShortening(matchedChars, map, hit, needle, e.after) : null;
+    const change = noop ? null : geometricShortening || planInlineChange(paras, matchedChars, map, hits[0], needle, e.after);
     if (change?.failure) {
       failures.push({ id: e.id, pageIndex: e.pageIndex, code: change.failure });
       continue;
@@ -271,12 +276,11 @@ export function planPageEdits(paras, edits) {
     // The inline planner merges a multi-paragraph replacement into the last
     // paragraph. For a discontiguous geometric chain that can overlap later
     // lines or unrelated objects, so reject until placement is proven safe.
-    const discontiguous = source.some((v, k) => k > 0 && v > source[k - 1] + 2);
-    if (discontiguous && new Set((change?.del || []).map((c) => c.pi)).size > 1) {
+    if (discontiguous && new Set((change?.del || []).map((c) => c.pi)).size > 1 && !geometricShortening) {
       failures.push({ id: e.id, pageIndex: e.pageIndex, code: "UNSUPPORTED_GEOMETRIC_CHANGE" });
       continue;
     }
-    plans.push({ edit: e, span, touched, insertAt: span.find((c) => c.pi === lastPi), noop, change, start: Math.min(...source), sourceHyphenNormalization: span.some((c) => c.lineEndHyphen) });
+    plans.push({ edit: e, span, touched, geometricShortening: !!geometricShortening, insertAt: span.find((c) => c.pi === lastPi), noop, change, start: Math.min(...source), sourceHyphenNormalization: span.some((c) => c.lineEndHyphen) });
   }
   // Paragraph mutations, built only from accepted, non-noop plans.
   const perPara = new Map();
@@ -489,8 +493,18 @@ export async function editPdf(request, options = {}) {
       if (snapshotKey(paras) !== key) throw fail("STATE_DRIFT", "Page model changed between planning and commit", { pageIndex });
       const context = quality.capturePageLayout(engine, at, paras);
       const touched = [];
-      for (const [pi, { del, inserts }] of [...plan.perPara.entries()].sort((x, y) => x[0] - y[0])) {
+      const mutations = [...plan.perPara.entries()].sort((x, y) => x[0] - y[0]);
+      for (const [mutationIndex, [pi, { del, inserts }]] of mutations.entries()) {
         const para = paras[pi];
+        const geometric = plan.plans.some((p) => p.geometricShortening && p.touched.includes(pi));
+        if (geometric && !inserts.length) {
+          if (mutationIndex !== mutations.length - 1 || plan.plans.filter((p) => p.touched.includes(pi) && !p.noop).length !== 1 || !removeGeometricFirstLine(engine, para, del, inserts)) {
+            throw fail("LAYOUT_UNSUPPORTED", "Geometric deletion could not preserve the source objects", { pageIndex, paragraphIndex: pi });
+          }
+          mutated = true;
+          pageReport.paragraphs.push({ index:pi, surgical:true, lineRetention:{status:"geometric_first_line_removed"} });
+          continue;
+        }
         const runs = rebuildRuns(para, del, inserts);
         // Source lines are kept in place when the engine re-lays the
         // paragraph out for an edit that fits them (see inline-preservation).
@@ -503,7 +517,12 @@ export async function editPdf(request, options = {}) {
         try {
           // Only a stepped commit (linePlan.breaks) can be undone here.
           const pre = linePlan?.breaks && localStable ? pageObjectList(engine) : null;
-          committed = commitRetainingLines(engine, para, runs, linePlan);
+          const prefix = plan.plans.some((p) => p.geometricShortening && p.change.inserts.some((ins) => ins.pi === pi));
+          if (prefix) {
+            if (plan.plans.filter((p) => p.touched.includes(pi) && !p.noop).length !== 1) throw new LineRetentionError("geometric_prefix_shared");
+            committed = await commitGeometricPrefix(engine, para, del, inserts);
+            if (!committed) throw new LineRetentionError("geometric_prefix_unsupported");
+          } else committed = commitRetainingLines(engine, para, runs, linePlan);
           // Any plain re-layout lost the source lines, including one that
           // changed the line count: commitLineLocal itself declines an edit
           // that leaves its source line or does not fit it.

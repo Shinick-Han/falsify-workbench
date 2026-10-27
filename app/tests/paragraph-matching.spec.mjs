@@ -41,3 +41,20 @@ test('rejects a replacement spanning discontiguous paragraphs', () => {
   assert.equal(p.failures[0].code,'UNSUPPORTED_GEOMETRIC_CHANGE');
   assert.equal(p.perPara.size,0);
 });
+test('shortening retains source prefix and deletes each geometric fragment', () => {
+  const p=planPageEdits(objects(),[edit('start old finish','start.')]);
+  assert.deepEqual(p.failures,[]);
+  assert.deepEqual([...p.perPara.keys()],[0,2]);
+  assert.deepEqual(p.perPara.get(0).inserts.map(({ri,o,text})=>({ri,o,text})),[{ri:0,o:5,text:'.'}]);
+  assert.deepEqual([...p.perPara.get(0).del],['0:5','0:6','0:7','0:8']);
+  assert.equal(p.perPara.get(2).del.size,7);
+});
+test('does not shorten inside a word', () => {
+  const p=planPageEdits(objects(),[edit('start old finish','sta.')]);
+  assert.equal(p.failures[0].code,'UNSUPPORTED_GEOMETRIC_CHANGE');
+});
+test('two geometric chains are ambiguous', () => {
+  const p=objects(); p.push(para('start old',400,100),para(' finish',400,80));
+  const result=planPageEdits(p,[edit('start old finish')]);
+  assert.equal(result.failures[0].code,'AMBIGUOUS_MATCH');
+});
