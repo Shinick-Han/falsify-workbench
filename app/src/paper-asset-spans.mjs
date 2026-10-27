@@ -18,19 +18,20 @@ export function resolveOutputAssetSpans({bytes,mupdf,flow,blockSpans}={}) {
     doc=mupdf.Document.openDocument(bytes,'application/pdf');
     const pages=[];
     for(let pi=0;pi<doc.countPages();pi++) {
-      const page=doc.loadPage(pi), placements=[], clips=[]; let failed=false, dev;
+      const page=doc.loadPage(pi), placements=[], clips=[]; let failed=false, maskDepth=0, dev;
       try {
         const bounds=[...page.getBounds()];
         dev=new mupdf.Device({
-          clipPath(path,evenOdd,ctm) { try { const points=[]; let complex=false,closed=false; path.walk({moveTo(x,y){points.push([x,y]);},lineTo(x,y){points.push([x,y]);},curveTo(){complex=true;},closePath(){closed=true;}}); const xs=new Set(points.map(p=>p[0])),ys=new Set(points.map(p=>p[1])); const axis=Math.abs(ctm[1])<1e-8 && Math.abs(ctm[2])<1e-8; const rect=axis && !complex && closed && points.length===4 && xs.size===2 && ys.size===2 && points.every((p,i)=>{const n=points[(i+1)%4];return (p[0]===n[0]) !== (p[1]===n[1]);}); clips.push(rect ? [...path.getBounds(null,ctm)] : null); } catch {clips.push(null);} finally {path.destroy();} },
+          clipPath(path,evenOdd,ctm) { try { const points=[]; let complex=false,closed=false; path.walk({moveTo(x,y){points.push([x,y]);},lineTo(x,y){points.push([x,y]);},curveTo(){complex=true;},closePath(){closed=true;}}); if (points.length>1 && points[0][0]===points.at(-1)[0] && points[0][1]===points.at(-1)[1]) points.pop(); const xs=new Set(points.map(p=>p[0])),ys=new Set(points.map(p=>p[1])); const axis=Math.abs(ctm[1])<1e-8 && Math.abs(ctm[2])<1e-8; const rect=axis && !complex && closed && points.length===4 && xs.size===2 && ys.size===2 && points.every((p,i)=>{const n=points[(i+1)%4];return (p[0]===n[0]) !== (p[1]===n[1]);}); clips.push(rect ? [...path.getBounds(null,ctm)] : null); } catch {clips.push(null);} finally {path.destroy();} },
           clipStrokePath(path,stroke){path.destroy();stroke.destroy();clips.push(null);},
           clipText(text){text.destroy();clips.push(null);},
           clipStrokeText(text,stroke){text.destroy();stroke.destroy();clips.push(null);},
           clipImageMask(image){image.destroy();clips.push(null);},
           popClip(){if(clips.length) clips.pop(); else failed=true;},
-          fillImage(image,ctm,alpha) { try { const [a,b,c,d,e,f]=ctm; const bbox=[Math.min(e,e+a,e+c,e+a+c),Math.min(f,f+b,f+d,f+b+d),Math.max(e,e+a,e+c,e+a+c),Math.max(f,f+b,f+d,f+b+d)]; placements.push({bbox,valid:ctm.every(Number.isFinite) && a>0 && d>0 && Math.abs(b)<1e-5 && Math.abs(c)<1e-5 && alpha===1 && box(bbox) && inside(bbox,bounds) && clips.every(clip=>clip && inside(bbox,clip))}); } finally {image.destroy();} },
-          fillImageMask(image){failed=true;image.destroy();},
-          beginMask(){failed=true;}
+          fillImage(image,ctm,alpha) { try { const [a,b,c,d,e,f]=ctm; const bbox=[Math.min(e,e+a,e+c,e+a+c),Math.min(f,f+b,f+d,f+b+d),Math.max(e,e+a,e+c,e+a+c),Math.max(f,f+b,f+d,f+b+d)]; if (!maskDepth) placements.push({bbox,valid:ctm.every(Number.isFinite) && a>0 && d>0 && Math.abs(b)<1e-5 && Math.abs(c)<1e-5 && alpha===1 && box(bbox) && inside(bbox,bounds) && clips.every(clip=>clip && inside(bbox,clip))}); } finally {image.destroy();} },
+          fillImageMask(image,ctm) { try { if (!maskDepth) { const [a,b,c,d,e,f]=ctm; placements.push({bbox:[Math.min(e,e+a,e+c,e+a+c),Math.min(f,f+b,f+d,f+b+d),Math.max(e,e+a,e+c,e+a+c),Math.max(f,f+b,f+d,f+b+d)],valid:false}); } } finally {image.destroy();} },
+          beginMask(area,luminosity,colorspace) {maskDepth++; colorspace?.destroy();},
+          endMask(){if (maskDepth) {maskDepth--; clips.push(null);} else failed=true;}
         });
         page.run(dev,mupdf.Matrix.identity); dev.close();
         pages.push({bounds,placements,failed});
@@ -42,6 +43,7 @@ export function resolveOutputAssetSpans({bytes,mupdf,flow,blockSpans}={}) {
       let reason=null, candidates=[];
       if (!id || !Array.isArray(ids) || ids.some(x=>typeof x!=='string' || !x) || new Set(ids).size!==ids.length || [id,...ids].some(x=>counts.get(x)!==1)) reason='unbound-or-duplicate-id';
       else if (ns.length!==1) reason='missing-or-duplicate-marker';
+      else if (box(b) && items.some(other=>other!==item && other.source?.pageIndex===item.source?.pageIndex && box(other.source?.bbox) && overlaps(b,other.source.bbox))) reason='overlapping-source-assets';
       else {
         const {start:s,end:e,sourcePage}=ns[0];
         if (!s || !e || !Number.isInteger(item.source?.pageIndex) || sourcePage!==item.source.pageIndex || !Number.isInteger(s.page) || s.page!==e.page || s.page<1 || s.page>pages.length || ![s.x,s.y,e.x,e.y].every(Number.isFinite) || e.y-s.y<5 || Math.abs(e.x-s.x)>1 || (sourcePage!=null && sourcePage!==item.source?.pageIndex)) reason='invalid-marker';

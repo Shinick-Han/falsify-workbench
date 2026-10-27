@@ -18,3 +18,34 @@ test('same image resource repeated elsewhere only selects nominated occurrence',
 test('shared source ownership, clipping and wrong scale fail closed',()=>{assert.equal(run(placement,{items:[flow.items[0],{...flow.items[0],renderAssetId:'other'}]}).spans.length,0);assert.equal(run('q 20 260 50 40 re W n '+placement+' Q').spans.length,0);assert.equal(run('q 100 0 0 60 20 240 cm /im Do Q').spans.length,0);});
 
 test('overlapping panel image is not mistaken for a unique capture',()=>{const r=run(placement+' q 30 0 0 20 40 260 cm /im Do Q');assert.equal(r.evidence[0].reason,'overlapping-placement');assert.deepEqual(r.spans,[]);});
+
+
+test('full rectangular clip including an explicit closing segment preserves placement',()=>{
+ const clip='q 10 240 m 130 240 l 130 310 l 10 310 l 10 240 l h W n ';
+ assert.equal(run(clip+placement+' Q').evidence[0].reason,'resolved');
+});
+test('overlapping distinct source figures cannot claim geometry',()=>{
+ const other={...flow.items[0],renderAssetId:'other',assetIds:['other-original'],source:{pageIndex:0,bbox:[100,20,220,90]}};
+ const r=run(placement,{items:[flow.items[0],other]});
+ assert.equal(r.evidence[0].reason,'overlapping-source-assets');
+ assert.deepEqual(r.spans,[]);
+});
+
+// Device events mimic MuPDF's mask lifecycle, including the pop of the resulting clip.
+function maskEvents(events) {
+ const image=()=>({destroy(){}});
+ const fake={Matrix:{identity:[]},Device:class {constructor(cb){this.cb=cb;} close(){} destroy(){}},Document:{openDocument(){return {countPages:()=>1,loadPage:()=>({getBounds:()=>[0,0,300,400],run(dev){events(dev.cb,image);},destroy(){}}),destroy(){}};}}};
+ return resolve({bytes:new Uint8Array([1]),mupdf:fake,flow,blockSpans:[marker]});
+}
+test('mask scope rejects masked placements but permits later unrelated images',()=>{
+ const masked=maskEvents((d,image)=>{d.beginMask([],false,null);d.endMask();d.fillImage(image(),[100,0,0,50,20,100],1);d.popClip();});
+ assert.equal(masked.spans.length,0);
+ const unrelated=maskEvents((d,image)=>{d.beginMask([],false,null);d.endMask();d.fillImage(image(),[10,0,0,10,200,200],1);d.popClip();d.fillImage(image(),[100,0,0,50,20,100],1);});
+ assert.equal(unrelated.evidence[0].reason,'resolved');
+});
+test('image masks elsewhere do not invalidate a page but overlapping masks do',()=>{
+ const unrelated=maskEvents((d,image)=>{d.fillImageMask(image(),[10,0,0,10,200,200]);d.fillImage(image(),[100,0,0,50,20,100],1);});
+ assert.equal(unrelated.evidence[0].reason,'resolved');
+ const overlap=maskEvents((d,image)=>{d.fillImageMask(image(),[10,0,0,10,30,110]);d.fillImage(image(),[100,0,0,50,20,100],1);});
+ assert.equal(overlap.evidence[0].reason,'overlapping-placement');
+});
