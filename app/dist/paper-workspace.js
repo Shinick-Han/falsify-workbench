@@ -344,6 +344,15 @@
     if(!m||m.length>240||/[<>]/.test(m))return '이유를 표시하지 않습니다.';
     return m;
   }
+  function generationError(e){
+    const reasons={NOT_FOUND:'원문 인용의 위치를 찾지 못했습니다',AMBIGUOUS_MATCH:'같은 원문 인용이 여러 곳에 있습니다',OVERLAPPING_EDITS:'다른 변경과 범위가 겹칩니다',NOT_EDITABLE:'이 텍스트 배치를 편집하지 못했습니다',AMBIGUOUS_STYLE:'변경에 적용할 글꼴을 정하지 못했습니다',UNSUPPORTED_WRAP_COMBINATION:'원문의 줄바꿈을 연결하지 못했습니다'};
+    const failures=e?.details?.failures;
+    if(!Array.isArray(failures)||!failures.length)return safeMessage(e);
+    return failures.slice(0,6).map(f=>{
+      const page=Number.isInteger(f.pageIndex)&&f.pageIndex>=0?'쪽 '+(f.pageIndex+1)+' · ':'';
+      return page+(reasons[f.code]||'편집 계획을 만들지 못했습니다')+'.';
+    }).join(' ');
+  }
   function originText(origin,model){
     if(origin==='ai-proposal')return model?'AI 제안 · '+model:'AI 제안 · 모델 식별 없음';
     if(origin==='human')return '직접 편집';
@@ -1444,7 +1453,7 @@
       }catch(e){
         if(mine!==genId||epoch!==epochAt||!source||source.fileHash!==hash)return;
         if(ctl.signal&&ctl.signal.aborted){setGenStatus('생성을 중단했습니다. 마지막 생성본은 그대로입니다.');return;}
-        setGenStatus('생성하지 못했습니다. 마지막 생성본은 그대로입니다. '+safeMessage(e),true);
+        setGenStatus('생성하지 못했습니다. 마지막 생성본은 그대로입니다. '+generationError(e),true);
       }finally{if(genCtl===ctl)genCtl=null;if(mine===genId&&epoch===epochAt){generating=false;renderChrome();}}
     }
     function download(file,neutral=false){

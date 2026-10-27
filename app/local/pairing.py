@@ -209,7 +209,8 @@ def _sddl_aces(sddl):
 
 def _run_icacls(args):
     import subprocess
-    completed = subprocess.run(['icacls', *args], check=False, capture_output=True, text=True)
+    completed = subprocess.run(['icacls', *args], check=False, capture_output=True, text=True,
+                               **({'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {}))
     if completed.returncode != 0:
         raise PairingError('pairing_store_permissions')
     return completed.stdout or ''
@@ -218,7 +219,8 @@ def _run_icacls(args):
 def _windows_user_sid():
     import csv
     import subprocess
-    completed = subprocess.run(['whoami', '/user', '/fo', 'csv', '/nh'], check=False, capture_output=True, text=True)
+    completed = subprocess.run(['whoami', '/user', '/fo', 'csv', '/nh'], check=False, capture_output=True, text=True,
+                               **({'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {}))
     if completed.returncode != 0 or not completed.stdout.strip():
         raise PairingError('pairing_store_permissions')
     try:

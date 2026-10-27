@@ -143,7 +143,7 @@ def _kill_tree(process):
     if os.name == "nt":
         subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                       timeout=10, check=False)
+                       timeout=10, check=False, creationflags=subprocess.CREATE_NO_WINDOW)
     else:
         import signal
         os.killpg(process.pid, signal.SIGKILL)
@@ -155,7 +155,9 @@ def bounded_transport(command, *, cwd, env, stdin, timeout_seconds, max_output_b
     """Drain both pipes with bounded queue/chunks and kill the process tree on limit."""
     process = subprocess.Popen(command, cwd=cwd, env=env, stdin=subprocess.PIPE,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               shell=False, start_new_session=os.name != "nt")
+                               shell=False,
+                               **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt"
+                                  else {"start_new_session": True}))
     chunks = queue.Queue(maxsize=8)
     stop = threading.Event()
 
