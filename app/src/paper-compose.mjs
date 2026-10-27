@@ -203,7 +203,7 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
   const ownedIds=new Set(); for(const item of flow?.items || []) for(const id of item.assetIds || []) {if(ownedIds.has(id)) fail('Duplicate flow asset ownership'); ownedIds.add(id);}
   for(const a of document.assets || []) if(flow && !ownedIds.has(a.id)) assetFindings.push({code:'asset-unowned',assetId:a.id});
   function spanMarker(id, sourcePage, edge) {
-    return `#context [#let p = here().position(); #metadata((id: ${typstString(id)}, page: p.page, x: p.x / 1pt, y: p.y / 1pt, sourcePage: ${Number.isInteger(sourcePage) ? sourcePage : 'none'}, edge: ${typstString(edge)})) <paper-${edge === 'start' ? 'block' : 'block-end'}>]`;
+    return `#context [#let p = here().position();#metadata((id: ${typstString(id)}, page: p.page, x: p.x / 1pt, y: p.y / 1pt, sourcePage: ${Number.isInteger(sourcePage) ? sourcePage : 'none'}, edge: ${typstString(edge)}))#label(${typstString(`paper-${edge === 'start' ? 'block' : 'block-end'}`)})]`;
   }
   function renderBlock(block, mark=true) {
     const text=textById.get(block.id); if (!text) return '';
@@ -211,7 +211,7 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
     const endMarker=mark ? spanMarker(block.id,block.source?.pageIndex,'end') : '';
 
     const chars=block.source?.characters || [];
-    if (!linkPlan && (!chars.length || !styleById.size) && !fonts.fallback?.length && !(glyphsByBlock.get(block.id)||[]).length && !(changes.get(block.id)||[]).some(e=>e.after.includes('\n'))) return marker+`#text(${typstString(text)})`+endMarker;
+    if (!linkPlan && (!chars.length || !styleById.size) && !fonts.fallback?.length && !(glyphsByBlock.get(block.id)||[]).length && !text.includes('\t') && !(changes.get(block.id)||[]).some(e=>e.after.includes('\n'))) return marker+`#text(${typstString(text)})`+endMarker;
     // Build source-indexed styles, then apply the same line separators and edits.
     const raw=block.text, spaces=spacesFor(block);
     let logical='', styles=[], glyphMap=[], destinations=[], offsets=[], before=[], after=[];
@@ -241,11 +241,11 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
     const emitLabels=i=>(labels.get(i)||[]).map(l=>`#box[]#label(${typstString(l)})`).join('');
     const runs=[]; for(let i=0;i<result.length;) {
       let j=i+(result.codePointAt(i)>0xffff?2:1); const family=familyAt(i), glyph=mappedGlyphs[i];
-      const editLineBreak=result[i]==='\n' && mappedOffsets[i]===null;
-      while(!glyph && !editLineBreak && j<result.length && !(result[j]==='\n' && mappedOffsets[j]===null) && !labels.has(j) && !mappedGlyphs[j] && mapped[j]===mapped[i] && familyAt(j)===family && key(mappedDest[j])===key(mappedDest[i])) j+=result.codePointAt(j)>0xffff?2:1;
+      const editLineBreak=result[i]==='\n' && mappedOffsets[i]===null, tab=result[i]==='\t';
+      while(!glyph && !editLineBreak && !tab && j<result.length && result[j]!=='\t' && !(result[j]==='\n' && mappedOffsets[j]===null) && !labels.has(j) && !mappedGlyphs[j] && mapped[j]===mapped[i] && familyAt(j)===family && key(mappedDest[j])===key(mappedDest[i])) j+=result.codePointAt(j)>0xffff?2:1;
       let content;
       if(glyph) {const path=`source-glyphs/${glyph.pageIndex}-${glyph.start}.svg`;files[path]=new Uint8Array(glyph.bytes);content=`#box(width: ${glyph.advance}pt, height: ${glyph.height}pt, baseline: ${glyph.baselineShift}pt)[#move(dx: ${glyph.offsetX}pt)[#image(${typstString(path)}, width: ${glyph.width}pt)]]`;}
-      else {const style=styleById.get(mapped[i]), size=style?.size; let opts=Number.isFinite(size)&&size>0 ? `size: ${size}pt, ` : ''; if(family) opts+=`font: ${typstString(family)}, `; const name=style?.fontName || ''; if(/bold/i.test(name)) opts+='weight: "bold", '; if(/italic|oblique/i.test(name)) opts+='style: "italic", '; content=editLineBreak ? `#text(${opts}${typstString(' ')})#linebreak()` : `#text(${opts}${typstString(result.slice(i,j))})`;}
+      else {const style=styleById.get(mapped[i]), size=style?.size; let opts=Number.isFinite(size)&&size>0 ? `size: ${size}pt, ` : ''; if(family) opts+=`font: ${typstString(family)}, `; const name=style?.fontName || ''; if(/bold/i.test(name)) opts+='weight: "bold", '; if(/italic|oblique/i.test(name)) opts+='style: "italic", '; content=editLineBreak ? `#text(${opts}${typstString(' ')})#linebreak()` : `#text(${opts}${typstString(tab?' ':result.slice(i,j))})`;}
       runs.push(emitLabels(i)+wrap(content,mappedDest[i])); i=j;
     }
     return marker+runs.join('')+endMarker;
@@ -317,7 +317,7 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
         const parts=pg[kind].filter(e=>rendered.has(e)).map(entry=>{
           const [x,y]=entry.bbox, dy=kind==='header' ? y : y-(page.height-margins.bottom);
           const id=entry.blockId || entry.itemId;
-          return `#place(top + left, dx: ${x-margins.left}pt, dy: ${dy}pt)[#context [#let p = here().position(); #metadata((id: ${typstString(id)}, sourcePage: ${pg.sourcePage}, page: p.page, x: p.x / 1pt, y: p.y / 1pt, kind: ${typstString(kind)})) <paper-furniture>]${rendered.get(entry)}]`;
+          return `#place(top + left, dx: ${x-margins.left}pt, dy: ${dy}pt)[#context [#let p = here().position();#metadata((id: ${typstString(id)}, sourcePage: ${pg.sourcePage}, page: p.page, x: p.x / 1pt, y: p.y / 1pt, kind: ${typstString(kind)}))#label("paper-furniture")]${rendered.get(entry)}]`;
         });
         return `if sp == ${pg.sourcePage} [${parts.join('')}]`;
       });

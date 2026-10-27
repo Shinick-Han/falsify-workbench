@@ -125,6 +125,8 @@ test('encoded glyphs resolve only the matching hard-hyphen boundary', async () =
     assert.equal((await run(variant,correct)).checks.content.status,'pass',variant);
     assert.equal((await run(variant,opposite)).checks.content.status,'finding',variant);
   }
+  const evidence=(await run('hyphen-wrap','antero-posterior')).checks.content.spacingEvidence;
+  assert.deepEqual(evidence.map(x=>[x.action,x.leftScalar,x.rightScalar,x.encodedWhitespace]),[['remove-inferred-space',45,112,[]]]);
   assert.equal((await run('minus-wrap','value - 12')).checks.content.status,'pass');
   assert.equal((await run('minus-wrap','value 12')).checks.content.status,'finding');
   const failed = await run('hyphen-wrap','antero-posterior',{mupdf:{}});
@@ -177,6 +179,12 @@ test('wrapped citations use encoded spaces rather than inventing a separator', a
   assert.equal((await run('range-wrap','337– 41')).checks.content.status,'finding');
   assert.equal((await run('url-wrap','site/path/?key=value')).checks.content.status,'pass');
   assert.equal((await run('url-wrap','site/path/? key=value')).checks.content.status,'finding');
+  assert.equal((await run('hyphen-paragraph','antero- posterior')).checks.content.status,'pass');
+  assert.equal((await run('hyphen-paragraph','antero-posterior')).checks.content.status,'finding');
+  assert.equal((await run('url-paragraph','https://site.test Peer review')).checks.content.status,'pass');
+  assert.equal((await run('url-paragraph','https://site.testPeer review')).checks.content.status,'finding');
+  assert.equal((await run('url-reference','https://site.test/ 2. Reference')).checks.content.status,'pass');
+  assert.equal((await run('url-reference','https://site.test/2. Reference')).checks.content.status,'finding');
 });
 
 test('synthetic PDF.js quote gaps require matching encoded glyph evidence', async () => {
@@ -191,6 +199,15 @@ test('synthetic PDF.js quote gaps require matching encoded glyph evidence', asyn
   assert.equal((await run('quote-space','bath ”')).checks.content.status,'pass');
   assert.equal((await run('quote-space','bath”')).checks.content.status,'finding');
   assert.equal((await run('quote','bath”',{})).checks.content.status,'unavailable');
+});
+
+test('representation equivalence is explicit and does not mask scientific changes or spaces', async () => {
+  const run=text=>checkRecomposition({bytes:geometryCorpus('micro'),expectedBlocks:[{id:'x',text}],pdfjs,mupdf});
+  const result=await run('1 µM ki\u00adnase');
+  assert.equal(result.checks.content.status,'normalized');
+  assert.deepEqual(result.checks.content.representationDifferences.map(x=>[x.kind,x.sourceOffset,x.outputOffset]),[['micro-sign-to-greek-mu',2,2],['discretionary-soft-hyphen-omitted',7,7]]);
+  assert.match(result.checks.content.limitation,/not byte-exact/);
+  for(const changed of ['2 µM ki\u00adnase','1 µM ki\u00adnases','1 µMki\u00adnase','1 µm ki\u00adnase']) assert.equal((await run(changed)).checks.content.status,'finding',changed);
 });
 
 // Real PDF bytes with independently placed body and running furniture.

@@ -3,11 +3,25 @@ import {readOutputGlyphs} from './paper-output-glyphs.mjs';
 // logical content, not a destination map, as the expectation.
 const normalize = value => value.replace(/\s+/gu, ' ').trim();
 
+// Only these two representations are treated as equivalent, with their
+// original offsets retained. Other character and word-space changes fail.
+function representationComparison(expected, observed) {
+  let i=0,j=0; const differences=[];
+  while(i<expected.length && j<observed.length) {
+    const a=expected.codePointAt(i),b=observed.codePointAt(j);
+    if(a===b) {i+=a>0xffff?2:1;j+=b>0xffff?2:1;continue;}
+    if(a===0x00b5 && b===0x03bc) {differences.push({kind:'micro-sign-to-greek-mu',sourceOffset:i,outputOffset:j,source:'U+00B5',output:'U+03BC'});i++;j++;continue;}
+    if(a===0x00ad && expected.codePointAt(i+1)===b) {differences.push({kind:'discretionary-soft-hyphen-omitted',sourceOffset:i,outputOffset:j,source:'U+00AD',output:null});i++;continue;}
+    return {matches:false,differences:[]};
+  }
+  return {matches:i===expected.length && j===observed.length,differences};
+}
+
 export async function checkRecomposition({bytes, expectedBlocks, edits = {}, pdfjs, exporter, mupdf, expectedFurniture, outputFurniture, bodyFrame, blockSpans} = {}) {
   if (!(bytes instanceof Uint8Array) || !bytes.length || !pdfjs?.getDocument) throw new TypeError('PDF bytes and PDF.js are required');
   if (!Array.isArray(expectedBlocks) || !expectedBlocks.length || expectedBlocks.some(b => typeof b.id !== 'string' || typeof b.text !== 'string') || new Set(expectedBlocks.map(b => b.id)).size !== expectedBlocks.length) throw new TypeError('unique expected blocks are required');
   if (Object.keys(edits).some(id => !expectedBlocks.some(b => b.id === id) || typeof edits[id] !== 'string')) throw new TypeError('invalid edit');
-  const findings = [], pages = [], locations = [];
+  const findings = [], pages = [], locations = [], spacingEvidence = [];
   const furnitureEnabled = expectedFurniture !== undefined || outputFurniture !== undefined || bodyFrame !== undefined;
   const furnitureValid = Array.isArray(expectedFurniture) && Array.isArray(outputFurniture) && bodyFrame &&
     ['left','top','right','bottom'].every(k => Number.isFinite(bodyFrame[k])) && bodyFrame.left < bodyFrame.right && bodyFrame.top < bodyFrame.bottom;
@@ -168,7 +182,10 @@ export async function checkRecomposition({bytes, expectedBlocks, edits = {}, pdf
           if (previous.hasEOL) {
             // PDF.js can discard an encoded trailing space before EOL. Resolve
             // hyphenated words and wrapped citations from encoded glyphs.
-            if ((/[\p{L}\p{N}]-$/u.test(previous.str) && /^\p{L}/u.test(item.str)) || (/\p{N}–$/u.test(previous.str) && /^\p{N}/u.test(item.str)) || (/\S$/u.test(previous.str) && /^\[/u.test(item.str)) || (/\S*\/\S*[?=&]$/u.test(previous.str) && /^[\p{L}\p{N}]/u.test(item.str))) {
+            const recent=parts.slice(-8).join('');
+            const paragraphGap=position && previous.position && Math.abs(position.y-previous.position.y)>Math.max(position.height,previous.position.height)*1.9;
+            const url=/(?:https?:\/\/|www\.)[^\s]*$/iu.test(recent) && (/[./?=&-]$/u.test(recent) || (/\p{L}$/u.test(recent) && /^\p{N}/u.test(item.str)) || /^[\p{L}\p{N}_-]+[./]/u.test(item.str));
+            if (!paragraphGap && ((/[\p{L}\p{N}+][–\-/]$/u.test(recent) && /^[\p{L}\p{N}_−]/u.test(item.str)) || (/(?:^|\s)-$/u.test(recent) && /^\p{L}/u.test(item.str)) || (/\S$/u.test(previous.str) && /^\[/u.test(item.str)) || (/\S*\/\S*[?=&]$/u.test(previous.str) && /^[\p{L}\p{N}]/u.test(item.str)) || (url && /^[\p{L}\p{N}]/u.test(item.str)))) {
               boundaries.push({part:parts.length, ordinal, leftPosition:previous.position, rightPosition:position});
             }
             parts.push(' ');
@@ -208,7 +225,10 @@ export async function checkRecomposition({bytes, expectedBlocks, edits = {}, pdf
             glyph.origin[0] >= pos.x - 1 && glyph.origin[0] <= pos.x + pos.width + 1;
           if (aligned && left !== undefined && right !== undefined && left < right &&
               near(glyphs[left], boundary.leftPosition) && near(glyphs[right], boundary.rightPosition)) {
-            parts[boundary.part] = glyphs.slice(left + 1, right).some(g => /\s/u.test(String.fromCodePoint(g.scalar))) ? ' ' : '';
+            const spaces=glyphs.slice(left + 1, right).filter(g=>/\s/u.test(String.fromCodePoint(g.scalar)));
+            const resolved=spaces.length ? ' ' : '';
+            if(parts[boundary.part]!==resolved) spacingEvidence.push({pageIndex:n-1,action:resolved?'retain-encoded-space':'remove-inferred-space',leftScalar:glyphs[left].scalar,rightScalar:glyphs[right].scalar,leftOrigin:glyphs[left].origin,rightOrigin:glyphs[right].origin,encodedWhitespace:spaces.map(g=>g.scalar)});
+            parts[boundary.part] = resolved;
           } else {
             findings.push({code:'ambiguous-text-geometry', pageIndex:n - 1, reason:'PDF.js may discard an encoded space at a line-final hyphen or citation boundary, or infer one before a closing quote; glyph stream unavailable or misaligned.'});
           }
@@ -224,7 +244,8 @@ export async function checkRecomposition({bytes, expectedBlocks, edits = {}, pdf
   }
   const observed = normalize(pages.join(' '));
   const expected = normalize(expectedBlocks.map(b => Object.hasOwn(edits,b.id) ? edits[b.id] : b.text).join(' '));
-  if (observed !== expected) findings.push({code:'content-mismatch', expected, observed});
+  const representation=representationComparison(expected,observed);
+  if (!representation.matches) findings.push({code:'content-mismatch', expected, observed});
   const alignmentAvailable = observed === expected && !findings.some(f => f.code === 'ambiguous-text-geometry' || f.code === 'unsupported-text-geometry');
   if (alignmentAvailable) {
     // Both sequences are normalized as a whole, with one separator between
@@ -248,6 +269,6 @@ export async function checkRecomposition({bytes, expectedBlocks, edits = {}, pdf
     }
   }
   const independent = typeof exporter === 'string' && exporter.trim() && !/pdf\.?js/i.test(exporter) ? {status:'declared', reader:'PDF.js text extraction', exporter, limitation:'Distinct named engines only; exporter identity is caller supplied.'} : {status:'unavailable', reader:'PDF.js text extraction', reason:'Exporter path not supplied or uses PDF.js.'};
-  return {schema:'falsify.recomposition-check.v1', readable:true, checks:{furniture:furnitureEnabled ? {status:findings.some(f=>f.code==='missing-furniture' || f.code==='unexpected-margin-text' || f.code==='wrong-furniture-source') ? 'finding' : !furnitureValid || !selectedSources || findings.some(f=>f.code==='furniture-unavailable' || f.code==='ambiguous-furniture') ? 'unavailable' : 'checked', sourceAssociation, assets:furnitureAssets ? {status:'unavailable',reason:'Furniture assets require independent visual inspection.'} : {status:'not-applicable'}} : undefined,content:{status:findings.some(f=>f.code==='ambiguous-text-geometry' || f.code==='unsupported-text-geometry') ? 'unavailable' : observed === expected ? 'pass':'finding', comparison:'ordered text with whitespace runs collapsed; ambiguous item geometry is unavailable'}, bounds:{status:findings.some(f=>f.code==='text-outside-page')?'finding':!inspectedItems || findings.some(f=>f.code==='unsupported-text-geometry')?'unavailable':'checked', limitation:'Extracted upright text items only, estimated from font ascent and descent; PDF.js may omit off-page text. Not clipping or ink bounds.'}, movement:alignmentAvailable ? {status:'observed', locations} : {status:'unavailable', locations:null, reason:'Complete ordered text alignment or supported geometry is unavailable.'}, independent, visual:{status:'unavailable', reason:'No raster or visibility inspection.'}, overlap:{status:'unavailable', reason:'Text and asset ownership not established.'}, captionOwnership:{status:'unavailable', reason:'Relations not established from PDF bytes.'}}, findings};
+  return {schema:'falsify.recomposition-check.v1', readable:true, checks:{furniture:furnitureEnabled ? {status:findings.some(f=>f.code==='missing-furniture' || f.code==='unexpected-margin-text' || f.code==='wrong-furniture-source') ? 'finding' : !furnitureValid || !selectedSources || findings.some(f=>f.code==='furniture-unavailable' || f.code==='ambiguous-furniture') ? 'unavailable' : 'checked', sourceAssociation, assets:furnitureAssets ? {status:'unavailable',reason:'Furniture assets require independent visual inspection.'} : {status:'not-applicable'}} : undefined,content:{status:findings.some(f=>f.code==='ambiguous-text-geometry' || f.code==='unsupported-text-geometry') ? 'unavailable' : observed===expected ? 'pass' : representation.matches ? 'normalized' : 'finding', comparison:'ordered text with whitespace runs collapsed; ambiguous item geometry is unavailable',representationDifferences:representation.matches ? representation.differences : [],spacingEvidence,offsetUnit:'UTF-16 offsets in whitespace-normalized source expectation and PDF.js output',limitation:representation.differences.length ? 'The listed representation differences are not byte-exact preservation.' : undefined}, bounds:{status:findings.some(f=>f.code==='text-outside-page')?'finding':!inspectedItems || findings.some(f=>f.code==='unsupported-text-geometry')?'unavailable':'checked', limitation:'Extracted upright text items only, estimated from font ascent and descent; PDF.js may omit off-page text. Not clipping or ink bounds.'}, movement:alignmentAvailable ? {status:'observed', locations} : {status:'unavailable', locations:null, reason:'Complete ordered text alignment or supported geometry is unavailable.'}, independent, visual:{status:'unavailable', reason:'No raster or visibility inspection.'}, overlap:{status:'unavailable', reason:'Text and asset ownership not established.'}, captionOwnership:{status:'unavailable', reason:'Relations not established from PDF bytes.'}}, findings};
 }
 

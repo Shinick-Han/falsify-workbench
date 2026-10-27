@@ -9,6 +9,11 @@ const src=new TextEncoder().encode('source'); const sha=b=>createHash('sha256').
 const make=()=>({schema:'falsify.paper-document.v1',sourceSha256:sha(src),pages:[{sourcePageIndex:0,width:400,height:600}],blocks:[{id:'a',text:'repeat hard-repeat −12 [1]',source:{pageIndex:0,range:{start:0,end:26},lines:[{range:{start:0,end:12}},{range:{start:12,end:26}}]}},{id:'b',text:'repeat',source:{pageIndex:0,range:{start:26,end:32},lines:[]}}],assets:[]});
 const pdf=new TextEncoder().encode('%PDF-1.7\nactual bytes');
 const edit={blockId:'b',pageIndex:0,start:26,end:32,before:'repeat',after:'changed'};
+test('markers do not insert spaces and source tabs keep a word separator',async()=>{
+ const d=make();d.blocks=[{id:'x',text:'102.\tGilbert',source:{pageIndex:0,range:{start:0,end:12},lines:[]}}];let source,checked;
+ await composeDocument({document:d,sourceBytes:src},{compile:async p=>(source=p.source,pdf),outputCheck:async p=>(checked=p.expectedBlocks,{checks:{content:{status:'pass'}},findings:[]})});
+ assert.doesNotMatch(source,/here\(\)\.position\(\); #metadata/);assert.match(source,/#text\("102\."\)#text\(" "\)#text\("Gilbert"\)/);assert.equal(checked[0].text,'102.\tGilbert');
+});
 test('explicit After line breaks retain an encoded separator and the full replacement',async()=>{
  const d=make(), after='exact expres-\nsion continues';let source,checked;
  await composeDocument({document:d,sourceBytes:src,edits:[{...edit,after}]},{compile:async p=>(source=p.source,pdf),outputCheck:async p=>(checked=p.expectedBlocks,{checks:{content:{status:'pass'}},findings:[]})});
@@ -175,7 +180,7 @@ test('inline joiners retain their original positions when fragments are deleted'
   const flow={schema:'falsify.paper-flow.v1',sourceSha256:d.sourceSha256,fragments,items:[{kind:'paragraph',inline:true,blockIds:fragments.map(f=>f.id),joiners:['-','+']}]};
   let source,checked;
   await composeDocument({document:d,sourceBytes:src,flow,edits:[{blockId:'p',pageIndex:0,start,end,before:'abc'.slice(start,end),after}]},{compile:async p=>(source=p.source,pdf),outputCheck:async p=>(checked=p.expectedBlocks,{checks:{content:{status:'pass'}},findings:[]})});
-  assert.equal(checked[0].text,expected);assert.ok(source.replace(/#context \[.*? <paper-block(?:-end)?>\]/g,'').includes(rendered),source);
+  assert.equal(checked[0].text,expected);assert.ok(source.replace(/#context \[.*?#label\("paper-block(?:-end)?"\)\]/g,'').includes(rendered),source);
   const literalText=[...source.matchAll(/#text\("([^"\\]*)"\)/g)].map(m=>m[1]).join('');
   assert.equal(literalText,expected);
  }
