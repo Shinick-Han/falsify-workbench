@@ -18,7 +18,7 @@ python3 -m venv "$work/venv"
 "$work/venv/bin/python" -m unittest discover -s app/tests -p test_web_bridge.py -v
 "$work/venv/bin/python" -m unittest discover -s app/tests -p test_port_binding.py -v
 "$work/venv/bin/python" -m unittest discover -s app/tests -p test_pairing.py -v
-node --test app/tests/local-bridge.spec.cjs
+node --test app/tests/local-bridge.spec.cjs app/tests/auto-pair.spec.cjs
 "$work/venv/bin/python" - "$work" <<'PY'
 import http.client, json, os, pathlib, socket, subprocess, sys, time
 work = pathlib.Path(sys.argv[1]); fakebin = work / 'bin'; fakebin.mkdir()
