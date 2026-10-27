@@ -441,6 +441,35 @@ export function buildPaperFlow(document, {drawings=document?.drawings || [], lin
     if(continuousOrder) [...continuousOrder,...footers].forEach((item,i)=>item.continuousPosition=i);
     items.push(...[...entries,...footers].map(({box,pos,index,memberBoxes,...item})=>item));
   }
+  // Only a previously established artwork region can follow a bottom caption.
+  // Its labels and panels are owned together; independent text is a barrier.
+  const blockMap=new Map([...document.blocks,...fragments].map(b=>[b.id,b]));
+  const frameOK=p=>p && p.geometry?.frame==='mupdf-display' &&
+    sameNumbers(p.geometry.bounds,[0,0,p.width,p.height]) &&
+    Array.isArray(p.geometry.pageTransform) && p.geometry.pageTransform.length===6 && p.geometry.pageTransform.every(Number.isFinite);
+  for(const page of document.pages) {
+    const next=document.pages.find(p=>p.sourcePageIndex===page.sourcePageIndex+1);
+    if(!frameOK(page) || !frameOK(next) || !sameNumbers(page.geometry.bounds,next.geometry.bounds) || !sameNumbers(page.geometry.pageTransform,next.geometry.pageTransform)) continue;
+    const current=items.filter(i=>i.source.pageIndex===page.sourcePageIndex && !['header','footer'].includes(i.kind));
+    const caption=current.at(-1);
+    if(caption?.kind!=='caption' || !boxOK(caption.source.bbox) || caption.source.bbox[3]<page.height*.88 || relations.some(r=>r.kind==='caption' && r.captionItemId===caption.id)) continue;
+    const blocks=caption.blockIds.map(id=>blockMap.get(id));
+    if(blocks.some(b=>!b || b.source?.pageIndex!==page.sourcePageIndex || !b.source.range || page.text?.slice(b.source.range.start,b.source.range.end)!==b.text)) continue;
+    const text=blocks.map(b=>b.text).join('');
+    if(!/^\s*(?:extended\s+data\s+)?fig(?:ure)?\.?\s*\d/i.test(text) || !/[.!?][)\]"'\u2019\u201d]*\s*$/.test(text)) continue;
+    const following=items.filter(i=>i.source.pageIndex===next.sourcePageIndex && !['header','footer'].includes(i.kind));
+    if(following.length!==1 || following[0].kind!=='asset') continue;
+    const artwork=following[0], box=artwork.source.bbox;
+    const region=regions.find(r=>r.id===artwork.renderAssetId && r.pageIndex===next.sourcePageIndex && r.classification==='compound-figure');
+    if(!region || !boxOK(box) || !sameNumbers(region.bbox,box) || box[2]-box[0]<next.width*.7 || box[3]-box[1]<next.height*.7 || artwork.captionIds.length ||
+      region.blockIds.length!==artwork.blockIds.length || region.assetIds.length!==artwork.assetIds.length ||
+      region.blockIds.some(id=>!artwork.blockIds.includes(id)) || region.assetIds.some(id=>!artwork.assetIds.includes(id))) continue;
+    artwork.captionIds.push(...caption.blockIds); artwork.captionPositions ||= {};
+    for(const id of caption.blockIds) artwork.captionPositions[id]='above';
+    relations.push({kind:'caption',assetItemId:artwork.id,captionItemId:caption.id,position:'above',provenance:{rule:'adjacent-page-bottom-caption-full-page-artwork',sourceSha256:document.sourceSha256,captionPageIndex:page.sourcePageIndex,artworkPageIndex:next.sourcePageIndex,frame:'mupdf-display',regionId:region.id}});
+    const unresolved=diagnostics.findIndex(d=>d.code==='caption-association-unresolved' && d.itemId===caption.id);
+    if(unresolved>=0) diagnostics.splice(unresolved,1);
+  }
   return {schema:'falsify.paper-flow.v1',sourceSha256:document.sourceSha256,items,relations,diagnostics,fragments,regions};
 }
 function ownedByAsset(x,entries) {return entries.some(e=>e.kind==='asset' && e.blockIds.includes(x.b.id));}
