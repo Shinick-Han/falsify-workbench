@@ -20,8 +20,8 @@ original Forms/images and all other painting uses remain untouched. The
 output is accepted only after re-reading it: same page count/boxes/rotation, identical text words on every page,
 identical decoded content streams except the selected chain's renamed operands (including per-invocation Form checks),
 identical occurrence list except the selected size,
-pixel-identical renders of every other page and of the target page outside the image box (+2 px antialias bleed), and a
-visible change inside it. This is an engine render self-check (MuPDF), not an independent fidelity proof.
+pixel-identical renders of every other page and the target page outside the image box (+2 px antialias bleed),
+except for a bounded RGBA rounding difference proved against an opaque-alpha control, and a visible change inside it. This is an engine render self-check (MuPDF), not an independent fidelity proof.
 
 Bounds: source <= 25 MiB and <= 64 pages, content streams decoded by a bounded Flate inflater (other filters -> page
 'scan-limit'), operator/form-depth budgets, PNG <= 4 MiB / <= 4M pixels / each side <= 8192 validated from the IHDR and
@@ -812,7 +812,7 @@ def _position(path):
     return [None if isinstance(p, list) else p for p in path]
 
 
-def _verify(pk, mu, Image, ImageChops, source, output, scan, target, expected_streams, size):
+def _verify(pk, mu, Image, ImageChops, source, output, scan, target, expected_streams, size, control=None):
     if len(output) > LIMITS['maxOutputBytes']: raise ValueError('output-too-large')
     fail = ValueError('check-failed')
     pno = target['pageIndex']
@@ -827,7 +827,23 @@ def _verify(pk, mu, Image, ImageChops, source, output, scan, target, expected_st
     if len(a_streams) != len(b_streams): raise fail
     for i, (a, b) in enumerate(zip(a_streams, b_streams)):
         if b is None or b != (expected_streams['pageStreams'] if i == pno else a): raise fail
+    # The opaque-alpha control uses the same replacement and selected Do chain. Its streams
+    # must independently satisfy the same exact-operator proof before it can explain rounding.
+    if control is not None:
+        if len(control[0]) > LIMITS['maxOutputBytes'] or control[1] != expected_streams: raise fail
+        control_pdf = _open_pike(pk, control[0])
+        source_pdf = _open_pike(pk, source)
+        try:
+            cp, sp = _page_streams(pk, control_pdf), _page_streams(pk, source_pdf)
+            if len(cp) != len(sp) or any(x != (control[1]['pageStreams'] if i == pno else sp[i])
+                    for i, x in enumerate(cp)): raise fail
+            forms = _form_streams(pk, source_pdf)
+            forms.update({(pno,) + path: data for path, data in control[1]['formStreams'].items()})
+            if _form_streams(pk, control_pdf) != forms: raise fail
+        finally:
+            control_pdf.close(); source_pdf.close()
     a, b = _open_mu(mu, source), _open_mu(mu, output)
+    c = _open_mu(mu, control[0]) if control is not None else None
     try:
         if a.page_count != b.page_count: raise fail
         for i in range(a.page_count):
@@ -851,13 +867,29 @@ def _verify(pk, mu, Image, ImageChops, source, output, scan, target, expected_st
                 min(ra.width, math.ceil(x1 * zoom) + BLEED_PX), min(ra.height, math.ceil(y1 * zoom) + BLEED_PX))
             changed = diff.getbbox()
             if changed is None: raise ValueError('no-op')
-            if not _contains(roi, changed): raise fail
+            if not _contains(roi, changed):
+                if c is None or c.page_count != a.page_count: raise fail
+                pc = c[i]
+                if (tuple(pc.mediabox), tuple(pc.cropbox), pc.rotation) != (tuple(pa.mediabox), tuple(pa.cropbox), pa.rotation) \
+                        or pc.get_text('words', sort=False) != pa.get_text('words', sort=False): raise fail
+                rc = pc.get_pixmap(matrix=m, alpha=False, colorspace=mu.csRGB)
+                if (rc.width, rc.height) != (ra.width, ra.height): raise fail
+                ic = Image.frombytes('RGB', (rc.width, rc.height), rc.samples)
+                source_control = ImageChops.difference(ia, ic)
+                output_control = ImageChops.difference(ib, ic)
+                source_control.paste((0, 0, 0), roi)
+                output_control.paste((0, 0, 0), roi)
+                # Only renderer-path rounding proven by this control is allowed: <=2 per
+                # channel versus source, and exact equality to output outside the ROI.
+                if max(channel.getextrema()[1] for channel in source_control.split()) > 2 \
+                        or output_control.getbbox() is not None: raise fail
             r, g, bl = diff.crop(roi).split()
             peak = ImageChops.lighter(ImageChops.lighter(r, g), bl)
             if sum(peak.point(lambda v: 255 if v > VISIBLE_DELTA else 0).histogram()[255:]) < MIN_VISIBLE_PIXELS:
                 raise ValueError('no-op')
     finally:
         a.close(); b.close()
+        if c is not None: c.close()
     _, after, complete, _ = _scan(pk, mu, output)
     before = scan['occurrences']
     if len(after) != len(before) or complete != scan['complete']: raise fail
@@ -881,8 +913,11 @@ def replace_occurrence(source, occurrence_id, replacement_png):
     if target['reason'] is not None: raise ValueError(target['reason'])
     rgb = _decode_png(Image, bytes(replacement_png), size)
     output, expected = _rewrite(pk, source, target, rgb, size)
+    control = None
+    if rgb[1] is not None:
+        control = _rewrite(pk, source, target, (rgb[0], bytes([255]) * (size[0] * size[1])), size)
     _verify(pk, mu, Image, ImageChops, source, output, {'occurrences': occurrences, 'complete': complete}, target,
-        expected, size)
+        expected, size, control)
     out_sha = _sha(output)
     return output, {'schema': REPORT_SCHEMA, 'sourceSha256': sha, 'occurrenceId': occurrence_id, 'outputSha256': out_sha,
         'pageIndex': target['pageIndex'], 'bbox': list(target['bbox']), 'changedOccurrences': 1, 'check': 'passed',

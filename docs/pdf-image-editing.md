@@ -44,8 +44,9 @@ IDs bind selection to the exact original. The companion re-derives the placement
 not from a client-provided rectangle. The native child has a timeout and temporary-file cleanup, **not an OS memory sandbox**.
 
 The writer checks page count/geometry, extracted text and rendered pixels outside the tight selected region; the selected
-region must actually change. For complex clips the region is the conservative image bounding box. Some
-otherwise eligible replacements can fail this check when rendering changes outside that region. Decoded page and reachable Form streams are also compared by painting invocation: only the
+region must actually change. For complex clips the region is the conservative image bounding box. For RGBA, an independently
+rewritten opaque-alpha control must match the output exactly outside that region; its differences from the source are
+limited to two values per channel. Both outputs must pass the same exact stream checks. Other pages remain pixel-identical. Decoded page and reachable Form streams are also compared by painting invocation: only the
 selected ancestry's exact operand renames are allowed, so a shared Form changing elsewhere fails even if it causes no pixel
 difference. Malformed painting operands or unbalanced graphics state make the affected scan incomplete and non-editable.
 Its report calls this an **engine rendering check**, not independent scientific verification.

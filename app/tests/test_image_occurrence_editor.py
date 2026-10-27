@@ -639,6 +639,27 @@ class OutputCheck(unittest.TestCase):
             return buf.getvalue(), expected
         return rewrite
 
+    def test_alpha_shared_form_control_and_small_unrelated_change(self):
+        source = form_source()
+        target = listing(source)[0]
+        for alpha in (255, 128):
+            out, _ = ed.replace_occurrence(source, target['id'], png(mode='RGBA', alpha=alpha))
+            self.assertEqual(texts(source), texts(out))
+        calls = [0]
+        def tamper_actual(pk, src, selected, rgb, size):
+            output, expected = self.real(pk, src, selected, rgb, size)
+            calls[0] += 1
+            if calls[0] == 1:
+                with pikepdf.open(io.BytesIO(output)) as pdf:
+                    original = pdf.Root.Pages.Kids[0].Resources.XObject.Fm.Resources.XObject.Im1
+                    pixels = bytearray(original.read_bytes()); pixels[0] += 1
+                    original.write(zlib.compress(bytes(pixels)), filter=pikepdf.Name.FlateDecode)
+                    buf = io.BytesIO(); pdf.save(buf); output = buf.getvalue()
+            return output, expected
+        with patch.object(ed, '_rewrite', tamper_actual):
+            with self.assertRaisesRegex(ValueError, '^check-failed$'):
+                ed.replace_occurrence(source, target['id'], png(mode='RGBA', alpha=128))
+
     def test_unrelated_pixel_change_fails(self):
         def other_page_image(pdf):
             im2 = pdf.Root.Pages.Kids[1].Resources.XObject.Im2
