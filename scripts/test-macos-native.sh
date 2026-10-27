@@ -46,7 +46,7 @@ try:
         except (OSError, http.client.HTTPException): time.sleep(0.1)
     else: raise RuntimeError('companion startup timed out')
     assert status == 200
-    status, capabilities = request('/api/capabilities', {'Authorization': 'Bearer ' + session['token']})
+    status, capabilities = request('/api/capabilities', {'Authorization': 'Bearer ' + session['token'], 'Sec-Fetch-Site': 'same-origin'})
     assert status == 200 and capabilities['red'] and capabilities['blue'] and capabilities['pdf']
     assert capabilities['cliSelection'] and capabilities['harnessWrapper']
     assert {item['id'] for item in capabilities['cliAgents'] if item['installed']} >= {'codex', 'claude'}
