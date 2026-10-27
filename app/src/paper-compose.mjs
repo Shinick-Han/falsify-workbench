@@ -428,12 +428,7 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
       const rendered=item.inline ? parts.map((p,i)=>p+(i<parts.length-1 ? `#text(${typstString(item.joiners[i])})` : '')).join('') : parts.filter(Boolean).join('\n');
       return paragraphContext(blocks,item.kind,rendered);
     };
-    const renderCaption=item=>{
-      const blocks=(item.blockIds||[]).map(id=>blockById.get(id));
-      const parts=blocks.map(b=>renderBlock(b));
-      const rendered=item.inline ? parts.map((p,i)=>p+(i<parts.length-1 ? `#text(${typstString(item.joiners[i])})` : '')).join('') : parts.filter(Boolean).join('\n');
-      return paragraphContext(blocks,'caption',rendered);
-    };
+    const renderCaption=renderFlowItem;
     for(const [itemIndex,item] of flow.items.entries()) {
       if(plan?.excludedItemIds.includes(item.id) || deferredItems.has(item)) continue;
       if(item.kind==='caption' && (item.blockIds||[]).every(id=>linkedCaptions.has(id))) continue;
