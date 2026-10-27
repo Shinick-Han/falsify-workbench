@@ -78,6 +78,41 @@ export function normalizeDocument({sourceSha256, pages, signal} = {}) {
   return model;
 }
 
+// Compare the complete page raster and character occurrences after removing text
+// in one image occurrence on a disposable copy. Fail closed on ambiguous matches.
+function probeOcclusion(bytes, model, pageIndex, asset, signal) {
+  const pageInfo=model.pages[pageIndex], box=asset.source.bbox, transform=pageInfo.geometry?.pageTransform;
+  if (!boxOK(box) || !transform || transform[1]!==0 || transform[2]!==0 || pageInfo.width*pageInfo.height*4>12000000) return null;
+  const source=model.blocks.filter(b=>b.text && b.source.pageIndex===pageIndex).flatMap(b=>b.source.characters.map(c=>({c,text:pageInfo.text.slice(c.start,c.end)})));
+  const overlaps=b=>boxOK(b) && b[0]<box[2] && box[0]<b[2] && b[1]<box[3] && box[1]<b[3];
+  if (!source.some(x=>overlaps(x.c.bbox))) return null;
+
+  let doc,page,annot,st,pix;
+  try {
+    checkAbort(signal); doc=mupdf.Document.openDocument(bytes,'application/pdf').asPDF(); page=doc.loadPage(pageIndex);
+    const raster=()=>{pix=page.toPixmap([2,0,0,2,0,0],mupdf.ColorSpace.DeviceRGB,false);try{return {width:pix.getWidth(),height:pix.getHeight(),pixels:Uint8Array.from(pix.getPixels())};}finally{pix.destroy();pix=null;}};
+    const before=raster(); annot=page.createAnnotation('Redact');annot.setRect(box);annot.update();
+    page.applyRedactions(false,mupdf.PDFPage.REDACT_IMAGE_NONE,mupdf.PDFPage.REDACT_LINE_ART_NONE,mupdf.PDFPage.REDACT_TEXT_REMOVE);
+    const after=raster();if(before.width!==after.width || before.height!==after.height || before.pixels.length!==after.pixels.length || before.pixels.some((v,i)=>v!==after.pixels[i])) return null;
+    st=page.toStructuredText('preserve-whitespace,preserve-images');const remaining=[];
+    st.walk({onChar(text,origin,font,size,quad){remaining.push({text,bbox:quadBox(quad)});},onImageBlock(b,t,image){image.destroy();}});
+    // Match each after-occurrence to one unique original occurrence. Native
+    // redaction can shift floating-point coordinates by a few thousandths.
+    const matched=new Set();
+    for(const x of remaining) {
+      const candidates=[];
+      for(let i=0;i<source.length;i++) {const y=source[i];if(!matched.has(i) && String.fromCharCode(y.text.codePointAt(0))===x.text && y.c.bbox?.every((v,j)=>Math.abs(v-x.bbox[j])<0.02)) candidates.push(i);}
+      if(candidates.length!==1) return null;
+      matched.add(candidates[0]);
+    }
+    const removed=source.filter((x,i)=>!matched.has(i));
+    if (!removed.length || removed.some(x=>!overlaps(x.c.bbox))) return null;
+    const ranges=[];for(const x of removed) {const last=ranges.at(-1);if(last && last.end===x.c.start) last.end=x.c.end;else ranges.push({start:x.c.start,end:x.c.end});}
+    return {sourceSha256:model.sourceSha256,pageIndex,assetId:asset.id,bbox:[...box],ranges,proof:{scale:2,changedChannels:0,removedCharacters:removed.length}};
+  } catch (e) {if(e?.name==='AbortError') throw e;return null;}
+  finally {pix?.destroy();st?.destroy();annot?.destroy();page?.destroy();doc?.destroy();}
+}
+
 /** Read File, Uint8Array, or {bytes: Uint8Array} using the installed MuPDF reader. */
 export async function readDocument({file,fileHash,signal} = {}) {
   checkAbort(signal);
@@ -139,5 +174,17 @@ export async function readDocument({file,fileHash,signal} = {}) {
       await new Promise(resolve=>setTimeout(resolve,0));
     }
   } finally {doc?.destroy();}
-  checkAbort(signal); return normalizeDocument({sourceSha256,pages,signal});
+  checkAbort(signal); const model=normalizeDocument({sourceSha256,pages,signal});
+  model.occlusions=[];
+  // Bounded candidates: image occurrences only; no source bytes are written.
+  for (const [index,asset] of model.assets.entries()) {
+    checkAbort(signal);
+    const b=asset.source.bbox, pi=asset.source.pageIndex;
+    const candidate=boxOK(b) && model.blocks.some(x=>x.text && x.source.pageIndex===pi && x.source.characters.some(c=>boxOK(c.bbox) && c.bbox[0]<b[2] && b[0]<c.bbox[2] && c.bbox[1]<b[3] && b[1]<c.bbox[3]));
+    if(!candidate) continue;
+    const evidence=index<32 ? probeOcclusion(bytes,model,pi,asset,signal) : null;
+    if(evidence) model.occlusions.push(evidence);
+    else model.diagnostics.push({code:'occlusion-unavailable',pageIndex:pi,assetId:asset.id,detail:'Candidate did not establish unchanged raster and unambiguous removed source characters.'});
+  }
+  return model;
 }

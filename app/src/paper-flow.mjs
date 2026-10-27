@@ -71,12 +71,30 @@ function inlineFragments(blocks, hash) {
   return {replacements,groups};
 }
 
+// Preserve original IDs and text in the model; flow fragments are exact views.
+function occlusionFragments(block, evidence, hash) {
+  const range=block.source?.range, chars=block.source?.characters, lines=block.source?.lines;
+  if(!range || !chars?.length || !lines?.length) return [block];
+  const cuts=new Set([range.start,range.end]);
+  for(const e of evidence) for(const r of e.ranges) if(r.start>=range.start && r.end<=range.end) {cuts.add(r.start);cuts.add(r.end);}
+  const sorted=[...cuts].sort((a,b)=>a-b); if(sorted.length===2) return [block];
+  const parts=[];
+  for(let i=0;i<sorted.length-1;i++) {
+    const start=sorted[i],end=sorted[i+1], cs=chars.filter(c=>c.start>=start && c.end<=end);
+    if(!cs.length || cs.some(c=>!boxOK(c.bbox))) return [block];
+    const ls=lines.filter(l=>l.range.start<end && l.range.end>start).map(l=>({...l,range:{start:Math.max(start,l.range.start),end:Math.min(end,l.range.end)},bbox:union(cs.filter(c=>c.start<l.range.end && c.end>l.range.start).map(c=>c.bbox))}));
+    parts.push({...block,id:`fragment-${hex(new TextEncoder().encode(JSON.stringify([hash,block.source.pageIndex,start,end]))).slice(0,24)}`,parentBlockId:block.id,text:block.text.slice(start-range.start,end-range.start),source:{...block.source,range:{start,end},characters:cs,lines:ls,bbox:union(cs.map(c=>c.bbox))}});
+  }
+  return parts;
+}
+
 /** Produce a deterministic, source-bound reading order and ownership proposal. */
 export function buildPaperFlow(document, {drawings=document?.drawings || []} = {}) {
   if (document?.schema !== 'falsify.paper-document.v1' || !Array.isArray(document.pages) || !Array.isArray(document.blocks) || !Array.isArray(document.assets)) throw new TypeError('Expected falsify.paper-document.v1');
   const items=[],relations=[],diagnostics=[],fragments=[],regions=[];
   const styles=new Map((document.styles || []).map(s=>[s.id,s]));
-  let flowBlocks=document.blocks.flatMap(b=>splitBlock(b,document.sourceSha256,styles));
+  const evidence=(document.occlusions || []).filter(e=>e.sourceSha256===document.sourceSha256 && Array.isArray(e.ranges) && e.proof?.changedChannels===0 && e.proof?.removedCharacters>0);
+  let flowBlocks=document.blocks.flatMap(b=>occlusionFragments(b,evidence.filter(e=>e.pageIndex===b.source?.pageIndex),document.sourceSha256)).flatMap(b=>splitBlock(b,document.sourceSha256,styles));
   const inline=inlineFragments(flowBlocks,document.sourceSha256);
   flowBlocks=flowBlocks.flatMap(b=>inline.replacements.has(b.id) ? (inline.replacements.get(b.id) || [b]) : [b]);
   fragments.push(...flowBlocks.filter(b=>b.parentBlockId));
@@ -163,9 +181,16 @@ export function buildPaperFlow(document, {drawings=document?.drawings || []} = {
       const group=[a];represented.add(a.a.id);
       if(boxOK(a.box)) for(let i=0;i<group.length;i++) for(const other of assets) if(!represented.has(other.a.id) && boxOK(other.box) && overlap(group[i].box,other.box)) {group.push(other);represented.add(other.a.id);}
       const box=group.every(x=>boxOK(x.box))?union(group.map(x=>x.box)):null;
-      const bs=blocks.filter(x=>!owned.has(x.b.id) && ((x.b.assetIds || []).some(id=>group.some(y=>y.a.id===id)) || (x.b.text && x.b.text.trim().length <= 12 && (x.b.source?.lines?.length || 1) === 1 && boxOK(box) && boxOK(x.box) && group.some(y=>y.box[3]-y.box[1]>=20 && contains(y.box,x.box)))));
+      const proofs=evidence.filter(e=>e.pageIndex===pi && group.some(y=>y.a.id===e.assetId));
+      const confirmed=x=>x.b.text && x.b.source?.range && proofs.some(e=>{const r=x.b.source.range;return e.ranges.some(z=>z.start<=r.start && z.end>=r.end);});
+      const bs=blocks.filter(x=>!owned.has(x.b.id) && ((x.b.assetIds || []).some(id=>group.some(y=>y.a.id===id)) || confirmed(x)));
       bs.forEach(x=>owned.add(x.b.id));
-      entries.push(make('asset',bs,group,box,a.pos,a.index));
+      const entry=make('asset',bs,group,box,a.pos,a.index);
+      if(proofs.length && bs.some(confirmed) && boxOK(box)) {
+        const id=`region-${hex(new TextEncoder().encode(JSON.stringify([document.sourceSha256,pi,box]))).slice(0,24)}`;
+        entry.renderAssetId=id;regions.push({id,pageIndex:pi,bbox:[...box],blockIds:bs.map(x=>x.b.id),assetIds:group.map(x=>x.a.id),classification:'verified-occlusion'});
+      }
+      entries.push(entry);
     }
     for(const x of blocks) {
       if(owned.has(x.b.id)) continue;
