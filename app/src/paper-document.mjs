@@ -43,7 +43,7 @@ export function normalizeDocument({sourceSha256, pages, signal} = {}) {
         writingMode:Number.isFinite(line.writingMode)?line.writingMode:null, baseline:line.baseline ? line.baseline.map(p=>[...p]) : null
       })) : [];
       if (!lines.length) model.diagnostics.push({code:'line-boundaries-unavailable',pageIndex,blockIndex:index});
-      blocks.push({id:id('block',[sourceSha256,pageIndex,start,offset]),kind:'paragraph',text,source:{pageIndex,bbox,range:{start,end:offset},characters:chars,lines},styleId:styleIds.every(s=>s===styleIds[0])?styleIds[0]:null,assetIds:[],captionIds:[]});
+      blocks.push({id:id('block',[sourceSha256,pageIndex,start,offset]),kind:'paragraph',text,source:{pageIndex,bbox,range:{start,end:offset},characters:chars,lines,readerPosition:Number.isInteger(item.readerPosition)?item.readerPosition:null},styleId:styleIds.every(s=>s===styleIds[0])?styleIds[0]:null,assetIds:[],captionIds:[]});
     }
     // Only order columns when every block falls on one side of an empty vertical strip.
     let ordered=blocks, gutter=null;
@@ -63,10 +63,18 @@ export function normalizeDocument({sourceSha256, pages, signal} = {}) {
     if (gutter) model.diagnostics.push({code:'reading-order-heuristic',pageIndex,detail:'Column gutter ordering is geometric, not semantic proof.'});
     if (page.geometry?.originalPageMapping !== 'verified') model.diagnostics.push({code:'original-page-geometry-unverified',pageIndex,detail:'Source boxes are in the observed frame; mapping to original PDF coordinates is not established.'});
     model.blocks.push(...ordered);
-    for (let index=0;index<page.images.length;index++) {const bbox=cloneBox(page.images[index].bbox); const assetId=id('asset',[sourceSha256,pageIndex,index,bbox]); model.assets.push({id:assetId,kind:'image',source:{pageIndex,bbox,occurrence:index}}); if(!bbox)model.diagnostics.push({code:'image-geometry-unavailable',pageIndex,occurrence:index});}
+    for (let index=0;index<page.images.length;index++) {
+      const image=page.images[index], bbox=cloneBox(image.bbox), assetId=id('asset',[sourceSha256,pageIndex,index,bbox]);
+      const source={pageIndex,bbox,occurrence:index,readerPosition:Number.isInteger(image.readerPosition)?image.readerPosition:null,transform:Array.isArray(image.transform)?[...image.transform]:null};
+      model.assets.push({id:assetId,kind:'image',source,content:image.content ?? null});
+      model.blocks.push({id:id('figure',[sourceSha256,pageIndex,index,bbox]),kind:'figure',text:'',source,styleId:null,assetIds:[assetId],captionIds:[]});
+      if(!bbox)model.diagnostics.push({code:'image-geometry-unavailable',pageIndex,occurrence:index});
+      if(!image.content)model.diagnostics.push({code:'image-content-unavailable',pageIndex,occurrence:index});
+    }
     if (!blocks.length) model.diagnostics.push({code:'no-extracted-text',pageIndex});
   }
-  model.diagnostics.push({code:'semantic-structure-unavailable',detail:'Block kinds are text-block placeholders; caption links, font files, vector assets and OCR are not recovered.'});
+  model.diagnostics.push({code:'font-program-unavailable',detail:'Structured-text Font exposes observed names, not source font programs or verified PDF resource identity.'});
+  model.diagnostics.push({code:'semantic-structure-unavailable',detail:'Text block kinds are placeholders; caption links, vector assets and OCR are not recovered.'});
   return model;
 }
 
@@ -89,12 +97,21 @@ export async function readDocument({file,fileHash,signal} = {}) {
       try {
         page=doc.loadPage(i); const bounds=page.getBounds();
         if(bounds[0]!==0 || bounds[1]!==0) throw new Error('Unsupported page origin');
-        const observed={width:bounds[2]-bounds[0],height:bounds[3]-bounds[1],geometry:{frame:'mupdf-display',bounds:[...bounds],pageTransform:[...page.getTransform()],originalPageMapping:'unverified'},blocks:[],images:[]}; let block,line;
+        const observed={width:bounds[2]-bounds[0],height:bounds[3]-bounds[1],geometry:{frame:'mupdf-display',bounds:[...bounds],pageTransform:[...page.getTransform()],originalPageMapping:'unverified'},blocks:[],images:[]}; let block,line,readerPosition=0;
         st=page.toStructuredText('preserve-whitespace,preserve-images');
-        st.walk({beginTextBlock(bbox){checkAbort(signal);block={bbox:[...bbox],chars:[],lines:[]};observed.blocks.push(block);},
+        st.walk({beginTextBlock(bbox){checkAbort(signal);block={bbox:[...bbox],chars:[],lines:[],readerPosition:readerPosition++};observed.blocks.push(block);},
           beginLine(bbox,writingMode,direction){checkAbort(signal);line={bbox:[...bbox],writingMode,direction:[...direction],start:block.chars.length,end:block.chars.length,baseline:null};block.lines.push(line);},
           onChar(text,origin,font,size,quad,color){checkAbort(signal);if(!block || !line) throw new Error('Unexpected character outside text line');block.chars.push({text,bbox:quadBox(quad),fontName:font.getName(),size,color:color?[...color]:null});line.end=block.chars.length;const point=[...origin];if(!line.baseline) line.baseline=[point,point];else line.baseline[1]=point;},
-          endLine(){line=null;},endTextBlock(){block=null;},onImageBlock(bbox){checkAbort(signal);observed.images.push({bbox:[...bbox]});}});
+          endLine(){line=null;},endTextBlock(){block=null;},onImageBlock(bbox,transform,image){
+            checkAbort(signal); let pixmap,mask,maskPixmap,content=null;
+            try {
+              pixmap=image.toPixmap(); mask=image.getMask();
+              if(mask) maskPixmap=mask.toPixmap();
+              content={representation:'mupdf-decoded-png',bytes:pixmap.asPNG().slice(),width:pixmap.getWidth(),height:pixmap.getHeight(),alpha:!!pixmap.getAlpha(),mask:maskPixmap?{bytes:maskPixmap.asPNG().slice(),width:maskPixmap.getWidth(),height:maskPixmap.getHeight(),alpha:!!maskPixmap.getAlpha()}:null};
+            } catch { /* Preserve an explicit unavailable occurrence instead of inventing bytes. */ }
+            finally {maskPixmap?.destroy();mask?.destroy();pixmap?.destroy();image.destroy();}
+            observed.images.push({bbox:[...bbox],transform:[...transform],readerPosition:readerPosition++,content});
+          }});
         pages.push(observed);
       } finally {st?.destroy();page?.destroy();}
       // Yield to allow an AbortSignal from the event loop to be observed between pages.
