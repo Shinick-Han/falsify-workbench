@@ -134,7 +134,41 @@ export function buildPaperFlow(document, {drawings=document?.drawings || []} = {
     const plotBlocks=blocks.filter(x=>x.b.text && boxOK(x.box) && x.box[1]>=page.height*.05 && x.box[3]<=plotBottom);
     const plotPaths=paths.filter(b=>b[0]>=0 && b[1]>=page.height*.05 && b[2]<=page.width && b[3]<=plotBottom);
     let plot=false;
-    if(!form && plotPaths.length>=1000 && plotBlocks.length>=20 && plotBlocks.every(x=>x.b.text.length<=200 && !/^\s*(?:fig(?:ure)?\.?|table)\s*\d/i.test(x.b.text)) && plotBlocks.filter(x=>x.b.text.length<=100).length/plotBlocks.length>=.95) {
+    // Multiple separated image occurrences can be panels of one figure. Use
+    // narrative and caption geometry as hard vertical boundaries; a crop is
+    // accepted only when no excluded text or image intersects it.
+    if(!form) {
+      const central=blocks.filter(x=>x.b.text && boxOK(x.box) && x.box[1]>=page.height*.05 && x.box[3]<=page.height*.9);
+      const narrative=x=>{
+        const lines=x.b.source?.lines || [];
+        return captions.includes(x) || (bodySize && sizeOf(x.b)>=bodySize*.88 && x.box[2]-x.box[0]>=page.width*.3 && (lines.length>=2 || x.b.text.trim().length>=55));
+      };
+      const barriers=central.filter(narrative).sort(geom);
+      const limits=[page.height*.05,...barriers.flatMap(x=>[x.box[1],x.box[3]]),page.height*.9].sort((a,b)=>a-b);
+      for(let i=0;i<limits.length-1;i++) {
+        const top=limits[i],bottom=limits[i+1];
+        if(bottom<=top || barriers.some(x=>x.box[1]<bottom && x.box[3]>top)) continue;
+        const as=assets.filter(x=>!represented.has(x.a.id) && boxOK(x.box) && x.box[1]>=top && x.box[3]<=bottom);
+        if(as.length<2) continue;
+        const labels=central.filter(x=>!owned.has(x.b.id) && !narrative(x) && x.box[1]>=top && x.box[3]<=bottom);
+        if(labels.length<3) continue;
+        const ps=paths.filter(b=>b[1]>=top && b[3]<=bottom);
+        const raw=union([...as.map(x=>x.box),...labels.map(x=>x.box),...ps]);
+        // Painted strokes and glyph ink can extend beyond their geometric
+        // bounds. Include a small margin, subject to the same exclusion check.
+        const box=[Math.max(0,raw[0]-2),Math.max(0,raw[1]-2),Math.min(page.width,raw[2]+2),Math.min(page.height,raw[3]+2)];
+        if(box[2]-box[0]<page.width*.4 || box[3]-box[1]<page.height*.2) continue;
+        if(blocks.some(x=>x.b.text && boxOK(x.box) && overlap(box,x.box) && !labels.includes(x)) || assets.some(x=>boxOK(x.box) && overlap(box,x.box) && !as.includes(x))) continue;
+        const bs=[...labels,...blocks.filter(x=>!owned.has(x.b.id) && (x.b.assetIds || []).some(id=>as.some(a=>a.a.id===id)))];
+        bs.forEach(x=>owned.add(x.b.id)); as.forEach(x=>represented.add(x.a.id));
+        const id=`region-${hex(new TextEncoder().encode(JSON.stringify([document.sourceSha256,pi,box]))).slice(0,24)}`;
+        const entry=make('asset',bs,as,box,Math.min(...bs.map(x=>x.pos ?? Infinity)),Math.min(...bs.map(x=>x.index)));
+        entry.renderAssetId=id; entries.push(entry);
+        regions.push({id,pageIndex:pi,bbox:[...box],blockIds:bs.map(x=>x.b.id),assetIds:as.map(x=>x.a.id),classification:'compound-figure'});
+        plot=true;
+      }
+    }
+    if(!form && !plot && plotPaths.length>=1000 && plotBlocks.length>=20 && plotBlocks.every(x=>x.b.text.length<=200 && !/^\s*(?:fig(?:ure)?\.?|table)\s*\d/i.test(x.b.text)) && plotBlocks.filter(x=>x.b.text.length<=100).length/plotBlocks.length>=.95) {
       let box=union([...plotPaths,...plotBlocks.map(x=>x.box)]);
       const touching=assets.filter(x=>boxOK(x.box) && overlap(box,x.box));
       if(touching.every(x=>x.box[0]>=0 && x.box[1]>=page.height*.05 && x.box[2]<=page.width && x.box[3]<=plotBottom)) box=union([box,...touching.map(x=>x.box)]);

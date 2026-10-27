@@ -49,6 +49,17 @@ test('dense plot owns its labels and image while leaving caption and body outsid
  const f=buildPaperFlow(d,{drawings}),r=f.regions[0],asset=f.items.find(i=>i.renderAssetId===r?.id);
  assert.ok(r);assert.equal(asset.blockIds.length,21);assert.deepEqual(asset.assetIds,['img']);assert.deepEqual(f.items.map(i=>i.kind),['asset','caption','paragraph']);assert.equal(new Set(f.items.flatMap(i=>i.blockIds)).size,d.blocks.length);
 });
+test('disjoint raster panels and long protocol labels share a crop bounded by narrative and caption',()=>{
+ const body='Narrative body text describes the experiment and remains separately editable.';
+ const label='A long protocol label listing reagents and concentrations '.repeat(5);
+ const d=model([block('metadata','Published online: xx xx xxxx',[20,20,170,30],0),block('body',body,[20,55,370,70],1,{styleId:'body'}),block('label',label,[30,120,155,175],2,{styleId:'small'}),block('axis','Axis',[210,130,235,140],3,{styleId:'small'}),block('panel','a',[25,105,32,115],4,{styleId:'small'}),block('f1','',[30,190,170,300],5,{kind:'figure',assetIds:['a']}),block('f2','',[210,190,350,300],6,{kind:'figure',assetIds:['b']}),block('caption','Figure 3. Panels',[20,330,350,345],7,{styleId:'body'}),block('after',body,[20,380,370,395],8,{styleId:'body'})]);
+ d.blocks.push(block('icon','',[180,20,190,30],9,{kind:'figure',assetIds:['icon-asset']}));
+ d.styles=[{id:'body',size:10},{id:'small',size:6}];d.assets=[{id:'a',source:{pageIndex:0,bbox:[30,190,170,300]}},{id:'b',source:{pageIndex:0,bbox:[210,190,350,300]}},{id:'icon-asset',source:{pageIndex:0,bbox:[180,20,190,30]}}];
+ const f=buildPaperFlow(d,{drawings:[{pageIndex:0,bbox:[180,200,190,240]}]}),r=f.regions.find(x=>x.classification==='compound-figure'),item=f.items.find(x=>x.renderAssetId===r?.id);
+ assert.ok(r);assert.deepEqual(item.assetIds,['a','b']);assert.deepEqual(new Set(item.blockIds),new Set(['label','axis','panel','f1','f2']));assert.deepEqual(item.captionIds,['caption']);
+ assert.ok(r.bbox[1]>70 && r.bbox[3]<330);assert.equal(f.items.find(x=>x.blockIds.includes('body')).kind,'paragraph');assert.equal(f.items.find(x=>x.blockIds.includes('metadata')).kind,'paragraph');
+ assert.deepEqual(ids(f).sort(),d.blocks.map(b=>b.id).sort());assert.deepEqual(f.items.flatMap(i=>i.assetIds).sort(),['a','b','icon-asset']);assert.ok(!item.assetIds.includes('icon-asset'));
+});
 test('outline artwork is captured only when central editable text is absent',()=>{
  const drawings=Array.from({length:2200},(_,i)=>({pageIndex:0,bbox:[20+(i%350),10+(i%570),21+(i%350),11+(i%570)]}));
  const d=model([block('footer','edge marker',[30,570,180,580],0),block('fig','',[20,40,100,70],1,{kind:'figure',assetIds:['img']})]);d.assets=[{id:'img',source:{pageIndex:0,bbox:[20,40,100,70]}}];
