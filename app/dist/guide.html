@@ -174,10 +174,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install-connection.ps1 -Wh
 powershell -NoProfile -ExecutionPolicy Bypass -File .\install-connection.ps1</code></pre>
 <p class="note">등록 후에는 이 폴더를 옮기거나 이름을 바꾸지 마세요. 옮겼다면 <code>uninstall-connection.ps1</code>로 지우고 새 위치에서 다시 등록합니다. 링크는 포트만 전달하며 토큰은 절대 링크에 담기지 않습니다.</p>
 <h3>macOS / Linux</h3>
-<pre><code>cd tools/workbench
-python3 -m venv .venv
+<pre><code>python3 -m venv .venv
 .venv/bin/python -m pip install -r app/local/requirements.txt
-.venv/bin/python app/local/server.py --web-origin https://shinick-han.github.io</code></pre>
+./install-connection.sh</code></pre>
+<p>Python 3 설치 후 저장소 폴더에서 실행합니다. 수동 연결은 같은 폴더에서 <code>./open-connection.sh 'falsify://connect?port=7816'</code>을 실행하고 표시된 토큰을 붙여넣습니다. 다른 포트는 숫자를 바꿉니다. <a href="https://github.com/Shinick-Han/falsify-workbench/blob/main/docs/macos-connection.md">macOS 연결 안내</a></p>
 </section>
 
 <section id="connect" aria-labelledby="connect-title">
