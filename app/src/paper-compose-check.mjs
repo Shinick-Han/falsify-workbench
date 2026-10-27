@@ -1,13 +1,18 @@
+import {readOutputGlyphs} from './paper-output-glyphs.mjs';
 // Byte-derived text comparison for full-document recomposition. The caller supplies
 // logical content, not a destination map, as the expectation.
 const normalize = value => value.replace(/\s+/gu, ' ').trim();
 
-export async function checkRecomposition({bytes, expectedBlocks, edits = {}, pdfjs, exporter} = {}) {
+export async function checkRecomposition({bytes, expectedBlocks, edits = {}, pdfjs, exporter, mupdf} = {}) {
   if (!(bytes instanceof Uint8Array) || !bytes.length || !pdfjs?.getDocument) throw new TypeError('PDF bytes and PDF.js are required');
   if (!Array.isArray(expectedBlocks) || !expectedBlocks.length || expectedBlocks.some(b => typeof b.id !== 'string' || typeof b.text !== 'string') || new Set(expectedBlocks.map(b => b.id)).size !== expectedBlocks.length) throw new TypeError('unique expected blocks are required');
   if (Object.keys(edits).some(id => !expectedBlocks.some(b => b.id === id) || typeof edits[id] !== 'string')) throw new TypeError('invalid edit');
   const findings = [], pages = [], locations = [];
   let inspectedItems = 0;
+  let glyphPages = null;
+  if (mupdf) {
+    try { glyphPages = readOutputGlyphs({bytes:bytes.slice(), mupdf}); } catch { glyphPages = null; }
+  }
   const task = pdfjs.getDocument({data: bytes.slice(), useSystemFonts: true, isEvalSupported: false});
   let doc;
   try {
@@ -16,7 +21,8 @@ export async function checkRecomposition({bytes, expectedBlocks, edits = {}, pdf
       const page = await doc.getPage(n), viewport = page.getViewport({scale: 1});
       const content = await page.getTextContent();
       const parts = [];
-      let previous = null;
+      let previous = null, ordinal = 0;
+      const boundaries = [], itemScalars = [];
       const frame = viewport.transform;
       const frameSupported = viewport.rotation === 0 && Array.isArray(frame) && frame.length === 6 && frame.every(Number.isFinite) &&
         frame[0] === 1 && frame[1] === 0 && frame[2] === 0 && frame[3] === -1 &&
@@ -47,8 +53,9 @@ export async function checkRecomposition({bytes, expectedBlocks, edits = {}, pdf
           if (previous.hasEOL) {
             // PDF.js can discard an encoded trailing space before EOL, so a
             // wrapped hyphen cannot establish whether that space existed.
-            if (/\p{L}-$/u.test(previous.str) && /^\p{L}/u.test(item.str))
-              findings.push({code:'ambiguous-text-geometry', pageIndex:n - 1, reason:'PDF.js may discard an encoded space after a line-final hyphen.'});
+            if (/\p{L}-$/u.test(previous.str) && /^\p{L}/u.test(item.str)) {
+              boundaries.push({part:parts.length, ordinal, leftPosition:previous.position, rightPosition:position});
+            }
             parts.push(' ');
           }
           else if (!position || !previous.position) findings.push({code:'ambiguous-text-geometry', pageIndex:n - 1});
@@ -62,8 +69,31 @@ export async function checkRecomposition({bytes, expectedBlocks, edits = {}, pdf
           }
         }
         parts.push(item.str);
+        for (const scalar of item.str) if (!/\s/u.test(scalar)) { itemScalars.push(scalar); ordinal++; }
         if (item.str) previous = {str:item.str, hasEOL:item.hasEOL, position};
         else if (item.hasEOL && previous) previous.hasEOL = true;
+      }
+      if (boundaries.length) {
+        const glyphs = glyphPages?.[n - 1];
+        const mapped = [], encoded = [];
+        if (Array.isArray(glyphs)) {
+          for (let i = 0; i < glyphs.length; i++) {
+            const char = String.fromCodePoint(glyphs[i].scalar);
+            if (!/\s/u.test(char)) { mapped.push(i); encoded.push(char); }
+          }
+        }
+        const aligned = encoded.length === itemScalars.length && encoded.every((char, i) => char === itemScalars[i]);
+        for (const boundary of boundaries) {
+          const left = mapped[boundary.ordinal - 1], right = mapped[boundary.ordinal];
+          const near = (glyph, pos) => pos && glyph && Math.abs(glyph.origin[1] - pos.y) < Math.max(1, pos.height * 0.2) &&
+            glyph.origin[0] >= pos.x - 1 && glyph.origin[0] <= pos.x + pos.width + 1;
+          if (aligned && left !== undefined && right !== undefined && left < right &&
+              near(glyphs[left], boundary.leftPosition) && near(glyphs[right], boundary.rightPosition)) {
+            parts[boundary.part] = glyphs.slice(left + 1, right).some(g => /\s/u.test(String.fromCodePoint(g.scalar))) ? ' ' : '';
+          } else {
+            findings.push({code:'ambiguous-text-geometry', pageIndex:n - 1, reason:'PDF.js may discard an encoded space after a line-final hyphen; glyph stream unavailable or misaligned.'});
+          }
+        }
       }
       pages.push(normalize(parts.join('')));
       page.cleanup();

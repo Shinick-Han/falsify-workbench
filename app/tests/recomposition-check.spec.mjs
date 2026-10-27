@@ -1,6 +1,8 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import * as pdfjs from '../node_modules/pdfjs-dist/legacy/build/pdf.mjs';
+import * as mupdf from '../dist/browser-pdf-vendor/mupdf.js';
+import {readOutputGlyphs} from '../src/paper-output-glyphs.mjs';
 import {checkRecomposition} from '../src/paper-compose-check.mjs';
 import {blocks,after,corpus,geometryCorpus,pageCorpus} from './recomposition-corpus.mjs';
 pdfjs.GlobalWorkerOptions.workerSrc = new URL('../node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs', import.meta.url).href;
@@ -109,4 +111,47 @@ test('line ends preserve encoded hyphens, spaces and minus signs', async () => {
   assert.equal((await geometryCheck('minus-wrap','value - 12')).checks.content.status,'pass');
   assert.equal((await geometryCheck('minus-wrap','value 12')).checks.content.status,'finding');
   assert.notEqual((await geometryCheck('soft-wrap','software')).checks.content.status,'pass');
+});
+
+
+test('encoded glyphs resolve only the matching hard-hyphen boundary', async () => {
+  const run = (variant,text,extra={}) => checkRecomposition({bytes:geometryCorpus(variant),expectedBlocks:[{id:'x',text}],pdfjs,mupdf,...extra});
+  for (const [variant,correct,opposite] of [
+    ['hyphen-wrap','antero-posterior','antero- posterior'],
+    ['hyphen-space','antero- posterior','antero-posterior'],
+    ['repeat-hyphen','antero-posterior antero- posterior','antero- posterior antero-posterior'],
+    ['unrelated-space','other space antero-posterior','other space antero- posterior']
+  ]) {
+    assert.equal((await run(variant,correct)).checks.content.status,'pass',variant);
+    assert.equal((await run(variant,opposite)).checks.content.status,'finding',variant);
+  }
+  assert.equal((await run('minus-wrap','value - 12')).checks.content.status,'pass');
+  assert.equal((await run('minus-wrap','value 12')).checks.content.status,'finding');
+  const failed = await run('hyphen-wrap','antero-posterior',{mupdf:{}});
+  assert.equal(failed.checks.content.status,'unavailable');
+  const mismatch = await run('hyphen-wrap','antero-posterio9',{mupdf:{}});
+  assert.ok(mismatch.findings.some(f=>f.code === 'content-mismatch'));
+  const glyphs = readOutputGlyphs({bytes:geometryCorpus('hyphen-space'),mupdf});
+  assert.deepEqual(glyphs[0].map(g=>g.scalar).slice(5,9),[111,45,32,112]);
+  assert.ok(glyphs[0].every(g=>g.pageIndex === 0 && g.origin.every(Number.isFinite)));
+});
+
+
+test('glyph-resolved boundaries retain page movement and reject unknown scalars', async () => {
+  const bytes = geometryCorpus('hyphen-page');
+  const expectedBlocks = [{id:'a',text:'first'},{id:'b',text:'antero-posterior'}];
+  const result = await checkRecomposition({bytes,expectedBlocks,pdfjs,mupdf});
+  assert.equal(result.checks.content.status,'pass');
+  assert.deepEqual(result.checks.movement.locations,[{id:'a',pageIndexes:[0]},{id:'b',pageIndexes:[1]}]);
+  const unknown = {...mupdf, Device:class extends mupdf.Device {
+    constructor(callbacks) {
+      const wrapped = {...callbacks, fillText(text,ctm,cs) {
+        callbacks.fillText({walk(walker) { text.walk({showGlyph(font,trm,gid,scalar) { walker.showGlyph(font,trm,gid,-1); }}); }, destroy() { text.destroy(); }},ctm,cs);
+      }};
+      super(wrapped);
+    }
+  }};
+  const invalid = await checkRecomposition({bytes,expectedBlocks,pdfjs,mupdf:unknown});
+  assert.equal(invalid.checks.content.status,'unavailable');
+  assert.equal(invalid.checks.movement.locations,null);
 });
