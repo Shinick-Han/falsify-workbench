@@ -5,11 +5,16 @@ import os
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import http.client
 import ssl
 from urllib.parse import urlsplit
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from experiments.selfplay_codex import macos_runtime_path
 
 TIMEOUT_SECONDS = 180
 MAX_OUTPUT_BYTES = 150000
@@ -36,6 +41,7 @@ def run_stdio(argv, stdin, cwd, stdout_path):
     # No shell interpolation, no inherited account tokens, disposable cwd.
     # This is not isolation: trusted code can access the user's filesystem/network.
     env = {k:v for k,v in os.environ.items() if k.upper() in {'PATH','SYSTEMROOT','WINDIR','TEMP','TMP','PATHEXT'}}
+    if sys.platform == 'darwin': env['PATH'] = macos_runtime_path()
     with open(stdout_path, 'wb') as stdout:
         p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=stdout,
             stderr=subprocess.DEVNULL, cwd=cwd, env=env,
