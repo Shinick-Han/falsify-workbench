@@ -432,7 +432,12 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
         if(!item.inline) parts=parts.filter(Boolean);
       }
       if(parts.length) {const rendered=item.inline ? parts.map((p,i)=>p+(i<parts.length-1 ? `#text(${typstString(item.joiners[i])})` : '')).join('') : parts.join(item.kind==='asset'?'\n\n':'\n'); const scoped=item.kind==='asset' ? rendered : paragraphContext((item.blockIds||[]).map(id=>blockById.get(id)),item.kind,rendered); const result=item.kind==='heading' ? `#block(sticky: true)[${scoped}]` : scoped;
-        if(measuredContinuous && itemIndex>=firstBodyIndex && item.kind==='asset' && item.span==='page') {flush(); source+=measured(result)+'\n';}
+        if(measuredContinuous && itemIndex>=firstBodyIndex && item.kind==='asset' && item.span==='page') {
+          flush();
+          // An unpaired full-width figure cannot float through the preceding
+          // caption. Finish that column stream before its source artwork page.
+          source+=(item.captionIds?.length ? measured(result) : `#page(columns: 1)[${result}]`)+'\n';
+        }
         else group.push(result);}
 
     }
