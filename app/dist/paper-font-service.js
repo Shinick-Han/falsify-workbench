@@ -124,7 +124,7 @@
         }
         let result;
         try {
-          result = await query();
+          result = await query.call(globalThis);
         } catch {
           throw error("\uB85C\uCEEC \uAE00\uAF34 \uC811\uADFC\uC774 \uAC70\uBD80\uB418\uC5C8\uAC70\uB098 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4. \uBE0C\uB77C\uC6B0\uC800 \uAD8C\uD55C\uC744 \uD655\uC778\uD55C \uD6C4 \uB2E4\uC2DC \uC2DC\uB3C4\uD558\uAC70\uB098 \uD30C\uC77C\uC744 \uC120\uD0DD\uD574 \uC8FC\uC138\uC694.");
         }

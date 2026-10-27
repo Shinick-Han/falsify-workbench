@@ -102,7 +102,7 @@ export function createBrowserFontStore(options = {}) {
         revision++;
       }
       let result;
-      try { result = await query(); }
+      try { result = await query.call(globalThis); }
       catch { throw error('로컬 글꼴 접근이 거부되었거나 실패했습니다. 브라우저 권한을 확인한 후 다시 시도하거나 파일을 선택해 주세요.'); }
       if (serial !== requestSerial || epoch !== expectedEpoch) throw stale();
       const next = [], existing = new Set();
