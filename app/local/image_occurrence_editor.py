@@ -6,7 +6,7 @@ Public API (contract: falsify coordination image-occurrence-contract, v1):
   replace_occurrence(source, occurrence_id, replacement_png) -> (output_pdf_bytes, report)
 Failures raise ValueError(fixed_code); a missing dependency raises ValueError('dependency-unavailable').
 
-What is editable: a page-level or simple Form-nested `/Name Do` raster Image XObject on an unrotated, uncropped page with a positive near-axis-aligned CTM and rectangular clipping. Operator-local surgery preserves clipping and subsequent paints. Graphics-state transparency, complex clips, image stencils, explicit masks, soft masks with matte, optional content and tagged structures remain unsupported. RGB PNG retains a compatible original soft mask; RGBA PNG supplies its own alpha in place of the original mask. Other occurrences of shared resources remain unchanged.
+What is editable: a page-level or simple Form-nested `/Name Do` raster Image XObject on an unrotated, uncropped page with a nonsingular affine CTM and existing clipping. Operator-local surgery preserves clipping and subsequent paints. Graphics-state transparency, image stencils, explicit masks, soft masks with matte, optional content and tagged structures remain unsupported. RGB PNG retains a compatible original soft mask; RGBA PNG supplies its own alpha in place of the original mask. Other occurrences of shared resources remain unchanged.
 
 Occurrence id = sha256(source sha256, page index, painting operator path). The path is (content stream index, operator
 index) for the page-level Do, extended by (form object, operator index) for nested paints, so two paints of one xref at
@@ -379,11 +379,11 @@ class _Scanner:
         reason = self.page_reason or reason
         if reason is None and state.get('structure_unsupported'):
             reason = 'form-image'
-        if reason is None and not (_axis(ctm) and ctm[0] > 0 and ctm[3] > 0 and bbox[2] - bbox[0] > TOL
-                and bbox[3] - bbox[1] > TOL and width > 0 and height > 0):
+        # Surgery changes only a Do resource; the original CTM and clip remain in the stream.
+        # A complex clip uses the image AABB as a conservative render-check region.
+        if reason is None and not (abs(ctm[0] * ctm[3] - ctm[1] * ctm[2]) > 1e-9
+                and bbox[2] - bbox[0] > TOL and bbox[3] - bbox[1] > TOL and width > 0 and height > 0):
             reason = 'unsupported-transform'
-        if reason is None and state['clip'] == 'complex':
-            reason = 'clipped-image'
         if reason is None and state['trans']: reason = 'transparency'
         self.events.append({'kind': kind, 'path': path, 'name': name, 'xref': xref, 'width': width, 'height': height,
             'pdfBox': bbox, 'visibleBox': _intersect(_intersect(bbox, self.mediabox), state['clip'])

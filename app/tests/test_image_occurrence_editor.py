@@ -310,14 +310,12 @@ class FormOccurrences(unittest.TestCase):
             self.assertEqual(list(old.Matrix), list(new.Matrix))
             self.assertEqual(list(old.BBox), list(new.BBox))
 
-    def test_masks_groups_clipping_and_rotation_remain_unsupported(self):
+    def test_masks_and_groups_remain_unsupported(self):
         cases = [
             (form_source(image_extra={'ImageMask': True}), 'transparency'),
             (form_source(image_extra={'Mask': pikepdf.Array([0, 0, 0, 0, 0, 0])}), 'transparency'),
             (form_source(form_extra={'/SMask': pikepdf.Name.None_}), 'transparency'),
             (form_source(form_extra={'/Group': pikepdf.Dictionary(S=pikepdf.Name.Transparency)}), 'transparency'),
-            (form_source(inner_data=b'0 0 m 50 0 l 0 40 l h W n q 50 0 0 40 0 0 cm /Im1 Do Q'), 'clipped-image'),
-            (form_source(form_extra={'/Matrix': pikepdf.Array([0, 1, -1, 0, 50, 0])}), 'unsupported-transform'),
         ]
         for source, reason in cases:
             with self.subTest(reason=reason):
@@ -326,6 +324,15 @@ class FormOccurrences(unittest.TestCase):
                 self.assertTrue(all(not o['editable'] and o['reason'] == reason for o in occ))
                 with self.assertRaisesRegex(ValueError, '^' + reason + '$'):
                     ed.replace_occurrence(source, occ[0]['id'], png())
+
+    def test_rotated_form_and_complex_clip_export(self):
+        cases = [form_source(inner_data=b'0 0 m 50 0 l 0 40 l h W n q 50 0 0 40 0 0 cm /Im1 Do Q'),
+            form_source(form_extra={'/Matrix': pikepdf.Array([0, 1, -1, 0, 50, 0])})]
+        for source in cases:
+            target = listing(source)[0]
+            self.assertTrue(target['editable'])
+            out, _ = ed.replace_occurrence(source, target['id'], png())
+            self.assertOnlyTargetChanged(source, out, target)
 
     def test_ambiguous_do_and_unbalanced_form_state_reject_entire_page(self):
         for tail in (b'/Im1 /Im1 Do', b'Q', b'q', b'1 q', b'1 Q'):
@@ -394,7 +401,7 @@ class HonestRejection(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '^%s$' % code):
             ed.replace_occurrence(src, occ_id, png())
 
-    def test_clip_cutting_the_image_rejected_enclosing_clip_allowed(self):
+    def test_rectangular_and_complex_clips_allowed(self):
         got, _ = self.reason([b'q 30 280 50 50 re W n ' + A + b'Q\n'])
         self.assertEqual(got, [(True, None)])
         src = make_pdf([b'q 30 280 50 50 re W n ' + A + b'Q\n'], IM)
@@ -402,7 +409,7 @@ class HonestRejection(unittest.TestCase):
         got, _ = self.reason([b'q 0 0 300 400 re W n ' + A + b'Q\n'])
         self.assertEqual(got, [(True, None)])
         got, _ = self.reason([b'q 30 280 m 200 300 l 40 390 l h W n ' + A + b'Q\n'])
-        self.assertEqual(got, [(False, 'clipped-image')])
+        self.assertEqual(got, [(True, None)])
 
     def test_transparency_rejected(self):
         gs = {'/Half': pikepdf.Dictionary(ca=0.5)}
@@ -447,11 +454,38 @@ class HonestRejection(unittest.TestCase):
             return rgb_image(p, 1, SMask=mask)
         self.assertEqual(listing(make_pdf([A], {'Im1': masked}))[0]['reason'], 'transparency')
 
-    def test_near_axis_noise_is_scaled_but_shear_is_rejected(self):
-        for skew, expected in [('0.00002', True), ('0.1', False)]:
+    def test_near_axis_noise_and_shear_allowed(self):
+        for skew, expected in [('0.00002', True), ('0.1', True)]:
             src = make_pdf([('q 100 %s 0 80 30 280 cm /Im1 Do Q' % skew).encode()], IM)
             self.assertEqual(listing(src)[0]['editable'], expected)
             if expected: ed.replace_occurrence(src, listing(src)[0]['id'], png())
+
+    def test_affine_and_complex_clip_shared_image_with_alpha(self):
+        def masked(p):
+            mask = p.make_stream(bytes([0, 64, 128, 192, 255, 255] * 5))
+            mask.Type, mask.Subtype = pikepdf.Name.XObject, pikepdf.Name.Image
+            mask.Width, mask.Height = 6, 5
+            mask.ColorSpace, mask.BitsPerComponent = pikepdf.Name.DeviceGray, 8
+            return rgb_image(p, 1, SMask=mask)
+        matrices = [b'0 80 -100 0 130 280', b'100 30 20 80 30 280', b'-100 0 0 80 130 280']
+        for matrix in matrices:
+            for mode in ('RGB', 'RGBA'):
+                with self.subTest(matrix=matrix, mode=mode):
+                    content = (b'q 0.8 0.8 0.2 rg 0 0 300 400 re f Q\n'
+                        + b'q 30 280 m 130 280 l 80 360 l h W n q ' + matrix
+                        + b' cm /Im1 Do Q Q\n' + B + TEXT)
+                    src = make_pdf([content], {'Im1': masked})
+                    occ = listing(src)
+                    self.assertTrue(occ[0]['editable'] and occ[0]['shared'])
+                    out, _ = ed.replace_occurrence(src, occ[0]['id'], png(mode=mode, alpha=128))
+                    before, after = render(src, 0), render(out, 0)
+                    self.assertEqual(before.pixel(230, 80), after.pixel(230, 80))
+                    self.assertEqual(before.pixel(35, 45), after.pixel(35, 45))
+                    self.assertEqual(texts(src), texts(out))
+
+    def test_singular_transform_rejected(self):
+        got, _ = self.reason([b'q 100 50 80 40 30 280 cm /Im1 Do Q'])
+        self.assertEqual(got, [(False, 'unsupported-transform')])
 
     def test_soft_mask_rgb_retained_and_rgba_replaced_on_shared_occurrence(self):
         def masked(p):
@@ -474,13 +508,13 @@ class HonestRejection(unittest.TestCase):
                 self.assertEqual(xo.Im2.SMask.objgen == xo.Im1.SMask.objgen, mode == 'RGB')
                 if mode == 'RGBA': self.assertEqual(set(xo.Im2.SMask.read_bytes()), {128})
 
-    def test_rotated_cropped_page_and_rotated_transform_rejected(self):
+    def test_rotated_cropped_page_rejected_but_affine_allowed(self):
         got, _ = self.reason([A], page_extra={0: {'Rotate': 90}})
         self.assertEqual(got, [(False, 'rotated-page')])
         got, _ = self.reason([A], page_extra={0: {'CropBox': pikepdf.Array([0, 0, 200, 400])}})
         self.assertEqual(got, [(False, 'cropped-page')])
         got, _ = self.reason([b'q 0 80 -100 0 130 280 cm /Im1 Do Q\n', b'q 100 0 0 -80 30 360 cm /Im1 Do Q\n'])
-        self.assertEqual(got, [(False, 'unsupported-transform'), (False, 'unsupported-transform')])
+        self.assertEqual(got, [(True, None), (True, None)])
 
     def test_simple_form_editable_but_inline_image_stays_rejected(self):
         def form(p):

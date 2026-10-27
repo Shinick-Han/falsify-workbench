@@ -34,9 +34,9 @@ three nested Forms). A resource or Form reused on the same page or across pages 
 changed. The writer clones only the selected Form ancestry, with separate Resources/XObject dictionaries at every level,
 and renames exactly that chain's painting operands with pikepdf/QPDF raw tokens. Original shared Forms/images keep their
 original references for all other uses. Image geometry, page size and unselected content must be preserved. Form matrices
-and containing rectangular BBoxes are retained; the image's final transform must be positive and axis-aligned.
+and containing rectangular BBoxes are retained; the image's final affine transform must be nonsingular.
 
-Rectangular clipping and later overlapping paint stay in place at the original operator. Inline images, complex clipping, Form transparency groups/masks, image stencils, explicit masks, soft masks with matte, unsupported transforms and cropped/rotated page mappings require separate support; they are not silently reconstructed or flattened. Vector figures and
+Existing clipping and later overlapping paint stay in place at the original operator. Inline images, Form transparency groups/masks, image stencils, explicit masks, soft masks with matte, unsupported transforms and cropped/rotated page mappings require separate support; they are not silently reconstructed or flattened. Vector figures and
 tables are not raster placements. A bounded or incomplete inventory is not evidence that every figure was inspected.
 
 Inputs are capped at PDF25 MiB and PNG4 MiB/4 million pixels. Output is capped at64 MiB. Source hashes and painting-derived
@@ -44,7 +44,8 @@ IDs bind selection to the exact original. The companion re-derives the placement
 not from a client-provided rectangle. The native child has a timeout and temporary-file cleanup, **not an OS memory sandbox**.
 
 The writer checks page count/geometry, extracted text and rendered pixels outside the tight selected region; the selected
-region must actually change. Decoded page and reachable Form streams are also compared by painting invocation: only the
+region must actually change. For complex clips the region is the conservative image bounding box. Some
+otherwise eligible replacements can fail this check when rendering changes outside that region. Decoded page and reachable Form streams are also compared by painting invocation: only the
 selected ancestry's exact operand renames are allowed, so a shared Form changing elsewhere fails even if it causes no pixel
 difference. Malformed painting operands or unbalanced graphics state make the affected scan incomplete and non-editable.
 Its report calls this an **engine rendering check**, not independent scientific verification.
@@ -59,8 +60,8 @@ have their own notices. Pillow has its own license. PyMuPDF remains AGPL/commerc
 The source release does not bundle the optional native wheels, private paper assets or the separate patched text-editor WASM.
 
 Synthetic engine tests exercise one and two nested Forms repeated on the same and other pages, source immutability,
-retained matrices/BBoxes/metadata, exact stream isolation and unselected pixel equality. They also exercise soft masks, alpha, rectangular clips and later paint, and refuse unsupported masks, transparency groups, complex clips, rotated transforms and ambiguous operators. This does not establish general publisher-figure
-editing: vector/table reconstruction, arbitrary clipping, annotations and complex compositing remain separate work.
+retained matrices/BBoxes/metadata, exact stream isolation and unselected pixel equality. They also exercise soft masks, alpha, complex clips, affine transforms and later paint, and refuse unsupported masks, transparency groups, singular transforms and ambiguous operators. This does not establish general publisher-figure
+editing: vector/table reconstruction, annotations and complex compositing remain separate work.
 
 
 ## Layer and structure boundaries
