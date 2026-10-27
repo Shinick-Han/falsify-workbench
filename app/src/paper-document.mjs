@@ -36,7 +36,14 @@ export function normalizeDocument({sourceSha256, pages, signal} = {}) {
       if (!text.length) continue;
       const bbox=cloneBox(item.bbox);
       if (!bbox || chars.some(c=>!c.bbox)) model.diagnostics.push({code:'text-geometry-unavailable',pageIndex,blockIndex:index});
-      blocks.push({id:id('block',[sourceSha256,pageIndex,start,offset]),kind:'paragraph',text,source:{pageIndex,bbox,range:{start,end:offset},characters:chars},styleId:styleIds.every(s=>s===styleIds[0])?styleIds[0]:null,assetIds:[],captionIds:[]});
+      if (item.lines && (!Array.isArray(item.lines) || item.lines.some(line=>!Number.isInteger(line.start) || !Number.isInteger(line.end) || line.start<0 || line.start>line.end || line.end>chars.length))) throw new TypeError('Invalid observed line ranges');
+      const lines = Array.isArray(item.lines) ? item.lines.map(line => ({
+        range:{start:line.start === chars.length ? offset : chars[line.start].start,end:line.end === 0 ? start : chars[line.end-1].end},
+        bbox:cloneBox(line.bbox), direction:Array.isArray(line.direction)?[...line.direction]:null,
+        writingMode:Number.isFinite(line.writingMode)?line.writingMode:null, baseline:line.baseline ? line.baseline.map(p=>[...p]) : null
+      })) : [];
+      if (!lines.length) model.diagnostics.push({code:'line-boundaries-unavailable',pageIndex,blockIndex:index});
+      blocks.push({id:id('block',[sourceSha256,pageIndex,start,offset]),kind:'paragraph',text,source:{pageIndex,bbox,range:{start,end:offset},characters:chars,lines},styleId:styleIds.every(s=>s===styleIds[0])?styleIds[0]:null,assetIds:[],captionIds:[]});
     }
     // Only order columns when every block falls on one side of an empty vertical strip.
     let ordered=blocks, gutter=null;
@@ -52,7 +59,9 @@ export function normalizeDocument({sourceSha256, pages, signal} = {}) {
       if(candidates.length===1) {const c=candidates[0]; gutter=[c.l,c.r]; const order=(a,b)=>a.source.bbox[1]-b.source.bbox[1] || a.source.bbox[0]-b.source.bbox[0] || a.source.range.start-b.source.range.start; ordered=[...c.left.sort(order),...c.right.sort(order)];}
     }
     if (!gutter && blocks.length>1) model.diagnostics.push({code:'reading-order-unresolved',pageIndex,detail:'Reader order retained; no unique page-wide column gutter established.'});
-    model.pages.push({sourcePageIndex:pageIndex,width:page.width,height:page.height,text:pageText,readingOrder:gutter?'geometry-columns':'reader',columnGutter:gutter});
+    model.pages.push({sourcePageIndex:pageIndex,width:page.width,height:page.height,text:pageText,geometry:page.geometry ?? {frame:'caller-observed',originalPageMapping:'unverified'},readingOrder:gutter?'geometry-columns':'reader',columnGutter:gutter});
+    if (gutter) model.diagnostics.push({code:'reading-order-heuristic',pageIndex,detail:'Column gutter ordering is geometric, not semantic proof.'});
+    if (page.geometry?.originalPageMapping !== 'verified') model.diagnostics.push({code:'original-page-geometry-unverified',pageIndex,detail:'Source boxes are in the observed frame; mapping to original PDF coordinates is not established.'});
     model.blocks.push(...ordered);
     for (let index=0;index<page.images.length;index++) {const bbox=cloneBox(page.images[index].bbox); const assetId=id('asset',[sourceSha256,pageIndex,index,bbox]); model.assets.push({id:assetId,kind:'image',source:{pageIndex,bbox,occurrence:index}}); if(!bbox)model.diagnostics.push({code:'image-geometry-unavailable',pageIndex,occurrence:index});}
     if (!blocks.length) model.diagnostics.push({code:'no-extracted-text',pageIndex});
@@ -80,11 +89,12 @@ export async function readDocument({file,fileHash,signal} = {}) {
       try {
         page=doc.loadPage(i); const bounds=page.getBounds();
         if(bounds[0]!==0 || bounds[1]!==0) throw new Error('Unsupported page origin');
-        const observed={width:bounds[2]-bounds[0],height:bounds[3]-bounds[1],blocks:[],images:[]}; let block;
+        const observed={width:bounds[2]-bounds[0],height:bounds[3]-bounds[1],geometry:{frame:'mupdf-display',bounds:[...bounds],pageTransform:[...page.getTransform()],originalPageMapping:'unverified'},blocks:[],images:[]}; let block,line;
         st=page.toStructuredText('preserve-whitespace,preserve-images');
-        st.walk({beginTextBlock(bbox){checkAbort(signal);block={bbox:[...bbox],chars:[]};observed.blocks.push(block);},
-          onChar(text,_origin,font,size,quad,color){checkAbort(signal);if(!block) throw new Error('Unexpected character outside text block');block.chars.push({text,bbox:quadBox(quad),fontName:font.getName(),size,color:color?[...color]:null});},
-          endTextBlock(){block=null;},onImageBlock(bbox){checkAbort(signal);observed.images.push({bbox:[...bbox]});}});
+        st.walk({beginTextBlock(bbox){checkAbort(signal);block={bbox:[...bbox],chars:[],lines:[]};observed.blocks.push(block);},
+          beginLine(bbox,writingMode,direction){checkAbort(signal);line={bbox:[...bbox],writingMode,direction:[...direction],start:block.chars.length,end:block.chars.length,baseline:null};block.lines.push(line);},
+          onChar(text,origin,font,size,quad,color){checkAbort(signal);if(!block || !line) throw new Error('Unexpected character outside text line');block.chars.push({text,bbox:quadBox(quad),fontName:font.getName(),size,color:color?[...color]:null});line.end=block.chars.length;const point=[...origin];if(!line.baseline) line.baseline=[point,point];else line.baseline[1]=point;},
+          endLine(){line=null;},endTextBlock(){block=null;},onImageBlock(bbox){checkAbort(signal);observed.images.push({bbox:[...bbox]});}});
         pages.push(observed);
       } finally {st?.destroy();page?.destroy();}
       // Yield to allow an AbortSignal from the event loop to be observed between pages.
