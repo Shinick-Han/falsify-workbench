@@ -81,3 +81,13 @@ with zipfile.ZipFile(archive) as z:
         assert files[name].external_attr >> 16 & 0o111, name
 print('Archive tracked paths and Unix modes verified; SHA-256 and commit match.')
 PY
+mkdir "$work/extracted"
+unzip -q "$work"/release/*.zip -d "$work/extracted"
+"$work/venv/bin/python" - "$work/extracted" <<'PY'
+import pathlib, stat, sys
+root = next(pathlib.Path(sys.argv[1]).iterdir())
+for name in ('install-connection.sh', 'open-connection.sh', 'uninstall-connection.sh'):
+    assert stat.S_IMODE((root / name).stat().st_mode) == 0o755, name
+assert stat.S_IMODE((root / 'falsify-connection.sh').stat().st_mode) == 0o644
+print('System unzip preserved launcher executable modes and regular file mode.')
+PY
