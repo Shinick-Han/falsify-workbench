@@ -33,6 +33,7 @@
   <script src="document-preview.js?v=0.2.0-alpha.21" defer></script>
   <script src="image-editor-core.js?v=0.2.0-alpha.21" defer></script>
   <script src="image-editor.js?v=0.2.0-alpha.21" defer></script>
+  <script type="module" src="paper-recompose-entry.mjs?v=0.2.0-alpha.21"></script>
   <script src="pending-job.js?v=0.2.0-alpha.21" defer></script>
   <script src="paper-edits.js?v=0.2.0-alpha.21" defer></script>
   <script src="blind-pdf.js?v=0.2.0-alpha.21" defer></script>
@@ -172,6 +173,7 @@
               <div class="button-row"><button type="button" class="button secondary" id="paper-undo" disabled>실행 취소</button><button type="button" class="button secondary" id="paper-redo" disabled>다시 실행</button></div>
               <ul id="paper-edits" class="paper-edits" aria-label="편집 목록"></ul>
               <p id="paper-export-note" class="muted"></p>
+              <label class="paper-recompose-option"><input type="checkbox" id="paper-recompose"> 전체 논문 재조판</label>
               <div class="button-row"><button type="button" class="button primary" id="paper-generate" disabled>수정본 미리보기 만들기</button></div>
               <p id="paper-generate-status" class="form-feedback" role="status" aria-live="polite"></p>
               <details class="red-help paper-file-details"><summary>파일 정보</summary><code id="paper-output-hash" class="paper-output-hash"></code></details>

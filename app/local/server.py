@@ -319,7 +319,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get('Sec-Fetch-Site') == 'cross-site': self.reply(403, {'error': 'cross_site_denied'}); return
         if path == '/': path = '/index.html'
         target = (DIST / path.lstrip('/')).resolve()
-        if not target.is_relative_to(DIST.resolve()) or not target.is_file() or any(part.startswith('.') for part in Path(path).parts) or target.suffix not in ['.html', '.css', '.js', '.mjs', '.bcmap', '.pfb', '.ttf', '.wasm', '.txt']:
+        if not target.is_relative_to(DIST.resolve()) or not target.is_file() or any(part.startswith('.') for part in Path(path).parts) or target.suffix not in ['.html', '.css', '.js', '.mjs', '.json', '.bcmap', '.pfb', '.ttf', '.otf', '.wasm', '.txt']:
             self.reply(404, {'error': 'not_found'}); return
         mime = 'application/javascript' if target.suffix in ['.js', '.mjs'] else mimetypes.guess_type(target)[0] or 'application/octet-stream'
         self.reply(200, target.read_bytes(), mime)
