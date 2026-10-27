@@ -606,6 +606,8 @@ test('RED handoff retires only a finished failure, preserves harness approval an
   page.get('doc-blue-next').click();assert.equal(page.get('doc-blue-consent').checked,true);
   await until(()=>jobPosts(page.calls).length===2,'explicit next action starts new review');
   const body=jobPosts(page.calls)[1].body;assert.notEqual(body.requestId,old.requestId);assert.equal('sourceRunId' in body,false);assert.equal(JSON.stringify(body).includes('red-source-run'),false);
+  page.get('doc-blue-clear').click();assert.equal(page.get('doc-blue-previous-failure').hidden,true);
+  const downloads=page.downloads.length;page.get('doc-blue-previous-request').click();assert.equal(page.downloads.length,downloads);
 });
 
 test('RED handoff keeps an unknown receipt and never silently posts or cancels it',async()=>{
