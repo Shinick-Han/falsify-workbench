@@ -403,6 +403,31 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
       if(columns===2) bodyStarted=true; group=[];};
     const captionById=new Map(flow.items.filter(i=>i.kind==='caption').flatMap(i=>(i.blockIds||[]).map(id=>[id,i]))), linkedCaptions=new Set();
     for(const item of flow.items) if(item.kind==='asset') for(const id of item.captionIds||[]) {if(!captionById.has(id) || linkedCaptions.has(id)) fail('Unknown or duplicate caption link'); linkedCaptions.add(id);}
+    // Only move a complete, short source item across its own linked caption.
+    // Other content remains a barrier; furniture does not participate in flow.
+    const keepBeforeAsset=new Map(), deferredItems=new Set();
+    if(measuredContinuous && figurePlacement==='page') for(const [assetIndex,asset] of flow.items.entries()) {
+      if(assetIndex<firstBodyIndex || asset.kind!=='asset' || asset.span!=='page' || !asset.captionIds?.length) continue;
+      const significant=flow.items.slice(0,assetIndex).filter(i=>!plan?.excludedItemIds.includes(i.id));
+      const caption=significant.at(-1), item=significant.at(-2);
+      if(!caption || caption.kind!=='caption' || !item || item.kind!=='paragraph' || item.span==='page' || item.columns!==2) continue;
+      const ids=caption.blockIds||[];
+      if(!ids.length || ids.some(id=>!asset.captionIds.includes(id) || asset.captionPositions?.[id]!=='above') || asset.captionIds.length!==ids.length) continue;
+      const src=item.source, cs=caption.source, as=asset.source, box=src?.bbox, cb=cs?.bbox, sourcePage=document.pages[src?.pageIndex];
+      if(!sourcePage || src.pageIndex!==cs?.pageIndex || as?.pageIndex!==src.pageIndex+1 || !Array.isArray(box) || !Array.isArray(cb) || box.length!==4 || cb.length!==4 || !box.every(Number.isFinite) || !cb.every(Number.isFinite) || box[1]<sourcePage.height*0.5 || box[3]>cb[1] || cb[1]-box[3]>sourcePage.height*0.08) continue;
+      const blocks=(item.blockIds||[]).map(id=>blockById.get(id));
+      if(!blocks.length || blocks.some(b=>!b || b.source?.pageIndex!==src.pageIndex || !b.source?.range || b.source.range.end-b.source.range.start!==b.text?.length || !b.source.lines?.length)) continue;
+      const lines=blocks.reduce((n,b)=>n+b.source.lines.length,0);
+      const current=blocks.reduce((n,b)=>n+logicalText(b,changes.get(b.id)||[],omittedFor(b),spacesFor(b)).length,0)+(item.joiners||[]).reduce((n,j)=>n+j.length,0);
+      if(lines>3 || current>240) continue;
+      keepBeforeAsset.set(asset,item); deferredItems.add(item);
+    }
+    const renderFlowItem=item=>{
+      const blocks=(item.blockIds||[]).map(id=>blockById.get(id));
+      const parts=blocks.map(b=>renderBlock(b));
+      const rendered=item.inline ? parts.map((p,i)=>p+(i<parts.length-1 ? `#text(${typstString(item.joiners[i])})` : '')).join('') : parts.filter(Boolean).join('\n');
+      return paragraphContext(blocks,item.kind,rendered);
+    };
     const renderCaption=item=>{
       const blocks=(item.blockIds||[]).map(id=>blockById.get(id));
       const parts=blocks.map(b=>renderBlock(b));
@@ -410,7 +435,7 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
       return paragraphContext(blocks,'caption',rendered);
     };
     for(const [itemIndex,item] of flow.items.entries()) {
-      if(plan?.excludedItemIds.includes(item.id)) continue;
+      if(plan?.excludedItemIds.includes(item.id) || deferredItems.has(item)) continue;
       if(item.kind==='caption' && (item.blockIds||[]).every(id=>linkedCaptions.has(id))) continue;
       // Small, bottom-of-title-page notes may span both source columns but
       // remain ordinary sequential text in the reflowed column stream.
@@ -436,7 +461,8 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
         const above=captionItems.filter(c=>item.captionPositions?.[c.blockIds[0]]==='above').map(renderCaption).filter(Boolean);
         const below=captionItems.filter(c=>item.captionPositions?.[c.blockIds[0]]!=='above').map(renderCaption).filter(Boolean);
         if(parts.length && below.length) parts=[`#block(sticky: true)[${parts.join('\n')}]`];
-        const aboveParts=above.map(caption=>`#block(sticky: true)[${caption}]`);
+        const kept=keepBeforeAsset.get(item);
+        const aboveParts=[...(kept ? [renderFlowItem(kept)] : []),...above.map(caption=>`#block(sticky: true)[${caption}]`)];
         if(fit?.width && parts.length===1) {
           // Measure caption and paragraph spacing with a zero-height frame.
           // Keep at least half the original size or use the breakable page path.
