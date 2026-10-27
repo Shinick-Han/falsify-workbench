@@ -11,7 +11,7 @@ const sha=async s=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256
 const texts=e=>!e||typeof e!=='object'?[]:[e.textContent,...(e.children||[]).flatMap(texts)].filter(Boolean);
 const shown=e=>texts(e).join('\n');
 // Synthetic DOM for the ledger: elements register by id when assigned; querySelector('#id') resolves or creates.
-function ledger(stored){
+function ledger(stored,scriptUrl){
   const els=new Map(),store=new Map(stored||[]);
   function element(tag){const e=new EventTarget(),classes=new Set();let id='';
     Object.defineProperty(e,'id',{get:()=>id,set:v=>{id=v;els.set(v,e);}});
@@ -22,15 +22,16 @@ function ledger(stored){
     Object.defineProperty(e,'innerHTML',{set(){}});Object.defineProperty(e,'firstChild',{get(){return this.children[0]??null;}});Object.defineProperty(e,'lastChild',{get(){return this.children.at(-1)??null;}});return e;}
   const get=id=>{if(!els.has(id))element('div').id=id;return els.get(id);};
   const document=new EventTarget();Object.assign(document,{readyState:'complete',createElement:element,createTextNode:s=>({textContent:s}),querySelector:s=>s.startsWith('#')?get(s.slice(1)):null,querySelectorAll:()=>[],body:element('body')});
+  if(scriptUrl)document.currentScript={src:scriptUrl};
   const ctx=vm.createContext({document,FalsifyComparison:require('../dist/harness-comparison.js'),FalsifyReview:require('../dist/review-workbench.js'),FalsifyHarness:H,FalsifyLocalBridge:{busy(){},capabilities:()=>null,state:()=>({status:'manual',connected:false,cap:null})},FalsifyDocumentRed:R,FalsifyDocumentBlue:require('../dist/document-blue-core.js'),
     localStorage:{getItem:k=>store.get(k)??null,setItem:(k,v)=>store.set(k,v)},crypto:globalThis.crypto,atob,Uint8Array,TextEncoder,CustomEvent,Event,URL,Blob,setTimeout,clearTimeout});
-  vm.runInContext(fs.readFileSync(path.join(dist,'experiment-ledger.js'),'utf8').replace('  function finalState(run,f){','  globalThis.__renderComparison=renderHarnessComparison;\n  function finalState(run,f){'),ctx,{filename:'experiment-ledger.js'});
+  vm.runInContext(fs.readFileSync(path.join(dist,'experiment-ledger.js'),'utf8').replace('  function finalState(run,f){','  globalThis.__archiveUrl=ARCHIVE_URL;\n  globalThis.__renderComparison=renderHarnessComparison;\n  function finalState(run,f){'),ctx,{filename:'experiment-ledger.js'});
   const lab=ctx.FalsifyLab,db=()=>JSON.parse(store.get(KEY));
   const rows=()=>get('ledger-table-body').children.map(tr=>tr.children.map(td=>[td.textContent,...td.children.map(s=>s.textContent)].join(' | ')));
   async function restore(data){get('ledger-status').textContent='';const raw=JSON.stringify(data);get('ledger-import').files=[{size:raw.length,text:async()=>raw}];get('ledger-import').dispatchEvent(new Event('change'));await until(()=>get('ledger-status').textContent!=='','import settled');return get('ledger-status').textContent;}
   async function review(id,verdict,score){assert.equal(await lab.review(id),true);get('evaluation-reviewer').value='Synthetic reviewer';get('evaluation-verdict').value=verdict;get('evaluation-score').value=score==null?'':String(score);get('evaluation-note').value='Synthetic test only.';
     get('evaluation-form').dispatchEvent(new Event('submit',{cancelable:true}));assert.match(get('evaluation-status').textContent,/검수 이력을 추가/);}
-  return {get,lab,store,db,rows,restore,review,ctx,document,renderComparison:()=>ctx.__renderComparison(),summary:()=>get('ledger-summary').textContent};
+  return {get,lab,store,db,rows,restore,review,ctx,document,archiveUrl:ctx.__archiveUrl,renderComparison:()=>ctx.__renderComparison(),summary:()=>get('ledger-summary').textContent};
 }
 const segments=[{id:'s0',label:'p1',text:'Study does not show benefit.'},{id:'s1',label:'p2',text:'Only an association was observed.'}];
 const evidence=[{segmentId:'s1',quote:'Only an association was observed.',relation:'Synthetic qualification.'}];
@@ -162,6 +163,8 @@ test('BLUE visual record retains bound metadata without bytes across import and 
   const forged=plain(q);forged.visualEvidence[0].sha256='0'.repeat(64);await assert.rejects(w.lab.record('blue',doc,forged,result,'local-codex'),/해시 불일치/);
 });
 test('comparison UI renders actual ledger records and exclusion reasons in VM',async()=>{const {w,ids}=await populated();w.get('harness-comparison-reference').value=ids.live;w.renderComparison();await flush();assert.match(w.get('harness-comparison-summary').textContent,/누락 시도 수 \/ 비용 미상/);const rows=w.get('harness-comparison-body').children;assert.ok(rows.length>=4);assert.match(shown(rows[0]),/portable 전략 미선언/);assert.match(shown(rows.at(-1)),/출처/);});
+
+test('archive module follows the entry script release version instead of reusing a cached module',async()=>{const w=ledger([], 'https://example.invalid/app/experiment-ledger.js?v=0.2.0-alpha.16');await w.lab.ready;assert.equal(w.archiveUrl,'https://example.invalid/app/review-bundle.mjs?v=0.2.0-alpha.16');const bare=ledger([], 'https://example.invalid/app/experiment-ledger.js');await bare.lab.ready;assert.equal(bare.archiveUrl,'https://example.invalid/app/review-bundle.mjs');});
 
 test('real bind, record, reload, archive and import preserve input identity and exclusions',async()=>{
   // Synthetic responses only: no broker or model is invoked or claimed as test evidence.
