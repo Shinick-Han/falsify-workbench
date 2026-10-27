@@ -580,6 +580,10 @@
       ui.inlineMeta.textContent='쪽 '+(inline.pageIndex+1)+(Number.isSafeInteger(inline.anchor&&inline.anchor.occurrence)?' · occurrence '+inline.anchor.occurrence:'')+(box?' · 좌표 '+box.map(round).join(', '):'');
       placeInline();
     }
+    function focusInline(){
+      if(globalThis.matchMedia?.('(max-width: 700px)').matches)ui.inline.scrollIntoView?.({block:'start'});
+      ui.inlineAfter.focus();
+    }
     function segmentFor(before,anchor,pageIndex){
       const all=coreSegments(source&&source.segments).filter(s=>segmentPage(s)===pageIndex);
       // Paragraph discovery must not make a previously unique word selection ambiguous.
@@ -811,7 +815,7 @@
     async function drawBefore(n,mine){
       mine=mine==null?epoch:mine;
       if(!source||!source.doc||!Number.isSafeInteger(n)||n<1||n>pages||epoch!==mine)return;
-      clearTables(true);
+      clearTables(true);clearParagraphs();
       const seq=++drawSeq,live=()=>epoch===mine&&seq===drawSeq;
       if(inspectCtl){inspectCtl.abort();inspectCtl=null;}
       pageText=null;
@@ -891,11 +895,37 @@
           ensureSession(true);
         }
         source.segments=coreSegments(source.segments).filter(s=>!clean.some(p=>p.id===s.id)).concat(clean);
+        renderParagraphs(display);
         setBeforeStatus((display.pageIndex+1)+' / '+pages+'쪽 · 원본 바이트 · 문단을 클릭해 편집');
       }catch(e){
         if(epoch!==mine||seq!==drawSeq||pageText!==display||ctl.signal?.aborted)return;
         setBeforeStatus((display.pageIndex+1)+' / '+pages+'쪽 · 문단을 읽지 못했습니다. 글 선택 편집은 사용할 수 있습니다. '+safeMessage(e),true);
       }finally{if(inspectCtl===ctl)inspectCtl=null;}
+    }
+    function clearParagraphs(){
+      if(!pageText)return;
+      pageText.paragraphList?.remove();pageText.paragraphMarker?.remove();
+      pageText.paragraphList=null;pageText.paragraphMarker=null;pageText.paragraphs=null;
+    }
+    function renderParagraphs(display){
+      const list=doc.createElement('details');list.className='paper-paragraph-list';
+      const summary=doc.createElement('summary');summary.textContent='이 쪽의 문단 선택 ('+display.paragraphs.length+')';list.append(summary);
+      const marker=doc.createElement('div');marker.className='paper-paragraph-marker';marker.hidden=true;marker.setAttribute('aria-hidden','true');display.pageEl.append(marker);
+      const mark=p=>{
+        if(pageText!==display||editMode!=='text')return;
+        if(!p){marker.hidden=true;return;}
+        const b=p.bbox;marker.style.left=b[0]/display.paragraphWidth*100+'%';marker.style.top=b[1]/display.paragraphHeight*100+'%';
+        marker.style.width=(b[2]-b[0])/display.paragraphWidth*100+'%';marker.style.height=(b[3]-b[1])/display.paragraphHeight*100+'%';marker.hidden=false;
+      };
+      for(const p of display.paragraphs){
+        const button=doc.createElement('button');button.type='button';button.className='paper-paragraph-button';
+        button.textContent=p.text;button.disabled=p.editable===false;
+        if(button.disabled)button.title='이 문단은 흐름 편집을 지원하지 않습니다.';
+        button.addEventListener('focus',()=>mark(p));button.addEventListener('blur',()=>mark(null));
+        button.addEventListener('mouseenter',()=>mark(p));button.addEventListener('mouseleave',()=>mark(null));
+        button.addEventListener('click',()=>openParagraphBinding(display,p));list.append(button);
+      }
+      display.paragraphList=list;display.paragraphMarker=marker;ui.beforeStage.prepend(list);
     }
     function clearTables(closeInline){
       tableSeq++;if(tableCtl){tableCtl.abort();tableCtl=null;}
@@ -907,7 +937,7 @@
     function setEditMode(mode){
       if(mode==='table'&&ui.modeTable.disabled)return;
       if(!canLeaveInline())return;
-      clearTables(true);if(inspectCtl){inspectCtl.abort();inspectCtl=null;}
+      clearTables(true);clearParagraphs();if(inspectCtl){inspectCtl.abort();inspectCtl=null;}
       editMode=mode;ui.modeText.setAttribute('aria-pressed',String(mode==='text'));ui.modeTable.setAttribute('aria-pressed',String(mode==='table'));
       ui.modeHelp.textContent=mode==='table'?'셀을 눌러 값을 고치세요. 점선 셀은 지원 범위를 확인하세요.':'문단을 누르거나 글자를 드래그하세요.';
       if(inline){inline=null;renderInline();}
@@ -944,7 +974,7 @@
             const existing=(snapshot?.edits||[]).find(e=>e.segmentId===row.id),rect=display.pageEl.getBoundingClientRect(),anchor={start:0,end:selection.before.length,bbox:selection.anchor.bbox.slice(),coordinate:'top-left',rotation:0};
             inline={table:true,before:selection.before,after:existing?existing.after:selection.before,anchor,pageIndex:display.pageIndex,segmentId:row.id,editId:existing?.id||null,
               clientRect:{left:rect.left+b[0]*rect.width/found.width,bottom:rect.top+b[3]*rect.height/found.height,width:(b[2]-b[0])*rect.width/found.width}};
-            renderInline();ui.inlineAfter.focus();
+            renderInline();focusInline();
           });layer.append(button);
         }
         display.pageEl.append(layer);
@@ -962,14 +992,17 @@
       const y=(event.clientY-rect.top)*pageText.paragraphHeight/rect.height;
       const hits=pageText.paragraphs.filter(p=>x>=p.bbox[0]&&x<=p.bbox[2]&&y>=p.bbox[1]&&y<=p.bbox[3]);
       if(hits.length!==1)return;
-      if(!canLeaveInline())return;
-      const p=hits[0],id='paragraph:'+pageText.pageIndex+':'+p.id;
+      openParagraphBinding(pageText,hits[0]);
+    }
+    function openParagraphBinding(display,p){
+      if(editMode!=='text'||pageText!==display||!display.paragraphs?.includes(p)||!canLeaveInline())return;
+      const rect=display.pageEl.getBoundingClientRect(),id='paragraph:'+display.pageIndex+':'+p.id;
       if(p.editable===false){setEditStatus('이 문단은 흐름 편집을 지원하지 않습니다. 글 선택 편집으로 위치를 확인할 수 있습니다.',true);return;}
       const existing=(snapshot&&snapshot.edits||[]).find(e=>e.segmentId===id&&e.before===p.text);
       const anchor={start:0,end:p.text.length,occurrence:0,bbox:p.bbox.slice(),coordinate:'top-left',rotation:0};
       inline={before:p.text,after:existing?existing.after:p.text,anchor,pageIndex:pageText.pageIndex,segmentId:id,editId:existing?existing.id:null,
         clientRect:{left:rect.left+p.bbox[0]*rect.width/pageText.paragraphWidth,bottom:rect.top+p.bbox[3]*rect.height/pageText.paragraphHeight,width:(p.bbox[2]-p.bbox[0])*rect.width/pageText.paragraphWidth}};
-      renderInline();ui.inlineAfter.focus();
+      renderInline();focusInline();
     }
     function itemElement(node,textEl){
       let n=node&&node.nodeType===3?(node.parentElement||node.parentNode):node;
@@ -1056,14 +1089,14 @@
       const segment=segmentFor(located.before,located.anchor,pageText.pageIndex);
       const existing=(snapshot?.edits||[]).find(e=>e.pageIndex===pageText.pageIndex&&e.before===located.before&&JSON.stringify(e.anchor?.bbox)===JSON.stringify(located.anchor?.bbox));
       inline={before:located.before,after:existing?existing.after:located.before,anchor:existing?existing.anchor:located.anchor,pageIndex:pageText.pageIndex,segmentId:existing?existing.segmentId:segment?segment.id:undefined,editId:existing?existing.id:null,clientRect:clientBox(range)};
-      renderInline();ui.inlineAfter.focus();
+      renderInline();focusInline();
     }
     function loadInline(edit){
       if(!canLeaveInline())return;
       const mine=epoch,open=()=>{
         if(epoch!==mine||!(snapshot?.edits||[]).some(e=>e.id===edit.id)||!canLeaveInline())return;
         inline={table:String(edit.segmentId||'').startsWith('table:'),before:edit.before,after:edit.after,anchor:edit.anchor,pageIndex:edit.pageIndex,segmentId:edit.segmentId,editId:edit.id};
-        renderInline();ui.inlineAfter.focus();
+        renderInline();focusInline();
       };
       if(page===edit.pageIndex+1&&pageText)open();else void drawBefore(edit.pageIndex+1).then(open);
     }
