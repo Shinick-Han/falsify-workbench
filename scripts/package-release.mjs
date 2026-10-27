@@ -108,6 +108,38 @@ export function assertShippableSource(tracked, rootDir) {
   return null;
 }
 
+// git archive omits Unix attributes for non-executable ZIP entries. Record the
+// exact Git modes in the central directory so extractors can preserve them.
+export function preserveZipModes(bytes, prefix, modes) {
+  let end = -1;
+  for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 65557); i--) {
+    if (bytes.readUInt32LE(i) === 0x06054b50 && i + 22 + bytes.readUInt16LE(i + 20) === bytes.length) { end = i; break; }
+  }
+  if (end < 0 || bytes.readUInt16LE(end + 4) || bytes.readUInt16LE(end + 6)) throw new Error('Unsupported ZIP directory.');
+  const count = bytes.readUInt16LE(end + 10);
+  if (count === 0xffff) throw new Error('ZIP64 is not supported.');
+  let pos = bytes.readUInt32LE(end + 16);
+  const seen = new Set();
+  for (let i = 0; i < count; i++) {
+    if (pos + 46 > end || bytes.readUInt32LE(pos) !== 0x02014b50) throw new Error('Invalid ZIP directory entry.');
+    const nameLength = bytes.readUInt16LE(pos + 28), extraLength = bytes.readUInt16LE(pos + 30), commentLength = bytes.readUInt16LE(pos + 32);
+    const next = pos + 46 + nameLength + extraLength + commentLength;
+    if (next > end) throw new Error('Truncated ZIP directory entry.');
+    const name = bytes.toString('utf8', pos + 46, pos + 46 + nameLength);
+    if (!name.startsWith(prefix)) throw new Error('Unexpected ZIP prefix: ' + name);
+    if (!name.endsWith('/')) {
+      const path = name.slice(prefix.length), mode = modes.get(path);
+      if (mode === undefined || seen.has(path)) throw new Error('Unexpected ZIP path: ' + path);
+      seen.add(path);
+      bytes[pos + 5] = 3; // Unix creator
+      bytes.writeUInt32LE((((mode << 16) | (bytes.readUInt32LE(pos + 38) & 0xffff)) >>> 0), pos + 38);
+    }
+    pos = next;
+  }
+  if (seen.size !== modes.size) throw new Error('ZIP is missing tracked paths.');
+  return bytes;
+}
+
 function main() {
   const args = process.argv.slice(2);
   if (args.length !== 2 || args[0] !== '--out-dir' || !isAbsolute(args[1])) {
@@ -134,7 +166,14 @@ function main() {
   const name = `falsify-workbench-v${version}.zip`;
   const archive = join(directory, name);
   execFileSync('git', ['-C', root, 'archive', '--format=zip', `--prefix=falsify-workbench-v${version}/`, '-o', archive, commit], { windowsHide: true });
-  const bytes = readFileSync(archive);
+  const tree = execFileSync('git', ['-C', root, 'ls-tree', '-r', '-z', commit]);
+  const modes = new Map(tree.toString('utf8').split('\0').filter(Boolean).map(entry => {
+    const match = /^(\d+) blob [0-9a-f]+\t([\s\S]+)$/.exec(entry);
+    if (!match) throw new Error('Unsupported tracked tree entry.');
+    return [match[2], parseInt(match[1], 8)];
+  }));
+  const bytes = preserveZipModes(readFileSync(archive), `falsify-workbench-v${version}/`, modes);
+  writeFileSync(archive, bytes);
   const sha256 = createHash('sha256').update(bytes).digest('hex');
   const receipt = { schema: 'falsify.source-release.v1', version, commit,
     repository: 'https://github.com/Shinick-Han/falsify-workbench', sourceOnly: true,

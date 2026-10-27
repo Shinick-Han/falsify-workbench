@@ -2,7 +2,7 @@
 
 The branch-scoped `macOS native compatibility` workflow runs on GitHub-hosted macOS 15 ARM64 and Intel machines. It invokes `/bin/bash` explicitly to exercise the system Bash 3.2. The existing POSIX handler contracts and macOS handler test run first; the latter compiles and registers only `falsify-test-isolated`, unregisters its own applet, and does not click an approval dialog.
 
-The native smoke creates a temporary Python venv and installs `app/local/requirements.txt`, runs synthetic RED PDF export and BLUE visual tests with their fake CLI, runs the existing packaging contracts, and builds a source archive from the clean checkout. It checks archive paths, Unix file modes, checksum, and commit. No real model or private paper is used. The temporary venv and archive are removed on exit. This does not test GUI approval or production URL registration.
+The native smoke creates a temporary Python venv and installs `app/local/requirements.txt`, runs synthetic RED PDF export, BLUE visual tests with their fake CLI, and macOS runtime and CLI selection contracts. It runs packaging contracts and builds a source archive from the clean checkout. It checks archive paths, explicit Unix file modes, checksum, and commit. No real model or private paper is used. The temporary venv and archive are removed on exit. This does not test GUI approval or production URL registration.
 
 Run from a clean committed checkout on macOS with Python 3, Node, and Git available:
 
