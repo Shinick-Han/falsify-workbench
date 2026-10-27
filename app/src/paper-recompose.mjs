@@ -1,4 +1,5 @@
 import {readDocument} from './paper-document.mjs';
+import {recoverSourceSpaces} from './paper-source-spacing.mjs';
 import {buildPaperFlow} from './paper-flow.mjs';
 import {readSourceAssets} from './paper-source-assets.mjs';
 import {createFontPlan} from './paper-fonts.mjs';
@@ -25,10 +26,14 @@ function pageStreams(document, flow, visibleWrap=false, logicalWrap=false) {
         for(const ch of sep) s.chars.push({ch,source:null});
       }
       const boundaries=new Set((b.source.lines||[]).slice(1).map(l=>l.range.start-b.source.range.start));
+      const spaces=new Set(b.source.wordSpaceOffsets||[]);
       for(let i=0;i<b.text.length;i++) {
         if(logicalWrap && boundaries.has(i) && i>1 && b.text[i-1]==='-' && /\p{L}/u.test(b.text[i-2]) && /\p{L}/u.test(b.text[i])) s.chars.at(-1).ch='';
         if(boundaries.has(i) && i>0 && !/\s/u.test(b.text[i-1]) && !/\s/u.test(b.text[i]) && (visibleWrap || b.text[i-1]!=='-') && !(b.text[i-1]==='−' && /[0-9]/u.test(b.text[i]))) s.chars.push({ch:' ',source:null});
-        const offset=b.source.range.start+i, character=(b.source.characters||[]).find(c=>c.start<=offset && c.end>offset);
+        const offset=b.source.range.start+i;
+        const parent=lookup.get(b.parentBlockId||b.id), parentIndex=offset-(parent?.source?.range?.start??offset);
+        if(spaces.has(offset) && parentIndex>0 && !/\s/u.test(parent.text[parentIndex-1]) && !/\s/u.test(b.text[i])) s.chars.push({ch:' ',source:null});
+        const character=(b.source.characters||[]).find(c=>c.start<=offset && c.end>offset);
         s.chars.push({ch:b.text[i],source:{blockId:b.parentBlockId||b.id,start:offset,end:offset+1,bbox:character?.bbox||null,fragmentId:b.id}});
       }
     }
@@ -99,7 +104,8 @@ export async function prepare(request={}, options={}) {
   const input=request.file;
   const bytes=input instanceof Uint8Array?Uint8Array.from(input):input?.bytes instanceof Uint8Array?Uint8Array.from(input.bytes):typeof input?.arrayBuffer==='function'?new Uint8Array(await input.arrayBuffer()):null;
   abort(signal); if(!bytes?.length) fail('invalid','Source PDF is required.');
-  const document=await readDocument({file:bytes,fileHash:hash,signal}); abort(signal);
+  const observed=await readDocument({file:bytes,fileHash:hash,signal}); abort(signal);
+  const spacing=await recoverSourceSpaces({bytes,document:observed,pdfjs:options.pdfjs,signal}); const document=spacing.document; abort(signal);
   const inventory=await readSourceAssets({bytes,document,signal}); abort(signal);
   const flow=buildPaperFlow(document,{drawings:inventory.drawings});
   const {bindings,changes}=bindEdits(document,flow,edits);
@@ -119,6 +125,6 @@ export async function prepare(request={}, options={}) {
   const result=await composeDocument({document,sourceBytes:bytes,flow,assets:captured,edits:changes,signal},{compile:options.compile,fonts:fontPlan,outputCheck:args=>checkRecomposition({...args,pdfjs:options.pdfjs,mupdf:options.mupdf,exporter:'Typst'})}); abort(signal);
   const actual=new Uint8Array(await result.file.arrayBuffer()); abort(signal);
   if(hex(actual)!==result.sha256) fail('output-hash','Output bytes do not match their hash.');
-  return {...result,revision,bindings,sourceBinding:{sourceSha256:document.sourceSha256,editCount:bindings.length,partCount:changes.length},sourceAssets:{regions:regions.length,diagnostics:captured.diagnostics}};
+  return {...result,revision,bindings,sourceBinding:{spacing:spacing.evidence,sourceSha256:document.sourceSha256,editCount:bindings.length,partCount:changes.length},sourceAssets:{regions:regions.length,diagnostics:captured.diagnostics}};
 }
 

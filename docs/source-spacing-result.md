@@ -1,0 +1,10 @@
+# Source spacing result
+
+Base: `85f877a1c160e3ea281c9e194c0e3c95c9d7813e`. The candidate commit contains `recoverSourceSpaces({bytes,document,pdfjs,signal})`, returning `{document,sourceSha256,evidence}`. The owned document view adds `block.source.wordSpaceOffsets`: absolute page UTF-16 offsets before raw characters. Original bytes, text, IDs, ranges and caller objects are unchanged. Evidence counts matched pages, lines and inserted hints. Exact source hash, matching MuPDF/PDF.js page transforms, line baseline and horizontal extent, unique line correspondence, and identical non-whitespace characters are required. No reader or unknown geometry yields no hints.
+
+Search considered the existing MuPDF document model, PDF.js extraction and bridge mapping. A small adapter around the existing readers was chosen; no dependency was added. PDF.js can split a physical line into multiple items; such cases remain unhinted unless a whole item corresponds to the whole source line. Different glyph streams and unsupported frames are also deliberately left unchanged.
+
+Validation: `node --test app/tests/paper-source-spacing.spec.mjs app/tests/paper-recompose.spec.mjs app/tests/paper-document.spec.mjs app/tests/paper-compose.spec.mjs` passed 44/44. The tests use actual PDF.js byte extraction and cover omitted and encoded spaces, repeated lines, mismatched letters/numbers/minus, unknown frame and reader, stale hash, cancellation, and immutability. PDF.js emitted its standard-font-data warning for the synthetic fixture.
+
+Private local source proof, using current integration reader/assets/flow and the candidate binder: case36 p7/p26 2/2; cold 8/8. On cold page 12, the independent reader's `beneficial effect on health.` corresponds to the native `beneficialeffect on health.` and yielded the missing offset. Cold: 15 matching page frames, 794 matched lines, 73 hints; case36: 36 matching frames, 1661 matched lines, zero hints. These are binding results, not real rendered-output or visual validation. The compositor must consume the supplied hints; the root integration owns that and final output verification.
+
