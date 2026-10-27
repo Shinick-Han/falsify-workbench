@@ -39,13 +39,14 @@ print(json.dumps({'home': str(Path.home()), 'search': _search_path(),
 '''
             names = list(directories) + ['PATH', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'AUTH_TOKEN', 'CODEX_TOKEN']
             with patch.dict(os.environ, env, clear=True):
+                expected_path = adapter.macos_runtime_path() if sys.platform == 'darwin' else env['PATH']
                 raw = adapter.run_stdio([sys.executable, '-c', code, str(frozen), *names], b'',
                                         str(root), str(root / 'out'))
             actual = json.loads(raw)
             self.assertEqual(actual['home'], str(home))
             self.assertIn(str(home / '.local' / 'bin'), actual['search'])
             for name, value in directories.items(): self.assertEqual(actual['env'][name], value)
-            self.assertEqual(actual['env']['PATH'], env['PATH'])
+            self.assertEqual(actual['env']['PATH'], expected_path)
             for name in names[-4:]: self.assertIsNone(actual['env'][name])
 
     def test_posix_environment_allowlist(self):
