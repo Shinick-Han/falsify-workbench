@@ -256,7 +256,7 @@ function vmStorage(){const m=new Map();return {getItem:k=>m.has(k)?m.get(k):null
 async function redPage(storage,hooks,options={}){
   const els=new Map(),get=id=>{if(!els.has(id))els.set(id,element(id));return els.get(id);};
   const document=new EventTarget();
-  Object.assign(document,{querySelector:s=>s.startsWith('#')?get(s.slice(1)):null,querySelectorAll:()=>[],createElement:tag=>element(tag),body:element('body')});
+  Object.assign(document,{querySelector:s=>s.startsWith('#')?(s==='#red-receipt-check'||s==='#red-pending-discard'?els.get(s.slice(1))||null:get(s.slice(1))):null,querySelectorAll:()=>[],createElement:tag=>{const e=element(tag);Object.defineProperty(e,'id',{get(){return this._id;},set(v){this._id=v;els.set(v,this);}});return e;},body:element('body')});
   get('red-level').value='1';get('red-budget').value='8';get('red-empty').textContent='empty';
   const calls=[];
   const cap={red:true,pdf:false,companionInstance:INSTANCE};
@@ -267,9 +267,9 @@ async function redPage(storage,hooks,options={}){
   if(options.helper!==false)vm.runInContext(fs.readFileSync(path.join(dist,'pending-job.js'),'utf8'),ctx,{filename:'pending-job.js'});
   vm.runInContext(fs.readFileSync(path.join(dist,'document-red.js'),'utf8'),ctx,{filename:'document-red.js'});
   const text='The claim is absolute.';
-  return {get,calls,async load(){document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file:{name:'notes.txt',arrayBuffer:async()=>new TextEncoder().encode(text).buffer},result:{text,format:'TXT',segments:[{label:'p',text}]}}}));
-    for(let i=0;i<50&&get('document-red').hidden!==false;i++)await new Promise(r=>setTimeout(r,5));
-    assert.equal(get('document-red').hidden,false);}};
+  return {get,find:id=>els.get(id),calls,async load(name='notes.txt',content=text){document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file:{name,arrayBuffer:async()=>new TextEncoder().encode(content).buffer},result:{text:content,format:'TXT',segments:[{label:'p',text:content}]}}}));
+    for(let i=0;i<100&&!get('red-document-summary').textContent.startsWith(name+' ·');i++)await new Promise(r=>setTimeout(r,5));
+    assert.match(get('red-document-summary').textContent,new RegExp('^'+name.replace('.', '\\.')+' ·'));}};
 }
 test('RED page writes the pending record before POST and does not POST again after a throw or a reload',async()=>{
   const storage=vmStorage();let failPost=true;
@@ -296,6 +296,39 @@ test('RED page writes the pending record before POST and does not POST again aft
   assert.match(reloaded.get('red-export-status').textContent,/원본 파일/);
 });
 function completedBody(saved){return {id:saved.requestId,role:saved.role,state:'completed',sourceHash:saved.sourceHash,revision:saved.revision,harnessHash:saved.harnessHash,companionInstance:saved.companionInstance,requestBytesDigest:saved.requestBytesDigest,progress:{completedCalls:1},result:saved.role==='blue'?{schema:Blue.VERSION,revision:saved.revision,sourceHash:saved.sourceHash,status:'abstain',findings:[]}:{schema:Red.VERSION,revision:saved.revision,sourceHash:saved.sourceHash,status:'abstain',candidates:[]}};}
+
+test('RED same loaded document explicitly checks lost receipt with GET only',async()=>{
+  const storage=vmStorage();let resolveGet, started=false;
+  const page=await redPage(storage,{reply:async p=>{if(p==='/api/red/jobs')throw Error('lost response');started=true;return new Promise(r=>resolveGet=r);}});
+  await page.load();page.get('red-consent').checked=true;page.get('red-start').click();
+  await until(()=>P.read('red',storage).record?.postReceipt==='unknown'&&page.find('red-receipt-check')&&!page.find('red-receipt-check').hidden,'unknown receipt action');
+  const before=page.calls.length;page.get('red-receipt-check').click();await until(()=>started,'GET started');
+  const saved=P.read('red',storage).record;assert.equal(page.calls.length,before+1);assert.equal(page.calls.at(-1).path,'/api/red/jobs/'+encodeURIComponent(saved.requestId));assert.equal(page.calls.at(-1).body,undefined);
+  resolveGet(completedBody(saved));await until(()=>P.read('red',storage).record?.disposition==='completed','recovered');
+  assert.match(page.get('red-progress').textContent,/복구했습니다/);assert.equal(page.get('red-document-summary').textContent.startsWith('notes.txt'),true);assert.equal(page.calls.length,2);
+});
+test('RED foreign job and a new document during GET never replace the active document or result',async()=>{
+  for(const scenario of ['foreign','new-document','new-result']){
+    const storage=vmStorage();let resolveGet,started=false;
+    const page=await redPage(storage,{reply:async p=>{if(p==='/api/red/jobs')throw Error('lost response');started=true;return new Promise(r=>resolveGet=r);}});
+    await page.load();page.get('red-consent').checked=true;page.get('red-start').click();
+    await until(()=>P.read('red',storage).record?.postReceipt==='unknown'&&page.find('red-receipt-check')&&!page.find('red-receipt-check').hidden,'unknown action');
+    const saved=P.read('red',storage).record;page.get('red-receipt-check').click();await until(()=>started,'GET started');
+    if(scenario==='new-document')await page.load('new.txt','New document text.');
+    if(scenario==='new-result'){
+      page.get('red-response').value=JSON.stringify({schema:Red.VERSION,revision:saved.revision,sourceHash:saved.sourceHash,status:'refusal',candidates:[]});page.get('red-import-response').click();
+      await until(()=>page.get('red-progress').textContent.includes('수동 응답'),'manual result');
+    }
+    const summary=page.get('red-document-summary').textContent, progress=page.get('red-progress').textContent;
+    resolveGet({...completedBody(saved),...(scenario==='foreign'?{id:'foreign-job'}:{})});
+    await new Promise(r=>setTimeout(r,80));
+    assert.equal(page.get('red-document-summary').textContent,summary,scenario);
+    if(scenario!=='foreign')assert.equal(page.get('red-progress').textContent,progress,scenario);
+    else assert.match(page.get('red-progress').textContent,/다릅니다/);
+    assert.equal(P.read('red',storage).record.disposition,'open');assert.equal(page.calls.length,2);assert.equal(page.calls[1].body,undefined);
+  }
+});
+
 test('RED hold failure keeps the visible result and rapid clicks post at most once',async()=>{
   const storage=vmStorage();
   const blocked=await redPage(storage,{reply:async()=>{throw new Error('no post');}});
@@ -440,6 +473,7 @@ test('BLUE failure stays visible across live poll, reload, and connection and do
   await until(()=>/BLUE 검토 중/.test(page.get('doc-blue-progress').textContent)&&!page.get('doc-blue-progress').textContent.includes(CITE),'running is not a failure');
   await until(()=>page.get('doc-blue-failure').textContent.includes(cite),'failed poll shows the server phrase');
   assert.equal(page.get('doc-blue-progress').textContent.includes(cite),true);
+  assert.equal(page.get('doc-blue-failure').hidden,true,'duplicate failure panel is hidden');
   assert.equal(page.get('doc-blue-progress').textContent.includes('같은 역할의 대기 기록이 남아 있습니다'),false);
   assert.equal(page.get('doc-blue-failure').textContent.includes('같은 역할의 대기 기록이 남아 있습니다'),false);
   assert.equal(htmlWrites,0);assert.equal(jobPosts(page.calls).length,1);
