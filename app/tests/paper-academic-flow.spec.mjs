@@ -17,5 +17,25 @@ test('continuous two-column flow uses native pages and passes source profile to 
  const text='A body paragraph';const document={schema:'falsify.paper-document.v1',sourceSha256,pages:[{width:400,height:600}],styles:[{id:'s',size:9,fontName:'Serif'}],blocks:[{id:'p',text,source:{pageIndex:0,range:{start:0,end:text.length},characters:[{start:0,end:text.length,styleId:'s'}],lines:[]}}]};
  const flow={schema:'falsify.paper-flow.v1',sourceSha256,items:[{kind:'paragraph',columns:2,span:'column',blockIds:['p']}]}; let source,checked;
  const out=await composeDocument({document,flow,sourceBytes:src},{compile:async p=>(source=p.source,new TextEncoder().encode('%PDF-1.4')),outputCheck:async p=>(checked=p,{checks:{content:{status:'pass'}},findings:[]})});
- assert.match(source,/#set page\([^\n]+columns: 2/);assert.doesNotMatch(source,/#columns\(2\)/);assert.match(source,/#set text\(size: 9pt\)/);assert.equal(checked.layoutProfile.bodyFontSize,9);assert.deepEqual(out.layoutProfile,checked.layoutProfile);
+ assert.match(source,/#set page\([^\n]+columns: 2/);assert.doesNotMatch(source,/#columns\(2\)/);assert.match(source,/#set text\(size: 9pt\)/);assert.equal(checked.layoutProfile.sourceProfile.bodyFontSize,9);assert.equal(checked.layoutProfile.sourceProfile.coordinateSpace,'source');assert.equal(checked.layoutProfile.bodyFontSize,undefined);assert.deepEqual(out.layoutProfile,checked.layoutProfile);
+});
+
+test('repagination and subset font names cannot become output geometry or font assertions',async()=>{
+ const src=new TextEncoder().encode('source'), sourceSha256=createHash('sha256').update(src).digest('hex'), text='Figure 1. A caption';
+ const document={schema:'falsify.paper-document.v1',sourceSha256,pages:[{sourcePageIndex:0,width:400,height:600}],styles:[{id:'s',size:9,fontName:'ABCDEF+SourceSerif'}],blocks:[{id:'p',text:'A body paragraph',source:{pageIndex:0,range:{start:0,end:16},characters:[{start:0,end:16,styleId:'s'}],lines:[]}},{id:'c',text,source:{pageIndex:0,range:{start:16,end:16+text.length},lines:[]}}]};
+ const box=[20,200,300,300], flow={schema:'falsify.paper-flow.v1',sourceSha256,items:[{kind:'paragraph',columns:2,span:'column',blockIds:['p'],source:{pageIndex:0,bbox:[20,30,180,190]}},{kind:'asset',span:'page',assetIds:['pic'],blockIds:[],captionIds:['c'],source:{pageIndex:0,bbox:box}},{kind:'caption',blockIds:['c']}]};
+ const svg=new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg" width="280" height="100"></svg>');let checked;
+ await composeDocument({document,flow,sourceBytes:src,assets:[{id:'pic',source:{pageIndex:0,bbox:box},content:{representation:'svg',bytes:svg}}]},{fonts:{family:'Noto Serif'},compile:async()=>({bytes:new TextEncoder().encode('%PDF-1.4'),blockSpans:[{id:'pic',start:{page:3,x:36,y:36},end:{page:3,x:36,y:136}}]}),outputCheck:async p=>(checked=p,{checks:{content:{status:'pass'}},findings:[]})});
+ assert.equal(checked.layoutProfile.coordinateSpace,'output');assert.equal(checked.layoutProfile.columns,undefined);assert.equal(checked.layoutProfile.captions,undefined);assert.equal(checked.layoutProfile.bodyFontNames,undefined);assert.equal(checked.layoutProfile.bodyFontSize,undefined);assert.deepEqual(checked.layoutProfile.sourceProfile.bodyFontNames,['ABCDEF+SourceSerif']);assert.equal(checked.layoutProfile.sourceProfile.captions[0].assetPageIndex,0);assert.equal(checked.blockSpans[0].start.page,3);
+});
+
+test('layout policy is bounded, source-relative and rejects missing evidence',async()=>{
+ const src=new TextEncoder().encode('source'), sourceSha256=createHash('sha256').update(src).digest('hex'), text='Body paragraph';
+ const document={schema:'falsify.paper-document.v1',sourceSha256,pages:[{sourcePageIndex:0,width:400,height:600}],styles:[{id:'s',size:10}],blocks:[{id:'p',text,source:{pageIndex:0,range:{start:0,end:text.length},characters:[{start:0,end:text.length,styleId:'s'}],lines:[{range:{start:0,end:7},bbox:[0,0,100,10]},{range:{start:7,end:text.length},bbox:[0,12,100,22]}]}}]};
+ const flow={schema:'falsify.paper-flow.v1',sourceSha256,items:[{kind:'paragraph',columns:2,blockIds:['p']}]};let source;
+ const compile=async p=>(source=p.source,new TextEncoder().encode('%PDF-1.4'));
+ const result=await composeDocument({document,flow,sourceBytes:src,layoutPolicy:{lineHeightScale:1.05,paragraphSpacingEm:0.5,columnGutterEm:1.2}},{compile});
+ assert.match(source,/leading: 2\.6[0-9]*pt/);assert.match(source,/spacing: 5pt/);assert.match(source,/gutter: 12pt/);assert.equal(result.layoutPolicy.lineHeightScale,1.05);
+ for(const layoutPolicy of [{lineHeightScale:0.5},{fontScale:0.9},{columnGutterEm:3},{paragraphSpacingEm:NaN}]) await assert.rejects(composeDocument({document,flow,sourceBytes:src,layoutPolicy},{compile}),/Invalid layout policy/);
+ const noEvidence=structuredClone(document);noEvidence.styles=[];await assert.rejects(composeDocument({document:noEvidence,flow,sourceBytes:src,layoutPolicy:{columnGutterEm:1}},{compile}),/requires source measurements/);
 });

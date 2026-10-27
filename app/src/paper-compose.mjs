@@ -61,7 +61,7 @@ function ambiguousBoundaries(block, changes) {
     !/\s/u.test(raw[i-1]) && !/\s/u.test(raw[i]) && raw[i-1]!=='-' &&
     !(raw[i-1]==='−' && /[0-9]/u.test(raw[i])));
 }
-export async function composeDocument({document, edits=[], flow, assets, links, signal, sourceBytes, runningFurniture=false}={}, {compile, fonts={}, outputCheck, furniturePlanner}={}) {
+export async function composeDocument({document, edits=[], flow, assets, links, signal, sourceBytes, runningFurniture=false, layoutPolicy}={}, {compile, fonts={}, outputCheck, furniturePlanner}={}) {
   abort(signal);
   // Own the data used by this attempt before any asynchronous operation.
   if (document) document = structuredClone(document);
@@ -69,6 +69,7 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
   assets = assets == null ? null : structuredClone(assets);
   links = links == null ? null : structuredClone(links);
   edits = edits.map(e=>({...e}));
+  layoutPolicy = layoutPolicy == null ? layoutPolicy : structuredClone(layoutPolicy);
   sourceBytes = sourceBytes instanceof Uint8Array ? new Uint8Array(sourceBytes) : sourceBytes;
   const plannerDocument=structuredClone(document);
   const originalFonts=fonts, glyphLookup=fonts.hasGlyph;
@@ -171,7 +172,18 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
   if(linkPlan) for(const label of suppressedLabels) linkPlan.diagnostics.push({code:'target-furniture-unresolved',label});
   if(linkPlan) for(const id of new Set(linkPlan.sourceAssets.map(a=>a.assetItemId))) { const candidates=linkPlan.sourceAssets.filter(a=>a.assetItemId===id); const destinations=new Set(candidates.map(a=>JSON.stringify([a.destinationLabel||null,a.destinationLabel?null:a.uri,a.destinationStatus||null]))); if(destinations.size>1) linkPlan.diagnostics.push({code:'source-asset-link-conflict',assetItemId:id,linkIds:[...new Set(candidates.flatMap(a=>a.linkIds))]}); }
   const margins=plan?.margins || {top:36,right:36,bottom:36,left:36};
-  const layoutProfile=deriveLayoutProfile(document,flow);
+  const sourceProfile=deriveLayoutProfile(document,flow);
+  // The checker interprets geometry and font names as output observations.
+  // Source PDF subset names and source coordinates are not output evidence.
+  const layoutProfile={coordinateSpace:'output',sourceProfile,headings:sourceProfile.headings};
+  const policy=layoutPolicy ?? {};
+  if(!policy || typeof policy!=='object' || Array.isArray(policy)) fail('Invalid layout policy');
+  const bounds={lineHeightScale:[0.95,1.05],paragraphSpacingEm:[0.25,1],columnGutterEm:[0.8,2]};
+  for(const [key,value] of Object.entries(policy)) {
+    const limit=bounds[key];
+    if(!limit || !Number.isFinite(value) || value<limit[0] || value>limit[1]) fail('Invalid layout policy: '+key);
+    if(!sourceProfile.bodyFontSize || (key==='lineHeightScale' && !sourceProfile.bodyLineHeight)) fail('Layout policy requires source measurements: '+key);
+  }
   // Page-level flow is safe only when every item belongs to the same
   // two-column stream; mixed spanning material stays in ordered bands.
   const continuousColumns=!!flow?.items.length && flow.items.every(i=>i.columns===2 && i.span!=='page' && i.kind!=='asset');
@@ -180,10 +192,12 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
   const candidates = fonts.candidates?.filter(c=>c.getBytes?.()) || [];
   const families = [...new Set([fonts.selected?.family, ...candidates.map(c=>c.family)].filter(Boolean))];
   if (!families.length && fonts.family) families.push(String(fonts.family));
-  const bodySize=layoutProfile.bodyFontSize;
+  const bodySize=sourceProfile.bodyFontSize;
   if (families.length || bodySize) source+=`#set text(${families.length ? `font: (${families.map(typstString).join(', ')},)` : ''}${families.length && bodySize ? ', ' : ''}${bodySize ? `size: ${bodySize}pt` : ''})\n`;
-  const leading=bodySize && layoutProfile.bodyLineHeight ? layoutProfile.bodyLineHeight-bodySize : null;
-  source+=`#set par(justify: true${leading!==null && leading>=0 && leading<=bodySize ? `, leading: ${leading}pt` : ''})\n#set text(hyphenate: true)\n`;
+  const leading=bodySize && sourceProfile.bodyLineHeight ? sourceProfile.bodyLineHeight*(policy.lineHeightScale ?? 1)-bodySize : null;
+  if(policy.lineHeightScale!==undefined && (leading<0 || leading>bodySize)) fail('Layout policy exceeds supported source line rhythm');
+  source+=`#set par(justify: true${leading!==null && leading>=0 && leading<=bodySize ? `, leading: ${leading}pt` : ''}${policy.paragraphSpacingEm!==undefined ? `, spacing: ${policy.paragraphSpacingEm*bodySize}pt` : ''})\n#set text(hyphenate: true)\n`;
+  if(policy.columnGutterEm!==undefined) source+=`#set columns(gutter: ${policy.columnGutterEm*bodySize}pt)\n`;
   const files = {};
   const assetList = Array.isArray(assets) ? assets : assets?.assets || document.assets || [];
   // Targets on unavailable assets must not produce dangling Typst labels.
@@ -409,5 +423,5 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
   }
   if (outputTextCheck==='finding') warnings.push('Output text check found content loss or mismatch.');
   const verification={status:outputTextCheck==='finding' || assetFindings.length?'finding':'warning', sourceSha256:document.sourceSha256, contentVerified:outputTextCheck==='pass' && !furniture.templates.length && !ambiguous.length && !assetOwned.size && !assetFindings.length && !sourceGlyphResult.glyphs.length && !sourceGlyphResult.unavailable.length, sourceGlyphs:sourceGlyphResult, layoutVerified:false, coverage, outputTextCheck, checkReport, artworkBlocks, assetFindings, ambiguousBoundaries:ambiguous, furniture:{...furniture,margins:{...margins},output:compiled?.furnitureMap ?? null}, edits:edits.map(e=>({blockId:e.blockId,start:e.start,end:e.end,status:'bound'}))};
-  return {linkPlan,layoutProfile,file:new File([bytes],'recomposed.pdf',{type:'application/pdf'}),sha256,verification,pageMap:null,blockMap:compiled?.blockMap ?? null,blockSpans:compiled?.blockSpans ?? null,furnitureMap:compiled?.furnitureMap ?? null,warnings};
+  return {linkPlan,layoutProfile,layoutPolicy:{...policy},file:new File([bytes],'recomposed.pdf',{type:'application/pdf'}),sha256,verification,pageMap:null,blockMap:compiled?.blockMap ?? null,blockSpans:compiled?.blockSpans ?? null,furnitureMap:compiled?.furnitureMap ?? null,warnings};
 }

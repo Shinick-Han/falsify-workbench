@@ -30,5 +30,5 @@ export function deriveLayoutProfile(document, flow) {
   }
   const columns=[...columnGroups.values()];
   const captions=items.filter(i=>i.kind==='asset').flatMap(i=>(i.captionIds || []).map(id=>({text:blocks.get(id)?.text || '',assetPageIndex:i.source?.pageIndex,assetBbox:i.source?.bbox ? [...i.source.bbox] : null})));
-  return {bodyFontSize:bodyStats.size,bodyFontNames:bodyStats.fontNames,bodyLineHeight:median(rhythm),headingFontSize:headingStats.size,headingFontNames:headingStats.fontNames,captionFontSize:captionStats.size,captionFontNames:captionStats.fontNames,captions,headings:byKind('heading').map(b=>({text:b.text})),columns};
+  return {coordinateSpace:'source',bodyFontSize:bodyStats.size,bodyFontNames:bodyStats.fontNames,bodyLineHeight:median(rhythm),headingFontSize:headingStats.size,headingFontNames:headingStats.fontNames,captionFontSize:captionStats.size,captionFontNames:captionStats.fontNames,captions,headings:byKind('heading').map(b=>({text:b.text})),columns};
 }
