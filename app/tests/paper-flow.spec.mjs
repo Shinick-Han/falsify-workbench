@@ -72,3 +72,24 @@ test('verified partial range fragments an original block without losing adjacent
  const fig=block('fig','',[30,49,40,61],1,{kind:'figure',assetIds:['a']}),d=model([raw,fig]);d.assets=[{id:'a',source:{pageIndex:0,bbox:[30,49,40,61],readerPosition:1}}];d.occlusions=[{sourceSha256:d.sourceSha256,pageIndex:0,assetId:'a',ranges:[{start:2,end:4}],proof:{changedChannels:0,removedCharacters:2}}];
  const f=buildPaperFlow(d), map=new Map([...d.blocks,...f.fragments].map(b=>[b.id,b])),owned=f.items.flatMap(i=>i.blockIds.map(id=>({kind:i.kind,b:map.get(id)}))).filter(x=>x.b.text).sort((a,b)=>a.b.source.range.start-b.b.source.range.start);assert.deepEqual(owned.map(x=>[x.kind,x.b.text]),[['paragraph','AB'],['asset','CD'],['paragraph','EF']]);assert.equal(d.blocks[0].text,text);assert.deepEqual(owned.map(x=>x.b.source.range),[{start:0,end:2},{start:2,end:4},{start:4,end:6}]);
 });
+import {createHash, webcrypto} from 'node:crypto';
+import {File} from 'node:buffer';
+import {composeDocument,typstString} from '../src/paper-compose.mjs';
+test('dense vector plot excludes adjacent editable body and retains axis labels without raster',async()=>{
+ const src=new TextEncoder().encode('source'); globalThis.crypto ||= webcrypto; globalThis.File ||= File;
+ const labels=Array.from({length:20},(_,i)=>block(`label${i}`,`p${i}`,[30+i*5,60+i*4,34+i*5,64+i*4],i));
+ const body=block('body','This is ordinary editable body.',[260,100,390,115],20),caption=block('caption','Figure 1. Plot',[20,300,180,315],21);
+ const axis=block('axis','10',[14,150,23,155],22);
+ const d=model([...labels,body,caption]); d.sourceSha256=createHash('sha256').update(src).digest('hex');
+ for(const b of d.blocks) b.source.lines[0].range={...b.source.range};
+ const drawings=Array.from({length:1000},(_,i)=>({pageIndex:0,bbox:[25+(i%200),50+2*Math.floor(i/10),26+(i%200),51+2*Math.floor(i/10)]}));
+ const f=buildPaperFlow(d,{drawings}),region=f.regions[0],asset=f.items.find(x=>x.renderAssetId===region?.id);
+ assert.ok(region); assert.ok(labels.every(x=>asset.blockIds.includes(x.id)));
+ const withAxis=buildPaperFlow({...d,blocks:[...d.blocks,axis]},{drawings}); assert.ok(withAxis.items.find(x=>x.renderAssetId)?.blockIds.includes('axis'));
+ assert.equal(f.items.find(x=>x.blockIds.includes('body')).kind,'paragraph'); assert.equal(f.items.find(x=>x.blockIds.includes('caption')).kind,'caption');
+ assert.ok(region.bbox[2]<body.source.bbox[0]); assert.equal(new Set(f.items.flatMap(x=>x.blockIds)).size,d.blocks.length);
+ let captured,expected; const pdf=new TextEncoder().encode('%PDF-1.7\n');
+ await composeDocument({document:d,sourceBytes:src,edits:[{blockId:'body',pageIndex:0,start:body.source.range.start,end:body.source.range.start+4,before:'This',after:'That'}]},{compile:async p=>(captured=p.source,pdf),outputCheck:async p=>(expected=p.expectedBlocks,{checks:{content:{status:'pass'}},findings:[]})});
+ assert.ok(captured.includes(typstString('That is ordinary editable body.'))); assert.equal(expected.find(x=>x.id==='body').text,'That is ordinary editable body.');
+ assert.deepEqual(expected.filter(x=>x.id!=='body').map(x=>x.text),d.blocks.filter(x=>x.id!=='body').map(x=>x.text));
+});

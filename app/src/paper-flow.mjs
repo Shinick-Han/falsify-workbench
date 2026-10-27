@@ -131,7 +131,7 @@ export function buildPaperFlow(document, {drawings=document?.drawings || []} = {
     }
     const captions=blocks.filter(x=>boxOK(x.box) && /^\s*(?:extended\s+data\s+)?(?:fig(?:ure)?\.?|table)\s*\d/i.test(x.b.text || ''));
     const plotBottom=Math.min(page.height*.9,...captions.map(x=>x.box[1]));
-    const plotBlocks=blocks.filter(x=>x.b.text && boxOK(x.box) && x.box[1]>=page.height*.05 && x.box[3]<=plotBottom);
+    const plotText=blocks.filter(x=>x.b.text && boxOK(x.box) && x.box[1]>=page.height*.05 && x.box[3]<=plotBottom);
     const plotPaths=paths.filter(b=>b[0]>=0 && b[1]>=page.height*.05 && b[2]<=page.width && b[3]<=plotBottom);
     let plot=false;
     // Multiple separated image occurrences can be panels of one figure. Use
@@ -168,11 +168,23 @@ export function buildPaperFlow(document, {drawings=document?.drawings || []} = {
         plot=true;
       }
     }
-    if(!form && !plot && plotPaths.length>=1000 && plotBlocks.length>=20 && plotBlocks.every(x=>x.b.text.length<=200 && !/^\s*(?:fig(?:ure)?\.?|table)\s*\d/i.test(x.b.text)) && plotBlocks.filter(x=>x.b.text.length<=100).length/plotBlocks.length>=.95) {
-      let box=union([...plotPaths,...plotBlocks.map(x=>x.box)]);
+    // Establish the artwork extent before considering text. Nearby short,
+    // single-line labels may extend just outside it; prose remains independent.
+    if(!form && !plot && plotPaths.length>=1000) {
+      const artwork=union(plotPaths);
+      const plotBlocks=plotText.filter(x=>{
+        const text=x.b.text.trim(), lines=x.b.source?.lines || [];
+        const dx=Math.max(artwork[0]-x.box[2],x.box[0]-artwork[2],0);
+        const dy=Math.max(artwork[1]-x.box[3],x.box[1]-artwork[3],0);
+        const distance=Math.max(10,Math.min(15,(sizeOf(x.b) || x.box[3]-x.box[1])*1.5));
+        const smallArtworkText=contains(artwork,x.box) && bodySize && sizeOf(x.b) && sizeOf(x.b)<=bodySize*.9;
+        return smallArtworkText || (text.length<=30 && text.split(/\s+/).length<=3 && !/[.!?]\s*$/.test(text) && lines.length<=1 &&
+          (text.length<=2 || !bodySize || !sizeOf(x.b) || sizeOf(x.b)<=bodySize*1.1) && dx<=distance && dy<=distance);
+      });
+      let box=union([artwork,...plotBlocks.map(x=>x.box)]);
       const touching=assets.filter(x=>boxOK(x.box) && overlap(box,x.box));
       if(touching.every(x=>x.box[0]>=0 && x.box[1]>=page.height*.05 && x.box[2]<=page.width && x.box[3]<=plotBottom)) box=union([box,...touching.map(x=>x.box)]);
-      if(touching.every(x=>contains(box,x.box)) && box[2]-box[0]>page.width*.4 && box[3]-box[1]>page.height*.2) {
+      if(plotBlocks.length>=20 && !blocks.some(x=>x.b.text && boxOK(x.box) && overlap(box,x.box) && !plotBlocks.includes(x)) && touching.every(x=>contains(box,x.box)) && box[2]-box[0]>page.width*.4 && box[3]-box[1]>page.height*.2) {
         const as=assets.filter(x=>boxOK(x.box) && contains(box,x.box));
         const figureBlocks=blocks.filter(x=>(x.b.assetIds || []).some(id=>as.some(a=>a.a.id===id)));
         plotBlocks.push(...figureBlocks.filter(x=>!plotBlocks.includes(x)));
