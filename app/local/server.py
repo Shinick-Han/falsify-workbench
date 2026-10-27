@@ -31,6 +31,8 @@ import paper_analysis_service
 import image_edit_service
 import harness_adapter
 import harness_profile
+import harness_deployment
+import subprocess
 import pairing
 from build_info import WORKBENCH_VERSION
 from experiments.selfplay_codex import discover_codex
@@ -114,6 +116,7 @@ def busy_locked(server):
 CORS_HEADERS = {'authorization', 'content-type'}
 IMAGE_ROUTES = ('/api/paper/images', '/api/paper/images/export')
 PROFILE_ROUTE = '/api/harness/profile/propose'
+DEPLOY_ROUTE = '/api/harness/deploy'
 HOST_LABEL = re.compile(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?')
 
 def parse_web_origin(value):
@@ -136,7 +139,7 @@ def cors_route(method, path):
     Pair register, /api/session and launcher routes stay off this list.
     """
     if method == 'GET': return path in ('/api/capabilities', pairing.STATUS_PATH) or re.fullmatch(r'/api/(red|blue)/jobs/.+', path) is not None
-    if method == 'POST': return path in ['/api/red/jobs', '/api/blue/jobs', '/api/export', '/api/paper/inspect', *IMAGE_ROUTES, PROFILE_ROUTE, pairing.REDEEM_PATH, pairing.REVOKE_PATH] or re.fullmatch(r'/api/(red|blue)/jobs/.+/cancel', path) is not None
+    if method == 'POST': return path in ['/api/red/jobs', '/api/blue/jobs', '/api/export', '/api/paper/inspect', *IMAGE_ROUTES, PROFILE_ROUTE, DEPLOY_ROUTE, pairing.REDEEM_PATH, pairing.REVOKE_PATH] or re.fullmatch(r'/api/(red|blue)/jobs/.+/cancel', path) is not None
     return False
 
 def no_duplicates(items):
@@ -303,7 +306,7 @@ class Handler(BaseHTTPRequestHandler):
                     'model': 'gpt-6.1-sol', 'isolation': 'read-only CLI restrictions; not OS-enforced input-only isolation',
                     'cliSelection': True, 'harnessWrapper': True, 'cliAgents': cli_agents(), 'pdfEditor': pdf_editor,
                     'paperAnalysis': paper_analysis_service.capability(), 'imageEditor': image_edit_service.capability(),
-                    'harnessProfileProposal': harness_profile.capability(),
+                    'harnessProfileProposal': harness_profile.capability(), 'harnessDeployment': True,
                     'workbenchVersion': WORKBENCH_VERSION,
                     'companionInstance': companion_instance_descriptor(self.server.instance_id)}); return
             with LOCK:
@@ -330,7 +333,7 @@ class Handler(BaseHTTPRequestHandler):
         path = unquote(urlsplit(self.path).path)
         role = 'blue' if path.startswith('/api/blue/jobs') else 'red'
         prefix = '/api/' + role + '/jobs'
-        if path not in ['/api/red/jobs', '/api/blue/jobs', '/api/export', '/api/paper/inspect', *IMAGE_ROUTES, PROFILE_ROUTE] and not (path.startswith(prefix + '/') and path.endswith('/cancel')):
+        if path not in ['/api/red/jobs', '/api/blue/jobs', '/api/export', '/api/paper/inspect', *IMAGE_ROUTES, PROFILE_ROUTE, DEPLOY_ROUTE] and not (path.startswith(prefix + '/') and path.endswith('/cancel')):
             self.reply(404, {'error': 'operation_not_allowed'}); return
         try:
             if self.headers.get('Content-Type') != 'application/json': raise ValueError('application/json 필요')
@@ -374,6 +377,15 @@ class Handler(BaseHTTPRequestHandler):
                 if not admitted: self.reply(409, {'error': 'companion_busy'}); return
                 try: result = (image_edit_service.export_image if export else image_edit_service.list_images)(request)
                 except image_edit_service.ImageEditError as error: self.reply(error.status, error.payload()); return
+                finally: ACTIVE.release()
+                self.reply(200, result); return
+            if path == DEPLOY_ROUTE:
+                with LOCK: admitted = not self.server_closing() and ACTIVE.acquire(blocking=False)
+                if not admitted: self.reply(409, {'error': 'companion_busy'}); return
+                try:
+                    try: result = harness_deployment.deploy(data)
+                    except (ValueError, OSError, subprocess.SubprocessError):
+                        self.reply(400, {'error': 'harness_deployment_failed'}); return
                 finally: ACTIVE.release()
                 self.reply(200, result); return
             if path == PROFILE_ROUTE:

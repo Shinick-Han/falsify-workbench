@@ -296,7 +296,31 @@
     blueFileChoices(){return db.runs.filter(r=>r&&r.role==='blue').map(r=>({id:r.id,fileHash:r.fileHash,createdAt:r.createdAt,sourceName:typeof r.sourceName==='string'?r.sourceName:'',findings:Array.isArray(r.response&&r.response.findings)?r.response.findings.map(f=>({id:f.id,segmentId:f.segmentId,label:typeof f.label==='string'?f.label:'',quote:typeof f.quote==='string'?f.quote:'',rationale:typeof f.rationale==='string'?f.rationale:''})):[]}));},
     // A shared harness only fills the editor and the review panel: never registered, selected or executed. Navigation stays with the caller.
     async previewSharedHarness(config,expectedHash,alive){await ready;if(typeof alive==='function'&&!alive())throw staleOpen();let valid,hash;try{valid=H.validate(config);hash=await H.hash(valid);if(expectedHash!==undefined&&expectedHash!==hash)throw Error('공유 harness의 내용 해시가 기록과 다릅니다.');}catch(e){if(typeof alive==='function'&&!alive())throw staleOpen();$('#harness-preview').hidden=true;status('#harness-status','공유 harness를 불러오지 못했습니다: '+e.message,true);throw e;}
-      if(typeof alive==='function'&&!alive())throw staleOpen();$('#harness-editor').value=JSON.stringify(valid,null,2);showHarnessPreview(valid,hash,'공유 Harness 검토');status('#harness-status','공유 기록의 harness를 편집기에 불러왔습니다. 등록·선택·실행은 하지 않았습니다. 내용을 검토한 뒤 직접 등록하세요.');return hash;},
+      if(typeof alive==='function'&&!alive())throw staleOpen();$('#harness-editor').value=JSON.stringify(valid,null,2);showHarnessPreview(valid,hash,'공유 Harness 검토');
+      const use=text('button',valid.id==='shinick-blue-evidence-external-v035'&&valid.role==='blue'&&valid.version==='0.3.5'?'이 PC에 BLUE 준비 후 사용':'이 Harness 사용');use.type='button';use.className='button primary';use.addEventListener('click',async()=>{use.disabled=true;try{
+        if(!harnessLease||harnessLease.hash!==hash||Date.now()>=harnessLease.expiresAt||$('#harness-editor').value!==harnessLease.shownEditor)throw Error('미리보기가 변경되거나 만료되었습니다. 다시 열어주세요.');
+        const lease=harnessLease, original=H.validate(JSON.parse($('#harness-editor').value)),actual=await H.hash(original);
+        if(actual!==hash||harnessLease!==lease||Date.now()>=lease.expiresAt||$('#harness-editor').value!==lease.shownEditor)throw staleOpen();
+        let current=original, chosenHash=hash;
+        if(original.id==='shinick-blue-evidence-external-v035'&&original.role==='blue'&&original.version==='0.3.5'){
+          const bridge=globalThis.FalsifyLocalBridge, link=bridge?.session?.();
+          if(!link||bridge?.capabilities?.()?.harnessDeployment!==true)throw Error('이 PC에 맞는 BLUE를 준비하려면 최신 companion을 연결하세요.');
+          const result=await link.request('/api/harness/deploy',{schema:'falsify.harness-deployment-request.v1',family:'evidence-blue-v035'});
+          if(harnessLease!==lease||Date.now()>=lease.expiresAt||$('#harness-editor').value!==lease.shownEditor)throw staleOpen();
+          if(result?.schema!=='falsify.harness-deployment.v1')throw Error('로컬 Harness 준비 결과를 확인할 수 없습니다.');
+          current=H.validate(result.profile,'blue');chosenHash=await H.hash(current);
+          if(harnessLease!==lease||Date.now()>=lease.expiresAt||$('#harness-editor').value!==lease.shownEditor)throw staleOpen();
+        }
+        const role=current.role;
+        if(locked[role])throw Error('해당 역할의 실행이 끝난 뒤 선택하세요.');
+        if(!db.harnesses.some(h=>h.hash===chosenHash)){if(db.harnesses.length>=100)throw Error('harness는 최대 100개');persist({...db,harnesses:[...db.harnesses,{config:current,hash:chosenHash}]});}
+        saveLibrary({...library,hidden:library.hidden.filter(h=>h!==chosenHash),preferred:{...library.preferred,[role]:chosenHash}});
+        selected[role]=db.harnesses.find(h=>h.hash===chosenHash);cli[role]=null;clearConsent(role);rebind(role);refreshHarness();harnessLease.pinned=true;
+        document.dispatchEvent(new CustomEvent('falsify:harness-change',{detail:{role}}));
+        document.querySelector('[data-view="'+(role==='red'?'workbench':role)+'"]')?.click();
+        status('#harness-status',role.toUpperCase()+' Harness를 선택했습니다. 실행 동의는 해당 화면에서 따로 선택하세요.');
+      }catch(e){status('#harness-status',e.message,true);}finally{use.disabled=false;}});$('#harness-preview').append(use);
+      status('#harness-status','공유 Harness를 검토하세요. 사용을 누르기 전에는 등록하거나 선택하지 않습니다.');return hash;},
     // extras: finalState (RED), sourceRunId (BLUE) are stored; isCurrent is a live-only guard checked right before the synchronous persist.
     async record(role,doc,request,response,provenance,extras={}){const isCurrent=extras?.isCurrent;if(!plain(extras??{})||Object.keys(extras??{}).some(k=>!['finalState','sourceRunId','snapshotOf','isCurrent'].includes(k))||isCurrent!==undefined&&typeof isCurrent!=='function')throw Error('기록 추가 정보 형식 오류');const {finalState:final=null,sourceRunId=null,snapshotOf=null}=clone({...(extras??{}),isCurrent:undefined});doc=clone(doc);request=clone(request);response=clone(response);await ready;if(!request?.harness)throw Error('현재 harness 요청을 먼저 저장하거나 실행하세요.');const harness=H.validate(request.harness,role),harnessHash=await H.hash(harness);
       // A CLI selection derived from a registered version is registered as its own version on first record; stored versions are never edited.
