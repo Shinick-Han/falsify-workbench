@@ -341,8 +341,9 @@ export class PdfEngine {
   static localFonts = new Map();
   static fallbackFonts = new Map();
 
-  constructor(module) {
+  constructor(module, fontSnapshot = null) {
     this.M = module;
+    this.fontSnapshot = fontSnapshot;
     this.doc = 0;
     this.page = 0;
     this.session = 0;
@@ -383,6 +384,39 @@ export class PdfEngine {
         fam = fam.replace(/ (serif|mono)$/, '');
         const want = [];
         for (let i = 0; i < n; i++) want.push(M.HEAPU32[(cps >> 2) + i]);
+        if (this.fontSnapshot) {
+          const key = s => {
+            let name = String(s || '').replace(/^[A-Z]{6}\+/, '');
+            name = name.replace(/^(TimesNewRomanPS|Arial)-(BoldItalic|BoldOblique|Bold|Italic|Oblique)MT$/i, (_, family, variant) => `${/^arial$/i.test(family) ? 'Arial' : 'TimesNewRoman'}-${variant}`);
+            name = name.replace(/[-,](?:bolditalic|boldoblique|bold|italic|oblique|regular|roman)$/i, '').toLowerCase().replace(/[\s_-]+/g, '');
+            return ({timesnewromanpsmt: 'timesnewroman', arialmt: 'arial'})[name] || name;
+          };
+          const target = key(fam);
+          const faces = this.fontSnapshot.fonts;
+          const matches = f => target && (key(f.family) === target || key(f.postscriptName) === target);
+          const rank = f => (f.italic === !!italic ? 0 : 2000) + Math.abs(f.weight - (bold ? 700 : 400));
+          const covering = f => f.bytes.length && (!want.length || sfntCovers(f.bytes, want));
+          // Prefer an exact family/style even if another style occurs earlier.
+          const same = faces.filter(matches).sort((a, b) => rank(a) - rank(b));
+          const bestRank = same.length ? rank(same[0]) : Infinity;
+          let face = same.find(f => rank(f) === bestRank && covering(f));
+          // A different face is an explicit fallback, never a family alias.
+          if (!face) face = faces.filter(f => !matches(f) && covering(f)).sort((a, b) => rank(a) - rank(b))[0];
+          if (!face) return 0;
+          const selection = {requestedFamily: fam, bold: !!bold, italic: !!italic,
+            family: face.family, postscriptName: face.postscriptName || null,
+            weight: face.weight, faceItalic: face.italic, source: face.source,
+            sha256: face.sha256, fallback: !matches(face),
+            styleSubstitution: (face.weight >= 600) !== !!bold || face.italic !== !!italic};
+          if (!this.fontSnapshot.selections.some(s => JSON.stringify(s) === JSON.stringify(selection)))
+            this.fontSnapshot.selections.push(selection);
+          const buf = M._ec_buffer_alloc(face.bytes.length);
+          if (!buf) return 0;
+          M.HEAPU8.set(face.bytes, buf);
+          M.HEAPU32[outData >> 2] = buf;
+          M.HEAPU32[outSize >> 2] = face.bytes.length;
+          return 1;
+        }
         const styleKey = (bold ? 1 : 0) + '' + (italic ? 1 : 0);
         const sk = '|' + styleKey;
         const names = [fam, ...scriptFallbackFamilies(want)];

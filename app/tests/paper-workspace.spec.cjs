@@ -129,7 +129,7 @@ function mount(opts={}){
   const sourceBlobs=opts.sourceBlobs||blobMemory();
   const clock={value:opts.clock??1_700_000_000_000};
   const ws=api.create({document:w.document,preview:opts.preview===false?undefined:{pdfParams:Preview.pdfParams,fitScale:Preview.fitScale,defaultImport:async()=>lib},
-    edits:edits||undefined,exporter:exporter||undefined,paragraphPdf:opts.paragraphPdf,tablePdf:opts.tablePdf,pipeline:opts.pipeline,storage,sourceBlobs,urls:{createObjectURL(file){downloads.push(file);return 'blob:'+downloads.length;},revokeObjectURL(){}},
+    edits:edits||undefined,fonts:opts.fonts,exporter:exporter||undefined,paragraphPdf:opts.paragraphPdf,tablePdf:opts.tablePdf,pipeline:opts.pipeline,storage,sourceBlobs,urls:{createObjectURL(file){downloads.push(file);return 'blob:'+downloads.length;},revokeObjectURL(){}},
     timers,subtle:opts.subtle||crypto.subtle,now:()=>clock.value});
   const file=f=>{w.get('paper-file').files=[f];w.get('paper-file').dispatchEvent(new Event('change'));};
   const canvas=()=>w.get('paper-before-stage').children.flatMap(page=>(page.children||[]).filter(c=>c.tagName==='canvas'));
@@ -1127,6 +1127,35 @@ test('paragraph preparation is reused for the same original page and reset for a
   v.file(pdfFile(pdfBytes('MARKER-B')));await until(()=>calls.length===2&&/문단을 클릭/.test(v.get('paper-before-status').textContent),'new original inspected');
   assert.notEqual(calls[0].fileHash,calls[1].fileHash);
   assert.equal(v.ws.getEditSnapshot().edits.length,0);
+});
+
+test('a font requiring complete embedding uses the full-font writer',async()=>{
+  let paragraphCalls=0;const selected=[],bytes=pdfBytes('FULL-FONT');
+  const fonts={revision:0,list:()=>[],resolve:async()=>({revision:0,digest:'full-font',fonts:[{fsType:256,bytes:new Uint8Array([1])}]})};
+  const adapter=paragraphMock('Original paragraph.',{prepare:async()=>{paragraphCalls++;throw new Error('wrong writer');}});
+  const v=mount({fonts,paragraphPdf:adapter,exporter:{prepare:async r=>{selected.push(r);return {file:pdfFile(bytes),sha256:sha(bytes),verification:{status:'applied'}};}}});
+  v.file(pdfFile(pdfBytes('MARKER-A')));await until(()=>/문단을 클릭/.test(v.get('paper-before-status').textContent),'full-font source');
+  clickParagraph(v);v.get('paper-inline-after').value='Edited paragraph.';v.get('paper-inline-apply').click();
+  v.get('paper-generate').click();await until(()=>v.ws.getOutput()&&!v.get('paper-generate').disabled,'full-font output');
+  assert.equal(paragraphCalls,0);assert.equal(selected.length,1);assert.equal(selected[0].fontSnapshot.fonts[0].fsType,256);
+});
+
+test('font buttons pass a frozen font snapshot to PDF generation and mark the previous file stale',async()=>{
+  let revision=0,localCalls=0;const requests=[],bytes=pdfBytes('FONT-GENERATED');
+  const fonts={get revision(){return revision;},list:()=>[{family:'Example',source:'local'}],requestLocalFonts:async()=>{localCalls++;revision++;},resolve:async requirements=>{assert.ok(requirements.length);return {revision,digest:'fonts-'+revision,fonts:[{id:'private-font',bytes:new Uint8Array([4,5,6])}]};}};
+  const adapter=paragraphMock('Original paragraph.',{prepare:async r=>{requests.push(r);return {file:pdfFile(bytes),sha256:sha(bytes),verification:{status:'applied'}};}});
+  const v=mount({fonts,paragraphPdf:adapter});v.file(pdfFile(pdfBytes('MARKER-A')));
+  await until(()=>/문단을 클릭/.test(v.get('paper-before-status').textContent),'font source');
+  clickParagraph(v);v.get('paper-inline-after').value='Edited paragraph.';v.get('paper-inline-apply').click();
+  v.get('paper-generate').click();await until(()=>v.ws.getOutput()&&!v.get('paper-generate').disabled,'font generated');
+  assert.equal(requests.length,1);assert.ok(requests[0].fontSnapshot.fonts[0].bytes instanceof Uint8Array);
+  assert.doesNotMatch(JSON.stringify(v.ws.getOutput()),/private-font/);
+  v.get('paper-font-local').click();assert.equal(localCalls,1,'local access starts inside click');
+  await until(()=>/사용 가능/.test(v.get('paper-font-status').textContent),'local fonts');
+  assert.equal(v.get('paper-current-download').textContent,'마지막 생성본 다운로드');
+  assert.match(v.get('paper-generate-status').textContent,/글꼴이 바뀌었습니다/);
+  v.get('paper-generate').click();await until(()=>requests.length===2&&!v.get('paper-generate').disabled,'regenerated fonts');
+  assert.equal(requests[1].fontSnapshot.digest,'fonts-1');assert.equal(v.get('paper-current-download').textContent,'현재 생성본 다운로드');
 });
 
 (async()=>{let passed=0;for(const [name,fn] of tests){try{await fn();passed++;console.log('PASS '+name);}catch(e){console.error('FAIL '+name+'\n'+(e.stack||e));process.exitCode=1;}}

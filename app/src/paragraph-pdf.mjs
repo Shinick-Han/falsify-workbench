@@ -4,6 +4,7 @@ import {canonicalParagraphText, editPdf} from './paragraph-vendor/editor.mjs';
 import {loadRuntime, RUNTIME} from './paragraph-pdf-runtime.mjs';
 import {hex} from './paragraph-pdf-crypto.mjs';
 import {createAnnotationTransport} from './document-flow-annotations.mjs';
+import {parseFont} from './browser-fonts.mjs';
 
 export const COORDINATE_SPACE = 'top-left-page';
 export const LIMITS = Object.freeze({maxFileBytes: 25 * 1024 * 1024});
@@ -27,11 +28,37 @@ async function source(request) {
   if (request.fileHash && request.fileHash.toLowerCase() !== hash) throw new ParagraphPdfError('stale-source', 'Source PDF differs from the inspected file.', {sourceSha256: hash});
   return {bytes, hash};
 }
+// Capture before the first await, so every engine in this request sees the same bytes.
+function captureFonts(snapshot) {
+  if (snapshot == null) return null;
+  const invalid = () => { throw new ParagraphPdfError('invalid-font-snapshot', 'Font snapshot failed validation.'); };
+  if (!Number.isSafeInteger(snapshot.revision) || snapshot.revision < 0 || !Array.isArray(snapshot.fonts) || typeof snapshot.digest !== 'string') invalid();
+  const metadata = [];
+  const fonts = snapshot.fonts.map(face => {
+    if (!face || !(face.bytes instanceof Uint8Array) || !face.bytes.length || typeof face.id !== 'string' || !['local', 'file', 'bundled'].includes(face.source)) invalid();
+    const bytes = face.bytes.slice();
+    if (hex(bytes) !== face.sha256) invalid();
+    let parsed;
+    try { parsed = parseFont(bytes); } catch { invalid(); }
+    // PDFium may rewrite/subset the supplied program; do not use a face that
+    // requires complete embedding until the engine can guarantee that contract.
+    if (parsed.fsType & 0x100) throw new ParagraphPdfError('unsupported-font-license', 'Paragraph editing cannot guarantee full embedding for this font.');
+    for (const field of ['family', 'postscriptName', 'weight', 'italic', 'fsType']) {
+      if (face[field] !== parsed[field]) invalid();
+    }
+    const {bytes: ignored, ...descriptor} = face;
+    metadata.push(descriptor);
+    return {...descriptor, bytes};
+  });
+  if (hex(new TextEncoder().encode(JSON.stringify(metadata))) !== snapshot.digest) invalid();
+  return {revision: snapshot.revision, digest: snapshot.digest, fonts, selections: []};
+}
 export async function inspectPage(request = {}) {
+  const fontSnapshot = captureFonts(request.fontSnapshot);
   const {bytes, hash} = await source(request);
   const {engineFactory} = await loadRuntime();
   checkAbort(request.signal);
-  const engine = await engineFactory(bytes);
+  const engine = await engineFactory(bytes, fontSnapshot);
   try {
     const pageIndex = request.pageIndex;
     if (!Number.isInteger(pageIndex) || pageIndex < 0 || pageIndex >= engine.pageCount) throw new ParagraphPdfError('invalid-page', 'Page index is outside the document.');
@@ -178,6 +205,7 @@ async function reconcileEdits(bytes, edits, engineFactory, signal) {
 }
 
 export async function prepare(request = {}) {
+  const fontSnapshot = captureFonts(request.fontSnapshot);
   let requestedEdits = request.edits;
   let fileHash = request.fileHash || '';
   if (requestedEdits && !Array.isArray(requestedEdits)) {
@@ -195,7 +223,8 @@ export async function prepare(request = {}) {
   const enabled = requestedEdits.filter(edit => edit?.enabled !== false);
   if (!enabled?.length) throw new ParagraphPdfError('no-edits', 'At least one enabled edit is required.');
   const edits = enabled.map((e, index) => ({id: e?.id || `edit-${index}`, pageIndex: e?.pageIndex, before: e?.before, after: e?.after}));
-  const {engineFactory, info} = await loadRuntime();
+  const {engineFactory: createEngine, info} = await loadRuntime();
+  const engineFactory = bytes => createEngine(bytes, fontSnapshot);
   checkAbort(request.signal);
   // Matching remains exact and all-or-nothing. Duplicate Before text is an
   // explicit AMBIGUOUS_MATCH; selection metadata never silently relocates it.
@@ -209,7 +238,8 @@ export async function prepare(request = {}) {
   const status = report.ok === true && report.selfCheck?.status === 'passed' ? (warnings.some(w => w.severity === 'warning') ? 'warning' : 'applied') : 'failed';
   const verification = {
     schema: 'falsify.paragraph-pdf.v1', engine: RUNTIME.engine, license: RUNTIME.license,
-    sourceSha256: hash, outputSha256: sha256, status, layoutVerified: false, independent: false,
+    sourceSha256: hash, outputSha256: sha256, fontSnapshotDigest: fontSnapshot?.digest ?? null,
+    fontSelections: fontSnapshot?.selections ?? [], status, layoutVerified: false, independent: false,
     coordinateSpace: COORDINATE_SPACE, pageCount: report.pagination.pages,
     edits: report.edits, checks: (report.selfCheck?.failures || []).map(item => ({...item, status: 'failed'})), warnings, runtime: info,
     quality: {independent: false, method: 'PDFium saved-file self-check', limitations: 'Same-engine structural checks; independent typography and visual QA are required.'},

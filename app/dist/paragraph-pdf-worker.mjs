@@ -2249,9 +2249,9 @@ function cloneUnderline(engine, source2, dx, dy) {
     if (!M._FPDFPath_SetDrawMode(h, source2.fillMode, source2.stroke) || !M._FPDFPageObj_SetMatrix(h, p)) fail2("document_flow_underline_clone_failed");
     if (!underlineEqual(snapshotTinyUnderline(engine, h), source2, dx, dy)) fail2("document_flow_underline_clone_mismatch");
     return h >>> 0;
-  } catch (error) {
+  } catch (error2) {
     M._FPDFPageObj_Destroy(h);
-    throw error;
+    throw error2;
   } finally {
     M._free(p);
   }
@@ -3108,8 +3108,8 @@ function inspectDocumentGroups(src, out, map, groups, byPage, failures, warnings
       const moves = deriveNativeLinkMoves(src, derived, glyphs, edits, annotationModel, expectedPageText, nativeFitRTargetPages(annotationModel, ids));
       annotationMoves.push(...moves);
       verifySavedUnderlines(out, derived, oo, moves);
-    } catch (error) {
-      failures.push({ code: error?.code ?? "document_flow_link_mapping_failed", pageIndex: ids[0] });
+    } catch (error2) {
+      failures.push({ code: error2?.code ?? "document_flow_link_mapping_failed", pageIndex: ids[0] });
     }
     const source2 = ss.map((b) => readGlyphs(src, b.sourcePageIndex)), output = oo.map((b) => readGlyphs(out, b.outputPageIndex));
     const expected = [];
@@ -4010,8 +4010,9 @@ var PAGE_CACHE_MAX = 6;
 var PdfEngine = class _PdfEngine {
   static localFonts = /* @__PURE__ */ new Map();
   static fallbackFonts = /* @__PURE__ */ new Map();
-  constructor(module) {
+  constructor(module, fontSnapshot = null) {
     this.M = module;
+    this.fontSnapshot = fontSnapshot;
     this.doc = 0;
     this.page = 0;
     this.session = 0;
@@ -4047,6 +4048,45 @@ var PdfEngine = class _PdfEngine {
         fam = fam.replace(/ (serif|mono)$/, "");
         const want = [];
         for (let i = 0; i < n; i++) want.push(M.HEAPU32[(cps >> 2) + i]);
+        if (this.fontSnapshot) {
+          const key2 = (s) => {
+            let name = String(s || "").replace(/^[A-Z]{6}\+/, "");
+            name = name.replace(/^(TimesNewRomanPS|Arial)-(BoldItalic|BoldOblique|Bold|Italic|Oblique)MT$/i, (_, family, variant) => `${/^arial$/i.test(family) ? "Arial" : "TimesNewRoman"}-${variant}`);
+            name = name.replace(/[-,](?:bolditalic|boldoblique|bold|italic|oblique|regular|roman)$/i, "").toLowerCase().replace(/[\s_-]+/g, "");
+            return { timesnewromanpsmt: "timesnewroman", arialmt: "arial" }[name] || name;
+          };
+          const target = key2(fam);
+          const faces = this.fontSnapshot.fonts;
+          const matches = (f) => target && (key2(f.family) === target || key2(f.postscriptName) === target);
+          const rank = (f) => (f.italic === !!italic ? 0 : 2e3) + Math.abs(f.weight - (bold ? 700 : 400));
+          const covering = (f) => f.bytes.length && (!want.length || sfntCovers(f.bytes, want));
+          const same = faces.filter(matches).sort((a, b) => rank(a) - rank(b));
+          const bestRank = same.length ? rank(same[0]) : Infinity;
+          let face = same.find((f) => rank(f) === bestRank && covering(f));
+          if (!face) face = faces.filter((f) => !matches(f) && covering(f)).sort((a, b) => rank(a) - rank(b))[0];
+          if (!face) return 0;
+          const selection = {
+            requestedFamily: fam,
+            bold: !!bold,
+            italic: !!italic,
+            family: face.family,
+            postscriptName: face.postscriptName || null,
+            weight: face.weight,
+            faceItalic: face.italic,
+            source: face.source,
+            sha256: face.sha256,
+            fallback: !matches(face),
+            styleSubstitution: face.weight >= 600 !== !!bold || face.italic !== !!italic
+          };
+          if (!this.fontSnapshot.selections.some((s) => JSON.stringify(s) === JSON.stringify(selection)))
+            this.fontSnapshot.selections.push(selection);
+          const buf2 = M._ec_buffer_alloc(face.bytes.length);
+          if (!buf2) return 0;
+          M.HEAPU8.set(face.bytes, buf2);
+          M.HEAPU32[outData >> 2] = buf2;
+          M.HEAPU32[outSize >> 2] = face.bytes.length;
+          return 1;
+        }
         const styleKey = (bold ? 1 : 0) + "" + (italic ? 1 : 0);
         const sk = "|" + styleKey;
         const names = [fam, ...scriptFallbackFamilies(want)];
@@ -5584,9 +5624,9 @@ var RUNTIME = Object.freeze({
 });
 var runtime;
 async function loadRuntime() {
-  if (!runtime) runtime = initialize().catch((error) => {
+  if (!runtime) runtime = initialize().catch((error2) => {
     runtime = null;
-    throw error;
+    throw error2;
   });
   return runtime;
 }
@@ -5609,7 +5649,7 @@ async function initialize() {
     /* @vite-ignore */
     asset("editcore.js").href
   );
-  const engineFactory = async (bytes2) => {
+  const engineFactory = async (bytes2, fontSnapshot = null) => {
     const M = await createModule({ wasmBinary: wasm, print() {
     }, printErr() {
     } });
@@ -5618,12 +5658,12 @@ async function initialize() {
     M.HEAPU32[cfg >> 2] = 2;
     M._FPDF_InitLibraryWithConfig(cfg);
     M._free(cfg);
-    const engine = new PdfEngine(M);
+    const engine = new PdfEngine(M, fontSnapshot);
     try {
       if (bytes2) engine.open(new Uint8Array(bytes2));
-    } catch (error) {
+    } catch (error2) {
       engine.close();
-      throw error;
+      throw error2;
     }
     return engine;
   };
@@ -5749,9 +5789,9 @@ async function compactDocumentFlow(engineFactory, sourceBytes, intermediatePdf, 
         plan.underlines = matchStagedUnderlines(bands, parts, stagedMoves);
         plans.push(plan);
         start = end;
-      } catch (error) {
-        if (policy !== "compatible-groups") throw error;
-        warnings.push({ code: "document_flow_barrier_not_compacted", severity: "warning", pageIndex: start, reason: error?.code || "document_flow_failed" });
+      } catch (error2) {
+        if (policy !== "compatible-groups") throw error2;
+        warnings.push({ code: "document_flow_barrier_not_compacted", severity: "warning", pageIndex: start, reason: error2?.code || "document_flow_failed" });
       }
     }
     const allSourcePages = plans.flatMap((p) => p.bands.map((b) => b.sourcePageIndex));
@@ -7399,9 +7439,9 @@ function context(mupdf, source2) {
   try {
     doc = new mupdf.PDFDocument(source2);
     if (doc.needsPassword() || doc.countPages() < 1 || doc.countPages() > ANNOTATION_LIMITS.pages) fail5("annotation-document-unsupported");
-  } catch (error) {
+  } catch (error2) {
     doc?.destroy();
-    if (error?.code) throw error;
+    if (error2?.code) throw error2;
     fail5("annotation-document-invalid");
   }
   const arena = [];
@@ -7698,9 +7738,9 @@ async function inspect({ mupdf, sourceBytes, sourceSha256 } = {}) {
         descriptor.destination = resolved.destination;
         descriptor.internalDestinationSourcePageIndices = resolved.targets;
         descriptor.internalDestinations = resolved.destinations;
-      } catch (error) {
+      } catch (error2) {
         descriptor.eligible = false;
-        descriptor.reason = error?.code || "annotation-object-invalid";
+        descriptor.reason = error2?.code || "annotation-object-invalid";
       }
       if (!descriptor.destination) {
         const hasTarget = !c.get(annotation, "Dest").isNull() || !c.get(annotation, "A").isNull();
@@ -7737,8 +7777,8 @@ async function inspect({ mupdf, sourceBytes, sourceSha256 } = {}) {
       }
     }) });
     return model;
-  } catch (error) {
-    if (error instanceof AnnotationTransportError) throw error;
+  } catch (error2) {
+    if (error2 instanceof AnnotationTransportError) throw error2;
     fail5("annotation-inspection-failed");
   } finally {
     c.close();
@@ -7810,9 +7850,9 @@ async function bound({ model, sourceBytes, outputBytes, sourcePageMap, moves = [
     if (reflowedSourcePages.length && unsupportedDocumentActions(c, pages)) fail5("annotation-action-root-unsupported");
     for (const [s, o] of map) if (state.pageGeometry[s] && !numbers(state.pageGeometry[s], geometry(c, pages[o]))) fail5("annotation-page-identity-invalid");
     return { c, state, map, refs, pages, plan };
-  } catch (error) {
+  } catch (error2) {
     c.close();
-    throw error;
+    throw error2;
   }
 }
 async function verifyDocument(ctx, expected, after = false) {
@@ -7925,8 +7965,8 @@ async function transport(request = {}) {
     const result = await validate({ ...request, outputBytes: pdf });
     if (!result.ok) fail5(result.code);
     return { pdf, report: { check: "passed", moved: (request.moves || []).length, checkedAnnotations: ctx.state.records.length, warnings: sourceWarnings(ctx.state.records) } };
-  } catch (error) {
-    if (error instanceof AnnotationTransportError) throw error;
+  } catch (error2) {
+    if (error2 instanceof AnnotationTransportError) throw error2;
     fail5("annotation-transport-failed");
   } finally {
     ctx.c.close();
@@ -7938,14 +7978,71 @@ async function validate(request = {}) {
     ctx = await bound(request);
     await verifyDocument(ctx, ctx.plan.expected, true);
     return { ok: true, checkedAnnotations: ctx.state.records.length, moved: (request.moves || []).length, warnings: sourceWarnings(ctx.state.records) };
-  } catch (error) {
-    return { ok: false, code: error instanceof AnnotationTransportError ? error.code : "annotation-validation-failed" };
+  } catch (error2) {
+    return { ok: false, code: error2 instanceof AnnotationTransportError ? error2.code : "annotation-validation-failed" };
   } finally {
     ctx?.c.close();
   }
 }
 function createAnnotationTransport({ mupdf } = {}) {
   return Object.freeze({ inspect: (request) => inspect({ ...request, mupdf }), transport, validate });
+}
+
+// app/src/browser-fonts.mjs
+var error = (message) => new Error(message);
+function parseFont(bytes2) {
+  const bad = () => {
+    throw error("\uC62C\uBC14\uB978 TTF \uB610\uB294 OTF \uAE00\uAF34 \uD30C\uC77C\uC744 \uC120\uD0DD\uD574 \uC8FC\uC138\uC694.");
+  };
+  if (!(bytes2 instanceof Uint8Array) || bytes2.length < 12) bad();
+  const view = new DataView(bytes2.buffer, bytes2.byteOffset, bytes2.byteLength);
+  const u16 = (o) => {
+    if (o < 0 || o + 2 > bytes2.length) bad();
+    return view.getUint16(o);
+  };
+  const u32 = (o) => {
+    if (o < 0 || o + 4 > bytes2.length) bad();
+    return view.getUint32(o);
+  };
+  const tag = (o) => String.fromCharCode(...bytes2.subarray(o, o + 4));
+  const sig = u32(0);
+  if (sig === 1953784678) throw error("\uAE00\uAF34 \uCEEC\uB809\uC158(TTC/OTC)\uC740 \uC9C0\uC6D0\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. \uB2E8\uC77C TTF \uB610\uB294 OTF\uB97C \uC120\uD0DD\uD574 \uC8FC\uC138\uC694.");
+  if (sig !== 65536 && sig !== 1330926671 && sig !== 1953658213) bad();
+  const count = u16(4), tables = /* @__PURE__ */ new Map();
+  if (!count || 12 + count * 16 > bytes2.length) bad();
+  for (let i = 0; i < count; i++) {
+    const p = 12 + i * 16, name = tag(p), offset = u32(p + 8), length = u32(p + 12);
+    if (offset > bytes2.length || length > bytes2.length - offset || tables.has(name)) bad();
+    tables.set(name, { offset, length });
+  }
+  if (tables.has("fvar")) throw error("\uAC00\uBCC0 \uAE00\uAF34\uC740 \uC9C0\uC6D0\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. \uACE0\uC815 \uAD75\uAE30\uC758 TTF \uB610\uB294 OTF\uB97C \uC120\uD0DD\uD574 \uC8FC\uC138\uC694.");
+  const names = tables.get("name"), os2 = tables.get("OS/2"), head = tables.get("head");
+  if (!names || names.length < 6 || !os2 || os2.length < 64 || !head || head.length < 46) bad();
+  const n = names.offset, entries2 = u16(n + 2), strings = n + u16(n + 4), end = n + names.length;
+  if (n + 6 + entries2 * 12 > end || strings > end) bad();
+  const values = /* @__PURE__ */ new Map();
+  for (let i = 0; i < entries2; i++) {
+    const p = n + 6 + i * 12, platform = u16(p), encoding = u16(p + 2), language = u16(p + 4), id = u16(p + 6), length = u16(p + 8), start = strings + u16(p + 10);
+    if (start > end || length > end - start) bad();
+    if (![1, 2, 6, 16, 17].includes(id)) continue;
+    let text;
+    if (platform === 0 || platform === 3) {
+      if (length % 2) bad();
+      text = "";
+      for (let j = 0; j < length; j += 2) text += String.fromCharCode(u16(start + j));
+    } else if (platform === 1 && encoding === 0) text = String.fromCharCode(...bytes2.subarray(start, start + length));
+    else continue;
+    text = text.replace(/\0/g, "").trim();
+    const score = (platform === 3 ? 4 : platform === 0 ? 3 : 1) + (language === 1033 ? 2 : 0);
+    if (text && (!values.has(id) || values.get(id).score < score)) values.set(id, { text, score });
+  }
+  const get = (id) => values.get(id)?.text;
+  const family = get(16) || get(1), postscriptName = get(6);
+  if (!family) bad();
+  const weight = u16(os2.offset + 4), fsType = u16(os2.offset + 8), selection = u16(os2.offset + 62), macStyle = u16(head.offset + 44);
+  if (weight < 1 || weight > 1e3) bad();
+  if (fsType & 512 || fsType & 2 && !(fsType & 12)) throw error("\uC774 \uAE00\uAF34\uC740 \uC784\uBCA0\uB529 \uC81C\uD55C \uB610\uB294 \uBE44\uD2B8\uB9F5 \uC804\uC6A9 \uC81C\uD55C\uC774 \uC788\uC5B4 PDF\uC5D0 \uC0AC\uC6A9\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. \uB2E4\uB978 \uAE00\uAF34\uC744 \uC120\uD0DD\uD574 \uC8FC\uC138\uC694.");
+  return { family, ...postscriptName ? { postscriptName } : {}, weight, italic: Boolean(selection & 1 || macStyle & 2), fsType };
 }
 
 // app/src/paragraph-pdf.mjs
@@ -7974,11 +8071,40 @@ async function source(request) {
   if (request.fileHash && request.fileHash.toLowerCase() !== hash) throw new ParagraphPdfError("stale-source", "Source PDF differs from the inspected file.", { sourceSha256: hash });
   return { bytes: bytes2, hash };
 }
+function captureFonts(snapshot) {
+  if (snapshot == null) return null;
+  const invalid = () => {
+    throw new ParagraphPdfError("invalid-font-snapshot", "Font snapshot failed validation.");
+  };
+  if (!Number.isSafeInteger(snapshot.revision) || snapshot.revision < 0 || !Array.isArray(snapshot.fonts) || typeof snapshot.digest !== "string") invalid();
+  const metadata = [];
+  const fonts = snapshot.fonts.map((face) => {
+    if (!face || !(face.bytes instanceof Uint8Array) || !face.bytes.length || typeof face.id !== "string" || !["local", "file", "bundled"].includes(face.source)) invalid();
+    const bytes2 = face.bytes.slice();
+    if (hex(bytes2) !== face.sha256) invalid();
+    let parsed;
+    try {
+      parsed = parseFont(bytes2);
+    } catch {
+      invalid();
+    }
+    if (parsed.fsType & 256) throw new ParagraphPdfError("unsupported-font-license", "Paragraph editing cannot guarantee full embedding for this font.");
+    for (const field of ["family", "postscriptName", "weight", "italic", "fsType"]) {
+      if (face[field] !== parsed[field]) invalid();
+    }
+    const { bytes: ignored, ...descriptor } = face;
+    metadata.push(descriptor);
+    return { ...descriptor, bytes: bytes2 };
+  });
+  if (hex(new TextEncoder().encode(JSON.stringify(metadata))) !== snapshot.digest) invalid();
+  return { revision: snapshot.revision, digest: snapshot.digest, fonts, selections: [] };
+}
 async function inspectPage(request = {}) {
+  const fontSnapshot = captureFonts(request.fontSnapshot);
   const { bytes: bytes2, hash } = await source(request);
   const { engineFactory } = await loadRuntime();
   checkAbort(request.signal);
-  const engine = await engineFactory(bytes2);
+  const engine = await engineFactory(bytes2, fontSnapshot);
   try {
     const pageIndex = request.pageIndex;
     if (!Number.isInteger(pageIndex) || pageIndex < 0 || pageIndex >= engine.pageCount) throw new ParagraphPdfError("invalid-page", "Page index is outside the document.");
@@ -8133,6 +8259,7 @@ async function reconcileEdits(bytes2, edits, engineFactory, signal) {
   return { edits: output, diagnostics };
 }
 async function prepare(request = {}) {
+  const fontSnapshot = captureFonts(request.fontSnapshot);
   let requestedEdits = request.edits;
   let fileHash = request.fileHash || "";
   if (requestedEdits && !Array.isArray(requestedEdits)) {
@@ -8150,7 +8277,8 @@ async function prepare(request = {}) {
   const enabled = requestedEdits.filter((edit) => edit?.enabled !== false);
   if (!enabled?.length) throw new ParagraphPdfError("no-edits", "At least one enabled edit is required.");
   const edits = enabled.map((e, index) => ({ id: e?.id || `edit-${index}`, pageIndex: e?.pageIndex, before: e?.before, after: e?.after }));
-  const { engineFactory, info } = await loadRuntime();
+  const { engineFactory: createEngine, info } = await loadRuntime();
+  const engineFactory = (bytes3) => createEngine(bytes3, fontSnapshot);
   checkAbort(request.signal);
   const reconciled = await reconcileEdits(bytes2, edits, engineFactory, request.signal);
   const { pdf, report } = await editPdf({ sourceBytes: bytes2, edits: reconciled.edits, reflow: true }, {
@@ -8174,6 +8302,8 @@ async function prepare(request = {}) {
     license: RUNTIME.license,
     sourceSha256: hash,
     outputSha256: sha2562,
+    fontSnapshotDigest: fontSnapshot?.digest ?? null,
+    fontSelections: fontSnapshot?.selections ?? [],
     status,
     layoutVerified: false,
     independent: false,
@@ -8207,7 +8337,7 @@ self.onmessage = async ({ data }) => {
       const output = await result.file.arrayBuffer();
       self.postMessage({ id, ok: true, result: { ...result, file: void 0 }, name: result.file.name, bytes: output }, [output]);
     } else self.postMessage({ id, ok: true, result });
-  } catch (error) {
-    self.postMessage({ id, ok: false, error: { message: error.message, code: error.code || "engine", details: error.details || {}, report: error.report } });
+  } catch (error2) {
+    self.postMessage({ id, ok: false, error: { message: error2.message, code: error2.code || "engine", details: error2.details || {}, report: error2.report } });
   }
 };

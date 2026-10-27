@@ -423,6 +423,7 @@
       inline:need('paper-inline'),inlineMeta:need('paper-inline-meta'),inlineBefore:need('paper-inline-before'),inlineAfter:need('paper-inline-after'),
       inlineApply:need('paper-inline-apply'),inlineCancel:need('paper-inline-cancel'),
       coreNote:need('paper-core-note'),editStatus:need('paper-edit-status'),undo:need('paper-undo'),redo:need('paper-redo'),edits:need('paper-edits'),
+      fontLocal:doc.querySelector('#paper-font-local'),fontAdd:doc.querySelector('#paper-font-add'),fontFiles:doc.querySelector('#paper-font-files'),fontStatus:doc.querySelector('#paper-font-status'),
       exportNote:need('paper-export-note'),generate:need('paper-generate'),genStatus:need('paper-generate-status'),hash:need('paper-output-hash'),
       current:need('paper-current-download'),team:need('paper-team-share'),blue:need('paper-blue-handoff'),
       draftOpt:need('paper-draft-opt'),draftSource:need('paper-draft-source'),draftSave:need('paper-draft-save'),draftRestore:need('paper-draft-restore'),draftDelete:need('paper-draft-delete'),draftStatus:need('paper-draft-status'),
@@ -434,11 +435,14 @@
     const editsApi=()=>deps.edits||globalThis.FalsifyPaperEdits||null;
     const tableApi=()=>deps.tablePdf||globalThis.FalsifyTablePdf||null;
     const paragraphApi=()=>deps.paragraphPdf||globalThis.FalsifyParagraphPdf||null;
+    const fontsApi=()=>deps.fonts||globalThis.FalsifyFonts||null;
     const legacyExporterApi=()=>deps.exporter||globalThis.FalsifyBrowserPdf||null;
     const pipelineApi=()=>deps.pipeline||globalThis.FalsifyPdfEditPipeline||null;
     const tableEdit=e=>String(e.segmentId||'').startsWith('table:');
+    const fullFontEmbedding=fonts=>fonts?.fonts?.some(f=>(f.fsType&0x100)!==0);
     function bodyExporter(edits){
       const flow=paragraphApi();
+      if(fontsApi()&&flow)return flow;
       if(edits.some(e=>String(e.segmentId||'').startsWith('paragraph:')))return flow;
       if(flow&&edits.some(e=>e.origin==='ai-proposal'||e.origin==='external-ai-import'))return flow;
       return legacyExporterApi()||flow;
@@ -471,6 +475,7 @@
       };
     }
     let epoch=0,source=null,session=null,unsub=null,snapshot=null,output=null,inline=null,pageText=null;
+    let fontRevision=0,fontBusy=false;
     let proposalQueue=null,accepted=new Set(),modelById=new Map(),draftRaw=null,pendingFocus=null,pendingResume=null;
     let editMode='text',tableCtl=null,tableSeq=0,tableBindings=new Map();
     let inspectCtl=null,resumeCtl=null,afterPart=0,afterSourcePage=0;
@@ -507,7 +512,52 @@
       if(tag==='input'||tag==='INPUT')return target.type!=='checkbox'&&target.type!=='button';
       return false;
     }
-    function stale(){return !!output&&(!snapshot||snapshot.revision!==output.revision);}
+    function stale(){return !!output&&(!snapshot||snapshot.revision!==output.revision||(output.fontRevision??0)!==fontRevision);}
+    function fontsChanged(){
+      fontRevision++;genId++;genCtl?.abort();generating=false;
+      renderChrome();
+      if(output)setGenStatus('글꼴이 바뀌었습니다. 미리보기를 다시 만드세요.');
+    }
+    async function importFonts(local){
+      const api=fontsApi();if(!api||fontBusy)return;
+      // Invoke local-font access directly in the user's click, before any await.
+      let pending;
+      try{pending=local?api.requestLocalFonts():api.addFiles(ui.fontFiles?.files||[]);}
+      catch(e){say(ui.fontStatus,safeMessage(e),true);return;}
+      fontBusy=true;renderChrome();say(ui.fontStatus,'글꼴 확인 중…');
+      const revision=api.revision;
+      try{
+        await pending;fontsChanged();
+        const count=api.list?.().length||0;
+        say(ui.fontStatus,count?count+'개 글꼴 사용 가능 · 원본과 같은 글꼴을 자동으로 찾습니다.':'글꼴 파일을 추가하세요.');
+      }catch(e){
+        if(api.revision!==revision)fontsChanged();
+        say(ui.fontStatus,safeMessage(e),true);
+      }finally{fontBusy=false;if(ui.fontFiles)ui.fontFiles.value='';renderChrome();}
+    }
+    async function resolveFonts(edits,signal){
+      const api=fontsApi();if(!api?.resolve)return undefined;
+      const requirements=[],current=source,file=current?.file;
+      for(const pageIndex of new Set(edits.map(e=>e.pageIndex))){
+        if(signal?.aborted)throw new Error('글꼴 적용을 취소했습니다.');
+        let found=current.paragraphPages.get(pageIndex);
+        if(!found&&paragraphApi()?.inspectPage){
+          found=await paragraphApi().inspectPage({file,fileHash:current.fileHash,pageIndex,signal});
+          if(source!==current||signal?.aborted)throw new Error('논문이 바뀌어 글꼴 적용을 취소했습니다.');
+          current.paragraphPages.set(pageIndex,found);
+        }
+        const text=edits.filter(e=>e.pageIndex===pageIndex).map(e=>e.after).join('\n');
+        const start=requirements.length;
+        for(const p of found?.paragraphs||[])for(const r of p.runs?.length?p.runs:[p]){
+          const family=r.fontName||p.fontName||'';
+          if(family)requirements.push({family,bold:/bold|semibold|demi|black/i.test(family),italic:/italic|oblique/i.test(family),text});
+        }
+        if(requirements.length===start)requirements.push({family:'Liberation Serif',text});
+      }
+      const result=await api.resolve(requirements);
+      if(source!==current||signal?.aborted)throw new Error('논문이 바뀌어 글꼴 적용을 취소했습니다.');
+      return result;
+    }
     function enabledEdits(){return (snapshot&&snapshot.edits||[]).filter(e=>e&&e.enabled!==false);}
     function draftKey(){return source&&source.fileHash?'falsify.paper-draft.v1.'+source.fileHash:null;}
 
@@ -542,10 +592,12 @@
     function renderChrome(){
       const pdf=!!(source&&source.pdf),ready=!!(source&&source.fileHash);
       ui.original.disabled=!source;
+      if(ui.fontLocal)ui.fontLocal.disabled=fontBusy||!fontsApi();
+      if(ui.fontAdd)ui.fontAdd.disabled=fontBusy||!fontsApi();
       ui.modeTable.disabled=!pdf||!ready||!source.doc||!tableApi();
       ui.coreNote.textContent=editsApi()?'':'편집 코어가 아직 없습니다. 쪽 보기와 원본 다운로드는 사용할 수 있지만 편집은 저장되지 않습니다.';
       ui.exportNote.textContent=!pdf&&source?'PDF가 아니라 브라우저에서 생성본을 만들지 않습니다.':exporterApi()?'':'브라우저 PDF 편집 모듈이 아직 없습니다. 생성본을 만들지 않으며, 성공으로 표시하지 않습니다.';
-      ui.generate.disabled=generating||!exporterApi()||!pdf||!enabledEdits().length;
+      ui.generate.disabled=generating||fontBusy||!exporterApi()||!pdf||!enabledEdits().length;
       ui.draftSave.disabled=!(ui.draftOpt.checked&&session&&ready);
       const hasDraft=!!draftRaw||readIndex().length>0;
       ui.draftRestore.hidden=!hasDraft;
@@ -1292,11 +1344,13 @@
         if(built.error)throw new Error(built.error);
         isolated.add({pageIndex:item.pageIndex,segmentId:item.segmentId,before:item.before,after:item.after,anchor:built.anchor,origin:'external-ai-import'});
       }
-      const batch=isolated.snapshot(), edits=batch.edits.filter(e=>e.enabled!==false), api=bodyExporter(edits);
+      const batch=isolated.snapshot(), edits=batch.edits.filter(e=>e.enabled!==false);let api=bodyExporter(edits);
       if(!api?.prepare)throw new Error('브라우저 PDF 편집 모듈이 없습니다.');
       const mine=++genId,ctl=new AbortController();genCtl=ctl;generating=true;renderChrome();
       try{
-        const prepared=await benchmarkSource({file,fileHash,edits:clone(edits),signal:ctl.signal});
+        const fontSnapshot=await resolveFonts(edits,ctl.signal);
+        if(fullFontEmbedding(fontSnapshot)&&legacyExporterApi()?.prepare)api=legacyExporterApi();
+        const prepared=await benchmarkSource({file,fileHash,edits:clone(edits),fontSnapshot,signal:ctl.signal});
         if(!live()||mine!==genId||ctl.signal.aborted)throw new Error('원본 또는 편집이 바뀌어 생성을 취소했습니다.');
         const result=bindBenchmarkResult(await api.prepare(prepared.request),prepared,fileHash);
         if(!live()||mine!==genId||ctl.signal.aborted)throw new Error('원본 또는 편집이 바뀌어 생성을 취소했습니다.');
@@ -1308,7 +1362,7 @@
       }finally{if(genCtl===ctl)genCtl=null;if(mine===genId&&epoch===epochAt){generating=false;renderChrome();}}
     }
     async function generate(){
-      const api=exporterApi();
+      let api=exporterApi();
       if(!api||typeof api.prepare!=='function'){setGenStatus('브라우저 PDF 편집 모듈이 없어 생성하지 않았습니다. 원본 다운로드는 사용할 수 있습니다.',true);return;}
       if(!source||!source.pdf||!source.fileHash){setGenStatus('PDF 원본이 없어 생성하지 않았습니다.',true);return;}
       const edits=enabledEdits();
@@ -1322,17 +1376,19 @@
         const exportEdits=JSON.parse(JSON.stringify(edits));
         const mixed=exportEdits.some(tableEdit)&&exportEdits.some(e=>!tableEdit(e));
         if(!mixed)for(const edit of exportEdits)if(tableEdit(edit)&&edit.anchor)delete edit.anchor.occurrence;
-        const prepared=await benchmarkSource({file,fileHash:hash,edits:exportEdits,signal:ctl.signal}),request=prepared.request;
+        const fontSnapshot=await resolveFonts(exportEdits,ctl.signal);
+        if(!mixed&&fullFontEmbedding(fontSnapshot)&&legacyExporterApi()?.prepare)api=legacyExporterApi();
+        const prepared=await benchmarkSource({file,fileHash:hash,edits:exportEdits,fontSnapshot,signal:ctl.signal}),request=prepared.request;
         if(mine!==genId||epoch!==epochAt||ctl.signal.aborted)return;
         let result;
         try{
           if(mixed){
-            const bodyApi=bodyExporter(edits.filter(e=>!tableEdit(e)));
+            const bodyApi=fullFontEmbedding(fontSnapshot)&&legacyExporterApi()?.prepare?legacyExporterApi():bodyExporter(edits.filter(e=>!tableEdit(e)));
             const bodyAdapter={prepare:async bodyRequest=>{
               try{return await bodyApi.prepare(bodyRequest);}
               catch(e){
                 const rows=Array.isArray(bodyRequest.edits)?bodyRequest.edits:bodyRequest.edits?.edits,failures=e?.details?.edits;
-                const canFlow=bodyApi===legacyExporterApi()&&paragraphApi()&&Array.isArray(rows)&&!rows.some(tableEdit)&&e.code==='unsupported'&&Array.isArray(failures)&&failures.length&&failures.every(f=>f.code==='long-after-no-room');
+                const canFlow=!fullFontEmbedding(fontSnapshot)&&bodyApi===legacyExporterApi()&&paragraphApi()&&Array.isArray(rows)&&!rows.some(tableEdit)&&e.code==='unsupported'&&Array.isArray(failures)&&failures.length&&failures.every(f=>f.code==='long-after-no-room');
                 if(!canFlow||ctl.signal?.aborted||mine!==genId||epoch!==epochAt||!source||source.fileHash!==hash||snapshot?.revision!==revision)throw e;
                 setGenStatus('표 편집을 유지한 파일에서 본문만 문단 흐름으로 생성하는 중입니다.');
                 return paragraphApi().prepare(bodyRequest);
@@ -1343,7 +1399,7 @@
         }
         catch(e){
           const failures=e&&e.details&&e.details.edits;
-          const canFlow=!edits.some(e=>String(e.segmentId||'').startsWith('table:'))&&api===legacyExporterApi()&&paragraphApi()&&e.code==='unsupported'&&Array.isArray(failures)&&failures.length&&failures.every(f=>f.code==='long-after-no-room');
+          const canFlow=!fullFontEmbedding(request.fontSnapshot)&&!edits.some(e=>String(e.segmentId||'').startsWith('table:'))&&api===legacyExporterApi()&&paragraphApi()&&e.code==='unsupported'&&Array.isArray(failures)&&failures.length&&failures.every(f=>f.code==='long-after-no-room');
           if(!canFlow||ctl.signal?.aborted||mine!==genId||epoch!==epochAt||!source||source.fileHash!==hash||snapshot?.revision!==revision)throw e;
           setGenStatus('선택 편집이 원래 공간에 들어가지 않아 전체 편집을 문단 흐름으로 생성하는 중입니다.');
           result=await paragraphApi().prepare({...request,edits:JSON.parse(JSON.stringify(edits))});
@@ -1357,7 +1413,7 @@
         if(mine!==genId||epoch!==epochAt||!source||source.file!==file||source.fileHash!==hash||ctl.signal?.aborted)return;
         if(actualHash!==result.sha256)throw new Error('생성 파일의 바이트와 해시가 달라 받지 않았습니다.');
         if(new TextDecoder().decode(bytes.subarray(0,1024)).indexOf('%PDF-')<0)throw new Error('생성 결과에 PDF 서명이 없어 받지 않았습니다.');
-        const candidate={file:result.file,sha256:result.sha256,originalSourceSha256:HEX.test(result.originalSourceSha256||'')?result.originalSourceSha256:hash,verification:result.verification==null?null:result.verification,warnings:Array.isArray(result.warnings)?result.warnings:null,pageMap:clone(result.pageMap)||null,revision,blocked:false};
+        const candidate={file:result.file,sha256:result.sha256,originalSourceSha256:HEX.test(result.originalSourceSha256||'')?result.originalSourceSha256:hash,verification:result.verification==null?null:result.verification,warnings:Array.isArray(result.warnings)?result.warnings:null,pageMap:clone(result.pageMap)||null,revision,fontRevision,blocked:false};
         let tableNote='';
         const tableEdits=edits.filter(e=>String(e.segmentId||'').startsWith('table:'));
         if(tableEdits.length){
@@ -1630,6 +1686,9 @@
     ui.original.addEventListener('click',()=>{if(source)download(source.file);});
     ui.current.addEventListener('click',()=>{if(output&&!output.blocked)download(output.file,true);});
     ui.generate.addEventListener('click',()=>{if(!ui.generate.disabled)void generate();});
+    ui.fontLocal?.addEventListener('click',()=>{void importFonts(true);});
+    ui.fontAdd?.addEventListener('click',()=>{ui.fontFiles?.click();});
+    ui.fontFiles?.addEventListener('change',()=>{if(ui.fontFiles.files?.length)void importFonts(false);});
     ui.team.addEventListener('click',share);
     ui.blue.addEventListener('click',handoff);
     ui.undo.addEventListener('click',()=>{if(session&&snapshot&&snapshot.canUndo)session.undo();});

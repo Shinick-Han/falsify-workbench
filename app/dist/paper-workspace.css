@@ -62,3 +62,8 @@
 #paper-table-status.error{color:var(--red-ink)}
 @media(max-width:700px){.paper-edit-tools .button{flex:1 1 0}.paper-edit-tools span{flex-basis:100%}}
 @media(max-width:700px){.paper-workspace .paper-toolbar .button{width:auto;flex:0 0 auto}.paper-toolbar{gap:8px}.paper-inline .button-row{display:flex}.paper-inline .button-row .button{width:auto;flex:1}}
+/* Font access belongs to the existing editing toolbar. */
+.paper-font-tools{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin:12px 0 18px}
+.paper-font-tools .muted{flex:1 1 220px;font-size:13px}
+.paper-font-tools button svg{width:18px;height:18px;flex:none}
+@media(max-width:700px){.paper-font-tools .button{flex:1 1 160px}.paper-font-tools .muted{flex-basis:100%}}
