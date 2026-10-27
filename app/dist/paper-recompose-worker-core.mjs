@@ -1887,7 +1887,7 @@ async function composeDocument({ document, edits = [], flow, assets, links, sign
   }
   for (const a of document.assets || []) if (flow && !ownedIds.has(a.id)) assetFindings.push({ code: "asset-unowned", assetId: a.id });
   function spanMarker(id2, sourcePage, edge) {
-    return `#context [#let p = here().position(); #metadata((id: ${typstString(id2)}, page: p.page, x: p.x / 1pt, y: p.y / 1pt, sourcePage: ${Number.isInteger(sourcePage) ? sourcePage : "none"}, edge: ${typstString(edge)})) <paper-${edge === "start" ? "block" : "block-end"}>]`;
+    return `#context [#let p = here().position();#metadata((id: ${typstString(id2)}, page: p.page, x: p.x / 1pt, y: p.y / 1pt, sourcePage: ${Number.isInteger(sourcePage) ? sourcePage : "none"}, edge: ${typstString(edge)}))#label(${typstString(`paper-${edge === "start" ? "block" : "block-end"}`)})]`;
   }
   function renderBlock(block, mark = true) {
     const text = textById.get(block.id);
@@ -1895,7 +1895,7 @@ async function composeDocument({ document, edits = [], flow, assets, links, sign
     const marker = mark ? spanMarker(block.id, block.source?.pageIndex, "start") : "";
     const endMarker = mark ? spanMarker(block.id, block.source?.pageIndex, "end") : "";
     const chars = block.source?.characters || [];
-    if (!linkPlan && (!chars.length || !styleById.size) && !fonts.fallback?.length && !(glyphsByBlock.get(block.id) || []).length && !(changes.get(block.id) || []).some((e) => e.after.includes("\n"))) return marker + `#text(${typstString(text)})` + endMarker;
+    if (!linkPlan && (!chars.length || !styleById.size) && !fonts.fallback?.length && !(glyphsByBlock.get(block.id) || []).length && !text.includes("	") && !(changes.get(block.id) || []).some((e) => e.after.includes("\n"))) return marker + `#text(${typstString(text)})` + endMarker;
     const raw = block.text, spaces = spacesFor(block);
     let logical = "", styles = [], glyphMap = [], destinations = [], offsets = [], before = [], after = [];
     const destinationAt = (offset) => {
@@ -1969,8 +1969,8 @@ async function composeDocument({ document, edits = [], flow, assets, links, sign
     for (let i = 0; i < result.length; ) {
       let j = i + (result.codePointAt(i) > 65535 ? 2 : 1);
       const family = familyAt(i), glyph = mappedGlyphs[i];
-      const editLineBreak = result[i] === "\n" && mappedOffsets[i] === null;
-      while (!glyph && !editLineBreak && j < result.length && !(result[j] === "\n" && mappedOffsets[j] === null) && !labels.has(j) && !mappedGlyphs[j] && mapped[j] === mapped[i] && familyAt(j) === family && key(mappedDest[j]) === key(mappedDest[i])) j += result.codePointAt(j) > 65535 ? 2 : 1;
+      const editLineBreak = result[i] === "\n" && mappedOffsets[i] === null, tab = result[i] === "	";
+      while (!glyph && !editLineBreak && !tab && j < result.length && result[j] !== "	" && !(result[j] === "\n" && mappedOffsets[j] === null) && !labels.has(j) && !mappedGlyphs[j] && mapped[j] === mapped[i] && familyAt(j) === family && key(mappedDest[j]) === key(mappedDest[i])) j += result.codePointAt(j) > 65535 ? 2 : 1;
       let content;
       if (glyph) {
         const path = `source-glyphs/${glyph.pageIndex}-${glyph.start}.svg`;
@@ -1983,7 +1983,7 @@ async function composeDocument({ document, edits = [], flow, assets, links, sign
         const name = style?.fontName || "";
         if (/bold/i.test(name)) opts += 'weight: "bold", ';
         if (/italic|oblique/i.test(name)) opts += 'style: "italic", ';
-        content = editLineBreak ? `#text(${opts}${typstString(" ")})#linebreak()` : `#text(${opts}${typstString(result.slice(i, j))})`;
+        content = editLineBreak ? `#text(${opts}${typstString(" ")})#linebreak()` : `#text(${opts}${typstString(tab ? " " : result.slice(i, j))})`;
       }
       runs.push(emitLabels(i) + wrap(content, mappedDest[i]));
       i = j;
@@ -2080,7 +2080,7 @@ async function composeDocument({ document, edits = [], flow, assets, links, sign
         const parts = pg[kind].filter((e) => rendered.has(e)).map((entry) => {
           const [x, y] = entry.bbox, dy = kind === "header" ? y : y - (page.height - margins.bottom);
           const id2 = entry.blockId || entry.itemId;
-          return `#place(top + left, dx: ${x - margins.left}pt, dy: ${dy}pt)[#context [#let p = here().position(); #metadata((id: ${typstString(id2)}, sourcePage: ${pg.sourcePage}, page: p.page, x: p.x / 1pt, y: p.y / 1pt, kind: ${typstString(kind)})) <paper-furniture>]${rendered.get(entry)}]`;
+          return `#place(top + left, dx: ${x - margins.left}pt, dy: ${dy}pt)[#context [#let p = here().position();#metadata((id: ${typstString(id2)}, sourcePage: ${pg.sourcePage}, page: p.page, x: p.x / 1pt, y: p.y / 1pt, kind: ${typstString(kind)}))#label("paper-furniture")]${rendered.get(entry)}]`;
         });
         return `if sp == ${pg.sourcePage} [${parts.join("")}]`;
       });
@@ -2156,11 +2156,10 @@ ${document.blocks.map((b) => renderBlock(b)).filter(Boolean).join("\n\n")}
       if (!all.length || all.some((s) => !s?.start || !s.end || !Number.isInteger(s.end.page))) continue;
       const last = Math.max(...all.map((s) => s.end.page));
       const onPage = all.filter((s) => s.start.page <= last && s.end.page >= last);
-      const starts = onPage.filter((s) => s.start.page === last);
       const splitX = margins.left + (page.width - margins.left - margins.right) / 2;
-      if (starts.length < 3 || onPage.some((s) => s.start.page === last && s.start.x >= splitX || s.end.page === last && s.end.x >= splitX)) continue;
+      if (onPage.some((s) => s.start.page === last && s.start.x >= splitX || s.end.page === last && s.end.x >= splitX)) continue;
       const bottom = Math.max(...onPage.filter((s) => s.end.page === last).map((s) => s.end.y));
-      if (!Number.isFinite(bottom) || bottom > margins.top + (page.height - margins.top - margins.bottom) * 0.7) continue;
+      if (!Number.isFinite(bottom) || bottom > page.height - margins.bottom) continue;
       const target = (margins.top + bottom) / 2;
       const eligible = items.filter((item) => !item.inline && ["paragraph", "caption"].includes(item.kind) && item.ids.length === 1).map((item) => spans.get(item.ids[0])).filter((s) => s?.start?.page === last && s.start.y > margins.top + 25 && s.start.y < bottom - 25).sort((a, b) => Math.abs(a.start.y - target) - Math.abs(b.start.y - target));
       const chosen = eligible[0];
@@ -2260,11 +2259,36 @@ function readOutputGlyphs({ bytes, mupdf: mupdf6 }) {
 
 // app/src/paper-compose-check.mjs
 var normalize = (value) => value.replace(/\s+/gu, " ").trim();
+function representationComparison(expected, observed) {
+  let i = 0, j = 0;
+  const differences = [];
+  while (i < expected.length && j < observed.length) {
+    const a = expected.codePointAt(i), b = observed.codePointAt(j);
+    if (a === b) {
+      i += a > 65535 ? 2 : 1;
+      j += b > 65535 ? 2 : 1;
+      continue;
+    }
+    if (a === 181 && b === 956) {
+      differences.push({ kind: "micro-sign-to-greek-mu", sourceOffset: i, outputOffset: j, source: "U+00B5", output: "U+03BC" });
+      i++;
+      j++;
+      continue;
+    }
+    if (a === 173 && expected.codePointAt(i + 1) === b) {
+      differences.push({ kind: "discretionary-soft-hyphen-omitted", sourceOffset: i, outputOffset: j, source: "U+00AD", output: null });
+      i++;
+      continue;
+    }
+    return { matches: false, differences: [] };
+  }
+  return { matches: i === expected.length && j === observed.length, differences };
+}
 async function checkRecomposition({ bytes, expectedBlocks, edits = {}, pdfjs, exporter, mupdf: mupdf6, expectedFurniture, outputFurniture, bodyFrame, blockSpans } = {}) {
   if (!(bytes instanceof Uint8Array) || !bytes.length || !pdfjs?.getDocument) throw new TypeError("PDF bytes and PDF.js are required");
   if (!Array.isArray(expectedBlocks) || !expectedBlocks.length || expectedBlocks.some((b) => typeof b.id !== "string" || typeof b.text !== "string") || new Set(expectedBlocks.map((b) => b.id)).size !== expectedBlocks.length) throw new TypeError("unique expected blocks are required");
   if (Object.keys(edits).some((id2) => !expectedBlocks.some((b) => b.id === id2) || typeof edits[id2] !== "string")) throw new TypeError("invalid edit");
-  const findings = [], pages = [], locations = [];
+  const findings = [], pages = [], locations = [], spacingEvidence = [];
   const furnitureEnabled = expectedFurniture !== void 0 || outputFurniture !== void 0 || bodyFrame !== void 0;
   const furnitureValid = Array.isArray(expectedFurniture) && Array.isArray(outputFurniture) && bodyFrame && ["left", "top", "right", "bottom"].every((k) => Number.isFinite(bodyFrame[k])) && bodyFrame.left < bodyFrame.right && bodyFrame.top < bodyFrame.bottom;
   if (furnitureEnabled && !furnitureValid) findings.push({ code: "furniture-unavailable", reason: "Furniture declarations, output map or body frame unavailable." });
@@ -2437,7 +2461,10 @@ async function checkRecomposition({ bytes, expectedBlocks, edits = {}, pdfjs, ex
         }
         if (previous && item.str && !/\s$/u.test(previous.str) && !/^\s/u.test(item.str)) {
           if (previous.hasEOL) {
-            if (/[\p{L}\p{N}]-$/u.test(previous.str) && /^\p{L}/u.test(item.str) || /\p{N}–$/u.test(previous.str) && /^\p{N}/u.test(item.str) || /\S$/u.test(previous.str) && /^\[/u.test(item.str) || /\S*\/\S*[?=&]$/u.test(previous.str) && /^[\p{L}\p{N}]/u.test(item.str)) {
+            const recent = parts.slice(-8).join("");
+            const paragraphGap = position && previous.position && Math.abs(position.y - previous.position.y) > Math.max(position.height, previous.position.height) * 1.9;
+            const url = /(?:https?:\/\/|www\.)[^\s]*$/iu.test(recent) && (/[./?=&-]$/u.test(recent) || /\p{L}$/u.test(recent) && /^\p{N}/u.test(item.str) || /^[\p{L}\p{N}_-]+[./]/u.test(item.str));
+            if (!paragraphGap && (/[\p{L}\p{N}+][–\-/]$/u.test(recent) && /^[\p{L}\p{N}_−]/u.test(item.str) || /(?:^|\s)-$/u.test(recent) && /^\p{L}/u.test(item.str) || /\S$/u.test(previous.str) && /^\[/u.test(item.str) || /\S*\/\S*[?=&]$/u.test(previous.str) && /^[\p{L}\p{N}]/u.test(item.str) || url && /^[\p{L}\p{N}]/u.test(item.str))) {
               boundaries.push({ part: parts.length, ordinal, leftPosition: previous.position, rightPosition: position });
             }
             parts.push(" ");
@@ -2477,7 +2504,10 @@ async function checkRecomposition({ bytes, expectedBlocks, edits = {}, pdfjs, ex
           const left = mapped[boundary.ordinal - 1], right = mapped[boundary.ordinal];
           const near2 = (glyph, pos) => pos && glyph && Math.abs(glyph.origin[1] - pos.y) < Math.max(1, pos.height * 0.2) && glyph.origin[0] >= pos.x - 1 && glyph.origin[0] <= pos.x + pos.width + 1;
           if (aligned && left !== void 0 && right !== void 0 && left < right && near2(glyphs[left], boundary.leftPosition) && near2(glyphs[right], boundary.rightPosition)) {
-            parts[boundary.part] = glyphs.slice(left + 1, right).some((g) => /\s/u.test(String.fromCodePoint(g.scalar))) ? " " : "";
+            const spaces = glyphs.slice(left + 1, right).filter((g) => /\s/u.test(String.fromCodePoint(g.scalar)));
+            const resolved = spaces.length ? " " : "";
+            if (parts[boundary.part] !== resolved) spacingEvidence.push({ pageIndex: n - 1, action: resolved ? "retain-encoded-space" : "remove-inferred-space", leftScalar: glyphs[left].scalar, rightScalar: glyphs[right].scalar, leftOrigin: glyphs[left].origin, rightOrigin: glyphs[right].origin, encodedWhitespace: spaces.map((g) => g.scalar) });
+            parts[boundary.part] = resolved;
           } else {
             findings.push({ code: "ambiguous-text-geometry", pageIndex: n - 1, reason: "PDF.js may discard an encoded space at a line-final hyphen or citation boundary, or infer one before a closing quote; glyph stream unavailable or misaligned." });
           }
@@ -2495,7 +2525,8 @@ async function checkRecomposition({ bytes, expectedBlocks, edits = {}, pdfjs, ex
   }
   const observed = normalize(pages.join(" "));
   const expected = normalize(expectedBlocks.map((b) => Object.hasOwn(edits, b.id) ? edits[b.id] : b.text).join(" "));
-  if (observed !== expected) findings.push({ code: "content-mismatch", expected, observed });
+  const representation = representationComparison(expected, observed);
+  if (!representation.matches) findings.push({ code: "content-mismatch", expected, observed });
   const alignmentAvailable = observed === expected && !findings.some((f) => f.code === "ambiguous-text-geometry" || f.code === "unsupported-text-geometry");
   if (alignmentAvailable) {
     const pageRanges = [];
@@ -2524,7 +2555,7 @@ async function checkRecomposition({ bytes, expectedBlocks, edits = {}, pdfjs, ex
     }
   }
   const independent = typeof exporter === "string" && exporter.trim() && !/pdf\.?js/i.test(exporter) ? { status: "declared", reader: "PDF.js text extraction", exporter, limitation: "Distinct named engines only; exporter identity is caller supplied." } : { status: "unavailable", reader: "PDF.js text extraction", reason: "Exporter path not supplied or uses PDF.js." };
-  return { schema: "falsify.recomposition-check.v1", readable: true, checks: { furniture: furnitureEnabled ? { status: findings.some((f) => f.code === "missing-furniture" || f.code === "unexpected-margin-text" || f.code === "wrong-furniture-source") ? "finding" : !furnitureValid || !selectedSources || findings.some((f) => f.code === "furniture-unavailable" || f.code === "ambiguous-furniture") ? "unavailable" : "checked", sourceAssociation, assets: furnitureAssets ? { status: "unavailable", reason: "Furniture assets require independent visual inspection." } : { status: "not-applicable" } } : void 0, content: { status: findings.some((f) => f.code === "ambiguous-text-geometry" || f.code === "unsupported-text-geometry") ? "unavailable" : observed === expected ? "pass" : "finding", comparison: "ordered text with whitespace runs collapsed; ambiguous item geometry is unavailable" }, bounds: { status: findings.some((f) => f.code === "text-outside-page") ? "finding" : !inspectedItems || findings.some((f) => f.code === "unsupported-text-geometry") ? "unavailable" : "checked", limitation: "Extracted upright text items only, estimated from font ascent and descent; PDF.js may omit off-page text. Not clipping or ink bounds." }, movement: alignmentAvailable ? { status: "observed", locations } : { status: "unavailable", locations: null, reason: "Complete ordered text alignment or supported geometry is unavailable." }, independent, visual: { status: "unavailable", reason: "No raster or visibility inspection." }, overlap: { status: "unavailable", reason: "Text and asset ownership not established." }, captionOwnership: { status: "unavailable", reason: "Relations not established from PDF bytes." } }, findings };
+  return { schema: "falsify.recomposition-check.v1", readable: true, checks: { furniture: furnitureEnabled ? { status: findings.some((f) => f.code === "missing-furniture" || f.code === "unexpected-margin-text" || f.code === "wrong-furniture-source") ? "finding" : !furnitureValid || !selectedSources || findings.some((f) => f.code === "furniture-unavailable" || f.code === "ambiguous-furniture") ? "unavailable" : "checked", sourceAssociation, assets: furnitureAssets ? { status: "unavailable", reason: "Furniture assets require independent visual inspection." } : { status: "not-applicable" } } : void 0, content: { status: findings.some((f) => f.code === "ambiguous-text-geometry" || f.code === "unsupported-text-geometry") ? "unavailable" : observed === expected ? "pass" : representation.matches ? "normalized" : "finding", comparison: "ordered text with whitespace runs collapsed; ambiguous item geometry is unavailable", representationDifferences: representation.matches ? representation.differences : [], spacingEvidence, offsetUnit: "UTF-16 offsets in whitespace-normalized source expectation and PDF.js output", limitation: representation.differences.length ? "The listed representation differences are not byte-exact preservation." : void 0 }, bounds: { status: findings.some((f) => f.code === "text-outside-page") ? "finding" : !inspectedItems || findings.some((f) => f.code === "unsupported-text-geometry") ? "unavailable" : "checked", limitation: "Extracted upright text items only, estimated from font ascent and descent; PDF.js may omit off-page text. Not clipping or ink bounds." }, movement: alignmentAvailable ? { status: "observed", locations } : { status: "unavailable", locations: null, reason: "Complete ordered text alignment or supported geometry is unavailable." }, independent, visual: { status: "unavailable", reason: "No raster or visibility inspection." }, overlap: { status: "unavailable", reason: "Text and asset ownership not established." }, captionOwnership: { status: "unavailable", reason: "Relations not established from PDF bytes." } }, findings };
 }
 
 // app/src/paper-recompose.mjs
