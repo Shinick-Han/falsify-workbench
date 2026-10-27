@@ -32,3 +32,47 @@ test('line-end punctuation stays literal and wrapped quotes retain raw ranges',(
 test('repeated wrapped literal hyphen remains ambiguous',()=>{const {d,flow}=synthetic(),[a,b]=d.blocks;for(const block of [a,b]){const start=block.source.range.start;block.text='re-sign';block.source.range.end=start+7;block.source.lines=[{range:{start,end:start+3}},{range:{start:start+3,end:start+7}}];}flow.items=[a,b].map(block=>({kind:'paragraph',blockIds:[block.id]}));assert.throws(()=>bindEdits(d,flow,[{pageIndex:0,before:'re-\nsign',after:'quit'}]),e=>e.details.code==='AMBIGUOUS_MATCH');});
 test('explicit empty and disabled edits use the baseline pipeline',async()=>{const bytes=fixture(),options={mupdf,compile:async()=>fakePdf};for(const edits of [[],[{pageIndex:0,before:'absent',after:'x',enabled:false}]]){const original=structuredClone(edits);const result=await prepare({file:bytes,edits},options);assert.equal(result.sourceBinding.editCount,0);assert.deepEqual(edits,original);assert.ok(result.file.size);}});
 test('hint at a fragment boundary preserves the parent raw range',()=>{const {d,flow}=synthetic(),b=d.blocks[1],start=b.source.range.start;b.source.wordSpaceOffsets=[start+2];const f1={...b,id:'f1',parentBlockId:b.id,text:'bo',source:{...b.source,range:{start,end:start+2},lines:[]}},f2={...b,id:'f2',parentBlockId:b.id,text:'ld',source:{...b.source,range:{start:start+2,end:start+4},lines:[]}};flow.fragments=[f1,f2];flow.items[0].blockIds=[d.blocks[0].id,'f1','f2',d.blocks[2].id];flow.items[0].joiners=['','',''];const result=bindEdits(d,flow,[{pageIndex:0,before:'alpha bo ld words',after:'x'}]);assert.equal(result.bindings[0].sourceBefore,'alpha bold words');});
+
+test('explicit native selection retains quote provenance and exact replacement',()=>{
+  const {d,flow}=synthetic(), b=d.blocks[0], start=b.source.range.start;
+  b.text='re-sign'; b.source.range.end=start+7; flow.items=[{kind:'paragraph',blockIds:[b.id]}];
+  const edits=[{id:'x',pageIndex:0,before:'resign',after:'  exact\nafter '}], original=structuredClone(d);
+  assert.throws(()=>bindEdits(d,flow,edits),e=>e.details.code==='NO_MATCH');
+  const selection={id:'x',sourceSha256:d.sourceSha256,parts:[{blockId:b.id,pageIndex:0,start,end:start+7,before:'re-sign'}]};
+  const result=bindEdits(d,flow,edits,[selection]);
+  assert.equal(result.bindings[0].matchMethod,'explicit-source'); assert.equal(result.bindings[0].before,'resign'); assert.equal(result.bindings[0].sourceBefore,'re-sign'); assert.equal(result.changes[0].after,'  exact\nafter '); assert.deepEqual(d,original);
+});
+test('explicit parts validate source, flow ownership, order and overlap',()=>{
+  const {d,flow}=synthetic(), [a,b,c]=d.blocks;
+  const part=x=>({blockId:x.id,pageIndex:0,start:x.source.range.start,end:x.source.range.end,before:x.text});
+  const selection={index:0,sourceSha256:d.sourceSha256,parts:[part(a),part(b),part(c)]}, edits=[{id:'x',pageIndex:0,before:'different',after:'new'}];
+  const bind=s=>bindEdits(d,flow,edits,[s]);
+  assert.deepEqual(bind(selection).changes.map(p=>p.after),['new','','']);
+  for(const parts of [[part(b),part(a)],[part(a),part(c)],[{...part(a),before:'wrong'}],[{...part(a),pageIndex:1}],[{...part(a),end:part(a).end+1}]]) assert.throws(()=>bind({...selection,parts}),{code:'source-binding'});
+  assert.throws(()=>bind({...selection,sourceSha256:'0'.repeat(64)}),{code:'stale-source'});
+  const assetFlow=structuredClone(flow); assetFlow.items=[{kind:'paragraph',blockIds:[a.id]},{kind:'asset',blockIds:[b.id]},{kind:'paragraph',blockIds:[c.id]}];
+  assert.throws(()=>bindEdits(d,assetFlow,edits,[selection]),{code:'source-binding'});
+  assert.throws(()=>bindEdits(d,flow,[...edits,{id:'x',pageIndex:0,before:'bold',after:'y'}]),{code:'invalid-edit'});
+  assert.throws(()=>bindEdits(d,flow,[...edits,{id:'y',pageIndex:0,before:'bold',after:'y'}],[selection]),e=>e.details.code==='OVERLAP');
+  assert.throws(()=>bindEdits(d,flow,edits,[selection,selection]),{code:'source-binding'});
+  assert.equal(bindEdits(d,flow,[{...edits[0],enabled:false}],[selection]).bindings.length,0);
+});
+test('explicit native offsets include non-BMP text and mixed block styles',()=>{
+  const {d,flow}=synthetic(),[a,b]=d.blocks; const start=a.source.range.start;
+  a.text='A😀';a.source.range.end=start+a.text.length; flow.items=[{kind:'paragraph',blockIds:[a.id,b.id]}];
+  const parts=[a,b].map(x=>({blockId:x.id,pageIndex:0,start:x.source.range.start,end:x.source.range.end,before:x.text}));
+  const result=bindEdits(d,flow,[{pageIndex:0,before:'different',after:'done'}],[{index:0,sourceSha256:d.sourceSha256,parts}]);
+  assert.equal(result.bindings[0].sourceBefore,'A😀bold');assert.deepEqual(result.changes.map(p=>p.after),['done','']);
+});
+
+test('prepare accepts explicit source parts using original edit index',async()=>{
+  const bytes=fixture(), document=await readDocument({file:bytes}), block=document.blocks.find(b=>b.text.includes('First value -12'));
+  const start=block.source.range.start+block.text.indexOf('First value -12'); let compiled;
+  const result=await prepare({file:bytes,edits:[{enabled:false},{id:'chosen',pageIndex:0,before:'external quote',after:'changed'}],bindings:[{index:1,sourceSha256:document.sourceSha256,parts:[{blockId:block.id,pageIndex:0,start,end:start+15,before:'First value -12'}]}]},{mupdf,compile:async p=>(compiled=p.source,fakePdf)});
+  assert.equal(result.bindings[0].matchMethod,'explicit-source');assert.equal(result.bindings[0].before,'external quote');assert.equal(result.bindings[0].sourceBefore,'First value -12');assert.ok(compiled.includes('changed'));
+});
+test('duplicate flow ownership is rejected for explicit selection',()=>{
+  const {d,flow}=synthetic(),b=d.blocks[0];flow.items.push({kind:'paragraph',blockIds:[b.id]});
+  const part={blockId:b.id,pageIndex:0,start:b.source.range.start,end:b.source.range.end,before:b.text};
+  assert.throws(()=>bindEdits(d,flow,[{pageIndex:0,before:'other',after:'x'}],[{index:0,sourceSha256:d.sourceSha256,parts:[part]}]),e=>e.details.code==='AMBIGUOUS_EXPLICIT');
+});
