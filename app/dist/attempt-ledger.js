@@ -14,7 +14,7 @@
   }
   function fromPending(r,observedAt){
     const h=r.request.harness,adapter=h.adapter||{},finished=Number.isSafeInteger(r.finishedAt)?r.finishedAt:observedAt;
-    return normalize({id:r.requestId,role:r.role,harnessHash:r.harnessHash,harnessName:h.name||null,harnessVersion:h.version||null,model:adapter.model||null,effort:adapter.effort||null,budget:r.request.maxCalls,level:r.role==='red'?(r.request.level??null):null,fileHash:r.fileHash,sourceHash:r.sourceHash,startedAt:r.createdAt,finishedAt:finished,durationMs:finished-r.createdAt,calls:null,status:statuses.includes(r.disposition)?r.disposition:'unknown'});
+    return normalize({id:r.requestId,role:r.role,harnessHash:r.harnessHash,harnessName:h.name||null,harnessVersion:h.version||null,model:adapter.model||null,effort:adapter.effort||null,budget:r.request.maxCalls,level:r.role==='red'?(r.request.level??null):null,fileHash:r.fileHash,sourceHash:r.sourceHash,startedAt:r.createdAt,finishedAt:finished,durationMs:finished-r.createdAt,calls:Number.isSafeInteger(r.observedCalls)&&r.observedCalls>=0?r.observedCalls:null,status:statuses.includes(r.disposition)?r.disposition:'unknown'});
   }
   function read(storage){const box=storage||root.localStorage,raw=box.getItem(KEY);if(!raw)return [];const data=JSON.parse(raw);if(!data||data.schema!==KEY||!Array.isArray(data.attempts)||Object.keys(data).sort().join()!=='attempts,schema')throw Error('Invalid attempt ledger');const rows=data.attempts.map(normalize);if(new Set(rows.map(x=>x.role+':'+x.id)).size!==rows.length)throw Error('Duplicate attempt');return rows;}
   function capture(record,storage,now=Date.now()){

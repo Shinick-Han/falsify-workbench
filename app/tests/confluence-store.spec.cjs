@@ -36,7 +36,7 @@ function labStub(extraRuns=[]){
   return {calls,db,before,unchanged:()=>JSON.stringify(db)===before,ready:Promise.resolve(),
     cloudSnapshot:async()=>{calls.push('snapshot'); return JSON.parse(JSON.stringify(db));},
     reviewSnapshot:async(id)=>{calls.push(['reviewSnapshot',id]); const snap=JSON.parse(JSON.stringify(db)); if(labStub.unsent) snap.reviews=snap.reviews.concat([{id:'unsent-1',runId:id,note:'UNSENT_REVIEW_MARKER',findingAssessments:[{id:'F9',verdict:'pending'}],reviewContext:{mode:'blue-only'}}]); return snap;},
-    openArchive:async(archive)=>{const ref=archive.kind==='harness'?archive.data&&archive.data.hash:archive.kind==='paper-edit'?archive.id:archive.data&&archive.data.selectedRunId; calls.push(['open',archive.kind,ref]); if(labStub.fail) throw Error('임시 열람을 열지 못했습니다. 로컬 기록은 그대로입니다.'); if(archive.kind==='harness') return {kind:'harness',hash:archive.data.hash}; if(archive.kind==='paper-edit') return {kind:'paper-edit',id:archive.id}; return {kind:'experiment',runId:archive.data.selectedRunId};},
+    openArchive:async(archive)=>{const ref=archive.kind==='harness'?archive.data&&archive.data.hash:['paper-edit','attempt'].includes(archive.kind)?archive.id:archive.data&&archive.data.selectedRunId; calls.push(['open',archive.kind,ref]); if(labStub.fail) throw Error('임시 열람을 열지 못했습니다. 로컬 기록은 그대로입니다.'); if(archive.kind==='harness') return {kind:'harness',hash:archive.data.hash}; if(archive.kind==='paper-edit') return {kind:'paper-edit',id:archive.id}; if(archive.kind==='attempt') return {kind:'attempt',id:archive.id}; return {kind:'experiment',runId:archive.data.selectedRunId};},
     closeArchive:async()=>{calls.push('closeArchive');},
     restoreArchive:async()=>{calls.push('restore'); throw Error('persistent restore');},
     review:async(id)=>{calls.push(['review',id]); return true;},
@@ -531,6 +531,7 @@ test('attempt publication is explicit and never retries an unknown write',async(
   assert.equal(t.calls.some(c=>c.method==='POST'&&c.path==='/v1/confluence/archives'),false);
   const result=await app.publishAttempt({id:'attempt-1'},{teamShare:true});assert.equal(result.stored,true);
   const posts=t.calls.filter(c=>c.method==='POST'&&c.path==='/v1/confluence/archives');assert.equal(posts.length,1);assert.equal(posts[0].body.archive.kind,'attempt');
+  const before=t.store.get(LEDGER_KEY);t.$('confluence-review-load').click();await until(()=>/Synthetic attempt/.test(t.$('confluence-review-list').textContent),'attempt list');openSaved(t,'confluence-review-list');await until(()=>t.lab.calls.some(c=>c[0]==='open'&&c[1]==='attempt'),'attempt opened');assert.equal(t.store.get(LEDGER_KEY),before);
   let count=0;const broken=setup({routes:(method,path,init)=>{if(method==='POST'&&path==='/v1/confluence/archives'){count++;return {status:502,body:{error:{code:'write_unknown'}}};}return api.routes(method,path,init);}});await broken.ready;await connect(broken);await assert.rejects((await broken.ready).publishAttempt({id:'attempt-2'},{teamShare:true}),/다시 보내지/);assert.equal(count,1);
 });
 

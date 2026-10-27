@@ -96,6 +96,7 @@
     // Optional, added only after a matched failure. Older records omit it and stay valid.
     if(Object.hasOwn(x,'serverFailure')&&(typeof x.serverFailure!=='string'||x.serverFailure.length<1||x.serverFailure.length>300||x.serverFailure!==safeFailure(x.serverFailure)))return false;
     if(Object.hasOwn(x,'adapterFailure')&&!structuredFailure(x.adapterFailure))return false;
+    if(Object.hasOwn(x,'observedCalls')&&(!Number.isSafeInteger(x.observedCalls)||x.observedCalls<0))return false;
     return true;
   }
   function blocking(found){
@@ -166,6 +167,7 @@
     if(Object.hasOwn(patch,'postReceipt')){if(!RECEIPTS.includes(patch.postReceipt))return {ok:false,status:'rejected',message:'접수 상태가 올바르지 않습니다.'};next.postReceipt=patch.postReceipt;}
     if(Object.hasOwn(patch,'disposition')){if(!DISPOSITIONS.includes(patch.disposition))return {ok:false,status:'rejected',message:'대기 상태가 올바르지 않습니다.'};next.disposition=patch.disposition;}
     if(Object.hasOwn(patch,'serverFailure')){const safe=safeFailure(patch.serverFailure);if(!safe)return {ok:false,status:'rejected',message:'서버 실패 문구를 보관하지 못했습니다. 기록은 바꾸지 않았습니다.'};next.serverFailure=safe;}
+    if(Object.hasOwn(patch,'observedCalls')){if(!Number.isSafeInteger(patch.observedCalls)||patch.observedCalls<0)return {ok:false,status:'rejected',message:'관찰한 호출 수가 올바르지 않습니다.'};next.observedCalls=patch.observedCalls;}
     if(Object.hasOwn(patch,'adapterFailure')){const f=structuredFailure(patch.adapterFailure);if(!f)return {ok:false,status:'rejected',message:'실패 정보 형식이 올바르지 않습니다.'};next.adapterFailure=f;}
     if(next.disposition==='open'||next.disposition==='running'){next.finishedAt=null;next.expiresAt=null;}
     else if(Object.hasOwn(patch,'finishedAt')){if(!Number.isFinite(patch.finishedAt))return {ok:false,status:'rejected',message:'완료 시각이 올바르지 않습니다.'};next.finishedAt=patch.finishedAt;next.expiresAt=patch.finishedAt+RETENTION_MS;}
