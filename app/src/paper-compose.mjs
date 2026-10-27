@@ -2,6 +2,7 @@ import {deriveLayoutProfile} from './paper-style-profile.mjs';
 import {buildLinkPlan} from './paper-link-plan.mjs';
 import {readSourceGlyphs} from './paper-source-glyphs.mjs';
 import {inspectFonts} from './paper-fonts.mjs';
+import {findSourceWrapOmissions,sourceWrapOffsetsForBlock} from './paper-source-wrap.mjs';
 const abort = signal => { if (signal?.aborted) throw new DOMException('Composition cancelled', 'AbortError'); };
 const fail = message => { throw new Error(message); };
 const captionOrder = item => [...(item.captionIds || []).filter(id=>item.captionPositions?.[id]==='above'),...(item.captionIds || []).filter(id=>item.captionPositions?.[id]!=='above')];
@@ -95,6 +96,14 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
     const list=changes.get(b.id)||[]; if(list.some(e=>start<e.end && end>e.start)) fail('Overlapping edit targets');
     list.push({start,end,after:edit.after,inherit:linkPlan?.changes.find(c=>c.blockId===edit.blockId && c.start===edit.start && c.end===edit.end)?.inherit || null}); changes.set(b.id,list);
   }
+  const sourceWrap=findSourceWrapOmissions({document,bytes:sourceBytes});
+  // Keep replacements literal, and leave link labels/URLs intact. This projects
+  // only unchanged source words, using their original source ranges.
+  const wrapOmissions=sourceWrap.omissions.filter(o=>{
+    const r=o.evidence.sourceRange;
+    return !edits.some(e=>e.blockId===o.blockId && e.pageIndex===o.pageIndex && e.start<r.end && e.end>r.start) &&
+      !(links?.links||[]).some(l=>l.source?.pageIndex===o.pageIndex && l.relation?.ranges?.some(x=>x.blockId===o.blockId && x.start<r.end && x.end>r.start));
+  });
   const projectedSpaces=new Map(), projectedAmbiguous=[];
   if (flow?.fragments?.length) {
     const parents=new Map(document.blocks.map(b=>[b.id,b])), groups=new Map();
@@ -156,7 +165,8 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
   const sourceGlyphResult=readSourceGlyphs({bytes:sourceBytes,document:{...document,blocks:document.blocks.filter(b=>!assetOwned.has(b.id))},changes});
   const glyphsByBlock=new Map();
   for(const glyph of sourceGlyphResult.glyphs) {const list=glyphsByBlock.get(glyph.blockId)||[]; list.push(glyph); glyphsByBlock.set(glyph.blockId,list);}
-  const omittedFor=b=>new Set((glyphsByBlock.get(b.id)||[]).flatMap(g=>Array.from({length:g.end-g.start},(_,i)=>g.start-b.source.range.start+i)));
+  const wrapOffsetsFor=b=>new Set(sourceWrapOffsetsForBlock(b,wrapOmissions));
+  const omittedFor=b=>new Set([...wrapOffsetsFor(b),...(glyphsByBlock.get(b.id)||[]).flatMap(g=>Array.from({length:g.end-g.start},(_,i)=>g.start-b.source.range.start+i))]);
   let expectedBlocks=orderedBlocks.filter(b=>typeof b?.text==='string' && b.text.length).map(b=>({id:b.id,text:logicalText(b,changes.get(b.id)||[],omittedFor(b),spacesFor(b))}));
   if(flow) for(const item of flow.items.filter(i=>i.inline)) {
     if(!Array.isArray(item.joiners) || item.joiners.length!==(item.blockIds||[]).length-1 || item.joiners.some(j=>typeof j!=='string')) fail('Invalid inline joiners');
@@ -272,7 +282,7 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
     const chars=block.source?.characters || [];
     if (!linkPlan && (!chars.length || !styleById.size) && !fonts.fallback?.length && !(glyphsByBlock.get(block.id)||[]).length && !text.includes('\t') && !(changes.get(block.id)||[]).some(e=>e.after.includes('\n'))) return marker+`#text(${typstString(text)})`+endMarker;
     // Build source-indexed styles, then apply the same line separators and edits.
-    const raw=block.text, spaces=spacesFor(block);
+    const raw=block.text, spaces=spacesFor(block), wrapOffsets=wrapOffsetsFor(block);
     let logical='', styles=[], glyphMap=[], destinations=[], offsets=[], before=[], after=[];
     const destinationAt=offset=>{const active=(linkPlan?.sourceRuns||[]).filter(r=>r.blockId===block.id && r.start<=offset && offset<r.end); const keys=new Map(active.map(r=>[JSON.stringify([r.destinationLabel||null,r.destinationLabel?null:r.uri,r.destinationStatus||null]),r])); const r=keys.size===1 ? [...keys.values()][0] : null;return r && !r.destinationStatus && !suppressedLabels.has(r.destinationLabel) ? r : null;};
     const sourceGlyphs=new Map((glyphsByBlock.get(block.id)||[]).map(g=>[g.start-block.source.range.start,g]));
@@ -281,7 +291,7 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
       before[i]=logical.length;
       if(spaces.has(i)) {logical+=' ';styles.push(styleAt(Math.max(0,i-1)));glyphMap.push(null);destinations.push(null);offsets.push(null);}
       after[i]=logical.length;
-      if(i<raw.length) {logical+=raw[i];styles.push(styleAt(i));glyphMap.push(sourceGlyphs.get(i)||null);destinations.push(destinationAt(block.source.range.start+i));offsets.push(block.source.range.start+i);}
+      if(i<raw.length && !wrapOffsets.has(i)) {logical+=raw[i];styles.push(styleAt(i));glyphMap.push(sourceGlyphs.get(i)||null);destinations.push(destinationAt(block.source.range.start+i));offsets.push(block.source.range.start+i);}
     }
     let result='', mapped=[], mappedGlyphs=[], mappedDest=[], mappedOffsets=[], cursor=0;
     for(const edit of [...(changes.get(block.id)||[])].sort((a,b)=>a.start-b.start)) {
@@ -511,5 +521,6 @@ export async function composeDocument({document, edits=[], flow, assets, links, 
   }
   if (outputTextCheck==='finding') warnings.push('Output text check found content loss or mismatch.');
   const verification={flowCheck,status:outputTextCheck==='finding' || assetFindings.length || flowCheck.status==='finding'?'finding':'warning', sourceSha256:document.sourceSha256, contentVerified:flowCheck.status!=='finding' && outputTextCheck==='pass' && !furniture.templates.length && !ambiguous.length && !assetOwned.size && !assetFindings.length && !sourceGlyphResult.glyphs.length && !sourceGlyphResult.unavailable.length, sourceGlyphs:sourceGlyphResult, layoutVerified:false, coverage, outputTextCheck, checkReport, artworkBlocks, assetFindings, ambiguousBoundaries:ambiguous, furniture:{...furniture,margins:{...margins},output:compiled?.furnitureMap ?? null}, edits:edits.map(e=>({blockId:e.blockId,start:e.start,end:e.end,status:'bound'}))};
+  verification.sourceNormalization={sourceSha256:sourceWrap.sourceSha256,lineWrapHyphens:wrapOmissions.map(o=>({pageIndex:o.pageIndex,start:o.start,end:o.end,corroboration:o.evidence.corroboration}))};
   return {linkPlan,layoutProfile,enginePlan,layoutPolicy:{...policy},file:new File([bytes],'recomposed.pdf',{type:'application/pdf'}),sha256,verification,pageMap:null,blockMap:compiled?.blockMap ?? null,blockSpans:compiled?.blockSpans ?? null,furnitureMap:compiled?.furnitureMap ?? null,warnings};
 }

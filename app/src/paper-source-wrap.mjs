@@ -32,7 +32,7 @@ export function findSourceWrapOmissions({document,bytes}={}) {
   const occurrences=(word,exclude) => verified.flatMap(({block,lines})=>lines.flatMap(({line,text})=>{
     const found=[]; let at=-1;
     while ((at=text.indexOf(word,at+1))!==-1) {
-      if (!tokenChar(text[at-1]) && !tokenChar(text[at+word.length])) {
+      if (!/(?:https?:\/\/|www\.|@)/iu.test(text) && !tokenChar(text[at-1]) && !tokenChar(text[at+word.length])) {
         const start=line.range.start+at, end=start+word.length;
         if (!(exclude && block.source.pageIndex===exclude.pageIndex && start<exclude.end && end>exclude.start) && !(block.source.wordSpaceOffsets||[]).some(x=>x>start && x<end)) found.push({pageIndex:block.source.pageIndex,blockId:block.id,start,end});
       }
@@ -43,7 +43,8 @@ export function findSourceWrapOmissions({document,bytes}={}) {
   for (const {block,lines} of verified) for(let i=0;i+1<lines.length;i++) {
     const a=lines[i], b=lines[i+1], boundary=a.line.range.end;
     if (boundary!==b.line.range.start || b.line.baseline[0][1]<=a.line.baseline[0][1] || b.line.baseline[0][1]-a.line.baseline[0][1]>3*Math.max(a.line.bbox[3]-a.line.bbox[1],b.line.bbox[3]-b.line.bbox[1]) || (block.source.wordSpaceOffsets||[]).includes(boundary)) continue;
-    const left=a.text.match(/(?:^|[^\p{L}\p{N}\p{M}_\-−–])([a-z]{2,})-$/u), right=b.text.match(/^([a-z]{2,})(?=$|[^\p{L}\p{N}\p{M}_\-−–])/u);
+    if(/(?:https?:\/\/|www\.|@)/iu.test(a.text+b.text)) continue;
+    const left=a.text.match(/(?:^|[^\p{L}\p{N}\p{M}_\-−–])([a-z]{3,})-$/u), right=b.text.match(/^([a-z]{2,})(?=$|[^\p{L}\p{N}\p{M}_\-−–])/u);
     if (!left || !right) continue;
     const start=boundary-1-left[1].length, end=boundary+right[1].length;
     if ((block.source.wordSpaceOffsets||[]).some(x=>x>start && x<end)) continue;
