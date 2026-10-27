@@ -247,7 +247,7 @@ let htmlWrites=0;
 function element(id){
   const e=new EventTarget();
   Object.assign(e,{id,disabled:false,hidden:false,checked:false,value:'',textContent:'',children:[],files:[],className:'',
-    classList:{toggle(){}},replaceChildren(){},append(){},after(){},remove(){},click(){this.dispatchEvent(new Event('click'));},
+    classList:{toggle(){}},replaceChildren(){this.children=[];},append(...nodes){this.children.push(...nodes);},after(){},remove(){},click(){this.dispatchEvent(new Event('click'));},
     getClientRects:()=>[],addEventListener(t,f){EventTarget.prototype.addEventListener.call(this,t,f);}});
   Object.defineProperty(e,'innerHTML',{set(){htmlWrites++;},get(){return e.textContent||'';}});
   return e;
@@ -256,18 +256,18 @@ function vmStorage(){const m=new Map();return {getItem:k=>m.has(k)?m.get(k):null
 async function redPage(storage,hooks,options={}){
   const els=new Map(),get=id=>{if(!els.has(id))els.set(id,element(id));return els.get(id);};
   const document=new EventTarget();
-  Object.assign(document,{querySelector:s=>s.startsWith('#')?(s==='#red-receipt-check'||s==='#red-pending-discard'?els.get(s.slice(1))||null:get(s.slice(1))):null,querySelectorAll:()=>[],createElement:tag=>{const e=element(tag);Object.defineProperty(e,'id',{get(){return this._id;},set(v){this._id=v;els.set(v,this);}});return e;},body:element('body')});
+  Object.assign(document,{querySelector:s=>s.startsWith('#')?(['#red-receipt-check','#red-pending-discard','#red-recovery-details','#red-previous-failure'].includes(s)?els.get(s.slice(1))||null:get(s.slice(1))):null,querySelectorAll:()=>[],createElement:tag=>{const e=element(tag);Object.defineProperty(e,'id',{get(){return this._id;},set(v){this._id=v;els.set(v,this);}});return e;},body:element('body')});
   get('red-level').value='1';get('red-budget').value='8';get('red-empty').textContent='empty';
-  const calls=[];
+  const calls=[],downloads=[];
   const cap={red:true,pdf:false,companionInstance:INSTANCE};
   const bridge={busy(){},state:()=>({status:'paired',connected:true,cap}),capabilities:()=>cap,session:()=>({request:async(p,body)=>{calls.push({path:p,body});return hooks.reply(p,body,calls);}})};
-  const lab={busy(){},allowed:()=>true,ready:Promise.resolve(),bind:async(role,r)=>({...r,harness:H.builtin(role)}),record:async()=>'run-1'};
+  const lab={busy(){},allowed:()=>true,ready:Promise.resolve(),bind:async(role,r)=>({...r,harness:hooks.harness||H.builtin(role)}),record:async()=>'run-1'};
   if(options.shipped){const script=element('pending-job.js');script.src='pending-job.js';script.getAttribute=name=>name==='src'?'pending-job.js':null;document.scripts=[script];}
-  const ctx=vm.createContext({document,crypto:globalThis.crypto,localStorage:storage,navigator:{locks},FalsifyDocumentRed:Red,FalsifyHarness:H,FalsifyLocalBridge:bridge,FalsifyLab:lab,FalsifyExport:{},TextEncoder,TextDecoder,CustomEvent,Event,URL:{createObjectURL:()=>'blob:1',revokeObjectURL(){}},Blob,File,setTimeout,clearTimeout,confirm:()=>true,addEventListener(){},btoa,atob,Uint8Array,Array,Promise,Error,Map,JSON,Number,String,Object,console});
+  const ctx=vm.createContext({document,crypto:globalThis.crypto,localStorage:storage,navigator:{locks},FalsifyDocumentRed:Red,FalsifyHarness:H,FalsifyLocalBridge:bridge,FalsifyLab:lab,FalsifyExport:{},TextEncoder,TextDecoder,CustomEvent,Event,URL:{createObjectURL(blob){downloads.push(blob);return 'blob:1';},revokeObjectURL(){}},Blob,File,setTimeout,clearTimeout,confirm:()=>true,addEventListener(){},btoa,atob,Uint8Array,Array,Promise,Error,Map,JSON,Number,String,Object,console});
   if(options.helper!==false)vm.runInContext(fs.readFileSync(path.join(dist,'pending-job.js'),'utf8'),ctx,{filename:'pending-job.js'});
   vm.runInContext(fs.readFileSync(path.join(dist,'document-red.js'),'utf8'),ctx,{filename:'document-red.js'});
   const text='The claim is absolute.';
-  return {get,find:id=>els.get(id),calls,async load(name='notes.txt',content=text){document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file:{name,arrayBuffer:async()=>new TextEncoder().encode(content).buffer},result:{text:content,format:'TXT',segments:[{label:'p',text:content}]}}}));
+  return {get,find:id=>els.get(id),calls,downloads,async load(name='notes.txt',content=text){document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file:{name,arrayBuffer:async()=>new TextEncoder().encode(content).buffer},result:{text:content,format:'TXT',segments:[{label:'p',text:content}]}}}));
     for(let i=0;i<100&&!get('red-document-summary').textContent.startsWith(name+' ·');i++)await new Promise(r=>setTimeout(r,5));
     assert.match(get('red-document-summary').textContent,new RegExp('^'+name.replace('.', '\\.')+' ·'));}};
 }
@@ -372,13 +372,13 @@ test('shipped RED page fails safe without the helper; an unshipped VM may post o
 async function bluePage(storage,hooks){
   const els=new Map(),get=id=>{if(!els.has(id))els.set(id,element(id));return els.get(id);};
   const document=new EventTarget();
-  Object.assign(document,{querySelector:s=>s.startsWith('#')?get(s.slice(1)):null,querySelectorAll:()=>[],createElement:tag=>element(tag),body:element('body')});
+  Object.assign(document,{querySelector:s=>s.startsWith('#')?(s==='#doc-blue-retry-previous'||s==='#doc-blue-recovery-details'?els.get(s.slice(1))||null:get(s.slice(1))):null,querySelectorAll:()=>[],createElement:tag=>{const e=element(tag);Object.defineProperty(e,'id',{get(){return this._id;},set(v){this._id=v;els.set(v,this);}});return e;},body:element('body')});
   get('doc-blue-budget').value='4';
   const calls=[],downloads=[];
   const cap={red:true,blue:true,pdf:false,companionInstance:INSTANCE};
   const net={connected:true};
   const bridge={busy(){},state:()=>({status:net.connected?'paired':'manual',connected:net.connected,cap}),capabilities:()=>cap,session:()=>({request:async(p,body)=>{calls.push({path:p,body});if(p==='/api/capabilities')return hooks.liveCap||cap;return hooks.reply(p,body,calls);}})};
-  const lab={busy(){},allowed:()=>true,ready:Promise.resolve(),bind:async(role,r)=>({...r,harness:H.builtin(role)}),record:async()=>'run-1'};
+  const lab={busy(){},allowed:()=>true,ready:Promise.resolve(),bind:async(role,r)=>({...r,harness:hooks.harness||H.builtin(role)}),record:async()=>'run-1'};
   const importer={extract:async()=>({text:'The claim is absolute.',format:'TXT',warnings:[],segments:[{label:'p',text:'The claim is absolute.'}]})};
   const ctx=vm.createContext({document,crypto:globalThis.crypto,localStorage:storage,navigator:{locks},FalsifyDocumentBlue:Blue,FalsifyHarness:H,FalsifyLocalBridge:bridge,FalsifyLab:lab,FalsifyImport:importer,TextEncoder,TextDecoder,CustomEvent,Event,AbortController,URL:{createObjectURL(blob){downloads.push(blob);return 'blob:'+downloads.length;},revokeObjectURL(){}},Blob,File,setTimeout,clearTimeout,confirm:()=>true,Uint8Array,Array,Promise,Error,Map,JSON,Number,String,Object,console});
   vm.runInContext(fs.readFileSync(path.join(dist,'pending-job.js'),'utf8'),ctx,{filename:'pending-job.js'});
@@ -387,6 +387,30 @@ async function bluePage(storage,hooks){
     for(let i=0;i<50&&!/추출 완료/.test(get('doc-blue-progress').textContent);i++)await new Promise(r=>setTimeout(r,5));
     assert.match(get('doc-blue-progress').textContent,/추출 완료/);}};
 }
+
+for(const role of ['red','blue'])test(role.toUpperCase()+' failed attempt identity and exports survive one explicit retry with a new harness',async()=>{
+  const storage=vmStorage(), a={...H.builtin(role),name:'Attempt A',version:'A1'}, b={...H.builtin(role),name:'Selected B',version:'B2'};
+  const hooks={harness:a,reply:async(p,body)=>{
+    if(p==='/api/'+role+'/jobs')return {id:body.requestId};
+    const r=P.read(role,storage).record;
+    if(r.request.harness.name==='Attempt A')return {...job(r,'failed',{failure:{schema:'falsify.adapter-failure.v1',code:'timeout',stage:'execute',recovery:'retry'}}).body};
+    return completedBody(r);
+  }};
+  const page=role==='red'?await redPage(storage,hooks):await bluePage(storage,hooks);
+  await page.load();const prefix=role==='red'?'red':'doc-blue';page.get(prefix+'-consent').checked=true;page.get(prefix+'-start').click();
+  await until(()=>P.read(role,storage).record?.disposition==='failed','first failure');
+  await until(()=>page.get(prefix+'-progress').textContent.includes('Attempt A'),'failure identity');
+  const old=P.read(role,storage).record, text=page.get(prefix+'-progress').textContent;
+  assert.ok(text.includes('A1')&&text.includes(old.harnessHash));
+  hooks.harness=b;page.get(prefix+'-start').click();page.get(prefix+'-start').click();
+  await until(()=>P.read(role,storage).record?.disposition==='completed','retry completion');
+  const posts=page.calls.filter(c=>c.path==='/api/'+role+'/jobs');assert.equal(posts.length,2);assert.equal(posts[1].body.harness.name,'Selected B');
+  const details=page.get(role==='red'?'red-previous-failure':'doc-blue-retry-previous');assert.equal(details.hidden,false);
+  details.children[1].click();details.children[2].click();
+  const diagnostic=JSON.parse(await page.downloads.at(-2).text()), original=JSON.parse(await page.downloads.at(-1).text());
+  assert.equal(diagnostic.harnessName,'Attempt A');assert.equal(diagnostic.harnessVersion,'A1');assert.equal(diagnostic.harnessHash,old.harnessHash);assert.equal(original.harness.name,'Attempt A');
+});
+
 const CITE='BLUE 재독 기준 인용이 해당 문단에 없거나 중복됩니다.';
 function storedBlue(storage){return JSON.parse(storage.raw.get(P.storageKey('blue')));}
 function matchedJob(storage,state,extra={}){const record=storedBlue(storage);return {id:record.requestId,role:'blue',state,sourceHash:record.sourceHash,revision:record.revision,harnessHash:record.harnessHash,companionInstance:record.companionInstance,requestBytesDigest:record.requestBytesDigest,progress:{completedCalls:1,requiredCalls:1,phase:'reread'},...extra};}
@@ -495,7 +519,7 @@ test('BLUE failure stays visible across live poll, reload, and connection and do
   await new Promise(r=>setTimeout(r,20));
   assert.equal(page.downloads.length,before+2);
   const diagnostic=JSON.parse(await page.downloads[before].text()),exported=JSON.parse(await page.downloads[before+1].text());
-  assert.deepEqual(Object.keys(diagnostic).sort(),['adapterFailure','companionInstance','disposition','fileHash','harnessHash','postReceipt','requestBytesDigest','requestFingerprint','requestId','revision','role','schema','serverFailure','sourceHash']);
+  assert.deepEqual(Object.keys(diagnostic).sort(),['adapterFailure','companionInstance','disposition','fileHash','harnessHash','harnessName','harnessVersion','postReceipt','requestBytesDigest','requestFingerprint','requestId','revision','role','schema','serverFailure','sourceHash']);
   assert.equal(diagnostic.serverFailure,cite);assert.equal(JSON.stringify(diagnostic).includes('SHOULD-NOT-APPEAR'),false);assert.equal(JSON.stringify(diagnostic).includes('Bearer'),false);
   assert.deepEqual(exported,JSON.parse(requestSnap));assert.equal(JSON.stringify(exported).includes('"token"'),false);
   let reloadStep='same';
