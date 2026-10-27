@@ -43,3 +43,16 @@ test('image occurrences retain decoded content, alpha mask and distinct placemen
  if(a.content.mask){const mask=new mupdf.Image(a.content.mask.bytes),maskPixmap=mask.toPixmap();try{const samples=Array.from(maskPixmap.getPixels());assert.ok(samples.includes(0));assert.ok(samples.includes(255));}finally{maskPixmap.destroy();mask.destroy();}}
  const figures=m.blocks.filter(x=>x.kind==='figure');assert.deepEqual(figures.map(x=>x.assetIds[0]),m.assets.map(x=>x.id));assert.ok(m.diagnostics.some(x=>x.code==='font-program-unavailable'));assert.deepEqual(m.blocks.find(x=>x.kind==='paragraph').source.lines.map(l=>m.pages[0].text.slice(l.range.start,l.range.end)),['Line one','Line two']);
 });
+
+function unicodeFixture(){
+ const cmap='/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n/CMapName /Test def\n/CMapType 2 def\n1 begincodespacerange\n<00> <FF>\nendcodespacerange\n4 beginbfchar\n<41> <0058>\n<42> <D83DDE00>\n<43> <D835DC00>\n<44> <0059>\nendbfchar\nendcmap\nCMapName currentdict /CMap defineresource pop\nend end';
+ const stream='BT /F 12 Tf 30 100 Td (ABCD) Tj ET';
+ const objects=['<< /Type /Catalog /Pages 2 0 R >>','<< /Type /Pages /Kids [3 0 R] /Count 1 >>','<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] /Resources << /Font << /F 4 0 R >> >> /Contents 5 0 R >>','<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /ToUnicode 6 0 R >>',`<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`,`<< /Length ${cmap.length} >>\nstream\n${cmap}\nendstream`];
+ let pdf='%PDF-1.4\n',offsets=[0];for(let i=0;i<objects.length;i++){offsets.push(pdf.length);pdf+=`${i+1} 0 obj\n${objects[i]}\nendobj\n`;}const x=pdf.length;pdf+=`xref\n0 ${offsets.length}\n0000000000 65535 f \n`+offsets.slice(1).map(n=>String(n).padStart(10,'0')+' 00000 n \n').join('')+`trailer\n<< /Size ${offsets.length} /Root 1 0 R >>\nstartxref\n${x}\n%%EOF\n`;return new TextEncoder().encode(pdf);
+}
+test('supplementary scalars agree with independent PDF.js and retain UTF-16 source ranges',async()=>{
+ const pdfjs=await import('pdfjs-dist/legacy/build/pdf.mjs');pdfjs.GlobalWorkerOptions.workerSrc=new URL('../node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs',import.meta.url).href;
+ const bytes=unicodeFixture(),model=await readDocument({file:bytes}),again=await readDocument({file:bytes});const task=pdfjs.getDocument({data:bytes.slice()});
+ try{const doc=await task.promise,page=await doc.getPage(1),content=await page.getTextContent();assert.equal(content.items.map(item=>item.str).join(''),'X😀𝐀Y');assert.equal(model.pages[0].text,'X😀𝐀Y');}finally{await task.destroy();}
+ const b=model.blocks[0];assert.equal(b.text,'X😀𝐀Y');assert.deepEqual(b.source.range,{start:0,end:6});assert.deepEqual(b.source.characters.map(c=>[c.start,c.end]),[[0,1],[1,3],[3,5],[5,6]]);assert.deepEqual(b.source.lines.map(l=>l.range),[{start:0,end:6}]);assert.equal(b.id,again.blocks[0].id);assert.equal(b.id,`block-${createHash('sha256').update(JSON.stringify([model.sourceSha256,0,0,6])).digest('hex').slice(0,24)}`);
+});

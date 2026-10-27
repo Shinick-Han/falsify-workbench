@@ -112,6 +112,27 @@ export async function readDocument({file,fileHash,signal} = {}) {
             finally {maskPixmap?.destroy();mask?.destroy();pixmap?.destroy();image.destroy();}
             observed.images.push({bbox:[...bbox],transform:[...transform],readerPosition:readerPosition++,content});
           }});
+        // JSON is printed from the same native structured-text page using full runes.
+        // Require exact one-to-one agreement with the walker's truncated UTF-16 units
+        // before transferring scalar values onto its geometry and font observations.
+        let scalarText;
+        try {
+          const json=JSON.parse(st.asJSON());
+          if (!Array.isArray(json.blocks)) throw new Error('Missing blocks');
+          scalarText=json.blocks.filter(b=>b.type==='text').flatMap(b=>{
+            if (!Array.isArray(b.lines)) throw new Error('Missing lines');
+            return b.lines.flatMap(l=>{if(typeof l.text!=='string') throw new Error('Missing text'); return [...l.text];});
+          });
+          const chars=observed.blocks.flatMap(b=>b.chars);
+          if (chars.length!==scalarText.length || scalarText.some((s,j)=>{
+            const cp=s.codePointAt(0);
+            return cp>=0xD800 && cp<=0xDFFF || chars[j].text!==String.fromCharCode(cp);
+          })) throw new Error('Reader streams differ');
+          chars.forEach((c,j)=>{c.text=scalarText[j];});
+        } catch (cause) {
+          const e=new Error('Unicode-preserving structured text correspondence unavailable',{cause});
+          e.code='unicode-extraction-unavailable'; throw e;
+        }
         pages.push(observed);
       } finally {st?.destroy();page?.destroy();}
       // Yield to allow an AbortSignal from the event loop to be observed between pages.
