@@ -40,6 +40,7 @@ function maskEvents(events) {
 test('mask scope rejects masked placements but permits later unrelated images',()=>{
  const masked=maskEvents((d,image)=>{d.beginMask([],false,null);d.endMask();d.fillImage(image(),[100,0,0,50,20,100],1);d.popClip();});
  assert.equal(masked.spans.length,0);
+ assert.equal(masked.evidence[0].reason,'masked-or-clipped-placement');
  const unrelated=maskEvents((d,image)=>{d.beginMask([],false,null);d.endMask();d.fillImage(image(),[10,0,0,10,200,200],1);d.popClip();d.fillImage(image(),[100,0,0,50,20,100],1);});
  assert.equal(unrelated.evidence[0].reason,'resolved');
 });

@@ -28,7 +28,7 @@ export function resolveOutputAssetSpans({bytes,mupdf,flow,blockSpans}={}) {
           clipStrokeText(text,stroke){text.destroy();stroke.destroy();clips.push(null);},
           clipImageMask(image){image.destroy();clips.push(null);},
           popClip(){if(clips.length) clips.pop(); else failed=true;},
-          fillImage(image,ctm,alpha) { try { const [a,b,c,d,e,f]=ctm; const bbox=[Math.min(e,e+a,e+c,e+a+c),Math.min(f,f+b,f+d,f+b+d),Math.max(e,e+a,e+c,e+a+c),Math.max(f,f+b,f+d,f+b+d)]; if (!maskDepth) placements.push({bbox,valid:ctm.every(Number.isFinite) && a>0 && d>0 && Math.abs(b)<1e-5 && Math.abs(c)<1e-5 && alpha===1 && box(bbox) && inside(bbox,bounds) && clips.every(clip=>clip && inside(bbox,clip))}); } finally {image.destroy();} },
+          fillImage(image,ctm,alpha) { try { const [a,b,c,d,e,f]=ctm; const bbox=[Math.min(e,e+a,e+c,e+a+c),Math.min(f,f+b,f+d,f+b+d),Math.max(e,e+a,e+c,e+a+c),Math.max(f,f+b,f+d,f+b+d)]; if (!maskDepth) placements.push({bbox,valid:ctm.every(Number.isFinite) && a>0 && d>0 && Math.abs(b)<1e-5 && Math.abs(c)<1e-5 && alpha===1 && box(bbox) && inside(bbox,bounds) && clips.every(clip=>clip && inside(bbox,clip)), uncertainClip:clips.some(clip=>!clip || !inside(bbox,clip))}); } finally {image.destroy();} },
           fillImageMask(image,ctm) { try { if (!maskDepth) { const [a,b,c,d,e,f]=ctm; placements.push({bbox:[Math.min(e,e+a,e+c,e+a+c),Math.min(f,f+b,f+d,f+b+d),Math.max(e,e+a,e+c,e+a+c),Math.max(f,f+b,f+d,f+b+d)],valid:false}); } } finally {image.destroy();} },
           beginMask(area,luminosity,colorspace) {maskDepth++; colorspace?.destroy();},
           endMask(){if (maskDepth) {maskDepth--; clips.push(null);} else failed=true;}
@@ -51,8 +51,9 @@ export function resolveOutputAssetSpans({bytes,mupdf,flow,blockSpans}={}) {
           const pg=pages[s.page-1], height=e.y-s.y, tol=1.5;
           if (pg.failed || !box(pg.bounds) || !inside([s.x,s.y,s.x+0.001,e.y],pg.bounds)) reason='unavailable-page';
           else {
-            candidates=pg.placements.filter(p=>p.valid && Math.abs(p.bbox[0]-s.x)<=tol && Math.abs(p.bbox[1]-s.y)<=tol && Math.abs(p.bbox[3]-e.y)<=tol && Math.abs((p.bbox[3]-p.bbox[1])-height)<=2*tol && (!box(b) || Math.abs(Math.log(((p.bbox[2]-p.bbox[0])/(p.bbox[3]-p.bbox[1]))/((b[2]-b[0])/(b[3]-b[1]))))<=0.02));
-            if(candidates.length!==1) reason=candidates.length?'ambiguous-placement':'no-matching-placement';
+            const matching=pg.placements.filter(p=>Math.abs(p.bbox[0]-s.x)<=tol && Math.abs(p.bbox[1]-s.y)<=tol && Math.abs(p.bbox[3]-e.y)<=tol && Math.abs((p.bbox[3]-p.bbox[1])-height)<=2*tol && (!box(b) || Math.abs(Math.log(((p.bbox[2]-p.bbox[0])/(p.bbox[3]-p.bbox[1]))/((b[2]-b[0])/(b[3]-b[1]))))<=0.02));
+            candidates=matching.filter(p=>p.valid);
+            if(candidates.length!==1) reason=candidates.length?'ambiguous-placement':matching.some(p=>p.uncertainClip)?'masked-or-clipped-placement':'no-matching-placement';
             else if (pg.placements.some(p=>p!==candidates[0] && box(p.bbox) && overlaps(p.bbox,candidates[0].bbox))) reason='overlapping-placement';
             else claims.push({id,ids,pageIndex:s.page-1,placement:candidates[0]});
           }
