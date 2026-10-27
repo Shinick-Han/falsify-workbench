@@ -1158,6 +1158,21 @@ test('font buttons pass a frozen font snapshot to PDF generation and mark the pr
   assert.equal(requests[1].fontSnapshot.digest,'fonts-1');assert.equal(v.get('paper-current-download').textContent,'현재 생성본 다운로드');
 });
 
+test('generation failure identifies pages and causes while preserving edits and last output',async()=>{
+  const file=pdfFile(pdfBytes('MARKER-GEN'),'edited.pdf');let failure=null;
+  const v=mount({paragraphPdf:{...paragraphMock('Original paragraph.'),prepare:async()=>{
+    if(failure)throw failure;return {file,sha256:sha(pdfBytes('MARKER-GEN')),verification:{status:'applied'}};
+  }}});
+  v.file(pdfFile(pdfBytes('MARKER-A')));await until(()=>/문단을 클릭/.test(v.get('paper-before-status').textContent),'source');
+  clickParagraph(v);v.get('paper-inline-after').value='Replacement paragraph.';v.get('paper-inline-apply').click();
+  v.get('paper-generate').click();await until(()=>v.ws.getOutput()&&!v.get('paper-generate').disabled,'first output');
+  failure=Object.assign(new Error('2 edit(s) could not be matched exactly once or planned'),{code:'MATCH_FAILED',details:{failures:[{pageIndex:9,code:'NOT_FOUND'},{pageIndex:18,code:'AMBIGUOUS_MATCH'}]}});
+  v.get('paper-generate').click();await until(()=>/생성하지 못했습니다/.test(v.get('paper-generate-status').textContent)&&!v.get('paper-generate').disabled,'failure');
+  assert.match(v.get('paper-generate-status').textContent,/쪽 10 · 원문 인용의 위치를 찾지 못했습니다/);
+  assert.match(v.get('paper-generate-status').textContent,/쪽 19 · 같은 원문 인용이 여러 곳에 있습니다/);
+  assert.equal(v.ws.getOutput().file,file);assert.equal(v.ws.getEditSnapshot().edits[0].after,'Replacement paragraph.');
+});
+
 (async()=>{let passed=0;for(const [name,fn] of tests){try{await fn();passed++;console.log('PASS '+name);}catch(e){console.error('FAIL '+name+'\n'+(e.stack||e));process.exitCode=1;}}
   console.log(JSON.stringify({file:'paper-workspace.spec.cjs',passed,failed:tests.length-passed,total:tests.length}));})();
 
