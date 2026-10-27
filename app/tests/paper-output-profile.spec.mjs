@@ -4,8 +4,9 @@ import * as mupdf from '../dist/browser-pdf-vendor/mupdf.js';
 import {buildOutputProfile} from '../src/paper-output-profile.mjs';
 import {inspectLayoutQuality} from '../src/paper-layout-quality.mjs';
 
-function pdf({duplicate=false,image=true,duplicateImage=false,font='Courier',size=6}={}) {
+function pdf({duplicate=false,image=true,duplicateImage=false,font='Courier',size=6,subsetName}={}) {
  const d=new mupdf.PDFDocument(),f=d.addSimpleFont(new mupdf.Font(font)); const pix=new mupdf.Pixmap(mupdf.ColorSpace.DeviceRGB,[0,0,2,2],true);pix.clear(128);const im=new mupdf.Image(pix), ref=d.addImage(im);
+ if(subsetName)f.put('BaseFont',d.newName(subsetName));
  const line=(t,y)=>`BT /F ${size} Tf 30 ${y} Td (${t}) Tj ET\n`;
  d.insertPage(-1,d.addPage([0,0,300,400],0,{Font:{F:f}},line('Unrelated page',350)));
  let stream=(image?'q 100 0 0 80 80 200 cm /Im Do Q\n':'80 200 100 80 re f\n')+line('Figure 1. An image',185)+line('Scientific value p < 0.05 remains.',120);
@@ -42,4 +43,12 @@ test('multiple resource aliases nominate one actual capture without hiding dupli
  const assetSpans=['capture','im','panel'].map(id=>({id,pageIndex:1,bbox:[80,120,180,200]}));
  assert.equal(run({}, {flow:grouped,assetSpans}).profile.captions.length,1);
  assert.equal(run({duplicateImage:true}, {flow:grouped,assetSpans}).profile.captions.length,0);
+});
+test('a PDF subset prefix preserves font identity while a different family still fails',()=>{
+ const bytes=pdf({subsetName:'ABCDEF+Courier'}),profile={coordinateSpace:'output',bodyLines:[{text:'Scientific value p < 0.05 remains.'}],outputBodyFontNames:['Courier']};
+ const correct=inspectLayoutQuality({bytes,mupdf,profile});
+ assert.equal(correct.coverage.profile.fontNames.checked,1);
+ assert.ok(!correct.issues.some(x=>x.type==='body-font-deviation'));
+ const wrong=inspectLayoutQuality({bytes,mupdf,profile:{...profile,outputBodyFontNames:['Helvetica']}});
+ assert.ok(wrong.issues.some(x=>x.type==='body-font-deviation'));
 });

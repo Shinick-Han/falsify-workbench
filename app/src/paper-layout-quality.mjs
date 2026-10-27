@@ -5,6 +5,7 @@ const intersection = (a,b) => [Math.max(a[0],b[0]),Math.max(a[1],b[1]),Math.min(
 const contains = (a,b) => a[0]<=b[0]+1 && a[1]<=b[1]+1 && a[2]>=b[2]-1 && a[3]>=b[3]-1;
 const union = boxes => [Math.min(...boxes.map(b=>b[0])),Math.min(...boxes.map(b=>b[1])),Math.max(...boxes.map(b=>b[2])),Math.max(...boxes.map(b=>b[3]))];
 const norm = s => s.replace(/\s+/gu,' ').trim();
+const fontIdentity = name => String(name).replace(/^[A-Z]{6}\+/u,'');
 
 /** Optional profile: bodyFontSize, bodyFontNames, captions [{text, assetPageIndex, assetBbox}], columns.
  * Metadata nominates a relationship; both caption text and an image placement must be observed independently. */
@@ -59,7 +60,7 @@ export function inspectLayoutQuality({bytes,mupdf,profile={},sourceBytes,sourceP
       const expectedSize=Number.isFinite(body.sourceFontSize) && body.sourceFontSize>0 ? body.sourceFontSize : profile.bodyFontSize;
       if(Number.isFinite(expectedSize) && size && size<expectedSize*0.8) add('small-body-text',page.pageIndex,line.bbox,5,{text:line.text,size,expectedSize,source:'unique-output-body-line'});
       const aliases=profile.outputBodyFontNames;
-      if(Array.isArray(aliases) && aliases.length) {profileCoverage.fontNames.checked++;if(!line.chars.some(c=>aliases.includes(c.font))) add('body-font-deviation',page.pageIndex,line.bbox,3,{text:line.text,fonts:[...new Set(line.chars.map(c=>c.font))],expectedFonts:aliases,source:'unique-output-body-line'});}
+      if(Array.isArray(aliases) && aliases.length) {profileCoverage.fontNames.checked++;const allowed=aliases.map(fontIdentity);if(!line.chars.some(c=>allowed.includes(fontIdentity(c.font)))) add('body-font-deviation',page.pageIndex,line.bbox,3,{text:line.text,fonts:[...new Set(line.chars.map(c=>c.font))],expectedFonts:aliases,source:'unique-output-body-line'});}
       else if(profile.bodyFontNames?.length) profileCoverage.fontNames.skipped++;
     }
     if(!(profile.bodyLines || []).length && (profile.bodyFontSize || profile.bodyFontNames?.length || profile.outputBodyFontNames?.length)) {profileCoverage.bodyLines.skipped++;if(profile.bodyFontNames?.length || profile.outputBodyFontNames?.length) profileCoverage.fontNames.skipped++;}
