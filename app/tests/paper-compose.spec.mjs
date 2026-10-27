@@ -103,7 +103,16 @@ test('flow order, linked caption and artwork ownership set the checker expectati
  const f={schema:'falsify.paper-flow.v1',sourceSha256:d.sourceSha256,items:[{kind:'paragraph',blockIds:['b']},{kind:'asset',assetIds:['pic'],blockIds:['inside'],captionIds:['a']},{kind:'caption',blockIds:['a']}]};
  const svg=new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg" width="4" height="2"></svg>'); let checked, payload;
  const out=await composeDocument({document:d,sourceBytes:src,flow:f,assets:[{id:'pic',content:{representation:'svg',bytes:svg}}]},{compile:async p=>(payload=p,pdf),outputCheck:async x=>(checked=x.expectedBlocks,{checks:{content:{status:'pass'}},findings:[]})});
- assert.deepEqual(checked.map(x=>x.id),['b','a']); assert.deepEqual(out.verification.artworkBlocks.map(x=>x.id),['inside']); assert.equal(out.verification.contentVerified,false); assert.match(payload.source,/#block\(breakable: false\)/); assert.equal(payload.source.split('repeat hard-repeat').length-1,1);
+ assert.deepEqual(checked.map(x=>x.id),['b','a']); assert.deepEqual(out.verification.artworkBlocks.map(x=>x.id),['inside']); assert.equal(out.verification.contentVerified,false); assert.match(payload.source,/#block\(sticky: true\)\[\#image\([^\n]+\)\]/); assert.equal(payload.source.split('repeat hard-repeat').length-1,1);
+});
+
+test('tall source artwork fits page height with a separate flowing caption',async()=>{
+ const d=make(), source={pageIndex:0,bbox:[0,0,200,1000]};
+ const flow={schema:'falsify.paper-flow.v1',sourceSha256:d.sourceSha256,items:[{kind:'asset',span:'page',assetIds:['pic'],blockIds:[],captionIds:['a'],source},{kind:'caption',blockIds:['a']},{kind:'paragraph',blockIds:['b']}]};
+ const svg=new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg" width="200" height="1000"></svg>');let generated;
+ await composeDocument({document:d,sourceBytes:src,flow,assets:[{id:'pic',source,content:{representation:'svg',bytes:svg}}]},{compile:async p=>(generated=p.source,pdf)});
+ assert.match(generated,/#block\(sticky: true\)\[#image\("assets\/0.svg", width: 101.6pt\)\]/);
+ assert.ok(generated.indexOf('#text("repeat hard-repeat')>generated.indexOf('width: 101.6pt)]'));
 });
 
 test('union capture owns panels and rejects missing or malformed occurrences',async()=>{

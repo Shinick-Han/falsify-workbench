@@ -185,8 +185,13 @@ export async function composeDocument({document, edits=[], flow, assets, signal,
     const path=`assets/${placedAssets.size}.${ext}`; files[path]=new Uint8Array(bytes); placedAssets.add(id);
     const bbox=asset.source?.bbox || item?.source?.bbox;
     const sourceWidth=Array.isArray(bbox) ? bbox[2]-bbox[0] : null;
+    const sourceHeight=Array.isArray(bbox) ? bbox[3]-bbox[1] : null;
     const available=(page.width-72)/(item?.span==='page' || item?.columns!==2 ? 1 : 2);
-    const width=Number.isFinite(sourceWidth) && sourceWidth>0 ? `${Math.min(sourceWidth,available)}pt` : '100%';
+    // Reserve a line for the caption when a source region is nearly page-high.
+    // Scaling the width from the source rectangle preserves the capture's ratio.
+    const maxHeight=Math.max(1,page.height-72-((item?.captionIds || []).length ? 20 : 0));
+    const heightLimited=Number.isFinite(sourceHeight) && sourceHeight>0 && Number.isFinite(sourceWidth) && sourceWidth>0 ? maxHeight*sourceWidth/sourceHeight : Infinity;
+    const width=Number.isFinite(sourceWidth) && sourceWidth>0 ? `${Math.min(sourceWidth,available,heightLimited)}pt` : '100%';
     return `#image(${typstString(path)}, width: ${width})`;
   }
   if (flow) {
@@ -207,7 +212,7 @@ export async function composeDocument({document, edits=[], flow, assets, signal,
         } else if((item.assetIds||[]).length>1) assetFindings.push({code:'asset-union-required',assetIds:[...item.assetIds]});
         else parts=(item.assetIds||[]).map(id=>renderAsset(id,item)).filter(Boolean);
         const captions=(item.captionIds||[]).map(id=>renderBlock(blockById.get(id))).filter(Boolean);
-        if(parts.length && captions.length) parts=[`#block(breakable: false)[${parts.join('\n')}\n${captions.join('\n')}]`]; else parts.push(...captions);
+        if(parts.length && captions.length) parts=[`#block(sticky: true)[${parts.join('\n')}]`,...captions]; else parts.push(...captions);
       } else {
         parts=(item.blockIds||[]).filter(id=>!linkedCaptions.has(id)).map(id=>blockById.get(id)).filter(Boolean).map(renderBlock);
         if(!item.inline) parts=parts.filter(Boolean);
