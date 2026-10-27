@@ -69,6 +69,8 @@ function explicitParts(document, flow, edit, selection, index) {
   const parts=selection.parts.map(p=>{
     const b=blocks.get(p?.blockId), r=b?.source?.range;
     if(!b || !r || p.pageIndex!==edit.pageIndex || b.source.pageIndex!==p.pageIndex || !Number.isInteger(p.start) || !Number.isInteger(p.end) || p.start<r.start || p.end>r.end || p.start>=p.end || typeof p.before!=='string' || b.text.slice(p.start-r.start,p.end-r.start)!==p.before) bad('Explicit part does not match its native source.');
+    const splitsScalar=offset=>offset>0 && offset<b.text.length && /[\uD800-\uDBFF]/u.test(b.text[offset-1]) && /[\uDC00-\uDFFF]/u.test(b.text[offset]);
+    if(splitsScalar(p.start-r.start) || splitsScalar(p.end-r.start)) bad('Explicit part splits a Unicode scalar.');
     if(assetRanges.some(a=>a.blockId===p.blockId && p.start<a.end && p.end>a.start)) bad('Explicit selection includes asset-owned text.');
     return {blockId:p.blockId,pageIndex:p.pageIndex,start:p.start,end:p.end,before:p.before};
   });
@@ -110,7 +112,6 @@ export function bindEdits(document, flow, edits, explicit=[]) {
     const variants=/-[^\S\r\n]*[\r\n]/u.test(e.before)?[streams,wrapped]:[streams];
     for(const variant of variants) { const stream=variant.get(e.pageIndex);
     if(stream) for(let at=stream.text.indexOf(needle);at>=0;at=stream.text.indexOf(needle,at+1)) {
-      if(/[0-9]/u.test(needle[0]) && /[-+−]/u.test(stream.text[at-1]||'')) continue;
       const refs=[];
       for(let pos=at;pos<at+needle.length;pos++) {
         refs.push(...stream.map[pos]);
@@ -150,7 +151,7 @@ export async function prepare(request={}, options={}) {
   const candidates=(options.fonts||[]).map(f=>({...f,bytes:f.bytes instanceof Uint8Array?Uint8Array.from(f.bytes):f.bytes instanceof ArrayBuffer?f.bytes.slice(0):f.bytes}));
   const snapshot=Array.isArray(request.edits)?{edits:request.edits}:request.edits;
   if(!snapshot || !Array.isArray(snapshot.edits) || (snapshot.schema && snapshot.schema!=='falsify.paper-edits.v1')) fail('invalid','Expected edit array or paper edit snapshot.');
-  const edits=structuredClone(snapshot.edits), revision=snapshot.revision??request.revision??null;
+  const edits=structuredClone(snapshot.edits), explicit=structuredClone(request.bindings??[]), revision=snapshot.revision??request.revision??null;
   const hash=request.fileHash||snapshot.fileHash;
   if(request.fileHash && snapshot.fileHash && request.fileHash.toLowerCase()!==snapshot.fileHash.toLowerCase()) fail('stale-source','Request and snapshot hashes differ.');
   const input=request.file;
@@ -160,7 +161,7 @@ export async function prepare(request={}, options={}) {
   const spacing=await recoverSourceSpaces({bytes,document:observed,pdfjs:options.pdfjs,signal}); const document=spacing.document; abort(signal);
   const inventory=await readSourceAssets({bytes,document,signal}); abort(signal);
   const flow=buildPaperFlow(document,{drawings:inventory.drawings});
-  const {bindings,changes}=bindEdits(document,flow,edits,request.bindings??[]);
+  const {bindings,changes}=bindEdits(document,flow,edits,explicit);
   const regions=(flow.regions||[]).map(r=>structuredClone(r));
   const ids=new Set(regions.map(r=>r.id));
   for(const item of flow.items.filter(i=>i.kind==='asset' && !i.renderAssetId)) {

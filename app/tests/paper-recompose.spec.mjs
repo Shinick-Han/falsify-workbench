@@ -26,7 +26,10 @@ test('line-end punctuation stays literal and wrapped quotes retain raw ranges',(
   assert.throws(()=>bind('resign'),e=>e.details.code==='NO_MATCH');
   for(const before of ['re-sign','re-\nsign']) {const result=bind(before,'  exact\nafter ');assert.equal(result.bindings[0].sourceBefore,'re-sign');assert.deepEqual(result.changes.map(p=>[p.start,p.end,p.before,p.after]),[[start,start+7,'re-sign','  exact\nafter ']]);}
   assert.throws(()=>bind('Re-sign'),e=>e.details.code==='NO_MATCH');assert.deepEqual(d,original);
-  set('-12',1);assert.throws(()=>bind('12'),e=>e.details.code==='NO_MATCH');assert.equal(bind('-12').changes[0].before,'-12');
+  for(const sign of ['-','+','−']) {
+    set(`${sign}12`,1); const change=bind('12','13').changes[0];
+    assert.equal(change.before,'12'); assert.equal(b.text.slice(0,change.start-start)+change.after+b.text.slice(change.end-start),`${sign}13`);
+  }
   set('re\u00adsign',7);assert.throws(()=>bind('resign'),e=>e.details.code==='NO_MATCH');assert.equal(bind('re\u00adsign').changes[0].before,'re\u00adsign');
 });
 test('repeated wrapped literal hyphen remains ambiguous',()=>{const {d,flow}=synthetic(),[a,b]=d.blocks;for(const block of [a,b]){const start=block.source.range.start;block.text='re-sign';block.source.range.end=start+7;block.source.lines=[{range:{start,end:start+3}},{range:{start:start+3,end:start+7}}];}flow.items=[a,b].map(block=>({kind:'paragraph',blockIds:[block.id]}));assert.throws(()=>bindEdits(d,flow,[{pageIndex:0,before:'re-\nsign',after:'quit'}]),e=>e.details.code==='AMBIGUOUS_MATCH');});
@@ -75,4 +78,23 @@ test('duplicate flow ownership is rejected for explicit selection',()=>{
   const {d,flow}=synthetic(),b=d.blocks[0];flow.items.push({kind:'paragraph',blockIds:[b.id]});
   const part={blockId:b.id,pageIndex:0,start:b.source.range.start,end:b.source.range.end,before:b.text};
   assert.throws(()=>bindEdits(d,flow,[{pageIndex:0,before:'other',after:'x'}],[{index:0,sourceSha256:d.sourceSha256,parts:[part]}]),e=>e.details.code==='AMBIGUOUS_EXPLICIT');
+});
+
+
+test('explicit parts cannot split a surrogate pair',()=>{
+  const {d,flow}=synthetic(), b=d.blocks[0], start=b.source.range.start;
+  b.text='A😀B'; b.source.range.end=start+b.text.length; flow.items=[{kind:'paragraph',blockIds:[b.id]}];
+  const select=(from,to)=>({index:0,sourceSha256:d.sourceSha256,parts:[{blockId:b.id,pageIndex:0,start:start+from,end:start+to,before:b.text.slice(from,to)}]});
+  const edits=[{pageIndex:0,before:'other',after:'x'}];
+  for(const [from,to] of [[0,2],[2,4]]) assert.throws(()=>bindEdits(d,flow,edits,[select(from,to)]),e=>e.details.code==='INVALID_EXPLICIT');
+  assert.equal(bindEdits(d,flow,edits,[select(1,3)]).changes[0].before,'😀');
+});
+
+test('prepare snapshots explicit selection and source inputs before reading a File',async()=>{
+  const bytes=fixture(), document=await readDocument({file:bytes}), block=document.blocks.find(b=>b.text.includes('First value -12'));
+  const start=block.source.range.start+block.text.indexOf('First value -12'), originalSignal=new AbortController().signal;
+  const request={fileHash:sha(bytes),revision:4,signal:originalSignal,edits:[{id:'chosen',pageIndex:0,before:'external quote',after:'changed'}],bindings:[{id:'chosen',sourceSha256:document.sourceSha256,parts:[{blockId:block.id,pageIndex:0,start,end:start+15,before:'First value -12'}]}]};
+  request.file={async arrayBuffer(){request.bindings[0].parts[0].before='mutated'; request.fileHash='0'.repeat(64); request.revision=9; const c=new AbortController(); c.abort(); request.signal=c.signal; return bytes.slice().buffer;}};
+  const result=await prepare(request,{mupdf,compile:async()=>fakePdf});
+  assert.equal(result.bindings[0].sourceBefore,'First value -12'); assert.equal(result.revision,4);
 });
