@@ -13,7 +13,7 @@ const box = b => Array.isArray(b) && b.length===4 && b.every(Number.isFinite) &&
 const overlaps = (a,b) => a[0]<b[2] && b[0]<a[2] && a[1]<b[3] && b[1]<a[3];
 
 // Keep one map entry per UTF-16 unit. Generated separators have no source.
-function pageStreams(document, flow, visibleWrap=false, logicalWrap=false) {
+function pageStreams(document, flow, visibleWrap=false) {
   const lookup=new Map([...document.blocks,...(flow.fragments||[])].map(b=>[b.id,b]));
   const streams=new Map();
   for(const item of flow.items) {
@@ -28,7 +28,6 @@ function pageStreams(document, flow, visibleWrap=false, logicalWrap=false) {
       const boundaries=new Set((b.source.lines||[]).slice(1).map(l=>l.range.start-b.source.range.start));
       const spaces=new Set(b.source.wordSpaceOffsets||[]);
       for(let i=0;i<b.text.length;i++) {
-        if(logicalWrap && boundaries.has(i) && i>1 && b.text[i-1]==='-' && /\p{L}/u.test(b.text[i-2]) && /\p{L}/u.test(b.text[i])) s.chars.at(-1).ch='';
         if(boundaries.has(i) && i>0 && !/\s/u.test(b.text[i-1]) && !/\s/u.test(b.text[i]) && (visibleWrap || b.text[i-1]!=='-') && !(b.text[i-1]==='−' && /[0-9]/u.test(b.text[i]))) s.chars.push({ch:' ',source:null});
         const offset=b.source.range.start+i;
         const parent=lookup.get(b.parentBlockId||b.id), parentIndex=offset-(parent?.source?.range?.start??offset);
@@ -39,9 +38,8 @@ function pageStreams(document, flow, visibleWrap=false, logicalWrap=false) {
     }
   }
   for(const s of streams.values()) {
-    s.text=''; s.map=[]; s.omitted=[];
+    s.text=''; s.map=[];
     for(const entry of s.chars) {
-      if(entry.ch==='') { s.omitted.push({at:s.text.length,source:entry.source}); continue; }
       if(/\s/u.test(entry.ch)) {
         if(s.text.endsWith(' ')) {s.map.at(-1).push(entry.source); continue;}
         s.text+=' '; s.map.push([entry.source]);
@@ -51,17 +49,17 @@ function pageStreams(document, flow, visibleWrap=false, logicalWrap=false) {
   return streams;
 }
 export function bindEdits(document, flow, edits) {
-  const streams=pageStreams(document,flow), wrapped=pageStreams(document,flow,true), logical=pageStreams(document,flow,false,true), blocks=new Map(document.blocks.map(b=>[b.id,b]));
+  const streams=pageStreams(document,flow), wrapped=pageStreams(document,flow,true), blocks=new Map(document.blocks.map(b=>[b.id,b]));
   const bindings=[], changes=[], used=new Map();
   for(const [index,e] of edits.entries()) {
     if(!Number.isInteger(e.pageIndex) || typeof e.before!=='string' || !e.before.trim() || typeof e.after!=='string') fail('invalid-edit','Edit requires pageIndex, Before and After.',{index,id:e.id});
     const needle=e.before.replace(/\s+/gu,' '), hits=[];
-    const variants=/-[^\S\r\n]*[\r\n]/u.test(e.before)?[streams,wrapped,logical]:[streams,logical];
+    const variants=/-[^\S\r\n]*[\r\n]/u.test(e.before)?[streams,wrapped]:[streams];
     for(const variant of variants) { const stream=variant.get(e.pageIndex);
     if(stream) for(let at=stream.text.indexOf(needle);at>=0;at=stream.text.indexOf(needle,at+1)) {
+      if(/[0-9]/u.test(needle[0]) && /[-+−]/u.test(stream.text[at-1]||'')) continue;
       const refs=[];
       for(let pos=at;pos<at+needle.length;pos++) {
-        refs.push(...stream.omitted.filter(x=>x.at===pos && pos>at).map(x=>x.source));
         refs.push(...stream.map[pos]);
       }
       const selected=refs.filter(Boolean);
