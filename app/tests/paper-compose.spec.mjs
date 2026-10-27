@@ -28,3 +28,57 @@ test('figure with no source range is reported as unsupported rather than silentl
  await composeDocument({document:d,sourceBytes:src,edits:[{blockId:'x',pageIndex:0,start:0,end:11,before:'hard-repeat',after:'new-word'}]},{compile:async p=>(captured=p.source,pdf)}); assert.ok(captured.includes(typstString('new-word keep  space −12')));
  });
  test('checker mismatch remains a finding and draft is downloadable',async()=>{const out=await composeDocument({document:make(),sourceBytes:src},{compile:async()=>pdf,outputCheck:async()=>({checks:{content:{status:'unavailable'}},findings:[{code:'content-mismatch'}]})});assert.equal(out.verification.outputTextCheck,'finding');assert.equal(out.verification.status,'finding');assert.equal(out.file.size,pdf.length);});
+
+
+test('source-to-logical edit mapping keeps boundaries and literal neighbors',async()=>{
+ const cases=[
+  ['helloworld',[5],5,10,'earth','hello earth'],
+  ['helloworld',[5],0,5,'hi','hi world'],
+  ['helloworld',[5],3,7,'X','helXrld'],
+  ['helloworld',[5],5,10,'','hello '],
+  ['hello world',[5],6,11,'earth','hello earth'],
+  ['hard-repeat',[5],5,11,'word','hard-word'],
+  ['hard-repeat',[5],0,5,'soft-','soft-repeat'],
+  ['−12',[1],1,3,'34','−34'],
+ ];
+ for(const [raw,bounds,start,end,after,expected] of cases){
+  const d=make(); const points=[0,...bounds,raw.length];
+  d.blocks=[{id:'x',text:raw,source:{pageIndex:0,range:{start:0,end:raw.length},lines:points.slice(1).map((end,i)=>({range:{start:points[i],end}}))}}];
+  const original=structuredClone(d); let captured;
+  const out=await composeDocument({document:d,sourceBytes:src,edits:[{blockId:'x',pageIndex:0,start,end,before:raw.slice(start,end),after}]},{compile:async p=>(captured=p.source,pdf),outputCheck:async ({expectedBlocks})=>{assert.equal(expectedBlocks[0].text,expected);return {checks:{content:{status:'pass'}},findings:[]}}});
+  assert.ok(captured.includes(typstString(expected)),raw); assert.deepEqual(d,original); assert.equal(out.verification.contentVerified, !out.verification.ambiguousBoundaries.length);
+ }
+});
+
+test('signed numeric boundaries preserve independent literal expectations',async()=>{
+ for(const [raw,cut,expected] of [['−12',1,'−12'],['-12',1,'-12'],['hard-repeat',5,'hard-repeat'],['helloWorld',5,'hello World']]){
+  const d=make();d.blocks=[{id:'x',text:raw,source:{pageIndex:0,range:{start:0,end:raw.length},lines:[{range:{start:0,end:cut}},{range:{start:cut,end:raw.length}}]}}];
+  await composeDocument({document:d,sourceBytes:src},{compile:async ({source})=>{assert.ok(source.includes(typstString(expected)));return pdf},outputCheck:async ({expectedBlocks})=>{assert.equal(expectedBlocks[0].text,expected);return {checks:{content:{status:'pass'}},findings:[]}}});
+ }
+});
+
+test('Buffer snapshots own source, compiler result and checker bytes',async()=>{
+ const input=Buffer.from(src), bytes=Buffer.from(pdf), inputOriginal=Buffer.from(input), bytesOriginal=Buffer.from(bytes), d=make(); let release;
+ const gate=new Promise(r=>release=r);
+ const pending=composeDocument({document:d,sourceBytes:input},{fonts:{hasGlyph:async()=>{await gate;return true}},compile:async()=>bytes,outputCheck:async ({bytes:checked})=>{assert.deepEqual(checked,new Uint8Array(bytesOriginal));checked.fill(1);bytes.fill(2);return {checks:{content:{status:'pass'}},findings:[]}}});
+ input.fill(3);release(); const out=await pending;
+ assert.equal(out.verification.sourceSha256,sha(inputOriginal)); assert.equal(out.sha256,sha(bytesOriginal));
+ const fileBytes=new Uint8Array(await out.file.arrayBuffer());assert.deepEqual(fileBytes,new Uint8Array(bytesOriginal));assert.equal(sha(fileBytes),out.sha256);
+ assert.deepEqual(input,Buffer.alloc(input.length,3));assert.deepEqual(bytes,Buffer.alloc(bytes.length,2));
+});
+
+test('worker settles and cleans handlers on each completion path',async()=>{
+ for(const mode of ['throw','messageerror','error','success','abort']){
+  const c=new AbortController();let terminated=0, removes=0;const originalRemove=c.signal.removeEventListener.bind(c.signal);c.signal.removeEventListener=(...args)=>{removes++;return originalRemove(...args)};
+  const w={terminate(){terminated++},postMessage(){if(mode==='throw')throw new DOMException('clone error','DataCloneError');if(mode==='messageerror')this.onmessageerror({});if(mode==='error')this.onerror({message:'failed'});if(mode==='success')this.onmessage({data:{bytes:pdf}});if(mode==='abort')c.abort()}};
+  const pending=compileInWorker(w,{},c.signal);
+  if(mode==='success') assert.equal(await pending,pdf);else await assert.rejects(pending);
+  c.abort();assert.equal(terminated,1,mode);assert.equal(removes,1,mode);assert.equal(w.onmessage,null);assert.equal(w.onerror,null);assert.equal(w.onmessageerror,null);
+ }
+});
+
+test('ambiguous line break cannot claim content verification from a guessed separator',async()=>{
+ const d=make();d.blocks=[{id:'x',text:'helloworld',source:{pageIndex:0,range:{start:0,end:10},lines:[{range:{start:0,end:5}},{range:{start:5,end:10}}]}}];
+ const out=await composeDocument({document:d,sourceBytes:src},{compile:async()=>pdf,outputCheck:async ({expectedBlocks})=>{assert.equal(expectedBlocks[0].text,'hello world');return {checks:{content:{status:'pass'}},findings:[]}}});
+ assert.equal(out.verification.contentVerified,false);assert.equal(out.verification.outputTextCheck,'pass');assert.deepEqual(out.verification.ambiguousBoundaries,[{blockId:'x',offset:5}]);
+});

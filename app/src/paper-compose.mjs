@@ -25,22 +25,38 @@ function lineBoundaries(block) {
   return bounds;
 }
 function logicalText(block, changes) {
-  const raw=block.text, bounds=lineBoundaries(block); let out='';
-  for (let i=0;i<=raw.length;) {
-    const edit=changes.find(e=>e.start===i);
-    if (edit) { out+=edit.after; i=edit.end; if(edit.start===edit.end) fail('Empty edit ranges are unsupported'); continue; }
-    if (i===raw.length) break;
-    if (bounds.includes(i) && i>0 && raw[i-1]!=='-' && !/\s/u.test(raw[i-1]) && !/\s/u.test(raw[i])) out+=' ';
-    out+=raw[i++];
+  const raw=block.text, bounds=new Set(lineBoundaries(block));
+  let logical=''; const before=[], after=[];
+  // Map each source offset to both sides of any inserted line separator.
+  for (let i=0;i<=raw.length;i++) {
+    before[i]=logical.length;
+    if (bounds.has(i) && i>0 && i<raw.length && !/\s/u.test(raw[i-1]) && !/\s/u.test(raw[i]) && raw[i-1]!=='-' && !(raw[i-1]==='−' && /[0-9]/u.test(raw[i]))) logical+=' ';
+    after[i]=logical.length;
+    if (i<raw.length) logical+=raw[i];
   }
-  return out;
+  let out='', cursor=0;
+  for (const edit of [...changes].sort((a,b)=>a.start-b.start)) {
+    const start=after[edit.start], end=before[edit.end];
+    out+=logical.slice(cursor,start)+edit.after;
+    cursor=end;
+  }
+  return out+logical.slice(cursor);
+}
+// A source line break without whitespace does not prove whether two fragments
+// were separate words. The inserted space is a layout convention, not evidence.
+function ambiguousBoundaries(block, changes) {
+  const raw=block.text;
+  return lineBoundaries(block).filter(i=>i>0 && i<raw.length &&
+    !changes.some(e=>e.start<i && i<e.end) &&
+    !/\s/u.test(raw[i-1]) && !/\s/u.test(raw[i]) && raw[i-1]!=='-' &&
+    !(raw[i-1]==='−' && /[0-9]/u.test(raw[i])));
 }
 export async function composeDocument({document, edits=[], signal, sourceBytes}={}, {compile, fonts={}, outputCheck}={}) {
   abort(signal);
   // Own the data used by this attempt before any asynchronous operation.
   document = document == null ? document : {schema:document.schema, sourceSha256:document.sourceSha256, pages:document.pages?.map(p=>({...p})), blocks:document.blocks?.map(b=>({...b, assetIds:b.assetIds?.slice(), source:b.source && {...b.source, range:b.source.range && {...b.source.range}, lines:b.source.lines?.map(l=>({...l, range:l.range && {...l.range}}))}})), assets:document.assets?.slice()};
   edits = edits.map(e=>({...e}));
-  sourceBytes = sourceBytes instanceof Uint8Array ? sourceBytes.slice() : sourceBytes;
+  sourceBytes = sourceBytes instanceof Uint8Array ? new Uint8Array(sourceBytes) : sourceBytes;
   fonts = {...fonts};
   if (document?.schema!=='falsify.paper-document.v1' || !/^[a-f0-9]{64}$/.test(document.sourceSha256) || !Array.isArray(document.blocks) || !Array.isArray(document.pages) || !document.pages.length) fail('Invalid paper document');
   if (!(sourceBytes instanceof Uint8Array) || await hash(sourceBytes)!==document.sourceSha256) fail('Source hash mismatch or source bytes unavailable');
@@ -58,6 +74,7 @@ export async function composeDocument({document, edits=[], signal, sourceBytes}=
   }
   const expectedBlocks=document.blocks.filter(b=>typeof b.text==='string' && b.text.length).map(b=>({id:b.id,text:logicalText(b,changes.get(b.id)||[])}));
   const texts=expectedBlocks.map(b=>b.text);
+  const ambiguous=document.blocks.filter(b=>typeof b.text==='string' && b.text.length).flatMap(b=>ambiguousBoundaries(b,changes.get(b.id)||[]).map(offset=>({blockId:b.id,offset:offset+b.source.range.start})));
   const coverage=await inspectFonts(texts.join('\n'),fonts); abort(signal);
   const page=document.pages[0]; if(!Number.isFinite(page.width)||!Number.isFinite(page.height)||page.width<=0||page.height<=0) fail('Invalid page size');
   // Fixed program; paper and supplied font names occur only as string values.
@@ -66,7 +83,7 @@ export async function composeDocument({document, edits=[], signal, sourceBytes}=
   source+=texts.map(t=>`#text(${typstString(t)})`).join('\n\n');
   const compiled=await compile({source, fonts, signal}); abort(signal);
   const returnedBytes=compiled instanceof Uint8Array ? compiled : compiled?.bytes;
-  const bytes=returnedBytes instanceof Uint8Array ? returnedBytes.slice() : returnedBytes;
+  const bytes=returnedBytes instanceof Uint8Array ? new Uint8Array(returnedBytes) : returnedBytes;
   if (!(bytes instanceof Uint8Array) || new TextDecoder().decode(bytes.subarray(0,5))!=='%PDF-') fail('Compiler did not return PDF bytes');
   const sha256=await hash(bytes); abort(signal);
   const warnings=['Content, layout, output mappings and asset preservation have not been independently verified.'];
@@ -74,11 +91,14 @@ export async function composeDocument({document, edits=[], signal, sourceBytes}=
   if(coverage.status!=='covered') warnings.push(`Font coverage ${coverage.status}; output may lose glyphs.`);
   let outputTextCheck='unavailable', checkReport=null;
   if (typeof outputCheck==='function') {
-    try { checkReport=await outputCheck({bytes:bytes.slice(), expectedBlocks:expectedBlocks.map(b=>({...b}))}); abort(signal);
+    try { checkReport=await outputCheck({bytes:new Uint8Array(bytes), expectedBlocks:expectedBlocks.map(b=>({...b}))}); abort(signal);
       outputTextCheck=checkReport?.findings?.some(f=>f.code==='content-mismatch') ? 'finding' : checkReport?.checks?.content?.status || 'unavailable';
     } catch (error) { abort(signal); warnings.push(`Output text check unavailable: ${error.message}`); }
   }
+  if (ambiguous.length) {
+    warnings.push('Ambiguous source line boundaries use a spacing convention; content verification is unavailable.');
+  }
   if (outputTextCheck==='finding') warnings.push('Output text check found content loss or mismatch.');
-  const verification={status:outputTextCheck==='finding'?'finding':'warning', sourceSha256:document.sourceSha256, contentVerified:outputTextCheck==='pass', layoutVerified:false, coverage, outputTextCheck, checkReport, edits:edits.map(e=>({blockId:e.blockId,start:e.start,end:e.end,status:'bound'}))};
+  const verification={status:outputTextCheck==='finding'?'finding':'warning', sourceSha256:document.sourceSha256, contentVerified:outputTextCheck==='pass' && !ambiguous.length, layoutVerified:false, coverage, outputTextCheck, checkReport, ambiguousBoundaries:ambiguous, edits:edits.map(e=>({blockId:e.blockId,start:e.start,end:e.end,status:'bound'}))};
   return {file:new File([bytes],'recomposed.pdf',{type:'application/pdf'}),sha256,verification,pageMap:null,blockMap:null,warnings};
 }
