@@ -1155,7 +1155,7 @@ function canonicalPage(page, partition = page?.W / 2) {
     const candidates = lines2.filter((l) => l.channel === channel && Math.abs(l.y - g.origin[1]) <= 0.5 && Math.abs(l.size - size(g)) <= 0.2);
     if (candidates.length > 1) return fail("ambiguous_baseline", g.i);
     let line = candidates[0];
-    if (!line) lines2.push(line = { channel, y: g.origin[1], size: size(g), items: [] });
+    if (!line) lines2.push(line = { channel, y: g.origin[1], size: size(g), items: [], aliases: [] });
     line.items.push({ i: g.i, u: g.u, x: g.l, r: g.r, generated: false });
   }
   for (const line of [...lines2]) {
@@ -1163,7 +1163,9 @@ function canonicalPage(page, partition = page?.W / 2) {
     const candidates = lines2.filter((l) => l !== line && l.channel === line.channel && l.size >= line.size * 1.2 && l.size <= line.size * 3 && l.y < line.y && line.y - l.y <= l.size * 0.8 && l.items.some((g) => g.r <= first.x + 1 && first.x - g.r <= l.size * 1.3));
     if (candidates.length > 1) return fail("ambiguous_marker", first.i);
     if (candidates.length === 1) {
-      candidates[0].items.push(...line.items);
+      const owner = candidates[0];
+      owner.items.push(...line.items);
+      owner.aliases.push({ channel: line.channel, y: line.y, size: line.size, items: [...line.items] }, ...line.aliases);
       lines2.splice(lines2.indexOf(line), 1);
     }
   }
@@ -1193,17 +1195,23 @@ function canonicalPage(page, partition = page?.W / 2) {
       const { line, li } = candidates2[0];
       const last = [...line.items].sort((a, b2) => a.x - b2.x).at(-1);
       const first = [...lines2[li + 1].items].sort((a, b2) => a.x - b2.x)[0];
-      let before = i - 1, after = i + 1;
-      while (before >= 0 && isSpace(page.chars[before].u)) before--;
-      while (after < page.chars.length && isSpace(page.chars[after].u)) after++;
-      if (!last || !first || x2 < last.x || x2 - last.r > line.size || last.i !== before || first.i !== after || !/\p{L}/u.test(String.fromCharCode(last.u)) || !/\p{L}/u.test(String.fromCharCode(first.u))) return fail("discretionary_break_unproven", i);
+      let before2 = i - 1, after2 = i + 1;
+      while (before2 >= 0 && isSpace(page.chars[before2].u)) before2--;
+      while (after2 < page.chars.length && isSpace(page.chars[after2].u)) after2++;
+      if (!last || !first || x2 < last.x || x2 - last.r > line.size || last.i !== before2 || first.i !== after2 || !/\p{L}/u.test(String.fromCharCode(last.u)) || !/\p{L}/u.test(String.fromCharCode(first.u))) return fail("discretionary_break_unproven", i);
       joins.add(li);
       normalizedDiscretionary.push(i);
       continue;
     }
     if (!isSpace(c.u)) return fail("nonspace_geometry_unavailable", i);
     if (c.generated === true) {
-      ignored.push(i);
+      const left = glyphs.get(i - 1), right = glyphs.get(i + 1);
+      const li = itemLine.get(i - 1), ri = itemLine.get(i + 1);
+      const [x2, y2] = c.origin ?? [];
+      const line = lines2[li];
+      if (c.u === 32 && left && right && li === ri && line && valid(x2) && valid(y2) && right.l - left.r > 0.01 && x2 >= left.r - 0.5 && x2 <= right.l + 0.5 && [line, ...line.aliases].some((b2) => Math.abs(b2.y - y2) <= 0.5)) {
+        line.items.push({ i, u: 32, x: x2, r: x2, generated: true });
+      } else ignored.push(i);
       continue;
     }
     const [l, r, b, t] = c.box ?? [];
@@ -1216,7 +1224,19 @@ function canonicalPage(page, partition = page?.W / 2) {
       continue;
     }
     const channel = x < partition ? 0 : 1;
-    const candidates = lines2.filter((line) => line.channel === channel && Math.abs(line.y - y) <= 0.5);
+    let before = i - 1, after = i + 1;
+    while (before >= 0 && isSpace(page.chars[before].u)) before--;
+    while (after < page.chars.length && isSpace(page.chars[after].u)) after++;
+    const baselines = lines2.flatMap((line) => [line, ...line.aliases]).filter((baseline) => baseline.channel === channel && Math.abs(baseline.y - y) <= 0.5);
+    if (baselines.length > 1) return fail("literal_whitespace_line_ambiguous", i, { candidates: baselines.length });
+    const candidates = [];
+    for (const line of lines2) {
+      if (line.channel === channel && Math.abs(line.y - y) <= 0.5) candidates.push(line);
+      for (const alias of line.aliases) {
+        if (alias.channel !== channel || Math.abs(alias.y - y) > 0.5) continue;
+        if (alias.items.some((item) => item.i === before && l >= item.x && l - item.r <= alias.size || item.i === after && r <= item.r && item.x - r <= alias.size)) candidates.push(line);
+      }
+    }
     if (candidates.length !== 1) return fail("literal_whitespace_line_ambiguous", i, { candidates: candidates.length });
     candidates[0].items.push({ i, u: c.u, x: l, r, generated: false });
   }
@@ -1772,12 +1792,12 @@ function normalizedSource(chars, band) {
   }
   return { text: text2, indices };
 }
-function mapSourceGlyphs(sourceEngine, sourceBands, targetGlyphs, edits, expectedPageText2) {
+function mapSourceGlyphs(sourceEngine, sourceBands, targetGlyphs, edits, expectedPageText2, sourceCharacterProvider) {
   const expected = [], mapping2 = /* @__PURE__ */ new Map(), sources = /* @__PURE__ */ new Map();
   for (const band of sourceBands) {
     const chars = readLinkPageCharacters(sourceEngine, band.sourcePageIndex);
     sources.set(band.sourcePageIndex, chars);
-    const normalized = normalizedSource(chars, band);
+    const normalized = normalizedSource(sourceCharacterProvider ? sourceCharacterProvider(band, chars) : chars, band);
     const exp = expectedPageText2(normalized.text, edits.filter((e) => e.pageIndex === band.sourcePageIndex), { includeSpans: true });
     if (!exp.ok) fail2("document_flow_link_edit_mapping_ambiguous");
     const append = (start, end) => {
@@ -1800,10 +1820,10 @@ function mapSourceGlyphs(sourceEngine, sourceBands, targetGlyphs, edits, expecte
   if (expected.length !== targetGlyphs.length || expected.some((u, i) => u !== targetGlyphs[i].u)) fail2("document_flow_link_text_mapping_mismatch");
   return { mapping: mapping2, sources };
 }
-function deriveNativeLinkMoves(sourceEngine, sourceBands, targetGlyphs, edits, model, expectedPageText2, authorizedTargets = /* @__PURE__ */ new Set()) {
+function deriveNativeLinkMoves(sourceEngine, sourceBands, targetGlyphs, edits, model, expectedPageText2, authorizedTargets = /* @__PURE__ */ new Set(), sourceCharacterProvider) {
   if (!model || !model.annotations.some((a) => sourceBands.some((b) => b.sourcePageIndex === a.sourcePageIndex))) return [];
   const ids = sourceBands.map((b) => b.sourcePageIndex);
-  const { mapping: mapping2, sources } = mapSourceGlyphs(sourceEngine, sourceBands, targetGlyphs, edits, expectedPageText2);
+  const { mapping: mapping2, sources } = mapSourceGlyphs(sourceEngine, sourceBands, targetGlyphs, edits, expectedPageText2, sourceCharacterProvider);
   const moves = [], claimed = /* @__PURE__ */ new Set();
   for (const descriptor of model.annotations.filter((a) => ids.includes(a.sourcePageIndex))) {
     if (descriptor.eligible !== true || descriptor.kind !== "link") fail2(descriptor.reason || "document_flow_annotation_unsupported");
@@ -2144,11 +2164,13 @@ var init_document_flow_band = __esm({
 // src/paragraph-vendor/quality.mjs
 var quality_exports = {};
 __export(quality_exports, {
+  alignEdgeGlyphs: () => alignEdgeGlyphs,
   capturePageLayout: () => capturePageLayout,
   cascadeBarrier: () => cascadeBarrier,
   cascadeShifts: () => cascadeShifts,
   countGlyphLines: () => countGlyphLines,
   edgeGlyphs: () => edgeGlyphs,
+  edgeGlyphsEquivalent: () => edgeGlyphsEquivalent,
   expectedPageText: () => expectedPageText,
   findGeneratedWhitespaceMatches: () => findGeneratedWhitespaceMatches,
   inspectSavedPdf: () => inspectSavedPdf,
@@ -2429,7 +2451,7 @@ function cascadeBarrier(engine, ctx, grown, shifts) {
   const bodyHandles = new Set(ctx.paras.filter((q) => q.role === "body").flatMap((q) => (engine.paragraphObjects(q.id) || []).map((h) => h >>> 0)));
   const fixed = listObjects(engine).filter((h) => !bodyHandles.has(h)).map((h) => engine.objectBounds(h));
   if (fixed.some((b) => !b)) return grown[0]?.id ?? "unknown";
-  const intersects2 = (a, b) => Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x) > 0.01 && Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y) > 0.01;
+  const intersects3 = (a, b) => Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x) > 0.01 && Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y) > 0.01;
   for (const q of ctx.paras) {
     if (!q.box || q.role !== "body") continue;
     const shift = shifts.get(q.id) || 0;
@@ -2438,7 +2460,7 @@ function cascadeBarrier(engine, ctx, grown, shifts) {
     const sweep = { x: q.box.x, y: bottomOf(q.box) - shift - delta, w: q.box.w, h: q.box.h + shift + delta };
     const original = { x: q.box.x, y: bottomOf(q.box) - TOL, w: q.box.w, h: q.box.h + 2 * TOL };
     const area = (a, b) => Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x)) * Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
-    if (fixed.some((b) => intersects2(sweep, b) && area(sweep, b) > area(original, b) + 0.01)) return q.id;
+    if (fixed.some((b) => intersects3(sweep, b) && area(sweep, b) > area(original, b) + 0.01)) return q.id;
   }
   return null;
 }
@@ -2616,7 +2638,9 @@ function readStyle(M, tp, i, buf) {
 function sameStyle(a, b) {
   if (!a || !b) return a === b;
   const eq = (x, y, tol = 0) => x === null || y === null ? x === y : x.every((v, k) => Math.abs(v - y[k]) <= tol);
-  return a.font !== null && a.font === b.font && a.flags === b.flags && Math.abs(a.size - b.size) <= 0.01 && a.render === b.render && eq(a.fill, b.fill) && eq(a.stroke, b.stroke) && eq(a.mat, b.mat, 1e-3);
+  const transform = (s) => s.mat && Number.isFinite(s.size) && s.size > 0 ? s.mat.map((v) => v * s.size) : null;
+  const matrixEqual = a.mat && b.mat ? eq(transform(a), transform(b), 0.01) : a.mat === b.mat && Math.abs(a.size - b.size) <= 0.01;
+  return a.font !== null && a.font === b.font && a.flags === b.flags && a.render === b.render && eq(a.fill, b.fill) && eq(a.stroke, b.stroke) && matrixEqual;
 }
 function readGlyphs(engine, pageIndex) {
   ensurePage(engine, pageIndex);
@@ -2720,27 +2744,21 @@ function bodyBoxes(engine, pageIndex, g) {
 function edgeBodySplit(src, out, i, oi, s, o, es, eo) {
   const sb = bodyBoxes(src, i, s), ob = bodyBoxes(out, oi, o);
   if (!sb || !ob) return null;
-  const pending = /* @__PURE__ */ new Map();
-  for (const d of eo) pending.set(d.u, [...pending.get(d.u) || [], d]);
-  const at = (c) => {
-    const list3 = pending.get(c.u) || [];
-    const k = list3.findIndex((d) => Math.abs(c.l - d.l) <= 0.5 && Math.abs(c.b - d.b) <= 0.5 && sameStyle(c.style ?? null, d.style ?? null));
-    return k < 0 ? null : list3.splice(k, 1)[0];
-  };
-  let bodyChanged = 0, edgeMissing = 0;
-  for (const c of es) {
-    if (at(c)) continue;
+  const matches = alignEdgeGlyphs(es, eo);
+  let bodyChanged = 0, edgeMissing = 0, edgeAdded = 0, edgeStyleChanged = 0;
+  for (const c of matches.missing) {
     if (inBoxes(c, sb)) bodyChanged++;
     else edgeMissing++;
   }
-  let edgeAdded = 0;
-  for (const list3 of pending.values()) {
-    for (const d of list3) {
-      if (inBoxes(d, ob) || inBoxes(d, sb)) bodyChanged++;
-      else edgeAdded++;
-    }
+  for (const d of matches.added) {
+    if (inBoxes(d, ob) || inBoxes(d, sb)) bodyChanged++;
+    else edgeAdded++;
   }
-  return { bodyChanged, edgeMissing, edgeAdded };
+  for (const [c] of matches.restyled) {
+    if (inBoxes(c, sb)) bodyChanged++;
+    else edgeStyleChanged++;
+  }
+  return { bodyChanged, edgeMissing, edgeAdded, edgeStyleChanged };
 }
 function extents(g) {
   if (!g.glyphs.length) return null;
@@ -2805,13 +2823,15 @@ function matchesStationaryReorderedGlyphs(source2, output, edits) {
   const normalized = normalizedSourceChars(source2.chars);
   const exp = expectedPageText(source2.text, edits, { includeSpans: true });
   if (!exp.ok) return false;
-  const expected = [];
+  const planned = [];
   let at = 0;
   for (const span of exp.spans) {
-    expected.push(...normalized.slice(at, span.a), ...span.after.split("").map((ch) => ({ ch })));
+    planned.push(...normalized.slice(at, span.a), ...span.after.split("").map((ch) => ({ ch })));
     at = span.b;
   }
-  expected.push(...normalized.slice(at));
+  planned.push(...normalized.slice(at));
+  const expected = planned.filter((c, i) => c.ch !== " " || i > 0 && planned[i - 1].ch !== " ");
+  if (expected.at(-1)?.ch === " ") expected.pop();
   if (expected.map((x) => x.ch).join("") !== exp.text) return false;
   const sg = new Map(source2.glyphs.map((g) => [g.i, g]));
   const og = new Map(output.glyphs.map((g) => [g.i, g]));
@@ -2962,7 +2982,7 @@ async function inspectSavedPdf(engineFactory, sourceBytes, outputBytes, edits, o
       row.extents = { source: se, output: oe };
       if (se && oe && (oe.right > se.right + TOL || oe.left < se.left - TOL)) failures.push({ code: "text_outside_source_columns", pageIndex: i });
       const es = edgeGlyphs(s), eo = edgeGlyphs(o);
-      const stable = sameGlyphs(es, eo) && sameStyles(es, eo);
+      const stable = edgeGlyphsEquivalent(es, eo);
       row.edge_glyphs = es.length;
       row.edge_stable = stable;
       if (!stable) {
@@ -2972,6 +2992,7 @@ async function inspectSavedPdf(engineFactory, sourceBytes, outputBytes, edits, o
         if (split) row.edge_split = split;
         if (editsEdge) warnings.push({ code: "edge_edit_unverified", pageIndex: i });
         else if (!split || split.edgeMissing || split.edgeAdded) failures.push({ code: "header_footer_moved", pageIndex: i, ...split || {} });
+        else if (split.edgeStyleChanged) failures.push({ code: "header_footer_style_changed", pageIndex: i, ...split });
         else failures.push({ code: "edge_band_body_changed", pageIndex: i, count: split.bodyChanged });
       }
     }
@@ -3140,6 +3161,27 @@ function inspectDocumentGroups(src, out, map, groups, byPage, failures, warnings
     for (const i of ids) covered.set(i, { documentFlow: true, text_equal: equal, flowSourcePageIndices: ids, flowOutputPageIndices: ois, expected_text: digest(want, includeText) });
   }
   return covered;
+}
+function alignEdgeGlyphs(source2, output) {
+  const candidates = source2.map((c) => output.map((d, j) => samePlace(c, d) ? j : -1).filter((j) => j >= 0));
+  const reverse = output.map((_, j) => candidates.reduce((n, cs) => n + Number(cs.includes(j)), 0));
+  const used = /* @__PURE__ */ new Set(), missing = [], restyled = [];
+  source2.forEach((c, i) => {
+    const cs = candidates[i];
+    if (cs.length !== 1 || reverse[cs[0]] !== 1) {
+      missing.push(c);
+      return;
+    }
+    const j = cs[0];
+    used.add(j);
+    if (!sameStyle(c.style ?? null, output[j].style ?? null)) restyled.push([c, output[j]]);
+  });
+  return { missing, added: output.filter((_, j) => !used.has(j)), restyled };
+}
+function edgeGlyphsEquivalent(source2, output) {
+  if (source2.length === output.length && source2.every((c, i) => samePlace(c, output[i]) && sameStyle(c.style ?? null, output[i].style ?? null))) return true;
+  const result = alignEdgeGlyphs(source2, output);
+  return !result.missing.length && !result.added.length && !result.restyled.length;
 }
 function normalizePageMap(map, sourcePageCount) {
   if (map === void 0 || map === null) {
@@ -3407,8 +3449,11 @@ function inspectContinued(s, o, out, m, pageEdits, row, failures, warnings, incl
   if (parts.slice(1).some((p) => !p)) failures.push({ code: "continuation_page_empty", pageIndex: i });
   const es = outsideBand(s, lo, hi), eo = outsideBand(o, lo, hi);
   row.edge_glyphs = es.length;
-  row.edge_stable = sameGlyphs(es, eo) && sameStyles(es, eo);
-  if (!row.edge_stable) failures.push({ code: "header_footer_moved", pageIndex: i });
+  row.edge_stable = edgeGlyphsEquivalent(es, eo);
+  if (!row.edge_stable) {
+    const diff = alignEdgeGlyphs(es, eo);
+    failures.push({ code: diff.missing.length || diff.added.length ? "header_footer_moved" : "header_footer_style_changed", pageIndex: i });
+  }
   const se = extents(s);
   row.continuation = conts.map((g, k) => {
     const bodyGlyphs = inBand(g, lo, hi);
@@ -6071,7 +6116,7 @@ var RUNTIME = Object.freeze({
   moduleCommit: "cd4ba2cdd68ae7e51198f615bd4ac6130206b162",
   moduleOverlayCommit: overlay_default.commit,
   jsSha256: "6e6989a9994715951720e05355111aca7eab898e92b519ebea160167875bb3eb",
-  wasmSha256: "cf9f0e9ec0a68cc5932795e87622b2809ecca5561482a23bc034de3d6410696d",
+  wasmSha256: "15212c22d100c7d262d6d9996117517dbe3a30e80d43569977df5b2cd7ff35c6",
   sourceBuildVerified: false,
   trust: "locally-supplied-hash-verified-artifacts"
 });
@@ -6650,6 +6695,164 @@ async function repairInlineMarkers({ engineFactory, sourceBytes, outputBytes, pa
       }
     }
     return { pdf: repairs.length ? new Uint8Array(out.save()) : new Uint8Array(outputBytes), repairs, warnings };
+  } finally {
+    try {
+      src?.close();
+    } finally {
+      out?.close();
+    }
+  }
+}
+
+// src/paragraph-link-transport.mjs
+init_paragraph_pdf_crypto();
+init_document_flow_links();
+init_quality();
+init_paragraph_geometry_conservation();
+var intersects2 = (a, b) => Math.min(a.r, b.r) - Math.max(a.l, b.l) > 1e-4 && Math.min(a.t, b.t) - Math.max(a.b, b.b) > 1e-4;
+var sameBox = (a, b) => ["l", "r", "b", "t"].every((k) => Number.isFinite(a[k]) && Number.isFinite(b[k]) && Math.abs(a[k] - b[k]) <= 0.05);
+function stationaryLinks(links, source2, target, edits) {
+  let text2 = "", indices = [];
+  for (const c of source2.chars) {
+    const ch = String.fromCharCode(c.u);
+    if (/\s/u.test(ch)) {
+      if (text2 && !text2.endsWith(" ")) {
+        text2 += " ";
+        indices.push(null);
+      }
+    } else {
+      text2 += ch;
+      indices.push(c.index);
+    }
+  }
+  if (text2.endsWith(" ")) {
+    text2 = text2.slice(0, -1);
+    indices.pop();
+  }
+  const expected = expectedPageText(text2, edits, { includeSpans: true });
+  if (!expected.ok) return /* @__PURE__ */ new Set();
+  const edited = new Set(expected.spans.flatMap((s) => indices.slice(s.a, s.b).filter((i) => i !== null)));
+  const proved = /* @__PURE__ */ new Set();
+  for (const link of links) {
+    if (!Array.isArray(link.rect) || link.rect.length !== 4 || !link.rect.every(Number.isFinite)) continue;
+    const [x1, y1, x2, y2] = link.rect, rect = { l: Math.min(x1, x2), r: Math.max(x1, x2), b: Math.min(y1, y2), t: Math.max(y1, y2) };
+    const owned = source2.chars.filter((c) => c.u > 32 && c.box && intersects2(c.box, rect));
+    if (!owned.length || owned.some((c) => edited.has(c.index))) continue;
+    const outputOwned = target.chars.filter((c) => c.u > 32 && c.box && intersects2(c.box, rect));
+    if (outputOwned.length !== owned.length) continue;
+    const used = /* @__PURE__ */ new Set();
+    let ok = true;
+    for (const c of owned) {
+      const asGlyph = (c2) => ({ u: c2.u, ...c2.box, style: c2.style });
+      const matches = outputOwned.filter((t) => t.u === c.u && sameBox(c.box, t.box) && c.style && t.style && edgeGlyphsEquivalent([asGlyph(c)], [asGlyph(t)]));
+      if (matches.length !== 1 || used.has(matches[0].index)) {
+        ok = false;
+        break;
+      }
+      used.add(matches[0].index);
+    }
+    if (ok) proved.add(link.annotationIndex);
+  }
+  return proved;
+}
+async function transportParagraphLinks({ engineFactory, sourceBytes, outputBytes, edits, sourcePageMap, flowGroups = [], annotationAdapter }) {
+  const failures = [], moves = [];
+  const skipped = new Set(flowGroups.flatMap((g) => (g.sourcePages || []).map((p) => p.sourcePageIndex)));
+  const pages = [...new Set(edits.map((e) => e.pageIndex))].filter((p) => !skipped.has(p));
+  let src, out, model;
+  try {
+    src = await engineFactory(sourceBytes);
+    out = await engineFactory(outputBytes);
+    for (const pageIndex of pages) {
+      src.loadPage(pageIndex);
+      const count = src.M._FPDFPage_GetAnnotCount?.(src.page);
+      if (!Number.isInteger(count) || count < 0) {
+        failures.push({ code: "paragraph_link_inventory_unverified", pageIndex });
+        continue;
+      }
+      if (!count) continue;
+      if (!annotationAdapter) {
+        failures.push({ code: "paragraph_link_adapter_unavailable", pageIndex });
+        continue;
+      }
+      try {
+        model ||= await annotationAdapter.inspect({ sourceBytes, sourceSha256: createHash("sha256").update(sourceBytes).digest("hex") });
+        const links = model.annotations.filter((a) => a.sourcePageIndex === pageIndex && a.kind === "link");
+        if (!links.length) continue;
+        const map = sourcePageMap.find((m) => m.sourcePageIndex === pageIndex);
+        if (!map || map.continuationPageIndices?.length) throw Object.assign(new Error(), { code: "paragraph_link_continuation_unverified" });
+        const pageEdits = edits.filter((e) => e.pageIndex === pageIndex);
+        const sourceRaw = readLinkPageCharacters(src, pageIndex), targetRaw = readLinkPageCharacters(out, map.outputPageIndex);
+        const sourceGeometry = readGlyphs(src, pageIndex), targetGeometry = readGlyphs(out, map.outputPageIndex);
+        const withStyle = (chars, geometry2) => {
+          const styles = new Map(geometry2.glyphs.map((g) => [g.i, g.style]));
+          return chars.map((c) => ({ ...c, style: styles.get(c.index) }));
+        };
+        const ownership = /* @__PURE__ */ new Map();
+        for (const link of links) if (Array.isArray(link.rect) && link.rect.length === 4 && link.rect.every(Number.isFinite)) {
+          const [x1, y1, x2, y2] = link.rect, rect = { l: Math.min(x1, x2), r: Math.max(x1, x2), b: Math.min(y1, y2), t: Math.max(y1, y2) };
+          for (const c of sourceRaw.filter((c2) => c2.box && intersects2(c2.box, rect))) {
+            const owners = ownership.get(c.index) || [];
+            owners.push(link.annotationIndex);
+            ownership.set(c.index, owners);
+          }
+        }
+        const overlapping = new Set([...ownership.values()].filter((a) => a.length > 1).flat());
+        for (const link of links.filter((a) => overlapping.has(a.annotationIndex))) failures.push({ code: "paragraph_link_unverified", pageIndex, annotationIndex: link.annotationIndex, reason: "document_flow_link_overlapping_ownership" });
+        const candidates = links.filter((a) => !overlapping.has(a.annotationIndex));
+        const stationary = stationaryLinks(candidates, { chars: withStyle(sourceRaw, sourceGeometry) }, { chars: withStyle(targetRaw, targetGeometry) }, pageEdits);
+        const remaining = candidates.filter((a) => !stationary.has(a.annotationIndex));
+        if (!remaining.length) continue;
+        const band = { sourcePageIndex: pageIndex, floor: -1e5, bodyTop: 1e5 };
+        let sourcePage, outputPage, expected, targets, globalError;
+        const ordered = (canonical, raw) => canonical.chars.map((c) => {
+          if (c.virtual) return { u: c.u, index: null, box: null };
+          const native = raw[c.i];
+          if (!native || native.index !== c.i || native.u !== c.u || c.u > 32 && !native.box) throw Object.assign(new Error(), { code: "document_flow_link_text_mapping_mismatch" });
+          return native;
+        });
+        try {
+          sourcePage = canonicalPage(sourceGeometry);
+          outputPage = canonicalPage(targetGeometry, sourcePage.partition);
+          if (!sourcePage.ok || !outputPage.ok) throw Object.assign(new Error(), { code: "document_flow_link_text_mapping_mismatch" });
+          expected = expectedPageText(sourcePage.text, pageEdits, { includeSpans: true });
+          if (!expected.ok) throw Object.assign(new Error(), { code: "document_flow_link_edit_mapping_ambiguous" });
+          if (expected.text !== outputPage.text.replace(/\s+/gu, " ").trim()) throw Object.assign(new Error(), { code: "document_flow_link_text_mapping_mismatch" });
+          targets = ordered(outputPage, targetRaw).filter((c) => c.u > 32);
+        } catch (error2) {
+          globalError = error2;
+        }
+        for (const link of remaining) {
+          try {
+            if (globalError) throw globalError;
+            const linkModel = { ...model, annotations: [link] };
+            const pageMoves = deriveNativeLinkMoves(src, [band], targets.map((c) => ({ ...c, outputPageIndex: map.outputPageIndex })), edits, linkModel, expectedPageText, /* @__PURE__ */ new Set(), (_band, raw) => ordered(sourcePage, raw));
+            moves.push(...pageMoves);
+          } catch (error2) {
+            failures.push({ code: "paragraph_link_unverified", pageIndex, annotationIndex: link.annotationIndex, reason: error2?.code || "paragraph_link_mapping_failed" });
+          }
+        }
+      } catch (error2) {
+        const links = model?.annotations?.filter((a) => a.sourcePageIndex === pageIndex && a.kind === "link") || [];
+        if (links.length) for (const a of links) failures.push({ code: "paragraph_link_unverified", pageIndex, annotationIndex: a.annotationIndex, reason: error2?.code || "paragraph_link_mapping_failed" });
+        else failures.push({ code: "paragraph_link_inventory_unverified", pageIndex, reason: error2?.code || "annotation_inspection_failed" });
+      }
+    }
+    if (model) {
+      try {
+        const request = { model, sourceBytes, outputBytes, sourcePageMap, moves, preserveUnmovedUnsupported: true, reflowedSourcePages: [...new Set(moves.map((m) => m.sourcePageIndex))] };
+        const pdf = moves.length ? new Uint8Array((await annotationAdapter.transport(request)).pdf) : outputBytes;
+        const verified = await annotationAdapter.validate({ ...request, outputBytes: pdf });
+        if (!verified?.ok) throw Object.assign(new Error(), { code: verified?.code || "annotation_validation_failed" });
+        return { pdf, moves, failures };
+      } catch (error2) {
+        const affected = moves.length ? moves : model.annotations.filter((a) => a.kind === "link" && pages.includes(a.sourcePageIndex));
+        for (const move of affected) failures.push({ code: "paragraph_link_unverified", pageIndex: move.sourcePageIndex, annotationIndex: move.annotationIndex, reason: error2?.code || "annotation_transport_failed" });
+      }
+    }
+    return { pdf: outputBytes, moves: [], failures };
+  } catch (error2) {
+    return { pdf: outputBytes, moves: [], failures: [...failures, ...pages.map((pageIndex) => ({ code: "paragraph_link_inventory_unverified", pageIndex, reason: error2?.code || "paragraph_link_check_failed" }))] };
   } finally {
     try {
       src?.close();
@@ -8413,6 +8616,10 @@ async function editPdf(request, options = {}) {
   pdf = markerResult.pdf;
   report.inlineMarkerRepairs = markerResult.repairs;
   report.warnings.push(...markerResult.warnings);
+  const paragraphLinks = await transportParagraphLinks({ engineFactory, sourceBytes, outputBytes: pdf, edits, sourcePageMap, flowGroups, annotationAdapter: options.annotationAdapter });
+  pdf = paragraphLinks.pdf;
+  report.paragraphLinkMoves = paragraphLinks.moves;
+  report.paragraphLinkFailures = paragraphLinks.failures;
   const qaCapture = captureConsole(!!options.includeEngineLog);
   let check;
   try {
@@ -8424,6 +8631,7 @@ async function editPdf(request, options = {}) {
   } finally {
     report.selfCheckLog = qaCapture.restore();
   }
+  if (paragraphLinks.failures.length) check = { ...check, ok: false, failures: [...check?.failures ?? [], ...paragraphLinks.failures] };
   report.selfCheck = { status: check?.ok === true ? "passed" : "failed", ...check };
   report.pagination.flow = (check?.pages ?? []).filter((row) => row.continuationPageIndices?.length).map((row) => ({
     sourcePageIndex: row.pageIndex,
@@ -8526,6 +8734,11 @@ function rectangle(c, obj) {
   const r = numericArray(c, obj, 4);
   if (r.length !== 4 || r[0] >= r[2] || r[1] >= r[3]) fail6("annotation-geometry-invalid");
   return r;
+}
+function annotationRectangle(c, obj) {
+  const r = numericArray(c, obj, 4);
+  if (r.length !== 4 || r[0] === r[2] || r[1] === r[3]) fail6("annotation-geometry-invalid");
+  return [Math.min(r[0], r[2]), Math.min(r[1], r[3]), Math.max(r[0], r[2]), Math.max(r[1], r[3])];
 }
 function geometry(c, page) {
   const media = rectangle(c, c.keep(page.getInheritable("MediaBox"))), crop = c.keep(page.getInheritable("CropBox")), rotate = c.keep(page.getInheritable("Rotate")), unit = c.get(page, "UserUnit");
@@ -8740,7 +8953,7 @@ async function inventory(c, refs, pages, source2 = false) {
       if (++count > ANNOTATION_LIMITS.annotations) fail6("annotation-count-limit");
       const annotation = c.get(array, i);
       if (!annotation.isDictionary()) fail6("annotation-object-invalid");
-      const id = identity(annotation), record = { sourcePageIndex: p, annotationIndex: i, object: annotation, fingerprint: await fingerprint(c, annotation, refs, false, budget), fullFingerprint: await fingerprint(c, annotation, refs, true, budget) };
+      const id = identity(annotation), record = { sourcePageIndex: p, annotationIndex: i, aliasKey: shared.get(id)?.aliasKey ?? key2(p, i), object: annotation, fingerprint: await fingerprint(c, annotation, refs, false, budget), fullFingerprint: await fingerprint(c, annotation, refs, true, budget) };
       if (shared.has(id)) {
         record.shared = true;
         shared.get(id).shared = true;
@@ -8775,7 +8988,7 @@ async function inspect({ mupdf, sourceBytes, sourceSha256 } = {}) {
         }
         const media = geometry(c, pages[record.sourcePageIndex]);
         record.media = media;
-        descriptor.rect = rectangle(c, c.get(annotation, "Rect"));
+        descriptor.rect = annotationRectangle(c, c.get(annotation, "Rect"));
         if (!contains(media, descriptor.rect)) fail6("annotation-geometry-invalid");
         const quads = c.get(annotation, "QuadPoints");
         if (!quads.isNull()) {
@@ -8820,7 +9033,7 @@ async function inspect({ mupdf, sourceBytes, sourceSha256 } = {}) {
     }
     for (const record of snapshot.records) {
       if (!record.descriptor.rect) try {
-        record.descriptor.rect = rectangle(c, c.get(record.object, "Rect"));
+        record.descriptor.rect = annotationRectangle(c, c.get(record.object, "Rect"));
       } catch {
       }
       if (record.hadP === void 0) record.hadP = !c.get(record.object, "P").isNull();
@@ -8851,7 +9064,7 @@ function mapping(model, map, count) {
   }
   return result;
 }
-function movementPlan(model, records, map, count, moves, reflowed, destinationMoves = []) {
+function movementPlan(model, records, map, count, moves, reflowed, destinationMoves = [], preserveUnmovedUnsupported = false) {
   if (!Array.isArray(moves) || moves.length > ANNOTATION_LIMITS.annotations || !Array.isArray(reflowed) || reflowed.some((p) => !Number.isInteger(p) || p < 0 || p >= model.pageCount) || new Set(reflowed).size !== reflowed.length) fail6("annotation-move-invalid");
   const group = new Set(reflowed), byKey = new Map(records.map((r) => [key2(r.sourcePageIndex, r.annotationIndex), r])), planned = /* @__PURE__ */ new Map();
   for (const move of moves) {
@@ -8878,11 +9091,11 @@ function movementPlan(model, records, map, count, moves, reflowed, destinationMo
   }
   for (const record of records) {
     const d = record.descriptor;
-    if (record.shared) fail6("annotation-shared-object");
+    if (record.shared && (preserveUnmovedUnsupported !== true || records.some((r) => r.aliasKey === record.aliasKey && planned.has(key2(r.sourcePageIndex, r.annotationIndex))))) fail6("annotation-shared-object");
     if (group.size && record.actionOwnershipUnsafe) fail6("annotation-action-root-unsupported");
     if (group.size && record.destinationUnsafe) fail6("annotation-destination-unresolved");
     if ((record.unexposedTargets || []).some((p) => group.has(p))) fail6("annotation-destination-reflowed");
-    if (group.has(record.sourcePageIndex) && !d.eligible) fail6(d.reason);
+    if (group.has(record.sourcePageIndex) && !d.eligible && !(preserveUnmovedUnsupported === true && !planned.has(key2(record.sourcePageIndex, record.annotationIndex)) && (record.shared || d.kind === "unsupported" && d.reason === "annotation-subtype-unsupported"))) fail6(d.reason);
     if ((d.internalDestinationSourcePageIndices || []).some((p) => group.has(p) && (!(d.internalDestinations || []).some((x) => x.targetSourcePageIndex === p) || (d.internalDestinations || []).some((x) => x.targetSourcePageIndex === p && !destinationPlan.has(x.id))))) fail6("annotation-destination-reflowed");
   }
   const expected = Array.from({ length: count }, () => []);
@@ -8896,17 +9109,17 @@ function movementPlan(model, records, map, count, moves, reflowed, destinationMo
   }
   return { expected, planned, destinationPlan };
 }
-async function bound({ model, sourceBytes, outputBytes, sourcePageMap, moves = [], reflowedSourcePages = [], destinationMoves = [] }) {
+async function bound({ model, sourceBytes, outputBytes, sourcePageMap, moves = [], reflowedSourcePages = [], destinationMoves = [], preserveUnmovedUnsupported = false }) {
   const state = privateModels.get(model);
   if (!state) fail6("annotation-model-unverified");
   if (await digest2(bytes(sourceBytes, ANNOTATION_LIMITS.sourceBytes)) !== state.sha) fail6("annotation-stale-source");
   const c = context(state.mupdf, bytes(outputBytes, ANNOTATION_LIMITS.outputBytes));
   try {
     if (reflowedSourcePages.length && state.actionOwnershipUnsupported) fail6("annotation-action-root-unsupported");
-    const map = mapping(model, sourcePageMap, c.doc.countPages()), inverse = new Map([...map].map(([s, o]) => [o, ["source-page", s]])), { refs, pages } = pageRefs(c, inverse), plan = movementPlan(model, state.records, map, pages.length, moves, reflowedSourcePages, destinationMoves);
+    const map = mapping(model, sourcePageMap, c.doc.countPages()), inverse = new Map([...map].map(([s, o]) => [o, ["source-page", s]])), { refs, pages } = pageRefs(c, inverse), plan = movementPlan(model, state.records, map, pages.length, moves, reflowedSourcePages, destinationMoves, preserveUnmovedUnsupported);
     if (reflowedSourcePages.length && unsupportedDocumentActions(c, pages)) fail6("annotation-action-root-unsupported");
     for (const [s, o] of map) if (state.pageGeometry[s] && !numbers(state.pageGeometry[s], geometry(c, pages[o]))) fail6("annotation-page-identity-invalid");
-    return { c, state, map, refs, pages, plan };
+    return { c, state, map, refs, pages, plan, preserveUnmovedUnsupported };
   } catch (error2) {
     c.close();
     throw error2;
@@ -8941,11 +9154,15 @@ async function verifyDocument(ctx, expected, after = false) {
       item.old.operands.forEach((n, j) => item.obj.put(j + 2, n));
     }
     const actual = await inventory(c, refs, pages), names = nameDestinations(c), readDestination = destinationReader(c, refs, names), destinationBudget = { objects: 0, streams: 0, strings: 0 };
-    if (actual.records.some((r) => r.shared)) fail6("annotation-shared-object");
+    if (ctx.preserveUnmovedUnsupported !== true && actual.records.some((r) => r.shared)) fail6("annotation-shared-object");
+    const aliases = /* @__PURE__ */ new Map(), reverseAliases = /* @__PURE__ */ new Map();
     for (let p = 0; p < pages.length; p++) {
       if (actual.byPage[p].length !== expected[p].length) fail6("annotation-output-count-mismatch");
       for (let i = 0; i < expected[p].length; i++) {
         const { record, move } = expected[p][i], out = actual.byPage[p][i], d = record.descriptor;
+        if (aliases.has(record.aliasKey) && aliases.get(record.aliasKey) !== out.aliasKey || reverseAliases.has(out.aliasKey) && reverseAliases.get(out.aliasKey) !== record.aliasKey) fail6("annotation-shared-object");
+        aliases.set(record.aliasKey, out.aliasKey);
+        reverseAliases.set(out.aliasKey, record.aliasKey);
         if ((move ? out.fingerprint : out.fullFingerprint) !== (move ? record.fingerprint : record.fullFingerprint)) fail6("annotation-semantic-mismatch");
         if (record.destinationFingerprints) {
           const resolved = readDestination(out.object), fingerprints = await Promise.all(resolved.values.map((value) => fingerprint(c, value, refs, true, destinationBudget)));
@@ -8954,7 +9171,7 @@ async function verifyDocument(ctx, expected, after = false) {
         if (!move) continue;
         if (!d.rect) fail6("annotation-geometry-invalid");
         const rect = d.rect.map((v, k) => v + (move ? k % 2 ? move.dy : move.dx : 0));
-        if (!numbers(rect, rectangle(c, c.get(out.object, "Rect")))) fail6("annotation-output-geometry-mismatch");
+        if (!numbers(rect, annotationRectangle(c, c.get(out.object, "Rect")))) fail6("annotation-output-geometry-mismatch");
         if (move && !contains(geometry(c, pages[p]), rect)) fail6("annotation-output-geometry-mismatch");
         const quads = c.get(out.object, "QuadPoints");
         if (d.quadPoints) {
@@ -8978,7 +9195,7 @@ async function verifyDocument(ctx, expected, after = false) {
 async function transport(request = {}) {
   const ctx = await bound(request);
   try {
-    const noMoves = movementPlan(request.model, ctx.state.records, ctx.map, ctx.pages.length, [], request.reflowedSourcePages || [], request.destinationMoves || []);
+    const noMoves = movementPlan(request.model, ctx.state.records, ctx.map, ctx.pages.length, [], request.reflowedSourcePages || [], request.destinationMoves || [], request.preserveUnmovedUnsupported);
     const actual = await verifyDocument(ctx, noMoves.expected), located = /* @__PURE__ */ new Map();
     for (const record of ctx.state.records) located.set(key2(record.sourcePageIndex, record.annotationIndex), actual.byPage[ctx.map.get(record.sourcePageIndex)][record.annotationIndex].object);
     const reader = destinationReader(ctx.c, ctx.refs, nameDestinations(ctx.c)), changed = /* @__PURE__ */ new Set();

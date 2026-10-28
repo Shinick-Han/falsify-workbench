@@ -3,13 +3,13 @@ import {test} from 'node:test';
 import {readFileSync,copyFileSync,mkdtempSync,mkdirSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
-import {pathToFileURL} from 'node:url';
+import {fileURLToPath,pathToFileURL} from 'node:url';
 import {build} from 'esbuild';
 import * as mupdf from '../dist/browser-pdf-vendor/mupdf.js';
 import {createHash} from 'node:crypto';
 import {createAnnotationTransport} from '../src/document-flow-annotations.mjs';
 
-const app=resolve('app'),temp=mkdtempSync(join(tmpdir(),'paragraph-links-'));
+const app=fileURLToPath(new URL('..',import.meta.url)),temp=mkdtempSync(join(tmpdir(),'paragraph-links-'));
 mkdirSync(join(temp,'paragraph-vendor'));
 for(const f of ['editcore.js','editcore.wasm'])copyFileSync(join(app,'src/paragraph-vendor/runtime',f),join(temp,'paragraph-vendor',f));
 copyFileSync(join(app,'dist/paragraph-vendor/package.json'),join(temp,'paragraph-vendor/package.json'));

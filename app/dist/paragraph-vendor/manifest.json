@@ -44,6 +44,14 @@
     {
       "name": "native-inline-flanked.patch",
       "sha256": "9dd0fb0e72131f3fb3926eed8bb1d325b4c1d4d7e68fcf722a1df56644d4efeb"
+    },
+    {
+      "name": "native-composite-inline.patch",
+      "sha256": "8f78d98af9d3b5dea07becdcac894290e99e7ccf6e535e51937dc8b117eee515"
+    },
+    {
+      "name": "native-horizontal-scale.patch",
+      "sha256": "088a2d30015707444031ef1bd2030954ce70eb5fc6cc1dbc5bef81cedaf35d6f"
     }
   ],
   "artifacts": {
@@ -53,20 +61,20 @@
     },
     "wasm": {
       "path": "editcore.wasm",
-      "sha256": "cf9f0e9ec0a68cc5932795e87622b2809ecca5561482a23bc034de3d6410696d"
+      "sha256": "15212c22d100c7d262d6d9996117517dbe3a30e80d43569977df5b2cd7ff35c6"
     }
   },
   "sourceBuildVerified": false,
   "trust": "locally-supplied-hash-verified-artifacts",
   "editorModuleSha256": {
-    "editor.mjs": "8232d16cfd04fce033b1d28cc715ff1ad9b123298ca10875df0e36a06b2b4afc",
-    "quality.mjs": "c71eb1d25f767432e9a2287a9fc05eb7a4f8558c72464ff91d48a964a7825ac9",
+    "editor.mjs": "97b0a59c4b7f6923c5e8b4053c4fc886083427e159fc9fdda7b31491dfe9231c",
+    "quality.mjs": "6a65493e0b27978792a4569e625e6489b927a88c0153eed9a864f1d1de7ec919",
     "pagination.mjs": "2a1d14b573357c6054fc6434b73fdb7cdf0a57c9abff41fba916fb62e55901ca",
     "inline-preservation.mjs": "84b98551dad10752016319ee0e14e953b1723cd6142079d9ed3dc0b593149de7",
     "continuation-template.mjs": "94bfc49200818466e9ec99560d00a7e2dcf72a8003fa10d485852bbace124336",
     "document-flow.mjs": "86f70b872d44034bc8ec33fbd045ede83b5ba8b8649305c46d86d3563bbe4067",
     "document-flow-band.mjs": "1b44eb4198fe99a60c83b742ecf6911b153bfd082e4e92a69f798828d4689a3f",
-    "document-flow-links.mjs": "50e2a0812061a7d820a71881fedd3c0a5f7fc679b3b388cb9da1b62acdc194f9",
+    "document-flow-links.mjs": "bfc7bd1a183d1cbc36d674041d05cf4df55168322089214be9c6424dc7b98c25",
     "document-flow-underlines.mjs": "ce6aff33f329de3920b93d7f1bb7be453c11dc62391e70857366be571212d85b"
   },
   "provenance": "Runtime bytes match caller-supplied candidate digests; build from listed C++ sources/patches is not verified. Editor-module overlay, if any, must accompany source distribution."

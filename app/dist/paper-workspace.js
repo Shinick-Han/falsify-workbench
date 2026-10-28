@@ -256,6 +256,8 @@
     'edited-flow-text-or-order-mismatch':'이어지는 본문 내용 또는 순서가 원문·편집과 다름',
     'glyph-overlap-increased':'글자 겹침이 늘어남',
     'header-footer-moved':'머리말 또는 꼬리말 위치가 바뀜',
+    'header-footer-style-changed':'머리말 또는 꼬리말의 글꼴·크기가 바뀜',
+    'paragraph-link-unverified':'인용 링크의 위치를 확인하지 못함',
     'continued-flow-source-typography-normalized':'원문의 줄끝 하이픈과 추출 공백을 재배치함',
     'continued-flow-generated-whitespace-normalized':'PDF 추출기가 만든 공백을 구분해 검사함',
     'source-line-end-discretionary-hyphen-matched':'원문의 줄끝 하이픈을 연결해 위치를 확인함',
