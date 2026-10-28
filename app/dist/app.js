@@ -8,7 +8,7 @@
   let view=fromHash(location.hash)||'workbench',documentProgress=null,blueProgress=null,flapTimer;
   let importEpoch=0,importController=null,importedDocument=null,importedFile=null;
 
-  function focusTarget(element){if(!element)return;element.scrollIntoView({block:'center'});element.focus({preventScroll:true});}
+  function focusTarget(element){if(!element)return;for(let p=element.parentElement;p;p=p.parentElement)if(p.tagName==='DETAILS')p.open=true;element.scrollIntoView({block:'center'});element.focus({preventScroll:true});}
   function navigate(next,push=true){
     if(!Object.hasOwn(views,next))return;
     const changed=next!==view;view=next;
@@ -25,7 +25,7 @@
       if(blueProgress?.busy)return {gate:'B1',title:blueProgress.phase==='import'?'변경본을 읽고 있습니다':'BLUE 검토 중입니다',detail:blueProgress.name,label:'진행 상태 보기',action:()=>focusTarget($('#doc-blue-progress'))};
       if(blueProgress?.hasResult)return {gate:'B1',title:'BLUE 결과를 확인하세요',detail:blueProgress.name,label:'결과 보기',action:()=>{const external=globalThis.FalsifyDocumentBlueExternal?.getExternalResponses?.();const target=external?.items?.length?$('#external-blue'):$('#doc-blue-findings').closest('.role-step');target?.scrollIntoView({block:'start'});}};
       if(blueProgress?.handoff&&blueProgress.name&&$('#doc-blue-next'))return {gate:'B1',title:$('#doc-blue-handoff-state').textContent,detail:blueProgress.name,label:$('#doc-blue-next').textContent,action:()=>$('#doc-blue-next').click()};
-      if(blueProgress?.name)return {gate:'B1',title:'논문을 검토할 준비가 됐습니다',detail:blueProgress.name,label:'AI 답변 가져오기',action:()=>focusTarget($('#external-blue textarea')||$('#doc-blue-start'))};
+      if(blueProgress?.name)return {gate:'B1',title:'논문을 검토할 준비가 됐습니다',detail:blueProgress.name,label:'AI 답변 가져오기',action:()=>focusTarget($('#external-blue textarea[aria-label="BLUE 외부 응답"]')||$('#doc-blue-start'))};
       return {gate:'B1',title:'BLUE 검토 파일을 입력하세요',detail:'검토할 논문을 직접 고르세요.',label:'BLUE 파일 입력',action:()=>focusTarget($('#doc-blue-file'))};
     }
     if(documentProgress){
@@ -33,7 +33,7 @@
       if(p.busy)return {gate:'R1',title:'RED 검토 중입니다',detail,label:'진행 상태 보기',action:()=>$('#red-progress').scrollIntoView({block:'center'})};
       if(p.count)return {gate:'R1',title:'후보를 선택하고 편집하세요',detail,label:'후보로 이동',action:()=>focusTarget($('#red-candidates input')||$('#red-result-step'))};
       if(p.hasResult)return {gate:'R1',title:'RED 결과를 확인하세요',detail,label:'결과 보기',action:()=>$('#red-result-step').scrollIntoView({block:'start'})};
-      return {gate:'R1',title:'RED 실행 설정을 확인하세요',detail,label:'실행 설정으로',action:()=>focusTarget($('#document-red'))};
+      return {gate:'R1',title:'논문을 보고 검토 지시를 적으세요',detail:p.name,label:'지시문 작성',action:()=>focusTarget($('#external-red .prompt-instructions textarea')||$('#paper-before-stage'))};
     }
     return {gate:'R1',title:'논문 파일을 입력하세요',detail:'RED는 입력 파일에서 근거 있는 해석 왜곡 후보를 준비합니다.',label:'RED 파일 입력',action:()=>focusTarget($('#paper-file'))};
   }

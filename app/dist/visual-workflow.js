@@ -14,7 +14,7 @@
   const ready=(async()=>{
     if(document.readyState==='loading')await new Promise(resolve=>document.addEventListener('DOMContentLoaded',resolve,{once:true}));
     await globalThis.FalsifyLab?.ready;
-    const state={red:{},blue:{}},steps={};
+    const state={red:{},blue:{}},steps={},advancedRoles={};
 
     // Keep the actual file inputs and their existing listeners. The upstream
     // component supplies drag/paste handling, the browser supplies file picking.
@@ -91,6 +91,8 @@
       importReply.id='visual-'+role+'-external';start?.closest('.button-row')?.before(importReply);
       const runNote=el('p','visual-next');runNote.setAttribute('role','status');start?.closest('.button-row')?.after(runNote);
       state[role].note=runNote;
+      const advancedRole=disclosure('자동 실행·도구 설정',items.slice(1));advancedRole.id=role+'-advanced-tools';advancedRole.classList.add('visual-advanced-execution');advancedRoles[role]=advancedRole;root.append(advancedRole);
+      const externalPanel=$('#external-'+role);if(externalPanel)advancedRole.before(externalPanel);
       // Keep the visible transmission scope beside the consent checkbox.
       const selection=$('#'+role+'-harness')?.closest('.harness-selection');
       if(selection){
@@ -116,6 +118,7 @@
     }
     function render(role,detail){
       const s=state[role];if(detail!==undefined)Object.assign(s,detail||{name:'',busy:false,hasResult:false});
+      const advancedTitle=advancedRoles[role]?.querySelector(':scope > summary');if(advancedTitle)advancedTitle.textContent='자동 실행·도구 설정'+(s.busy?' · '+role.toUpperCase()+' 진행 중':'');
       const sections=steps[role];if(!sections?.length)return;
       const hasFile=!!s.name,hasResult=!!s.hasResult;
       // Empty future steps stay as small destinations; no forced RED -> BLUE sequence.
@@ -171,6 +174,8 @@
       document.addEventListener('falsify:local-bridge',connection);connection();
       const instructions=pair.querySelector('.bridge-steps');if(instructions){const d=el('details','visual-details');d.append(el('summary','','처음 연결하는 PC'),instructions);pair.prepend(d);}
     }
+    function placeBridge(){if(!bridge)return;const current=document.querySelector('.rail [data-view][aria-current="page"]')?.dataset.view,role=current==='blue'?'blue':current==='workbench'?'red':null;bridge.hidden=!role;if(role&&advancedRoles[role])advancedRoles[role].append(bridge);}
+    document.querySelectorAll('.rail [data-view]').forEach(b=>b.addEventListener('click',()=>queueMicrotask(placeBridge)));addEventListener('hashchange',placeBridge);addEventListener('popstate',placeBridge);placeBridge();
     for(const [id,name] of [['red-download','download'],['doc-blue-record','check'],['red-record','check'],['evaluation-save','check'],['bridge-launch','plug'],['bridge-connect','plug'],['harness-register','plus'],['harness-download','download']])decorate($('#'+id),name);
 
     // Library first, code authoring on demand. Existing inputs/listeners stay intact.
