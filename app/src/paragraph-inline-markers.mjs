@@ -88,12 +88,17 @@ export function planInlineMarkers(source, output, pageIndex=0) {
   return {repairs,warnings};
 }
 
-export async function repairInlineMarkers({engineFactory,sourceBytes,outputBytes,pageIndices}) {
+export async function repairInlineMarkers({engineFactory,sourceBytes,outputBytes,pageIndices,sourcePageMap}) {
   let src,out; const repairs=[],warnings=[];
   try {
     src=await engineFactory(sourceBytes); out=await engineFactory(outputBytes);
     for(const pageIndex of pageIndices) {
-      const s=readGlyphs(src,pageIndex), o=readGlyphs(out,pageIndex);
+      const mapping=sourcePageMap?.find(m=>m.sourcePageIndex===pageIndex);
+      if(sourcePageMap && (!mapping || mapping.continuationPageIndices?.length)) {
+        warnings.push({pageIndex,code:'inline_marker_continuation_unverified'}); continue;
+      }
+      const outputPageIndex=mapping?.outputPageIndex ?? pageIndex;
+      const s=readGlyphs(src,pageIndex), o=readGlyphs(out,outputPageIndex);
       if(!s.styled || !o.styled) {warnings.push({pageIndex,code:'inline_marker_style_unavailable'});continue;}
       const plan=planInlineMarkers(s,o,pageIndex); warnings.push(...plan.warnings);
       const seen=new Set(), counts=new Map();

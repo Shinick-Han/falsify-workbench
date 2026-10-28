@@ -145,7 +145,11 @@ test('real PDFium paragraph inspect and reflow retain full After and following c
     assert.ok(afterQuads.length>0,'complete After has independent glyph quads');
     const ys=xs=>xs.filter((_,i)=>i%2===1);
     assert.ok(Math.min(...ys(found))>=Math.min(...ys(sourceFollowing))-.5,'following content does not move upward into the expansion');
-    assert.ok(Math.max(...ys(afterQuads))<=Math.min(...ys(found))+.5,'expanded content ends before the following paragraph');
+    // MuPDF search quads include the font's ascent/descent box; these boxes
+    // overlap even on normally spaced source lines. Compare successive line
+    // tops against the source font size rather than treating that box as ink.
+    const tops=quads=>Array.from({length:quads.length/8},(_,i)=>Math.min(quads[i*8+1],quads[i*8+3]));
+    assert.ok(Math.min(...tops(found))-Math.max(...tops(afterQuads))>=target.size-1,'following paragraph has a full line of clearance after the expanded text');
     assert.ok(following && originalFollowing,'both source and output retain the following paragraph');
     // Compare image object stream and rendered image region independently.
     const render = data => { const doc=mupdf.Document.openDocument(data,'application/pdf');const p=doc.loadPage(0); const pix=p.toPixmap([1,0,0,1,0,0],mupdf.ColorSpace.DeviceRGB,false); const pixels=Uint8Array.from(pix.getPixels());const stride=pix.getStride();const sample=[];for(let y=322;y<342;y++)sample.push(...pixels.slice(y*stride+450*3,y*stride+470*3));pix.destroy();p.destroy();doc.destroy();return sample; };

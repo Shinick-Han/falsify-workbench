@@ -59,3 +59,13 @@ test('in-page cascade rejects a foreign figure in the swept area', () => {
   boxes.set(3,{x:0,y:62,w:80,h:6});
   assert.equal(cascadeBarrier(engine,ctx,[{id:'a',box:ctx.paras[0].box,delta:20}],new Map([['b',10]])),null);
 });
+
+test('existing source mask overlap is preserved while newly entered content still blocks', () => {
+  const ctx={paras:[para('a',110,100)]};
+  const boxes=new Map([[1,{x:110,y:90,w:80,h:10}],[2,{x:110,y:92,w:80,h:5}]]);
+  const engine={page:1,M:{_FPDFPage_CountObjects:()=>2,_FPDFPage_GetObject:(_,i)=>i+1},paragraphObjects:()=>[1],objectBounds:h=>boxes.get(h)};
+  const grown=[{id:'a',box:ctx.paras[0].box,delta:12}];
+  assert.equal(cascadeBarrier(engine,ctx,grown,new Map()),null);
+  boxes.set(2,{x:110,y:80,w:80,h:5});
+  assert.equal(cascadeBarrier(engine,ctx,grown,new Map()),'a');
+});

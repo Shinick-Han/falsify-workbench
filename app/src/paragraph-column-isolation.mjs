@@ -82,13 +82,20 @@ export function isolateColumns(engine, paragraphs, edits, plan) {
     detached = pending;
     if (failed) throw new Error("column_isolation_restore_failed");
   };
+  // A failed operation produces no PDF. Release only objects that are still
+  // detached; restored objects remain owned by the page.
+  restore.disposeDetached = () => {
+    if (!detached.length) return;
+    for (const item of detached) M._FPDFPageObj_Destroy(item.h);
+    detached = [];
+  };
   try {
     for (const item of slots) {
       if (!M._FPDFPage_RemoveObject(engine.page, item.h)) throw new Error("column_isolation_remove_failed");
       detached.push(item);
     }
   } catch (e) {
-    restore();
+    try { restore(); } catch (restoreError) { restore.disposeDetached(); throw restoreError; }
     throw e;
   }
   return restore;

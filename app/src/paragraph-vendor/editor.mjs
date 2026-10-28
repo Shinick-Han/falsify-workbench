@@ -10,6 +10,7 @@ import { loadRuntime } from "./runtime.mjs";
 import { PAGINATION_CAPABILITY, PAGINATION_LIMITS, paginateOverflow } from "./pagination.mjs";
 import { compactDocumentFlow } from "./document-flow.mjs";
 import { isolateColumns } from "../paragraph-column-isolation.mjs";
+import { repairInlineMarkers } from "../paragraph-inline-markers.mjs";
 import {
   LineRetentionError,
   canCommitLineLocal,
@@ -647,7 +648,9 @@ export async function editPdf(request, options = {}) {
     }
   } finally {
     try {
-      try { restoreColumns?.(); } finally { engine?.close(); }
+      try { restoreColumns?.(); } finally {
+        try { restoreColumns?.disposeDetached?.(); } finally { engine?.close(); }
+      }
     } catch {}
     report.engineLog = logCapture.restore();
   }
@@ -689,7 +692,15 @@ export async function editPdf(request, options = {}) {
     documentFlowPolicy: options.documentFlow === 'compatible-groups' ? 'compatible-groups' : documentFlowEnabled ? 'strict' : 'disabled',
   };
 
-  // Same-engine self-check on a freshly reopened copy.
+  // Reflowed body text and separately stored raised references must move
+  // together. Match the unchanged parent context before translating markers.
+  const markerResult = await repairInlineMarkers({engineFactory, sourceBytes, outputBytes: pdf,
+    pageIndices: [...new Set(edits.map(e => e.pageIndex))], sourcePageMap});
+  pdf = markerResult.pdf;
+  report.inlineMarkerRepairs = markerResult.repairs;
+  report.warnings.push(...markerResult.warnings);
+
+  // Same-engine self-check on the final bytes, including marker repairs.
   const qaCapture = captureConsole(!!options.includeEngineLog);
   let check;
   try {

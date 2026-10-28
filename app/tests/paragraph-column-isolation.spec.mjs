@@ -65,3 +65,12 @@ test('quote mapping accounts for supplementary Unicode characters', () => {
   restore();
   assert.deepEqual(f.objects, [1, 3, 2, 4, 5]);
 });
+
+test('failed rollback releases only objects still detached', () => {
+  const f=fixture({failRemove:2}), destroyed=[];
+  f.engine.M._FPDFPage_InsertObjectAtIndex=()=>0;
+  f.engine.M._FPDFPageObj_Destroy=h=>destroyed.push(h);
+  assert.throws(()=>f.run('left'),/column_isolation_restore_failed/);
+  assert.deepEqual(destroyed,[3]);
+  assert.deepEqual(f.objects,[1,2,4,5]);
+});
