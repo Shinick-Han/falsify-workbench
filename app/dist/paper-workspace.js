@@ -555,7 +555,7 @@
     function stale(){if(!output)return false;const g=deps.generation||globalThis.FalsifyPaperGeneration;if(output.key&&g?.key){try{return g.key(captureSpec())!==output.key;}catch{return true;}}return !snapshot||snapshot.revision!==output.revision||(output.fontRevision??0)!==fontRevision||(output.externalRevision??0)!==externalRevision;}
     function fontsChanged(){
       fontRevision++;genId++;genCtl?.abort();generating=false;
-      renderChrome();
+      scheduleGeneration();renderChrome();
       if(output)setGenStatus('글꼴이 바뀌었습니다. 미리보기를 다시 만드세요.');
     }
     async function importFonts(local){
@@ -1533,7 +1533,8 @@
       let api=recompose?recompositionApi():mixed?pipelineApi():tables.length?legacyExporterApi():bodyExporter(body);
       if(!api?.prepare)throw Error('PDF 편집 모듈이 없습니다.');
       if(!recompose&&!mixed)for(const edit of edits)if(tableEdit(edit)&&edit.anchor)delete edit.anchor.occurrence;
-      const fontSnapshot=recompose?undefined:await resolveFonts(edits,signal);if(!recompose&&!mixed&&fullFontEmbedding(fontSnapshot)&&legacyExporterApi()?.prepare)api=legacyExporterApi();
+      if(fontRevision!==spec.fontRevision)throw Error('요청한 글꼴이 바뀌어 다시 생성해야 합니다.');
+      const fontSnapshot=recompose?undefined:await resolveFonts(edits,signal);if(fontRevision!==spec.fontRevision)throw Error('요청한 글꼴이 바뀌어 다시 생성해야 합니다.');if(!recompose&&!mixed&&fullFontEmbedding(fontSnapshot)&&legacyExporterApi()?.prepare)api=legacyExporterApi();
       const prepared=recompose?{request:{file,fileHash:spec.fileHash,edits,revision:spec.revision,signal},blinding:null}:await benchmarkSource({file,fileHash:spec.fileHash,edits,fontSnapshot,signal});
       let result;
       try{if(mixed&&!recompose){
@@ -1894,7 +1895,7 @@
     ui.zoomOut.addEventListener('click',()=>{const i=ZOOMS.indexOf(zoom);if(i<=0)return;zoom=ZOOMS[i-1];syncNav();if(source&&source.doc)void drawBefore(page);});
     ui.original.addEventListener('click',()=>{if(source)download(source.file);});
     ui.current.addEventListener('click',()=>{if(generationApi())void currentAction('download');else if(output&&!output.blocked)download(output.file,true);});
-    doc.querySelector('#paper-recompose')?.addEventListener('change',renderChrome);
+    doc.querySelector('#paper-recompose')?.addEventListener('change',()=>{scheduleGeneration();renderChrome();});
     doc.addEventListener('falsify:recomposition-ready',renderChrome);
     ui.generate.addEventListener('click',()=>{if(!ui.generate.disabled){if(generationApi())void currentAction('preview');else void generate();}});
     ui.generateCancel?.addEventListener('click',()=>{if(!generating)return;generator?.cancel();abortGen();renderChrome();setGenStatus('생성을 취소했습니다.');});
