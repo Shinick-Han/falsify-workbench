@@ -1,7 +1,7 @@
 import {readGlyphs} from './paragraph-vendor/quality.mjs';
 
 const text = gs => gs.map(g => String.fromCodePoint(g.u)).join('');
-const key = gs => text(gs).normalize('NFKC').replace(/[^\p{L}\p{N}]/gu, '').toLowerCase();
+const key = gs => text(gs).normalize('NFKC').replace(/\s/gu, '').toLowerCase();
 const originY = g => g.origin?.[1];
 const size = g => g.style.size * Math.hypot(g.style.mat?.[2] ?? 0, g.style.mat?.[3] ?? 1);
 const styleKey = g => JSON.stringify(g.style);

@@ -45,3 +45,16 @@ test('does not move an object containing unrelated body glyphs',()=>{
  const plan=planInlineMarkers(source,output);
  assert.equal(plan.repairs.length,0); assert.ok(plan.warnings.some(w=>w.code==='inline_marker_object_ambiguous'));
 });
+
+test('anchors to closing punctuation across reflow without losing its geometry',()=>{
+ const source=fixture(), output=fixture({shift:15});
+ for(const page of [source,output]) {
+  const marker=page.glyphs.pop(), parent=page.glyphs.at(-1);
+  const x=parent.r;
+  page.glyphs.push({...parent,u:41,l:x,r:x+3,i:parent.i+1,origin:[x,parent.origin[1]]});
+  if(page===source) {marker.l+=3; marker.r+=3; marker.origin[0]+=3;}
+  page.glyphs.push(marker);
+ }
+ const plan=planInlineMarkers(source,output);
+ assert.equal(plan.repairs.length,1); assert.equal(plan.repairs[0].dx,18);
+});
