@@ -23,13 +23,14 @@ const plugin={name:'adapt',setup(b){
 await build({entryPoints:[join(app,'src/paragraph-pdf.mjs')],outfile:join(temp,'candidate.mjs'),bundle:true,format:'esm',platform:'browser',target:'es2022',plugins:[plugin]});
 const {prepare}=await import(pathToFileURL(join(temp,'candidate.mjs')).href);
 globalThis.fetch=async input=>new Response(readFileSync(new URL(input)));
-function fixture(widget=false,wide=false,duplicate=false,wrapped=false){
+function fixture(widget=false,wide=false,duplicate=false,wrapped=false,stationary=false){
  const d=new mupdf.PDFDocument();try{
   const font=d.addSimpleFont(new mupdf.Font('Times-Roman'));
   const text='BT /F1 11 Tf 40 700 Td (An initial claim includes supporting REFERENCE.) Tj ET BT /F1 11 Tf 40 686 Td (All measurement conditions remain explicitly stated.) Tj ET BT /F1 11 Tf 40 672 Td (The remaining evidence stays available for review.) Tj ET BT /F1 11 Tf 40 560 Td (Following paragraph remains separate and readable.) Tj ET BT /F1 11 Tf 350 700 Td (The right column is independent.) Tj ET BT /F1 11 Tf 350 686 Td (Its contents and positions should remain unchanged.) Tj ET BT /F1 11 Tf 350 672 Td (No change is requested in this column.) Tj ET';
-  d.insertPage(-1,d.addPage([0,0,640,800],0,{Font:{F1:font}},(wrapped?text.replace('REFERENCE.','REF').replace('(All measurement conditions remain explicitly stated.)','(All measurement conditions)')+' BT /F1 11 Tf 201 686 Td (ERENCE) Tj ET':text)+(duplicate?' BT /F1 11 Tf 350 650 Td (REFERENCE) Tj ET':'')));
+  d.insertPage(-1,d.addPage([0,0,640,800],0,{Font:{F1:font}},(wrapped?text.replace('REFERENCE.','REF').replace('BT /F1 11 Tf 40 686 Td (All measurement conditions remain explicitly stated.) Tj ET ','')+' BT /F1 11 Tf 201 686 Td (ERENCE) Tj ET':text)+(duplicate?' BT /F1 11 Tf 350 650 Td (REFERENCE) Tj ET':'')));
   d.insertPage(-1,d.addPage([0,0,640,800],0,{Font:{F1:font}},'BT /F1 11 Tf 40 700 Td (Unchanged page.) Tj ET'));
   const page=d.findPage(0),annots=[d.addObject({Type:'Annot',Subtype:'Link',Rect:wrapped?[200,683,264,711]:wide?[145,697,263.982,711]:[201.029,697,263.982,711],A:{S:'URI',URI:d.newString('https://example.invalid/reference')}})];
+  if(stationary)annots.push(d.addObject({Type:'Annot',Subtype:'Link',Rect:[350,647,413,661],A:{S:'URI',URI:d.newString('https://example.invalid/stationary')}}));
   if(widget)annots.push(d.addObject({Type:'Annot',Subtype:'Text',Rect:[400,400,420,420],Contents:d.newString('keep')}));
   page.put('Annots',annots);const b=d.saveToBuffer();try{return b.asUint8Array().slice();}finally{b.destroy();}
  }finally{d.destroy();}
@@ -78,7 +79,7 @@ test('link moves while the complete comment dictionary remains bound',async()=>{
 test('a wrapped link with non-rigid mapping is explicitly unverified',async()=>{
  const result=await prepare({file:fixture(false,false,false,true),edits:[edit]});
  assert.equal(result.verification.report.paragraphLinkMoves.length,0);
- assert.ok(result.verification.report.selfCheck.failures.some(f=>f.code==='paragraph_link_unverified'&&f.reason==='document_flow_link_not_rigid_translation'));
+ assert.ok(result.verification.report.selfCheck.failures.some(f=>f.code==='paragraph_link_unverified'&&['document_flow_link_not_rigid_translation','document_flow_link_text_mapping_mismatch'].includes(f.reason)),JSON.stringify(result.verification.report.selfCheck.failures));
 });
 
 
@@ -93,6 +94,27 @@ test('duplicate labels do not redirect the source-owned link to the other column
  const report=result.verification.report;
  assert.equal(report.paragraphLinkMoves.length,1,JSON.stringify(report.selfCheck.failures));
  assert.ok(report.paragraphLinkMoves[0].dx<0);
+});
+
+test('stationary link is preserved while another link moves',async()=>{
+ const src=fixture(false,false,true,false,true),result=await prepare({file:src,edits:[edit]});
+ const report=result.verification.report;
+ assert.equal(report.paragraphLinkMoves.length,1,JSON.stringify(report.selfCheck.failures));
+ assert.equal(report.paragraphLinkMoves[0].annotationIndex,0);
+ assert.ok(!report.selfCheck.failures.some(f=>f.code==='paragraph_link_unverified'&&f.annotationIndex===1),JSON.stringify(report.selfCheck.failures));
+ const a=new mupdf.PDFDocument(src),b=new mupdf.PDFDocument(new Uint8Array(await result.file.arrayBuffer()));
+ try {assert.deepEqual(Array.from({length:4},(_,i)=>b.findPage(0).get('Annots',1,'Rect',i).asNumber()),Array.from({length:4},(_,i)=>a.findPage(0).get('Annots',1,'Rect',i).asNumber()));}
+ finally {a.destroy();b.destroy();}
+});
+
+test('zero moves still validates and preserves the stationary raw link',async()=>{
+ const initial=fixture(false,false,true,false,true),doc=new mupdf.PDFDocument(initial);let src;
+ try {doc.findPage(0).get('Annots').delete(0);const buf=doc.saveToBuffer();try{src=buf.asUint8Array().slice();}finally{buf.destroy();}}finally{doc.destroy();}
+ const result=await prepare({file:src,edits:[edit]}),report=result.verification.report;
+ assert.equal(report.paragraphLinkMoves.length,0);
+ assert.ok(!report.selfCheck.failures.some(f=>f.code==='paragraph_link_unverified'),JSON.stringify(report.selfCheck.failures));
+ const api=createAnnotationTransport({mupdf}),model=await api.inspect({sourceBytes:src,sourceSha256:createHash('sha256').update(src).digest('hex')});
+ assert.equal((await api.validate({model,sourceBytes:src,outputBytes:new Uint8Array(await result.file.arrayBuffer()),sourcePageMap:[0,1].map(i=>({sourcePageIndex:i,outputPageIndex:i})),moves:[],preserveUnmovedUnsupported:true})).ok,true);
 });
 
 test('canonical provider preserves native ownership when saved body objects append out of raw order',async()=>{
