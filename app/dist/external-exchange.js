@@ -32,6 +32,7 @@
     const segments=Array.isArray(options.segments)?options.segments.filter(s=>s&&typeof s.id==='string'&&typeof s.text==='string'):[];
     const batch={schema:'falsify.external-batch.v1',id:id(),role,fileHash:options.fileHash,raw,importedAt:new Date().toISOString(),status:'unparsed',items:[],diagnostics:[]};
     for(const key of ['model','prompt','harness','requestId'])if(options[key]!=null)batch[key]=options[key];
+    if(raw.length>red.LIMITS.inputChars){batch.diagnostics.push({code:'input-limit',message:'응답이 길이 한도를 넘어 자동으로 읽지 못했습니다. 원문은 보관됩니다.'});return batch;}
     const obj=json(raw);if(obj&&typeof obj==='object'&&!Array.isArray(obj)){
       for(const key of ['model','prompt','harness','requestId'])if(batch[key]==null&&obj[key]!=null)batch[key]=obj[key];
       for(const key of ['fileHash','sourceHash'])if(typeof obj[key]==='string'&&obj[key]&&typeof options[key]==='string'&&obj[key]!==options[key])batch.diagnostics.push({code:'file-hash-mismatch',message:'응답의 원문 식별이 현재 파일과 다릅니다. 확인이 필요합니다.',identity:key,claimed:obj[key]});
@@ -49,7 +50,8 @@
       });
     }else if(role==='red'&&red&&segments.length&&options.fileHash){
       const parsed=red.parse(raw,{segments,fileHash:options.fileHash});batch.diagnostics.push(...parsed.diagnostics);
-      for(const p of parsed.proposals){const item={id:id(),kind:'change',before:p.before,after:p.after,rationale:'',evidence:[],references:[],attackTypes:[],uncertainty:'',segmentId:p.segmentId,pageIndex:p.pageIndex,matchStatus:p.status,anchor:p.anchor,matches:p.matches};locate(item,segments,item.before);batch.items.push(item);}
+      const chunks=raw.split(/\n[ \t]*---[ \t]*(?:\n|$)/).filter(c=>/(?:^|\n)[ \t]*before[ \t]*:/i.test(c));
+      for(const [index,p] of parsed.proposals.entries()){const field=name=>{const m=new RegExp('(?:^|\\n)[ \\t]*'+name+'[ \\t]*:[ \\t]*([^\\n]*)','i').exec(chunks[index]||'');return m?m[1].trim():'';};const item={id:id(),kind:'change',before:p.before,after:p.after,rationale:field('rationale'),evidence:strings(field('evidence')),references:strings(field('references')),attackTypes:[],uncertainty:field('uncertainty'),segmentId:p.segmentId,pageIndex:p.pageIndex,matchStatus:p.status,anchor:p.anchor,matches:p.matches};locate(item,segments,item.before);batch.items.push(item);}
     }else if(role==='blue'&&raw.trim()&&!obj){batch.items.push({id:id(),kind:'finding',rationale:raw.trim(),evidence:[],references:[],attackTypes:[],uncertainty:'',segmentId:null,pageIndex:null,matchStatus:'missing',anchor:null,matches:[]});}
     if(batch.items.length)batch.status='ok';
     return batch;
