@@ -318,7 +318,7 @@ export function repairPageLayout(engine, pageIndex, context, touched, options = 
   repairs.push(...(p?.repairs ?? []));
   warnings.push(...(p?.warnings ?? []));
   if (!p?.ok) return { repairs, warnings, pagination: null };
-  const pagination = { added: p.added, lineCounts: p.lineCounts, keptLines: p.keptLines, bodyTop: p.bodyTop, ...(p.flowTop !== undefined ? { flowTop: p.flowTop } : {}), floor: p.floor };
+  const pagination = { added: p.added, lineCounts: p.lineCounts, keptLines: p.keptLines, bodyTop: p.bodyTop, ...(p.flowTop !== undefined ? { flowTop: p.flowTop } : {}), floor: p.floor, ...(p.flowColumn ? { flowColumn: p.flowColumn } : {}) };
   if (p.continuationStyle !== undefined) {
     if (!validContinuationStyle(p.continuationStyle)) {
       warnings.push({ code: "continuation_style_invalid", pageIndex, severity: "error" });
@@ -327,6 +327,27 @@ export function repairPageLayout(engine, pageIndex, context, touched, options = 
     pagination.continuationStyle = { ...p.continuationStyle };
   }
   return { repairs, warnings, pagination };
+}
+
+// Propagate only the part of growth that exceeds existing vertical gaps.
+// Use the same plan for in-page repair and continuation planning.
+export function cascadeShifts(ctx, grown) {
+  const growth = new Map(grown.map((g) => [g.id, g.delta]));
+  const ordered = ctx.paras.filter((q) => q.box && q.role === "body")
+    .sort((a, b) => b.box.top - a.box.top || a.box.x - b.box.x);
+  const shifts = new Map();
+  for (let i = 0; i < ordered.length; i++) {
+    const q = ordered[i];
+    let shift = 0;
+    for (const prev of ordered.slice(0, i)) {
+      if (hOverlap(prev.box, q.box) < 0.35 * Math.min(prev.box.w, q.box.w)) continue;
+      if (q.box.top > bottomOf(prev.box) + 0.5) continue;
+      const gap = Math.max(0, bottomOf(prev.box) - q.box.top);
+      shift = Math.max(shift, (shifts.get(prev.id) || 0) + (growth.get(prev.id) || 0) - gap);
+    }
+    if (shift > 0.01) shifts.set(q.id, shift);
+  }
+  return shifts;
 }
 
 // Shift following body paragraphs of the same column by the growth above
@@ -346,13 +367,13 @@ function cascade(engine, ctx, grown, touchedIds, repairs, warnings, allowOverflo
   const floor = edgeTops.length
     ? Math.max(Math.max(...edgeTops) + 2, Math.min(pageBottom + EDGE_BAND * ctx.pageH, ...bodyBottoms))
     : Math.min(...bodyBottoms, Infinity);
-  const plan = new Map();
-  for (const g of grown) {
-    for (const q of ctx.paras) {
-      if (!q.box || q.id === g.id || q.role !== "body" || !q.editable) continue;
-      if (q.box.top > bottomOf(g.box) + 0.5) continue;
-      if (hOverlap(q.box, g.box) < 0.35 * Math.min(g.box.w, q.box.w)) continue;
-      plan.set(q.id, (plan.get(q.id) || 0) + g.delta);
+  const plan = cascadeShifts(ctx, grown);
+  // Never silently move a paragraph that the engine cannot edit.
+  for (const [id] of plan) {
+    const q = ctx.paras.find((p) => p.id === id);
+    if (!q.editable || q.sharesObjects) {
+      warnings.push({ code: "pagination_unsupported_shared_objects", id, severity: "error" });
+      return null;
     }
   }
   const violations = [];
@@ -361,7 +382,7 @@ function cascade(engine, ctx, grown, touchedIds, repairs, warnings, allowOverflo
     if (bottomOf(q.box) - dy < floor - 0.01) violations.push(id);
   }
   // Growth of the last paragraph itself must also fit.
-  for (const g of grown) if (bottomOf(g.box) - g.delta < floor - 0.01) violations.push(g.id);
+  for (const g of grown) if (bottomOf(g.box) - g.delta - (plan.get(g.id) || 0) < floor - 0.01) violations.push(g.id);
   if (violations.length) {
     if (allowOverflow) {
       warnings.push({ code: "pagination_required", severity: "info", paragraphs: violations, floor: +floor.toFixed(2) });
@@ -572,7 +593,7 @@ function readGlyphs(engine, pageIndex) {
     const l = M.HEAPF64[b >> 3], r = M.HEAPF64[(b + 8) >> 3];
     const bo = M.HEAPF64[(b + 16) >> 3], t = M.HEAPF64[(b + 24) >> 3];
     glyphs.push(styled ? { u, l, r, b: bo, t, i, ...readStyle(M, tp, i, sb) } : { u, l, r, b: bo, t, i });
-    chars.push({ u, cy: (bo + t) / 2 });
+    chars.push({ u, cy: (bo + t) / 2, cx: (l + r) / 2 });
   }
   M._free(b);
   if (sb) M._free(sb);
@@ -1057,6 +1078,7 @@ export function normalizePageMap(map, sourcePageCount) {
     if (cont.length && !(Number.isFinite(m.bodyTop) && Number.isFinite(m.floor) && m.bodyTop > m.floor)) return null;
     if (m.flowTop !== undefined && !(cont.length && Number.isFinite(m.flowTop) && m.flowTop > m.floor && m.flowTop <= m.bodyTop + 2)) return null;
     if (cont.length && !(Array.isArray(m.lineCounts) && m.lineCounts.length === cont.length)) return null;
+    if (m.flowColumn !== undefined && !(cont.length && Number.isFinite(m.flowColumn?.x0) && Number.isFinite(m.flowColumn?.x1) && m.flowColumn.x1 > m.flowColumn.x0)) return null;
     if (m.continuationStyle !== undefined && !(cont.length && validContinuationStyle(m.continuationStyle))) return null;
     out.push({ ...m, continuationPageIndices: [...cont] });
   }
@@ -1266,7 +1288,32 @@ function inspectContinued(s, o, out, m, pageEdits, row, failures, warnings, incl
   const { floor, bodyTop } = m;
   const lo = floor - 0.5, hi = bodyTop + 0.5;
   const flowHi = m.flowTop === undefined ? hi : Math.min(hi, m.flowTop + 0.5);
-  const exp = expectedPageText(bandText(s, lo, flowHi), pageEdits);
+  const column = m.flowColumn;
+  const inColumn = (c) => !column || (c.cx ?? (c.l + c.r) / 2) >= column.x0 - 0.5 && (c.cx ?? (c.l + c.r) / 2) <= column.x1 + 0.5;
+  // Attach whitespace to adjacent visible text without admitting text from a
+  // different column. Existing unbounded maps retain their original behavior.
+  const selected = (g, top) => {
+    if (!column) return g.chars.filter((c) => c.cy === null || c.cy >= lo && c.cy <= top);
+    const visible = (c) => c.cy !== null && c.cy >= lo && c.cy <= top && inColumn(c);
+    return g.chars.filter((c, k, cs) => {
+      if (c.cy !== null) return visible(c);
+      let a = k - 1, b = k + 1;
+      while (a >= 0 && cs[a].cy === null) a--;
+      while (b < cs.length && cs[b].cy === null) b++;
+      return a >= 0 && b < cs.length && visible(cs[a]) && visible(cs[b]);
+    });
+  };
+  const flowText = (g, top) => selected(g, top).map((c) => String.fromCharCode(c.u)).join("");
+  const exp = expectedPageText(flowText(s, flowHi), pageEdits);
+  if (column) {
+    const fixed = (g) => g.glyphs.filter((c) => {
+      const cy = (c.b + c.t) / 2;
+      return cy >= lo && cy <= hi && !inColumn(c);
+    });
+    const a = fixed(s), b = fixed(o);
+    row.fixed_column_stable = sameGlyphs(a, b) && sameStyles(a, b);
+    if (!row.fixed_column_stable) failures.push({ code: "fixed_other_column_changed", pageIndex: i });
+  }
   if (flowHi < hi) {
     const fixed = (g) => g.glyphs.filter((c) => c.b + (c.t - c.b) / 2 > flowHi && c.b + (c.t - c.b) / 2 <= hi);
     const a = fixed(s), b = fixed(o);
@@ -1276,7 +1323,7 @@ function inspectContinued(s, o, out, m, pageEdits, row, failures, warnings, incl
   const conts = m.continuationPageIndices.map((k) => readGlyphs(out, k));
   // Every page of the flow is compared by its body band only; anything a
   // continuation page carries outside the band is checked as edge content.
-  const parts = [normStr(bandText(o, lo, flowHi)), ...conts.map((g) => normStr(bandText(g, lo, hi)))];
+  const parts = [normStr(flowText(o, flowHi)), ...conts.map((g) => normStr(flowText(g, hi)))];
   const joined = joinFlowParts(parts, exp.ok ? exp.text : "");
   const got = joined.text;
   row.body_band = { floor: +floor.toFixed(2), bodyTop: +bodyTop.toFixed(2) };
@@ -1285,10 +1332,9 @@ function inspectContinued(s, o, out, m, pageEdits, row, failures, warnings, incl
     failures.push({ code: "expected_text_uncomputable", pageIndex: i, id: exp.id, reason: exp.reason });
   } else {
     row.text_equal = exp.text === got;
-    const sourceWords = new Set([...bandText(s, lo, flowHi).matchAll(/([\p{L}]+)\u0002\s*([\p{L}]+)/gu)].map((m) => m[1] + m[2]));
+    const sourceWords = new Set([...flowText(s, flowHi).matchAll(/([\p{L}]+)\u0002\s*([\p{L}]+)/gu)].map((m) => m[1] + m[2]));
     const expectedTypography = exp.text.replace(/([\p{L}]+)\u0002\s*([\p{L}]+)/gu, (raw, left, right) => sourceWords.has(left + right) ? left + right : raw);
     if (!row.text_equal) {
-      const selected = (g, top) => g.chars.filter((c) => c.cy === null || c.cy >= lo && c.cy <= top);
       const actual = [selected(o, flowHi), ...conts.map((g) => selected(g, hi))]
         .flatMap((part, k) => k ? [{ u: 32, generated: true }, ...part] : part);
       // Remove an actual U+0002 and its line separator only for the exact
@@ -1318,6 +1364,7 @@ function inspectContinued(s, o, out, m, pageEdits, row, failures, warnings, incl
   const se = extents(s);
   row.continuation = conts.map((g, k) => {
     const bodyGlyphs = inBand(g, lo, hi);
+    if (column && bodyGlyphs.some((c) => !inColumn(c))) failures.push({ code: "continuation_text_outside_flow_column", pageIndex: i, outputPageIndex: m.continuationPageIndices[k] });
     const edge = outsideBand(g, lo, hi);
     const c = {
       outputPageIndex: m.continuationPageIndices[k],
