@@ -46,12 +46,7 @@ export function planInlineChange(paras, chars, map, hit, needle, after) {
   const text = X.join("");
   const del = D.flatMap(rawOf).filter((c) => c.pi >= 0);
   if (!text) return { del, inserts: [] };
-  // Justification can vary hScale between source lines without changing the
-  // semantic style used to choose an existing replacement anchor.
-  const style = (c) => {
-    const r = paras[c.pi].runs[c.ri];
-    return STYLE_KEYS.filter((k) => k !== "hScale").map((k) => String(k === "rgba" || k === "strokeRgba" ? (r?.[k] ?? 0) >>> 0 : r?.[k] ?? "")).join("|");
-  };
+  const style = (c) => runStyleKey(paras[c.pi].runs[c.ri]);
   const place = (c, text, after = false) => ({ pi: c.pi, ri: c.ri, o: c.o + (after ? 1 : 0), text });
   const words = del.filter((c) => !isWs(c));
 
