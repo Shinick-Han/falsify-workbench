@@ -526,7 +526,7 @@
           say('팀 시도를 메모리에서 12시간 동안 임시 열람합니다. 로컬 기록에 합치지 않았습니다.');
         }else if(normalized.kind==='external-response'){
           if(!opened||opened.kind!=='external-response'||opened.id!==normalized.id)throw local('외부 응답 임시 열람을 열지 못했습니다.');
-          state.temp={pageId,kind:'external-response',id:opened.id,expiresAt:Date.now()+TEMP_MS};armTeamTimer();showView('results');
+          state.temp={pageId,kind:'external-response',id:opened.id,expiresAt:Date.now()+TEMP_MS};armTeamTimer();showView('review');
           say('외부 응답을 메모리에서 12시간 동안 열람합니다. 로컬 기록에 합치지 않았습니다.');
         }else if(normalized.kind==='paper-edit'){
           if(!opened||opened.kind!=='paper-edit'||typeof opened.id!=='string'||!opened.id) throw local('수동 편집 임시 열람 결과가 아니어서 검수로 열지 않았습니다. 로컬 기록은 그대로입니다.');
