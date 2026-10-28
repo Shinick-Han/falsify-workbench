@@ -9,3 +9,4 @@ RED는 Before/After가 있는 변경을 가져옵니다. After가 빈 문자열�
 `FalsifyDocumentBlueExternal`은 현재 BLUE 입력, 응답 추가, 선택·위치 연결과 복원을 제공합니다. 저장 버튼을 누르면 외부 응답 스냅샷을 로컬 기록에 보관하며 전체 기록 백업·복원에 포함됩니다. 실행 harness나 모델 호출은 만들어 기록하지 않습니다. 자동 팀 공개는 없습니다.
 
 통합 순서: `external-red.js`, `external-exchange.js`, `external-proposals.js` 후 `external-red-ui.js`와 `document-blue.js`, 그 다음 `external-blue-ui.js`. `external-blue-ui.css`를 포함합니다. BLUE 호스트는 `#document-blue`입니다.
+`external-ai-import` 출처로 표시합니다. 파서의 응답 자동 처리 한도는 200000자이며, 한도를 넘는 원문은 잘라내지 않고 보관합니다. 구현은 AGPL-3.0-only입니다.
