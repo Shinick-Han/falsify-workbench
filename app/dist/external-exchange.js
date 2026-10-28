@@ -3,6 +3,7 @@
   'use strict';
   const id=()=>typeof crypto!=='undefined'&&crypto.randomUUID?crypto.randomUUID():'external-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);
   const strings=v=>Array.isArray(v)?v.filter(x=>typeof x==='string'):typeof v==='string'&&v?[v]:[];
+  const evidence=v=>Array.isArray(v)?v.map(x=>JSON.parse(JSON.stringify(x))):typeof v==='string'&&v?[v]:[];
   // Each output code unit retains the corresponding original start/end offsets.
   function normalize(text){
     let value='',starts=[],ends=[];
@@ -33,7 +34,8 @@
     for(const key of ['model','prompt','harness','requestId'])if(options[key]!=null)batch[key]=options[key];
     const obj=json(raw);if(obj&&typeof obj==='object'&&!Array.isArray(obj)){
       for(const key of ['model','prompt','harness','requestId'])if(batch[key]==null&&obj[key]!=null)batch[key]=obj[key];
-      const claimed=obj.fileHash||obj.sourceHash;if(typeof claimed==='string'&&claimed&&options.fileHash&&claimed!==options.fileHash)batch.diagnostics.push({code:'file-hash-mismatch',message:'응답의 원문 식별이 현재 파일과 다릅니다. 확인이 필요합니다.',claimedFileHash:claimed});
+      for(const key of ['fileHash','sourceHash'])if(typeof obj[key]==='string'&&obj[key]&&typeof options[key]==='string'&&obj[key]!==options[key])batch.diagnostics.push({code:'file-hash-mismatch',message:'응답의 원문 식별이 현재 파일과 다릅니다. 확인이 필요합니다.',identity:key,claimed:obj[key]});
+      if(typeof obj.role==='string'&&obj.role.toLowerCase()!==role)batch.diagnostics.push({code:'role-mismatch',message:'응답의 역할이 현재 작업과 다릅니다.'});
       if(['abstain','refusal'].includes(obj.status))batch.status=obj.status;
     }
     let list=Array.isArray(obj)?obj:obj&&typeof obj==='object'?(role==='red'?(obj.changes??obj.candidates??obj.edits):(obj.findings??obj.items)):null;
@@ -41,7 +43,7 @@
     if(Array.isArray(list)){
       list.forEach((entry,index)=>{
         if(!entry||typeof entry!=='object'||Array.isArray(entry)||(role==='red'&&(typeof entry.before!=='string'||!entry.before.trim()||typeof entry.after!=='string'))){batch.diagnostics.push({code:'malformed-item',index,message:'이 항목을 읽지 못했습니다.'});return;}
-        const item={id:id(),kind:role==='red'?'change':'finding',rationale:typeof entry.rationale==='string'?entry.rationale:typeof entry.description==='string'?entry.description:typeof entry.message==='string'?entry.message:'',evidence:strings(entry.evidence),references:strings(entry.references),attackTypes:strings(entry.attackTypes),uncertainty:typeof entry.uncertainty==='string'?entry.uncertainty:'',segmentId:typeof entry.segmentId==='string'?entry.segmentId:null,pageIndex:Number.isInteger(entry.pageIndex)&&entry.pageIndex>=0?entry.pageIndex:null,matchStatus:'missing',anchor:null,matches:[]};
+        const item={id:id(),kind:role==='red'?'change':'finding',rationale:typeof entry.rationale==='string'?entry.rationale:typeof entry.description==='string'?entry.description:typeof entry.message==='string'?entry.message:'',evidence:evidence(entry.evidence),references:evidence(entry.references),attackTypes:strings(entry.attackTypes),uncertainty:typeof entry.uncertainty==='string'?entry.uncertainty:'',segmentId:typeof entry.segmentId==='string'?entry.segmentId:null,pageIndex:Number.isInteger(entry.pageIndex)&&entry.pageIndex>=0?entry.pageIndex:null,matchStatus:'missing',anchor:null,matches:[]};
         if(role==='red'){item.before=entry.before;item.after=entry.after;locate(item,segments,item.before);}else{if(typeof entry.quote==='string'&&entry.quote){item.quote=entry.quote;locate(item,segments,item.quote);}if(!item.quote&&!item.rationale&&!item.evidence.length){batch.diagnostics.push({code:'malformed-item',index,message:'내용이 없는 지적입니다.'});return;}}
         batch.items.push(item);
       });
@@ -52,6 +54,6 @@
     if(batch.items.length)batch.status='ok';
     return batch;
   }
-  function buildPrompt(options={}){const role=options.role==='blue'?'blue':'red';const text=role==='red'?'원문의 취약한 주장에 대한 Before와 After를 제안하세요. 삭제는 빈 After입니다.':'원문의 문제점을 검토하고 근거와 참고자료를 제시하세요. 인용이 없으면 생략하세요.';const shape=role==='red'?'{"changes":[{"before":"원문 인용","after":"변경문","rationale":"이유","evidence":[],"references":[]}]}':'{"findings":[{"quote":"원문 인용 (선택)","rationale":"지적","evidence":[],"references":[]}]}';return [options.prompt||text,options.harness||'', '응답 형식 (선택): '+shape,options.fileHash?'fileHash: '+options.fileHash:'',options.includeSource===false?'':(options.segments||[]).map(s=>'--- '+s.id+' ---\n'+s.text).join('\n\n')].filter(Boolean).join('\n\n');}
+  function buildPrompt(options={}){const role=options.role==='blue'?'blue':'red';const text=role==='red'?'원문의 취약한 주장에 대한 Before와 After를 제안하세요. 삭제는 빈 After입니다.':'원문의 문제점을 검토하고 근거와 참고자료를 제시하세요. 인용이 없으면 생략하세요.';const shape=role==='red'?'{"changes":[{"before":"원문 인용","after":"변경문","rationale":"이유","evidence":[],"references":[]}]}':'{"findings":[{"quote":"원문 인용 (선택)","rationale":"지적","evidence":[],"references":[]}]}';return [options.prompt||text,options.harness?(typeof options.harness==='string'?options.harness:JSON.stringify(options.harness,null,2)):'', '응답 형식 (선택): '+shape,options.fileHash?'fileHash: '+options.fileHash:'',options.includeSource===false?'':(options.segments||[]).map(s=>'--- '+s.id+' ---\n'+s.text).join('\n\n')].filter(Boolean).join('\n\n');}
   return {parse,buildPrompt};
 });
