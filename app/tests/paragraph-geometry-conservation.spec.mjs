@@ -59,3 +59,10 @@ test('visible hyphen and unknown controls are never normalized away',()=>{
   assert.equal(compare(page('ab-cd'),page('abcd')).match,false);
   const p=page('abc'); p.chars[1].u=3; p.glyphs=p.glyphs.filter(g=>g.i!==1); assert.equal(canonicalPage(p).reason,'nonspace_geometry_unavailable');
 });
+test('a physical reflow line break can retain a source word boundary',()=>{
+  const s=page('a b c'),o=page('ab d');
+  for(const g of o.glyphs.filter(g=>g.i>=1)){g.l-=6;g.r-=6;g.origin=[g.l,0];}
+  for(let i=1;i<o.chars.length;i++)if(o.chars[i].u===32){o.chars[i].box=[16,18,0,10];o.chars[i].origin=[16,0];}
+  assert.equal(compare(s,o,[{before:'c',after:'d'}]).match,true);
+  assert.equal(compare(s,page('ab d'),[{before:'c',after:'d'}]).match,false);
+});

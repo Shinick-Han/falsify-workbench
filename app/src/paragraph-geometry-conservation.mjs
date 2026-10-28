@@ -1,4 +1,7 @@
-// Spatial conservation is deliberately independent of paint visibility and reading order.
+// Compare spatial content with word-preserving whitespace normalization. A
+// physical line break may replace a source word space during reflow; this
+// proves the word boundary, not byte identity of encoded whitespace. Paint
+// visibility and human reading order remain separate checks.
 const isSpace = u => /\s/u.test(String.fromCharCode(u));
 const valid = n => Number.isFinite(n);
 const size = g => g.style?.size * Math.hypot(g.style?.mat?.[2] ?? 0, g.style?.mat?.[3] ?? 1);
@@ -60,7 +63,11 @@ export function canonicalPage(page, partition = page?.W / 2) {
       const {line,li}=candidates[0];
       const last=[...line.items].sort((a,b)=>a.x-b.x).at(-1);
       const first=[...lines[li+1].items].sort((a,b)=>a.x-b.x)[0];
+      let before=i-1, after=i+1;
+      while (before>=0 && isSpace(page.chars[before].u)) before--;
+      while (after<page.chars.length && isSpace(page.chars[after].u)) after++;
       if (!last || !first || x<last.x || x-last.r>line.size ||
+          last.i!==before || first.i!==after ||
           !/\p{L}/u.test(String.fromCharCode(last.u)) || !/\p{L}/u.test(String.fromCharCode(first.u))) return fail('discretionary_break_unproven',i);
       joins.add(li); normalizedDiscretionary.push(i); continue;
     }
