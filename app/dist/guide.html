@@ -309,6 +309,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\start-companion.ps1 -NoIns
   "adapter": {"type": "stdio", "executable": "C:/Python311/python.exe", "args": ["D:/harness/stdio_harness.py"]}
 }</code></pre>
 <p>필드 규칙과 호출 입출력은 <a href="https://github.com/Shinick-Han/falsify-workbench/blob/main/docs/harness-contract.md">Harness 계약</a>을 따릅니다.</p>
+<h3>결함 주입 전용 하니스 (latex_red_harness.py)</h3>
+<p><a href="https://github.com/Shinick-Han/falsify-workbench/blob/main/app/examples/latex_red_harness.py">latex_red_harness.py</a>는 모델을 부르지 않는 결정적 RED 하니스입니다. 전달된 추출 텍스트에서 비교·수량·완화 표현을 한 번만 나오는 구절에 한정해 바꾸고, 호출이 요구하는 필드 집합에 맞춰 <code>candidates</code>를 최대 12개까지 채웁니다. 같은 입력이면 같은 결과가 나오고 호출당 시간 제한 안에서 끝납니다. 실제 PDF 재조판은 이 하니스 밖에 있는 companion 단계가 같은 교체표를 적용해 만든다.</p>
+<pre data-harness><code>{
+  "schema": "falsify.harness.v1",
+  "id": "latex-red",
+  "name": "LaTeX RED",
+  "version": "1",
+  "role": "red",
+  "instructions": "비교 방향·수량·완화 표현을 정확히 한 번 나오는 구절에서만 바꾼다. 근거는 원문 인용 그대로.",
+  "maxCalls": 8,
+  "adapter": {"type": "stdio", "executable": "C:/Python312/python.exe", "args": ["D:/falsify-workbench/app/examples/latex_red_harness.py"]},
+  "settings": {"language": "ko"}
+}</code></pre>
 </section>
 
 <section id="results" aria-labelledby="results-title">
