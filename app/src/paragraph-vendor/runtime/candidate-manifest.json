@@ -24,6 +24,14 @@
     {
       "name": "editcore-reedit-space.patch",
       "sha256": "53919b15c82024b308799c58d732ae2907737fc5a7ad9188a98fd66711c7c509"
+    },
+    {
+      "name": "native-font-cmap.patch",
+      "sha256": "d6ae1c5dab1be6c8a6edd50602a9dfe0bb5a9e6a5901120e5950c7c409c5a895"
+    },
+    {
+      "name": "native-inline-script.patch",
+      "sha256": "0af612808f4a84c43df7ed031e43367648c37b54dc66bd3e74d2628afbc11b5d"
     }
   ],
   "artifacts": {
@@ -33,7 +41,7 @@
     },
     "wasm": {
       "path": "editcore.wasm",
-      "sha256": "9b14b88937a9b21697565df94e82b28ac645547413606d4994d50d9200529c6e"
+      "sha256": "5eca1dab3686aeac0cea3a591ab7931bc2651d9cd25f6fcda9ad2b472136125e"
     }
   },
   "provenance": {
@@ -42,6 +50,6 @@
     "jsInputName": "pdfium.js",
     "wasmInputName": "pdfium.wasm",
     "verification": "Artifact and patch sha256 recorded from supplied files only; C++/WASM rebuild from the listed sources was not verified by this script.",
-    "note": "reedit-1726cc21-20261019 snapshot (provenance.json b2878492) from same-host build root /home/jcpuk/editor-wasm-build.I80fju out/wasm-resumed-20261019; native 1726cc21, parent 8ba2939, gate native-repair-review.json fea29c69 ACCEPT_SOURCE_SCOPE. Stacked patches applied in order stream-order(pdfium), natural-space, justified-space, reedit-space(engine); only stream-order and reedit-space reverse-check individually, all four bound by engine.diff 6cf69c5f (blob ids 813903c..1726cc21) and pdfium.diff d5225a53. Incremental, not clean-room."
+    "note": "reedit-1726cc21-20261019 snapshot (provenance.json b2878492) from same-host build root /home/jcpuk/editor-wasm-build.I80fju out/wasm-resumed-20261019; native 1726cc21, parent 8ba2939, gate native-repair-review.json fea29c69 ACCEPT_SOURCE_SCOPE. Stacked patches applied in order stream-order(pdfium), natural-space, justified-space, reedit-space(engine); only stream-order and reedit-space reverse-check individually, all four bound by engine.diff 6cf69c5f (blob ids 813903c..1726cc21) and pdfium.diff d5225a53. Incremental, not clean-room. Font cmap and inline script patches applied on the same-host incremental cached source build snapshot /home/jcpuk/editor-wasm-build.I80fju/out/font-inline-20261028; not a clean reproducible source build."
   }
 }
