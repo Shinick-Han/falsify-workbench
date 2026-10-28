@@ -41,3 +41,21 @@ test('raised marker attaches to the body line before following punctuation',()=>
   const p=page('ab1.'); const marker=p.glyphs[2]; marker.origin[1]=14; marker.b=14; marker.t=20; marker.style.size=6;
   assert.equal(canonicalPage(p).text,'ab1.');
 });
+
+
+test('discretionary break requires physical letter endpoints and is accounted',()=>{
+  const p=page('abXcd'); p.chars[2]={u:2,discretionary:true,generated:false,origin:[22,10]}; p.glyphs=p.glyphs.filter(g=>g.i!==2);
+  for(const g of p.glyphs.filter(g=>g.i>2)) {g.l-=18;g.r-=18;g.origin=[g.l,0];}
+  const result=canonicalPage(p); assert.equal(result.ok,true); assert.equal(result.text,'abcd'); assert.deepEqual(result.evidence.normalizedDiscretionary,[2]);
+  p.chars[2].discretionary=false; assert.equal(canonicalPage(p).reason,'nonspace_geometry_unavailable');
+});
+test('physical line breaks preserve word boundaries and literal controls',()=>{
+  const p=page('ab\ncd'); p.chars[2].box=null; p.chars[2].origin=null; p.glyphs=p.glyphs.filter(g=>g.i!==2);
+  for(const g of p.glyphs.filter(g=>g.i>2)) {g.l-=18;g.r-=18;g.origin=[g.l,0];}
+  const result=canonicalPage(p); assert.equal(result.ok,true); assert.equal(result.text,'ab cd'); assert.deepEqual(result.evidence.boundaryWhitespace,[2]);
+  assert.equal(compare(p,page('abcd')).match,false);
+});
+test('visible hyphen and unknown controls are never normalized away',()=>{
+  assert.equal(compare(page('ab-cd'),page('abcd')).match,false);
+  const p=page('abc'); p.chars[1].u=3; p.glyphs=p.glyphs.filter(g=>g.i!==1); assert.equal(canonicalPage(p).reason,'nonspace_geometry_unavailable');
+});

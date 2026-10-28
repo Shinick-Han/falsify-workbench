@@ -30,34 +30,69 @@ export function canonicalPage(page, partition = page?.W / 2) {
     if (candidates.length>1) return fail('ambiguous_marker',first.i);
     if (candidates.length===1) {candidates[0].items.push(...line.items); lines.splice(lines.indexOf(line),1);}
   }
-  const ignored=[];
+  lines.sort((a,b)=>a.channel-b.channel || b.y-a.y);
+  for (const line of lines) line.items.sort((a,b)=>a.x-b.x || a.i-b.i);
+  const ignored=[], boundaryWhitespace=[], normalizedDiscretionary=[];
+  const itemLine = new Map(lines.flatMap((line, n)=>line.items.map(item=>[item.i,n])));
+  const adjacentBreak = i => {
+    let a=i-1, b=i+1;
+    while (a>=0 && !glyphs.has(a) && isSpace(page.chars[a].u)) a--;
+    while (b<page.chars.length && !glyphs.has(b) && isSpace(page.chars[b].u)) b++;
+    const left=glyphs.get(a), right=glyphs.get(b), li=itemLine.get(a), ri=itemLine.get(b);
+    if (!left || !right || lines[li].channel!==lines[ri].channel || ri!==li+1) return null;
+    const last=[...lines[li].items].sort((x,y)=>x.x-y.x).at(-1), first=[...lines[ri].items].sort((x,y)=>x.x-y.x)[0];
+    if (last?.i!==a || first?.i!==b) return null;
+    return {a,b,li,ri};
+  };
+  const joins=new Set(), literalBoundaries=new Set();
   for (let i=0;i<page.chars.length;i++) {
     const c=page.chars[i];
     if (glyphs.has(i)) continue;
     if (!Number.isInteger(c.u)) return fail('invalid_character',i);
-    if (!isSpace(c.u)) return fail(c.u===2 && c.discretionary ? 'discretionary_break_unproven' : 'nonspace_geometry_unavailable',i);
+    if (c.u===2 && c.discretionary===true) {
+      const [x,y]=c.origin ?? [];
+      const candidates=lines.map((line,li)=>({line,li})).filter(({line,li})=>
+        valid(x) && valid(y) && line.channel===(x<partition?0:1) && Math.abs(line.y-y)<=.5 &&
+        li+1<lines.length && lines[li+1].channel===line.channel &&
+        line.y-lines[li+1].y>0 && line.y-lines[li+1].y<=line.size*2 &&
+        Math.abs(line.size-lines[li+1].size)<=.5);
+      if (candidates.length!==1) return fail('discretionary_break_unproven',i);
+      const {line,li}=candidates[0];
+      const last=[...line.items].sort((a,b)=>a.x-b.x).at(-1);
+      const first=[...lines[li+1].items].sort((a,b)=>a.x-b.x)[0];
+      if (!last || !first || x<last.x || x-last.r>line.size ||
+          !/\p{L}/u.test(String.fromCharCode(last.u)) || !/\p{L}/u.test(String.fromCharCode(first.u))) return fail('discretionary_break_unproven',i);
+      joins.add(li); normalizedDiscretionary.push(i); continue;
+    }
+    if (!isSpace(c.u)) return fail('nonspace_geometry_unavailable',i);
     if (c.generated===true) {ignored.push(i); continue;}
     const [l,r,b,t]=c.box ?? [];
     const [x,y]=c.origin ?? [];
-    if (![l,r,b,t,x,y].every(valid)) return fail('literal_whitespace_geometry_unavailable',i);
+    if (/[\r\n]/u.test(String.fromCharCode(c.u)) || ![l,r,b,t,x,y].every(valid)) {
+      const br=adjacentBreak(i);
+      if (!br || !/[\r\n]/u.test(String.fromCharCode(c.u))) return fail('literal_whitespace_geometry_unavailable',i);
+      boundaryWhitespace.push(i); literalBoundaries.add(br.li); continue;
+    }
     const channel=x<partition?0:1;
     const candidates=lines.filter(line=>line.channel===channel && Math.abs(line.y-y)<=.5);
     if (candidates.length!==1) return fail('literal_whitespace_line_ambiguous',i,{candidates:candidates.length});
     candidates[0].items.push({i,u:c.u,x:l,r,generated:false});
   }
-  lines.sort((a,b)=>a.channel-b.channel || b.y-a.y);
   const chars=[];
-  for (const line of lines) {
+  for (let n=0;n<lines.length;n++) {
+    const line=lines[n];
     line.items.sort((a,b)=>a.x-b.x || a.i-b.i);
     for (let k=1;k<line.items.length;k++) if (Math.abs(line.items[k].x-line.items[k-1].x)<1e-6 && line.items[k].u!==line.items[k-1].u) return fail('ambiguous_horizontal_order',line.items[k].i);
+    if (n && (!joins.has(n-1) || literalBoundaries.has(n-1))) chars.push({u:32,generated:!literalBoundaries.has(n-1),virtual:true});
     chars.push(...line.items);
   }
-  const indices=chars.map(c=>c.i).concat(ignored);
+  const mapped=chars.filter(c=>!c.virtual).map(c=>c.i);
+  const indices=mapped.concat(ignored,boundaryWhitespace,normalizedDiscretionary);
   if (indices.length!==page.chars.length || new Set(indices).size!==page.chars.length) return fail('index_coverage_incomplete');
-  return {ok:true,chars,text:chars.map(c=>String.fromCharCode(c.u)).join(''),partition,evidence:{total:page.chars.length,mapped:chars.map(c=>c.i),generatedWhitespace:ignored}};
+  return {ok:true,chars,text:chars.map(c=>String.fromCharCode(c.u)).join(''),partition,evidence:{total:page.chars.length,mapped,generatedWhitespace:ignored,boundaryWhitespace,normalizedDiscretionary}};
 }
 
-export function compareSourceGeometry(source, output, edits, {expectedPageText} = {}) {
+export function compareSourceGeometry(source, output, edits, {expectedPageText, matchesGeneratedWhitespace} = {}) {
   if (typeof expectedPageText !== 'function') return fail('expected_page_text_unavailable');
   if (source?.W!==output?.W || source?.H!==output?.H || JSON.stringify(source?.frame)!==JSON.stringify(output?.frame)) return fail('frame_mismatch');
   const s=canonicalPage(source), o=canonicalPage(output,s.partition);
@@ -65,8 +100,9 @@ export function compareSourceGeometry(source, output, edits, {expectedPageText} 
   if (!o.ok) return {...o,side:'output'};
   const expected=expectedPageText(s.text,edits,{includeSpans:true});
   if (!expected.ok) return {...expected,side:'source'};
-  // No output-generated space may satisfy a literal source space. Both
-  // canonical streams exclude generated extraction whitespace before comparing.
+  // Virtual physical line separators are optional on the output side when
+  // the caller supplies the existing generated-whitespace matcher.
   const actual=o.text.replace(/\s+/gu,' ').trim();
-  return {ok:true,match:actual===expected.text,expected:expected.text,actual,spans:expected.spans,sourceEvidence:s.evidence,outputEvidence:o.evidence};
+  const match=typeof matchesGeneratedWhitespace==='function' ? matchesGeneratedWhitespace(expected.text,o.chars) : actual===expected.text;
+  return {ok:true,match,expected:expected.text,actual,spans:expected.spans,sourceEvidence:s.evidence,outputEvidence:o.evidence};
 }
