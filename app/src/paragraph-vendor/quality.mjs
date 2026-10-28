@@ -364,7 +364,10 @@ export function cascadeBarrier(engine, ctx, grown, shifts) {
     const delta = grown.find((g) => g.id === q.id)?.delta || 0;
     if (!(shift > 0 || delta > 0)) continue;
     const sweep = { x: q.box.x, y: bottomOf(q.box) - shift - delta, w: q.box.w, h: q.box.h + shift + delta };
-    if (fixed.some((b) => intersects(sweep, b))) return q.id;
+    // Existing overlap (for example a source white masking path) is not a new collision.
+    const original={x:q.box.x,y:bottomOf(q.box)-TOL,w:q.box.w,h:q.box.h+2*TOL};
+    const area=(a,b)=>Math.max(0,Math.min(a.x+a.w,b.x+b.w)-Math.max(a.x,b.x))*Math.max(0,Math.min(a.y+a.h,b.y+b.h)-Math.max(a.y,b.y));
+    if (fixed.some((b) => intersects(sweep,b) && area(sweep,b)>area(original,b)+0.01)) return q.id;
   }
   return null;
 }

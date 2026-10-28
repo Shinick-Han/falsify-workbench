@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import { loadRuntime } from "./runtime.mjs";
 import { PAGINATION_CAPABILITY, PAGINATION_LIMITS, paginateOverflow } from "./pagination.mjs";
 import { compactDocumentFlow } from "./document-flow.mjs";
+import { isolateColumns } from "../paragraph-column-isolation.mjs";
 import {
   LineRetentionError,
   canCommitLineLocal,
@@ -441,6 +442,7 @@ export async function editPdf(request, options = {}) {
 
   const logCapture = captureConsole(!!options.includeEngineLog);
   let engine;
+  let restoreColumns = null;
   let pdf;
   let sourcePageCount = 0;
   const continued = new Map();
@@ -464,10 +466,13 @@ export async function editPdf(request, options = {}) {
     for (const [pageIndex, pageEdits] of groupByPage(edits)) {
       engine.loadPage(pageIndex);
       engine.normalizeFontsForEdit();
-      const paras = engine.buildModel();
-      const plan = planPageEdits(paras, pageEdits);
+      let paras = engine.buildModel();
+      let plan = planPageEdits(paras, pageEdits);
+      restoreColumns = isolateColumns(engine, paras, pageEdits, plan);
+      if (restoreColumns) { paras = engine.buildModel(); plan = planPageEdits(paras, pageEdits); }
       failures.push(...plan.failures);
-      pagePlans.push({ pageIndex, paras, plan, key: snapshotKey(paras), regenHostile: engine.pageRegenHostile() });
+      pagePlans.push({ pageIndex, pageEdits, isolated: !!restoreColumns, paras, plan, key: snapshotKey(paras), regenHostile: engine.pageRegenHostile() });
+      restoreColumns?.(); restoreColumns = null;
     }
     if (failures.length) {
       for (const f of failures) Object.assign(editReport.get(f.id), { status: "rejected", code: f.code, hits: f.hits });
@@ -482,7 +487,7 @@ export async function editPdf(request, options = {}) {
     // a page shift every later page by `added`, so the engine addresses
     // source page p at p + added (pagination evicts stale cache entries).
     let mutated = false;
-    for (const { pageIndex, plan, key, regenHostile } of pagePlans) {
+    for (const { pageIndex, pageEdits, isolated, plan, key, regenHostile } of pagePlans) {
       const pageReport = { pageIndex, paragraphs: [], regenHostile };
       report.pages.push(pageReport);
       if (regenHostile) report.warnings.push({ pageIndex, code: "PAGE_REGEN_HOSTILE" });
@@ -497,6 +502,11 @@ export async function editPdf(request, options = {}) {
       if (plan.perPara.size === 0) continue;
       const at = pageIndex + added;
       engine.loadPage(at);
+      if (isolated) {
+        const initial = engine.buildModel();
+        restoreColumns = isolateColumns(engine, initial, pageEdits, planPageEdits(initial, pageEdits));
+        if (!restoreColumns) throw fail("STATE_DRIFT", "Column isolation could not be repeated", { pageIndex });
+      }
       // A line-local commit undoes steps by object handle, so it needs a page
       // whose model build keeps every page object: a build that re-creates
       // objects (seen for text objects with word spacing) would point those
@@ -589,7 +599,7 @@ export async function editPdf(request, options = {}) {
         // page map even when the quality module does not forward it.
         let paginated = null;
         const repairOptions = pg.allow
-          ? { paginate: (eng, ctx, grown, info) => (paginated = paginateOverflow(eng, ctx, grown, { ...info, maxNewPages: pg.max - added })) }
+          ? { paginate: (eng, ctx, grown, info) => { restoreColumns?.(); restoreColumns = null; return (paginated = paginateOverflow(eng, ctx, grown, { ...info, maxNewPages: pg.max - added })); } }
           : {};
         try {
           r = quality.repairPageLayout(engine, at, context, touched, repairOptions);
@@ -624,6 +634,7 @@ export async function editPdf(request, options = {}) {
         }
       }
       for (const p of plan.plans) if (!p.noop) editReport.get(p.edit.id).status = "applied";
+      restoreColumns?.(); restoreColumns = null;
     }
 
     if (mutated) {
@@ -636,7 +647,7 @@ export async function editPdf(request, options = {}) {
     }
   } finally {
     try {
-      engine?.close();
+      try { restoreColumns?.(); } finally { engine?.close(); }
     } catch {}
     report.engineLog = logCapture.restore();
   }
