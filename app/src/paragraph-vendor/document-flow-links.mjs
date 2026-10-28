@@ -60,11 +60,11 @@ function normalizedSource(chars,band) {
   return {text,indices};
 }
 
-function mapSourceGlyphs(sourceEngine,sourceBands,targetGlyphs,edits,expectedPageText) {
+function mapSourceGlyphs(sourceEngine,sourceBands,targetGlyphs,edits,expectedPageText,sourceCharacterProvider) {
   const expected=[],mapping=new Map(),sources=new Map();
   for(const band of sourceBands){
     const chars=readLinkPageCharacters(sourceEngine,band.sourcePageIndex);sources.set(band.sourcePageIndex,chars);
-    const normalized=normalizedSource(chars,band);
+    const normalized=normalizedSource(sourceCharacterProvider ? sourceCharacterProvider(band,chars) : chars,band);
     const exp=expectedPageText(normalized.text,edits.filter(e=>e.pageIndex===band.sourcePageIndex),{includeSpans:true});
     if(!exp.ok)fail('document_flow_link_edit_mapping_ambiguous');
     const append=(start,end)=>{
@@ -89,10 +89,10 @@ function mapSourceGlyphs(sourceEngine,sourceBands,targetGlyphs,edits,expectedPag
   return {mapping,sources};
 }
 
-export function deriveNativeLinkMoves(sourceEngine,sourceBands,targetGlyphs,edits,model,expectedPageText,authorizedTargets=new Set()) {
+export function deriveNativeLinkMoves(sourceEngine,sourceBands,targetGlyphs,edits,model,expectedPageText,authorizedTargets=new Set(),sourceCharacterProvider) {
   if(!model||!model.annotations.some(a=>sourceBands.some(b=>b.sourcePageIndex===a.sourcePageIndex)))return [];
   const ids=sourceBands.map(b=>b.sourcePageIndex);
-  const {mapping,sources}=mapSourceGlyphs(sourceEngine,sourceBands,targetGlyphs,edits,expectedPageText);
+  const {mapping,sources}=mapSourceGlyphs(sourceEngine,sourceBands,targetGlyphs,edits,expectedPageText,sourceCharacterProvider);
   const moves=[],claimed=new Set();
   for(const descriptor of model.annotations.filter(a=>ids.includes(a.sourcePageIndex))){
     if(descriptor.eligible!==true||descriptor.kind!=='link')fail(descriptor.reason||'document_flow_annotation_unsupported');

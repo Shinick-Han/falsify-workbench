@@ -2,7 +2,8 @@
 // ordinary page edits. Unsupported mappings remain explicit failures.
 import {createHash} from 'node:crypto';
 import {deriveNativeLinkMoves, readLinkPageCharacters} from './paragraph-vendor/document-flow-links.mjs';
-import {expectedPageText} from './paragraph-vendor/quality.mjs';
+import {expectedPageText, readGlyphs} from './paragraph-vendor/quality.mjs';
+import {canonicalPage} from './paragraph-geometry-conservation.mjs';
 
 export async function transportParagraphLinks({engineFactory, sourceBytes, outputBytes, edits, sourcePageMap, flowGroups=[], annotationAdapter}) {
   const failures=[], moves=[];
@@ -24,11 +25,24 @@ export async function transportParagraphLinks({engineFactory, sourceBytes, outpu
         const map=sourcePageMap.find(m=>m.sourcePageIndex===pageIndex);
         if(!map||map.continuationPageIndices?.length)throw Object.assign(new Error(),{code:'paragraph_link_continuation_unverified'});
         const band={sourcePageIndex:pageIndex,floor:-100000,bodyTop:100000};
-        const targets=readLinkPageCharacters(out,map.outputPageIndex).filter(c=>c.u>32&&c.box).map(c=>({...c,outputPageIndex:map.outputPageIndex}));
+        const sourcePage=canonicalPage(readGlyphs(src,pageIndex));
+        const outputPage=canonicalPage(readGlyphs(out,map.outputPageIndex),sourcePage.partition);
+        if(!sourcePage.ok||!outputPage.ok)throw Object.assign(new Error(),{code:'document_flow_link_text_mapping_mismatch'});
+        const expected=expectedPageText(sourcePage.text,edits.filter(e=>e.pageIndex===pageIndex),{includeSpans:true});
+        const normalize=text=>text.replace(/\s+/gu,' ').trim();
+        if(!expected.ok)throw Object.assign(new Error(),{code:'document_flow_link_edit_mapping_ambiguous'});
+        if(expected.text!==normalize(outputPage.text))throw Object.assign(new Error(),{code:'document_flow_link_text_mapping_mismatch'});
+        const ordered=(canonical,raw)=>canonical.chars.map(c=>{
+          if(c.virtual)return {u:c.u,index:null,box:null};
+          const native=raw[c.i];
+          if(!native||native.index!==c.i||native.u!==c.u||(c.u>32&&!native.box))throw Object.assign(new Error(),{code:'document_flow_link_text_mapping_mismatch'});
+          return native;
+        });
+        const targets=ordered(outputPage,readLinkPageCharacters(out,map.outputPageIndex)).filter(c=>c.u>32).map(c=>({...c,outputPageIndex:map.outputPageIndex}));
         // Glyph proof considers links only; the original private model still binds every
         // annotation when the adapter validates the complete output.
         const linkModel={...model,annotations:model.annotations.filter(a=>a.kind==='link')};
-        const pageMoves=deriveNativeLinkMoves(src,[band],targets,edits,linkModel,expectedPageText);
+        const pageMoves=deriveNativeLinkMoves(src,[band],targets,edits,linkModel,expectedPageText,new Set(),(_band,raw)=>ordered(sourcePage,raw));
         moves.push(...pageMoves);
       } catch(error) {
         const links=model?.annotations?.filter(a=>a.sourcePageIndex===pageIndex&&a.kind==='link')||[];

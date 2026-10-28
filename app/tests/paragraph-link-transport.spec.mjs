@@ -94,3 +94,20 @@ test('duplicate labels do not redirect the source-owned link to the other column
  assert.equal(report.paragraphLinkMoves.length,1,JSON.stringify(report.selfCheck.failures));
  assert.ok(report.paragraphLinkMoves[0].dx<0);
 });
+
+test('canonical provider preserves native ownership when saved body objects append out of raw order',async()=>{
+ const {deriveNativeLinkMoves}=await import('../src/paragraph-vendor/document-flow-links.mjs');
+ const {expectedPageText}=await import('../src/paragraph-vendor/quality.mjs');
+ // Raw source is interleaved, while output body glyphs were appended after the second label.
+ const physical='A LINK B LINK';
+ const positions=[...physical].map((ch,i)=>({u:ch.charCodeAt(0),box:ch===' '?null:{l:i*10,r:i*10+8,b:10,t:20}}));
+ const order=[...positions.keys()].filter(i=>i>=7).concat([...positions.keys()].filter(i=>i<7));
+ const raw=order.map(i=>positions[i]);
+ const heap=new Float64Array(8);
+ const M={HEAPF64:heap,_malloc:()=>0,_free:()=>{},_FPDFText_LoadPage:()=>1,_FPDFText_ClosePage:()=>{},_FPDFText_CountChars:()=>raw.length,_FPDFText_GetUnicode:(_,i)=>raw[i].u,_FPDFText_GetCharBox:(_,i)=>{const b=raw[i].box;if(!b)return 0;heap.set([b.l,b.r,b.b,b.t]);return 1;},_FPDFText_GetTextObject:()=>1,_FPDFText_IsGenerated:()=>0};
+ const engine={M,page:1,loadPage(){}};
+ const targets=positions.filter(c=>c.box).map(c=>({...c,box:{...c.box,b:c.box.b+5,t:c.box.t+5},outputPageIndex:0}));
+ const descriptor={sourcePageIndex:0,annotationIndex:0,kind:'link',eligible:true,rect:[20,10,58,20],destination:{type:'uri'}};
+ const moves=deriveNativeLinkMoves(engine,[{sourcePageIndex:0,floor:0,bodyTop:100}],targets,[],{annotations:[descriptor]},expectedPageText,new Set(),(_band,chars)=>[...chars].sort((a,b)=>order[a.index]-order[b.index]));
+ assert.deepEqual(moves,[{sourcePageIndex:0,annotationIndex:0,outputPageIndex:0,dx:0,dy:5}]);
+});
