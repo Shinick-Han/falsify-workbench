@@ -86,7 +86,7 @@
       const importReply=button('file-text','AI 답변 가져오기',()=>{
         const panel=$('#external-'+role);if(!panel)return;
         for(let parent=panel.parentElement;parent;parent=parent.parentElement)if(parent.tagName==='DETAILS')parent.open=true;
-        panel.scrollIntoView({block:'start'});panel.querySelector('textarea')?.focus({preventScroll:true});
+        panel.scrollIntoView({block:'start'});panel.querySelector(role==='red'?'#external-red-paste':'textarea[aria-label="BLUE 외부 응답"]')?.focus({preventScroll:true});
       });
       importReply.id='visual-'+role+'-external';start?.closest('.button-row')?.before(importReply);
       const runNote=el('p','visual-next');runNote.setAttribute('role','status');start?.closest('.button-row')?.after(runNote);
@@ -118,7 +118,8 @@
     }
     function render(role,detail){
       const s=state[role];if(detail!==undefined)Object.assign(s,detail||{name:'',busy:false,hasResult:false});
-      const advancedTitle=advancedRoles[role]?.querySelector(':scope > summary');if(advancedTitle)advancedTitle.textContent='자동 실행·도구 설정'+(s.busy?' · '+role.toUpperCase()+' 진행 중':'');
+      const progress=$(role==='red'?'#red-progress':'#doc-blue-progress');
+      const advancedTitle=advancedRoles[role]?.querySelector(':scope > summary');if(advancedTitle)advancedTitle.textContent='자동 실행·도구 설정 · '+(s.busy?role.toUpperCase()+' 진행 중':(progress?.textContent.trim()|| (globalThis.FalsifyLocalBridge?.state()?.connected?'내 PC 연결됨':'내 PC 연결 안 됨')));
       const sections=steps[role];if(!sections?.length)return;
       const hasFile=!!s.name,hasResult=!!s.hasResult;
       // Empty future steps stay as small destinations; no forced RED -> BLUE sequence.
@@ -131,7 +132,6 @@
       else if(!connected)note=''; // The connection action below opens the existing PC panel.
       else if(!$(role==='red'?'#red-consent':'#doc-blue-consent')?.checked)note='논문 전송에 동의하면 검토를 시작할 수 있습니다.';
       else if(start?.disabled&&!FalsifyLab.allowed(role))note='선택한 도구의 실행 설정을 확인하세요.';
-      const progress=$(role==='red'?'#red-progress':'#doc-blue-progress');
       if(progress?.textContent.trim())note='';
       if(s.note&&s.note.textContent!==note)s.note.textContent=note;
       if(s.note)s.note.hidden=!note;
@@ -175,7 +175,7 @@
       const instructions=pair.querySelector('.bridge-steps');if(instructions){const d=el('details','visual-details');d.append(el('summary','','처음 연결하는 PC'),instructions);pair.prepend(d);}
     }
     function placeBridge(){if(!bridge)return;const current=document.querySelector('.rail [data-view][aria-current="page"]')?.dataset.view,role=current==='blue'?'blue':current==='workbench'?'red':null;bridge.hidden=!role;if(role&&advancedRoles[role])advancedRoles[role].append(bridge);}
-    document.querySelectorAll('.rail [data-view]').forEach(b=>b.addEventListener('click',()=>queueMicrotask(placeBridge)));addEventListener('hashchange',placeBridge);addEventListener('popstate',placeBridge);placeBridge();
+    const rail=$('.rail');if(rail)new MutationObserver(placeBridge).observe(rail,{subtree:true,attributes:true,attributeFilter:['aria-current']});placeBridge();
     for(const [id,name] of [['red-download','download'],['doc-blue-record','check'],['red-record','check'],['evaluation-save','check'],['bridge-launch','plug'],['bridge-connect','plug'],['harness-register','plus'],['harness-download','download']])decorate($('#'+id),name);
 
     // Library first, code authoring on demand. Existing inputs/listeners stay intact.
