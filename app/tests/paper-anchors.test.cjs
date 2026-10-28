@@ -7,4 +7,10 @@ assert.equal(find({quote:'neurological result [12]',segments}).matches[0].before
 assert.equal(find({quote:'These results demonstrate a notable effect. sufficient to restore neural competency in all lines.',segments}).matches[0].segmentId,'layout:p2:column1');
 const fuzzy=find({quote:'The finding is not significant.',segments});assert.equal(fuzzy.status,'suggested');assert.ok(fuzzy.matches[0].before.includes('significant'));
 assert.equal(find({quote:'entirely unrelated short passage',segments}).status,'missing');
+const duplicate=[{id:'a',pageIndex:0,text:'before same text after'}, {id:'b',pageIndex:1,text:'other same text end'}, {id:'layout:p1:page',pageIndex:0,text:'before same text after'}];
+assert.deepEqual(find({quote:'same text',segments:duplicate}).matches.map(x=>x.segmentId),['a','b']);
+assert.equal(find({quote:'same text',segments:duplicate,pageIndex:9,prefix:'before',suffix:'after'}).matches[0].segmentId,'a');
+assert.equal(find({quote:'same text',segments:duplicate,pageIndex:1}).matches[0].segmentId,'b');
+assert.equal(find({quote:'The result was 12 [2].',segments:[{id:'a',text:'The result was 13 [3].'}]}).status,'suggested');
+assert.equal(find({quote:'The result was not significant.',segments:[{id:'a',text:'The result was significant.'}]}).status,'suggested');
 console.log('paper anchors tests passed');

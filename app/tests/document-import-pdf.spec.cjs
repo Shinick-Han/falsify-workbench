@@ -63,7 +63,7 @@ const marks=s=>[...s].filter(c=>c===MARK).length;
     if(path.basename(paper)==='Falsify_2차_문제집.pdf'){
       const alias=r.matchSegments.find(s=>s.pageIndex===1&&/These\s+results demonstrate/.test(s.text));
       const range=alias?.text.match(/These\s+results demonstrate[\s\S]*?sufficient to restore neural competency in all lines/);
-      check('real p2 visual quote reconstructed through appended tail',!!range);
+      check('real p2 visual quote reconstructed through appended tail without intervening material',!!range&&range[0].split('\n').length<=4);
       if(range){const match=require('../dist/paper-anchors.js').find({quote:range[0].replace(/\s+/g,' '),segments:r.segments.map((s,i)=>({...s,id:'canonical:'+i,pageIndex:i})).concat(r.matchSegments),pageIndex:1});check('real p2 quote matches the visual alias',match.status==='matched'&&match.matches[0].segmentId===alias.id&&match.matches[0].pageIndex===1);}
     }
     check('real paper extracts without NUL rejection',r.ok&&!r.text.includes('\0'));
