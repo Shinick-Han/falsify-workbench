@@ -165,6 +165,16 @@ test('workspace imports additively and flush captures selected proposal',async()
   resolveExport();await until(()=>v.downloads.length===1,'captured download');assert.equal(requests[0].edits[0].after,'Beta');assert.ok(v.downloads[0].name==='generated.pdf');
 });
 
+test('current output only exposes the exact current draft key',async()=>{
+  const bytes=pdfBytes('MARKER-GEN'),v=mount({exporter:{prepare:async()=>({file:pdfFile(bytes),sha256:sha(bytes)})}}),file=pdfFile(pdfBytes('MARKER-A'));
+  v.file(file);await until(()=>v.ws.getSource()?.fileHash,'source');v.document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file,result:{segments:[{id:'s0',pageIndex:0,text:'Alpha'}]}}}));
+  const hash=v.ws.getSource().fileHash;v.ws.acceptExternalResponse({schema:'falsify.external-batch.v1',id:'a',role:'red',fileHash:hash,raw:'answer',items:[{id:'x',kind:'change',before:'Alpha',after:'Beta',segmentId:'s0',pageIndex:0,matchStatus:'matched',anchor:{start:0,end:5}}]});
+  const c=v.get('paper-proposal-list').children[0].children[0].children[0];c.checked=true;c.dispatchEvent(new Event('change'));v.get('paper-generate').click();await until(()=>v.ws.getCurrentOutput()?.sha256===sha(bytes),'generated current');
+  const last=v.ws.getOutput();assert.ok(last.generationKey);assert.equal(v.ws.getCurrentOutput().generationKey,last.generationKey);
+  const editor=v.get('paper-proposal-list').children[0].children[1];editor.dispatchEvent(new Event('compositionstart'));editor.value='Gamma';editor.dispatchEvent(new Event('input'));assert.equal(v.ws.getCurrentOutput(),null);assert.equal(v.ws.getOutput().sha256,last.sha256);
+  editor.value='Beta';assert.equal(v.ws.getCurrentOutput().generationKey,last.generationKey);
+});
+
 test('BLUE receives click-time file even after a later edit',async()=>{
   let finish;const calls=[];const exporter={prepare(req){calls.push(req);return new Promise(resolve=>{finish=()=>{const bytes=pdfBytes('MARKER-GEN');resolve({file:pdfFile(bytes,'blue.pdf'),sha256:sha(bytes)});};});}};
   const v=mount({exporter}),file=pdfFile(pdfBytes('MARKER-A'));v.file(file);await until(()=>v.ws.getSource()?.fileHash,'source');

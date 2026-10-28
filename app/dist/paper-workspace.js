@@ -1928,12 +1928,14 @@
     renderChrome();renderInline();renderEdits();remindDraft();
     try{const blobs=blobApi();if(blobs?.purgeExpired)void blobs.purgeExpired(now()).catch(()=>{});}catch{}
     if(ui.file.files&&ui.file.files[0])void openFile(ui.file.files[0]);
+    function publicOutput(){if(!output||output.blocked)return null;return Object.freeze({file:output.file,sha256:output.sha256,originalSourceSha256:output.originalSourceSha256,verification:published(output.verification),revision:output.revision,pageMap:published(output.pageMap),generationKey:output.key||null});}
     return {
       acceptProposals,acceptExternalResponse,exportRedBatch,
       getExternalResponses(){return external?external.snapshot():null;},
       getSource(){if(!source||!source.file||!source.fileHash)return null;return Object.freeze({file:source.file,fileHash:source.fileHash,segments:published(source.segments)||[],externalSegments:published(externalSegments(source.segments))||[]});},
       getEditSnapshot(){const raw=session&&typeof session.snapshot==='function'?session.snapshot():snapshot;return raw?published(raw):null;},
-      getOutput(){if(!output||output.blocked)return null;return Object.freeze({file:output.file,sha256:output.sha256,originalSourceSha256:output.originalSourceSha256,verification:published(output.verification),revision:output.revision,pageMap:published(output.pageMap)});}
+      getOutput:publicOutput,
+      getCurrentOutput(){const g=generationApi();if(!output||output.blocked||!output.key||!g?.key)return null;try{if(g.key(captureSpec())!==output.key)return null;}catch{return null;}return publicOutput();}
     };
   }
   return {create,pageIndexFromLabel,classifyProposals,anchorFromSelection,clampScale,TTL};
