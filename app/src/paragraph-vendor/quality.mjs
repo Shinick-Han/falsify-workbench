@@ -818,13 +818,18 @@ export function matchesStationaryReorderedGlyphs(source, output, edits) {
   const normalized = normalizedSourceChars(source.chars);
   const exp = expectedPageText(source.text, edits, {includeSpans: true});
   if (!exp.ok) return false;
-  const expected = [];
+  const planned = [];
   let at = 0;
   for (const span of exp.spans) {
-    expected.push(...normalized.slice(at, span.a), ...span.after.split('').map(ch => ({ch})));
+    planned.push(...normalized.slice(at, span.a), ...span.after.split('').map(ch => ({ch})));
     at = span.b;
   }
-  expected.push(...normalized.slice(at));
+  planned.push(...normalized.slice(at));
+  // Deleting a whole fragment can join its two surrounding whitespace runs.
+  // Use the same normalization as expectedPageText without losing the source
+  // identity of any surviving non-whitespace character.
+  const expected = planned.filter((c, i) => c.ch !== ' ' || (i > 0 && planned[i - 1].ch !== ' '));
+  if (expected.at(-1)?.ch === ' ') expected.pop();
   if (expected.map(x => x.ch).join('') !== exp.text) return false;
   const sg = new Map(source.glyphs.map(g => [g.i, g]));
   const og = new Map(output.glyphs.map(g => [g.i, g]));
