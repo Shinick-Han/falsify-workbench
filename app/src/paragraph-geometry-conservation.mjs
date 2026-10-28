@@ -79,7 +79,21 @@ export function canonicalPage(page, partition = page?.W / 2) {
       joins.add(li); normalizedDiscretionary.push(i); continue;
     }
     if (!isSpace(c.u)) return fail('nonspace_geometry_unavailable',i);
-    if (c.generated===true) {ignored.push(i); continue;}
+    if (c.generated===true) {
+      // PDF writers may encode a source line break as positioning between
+      // text objects. Keep PDFium's resulting word space only when its raw
+      // neighbours and geometry prove one physical line and a positive gap.
+      const left=glyphs.get(i-1), right=glyphs.get(i+1);
+      const li=itemLine.get(i-1), ri=itemLine.get(i+1);
+      const [x,y]=c.origin ?? [];
+      const line=lines[li];
+      if (c.u===32 && left && right && li===ri && line && valid(x) && valid(y) &&
+          right.l-left.r>0.01 && x>=left.r-.5 && x<=right.l+.5 &&
+          [line,...line.aliases].some(b=>Math.abs(b.y-y)<=.5)) {
+        line.items.push({i,u:32,x,r:x,generated:true});
+      } else ignored.push(i);
+      continue;
+    }
     const [l,r,b,t]=c.box ?? [];
     const [x,y]=c.origin ?? [];
     if (/[\r\n]/u.test(String.fromCharCode(c.u)) || ![l,r,b,t,x,y].every(valid)) {

@@ -26,8 +26,10 @@ test('missing extra swapped words and literal space fail',()=>{
     if(text==='alpha  beta') assert.equal(result.match,true); else assert.equal(result.match,false,text);
   }
 });
-test('generated whitespace is recorded but cannot replace literal space',()=>{
+test('generated word spaces need a proven physical boundary',()=>{
   const a=page('alpha beta'), b=page('alpha beta'); b.chars[5].generated=true;
+  assert.equal(compare(a,b).match,true);
+  b.chars[5].origin=[0,100];
   assert.equal(compare(a,b).match,false);
   assert.deepEqual(canonicalPage(b).evidence.generatedWhitespace,[5]);
 });
