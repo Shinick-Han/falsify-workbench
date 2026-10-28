@@ -238,7 +238,7 @@
   async function validateDatabase(value,imported=false,known=[]){
     if(!value||value.schema!==KEY||!Array.isArray(value.harnesses)||!Array.isArray(value.runs)||!Array.isArray(value.reviews)||value.harnesses.length>100||value.runs.length>100||value.reviews.length>1000)throw Error('기록 형식/수량 제한 초과');
     const out={schema:KEY,harnesses:[],runs:[],reviews:[],externalResponses:[]},ids=new Set();
-    if(value.externalResponses!==undefined&&!Array.isArray(value.externalResponses))throw Error('외부 응답 기록 형식 오류');
+    if(value.externalResponses!==undefined&&(!Array.isArray(value.externalResponses)||value.externalResponses.length>100))throw Error('외부 응답 기록 형식 오류');
     for(const r of value.externalResponses||[]){if(!plain(r)||typeof r.id!=='string'||!r.id||out.externalResponses.some(x=>x.id===r.id)||!HEX.test(r.fileHash)||!HEX.test(r.sourceHash)||typeof r.revision!=='string'||!Array.isArray(r.segments)||!r.segments.length||r.segments.some(s=>!s||typeof s.id!=='string'||typeof s.text!=='string')||await sha(r.segments.map(s=>s.text).join('\n\n'))!==r.sourceHash||r.provenance!=='external-ai-import'||!Number.isFinite(Date.parse(r.createdAt))||!globalThis.FalsifyExternalProposals)throw Error('외부 응답 기록 오류');const store=FalsifyExternalProposals.create({fileHash:r.fileHash,role:'blue',segments:r.segments});store.restore(r.snapshot);for(const b of r.snapshot.batches)if(b.schema!=='falsify.external-batch.v1'||b.fileHash!==r.fileHash||b.role!=='blue'||typeof b.raw!=='string')throw Error('외부 응답 출처 오류');for(const item of r.snapshot.items){if(item.anchor){const segment=r.segments.find(s=>s.id===item.segmentId),a=item.anchor;if(!segment||!Number.isInteger(a.start)||!Number.isInteger(a.end)||a.start<0||a.end<=a.start||segment.text.slice(a.start,a.end)!==(item.before||item.quote))throw Error('외부 응답 위치 오류');}}out.externalResponses.push(clone(r));}
     for(const h of value.harnesses){const config=H.validate(h.config);const hash=await H.hash(config);if(hash!==h.hash||out.harnesses.some(x=>x.hash===hash))throw Error('harness 해시/중복 오류');out.harnesses.push({config,hash});}
     for(const r of value.runs){const run=await checkRun(r,out.harnesses,out.runs,imported);ids.add(run.id);out.runs.push(run);}
@@ -253,6 +253,7 @@
   function mergedCopy(imported){
     const next=clone(db);
     for(const r of imported.externalResponses||[]){const old=(next.externalResponses||[]).find(x=>x.id===r.id);if(old&&stable(old)!==stable(r))fail('같은 외부 응답 ID의 내용이 다릅니다.');if(!old)(next.externalResponses||(next.externalResponses=[])).push(r);}
+    if((next.externalResponses||[]).length>100)fail('외부 응답 기록은 최대 100건입니다.');
     for(const h of imported.harnesses)if(!next.harnesses.some(x=>x.hash===h.hash))next.harnesses.push(h);
     for(const r of imported.runs){const old=next.runs.find(x=>x.id===r.id);if(old&&stable({...old,provenance:r.provenance})!==stable(r))fail('같은 실행 ID의 내용이 달라 병합을 차단했습니다.');if(!old)next.runs.push(r);}
     for(const v of imported.reviews){const old=next.reviews.find(x=>x.id===v.id);if(old&&stable(old)!==stable(v))fail('같은 검수 ID의 내용이 달라 병합을 차단했습니다.');if(!old)next.reviews.push(v);}
