@@ -1,6 +1,6 @@
 # Falsify 외부 AI RED BLUE 작업 흐름 North Star
 
-기준일: 2026-10-28 · 스펙 v1 · 상태: alpha.28 구현·배포 완료. 검증 범위와 후속 항목은 구현 기록 참조
+기준일: 2026-10-28 · 스펙 v1 · 상태: alpha.29 프롬프트 중심 흐름 구현·검수 완료. 배포 결과는 WorkBite T-0152 참조
 
 적용 대상: 사용자가 지정한 Falsify 프로젝트 orchestrator. 다른 Codex agent·하위 작업자·검수자에게는 이 문서의 열람·준수 의무가 없다. 해당 orchestrator가 필요한 내용만 개별 작업 지시로 추려 전달한다.
 
@@ -12,7 +12,7 @@
 
 이 문서는 Falsify orchestrator가 이번 웹앱 개발을 판단·조율하는 기준이다. Falsify 팀의 공식 연구 목표나 연구용 harness의 성능을 정의하지 않는다. 구현 진행도와 검증 결과는 WorkBite T-0152 및 커밋·검사 결과에 남긴다. 계획을 구현 완료로 표시하지 않는다.
 
-구현·검증 증거: [external-ai-implementation.md](external-ai-implementation.md). 배포 결과는 WorkBite T-0152의 체크포인트로 확인한다.
+구현·검증 증거: [prompt-first-implementation.md](prompt-first-implementation.md), 이전 alpha.28 [구현 기록](external-ai-implementation.md). 배포 결과는 WorkBite T-0152의 체크포인트로 확인한다.
 
 ## 2026-10-28 후속 결정: 프롬프트 중심 기본 사용
 
