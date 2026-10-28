@@ -42,3 +42,21 @@ for (const [pageIndex, codes, reason] of [
     assert.equal(closed, true);
   });
 }
+
+test('continuation column reaches the saved-file check and public page map', async () => {
+  const para = { id: 1, runs: [{ text: 'Original text', font: 'Helvetica' }], lines: [], format: {} };
+  const column = { x0: 300, x1: 550 };
+  const engine = { pageCount: 1, loadPage() {}, normalizeFontsForEdit() {}, buildModel: () => [para],
+    pageRegenHostile: () => false, commitParagraph: () => ({ id: 1, surgical: true }),
+    save: () => new Uint8Array([1, 2]), close() {} };
+  let checkedMap;
+  const quality = { capturePageLayout: () => ({}),
+    repairPageLayout: () => ({ pagination: { added: 1, lineCounts: [1], keptLines: 1, bodyTop: 700, floor: 50, flowColumn: column } }),
+    inspectSavedPdf: (_factory, _source, _pdf, _edits, options) => { checkedMap = options.sourcePageMap; return { ok: true }; } };
+  const { report } = await editPdf({ sourceBytes: new Uint8Array([1]), reflow: true,
+    edits: [{ id: 'edit', pageIndex: 0, before: 'Original text', after: 'Replacement text' }] },
+    { engineFactory: async () => engine, quality });
+  assert.deepEqual(report.pagination.sourcePageMap[0].flowColumn, column);
+  assert.deepEqual(checkedMap[0].flowColumn, column);
+  assert.notEqual(report.pagination.sourcePageMap[0].flowColumn, column);
+});

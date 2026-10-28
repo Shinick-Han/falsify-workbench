@@ -648,7 +648,7 @@ export async function editPdf(request, options = {}) {
     const c = continued.get(s);
     const n = c?.added ?? 0;
     const entry = { sourcePageIndex: s, outputPageIndex: out, continuationPageIndices: Array.from({ length: n }, (_, k) => out + 1 + k) };
-    if (c) Object.assign(entry, { lineCounts: [...c.lineCounts], keptLines: c.keptLines, bodyTop: c.bodyTop, ...(c.flowTop !== undefined ? { flowTop: c.flowTop } : {}), floor: c.floor });
+    if (c) Object.assign(entry, { lineCounts: [...c.lineCounts], keptLines: c.keptLines, bodyTop: c.bodyTop, ...(c.flowTop !== undefined ? { flowTop: c.flowTop } : {}), ...(c.flowColumn ? { flowColumn: { ...c.flowColumn } } : {}), floor: c.floor });
     if (c?.continuationStyle) entry.continuationStyle = { version: c.continuationStyle.version, policy: c.continuationStyle.policy, applied: c.continuationStyle.applied === true };
     sourcePageMap.push(entry);
     out += 1 + n;
