@@ -15,13 +15,13 @@ export function isolateColumns(engine, paragraphs, edits, plan) {
     let j = i;
     if (/\s/.test(chars[i].ch)) while (j + 1 < chars.length && /\s/.test(chars[j + 1].ch)) j++;
     norm += /\s/.test(chars[i].ch) ? " " : chars[i].ch;
-    map.push([i, j]);
+    for (let k = 0; k < (/\s/.test(chars[i].ch) ? 1 : chars[i].ch.length); k++) map.push([i, j]);
     i = j;
   }
   const selected = new Set();
   for (const edit of edits) {
     const needle = edit.before.replace(/\s+/g, " "), at = norm.indexOf(needle);
-    if (at < 0 || norm.indexOf(needle, at + 1) >= 0) {
+    if (!needle || at < 0 || norm.indexOf(needle, at + 1) >= 0) {
       return null;
     }
     for (const c of chars.slice(map[at][0], map[at + needle.length - 1][1] + 1)) if (!/\s/.test(c.ch)) {
@@ -31,7 +31,7 @@ export function isolateColumns(engine, paragraphs, edits, plan) {
   }
   const candidates = new Set(plan.plans.flatMap((p) => p.touched));
   const foreign = new Set();
-  let side = null, gap = null;
+  let side = null, gap = null, gapRight = null;
   for (const pi of candidates) {
     const objects = engine.paragraphObjects(paragraphs[pi].id).map((h) => ({ h: h >>> 0, b: engine.objectBounds(h) }));
     if (objects.some((o) => !o.b || !Number.isFinite(o.b.x) || !Number.isFinite(o.b.w))) return null;
@@ -52,15 +52,16 @@ export function isolateColumns(engine, paragraphs, edits, plan) {
       if (side && (side !== s || Math.abs(gap - a) > 10)) return null;
       side = s;
       gap = a;
+      gapRight = b;
       for (const o of objects) if (left ? o.b.x >= b - 0.01 : o.b.x + o.b.w <= a + 0.01) foreign.add(o.h);
       break;
     }
   }
-  if(foreign.size) for(let i=0;i<engine.objectCount();i++){const o=engine.objectAt(i);if(M._FPDFPageObj_GetType(o.handle)!==1)continue;const b=engine.objectBounds(o.handle);if(b && (side==="right"?b.x+b.w<=gap+0.01:b.x>=gap+10-0.01))foreign.add(o.handle>>>0);}
+  if(foreign.size) for(let i=0;i<engine.objectCount();i++){const o=engine.objectAt(i);if(M._FPDFPageObj_GetType(o.handle)!==1)continue;const b=engine.objectBounds(o.handle);if(b && (side==="right"?b.x+b.w<=gap+0.01:b.x>=gapRight-0.01))foreign.add(o.handle>>>0);}
   if (!foreign.size) return null;
   for (const h of selected) {
     const b = engine.objectBounds(h);
-    if (!b || (side === "left" ? b.x + b.w > gap + 0.01 : b.x < gap + 10 - 0.01)) return null;
+    if (!b || (side === "left" ? b.x + b.w > gap + 0.01 : b.x < gapRight - 0.01)) return null;
   }
   const slots = [];
   for (let i = 0; i < engine.objectCount(); i++) {
@@ -70,16 +71,16 @@ export function isolateColumns(engine, paragraphs, edits, plan) {
   if (slots.length !== foreign.size) return null;
   let detached = [];
   const restore = () => {
-    while (detached.length) {
-      const item=detached[0];
-      if (!M._FPDFPage_InsertObjectAtIndex(engine.page,item.h,item.i)) {
-        if (typeof M._FPDFPage_InsertObject === 'function') M._FPDFPage_InsertObject(engine.page,item.h);
-        else M._FPDFPageObj_Destroy?.(item.h);
-        detached.shift();
-        throw new Error('column_isolation_restore_failed');
+    let failed = false;
+    const pending = [];
+    for (const item of detached) {
+      if (!M._FPDFPage_InsertObjectAtIndex(engine.page, item.h, item.i - pending.length)) {
+        failed = true;
+        pending.push(item);
       }
-      detached.shift();
     }
+    detached = pending;
+    if (failed) throw new Error("column_isolation_restore_failed");
   };
   try {
     for (const item of slots) {
