@@ -2,7 +2,7 @@
 // ordinary page edits. Unsupported mappings remain explicit failures.
 import {createHash} from 'node:crypto';
 import {deriveNativeLinkMoves, readLinkPageCharacters} from './paragraph-vendor/document-flow-links.mjs';
-import {expectedPageText, readGlyphs} from './paragraph-vendor/quality.mjs';
+import {expectedPageText, readGlyphs, edgeGlyphsEquivalent} from './paragraph-vendor/quality.mjs';
 import {canonicalPage} from './paragraph-geometry-conservation.mjs';
 
 const intersects=(a,b)=>Math.min(a.r,b.r)-Math.max(a.l,b.l)>1e-4&&Math.min(a.t,b.t)-Math.max(a.b,b.b)>1e-4;
@@ -25,14 +25,15 @@ function stationaryLinks(links, source, target, edits) {
   for(const link of links) {
     if(!Array.isArray(link.rect)||link.rect.length!==4||!link.rect.every(Number.isFinite))continue;
     const [x1,y1,x2,y2]=link.rect,rect={l:Math.min(x1,x2),r:Math.max(x1,x2),b:Math.min(y1,y2),t:Math.max(y1,y2)};
-    const owned=source.chars.filter(c=>c.box&&intersects(c.box,rect));
+    const owned=source.chars.filter(c=>c.u>32&&c.box&&intersects(c.box,rect));
     if(!owned.length||owned.some(c=>edited.has(c.index)))continue;
-    const outputOwned=target.chars.filter(c=>c.box&&intersects(c.box,rect));
+    const outputOwned=target.chars.filter(c=>c.u>32&&c.box&&intersects(c.box,rect));
     if(outputOwned.length!==owned.length)continue;
     const used=new Set();let ok=true;
     for(const c of owned) {
+      const asGlyph=c=>({u:c.u,...c.box,style:c.style});
       const matches=outputOwned.filter(t=>t.u===c.u&&sameBox(c.box,t.box)&&
-        (!c.style||!t.style||JSON.stringify(c.style)===JSON.stringify(t.style)));
+        c.style&&t.style&&edgeGlyphsEquivalent([asGlyph(c)],[asGlyph(t)]));
       if(matches.length!==1||used.has(matches[0].index)){ok=false;break;}
       used.add(matches[0].index);
     }
