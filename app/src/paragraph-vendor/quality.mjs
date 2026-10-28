@@ -350,6 +350,25 @@ export function cascadeShifts(ctx, grown) {
   return shifts;
 }
 
+// Foreign objects and fixed edge text cannot be displaced by cascade. Refuse
+// when a grown or moved paragraph would sweep through their actual bounds.
+export function cascadeBarrier(engine, ctx, grown, shifts) {
+  const bodyHandles = new Set(ctx.paras.filter((q) => q.role === "body").flatMap((q) => (engine.paragraphObjects(q.id) || []).map((h) => h >>> 0)));
+  const fixed = listObjects(engine).filter((h) => !bodyHandles.has(h)).map((h) => engine.objectBounds(h));
+  if (fixed.some((b) => !b)) return grown[0]?.id ?? "unknown";
+  const intersects = (a, b) => Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x) > 0.01
+    && Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y) > 0.01;
+  for (const q of ctx.paras) {
+    if (!q.box || q.role !== "body") continue;
+    const shift = shifts.get(q.id) || 0;
+    const delta = grown.find((g) => g.id === q.id)?.delta || 0;
+    if (!(shift > 0 || delta > 0)) continue;
+    const sweep = { x: q.box.x, y: bottomOf(q.box) - shift - delta, w: q.box.w, h: q.box.h + shift + delta };
+    if (fixed.some((b) => intersects(sweep, b))) return q.id;
+  }
+  return null;
+}
+
 // Shift following body paragraphs of the same column by the growth above
 // them. Edge paragraphs (headers, footers, page numbers) never move. If the
 // shift would push body text into the footer zone, nothing is moved and the
@@ -391,6 +410,12 @@ function cascade(engine, ctx, grown, touchedIds, repairs, warnings, allowOverflo
     }
     warnings.push({ code: "pagination_unsupported", severity: "error", paragraphs: violations, floor: +floor.toFixed(2) });
     repairs.push({ kind: "cascade", action: "skipped_no_room", moved: 0 });
+    return null;
+  }
+  const barrier = cascadeBarrier(engine, ctx, grown, plan);
+  if (barrier !== null) {
+    warnings.push({ code: "pagination_unsupported_foreign_object_in_flow", id: barrier, severity: "error" });
+    repairs.push({ kind: "cascade", action: "rejected_foreign_object", moved: 0 });
     return null;
   }
   let moved = 0;

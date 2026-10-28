@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildFlowPlan } from '../src/paragraph-vendor/pagination.mjs';
-import { cascadeShifts, normalizePageMap } from '../src/paragraph-vendor/quality.mjs';
+import { cascadeShifts, cascadeBarrier, normalizePageMap } from '../src/paragraph-vendor/quality.mjs';
 
 const para = (id, x, top, h = 10, role = 'body') => ({ id, box: { x, top, w: 80, h }, role, editable: true, topLevel: true });
 
@@ -48,4 +48,14 @@ test('continuation respects line capacity and page budget', async () => {
   const { planFlow } = await import('../src/paragraph-vendor/pagination.mjs');
   assert.equal(planFlow([{top:80,bottom:20}],{bodyTop:100,floor:50,maxNewPages:2}).code,'pagination_line_exceeds_body');
   assert.equal(planFlow([{top:45,bottom:35}],{bodyTop:100,floor:50,maxNewPages:0}).code,'pagination_budget_exceeded');
+});
+
+
+test('in-page cascade rejects a foreign figure in the swept area', () => {
+  const ctx = { paras: [para('a', 110, 100), para('b', 110, 80)] };
+  const boxes = new Map([[1,{x:110,y:90,w:80,h:10}],[2,{x:110,y:70,w:80,h:10}],[3,{x:100,y:62,w:100,h:6}]]);
+  const engine = { page: 1, M: { _FPDFPage_CountObjects:()=>3, _FPDFPage_GetObject:(_,i)=>i+1 }, paragraphObjects:(id)=>[id === 'a' ? 1 : 2], objectBounds:(h)=>boxes.get(h) };
+  assert.equal(cascadeBarrier(engine,ctx,[{id:'a',box:ctx.paras[0].box,delta:20}],new Map([['b',10]])),'b');
+  boxes.set(3,{x:0,y:62,w:80,h:6});
+  assert.equal(cascadeBarrier(engine,ctx,[{id:'a',box:ctx.paras[0].box,delta:20}],new Map([['b',10]])),null);
 });
