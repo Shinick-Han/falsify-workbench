@@ -43,6 +43,16 @@ test('raised marker attaches to the body line before following punctuation',()=>
   const p=page('ab1.'); const marker=p.glyphs[2]; marker.origin[1]=14; marker.b=14; marker.t=20; marker.style.size=6;
   assert.equal(canonicalPage(p).text,'ab1.');
 });
+test('stationary script ownership does not depend on raw PDF object order',()=>{
+  const normal=page('a1b');normal.glyphs[1].origin[1]=14;normal.glyphs[1].b=14;normal.glyphs[1].style.size=6;
+  const reordered=structuredClone(normal),order=[1,0,2];
+  reordered.chars=order.map(i=>normal.chars[i]);
+  reordered.glyphs=order.map((old,i)=>({...structuredClone(normal.glyphs[old]),i}));
+  assert.equal(canonicalPage(normal).text,'a1b');
+  assert.equal(canonicalPage(reordered).text,'a1b');
+  const lost=structuredClone(reordered);lost.glyphs.shift();
+  assert.equal(canonicalPage(lost).ok,false);
+});
 
 
 test('discretionary break requires physical letter endpoints and is accounted',()=>{

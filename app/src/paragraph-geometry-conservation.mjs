@@ -25,13 +25,12 @@ export function canonicalPage(page, partition = page?.W / 2) {
     if (!line) lines.push(line={channel,y:g.origin[1],size:size(g),items:[],aliases:[]});
     line.items.push({i:g.i,u:g.u,x:g.l,r:g.r,generated:false});
   }
-  // Attach a raised, smaller marker only when exactly one lower body line has
-  // an adjacent preceding glyph. This uses source geometry, never marker text.
+  // Saved PDF objects can append a script before or after the body in raw
+  // extraction order. Bind it to one adjacent physical baseline, rather than
+  // requiring the preceding raw character to belong to that baseline.
   for (const line of [...lines]) {
     const first=[...line.items].sort((a,b)=>a.x-b.x)[0];
-    let previous=first.i-1;
-    while (previous>=0 && !glyphs.has(previous) && isSpace(page.chars[previous].u)) previous--;
-    const candidates=lines.filter(l=>l!==line && l.channel===line.channel && l.size>=line.size*1.2 && l.size<=line.size*3 && l.y<line.y && line.y-l.y<=l.size*.8 && l.items.some(g=>g.i===previous && g.r<=first.x+1 && first.x-g.r<=l.size*1.3));
+    const candidates=lines.filter(l=>l!==line && l.channel===line.channel && l.size>=line.size*1.2 && l.size<=line.size*3 && l.y<line.y && line.y-l.y<=l.size*.8 && l.items.some(g=>g.r<=first.x+1 && first.x-g.r<=l.size*1.3));
     if (candidates.length>1) return fail('ambiguous_marker',first.i);
     if (candidates.length===1) {
       const owner=candidates[0];
