@@ -606,9 +606,15 @@ export async function editPdf(request, options = {}) {
             throw fail("PAGINATION_LIMIT", `Edit on page ${pageIndex} needs more than the ${pg.max} allowed new page(s)`, { pageIndex, maxNewPages: pg.max });
           }
           const unsupported = errors.some((w) => /unsupported/.test(String(w.code)));
-          throw fail(unsupported ? "LAYOUT_UNSUPPORTED" : "REPAIR_FAILED", `Layout repair reported ${errors.length} error(s) on page ${pageIndex}`, {
+          const codes = errors.map((w) => w.code);
+          const reasons = [];
+          if (codes.includes("pagination_unsupported_edge_paragraph_in_flow")) reasons.push("페이지 경계의 문단을 이어 배치할 수 없습니다");
+          if (codes.includes("pagination_unsupported_multi_column_flow")) reasons.push("여러 단으로 된 본문을 이어 배치할 수 없습니다");
+          if (codes.some((code) => !["pagination_unsupported_edge_paragraph_in_flow", "pagination_unsupported_multi_column_flow"].includes(code))) reasons.push("현재 레이아웃을 안전하게 복구할 수 없습니다");
+          throw fail(unsupported ? "LAYOUT_UNSUPPORTED" : "REPAIR_FAILED", `PDF ${pageIndex + 1}쪽: ${reasons.join("; ")}. 해당 쪽의 편집 내용이나 배치를 확인해 주세요.`, {
             pageIndex,
-            codes: errors.map((w) => w.code),
+            codes,
+            count: errors.length,
           });
         }
         if (r?.pagination?.added > 0) {
