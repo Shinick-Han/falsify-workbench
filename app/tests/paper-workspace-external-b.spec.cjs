@@ -129,7 +129,7 @@ function mount(opts={}){
   const sourceBlobs=opts.sourceBlobs||blobMemory();
   const clock={value:opts.clock??1_700_000_000_000};
   const ws=api.create({document:w.document,preview:opts.preview===false?undefined:{pdfParams:Preview.pdfParams,fitScale:Preview.fitScale,defaultImport:async()=>lib},
-    generation:require('../dist/paper-generation.js'),externalProposals:require('../dist/external-proposals.js'),edits:edits||undefined,fonts:opts.fonts,exporter:exporter||undefined,paragraphPdf:opts.paragraphPdf,tablePdf:opts.tablePdf,pipeline:opts.pipeline,recompositionPdf:opts.recompositionPdf,storage,sourceBlobs,urls:{createObjectURL(file){downloads.push(file);return 'blob:'+downloads.length;},revokeObjectURL(){}},
+    changeMarks:opts.changeMarks,generation:require('../dist/paper-generation.js'),externalProposals:require('../dist/external-proposals.js'),edits:edits||undefined,fonts:opts.fonts,exporter:exporter||undefined,paragraphPdf:opts.paragraphPdf,tablePdf:opts.tablePdf,pipeline:opts.pipeline,recompositionPdf:opts.recompositionPdf,storage,sourceBlobs,urls:{createObjectURL(file){downloads.push(file);return 'blob:'+downloads.length;},revokeObjectURL(){}},
     timers,subtle:opts.subtle||crypto.subtle,now:()=>clock.value});
   const file=f=>{w.get('paper-file').files=[f];w.get('paper-file').dispatchEvent(new Event('change'));};
   const canvas=()=>w.get('paper-before-stage').children.flatMap(page=>(page.children||[]).filter(c=>c.tagName==='canvas'));
@@ -274,6 +274,24 @@ test('layout catalog and one-click suggested source survive into generated PDF r
   assert.equal(v.ws.getExternalResponses().items[0].enabled,false);const apply=v.get('paper-proposal-list').querySelectorAll('button').find(b=>b.textContent==='이 부분 수정');assert.ok(apply);apply.click();
   const chosen=v.ws.getExternalResponses().items[0];assert.equal(chosen.before,'Alpha beta');assert.equal(chosen.enabled,true);assert.equal(v.ws.getExternalResponses().batches[0].raw,'AI quote Alpha betta');
   v.get('paper-current-download').click();await until(()=>calls.length&&v.downloads.length,'generated layout download');assert.equal(calls[0].edits[0].before,'Alpha beta');assert.equal(calls[0].edits[0].segmentId,'layout:p1:column1');assert.equal(calls[0].edits[0].after,'Gamma');
+});
+
+test('layout highlights follow geometry order, repaint on selection, and reset on source change',async()=>{
+  const calls=[],marks={paintPage(args){args.divs.forEach((d,i)=>{d.dataset.i=String(i);});calls.push(args);const layer=args.document.createElement('div');args.container.append(layer);return {layer,missing:[],count:0};}};
+  const items=[{str:'tail',transform:[1,0,0,1,10,80],width:30,height:10},{str:'intervening',transform:[1,0,0,1,300,90],width:50,height:10},{str:'head-',transform:[1,0,0,1,10,100],width:30,height:10}];
+  const v=mount({items,changeMarks:marks}),file=pdfFile(pdfBytes('MARKER-A'));v.file(file);await until(()=>v.ws.getSource()?.fileHash&&v.canvas().length,'source page');
+  v.document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file,result:{segments:[{id:'s0',pageIndex:0,text:'tail intervening head-'}],matchSegments:[{id:'layout:p1:page',pageIndex:0,text:'head-\ntail',itemIndices:[2,0]}]}}}));
+  const hash=v.ws.getSource().fileHash;v.ws.acceptExternalResponse({schema:'falsify.external-batch.v1',id:'a',role:'red',fileHash:hash,raw:'r',items:[{id:'x',kind:'change',before:'head-\ntail',after:'changed',segmentId:'layout:p1:page',pageIndex:0,matchStatus:'suggested',anchor:null,matches:[{segmentId:'layout:p1:page',pageIndex:0,start:0,end:10}]}]});
+  const preview=calls.filter(c=>c.edits.some(e=>e.id==='candidate-location')).at(-1);assert.deepEqual(preview.items.map(x=>x.str),['head-','tail']);assert.equal(preview.items[0].hasEOL,true);assert.deepEqual(preview.divs.map(d=>d.dataset.i),['2','0']);assert.equal(require('../dist/paper-change-marks.js').ranges(preview.items,preview.edits,'before').missing.length,0);
+  v.get('paper-proposal-list').querySelectorAll('button').find(b=>b.textContent==='이 부분 수정').click();assert.ok(calls.some(c=>c.edits.some(e=>e.id==='p1')&&c.items.map(x=>x.str).join('|')==='head-|tail'));
+  v.ws.acceptExternalResponse({schema:'falsify.external-batch.v1',id:'b',role:'red',fileHash:hash,raw:'r2',items:[{id:'z',kind:'change',before:'head tail',after:'other',matchStatus:'suggested',anchor:null,matches:[{segmentId:'layout:p1:page',pageIndex:0,start:0,end:10}]}]});
+  v.file(pdfFile(pdfBytes('MARKER-B'),'other.pdf'));await until(()=>v.ws.getSource()?.fileHash===sha(pdfBytes('MARKER-B'))&&v.canvas().length,'new source');const n=calls.length;v.get('paper-page-next').click();await settle();assert.ok(!calls.slice(n).some(c=>c.edits.some(e=>e.id==='candidate-location')));
+});
+test('cross-alias external edits require disabling the first selection',async()=>{
+  const v=mount(),file=pdfFile(pdfBytes('MARKER-A'));v.file(file);await until(()=>v.ws.getSource()?.fileHash,'source');
+  v.document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file,result:{segments:[{id:'s0',pageIndex:0,text:'Alpha Beta'}],matchSegments:[{id:'layout:p1:page',pageIndex:0,text:'Alpha Beta',itemIndices:[0,1]}]}}}));
+  const hash=v.ws.getSource().fileHash;v.ws.acceptExternalResponse({schema:'falsify.external-batch.v1',id:'a',role:'red',fileHash:hash,raw:'r',items:[{id:'x',kind:'change',before:'Alpha',after:'One',segmentId:'s0',pageIndex:0,matchStatus:'matched',anchor:{start:0,end:5}},{id:'y',kind:'change',before:'Alpha Beta',after:'Two',segmentId:'layout:p1:page',pageIndex:0,matchStatus:'matched',anchor:{start:0,end:10}}]});
+  let checks=()=>v.get('paper-proposal-list').children.slice(0,2).map(row=>row.children[0].children[0]);let [a,b]=checks();a.checked=true;a.dispatchEvent(new Event('change'));[a,b]=checks();b.checked=true;b.dispatchEvent(new Event('change'));assert.deepEqual(v.ws.getExternalResponses().items.map(x=>x.enabled),[true,false]);assert.match(v.get('paper-proposal-status').textContent,/겹칩니다/);a.checked=false;a.dispatchEvent(new Event('change'));[a,b]=checks();b.checked=true;b.dispatchEvent(new Event('change'));assert.deepEqual(v.ws.getExternalResponses().items.map(x=>x.enabled),[false,true]);
 });
 
 (async()=>{let passed=0;for(const [name,fn] of tests){try{await fn();passed++;console.log('PASS '+name);}catch(e){console.error('FAIL '+name,e);process.exitCode=1;}}console.log(JSON.stringify({passed,total:tests.length}));})();
