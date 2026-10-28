@@ -9,11 +9,11 @@
     const snap=()=>clone({schema:SCHEMA,fileHash,role,batches,items});
     const emit=()=>{const s=snap();for(const fn of listeners)try{fn(clone(s));}catch(_){}return s;};
     function valid(item){
-      if(!item.anchor||typeof item.before!=='string'||!item.before)return false;
+      const needle=role==='blue'?item.quote:item.before;if(!item.anchor||typeof needle!=='string'||!needle)return false;
       const s=source.find(x=>x.id===item.segmentId),a=item.anchor;
-      if(!s||!Number.isInteger(a.start)||!Number.isInteger(a.end)||a.start<0||a.end<=a.start||a.end>s.text.length||s.text.slice(a.start,a.end)!==item.before)return false;
+      if(!s||!Number.isInteger(a.start)||!Number.isInteger(a.end)||a.start<0||a.end<=a.start||a.end>s.text.length||s.text.slice(a.start,a.end)!==needle)return false;
       if(Number.isInteger(s.pageIndex)&&s.pageIndex!==item.pageIndex)return false;
-      let count=0,at=-1;while((at=s.text.indexOf(item.before,at+1))>=0&&at<a.start)count++;
+      let count=0,at=-1;while((at=s.text.indexOf(needle,at+1))>=0&&at<a.start)count++;
       if(a.occurrence!=null&&a.occurrence!==count)return false;
       return Number.isInteger(item.pageIndex)&&item.pageIndex>=0;
     }
@@ -33,7 +33,7 @@
         const duplicate=items.find(x=>!x.parentIds&&key(x)===key(item));
         if(duplicate){if(!duplicate.sourceRefs.some(r=>r.batchId===ref.batchId&&r.itemId===ref.itemId))duplicate.sourceRefs.push(ref);continue;}
         item.id='p'+next++;item.sourceRefs=[ref];item.enabled=false;
-        if(item.matchStatus==='matched'&&role==='red'&&!valid(item))item.matchStatus='missing';
+        if(item.matchStatus==='matched'&&!valid(item))item.matchStatus='missing';
         items.push(item);
       }
       return emit();
@@ -47,8 +47,9 @@
     }
     function bind(id,binding){
       const item=find(id),nextItem={...item,...clone(binding)};
+      if(role==='blue'&&typeof binding.before==='string')nextItem.quote=binding.before;
       if(!valid(nextItem))throw Error('Source range does not match');
-      const s=source.find(x=>x.id===nextItem.segmentId);let occurrence=0,pos=-1;while((pos=s.text.indexOf(nextItem.before,pos+1))>=0&&pos<nextItem.anchor.start)occurrence++;
+      const s=source.find(x=>x.id===nextItem.segmentId);let occurrence=0,pos=-1;while((pos=s.text.indexOf(role==='blue'?nextItem.quote:nextItem.before,pos+1))>=0&&pos<nextItem.anchor.start)occurrence++;
       nextItem.anchor={...nextItem.anchor,occurrence};nextItem.matchStatus='matched';nextItem.enabled=false;Object.assign(item,nextItem);return emit();
     }
     function combine(ids,fields){
@@ -58,7 +59,7 @@
     }
     function restore(value){
       const s=clone(value);if(s.schema!==SCHEMA||s.fileHash!==fileHash||s.role!==role||!Array.isArray(s.batches)||!Array.isArray(s.items))throw Error('Snapshot does not match document');
-      const seen=new Set();for(const item of s.items){if(typeof item.id!=='string'||seen.has(item.id)||!Array.isArray(item.sourceRefs))throw Error('Invalid proposal');seen.add(item.id);if(item.matchStatus==='matched'&&role==='red'&&!valid(item))throw Error('Invalid source range');if(item.enabled&&role==='red'&&(item.matchStatus!=='matched'||!valid(item)||typeof item.after!=='string'||item.after===item.before||(item.after!==''&&!item.after.trim())))throw Error('Invalid selected proposal');}
+      const seen=new Set();for(const item of s.items){if(typeof item.id!=='string'||seen.has(item.id)||!Array.isArray(item.sourceRefs))throw Error('Invalid proposal');seen.add(item.id);if(item.matchStatus==='matched'&&!valid(item))throw Error('Invalid source range');if(item.enabled&&role==='red'&&(item.matchStatus!=='matched'||!valid(item)||typeof item.after!=='string'||item.after===item.before||(item.after!==''&&!item.after.trim())))throw Error('Invalid selected proposal');}
       const active=s.items.filter(x=>x.enabled&&role==='red');for(let i=0;i<active.length;i++)for(let j=i+1;j<active.length;j++)if(overlap(active[i],active[j]))throw Error('Overlapping selections');
       batches=s.batches;items=s.items;next=Math.max(0,...items.map(x=>/^p\d+$/.test(x.id)?Number(x.id.slice(1)):0))+1;return emit();
     }
