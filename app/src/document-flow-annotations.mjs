@@ -190,7 +190,7 @@ function mapping(model,map,count){
   for(const row of map){if(!Number.isInteger(row?.sourcePageIndex)||row.sourcePageIndex<0||row.sourcePageIndex>=model.pageCount||result.has(row.sourcePageIndex)||!Number.isInteger(row.outputPageIndex)||row.outputPageIndex<0||row.outputPageIndex>=count||output.has(row.outputPageIndex))fail('annotation-page-map-invalid');result.set(row.sourcePageIndex,row.outputPageIndex);output.add(row.outputPageIndex);}
   return result;
 }
-function movementPlan(model,records,map,count,moves,reflowed,destinationMoves=[]){
+function movementPlan(model,records,map,count,moves,reflowed,destinationMoves=[],preserveUnmovedUnsupported=false){
   if(!Array.isArray(moves)||moves.length>ANNOTATION_LIMITS.annotations||!Array.isArray(reflowed)||reflowed.some(p=>!Number.isInteger(p)||p<0||p>=model.pageCount)||new Set(reflowed).size!==reflowed.length)fail('annotation-move-invalid');
   const group=new Set(reflowed),byKey=new Map(records.map(r=>[key(r.sourcePageIndex,r.annotationIndex),r])),planned=new Map();
   for(const move of moves){
@@ -214,7 +214,7 @@ function movementPlan(model,records,map,count,moves,reflowed,destinationMoves=[]
     if(group.size&&record.actionOwnershipUnsafe)fail('annotation-action-root-unsupported');
     if(group.size&&record.destinationUnsafe)fail('annotation-destination-unresolved');
     if((record.unexposedTargets||[]).some(p=>group.has(p)))fail('annotation-destination-reflowed');
-    if(group.has(record.sourcePageIndex)&&!d.eligible)fail(d.reason);
+    if(group.has(record.sourcePageIndex)&&!d.eligible&&!(preserveUnmovedUnsupported===true&&d.kind==='unsupported'&&d.reason==='annotation-subtype-unsupported'&&!planned.has(key(record.sourcePageIndex,record.annotationIndex))))fail(d.reason);
     if((d.internalDestinationSourcePageIndices||[]).some(p=>group.has(p)&&(!(d.internalDestinations||[]).some(x=>x.targetSourcePageIndex===p)||(d.internalDestinations||[]).some(x=>x.targetSourcePageIndex===p&&!destinationPlan.has(x.id)))))fail('annotation-destination-reflowed');
   }
   const expected=Array.from({length:count},()=>[]);
@@ -222,13 +222,13 @@ function movementPlan(model,records,map,count,moves,reflowed,destinationMoves=[]
   for(const move of moves){const record=byKey.get(key(move.sourcePageIndex,move.annotationIndex));if(move.outputPageIndex!==map.get(move.sourcePageIndex))expected[move.outputPageIndex].push({record,move});}
   return {expected,planned,destinationPlan};
 }
-async function bound({model,sourceBytes,outputBytes,sourcePageMap,moves=[],reflowedSourcePages=[],destinationMoves=[]}){
+async function bound({model,sourceBytes,outputBytes,sourcePageMap,moves=[],reflowedSourcePages=[],destinationMoves=[],preserveUnmovedUnsupported=false}){
   const state=privateModels.get(model);if(!state)fail('annotation-model-unverified');
   if(await digest(bytes(sourceBytes,ANNOTATION_LIMITS.sourceBytes))!==state.sha)fail('annotation-stale-source');
   const c=context(state.mupdf,bytes(outputBytes,ANNOTATION_LIMITS.outputBytes));
   try{
     if(reflowedSourcePages.length&&state.actionOwnershipUnsupported)fail('annotation-action-root-unsupported');
-    const map=mapping(model,sourcePageMap,c.doc.countPages()),inverse=new Map([...map].map(([s,o])=>[o,['source-page',s]])),{refs,pages}=pageRefs(c,inverse),plan=movementPlan(model,state.records,map,pages.length,moves,reflowedSourcePages,destinationMoves);
+    const map=mapping(model,sourcePageMap,c.doc.countPages()),inverse=new Map([...map].map(([s,o])=>[o,['source-page',s]])),{refs,pages}=pageRefs(c,inverse),plan=movementPlan(model,state.records,map,pages.length,moves,reflowedSourcePages,destinationMoves,preserveUnmovedUnsupported);
     if(reflowedSourcePages.length&&unsupportedDocumentActions(c,pages))fail('annotation-action-root-unsupported');
     for(const [s,o]of map)if(state.pageGeometry[s]&&!numbers(state.pageGeometry[s],geometry(c,pages[o])))fail('annotation-page-identity-invalid');
     return {c,state,map,refs,pages,plan};
@@ -281,7 +281,7 @@ async function verifyDocument(ctx,expected,after=false){
 export async function transport(request={}){
   const ctx=await bound(request);
   try{
-    const noMoves=movementPlan(request.model,ctx.state.records,ctx.map,ctx.pages.length,[],request.reflowedSourcePages||[],request.destinationMoves||[]);
+    const noMoves=movementPlan(request.model,ctx.state.records,ctx.map,ctx.pages.length,[],request.reflowedSourcePages||[],request.destinationMoves||[],request.preserveUnmovedUnsupported);
     const actual=await verifyDocument(ctx,noMoves.expected),located=new Map();
     for(const record of ctx.state.records)located.set(key(record.sourcePageIndex,record.annotationIndex),actual.byPage[ctx.map.get(record.sourcePageIndex)][record.annotationIndex].object);
     const reader=destinationReader(ctx.c,ctx.refs,nameDestinations(ctx.c)),changed=new Set();

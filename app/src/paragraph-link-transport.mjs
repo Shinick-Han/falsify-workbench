@@ -25,7 +25,10 @@ export async function transportParagraphLinks({engineFactory, sourceBytes, outpu
         if(!map||map.continuationPageIndices?.length)throw Object.assign(new Error(),{code:'paragraph_link_continuation_unverified'});
         const band={sourcePageIndex:pageIndex,floor:-100000,bodyTop:100000};
         const targets=readLinkPageCharacters(out,map.outputPageIndex).filter(c=>c.u>32&&c.box).map(c=>({...c,outputPageIndex:map.outputPageIndex}));
-        const pageMoves=deriveNativeLinkMoves(src,[band],targets,edits,model,expectedPageText);
+        // Glyph proof considers links only; the original private model still binds every
+        // annotation when the adapter validates the complete output.
+        const linkModel={...model,annotations:model.annotations.filter(a=>a.kind==='link')};
+        const pageMoves=deriveNativeLinkMoves(src,[band],targets,edits,linkModel,expectedPageText);
         moves.push(...pageMoves);
       } catch(error) {
         const links=model?.annotations?.filter(a=>a.sourcePageIndex===pageIndex&&a.kind==='link')||[];
@@ -35,7 +38,7 @@ export async function transportParagraphLinks({engineFactory, sourceBytes, outpu
     }
     if(moves.length){
       try {
-        const request={model,sourceBytes,outputBytes,sourcePageMap,moves,reflowedSourcePages:[...new Set(moves.map(m=>m.sourcePageIndex))]};
+        const request={model,sourceBytes,outputBytes,sourcePageMap,moves,preserveUnmovedUnsupported:true,reflowedSourcePages:[...new Set(moves.map(m=>m.sourcePageIndex))]};
         const result=await annotationAdapter.transport(request);
         const pdf=new Uint8Array(result.pdf);
         const verified=await annotationAdapter.validate({...request,outputBytes:pdf});
