@@ -456,7 +456,7 @@
     function bodyExporter(edits){
       const flow=paragraphApi();
       if(fontsApi()&&flow)return flow;
-      if(edits.some(e=>String(e.segmentId||'').startsWith('paragraph:')))return flow;
+      if(edits.some(e=>/^(paragraph|layout):/.test(String(e.segmentId||''))))return flow;
       if(flow&&edits.some(e=>e.origin==='ai-proposal'||e.origin==='external-ai-import'))return flow;
       return legacyExporterApi()||flow;
     }
@@ -1315,16 +1315,35 @@
       };
       if(page===edit.pageIndex+1&&pageText)open();else void drawBefore(edit.pageIndex+1).then(open);
     }
+    // Project uniquely identifiable selected text into a shared page catalog. Whitespace
+    // differs between the content stream and geometry order, so compare compact offsets.
+    function projectedRange(edit,segment){
+      const own=(source?.segments||[]).find(s=>s.id===edit.segmentId);
+      const a=edit.anchor;
+      if(!own||!a||!Number.isSafeInteger(a.start)||!Number.isSafeInteger(a.end)||a.start<0||a.end>own.text.length||a.end<=a.start)return null;
+      const selected=own.text.slice(a.start,a.end);
+      if(typeof edit.before==='string'&&selected!==edit.before)return null;
+      const compact=text=>text.replace(/\s+/g,'');
+      const needle=compact(selected),ownText=compact(own.text),target=compact(segment.text);
+      if(!needle)return null;
+      const unique=(text,q)=>{const i=text.indexOf(q);return i>=0&&text.indexOf(q,i+1)<0?i:-1;};
+      if(unique(ownText,needle)<0)return null;
+      const start=unique(target,needle);
+      return start<0?null:{start,end:start+needle.length};
+    }
     function crossAliasOverlap(candidate,includeExternal=false){
       const others=(snapshot?.edits||[]).filter(e=>e.enabled!==false).concat(includeExternal?(external?.edits?.()||[]):[]);
       return others.some(e=>{
         if(e.id===candidate.id||e.id===candidate.editId||e.pageIndex!==candidate.pageIndex)return false;
         if(e.segmentId===candidate.segmentId)return !!(e.anchor&&candidate.anchor&&e.anchor.start<candidate.anchor.end&&candidate.anchor.start<e.anchor.end);
+        for(const segment of source?.segments||[]){
+          if(segmentPage(segment)!==candidate.pageIndex)continue;
+          const a=projectedRange(candidate,segment),b=projectedRange(e,segment);
+          if(a&&b)return a.start<b.end&&b.start<a.end;
+        }
         const box=candidate.anchor?.bbox,other=e.anchor?.bbox;
         if(validBbox(box)&&validBbox(other))return box[0]<other[2]&&box[2]>other[0]&&box[1]<other[3]&&box[3]>other[1];
-        // Different text streams cannot prove disjointness without geometry. Require
-        // the user to disable the other edit rather than export overlapping ranges.
-        return true;
+        return false;
       });
     }
     function closeInline(){
@@ -1539,7 +1558,7 @@
       const mine=++genId,ctl=new AbortController();genCtl=ctl;generating=true;renderChrome();
       try{
         const fontSnapshot=await resolveFonts(edits,ctl.signal);
-        if(fullFontEmbedding(fontSnapshot)&&legacyExporterApi()?.prepare)api=legacyExporterApi();
+        if(fullFontEmbedding(fontSnapshot)&&!edits.some(e=>String(e.segmentId||'').startsWith('layout:'))&&legacyExporterApi()?.prepare)api=legacyExporterApi();
         const prepared=await benchmarkSource({file,fileHash,edits:clone(edits),fontSnapshot,signal:ctl.signal});
         if(!live()||mine!==genId||ctl.signal.aborted)throw new Error('원본 또는 편집이 바뀌어 생성을 취소했습니다.');
         const result=bindBenchmarkResult(await api.prepare(prepared.request),prepared,fileHash);
@@ -1555,7 +1574,7 @@
     function captureSpec(){
       if(!source?.fileHash||!snapshot)throw Error('원본을 먼저 선택하세요.');
       let edits=clone(enabledEdits());
-      for(const edit of edits)if(crossAliasOverlap(edit,true))throw Error('같은 페이지의 편집 위치가 겹치거나 서로 다른 원문 구간으로 확인되지 않습니다. 기존 편집을 끄고 다시 선택하세요.');
+      for(const edit of edits)if(crossAliasOverlap(edit,true))throw Error('편집 위치가 겹칩니다. 기존 편집을 끄고 다시 선택하세요.');
       for(const edit of edits){const editor=proposalInputs.get(edit.id);if(editor){edit.after=editor.value;if(edit.after!==''&&!edit.after.trim())throw Error('제안 수정문을 확인하세요.');}}
       edits=edits.filter(e=>e.after!==e.before);
       if(inline){const after=directEditor?directEditor.value:ui.inlineAfter.value;if(after!==inline.after){
@@ -1580,11 +1599,11 @@
       if(!api?.prepare)throw Error('PDF 편집 모듈이 없습니다.');
       if(!recompose&&!mixed)for(const edit of edits)if(tableEdit(edit)&&edit.anchor)delete edit.anchor.occurrence;
       if(fontRevision!==spec.fontRevision)throw Error('요청한 글꼴이 바뀌어 다시 생성해야 합니다.');
-      const fontSnapshot=recompose?undefined:await resolveFonts(edits,signal);if(fontRevision!==spec.fontRevision)throw Error('요청한 글꼴이 바뀌어 다시 생성해야 합니다.');if(!recompose&&!mixed&&fullFontEmbedding(fontSnapshot)&&legacyExporterApi()?.prepare)api=legacyExporterApi();
+      const fontSnapshot=recompose?undefined:await resolveFonts(edits,signal);if(fontRevision!==spec.fontRevision)throw Error('요청한 글꼴이 바뀌어 다시 생성해야 합니다.');if(!recompose&&!mixed&&fullFontEmbedding(fontSnapshot)&&!edits.some(e=>String(e.segmentId||'').startsWith('layout:'))&&legacyExporterApi()?.prepare)api=legacyExporterApi();
       const prepared=recompose?{request:{file,fileHash:spec.fileHash,edits,revision:spec.revision,signal},blinding:null}:await benchmarkSource({file,fileHash:spec.fileHash,edits,fontSnapshot,signal});
       let result;
       try{if(mixed&&!recompose){
-        const bodyApi=fullFontEmbedding(fontSnapshot)&&legacyExporterApi()?.prepare?legacyExporterApi():bodyExporter(body);
+        const bodyApi=fullFontEmbedding(fontSnapshot)&&!edits.some(e=>String(e.segmentId||'').startsWith('layout:'))&&legacyExporterApi()?.prepare?legacyExporterApi():bodyExporter(body);
         const adapter={prepare:async req=>{try{return await bodyApi.prepare(req);}catch(e){const rows=Array.isArray(req.edits)?req.edits:req.edits?.edits,failures=e?.details?.edits;const canFlow=!fullFontEmbedding(fontSnapshot)&&bodyApi===legacyExporterApi()&&paragraphApi()&&Array.isArray(rows)&&!rows.some(tableEdit)&&e.code==='unsupported'&&Array.isArray(failures)&&failures.length&&failures.every(f=>f.code==='long-after-no-room');if(!canFlow||signal.aborted)throw e;return paragraphApi().prepare(req);}}};
         result=await api.prepare(prepared.request,{selectionPdf:legacyExporterApi(),paragraphPdf:adapter});
       }else result=await api.prepare(prepared.request);}
@@ -1621,14 +1640,14 @@
         const mixed=exportEdits.some(tableEdit)&&exportEdits.some(e=>!tableEdit(e));
         if(!recompose&&!mixed)for(const edit of exportEdits)if(tableEdit(edit)&&edit.anchor)delete edit.anchor.occurrence;
         const fontSnapshot=recompose?undefined:await resolveFonts(exportEdits,ctl.signal);
-        if(!recompose&&!mixed&&fullFontEmbedding(fontSnapshot)&&legacyExporterApi()?.prepare)api=legacyExporterApi();
+        if(!recompose&&!mixed&&fullFontEmbedding(fontSnapshot)&&!edits.some(e=>String(e.segmentId||'').startsWith('layout:'))&&legacyExporterApi()?.prepare)api=legacyExporterApi();
         const prepared=recompose?{request:{file,fileHash:hash,edits:exportEdits,revision,signal:ctl.signal},blinding:null}:await benchmarkSource({file,fileHash:hash,edits:exportEdits,fontSnapshot,signal:ctl.signal}),request=prepared.request;
         if(mine!==genId||epoch!==epochAt||ctl.signal.aborted)return;
         let result;
         try{
           if(recompose)result=await api.prepare(request);
           else if(mixed){
-            const bodyApi=fullFontEmbedding(fontSnapshot)&&legacyExporterApi()?.prepare?legacyExporterApi():bodyExporter(edits.filter(e=>!tableEdit(e)));
+            const bodyApi=fullFontEmbedding(fontSnapshot)&&!edits.some(e=>String(e.segmentId||'').startsWith('layout:'))&&legacyExporterApi()?.prepare?legacyExporterApi():bodyExporter(edits.filter(e=>!tableEdit(e)));
             const bodyAdapter={prepare:async bodyRequest=>{
               try{return await bodyApi.prepare(bodyRequest);}
               catch(e){
