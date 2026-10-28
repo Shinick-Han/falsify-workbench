@@ -141,6 +141,11 @@ test('real PDFium paragraph inspect and reflow retain full After and following c
     const bottom=(data,needle)=>{const d=mupdf.Document.openDocument(data,'application/pdf'),p=d.loadPage(0);try{return p.search(needle).flat(2);}finally{p.destroy();d.destroy();}};
     const found=bottom(saved,'Following paragraph remains readable.');
     assert.ok(found.length>0,'following paragraph remains independently locatable');
+    const afterQuads=bottom(saved,after), sourceFollowing=bottom(bytes,'Following paragraph remains readable.');
+    assert.ok(afterQuads.length>0,'complete After has independent glyph quads');
+    const ys=xs=>xs.filter((_,i)=>i%2===1);
+    assert.ok(Math.min(...ys(found))>=Math.min(...ys(sourceFollowing))-.5,'following content does not move upward into the expansion');
+    assert.ok(Math.max(...ys(afterQuads))<=Math.min(...ys(found))+.5,'expanded content ends before the following paragraph');
     assert.ok(following && originalFollowing,'both source and output retain the following paragraph');
     // Compare image object stream and rendered image region independently.
     const render = data => { const doc=mupdf.Document.openDocument(data,'application/pdf');const p=doc.loadPage(0); const pix=p.toPixmap([1,0,0,1,0,0],mupdf.ColorSpace.DeviceRGB,false); const pixels=Uint8Array.from(pix.getPixels());const stride=pix.getStride();const sample=[];for(let y=322;y<342;y++)sample.push(...pixels.slice(y*stride+450*3,y*stride+470*3));pix.destroy();p.destroy();doc.destroy();return sample; };
