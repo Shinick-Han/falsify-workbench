@@ -76,7 +76,7 @@
       const terminal=terminalKind(pending.record);action=terminal?'이전 요청 정리':'이전 요청 확인';
       nextAction=terminal?()=>void onDiscard():()=>{void recoverBlue();revealControl($('#doc-blue-pending-discard'));};
     }
-    else if(!B.capabilities()?.blue){text='변경본이 준비됐습니다. 내 PC를 연결하세요.';action='내 PC 연결';nextAction=()=>revealControl(document.querySelector('.visual-connection-details summary')||$('#bridge-port'));}
+    else if(!B.capabilities()?.blue){text='변경본이 준비됐습니다. 원하는 AI의 BLUE 답변을 가져오세요.';action='AI 답변 가져오기';nextAction=()=>revealControl(document.querySelector('#external-blue textarea')||$('#doc-blue-response'));}
     else if(!FalsifyLab.allowed('blue')){text='변경본이 준비됐습니다. 선택한 BLUE 하네스를 확인하세요.';action='하네스 확인';nextAction=()=>revealControl(!$('#blue-harness-consent').checked?$('#blue-harness-consent'):$('#blue-harness'));}
     else if(!$('#doc-blue-consent').checked){text='이 변경본을 선택한 BLUE 도구에 보내 검토합니다.';action='이 파일로 BLUE 검토 시작';nextAction=()=>{$('#doc-blue-consent').checked=true;$('#doc-blue-consent').dispatchEvent(new Event('change'));$('#doc-blue-start').click();};}
     else{text='변경본과 BLUE 도구가 준비됐습니다.';action='BLUE 검토 시작';nextAction=()=>$('#doc-blue-start').click();}

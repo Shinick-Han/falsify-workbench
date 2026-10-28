@@ -1,6 +1,6 @@
 # Falsify 외부 AI RED BLUE 작업 흐름 North Star
 
-기준일: 2026-10-28 · 스펙 v1 · 상태: 사용자 결정 확정, 구현 계획 수립 완료
+기준일: 2026-10-28 · 스펙 v1 · 상태: 구현·로컬 통합 검증 완료, 배포 진행
 
 적용 대상: 사용자가 지정한 Falsify 프로젝트 orchestrator. 다른 Codex agent·하위 작업자·검수자에게는 이 문서의 열람·준수 의무가 없다. 해당 orchestrator가 필요한 내용만 개별 작업 지시로 추려 전달한다.
 
@@ -11,6 +11,8 @@
 사용 성공의 기준은 서로 다른 AI의 답변을 누적하고, 원하는 변경을 체크해 자연스러운 PDF로 받은 뒤, 그 파일의 BLUE 검토 결과도 가져와 기록하는 것이다. 앱에서 요청을 만들지 않고 외부에서 먼저 작업한 답변도 받는다.
 
 이 문서는 Falsify orchestrator가 이번 웹앱 개발을 판단·조율하는 기준이다. Falsify 팀의 공식 연구 목표나 연구용 harness의 성능을 정의하지 않는다. 구현 진행도와 검증 결과는 WorkBite T-0152 및 커밋·검사 결과에 남긴다. 계획을 구현 완료로 표시하지 않는다.
+
+구현·검증 증거: [external-ai-implementation.md](external-ai-implementation.md). 배포 결과는 WorkBite T-0152의 체크포인트로 확인한다.
 
 ## 확정된 사용자 결정
 
