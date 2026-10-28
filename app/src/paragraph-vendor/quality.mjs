@@ -595,8 +595,15 @@ function readStyle(M, tp, i, buf) {
 function sameStyle(a, b) {
   if (!a || !b) return a === b;
   const eq = (x, y, tol = 0) => (x === null || y === null ? x === y : x.every((v, k) => Math.abs(v - y[k]) <= tol));
-  return a.font !== null && a.font === b.font && a.flags === b.flags && Math.abs(a.size - b.size) <= 0.01 && a.render === b.render
-    && eq(a.fill, b.fill) && eq(a.stroke, b.stroke) && eq(a.mat, b.mat, 1e-3);
+  const transform = (s) => s.mat && Number.isFinite(s.size) && s.size > 0
+    ? s.mat.map((v) => v * s.size) : null;
+  // The same effective transform may be serialized as size 1 and a scaled
+  // matrix, or as the font size and an identity matrix. Do not round away
+  // metric drift: each effective component has the existing 0.01pt bound.
+  const matrixEqual = a.mat && b.mat ? eq(transform(a), transform(b), 0.01)
+    : a.mat === b.mat && Math.abs(a.size - b.size) <= 0.01;
+  return a.font !== null && a.font === b.font && a.flags === b.flags && a.render === b.render
+    && eq(a.fill, b.fill) && eq(a.stroke, b.stroke) && matrixEqual;
 }
 
 const sameStyles = (a, b) => a.length === b.length && a.every((c, k) => sameStyle(c.style ?? null, b[k].style ?? null));
@@ -724,27 +731,21 @@ const inBoxes = (c, boxes) => {
 function edgeBodySplit(src, out, i, oi, s, o, es, eo) {
   const sb = bodyBoxes(src, i, s), ob = bodyBoxes(out, oi, o);
   if (!sb || !ob) return null;
-  const pending = new Map();
-  for (const d of eo) pending.set(d.u, [...(pending.get(d.u) || []), d]);
-  const at = (c) => {
-    const list = pending.get(c.u) || [];
-    const k = list.findIndex((d) => Math.abs(c.l - d.l) <= 0.5 && Math.abs(c.b - d.b) <= 0.5 && sameStyle(c.style ?? null, d.style ?? null));
-    return k < 0 ? null : list.splice(k, 1)[0];
-  };
-  let bodyChanged = 0, edgeMissing = 0;
-  for (const c of es) {
-    if (at(c)) continue;
+  const matches = alignEdgeGlyphs(es, eo);
+  let bodyChanged = 0, edgeMissing = 0, edgeAdded = 0, edgeStyleChanged = 0;
+  for (const c of matches.missing) {
     if (inBoxes(c, sb)) bodyChanged++;
     else edgeMissing++;
   }
-  let edgeAdded = 0;
-  for (const list of pending.values()) {
-    for (const d of list) {
-      if (inBoxes(d, ob) || inBoxes(d, sb)) bodyChanged++;
-      else edgeAdded++;
-    }
+  for (const d of matches.added) {
+    if (inBoxes(d, ob) || inBoxes(d, sb)) bodyChanged++;
+    else edgeAdded++;
   }
-  return { bodyChanged, edgeMissing, edgeAdded };
+  for (const [c] of matches.restyled) {
+    if (inBoxes(c, sb)) bodyChanged++;
+    else edgeStyleChanged++;
+  }
+  return { bodyChanged, edgeMissing, edgeAdded, edgeStyleChanged };
 }
 
 function extents(g) {
@@ -962,7 +963,7 @@ export async function inspectSavedPdf(engineFactory, sourceBytes, outputBytes, e
       row.extents = { source: se, output: oe };
       if (se && oe && (oe.right > se.right + TOL || oe.left < se.left - TOL)) failures.push({ code: "text_outside_source_columns", pageIndex: i });
       const es = edgeGlyphs(s), eo = edgeGlyphs(o);
-      const stable = sameGlyphs(es, eo) && sameStyles(es, eo);
+      const stable = edgeGlyphsEquivalent(es, eo);
       row.edge_glyphs = es.length;
       row.edge_stable = stable;
       if (!stable) {
@@ -972,6 +973,7 @@ export async function inspectSavedPdf(engineFactory, sourceBytes, outputBytes, e
         if (split) row.edge_split = split;
         if (editsEdge) warnings.push({ code: "edge_edit_unverified", pageIndex: i });
         else if (!split || split.edgeMissing || split.edgeAdded) failures.push({ code: "header_footer_moved", pageIndex: i, ...(split || {}) });
+        else if (split.edgeStyleChanged) failures.push({ code: "header_footer_style_changed", pageIndex: i, ...split });
         else failures.push({ code: "edge_band_body_changed", pageIndex: i, count: split.bodyChanged });
       }
     }
@@ -1104,6 +1106,26 @@ function inspectDocumentGroups(src, out, map, groups, byPage, failures, warnings
     for(const i of ids)covered.set(i,{documentFlow:true,text_equal:equal,flowSourcePageIndices:ids,flowOutputPageIndices:ois,expected_text:digest(want,includeText)});
   }
   return covered;
+}
+
+// Only unambiguous Unicode + complete ink-box matches can be reordered.
+// Ambiguous overlaps remain unmatched, including coincident different styles.
+export function alignEdgeGlyphs(source, output) {
+  const candidates = source.map((c) => output.map((d, j) => samePlace(c, d) ? j : -1).filter((j) => j >= 0));
+  const reverse = output.map((_, j) => candidates.reduce((n, cs) => n + Number(cs.includes(j)), 0));
+  const used = new Set(), missing = [], restyled = [];
+  source.forEach((c, i) => {
+    const cs = candidates[i];
+    if (cs.length !== 1 || reverse[cs[0]] !== 1) { missing.push(c); return; }
+    const j = cs[0]; used.add(j);
+    if (!sameStyle(c.style ?? null, output[j].style ?? null)) restyled.push([c, output[j]]);
+  });
+  return { missing, added: output.filter((_, j) => !used.has(j)), restyled };
+}
+
+export function edgeGlyphsEquivalent(source, output) {
+  const result = alignEdgeGlyphs(source, output);
+  return !result.missing.length && !result.added.length && !result.restyled.length;
 }
 
 const sameGlyphs = (a, b) => a.length === b.length && a.every((c, k) => {
@@ -1444,8 +1466,11 @@ function inspectContinued(s, o, out, m, pageEdits, row, failures, warnings, incl
   if (parts.slice(1).some((p) => !p)) failures.push({ code: "continuation_page_empty", pageIndex: i });
   const es = outsideBand(s, lo, hi), eo = outsideBand(o, lo, hi);
   row.edge_glyphs = es.length;
-  row.edge_stable = sameGlyphs(es, eo) && sameStyles(es, eo);
-  if (!row.edge_stable) failures.push({ code: "header_footer_moved", pageIndex: i });
+  row.edge_stable = edgeGlyphsEquivalent(es, eo);
+  if (!row.edge_stable) {
+    const diff = alignEdgeGlyphs(es, eo);
+    failures.push({ code: diff.missing.length || diff.added.length ? "header_footer_moved" : "header_footer_style_changed", pageIndex: i });
+  }
   const se = extents(s);
   row.continuation = conts.map((g, k) => {
     const bodyGlyphs = inBand(g, lo, hi);
