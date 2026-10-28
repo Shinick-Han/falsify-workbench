@@ -132,8 +132,8 @@ def run_review(data, progress, cancelled, backend_factory=CodexBackend, claude_f
             evidence_check(note['evidence'], source, 600)
             notes.append(note)
     selected = attack_types(data)
-    payload = {'attackTypes': selected, 'format': data.get('format'), **({'segments': chunks[0]} if len(chunks) == 1 else {'allChunkNotes': notes})}
-    legacy = 'attackTypes' not in data
+    legacy = type(data.get('level')) is int and data['level'] in (1, 2, 3) and selected == [TYPES[data['level'] - 1]]
+    payload = {'attackTypes': selected, **({'level': data['level']} if legacy else {}), 'format': data.get('format'), **({'segments': chunks[0]} if len(chunks) == 1 else {'allChunkNotes': notes})}
     candidate_schema = CANDIDATE if legacy else strict_object({**{k:v for k,v in CANDIDATE['properties'].items() if k != 'level'}, 'attackTypes': {'type':'array', 'items':{'type':'string','enum':TYPES}, 'minItems':1, 'maxItems':3}})
     result_schema = strict_object({'status': RESULT['properties']['status'], 'candidates': {'type':'array','items':candidate_schema,'maxItems':12}})
     response = invoke(policy + 'All extracted text has been supplied in this call or previous chunk reads. Propose up to 12 candidates at exact unique quotations. '

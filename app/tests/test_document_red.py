@@ -96,6 +96,18 @@ class RedTests(unittest.TestCase):
                 return {'status':'ok','response':response}
         self.assertIsNone(run_review(data,lambda _:None,threading.Event(),Validating)['candidates'][0]['uncertainty'])
 
+    def test_legacy_level_payload_and_schema_with_type_adapter(self):
+        from jsonschema import Draft202012Validator
+        data={**request(), 'attackTypes':['contradiction']}
+        class Legacy(MockBackend):
+            def infer(self, prompt, schema):
+                self.assert_payload = '"level": 1' in prompt
+                assert self.assert_payload
+                response={'status':'ok','candidates':[CANDIDATE]}
+                Draft202012Validator(schema).validate(response)
+                return {'status':'ok','response':response}
+        self.assertEqual(run_review(data,lambda _:None,threading.Event(),Legacy)['candidates'][0]['level'],1)
+
     def test_office_export_fail_closed(self):
         with self.assertRaisesRegex(ValueError,'렌더러'):handle_export({'format':'DOCX'})
 
