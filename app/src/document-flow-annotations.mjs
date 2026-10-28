@@ -142,7 +142,7 @@ async function inventory(c,refs,pages,source=false){
     for(let i=0;i<array.length;i++){
       if(++count>ANNOTATION_LIMITS.annotations)fail('annotation-count-limit');
       const annotation=c.get(array,i);if(!annotation.isDictionary())fail('annotation-object-invalid');
-      const id=identity(annotation),record={sourcePageIndex:p,annotationIndex:i,object:annotation,fingerprint:await fingerprint(c,annotation,refs,false,budget),fullFingerprint:await fingerprint(c,annotation,refs,true,budget)};
+      const id=identity(annotation),record={sourcePageIndex:p,annotationIndex:i,aliasKey:shared.get(id)?.aliasKey??key(p,i),object:annotation,fingerprint:await fingerprint(c,annotation,refs,false,budget),fullFingerprint:await fingerprint(c,annotation,refs,true,budget)};
       if(shared.has(id)){record.shared=true;shared.get(id).shared=true;}else shared.set(id,record);
       records.push(record);list.push(record);
     }
@@ -211,11 +211,11 @@ function movementPlan(model,records,map,count,moves,reflowed,destinationMoves=[]
     destinationPlan.set(move.id,{move,descriptor:d,operands});
   }
   for(const record of records){
-    const d=record.descriptor;if(record.shared)fail('annotation-shared-object');
+    const d=record.descriptor;if(record.shared&&(preserveUnmovedUnsupported!==true||records.some(r=>r.aliasKey===record.aliasKey&&planned.has(key(r.sourcePageIndex,r.annotationIndex)))))fail('annotation-shared-object');
     if(group.size&&record.actionOwnershipUnsafe)fail('annotation-action-root-unsupported');
     if(group.size&&record.destinationUnsafe)fail('annotation-destination-unresolved');
     if((record.unexposedTargets||[]).some(p=>group.has(p)))fail('annotation-destination-reflowed');
-    if(group.has(record.sourcePageIndex)&&!d.eligible&&!(preserveUnmovedUnsupported===true&&d.kind==='unsupported'&&d.reason==='annotation-subtype-unsupported'&&!planned.has(key(record.sourcePageIndex,record.annotationIndex))))fail(d.reason);
+    if(group.has(record.sourcePageIndex)&&!d.eligible&&!(preserveUnmovedUnsupported===true&&!planned.has(key(record.sourcePageIndex,record.annotationIndex))&&(record.shared||(d.kind==='unsupported'&&d.reason==='annotation-subtype-unsupported'))))fail(d.reason);
     if((d.internalDestinationSourcePageIndices||[]).some(p=>group.has(p)&&(!(d.internalDestinations||[]).some(x=>x.targetSourcePageIndex===p)||(d.internalDestinations||[]).some(x=>x.targetSourcePageIndex===p&&!destinationPlan.has(x.id)))))fail('annotation-destination-reflowed');
   }
   const expected=Array.from({length:count},()=>[]);
@@ -232,7 +232,7 @@ async function bound({model,sourceBytes,outputBytes,sourcePageMap,moves=[],reflo
     const map=mapping(model,sourcePageMap,c.doc.countPages()),inverse=new Map([...map].map(([s,o])=>[o,['source-page',s]])),{refs,pages}=pageRefs(c,inverse),plan=movementPlan(model,state.records,map,pages.length,moves,reflowedSourcePages,destinationMoves,preserveUnmovedUnsupported);
     if(reflowedSourcePages.length&&unsupportedDocumentActions(c,pages))fail('annotation-action-root-unsupported');
     for(const [s,o]of map)if(state.pageGeometry[s]&&!numbers(state.pageGeometry[s],geometry(c,pages[o])))fail('annotation-page-identity-invalid');
-    return {c,state,map,refs,pages,plan};
+    return {c,state,map,refs,pages,plan,preserveUnmovedUnsupported};
   }catch(error){c.close();throw error;}
 }
 async function verifyDocument(ctx,expected,after=false){
@@ -256,11 +256,14 @@ async function verifyDocument(ctx,expected,after=false){
     }
     for(const item of restore){item.obj.put(0,pages[ctx.map.get(item.old.targetSourcePageIndex)]);item.old.operands.forEach((n,j)=>item.obj.put(j+2,n));}
     const actual=await inventory(c,refs,pages),names=nameDestinations(c),readDestination=destinationReader(c,refs,names),destinationBudget={objects:0,streams:0,strings:0};
-  if(actual.records.some(r=>r.shared))fail('annotation-shared-object');
+  if(ctx.preserveUnmovedUnsupported!==true&&actual.records.some(r=>r.shared))fail('annotation-shared-object');
+  const aliases=new Map(),reverseAliases=new Map();
   for(let p=0;p<pages.length;p++){
     if(actual.byPage[p].length!==expected[p].length)fail('annotation-output-count-mismatch');
     for(let i=0;i<expected[p].length;i++){
       const {record,move}=expected[p][i],out=actual.byPage[p][i],d=record.descriptor;
+      if((aliases.has(record.aliasKey)&&aliases.get(record.aliasKey)!==out.aliasKey)||(reverseAliases.has(out.aliasKey)&&reverseAliases.get(out.aliasKey)!==record.aliasKey))fail('annotation-shared-object');
+      aliases.set(record.aliasKey,out.aliasKey);reverseAliases.set(out.aliasKey,record.aliasKey);
       if((move?out.fingerprint:out.fullFingerprint)!==(move?record.fingerprint:record.fullFingerprint))fail('annotation-semantic-mismatch');
       if(record.destinationFingerprints){const resolved=readDestination(out.object),fingerprints=await Promise.all(resolved.values.map(value=>fingerprint(c,value,refs,true,destinationBudget)));if(JSON.stringify(fingerprints)!==JSON.stringify(record.destinationFingerprints)||JSON.stringify(resolved.missingNames)!==JSON.stringify(record.missingDestinationNames))fail('annotation-destination-definition-mismatch');}
       if(!move)continue;

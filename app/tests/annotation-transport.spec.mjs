@@ -59,6 +59,24 @@ test('wrong source/model/map, duplicate moves, shared annotation ownership, tagg
   for(const change of [{sourceBytes:source({unknownAction:true})},{model:JSON.parse(JSON.stringify(model))},{sourcePageMap:[map[0],map[0],map[2]]},{moves:[move,move]},{moves:[{...move,dx:NaN}]},{moves:[{...move,split:true}]},{moves:[{...move,dx:1000}]}])assert.equal((await api.validate(args(model,src,change))).ok,false);
   for(const options of [{shared:true},{tagged:true},{badRect:true},{unknownAction:true}]){const bytes=source(options),m=await inspect(bytes);assert.ok(m.annotations.some(a=>!a.eligible));await assert.rejects(()=>api.transport(args(m,bytes)));}
 });
+test('opt-in preserves stationary annotation alias partitions and rejects moved, split or joined aliases',async()=>{
+  const src=source({shared:true}),model=await inspect(src),request=args(model,src,{moves:[],reflowedSourcePages:[],preserveUnmovedUnsupported:true});
+  const out=await api.transport(request);assert.equal((await api.validate({...request,outputBytes:out.pdf})).ok,true);
+  const staged=mutate(src,d=>d.insertPage(1,d.addPage([0,0,300,400],0,{},''))),sourcePageMap=[{sourcePageIndex:0,outputPageIndex:0},{sourcePageIndex:1,outputPageIndex:2},{sourcePageIndex:2,outputPageIndex:3}];
+  const mapped={...request,outputBytes:staged,sourcePageMap},mappedOut=await api.transport(mapped);assert.equal((await api.validate({...mapped,outputBytes:mappedOut.pdf})).ok,true);
+  assert.ok(!JSON.stringify(model).includes('aliasKey'));
+  await assert.rejects(()=>api.transport({...request,preserveUnmovedUnsupported:false}));
+  await assert.rejects(()=>api.transport({...request,moves:[move],reflowedSourcePages:[0]}));
+  const split=mutate(out.pdf,d=>{const arr=d.findPage(1).get('Annots'),original=arr.get(1);arr.put(1,d.addObject(original.resolve()));});
+  assert.equal((await api.validate({...request,outputBytes:split})).ok,false);
+  await assert.rejects(()=>api.transport({...request,outputBytes:split}));
+  const distinct=mutate(src,d=>{const arr=d.findPage(1).get('Annots'),original=arr.get(1);arr.put(1,d.addObject(original.resolve()));}),distinctModel=await inspect(distinct),distinctRequest=args(distinctModel,distinct,{moves:[],reflowedSourcePages:[],preserveUnmovedUnsupported:true});
+  const joined=mutate(distinct,d=>d.findPage(1).get('Annots').put(1,d.findPage(0).get('Annots',0)));
+  assert.equal((await api.validate({...distinctRequest,outputBytes:joined})).ok,false);
+  await assert.rejects(()=>api.transport({...distinctRequest,outputBytes:joined}));
+  const normalMove={sourcePageIndex:0,annotationIndex:1,outputPageIndex:1,dx:0,dy:-10},moving={...request,moves:[normalMove],reflowedSourcePages:[0,1]};
+  const moved=await api.transport(moving);assert.equal((await api.validate({...moving,outputBytes:moved.pdf})).ok,true);
+});
 test('validation rejects dropped links, altered nested actions/streams and unauthorized fixed-edge geometry',async()=>{
   const src=source(),model=await inspect(src),out=await api.transport(args(model,src));
   const changes=[d=>d.findPage(1).get('Annots').delete(1),d=>d.findPage(1).get('Annots',1,'A','Next','PrivateUnknown').put('Nested',d.newString('altered')),d=>d.findPage(1).get('Annots',1,'A').delete('Next'),d=>d.findPage(1).get('Annots',1,'A','Next','PrivateUnknown').put('Rect',[1,2,30,40]),d=>d.findPage(1).get('Annots',0).put('Rect',[21,380,141,395]),d=>d.findPage(1).get('Annots',1,'A','PrivateUnknown','Blob').writeRawStream(new Uint8Array([9,8,7]))];
