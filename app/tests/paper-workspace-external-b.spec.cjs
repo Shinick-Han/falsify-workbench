@@ -139,6 +139,18 @@ function keydown(target,init){const e=new Event('keydown',{cancelable:true});Obj
 function buttons(v,act,id){return v.get('paper-edits').querySelectorAll('button').filter(b=>b.dataset.act===act&&(!id||b.dataset.edit===id));}
 
 
+test('external source excludes synthetic aliases but retains distinct occurrences and supports manual binding',async()=>{
+  const X=require('../dist/external-exchange.js'),v=mount({paragraphPdf:paragraphMock('Unique 120.')});
+  const file=pdfFile(pdfBytes('MARKER-A'));v.file(file);await until(()=>/문단을 클릭/.test(v.get('paper-before-status').textContent),'paragraph alias');
+  v.document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file,result:{segments:[{id:'s0',pageIndex:0,text:'Unique 120.'},{id:'s1',pageIndex:1,text:'Other text.'}]}}}));
+  const source=v.ws.getSource();assert.ok(source.segments.some(s=>s.id.startsWith('paragraph:')));assert.deepEqual(source.externalSegments.map(s=>s.id),['s0','s1']);
+  const prompt=X.buildPrompt({role:'red',fileHash:source.fileHash,segments:source.externalSegments,includeSource:true});assert.equal((prompt.match(/Unique 120\./g)||[]).length,1);
+  const parsed=X.parse('{"changes":[{"before":"120","after":"121"}]}',{role:'red',fileHash:source.fileHash,segments:source.externalSegments});assert.equal(parsed.items[0].matchStatus,'matched');
+  v.ws.acceptExternalResponse(parsed);assert.equal(v.ws.getExternalResponses().items[0].matchStatus,'matched');
+  v.ws.acceptExternalResponse({schema:'falsify.external-batch.v1',id:'alias',role:'red',fileHash:source.fileHash,raw:'alias',items:[{id:'x',kind:'change',before:'120',after:'122',segmentId:'paragraph:0:p0',pageIndex:0,matchStatus:'matched',anchor:{start:7,end:10}}]});
+  const row=v.get('paper-proposal-list').children[1];assert.equal(v.ws.getExternalResponses().items[1].matchStatus,'missing');assert.equal(row.children[4].children.length,2);
+});
+
 test('workspace imports additively and flush captures selected proposal',async()=>{
   let resolveExport;const requests=[];
   const exporter={prepare(req){requests.push(req);return new Promise(resolve=>{resolveExport=()=>{const bytes=pdfBytes('MARKER-GEN');resolve({file:pdfFile(bytes,'generated.pdf'),sha256:sha(bytes),verification:null,pageMap:null});};});}};
