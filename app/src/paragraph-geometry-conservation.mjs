@@ -22,16 +22,23 @@ export function canonicalPage(page, partition = page?.W / 2) {
     const candidates = lines.filter(l=>l.channel===channel && Math.abs(l.y-g.origin[1])<=.5 && Math.abs(l.size-size(g))<=.2);
     if (candidates.length > 1) return fail('ambiguous_baseline',g.i);
     let line=candidates[0];
-    if (!line) lines.push(line={channel,y:g.origin[1],size:size(g),items:[]});
+    if (!line) lines.push(line={channel,y:g.origin[1],size:size(g),items:[],aliases:[]});
     line.items.push({i:g.i,u:g.u,x:g.l,r:g.r,generated:false});
   }
   // Attach a raised, smaller marker only when exactly one lower body line has
   // an adjacent preceding glyph. This uses source geometry, never marker text.
   for (const line of [...lines]) {
     const first=[...line.items].sort((a,b)=>a.x-b.x)[0];
-    const candidates=lines.filter(l=>l!==line && l.channel===line.channel && l.size>=line.size*1.2 && l.size<=line.size*3 && l.y<line.y && line.y-l.y<=l.size*.8 && l.items.some(g=>g.r<=first.x+1 && first.x-g.r<=l.size*1.3));
+    let previous=first.i-1;
+    while (previous>=0 && !glyphs.has(previous) && isSpace(page.chars[previous].u)) previous--;
+    const candidates=lines.filter(l=>l!==line && l.channel===line.channel && l.size>=line.size*1.2 && l.size<=line.size*3 && l.y<line.y && line.y-l.y<=l.size*.8 && l.items.some(g=>g.i===previous && g.r<=first.x+1 && first.x-g.r<=l.size*1.3));
     if (candidates.length>1) return fail('ambiguous_marker',first.i);
-    if (candidates.length===1) {candidates[0].items.push(...line.items); lines.splice(lines.indexOf(line),1);}
+    if (candidates.length===1) {
+      const owner=candidates[0];
+      owner.items.push(...line.items);
+      owner.aliases.push({channel:line.channel,y:line.y,size:line.size,items:[...line.items]},...line.aliases);
+      lines.splice(lines.indexOf(line),1);
+    }
   }
   lines.sort((a,b)=>a.channel-b.channel || b.y-a.y);
   for (const line of lines) line.items.sort((a,b)=>a.x-b.x || a.i-b.i);
@@ -81,7 +88,24 @@ export function canonicalPage(page, partition = page?.W / 2) {
       boundaryWhitespace.push(i); literalBoundaries.add(br.li); continue;
     }
     const channel=x<partition?0:1;
-    const candidates=lines.filter(line=>line.channel===channel && Math.abs(line.y-y)<=.5);
+    // An attached script keeps its original baseline. Only its immediate raw
+    // glyph neighbour can establish ownership of whitespace on that baseline.
+    let before=i-1, after=i+1;
+    while (before>=0 && isSpace(page.chars[before].u)) before--;
+    while (after<page.chars.length && isSpace(page.chars[after].u)) after++;
+    const baselines=lines.flatMap(line=>[line,...line.aliases]).filter(baseline=>
+      baseline.channel===channel && Math.abs(baseline.y-y)<=.5);
+    if (baselines.length>1) return fail('literal_whitespace_line_ambiguous',i,{candidates:baselines.length});
+    const candidates=[];
+    for (const line of lines) {
+      if (line.channel===channel && Math.abs(line.y-y)<=.5) candidates.push(line);
+      for (const alias of line.aliases) {
+        if (alias.channel!==channel || Math.abs(alias.y-y)>.5) continue;
+        if (alias.items.some(item=>
+          (item.i===before && l>=item.x && l-item.r<=alias.size) ||
+          (item.i===after && r<=item.r && item.x-r<=alias.size))) candidates.push(line);
+      }
+    }
     if (candidates.length!==1) return fail('literal_whitespace_line_ambiguous',i,{candidates:candidates.length});
     candidates[0].items.push({i,u:c.u,x:l,r,generated:false});
   }

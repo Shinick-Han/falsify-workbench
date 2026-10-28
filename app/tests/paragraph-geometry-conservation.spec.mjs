@@ -66,3 +66,34 @@ test('a physical reflow line break can retain a source word boundary',()=>{
   assert.equal(compare(s,o,[{before:'c',after:'d'}]).match,true);
   assert.equal(compare(s,page('ab d'),[{before:'c',after:'d'}]).match,false);
 });
+
+test('literal whitespace on an attached script baseline keeps its raw ownership',()=>{
+  const make=()=>{
+    const p=page('xn+1 should');
+    for(const g of p.glyphs.filter(g=>g.i>=1 && g.i<=3)) {g.origin[1]=14;g.b=14;g.t=20;g.style.size=6;}
+    p.chars[4].origin[1]=14; p.chars[4].box[2]=14; p.chars[4].box[3]=20;
+    return p;
+  };
+  const p=make(), c=canonicalPage(p);
+  assert.equal(c.ok,true); assert.equal(c.text,'xn+1 should');
+  assert.equal(c.evidence.mapped.length,p.chars.length);
+  assert.equal(compare(p,make()).match,true);
+  assert.equal(compare(p,page('xn+1should')).match,false);
+  assert.equal(compare(p,page('xn+ 1 should')).match,false);
+  assert.equal(compare(p,page('x+ n1 should')).match,false);
+  const unrelated=make(); unrelated.chars[4].origin[0]=150; unrelated.chars[4].box[0]=150; unrelated.chars[4].box[1]=152;
+  assert.equal(canonicalPage(unrelated).reason,'literal_whitespace_line_ambiguous');
+  const different=make(); different.glyphs.find(g=>g.i===3).style.size=11;
+  assert.equal(canonicalPage(different).ok,false);
+});
+
+test('script alias cannot claim whitespace also owned by another baseline',()=>{
+  const p=page('xn a');
+  const marker=p.glyphs.find(g=>g.i===1); marker.origin[1]=14; marker.b=14; marker.t=20; marker.style.size=6;
+  p.chars[2].origin[1]=14; p.chars[2].box[2]=14; p.chars[2].box[3]=20;
+  // Another independently surviving line at the same baseline makes ownership ambiguous.
+  const extra={...p.glyphs.find(g=>g.i===3),l:80,r:84,origin:[80,14],style:{size:10,mat:[1,0,0,1]}};
+  p.glyphs.push(extra); p.chars[3].u=extra.u;
+  p.glyphs=p.glyphs.filter((g,idx)=>g.i!==3 || idx===p.glyphs.length-1);
+  assert.equal(canonicalPage(p).reason,'literal_whitespace_line_ambiguous');
+});
