@@ -72,7 +72,7 @@
     candidates.forEach((c,i)=>{
       const section=document.createElement('section');section.className='red-proposal';
       const choice=document.createElement('label');choice.className='check-row';const check=document.createElement('input');check.type='checkbox';check.checked=c.selected;
-      const title=document.createElement('span');title.textContent='후보 '+(i+1)+' · '+c.label+' · '+(c.attackTypes?.length?c.attackTypes.join(', '):'L'+c.level);choice.append(check,title);section.append(choice);
+      const title=document.createElement('span');title.textContent='후보 '+(i+1)+' · '+c.label+(c.attackTypes?.length?' · '+c.attackTypes.join(', '):(c.level!=null?' · L'+c.level:''));choice.append(check,title);section.append(choice);
       const notes=document.createElement('details');notes.className='red-candidate-notes';
       const notesTitle=document.createElement('summary');notesTitle.textContent='공격 근거와 검토 메모';notes.append(notesTitle);
       const rationale=document.createElement('p');rationale.textContent=c.rationale;notes.append(rationale);
@@ -80,7 +80,7 @@
       c.evidence.forEach(e=>{const location=document.createElement('p');location.textContent=e.label+' — '+e.relation;const quote=document.createElement('blockquote');quote.textContent=e.quote;evidence.append(location,quote);});notes.append(evidence);
       const comparison=document.createElement('div');comparison.className='red-ab';const before=document.createElement('div'),beforeTitle=document.createElement('h3'),beforeText=document.createElement('p');beforeTitle.textContent='Before · 원본 인용';beforeText.textContent=c.before;before.append(beforeTitle,beforeText);
       const after=document.createElement('div'),label=document.createElement('label'),area=document.createElement('textarea');area.id='red-after-'+i;area.rows=4;area.maxLength=4000;area.value=c.after;label.htmlFor=area.id;label.textContent='After · 직접 편집 가능';after.append(label,area);comparison.append(before,after);section.append(comparison);
-      const uncertainty=document.createElement('p');uncertainty.className='muted';uncertainty.textContent=c.uncertainty;notes.append(uncertainty);section.append(notes);
+      if(c.uncertainty){const uncertainty=document.createElement('p');uncertainty.className='muted';uncertainty.textContent=c.uncertainty;notes.append(uncertainty);}section.append(notes);
       const marks=globalThis.FalsifyChangeMarks,afterText=document.createElement('p');afterText.className='red-change-preview';afterText.ariaLabel='변경 문구 강조';after.append(afterText);
       const paint=()=>{if(marks){marks.paintText(beforeText,c.before,c.after,'before');marks.paintText(afterText,c.before,c.after,'after');}else afterText.hidden=true;};paint();
       check.addEventListener('change',()=>{c.selected=check.checked;changed();});area.addEventListener('input',()=>{c.after=area.value;c.edited=true;paint();changed();});list.append(section);

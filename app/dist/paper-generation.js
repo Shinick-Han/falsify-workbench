@@ -5,7 +5,7 @@
   function key(spec){return stable({fileHash:spec.fileHash,edits:(spec.edits||[]).filter(e=>e.enabled!==false).map(e=>({segmentId:e.segmentId,pageIndex:e.pageIndex,before:e.before,after:e.after,anchor:e.anchor})),fontRevision:spec.fontRevision,exportSettings:spec.exportSettings});}
   function create({generate,onResult=()=>{},onState=()=>{},delayMs=200,maxEntries=4}){
     let timer=null,background=null,running=null,disposed=false,sequence=0;const queue=[],cache=new Map();
-    const notify=(job,phase,error)=>onState({key:job.key,phase,...(error?{error}: {})});
+    const notify=(job,phase,error)=>{try{onState({key:job.key,phase,...(error?{error}: {})});}catch{/* observer failures must not stall the queue */}};
     const aborted=()=>{const e=new Error('Generation cancelled');e.name='AbortError';return e;};
     function remember(k,v){cache.delete(k);cache.set(k,v);while(cache.size>Math.max(1,maxEntries))cache.delete(cache.keys().next().value);}
     function enqueue(job){queue.push(job);pump();}
@@ -17,13 +17,13 @@
     function captured(spec){return typeof structuredClone==='function'?structuredClone(spec):JSON.parse(JSON.stringify(spec));}
     function schedule(spec){if(disposed)return;const copy=captured(spec),job={spec:copy,key:key(copy),seq:++sequence,explicit:false};dropBackground();background=job;notify(job,'scheduled');timer=setTimeout(()=>{timer=null;if(background===job){background=null;enqueue(job);}},delayMs);}
     function flush(spec){if(disposed)return Promise.reject(aborted());const copy=captured(spec),job={spec:copy,key:key(copy),seq:++sequence,explicit:true};dropBackground();return new Promise((resolve,reject)=>{job.resolve=resolve;job.reject=reject;queue.push(job);pump();});}
-    function cancel(){++sequence;dropBackground();for(const job of queue.splice(0)){job.cancelled=true;job.reject?.(aborted());}if(running){running.cancelled=true;running.controller.abort();}}
+    function cancel(){++sequence;dropBackground();for(const job of queue.splice(0)){job.cancelled=true;job.reject?.(aborted());}if(running){running.cancelled=true;running.controller.abort();running.reject?.(aborted());}}
     function dispose(){if(disposed)return;cancel();disposed=true;cache.clear();}
     return {schedule,flush,cancel,dispose};
   }
   function createDocumentCache({maxEntries=2}={}){
     const entries=new Map();let disposed=false;
-    function destroy(e){if(e.destroyed)return;e.destroyed=true;Promise.resolve(e.promise).then(doc=>{if(e.task&&typeof e.task.destroy==='function')return e.task.destroy();if(doc&&typeof doc.destroy==='function')return doc.destroy();}).catch(()=>{});}
+    function destroy(e){if(e.destroyed)return;e.destroyed=true;if(e.task&&typeof e.task.destroy==='function'){try{Promise.resolve(e.task.destroy()).catch(()=>{});}catch{}return;}Promise.resolve(e.promise).then(doc=>doc&&typeof doc.destroy==='function'?doc.destroy():undefined).catch(()=>{});}
     function trim(){for(const [k,e] of entries){if(entries.size<=Math.max(1,maxEntries))break;if(!e.refs){entries.delete(k);destroy(e);}}}
     async function load(k,loader){if(disposed)throw new Error('Document cache disposed');let e=entries.get(k);if(!e){const task=loader();e={task,refs:0,destroyed:false,promise:Promise.resolve(task&&task.promise||task)};entries.set(k,e);e.promise.catch(()=>{if(entries.get(k)===e)entries.delete(k);});}else{entries.delete(k);entries.set(k,e);}e.refs++;try{const doc=await e.promise;if(disposed||e.destroyed)throw new Error('Document cache disposed');trim();return doc;}catch(err){e.refs--;throw err;}}
     function release(k){const e=entries.get(k);if(e&&e.refs>0)e.refs--;trim();}

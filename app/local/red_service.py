@@ -25,7 +25,7 @@ def strict_object(properties):
 
 EVIDENCE = strict_object({'segmentId': STRING, 'quote': STRING, 'relation': STRING})
 CANDIDATE = strict_object({'id': STRING, 'segmentId': STRING, 'level': {'type': 'integer', 'enum': [1, 2, 3]},
-    'before': STRING, 'after': STRING, 'rationale': STRING, 'evidence': {'type': 'array', 'items': EVIDENCE, 'minItems': 1, 'maxItems': 6}, 'uncertainty': STRING})
+    'before': STRING, 'after': STRING, 'rationale': STRING, 'evidence': {'type': 'array', 'items': EVIDENCE, 'minItems': 1, 'maxItems': 6}, 'uncertainty': {'type': ['string', 'null']}})
 RESULT = strict_object({'status': {'type': 'string', 'enum': ['ok', 'abstain', 'refusal']}, 'candidates': {'type': 'array', 'items': CANDIDATE, 'maxItems': 12}})
 SCAN = strict_object({'status': {'type': 'string', 'enum': ['ok', 'abstain', 'refusal']}, 'summary': STRING,
     'evidence': {'type': 'array', 'items': EVIDENCE, 'maxItems': 4}})
@@ -91,7 +91,7 @@ def validate_candidates(response, segments):
             raise ValueError('공격 위치 인용이 없거나 중복됩니다.')
         if not isinstance(after, str) or (after and not after.strip()) or len(after) > 4000 or before == after: raise ValueError('변경문이 올바르지 않습니다.')
         if 'attackTypes' in c or 'level' in c: attack_types(c)
-        if not c['rationale'].strip() or len(c['rationale']) > 3000 or not isinstance(c.get('uncertainty', ''), str) or len(c.get('uncertainty', '')) > 1500:
+        if not c['rationale'].strip() or len(c['rationale']) > 3000 or (c.get('uncertainty') is not None and (not isinstance(c['uncertainty'], str) or len(c['uncertainty']) > 1500)):
             raise ValueError('근거/한계 설명 제한 초과')
         evidence_check(c['evidence'], source)
 
@@ -137,8 +137,7 @@ def run_review(data, progress, cancelled, backend_factory=CodexBackend, claude_f
     candidate_schema = CANDIDATE if legacy else strict_object({**{k:v for k,v in CANDIDATE['properties'].items() if k != 'level'}, 'attackTypes': {'type':'array', 'items':{'type':'string','enum':TYPES}, 'minItems':1, 'maxItems':3}})
     result_schema = strict_object({'status': RESULT['properties']['status'], 'candidates': {'type':'array','items':candidate_schema,'maxItems':12}})
     response = invoke(policy + 'All extracted text has been supplied in this call or previous chunk reads. Propose up to 12 candidates at exact unique quotations. '
-        'Each candidate needs a clear causal/logical rationale (<=3000 chars), exact evidence quotes, uncertainty (<=1500 chars), before/after <=4000 chars. '
-        'For PDF prefer short clauses within ONE original line and replacements that fit the original text width; never invent new page layout. '
+        'Each candidate needs a clear causal/logical rationale (<=3000 chars), exact evidence quotes, before/after <=4000 chars. Uncertainty is optional; use null when absent (otherwise <=1500 chars). '
         'A candidate is a hypothesis, not proof. Use only quoted text available here; abstain if unsupported. Return only selected attack types. '
         + json.dumps(payload, ensure_ascii=False), result_schema)
     validate_candidates(response, data['segments'])

@@ -84,6 +84,18 @@ class RedTests(unittest.TestCase):
         class Mixed(MockBackend):
             def infer(self, prompt, schema): return {'status':'ok','response':{'status':'ok','candidates':[c]}}
         self.assertEqual(run_review(data,lambda _:None,threading.Event(),Mixed)['candidates'][0]['after'],'')
+    def test_real_schema_nullable_uncertainty_and_pdf_prompt(self):
+        from jsonschema import Draft202012Validator
+        data=request(); del data['level']; data['attackTypes']=['contradiction','unsupported-inference']; data['format']='PDF'
+        candidate={**CANDIDATE, 'attackTypes':data['attackTypes'], 'uncertainty':None, 'after':''}; del candidate['level']
+        class Validating(MockBackend):
+            def infer(self, prompt, schema):
+                response={'status':'ok','candidates':[candidate]}
+                Draft202012Validator(schema).validate(response)
+                assert 'ONE original line' not in prompt and 'original text width' not in prompt
+                return {'status':'ok','response':response}
+        self.assertIsNone(run_review(data,lambda _:None,threading.Event(),Validating)['candidates'][0]['uncertainty'])
+
     def test_office_export_fail_closed(self):
         with self.assertRaisesRegex(ValueError,'렌더러'):handle_export({'format':'DOCX'})
 
