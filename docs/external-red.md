@@ -10,3 +10,6 @@ RED는 Before/After가 있는 변경을 가져옵니다. After가 빈 문자열�
 
 통합 순서: `external-red.js`, `external-exchange.js`, `external-proposals.js` 후 `external-red-ui.js`와 `document-blue.js`, 그 다음 `external-blue-ui.js`. `external-blue-ui.css`를 포함합니다. BLUE 호스트는 `#document-blue`입니다.
 `external-ai-import` 출처로 표시합니다. 파서의 응답 자동 처리 한도는 200000자이며, 한도를 넘는 원문은 잘라내지 않고 보관합니다. 구현은 AGPL-3.0-only입니다.
+프롬프트에는 원문과 선택한 Harness를 각각 포함할지 고를 수 있습니다. RED는 현재 선택한 공격 유형을 포함합니다. 파일 또는 붙여넣기는 바로 가져오며, 직접 입력한 글은 가져오기 버튼을 사용합니다. 원문을 바꾸면 이전 입력은 비웁니다.
+
+RED와 BLUE의 외부 응답은 명시적으로 기록할 수 있습니다. 기록판에서 사람 검수와 팀 공개를 선택할 수 있으며, Confluence에는 `external-response` 보관으로 원문 추출 텍스트·응답·선택·검수 의견이 포함됩니다. 팀에서 가져온 보관은 12시간 임시 열람이며 로컬 기록에 자동으로 합치지 않습니다.
