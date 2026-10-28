@@ -1,5 +1,5 @@
 import {spawnSync} from 'node:child_process';
-const externalWorkflow = spawnSync(process.execPath, ['--test', 'tests/external-exchange.test.cjs', 'tests/external-proposals-b.spec.cjs', 'tests/external-exchange-ui.test.cjs', 'tests/external-archive.test.cjs', 'tests/paper-generation.spec.cjs', 'tests/paper-workspace-external-b.spec.cjs', 'tests/external-workflow.integration.test.cjs'], {stdio: 'inherit'});
+const externalWorkflow = spawnSync(process.execPath, ['--test', 'tests/paper-anchors.test.cjs', 'tests/external-exchange.test.cjs', 'tests/external-proposals-b.spec.cjs', 'tests/external-exchange-ui.test.cjs', 'tests/external-archive.test.cjs', 'tests/paper-generation.spec.cjs', 'tests/paper-workspace-external-b.spec.cjs', 'tests/external-workflow.integration.test.cjs'], {stdio: 'inherit'});
 if (externalWorkflow.error || externalWorkflow.status !== 0) process.exit(externalWorkflow.status || 1);
 const marks = spawnSync(process.execPath, ['--test', 'tests/paper-change-marks.spec.cjs'], {stdio: 'inherit'});
 if (marks.error || marks.status !== 0) process.exit(marks.status || 1);

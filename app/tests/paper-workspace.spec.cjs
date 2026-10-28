@@ -745,7 +745,7 @@ test('output: object warnings and failed checks name the candidate without claim
   v.get('paper-current-download').click();assert.equal(v.downloads.at(-1),v.ws.getOutput().file);
 });
 
-test('wayfinding: an uploaded RED file points at manual editing',async()=>{
+test('wayfinding: prompt-first sign remains intact and external import opens its containing details',async()=>{
   const VISUAL=fs.readFileSync(path.resolve(__dirname,'../dist/visual-workflow.js'),'utf8');
   const observers=[];
   class MutationObserver{constructor(fn){this.fn=fn;observers.push(this);}observe(target){this.target=target;}disconnect(){}}
@@ -754,7 +754,7 @@ test('wayfinding: an uploaded RED file points at manual editing',async()=>{
     const e=new EventTarget();
     e.tagName=String(tag).toUpperCase();e.children=[];e.className='';e.textContent='';e.id='';e.hidden=false;e.disabled=false;e.value='';e.dataset={};e.options=[];e.type='button';
     e.classList={add(){},remove(){},toggle(c,on){e.className=on?'x':'';},contains:()=>false};
-    e.setAttribute=()=>{};e.getAttribute=()=>null;e.append=(...c)=>{e.children.push(...c);};e.prepend=(...c)=>{e.children.unshift(...c);};e.replaceChildren=(...c)=>{e.children=c;};
+    e.setAttribute=()=>{};e.getAttribute=()=>null;e.append=(...c)=>{for(const child of c)child.parentElement=e;e.children.push(...c);};e.prepend=(...c)=>{for(const child of c)child.parentElement=e;e.children.unshift(...c);};e.replaceChildren=(...c)=>{for(const child of c)child.parentElement=e;e.children=c;};
     e.after=()=>{};e.before=()=>{};e.remove=()=>{};e.focus=()=>{document.activeElement=e;};e.scrollIntoView=()=>{e.scrolled=true;};e.closest=()=>null;e.matches=()=>false;
     e.querySelector=sel=>e.querySelectorAll(sel)[0]||null;
     e.querySelectorAll=sel=>{
@@ -782,6 +782,7 @@ test('wayfinding: an uploaded RED file points at manual editing',async()=>{
   const runLabel=node('label');get('evaluation-run').closest=()=>runLabel;get('evaluation-run').options=[];get('evaluation-run').value='';
   get('evaluation-verdict').options=[];get('evaluation-verdict').id='evaluation-verdict';
   get('evaluation-form').insertBefore=()=>{};
+  const bridgeHead=node('div');bridgeHead.className='step-head';get('local-bridge').append(bridgeHead);
   const manager=get('harness-manager'),heading=node('h2');manager.append(heading);
   manager.querySelector=sel=>sel==='h2'?heading:null;
   document.documentElement=node('html');document.body=node('body');document.activeElement=null;document.readyState='complete';document.baseURI=BASE;
@@ -793,19 +794,19 @@ test('wayfinding: an uploaded RED file points at manual editing',async()=>{
   vm.runInContext(VISUAL,ctx,{filename:'visual-workflow.js'});
   await ctx.FalsifyVisual.ready;
   const title=get('sign-title'),detail=get('sign-detail'),label=get('sign-action-label'),action=get('sign-action');
-  title.textContent='RED 실행 설정을 확인하세요';detail.textContent='paper.pdf · 0개 후보';label.textContent='실행 설정으로';
+  title.textContent='논문을 보고 검토 지시를 적으세요';detail.textContent='paper.pdf';label.textContent='지시문 작성';
   for(const observer of observers)if(observer.target===title)observer.fn();
-  assert.equal(title.textContent,'원본에서 직접 고치세요');
-  assert.equal(detail.textContent,'쪽을 보고 글자를 고칩니다. AI 실행과 외부 제안은 선택입니다.');
-  assert.equal(label.textContent,'원본 편집으로');
-  title.textContent='RED 실행 설정을 확인하세요';
   document.dispatchEvent(new CustomEvent('falsify:document-state',{detail:{name:'paper.pdf',busy:false,hasResult:false,count:0}}));
-  assert.equal(title.textContent,'원본에서 직접 고치세요');
-  assert.equal(made.find(e=>e.className==='visual-next').hidden,true,'the manual edit sign does not add another instruction paragraph');
-  assert.equal(made.filter(e=>e.tagName==='BUTTON'&&e.children.some(c=>c.textContent==='내 PC 연결')).length,2,'each role has a direct connection action');
-  let bubbled=0;action.addEventListener('click',()=>{bubbled++;get('document-red').focus();});
+  assert.equal(title.textContent,'논문을 보고 검토 지시를 적으세요');
+  assert.equal(label.textContent,'지시문 작성');
+  assert.equal(made.filter(e=>e.tagName==='BUTTON'&&e.children.some(c=>c.textContent==='내 PC 연결')).length,2);
+  let bubbled=0;action.addEventListener('click',()=>{bubbled++;get('prompt-target').focus();});
   action.dispatchEvent(new Event('click',{bubbles:true,cancelable:true}));
-  assert.equal(bubbled,0);assert.equal(document.activeElement,get('paper-before-stage'));assert.equal(get('paper-before-stage').scrolled,true);
+  assert.equal(bubbled,1);assert.equal(document.activeElement,get('prompt-target'));
+  const wrapper=node('details'),panel=get('external-red'),answer=get('external-red-paste');wrapper.append(panel);panel.querySelector=sel=>sel==='#external-red-paste'?answer:null;
+  const importButton=made.find(e=>e.id==='visual-red-external');importButton.dispatchEvent(new Event('click'));
+  assert.equal(wrapper.open,true);assert.equal(panel.scrolled,true);assert.equal(document.activeElement,answer);
+  assert.match(HTML,/id="paper-before-stage"/,'manual editing remains reachable');
   title.textContent='RED 검토 중입니다';detail.textContent='paper.pdf · 0개 후보';
   document.dispatchEvent(new CustomEvent('falsify:document-state',{detail:{name:'paper.pdf',busy:true,hasResult:false,count:0}}));
   assert.equal(title.textContent,'RED 검토 중입니다');
