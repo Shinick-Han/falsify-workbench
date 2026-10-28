@@ -16,6 +16,7 @@
 // self-check, not an independent or rendering-based release check.
 
 import { createHash } from "node:crypto";
+import { compareSourceGeometry } from "../paragraph-geometry-conservation.mjs";
 import { resolvePageFraction } from "./continuation-template.mjs";
 import { deriveDocumentFlowBand } from "./document-flow-band.mjs";
 import { deriveNativeLinkMoves, deriveNativeFitRMoves, nativeFitRTargetPages, savedLinkGlyphs } from "./document-flow-links.mjs";
@@ -921,6 +922,23 @@ export async function inspectSavedPdf(engineFactory, sourceBytes, outputBytes, e
           row.text_equal = true;
           row.stationary_glyph_order_normalized = true;
           warnings.push({ code: "stationary_glyph_order_normalized", pageIndex: i, severity: "warning" });
+        }
+        if (!row.text_equal) {
+          const spatial = compareSourceGeometry(s, o, pageEdits, { expectedPageText });
+          const counts = evidence => evidence && ({
+            total: evidence.total, mapped: evidence.mapped.length,
+            generatedWhitespace: evidence.generatedWhitespace.length,
+            boundaryWhitespace: evidence.boundaryWhitespace.length,
+            normalizedDiscretionary: evidence.normalizedDiscretionary.length
+          });
+          row.spatial_conservation = { available: spatial.ok, match: spatial.match === true,
+            ...(spatial.ok ? { source: counts(spatial.sourceEvidence), output: counts(spatial.outputEvidence),
+              expected: digest(spatial.expected, options.includeText), actual: digest(spatial.actual, options.includeText) }
+              : { reason: spatial.reason }) };
+          if (spatial.ok && spatial.match) {
+            row.text_equal = true;
+            warnings.push({ code: "spatial_text_order_normalized", pageIndex: i, severity: "warning" });
+          }
         }
         row.expected_text = digest(exp.text, options.includeText);
         if (!row.text_equal) failures.push({ code: "edited_page_text_or_order_mismatch", pageIndex: i });
