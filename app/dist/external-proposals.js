@@ -29,7 +29,7 @@
       const b=clone(batch);batches.push(b);
       for(const raw of b.items){
         const item=clone(raw),ref={batchId:b.id,itemId:item.id};
-        const key=x=>JSON.stringify([x.kind,x.before,x.after,x.quote,x.segmentId,x.pageIndex,x.anchor,x.rationale,x.evidence,x.references,x.attackTypes,x.uncertainty]);
+        const key=x=>JSON.stringify([x.kind,x.before,x.after,x.quote,x.segmentId,x.pageIndex,x.anchor,x.rationale,x.evidence,x.references,x.attackTypes,x.uncertainty,x.findingType,x.severity,x.confidence,x.locationLabel,x.reportNumber]);
         const duplicate=items.find(x=>!x.parentIds&&key(x)===key(item));
         if(duplicate){if(!duplicate.sourceRefs.some(r=>r.batchId===ref.batchId&&r.itemId===ref.itemId))duplicate.sourceRefs.push(ref);continue;}
         item.id='p'+next++;item.sourceRefs=[ref];item.enabled=false;

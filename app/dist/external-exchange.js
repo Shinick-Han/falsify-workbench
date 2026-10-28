@@ -16,11 +16,21 @@
   }
   function locate(item,segments,needle){
     const q=normalize(needle).value.trim();if(!q)return;
+    const finder=globalThis.FalsifyPaperAnchors?.find;
+    if(typeof finder==='function'){
+      const found=finder({quote:needle,segments,pageIndex:item.pageIndex,segmentId:item.segmentId});
+      if(found&&Array.isArray(found.matches)){
+        item.matches=found.matches;item.matchStatus=found.status;item.anchor=null;
+        if(found.status==='matched'&&found.matches.length===1){const m=found.matches[0],s=segments.find(x=>x.id===m.segmentId);if(s&&Number.isInteger(m.start)&&Number.isInteger(m.end)){item.segmentId=m.segmentId;item.pageIndex=m.pageIndex;item.anchor={start:m.start,end:m.end};if(item.kind==='change')item.before=s.text.slice(m.start,m.end);else item.quote=s.text.slice(m.start,m.end);}}
+        return;
+      }
+    }
     let scope=segments;
     if(item.segmentId)scope=scope.filter(s=>s.id===item.segmentId);
     if(item.pageIndex!=null)scope=scope.filter((s,i)=>(s.pageIndex??red.pageIndexFromLabel(s.label)??segments.indexOf(s))===item.pageIndex);
     const matches=[];
     for(const s of scope){const n=normalize(s.text);let at=0;while((at=n.value.indexOf(q,at))!==-1){const start=n.starts[at],end=n.ends[at+q.length-1],pageIndex=s.pageIndex??red.pageIndexFromLabel(s.label)??segments.indexOf(s);matches.push({segmentId:s.id,pageIndex,start,end});at++;if(matches.length>100)break;}}
+    if(!matches.length&&(item.pageIndex!=null||item.segmentId)){const hintPage=item.pageIndex,hintSegment=item.segmentId;item.pageIndex=null;item.segmentId=null;locate(item,segments,needle);if(item.matchStatus==='missing'){item.pageIndex=hintPage;item.segmentId=hintSegment;}return;}
     item.matches=matches;item.matchStatus=matches.length===1?'matched':matches.length?'ambiguous':'missing';
     if(matches.length===1){const m=matches[0],s=segments.find(x=>x.id===m.segmentId);item.segmentId=m.segmentId;item.pageIndex=m.pageIndex;item.anchor={start:m.start,end:m.end};if(item.kind==='change')item.before=s.text.slice(m.start,m.end);else item.quote=s.text.slice(m.start,m.end);}
     else item.anchor=null;
