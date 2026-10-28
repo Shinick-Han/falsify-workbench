@@ -600,7 +600,7 @@ function sameStyle(a, b) {
 
 const sameStyles = (a, b) => a.length === b.length && a.every((c, k) => sameStyle(c.style ?? null, b[k].style ?? null));
 
-function readGlyphs(engine, pageIndex) {
+export function readGlyphs(engine, pageIndex) {
   ensurePage(engine, pageIndex);
   const M = engine.M;
   const tp = M._FPDFText_LoadPage(engine.page);
