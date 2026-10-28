@@ -42,7 +42,7 @@
     function update(id,fields){
       const item=find(id),allowed=['after','rationale','evidence','references','attackTypes','uncertainty'];
       for(const k of Object.keys(fields||{}))if(!allowed.includes(k))throw Error('Unsupported field');
-      const updated={...item,...clone(fields)};if(updated.enabled&&role==='red'&&(typeof updated.after!=='string'||updated.after===updated.before||(updated.after!==''&&!updated.after.trim())))throw Error('Invalid after');
+      const updated={...item,...clone(fields)};if(updated.enabled&&role==='red'&&(typeof updated.after!=='string'||(updated.after!==''&&!updated.after.trim())))throw Error('Invalid after');
       Object.assign(item,updated);return emit();
     }
     function bind(id,binding){
@@ -59,11 +59,11 @@
     }
     function restore(value){
       const s=clone(value);if(s.schema!==SCHEMA||s.fileHash!==fileHash||s.role!==role||!Array.isArray(s.batches)||!Array.isArray(s.items))throw Error('Snapshot does not match document');
-      const seen=new Set();for(const item of s.items){if(typeof item.id!=='string'||seen.has(item.id)||!Array.isArray(item.sourceRefs))throw Error('Invalid proposal');seen.add(item.id);if(item.matchStatus==='matched'&&!valid(item))throw Error('Invalid source range');if(item.enabled&&role==='red'&&(item.matchStatus!=='matched'||!valid(item)||typeof item.after!=='string'||item.after===item.before||(item.after!==''&&!item.after.trim())))throw Error('Invalid selected proposal');}
+      const seen=new Set();for(const item of s.items){if(typeof item.id!=='string'||seen.has(item.id)||!Array.isArray(item.sourceRefs))throw Error('Invalid proposal');seen.add(item.id);if(item.matchStatus==='matched'&&!valid(item))throw Error('Invalid source range');if(item.enabled&&role==='red'&&(item.matchStatus!=='matched'||!valid(item)||typeof item.after!=='string'||(item.after!==''&&!item.after.trim())))throw Error('Invalid selected proposal');}
       const active=s.items.filter(x=>x.enabled&&role==='red');for(let i=0;i<active.length;i++)for(let j=i+1;j<active.length;j++)if(overlap(active[i],active[j]))throw Error('Overlapping selections');
       batches=s.batches;items=s.items;next=Math.max(0,...items.map(x=>/^p\d+$/.test(x.id)?Number(x.id.slice(1)):0))+1;return emit();
     }
-    function edits(){return clone(items.filter(x=>role==='red'&&x.enabled&&x.kind==='change'&&x.matchStatus==='matched'&&valid(x)).map(x=>({id:x.id,enabled:true,before:x.before,after:x.after,segmentId:x.segmentId,pageIndex:x.pageIndex,anchor:x.anchor,origin:x.origin||'external-ai-import',sourceRefs:x.sourceRefs})));}
+    function edits(){return clone(items.filter(x=>role==='red'&&x.enabled&&x.kind==='change'&&x.matchStatus==='matched'&&valid(x)&&x.after!==x.before).map(x=>({id:x.id,enabled:true,before:x.before,after:x.after,segmentId:x.segmentId,pageIndex:x.pageIndex,anchor:x.anchor,origin:x.origin||'external-ai-import',sourceRefs:x.sourceRefs})));}
     return {append,snapshot:snap,setEnabled,update,bind,combine,restore,edits,subscribe(fn){listeners.add(fn);return()=>listeners.delete(fn);}};
   }
   return {create};

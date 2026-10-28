@@ -167,4 +167,66 @@ test('opted-in draft restores the additive collection',async()=>{
   v.get('paper-draft-opt').checked=true;v.get('paper-draft-save').click();await until(()=>v.storage.getItem('falsify.paper-draft.v1.'+hash),'draft saved');const saved=JSON.parse(v.storage.getItem('falsify.paper-draft.v1.'+hash));assert.equal(saved.extras.external.batches[0].raw,'answer');
   v.get('paper-draft-restore').click();await until(()=>/다시 넣었습니다/.test(v.get('paper-draft-status').textContent),'draft restored');assert.equal(v.ws.getExternalResponses().items.length,1);
 });
+function clickParagraph(v,x=100,y=100){
+  const page=v.get('paper-before-stage').children.find(e=>e.className==='paper-page');
+  page.getBoundingClientRect=()=>({left:20,top:30,width:612,height:792,right:632,bottom:822});
+  const event=new Event('click');Object.assign(event,{clientX:x+20,clientY:y+30,detail:1});
+  v.get('paper-before-stage').dispatchEvent(event);
+}
+function paragraphMock(text='A full paragraph.\nSecond line.',extra={}){
+  return {...extra,inspectPage:extra.inspectPage|| (async({file,pageIndex})=>({fileHash:sha(Buffer.from(await file.arrayBuffer())),pageIndex,width:612,height:792,rotation:0,paragraphs:[{id:'p0',text,bbox:[72,80,540,140]}]}))};
+}
+function tableMock(extra={}){
+  return {inspectPage:async args=>({fileHash:args.fileHash,revision:args.revision,pageIndex:args.pageIndex,width:612,height:792,truncated:false,cells:[{
+    row:12,col:1,cellBbox:[160,360,280,390],alias:'table:'+args.pageIndex+':source-cell-last',selection:{status:'ready',sourceSha256:args.fileHash,revision:args.revision,pageIndex:args.pageIndex,before:'10',anchor:{bbox:[170,370,180,380]}}}]}),...extra};
+}
+const tableButtons=v=>v.get('paper-before-stage').querySelectorAll('button').filter(n=>n.className==='paper-table-cell');
+async function mixedFixture(v){
+  v.file(pdfFile(pdfBytes('MARKER-A')));await until(()=>/문단을 클릭/.test(v.get('paper-before-status').textContent),'mixed first body');clickParagraph(v);v.get('paper-inline-after').value='Expanded source body paragraph.';v.get('paper-inline-apply').click();
+  v.get('paper-page-next').click();await until(()=>/^2.*문단을 클릭/.test(v.get('paper-before-status').textContent),'mixed second page');v.get('paper-mode-table').click();await until(()=>tableButtons(v).length,'mixed table cells');tableButtons(v)[0].click();v.get('paper-inline-after').value='11';v.get('paper-inline-apply').click();
+}
+const pipelineResult=(bytes,inputHash,outputCount=2,map=[0,1].map(i=>({sourcePageIndex:i,outputPageIndex:i,continuationPageIndices:[]})),status='applied')=>({file:pdfFile(bytes),sha256:sha(bytes),pageMap:map,verification:{sourceSha256:inputHash,outputSha256:sha(bytes),status,pageCount:{source:2,output:outputCount},edits:[],checks:[]}});
+test('mixed UI: actual pipeline receives full original edit list and stage hash chain, remaps table fit after inserted pages',async()=>{
+  const {prepare}=await import(require('node:url').pathToFileURL(path.resolve(__dirname,'../src/pdf-edit-pipeline.mjs')).href),calls=[],fitCalls=[],a=pdfBytes('TABLE-A'),b=pdfBytes('MARKER-GEN'),finalMap=[{sourcePageIndex:0,outputPageIndex:0,continuationPageIndices:[1]},{sourcePageIndex:1,outputPageIndex:2,continuationPageIndices:[]}];
+  const v=mount({edits:require('../dist/paper-edits.js'),pipeline:{prepare:async(req,engines)=>{calls.push({kind:'pipeline',request:req});return prepare(req,engines);}},exporter:{prepare:async req=>{calls.push({kind:'A',request:req});assert.equal(req.edits.length,1);assert.ok(req.edits[0].segmentId.startsWith('table:'));assert.equal(req.edits[0].anchor.occurrence,undefined);return pipelineResult(a,req.fileHash);}},paragraphPdf:paragraphMock('Source body paragraph.',{prepare:async req=>{calls.push({kind:'B',request:req});assert.equal(req.fileHash,sha(a));assert.equal(sha(req.file),sha(a));assert.equal(req.edits.length,1);assert.ok(req.edits[0].segmentId.startsWith('paragraph:'));return pipelineResult(b,req.fileHash,3,finalMap);}}),tablePdf:tableMock({checkFit:async req=>{fitCalls.push(req);return {results:[{id:req.cells[0].id,status:'inside'}]};}})});
+  await mixedFixture(v);const original=structuredClone(v.ws.getEditSnapshot().edits);v.log.setPages(3);v.get('paper-generate').click();await until(()=>v.ws.getOutput(),'mixed UI actual output');
+  assert.deepEqual(calls.map(c=>c.kind),['pipeline','A','B']);assert.equal(calls[0].request.fileHash,sha(pdfBytes('MARKER-A')));assert.equal(calls[0].request.edits.length,2);assert.equal(calls[0].request.edits.find(e=>e.segmentId.startsWith('table:')).anchor.occurrence,0);assert.deepEqual(v.ws.getEditSnapshot().edits,original);
+  const out=v.ws.getOutput();assert.equal(out.originalSourceSha256,sha(pdfBytes('MARKER-A')));assert.equal(out.sha256,sha(b));assert.deepEqual(out.verification.stages.map(s=>[s.inputSha256,s.outputSha256]),[[sha(pdfBytes('MARKER-A')),sha(a)],[sha(a),sha(b)]]);assert.equal(out.verification.independent,false);assert.equal(out.verification.layoutVerified,false);assert.equal(fitCalls[0].cells[0].pageIndex,2);assert.equal(fitCalls[0].pageIndex,2);assert.deepEqual(out.pageMap,finalMap);
+});
+
+test('direct editor owns typing and caret events, while source selection and IME remain safe',async()=>{
+  const v=mount({paragraphPdf:paragraphMock('A full paragraph.')});v.file(pdfFile(pdfBytes('MARKER-A')));
+  await until(()=>/문단을 클릭/.test(v.get('paper-before-status').textContent),'paragraph ready');clickParagraph(v);
+  const editor=v.document.activeElement,stage=v.get('paper-before-stage');
+  editor.value='First';editor.dispatchEvent(new Event('input'));
+  for(const type of ['keyup','pointerup','mouseup']){
+    const e=new Event(type);Object.defineProperty(e,'target',{value:editor});stage.dispatchEvent(e);
+    assert.equal(editor.parentElement!==null,true,type+' keeps editor open');assert.equal(v.edits.added.length,0);
+  }
+  // A selection outside the PDF text layer must not commit an active editor either.
+  const outside=v.document.createElement('span');
+  v.document.getSelection=()=>({isCollapsed:false,rangeCount:1,anchorNode:outside,getRangeAt:()=>({commonAncestorContainer:outside,startContainer:outside})});
+  stage.dispatchEvent(new Event('keyup'));assert.ok(editor.parentElement);assert.equal(v.edits.added.length,0);
+  editor.dispatchEvent(new Event('compositionstart'));
+  assert.equal(keydown(editor,{key:'Escape',isComposing:true}).defaultPrevented,false);
+  assert.equal(keydown(stage,{key:'Escape',isComposing:true}).defaultPrevented,false);
+  keydown(stage,{key:'ArrowRight',isComposing:true});v.get('paper-page-next').click();editor.dispatchEvent(new Event('blur'));
+  v.get('paper-inline-apply').click();v.get('paper-inline-cancel').click();
+  assert.ok(editor.parentElement);assert.equal(v.edits.added.length,0);assert.equal(v.get('paper-page-label').textContent,'1 / 2쪽');
+  editor.dispatchEvent(new Event('compositionend'));
+  editor.value='First second';editor.dispatchEvent(new Event('input'));
+  const pageEl=editor.parentElement,textEl=pageEl.children.find(c=>String(c.className).includes('textLayer')),span=textEl.querySelectorAll('span')[0];
+  v.document.getSelection=()=>({isCollapsed:false,rangeCount:1,anchorNode:span,getRangeAt:()=>({commonAncestorContainer:textEl,intersectsNode:n=>n===span})});
+  stage.dispatchEvent(new Event('keyup'));assert.equal(v.edits.added.length,1);assert.equal(v.edits.added[0].after,'First second');assert.equal(editor.parentElement,null);
+  stage.dispatchEvent(new Event('keyup'));assert.equal(v.document.activeElement.tagName,'textarea','source Shift-arrow selection opens editor');
+  keydown(v.document.activeElement,{key:'Escape'});assert.equal(v.document.activeElement,stage);
+});
+
+
+test('proposal textarea retains node and captures unfinished IME input',async()=>{
+  const calls=[],bytes=pdfBytes('MARKER-GEN'),v=mount({exporter:{prepare:async req=>{calls.push(req);return {file:pdfFile(bytes,'out.pdf'),sha256:sha(bytes)};}}}),file=pdfFile(pdfBytes('MARKER-A'));v.file(file);await until(()=>v.ws.getSource()?.fileHash,'source');
+  v.document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file,result:{segments:[{id:'s0',label:'PDF p. 1',text:'Alpha Alpha'}]}}}));const hash=v.ws.getSource().fileHash;
+  v.ws.acceptExternalResponse({schema:'falsify.external-batch.v1',id:'a',role:'red',fileHash:hash,raw:'raw',items:[{id:'x',kind:'change',before:'Alpha',after:'Beta',segmentId:'s0',pageIndex:0,matchStatus:'matched',anchor:{start:0,end:5}}]});
+  let row=v.get('paper-proposal-list').children[0],c=row.children[0].children[0];c.checked=true;c.dispatchEvent(new Event('change'));row=v.get('paper-proposal-list').children[0];const editor=row.children[1];editor.focus();editor.dispatchEvent(new Event('compositionstart'));editor.value='한글';editor.dispatchEvent(new Event('input'));v.get('paper-current-download').click();await until(()=>v.downloads.length,'IME captured');assert.equal(calls[0].edits[0].after,'한글');assert.equal(v.get('paper-proposal-list').children[0].children[1],editor);assert.equal(v.document.activeElement,editor);editor.dispatchEvent(new Event('compositionend'));
+});
 (async()=>{let passed=0;for(const [name,fn] of tests){try{await fn();passed++;console.log('PASS '+name);}catch(e){console.error('FAIL '+name,e);process.exitCode=1;}}console.log(JSON.stringify({passed,total:tests.length}));})();
