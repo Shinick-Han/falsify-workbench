@@ -11,6 +11,7 @@ import { PAGINATION_CAPABILITY, PAGINATION_LIMITS, paginateOverflow } from "./pa
 import { compactDocumentFlow } from "./document-flow.mjs";
 import { isolateColumns } from "../paragraph-column-isolation.mjs";
 import { repairInlineMarkers } from "../paragraph-inline-markers.mjs";
+import { transportParagraphLinks } from "../paragraph-link-transport.mjs";
 import {
   LineRetentionError,
   canCommitLineLocal,
@@ -700,6 +701,11 @@ export async function editPdf(request, options = {}) {
   report.inlineMarkerRepairs = markerResult.repairs;
   report.warnings.push(...markerResult.warnings);
 
+  const paragraphLinks = await transportParagraphLinks({engineFactory, sourceBytes, outputBytes: pdf, edits, sourcePageMap, flowGroups, annotationAdapter: options.annotationAdapter});
+  pdf = paragraphLinks.pdf;
+  report.paragraphLinkMoves = paragraphLinks.moves;
+  report.paragraphLinkFailures = paragraphLinks.failures;
+
   // Same-engine self-check on the final bytes, including marker repairs.
   const qaCapture = captureConsole(!!options.includeEngineLog);
   let check;
@@ -712,6 +718,7 @@ export async function editPdf(request, options = {}) {
   } finally {
     report.selfCheckLog = qaCapture.restore();
   }
+  if (paragraphLinks.failures.length) check = {...check, ok: false, failures: [...(check?.failures ?? []), ...paragraphLinks.failures]};
   report.selfCheck = { status: check?.ok === true ? "passed" : "failed", ...check };
   report.pagination.flow = (check?.pages ?? [])
     .filter((row) => row.continuationPageIndices?.length)
