@@ -29,6 +29,26 @@ test('continuation plans one column and preserves disjoint paragraph and object'
   assert.deepEqual(new Set(plan.lines.flatMap(l=>l.items.map(i=>i.h))),new Set([1,2]));
 });
 
+test('ordinary one-column continuation leaves whole-page compaction eligible', () => {
+  const {engine,ctx,grown}=fixture();
+  ctx.paras=ctx.paras.slice(0,2);
+  engine.M._FPDFPage_CountObjects=()=>2;
+  const plan=buildFlowPlan(engine,ctx,grown,{floor:65,maxNewPages:3});
+  assert.equal(plan.ok,true);
+  assert.ok(plan.pages.length > 1);
+  assert.equal(plan.flowColumn,undefined);
+});
+
+test('a disjoint body-band object alone retains the selected-column guard', () => {
+  const {engine,ctx,grown}=fixture({x:0,y:70,w:80,h:10});
+  ctx.paras=ctx.paras.slice(0,2);
+  engine.M._FPDFPage_CountObjects=()=>3;
+  engine.M._FPDFPage_GetObject=(_,i)=>[1,2,5][i];
+  const plan=buildFlowPlan(engine,ctx,grown,{floor:65,maxNewPages:3});
+  assert.equal(plan.ok,true);
+  assert.deepEqual(plan.flowColumn,{x0:110,x1:190});
+});
+
 test('a figure crossing the flow column is rejected', () => {
   const {engine,ctx,grown}=fixture({x:0,y:60,w:190,h:10});
   assert.equal(buildFlowPlan(engine,ctx,grown,{floor:65,maxNewPages:3}).code,'pagination_unsupported_foreign_object_in_flow');

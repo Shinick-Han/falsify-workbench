@@ -268,13 +268,23 @@ export function buildFlowPlan(engine, ctx, grown, { floor, maxNewPages }) {
       if (b && b.top - b.bottom > EPS) bodyTop = Math.max(bodyTop, b.top);
     }
   }
+  // A column bound is needed only when body-band content remains beside the
+  // selected flow. Ordinary one-column continuations must remain eligible for
+  // whole-page compaction, even though their flow has measurable x bounds.
+  const hasFixedColumn = objects.some((h) => {
+    const b = bounds(h);
+    if (!b) return false;
+    const cy = (b.top + b.bottom) / 2;
+    return cy >= floor - EPS && cy <= bodyTop + EPS &&
+      (b.x + b.w < flowColumn.x0 - 0.5 || b.x > flowColumn.x1 + 0.5);
+  });
   const virtual = lines.map((l) => ({ top: l.top - l.shift, bottom: l.bottom - l.shift }));
   const split = planFlow(virtual, { bodyTop, floor, maxNewPages });
   if (!split.ok) return err(split.code, { line: split.line, maxNewPages: split.maxNewPages });
   // Paragraph boxes use font metrics; bodyTop is measured glyph ink. The
   // report's flow band must not begin above the measured body band merely
   // because an ascender metric extends farther than its actual glyphs.
-  return { ok: true, lines, pages: split.pages, bodyTop, flowTop: Math.min(flowTop, bodyTop), flowColumn, floor, orphans, objects };
+  return { ok: true, lines, pages: split.pages, bodyTop, flowTop: Math.min(flowTop, bodyTop), ...(hasFixedColumn ? { flowColumn } : {}), floor, orphans, objects };
 }
 
 const coded = (code) => Object.assign(new Error(code), { code });
