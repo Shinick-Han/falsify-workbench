@@ -27,6 +27,7 @@ function numericArray(c,obj,multiple,minimum=multiple){
   return out;
 }
 function rectangle(c,obj){const r=numericArray(c,obj,4);if(r.length!==4||r[0]>=r[2]||r[1]>=r[3])fail('annotation-geometry-invalid');return r;}
+function annotationRectangle(c,obj){const r=numericArray(c,obj,4);if(r.length!==4||r[0]===r[2]||r[1]===r[3])fail('annotation-geometry-invalid');return [Math.min(r[0],r[2]),Math.min(r[1],r[3]),Math.max(r[0],r[2]),Math.max(r[1],r[3])];}
 function geometry(c,page){
   const media=rectangle(c,c.keep(page.getInheritable('MediaBox'))),crop=c.keep(page.getInheritable('CropBox')),rotate=c.keep(page.getInheritable('Rotate')),unit=c.get(page,'UserUnit');
   if((!rotate.isNull()&&(!rotate.isNumber()||rotate.asNumber()%360!==0))||media[0]!==0||media[1]!==0||(!crop.isNull()&&!numbers(media,rectangle(c,crop)))||(!unit.isNull()&&unit.asNumber()!==1))fail('annotation-page-geometry-unsupported');
@@ -165,7 +166,7 @@ export async function inspect({mupdf,sourceBytes,sourceSha256}={}){
       try{
         if(record.actionOwnershipUnsafe)fail('annotation-action-root-unsupported');
         const subtype=c.get(annotation,'Subtype').asName();if(subtype!=='Link'){descriptor.kind='unsupported';fail('annotation-subtype-unsupported');}
-        const media=geometry(c,pages[record.sourcePageIndex]);record.media=media;descriptor.rect=rectangle(c,c.get(annotation,'Rect'));if(!contains(media,descriptor.rect))fail('annotation-geometry-invalid');
+        const media=geometry(c,pages[record.sourcePageIndex]);record.media=media;descriptor.rect=annotationRectangle(c,c.get(annotation,'Rect'));if(!contains(media,descriptor.rect))fail('annotation-geometry-invalid');
         const quads=c.get(annotation,'QuadPoints');if(!quads.isNull()){descriptor.quadPoints=numericArray(c,quads,8);for(let i=0;i<descriptor.quadPoints.length;i+=2)if(!contains(descriptor.rect,[descriptor.quadPoints[i],descriptor.quadPoints[i+1],descriptor.quadPoints[i],descriptor.quadPoints[i+1]]))fail('annotation-geometry-invalid');}
         const owner=c.get(annotation,'P');record.hadP=!owner.isNull();if(record.hadP&&(!owner.isIndirect()||owner.asIndirect()!==pages[record.sourcePageIndex].asIndirect()))fail('annotation-page-owner-invalid');
         if(record.shared)fail('annotation-shared-object');
@@ -177,7 +178,7 @@ export async function inspect({mupdf,sourceBytes,sourceSha256}={}){
     }
     // Unsupported annotation geometry is still retained privately for no-op validation.
     for(const record of snapshot.records){
-      if(!record.descriptor.rect)try{record.descriptor.rect=rectangle(c,c.get(record.object,'Rect'));}catch{}
+      if(!record.descriptor.rect)try{record.descriptor.rect=annotationRectangle(c,c.get(record.object,'Rect'));}catch{}
       if(record.hadP===undefined)record.hadP=!c.get(record.object,'P').isNull();
     }
     const model=frozen({schema:'falsify.flow-annotations.v1',sourceSha256:sha,pageCount:pages.length,actionOwnershipUnsupported:actionOwnershipUnsupported||snapshot.records.some(r=>r.actionOwnershipUnsafe),warnings:sourceWarnings(snapshot.records),annotations});
@@ -265,7 +266,7 @@ async function verifyDocument(ctx,expected,after=false){
       if(!move)continue;
       if(!d.rect)fail('annotation-geometry-invalid');
       const rect=d.rect.map((v,k)=>v+(move?(k%2?move.dy:move.dx):0));
-      if(!numbers(rect,rectangle(c,c.get(out.object,'Rect'))))fail('annotation-output-geometry-mismatch');
+      if(!numbers(rect,annotationRectangle(c,c.get(out.object,'Rect'))))fail('annotation-output-geometry-mismatch');
       if(move&&!contains(geometry(c,pages[p]),rect))fail('annotation-output-geometry-mismatch');
       const quads=c.get(out.object,'QuadPoints');
       if(d.quadPoints){const expectedQuads=d.quadPoints.map((v,k)=>v+(move?(k%2?move.dy:move.dx):0));if(!numbers(expectedQuads,numericArray(c,quads,8)))fail('annotation-output-geometry-mismatch');}

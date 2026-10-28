@@ -14,7 +14,7 @@ function source({shared=false,tagged=false,badRect=false,namedTarget=2,unknownAc
     const stream=doc.addStream(new Uint8Array([0,1,255,23,48]),{PrivateStreamKey:doc.newString('unknown-stream-value')});
     const next={S:'URI',URI:doc.newString('https://other.invalid/never-open'),PrivateUnknown:{Rect:[1,2,3,4],Nested:doc.newString('private-next-value')}};
     const action={S:unknownAction?'JavaScript':'URI',URI:doc.newString('https://example.invalid/never-open'),PrivateUnknown:{Nested:[17,doc.newString('retained-action-data'),pages[2]],Blob:stream},Next:next};
-    const firstObj={Type:'Annot',Subtype:'Link',Rect:badRect?[30,265,110,250]:[30,250,110,265],P:pages[0],QuadPoints:[30,265,110,265,30,250,110,250],Contents:doc.newString('Repeated label'),A:action,PrivateUnknown:{Keep:true,Other:doc.newString('do-not-report')}};
+    const firstObj={Type:'Annot',Subtype:'Link',Rect:badRect?[30,250,30,265]:[30,250,110,265],P:pages[0],QuadPoints:[30,265,110,265,30,250,110,250],Contents:doc.newString('Repeated label'),A:action,PrivateUnknown:{Keep:true,Other:doc.newString('do-not-report')}};
     if(tagged)firstObj.StructParent=4;
     const first=direct?doc.newDictionary():doc.addObject(firstObj);if(direct)for(const [k,v]of Object.entries(firstObj))first.put(k,v);
     const second=doc.addObject({Type:'Annot',Subtype:'Link',Rect:[30,200,110,215],P:pages[0],Contents:doc.newString('Repeated label'),Dest:doc.newString('namedTarget'),PrivateUnknown:stream});
@@ -199,4 +199,23 @@ test('direct FitR reaches an inserted final page and rejects staged changes and 
   const output=await api.transport(request);assert.equal((await api.validate({...request,outputBytes:output.pdf})).ok,true);
   const bad=mutate(staged,d=>d.findPage(0).get('Annots',1,'Dest').put(2,11));await assert.rejects(()=>api.transport({...request,outputBytes:bad}));
   const other=source(),otherModel=await inspect(other),xyz=otherModel.annotations[1].internalDestinations[0];await assert.rejects(()=>api.transport(args(otherModel,other,{moves:[],reflowedSourcePages:[2],destinationMoves:[{id:xyz.id,sourcePageIndex:2,outputPageIndex:1,dx:0,dy:0}]})),{code:'annotation-destination-move-invalid'});
+});
+
+
+test('opposite-corner annotation rectangles normalize for moves while stationary raw dictionaries stay bound',async()=>{
+  for(const raw of [[110,250,30,265],[30,265,110,250],[110,265,30,250]]){
+    const src=mutate(source(),d=>d.findPage(0).get('Annots',0).put('Rect',raw)),model=await inspect(src);
+    assert.equal(model.annotations[0].eligible,true);assert.deepEqual(model.annotations[0].rect,[30,250,110,265]);
+    const stationary=args(model,src,{moves:[],reflowedSourcePages:[]}),unchanged=await api.transport(stationary);
+    assert.equal((await api.validate({...stationary,outputBytes:unchanged.pdf})).ok,true);
+    const doc=new mupdf.PDFDocument(unchanged.pdf);try{assert.deepEqual(values(doc.findPage(0).get('Annots',0,'Rect')),raw);}finally{doc.destroy();}
+    for(const change of [d=>d.findPage(0).get('Annots',0).put('Rect',[30,250,110,265]),d=>d.findPage(0).get('Annots',0).put('Contents',d.newString('changed'))]){
+      const altered=mutate(unchanged.pdf,change);assert.equal((await api.validate({...stationary,outputBytes:altered})).ok,false);await assert.rejects(()=>api.transport({...stationary,outputBytes:altered}));
+    }
+    const request=args(model,src),out=await api.transport(request);assert.equal((await api.validate({...request,outputBytes:out.pdf})).ok,true);
+    const moved=new mupdf.PDFDocument(out.pdf);try{const link=moved.findPage(1).get('Annots',1);assert.deepEqual(values(link.get('Rect')),[50,170,130,185]);assert.equal(link.get('Contents').asString(),'Repeated label');assert.equal(link.get('A','URI').asString(),'https://example.invalid/never-open');}finally{moved.destroy();}
+    const reversedOutput=mutate(out.pdf,d=>d.findPage(1).get('Annots',1).put('Rect',[130,185,50,170]));assert.equal((await api.validate({...request,outputBytes:reversedOutput})).ok,true);
+  }
+  for(const raw of [[30,250,30,265],[30,250,110,250]]){const src=mutate(source(),d=>d.findPage(0).get('Annots',0).put('Rect',raw)),model=await inspect(src);assert.equal(model.annotations[0].eligible,false);assert.equal(model.annotations[0].reason,'annotation-geometry-invalid');}
+  const src=mutate(source(),d=>d.findPage(0).put('MediaBox',[300,0,0,400])),model=await inspect(src);assert.equal(model.annotations[0].eligible,false);
 });
