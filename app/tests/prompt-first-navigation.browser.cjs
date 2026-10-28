@@ -22,4 +22,3 @@ const assert=require('node:assert/strict');
  await page.locator('.rail [data-view="results"]').click();await page.locator('.brand').click();await page.waitForFunction(()=>document.querySelector('#local-bridge').closest('.visual-advanced-execution')?.id==='red-advanced-tools');
  assert.deepEqual(errors,[]);console.log('basic/advanced navigation and bridge checks passed');
  }finally{await browser.close();}})().catch(e=>{console.error(e);process.exitCode=1;});
-
