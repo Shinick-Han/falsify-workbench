@@ -75,6 +75,15 @@ class RedTests(unittest.TestCase):
             def infer(self,*_):self.__class__.calls+=1;return {'status':'error','error_code':'synthetic_error'}
         with self.assertRaises(ValueError):run_review(request(),lambda _:None,threading.Event(),Error)
         self.assertEqual(Error.calls,1)
+    def test_mixed_types_deletion_and_optional_uncertainty(self):
+        c={**CANDIDATE, 'attackTypes':['contradiction','unsupported-inference'], 'after':''}
+        del c['level']; del c['uncertainty']
+        validate_candidates({'status':'ok','candidates':[c]}, request()['segments'])
+        data=request(); del data['level']; data['attackTypes']=['contradiction','unsupported-inference']
+        validate_request(data)
+        class Mixed(MockBackend):
+            def infer(self, prompt, schema): return {'status':'ok','response':{'status':'ok','candidates':[c]}}
+        self.assertEqual(run_review(data,lambda _:None,threading.Event(),Mixed)['candidates'][0]['after'],'')
     def test_office_export_fail_closed(self):
         with self.assertRaisesRegex(ValueError,'렌더러'):handle_export({'format':'DOCX'})
 
