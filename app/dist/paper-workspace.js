@@ -863,14 +863,15 @@
     }
     function adoptSegments(raw,matchSegments){
       if(!source)return;
-      if(Array.isArray(matchSegments))source.layoutSegments=published(matchSegments)||[];
+      const layoutSegments=Array.isArray(matchSegments)?published(matchSegments)||[]:source.layoutSegments||[];
       const paragraphs=(source.segments||[]).filter(s=>sourceAlias(s.id));
-      const layouts=coreSegments(source.layoutSegments||[]);
-      source.segments=coreSegments(raw).filter(s=>!paragraphs.some(p=>p.id===s.id)).concat(paragraphs).filter(s=>!layouts.some(p=>p.id===s.id)).concat(layouts);
+      const layouts=coreSegments(layoutSegments);
+      const nextSegments=coreSegments(raw).filter(s=>!paragraphs.some(p=>p.id===s.id)).concat(paragraphs).filter(s=>!layouts.some(p=>p.id===s.id)).concat(layouts);
       if(session&&typeof session.addSegments==='function'){
-        try{session.addSegments(coreSegments(source.segments));}
+        try{session.addSegments(coreSegments(nextSegments));}
         catch(e){setEditStatus('새 원문 구간을 연결하지 못했습니다. '+safeMessage(e),true);return;}
       }
+      source.layoutSegments=layoutSegments;source.segments=nextSegments;
       if(pendingResume){applyResume(pendingResume);if(source.fileHash)emit('falsify:paper-workspace-source',{fileHash:source.fileHash,name:source.name});paintProposals();return;}
       ensureSession(!(snapshot&&snapshot.edits&&snapshot.edits.length));
       if(source.fileHash)emit('falsify:paper-workspace-source',{fileHash:source.fileHash,name:source.name});

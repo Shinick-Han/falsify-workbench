@@ -243,10 +243,8 @@ test('reader: file input paints one original page before extraction, and the sec
   v.get('paper-before-stage').dispatchEvent(new Event('mouseup'));
   v.get('paper-inline-after').value='   ';v.get('paper-inline-apply').click();
   assert.match(v.get('paper-edit-status').textContent,/공백만/);assert.equal(v.ws.getEditSnapshot().edits[0].after,'');
-  v.document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file,result:{segments:[
-    {id:'s0',label:'PDF p. 1',text:'Unique claim stays.'},{id:'s1',label:'PDF p. 2',text:'Alpha shared'},{id:'s2',label:'PDF p. 2',text:'Alpha shared'}]}}}));
   v.ws.acceptProposals([
-    {segmentId:'s0',before:'Unique claim stays.',after:'Unique claim moves.',status:'matched'},
+    {segmentId:'s1',before:'Unique claim stays.',after:'Unique claim moves.',status:'matched'},
     {before:'Alpha shared',after:'Alpha changed',status:'matched'},
     {before:'missing words',after:'nope',status:'matched'}
   ],{origin:'external-ai-import',model:'gpt-sneaky'});
@@ -266,6 +264,24 @@ test('reader: file input paints one original page before extraction, and the sec
   const src=v.ws.getSource();const kept=src.segments[0].text;
   assert.throws(()=>{src.segments[0].text='changed';});
   assert.equal(v.ws.getSource().segments[0].text,kept);assert.equal(src.file,file);
+});
+
+test('reader: rejected source catalog replacement preserves edit session bindings',async()=>{
+  const v=mount({edits:require('../dist/paper-edits.js')}),file=pdfFile(pdfBytes('MARKER-A'));
+  v.file(file);await until(()=>v.canvas().length===1,'page painted');
+  const send=segments=>v.document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file,result:{segments}}}));
+  send([{id:'s0',label:'PDF p. 1',text:'Alpha Alpha'},{id:'s1',label:'PDF p. 1',text:'Unique claim stays.'}]);
+  const layer=v.get('paper-before-stage').children.find(e=>e.className==='paper-page').children.find(c=>String(c.className).includes('textLayer'));
+  const span=layer.querySelectorAll('span')[1];
+  v.document.getSelection=()=>({isCollapsed:false,rangeCount:1,anchorNode:span,getRangeAt:()=>({commonAncestorContainer:layer,intersectsNode:n=>n===span})});
+  v.get('paper-before-stage').dispatchEvent(new Event('mouseup'));v.get('paper-inline-after').value='Beta';v.get('paper-inline-apply').click();
+  assert.equal(v.ws.getEditSnapshot().edits.length,1);
+  send([{id:'s0',label:'PDF p. 1',text:'Unique claim stays.'}]);
+  assert.match(v.get('paper-edit-status').textContent,/새 원문 구간을 연결하지 못했습니다/);
+  assert.equal(v.ws.getSource().segments.find(s=>s.id==='s0').text,'Alpha Alpha');
+  v.ws.acceptProposals([{segmentId:'s1',before:'Unique claim stays.',after:'Unique claim moves.'}],{origin:'external-ai-import'});
+  v.get('paper-proposal-list').querySelectorAll('button')[0].click();
+  assert.equal(v.ws.getEditSnapshot().edits.length,2);
 });
 
 test('keyboard: arrows move pages except from a field, Escape returns to the stage, and Ctrl+Z undoes',async()=>{
