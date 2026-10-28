@@ -30,6 +30,11 @@ const sha=b=>crypto.createHash('sha256').update(b).digest('hex');
 async function read(name,buffer){const before=sha(buffer);try{const r=await FalsifyImport.extract(new File([buffer],name));assert.equal(sha(buffer),before,'input bytes unchanged');return {ok:true,...r};}catch(e){assert.equal(sha(buffer),before,'input bytes unchanged');return {ok:false,error:e.message};}}
 const marks=s=>[...s].filter(c=>c===MARK).length;
 (async()=>{
+  const run=(str,x,y,width=60)=>({str,transform:[1,0,0,1,x,y],width,height:10,hasEOL:true});
+  const mixed=[{type:'beginMarkedContent'},run('visible',10,100),{str:'',hasEOL:true},run('old body',10,80),run('new body',10,80),run('tail',10,60)];
+  const overlays=FalsifyImport.layoutAliases(mixed,0,600);
+  check('overlapping bodies stay separate alternatives',overlays.length===2&&overlays.some(s=>s.text==='visible\nold body\ntail')&&overlays.some(s=>s.text==='visible\nnew body\ntail'));
+  check('alias indices use original PDF.js item indices including non-text and empty items',JSON.stringify(overlays.map(s=>s.itemIndices))==='[[1,3,5],[1,4,5]]');
   // ToUnicode maps code 0x41 'A' to U+0000 and 0x42 'B' to U+0001: the shape of an unmapped TeX delimiter glyph.
   let r=await read('nul-glyph.pdf',pdf([[[72,720,'left ( A x B ) right']]],{toUnicode:[['41','0000'],['42','0001']]}));
   check('unmapped U+0000/U+0001 glyphs no longer reject the PDF',r.ok);

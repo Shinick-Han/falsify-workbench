@@ -13,4 +13,10 @@ assert.equal(find({quote:'same text',segments:duplicate,pageIndex:9,prefix:'befo
 assert.equal(find({quote:'same text',segments:duplicate,pageIndex:1}).matches[0].segmentId,'b');
 assert.equal(find({quote:'The result was 12 [2].',segments:[{id:'a',text:'The result was 13 [3].'}]}).status,'suggested');
 assert.equal(find({quote:'The result was not significant.',segments:[{id:'a',text:'The result was significant.'}]}).status,'suggested');
+const late=Array(1100).fill('The finding was marginally different.').join(' ');
+let ranked=find({quote:'The finding was statistically significant.',segments:[{id:'a',pageIndex:0,text:late},{id:'b',pageIndex:1,text:'The finding was statistically significanx.'}],pageIndex:0});
+assert.equal(ranked.status,'suggested');assert.equal(ranked.matches[0].segmentId,'b');
+const many=find({quote:'same text',segments:[{id:'a',text:Array(101).fill('same text').join(' ')}]});
+assert.equal(many.status,'ambiguous');assert.equal(many.matches.length,101);
+assert.equal(find({quote:'old body',segments:[{id:'layout:p1:page:overlay1',text:'visible old body tail'}]}).status,'suggested');
 console.log('paper anchors tests passed');

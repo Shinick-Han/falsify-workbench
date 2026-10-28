@@ -77,16 +77,31 @@ export function layoutAliases(items,pageIndex,pageWidth){
   const mid=pageWidth/2, left=runs.filter(r=>r.x<mid&&r.x+r.width<=mid+10),right=runs.filter(r=>r.x>=mid);
   const two=left.length>=3&&right.length>=3&&left.some(a=>right.some(b=>Math.abs(a.y-b.y)<Math.max(a.height,b.height)));
   const groups=two?[runs.filter(r=>r.x<mid),right]:[runs];
-  return groups.map((group,i)=>{
+  return groups.flatMap((group,i)=>{
     group.sort((a,b)=>b.y-a.y||a.x-b.x);
     const lines=[];
     for(const r of group){let line=lines.find(l=>Math.abs(l.y-r.y)<=Math.max(2,Math.min(l.height,r.height)*0.35));if(!line){line={y:r.y,height:r.height,runs:[]};lines.push(line);}line.runs.push(r);}
     lines.sort((a,b)=>b.y-a.y);
-    const ordered=lines.map(l=>l.runs.sort((a,b)=>a.x-b.x));
-    const text=ordered.map(line=>line.map(r=>r.text.trim()).join(' ')).join('\n').trim();
-    const itemIndices=ordered.flatMap(line=>line.map(r=>r.index));
-    return {id:'layout:p'+(pageIndex+1)+':'+(two?'column'+(i+1):'page'),label:'PDF p. '+(pageIndex+1)+(two?' · column '+(i+1):' · layout'),text,pageIndex,itemIndices};
-  }).filter(s=>s.text);
+    // Overlaid source runs are alternatives, never concatenate them into a synthetic
+    // sentence or silently choose one. Preserve each possible source mapping.
+    let variants=[[]];
+    for(const line of lines){
+      const clusters=[];
+      for(const r of line.runs.sort((a,b)=>a.x-b.x)){
+        const cluster=clusters.find(c=>c.some(v=>Math.min(v.x+v.width,r.x+r.width)-Math.max(v.x,r.x)>Math.min(v.width,r.width)*0.5));
+        if(cluster)cluster.push(r);else clusters.push([r]);
+      }
+      let choices=[[]];
+      for(const cluster of clusters){choices=choices.flatMap(choice=>cluster.map(r=>choice.concat(r)));if(choices.length*variants.length>16)return [];}
+      variants=variants.flatMap(variant=>choices.map(choice=>variant.concat([choice.sort((a,b)=>a.x-b.x)])));
+    }
+    return variants.map((ordered,variant)=>{
+      const text=ordered.map(line=>line.map(r=>r.text.trim()).join(' ')).join('\n').trim();
+      const itemIndices=ordered.flatMap(line=>line.map(r=>r.index));
+      const base='layout:p'+(pageIndex+1)+':'+(two?'column'+(i+1):'page');
+      return {id:base+(variants.length>1?':overlay'+(variant+1):''),label:'PDF p. '+(pageIndex+1)+(two?' · column '+(i+1):' · layout'),text,pageIndex,itemIndices};
+    }).filter(s=>s.text);
+  });
 }
 async function pdf(bytes,{signal,onProgress}){
   if(new TextDecoder().decode(bytes.subarray(0,1024)).indexOf('%PDF-')<0)fail('PDF 서명이 없습니다. 손상된 파일인지 확인하세요.');
