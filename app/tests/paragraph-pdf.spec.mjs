@@ -243,7 +243,7 @@ test('isolated Chromium worker performs inspect/prepare with real WASM and no up
     assert.deepEqual(errors,[]);assert.ok(hits.some(h=>h.url.includes('editcore.wasm?sha256=')));
     for(const hit of hits.filter(h=>/editcore\.(js|wasm)/.test(h.url))) {
       const hash=new URL(hit.url,origin).searchParams.get('sha256');
-      assert.equal(hash,hit.url.includes('editcore.wasm') ? 'cf9f0e9ec0a68cc5932795e87622b2809ecca5561482a23bc034de3d6410696d' : '6e6989a9994715951720e05355111aca7eab898e92b519ebea160167875bb3eb');
+      assert.equal(hash,hit.url.includes('editcore.wasm') ? '15212c22d100c7d262d6d9996117517dbe3a30e80d43569977df5b2cd7ff35c6' : '6e6989a9994715951720e05355111aca7eab898e92b519ebea160167875bb3eb');
     }
     const linked=linkedFlowFixture(),savedSource=linked.slice();
     const linkedResult=await page.evaluate(async({bytes,before,after})=>{

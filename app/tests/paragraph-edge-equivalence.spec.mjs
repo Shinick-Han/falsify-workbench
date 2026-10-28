@@ -27,3 +27,11 @@ test('coincident glyphs with different styles are ambiguous',()=>{
   const source=[glyph('A',1),glyph('A',1,{style:{...style,flags:1}})];
   assert.equal(edgeGlyphsEquivalent(source,structuredClone(source).reverse()),false);
 });
+test('unchanged duplicate paint entries preserve their original order and multiplicity',()=>{
+  const source=[glyph('A',1),glyph('A',1)];
+  assert.equal(edgeGlyphsEquivalent(source,structuredClone(source)),true);
+  assert.equal(edgeGlyphsEquivalent(source,source.slice(1)),false);
+  const layered=[glyph('A',1),glyph('A',1,{style:{...style,flags:1}})];
+  assert.equal(edgeGlyphsEquivalent(layered,structuredClone(layered)),true);
+  assert.equal(edgeGlyphsEquivalent(layered,structuredClone(layered).reverse()),false);
+});

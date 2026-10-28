@@ -1124,6 +1124,7 @@ export function alignEdgeGlyphs(source, output) {
 }
 
 export function edgeGlyphsEquivalent(source, output) {
+  if (source.length === output.length && source.every((c, i) => samePlace(c, output[i]) && sameStyle(c.style ?? null, output[i].style ?? null))) return true;
   const result = alignEdgeGlyphs(source, output);
   return !result.missing.length && !result.added.length && !result.restyled.length;
 }
