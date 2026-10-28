@@ -40,6 +40,10 @@ const marks=s=>[...s].filter(c=>c===MARK).length;
   r=await read('clean.pdf',pdf([[[72,720,'Plain caf\xe9 \x93quoted\x94 text.']],[[72,720,'Column one'],[320,720,'column two']]]));
   check('normal WinAnsi text unchanged and no glyph warning',r.ok&&r.segments[0].text==='Plain café “quoted” text.'&&!r.warnings.some(w=>w.includes('글리프')));
   check('multicolumn runs keep their word boundary (spacing is PDF.js-owned)',r.ok&&/^Column one\s+column two$/.test(r.segments[1].text));
+  r=await read('overlay.pdf',pdf([[[40,720,'Left opening'],[40,700,'Left ending.'],[320,720,'These results demonstrate'],[320,700,'an important effect'],[320,680,'old trailing words'],[40,400,'Figure caption'],[320,660,'sufficient to restore neural competency in all lines.']]]));
+  const visual=r.matchSegments.find(s=>s.id==='layout:p1:column2');
+  check('geometry order places appended overlay before caption',r.ok&&visual&&/These results demonstrate\s+an important effect\s+old trailing words\s+sufficient to restore neural competency in all lines\./.test(visual.text));
+  check('canonical content stream remains unchanged',r.ok&&r.segments[0].text.indexOf('Figure caption')<r.segments[0].text.indexOf('sufficient to restore'));
   r=await read('mapped-unicode.pdf',pdf([[[72,720,'ABC']]],{toUnicode:[['41','D55C'],['42','AE00'],['43','03B1']]}));
   check('non-control Unicode from ToUnicode preserved',r.ok&&r.text==='한글α'&&!r.warnings.some(w=>w.includes('글리프')));
   r=await read('mixed.pdf',pdf([[[72,720,'Page one A']],[]],{toUnicode:[['41','0000']]}));
@@ -56,6 +60,12 @@ const marks=s=>[...s].filter(c=>c===MARK).length;
     const report={sha256:hash,ok:r.ok,error:r.error,pages:r.segments?.length,chars:r.text?.length,marks:r.ok?r.segments.map((s,i)=>[i+1,marks(s.text)]).filter(([,n])=>n):null,
       contexts:r.ok?r.segments.flatMap((s,i)=>[...s.text.matchAll(new RegExp('.{0,24}'+MARK+'.{0,24}','g'))].map(m=>({page:i+1,text:m[0]}))):null,warnings:r.warnings,sha256After:sha(fs.readFileSync(paper))};
     console.log(JSON.stringify({realPaper:report},null,1));
+    if(path.basename(paper)==='Falsify_2차_문제집.pdf'){
+      const alias=r.matchSegments.find(s=>s.pageIndex===1&&/These\s+results demonstrate/.test(s.text));
+      const range=alias?.text.match(/These\s+results demonstrate[\s\S]*?sufficient to restore neural competency in all lines/);
+      check('real p2 visual quote reconstructed through appended tail',!!range);
+      if(range){const match=require('../dist/paper-anchors.js').find({quote:range[0].replace(/\s+/g,' '),segments:r.segments.map((s,i)=>({...s,id:'canonical:'+i,pageIndex:i})).concat(r.matchSegments),pageIndex:1});check('real p2 quote matches the visual alias',match.status==='matched'&&match.matches[0].segmentId===alias.id&&match.matches[0].pageIndex===1);}
+    }
     check('real paper extracts without NUL rejection',r.ok&&!r.text.includes('\0'));
     check('real paper bytes unchanged',report.sha256After===hash);
     // RCA for arXiv 2608.01205 (ReBRAC): CMEX10 has no ToUnicode; codes 0x10/0x11 on p.3 and 0x00/0x01 on p.4 are big delimiters.

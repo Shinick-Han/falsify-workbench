@@ -1,0 +1,10 @@
+const assert=require('node:assert/strict');
+const {find}=require('../dist/paper-anchors.js');
+const segments=[{id:'p1',pageIndex:0,text:'Repeated quote. Repeated quote. The ﬁnding is significant. A neuro-\nlogical result [12].'}, {id:'layout:p2:column1',pageIndex:1,text:'These results demonstrate a notable effect.\nsufficient to restore neural competency in all lines.'}];
+assert.equal(find({quote:'Repeated quote.',segments}).status,'ambiguous');
+assert.equal(find({quote:'finding is significant',segments,pageIndex:7}).matches[0].before,'ﬁnding is significant');
+assert.equal(find({quote:'neurological result [12]',segments}).matches[0].before,'neuro-\nlogical result [12]');
+assert.equal(find({quote:'These results demonstrate a notable effect. sufficient to restore neural competency in all lines.',segments}).matches[0].segmentId,'layout:p2:column1');
+const fuzzy=find({quote:'The finding is not significant.',segments});assert.equal(fuzzy.status,'suggested');assert.ok(fuzzy.matches[0].before.includes('significant'));
+assert.equal(find({quote:'entirely unrelated short passage',segments}).status,'missing');
+console.log('paper anchors tests passed');
