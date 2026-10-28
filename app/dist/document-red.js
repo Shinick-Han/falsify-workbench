@@ -26,7 +26,7 @@
   // Every job/export binds one bridge link for its whole life (start, polls, cancel); the bridge refuses to switch while busy.
   function link(){const l=B.session();if(!l)throw new Error('로컬 broker 연결이 없습니다. 위 연결 패널에서 연결하거나 수동 JSON 교환을 쓰세요.');return l;}
   function connection(){const s=B.state(),cap=s.cap;
-    $('#red-connection').textContent=s.status==='checking'?'로컬 실행 상태 확인 중':s.connected?(s.status==='paired'?'페어링된 로컬 broker':'로컬 broker 연결')+(cap?.red?' · 실행 CLI·모델은 아래 Harness 선택을 따릅니다'+(cap.cliSelection?'':' · 이 companion은 기본 Codex CLI'+(cap.model?' ('+cap.model+')':'')+'만 지원 (CLI 선택은 최신 companion 필요)')+' · 사용자 harness는 자체 모델/도구를 사용하며 내부 격리는 미검증':' · 이 broker는 RED 실행을 지원하지 않습니다.'):'로컬 broker 연결 없음 · 파일 추출과 수동 JSON 교환만 가능합니다. 위 연결 패널을 확인하세요.';}
+    $('#red-connection').textContent=s.status==='checking'?'로컬 실행 상태 확인 중':s.connected?(s.status==='paired'?'페어링된 로컬 broker':'로컬 broker 연결')+(cap?.red?' · 실행 CLI·모델은 아래 Harness 선택을 따릅니다'+(cap.cliSelection?'':' · 이 companion은 기본 Codex CLI'+(cap.model?' ('+cap.model+')':'')+'만 지원 (CLI 선택은 최신 companion 필요)')+' · 사용자 harness는 자체 모델/도구를 사용하며 내부 격리는 미검증':' · 이 broker는 RED 실행을 지원하지 않습니다.'):'로컬 broker 연결 없음 · 외부 RED 응답을 가져오거나 위 연결 패널에서 연결하세요.';}
   // The record button is ledger-mounted; bridge changes before that only refresh the connection line.
   document.addEventListener('falsify:local-bridge',()=>{connection();if($('#red-record'))controls();if(helperReady())void recoverRed();});connection();if(helperReady())void recoverRed();
   function controls(){
