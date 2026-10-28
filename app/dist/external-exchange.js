@@ -21,7 +21,7 @@
       const found=finder({quote:needle,segments,pageIndex:item.pageIndex,segmentId:item.segmentId});
       if(found&&Array.isArray(found.matches)){
         item.matches=found.matches;item.matchStatus=found.status;item.anchor=null;
-        if(found.status==='matched'&&found.matches.length===1){const m=found.matches[0],s=segments.find(x=>x.id===m.segmentId);if(s&&Number.isInteger(m.start)&&Number.isInteger(m.end)){item.segmentId=m.segmentId;item.pageIndex=m.pageIndex;item.anchor={start:m.start,end:m.end};if(item.kind==='change')item.before=s.text.slice(m.start,m.end);else item.quote=s.text.slice(m.start,m.end);}}
+        if(found.status==='matched'&&found.matches.length===1){const m=found.matches[0],s=segments.find(x=>x.id===m.segmentId);if(s&&Number.isInteger(m.start)&&Number.isInteger(m.end)){item.segmentId=m.segmentId;item.pageIndex=m.pageIndex;item.anchor={start:m.start,end:m.end};if(item.kind==='change')item.before=s.text.slice(m.start,m.end);else item.sourceQuote=s.text.slice(m.start,m.end);}}
         return;
       }
     }
@@ -32,7 +32,7 @@
     for(const s of scope){const n=normalize(s.text);let at=0;while((at=n.value.indexOf(q,at))!==-1){const start=n.starts[at],end=n.ends[at+q.length-1],pageIndex=s.pageIndex??red.pageIndexFromLabel(s.label)??segments.indexOf(s);matches.push({segmentId:s.id,pageIndex,start,end});at++;if(matches.length>100)break;}}
     if(!matches.length&&(item.pageIndex!=null||item.segmentId)){const hintPage=item.pageIndex,hintSegment=item.segmentId;item.pageIndex=null;item.segmentId=null;locate(item,segments,needle);if(item.matchStatus==='missing'){item.pageIndex=hintPage;item.segmentId=hintSegment;}return;}
     item.matches=matches;item.matchStatus=matches.length===1?'matched':matches.length?'ambiguous':'missing';
-    if(matches.length===1){const m=matches[0],s=segments.find(x=>x.id===m.segmentId);item.segmentId=m.segmentId;item.pageIndex=m.pageIndex;item.anchor={start:m.start,end:m.end};if(item.kind==='change')item.before=s.text.slice(m.start,m.end);else item.quote=s.text.slice(m.start,m.end);}
+    if(matches.length===1){const m=matches[0],s=segments.find(x=>x.id===m.segmentId);item.segmentId=m.segmentId;item.pageIndex=m.pageIndex;item.anchor={start:m.start,end:m.end};if(item.kind==='change')item.before=s.text.slice(m.start,m.end);else item.sourceQuote=s.text.slice(m.start,m.end);}
     else item.anchor=null;
   }
   function json(raw){const text=raw.trim().replace(/^\uFEFF/,'');try{return JSON.parse(text);}catch{}const fence=/```(?:json)?\s*\n([\s\S]*?)```/i.exec(text);if(fence){try{return JSON.parse(fence[1]);}catch{}}return null;}
@@ -42,9 +42,9 @@
     for(let i=0;i+1<lines.length;i++){
       const header=cells(lines[i]).map(x=>x.replace(/\s/g,'')), index=names.map(n=>header.indexOf(n.replace(/\s/g,'')));
       if(index.some(n=>n<0)||!/^\s*\|?[\s:|\-]+\|?\s*$/.test(lines[i+1]))continue;
-      const entries=[];let j=i+2;
-      for(;j<lines.length;j++){if(!lines[j].includes('|')||!lines[j].trim())break;const row=cells(lines[j]);if(row.length<header.length)break;const v=index.map(n=>row[n]);const page=/^\s*(\d+)\s*(?:쪽|p(?:age)?\.?)?\s*$/i.exec(v[1]);entries.push({reportNumber:v[0],page:page?Number(page[1]):undefined,locationLabel:v[2],findingType:v[3],severity:v[4],quote:v[5],rationale:v[6],confidence:v[7]});}
-      if(entries.length)return {entries,report:lines.slice(j).join('\n').trim()};
+      const entries=[],malformed=[];let j=i+2;const fenced=i>0&&/^\s*`{3,}(?:\w+)?\s*$/.test(lines[i-1]);
+      for(;j<lines.length;j++){if(!lines[j].includes('|')||!lines[j].trim())break;const row=cells(lines[j]);if(row.length<header.length){malformed.push(j+1);continue;}const v=index.map(n=>row[n]);const page=/^\s*(\d+)\s*(?:쪽|p(?:age)?\.?)?\s*$/i.exec(v[1]);entries.push({reportNumber:v[0],page:page?Number(page[1]):undefined,locationLabel:v[2],findingType:v[3],severity:v[4],quote:v[5],rationale:v[6],confidence:v[7]});}
+      if(fenced&&/^\s*`{3,}\s*$/.test(lines[j]||''))j++;if(entries.length)return {entries,malformed,report:lines.slice(j).join('\n').trim()};
     }
     return null;
   }
@@ -61,7 +61,7 @@
       if(typeof obj.role==='string'&&obj.role.toLowerCase()!==role)batch.diagnostics.push({code:'role-mismatch',message:'응답의 역할이 현재 작업과 다릅니다.'});
       if(['abstain','refusal'].includes(obj.status))batch.status=obj.status;
     }
-    const table=role==='blue'&&!obj?markdownFindings(raw):null;if(table&&table.report)batch.report=table.report;
+    const table=role==='blue'&&!obj?markdownFindings(raw):null;if(table&&table.report)batch.report=table.report;if(table)for(const line of table.malformed)batch.diagnostics.push({code:'malformed-item',line,message:'이 표 행을 읽지 못했습니다.'});
     let list=table?table.entries:Array.isArray(obj)?obj:obj&&typeof obj==='object'?(role==='red'?(obj.changes??obj.candidates??obj.edits):(obj.findings??obj.items)):null;
     if(!Array.isArray(list)&&obj&&typeof obj==='object'&&(role==='red'?typeof obj.before==='string':typeof obj.quote==='string'||typeof obj.rationale==='string'))list=[obj];
     if(Array.isArray(list)){
