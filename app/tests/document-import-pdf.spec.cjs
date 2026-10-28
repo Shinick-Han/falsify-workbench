@@ -43,6 +43,7 @@ const marks=s=>[...s].filter(c=>c===MARK).length;
   r=await read('overlay.pdf',pdf([[[40,720,'Left opening'],[40,700,'Left ending.'],[320,720,'These results demonstrate'],[320,700,'an important effect'],[320,680,'old trailing words'],[40,400,'Figure caption'],[320,660,'sufficient to restore neural competency in all lines.']]]));
   const visual=r.matchSegments.find(s=>s.id==='layout:p1:column2');
   check('geometry order places appended overlay before caption',r.ok&&visual&&/These results demonstrate\s+an important effect\s+old trailing words\s+sufficient to restore neural competency in all lines\./.test(visual.text));
+  check('layout alias retains ordered original item indices',r.ok&&visual.itemIndices.length===4&&visual.itemIndices[3]>visual.itemIndices[2]);
   check('canonical content stream remains unchanged',r.ok&&r.segments[0].text.indexOf('Figure caption')<r.segments[0].text.indexOf('sufficient to restore'));
   r=await read('mapped-unicode.pdf',pdf([[[72,720,'ABC']]],{toUnicode:[['41','D55C'],['42','AE00'],['43','03B1']]}));
   check('non-control Unicode from ToUnicode preserved',r.ok&&r.text==='한글α'&&!r.warnings.some(w=>w.includes('글리프')));

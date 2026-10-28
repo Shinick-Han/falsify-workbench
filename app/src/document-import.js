@@ -72,7 +72,7 @@ const CONTROL=/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g;
 function unmapped(str,count){return str.replace(CONTROL,()=>{count();return MARK;});}
 // Build a separate visual reading order; canonical content-stream extraction is untouched.
 export function layoutAliases(items,pageIndex,pageWidth){
-  const runs=items.filter(x=>typeof x.str==='string'&&x.str.trim()&&Array.isArray(x.transform)&&Number.isFinite(x.transform[4])&&Number.isFinite(x.transform[5])).map(x=>({text:unmapped(x.str,()=>{}),x:x.transform[4],y:x.transform[5],width:x.width||0,height:Math.abs(x.height||x.transform[3]||10)}));
+  const runs=items.map((x,index)=>({x,index})).filter(({x})=>typeof x.str==='string'&&x.str.trim()&&Array.isArray(x.transform)&&Number.isFinite(x.transform[4])&&Number.isFinite(x.transform[5])).map(({x,index})=>({index,text:unmapped(x.str,()=>{}),x:x.transform[4],y:x.transform[5],width:x.width||0,height:Math.abs(x.height||x.transform[3]||10)}));
   if(!runs.length)return [];
   const mid=pageWidth/2, left=runs.filter(r=>r.x<mid&&r.x+r.width<=mid+10),right=runs.filter(r=>r.x>=mid);
   const two=left.length>=3&&right.length>=3&&left.some(a=>right.some(b=>Math.abs(a.y-b.y)<Math.max(a.height,b.height)));
@@ -82,8 +82,10 @@ export function layoutAliases(items,pageIndex,pageWidth){
     const lines=[];
     for(const r of group){let line=lines.find(l=>Math.abs(l.y-r.y)<=Math.max(2,Math.min(l.height,r.height)*0.35));if(!line){line={y:r.y,height:r.height,runs:[]};lines.push(line);}line.runs.push(r);}
     lines.sort((a,b)=>b.y-a.y);
-    const text=lines.map(l=>l.runs.sort((a,b)=>a.x-b.x).map(r=>r.text.trim()).join(' ')).join('\n').trim();
-    return {id:'layout:p'+(pageIndex+1)+':'+(two?'column'+(i+1):'page'),label:'PDF p. '+(pageIndex+1)+(two?' · column '+(i+1):' · layout'),text,pageIndex};
+    const ordered=lines.map(l=>l.runs.sort((a,b)=>a.x-b.x));
+    const text=ordered.map(line=>line.map(r=>r.text.trim()).join(' ')).join('\n').trim();
+    const itemIndices=ordered.flatMap(line=>line.map(r=>r.index));
+    return {id:'layout:p'+(pageIndex+1)+':'+(two?'column'+(i+1):'page'),label:'PDF p. '+(pageIndex+1)+(two?' · column '+(i+1):' · layout'),text,pageIndex,itemIndices};
   }).filter(s=>s.text);
 }
 async function pdf(bytes,{signal,onProgress}){
