@@ -21,3 +21,27 @@ test('duplicate body context is left unresolved',()=>{
  assert.equal(plan.repairs.length,0);assert.ok(plan.warnings.some(w=>w.code==='inline_marker_ambiguous'));
 });
 
+
+test('matches context across changed line wrapping',()=>{
+ const source=fixture(), output=fixture({shift:15});
+ // Reflow the first half of the source context onto a preceding line.
+ const body=source.glyphs.filter(g=>g.obj===1);
+ for(const g of body.slice(0,10)){g.origin[1]+=12;g.b+=12;g.t+=12;}
+ const plan=planInlineMarkers(source,output);
+ assert.equal(plan.repairs.length,1); assert.equal(plan.repairs[0].dx,15);
+});
+test('moves a marker split into objects together',()=>{
+ const source=fixture(), output=fixture({shift:15});
+ for(const page of [source,output]) {
+  const g=page.glyphs.at(-1);
+  page.glyphs.push({...g,u:50,l:g.l+3,r:g.r+3,i:g.i+1,obj:4,origin:[g.origin[0]+3,g.origin[1]]});
+ }
+ const plan=planInlineMarkers(source,output);
+ assert.equal(plan.repairs.length,2); assert.deepEqual(plan.repairs.map(r=>r.dx),[15,15]);
+});
+test('does not move an object containing unrelated body glyphs',()=>{
+ const source=fixture(), output=fixture({shift:15});
+ output.glyphs[0].obj=2;
+ const plan=planInlineMarkers(source,output);
+ assert.equal(plan.repairs.length,0); assert.ok(plan.warnings.some(w=>w.code==='inline_marker_object_ambiguous'));
+});
