@@ -216,7 +216,7 @@ class BusytexPipeline {
     }
 
     constructor(busytex_js, busytex_wasm, data_packages_js, preload_data_packages_js, texmf_local, print, on_initialized, preload, script_loader, biber_js = null, biber_wasm = null, biber_data = null) {
-        this.print = text => { console.log(text); print(text); };
+        this.print = text => { print(text); };
         this.preload = preload;
         this.script_loader = script_loader;
 

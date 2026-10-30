@@ -26,7 +26,7 @@ export function createLatexCompiler(options = {}) {
         worker.onerror = () => finish('ENGINE_ERROR','LaTeX engine failed to initialize or compile.');
         worker.onmessage = ({data}) => {
           if (!pending) return;
-          if (data.print) { onProgress?.({message:String(data.print)}); return; }
+          if (data.print) { onProgress?.({message:'LaTeX compilation in progress.'}); return; }
           if (data.exception) return finish('ENGINE_ERROR','LaTeX engine reported an error.');
           if (data.initialized) {
             const drivers = {pdflatex:'pdftex_bibtex8',xelatex:'xetex_bibtex8_dvipdfmx',lualatex:'luahbtex_bibtex8'};

@@ -23,8 +23,9 @@ try {
   if(f==='busytex_pipeline.js') {
    const source=bytes.toString('utf8');
    const line="        console.log('LOGS', logs);";
-   if(!source.includes(line))throw new Error('Expected upstream log statement not found');
-   bytes=Buffer.from(source.replace(line,'        // Falsify: do not expose document logs in the browser console.'));
+   const printLine='        this.print = text => { console.log(text); print(text); };';
+   if(!source.includes(line) || !source.includes(printLine))throw new Error('Expected upstream log statement not found');
+   bytes=Buffer.from(source.replace(line,'        // Falsify: do not expose document logs in the browser console.').replace(printLine,'        this.print = text => { print(text); };'));
   }
   await writeFile(join(target,f),bytes);
  }

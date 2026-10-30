@@ -3,7 +3,7 @@
   "sourceCommit": "61b83cde2836d42cf941f6559d36c9678d52cbf2",
   "archiveSha256": "4f63731fe4ec9238d877846074ab424350add6f6e956944def389e6752d2c78b",
   "modifications": [
-    "busytex_pipeline.js: remove complete compilation log console output"
+    "busytex_pipeline.js: remove compilation log and status console output"
   ],
   "files": [
     {
@@ -23,8 +23,8 @@
     },
     {
       "name": "busytex_pipeline.js",
-      "bytes": 37149,
-      "sha256": "05e33447d79af4384e0ff687bf09e1c55dab5857996e8d6564c4f8fb939dadd7"
+      "bytes": 37130,
+      "sha256": "5448e0af0286bfba2ab2b4380af5d3a5f71341f1c2334d40195e9bc1baa262a5"
     },
     {
       "name": "busytex_worker.js",
