@@ -18,6 +18,15 @@ try {
  if(hash.digest('hex')!==expected)throw new Error('BusyTeX archive SHA-256 mismatch');
  execFileSync('tar',['-xzf',archive,'-C',temp,...files.map(f=>'busytex/'+f)],{stdio:'inherit'});
  const target=resolve('dist/latex-compiler-vendor'); await mkdir(target,{recursive:true});
- for(const f of files) await writeFile(join(target,f),await readFile(join(temp,'busytex',f)));
+ for(const f of files) {
+  let bytes=await readFile(join(temp,'busytex',f));
+  if(f==='busytex_pipeline.js') {
+   const source=bytes.toString('utf8');
+   const line="        console.log('LOGS', logs);";
+   if(!source.includes(line))throw new Error('Expected upstream log statement not found');
+   bytes=Buffer.from(source.replace(line,'        // Falsify: do not expose document logs in the browser console.'));
+  }
+  await writeFile(join(target,f),bytes);
+ }
  console.log(`Installed pinned BusyTeX assets to ${target}`);
 } finally {await rm(temp,{recursive:true,force:true});}
