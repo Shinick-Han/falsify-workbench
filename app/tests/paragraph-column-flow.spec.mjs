@@ -138,7 +138,7 @@ test('source baseline continuity keeps reference fragments with their body and p
     p('edgeLine',117,56.348,175,11.04,[50.25],'last reference line'),
     p('footer',100,30,80,8,[24],'publisher footer'),
     p('page',380,30,10,8,[24],'10'),
-    p('otherColumn',0,196,80,10,[190],'independent')];
+    p('otherColumn',0,196,89,10,[190],'independent')];
   const handles = new Map(input.map((p,i)=>[p.id,[i+1]]));
   const e={page:1,pageIndex:0,pageWidth:500,pageHeight:800,M:{_FPDFPage_CountObjects:()=>input.length,_FPDFPage_GetObject:(_,i)=>i+1,_FPDFPageObj_GetType:()=>1},paragraphObjects:id=>handles.get(id)};
   const ctx=capturePageLayout(e,0,input);
