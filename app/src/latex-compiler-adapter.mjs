@@ -21,8 +21,8 @@ export function createLatexCompiler(options = {}) {
     if (!project.files.some(f => f.path === project.mainFile)) throw new Error('Main file missing');
     return new Promise(resolve => {
       const abort = () => cancel();
-      const timer = setTimeout(() => finish('TIMEOUT','LaTeX compilation timed out.'), options.timeoutMs ?? 180000);
-      pending = {resolve,project,key,started,cleanup:()=>{clearTimeout(timer); signal?.removeEventListener('abort',abort);}};
+      const timer = setTimeout(() => { if (pending?.timer === timer) finish('TIMEOUT','LaTeX compilation timed out.'); }, options.timeoutMs ?? 180000);
+      pending = {resolve,project,key,started,timer,cleanup:()=>{clearTimeout(timer); signal?.removeEventListener('abort',abort);}};
       if (signal?.aborted) return abort();
       signal?.addEventListener('abort',abort,{once:true});
       try {
