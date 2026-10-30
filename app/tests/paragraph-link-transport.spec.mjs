@@ -60,8 +60,16 @@ test('whole paragraph replacement retains unchanged URI label identity',async()=
  const result=await prepare({file:src,edits:[{id:'whole',pageIndex:0,before,after}]}), report=result.verification.report;
  assert.equal(report.paragraphLinkMoves.length,1,JSON.stringify(report.selfCheck.failures));
  assert.ok(!report.selfCheck.failures.some(f=>f.code==='paragraph_link_unverified'),JSON.stringify(report.selfCheck.failures));
- const d=new mupdf.PDFDocument(new Uint8Array(await result.file.arrayBuffer()));
+ const pdf=new Uint8Array(await result.file.arrayBuffer()), d=new mupdf.PDFDocument(pdf);
  try {assert.equal(d.findPage(0).get('Annots',0,'A','URI').asString(),'https://example.invalid/reference');} finally {d.destroy();}
+ const api=createAnnotationTransport({mupdf}), model=await api.inspect({sourceBytes:src,sourceSha256:createHash('sha256').update(src).digest('hex')});
+ const request={model,sourceBytes:src,outputBytes:pdf,sourcePageMap:[0,1].map(i=>({sourcePageIndex:i,outputPageIndex:i})),moves:report.paragraphLinkMoves,reflowedSourcePages:[0],preserveUnmovedUnsupported:true};
+ assert.equal((await api.validate(request)).ok,true);
+ for(const mutate of [doc=>doc.findPage(0).get('Annots',0,'A').put('URI',doc.newString('https://example.invalid/changed')),doc=>doc.findPage(0).get('Annots').delete(0)]){
+  const doc=new mupdf.PDFDocument(pdf);let bad;
+  try {mutate(doc);const buf=doc.saveToBuffer();try{bad=buf.asUint8Array().slice();}finally{buf.destroy();}} finally {doc.destroy();}
+  assert.equal((await api.validate({...request,outputBytes:bad})).ok,false);
+ }
 });
 test('link moves while the complete comment dictionary remains bound',async()=>{
  const src=fixture(true),result=await prepare({file:src,edits:[edit]}),report=result.verification.report,pdf=new Uint8Array(await result.file.arrayBuffer());
