@@ -126,6 +126,20 @@ test('body reflow near edge retains linked and inline-math page content', async 
   } finally { globalThis.fetch=previous; }
 });
 
+test('full linked paragraph with empty font snapshot preserves requested text', async () => {
+  const previous=globalThis.fetch;globalThis.fetch=localFetch;
+  try {
+    const source=new Uint8Array(readFileSync(join(app,'tests/fixtures/paragraph-audit-synthetic.pdf')));
+    const before='An initial claim includes supporting REFERENCE. All measurement conditions remain explicitly stated. The remaining evidence stays available for review.';
+    const after=before.replace('An initial claim','A revised claim');
+    const digest=hex(new TextEncoder().encode('[]'));
+    const result=await prepare({file:source,fontSnapshot:{revision:0,digest,fonts:[],selections:[]},edits:[{id:'e1',segmentId:'paragraph:0:p0-1-b7070b64cbc74f9c',pageIndex:0,anchor:{bbox:[40,90.342,272.815,130.739]},before,after}]});
+    assert.notEqual(result.verification.status,'failed',JSON.stringify(result.verification.checks));
+    assert.equal(result.verification.fontSnapshotDigest,digest);
+    assert.ok(extraction(new Uint8Array(await result.file.arrayBuffer())).includes(after));
+  } finally {globalThis.fetch=previous;}
+});
+
 test('table inspection limits do not block an in-page edit', {timeout:120000}, async () => {
   const previous=globalThis.fetch;globalThis.fetch=localFetch;
   const document=new mupdf.PDFDocument();
