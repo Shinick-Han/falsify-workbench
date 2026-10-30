@@ -96,3 +96,69 @@ Mark${patchedNote} Next\footnote{Next note.}
   assert.deepEqual(JSON.parse(links.stdout),['cite.example','cite.example','Hfootnote.1','Hfootnote.2']);
  } finally { rmSync(dir,{recursive:true,force:true}); }
 });
+import {createLatexProject} from '../src/latex-project.mjs';
+import {analyzeLatexSource,locateSourceText} from '../src/latex-source-model.mjs';
+import {applySourceChanges} from '../src/latex-source-patches.mjs';
+async function actualPatch(source,before,after) {
+ const p=await createLatexProject({files:[{path:'main.tex',bytes:new TextEncoder().encode(source)}]});
+ const model={...analyzeLatexSource(p),locateSourceText};
+ const proposal=resolveSourceProposals(p,[{id:'response',before,after}],{model}).proposals[0];
+ if(proposal.status!=='matched') return {p,proposal};
+ const changes=proposal.sourceChanges.map((c,i)=>({...c,id:proposal.id+':'+i,proposalId:proposal.id})), result=await applySourceChanges(p,changes);
+ return {p,proposal,changes,result,source:new TextDecoder('utf-8',{ignoreBOM:true}).decode(result.project.files[0].bytes)};
+}
+test('actual project patches multiple body and marker spans atomically',async()=>{
+ const original='\\begin{document}An initial claim\\textsuperscript{62} remains conditional.\\end{document}';
+ const before='An initial claim62 remains conditional.';
+ for(const [after,expected] of [
+  ['An revised claim62 remains provisional.','An revised claim\\textsuperscript{62} remains provisional.'],
+  ['An revised claim63 remains provisional.','An revised claim\\textsuperscript{63} remains provisional.'],
+  ['An claim62 remains conditional.','An claim\\textsuperscript{62} remains conditional.']
+ ]) {
+  const r=await actualPatch(original,before,after);
+  assert.equal(r.proposal.status,'matched'); assert.deepEqual(r.result.diagnostics,[]);
+  assert.ok(r.source.includes(expected),r.source); assert.ok(r.changes.every(c=>c.proposalId==='response'));
+ }
+});
+test('actual Unicode, BOM, whitespace and comments retain unchanged source bytes',async()=>{
+ const original='\ufeff\\begin{document}😀 café  initial claim\\textsuperscript{62} remains conditional.% preserve\n\\end{document}';
+ const r=await actualPatch(original,'😀 café initial claim62 remains conditional.','😀 café revised claim63 remains provisional.');
+ assert.equal(r.proposal.status,'matched'); assert.deepEqual(r.result.diagnostics,[]);
+ assert.equal(r.source,'\ufeff\\begin{document}😀 café  revised claim\\textsuperscript{63} remains provisional.% preserve\n\\end{document}');
+});
+test('ambiguous and unknown-rendered passages remain unresolved',async()=>{
+ const repeated='\\begin{document}An initial claim\\textsuperscript{62} remains. An initial claim\\textsuperscript{62} remains.\\end{document}';
+ assert.equal((await actualPatch(repeated,'An initial claim62 remains.','An revised claim62 remains.')).proposal.status,'ambiguous');
+ const unknown='\\begin{document}An initial \\mystery{hidden}claim\\textsuperscript{62} remains.\\end{document}';
+ assert.equal((await actualPatch(unknown,'An initial claim62 remains.','An revised claim62 remains.')).proposal.status,'unresolved');
+});
+test('malformed entries are filtered and identity mismatch is retained',()=>{
+ const model={projectId:'p',nodes:[]};
+ const r=resolveSourceProposals({id:'p'},{diagnostics:[{code:'file-hash-mismatch'}],items:[null,3,{}, {before:'x',after:''}]},{model});
+ assert.equal(r.proposals.length,2);assert.equal(r.proposals[0].status,'invalid');assert.equal(r.proposals[1].status,'identity-mismatch');
+});
+
+
+
+test('actual whole-node deletion and multiple changes in one node remain source anchored',async()=>{
+ for(const [before,after] of [['Remove me',''],['alpha beta gamma','ALPHA beta GAMMA'],['cat','cats']]) {
+  const r=await actualPatch('\\begin{document}'+before+'\\end{document}',before,after);
+  assert.equal(r.proposal.status,'matched'); assert.deepEqual(r.result.diagnostics,[]);
+  assert.equal(r.source,'\\begin{document}'+after+'\\end{document}');
+  for(const c of r.changes) assert.equal(new TextDecoder().decode(r.p.files[0].bytes).slice(c.anchor.start,c.anchor.end),c.before);
+ }
+});
+test('patched mixed sentence compiles to the expected PDF text',async t=>{
+ if(spawnSync('pdflatex',['--version'],{encoding:'utf8'}).status!==0 || spawnSync('pdftotext',['-v'],{encoding:'utf8'}).status!==0) return t.skip('requires pdflatex and pdftotext');
+ const original='\\documentclass{article}\n\\begin{document}An initial claim\\textsuperscript{62} remains conditional.\\end{document}';
+ const r=await actualPatch(original,'An initial claim62 remains conditional.','An revised claim63 remains provisional.');
+ assert.equal(r.proposal.status,'matched');assert.deepEqual(r.result.diagnostics,[]);
+ const dir=mkdtempSync(join(tmpdir(),'falsify-mixed-'));
+ try {
+  writeFileSync(join(dir,'mixed.tex'),r.source);
+  const compile=spawnSync('pdflatex',['-interaction=nonstopmode','-halt-on-error','mixed.tex'],{cwd:dir,encoding:'utf8',env:{...process.env,MIKTEX_ENABLEINSTALLER:'0'}});
+  assert.equal(compile.status,0,compile.stdout+'\n'+compile.stderr);
+  const output=spawnSync('pdftotext',['-layout','mixed.pdf','-'],{cwd:dir,encoding:'utf8'});
+  assert.equal(output.status,0,output.stderr);assert.match(output.stdout,/An revised claim63 remains provisional\./);
+ } finally {rmSync(dir,{recursive:true,force:true});}
+});
