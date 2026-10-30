@@ -6,6 +6,8 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {serializeReconstruction} from '../src/pdf-latex-serialize.mjs';
 import {hex} from '../src/paragraph-pdf-crypto.mjs';
+import {createLatexProject} from '../src/latex-project.mjs';
+import {locateSourceText} from '../src/latex-source-model.mjs';
 const hash='a'.repeat(64), enc=new TextEncoder(), dec=new TextDecoder();
 const ref=(pageIndex=0)=>({sourceSha256:hash,pageIndex,frame:'mupdf-display',bbox:[1,2,10,12],range:{start:0,end:2}});
 const item=(id,text,extra={})=>({id,kind:'paragraph',status:'observed',text,evidence:[ref()],...extra});
@@ -16,7 +18,7 @@ const asset={id:'a',bytes:image,sha256:hex(image),mediaType:'image/png',represen
 test('deterministic editable source, escaped text and exact UTF-16 bindings',()=>{
  const m=make([item('a','A & B #1 $2 {x} 50% _ ^ ~ \\'),item('b','The effect is 63. The effect is not 63.',{kind:'heading'})]);
  const original=structuredClone(m), r=serializeReconstruction({model:m});
- assert.deepEqual(m,original); assert.deepEqual(r,serializeReconstruction({model:m})); assert.equal(r.status,'ready');
+ assert.deepEqual(m,original); assert.deepEqual(r,serializeReconstruction({model:m})); assert.equal(r.status,'needs-review');
  const s=source(r); assert.match(s,/The effect is 63\. The effect is not 63\./);
  assert.equal(s.slice(r.bindings[0].start,r.bindings[0].end),'A \\& B \\#1 \\$2 \\{x\\} 50\\% \\_ \\textasciicircum{} \\textasciitilde{} \\textbackslash{}');
 });
@@ -24,7 +26,7 @@ test('reviewed transcription is evidence-bound and scripts are never guessed',()
  const i=item('math','x2',{reason:'inline-script-candidate'}), m=make([i]);
  assert.equal(serializeReconstruction({model:m}).status,'needs-review');
  const decision={itemId:'math',sourceSha256:hash,tex:'$x^2$',evidence:[ref()]};
- const r=serializeReconstruction({model:m,decisions:[decision]}); assert.equal(r.status,'ready'); assert.equal(source(r).slice(r.bindings[0].start,r.bindings[0].end),'$x^2$'); assert.equal(r.bindings[0].status,'reviewed');
+ const r=serializeReconstruction({model:m,decisions:[decision]}); assert.equal(r.status,'needs-review'); assert.equal(source(r).slice(r.bindings[0].start,r.bindings[0].end),'$x^2$'); assert.equal(r.bindings[0].status,'reviewed');
  assert.throws(()=>serializeReconstruction({model:m,decisions:[{...decision,sourceSha256:'b'.repeat(64)}]}),{code:'INVALID_DECISION'});
  assert.throws(()=>serializeReconstruction({model:m,decisions:[decision,decision]}),{code:'INVALID_DECISION'});
 });
@@ -47,6 +49,29 @@ test('page order, missing assets, unresolved relations and Unicode are explicit'
  const r=serializeReconstruction({model:m}); assert.equal(r.status,'needs-review'); assert.ok(r.diagnostics.some(d=>d.code==='PAGE_ORDER_REVIEW')); assert.ok(r.diagnostics.some(d=>d.code==='RELATION_REVIEW')); assert.match(source(r),/\\newpage/); assert.ok(source(r).indexOf('First')<source(r).indexOf('Second'));
  assert.throws(()=>serializeReconstruction({model:make([item('f','',{kind:'figure',assetId:'missing'})])}),{code:'INVALID_ASSET_REFERENCE'});
  const unicode=serializeReconstruction({model:make([item('u','naïve')])}); assert.equal(unicode.status,'needs-review'); assert.match(source(unicode),/Original UTF-8 text: naïve/);
+});
+test('source geometry uses bp, bounded regions, and observed font only with complete evidence',async()=>{
+ const small={...asset,evidence:[{...ref(),bbox:[20,30,32,42]}]};
+ const text='Observed body'; const styled=item('p',text,{extensions:{columns:1,styles:[{id:'style1',size:9.5}],segments:[{text,styleIds:['style1']}]}});
+ const result=serializeReconstruction({model:make([styled,item('f','',{kind:'figure',assetId:'a'})],{assets:[small]})}); const tex=source(result);
+ assert.match(tex,/\\pdfpagewidth=612bp\\pdfpageheight=792bp/);
+ assert.match(tex,/\\includegraphics\[width=12bp,height=12bp,keepaspectratio\]/);
+ assert.match(tex,/\\fontsize\{9\.5bp\}\{11\.4bp\}\\selectfont/);
+ const project=await createLatexProject({files:result.files,mainFile:result.mainFile}); assert.equal(locateSourceText(project,{before:text}).status,'matched');
+ assert.ok(result.diagnostics.some(d=>d.code==='LEADING_UNVERIFIED')); assert.ok(result.diagnostics.some(d=>d.code==='LAYOUT_OVERFLOW_UNVERIFIED'));
+ const large={...small,evidence:[{...ref(),bbox:[0,0,1000,500]}]}; const bounded=serializeReconstruction({model:make([item('f','',{kind:'figure',assetId:'a'})],{assets:[large]})});
+ assert.match(source(bounded),/width=540bp,height=270bp/); assert.ok(bounded.diagnostics.some(d=>d.code==='REGION_SCALED_DOWN'));
+ const column=structuredClone(styled); column.extensions.columns=2; const r=serializeReconstruction({model:make([column])}); assert.doesNotMatch(source(r),/\\fontsize/); assert.ok(r.diagnostics.some(d=>d.code==='MULTICOLUMN_REVIEW'));
+});
+test('small image and multi-page text retain measured physical geometry',t=>{
+ const probe=spawnSync('pdflatex',['--version'],{encoding:'utf8'}); if(probe.error?.code==='ENOENT'){t.skip('pdflatex not installed');return;}
+ const check=spawnSync('python',['-c','import pymupdf'],{encoding:'utf8'}); if(check.status!==0){t.skip('PyMuPDF not installed for geometry inspection');return;}
+ const pages=[...make([]).pages,{pageIndex:1,width:500,height:700,frame:'mupdf-display',transform:[1,0,0,-1,0,700]}];
+ const small={...asset,evidence:[{...ref(1),bbox:[20,30,32,42]}]};
+ const r=serializeReconstruction({model:make([item('long','A sentence with numbers 63 and 64. '.repeat(20)),item('fig','',{kind:'figure',assetId:'a',evidence:[ref(1)]})],{pages,assets:[small]})});
+ const dir=mkdtempSync(join(tmpdir(),'falsify-geometry-')); try {for(const f of r.files){const p=join(dir,...f.path.split('/'));mkdirSync(join(p,'..'),{recursive:true});writeFileSync(p,f.bytes);} const run=spawnSync('pdflatex',['-interaction=nonstopmode','-halt-on-error','main.tex'],{cwd:dir,encoding:'utf8',env:{...process.env,MIKTEX_ENABLEINSTALLER:'0'},timeout:60000});assert.equal(run.status,0,run.stdout+'\n'+run.stderr);
+ const py=spawnSync('python',['-c',"import pymupdf,json; d=pymupdf.open('main.pdf'); print(json.dumps({'pages':[[p.rect.width,p.rect.height] for p in d], 'images':[[list(r) for im in p.get_images() for r in p.get_image_rects(im)] for p in d]}))"],{cwd:dir,encoding:'utf8'}); assert.equal(py.status,0,py.stderr); const data=JSON.parse(py.stdout); assert.deepEqual(data.pages,[[612,792],[500,700]]); assert.equal(data.images[1].length,1); const box=data.images[1][0]; assert.ok(Math.abs(box[2]-box[0]-12)<.1 && Math.abs(box[3]-box[1]-12)<.1,JSON.stringify(box));
+ } finally {rmSync(dir,{recursive:true,force:true});}
 });
 test('emitted source compiles with local pdflatex when available',t=>{
  const probe=spawnSync('pdflatex',['--version'],{encoding:'utf8'}); if(probe.error?.code==='ENOENT'){t.skip('pdflatex not installed');return;}

@@ -5,6 +5,7 @@ const hashPattern = /^[0-9a-f]{64}$/;
 const png = [137,80,78,71,13,10,26,10];
 const fail = code => { throw Object.assign(new Error(code), {code}); };
 const finite = v => typeof v === 'number' && Number.isFinite(v);
+const dimension = n => Number(n.toFixed(6)).toString();
 const escapeMap = {'\\':'\\textbackslash{}','{':'\\{','}':'\\}','$':'\\$','&':'\\&','#':'\\#','%':'\\%','_':'\\_','~':'\\textasciitilde{}','^':'\\textasciicircum{}','-':'{-}','`':'\\textasciigrave{}',"'":'\\textquotesingle{}'};
 function plain(text) {
   let unsupported = false, output = '';
@@ -29,7 +30,7 @@ export function serializeReconstruction({model, decisions=[], engine='pdflatex'}
   if (!model || model.schema !== 'falsify.pdf-latex-reconstruction.v1' || !hashPattern.test(model.sourceSha256) || !Array.isArray(model.pages) || !model.pages.length || !Array.isArray(model.items) || !Array.isArray(model.assets) || !Array.isArray(model.diagnostics) || !Array.isArray(model.relations) || !Array.isArray(decisions)) fail('INVALID_MODEL');
   const hash=model.sourceSha256, pages=new Map();
   for (const p of model.pages) {
-    if (!p || !Number.isInteger(p.pageIndex) || p.pageIndex !== pages.size || !finite(p.width) || !finite(p.height) || p.width <= 0 || p.height <= 0 || p.width > 14400 || p.height > 14400 || p.frame !== 'mupdf-display' || !Array.isArray(p.transform) || p.transform.length !== 6 || !p.transform.every(finite)) fail('INVALID_PAGE');
+    if (!p || !Number.isInteger(p.pageIndex) || p.pageIndex !== pages.size || !finite(p.width) || !finite(p.height) || p.width < .01 || p.height < .01 || p.width > 14400 || p.height > 14400 || p.frame !== 'mupdf-display' || !Array.isArray(p.transform) || p.transform.length !== 6 || !p.transform.every(finite)) fail('INVALID_PAGE');
     pages.set(p.pageIndex,p);
   }
   const items=new Map();
@@ -51,6 +52,7 @@ export function serializeReconstruction({model, decisions=[], engine='pdflatex'}
   const diagnostics=model.diagnostics.map(d=>({...d})), bindings=[], files=[];
   let status = diagnostics.some(d=>d.severity==='error') ? 'unsupported' : diagnostics.some(d=>d.severity==='warning') ? 'needs-review' : 'ready';
   const issue=(code,item,severity='warning')=>{diagnostics.push({code,severity,...(item?{itemId:item.id,pageIndex:item.evidence[0].pageIndex}:{})}); if(severity==='error') status='unsupported'; else if(status==='ready') status='needs-review';};
+  issue('LAYOUT_OVERFLOW_UNVERIFIED');
   let source='\\documentclass{article}\n\\usepackage{graphicx}\n\\pagestyle{empty}\n\\setlength{\\parindent}{0pt}\n\\setlength{\\parskip}{6pt}\n\\begin{document}\n';
   const append=(item, body, bindingStatus)=>{const start=source.length; source+=body; bindings.push({itemId:item.id,projectId:null,path:'main.tex',start,end:source.length,evidence:structuredClone(item.evidence),status:bindingStatus}); source+='\n\n';};
   if (!model.items.length) issue('MISSING_CONTENT',null,'error');
@@ -60,8 +62,10 @@ export function serializeReconstruction({model, decisions=[], engine='pdflatex'}
   let assetNumber=0;
   for (const [index,p] of pages) {
     if(index) source+='\\newpage\n';
-    if (!model.items.some(i=>i.evidence[0].pageIndex===index)) { issue('EMPTY_PAGE_REVIEW'); source+='\\null\n'; }
-    source+=`\\pdfpagewidth=${p.width}pt\\pdfpageheight=${p.height}pt\n\\setlength{\\textwidth}{${Math.max(1,p.width-72)}pt}\\setlength{\\textheight}{${Math.max(1,p.height-72)}pt}\\hsize=\\textwidth\\vsize=\\textheight\n\\setlength{\\oddsidemargin}{-36pt}\\setlength{\\topmargin}{-72pt}\\setlength{\\headheight}{0pt}\\setlength{\\headsep}{0pt}\n`;
+    const emptyPage=!model.items.some(i=>i.evidence[0].pageIndex===index);
+    if (emptyPage) issue('EMPTY_PAGE_REVIEW');
+    source+=`\\pdfpagewidth=${dimension(p.width)}bp\\pdfpageheight=${dimension(p.height)}bp\n\\setlength{\\textwidth}{${dimension(Math.max(1,p.width-72))}bp}\\setlength{\\textheight}{${dimension(Math.max(1,p.height-72))}bp}\\hsize=\\textwidth\\vsize=\\textheight\n\\setlength{\\oddsidemargin}{-36bp}\\setlength{\\topmargin}{-36bp}\\setlength{\\headheight}{0pt}\\setlength{\\headsep}{0pt}\n`;
+    if (emptyPage) source+='\\null\n';
     for (const item of model.items.filter(i=>i.evidence[0].pageIndex===index)) {
       const decision=choices.get(item.id);
       if (decision) {append(item,decision.tex,'reviewed'); continue;}
@@ -84,7 +88,12 @@ export function serializeReconstruction({model, decisions=[], engine='pdflatex'}
         if (!a || a.evidence.some(r=>r.pageIndex!==index)) fail('INVALID_ASSET_REFERENCE');
         const path=`assets/region-${++assetNumber}.png`;
         files.push({path,bytes:a.bytes.slice()});
-        append(item,`\\includegraphics[width=\\linewidth,keepaspectratio]{${path}}`,'noneditable');
+        const box=a.evidence[0].bbox, w=box[2]-box[0], h=box[3]-box[1];
+        if (!(finite(w) && finite(h) && w>=.01 && h>=.01)) fail('INVALID_ASSET_REFERENCE');
+        const scale=Math.min(1,Math.max(1,p.width-72)/w,Math.max(1,p.height-72)/h);
+        if (!(w*scale>=.00001 && h*scale>=.00001)) fail('INVALID_ASSET_REFERENCE');
+        if (scale<1) issue('REGION_SCALED_DOWN',item);
+        append(item,`\\includegraphics[width=${dimension(w*scale)}bp,height=${dimension(h*scale)}bp,keepaspectratio]{${path}}`,'noneditable');
         issue('NONEDITABLE_REGION',item); continue;
       }
       const semantic = ['math','footnote','citation'].includes(item.kind) || item.reason==='inline-script-candidate' || !!item.extensions?.candidates?.length;
@@ -96,7 +105,16 @@ export function serializeReconstruction({model, decisions=[], engine='pdflatex'}
         if (!['paragraph','heading'].includes(item.kind)) issue('ITEM_KIND_REVIEW',item);
         if (item.status==='unsupported') issue('UNSUPPORTED_ITEM',item);
         const original=text.unsupported ? '% Original UTF-8 text: '+item.text.replace(/[\r\n]/g,' ')+'\n' : '';
-        const body=original+(item.kind==='heading' ? `\\textbf{${text.output}}` : text.output);
+        let content=item.kind==='heading' ? `\\textbf{${text.output}}` : text.output;
+        const styles=item.extensions?.styles, sizes=Array.isArray(styles) ? styles.map(style=>style.size) : [];
+        const segments=item.extensions?.segments;
+        const covered=Array.isArray(segments) && segments.length && segments.map(s=>s.text).join('')===item.text && segments.every(s=>Array.isArray(s.styleIds) && s.styleIds.length && s.styleIds.every(id=>styles?.some(style=>style.id===id)));
+        if (covered && sizes.length && sizes.every(size=>finite(size)&&size>=6&&size<=36&&size===sizes[0]) && !semantic && item.extensions?.columns!==2) {
+          const size=sizes[0];
+          issue('LEADING_UNVERIFIED',item);
+          content=`\\fontsize{${dimension(size)}bp}{${dimension(size*1.2)}bp}\\selectfont ${content}\\par\\normalsize`;
+        }
+        const body=original+content;
         append(item,body,'exact-text');
       } else {
         issue('MISSING_CONTENT',item,'error');
