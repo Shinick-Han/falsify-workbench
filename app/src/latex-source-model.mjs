@@ -5,14 +5,25 @@ const pos=n=>n?.position?.start?.offset, end=n=>n?.position?.end?.offset;
 export function analyzeLatexSource(project) {
  const nodes=[],diagnostics=[],documents=[];
  for(const file of project.files.filter(f=>/\.tex$/i.test(f.path))) { let source,ast; try{source=dec.decode(file.bytes);ast=parseMinimal(source)}catch{diagnostics.push({code:'PARSE_ERROR',message:'Could not parse UTF-8 LaTeX source',path:file.path});continue}
- const add=(kind,start,finish,cs,ce)=>{if(!Number.isInteger(start)||!Number.isInteger(finish)||cs<start||ce>finish||cs>ce)return;const sourceText=source.slice(start,finish),text=source.slice(cs,ce);const id=hex(enc.encode(JSON.stringify([project.id,file.path,kind,start,finish])));nodes.push({id,path:file.path,kind,start,end:finish,contentStart:cs,contentEnd:ce,text,sourceText,displayText:text,displayMap:Array.from({length:text.length},(_,i)=>({start:cs+i,end:cs+i+1}))});};
+ const add=(kind,start,finish,cs,ce)=>{if(!Number.isInteger(start)||!Number.isInteger(finish)||cs<start||ce>finish||cs>ce)return;const sourceText=source.slice(start,finish),text=source.slice(cs,ce);const id=hex(enc.encode(JSON.stringify([project.id,file.path,kind,start,finish])));nodes.push({id,path:file.path,kind,start,end:finish,contentStart:cs,contentEnd:ce,text,sourceText,displayText:kind==='citation'?'':text,displayStatus:kind==='citation'?'unresolved':'source',displayMap:kind==='citation'?[]:Array.from({length:text.length},(_,i)=>({start:cs+i,end:cs+i+1}))});};
  function walk(list,inMath=false) { if(!Array.isArray(list))return; let runStart=null,runEnd=null; const flush=()=>{if(runStart!==null&&source.slice(runStart,runEnd).trim())add('text',runStart,runEnd,runStart,runEnd);runStart=runEnd=null};
  for(let i=0;i<list.length;i++){const n=list[i],s=pos(n),e=end(n); if(!inMath&&(n.type==='string'||n.type==='whitespace')&&s!==undefined){if(runEnd!==null&&runEnd!==s)flush();runStart??=s;runEnd=e;continue} flush();
  if(n.type==='inlinemath'||n.type==='displaymath'){const len=n.type==='displaymath'?2:1;add('math',s,e,s+len,e-len);walk(n.content,true);continue}
- if(n.type==='macro') { const map={textsuperscript:'superscript',textsubscript:'subscript',footnote:'footnote',cite:'citation',citep:'citation',citet:'citation','^':'superscript','_':'subscript'}; const kind=map[n.content];const next=list[i+1]; if(kind&&next?.type==='group'&&pos(next)===e){add(kind,s,end(next),pos(next)+1,end(next)-1);i++;continue} if(kind&&inMath&&next&&pos(next)===e&&next.type==='string'){add(kind,s,end(next),pos(next),end(next));i++;continue} }
+ if(n.type==='macro') { const map={textsuperscript:'superscript',textsubscript:'subscript',footnote:'footnote',cite:'citation',citep:'citation',citet:'citation','^':'superscript','_':'subscript'}; const kind=map[n.content];const next=list[i+1]; if(kind&&next?.type==='group'&&pos(next)===e){add(kind,s,end(next),pos(next)+1,end(next)-1);i++;continue} if(kind&&inMath&&next&&pos(next)===e&&next.type==='string'){add(kind,s,end(next),pos(next),end(next));i++;continue}
+ // Arguments of unknown and control macros are not evidence of rendered text.
+ // Known text wrappers retain their nested source text without expanding macros.
+ const textMacros=new Set(['section','subsection','subsubsection','paragraph','subparagraph','chapter','part','textbf','textit','emph','texttt','textrm','textsf','textsc','mbox','caption','title','author']);
+ let j=i+1;while(list[j]?.type==='whitespace')j++;
+ if(list[j]?.type==='string'&&list[j].content==='*')j++;
+ while(list[j]?.type==='whitespace')j++;
+ if(list[j]?.type==='string'&&list[j].content==='['){let depth=0;do{if(list[j]?.type==='string'&&list[j].content==='[')depth++;if(list[j]?.type==='string'&&list[j].content===']')depth--;j++;}while(j<list.length&&depth>0);while(list[j]?.type==='whitespace')j++;}
+ if(kind&&list[j]?.type==='group'){add(kind,s,end(list[j]),pos(list[j])+1,end(list[j])-1);i=j;continue}
+ if(list[j]?.type==='group'){if(textMacros.has(n.content)){walk(list[j].content,inMath);i=j;}else{do{i=j;j++;while(list[j]?.type==='whitespace')j++;}while(list[j]?.type==='group');}continue}
+ }
  if(n.type==='group')walk(n.content,inMath); else if(n.type==='environment')walk(n.content,inMath);
  }flush(); }
- walk(ast.content);
+ const document=ast.content.find(n=>n.type==='environment'&&n.env==='document');
+ if(document)walk(document.content);else walk(ast.content);
  const ordered=nodes.filter(n=>n.path===file.path).sort((a,b)=>a.start-b.start||b.end-a.end);let last=-1,displayText='',displayMap=[];for(const n of ordered){if(n.start<last)continue;displayText+=n.displayText;displayMap.push(...n.displayMap.map(m=>({...m,nodeId:n.id,kind:n.kind})));last=n.end;}documents.push({path:file.path,displayText,displayMap});
  }
  return {projectId:project.id,nodes,documents,diagnostics};
