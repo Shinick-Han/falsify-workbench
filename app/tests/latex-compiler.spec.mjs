@@ -38,3 +38,9 @@ test('abort terminates its worker and cannot finish a subsequent compile',async(
  const next=compiler.compile({project,key:'new'}); workers[0].onmessage({data:{pdf:new Uint8Array([1]),exit_code:0}});
  workers[1].onmessage({data:{pdf:new Uint8Array([2]),exit_code:0}}); assert.equal((await next).key,'new');
 });
+test('snapshot source bytes before asynchronous worker initialization',async()=>{
+ let instance; const compiler=createLatexCompiler({workerFactory:()=>instance={postMessage(m){this.sent??=[];this.sent.push(m)},terminate(){}}});
+ const bytes=new Uint8Array([65]); const input={...project,files:[{path:'main.tex',bytes}]};
+ const pending=compiler.compile({project:input}); bytes[0]=66; instance.onmessage({data:{initialized:true}});
+ assert.equal(instance.sent[1].files[0].contents[0],65); compiler.cancel(); await pending;
+});

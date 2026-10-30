@@ -14,7 +14,8 @@ export function createLatexCompiler(options = {}) {
   async function compile(request) {
     if (disposed) throw new Error('Compiler disposed');
     if (pending) throw new Error('Compiler already busy');
-    const {project, signal, onProgress, key} = request;
+    const {project: inputProject, signal, onProgress, key} = request;
+    const project = inputProject && {...inputProject, files:inputProject.files?.map(f=>({...f,bytes:new Uint8Array(f.bytes)}))};
     const started = Date.now();
     if (!project?.files || !project.mainFile || !['pdflatex','xelatex','lualatex'].includes(project.engine)) throw new Error('Invalid LaTeX project');
     if (project.files.some(f => !f.path || f.path.startsWith('/') || f.path.includes('\\') || f.path.split('/').some(s => !s || s === '.' || s === '..'))) throw new Error('Invalid project path');
