@@ -28,18 +28,17 @@ export function buildReferencePatch(project, node, {after, mode} = {}) {
     if (match) return {anchor, afterSource: match[1] + after + match[3], diagnostics};
   }
   if (node.kind === 'citation') {
-    // hyperref's standard numeric bibliography destinations are named cite.<key>.
-    // Keep the citation in the auxiliary file so ordering and bibliography remain unchanged.
     const match=/^\\cite\s*\{([A-Za-z0-9_:.-]+)\}$/.exec(original);
     const files=project.files.filter(f=>/\.tex$/i.test(f.path)).map(f=>new TextDecoder().decode(f.bytes)).join('\n');
     const hyperref=/\\usepackage(?:\[[^\]]*\])?\s*\{[^}]*\bhyperref\b[^}]*\}/.test(files);
     const incompatible=/\\(?:usepackage|RequirePackage)(?:\[[^\]]*\])?\s*\{[^}]*(?:natbib|biblatex)[^}]*\}|\\(?:re)?newcommand\s*\{?\\cite\b/.test(files);
-    if (match && hyperref && !incompatible) return {anchor,afterSource:`\\nocite{${match[1]}}\\hyperlink{cite.${match[1]}}{${after}}`,diagnostics};
+    if (match && hyperref && !incompatible) return {anchor,afterSource:`\\begingroup\\expandafter\\def\\csname b@${match[1]}\\endcsname{\\hyperlink{cite.${match[1]}}{${after}}}${original}\\endgroup`,diagnostics};
     return fail('unsupported-citation-override', 'Display override requires a single standard citation with hyperref; edit this citation in source for other styles.');
   }
   if (node.kind === 'footnote') {
-    // The ordinary footnote still advances its counter; the local definition changes only its printed mark.
-    if (/^\\footnote\s*\{/.test(original) && original.endsWith('}')) return {anchor, afterSource: `\\begingroup\\renewcommand{\\thefootnote}{${after}}${original}\\endgroup`, diagnostics};
+    // Increment and link the mark once; typeset the body with the restored counter format.
+    const match = /^\\footnote(\s*\{[\s\S]*\})$/.exec(original);
+    if (match) return {anchor, afterSource: `\\begingroup\\renewcommand{\\thefootnote}{${after}}\\footnotemark\\endgroup\\footnotetext${match[1]}`, diagnostics};
   }
   return fail('unsupported-display-override', 'This marker cannot be safely overridden. Edit its source explicitly or select a supported standard marker.');
 }

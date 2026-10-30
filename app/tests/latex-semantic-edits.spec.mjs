@@ -1,5 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {spawnSync} from 'node:child_process';
+import {mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 import {buildReferencePatch} from '../src/latex-reference-policy.mjs';
 import {resolveSourceProposals} from '../src/latex-semantic-edits.mjs';
 const make = (source, kind, content) => { const start=source.indexOf('\\'); const end=source.length; const contentStart=source.indexOf('{',start)+1, contentEnd=source.lastIndexOf('}'); return {project:{id:'p',files:[{path:'a.tex',bytes:new TextEncoder().encode(source)}]},node:{id:'n',path:'a.tex',kind,start,end,contentStart,contentEnd,sourceText:source.slice(start),text:content}}; };
@@ -8,7 +12,7 @@ test('superscript display and footnote display preserve source and counter opera
   assert.equal(buildReferencePatch(project,node,{after:'63',mode:'display-override'}).afterSource,'\\textsuperscript{63}');
   ({project,node}=make('Text\\footnote{Original note.}','footnote','Original note.'));
   const patch=buildReferencePatch(project,node,{after:'63',mode:'display-override'});
-  assert.equal(patch.afterSource,'\\begingroup\\renewcommand{\\thefootnote}{63}\\footnote{Original note.}\\endgroup');
+  assert.equal(patch.afterSource,'\\begingroup\\renewcommand{\\thefootnote}{63}\\footnotemark\\endgroup\\footnotetext{Original note.}');
   assert.equal(buildReferencePatch(project,node,{after:'New & note',mode:'content'}).afterSource,'\\footnote{New \\& note}');
 });
 test('citation content keeps command and rejects unsafe override',()=>{
@@ -62,5 +66,33 @@ test('standard hyperref citation override preserves bibliography registration an
  const original='\\usepackage{hyperref}\nText\\cite{example}';
  const {project,node}=make(original,'citation','example'); node.start=original.indexOf('\\cite'); node.sourceText=original.slice(node.start); node.contentStart=original.indexOf('{example}')+1; node.contentEnd=node.contentStart+7;
  const patch=buildReferencePatch(project,node,{after:'63',mode:'display-override'});
- assert.equal(patch.afterSource,'\\nocite{example}\\hyperlink{cite.example}{63}');
+ assert.equal(patch.afterSource,'\\begingroup\\expandafter\\def\\csname b@example\\endcsname{\\hyperlink{cite.example}{63}}\\cite{example}\\endgroup');
+});
+
+test('compiled standard references keep display, counters, registration and link destinations', t=>{
+ const available=(cmd,args)=>spawnSync(cmd,args,{encoding:'utf8'}).status===0;
+ if (!available('pdflatex',['--version']) || !available('pdftotext',['-v']) || !available('python',['-c','import pypdf'])) return t.skip('requires pdflatex, pdftotext and Python pypdf');
+ const cite=make('\\cite{example}','citation','example');
+ cite.project.files.push({path:'preamble.tex',bytes:new TextEncoder().encode('\\usepackage{hyperref}')});
+ const note=make('\\footnote{Original note.}','footnote','Original note.');
+ const patchedCite=buildReferencePatch(cite.project,cite.node,{after:'63',mode:'display-override'}).afterSource;
+ const patchedNote=buildReferencePatch(note.project,note.node,{after:'63',mode:'display-override'}).afterSource;
+ const dir=mkdtempSync(join(tmpdir(),'falsify-reference-'));
+ try {
+  writeFileSync(join(dir,'probe.tex'),String.raw`\documentclass{article}
+\usepackage{hyperref}
+\begin{document}
+Cite ${patchedCite}. Normal \cite{example}.
+Mark${patchedNote} Next\footnote{Next note.}
+\begin{thebibliography}{9}\bibitem{example} Example.\end{thebibliography}
+\end{document}`);
+  for (let i=0;i<2;i++) { const r=spawnSync('pdflatex',['-interaction=nonstopmode','-halt-on-error','probe.tex'],{cwd:dir,encoding:'utf8',env:{...process.env, MIKTEX_ENABLEINSTALLER:'0'}}); assert.equal(r.status,0,r.stdout+'\n'+r.stderr); }
+  const text=spawnSync('pdftotext',['-layout','probe.pdf','-'],{cwd:dir,encoding:'utf8'}); assert.equal(text.status,0,text.stderr);
+  assert.match(text.stdout,/Cite \[63\]\. Normal \[1\]\. Mark63 Next2/);
+  assert.match(text.stdout,/1 Original note\./); assert.match(text.stdout,/2 Next note\./);
+  assert.equal((readFileSync(join(dir,'probe.aux'),'utf8').match(/\\citation\{example\}/g)||[]).length,2);
+  const links=spawnSync('python',['-c',"import json,pypdf; r=pypdf.PdfReader('probe.pdf'); print(json.dumps([a.get_object().get('/A',{}).get('/D') for a in r.pages[0].get('/Annots',[])]))"],{cwd:dir,encoding:'utf8'});
+  assert.equal(links.status,0,links.stderr);
+  assert.deepEqual(JSON.parse(links.stdout),['cite.example','cite.example','Hfootnote.1','Hfootnote.2']);
+ } finally { rmSync(dir,{recursive:true,force:true}); }
 });
