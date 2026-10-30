@@ -23,7 +23,7 @@
 +    if (!holder) return false;
 +    auto validDict = [&](FPDF_FONT font) {
 +        auto* dict = abiFontDict(s.doc, holder, font, name);
-+        if (!dict || dict->KeyExist(fxcrt::StringViewTemplate<char>("ToUnicode",9))) return false;
++        if (!dict || abiByteStringChars(dict->GetByteStringFor(fxcrt::StringViewTemplate<char>("BaseFont",8))) != name || abiByteStringChars(dict->GetByteStringFor(fxcrt::StringViewTemplate<char>("Subtype",7))) != "Type1" || dict->KeyExist(fxcrt::StringViewTemplate<char>("ToUnicode",9))) return false;
 +        for (const auto& key : {"Widths","FirstChar","LastChar","FontDescriptor"})
 +            if (dict->KeyExist(fxcrt::StringViewTemplate<char>(key,strlen(key)))) return false;
 +        if (!dict->KeyExist(fxcrt::StringViewTemplate<char>("Encoding",8))) return true;

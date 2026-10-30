@@ -51,7 +51,7 @@
     },
     {
       "name": "native-standard-digit-equivalence.patch",
-      "sha256": "3dab8564d7bc3f275991eae476cdba961b8ad737c75a8ff87bf83a6cbf06c372"
+      "sha256": "07ea8445415b77d1abec998cac1aab2049d798f83d070b296aa5b08ff0c6f727"
     }
   ],
   "artifacts": {
@@ -61,7 +61,7 @@
     },
     "wasm": {
       "path": "editcore.wasm",
-      "sha256": "7d9c7b8738db848b4595b8f71bcde3ab18360a131ac0b3126b4b7035af959dc8"
+      "sha256": "770c19d26ff95cb24db2dd8f9a348ab00fa9415547cd343148c3180bc19e7e2c"
     }
   },
   "provenance": {
@@ -72,9 +72,9 @@
     "verification": "Artifact and patch sha256 recorded from supplied files only; C++/WASM rebuild from the listed sources was not verified by this script.",
     "note": "reedit-1726cc21-20261019 snapshot (provenance.json b2878492) from same-host build root /home/jcpuk/editor-wasm-build.I80fju out/wasm-resumed-20261019; native 1726cc21, parent 8ba2939, gate native-repair-review.json fea29c69 ACCEPT_SOURCE_SCOPE. Stacked patches applied in order stream-order(pdfium), natural-space, justified-space, reedit-space(engine); only stream-order and reedit-space reverse-check individually, all four bound by engine.diff 6cf69c5f (blob ids 813903c..1726cc21) and pdfium.diff d5225a53. Incremental, not clean-room. Font cmap and inline script patches applied on the same-host incremental cached source build snapshot /home/jcpuk/editor-wasm-build.I80fju/out/font-inline-20261028; not a clean reproducible source build. Final flanked-marker gap merge built and individually reverse-checked in snapshot font-inline-flanked-20261028; nativeSnapshot binds its complete source diffs. Unchanged-column interleaving is handled before general line merging. Composite inline and horizontal scale patches stacked on alpha.32, snapshot editor-scripts-scale-20261028; original script styles and measured horizontal ratios retained. Incremental build; sourceBuildVerified remains false. Word spacing normalization checks the current text object Tw so explicit-position objects are not repeatedly recreated. Incremental same-host relink, not a clean rebuild. Narrow nonembedded Helvetica digit equivalence avoids renaming source fonts when dictionaries, mappings, widths and outlines prove equivalence; unsupported collision cases retain prior behavior and may remain draft. Incremental relink, not clean build.",
     "nativeSnapshot": {
-      "name": "font-digit-probe-20261030",
-      "provenanceSha256": "cca1ef36075e86b5f1c3bfba5a0e4c0c2b5a119e0eed5ba84b14bb1b9ffc4b03",
-      "engineDiffSha256": "ab1426144fb76dee2fadc575486209c4f62510d24af00659e5597c3c5dbd2f24",
+      "name": "font-digit-type1-20261030",
+      "provenanceSha256": "5d828ced4383b10eed01b56c1f959a81ba1f59f52a2849e80b81f66991a06780",
+      "engineDiffSha256": "62148df1e6780fda23426723e45c73b4a8ad24e0f12caa527094573249845719",
       "pdfiumDiffSha256": "f6059e1c45acc5f8127ce713fb23695cd4685b8a449857b7eea8cf1f9e461c34",
       "incremental": true
     }
