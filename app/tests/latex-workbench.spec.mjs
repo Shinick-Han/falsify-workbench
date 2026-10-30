@@ -109,3 +109,13 @@ test('adding an asset rebinds verified ranges to the new project and preserves c
   const saved=await encodeSourceSession({project:next,changes,responses},{createLatexProject});
   assert.equal((await decodeSourceSession(saved,{createLatexProject})).changes[1].rebindDiagnostic,conflict.rebindDiagnostic);
 });
+test('source highlights use complete proposal context and displayed manual text',()=>{
+  const changes=[{id:'p:0',proposalId:'p',enabled:true},{id:'p:1',proposalId:'p',enabled:true},{id:'m',anchor:{nodeId:'n'},before:'\\cite{x}',after:'63'}];
+  assert.deepEqual(workbench.highlightEdits(changes,[{id:'p',before:'Claim62 works',after:'Claim63 holds'}],{nodes:[{id:'n',displayText:'62'}]}),[{id:'p',before:'Claim62 works',after:'Claim63 holds'},{id:'m',before:'62',after:'63'}]);
+  changes[1].enabled=false;assert.equal(workbench.highlightEdits(changes,[{id:'p',before:'a',after:'b'}],{nodes:[]}).length,1);
+});
+test('PDF item separator joins touching superscript runs but preserves spaces and line breaks',()=>{
+  const item={transform:[10,0,0,10,50,100],width:25};
+  assert.equal(workbench.pdfItemSeparator(item,{transform:[7,0,0,7,75,103]}),'');
+  assert.equal(workbench.pdfItemSeparator(item,{transform:[10,0,0,10,79,100]}),' ');
+});

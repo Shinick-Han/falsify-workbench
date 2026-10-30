@@ -51,6 +51,20 @@ export function proposalTransaction(changes, proposal, enabled, projectId) {
   return next.concat(primitives.map((c,i)=>({...c,id:proposal.id+':'+i,proposalId:proposal.id,enabled,provenance:proposal.provenance})));
 }
 
+// PDF.js item geometry determines whether adjacent extracted runs touch.
+export function pdfItemSeparator(item,next){
+  if(!next || !item?.transform || !next.transform || !Number.isFinite(item.width))return ' ';
+  const a=item.transform,b=next.transform;
+  if(Math.abs(a[1])>.01 || Math.abs(b[1])>.01 || a[0]<=0 || b[0]<=0)return ' ';
+  const gap=b[4]-(a[4]+item.width), height=Math.max(Math.abs(a[3]),Math.abs(b[3]),1);
+  return gap>=-height*.15 && gap<=height*.12 ? '' : ' ';
+}
+export function highlightEdits(changes,proposals,model){
+  const enabled=changes.filter(c=>c.enabled!==false), result=[];
+  for(const p of proposals){const group=enabled.filter(c=>c.proposalId===p.id);if(group.length && group.length===changes.filter(c=>c.proposalId===p.id).length)result.push({id:p.id,before:p.before,after:p.after});}
+  for(const c of enabled.filter(c=>!c.proposalId)){const node=model?.nodes?.find(n=>n.id===c.anchor?.nodeId);result.push({id:c.id,before:node?.displayText ?? c.before,after:c.after});}
+  return result;
+}
 export function mountLatexWorkbench(doc=globalThis.document){
   const intake=doc.getElementById('paper-file'),pdfWorkspace=doc.getElementById('paper-workspace');
   if(!intake||!pdfWorkspace)return null;
@@ -121,28 +135,31 @@ export function mountLatexWorkbench(doc=globalThis.document){
   function edit({nodeId,after,mode}){run(async()=>{if(pendingRestore)throw new Error('먼저 PDF 만들기를 눌러 원본을 준비하세요.');const node=model.nodes.find(n=>n.id===nodeId);if(!node)throw new Error('원본을 다시 선택하세요.');const policy=mode==='raw-source'?{anchor:{projectId:project.id,nodeId:node.id,path:node.path,start:node.contentStart,end:node.contentEnd,kind:node.kind},afterSource:after,diagnostics:[]}:buildReferencePatch(project,node,{after,mode});if(policy.diagnostics.length)throw new Error(policy.diagnostics[0].message);const source=textFile(project,node.path);session.setChange({id:'manual-'+node.id,before:source.slice(policy.anchor.start,policy.anchor.end),after,afterSource:policy.afterSource,anchor:policy.anchor,kind:node.kind,mode,provenance:{origin:'human'}});});}
   function selectProposal(p,enabled){try{if(pendingRestore)throw new Error('먼저 PDF 만들기를 눌러 원본을 준비하세요.');session.setChanges(proposalTransaction(session.snapshot().changes,p,enabled,project.id));}catch(e){showError(e);}}
   function bindProposal(p){const node=model?.nodes.find(n=>n.id===selection?.nodeId);if(!node)throw new Error('먼저 원본에서 내용을 선택하세요.');if(!globalThis.confirm('선택한 원본 전체를 이 제안으로 바꾸시겠습니까?'))return;const anchor={projectId:project.id,nodeId:node.id,path:node.path,start:node.contentStart,end:node.contentEnd,kind:node.kind};p.status='matched';p.kind=node.kind;p.anchor=anchor;p.before=textFile(project,node.path).slice(anchor.start,anchor.end);p.sourceChanges=undefined;selectProposal(p,true);}
-  let highlightTicket=0;
+  let highlightTicket=0;const textPages=new Map(),textLayers=new Map(),visibleText=[null,null];
   async function updateHighlights(){
     const ticket=++highlightTicket;leftOverlay.replaceChildren();rightOverlay.replaceChildren();highlightLabel.textContent='';
     if(!session||!project)return;const state=session.snapshot(),changes=state.changes.filter(c=>c.enabled!==false),baseline=state.baseline,current=state.artifact;
     if(!changes.length||!baseline)return;
-    const derived=await applySourceChanges(project,changes);if(ticket!==highlightTicket||derived.diagnostics.length)return;
-    const describe=(c,side)=>{const src=textFile(project,c.anchor.path),prefix=src.slice(0,c.anchor.start),prior=changes.filter(x=>x.anchor.path===c.anchor.path&&x.anchor.end<=c.anchor.start&&x.id!==c.id);let line=prefix.split('\n').length;
-      if(side)for(const p of prior)line+=(p.afterSource??p.after).split('\n').length-p.before.split('\n').length;
-      const count=(side?(c.afterSource??c.after):c.before).split('\n').length;return {path:c.anchor.path,line,count};};
-    const labels=[];
-    for(const [side,artifact,overlay,canvas] of [[0,baseline,leftOverlay,leftCanvas],[1,current,rightOverlay,rightCanvas]]){
-      if(!artifact)continue;let map=null;try{if(artifact.synctex)map=parseSynctex(artifact.synctex,{project:side?derived.project:project});}catch{}
-      for(const change of changes){const {path,line,count}=describe(change,side);labels.push(`${side?'수정본':'원본'} ${path}:${line}${count>1?`–${line+count-1}`:''}`);
-        for(let n=line;map&&n<line+count;n++){const boxes=mapSourceToPdf(map,{path,line:n}).candidates.filter(v=>v.pageIndex===currentPage&&v.box.width>0&&v.box.height>0&&v.box.width<canvas.width/1.2*.9&&v.box.height<canvas.height/1.2*.2).sort((a,b)=>a.box.width*a.box.height-b.box.width*b.box.height);if(!boxes.length)continue;const b=boxes[0].box,mark=el('span','','latex-highlight-mark');mark.style.left=`${b.x*1.2/canvas.width*100}%`;mark.style.top=`${b.y*1.2/canvas.height*100}%`;mark.style.width=`${b.width*1.2/canvas.width*100}%`;mark.style.height=`${b.height*1.2/canvas.height*100}%`;overlay.append(mark);}
-      }
+    const edits=highlightEdits(state.changes,proposals,model),labels=[];
+    for(const c of changes){const line=textFile(project,c.anchor.path).slice(0,c.anchor.start).split('\n').length;labels.push(`${c.anchor.path}:${line}`);}
+    highlightLabel.textContent=`변경 원본 줄: ${[...new Set(labels)].join(' · ')}`;
+    const marks=globalThis.FalsifyChangeMarks;if(!marks?.paintPage)return;
+    for(const [i,artifact,overlay,frame] of [[0,baseline,leftOverlay,leftFrame],[1,current,rightOverlay,rightFrame]]){
+      if(!artifact)continue;const view=visibleText[i];if(!view||view.key!==artifact.pdfHash+':'+currentPage)continue;
+      const scale=frame.getBoundingClientRect().width/view.viewport.width;if(!(scale>0))continue;view.element.style.transform=`scale(${scale})`;
+      const result=marks.paintPage({document:doc,container:frame,items:view.items,divs:view.divs,edits,side:i?'after':'before',separator:pdfItemSeparator});
+      if(ticket!==highlightTicket){result.layer.remove();return;}overlay.append(result.layer);
     }
-    if(ticket===highlightTicket)highlightLabel.textContent=labels.length?`변경 줄: ${[...new Set(labels)].join(' · ')}`:'';
   }
+  const resizeObserver=typeof ResizeObserver==='function'?new ResizeObserver(()=>void updateHighlights()):null;resizeObserver?.observe(leftFrame);resizeObserver?.observe(rightFrame);
   async function pdfLibrary(ticket){if(!pdfjs){pdfjs=await import('./vendor/pdf.mjs');pdfjs.GlobalWorkerOptions.workerSrc=new URL('vendor/pdf.worker.mjs',base).href;}if(ticket!==renderEpoch)return null;documentCache??=globalThis.FalsifyPaperGeneration.createDocumentCache({maxEntries:3});return pdfjs;}
   let renderedKey='',leftRendered='';
   async function render(){if(!active||!session)return;const ticket=++renderEpoch,s=session.snapshot(),baseline=s.baseline,current=s.artifact||s.lastArtifact;if(!baseline||!current)return;const lib=await pdfLibrary(ticket);if(!lib)return;const cache=documentCache;let docs=[];try{for(const a of[baseline,current])docs.push(await cache.load(a.pdfHash,()=>lib.getDocument({data:a.pdfBytes.slice(),cMapUrl:new URL('vendor/cmaps/',base).href,cMapPacked:true,standardFontDataUrl:new URL('vendor/standard_fonts/',base).href,wasmUrl:new URL('vendor/wasm/',base).href})));if(ticket!==renderEpoch)return;currentPage=Math.min(currentPage,Math.max(docs[0].numPages,docs[1].numPages)-1);pageLabel.textContent=`${currentPage+1} / ${Math.max(docs[0].numPages,docs[1].numPages)}쪽`;prev.disabled=currentPage===0;next.disabled=currentPage>=Math.max(docs[0].numPages,docs[1].numPages)-1;
-      for(const[i,pdf]of docs.entries()){const canvas=i?rightCanvas:leftCanvas,a=i?current:baseline,key=a.pdfHash+':'+currentPage;if((i?renderedKey:leftRendered)===key)continue;if(currentPage>=pdf.numPages){canvas.width=1;canvas.height=1;continue;}const page=await pdf.getPage(currentPage+1);if(ticket!==renderEpoch)return;const viewport=page.getViewport({scale:1.2}),scratch=doc.createElement('canvas');scratch.width=Math.ceil(viewport.width);scratch.height=Math.ceil(viewport.height);await page.render({canvasContext:scratch.getContext('2d'),viewport}).promise;if(ticket!==renderEpoch)return;canvas.width=scratch.width;canvas.height=scratch.height;canvas.getContext('2d').drawImage(scratch,0,0);canvas.dataset.scale='1.2';if(i)renderedKey=key;else leftRendered=key;}
+      for(const[i,pdf]of docs.entries()){const canvas=i?rightCanvas:leftCanvas,a=i?current:baseline,key=a.pdfHash+':'+currentPage;if((i?renderedKey:leftRendered)===key)continue;if(currentPage>=pdf.numPages){canvas.width=1;canvas.height=1;continue;}const page=await pdf.getPage(currentPage+1);if(ticket!==renderEpoch)return;const viewport=page.getViewport({scale:1.2}),scratch=doc.createElement('canvas');scratch.width=Math.ceil(viewport.width);scratch.height=Math.ceil(viewport.height);await page.render({canvasContext:scratch.getContext('2d'),viewport}).promise;if(ticket!==renderEpoch)return;canvas.width=scratch.width;canvas.height=scratch.height;canvas.getContext('2d').drawImage(scratch,0,0);canvas.dataset.scale='1.2';
+        let content=textPages.get(key);if(!content){content=await page.getTextContent();textPages.set(key,content);if(textPages.size>12)textPages.delete(textPages.keys().next().value);}if(ticket!==renderEpoch)return;
+        const frame=i?rightFrame:leftFrame;visibleText[i]?.element.remove();const layerKey=i+':'+key;let view=textLayers.get(layerKey);
+        if(!view){const textEl=el('div','','paper-text-layer textLayer latex-pdf-text-layer');textEl.style.width=viewport.width+'px';textEl.style.height=viewport.height+'px';textEl.style.setProperty('--total-scale-factor',String(viewport.scale));textEl.style.setProperty('--scale-round-x','1px');textEl.style.setProperty('--scale-round-y','1px');textEl.style.setProperty('--text-scale-factor','1');frame.append(textEl);const layer=new lib.TextLayer({textContentSource:content,container:textEl,viewport});await layer.render();if(ticket!==renderEpoch){textEl.remove();return;}view={key,element:textEl,items:content.items,divs:layer.textDivs,viewport};textLayers.set(layerKey,view);if(textLayers.size>12){const oldest=textLayers.keys().next().value;textLayers.get(oldest).element.remove();textLayers.delete(oldest);}}else frame.append(view.element);visibleText[i]=view;
+        if(i)renderedKey=key;else leftRendered=key;}
       void updateHighlights();
     }catch(e){if(ticket===renderEpoch)showError(e);}finally{for(const[i,pdf]of docs.entries())cache.release((i?current:baseline).pdfHash);}}
   prev.onclick=()=>{currentPage=Math.max(0,currentPage-1);void render();};next.onclick=()=>{currentPage++;void render();};
