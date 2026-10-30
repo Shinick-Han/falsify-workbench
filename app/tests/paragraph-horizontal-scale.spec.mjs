@@ -65,3 +65,37 @@ test('repeated no-op model builds preserve word-spaced object ownership and geom
     }
   } finally { e.close(); }
 });
+
+test('Tc and explicit TJ spacing survive model builds and save/reload', async () => {
+  const M=await create({wasmBinary:readFileSync(join(runtime,'editcore.wasm')),print(){},printErr(){}});
+  const cfg=M._malloc(48); M.HEAPU8.fill(0,cfg,cfg+48); M.HEAPU32[cfg>>2]=2; M._FPDF_InitLibraryWithConfig(cfg); M._free(cfg);
+  const streams=[
+    'BT /F1 12 Tf 1.1 Tc 1 0 0 1 60 200 Tm (one two three) Tj ET',
+    'BT /F1 12 Tf 1 0 0 1 60 200 Tm [(one ) -180 (two ) -180 (three)] TJ ET',
+  ];
+  const e=new PdfEngine(M); e.open(fixture(streams));
+  const glyphs=()=>{
+    const tp=M._FPDFText_LoadPage(e.page), p=M._malloc(16), out=[];
+    try { for(let i=0,n=M._FPDFText_CountChars(tp);i<n;i++) {
+      const u=M._FPDFText_GetUnicode(tp,i);
+      if (u && M._FPDFText_GetCharOrigin(tp,i,p,p+8)) out.push([u,M.HEAPF64[p>>3],M.HEAPF64[(p+8)>>3]]);
+    } } finally { M._free(p); M._FPDFText_ClosePage(tp); }
+    return out;
+  };
+  const same=(a,b)=>{ assert.equal(b.length,a.length); a.forEach((v,i)=>{assert.equal(b[i][0],v[0]); assert.ok(Math.abs(v[1]-b[i][1])<0.02); assert.ok(Math.abs(v[2]-b[i][2])<0.02);}); };
+  try {
+    for(let page=0;page<streams.length;page++) {
+      e.loadPage(page); const original=glyphs(); e.buildModel(); same(original,glyphs());
+      const objects=Array.from({length:M._FPDFPage_CountObjects(e.page)},(_,i)=>M._FPDFPage_GetObject(e.page,i)>>>0);
+      e.buildModel(); same(original,glyphs());
+      assert.deepEqual(Array.from({length:M._FPDFPage_CountObjects(e.page)},(_,i)=>M._FPDFPage_GetObject(e.page,i)>>>0),objects);
+      e.historyBeginStep('spacing-undo');
+      e.historyNoteMatrix(objects[0]); e.translateObject(objects[0],3,0);
+      e.historyEndStep(); assert.ok(e.historyUndo()); same(original,glyphs());
+      e.buildModel(); same(original,glyphs());
+      assert.deepEqual(Array.from({length:M._FPDFPage_CountObjects(e.page)},(_,i)=>M._FPDFPage_GetObject(e.page,i)>>>0),objects);
+      e.generateContent(); const bytes=e.save(); e.reopen(bytes,page); same(original,glyphs());
+      e.buildModel(); same(original,glyphs());
+    }
+  } finally { e.close(); }
+});
