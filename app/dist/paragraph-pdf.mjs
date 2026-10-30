@@ -8775,6 +8775,24 @@ function planInlineChange(paras, chars, map, hit, needle, after) {
   const style = (c) => runStyleKey(paras[c.pi].runs[c.ri]);
   const place = (c, text4, after2 = false) => ({ pi: c.pi, ri: c.ri, o: c.o + (after2 ? 1 : 0), text: text4 });
   const words = del.filter((c) => !isWs(c));
+  if (D.length === 1 && X.length === 1 && !WS.test(D[0].t) && !WS.test(X[0]) && new Set(words.map(style)).size > 1) {
+    const b = D[0], a = X[0];
+    let first = 0, last = 0;
+    while (first < b.t.length && first < a.length && b.t[first] === a[first]) first++;
+    while (last < b.t.length - first && last < a.length - first && b.t[b.t.length - 1 - last] === a[a.length - 1 - last]) last++;
+    const old = b.t.slice(first, b.t.length - last), replacement = a.slice(first, a.length - last);
+    if ((first || last) && old) {
+      const narrow = rawOf({ k0: b.k0 + first, k1: b.k1 - last }).filter((c) => c.pi >= 0);
+      if (narrow.length && new Set(narrow.map(style)).size === 1) {
+        const numeric = /^[0-9]+$/.test(old) && /^[0-9]+$/.test(replacement);
+        return {
+          del: narrow,
+          inserts: replacement ? [place(narrow[0], replacement)] : [],
+          ...numeric ? { warning: "numeric_marker_style_from_digits", numericMarker: { before: old, after: replacement, context: b.t, offset: first } } : {}
+        };
+      }
+    }
+  }
   if (words.length) {
     const styles = new Set(words.map(style));
     const paraSet = new Set(del.map((c) => c.pi));
@@ -8862,29 +8880,41 @@ function planInlineChange(paras, chars, map, hit, needle, after) {
   const ins = [rk ? viaRight : null, lk ? viaLeft : null, viaRight, viaLeft].find((c) => c && style(c) === want);
   return ins ? { del, inserts: [ins] } : { failure: "AMBIGUOUS_STYLE" };
 }
-function commitNumericMarker(engine, para, before, after) {
-  if (!/^[0-9]+(?:[,;:–-][0-9]+)+$/.test(before) || !/^[0-9]+$/.test(after)) return null;
+function commitNumericMarker(engine, para, before, after, scope = null) {
+  if (!/^[0-9]+(?:[,;:–-][0-9]+)*$/.test(before) || !/^[0-9]+$/.test(after)) return null;
   const M = engine.M;
-  const required = ["_FPDFText_LoadPage", "_FPDFText_CountChars", "_FPDFText_GetUnicode", "_FPDFText_GetTextObject", "_FPDFText_ClosePage", "_FPDFText_SetText", "_FPDFPage_RemoveObject"];
+  const required = ["_FPDFText_LoadPage", "_FPDFText_CountChars", "_FPDFText_GetUnicode", "_FPDFText_GetTextObject", "_FPDFText_GetCharBox", "_FPDFText_ClosePage", "_FPDFText_SetText", "_FPDFPage_RemoveObject"];
   if (!required.every((k) => typeof M?.[k] === "function")) return null;
   const owner = new Set((engine.paragraphObjects(para.id) || []).map((h) => h >>> 0));
   const pageText = M._FPDFText_LoadPage(engine.page);
   if (!pageText) return null;
-  const chars = [];
+  const chars = [], buf = M._malloc(32);
   try {
-    for (let i = 0; i < M._FPDFText_CountChars(pageText); i++) chars.push({ u: M._FPDFText_GetUnicode(pageText, i), h: M._FPDFText_GetTextObject(pageText, i) >>> 0 });
+    for (let i = 0; i < M._FPDFText_CountChars(pageText); i++) {
+      const u = M._FPDFText_GetUnicode(pageText, i), h = M._FPDFText_GetTextObject(pageText, i) >>> 0;
+      const valid2 = M._FPDFText_GetCharBox(pageText, i, buf, buf + 8, buf + 16, buf + 24), v = valid2 ? [0, 1, 2, 3].map((k) => M.HEAPF64[(buf >> 3) + k]) : null;
+      chars.push({ u, h, box: v && v.every(Number.isFinite) ? { x: v[0], y: v[2], w: v[1] - v[0], h: v[3] - v[2] } : null });
+    }
   } finally {
     M._FPDFText_ClosePage(pageText);
+    M._free(buf);
   }
-  const text3 = chars.map((c) => String.fromCharCode(c.u)).join(""), start = text3.indexOf(before);
-  if (start < 0 || text3.indexOf(before, start + 1) >= 0) return null;
+  const text3 = chars.map((c) => String.fromCharCode(c.u)).join("");
+  const indexed = scope ? chars.map((c, i) => ({ c, i })).filter(({ c }) => !/\s/.test(String.fromCharCode(c.u))) : null;
+  const search = indexed ? indexed.map(({ c }) => String.fromCharCode(c.u)).join("") : text3, needle = scope?.context || before, where = search.indexOf(needle);
+  if (where < 0 || search.indexOf(needle, where + 1) >= 0) return null;
+  const at = where + (scope?.offset || 0), start = indexed ? indexed[at]?.i : at;
+  if (!Number.isInteger(start) || text3.slice(start, start + before.length) !== before) return null;
   const selected = chars.slice(start, start + before.length), handles = [...new Set(selected.map((c) => c.h))];
   if (handles.some((h) => !h || !owner.has(h)) || chars.some((c, i) => handles.includes(c.h) && (i < start || i >= start + before.length))) return null;
-  const firstText = selected.filter((c) => c.h === handles[0]).map((c) => String.fromCharCode(c.u)).join("");
-  if (!/^[0-9]+$/.test(firstText) || selected.findIndex((c) => c.h !== handles[0]) !== firstText.length) return null;
+  if (handles.length > 1 && typeof engine.retainDetachedObject !== "function" && typeof M._FPDFPageObj_Destroy !== "function") return null;
+  const firstText = selected.filter((c) => c.h === handles[0]).map((c) => String.fromCharCode(c.u)).join(""), firstEnd = selected.findIndex((c) => c.h !== handles[0]);
+  if (!/^[0-9]+$/.test(firstText) || firstEnd >= 0 && firstEnd !== firstText.length) return null;
   const boxes = handles.map((h) => engine.objectBounds(h));
   if (boxes.some((b) => !b || ![b.x, b.y, b.w, b.h].every(Number.isFinite))) return null;
-  const bounds = { left: Math.min(...boxes.map((b) => b.x)), right: Math.max(...boxes.map((b) => b.x + b.w)), bottom: Math.min(...boxes.map((b) => b.y)), top: Math.max(...boxes.map((b) => b.y + b.h)) };
+  const bounds = { x: Math.min(...boxes.map((b) => b.x)), y: Math.min(...boxes.map((b) => b.y)) };
+  bounds.w = Math.max(...boxes.map((b) => b.x + b.w)) - bounds.x;
+  bounds.h = Math.max(...boxes.map((b) => b.y + b.h)) - bounds.y;
   const put = (value) => {
     const p = M._malloc((value.length + 1) * 2);
     try {
@@ -8896,14 +8926,22 @@ function commitNumericMarker(engine, para, before, after) {
     }
   };
   if (!put(after)) throw new LineRetentionError("numeric_marker_write_failed");
-  const next = engine.objectBounds(handles[0]);
-  if (!next || next.x < bounds.left - 0.5 || next.x + next.w > bounds.right + 0.5 || next.y < bounds.bottom - 0.5 || next.y + next.h > bounds.top + 0.5) {
+  const next = engine.objectBounds(handles[0]), overlap = (a, b) => Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x)) * Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+  let fits = next && next.x >= bounds.x - 0.5 && next.y >= bounds.y - 0.5 && next.y + next.h <= bounds.y + bounds.h + 0.5;
+  if (fits && next.x + next.w > bounds.x + bounds.w + 0.5) {
+    fits = Number.isFinite(engine.pageWidth) && next.x + next.w <= engine.pageWidth && chars.every((c, i) => {
+      if (i >= start && i < start + before.length || !c.u || /\s/.test(String.fromCharCode(c.u))) return true;
+      return !!c.box && overlap(next, c.box) <= overlap(bounds, c.box) + 0.05;
+    });
+  }
+  if (!fits) {
     if (!put(firstText)) throw new LineRetentionError("numeric_marker_restore_failed");
     return null;
   }
   for (const h of handles.slice(1)) {
     if (!M._FPDFPage_RemoveObject(engine.page, h)) throw new LineRetentionError("numeric_marker_remove_failed");
-    engine.retainDetachedObject(h);
+    if (typeof engine.retainDetachedObject === "function") engine.retainDetachedObject(h);
+    else M._FPDFPageObj_Destroy(h);
   }
   engine._pageDirty = true;
   engine._spliceOk = false;
@@ -10583,7 +10621,8 @@ async function editPdf(request, options = {}) {
         const para = paras[pi];
         const markerPlans = plan.plans.filter((p) => !p.noop && p.touched.includes(pi));
         if (markerPlans.length === 1 && markerPlans[0].change?.warning === "numeric_marker_style_from_digits") {
-          const marker = commitNumericMarker(engine, para, markerPlans[0].edit.before, markerPlans[0].edit.after);
+          const mapped = markerPlans[0].change.numericMarker;
+          const marker = commitNumericMarker(engine, para, mapped?.before || markerPlans[0].edit.before, mapped?.after || markerPlans[0].edit.after, mapped);
           if (marker) {
             mutated = true;
             pageReport.paragraphs.push({ index: pi, surgical: true, lineRetention: marker });

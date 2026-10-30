@@ -528,7 +528,8 @@ export async function editPdf(request, options = {}) {
         const para = paras[pi];
         const markerPlans=plan.plans.filter(p=>!p.noop&&p.touched.includes(pi));
         if(markerPlans.length===1&&markerPlans[0].change?.warning==='numeric_marker_style_from_digits'){
-          const marker=commitNumericMarker(engine,para,markerPlans[0].edit.before,markerPlans[0].edit.after);
+          const mapped=markerPlans[0].change.numericMarker;
+          const marker=commitNumericMarker(engine,para,mapped?.before||markerPlans[0].edit.before,mapped?.after||markerPlans[0].edit.after,mapped);
           if(marker){mutated=true;pageReport.paragraphs.push({index:pi,surgical:true,lineRetention:marker});continue;}
         }
         const geometric = plan.plans.some((p) => p.geometricShortening && p.touched.includes(pi));

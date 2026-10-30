@@ -18,3 +18,17 @@ test('mixed prose and newly punctuated alternatives do not assume a marker style
  assert.equal(plan([run('item2',65535),run(',',255),run('3',65535)]).failure,'AMBIGUOUS_STYLE');
  assert.equal(plan([run('2',65535),run(',',255),run('3',65535)],'3,5').failure,'AMBIGUOUS_STYLE');
 });
+
+test('editing a raised digit inside an author word preserves the surrounding mixed styles',()=>{
+ const runs=[run('Example Author ',255,{size:12,rise:0,bold:true}),run('Kim',255,{size:12,rise:0,bold:true}),run('2',65535),run(',',255),run('3',65535),run(', Other Author',255,{size:12,rise:0,bold:true})];
+ const p=plan(runs,'Example Author Kim2,45, Other Author');
+ assert.equal(p.failure,undefined);
+ assert.deepEqual(p.del.map(c=>c.ch),['3']);
+ assert.deepEqual(p.inserts,[{pi:0,ri:4,o:0,text:'45'}]);
+ assert.deepEqual(p.numericMarker,{before:'3',after:'45',context:'Kim2,3,',offset:5});
+});
+
+test('a changed span crossing distinct styles still requires a mapping',()=>{
+ const p=plan([run('Kim',255,{size:12,rise:0,bold:true}),run('2',65535),run(',',255),run('3',65535)],'Smith45');
+ assert.equal(p.failure,'AMBIGUOUS_STYLE');
+});

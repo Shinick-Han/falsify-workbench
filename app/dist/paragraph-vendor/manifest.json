@@ -79,10 +79,10 @@
   "sourceBuildVerified": false,
   "trust": "locally-supplied-hash-verified-artifacts",
   "editorModuleSha256": {
-    "editor.mjs": "8506650b8e454ba52662176473dacb297312965b3a8b47b4b201f74eaea943f4",
+    "editor.mjs": "eb1c0997cad8a72fba1c375ee0919e8b870e5b4d06309a8f37c2ba809bcb745e",
     "quality.mjs": "53e686d6967a2b6346889a771428fb9915a6a4a787fdb2ecf13d78d6cb0be6c2",
     "pagination.mjs": "2a1d14b573357c6054fc6434b73fdb7cdf0a57c9abff41fba916fb62e55901ca",
-    "inline-preservation.mjs": "020d3ac1ee83e0183e59d644f50cab511e6d81649c72abad5dc60f4a0ac11b24",
+    "inline-preservation.mjs": "0df48e5185b805a11e8f7c51928ac762af2d9526ed2bd94212e11b65ae66cff3",
     "continuation-template.mjs": "815e43e32ce08b46ef531acf0154bdd4c94de98b851526dff46b0b7368926d38",
     "document-flow.mjs": "86f70b872d44034bc8ec33fbd045ede83b5ba8b8649305c46d86d3563bbe4067",
     "document-flow-band.mjs": "1b44eb4198fe99a60c83b742ecf6911b153bfd082e4e92a69f798828d4689a3f",
