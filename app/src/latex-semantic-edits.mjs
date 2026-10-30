@@ -34,7 +34,7 @@ export function resolveSourceProposals(project, response, {model} = {}) {
   if (typeof response === 'string') {
     const parser = model.parseResponse || globalThis.FalsifyExternalExchange?.parse;
     if (!parser) return {proposals: [], diagnostics: [{code:'parser-unavailable', message:'Load the external response parser before importing a response.'}]};
-    const segments = (model.nodes || []).map(n => ({id:n.id, text:n.displayText ?? n.text ?? ''}));
+    const segments = model.documents?.length ? model.documents.map(d=>({id:d.path,text:d.displayText})) : (model.nodes || []).map(n => ({id:n.id, text:n.displayText ?? n.text ?? ''}));
     batch = parser(response, {role:'red', fileHash:project.id, segments});
   }
   const entries = Array.isArray(batch) ? batch : batch?.changes || batch?.items || batch?.proposals || [];
@@ -45,7 +45,7 @@ export function resolveSourceProposals(project, response, {model} = {}) {
     const base = {id:item.id || `source-change-${i+1}`, before:item.before, after:item.after, kind:item.kind && item.kind !== 'change' ? item.kind : 'text', mode:item.mode || 'content', enabled:item.enabled !== false, provenance};
     if (typeof item.before !== 'string' || typeof item.after !== 'string') return {...base, enabled:false, status:'invalid'};
     if (identityMismatch) return {...base, enabled:false, status:'identity-mismatch'};
-    if (item.anchor) {
+    if (item.anchor && !(batch?.schema === 'falsify.external-batch.v1' && !item.anchor.projectId && !item.anchor.nodeId)) {
       const node = (model.nodes || []).find(n => n.id === item.anchor.nodeId);
       if (item.anchor.projectId !== project.id || !node || node.path !== item.anchor.path || item.anchor.start < node.start || item.anchor.end > node.end || item.anchor.start > item.anchor.end || node.kind !== item.anchor.kind) return {...base, enabled:false, status:'stale-anchor'};
       return {...base, kind:node.kind, anchor:item.anchor, status:'matched'};

@@ -47,3 +47,14 @@ test('mixed sentence uses display map to preserve the superscript source',()=>{
   const a=proposal.sourceChanges[0].anchor;
   assert.equal(source.slice(0,a.start)+'3'+source.slice(a.end),'An initial claim\\textsuperscript{63} remains conditional.');
 });
+test('existing JSON and markdown parser anchors are resolved again against source identity', async()=>{
+  const {createRequire}=await import('node:module'); const require=createRequire(import.meta.url); const parser=require('../dist/external-exchange.js');
+  const source='An initial claim\\textsuperscript{62} remains conditional.', before='An initial claim62 remains conditional.', after='An initial claim63 remains conditional.';
+  const start=source.indexOf('62'); const node={id:'marker',path:'a.tex',kind:'superscript',contentStart:start,contentEnd:start+2};
+  const displayMap=Array.from(before,(_,i)=>i<16?{nodeId:'text',start:i,end:i+1}:i<18?{nodeId:'marker',start:start+i-16,end:start+i-15}:{nodeId:'tail',start:source.indexOf(' remains')+i-18,end:source.indexOf(' remains')+i-17});
+  const model={projectId:'p',nodes:[node],documents:[{path:'a.tex',displayText:before,displayMap}],parseResponse:parser.parse};
+  const project={id:'p',files:[{path:'a.tex',bytes:new TextEncoder().encode(source)}]};
+  for (const raw of [JSON.stringify({changes:[{before,after}]}), `Before: ${before}\nAfter: ${after}`]) {
+    const result=resolveSourceProposals(project,raw,{model}); assert.equal(result.proposals[0].sourceChanges[0].after,'3'); assert.ok(result.proposals[0].provenance.responseId);
+  }
+});
