@@ -1089,7 +1089,45 @@ export function commitPrefixSuffix(engine, paras, pi, del, inserts, runs, change
   const flat = textOf(para);
   const fullNew = runs.map((r) => r.text).join("");
   const suffixRuns = sliceRuns(runs, start);
-  if (!suffixRuns.length || squash(flat.slice(0, start) + suffixRuns.map((r) => r.text).join("")) !== squash(fullNew)) return { reason: "edited_text_mismatch" };
+  // A deletion can remove the entire suffix. Keep the prefix objects in
+  // their original painter slots and remove only fully owned suffix objects.
+  if (!suffixRuns.length) {
+    if (!options.context || inserts.length || fullNew !== flat.slice(0, start) ||
+        typeof engine.historyRemoveObject !== "function") return { reason: "edited_text_mismatch" };
+    for (let j = k; j < source.length; j++) {
+      const expected = flat.slice(source[j].off, source[j + 1]?.off ?? flat.length).replace(/\s/g, "");
+      const actual = before[j].map(g => String.fromCodePoint(g.u)).join("");
+      if (expected !== actual) return { reason: "suffix_text_unresolved" };
+    }
+    const stable = handles.filter(h => !suffixSet.has(h));
+    const target = options.context.paras[pi];
+    if (!stable.length || !target || target.handles.length !== handles.length ||
+        target.handles.some(h => !handles.includes(h))) return { reason: "paragraph_objects_changed" };
+    const ownership = new Map(options.context.paras.map((q, j) => [q.id, j === pi ? stable : q.handles]));
+    const depth = engine.historyDepth().undo;
+    engine.historyBeginStep("falsify-delete-suffix");
+    let removed = true;
+    try { for (const h of suffixOrdered) if (!engine.historyRemoveObject(h)) { removed = false; break; } }
+    finally { engine.historyEndStep(); }
+    const undo = () => {
+      if (engine.historyDepth().undo > depth && !engine.historyUndo()) throw new LineRetentionError("undo_failed");
+      if (pageObjectList(engine).join(",") !== pageBefore.join(",") ||
+          !sameGlyphs(prefixGlyphs, collectGlyphs(engine, prefix)).ok ||
+          !sameGlyphs(suffixGlyphs, collectGlyphs(engine, suffixOrdered)).ok) throw new LineRetentionError("state_drift");
+    };
+    const remaining = pageBefore.filter(h => !suffixSet.has(h));
+    const proof = sameGlyphs(prefixGlyphs, collectGlyphs(engine, prefix));
+    if (!removed || engine.historyDepth().undo <= depth || pageObjectList(engine).join(",") !== remaining.join(",") || !proof.ok) {
+      undo(); return { reason: "suffix_deletion_unproven" };
+    }
+    engine._pageDirty = true;
+    engine._spliceOk = false;
+    return { upd: { ...para, runs, lines: source.slice(0, k), surgical: true },
+      ids: paras.map(p => p.id), ownership, context: options.context,
+      reservedBaseline: source[k - 1].y,
+      lines: { status: "source_suffix_deleted", prefixKept: k, kept: k, maxKeptShift: +proof.max.toFixed(4) } };
+  }
+  if (squash(flat.slice(0, start) + suffixRuns.map((r) => r.text).join("")) !== squash(fullNew)) return { reason: "edited_text_mismatch" };
 
   let steps = 0;
   let reservation = null;

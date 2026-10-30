@@ -21,7 +21,7 @@ const {default:create}=await import(pathToFileURL(join(temp,'paragraph-vendor/ed
 after(()=>{assert.ok(resolve(temp).startsWith(resolve(tmpdir())+sep));rmSync(temp,{recursive:true,force:true});});
 const {prepare}=await import(pathToFileURL(join(temp,'candidate.mjs')).href);
 function fixture(mask=true,variant='normal'){const d=new mupdf.PDFDocument(), font=d.addSimpleFont(new mupdf.Font('Helvetica'));if(variant==='widths'){font.put('FirstChar',32);font.put('LastChar',126);font.put('Widths',Array(95).fill(500));} if(variant==='differences')font.put('Encoding',{Type:'Encoding',BaseEncoding:'WinAnsiEncoding',Differences:[65,'A']});if(variant==='tounicode')font.put('ToUnicode',d.addStream('/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def /CMapName /Identity def /CMapType 2 def 1 begincodespacerange <00> <ff> endcodespacerange 1 beginbfrange <00> <ff> <0000> endbfrange endcmap CMapName currentdict /CMap defineresource pop end end',{}));const resources={Font:{F1:font}};
- const c=`BT /F1 11 Tf 1.03 0 0 1 40 700 Tm (First line contains a concealed marker here.) Tj ET\n${mask?'q 1 1 1 rg 100 697 24 12 re f Q'+(mask==='two'?'\nq 1 1 1 rg 150 697 24 12 re f Q':''):''}\nBT /F1 11 Tf 1.002 0 0 1 40 686 Tm (Second line has words to replace at the end.) Tj 0.998 0 0 1 40 672 Tm (Second line has words to replace at the end.) Tj ET\nBT /F1 11 Tf 330 700 Td (Right column is independent and stays untouched.) Tj ET`;
+ const c=`BT /F1 11 Tf 1.03 0 0 1 40 700 Tm (First line contains a concealed marker here.) Tj ET\n${mask?'q 1 1 1 rg 100 697 24 12 re f Q'+(mask==='two'?'\nq 1 1 1 rg 150 697 24 12 re f Q':''):''}\nBT /F1 11 Tf 1.002 0 0 1 40 686 Tm (Second line has words to replace at the end.) Tj 0.998 0 0 1 40 672 Tm (${variant==='delete'?'Final line removes every remaining word.':'Second line has words to replace at the end.'}) Tj ET\nBT /F1 11 Tf 330 700 Td (Right column is independent and stays untouched.) Tj ET`;
  d.insertPage(-1,d.addPage([0,0,600,800],0,resources,c));d.insertPage(-1,d.addPage([0,0,600,800],0,resources,'BT /F1 11 Tf 40 700 Td (Second page remains unchanged.) Tj ET'));const bytes=d.saveToBuffer().asUint8Array().slice();d.destroy();return bytes;}
 function pixels(bytes,page,x0,y0,x1,y1){const d=mupdf.Document.openDocument(bytes,'application/pdf'),p=d.loadPage(page),pix=p.toPixmap([1,0,0,1,0,0],mupdf.ColorSpace.DeviceRGB,false),raw=pix.getPixels(),stride=pix.getStride(),a=[];for(let y=y0;y<y1;y++)a.push(...raw.slice(y*stride+x0*3,y*stride+x1*3));pix.destroy();p.destroy();d.destroy();return a;}
 function text(bytes){const d=mupdf.Document.openDocument(bytes,'application/pdf'),p=d.loadPage(0),s=p.toStructuredText(),out=s.asText().replace(/\s+/g,' ');s.destroy();p.destroy();d.destroy();return out;}
@@ -79,3 +79,21 @@ test('two interleaved masks keep the prefix concealed after re-edit',async()=>{c
  assert.deepEqual(pixels(savedAgain,0,40,88,300,104),pixels(src,0,40,88,300,104));
  assert.deepEqual(pixels(savedAgain,1,0,0,600,800),pixels(src,1,0,0,600,800));
  }finally{globalThis.fetch=previous;}});
+
+for (const mask of [true, 'two']) test(`deleting the entire final suffix preserves ${mask === true ? 'one mask' : 'two masks'} and survives reopen`, async () => {
+ const previous=globalThis.fetch; globalThis.fetch=async input=>new Response(readFileSync(new URL(input))); try {
+  const src=fixture(mask,'delete'), original=src.slice();
+  const before='Final line removes every remaining word.';
+  const after='';
+  const out=await prepare({file:src,edits:[{id:'delete-suffix',pageIndex:0,before,after}]}), saved=new Uint8Array(await out.file.arrayBuffer());
+  assert.deepEqual(src,original); assert.equal(out.verification.pageCount.output,2);
+  assert.equal(out.verification.report.pages[0].paragraphs[0].lineRetention.status,'source_suffix_deleted');
+  assert.equal((text(saved).match(/Second line has words to replace at the end\./g)||[]).length,1);
+  assert.deepEqual(pixels(saved,0,40,88,300,104),pixels(src,0,40,88,300,104));
+  const oldGlyphs=prefixGlyphs(src),newGlyphs=prefixGlyphs(saved); assert.equal(newGlyphs.length,oldGlyphs.length); oldGlyphs.forEach((g,i)=>{const n=newGlyphs[i]; assert.equal(n.ch,g.ch); assert.equal(n.font,g.font); assert.ok(Math.abs(n.size-g.size)<0.001); for(const k of ['origin','quad']) g[k].forEach((v,j)=>assert.ok(Math.abs(v-n[k][j])<0.001));});
+  const again=await prepare({file:saved,edits:[{id:'again',pageIndex:0,before:'Second line has',after:'Second line'}]}), savedAgain=new Uint8Array(await again.file.arrayBuffer());
+  assert.ok(text(savedAgain).includes('Second line words to replace'));
+  assert.deepEqual(pixels(savedAgain,0,40,88,300,104),pixels(src,0,40,88,300,104));
+  assert.deepEqual(pixels(savedAgain,1,0,0,600,800),pixels(src,1,0,0,600,800));
+ } finally {globalThis.fetch=previous;}
+});
