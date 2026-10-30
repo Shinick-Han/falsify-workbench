@@ -59,3 +59,35 @@ test('source line selection includes nodes on the mapped line only',()=>{
   const model={nodes:[{id:'first',path:'body.tex',start:0,end:5},{id:'second',path:'body.tex',start:6,end:12},{id:'third',path:'body.tex',start:13,end:18}]};
   assert.deepEqual(sourceNodesAtLine(project,model,'body.tex',2).map(n=>n.id),['second']);
 });
+
+
+test('PDF click coordinates and bounded nearest boxes',()=>{
+  const point=workbench.pdfClickPoint({left:0,top:0,width:510,height:660},{width:735,height:951},172,220);
+  assert.ok(Math.abs(point.x-206.57)<0.1); assert.ok(Math.abs(point.y-264.17)<0.1);
+  const map={boxes:[{pageIndex:0,path:'body.tex',line:2,box:{x:201.4,y:262.1,width:8.44,height:4.49}}]};
+  assert.equal(workbench.pickSourceLines(map,{pageIndex:0,...point})[0].line,2);
+  assert.equal(workbench.pickSourceLines(map,{pageIndex:0,x:400,y:400}).length,0);
+});
+
+test('restore validates disabled anchors using the real patch engine',async()=>{
+  const {createLatexProject}=await import('../src/latex-project.mjs');
+  const {analyzeLatexSource}=await import('../src/latex-source-model.mjs');
+  const p=await createLatexProject({files:[{path:'main.tex',bytes:new TextEncoder().encode('Hello world')}]});
+  const n=analyzeLatexSource(p).nodes[0],c={id:'one',kind:n.kind,before:n.text,after:'Hi',enabled:false,anchor:{projectId:p.id,nodeId:n.id,path:n.path,kind:n.kind,start:n.contentStart,end:n.contentEnd}};
+  await workbench.validateRestoredChanges(p,[c]);
+  await assert.rejects(workbench.validateRestoredChanges(p,[{...c,anchor:{...c.anchor,nodeId:'unknown'}}]));
+});
+
+
+test('real archive roundtrip preserves source upload and explicit raw item provenance',async()=>{
+  const {createLatexProject}=await import('../src/latex-project.mjs');
+  const {encodeSourceSession,decodeSourceSession,projectLegacyExternal}=await import('../src/latex-session-archive.mjs');
+  const {hex}=await import('../src/paragraph-pdf-crypto.mjs');
+  const bytes=new TextEncoder().encode('Hello world'),p=await createLatexProject({files:[{path:'main.tex',bytes}],mainFile:'main.tex'}),h=hex(bytes);
+  const batch={schema:'falsify.external-batch.v1',id:'batch',fileHash:h,role:'red',raw:'response',items:[{id:'raw',before:'Hello',after:'Hi'}]};
+  const responses={schema:'falsify.latex-responses.v1',projectId:p.id,batches:[batch],proposals:[{id:'random:0:raw',before:'Hello',after:'Hi',provenance:{responseId:'batch',itemId:'raw'}}],changes:[]};
+  const json=await encodeSourceSession({project:p,changes:[],responses,sourceUpload:{name:'main.tex',bytes,sha256:h}},{createLatexProject});
+  const restored=await decodeSourceSession(json,{createLatexProject}); assert.deepEqual(restored.sourceUpload.bytes,bytes);
+  const snapshot=projectLegacyExternal({fileHash:h,project:p,responses:restored.responses,segments:[{id:'main.tex',text:'Hello world'}]});
+  assert.equal(snapshot.items[0].sourceRefs[0].itemId,'raw');
+});

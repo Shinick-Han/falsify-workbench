@@ -31,5 +31,5 @@ export function createLatexSourceEditor({container, onEdit, onCompile, onDownloa
   apply.addEventListener('click',()=>{if(currentNode() && !composing) {editing=false; onEdit?.({nodeId:selected,after:edit.value,mode:mode.value});}});
   function setState(next = {}) { const previousModel=state.model; state={...state,...next}; if (Object.hasOwn(next,'selection') && next.selection?.nodeId && next.selection.nodeId!==selected) {editing=false;selectNode(next.selection.nodeId);} if (previousModel!==state.model) {if (selected && !currentNode()) selected=null; renderNodes();} else updateSelection(); if(selected && !editing && !composing && doc.activeElement!==edit)selectNode(selected); status.textContent=(state.diagnostics || []).map(d=>d.message).filter(Boolean).join(' ') || (state.busy?'처리 중…':state.project?'원본 준비됨':'LaTeX 파일을 선택하거나 놓으세요.'); undo.disabled=!!state.busy || !state.canUndo; redo.disabled=!!state.busy || !state.canRedo; for (const [i,b] of buttons.entries()) b.disabled=!!state.busy || (i===0 ? !state.project : i===3 ? !state.project : !state.artifact?.success); }
   setState({});
-  return {setState, selectNode, getPreviewHost:()=>preview, destroy:()=>section.remove()};
+  return {setState, selectNode, getPreviewHost:()=>preview, getUnfinishedEdit:()=>selected ? {nodeId:selected,after:edit.value,mode:mode.value} : null, destroy:()=>section.remove()};
 }
