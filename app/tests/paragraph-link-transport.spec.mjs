@@ -132,4 +132,12 @@ test('canonical provider preserves native ownership when saved body objects appe
  const descriptor={sourcePageIndex:0,annotationIndex:0,kind:'link',eligible:true,rect:[20,10,58,20],destination:{type:'uri'}};
  const moves=deriveNativeLinkMoves(engine,[{sourcePageIndex:0,floor:0,bodyTop:100}],targets,[],{annotations:[descriptor]},expectedPageText,new Set(),(_band,chars)=>[...chars].sort((a,b)=>order[a.index]-order[b.index]));
  assert.deepEqual(moves,[{sourcePageIndex:0,annotationIndex:0,outputPageIndex:0,dx:0,dy:5}]);
+ const band=[{sourcePageIndex:0,floor:0,bodyTop:100}], model={annotations:[descriptor]};
+ const ordered=(_band,chars)=>[...chars].sort((a,b)=>order[a.index]-order[b.index]);
+ const replacement=[{id:'whole',pageIndex:0,before:physical,after:'C LINK B LINK'}];
+ const changed=targets.map((c,i)=>i===0?{...c,u:'C'.charCodeAt(0)}:c);
+ assert.deepEqual(deriveNativeLinkMoves(engine,band,changed,replacement,model,expectedPageText,new Set(),ordered),moves);
+ const labelEdit=[{id:'label',pageIndex:0,before:physical,after:'A LANK B LINK'}];
+ const labelTargets=targets.map((c,i)=>i===2?{...c,u:'A'.charCodeAt(0)}:c);
+ assert.throws(()=>deriveNativeLinkMoves(engine,band,labelTargets,labelEdit,model,expectedPageText,new Set(),ordered),e=>e.code==='document_flow_link_edited_label');
 });

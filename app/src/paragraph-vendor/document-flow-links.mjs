@@ -78,9 +78,15 @@ function mapSourceGlyphs(sourceEngine,sourceBands,targetGlyphs,edits,expectedPag
     let at=0;
     for(const span of exp.spans){
       append(at,span.a);
-      // Even a same-label occurrence in After is not source identity. A link
-      // intersecting an explicit replacement is conservatively unsupported.
-      for(const ch of span.after)if(ch.charCodeAt(0)>32)expected.push(ch.charCodeAt(0));
+      // Only common outer runs have unambiguous source identity. The changed
+      // middle remains unmapped even if it happens to repeat a link label.
+      const before=normalized.text.slice(span.a,span.b), after=span.after;
+      let prefix=0, suffix=0;
+      while(prefix<before.length&&prefix<after.length&&before[prefix]===after[prefix])prefix++;
+      while(suffix<before.length-prefix&&suffix<after.length-prefix&&before[before.length-1-suffix]===after[after.length-1-suffix])suffix++;
+      append(span.a,span.a+prefix);
+      for(let j=prefix;j<after.length-suffix;j++)if(after.charCodeAt(j)>32)expected.push(after.charCodeAt(j));
+      append(span.b-suffix,span.b);
       at=span.b;
     }
     append(at,normalized.text.length);
