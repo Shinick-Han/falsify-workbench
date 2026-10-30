@@ -39,6 +39,26 @@ export function planReconstructionLayout(model){
    if(!column(body[i])){full(body[i++]);continue;}
    let end=i+1;while(end<body.length&&column(body[end]))end++;
    const group=body.slice(i,end),sorted=[...group].sort((a,b)=>a.box[0]-b.box[0]||a.box[2]-b.box[2]);
+   const hint=model.pages[page.pageIndex].extensions?.layoutHints, gutter=hint?.gutterBp;
+   const hintValid=hint?.status==='proposed'&&hint?.provenance==='paper-flow'&&hint?.columns===2&&Array.isArray(gutter)&&gutter.length===2&&gutter.every(Number.isFinite)&&gutter[0]>=0&&gutter[0]<gutter[1]&&gutter[1]<=page.width;
+   if(hintValid){
+    const mid=(gutter[0]+gutter[1])/2;
+    const left=group.filter(x=>x.box[2]<=mid),right=group.filter(x=>x.box[0]>=mid);
+    const crossing=group.some(x=>x.box[0]<gutter[1]&&x.box[2]>gutter[0]);
+    const ordered=side=>side.every((x,k)=>!k||side[k-1].box[1]<=x.box[1]);
+    const contiguous=!group.some((x,k)=>right.includes(x)&&group.slice(k+1).some(y=>left.includes(y)));
+    if(!crossing&&left.length&&right.length&&left.length+right.length===group.length&&contiguous&&ordered(left)&&ordered(right)){
+     const overlapping=side=>side.some((a,k)=>side.slice(k+1).some(b=>overlapY(a.box,b.box)));
+     if(overlapping(left)||overlapping(right))say(page.pageIndex,'COLUMN_VERTICAL_OVERLAP',group.map(x=>x.item.id));
+     const l=union(left.map(x=>x.box)),r=union(right.map(x=>x.box)),box=union([l,r]);
+     add({kind:'columns',left:left.map(x=>x.item.id),right:right.map(x=>x.item.id),leftBox:l,rightBox:r,top:box[1],bottom:box[3]});i=end;continue;
+    }
+    // A trusted-looking hint that contradicts the item geometry is not used to
+    // force either a side or a different split. Preserve observed order.
+    say(page.pageIndex,'COLUMN_HINT_CONFLICT',group.map(x=>x.item.id));
+    for(const entry of group)full(entry);i=end;continue;
+   }
+   if(hint!=null)say(page.pageIndex,'COLUMN_HINT_INVALID',group.map(x=>x.item.id));
    const candidates=[];
    for(let cut=1;cut<sorted.length;cut++){
     const left=sorted.slice(0,cut),right=sorted.slice(cut),l=union(left.map(x=>x.box)),r=union(right.map(x=>x.box));
