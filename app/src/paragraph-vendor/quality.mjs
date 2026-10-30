@@ -392,6 +392,62 @@ export function cascadeFloor(ctx) {
     : Math.min(ctx.pageH * EDGE_BAND, ...bodyBottoms);
 }
 
+// Reserve room before rebuilding a model whose newly inserted suffix would
+// otherwise merge with the next paragraph. Source handles, rather than the
+// model IDs invalidated by isolation, identify the paragraphs to move.
+// The caller must undo subsequent history steps before calling rollback.
+export function reserveCascadeSpace(engine, ctx, grown, { targetHandles = [] } = {}) {
+  const fail = code => ({ ok: false, code });
+  const validBox = b => b && [b.x,b.top,b.w,b.h].every(Number.isFinite) && b.w > 0 && b.h > 0;
+  if (!ctx || !Number.isFinite(ctx.pageH) || ctx.pageH <= 0 || !Array.isArray(ctx.paras) || !Array.isArray(grown) || grown.length !== 1 ||
+      ctx.paras.some(q => q.box && !validBox(q.box)) ||
+      grown.some(g => !validBox(g?.box) || !Number.isFinite(g.delta) || g.delta <= 0 || !ctx.paras.some(q => q.id === g.id && q.role === 'body'))) return fail('reserve_invalid');
+  const live = new Set(listObjects(engine));
+  if (!Array.isArray(targetHandles) || targetHandles.some(h => !live.has(h >>> 0) || engine.M._FPDFPageObj_GetType(h) !== OBJ_TEXT)) return fail('reserve_target_invalid');
+  const shifts = cascadeShifts(ctx, grown), floor = cascadeFloor(ctx);
+  const moved = ctx.paras.filter(q => shifts.has(q.id));
+  if (moved.some(q => !q.editable || q.sharesObjects || !q.topLevel || !q.handles?.length || q.handles.some(h => !live.has(h >>> 0)))) return fail('reserve_objects_unavailable');
+  const handles = moved.flatMap(q => q.handles.map(h => h >>> 0));
+  if (new Set(handles).size !== handles.length || handles.some(h => targetHandles.includes(h))) return fail('reserve_shared_objects');
+  if (moved.some(q => bottomOf(q.box) - shifts.get(q.id) < floor - .01) || grown.some(g => bottomOf(g.box) - g.delta - (shifts.get(g.id) || 0) < floor - .01)) return fail('reserve_no_room');
+  const lookup = new Map(ctx.paras.map(q => [q.id, (q.handles || []).filter(h => live.has(h >>> 0))]));
+  // New target handles are body-owned for collision checking, but are never
+  // themselves moved by the reservation.
+  lookup.set(grown[0].id, [...(lookup.get(grown[0].id) || []), ...targetHandles]);
+  const view = Object.create(engine);
+  view.paragraphObjects = id => lookup.get(id) || [];
+  if (cascadeBarrier(view, ctx, grown, shifts) !== null) return fail('reserve_foreign_object');
+  const next = { ...ctx, paras: ctx.paras.map(q => {
+    const dy = shifts.get(q.id) || 0;
+    return dy ? { ...q, box: { ...q.box, top: q.box.top - dy }, baselines: q.baselines?.map(y => y - dy) } : q;
+  }) };
+  if (!handles.length) return { ok: true, context: next, shifts, rollback: () => true };
+  if (!['historyDepth','historyBeginStep','historyEndStep','historyNoteMatrix','historyUndo','translateObject'].every(k => typeof engine[k] === 'function')) return fail('reserve_history_unavailable');
+  const depth = engine.historyDepth().undo;
+  const translated = [];
+  engine.historyBeginStep('falsify-reserve-flow');
+  try {
+    for (const q of moved) for (const h of q.handles) {
+      engine.historyNoteMatrix(h);
+      engine.translateObject(h, 0, -shifts.get(q.id));
+      translated.push([h, shifts.get(q.id)]);
+    }
+  } catch (error) {
+    for (const [h, dy] of translated.reverse()) engine.translateObject(h, 0, dy);
+    throw error;
+  } finally { engine.historyEndStep(); }
+  if (engine.historyDepth().undo !== depth + 1) {
+    for (const [h, dy] of translated.reverse()) engine.translateObject(h, 0, dy);
+    return fail('reserve_history_unavailable');
+  }
+  let pending = true;
+  return { ok: true, context: next, shifts, rollback: () => {
+    if (!pending || engine.historyDepth().undo !== depth + 1) return false;
+    pending = false;
+    return engine.historyUndo();
+  } };
+}
+
 function cascade(engine, ctx, grown, touchedIds, repairs, warnings, allowOverflow = false) {
   const floor = cascadeFloor(ctx);
   const plan = cascadeShifts(ctx, grown);

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildFlowPlan } from '../src/paragraph-vendor/pagination.mjs';
-import { cascadeShifts, cascadeBarrier, cascadeFloor, normalizePageMap } from '../src/paragraph-vendor/quality.mjs';
+import { cascadeShifts, cascadeBarrier, cascadeFloor, reserveCascadeSpace, normalizePageMap } from '../src/paragraph-vendor/quality.mjs';
 
 test('cascade floor admits clear lower page space while preserving a footer', () => {
   const body = { role: 'body', box: { x: 40, top: 310, w: 200, h: 12 } };
@@ -10,6 +10,24 @@ test('cascade floor admits clear lower page space while preserving a footer', ()
   assert.equal(cascadeFloor({ pageH: 500, paras: [low] }), 43);
   const footer = { role: 'footer_uncertain', box: { x: 40, top: 80, w: 40, h: 10 } };
   assert.equal(cascadeFloor({ pageH: 500, paras: [body, footer] }), 120);
+});
+
+test('reservation checks barriers and rolls back a recorded whole-body move', () => {
+  const boxes = new Map([[1,{x:10,y:290,w:80,h:10}],[2,{x:10,y:270,w:80,h:10}]]);
+  let depth=0, before;
+  const e={page:1,M:{_FPDFPage_CountObjects:()=>boxes.size,_FPDFPage_GetObject:(_,i)=>[...boxes.keys()][i],_FPDFPageObj_GetType:()=>1},
+    objectBounds:h=>boxes.get(h), historyDepth:()=>({undo:depth}), historyBeginStep:()=>{before=structuredClone(boxes);},
+    historyEndStep:()=>{depth++;}, historyNoteMatrix:()=>{}, translateObject:(h,dx,dy)=>{boxes.get(h).y+=dy;},
+    historyUndo:()=>{boxes.clear();for(const [h,b] of before)boxes.set(h,b);depth--;return true;}};
+  const ctx={pageH:500,paras:[{id:'a',role:'body',box:{x:10,top:300,w:80,h:10},handles:[1],editable:true,topLevel:true},
+    {id:'b',role:'body',box:{x:10,top:280,w:80,h:10},handles:[2],editable:true,topLevel:true,baselines:[275]}]};
+  const grown=[{id:'a',box:ctx.paras[0].box,delta:15}];
+  const r=reserveCascadeSpace(e,ctx,grown,{targetHandles:[1]});
+  assert.equal(r.ok,true); assert.equal(boxes.get(2).y,265); assert.equal(r.context.paras[1].box.top,275);
+  assert.equal(ctx.paras[1].box.top,280); assert.equal(r.rollback(),true); assert.equal(boxes.get(2).y,270);
+  boxes.set(3,{x:10,y:265,w:80,h:3});
+  assert.equal(reserveCascadeSpace(e,ctx,grown,{targetHandles:[1]}).code,'reserve_foreign_object');
+  assert.equal(boxes.get(2).y,270);
 });
 
 const para = (id, x, top, h = 10, role = 'body') => ({ id, box: { x, top, w: 80, h }, role, editable: true, topLevel: true });
