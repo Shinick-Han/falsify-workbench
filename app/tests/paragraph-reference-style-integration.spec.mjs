@@ -55,3 +55,19 @@ test('a full author paragraph edit grows only its raised digit object',async()=>
   assert.ok(changed>0);const p=b.loadPage(0),t=p.toStructuredText();try{assert.ok(t.asText().includes('45'));}finally{t.destroy();p.destroy();}
  }finally{a.destroy();b.destroy();}
 });
+
+for(const marker of ['34','63'])test(`inserting a digit into a raised marker preserves the rest of the page (${marker})`,async()=>{
+ const source=fixture(),e=await engineFactory(source);let before;
+ try{e.loadPage(0);e.normalizeFontsForEdit();before=e.buildModel().find(p=>p.runs.map(r=>r.text).join('').includes('Example Author')).runs.map(r=>r.text).join('');}finally{e.close();}
+ let result;try{result=await editPdf({sourceBytes:source,edits:[{id:'insert-marker',pageIndex:0,before,after:before.replace('2,3','2,'+marker)}],reflow:true},{engineFactory});}
+ catch(e){throw new Error(JSON.stringify({code:e.code,checks:e.report?.selfCheck}));}
+ assert.equal(result.report.status,'self-check-passed');assert.ok(result.report.pages[0].paragraphs.some(p=>p.lineRetention?.status==='source_numeric_marker'&&p.lineRetention.objects===1));
+ const a=mupdf.Document.openDocument(source,'application/pdf'),b=mupdf.Document.openDocument(result.pdf,'application/pdf');
+ try{
+  assert.equal(b.countPages(),2);assert.deepEqual(raster(a,1),raster(b,1));const old=raster(a,0),next=raster(b,0);let changed=0;
+  for(let o=0;o<old.bytes.length;o+=3)if(old.bytes[o]!==next.bytes[o]||old.bytes[o+1]!==next.bytes[o+1]||old.bytes[o+2]!==next.bytes[o+2]){
+   const pixel=o/3,x=pixel%old.width,y=Math.floor(pixel/old.width);assert.ok(x>=290&&x<=312&&y>=172&&y<=196,`Unexpected changed pixel ${x},${y}`);changed++;
+  }
+  assert.ok(changed>0);const p=b.loadPage(0),t=p.toStructuredText();try{assert.ok(t.asText().includes(marker));}finally{t.destroy();p.destroy();}
+ }finally{a.destroy();b.destroy();}
+});

@@ -57,15 +57,24 @@ export function planInlineChange(paras, chars, map, hit, needle, after) {
     let first = 0, last = 0;
     while (first < b.t.length && first < a.length && b.t[first] === a[first]) first++;
     while (last < b.t.length - first && last < a.length - first && b.t[b.t.length - 1 - last] === a[a.length - 1 - last]) last++;
-    const old = b.t.slice(first, b.t.length - last), replacement = a.slice(first, a.length - last);
+    let start = first, end = b.t.length - last;
+    let old = b.t.slice(start, end), replacement = a.slice(first, a.length - last);
+    // Inserting a digit has no deleted character to supply its style. Keep
+    // the adjacent original number as the replacement anchor instead.
+    if (!old && /^[0-9]+$/.test(replacement)) {
+      while (start > 0 && /^[0-9]$/.test(b.t[start - 1])) start--;
+      while (end < b.t.length && /^[0-9]$/.test(b.t[end])) end++;
+      old = b.t.slice(start, end);
+      replacement = b.t.slice(start, first) + replacement + b.t.slice(first, end);
+    }
     if ((first || last) && old) {
-      const narrow = rawOf({ k0: b.k0 + first, k1: b.k1 - last }).filter(c => c.pi >= 0);
+      const narrow = rawOf({ k0: b.k0 + start, k1: b.k0 + end }).filter(c => c.pi >= 0);
       if (narrow.length && new Set(narrow.map(style)).size === 1) {
         const numeric = /^[0-9]+$/.test(old) && /^[0-9]+$/.test(replacement);
         return {
           del: narrow,
           inserts: replacement ? [place(narrow[0], replacement)] : [],
-          ...(numeric ? { warning: 'numeric_marker_style_from_digits', numericMarker: { before: old, after: replacement, context: b.t, offset: first } } : {}),
+          ...(numeric ? { warning: 'numeric_marker_style_from_digits', numericMarker: { before: old, after: replacement, context: b.t, offset: start } } : {}),
         };
       }
     }

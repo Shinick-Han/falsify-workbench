@@ -3128,6 +3128,7 @@ __export(quality_exports, {
   cascadeFloor: () => cascadeFloor,
   cascadeShifts: () => cascadeShifts,
   checkContinuationEdges: () => checkContinuationEdges,
+  compareModelNumericEdit: () => compareModelNumericEdit,
   countGlyphLines: () => countGlyphLines,
   edgeGlyphs: () => edgeGlyphs,
   edgeGlyphsEquivalent: () => edgeGlyphsEquivalent,
@@ -3137,6 +3138,7 @@ __export(quality_exports, {
   joinFlowParts: () => joinFlowParts,
   matchesGeneratedWhitespace: () => matchesGeneratedWhitespace,
   matchesStationaryReorderedGlyphs: () => matchesStationaryReorderedGlyphs,
+  modelNumericEditProof: () => modelNumericEditProof,
   normalizePageMap: () => normalizePageMap,
   readGlyphs: () => readGlyphs,
   repairPageLayout: () => repairPageLayout,
@@ -3987,6 +3989,92 @@ function expectedPageText(sourceText, pageEdits, options = {}) {
   }
   return { ok: true, text: normStr(out + norm.slice(at)), ...options.includeSpans ? { spans: spans.map((s) => ({ ...s })) } : {} };
 }
+function modelNumericEditProof(source2, output, edits, paragraphs) {
+  if (edits.length !== 1 || !Array.isArray(paragraphs)) return null;
+  if ([...source2.chars, ...output.chars].some((c) => !Number.isInteger(c.u) || c.u < 0 || c.u > 1114111)) return null;
+  const e = edits[0], before = normStr(e.before), after = normStr(e.after);
+  if (!before) return null;
+  let prefix = 0, suffix = 0;
+  while (prefix < Math.min(before.length, after.length) && before[prefix] === after[prefix]) prefix++;
+  while (suffix < Math.min(before.length, after.length) - prefix && before.at(-1 - suffix) === after.at(-1 - suffix)) suffix++;
+  const changed = after.slice(prefix, after.length - suffix);
+  if (!/^\d*$/.test(before.slice(prefix, before.length - suffix)) || !/^\d+$/.test(changed)) return null;
+  let start = prefix, end = before.length - suffix;
+  while (start > 0 && /[0-9]/.test(before[start - 1])) start--;
+  while (end < before.length && /[0-9]/.test(before[end])) end++;
+  const old = before.slice(start, end);
+  if (!/^[0-9]+$/.test(old)) return null;
+  const replacement = before.slice(start, prefix) + changed + before.slice(before.length - suffix, end);
+  const hits2 = [];
+  for (const p2 of paragraphs) {
+    const text4 = normStr(paraText(p2));
+    for (let k = text4.indexOf(before); k >= 0; k = text4.indexOf(before, k + 1)) hits2.push({ p: p2, text: text4, k });
+  }
+  if (hits2.length !== 1 || !hits2[0].p.box) return null;
+  const { p, text: text3, k: hit } = hits2[0], box = p.box, tokens2 = [];
+  source2.chars.forEach((c, index) => {
+    const ch = String.fromCodePoint(c.u);
+    if (/\s/.test(ch)) {
+      if (tokens2.at(-1)?.ch === " ") tokens2.at(-1).optional &&= c.generated === true;
+      else tokens2.push({ ch: " ", optional: c.generated === true });
+    } else tokens2.push({ ch, index });
+  });
+  let anchored = null;
+  const max = Math.max(start, before.length - end);
+  for (let n = 0; n <= max; n++) {
+    const left = Math.min(start, n), right = Math.min(before.length - end, n);
+    const context2 = before.slice(start - left, end + right);
+    const modelAt = hit + start - left;
+    if (text3.indexOf(context2) !== modelAt || text3.indexOf(context2, modelAt + 1) !== -1) continue;
+    const candidates = [];
+    for (let first = 0; first < tokens2.length; first++) {
+      if (tokens2[first].ch !== context2[0]) continue;
+      let at = 0, ids = [];
+      for (let j2 = first; j2 < tokens2.length && at < context2.length; j2++) {
+        const token = tokens2[j2];
+        if (token.ch === context2[at]) {
+          if (at >= left && at < left + old.length) ids.push(token.index);
+          at++;
+        } else if (!(token.ch === " " && token.optional)) break;
+      }
+      if (at !== context2.length || ids.length !== old.length || ids.some((index) => {
+        const c = source2.chars[index];
+        return !c || !Number.isFinite(c.cx) || !Number.isFinite(c.cy) || c.cx < box.x || c.cx > box.x + box.w || c.cy < box.top - box.h || c.cy > box.top;
+      })) continue;
+      candidates.push(ids);
+    }
+    if (candidates.length === 1) {
+      anchored = candidates[0];
+      break;
+    }
+  }
+  if (!anchored) return null;
+  const remove = new Set(anchored);
+  const sourceChars = source2.chars.flatMap((c, i2) => i2 === anchored[0] ? [...replacement].map((ch) => ({ u: ch.codePointAt(0), replacement: true })) : remove.has(i2) ? [] : [{ u: c.u, generated: c.generated, sourceIndex: i2 }]);
+  const a = generatedWhitespaceTokens(sourceChars, true, true), b = generatedWhitespaceTokens(output.chars, true, true);
+  const outputIndices = [], retained = [];
+  let i = 0, j = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i].ch === b[j].ch) {
+      if (a[i].ch !== " ") {
+        const c = sourceChars[a[i].index];
+        if (c.replacement) outputIndices.push(b[j].index);
+        else retained.push({ sourceIndex: c.sourceIndex, outputIndex: b[j].index });
+      }
+      i++;
+      j++;
+    } else if (a[i].ch === " " && a[i].optional) i++;
+    else if (b[j].ch === " " && b[j].optional) j++;
+    else return null;
+  }
+  while (i < a.length && a[i].ch === " " && a[i].optional) i++;
+  while (j < b.length && b[j].ch === " " && b[j].optional) j++;
+  if (i !== a.length || j !== b.length) return null;
+  return { sourceIndices: anchored, outputIndices, retained };
+}
+function compareModelNumericEdit(source2, output, edits, paragraphs) {
+  return modelNumericEditProof(source2, output, edits, paragraphs) !== null;
+}
 function normalizedSourceChars(chars) {
   const out = [];
   for (let i = 0; i < chars.length; i++) {
@@ -4107,7 +4195,16 @@ async function inspectSavedPdf(engineFactory, sourceBytes, outputBytes, edits, o
         continue;
       }
       const exp = expectedPageText(s.text, pageEdits);
-      if (!exp.ok) {
+      let modelNumericMatch = false;
+      if (!exp.ok && exp.reason === "before_not_found" && typeof src.buildModel === "function") {
+        ensurePage(src, i);
+        modelNumericMatch = compareModelNumericEdit(s, o, pageEdits, src.buildModel());
+      }
+      if (modelNumericMatch) {
+        row.text_equal = true;
+        row.model_numeric_text_conservation = true;
+        warnings.push({ code: "model_numeric_text_conservation", pageIndex: i, severity: "warning", detail: "Unique source paragraph and numeric marker context matched; complete page extraction conserved with generated whitespace normalization" });
+      } else if (!exp.ok) {
         failures.push({ code: "expected_text_uncomputable", pageIndex: i, id: exp.id, reason: exp.reason });
       } else {
         row.text_equal = exp.text === normStr(o.text);
@@ -4521,15 +4618,15 @@ function joinFlowParts(parts, expected) {
   }
   return { text: normStr(acc), softJoins };
 }
-function generatedWhitespaceTokens(chars) {
+function generatedWhitespaceTokens(chars, codePoints = false, includeIndices = false) {
   const tokens2 = [];
-  for (const c of chars) {
-    const ch = String.fromCharCode(c.u);
+  for (const [index, c] of chars.entries()) {
+    const ch = codePoints ? String.fromCodePoint(c.u) : String.fromCharCode(c.u);
     if (/\s/.test(ch)) {
       const prev = tokens2[tokens2.length - 1];
       if (prev?.ch === " ") prev.optional &&= c.generated === true;
       else tokens2.push({ ch: " ", optional: c.generated === true });
-    } else tokens2.push({ ch, optional: false });
+    } else tokens2.push({ ch, optional: false, ...includeIndices ? { index } : {} });
   }
   if (tokens2[0]?.ch === " ") tokens2.shift();
   if (tokens2[tokens2.length - 1]?.ch === " ") tokens2.pop();
@@ -7999,7 +8096,7 @@ function entries(c, obj) {
   obj.forEach((value, name) => list3.push([name, c.keep(value)]));
   return list3.sort((a, b) => String(a[0]).localeCompare(String(b[0]), "en"));
 }
-async function fingerprint(c, annotation, refs, full = false, budget = { objects: 0, streams: 0, strings: 0 }) {
+async function fingerprint(c, annotation, refs, full = false, budget = { objects: 0, streams: 0, strings: 0 }, omitGeneratedFlag = false) {
   const seen = /* @__PURE__ */ new Map();
   function canonical(obj, depth, root = false) {
     if (depth > ANNOTATION_LIMITS.depth || ++budget.objects > ANNOTATION_LIMITS.objects) fail7("annotation-object-limit");
@@ -8029,7 +8126,7 @@ async function fingerprint(c, annotation, refs, full = false, budget = { objects
       if (obj.length > ANNOTATION_LIMITS.objects) fail7("annotation-object-limit");
       return ["array", Array.from({ length: obj.length }, (_, i) => canonical(c.get(obj, i), depth + 1))];
     }
-    if (obj.isDictionary()) return ["dict", entries(c, obj).filter(([name]) => full || !root || !["Rect", "P", "QuadPoints"].includes(name)).map(([name, value2]) => [name, canonical(value2, depth + 1)])];
+    if (obj.isDictionary()) return ["dict", entries(c, obj).filter(([name]) => (!omitGeneratedFlag || !root || name !== "PDFIUM_HasGeneratedAP") && (full || !root || !["Rect", "P", "QuadPoints"].includes(name))).map(([name, value2]) => [name, canonical(value2, depth + 1)])];
     fail7("annotation-object-invalid");
   }
   function streamData2(obj, walkSeen = /* @__PURE__ */ new Set(), depth = 0, root = true) {
@@ -8052,7 +8149,7 @@ async function fingerprint(c, annotation, refs, full = false, budget = { objects
       return streamData2(c.keep(obj.resolve()), walkSeen, depth + 1, root);
     }
     if (obj.isArray()) return Array.from({ length: obj.length }, (_, i) => streamData2(c.get(obj, i), walkSeen, depth + 1, false));
-    if (obj.isDictionary()) return entries(c, obj).filter(([name]) => full || !root || !["Rect", "P", "QuadPoints"].includes(name)).map(([name, value2]) => [name, streamData2(value2, walkSeen, depth + 1, false)]);
+    if (obj.isDictionary()) return entries(c, obj).filter(([name]) => (!omitGeneratedFlag || !root || name !== "PDFIUM_HasGeneratedAP") && (full || !root || !["Rect", "P", "QuadPoints"].includes(name))).map(([name, value2]) => [name, streamData2(value2, walkSeen, depth + 1, false)]);
     return null;
   }
   const value = JSON.stringify([canonical(annotation, 0, true), streamData2(annotation)]);
@@ -8177,6 +8274,15 @@ function unsupportedDocumentActions(c, pages) {
   const catalog = c.get(c.doc.getTrailer(), "Root");
   return !c.get(catalog, "AA").isNull() || !c.get(catalog, "OpenAction").isNull() || pages.some((page) => !c.get(page, "AA").isNull());
 }
+async function fitOpenAction(c, refs, pages) {
+  const catalog = c.get(c.doc.getTrailer(), "Root"), open = c.get(catalog, "OpenAction");
+  if (!c.get(catalog, "AA").isNull() || pages.some((page2) => !c.get(page2, "AA").isNull())) return null;
+  if (open.isNull()) return { present: false };
+  if (!open.isArray() || open.length !== 2) return null;
+  const page = c.get(open, 0), mode = c.get(open, 1);
+  if (!page.isIndirect() || !refs.has(page.asIndirect()) || !mode.isName() || !["Fit", "FitB"].includes(mode.asName())) return null;
+  return { present: true, hash: await fingerprint(c, open, refs, true) };
+}
 function annotationArray(c, page) {
   const value = c.get(page, "Annots");
   if (!value.isNull() && !value.isArray()) fail7("annotation-array-invalid");
@@ -8193,6 +8299,12 @@ async function inventory(c, refs, pages, source2 = false) {
       const annotation = c.get(array, i);
       if (!annotation.isDictionary()) fail7("annotation-object-invalid");
       const id2 = identity(annotation), record = { sourcePageIndex: p, annotationIndex: i, aliasKey: shared.get(id2)?.aliasKey ?? key2(p, i), object: annotation, fingerprint: await fingerprint(c, annotation, refs, false, budget), fullFingerprint: await fingerprint(c, annotation, refs, true, budget) };
+      const generated = c.get(annotation, "PDFIUM_HasGeneratedAP"), ap = c.get(annotation, "AP");
+      record.generatedMarker = generated.isNull() ? "absent" : generated.isBoolean() && generated.asBoolean() ? "true" : "other";
+      if (c.get(annotation, "Subtype").asName() === "Link" && ap.isNull() && record.generatedMarker !== "other") {
+        record.noGeneratedFingerprint = await fingerprint(c, annotation, refs, true, budget, true);
+        record.noGeneratedMoveFingerprint = await fingerprint(c, annotation, refs, false, budget, true);
+      }
       if (shared.has(id2)) {
         record.shared = true;
         shared.get(id2).shared = true;
@@ -8213,7 +8325,7 @@ async function inspect({ mupdf, sourceBytes, sourceSha256 } = {}) {
   try {
     const identities = new Map(Array.from({ length: c.doc.countPages() }, (_, i) => [i, ["source-page", i]])), { refs, pages } = pageRefs(c, identities), catalog = c.get(c.doc.getTrailer(), "Root");
     const tagged = !c.get(catalog, "StructTreeRoot").isNull() || c.get(catalog, "MarkInfo", "Marked").asBoolean();
-    const actionOwnershipUnsupported = unsupportedDocumentActions(c, pages), destinationBudget = { objects: 0, streams: 0, strings: 0 };
+    const fitAction = await fitOpenAction(c, refs, pages), actionOwnershipUnsupported = unsupportedDocumentActions(c, pages) && !fitAction, destinationBudget = { objects: 0, streams: 0, strings: 0 };
     const names = nameDestinations(c), readDestination = destinationReader(c, refs, names), snapshot = await inventory(c, refs, pages, true), annotations = [];
     for (const record of snapshot.records) {
       const annotation = record.object, descriptor = { sourcePageIndex: record.sourcePageIndex, annotationIndex: record.annotationIndex, kind: c.get(record.object, "Subtype").asName() === "Link" ? "link" : "unsupported", eligible: true };
@@ -8278,7 +8390,7 @@ async function inspect({ mupdf, sourceBytes, sourceSha256 } = {}) {
       if (record.hadP === void 0) record.hadP = !c.get(record.object, "P").isNull();
     }
     const model = frozen2({ schema: "falsify.flow-annotations.v1", sourceSha256: sha, pageCount: pages.length, actionOwnershipUnsupported: actionOwnershipUnsupported || snapshot.records.some((r) => r.actionOwnershipUnsafe), warnings: sourceWarnings(snapshot.records), annotations });
-    privateModels.set(model, { mupdf, sha, actionOwnershipUnsupported: model.actionOwnershipUnsupported, records: snapshot.records.map(({ object, ...record }) => record), pageGeometry: pages.map((page) => {
+    privateModels.set(model, { mupdf, sha, fitAction, actionOwnershipUnsupported: model.actionOwnershipUnsupported, records: snapshot.records.map(({ object, ...record }) => record), pageGeometry: pages.map((page) => {
       try {
         return geometry(c, page);
       } catch {
@@ -8307,10 +8419,25 @@ function movementPlan(model, records, map, count, moves, reflowed, destinationMo
   if (!Array.isArray(moves) || moves.length > ANNOTATION_LIMITS.annotations || !Array.isArray(reflowed) || reflowed.some((p) => !Number.isInteger(p) || p < 0 || p >= model.pageCount) || new Set(reflowed).size !== reflowed.length) fail7("annotation-move-invalid");
   const group = new Set(reflowed), byKey = new Map(records.map((r) => [key2(r.sourcePageIndex, r.annotationIndex), r])), planned = /* @__PURE__ */ new Map();
   for (const move of moves) {
-    if (!move || Object.keys(move).sort().join(",") !== "annotationIndex,dx,dy,outputPageIndex,sourcePageIndex" || !Number.isInteger(move.sourcePageIndex) || !Number.isInteger(move.annotationIndex) || !Number.isInteger(move.outputPageIndex) || move.outputPageIndex < 0 || move.outputPageIndex >= count || ![move.dx, move.dy].every((n) => typeof n === "number" && Number.isFinite(n) && Math.abs(n) <= 1e5)) fail7("annotation-move-invalid");
+    if (!move || !["annotationIndex,dx,dy,outputPageIndex,sourcePageIndex", "annotationIndex,dx,dy,outputPageIndex,rect,sourcePageIndex"].includes(Object.keys(move).sort().join(",")) || !Number.isInteger(move.sourcePageIndex) || !Number.isInteger(move.annotationIndex) || !Number.isInteger(move.outputPageIndex) || move.outputPageIndex < 0 || move.outputPageIndex >= count || ![move.dx, move.dy].every((n) => typeof n === "number" && Number.isFinite(n) && Math.abs(n) <= 1e5)) fail7("annotation-move-invalid");
     const id2 = key2(move.sourcePageIndex, move.annotationIndex), record = byKey.get(id2);
     if (!record || planned.has(id2) || !record.descriptor.eligible || !group.has(move.sourcePageIndex)) fail7("annotation-move-invalid");
+    if (move.rect !== void 0) {
+      const d = record.descriptor, r = move.rect;
+      if (d.kind !== "link" || d.quadPoints || !Array.isArray(d.rect) || !Array.isArray(r) || r.length !== 4 || !r.every(Number.isFinite) || r[0] >= r[2] || r[1] >= r[3] || move.dx !== 0 || move.dy !== 0 || move.outputPageIndex !== map.get(move.sourcePageIndex) || !contains2(r, d.rect)) fail7("annotation-move-invalid");
+      for (const other of records.filter((x) => x.sourcePageIndex === move.sourcePageIndex && x !== record)) {
+        const q = other.descriptor.rect;
+        if (!Array.isArray(q) || q.length !== 4) fail7("annotation-move-invalid");
+        if (Math.min(r[2], q[2]) - Math.max(r[0], q[0]) > 1e-4 && Math.min(r[3], q[3]) - Math.max(r[1], q[1]) > 1e-4) fail7("annotation-move-overlap");
+      }
+    }
     planned.set(id2, move);
+  }
+  const expanded = [...planned.values()].filter((m) => m.rect !== void 0);
+  for (let i = 0; i < expanded.length; i++) for (let j = i + 1; j < expanded.length; j++) {
+    const a = expanded[i], b = expanded[j];
+    if (a.outputPageIndex !== b.outputPageIndex) continue;
+    if (Math.min(a.rect[2], b.rect[2]) - Math.max(a.rect[0], b.rect[0]) > 1e-4 && Math.min(a.rect[3], b.rect[3]) - Math.max(a.rect[1], b.rect[1]) > 1e-4) fail7("annotation-move-overlap");
   }
   if (!Array.isArray(destinationMoves) || destinationMoves.length > ANNOTATION_LIMITS.annotations) fail7("annotation-destination-move-invalid");
   const destinations = /* @__PURE__ */ new Map();
@@ -8362,7 +8489,11 @@ async function bound({ model, sourceBytes, outputBytes, sourcePageMap, moves = [
   try {
     if (reflowedSourcePages.length && state.actionOwnershipUnsupported) fail7("annotation-action-root-unsupported");
     const map = mapping(model, sourcePageMap, c.doc.countPages()), inverse = new Map([...map].map(([s, o]) => [o, ["source-page", s]])), { refs, pages } = pageRefs(c, inverse), plan = movementPlan(model, state.records, map, pages.length, moves, reflowedSourcePages, destinationMoves, preserveUnmovedUnsupported);
-    if (reflowedSourcePages.length && unsupportedDocumentActions(c, pages)) fail7("annotation-action-root-unsupported");
+    if (reflowedSourcePages.length) {
+      const outputAction = await fitOpenAction(c, refs, pages);
+      if (!state.fitAction || !outputAction || JSON.stringify(state.fitAction) !== JSON.stringify(outputAction)) fail7("annotation-action-root-unsupported");
+      if (state.fitAction.present && (pages.length !== model.pageCount || [...map].some(([s, o]) => s !== o) || moves.some((m) => m.rect === void 0 || m.dx !== 0 || m.dy !== 0 || m.sourcePageIndex !== m.outputPageIndex) || destinationMoves.some((m) => m.dx !== 0 || m.dy !== 0 || m.sourcePageIndex !== m.outputPageIndex))) fail7("annotation-action-root-unsupported");
+    }
     for (const [s, o] of map) if (state.pageGeometry[s] && !numbers(state.pageGeometry[s], geometry(c, pages[o]))) fail7("annotation-page-identity-invalid");
     return { c, state, map, refs, pages, plan, preserveUnmovedUnsupported };
   } catch (error2) {
@@ -8408,14 +8539,16 @@ async function verifyDocument(ctx, expected, after = false) {
         if (aliases.has(record.aliasKey) && aliases.get(record.aliasKey) !== out.aliasKey || reverseAliases.has(out.aliasKey) && reverseAliases.get(out.aliasKey) !== record.aliasKey) fail7("annotation-shared-object");
         aliases.set(record.aliasKey, out.aliasKey);
         reverseAliases.set(out.aliasKey, record.aliasKey);
-        if ((move ? out.fingerprint : out.fullFingerprint) !== (move ? record.fingerprint : record.fullFingerprint)) fail7("annotation-semantic-mismatch");
+        if ((move ? out.fingerprint : out.fullFingerprint) !== (move ? record.fingerprint : record.fullFingerprint)) {
+          if (record.generatedMarker !== "absent" || out.generatedMarker !== "true" || !(move ? record.noGeneratedMoveFingerprint : record.noGeneratedFingerprint) || (move ? record.noGeneratedMoveFingerprint : record.noGeneratedFingerprint) !== (move ? out.noGeneratedMoveFingerprint : out.noGeneratedFingerprint)) fail7("annotation-semantic-mismatch");
+        }
         if (record.destinationFingerprints) {
           const resolved = readDestination(out.object), fingerprints = await Promise.all(resolved.values.map((value) => fingerprint(c, value, refs, true, destinationBudget)));
           if (JSON.stringify(fingerprints) !== JSON.stringify(record.destinationFingerprints) || JSON.stringify(resolved.missingNames) !== JSON.stringify(record.missingDestinationNames)) fail7("annotation-destination-definition-mismatch");
         }
         if (!move) continue;
         if (!d.rect) fail7("annotation-geometry-invalid");
-        const rect2 = d.rect.map((v, k) => v + (move ? k % 2 ? move.dy : move.dx : 0));
+        const rect2 = move?.rect ?? d.rect.map((v, k) => v + (move ? k % 2 ? move.dy : move.dx : 0));
         if (!numbers(rect2, annotationRectangle(c, c.get(out.object, "Rect")))) fail7("annotation-output-geometry-mismatch");
         if (move && !contains2(geometry(c, pages[p]), rect2)) fail7("annotation-output-geometry-mismatch");
         const quads = c.get(out.object, "QuadPoints");
@@ -8460,7 +8593,7 @@ async function transport(request = {}) {
     const touched = /* @__PURE__ */ new Set();
     for (const move of request.moves || []) {
       const object = located.get(key2(move.sourcePageIndex, move.annotationIndex)), record = ctx.state.records.find((r) => r.sourcePageIndex === move.sourcePageIndex && r.annotationIndex === move.annotationIndex), d = record.descriptor;
-      const rect2 = d.rect.map((v, k) => v + (k % 2 ? move.dy : move.dx));
+      const rect2 = move.rect ?? d.rect.map((v, k) => v + (k % 2 ? move.dy : move.dx));
       if (!contains2(geometry(ctx.c, ctx.pages[move.outputPageIndex]), rect2)) fail7("annotation-output-geometry-mismatch");
       object.put("Rect", rect2);
       object.put("P", ctx.pages[move.outputPageIndex]);
@@ -8510,33 +8643,13 @@ function createAnnotationTransport({ mupdf } = {}) {
 // src/paragraph-link-transport.mjs
 var intersects2 = (a, b) => Math.min(a.r, b.r) - Math.max(a.l, b.l) > 1e-4 && Math.min(a.t, b.t) - Math.max(a.b, b.b) > 1e-4;
 var sameBox = (a, b) => ["l", "r", "b", "t"].every((k) => Number.isFinite(a[k]) && Number.isFinite(b[k]) && Math.abs(a[k] - b[k]) <= 0.05);
-function stationaryLinks(links, source2, target, edits) {
-  let text3 = "", indices = [];
-  for (const c of source2.chars) {
-    const ch = String.fromCharCode(c.u);
-    if (/\s/u.test(ch)) {
-      if (text3 && !text3.endsWith(" ")) {
-        text3 += " ";
-        indices.push(null);
-      }
-    } else {
-      text3 += ch;
-      indices.push(c.index);
-    }
-  }
-  if (text3.endsWith(" ")) {
-    text3 = text3.slice(0, -1);
-    indices.pop();
-  }
-  const expected = expectedPageText(text3, edits, { includeSpans: true });
-  if (!expected.ok) return /* @__PURE__ */ new Set();
-  const edited = new Set(expected.spans.flatMap((s) => indices.slice(s.a, s.b).filter((i) => i !== null)));
+function stationaryLinks(links, source2, target) {
   const proved = /* @__PURE__ */ new Set();
   for (const link of links) {
     if (!Array.isArray(link.rect) || link.rect.length !== 4 || !link.rect.every(Number.isFinite)) continue;
     const [x1, y1, x2, y2] = link.rect, rect2 = { l: Math.min(x1, x2), r: Math.max(x1, x2), b: Math.min(y1, y2), t: Math.max(y1, y2) };
     const owned = source2.chars.filter((c) => c.u > 32 && c.box && intersects2(c.box, rect2));
-    if (!owned.length || owned.some((c) => edited.has(c.index))) continue;
+    if (!owned.length) continue;
     const outputOwned = target.chars.filter((c) => c.u > 32 && c.box && intersects2(c.box, rect2));
     if (outputOwned.length !== owned.length) continue;
     const used = /* @__PURE__ */ new Set();
@@ -8554,7 +8667,75 @@ function stationaryLinks(links, source2, target, edits) {
   }
   return proved;
 }
-function stationaryXYZ(destinations, source2, target, edits, pageIndex, outputPageIndex) {
+function numericLink(link, source2, target, proof, allAnnotations, pageIndex, outputPageIndex) {
+  if (!proof || !link.eligible || !Array.isArray(link.rect) || link.quadPoints) return null;
+  const [l, b, r, t] = link.rect, rect2 = { l, b, r, t };
+  const changed = new Set(proof.sourceIndices), replacement = new Set(proof.outputIndices);
+  const owned = source2.filter((c) => c.u > 32 && c.box && intersects2(c.box, rect2));
+  if (!owned.length || !proof.sourceIndices.every((i) => owned.some((c) => c.index === i)) || !proof.outputIndices.length) return null;
+  const retained = new Map(proof.retained.map((x) => [x.sourceIndex, x.outputIndex]));
+  const mapped = [];
+  for (const c of owned) {
+    if (changed.has(c.index)) continue;
+    const n = retained.get(c.index), o = target[n];
+    if (!o?.box || o.u !== c.u || !sameBox(c.box, o.box) || !c.style || !o.style || !edgeGlyphsEquivalent([{ u: c.u, ...c.box, style: c.style }], [{ u: o.u, ...o.box, style: o.style }])) return null;
+    mapped.push(n);
+  }
+  const old = proof.sourceIndices.map((i) => source2[i]), fresh = proof.outputIndices.map((i) => target[i]);
+  if (old.some((c) => !c?.box || !c.style) || fresh.some((c) => !c?.box || !c.style)) return null;
+  const exemplar = old[0];
+  for (const c of fresh) if (!edgeGlyphsEquivalent([{ u: exemplar.u, ...exemplar.box, style: exemplar.style }], [{ u: exemplar.u, ...exemplar.box, style: c.style }])) return null;
+  const bounds = (chars) => ({ l: Math.min(...chars.map((c) => c.box.l)), r: Math.max(...chars.map((c) => c.box.r)), b: Math.min(...chars.map((c) => c.box.b)), t: Math.max(...chars.map((c) => c.box.t)) });
+  const before = bounds(owned), after = bounds([...mapped.map((i) => target[i]), ...fresh]);
+  const nr = [Math.min(l, after.l - (before.l - l)), Math.min(b, after.b - (before.b - b)), Math.max(r, after.r + (r - before.r)), Math.max(t, after.t + (t - before.t))];
+  if (nr.some((n) => !Number.isFinite(n)) || before.l < l - 0.05 || before.r > r + 0.05 || before.b < b - 0.05 || before.t > t + 0.05) return null;
+  const box = { l: nr[0], b: nr[1], r: nr[2], t: nr[3] }, allowed = /* @__PURE__ */ new Set([...mapped, ...replacement]);
+  const inside = target.filter((c) => c.u > 32 && c.box && intersects2(c.box, box));
+  if (inside.length !== allowed.size || inside.some((c) => !allowed.has(c.index))) return null;
+  for (const a of allAnnotations.filter((a2) => a2.sourcePageIndex === pageIndex && a2.annotationIndex !== link.annotationIndex)) {
+    if (!Array.isArray(a.rect) || a.rect.length !== 4 || !a.rect.every(Number.isFinite)) return null;
+    const [al, ab, ar, at] = a.rect;
+    if (intersects2(box, { l: Math.min(al, ar), r: Math.max(al, ar), b: Math.min(ab, at), t: Math.max(ab, at) })) return null;
+  }
+  return { sourcePageIndex: pageIndex, annotationIndex: link.annotationIndex, outputPageIndex, dx: 0, dy: 0, rect: nr };
+}
+function stationaryPaint(link, source2, target, sourcePage, outputPage, sourceGeometry, targetGeometry) {
+  if (typeof source2.renderPageRegion !== "function" || typeof target.renderPageRegion !== "function" || !Array.isArray(link.rect) || sourceGeometry.frame?.rotation !== 0 || JSON.stringify(sourceGeometry.frame) !== JSON.stringify(targetGeometry.frame) || sourceGeometry.W !== targetGeometry.W || sourceGeometry.H !== targetGeometry.H) return false;
+  const [l, b, r, t] = link.rect, W = sourceGeometry.W, H = sourceGeometry.H, scale = 2;
+  if (![l, b, r, t, W, H].every(Number.isFinite) || l < 0 || b < 0 || r > W || t > H || l >= r || b >= t) return false;
+  const fullW = Math.ceil(W * scale), fullH = Math.ceil(H * scale), x = Math.floor(l * scale), y = Math.floor((H - t) * scale), w = Math.ceil(r * scale) - x, h = Math.ceil((H - b) * scale) - y;
+  if (w * h > 1e6 || w < 1 || h < 1) return false;
+  source2.loadPage(sourcePage);
+  target.loadPage(outputPage);
+  const a = source2.renderPageRegion(fullW, fullH, x, y, w, h), z = target.renderPageRegion(fullW, fullH, x, y, w, h);
+  if (!a?.data || !z?.data || a.data.length !== z.data.length) return false;
+  let painted = false;
+  for (let i = 0; i < a.data.length; i++) {
+    if (a.data[i] !== z.data[i]) return false;
+    if (i % 4 !== 3 && a.data[i] < 250) painted = true;
+  }
+  return painted;
+}
+function stationaryPagePaint(src, out, pageIndex, outputPageIndex, s, t, proof, rawSource, rawTarget) {
+  if (!proof || s.frame?.rotation !== 0 || typeof src.renderPageRegion !== "function" || typeof out.renderPageRegion !== "function") return false;
+  const box = [...proof.sourceIndices.map((i) => rawSource[i]?.box), ...proof.outputIndices.map((i) => rawTarget[i]?.box)];
+  if (!box.length || box.some((b2) => !b2)) return false;
+  const W = Math.ceil(s.W * 2), H = Math.ceil(s.H * 2);
+  if (!Number.isSafeInteger(W) || !Number.isSafeInteger(H) || W < 1 || H < 1 || W * H > 8e6) return false;
+  const left = Math.floor(2 * Math.min(...box.map((b2) => b2.l))) - 3, right = Math.ceil(2 * Math.max(...box.map((b2) => b2.r))) + 3;
+  const top = Math.floor(2 * (s.H - Math.max(...box.map((b2) => b2.t)))) - 3, bottom = Math.ceil(2 * (s.H - Math.min(...box.map((b2) => b2.b)))) + 3;
+  src.loadPage(pageIndex);
+  out.loadPage(outputPageIndex);
+  const a = src.renderPageRegion(W, H, 0, 0, W, H), b = out.renderPageRegion(W, H, 0, 0, W, H);
+  if (!a?.data || !b?.data || a.data.length !== b.data.length) return false;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    if (x >= left && x <= right && y >= top && y <= bottom) continue;
+    const p = (y * W + x) * 4;
+    for (let k = 0; k < 4; k++) if (a.data[p + k] !== b.data[p + k]) return false;
+  }
+  return true;
+}
+function stationaryXYZ(destinations, source2, target, edits, pageIndex, outputPageIndex, proof, pagePaint) {
   let text3 = "", indices = [];
   for (const c of source2.chars) {
     const ch = String.fromCharCode(c.u);
@@ -8573,8 +8754,18 @@ function stationaryXYZ(destinations, source2, target, edits, pageIndex, outputPa
     indices.pop();
   }
   const expected = expectedPageText(text3, edits, { includeSpans: true });
-  if (!expected.ok) return [];
-  const edited = new Set(expected.spans.flatMap((s) => indices.slice(s.a, s.b).filter((i) => i !== null)));
+  if (!expected.ok && !proof) return [];
+  const edited = proof ? new Set(proof.sourceIndices) : new Set(expected.spans.flatMap((s) => indices.slice(s.a, s.b).filter((i) => i !== null)));
+  const retained = proof ? new Map(proof.retained.map((x) => [x.sourceIndex, x.outputIndex])) : null;
+  let pageStable = !!proof && pagePaint;
+  if (proof) for (const { sourceIndex, outputIndex } of proof.retained) {
+    const a = source2.chars[sourceIndex], b = target.chars[outputIndex];
+    if (!a || !b || a.u !== b.u || !!a.box !== !!b.box || a.box && (!sameBox(a.box, b.box) || !a.style || !b.style || !edgeGlyphsEquivalent([{ u: a.u, ...a.box, style: a.style }], [{ u: b.u, ...b.box, style: b.style }]))) {
+      pageStable = false;
+      break;
+    }
+  }
+  const changedBoxes = proof ? proof.sourceIndices.map((i) => source2.chars[i]?.box).filter(Boolean) : [];
   const groups = /* @__PURE__ */ new Map();
   for (const c of source2.chars) if (c.u > 32 && c.object && c.box && !c.generated) {
     const g = groups.get(c.object) || [];
@@ -8584,7 +8775,12 @@ function stationaryXYZ(destinations, source2, target, edits, pageIndex, outputPa
   const proved = [];
   for (const d of destinations) {
     if (d.kind !== "XYZ" || d.operands.length !== 3 || !Number.isFinite(d.operands[0]) || !Number.isFinite(d.operands[1]) || !(d.operands[2] === null || Number.isFinite(d.operands[2]))) continue;
-    const [x, y] = d.operands, matches = [...groups.values()].filter((g) => {
+    const [x, y] = d.operands;
+    if (pageStable && changedBoxes.length === proof.sourceIndices.length && !changedBoxes.some((q) => x >= q.l - 0.5 && x <= q.r + 0.5 && y >= q.b - 0.5 && y <= q.t + 0.5)) {
+      proved.push({ id: d.id, sourcePageIndex: pageIndex, outputPageIndex, dx: 0, dy: 0 });
+      continue;
+    }
+    const matches = [...groups.values()].filter((g) => {
       const l = Math.min(...g.map((c) => c.box.l)), t = Math.max(...g.map((c) => c.box.t));
       return l >= x - 0.5 && l <= x + 4 && t <= y + 2 && t >= y - 8;
     });
@@ -8592,7 +8788,7 @@ function stationaryXYZ(destinations, source2, target, edits, pageIndex, outputPa
     const used = /* @__PURE__ */ new Set();
     let ok = true;
     for (const c of matches[0]) {
-      const candidates = target.chars.filter((t) => t.u === c.u && t.box && sameBox(c.box, t.box) && c.style && t.style && edgeGlyphsEquivalent([{ u: c.u, ...c.box, style: c.style }], [{ u: t.u, ...t.box, style: t.style }]));
+      const candidates = target.chars.filter((t) => (!retained || retained.get(c.index) === t.index) && t.u === c.u && t.box && sameBox(c.box, t.box) && c.style && t.style && edgeGlyphsEquivalent([{ u: c.u, ...c.box, style: c.style }], [{ u: t.u, ...t.box, style: t.style }]));
       if (candidates.length !== 1 || used.has(candidates[0].index)) {
         ok = false;
         break;
@@ -8655,6 +8851,15 @@ async function transportParagraphLinks({ engineFactory, sourceBytes, outputBytes
         const pageEdits = edits.filter((e) => e.pageIndex === pageIndex);
         const sourceRaw = readLinkPageCharacters(src, pageIndex), targetRaw = readLinkPageCharacters(out, map.outputPageIndex);
         const sourceGeometry = readGlyphs(src, pageIndex), targetGeometry = readGlyphs(out, map.outputPageIndex);
+        const identityMap = sourcePageMap.length === src.pageCount && src.pageCount === out.pageCount && sourcePageMap.every((m) => m.sourcePageIndex === m.outputPageIndex && !m.continuationPageIndices?.length) && sourceGeometry.W === targetGeometry.W && sourceGeometry.H === targetGeometry.H && JSON.stringify(sourceGeometry.frame) === JSON.stringify(targetGeometry.frame);
+        let numericProof = null;
+        if (identityMap && typeof src.buildModel === "function") {
+          try {
+            src.loadPage(pageIndex);
+            numericProof = modelNumericEditProof(sourceGeometry, targetGeometry, pageEdits, src.buildModel());
+          } catch {
+          }
+        }
         const withStyle = (chars, geometry2) => {
           const styles = new Map(geometry2.glyphs.map((g) => [g.i, g.style]));
           return chars.map((c) => ({ ...c, style: styles.get(c.index) }));
@@ -8671,11 +8876,28 @@ async function transportParagraphLinks({ engineFactory, sourceBytes, outputBytes
         const overlapping = new Set([...ownership.values()].filter((a) => a.length > 1).flat());
         for (const link of links.filter((a) => overlapping.has(a.annotationIndex))) failures.push({ code: "paragraph_link_unverified", pageIndex, annotationIndex: link.annotationIndex, reason: "document_flow_link_overlapping_ownership" });
         const candidates = links.filter((a) => !overlapping.has(a.annotationIndex));
-        const stationary = stationaryLinks(candidates, { chars: withStyle(sourceRaw, sourceGeometry) }, { chars: withStyle(targetRaw, targetGeometry) }, pageEdits);
+        const stationary = stationaryLinks(candidates, { chars: withStyle(sourceRaw, sourceGeometry) }, { chars: withStyle(targetRaw, targetGeometry) });
+        const styledSource = withStyle(sourceRaw, sourceGeometry), styledTarget = withStyle(targetRaw, targetGeometry);
+        for (const link of candidates.filter((a) => !stationary.has(a.annotationIndex))) {
+          const rect2 = link.rect;
+          if (!Array.isArray(rect2)) continue;
+          const [l, b, r, t] = rect2, box = { l: Math.min(l, r), r: Math.max(l, r), b: Math.min(b, t), t: Math.max(b, t) };
+          if (identityMap && !sourceRaw.some((c) => c.u > 32 && c.box && intersects2(c.box, box)) && !targetRaw.some((c) => c.u > 32 && c.box && intersects2(c.box, box)) && stationaryPaint(link, src, out, pageIndex, map.outputPageIndex, sourceGeometry, targetGeometry)) stationary.add(link.annotationIndex);
+        }
+        const numericMoves = [];
+        for (const link of candidates.filter((a) => !stationary.has(a.annotationIndex))) {
+          const move = numericLink(link, styledSource, styledTarget, numericProof, model.annotations, pageIndex, map.outputPageIndex);
+          if (move) {
+            numericMoves.push(move);
+            stationary.add(link.annotationIndex);
+          }
+        }
+        moves.push(...numericMoves);
         const remaining = candidates.filter((a) => !stationary.has(a.annotationIndex));
         const destinations = /* @__PURE__ */ new Map();
         for (const a of model.annotations) for (const d of a.internalDestinations || []) if (d.targetSourcePageIndex === pageIndex) destinations.set(d.id, d);
-        const fixedDestinations = stationaryXYZ([...destinations.values()], { chars: withStyle(sourceRaw, sourceGeometry) }, { chars: withStyle(targetRaw, targetGeometry) }, pageEdits, pageIndex, map.outputPageIndex);
+        const pagePaint = identityMap && numericProof && stationaryPagePaint(src, out, pageIndex, map.outputPageIndex, sourceGeometry, targetGeometry, numericProof, sourceRaw, targetRaw);
+        const fixedDestinations = stationaryXYZ([...destinations.values()], { chars: withStyle(sourceRaw, sourceGeometry) }, { chars: withStyle(targetRaw, targetGeometry) }, pageEdits, pageIndex, map.outputPageIndex, numericProof, pagePaint);
         destinationMoves.push(...fixedDestinations);
         const fixedIds = new Set(fixedDestinations.map((d) => d.id));
         if (!remaining.length && fixedIds.size === destinations.size) continue;
@@ -8780,15 +9002,22 @@ function planInlineChange(paras, chars, map, hit, needle, after) {
     let first = 0, last = 0;
     while (first < b.t.length && first < a.length && b.t[first] === a[first]) first++;
     while (last < b.t.length - first && last < a.length - first && b.t[b.t.length - 1 - last] === a[a.length - 1 - last]) last++;
-    const old = b.t.slice(first, b.t.length - last), replacement = a.slice(first, a.length - last);
+    let start = first, end = b.t.length - last;
+    let old = b.t.slice(start, end), replacement = a.slice(first, a.length - last);
+    if (!old && /^[0-9]+$/.test(replacement)) {
+      while (start > 0 && /^[0-9]$/.test(b.t[start - 1])) start--;
+      while (end < b.t.length && /^[0-9]$/.test(b.t[end])) end++;
+      old = b.t.slice(start, end);
+      replacement = b.t.slice(start, first) + replacement + b.t.slice(first, end);
+    }
     if ((first || last) && old) {
-      const narrow = rawOf({ k0: b.k0 + first, k1: b.k1 - last }).filter((c) => c.pi >= 0);
+      const narrow = rawOf({ k0: b.k0 + start, k1: b.k0 + end }).filter((c) => c.pi >= 0);
       if (narrow.length && new Set(narrow.map(style)).size === 1) {
         const numeric = /^[0-9]+$/.test(old) && /^[0-9]+$/.test(replacement);
         return {
           del: narrow,
           inserts: replacement ? [place(narrow[0], replacement)] : [],
-          ...numeric ? { warning: "numeric_marker_style_from_digits", numericMarker: { before: old, after: replacement, context: b.t, offset: first } } : {}
+          ...numeric ? { warning: "numeric_marker_style_from_digits", numericMarker: { before: old, after: replacement, context: b.t, offset: start } } : {}
         };
       }
     }

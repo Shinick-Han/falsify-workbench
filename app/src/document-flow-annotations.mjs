@@ -39,7 +39,7 @@ function pageRefs(c,map){
   return {refs,pages};
 }
 function entries(c,obj){const list=[];obj.forEach((value,name)=>list.push([name,c.keep(value)]));return list.sort((a,b)=>String(a[0]).localeCompare(String(b[0]),'en'));}
-async function fingerprint(c,annotation,refs,full=false,budget={objects:0,streams:0,strings:0}){
+async function fingerprint(c,annotation,refs,full=false,budget={objects:0,streams:0,strings:0},omitGeneratedFlag=false){
   const seen=new Map();
   function canonical(obj,depth,root=false){
     if(depth>ANNOTATION_LIMITS.depth||++budget.objects>ANNOTATION_LIMITS.objects)fail('annotation-object-limit');
@@ -57,7 +57,7 @@ async function fingerprint(c,annotation,refs,full=false,budget={objects:0,stream
       if(obj.length>ANNOTATION_LIMITS.objects)fail('annotation-object-limit');
       return ['array',Array.from({length:obj.length},(_,i)=>canonical(c.get(obj,i),depth+1))];
     }
-    if(obj.isDictionary())return ['dict',entries(c,obj).filter(([name])=>full||!root||!['Rect','P','QuadPoints'].includes(name)).map(([name,value])=>[name,canonical(value,depth+1)])];
+    if(obj.isDictionary())return ['dict',entries(c,obj).filter(([name])=>(!omitGeneratedFlag||!root||name!=='PDFIUM_HasGeneratedAP')&&(full||!root||!['Rect','P','QuadPoints'].includes(name))).map(([name,value])=>[name,canonical(value,depth+1)])];
     fail('annotation-object-invalid');
   }
   // Stream tests must use the indirect reference: its resolved dictionary alone cannot read the stream.
@@ -71,7 +71,7 @@ async function fingerprint(c,annotation,refs,full=false,budget={objects:0,stream
       return streamData(c.keep(obj.resolve()),walkSeen,depth+1,root);
     }
     if(obj.isArray())return Array.from({length:obj.length},(_,i)=>streamData(c.get(obj,i),walkSeen,depth+1,false));
-    if(obj.isDictionary())return entries(c,obj).filter(([name])=>full||!root||!['Rect','P','QuadPoints'].includes(name)).map(([name,value])=>[name,streamData(value,walkSeen,depth+1,false)]);
+    if(obj.isDictionary())return entries(c,obj).filter(([name])=>(!omitGeneratedFlag||!root||name!=='PDFIUM_HasGeneratedAP')&&(full||!root||!['Rect','P','QuadPoints'].includes(name))).map(([name,value])=>[name,streamData(value,walkSeen,depth+1,false)]);
     return null;
   }
   const value=JSON.stringify([canonical(annotation,0,true),streamData(annotation)]);
@@ -134,6 +134,17 @@ function destinationReader(c,refs,names){
   };
 }
 function unsupportedDocumentActions(c,pages){const catalog=c.get(c.doc.getTrailer(),'Root');return !c.get(catalog,'AA').isNull()||!c.get(catalog,'OpenAction').isNull()||pages.some(page=>!c.get(page,'AA').isNull());}
+// Only a page-wide Fit OpenAction has no coordinate anchor to invalidate on
+// a stationary edit. All other action roots retain the existing barrier.
+async function fitOpenAction(c,refs,pages){
+  const catalog=c.get(c.doc.getTrailer(),'Root'),open=c.get(catalog,'OpenAction');
+  if(!c.get(catalog,'AA').isNull()||pages.some(page=>!c.get(page,'AA').isNull()))return null;
+  if(open.isNull())return {present:false};
+  if(!open.isArray()||open.length!==2)return null;
+  const page=c.get(open,0),mode=c.get(open,1);
+  if(!page.isIndirect()||!refs.has(page.asIndirect())||!mode.isName()||!['Fit','FitB'].includes(mode.asName()))return null;
+  return {present:true,hash:await fingerprint(c,open,refs,true)};
+}
 function annotationArray(c,page){const value=c.get(page,'Annots');if(!value.isNull()&&!value.isArray())fail('annotation-array-invalid');return value;}
 async function inventory(c,refs,pages,source=false){
   const records=[],byPage=[],shared=new Map(),budget={objects:0,streams:0,strings:0};let count=0;
@@ -143,6 +154,9 @@ async function inventory(c,refs,pages,source=false){
       if(++count>ANNOTATION_LIMITS.annotations)fail('annotation-count-limit');
       const annotation=c.get(array,i);if(!annotation.isDictionary())fail('annotation-object-invalid');
       const id=identity(annotation),record={sourcePageIndex:p,annotationIndex:i,aliasKey:shared.get(id)?.aliasKey??key(p,i),object:annotation,fingerprint:await fingerprint(c,annotation,refs,false,budget),fullFingerprint:await fingerprint(c,annotation,refs,true,budget)};
+      const generated=c.get(annotation,'PDFIUM_HasGeneratedAP'),ap=c.get(annotation,'AP');
+      record.generatedMarker=generated.isNull()?'absent':generated.isBoolean()&&generated.asBoolean()?'true':'other';
+      if(c.get(annotation,'Subtype').asName()==='Link'&&ap.isNull()&&record.generatedMarker!=='other'){record.noGeneratedFingerprint=await fingerprint(c,annotation,refs,true,budget,true);record.noGeneratedMoveFingerprint=await fingerprint(c,annotation,refs,false,budget,true);}
       if(shared.has(id)){record.shared=true;shared.get(id).shared=true;}else shared.set(id,record);
       records.push(record);list.push(record);
     }
@@ -158,7 +172,7 @@ export async function inspect({mupdf,sourceBytes,sourceSha256}={}){
   try{
     const identities=new Map(Array.from({length:c.doc.countPages()},(_,i)=>[i,['source-page',i]])),{refs,pages}=pageRefs(c,identities),catalog=c.get(c.doc.getTrailer(),'Root');
     const tagged=!c.get(catalog,'StructTreeRoot').isNull()||c.get(catalog,'MarkInfo','Marked').asBoolean();
-    const actionOwnershipUnsupported=unsupportedDocumentActions(c,pages),destinationBudget={objects:0,streams:0,strings:0};
+    const fitAction=await fitOpenAction(c,refs,pages),actionOwnershipUnsupported=unsupportedDocumentActions(c,pages)&&!fitAction,destinationBudget={objects:0,streams:0,strings:0};
     const names=nameDestinations(c),readDestination=destinationReader(c,refs,names),snapshot=await inventory(c,refs,pages,true),annotations=[];
     for(const record of snapshot.records){
       const annotation=record.object,descriptor={sourcePageIndex:record.sourcePageIndex,annotationIndex:record.annotationIndex,kind:c.get(record.object,'Subtype').asName()==='Link'?'link':'unsupported',eligible:true};
@@ -182,7 +196,7 @@ export async function inspect({mupdf,sourceBytes,sourceSha256}={}){
       if(record.hadP===undefined)record.hadP=!c.get(record.object,'P').isNull();
     }
     const model=frozen({schema:'falsify.flow-annotations.v1',sourceSha256:sha,pageCount:pages.length,actionOwnershipUnsupported:actionOwnershipUnsupported||snapshot.records.some(r=>r.actionOwnershipUnsafe),warnings:sourceWarnings(snapshot.records),annotations});
-    privateModels.set(model,{mupdf,sha,actionOwnershipUnsupported:model.actionOwnershipUnsupported,records:snapshot.records.map(({object,...record})=>record),pageGeometry:pages.map(page=>{try{return geometry(c,page);}catch{return null;}})});return model;
+    privateModels.set(model,{mupdf,sha,fitAction,actionOwnershipUnsupported:model.actionOwnershipUnsupported,records:snapshot.records.map(({object,...record})=>record),pageGeometry:pages.map(page=>{try{return geometry(c,page);}catch{return null;}})});return model;
   }catch(error){if(error instanceof AnnotationTransportError)throw error;fail('annotation-inspection-failed');}finally{c.close();}
 }
 function mapping(model,map,count){
@@ -195,8 +209,20 @@ function movementPlan(model,records,map,count,moves,reflowed,destinationMoves=[]
   if(!Array.isArray(moves)||moves.length>ANNOTATION_LIMITS.annotations||!Array.isArray(reflowed)||reflowed.some(p=>!Number.isInteger(p)||p<0||p>=model.pageCount)||new Set(reflowed).size!==reflowed.length)fail('annotation-move-invalid');
   const group=new Set(reflowed),byKey=new Map(records.map(r=>[key(r.sourcePageIndex,r.annotationIndex),r])),planned=new Map();
   for(const move of moves){
-    if(!move||Object.keys(move).sort().join(',')!=='annotationIndex,dx,dy,outputPageIndex,sourcePageIndex'||!Number.isInteger(move.sourcePageIndex)||!Number.isInteger(move.annotationIndex)||!Number.isInteger(move.outputPageIndex)||move.outputPageIndex<0||move.outputPageIndex>=count||![move.dx,move.dy].every(n=>typeof n==='number'&&Number.isFinite(n)&&Math.abs(n)<=100000))fail('annotation-move-invalid');
-    const id=key(move.sourcePageIndex,move.annotationIndex),record=byKey.get(id);if(!record||planned.has(id)||!record.descriptor.eligible||!group.has(move.sourcePageIndex))fail('annotation-move-invalid');planned.set(id,move);
+    if(!move||!['annotationIndex,dx,dy,outputPageIndex,sourcePageIndex','annotationIndex,dx,dy,outputPageIndex,rect,sourcePageIndex'].includes(Object.keys(move).sort().join(','))||!Number.isInteger(move.sourcePageIndex)||!Number.isInteger(move.annotationIndex)||!Number.isInteger(move.outputPageIndex)||move.outputPageIndex<0||move.outputPageIndex>=count||![move.dx,move.dy].every(n=>typeof n==='number'&&Number.isFinite(n)&&Math.abs(n)<=100000))fail('annotation-move-invalid');
+    const id=key(move.sourcePageIndex,move.annotationIndex),record=byKey.get(id);if(!record||planned.has(id)||!record.descriptor.eligible||!group.has(move.sourcePageIndex))fail('annotation-move-invalid');if(move.rect!==undefined){
+      const d=record.descriptor,r=move.rect;
+      if(d.kind!=='link'||d.quadPoints||!Array.isArray(d.rect)||!Array.isArray(r)||r.length!==4||!r.every(Number.isFinite)||r[0]>=r[2]||r[1]>=r[3]||move.dx!==0||move.dy!==0||move.outputPageIndex!==map.get(move.sourcePageIndex)||!contains(r,d.rect))fail('annotation-move-invalid');
+      for(const other of records.filter(x=>x.sourcePageIndex===move.sourcePageIndex&&x!==record)){
+        const q=other.descriptor.rect;if(!Array.isArray(q)||q.length!==4)fail('annotation-move-invalid');
+        if(Math.min(r[2],q[2])-Math.max(r[0],q[0])>1e-4&&Math.min(r[3],q[3])-Math.max(r[1],q[1])>1e-4)fail('annotation-move-overlap');
+      }
+    }planned.set(id,move);
+  }
+  const expanded=[...planned.values()].filter(m=>m.rect!==undefined);
+  for(let i=0;i<expanded.length;i++)for(let j=i+1;j<expanded.length;j++){
+    const a=expanded[i],b=expanded[j];if(a.outputPageIndex!==b.outputPageIndex)continue;
+    if(Math.min(a.rect[2],b.rect[2])-Math.max(a.rect[0],b.rect[0])>1e-4&&Math.min(a.rect[3],b.rect[3])-Math.max(a.rect[1],b.rect[1])>1e-4)fail('annotation-move-overlap');
   }
   if(!Array.isArray(destinationMoves)||destinationMoves.length>ANNOTATION_LIMITS.annotations)fail('annotation-destination-move-invalid');
   const destinations=new Map();
@@ -237,7 +263,11 @@ async function bound({model,sourceBytes,outputBytes,sourcePageMap,moves=[],reflo
   try{
     if(reflowedSourcePages.length&&state.actionOwnershipUnsupported)fail('annotation-action-root-unsupported');
     const map=mapping(model,sourcePageMap,c.doc.countPages()),inverse=new Map([...map].map(([s,o])=>[o,['source-page',s]])),{refs,pages}=pageRefs(c,inverse),plan=movementPlan(model,state.records,map,pages.length,moves,reflowedSourcePages,destinationMoves,preserveUnmovedUnsupported);
-    if(reflowedSourcePages.length&&unsupportedDocumentActions(c,pages))fail('annotation-action-root-unsupported');
+    if(reflowedSourcePages.length){
+      const outputAction=await fitOpenAction(c,refs,pages);
+      if(!state.fitAction||!outputAction||JSON.stringify(state.fitAction)!==JSON.stringify(outputAction))fail('annotation-action-root-unsupported');
+      if(state.fitAction.present&&(pages.length!==model.pageCount||[...map].some(([s,o])=>s!==o)||moves.some(m=>m.rect===undefined||m.dx!==0||m.dy!==0||m.sourcePageIndex!==m.outputPageIndex)||destinationMoves.some(m=>m.dx!==0||m.dy!==0||m.sourcePageIndex!==m.outputPageIndex)))fail('annotation-action-root-unsupported');
+    }
     for(const [s,o]of map)if(state.pageGeometry[s]&&!numbers(state.pageGeometry[s],geometry(c,pages[o])))fail('annotation-page-identity-invalid');
     return {c,state,map,refs,pages,plan,preserveUnmovedUnsupported};
   }catch(error){c.close();throw error;}
@@ -271,11 +301,15 @@ async function verifyDocument(ctx,expected,after=false){
       const {record,move}=expected[p][i],out=actual.byPage[p][i],d=record.descriptor;
       if((aliases.has(record.aliasKey)&&aliases.get(record.aliasKey)!==out.aliasKey)||(reverseAliases.has(out.aliasKey)&&reverseAliases.get(out.aliasKey)!==record.aliasKey))fail('annotation-shared-object');
       aliases.set(record.aliasKey,out.aliasKey);reverseAliases.set(out.aliasKey,record.aliasKey);
-      if((move?out.fingerprint:out.fullFingerprint)!==(move?record.fingerprint:record.fullFingerprint))fail('annotation-semantic-mismatch');
+      if((move?out.fingerprint:out.fullFingerprint)!==(move?record.fingerprint:record.fullFingerprint)){
+        // PDFium may add this boolean to a Link lacking an appearance. AP and
+        // every other key, including unknown keys, remain in the fingerprint.
+        if(record.generatedMarker!=='absent'||out.generatedMarker!=='true'||!(move?record.noGeneratedMoveFingerprint:record.noGeneratedFingerprint)||(move?record.noGeneratedMoveFingerprint:record.noGeneratedFingerprint)!==(move?out.noGeneratedMoveFingerprint:out.noGeneratedFingerprint))fail('annotation-semantic-mismatch');
+      }
       if(record.destinationFingerprints){const resolved=readDestination(out.object),fingerprints=await Promise.all(resolved.values.map(value=>fingerprint(c,value,refs,true,destinationBudget)));if(JSON.stringify(fingerprints)!==JSON.stringify(record.destinationFingerprints)||JSON.stringify(resolved.missingNames)!==JSON.stringify(record.missingDestinationNames))fail('annotation-destination-definition-mismatch');}
       if(!move)continue;
       if(!d.rect)fail('annotation-geometry-invalid');
-      const rect=d.rect.map((v,k)=>v+(move?(k%2?move.dy:move.dx):0));
+      const rect=move?.rect??d.rect.map((v,k)=>v+(move?(k%2?move.dy:move.dx):0));
       if(!numbers(rect,annotationRectangle(c,c.get(out.object,'Rect'))))fail('annotation-output-geometry-mismatch');
       if(move&&!contains(geometry(c,pages[p]),rect))fail('annotation-output-geometry-mismatch');
       const quads=c.get(out.object,'QuadPoints');
@@ -305,7 +339,7 @@ export async function transport(request={}){
     const touched=new Set();
     for(const move of request.moves||[]){
       const object=located.get(key(move.sourcePageIndex,move.annotationIndex)),record=ctx.state.records.find(r=>r.sourcePageIndex===move.sourcePageIndex&&r.annotationIndex===move.annotationIndex),d=record.descriptor;
-      const rect=d.rect.map((v,k)=>v+(k%2?move.dy:move.dx));if(!contains(geometry(ctx.c,ctx.pages[move.outputPageIndex]),rect))fail('annotation-output-geometry-mismatch');
+      const rect=move.rect??d.rect.map((v,k)=>v+(k%2?move.dy:move.dx));if(!contains(geometry(ctx.c,ctx.pages[move.outputPageIndex]),rect))fail('annotation-output-geometry-mismatch');
       object.put('Rect',rect);object.put('P',ctx.pages[move.outputPageIndex]);
       if(d.quadPoints)object.put('QuadPoints',d.quadPoints.map((v,k)=>v+(k%2?move.dy:move.dx)));
       touched.add(ctx.map.get(move.sourcePageIndex));touched.add(move.outputPageIndex);

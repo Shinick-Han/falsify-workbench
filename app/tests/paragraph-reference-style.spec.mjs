@@ -32,3 +32,20 @@ test('a changed span crossing distinct styles still requires a mapping',()=>{
  const p=plan([run('Kim',255,{size:12,rise:0,bold:true}),run('2',65535),run(',',255),run('3',65535)],'Smith45');
  assert.equal(p.failure,'AMBIGUOUS_STYLE');
 });
+
+test('adding digits inside a mixed-style word keeps the existing numeric style',()=>{
+ const runs=[run('Kim',255,{size:12,rise:0,bold:true}),run('2',65535),run(',',255),run('3',65535),run(',',255,{size:12,rise:0})];
+ for(const after of ['Kim2,34,','Kim2,63,']){
+  const p=plan(runs,after);
+  assert.equal(p.failure,undefined);
+  assert.deepEqual(p.del.map(c=>c.ch),['3']);
+  assert.deepEqual(p.inserts,[{pi:0,ri:3,o:0,text:after==='Kim2,34,'?'34':'63'}]);
+  assert.equal(p.numericMarker.before,'3');
+  assert.equal(p.numericMarker.offset,5);
+ }
+});
+
+test('numeric insertion spanning differently styled digits remains unresolved',()=>{
+ const p=plan([run('Kim',255,{size:12,rise:0}),run('1',65535),run('2',255)],'Kim132');
+ assert.equal(p.failure,'AMBIGUOUS_STYLE');
+});

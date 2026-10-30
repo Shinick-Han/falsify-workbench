@@ -231,3 +231,23 @@ test('large document inventory fails closed on invalid counts and errors and res
   assert.equal(source.page,0);
  }
 });
+
+test('unchanged linked glyphs remain proved when the selection includes them',async()=>{
+ const before='An initial claim includes supporting REFERENCE. All measurement conditions remain explicitly stated. The remaining evidence stays available for review.';
+ const after=before.replace('stated','proved');
+ const result=await prepare({file:fixture(),edits:[{id:'whole-stationary',pageIndex:0,before,after}]}),report=result.verification.report;
+ assert.equal(report.paragraphLinkMoves.length,0,JSON.stringify(report.selfCheck.failures));
+ assert.ok(!report.paragraphLinkFailures.some(f=>f.code==='paragraph_link_unverified'),JSON.stringify(report.paragraphLinkFailures));
+});
+
+test('a changed linked numeric marker is not silently certified as stationary',async()=>{
+ const d=new mupdf.PDFDocument();let src;
+ try{
+  const font=d.addSimpleFont(new mupdf.Font('Times-Roman'));
+  d.insertPage(-1,d.addPage([0,0,640,800],0,{Font:{F1:font}},'BT /F1 11 Tf 40 700 Td (Claim) Tj ET BT /F1 8 Tf 65 704 Td (2,) Tj ET BT /F1 8 Tf 71 704 Td (3) Tj ET BT /F1 11 Tf 75 700 Td ( with evidence.) Tj ET BT /F1 11 Tf 40 680 Td (Another unchanged statement.) Tj ET'));
+  const page=d.findPage(0);page.put('Annots',[d.addObject({Type:'Annot',Subtype:'Link',Rect:[65,703,69,713],A:{S:'URI',URI:d.newString('https://example.invalid/two')}}),d.addObject({Type:'Annot',Subtype:'Link',Rect:[71,703,75,713],A:{S:'URI',URI:d.newString('https://example.invalid/three')}})]);
+  const buf=d.saveToBuffer();try{src=buf.asUint8Array().slice();}finally{buf.destroy();}
+ }finally{d.destroy();}
+ const result=await prepare({file:src,edits:[{id:'marker',pageIndex:0,before:'Claim2,3 with evidence.',after:'Claim2,45 with evidence.'}]});
+ assert.ok(result.verification.report.paragraphLinkFailures.some(f=>f.annotationIndex===1&&f.code==='paragraph_link_unverified'),JSON.stringify(result.verification.report));
+});

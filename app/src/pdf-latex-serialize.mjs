@@ -1,5 +1,6 @@
 import {planReconstructionLayout} from './pdf-latex-layout.mjs';
 import {hex} from './paragraph-pdf-crypto.mjs';
+import {unicodeActualTextPreamble} from './pdf-latex-unicode.mjs';
 
 const enc = new TextEncoder();
 const hashPattern = /^[0-9a-f]{64}$/;
@@ -20,7 +21,7 @@ const unicodeMacros = {
   'ä':'\\"{a}', 'ö':'\\"{o}', 'ñ':'\\~{n}', '©':'\\textcircled{c}',
   'ﬀ':'ff'
 };
-const unicodePreamble=Object.entries(unicodeMacros).map(([ch,macro])=>`\\DeclareUnicodeCharacter{${ch.codePointAt(0).toString(16).toUpperCase().padStart(4,'0')}}{${macro}}`).join('\n')+'\n';
+const unicodePreamble=unicodeActualTextPreamble(unicodeMacros);
 function plain(text) {
   let unsupported = false, mapped = false, output = '';
   for (const ch of text) {
@@ -152,7 +153,10 @@ export function serializeReconstruction({model, decisions=[], engine='pdflatex'}
     if(index) source+='\\newpage\n';
     const box=page.bodyBox, left=box?box[0]:36, top=box?box[1]:36;
     const width=box?Math.max(1,box[2]-box[0]):Math.max(1,p.width-72);
-    const height=Math.max(1,p.height-top-Math.min(36,Math.max(0,p.height-(box?.[3]??p.height-36))));
+    // Furniture is painted at shipout, so it must also limit TeX's body flow.
+    // With no footer, keep the unused bottom margin available for font metrics.
+    const footerTop=Math.min(p.height,...page.furniture.filter(f=>f.placement==='footer').map(f=>f.bbox[1]));
+    const height=Math.max(1,footerTop-top);
     source+=`\\pdfpagewidth=${dimension(p.width)}bp\\pdfpageheight=${dimension(p.height)}bp\n\\setlength{\\textwidth}{${dimension(width)}bp}\\setlength{\\textheight}{${dimension(height)}bp}\\hsize=\\textwidth\\vsize=\\textheight\n\\setlength{\\oddsidemargin}{${dimension(left-72)}bp}\\setlength{\\topmargin}{${dimension(top-72)}bp}\\setlength{\\headheight}{0pt}\\setlength{\\headsep}{0pt}\n`;
     if(!page.bands.length && !page.furniture.length) {issue('EMPTY_PAGE_REVIEW');source+='\\null\n';}
     if(page.furniture.length) {
@@ -162,13 +166,26 @@ export function serializeReconstruction({model, decisions=[], engine='pdflatex'}
       if(!page.bands.length) source+='\\null\n';
     }
     for(const band of page.bands){
-      if(band.gapBeforeBp>0) source+=`\\vspace*{${dimension(band.gapBeforeBp)}bp}\n`;
+      // Target the next source top using actual TeX page height so earlier
+      // line-height differences do not accumulate in the gaps. Never move
+      // backwards when already over the target; overflow remains reviewable.
+      if(band.gapBeforeBp>0) source+=`\\par\\dimen0=${dimension(band.top-top)}bp\\advance\\dimen0 by -\\pagetotal\\ifdim\\dimen0>0pt\\vskip\\dimen0\\nointerlineskip\\fi\n`;
       if(band.kind==='full-width') {for(const id of band.items) emitItem(items.get(id),p,width);continue;}
       const leftWidth=band.leftBox[2]-band.leftBox[0],rightWidth=band.rightBox[2]-band.rightBox[0],gap=band.rightBox[0]-band.leftBox[2];
       source+=`\\noindent\\hspace*{${dimension(Math.max(0,band.leftBox[0]-left))}bp}\\begin{minipage}[t]{${dimension(leftWidth)}bp}\n`;
-      for(const id of band.left)emitItem(items.get(id),p,leftWidth);
+      const emitColumn=(ids,columnWidth)=>{
+        let bottom=band.top;
+        for(const id of ids){
+          const item=items.get(id), top=Math.min(...item.evidence.map(e=>e.bbox[1]));
+          const gap=Math.max(0,top-bottom);
+          if(gap>0) source+=`\\vspace*{${dimension(gap)}bp}\n`;
+          emitItem(item,p,columnWidth);
+          bottom=Math.max(bottom,...item.evidence.map(e=>e.bbox[3]));
+        }
+      };
+      emitColumn(band.left,leftWidth);
       source+=`\\end{minipage}\\hspace{${dimension(gap)}bp}\\begin{minipage}[t]{${dimension(rightWidth)}bp}\n`;
-      for(const id of band.right)emitItem(items.get(id),p,rightWidth);
+      emitColumn(band.right,rightWidth);
       source+='\\end{minipage}\\par\n';
     }
   }

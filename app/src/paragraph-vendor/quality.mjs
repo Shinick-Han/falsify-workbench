@@ -1036,6 +1036,99 @@ export function expectedPageText(sourceText, pageEdits, options = {}) {
   return { ok: true, text: normStr(out + norm.slice(at)), ...(options.includeSpans ? {spans:spans.map(s=>({...s}))} : {}) };
 }
 
+// Bind a numeric change to the unique selected source paragraph and an
+// unambiguous digit anchor, then compare every extracted page character.
+export function modelNumericEditProof(source, output, edits, paragraphs) {
+  if (edits.length !== 1 || !Array.isArray(paragraphs)) return null;
+  if ([...source.chars, ...output.chars].some(c => !Number.isInteger(c.u) || c.u < 0 || c.u > 0x10ffff)) return null;
+  const e = edits[0], before = normStr(e.before), after = normStr(e.after);
+  if (!before) return null;
+  let prefix = 0, suffix = 0;
+  while (prefix < Math.min(before.length, after.length) && before[prefix] === after[prefix]) prefix++;
+  while (suffix < Math.min(before.length, after.length) - prefix && before.at(-1-suffix) === after.at(-1-suffix)) suffix++;
+  const changed = after.slice(prefix, after.length-suffix);
+  if (!/^\d*$/.test(before.slice(prefix, before.length-suffix)) || !/^\d+$/.test(changed)) return null;
+  // As in the inline planner, an insertion is anchored to its adjacent
+  // original number; expanding replacements also binds the complete number.
+  let start=prefix, end=before.length-suffix;
+  while (start>0 && /[0-9]/.test(before[start-1])) start--;
+  while (end<before.length && /[0-9]/.test(before[end])) end++;
+  const old=before.slice(start,end);
+  if (!/^[0-9]+$/.test(old)) return null;
+  const replacement=before.slice(start,prefix)+changed+before.slice(before.length-suffix,end);
+  const hits=[];
+  for (const p of paragraphs) {
+    const text=normStr(paraText(p));
+    for (let k=text.indexOf(before); k>=0; k=text.indexOf(before,k+1)) hits.push({p,text,k});
+  }
+  if (hits.length!==1 || !hits[0].p.box) return null;
+  const {p,text,k:hit}=hits[0], box=p.box, tokens=[];
+  source.chars.forEach((c,index)=>{
+    const ch=String.fromCodePoint(c.u);
+    if (/\s/.test(ch)) {
+      if (tokens.at(-1)?.ch===' ') tokens.at(-1).optional &&= c.generated===true;
+      else tokens.push({ch:' ',optional:c.generated===true});
+    } else tokens.push({ch,index});
+  });
+  // Grow symmetric source context until it identifies exactly one model
+  // occurrence and one extraction occurrence inside the paragraph box. This
+  // allows short selections without assuming a fixed number of characters.
+  let anchored=null;
+  const max=Math.max(start,before.length-end);
+  for (let n=0;n<=max;n++) {
+    const left=Math.min(start,n), right=Math.min(before.length-end,n);
+    const context=before.slice(start-left,end+right);
+    const modelAt=hit+start-left;
+    if (text.indexOf(context)!==modelAt || text.indexOf(context,modelAt+1)!==-1) continue;
+    const candidates=[];
+    for (let first=0;first<tokens.length;first++) {
+      if (tokens[first].ch!==context[0]) continue;
+      let at=0, ids=[];
+      for (let j=first;j<tokens.length && at<context.length;j++) {
+        const token=tokens[j];
+        if (token.ch===context[at]) {
+          if (at>=left && at<left+old.length) ids.push(token.index);
+          at++;
+        } else if (!(token.ch===' ' && token.optional)) break;
+      }
+      if (at!==context.length || ids.length!==old.length || ids.some(index=>{
+        const c=source.chars[index];
+        return !c || !Number.isFinite(c.cx) || !Number.isFinite(c.cy) || c.cx<box.x || c.cx>box.x+box.w || c.cy<box.top-box.h || c.cy>box.top;
+      })) continue;
+      candidates.push(ids);
+    }
+    if (candidates.length===1) { anchored=candidates[0]; break; }
+  }
+  if (!anchored) return null;
+  const remove=new Set(anchored);
+  const sourceChars=source.chars.flatMap((c,i)=>i===anchored[0]
+    ? [...replacement].map(ch=>({u:ch.codePointAt(0),replacement:true}))
+    : remove.has(i) ? [] : [{u:c.u,generated:c.generated,sourceIndex:i}]);
+  const a=generatedWhitespaceTokens(sourceChars, true, true), b=generatedWhitespaceTokens(output.chars, true, true);
+  const outputIndices=[], retained=[];
+  let i=0,j=0;
+  while (i<a.length && j<b.length) {
+    if (a[i].ch===b[j].ch) {
+      if (a[i].ch!==' ') {
+        const c=sourceChars[a[i].index];
+        if (c.replacement) outputIndices.push(b[j].index);
+        else retained.push({sourceIndex:c.sourceIndex,outputIndex:b[j].index});
+      }
+      i++; j++;
+    } else if (a[i].ch===' ' && a[i].optional) i++;
+    else if (b[j].ch===' ' && b[j].optional) j++;
+    else return null;
+  }
+  while (i<a.length && a[i].ch===' ' && a[i].optional) i++;
+  while (j<b.length && b[j].ch===' ' && b[j].optional) j++;
+  if (i!==a.length || j!==b.length) return null;
+  return {sourceIndices:anchored,outputIndices,retained};
+}
+
+export function compareModelNumericEdit(source, output, edits, paragraphs) {
+  return modelNumericEditProof(source, output, edits, paragraphs) !== null;
+}
+
 // Normalize whitespace while retaining each non-whitespace source character's
 // extraction index. Edits are located in the same normalized text.
 function normalizedSourceChars(chars) {
@@ -1162,7 +1255,16 @@ export async function inspectSavedPdf(engineFactory, sourceBytes, outputBytes, e
         continue;
       }
       const exp = expectedPageText(s.text, pageEdits);
-      if (!exp.ok) {
+      let modelNumericMatch = false;
+      if (!exp.ok && exp.reason === "before_not_found" && typeof src.buildModel === "function") {
+        ensurePage(src, i);
+        modelNumericMatch = compareModelNumericEdit(s, o, pageEdits, src.buildModel());
+      }
+      if (modelNumericMatch) {
+        row.text_equal = true;
+        row.model_numeric_text_conservation = true;
+        warnings.push({ code: "model_numeric_text_conservation", pageIndex: i, severity: "warning", detail: "Unique source paragraph and numeric marker context matched; complete page extraction conserved with generated whitespace normalization" });
+      } else if (!exp.ok) {
         failures.push({ code: "expected_text_uncomputable", pageIndex: i, id: exp.id, reason: exp.reason });
       } else {
         row.text_equal = exp.text === normStr(o.text);
@@ -1588,15 +1690,15 @@ export function joinFlowParts(parts, expected) {
 // the caller's logical text has no space there. Only whitespace explicitly
 // marked generated by PDFium may be skipped; typed whitespace, visible
 // hyphens, character identity and order remain mandatory.
-function generatedWhitespaceTokens(chars) {
+function generatedWhitespaceTokens(chars, codePoints = false, includeIndices = false) {
   const tokens = [];
-  for (const c of chars) {
-    const ch = String.fromCharCode(c.u);
+  for (const [index, c] of chars.entries()) {
+    const ch = codePoints ? String.fromCodePoint(c.u) : String.fromCharCode(c.u);
     if (/\s/.test(ch)) {
       const prev = tokens[tokens.length - 1];
       if (prev?.ch === " ") prev.optional &&= c.generated === true;
       else tokens.push({ ch: " ", optional: c.generated === true });
-    } else tokens.push({ ch, optional: false });
+    } else tokens.push({ ch, optional: false, ...(includeIndices ? {index} : {}) });
   }
   if (tokens[0]?.ch === " ") tokens.shift();
   if (tokens[tokens.length - 1]?.ch === " ") tokens.pop();

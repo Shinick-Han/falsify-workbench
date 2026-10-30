@@ -44,10 +44,12 @@ export function planReconstructionLayout(model){
    if(hintValid){
     const mid=(gutter[0]+gutter[1])/2;
     const left=group.filter(x=>x.box[2]<=mid),right=group.filter(x=>x.box[0]>=mid);
-    const crossing=group.some(x=>x.box[0]<gutter[1]&&x.box[2]>gutter[0]);
+    // Hints are approximate; actual envelopes must remain on their side
+    // of the midpoint and leave a measurable physical gutter.
+    const separated=left.length&&right.length&&Math.min(...right.map(x=>x.box[0]))-Math.max(...left.map(x=>x.box[2]))>=Math.max(4,page.width*.01);
     const ordered=side=>side.every((x,k)=>!k||side[k-1].box[1]<=x.box[1]);
     const contiguous=!group.some((x,k)=>right.includes(x)&&group.slice(k+1).some(y=>left.includes(y)));
-    if(!crossing&&left.length&&right.length&&left.length+right.length===group.length&&contiguous&&ordered(left)&&ordered(right)){
+    if(separated&&left.length+right.length===group.length&&contiguous&&ordered(left)&&ordered(right)){
      const overlapping=side=>side.some((a,k)=>side.slice(k+1).some(b=>overlapY(a.box,b.box)));
      if(overlapping(left)||overlapping(right))say(page.pageIndex,'COLUMN_VERTICAL_OVERLAP',group.map(x=>x.item.id));
      const l=union(left.map(x=>x.box)),r=union(right.map(x=>x.box)),box=union([l,r]);

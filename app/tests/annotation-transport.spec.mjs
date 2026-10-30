@@ -252,3 +252,36 @@ test('XYZ destination moves preserve viewport kind and zoom and reject tampering
   const tampered=mutate(out.pdf,doc=>doc.getTrailer().get('Root','Names','Dests','Kids',0,'Names',1,'D').put(3,364));
   assert.equal((await api.validate({...request,outputBytes:tampered})).ok,false);
 });
+
+test('stationary Fit open action and generated Link marker preserve the complete annotation graph',async()=>{
+ const src=mutate(source(),d=>d.getTrailer().get('Root').put('OpenAction',[d.findPage(0),'Fit']));
+ const model=await inspect(src), request=args(model,src,{moves:[],reflowedSourcePages:[0],preserveUnmovedUnsupported:true});
+ const output=mutate(src,d=>{for(const page of [0,1]){const a=d.findPage(page).get('Annots');for(let i=0;i<a.length;i++)a.get(i).put('PDFIUM_HasGeneratedAP',true);}});
+ assert.equal(model.actionOwnershipUnsupported,false);
+ assert.equal((await api.validate({...request,outputBytes:output})).ok,true);
+ const corruptions=[
+  d=>d.findPage(0).get('Annots').delete(0),
+  d=>d.findPage(0).get('Annots',0).put('Rect',[31,250,110,265]),
+  d=>d.findPage(0).get('Annots',0,'A').put('URI',d.newString('https://changed.invalid')),
+  d=>d.findPage(0).get('Annots',0,'A','Next').put('URI',d.newString('https://changed.invalid')),
+  d=>d.findPage(0).get('Annots',0).put('AP',{N:{Changed:true}}),
+  d=>d.findPage(0).get('Annots',0).put('PDFIUM_HasGeneratedAP',false),
+  d=>d.findPage(0).get('Annots',0,'PrivateUnknown').put('Keep',false),
+  d=>d.getTrailer().get('Root').put('OpenAction',[d.findPage(1),'Fit']),
+  d=>d.getTrailer().get('Root').put('OpenAction',[d.findPage(0),'XYZ',25,375,null]),
+  d=>d.findPage(0).put('AA',{O:{S:'URI',URI:d.newString('https://changed.invalid')}}),
+  d=>d.getTrailer().get('Root').delete('OpenAction'),
+ ];
+ for(const change of corruptions)assert.equal((await api.validate({...request,outputBytes:mutate(output,change)})).ok,false);
+ assert.equal((await api.validate({...request,outputBytes:output,moves:[{sourcePageIndex:0,annotationIndex:0,outputPageIndex:0,dx:0,dy:0}]})).ok,false);
+ const existing=mutate(src,d=>d.findPage(0).get('Annots',0).put('PDFIUM_HasGeneratedAP',false)),existingModel=await inspect(existing);
+ assert.equal((await api.validate({...request,model:existingModel,sourceBytes:existing,outputBytes:mutate(existing,d=>d.findPage(0).get('Annots',0).put('PDFIUM_HasGeneratedAP',true))})).ok,false);
+ const withAppearance=mutate(src,d=>d.findPage(0).get('Annots',0).put('AP',{N:{Known:1}})),appearanceModel=await inspect(withAppearance);
+ assert.equal((await api.validate({...request,model:appearanceModel,sourceBytes:withAppearance,outputBytes:mutate(withAppearance,d=>d.findPage(0).get('Annots',0).put('PDFIUM_HasGeneratedAP',true))})).ok,false);
+});
+
+test('two independently expanded links cannot overlap each other',async()=>{
+ const src=mutate(source(),d=>d.findPage(0).get('Annots',0).delete('QuadPoints')),model=await inspect(src);
+ const moves=[{sourcePageIndex:0,annotationIndex:0,outputPageIndex:0,dx:0,dy:0,rect:[30,220,110,265]},{sourcePageIndex:0,annotationIndex:1,outputPageIndex:0,dx:0,dy:0,rect:[30,200,110,225]}];
+ assert.equal((await api.validate(args(model,src,{moves,reflowedSourcePages:[0]}))).code,'annotation-move-overlap');
+});

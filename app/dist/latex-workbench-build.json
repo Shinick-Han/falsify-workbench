@@ -15,7 +15,7 @@
     },
     {
       "path": "src/latex-project.mjs",
-      "sha256": "d00ef5a988fc5bd1396839afeb735272b49574ba79e1782fef88f771fe97c67c"
+      "sha256": "93a70a8055e318913c8f41cef667f1ad4ebe12f5a0d4728856b82f0359b6abd5"
     },
     {
       "path": "src/latex-reference-policy.mjs",
@@ -83,7 +83,7 @@
     },
     {
       "path": "src/pdf-latex-layout.mjs",
-      "sha256": "7d2eba56b17ffd5d39d1ea423c22bae83824c86c120c1f55a1c93d83e82eb774"
+      "sha256": "a8e42f5390261a9550f57e7180df98f55940cd79baa35bc79b9cde38a6fe8d8f"
     },
     {
       "path": "src/pdf-latex-reader-worker.mjs",
@@ -99,7 +99,11 @@
     },
     {
       "path": "src/pdf-latex-serialize.mjs",
-      "sha256": "3d821def6f63e04cae40257081eeec404f0b63a7ecee0c193c37e40e54ead174"
+      "sha256": "ee8dda840856069237baa8e3ddded019524c069989bc6449955b7d292b3c0965"
+    },
+    {
+      "path": "src/pdf-latex-unicode.mjs",
+      "sha256": "07825a6545b3febab3999913e14e1b19d2a9577ac69588db81744c4464fcfc3a"
     },
     {
       "path": "src/pdf-latex-workbench.mjs",
@@ -124,10 +128,10 @@
   ],
   "output": {
     "path": "latex-workbench.mjs",
-    "sha256": "d6ef011ee7e9267f642b75327d437069f024863e754aad31cd53a3bc11c38fff"
+    "sha256": "3baa67b551ebecd99b56b1d7b60821188ddfbfbffa47b62784071096c20ce3a7"
   },
   "worker": {
     "path": "pdf-latex-reader-worker.mjs",
-    "sha256": "299907e2f72def9003155a3ef6094ec1aae90b973ad9f47639a2a2d99a607c7c"
+    "sha256": "b50257c1405d393bdecc8fdb1a985718dc8abd7309284fc47de5d0c7f1f0d425"
   }
 }
