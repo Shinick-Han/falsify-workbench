@@ -5,7 +5,7 @@ const reconstruction = spawnSync(process.execPath, ['--test','tests/pdf-latex-ev
 if(reconstruction.error || reconstruction.status!==0)process.exit(reconstruction.status||1);
 const marker = spawnSync(process.execPath, ['--test','tests/paragraph-pdf-content-operators.spec.mjs','tests/paragraph-pdf-marker-surgery.spec.mjs','tests/paragraph-pdf-marker-path.spec.mjs'], {stdio:'inherit'});
 if(marker.error || marker.status!==0)process.exit(marker.status||1);
-for (const file of ['paragraph-quality-repair.spec.mjs', 'browser-pdf-crop-table.spec.mjs', 'table-crop-fit.spec.mjs', 'paper-structured-table.spec.mjs', 'paragraph-mixed-table-repair.spec.mjs', 'paragraph-ruled-table.spec.mjs', 'paragraph-fixed-font-regression.spec.mjs', 'paragraph-scale-prefix.spec.mjs', 'paragraph-scale-prefix-integration.spec.mjs']) {
+for (const file of ['paragraph-quality-repair.spec.mjs', 'browser-pdf-crop-table.spec.mjs', 'table-crop-fit.spec.mjs', 'paper-structured-table.spec.mjs', 'paragraph-mixed-table-repair.spec.mjs', 'paragraph-ruled-table.spec.mjs', 'paragraph-fixed-font-regression.spec.mjs', 'paragraph-scale-prefix.spec.mjs', 'paragraph-reference-style.spec.mjs', 'paragraph-reference-style-integration.spec.mjs', 'paragraph-scale-prefix-integration.spec.mjs']) {
   const result = spawnSync(process.execPath, ['--test', 'tests/' + file], {stdio: 'inherit'});
   if (result.error || result.status !== 0) process.exit(result.status || 1);
 }

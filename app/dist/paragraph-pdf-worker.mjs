@@ -8784,6 +8784,11 @@ function planInlineChange(paras, chars, map, hit, needle, after) {
       return { del, inserts: [place(anchor, text3)], warning: styles.size > 1 ? "style_inherited_across_paragraphs" : void 0 };
     }
     if (styles.size === 1) return { del, inserts: [place(words[0], text3)] };
+    const marker = del.map((c) => c.ch).join("");
+    const digits = words.filter((c) => /^[0-9]$/.test(c.ch));
+    if (/^[0-9]+$/.test(text3) && /^[0-9]+(?:\s*[,;:–-]\s*[0-9]+)+$/.test(marker) && digits.length && new Set(digits.map(style)).size === 1 && new Set(words.map((c) => runStyleKey({ ...paras[c.pi].runs[c.ri], rgba: 0 }))).size === 1) {
+      return { del, inserts: [place(digits[0], text3)], warning: "numeric_marker_style_from_digits" };
+    }
     const pi = words[0].pi;
     const para = paras[pi], lines2 = para.lines || [];
     const starts = [];
@@ -8856,6 +8861,53 @@ function planInlineChange(paras, chars, map, hit, needle, after) {
   }
   const ins = [rk ? viaRight : null, lk ? viaLeft : null, viaRight, viaLeft].find((c) => c && style(c) === want);
   return ins ? { del, inserts: [ins] } : { failure: "AMBIGUOUS_STYLE" };
+}
+function commitNumericMarker(engine, para, before, after) {
+  if (!/^[0-9]+(?:[,;:–-][0-9]+)+$/.test(before) || !/^[0-9]+$/.test(after)) return null;
+  const M = engine.M;
+  const required = ["_FPDFText_LoadPage", "_FPDFText_CountChars", "_FPDFText_GetUnicode", "_FPDFText_GetTextObject", "_FPDFText_ClosePage", "_FPDFText_SetText", "_FPDFPage_RemoveObject"];
+  if (!required.every((k) => typeof M?.[k] === "function")) return null;
+  const owner = new Set((engine.paragraphObjects(para.id) || []).map((h) => h >>> 0));
+  const pageText = M._FPDFText_LoadPage(engine.page);
+  if (!pageText) return null;
+  const chars = [];
+  try {
+    for (let i = 0; i < M._FPDFText_CountChars(pageText); i++) chars.push({ u: M._FPDFText_GetUnicode(pageText, i), h: M._FPDFText_GetTextObject(pageText, i) >>> 0 });
+  } finally {
+    M._FPDFText_ClosePage(pageText);
+  }
+  const text3 = chars.map((c) => String.fromCharCode(c.u)).join(""), start = text3.indexOf(before);
+  if (start < 0 || text3.indexOf(before, start + 1) >= 0) return null;
+  const selected = chars.slice(start, start + before.length), handles = [...new Set(selected.map((c) => c.h))];
+  if (handles.some((h) => !h || !owner.has(h)) || chars.some((c, i) => handles.includes(c.h) && (i < start || i >= start + before.length))) return null;
+  const firstText = selected.filter((c) => c.h === handles[0]).map((c) => String.fromCharCode(c.u)).join("");
+  if (!/^[0-9]+$/.test(firstText) || selected.findIndex((c) => c.h !== handles[0]) !== firstText.length) return null;
+  const boxes = handles.map((h) => engine.objectBounds(h));
+  if (boxes.some((b) => !b || ![b.x, b.y, b.w, b.h].every(Number.isFinite))) return null;
+  const bounds = { left: Math.min(...boxes.map((b) => b.x)), right: Math.max(...boxes.map((b) => b.x + b.w)), bottom: Math.min(...boxes.map((b) => b.y)), top: Math.max(...boxes.map((b) => b.y + b.h)) };
+  const put = (value) => {
+    const p = M._malloc((value.length + 1) * 2);
+    try {
+      for (let i = 0; i < value.length; i++) M.HEAPU16[(p >> 1) + i] = value.charCodeAt(i);
+      M.HEAPU16[(p >> 1) + value.length] = 0;
+      return !!M._FPDFText_SetText(handles[0], p);
+    } finally {
+      M._free(p);
+    }
+  };
+  if (!put(after)) throw new LineRetentionError("numeric_marker_write_failed");
+  const next = engine.objectBounds(handles[0]);
+  if (!next || next.x < bounds.left - 0.5 || next.x + next.w > bounds.right + 0.5 || next.y < bounds.bottom - 0.5 || next.y + next.h > bounds.top + 0.5) {
+    if (!put(firstText)) throw new LineRetentionError("numeric_marker_restore_failed");
+    return null;
+  }
+  for (const h of handles.slice(1)) {
+    if (!M._FPDFPage_RemoveObject(engine.page, h)) throw new LineRetentionError("numeric_marker_remove_failed");
+    engine.retainDetachedObject(h);
+  }
+  engine._pageDirty = true;
+  engine._spliceOk = false;
+  return { status: "source_numeric_marker", objects: handles.length };
 }
 function planGeometricShortening(chars, map, hit, before, after) {
   let n = 0;
@@ -10529,6 +10581,15 @@ async function editPdf(request, options = {}) {
       const mutations = [...plan.perPara.entries()].sort((x, y) => x[0] - y[0]);
       for (const [mutationIndex, [pi, { del, inserts }]] of mutations.entries()) {
         const para = paras[pi];
+        const markerPlans = plan.plans.filter((p) => !p.noop && p.touched.includes(pi));
+        if (markerPlans.length === 1 && markerPlans[0].change?.warning === "numeric_marker_style_from_digits") {
+          const marker = commitNumericMarker(engine, para, markerPlans[0].edit.before, markerPlans[0].edit.after);
+          if (marker) {
+            mutated = true;
+            pageReport.paragraphs.push({ index: pi, surgical: true, lineRetention: marker });
+            continue;
+          }
+        }
         const geometric = plan.plans.some((p) => p.geometricShortening && p.touched.includes(pi));
         if (geometric && !inserts.length) {
           if (mutationIndex !== mutations.length - 1 || plan.plans.filter((p) => p.touched.includes(pi) && !p.noop).length !== 1 || !removeGeometricFirstLine(engine, para, del, inserts)) {

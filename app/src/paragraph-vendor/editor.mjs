@@ -17,6 +17,7 @@ import {
   canCommitLineLocal,
   commitRetainingLines,
   commitSourceLineDeletion,
+  commitNumericMarker,
   commitGeometricPrefix,
   commitPrefixSuffix,
   editedLineSpan,
@@ -525,6 +526,11 @@ export async function editPdf(request, options = {}) {
       const mutations = [...plan.perPara.entries()].sort((x, y) => x[0] - y[0]);
       for (const [mutationIndex, [pi, { del, inserts }]] of mutations.entries()) {
         const para = paras[pi];
+        const markerPlans=plan.plans.filter(p=>!p.noop&&p.touched.includes(pi));
+        if(markerPlans.length===1&&markerPlans[0].change?.warning==='numeric_marker_style_from_digits'){
+          const marker=commitNumericMarker(engine,para,markerPlans[0].edit.before,markerPlans[0].edit.after);
+          if(marker){mutated=true;pageReport.paragraphs.push({index:pi,surgical:true,lineRetention:marker});continue;}
+        }
         const geometric = plan.plans.some((p) => p.geometricShortening && p.touched.includes(pi));
         if (geometric && !inserts.length) {
           if (mutationIndex !== mutations.length - 1 || plan.plans.filter((p) => p.touched.includes(pi) && !p.noop).length !== 1 || !removeGeometricFirstLine(engine, para, del, inserts)) {

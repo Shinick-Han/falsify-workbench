@@ -354,7 +354,7 @@
     return m;
   }
   function generationError(e){
-    const reasons={NOT_FOUND:'원문 인용의 위치를 찾지 못했습니다',AMBIGUOUS_MATCH:'같은 원문 인용이 여러 곳에 있습니다',OVERLAPPING_EDITS:'다른 변경과 범위가 겹칩니다',NOT_EDITABLE:'이 텍스트 배치를 편집하지 못했습니다',AMBIGUOUS_STYLE:'변경에 적용할 글꼴을 정하지 못했습니다',UNSUPPORTED_WRAP_COMBINATION:'원문의 줄바꿈을 연결하지 못했습니다'};
+    const reasons={NOT_FOUND:'원문 인용의 위치를 찾지 못했습니다',AMBIGUOUS_MATCH:'같은 원문 인용이 여러 곳에 있습니다',OVERLAPPING_EDITS:'다른 변경과 범위가 겹칩니다',NOT_EDITABLE:'이 텍스트 배치를 편집하지 못했습니다',AMBIGUOUS_STYLE:'선택한 구간의 글꼴·크기·색상이 섞여 변경 서식을 정하지 못했습니다',UNSUPPORTED_WRAP_COMBINATION:'원문의 줄바꿈을 연결하지 못했습니다'};
     const failures=e?.details?.failures;
     if(!Array.isArray(failures)||!failures.length)return safeMessage(e);
     return failures.slice(0,6).map(f=>{

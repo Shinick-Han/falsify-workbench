@@ -60,6 +60,19 @@ export function planInlineChange(paras, chars, map, hit, needle, after) {
       return { del, inserts: [place(anchor, text)], warning: styles.size > 1 ? "style_inherited_across_paragraphs" : undefined };
     }
     if (styles.size === 1) return { del, inserts: [place(words[0], text)] };
+    // Citation lists can paint their digits as links while separators use the
+    // surrounding text color. Consolidating that list into one number inherits
+    // the common digit style, including its original size/rise. No font or
+    // geometry difference is discarded, and differently styled digits remain
+    // ambiguous.
+    const marker = del.map(c => c.ch).join('');
+    const digits = words.filter(c => /^[0-9]$/.test(c.ch));
+    if (/^[0-9]+$/.test(text) && /^[0-9]+(?:\s*[,;:–-]\s*[0-9]+)+$/.test(marker) && digits.length &&
+        new Set(digits.map(style)).size === 1 &&
+        new Set(words.map(c => runStyleKey({...paras[c.pi].runs[c.ri], rgba: 0}))).size === 1) {
+      return {del, inserts:[place(digits[0], text)], warning:'numeric_marker_style_from_digits'};
+    }
+
     // A source line may be horizontally expanded independently of its
     // neighbours. Only classify that difference as line geometry when every
     // affected line has one scale and all other run properties agree. The
@@ -138,6 +151,34 @@ export function planInlineChange(paras, chars, map, hit, needle, after) {
   }
   const ins = [rk ? viaRight : null, lk ? viaLeft : null, viaRight, viaLeft].find((c) => c && style(c) === want);
   return ins ? { del, inserts: [ins] } : { failure: "AMBIGUOUS_STYLE" };
+}
+
+// Keep the surrounding line intact when consolidating an isolated citation.
+export function commitNumericMarker(engine, para, before, after) {
+  if (!/^[0-9]+(?:[,;:–-][0-9]+)+$/.test(before) || !/^[0-9]+$/.test(after)) return null;
+  const M=engine.M;
+  const required=['_FPDFText_LoadPage','_FPDFText_CountChars','_FPDFText_GetUnicode','_FPDFText_GetTextObject','_FPDFText_ClosePage','_FPDFText_SetText','_FPDFPage_RemoveObject'];
+  if(!required.every(k=>typeof M?.[k]==='function'))return null;
+  const owner=new Set((engine.paragraphObjects(para.id)||[]).map(h=>h>>>0));
+  const pageText=M._FPDFText_LoadPage(engine.page);if(!pageText)return null;
+  const chars=[];
+  try{for(let i=0;i<M._FPDFText_CountChars(pageText);i++)chars.push({u:M._FPDFText_GetUnicode(pageText,i),h:M._FPDFText_GetTextObject(pageText,i)>>>0});}
+  finally{M._FPDFText_ClosePage(pageText);}
+  const text=chars.map(c=>String.fromCharCode(c.u)).join(''),start=text.indexOf(before);
+  if(start<0||text.indexOf(before,start+1)>=0)return null;
+  const selected=chars.slice(start,start+before.length),handles=[...new Set(selected.map(c=>c.h))];
+  if(handles.some(h=>!h||!owner.has(h))||chars.some((c,i)=>handles.includes(c.h)&&(i<start||i>=start+before.length)))return null;
+  const firstText=selected.filter(c=>c.h===handles[0]).map(c=>String.fromCharCode(c.u)).join('');
+  if(!/^[0-9]+$/.test(firstText)||selected.findIndex(c=>c.h!==handles[0])!==firstText.length)return null;
+  const boxes=handles.map(h=>engine.objectBounds(h));if(boxes.some(b=>!b||![b.x,b.y,b.w,b.h].every(Number.isFinite)))return null;
+  const bounds={left:Math.min(...boxes.map(b=>b.x)),right:Math.max(...boxes.map(b=>b.x+b.w)),bottom:Math.min(...boxes.map(b=>b.y)),top:Math.max(...boxes.map(b=>b.y+b.h))};
+  const put=value=>{const p=M._malloc((value.length+1)*2);try{for(let i=0;i<value.length;i++)M.HEAPU16[(p>>1)+i]=value.charCodeAt(i);M.HEAPU16[(p>>1)+value.length]=0;return !!M._FPDFText_SetText(handles[0],p);}finally{M._free(p);}};
+  if(!put(after))throw new LineRetentionError('numeric_marker_write_failed');
+  const next=engine.objectBounds(handles[0]);
+  if(!next||next.x<bounds.left-.5||next.x+next.w>bounds.right+.5||next.y<bounds.bottom-.5||next.y+next.h>bounds.top+.5){if(!put(firstText))throw new LineRetentionError('numeric_marker_restore_failed');return null;}
+  for(const h of handles.slice(1)){if(!M._FPDFPage_RemoveObject(engine.page,h))throw new LineRetentionError('numeric_marker_remove_failed');engine.retainDetachedObject(h);}
+  engine._pageDirty=true;engine._spliceOk=false;
+  return {status:'source_numeric_marker',objects:handles.length};
 }
 
 // A geometric chain can cross unrelated PDF object order. A shortening that
