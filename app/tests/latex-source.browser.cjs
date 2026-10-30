@@ -135,7 +135,9 @@ async function main() {
     const pdfInput = await fs.readFile(path.join(__dirname,'fixtures/paragraph-marker-synthetic.pdf'));
     await page.locator('#paper-file').setInputFiles({name:'paragraph-marker-synthetic.pdf',mimeType:'application/pdf',buffer:pdfInput});
     await page.waitForFunction(h => !FalsifyLatexWorkbench.active && FalsifyPaperWorkspace.getSource()?.fileHash===h, hash(pdfInput), {timeout});
-    await page.waitForFunction(h => FalsifyPaperWorkspace.getCurrentOutput()?.sha256===h, hash(pdfInput), {timeout});
+    // A freshly opened PDF has no generated artifact until an edit is made.
+    const switchedPdf=await streamBytes(await download(page.locator('#paper-workspace').getByRole('button',{name:'원본 다운로드',exact:true})));
+    assert.equal(hash(switchedPdf),hash(pdfInput));
     assert.equal(posts.length,0);
     assert.ok(assets.some(x=>x.endsWith('/busytex.wasm')) && assets.some(x=>x.endsWith('/texlive-basic.data')) && assets.some(x=>x.endsWith('/pdf.worker.mjs')));
     assert.ok(assets.every(x=>x.startsWith(prefix)));

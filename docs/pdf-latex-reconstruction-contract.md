@@ -1,6 +1,6 @@
 # PDF-to-LaTeX reconstruction: P0 contract proposal
 
-Status: proposal, 2026-10-30; base `3e802bfafc9ce9fbe5bfe9d49d4a85973cee0763`. No reconstruction implementation or end-to-end success is claimed. Root owns this contract and may revise it before assigning P1–P4. Start implementation only after the original-source I2 gate. The existing source contract and PDF editor remain authoritative.
+Status: accepted for the first reconstruction implementation, 2026-10-30; source base `30e2bd474edf521ad22248c22530ba1ff890aabe`. Original-source browser checks cover actual WASM compile, external mixed-run edits, highlights and resize, download, archive restore, BLUE file identity without auto-run, and return to the PDF editor. The source-record projection passes the existing Confluence archive codec locally; a team publication roundtrip was not performed. No reconstruction implementation or end-to-end success is claimed yet. Root owns integration. The existing source contract and PDF editor remain authoritative.
 
 ## Objective and first supported scope
 
