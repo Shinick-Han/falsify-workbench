@@ -20,7 +20,13 @@ export function analyzeLatexSource(project) {
  if(kind&&list[j]?.type==='group'){add(kind,s,end(list[j]),pos(list[j])+1,end(list[j])-1);i=j;continue}
  if(list[j]?.type==='group'){if(textMacros.has(n.content)){walk(list[j].content,inMath);i=j;}else{do{i=j;j++;while(list[j]?.type==='whitespace')j++;}while(list[j]?.type==='group');}continue}
  }
- if(n.type==='group')walk(n.content,inMath); else if(n.type==='environment')walk(n.content,inMath);
+ if(n.type==='group')walk(n.content,inMath); else if(n.type==='environment'){
+   let content=n.content;
+   // parseMinimal leaves float placement in the environment body. It is
+   // source configuration, not a rendered paragraph or editable caption.
+   if(['figure','figure*','table','table*'].includes(n.env)&&content?.[0]?.type==='string'&&content[0].content==='['){let j=1;while(j<content.length&&!(content[j].type==='string'&&content[j].content===']'))j++;if(j<content.length)content=content.slice(j+1);}
+   walk(content,inMath);
+ }
  }flush(); }
  const document=ast.content.find(n=>n.type==='environment'&&n.env==='document');
  if(document)walk(document.content);else walk(ast.content);

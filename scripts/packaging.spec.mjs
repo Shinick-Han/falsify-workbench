@@ -10,11 +10,21 @@ import {
   MUPDF_WASM, MUPDF_WASM_SHA256, PDFJS_WASM, PARAGRAPH_WASM, PARAGRAPH_WASM_SHA256,
   assertShippableSource, unexpectedReleasePaths, verifyVendoredMupdfWasm, verifyParagraphRuntime,
   RECOMPOSITION_WASM, RECOMPOSITION_WASM_SHA256, verifyRecompositionRuntime,
+  LATEX_WASM, LATEX_MANIFEST_SHA256, verifyLatexRuntime,
 } from './package-release.mjs';
 import { assertChromeLoaderExecuted, CHROME_TEST } from './assert-browser-pdf-executed.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const workflow = readFileSync(join(root, '.github/workflows/pages.yml'), 'utf8');
+
+test('the exact BusyTeX asset profile is included without accepting arbitrary wasm',()=>{
+  const proof=verifyLatexRuntime(root);
+  assert.equal(proof.manifestSha256,LATEX_MANIFEST_SHA256);
+  assert.equal(proof.files,7);
+  assert.deepEqual(unexpectedReleasePaths([LATEX_WASM]),[]);
+  assertShippableSource([LATEX_WASM],root);
+  assert.throws(()=>assertShippableSource(['app/dist/latex-compiler-vendor/extra.wasm'],root),/Unexpected private/);
+});
 
 test('recomposition compiler, font assets and notices survive source packaging', () => {
   const proof = verifyRecompositionRuntime(root);

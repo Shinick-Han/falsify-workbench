@@ -30,6 +30,8 @@ export const PARAGRAPH_JS_SHA256 = 'cbef240d8893fd9624c08eadbb1ffb405a583c96878d
 export const PARAGRAPH_WASM_BYTES = 7350963;
 export const RECOMPOSITION_WASM = 'app/dist/recomposition-vendor/typst_ts_web_compiler_bg.wasm';
 export const RECOMPOSITION_WASM_SHA256 = '1fc968438a672366dfec39c96c842c26ed29caff4eb1bcaab19a6c60867de5fd';
+export const LATEX_WASM = 'app/dist/latex-compiler-vendor/busytex.wasm';
+export const LATEX_MANIFEST_SHA256 = '3f9a3b4f5ee5cd82530a83f6afa596a0dcd163359d89c4850af9e853455e485b';
 
 const forbidden = /(?:^|\/)(?:\.venv|\.local|node_modules|\.pdf-editor\.local\.json|\.runtime[^/]*|output|tmp)(?:\/|$)|^experiments\/|\.(?:pdf|docx|wav|mp3|wasm)$/i;
 const pdfjsWasm = new Set(PDFJS_WASM);
@@ -41,7 +43,21 @@ const PARAGRAPH_FIXTURE = 'app/tests/fixtures/paragraph-audit-synthetic.pdf';
 const PARAGRAPH_FIXTURE_SHA256 = '188f53578f05e85a906a2ad58f34d0191408f60c8c0d448c87fe6625570b03f5';
 
 export function unexpectedReleasePaths(tracked) {
-  return tracked.filter(p => forbidden.test(p) && !pdfjsWasm.has(p) && p !== MUPDF_WASM && p !== RECOMPOSITION_WASM && p !== HANDOFF_FIXTURE && p !== PARAGRAPH_FIXTURE && !PARAGRAPH_WASM.includes(p) && p !== 'experiments/selfplay_codex.py');
+  return tracked.filter(p => forbidden.test(p) && !pdfjsWasm.has(p) && p !== MUPDF_WASM && p !== RECOMPOSITION_WASM && p !== LATEX_WASM && p !== HANDOFF_FIXTURE && p !== PARAGRAPH_FIXTURE && !PARAGRAPH_WASM.includes(p) && p !== 'experiments/selfplay_codex.py');
+}
+
+export function verifyLatexRuntime(rootDir) {
+  const bytes = readFileSync(join(rootDir, 'app/latex-compiler-manifest.json'));
+  if (createHash('sha256').update(bytes).digest('hex') !== LATEX_MANIFEST_SHA256) throw new Error('LaTeX compiler manifest differs from pinned asset profile.');
+  const manifest = JSON.parse(bytes.toString('utf8'));
+  const expected = ['busytex.js','busytex.wasm','busytex_biber.js','busytex_pipeline.js','busytex_worker.js','texlive-basic.data','texlive-basic.js'];
+  if (manifest.files.map(f=>f.name).sort().join(',') !== expected.sort().join(',')) throw new Error('LaTeX compiler asset set differs from pinned profile.');
+  for (const file of manifest.files) {
+    const data=readFileSync(join(rootDir,'app/dist/latex-compiler-vendor',file.name));
+    if(data.length!==file.bytes || createHash('sha256').update(data).digest('hex')!==file.sha256) throw new Error('LaTeX runtime digest mismatch: '+file.name);
+  }
+  if(!readFileSync(join(rootDir,'app/latex-compiler-LICENSE.txt'),'utf8').includes('AFFERO GENERAL PUBLIC LICENSE')) throw new Error('LaTeX compiler license is missing.');
+  return {manifestSha256:LATEX_MANIFEST_SHA256,files:manifest.files.length,bytes:manifest.files.reduce((n,f)=>n+f.bytes,0)};
 }
 
 export function verifyRecompositionRuntime(rootDir) {
@@ -132,6 +148,7 @@ export function assertShippableSource(tracked, rootDir) {
   if (tracked.includes(HANDOFF_FIXTURE) && createHash('sha256').update(readFileSync(join(rootDir, HANDOFF_FIXTURE))).digest('hex') !== HANDOFF_FIXTURE_SHA256) throw new Error('Synthetic handoff fixture digest mismatch.');
   if (tracked.includes(PARAGRAPH_FIXTURE) && createHash('sha256').update(readFileSync(join(rootDir, PARAGRAPH_FIXTURE))).digest('hex') !== PARAGRAPH_FIXTURE_SHA256) throw new Error('Synthetic paragraph fixture digest mismatch.');
   if (tracked.includes(RECOMPOSITION_WASM)) verifyRecompositionRuntime(rootDir);
+  if (tracked.includes(LATEX_WASM)) verifyLatexRuntime(rootDir);
   if (PARAGRAPH_WASM.some(p => tracked.includes(p))) {
     if (!PARAGRAPH_WASM.every(p => tracked.includes(p))) throw new Error('Paragraph runtime requires both source and shipped WASM.');
     verifyParagraphRuntime(rootDir);

@@ -8,7 +8,7 @@ export function buildReferencePatch(project, node, {after, mode} = {}) {
   if (!project || !node || typeof after !== 'string' || !['content', 'display-override'].includes(mode)) return fail('invalid-reference-edit', 'Choose a source node, replacement and edit mode.');
   const file = project.files?.find(f => f.path === node.path);
   if (!file || !Number.isInteger(node.start) || !Number.isInteger(node.end)) return fail('stale-anchor', 'The source node is no longer available; select it again.');
-  const source = new TextDecoder('utf-8', {fatal:true}).decode(file.bytes);
+  const source = new TextDecoder('utf-8', {fatal:true,ignoreBOM:true}).decode(file.bytes);
   const original = source.slice(node.start, node.end);
   if (node.sourceText !== original) return fail('stale-anchor', 'The source changed; select the node again.');
   if (mode === 'content') {
