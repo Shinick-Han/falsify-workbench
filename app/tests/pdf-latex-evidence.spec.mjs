@@ -54,3 +54,41 @@ test('page budget is enforced before native extraction and cancellation is obser
   const controller=new AbortController(),pending=extractReconstructionEvidence({bytes:short,sourceSha256:hex(short),signal:controller.signal});
   setTimeout(()=>controller.abort(),0);await assert.rejects(pending,{name:'AbortError'});
 });
+
+// A 36-page model exercises thousands of independently owned source ranges;
+// its geometry and text are synthetic and it is not a substitute for PDF parsing.
+function largeEvidence(pageCount=36,perPage=56,textWidth=72){
+  const hash='a'.repeat(64),pages=[],blocks=[],items=[],frames=[];
+  for(let pageIndex=0;pageIndex<pageCount;pageIndex++){
+    let text='';const geometry={frame:'mupdf-display',bounds:[0,0,612,792],pageTransform:[1,0,0,-1,0,792]};
+    for(let i=0;i<perPage;i++){
+      const value=textWidth===1?'x':`Page ${pageIndex} block ${i} value 42. `.padEnd(textWidth,'x'),start=text.length; text+=value;
+      const id=`b-${pageIndex}-${i}`,bbox=[20,20+i*10,400,29+i*10],source={pageIndex,bbox,range:{start,end:text.length},characters:[],lines:[]};
+      blocks.push({id,text:value,source});items.push({id:`f-${pageIndex}-${i}`,kind:'paragraph',blockIds:[id],assetIds:[],source:{pageIndex,bbox},columns:1,span:'page'});
+    }
+    pages.push({sourcePageIndex:pageIndex,width:612,height:792,text,geometry});frames.push({pageIndex,bounds:geometry.bounds,pageTransform:geometry.pageTransform,verified:true});
+  }
+  return {document:{schema:'falsify.paper-document.v1',sourceSha256:hash,pages,blocks,assets:[],styles:[],diagnostics:[]},flow:{schema:'falsify.paper-flow.v1',sourceSha256:hash,items,fragments:[],regions:[],relations:[],diagnostics:[]},links:{schema:'falsify.paper-source-links.v1',sourceSha256:hash,frames,links:[]},assets:{sourceSha256:hash,assets:[],diagnostics:[]}};
+}
+test('36-page evidence keeps all 2016 blocks and exact text within finite budgets',()=>{
+  const evidence=largeEvidence(),model=buildReconstructionModel(evidence);
+  assert.equal(model.items.length,2016);
+  assert.equal(model.items.reduce((n,item)=>n+item.text.length,0),36*56*72);
+  assert.equal(new Set(model.items.map(item=>item.id)).size,2016);
+  const limit=largeEvidence(1,8000,1);assert.equal(buildReconstructionModel(limit).items.length,8000);
+  const exceeded=largeEvidence(1,8001,1);assert.throws(()=>buildReconstructionModel(exceeded),{code:'budget-exceeded'});
+});
+test('indexed range ownership still rejects overlapping fragments and missing source text',async()=>{
+  const evidence=await extract(synthetic()),item=evidence.flow.items.find(x=>x.blockIds.length===1&&evidence.document.blocks.find(b=>b.id===x.blockIds[0]&&b.text));
+  const missing=structuredClone(evidence);missing.flow.items=missing.flow.items.filter(x=>x.id!==item.id);assert.throws(()=>buildReconstructionModel(missing),{code:'uncovered-source-text'});
+  const overlap=structuredClone(evidence),parent=overlap.document.blocks.find(b=>b.id===item.blockIds[0]),r=parent.source.range;
+  const fragment={...structuredClone(parent),id:'overlap-fragment',parentBlockId:parent.id,source:{...structuredClone(parent.source),range:{...r}}};
+  overlap.flow.fragments.push(fragment);overlap.flow.items.push({...structuredClone(item),id:'overlap-flow',blockIds:[fragment.id]});
+  assert.throws(()=>buildReconstructionModel(overlap),{code:'ambiguous-provenance'});
+});
+
+test('drawing observation budget remains finite',async()=>{
+  const d=new mupdf.PDFDocument(),stream='1 w\n'+'0 0 m 20 20 l S\n'.repeat(50001);
+  d.insertPage(-1,d.addPage([0,0,100,100],0,{},stream));const b=d.saveToBuffer(),bytes=b.asUint8Array().slice();b.destroy();d.destroy();
+  await assert.rejects(extract(bytes),{code:'budget-exceeded'});
+});

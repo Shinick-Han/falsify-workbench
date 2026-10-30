@@ -6,7 +6,7 @@ import {readSourceLinks} from './paper-source-links.mjs';
 import {buildPaperFlow} from './paper-flow.mjs';
 
 const HASH=/^[a-f0-9]{64}$/;
-const LIMIT={bytes:25*1024*1024,pages:100,dimension:14400,characters:200000,blocks:1000,assets:1000,drawings:10000};
+const LIMIT={bytes:25*1024*1024,pages:100,dimension:14400,characters:200000,blocks:8000,assets:1000,drawings:50000};
 const fail=code=>{const e=new Error(code);e.code=code;throw e;};
 const abort=signal=>{if(signal?.aborted){const e=new Error('aborted');e.name='AbortError';e.code='aborted';throw e;}};
 const box=b=>Array.isArray(b)&&b.length===4&&b.every(Number.isFinite)&&b[0]<=b[2]&&b[1]<=b[3];
@@ -83,8 +83,16 @@ export function buildReconstructionModel({document,flow,links,assets}={}){
     if(reason)diagnostics.push({code:reason,severity:'warning',pageIndex:f.source.pageIndex,itemId:id});
   }
   // A source occurrence may not be consumed by multiple flow fragments/items.
-  const ranges=new Map();for(const item of items)for(const e of item.evidence.filter(e=>e.range)){const key=e.pageIndex,arr=ranges.get(key)||[];if(arr.some(r=>e.range.start<r.end&&r.start<e.range.end))fail('ambiguous-provenance');arr.push(e.range);ranges.set(key,arr);}
-  for(const b of document.blocks.filter(b=>b.text)){const r=b.source.range,covered=(ranges.get(b.source.pageIndex)||[]).filter(x=>x.start>=r.start&&x.end<=r.end).sort((a,b)=>a.start-b.start);if(!covered.length||covered[0].start!==r.start||covered.at(-1).end!==r.end||covered.some((x,i)=>i&&covered[i-1].end!==x.start))fail('uncovered-source-text');}
+  const byPage=new Map(),byBlock=new Map();
+  for(const item of items)for(const e of item.evidence)if(e.range){
+    const pageRanges=byPage.get(e.pageIndex)||[];pageRanges.push(e.range);byPage.set(e.pageIndex,pageRanges);
+    const blockRanges=byBlock.get(e.blockId)||[];blockRanges.push(e.range);byBlock.set(e.blockId,blockRanges);
+  }
+  for(const ranges of byPage.values()){
+    ranges.sort((a,b)=>a.start-b.start||a.end-b.end);
+    for(let i=1;i<ranges.length;i++)if(ranges[i].start<ranges[i-1].end)fail('ambiguous-provenance');
+  }
+  for(const b of document.blocks)if(b.text){const r=b.source.range,covered=byBlock.get(b.id)||[];covered.sort((a,b)=>a.start-b.start||a.end-b.end);if(!covered.length||covered[0].start!==r.start||covered.at(-1).end!==r.end||covered.some((x,i)=>i&&covered[i-1].end!==x.start))fail('uncovered-source-text');}
   if(ownedAssets.size!==sourceAssets.size)fail('uncovered-source-asset');
   for(const link of links.links||[]){const s=link.source;if(!s?.frameVerified||s.frame!=='mupdf-display'||!document.pages[s.pageIndex]||!box(s.bbox))fail('invalid-evidence');const matching=items.filter(item=>item.evidence.some(e=>e.pageIndex===s.pageIndex&&e.range&&(link.relation?.ranges||[]).some(r=>r.blockId===e.blockId&&r.start<e.range.end&&e.range.start<r.end)));for(const item of matching){(item.extensions.links||=[]).push({id:link.id,evidence:refs(s,{occurrence:s.occurrence}),status:'unresolved'});if(item.status==='observed'){item.status='proposed';item.reason='link-unresolved';}diagnostics.push({code:'link-unresolved',severity:'warning',pageIndex:s.pageIndex,itemId:item.id});}if(!matching.length)diagnostics.push({code:'link-unresolved',severity:'warning',pageIndex:s.pageIndex});}
   const relations=[];for(const r of flow.relations||[]){if(r.kind==='caption'){const from=flowIds.get(r.assetItemId),to=flowIds.get(r.captionItemId);if(!from||!to)fail('invalid-evidence');relations.push({kind:'caption',from,to,status:'proposed',evidence:[...items.find(i=>i.id===from).evidence,...items.find(i=>i.id===to).evidence]});}}
