@@ -47,15 +47,67 @@
     },
     {
       "path": "src/latex-workbench.mjs",
-      "sha256": "7845d6bfa1c2b62603b477514b15a7bce4ec857ffd670437c97d95d34fb67326"
+      "sha256": "37bf4c4dd4b251585e19b5bf44a824f80fce100c3bf51615ebb816395a12bb84"
+    },
+    {
+      "path": "src/paper-document.mjs",
+      "sha256": "259707b830e6bd6cfb8f382db3004aa84e8ed78f9c89a5d42244a08443d4eedf"
+    },
+    {
+      "path": "src/paper-flow.mjs",
+      "sha256": "2c55d2df34d1d502cb308f46b5064df4897c163299362bf4c181e6c6e88530bd"
+    },
+    {
+      "path": "src/paper-source-assets.mjs",
+      "sha256": "ccc30138fae3ef8f5dcb259f6be51a561fd6fa8bd6a8465ab4888d1679b4e49c"
+    },
+    {
+      "path": "src/paper-source-links.mjs",
+      "sha256": "70438c684bcc5e2fb9b36a00d5007f51e28a0459c7f976202fb8d2ec28b43819"
     },
     {
       "path": "src/paragraph-pdf-crypto.mjs",
       "sha256": "62a669dd4576506ca5911af3baf306548e153ad6bea449ad6a4dd00b1c10f2b9"
+    },
+    {
+      "path": "src/pdf-latex-baseline.mjs",
+      "sha256": "930a8cb29a695bf3f0e9c158dbfdc7caee0219412f68a9d92919a0af5bf3f7fb"
+    },
+    {
+      "path": "src/pdf-latex-evidence.mjs",
+      "sha256": "d5549ad247071acec1334374fb9340b76dd6dfa59a9986cd5aa5b00fba49253b"
+    },
+    {
+      "path": "src/pdf-latex-regions.mjs",
+      "sha256": "cac593dc1c2151e32c938c29e5bcc407c8114b9098df32a6299670d2a30b2a35"
+    },
+    {
+      "path": "src/pdf-latex-serialize.mjs",
+      "sha256": "cba3d0e469d6e3f858b25da4082eb1b78cc625ae1f177ecbeeb631daa6a05605"
+    },
+    {
+      "path": "src/pdf-latex-workbench.mjs",
+      "sha256": "512c648086102b23ff811729398af8935ed17865230c8ba3863654b29a7fca64"
+    },
+    {
+      "path": "src/table-adapter.mjs",
+      "sha256": "41536d1d7ca96ffdccc2a1f4d1ff3c90cb79bd86933b5a9b19a0326ca4095046"
+    },
+    {
+      "path": "src/table-vendor/detection.mjs",
+      "sha256": "0b231b360fb92657760e51b910e8362c7025a16e469236e6521493f1bf4e88bf"
+    },
+    {
+      "path": "src/table-vendor/geometry.mjs",
+      "sha256": "33ecb121ecd8f152d2d5023b34db1afd28c32c959db07c2f0799cc4261ce57ea"
+    },
+    {
+      "path": "src/table-vendor/model.mjs",
+      "sha256": "33c211e144c5458db3e6994c3e0e2503ab5a74a575fed995d1d83c1c205b59e1"
     }
   ],
   "output": {
     "path": "latex-workbench.mjs",
-    "sha256": "c10838289d99a7bb4d31ebbc64fd20e909ea6c5d09c25cc48f6928b700879bb4"
+    "sha256": "f7cb9e722accbe38fcd4bbac247500c6cbe74ab5e9781afc16dd9a9af7fd5cd5"
   }
 }
