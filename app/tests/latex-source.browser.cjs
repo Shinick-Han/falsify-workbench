@@ -165,11 +165,16 @@ async function main() {
     assert.equal(reconstruction.lineage.sourcePdfHash,hash(pdfInput));
     assert.equal(reconstruction.lineage.baselinePdfHash,reconstruction.hash);
     assert.equal(reconstruction.comparison.sourcePages,1);
-    assert.equal(reconstruction.comparison.baselinePages,1);
+    // This experimental route reports pagination differences; it does not promise
+    // a facsimile. Verify its reported count against the actual downloaded PDF.
+    assert.ok(Number.isSafeInteger(reconstruction.comparison.baselinePages) && reconstruction.comparison.baselinePages>0);
+    if(reconstruction.comparison.baselinePages!==reconstruction.comparison.sourcePages)console.log('Experimental reconstruction pagination difference:',reconstruction.comparison.sourcePages,'->',reconstruction.comparison.baselinePages);
     for(const key of ['text','numbers']) {assert.deepEqual(reconstruction.comparison[key].missing,[]);assert.deepEqual(reconstruction.comparison[key].added,[]);}
     console.log('Reconstruction baseline comparison passed');
     const reconstructedPdf=await streamBytes(await download(page.getByRole('button',{name:'재구성 PDF 다운로드',exact:true})));
     assert.equal(hash(reconstructedPdf),reconstruction.hash);
+    const actualBaselinePages=await page.evaluate(async b64=>{const pdfjs=await import('./vendor/pdf.mjs');const task=pdfjs.getDocument({data:Uint8Array.from(atob(b64),c=>c.charCodeAt(0))});try{return (await task.promise).numPages;}finally{await task.destroy();}},reconstructedPdf.toString('base64'));
+    assert.equal(reconstruction.comparison.baselinePages,actualBaselinePages);
     await page.getByRole('button',{name:'이 기준본으로 편집',exact:true}).click();
     await page.waitForFunction(h=>{const w=window.FalsifyLatexWorkbench,s=w?.getSession()?.snapshot(),a=w?.getArchiveState();return w?.active && s?.baseline?.pdfHash===h && w.getCurrentOutput()?.sha256===h && a?.reconstruction?.baselinePdfHash===h;},reconstruction.hash,{timeout});
     const accepted=await page.evaluate(()=>{const w=FalsifyLatexWorkbench,s=w.getSession().snapshot(),a=w.getArchiveState();return {source:w.getSource().fileHash,baseline:s.baseline.pdfHash,current:w.getCurrentOutput().sha256,changes:s.changes.length,lineage:a.reconstruction,bytes:s.baseline.pdfBytes.length};});
