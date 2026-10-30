@@ -152,7 +152,8 @@ async function main() {
     // A freshly opened PDF has no generated artifact until an edit is made.
     const switchedPdf=await streamBytes(await download(page.locator('#paper-workspace').getByRole('button',{name:'원본 다운로드',exact:true})));
     assert.equal(hash(switchedPdf),hash(pdfInput));
-    await page.locator('#paper-before-stage img').waitFor({state:'visible',timeout});
+    await page.locator('#paper-before-stage .textLayer span').first().waitFor({state:'visible',timeout});
+    console.log('Source restore, PDF switch and delayed-read guard passed');
     // Reconstruct the synthetic PDF locally, then bind all later artifacts to
     // the exact no-attack baseline that was compared with the original.
     await page.locator('details:has(#paper-recompose) > summary').click();
