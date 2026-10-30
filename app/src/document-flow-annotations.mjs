@@ -206,8 +206,15 @@ function movementPlan(model,records,map,count,moves,reflowed,destinationMoves=[]
   const destinationPlan=new Map();
   for(const move of destinationMoves){
     if(!move||Object.keys(move).sort().join(',')!=='dx,dy,id,outputPageIndex,sourcePageIndex'||!Number.isInteger(move.id)||!Number.isInteger(move.sourcePageIndex)||!Number.isInteger(move.outputPageIndex)||move.outputPageIndex<0||move.outputPageIndex>=count||![move.dx,move.dy].every(n=>typeof n==='number'&&Number.isFinite(n)&&Math.abs(n)<=100000))fail('annotation-destination-move-invalid');
-    const d=destinations.get(move.id);if(!d||destinationPlan.has(move.id)||d.kind!=='FitR'||d.targetSourcePageIndex!==move.sourcePageIndex||!group.has(move.sourcePageIndex)||d.operands.length!==4||!d.operands.every(n=>typeof n==='number'&&Number.isFinite(n)))fail('annotation-destination-move-invalid');
-    const operands=d.operands.map((n,i)=>n+(i%2?move.dy:move.dx));if(!operands.every(n=>Number.isFinite(n)&&Math.abs(n)<=100000)||operands[0]>=operands[2]||operands[1]>=operands[3])fail('annotation-destination-move-invalid');
+    const d=destinations.get(move.id);if(!d||destinationPlan.has(move.id)||d.targetSourcePageIndex!==move.sourcePageIndex||!group.has(move.sourcePageIndex))fail('annotation-destination-move-invalid');
+    let operands;
+    if(d.kind==='FitR'&&d.operands.length===4&&d.operands.every(n=>typeof n==='number'&&Number.isFinite(n))){
+      operands=d.operands.map((n,i)=>n+(i%2?move.dy:move.dx));
+      if(operands[0]>=operands[2]||operands[1]>=operands[3])fail('annotation-destination-move-invalid');
+    }else if(d.kind==='XYZ'&&d.operands.length===3&&Number.isFinite(d.operands[0])&&Number.isFinite(d.operands[1])&&(d.operands[2]===null||Number.isFinite(d.operands[2]))){
+      operands=[d.operands[0]+move.dx,d.operands[1]+move.dy,d.operands[2]];
+    }else fail('annotation-destination-move-invalid');
+    if(!operands.every(n=>n===null||Number.isFinite(n)&&Math.abs(n)<=100000))fail('annotation-destination-move-invalid');
     destinationPlan.set(move.id,{move,descriptor:d,operands});
   }
   for(const record of records){

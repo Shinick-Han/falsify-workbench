@@ -159,3 +159,40 @@ test('canonical provider preserves native ownership when saved body objects appe
  const labelTargets=targets.map((c,i)=>i===2?{...c,u:'A'.charCodeAt(0)}:c);
  assert.throws(()=>deriveNativeLinkMoves(engine,band,labelTargets,labelEdit,model,expectedPageText,new Set(),ordered),e=>e.code==='document_flow_link_edited_label');
 });
+import {deriveNativeXYZMoves} from '../src/paragraph-vendor/document-flow-links.mjs';
+test('XYZ anchors follow a unique rigid source object and reject edited or ambiguous anchors',()=>{
+ const chars=[{u:65,object:7,box:{l:11,r:15,b:90,t:98}},{u:66,object:7,box:{l:15,r:19,b:90,t:98}}], heap=new Float64Array(16);
+ const M={HEAPF64:heap,_malloc:()=>8,_free:()=>{},_FPDFText_LoadPage:()=>1,_FPDFText_ClosePage:()=>{},_FPDFText_CountChars:()=>chars.length,
+  _FPDFText_GetUnicode:(_,i)=>chars[i].u,_FPDFText_GetTextObject:(_,i)=>chars[i].object,_FPDFText_IsGenerated:()=>0,
+  _FPDFText_GetCharBox:(_,i,l,r,b,t)=>{const q=chars[i].box;heap[l>>3]=q.l;heap[r>>3]=q.r;heap[b>>3]=q.b;heap[t>>3]=q.t;return 1;}};
+ const engine={M,page:1,loadPage:()=>{}}, bands=[{sourcePageIndex:0,floor:0,bodyTop:200}], model={annotations:[{internalDestinations:[{id:3,kind:'XYZ',targetSourcePageIndex:0,operands:[10,100,null]}]}]};
+ const target=chars.map(c=>({u:c.u,box:{l:c.box.l+2,r:c.box.r+2,b:c.box.b-5,t:c.box.t-5},outputPageIndex:0}));
+ const expected=()=>({ok:true,spans:[]});
+ assert.deepEqual(deriveNativeXYZMoves(engine,bands,target,[],model,expected),[{id:3,sourcePageIndex:0,outputPageIndex:0,dx:2,dy:-5}]);
+ assert.throws(()=>deriveNativeXYZMoves(engine,bands,[target[0],{...target[1],box:{...target[1].box,b:80}}],[],model,expected),{code:'document_flow_destination_not_rigid'});
+ const edited=()=>({ok:true,spans:[{a:0,b:2,after:'CD'}]});
+ assert.throws(()=>deriveNativeXYZMoves(engine,bands,target,[],model,edited),{code:'document_flow_link_text_mapping_mismatch'});
+ chars.push({u:67,object:8,box:{l:11,r:13,b:90,t:98}});target.push({u:67,box:{l:13,r:15,b:85,t:93},outputPageIndex:0});
+ assert.throws(()=>deriveNativeXYZMoves(engine,bands,target,[],model,expected),{code:'document_flow_destination_ownership_ambiguous'});
+});
+
+test('incoming-only XYZ destination follows a rigidly moved target on an annotation-free edited page',async()=>{
+ const d=new mupdf.PDFDocument();let src;
+ try {
+  const font=d.addSimpleFont(new mupdf.Font('Times-Roman'));
+  d.insertPage(-1,d.addPage([0,0,640,800],0,{Font:{F1:font}},'BT /F1 11 Tf 40 700 Td (Initial claim.) Tj ET BT /F1 11 Tf 40 660 Td (Target paragraph remains unchanged.) Tj ET'));
+  d.insertPage(-1,d.addPage([0,0,640,800],0,{Font:{F1:font}},'BT /F1 11 Tf 40 700 Td (Incoming link.) Tj ET'));
+  const target=d.findPage(0),from=d.findPage(1);
+  from.put('Annots',[d.addObject({Type:'Annot',Subtype:'Link',Rect:[40,690,100,710],Dest:[target,'XYZ',39,669,null],Contents:d.newString('preserve-extra')})]);
+  const buf=d.saveToBuffer();try{src=buf.asUint8Array().slice();}finally{buf.destroy();}
+ }finally{d.destroy();}
+ const result=await prepare({file:src,edits:[{id:'growth',pageIndex:0,before:'Initial claim.',after:'Initial claim and a detailed explanation of the evidence and its interpretation across multiple settings. '.repeat(5)}]});
+ assert.ok(!result.verification.checks.some(c=>c.status==='failed'),JSON.stringify(result.verification.checks));
+ const output=new Uint8Array(await result.file.arrayBuffer()), out=new mupdf.PDFDocument(output);
+ try {
+  const link=out.findPage(1).get('Annots',0), dest=link.get('Dest');
+  assert.equal(dest.get(0).asIndirect(),out.findPage(0).asIndirect());assert.equal(dest.get(1).asName(),'XYZ');
+  assert.equal(dest.get(2).asNumber(),39);assert.ok(dest.get(3).asNumber()<669);assert.ok(dest.get(4).isNull());
+  assert.equal(link.get('Contents').asString(),'preserve-extra');
+ } finally {out.destroy();}
+});

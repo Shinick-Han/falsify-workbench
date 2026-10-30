@@ -216,7 +216,7 @@ test('direct FitR reaches an inserted final page and rejects staged changes and 
   const request=args(model,src,{outputBytes:staged,sourcePageMap,moves:[],reflowedSourcePages:[2],destinationMoves:[{id,sourcePageIndex:2,outputPageIndex:1,dx:5,dy:-5}]});
   const output=await api.transport(request);assert.equal((await api.validate({...request,outputBytes:output.pdf})).ok,true);
   const bad=mutate(staged,d=>d.findPage(0).get('Annots',1,'Dest').put(2,11));await assert.rejects(()=>api.transport({...request,outputBytes:bad}));
-  const other=source(),otherModel=await inspect(other),xyz=otherModel.annotations[1].internalDestinations[0];await assert.rejects(()=>api.transport(args(otherModel,other,{moves:[],reflowedSourcePages:[2],destinationMoves:[{id:xyz.id,sourcePageIndex:2,outputPageIndex:1,dx:0,dy:0}]})),{code:'annotation-destination-move-invalid'});
+  const other=mutate(source(),d=>d.getTrailer().get('Root','Names','Dests','Kids',0,'Names').put(1,{D:[d.findPage(2),'XYZ',null,375,null]})),otherModel=await inspect(other),xyz=otherModel.annotations[1].internalDestinations[0];await assert.rejects(()=>api.transport(args(otherModel,other,{moves:[],reflowedSourcePages:[2],destinationMoves:[{id:xyz.id,sourcePageIndex:2,outputPageIndex:1,dx:0,dy:0}]})),{code:'annotation-destination-move-invalid'});
 });
 
 
@@ -236,4 +236,19 @@ test('opposite-corner annotation rectangles normalize for moves while stationary
   }
   for(const raw of [[30,250,30,265],[30,250,110,250]]){const src=mutate(source(),d=>d.findPage(0).get('Annots',0).put('Rect',raw)),model=await inspect(src);assert.equal(model.annotations[0].eligible,false);assert.equal(model.annotations[0].reason,'annotation-geometry-invalid');}
   const src=mutate(source(),d=>d.findPage(0).put('MediaBox',[300,0,0,400])),model=await inspect(src);assert.equal(model.annotations[0].eligible,false);
+});
+
+
+test('XYZ destination moves preserve viewport kind and zoom and reject tampering',async()=>{
+  const src=source(), model=await inspect(src), d=model.annotations[1].internalDestinations[0];
+  const destinationMoves=[{id:d.id,sourcePageIndex:2,outputPageIndex:1,dx:8,dy:-12}];
+  const request=args(model,src,{moves:[],reflowedSourcePages:[2],destinationMoves});
+  const out=await api.transport(request); assert.equal((await api.validate({...request,outputBytes:out.pdf})).ok,true);
+  const doc=new mupdf.PDFDocument(out.pdf); try {
+    const dest=doc.getTrailer().get('Root','Names','Dests','Kids',0,'Names',1,'D');
+    assert.equal(dest.get(0).asIndirect(),doc.findPage(1).asIndirect());
+    assert.equal(dest.get(1).asName(),'XYZ');assert.equal(dest.get(2).asNumber(),33);assert.equal(dest.get(3).asNumber(),363);assert.ok(dest.get(4).isNull());
+  } finally {doc.destroy();}
+  const tampered=mutate(out.pdf,doc=>doc.getTrailer().get('Root','Names','Dests','Kids',0,'Names',1,'D').put(3,364));
+  assert.equal((await api.validate({...request,outputBytes:tampered})).ok,false);
 });
