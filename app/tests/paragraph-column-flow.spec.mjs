@@ -28,6 +28,10 @@ test('reservation checks barriers and rolls back a recorded whole-body move', ()
   boxes.set(3,{x:10,y:265,w:80,h:3});
   assert.equal(reserveCascadeSpace(e,ctx,grown,{targetHandles:[1]}).code,'reserve_foreign_object');
   assert.equal(boxes.get(2).y,270);
+  boxes.delete(3);
+  assert.equal(reserveCascadeSpace({...e,pageT:[0,1,-1,0,0,0]},ctx,grown,{targetHandles:[1]}).code,'reserve_transform_unsupported');
+  assert.equal(reserveCascadeSpace(e,ctx,[{...grown[0],delta:260}],{targetHandles:[1]}).code,'reserve_no_room');
+  assert.equal(boxes.get(2).y,270);
 });
 
 const para = (id, x, top, h = 10, role = 'body') => ({ id, box: { x, top, w: 80, h }, role, editable: true, topLevel: true });

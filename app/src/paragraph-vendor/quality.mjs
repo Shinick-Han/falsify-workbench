@@ -402,6 +402,7 @@ export function reserveCascadeSpace(engine, ctx, grown, { targetHandles = [] } =
   if (!ctx || !Number.isFinite(ctx.pageH) || ctx.pageH <= 0 || !Array.isArray(ctx.paras) || !Array.isArray(grown) || grown.length !== 1 ||
       ctx.paras.some(q => q.box && !validBox(q.box)) ||
       grown.some(g => !validBox(g?.box) || !Number.isFinite(g.delta) || g.delta <= 0 || !ctx.paras.some(q => q.id === g.id && q.role === 'body'))) return fail('reserve_invalid');
+  if (!uprightPage(engine)) return fail('reserve_transform_unsupported');
   const live = new Set(listObjects(engine));
   if (!Array.isArray(targetHandles) || targetHandles.some(h => !live.has(h >>> 0) || engine.M._FPDFPageObj_GetType(h) !== OBJ_TEXT)) return fail('reserve_target_invalid');
   const shifts = cascadeShifts(ctx, grown), floor = cascadeFloor(ctx);
