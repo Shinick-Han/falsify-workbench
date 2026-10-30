@@ -239,7 +239,7 @@ export async function prepare(request = {}) {
     }
     const engine = await createEngine(input, fontSnapshot);
     const open = engine.open.bind(engine);
-    engine.open = data => { const result=open(data); bindSourceTables(engine,data,data instanceof Uint8Array ? proofs.get(hex(data)) : null); return result; };
+    engine.open = (data,...args) => { const result=open(data,...args); bindSourceTables(engine,data,data instanceof Uint8Array ? proofs.get(hex(data)) : null); return result; };
     if(input) bindSourceTables(engine,input,proofs.get(digest));
     return engine;
   };
