@@ -1,4 +1,8 @@
 import {spawnSync} from 'node:child_process';
+for (const file of ['paragraph-quality-repair.spec.mjs', 'browser-pdf-crop-table.spec.mjs', 'table-crop-fit.spec.mjs', 'paper-structured-table.spec.mjs', 'paragraph-mixed-table-repair.spec.mjs', 'paragraph-ruled-table.spec.mjs', 'paragraph-fixed-font-regression.spec.mjs']) {
+  const result = spawnSync(process.execPath, ['--test', 'tests/' + file], {stdio: 'inherit'});
+  if (result.error || result.status !== 0) process.exit(result.status || 1);
+}
 const externalWorkflow = spawnSync(process.execPath, ['--test', 'tests/paper-anchors.test.cjs', 'tests/external-exchange.test.cjs', 'tests/external-proposals-b.spec.cjs', 'tests/external-exchange-ui.test.cjs', 'tests/external-archive.test.cjs', 'tests/paper-generation.spec.cjs', 'tests/paper-workspace-external-b.spec.cjs', 'tests/external-workflow.integration.test.cjs'], {stdio: 'inherit'});
 if (externalWorkflow.error || externalWorkflow.status !== 0) process.exit(externalWorkflow.status || 1);
 const marks = spawnSync(process.execPath, ['--test', 'tests/paper-change-marks.spec.cjs'], {stdio: 'inherit'});

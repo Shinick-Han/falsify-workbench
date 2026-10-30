@@ -44,16 +44,24 @@
     {
       "name": "native-horizontal-scale.patch",
       "sha256": "088a2d30015707444031ef1bd2030954ce70eb5fc6cc1dbc5bef81cedaf35d6f"
+    },
+    {
+      "name": "native-word-spacing-idempotence.patch",
+      "sha256": "7f1c580b6afd29670f11a0e0945eeaa15ac20982e59c23777f5a8766b74f1e17"
+    },
+    {
+      "name": "native-standard-digit-equivalence.patch",
+      "sha256": "07ea8445415b77d1abec998cac1aab2049d798f83d070b296aa5b08ff0c6f727"
     }
   ],
   "artifacts": {
     "js": {
       "path": "editcore.js",
-      "sha256": "6e6989a9994715951720e05355111aca7eab898e92b519ebea160167875bb3eb"
+      "sha256": "7b8ba07a1ff5fd190e97c8513bbe008e5c60052d51449510c5f7d415dc70aaeb"
     },
     "wasm": {
       "path": "editcore.wasm",
-      "sha256": "15212c22d100c7d262d6d9996117517dbe3a30e80d43569977df5b2cd7ff35c6"
+      "sha256": "770c19d26ff95cb24db2dd8f9a348ab00fa9415547cd343148c3180bc19e7e2c"
     }
   },
   "provenance": {
@@ -62,11 +70,11 @@
     "jsInputName": "pdfium.js",
     "wasmInputName": "pdfium.wasm",
     "verification": "Artifact and patch sha256 recorded from supplied files only; C++/WASM rebuild from the listed sources was not verified by this script.",
-    "note": "reedit-1726cc21-20261019 snapshot (provenance.json b2878492) from same-host build root /home/jcpuk/editor-wasm-build.I80fju out/wasm-resumed-20261019; native 1726cc21, parent 8ba2939, gate native-repair-review.json fea29c69 ACCEPT_SOURCE_SCOPE. Stacked patches applied in order stream-order(pdfium), natural-space, justified-space, reedit-space(engine); only stream-order and reedit-space reverse-check individually, all four bound by engine.diff 6cf69c5f (blob ids 813903c..1726cc21) and pdfium.diff d5225a53. Incremental, not clean-room. Font cmap and inline script patches applied on the same-host incremental cached source build snapshot /home/jcpuk/editor-wasm-build.I80fju/out/font-inline-20261028; not a clean reproducible source build. Final flanked-marker gap merge built and individually reverse-checked in snapshot font-inline-flanked-20261028; nativeSnapshot binds its complete source diffs. Unchanged-column interleaving is handled before general line merging. Composite inline and horizontal scale patches stacked on alpha.32, snapshot editor-scripts-scale-20261028; original script styles and measured horizontal ratios retained. Incremental build; sourceBuildVerified remains false.",
+    "note": "reedit-1726cc21-20261019 snapshot (provenance.json b2878492) from same-host build root /home/jcpuk/editor-wasm-build.I80fju out/wasm-resumed-20261019; native 1726cc21, parent 8ba2939, gate native-repair-review.json fea29c69 ACCEPT_SOURCE_SCOPE. Stacked patches applied in order stream-order(pdfium), natural-space, justified-space, reedit-space(engine); only stream-order and reedit-space reverse-check individually, all four bound by engine.diff 6cf69c5f (blob ids 813903c..1726cc21) and pdfium.diff d5225a53. Incremental, not clean-room. Font cmap and inline script patches applied on the same-host incremental cached source build snapshot /home/jcpuk/editor-wasm-build.I80fju/out/font-inline-20261028; not a clean reproducible source build. Final flanked-marker gap merge built and individually reverse-checked in snapshot font-inline-flanked-20261028; nativeSnapshot binds its complete source diffs. Unchanged-column interleaving is handled before general line merging. Composite inline and horizontal scale patches stacked on alpha.32, snapshot editor-scripts-scale-20261028; original script styles and measured horizontal ratios retained. Incremental build; sourceBuildVerified remains false. Word spacing normalization checks the current text object Tw so explicit-position objects are not repeatedly recreated. Incremental same-host relink, not a clean rebuild. Narrow nonembedded Helvetica digit equivalence avoids renaming source fonts when dictionaries, mappings, widths and outlines prove equivalence; unsupported collision cases retain prior behavior and may remain draft. Incremental relink, not clean build.",
     "nativeSnapshot": {
-      "name": "editor-scripts-scale-20261028",
-      "provenanceSha256": "c64bb7c491534f2fffdedfdc43c30dd77d4dd6e49e5e99b7d37c43817d1229c5",
-      "engineDiffSha256": "0f7f9660f1f1352a301f5cd423f6572700798551f5e69e429f8201a082b8c0fa",
+      "name": "font-digit-type1-20261030",
+      "provenanceSha256": "5d828ced4383b10eed01b56c1f959a81ba1f59f52a2849e80b81f66991a06780",
+      "engineDiffSha256": "62148df1e6780fda23426723e45c73b4a8ad24e0f12caa527094573249845719",
       "pdfiumDiffSha256": "f6059e1c45acc5f8127ce713fb23695cd4685b8a449857b7eea8cf1f9e461c34",
       "incremental": true
     }
