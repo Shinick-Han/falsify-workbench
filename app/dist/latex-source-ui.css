@@ -13,3 +13,5 @@
 .latex-source-node[aria-pressed=true]{border-color:var(--ink,#111315);outline:2px solid var(--ink,#111315)}
 .latex-source-editor :focus-visible{outline:3px solid var(--focus,#246388);outline-offset:3px}
 @media(max-width:700px){.latex-source-editor{padding:16px}.latex-source-actions .button{width:100%}}
+
+.latex-highlight-frame{position:relative;display:inline-block;max-width:100%}.latex-highlight-frame canvas{display:block;max-width:100%;height:auto}.latex-highlight-overlay{position:absolute;inset:0;pointer-events:none}.latex-highlight-mark{position:absolute;background:rgba(255,189,36,.35);outline:1px solid rgba(190,118,0,.65);pointer-events:none}.latex-highlight-label{font-size:13px;overflow-wrap:anywhere}

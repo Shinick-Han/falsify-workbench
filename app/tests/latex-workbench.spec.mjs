@@ -91,3 +91,21 @@ test('real archive roundtrip preserves source upload and explicit raw item prove
   const snapshot=projectLegacyExternal({fileHash:h,project:p,responses:restored.responses,segments:[{id:'main.tex',text:'Hello world'}]});
   assert.equal(snapshot.items[0].sourceRefs[0].itemId,'raw');
 });
+
+test('adding an asset rebinds verified ranges to the new project and preserves conflicts',async()=>{
+  const {createLatexProject}=await import('../src/latex-project.mjs');
+  const {analyzeLatexSource}=await import('../src/latex-source-model.mjs');
+  const bytes=new TextEncoder().encode('Hello world');
+  const old=await createLatexProject({files:[{path:'nested/main.tex',bytes}],mainFile:'nested/main.tex'});
+  const n=analyzeLatexSource(old).nodes[0];
+  const c={id:'one',kind:n.kind,before:n.text,after:'Hi',anchor:{projectId:old.id,nodeId:n.id,path:n.path,kind:n.kind,start:n.contentStart,end:n.contentEnd}};
+  const next=await createLatexProject({...old,files:[...old.files,{path:'nested/image.png',bytes:new Uint8Array([1,2])}]});
+  const [rebound,conflict]=await workbench.rebindChanges(old,next,[c,{...c,id:'bad',anchor:{...c.anchor,nodeId:'missing'}}]);
+  assert.equal(rebound.anchor.projectId,next.id);assert.equal(rebound.enabled,undefined);
+  assert.equal(conflict.enabled,false);assert.ok(conflict.rebindDiagnostic);assert.equal(conflict.before,c.before);
+  await workbench.validateRestoredChanges(next,[rebound,conflict]);
+  const {encodeSourceSession,decodeSourceSession}=await import('../src/latex-session-archive.mjs');
+  const changes=[rebound,conflict],responses={schema:'falsify.latex-responses.v1',projectId:next.id,batches:[],proposals:[],changes};
+  const saved=await encodeSourceSession({project:next,changes,responses},{createLatexProject});
+  assert.equal((await decodeSourceSession(saved,{createLatexProject})).changes[1].rebindDiagnostic,conflict.rebindDiagnostic);
+});
