@@ -703,20 +703,16 @@ export function edgeGlyphs(g) {
   return g.glyphs.filter((c) => keep.has(c));
 }
 
-// Boxes of the paragraphs a page model classifies as body (see classify)
-// that also reach out of the page's edge bands, so they cannot be a running
-// header or footer: a body paragraph whose last lines sit in the bottom band
-// of a dense page. null when model space is not plain user space.
+// Source model body boxes, including body text inside the glyph-extent edge
+// band. null when model space is not plain user space.
 function bodyBoxes(engine, pageIndex, g) {
   ensurePage(engine, pageIndex);
   if (typeof engine.buildModel !== "function" || !uprightPage(engine) || !g.glyphs.length) return null;
   const paras = engine.buildModel();
   const boxes = paras.filter((p) => p.box).map((p) => p.box);
   const edgeBottomY = boxes.length ? Math.min(0, ...boxes.map(bottomOf)) : 0;
-  const lo = Math.min(...g.glyphs.map((c) => c.b)) + EDGE_BAND * g.H;
-  const hi = Math.max(...g.glyphs.map((c) => c.t)) - EDGE_BAND * g.H;
   return paras
-    .filter((p) => p.box && classify(p, engine.pageHeight, edgeBottomY) === "body" && p.box.top > lo && bottomOf(p.box) < hi)
+    .filter((p) => p.box && classify(p, engine.pageHeight, edgeBottomY) === "body")
     .map((p) => p.box);
 }
 
@@ -754,7 +750,7 @@ function edgeBodySplit(src, out, i, oi, s, o, es, eo) {
 
 // Authorize only the changed subrange of an unambiguously located edit.
 // Unchanged prefix/suffix glyphs remain subject to the ordinary edge check.
-export function authorizedEdgeChanges(source, output, edits, es, eo) {
+export function authorizedEdgeChanges(source, output, edits, es, eo, body = []) {
   let exp = expectedPageText(source.text, edits, { includeSpans: true });
   let sn = normalizedSourceChars(source.chars), on = normalizedSourceChars(output.chars);
   if (!exp.ok || on.map(c => c.ch).join('') !== exp.text) {
@@ -777,7 +773,7 @@ export function authorizedEdgeChanges(source, output, edits, es, eo) {
     let prefix = 0, suffix = 0;
     while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) prefix++;
     while (suffix < before.length - prefix && suffix < after.length - prefix && before[before.length - 1 - suffix] === after[after.length - 1 - suffix]) suffix++;
-    for (const c of sn.slice(span.a + prefix, span.b - suffix)) if (c.sourceIndex !== undefined) sourceIndices.add(c.sourceIndex);
+    for (const c of sn.slice(span.a, span.b)) if (c.sourceIndex !== undefined) sourceIndices.add(c.sourceIndex);
     const start = span.a + delta;
     // Retained glyphs on the edited baseline may shift by a fraction of a
     // point. Pair them by text identity and require one consistent shift.
@@ -802,18 +798,43 @@ export function authorizedEdgeChanges(source, output, edits, es, eo) {
       }
       if (a.u === b.u && Math.abs(dx) > .5 && Math.abs(dx) <= 1 && Math.abs((b.r-a.r)-dx) <= .1 && Math.abs(a.b-b.b) <= .1 && Math.abs(a.t-b.t) <= .1 && sameStyle(a.style,b.style)) shiftedPairs.push({a,b,dx});
     }
-    for (const c of on.slice(start + prefix, start + after.length - suffix)) if (c.sourceIndex !== undefined) outputIndices.add(c.sourceIndex);
+    for (const c of on.slice(start, start + after.length)) if (c.sourceIndex !== undefined) outputIndices.add(c.sourceIndex);
     delta += after.length - (span.b - span.a);
   }
   // Edge bands are derived from glyph extents and can change as the edited
   // line shrinks. Match unchanged edge glyphs against the entire other page.
   const sourceDiff = alignEdgeGlyphs(es, output.glyphs);
   const outputDiff = alignEdgeGlyphs(source.glyphs, eo);
+  // Only whole, source-classified body paragraphs below an edit may cascade.
+  // Pair their unchanged characters in the independently checked text order,
+  // and require a single vertical translation with unchanged geometry/style.
+  const edited = [...sourceIndices].map(i => sourceGlyph.get(i)).filter(Boolean);
+  const movedSource = new Set(), movedOutput = new Set();
+  if (edited.length) for (const box of body) {
+    if (!edited.some(c => c.b >= box.top && c.l <= box.x + box.w && c.r >= box.x)) continue;
+    const members = source.glyphs.filter(c => inBoxes(c, [box]));
+    if (!members.length || members.some(c => sourceIndices.has(c.i))) continue;
+    const pairs = [];
+    for (let k = 0; k < sn.length; k++) {
+      const a = sourceGlyph.get(sn[k].sourceIndex);
+      if (!a || !members.includes(a)) continue;
+      let offset = 0;
+      for (const span of exp.spans) if (span.b <= k) offset += span.after.length - (span.b - span.a);
+      const b = outputGlyph.get(on[k + offset]?.sourceIndex);
+      if (!b || a.u !== b.u || !sameStyle(a.style, b.style)) { pairs.length = 0; break; }
+      pairs.push([a, b]);
+    }
+    if (pairs.length !== members.length) continue;
+    const dy = pairs[0][1].b - pairs[0][0].b;
+    if (dy >= -0.5 || pairs.some(([a,b]) => Math.abs(b.l-a.l) > .1 || Math.abs(b.r-a.r) > .1 ||
+      Math.abs(b.b-a.b-dy) > .1 || Math.abs(b.t-a.t-dy) > .1)) continue;
+    for (const [a,b] of pairs) { movedSource.add(a.i); movedOutput.add(b.i); }
+  }
   const shifts = shiftedPairs.map(p => p.dx);
   if (shifts.length && Math.max(...shifts) - Math.min(...shifts) > .1) return false;
-  return sourceDiff.missing.every(c => sourceIndices.has(c.i) || shiftedPairs.some(p => p.a.i === c.i)) &&
-    outputDiff.added.every(c => outputIndices.has(c.i) || shiftedPairs.some(p => p.b.i === c.i)) &&
-    sourceDiff.restyled.length === 0 && outputDiff.restyled.length === 0;
+  return sourceDiff.missing.every(c => sourceIndices.has(c.i) || movedSource.has(c.i) || shiftedPairs.some(p => p.a.i === c.i)) &&
+    outputDiff.added.every(c => outputIndices.has(c.i) || movedOutput.has(c.i) || shiftedPairs.some(p => p.b.i === c.i)) &&
+    sourceDiff.restyled.every(([c]) => sourceIndices.has(c.i)) && outputDiff.restyled.every(([,c]) => outputIndices.has(c.i));
 }
 
 function extents(g) {
@@ -1041,7 +1062,7 @@ export async function inspectSavedPdf(engineFactory, sourceBytes, outputBytes, e
       row.edge_glyphs = es.length;
       row.edge_stable = stable;
       if (!stable) {
-        const editsEdge = authorizedEdgeChanges(s, o, pageEdits, es, eo);
+        const editsEdge = authorizedEdgeChanges(s, o, pageEdits, es, eo, bodyBoxes(src, i, s) || []);
         const split = editsEdge ? null : edgeBodySplit(src, out, i, m.outputPageIndex, s, o, es, eo);
         if (split) row.edge_split = split;
         if (editsEdge) warnings.push({ code: "edge_edit_authorized", pageIndex: i });

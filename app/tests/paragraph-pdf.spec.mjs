@@ -10,7 +10,8 @@ import vm from 'node:vm';
 // MuPDF WASM namespaces in one Node realm do not share device callback maps.
 import * as mupdf from '../dist/browser-pdf-vendor/mupdf.js';
 import {hex} from '../src/paragraph-pdf-crypto.mjs';
-import {inspectPage, prepare} from '../dist/paragraph-pdf.mjs';
+import {pathToFileURL} from 'node:url';
+const {inspectPage, prepare} = await import(process.env.PARAGRAPH_CANDIDATE ? pathToFileURL(resolve(process.env.PARAGRAPH_CANDIDATE)).href : new URL('../dist/paragraph-pdf.mjs', import.meta.url).href);
 import {createAnnotationTransport} from '../src/document-flow-annotations.mjs';
 
 const app = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -101,7 +102,7 @@ function extraction(bytes) {
 const localFetch = async input => {
   const url = new URL(input);
   assert.equal(url.protocol, 'file:', 'Node harness forbids all external requests');
-  assert.ok(url.pathname.includes('/dist/paragraph-vendor/'));
+  assert.ok(url.pathname.includes('/dist/paragraph-vendor/') || (process.env.PARAGRAPH_CANDIDATE && url.pathname.includes('/.local/pdf-repair/paragraph-vendor/')));
   return new Response(readFileSync(url));
 };
 

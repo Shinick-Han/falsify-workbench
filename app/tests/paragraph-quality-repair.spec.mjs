@@ -17,6 +17,22 @@ test('edge authorization uses edited positions and rejects unrelated movement or
  const missing=structuredClone(b);missing.glyphs=missing.glyphs.filter(g=>g.i!==11);
  assert.equal(authorizedEdgeChanges(a,missing,edits,a.glyphs,missing.glyphs),false);
 });
+test('only complete rigid downward movement of source body below an edit is authorized',()=>{
+ const a=page('A old text footer'),b=page('A new text footer'),edits=[{before:'A old text',after:'A new text'}];
+ for(const p of [a,b]) for(const g of p.glyphs) if(g.i<10){g.b+=30;g.t+=30;g.origin[1]+=30;}
+ for(const g of b.glyphs) if(g.i>=11){g.b-=5;g.t-=5;g.origin[1]-=5;}
+ const box={x:60,top:20,w:50,h:10};
+ assert.equal(authorizedEdgeChanges(a,b,edits,a.glyphs,b.glyphs,[box]),true);
+ const moved=structuredClone(b); moved.glyphs.find(g=>g.i===11).l+=3;
+ assert.equal(authorizedEdgeChanges(a,moved,edits,a.glyphs,moved.glyphs,[box]),false);
+ const lost=structuredClone(b); lost.glyphs=lost.glyphs.filter(g=>g.i!==11);
+ assert.equal(authorizedEdgeChanges(a,lost,edits,a.glyphs,lost.glyphs,[box]),false);
+ const restyled=structuredClone(b); restyled.glyphs.find(g=>g.i===11).style.size=14;
+ assert.equal(authorizedEdgeChanges(a,restyled,edits,a.glyphs,restyled.glyphs,[box]),false);
+ const missingAfter=page('A bad text footer');
+ assert.equal(authorizedEdgeChanges(a,missingAfter,edits,a.glyphs,missingAfter.glyphs,[box]),false);
+ assert.equal(authorizedEdgeChanges(a,b,edits,a.glyphs,b.glyphs,[]),false);
+});
 test('quarter-turn frames conserve text and reject missing replacement or invalid transforms',()=>{
  for(const r of [1,2,3]){const a=page('alpha beta',r),b=page('alpha zeta',r),edits=[{before:'beta',after:'zeta'}];
  assert.equal(compareSourceGeometry(a,b,edits,{expectedPageText}).match,true);
