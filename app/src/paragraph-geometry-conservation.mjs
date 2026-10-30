@@ -17,13 +17,18 @@ function userPartition(page) {
   const upright = f.rotation === 0 && Math.abs(t[1]) <= 1e-6 && Math.abs(t[2]) <= 1e-6 && t[0] > 0 && t[3] > 0;
   if (!upright && matrices[f.rotation].some((x,i) => Math.abs(x-t[i]) > 1e-6)) return null;
   const [a,b,c,d,e,f0] = t, det = a*d-b*c;
-  const xs = [[0,0],[page.W,0],[0,page.H],[page.W,page.H]].map(([x,y]) => (d*(x-e)-c*(y-f0))/det);
-  return (Math.min(...xs)+Math.max(...xs))/2;
+  if (!valid(det) || det === 0) return null;
+  const inverse = [d/det, -b/det, -c/det, a/det];
+  if (!inverse.every(valid) || !valid(-inverse[0]*e-inverse[2]*f0) || !valid(-inverse[1]*e-inverse[3]*f0)) return null;
+  const xs = [[0,0],[page.W,0],[0,page.H],[page.W,page.H]].map(([x,y]) => inverse[0]*(x-e)+inverse[2]*(y-f0));
+  if (!xs.every(valid)) return null;
+  const partition = Math.min(...xs)/2+Math.max(...xs)/2;
+  return valid(partition) ? partition : null;
 }
 
 export function canonicalPage(page, partition = userPartition(page)) {
   if (!page || !Array.isArray(page.chars) || !Array.isArray(page.glyphs) || !valid(page.W) || !valid(page.H)) return fail('page_geometry_unavailable');
-  if (userPartition(page) === null) return fail('unsupported_frame');
+  if (userPartition(page) === null || !valid(partition)) return fail('unsupported_frame');
   const glyphs = new Map();
   for (const g of page.glyphs) {
     if (!Number.isInteger(g.i) || g.i < 0 || g.i >= page.chars.length || glyphs.has(g.i) || g.u !== page.chars[g.i].u || ![g.l,g.r,g.b,g.t,g.origin?.[0],g.origin?.[1]].every(valid) || g.r < g.l || g.t < g.b || !valid(size(g)) || size(g) <= 0) return fail('glyph_geometry_unavailable',g.i);
@@ -33,10 +38,31 @@ export function canonicalPage(page, partition = userPartition(page)) {
   const ordered = [...glyphs.values()].sort((a,b)=>b.origin[1]-a.origin[1] || a.l-b.l || a.i-b.i);
   // A physical line can cross the midpoint. Keep adjacent glyphs on one
   // baseline in the channel of its start; a large gap still separates columns.
-  const channels = new Map();
-  for (const g of ordered) {
-    const prior = ordered.filter(h => h !== g && h.l <= g.l && channels.has(h.i) && Math.abs(h.origin[1]-g.origin[1]) <= .5 && Math.abs(size(h)-size(g)) <= .2 && g.l-h.r <= size(g)*2).sort((a,b)=>b.r-a.r)[0];
-    channels.set(g.i, prior ? channels.get(prior.i) : (g.l < partition ? 0 : 1));
+  const channels = new Map(), baselines = new Map();
+  for (const [order,g] of ordered.entries()) {
+    const bucket = Math.floor(g.origin[1] / .5), candidates = new Set([bucket-1,bucket,bucket+1]);
+    let prior = null;
+    // Lists are sorted by right edge; ties retain original processing order.
+    // Only neighbouring baseline buckets can satisfy the original tolerance.
+    for (const key of candidates) {
+      const list = baselines.get(key) ?? [];
+      for (let j=list.length-1;j>=0;j--) {
+        const h=list[j];
+        if (prior && h.g.r < prior.g.r) break;
+        if (h.g.l <= g.l && Math.abs(h.g.origin[1]-g.origin[1]) <= .5 &&
+            Math.abs(size(h.g)-size(g)) <= .2 && g.l-h.g.r <= size(g)*2 &&
+            (!prior || h.g.r > prior.g.r || (h.g.r === prior.g.r && h.order < prior.order))) prior=h;
+      }
+    }
+    channels.set(g.i, prior ? channels.get(prior.g.i) : (g.l < partition ? 0 : 1));
+    let list=baselines.get(bucket);
+    if (!list) baselines.set(bucket,list=[]);
+    let lo=0, hi=list.length;
+    while (lo<hi) {
+      const mid=(lo+hi)>>1, h=list[mid];
+      if (h.g.r < g.r || (h.g.r === g.r && h.order > order)) lo=mid+1; else hi=mid;
+    }
+    list.splice(lo,0,{g,order});
   }
   for (const g of ordered) {
     const channel = channels.get(g.i);

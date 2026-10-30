@@ -109,3 +109,35 @@ test('script alias cannot claim whitespace also owned by another baseline',()=>{
   p.glyphs=p.glyphs.filter((g,idx)=>g.i!==3 || idx===p.glyphs.length-1);
   assert.equal(canonicalPage(p).reason,'literal_whitespace_line_ambiguous');
 });
+
+test('invalid inverses and explicit partitions fail closed',()=>{
+  const p=page('a');
+  p.frame={rotation:0,transform:[1e-320,0,0,1e-320,0,0]};
+  assert.equal(canonicalPage(p).reason,'unsupported_frame');
+  assert.equal(canonicalPage(p,100).reason,'unsupported_frame');
+  p.frame=frame;
+  for(const partition of [NaN,Infinity,-Infinity]) assert.equal(canonicalPage(p,partition).reason,'unsupported_frame');
+  for(const [rotation,transform] of [[1,[0,-1,1,0,0,200]],[2,[-1,0,0,-1,200,200]],[3,[0,1,-1,0,200,0]]]) {
+    p.frame={rotation,transform}; assert.equal(canonicalPage(p).ok,true);
+  }
+});
+
+test('columns and midpoint-crossing lines retain physical order at realistic page scale',()=>{
+  const make=spec=>{
+    const chars=[],glyphs=[];
+    for(const [i,{ch,x,y}] of spec.entries()) {
+      const u=ch.charCodeAt(0); chars.push({u});
+      glyphs.push({i,u,l:x,r:x+4,b:y,t:y+10,origin:[x,y],style:{size:10,mat:[1,0,0,1]}});
+    }
+    return {W:200,H:1100,frame,chars,glyphs};
+  };
+  const cols=make([{ch:'A',x:10,y:100},{ch:'A',x:110,y:100},{ch:'B',x:10,y:80},{ch:'B',x:110,y:80}]);
+  assert.equal(canonicalPage(cols).text,'A B A B');
+  const cross=make([{ch:'A',x:94,y:100},{ch:'B',x:100,y:100},{ch:'C',x:106,y:100}]);
+  assert.equal(canonicalPage(cross).text,'ABC');
+  const large=make(Array.from({length:6000},(_,i)=>({ch:String.fromCharCode(65+i%26),x:10+(i%100)*5,y:1000-Math.floor(i/100)*12})));
+  large.W=600;
+  const result=canonicalPage(large);
+  assert.equal(result.ok,true); assert.equal(result.evidence.mapped.length,6000);
+  assert.equal(result.text.replaceAll(' ','').length,6000);
+});
