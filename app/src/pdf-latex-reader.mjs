@@ -18,14 +18,25 @@ export function createReconstructionReader({workerFactory}={}){
       const abort=()=>finish(reject,aborted());active={id,abort};signal?.addEventListener('abort',abort,{once:true});
       if(signal?.aborted)return abort();
       (async()=>{
-        let bytes,file=null,sourceDocument=null;
+        let bytes,file=null,sourceDocument=null,sourceBytes=null,sourceHash=null;
         if(kind==='read'){
           file=request.file;if(!file||typeof file.arrayBuffer!=='function'||(Number.isFinite(file.size)&&file.size>MAX_BYTES))throw error('INVALID_INPUT','PDF 파일을 확인하세요.');
           bytes=new Uint8Array(await file.arrayBuffer()).slice();
         }else{
           if(!(request.bytes instanceof Uint8Array))throw error('INVALID_INPUT','기준 PDF 바이트가 필요합니다.');
-          bytes=request.bytes.slice();sourceDocument=structuredClone(request.sourceDocument);
-          if(!sourceDocument||!HASH.test(sourceDocument.sourceSha256)||!Array.isArray(sourceDocument.pages)||!sourceDocument.pages.length||sourceDocument.pages.some(p=>typeof p?.text!=='string'))throw error('INVALID_INPUT','원본 추출 결과를 확인하세요.');
+          bytes=request.bytes.slice();
+          if(request.sourceFile!=null){
+            const f=request.sourceFile;
+            if(request.sourceDocument!=null||typeof f.arrayBuffer!=='function'||(Number.isFinite(f.size)&&f.size>MAX_BYTES))throw error('INVALID_INPUT','원본 PDF 파일을 확인하세요.');
+            sourceBytes=new Uint8Array(await f.arrayBuffer()).slice();
+            if(done)return;
+            if(!sourceBytes.length||sourceBytes.length>MAX_BYTES)throw error('INVALID_INPUT','원본 PDF 크기가 허용 범위를 벗어났습니다.');
+            sourceHash=hex(sourceBytes);
+          }else{
+            sourceDocument=structuredClone(request.sourceDocument);
+            if(!sourceDocument||!HASH.test(sourceDocument.sourceSha256)||!Array.isArray(sourceDocument.pages)||!sourceDocument.pages.length||sourceDocument.pages.some(p=>typeof p?.text!=='string'))throw error('INVALID_INPUT','원본 추출 결과를 확인하세요.');
+            sourceHash=sourceDocument.sourceSha256;
+          }
         }
         if(done)return;if(!bytes.length||bytes.length>MAX_BYTES)throw error('INVALID_INPUT','PDF 크기가 허용 범위를 벗어났습니다.');
         const sha=hex(bytes);worker=create();if(done){worker.terminate();return;}
@@ -39,12 +50,12 @@ export function createReconstructionReader({workerFactory}={}){
             if(!r||r.sourceSha256!==sha||r.model?.schema!=='falsify.pdf-latex-reconstruction.v1'||r.model.sourceSha256!==sha||r.evidence?.document?.sourceSha256!==sha||!Array.isArray(r.evidence.document.pages)||!r.evidence.document.pages.length||r.evidence.document.pages.some(p=>typeof p?.text!=='string')||!Array.isArray(r.model.assets)||r.model.assets.some(a=>!(a?.bytes instanceof Uint8Array)||!HASH.test(a.sha256)||hex(a.bytes)!==a.sha256))return finish(reject,error('INVALID_RESULT','PDF 재구성 결과가 원본과 다릅니다.'));
             return finish(resolve,{...r,file});
           }
-          if(!r||r.schema!=='falsify.reconstruction-comparison.v1'||r.sourcePdfHash!==sourceDocument.sourceSha256||r.baselinePdfHash!==sha||r.sourcePages!==sourceDocument.pages.length||!Number.isSafeInteger(r.baselinePages)||r.baselinePages<1||r.method!=='extracted-token-multiset'||r.readingOrderVerified!==false||r.visualLayoutVerified!==false||![r.text?.missing,r.text?.added,r.numbers?.missing,r.numbers?.added].every(a=>Array.isArray(a)&&a.every(v=>typeof v==='string')))return finish(reject,error('INVALID_RESULT','PDF 비교 결과가 입력과 다릅니다.'));
+          if(!r||r.schema!=='falsify.reconstruction-comparison.v1'||r.sourcePdfHash!==sourceHash||r.baselinePdfHash!==sha||!Number.isSafeInteger(r.sourcePages)||r.sourcePages<1||(sourceDocument&&r.sourcePages!==sourceDocument.pages.length)||!Number.isSafeInteger(r.baselinePages)||r.baselinePages<1||r.method!=='extracted-token-multiset'||r.readingOrderVerified!==false||r.visualLayoutVerified!==false||![r.text?.missing,r.text?.added,r.numbers?.missing,r.numbers?.added].every(a=>Array.isArray(a)&&a.every(v=>typeof v==='string')))return finish(reject,error('INVALID_RESULT','PDF 비교 결과가 입력과 다릅니다.'));
           finish(resolve,r);
         };
         worker.onerror=()=>finish(reject,error('WORKER_FAILED','PDF 재구성 작업에 실패했습니다.'));
         worker.onmessageerror=()=>finish(reject,error('WORKER_FAILED','PDF 재구성 결과를 읽지 못했습니다.'));
-        worker.postMessage({id,type:kind,bytes,sourceDocument},[bytes.buffer]);
+        worker.postMessage({id,type:kind,bytes,sourceDocument,sourceBytes},sourceBytes?[bytes.buffer,sourceBytes.buffer]:[bytes.buffer]);
       })().catch(e=>{if(done)return;if(e?.code==='WORKER_UNAVAILABLE'||e?.code==='INVALID_INPUT')finish(reject,e);else finish(reject,error('WORKER_FAILED','PDF 재구성 작업에 실패했습니다.'));});
     });
   }

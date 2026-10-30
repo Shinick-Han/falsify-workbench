@@ -5,7 +5,7 @@ import {hex} from './paragraph-pdf-crypto.mjs';
 /** Separate entry point to make the worker protocol testable without a DOM. */
 export function installReconstructionReaderWorker(scope,{prepare=prepareReconstruction,read=readDocument,compare=compareReconstruction}={}){
   scope.onmessage=async ({data})=>{
-    const {id,type,bytes,sourceDocument}=data||{};
+    const {id,type,bytes,sourceDocument,sourceBytes}=data||{};
     if(!Number.isSafeInteger(id)||!['read','compare'].includes(type)||!(bytes instanceof Uint8Array)){scope.postMessage({id,type:'error',code:'INVALID_REQUEST'});return;}
     try{
       if(type==='read'){
@@ -17,7 +17,8 @@ export function installReconstructionReaderWorker(scope,{prepare=prepareReconstr
         const compact={sourceSha256:draft.sourceSha256,model,evidence:{document:{sourceSha256:document.sourceSha256,pages:document.pages.map(p=>({text:p.text,width:p.width,height:p.height,sourcePageIndex:p.sourcePageIndex}))}}};
         scope.postMessage({id,type:'result',result:compact},transfer);
       }else{
-        const document=await read({file:bytes.slice(),fileHash:hex(bytes)}),result=compare(sourceDocument,document);
+        const original=sourceBytes instanceof Uint8Array?await read({file:sourceBytes.slice(),fileHash:hex(sourceBytes)}):sourceDocument;
+        const document=await read({file:bytes.slice(),fileHash:hex(bytes)}),result=compare(original,document);
         scope.postMessage({id,type:'result',result});
       }
     }catch{scope.postMessage({id,type:'error',code:'WORKER_FAILED'});}
