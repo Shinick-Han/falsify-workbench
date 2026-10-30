@@ -3,7 +3,7 @@
 <div class="meta">Falsify Workbench / 구현계획 v1 / 2026-10-30 / 기준 alpha.33, <code>a65617448da7adbf41c2b1bddd9d2b95576ec5c4</code></div>
 <h1>LaTeX 소스 기반 논문 편집 구현계획</h1>
 <p class="lead"><strong>본문·수식·윗첨자·각주를 소스 구조로 편집하고, 같은 조판 환경에서 변경 전·후 PDF를 만든다.</strong><br>사용자는 현재처럼 논문을 넣고, 미리보기에서 수정하고, PDF를 받는다. LaTeX 코드와 컴파일 설정은 고급 기능에 둔다.</p>
-<p>이 문서는 구현을 배정하기 위한 계획이다. 앱 코드 작성, OSS fork, 패키지 설치, 모델 실행, 배포는 아직 시작하지 않았다. 아래 작업 ID는 계획서 내부 ID이며 WorkBite Task ID가 아니다.</p>
+<p>이 문서는 구현 착수 전 작성한 계획이다. 이후 구현·검증 결과와 남은 범위는 <a href="latex-source-editing-status.ko.html">현재 구현 상태</a>에서 확인한다. 아래 작업 ID는 계획서 내부 ID이며 WorkBite Task ID가 아니다.</p>
 <nav><a href="#decision">1. 결정과 범위</a><a href="#evidence">2. 기존 구현과 OSS</a><a href="#flow">3. 사용 흐름</a><a href="#model">4. 데이터와 편집</a><a href="#compile">5. 컴파일</a><a href="#pdf">6. PDF 재구성</a><a href="#evaluation">7. RED/BLUE 실험</a><a href="#tasks">8. 병렬 작업</a><a href="#acceptance">9. 완료 기준</a><a href="#release">10. 적용 순서</a></nav>
 
 <h2 id="decision">1. 결정과 범위</h2>
@@ -64,15 +64,15 @@
 <ul>
 <li>LaTeX 매크로 인수와 수식 환경을 구분한다. 일반 텍스트 입력의 <code>% $ &amp; # _ { } </code>는 맥락에 맞춰 escape한다. LaTeX 코드를 직접 넣는 동작은 고급 편집에서 명시적으로 선택한다.</li>
 <li>문장을 통째로 받아도 실제 바뀐 source node와 문자 범위를 계산한다. 그대로인 윗첨자·강조·인용 매크로는 그대로 남긴다.</li>
-<li>본문 안의 <code>	extsuperscript{62}</code>, 수식의 <code>x^{n+1}</code>를 각각 편집한다. 혼합 이탤릭·아래첨자·색상도 구조와 속성을 유지한다.</li>
+<li>본문 안의 <code>\textsuperscript{62}</code>, 수식의 <code>x^{n+1}</code>를 각각 편집한다. 혼합 이탤릭·아래첨자·색상도 구조와 속성을 유지한다.</li>
 <li>SyncTeX로 PDF 위치에서 소스 파일·줄을 찾고, 노드와 표시 텍스트를 대조해 문자 범위를 좁힌다. SyncTeX 결과를 곧바로 정확한 문자 위치라고 간주하지 않는다. 한 소스가 여러 위치에 렌더링되는 매크로는 호출부와 정의부를 구분한다.</li>
 </ul>
 <h3>각주·인용의 두 가지 의미</h3>
 <table><thead><tr><th>사용자 의도</th><th>처리</th><th>유지할 것</th></tr></thead><tbody>
-<tr><td>각주 내용이나 인용 대상 변경</td><td><code>ootnote{…}</code>, <code>cite{key}</code> 등 해당 소스 노드를 수정하고 정상 참조 계산</td><td>템플릿의 번호 형식, 본문 연결, 참고문헌·각주 위치</td></tr>
+<tr><td>각주 내용이나 인용 대상 변경</td><td><code>\footnote{…}</code>, <code>\cite{key}</code> 등 해당 소스 노드를 수정하고 정상 참조 계산</td><td>템플릿의 번호 형식, 본문 연결, 참고문헌·각주 위치</td></tr>
 <tr><td>보이는 번호만 의도적으로 변경</td><td>선택한 참조의 표시값만 바꾸는 <code>display-override</code> 편집. 번호 클릭 후 숫자를 고치면 이 의도로 기록</td><td>주변 번호·참고문헌·각주 본문을 자동으로 일괄 수정하지 않음. 자동 재번호 매김이 RED 결함을 없애지 않게 함</td></tr>
 </tbody></table>
-<p>표시값 override는 별도의 템플릿 어댑터로 구현한다. <code>ootnote</code>를 단순한 문자열 치환으로 바꾸지 않는다. G0에서 기본 각주, 재사용 각주 표지, hyperref, natbib/biblatex 예제로 카운터·링크·주변 표기 보존을 증명한 구현을 선택한다. 임의의 사용자 매크로를 같은 규칙으로 처리한다고 가정하지 않는다.</p>
+<p>표시값 override는 별도의 템플릿 어댑터로 구현한다. <code>\footnote</code>를 단순한 문자열 치환으로 바꾸지 않는다. G0에서 기본 각주, 재사용 각주 표지, hyperref, natbib/biblatex 예제로 카운터·링크·주변 표기 보존을 증명한 구현을 선택한다. 임의의 사용자 매크로를 같은 규칙으로 처리한다고 가정하지 않는다.</p>
 <h3>외부 AI 응답</h3>
 <p>현재의 <code>{changes:[{before,after,rationale,evidence}]}</code>와 Markdown 응답을 계속 받는다. 사용자가 파일명·AST 경로·해시·LaTeX 문법을 새로 채우게 하지 않는다. 앱이 표시 텍스트에서 source anchor를 찾고, 복수 후보일 때만 해당 위치를 확인받는다. 기존 후보 체크·충돌 선택·원응답 보존 규칙을 유지한다.</p>
 

@@ -423,6 +423,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\start-companion.ps1 -NoIns
 <p>RED 사본을 내려받은 뒤 <b class="ui">이 변경본을 BLUE에서 검토</b>을 쓰거나 BLUE에 그 파일을 직접 올립니다. 이후 <b class="ui">검수</b>에서 BLUE 실행을 고르면 출력 해시 일치로 변경 위치를 대조할 수 있습니다. 판정은 사람이 합니다.</p>
 </section>
 
+<section id="latex-source">
+<h2>LaTeX 소스로 편집하기</h2>
+<ol><li>RED의 파일 입력에 <code>.tex</code>나 그림·참고문헌·스타일 파일을 포함한 <code>.zip</code>을 넣습니다.</li><li>미리보기에서 고칠 곳을 누르거나 외부 AI의 Before/After를 가져옵니다.</li><li><b>PDF 다운로드</b>로 변경본을 받고, <b>BLUE로 보내기</b>로 같은 파일을 검토합니다.</li></ol>
+<p><b>작업 JSON 저장</b>으로 보관한 파일은 새 화면의 첫 파일 입력에 넣어 복구합니다. <b>PDF 만들기</b>를 누르기 전에는 컴파일하지 않습니다.</p>
+<p>PDF만 있다면 <b>고급 생성 옵션 → PDF를 LaTeX 소스로 편집 (실험)</b>에서 원본과 재구성 기준본을 비교할 수 있습니다. 복잡한 다단·수식·첨자의 원본 복원 품질은 아직 개선 중입니다. 기존 PDF 편집이 기본입니다.</p>
+</section>
 <section id="docs" aria-labelledby="docs-title">
 <h2 id="docs-title">16. 기술 문서</h2>
 <ul>

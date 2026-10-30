@@ -64,7 +64,7 @@ test('source editor restores history without overwriting focused typing and labe
     remove(){}
   }
   const doc={activeElement:null,createElement(tag){return new Element(tag,this);}};
-  const container=new Element('div',doc),editor=createLatexSourceEditor({container});
+  let savedLast=0;const container=new Element('div',doc),editor=createLatexSourceEditor({container,onDownloadLast:()=>savedLast++});
   const section=container.children[0], edit=section.querySelectorAll('textarea')[0];
   const n={id:'n',kind:'citation',text:'example',displayText:'',sourceText:'\\cite{example}'};
   editor.setState({model:{nodes:[n]},changes:[],selection:{nodeId:'n'}});
@@ -73,6 +73,13 @@ test('source editor restores history without overwriting focused typing and labe
   editor.setState({changes:[{anchor:{nodeId:'n'},after:'other',enabled:true}]});assert.equal(edit.value,'other');
   doc.activeElement=edit;edit.value='in progress';edit.fire('input');editor.setState({changes:[]});assert.equal(edit.value,'in progress');
   doc.activeElement=null;edit.fire('blur');editor.setState({changes:[]});assert.equal(edit.value,'example');
+  const lastDownload=section.querySelectorAll('button').find(b=>b.textContent==='마지막 생성 PDF 다운로드');
+  editor.setState({artifact:null,lastArtifact:{success:true},diagnostics:[{message:'compile failed'}]});
+  assert.equal(lastDownload.hidden,false);lastDownload.fire('click');assert.equal(savedLast,1);
+  assert.equal(section.querySelectorAll('button').find(b=>b.textContent==='BLUE로 보내기').disabled,true);
+  editor.setState({artifact:{success:true}});assert.equal(lastDownload.hidden,true);
+  editor.setState({artifact:null,lastArtifact:null});assert.equal(lastDownload.hidden,true);
+
 });
 
 test('source line selection includes nodes on the mapped line only',()=>{

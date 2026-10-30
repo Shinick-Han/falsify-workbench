@@ -3,7 +3,7 @@
   "inputs": [
     {
       "path": "dist/latex-source-ui.js",
-      "sha256": "0094b6b36b4b465411e819f15b342de18b35d90a7132d582410a1aa0ad899323"
+      "sha256": "0ba4a6a1068a2f2eb677c7aad3a798d3df56468d0fa897f2d371bc5ac1e6388e"
     },
     {
       "path": "latex-compiler-manifest.json",
@@ -51,7 +51,7 @@
     },
     {
       "path": "src/latex-workbench.mjs",
-      "sha256": "27823063b8d0882b1b218c4e24d32761fb39a89220665318421631538039a4bc"
+      "sha256": "17617d6c1486b820a880e0ab71527d416b700151e1bf14d369bb96b19afc5d7c"
     },
     {
       "path": "src/paper-document.mjs",
@@ -79,7 +79,11 @@
     },
     {
       "path": "src/pdf-latex-evidence.mjs",
-      "sha256": "d2ad26fe0a24fcee71b410e3a2247ea48eae1366c8da96885d4752eede82ebe0"
+      "sha256": "9adbc697a7393dd097d34a2eedae6562c2c2f140fd746966138135623c13801a"
+    },
+    {
+      "path": "src/pdf-latex-layout.mjs",
+      "sha256": "7d2eba56b17ffd5d39d1ea423c22bae83824c86c120c1f55a1c93d83e82eb774"
     },
     {
       "path": "src/pdf-latex-reader-worker.mjs",
@@ -95,11 +99,11 @@
     },
     {
       "path": "src/pdf-latex-serialize.mjs",
-      "sha256": "a5b37301618671661e4a3e869c19026d5f53e292e73ae3258100efc8517a5be8"
+      "sha256": "3d821def6f63e04cae40257081eeec404f0b63a7ecee0c193c37e40e54ead174"
     },
     {
       "path": "src/pdf-latex-workbench.mjs",
-      "sha256": "5f374706b88972b4d63d3c8fce9b4772891f484f3f5a3abe0b4ce4d884446863"
+      "sha256": "fc06413dc1e62b6fe0126ef2081c03da6d3e0b33e499a37107341865af06cd38"
     },
     {
       "path": "src/table-adapter.mjs",
@@ -120,10 +124,10 @@
   ],
   "output": {
     "path": "latex-workbench.mjs",
-    "sha256": "edf7f1e9c24f720f7aaf8e2f6ae2beefc88a86d36bf2fdc360ae6a78d2203e29"
+    "sha256": "21735dcc322e256dcaebe5fb0ae1f40b2e63c4bb395028c3c2c39adc8434e7fc"
   },
   "worker": {
     "path": "pdf-latex-reader-worker.mjs",
-    "sha256": "34726d6e48f4e8fc98b4409354aed29dfcd70a01c23aa805622f1706f7c2b05a"
+    "sha256": "299907e2f72def9003155a3ef6094ec1aae90b973ad9f47639a2a2d99a607c7c"
   }
 }

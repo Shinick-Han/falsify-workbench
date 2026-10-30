@@ -80,6 +80,7 @@ async function main() {
       return page.evaluate(() => { const w=window.FalsifyLatexWorkbench, a=w.getSession().snapshot().artifact; return {hash:w.getCurrentOutput().sha256, bytes:a.pdfBytes.length, synctex:a.synctex?.length || 0, engine:a.engineManifest}; });
     };
     const initial = await waitOutput(false);
+    assert.equal(await page.locator('label:has(#paper-file) .visual-file-title').textContent(),'synthetic-project.zip');
     assert.ok(initial.bytes > 0 && initial.synctex > 0);
     assert.equal(initial.engine.version, '1.4.1');
     assert.equal(initial.engine.source, '61b83cde2836d42cf941f6559d36c9678d52cbf2');
@@ -141,6 +142,12 @@ async function main() {
     assert.ok((await extract(restoredPdf)).includes('remains provisional.'));
     const pdfInput = await fs.readFile(path.join(__dirname,'fixtures/paragraph-marker-synthetic.pdf'));
     await page.locator('#paper-file').setInputFiles({name:'paragraph-marker-synthetic.pdf',mimeType:'application/pdf',buffer:pdfInput});
+    // A slow archive read must not take over a PDF selected more recently, even while LaTeX is inactive.
+    await page.evaluate(()=>{window.pendingArchiveRead=FalsifyLatexWorkbench.load({name:'delayed-session.json',text:()=>new Promise(resolve=>{window.finishArchiveRead=resolve;})});});
+    await page.locator('#paper-file').setInputFiles({name:'newer-synthetic.pdf',mimeType:'application/pdf',buffer:pdfInput});
+    await page.evaluate(async json=>{window.finishArchiveRead(json);await window.pendingArchiveRead;},archive.toString());
+    assert.equal(await page.evaluate(()=>FalsifyLatexWorkbench.active),false);
+
     await page.waitForFunction(h => !FalsifyLatexWorkbench.active && FalsifyPaperWorkspace.getSource()?.fileHash===h, hash(pdfInput), {timeout});
     // A freshly opened PDF has no generated artifact until an edit is made.
     const switchedPdf=await streamBytes(await download(page.locator('#paper-workspace').getByRole('button',{name:'원본 다운로드',exact:true})));

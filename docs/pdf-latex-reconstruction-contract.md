@@ -42,7 +42,7 @@ type ReconstructionModel = {schema:'falsify.pdf-latex-reconstruction.v1', source
 type Asset = {id:string, evidence:EvidenceRef[], representation:'region-raster'|'image',
   bytes:Uint8Array, mediaType:string, sha256:string, editable:false, reason:string};
 type SourceBinding = {itemId:string, projectId:string, path:string, start:number,end:number,
-  evidence:EvidenceRef[], status:'exact-text'|'reviewed'|'noneditable'};
+  evidence:EvidenceRef[], status:'exact-text'|'reviewed'|'review-required'|'noneditable'};
 ```
 
 Relations are claims with evidence, never inferred from a matching printed number alone. `confirmed` requires a documented source proof or explicit user review, not a heuristic score. Retain source crop evidence for unsupported regions and keep content ownership exclusive: no figure-label duplication into prose. A crop is valid only when the bounded source region is known and does not silently include unrelated content; otherwise report unsupported. Do not export external font bytes absent permission/coverage review. Keep original PDF bytes and all maps privately; no source/maps in BLUE inputs.
