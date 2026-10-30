@@ -129,3 +129,21 @@ test('typography weighs observed non-whitespace glyphs and estimates only consis
   assert.equal(irregularItem.extensions.typography.fontSizeBp,9);assert.equal(irregularItem.extensions.typography.leadingBp,undefined);
   assert.equal(columnsItem.extensions.typography.leadingBp,undefined);
 });
+
+test('page layout hints retain only a single valid source-flow gutter',()=>{
+  const input=largeEvidence(2,3),before=structuredClone(input);
+  input.flow.diagnostics.push({code:'geometry-order-heuristic',pageIndex:1,gutter:[280,325]});
+  const output=buildReconstructionModel(input);
+  assert.equal(output.pages[0].extensions,undefined);
+  assert.deepEqual(output.pages[1].extensions.layoutHints,{columns:2,gutterBp:[280,325],status:'proposed',provenance:'paper-flow'});
+  assert.deepEqual(input.document,before.document);
+  for(const item of output.items)for(const segment of item.extensions.segments){const e=segment.evidence;assert.equal(input.document.pages[e.pageIndex].text.slice(e.range.start,e.range.end),segment.text);}
+  const conflict=structuredClone(input);conflict.flow.diagnostics.push({code:'geometry-order-heuristic',pageIndex:1,gutter:[290,330]});
+  const conflicting=buildReconstructionModel(conflict);assert.equal(conflicting.pages[1].extensions,undefined);assert.ok(conflicting.diagnostics.some(d=>d.code==='layout-hint-unresolved'&&d.pageIndex===1));
+  for(const gutter of [[0,325],[300,300],[300,612],[300,NaN],null]){
+    const invalid=structuredClone(input);invalid.flow.diagnostics[0].gutter=gutter;const result=buildReconstructionModel(invalid);
+    assert.equal(result.pages[1].extensions,undefined);assert.ok(result.diagnostics.some(d=>d.code==='layout-hint-unresolved'&&d.pageIndex===1));
+  }
+  const badPage=structuredClone(input);badPage.flow.diagnostics[0].pageIndex=2;const result=buildReconstructionModel(badPage);
+  assert.ok(result.pages.every(p=>!p.extensions));assert.ok(result.diagnostics.some(d=>d.code==='layout-hint-unresolved'));
+});

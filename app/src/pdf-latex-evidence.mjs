@@ -87,6 +87,16 @@ export function buildReconstructionModel({document,flow,links,assets}={}){
   if(flow.items.length>LIMIT.blocks+LIMIT.assets||flow.fragments.length>LIMIT.blocks*4||flow.regions.length>LIMIT.assets)fail('budget-exceeded');
   for(const [i,f] of links.frames.entries()){const p=document.pages[i];if(f.pageIndex!==i||!f.verified||!same(f.bounds,p.geometry.bounds)||!same(f.pageTransform,p.geometry.pageTransform))fail('invalid-page-frame');}
   const pages=document.pages.map(p=>({pageIndex:p.sourcePageIndex,width:p.width,height:p.height,frame:'mupdf-display',transform:[...p.geometry.pageTransform]}));
+  const layoutWarnings=[],gutters=new Map();
+  for(const d of flow.diagnostics||[])if(d.code==='geometry-order-heuristic'){
+    if(!Number.isInteger(d.pageIndex)||!pages[d.pageIndex]){layoutWarnings.push({code:'layout-hint-unresolved',severity:'warning'});continue;}
+    const entries=gutters.get(d.pageIndex)||[];entries.push(d.gutter);gutters.set(d.pageIndex,entries);
+  }
+  for(const [pageIndex,entries] of gutters){
+    const page=pages[pageIndex],g=entries[0];
+    if(entries.length!==1||!Array.isArray(g)||g.length!==2||!g.every(Number.isFinite)||g[0]<=0||g[0]>=g[1]||g[1]>=page.width){layoutWarnings.push({code:'layout-hint-unresolved',severity:'warning',pageIndex});continue;}
+    page.extensions={layoutHints:{columns:2,gutterBp:[...g],status:'proposed',provenance:'paper-flow'}};
+  }
   const refs=(s,extra={})=>({sourceSha256:hash,pageIndex:s.pageIndex,frame:'mupdf-display',bbox:[...s.bbox],...extra});
   const styles=new Map((document.styles||[]).map(x=>[x.id,x]));
   const blocks=new Map(document.blocks.map(b=>[b.id,b]));
@@ -95,7 +105,7 @@ export function buildReconstructionModel({document,flow,links,assets}={}){
   const outAssets=[];
   const assetIds=new Set();for(const a of assets.assets){const orig=sourceAssets.get(a.id);if(!orig||assetIds.has(a.id)||orig.source?.pageIndex!==a.source?.pageIndex||orig.source?.occurrence!==a.source?.occurrence||!same(orig.source?.bbox,a.source?.bbox))fail('ambiguous-provenance');assetIds.add(a.id);const content=a.content;if(content?.representation==='mupdf-decoded-png'&&content.bytes instanceof Uint8Array&&content.bytes.length){if(!(orig.content?.bytes instanceof Uint8Array)||hex(orig.content.bytes)!==hex(content.bytes))fail('stale-evidence');const bytes=content.bytes.slice();outAssets.push({id:a.id,evidence:[refs(a.source,{occurrence:a.source.occurrence})],representation:'image',bytes,mediaType:'image/png',sha256:hex(bytes),editable:false,reason:'decoded-image-compositing-unverified'});}}
   if(assetIds.size!==sourceAssets.size)fail('uncovered-source-asset');
-  const owned=new Set(),ownedAssets=new Set(),flowIds=new Map(),items=[],diagnostics=[...document.diagnostics,...flow.diagnostics,...(assets.diagnostics||[])].map(d=>({code:d.code,severity:'warning',...(Number.isInteger(d.pageIndex)?{pageIndex:d.pageIndex}:{})}));
+  const owned=new Set(),ownedAssets=new Set(),flowIds=new Map(),items=[],diagnostics=[...document.diagnostics,...flow.diagnostics,...(assets.diagnostics||[])].map(d=>({code:d.code,severity:'warning',...(Number.isInteger(d.pageIndex)?{pageIndex:d.pageIndex}:{})})).concat(layoutWarnings);
   for(const [order,f] of flow.items.entries()){
     if(!f?.id||flowIds.has(f.id)||!Array.isArray(f.blockIds)||!Array.isArray(f.assetIds)||!document.pages[f.source?.pageIndex]||!box(f.source?.bbox))fail('invalid-evidence');
     const region=f.renderAssetId?regions.get(f.renderAssetId):null;if(f.renderAssetId&&(!region||region.pageIndex!==f.source.pageIndex||!same(region.bbox,f.source.bbox)||!Array.isArray(region.blockIds)||!Array.isArray(region.assetIds)||region.blockIds.length!==f.blockIds.length||region.assetIds.length!==f.assetIds.length||region.blockIds.some(id=>!f.blockIds.includes(id))||region.assetIds.some(id=>!f.assetIds.includes(id))))fail('invalid-evidence');
