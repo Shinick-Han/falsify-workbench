@@ -5,13 +5,15 @@ import {createLatexProject} from '../src/latex-project.mjs';
 import {locateSourceText,analyzeLatexSource} from '../src/latex-source-model.mjs';
 import {applySourceChanges} from '../src/latex-source-patches.mjs';
 import {createLatexSession} from '../src/latex-session.mjs';
+import {hex} from '../src/paragraph-pdf-crypto.mjs';
 const generationApi=createRequire(import.meta.url)('../dist/paper-generation.js'),enc=new TextEncoder(),dec=new TextDecoder();
 async function setup(options={}){
  const project=await createLatexProject({mainFile:'main.tex',files:[{path:'main.tex',bytes:enc.encode('Hello world \\textsuperscript{62}')} ]});
  const match=locateSourceText(project,{before:'Hello'}).candidates[0];
  const change={id:'one',kind:'text',mode:'content',before:match.before,after:'Goodbye',anchor:match.anchor};
  const calls=[];const compiler=options.compiler||{async compile(req){calls.push(req);return {success:true,pdfBytes:enc.encode(dec.decode(req.project.files[0].bytes)),diagnostics:[]};}};
- const session=createLatexSession({project,applyChanges:options.applyChanges||applySourceChanges,compiler,generationApi,onOutput:options.onOutput});return {project,change,calls,session};
+ const initialArtifact=typeof options.initialArtifact==='function'?options.initialArtifact(project):options.initialArtifact;
+ const session=createLatexSession({project,applyChanges:options.applyChanges||applySourceChanges,compiler,generationApi,initialArtifact,onOutput:options.onOutput});return {project,change,calls,session,initialArtifact};
 }
 test('actual patches, selection, undo, redo and original',async()=>{
  const {project,change,calls,session}=await setup();const original=dec.decode(project.files[0].bytes);
@@ -45,4 +47,28 @@ test('unapplied result is rejected without diagnostics',async()=>{
 test('compiler failure retains previous artifact without exposing it as current',async()=>{
  let count=0;const compiler={async compile({project}){if(++count===1)return {success:true,pdfBytes:new Uint8Array(project.files[0].bytes)};return {success:false,diagnostics:[{severity:'error',message:'bad source'}]};}};
  const {session,change}=await setup({compiler});await session.compile();const baseline=session.getBaseline();baseline.pdfBytes[0]=0;assert.notEqual(session.getBaseline().pdfBytes[0],0);session.setChange(change);await assert.rejects(session.compile(),{code:'latex-compile-failed'});assert.equal(session.getCurrentOutput(),null);assert.ok(session.snapshot().lastArtifact);assert.equal(session.snapshot().error.message,'bad source');session.dispose();
+});
+
+test('adopted compared PDF is owned, re-keyed and reused through edits and undo even after cache eviction',async()=>{
+ const bytes=enc.encode('%PDF-1.7\ncompared baseline\n%%EOF'),events=[];
+ const {session,change,calls,initialArtifact}=await setup({initialArtifact:p=>({success:true,pdfBytes:bytes,pdfHash:hex(bytes),projectId:p.id,engine:p.engine,key:'untrusted'}),onOutput:o=>events.push(o)});
+ assert.equal(events.length,0);assert.notEqual(session.getCurrentOutput().key,'untrusted');
+ bytes[5]=88;initialArtifact.pdfBytes[6]=88;
+ const baseline=session.getBaseline(),expected=dec.decode(baseline.pdfBytes);assert.match(expected,/%PDF-1\.7/);
+ baseline.pdfBytes[0]=0;const first=await session.compile();assert.equal(dec.decode(first.pdfBytes),expected);assert.equal(calls.length,0);
+ first.pdfBytes[0]=0;assert.equal(dec.decode(session.getCurrentOutput().pdfBytes),expected);
+ for(const value of ['A','B','C','D']){session.setChange({...change,after:value});await session.compile();}
+ assert.equal(calls.length,4);for(let i=0;i<4;i++)session.undo();
+ const restored=await session.compile();assert.equal(dec.decode(restored.pdfBytes),expected);assert.equal(dec.decode(session.getBaseline().pdfBytes),expected);assert.equal(calls.length,4);
+ session.redo();assert.match(dec.decode((await session.compile()).pdfBytes),/^A/);assert.equal(dec.decode(session.getBaseline().pdfBytes),expected);session.dispose();
+});
+test('adoption rejects invalid PDF identity and content',async()=>{
+ const bytes=enc.encode('%PDF-1.7\nbody\n%%EOF');
+ for(const patch of [{projectId:'wrong'},{pdfHash:'0'.repeat(64)},{success:false},{engine:'other'},{pdfBytes:enc.encode('not a PDF')},{pdfBytes:new Uint8Array()}]){
+   await assert.rejects(setup({initialArtifact:p=>({success:true,pdfBytes:bytes,pdfHash:hex(bytes),projectId:p.id,engine:p.engine,...patch})}),e=>['invalid-initial-artifact','artifact-hash-mismatch'].includes(e.code));
+ }
+});
+test('an obsolete explicit compile cannot return success after the source changes',async()=>{
+ let release,started;const began=new Promise(r=>started=r);const compiler={async compile({project}){started();await new Promise(r=>release=r);return {success:true,pdfBytes:new Uint8Array(project.files[0].bytes)};}};
+ const {session,change}=await setup({compiler});const previous=session.compile();await began;session.setChange(change);release();await assert.rejects(previous,{name:'AbortError'});assert.equal(session.getCurrentOutput(),null);session.cancel();session.dispose();
 });
