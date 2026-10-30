@@ -35,3 +35,15 @@ test('whole sentence narrows the changed marker without replacing surrounding Te
   assert.equal(result.proposals[0].sourceChanges[0].after,'3');
   assert.equal(result.proposals[0].sourceChanges[0].anchor.kind,'superscript');
 });
+test('mixed sentence uses display map to preserve the superscript source',()=>{
+  const source='An initial claim\\textsuperscript{62} remains conditional.';
+  const before='An initial claim62 remains conditional.', after='An initial claim63 remains conditional.';
+  const markerStart=source.indexOf('62'), marker={id:'marker',path:'a.tex',kind:'superscript',contentStart:markerStart,contentEnd:markerStart+2};
+  const displayMap=Array.from(before,(_,i)=>i<16?{nodeId:'text',start:i,end:i+1}:i<18?{nodeId:'marker',start:markerStart+i-16,end:markerStart+i-15}:{nodeId:'tail',start:source.indexOf(' remains')+i-18,end:source.indexOf(' remains')+i-17});
+  const model={projectId:'p',nodes:[marker],documents:[{path:'a.tex',displayText:before,displayMap}]};
+  const project={id:'p',files:[{path:'a.tex',bytes:new TextEncoder().encode(source)}]};
+  const proposal=resolveSourceProposals(project,[{before,after}],{model}).proposals[0];
+  assert.equal(proposal.sourceChanges[0].before,'2'); assert.equal(proposal.sourceChanges[0].after,'3');
+  const a=proposal.sourceChanges[0].anchor;
+  assert.equal(source.slice(0,a.start)+'3'+source.slice(a.end),'An initial claim\\textsuperscript{63} remains conditional.');
+});

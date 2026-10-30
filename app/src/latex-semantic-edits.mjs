@@ -1,3 +1,31 @@
+// Use the model's display map to narrow a mixed sentence to a single source node.
+function narrowMixed(project, model, item, base) {
+  let left=0, right=0;
+  while (left<item.before.length && left<item.after.length && item.before[left]===item.after[left]) left++;
+  while (right<item.before.length-left && right<item.after.length-left && item.before[item.before.length-1-right]===item.after[item.after.length-1-right]) right++;
+  if (!left && !right || left===item.before.length-right) return null;
+  const matches=[];
+  for (const doc of model.documents || []) {
+    if (item.path && item.path!==doc.path || !Array.isArray(doc.displayMap)) continue;
+    let at=-1;
+    while ((at=doc.displayText.indexOf(item.before,at+1))!==-1) matches.push({doc,at});
+  }
+  if (matches.length!==1) return null;
+  const {doc,at}=matches[0], selected=doc.displayMap.slice(at+left,at+item.before.length-right);
+  if (!selected.length || selected.some(m=>!m || m.nodeId!==selected[0].nodeId)) return null;
+  for (let i=1;i<selected.length;i++) if (selected[i-1].end!==selected[i].start) return null;
+  const node=(model.nodes || []).find(n=>n.id===selected[0].nodeId && n.path===doc.path);
+  if (!node) return null;
+  const start=selected[0].start, end=selected[selected.length-1].end;
+  if (start<node.contentStart || end>node.contentEnd) return null;
+  const file=project.files?.find(f=>f.path===doc.path); if (!file) return null;
+  let source; try {source=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(file.bytes);} catch {return null;}
+  const before=source.slice(start,end), after=item.after.slice(left,item.after.length-right);
+  if (before!==item.before.slice(left,item.before.length-right)) return null;
+  const anchor={projectId:project.id,nodeId:node.id,path:doc.path,start,end,kind:node.kind};
+  return {...base,status:'matched',anchor,sourceChanges:[{...base,before,after,anchor,kind:node.kind}]};
+}
+
 /** Resolve imported/manual proposals against an injected source model. */
 export function resolveSourceProposals(project, response, {model} = {}) {
   const diagnostics = [];
@@ -22,6 +50,7 @@ export function resolveSourceProposals(project, response, {model} = {}) {
       if (item.anchor.projectId !== project.id || !node || node.path !== item.anchor.path || item.anchor.start < node.start || item.anchor.end > node.end || item.anchor.start > item.anchor.end || node.kind !== item.anchor.kind) return {...base, enabled:false, status:'stale-anchor'};
       return {...base, kind:node.kind, anchor:item.anchor, status:'matched'};
     }
+    const mixed=narrowMixed(project,model,item,base); if (mixed) return mixed;
     const locate = model.locateSourceText || model.locate;
     if (typeof locate !== 'function') return {...base, enabled:false, status:'unresolved'};
     const result = locate(project, {before:item.before, ...(item.path ? {path:item.path} : {}), ...(item.nodeId ? {nodeId:item.nodeId} : {})});
