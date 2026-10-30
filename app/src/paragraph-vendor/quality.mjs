@@ -124,7 +124,7 @@ export function capturePageLayout(engine, pageIndex, paragraphs) {
       const onLine = p.baselines.some((v) => Math.abs(v - y) <= Math.min(5, pitch * 0.5));
       const continuation = Math.abs(Math.min(...p.baselines) - pitch - y) <= 1.5
         && Math.abs(q.box.x - p.box.x) <= 2;
-      return (onLine && horizontalGap <= 0.8 * pitch) || continuation;
+      return (onLine && horizontalGap <= 0.8 * pitch && (horizontalGap === 0 || q.box.w <= 2 * pitch)) || continuation;
     });
     if (owner) q.role = "body";
   }
@@ -369,7 +369,8 @@ export function cascadeShifts(ctx, grown, { preserveSourceGaps = false } = {}) {
       // Inline markers and split runs share a source line with a multi-line
       // owner, even when their boxes do not horizontally overlap.
       const inline = prevLines.length > 1 && lines.some((y) => prevLines.some((v) => Math.abs(y - v) <= 1.5))
-        && horizontalGap <= Math.max(8, 0.8 * Math.max(prev.size || 0, q.size || 0));
+        && horizontalGap <= Math.max(8, 0.8 * Math.max(prev.size || 0, q.size || 0))
+        && (horizontalGap === 0 || Math.min(prev.box.w, q.box.w) <= 2 * Math.max(prev.size || 0, q.size || 0, 10));
       if (inline) { shift = Math.max(shift, displacement); continue; }
       if (overlap < 0.35 * Math.min(prev.box.w, q.box.w)) continue;
       // Font metric boxes can overlap while their source baselines remain
