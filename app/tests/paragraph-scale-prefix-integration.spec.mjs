@@ -88,10 +88,13 @@ for (const mask of [true, 'two']) test(`deleting the entire final suffix preserv
   const out=await prepare({file:src,edits:[{id:'delete-suffix',pageIndex:0,before,after}]}), saved=new Uint8Array(await out.file.arrayBuffer());
   assert.deepEqual(src,original); assert.equal(out.verification.pageCount.output,2);
   assert.equal(out.verification.report.pages[0].paragraphs[0].lineRetention.status,'source_suffix_deleted');
+  assert.notEqual(out.verification.status,'failed',JSON.stringify(out.verification.checks));
+  assert.ok(!text(saved).includes(before));
   assert.equal((text(saved).match(/Second line has words to replace at the end\./g)||[]).length,1);
   assert.deepEqual(pixels(saved,0,40,88,300,104),pixels(src,0,40,88,300,104));
   const oldGlyphs=prefixGlyphs(src),newGlyphs=prefixGlyphs(saved); assert.equal(newGlyphs.length,oldGlyphs.length); oldGlyphs.forEach((g,i)=>{const n=newGlyphs[i]; assert.equal(n.ch,g.ch); assert.equal(n.font,g.font); assert.ok(Math.abs(n.size-g.size)<0.001); for(const k of ['origin','quad']) g[k].forEach((v,j)=>assert.ok(Math.abs(v-n[k][j])<0.001));});
   const again=await prepare({file:saved,edits:[{id:'again',pageIndex:0,before:'Second line has',after:'Second line'}]}), savedAgain=new Uint8Array(await again.file.arrayBuffer());
+  assert.notEqual(again.verification.status,'failed',JSON.stringify(again.verification.checks));
   assert.ok(text(savedAgain).includes('Second line words to replace'));
   assert.deepEqual(pixels(savedAgain,0,40,88,300,104),pixels(src,0,40,88,300,104));
   assert.deepEqual(pixels(savedAgain,1,0,0,600,800),pixels(src,1,0,0,600,800));

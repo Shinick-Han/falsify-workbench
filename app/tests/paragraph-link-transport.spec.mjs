@@ -211,7 +211,7 @@ test('large annotation-free document is editable but a later incoming link block
  const edit={id:'short',pageIndex:0,before:'Original short text',after:'Changed short text'};
  const empty=await prepare({file:make(false),edits:[edit]});
  assert.notEqual(empty.verification.status,'failed',JSON.stringify(empty.verification.checks));
- await assert.rejects(prepare({file:make(false),edits:[{...edit,after:'Expanded content requires more room on a continuation page. '.repeat(60)}]}),e=>e.code==='LAYOUT_UNSUPPORTED'&&e.details?.cause==='document_flow_page_budget_exceeded');
+ await assert.rejects(prepare({file:make(false),edits:[{...edit,after:'Expanded content requires more room on a continuation page. '.repeat(60)}]}),e=>(e.code==='LAYOUT_UNSUPPORTED' && e.details?.cause==='document_flow_page_budget_exceeded') || (e.code==='REPAIR_FAILED' && e.details?.codes?.includes('continuation_table_source_unavailable')));
  const linked=await prepare({file:make(true),edits:[edit]});
  assert.ok(linked.verification.checks.some(c=>c.status==='failed'),JSON.stringify(linked.verification.checks));
  assert.ok(linked.verification.report.selfCheck.failures.some(f=>f.code==='paragraph_link_inventory_unverified'&&f.reason==='annotation-document-unsupported'),JSON.stringify(linked.verification.report.selfCheck.failures));

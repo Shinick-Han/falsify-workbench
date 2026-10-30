@@ -1,5 +1,5 @@
 import {spawnSync} from 'node:child_process';
-for (const file of ['paragraph-quality-repair.spec.mjs', 'browser-pdf-crop-table.spec.mjs', 'table-crop-fit.spec.mjs', 'paper-structured-table.spec.mjs', 'paragraph-mixed-table-repair.spec.mjs', 'paragraph-ruled-table.spec.mjs', 'paragraph-fixed-font-regression.spec.mjs']) {
+for (const file of ['paragraph-quality-repair.spec.mjs', 'browser-pdf-crop-table.spec.mjs', 'table-crop-fit.spec.mjs', 'paper-structured-table.spec.mjs', 'paragraph-mixed-table-repair.spec.mjs', 'paragraph-ruled-table.spec.mjs', 'paragraph-fixed-font-regression.spec.mjs', 'paragraph-scale-prefix.spec.mjs', 'paragraph-scale-prefix-integration.spec.mjs']) {
   const result = spawnSync(process.execPath, ['--test', 'tests/' + file], {stdio: 'inherit'});
   if (result.error || result.status !== 0) process.exit(result.status || 1);
 }
