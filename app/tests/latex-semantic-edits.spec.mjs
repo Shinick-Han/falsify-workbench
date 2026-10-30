@@ -14,7 +14,7 @@ test('superscript display and footnote display preserve source and counter opera
 test('citation content keeps command and rejects unsafe override',()=>{
   const {project,node}=make('Text\\cite{old}','citation','old');
   assert.equal(buildReferencePatch(project,node,{after:'new',mode:'content'}).afterSource,'\\cite{new}');
-  assert.equal(buildReferencePatch(project,node,{after:'63',mode:'display-override'}).diagnostics[0].code,'unsupported-display-override');
+  assert.equal(buildReferencePatch(project,node,{after:'63',mode:'display-override'}).diagnostics[0].code,'unsupported-citation-override');
   node.sourceText='stale'; assert.equal(buildReferencePatch(project,node,{after:'new',mode:'content'}).diagnostics[0].code,'stale-anchor');
 });
 test('response identity and stale anchors prevent application',()=>{
@@ -57,4 +57,10 @@ test('existing JSON and markdown parser anchors are resolved again against sourc
   for (const raw of [JSON.stringify({changes:[{before,after}]}), `Before: ${before}\nAfter: ${after}`]) {
     const result=resolveSourceProposals(project,raw,{model}); assert.equal(result.proposals[0].sourceChanges[0].after,'3'); assert.ok(result.proposals[0].provenance.responseId);
   }
+});
+test('standard hyperref citation override preserves bibliography registration and target',()=>{
+ const original='\\usepackage{hyperref}\nText\\cite{example}';
+ const {project,node}=make(original,'citation','example'); node.start=original.indexOf('\\cite'); node.sourceText=original.slice(node.start); node.contentStart=original.indexOf('{example}')+1; node.contentEnd=node.contentStart+7;
+ const patch=buildReferencePatch(project,node,{after:'63',mode:'display-override'});
+ assert.equal(patch.afterSource,'\\nocite{example}\\hyperlink{cite.example}{63}');
 });

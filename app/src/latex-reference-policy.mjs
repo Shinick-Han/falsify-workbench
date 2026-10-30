@@ -27,6 +27,16 @@ export function buildReferencePatch(project, node, {after, mode} = {}) {
     const match = /^(\\textsuperscript\s*\{)([^{}]*)(\})$/.exec(original);
     if (match) return {anchor, afterSource: match[1] + after + match[3], diagnostics};
   }
+  if (node.kind === 'citation') {
+    // hyperref's standard numeric bibliography destinations are named cite.<key>.
+    // Keep the citation in the auxiliary file so ordering and bibliography remain unchanged.
+    const match=/^\\cite\s*\{([A-Za-z0-9_:.-]+)\}$/.exec(original);
+    const files=project.files.filter(f=>/\.tex$/i.test(f.path)).map(f=>new TextDecoder().decode(f.bytes)).join('\n');
+    const hyperref=/\\usepackage(?:\[[^\]]*\])?\s*\{[^}]*\bhyperref\b[^}]*\}/.test(files);
+    const incompatible=/\\(?:usepackage|RequirePackage)(?:\[[^\]]*\])?\s*\{[^}]*(?:natbib|biblatex)[^}]*\}|\\(?:re)?newcommand\s*\{?\\cite\b/.test(files);
+    if (match && hyperref && !incompatible) return {anchor,afterSource:`\\nocite{${match[1]}}\\hyperlink{cite.${match[1]}}{${after}}`,diagnostics};
+    return fail('unsupported-citation-override', 'Display override requires a single standard citation with hyperref; edit this citation in source for other styles.');
+  }
   if (node.kind === 'footnote') {
     // The ordinary footnote still advances its counter; the local definition changes only its printed mark.
     if (/^\\footnote\s*\{/.test(original) && original.endsWith('}')) return {anchor, afterSource: `\\begingroup\\renewcommand{\\thefootnote}{${after}}${original}\\endgroup`, diagnostics};
