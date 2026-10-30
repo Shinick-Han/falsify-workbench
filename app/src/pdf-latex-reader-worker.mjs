@@ -1,0 +1,26 @@
+import {prepareReconstruction,compareReconstruction} from './pdf-latex-baseline.mjs';
+import {readDocument} from './paper-document.mjs';
+import {hex} from './paragraph-pdf-crypto.mjs';
+
+/** Separate entry point to make the worker protocol testable without a DOM. */
+export function installReconstructionReaderWorker(scope,{prepare=prepareReconstruction,read=readDocument,compare=compareReconstruction}={}){
+  scope.onmessage=async ({data})=>{
+    const {id,type,bytes,sourceDocument}=data||{};
+    if(!Number.isSafeInteger(id)||!['read','compare'].includes(type)||!(bytes instanceof Uint8Array)){scope.postMessage({id,type:'error',code:'INVALID_REQUEST'});return;}
+    try{
+      if(type==='read'){
+        const owned=bytes.slice(),file={arrayBuffer:async()=>owned.slice().buffer};
+        const draft=await prepare({file,onProgress:()=>scope.postMessage({id,type:'progress'})});
+        const document=draft.evidence.document, model=structuredClone(draft.model),transfer=[];
+        // Each array gets an independent owned buffer, even for shared/offset views.
+        for(const asset of model.assets){asset.bytes=Uint8Array.from(asset.bytes);transfer.push(asset.bytes.buffer);}
+        const compact={sourceSha256:draft.sourceSha256,model,evidence:{document:{sourceSha256:document.sourceSha256,pages:document.pages.map(p=>({text:p.text,width:p.width,height:p.height,sourcePageIndex:p.sourcePageIndex}))}}};
+        scope.postMessage({id,type:'result',result:compact},transfer);
+      }else{
+        const document=await read({file:bytes.slice(),fileHash:hex(bytes)}),result=compare(sourceDocument,document);
+        scope.postMessage({id,type:'result',result});
+      }
+    }catch{scope.postMessage({id,type:'error',code:'WORKER_FAILED'});}
+  };
+}
+if(typeof WorkerGlobalScope!=='undefined'&&globalThis instanceof WorkerGlobalScope)installReconstructionReaderWorker(globalThis);
