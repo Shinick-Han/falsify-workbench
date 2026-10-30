@@ -7,17 +7,17 @@ const png = [137,80,78,71,13,10,26,10];
 const fail = code => { throw Object.assign(new Error(code), {code}); };
 const finite = v => typeof v === 'number' && Number.isFinite(v);
 const dimension = n => Number(n.toFixed(6)).toString();
-const escapeMap = {'\\':'\\textbackslash{}','{':'\\{','}':'\\}','$':'\\$','&':'\\&','#':'\\#','%':'\\%','_':'\\_','~':'\\textasciitilde{}','^':'\\textasciicircum{}','-':'{-}','`':'\\textasciigrave{}',"'":'\\textquotesingle{}'};
+const escapeMap = {'\\':'\\ensuremath{\\backslash}','{':'\\{','}':'\\}','$':'\\ensuremath{\\$}','&':'\\&','#':'\\#','%':'\\%','_':'\\_','~':'\\~{}','^':'\\^{}','-':'{-}','`':'\\char96{}',"'":'\\char39{}'};
 // Preserve the original Unicode in editable TeX. Isolated glyph declarations
 // do not assert equation semantics; PDF glyph mapping still needs comparison.
 const unicodeMacros = {
-  ' ':'\\thinspace', ' ':'\\kern.05em', '–':'\\textendash{}',
+  ' ':'\\thinspace', ' ':'\\kern.05em', '–':'--',
   '−':'\\ensuremath{-}', '±':'\\ensuremath{\\pm}', 'μ':'\\ensuremath{\\mu}',
   'µ':'\\ensuremath{\\mu}', 'β':'\\ensuremath{\\beta}', '∞':'\\ensuremath{\\infty}',
-  '×':'\\ensuremath{\\times}', '°':'\\textdegree{}', '’':'\\textquoteright{}',
-  '‘':'\\textquoteleft{}', 'ï':'\\"{i}', 'á':"\\'{a}", 'é':"\\'{e}",
+  '×':'\\ensuremath{\\times}', '°':'\\ensuremath{{}^{\\circ}}', '’':"'",
+  '‘':'`', 'ï':'\\"{i}', 'á':"\\'{a}", 'é':"\\'{e}",
   'ó':"\\'{o}", 'ú':"\\'{u}", 'í':"\\'{i}", 'ü':'\\"{u}',
-  'ä':'\\"{a}', 'ö':'\\"{o}', 'ñ':'\\~{n}', '©':'\\copyright{}',
+  'ä':'\\"{a}', 'ö':'\\"{o}', 'ñ':'\\~{n}', '©':'\\textcircled{c}',
   'ﬀ':'ff'
 };
 const unicodePreamble=Object.entries(unicodeMacros).map(([ch,macro])=>`\\DeclareUnicodeCharacter{${ch.codePointAt(0).toString(16).toUpperCase().padStart(4,'0')}}{${macro}}`).join('\n')+'\n';
