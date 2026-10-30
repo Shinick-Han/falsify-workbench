@@ -225,9 +225,9 @@ export async function prepare(request = {}) {
   if (!enabled?.length) throw new ParagraphPdfError('no-edits', 'At least one enabled edit is required.');
   const edits = enabled.map((e, index) => ({id: e?.id || `edit-${index}`, pageIndex: e?.pageIndex, before: e?.before, after: e?.after}));
   const {engineFactory: createEngine, info} = await loadRuntime();
-  const mupdf = await import('./browser-pdf-vendor/mupdf.js');
-  checkAbort(request.signal);
-  const tableProof = await deriveSourceTables(bytes, hash, mupdf);
+  let tableProof;
+  try { const mupdf = await import('./browser-pdf-vendor/mupdf.js'); checkAbort(request.signal); tableProof = await deriveSourceTables(bytes, hash, mupdf); }
+  catch { checkAbort(request.signal); tableProof = {sha:hash, unavailable:true}; }
   const engineFactory = async input => {
     const engine = await createEngine(input, fontSnapshot);
     const open = engine.open.bind(engine);

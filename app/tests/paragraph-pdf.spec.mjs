@@ -126,6 +126,21 @@ test('body reflow near edge retains linked and inline-math page content', async 
   } finally { globalThis.fetch=previous; }
 });
 
+test('table inspection limits do not block an in-page edit', {timeout:120000}, async () => {
+  const previous=globalThis.fetch;globalThis.fetch=localFetch;
+  const document=new mupdf.PDFDocument();
+  try {
+    const font=document.addSimpleFont(new mupdf.Font('Helvetica'));
+    for(let i=0;i<201;i++) document.insertPage(-1,document.addPage([0,0,300,400],0,{Font:{F1:font}},i===0?'BT /F1 10 Tf 30 300 Td (Original short text.) Tj ET':'\n'));
+    const bytes=new Uint8Array(document.saveToBuffer().asUint8Array());
+    const result=await prepare({file:bytes,edits:[{id:'edit',pageIndex:0,before:'Original short text.',after:'Changed short text.'}]});
+    assert.notEqual(result.verification.status,'failed',JSON.stringify(result.verification.checks));
+    assert.equal(result.verification.report.pagination.addedPages,0);
+    await assert.rejects(()=>prepare({file:bytes,edits:[{id:'grow',pageIndex:0,before:'Original short text.',after:'A longer replacement sentence needs another page. '.repeat(7)}]}),e=>
+      e.details?.codes?.includes('continuation_table_source_unavailable'));
+  } finally {document.destroy();globalThis.fetch=previous;}
+});
+
 test('real PDFium paragraph inspect and reflow retain full After and following content', async () => {
   const previous = globalThis.fetch; globalThis.fetch = localFetch;
   try {

@@ -15,11 +15,14 @@ export function bindSourceTables(engine, bytes, provenance) {
   if(bytes instanceof Uint8Array && hex(bytes)===provenance.sha) bindings.set(engine,provenance);
 }
 export function sourceTableCells(engine) {
-  const proof=bindings.get(engine), page=proof?.pages[engine.pageIndex];
+  const proof=bindings.get(engine);
+  if(!proof) return [];
+  if(proof.unavailable || typeof engine.M._FPDF_GetPageCount!=='function' || engine.M._FPDF_GetPageCount(engine.doc)!==proof.pages.length) return null;
+  const page=proof.pages[engine.pageIndex];
   const t=engine.pageT || [1,0,0,1,0,0];
   if(!page || page.rotation!==0 || typeof engine.M._FPDFPage_GetRotation!=='function' || engine.M._FPDFPage_GetRotation(engine.page)!==0 ||
       t.length!==6 || t.some((v,i)=>!Number.isFinite(v)||Math.abs(v-[1,0,0,1,0,0][i])>1e-4) ||
-      Math.abs(engine.pageWidth-page.width)>.01 || Math.abs(engine.pageHeight-page.height)>.01) return [];
+      Math.abs(engine.pageWidth-page.width)>.01 || Math.abs(engine.pageHeight-page.height)>.01) return null;
   return proof.cells.filter(c=>c.pageIndex===engine.pageIndex).map(({bbox:[l,top,r,bottom]})=>({l,r,b:page.height-bottom,t:page.height-top}));
 }
 export const inSourceTableCell=(b,cells)=>cells.some(c=>b.l>=c.l-.1&&b.r<=c.r+.1&&b.b>=c.b-.1&&b.t<=c.t+.1);

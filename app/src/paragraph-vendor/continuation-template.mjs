@@ -255,6 +255,7 @@ export function snapshotPageEdges(engine, floor, bodyTop, exclude = null, select
   const lo = floor - 0.5, hi = bodyTop + 0.5;
   const n = M._FPDFPage_CountObjects(page);
   const tables = selection ? [] : sourceTableCells(engine);
+  if (tables === null) return fail('continuation_table_source_unavailable');
   const order = new Map();
   const edges = [];
   for (let i = 0; i < n; i++) {

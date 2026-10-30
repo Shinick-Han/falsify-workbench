@@ -1576,6 +1576,7 @@ export function matchesGeneratedWhitespace(expected, chars) {
 // outside the band must be glyph-for-glyph where it was.
 function inspectContinued(s, o, out, m, pageEdits, row, failures, warnings, includeText, sourceTables = []) {
   const i = row.pageIndex;
+  if (sourceTables === null) { failures.push({code:'continuation_table_source_unavailable',pageIndex:i}); return; }
   const { floor, bodyTop } = m;
   const lo = floor - 0.5, hi = bodyTop + 0.5;
   const flowHi = m.flowTop === undefined ? hi : Math.min(hi, m.flowTop + 0.5);
