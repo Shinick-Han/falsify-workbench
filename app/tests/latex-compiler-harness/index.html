@@ -1,6 +1,8 @@
 <!doctype html><meta charset="utf-8"><title>BusyTeX synthetic fixture</title>
 <button id="compile">Compile synthetic fixture</button><button id="cancel">Cancel</button><pre id="status">Ready</pre><script type="module">
 import {createLatexCompiler} from '../../src/latex-compiler-adapter.mjs';
+import * as mapApi from './map-bundle.mjs';
+window.fixtureMapApi=mapApi;
 const paths=['main.tex','sections/body.tex','refs.bib','figure.png'];
 const compiler=createLatexCompiler();
 document.querySelector('#cancel').onclick=()=>compiler.cancel();

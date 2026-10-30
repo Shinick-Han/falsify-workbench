@@ -24,3 +24,10 @@ test('cancel and failed compilation never return stale PDF',async()=>{
  pending=compiler.compile({project}); instance.onmessage({data:{pdf:new Uint8Array([1]),exit_code:1}}); const result=await pending; assert.equal(result.success,false); assert.equal(result.pdfBytes,undefined);
  compiler.dispose(); await assert.rejects(compiler.compile({project}));
 });
+test('failure reports a bounded missing file and line without returning source text',async()=>{
+ let instance; const compiler=createLatexCompiler({workerFactory:()=>instance={postMessage(){},terminate(){}}});
+ const pending=compiler.compile({project});
+ instance.onmessage({data:{pdf:null,exit_code:1,log:"! LaTeX Error: File `absent.sty' not found.\nl.7 private source text"}});
+ const result=await pending; assert.equal(result.diagnostics[0].code,'TEX_MISSING_FILE');
+ assert.equal(result.diagnostics[0].line,7); assert.equal(JSON.stringify(result).includes('private source text'),false);
+});

@@ -1,6 +1,12 @@
 import { hex } from './paragraph-pdf-crypto.mjs';
 
 const manifest = Object.freeze({name:'TeXlyre BusyTeX', version:'1.4.1', source:'61b83cde2836d42cf941f6559d36c9678d52cbf2', engine:'combined', data:'texlive-basic'});
+function failureDiagnostic(data) {
+  const log = typeof data.log === 'string' ? data.log : '';
+  const missing = /(?:LaTeX Error: )?File [`']([A-Za-z0-9_./+-]{1,180}\.(?:sty|cls|tex|bib|bst|png|pdf|jpg))['`] not found/i.exec(log);
+  const line = /(?:^|\n)l\.(\d+)\b/.exec(log);
+  return {code:missing?'TEX_MISSING_FILE':'COMPILE_FAILED',message:missing?`Required file ${missing[1]} was not found.`:'LaTeX compilation failed; check source and available packages.',severity:'error',...(line?{line:Number(line[1])}:{})};
+}
 export function createLatexCompiler(options = {}) {
   let worker = null, pending = null, disposed = false;
   const finish = (code, message) => { if (!pending) return; const p = pending; pending = null; worker?.terminate(); worker = null; p.cleanup(); p.resolve({schema:'falsify.latex-artifact.v1', success:false, projectId:p.project.id, key:p.key, engine:p.project.engine, engineManifest:manifest, diagnostics:[{code,message,severity:'error'}], timings:{totalMs:Date.now()-p.started}}); };
@@ -35,7 +41,7 @@ export function createLatexCompiler(options = {}) {
             const p = pending; pending = null; p.cleanup(); worker.terminate(); worker = null;
             const bytes = data.pdf ? new Uint8Array(data.pdf) : null;
             const success = data.exit_code === 0 && bytes?.length > 0;
-            p.resolve({schema:'falsify.latex-artifact.v1',success, ...(success ? {pdfBytes:bytes,pdfHash:hex(bytes),...(data.synctex ? {synctex:new Uint8Array(data.synctex)} : {})} : {}),projectId:project.id,key,engine:project.engine,engineManifest:manifest,diagnostics:success?[]:[{code:'COMPILE_FAILED',message:'LaTeX compilation failed; check source and available packages.',severity:'error'}],timings:{totalMs:Date.now()-started}});
+            p.resolve({schema:'falsify.latex-artifact.v1',success, ...(success ? {pdfBytes:bytes,pdfHash:hex(bytes),...(data.synctex ? {synctex:new Uint8Array(data.synctex)} : {})} : {}),projectId:project.id,key,engine:project.engine,engineManifest:manifest,diagnostics:success?[]:[failureDiagnostic(data)],timings:{totalMs:Date.now()-started}});
           }
         };
         worker.postMessage({busytex_js:fileUrl('busytex.js'),busytex_wasm:fileUrl('busytex.wasm'),biber_js:fileUrl('biber.js'),biber_wasm:fileUrl('biber.wasm'),biber_data:fileUrl('biber.data'),preload_data_packages_js:[fileUrl('texlive-basic.js')],data_packages_js:[fileUrl('texlive-basic.js')],texmf_local:[],preload:true});
