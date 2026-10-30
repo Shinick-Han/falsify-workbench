@@ -1,3 +1,4 @@
+import {planReconstructionLayout} from './pdf-latex-layout.mjs';
 import {hex} from './paragraph-pdf-crypto.mjs';
 
 const enc = new TextEncoder();
@@ -67,22 +68,19 @@ export function serializeReconstruction({model, decisions=[], engine='pdflatex'}
   let status = diagnostics.some(d=>d.severity==='error') ? 'unsupported' : diagnostics.some(d=>d.severity==='warning') ? 'needs-review' : 'ready';
   const issue=(code,item,severity='warning')=>{diagnostics.push({code,severity,...(item?{itemId:item.id,pageIndex:item.evidence[0].pageIndex}:{})}); if(severity==='error') status='unsupported'; else if(status==='ready') status='needs-review';};
   issue('LAYOUT_OVERFLOW_UNVERIFIED');
-  let source='\\documentclass{article}\n\\usepackage{graphicx}\n'+unicodePreamble+'\\pagestyle{empty}\n\\setlength{\\parindent}{0pt}\n\\setlength{\\parskip}{6pt}\n\\begin{document}\n';
+  let source='\\documentclass{article}\n\\usepackage{graphicx}\n'+unicodePreamble+'\\pagestyle{empty}\n\\setlength{\\parindent}{0pt}\n\\setlength{\\parskip}{0pt}\n\\begin{document}\n';
   const append=(item, body, bindingStatus)=>{const start=source.length; source+=body; bindings.push({itemId:item.id,projectId:null,path:'main.tex',start,end:source.length,evidence:structuredClone(item.evidence),status:bindingStatus}); source+='\n\n';};
   if (!model.items.length) issue('MISSING_CONTENT',null,'error');
   for (const relation of model.relations) if (relation.status!=='confirmed') issue('RELATION_REVIEW');
   let previousPage=-1;
   for (const item of model.items) {const page=item.evidence[0].pageIndex; if(page<previousPage) issue('PAGE_ORDER_REVIEW',item); previousPage=page;}
+  const layout=planReconstructionLayout(model);
+  for(const d of layout.diagnostics) {diagnostics.push(d); if(d.severity==='error') status='unsupported'; else if(d.severity==='warning'&&status==='ready') status='needs-review';}
   let assetNumber=0;
-  for (const [index,p] of pages) {
-    if(index) source+='\\newpage\n';
-    const emptyPage=!model.items.some(i=>i.evidence[0].pageIndex===index);
-    if (emptyPage) issue('EMPTY_PAGE_REVIEW');
-    source+=`\\pdfpagewidth=${dimension(p.width)}bp\\pdfpageheight=${dimension(p.height)}bp\n\\setlength{\\textwidth}{${dimension(Math.max(1,p.width-72))}bp}\\setlength{\\textheight}{${dimension(Math.max(1,p.height-72))}bp}\\hsize=\\textwidth\\vsize=\\textheight\n\\setlength{\\oddsidemargin}{-36bp}\\setlength{\\topmargin}{-36bp}\\setlength{\\headheight}{0pt}\\setlength{\\headsep}{0pt}\n`;
-    if (emptyPage) source+='\\null\n';
-    for (const item of model.items.filter(i=>i.evidence[0].pageIndex===index)) {
+  function emitItem(item,p,availableWidth) {
+    const index=p.pageIndex;
       const decision=choices.get(item.id);
-      if (decision) {append(item,decision.tex,'reviewed'); continue;}
+      if (decision) {append(item,decision.tex,'reviewed'); return;}
       if (item.extensions?.columns > 1) issue('MULTICOLUMN_REVIEW',item);
       if (item.kind==='table' && item.table) {
         const rows=item.table.rows;
@@ -94,7 +92,7 @@ export function serializeReconstruction({model, decisions=[], engine='pdflatex'}
           if(cells.flat().some(c=>c.mapped)) issue('UNICODE_RENDER_REVIEW',item);
           const original=cells.flat().some(c=>c.unsupported) ? rows.flat().map(c=>'% Original UTF-8 cell: '+c.text.replace(/[\r\n]/g,' ')).join('\n')+'\n' : '';
           append(item,original+'\\begin{tabular}{'+('l'.repeat(width))+'}\n'+cells.map(row=>row.map(c=>c.output).join(' & ')+' \\\\').join('\n')+'\n\\end{tabular}',cells.flat().some(c=>c.mapped||c.unsupported)?'review-required':'reviewed');
-          continue;
+          return;
         }
         issue('TABLE_STRUCTURE_REVIEW',item);
       }
@@ -105,11 +103,11 @@ export function serializeReconstruction({model, decisions=[], engine='pdflatex'}
         files.push({path,bytes:a.bytes.slice()});
         const box=a.evidence[0].bbox, w=box[2]-box[0], h=box[3]-box[1];
         if (!(finite(w) && finite(h) && w>=.01 && h>=.01)) fail('INVALID_ASSET_REFERENCE');
-        const scale=Math.min(1,Math.max(1,p.width-72)/w,Math.max(1,p.height-72)/h);
+        const scale=Math.min(1,availableWidth/w,Math.max(1,p.height-72)/h);
         if (!(w*scale>=.00001 && h*scale>=.00001)) fail('INVALID_ASSET_REFERENCE');
         if (scale<1) issue('REGION_SCALED_DOWN',item);
         append(item,`\\includegraphics[width=${dimension(w*scale)}bp,height=${dimension(h*scale)}bp,keepaspectratio]{${path}}`,'noneditable');
-        issue('NONEDITABLE_REGION',item); continue;
+        issue('NONEDITABLE_REGION',item); return;
       }
       const semantic = ['math','footnote','citation'].includes(item.kind) || item.reason==='inline-script-candidate' || !!item.extensions?.candidates?.length;
       if (typeof item.text==='string' && item.text.length) {
@@ -125,10 +123,22 @@ export function serializeReconstruction({model, decisions=[], engine='pdflatex'}
         const styles=item.extensions?.styles, sizes=Array.isArray(styles) ? styles.map(style=>style.size) : [];
         const segments=item.extensions?.segments;
         const covered=Array.isArray(segments) && segments.length && segments.map(s=>s.text).join('')===item.text && segments.every(s=>Array.isArray(s.styleIds) && s.styleIds.length && s.styleIds.every(id=>styles?.some(style=>style.id===id)));
-        if (covered && sizes.length && sizes.every(size=>finite(size)&&size>=6&&size<=36&&size===sizes[0]) && !semantic && item.extensions?.columns!==2) {
-          const size=sizes[0];
+        const typography=item.extensions?.typography;
+        const counts=typography?.styleCounts, weights=new Map();
+        let countValid=Array.isArray(counts) && counts.length>0;
+        if (countValid) for (const entry of counts) {
+          const style=styles?.find(s=>s.id===entry.styleId);
+          if (!style || !finite(style.size) || !Number.isSafeInteger(entry.count) || entry.count<=0) {countValid=false;break;}
+          weights.set(style.size,(weights.get(style.size)||0)+entry.count);
+        }
+        const ranked=[...weights.entries()].sort((a,b)=>b[1]-a[1]);
+        const observedSize=countValid && ranked.length && (!ranked[1]||ranked[0][1]>ranked[1][1]) && ranked[0][0]===typography.fontSizeBp && typography.fontSizeBp>=6 && typography.fontSizeBp<=36 ? typography.fontSizeBp : null;
+        const uniformSize=covered && sizes.length && sizes.every(size=>finite(size)&&size>=6&&size<=36&&size===sizes[0]) ? sizes[0] : null;
+        const size=observedSize ?? uniformSize;
+        if (size) {
+          const leading=typography && finite(typography.leadingBp) && typography.leadingBp>=size*.75 && typography.leadingBp<=size*3 && typography.leadingEvidence?.length>=2 && validRefs(typography.leadingEvidence,hash,pages) && typography.leadingEvidence.every(e=>e.pageIndex===index) ? typography.leadingBp : size*1.2;
           issue('LEADING_UNVERIFIED',item);
-          content=`\\fontsize{${dimension(size)}bp}{${dimension(size*1.2)}bp}\\selectfont ${content}\\par\\normalsize`;
+          content=`\\fontsize{${dimension(size)}bp}{${dimension(leading)}bp}\\selectfont ${content}\\par\\normalsize`;
         }
         const body=original+content;
         append(item,body,text.unsupported||text.mapped?'review-required':'exact-text');
@@ -136,6 +146,30 @@ export function serializeReconstruction({model, decisions=[], engine='pdflatex'}
         issue('MISSING_CONTENT',item,'error');
         source+=`% Content missing for item ${index + 1}; review source evidence.\n`;
       }
+  }
+  for (const page of layout.pages) {
+    const p=pages.get(page.pageIndex), index=p.pageIndex;
+    if(index) source+='\\newpage\n';
+    const box=page.bodyBox, left=box?box[0]:36, top=box?box[1]:36;
+    const width=box?Math.max(1,box[2]-box[0]):Math.max(1,p.width-72);
+    const height=Math.max(1,p.height-top-Math.min(36,Math.max(0,p.height-(box?.[3]??p.height-36))));
+    source+=`\\pdfpagewidth=${dimension(p.width)}bp\\pdfpageheight=${dimension(p.height)}bp\n\\setlength{\\textwidth}{${dimension(width)}bp}\\setlength{\\textheight}{${dimension(height)}bp}\\hsize=\\textwidth\\vsize=\\textheight\n\\setlength{\\oddsidemargin}{${dimension(left-72)}bp}\\setlength{\\topmargin}{${dimension(top-72)}bp}\\setlength{\\headheight}{0pt}\\setlength{\\headsep}{0pt}\n`;
+    if(!page.bands.length && !page.furniture.length) {issue('EMPTY_PAGE_REVIEW');source+='\\null\n';}
+    if(page.furniture.length) {
+      source+='\\AddToHookNext{shipout/foreground}{%\n';
+      for(const entry of page.furniture){const b=entry.bbox, width=Math.max(1,b[2]-b[0]);source+=`\\put(${dimension(b[0])}bp,${dimension(-b[3])}bp){\\makebox[0pt][l]{\\parbox[t]{${dimension(width)}bp}{%\n`;emitItem(items.get(entry.itemId),p,width);source+='}}}\n';}
+      source+='}\n';
+      if(!page.bands.length) source+='\\null\n';
+    }
+    for(const band of page.bands){
+      if(band.gapBeforeBp>0) source+=`\\vspace*{${dimension(band.gapBeforeBp)}bp}\n`;
+      if(band.kind==='full-width') {for(const id of band.items) emitItem(items.get(id),p,width);continue;}
+      const leftWidth=band.leftBox[2]-band.leftBox[0],rightWidth=band.rightBox[2]-band.rightBox[0],gap=band.rightBox[0]-band.leftBox[2];
+      source+=`\\noindent\\hspace*{${dimension(Math.max(0,band.leftBox[0]-left))}bp}\\begin{minipage}[t]{${dimension(leftWidth)}bp}\n`;
+      for(const id of band.left)emitItem(items.get(id),p,leftWidth);
+      source+=`\\end{minipage}\\hspace{${dimension(gap)}bp}\\begin{minipage}[t]{${dimension(rightWidth)}bp}\n`;
+      for(const id of band.right)emitItem(items.get(id),p,rightWidth);
+      source+='\\end{minipage}\\par\n';
     }
   }
   source+='\\end{document}\n';
