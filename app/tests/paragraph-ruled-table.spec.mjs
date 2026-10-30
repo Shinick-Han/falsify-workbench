@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {hex} from '../src/paragraph-pdf-crypto.mjs';
-import {bindSourceTables,sourceTableCells,inSourceTableCell} from '../src/paragraph-source-tables.mjs';
+import {deriveSourceTables,bindSourceTables,sourceTableCells,inSourceTableCell} from '../src/paragraph-source-tables.mjs';
+test('source-table extraction rejects an incorrect byte binding',async()=>{
+ await assert.rejects(()=>deriveSourceTables(new Uint8Array([37,80,68,70,45,49]),'0'.repeat(64),{}),{code:'stale-source'});
+});
 test('table cells bind only matching source bytes and supported page geometry',()=>{
  const bytes=new Uint8Array([1,2,3]), proof={sha:hex(bytes),pages:[{width:200,height:300,rotation:0}],cells:[{pageIndex:0,bbox:[10,20,30,40]}]};
  const e={page:1,pageIndex:0,pageWidth:200,pageHeight:300,pageT:[1,0,0,1,0,0],M:{_FPDFPage_GetRotation:()=>0}};
