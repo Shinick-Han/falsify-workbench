@@ -4,6 +4,7 @@ import {createHash} from 'node:crypto';
 import {deriveNativeLinkMoves, deriveNativeXYZMoves, deriveNativeFitRMoves, readLinkPageCharacters} from './paragraph-vendor/document-flow-links.mjs';
 import {expectedPageText, readGlyphs, edgeGlyphsEquivalent} from './paragraph-vendor/quality.mjs';
 import {canonicalPage} from './paragraph-geometry-conservation.mjs';
+import {ANNOTATION_LIMITS} from './document-flow-annotations.mjs';
 
 const intersects=(a,b)=>Math.min(a.r,b.r)-Math.max(a.l,b.l)>1e-4&&Math.min(a.t,b.t)-Math.max(a.b,b.b)>1e-4;
 const sameBox=(a,b)=>['l','r','b','t'].every(k=>Number.isFinite(a[k])&&Number.isFinite(b[k])&&Math.abs(a[k]-b[k])<=.05);
@@ -87,7 +88,26 @@ export async function transportParagraphLinks({engineFactory, sourceBytes, outpu
       if(!count&&!annotationAdapter)continue;
       if(!annotationAdapter){failures.push({code:'paragraph_link_adapter_unavailable',pageIndex});continue;}
       try {
-        model ||= await annotationAdapter.inspect({sourceBytes,sourceSha256:createHash('sha256').update(sourceBytes).digest('hex')});
+        if (!model) {
+          try {
+            model = await annotationAdapter.inspect({sourceBytes,sourceSha256:createHash('sha256').update(sourceBytes).digest('hex')});
+          } catch (error) {
+            // The raw adapter has a page limit. Only a complete PDFium inventory
+            // can prove there are no incoming links when that limit is hit.
+            if (error?.code !== 'annotation-document-unsupported' || !Number.isInteger(src.pageCount) || src.pageCount <= ANNOTATION_LIMITS.pages) throw error;
+            let empty = true;
+            try {
+              for (let i=0; i<src.pageCount; i++) {
+                src.loadPage(i);
+                const n=src.M._FPDFPage_GetAnnotCount?.(src.page);
+                if (!Number.isInteger(n) || n < 0) throw error;
+                if (n) { empty=false; break; }
+              }
+            } finally { src.loadPage(pageIndex); }
+            if (empty) continue;
+            throw error;
+          }
+        }
         const links=model.annotations.filter(a=>a.sourcePageIndex===pageIndex&&a.kind==='link');
         const hasInbound=model.annotations.some(a=>(a.internalDestinationSourcePageIndices||[]).includes(pageIndex));
         if(!links.length&&!hasInbound)continue;

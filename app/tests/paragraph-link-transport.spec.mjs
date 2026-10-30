@@ -196,3 +196,38 @@ test('incoming-only XYZ destination follows a rigidly moved target on an annotat
   assert.equal(link.get('Contents').asString(),'preserve-extra');
  } finally {out.destroy();}
 });
+
+
+test('large annotation-free document is editable but a later incoming link blocks the shortcut',async()=>{
+ const make=linked=>{
+  const d=new mupdf.PDFDocument();
+  try {
+   const font=d.addSimpleFont(new mupdf.Font('Helvetica'));
+   for(let i=0;i<201;i++)d.insertPage(-1,d.addPage([0,0,612,792],0,{Font:{F1:font}},i===0?'BT /F1 12 Tf 72 700 Td (Original short text) Tj ET':''));
+   if(linked){const target=d.findPage(0),last=d.findPage(200);last.put('Annots',[d.addObject({Type:'Annot',Subtype:'Link',Rect:[10,10,30,30],Dest:[target,'XYZ',72,700,null]})]);}
+   const buf=d.saveToBuffer();try{return buf.asUint8Array().slice();}finally{buf.destroy();}
+  } finally {d.destroy();}
+ };
+ const edit={id:'short',pageIndex:0,before:'Original short text',after:'Changed short text'};
+ const empty=await prepare({file:make(false),edits:[edit]});
+ assert.notEqual(empty.verification.status,'failed',JSON.stringify(empty.verification.checks));
+ await assert.rejects(prepare({file:make(false),edits:[{...edit,after:'Expanded content requires more room on a continuation page. '.repeat(60)}]}),e=>e.code==='LAYOUT_UNSUPPORTED'&&e.details?.cause==='document_flow_page_budget_exceeded');
+ const linked=await prepare({file:make(true),edits:[edit]});
+ assert.ok(linked.verification.checks.some(c=>c.status==='failed'),JSON.stringify(linked.verification.checks));
+ assert.ok(linked.verification.report.selfCheck.failures.some(f=>f.code==='paragraph_link_inventory_unverified'&&f.reason==='annotation-document-unsupported'),JSON.stringify(linked.verification.report.selfCheck.failures));
+});
+
+test('large document inventory fails closed on invalid counts and errors and restores the edited page',async()=>{
+ const {transportParagraphLinks}=await import('../src/paragraph-link-transport.mjs');
+ for(const bad of [-1, undefined, 'throw']){
+  let source, calls=0;
+  const factory=async()=>{
+   const engine={pageCount:201,page:0,loadPage(i){this.page=i;},close(){},M:{_FPDFPage_GetAnnotCount(i){if(i===200){if(bad==='throw')throw new Error('inventory');return bad;}return 0;}}};
+   if(!calls++)source=engine;return engine;
+  };
+  const adapter={async inspect(){throw Object.assign(new Error(),{code:'annotation-document-unsupported'});}};
+  const result=await transportParagraphLinks({engineFactory:factory,sourceBytes:new Uint8Array([1]),outputBytes:new Uint8Array([1]),edits:[{pageIndex:0}],sourcePageMap:[],annotationAdapter:adapter});
+  assert.ok(result.failures.some(f=>f.code==='paragraph_link_inventory_unverified'));
+  assert.equal(source.page,0);
+ }
+});
