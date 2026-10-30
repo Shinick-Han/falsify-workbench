@@ -119,3 +119,32 @@ test('PDF item separator joins touching superscript runs but preserves spaces an
   assert.equal(workbench.pdfItemSeparator(item,{transform:[7,0,0,7,75,103]}),'');
   assert.equal(workbench.pdfItemSeparator(item,{transform:[10,0,0,10,79,100]}),' ');
 });
+
+test('real PDF.js text runs paint precise changed ranges and reject repeated quotes',async()=>{
+  const {readFile}=await import('node:fs/promises');
+  const pdfjs=await import('pdfjs-dist/legacy/build/pdf.mjs');
+  const {createRequire}=await import('node:module');
+  const marks=createRequire(import.meta.url)('../dist/paper-change-marks.js');
+  const bytes=new Uint8Array(await readFile(new URL('./fixtures/paragraph-marker-synthetic.pdf',import.meta.url)));
+  const document=await pdfjs.getDocument({data:bytes}).promise;
+  const items=(await (await document.getPage(1)).getTextContent()).items;
+  const before='An initial claim62 remains conditional.',after='An altered claim63 remains provisional.';
+  const edits=[{id:'edit',before,after}];
+  const hits=marks.ranges(items,edits,'before',workbench.pdfItemSeparator);
+  assert.deepEqual(hits.missing,[]);
+  assert.deepEqual(hits.found.filter(h=>items[h.itemIndex].str.trim()).map(h=>[items[h.itemIndex].str.slice(h.start,h.end),h.itemIndex]),[['initial claim',8],['62',9],['remains condit',11]]);
+  // Preserve PDF.js geometry and explicit whitespace while simulating the revised runs.
+  const revised=items.map((item,i)=>({...item,str:i===8?'An altered claim':i===9?'63':i===11?item.str.replace('conditional','provisional'):item.str}));
+  const afterHits=marks.ranges(revised,edits,'after',workbench.pdfItemSeparator);
+  assert.deepEqual(afterHits.missing,[]);
+  assert.deepEqual(afterHits.found.filter(h=>revised[h.itemIndex].str.trim()).map(h=>revised[h.itemIndex].str.slice(h.start,h.end)),['altered claim','63','remains provis']);
+  const duplicate=marks.ranges([...items,...items],edits,'before',workbench.pdfItemSeparator);
+  assert.deepEqual(duplicate.found,[]);assert.deepEqual(duplicate.missing,['edit']);
+  const painted=[];
+  const divs=items.filter(i=>typeof i.str==='string').map(i=>({dataset:{},firstChild:{nodeType:3,textContent:i.str}}));
+  const doc={createElement(){return {style:{},dataset:{},setAttribute(){},append(el){painted.push(el);}};},createRange(){let node,start,end;return {setStart(n,p){node=n;start=p;},setEnd(n,p){assert.equal(n,node);end=p;},getClientRects(){return [{left:start,top:2,right:end,width:end-start,height:10}];}};}};
+  const container={append(){},getBoundingClientRect(){return {left:0,top:0};}};
+  const result=marks.paintPage({document:doc,container,items,divs,edits,side:'before',separator:workbench.pdfItemSeparator});
+  assert.ok(result.count>=3);assert.ok(painted.every(el=>el.dataset.edit==='edit'));
+  await document.cleanup();
+});
