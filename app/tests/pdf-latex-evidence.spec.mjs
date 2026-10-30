@@ -92,3 +92,40 @@ test('drawing observation budget remains finite',async()=>{
   d.insertPage(-1,d.addPage([0,0,100,100],0,{},stream));const b=d.saveToBuffer(),bytes=b.asUint8Array().slice();b.destroy();d.destroy();
   await assert.rejects(extract(bytes),{code:'budget-exceeded'});
 });
+
+test('typography weighs observed non-whitespace glyphs and estimates only consistent line spacing',async()=>{
+  const {normalizeDocument}=await import('../src/paper-document.mjs'),hash='b'.repeat(64);
+  const make=(lines,x,y)=>{
+    const chars=[],ls=[];
+    for(const [row,[text,offset,small]] of lines.entries()){
+      const start=chars.length;
+      for(const [j,ch] of [...text].entries()){
+        const sup=small?.includes(j),top=y+offset-(sup?3:0),size=sup?6:9;
+        chars.push({text:ch,bbox:[x+j*5,top,x+j*5+4,top+size],fontName:sup?'Small':'Body',size});
+      }
+      ls.push({start,end:chars.length,bbox:[x,y+offset,x+text.length*5,y+offset+9],writingMode:0,direction:[1,0]});
+    }
+    return {bbox:[x,y,x+100,y+60],chars,lines:ls};
+  };
+  const body=make([['Alpha 2',0,[6]],['Beta words',12,[]]],20,30);
+  body.chars[0].fontName='Body Italic';
+  const title=make([['Heading',0,[]]],20,120);for(const c of title.chars){c.size=18;c.fontName='Title';}
+  const tie=make([['xy',0,[1]]],20,220);
+  const irregular=make([['First',0,[]],['Second',12,[]],['Third',35,[]]],20,300);
+  const columns=make([['Left',0,[]],['Right',12,[]]],20,400);for(const c of columns.chars.slice(columns.lines[1].start))c.bbox=[c.bbox[0]+300,c.bbox[1],c.bbox[2]+300,c.bbox[3]];
+  const geometry={frame:'mupdf-display',bounds:[0,0,612,792],pageTransform:[1,0,0,-1,0,792]};
+  const document=normalizeDocument({sourceSha256:hash,pages:[{width:612,height:792,geometry,blocks:[body,title,tie,irregular,columns],images:[]}]});
+  const items=document.blocks.map((b,i)=>({id:`flow-${i}`,kind:i===1?'heading':'paragraph',blockIds:[b.id],assetIds:[],source:{pageIndex:0,bbox:b.source.bbox},columns:1,span:'page'}));
+  const flow={schema:'falsify.paper-flow.v1',sourceSha256:hash,items,fragments:[],regions:[],relations:[],diagnostics:[]};
+  const links={schema:'falsify.paper-source-links.v1',sourceSha256:hash,frames:[{pageIndex:0,bounds:geometry.bounds,pageTransform:geometry.pageTransform,verified:true}],links:[]};
+  const model=buildReconstructionModel({document,flow,links,assets:{sourceSha256:hash,assets:[],diagnostics:[]}});
+  const [bodyItem,titleItem,tieItem,irregularItem,columnsItem]=model.items,typo=bodyItem.extensions.typography;
+  assert.equal(typo.fontSizeBp,9);assert.equal(typo.leadingBp,12);assert.equal(typo.status,'proposed');
+  assert.deepEqual(typo.styleCounts.map(s=>s.count).sort((a,b)=>a-b),[1,1,13]);
+  assert.equal(typo.leadingEvidence.length,2);for(const e of typo.leadingEvidence){assert.equal(e.blockId,bodyItem.evidence[0].blockId);assert.ok(e.range.start>=bodyItem.evidence[0].range.start&&e.range.end<=bodyItem.evidence[0].range.end);assert.ok(Number.isFinite(e.bottomBp));}
+  assert.equal(bodyItem.text,document.blocks[0].text);assert.deepEqual(bodyItem.evidence[0].range,document.blocks[0].source.range);
+  assert.equal(titleItem.extensions.typography.fontSizeBp,18);assert.equal(titleItem.extensions.typography.leadingBp,undefined);
+  assert.equal(tieItem.extensions.typography.fontSizeBp,null);assert.equal(tieItem.extensions.typography.leadingBp,undefined);
+  assert.equal(irregularItem.extensions.typography.fontSizeBp,9);assert.equal(irregularItem.extensions.typography.leadingBp,undefined);
+  assert.equal(columnsItem.extensions.typography.leadingBp,undefined);
+});

@@ -12,6 +12,41 @@ const abort=signal=>{if(signal?.aborted){const e=new Error('aborted');e.name='Ab
 const box=b=>Array.isArray(b)&&b.length===4&&b.every(Number.isFinite)&&b[0]<=b[2]&&b[1]<=b[3];
 const same=(a,b)=>Array.isArray(a)&&Array.isArray(b)&&a.length===b.length&&a.every((v,i)=>Number.isFinite(v)&&Math.abs(v-b[i])<.01);
 const stable=(hash,kind,value)=>`${kind}-${hex(new TextEncoder().encode(JSON.stringify([hash,kind,value]))).slice(0,24)}`;
+const median=values=>{const sorted=[...values].sort((a,b)=>a-b),n=sorted.length;return n%2?sorted[(n-1)/2]:(sorted[n/2-1]+sorted[n/2])/2;};
+
+// Font sizes and glyph boxes are observations, not recovered TeX settings.
+// Only non-whitespace characters within the original fragment's range count.
+function typography(blockIds,blocks,document,styles,refs){
+  const counts=new Map(),sizeCounts=new Map(),parts=[];
+  for(const id of blockIds){
+    const b=blocks.get(id);if(!b?.text)continue;const s=b.source,r=s.range,p=document.pages[s.pageIndex];
+    const chars=(s.characters||[]).filter(c=>Number.isSafeInteger(c.start)&&Number.isSafeInteger(c.end)&&c.start>=r.start&&c.end<=r.end&&c.start<c.end&&!/^\s+$/u.test(p.text.slice(c.start,c.end)));
+    for(const c of chars){if(typeof c.styleId!=='string')continue;counts.set(c.styleId,(counts.get(c.styleId)||0)+1);const size=styles.get(c.styleId)?.size;if(Number.isFinite(size)&&size>0)sizeCounts.set(size,(sizeCounts.get(size)||0)+1);}
+    parts.push({b,chars});
+  }
+  const ranked=[...sizeCounts].sort((a,b)=>b[1]-a[1]||a[0]-b[0]);
+  const fontSizeBp=ranked.length&&(!ranked[1]||ranked[0][1]>ranked[1][1])?ranked[0][0]:null;
+  const output={fontSizeBp,styleCounts:[...counts].sort((a,b)=>a[0]<b[0]?-1:a[0]>b[0]?1:0).map(([styleId,count])=>({styleId,count})),leadingEvidence:[],status:fontSizeBp===null?'proposed':'observed'};
+  if(fontSizeBp===null)return output;
+  const observations=[];
+  for(const {b,chars} of parts){
+    const lines=[],sourceLines=b.source.lines||[];let usable=true;
+    for(const line of sourceLines){
+      const r=line.range;if(!r||!Number.isSafeInteger(r.start)||!Number.isSafeInteger(r.end)||r.start<b.source.range.start||r.end>b.source.range.end||r.start>=r.end||line.writingMode!==0||!Array.isArray(line.direction)||Math.abs(line.direction[0]-1)>.01||Math.abs(line.direction[1])>.01){usable=false;break;}
+      const glyphs=chars.filter(c=>c.start>=r.start&&c.end<=r.end&&styles.get(c.styleId)?.size===fontSizeBp&&box(c.bbox));if(!glyphs.length){usable=false;break;}
+      const bbox=glyphs.reduce((a,c)=>[Math.min(a[0],c.bbox[0]),Math.min(a[1],c.bbox[1]),Math.max(a[2],c.bbox[2]),Math.max(a[3],c.bbox[3])],[Infinity,Infinity,-Infinity,-Infinity]);
+      lines.push({...refs({pageIndex:b.source.pageIndex,bbox},{blockId:b.parentBlockId||b.id,range:{...r}}),bottomBp:median(glyphs.map(c=>c.bbox[3]))});
+    }
+    // Do not infer spacing between separate blocks or columns.
+    if(!usable||lines.length<2)continue;
+    const distances=[];let valid=true;
+    for(let i=1;i<lines.length;i++){const a=lines[i-1],z=lines[i],distance=z.bottomBp-a.bottomBp,overlap=Math.min(a.bbox[2],z.bbox[2])-Math.max(a.bbox[0],z.bbox[0]);if(distance<=0||distance>fontSizeBp*3||overlap<=0){valid=false;break;}distances.push(distance);}
+    if(valid)observations.push({lines,distances});
+  }
+  const distances=observations.flatMap(x=>x.distances);
+  if(distances.length){const lead=median(distances);if(distances.every(d=>Math.abs(d-lead)<=Math.max(.5,lead*.1))){output.leadingBp=lead;output.leadingEvidence=observations.flatMap(x=>x.lines);output.status='proposed';}}
+  return output;
+}
 
 function validateDocument(document){
   if(document?.schema!=='falsify.paper-document.v1'||!HASH.test(document.sourceSha256)||!Array.isArray(document.pages)||!Array.isArray(document.blocks)||!Array.isArray(document.assets))fail('invalid-evidence');
@@ -79,7 +114,7 @@ export function buildReconstructionModel({document,flow,links,assets}={}){
     if(segments.length&&f.source.bbox[1]>document.pages[f.source.pageIndex].height*.8&&/^\s*\d+\s*\S/u.test(text))candidates.push({kind:'footnote',evidence:segments.map(s=>s.evidence)});
     const id=stable(hash,'item',[f.source.pageIndex,kind,evidence]);flowIds.set(f.id,id);
     const reason=f.kind==='asset'?'region-unverified':candidates.some(c=>c.kind==='script')?'inline-script-candidate':candidates.length?'semantic-candidate':f.columns>1?'column-order-unverified':f.kind==='caption'?'caption-proposal':f.blockIds.some(id=>(blocks.get(id)?.source?.lines?.length||0)>1)?'line-boundary-unverified':f.inline&&f.joiners?.some(Boolean)?'flow-joiner-unverified':undefined;
-    items.push({id,kind,evidence,status:f.kind==='asset'?'unsupported':reason||kind!=='paragraph'?'proposed':'observed',...(text?{text}:{}),order,...(f.assetIds.length===1&&outAssets.some(a=>a.id===f.assetIds[0])?{assetId:f.assetIds[0]}:{}),...(reason?{reason}:{}),extensions:{flowId:f.id,blockIds:[...f.blockIds],assetIds:[...f.assetIds],regionId:region?.id||null,regionClassification:regionKind,columns:f.columns||1,span:f.span||'page',segments,candidates,styles:[...new Set(segments.flatMap(s=>s.styleIds))].map(id=>styles.get(id)).filter(Boolean).map(s=>({...s})),lineCount:f.blockIds.reduce((n,id)=>n+(blocks.get(id)?.source?.lines?.length||0),0)}});
+    items.push({id,kind,evidence,status:f.kind==='asset'?'unsupported':reason||kind!=='paragraph'?'proposed':'observed',...(text?{text}:{}),order,...(f.assetIds.length===1&&outAssets.some(a=>a.id===f.assetIds[0])?{assetId:f.assetIds[0]}:{}),...(reason?{reason}:{}),extensions:{flowId:f.id,blockIds:[...f.blockIds],assetIds:[...f.assetIds],regionId:region?.id||null,regionClassification:regionKind,columns:f.columns||1,span:f.span||'page',segments,candidates,styles:[...new Set(segments.flatMap(s=>s.styleIds))].map(id=>styles.get(id)).filter(Boolean).map(s=>({...s})),lineCount:f.blockIds.reduce((n,id)=>n+(blocks.get(id)?.source?.lines?.length||0),0),typography:typography(f.blockIds,blocks,document,styles,refs)}});
     if(reason)diagnostics.push({code:reason,severity:'warning',pageIndex:f.source.pageIndex,itemId:id});
   }
   // A source occurrence may not be consumed by multiple flow fragments/items.
