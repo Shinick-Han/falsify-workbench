@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-alpha.34
+
+- LaTeX 프로젝트 입력·소스 구조 편집·브라우저 컴파일과 PDF/BLUE 전달 추가.
+- 작업 저장·복구, 변경 표시, 파일 전환 중 오래된 작업의 덮어쓰기 수정.
+- PDF→LaTeX 재구성은 고급 옵션의 실험 기능으로 제공.
+- [변경 내용](docs/releases/0.2.0-alpha.34.md) / [지원 범위](docs/latex-source-editing-status.ko.html)
+
 ## 0.2.0-alpha.33
 
 - 긴 수정문과 마지막 줄 삭제에서 원본 글꼴, 줄 배치와 가림 도형 순서 보존.

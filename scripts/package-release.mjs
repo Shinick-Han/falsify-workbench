@@ -177,7 +177,7 @@ function main() {
       && !companion.includes(`WORKBENCH_VERSION='${version}'`)
       && !companion.includes(`WORKBENCH_VERSION = "${version}"`)) throw new Error('App, companion and release versions differ.');
   const entry = readFileSync(join(root, 'app/dist/index.html'), 'utf8');
-  const assetVersions = [...entry.matchAll(/(?:src|href)="[^"\s]+\?v=([^"\s]+)"/g)].map(m => m[1]);
+  const assetVersions = [...entry.matchAll(/(?:src|href)="[^"\s]+\?v=([^"&\s]+)(?:&[^"\s]*)?"/g)].map(m => m[1]);
   if (!assetVersions.length || assetVersions.some(v => v !== version)) throw new Error('Update versioned entry asset URLs to the release VERSION.');
   const tracked = git('ls-tree', '-r', '--name-only', commit).split('\n').filter(Boolean);
   assertShippableSource(tracked, root);
