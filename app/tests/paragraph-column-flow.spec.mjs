@@ -1,7 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildFlowPlan } from '../src/paragraph-vendor/pagination.mjs';
-import { cascadeShifts, cascadeBarrier, normalizePageMap } from '../src/paragraph-vendor/quality.mjs';
+import { cascadeShifts, cascadeBarrier, cascadeFloor, normalizePageMap } from '../src/paragraph-vendor/quality.mjs';
+
+test('cascade floor admits clear lower page space while preserving a footer', () => {
+  const body = { role: 'body', box: { x: 40, top: 310, w: 200, h: 12 } };
+  assert.equal(cascadeFloor({ pageH: 500, paras: [body] }), 50);
+  const low = { ...body, box: { ...body.box, top: 55, h: 12 } };
+  assert.equal(cascadeFloor({ pageH: 500, paras: [low] }), 43);
+  const footer = { role: 'footer_uncertain', box: { x: 40, top: 80, w: 40, h: 10 } };
+  assert.equal(cascadeFloor({ pageH: 500, paras: [body, footer] }), 120);
+});
 
 const para = (id, x, top, h = 10, role = 'body') => ({ id, box: { x, top, w: 80, h }, role, editable: true, topLevel: true });
 

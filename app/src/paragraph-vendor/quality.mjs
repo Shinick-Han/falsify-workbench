@@ -383,13 +383,17 @@ export function cascadeBarrier(engine, ctx, grown, shifts) {
 // EDGE_BAND of the page's content extent: the saved-PDF check reads whole
 // lines inside that band as header/footer content, so body text is never
 // moved into it unless the source body already reached lower.
-function cascade(engine, ctx, grown, touchedIds, repairs, warnings, allowOverflow = false) {
+export function cascadeFloor(ctx) {
   const edgeTops = ctx.paras.filter((q) => q.box && q.role !== "body" && q.box.top < ctx.pageH / 2).map((q) => q.box.top);
   const bodyBottoms = ctx.paras.filter((q) => q.box && q.role === "body").map((q) => bottomOf(q.box));
   const pageBottom = Math.min(...ctx.paras.filter((q) => q.box).map((q) => bottomOf(q.box)));
-  const floor = edgeTops.length
+  return edgeTops.length
     ? Math.max(Math.max(...edgeTops) + 2, Math.min(pageBottom + EDGE_BAND * ctx.pageH, ...bodyBottoms))
-    : Math.min(...bodyBottoms, Infinity);
+    : Math.min(ctx.pageH * EDGE_BAND, ...bodyBottoms);
+}
+
+function cascade(engine, ctx, grown, touchedIds, repairs, warnings, allowOverflow = false) {
+  const floor = cascadeFloor(ctx);
   const plan = cascadeShifts(ctx, grown);
   // Never silently move a paragraph that the engine cannot edit.
   for (const [id] of plan) {
