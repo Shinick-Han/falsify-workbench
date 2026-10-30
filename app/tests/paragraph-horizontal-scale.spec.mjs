@@ -109,6 +109,16 @@ test('Tc and explicit TJ spacing survive model builds and save/reload', async ()
       assert.deepEqual(Array.from({length:M._FPDFPage_CountObjects(e.page)},(_,i)=>M._FPDFPage_GetObject(e.page,i)>>>0),objects);
       e.generateContent(); const bytes=e.save(); e.reopen(bytes,pageIndex); same(original,glyphs());
       e.buildModel(); same(original,glyphs());
+      let para=e.buildModel().find(p=>p.editable && p.runs.some(r=>r.text.trim()));
+      assert.ok(para);
+      const edited=para.runs.map((r,i)=>({...r,sourceIndex:i,text:r.text.replace(page>=2?'l':'one','')}));
+      e.historyBeginStep('spacing-edit'); assert.ok(e.commitParagraph(para.id,edited,para.format)); e.historyEndStep();
+      assert.ok(e.historyUndo()); same(original,glyphs());
+      para=e.buildModel().find(p=>p.editable && p.runs.some(r=>r.text.trim())); assert.ok(para);
+      const editedAgain=para.runs.map((r,i)=>({...r,sourceIndex:i,text:r.text.replace(page>=2?'l':'one','')}));
+      e.historyBeginStep('spacing-reedit'); assert.ok(e.commitParagraph(para.id,editedAgain,para.format)); e.historyEndStep();
+      const expected=original.map(g=>String.fromCodePoint(g[0])).join('').replace(page>=2?'l':'one','');
+      assert.equal(glyphs().map(g=>String.fromCodePoint(g[0])).join('').trim(),expected.trim());
     }
   } finally { e.close(); }
 });
