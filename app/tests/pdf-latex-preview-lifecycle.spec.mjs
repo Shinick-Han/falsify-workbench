@@ -21,7 +21,7 @@ test('stale pending documents destroy only their own pair, never the new preview
  first.resolve(oldPair[0]);second.resolve(oldPair[1]);assert.equal(await old,false);assert.deepEqual(shown,newPair);assert.deepEqual(oldPair.map(d=>d.destroyed),[1,1]);assert.deepEqual(newPair.map(d=>d.destroyed),[0,0]);
 });
 test('current load failure destroys the fulfilled document and reports failure',async()=>{
- const retained=pdf('partial');let installed=false;
+ const task=pdf('loading task'),retained={loadingTask:task};let installed=false;
  await assert.rejects(replaceReconstructionPreview({library:async()=>({}),isCurrent:()=>true,dispose:async()=>{},load:()=>[Promise.resolve(retained),Promise.reject(new Error('failure'))],install:()=>{installed=true;}}),/미리보기를 열지 못했습니다/);
- assert.equal(retained.destroyed,1);assert.equal(installed,false);
+ assert.equal(task.destroyed,1);assert.equal(installed,false);
 });

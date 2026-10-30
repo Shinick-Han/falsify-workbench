@@ -96,9 +96,9 @@ async function main() {
     const extract = async bytes => page.evaluate(async b64 => {
       const pdfjs=await import(new URL('vendor/pdf.mjs', document.baseURI).href); pdfjs.GlobalWorkerOptions.workerSrc=new URL('vendor/pdf.worker.mjs', document.baseURI).href;
       const binary=atob(b64), data=Uint8Array.from(binary, c=>c.charCodeAt(0));
-      const doc=await pdfjs.getDocument({data}).promise; let text='';
+      const loadingTask=pdfjs.getDocument({data}),doc=await loadingTask.promise; let text='';
       for(let i=1;i<=doc.numPages;i++) text+=(await (await doc.getPage(i)).getTextContent()).items.map(x=>x.str).join(' ')+' ';
-      await doc.destroy(); return text.replace(/\s+/g,' ');
+      await loadingTask.destroy(); return text.replace(/\s+/g,' ');
     }, bytes.toString('base64'));
     const text = await extract(pdf);
     for (const expected of ['An altered claim', '63', 'remains provisional.', 'Synthetic unchanged figure.', 'Synthetic reference', 'original note remains available', 'Following evidence stays readable']) assert.ok(text.includes(expected), `Missing PDF content: ${expected}`);

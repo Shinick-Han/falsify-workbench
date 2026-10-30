@@ -103,7 +103,7 @@
     },
     {
       "path": "src/pdf-latex-workbench.mjs",
-      "sha256": "fc06413dc1e62b6fe0126ef2081c03da6d3e0b33e499a37107341865af06cd38"
+      "sha256": "43128df5b6f69c23809dd2ad341cc80e9e7c2fc046492fbd2e02d2fef4f99a49"
     },
     {
       "path": "src/table-adapter.mjs",
@@ -124,7 +124,7 @@
   ],
   "output": {
     "path": "latex-workbench.mjs",
-    "sha256": "21735dcc322e256dcaebe5fb0ae1f40b2e63c4bb395028c3c2c39adc8434e7fc"
+    "sha256": "d6ef011ee7e9267f642b75327d437069f024863e754aad31cd53a3bc11c38fff"
   },
   "worker": {
     "path": "pdf-latex-reader-worker.mjs",

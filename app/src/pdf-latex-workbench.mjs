@@ -15,7 +15,7 @@ export async function replaceReconstructionPreview({library,isCurrent,dispose,lo
   const settled=await Promise.allSettled(load(lib));
   const loaded=settled.filter(r=>r.status==='fulfilled').map(r=>r.value);
   if(!isCurrent()||loaded.length!==2){
-    for(const p of loaded)try{await p.destroy();}catch{}
+    for(const p of loaded)try{await (p.loadingTask||p).destroy();}catch{}
     if(isCurrent())throw new Error('미리보기를 열지 못했습니다. 생성 PDF는 다운로드할 수 있습니다.');
     return false;
   }
@@ -43,7 +43,7 @@ export function mountPdfLatexWorkbench(doc=globalThis.document){
   function buttons(){download.disabled=busy||!artifact;sourceDownload.disabled=busy||!prepared;accept.disabled=busy||!artifact||!prepared;rebuild.disabled=busy||!draft;stop.hidden=!busy;previous.disabled=!pdfs.length||pageIndex===0;next.disabled=!pdfs.length||pageIndex>=Math.max(...pdfs.map(p=>p.numPages))-1;}
   function currentSource(){return globalThis.FalsifyPaperWorkspace?.getSource?.();}
   function stillCurrent(own){return own===ticket&&sourceIdentity===currentSource()?.fileHash&&!globalThis.FalsifyLatexWorkbench?.active;}
-  async function disposePdfs(){++renderTicket;const old=pdfs;pdfs=[];for(const p of old)try{await p.destroy();}catch{}}
+  async function disposePdfs(){++renderTicket;const old=pdfs;pdfs=[];for(const p of old)try{await (p.loadingTask||p).destroy();}catch{}}
   async function cancel(){++ticket;++renderTicket;abort?.abort();reader.cancel();compiler?.cancel();compiler?.dispose();compiler=null;prepared=artifact=null;busy=false;buttons();}
   async function render(){if(pdfs.length!==2)return;const own=++renderTicket,documents=pdfs,requestedPage=pageIndex;pageLabel.textContent=`${requestedPage+1} / ${Math.max(...documents.map(p=>p.numPages))}쪽`;buttons();try{for(const[i,pdf]of documents.entries()){if(own!==renderTicket)return;const canvas=i?baselineCanvas:originalCanvas;if(requestedPage>=pdf.numPages){canvas.width=canvas.height=1;continue;}const page=await pdf.getPage(requestedPage+1);if(own!==renderTicket)return;const viewport=page.getViewport({scale:1.2}),scratch=doc.createElement('canvas');scratch.width=Math.ceil(viewport.width);scratch.height=Math.ceil(viewport.height);await page.render({canvasContext:scratch.getContext('2d'),viewport}).promise;if(own!==renderTicket)return;canvas.width=scratch.width;canvas.height=scratch.height;canvas.getContext('2d').drawImage(scratch,0,0);}}catch(e){if(own===renderTicket)throw e;}}
   previous.onclick=()=>{pageIndex=Math.max(0,pageIndex-1);void render();};next.onclick=()=>{pageIndex++;void render();};
