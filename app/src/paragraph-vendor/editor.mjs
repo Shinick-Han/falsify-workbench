@@ -556,7 +556,10 @@ export async function editPdf(request, options = {}) {
           if (lost && linePlan?.breaks && objectsBefore !== null && !localStable) lineLocal = { status: "declined", reason: "page_model_unstable" };
           // A re-layout that lost the source lines is replaced by a re-layout
           // of the edited line alone when the edit stays inside it.
-          if (pre && lost) {
+          // Retrying a deletion after undo can change the engine's choice of
+          // surgical versus reflow commit. Keep the original commit until a
+          // deletion-specific retry can prove equivalent text and ordering.
+          if (pre && lost && inserts.length) {
             const changed = new Set(touched.map((t) => t.index));
             const local = replaceReflowWithLineLocal(engine, paras, pi, del, inserts, runs, pre, changed);
             // A line-local commit and a declined prefix rollback both rebuild

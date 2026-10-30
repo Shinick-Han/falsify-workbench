@@ -15,9 +15,9 @@ const bundle = await build({entryPoints:[fileURLToPath(new URL('paragraph-vendor
 }}]});
 const {PdfEngine} = await import('data:text/javascript;base64,' + Buffer.from(bundle.outputFiles[0].contents).toString('base64'));
 
-function fixture() {
+function fixture(customStreams) {
   const matrices = ['8.2319 0 0 8.25', '8.2665 0 0 8.25', '8.25 0 0 8.25', '0 8.2319 -8.25 0', '0 0 0 8.25'];
-  const streams = matrices.map(m => `BT /F1 1 Tf ${m} 60 200 Tm (Scale test) Tj ET`);
+  const streams = customStreams ?? matrices.map(m => `BT /F1 1 Tf ${m} 60 200 Tm (Scale test) Tj ET`);
   const objects = ['<< /Type /Catalog /Pages 2 0 R >>', `<< /Type /Pages /Kids [${streams.map((_,i)=>`${4+i*2} 0 R`).join(' ')}] /Count ${streams.length} >>`, '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>'];
   for (const [i,s] of streams.entries()) objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 500 500] /Resources << /Font << /F1 3 0 R >> >> /Contents ${5+i*2} 0 R >>`, `<< /Length ${s.length} >>\nstream\n${s}\nendstream`);
   let pdf='%PDF-1.4\n', offsets=[0];
@@ -42,5 +42,26 @@ test('native model retains small horizontal scales, including rotated text', asy
     }
     e.loadPage(4);
     for (const run of e.buildModel().flatMap(p=>p.runs)) assert.ok(Number.isFinite(run.hScale) && run.hScale > 0);
+  } finally { e.close(); }
+});
+
+test('repeated no-op model builds preserve word-spaced object ownership and geometry', async () => {
+  const M=await create({wasmBinary:readFileSync(join(runtime,'editcore.wasm')),print(){},printErr(){}});
+  const cfg=M._malloc(48); M.HEAPU8.fill(0,cfg,cfg+48); M.HEAPU32[cfg>>2]=2; M._FPDF_InitLibraryWithConfig(cfg); M._free(cfg);
+  const e=new PdfEngine(M);
+  e.open(fixture(['BT /F1 12 Tf 2 Tw 1 0 0 1 60 200 Tm (word spaced text) Tj ET']));
+  try {
+    e.loadPage(0);
+    const first=e.buildModel();
+    const snapshot=() => Array.from({length:M._FPDFPage_CountObjects(e.page)}, (_, i) => {
+      const h=M._FPDFPage_GetObject(e.page,i) >>> 0;
+      return {h, bounds:e.objectBounds(h)};
+    });
+    const objects=snapshot();
+    for (let i=0; i<3; i++) {
+      const next=e.buildModel();
+      assert.deepEqual(snapshot(), objects);
+      assert.deepEqual(next.map(p=>p.runs.map(r=>r.text).join('')), first.map(p=>p.runs.map(r=>r.text).join('')));
+    }
   } finally { e.close(); }
 });
