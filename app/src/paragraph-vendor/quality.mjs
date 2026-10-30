@@ -109,6 +109,25 @@ export function capturePageLayout(engine, pageIndex, paragraphs) {
       topLevel: slots.length === handles.length,
     };
   });
+  // Recover edge-band fragments only when source baselines establish that
+  // they belong to a multi-line body paragraph in the same column. A marker
+  // may sit beside a body line; a final line may continue its regular pitch.
+  for (const q of paras) {
+    if (q.role === "body" || !q.box || q.baselines.length !== 1) continue;
+    const y = q.baselines[0];
+    const owner = paras.find((p) => {
+      if (p.role !== "body" || !p.box || p.baselines.length < 3) return false;
+      const gaps = p.baselines.slice(1).map((v, i) => p.baselines[i] - v);
+      const pitch = median(gaps);
+      if (!(pitch > 0) || !gaps.every((g) => Math.abs(g - pitch) <= 0.1 * pitch)) return false;
+      const horizontalGap = Math.max(0, p.box.x - (q.box.x + q.box.w), q.box.x - (p.box.x + p.box.w));
+      const onLine = p.baselines.some((v) => Math.abs(v - y) <= 1.5);
+      const continuation = Math.abs(Math.min(...p.baselines) - pitch - y) <= 1.5
+        && Math.abs(q.box.x - p.box.x) <= 2;
+      return (onLine && horizontalGap <= pitch) || continuation;
+    });
+    if (owner) q.role = "body";
+  }
   // A publisher footer can exceed the short-text heuristic. Require a
   // separate page number on its baseline inside the bottom edge band.
   const numbers = paras.filter((q) => q.role === "page_number" && q.box?.top <= edgeBottomY + pageH * EDGE_BAND);
@@ -333,7 +352,7 @@ export function repairPageLayout(engine, pageIndex, context, touched, options = 
 
 // Propagate only the part of growth that exceeds existing vertical gaps.
 // Use the same plan for in-page repair and continuation planning.
-export function cascadeShifts(ctx, grown) {
+export function cascadeShifts(ctx, grown, { preserveSourceGaps = false } = {}) {
   const growth = new Map(grown.map((g) => [g.id, g.delta]));
   const ordered = ctx.paras.filter((q) => q.box && q.role === "body")
     .sort((a, b) => b.box.top - a.box.top || a.box.x - b.box.x);
@@ -342,10 +361,25 @@ export function cascadeShifts(ctx, grown) {
     const q = ordered[i];
     let shift = 0;
     for (const prev of ordered.slice(0, i)) {
-      if (hOverlap(prev.box, q.box) < 0.35 * Math.min(prev.box.w, q.box.w)) continue;
-      if (q.box.top > bottomOf(prev.box) + 0.5) continue;
-      const gap = Math.max(0, bottomOf(prev.box) - q.box.top);
-      shift = Math.max(shift, (shifts.get(prev.id) || 0) + (growth.get(prev.id) || 0) - gap);
+      const displacement = (shifts.get(prev.id) || 0) + (growth.get(prev.id) || 0);
+      if (displacement <= 0.01) continue;
+      const overlap = hOverlap(prev.box, q.box);
+      const prevLines = prev.baselines || [], lines = q.baselines || [];
+      const horizontalGap = Math.max(0, -overlap);
+      // Inline markers and split runs share a source line with a multi-line
+      // owner, even when their boxes do not horizontally overlap.
+      const inline = prevLines.length > 1 && lines.some((y) => prevLines.some((v) => Math.abs(y - v) <= 1.5))
+        && horizontalGap <= Math.max(prev.size || 0, q.size || 0, 12);
+      if (inline) { shift = Math.max(shift, displacement); continue; }
+      if (overlap < 0.35 * Math.min(prev.box.w, q.box.w)) continue;
+      // Font metric boxes can overlap while their source baselines remain
+      // ordered. Accept only a small overlap backed by distinct baselines.
+      const metricOverlap = q.box.top - bottomOf(prev.box);
+      if (metricOverlap > 0.5 && !(metricOverlap <= 2 && prevLines.length && lines.length
+        && Math.max(...lines) < Math.min(...prevLines) - 0.5)) continue;
+      const gap = Math.max(0, -metricOverlap);
+      const needed = displacement - gap;
+      shift = Math.max(shift, preserveSourceGaps && needed > 0.01 ? displacement : needed);
     }
     if (shift > 0.01) shifts.set(q.id, shift);
   }
@@ -406,7 +440,7 @@ export function reserveCascadeSpace(engine, ctx, grown, { targetHandles = [] } =
   if (!uprightPage(engine)) return fail('reserve_transform_unsupported');
   const live = new Set(listObjects(engine));
   if (!Array.isArray(targetHandles) || targetHandles.some(h => !live.has(h >>> 0) || engine.M._FPDFPageObj_GetType(h) !== OBJ_TEXT)) return fail('reserve_target_invalid');
-  const shifts = cascadeShifts(ctx, grown), floor = cascadeFloor(ctx);
+  const shifts = cascadeShifts(ctx, grown, { preserveSourceGaps: true }), floor = cascadeFloor(ctx);
   const moved = ctx.paras.filter(q => shifts.has(q.id));
   if (moved.some(q => !q.editable || q.sharesObjects || !q.topLevel || !q.handles?.length || q.handles.some(h => !live.has(h >>> 0)))) return fail('reserve_objects_unavailable');
   const handles = moved.flatMap(q => q.handles.map(h => h >>> 0));

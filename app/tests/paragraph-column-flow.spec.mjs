@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildFlowPlan } from '../src/paragraph-vendor/pagination.mjs';
-import { cascadeShifts, cascadeBarrier, cascadeFloor, reserveCascadeSpace, normalizePageMap } from '../src/paragraph-vendor/quality.mjs';
+import { capturePageLayout, cascadeShifts, cascadeBarrier, cascadeFloor, reserveCascadeSpace, normalizePageMap } from '../src/paragraph-vendor/quality.mjs';
 
 test('cascade floor admits clear lower page space while preserving a footer', () => {
   const body = { role: 'body', box: { x: 40, top: 310, w: 200, h: 12 } };
@@ -23,7 +23,7 @@ test('reservation checks barriers and rolls back a recorded whole-body move', ()
     {id:'b',role:'body',box:{x:10,top:280,w:80,h:10},handles:[2],editable:true,topLevel:true,baselines:[275]}]};
   const grown=[{id:'a',box:ctx.paras[0].box,delta:15}];
   const r=reserveCascadeSpace(e,ctx,grown,{targetHandles:[1]});
-  assert.equal(r.ok,true); assert.equal(boxes.get(2).y,265); assert.equal(r.context.paras[1].box.top,275);
+  assert.equal(r.ok,true); assert.equal(boxes.get(2).y,255); assert.equal(r.context.paras[1].box.top,265);
   assert.equal(ctx.paras[1].box.top,280); assert.equal(r.rollback(),true); assert.equal(boxes.get(2).y,270);
   boxes.set(3,{x:10,y:265,w:80,h:3});
   assert.equal(reserveCascadeSpace(e,ctx,grown,{targetHandles:[1]}).code,'reserve_foreign_object');
@@ -40,6 +40,13 @@ test('cascade consumes real gaps and propagates only remaining growth', () => {
   const ctx = { paras: [para('a', 100, 100), para('b', 100, 85), para('c', 100, 70), para('left', 0, 80)] };
   assert.deepEqual([...cascadeShifts(ctx, [{ id: 'a', box: ctx.paras[0].box, delta: 8 }])], [['b', 3]]);
   assert.deepEqual([...cascadeShifts(ctx, [{ id: 'a', box: ctx.paras[0].box, delta: 13 }])], [['b', 8], ['c', 3]]);
+});
+
+test('reservation retains source gaps along the affected chain and leaves separate columns and distant text alone', () => {
+  const ctx = { paras: [para('a', 100, 100), para('b', 100, 89.43), para('c', 100, 78.86), para('distant', 100, 40), para('left', 0, 80)] };
+  const grown = [{ id: 'a', box: ctx.paras[0].box, delta: 10.75 }];
+  assert.deepEqual([...cascadeShifts(ctx, grown, { preserveSourceGaps: true })], [['b', 10.75], ['c', 10.75]]);
+  assert.deepEqual([...cascadeShifts(ctx, grown)].map(([id, dy]) => [id, +dy.toFixed(2)]), [['b', 10.18], ['c', 9.61]]);
 });
 
 function fixture(figure) {
@@ -119,4 +126,26 @@ test('existing source mask overlap is preserved while newly entered content stil
   assert.equal(cascadeBarrier(engine,ctx,grown,new Map()),null);
   boxes.set(2,{x:110,y:80,w:80,h:5});
   assert.equal(cascadeBarrier(engine,ctx,grown,new Map()),'a');
+});
+
+
+test('source baseline continuity keeps reference fragments with their body and protects furniture', () => {
+  const p = (id, x, top, w, h, ys, text) => ({id, box:{x,top,w,h}, lines:ys.map(y=>({y})), runs:[{text,size:10}], editable:true});
+  const input = [p('heading',100,208.342,57,13.201,[199],'References'),
+    p('marker',100,196.004,10,10.92,[190],'1'),
+    p('refs',117,196.004,236,139.944,[190,179.25,168.5,157.75,147,136.25,125.5,114.75,104,93.25,82.5,71.75,61],'reference body'),
+    p('edgeMarker',100,66.98,10,10.92,[61],'6'),
+    p('edgeLine',117,56.348,175,11.04,[50.25],'last reference line'),
+    p('footer',100,30,80,8,[24],'publisher footer'),
+    p('page',380,30,10,8,[24],'10'),
+    p('otherColumn',0,196,80,10,[190],'independent')];
+  const handles = new Map(input.map((p,i)=>[p.id,[i+1]]));
+  const e={page:1,pageIndex:0,pageWidth:500,pageHeight:800,M:{_FPDFPage_CountObjects:()=>input.length,_FPDFPage_GetObject:(_,i)=>i+1,_FPDFPageObj_GetType:()=>1},paragraphObjects:id=>handles.get(id)};
+  const ctx=capturePageLayout(e,0,input);
+  const roles=Object.fromEntries(ctx.paras.map(p=>[p.id,p.role]));
+  assert.equal(roles.edgeMarker,'body'); assert.equal(roles.edgeLine,'body');
+  assert.equal(roles.footer,'footer_uncertain'); assert.equal(roles.page,'page_number');
+  const shifts=cascadeShifts(ctx,[{id:'heading',delta:10.75}],{preserveSourceGaps:true});
+  for (const id of ['marker','refs','edgeMarker','edgeLine']) assert.equal(shifts.get(id),10.75,id);
+  assert.equal(shifts.has('otherColumn'),false); assert.equal(shifts.has('footer'),false);
 });
