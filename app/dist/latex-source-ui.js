@@ -4,9 +4,9 @@ export function createLatexSourceEditor({container, onEdit, onCompile, onDownloa
   const doc = container.ownerDocument;
   const el = (tag, attrs = {}, text = '') => { const n = doc.createElement(tag); for (const [k,v] of Object.entries(attrs)) { if (k === 'className') n.className = v; else n.setAttribute(k,v); } if (text) n.textContent = text; return n; };
   const section = el('section',{className:'latex-source-editor'});
-  const title = el('h2',{},'LaTeX 원본 편집');
+  const title = el('h2',{},'LaTeX 편집');
   const importLabel = el('label',{className:'latex-source-import'},'원본 파일');
-  const input = el('input',{type:'file',accept:'.tex,.zip,application/zip'}); importLabel.append(input);
+  const input = el('input',{type:'file',accept:'.tex,.zip,.json,application/zip,application/json'}); importLabel.append(input);
   const status = el('p',{className:'latex-source-status',role:'status'});
   const preview = el('div',{className:'latex-source-preview','aria-label':'PDF 미리보기'});
   const list = el('div',{className:'latex-source-nodes','aria-label':'원본 내용'});

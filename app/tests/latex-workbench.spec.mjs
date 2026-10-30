@@ -5,12 +5,34 @@ import {mkdtemp, writeFile, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {pathToFileURL} from 'node:url';
+import {readFile} from 'node:fs/promises';
+import {prepareReconstruction,createReconstructionProject,compareReconstruction,createReconstructionLineage} from '../src/pdf-latex-baseline.mjs';
+import {createLatexProject} from '../src/latex-project.mjs';
+import {encodeSourceSession,decodeSourceSession} from '../src/latex-session-archive.mjs';
+import {hex} from '../src/paragraph-pdf-crypto.mjs';
 
 const dir=await mkdtemp(join(tmpdir(),'falsify-workbench-'));
-const bundle=await build({entryPoints:[new URL('../src/latex-workbench.mjs',import.meta.url).pathname.replace(/^\/(\w:)/,'$1')],bundle:true,format:'esm',platform:'node',write:false,external:['./vendor/pdf.mjs']});
+const bundle=await build({entryPoints:[new URL('../src/latex-workbench.mjs',import.meta.url).pathname.replace(/^\/(\w:)/,'$1')],bundle:true,format:'esm',platform:'node',write:false,external:['./vendor/pdf.mjs'],plugins:[{name:'native-mupdf',setup(b){b.onResolve({filter:/^mupdf$/},()=>({path:import.meta.resolve('mupdf'),external:true}));}}]});
 const file=join(dir,'workbench.mjs');await writeFile(file,bundle.outputFiles[0].contents);
 const workbench=await import(pathToFileURL(file));
 const {proposalTransaction}=workbench;
+test('reconstruction archive preserves compared baseline bytes and concrete lineage without compiling',async()=>{
+  const bytes=new Uint8Array(await readFile(new URL('./fixtures/paragraph-marker-synthetic.pdf',import.meta.url))),sourceUpload={name:'synthetic.pdf',bytes,sha256:hex(bytes)};
+  const draft=await prepareReconstruction({file:new File([bytes],sourceUpload.name,{type:'application/pdf'})}),prepared=await createReconstructionProject(draft);
+  // Synthetic artifact for codec identity only; browser tests compile the emitted source.
+  const baseline={schema:'falsify.latex-artifact.v1',success:true,engine:'pdflatex',engineManifest:{name:'test-only'},projectId:prepared.project.id,pdfBytes:bytes,pdfHash:hex(bytes),synctex:Uint8Array.of(31,139,1)};
+  const comparison=compareReconstruction(draft.evidence.document,draft.evidence.document),reconstruction=createReconstructionLineage({project:prepared.project,artifact:baseline,comparison,bindings:prepared.bindings,decisions:[]});
+  const archive=await encodeSourceSession({project:prepared.project,changes:[],baseline,reconstruction,sourceUpload},{createLatexProject}),restored=await decodeSourceSession(archive,{createLatexProject});
+  assert.deepEqual(restored.baseline.pdfBytes,bytes);assert.deepEqual(restored.baseline.synctex,baseline.synctex);assert.equal(restored.baseline.projectId,prepared.project.id);
+  assert.deepEqual(workbench.validateRestoredReconstruction(restored),reconstruction);
+  const stale=structuredClone(restored);stale.sourceUpload.bytes[0]^=1;assert.throws(()=>workbench.validateRestoredReconstruction(stale));
+  const wrong=structuredClone(restored);wrong.baseline.projectId='0'.repeat(64);assert.throws(()=>workbench.validateRestoredReconstruction(wrong));
+  const newProject=await createLatexProject({...prepared.project,files:[...prepared.project.files,{path:'extra.txt',bytes:new TextEncoder().encode('new file')}]}),pending={schema:'falsify.reconstruction-pending.v1',sourcePdfHash:prepared.project.sourcePdfHash,reason:'files-added',previous:reconstruction,previousProject:workbench.reconstructionDescriptor(prepared.project)};
+  const pendingArchive=await encodeSourceSession({project:newProject,changes:[],baseline,reconstruction:pending,sourceUpload},{createLatexProject}),pendingRestored=await decodeSourceSession(pendingArchive,{createLatexProject});
+  assert.equal(workbench.validateRestoredReconstruction(pendingRestored).schema,'falsify.reconstruction-pending.v1');
+  const lost=structuredClone(pendingRestored);lost.reconstruction=null;assert.throws(()=>workbench.validateRestoredReconstruction(lost));
+  const changedPrior=structuredClone(pendingRestored);changedPrior.reconstruction.previousProject.files[0].sha256='0'.repeat(64);assert.throws(()=>workbench.validateRestoredReconstruction(changedPrior));
+});
 process.on('exit',()=>{void rm(dir,{recursive:true,force:true});});
 const anchor=(start,end)=>({projectId:'p',nodeId:'n',path:'main.tex',kind:'text',start,end});
 const part=(start,end)=>({anchor:anchor(start,end),before:'old',after:'new',kind:'text'});
