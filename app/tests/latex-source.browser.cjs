@@ -34,6 +34,8 @@ async function main() {
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, 'http://127.0.0.1');
+      // A static localhost preview has no companion broker. Return no token.
+      if (req.method === 'GET' && req.url === '/api/session') { res.writeHead(200, {'Content-Type':'application/json','Cache-Control':'no-store'}).end('{}'); return; }
       if (!url.pathname.startsWith(prefix)) { res.writeHead(404).end(); return; }
       const rel = decodeURIComponent(url.pathname.slice(prefix.length)) || 'index.html';
       const file = path.resolve(root, rel);
@@ -49,6 +51,7 @@ async function main() {
     const context = await browser.newContext({acceptDownloads:true});
     const origin = `http://127.0.0.1:${server.address().port}`;
     const failures = [], assets = [], posts = [];
+    let sessionChecks = 0;
     await context.route('**/*', route => {
       const url = new URL(route.request().url());
       if (url.protocol === 'data:' || url.protocol === 'blob:' || (url.origin === origin)) return route.continue();
@@ -61,11 +64,15 @@ async function main() {
       const u = new URL(r.url());
       if (u.origin === origin && /(?:latex-compiler-vendor|pdf\.worker)/.test(u.pathname)) assets.push(u.pathname);
       if (r.method() === 'POST' && /\/api\/(?:blue|red)\/jobs/.test(u.pathname)) posts.push(u.pathname);
-      if (u.origin === origin && !u.pathname.startsWith(prefix)) failures.push('root-origin request');
+      const localSession=u.origin===origin && r.method()==='GET' && u.pathname==='/api/session' && !u.search;
+      if (localSession) sessionChecks++;
+      if (u.origin === origin && !u.pathname.startsWith(prefix) && !localSession) failures.push('root-origin request');
     });
     page.on('response', r => { const u = new URL(r.url()); if (u.origin === origin && r.status() >= 400) failures.push(`local HTTP ${r.status()}`); });
     await page.goto(origin + prefix);
     await page.waitForFunction(() => !!window.FalsifyLatexWorkbench);
+    await page.evaluate(() => window.FalsifyLocalBridge.ready);
+    assert.equal(await page.evaluate(() => window.FalsifyLocalBridge.state().status),'local-unavailable');
     const zip = Buffer.from(zipSync(await fixtureZip(path.join(__dirname, 'fixtures/latex-source/project'))));
     await page.locator('#paper-file').setInputFiles({name:'synthetic-project.zip',mimeType:'application/zip',buffer:zip});
     const waitOutput = async enabled => {
@@ -193,6 +200,7 @@ async function main() {
     assert.equal(hash(reconstructionRestoredPdf),reconstructionRestored.hash);
     assert.ok((await extract(reconstructionRestoredPdf)).includes(reconstructionAfter));
     assert.equal(posts.length,0);
+    assert.equal(sessionChecks,1);
     assert.ok(assets.some(x=>x.endsWith('/busytex.wasm')) && assets.some(x=>x.endsWith('/texlive-basic.data')) && assets.some(x=>x.endsWith('/pdf.worker.mjs')));
     assert.ok(assets.every(x=>x.startsWith(prefix)));
     assert.deepEqual(failures, []);
