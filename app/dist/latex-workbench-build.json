@@ -1,0 +1,61 @@
+{
+  "schema": "falsify.browser-bundle.v1",
+  "inputs": [
+    {
+      "path": "dist/latex-source-ui.js",
+      "sha256": "8641a4c058ee9eaca184d39d863fca36dd4728714414f5c1601feccc072771af"
+    },
+    {
+      "path": "latex-compiler-manifest.json",
+      "sha256": "3f9a3b4f5ee5cd82530a83f6afa596a0dcd163359d89c4850af9e853455e485b"
+    },
+    {
+      "path": "src/latex-compiler-adapter.mjs",
+      "sha256": "5fe859ca86a83bcf180e13301b362f4e90cfa5e4714c2b36aa7fc3a00255448e"
+    },
+    {
+      "path": "src/latex-project.mjs",
+      "sha256": "d00ef5a988fc5bd1396839afeb735272b49574ba79e1782fef88f771fe97c67c"
+    },
+    {
+      "path": "src/latex-reference-policy.mjs",
+      "sha256": "9d792d80da09a5930f341d37fedafa52c93ab24b98ea65be355478faa760f0d0"
+    },
+    {
+      "path": "src/latex-semantic-edits.mjs",
+      "sha256": "2919ac9c914dc2f57b8d1bfc1830cfc9f06792589d991def7ccf9095407a5fec"
+    },
+    {
+      "path": "src/latex-session-archive.mjs",
+      "sha256": "fae7ae9867221a8d60c1465ac98045301f163732fe51212100e7b6859367384d"
+    },
+    {
+      "path": "src/latex-session.mjs",
+      "sha256": "a33ec1dab33c58898cce9dc9588a31259971ae6cc95b804901b087838a0934fe"
+    },
+    {
+      "path": "src/latex-source-model.mjs",
+      "sha256": "aa845d2ccb135ff90138482cb9b06a1afe1bced8399047cb10cdabca6b8182ab"
+    },
+    {
+      "path": "src/latex-source-patches.mjs",
+      "sha256": "561b0a8aff8d564cf58f4a38defe295b6373d9629c4021b29dbbcfe1362348f7"
+    },
+    {
+      "path": "src/latex-synctex-map.mjs",
+      "sha256": "7aadd169fbd8e14be16a86573171054f8cafde79fa9589b8fd037427cd89ba35"
+    },
+    {
+      "path": "src/latex-workbench.mjs",
+      "sha256": "7845d6bfa1c2b62603b477514b15a7bce4ec857ffd670437c97d95d34fb67326"
+    },
+    {
+      "path": "src/paragraph-pdf-crypto.mjs",
+      "sha256": "62a669dd4576506ca5911af3baf306548e153ad6bea449ad6a4dd00b1c10f2b9"
+    }
+  ],
+  "output": {
+    "path": "latex-workbench.mjs",
+    "sha256": "c10838289d99a7bb4d31ebbc64fd20e909ea6c5d09c25cc48f6928b700879bb4"
+  }
+}

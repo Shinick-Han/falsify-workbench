@@ -1,6 +1,8 @@
 import {spawnSync} from 'node:child_process';
 const latex = spawnSync(process.execPath, ['--test','tests/latex-source-project.spec.mjs','tests/latex-compiler.spec.mjs','tests/latex-semantic-edits.spec.mjs','tests/latex-session.spec.mjs','tests/latex-workbench.spec.mjs','tests/latex-session-archive.spec.mjs'], {stdio:'inherit'});
 if(latex.error || latex.status!==0)process.exit(latex.status||1);
+const marker = spawnSync(process.execPath, ['--test','tests/paragraph-pdf-content-operators.spec.mjs','tests/paragraph-pdf-marker-surgery.spec.mjs'], {stdio:'inherit'});
+if(marker.error || marker.status!==0)process.exit(marker.status||1);
 for (const file of ['paragraph-quality-repair.spec.mjs', 'browser-pdf-crop-table.spec.mjs', 'table-crop-fit.spec.mjs', 'paper-structured-table.spec.mjs', 'paragraph-mixed-table-repair.spec.mjs', 'paragraph-ruled-table.spec.mjs', 'paragraph-fixed-font-regression.spec.mjs', 'paragraph-scale-prefix.spec.mjs', 'paragraph-scale-prefix-integration.spec.mjs']) {
   const result = spawnSync(process.execPath, ['--test', 'tests/' + file], {stdio: 'inherit'});
   if (result.error || result.status !== 0) process.exit(result.status || 1);

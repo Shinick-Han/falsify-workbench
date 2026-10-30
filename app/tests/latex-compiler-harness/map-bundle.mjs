@@ -421,7 +421,7 @@ function parseSynctex(bytes, { project } = {}) {
     if (!m) continue;
     const source = inputs.get(+m[1]);
     if (!source) continue;
-    const matches = [...paths].filter((p) => source === p || source.endsWith("/" + p));
+    const matches = paths.has(source) ? [source] : [...paths].filter((p) => source.endsWith("/" + p));
     if (matches.length !== 1) continue;
     const scale = unit * (mag / 1e3) / 65536 * 72 / 72.27;
     const x2 = (+m[4] + xOffset) * scale, baseline = (+m[5] + yOffset) * scale;

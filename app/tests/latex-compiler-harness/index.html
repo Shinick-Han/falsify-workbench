@@ -2,7 +2,10 @@
 <button id="compile">Compile synthetic fixture</button><button id="cancel">Cancel</button><pre id="status">Ready</pre><script type="module">
 import {createLatexCompiler} from '../../src/latex-compiler-adapter.mjs';
 import * as mapApi from './map-bundle.mjs';
+import * as pdfjs from '../../dist/vendor/pdf.mjs';
+pdfjs.GlobalWorkerOptions.workerSrc=new URL('../../dist/vendor/pdf.worker.mjs',import.meta.url).href;
 window.fixtureMapApi=mapApi;
+window.fixturePdf=pdfjs;
 const paths=['main.tex','sections/body.tex','refs.bib','figure.png'];
 const compiler=createLatexCompiler();
 document.querySelector('#cancel').onclick=()=>compiler.cancel();

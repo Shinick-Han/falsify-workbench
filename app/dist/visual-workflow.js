@@ -23,7 +23,7 @@
       const drop=document.createElement('file-drop');drop.className='visual-drop';drop.setAttribute('multiple','');
       label.before(drop);drop.append(label);label.classList.add('visual-file-label');
       const portrait=el('span','visual-paper');portrait.append(icon('file-up'));
-      const title=el('strong','visual-file-title','논문 놓기'),meta=el('span','visual-file-meta','PDF · Word · 텍스트'),copy=el('span','visual-file-copy');copy.append(title,meta);
+      const title=el('strong','visual-file-title','논문 놓기'),meta=el('span','visual-file-meta',role==='red'?'PDF · Word · 텍스트 · 소스 ZIP':'PDF · Word · 텍스트'),copy=el('span','visual-file-copy');copy.append(title,meta);
       label.replaceChildren(portrait,copy,input);input.classList.add('visual-file-input');
       const error=el('p','form-feedback error');error.setAttribute('role','alert');drop.after(error);
       let epoch=0,task=null,timer=0;
@@ -46,7 +46,7 @@
         }catch{if(current===epoch)portrait.replaceChildren(icon('file-text'));} // Picking and extraction remain usable if thumbnail rendering fails.
       }
       let shown=null;
-      function sync(supplied){const file=supplied instanceof File?supplied:input.files?.[0]||null;if(file===shown)return;shown=file;drop.classList.toggle('has-file',!!file);title.textContent=file?file.name:'논문 놓기';meta.textContent=file?(file.size/1024/1024).toFixed(1)+' MB · 다른 파일로 바꾸기':'PDF · Word · 텍스트';error.textContent='';void thumbnail(file);}
+      function sync(supplied){const file=supplied instanceof File?supplied:input.files?.[0]||null;if(file===shown)return;shown=file;drop.classList.toggle('has-file',!!file);title.textContent=file?file.name:'논문 놓기';meta.textContent=file?(file.size/1024/1024).toFixed(1)+' MB · 다른 파일로 바꾸기':role==='red'?'PDF · Word · 텍스트 · 소스 ZIP':'PDF · Word · 텍스트';error.textContent='';void thumbnail(file);}
       drop.addEventListener('filedrop',event=>{
         const files=event.files||[];if(!files.length)return;
         if(files.length!==1){error.textContent='논문 한 개만 놓아주세요.';return;}
