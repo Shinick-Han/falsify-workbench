@@ -36,9 +36,12 @@ const pdfjsWasm = new Set(PDFJS_WASM);
 // Two-sentence synthetic handoff fixture; user papers remain excluded.
 const HANDOFF_FIXTURE = 'app/tests/fixtures/handoff-paper.pdf';
 const HANDOFF_FIXTURE_SHA256 = 'b518af142de7f30099d55a8125f9ae0e742ddefd403919106ed14b237822a275';
+// Two-page synthetic paragraph/link regression fixture; no real paper.
+const PARAGRAPH_FIXTURE = 'app/tests/fixtures/paragraph-audit-synthetic.pdf';
+const PARAGRAPH_FIXTURE_SHA256 = '188f53578f05e85a906a2ad58f34d0191408f60c8c0d448c87fe6625570b03f5';
 
 export function unexpectedReleasePaths(tracked) {
-  return tracked.filter(p => forbidden.test(p) && !pdfjsWasm.has(p) && p !== MUPDF_WASM && p !== RECOMPOSITION_WASM && p !== HANDOFF_FIXTURE && !PARAGRAPH_WASM.includes(p) && p !== 'experiments/selfplay_codex.py');
+  return tracked.filter(p => forbidden.test(p) && !pdfjsWasm.has(p) && p !== MUPDF_WASM && p !== RECOMPOSITION_WASM && p !== HANDOFF_FIXTURE && p !== PARAGRAPH_FIXTURE && !PARAGRAPH_WASM.includes(p) && p !== 'experiments/selfplay_codex.py');
 }
 
 export function verifyRecompositionRuntime(rootDir) {
@@ -127,6 +130,7 @@ export function assertShippableSource(tracked, rootDir) {
   const bad = unexpectedReleasePaths(tracked);
   if (bad.length) throw new Error(`Unexpected private/binary paths in source release: ${bad.join(', ')}`);
   if (tracked.includes(HANDOFF_FIXTURE) && createHash('sha256').update(readFileSync(join(rootDir, HANDOFF_FIXTURE))).digest('hex') !== HANDOFF_FIXTURE_SHA256) throw new Error('Synthetic handoff fixture digest mismatch.');
+  if (tracked.includes(PARAGRAPH_FIXTURE) && createHash('sha256').update(readFileSync(join(rootDir, PARAGRAPH_FIXTURE))).digest('hex') !== PARAGRAPH_FIXTURE_SHA256) throw new Error('Synthetic paragraph fixture digest mismatch.');
   if (tracked.includes(RECOMPOSITION_WASM)) verifyRecompositionRuntime(rootDir);
   if (PARAGRAPH_WASM.some(p => tracked.includes(p))) {
     if (!PARAGRAPH_WASM.every(p => tracked.includes(p))) throw new Error('Paragraph runtime requires both source and shipped WASM.');
