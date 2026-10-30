@@ -1,17 +1,28 @@
 // Use the model's display map to narrow a mixed sentence to a single source node.
 function narrowMixed(project, model, item, base) {
+  let rawLeft=0, rawRight=0;
+  while (rawLeft<item.before.length && rawLeft<item.after.length && item.before[rawLeft]===item.after[rawLeft]) rawLeft++;
+  while (rawRight<item.before.length-rawLeft && rawRight<item.after.length-rawLeft && item.before[item.before.length-1-rawRight]===item.after[item.after.length-1-rawRight]) rawRight++;
+  if (/\s/.test(item.before.slice(rawLeft,item.before.length-rawRight)+item.after.slice(rawLeft,item.after.length-rawRight))) return null;
+  const normalize = value => value.replace(/\s+/g,' ');
+  const beforeText=normalize(item.before), afterText=normalize(item.after);
   let left=0, right=0;
-  while (left<item.before.length && left<item.after.length && item.before[left]===item.after[left]) left++;
-  while (right<item.before.length-left && right<item.after.length-left && item.before[item.before.length-1-right]===item.after[item.after.length-1-right]) right++;
-  if (!left && !right || left===item.before.length-right) return null;
+  while (left<beforeText.length && left<afterText.length && beforeText[left]===afterText[left]) left++;
+  while (right<beforeText.length-left && right<afterText.length-left && beforeText[beforeText.length-1-right]===afterText[afterText.length-1-right]) right++;
+  if (!left && !right || left===beforeText.length-right) return null;
   const matches=[];
   for (const doc of model.documents || []) {
     if (item.path && item.path!==doc.path || !Array.isArray(doc.displayMap)) continue;
+    let normalized='', map=[];
+    for (let i=0;i<doc.displayText.length;) {
+      let j=i+1; if (/\s/.test(doc.displayText[i])) {while (j<doc.displayText.length && /\s/.test(doc.displayText[j])) j++; normalized+=' ';} else normalized+=doc.displayText[i];
+      map.push({start:i,end:j}); i=j;
+    }
     let at=-1;
-    while ((at=doc.displayText.indexOf(item.before,at+1))!==-1) matches.push({doc,at});
+    while ((at=normalized.indexOf(beforeText,at+1))!==-1) matches.push({doc,at,map});
   }
   if (matches.length!==1) return null;
-  const {doc,at}=matches[0], selected=doc.displayMap.slice(at+left,at+item.before.length-right);
+  const {doc,at,map}=matches[0], selected=doc.displayMap.slice(map[at+left].start,map[at+beforeText.length-right-1].end);
   if (!selected.length || selected.some(m=>!m || m.nodeId!==selected[0].nodeId)) return null;
   for (let i=1;i<selected.length;i++) if (selected[i-1].end!==selected[i].start) return null;
   const node=(model.nodes || []).find(n=>n.id===selected[0].nodeId && n.path===doc.path);
@@ -20,8 +31,8 @@ function narrowMixed(project, model, item, base) {
   if (start<node.contentStart || end>node.contentEnd) return null;
   const file=project.files?.find(f=>f.path===doc.path); if (!file) return null;
   let source; try {source=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(file.bytes);} catch {return null;}
-  const before=source.slice(start,end), after=item.after.slice(left,item.after.length-right);
-  if (before!==item.before.slice(left,item.before.length-right)) return null;
+  const before=source.slice(start,end), after=afterText.slice(left,afterText.length-right);
+  if (before!==beforeText.slice(left,beforeText.length-right)) return null;
   const anchor={projectId:project.id,nodeId:node.id,path:doc.path,start,end,kind:node.kind};
   return {...base,status:'matched',anchor,sourceChanges:[{...base,before,after,anchor,kind:node.kind}]};
 }
