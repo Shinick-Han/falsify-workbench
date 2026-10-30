@@ -51,6 +51,7 @@ export function canonicalPage(page, partition = userPartition(page)) {
         if (prior && h.g.r < prior.g.r) break;
         if (h.g.l <= g.l && Math.abs(h.g.origin[1]-g.origin[1]) <= .5 &&
             Math.abs(size(h.g)-size(g)) <= .2 && g.l-h.g.r <= size(g)*2 &&
+            !(h.g.r < partition && g.l >= partition && g.l-h.g.r > size(g)) &&
             (!prior || h.g.r > prior.g.r || (h.g.r === prior.g.r && h.order < prior.order))) prior=h;
       }
     }

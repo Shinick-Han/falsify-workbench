@@ -61,6 +61,20 @@ test('discretionary break requires physical letter endpoints and is accounted',(
   const result=canonicalPage(p); assert.equal(result.ok,true); assert.equal(result.text,'abcd'); assert.deepEqual(result.evidence.normalizedDiscretionary,[2]);
   p.chars[2].discretionary=false; assert.equal(canonicalPage(p).reason,'nonspace_geometry_unavailable');
 });
+test('discretionary join remains in its column when a nearby second column starts across midpoint',()=>{
+  const p=page('abXcdYZ'); p.chars[2]={u:2,discretionary:true,generated:false,origin:[92,10]};
+  p.glyphs=p.glyphs.filter(g=>g.i!==2);
+  for(const g of p.glyphs) {
+    const x=g.i<2?80+g.i*6:g.i<5?80+(g.i-3)*6:105;
+    const y=g.i<3||g.i===5?10:0;
+    Object.assign(g,{l:x,r:x+4,b:y,t:y+10,origin:[x,y]});
+  }
+  const result=canonicalPage(p);
+  assert.equal(result.ok,true); assert.equal(result.text,'abcd Y Z');
+  assert.deepEqual(result.evidence.normalizedDiscretionary,[2]);
+  const bad=structuredClone(p); bad.chars[2].origin[0]=120;
+  assert.equal(canonicalPage(bad).reason,'discretionary_break_unproven');
+});
 test('physical line breaks preserve word boundaries and literal controls',()=>{
   const p=page('ab\ncd'); p.chars[2].box=null; p.chars[2].origin=null; p.glyphs=p.glyphs.filter(g=>g.i!==2);
   for(const g of p.glyphs.filter(g=>g.i>2)) {g.l-=18;g.r-=18;g.origin=[g.l,0];}
