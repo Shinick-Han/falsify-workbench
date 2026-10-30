@@ -21,12 +21,12 @@ function select(bytes,quote) {
   assert.ok(pos>=0, `missing ${quote}`); assert.equal(str.indexOf(quote,pos+1),-1);
   const marker=pos+quote.indexOf('62'); return all.slice(marker,marker+2);
 }
-const args=(quote='62',bytes=source)=>({bytes,pageIndex:0,glyphs:select(bytes,quote),after:'63',fontSnapshot,fontPostscriptName:'LMRoman7-Regular',scanTextShows});
+const args=(quote='62',bytes=source)=>({bytes,pageIndex:0,glyphs:select(bytes,quote),after:'63',fontSnapshot,fontPostscriptName:'LMRoman7-Regular',scanTextShows,mupdf});
 for (const quote of ['62','An initial claim62 remains conditional.']) test(`source stream preserves full page for ${quote}`,async()=>{
   const input=args(quote), result=await replaceMarkerGlyph(input); assert.ok(result); assert.equal(result.report.changedPixels,58);
   const before=glyphs(source), after=glyphs(result.bytes), at=before.findIndex(g=>g.pdf[0]===input.glyphs[1].pdf[0]&&g.pdf[1]===input.glyphs[1].pdf[1]);
   assert.equal(before[at].c,'2'); assert.equal(after[at].c,'3'); assert.equal(after[at-1].c,'6'); assert.deepEqual(before.map(g=>g.c).join('').replace('62','63'),after.map(g=>g.c).join(''));
-  const d=new mupdf.PDFDocument(result.bytes); try {const fonts=d.findPage(0).get('Resources').get('Font'); const f=fonts.get('FwMarker'); assert.ok(f.get('ToUnicode').isStream()); const embedded=f.get('DescendantFonts').get(0).get('FontDescriptor').get('FontFile3').readStream(); try {assert.deepEqual(embedded.asUint8Array(),fontSnapshot.fonts[0].bytes);} finally {embedded.destroy();}} finally {d.destroy();}
+  const d=new mupdf.PDFDocument(result.bytes); try {const fonts=d.findPage(0).get('Resources').get('Font'); let f; fonts.forEach(v=>{if(v.get('Subtype').asName()==='Type0') f=v;}); assert.ok(f); assert.ok(f.get('ToUnicode').isStream()); const embedded=f.get('DescendantFonts').get(0).get('FontDescriptor').get('FontFile3').readStream(); try {assert.deepEqual(embedded.asUint8Array(),fontSnapshot.fonts[0].bytes);} finally {embedded.destroy();}} finally {d.destroy();}
 });
 test('rejects ambiguous source shows and mismatched source font',async()=>{
   const input=args(); const duplicate=raw=>{const p=scanTextShows(raw); return {...p,shows:[...p.shows,...p.shows]};};
