@@ -1,0 +1,7 @@
+# Local LaTeX compiler assets
+
+The adapter uses TeXlyre BusyTeX 1.4.1, API source commit 61b83cde2836d42cf941f6559d36c9678d52cbf2, AGPL-3.0-or-later: https://github.com/TeXlyre/texlyre-busytex . The upstream assets archive SHA-256 is `4f63731fe4ec9238d877846074ab424350add6f6e956944def389e6752d2c78b`. The build script verifies this archive and extracts only the combined engine and basic TeX Live data. Archive download is 521,748,902 bytes; extracted runtime files total approximately 128 MB. The archive includes upstream TeX Live components with their respective licenses; see the upstream repositories and distribution notices. Do not treat the basic package set as a full TeX distribution.
+
+From `app`, run `node scripts/build-latex-compiler.mjs`; optionally set `FALSIFY_BUSYTEX_ARCHIVE` to a previously downloaded archive. Serve `app` over HTTP and open `tests/latex-compiler-harness/`; click compile. All compilation and source files stay in the browser; no remote package endpoint or shell escape is enabled. Missing packages fail compilation. The current implementation creates a fresh worker per compile, so it does not promise warm in-memory engine reuse. Browser cache may cache the static data.
+
+SyncTeX mapping adapts TeXlyre parser from commit 92b50ca050af8473f0fd51a048a7e1d60dcdb2dc, AGPL-3.0-or-later: https://github.com/TeXlyre/texlyre/blob/92b50ca050af8473f0fd51a048a7e1d60dcdb2dc/src/utils/latexSynctexParser.ts . Mapping is line/box level only and reports no character precision.
