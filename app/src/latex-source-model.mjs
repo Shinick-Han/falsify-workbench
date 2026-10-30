@@ -22,9 +22,16 @@ export function analyzeLatexSource(project) {
  }
  if(n.type==='group')walk(n.content,inMath); else if(n.type==='environment'){
    let content=n.content;
-   // parseMinimal leaves float placement in the environment body. It is
-   // source configuration, not a rendered paragraph or editable caption.
-   if(['figure','figure*','table','table*'].includes(n.env)&&content?.[0]?.type==='string'&&content[0].content==='['){let j=1;while(j<content.length&&!(content[j].type==='string'&&content[j].content===']'))j++;if(j<content.length)content=content.slice(j+1);}
+   // These environments may consume a leading optional argument; parseMinimal
+   // leaves it in the body, including whitespace before the opening bracket.
+   if(['figure','figure*','table','table*','itemize','enumerate','description'].includes(n.env)){
+     let j=0; while(content?.[j]?.type==='whitespace')j++;
+     if(content?.[j]?.type==='string'&&content[j].content==='['){
+       let depth=0, k=j;
+       for(;k<content.length;k++) {if(content[k].type==='string'&&content[k].content==='[')depth++;if(content[k].type==='string'&&content[k].content===']'&&!--depth){k++;break;}}
+       if(depth===0)content=content.slice(k);
+     }
+   }
    walk(content,inMath);
  }
  }flush(); }

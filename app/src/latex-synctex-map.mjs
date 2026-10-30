@@ -21,7 +21,7 @@ export function parseSynctex(bytes,{project}={}) {
     const m=/^[h(\[](-?\d+),(-?\d+)(?:,(-?\d+))?:(-?\d+),(-?\d+):(-?\d+),(-?\d+),(-?\d+)/.exec(raw);
     if(!m)continue;
     const source=inputs.get(+m[1]); if(!source)continue;
-    const matches=[...paths].filter(p=>source===p || source.endsWith('/'+p));
+    const matches=paths.has(source) ? [source] : [...paths].filter(p=>source.endsWith('/'+p));
     if(matches.length!==1)continue;
     // SyncTeX coordinates are scaled TeX points measured from page top-left;
     // PDF points use 72/in instead of TeX's 72.27/in.

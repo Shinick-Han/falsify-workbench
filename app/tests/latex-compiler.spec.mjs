@@ -44,3 +44,17 @@ test('snapshot source bytes before asynchronous worker initialization',async()=>
  const pending=compiler.compile({project:input}); bytes[0]=66; instance.onmessage({data:{initialized:true}});
  assert.equal(instance.sent[1].files[0].contents[0],65); compiler.cancel(); await pending;
 });
+
+test('successful PDF retains bounded unresolved and font diagnostics without source logs',async()=>{
+ let instance; const compiler=createLatexCompiler({workerFactory:()=>instance={postMessage(){},terminate(){}}});
+ const pending=compiler.compile({project});
+ instance.onmessage({data:{pdf:new Uint8Array([37,80,68,70]),exit_code:0,log:"LaTeX Warning: Reference `private-key' on page 1 undefined.\nLaTeX Warning: Citation `private-cite' on page 1 undefined.\nMissing character: There is no private-character in font cmr10!"}});
+ const result=await pending; assert.equal(result.success,true);
+ assert.deepEqual(result.diagnostics.map(d=>d.code),['TEX_UNDEFINED_REFERENCE','TEX_UNDEFINED_CITATION','TEX_FONT_WARNING']);
+ assert.equal(JSON.stringify(result).includes('private-'),false);
+});
+test('SyncTeX prefers exact project path over a suffix match',()=>{
+ const input=new TextEncoder().encode(synctex.replace('/project/main.tex','sections/main.tex'));
+ const map=parseSynctex(input,{project:{...project,files:[{path:'main.tex'},{path:'sections/main.tex'}]}});
+ assert.equal(map.boxes[0].path,'sections/main.tex');
+});
