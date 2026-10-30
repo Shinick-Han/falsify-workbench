@@ -547,16 +547,19 @@ export async function editPdf(request, options = {}) {
           // Only a stepped commit (linePlan.breaks) can be undone here.
           const pre = linePlan?.breaks && localStable ? pageObjectList(engine) : null;
           const prefix = plan.plans.some((p) => p.geometricShortening && p.change.inserts.some((ins) => ins.pi === pi));
-          const scalePrefix = plan.plans.some((p) => p.change?.requiresPrefix && p.touched.includes(pi));
-          const sourceOwner = context.paras[pi], ownerHandles = new Set(sourceOwner.handles);
+          const sourceOwner = context?.paras?.[pi];
+          const hasSourceContext = Array.isArray(context?.objects) && Array.isArray(context?.types) && Array.isArray(sourceOwner?.handles) && Array.isArray(sourceOwner?.slots) && sourceOwner.slots.length > 0;
+          const scalePrefix = hasSourceContext && plan.plans.some((p) => p.change?.requiresPrefix && p.touched.includes(pi));
+          const ownerHandles = new Set(hasSourceContext ? sourceOwner.handles : []);
           const deletionSpan = !inserts.length ? editedLineSpan(para, del, inserts) : null;
-          const suffixSlots = deletionSpan && !deletionSpan.reason ? sourceOwner.slots.filter(slot => {
+          const suffixSlots = hasSourceContext && deletionSpan && !deletionSpan.reason ? sourceOwner.slots.filter(slot => {
             const b = engine.objectBounds(context.objects[slot]);
             return b && para.lines.slice(deletionSpan.k).some(l => l.y >= b.y - 1 && l.y <= b.y + b.h + 1);
           }) : [];
           const firstSuffixSlot = suffixSlots.length ? Math.min(...suffixSlots) : -1;
-          const foreignBetween = context.objects.slice(sourceOwner.slots[0], sourceOwner.slots.at(-1) + 1).filter(h => !ownerHandles.has(h));
-          const maskPrefix = deletionSpan && !deletionSpan.reason && deletionSpan.k > 0 && firstSuffixSlot >= 0 && foreignBetween.length === 1 && sourceOwner.slots.some(slot => {
+          // Any intervening path overlapping a retained source line can mask it.
+          // The prefix/suffix commit separately proves suffix contiguity and preserves page order.
+          const maskPrefix = hasSourceContext && deletionSpan && !deletionSpan.reason && deletionSpan.k > 0 && firstSuffixSlot >= 0 && sourceOwner.slots.some(slot => {
             const prefixHandle = context.objects[slot], b = engine.objectBounds(prefixHandle);
             if (!b || slot >= firstSuffixSlot || !para.lines.slice(0, deletionSpan.k).some(l => l.y >= b.y - 1 && l.y <= b.y + b.h + 1)) return false;
             return context.objects.slice(slot + 1, firstSuffixSlot).some((h, offset) => {
