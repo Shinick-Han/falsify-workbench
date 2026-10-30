@@ -380,7 +380,10 @@ export function cascadeShifts(ctx, grown, { preserveSourceGaps = false } = {}) {
         && Math.max(...lines) < Math.min(...prevLines) - 0.5)) continue;
       const gap = Math.max(0, -metricOverlap);
       const needed = displacement - gap;
-      shift = Math.max(shift, preserveSourceGaps && needed > 0.01 ? displacement : needed);
+      // Retain two points of source separation, while allowing larger
+      // paragraph gaps to absorb growth before moving the downstream chain.
+      const reserved = displacement - Math.max(0, gap - 2);
+      shift = Math.max(shift, preserveSourceGaps && needed > 0.01 ? reserved : needed);
     }
     if (shift > 0.01) shifts.set(q.id, shift);
   }

@@ -23,7 +23,7 @@ test('reservation checks barriers and rolls back a recorded whole-body move', ()
     {id:'b',role:'body',box:{x:10,top:280,w:80,h:10},handles:[2],editable:true,topLevel:true,baselines:[275]}]};
   const grown=[{id:'a',box:ctx.paras[0].box,delta:15}];
   const r=reserveCascadeSpace(e,ctx,grown,{targetHandles:[1]});
-  assert.equal(r.ok,true); assert.equal(boxes.get(2).y,255); assert.equal(r.context.paras[1].box.top,265);
+  assert.equal(r.ok,true); assert.equal(boxes.get(2).y,263); assert.equal(r.context.paras[1].box.top,273);
   assert.equal(ctx.paras[1].box.top,280); assert.equal(r.rollback(),true); assert.equal(boxes.get(2).y,270);
   boxes.set(3,{x:10,y:265,w:80,h:3});
   assert.equal(reserveCascadeSpace(e,ctx,grown,{targetHandles:[1]}).code,'reserve_foreign_object');
