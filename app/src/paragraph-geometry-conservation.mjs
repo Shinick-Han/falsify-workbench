@@ -7,18 +7,39 @@ const valid = n => Number.isFinite(n);
 const size = g => g.style?.size * Math.hypot(g.style?.mat?.[2] ?? 0, g.style?.mat?.[3] ?? 1);
 const fail = (reason, index, extra = {}) => ({ok:false, reason, ...(index === undefined ? {} : {index}), ...extra});
 
-export function canonicalPage(page, partition = page?.W / 2) {
-  if (!page || !Array.isArray(page.chars) || !Array.isArray(page.glyphs) || !valid(page.W) || !valid(page.H) || !valid(partition)) return fail('page_geometry_unavailable');
-  const frame = page.frame;
-  if (!frame || frame.rotation !== 0 || !Array.isArray(frame.transform) || frame.transform.length !== 6 || frame.transform.some(x => !valid(x)) || Math.abs(frame.transform[1]) > 1e-6 || Math.abs(frame.transform[2]) > 1e-6 || frame.transform[0] <= 0 || frame.transform[3] <= 0) return fail('unsupported_frame');
+// PDFium glyph boxes and origins are in unrotated PDF user space. The page
+// transform maps that space into the displayed page; invert its four corners
+// to locate the same two-column partition in user space for each quarter turn.
+function userPartition(page) {
+  const f = page?.frame, t = f?.transform;
+  const matrices = [[1,0,0,1], [0,-1,1,0], [-1,0,0,-1], [0,1,-1,0]];
+  if (!Number.isInteger(f?.rotation) || !matrices[f.rotation] || !Array.isArray(t) || t.length !== 6 || t.some(x => !valid(x))) return null;
+  const upright = f.rotation === 0 && Math.abs(t[1]) <= 1e-6 && Math.abs(t[2]) <= 1e-6 && t[0] > 0 && t[3] > 0;
+  if (!upright && matrices[f.rotation].some((x,i) => Math.abs(x-t[i]) > 1e-6)) return null;
+  const [a,b,c,d,e,f0] = t, det = a*d-b*c;
+  const xs = [[0,0],[page.W,0],[0,page.H],[page.W,page.H]].map(([x,y]) => (d*(x-e)-c*(y-f0))/det);
+  return (Math.min(...xs)+Math.max(...xs))/2;
+}
+
+export function canonicalPage(page, partition = userPartition(page)) {
+  if (!page || !Array.isArray(page.chars) || !Array.isArray(page.glyphs) || !valid(page.W) || !valid(page.H)) return fail('page_geometry_unavailable');
+  if (userPartition(page) === null) return fail('unsupported_frame');
   const glyphs = new Map();
   for (const g of page.glyphs) {
     if (!Number.isInteger(g.i) || g.i < 0 || g.i >= page.chars.length || glyphs.has(g.i) || g.u !== page.chars[g.i].u || ![g.l,g.r,g.b,g.t,g.origin?.[0],g.origin?.[1]].every(valid) || g.r < g.l || g.t < g.b || !valid(size(g)) || size(g) <= 0) return fail('glyph_geometry_unavailable',g.i);
     glyphs.set(g.i,g);
   }
   const lines = [];
-  for (const g of [...glyphs.values()].sort((a,b)=>b.origin[1]-a.origin[1] || a.l-b.l || a.i-b.i)) {
-    const channel = g.l < partition ? 0 : 1;
+  const ordered = [...glyphs.values()].sort((a,b)=>b.origin[1]-a.origin[1] || a.l-b.l || a.i-b.i);
+  // A physical line can cross the midpoint. Keep adjacent glyphs on one
+  // baseline in the channel of its start; a large gap still separates columns.
+  const channels = new Map();
+  for (const g of ordered) {
+    const prior = ordered.filter(h => h !== g && h.l <= g.l && channels.has(h.i) && Math.abs(h.origin[1]-g.origin[1]) <= .5 && Math.abs(size(h)-size(g)) <= .2 && g.l-h.r <= size(g)*2).sort((a,b)=>b.r-a.r)[0];
+    channels.set(g.i, prior ? channels.get(prior.i) : (g.l < partition ? 0 : 1));
+  }
+  for (const g of ordered) {
+    const channel = channels.get(g.i);
     const candidates = lines.filter(l=>l.channel===channel && Math.abs(l.y-g.origin[1])<=.5 && Math.abs(l.size-size(g))<=.2);
     if (candidates.length > 1) return fail('ambiguous_baseline',g.i);
     let line=candidates[0];
@@ -90,7 +111,27 @@ export function canonicalPage(page, partition = page?.W / 2) {
           right.l-left.r>0.01 && x>=left.r-.5 && x<=right.l+.5 &&
           [line,...line.aliases].some(b=>Math.abs(b.y-y)<=.5)) {
         line.items.push({i,u:32,x,r:x,generated:true});
-      } else ignored.push(i);
+      } else {
+        // PDFium can emit the generated separator between two objects in
+        // stream order even when those objects extract in reverse visual order.
+        // Prove a single adjacent physical boundary between those same objects.
+        const a = glyphs.get(i-1), b = glyphs.get(i+1);
+        const line = lines[itemLine.get(i-1)];
+        let inserted = false;
+        if (c.u === 32 && a?.obj && b?.obj && a.obj !== b.obj && line && itemLine.get(i-1) === itemLine.get(i+1)) {
+          const items = [...line.items].sort((p,q)=>p.x-q.x);
+          const boundaries = [];
+          for (let k=1;k<items.length;k++) {
+            const l=glyphs.get(items[k-1].i), r=glyphs.get(items[k].i);
+            if (l && r && ((l.obj===a.obj && r.obj===b.obj) || (l.obj===b.obj && r.obj===a.obj)) && r.l-l.r>0.01 && r.l-l.r<=line.size) boundaries.push([l,r]);
+          }
+          if (boundaries.length===1) {
+            const [l,r]=boundaries[0], x=(l.r+r.l)/2;
+            line.items.push({i,u:32,x,r:x,generated:true}); inserted=true;
+          }
+        }
+        if (!inserted) ignored.push(i);
+      }
       continue;
     }
     const [l,r,b,t]=c.box ?? [];
@@ -100,7 +141,8 @@ export function canonicalPage(page, partition = page?.W / 2) {
       if (!br || !/[\r\n]/u.test(String.fromCharCode(c.u))) return fail('literal_whitespace_geometry_unavailable',i);
       boundaryWhitespace.push(i); literalBoundaries.add(br.li); continue;
     }
-    const channel=x<partition?0:1;
+    const neighbours = [glyphs.get(i-1), glyphs.get(i+1)].filter(Boolean);
+    const channel = neighbours.length ? channels.get(neighbours[0].i) : (x<partition?0:1);
     // An attached script keeps its original baseline. Only its immediate raw
     // glyph neighbour can establish ownership of whitespace on that baseline.
     let before=i-1, after=i+1;

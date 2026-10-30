@@ -16,7 +16,7 @@
 // self-check, not an independent or rendering-based release check.
 
 import { createHash } from "node:crypto";
-import { compareSourceGeometry } from "../paragraph-geometry-conservation.mjs";
+import { canonicalPage, compareSourceGeometry } from "../paragraph-geometry-conservation.mjs";
 import { resolvePageFraction } from "./continuation-template.mjs";
 import { deriveDocumentFlowBand } from "./document-flow-band.mjs";
 import { deriveNativeLinkMoves, deriveNativeFitRMoves, nativeFitRTargetPages, savedLinkGlyphs } from "./document-flow-links.mjs";
@@ -748,6 +748,70 @@ function edgeBodySplit(src, out, i, oi, s, o, es, eo) {
   return { bodyChanged, edgeMissing, edgeAdded, edgeStyleChanged };
 }
 
+// Authorize only the changed subrange of an unambiguously located edit.
+// Unchanged prefix/suffix glyphs remain subject to the ordinary edge check.
+export function authorizedEdgeChanges(source, output, edits, es, eo) {
+  let exp = expectedPageText(source.text, edits, { includeSpans: true });
+  let sn = normalizedSourceChars(source.chars), on = normalizedSourceChars(output.chars);
+  if (!exp.ok || on.map(c => c.ch).join('') !== exp.text) {
+    const verified = compareSourceGeometry(source, output, edits, { expectedPageText });
+    if (!verified.ok || !verified.match) return false;
+    const a = canonicalPage(source), b = canonicalPage(output, a.partition);
+    if (!a.ok || !b.ok) return false;
+    const normalize = chars => normalizedSourceChars(chars).map(c => ({...c, sourceIndex: c.sourceIndex === undefined ? undefined : chars[c.sourceIndex].i}));
+    sn = normalize(a.chars); on = normalize(b.chars);
+    exp = expectedPageText(a.text, edits, { includeSpans: true });
+  }
+  if (!exp.ok || on.map(c => c.ch).join('') !== exp.text) return false;
+  const sourceIndices = new Set(), outputIndices = new Set(), shiftedPairs = [];
+  const sourceGlyph = new Map(source.glyphs.map(c => [c.i, c]));
+  const outputGlyph = new Map(output.glyphs.map(c => [c.i, c]));
+  let delta = 0;
+  for (const span of exp.spans) {
+    const before = sn.slice(span.a, span.b).map(c => c.ch).join('');
+    const after = span.after;
+    let prefix = 0, suffix = 0;
+    while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) prefix++;
+    while (suffix < before.length - prefix && suffix < after.length - prefix && before[before.length - 1 - suffix] === after[after.length - 1 - suffix]) suffix++;
+    for (const c of sn.slice(span.a + prefix, span.b - suffix)) if (c.sourceIndex !== undefined) sourceIndices.add(c.sourceIndex);
+    const start = span.a + delta;
+    // Retained glyphs on the edited baseline may shift by a fraction of a
+    // point. Pair them by text identity and require one consistent shift.
+    const changed = sn.slice(span.a + prefix, span.b - suffix).map(c => sourceGlyph.get(c.sourceIndex)).filter(Boolean);
+    const nextSpan = exp.spans.find(s => s.a >= span.b && s !== span);
+    const retainedEnd = nextSpan?.a ?? sn.length;
+    let previous = changed.at(-1);
+    for (let k = span.b - suffix; k < retainedEnd; k++) {
+      const a = sourceGlyph.get(sn[k]?.sourceIndex);
+      const b = outputGlyph.get(on[start + after.length - suffix + k - (span.b - suffix)]?.sourceIndex);
+      if (!a || !b) continue;
+      if (!previous?.origin || !a.origin || Math.abs(previous.origin[1]-a.origin[1]) > .1 ||
+          source.chars.slice(previous.i + 1, a.i).some(c => c.u === 10 || c.u === 13) ||
+          a.l - previous.r > (previous.style?.size || 0) * 2) break;
+      previous = a;
+      const dx = b.l-a.l;
+      // A retained suffix inside the explicit edit may be redrawn at the
+      // end of a shorter replacement; it is still part of that edit.
+      if (k < span.b && Math.abs(dx) > 1 && changed.some(c => c.origin && b.origin && Math.abs(c.origin[1]-b.origin[1]) <= .1) &&
+          b.l >= Math.min(...changed.map(c => c.l)) - 1 && b.r <= Math.max(a.r, ...changed.map(c => c.r)) + 1) {
+        sourceIndices.add(a.i); outputIndices.add(b.i); continue;
+      }
+      if (a.u === b.u && Math.abs(dx) > .5 && Math.abs(dx) <= 1 && Math.abs((b.r-a.r)-dx) <= .1 && Math.abs(a.b-b.b) <= .1 && Math.abs(a.t-b.t) <= .1 && sameStyle(a.style,b.style)) shiftedPairs.push({a,b,dx});
+    }
+    for (const c of on.slice(start + prefix, start + after.length - suffix)) if (c.sourceIndex !== undefined) outputIndices.add(c.sourceIndex);
+    delta += after.length - (span.b - span.a);
+  }
+  // Edge bands are derived from glyph extents and can change as the edited
+  // line shrinks. Match unchanged edge glyphs against the entire other page.
+  const sourceDiff = alignEdgeGlyphs(es, output.glyphs);
+  const outputDiff = alignEdgeGlyphs(source.glyphs, eo);
+  const shifts = shiftedPairs.map(p => p.dx);
+  if (shifts.length && Math.max(...shifts) - Math.min(...shifts) > .1) return false;
+  return sourceDiff.missing.every(c => sourceIndices.has(c.i) || shiftedPairs.some(p => p.a.i === c.i)) &&
+    outputDiff.added.every(c => outputIndices.has(c.i) || shiftedPairs.some(p => p.b.i === c.i)) &&
+    sourceDiff.restyled.length === 0 && outputDiff.restyled.length === 0;
+}
+
 function extents(g) {
   if (!g.glyphs.length) return null;
   return { left: Math.min(...g.glyphs.map((c) => c.l)), right: Math.max(...g.glyphs.map((c) => c.r)) };
@@ -954,10 +1018,11 @@ export async function inspectSavedPdf(engineFactory, sourceBytes, outputBytes, e
           if (!normStr(e.after)) continue;
           const exact = t.includes(normStr(e.after));
           const normalized = !exact && findGeneratedWhitespaceMatches(e.after, o.chars).length > 0;
-          row.after_checks.push({ id: e.id, present: exact || normalized,
-            method: exact ? "extracted-text" : normalized ? "generated-whitespace" : "not-found" });
+          const physical = !exact && !normalized && row.spatial_conservation?.match === true && normStr(canonicalPage(o).text ?? '').includes(normStr(e.after));
+          row.after_checks.push({ id: e.id, present: exact || normalized || physical,
+            method: exact ? "extracted-text" : normalized ? "generated-whitespace" : physical ? "spatial-order" : "not-found" });
           if (normalized) warnings.push({ code: "after_generated_whitespace_normalized", pageIndex: i, id: e.id, severity: "warning" });
-          if (!exact && !normalized) failures.push({ code: "after_missing", pageIndex: i, id: e.id });
+          if (!exact && !normalized && !physical) failures.push({ code: "after_missing", pageIndex: i, id: e.id });
         }
       }
       row.offpage = { source: offPage(s), output: offPage(o) };
@@ -972,11 +1037,10 @@ export async function inspectSavedPdf(engineFactory, sourceBytes, outputBytes, e
       row.edge_glyphs = es.length;
       row.edge_stable = stable;
       if (!stable) {
-        const edgeText = normStr(String.fromCharCode(...es.map((c) => c.u)));
-        const editsEdge = pageEdits.some((e) => edgeText.replace(/ /g, "").includes(normStr(e.before).replace(/ /g, "")));
+        const editsEdge = authorizedEdgeChanges(s, o, pageEdits, es, eo);
         const split = editsEdge ? null : edgeBodySplit(src, out, i, m.outputPageIndex, s, o, es, eo);
         if (split) row.edge_split = split;
-        if (editsEdge) warnings.push({ code: "edge_edit_unverified", pageIndex: i });
+        if (editsEdge) warnings.push({ code: "edge_edit_authorized", pageIndex: i });
         else if (!split || split.edgeMissing || split.edgeAdded) failures.push({ code: "header_footer_moved", pageIndex: i, ...(split || {}) });
         else if (split.edgeStyleChanged) failures.push({ code: "header_footer_style_changed", pageIndex: i, ...split });
         else failures.push({ code: "edge_band_body_changed", pageIndex: i, count: split.bodyChanged });
