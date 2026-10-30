@@ -136,6 +136,7 @@ test('source baseline continuity keeps reference fragments with their body and p
     p('refs',117,196.004,236,139.944,[190,179.25,168.5,157.75,147,136.25,125.5,114.75,104,93.25,82.5,71.75,61],'reference body'),
     p('edgeMarker',100,66.98,10,10.92,[61],'6'),
     p('edgeLine',117,56.348,175,11.04,[50.25],'last reference line'),
+    p('raised',320,69,12,6,[64],'citation'),
     p('footer',100,30,80,8,[24],'publisher footer'),
     p('page',380,30,10,8,[24],'10'),
     p('otherColumn',0,196,89,10,[190],'independent')];
@@ -143,9 +144,15 @@ test('source baseline continuity keeps reference fragments with their body and p
   const e={page:1,pageIndex:0,pageWidth:500,pageHeight:800,M:{_FPDFPage_CountObjects:()=>input.length,_FPDFPage_GetObject:(_,i)=>i+1,_FPDFPageObj_GetType:()=>1},paragraphObjects:id=>handles.get(id)};
   const ctx=capturePageLayout(e,0,input);
   const roles=Object.fromEntries(ctx.paras.map(p=>[p.id,p.role]));
-  assert.equal(roles.edgeMarker,'body'); assert.equal(roles.edgeLine,'body');
+  assert.equal(roles.edgeMarker,'body'); assert.equal(roles.edgeLine,'body'); assert.equal(roles.raised,'body');
   assert.equal(roles.footer,'footer_uncertain'); assert.equal(roles.page,'page_number');
   const shifts=cascadeShifts(ctx,[{id:'heading',delta:10.75}],{preserveSourceGaps:true});
   for (const id of ['marker','refs','edgeMarker','edgeLine']) assert.equal(shifts.get(id),10.75,id);
   assert.equal(shifts.has('otherColumn'),false); assert.equal(shifts.has('footer'),false);
+});
+
+ test('nearby full-width columns sharing a baseline are not inline fragments', () => {
+  const left={...para('left',0,100),baselines:[95,85,75],size:10};
+  const right={...para('right',87,100),baselines:[95,85,75],size:10};
+  assert.equal(cascadeShifts({paras:[left,right]},[{id:'left',delta:10}],{preserveSourceGaps:true}).has('right'),false);
 });
