@@ -53,6 +53,16 @@ test('ordinary expansion moves a raw URI link and validates saved geometry',asyn
   try {assert.deepEqual(ra.getPixels(),rb.getPixels());} finally {ra.destroy();rb.destroy();pa.destroy();pb.destroy();}
  }finally{a.destroy();b.destroy();}
 });
+
+test('whole paragraph replacement retains unchanged URI label identity',async()=>{
+ const src=fixture(), before='An initial claim includes supporting REFERENCE. All measurement conditions remain explicitly stated. The remaining evidence stays available for review.';
+ const after=before.replace('An initial claim','An expanded explanation of the measured outcome and its interpretation under the experimental conditions');
+ const result=await prepare({file:src,edits:[{id:'whole',pageIndex:0,before,after}]}), report=result.verification.report;
+ assert.equal(report.paragraphLinkMoves.length,1,JSON.stringify(report.selfCheck.failures));
+ assert.ok(!report.selfCheck.failures.some(f=>f.code==='paragraph_link_unverified'),JSON.stringify(report.selfCheck.failures));
+ const d=new mupdf.PDFDocument(new Uint8Array(await result.file.arrayBuffer()));
+ try {assert.equal(d.findPage(0).get('Annots',0,'A','URI').asString(),'https://example.invalid/reference');} finally {d.destroy();}
+});
 test('link moves while the complete comment dictionary remains bound',async()=>{
  const src=fixture(true),result=await prepare({file:src,edits:[edit]}),report=result.verification.report,pdf=new Uint8Array(await result.file.arrayBuffer());
  assert.equal(report.paragraphLinkMoves.length,1,JSON.stringify(report.selfCheck.failures));
