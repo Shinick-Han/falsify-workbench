@@ -87,9 +87,9 @@ async function main() {
     await page.locator('#external-red-paste').fill(JSON.stringify({changes:[{before,after}]}));
     await page.locator('#external-red').getByRole('button',{name:'응답 가져오기'}).click();
     await page.waitForFunction(() => document.querySelector('.latex-change-row input')?.checked, null, {timeout});
-    const edited = await waitOutput(true);
+    const edited = await waitOutput(true); console.log('Source project compile and edit passed');
     assert.notEqual(edited.hash, initial.hash);
-    const download = async button => { const pending=page.waitForEvent('download'); await button.click(); return (await pending).createReadStream(); };
+    const download = async button => { const pending=page.waitForEvent('download',{timeout}); pending.catch(()=>{}); await button.click(); return (await pending).createReadStream(); };
     const streamBytes = async stream => { const chunks=[]; for await (const chunk of stream) chunks.push(chunk); return Buffer.concat(chunks); };
     const pdf = await streamBytes(await download(page.locator('#latex-source-workbench').getByRole('button',{name:'PDF 다운로드'})));
     assert.equal(hash(pdf), edited.hash);
@@ -106,11 +106,11 @@ async function main() {
     await page.locator('#latex-source-workbench').getByRole('button',{name:'BLUE로 보내기'}).click();
     await page.waitForFunction(h => window.FalsifyDocumentBlueExternal?.getSource()?.fileHash === h, edited.hash, {timeout});
     assert.equal(await page.locator('#doc-blue-consent').isChecked(), false);
-    await page.locator('#doc-blue-request').evaluate(e => e.closest('details').open = true);
+    await page.locator('#doc-blue-request').evaluate(e => {for(let p=e.parentElement;p;p=p.parentElement)if(p.tagName==='DETAILS')p.open=true;});
     const request = JSON.parse((await streamBytes(await download(page.locator('#doc-blue-request')))).toString());
     const requestText = JSON.stringify(request);
     for (const forbidden of ['sourceSession','sourceChanges','proposals','responseId','sections/body.tex','An initial claim']) assert.ok(!requestText.includes(forbidden), 'RED/source metadata leaked into BLUE request');
-    assert.equal(posts.length, 0);
+    assert.equal(posts.length, 0); console.log('BLUE PDF-only request passed');
     await page.locator('[data-view="workbench"]').first().click();
     await page.locator('#latex-source-workbench').getByRole('button',{name:'실행 취소'}).click();
     await waitOutput(false);
@@ -166,6 +166,7 @@ async function main() {
     assert.equal(reconstruction.comparison.sourcePages,1);
     assert.equal(reconstruction.comparison.baselinePages,1);
     for(const key of ['text','numbers']) {assert.deepEqual(reconstruction.comparison[key].missing,[]);assert.deepEqual(reconstruction.comparison[key].added,[]);}
+    console.log('Reconstruction baseline comparison passed');
     const reconstructedPdf=await streamBytes(await download(page.getByRole('button',{name:'재구성 PDF 다운로드',exact:true})));
     assert.equal(hash(reconstructedPdf),reconstruction.hash);
     await page.getByRole('button',{name:'이 기준본으로 편집',exact:true}).click();
@@ -189,7 +190,7 @@ async function main() {
     await page.locator('#latex-source-workbench').getByRole('button',{name:'BLUE로 보내기'}).click();
     await page.waitForFunction(h=>window.FalsifyDocumentBlueExternal?.getSource()?.fileHash===h,reconstructionEdited.hash,{timeout});
     assert.equal(await page.locator('#doc-blue-consent').isChecked(),false);
-    await page.locator('#doc-blue-request').evaluate(e=>e.closest('details').open=true);
+    await page.locator('#doc-blue-request').evaluate(e=>{for(let p=e.parentElement;p;p=p.parentElement)if(p.tagName==='DETAILS')p.open=true;});
     const reconstructionRequest=JSON.parse((await streamBytes(await download(page.locator('#doc-blue-request')))).toString());
     for(const forbidden of ['sourceSession','sourceChanges','reconstruction-lineage','baselinePdfHash','responseId']) assert.ok(!JSON.stringify(reconstructionRequest).includes(forbidden),'reconstruction metadata leaked into BLUE request');
     await page.locator('[data-view="workbench"]').first().click();
