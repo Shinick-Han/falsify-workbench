@@ -553,7 +553,14 @@ export function restoreSourceOrder(engine, ctx, repairs, warnings) {
   const current = listObjects(engine);
   const present = new Set(current);
   const ownerOfSource = new Map();
-  for (const q of ctx.paras) for (const h of q.handles) ownerOfSource.set(h, q.id);
+  for (const q of ctx.paras) for (const h of q.handles) {
+    if (ownerOfSource.has(h) && ownerOfSource.get(h) !== q.id) {
+      warnings.push({ code: "object_shared_between_paragraphs", id: q.id, severity: "warning" });
+      repairs.push({ kind: "reading_order", action: "skipped", reason: "object_shared_between_paragraphs" });
+      return;
+    }
+    ownerOfSource.set(h, q.id);
+  }
 
   const changed = [];
   const claimed = new Map();
@@ -579,29 +586,48 @@ export function restoreSourceOrder(engine, ctx, repairs, warnings) {
       if (o !== undefined && o !== q.id) return fail("handle_identity_reused", { id: q.id });
       if (o === undefined && ctx.objects.includes(h)) return fail("handle_identity_reused", { id: q.id });
     }
-    // A source paragraph can end in an overlay above its own masking path.
-    // Retain that final painter slot; moving its replacement to the first
-    // slot would put the new text underneath the surviving mask. Other
-    // objects retain their relative order. The preview and saved checks
-    // still report layout changes independently of this ordering repair.
     if (interleaved) warnings.push({ code: "interleaved_source_overlay_order", id: q.id, severity: "warning" });
-    changed.push({ id: q.id, first: ctx.objects[interleaved ? hi : lo], now });
+    const source = ctx.objects.filter((h) => ownerOfSource.get(h) === q.id);
+    const survivors = source.filter((h) => now.includes(h));
+    const currentSurvivors = now.filter((h) => source.includes(h));
+    if (survivors.length !== currentSurvivors.length || survivors.some((h, i) => h !== currentSurvivors[i])) {
+      return fail("surviving_source_order_ambiguous", { id: q.id });
+    }
+    // Surviving handles anchor their original painter slots. Fresh handles
+    // can only occupy deleted source slots in the same interval between
+    // anchors; a fully replaced interleaved paragraph keeps the existing
+    // final-slot overlay policy.
+    const insertions = new Map();
+    let srcStart = 0, nowStart = 0;
+    for (const anchor of [...survivors, null]) {
+      const srcEnd = anchor === null ? source.length : source.indexOf(anchor, srcStart);
+      const nowEnd = anchor === null ? now.length : now.indexOf(anchor, nowStart);
+      const deleted = source.slice(srcStart, srcEnd);
+      const fresh = now.slice(nowStart, nowEnd);
+      if (fresh.length && !deleted.length) return fail("replacement_without_source_slot", { id: q.id });
+      if (fresh.length) {
+        const slot = interleaved ? deleted[deleted.length - 1] : deleted[0];
+        insertions.set(slot, fresh);
+      }
+      srcStart = srcEnd + 1;
+      nowStart = nowEnd + 1;
+    }
+    changed.push({ id: q.id, insertions, survivors: new Set(survivors) });
   }
   if (!changed.length) {
     repairs.push({ kind: "reading_order", action: "unchanged", moved: 0 });
     return;
   }
   const changedIds = new Set(changed.map((c) => c.id));
-  const firstSlot = new Map(changed.map((c) => [c.first, c]));
+  const byId = new Map(changed.map((c) => [c.id, c]));
   const desired = [];
   for (const h of ctx.objects) {
-    const c = firstSlot.get(h);
+    const c = byId.get(ownerOfSource.get(h));
     if (c) {
-      const pos = new Map(current.map((x, i) => [x, i]));
-      desired.push(...[...c.now].sort((a, b) => pos.get(a) - pos.get(b)));
+      if (c.insertions.has(h)) desired.push(...c.insertions.get(h));
+      if (c.survivors.has(h)) desired.push(h);
       continue;
     }
-    if (changedIds.has(ownerOfSource.get(h))) continue;
     if (!present.has(h)) continue;
     if (claimed.has(h) && changedIds.has(claimed.get(h))) continue;
     desired.push(h);
