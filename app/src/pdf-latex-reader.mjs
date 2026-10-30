@@ -5,7 +5,7 @@ const aborted=()=>Object.assign(new Error('작업을 취소했습니다.'),{name
 let sequence=0;
 /** Each read or comparison gets a fresh Worker and privately owned input bytes. */
 export function createReconstructionReader({workerFactory}={}){
-  const create=workerFactory||(()=>{if(typeof Worker!=='function')throw error('WORKER_UNAVAILABLE','이 브라우저에서 PDF 재구성 작업자를 사용할 수 없습니다.');return new Worker(new URL('./pdf-latex-reader-worker.mjs',import.meta.url),{type:'module'});});
+  const create=workerFactory||(()=>{if(typeof Worker!=='function')throw error('WORKER_UNAVAILABLE','이 브라우저에서 PDF 재구성 작업자를 사용할 수 없습니다.');const url=new URL('./pdf-latex-reader-worker.mjs',import.meta.url);url.search=new URL(import.meta.url).search;return new Worker(url,{type:'module'});});
   let active=null,disposed=false;
   function cancel(){active?.abort();}
   function dispose(){disposed=true;cancel();}
