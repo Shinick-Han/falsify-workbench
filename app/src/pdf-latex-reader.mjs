@@ -4,7 +4,7 @@ const error=(code,message)=>Object.assign(new Error(message),{code});
 const aborted=()=>Object.assign(new Error('작업을 취소했습니다.'),{name:'AbortError',code:'ABORTED'});
 let sequence=0;
 /** Each read or comparison gets a fresh Worker and privately owned input bytes. */
-export function createReconstructionReader({workerFactory}={}){
+export function createReconstructionReader({workerFactory,startupTimeoutMs=30000}={}){
   const create=workerFactory||(()=>{if(typeof Worker!=='function')throw error('WORKER_UNAVAILABLE','이 브라우저에서 PDF 재구성 작업자를 사용할 수 없습니다.');const url=new URL('./pdf-latex-reader-worker.mjs',import.meta.url);url.search=new URL(import.meta.url).search;return new Worker(url,{type:'module'});});
   let active=null,disposed=false;
   function cancel(){active?.abort();}
@@ -13,8 +13,8 @@ export function createReconstructionReader({workerFactory}={}){
     if(disposed)return Promise.reject(error('READER_DISPOSED','작업자가 종료되었습니다.'));
     cancel();const id=++sequence,signal=request?.signal;
     return new Promise((resolve,reject)=>{
-      let worker=null,done=false;
-      const finish=(fn,value)=>{if(done)return;done=true;signal?.removeEventListener('abort',abort);if(worker){worker.onmessage=null;worker.onerror=null;worker.onmessageerror=null;worker.terminate();}if(active?.id===id)active=null;fn(value);};
+      let worker=null,done=false,posted=false,startupTimer=null;
+      const finish=(fn,value)=>{if(done)return;done=true;clearTimeout(startupTimer);signal?.removeEventListener('abort',abort);if(worker){worker.onmessage=null;worker.onerror=null;worker.onmessageerror=null;worker.terminate();}if(active?.id===id)active=null;fn(value);};
       const abort=()=>finish(reject,aborted());active={id,abort};signal?.addEventListener('abort',abort,{once:true});
       if(signal?.aborted)return abort();
       (async()=>{
@@ -41,7 +41,16 @@ export function createReconstructionReader({workerFactory}={}){
         if(done)return;if(!bytes.length||bytes.length>MAX_BYTES)throw error('INVALID_INPUT','PDF 크기가 허용 범위를 벗어났습니다.');
         const sha=hex(bytes);worker=create();if(done){worker.terminate();return;}
         worker.onmessage=({data})=>{
-          if(done||data?.id!==id)return;
+          if(done)return;
+          if(data?.type==='ready'){
+            if(posted)return;
+            posted=true;clearTimeout(startupTimer);
+            try{worker.postMessage({id,type:kind,bytes,sourceDocument,sourceBytes},sourceBytes?[bytes.buffer,sourceBytes.buffer]:[bytes.buffer]);}
+            catch{return finish(reject,error('WORKER_FAILED','PDF 재구성 작업을 시작하지 못했습니다.'));}
+            return;
+          }
+          if(!posted){if(data?.type==='error')finish(reject,error('WORKER_FAILED','PDF 재구성 작업자를 시작하지 못했습니다.'));return;}
+          if(data?.id!==id)return;
           if(data.type==='progress'){try{request.onProgress?.('원본의 글·그림·표를 읽고 있습니다.');}catch{}return;}
           if(data.type==='error')return finish(reject,error('WORKER_FAILED','PDF 재구성 작업에 실패했습니다.'));
           if(data.type!=='result')return finish(reject,error('INVALID_RESULT','PDF 재구성 결과를 확인할 수 없습니다.'));
@@ -55,7 +64,7 @@ export function createReconstructionReader({workerFactory}={}){
         };
         worker.onerror=()=>finish(reject,error('WORKER_FAILED','PDF 재구성 작업에 실패했습니다.'));
         worker.onmessageerror=()=>finish(reject,error('WORKER_FAILED','PDF 재구성 결과를 읽지 못했습니다.'));
-        worker.postMessage({id,type:kind,bytes,sourceDocument,sourceBytes},sourceBytes?[bytes.buffer,sourceBytes.buffer]:[bytes.buffer]);
+        startupTimer=setTimeout(()=>finish(reject,error('WORKER_START_TIMEOUT','PDF 재구성 작업자가 응답하지 않습니다. 다시 시도하세요.')),Number.isFinite(startupTimeoutMs)&&startupTimeoutMs>0?startupTimeoutMs:30000);
       })().catch(e=>{if(done)return;if(e?.code==='WORKER_UNAVAILABLE'||e?.code==='INVALID_INPUT')finish(reject,e);else finish(reject,error('WORKER_FAILED','PDF 재구성 작업에 실패했습니다.'));});
     });
   }

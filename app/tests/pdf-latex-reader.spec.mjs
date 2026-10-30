@@ -5,7 +5,7 @@ import {createReconstructionReader} from '../src/pdf-latex-reader.mjs';
 import {installReconstructionReaderWorker} from '../src/pdf-latex-reader-worker.mjs';
 import {hex} from '../src/paragraph-pdf-crypto.mjs';
 function fixture(text){const d=new mupdf.PDFDocument(),font=new mupdf.Font('Helvetica');try{const f=d.addSimpleFont(font);d.insertPage(-1,d.addPage([0,0,300,400],0,{Font:{F:f}},`BT /F 12 Tf 30 330 Td (${text}) Tj ET`));const b=d.saveToBuffer();try{return b.asUint8Array().slice();}finally{b.destroy();}}finally{font.destroy();d.destroy();}}
-class FakeWorker {constructor(){this.terminated=false;this.sent=[];} postMessage(m,t){this.sent.push(structuredClone(m,{transfer:t}));} terminate(){this.terminated=true;} reply(data){this.onmessage?.({data});}}
+class FakeWorker {constructor({manual=false}={}){this.terminated=false;this.sent=[];if(!manual)queueMicrotask(()=>this.reply({type:'ready'}));} postMessage(m,t){this.sent.push(structuredClone(m,{transfer:t}));} terminate(){this.terminated=true;} reply(data){this.onmessage?.({data});}}
 const tick=()=>new Promise(r=>setImmediate(r));
 const file=b=>({size:b.length,arrayBuffer:async()=>b.buffer});
 const draft=(sha,assets=[])=>({sourceSha256:sha,model:{schema:'falsify.pdf-latex-reconstruction.v1',sourceSha256:sha,assets},evidence:{document:{sourceSha256:sha,pages:[{text:'x'}]}}});
@@ -32,5 +32,16 @@ test('sourceFile capture observes abort before spawning and active cancel termin
 test('worker compares both real synthetic PDFs from bytes with source-bound hashes',async()=>{
  const messages=[],scope={postMessage:(m,t=[])=>messages.push(structuredClone(m,{transfer:t}))};installReconstructionReaderWorker(scope);
  const original=fixture('Value -63 and 1.5 percent.'),baseline=fixture('Value 63 and 1.5 percent.');await scope.onmessage({data:{id:7,type:'compare',sourceBytes:original,bytes:baseline}});
- const c=messages[0].result;assert.equal(c.sourcePdfHash,hex(original));assert.equal(c.baselinePdfHash,hex(baseline));assert.equal(c.sourcePages,1);assert.equal(c.baselinePages,1);assert.deepEqual(c.numbers.missing,['-63']);assert.deepEqual(c.numbers.added,['63']);
+ const c=messages.find(x=>x.type==='result').result;assert.equal(c.sourcePdfHash,hex(original));assert.equal(c.baselinePdfHash,hex(baseline));assert.equal(c.sourcePages,1);assert.equal(c.baselinePages,1);assert.deepEqual(c.numbers.missing,['-63']);assert.deepEqual(c.numbers.added,['63']);
 });
+test('delayed ready sends one request only and ignores stale worker ready',async()=>{
+ const workers=[],r=createReconstructionReader({workerFactory:()=>{const w=new FakeWorker({manual:true});workers.push(w);return w;}}),b=Uint8Array.of(1,2),first=r.read({file:file(b)});await tick();const w1=workers[0],old=w1.onmessage;assert.equal(w1.sent.length,0);
+ const second=r.read({file:file(b)});await assert.rejects(first,{name:'AbortError'});await tick();const w2=workers[1];old({data:{type:'ready'}});assert.equal(w1.sent.length,0);assert.equal(w2.sent.length,0);
+ w2.reply({type:'ready'});w2.reply({type:'ready'});assert.equal(w2.sent.length,1);w2.reply({id:w2.sent[0].id,type:'result',result:draft(hex(b))});await second;assert.ok(w2.terminated);
+});
+test('abort before ready never transfers and startup failure or timeout cleans up',async()=>{
+ const workers=[],r=createReconstructionReader({workerFactory:()=>{const w=new FakeWorker({manual:true});workers.push(w);return w;},startupTimeoutMs:15}),b=Uint8Array.of(1),c=new AbortController(),p=r.read({file:file(b),signal:c.signal});await tick();const w=workers[0],handler=w.onmessage;c.abort();await assert.rejects(p,{name:'AbortError'});handler({data:{type:'ready'}});assert.equal(w.sent.length,0);assert.ok(w.terminated);
+ const q=r.read({file:file(b)});await tick();const w2=workers[1];w2.onerror({message:'private source'});await assert.rejects(q,e=>e.code==='WORKER_FAILED'&&!e.message.includes('private'));assert.ok(w2.terminated);assert.equal(w2.sent.length,0);
+ const t=r.read({file:file(b)});await tick();const w3=workers[2];await assert.rejects(t,{code:'WORKER_START_TIMEOUT'});assert.ok(w3.terminated);assert.equal(w3.sent.length,0);
+});
+test('worker announces readiness only after installing request handler',()=>{let handlerAtReady=false;const scope={postMessage(m){if(m.type==='ready')handlerAtReady=typeof scope.onmessage==='function';}};installReconstructionReaderWorker(scope);assert.equal(handlerAtReady,true);});

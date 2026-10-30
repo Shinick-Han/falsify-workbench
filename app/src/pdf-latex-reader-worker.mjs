@@ -23,5 +23,6 @@ export function installReconstructionReaderWorker(scope,{prepare=prepareReconstr
       }
     }catch{scope.postMessage({id,type:'error',code:'WORKER_FAILED'});}
   };
+  scope.postMessage({type:'ready'});
 }
 if(typeof WorkerGlobalScope!=='undefined'&&globalThis instanceof WorkerGlobalScope)installReconstructionReaderWorker(globalThis);
