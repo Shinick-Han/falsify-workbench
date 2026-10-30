@@ -7,16 +7,30 @@ const fail = code => { throw Object.assign(new Error(code), {code}); };
 const finite = v => typeof v === 'number' && Number.isFinite(v);
 const dimension = n => Number(n.toFixed(6)).toString();
 const escapeMap = {'\\':'\\textbackslash{}','{':'\\{','}':'\\}','$':'\\$','&':'\\&','#':'\\#','%':'\\%','_':'\\_','~':'\\textasciitilde{}','^':'\\textasciicircum{}','-':'{-}','`':'\\textasciigrave{}',"'":'\\textquotesingle{}'};
+// Preserve the original Unicode in editable TeX. Isolated glyph declarations
+// do not assert equation semantics; PDF glyph mapping still needs comparison.
+const unicodeMacros = {
+  ' ':'\\thinspace', ' ':'\\kern.05em', '–':'\\textendash{}',
+  '−':'\\ensuremath{-}', '±':'\\ensuremath{\\pm}', 'μ':'\\ensuremath{\\mu}',
+  'µ':'\\ensuremath{\\mu}', 'β':'\\ensuremath{\\beta}', '∞':'\\ensuremath{\\infty}',
+  '×':'\\ensuremath{\\times}', '°':'\\textdegree{}', '’':'\\textquoteright{}',
+  '‘':'\\textquoteleft{}', 'ï':'\\"{i}', 'á':"\\'{a}", 'é':"\\'{e}",
+  'ó':"\\'{o}", 'ú':"\\'{u}", 'í':"\\'{i}", 'ü':'\\"{u}',
+  'ä':'\\"{a}', 'ö':'\\"{o}', 'ñ':'\\~{n}', '©':'\\copyright{}',
+  'ﬀ':'ff'
+};
+const unicodePreamble=Object.entries(unicodeMacros).map(([ch,macro])=>`\\DeclareUnicodeCharacter{${ch.codePointAt(0).toString(16).toUpperCase().padStart(4,'0')}}{${macro}}`).join('\n')+'\n';
 function plain(text) {
-  let unsupported = false, output = '';
+  let unsupported = false, mapped = false, output = '';
   for (const ch of text) {
     const cp = ch.codePointAt(0);
     if (escapeMap[ch]) output += escapeMap[ch];
     else if (ch === '\n' || ch === '\r' || ch === '\t') output += ' ';
     else if (cp >= 32 && cp <= 126) output += ch;
+    else if (Object.hasOwn(unicodeMacros,ch)) { mapped=true; output+=ch; }
     else { unsupported = true; output += `\\fbox{U+${cp.toString(16).toUpperCase()}}`; }
   }
-  return {output,unsupported};
+  return {output,unsupported,mapped};
 }
 function evidenceValid(ref, hash, pages) {
   return ref && ref.sourceSha256 === hash && Number.isInteger(ref.pageIndex) && pages.has(ref.pageIndex) && ref.frame === 'mupdf-display' && Array.isArray(ref.bbox) && ref.bbox.length === 4 && ref.bbox.every(finite) && ref.bbox[0] <= ref.bbox[2] && ref.bbox[1] <= ref.bbox[3] && (!ref.range || Number.isInteger(ref.range.start) && Number.isInteger(ref.range.end) && ref.range.start >= 0 && ref.range.end >= ref.range.start);
@@ -53,7 +67,7 @@ export function serializeReconstruction({model, decisions=[], engine='pdflatex'}
   let status = diagnostics.some(d=>d.severity==='error') ? 'unsupported' : diagnostics.some(d=>d.severity==='warning') ? 'needs-review' : 'ready';
   const issue=(code,item,severity='warning')=>{diagnostics.push({code,severity,...(item?{itemId:item.id,pageIndex:item.evidence[0].pageIndex}:{})}); if(severity==='error') status='unsupported'; else if(status==='ready') status='needs-review';};
   issue('LAYOUT_OVERFLOW_UNVERIFIED');
-  let source='\\documentclass{article}\n\\usepackage{graphicx}\n\\pagestyle{empty}\n\\setlength{\\parindent}{0pt}\n\\setlength{\\parskip}{6pt}\n\\begin{document}\n';
+  let source='\\documentclass{article}\n\\usepackage{graphicx}\n'+unicodePreamble+'\\pagestyle{empty}\n\\setlength{\\parindent}{0pt}\n\\setlength{\\parskip}{6pt}\n\\begin{document}\n';
   const append=(item, body, bindingStatus)=>{const start=source.length; source+=body; bindings.push({itemId:item.id,projectId:null,path:'main.tex',start,end:source.length,evidence:structuredClone(item.evidence),status:bindingStatus}); source+='\n\n';};
   if (!model.items.length) issue('MISSING_CONTENT',null,'error');
   for (const relation of model.relations) if (relation.status!=='confirmed') issue('RELATION_REVIEW');
@@ -77,8 +91,9 @@ export function serializeReconstruction({model, decisions=[], engine='pdflatex'}
         if(valid) {
           const cells=rows.map(row=>row.map(c=>plain(c.text)));
           if(cells.flat().some(c=>c.unsupported)) issue('UNICODE_REVIEW',item);
+          if(cells.flat().some(c=>c.mapped)) issue('UNICODE_RENDER_REVIEW',item);
           const original=cells.flat().some(c=>c.unsupported) ? rows.flat().map(c=>'% Original UTF-8 cell: '+c.text.replace(/[\r\n]/g,' ')).join('\n')+'\n' : '';
-          append(item,original+'\\begin{tabular}{'+('l'.repeat(width))+'}\n'+cells.map(row=>row.map(c=>c.output).join(' & ')+' \\\\').join('\n')+'\n\\end{tabular}','reviewed');
+          append(item,original+'\\begin{tabular}{'+('l'.repeat(width))+'}\n'+cells.map(row=>row.map(c=>c.output).join(' & ')+' \\\\').join('\n')+'\n\\end{tabular}',cells.flat().some(c=>c.mapped||c.unsupported)?'review-required':'reviewed');
           continue;
         }
         issue('TABLE_STRUCTURE_REVIEW',item);
@@ -100,6 +115,7 @@ export function serializeReconstruction({model, decisions=[], engine='pdflatex'}
       if (typeof item.text==='string' && item.text.length) {
         const text=plain(item.text);
         if (text.unsupported) issue('UNICODE_REVIEW',item);
+        if (text.mapped) issue('UNICODE_RENDER_REVIEW',item);
         if (/\s{2}|[\r\n\t]/.test(item.text)) issue('TEXT_SPACING_REVIEW',item);
         if (semantic) issue('TRANSCRIPTION_REVIEW',item);
         if (!['paragraph','heading'].includes(item.kind)) issue('ITEM_KIND_REVIEW',item);
@@ -115,7 +131,7 @@ export function serializeReconstruction({model, decisions=[], engine='pdflatex'}
           content=`\\fontsize{${dimension(size)}bp}{${dimension(size*1.2)}bp}\\selectfont ${content}\\par\\normalsize`;
         }
         const body=original+content;
-        append(item,body,'exact-text');
+        append(item,body,text.unsupported||text.mapped?'review-required':'exact-text');
       } else {
         issue('MISSING_CONTENT',item,'error');
         source+=`% Content missing for item ${index + 1}; review source evidence.\n`;
