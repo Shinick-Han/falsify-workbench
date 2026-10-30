@@ -814,10 +814,11 @@ export function authorizedEdgeChanges(source, output, edits, es, eo, body = []) 
     if (!edited.some(c => c.b >= box.top && c.l <= box.x + box.w && c.r >= box.x)) continue;
     const members = source.glyphs.filter(c => inBoxes(c, [box]));
     if (!members.length || members.some(c => sourceIndices.has(c.i))) continue;
+    const memberIds = new Set(members.map(c => c.i));
     const pairs = [];
     for (let k = 0; k < sn.length; k++) {
       const a = sourceGlyph.get(sn[k].sourceIndex);
-      if (!a || !members.includes(a)) continue;
+      if (!a || !memberIds.has(a.i)) continue;
       let offset = 0;
       for (const span of exp.spans) if (span.b <= k) offset += span.after.length - (span.b - span.a);
       const b = outputGlyph.get(on[k + offset]?.sourceIndex);
