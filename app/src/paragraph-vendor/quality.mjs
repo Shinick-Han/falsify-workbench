@@ -17,7 +17,8 @@
 
 import { createHash } from "node:crypto";
 import { canonicalPage, compareSourceGeometry } from "../paragraph-geometry-conservation.mjs";
-import { resolvePageFraction, ruledTableRegions, inRuledTable } from "./continuation-template.mjs";
+import { resolvePageFraction } from "./continuation-template.mjs";
+import { sourceTableCells, inSourceTableCell } from "../paragraph-source-tables.mjs";
 import { deriveDocumentFlowBand } from "./document-flow-band.mjs";
 import { deriveNativeLinkMoves, deriveNativeFitRMoves, nativeFitRTargetPages, savedLinkGlyphs } from "./document-flow-links.mjs";
 import { verifySavedUnderlines } from "./document-flow-underlines.mjs";
@@ -1088,7 +1089,7 @@ export async function inspectSavedPdf(engineFactory, sourceBytes, outputBytes, e
       if (m.continuationPageIndices.length) {
         row.continuationPageIndices = [...m.continuationPageIndices];
         if (!pageEdits.length) failures.push({ code: "continuation_without_edit", pageIndex: i });
-        else { ensurePage(src, i); inspectContinued(s, o, out, m, pageEdits, row, failures, warnings, !!options.includeText, ruledTableRegions(src)); }
+        else { ensurePage(src, i); inspectContinued(s, o, out, m, pageEdits, row, failures, warnings, !!options.includeText, sourceTableCells(src)); }
         continue;
       }
       if (!pageEdits.length) {
@@ -1675,7 +1676,7 @@ function inspectContinued(s, o, out, m, pageEdits, row, failures, warnings, incl
     if (c.offpage) failures.push({ code: "glyphs_off_page", pageIndex: i, outputPageIndex: c.outputPageIndex, count: c.offpage });
     if (c.overlap > overlaps(s, true)) failures.push({ code: "glyph_overlap_increased", pageIndex: i, outputPageIndex: c.outputPageIndex });
     if (m.continuationStyle) {
-      c.edges = checkContinuationEdges(s, es.filter(c => !inRuledTable(c, sourceTables)), g, edge, k + 1, i, c.outputPageIndex, failures);
+      c.edges = checkContinuationEdges(s, es.filter(c => !inSourceTableCell(c, sourceTables)), g, edge, k + 1, i, c.outputPageIndex, failures);
     } else if (c.outside_band) {
       failures.push({ code: "continuation_outside_body_band", pageIndex: i, outputPageIndex: c.outputPageIndex });
     }

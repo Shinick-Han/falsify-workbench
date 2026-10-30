@@ -1,3 +1,4 @@
+import { sourceTableCells, inSourceTableCell } from "../paragraph-source-tables.mjs";
 // Source-style running headers/footers on continuation pages.
 //
 // A continuation page repeats the edge text of its source page: every text
@@ -18,54 +19,6 @@ const OBJ_TEXT = 1;
 const POS_TOL = 0.05;
 const ANCHOR_TOL = 0.1;
 const CENTER_TOL = 2;
-
-// Recognize only complete, axis-aligned ruled grids. The immutable source
-// page is inspected independently by the saved-PDF checker using this same
-// routine; arbitrary aligned prose and single decoration rules are not a
-// table. Unsupported paths are simply not evidence of a grid.
-export function ruledTableRegions(engine) {
-  const M=engine.M, page=engine.page, n=M._FPDFPage_CountObjects(page);
-  if (typeof M._FPDFPage_GetRotation !== 'function' || M._FPDFPage_GetRotation(page)!==0 || (engine.pageT || [1,0,0,1,0,0]).some((v,i)=>!Number.isFinite(v)||Math.abs(v-[1,0,0,1,0,0][i])>1e-4) ||
-      n>5000 || !['_FPDFPath_CountSegments','_FPDFPath_GetPathSegment','_FPDFPathSegment_GetPoint','_FPDFPathSegment_GetType','_FPDFPageObj_GetMatrix','_FPDFPath_GetDrawMode','_FPDFPageObj_GetClipPath','_FPDFClipPath_CountPaths','_FPDFPageObj_HasTransparency','_FPDFPageObj_GetDashCount'].every(k=>typeof M[k]==='function')) return [];
-  const horizontal=[], vertical=[], textBoxes=[], p=M._malloc(32), near=(a,b)=>Math.abs(a-b)<.1;
-  try {
-    for(let i=0;i<n;i++) {
-      const h=M._FPDFPage_GetObject(page,i)>>>0;
-      if(M._FPDFPageObj_GetType(h)===OBJ_TEXT) { const b=objectBox(M,h); if(b)textBoxes.push(b); continue; }
-      if(M._FPDFPageObj_GetType(h)!==2 || M._FPDFPath_CountSegments(h)!==2 || !M._FPDFPageObj_GetMatrix(h,p)) continue;
-      const clip=M._FPDFPageObj_GetClipPath(h), clipCount=clip?M._FPDFClipPath_CountPaths(clip):-1;
-      if(clipCount>0 || clipCount< -1 || M._FPDFPageObj_HasTransparency(h) || M._FPDFPageObj_GetDashCount(h)!==0) continue;
-      const m=Array.from(M.HEAPF32.slice(p>>2,(p>>2)+6));
-      if(m.some(v=>!Number.isFinite(v)) || !m.slice(0,4).every((v,k)=>near(v,[1,0,0,1][k]))) continue;
-      const points=[];
-      for(let k=0;k<2;k++) {const seg=M._FPDFPath_GetPathSegment(h,k);if(M._FPDFPathSegment_GetType(seg)!==(k?0:2)||!M._FPDFPathSegment_GetPoint(seg,p,p+4))break;points.push([M.HEAPF32[p>>2]+m[4],M.HEAPF32[(p>>2)+1]+m[5]]);}
-      if(points.length!==2 || points.flat().some(v=>!Number.isFinite(v)) || !M._FPDFPath_GetDrawMode(h,p,p+4) || M.HEAP32[p>>2]!==0 || !M.HEAP32[(p>>2)+1]) continue;
-      const [[x,y],[xx,yy]]=points;
-      if(near(y,yy)&&Math.abs(x-xx)>2) horizontal.push({y:(y+yy)/2,x0:Math.min(x,xx),x1:Math.max(x,xx)});
-      else if(near(x,xx)&&Math.abs(y-yy)>2) vertical.push({x:(x+xx)/2,y0:Math.min(y,yy),y1:Math.max(y,yy)});
-    }
-  } finally {M._free(p);}
-  if(horizontal.length>128 || vertical.length>128) return [];
-  const regions=[];
-  for(const h of horizontal) {
-    const hs=horizontal.filter(v=>near(v.x0,h.x0)&&near(v.x1,h.x1));
-    const ys=[...new Set(hs.map(v=>v.y.toFixed(1)))].map(Number).sort((a,b)=>a-b);
-    if(ys.length<3 || ys.length>32) continue;
-    const vs=vertical.filter(v=>near(v.y0,ys[0])&&near(v.y1,ys.at(-1))&&v.x>=h.x0-.1&&v.x<=h.x1+.1);
-    const xs=[...new Set(vs.map(v=>v.x.toFixed(1)))].map(Number).sort((a,b)=>a-b);
-    if(xs.length<3 || xs.length>32 || !near(xs[0],h.x0) || !near(xs.at(-1),h.x1)) continue;
-    const cells=new Set();
-    for(const b of textBoxes) for(let x=0;x<xs.length-1;x++)for(let y=0;y<ys.length-1;y++)
-      if(b.l>=xs[x]-.1&&b.r<=xs[x+1]+.1&&b.b>=ys[y]-.1&&b.t<=ys[y+1]+.1)cells.add(`${x},${y}`);
-    const occupied=[...cells].map(s=>s.split(',').map(Number));
-    if(cells.size<4 || new Set(occupied.map(c=>c[0])).size<2 || new Set(occupied.map(c=>c[1])).size<2) continue;
-    if(!regions.some(r=>near(r.x0,h.x0)&&near(r.x1,h.x1)&&near(r.y0,ys[0])&&near(r.y1,ys.at(-1)))) regions.push({x0:h.x0,x1:h.x1,y0:ys[0],y1:ys.at(-1),xs,ys});
-  }
-  return regions;
-}
-
-export const inRuledTable = (b, regions) => regions.some(r => r.xs.slice(1).some((x1,x)=>r.ys.slice(1).some((y1,y)=>
-  b.l>=r.xs[x]-.1 && b.r<=x1+.1 && b.b>=r.ys[y]-.1 && b.t<=y1+.1)));
 
 export const CONTINUATION_STYLE = Object.freeze({ version: 1, policy: "source-number-suffix" });
 
@@ -301,7 +254,7 @@ export function snapshotPageEdges(engine, floor, bodyTop, exclude = null, select
   const pageW = M._FPDF_GetPageWidthF(page), pageH = M._FPDF_GetPageHeightF(page);
   const lo = floor - 0.5, hi = bodyTop + 0.5;
   const n = M._FPDFPage_CountObjects(page);
-  const tables = selection ? [] : ruledTableRegions(engine);
+  const tables = selection ? [] : sourceTableCells(engine);
   const order = new Map();
   const edges = [];
   for (let i = 0; i < n; i++) {
@@ -311,7 +264,7 @@ export function snapshotPageEdges(engine, floor, bodyTop, exclude = null, select
     if (exclude?.has(h)) continue;
     const bx = objectBox(M, h);
     if (!bx) continue;
-    if (M._FPDFPageObj_GetType(h) === OBJ_TEXT && inRuledTable(bx, tables)) continue;
+    if (M._FPDFPageObj_GetType(h) === OBJ_TEXT && inSourceTableCell(bx, tables)) continue;
     const cy = (bx.b + bx.t) / 2;
     if (!selection && cy >= lo && cy <= hi) continue;
     edges.push({ h, index: i, bounds: bx, band: cy > hi ? "top" : "bottom" });

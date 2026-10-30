@@ -5,6 +5,7 @@ import {loadRuntime, RUNTIME} from './paragraph-pdf-runtime.mjs';
 import {hex} from './paragraph-pdf-crypto.mjs';
 import {createAnnotationTransport} from './document-flow-annotations.mjs';
 import {parseFont} from './browser-fonts.mjs';
+import {deriveSourceTables, bindSourceTables} from './paragraph-source-tables.mjs';
 
 export const COORDINATE_SPACE = 'top-left-page';
 export const LIMITS = Object.freeze({maxFileBytes: 25 * 1024 * 1024});
@@ -224,7 +225,16 @@ export async function prepare(request = {}) {
   if (!enabled?.length) throw new ParagraphPdfError('no-edits', 'At least one enabled edit is required.');
   const edits = enabled.map((e, index) => ({id: e?.id || `edit-${index}`, pageIndex: e?.pageIndex, before: e?.before, after: e?.after}));
   const {engineFactory: createEngine, info} = await loadRuntime();
-  const engineFactory = bytes => createEngine(bytes, fontSnapshot);
+  const mupdf = await import('./browser-pdf-vendor/mupdf.js');
+  checkAbort(request.signal);
+  const tableProof = await deriveSourceTables(bytes, hash, mupdf);
+  const engineFactory = async input => {
+    const engine = await createEngine(input, fontSnapshot);
+    const open = engine.open.bind(engine);
+    engine.open = data => { const result=open(data); bindSourceTables(engine,data,tableProof); return result; };
+    if(input) bindSourceTables(engine,input,tableProof);
+    return engine;
+  };
   checkAbort(request.signal);
   // Matching remains exact and all-or-nothing. Duplicate Before text is an
   // explicit AMBIGUOUS_MATCH; selection metadata never silently relocates it.
