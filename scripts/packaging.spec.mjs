@@ -105,6 +105,19 @@ test('this tree is shippable with the tracked MuPDF wasm and without other binar
   verifyVendoredMupdfWasm(root);
 });
 
+test('only the pinned synthetic paragraph fixture is shippable', () => {
+  const fixture = 'app/tests/fixtures/paragraph-audit-synthetic.pdf';
+  assert.deepEqual(unexpectedReleasePaths([fixture]), []);
+  assertShippableSource([fixture], root);
+  const dir = mkdtempSync(join(tmpdir(), 'falsify-fixture-'));
+  try {
+    mkdirSync(join(dir, 'app/tests/fixtures'), {recursive: true});
+    writeFileSync(join(dir, fixture), 'changed fixture');
+    assert.throws(() => assertShippableSource([fixture], dir), /Synthetic paragraph fixture digest mismatch/);
+    assert.throws(() => assertShippableSource(['app/tests/fixtures/another.pdf'], root), /Unexpected private/);
+  } finally { rmSync(dir, {recursive: true, force: true}); }
+});
+
 test('workflow_dispatch verifies feature branches and deploys only main', () => {
   assert.match(workflow, /workflow_dispatch:/);
   assert.match(workflow, /push:\s*\n\s*branches:\s*\[main\]/);

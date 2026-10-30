@@ -25,9 +25,9 @@ export const PARAGRAPH_WASM = Object.freeze([
   'app/src/paragraph-vendor/runtime/editcore.wasm',
   'app/dist/paragraph-vendor/editcore.wasm',
 ]);
-export const PARAGRAPH_WASM_SHA256 = 'cf9f0e9ec0a68cc5932795e87622b2809ecca5561482a23bc034de3d6410696d';
-export const PARAGRAPH_JS_SHA256 = '6e6989a9994715951720e05355111aca7eab898e92b519ebea160167875bb3eb';
-export const PARAGRAPH_WASM_BYTES = 7340829;
+export const PARAGRAPH_WASM_SHA256 = '7674fe4cce4a8e15d702b02988610891693ac68f6121b4621e237949736778cb';
+export const PARAGRAPH_JS_SHA256 = 'cbef240d8893fd9624c08eadbb1ffb405a583c96878d6a14d11d8e9816c0832b';
+export const PARAGRAPH_WASM_BYTES = 7350963;
 export const RECOMPOSITION_WASM = 'app/dist/recomposition-vendor/typst_ts_web_compiler_bg.wasm';
 export const RECOMPOSITION_WASM_SHA256 = '1fc968438a672366dfec39c96c842c26ed29caff4eb1bcaab19a6c60867de5fd';
 
@@ -36,9 +36,12 @@ const pdfjsWasm = new Set(PDFJS_WASM);
 // Two-sentence synthetic handoff fixture; user papers remain excluded.
 const HANDOFF_FIXTURE = 'app/tests/fixtures/handoff-paper.pdf';
 const HANDOFF_FIXTURE_SHA256 = 'b518af142de7f30099d55a8125f9ae0e742ddefd403919106ed14b237822a275';
+// Two-page synthetic paragraph/link regression fixture; no real paper.
+const PARAGRAPH_FIXTURE = 'app/tests/fixtures/paragraph-audit-synthetic.pdf';
+const PARAGRAPH_FIXTURE_SHA256 = '188f53578f05e85a906a2ad58f34d0191408f60c8c0d448c87fe6625570b03f5';
 
 export function unexpectedReleasePaths(tracked) {
-  return tracked.filter(p => forbidden.test(p) && !pdfjsWasm.has(p) && p !== MUPDF_WASM && p !== RECOMPOSITION_WASM && p !== HANDOFF_FIXTURE && !PARAGRAPH_WASM.includes(p) && p !== 'experiments/selfplay_codex.py');
+  return tracked.filter(p => forbidden.test(p) && !pdfjsWasm.has(p) && p !== MUPDF_WASM && p !== RECOMPOSITION_WASM && p !== HANDOFF_FIXTURE && p !== PARAGRAPH_FIXTURE && !PARAGRAPH_WASM.includes(p) && p !== 'experiments/selfplay_codex.py');
 }
 
 export function verifyRecompositionRuntime(rootDir) {
@@ -127,6 +130,7 @@ export function assertShippableSource(tracked, rootDir) {
   const bad = unexpectedReleasePaths(tracked);
   if (bad.length) throw new Error(`Unexpected private/binary paths in source release: ${bad.join(', ')}`);
   if (tracked.includes(HANDOFF_FIXTURE) && createHash('sha256').update(readFileSync(join(rootDir, HANDOFF_FIXTURE))).digest('hex') !== HANDOFF_FIXTURE_SHA256) throw new Error('Synthetic handoff fixture digest mismatch.');
+  if (tracked.includes(PARAGRAPH_FIXTURE) && createHash('sha256').update(readFileSync(join(rootDir, PARAGRAPH_FIXTURE))).digest('hex') !== PARAGRAPH_FIXTURE_SHA256) throw new Error('Synthetic paragraph fixture digest mismatch.');
   if (tracked.includes(RECOMPOSITION_WASM)) verifyRecompositionRuntime(rootDir);
   if (PARAGRAPH_WASM.some(p => tracked.includes(p))) {
     if (!PARAGRAPH_WASM.every(p => tracked.includes(p))) throw new Error('Paragraph runtime requires both source and shipped WASM.');
