@@ -27,6 +27,15 @@ function fixture(customStreams) {
   return Buffer.from(pdf);
 }
 
+function compositeFixture() {
+  const cmap='/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def /CMapName /Synthetic def /CMapType 2 def 1 begincodespacerange <0000> <ffff> endcodespacerange 2 beginbfchar <006c> <006c> <0020> <0020> endbfchar endcmap CMapName currentdict /CMap defineresource pop end end';
+  const streams=['BT /F1 12 Tf 1 Tc 1 0 0 1 60 200 Tm <006c0020006c> Tj ET','BT /F1 12 Tf 1 0 0 1 60 200 Tm [<006c0020> -180 <006c>] TJ ET'];
+  const objs=['<< /Type /Catalog /Pages 2 0 R >>','<< /Type /Pages /Kids [6 0 R 8 0 R] /Count 2 >>','<< /Type /Font /Subtype /Type0 /BaseFont /Synthetic /Encoding /Identity-H /DescendantFonts [4 0 R] /ToUnicode 5 0 R >>','<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Synthetic /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /DW 500 /CIDToGIDMap /Identity >>',`<< /Length ${cmap.length} >>\nstream\n${cmap}\nendstream`];
+  for(const [i,s] of streams.entries()) objs.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 500 500] /Resources << /Font << /F1 3 0 R >> >> /Contents ${7+i*2} 0 R >>`,`<< /Length ${s.length} >>\nstream\n${s}\nendstream`);
+  let pdf='%PDF-1.4\n',offsets=[0]; for(const [i,obj] of objs.entries()){offsets.push(Buffer.byteLength(pdf));pdf+=`${i+1} 0 obj\n${obj}\nendobj\n`;}
+  const x=Buffer.byteLength(pdf);pdf+=`xref\n0 ${objs.length+1}\n0000000000 65535 f \n`+offsets.slice(1).map(n=>String(n).padStart(10,'0')+' 00000 n \n').join('')+`trailer\n<< /Size ${objs.length+1} /Root 1 0 R >>\nstartxref\n${x}\n%%EOF\n`;return Buffer.from(pdf);
+}
+
 test('native model retains small horizontal scales, including rotated text', async () => {
   const M=await create({wasmBinary:readFileSync(join(runtime,'editcore.wasm')),print(){},printErr(){}});
   const cfg=M._malloc(48); M.HEAPU8.fill(0,cfg,cfg+48); M.HEAPU32[cfg>>2]=2; M._FPDF_InitLibraryWithConfig(cfg); M._free(cfg);
@@ -84,8 +93,12 @@ test('Tc and explicit TJ spacing survive model builds and save/reload', async ()
   };
   const same=(a,b)=>{ assert.equal(b.length,a.length); a.forEach((v,i)=>{assert.equal(b[i][0],v[0]); assert.ok(Math.abs(v[1]-b[i][1])<0.02); assert.ok(Math.abs(v[2]-b[i][2])<0.02);}); };
   try {
-    for(let page=0;page<streams.length;page++) {
-      e.loadPage(page); const original=glyphs(); e.buildModel(); same(original,glyphs());
+    for(let page=0;page<4;page++) {
+      if (page===2) e.open(compositeFixture());
+      const pageIndex=page%2;
+      e.loadPage(pageIndex); const original=glyphs(); assert.ok(original.length>=3);
+      if (page>=2) assert.deepEqual(original.map(g=>g[0]),[108,32,108]);
+      e.buildModel(); same(original,glyphs());
       const objects=Array.from({length:M._FPDFPage_CountObjects(e.page)},(_,i)=>M._FPDFPage_GetObject(e.page,i)>>>0);
       e.buildModel(); same(original,glyphs());
       assert.deepEqual(Array.from({length:M._FPDFPage_CountObjects(e.page)},(_,i)=>M._FPDFPage_GetObject(e.page,i)>>>0),objects);
@@ -94,7 +107,7 @@ test('Tc and explicit TJ spacing survive model builds and save/reload', async ()
       e.historyEndStep(); assert.ok(e.historyUndo()); same(original,glyphs());
       e.buildModel(); same(original,glyphs());
       assert.deepEqual(Array.from({length:M._FPDFPage_CountObjects(e.page)},(_,i)=>M._FPDFPage_GetObject(e.page,i)>>>0),objects);
-      e.generateContent(); const bytes=e.save(); e.reopen(bytes,page); same(original,glyphs());
+      e.generateContent(); const bytes=e.save(); e.reopen(bytes,pageIndex); same(original,glyphs());
       e.buildModel(); same(original,glyphs());
     }
   } finally { e.close(); }
