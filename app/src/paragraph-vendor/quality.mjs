@@ -868,7 +868,7 @@ export function authorizedEdgeChanges(source, output, edits, es, eo, body = []) 
   const reflowSource = new Set(), reflowOutput = new Set();
   const editedGlyphs = [...sourceIndices].map(i => sourceGlyph.get(i)).filter(Boolean);
   for (const box of body) {
-    if (!editedGlyphs.some(c => inBoxes(c, [box]))) continue;
+    if (!editedGlyphs.length || editedGlyphs.some(c => !inBoxes(c, [box]) || body.filter(b => inBoxes(c, [b])).length !== 1)) continue;
     const members = source.glyphs.filter(c => inBoxes(c, [box]) && !sourceIndices.has(c.i));
     if (members.some(c => body.filter(b => inBoxes(c, [b])).length !== 1)) continue;
     const ids = new Set(members.map(c => c.i)), pairs = [];
@@ -900,7 +900,7 @@ export function authorizedEdgeChanges(source, output, edits, es, eo, body = []) 
   if (edited.length) for (const box of body) {
     if (!edited.some(c => c.b >= box.top && c.l <= box.x + box.w && c.r >= box.x)) continue;
     const members = source.glyphs.filter(c => inBoxes(c, [box]));
-    if (!members.length || members.some(c => sourceIndices.has(c.i))) continue;
+    if (!members.length || members.some(c => sourceIndices.has(c.i) || body.filter(b => inBoxes(c, [b])).length !== 1)) continue;
     const memberIds = new Set(members.map(c => c.i));
     const pairs = [];
     for (let k = 0; k < sn.length; k++) {

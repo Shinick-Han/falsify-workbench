@@ -23,6 +23,7 @@ test('only complete rigid downward movement of source body below an edit is auth
  for(const g of b.glyphs) if(g.i>=11){g.b-=5;g.t-=5;g.origin[1]-=5;}
  const box={x:60,top:20,w:50,h:10};
  assert.equal(authorizedEdgeChanges(a,b,edits,a.glyphs,b.glyphs,[box]),true);
+ assert.equal(authorizedEdgeChanges(a,b,edits,a.glyphs,b.glyphs,[box,{...box}]),false);
  const moved=structuredClone(b); moved.glyphs.find(g=>g.i===11).l+=3;
  assert.equal(authorizedEdgeChanges(a,moved,edits,a.glyphs,moved.glyphs,[box]),false);
  const lost=structuredClone(b); lost.glyphs=lost.glyphs.filter(g=>g.i!==11);
@@ -38,6 +39,7 @@ test('retained glyphs in edited body reflow with bounded contiguous geometry',()
  const box={x:10,top:20,w:60,h:10};
  for(const g of b.glyphs) if(g.i>=6&&g.i<=9){g.b-=8;g.t-=8;g.origin[1]-=8;}
  assert.equal(authorizedEdgeChanges(a,b,edits,a.glyphs,b.glyphs,[box]),true);
+ assert.equal(authorizedEdgeChanges(a,b,edits,a.glyphs,b.glyphs,[box,{...box}]),false);
  const displaced=structuredClone(b);for(const g of displaced.glyphs)if(g.i>=6&&g.i<=9){g.b-=100;g.t-=100;g.origin[1]-=100;}
  assert.equal(authorizedEdgeChanges(a,displaced,edits,a.glyphs,displaced.glyphs,[box]),false);
  const styleChanged=structuredClone(b);styleChanged.glyphs.find(g=>g.i===6).style.size=12;
