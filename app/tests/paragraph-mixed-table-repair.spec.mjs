@@ -10,12 +10,13 @@ import {prepare} from '../src/pdf-edit-pipeline.mjs';
 import {inspectTables} from '../dist/table-pdf-worker.mjs';
 import {readMuPdfTablePages} from '../src/table-adapter.mjs';
 const hash=b=>createHash('sha256').update(b).digest('hex');
-function fixture(){
+function fixture({furniture=false}={}){
  let body='0 0 0 RG .5 w\n';
  for(const x of [40,160,280])body+=`${x} 420 m ${x} 480 l S\n`;
  for(let r=0;r<=3;r++)body+=`40 ${480-r*20} m 280 ${480-r*20} l S\n`;
  for(const [r,row] of [['Group','Value'],['Control','10'],['Treated','10']].entries())for(const [c,x] of [[0,50],[1,170]])body+=`BT /F1 8 Tf ${x} ${467-r*20} Td (${row[c]}) Tj ET\n`;
  body+='BT /F1 10 Tf 40 300 Td (Original body paragraph stays lower on the page.) Tj ET\n';
+ if(furniture)body+='BT /F1 7 Tf 40 490 Td (Running header) Tj ET\nBT /F1 7 Tf 200 20 Td (1) Tj ET\n';
  const objs=[null,'<< /Type /Catalog /Pages 2 0 R >>','<< /Type /Pages /Kids [3 0 R] /Count 1 >>','<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 500] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>','<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',`<< /Length ${Buffer.byteLength(body)} >>\nstream\n${body}\nendstream`];
  let pdf='%PDF-1.4\n',off=[0];for(let i=1;i<objs.length;i++){off.push(Buffer.byteLength(pdf));pdf+=`${i} 0 obj\n${objs[i]}\nendobj\n`;}let at=Buffer.byteLength(pdf);pdf+=`xref\n0 ${objs.length}\n0000000000 65535 f \n`+off.slice(1).map(n=>`${String(n).padStart(10,'0')} 00000 n \n`).join('')+`trailer << /Size ${objs.length} /Root 1 0 R >>\nstartxref\n${at}\n%%EOF\n`;return new Uint8Array(Buffer.from(pdf));
 }
@@ -45,6 +46,21 @@ test('same-page table and body edits preserve table and fit naturally',{timeout:
  assert.match(after[0].map(x=>x.text).join(' '),/Changed body paragraph stays lower on the page\./);
 
  }finally{globalThis.fetch=saved;}
+});
+
+test('continuation retains furniture without repeating source table cells',{timeout:120000},async()=>{
+ const bytes=fixture({furniture:true}),sourceHash=hash(bytes),tables=await inspectTables({bytes:bytes.buffer.slice(0),fileHash:sourceHash,revision:'test',pageIndex:0});
+ const cell=tables.cells.find(c=>c.row===1&&c.col===1&&c.selection.status==='ready');assert.ok(cell);
+ const edit={id:'cell',segmentId:'table:0:cell',pageIndex:0,before:cell.selection.before,after:'11',anchor:cell.selection.anchor};
+ const body={id:'body',segmentId:'paragraph:0:body',pageIndex:0,before:'Original body paragraph stays lower on the page.',after:'Changed body paragraph stays lower on the page. '.repeat(30).trim(),anchor:{bbox:[40,190,300,210]}};
+ const saved=globalThis.fetch;globalThis.fetch=async input=>{const u=new URL(input);if(u.protocol==='file:'){const {readFileSync}=await import('node:fs');return new Response(readFileSync(u));}return saved(input);};
+ try {
+   const out=await prepare({file:new File([bytes],'fixture.pdf'),fileHash:sourceHash,edits:[edit,body]},{selectionPdf,paragraphPdf});
+   assert.notEqual(out.verification.status,'failed',JSON.stringify(out.verification.checks));
+   const pages=inspect(new Uint8Array(await out.file.arrayBuffer()));assert.ok(pages.length>1);
+   for(const page of pages.slice(1)) {const text=page.map(x=>x.text).join(' ');assert.match(text,/Running header/);assert.doesNotMatch(text,/Group|Value|Control|Treated/);}
+   assert.match(pages[1].map(x=>x.text).join(' '),/1\.1/);
+ } finally {globalThis.fetch=saved;}
 });
 
 

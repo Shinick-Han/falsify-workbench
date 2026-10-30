@@ -17,7 +17,7 @@
 
 import { createHash } from "node:crypto";
 import { canonicalPage, compareSourceGeometry } from "../paragraph-geometry-conservation.mjs";
-import { resolvePageFraction } from "./continuation-template.mjs";
+import { resolvePageFraction, ruledTableRegions, inRuledTable } from "./continuation-template.mjs";
 import { deriveDocumentFlowBand } from "./document-flow-band.mjs";
 import { deriveNativeLinkMoves, deriveNativeFitRMoves, nativeFitRTargetPages, savedLinkGlyphs } from "./document-flow-links.mjs";
 import { verifySavedUnderlines } from "./document-flow-underlines.mjs";
@@ -1088,7 +1088,7 @@ export async function inspectSavedPdf(engineFactory, sourceBytes, outputBytes, e
       if (m.continuationPageIndices.length) {
         row.continuationPageIndices = [...m.continuationPageIndices];
         if (!pageEdits.length) failures.push({ code: "continuation_without_edit", pageIndex: i });
-        else inspectContinued(s, o, out, m, pageEdits, row, failures, warnings, !!options.includeText);
+        else { ensurePage(src, i); inspectContinued(s, o, out, m, pageEdits, row, failures, warnings, !!options.includeText, ruledTableRegions(src)); }
         continue;
       }
       if (!pageEdits.length) {
@@ -1414,7 +1414,7 @@ const samePlace = (c, d) => c.u === d.u && Math.abs(c.l - d.l) <= 0.5 && Math.ab
 // the number's style and baseline, digits at their source spacing, suffix
 // at natural advance, aligned on the number's source left, centre or right
 // (by page position). Anything else outside the body band is extra.
-function checkContinuationEdges(s, es, g, edge, ordinal, pageIndex, outputPageIndex, failures) {
+export function checkContinuationEdges(s, es, g, edge, ordinal, pageIndex, outputPageIndex, failures) {
   const fail = (code, extra = {}) => failures.push({ code, pageIndex, outputPageIndex, ...extra });
   const res = { expected_glyphs: 0, output_glyphs: edge.length, page_numbers: [] };
   if (!s.styled || !g.styled) {
@@ -1573,7 +1573,7 @@ export function matchesGeneratedWhitespace(expected, chars) {
 // the output page followed by every continuation page must equal the
 // source body-band text with the edits applied, in order; everything
 // outside the band must be glyph-for-glyph where it was.
-function inspectContinued(s, o, out, m, pageEdits, row, failures, warnings, includeText) {
+function inspectContinued(s, o, out, m, pageEdits, row, failures, warnings, includeText, sourceTables = []) {
   const i = row.pageIndex;
   const { floor, bodyTop } = m;
   const lo = floor - 0.5, hi = bodyTop + 0.5;
@@ -1675,7 +1675,7 @@ function inspectContinued(s, o, out, m, pageEdits, row, failures, warnings, incl
     if (c.offpage) failures.push({ code: "glyphs_off_page", pageIndex: i, outputPageIndex: c.outputPageIndex, count: c.offpage });
     if (c.overlap > overlaps(s, true)) failures.push({ code: "glyph_overlap_increased", pageIndex: i, outputPageIndex: c.outputPageIndex });
     if (m.continuationStyle) {
-      c.edges = checkContinuationEdges(s, es, g, edge, k + 1, i, c.outputPageIndex, failures);
+      c.edges = checkContinuationEdges(s, es.filter(c => !inRuledTable(c, sourceTables)), g, edge, k + 1, i, c.outputPageIndex, failures);
     } else if (c.outside_band) {
       failures.push({ code: "continuation_outside_body_band", pageIndex: i, outputPageIndex: c.outputPageIndex });
     }

@@ -1,8 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {authorizedEdgeChanges,expectedPageText} from '../src/paragraph-vendor/quality.mjs';
+import {authorizedEdgeChanges,expectedPageText,checkContinuationEdges} from '../src/paragraph-vendor/quality.mjs';
 import {compareSourceGeometry} from '../src/paragraph-geometry-conservation.mjs';
 const style={font:'T',flags:0,size:10,fill:[0,0,0,255],stroke:[0,0,0,255],render:0,mat:[1,0,0,1]};
+test('unexpected continuation edge glyphs remain a failure',()=>{
+ const failures=[]; const extra={u:71,l:10,r:14,b:180,t:190,origin:[10,180],obj:1,style};
+ checkContinuationEdges({styled:true,W:200},[],{styled:true},[extra],1,0,1,failures);
+ assert.ok(failures.some(f=>f.code==='continuation_edge_extra'));
+});
 function page(text, rotation=0) {
  const chars=[],glyphs=[];let x=10;
  for(let i=0;i<text.length;i++){const u=text.charCodeAt(i);chars.push({u,generated:false,box:[x,x+2,10,20],origin:[x,10]});if(u!==32)glyphs.push({i,u,l:x,r:x+4,b:10,t:20,origin:[x,10],style});x+=6;}
