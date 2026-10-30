@@ -110,6 +110,22 @@ test('SHA-256 shim matches Node for strings and PDF bytes', () => {
   for(const bytes of [new Uint8Array(),new TextEncoder().encode('abc'),fixture()]) assert.equal(hex(bytes),sha(bytes));
 });
 
+test('body reflow near edge retains linked and inline-math page content', async () => {
+  const previous=globalThis.fetch; globalThis.fetch=localFetch;
+  try {
+    const source=new Uint8Array(readFileSync(join(app,'tests/fixtures/paragraph-audit-synthetic.pdf')));
+    for(const edit of [
+      {id:'link',pageIndex:0,before:'An initial claim',after:'An expanded explanation of the measured outcome and its interpretation under the experimental conditions'},
+      {id:'math',pageIndex:1,before:'The effect of',after:'The estimated magnitude of the observed effect of'}
+    ]) {
+      const result=await prepare({file:source,edits:[edit]});
+      assert.notEqual(result.verification.status,'failed',JSON.stringify(result.verification.checks));
+      const bytes=new Uint8Array(await result.file.arrayBuffer());
+      assert.ok(extraction(bytes).includes(edit.after));
+    }
+  } finally { globalThis.fetch=previous; }
+});
+
 test('real PDFium paragraph inspect and reflow retain full After and following content', async () => {
   const previous = globalThis.fetch; globalThis.fetch = localFetch;
   try {

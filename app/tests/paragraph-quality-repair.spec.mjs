@@ -33,6 +33,16 @@ test('only complete rigid downward movement of source body below an edit is auth
  assert.equal(authorizedEdgeChanges(a,missingAfter,edits,a.glyphs,missingAfter.glyphs,[box]),false);
  assert.equal(authorizedEdgeChanges(a,b,edits,a.glyphs,b.glyphs,[]),false);
 });
+test('retained glyphs in edited body reflow with bounded contiguous geometry',()=>{
+ const a=page('A old text footer'),b=page('A new text footer'),edits=[{before:'old',after:'new'}];
+ const box={x:10,top:20,w:60,h:10};
+ for(const g of b.glyphs) if(g.i>=6&&g.i<=9){g.b-=8;g.t-=8;g.origin[1]-=8;}
+ assert.equal(authorizedEdgeChanges(a,b,edits,a.glyphs,b.glyphs,[box]),true);
+ const displaced=structuredClone(b);for(const g of displaced.glyphs)if(g.i>=6&&g.i<=9){g.b-=100;g.t-=100;g.origin[1]-=100;}
+ assert.equal(authorizedEdgeChanges(a,displaced,edits,a.glyphs,displaced.glyphs,[box]),false);
+ const styleChanged=structuredClone(b);styleChanged.glyphs.find(g=>g.i===6).style.size=12;
+ assert.equal(authorizedEdgeChanges(a,styleChanged,edits,a.glyphs,styleChanged.glyphs,[box]),false);
+});
 test('quarter-turn frames conserve text and reject missing replacement or invalid transforms',()=>{
  for(const r of [1,2,3]){const a=page('alpha beta',r),b=page('alpha zeta',r),edits=[{before:'beta',after:'zeta'}];
  assert.equal(compareSourceGeometry(a,b,edits,{expectedPageText}).match,true);

@@ -862,6 +862,36 @@ export function authorizedEdgeChanges(source, output, edits, es, eo, body = []) 
   // line shrinks. Match unchanged edge glyphs against the entire other page.
   const sourceDiff = alignEdgeGlyphs(es, output.glyphs);
   const outputDiff = alignEdgeGlyphs(source.glyphs, eo);
+  // Retained text in the edited source body paragraph may wrap with the
+  // replacement. Bind every such glyph to its corresponding output glyph
+  // in the independently checked text order; never extend to other boxes.
+  const reflowSource = new Set(), reflowOutput = new Set();
+  const editedGlyphs = [...sourceIndices].map(i => sourceGlyph.get(i)).filter(Boolean);
+  for (const box of body) {
+    if (!editedGlyphs.some(c => inBoxes(c, [box]))) continue;
+    const members = source.glyphs.filter(c => inBoxes(c, [box]) && !sourceIndices.has(c.i));
+    if (members.some(c => body.filter(b => inBoxes(c, [b])).length !== 1)) continue;
+    const ids = new Set(members.map(c => c.i)), pairs = [];
+    for (let k = 0; k < sn.length; k++) {
+      const a = sourceGlyph.get(sn[k].sourceIndex);
+      if (!a || !ids.has(a.i)) continue;
+      let offset = 0;
+      for (const span of exp.spans) if (span.b <= k) offset += span.after.length - (span.b - span.a);
+      const b = outputGlyph.get(on[k + offset]?.sourceIndex);
+      if (!b || a.u !== b.u || !sameStyle(a.style, b.style)) { pairs.length = 0; break; }
+      pairs.push([a,b]);
+    }
+    if (pairs.length !== members.length) continue;
+    const placed = [...pairs.map(([,b]) => b), ...[...outputIndices].map(i => outputGlyph.get(i)).filter(Boolean)];
+    const original = source.glyphs.filter(c => inBoxes(c, [box]));
+    if (!placed.length || !original.length) continue;
+    const size = Math.max(...original.map(c => c.style?.size || 0));
+    const ys = [...new Set(placed.map(c => Math.round((c.origin?.[1] ?? c.b) * 10) / 10))].sort((a,b) => b-a);
+    const sourceTop = Math.max(...original.map(c => c.t));
+    if (!(size > 0) || Math.abs(Math.max(...placed.map(c => c.t)) - sourceTop) > size ||
+        ys.some((y,k) => k && ys[k-1] - y > size * 2.5)) continue;
+    for (const [a,b] of pairs) { reflowSource.add(a.i); reflowOutput.add(b.i); }
+  }
   // Only whole, source-classified body paragraphs below an edit may cascade.
   // Pair their unchanged characters in the independently checked text order,
   // and require a single vertical translation with unchanged geometry/style.
@@ -890,8 +920,8 @@ export function authorizedEdgeChanges(source, output, edits, es, eo, body = []) 
   }
   const shifts = shiftedPairs.map(p => p.dx);
   if (shifts.length && Math.max(...shifts) - Math.min(...shifts) > .1) return false;
-  return sourceDiff.missing.every(c => sourceIndices.has(c.i) || movedSource.has(c.i) || shiftedPairs.some(p => p.a.i === c.i)) &&
-    outputDiff.added.every(c => outputIndices.has(c.i) || movedOutput.has(c.i) || shiftedPairs.some(p => p.b.i === c.i)) &&
+  return sourceDiff.missing.every(c => sourceIndices.has(c.i) || reflowSource.has(c.i) || movedSource.has(c.i) || shiftedPairs.some(p => p.a.i === c.i)) &&
+    outputDiff.added.every(c => outputIndices.has(c.i) || reflowOutput.has(c.i) || movedOutput.has(c.i) || shiftedPairs.some(p => p.b.i === c.i)) &&
     sourceDiff.restyled.every(([c]) => sourceIndices.has(c.i)) && outputDiff.restyled.every(([,c]) => outputIndices.has(c.i));
 }
 
