@@ -31,3 +31,10 @@ test('failure reports a bounded missing file and line without returning source t
  const result=await pending; assert.equal(result.diagnostics[0].code,'TEX_MISSING_FILE');
  assert.equal(result.diagnostics[0].line,7); assert.equal(JSON.stringify(result).includes('private source text'),false);
 });
+test('abort terminates its worker and cannot finish a subsequent compile',async()=>{
+ const workers=[]; const compiler=createLatexCompiler({workerFactory:()=>{const worker={postMessage(){},terminate(){this.terminated=true}};workers.push(worker);return worker}});
+ const controller=new AbortController(); const first=compiler.compile({project,signal:controller.signal});
+ controller.abort(); assert.equal((await first).diagnostics[0].code,'CANCELLED'); assert.equal(workers[0].terminated,true);
+ const next=compiler.compile({project,key:'new'}); workers[0].onmessage({data:{pdf:new Uint8Array([1]),exit_code:0}});
+ workers[1].onmessage({data:{pdf:new Uint8Array([2]),exit_code:0}}); assert.equal((await next).key,'new');
+});

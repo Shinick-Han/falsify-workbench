@@ -28,10 +28,11 @@ export function createLatexCompiler(options = {}) {
       try {
         const assetBase = new URL(options.assetBase || '../dist/latex-compiler-vendor/', import.meta.url);
         worker = options.workerFactory ? options.workerFactory(assetBase) : new Worker(new URL('busytex_worker.js',assetBase));
+        const activeWorker = worker;
         const fileUrl = name => new URL(name,assetBase).href;
-        worker.onerror = () => finish('ENGINE_ERROR','LaTeX engine failed to initialize or compile.');
+        worker.onerror = () => { if (worker === activeWorker) finish('ENGINE_ERROR','LaTeX engine failed to initialize or compile.'); };
         worker.onmessage = ({data}) => {
-          if (!pending) return;
+          if (!pending || worker !== activeWorker) return;
           if (data.print) { onProgress?.({message:'LaTeX compilation in progress.'}); return; }
           if (data.exception) return finish('ENGINE_ERROR','LaTeX engine reported an error.');
           if (data.initialized) {
