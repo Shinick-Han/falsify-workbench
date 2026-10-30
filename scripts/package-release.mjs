@@ -25,9 +25,9 @@ export const PARAGRAPH_WASM = Object.freeze([
   'app/src/paragraph-vendor/runtime/editcore.wasm',
   'app/dist/paragraph-vendor/editcore.wasm',
 ]);
-export const PARAGRAPH_WASM_SHA256 = '15212c22d100c7d262d6d9996117517dbe3a30e80d43569977df5b2cd7ff35c6';
-export const PARAGRAPH_JS_SHA256 = '6e6989a9994715951720e05355111aca7eab898e92b519ebea160167875bb3eb';
-export const PARAGRAPH_WASM_BYTES = 7345493;
+export const PARAGRAPH_WASM_SHA256 = '770c19d26ff95cb24db2dd8f9a348ab00fa9415547cd343148c3180bc19e7e2c';
+export const PARAGRAPH_JS_SHA256 = '7b8ba07a1ff5fd190e97c8513bbe008e5c60052d51449510c5f7d415dc70aaeb';
+export const PARAGRAPH_WASM_BYTES = 7348904;
 export const RECOMPOSITION_WASM = 'app/dist/recomposition-vendor/typst_ts_web_compiler_bg.wasm';
 export const RECOMPOSITION_WASM_SHA256 = '1fc968438a672366dfec39c96c842c26ed29caff4eb1bcaab19a6c60867de5fd';
 
