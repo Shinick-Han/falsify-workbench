@@ -55,9 +55,13 @@ test('continuation retains furniture without repeating source table cells',{time
  const body={id:'body',segmentId:'paragraph:0:body',pageIndex:0,before:'Original body paragraph stays lower on the page.',after:'Changed body paragraph stays lower on the page. '.repeat(30).trim(),anchor:{bbox:[40,190,300,210]}};
  const saved=globalThis.fetch;globalThis.fetch=async input=>{const u=new URL(input);if(u.protocol==='file:'){const {readFileSync}=await import('node:fs');return new Response(readFileSync(u));}return saved(input);};
  try {
-   const out=await prepare({file:new File([bytes],'fixture.pdf'),fileHash:sourceHash,edits:[edit,body]},{selectionPdf,paragraphPdf});
-   assert.notEqual(out.verification.status,'failed',JSON.stringify(out.verification.checks));
-   const pages=inspect(new Uint8Array(await out.file.arrayBuffer()));assert.ok(pages.length>1);
+   let stageA;const selection={prepare:async r=>{const v=await selectionPdf.prepare(r);stageA=new Uint8Array(await v.file.arrayBuffer());return v;}};
+   const out=await prepare({file:new File([bytes],'fixture.pdf'),fileHash:sourceHash,edits:[edit,body]},{selectionPdf:selection,paragraphPdf});
+   assert.ok(['applied','warning'].includes(out.verification.status),JSON.stringify(out.verification.checks));
+   const final=new Uint8Array(await out.file.arrayBuffer());
+   assert.deepEqual(readMuPdfTablePages(final,mupdf)[0].rules,readMuPdfTablePages(stageA,mupdf)[0].rules);
+   assert.equal(tableRasterHash(final),tableRasterHash(stageA));
+   const pages=inspect(final);assert.ok(pages.length>1);
    for(const page of pages.slice(1)) {const text=page.map(x=>x.text).join(' ');assert.match(text,/Running header/);assert.doesNotMatch(text,/Group|Value|Control|Treated/);}
    assert.match(pages[1].map(x=>x.text).join(' '),/1\.1/);
  } finally {globalThis.fetch=saved;}
