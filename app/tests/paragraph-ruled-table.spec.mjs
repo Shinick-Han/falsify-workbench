@@ -16,5 +16,5 @@ test('table cells bind only matching source bytes and supported page geometry',(
  e.M._FPDFPage_GetRotation=()=>1;assert.equal(sourceTableCells(e),null);e.M._FPDFPage_GetRotation=()=>0;
  e.M._FPDF_GetPageCount=()=>2;assert.equal(sourceTableCells(e),null);e.M._FPDF_GetPageCount=()=>1;
  bindSourceTables(e,bytes,{sha:hex(bytes),unavailable:true});assert.equal(sourceTableCells(e),null);
- bindSourceTables(e,new Uint8Array([1,2,4]),proof);assert.deepEqual(sourceTableCells(e),[]);
+ bindSourceTables(e,new Uint8Array([1,2,4]),proof);assert.equal(sourceTableCells(e),null);
 });

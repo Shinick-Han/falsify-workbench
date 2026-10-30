@@ -12,11 +12,11 @@ export async function deriveSourceTables(bytes, sha, mupdf) {
 }
 export function bindSourceTables(engine, bytes, provenance) {
   bindings.delete(engine);
-  if(bytes instanceof Uint8Array && hex(bytes)===provenance.sha) bindings.set(engine,provenance);
+  if(bytes instanceof Uint8Array && provenance && hex(bytes)===provenance.sha) bindings.set(engine,provenance);
 }
 export function sourceTableCells(engine) {
   const proof=bindings.get(engine);
-  if(!proof) return [];
+  if(!proof) return null;
   if(proof.unavailable || typeof engine.M._FPDF_GetPageCount!=='function' || engine.M._FPDF_GetPageCount(engine.doc)!==proof.pages.length) return null;
   const page=proof.pages[engine.pageIndex];
   const t=engine.pageT || [1,0,0,1,0,0];

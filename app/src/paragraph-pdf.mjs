@@ -228,11 +228,19 @@ export async function prepare(request = {}) {
   let tableProof;
   try { const mupdf = await import('./browser-pdf-vendor/mupdf.js'); checkAbort(request.signal); tableProof = await deriveSourceTables(bytes, hash, mupdf); }
   catch { checkAbort(request.signal); tableProof = {sha:hash, unavailable:true}; }
+  const proofs = new Map([[hash,tableProof]]);
   const engineFactory = async input => {
+    const digest = input instanceof Uint8Array ? hex(input) : null;
+    if(digest && !proofs.has(digest)) {
+      let proof;
+      try { const mupdf=await import('./browser-pdf-vendor/mupdf.js'); checkAbort(request.signal); proof=await deriveSourceTables(input,digest,mupdf); }
+      catch { checkAbort(request.signal); proof={sha:digest,unavailable:true}; }
+      proofs.set(digest,proof);
+    }
     const engine = await createEngine(input, fontSnapshot);
     const open = engine.open.bind(engine);
-    engine.open = data => { const result=open(data); bindSourceTables(engine,data,tableProof); return result; };
-    if(input) bindSourceTables(engine,input,tableProof);
+    engine.open = data => { const result=open(data); bindSourceTables(engine,data,data instanceof Uint8Array ? proofs.get(hex(data)) : null); return result; };
+    if(input) bindSourceTables(engine,input,proofs.get(digest));
     return engine;
   };
   checkAbort(request.signal);
