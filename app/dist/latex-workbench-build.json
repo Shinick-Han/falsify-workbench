@@ -74,12 +74,28 @@
       "sha256": "2c55d2df34d1d502cb308f46b5064df4897c163299362bf4c181e6c6e88530bd"
     },
     {
+      "path": "src/paper-fonts.mjs",
+      "sha256": "12bc71a5cc278cac9b702557e6d6cf6729ac13b0c2aad6cb55bb989054ecf5ea"
+    },
+    {
       "path": "src/paper-layout-agent-ui.mjs",
-      "sha256": "59e16c993335523e9548eca0afd6952accd36f80c7c29dcbe6fffb7314693f61"
+      "sha256": "52dc93e6b980c1853cb27c0d5c0abeccbf27180415e8591defaf50f5c54383f3"
     },
     {
       "path": "src/paper-layout-agent.mjs",
-      "sha256": "1e384a562b0de13c0bd4f3d3b50e5d472ce4e585283cd9b7e0a3df0966c7179d"
+      "sha256": "b90753934612c63284a74b7a626005b400ba116c3085da8b96e7d173e5e17bd3"
+    },
+    {
+      "path": "src/paper-layout-asset-tools.mjs",
+      "sha256": "83b0afe922ea04df53610fc4317ab9ba1888e49d0228b7b52e3e559197c0aa9c"
+    },
+    {
+      "path": "src/paper-layout-document-tools.mjs",
+      "sha256": "88ed745ba782040d22fedf1e62f1682a5cc0a95a04b8ebf61228fd7febfc22f0"
+    },
+    {
+      "path": "src/paper-layout-edit-tools.mjs",
+      "sha256": "32df0730538d45fb96e65c317dff577a12eaf6ade1374cdf6de04a22a5f9606b"
     },
     {
       "path": "src/paper-layout-quality.mjs",
@@ -87,7 +103,15 @@
     },
     {
       "path": "src/paper-layout-structure.mjs",
-      "sha256": "3e33e88f5e135c691f1f01f4d2582b972682da1aff993f503ceb4e6c16f34db6"
+      "sha256": "dd02f4c8f4178a4b9fc4976c837f021efc949b62174a3e4191f9eea8a48a2c50"
+    },
+    {
+      "path": "src/paper-layout-tool-catalog.mjs",
+      "sha256": "75baf415587c5ac326930a320ab7127acc979f10f3efd6a1e885bf9ad8789267"
+    },
+    {
+      "path": "src/paper-layout-toolbox.mjs",
+      "sha256": "e6ed9db5c27852223dc4ac05624d12f83937585c5a75810ddae4fa7537918860"
     },
     {
       "path": "src/paper-source-assets.mjs",
@@ -168,10 +192,10 @@
   ],
   "output": {
     "path": "latex-workbench.mjs",
-    "sha256": "00c7abd1b38e4e1997baaa3a692fef6df354149d29e8c12a804d41cecb1d8722"
+    "sha256": "7408114ab9e43567ffeea9786ed4a4cb2005d31cf7080434bdea7f660406d1bf"
   },
   "worker": {
     "path": "pdf-latex-reader-worker.mjs",
-    "sha256": "2d9e73ffaa72b12e7c1a4cf8f54b07529de943e04a07edf5e09743c126b7bf1b"
+    "sha256": "d4c7b7fdcd3ba7e79613a873f504de0b26e9201703a4a6ec55b9af057c17204a"
   }
 }

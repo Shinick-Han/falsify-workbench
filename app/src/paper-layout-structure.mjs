@@ -48,16 +48,21 @@ function inspect(project){
  if(renderStructureRegion(s,s.plan,fragments).text!==region)fail('INVALID_MARKERS');return {s,source,start,stop:stop+END.length,fragments};
 }
 export function readLayoutStructure(project){return structuredClone(inspect(project).s);}
-export async function applyLayoutStructure({project,plan,signal}={}){
- if(signal?.aborted)throw new DOMException('Cancelled','AbortError');const {s,source,start,stop,fragments}=inspect(project);validate(s,plan);
+export function readLayoutUnitPayloads(project){return Object.fromEntries(inspect(project).fragments);}
+async function updateStructure({project,plan,signal,replacements={},extraFiles=[]}={}){
+ if(signal?.aborted)throw new DOMException('Cancelled','AbortError');const {s,source,start,stop,fragments}=inspect(project);plan ??= s.plan;validate(s,plan);
+ if(!replacements || Object.getPrototypeOf(replacements)!==Object.prototype || !Array.isArray(extraFiles))fail('INVALID_REPLACEMENTS');
+ for(const [id,payload] of Object.entries(replacements)){if(!fragments.has(id)||typeof payload!=='string')fail('INVALID_UNIT');fragments.set(id,payload);}
+ const existing=new Set(project.files.map(f=>f.path));for(const f of extraFiles){if(!f || typeof f.path!=='string'||existing.has(f.path)||!(f.bytes instanceof Uint8Array))fail('INVALID_EXTRA_FILE');existing.add(f.path);}
  // Reserve current-column space for a first-page footer entering the body box.
  // Keep the rest of the document's margins and pagination unchanged.
  const dimensions=[...source.slice(0,start).matchAll(/bottom\s*=\s*([\d.]+)\s*(bp|pt|mm|cm|in)/g)],last=dimensions.at(-1),factor={bp:1,pt:72/72.27,mm:72/25.4,cm:72/2.54,in:72};
  const bottom=last?Number(last[1])*factor[last[2]]:null;let reserve=0;
- for(const f of plan.furniture){const u=s.units.find(x=>x.id===f.id);if(f.placement!=='footer'||u.pageIndex!==0||!Number.isFinite(bottom))continue;
-  const b=u.bbox,bodyUnits=s.units.filter(v=>v.pageIndex===0&&!plan.furniture.some(x=>x.id===v.id)),minX=Math.min(...bodyUnits.map(v=>v.bbox[0])),maxX=Math.max(...bodyUnits.map(v=>v.bbox[2])),leftColumn=plan.columns===1||b[2]<=(minX+maxX)/2;
+ for(const f of plan.furniture){const u=s.units.find(x=>x.id===f.id);if(f.placement!=='footer'||!Number.isFinite(bottom))continue;
+  const b=u.bbox,bodyUnits=s.units.filter(v=>v.pageIndex===u.pageIndex&&!plan.furniture.some(x=>x.id===v.id)),minX=Math.min(...bodyUnits.map(v=>v.bbox[0])),maxX=Math.max(...bodyUnits.map(v=>v.bbox[2])),leftColumn=plan.columns===1||b[2]<=(minX+maxX)/2;
   const y=b[1]>=u.pageHeight/2?b[1]:u.pageHeight-36,bodyBottom=u.pageHeight-bottom;
-  if(!leftColumn||y>=bodyBottom)continue;
+  if(y>=bodyBottom)continue;
+  if(u.pageIndex!==0||!leftColumn)continue;
   const font=/\\fontsize\s*\{\s*([\d.]+)(bp|pt)?\s*\}/.exec(fragments.get(f.id)||''),size=font?Number(font[1])*(font[2]==='pt'?factor.pt:1):10;
   reserve=Math.max(reserve,bodyBottom-y+size*1.2+6);
  }
@@ -66,5 +71,9 @@ export async function applyLayoutStructure({project,plan,signal}={}){
  const files=project.files.map(f=>{if(f.path===project.mainFile)return {path:f.path,bytes:enc.encode(source.slice(0,start)+region+source.slice(stop))};if(f.path==='falsify-layout-structure.json')return {path:f.path,bytes:enc.encode(JSON.stringify(s))};
   if(f.path==='falsify-reconstruction.json'){const m=JSON.parse(dec.decode(f.bytes));m.baselineBindings??=structuredClone(m.bindings||[]);m.bindings=(m.bindings||[]).map(b=>{const offset=rendered.offsets.get(b.itemId),payload=fragments.get(b.itemId);if(offset===undefined||typeof payload!=='string')fail('INVALID_BINDING');return {...b,start:start+offset,end:start+offset+payload.length,status:'review-required',scope:'layout-unit',bindingScope:'containing-project'};});m.layoutDerived=true;return {path:f.path,bytes:enc.encode(JSON.stringify(m))};}
   return {path:f.path,bytes:f.bytes.slice()};});
+ for(const f of extraFiles)files.push({path:f.path,bytes:f.bytes.slice()});
  if(signal?.aborted)throw new DOMException('Cancelled','AbortError');const next=await createLatexProject({files,mainFile:project.mainFile,engine:project.engine,origin:project.origin,sourcePdfHash:project.sourcePdfHash});return {project:next,summary:{units:s.units.length,frontMatter:plan.frontMatter.length,furniture:plan.furniture.length,columns:plan.columns}};
 }
+
+export async function applyLayoutStructure({project,plan,signal}={}){return updateStructure({project,plan,signal});}
+export async function replaceLayoutUnitPayloads({project,replacements,extraFiles=[],signal}={}){return updateStructure({project,replacements,extraFiles,signal});}

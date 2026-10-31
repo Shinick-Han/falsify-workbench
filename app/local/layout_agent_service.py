@@ -2,6 +2,7 @@
 import base64
 import hashlib
 import json
+import math
 import re
 import struct
 from pathlib import Path
@@ -12,7 +13,11 @@ from experiments.selfplay_codex import CodexBackend
 
 REQUEST_SCHEMA = 'falsify.paper-layout-agent-step.v1'
 RESPONSE_SCHEMA = 'falsify.paper-layout-agent-action.v1'
-TOOLS = ('read_source', 'replace_source', 'compile_pdf', 'inspect_pdf', 'render_pages', 'read_reference', 'render_reference_pages', 'restructure_source', 'finish')
+CATALOG_PATH = Path(__file__).resolve().parent / 'layout-agent-tools.json'
+CATALOG = json.loads(CATALOG_PATH.read_text(encoding='utf-8'))
+TOOL_DEFINITIONS = {item['name']: item for item in CATALOG['tools']}
+TOOLS = tuple(TOOL_DEFINITIONS)
+ACTION_SCHEMA_V2 = CATALOG['providerActionSchema']
 HEX = re.compile(r'[0-9a-f]{64}\Z')
 SKILL_PATHS = (Path(__file__).resolve().parents[2] / '.agents/skills/falsify-paper-layout/SKILL.md',
                Path(__file__).resolve().parent / 'layout-agent-skill.md')
@@ -98,11 +103,12 @@ def _path(value):
 
 def validate_request(data):
     required = {'schema', 'consent', 'projectId', 'step', 'maxSteps', 'instruction', 'tools', 'observations', 'images', 'sourceFiles'}
-    if type(data) is not dict or not required <= set(data) or set(data) - required - {'model', 'effort', 'reference', 'structure', 'execution'} \
+    if type(data) is not dict or not required <= set(data) or set(data) - required - {'model', 'effort', 'reference', 'structure', 'execution', 'protocol'} \
             or data['schema'] != REQUEST_SCHEMA or data['consent'] is not True \
             or type(data['projectId']) is not str or not HEX.fullmatch(data['projectId']): raise ValueError('invalid_request')
     if type(data['step']) is not int or type(data['maxSteps']) is not int or not 1 <= data['maxSteps'] <= 32 or not 0 <= data['step'] < data['maxSteps']: raise ValueError('invalid_request')
     _text(data['instruction'], 8000)
+    if data.get('protocol', 'v1') not in ('v1', 'v2'): raise ValueError('invalid_request')
     if type(data['tools']) is not list or type(data['observations']) is not list or type(data['sourceFiles']) is not list: raise ValueError('invalid_request')
     if len(data['tools']) > 32 or len(data['observations']) > 64 or len(data['sourceFiles']) > 256: raise LayoutAgentError('request_limit', 400)
     for key in ('reference', 'structure'):
@@ -124,7 +130,8 @@ def validate_request(data):
     if len(images) > 4: raise LayoutAgentError('request_limit', 400)
     decoded, pages = [], set()
     for item in images:
-        if type(item) is not dict or not {'pageIndex', 'mime', 'base64'} <= set(item) or set(item)-{'pageIndex', 'mime', 'base64', 'document'} or type(item['pageIndex']) is not int or not 0 <= item['pageIndex'] < 500 or item.get('document','candidate') not in ('original','candidate') or (item.get('document','candidate'),item['pageIndex']) in pages or item['mime'] != 'image/png': raise ValueError('invalid_request')
+        if type(item) is not dict or not {'pageIndex', 'mime', 'base64'} <= set(item) or set(item)-{'pageIndex', 'mime', 'base64', 'document', 'bbox'} or type(item['pageIndex']) is not int or not 0 <= item['pageIndex'] < 500 or item.get('document','candidate') not in ('original','candidate') or (item.get('document','candidate'),item['pageIndex']) in pages or item['mime'] != 'image/png': raise ValueError('invalid_request')
+        if 'bbox' in item and (type(item['bbox']) is not list or len(item['bbox']) != 4 or any(type(v) not in (int, float) or not -100000 < v < 100000 for v in item['bbox']) or item['bbox'][0] >= item['bbox'][2] or item['bbox'][1] >= item['bbox'][3]): raise ValueError('invalid_request')
         pages.add((item.get('document','candidate'),item['pageIndex'])); encoded = _text(item['base64'], 699052)
         try:
             raw = base64.b64decode(encoded, validate=True)
@@ -138,7 +145,7 @@ def validate_request(data):
     try:
         context = {k: data[k] for k in ('projectId', 'step', 'maxSteps', 'tools', 'observations', 'sourceFiles')}
         context.update({k: data[k] for k in ('reference', 'structure', 'execution') if k in data})
-        context['images'] = [{'pageIndex': image['pageIndex'], 'mime': image['mime'], 'document':image.get('document','candidate')} for image in images]
+        context['images'] = [{'pageIndex': image['pageIndex'], 'mime': image['mime'], 'document':image.get('document','candidate'), **({'bbox':image['bbox']} if 'bbox' in image else {})} for image in images]
         text = json.dumps(context, ensure_ascii=False, allow_nan=False)
         text.encode('utf-8')
     except (TypeError, ValueError, UnicodeEncodeError, RecursionError): raise ValueError('invalid_request') from None
@@ -154,7 +161,29 @@ def _skill():
             except UnicodeDecodeError: raise LayoutAgentError('skill_unavailable') from None
     raise LayoutAgentError('skill_unavailable')
 
+def _matches(value, schema):
+    if 'anyOf' in schema: return any(_matches(value, item) for item in schema['anyOf'])
+    if 'const' in schema and value != schema['const']: return False
+    if 'enum' in schema and value not in schema['enum']: return False
+    kind = schema.get('type')
+    if kind == 'object': return type(value) is dict and all(k in value for k in schema.get('required', [])) and all(k in schema.get('properties', {}) and _matches(v, schema['properties'][k]) for k,v in value.items())
+    if kind == 'array': return type(value) is list and len(value) >= schema.get('minItems', 0) and len(value) <= schema.get('maxItems', 5000) and all(_matches(v, schema['items']) for v in value) and (not schema.get('uniqueItems') or len({json.dumps(v, sort_keys=True) for v in value}) == len(value))
+    if kind == 'string': return type(value) is str and len(value) <= 20000 and '\0' not in value
+    if kind == 'boolean': return type(value) is bool
+    return type(value) in ((int,) if kind == 'integer' else (int,float)) and math.isfinite(value) and schema.get('minimum', float('-inf')) <= value <= schema.get('maximum', float('inf'))
+
 def _action(value, paths):
+    if type(value) is dict and set(value) == {'tool','args','message'}:
+        if type(value.get('args')) is dict:
+            value = {**value, 'args':{k:v for k,v in value['args'].items() if v is not None}}
+        tool = TOOL_DEFINITIONS.get(value['tool']) if type(value.get('tool')) is str else None
+        if not tool or not _matches(value['args'], tool['parameters']): raise LayoutAgentError('invalid_action', 422)
+        try:
+            _text(value['message'], 4000)
+            _text(json.dumps(value['args'], ensure_ascii=False, allow_nan=False), 20000)
+        except (ValueError, LayoutAgentError): raise LayoutAgentError('invalid_action', 422) from None
+        if value['tool'] in ('read_source','replace_source') and value['args'].get('path') not in paths: raise LayoutAgentError('invalid_action', 422)
+        return value
     if type(value) is not dict or set(value) != set(ACTION_SCHEMA['required']) or value['tool'] not in TOOLS: raise LayoutAgentError('invalid_action', 422)
     for key, limit in (('path', 240), ('before', 20000), ('after', 20000), ('message', 4000)):
         try: _text(value[key], limit)
@@ -167,18 +196,23 @@ def _action(value, paths):
 
 def decide(request, *, backend_factory=CodexBackend):
     skill, skill_hash = _skill()
-    prompt = (skill + '\n\n' + PROMPT_CONTRACT + '\nTASK INSTRUCTION (JSON string):\n'
+    protocol = request['data'].get('protocol', 'v1')
+    instructions = (Path(__file__).resolve().parent / 'layout-agent-instructions.md').read_text(encoding='utf-8') if protocol == 'v2' else PROMPT_CONTRACT
+    prompt = (skill + '\n\n' + instructions + '\nTASK INSTRUCTION (JSON string):\n'
               + json.dumps(request['data']['instruction'], ensure_ascii=False)
               + '\nDOCUMENT AND TOOL DATA (JSON):\n' + request['text'])
     if len(prompt) > 100000: raise LayoutAgentError('request_limit', 400)
     try:
         backend = backend_factory(max_calls=1, timeout_seconds=120, max_prompt_chars=100000, model=request['model'], effort=request['effort'])
-        result = infer_visual(backend, prompt, ACTION_SCHEMA, request['images']) if request['images'] else backend.infer(prompt, ACTION_SCHEMA)
+        schema = ACTION_SCHEMA_V2 if protocol == 'v2' else ACTION_SCHEMA
+        result = infer_visual(backend, prompt, schema, request['images']) if request['images'] else backend.infer(prompt, schema)
     except Exception: raise LayoutAgentError('model_failed') from None
     if type(result) is not dict or result.get('status') != 'ok':
         code = result.get('error_code') if type(result) is dict else None
         status = result.get('status') if type(result) is dict else None
         raise LayoutAgentError('cli_login_required' if code == 'chatgpt_login_required' else 'model_timeout' if status == 'timeout' else 'model_tool_violation' if status == 'tool_violation' else 'model_failed')
     action = _action(result.get('response'), request['paths'])
+    offered = {t if type(t) is str else t.get('name') for t in request['data']['tools'] if type(t) in (str,dict)}
+    if action['tool'] not in offered: raise LayoutAgentError('invalid_action', 422)
     return {'schema': RESPONSE_SCHEMA, 'projectId': request['data']['projectId'], 'step': request['data']['step'],
             'action': action, 'model': request['model'], 'skillHash': skill_hash}

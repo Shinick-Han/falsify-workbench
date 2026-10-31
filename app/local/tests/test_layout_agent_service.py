@@ -45,6 +45,36 @@ class FakeBackend:
         return {'status': 'ok', 'response': action()}
 
 class ServiceTests(unittest.TestCase):
+    def test_typed_tool_actions_and_schema(self):
+        from jsonschema import Draft202012Validator
+        validator = Draft202012Validator(service.CATALOG['actionSchema'])
+        valid = {'tool':'update_layout','args':{'blockId':'b1','leadingBp':14},'message':'행간 조정'}
+        self.assertTrue(validator.is_valid(valid))
+        self.assertEqual(service._action(valid, {'main.tex'}), valid)
+        for args in ({'blockId':'b1','run':'shell'}, {'revisionId':'r1'}, {'blockId':'b1','leadingBp':float('inf')}):
+            with self.assertRaises(service.LayoutAgentError): service._action({**valid,'args':args}, {'main.tex'})
+        class Typed(FakeBackend):
+            def infer(self, prompt, schema):
+                self.calls += 1
+                self.prompt, self.schema = prompt, schema
+                return {'status':'ok','response':valid}
+        data = {**request(), 'protocol':'v2'}
+        result = service.decide(service.validate_request(data), backend_factory=Typed)
+        backend = Typed.instances[-1]
+        self.assertEqual(result['action'], valid)
+        self.assertEqual(backend.schema, service.ACTION_SCHEMA_V2)
+        self.assertIn('inspect_document', backend.prompt)
+        self.assertIn('selected RED', backend.prompt)
+        with self.assertRaises(service.LayoutAgentError):
+            service.decide(service.validate_request({**data,'tools':['finish']}), backend_factory=Typed)
+
+    def test_region_image_coordinates_reach_model_context(self):
+        data = {**request(),'protocol':'v2','images':[{'document':'original','pageIndex':0,'bbox':[10,20,30,40],'mime':'image/png','base64':base64.b64encode(png()).decode()}]}
+        checked = service.validate_request(data)
+        self.assertIn('"bbox": [10, 20, 30, 40]', checked['text'])
+        for bbox in ([30,20,10,40],[0,0,float('inf'),40],[0,0,20]):
+            with self.assertRaises(ValueError): service.validate_request({**data,'images':[{**data['images'][0],'bbox':bbox}]})
+
     def test_existing_codex_transport_disables_tools_and_sends_image(self):
         calls = []
         def transport(argv, **kwargs):
