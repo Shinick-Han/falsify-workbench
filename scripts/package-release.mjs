@@ -32,6 +32,7 @@ export const RECOMPOSITION_WASM = 'app/dist/recomposition-vendor/typst_ts_web_co
 export const RECOMPOSITION_WASM_SHA256 = '1fc968438a672366dfec39c96c842c26ed29caff4eb1bcaab19a6c60867de5fd';
 export const LATEX_WASM = 'app/dist/latex-compiler-vendor/busytex.wasm';
 export const LATEX_MANIFEST_SHA256 = '3f9a3b4f5ee5cd82530a83f6afa596a0dcd163359d89c4850af9e853455e485b';
+export const LATEX_LUA_MANIFEST_SHA256 = '90fd272bbdd003afb3e869dfeb369b881a814ea47dd27a98b4b87639559f6deb';
 
 const forbidden = /(?:^|\/)(?:\.venv|\.local|node_modules|\.pdf-editor\.local\.json|\.runtime[^/]*|output|tmp)(?:\/|$)|^experiments\/|\.(?:pdf|docx|wav|mp3|wasm)$/i;
 const pdfjsWasm = new Set(PDFJS_WASM);
@@ -59,7 +60,12 @@ export function verifyLatexRuntime(rootDir) {
     if(data.length!==file.bytes || createHash('sha256').update(data).digest('hex')!==file.sha256) throw new Error('LaTeX runtime digest mismatch: '+file.name);
   }
   if(!readFileSync(join(rootDir,'app/latex-compiler-LICENSE.txt'),'utf8').includes('AFFERO GENERAL PUBLIC LICENSE')) throw new Error('LaTeX compiler license is missing.');
-  return {manifestSha256:LATEX_MANIFEST_SHA256,files:manifest.files.length,bytes:manifest.files.reduce((n,f)=>n+f.bytes,0)};
+  const luaBytes=readFileSync(join(rootDir,'app/latex-compiler-lua-manifest.json'));
+  if(createHash('sha256').update(luaBytes).digest('hex')!==LATEX_LUA_MANIFEST_SHA256)throw new Error('Lua profile manifest differs from pinned assets.');
+  const lua=JSON.parse(luaBytes.toString('utf8'));
+  if(lua.schema!=='falsify.latex-lua-profile.v1'||lua.engine!=='lualatex'||lua.compilerVersion!=='1.4.1'||lua.files.map(f=>f.name).sort().join(',')!==['texlive-lua-profile.js','texlive-lua-profile.data','NOTICE-lua-profile.txt'].sort().join(','))throw new Error('Lua profile asset set differs from pinned profile.');
+  for(const file of lua.files){const data=readFileSync(join(rootDir,'app/dist/latex-compiler-vendor',file.name));if(data.length!==file.bytes||createHash('sha256').update(data).digest('hex')!==file.sha256)throw new Error('Lua runtime digest mismatch: '+file.name);}
+  return {manifestSha256:LATEX_MANIFEST_SHA256,files:manifest.files.length,bytes:manifest.files.reduce((n,f)=>n+f.bytes,0),lua:{manifestSha256:LATEX_LUA_MANIFEST_SHA256,files:lua.files.length,bytes:lua.files.reduce((n,f)=>n+f.bytes,0)}};
 }
 
 export function verifyRecompositionRuntime(rootDir) {

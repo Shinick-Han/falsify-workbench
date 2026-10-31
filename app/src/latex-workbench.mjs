@@ -9,6 +9,7 @@ import {createLatexSession} from './latex-session.mjs';
 import {createLatexSourceEditor} from '../dist/latex-source-ui.js';
 import {hex} from './paragraph-pdf-crypto.mjs';
 import manifest from '../latex-compiler-manifest.json';
+import {latexEngineManifest} from './latex-runtime-catalog.mjs';
 import {encodeSourceSession,decodeSourceSession,isSourceDraftFresh,projectLegacyExternal} from './latex-session-archive.mjs';
 import {mountPdfLatexWorkbench} from './pdf-latex-workbench.mjs';
 import {createReconstructionLineage} from './pdf-latex-baseline.mjs';
@@ -121,7 +122,7 @@ export function mountLatexWorkbench(doc=globalThis.document){
     try{renderedKey=leftRendered='';const hash=hex(new Uint8Array(await file.arrayBuffer()));if(ticket!==epoch)return;const p=await importLatexProject(file);if(ticket!==epoch)return;uploadHash=hash;const analysis=analyzeProjectFiles(p);if(!p.mainFile){project=p;const label=el('label','시작 파일 '),select=doc.createElement('select');for(const path of analysis.mainCandidates){const option=el('option',path);option.value=path;select.append(option);}const choose=el('button','열기');choose.type='button';choose.onclick=()=>run(async()=>{const choice=++mainTicket,path=select.value;const selected=await createLatexProject({...p,mainFile:path});if(ticket===epoch&&choice===mainTicket)await start(selected,ticket);});label.append(select);mainPicker.append(label,choose);if(!analysis.mainCandidates.length)throw new Error('문서를 시작하는 .tex 파일을 찾지 못했습니다. main.tex와 필요한 파일을 ZIP으로 넣으세요.');return;}await start(p,ticket);
     }catch(e){if(ticket===epoch)showError(e);}finally{if(ticket===epoch){busyImport=false;paint();}}}
   async function start(p,ticket,{compile=true,initialArtifact}={}){if(ticket!==epoch)return;session?.dispose();session=null;mainPicker.replaceChildren();project=p;model=analyzeLatexSource(p);const compiler=createLatexCompiler({assetBase:new URL('latex-compiler-vendor/',base).href});
-    session=createLatexSession({project,applyChanges:applySourceChanges,compiler,generationApi:globalThis.FalsifyPaperGeneration,engineManifest:manifest,...(initialArtifact?{initialArtifact}:{}),onState:s=>{if(ticket!==epoch)return;latestState=s;paint();},onOutput:()=>{if(ticket===epoch)void render();}});latestState=session.snapshot();busyImport=false;paint();if(compile)await session.compile();if(initialArtifact&&ticket===epoch)void render();}
+    session=createLatexSession({project,applyChanges:applySourceChanges,compiler,generationApi:globalThis.FalsifyPaperGeneration,engineManifest:p.engine==='lualatex'?{...manifest,luaProfile:latexEngineManifest(p.engine)}:manifest,...(initialArtifact?{initialArtifact}:{}),onState:s=>{if(ticket!==epoch)return;latestState=s;paint();},onOutput:()=>{if(ticket===epoch)void render();}});latestState=session.snapshot();busyImport=false;paint();if(compile)await session.compile();if(initialArtifact&&ticket===epoch)void render();}
   async function loadReconstructed({project:p,file,initialArtifact,reconstruction:lineage,signal}={}){
     if(p?.origin!=='reconstructed-pdf'||!file?.arrayBuffer)throw new Error('재구성 원본과 소스가 필요합니다.');
     const operation=++reconstructionTicket,startingEpoch=epoch,aborted=()=>new DOMException('취소했습니다.','AbortError');

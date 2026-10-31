@@ -1,5 +1,13 @@
 # Falsify 외부 AI RED BLUE 작업 흐름 North Star
 
+## 2026-10-31 문단 흐름 재조판
+
+기존 원본 배치 편집을 유지하고, 고급 옵션에서 문단 흐름의 LuaLaTeX 재구성을 선택하도록 구현했다. 기존 BusyTeX 1.4.1에 fontspec·microtype 런타임 약 0.44 MB를 추가하고, Liberation Serif 네 서체와 문서 전체 조판 프로필을 연결했다. 원본·공격 없는 기준본·편집본의 해시와 이력은 기존 계약을 사용한다. BLUE에는 생성 PDF만 보낸다.
+
+DocVortex는 Shinick-Han/DocVortex로 fork하고 독립 변환 어댑터를 실측했다. 텍스트·서식 차이와 XeLaTeX/ctexart 의존성이 있어 기본 웹 변환기로 교체하지 않았다. Docling·Marker·MinerU와 별도 OCR 평가 플랫폼은 이번 런타임에서 제외했다.
+
+실제 7쪽 논문의 새 조판본은 6쪽으로 생성·다운로드됐다. 전폭 첫 쪽, 일부 표, 머리말 분리, 문자·숫자 충실도는 남은 품질 작업이다. 범용 복원 완료나 공개 배포로 기록하지 않는다. 상세 선정 근거는 [재조판 부품 기록](paper-recomposition-components.md), 작업 영수증은 coordination/prompt-first-20261028/typography-wave-20261031에 둔다. WorkBite owner 인증이 복구되면 T-0152에 반영한다.
+
 기준일: 2026-10-28 · 스펙 v1 · 상태: alpha.29 프롬프트 중심 흐름 구현·검수 완료. 배포 결과는 WorkBite T-0152 참조
 
 적용 대상: 사용자가 지정한 Falsify 프로젝트 orchestrator. 다른 Codex agent·하위 작업자·검수자에게는 이 문서의 열람·준수 의무가 없다. 해당 orchestrator가 필요한 내용만 개별 작업 지시로 추려 전달한다.

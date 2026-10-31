@@ -58,3 +58,19 @@ test('SyncTeX prefers exact project path over a suffix match',()=>{
  const map=parseSynctex(input,{project:{...project,files:[{path:'main.tex'},{path:'sections/main.tex'}]}});
  assert.equal(map.boxes[0].path,'sections/main.tex');
 });
+
+test('Lua compilation preloads its static profile and keeps remote execution disabled', async()=>{
+ let instance; const compiler=createLatexCompiler({workerFactory:()=>instance={postMessage(m){this.sent??=[];this.sent.push(m)},terminate(){}}});
+ const pending=compiler.compile({project:{...project,engine:'lualatex'}});
+ assert.deepEqual(instance.sent[0].preload_data_packages_js.map(x=>new URL(x).pathname.split('/').pop()),['texlive-basic.js','texlive-lua-profile.js']);
+ instance.onmessage({data:{initialized:true}}); assert.equal(instance.sent[1].driver,'luahbtex_bibtex8'); assert.equal(instance.sent[1].remote_endpoint,''); assert.equal(instance.sent[1].shell_escape,false);
+ compiler.cancel(); const cancelled=await pending;assert.equal(cancelled.engineManifest.data,'texlive-basic+falsify-lua-profile');assert.equal(cancelled.engineManifest.manifestSha256.length,64);
+});
+
+test('Lua artifact records profile identity and bounded overflow facts without source text',async()=>{
+ let instance;const compiler=createLatexCompiler({workerFactory:()=>instance={postMessage(){},terminate(){}}});
+ const pending=compiler.compile({project:{...project,engine:'lualatex'}});
+ instance.onmessage({data:{pdf:new Uint8Array([37,80,68,70]),exit_code:0,log:'Overfull \\hbox (4.25pt too wide) in paragraph at lines 19--24\nprivate body\nOverfull \\vbox (1.0pt too high) detected at line 37\n'}});
+ const result=await pending;assert.equal(result.success,true);assert.equal(result.engineManifest.profile,'falsify.latex-lua-profile.v1');assert.equal(result.engineManifest.manifestSha256.length,64);
+ const d=result.diagnostics.find(d=>d.code==='TEX_OVERFULL_BOX');assert.equal(d.count,2);assert.equal(d.maxOverflowPt,4.25);assert.deepEqual(d.lines,[19,37]);assert.equal(JSON.stringify(result).includes('private body'),false);
+});

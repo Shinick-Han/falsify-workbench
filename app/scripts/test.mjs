@@ -1,7 +1,9 @@
 import {spawnSync} from 'node:child_process';
 const latex = spawnSync(process.execPath, ['--test','tests/latex-source-project.spec.mjs','tests/latex-compiler.spec.mjs','tests/latex-semantic-edits.spec.mjs','tests/latex-session.spec.mjs','tests/latex-workbench.spec.mjs','tests/latex-session-archive.spec.mjs'], {stdio:'inherit'});
 if(latex.error || latex.status!==0)process.exit(latex.status||1);
-const reconstruction = spawnSync(process.execPath, ['--test','tests/pdf-latex-evidence.spec.mjs','tests/pdf-latex-regions.spec.mjs','tests/pdf-latex-serialize.spec.mjs','tests/pdf-latex-unicode.spec.mjs','tests/pdf-latex-baseline.spec.mjs','tests/pdf-latex-reader.spec.mjs','tests/pdf-latex-preview-lifecycle.spec.mjs','tests/latex-source-export.spec.mjs'], {stdio:'inherit'});
+const runtime = spawnSync(process.execPath, ['--test','tests/latex-runtime-catalog.spec.mjs'], {stdio:'inherit'});
+if(runtime.error || runtime.status!==0)process.exit(runtime.status||1);
+const reconstruction = spawnSync(process.execPath, ['--test','tests/pdf-latex-evidence.spec.mjs','tests/pdf-latex-regions.spec.mjs','tests/pdf-latex-serialize.spec.mjs','tests/pdf-latex-unicode.spec.mjs','tests/pdf-latex-baseline.spec.mjs','tests/pdf-latex-reader.spec.mjs','tests/pdf-latex-preview-lifecycle.spec.mjs','tests/latex-source-export.spec.mjs','tests/paper-typography-profile.spec.mjs','tests/pdf-latex-flow-serialize.spec.mjs','tests/pdf-latex-fonts.spec.mjs'], {stdio:'inherit'});
 if(reconstruction.error || reconstruction.status!==0)process.exit(reconstruction.status||1);
 const marker = spawnSync(process.execPath, ['--test','tests/paragraph-pdf-content-operators.spec.mjs','tests/paragraph-pdf-marker-surgery.spec.mjs','tests/paragraph-pdf-marker-path.spec.mjs'], {stdio:'inherit'});
 if(marker.error || marker.status!==0)process.exit(marker.status||1);

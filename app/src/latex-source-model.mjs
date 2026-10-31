@@ -17,6 +17,14 @@ export function analyzeLatexSource(project) {
  if(list[j]?.type==='string'&&list[j].content==='*')j++;
  while(list[j]?.type==='whitespace')j++;
  if(list[j]?.type==='string'&&list[j].content==='['){let depth=0;do{if(list[j]?.type==='string'&&list[j].content==='[')depth++;if(list[j]?.type==='string'&&list[j].content===']')depth--;j++;}while(j<list.length&&depth>0);while(list[j]?.type==='whitespace')j++;}
+ // Declarations and layout commands have a fixed argument count. A following
+ // paragraph group is rendered content, not another argument of that command.
+ const layoutArity={selectfont:0,bfseries:0,itshape:0,normalfont:0,rmfamily:0,sffamily:0,ttfamily:0,centering:0,noindent:0,par:0,relax:0,nopagebreak:0,pagebreak:0,newpage:0,clearpage:0,Needspace:1,needspace:1,fontsize:2,setlength:2,addtolength:2,hspace:1,vspace:1};
+ if(Object.hasOwn(layoutArity,n.content)){
+   let count=0;while(count<layoutArity[n.content]&&list[j]?.type==='group'){count++;i=j;j++;while(list[j]?.type==='whitespace')j++;}
+   if(layoutArity[n.content]===0)i=Math.max(i,j-1);
+   continue;
+ }
  if(kind&&list[j]?.type==='group'){add(kind,s,end(list[j]),pos(list[j])+1,end(list[j])-1);i=j;continue}
  if(list[j]?.type==='group'){if(textMacros.has(n.content)){walk(list[j].content,inMath);i=j;}else{do{i=j;j++;while(list[j]?.type==='whitespace')j++;}while(list[j]?.type==='group');}continue}
  }
