@@ -1039,6 +1039,14 @@ export function expectedPageText(sourceText, pageEdits, options = {}) {
 // Bind a numeric change to the unique selected source paragraph and an
 // unambiguous digit anchor, then compare every extracted page character.
 export function modelNumericEditProof(source, output, edits, paragraphs) {
+  return modelInlineEditProof(source,output,edits,paragraphs,'numeric');
+}
+
+export function modelWordEditProof(source, output, edits, paragraphs) {
+  return modelInlineEditProof(source,output,edits,paragraphs,'word');
+}
+
+function modelInlineEditProof(source, output, edits, paragraphs, kind) {
   if (edits.length !== 1 || !Array.isArray(paragraphs)) return null;
   if ([...source.chars, ...output.chars].some(c => !Number.isInteger(c.u) || c.u < 0 || c.u > 0x10ffff)) return null;
   const e = edits[0], before = normStr(e.before), after = normStr(e.after);
@@ -1047,14 +1055,16 @@ export function modelNumericEditProof(source, output, edits, paragraphs) {
   while (prefix < Math.min(before.length, after.length) && before[prefix] === after[prefix]) prefix++;
   while (suffix < Math.min(before.length, after.length) - prefix && before.at(-1-suffix) === after.at(-1-suffix)) suffix++;
   const changed = after.slice(prefix, after.length-suffix);
-  if (!/^\d*$/.test(before.slice(prefix, before.length-suffix)) || !/^\d+$/.test(changed)) return null;
+  const alphabet=kind==='word'?/^[A-Za-z]*$/:/^\d*$/;
+  if (!alphabet.test(before.slice(prefix, before.length-suffix)) || !alphabet.test(changed) || !changed) return null;
   // As in the inline planner, an insertion is anchored to its adjacent
   // original number; expanding replacements also binds the complete number.
   let start=prefix, end=before.length-suffix;
-  while (start>0 && /[0-9]/.test(before[start-1])) start--;
-  while (end<before.length && /[0-9]/.test(before[end])) end++;
+  const member=kind==='word'?/[A-Za-z]/:/[0-9]/;
+  while (start>0 && member.test(before[start-1])) start--;
+  while (end<before.length && member.test(before[end])) end++;
   const old=before.slice(start,end);
-  if (!/^[0-9]+$/.test(old)) return null;
+  if (!(kind==='word'?/^[A-Za-z]{2,}$/:/^[0-9]+$/).test(old)) return null;
   const replacement=before.slice(start,prefix)+changed+before.slice(before.length-suffix,end);
   const hits=[];
   for (const p of paragraphs) {
@@ -1256,14 +1266,18 @@ export async function inspectSavedPdf(engineFactory, sourceBytes, outputBytes, e
       }
       const exp = expectedPageText(s.text, pageEdits);
       let modelNumericMatch = false;
+      let modelWordMatch = false;
       if (!exp.ok && exp.reason === "before_not_found" && typeof src.buildModel === "function") {
         ensurePage(src, i);
-        modelNumericMatch = compareModelNumericEdit(s, o, pageEdits, src.buildModel());
+        const model=src.buildModel();
+        modelNumericMatch = compareModelNumericEdit(s, o, pageEdits, model);
+        modelWordMatch = !modelNumericMatch && modelWordEditProof(s,o,pageEdits,model)!==null;
       }
-      if (modelNumericMatch) {
+      if (modelNumericMatch || modelWordMatch) {
         row.text_equal = true;
-        row.model_numeric_text_conservation = true;
-        warnings.push({ code: "model_numeric_text_conservation", pageIndex: i, severity: "warning", detail: "Unique source paragraph and numeric marker context matched; complete page extraction conserved with generated whitespace normalization" });
+        row[modelWordMatch?'model_word_text_conservation':'model_numeric_text_conservation'] = true;
+        warnings.push({ code: modelWordMatch?"model_word_text_conservation":"model_numeric_text_conservation", pageIndex: i, severity: "warning", detail: "Unique source paragraph and changed word context matched; complete page extraction conserved with generated whitespace normalization" });
+        if(modelWordMatch)row.after_checks=pageEdits.map(e=>({id:e.id,present:true,method:'model-word-full-page-proof'}));
       } else if (!exp.ok) {
         failures.push({ code: "expected_text_uncomputable", pageIndex: i, id: exp.id, reason: exp.reason });
       } else {

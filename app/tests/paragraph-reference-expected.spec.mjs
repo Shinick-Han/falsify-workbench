@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {compareModelNumericEdit, modelNumericEditProof, expectedPageText} from '../src/paragraph-vendor/quality.mjs';
+import {compareModelNumericEdit, modelNumericEditProof, modelWordEditProof, expectedPageText} from '../src/paragraph-vendor/quality.mjs';
 
 const before = 'Alice Author 3, Bob Writer marker';
 const after = 'Alice Author 45, Bob Writer marker';
@@ -15,6 +15,17 @@ function page(text, generated = []) {
 }
 const source = page(raw,[raw.indexOf(' 3')]);
 const matches = (s,o=output, ps=model) => compareModelNumericEdit(s,page(o),[edit],ps);
+
+test('word edits use unique model context while conserving every other page character',()=>{
+ const before='Ada Person2,3, Writer marker',after='Ada Persons2,3, Writer marker';
+ const source='Page Ada Person2,3, Writer identity marker ! tail',out=source.replace('Person','Persons');
+ const p=[{box:{x:0,top:100,w:500,h:100},runs:[{text:before}]}],edits=[{before,after}];
+ assert.equal(expectedPageText(source,edits).reason,'before_not_found');
+ assert.ok(modelWordEditProof(page(source),page(out),edits,p));
+ for(const corrupt of [out.replace('identity ',''),out.replace('identity marker','marker identity'),out+' tail',out.replace('Persons','Personz')])assert.equal(modelWordEditProof(page(source),page(corrupt),edits,p),null);
+ assert.equal(modelWordEditProof(page(source),page(out),edits,[...p,...p]),null);
+ assert.equal(modelWordEditProof(page(source),page(out),[...edits,...edits],p),null);
+});
 
 test('model-selected numeric edit proves full extraction despite displaced marker and generated gap',()=>{
   assert.equal(expectedPageText(raw,[edit]).reason,'before_not_found');

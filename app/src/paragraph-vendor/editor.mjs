@@ -18,6 +18,7 @@ import {
   commitRetainingLines,
   commitSourceLineDeletion,
   commitNumericMarker,
+  commitSourceWord,
   commitGeometricPrefix,
   commitPrefixSuffix,
   editedLineSpan,
@@ -527,6 +528,10 @@ export async function editPdf(request, options = {}) {
       for (const [mutationIndex, [pi, { del, inserts }]] of mutations.entries()) {
         const para = paras[pi];
         const markerPlans=plan.plans.filter(p=>!p.noop&&p.touched.includes(pi));
+        if(mutations.length===1&&markerPlans.length===1){
+          const word=commitSourceWord(engine,para,markerPlans[0].edit.before,markerPlans[0].edit.after);
+          if(word){mutated=true;pageReport.paragraphs.push({index:pi,surgical:true,lineRetention:word});continue;}
+        }
         if(markerPlans.length===1&&markerPlans[0].change?.warning==='numeric_marker_style_from_digits'){
           const mapped=markerPlans[0].change.numericMarker;
           const marker=commitNumericMarker(engine,para,mapped?.before||markerPlans[0].edit.before,mapped?.after||markerPlans[0].edit.after,mapped);

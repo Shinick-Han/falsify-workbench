@@ -273,7 +273,11 @@ test('stationary Fit open action and generated Link marker preserve the complete
   d=>d.getTrailer().get('Root').delete('OpenAction'),
  ];
  for(const change of corruptions)assert.equal((await api.validate({...request,outputBytes:mutate(output,change)})).ok,false);
- assert.equal((await api.validate({...request,outputBytes:output,moves:[{sourcePageIndex:0,annotationIndex:0,outputPageIndex:0,dx:0,dy:0}]})).ok,false);
+ assert.equal((await api.validate({...request,outputBytes:output,moves:[{sourcePageIndex:0,annotationIndex:0,outputPageIndex:0,dx:0,dy:0}]})).ok,true);
+ const moved={...request,moves:[{sourcePageIndex:0,annotationIndex:0,outputPageIndex:0,dx:4,dy:0}]};
+ const transported=await api.transport(moved);
+ assert.equal((await api.validate({...moved,outputBytes:transported.pdf})).ok,true);
+ assert.equal((await api.validate({...moved,outputBytes:output})).ok,false,'a supplied movement still needs the actual changed rectangle');
  const existing=mutate(src,d=>d.findPage(0).get('Annots',0).put('PDFIUM_HasGeneratedAP',false)),existingModel=await inspect(existing);
  assert.equal((await api.validate({...request,model:existingModel,sourceBytes:existing,outputBytes:mutate(existing,d=>d.findPage(0).get('Annots',0).put('PDFIUM_HasGeneratedAP',true))})).ok,false);
  const withAppearance=mutate(src,d=>d.findPage(0).get('Annots',0).put('AP',{N:{Known:1}})),appearanceModel=await inspect(withAppearance);

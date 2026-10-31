@@ -14,7 +14,7 @@ import {createHash} from 'node:crypto';
 function fixture(neighbour=false){
  const d=new mupdf.PDFDocument();try{
   const font=d.addSimpleFont(new mupdf.Font('Times-Roman'));
-  const content='BT /F1 12 Tf 60 400 Td (Example Author) Tj ET BT /F1 8 Tf 0 0 1 rg 140 404 Td (2) Tj ET BT /F1 8 Tf 0 0 0 rg 144 404 Td (,) Tj ET BT /F1 8 Tf 0 0 1 rg 146 404 Td (3) Tj ET BT /F1 12 Tf 158 400 Td (, Other Author) Tj ET BT /F1 12 Tf 60 350 Td (Evidence below stays in place.) Tj ET q 0 0 0 rg 220 250 20 20 re f Q';
+ const content='BT /F1 12 Tf 60 400 Td (Example Author) Tj ET BT /F1 8 Tf 0 0 1 rg 140 404 Td (2) Tj ET BT /F1 8 Tf 0 0 0 rg 144 404 Td (,) Tj ET BT /F1 8 Tf 0 0 1 rg 146 404 Td (3) Tj ET BT /F1 12 Tf 158 400 Td (, Other Author) Tj ET BT /F1 12 Tf 60 350 Td (Evidence below stays in place and defines the original column width.) Tj ET q 0 0 0 rg 220 250 20 20 re f Q';
   d.insertPage(-1,d.addPage([0,0,500,500],0,{Font:{F1:font}},content));
   const page=d.findPage(0),links=[d.addObject({Type:'Annot',Subtype:'Link',Rect:[140,403,144,413],A:{S:'URI',URI:d.newString('https://example.invalid/two')}}),d.addObject({Type:'Annot',Subtype:'Link',Rect:[146,403,150,413],A:{S:'URI',URI:d.newString('https://example.invalid/three')}}),d.addObject({Type:'Annot',Subtype:'Link',Rect:[220,250,240,270],Dest:[page,'XYZ',25,475,null]})];
   if(neighbour)links.push(d.addObject({Type:'Annot',Subtype:'Link',Rect:[152,403,156,413],A:{S:'URI',URI:d.newString('https://example.invalid/other')}}));
@@ -22,13 +22,27 @@ function fixture(neighbour=false){
  }finally{d.destroy();}
 }
 const adapter=createAnnotationTransport({mupdf});
-async function make(neighbour=false){
+async function make(neighbour=false,word=false){
  const source=fixture(neighbour),engine=await engineFactory(source);let before;
  try{engine.loadPage(0);engine.normalizeFontsForEdit();before=engine.buildModel().find(p=>p.runs.map(r=>r.text).join('').includes('Example Author')).runs.map(r=>r.text).join('');}finally{engine.close();}
- const edit={id:'marker',pageIndex:0,before,after:before.replace('2,3','2,45')};
+ const edit={id:word?'name':'marker',pageIndex:0,before,after:word?before.replace('Example','Examples'):before.replace('2,3','2,45')};
  const result=await editPdf({sourceBytes:source,edits:[edit],reflow:true},{engineFactory,annotationAdapter:adapter});
  return {source,edit,result};
 }
+
+test('a growing name carries the existing raised links with their original destinations',async()=>{
+ const {source,result}=await make(false,true);
+ assert.deepEqual(result.report.paragraphLinkFailures,[]);
+ assert.equal(result.report.selfCheck.ok,true);
+ assert.equal(result.report.pages[0].paragraphs[0].lineRetention.status,'source_word_objects');
+ const moves=result.report.paragraphLinkMoves;assert.equal(moves.length,2);assert.ok(moves.every(m=>m.dx>0&&m.dy===0));
+ const a=new mupdf.PDFDocument(source),b=new mupdf.PDFDocument(result.pdf);
+ try{for(const move of moves){
+  const x=a.findPage(0).get('Annots',move.annotationIndex),y=b.findPage(0).get('Annots',move.annotationIndex);
+  assert.equal(x.get('A','URI').asString(),y.get('A','URI').asString());
+  assert.ok(Math.abs(y.get('Rect',0).asNumber()-x.get('Rect',0).asNumber()-move.dx)<.01);
+ }}finally{a.destroy();b.destroy();}
+});
 test('numeric link extension keeps target, padding, graphic link and Fit action; rejects corruption',async()=>{
  const {source,result}=await make();
  assert.deepEqual(result.report.paragraphLinkFailures,[],JSON.stringify(result.report.paragraphLinkFailures));

@@ -231,6 +231,98 @@ export function commitNumericMarker(engine, para, before, after, scope=null) {
   return {status:'source_numeric_marker',objects:handles.length};
 }
 
+// A single word inside one source text object can grow into the spare space
+// at the end of its physical line. Keep every object, baseline and style;
+// translate the following text objects together, including separately modeled
+// superscripts. Never rebuild the whole mixed-style paragraph for this case.
+export function commitSourceWord(engine, para, before, after) {
+  let first=0,last=0;
+  while(first<Math.min(before.length,after.length)&&before[first]===after[first])first++;
+  while(last<Math.min(before.length,after.length)-first&&before.at(-1-last)===after.at(-1-last))last++;
+  let start=first,end=before.length-last;
+  while(start>0&&/[A-Za-z]/.test(before[start-1]))start--;
+  while(end<before.length&&/[A-Za-z]/.test(before[end]))end++;
+  const old=before.slice(start,end),next=before.slice(start,first)+after.slice(first,after.length-last)+before.slice(before.length-last,end);
+  if(!/^[A-Za-z]{2,}$/.test(old)||!/^[A-Za-z]{2,}$/.test(next)||old===next)return null;
+  const M=engine.M, required=['_FPDFText_LoadPage','_FPDFText_CountChars','_FPDFText_GetUnicode','_FPDFText_GetTextObject','_FPDFText_ClosePage','_FPDFText_SetText','_FPDFPage_CountObjects','_FPDFPage_GetObject','_FPDFPageObj_GetType','_FPDFText_GetCharOrigin','_FPDFText_GetCharBox','_FPDFTextObj_GetFont','_FPDFTextObj_GetFontSize','_FPDFPageObj_CreateTextObj','_FPDFPageObj_GetMatrix','_FPDFPageObj_SetMatrix','_FPDFPageObj_GetFillColor','_FPDFPageObj_SetFillColor','_FPDFTextObj_GetTextRenderMode','_FPDFPageObj_Destroy','_FPDFPage_RemoveObject','_FPDFPage_InsertObjectAtIndex'];
+  if(!required.every(k=>typeof M?.[k]==='function')||typeof engine.translateObject!=='function'||typeof engine.retainDetachedObject!=='function'||!Number.isFinite(engine.pageWidth))return null;
+  const owner=new Set((engine.paragraphObjects(para.id)||[]).map(h=>h>>>0)),tp=M._FPDFText_LoadPage(engine.page);
+  if(!tp)return null;
+  const chars=[],buf=M._malloc(48);
+  try{for(let i=0;i<M._FPDFText_CountChars(tp);i++){
+    const originOk=M._FPDFText_GetCharOrigin(tp,i,buf,buf+8),origin=originOk?[M.HEAPF64[buf>>3],M.HEAPF64[(buf>>3)+1]]:null;
+    const boxOk=M._FPDFText_GetCharBox(tp,i,buf,buf+8,buf+16,buf+24),box=boxOk?[0,1,2,3].map(k=>M.HEAPF64[(buf>>3)+k]):null;
+    chars.push({ch:String.fromCodePoint(M._FPDFText_GetUnicode(tp,i)),h:M._FPDFText_GetTextObject(tp,i)>>>0,origin,box});
+  }}finally{M._FPDFText_ClosePage(tp);M._free(buf);}
+  const raw=chars.map(c=>c.ch).join(''),hits=[];
+  const sizes=(para.runs||[]).map(r=>r.size).filter(n=>n>0);
+  if(raw.replace(/\s+/g,' ').includes(before.replace(/\s+/g,' '))&&!(sizes.length&&Math.min(...sizes)<Math.max(...sizes)*.85))return null;
+  for(let i=raw.indexOf(old);i>=0;i=raw.indexOf(old,i+1)){
+    const slice=chars.slice(i,i+old.length),h=slice[0]?.h;
+    if(h&&owner.has(h)&&slice.every(c=>c.h===h)&&!/[A-Za-z]/.test(raw[i-1]||'')&&!/[A-Za-z]/.test(raw[i+old.length]||''))hits.push({i,h});
+  }
+  if(hits.length!==1)return null;
+  const {h}=hits[0],full=chars.filter(c=>c.h===h).map(c=>c.ch).join('');
+  if(full.indexOf(old)!==full.lastIndexOf(old)||/[\r\n]/.test(full))return null;
+  const bounds=engine.objectBounds(h);
+  if(!bounds||![bounds.x,bounds.y,bounds.w,bounds.h].every(Number.isFinite)||bounds.h<=0)return null;
+  const objects=[];
+  for(let i=0;i<M._FPDFPage_CountObjects(engine.page);i++){
+    const handle=M._FPDFPage_GetObject(engine.page,i)>>>0,box=engine.objectBounds(handle);
+    if(!box||![box.x,box.y,box.w,box.h].every(Number.isFinite))return null;
+    objects.push({h:handle,box,type:M._FPDFPageObj_GetType(handle)});
+  }
+  const overlap=(a,b)=>Math.max(0,Math.min(a.x+a.w,b.x+b.w)-Math.max(a.x,b.x))*Math.max(0,Math.min(a.y+a.h,b.y+b.h)-Math.max(a.y,b.y));
+  const suffix=objects.filter(o=>o.h!==h&&o.type===1&&o.box.x>=bounds.x+bounds.w-.1&&overlap({...bounds,x:o.box.x,w:o.box.w},o.box)>0).sort((a,b)=>a.box.x-b.box.x);
+  // Restrict to one adjacent line, without crossing a column-sized gap.
+  let right=bounds.x+bounds.w;
+  const shifted=[];
+  for(const o of suffix){
+    const raised=o.box.h<bounds.h*.85&&o.box.w<bounds.h*3&&o.box.y>bounds.y+bounds.h*.3;
+    if(o.box.x-right>bounds.h*2||(!owner.has(o.h)&&!raised))break;
+    shifted.push(o);right=Math.max(right,o.box.x+o.box.w);
+  }
+  // The source may represent spaces with positioning rather than encoded
+  // glyphs. SetText on the complete object would introduce .notdef spaces.
+  // Stage its non-space chunks at their proven source origins instead.
+  if(M._FPDFTextObj_GetTextRenderMode(h)!==0)return null;
+  const p=M._malloc(32),staged=[];let committed=false;
+  try{
+    if(!M._FPDFPageObj_GetMatrix(h,p))return null;
+    const matrix=Array.from(M.HEAPF32.slice(p>>2,(p>>2)+6));
+    if(matrix.some(x=>!Number.isFinite(x))||Math.abs(matrix[1])>1e-6||Math.abs(matrix[2])>1e-6||matrix[0]<=0||matrix[3]<=0)return null;
+    if(!M._FPDFTextObj_GetFontSize(h,p))return null;
+    const fontSize=M.HEAPF32[p>>2],font=M._FPDFTextObj_GetFont(h);
+    if(!font||!(fontSize>0)||!M._FPDFPageObj_GetFillColor(h,p,p+4,p+8,p+12))return null;
+    const rgba=Array.from(M.HEAPU32.slice(p>>2,(p>>2)+4));if(rgba[3]!==255)return null;
+    const own=chars.filter(c=>c.h===h);let dx=0;
+    for(const match of full.matchAll(/\S+/g)){
+      const selected=own.slice(match.index,match.index+match[0].length),origin=selected[0]?.origin;
+      if(!origin||selected.some(c=>!c.box||!c.origin||Math.abs(c.origin[1]-origin[1])>.01))return null;
+      const left=Math.min(...selected.map(c=>c.box[0])),right=Math.max(...selected.map(c=>c.box[1])),bottom=Math.min(...selected.map(c=>c.box[2])),top=Math.max(...selected.map(c=>c.box[3]));
+      const changed=match[0]===old,text=changed?next:match[0],handle=M._FPDFPageObj_CreateTextObj(engine.doc,font,fontSize);
+      if(!handle)return null;staged.push({h:handle});
+      const str=M._malloc((text.length+1)*2);
+      try{for(let i=0;i<text.length;i++)M.HEAPU16[(str>>1)+i]=text.charCodeAt(i);M.HEAPU16[(str>>1)+text.length]=0;if(!M._FPDFText_SetText(handle,str))return null;}finally{M._free(str);}
+      M.HEAPF32.set([...matrix.slice(0,4),origin[0]+dx,origin[1]],p>>2);
+      if(!M._FPDFPageObj_SetMatrix(handle,p)||!M._FPDFPageObj_SetFillColor(handle,...rgba))return null;
+      const box=engine.objectBounds(handle);if(!box)return null;
+      if(!changed&&[box.x-left-dx,box.x+box.w-right-dx,box.y-bottom,box.y+box.h-top].some(v=>Math.abs(v)>.05))return null;
+      if(changed){if(Math.abs(box.x-left)>.05)return null;dx=box.x+box.w-right;}
+    }
+    if(!Number.isFinite(dx))return null;
+    const moving=new Set([h,...shifted.map(o=>o.h)]),placements=[...staged.map(o=>({before:bounds,after:engine.objectBounds(o.h)})),...shifted.map(o=>({before:o.box,after:{...o.box,x:o.box.x+dx}}))];
+    if(placements.some(q=>!q.after||q.after.x<0||q.after.x+q.after.w>engine.pageWidth||objects.some(o=>!moving.has(o.h)&&overlap(q.after,o.box)>overlap(q.before,o.box)+.05)))return null;
+    const slot=objects.findIndex(o=>o.h===h);
+    if(!M._FPDFPage_RemoveObject(engine.page,h))throw new LineRetentionError('source_word_remove_failed');
+    engine.retainDetachedObject(h);committed=true;
+    for(const [i,o] of staged.entries())if(!M._FPDFPage_InsertObjectAtIndex(engine.page,o.h,slot+i))throw new LineRetentionError('source_word_insert_failed');
+    for(const o of shifted)engine.translateObject(o.h,dx,0);
+    engine._pageDirty=true;engine._spliceOk=false;
+    return {status:'source_word_objects',objects:staged.length,translated:shifted.length,dx};
+  }finally{M._free(p);if(!committed)for(const o of staged)M._FPDFPageObj_Destroy(o.h);}
+}
+
 // A geometric chain can cross unrelated PDF object order. A shortening that
 // retains an exact prefix and ends in punctuation can keep that prefix at its
 // source coordinates, delete the remaining source characters in each run,

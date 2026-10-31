@@ -135,7 +135,8 @@ function destinationReader(c,refs,names){
 }
 function unsupportedDocumentActions(c,pages){const catalog=c.get(c.doc.getTrailer(),'Root');return !c.get(catalog,'AA').isNull()||!c.get(catalog,'OpenAction').isNull()||pages.some(page=>!c.get(page,'AA').isNull());}
 // Only a page-wide Fit OpenAction has no coordinate anchor to invalidate on
-// a stationary edit. All other action roots retain the existing barrier.
+// an edit on the same pages. Moving a verified Link rectangle does not change
+// that page-wide destination. All coordinate/action roots retain the barrier.
 async function fitOpenAction(c,refs,pages){
   const catalog=c.get(c.doc.getTrailer(),'Root'),open=c.get(catalog,'OpenAction');
   if(!c.get(catalog,'AA').isNull()||pages.some(page=>!c.get(page,'AA').isNull()))return null;
@@ -266,7 +267,7 @@ async function bound({model,sourceBytes,outputBytes,sourcePageMap,moves=[],reflo
     if(reflowedSourcePages.length){
       const outputAction=await fitOpenAction(c,refs,pages);
       if(!state.fitAction||!outputAction||JSON.stringify(state.fitAction)!==JSON.stringify(outputAction))fail('annotation-action-root-unsupported');
-      if(state.fitAction.present&&(pages.length!==model.pageCount||[...map].some(([s,o])=>s!==o)||moves.some(m=>m.rect===undefined||m.dx!==0||m.dy!==0||m.sourcePageIndex!==m.outputPageIndex)||destinationMoves.some(m=>m.dx!==0||m.dy!==0||m.sourcePageIndex!==m.outputPageIndex)))fail('annotation-action-root-unsupported');
+      if(state.fitAction.present&&(pages.length!==model.pageCount||[...map].some(([s,o])=>s!==o)||moves.some(m=>m.sourcePageIndex!==m.outputPageIndex)||destinationMoves.some(m=>m.sourcePageIndex!==m.outputPageIndex)))fail('annotation-action-root-unsupported');
     }
     for(const [s,o]of map)if(state.pageGeometry[s]&&!numbers(state.pageGeometry[s],geometry(c,pages[o])))fail('annotation-page-identity-invalid');
     return {c,state,map,refs,pages,plan,preserveUnmovedUnsupported};

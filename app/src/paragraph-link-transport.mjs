@@ -2,7 +2,7 @@
 // ordinary page edits. Unsupported mappings remain explicit failures.
 import {createHash} from 'node:crypto';
 import {deriveNativeLinkMoves, deriveNativeXYZMoves, deriveNativeFitRMoves, readLinkPageCharacters} from './paragraph-vendor/document-flow-links.mjs';
-import {expectedPageText, readGlyphs, edgeGlyphsEquivalent, modelNumericEditProof} from './paragraph-vendor/quality.mjs';
+import {expectedPageText, readGlyphs, edgeGlyphsEquivalent, modelNumericEditProof, modelWordEditProof} from './paragraph-vendor/quality.mjs';
 import {canonicalPage} from './paragraph-geometry-conservation.mjs';
 import {ANNOTATION_LIMITS} from './document-flow-annotations.mjs';
 
@@ -68,6 +68,35 @@ function numericLink(link, source, target, proof, allAnnotations, pageIndex, out
   return {sourcePageIndex:pageIndex,annotationIndex:link.annotationIndex,outputPageIndex,dx:0,dy:0,rect:nr};
 }
 
+function retainedLink(link,source,target,proof,pageIndex,outputPageIndex){
+  if(!proof||!link.eligible||!Array.isArray(link.rect)||link.quadPoints)return null;
+  const [l,b,r,t]=link.rect,box={l,b,r,t},retained=new Map(proof.retained.map(p=>[p.sourceIndex,p.outputIndex]));
+  const owned=source.filter(c=>c.u>32&&c.box&&intersects(c.box,box));
+  if(!owned.length)return null;
+  let dx,dy;const ids=new Set();
+  for(const c of owned){
+    const q=target[retained.get(c.index)];if(!q?.box||q.u!==c.u||!c.style||!q.style)return null;
+    dx??=q.box.l-c.box.l;dy??=q.box.b-c.box.b;
+    if(!sameBox({...c.box,l:c.box.l+dx,r:c.box.r+dx,b:c.box.b+dy,t:c.box.t+dy},q.box)||!edgeGlyphsEquivalent([{u:c.u,...c.box,style:c.style}],[{u:c.u,...c.box,style:q.style}]))return null;
+    ids.add(q.index);
+  }
+  const next={l:l+dx,r:r+dx,b:b+dy,t:t+dy},inside=target.filter(c=>c.u>32&&c.box&&intersects(c.box,next));
+  if(inside.length!==ids.size||inside.some(c=>!ids.has(c.index)))return null;
+  return {sourcePageIndex:pageIndex,outputPageIndex,annotationIndex:link.annotationIndex,dx,dy};
+}
+
+function changedProofBoxes(source,target,proof){
+  const boxes=[...proof.sourceIndices.map(i=>source[i]?.box),...proof.outputIndices.map(i=>target[i]?.box)];
+  if(boxes.some(b=>!b))return null;
+  for(const p of proof.retained){const a=source[p.sourceIndex],b=target[p.outputIndex];
+    if(!a||!b||a.u!==b.u||!!a.box!==!!b.box)return null;
+    if(a.box){if(!a.style||!b.style||!edgeGlyphsEquivalent([{u:a.u,...a.box,style:a.style}],[{u:a.u,...a.box,style:b.style}]))return null;
+      if(!sameBox(a.box,b.box))boxes.push(a.box,b.box);
+    }
+  }
+  return boxes;
+}
+
 // Compare local rendered paint for a non-text link, not just the empty text
 // inventory. The proof is deliberately restricted to unchanged upright pages.
 function stationaryPaint(link,source,target,sourcePage,outputPage,sourceGeometry,targetGeometry) {
@@ -87,8 +116,9 @@ function stationaryPaint(link,source,target,sourcePage,outputPage,sourceGeometry
 // entire page's paint, apart from the proven replacement, to remain identical.
 function stationaryPagePaint(src,out,pageIndex,outputPageIndex,s,t,proof,rawSource,rawTarget){
   if(!proof||s.frame?.rotation!==0||typeof src.renderPageRegion!=='function'||typeof out.renderPageRegion!=='function')return false;
-  const box=[...proof.sourceIndices.map(i=>rawSource[i]?.box),...proof.outputIndices.map(i=>rawTarget[i]?.box)];
-  if(!box.length||box.some(b=>!b))return false;
+  const styled=(raw,g)=>{const styles=new Map(g.glyphs.map(c=>[c.i,c.style]));return raw.map(c=>({...c,style:styles.get(c.index)}));};
+  const box=changedProofBoxes(styled(rawSource,s),styled(rawTarget,t),proof);
+  if(!box?.length)return false;
   const W=Math.ceil(s.W*2),H=Math.ceil(s.H*2);if(!Number.isSafeInteger(W)||!Number.isSafeInteger(H)||W<1||H<1||W*H>8000000)return false;
   const left=Math.floor(2*Math.min(...box.map(b=>b.l)))-3,right=Math.ceil(2*Math.max(...box.map(b=>b.r)))+3;
   const top=Math.floor(2*(s.H-Math.max(...box.map(b=>b.t))))-3,bottom=Math.ceil(2*(s.H-Math.min(...box.map(b=>b.b))))+3;
@@ -117,19 +147,15 @@ function stationaryXYZ(destinations, source, target, edits, pageIndex, outputPag
   if (!expected.ok&&!proof) return [];
   const edited=proof?new Set(proof.sourceIndices):new Set(expected.spans.flatMap(s=>indices.slice(s.a,s.b).filter(i=>i!==null)));
   const retained=proof?new Map(proof.retained.map(x=>[x.sourceIndex,x.outputIndex])):null;
-  let pageStable=!!proof&&pagePaint;
-  if(proof)for(const {sourceIndex,outputIndex} of proof.retained){
-    const a=source.chars[sourceIndex],b=target.chars[outputIndex];
-    if(!a||!b||a.u!==b.u||!!a.box!==!!b.box||(a.box&&(!sameBox(a.box,b.box)||!a.style||!b.style||!edgeGlyphsEquivalent([{u:a.u,...a.box,style:a.style}],[{u:b.u,...b.box,style:b.style}])))){pageStable=false;break;}
-  }
-  const changedBoxes=proof?proof.sourceIndices.map(i=>source.chars[i]?.box).filter(Boolean):[];
+  const changedBoxes=proof?changedProofBoxes(source.chars,target.chars,proof):[];
+  const pageStable=!!proof&&pagePaint&&!!changedBoxes;
   const groups=new Map();
   for(const c of source.chars) if(c.u>32&&c.object&&c.box&&!c.generated){const g=groups.get(c.object)||[];g.push(c);groups.set(c.object,g);}
   const proved=[];
   for(const d of destinations){
     if(d.kind!=='XYZ'||d.operands.length!==3||!Number.isFinite(d.operands[0])||!Number.isFinite(d.operands[1])||!(d.operands[2]===null||Number.isFinite(d.operands[2])))continue;
     const [x,y]=d.operands;
-    if(pageStable&&changedBoxes.length===proof.sourceIndices.length&&!changedBoxes.some(q=>x>=q.l-.5&&x<=q.r+.5&&y>=q.b-.5&&y<=q.t+.5)){proved.push({id:d.id,sourcePageIndex:pageIndex,outputPageIndex,dx:0,dy:0});continue;}
+    if(pageStable&&!changedBoxes.some(q=>x>=q.l-.5&&x<=q.r+.5&&y>=q.b-.5&&y<=q.t+.5)){proved.push({id:d.id,sourcePageIndex:pageIndex,outputPageIndex,dx:0,dy:0});continue;}
     const matches=[...groups.values()].filter(g=>{const l=Math.min(...g.map(c=>c.box.l)), t=Math.max(...g.map(c=>c.box.t));return l>=x-.5&&l<=x+4&&t<=y+2&&t>=y-8;});
     if(matches.length!==1||matches[0].some(c=>edited.has(c.index)))continue;
     const used=new Set();let ok=true;
@@ -186,7 +212,7 @@ export async function transportParagraphLinks({engineFactory, sourceBytes, outpu
         const sourceGeometry=readGlyphs(src,pageIndex),targetGeometry=readGlyphs(out,map.outputPageIndex);
         const identityMap=sourcePageMap.length===src.pageCount&&src.pageCount===out.pageCount&&sourcePageMap.every(m=>m.sourcePageIndex===m.outputPageIndex&&!m.continuationPageIndices?.length)&&sourceGeometry.W===targetGeometry.W&&sourceGeometry.H===targetGeometry.H&&JSON.stringify(sourceGeometry.frame)===JSON.stringify(targetGeometry.frame);
         let numericProof=null;
-        if(identityMap&&typeof src.buildModel==='function'){try{src.loadPage(pageIndex);numericProof=modelNumericEditProof(sourceGeometry,targetGeometry,pageEdits,src.buildModel());}catch{}}
+        if(identityMap&&typeof src.buildModel==='function'){try{src.loadPage(pageIndex);const model=src.buildModel();numericProof=modelNumericEditProof(sourceGeometry,targetGeometry,pageEdits,model)||modelWordEditProof(sourceGeometry,targetGeometry,pageEdits,model);}catch{}}
         const withStyle=(chars,geometry)=>{const styles=new Map(geometry.glyphs.map(g=>[g.i,g.style]));return chars.map(c=>({...c,style:styles.get(c.index)}));};
         const ownership=new Map();
         for(const link of links)if(Array.isArray(link.rect)&&link.rect.length===4&&link.rect.every(Number.isFinite)){
@@ -206,7 +232,7 @@ export async function transportParagraphLinks({engineFactory, sourceBytes, outpu
           if(identityMap&&!sourceRaw.some(c=>c.u>32&&c.box&&intersects(c.box,box))&&!targetRaw.some(c=>c.u>32&&c.box&&intersects(c.box,box))&&stationaryPaint(link,src,out,pageIndex,map.outputPageIndex,sourceGeometry,targetGeometry))stationary.add(link.annotationIndex);
         }
         const numericMoves=[];
-        for(const link of candidates.filter(a=>!stationary.has(a.annotationIndex))){const move=numericLink(link,styledSource,styledTarget,numericProof,model.annotations,pageIndex,map.outputPageIndex);if(move){numericMoves.push(move);stationary.add(link.annotationIndex);}}
+        for(const link of candidates.filter(a=>!stationary.has(a.annotationIndex))){const move=retainedLink(link,styledSource,styledTarget,numericProof,pageIndex,map.outputPageIndex)||numericLink(link,styledSource,styledTarget,numericProof,model.annotations,pageIndex,map.outputPageIndex);if(move){numericMoves.push(move);stationary.add(link.annotationIndex);}}
         moves.push(...numericMoves);
         const remaining=candidates.filter(a=>!stationary.has(a.annotationIndex));
         const destinations = new Map();
