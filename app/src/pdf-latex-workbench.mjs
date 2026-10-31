@@ -65,7 +65,7 @@ export function mountPdfLatexWorkbench(doc=globalThis.document){
       const comparison=await reader.compare({sourceDocument:ownDraft.evidence.document,bytes,signal});if(!stillCurrent(own))return;const nextArtifact={...result,pdfBytes:bytes,pdfHash:sha256,comparison};
       const lineage=createReconstructionLineage({project:nextPrepared.project,artifact:nextArtifact,comparison,bindings:nextPrepared.bindings,decisions:ownDecisions});
       prepared={...nextPrepared,lineage};artifact=nextArtifact;busy=false;buttons();
-      summary.textContent=`원본 ${comparison.sourcePages}쪽 → 기준본 ${comparison.baselinePages}쪽 · 숫자 토큰 차이 ${comparison.numbers.missing.length+comparison.numbers.added.length}개${nextPrepared.typography?` · ${nextPrepared.typography.page.columns}단 · Liberation Serif`:''}`;
+      summary.textContent=`원본 ${comparison.sourcePages}쪽 → 기준본 ${comparison.baselinePages}쪽 · 숫자 토큰 차이 ${comparison.numbers.missing.length+comparison.numbers.added.length}개${nextPrepared.typography?` · ${nextPrepared.typography.page.columns}단 · Liberation Serif`:''}${comparison.layoutAudit?.status==='partial'?` · 겹침·잘림 지적 ${comparison.layoutAudit.findings.length}건`:comparison.layoutAudit?' · 배치 점검 미완료':''}`;
       report.textContent=JSON.stringify({comparison,diagnostics:prepared.diagnostics,regions:draft.model.items.filter(i=>i.assetId).map(i=>({kind:i.kind,page:(i.evidence?.[0]?.pageIndex??0)+1,editable:false}))},null,2);
       status.textContent=prepared.status==='ready'?'편집할 기준본이 준비됐습니다.':'재구성본이 준비됐습니다. 원본과 차이를 확인하고 필요한 곳을 보정하세요.';
       const installed=await replaceReconstructionPreview({

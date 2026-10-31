@@ -77,7 +77,7 @@ export function analyzeProjectFiles(project) {
   const re=/\\(input|include|bibliography|addbibresource|includegraphics)(?:\s*\[[^\]]*\])?\s*\{([^{}]+)\}/g;
   for(const m of text.matchAll(re)) for(const part of (m[1]==='bibliography'?m[2].split(','):[m[2]])) {
    const r=part.trim();if(!r)continue;
-   if(r.includes('\\')) {note(main,path,m.index,r,m[1],'unknown');if(m[1]==='input'||m[1]==='include')state={dirs:[],unknown:true};continue;}
+   if(r.includes('\\')||/#[1-9]/.test(r)) {note(main,path,m.index,r,m[1],'unknown');if(m[1]==='input'||m[1]==='include')state={dirs:[],unknown:true};continue;}
    const valid=resolveReference(root,r)!==null, direct=valid?resolve(root,r,extensions(m[1])):null;
    let status=direct?'found':'missing';
    if(valid&&!direct&&m[1]==='includegraphics') {

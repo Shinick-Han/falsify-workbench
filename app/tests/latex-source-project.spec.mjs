@@ -9,6 +9,10 @@ import {createLatexProject,importLatexProject,exportLatexProject,analyzeProjectF
 import {analyzeLatexSource,locateSourceText} from '../src/latex-source-model.mjs';
 import {applySourceChanges} from '../src/latex-source-patches.mjs';
 const enc=new TextEncoder(),dec=new TextDecoder();
+test('graphics macro parameters are unresolved references, not missing filenames',async()=>{
+ const p=await createLatexProject({mainFile:'main.tex',files:[{path:'main.tex',bytes:enc.encode('\\documentclass{article}\n\\newcommand{\\picture}[1]{\\includegraphics{#1}}\n\\begin{document}Text.\\end{document}')}]});
+ const result=analyzeProjectFiles(p);assert.deepEqual(result.missingFiles,[]);assert.ok(result.diagnostics.some(d=>d.code==='UNRESOLVED_REFERENCE'&&d.reference==='#1'));
+});
 async function fixture(){const root=new URL('./fixtures/latex-source/project/',import.meta.url);return createLatexProject({mainFile:'main.tex',files:await Promise.all(['main.tex','sections/body.tex','refs.bib','figure.png'].map(async path=>({path,bytes:await readFile(new URL(path,root))})))});}
 test('fixture ZIP roundtrip retains content and identity',async()=>{const p=await fixture(),zip=await exportLatexProject(p),q=await importLatexProject({name:'project.zip',arrayBuffer:async()=>zip});assert.equal(q.id,p.id);assert.deepEqual(q.files,p.files);assert.deepEqual(analyzeProjectFiles(q).missingFiles,[]);});
 test('ambiguous main and missing dependencies are diagnosed',async()=>{let f=s=>enc.encode(s);const p=await createLatexProject({files:[{path:'a.tex',bytes:f('\\documentclass{a}\\begin{document}\\input{missing}\\end{document}')},{path:'b.tex',bytes:f('\\documentclass{a}\\begin{document}\\end{document}')}]});let a=analyzeProjectFiles(p);assert.equal(a.mainCandidates.length,2);assert.equal(a.missingFiles.length,1);assert.ok(a.diagnostics.some(x=>x.code==='AMBIGUOUS_MAIN'));});
