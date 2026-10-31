@@ -48,6 +48,26 @@ function typography(blockIds,blocks,document,styles,refs){
   return output;
 }
 
+// A line break can hide a separator when the reader concatenates source lines.
+// Retain the source segment verbatim and expose each insertion as a proposal.
+function lineSeparators(b,styles,refs){
+  const s=b.source,lines=s.lines||[],chars=s.characters||[],result=[];
+  if(lines.length<2||/[=∑∫√≤≥±×÷]|(?:https?:\/\/|www\.|doi\s*:)/iu.test(b.text))return result;
+  for(let i=1;i<lines.length;i++){
+    const a=lines[i-1],z=lines[i],ar=a.range,zr=z.range;
+    if(!ar||!zr||ar.end!==zr.start||ar.start<s.range.start||zr.end>s.range.end||ar.start>=ar.end||zr.start>=zr.end||a.writingMode!==0||z.writingMode!==0||!Array.isArray(a.direction)||!Array.isArray(z.direction)||Math.abs(a.direction[0]-1)>.01||Math.abs(a.direction[1])>.01||Math.abs(z.direction[0]-1)>.01||Math.abs(z.direction[1])>.01||!box(a.bbox)||!box(z.bbox))continue;
+    const left=b.text.slice(ar.start-s.range.start,ar.end-s.range.start),right=b.text.slice(zr.start-s.range.start,zr.end-s.range.start);
+    const lt=left.match(/[^\s]+$/u)?.[0],rt=right.match(/^[^\s]+/u)?.[0];
+    if(!lt||!rt||!/^\p{L}+(?:-\p{L}+)*$/u.test(lt)||!/^\p{L}+(?:-\p{L}+)*$/u.test(rt))continue;
+    const before=chars.find(c=>c.end===ar.end),after=chars.find(c=>c.start===zr.start);
+    if(!before||!after||before.styleId!==after.styleId||!box(before.bbox)||!box(after.bbox))continue;
+    const size=styles.get(before.styleId)?.size,vertical=after.bbox[1]-before.bbox[1],overlap=Math.min(a.bbox[2],z.bbox[2])-Math.max(a.bbox[0],z.bbox[0]);
+    if(!(size>0&&vertical>size*.5&&vertical<size*3&&overlap>0))continue;
+    result.push({offset:ar.end,separator:' ',method:'source-line-boundary',status:'proposed',before:refs({pageIndex:s.pageIndex,bbox:before.bbox},{blockId:b.parentBlockId||b.id,range:{start:before.start,end:before.end}}),after:refs({pageIndex:s.pageIndex,bbox:after.bbox},{blockId:b.parentBlockId||b.id,range:{start:after.start,end:after.end}})});
+  }
+  return result;
+}
+
 function validateDocument(document){
   if(document?.schema!=='falsify.paper-document.v1'||!HASH.test(document.sourceSha256)||!Array.isArray(document.pages)||!Array.isArray(document.blocks)||!Array.isArray(document.assets))fail('invalid-evidence');
   if(!document.pages.length||document.pages.length>LIMIT.pages||document.blocks.length>LIMIT.blocks||document.assets.length>LIMIT.assets)fail('budget-exceeded');
@@ -105,16 +125,27 @@ export function buildReconstructionModel({document,flow,links,assets}={}){
   const outAssets=[];
   const assetIds=new Set();for(const a of assets.assets){const orig=sourceAssets.get(a.id);if(!orig||assetIds.has(a.id)||orig.source?.pageIndex!==a.source?.pageIndex||orig.source?.occurrence!==a.source?.occurrence||!same(orig.source?.bbox,a.source?.bbox))fail('ambiguous-provenance');assetIds.add(a.id);const content=a.content;if(content?.representation==='mupdf-decoded-png'&&content.bytes instanceof Uint8Array&&content.bytes.length){if(!(orig.content?.bytes instanceof Uint8Array)||hex(orig.content.bytes)!==hex(content.bytes))fail('stale-evidence');const bytes=content.bytes.slice();outAssets.push({id:a.id,evidence:[refs(a.source,{occurrence:a.source.occurrence})],representation:'image',bytes,mediaType:'image/png',sha256:hex(bytes),editable:false,reason:'decoded-image-compositing-unverified'});}}
   if(assetIds.size!==sourceAssets.size)fail('uncovered-source-asset');
+  let inReferences=false;
   const owned=new Set(),ownedAssets=new Set(),flowIds=new Map(),items=[],diagnostics=[...document.diagnostics,...flow.diagnostics,...(assets.diagnostics||[])].map(d=>({code:d.code,severity:'warning',...(Number.isInteger(d.pageIndex)?{pageIndex:d.pageIndex}:{})})).concat(layoutWarnings);
   for(const [order,f] of flow.items.entries()){
     if(!f?.id||flowIds.has(f.id)||!Array.isArray(f.blockIds)||!Array.isArray(f.assetIds)||!document.pages[f.source?.pageIndex]||!box(f.source?.bbox))fail('invalid-evidence');
     const region=f.renderAssetId?regions.get(f.renderAssetId):null;if(f.renderAssetId&&(!region||region.pageIndex!==f.source.pageIndex||!same(region.bbox,f.source.bbox)||!Array.isArray(region.blockIds)||!Array.isArray(region.assetIds)||region.blockIds.length!==f.blockIds.length||region.assetIds.length!==f.assetIds.length||region.blockIds.some(id=>!f.blockIds.includes(id))||region.assetIds.some(id=>!f.assetIds.includes(id))))fail('invalid-evidence');
+    // Flow joiners are layout proposals between source blocks, not source text.
+    // Restrict them to the whitespace currently emitted by paper-flow and keep
+    // every segment's original range intact for provenance and review.
+    if(f.joiners!==undefined&&(!f.inline||!Array.isArray(f.joiners)||f.joiners.length!==Math.max(0,f.blockIds.length-1)||f.joiners.some(j=>j!==''&&j!==' ')))fail('invalid-evidence');
     const segments=[],evidence=[];
     for(const id of f.blockIds){const b=blocks.get(id);if(!b||owned.has(id)||b.source.pageIndex!==f.source.pageIndex)fail('ambiguous-provenance');owned.add(id);if(b.text){const r=b.source.range,p=document.pages[b.source.pageIndex];if(!r||p.text.slice(r.start,r.end)!==b.text)fail('invalid-evidence');const ref=refs(b.source,{blockId:b.parentBlockId||b.id,range:{...r}});evidence.push(ref);segments.push({text:b.text,evidence:ref,styleIds:[...new Set((b.source.characters||[]).map(c=>c.styleId).filter(Boolean))]});}}
     for(const id of f.assetIds){const a=sourceAssets.get(id);if(!a||ownedAssets.has(id)||a.source.pageIndex!==f.source.pageIndex||!box(a.source.bbox))fail('ambiguous-provenance');ownedAssets.add(id);evidence.push(refs(a.source,{occurrence:a.source.occurrence}));}
     if(f.kind==='asset')evidence.unshift(refs(f.source));
     if(!evidence.length)fail('invalid-evidence');
-    const text=segments.map(s=>s.text).join(''),fontSizes=segments.flatMap(s=>s.styleIds.map(id=>styles.get(id)?.size).filter(Number.isFinite));
+    if(f.joiners?.some(Boolean)&&segments.length!==f.blockIds.length)fail('invalid-evidence');
+    const rawText=segments.map((s,i)=>`${i&&f.joiners?f.joiners[i-1]:''}${s.text}`).join('');
+    if(/^\s*(?:references|bibliography)\s*$/iu.test(rawText))inReferences=true;
+    const prose=f.kind==='paragraph'&&rawText.length>=100&&!/[0-9]/u.test(rawText)&&/[.!?]/u.test(rawText);
+    const heading=f.kind==='heading'&&!/[0-9]/u.test(rawText);
+    const separators=!inReferences&&(heading||prose)?f.blockIds.flatMap(id=>{const b=blocks.get(id);return b?.text?lineSeparators(b,styles,refs):[];}):[];
+    const text=segments.map((s,i)=>{let value=s.text;for(const proposal of separators.filter(x=>x.before.blockId===s.evidence.blockId&&x.offset>s.evidence.range.start&&x.offset<s.evidence.range.end).sort((a,b)=>b.offset-a.offset)){const at=proposal.offset-s.evidence.range.start;value=value.slice(0,at)+proposal.separator+value.slice(at);}return `${i&&f.joiners?f.joiners[i-1]:''}${value}`;}).join(''),fontSizes=segments.flatMap(s=>s.styleIds.map(id=>styles.get(id)?.size).filter(Number.isFinite));
     const regionKind=region?.classification||null,kind=f.kind==='asset'?(region&&!['compound-figure','verified-occlusion'].includes(regionKind)?'unknown':'figure'):f.kind==='heading'?'heading':['header','footer'].includes(f.kind)?'furniture':'paragraph';
     const candidates=[];
     for(const id of f.blockIds){const b=blocks.get(id);if(!b?.text)continue;const cs=b.source.characters||[],sizes=cs.map(c=>styles.get(c.styleId)?.size).filter(n=>Number.isFinite(n)&&n>0).sort((a,b)=>a-b),median=sizes[Math.floor(sizes.length/2)];if(median)for(const c of cs){const size=styles.get(c.styleId)?.size;if(box(c.bbox)&&size>0&&size<median*.8&&c.start>=b.source.range.start&&c.end<=b.source.range.end)candidates.push({kind:'script',evidence:[refs({pageIndex:b.source.pageIndex,bbox:c.bbox},{blockId:b.parentBlockId||b.id,range:{start:c.start,end:c.end}})]});}}
@@ -124,8 +155,10 @@ export function buildReconstructionModel({document,flow,links,assets}={}){
     if(segments.length&&f.source.bbox[1]>document.pages[f.source.pageIndex].height*.8&&/^\s*\d+\s*\S/u.test(text))candidates.push({kind:'footnote',evidence:segments.map(s=>s.evidence)});
     const id=stable(hash,'item',[f.source.pageIndex,kind,evidence]);flowIds.set(f.id,id);
     const reason=f.kind==='asset'?'region-unverified':candidates.some(c=>c.kind==='script')?'inline-script-candidate':candidates.length?'semantic-candidate':f.columns>1?'column-order-unverified':f.kind==='caption'?'caption-proposal':f.blockIds.some(id=>(blocks.get(id)?.source?.lines?.length||0)>1)?'line-boundary-unverified':f.inline&&f.joiners?.some(Boolean)?'flow-joiner-unverified':undefined;
-    items.push({id,kind,evidence,status:f.kind==='asset'?'unsupported':reason||kind!=='paragraph'?'proposed':'observed',...(text?{text}:{}),order,...(f.assetIds.length===1&&outAssets.some(a=>a.id===f.assetIds[0])?{assetId:f.assetIds[0]}:{}),...(reason?{reason}:{}),extensions:{flowId:f.id,blockIds:[...f.blockIds],assetIds:[...f.assetIds],regionId:region?.id||null,regionClassification:regionKind,columns:f.columns||1,span:f.span||'page',segments,candidates,styles:[...new Set(segments.flatMap(s=>s.styleIds))].map(id=>styles.get(id)).filter(Boolean).map(s=>({...s})),lineCount:f.blockIds.reduce((n,id)=>n+(blocks.get(id)?.source?.lines?.length||0),0),typography:typography(f.blockIds,blocks,document,styles,refs)}});
+    items.push({id,kind,evidence,status:f.kind==='asset'?'unsupported':reason||kind!=='paragraph'?'proposed':'observed',...(text?{text}:{}),order,...(f.assetIds.length===1&&outAssets.some(a=>a.id===f.assetIds[0])?{assetId:f.assetIds[0]}:{}),...(reason?{reason}:{}),extensions:{flowId:f.id,blockIds:[...f.blockIds],assetIds:[...f.assetIds],regionId:region?.id||null,regionClassification:regionKind,columns:f.columns||1,span:f.span||'page',segments,candidates,...(separators.length?{separators}:{}),styles:[...new Set(segments.flatMap(s=>s.styleIds))].map(id=>styles.get(id)).filter(Boolean).map(s=>({...s})),lineCount:f.blockIds.reduce((n,id)=>n+(blocks.get(id)?.source?.lines?.length||0),0),typography:typography(f.blockIds,blocks,document,styles,refs)}});
+    if(separators.length)diagnostics.push({code:'source-line-separator-proposed',severity:'warning',pageIndex:f.source.pageIndex,itemId:id,count:separators.length});
     if(reason)diagnostics.push({code:reason,severity:'warning',pageIndex:f.source.pageIndex,itemId:id});
+    if(f.joiners?.some(Boolean)&&reason!=='flow-joiner-unverified')diagnostics.push({code:'flow-joiner-unverified',severity:'warning',pageIndex:f.source.pageIndex,itemId:id});
   }
   // A source occurrence may not be consumed by multiple flow fragments/items.
   const byPage=new Map(),byBlock=new Map();

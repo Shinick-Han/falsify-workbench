@@ -39,6 +39,8 @@ Ordinary TeX packages supply layout mechanisms. Select only packages present in 
 
 ## Render, inspect, repair
 
+For reference-aware editing, read the original PDF region text and render original pages as well as candidate pages. Image labels distinguish original from candidate. Compare front matter width, body columns, furniture and figure/caption placement. Use the source-bound structure plan to move existing units; retain each unit exactly once and preserve its current payload, including selected RED edits. Keep original metadata and PDF hashes bound. Record which original and candidate pages the model actually observed. A model cannot infer the original page layout from candidate text alone.
+
 1. Generate the PDF from the captured edit state. Record engine/profile, source/output hashes and page counts.
 2. Inspect the affected region and every page reached by reflow. Check both columns, gutters, captions, footnotes, clipping, overlaps, oversized objects and unexplained empty space. Render problem pages and inspect them visually.
 3. Change the smallest layout cause supported by the evidence; regenerate and check the affected extent again. Retain the last valid artifact and distinguish it from the current candidate.

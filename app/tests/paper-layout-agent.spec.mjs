@@ -13,6 +13,28 @@ async function fixture(source='Evidence 63. \\vspace{2pt} More text.') {
 }
 function setup(f,actions,extra={}) {let calls=[]; return {calls, args:{project:f.project,artifact:f.artifact(f.project),decide:async x=>{calls.push(x);return actions.shift();},compile:async ({project})=>f.artifact(project),inspect:async({artifact})=>({schema:'falsify.layout-quality.v1',status:'partial',pdfHash:artifact.pdfHash,issues:[],coverage:{pages:1}}),render:async()=>({images:[{pageIndex:0,mime:'image/png',base64:'iVBORw0KGgo='}],coverage:{pages:[0],complete:false}}),...extra}};}
 
+test('reference-aware completion observes original text and original/candidate images',async()=>{
+ const f=await fixture();f.project=await createLatexProject({...f.project,sourcePdfHash:'a'.repeat(64)});
+ const reference={sourcePdfHash:'a'.repeat(64),sourcePages:7};
+ const extra={reference,readReference:async()=>({...reference,pages:[{pageIndex:0,text:'Evidence 63'}]}),renderReference:async()=>({...reference,images:[{pageIndex:0,mime:'image/png',base64:'iVBORw0KGgo='}]})};
+ const s=setup(f,[action('read_reference'),action('render_reference_pages',{pages:[0]}),action('compile_pdf'),action('inspect_pdf'),action('render_pages',{pages:[0]}),action('finish')],extra);
+ const out=await runPaperLayoutAgent(s.args);assert.equal(out.status,'complete');assert.deepEqual(s.calls.at(-1).images.map(i=>i.document||'candidate'),['original','candidate']);assert.equal(s.calls[0].reference.sourcePdfHash,reference.sourcePdfHash);
+ const missing=await runPaperLayoutAgent(setup(f,[action('compile_pdf'),action('inspect_pdf'),action('render_pages'),action('finish')],extra).args);assert.equal(missing.status,'unresolved');
+ await assert.rejects(runPaperLayoutAgent({...s.args,reference:{sourcePdfHash:'b'.repeat(64)}}),/reference/);
+});
+
+test('a reference observation truncated by its record envelope cannot satisfy completion',async()=>{
+ const f=await fixture();f.project=await createLatexProject({...f.project,sourcePdfHash:'a'.repeat(64)});const reference={sourcePdfHash:'a'.repeat(64)};
+ const page={pageIndex:0,text:''},output={sourcePdfHash:reference.sourcePdfHash,pages:[page]};page.text='x'.repeat(11990-JSON.stringify(output).length);
+ const s=setup(f,[action('read_reference'),action('render_reference_pages'),action('compile_pdf'),action('inspect_pdf'),action('render_pages'),action('finish')],{reference,readReference:async()=>output,renderReference:async()=>({...reference,images:[{pageIndex:0,mime:'image/png',base64:'iVBORw0KGgo='}]})});
+ const out=await runPaperLayoutAgent(s.args);assert.equal(out.trace[0].result.status,'rejected');assert.equal(out.status,'unresolved');assert.equal(s.calls.some(c=>c.observations.some(e=>e.action==='read_reference'&&e.result.status==='ok')),false);
+});
+
+test('current execution status survives the short observation window',async()=>{
+ const f=await fixture(),actions=[action('compile_pdf'),action('inspect_pdf'),action('render_pages'),...Array.from({length:5},()=>action('read_source',{path:'main.tex'})),action('finish')];const s=setup(f,actions);const out=await runPaperLayoutAgent(s.args);
+ assert.equal(out.status,'complete');assert.equal(s.calls.at(-1).execution.canFinish,true);assert.equal(s.calls.at(-1).execution.compiledCurrent,true);assert.equal(s.calls.at(-1).observations.some(e=>e.action==='compile_pdf'),false);assert.ok(s.calls.at(-1).execution.completedActions.some(e=>e.tool==='compile_pdf'));
+});
+
 test('agent can fit a figure with preserved aspect ratio and cannot flatten it',async()=>{
  const before='\\includegraphics[width=0.8\\linewidth]';
  for(const [after,allowed] of [['\\includegraphics[width=0.8\\linewidth,height=1pt]',false],['\\includegraphics[width=0.8\\linewidth,height=120pt,keepaspectratio]',true]]){

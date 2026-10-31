@@ -195,6 +195,31 @@ class HttpTests(unittest.TestCase):
             httpd.shutdown(); thread.join(); httpd.server_close()
 
 class LayoutAgentLargeProjectTests(unittest.TestCase):
+    def test_original_and_candidate_can_share_page_number_without_losing_labels(self):
+        data = request()
+        data['reference'] = {'schema':'falsify.paper-layout-reference.v1','sourcePdfHash':'b'*64,'sourcePages':7}
+        data['images'] = [{'pageIndex':0,'document':kind,'mime':'image/png','base64':base64.b64encode(png()).decode()} for kind in ('original','candidate')]
+        checked = service.validate_request(data)
+        self.assertEqual([x['document'] for x in json.loads(checked['text'])['images']], ['original','candidate'])
+        self.assertEqual(len(checked['images']),2)
+        data['images'].append(dict(data['images'][0]))
+        with self.assertRaises(ValueError): service.validate_request(data)
+
+    def test_reference_hash_must_match_structure_and_structural_tool_is_explicit(self):
+        data = request()
+        data['reference'] = {'sourcePdfHash':'b'*64}
+        data['structure'] = {'sourcePdfHash':'c'*64}
+        with self.assertRaises(ValueError): service.validate_request(data)
+        data['structure']['sourcePdfHash']='b'*64
+        checked=service.validate_request(data)
+        proposed=action();proposed['tool']='restructure_source';proposed['after']=json.dumps({'schema':'falsify.paper-layout-plan.v1'})
+        self.assertEqual(service._action(proposed,checked['paths'])['tool'],'restructure_source')
+
+    def test_persistent_execution_status_is_visible_to_model(self):
+        data=request();data['execution']={'canFinish':True,'compiledCurrent':True,'completedActions':[{'tool':'compile_pdf','status':'ok'}]}
+        checked=service.validate_request(data)
+        self.assertTrue(json.loads(checked['text'])['execution']['canFinish'])
+
     def test_source_index_accepts_more_than_64_bounded_files(self):
         data = request()
         data['sourceFiles'] = [{'path': f'part-{i}.tex', 'text': 'Evidence 12.'} for i in range(100)]

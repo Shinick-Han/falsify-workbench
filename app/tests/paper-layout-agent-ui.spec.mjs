@@ -68,3 +68,22 @@ test('preview, download, BLUE and new source session use the candidate; stale ac
     epoch++;agent.invalidate();assert.equal(find(host,'이 PDF로 BLUE 검토').disabled,true);assert.equal(find(host,'후보 소스로 계속 편집').disabled,true);event=null;find(host,'이 PDF로 BLUE 검토').onclick();assert.equal(event,null);
   }finally{globalThis.File=previousFile;globalThis.CustomEvent=previousEvent;}
 });
+
+test('reconstructed reference is hash verified and original pages are labeled and bounded',async()=>{
+  const {hex}=await import('../src/paragraph-pdf-crypto.mjs');
+  const bytes=new Uint8Array([11,22,33]),host=new Element('host');let seen;
+  const page={getViewport:()=>({width:100,height:200}),getTextContent:async()=>({items:[{str:'Synthetic title'},{str:'Synthetic body'}]}),render:()=>({promise:Promise.resolve()})};
+  const lib={getDocument:()=>({promise:Promise.resolve({numPages:1,getPage:async()=>page}),destroy:async()=>{}})};
+  const doc={createElement(tag){const n=new Element(tag);if(tag==='canvas'){n.getContext=()=>({drawImage(){}});n.toDataURL=()=> 'data:image/png;base64,cG5n';}return n;}};
+  const project={id:'p',origin:'reconstructed-pdf',sourcePdfHash:hex(bytes)},artifact={projectId:'p',pdfBytes:bytes,pdfHash:'hash'},session={snapshot:()=>({changes:[]}),compile:async()=>artifact,getCurrentProject:async()=>project};
+  mountPaperLayoutAgent({doc,host,getSession:()=>session,getEpoch:()=>1,getReferenceFile:()=>({arrayBuffer:async()=>bytes.buffer}),download(){},bridge:{session:()=>({})},compilerFactory:()=>({dispose(){}}),readerFactory:()=>({dispose(){}}),loadPdf:async()=>lib,runAgent:async args=>{seen=args;const rendered=await args.renderReference({pages:[0]});assert.equal(rendered.images[0].document,'original');assert.equal(rendered.sourcePdfHash,project.sourcePdfHash);const read=await args.readReference({pages:[0]});assert.equal(read.sourcePdfHash,project.sourcePdfHash);assert.equal(read.pages[0].text,'Synthetic title Synthetic body');await assert.rejects(args.readReference({pages:[1]}));return {project,artifact,status:'unresolved'};}});
+  await find(host,'AI 레이아웃 시작').onclick();assert.equal(seen.reference.sourcePdfHash,hex(bytes));
+});
+
+test('reference mismatch refuses to invoke agent',async()=>{
+  const host=new Element('host');let called=false;
+  const project={id:'p',origin:'reconstructed-pdf',sourcePdfHash:'0'.repeat(64)},artifact={projectId:'p',pdfBytes:new Uint8Array([1])};
+  const session={snapshot:()=>({changes:[]}),compile:async()=>artifact,getCurrentProject:async()=>project};
+  mountPaperLayoutAgent({doc:document,host,getSession:()=>session,getEpoch:()=>1,getReferenceFile:()=>({arrayBuffer:async()=>new Uint8Array([1]).buffer}),download(){},bridge:{session:()=>({})},compilerFactory:()=>({dispose(){}}),readerFactory:()=>({dispose(){}}),runAgent:async()=>{called=true;}});
+  await find(host,'AI 레이아웃 시작').onclick();assert.equal(called,false);assert.ok(find(host,'원본 PDF와 현재 소스가 일치하지 않습니다.'));
+});

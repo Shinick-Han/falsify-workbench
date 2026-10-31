@@ -45,7 +45,7 @@ export async function createReconstructionProject(draft,decisions=[],dependencie
   const engine=result.engine??(layout==='semantic-flow'?'lualatex':'pdflatex');
   if(!result.mainFile||!result.files?.length)throw Object.assign(new Error('편집용 소스를 만들지 못했습니다.'),{diagnostics:result.diagnostics});
   const metadata={schema:'falsify.reconstruction-baseline.v1',sourcePdfHash:draft.sourceSha256,status:result.status,layout,...(result.typography?{typography:structuredClone(result.typography)}:{}),decisions:structuredClone(decisions),bindings:result.bindings.map(({projectId,...binding})=>({...binding,bindingScope:'containing-project'})),diagnostics:result.diagnostics};
-  const files=[...result.files,{path:'falsify-reconstruction.json',bytes:encoder.encode(JSON.stringify(metadata))}];
+  const files=[...result.files,...(result.structure?[{path:'falsify-layout-structure.json',bytes:encoder.encode(JSON.stringify(result.structure))}]:[]),{path:'falsify-reconstruction.json',bytes:encoder.encode(JSON.stringify(metadata))}];
   const project=await(dependencies.project||createLatexProject)({files,mainFile:result.mainFile,engine,origin:'reconstructed-pdf',sourcePdfHash:draft.sourceSha256});
   return {...result,project,bindings:result.bindings.map(b=>({...b,projectId:project.id}))};
 }

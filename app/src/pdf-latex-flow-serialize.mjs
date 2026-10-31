@@ -1,5 +1,6 @@
 import {hex} from './paragraph-pdf-crypto.mjs';
 import {inferTypographyProfile} from './paper-typography-profile.mjs';
+import {renderStructureRegion} from './paper-layout-structure.mjs';
 const enc=new TextEncoder(), fail=code=>{throw Object.assign(new Error(code),{code});};
 const escapeMap={'\\':'\\textbackslash{}','{':'\\{','}':'\\}','$':'\\$','&':'\\&','#':'\\#','%':'\\%','_':'\\_','~':'\\textasciitilde{}','^':'\\textasciicircum{}'};
 const escape=text=>Array.from(text, c=>escapeMap[c]??(c==='\r'||c==='\n'||c==='\t'?' ':c)).join('');
@@ -22,7 +23,9 @@ export function serializeFlowReconstruction({model,decisions=[],profile,fontFile
   issue('FLOW_LAYOUT_UNVERIFIED');for(const rel of model.relations)if(rel.status!=='confirmed')issue('RELATION_REVIEW');
   const font=fontPaths.has('regular')?`\\setmainfont[NFSSFamily=FalsifyBody,Path=fonts/,UprightFont={${fontPaths.get('regular').slice(6)}},${[...fontPaths].filter(([k])=>k!=='regular').map(([k,v])=>`${{bold:'BoldFont',italic:'ItalicFont',bolditalic:'BoldItalicFont'}[k]}={${v.slice(6)}}`).join(',')}]{FalsifyPublication}`:'\\setmainfont{Latin Modern Roman}';
   if(!fontPaths.size&&t.fonts?.serif!=='Latin Modern Roman')fail('INVALID_FONT');
-  let source=`% !TeX program = lualatex\n\\documentclass${p.columns===2?'[twocolumn]':''}{article}\n\\usepackage{fontspec}\n\\usepackage{microtype}\n\\usepackage{graphicx}\n\\usepackage[paperwidth=${num(p.widthBp)}bp,paperheight=${num(p.heightBp)}bp,left=${num(p.margins.left)}bp,right=${num(p.margins.right)}bp,top=${num(p.margins.top)}bp,bottom=${num(p.margins.bottom)}bp]{geometry}\n${font}\n`;
+  const headerClearance=Math.max(p.margins.top,...model.items.filter(i=>i.kind==='furniture'||i.evidence[0].bbox[3]<pages.get(i.evidence[0].pageIndex).height*.1).filter(i=>i.evidence[0].bbox[1]<pages.get(i.evidence[0].pageIndex).height*.1).map(i=>i.evidence[0].bbox[3]+10));
+  const footerClearance=Math.max(p.margins.bottom,...model.items.filter(i=>i.evidence.some(e=>e.bbox[1]>pages.get(e.pageIndex).height*.93)).map(i=>{const e=i.evidence[0];return pages.get(e.pageIndex).height-e.bbox[1]+10;}));
+  let source=`% !TeX program = lualatex\n\\documentclass{article}\n\\usepackage{fontspec}\n\\usepackage{microtype}\n\\usepackage{graphicx}\n\\usepackage[paperwidth=${num(p.widthBp)}bp,paperheight=${num(p.heightBp)}bp,left=${num(p.margins.left)}bp,right=${num(p.margins.right)}bp,top=${num(headerClearance)}bp,bottom=${num(footerClearance)}bp]{geometry}\n${font}\n`;
   source+=t.packages?.needspace?'\\IfFileExists{needspace.sty}{\\usepackage{needspace}}{\\newcommand{\\Needspace}[1]{}}\n':'\\newcommand{\\Needspace}[1]{}\n';
   if(t.packages?.luaWidowControl)source+='\\IfFileExists{lua-widow-control.sty}{\\usepackage{lua-widow-control}}{}\n';
   source+='\\widowpenalty=10000\n\\clubpenalty=10000\n\\displaywidowpenalty=10000\n';
@@ -31,7 +34,7 @@ export function serializeFlowReconstruction({model,decisions=[],profile,fontFile
   source+=`\\setlength{\\columnsep}{${num(p.gutterBp)}bp}\n\\setlength{\\parindent}{${num(body.indentEm)}em}\n\\setlength{\\parskip}{${num(body.paragraphGapEm)}em}\n\\pagestyle{empty}\n\\begin{document}\n`;
   const append=(i,s,state)=>{const start=source.length;source+=s;bindings.push({itemId:i.id,projectId:null,path:'main.tex',start,end:source.length,evidence:structuredClone(i.evidence),status:state});};
   const role=i=>i.kind==='heading'?'heading':i.kind==='caption'||i.reason==='caption-proposal'?'caption':i.kind==='footnote'?'footnote':'body';
-  const emitText=(i,text)=>{if(/[^\x00-\x7f]/u.test(text))issue('UNICODE_GLYPH_COVERAGE_UNVERIFIED',i);if(i.extensions?.candidates?.length||i.reason==='inline-script-candidate')issue('SEMANTIC_TRANSCRIPTION_REVIEW',i);return escape(text);};
+  const emitText=(i,text)=>{if(/[^\x00-\x7f]/u.test(text))issue('UNICODE_GLYPH_COVERAGE_UNVERIFIED',i);if(i.extensions?.candidates?.length||i.reason==='inline-script-candidate')issue('SEMANTIC_TRANSCRIPTION_REVIEW',i);if(i.extensions?.separators?.length)issue('SOURCE_SPACING_PROPOSED',i);return escape(text);};
   // Only the emitter's evidence-bound, adjacent caption relation can move into
   // a float. Other relations remain visible as review diagnostics.
   const boxOf=refs=>{const bs=refs.map(e=>e.bbox);return [Math.min(...bs.map(b=>b[0])),Math.min(...bs.map(b=>b[1])),Math.max(...bs.map(b=>b[2])),Math.max(...bs.map(b=>b[3]))];};
@@ -51,15 +54,38 @@ export function serializeFlowReconstruction({model,decisions=[],profile,fontFile
   const floatStart=new Map(), floatEnd=new Set();
   for(const [fid,cid] of groups){const fi=model.items.findIndex(i=>i.id===fid),ci=model.items.findIndex(i=>i.id===cid);const figure=items.get(fid),env=(figure.kind==='table'&&!figure.assetId?'table':'figure')+(spans(figure)?'*':'');floatStart.set(Math.min(fi,ci),env);floatEnd.add(JSON.stringify([Math.max(fi,ci),env]));}
   const endings=new Map([...floatEnd].map(x=>JSON.parse(x)));
-  for(const [index,i] of model.items.entries()){if(floatStart.has(index))source+=`\\begin{${floatStart.get(index)}}[htbp]\n\\centering\n`; const r=role(i),style=t.roles[r],decision=choices.get(i.id);if(r==='heading')source+='\\Needspace{4\\baselineskip}\n';if(i.assetId||r==='caption')source+='\\Needspace{5\\baselineskip}\n';source+=`{\\fontsize{${num(style.sizeBp)}bp}{${num(style.leadingBp)}bp}\\selectfont `;if(r==='heading')source+='\\bfseries ';
+  const unitFragments=new Map(),unitBindings=new Map();
+  for(const [index,i] of model.items.entries()){const unitStart=source.length, bindingStart=bindings.length; if(floatStart.has(index))source+=`\\begin{${floatStart.get(index)}}[htbp]\n\\centering\n`; const r=role(i),baseStyle=t.roles[r],page=pages.get(i.evidence[0].pageIndex),edgeBox=boxOf(i.evidence),observedSize=i.extensions?.typography?.fontSizeBp,isEdge=i.kind==='furniture'||edgeBox[3]<page.height*.1||edgeBox[1]>page.height*.93,style=isEdge&&good(observedSize,4,36)?{sizeBp:observedSize,leadingBp:observedSize*1.2}:baseStyle,decision=choices.get(i.id);if(r==='heading')source+='\\Needspace{4\\baselineskip}\n';if(i.assetId||r==='caption')source+='\\Needspace{5\\baselineskip}\n';source+=`{\\fontsize{${num(style.sizeBp)}bp}{${num(style.leadingBp)}bp}\\selectfont `;if(r==='heading')source+='\\bfseries ';
     if(decision)append(i,decision.tex,'reviewed');
     else if(i.assetId){const a=assets.get(i.assetId);if(!a||a.evidence.some(e=>e.pageIndex!==i.evidence[0].pageIndex))fail('INVALID_ASSET_REFERENCE');const path=`assets/${a.sha256}.png`;if(!files.some(f=>f.path===path))files.push({path,bytes:a.bytes.slice()});const b=assetBox(a,i),w=b?`${num(b[2]-b[0])}bp`:'\\wd\\FalsifyImageBox',h=b?`${num(b[3]-b[1])}bp`:'\\ht\\FalsifyImageBox';append(i,`\\FalsifyImage{${w}}{${h}}{${path}}`,'noneditable');issue('NONEDITABLE_REGION',i);if(i.text){if(a.representation==='region-raster')issue('RASTER_TEXT_NONEDITABLE',i);else source+=' '+emitText(i,i.text);}}
     else if(i.kind==='table'&&i.table?.rows?.length){const rows=i.table.rows;if(!rows.every(row=>Array.isArray(row)&&row.length===rows[0].length&&row.every(c=>typeof c?.text==='string'&&refs(c.evidence)&&(c.colSpan??1)===1&&(c.rowSpan??1)===1)))fail('INVALID_TABLE');const content='\\begin{tabular}{'+'l'.repeat(rows[0].length)+'}\n'+rows.map(row=>row.map(c=>emitText(i,c.text)).join(' & ')+' \\\\').join('\n')+'\n\\end{tabular}';append(i,content,'review-required');issue('TABLE_LAYOUT_REVIEW',i);}
-    else if(typeof i.text==='string'&&i.text.length)append(i,emitText(i,i.text),/[^\x00-\x7f]/u.test(i.text)||i.extensions?.candidates?.length||i.reason==='inline-script-candidate'?'review-required':'exact-text');
+    else if(typeof i.text==='string'&&i.text.length)append(i,emitText(i,i.text),/[^\x00-\x7f]/u.test(i.text)||i.extensions?.candidates?.length||i.extensions?.separators?.length||i.reason==='inline-script-candidate'?'review-required':'exact-text');
     else {issue('MISSING_CONTENT',i,'error');source+='% Missing source content';}
     source+='\\par}\n\n';
     if(r==='heading')source+='\\nopagebreak[4]\n';
     if(endings.has(index))source+=`\\end{${endings.get(index)}}\n`;
+    unitFragments.set(i.id,source.slice(unitStart)); for(const b of bindings.slice(bindingStart))unitBindings.set(i.id,{binding:b,start:b.start-unitStart,end:b.end-unitStart}); source=source.slice(0,unitStart);
   }
-  if(!model.items.length)issue('MISSING_CONTENT',null,'error');source+='\\end{document}\n';files.unshift({path:'main.tex',bytes:enc.encode(source)});return {files,mainFile:'main.tex',engine:'lualatex',bindings,diagnostics,status,typography:t};
+  if(!model.items.length)issue('MISSING_CONTENT',null,'error');
+  const units=model.items.map(i=>({id:i.id,pageIndex:i.evidence[0].pageIndex,pageHeight:pages.get(i.evidence[0].pageIndex).height,bbox:boxOf(i.evidence),kind:i.kind,role:role(i),span:i.extensions?.span||'unknown'}));
+  const first=pages.get(0),g=first.extensions?.layoutHints?.gutterBp;
+  const firstItems=units.filter(u=>u.pageIndex===0),left=firstItems.filter(u=>u.kind==='paragraph'&&Array.isArray(g)&&u.bbox[2]<=g[0]),right=firstItems.filter(u=>u.kind==='paragraph'&&Array.isArray(g)&&u.bbox[0]>=g[1]);
+  const paired=[];for(const l of left)for(const r of right){const overlap=Math.min(l.bbox[3],r.bbox[3])-Math.max(l.bbox[1],r.bbox[1]);if(overlap>=Math.min(l.bbox[3]-l.bbox[1],r.bbox[3]-r.bbox[1])*.5&&Math.min(l.bbox[3]-l.bbox[1],r.bbox[3]-r.bbox[1])>=12)paired.push(Math.min(l.bbox[1],r.bbox[1]));}
+  const bodyTop=paired.length?Math.min(...paired):null;
+  const furniture=units.filter(u=>u.kind==='furniture').map(u=>({id:u.id,placement:u.bbox[1]<pages.get(u.pageIndex).height/2?'header':'footer'}));
+  const furnitureIds=new Set(furniture.map(f=>f.id));
+  // Edge material before a spanning title and below body is not silently discarded.
+  // Require repeated furniture on later pages as evidence of page decoration.
+  const repeatedTop=units.some(u=>u.pageIndex>0&&u.kind==='furniture'&&u.bbox[1]<pages.get(u.pageIndex).height*.1);
+  const firstWide=firstItems.find(u=>Array.isArray(g)&&u.bbox[0]<g[0]&&u.bbox[2]>g[1]&&u.bbox[1]>first.height*.09);
+  if(repeatedTop&&firstWide)for(const u of firstItems)if(u.bbox[3]<firstWide.bbox[1]&&u.bbox[3]<first.height*.1&&!furnitureIds.has(u.id)){furniture.push({id:u.id,placement:'header'});furnitureIds.add(u.id);}
+  if(repeatedTop&&firstWide)for(const u of firstItems)if(u.bbox[1]>=first.height*.93&&!furnitureIds.has(u.id)){furniture.push({id:u.id,placement:'footer'});furnitureIds.add(u.id);}
+  const above=bodyTop===null?[]:firstItems.filter(u=>u.bbox[3]<=bodyTop&&!furnitureIds.has(u.id));
+  const wide=above.some(u=>u.bbox[0]<g[0]&&u.bbox[2]>g[1]);
+  const frontMatter=p.columns===2&&wide?above.map(u=>u.id):[];
+  const plan={schema:'falsify.paper-layout-plan.v1',sourcePdfHash:model.sourceSha256,frontMatter,order:units.map(u=>u.id),furniture,columns:p.columns};
+  const structure={schema:'falsify.paper-layout-structure.v1',sourcePdfHash:model.sourceSha256,units,plan,frontTopPaddingBp:frontMatter.length?Math.max(0,Math.min(150,units.find(u=>u.id===frontMatter[0]).bbox[1]-headerClearance)):0,groups:[...groups].map(([a,b])=>{const order=plan.order;return order.indexOf(a)<order.indexOf(b)?[a,b]:[b,a];})};
+  if(furniture.length)issue('FURNITURE_PLACEMENT_UNVERIFIED');
+  const rendered=renderStructureRegion(structure,plan,unitFragments);const base=source.length;source+=rendered.text;for(const [id,offset] of rendered.offsets){const b=unitBindings.get(id);if(b){b.binding.start=base+offset+b.start;b.binding.end=base+offset+b.end;}}
+  source+='\\end{document}\n';files.unshift({path:'main.tex',bytes:enc.encode(source)});return {files,mainFile:'main.tex',engine:'lualatex',bindings,diagnostics,status,typography:t,structure};
 }

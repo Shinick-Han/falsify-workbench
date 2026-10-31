@@ -63,7 +63,7 @@
     },
     {
       "path": "src/latex-workbench.mjs",
-      "sha256": "0728b513a4236662df91ba00aebc83bf05fad920b5c0a759ea29fbbf04e8c3ab"
+      "sha256": "6df4f71d42cc7e5b4ff75e5ce20bf588ede16d3abc6271bae2cac64f32aace63"
     },
     {
       "path": "src/paper-document.mjs",
@@ -75,15 +75,19 @@
     },
     {
       "path": "src/paper-layout-agent-ui.mjs",
-      "sha256": "7a1303d04a318869d5d6a3523acd24c609c3443dddc5b67c793dc8c966b2cf78"
+      "sha256": "59e16c993335523e9548eca0afd6952accd36f80c7c29dcbe6fffb7314693f61"
     },
     {
       "path": "src/paper-layout-agent.mjs",
-      "sha256": "6d612da04f02361f1a74d6f7f5b85850cde8a22a7f99504d7671fe27adaa6a34"
+      "sha256": "1e384a562b0de13c0bd4f3d3b50e5d472ce4e585283cd9b7e0a3df0966c7179d"
     },
     {
       "path": "src/paper-layout-quality.mjs",
       "sha256": "4df5bae301cfa9d77f38ea530d95ad54415fa3ba3caf11abb6c77da6f7826d40"
+    },
+    {
+      "path": "src/paper-layout-structure.mjs",
+      "sha256": "3e33e88f5e135c691f1f01f4d2582b972682da1aff993f503ceb4e6c16f34db6"
     },
     {
       "path": "src/paper-source-assets.mjs",
@@ -103,15 +107,15 @@
     },
     {
       "path": "src/pdf-latex-baseline.mjs",
-      "sha256": "e722d05903f1222cd57d8f38bd9346c4db8cf3656b225a8b985fb135105053bb"
+      "sha256": "c95ac173cbb7798e968b92b74802942c868d4f30b999ba23c86af97cacefd607"
     },
     {
       "path": "src/pdf-latex-evidence.mjs",
-      "sha256": "9adbc697a7393dd097d34a2eedae6562c2c2f140fd746966138135623c13801a"
+      "sha256": "29b016eb6bcab850a33002b77c4cc11d52b617aff4c6a75428579bb1201dcf2d"
     },
     {
       "path": "src/pdf-latex-flow-serialize.mjs",
-      "sha256": "858a70bf839b0939cf027f07a4337f6d36300428db15863beafc387b72209505"
+      "sha256": "527f52eeb1a2a24f17325c884feff26beb3eebed83b24f9291e2d9722e5f5339"
     },
     {
       "path": "src/pdf-latex-fonts.mjs",
@@ -164,10 +168,10 @@
   ],
   "output": {
     "path": "latex-workbench.mjs",
-    "sha256": "e1f68b26d40bde0862853b6a7fb31fb0fa0af0c4fbcbe8a673cdbf5957d8843e"
+    "sha256": "00c7abd1b38e4e1997baaa3a692fef6df354149d29e8c12a804d41cecb1d8722"
   },
   "worker": {
     "path": "pdf-latex-reader-worker.mjs",
-    "sha256": "f89b990ada5a61995dfb69a304366d47520be7b88ae05cf2baf067d5443b1d05"
+    "sha256": "2d9e73ffaa72b12e7c1a4cf8f54b07529de943e04a07edf5e09743c126b7bf1b"
   }
 }

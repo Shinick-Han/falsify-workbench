@@ -1,8 +1,9 @@
 import {createLatexProject} from './latex-project.mjs';
 import {hex} from './paragraph-pdf-crypto.mjs';
+import {readLayoutStructure} from './paper-layout-structure.mjs';
 
 const enc = new TextEncoder(), dec = new TextDecoder('utf-8', {fatal:true, ignoreBOM:true});
-const tools = ['read_source','replace_source','compile_pdf','inspect_pdf','render_pages','finish'];
+const tools = ['read_source','replace_source','compile_pdf','inspect_pdf','render_pages','read_reference','render_reference_pages','restructure_source','finish'];
 const instruction = 'Preserve all source content, references, assets and selected RED edits. Use exact unique before/after replacements for literal layout settings only. Example: \\setlength{\\parskip}{4pt} -> \\setlength{\\parskip}{6pt}; \\fontsize{10}{12}\\selectfont -> \\fontsize{10}{13}\\selectfont. Compile, inspect and render current PDF, then finish. Completion reports workflow only, not a visual quality pass.';
 const descriptions = {
   read_source:'Read an existing .tex file by path in 8,000-character chunks: pages:[chunkIndex] (default 0). before can locate a known substring instead. sourceFiles contains previews only; result gives totalChunks and offset.',
@@ -10,7 +11,10 @@ const descriptions = {
   compile_pdf:'Compile the current project; unsuccessful or stale outputs remain unresolved.',
   inspect_pdf:'Inspect the current compiled artifact and return its hash-bound layout observations.',
   render_pages:'Render up to four zero-based pages of the current compiled artifact.',
-  finish:'Finish only after observing compile, inspection and rendered pages; partial coverage is not a quality pass.'
+  read_reference:'Read original PDF text and region geometry for up to four zero-based pages. Use original evidence to preserve title, authors, abstract, body, captions and furniture.',
+  render_reference_pages:'Render up to four zero-based pages of the original PDF, separately labelled original. Compare them with candidate pages.',
+  restructure_source:'after is JSON {schema:"falsify.paper-layout-plan.v1",sourcePdfHash,frontMatter:[unitIds],order:[ALL unitIds exactly once],furniture:[{id,placement:"header"|"footer"}],columns:1|2}. Use structure units and current plan. Move layout units without rewriting their content; preserve established figure/caption groups.',
+  finish:'Finish only after observing compile, inspection and rendered candidate pages; when an original PDF is present, also read and visually observe its pages. Partial coverage is not a quality pass.'
 };
 const toolDescriptors = tools.map(name=>({name,description:descriptions[name]}));
 const length = String.raw`[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:pt|mm|cm|in|em|ex|bp|pc|dd|cc|sp|\\(?:textwidth|linewidth|columnwidth))`;
@@ -88,14 +92,16 @@ function validArtifact(a, p) {
 }
 
 /** Model decisions select injected app tools. No model action executes host commands. */
-export async function runPaperLayoutAgent({project, artifact=null, decide, compile, inspect, render, signal, onProgress, maxSteps=12}={}) {
+export async function runPaperLayoutAgent({project, artifact=null, decide, compile, inspect, render, reference=null,readReference,renderReference,restructure,signal, onProgress, maxSteps=12}={}) {
   if (!Number.isSafeInteger(maxSteps) || maxSteps < 1 || maxSteps > 32 || ![decide,compile,inspect,render].every(f=>typeof f==='function')) throw new TypeError('Invalid layout agent configuration');
   const verified = await createLatexProject(project);
   if (verified.id !== project.id || project.files.some(f => hex(f.bytes) !== f.sha256)) throw new Error('Stale project identity');
   if (artifact && !validArtifact(artifact, verified)) throw new Error('Stale artifact identity');
+  if(reference&&(!/^[a-f0-9]{64}$/.test(reference.sourcePdfHash||'')||reference.sourcePdfHash!==project.sourcePdfHash||typeof readReference!=='function'||typeof renderReference!=='function'))throw new Error('Original PDF reference does not match project');
   let current = verified, lastProject = verified, lastArtifact = artifact, compiled = null, inspected = null, rendered = null;
-  let observations = [], images = [], trace = [], coverage = null;
-  const result = (status, message) => ({project:lastProject, artifact:lastArtifact, status, trace, coverage, message});
+  let observations = [], images = [], trace = [], coverage = null,referenceImages=[],referenceRead=false,referenceSeen=false,candidateSeen=null;
+  const referencePages={read:new Set(),rendered:new Set(),observed:new Set()};
+  const result = (status, message) => ({project:lastProject, artifact:lastArtifact, status, trace, coverage:coverage?{...coverage,...(reference?{reference:{sourcePdfHash:reference.sourcePdfHash,readPages:[...referencePages.read],renderedPages:[...referencePages.rendered],observedPages:[...referencePages.observed]}}:{})}:coverage, message});
   const record = (action, data, identity=current.id, pdfHash=lastArtifact?.pdfHash ?? null) => {
     const entry = {action, result:bounded(data), projectId:identity, pdfHash};
     trace.push(entry); observations.push(entry); observations = observations.slice(-4);
@@ -107,14 +113,43 @@ export async function runPaperLayoutAgent({project, artifact=null, decide, compi
     let a;
     try {
       const sourceFiles=current.files.filter(f=>/\.tex$/i.test(f.path)),previewSize=Math.min(3000,Math.floor(16000/Math.max(1,sourceFiles.length)));
-      a = await decide({projectId:current.id, step, maxSteps, instruction, tools:structuredClone(toolDescriptors), observations:structuredClone(observations), images:structuredClone(images), sourceFiles:sourceFiles.map(f=>({path:f.path,text:dec.decode(f.bytes).slice(0,previewSize)}))});
+      let structure=null;try{const s=readLayoutStructure(current);structure={schema:s.schema,sourcePdfHash:s.sourcePdfHash,plan:s.plan,unitCount:s.units.length,units:s.units.slice(0,24).map(({id,pageIndex,bbox,kind,role,span})=>({id,pageIndex,bbox,kind,role,span})),unitsTruncated:s.units.length>24};}catch{}
+      const attached=referenceImages.length&&images.length?[...referenceImages.slice(0,2),...images.slice(0,2)]:[...referenceImages,...images].slice(0,4);
+      const observedRead=referenceRead||observations.some(e=>e.action==='read_reference'&&e.result?.status==='ok'),originalVisible=referenceSeen||attached.some(i=>i.document==='original'),candidateVisible=candidateSeen===lastArtifact?.pdfHash||attached.some(i=>i.document!=='original');
+      const execution={compiledCurrent:compiled===current.id,inspectedCurrent:inspected===lastArtifact?.pdfHash,renderedCurrent:rendered===lastArtifact?.pdfHash,originalRead:observedRead,originalVisible,candidateVisible,pdfHash:lastProject.id===current.id?lastArtifact?.pdfHash:null,remainingSteps:maxSteps-step,completedActions:trace.map(e=>({tool:e.action,status:e.result?.status}))};
+      execution.canFinish=execution.compiledCurrent&&execution.inspectedCurrent&&execution.renderedCurrent&&candidateVisible&&(!reference||observedRead&&originalVisible);
+      a = await decide({projectId:current.id, step, maxSteps, execution,instruction:instruction+(reference?' Compare the original PDF reference against the candidate. Read and render original pages first; retain full-width front matter, column body, anchored furniture and original content.':''), tools:structuredClone(toolDescriptors.filter(t=>!['read_reference','render_reference_pages'].includes(t.name)||reference).filter(t=>t.name!=='restructure_source'||structure&&typeof restructure==='function')), observations:structuredClone(observations), images:structuredClone(attached), sourceFiles:sourceFiles.map(f=>({path:f.path,text:dec.decode(f.bytes).slice(0,previewSize)})),...(reference?{reference:structuredClone(reference)}:{}),...(structure?{structure}: {})});
+      if(attached.some(i=>i.document==='original')){referenceSeen=true;for(const i of attached.filter(i=>i.document==='original'))referencePages.observed.add(i.pageIndex);}
+      if(observations.some(e=>e.action==='read_reference'&&e.result?.status==='ok'))referenceRead=true;
+      if(attached.some(i=>i.document!=='original')&&compiled===current.id)candidateSeen=lastArtifact?.pdfHash;
       if (cancelled()) return result('cancelled','Layout run cancelled.');
       if (!validAction(a)) { record('invalid_action',{status:'rejected',reason:'Malformed action'}); return result('unresolved','Malformed agent action.'); }
       const action = a.tool;
       if (action === 'finish') {
-        const complete = compiled === current.id && inspected === lastArtifact?.pdfHash && rendered === lastArtifact?.pdfHash && lastProject.id === current.id;
+        const complete = compiled === current.id && inspected === lastArtifact?.pdfHash && rendered === lastArtifact?.pdfHash && lastProject.id === current.id&&candidateSeen===lastArtifact?.pdfHash&&(!reference||referenceRead&&referenceSeen);
         record(action,{status:complete?'complete':'rejected',message:a.message});
         return result(complete?'complete':'unresolved',complete ? a.message : 'Current PDF has not been compiled, inspected and rendered.');
+      }
+      if(action==='read_reference'){
+        if(!reference){record(action,{status:'rejected',reason:'No original PDF reference'});continue;}
+        const output=await readReference({pages:[...a.pages],offset:/^\d+$/.test(a.before)?Number(a.before):0,signal});if(cancelled())return result('cancelled','Layout run cancelled.');
+        if(output?.sourcePdfHash!==reference.sourcePdfHash||!Array.isArray(output.pages)||!output.pages.length||output.pages.some(p=>!Number.isSafeInteger(p.pageIndex)||p.pageIndex<0)||bounded({status:'ok',reference:output})?.status==='truncated'){record(action,{status:'rejected',reason:'Original reference is unavailable, too large, or has another hash'});continue;}
+        for(const page of output.pages)referencePages.read.add(page.pageIndex);record(action,{status:'ok',reference:output});continue;
+      }
+      if(action==='render_reference_pages'){
+        if(!reference){record(action,{status:'rejected',reason:'No original PDF reference'});continue;}
+        const output=await renderReference({pages:[...a.pages],signal});if(cancelled())return result('cancelled','Layout run cancelled.');
+        if(output?.sourcePdfHash!==reference.sourcePdfHash||!Array.isArray(output.images)||!output.images.length||output.images.length>4||output.images.some(i=>!Number.isSafeInteger(i.pageIndex)||i.pageIndex<0||i.mime!=='image/png'||typeof i.base64!=='string'||!i.base64.startsWith('iVBORw0KGgo')||i.base64.length>699052)||a.pages.length&&a.pages.some(p=>!output.images.some(i=>i.pageIndex===p))){record(action,{status:'rejected',reason:'Original page render does not match reference'});continue;}
+        referenceImages=output.images.map(i=>({...i,document:'original'}));for(const i of referenceImages)referencePages.rendered.add(i.pageIndex);record(action,{status:'ok',sourcePdfHash:reference.sourcePdfHash,pages:referenceImages.map(i=>i.pageIndex),coverage:output.coverage});continue;
+      }
+      if(action==='restructure_source'){
+        if(typeof restructure!=='function'){record(action,{status:'rejected',reason:'No structural editor for this source'});continue;}
+        let plan;try{plan=JSON.parse(a.after);}catch{record(action,{status:'rejected',reason:'after must be a layout plan JSON object'});continue;}
+        let output;try{output=await restructure({project:structuredClone(current),plan,signal});}catch{record(action,{status:'rejected',reason:'Structure plan must preserve all units, assets and source identity; use current structure.plan with every unit exactly once'});continue;}
+        if(cancelled())return result('cancelled','Layout run cancelled.');
+        const next=await createLatexProject(output.project);
+        if(next.id!==output.project?.id||next.origin!==current.origin||next.engine!==current.engine||next.sourcePdfHash!==current.sourcePdfHash||current.files.some(f=>!(/\.tex$/i.test(f.path)||/^falsify-(?:layout-structure|reconstruction)\.json$/.test(f.path))&&!next.files.some(g=>g.path===f.path&&g.sha256===f.sha256))){record(action,{status:'rejected',reason:'Structural tool returned an unrelated project or changed source assets'});continue;}
+        current=next;compiled=inspected=rendered=candidateSeen=null;images=[];coverage=null;record(action,{status:'ok',summary:output.summary});continue;
       }
       if (action === 'read_source' || action === 'replace_source') {
         const file = current.files.find(f=>f.path===a.path && /\.tex$/i.test(f.path));
@@ -148,7 +183,7 @@ export async function runPaperLayoutAgent({project, artifact=null, decide, compi
       if (action === 'inspect_pdf') {
         const output=await inspect({project:structuredClone(current),artifact:structuredClone(lastArtifact),signal});
         if (cancelled()) return result('cancelled','Layout run cancelled.');
-        if (!output || output.schema !== 'falsify.layout-quality.v1' || !['ok','partial'].includes(output.status) || output.pdfHash !== lastArtifact.pdfHash || !Array.isArray(output.issues) || !output.coverage || typeof output.coverage !== 'object' || Array.isArray(output.coverage) || ['truncated','unavailable'].includes(bounded(output)?.status)) { inspected=null; record(action,{status:'failed',observation:output}); continue; }
+        if (!output || output.schema !== 'falsify.layout-quality.v1' || !['ok','partial'].includes(output.status) || output.pdfHash !== lastArtifact.pdfHash || !Array.isArray(output.issues) || !output.coverage || typeof output.coverage !== 'object' || Array.isArray(output.coverage) || ['truncated','unavailable'].includes(bounded({status:'ok',observation:output})?.status)) { inspected=null; record(action,{status:'failed',observation:output}); continue; }
         inspected=lastArtifact.pdfHash; record(action,{status:'ok',observation:output}); continue;
       }
       const output=await render({project:structuredClone(current),artifact:structuredClone(lastArtifact),pages:[...a.pages],signal});
