@@ -5,6 +5,8 @@ const runtime = spawnSync(process.execPath, ['--test','tests/latex-runtime-catal
 if(runtime.error || runtime.status!==0)process.exit(runtime.status||1);
 const layoutAudit = spawnSync(process.execPath, ['--test','tests/latex-layout-audit.spec.mjs'], {stdio:'inherit'});
 if(layoutAudit.error || layoutAudit.status!==0)process.exit(layoutAudit.status||1);
+const layoutAgent = spawnSync(process.execPath, ['--test','tests/paper-layout-agent.spec.mjs','tests/paper-layout-agent-ui.spec.mjs','tests/layout-agent-skill.spec.mjs'], {stdio:'inherit'});
+if(layoutAgent.error || layoutAgent.status!==0)process.exit(layoutAgent.status||1);
 const reconstruction = spawnSync(process.execPath, ['--test','tests/pdf-latex-evidence.spec.mjs','tests/pdf-latex-regions.spec.mjs','tests/pdf-latex-serialize.spec.mjs','tests/pdf-latex-unicode.spec.mjs','tests/pdf-latex-baseline.spec.mjs','tests/pdf-latex-reader.spec.mjs','tests/pdf-latex-preview-lifecycle.spec.mjs','tests/latex-source-export.spec.mjs','tests/paper-typography-profile.spec.mjs','tests/pdf-latex-flow-serialize.spec.mjs','tests/pdf-latex-fonts.spec.mjs'], {stdio:'inherit'});
 if(reconstruction.error || reconstruction.status!==0)process.exit(reconstruction.status||1);
 const marker = spawnSync(process.execPath, ['--test','tests/paragraph-pdf-content-operators.spec.mjs','tests/paragraph-pdf-marker-surgery.spec.mjs','tests/paragraph-pdf-marker-path.spec.mjs'], {stdio:'inherit'});

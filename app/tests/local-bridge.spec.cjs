@@ -13,6 +13,16 @@ function harness(hostname='shinick-han.github.io',port='',queue=[]){
   return {bridge,calls,states,queue};
 }
 const hosted=()=>harness();
+
+test('agent layout uses the authenticated bridge without widening other paper routes',async()=>{
+  const h=hosted(),action={schema:'falsify.paper-layout-agent-action.v1',action:{tool:'compile_pdf'}};
+  h.queue.push(reply(CAP),reply(action));await h.bridge.pair(TOKEN,'7816');
+  const result=await h.bridge.session().request('/api/paper/layout-agent/step',{consent:true});
+  assert.deepEqual(result,action);assert.equal(h.calls.length,2);
+  assert.equal(h.calls[1].init.method,'POST');assert.equal(h.calls[1].init.headers.Authorization,'Bearer '+TOKEN);
+  await assert.rejects(h.bridge.session().request('/api/paper/layout-agent/shell',{command:'x'}),/허용되지/);
+  assert.equal(h.calls.length,2);assert.equal(leaks(h),false);
+});
 test('known HTTP failure preserves numeric status for receipt classification',async()=>{
   const h=hosted();h.queue.push(reply(CAP),reply({error:'이미 실행 중입니다.'},409));
   await h.bridge.pair(TOKEN,'7816');

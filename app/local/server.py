@@ -32,6 +32,7 @@ import image_edit_service
 import harness_adapter
 import harness_profile
 import harness_deployment
+import layout_agent_service
 import subprocess
 import pairing
 from build_info import WORKBENCH_VERSION
@@ -117,6 +118,7 @@ CORS_HEADERS = {'authorization', 'content-type'}
 IMAGE_ROUTES = ('/api/paper/images', '/api/paper/images/export')
 PROFILE_ROUTE = '/api/harness/profile/propose'
 DEPLOY_ROUTE = '/api/harness/deploy'
+LAYOUT_AGENT_ROUTE = '/api/paper/layout-agent/step'
 HOST_LABEL = re.compile(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?')
 
 def parse_web_origin(value):
@@ -139,7 +141,7 @@ def cors_route(method, path):
     Pair register, /api/session and launcher routes stay off this list.
     """
     if method == 'GET': return path in ('/api/capabilities', pairing.STATUS_PATH) or re.fullmatch(r'/api/(red|blue)/jobs/.+', path) is not None
-    if method == 'POST': return path in ['/api/red/jobs', '/api/blue/jobs', '/api/export', '/api/paper/inspect', *IMAGE_ROUTES, PROFILE_ROUTE, DEPLOY_ROUTE, pairing.REDEEM_PATH, pairing.REVOKE_PATH] or re.fullmatch(r'/api/(red|blue)/jobs/.+/cancel', path) is not None
+    if method == 'POST': return path in ['/api/red/jobs', '/api/blue/jobs', '/api/export', '/api/paper/inspect', *IMAGE_ROUTES, PROFILE_ROUTE, DEPLOY_ROUTE, LAYOUT_AGENT_ROUTE, pairing.REDEEM_PATH, pairing.REVOKE_PATH] or re.fullmatch(r'/api/(red|blue)/jobs/.+/cancel', path) is not None
     return False
 
 def no_duplicates(items):
@@ -333,13 +335,17 @@ class Handler(BaseHTTPRequestHandler):
         path = unquote(urlsplit(self.path).path)
         role = 'blue' if path.startswith('/api/blue/jobs') else 'red'
         prefix = '/api/' + role + '/jobs'
-        if path not in ['/api/red/jobs', '/api/blue/jobs', '/api/export', '/api/paper/inspect', *IMAGE_ROUTES, PROFILE_ROUTE, DEPLOY_ROUTE] and not (path.startswith(prefix + '/') and path.endswith('/cancel')):
+        if path not in ['/api/red/jobs', '/api/blue/jobs', '/api/export', '/api/paper/inspect', *IMAGE_ROUTES, PROFILE_ROUTE, DEPLOY_ROUTE, LAYOUT_AGENT_ROUTE] and not (path.startswith(prefix + '/') and path.endswith('/cancel')):
             self.reply(404, {'error': 'operation_not_allowed'}); return
         try:
             if self.headers.get('Content-Type') != 'application/json': raise ValueError('application/json 필요')
             size = int(self.headers.get('Content-Length', '-1'))
             limit = 40 * 1024 * 1024 if path == '/api/paper/images/export' else 37 * 1024 * 1024 if path in ['/api/export', '/api/paper/inspect', '/api/paper/images'] else 6 * 1024 * 1024
-            if not 1 <= size <= limit: raise ValueError('본문 크기 제한 초과')
+            if not 1 <= size <= limit:
+                if path == LAYOUT_AGENT_ROUTE and size > limit:
+                    error = layout_agent_service.LayoutAgentError('request_limit', 400)
+                    self.reply(error.status, error.payload()); return
+                raise ValueError('본문 크기 제한 초과')
             raw = self.rfile.read(size)
             if len(raw) != size: raise ValueError('본문 수신 중단')
             body_digest = request_bytes_digest(raw) if path in ('/api/red/jobs', '/api/blue/jobs') else None
@@ -386,6 +392,16 @@ class Handler(BaseHTTPRequestHandler):
                     try: result = harness_deployment.deploy(data)
                     except (ValueError, OSError, subprocess.SubprocessError):
                         self.reply(400, {'error': 'harness_deployment_failed'}); return
+                finally: ACTIVE.release()
+                self.reply(200, result); return
+            if path == LAYOUT_AGENT_ROUTE:
+                try: request = layout_agent_service.validate_request(data)
+                except layout_agent_service.LayoutAgentError as error: self.reply(error.status, error.payload()); return
+                with LOCK: admitted = not self.server_closing() and ACTIVE.acquire(blocking=False)
+                if not admitted: self.reply(409, {'error': 'companion_busy'}); return
+                try:
+                    try: result = layout_agent_service.decide(request)
+                    except layout_agent_service.LayoutAgentError as error: self.reply(error.status, error.payload()); return
                 finally: ACTIVE.release()
                 self.reply(200, result); return
             if path == PROFILE_ROUTE:
