@@ -1,13 +1,13 @@
 const median = xs => { const a=[...xs].sort((x,y)=>x-y); return a.length ? a[Math.floor(a.length/2)] : null; };
 const valid = (x,min,max) => Number.isFinite(x)&&x>=min&&x<=max;
-const roleOf = i => i.kind==='heading'?'heading':i.kind==='caption'||i.reason==='caption-proposal'?'caption':i.kind==='footnote'?'footnote':'body';
+const roleOf = i => i.extensions?.publicationRole==='title'?'title':i.extensions?.publicationRole==='section-heading'?'heading':i.extensions?.publicationRole==='footnote'?'footnote':i.kind==='heading'?'heading':i.kind==='caption'||i.reason==='caption-proposal'?'caption':i.kind==='footnote'?'footnote':'body';
 export function inferTypographyProfile(model, overrides={}) {
   if (!model?.pages?.length || !Array.isArray(model.items)) throw new Error('INVALID_MODEL');
   const diagnostics=[], pages=model.pages;
   const pick=(name, observed, fallback) => { const value=observed??fallback; diagnostics.push({field:name,source:observed==null?'default':'observed',value}); return value; };
   const widthBp=pick('page.widthBp',median(pages.map(p=>p.width).filter(x=>valid(x,1,14400))),612);
   const heightBp=pick('page.heightBp',median(pages.map(p=>p.height).filter(x=>valid(x,1,14400))),792);
-  const bodyItems=model.items.filter(i=>roleOf(i)==='body'&&i.kind==='paragraph');
+  const bodyItems=model.items.filter(i=>roleOf(i)==='body'&&i.kind==='paragraph'&&(!i.extensions?.publicationRole||i.extensions.publicationRole==='body'));
   // Page edges are estimated from the outer body extents, not the median
   // paragraph: otherwise the more populated column becomes the page margin.
   const extents=pages.map((page,index)=>{
@@ -21,8 +21,8 @@ export function inferTypographyProfile(model, overrides={}) {
   const columns=pick('page.columns',hints.length>pages.length/2?2:null,1);
   const gutterBp=pick('page.gutterBp',median(hints.map(h=>h.gutterBp[1]-h.gutterBp[0]).filter(x=>valid(x,1,200))),18);
   const styles={};
-  for(const role of ['body','heading','caption','footnote']) {
-    const its=model.items.filter(i=>roleOf(i)===role), sizes=its.map(i=>i.extensions?.typography?.fontSizeBp).filter(x=>valid(x,6,36));
+  for(const role of ['body','heading','caption','footnote','title']) {
+    const its=role==='body'?bodyItems:model.items.filter(i=>roleOf(i)===role), sizes=its.map(i=>i.extensions?.typography?.fontSizeBp).filter(x=>valid(x,6,36));
     const sizeBp=pick(`roles.${role}.sizeBp`,median(sizes),role==='heading'?12:role==='body'?10:9);
     const leads=its.map(i=>i.extensions?.typography).filter(t=>valid(t?.leadingBp,sizeBp*.75,sizeBp*3)&&Array.isArray(t.leadingEvidence)&&t.leadingEvidence.length>=2&&t.leadingEvidence.every(e=>e.sourceSha256===model.sourceSha256)).map(t=>t.leadingBp);
     const leadingBp=pick(`roles.${role}.leadingBp`,median(leads),Math.round(sizeBp*120)/100);

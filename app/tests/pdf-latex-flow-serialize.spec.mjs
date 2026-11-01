@@ -6,6 +6,23 @@ const item=(id,text,extra={})=>({id,text,kind:'paragraph',status:'observed',evid
 const png=Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGP8zwACTGCSAQANHQEDgslx/wAAAABJRU5ErkJggg==','base64'));
 const model=items=>({schema:'falsify.pdf-latex-reconstruction.v1',sourceSha256:hash,pages:[{pageIndex:0,width:612,height:792,frame:'mupdf-display'}],items,assets:[],relations:[],diagnostics:[]});
 const text=r=>new TextDecoder().decode(r.files[0].bytes);
+test('publication roles retain hierarchy, inline markers and a reserved native footnote',()=>{
+ const m=model([
+ item('title','Paper title',{kind:'heading',extensions:{publicationRole:'title',typography:{fontSizeBp:22,leadingBp:27}}}),
+ item('author','Ada Lee1',{extensions:{publicationRole:'authors',typography:{fontSizeBp:11},inlineRuns:[{start:0,end:7,bold:true},{start:7,end:8,script:'super'}]}}),
+ item('abstract','AbstractResult 63.50.',{extensions:{publicationRole:'abstract',roleLabel:{start:0,end:8,text:'Abstract'},typography:{fontSizeBp:10},inlineRuns:[{start:0,end:8,bold:true},{start:8,end:21}]}}),
+ item('section','1. Introduction',{extensions:{publicationRole:'section-heading',typography:{fontSizeBp:10}}}),
+ item('foot','* Correspondence.',{extensions:{publicationRole:'footnote',typography:{fontSizeBp:8}}}),
+ item('body','Unchanged RED 71.',{extensions:{publicationRole:'body',typography:{fontSizeBp:10,leadingBp:12}}})]);
+ const r=serializeFlowReconstruction({model:m}),s=text(r);
+ assert.match(s,/\\fontsize\{22bp\}\{27bp\}/);assert.match(s,/\\textbf\{Ada Lee\}\\textsuperscript\{1\}/);
+ assert.match(s,/\\textbf\{Abstract\}\\par\\noindent Result 63\.50\./);
+ assert.match(s,/\\footnotetext\{[\s\S]*\* Correspondence\./);assert.equal((s.match(/\* Correspondence\./g)||[]).length,1);
+ assert.equal(r.structure.units.find(u=>u.id==='section').role,'heading');
+ for(const b of r.bindings)assert.ok(s.slice(b.start,b.end).length);
+ const override=serializeFlowReconstruction({model:m,profile:inferTypographyProfile(m,{body:{sizeBp:12,leadingBp:15}})});
+ assert.match(text(override),/\\fontsize\{12bp\}\{15bp\}\\selectfont Unchanged RED 71/);
+});
 test('native long paragraph and document profiles preserve actual content and bindings',()=>{const long='Result 63.5 μ 漢 & 20%. '.repeat(1000),m=model([item('p',long),item('q','Another paragraph.'),item('h','Section 1',{kind:'heading'})]),original=structuredClone(m);for(const columns of [1,2]){const p=inferTypographyProfile(m,{page:{columns},body:{sizeBp:10,leadingBp:12}}),r=serializeFlowReconstruction({model:m,profile:p}),s=text(r);assert.deepEqual(m,original);assert.equal(r.engine,'lualatex');assert.equal(s.includes('twocolumn'),columns===2);assert.doesNotMatch(s,/\\newpage|\\begin\{minipage\}|\\fbox/);assert.match(s,/μ 漢 \\& 20\\%/);assert.equal((s.match(/\\fontsize\{10bp\}\{12bp\}/g)||[]).length,2);assert.equal(s.slice(r.bindings[0].start,r.bindings[0].end),long.replaceAll('&','\\&').replaceAll('%','\\%'));assert.ok(r.diagnostics.some(d=>d.code==='UNICODE_GLYPH_COVERAGE_UNVERIFIED'));assert.match(s,/\\Needspace\{4\\baselineskip\}/);}});
 test('figure and caption retained; explicit transcription is evidence bound',()=>{const m=model([item('f','',{kind:'figure',assetId:'a'}),item('c','Figure 1: 63%',{reason:'caption-proposal'}),item('x','x2',{reason:'inline-script-candidate'})]);m.assets=[{id:'a',bytes:png,sha256:hex(png),mediaType:'image/png',representation:'image',editable:false,evidence:[ref]}];m.relations=[{kind:'caption',from:'f',to:'c',status:'proposed',evidence:[ref,ref]}];const r=serializeFlowReconstruction({model:m,decisions:[{itemId:'x',sourceSha256:hash,evidence:[ref],tex:'$x^2$'}]}),s=text(r);assert.match(s,/\\includegraphics/);assert.match(s,/Figure 1: 63\\%/);assert.equal(s.slice(r.bindings[2].start,r.bindings[2].end),'$x^2$');assert.equal(r.files.length,2);assert.equal((s.match(/\\Needspace\{5\\baselineskip\}/g)||[]).length,2);assert.throws(()=>serializeFlowReconstruction({model:m,decisions:[{itemId:'x',sourceSha256:'b'.repeat(64),evidence:[ref],tex:'$x^2$'}]}),{code:'INVALID_DECISION'});});
 
@@ -24,6 +41,11 @@ test('content-hashed font paths use a safe named NFSS family, including all styl
  const m=model([item('p','Real font project')]),fontFiles=['regular','bold','italic','bolditalic'].map((style,n)=>({path:style+'.ttf',bytes:Uint8Array.from([0,1,2,n]),role:'serif',style}));
  const r=serializeFlowReconstruction({model:m,fontFiles}),s=text(r);
  assert.match(s,/NFSSFamily=FalsifyBody,Path=fonts\//);assert.match(s,/UprightFont=\{[a-f0-9]{64}\.ttf\}/);assert.match(s,/BoldItalicFont=\{[a-f0-9]{64}\.ttf\}/);assert.match(s,/\]\{FalsifyPublication\}/);assert.equal(r.files.filter(f=>f.path.startsWith('fonts/')).length,4);
+});
+test('bundled symbol face preserves math characters without replacing their Unicode content',()=>{
+ const m=model([item('p','* ∗ ∼ − 63.50')]),r=serializeFlowReconstruction({model:m,fontFiles:[{path:'body.ttf',bytes:new Uint8Array([1,2]),role:'serif'},{path:'symbols.otf',bytes:new Uint8Array([3,4]),role:'math'}]}),s=text(r);
+ assert.match(s,/\\newfontfamily\\FalsifySymbols/);assert.match(s,/\{\\FalsifySymbols ∗\}/);assert.match(s,/\{\\FalsifySymbols ∼\}/);assert.match(s,/63\.50/);
+ assert.equal(r.files.filter(f=>f.path.startsWith('fonts/')).length,2);
 });
 
 test('layout commands preserve editable headings, author text and captions in the source editor',()=>{

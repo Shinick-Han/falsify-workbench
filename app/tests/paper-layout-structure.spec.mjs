@@ -9,6 +9,13 @@ const item=(id,kind,bbox,text)=>({id,kind,status:'observed',evidence:[ev(bbox)],
 const model={schema:'falsify.pdf-latex-reconstruction.v1',sourceSha256:hash,pages:[{pageIndex:0,width:600,height:800,frame:'mupdf-display',extensions:{layoutHints:{columns:2,gutterBp:[290,310],status:'proposed',provenance:'paper-flow'}}}],items:[item('title','heading',[40,80,520,100],'Title'),item('author','paragraph',[40,120,480,135],'A. Author'),item('abstract','paragraph',[40,150,520,220],'Abstract text'),item('left','paragraph',[40,260,280,350],'Left 123'),item('right','paragraph',[320,260,560,350],'Right 456')],assets:[],relations:[],diagnostics:[]};
 const make=async(testModel=model)=> (await createReconstructionProject({sourceSha256:hash,model:testModel},[],{layout:'semantic-flow',profile:{schema:'falsify.paper-typography.v1',page:{widthBp:600,heightBp:800,columns:2,gutterBp:20,margins:{left:40,right:40,top:36,bottom:36}},body:{indentEm:1,paragraphGapEm:0},roles:Object.fromEntries(['body','heading','caption','footnote'].map(x=>[x,{sizeBp:10,leadingBp:12}])),fonts:{serif:'Latin Modern Roman'},packages:{}}})).project;
 const source=p=>dec.decode(p.files.find(f=>f.path==='main.tex').bytes);
+test('moving a native footnote to footer keeps its own reservation instead of a shipout parbox',async()=>{
+ const m=structuredClone(model),foot=item('note','paragraph',[40,720,270,735],'* Contact author.');foot.extensions={...foot.extensions,publicationRole:'footnote',typography:{fontSizeBp:8}};m.items.push(foot);
+ const p=await make(m),s=readLayoutStructure(p),plan={...s.plan,furniture:[...s.plan.furniture,{id:'note',placement:'footer'}]};
+ const out=(await applyLayoutStructure({project:p,plan})).project,tex=source(out);
+ assert.equal((tex.match(/\\footnotetext\{/g)||[]).length,1);assert.doesNotMatch(tex,/FalsifyFurniture6e6f7465/);assert.doesNotMatch(tex,/\\enlargethispage/);
+ assert.deepEqual(readLayoutStructure(out).plan,plan);assert.match(tex,/\* Contact author\./);
+});
 test('source geometry forms front matter and current edited unit survives relocation',async()=>{
  let p=await make(),s=readLayoutStructure(p);assert.deepEqual(s.plan.frontMatter,['title','author','abstract']);assert.match(source(p),/\\twocolumn\[\{/);
  const files=p.files.map(f=>({path:f.path,bytes:f.path==='main.tex'?enc.encode(source(p).replace('Left 123','Edited RED 123')):f.bytes}));p=await createLatexProject({...p,files});s=readLayoutStructure(p);
