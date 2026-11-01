@@ -6,6 +6,10 @@ const item=(id,text,extra={})=>({id,text,kind:'paragraph',status:'observed',evid
 const png=Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGP8zwACTGCSAQANHQEDgslx/wAAAABJRU5ErkJggg==','base64'));
 const model=items=>({schema:'falsify.pdf-latex-reconstruction.v1',sourceSha256:hash,pages:[{pageIndex:0,width:612,height:792,frame:'mupdf-display'}],items,assets:[],relations:[],diagnostics:[]});
 const text=r=>new TextDecoder().decode(r.files[0].bytes);
+test('source-bound captions stay with their images across interleaved column items',()=>{
+ const f=item('f','',{kind:'figure',assetId:'a'}),c=item('c','Figure 1. Correct owner',{kind:'caption',reason:'inline-script-candidate'}),other=item('other','Other column body'),m=model([f,other,c]);m.assets=[{id:'a',bytes:png,sha256:hex(png),mediaType:'image/png',representation:'image',editable:false,evidence:[ref]}];m.relations=[{kind:'caption',from:'f',to:'c',status:'proposed',evidence:[...f.evidence,...c.evidence]}];const saved=structuredClone(m),r=serializeFlowReconstruction({model:m}),s=text(r);
+ assert.deepEqual(m,saved);assert.deepEqual(r.structure.groups,[['f','c']]);assert.deepEqual(r.structure.plan.order,['f','c','other']);assert.match(s,/\\begin\{figure\}[\s\S]*Correct owner[\s\S]*\\end\{figure\}[\s\S]*Other column body/);assert.equal((s.match(/Correct owner/g)||[]).length,1);
+});
 test('publication roles retain hierarchy, inline markers and a reserved native footnote',()=>{
  const m=model([
  item('title','Paper title',{kind:'heading',extensions:{publicationRole:'title',typography:{fontSizeBp:22,leadingBp:27}}}),

@@ -7,6 +7,19 @@ import {readSourceLinks} from '../src/paper-source-links.mjs';
 import {buildPaperFlow} from '../src/paper-flow.mjs';
 import {hex} from '../src/paragraph-pdf-crypto.mjs';
 import {enrichReconstructionRegions} from '../src/pdf-latex-regions.mjs';
+import {prepareReconstruction} from '../src/pdf-latex-baseline.mjs';
+import {auditReconstructionStructure} from '../src/pdf-latex-structure-audit.mjs';
+function horizontalTable(){
+ const d=new mupdf.PDFDocument(),font=d.addSimpleFont(new mupdf.Font('Helvetica'));let s='BT /f 10 Tf 30 480 Td (Unchanged surrounding body.) Tj ET\nBT /f 8 Tf 70 450 Td (Table 1. Measured parameters.) Tj ET\n';for(const y of [440,420,350])s+=`30 ${y} m 300 ${y} l S\n`;
+ for(const [row,values]of [['Parameter','Value'],['Width','70 nm'],['Read time','157 ns'],['Mass','0.36 m0']].entries())for(const [col,value]of values.entries())s+=`BT /f 8 Tf ${col?200:40} ${425-row*20} Td (${value}) Tj ET\n`;
+ d.insertPage(-1,d.addPage([0,0,340,500],0,{Font:{f:font}},s));const b=d.saveToBuffer();try{return b.asUint8Array().slice();}finally{b.destroy();d.destroy();}
+}
+test('horizontal academic rules preserve unit-bearing cells and their source raster',async()=>{
+ const bytes=horizontalTable(),draft=await prepareReconstruction({file:{name:'synthetic.pdf',arrayBuffer:async()=>bytes}}),m=draft.model,t=m.items.find(i=>i.kind==='table');assert.ok(t);assert.deepEqual(t.table.rows.map(r=>r.map(c=>c.text)),[['Parameter','Value'],['Width','70 nm'],['Read time','157 ns'],['Mass','0.36 m0']]);assert.ok(m.items.some(i=>i.text?.includes('Unchanged surrounding body.')));
+ const a=m.assets.find(a=>a.id===t.assetId),img=new mupdf.Image(a.bytes),out=new mupdf.PDFDocument();let result;try{const im=out.addImage(img);out.insertPage(-1,out.addPage([0,0,340,500],0,{XObject:{im}},'q 270 0 0 110 30 300 cm /im Do Q'));const b=out.saveToBuffer();try{result=b.asUint8Array().slice();}finally{b.destroy();}}finally{img.destroy();out.destroy();}
+ const doc=await readDocument({file:result}),audit=auditReconstructionStructure({model:m,sourceDocument:draft.evidence.document,document:doc,mupdf});assert.equal(audit.tables[0].status,'source-region-preserved');assert.equal(audit.tables[0].cellsChecked,8);assert.equal(audit.coverage.sourceRegions,1);
+ const dropped=auditReconstructionStructure({model:m,sourceDocument:draft.evidence.document,document:{...doc,assets:[]},mupdf});assert.equal(dropped.tables[0].status,'missing');assert.equal(dropped.status,'failed');
+});
 function fixture({rotation=0,table=false,overlapText=false,merged=false}={}){
  const d=new mupdf.PDFDocument(),pix=new mupdf.Pixmap(mupdf.ColorSpace.DeviceRGB,[0,0,2,2],true);pix.getPixels().set([255,0,0,255,0,128,0,128,0,0,0,0,0,0,255,255]);const im=new mupdf.Image(pix),font=new mupdf.Font('Helvetica');
  try {const image=d.addImage(im),f=d.addSimpleFont(font);let s='BT /f 10 Tf 20 365 Td (Body remains.) Tj ET\n';

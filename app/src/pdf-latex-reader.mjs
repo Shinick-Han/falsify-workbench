@@ -45,7 +45,7 @@ export function createReconstructionReader({workerFactory,startupTimeoutMs=30000
           if(data?.type==='ready'){
             if(posted)return;
             posted=true;clearTimeout(startupTimer);
-            try{worker.postMessage({id,type:kind,bytes,sourceDocument,sourceBytes},sourceBytes?[bytes.buffer,sourceBytes.buffer]:[bytes.buffer]);}
+            try{worker.postMessage({id,type:kind,bytes,sourceDocument,sourceBytes,...(request.reconstructionModel?{reconstructionModel:structuredClone(request.reconstructionModel)}:{})},sourceBytes?[bytes.buffer,sourceBytes.buffer]:[bytes.buffer]);}
             catch{return finish(reject,error('WORKER_FAILED','PDF 재구성 작업을 시작하지 못했습니다.'));}
             return;
           }
@@ -61,6 +61,7 @@ export function createReconstructionReader({workerFactory,startupTimeoutMs=30000
           }
           if(!r||r.schema!=='falsify.reconstruction-comparison.v1'||r.sourcePdfHash!==sourceHash||r.baselinePdfHash!==sha||!Number.isSafeInteger(r.sourcePages)||r.sourcePages<1||(sourceDocument&&r.sourcePages!==sourceDocument.pages.length)||!Number.isSafeInteger(r.baselinePages)||r.baselinePages<1||r.method!=='extracted-token-multiset'||r.readingOrderVerified!==false||r.visualLayoutVerified!==false||![r.text?.missing,r.text?.added,r.numbers?.missing,r.numbers?.added].every(a=>Array.isArray(a)&&a.every(v=>typeof v==='string')))return finish(reject,error('INVALID_RESULT','PDF 비교 결과가 입력과 다릅니다.'));
           if(r.layoutAudit!==undefined){const a=r.layoutAudit;if(a?.schema!=='falsify.latex-layout-audit.v1'||a.outputPdfHash!==sha||!['partial','unavailable'].includes(a.status)||!Array.isArray(a.findings)||a.findings.length>1000||a.findings.some(f=>typeof f?.type!=='string'||!Number.isSafeInteger(f.pageIndex)||f.pageIndex<0||f.pageIndex>=r.baselinePages||!Array.isArray(f.bbox)||f.bbox.length!==4||!f.bbox.every(Number.isFinite)))r.layoutAudit={schema:'falsify.latex-layout-audit.v1',outputPdfHash:sha,status:'unavailable',findings:[],coverage:null,limitations:['배치 점검 결과를 생성 PDF에 연결하지 못했습니다.']};}
+          if(r.structureAudit!==undefined&&(r.structureAudit?.schema!=='falsify.reconstruction-structure-audit.v1'||r.structureAudit.sourcePdfHash!==sourceHash||r.structureAudit.outputPdfHash!==sha))delete r.structureAudit;
           finish(resolve,r);
         };
         worker.onerror=()=>finish(reject,error('WORKER_FAILED','PDF 재구성 작업에 실패했습니다.'));

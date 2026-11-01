@@ -4,6 +4,7 @@ import {readSourceLinks} from './paper-source-links.mjs';
 import {buildPaperFlow} from './paper-flow.mjs';
 import {detectSourceTables, selectTableCell, readMuPdfTablePages} from './table-adapter.mjs';
 import {hex} from './paragraph-pdf-crypto.mjs';
+import {findPublicationTables} from './paper-publication-tables.mjs';
 
 const MAX_BYTES=25*1024*1024, MAX_REGIONS=256, MAX_PIXELS=16_000_000;
 const fail=code=>{const e=new Error(code);e.code=code;throw e;};
@@ -138,6 +139,38 @@ export async function enrichReconstructionRegions({model,bytes,mupdf,revision,si
     const item={id:`latex-table-${t.id}`,kind:'table',status:'observed',evidence,assetId,table,order:members[0].order,extensions:{blockIds:region.blockIds,assetIds:[],regionId:region.id}};
     if(!table){delete item.table;item.reason='table-structure-unproved';diag('table-structure-unproved',item);}
     output.items.splice(first,0,item);output.items=output.items.filter(i=>!memberIds.has(i.id));
+  }
+  // Preserve horizontally ruled academic tables as complete source regions.
+  // Cell observations accompany the crop; no PDF-writer authority is granted.
+  for(const candidate of findPublicationTables(rulePages,source.drawings)){
+    abort(signal);const pi=candidate.pageIndex,box=candidate.bbox;
+    if(output.items.some(i=>i.assetId&&i.evidence.some(e=>e.pageIndex===pi&&overlap(e.bbox,box))))continue;
+    const members=output.items.filter(i=>!i.assetId&&i.evidence.some(e=>e.pageIndex===pi&&overlap(e.bbox,box)));
+    const caption=output.items.find(i=>i.kind==='caption'&&i.evidence.some(e=>e.pageIndex===pi&&overlap(e.bbox,candidate.caption.bbox)));if(caption&&!members.includes(caption))members.push(caption);
+    if(!members.length)continue;
+    const boxes=members.flatMap(i=>i.evidence.filter(e=>e.pageIndex===pi).map(e=>e.bbox));
+    const cropBox=[Math.min(box[0],...boxes.map(b=>b[0])),Math.min(box[1],...boxes.map(b=>b[1])),Math.max(box[2],...boxes.map(b=>b[2])),Math.max(box[3],...boxes.map(b=>b[3]))];
+    if(cropBox[0]<box[0]-12||cropBox[2]>box[2]+12||cropBox[3]>box[3]+4||cropBox[1]<candidate.caption.bbox[1]-2||output.items.some(i=>i.assetId&&i.evidence.some(e=>e.pageIndex===pi&&overlap(e.bbox,cropBox))))continue;
+    const region={id:`publication-table-${pi}-${hex(new TextEncoder().encode(JSON.stringify(box))).slice(0,16)}`,pageIndex:pi,bbox:cropBox,blockIds:[...new Set(members.flatMap(i=>i.extensions?.blockIds||[]))],assetIds:[]};
+    if(9*(cropBox[2]-cropBox[0])*(cropBox[3]-cropBox[1])>MAX_PIXELS)continue;
+    const inventory=await readSourceAssets({bytes:snapshot,document,regions:[region],signal}),png=extractPng(inventory.assets.find(a=>a.id===region.id)),assetId=`latex-${region.id}`;
+    const rows=candidate.rows.map(row=>row.map(cell=>{
+      const evidence=[];
+      for(const b of document.blocks.filter(b=>b.text&&b.source.pageIndex===pi)){
+        const selected=(b.source.characters||[]).filter(c=>cell.runs.some(r=>within(c.bbox,r.bbox,.4)));let range=null;
+        for(const c of selected){if(range&&range.end===c.start)range.end=c.end;else{range={start:c.start,end:c.end};evidence.push(ref(hash,pi,b.source.bbox,{blockId:b.id,range}));}}
+      }
+      const canonical=evidence.map(e=>document.pages[e.pageIndex].text.slice(e.range.start,e.range.end)).join(' ');
+      const text=canonical&&canonical.replace(/\s/gu,'')!==cell.text.replace(/\s/gu,'')?canonical:cell.text;
+      return {text,evidence:evidence.length?evidence:[ref(hash,pi,box)]};
+    }));
+    const evidence=[ref(hash,pi,cropBox),...members.flatMap(i=>i.evidence)],ids=new Set(members.map(i=>i.id)),first=Math.min(...members.map(i=>output.items.indexOf(i)));
+    const gutter=output.pages[pi].extensions?.layoutHints?.gutterBp;
+    const spanning=Array.isArray(gutter)&&cropBox[0]<gutter[0]&&cropBox[2]>gutter[1]||cropBox[2]-cropBox[0]>output.pages[pi].width*.6;
+    const item={id:`latex-${region.id}`,kind:'table',status:'observed',evidence,assetId,table:{rows},order:members[0].order,extensions:{blockIds:region.blockIds,assetIds:[],regionId:region.id,span:spanning?'page':'column',publicationTable:{method:candidate.method,columns:candidate.columns,rows:rows.length,caption:candidate.caption.text,sourceRegion:[...cropBox]}}};
+    output.assets.push({id:assetId,evidence:[evidence[0]],representation:'region-raster',bytes:png,mediaType:'image/png',sha256:hex(png),editable:false,reason:'source-table-region'});
+    output.items.splice(first,0,item);output.items=output.items.filter(i=>!ids.has(i.id));output.relations=output.relations.filter(r=>!ids.has(r.from)&&!ids.has(r.to));
+    diag('source-table-region-preserved',item);
   }
   abort(signal);return output;
 }
