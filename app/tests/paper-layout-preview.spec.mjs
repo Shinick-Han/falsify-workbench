@@ -397,3 +397,210 @@ test('actual PDF.js renders, crops and extracts text from a synthetic PDF', asyn
   controller.dispose();
   assert.notEqual(candidateCanvas.width, 612, 'disposal resets the rendered buffer');
 });
+
+test('actual PDF.js: focus outline lands at scaled pixels and clearing restores the page', async t => {
+  let napi, pdfjs;
+  try {
+    napi = await import('@napi-rs/canvas');
+    pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  } catch (error) {
+    t.skip(`PDF.js or @napi-rs/canvas unavailable: ${error.message}`);
+    return;
+  }
+  pdfjs.GlobalWorkerOptions.workerSrc = new URL('../node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs', import.meta.url).href;
+  const standardFontDataUrl = fileURLToPath(new URL('../node_modules/pdfjs-dist/standard_fonts/', import.meta.url)).replace(/\\/g, '/');
+  const candidateCanvas = napi.createCanvas(1, 1);
+  const controller = createLayoutPreviewController({
+    doc: {createElement: () => napi.createCanvas(1, 1)}, candidateCanvas, scale: 1.5,
+    loadPdf: bytes => pdfjs.getDocument({data: bytes, standardFontDataUrl, isEvalSupported: false}),
+  });
+  const pdfBytes = syntheticPdf();
+  const before = pdfBytes.slice();
+  await controller.setDocuments({original: null, candidate: {pdfBytes, pdfHash: await sha(pdfBytes)}});
+  // Black box: PDF x 100..300, y 600..700 bottom-up -> top-left display points y 92..192.
+  const focus = {document: 'candidate', bbox: [100, 92, 300, 192]};
+  const shown = await controller.show({candidatePageIndex: 0, focus});
+  assert.equal(shown.focus.state, 'drawn', JSON.stringify(shown.focus));
+  assert.deepEqual(shown.focus.pixelRect, [150, 138, 450, 288]);
+  const ctx = candidateCanvas.getContext('2d');
+  const px = (x, y) => Array.from(ctx.getImageData(x, y, 1, 1).data);
+  const isRed = p => p[0] > 180 && p[1] < 90 && p[2] < 90;
+  const isWhite = p => p[0] > 220 && p[1] > 220 && p[2] > 220;
+  const isBlack = p => p[0] < 40 && p[3] > 200;
+  const lw = shown.focus.lineWidth; // 2 at scale 1.5; outline centred lw outside the box
+  assert.equal(lw, 2);
+  assert.ok(isRed(px(150 - lw, 213)), `left edge ${px(150 - lw, 213)}`);
+  assert.ok(isRed(px(450 + lw, 213)), `right edge ${px(450 + lw, 213)}`);
+  assert.ok(isRed(px(300, 138 - lw)), `top edge ${px(300, 138 - lw)}`);
+  assert.ok(isRed(px(300, 288 + lw)), `bottom edge ${px(300, 288 + lw)}`);
+  assert.ok(isWhite(px(300, 120)), 'outline does not spill far above the box');
+  assert.ok(isBlack(px(300, 213)), 'box interior not covered');
+  // Clearing focus on the same cached page restores the clean pixels without re-rendering.
+  const cleared = await controller.show({candidatePageIndex: 0});
+  assert.equal(cleared.candidate.reused, true);
+  assert.ok(isWhite(px(150 - lw, 213)), `outline removed ${px(150 - lw, 213)}`);
+  assert.ok(isBlack(px(300, 213)));
+  assert.equal(controller.getStats().pageRenders, 1);
+  assert.deepEqual(pdfBytes, before, 'PDF bytes never modified');
+  controller.dispose();
+});
+
+// Canvas fake whose pixels are {content, strokes}: resetting width clears them,
+// drawImage copies them, so a stale outline survives only if never restored.
+function pixelCanvas(name) {
+  let width = 0, height = 0;
+  const canvas = {name, dataset: {}, content: null, strokes: [], draws: 0,
+    get width() { return width; }, set width(v) { width = v; canvas.content = null; canvas.strokes = []; },
+    get height() { return height; }, set height(v) { height = v; canvas.content = null; canvas.strokes = []; },
+    getContext() {
+      return {canvas, strokeStyle: '', lineWidth: 1, save() {}, restore() {},
+        drawImage(src) { canvas.content = src.content; canvas.strokes = (src.strokes || []).map(s => ({...s})); canvas.draws++; },
+        strokeRect(x, y, w, h) { canvas.strokes.push({style: this.strokeStyle, lineWidth: this.lineWidth, rect: [x, y, w, h]}); }};
+    }};
+  return canvas;
+}
+
+function focusHarness(worldOptions = {}, scale = 2) {
+  const w = world(worldOptions);
+  const created = [];
+  const doc = {createElement() { const c = pixelCanvas('scratch'); created.push(c); return c; }};
+  const originalCanvas = pixelCanvas('original'), candidateCanvas = pixelCanvas('candidate');
+  const pages = [];
+  const controller = createLayoutPreviewController({doc, originalCanvas, candidateCanvas, loadPdf: w.loadPdf, scale,
+    cacheFactory: o => createBoundedDocumentCache(o), onPage: p => pages.push(p)});
+  return {w, controller, originalCanvas, candidateCanvas, pages, created};
+}
+const outlines = canvas => canvas.strokes.filter(s => s.style === '#d93025').map(s => s.rect);
+
+test('focus bbox in top-left display points is scaled to canvas pixels and outlined on the preview only', async () => {
+  const {w, controller, originalCanvas, candidateCanvas, pages} = focusHarness({}, 2);
+  const orig = await pdfInput('o'), cand = await pdfInput('c');
+  const candBytes = cand.pdfBytes.slice();
+  await controller.setDocuments({original: orig, candidate: cand});
+  // Fake page is 100x140 display points -> 200x280 canvas pixels at scale 2.
+  const shown = await controller.show({originalPageIndex: 0, candidatePageIndex: 1, focus: {document: 'candidate', bbox: [10, 20, 50, 60]}});
+  assert.equal(shown.status, 'ready');
+  assert.deepEqual([candidateCanvas.width, candidateCanvas.height], [200, 280]);
+  assert.equal(shown.focus.state, 'drawn');
+  assert.equal(shown.focus.document, 'candidate');
+  assert.equal(shown.focus.pageIndex, 1);
+  assert.deepEqual(shown.focus.bbox, [10, 20, 50, 60]);
+  assert.deepEqual(shown.focus.pixelRect, [20, 40, 100, 120]);
+  const lw = shown.focus.lineWidth;
+  assert.equal(lw, 3);
+  // Outline sits just outside the scaled box by one line width.
+  assert.deepEqual(outlines(candidateCanvas), [[20 - lw, 40 - lw, 80 + 2 * lw, 80 + 2 * lw]]);
+  assert.equal(candidateCanvas.strokes.length, 2, 'white halo + colored outline');
+  assert.equal(candidateCanvas.content, 'c:1');
+  assert.equal(candidateCanvas.dataset.focusBbox, '10,20,50,60');
+  assert.deepEqual(originalCanvas.strokes, [], 'other side has no marker');
+  assert.equal('focus' in shown.candidate, false, 'per-side metadata shape unchanged');
+  assert.deepEqual(pages.at(-1).focus, shown.focus);
+  assert.deepEqual(cand.pdfBytes, candBytes, 'PDF bytes untouched');
+  assert.deepEqual(w.log.renders, ['o:0', 'c:1']);
+
+  // Partially off-page bbox is clipped to display bounds; outline stays on canvas.
+  const clipped = await controller.show({originalPageIndex: 0, candidatePageIndex: 1, focus: {document: 'candidate', bbox: [-30, 100, 500, 900]}});
+  assert.deepEqual(clipped.focus.bbox, [0, 100, 100, 140]);
+  assert.deepEqual(clipped.focus.requestedBbox, [-30, 100, 500, 900]);
+  const [[x, y, wd, ht]] = outlines(candidateCanvas);
+  const half = lw / 2 + 1;
+  assert.deepEqual([x, y, x + wd, y + ht], [half, 200 - lw, 200 - half, 280 - half]);
+  assert.deepEqual(w.log.renders, ['o:0', 'c:1'], 'focus change re-used the rendered page');
+  controller.dispose();
+});
+
+test('replacing or clearing focus on the same cached page removes the prior outline', async () => {
+  const {w, controller, originalCanvas, candidateCanvas, created} = focusHarness({}, 1);
+  await controller.setDocuments({original: await pdfInput('o'), candidate: await pdfInput('c')});
+  const page = {originalPageIndex: 0, candidatePageIndex: 0};
+  await controller.show({...page, focus: {document: 'candidate', bbox: [10, 10, 20, 20]}});
+  assert.equal(outlines(candidateCanvas).length, 1);
+  const replaced = await controller.show({...page, focus: {document: 'candidate', bbox: [40, 40, 60, 70]}});
+  assert.equal(replaced.candidate.reused, true);
+  assert.deepEqual(outlines(candidateCanvas), [[38, 38, 24, 34]], 'only the new outline');
+  assert.equal(candidateCanvas.content, 'c:0', 'clean page restored under the new outline');
+  // Move focus to the other document: candidate marker cleared, original marked.
+  const moved = await controller.show({...page, focus: {document: 'original', bbox: [5, 5, 15, 15]}});
+  assert.equal(moved.focus.document, 'original');
+  assert.deepEqual(outlines(candidateCanvas), []);
+  assert.equal(candidateCanvas.dataset.focusBbox, undefined);
+  assert.equal(outlines(originalCanvas).length, 1);
+  // Clear focus entirely (no focus key -> metadata unchanged shape).
+  const cleared = await controller.show(page);
+  assert.equal('focus' in cleared, false);
+  assert.deepEqual([originalCanvas.strokes, candidateCanvas.strokes], [[], []]);
+  assert.deepEqual([originalCanvas.content, candidateCanvas.content], ['o:0', 'c:0']);
+  assert.deepEqual(w.log.renders, ['o:0', 'c:0'], 'no re-render for marker changes');
+  assert.ok(created.every(c => c.width === 0), 'no clean-page buffer retained without a marker');
+  // A marked page navigated away and back is not resurrected with its marker.
+  await controller.show({...page, focus: {document: 'candidate', bbox: [10, 10, 20, 20]}});
+  await controller.show({originalPageIndex: 0, candidatePageIndex: 1});
+  await controller.show(page);
+  assert.deepEqual(candidateCanvas.strokes, []);
+  controller.dispose();
+});
+
+test('a superseded or cancelled focused request never paints its marker', async () => {
+  const {w, controller, candidateCanvas} = focusHarness({manualRender: true}, 1);
+  await controller.setDocuments({original: null, candidate: await pdfInput('c')});
+  const first = controller.show({candidatePageIndex: 1, focus: {document: 'candidate', bbox: [10, 10, 30, 30]}});
+  await ticks();
+  const second = controller.show({candidatePageIndex: 2, focus: {document: 'candidate', bbox: [50, 50, 70, 70]}});
+  await ticks();
+  for (const task of w.pendingRenders) task.finish();
+  assert.equal((await first).status, 'cancelled');
+  const shown = await second;
+  assert.equal(shown.focus.state, 'drawn');
+  assert.deepEqual(outlines(candidateCanvas), [[48, 48, 24, 24]]);
+  assert.equal(candidateCanvas.content, 'c:2');
+
+  // Focused request superseded by a no-focus request: no stale marker.
+  const third = controller.show({candidatePageIndex: 0, focus: {document: 'candidate', bbox: [1, 1, 9, 9]}});
+  await ticks();
+  const fourth = controller.show({candidatePageIndex: 2});
+  await ticks();
+  for (const task of w.pendingRenders) task.finish();
+  assert.equal((await third).status, 'cancelled');
+  assert.equal((await fourth).status, 'ready');
+  assert.deepEqual(candidateCanvas.strokes, []);
+  assert.equal(candidateCanvas.content, 'c:2');
+
+  // cancel() before the focused render settles leaves the canvas as it was.
+  const pending = controller.show({candidatePageIndex: 1, focus: {document: 'candidate', bbox: [1, 1, 9, 9]}});
+  await ticks();
+  controller.cancel();
+  for (const task of w.pendingRenders) task.finish();
+  assert.equal((await pending).status, 'cancelled');
+  await ticks();
+  assert.deepEqual(candidateCanvas.strokes, []);
+  assert.equal(candidateCanvas.content, 'c:2');
+  controller.dispose();
+});
+
+test('invalid or unavailable focus draws no marker and keeps the out-of-range contract', async () => {
+  const {controller, originalCanvas, candidateCanvas, pages} = focusHarness({pages: {o: 2, c: 3}}, 1);
+  await controller.setDocuments({original: await pdfInput('o'), candidate: await pdfInput('c')});
+  for (const focus of [{document: 'other', bbox: [0, 0, 1, 1]}, {document: 'candidate', bbox: [5, 5, 5, 9]},
+    {document: 'candidate', bbox: [0, 0, 1]}, {document: 'candidate', bbox: [0, NaN, 1, 1]}, 'nope', {document: 'candidate'}]) {
+    const shown = await controller.show({focus});
+    assert.equal(shown.status, 'ready');
+    assert.equal(shown.focus.state, 'invalid', JSON.stringify(focus));
+    assert.deepEqual([originalCanvas.strokes, candidateCanvas.strokes], [[], []]);
+  }
+  const outside = await controller.show({focus: {document: 'candidate', bbox: [200, 10, 300, 20]}});
+  assert.equal(outside.focus.state, 'outside');
+  assert.deepEqual(candidateCanvas.strokes, []);
+  await controller.show({focus: {document: 'original', bbox: [1, 1, 9, 9]}});
+  assert.equal(outlines(originalCanvas).length, 1);
+  // Out-of-range original page: metadata contract unchanged, focus unavailable, marker gone.
+  const far = await controller.show({originalPageIndex: 5, candidatePageIndex: 0, focus: {document: 'original', bbox: [1, 1, 9, 9]}});
+  assert.equal(far.status, 'partial');
+  assert.equal(far.original.state, 'out-of-range');
+  assert.equal(far.originalPageIndex, 5);
+  assert.deepEqual([far.focus.state, far.focus.reason], ['unavailable', 'page-out-of-range']);
+  assert.equal(originalCanvas.width, 0);
+  assert.deepEqual(originalCanvas.strokes, []);
+  assert.deepEqual(pages.at(-1).focus, far.focus);
+  controller.dispose();
+});

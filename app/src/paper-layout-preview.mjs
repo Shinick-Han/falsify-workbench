@@ -8,6 +8,13 @@
  * never painted. Pages are rendered to a scratch canvas and copied onto the
  * visible canvas only while the request is still current.
  *
+ * show() optionally takes focus {document, bbox:[x0,y0,x1,y1]} in top-left
+ * display points (PDF.js viewport at scale 1 / MuPDF page bounds). The bbox is
+ * clipped to the shown page and outlined on the visible preview canvas only;
+ * PDF bytes are never modified. While a marker is drawn, one clean copy of that
+ * side's page is retained so a replaced or cleared focus restores the unmarked
+ * page without re-rendering. Superseded requests never draw or clear markers.
+ *
  * No model or backend calls are made; the only network access is the default
  * loader's lazy import of the bundled PDF.js vendor files.
  */
@@ -18,6 +25,8 @@ const MAX_TEXT_ENTRIES = 12;
 const DEFAULT_SCALE = 1.2;
 const SIDES = ['original', 'candidate'];
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
+const FOCUS_COLOR = '#d93025';
+const FOCUS_HALO = '#ffffff';
 
 const MESSAGES = {
   idle: '미리보기 대기 중',
@@ -154,7 +163,51 @@ function clearCanvas(canvas) {
     delete canvas.dataset.pdfHash;
     delete canvas.dataset.pageIndex;
     delete canvas.dataset.scale;
+    delete canvas.dataset.focusBbox;
   }
+}
+
+// Focus is optional and never throws: a malformed value yields {state:'invalid'}.
+function normalizeFocus(focus) {
+  if (focus === undefined || focus === null) return null;
+  const document = SIDES.includes(focus?.document) ? focus.document : null;
+  const bbox = focus?.bbox;
+  const valid = document && Array.isArray(bbox) && bbox.length === 4 && bbox.every(Number.isFinite) && bbox[2] > bbox[0] && bbox[3] > bbox[1];
+  if (!valid) return {document, state: 'invalid'};
+  return {document, bbox: bbox.map(Number)};
+}
+
+const round3 = value => Math.round(value * 1000) / 1000;
+
+// Clip a display-point bbox to the page and convert it to canvas pixels.
+function focusGeometry(bbox, display, renderScale, canvas) {
+  const x0 = Math.max(0, Math.min(bbox[0], display.width));
+  const x1 = Math.max(0, Math.min(bbox[2], display.width));
+  const y0 = Math.max(0, Math.min(bbox[1], display.height));
+  const y1 = Math.max(0, Math.min(bbox[3], display.height));
+  if (!(x1 > x0 && y1 > y0)) return {state: 'outside'};
+  const clipped = [x0, y0, x1, y1].map(round3);
+  const pixelRect = [x0, y0, x1, y1].map(v => v * renderScale);
+  const lineWidth = Math.max(2, Math.round(renderScale * 1.5));
+  const half = lineWidth / 2 + 1; // halo is lineWidth + 2 wide
+  const gap = lineWidth;
+  const ox0 = Math.max(half, pixelRect[0] - gap), oy0 = Math.max(half, pixelRect[1] - gap);
+  const ox1 = Math.min(canvas.width - half, pixelRect[2] + gap), oy1 = Math.min(canvas.height - half, pixelRect[3] + gap);
+  const outline = [ox0, oy0, Math.max(0, ox1 - ox0), Math.max(0, oy1 - oy0)].map(round3);
+  return {state: 'drawn', bbox: clipped, pixelRect: pixelRect.map(round3), outline, lineWidth};
+}
+
+function strokeFocus(canvas, geometry) {
+  const ctx = canvas.getContext('2d');
+  const [x, y, w, h] = geometry.outline;
+  ctx.save?.();
+  ctx.strokeStyle = FOCUS_HALO;
+  ctx.lineWidth = geometry.lineWidth + 2;
+  ctx.strokeRect(x, y, w, h);
+  ctx.strokeStyle = FOCUS_COLOR;
+  ctx.lineWidth = geometry.lineWidth;
+  ctx.strokeRect(x, y, w, h);
+  ctx.restore?.();
 }
 
 export function createLayoutPreviewController({
@@ -185,7 +238,7 @@ export function createLayoutPreviewController({
       : createBoundedDocumentCache({maxEntries: MAX_LOADED_DOCUMENTS}));
   if (!cache || typeof cache.load !== 'function' || typeof cache.release !== 'function') throw new TypeError('cacheFactory must return {load,release,dispose}');
 
-  const sides = Object.fromEntries(SIDES.map(name => [name, {name, document: null, docPromise: null, painted: ''}]));
+  const sides = Object.fromEntries(SIDES.map(name => [name, {name, document: null, docPromise: null, painted: '', paintedDisplay: null, marker: '', base: null}]));
   const textCache = new Map();
   const activeTasks = new Set();
   let ticket = 0;
@@ -234,7 +287,7 @@ export function createLayoutPreviewController({
     const {document, docPromise} = side;
     side.document = null;
     side.docPromise = null;
-    side.painted = '';
+    wipe(side);
     if (!document || !docPromise) return;
     // Release only a reference that was actually acquired; failed loads already
     // dropped their reference inside the cache.
@@ -294,7 +347,9 @@ export function createLayoutPreviewController({
   function blank(side, marker) {
     const canvas = canvases[side.name];
     if (canvas && side.painted !== marker) clearCanvas(canvas);
+    if (side.painted !== marker || side.marker) dropMarker(side);
     side.painted = marker;
+    side.paintedDisplay = null;
   }
 
   function freeScratch(scratch) {
@@ -303,12 +358,66 @@ export function createLayoutPreviewController({
     scratch.height = 0;
   }
 
+  function dropMarker(side) {
+    freeScratch(side.base);
+    side.base = null;
+    side.marker = '';
+  }
+
+  // Forget everything painted on a side (document change, release, dispose).
+  function wipe(side) {
+    if (canvases[side.name]) clearCanvas(canvases[side.name]);
+    dropMarker(side);
+    side.painted = '';
+    side.paintedDisplay = null;
+  }
+
+  // Bring the visible canvas of a painted side to exactly one marker (or none).
+  // Called only from commit(), i.e. for the current request.
+  function applyMarker(side, geometry) {
+    const canvas = canvases[side.name];
+    if (!canvas) return;
+    const signature = geometry?.state === 'drawn' ? geometry.outline.join(',') : '';
+    if (signature === side.marker) return;
+    if (side.marker) {
+      // Restore the clean page: resetting width clears the old outline.
+      const {width, height} = canvas;
+      canvas.width = width;
+      canvas.height = height;
+      if (side.base) canvas.getContext('2d').drawImage(side.base, 0, 0);
+      if (canvas.dataset) delete canvas.dataset.focusBbox;
+    }
+    if (!signature) { dropMarker(side); return; }
+    if (!side.base) {
+      const base = createScratch ? createScratch() : null;
+      if (!base) { geometry.state = 'unavailable'; geometry.reason = 'no-canvas-factory'; return; }
+      base.width = canvas.width;
+      base.height = canvas.height;
+      base.getContext('2d').drawImage(canvas, 0, 0);
+      side.base = base;
+    }
+    strokeFocus(canvas, geometry);
+    if (canvas.dataset) canvas.dataset.focusBbox = geometry.bbox.join(',');
+    side.marker = signature;
+  }
+
+  // Focus outcome for one side once its page state is known (pre-commit).
+  function sideFocus(side, focus, state, pageIndex, display, size) {
+    if (!focus || focus.document !== side.name || focus.state === 'invalid') return null;
+    const out = {document: side.name, pageIndex, requestedBbox: focus.bbox.slice()};
+    if (state !== 'ready') return {...out, state: 'unavailable', reason: `page-${state}`};
+    if (!canvases[side.name]) return {...out, state: 'unavailable', reason: 'no-canvas'};
+    if (!display || !size) return {...out, state: 'unavailable', reason: 'no-display-bounds'};
+    return {...out, ...focusGeometry(focus.bbox, display, renderScale, size)};
+  }
+
   // Prepare one side for a request without touching the visible canvas.
   // Resolves to {result, commit, discard}; rejects with AbortError when stale.
-  async function prepareSide(side, pageIndex, requestTicket) {
+  async function prepareSide(side, pageIndex, requestTicket, focus) {
     const base = {pageIndex, totalPages: 0, pdfHash: side.document?.pdfHash || null};
     const noop = () => {};
-    if (!side.document) return {result: {...base, state: 'absent', text: ''}, commit: () => blank(side, 'absent'), discard: noop};
+    const unavailable = state => sideFocus(side, focus, state, pageIndex);
+    if (!side.document) return {result: {...base, state: 'absent', text: '', focus: unavailable('absent')}, commit: () => blank(side, 'absent'), discard: noop};
     const owner = side.document;
     const stale = () => !current(requestTicket) || side.document !== owner;
     let pdf;
@@ -317,14 +426,14 @@ export function createLayoutPreviewController({
     } catch (error) {
       if (stale()) throw cancelledError();
       stats.loadFailures++;
-      return {result: {...base, state: 'error', error: error?.message || String(error), text: ''}, commit: () => blank(side, ''), discard: noop};
+      return {result: {...base, state: 'error', error: error?.message || String(error), text: '', focus: unavailable('error')}, commit: () => blank(side, ''), discard: noop};
     }
     if (stale()) throw cancelledError();
     const totalPages = Number.isSafeInteger(pdf?.numPages) && pdf.numPages >= 0 ? pdf.numPages : 0;
     const info = {...base, totalPages};
     if (pageIndex >= totalPages) {
       stats.outOfRange++;
-      return {result: {...info, state: 'out-of-range', text: ''}, commit: () => blank(side, `${owner.pdfHash}:missing`), discard: noop};
+      return {result: {...info, state: 'out-of-range', text: '', focus: unavailable('out-of-range')}, commit: () => blank(side, `${owner.pdfHash}:missing`), discard: noop};
     }
     const key = `${owner.pdfHash}:${pageIndex}`;
     const canvas = canvases[side.name];
@@ -333,17 +442,20 @@ export function createLayoutPreviewController({
       stats.renderReuses++;
       const text = await extractText(null, key);
       const size = canvas ? {width: canvas.width, height: canvas.height} : {};
-      return {result: {...info, state: 'ready', reused: true, ...size, text}, commit: noop, discard: noop};
+      const focusResult = sideFocus(side, focus, 'ready', pageIndex, side.paintedDisplay, canvas ? size : null);
+      return {result: {...info, state: 'ready', reused: true, ...size, text, focus: focusResult}, commit: () => applyMarker(side, focusResult), discard: noop};
     }
     const page = await pdf.getPage(pageIndex + 1);
     let scratch = null;
     try {
       if (stale()) throw cancelledError();
       let width = canvas?.width, height = canvas?.height;
+      let display = side.paintedDisplay;
       if (needsPaint) {
         const viewport = page.getViewport({scale: renderScale});
         width = Math.max(1, Math.ceil(viewport.width));
         height = Math.max(1, Math.ceil(viewport.height));
+        display = {width: viewport.width / renderScale, height: viewport.height / renderScale};
         scratch = createScratch ? createScratch() : null;
         if (!scratch) throw new Error('No canvas factory available for preview rendering');
         scratch.width = width;
@@ -367,21 +479,27 @@ export function createLayoutPreviewController({
       if (stale()) throw cancelledError();
       const rendered = scratch;
       scratch = null;
+      const focusResult = sideFocus(side, focus, 'ready', pageIndex, display, canvas ? {width, height} : null);
       const commit = () => {
-        if (!rendered) return;
+        if (!rendered) { applyMarker(side, focusResult); return; }
         canvas.width = width;
         canvas.height = height;
         canvas.getContext('2d').drawImage(rendered, 0, 0);
-        freeScratch(rendered);
         if (canvas.dataset) {
           canvas.dataset.pdfHash = owner.pdfHash;
           canvas.dataset.pageIndex = String(pageIndex);
           canvas.dataset.scale = String(renderScale);
+          delete canvas.dataset.focusBbox;
         }
+        // The fresh page has no outline; keep the clean render as the marker base.
+        dropMarker(side);
         side.painted = key;
+        side.paintedDisplay = display;
         stats.paints++;
+        if (focusResult?.state === 'drawn') side.base = rendered; else freeScratch(rendered);
+        applyMarker(side, focusResult);
       };
-      return {result: {...info, state: 'ready', reused: !needsPaint, width, height, text}, commit, discard: () => freeScratch(rendered)};
+      return {result: {...info, state: 'ready', reused: !needsPaint, width, height, text, focus: focusResult}, commit, discard: () => freeScratch(rendered)};
     } catch (error) {
       if (!isCancellation(error) && !stale()) {
         return {result: {...info, state: 'error', error: error?.message || String(error), text: ''}, commit: () => blank(side, ''), discard: noop};
@@ -424,7 +542,7 @@ export function createLayoutPreviewController({
         }
         releaseSide(side);
         side.document = value;
-        if (canvases[name]) clearCanvas(canvases[name]);
+        wipe(side);
       }
       status('idle', {original: sides.original.document?.pdfHash || null, candidate: sides.candidate.document?.pdfHash || null});
       return {status: 'ready', original: sides.original.document?.pdfHash || null, candidate: sides.candidate.document?.pdfHash || null};
@@ -433,11 +551,12 @@ export function createLayoutPreviewController({
     return verify;
   }
 
-  async function show({originalPageIndex = 0, candidatePageIndex = 0} = {}) {
+  async function show({originalPageIndex = 0, candidatePageIndex = 0, focus} = {}) {
     const pages = {
       original: validatePageIndex(originalPageIndex, 'originalPageIndex'),
       candidate: validatePageIndex(candidatePageIndex, 'candidatePageIndex'),
     };
+    const requestedFocus = normalizeFocus(focus);
     if (disposed) return {status: 'disposed'};
     stats.renderRequests++;
     supersede();
@@ -447,7 +566,7 @@ export function createLayoutPreviewController({
     await documentsReady;
     if (!current(requestTicket)) { stats.staleDiscards++; return {status: 'cancelled', requestId}; }
     status(SIDES.some(n => sides[n].document && !sides[n].docPromise) ? 'loading' : 'rendering', {requestId});
-    const settled = await Promise.allSettled(SIDES.map(name => prepareSide(sides[name], pages[name], requestTicket)));
+    const settled = await Promise.allSettled(SIDES.map(name => prepareSide(sides[name], pages[name], requestTicket, requestedFocus)));
     if (!current(requestTicket) || settled.some(r => r.status === 'rejected' && isCancellation(r.reason))) {
       for (const r of settled) if (r.status === 'fulfilled') r.value.discard();
       stats.staleDiscards++;
@@ -462,7 +581,8 @@ export function createLayoutPreviewController({
         result[name] = r.value.result;
       } else {
         blank(sides[name], '');
-        result[name] = {pageIndex: pages[name], totalPages: 0, pdfHash: sides[name].document?.pdfHash || null, state: 'error', error: r.reason?.message || String(r.reason), text: ''};
+        result[name] = {pageIndex: pages[name], totalPages: 0, pdfHash: sides[name].document?.pdfHash || null, state: 'error', error: r.reason?.message || String(r.reason), text: '',
+          focus: sideFocus(sides[name], requestedFocus, 'error', pages[name])};
       }
     }
     const states = SIDES.map(n => result[n].state);
@@ -478,6 +598,7 @@ export function createLayoutPreviewController({
       original: sideMeta(result.original),
       candidate: sideMeta(result.candidate),
     };
+    if (requestedFocus) meta.focus = focusMeta(requestedFocus, result);
     notify(onPage, meta);
     notify(onText, {
       requestId,
@@ -494,6 +615,12 @@ export function createLayoutPreviewController({
     if (side.reused !== undefined) out.reused = side.reused;
     if (side.error) out.error = side.error;
     return out;
+  }
+
+  function focusMeta(requested, result) {
+    if (requested.state === 'invalid') return {document: requested.document, state: 'invalid'};
+    const side = result[requested.document]?.focus;
+    return side ? {...side} : {document: requested.document, state: 'unavailable'};
   }
 
   function textMeta(side) {
@@ -514,7 +641,7 @@ export function createLayoutPreviewController({
     documentsEpoch++;
     for (const name of SIDES) {
       releaseSide(sides[name]);
-      if (canvases[name]) clearCanvas(canvases[name]);
+      wipe(sides[name]);
     }
     textCache.clear();
     try { cache.dispose?.(); } catch { /* best effort */ }
