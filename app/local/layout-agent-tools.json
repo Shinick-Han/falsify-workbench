@@ -105,7 +105,8 @@
             "uniqueItems": true
           },
           "offset": {
-            "type": "integer"
+            "type": "integer",
+            "minimum": 0
           },
           "textOffset": {
             "type": "integer",
@@ -260,7 +261,7 @@
     },
     {
       "name": "get_block",
-      "description": "Read one block, its source, positions and associated assets. Continue long source text with offset.",
+      "description": "Read one block, its source, positions and associated assets. Continue source text with offset, geometry hits with geometryOffset, and asset paths with assetOffset.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -275,6 +276,14 @@
             "type": "integer",
             "minimum": 1,
             "maximum": 4096
+          },
+          "geometryOffset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "assetOffset": {
+            "type": "integer",
+            "minimum": 0
           }
         },
         "required": [
@@ -800,7 +809,8 @@
                 "uniqueItems": true
               },
               "offset": {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0
               },
               "textOffset": {
                 "type": "integer",
@@ -950,6 +960,14 @@
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 4096
+              },
+              "geometryOffset": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "assetOffset": {
+                "type": "integer",
+                "minimum": 0
               }
             },
             "required": [
@@ -1470,7 +1488,8 @@
               "offset": {
                 "anyOf": [
                   {
-                    "type": "integer"
+                    "type": "integer",
+                    "minimum": 0
                   },
                   {
                     "type": "null"
@@ -1707,12 +1726,36 @@
                     "type": "null"
                   }
                 ]
+              },
+              "geometryOffset": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "assetOffset": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
               "blockId",
               "offset",
-              "limit"
+              "limit",
+              "geometryOffset",
+              "assetOffset"
             ],
             "additionalProperties": false
           },
