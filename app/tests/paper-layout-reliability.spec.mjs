@@ -59,3 +59,32 @@ test('failed receipt lookups are tagged for a manual discard and never fall back
  assert.deepEqual(posts,[]);
  await assert.rejects(layoutStepDecision({request:async()=>{throw new Error('network');}},request,{runId:'r3'}),e=>e.recovery===undefined);
 });
+
+
+test('known companion_busy 409 is not admitted; a lost POST and other 409s stay recoverable by GET',async()=>{
+ const busy=[];let posts=0;
+ await assert.rejects(layoutStepDecision({request:async()=>{posts++;throw Object.assign(new Error('secret companion log'),{code:'companion_busy',httpStatus:409});}},request,{runId:'r1',onPending:p=>busy.push(p)}),e=>e.disposition==='not-admitted'&&e.code==='companion_busy'&&e.httpStatus===409&&e.stepReceipt.stepId==='r1-s0'&&e.message.includes('다시 실행')&&!e.message.includes('secret'));
+ assert.equal(posts,1);assert.equal(busy[0].state,'unknown');assert.equal(busy.at(-1),null);
+ const bridge=[];posts=0;
+ await assert.rejects(layoutStepDecision({request:async()=>{posts++;throw Object.assign(new Error('companion_busy'),{httpStatus:409});}},request,{runId:'r1',onPending:p=>bridge.push(p)}),e=>e.disposition==='not-admitted'&&e.code==='companion_busy');
+ assert.equal(posts,1);assert.equal(bridge.at(-1),null);
+ let lost;await assert.rejects(layoutStepDecision({request:async()=>{throw Error('network');}},request,{runId:'r1',onPending:p=>{lost=p;}}),e=>e.disposition!=='not-admitted'&&/network/.test(e.message));
+ assert.equal(lost.state,'unknown');const recovered=[];await layoutStepDecision({request:async(path,body)=>{recovered.push(body);return receipt();}},request,{runId:'r2',pendingStep:lost,pollMs:0});assert.deepEqual(recovered,[null]);
+ const conflict=[];await assert.rejects(layoutStepDecision({request:async()=>{throw Object.assign(new Error('layout_step_conflict'),{httpStatus:409});}},request,{runId:'r1',onPending:p=>conflict.push(p)}),e=>e.httpStatus===409&&e.disposition!=='not-admitted'&&e.message==='layout_step_conflict');
+ assert.equal(conflict.at(-1).state,'unknown');
+ const unlabeled=[];await assert.rejects(layoutStepDecision({request:async()=>{throw Object.assign(new Error('companion_busy'),{httpStatus:503});}},request,{runId:'r1',onPending:p=>unlabeled.push(p)}),e=>e.disposition!=='not-admitted'&&e.message==='companion_busy');
+ assert.equal(unlabeled.at(-1).state,'unknown');
+ const pending={runId:'r1',stepId:'r1-s0',projectId:HASH,step:0,request,state:'unknown'},lookup=[];
+ await assert.rejects(layoutStepDecision({request:async()=>{throw Object.assign(new Error('companion_busy'),{httpStatus:409});}},request,{runId:'r2',pendingStep:pending,onPending:p=>lookup.push(p)}),e=>e.disposition!=='not-admitted'&&e.recovery==='unreachable');
+ assert.notEqual(lookup.at(-1),null);
+ let polls=0;const admitted=[];
+ await assert.rejects(layoutStepDecision({request:async()=>{polls++;return polls===1?receipt('running'):Promise.reject(Object.assign(new Error('companion_busy'),{httpStatus:409}));}},request,{runId:'r1',pollMs:0,onPending:p=>admitted.push(p)}),e=>e.disposition!=='not-admitted'&&e.message==='companion_busy');
+ assert.equal(admitted.at(-1).state,'running');
+ const done=await layoutStepDecision({request:async()=>receipt()},request,{runId:'r1',pollMs:0});assert.equal(done.response.action.tool,'finish');
+ await assert.rejects(layoutStepDecision({request:async()=>receipt()},request,{runId:'r2',pendingStep:{...lost,fingerprint:'b'.repeat(64)}}),/저장한 요청/);
+});
+
+test('failed action receipt retains fixed code and request identity without request content',async()=>{
+ const {layoutFailureDetails}=await import('../src/paper-layout-transport.mjs');const link={request:async()=>({...receipt('failed'),error:{error:'invalid_action',message:'private model output'}})};
+ try{await layoutStepDecision(link,request,{runId:'r1'});assert.fail('expected failed receipt');}catch(e){assert.equal(e.code,'invalid_action');assert.equal(e.disposition,'failed');const detail=layoutFailureDetails(e);assert.equal(detail.code,'invalid_action');assert.equal(detail.request.stepId,'r1-s0');assert.equal(detail.request.fingerprint,receipt('failed').fingerprint);assert.equal(JSON.stringify(detail).includes('private model output'),false);assert.equal('request' in detail.request,false);}
+});

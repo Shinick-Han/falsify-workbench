@@ -19,6 +19,26 @@ function validate(project,artifact,{optionalArtifact=false}={}){
  if(artifact?.schema!=='falsify.latex-artifact.v1'||artifact.success!==true||artifact.projectId!==project.id||artifact.engine!==project.engine||!(artifact.pdfBytes instanceof Uint8Array)||!artifact.pdfBytes.length||hex(artifact.pdfBytes)!==artifact.pdfHash)fail('INVALID_ARTIFACT');
 }
 function page(items,args={}){const offset=args.offset??0,limit=args.limit??20;if(!Number.isSafeInteger(offset)||offset<0||!Number.isSafeInteger(limit)||limit<1||limit>200)fail('INVALID_PAGINATION');return {total:items.length,offset,limit,nextOffset:offset+limit<items.length?offset+limit:null,items:items.slice(offset,offset+limit)};}
+const OBSERVATION_BUDGET=12000;
+const high=(s,i)=>i>=0&&i<s.length&&s.charCodeAt(i)>=0xD800&&s.charCodeAt(i)<=0xDBFF;
+const low=(s,i)=>i>=0&&i<s.length&&s.charCodeAt(i)>=0xDC00&&s.charCodeAt(i)<=0xDFFF;
+const observationBytes=value=>JSON.stringify({status:'ok',observation:value}).length;
+function snapEnd(source,text,start,end){
+ const snap=(value,index)=>index>start&&index<value.length&&high(value,index-1)&&low(value,index)?index-1:index;
+ end=snap(source,snap(text,end));
+ if(end===start&&(high(source,start)&&low(source,start+1)||high(text,start)&&low(text,start+1)))return Math.min(Math.max(source.length,text.length),start+2);
+ return end;
+}
+function fitInspection(result){
+ if(observationBytes(result)<=OBSERVATION_BUDGET)return result;
+ const items=result.blocks.items.map(item=>({id:item.id,detail:'이 항목의 부가 정보가 관찰 한도를 넘습니다. 식별자는 유지했습니다. 다음 항목은 offset으로 요청하세요.'}));
+ let fitted={...result,blocks:{...result.blocks,items}};
+ if(observationBytes(fitted)<=OBSERVATION_BUDGET)return fitted;
+ fitted={...fitted,fonts:fitted.fonts?{...fitted.fonts,items:[],detail:'글꼴 목록이 관찰 한도에 들어가지 않습니다. limit를 줄이세요.'}:null,images:fitted.images?{...fitted.images,items:[],detail:'그림 목록이 관찰 한도에 들어가지 않습니다. limit를 줄이세요.'}:null};
+ if(observationBytes(fitted)<=OBSERVATION_BUDGET)return fitted;
+ const next=result.blocks.nextOffset;
+ throw Object.assign(new Error(next==null?'문서 목록의 한 항목이 관찰 한도를 넘고 식별자를 유지한 채 줄일 수 없습니다. 구조를 나누세요.':`문서 목록의 한 항목이 관찰 한도를 넘습니다. offset ${next}으로 다음 항목을 요청하세요.`),{code:'request_limit'});
+}
 function blocks(project,artifact){
  const files=new Map(project.files.map(f=>[f.path,f]));const texts=new Map(project.files.filter(f=>/\.tex$/i.test(f.path)).map(f=>[f.path,dec.decode(f.bytes)]));
  const map=artifact?.synctex?parseSynctex(artifact.synctex,{project}):null;
@@ -33,15 +53,29 @@ async function inspect({project,artifact,referenceBytes,signal}){abort(signal);v
 /** Inspect source-bound blocks and current PDF inventories. */
 export async function inspectLayoutDocument({project,artifact,referenceBytes,args={},signal}={}){
  const {units,doc}=await inspect({project,artifact,referenceBytes,signal});let filtered=units;if(args.query){const q=String(args.query).toLocaleLowerCase();filtered=filtered.filter(b=>[b.id,b.text,b.kind,b.role].some(v=>String(v||'').toLocaleLowerCase().includes(q)));}if(args.kind)filtered=filtered.filter(b=>b.kind===args.kind||b.role===args.kind);if(args.pageIndex!==undefined)filtered=filtered.filter(b=>b.sourceGeometry?.pageIndex===args.pageIndex||b.currentGeometry.candidates.some(x=>x.pageIndex===args.pageIndex));
- return {schema:'falsify.layout-document-inspection.v1',projectId:project.id,outputHash:artifact?.pdfHash??null,blocks:page(filtered.map(({id,kind,role,path,sourceGeometry,currentGeometry,text})=>({id,kind,role,path,sourceGeometry,textPreview:text.slice(0,60),currentGeometry:{status:currentGeometry.status,frame:currentGeometry.frame,pageBoxMapping:currentGeometry.pageBoxMapping,candidates:currentGeometry.candidates.slice(0,1),candidateCount:currentGeometry.candidates.length}})),args),fonts:doc? page(doc.styles.map(({id,fontName,size})=>({id,fontName,size})),args):null,images:doc? page(doc.assets.map(({id,kind,source,content})=>({id,kind,source,width:content?.width??null,height:content?.height??null})),args):null,pageCount:doc?.pages.length??null};
+ let limit=args.limit??20;const build=()=>({schema:'falsify.layout-document-inspection.v1',projectId:project.id,outputHash:artifact?.pdfHash??null,blocks:page(filtered.map(({id,kind,role,path,sourceGeometry,currentGeometry,text})=>({id,kind,role,path,sourceGeometry,textPreview:text.slice(0,60),currentGeometry:{status:currentGeometry.status,frame:currentGeometry.frame,pageBoxMapping:currentGeometry.pageBoxMapping,candidates:currentGeometry.candidates.slice(0,1),candidateCount:currentGeometry.candidates.length}})),{...args,limit}),fonts:doc? page(doc.styles.map(({id,fontName,size})=>({id,fontName,size})),{...args,limit}):null,images:doc? page(doc.assets.map(({id,kind,source,content})=>({id,kind,source,width:content?.width??null,height:content?.height??null})),{...args,limit}):null,pageCount:doc?.pages.length??null});let result=build();while((JSON.stringify(result).length>8500||observationBytes(result)>OBSERVATION_BUDGET)&&limit>1){limit=Math.max(1,Math.floor(limit/2));result=build();}return fitInspection(result);
 }
 /** Return one source-bound block with current SyncTeX candidates. */
 export async function getLayoutBlock({project,artifact,referenceBytes,args={},signal}={}){
  const {units}=await inspect({project,artifact,referenceBytes,signal});const block=units.find(b=>b.id===args.blockId);if(!block)fail('BLOCK_NOT_FOUND');
  const offset=args.offset??0,limit=args.limit??2000;if(!Number.isSafeInteger(offset)||offset<0||!Number.isSafeInteger(limit)||limit<1||limit>4096)fail('INVALID_PAGINATION');
- const chunk=value=>({value:value.slice(offset,offset+limit),total:value.length,offset,limit,nextOffset:offset+limit<value.length?offset+limit:null});
- const {sourceText,text,currentGeometry,assetPaths,...detail}=block,sourceChunk=chunk(sourceText),textChunk=chunk(text);
- return {schema:'falsify.layout-block.v1',projectId:project.id,outputHash:artifact?.pdfHash??null,block:{...detail,sourceText:sourceChunk.value,text:textChunk.value,sourceTextPage:{total:sourceChunk.total,offset,limit,nextOffset:sourceChunk.nextOffset},textPage:{total:textChunk.total,offset,limit,nextOffset:textChunk.nextOffset},currentGeometry:{...currentGeometry,candidates:page(currentGeometry.candidates,{offset:args.geometryOffset??0,limit:2})},assetPaths:page(assetPaths,{offset:args.assetOffset??0,limit:2})}};
+ const {sourceText,text,currentGeometry,assetPaths,...detail}=block;
+ let start=offset;if(start>0&&(low(sourceText,start)&&high(sourceText,start-1)||low(text,start)&&high(text,start-1)))start--;
+ const maxLen=Math.max(sourceText.length,text.length),ceiling=snapEnd(sourceText,text,start,Math.min(maxLen,start+limit));
+ const geometry=page(currentGeometry.candidates,{offset:args.geometryOffset??0,limit:2}),assets=page(assetPaths,{offset:args.assetOffset??0,limit:2});
+ const build=end=>{
+  const sourceEnd=Math.min(end,sourceText.length),textEnd=Math.min(end,text.length);
+  const sourceSlice=sourceText.slice(Math.min(start,sourceText.length),sourceEnd),textSlice=text.slice(Math.min(start,text.length),textEnd);
+  const body={...detail,sourceText:sourceSlice,text:textSlice,sourceTextPage:{total:sourceText.length,offset:start,limit:sourceSlice.length,nextOffset:sourceEnd<sourceText.length?sourceEnd:null},textPage:{total:text.length,offset:start,limit:textSlice.length,nextOffset:textEnd<text.length?textEnd:null},currentGeometry:{...currentGeometry,candidates:geometry},assetPaths:assets};
+  const registeredId='lt1_'+'a'.repeat(64),budgetBlock=block.evidenceStatus==='source-bound'?{...body,targetId:block.id,sourceBlockId:block.id}:{...body,id:registeredId,targetId:registeredId,sourceBlockId:block.id};
+  const described={schema:'falsify.layout-block.v1',projectId:project.id,outputHash:artifact?.pdfHash??null,block:budgetBlock};
+  return {bytes:observationBytes(described),value:{schema:described.schema,projectId:described.projectId,outputHash:described.outputHash,block:body}};
+ };
+ if(start>=maxLen)return build(start).value;
+ let lo=start,hi=Math.min(maxLen,start+limit),best=start;
+ while(lo<=hi){const mid=Math.floor((lo+hi)/2),end=Math.min(ceiling,snapEnd(sourceText,text,start,mid));if(build(end).bytes<=OBSERVATION_BUDGET){best=end;lo=mid+1;}else hi=mid-1;}
+ if(best===start&&start<maxLen)throw Object.assign(new Error('이 블록은 한 글자도 관찰 한도에 들어가지 않습니다. blockId를 확인하고 offset으로 다른 구간을 요청하세요.'),{code:'request_limit'});
+ return build(best).value;
 }
 // Accept a generated wrapper only if its options reconstruct its exact shell.
 function unwrapBlock(text){

@@ -90,7 +90,7 @@
     },
     {
       "name": "read_reference",
-      "description": "Read original PDF text and source regions. Use offset to continue a page.",
+      "description": "Read original PDF text and source regions. Continue each page with its returned next arguments until next is null.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -105,7 +105,16 @@
             "uniqueItems": true
           },
           "offset": {
-            "type": "integer"
+            "type": "integer",
+            "minimum": 0
+          },
+          "textOffset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "unitOffset": {
+            "type": "integer",
+            "minimum": 0
           }
         },
         "required": [],
@@ -252,7 +261,7 @@
     },
     {
       "name": "get_block",
-      "description": "Read one block, its source, positions and associated assets. Continue long source text with offset.",
+      "description": "Read one block, its source, positions and associated assets. Continue source text with offset, geometry hits with geometryOffset, and asset paths with assetOffset.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -267,6 +276,14 @@
             "type": "integer",
             "minimum": 1,
             "maximum": 4096
+          },
+          "geometryOffset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "assetOffset": {
+            "type": "integer",
+            "minimum": 0
           }
         },
         "required": [
@@ -792,7 +809,16 @@
                 "uniqueItems": true
               },
               "offset": {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0
+              },
+              "textOffset": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "unitOffset": {
+                "type": "integer",
+                "minimum": 0
               }
             },
             "required": [],
@@ -934,6 +960,14 @@
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 4096
+              },
+              "geometryOffset": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "assetOffset": {
+                "type": "integer",
+                "minimum": 0
               }
             },
             "required": [
@@ -1454,7 +1488,30 @@
               "offset": {
                 "anyOf": [
                   {
-                    "type": "integer"
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "textOffset": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "unitOffset": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0
                   },
                   {
                     "type": "null"
@@ -1464,7 +1521,9 @@
             },
             "required": [
               "pages",
-              "offset"
+              "offset",
+              "textOffset",
+              "unitOffset"
             ],
             "additionalProperties": false
           },
@@ -1667,12 +1726,36 @@
                     "type": "null"
                   }
                 ]
+              },
+              "geometryOffset": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "assetOffset": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
               "blockId",
               "offset",
-              "limit"
+              "limit",
+              "geometryOffset",
+              "assetOffset"
             ],
             "additionalProperties": false
           },

@@ -256,4 +256,14 @@ class LayoutAgentLargeProjectTests(unittest.TestCase):
         checked = service.validate_request(data)
         self.assertEqual(len(checked['paths']), 100)
 
+
+class ReferenceCursorContractTests(unittest.TestCase):
+    def test_reference_continuation_cursors_are_accepted_by_service(self):
+        action = {'tool': 'read_reference', 'args': {'pages': [0], 'textOffset': 1000, 'unitOffset': 4}, 'message': ''}
+        self.assertEqual(service._action(action, {'main.tex'}), action)
+        action['args']['unitOffset'] = -1
+        with self.assertRaises(service.LayoutAgentError) as error:
+            service._action(action, {'main.tex'})
+        self.assertEqual(error.exception.code, 'invalid_action')
+
 if __name__ == '__main__': unittest.main()

@@ -225,7 +225,13 @@ export function deleteIfSameWrite(store,key,row){
  * returned as {code,message}, never thrown, so the current candidate is retained.
  */
 export function createLayoutRunStore({now=Date.now,indexedDB=globalThis.indexedDB,createLatexProject=defaultCreateLatexProject}={}){
-  const memory=new Map(),nextWriteId=createWriteIdentity();let consent=false,epoch=0,dbPromise=null,disposed=false,lastError=null;
+  const memory=new Map(),nextWriteId=createWriteIdentity(),latestWrite=new Map();let consent=false,epoch=0,wipeEpoch=0,dbPromise=null,disposed=false,lastError=null,activePuts=0,closeWhenIdle=null;
+  const writeSeq=id=>{const n=Number(String(id).slice(String(id).lastIndexOf(':')+1));return Number.isSafeInteger(n)?n:0;};
+  // Invocation order, not validation/encode completion order. A later put of the same run wins.
+  const claim=(runId,writeId)=>{const prev=latestWrite.get(runId)??null;if(!prev||writeSeq(writeId)>=writeSeq(prev))latestWrite.set(runId,writeId);return prev;};
+  const owns=(runId,writeId)=>latestWrite.get(runId)===writeId;
+  const unclaim=(runId,writeId,prev)=>{if(runId&&owns(runId,writeId)){if(prev)latestWrite.set(runId,prev);else latestWrite.delete(runId);}};
+  const closeDb=()=>{const p=dbPromise;dbPromise=null;p?.then(db=>db.close?.(),()=>{});};
   const live=()=>{if(disposed)throw Object.assign(new Error('Layout run store is disposed'),{code:'DISPOSED'});};
   const open=()=>{
     if(!indexedDB||typeof indexedDB.open!=='function')return Promise.reject(Object.assign(new Error('IndexedDB unavailable'),{code:'STORAGE_UNAVAILABLE'}));
@@ -251,23 +257,38 @@ export function createLayoutRunStore({now=Date.now,indexedDB=globalThis.indexedD
     async put(state,{consent:explicit}={}){
       live();
       // Capture the consent epoch at call time so a withdrawal during validation or the write wins.
-      const at=epoch,wanted=explicit===true||explicit===undefined&&consent===true;
-      const valid=await validateLayoutRunState(state,{createLatexProject});
-      const savedAt=now();remember(valid,savedAt);
-      if(!wanted||at!==epoch)return {runId:valid.runId,savedAt,persisted:false};
+      // writeId is assigned now so a slower earlier save cannot pass a save invoked after it.
+      const at=epoch,wanted=explicit===true||explicit===undefined&&consent===true,writeId=nextWriteId();
+      const hinted=typeof state?.runId==='string'?state.runId:null,prev=hinted?claim(hinted,writeId):null;
+      activePuts++;
       try{
-        const data=await encodeLayoutRun(valid,{createLatexProject});
-        const db=await open();
-        const row={runId:valid.runId,writeId:nextWriteId(),savedAt,expiresAt:savedAt+LAYOUT_RUN_TTL_MS,data};
-        // The epoch is re-checked when the put is issued: a withdrawal before that point
-        // means the put is never queued; after it, the withdrawal's clear is ordered later.
-        const issued=await tx(db,'readwrite',s=>at!==epoch?false:req(s.put(row)).then(()=>true));
-        // Consent withdrawn while this write was in flight: undo only this exact write,
-        // never a newer row of the same runId written after a re-grant.
-        if(!issued||at!==epoch){if(issued)await tx(db,'readwrite',s=>deleteIfSameWrite(s,valid.runId,row));return {runId:valid.runId,savedAt,persisted:false};}
-        lastError=null;
-        return {runId:valid.runId,savedAt,persisted:true,expiresAt:savedAt+LAYOUT_RUN_TTL_MS};
-      }catch(e){lastError=storageError(e);return {runId:valid.runId,savedAt,persisted:false,storageError:lastError};}
+        let valid;
+        try{valid=await validateLayoutRunState(state,{createLatexProject});}
+        catch(e){if(hinted)unclaim(hinted,writeId,prev);throw e;}
+        if(valid.runId!==hinted){if(hinted)unclaim(hinted,writeId,prev);claim(valid.runId,writeId);}
+        const savedAt=now();
+        // clear/dispose bumps wipeEpoch. Consent withdrawal bumps epoch only, so memory still updates.
+        if(disposed||at<wipeEpoch||!owns(valid.runId,writeId))return {runId:valid.runId,savedAt,persisted:false};
+        remember(valid,savedAt);
+        if(!wanted||at!==epoch||disposed||at<wipeEpoch||!owns(valid.runId,writeId))return {runId:valid.runId,savedAt,persisted:false};
+        try{
+          const data=await encodeLayoutRun(valid,{createLatexProject});
+          if(disposed||at!==epoch||at<wipeEpoch||!owns(valid.runId,writeId))return {runId:valid.runId,savedAt,persisted:false};
+          const db=await open();
+          const row={runId:valid.runId,writeId,savedAt,expiresAt:savedAt+LAYOUT_RUN_TTL_MS,data};
+          // Epoch and invocation identity are re-checked when the put is issued. A withdrawal,
+          // clear, dispose, or a later save before that point means this put is never queued.
+          // After it is queued, roll this exact write back only for consent withdrawal, clear,
+          // or dispose. A newer invocation that only took the claim leaves this valid row;
+          // a later issued readwrite transaction overwrites it when that save succeeds.
+          const issued=await tx(db,'readwrite',s=>at!==epoch||!owns(valid.runId,writeId)?false:req(s.put(row)).then(()=>true));
+          const withdrawn=disposed||at!==epoch||at<wipeEpoch;
+          if(!issued||withdrawn){if(issued){try{await tx(db,'readwrite',s=>deleteIfSameWrite(s,valid.runId,row));}catch{}}return {runId:valid.runId,savedAt,persisted:false};}
+          if(!owns(valid.runId,writeId))return {runId:valid.runId,savedAt,persisted:false};
+          lastError=null;
+          return {runId:valid.runId,savedAt,persisted:true,expiresAt:savedAt+LAYOUT_RUN_TTL_MS};
+        }catch(e){if(disposed||at<wipeEpoch)return {runId:valid.runId,savedAt,persisted:false};lastError=storageError(e);return {runId:valid.runId,savedAt,persisted:false,storageError:lastError};}
+      }finally{activePuts--;if(disposed&&activePuts===0&&closeWhenIdle){const close=closeWhenIdle;closeWhenIdle=null;close();}}
     },
     async get(runId){
       live();
@@ -289,7 +310,7 @@ export function createLayoutRunStore({now=Date.now,indexedDB=globalThis.indexedD
       return [...out.values()].sort((a,b)=>b.savedAt-a.savedAt);
     },
     async clear(){
-      live();memory.clear();epoch++;
+      live();memory.clear();epoch++;wipeEpoch=epoch;
       if(!indexedDB)return {cleared:true};
       try{const db=await open();await tx(db,'readwrite',s=>req(s.clear()));return {cleared:true};}
       catch(e){lastError=storageError(e);return {cleared:false,storageError:lastError};}
@@ -306,6 +327,6 @@ export function createLayoutRunStore({now=Date.now,indexedDB=globalThis.indexedD
     },
     get consent(){return consent;},
     get lastError(){return lastError;},
-    dispose(){if(disposed)return;disposed=true;memory.clear();const p=dbPromise;dbPromise=null;p?.then(db=>db.close?.(),()=>{});},
+    dispose(){if(disposed)return;disposed=true;memory.clear();epoch++;wipeEpoch=epoch;if(activePuts===0)closeDb();else closeWhenIdle=closeDb;},
   };
 }
