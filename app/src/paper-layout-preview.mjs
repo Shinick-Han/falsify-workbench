@@ -530,5 +530,28 @@ export function createLayoutPreviewController({
     };
   }
 
-  return {setDocuments, show, cancel, dispose, getStats};
+  async function findCorrespondingPage({from='candidate',pageIndex=0}={}) {
+    if(!SIDES.includes(from))throw new TypeError('Choose original or candidate');
+    validatePageIndex(pageIndex,'pageIndex');await documentsReady;
+    const at=ticket,epoch=documentsEpoch,to=from==='candidate'?'original':'candidate';
+    if(disposed||!sides[from].document||!sides[to].document)return {status:'missing'};
+    const check=()=>{if(disposed||ticket!==at||documentsEpoch!==epoch)throw cancelledError();};
+    const [source,target]=await Promise.all([acquire(sides[from]),acquire(sides[to])]);check();
+    if(pageIndex>=source.numPages)return {status:'missing'};
+    const words=value=>value.normalize('NFKC').toLowerCase().match(/[\p{L}\p{N}]+/gu)||[];
+    const grams=value=>{const w=words(value),set=new Set();for(let i=0;i+2<w.length;i++)set.add(w.slice(i,i+3).join(' '));return set;};
+    const page=await source.getPage(pageIndex+1),sourceText=await extractText(page,sides[from].document.pdfHash+':match:'+pageIndex);check();
+    const terms=grams(sourceText),exact=sourceText.replace(/\s+/g,' ').trim();if(!exact||terms.size<3)return {status:'missing'};
+    const scores=[];
+    for(let i=0;i<Math.min(target.numPages,500);i++){
+      check();const p=await target.getPage(i+1),text=await extractText(p,sides[to].document.pdfHash+':match:'+i);check();const other=grams(text);let common=0;for(const word of terms)if(other.has(word))common++;
+      scores.push({pageIndex:i,score:text.replace(/\s+/g,' ').trim()===exact?1:common/Math.max(terms.size,other.size,1)});
+      if(i%8===7)await new Promise(resolve=>setTimeout(resolve,0));
+    }
+    scores.sort((a,b)=>b.score-a.score);const best=scores[0],second=scores[1];
+    if(!best||best.score<0.45)return {status:'missing',searchedPages:scores.length};
+    if(second&&best.score-second.score<0.1)return {status:'ambiguous',candidates:scores.filter(s=>best.score-s.score<0.1),searchedPages:scores.length};
+    return {status:'matched',document:to,...best,searchedPages:scores.length};
+  }
+  return {setDocuments, show, cancel, dispose, getStats,findCorrespondingPage};
 }

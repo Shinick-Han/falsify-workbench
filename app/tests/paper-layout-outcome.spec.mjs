@@ -19,10 +19,12 @@ test('partial inspection with overlap and missing numbers reports issues and cha
  const layout=q.findings.find(f=>f.code==='text_overlap');assert.equal(layout.pageIndex,1);assert.deepEqual(layout.bbox,[10,20,30,40]);assert.equal(layout.severity,'error');assert.equal(layout.document,'candidate');
 });
 
-test('clean current evidence is unchanged and clear; identical source without comparison is unchanged',()=>{
+test('clean evidence or identical PDF bytes establish content preservation; source identity alone does not',()=>{
  let q=deriveLayoutOutcome({candidatePdfHash:B,candidateProjectId:'cand',baselinePdfHash:A,baselineProjectId:'base',inspection:inspection(),comparison:comparison()});
  assert.equal(q.content,'unchanged');assert.equal(q.layout,'clear');assert.deepEqual(q.findings,[]);
- q=deriveLayoutOutcome({candidatePdfHash:B,candidateProjectId:'base',baselineProjectId:'base'});assert.equal(q.content,'unchanged');assert.equal(q.layout,'unverified');
+ q=deriveLayoutOutcome({candidatePdfHash:B,candidateProjectId:'base',baselineProjectId:'base'});assert.equal(q.content,'unverified');assert.equal(q.layout,'unverified');
+ q=deriveLayoutOutcome({candidatePdfHash:A,baselinePdfHash:A,candidateProjectId:'base',baselineProjectId:'base'});assert.equal(q.content,'unchanged');
+ q=deriveLayoutOutcome({candidatePdfHash:null,candidateProjectId:'base',baselineProjectId:'base'});assert.equal(q.content,'unverified');
 });
 
 test('stale, mismatched or incomplete evidence stays unverified rather than failing',()=>{
