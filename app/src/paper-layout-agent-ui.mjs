@@ -149,7 +149,7 @@ export function mountPaperLayoutAgent({doc,host,getSession,getEpoch,getReference
           if(!recovered&&bridge?.state?.().cap?.paperLayoutJobs!==true)return requestLayoutDecision(link,payload,own.signal,r=>receipts.push(r));
           try{
             const instance=bridge?.state?.().cap?.companionInstance;
-            const out=await layoutStepDecision(link,{schema:'falsify.paper-layout-agent-step.v1',consent:true,...payload},{runId,signal:own.signal,pendingStep:recovered,companionInstance:instance,onPending:async p=>{pendingStep=p;if(runState)await remember({...runState,pendingStep:p});}});
+            const out=await layoutStepDecision(link,{schema:'falsify.paper-layout-agent-step.v1',consent:true,...payload},{runId,signal:own.signal,pendingStep:recovered,companionInstance:instance,onPending:async p=>{check();pendingStep=p;if(runState)await remember({...runState,pendingStep:p});}});
             recovered=null;deliveredAction=out.response.action.tool;receipts.push({projectId:out.response.projectId,step:input.step,model:out.response.model,skillHash:out.response.skillHash});return out.response.action;
           }catch(error){if(['failed','cancelled'].includes(error.disposition)){pendingStep=null;recovered=null;if(runState)await remember({...runState,pendingStep:null});}else if(recovered&&!own.signal.aborted&&error?.name!=='AbortError')pendingProblem=`보류 중인 요청을 확인하지 못했습니다 (${error.recovery==='not-found'?'접수 기록 없음 또는 만료':error.recovery==='mismatch'?'요청·companion 불일치':'연결 오류'}). 다시 시작하면 같은 요청을 조회만 합니다. 버리면 이 후보에서 새 요청으로 이어갈 수 있습니다.`;throw error;}
         },
