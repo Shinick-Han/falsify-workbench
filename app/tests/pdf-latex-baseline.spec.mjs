@@ -35,3 +35,13 @@ test('actual synthetic PDF flows through prepare, region, serialize and project;
  assert.throws(()=>createReconstructionLineage({...input,bindings:made.bindings.map(b=>({...b,projectId:'0'.repeat(64)}))}),{code:'INVALID_BINDINGS'});
  const changed=structuredClone(made.project);changed.files[0].bytes[0]^=1;assert.throws(()=>createReconstructionLineage({...input,project:changed}),{code:'STALE_PROJECT'});
 });
+
+test('flow reconstruction is explicit and preserves its typography and Lua engine in archive metadata',async()=>{
+ const bytes=pdf('A result of 63.5 percent.'),draft=await prepareReconstruction({file:{arrayBuffer:async()=>bytes.slice().buffer}});
+ const legacy=await createReconstructionProject(draft),flow=await createReconstructionProject(draft,[],{layout:'semantic-flow'});
+ assert.equal(legacy.project.engine,'pdflatex');assert.equal(flow.project.engine,'lualatex');assert.notEqual(flow.project.id,legacy.project.id);
+ const metadata=JSON.parse(new TextDecoder().decode(flow.project.files.find(f=>f.path==='falsify-reconstruction.json').bytes));
+ assert.equal(metadata.layout,'semantic-flow');assert.equal(metadata.typography.schema,'falsify.paper-typography.v1');
+ assert.ok(flow.bindings.every(b=>b.projectId===flow.project.id));
+ await assert.rejects(createReconstructionProject(draft,[],{layout:'unknown'}),/재구성 방식/);
+});

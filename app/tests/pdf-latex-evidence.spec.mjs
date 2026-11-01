@@ -78,6 +78,18 @@ test('36-page evidence keeps all 2016 blocks and exact text within finite budget
   const limit=largeEvidence(1,8000,1);assert.equal(buildReconstructionModel(limit).items.length,8000);
   const exceeded=largeEvidence(1,8001,1);assert.throws(()=>buildReconstructionModel(exceeded),{code:'budget-exceeded'});
 });
+test('proposed inter-block whitespace survives while source ranges remain exact',()=>{
+  const evidence=largeEvidence(1,3,1),[first,second,untouched]=evidence.flow.items;
+  first.blockIds.push(second.blockIds[0]);first.inline=true;first.joiners=[' '];
+  evidence.flow.items=[first,untouched];
+  const model=buildReconstructionModel(evidence),item=model.items[0];
+  assert.equal(item.text,'x x');assert.equal(model.items[1].text,'x');
+  assert.deepEqual(item.extensions.segments.map(s=>s.text),['x','x']);
+  for(const segment of item.extensions.segments){const e=segment.evidence;assert.equal(evidence.document.pages[e.pageIndex].text.slice(e.range.start,e.range.end),segment.text);}
+  assert.equal(item.reason,'flow-joiner-unverified');
+  const invalid=structuredClone(evidence);invalid.flow.items[0].joiners=[' injected '];
+  assert.throws(()=>buildReconstructionModel(invalid),{code:'invalid-evidence'});
+});
 test('indexed range ownership still rejects overlapping fragments and missing source text',async()=>{
   const evidence=await extract(synthetic()),item=evidence.flow.items.find(x=>x.blockIds.length===1&&evidence.document.blocks.find(b=>b.id===x.blockIds[0]&&b.text));
   const missing=structuredClone(evidence);missing.flow.items=missing.flow.items.filter(x=>x.id!==item.id);assert.throws(()=>buildReconstructionModel(missing),{code:'uncovered-source-text'});
@@ -146,4 +158,20 @@ test('page layout hints retain only a single valid source-flow gutter',()=>{
   }
   const badPage=structuredClone(input);badPage.flow.diagnostics[0].pageIndex=2;const result=buildReconstructionModel(badPage);
   assert.ok(result.pages.every(p=>!p.extensions));assert.ok(result.diagnostics.some(d=>d.code==='layout-hint-unresolved'));
+});
+
+test('source line proposals preserve ranges and protect identifiers, formulas and references',async()=>{
+  const {normalizeDocument}=await import('../src/paper-document.mjs'),hash='c'.repeat(64);
+  const make=(rows,y)=>{const chars=[],lines=[];for(const [row,text] of rows.entries()){const start=chars.length;for(const [i,ch] of [...text].entries())chars.push({text:ch,bbox:[20+i*5,y+row*12,24+i*5,y+row*12+9],fontName:'Body',size:9});lines.push({start,end:chars.length,bbox:[20,y+row*12,20+text.length*5,y+row*12+9],writingMode:0,direction:[1,0]});}return {bbox:[20,y,220,y+rows.length*12],chars,lines};};
+  const geometry={frame:'mupdf-display',bounds:[0,0,612,792],pageTransform:[1,0,0,-1,0,792]};
+  const document=normalizeDocument({sourceSha256:hash,pages:[{width:612,height:792,geometry,blocks:[make(['A title of','fin-shaped devices'],20),make(['normal prose ','continues here'],70),make(['tightkerning'],120),make(['number 10','20 items'],170),make(['doi:10.1234/ab','cd'],220),make(['x=alpha','beta'],270),make(['References'],320),make(['Smith journal','article'],350),make(['A clear sentence explains a detailed ordinary scientific observation and gives enough context for readers to','understand the result.'],390)],images:[]}]});
+  const items=document.blocks.map((b,i)=>({id:`line-${i}`,kind:i===0||i===6?'heading':'paragraph',blockIds:[b.id],assetIds:[],source:{pageIndex:0,bbox:b.source.bbox},columns:1,span:'page'}));
+  const flow={schema:'falsify.paper-flow.v1',sourceSha256:hash,items,fragments:[],regions:[],relations:[],diagnostics:[]},links={schema:'falsify.paper-source-links.v1',sourceSha256:hash,frames:[{pageIndex:0,bounds:geometry.bounds,pageTransform:geometry.pageTransform,verified:true}],links:[]};
+  const model=buildReconstructionModel({document,flow,links,assets:{sourceSha256:hash,assets:[],diagnostics:[]}});
+  assert.equal(model.items[0].text,'A title of fin-shaped devices');
+  for(let i=1;i<items.length;i++)assert.equal(model.items[i].text,document.blocks[i].text);
+  const proseInput=structuredClone({document,flow,links,assets:{sourceSha256:hash,assets:[],diagnostics:[]}});proseInput.flow.items=[...proseInput.flow.items.slice(0,6),proseInput.flow.items[8],...proseInput.flow.items.slice(6,8)];const proseModel=buildReconstructionModel(proseInput);assert.match(proseModel.items[6].text,/readers to understand/);
+  const proposal=model.items[0].extensions.separators[0];assert.equal(proposal.method,'source-line-boundary');assert.equal(proposal.status,'proposed');assert.equal(proposal.offset,proposal.before.range.end);assert.equal(proposal.offset,proposal.after.range.start);
+  assert.ok(model.diagnostics.some(d=>d.code==='source-line-separator-proposed'&&d.itemId===model.items[0].id));
+  for(const item of model.items)for(const segment of item.extensions.segments){const e=segment.evidence;assert.equal(document.pages[e.pageIndex].text.slice(e.range.start,e.range.end),segment.text);}
 });

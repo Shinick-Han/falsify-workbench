@@ -43,7 +43,7 @@ export function createLatexSession({project,applyChanges,compiler,generationApi,
     if(index<0)next.push(candidate);else next[index]=candidate;update(next);
   }
   function setChanges(next){if(!Array.isArray(next))throw new Error('changes required');for(const c of next)if(c.anchor?.projectId!==original.id)throw Object.assign(new Error('이 원본에 연결된 변경이 아닙니다.'),{code:'stale-anchor'});update(next);}
-  return {snapshot,getCurrentOutput:currentOutput,getBaseline:()=>publicOutput(baseline),setChange,setChanges,
+  return {snapshot,getInputIdentity:()=>({projectId:original.id,changes:copy(changes)}),getCurrentOutput:currentOutput,getBaseline:()=>publicOutput(baseline),setChange,setChanges,
     undo(){if(position>0){changes=copy(history[--position]);error=null;emit();generator.schedule(spec());}},
     redo(){if(position<history.length-1){changes=copy(history[++position]);error=null;emit();generator.schedule(spec());}},
     async compile(){if(disposed)throw abort();const requested=spec(),key=generationApi.key(requested),result=await generator.flush(requested);if(disposed||key!==generationApi.key(spec()))throw abort();return publicOutput(result);},

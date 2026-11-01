@@ -1,6 +1,7 @@
 import {extractReconstructionEvidence,buildReconstructionModel} from './pdf-latex-evidence.mjs';
 import {enrichReconstructionRegions} from './pdf-latex-regions.mjs';
 import {serializeReconstruction} from './pdf-latex-serialize.mjs';
+import {serializeFlowReconstruction} from './pdf-latex-flow-serialize.mjs';
 import {createLatexProject} from './latex-project.mjs';
 import {hex} from './paragraph-pdf-crypto.mjs';
 import * as mupdf from 'mupdf';
@@ -37,11 +38,15 @@ export async function prepareReconstruction({file,signal,onProgress=()=>{}}={},d
 }
 export async function createReconstructionProject(draft,decisions=[],dependencies={}){
   if(!draft?.sourceSha256||draft.model?.sourceSha256!==draft.sourceSha256)throw new Error('원본 PDF와 재구성 정보가 다릅니다.');
-  const result=(dependencies.serialize||serializeReconstruction)({model:draft.model,decisions,engine:'pdflatex'});
+  const layout=dependencies.layout??'source-layout';
+  if(!['source-layout','semantic-flow'].includes(layout))throw new TypeError('재구성 방식을 확인하세요.');
+  const serialize=dependencies.serialize||(layout==='semantic-flow'?serializeFlowReconstruction:serializeReconstruction);
+  const result=serialize({model:draft.model,decisions,engine:'pdflatex',profile:dependencies.profile,fontFiles:dependencies.fontFiles});
+  const engine=result.engine??(layout==='semantic-flow'?'lualatex':'pdflatex');
   if(!result.mainFile||!result.files?.length)throw Object.assign(new Error('편집용 소스를 만들지 못했습니다.'),{diagnostics:result.diagnostics});
-  const metadata={schema:'falsify.reconstruction-baseline.v1',sourcePdfHash:draft.sourceSha256,status:result.status,decisions:structuredClone(decisions),bindings:result.bindings.map(({projectId,...binding})=>({...binding,bindingScope:'containing-project'})),diagnostics:result.diagnostics};
-  const files=[...result.files,{path:'falsify-reconstruction.json',bytes:encoder.encode(JSON.stringify(metadata))}];
-  const project=await(dependencies.project||createLatexProject)({files,mainFile:result.mainFile,engine:'pdflatex',origin:'reconstructed-pdf',sourcePdfHash:draft.sourceSha256});
+  const metadata={schema:'falsify.reconstruction-baseline.v1',sourcePdfHash:draft.sourceSha256,status:result.status,layout,...(result.typography?{typography:structuredClone(result.typography)}:{}),decisions:structuredClone(decisions),bindings:result.bindings.map(({projectId,...binding})=>({...binding,bindingScope:'containing-project'})),diagnostics:result.diagnostics};
+  const files=[...result.files,...(result.structure?[{path:'falsify-layout-structure.json',bytes:encoder.encode(JSON.stringify(result.structure))}]:[]),{path:'falsify-reconstruction.json',bytes:encoder.encode(JSON.stringify(metadata))}];
+  const project=await(dependencies.project||createLatexProject)({files,mainFile:result.mainFile,engine,origin:'reconstructed-pdf',sourcePdfHash:draft.sourceSha256});
   return {...result,project,bindings:result.bindings.map(b=>({...b,projectId:project.id}))};
 }
 

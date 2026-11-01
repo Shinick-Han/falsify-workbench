@@ -77,7 +77,7 @@ export function analyzeProjectFiles(project) {
   const re=/\\(input|include|bibliography|addbibresource|includegraphics)(?:\s*\[[^\]]*\])?\s*\{([^{}]+)\}/g;
   for(const m of text.matchAll(re)) for(const part of (m[1]==='bibliography'?m[2].split(','):[m[2]])) {
    const r=part.trim();if(!r)continue;
-   if(r.includes('\\')) {note(main,path,m.index,r,m[1],'unknown');if(m[1]==='input'||m[1]==='include')state={dirs:[],unknown:true};continue;}
+   if(r.includes('\\')||/#[1-9]/.test(r)) {note(main,path,m.index,r,m[1],'unknown');if(m[1]==='input'||m[1]==='include')state={dirs:[],unknown:true};continue;}
    const valid=resolveReference(root,r)!==null, direct=valid?resolve(root,r,extensions(m[1])):null;
    let status=direct?'found':'missing';
    if(valid&&!direct&&m[1]==='includegraphics') {
@@ -107,6 +107,8 @@ export function analyzeProjectFiles(project) {
  for(const m of missingFiles)diagnostics.push({code:'MISSING_FILE',message:'Referenced file is missing',...m}); return {mainCandidates,missingFiles,diagnostics};
 }
 export async function importLatexProject(file,{mainFile,engine,signal}={}) { if(signal?.aborted) fail('ABORTED','Import cancelled'); const bytes=new Uint8Array(await file.arrayBuffer()); if(signal?.aborted) fail('ABORTED','Import cancelled'); let files; if(/\.tex$/i.test(file.name)) {const name=pathOf(file.name);files=[{path:name,bytes}];mainFile??=name;} else if(/\.zip$/i.test(file.name)) {let entries;try{let count=0,total=0;const names=new Set();unzipSync(bytes,{filter:f=>{if(++count>20000||names.has(f.name))fail('INVALID_ZIP','Duplicate or excessive ZIP entries');names.add(f.name);total+=f.originalSize;if(total>128*1024*1024||f.originalSize>Math.max(f.size*200,1000000))fail('INVALID_ZIP','ZIP size limit exceeded');return false;}});entries=unzipSync(bytes);}catch(e){if(e.code)throw e;fail('INVALID_ZIP','Invalid ZIP archive')} files=Object.entries(entries).filter(([p])=>!p.endsWith('/')).map(([path,bytes])=>({path,bytes}));} else fail('INVALID_FORMAT','Expected a .tex or .zip file');
- let p=await createLatexProject({files,mainFile:mainFile??null,engine}); if(!p.mainFile){const a=analyzeProjectFiles(p);if(a.mainCandidates.length===1)p=await createLatexProject({files,mainFile:a.mainCandidates[0],engine});}return p;
+ let p=await createLatexProject({files,mainFile:mainFile??null,engine}); if(!p.mainFile){const a=analyzeProjectFiles(p);if(a.mainCandidates.length===1)p=await createLatexProject({files,mainFile:a.mainCandidates[0],engine});}
+ if(engine===undefined&&p.mainFile){const source=dec.decode(p.files.find(f=>f.path===p.mainFile).bytes),hint=/^\s*%\s*!TeX\s+program\s*=\s*(pdflatex|xelatex|lualatex)\s*$/im.exec(source.split('\n').slice(0,20).join('\n'));if(hint)p=await createLatexProject({...p,engine:hint[1].toLowerCase()});}
+ return p;
 }
 export async function exportLatexProject(project) { const entries=Object.create(null); for(const f of project.files)entries[pathOf(f.path)]=new Uint8Array(f.bytes);return zipSync(entries); }

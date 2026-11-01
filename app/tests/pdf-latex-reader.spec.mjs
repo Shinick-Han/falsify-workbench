@@ -33,6 +33,7 @@ test('worker compares both real synthetic PDFs from bytes with source-bound hash
  const messages=[],scope={postMessage:(m,t=[])=>messages.push(structuredClone(m,{transfer:t}))};installReconstructionReaderWorker(scope);
  const original=fixture('Value -63 and 1.5 percent.'),baseline=fixture('Value 63 and 1.5 percent.');await scope.onmessage({data:{id:7,type:'compare',sourceBytes:original,bytes:baseline}});
  const c=messages.find(x=>x.type==='result').result;assert.equal(c.sourcePdfHash,hex(original));assert.equal(c.baselinePdfHash,hex(baseline));assert.equal(c.sourcePages,1);assert.equal(c.baselinePages,1);assert.deepEqual(c.numbers.missing,['-63']);assert.deepEqual(c.numbers.added,['63']);
+ assert.equal(c.layoutAudit.schema,'falsify.latex-layout-audit.v1');assert.equal(c.layoutAudit.outputPdfHash,hex(baseline));assert.equal(c.layoutAudit.status,'partial');assert.equal(c.visualLayoutVerified,false);
 });
 test('delayed ready sends one request only and ignores stale worker ready',async()=>{
  const workers=[],r=createReconstructionReader({workerFactory:()=>{const w=new FakeWorker({manual:true});workers.push(w);return w;}}),b=Uint8Array.of(1,2),first=r.read({file:file(b)});await tick();const w1=workers[0],old=w1.onmessage;assert.equal(w1.sent.length,0);
@@ -45,3 +46,16 @@ test('abort before ready never transfers and startup failure or timeout cleans u
  const t=r.read({file:file(b)});await tick();const w3=workers[2];await assert.rejects(t,{code:'WORKER_START_TIMEOUT'});assert.ok(w3.terminated);assert.equal(w3.sent.length,0);
 });
 test('worker announces readiness only after installing request handler',()=>{let handlerAtReady=false;const scope={postMessage(m){if(m.type==='ready')handlerAtReady=typeof scope.onmessage==='function';}};installReconstructionReaderWorker(scope);assert.equal(handlerAtReady,true);});
+
+test('a foreign audit is discarded while the correctly bound PDF comparison remains usable',async()=>{
+ const workers=[],reader=createReconstructionReader({workerFactory:()=>{const w=new FakeWorker();workers.push(w);return w;}}),bytes=Uint8Array.of(37,80,68,70,45),source={sourceSha256:'a'.repeat(64),pages:[{text:'Result'}]};
+ const pending=reader.compare({bytes,sourceDocument:source});await tick();const w=workers[0];
+ w.reply({id:w.sent[0].id,type:'result',result:{schema:'falsify.reconstruction-comparison.v1',sourcePdfHash:source.sourceSha256,baselinePdfHash:hex(bytes),sourcePages:1,baselinePages:1,method:'extracted-token-multiset',readingOrderVerified:false,visualLayoutVerified:false,text:{missing:[],added:[]},numbers:{missing:[],added:[]},layoutAudit:{schema:'falsify.latex-layout-audit.v1',outputPdfHash:'0'.repeat(64),status:'partial',findings:[]}}});
+ const result=await pending;assert.equal(result.baselinePdfHash,hex(bytes));assert.equal(result.layoutAudit.status,'unavailable');assert.equal(result.layoutAudit.outputPdfHash,hex(bytes));assert.deepEqual(result.layoutAudit.findings,[]);assert.ok(w.terminated);
+});
+
+test('optional audit failure preserves comparison and does not expose its error text',async()=>{
+ const messages=[],scope={postMessage:(m,t=[])=>messages.push(structuredClone(m,{transfer:t}))};installReconstructionReaderWorker(scope,{audit:async()=>{throw new Error('private document excerpt');}});
+ const bytes=fixture('A valid downloadable PDF.');await scope.onmessage({data:{id:8,type:'compare',sourceBytes:bytes.slice(),bytes}});
+ const result=messages.find(m=>m.type==='result')?.result;assert.ok(result);assert.equal(result.baselinePdfHash,hex(bytes));assert.equal(result.layoutAudit.status,'unavailable');assert.deepEqual(result.layoutAudit.findings,[]);assert.equal(JSON.stringify(result).includes('private document excerpt'),false);
+});

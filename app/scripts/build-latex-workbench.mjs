@@ -1,7 +1,11 @@
 import {build} from 'esbuild';
 import {readFile,writeFile} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
+import {layoutToolCatalog,layoutActionSchema,layoutProviderActionSchema} from '../src/paper-layout-tool-catalog.mjs';
 const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
+// Ship the same layout instructions with the companion as with project agents.
+await writeFile('local/layout-agent-skill.md',await readFile('../.agents/skills/falsify-paper-layout/SKILL.md'));
+await writeFile('local/layout-agent-tools.json',JSON.stringify({schema:'falsify.layout-tool-catalog.v2',tools:layoutToolCatalog,actionSchema:layoutActionSchema,providerActionSchema:layoutProviderActionSchema},null,2)+'\n');
 const settings={bundle:true,format:'esm',target:'es2022',minify:true,metafile:true,legalComments:'eof',external:['./vendor/*'],plugins:[{name:'shared-browser-mupdf',setup(build){build.onResolve({filter:/^mupdf$/},()=>({path:'./browser-pdf-vendor/mupdf.js',external:true}));}}]};
 const result=await build({...settings,entryPoints:['src/latex-workbench.mjs'],outfile:'dist/latex-workbench.mjs'});
 const worker=await build({...settings,entryPoints:['src/pdf-latex-reader-worker.mjs'],outfile:'dist/pdf-latex-reader-worker.mjs'});

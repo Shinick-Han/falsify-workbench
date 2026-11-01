@@ -1,11 +1,10 @@
 import { hex } from './paragraph-pdf-crypto.mjs';
-
-const manifest = Object.freeze({name:'TeXlyre BusyTeX', version:'1.4.1', source:'61b83cde2836d42cf941f6559d36c9678d52cbf2', engine:'combined', data:'texlive-basic'});
+import { latexRuntimeAssets,latexEngineManifest } from './latex-runtime-catalog.mjs';
 function failureDiagnostic(data) {
   const log = typeof data.log === 'string' ? data.log : '';
   const missing = /(?:LaTeX Error: )?File [`']([A-Za-z0-9_./+-]{1,180}\.(?:sty|cls|tex|bib|bst|png|pdf|jpg))['`] not found/i.exec(log);
   const line = /(?:^|\n)l\.(\d+)\b/.exec(log);
-  return {code:missing?'TEX_MISSING_FILE':'COMPILE_FAILED',message:missing?`Required file ${missing[1]} was not found.`:'LaTeX compilation failed; check source and available packages.',severity:'error',...(line?{line:Number(line[1])}:{})};
+  return {code:missing?'TEX_MISSING_FILE':'COMPILE_FAILED',message:missing?`Required file ${missing[1]} was not found. Add it to the local project or use a package included in the selected runtime profile.`:'LaTeX compilation failed; check source and available packages.',severity:'error',...(line?{line:Number(line[1])}:{})};
 }
 // Return bounded facts only: TeX logs can contain private document text.
 function warningDiagnostics(data) {
@@ -17,11 +16,13 @@ function warningDiagnostics(data) {
     diagnostics.push({code:'TEX_UNDEFINED_CITATION',message:'Some citations are unresolved.',severity:'warning'});
   if (/(?:Missing character:|LaTeX Font Warning:.*?(?:not available|undefined|substitut)|Font .+? not found|I can't find file [`']?[^\r\n]*?\.(?:tfm|mf))/i.test(log))
     diagnostics.push({code:'TEX_FONT_WARNING',message:'A font or character was unavailable or substituted.',severity:'warning'});
+  const overflow=[...log.matchAll(/Overfull \\[hv]box \(([\d.]+)pt too (?:wide|high)\)([^\n]*)/g)];
+  if(overflow.length)diagnostics.push({code:'TEX_OVERFULL_BOX',message:'조판 영역을 넘는 글 또는 그림이 있습니다.',severity:'warning',count:overflow.length,maxOverflowPt:Math.max(...overflow.map(m=>Number(m[1])).filter(Number.isFinite)),lines:[...new Set(overflow.flatMap(m=>{const at=/at lines? (\d+)/.exec(m[2]);return at?[Number(at[1])]:[];}))].slice(0,50)});
   return diagnostics;
 }
 export function createLatexCompiler(options = {}) {
   let worker = null, pending = null, disposed = false;
-  const finish = (code, message) => { if (!pending) return; const p = pending; pending = null; worker?.terminate(); worker = null; p.cleanup(); p.resolve({schema:'falsify.latex-artifact.v1', success:false, projectId:p.project.id, key:p.key, engine:p.project.engine, engineManifest:manifest, diagnostics:[{code,message,severity:'error'}], timings:{totalMs:Date.now()-p.started}}); };
+  const finish = (code, message) => { if (!pending) return; const p = pending; pending = null; worker?.terminate(); worker = null; p.cleanup(); p.resolve({schema:'falsify.latex-artifact.v1', success:false, projectId:p.project.id, key:p.key, engine:p.project.engine, engineManifest:latexEngineManifest(p.project.engine), diagnostics:[{code,message,severity:'error'}], timings:{totalMs:Date.now()-p.started}}); };
   function cancel() { finish('CANCELLED','Compilation cancelled.'); }
   async function compile(request) {
     if (disposed) throw new Error('Compiler disposed');
@@ -55,10 +56,11 @@ export function createLatexCompiler(options = {}) {
             const p = pending; pending = null; p.cleanup(); worker.terminate(); worker = null;
             const bytes = data.pdf ? new Uint8Array(data.pdf) : null;
             const success = data.exit_code === 0 && bytes?.length > 0;
-            p.resolve({schema:'falsify.latex-artifact.v1',success, ...(success ? {pdfBytes:bytes,pdfHash:hex(bytes),...(data.synctex ? {synctex:new Uint8Array(data.synctex)} : {})} : {}),projectId:project.id,key,engine:project.engine,engineManifest:manifest,diagnostics:success?warningDiagnostics(data):[failureDiagnostic(data),...warningDiagnostics(data)],timings:{totalMs:Date.now()-started}});
+            p.resolve({schema:'falsify.latex-artifact.v1',success, ...(success ? {pdfBytes:bytes,pdfHash:hex(bytes),...(data.synctex ? {synctex:new Uint8Array(data.synctex)} : {})} : {}),projectId:project.id,key,engine:project.engine,engineManifest:latexEngineManifest(project.engine),diagnostics:success?warningDiagnostics(data):[failureDiagnostic(data),...warningDiagnostics(data)],timings:{totalMs:Date.now()-started}});
           }
         };
-        worker.postMessage({busytex_js:fileUrl('busytex.js'),busytex_wasm:fileUrl('busytex.wasm'),biber_js:fileUrl('biber.js'),biber_wasm:fileUrl('biber.wasm'),biber_data:fileUrl('biber.data'),preload_data_packages_js:[fileUrl('texlive-basic.js')],data_packages_js:[fileUrl('texlive-basic.js')],texmf_local:[],preload:true});
+        const packages = latexRuntimeAssets(project.engine);
+        worker.postMessage({busytex_js:fileUrl('busytex.js'),busytex_wasm:fileUrl('busytex.wasm'),biber_js:fileUrl('biber.js'),biber_wasm:fileUrl('biber.wasm'),biber_data:fileUrl('biber.data'),preload_data_packages_js:packages.map(fileUrl),data_packages_js:packages.map(fileUrl),texmf_local:[],preload:true});
       } catch { finish('ENGINE_ERROR','Could not start LaTeX worker.'); }
     });
   }

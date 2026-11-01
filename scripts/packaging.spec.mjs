@@ -21,6 +21,7 @@ test('the exact BusyTeX asset profile is included without accepting arbitrary wa
   const proof=verifyLatexRuntime(root);
   assert.equal(proof.manifestSha256,LATEX_MANIFEST_SHA256);
   assert.equal(proof.files,7);
+  assert.equal(proof.lua.files,3);assert.ok(proof.lua.bytes<500000);assert.equal(proof.lua.manifestSha256.length,64);
   assert.deepEqual(unexpectedReleasePaths([LATEX_WASM]),[]);
   assertShippableSource([LATEX_WASM],root);
   assert.throws(()=>assertShippableSource(['app/dist/latex-compiler-vendor/extra.wasm'],root),/Unexpected private/);
