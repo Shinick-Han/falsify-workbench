@@ -2,6 +2,7 @@ import {createLatexProject} from './latex-project.mjs';
 import {hex} from './paragraph-pdf-crypto.mjs';
 import {readLayoutStructure} from './paper-layout-structure.mjs';
 import {layoutToolCatalog,normalizeLayoutAction} from './paper-layout-tool-catalog.mjs';
+import {deriveLayoutOutcome} from './paper-layout-outcome.mjs';
 
 const enc = new TextEncoder(), dec = new TextDecoder('utf-8', {fatal:true, ignoreBOM:true});
 const instruction = 'Adjust the current layout to the user\'s goal. Find blocks, apply typed edits, compile, inspect and compare the result. Save useful candidates and restore the chosen revision. Report changes and remaining findings in the user\'s language.';
@@ -75,30 +76,131 @@ function validArtifact(a, p) {
   return a?.success === true && a.projectId === p.id && a.engine === p.engine && a.pdfBytes instanceof Uint8Array && a.pdfBytes.length > 0 && typeof a.pdfHash === 'string' && hex(a.pdfBytes) === a.pdfHash;
 }
 
+export const LAYOUT_RUN_STATE_SCHEMA='falsify.layout-run-state.v1';
+const RUN_STATES=new Set(['running','completed','paused','cancelled','failed']),LEGACY_STATUS=new Set(['running','complete','unresolved','cancelled']);
+const MAX_CHECKPOINTS=12,MAX_TRACE=4096,RUN_ID=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const isObject=v=>v!==null&&typeof v==='object'&&!Array.isArray(v);
+const editablePath=p=>/\.tex$/i.test(p)||/^falsify-(?:layout-structure|reconstruction)\.json$/.test(p);
+const stateError=message=>Object.assign(new Error('Invalid layout run state: '+message),{code:'INVALID_RUN_STATE'});
+// Supplied project and PDF bytes are treated as immutable, so one digest per buffer suffices.
+const digests=new WeakMap();
+const digest=bytes=>{let h=digests.get(bytes);if(h===undefined){h=hex(bytes);digests.set(bytes,h);}return h;};
+function deepFreeze(value){
+  if(value===null||typeof value!=='object'||ArrayBuffer.isView(value)||Object.isFrozen(value))return value;
+  Object.freeze(value);for(const v of Object.values(value))deepFreeze(v);return value;
+}
+async function verifyStateProject(p,cache,label){
+  if(!isObject(p)||typeof p.id!=='string'||!Array.isArray(p.files)||!p.files.length)throw stateError(label+' project');
+  for(const f of p.files)if(!isObject(f)||!(f.bytes instanceof Uint8Array)||typeof f.sha256!=='string'||digest(f.bytes)!==f.sha256)throw stateError(label+' file hash');
+  let canonical=cache.get(p.id);
+  if(!canonical){canonical=await createLatexProject(p);if(canonical.id!==p.id)throw stateError(label+' project identity');cache.set(p.id,canonical);}
+  else if(canonical.files.length!==p.files.length||canonical.mainFile!==(p.mainFile??null)||canonical.engine!==p.engine||canonical.origin!==p.origin||canonical.files.some(f=>!p.files.some(g=>g.path===f.path&&g.sha256===f.sha256)))throw stateError(label+' project identity');
+  if((canonical.sourcePdfHash??null)!==(p.sourcePdfHash??null))throw stateError(label+' source PDF identity');
+  const bytes=new Map(p.files.map(f=>[f.path,f.bytes]));
+  return {...canonical,revision:Number.isSafeInteger(p.revision)&&p.revision>=0?p.revision:0,files:canonical.files.map(f=>({path:f.path,bytes:bytes.get(f.path),sha256:f.sha256}))};
+}
+function verifyStatePair(a,p,label){
+  if(!(a?.success===true&&a.projectId===p.id&&a.engine===p.engine&&a.pdfBytes instanceof Uint8Array&&a.pdfBytes.length>0&&typeof a.pdfHash==='string'&&digest(a.pdfBytes)===a.pdfHash))throw stateError(label+' PDF does not match its project');
+  return {...a};
+}
+const sameSource=(p,base)=>p.origin===base.origin&&p.engine===base.engine&&(p.sourcePdfHash??null)===(base.sourcePdfHash??null)&&base.files.every(f=>editablePath(f.path)||p.files.some(g=>g.path===f.path&&g.sha256===f.sha256));
+
+/** Validate a saved falsify.layout-run-state.v1 snapshot. Never calls a model or tool. */
+export async function validateLayoutRunState(state){
+  if(!isObject(state)||state.schema!==LAYOUT_RUN_STATE_SCHEMA)throw stateError('schema');
+  if(typeof state.runId!=='string'||!RUN_ID.test(state.runId))throw stateError('runId');
+  if(state.parentRunId!=null&&(typeof state.parentRunId!=='string'||!RUN_ID.test(state.parentRunId)))throw stateError('parentRunId');
+  if(!Number.isSafeInteger(state.stepCount)||state.stepCount<0)throw stateError('stepCount');
+  if(!RUN_STATES.has(state.runState)||!LEGACY_STATUS.has(state.status))throw stateError('status');
+  const cache=new Map(),baselineProject=await verifyStateProject(state.baselineProject,cache,'baseline');
+  const member=async(p,label)=>{const v=await verifyStateProject(p,cache,label);if(!sameSource(v,baselineProject))throw stateError(label+' engine or source identity differs from baseline');return v;};
+  const pair=async(c,label,required)=>{if(!isObject(c))throw stateError(label);const project=await member(c.project,label);if(c.artifact==null&&!required)return {project,artifact:null};return {project,artifact:verifyStatePair(c.artifact,project,label)};};
+  const baselineArtifact=state.baselineArtifact==null?null:verifyStatePair(state.baselineArtifact,baselineProject,'baseline');
+  const currentProject=await member(state.currentProject,'current');
+  const candidate=await pair(state.candidate,'candidate',false);
+  const previousCandidate=state.previousCandidate==null?null:await pair(state.previousCandidate,'previous candidate',true);
+  if(!Array.isArray(state.checkpoints)||state.checkpoints.length>MAX_CHECKPOINTS)throw stateError('checkpoints');
+  const ids=new Set(),checkpoints=[];
+  for(const c of state.checkpoints){
+    if(!isObject(c)||typeof c.revisionId!=='string'||!/^r\d{1,4}$/.test(c.revisionId)||ids.has(c.revisionId)||typeof c.label!=='string'||c.label.length>200)throw stateError('checkpoint');
+    ids.add(c.revisionId);const p=await pair(c,'checkpoint '+c.revisionId,false);checkpoints.push({revisionId:c.revisionId,label:c.label,...p});
+  }
+  if(!Array.isArray(state.trace)||state.trace.length>MAX_TRACE)throw stateError('trace');
+  // Trace strings remain data; each entry is re-bounded and never interpreted as a command.
+  const trace=state.trace.map(e=>{if(!isObject(e)||typeof e.action!=='string'||e.action.length>80||(e.projectId!=null&&typeof e.projectId!=='string')||(e.pdfHash!=null&&typeof e.pdfHash!=='string'))throw stateError('trace entry');return deepFreeze({action:e.action,result:bounded(e.result??null),projectId:e.projectId??null,pdfHash:e.pdfHash??null});});
+  return {schema:LAYOUT_RUN_STATE_SCHEMA,runId:state.runId,parentRunId:state.parentRunId??null,stepCount:state.stepCount,baselineProject,baselineArtifact,currentProject,candidate,...(previousCandidate?{previousCandidate}:{}),checkpoints,trace,coverage:bounded(state.coverage??null),quality:bounded(state.quality??null),status:state.status,runState:state.runState};
+}
+
 /** Model decisions select injected app tools. No model action executes host commands. */
-export async function runPaperLayoutAgent({project, artifact=null, decide, compile, inspect, render, reference=null,readReference,renderReference,restructure,handlers={},signal, onProgress, maxSteps=12}={}) {
+export async function runPaperLayoutAgent({project, artifact=null, decide, compile, inspect, render, reference=null,readReference,renderReference,restructure,handlers={},signal, onProgress, maxSteps=12, runId, resumeState=null, onState}={}) {
   if (!Number.isSafeInteger(maxSteps) || maxSteps < 1 || maxSteps > 32 || ![decide,compile,inspect,render].every(f=>typeof f==='function')) throw new TypeError('Invalid layout agent configuration');
-  const verified = await createLatexProject(project);
-  if (verified.id !== project.id || project.files.some(f => hex(f.bytes) !== f.sha256)) throw new Error('Stale project identity');
-  if (artifact && !validArtifact(artifact, verified)) throw new Error('Stale artifact identity');
-  if(reference&&(!/^[a-f0-9]{64}$/.test(reference.sourcePdfHash||'')||reference.sourcePdfHash!==project.sourcePdfHash||typeof readReference!=='function'||typeof renderReference!=='function'))throw new Error('Original PDF reference does not match project');
-  let current = verified, lastProject = verified, lastArtifact = artifact, compiled = null, inspected = null, rendered = null;
-  let observations = [], images = [], trace = [], coverage = null,referenceImages=[],referenceRead=false,referenceSeen=false,candidateSeen=null,compared=null;
+  if ((runId!==undefined&&(typeof runId!=='string'||!RUN_ID.test(runId)))||(onState!==undefined&&onState!==null&&typeof onState!=='function')) throw new TypeError('Invalid layout agent configuration');
+  // An explicit continuation restores the saved baseline, candidate and checkpoints.
+  const resumed = resumeState==null ? null : await validateLayoutRunState(resumeState);
+  if (resumed) {
+    if (project && project.id !== resumed.baselineProject.id) throw new Error('Resume state does not match project');
+    if (artifact && artifact.pdfHash !== resumed.baselineArtifact?.pdfHash) throw new Error('Resume state does not match artifact');
+    if (runId === resumed.runId) throw new TypeError('A continuation needs a fresh runId');
+  }
+  const verified = resumed ? resumed.baselineProject : await createLatexProject(project);
+  if (!resumed && (verified.id !== project.id || project.files.some(f => hex(f.bytes) !== f.sha256))) throw new Error('Stale project identity');
+  if (!resumed && artifact && !validArtifact(artifact, verified)) throw new Error('Stale artifact identity');
+  if(reference&&(!/^[a-f0-9]{64}$/.test(reference.sourcePdfHash||'')||reference.sourcePdfHash!==verified.sourcePdfHash||typeof readReference!=='function'||typeof renderReference!=='function'))throw new Error('Original PDF reference does not match project');
+  const run={runId:runId??(globalThis.crypto?.randomUUID?.()||'run-'+Date.now().toString(36)+Math.random().toString(36).slice(2,10)),parentRunId:resumed?.runId??null,carriedStepCount:resumed?.stepCount??0};
+  let current = resumed ? resumed.currentProject : verified, lastProject = resumed ? resumed.candidate.project : verified, lastArtifact = resumed ? resumed.candidate.artifact : artifact, inspected = null, rendered = null;
+  // A saved PDF paired with the current source is a compiled fact; observations are not carried.
+  let compiled = resumed && lastArtifact && lastProject.id === current.id ? current.id : null;
+  let observations = [], images = [], trace = resumed ? [...resumed.trace] : [], coverage = null,referenceImages=[],referenceRead=false,referenceSeen=false,candidateSeen=null,compared=null,stepsTaken=0;
   const referencePages={read:new Set(),rendered:new Set(),observed:new Set()};
   const observedOriginal=new Set(),observedCandidates=new Map(),viewHistory=[];
   const viewKey=i=>JSON.stringify([i.pageIndex,i.bbox||null]);
   const candidateViews=()=>{const hash=lastArtifact?.pdfHash;if(!observedCandidates.has(hash))observedCandidates.set(hash,new Set());return observedCandidates.get(hash);};
   const alreadyObserved=i=>(i.document==='original'?observedOriginal:candidateViews()).has(viewKey(i));
   const observe=i=>{const views=i.document==='original'?observedOriginal:candidateViews(),key=viewKey(i);if(!views.has(key)){views.add(key);viewHistory.push({document:i.document||'candidate',pdfHash:i.document==='original'?reference?.sourcePdfHash:lastArtifact?.pdfHash,pageIndex:i.pageIndex,...(i.bbox?{bbox:i.bbox}:{})});}if(i.document==='original'&&!i.bbox)referencePages.observed.add(i.pageIndex);};
-  let previousCandidate=null;
-  const baselineProject=verified,baselineArtifact=artifact,checkpoints=new Map();
+  let previousCandidate=resumed?.previousCandidate??null;
+  const baselineProject=verified,baselineArtifact=resumed?resumed.baselineArtifact:artifact,checkpoints=new Map((resumed?.checkpoints||[]).map(c=>[c.revisionId,{label:c.label,project:c.project,artifact:c.artifact}]));
+  const nextRevisionId=()=>'r'+(Math.max(0,...[...checkpoints.keys()].map(id=>Number(id.slice(1))))+1);
   const resetChecks=()=>{compiled=inspected=rendered=candidateSeen=compared=null;images=[];coverage=null;};
-  const result = (status, message) => ({project:lastProject, artifact:lastArtifact,...(previousCandidate?{previousCandidate}:{}), status, trace, coverage:{...(coverage||{status:'partial',visualQualityVerified:false}),observedViews:structuredClone(viewHistory),...(reference?{reference:{sourcePdfHash:reference.sourcePdfHash,readPages:[...referencePages.read],renderedPages:[...referencePages.rendered],observedPages:[...referencePages.observed],renderedRegions:trace.filter(e=>e.action==='render_region'&&e.result?.status==='ok').flatMap(e=>e.result.coverage?.regions||[]).filter(r=>r.document==='original'),observedRegions:viewHistory.filter(v=>v.document==='original'&&v.bbox)}}:{})}, message});
-  const record = (action, data, identity=current.id, pdfHash=lastArtifact?.pdfHash ?? null) => {
-    const entry = {action, result:bounded(data), projectId:identity, pdfHash};
-    trace.push(entry); observations.push(entry); observations = observations.slice(-4);
-    try { onProgress?.(entry); } catch { /* observers cannot alter the run */ }
+  const coverageOut=()=>({...(coverage||{status:'partial',visualQualityVerified:false}),observedViews:structuredClone(viewHistory),...(reference?{reference:{sourcePdfHash:reference.sourcePdfHash,readPages:[...referencePages.read],renderedPages:[...referencePages.rendered],observedPages:[...referencePages.observed],renderedRegions:trace.filter(e=>e.action==='render_region'&&e.result?.status==='ok').flatMap(e=>e.result.coverage?.regions||[]).filter(r=>r.document==='original'),observedRegions:viewHistory.filter(v=>v.document==='original'&&v.bbox)}}:{})});
+  // Quality evidence is keyed by the PDF hash it describes; a different candidate never inherits it.
+  const evidence={inspection:new Map(),comparison:new Map(),diagnostics:new Map()};
+  const keep=(map,hash,value)=>{map.delete(hash);map.set(hash,value);if(map.size>16)map.delete(map.keys().next().value);};
+  const ingest=entry=>{
+    const r=entry.result,hash=entry.pdfHash;if(r?.status!=='ok'||typeof hash!=='string')return;
+    if(entry.action==='inspect_pdf'&&r.observation?.schema==='falsify.layout-quality.v1'&&r.observation.pdfHash===hash)keep(evidence.inspection,hash,r.observation);
+    else if(entry.action==='compare_document'&&r.observation?.schema==='falsify.layout-document-comparison.v1'&&r.observation.outputHash===hash)keep(evidence.comparison,hash,r.observation);
+    else if(entry.action==='compile_pdf'&&Array.isArray(r.diagnostics))keep(evidence.diagnostics,hash,r.diagnostics);
   };
+  trace.forEach(ingest);
+  const candidateHash=()=>lastArtifact&&lastArtifact.projectId===lastProject.id?lastArtifact.pdfHash:null;
+  const quality=()=>{
+    const hash=candidateHash();
+    try{return deepFreeze(deriveLayoutOutcome({candidatePdfHash:hash,candidateProjectId:lastProject.id,baselinePdfHash:baselineArtifact?.pdfHash??null,baselineProjectId:baselineProject.id,inspection:hash?evidence.inspection.get(hash)??null:null,comparison:hash?evidence.comparison.get(hash)??null:null,diagnostics:hash?evidence.diagnostics.get(hash)??null:null,observedPages:viewHistory.filter(v=>v.document==='candidate'&&v.pdfHash===hash&&!v.bbox).map(v=>v.pageIndex)}));}
+    catch{return deepFreeze({schema:'falsify.layout-quality-outcome.v1',pdfHash:hash,content:'unverified',layout:'unverified',observedPages:[],findings:[]});}
+  };
+  // Snapshots share immutable byte buffers; frozen shells keep observers from altering the run.
+  const projectViews=new WeakMap(),artifactViews=new WeakMap();
+  const projectView=p=>{let v=projectViews.get(p);if(!v){v=Object.freeze({...p,files:Object.freeze(p.files.map(f=>Object.freeze({path:f.path,bytes:f.bytes,sha256:f.sha256})))});projectViews.set(p,v);}return v;};
+  const artifactView=a=>{if(!a)return null;let v=artifactViews.get(a);if(!v){const {pdfBytes,...rest}=a;let copy;try{copy=structuredClone(rest);}catch{copy={...rest};}v=deepFreeze({...copy,pdfBytes});artifactViews.set(a,v);}return v;};
+  const snapshot=(status,runState,q=quality())=>deepFreeze({schema:LAYOUT_RUN_STATE_SCHEMA,runId:run.runId,parentRunId:run.parentRunId,carriedStepCount:run.carriedStepCount,stepCount:run.carriedStepCount+stepsTaken,baselineProject:projectView(baselineProject),baselineArtifact:artifactView(baselineArtifact),currentProject:projectView(current),candidate:{project:projectView(lastProject),artifact:artifactView(lastArtifact)},...(previousCandidate?{previousCandidate:{project:projectView(previousCandidate.project),artifact:artifactView(previousCandidate.artifact)}}:{}),checkpoints:[...checkpoints].map(([revisionId,c])=>({revisionId,label:c.label,project:projectView(c.project),artifact:artifactView(c.artifact)})),trace:trace.slice(),coverage:coverageOut(),quality:q,status,runState});
+  const emit=build=>{
+    if(typeof onState!=='function')return;
+    try{const pending=onState(build());if(pending&&typeof pending.then==='function')pending.then(null,()=>{});}catch{/* observers cannot alter the run */}
+  };
+  const result = (status, message, runState=status==='complete'?'completed':status==='cancelled'?'cancelled':'paused') => {
+    let sessionState;try{sessionState=snapshot(status,runState,quality());}catch{sessionState=null;}
+    const q=sessionState?.quality??quality();
+    if(sessionState)emit(()=>sessionState);
+    return {project:lastProject, artifact:lastArtifact,...(previousCandidate?{previousCandidate}:{}), status, trace, coverage:coverageOut(), message, runState, quality:q, sessionState};
+  };
+  const record = (action, data, identity=current.id, pdfHash=lastArtifact?.pdfHash ?? null) => {
+    const entry = deepFreeze({action, result:bounded(data), projectId:identity, pdfHash});
+    trace.push(entry); observations.push(entry); observations = observations.slice(-4);
+    ingest(entry);
+    try { onProgress?.(entry); } catch { /* observers cannot alter the run */ }
+    if(entry.result?.status==='ok')emit(()=>snapshot('running','running'));
+  };
+  emit(()=>snapshot('running','running'));
   const cancelled = () => signal?.aborted;
   for (let step=0; step<maxSteps; step++) {
     if (cancelled()) return result('cancelled','Layout run cancelled.');
@@ -114,9 +216,11 @@ export async function runPaperLayoutAgent({project, artifact=null, decide, compi
       execution.pendingViews=[...referenceImages,...images].filter(i=>!visible(i)).map(({document='candidate',pageIndex,bbox})=>({document,pageIndex,...(bbox?{bbox}:{})}));
       execution.observedViews=structuredClone(viewHistory);
       execution.comparedCurrent=compared===lastArtifact?.pdfHash;
+      execution.run={runId:run.runId,parentRunId:run.parentRunId,carriedStepCount:run.carriedStepCount};
       execution.comparisonRequired=typeof handlers.compare_document==='function'&&current.id!==baselineProject.id;
       execution.canFinish=execution.compiledCurrent&&execution.inspectedCurrent&&execution.renderedCurrent&&candidateVisible&&(!reference||observedRead&&originalVisible)&&execution.pendingViews.length===0&&(!execution.comparisonRequired||execution.comparedCurrent);
       const availableTools=layoutToolCatalog.filter(t=>legacyTools.has(t.name)||['checkpoint','restore_revision'].includes(t.name)||typeof handlers[t.name]==='function').filter(t=>!['read_reference','render_reference_pages'].includes(t.name)||reference).filter(t=>t.name!=='restructure_source'||structure&&typeof restructure==='function');
+      stepsTaken=step+1;
       a = await decide({protocol:'v2',projectId:current.id, step, maxSteps, execution,instruction:instruction, tools:structuredClone(availableTools), observations:structuredClone(observations), images:structuredClone(attached), sourceFiles:sourceFiles.map(f=>({path:f.path,text:dec.decode(f.bytes).slice(0,previewSize)})),...(reference?{reference:structuredClone(reference)}:{}),...(structure?{structure}: {})});
       attached.forEach(observe);
       if(attached.some(i=>i.document==='original'))referenceSeen=true;
@@ -124,11 +228,11 @@ export async function runPaperLayoutAgent({project, artifact=null, decide, compi
       if(attached.some(i=>i.document!=='original')&&compiled===current.id)candidateSeen=lastArtifact?.pdfHash;
       if (cancelled()) return result('cancelled','Layout run cancelled.');
       a=normalizeLayoutAction(a);
-      if (!a||!availableTools.some(t=>t.name===a.tool)) { record('invalid_action',{status:'rejected',reason:'Choose an available tool and its listed arguments.'}); return result('unresolved','Malformed agent action.'); }
+      if (!a||!availableTools.some(t=>t.name===a.tool)) { record('invalid_action',{status:'rejected',reason:'Choose an available tool and its listed arguments.'}); return result('unresolved','Malformed agent action.','failed'); }
       const action = a.tool;
       if(action==='checkpoint'){
         if(checkpoints.size>=12){record(action,{status:'rejected',reason:'Twelve revisions are saved. Restore a revision to continue.'});continue;}
-        const revisionId='r'+(checkpoints.size+1),paired=lastProject.id===current.id&&validArtifact(lastArtifact,current)?lastArtifact:null;
+        const revisionId=nextRevisionId(),paired=lastProject.id===current.id&&validArtifact(lastArtifact,current)?lastArtifact:null;
         checkpoints.set(revisionId,{label:a.args.label||revisionId,project:current,artifact:paired});record(action,{status:'ok',revisionId,label:a.args.label||revisionId,hasPdf:!!paired});continue;
       }
       if(action==='restore_revision'){
@@ -225,7 +329,7 @@ export async function runPaperLayoutAgent({project, artifact=null, decide, compi
     } catch (error) {
       if (cancelled()) return result('cancelled','Layout run cancelled.');
       record(a?.tool || 'decide',{status:'failed',reason:'Tool failed'});
-      return result('unresolved','Layout agent tool failed.');
+      return result('unresolved','Layout agent tool failed.','failed');
     }
   }
   return result('unresolved','Layout agent reached its step limit.');
