@@ -12,7 +12,7 @@ const items=[
  ['compile_pdf','Generate the current PDF. Returns its hash and compiler findings.',object()],
  ['inspect_pdf','Check the current PDF for overlaps, clipping, column and caption findings.',object()],
  ['render_pages','View up to four candidate pages. Page indices start at zero.',object({pages})],
- ['read_reference','Read original PDF text and source regions. Use offset to continue a page.',object({pages,offset:integer})],
+ ['read_reference','Read original PDF text and source regions. Continue each page with its returned next arguments until next is null.',object({pages,offset:integer,textOffset:{type:'integer',minimum:0},unitOffset:{type:'integer',minimum:0}})],
  ['render_reference_pages','View up to four original pages. Request matching candidate pages with render_pages.',object({pages})],
  ['restructure_source','Set full-width front matter, body order, columns and header/footer units. Include every current unit once.',object({plan},['plan'])],
  ['finish','Return the chosen candidate and a brief account of changes and remaining findings.',object()],

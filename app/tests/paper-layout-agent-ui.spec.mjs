@@ -206,3 +206,20 @@ test('finding regions reach the preview; page inputs stay within the document an
  await agent.restoreRun({...state,quality:{content:'unchanged',layout:'clear',layoutScope:'observed',inspectionStatus:'partial',observedPages:[0],findings:[]}});
  assert.ok(findAll(host,n=>n.textContent?.includes('검사 범위에서 문제 없음')).length);assert.equal(findAll(host,n=>n.textContent?.includes('배치 검사 통과')).length,0);
 });
+
+
+test('large original reference pages stay bounded and cursors preserve all text and units',async()=>{
+ const {readLayoutReference}=await import('../src/paper-layout-reference.mjs');const bytes=Uint8Array.of(1,2,3),text='Original 71 '.repeat(1000),units=Array.from({length:160},(_,i)=>({id:'unit-'+i,pageIndex:Math.floor(i/40),bbox:[10,20,30,40],kind:'paragraph',role:'body',span:'column'})),structure={units,groups:[units.map(u=>u.id)],plan:{order:units.map(u=>u.id),frontMatter:[],furniture:[]}};let destroyed=0;
+ const args={bytes,sourcePdfHash:hex(bytes),structure,loadPdf:async()=>({getDocument:()=>({promise:Promise.resolve({numPages:4,getPage:async()=>({getTextContent:async()=>({items:[{str:text}]}),getViewport:()=>({width:600,height:800})})}),destroy:async()=>{destroyed++;}})}),baseUrl:new URL('https://example.test/')};
+ const first=await readLayoutReference({...args,pages:[0,1,2,3]});assert.ok(JSON.stringify({status:'ok',reference:first}).length<12000);assert.equal(first.pages.length,4);
+ for(const page of first.pages){let got=page.text,ids=page.units.map(u=>u.id),next=page.next,count=0;while(next){assert.ok(count++<100);const result=await readLayoutReference({...args,...next});assert.ok(JSON.stringify(result).length<12000);const part=result.pages[0];got+=part.text;ids.push(...part.units.map(u=>u.id));next=part.next;}assert.equal(got,text);assert.deepEqual(ids,units.filter(u=>u.pageIndex===page.pageIndex).map(u=>u.id));assert.equal(new Set(ids).size,ids.length);}
+ assert.ok(destroyed>1);await assert.rejects(readLayoutReference({...args,sourcePdfHash:'0'.repeat(64)}));
+});
+
+
+test('invalid action recovery exports its failed receipt and retains the candidate',async()=>{
+ const {runPaperLayoutAgent}=await import('../src/paper-layout-agent.mjs');const project=await makeProject(),bytes=Uint8Array.of(1,2),artifact={success:true,projectId:project.id,engine:project.engine,pdfBytes:bytes,pdfHash:hex(bytes)},session={snapshot:()=>({changes:[]}),compile:async()=>artifact,getCurrentProject:async()=>project};let requests=0;
+ const link={request:async(path,body)=>{assert.ok(body);const i=requests++;return {schema:'falsify.layout-step-receipt.v1',runId:body.runId,stepId:body.stepId,fingerprint:'a'.repeat(64),state:i?'completed':'failed',...(i?{result:{schema:'falsify.paper-layout-agent-action.v1',projectId:body.request.projectId,step:body.request.step,model:'test',skillHash:'a'.repeat(64),action:{tool:'finish',args:{},message:'Done'}}}:{error:{error:'invalid_action',message:'Rejected'}})};}};
+ const host=new Element('host'),agent=mountPaperLayoutAgent({doc:document,host,getSession:()=>session,getEpoch:()=>1,download(){},bridge:{session:()=>link,state:()=>({cap:{paperLayoutJobs:true}})},compilerFactory:()=>({dispose(){}}),readerFactory:()=>({dispose(){}}),runAgent:runPaperLayoutAgent});
+ await agent.start();assert.equal(requests,2);const candidate=agent.getCandidate();assert.equal(candidate.artifact.pdfHash,artifact.pdfHash);assert.equal(candidate.decisionReceipts[0].failure.code,'invalid_action');assert.match(candidate.decisionReceipts[0].failure.request.stepId,/-s0$/);assert.equal(candidate.sessionState.decisionReceipts[0].failure.code,'invalid_action');
+});

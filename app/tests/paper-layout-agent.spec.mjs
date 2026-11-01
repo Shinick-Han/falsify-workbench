@@ -87,3 +87,15 @@ test('empty or stale inspection and stale compile cannot replace valid output',a
  const f=await fixture();for(const inspect of [async()=>({}),async()=>({schema:'falsify.layout-quality.v1',status:'partial',pdfHash:'0'.repeat(64),issues:[],coverage:{pages:1}})]){const out=await runPaperLayoutAgent(setup(f,[action('compile_pdf'),action('inspect_pdf'),action('render_pages'),action('finish')],{inspect}).args);assert.equal(out.status,'unresolved');}
  const out=await runPaperLayoutAgent(setup(f,[action('replace_source',{path:'main.tex',before:'\\vspace{2pt}',after:'\\vspace{4pt}'}),action('compile_pdf'),action('finish')],{compile:async()=>f.artifact(f.project)}).args);assert.equal(out.status,'unresolved');assert.equal(out.project.id,f.project.id);assert.equal(out.artifact.projectId,f.project.id);
 });
+
+
+test('invalid model action is corrected under a fresh step without losing the candidate',async()=>{
+ const f=await fixture();let calls=0;const seen=[];
+ const s=setup(f,[],{maxSteps:5,decide:async input=>{seen.push(input);if(calls++===0)throw Object.assign(new Error('private prompt'),{code:'invalid_action',stepReceipt:{runId:'r1',stepId:'r1-s0',fingerprint:'a'.repeat(64),request:{secret:'never export'}}});return [action('compile_pdf'),action('inspect_pdf'),action('render_pages'),action('finish')][calls-2];}});
+ const out=await runPaperLayoutAgent(s.args);assert.equal(out.status,'complete');assert.equal(seen.length,5);assert.deepEqual(seen.map(x=>x.step),[0,1,2,3,4]);assert.equal(out.project.id,f.project.id);assert.equal(out.trace[0].action,'invalid_action');assert.equal(out.trace[0].result.status,'rejected');assert.equal(out.trace[0].result.request.stepId,'r1-s0');assert.equal(JSON.stringify(out.trace).includes('private prompt'),false);assert.equal(JSON.stringify(out.trace).includes('never export'),false);
+});
+test('invalid action correction has a step budget and other failures do not retry',async()=>{
+ const f=await fixture();let calls=0;
+ const out=await runPaperLayoutAgent(setup(f,[],{maxSteps:2,decide:async()=>{calls++;throw Object.assign(new Error(),{code:'invalid_action'});}}).args);assert.equal(calls,2);assert.equal(out.runState,'paused');assert.equal(out.artifact.pdfHash,f.artifact(f.project).pdfHash);
+ calls=0;const stopped=await runPaperLayoutAgent(setup(f,[],{decide:async()=>{calls++;throw Object.assign(new Error('private diagnostic'),{code:'model_timeout'});}}).args);assert.equal(calls,1);assert.equal(stopped.runState,'failed');assert.equal(stopped.trace[0].result.code,'model_timeout');assert.match(stopped.message,/시간/);assert.equal(stopped.message.includes('private'),false);
+});

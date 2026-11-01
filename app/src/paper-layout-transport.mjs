@@ -1,3 +1,10 @@
+const FAILURE_MESSAGES={invalid_action:'AI의 도구 호출 형식이 맞지 않습니다.',model_timeout:'AI 응답 시간이 초과됐습니다.',model_failed:'AI 응답을 받지 못했습니다.',model_tool_violation:'AI가 앱 밖의 도구 실행을 요청했습니다.',cli_login_required:'Codex 로그인이 필요합니다.',request_limit:'요청이 처리 가능한 크기를 넘었습니다.',invalid_request:'레이아웃 요청 형식을 확인하세요.',companion_busy:'PC에서 다른 작업을 처리하고 있습니다.',job_start_failed:'PC에서 AI 작업을 시작하지 못했습니다.',skill_unavailable:'설치된 배치 지침을 읽지 못했습니다.',fingerprint_mismatch:'요청 내용과 식별 정보가 다릅니다.',layout_step_conflict:'동일 단계에 다른 요청이 접수돼 있습니다.',layout_step_not_found:'이 PC에 해당 요청 기록이 없습니다.'};
+export function layoutFailureDetails(error){
+ const code=Object.hasOwn(FAILURE_MESSAGES,error?.code)?error.code:Object.hasOwn(FAILURE_MESSAGES,error?.message)?error.message:'request_failed',out={code,reason:FAILURE_MESSAGES[code]||'레이아웃 작업을 마치지 못했습니다.'},r=error?.stepReceipt;
+ if(r){const request={};for(const k of ['runId','stepId','projectId','fingerprint','companionInstance'])if(typeof r[k]==='string'&&/^[A-Za-z0-9._:-]{1,160}$/.test(r[k]))request[k]=r[k];if(Number.isSafeInteger(r.step)&&r.step>=0)request.step=r.step;if(Object.keys(request).length)out.request=request;}
+ if(Number.isSafeInteger(error?.httpStatus)&&error.httpStatus>=100&&error.httpStatus<=599)out.httpStatus=error.httpStatus;
+ return out;
+}
 const ROOT='/api/paper/layout-agent/jobs';
 const aborted=()=>new DOMException('취소했습니다.','AbortError');
 const pause=(ms,signal)=>new Promise((resolve,reject)=>{if(signal?.aborted){reject(aborted());return;}const cancel=()=>{clearTimeout(timer);reject(aborted());};const timer=setTimeout(()=>{signal?.removeEventListener('abort',cancel);resolve();},ms);signal?.addEventListener('abort',cancel,{once:true});});
@@ -29,7 +36,7 @@ export async function layoutStepDecision(link,request,{runId,signal,pendingStep,
     }
   }catch(error){if(signal?.aborted)throw aborted();if(recovering&&error&&typeof error==='object'&&!error.recovery)error.recovery=error.httpStatus===404?'not-found':'unreachable';throw error;}
   if(signal?.aborted)throw aborted();
-  if(receipt.state!=='completed')throw Object.assign(new Error(receipt.error?.message||'요청을 마치지 못했습니다. 다시 실행할 수 있습니다.'),{disposition:receipt.state,stepReceipt:saved});
+  if(receipt.state!=='completed')throw Object.assign(new Error(receipt.error?.message||'요청을 마치지 못했습니다. 다시 실행할 수 있습니다.'),{code:Object.hasOwn(FAILURE_MESSAGES,receipt.error?.error)?receipt.error.error:'request_failed',disposition:receipt.state,stepReceipt:saved});
   const response=receipt.result;
   if(response?.schema!=='falsify.paper-layout-agent-action.v1'||response.projectId!==original.projectId||response.step!==original.step||!response.action)throw new Error('레이아웃 응답의 소스·단계가 다릅니다.');
   return {response,pendingStep:saved};

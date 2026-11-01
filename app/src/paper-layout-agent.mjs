@@ -1,3 +1,4 @@
+import {layoutFailureDetails} from './paper-layout-transport.mjs';
 import {createLatexProject} from './latex-project.mjs';
 import {hex} from './paragraph-pdf-crypto.mjs';
 import {readLayoutStructure} from './paper-layout-structure.mjs';
@@ -198,7 +199,7 @@ export async function runPaperLayoutAgent({project, artifact=null, decide, compi
     trace.push(entry); observations.push(entry); observations = observations.slice(-4);
     ingest(entry);
     try { onProgress?.(entry); } catch { /* observers cannot alter the run */ }
-    if(entry.result?.status==='ok')emit(()=>snapshot('running','running'));
+    if(entry.result?.status==='ok'||entry.result?.code==='invalid_action')emit(()=>snapshot('running','running'));
   };
   emit(()=>snapshot('running','running'));
   const cancelled = () => signal?.aborted;
@@ -266,7 +267,7 @@ export async function runPaperLayoutAgent({project, artifact=null, decide, compi
       }
       if(action==='read_reference'){
         if(!reference){record(action,{status:'rejected',reason:'No original PDF reference'});continue;}
-        const output=await readReference({pages:[...a.pages],offset:/^\d+$/.test(a.before)?Number(a.before):0,signal});if(cancelled())return result('cancelled','Layout run cancelled.');
+        const output=await readReference({pages:[...a.pages],offset:a.args.offset??(/^\d+$/.test(a.before)?Number(a.before):0),textOffset:a.args.textOffset,unitOffset:a.args.unitOffset,signal});if(cancelled())return result('cancelled','Layout run cancelled.');
         if(output?.sourcePdfHash!==reference.sourcePdfHash||!Array.isArray(output.pages)||!output.pages.length||output.pages.some(p=>!Number.isSafeInteger(p.pageIndex)||p.pageIndex<0)||bounded({status:'ok',reference:output})?.status==='truncated'){record(action,{status:'rejected',reason:'Original reference is unavailable, too large, or has another hash'});continue;}
         for(const page of output.pages)referencePages.read.add(page.pageIndex);record(action,{status:'ok',reference:output});continue;
       }
@@ -328,8 +329,10 @@ export async function runPaperLayoutAgent({project, artifact=null, decide, compi
       record(action,{status:'ok',pages:images.map(i=>i.pageIndex),coverage});
     } catch (error) {
       if (cancelled()) return result('cancelled','Layout run cancelled.');
-      record(a?.tool || 'decide',{status:'failed',reason:'Tool failed'});
-      return result('unresolved','Layout agent tool failed.','failed');
+      const failure=layoutFailureDetails(error);
+      if(!a&&failure.code==='invalid_action'){record('invalid_action',{status:'rejected',...failure,reason:failure.reason+' Choose an offered tool and use exactly its listed arguments. No edit was applied.'});continue;}
+      record(a?.tool || 'decide',{status:'failed',...failure});
+      return result('unresolved',failure.reason,'failed');
     }
   }
   return result('unresolved','Layout agent reached its step limit.');

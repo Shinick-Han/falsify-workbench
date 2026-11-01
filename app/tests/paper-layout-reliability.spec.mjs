@@ -59,3 +59,9 @@ test('failed receipt lookups are tagged for a manual discard and never fall back
  assert.deepEqual(posts,[]);
  await assert.rejects(layoutStepDecision({request:async()=>{throw new Error('network');}},request,{runId:'r3'}),e=>e.recovery===undefined);
 });
+
+
+test('failed action receipt retains fixed code and request identity without request content',async()=>{
+ const {layoutFailureDetails}=await import('../src/paper-layout-transport.mjs');const link={request:async()=>({...receipt('failed'),error:{error:'invalid_action',message:'private model output'}})};
+ try{await layoutStepDecision(link,request,{runId:'r1'});assert.fail('expected failed receipt');}catch(e){assert.equal(e.code,'invalid_action');assert.equal(e.disposition,'failed');const detail=layoutFailureDetails(e);assert.equal(detail.code,'invalid_action');assert.equal(detail.request.stepId,'r1-s0');assert.equal(detail.request.fingerprint,receipt('failed').fingerprint);assert.equal(JSON.stringify(detail).includes('private model output'),false);assert.equal('request' in detail.request,false);}
+});
