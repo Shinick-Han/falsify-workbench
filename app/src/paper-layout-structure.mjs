@@ -7,10 +7,12 @@ const begin=id=>`% FALSIFY-UNIT-BEGIN ${key(id)}\n`,end=id=>`% FALSIFY-UNIT-END 
 const KINDS=new Set(['paragraph','heading','caption','furniture','figure','table','unknown']);
 const ROLES=new Set(['title','heading','caption','footnote','body']);
 const SPANS=new Set(['column','page','unknown']);
+// Generated unit ids are a short prefix plus 24 hex digits. A sha256 token serializes to 66. The registry repeats an id, so a longer id exceeds the observation budget.
+const MAX_SERIALIZED_ID=66;
 const finiteBox=b=>Array.isArray(b)&&b.length===4&&b.every(n=>typeof n==='number'&&Number.isFinite(n));
 function validate(s,p){
  if(s?.schema!=='falsify.paper-layout-structure.v1'||!Array.isArray(s.units)||!Array.isArray(s.groups)||!/^[a-f0-9]{64}$/.test(s.sourcePdfHash||''))fail('INVALID_STRUCTURE');
- const ids=s.units.map(u=>u.id);if(ids.some(id=>typeof id!=='string'||!id)||new Set(ids).size!==ids.length)fail('INVALID_STRUCTURE');
+ const ids=s.units.map(u=>u.id);if(ids.some(id=>typeof id!=='string'||!id||JSON.stringify(id).length>MAX_SERIALIZED_ID)||new Set(ids).size!==ids.length)fail('INVALID_STRUCTURE');
  if(s.units.some(u=>!u||typeof u!=='object'||!finiteBox(u.bbox)||(u.kind!==undefined&&!KINDS.has(u.kind))||(u.role!==undefined&&!ROLES.has(u.role))||(u.span!==undefined&&!SPANS.has(u.span))))fail('INVALID_STRUCTURE');
  if(p?.schema!=='falsify.paper-layout-plan.v1'||p.sourcePdfHash!==s.sourcePdfHash||![1,2].includes(p.columns)||!Array.isArray(p.order)||!Array.isArray(p.frontMatter)||!Array.isArray(p.furniture))fail('INVALID_PLAN');
  const all=new Set(ids),order=new Set(p.order),front=new Set(p.frontMatter),furniture=new Set(p.furniture.map(f=>f?.id));

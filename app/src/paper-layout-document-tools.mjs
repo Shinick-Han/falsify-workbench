@@ -66,8 +66,10 @@ export async function getLayoutBlock({project,artifact,referenceBytes,args={},si
  const build=end=>{
   const sourceEnd=Math.min(end,sourceText.length),textEnd=Math.min(end,text.length);
   const sourceSlice=sourceText.slice(Math.min(start,sourceText.length),sourceEnd),textSlice=text.slice(Math.min(start,text.length),textEnd);
-  const described={schema:'falsify.layout-block.v1',projectId:project.id,outputHash:artifact?.pdfHash??null,block:{...detail,sourceText:sourceSlice,text:textSlice,sourceTextPage:{total:sourceText.length,offset:start,limit:sourceSlice.length,nextOffset:sourceEnd<sourceText.length?sourceEnd:null},textPage:{total:text.length,offset:start,limit:textSlice.length,nextOffset:textEnd<text.length?textEnd:null},currentGeometry:{...currentGeometry,candidates:geometry},assetPaths:assets,targetId:'lt1_'+'a'.repeat(64),sourceBlockId:block.id}};
-  return {bytes:observationBytes(described),value:{schema:described.schema,projectId:described.projectId,outputHash:described.outputHash,block:{...detail,sourceText:sourceSlice,text:textSlice,sourceTextPage:described.block.sourceTextPage,textPage:described.block.textPage,currentGeometry:described.block.currentGeometry,assetPaths:described.block.assetPaths}}};
+  const body={...detail,sourceText:sourceSlice,text:textSlice,sourceTextPage:{total:sourceText.length,offset:start,limit:sourceSlice.length,nextOffset:sourceEnd<sourceText.length?sourceEnd:null},textPage:{total:text.length,offset:start,limit:textSlice.length,nextOffset:textEnd<text.length?textEnd:null},currentGeometry:{...currentGeometry,candidates:geometry},assetPaths:assets};
+  const registeredId='lt1_'+'a'.repeat(64),budgetBlock=block.evidenceStatus==='source-bound'?{...body,targetId:block.id,sourceBlockId:block.id}:{...body,id:registeredId,targetId:registeredId,sourceBlockId:block.id};
+  const described={schema:'falsify.layout-block.v1',projectId:project.id,outputHash:artifact?.pdfHash??null,block:budgetBlock};
+  return {bytes:observationBytes(described),value:{schema:described.schema,projectId:described.projectId,outputHash:described.outputHash,block:body}};
  };
  if(start>=maxLen)return build(start).value;
  let lo=start,hi=Math.min(maxLen,start+limit),best=start;

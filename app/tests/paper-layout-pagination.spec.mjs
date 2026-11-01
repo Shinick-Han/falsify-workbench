@@ -7,6 +7,7 @@ import {createReconstructionProject} from '../src/pdf-latex-baseline.mjs';
 import {readLayoutStructure,renderStructureRegion} from '../src/paper-layout-structure.mjs';
 import {normalizeLayoutAction} from '../src/paper-layout-tool-catalog.mjs';
 import {inspectLayoutDocument,getLayoutBlock} from '../src/paper-layout-document-tools.mjs';
+import {createLayoutToolHandlers} from '../src/paper-layout-toolbox.mjs';
 import {readLayoutReference} from '../src/paper-layout-reference.mjs';
 import {hex} from '../src/paragraph-pdf-crypto.mjs';
 
@@ -77,7 +78,26 @@ test('legacy offset, explicit cursors, end of page and invalid metadata stay det
  assert.equal(legacy.textOffset,1000);
  assert.equal(legacy.unitOffset,20);
  assert.deepEqual(legacy.units.map(u=>u.id),many.slice(20).map(u=>u.id));
- await assert.rejects(readLayoutReference({...base,pages:[0],offset:1}),/페이지 길이/);
+ const clamped=(await readLayoutReference({...base,pages:[0],offset:1})).pages[0];
+ assert.equal(clamped.textOffset,1000);
+ assert.equal(clamped.text.length,500);
+ assert.equal(clamped.unitOffset,units.length);
+ assert.deepEqual(clamped.units,[]);
+ assert.equal(clamped.unitsTruncated,false);
+ const legacyEof=(await readLayoutReference({...base,pages:[0],offset:2})).pages[0];
+ assert.equal(legacyEof.text,'');
+ assert.equal(legacyEof.textOffset,body.length);
+ assert.equal(legacyEof.unitOffset,units.length);
+ assert.equal(legacyEof.next,null);
+ const textLoad=async()=>({getDocument:()=>({promise:Promise.resolve({numPages:1,getPage:async()=>({getTextContent:async()=>({items:[{str:'X'.repeat(3000)}]}),getViewport:()=>({width:300,height:400})})}),destroy:async()=>{}})});
+ const textOnlyLegacy=(await readLayoutReference({...base,structure:undefined,loadPdf:textLoad,pages:[0],offset:1})).pages[0];
+ assert.equal(textOnlyLegacy.textOffset,1000);
+ assert.equal(textOnlyLegacy.text.length,1000);
+ const shortUnits=Array.from({length:45},(_,i)=>({id:'u'+i,pageIndex:0,bbox:[1,2,3,4],kind:'paragraph',role:'body',span:'column'}));
+ const shortLoad=async()=>({getDocument:()=>({promise:Promise.resolve({numPages:1,getPage:async()=>({getTextContent:async()=>({items:[{str:'ABCDEFG'}]}),getViewport:()=>({width:300,height:400})})}),destroy:async()=>{}})});
+ const short=(await readLayoutReference({...base,structure:{units:shortUnits,groups:[],plan:{order:shortUnits.map(u=>u.id),frontMatter:[],furniture:[],columns:1}},loadPdf:shortLoad,pages:[0],offset:1})).pages[0];
+ assert.equal(short.text,'');
+ assert.equal(short.units[0].id,'u20');
  const textOnly=(await readLayoutReference({...base,pages:[0],textOffset:4})).pages[0];
  assert.equal(textOnly.text.startsWith('EFGHIJ'),true);
  assert.equal(textOnly.unitOffset,0);
@@ -114,17 +134,25 @@ test('imported unit metadata is rejected and a single oversized item stays bound
  const legacyUnits=[{id:'header0',pageIndex:0,pageHeight:800,bbox:[40,20,180,30],kind:'furniture'},{id:'body',pageIndex:0,pageHeight:800,bbox:[40,70,550,700],kind:'paragraph'}];
  const plan={schema:'falsify.paper-layout-plan.v1',sourcePdfHash:hash,order:legacyUnits.map(u=>u.id),frontMatter:[],furniture:[{id:'header0',placement:'header'}],columns:1};
  renderStructureRegion({schema:'falsify.paper-layout-structure.v1',sourcePdfHash:hash,units:legacyUnits,groups:[],plan},plan,new Map([['header0','Journal\\par\n'],['body','Evidence 63\\par\n']]));
- const longId='U'.repeat(9000),hugeId='V'.repeat(15000);
- const wide=await project([item(longId,'Wide'),item('tail','Tail')]);
- const wideObs=await inspectLayoutDocument({project:wide,artifact:null,args:{limit:20}});
- assert.ok(observationBytes(wideObs)<=12000);
- assert.equal(wideObs.blocks.items.some(i=>i.id===longId),true);
- assert.ok(wideObs.blocks.nextOffset);
- const tail=await inspectLayoutDocument({project:wide,artifact:null,args:{offset:wideObs.blocks.nextOffset,limit:20}});
- assert.equal(tail.blocks.items.some(i=>i.id==='tail'),true);
- const overflow=await project([item(hugeId,'Huge'),item('after','After')]);
- await assert.rejects(inspectLayoutDocument({project:overflow,artifact:null}),error=>error.code==='request_limit'&&/offset/.test(error.message));
- const after=await inspectLayoutDocument({project:overflow,artifact:null,args:{offset:1,limit:1}});
- assert.equal(after.blocks.items[0].id,'after');
- assert.ok(observationBytes(after)<=12000);
+ await assert.rejects(()=>project([item('X'.repeat(6000),'Wide'),item('tail','Tail')]),{code:'INVALID_STRUCTURE'});
+ await assert.rejects(()=>project([item('h'.repeat(65),'Over'),item('tail','Tail')]),{code:'INVALID_STRUCTURE'});
+ const generated='item-'+'a'.repeat(24),hashId='h'.repeat(64);
+ const normal=await project([item(generated,'Kept'),item(hashId,'Hash'),item('tail','Tail')]);
+ assert.deepEqual(readLayoutStructure(normal).units.map(u=>u.id),[generated,hashId,'tail']);
+ const normalObs=await inspectLayoutDocument({project:normal,artifact:null,args:{limit:20}});
+ assert.ok(observationBytes(normalObs)<=12000);
+ assert.equal(normalObs.blocks.items.some(i=>i.id===generated),true);
+ assert.equal(normalObs.blocks.items.some(i=>i.id===hashId),true);
+ assert.equal(normalObs.blocks.items.some(i=>i.id==='tail'),true);
+});
+
+test('registered get_block observation stays inside the handler budget and keeps every quote',async()=>{
+ const quotes='"'.repeat(9000);
+ const quoted=await createLatexProject({mainFile:'main.tex',files:[{path:'main.tex',bytes:enc.encode('\\documentclass{article}\n\\begin{document}\n'+quotes+'\n\\end{document}\n')}]});
+ const handlers=createLayoutToolHandlers({project:quoted});
+ const id=(await handlers.inspect_document({project:quoted,args:{}})).observation.blocks.items[0].id;
+ for(const offset of [0,1,2000,3000]){const result=await handlers.get_block({project:quoted,args:{blockId:id,offset,limit:4096}});assert.ok(JSON.stringify({status:'ok',...result}).length<=12000);}
+ let offset=0,text='',guard=0;
+ while(offset!==null){assert.ok(++guard<40);const result=await handlers.get_block({project:quoted,args:{blockId:id,offset,limit:4096}});assert.ok(JSON.stringify({status:'ok',...result}).length<=12000);text+=result.observation.block.text;const next=result.observation.block.textPage.nextOffset;if(next==null)break;assert.ok(next>offset);offset=next;}
+ assert.equal((text.match(/"/g)||[]).length,9000);
 });

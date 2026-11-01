@@ -38,11 +38,13 @@ export async function readLayoutReference({bytes,sourcePdfHash,structure,loadPdf
   for(const pageIndex of selected){
    const page=await pdf.getPage(pageIndex+1),content=await page.getTextContent();check();
    const text=content.items.map(i=>i.str||'').join(' '),viewport=page.getViewport({scale:1}),units=structure?.units.filter(u=>u.pageIndex===pageIndex)||[];
-   if(startText>text.length||startUnit>units.length)throw new Error('원본 조회 위치가 이 페이지 길이를 넘었습니다. 0부터 읽거나, 직전에 받은 next 커서로 이어 가세요.');
-   let textCount=Math.min(1000,Math.max(0,text.length-startText)),unitCount=Math.min(20,Math.max(0,units.length-startUnit)),entry;
-   const make=()=>{const textEnd=snapEnd(text,startText,startText+textCount),shown=text.slice(startText,textEnd),textRemains=textEnd<text.length,unitsRemain=startUnit+unitCount<units.length;return {pageIndex,width:viewport.width,height:viewport.height,text:shown,textOffset:startText,textTruncated:textRemains,...(structure?{units:units.slice(startUnit,startUnit+unitCount).map(u=>projectUnit(structure,u)),unitOffset:startUnit,unitsTruncated:unitsRemain}:{}),next:textRemains||unitsRemain?{pages:[pageIndex],textOffset:textEnd,unitOffset:startUnit+unitCount}:null};};
+   let fromText=startText,fromUnit=startUnit;
+   if(explicit){if(hasText&&fromText>text.length||hasUnit&&fromUnit>units.length)throw new Error('원본 조회 위치가 이 페이지 길이를 넘었습니다. 0부터 읽거나, 직전에 받은 next 커서로 이어 가세요.');}
+   else{if(fromText>text.length)fromText=text.length;if(fromUnit>units.length)fromUnit=units.length;}
+   let textCount=Math.min(1000,Math.max(0,text.length-fromText)),unitCount=Math.min(20,Math.max(0,units.length-fromUnit)),entry;
+   const make=()=>{const textEnd=snapEnd(text,fromText,fromText+textCount),shown=text.slice(fromText,textEnd),textRemains=textEnd<text.length,unitsRemain=fromUnit+unitCount<units.length;return {pageIndex,width:viewport.width,height:viewport.height,text:shown,textOffset:fromText,textTruncated:textRemains,...(structure?{units:units.slice(fromUnit,fromUnit+unitCount).map(u=>projectUnit(structure,u)),unitOffset:fromUnit,unitsTruncated:unitsRemain}:{}),next:textRemains||unitsRemain?{pages:[pageIndex],textOffset:textEnd,unitOffset:fromUnit+unitCount}:null};};
    entry=make();while(JSON.stringify(entry).length>budget&&(unitCount>1||textCount>1)){if(unitCount>1)unitCount=Math.max(1,Math.floor(unitCount/2));else textCount=Math.max(1,Math.floor(textCount/2));entry=make();}
-   if(JSON.stringify(entry).length>budget)throw Object.assign(new Error('원본 영역 정보가 너무 큽니다. unitOffset '+(startUnit+1)+'으로 다음 유닛을 요청하세요.'),{code:'request_limit'});
+   if(JSON.stringify(entry).length>budget)throw Object.assign(new Error('원본 영역 정보가 너무 큽니다. unitOffset '+(fromUnit+1)+'으로 다음 유닛을 요청하세요.'),{code:'request_limit'});
    result.push(entry);
   }
   return {sourcePdfHash,totalPages:pdf.numPages,pages:result};
