@@ -1,8 +1,8 @@
 export const latexRuntimeCatalog = Object.freeze({
   name: 'TeXlyre BusyTeX', version: '1.4.1', source: '61b83cde2836d42cf941f6559d36c9678d52cbf2',
   profiles: Object.freeze({
-    basic: Object.freeze({assets: Object.freeze(['texlive-basic.js']), packages: Object.freeze(['article', 'geometry', 'graphicx'])}),
-    lua: Object.freeze({assets: Object.freeze(['texlive-basic.js', 'texlive-lua-profile.js']), packages: Object.freeze(['article', 'geometry', 'graphicx', 'fontspec', 'microtype'])})
+    basic: Object.freeze({assets: Object.freeze(['texlive-basic.js']), packages: Object.freeze(['article', 'geometry', 'graphicx', 'longtable'])}),
+    lua: Object.freeze({assets: Object.freeze(['texlive-basic.js', 'texlive-lua-profile.js']), packages: Object.freeze(['article', 'geometry', 'graphicx', 'longtable', 'fontspec', 'microtype'])})
   })
 });
 export function latexRuntimeAssets(engine) {

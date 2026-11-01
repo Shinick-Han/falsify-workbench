@@ -6,4 +6,6 @@ test('Lua profile adds only pinned local profile; pdfLaTeX retains basic assets'
   assert.deepEqual(latexRuntimeAssets('pdflatex'), ['texlive-basic.js']);
   assert.ok(latexRuntimeCatalog.profiles.lua.packages.includes('fontspec'));
   assert.ok(latexRuntimeCatalog.profiles.lua.packages.includes('microtype'));
+  assert.ok(latexRuntimeCatalog.profiles.basic.packages.includes('longtable'));
+  assert.ok(latexRuntimeCatalog.profiles.lua.packages.includes('longtable'));
 });
