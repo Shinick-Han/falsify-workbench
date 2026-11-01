@@ -1,6 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {replaceReconstructionPreview} from '../src/pdf-latex-workbench.mjs';
+import {handoffReconstruction} from '../src/pdf-latex-workbench.mjs';
+test('AI baseline handoff transfers the exact pair before explicit start; stale loading never starts AI',async()=>{
+ const calls=[],input={project:{id:'exact'},initialArtifact:{pdfHash:'baseline'},reconstruction:{sourceHash:'original'},signal:new AbortController().signal};let current=true;
+ const workbench={async loadReconstructed(v){assert.equal(v,input);calls.push('load');},async startLayoutReview(v){calls.push('start');assert.match(v.goal,/원본 PDF/);}};
+ assert.equal(await handoffReconstruction({workbench,input,isCurrent:()=>current}),true);assert.deepEqual(calls,['load']);
+ calls.length=0;assert.equal(await handoffReconstruction({workbench,input,isCurrent:()=>current,startAI:true}),true);assert.deepEqual(calls,['load','start']);
+ calls.length=0;workbench.loadReconstructed=async()=>{calls.push('load');current=false;};assert.equal(await handoffReconstruction({workbench,input,isCurrent:()=>current,startAI:true}),false);assert.deepEqual(calls,['load']);
+});
 const defer=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b});return {promise,resolve,reject};};
 const pdf=name=>({name,destroyed:0,async destroy(){this.destroyed++;}});
 const tick=()=>new Promise(resolve=>setImmediate(resolve));

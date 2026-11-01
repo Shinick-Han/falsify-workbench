@@ -7,6 +7,15 @@ import {loadReconstructionFonts} from './pdf-latex-fonts.mjs';
 import {inferTypographyProfile} from './paper-typography-profile.mjs';
 
 const base=new URL('.',import.meta.url);
+export async function handoffReconstruction({workbench,input,isCurrent,startAI=false,onLoaded=()=>{}}){
+  if(!isCurrent())return false;
+  await workbench.loadReconstructed(input);
+  if(input.signal?.aborted||!isCurrent())return false;
+  await onLoaded();
+  if(input.signal?.aborted||!isCurrent())return false;
+  if(startAI)await workbench.startLayoutReview({goal:'원본 PDF와 기준본을 대조하세요. 제목·저자·소속·초록·절 제목·각주를 구분하고, 본문 단과 그림·표 배치를 자연스럽게 다듬으세요. 원문의 단어·수치·인용과 선택된 변경은 보존하세요.'});
+  return true;
+}
 // A generation may become stale while its library or PDF documents are loading.
 // Only the owning generation may detach the displayed preview or install its pair.
 export async function replaceReconstructionPreview({library,isCurrent,dispose,load,install}) {
@@ -41,10 +50,10 @@ export function mountPdfLatexWorkbench(doc=globalThis.document){
   const panes=element('div','','latex-preview-panes'),originalPane=element('div','','latex-preview-pane'),baselinePane=element('div','','latex-preview-pane'),originalCanvas=element('canvas'),baselineCanvas=element('canvas');
   originalCanvas.setAttribute('aria-label','재구성 원본 PDF');baselineCanvas.setAttribute('aria-label','공격 없는 재구성 기준본 PDF');originalPane.append(element('h3','원본 PDF'),originalCanvas);baselinePane.append(element('h3','공격 없는 재구성 기준본'),baselineCanvas);panes.append(originalPane,baselinePane);
   const summary=element('p'),details=element('details'),detailsTitle=element('summary','복원 차이와 인식 내용'),report=element('pre'),corrections=element('div'),rebuild=button('기준본 만들기');details.append(detailsTitle,report,corrections);controls.append(rebuild);
-  const actions=element('div','','button-row'),download=button('재구성 PDF 다운로드'),sourceDownload=button('LaTeX ZIP 다운로드'),accept=button('이 기준본으로 편집');actions.append(download,sourceDownload,accept);panel.append(heading,status,controls,pager,panes,summary,details,actions);
+  const actions=element('div','','button-row'),download=button('재구성 PDF 다운로드'),sourceDownload=button('LaTeX ZIP 다운로드'),accept=button('이 기준본으로 편집'),ai=button('AI로 배치 다듬기'),aiNotice=element('p','AI로 다듬기를 누르면 원본과 기준본의 소스·페이지 이미지가 연결한 AI에 전달됩니다.');actions.append(download,sourceDownload,accept,ai);panel.append(heading,status,controls,pager,panes,summary,details,actions,aiNotice);
   const reader=createReconstructionReader();let ticket=0,abort=null,compiler=null,draft=null,prepared=null,artifact=null,pdfjs=null,pdfs=[],pageIndex=0,renderTicket=0,originalBytes=null,busy=false,sourceIdentity=null,accepting=false;
   function save(bytes,name,type){const url=URL.createObjectURL(new Blob([bytes],{type})),a=element('a');a.href=url;a.download=name;doc.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),30000);}
-  function buttons(){mode.disabled=busy;download.disabled=busy||!artifact;sourceDownload.disabled=busy||!prepared;accept.disabled=busy||!artifact||!prepared;rebuild.disabled=busy||!draft;stop.hidden=!busy;previous.disabled=!pdfs.length||pageIndex===0;next.disabled=!pdfs.length||pageIndex>=Math.max(...pdfs.map(p=>p.numPages))-1;}
+  function buttons(){mode.disabled=busy;download.disabled=busy||!artifact;sourceDownload.disabled=busy||!prepared;accept.disabled=ai.disabled=busy||!artifact||!prepared;rebuild.disabled=busy||!draft;stop.hidden=!busy;previous.disabled=!pdfs.length||pageIndex===0;next.disabled=!pdfs.length||pageIndex>=Math.max(...pdfs.map(p=>p.numPages))-1;}
   function currentSource(){return globalThis.FalsifyPaperWorkspace?.getSource?.();}
   function stillCurrent(own){return own===ticket&&sourceIdentity===currentSource()?.fileHash&&!globalThis.FalsifyLatexWorkbench?.active;}
   async function disposePdfs(){++renderTicket;const old=pdfs;pdfs=[];for(const p of old)try{await (p.loadingTask||p).destroy();}catch{}}
@@ -82,7 +91,8 @@ export function mountPdfLatexWorkbench(doc=globalThis.document){
   mode.onchange=()=>{void cancel();status.textContent='재구성 방식을 바꿨습니다. 기준본을 다시 만드세요.';};
   download.onclick=()=>{if(artifact)save(artifact.pdfBytes,'reconstructed-baseline.pdf','application/pdf');};sourceDownload.onclick=async()=>{if(!prepared||busy)return;const own=ticket,captured=prepared;try{const zip=await exportLatexProject(captured.project);if(stillCurrent(own)&&prepared===captured&&!busy)save(zip,'reconstructed-source.zip','application/zip');}catch(e){if(stillCurrent(own))status.textContent=e.message;}};
   corrections.addEventListener('input',()=>{void cancel();status.textContent='보정 내용을 입력했습니다. 기준본을 다시 만드세요.';});
-  accept.onclick=async()=>{if(!artifact||!prepared||busy||!stillCurrent(ticket))return;const own=++ticket,accepted=prepared,acceptedArtifact=artifact,signal=abort.signal;accepting=true;busy=true;buttons();try{await globalThis.FalsifyLatexWorkbench.loadReconstructed({project:accepted.project,file:draft.file,initialArtifact:acceptedArtifact,reconstruction:accepted.lineage,signal});if(own!==ticket||signal.aborted)throw new DOMException('취소했습니다.','AbortError');panel.hidden=true;await disposePdfs();}catch(e){if(own===ticket&&e.name!=='AbortError')status.textContent=e.message;}finally{accepting=false;if(own===ticket){busy=false;buttons();}}};
+  async function handoff(startAI){if(!artifact||!prepared||busy||!stillCurrent(ticket))return;if(startAI&&!globalThis.FalsifyLocalBridge?.session?.()){status.textContent='PC를 연결한 뒤 AI로 배치 다듬기를 누르세요.';return;}const own=++ticket,accepted=prepared,acceptedArtifact=artifact,signal=abort.signal;accepting=true;busy=true;buttons();try{const loaded=await handoffReconstruction({workbench:globalThis.FalsifyLatexWorkbench,input:{project:accepted.project,file:draft.file,initialArtifact:acceptedArtifact,reconstruction:accepted.lineage,signal},isCurrent:()=>own===ticket&&sourceIdentity===currentSource()?.fileHash,startAI,onLoaded:async()=>{panel.hidden=true;await disposePdfs();}});if(!loaded&&own===ticket)status.textContent='원본이 바뀌어 배치 보정을 취소했습니다.';}catch(e){if(own===ticket&&e.name!=='AbortError')status.textContent=e.message;}finally{accepting=false;if(own===ticket){busy=false;buttons();}}}
+  accept.onclick=()=>handoff(false);ai.onclick=()=>handoff(true);
   doc.addEventListener('falsify:latex-state',()=>{if(!panel.hidden&&!accepting&&globalThis.FalsifyLatexWorkbench?.active){void cancel();void disposePdfs();panel.hidden=true;}});
   doc.addEventListener('falsify:paper-workspace-source',()=>{if(sourceIdentity&&sourceIdentity!==currentSource()?.fileHash){void cancel();void disposePdfs();panel.hidden=true;}});
   buttons();const api={cancel,getState:()=>({busy,sourceSha256:sourceIdentity,project:prepared?.project,artifact:artifact?structuredClone(artifact):null,lineage:prepared?.lineage})};globalThis.FalsifyPdfLatexWorkbench=api;return api;

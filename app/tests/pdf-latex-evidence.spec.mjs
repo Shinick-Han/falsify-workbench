@@ -135,7 +135,10 @@ test('typography weighs observed non-whitespace glyphs and estimates only consis
   assert.equal(typo.fontSizeBp,9);assert.equal(typo.leadingBp,12);assert.equal(typo.status,'proposed');
   assert.deepEqual(typo.styleCounts.map(s=>s.count).sort((a,b)=>a-b),[1,1,13]);
   assert.equal(typo.leadingEvidence.length,2);for(const e of typo.leadingEvidence){assert.equal(e.blockId,bodyItem.evidence[0].blockId);assert.ok(e.range.start>=bodyItem.evidence[0].range.start&&e.range.end<=bodyItem.evidence[0].range.end);assert.ok(Number.isFinite(e.bottomBp));}
-  assert.equal(bodyItem.text,document.blocks[0].text);assert.deepEqual(bodyItem.evidence[0].range,document.blocks[0].source.range);
+  assert.equal(bodyItem.text,'Alpha 2 Beta words');assert.equal(bodyItem.extensions.segments[0].text,document.blocks[0].text);assert.deepEqual(bodyItem.evidence[0].range,document.blocks[0].source.range);
+  assert.ok(bodyItem.extensions.inlineRuns.some(r=>r.italic&&bodyItem.text.slice(r.start,r.end)==='A'));
+  assert.ok(bodyItem.extensions.inlineRuns.some(r=>r.script==='super'&&bodyItem.text.slice(r.start,r.end)==='2'));
+  assert.ok(bodyItem.extensions.inlineRuns.every((r,n,rs)=>!n||rs[n-1].end<=r.start));
   assert.equal(titleItem.extensions.typography.fontSizeBp,18);assert.equal(titleItem.extensions.typography.leadingBp,undefined);
   assert.equal(tieItem.extensions.typography.fontSizeBp,null);assert.equal(tieItem.extensions.typography.leadingBp,undefined);
   assert.equal(irregularItem.extensions.typography.fontSizeBp,9);assert.equal(irregularItem.extensions.typography.leadingBp,undefined);
@@ -169,7 +172,8 @@ test('source line proposals preserve ranges and protect identifiers, formulas an
   const flow={schema:'falsify.paper-flow.v1',sourceSha256:hash,items,fragments:[],regions:[],relations:[],diagnostics:[]},links={schema:'falsify.paper-source-links.v1',sourceSha256:hash,frames:[{pageIndex:0,bounds:geometry.bounds,pageTransform:geometry.pageTransform,verified:true}],links:[]};
   const model=buildReconstructionModel({document,flow,links,assets:{sourceSha256:hash,assets:[],diagnostics:[]}});
   assert.equal(model.items[0].text,'A title of fin-shaped devices');
-  for(let i=1;i<items.length;i++)assert.equal(model.items[i].text,document.blocks[i].text);
+  for(let i=1;i<7;i++)assert.equal(model.items[i].text,document.blocks[i].text);
+  assert.equal(model.items[7].text,'Smith journal article');assert.match(model.items[8].text,/readers to understand/);
   const proseInput=structuredClone({document,flow,links,assets:{sourceSha256:hash,assets:[],diagnostics:[]}});proseInput.flow.items=[...proseInput.flow.items.slice(0,6),proseInput.flow.items[8],...proseInput.flow.items.slice(6,8)];const proseModel=buildReconstructionModel(proseInput);assert.match(proseModel.items[6].text,/readers to understand/);
   const proposal=model.items[0].extensions.separators[0];assert.equal(proposal.method,'source-line-boundary');assert.equal(proposal.status,'proposed');assert.equal(proposal.offset,proposal.before.range.end);assert.equal(proposal.offset,proposal.after.range.start);
   assert.ok(model.diagnostics.some(d=>d.code==='source-line-separator-proposed'&&d.itemId===model.items[0].id));

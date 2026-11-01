@@ -14,7 +14,7 @@ function validate(s,p){
  for(const group of s.groups)if(!Array.isArray(group)||group.length!==2||group.some(id=>!all.has(id))||p.order.indexOf(group[1])!==p.order.indexOf(group[0])+1||front.has(group[0])||front.has(group[1])||furniture.has(group[0])||furniture.has(group[1]))fail('GROUP_SEPARATED');
 }
 export function renderStructureRegion(s,p,fragments){
- validate(s,p);const front=new Set(p.frontMatter),furn=new Map(p.furniture.map(f=>[f.id,f.placement])),offsets=new Map();let text=BEGIN;
+ validate(s,p);const front=new Set(p.frontMatter),furn=new Map(p.furniture.filter(f=>!(f.placement==='footer'&&s.units.find(u=>u.id===f.id)?.role==='footnote'&&fragments.get(f.id)?.includes('\\footnotetext{'))).map(f=>[f.id,f.placement])),offsets=new Map();let text=BEGIN;
  const add=id=>{const value=fragments.get(id);if(typeof value!=='string'||value.includes(BEGIN)||value.includes(END)||/^% FALSIFY-UNIT-(?:BEGIN|END) [0-9a-f]+$/m.test(value))fail('INVALID_UNIT');text+=begin(id);offsets.set(id,text.length);text+=value;text+=end(id);};
  // Keep every source payload in its own marked macro. Identical running
  // furniture becomes one page template, so reflow cannot create blank pages
@@ -59,6 +59,7 @@ async function updateStructure({project,plan,signal,replacements={},extraFiles=[
  const dimensions=[...source.slice(0,start).matchAll(/bottom\s*=\s*([\d.]+)\s*(bp|pt|mm|cm|in)/g)],last=dimensions.at(-1),factor={bp:1,pt:72/72.27,mm:72/25.4,cm:72/2.54,in:72};
  const bottom=last?Number(last[1])*factor[last[2]]:null;let reserve=0;
  for(const f of plan.furniture){const u=s.units.find(x=>x.id===f.id);if(f.placement!=='footer'||!Number.isFinite(bottom))continue;
+  if(u.role==='footnote'&&fragments.get(f.id)?.includes('\\footnotetext{'))continue;
   const b=u.bbox,bodyUnits=s.units.filter(v=>v.pageIndex===u.pageIndex&&!plan.furniture.some(x=>x.id===v.id)),minX=Math.min(...bodyUnits.map(v=>v.bbox[0])),maxX=Math.max(...bodyUnits.map(v=>v.bbox[2])),leftColumn=plan.columns===1||b[2]<=(minX+maxX)/2;
   const y=b[1]>=u.pageHeight/2?b[1]:u.pageHeight-36,bodyBottom=u.pageHeight-bottom;
   if(y>=bodyBottom)continue;
