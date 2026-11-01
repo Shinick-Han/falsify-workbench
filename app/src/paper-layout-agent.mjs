@@ -330,6 +330,7 @@ export async function runPaperLayoutAgent({project, artifact=null, decide, compi
     } catch (error) {
       if (cancelled()) return result('cancelled','Layout run cancelled.');
       const failure=layoutFailureDetails(error);
+      if(error?.disposition==='cancelled'){record(a?.tool || 'decide',{status:'failed',...failure});return result('cancelled','이 단계는 취소되어 끝났습니다. 이어서 진행하려면 새 실행을 시작하세요. '+failure.reason);}
       if(!a&&failure.code==='invalid_action'){record('invalid_action',{status:'rejected',...failure,reason:failure.reason+' Choose an offered tool and use exactly its listed arguments. No edit was applied.'});continue;}
       record(a?.tool || 'decide',{status:'failed',...failure});
       return result('unresolved',failure.reason,'failed');

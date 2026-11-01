@@ -34,7 +34,16 @@ export async function layoutStepDecision(link,request,{runId,signal,pendingStep,
       if(receipt.state!=='running')break;
       await pause(pollMs,signal);receipt=validate(await link.request(ROOT+'/'+id,null,{signal}));
     }
-  }catch(error){if(signal?.aborted)throw aborted();if(recovering&&error&&typeof error==='object'&&!error.recovery)error.recovery=error.httpStatus===404?'not-found':'unreachable';throw error;}
+  }catch(error){
+    if(signal?.aborted)throw aborted();
+    const code=error&&typeof error==='object'?(Object.hasOwn(FAILURE_MESSAGES,error.code)?error.code:Object.hasOwn(FAILURE_MESSAGES,error.message)?error.message:null):null;
+    if(!recovering&&receipt===undefined&&code==='companion_busy'&&error.httpStatus===409){
+      await onPending(null);
+      throw Object.assign(new Error('PC에서 다른 작업을 처리하고 있어 이 단계는 접수되지 않았습니다. 끝난 뒤 다시 실행하세요.'),{code:'companion_busy',disposition:'not-admitted',httpStatus:409,stepReceipt:saved});
+    }
+    if(recovering&&error&&typeof error==='object'&&!error.recovery)error.recovery=error.httpStatus===404?'not-found':'unreachable';
+    throw error;
+  }
   if(signal?.aborted)throw aborted();
   if(receipt.state!=='completed')throw Object.assign(new Error(receipt.error?.message||'요청을 마치지 못했습니다. 다시 실행할 수 있습니다.'),{code:Object.hasOwn(FAILURE_MESSAGES,receipt.error?.error)?receipt.error.error:'request_failed',disposition:receipt.state,stepReceipt:saved});
   const response=receipt.result;

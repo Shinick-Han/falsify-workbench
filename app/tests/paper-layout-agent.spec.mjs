@@ -94,6 +94,18 @@ test('invalid model action is corrected under a fresh step without losing the ca
  const s=setup(f,[],{maxSteps:5,decide:async input=>{seen.push(input);if(calls++===0)throw Object.assign(new Error('private prompt'),{code:'invalid_action',stepReceipt:{runId:'r1',stepId:'r1-s0',fingerprint:'a'.repeat(64),request:{secret:'never export'}}});return [action('compile_pdf'),action('inspect_pdf'),action('render_pages'),action('finish')][calls-2];}});
  const out=await runPaperLayoutAgent(s.args);assert.equal(out.status,'complete');assert.equal(seen.length,5);assert.deepEqual(seen.map(x=>x.step),[0,1,2,3,4]);assert.equal(out.project.id,f.project.id);assert.equal(out.trace[0].action,'invalid_action');assert.equal(out.trace[0].result.status,'rejected');assert.equal(out.trace[0].result.request.stepId,'r1-s0');assert.equal(JSON.stringify(out.trace).includes('private prompt'),false);assert.equal(JSON.stringify(out.trace).includes('never export'),false);
 });
+test('cancelled invalid_action ends cancelled without another decision and keeps the artifact',async()=>{
+ const f=await fixture(),hash=f.artifact(f.project).pdfHash;let calls=0;
+ const stop=error=>async()=>{calls++;throw error;};
+ const cancelled=await runPaperLayoutAgent(setup(f,[],{maxSteps:2,decide:stop(Object.assign(new Error('private prompt'),{code:'invalid_action',disposition:'cancelled',stepReceipt:{runId:'r1',stepId:'r1-s0',fingerprint:'a'.repeat(64),request:{secret:'never export'}}}))}).args);
+ assert.equal(calls,1);assert.equal(cancelled.runState,'cancelled');assert.equal(cancelled.status,'cancelled');assert.equal(cancelled.artifact.pdfHash,hash);assert.equal(cancelled.trace[0].result.request.stepId,'r1-s0');assert.equal(cancelled.trace[0].result.code,'invalid_action');assert.match(cancelled.message,/새 실행을 시작하세요/);assert.equal(cancelled.message.includes('private'),false);assert.equal(JSON.stringify(cancelled.trace).includes('never export'),false);
+ calls=0;const finalStep=await runPaperLayoutAgent(setup(f,[],{maxSteps:1,decide:stop(Object.assign(new Error(),{code:'invalid_action',disposition:'cancelled'}))}).args);
+ assert.equal(calls,1);assert.equal(finalStep.runState,'cancelled');assert.equal(finalStep.message.includes('step limit'),false);assert.equal(finalStep.artifact.pdfHash,hash);
+ calls=0;const retried=await runPaperLayoutAgent(setup(f,[],{maxSteps:2,decide:stop(Object.assign(new Error(),{code:'invalid_action',disposition:'failed'}))}).args);
+ assert.equal(calls,2);assert.equal(retried.runState,'paused');assert.equal(retried.artifact.pdfHash,hash);
+ calls=0;const timeout=await runPaperLayoutAgent(setup(f,[],{maxSteps:2,decide:stop(Object.assign(new Error('private diagnostic'),{code:'model_timeout',disposition:'cancelled'}))}).args);
+ assert.equal(calls,1);assert.equal(timeout.runState,'cancelled');assert.match(timeout.message,/시간/);assert.equal(timeout.message.includes('private'),false);assert.equal(timeout.artifact.pdfHash,hash);
+});
 test('invalid action correction has a step budget and other failures do not retry',async()=>{
  const f=await fixture();let calls=0;
  const out=await runPaperLayoutAgent(setup(f,[],{maxSteps:2,decide:async()=>{calls++;throw Object.assign(new Error(),{code:'invalid_action'});}}).args);assert.equal(calls,2);assert.equal(out.runState,'paused');assert.equal(out.artifact.pdfHash,f.artifact(f.project).pdfHash);
