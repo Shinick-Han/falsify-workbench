@@ -83,11 +83,11 @@
     },
     {
       "path": "src/paper-layout-agent-ui.mjs",
-      "sha256": "0794b79565ea604d859b20b6675f70fd9f116cbbedd17ed913ca91b53a06c82c"
+      "sha256": "7b831db0fbc59e484e67a70c88ad0d31b48729e09c3bdd387b754a7d57bf4692"
     },
     {
       "path": "src/paper-layout-agent.mjs",
-      "sha256": "b908914fa721f11759987e44681094abc190a03768881733a3ca92c7d7650a86"
+      "sha256": "3d87212f8fe9ae0d53c3b33ebea50cc5185dc823f970db7a74979977e4f985c5"
     },
     {
       "path": "src/paper-layout-asset-tools.mjs",
@@ -95,7 +95,7 @@
     },
     {
       "path": "src/paper-layout-document-tools.mjs",
-      "sha256": "91118a810e1f4c777be3223033f95429efaa513152fd3249e59ba6117071823d"
+      "sha256": "53abed824f37ed99db70655f26b43d3b2ea7a635bb9908e6c3b9bf0d43baafce"
     },
     {
       "path": "src/paper-layout-edit-tools.mjs",
@@ -115,15 +115,15 @@
     },
     {
       "path": "src/paper-layout-reference.mjs",
-      "sha256": "5daebc38e85f62eca9aeda80ad686906e4e714f11977f3b753b0e18588852943"
+      "sha256": "fcb3c99186824112607ec2d6f0a883446714945b94ede9a1499e2437bbf807b4"
     },
     {
       "path": "src/paper-layout-run-store.mjs",
-      "sha256": "69745045e7dd581fe71a5f287d95baf0b1f9a8268203c3a55736dfad723b812a"
+      "sha256": "b82d9035b578dd26e567bdb9e7e6ac25c1bdb0c57891913db90a9909c315c6cf"
     },
     {
       "path": "src/paper-layout-structure.mjs",
-      "sha256": "401bb44ada208c54db5782ca5e7584f5235ce1b4ec019b952fbe9bf96427552d"
+      "sha256": "ada1ac5bdb6a0b7621e40ba474349fc82b0124cf782d26c5897f35972340ff27"
     },
     {
       "path": "src/paper-layout-targets.mjs",
@@ -131,7 +131,7 @@
     },
     {
       "path": "src/paper-layout-tool-catalog.mjs",
-      "sha256": "9d52dcd2f233a2bec3b1be079aae509e4a6b99719bb4038df740d9dfcab93ce3"
+      "sha256": "e26ad8c00b1a0f409135f6aea86e4bba5768b75ea39bd97802f839eddeff3ab4"
     },
     {
       "path": "src/paper-layout-toolbox.mjs",
@@ -139,7 +139,7 @@
     },
     {
       "path": "src/paper-layout-transport.mjs",
-      "sha256": "ac32b1fe63f5ed2ccaf04fd7a44b62f97ecbb19f3abedb4d573c8adfb5e3ba62"
+      "sha256": "844fe402f6cc25e28a09d0a8024c6bdaffed1b76bd0d848038543da108a8af1c"
     },
     {
       "path": "src/paper-publication-semantics.mjs",
@@ -232,7 +232,7 @@
   ],
   "output": {
     "path": "latex-workbench.mjs",
-    "sha256": "82ece7d8da663ca980093b85b7a9a9d708c9bf7fc4c04641e06c21c0acea517d"
+    "sha256": "490593bd3d2213ba54d8d2846df58aa5c7a46447c7df7675722c1781d004eac5"
   },
   "worker": {
     "path": "pdf-latex-reader-worker.mjs",
