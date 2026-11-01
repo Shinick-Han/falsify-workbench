@@ -49,3 +49,13 @@ test('source draft storage keeps work in memory on unavailable IDB, respects con
  let now=100;const store=createLatexDraftStore({indexedDB:null,now:()=>now});assert.equal((await store.put('private',{consent:false})).persisted,false);assert.equal(await store.get(),null);
  const saved=await store.put('source + candidate',{consent:true});assert.equal(saved.persisted,false);assert.equal((await store.get()).archive,'source + candidate');now+=12*60*60*1000;assert.equal(await store.get(),null);await store.put('later',{consent:true});await store.clear();assert.equal(await store.get(),null);store.dispose();
 });
+
+test('failed receipt lookups are tagged for a manual discard and never fall back to POST',async()=>{
+ const pending={runId:'r1',stepId:'r1-s0',projectId:HASH,step:0,request,state:'unknown'};const posts=[];
+ await assert.rejects(layoutStepDecision({request:async(path,body)=>{if(body)posts.push(body);throw Object.assign(new Error('layout_step_not_found'),{httpStatus:404});}},request,{runId:'r2',pendingStep:pending}),e=>e.recovery==='not-found');
+ await assert.rejects(layoutStepDecision({request:async(path,body)=>{if(body)posts.push(body);throw new Error('offline');}},request,{runId:'r2',pendingStep:pending}),e=>e.recovery==='unreachable');
+ await assert.rejects(layoutStepDecision({request:async(path,body)=>{if(body)posts.push(body);return receipt();}},request,{runId:'r2',pendingStep:{...pending,companionInstance:'old'},companionInstance:'new'}),e=>e.recovery==='mismatch');
+ await assert.rejects(layoutStepDecision({request:async(path,body)=>{if(body)posts.push(body);return receipt();}},{...request,projectId:'b'.repeat(64)},{runId:'r2',pendingStep:pending}),e=>e.recovery==='mismatch');
+ assert.deepEqual(posts,[]);
+ await assert.rejects(layoutStepDecision({request:async()=>{throw new Error('network');}},request,{runId:'r3'}),e=>e.recovery===undefined);
+});

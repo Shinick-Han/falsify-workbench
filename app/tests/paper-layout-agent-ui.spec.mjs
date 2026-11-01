@@ -107,3 +107,74 @@ test('restore exposes candidate and issue navigation without model calls; anothe
  await agent.restoreRun(state);assert.equal(modelCalls,0);assert.equal(agent.getRunState().runId,'saved-run');assert.equal(find(host,'이 PDF로 BLUE 검토').disabled,false);find(host,'2쪽 · 글자 겹침').onclick();await new Promise(r=>setImmediate(r));assert.equal(pages.at(-1).candidatePageIndex,1);
  const other=await makeProject({files:[{path:'main.tex',bytes:new TextEncoder().encode('\\documentclass{article}\\begin{document}Another source\\end{document}')}]});const otherArtifact={...artifact,projectId:other.id};await agent.restoreRun({...state,runId:'other-run',baselineProject:other,baselineArtifact:otherArtifact,currentProject:other,candidate:{project:other,artifact:otherArtifact}});assert.equal(find(host,'이 PDF로 BLUE 검토').disabled,true);
 });
+
+// --- LQ UI state repair regressions ---
+const findAll=(host,pred,out=[])=>{if(pred(host))out.push(host);for(const child of host.children||[])findAll(child,pred,out);return out;};
+const tick=()=>new Promise(r=>setImmediate(r));
+const pdfArtifact=(project,text)=>{const bytes=new TextEncoder().encode(text);return {schema:'falsify.latex-artifact.v1',success:true,projectId:project.id,engine:project.engine,pdfBytes:bytes,pdfHash:hex(bytes)};};
+const memoryStore=puts=>()=>({put:async s=>{puts.push(s);return {};},get:async()=>null,setConsent:async()=>{},dispose(){}});
+const quietPreview=()=>({setDocuments:async()=>{},show:async()=>({candidate:{pageIndex:0,totalPages:1}}),dispose(){}});
+const savedState=(baselineProject,baselineArtifact,project,artifact,extra={})=>({schema:'falsify.layout-run-state.v1',runId:'saved-run',baselineProject,baselineArtifact,currentProject:project,candidate:{project,artifact},checkpoints:[],trace:[],coverage:{},quality:{content:'unchanged',layout:'unverified',observedPages:[],findings:[]},status:'unresolved',runState:'paused',stepCount:1,...extra});
+
+test('a fresh retry that fails at the real agent decide keeps the earlier candidate and its saved state primary',async()=>{
+ const previousFile=globalThis.File,previousEvent=globalThis.CustomEvent;globalThis.File=class {constructor(parts,name,options){this.parts=parts;this.name=name;this.type=options?.type;}};globalThis.CustomEvent=class {constructor(type,options){this.type=type;Object.assign(this,options);}};
+ try{
+  const base=await makeProject(),edited=await makeProject({files:[{path:'main.tex',bytes:new TextEncoder().encode('\\documentclass{article}\n\\begin{document}RED 71 tuned\\end{document}')}]});
+  const baseline=pdfArtifact(base,'%PDF-baseline'),good=pdfArtifact(edited,'%PDF-good-candidate'),puts=[],downloads=[];let decides=0,blueFile=null;
+  const session={getInputIdentity:()=>({projectId:base.id,changes:[]}),snapshot:()=>({project:base,changes:[]}),compile:async()=>baseline,getCurrentProject:async()=>base};
+  const doc={createElement:tag=>new Element(tag),dispatchEvent:e=>{blueFile=e.detail.file;return false;},querySelector:()=>null};
+  const host=new Element('host'),agent=mountPaperLayoutAgent({doc,host,getSession:()=>session,getEpoch:()=>1,download:(...a)=>downloads.push(a),storeFactory:memoryStore(puts),previewFactory:quietPreview,bridge:{session:()=>({request:async()=>{decides++;throw new Error('model request failed');}})},compilerFactory:()=>({compile:async()=>baseline,dispose(){}}),readerFactory:()=>({dispose(){}})});
+  await agent.restoreRun(savedState(base,baseline,edited,good));assert.equal(agent.getCandidate().artifact.pdfHash,good.pdfHash);
+  await find(host,'원본에서 다시 시작').onclick();
+  assert.equal(decides,1,'the real agent reached decide once');
+  assert.equal(agent.getFailedRun().runState,'failed');assert.notEqual(agent.getFailedRun().runId,'saved-run');
+  assert.equal(agent.getCandidate().artifact.pdfHash,good.pdfHash);assert.equal(agent.getRunState().runId,'saved-run');assert.equal(agent.getRunState().candidate.artifact.pdfHash,good.pdfHash);
+  assert.equal(puts.at(-1).runId,'saved-run','the device store ends on the kept run, not the failed one');
+  assert.ok(findAll(host,n=>typeof n.textContent==='string'&&n.textContent.includes('이전 후보를 유지')).length);
+  find(host,'후보 PDF 다운로드').onclick();assert.deepEqual(downloads.at(-1)[0],good.pdfBytes);
+  assert.equal(find(host,'이 PDF로 BLUE 검토').disabled,false);find(host,'이 PDF로 BLUE 검토').onclick();assert.deepEqual(blueFile.parts[0],good.pdfBytes);
+ }finally{globalThis.File=previousFile;globalThis.CustomEvent=previousEvent;}
+});
+
+test('a source switch shows a foreign candidate as detached, excludes it from the new archive and reset clears it',async()=>{
+ const {encodeSourceSession}=await import('../src/latex-session-archive.mjs');const {layoutRunForSource}=await import('../src/paper-layout-agent-ui.mjs');
+ const hashA=hex(new Uint8Array([1,1,1])),hashB=hex(new Uint8Array([2,2,2]));
+ const a=await makeProject({origin:'reconstructed-pdf',sourcePdfHash:hashA}),b=await makeProject({origin:'reconstructed-pdf',sourcePdfHash:hashB,files:[{path:'main.tex',bytes:new TextEncoder().encode('\\documentclass{article}\n\\begin{document}Paper B\\end{document}')}]});
+ const artifactA=pdfArtifact(a,'%PDF-A');let current=a;
+ const session={getInputIdentity:()=>({projectId:current.id,changes:[]}),snapshot:()=>({project:current,changes:[]}),getCurrentProject:async()=>current};
+ const host=new Element('host'),agent=mountPaperLayoutAgent({doc:document,host,getSession:()=>session,getEpoch:()=>1,download(){},storeFactory:memoryStore([]),previewFactory:quietPreview,bridge:{session:()=>({})},runAgent:()=>{throw new Error('restore must not run the model');}});
+ await agent.restoreRun(savedState(a,artifactA,a,artifactA));const note=find(host,'이전 소스에서 만든 후보입니다. 현재 소스의 BLUE 검토나 계속 편집에는 쓸 수 없습니다.');
+ assert.equal(note.hidden,true);assert.equal(find(host,'이 PDF로 BLUE 검토').disabled,false);assert.equal(layoutRunForSource(agent.getRunState(),a.id).runId,'saved-run');
+ current=b;agent.invalidate();
+ assert.equal(note.hidden,false);assert.equal(find(host,'이 PDF로 BLUE 검토').disabled,true);assert.equal(find(host,'후보 소스로 계속 편집').disabled,true);
+ assert.equal(layoutRunForSource(agent.getRunState(),b.id),null);
+ await assert.rejects(encodeSourceSession({project:b,changes:[],layoutRun:agent.getRunState()},{createLatexProject}),/mismatched/,'embedding the other paper run breaks the archive');
+ const json=await encodeSourceSession({project:b,changes:[],layoutRun:layoutRunForSource(agent.getRunState(),b.id)},{createLatexProject});assert.equal(JSON.parse(json).payload.layoutRun,undefined);
+ agent.reset();assert.equal(agent.getCandidate(),null);assert.equal(agent.getRunState(),null);assert.equal(find(host,'이 PDF로 BLUE 검토').disabled,true);
+});
+
+test('choosing a checkpoint drops the old pending receipt so continuation does not look it up',async()=>{
+ const base=await makeProject(),edited=await makeProject({files:[{path:'main.tex',bytes:new TextEncoder().encode('\\documentclass{article}\n\\begin{document}RED 71 cp\\end{document}')}]}),baseline=pdfArtifact(base,'%PDF-base'),cp=pdfArtifact(edited,'%PDF-cp');
+ const pendingStep={runId:'saved-run',stepId:'saved-run-s1',projectId:edited.id,step:1,request:{projectId:edited.id,step:1},state:'unknown'};let resumed;
+ const session={getInputIdentity:()=>({projectId:base.id,changes:[]}),snapshot:()=>({project:base,changes:[]}),getCurrentProject:async()=>base};
+ const host=new Element('host'),agent=mountPaperLayoutAgent({doc:document,host,getSession:()=>session,getEpoch:()=>1,download(){},storeFactory:memoryStore([]),previewFactory:quietPreview,bridge:{session:()=>({}),state:()=>({cap:{paperLayoutJobs:true}})},compilerFactory:()=>({dispose(){}}),readerFactory:()=>({dispose(){}}),runAgent:async o=>{resumed=o.resumeState;return {project:o.resumeState.candidate.project,artifact:o.resumeState.candidate.artifact,status:'unresolved',runState:'paused'};}});
+ await agent.restoreRun(savedState(base,baseline,edited,cp,{pendingStep,checkpoints:[{revisionId:'r1',label:'cp',project:edited,artifact:cp}]}));assert.equal(agent.getRunState().pendingStep.stepId,'saved-run-s1');
+ const revision=findAll(host,n=>n.tag==='select')[1];revision.value='r1';revision.onchange();for(let i=0;i<5;i++)await tick();
+ assert.equal(agent.getRunState().pendingStep,null);
+ await find(host,'AI 레이아웃 시작').onclick();assert.ok(resumed,'continuation used the checkpoint state');assert.equal(resumed.pendingStep,null);
+});
+
+test('an unrecoverable pending receipt is only looked up; the user discards it before a new request is sent',async()=>{
+ const base=await makeProject(),edited=await makeProject({files:[{path:'main.tex',bytes:new TextEncoder().encode('\\documentclass{article}\n\\begin{document}RED 71 pending\\end{document}')}]}),baseline=pdfArtifact(base,'%PDF-base'),cand=pdfArtifact(edited,'%PDF-cand');
+ const pendingStep={runId:'saved-run',stepId:'saved-run-s1',projectId:edited.id,step:1,request:{schema:'falsify.paper-layout-agent-step.v1',projectId:edited.id,step:1},state:'unknown'};const calls=[];
+ const link={request:async(path,body)=>{calls.push({path,post:!!body});if(!body)throw Object.assign(new Error('layout_step_not_found'),{httpStatus:404});return {schema:'falsify.layout-step-receipt.v1',runId:body.runId,stepId:body.stepId,fingerprint:'c'.repeat(64),state:'failed',error:{message:'stopped'}};}};
+ const session={getInputIdentity:()=>({projectId:base.id,changes:[]}),snapshot:()=>({project:base,changes:[]}),getCurrentProject:async()=>base};
+ const host=new Element('host'),agent=mountPaperLayoutAgent({doc:document,host,getSession:()=>session,getEpoch:()=>1,download(){},storeFactory:memoryStore([]),previewFactory:quietPreview,bridge:{session:()=>link,state:()=>({cap:{paperLayoutJobs:true}})},compilerFactory:()=>({compile:async()=>cand,dispose(){}}),readerFactory:()=>({dispose(){}})});
+ await agent.restoreRun(savedState(base,baseline,edited,cand,{pendingStep}));const discard=find(host,'보류 중인 요청 버리기');assert.equal(discard.hidden,true);
+ await find(host,'AI 레이아웃 시작').onclick();
+ assert.deepEqual(calls.map(c=>c.post),[false],'recovery is a GET only');assert.equal(calls[0].path,'/api/paper/layout-agent/jobs/saved-run-s1');
+ assert.equal(discard.hidden,false);assert.equal(agent.getCandidate().artifact.pdfHash,cand.pdfHash);assert.equal(agent.getRunState().pendingStep.stepId,'saved-run-s1');
+ await find(host,'AI 레이아웃 시작').onclick();assert.deepEqual(calls.map(c=>c.post),[false,false],'retrying still never submits');
+ await discard.onclick();assert.equal(agent.getRunState().pendingStep,null);assert.equal(discard.hidden,true);assert.equal(calls.length,2,'discarding sends nothing');
+ await find(host,'AI 레이아웃 시작').onclick();assert.deepEqual(calls.map(c=>c.post),[false,false,true],'one new request only after the user continues');assert.equal(agent.getCandidate().artifact.pdfHash,cand.pdfHash);
+});
