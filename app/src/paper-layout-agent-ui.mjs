@@ -38,12 +38,16 @@ export async function renderLayoutRegion({bytes,args,loadPdf,doc,baseUrl=base,si
  }finally{try{page?.cleanup?.();}finally{await task.destroy();}}
 }
 
+const stepIdToken=v=>typeof v==='string'&&/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(v)?v:'';
+// Request identity only. The step payload and model output are not receipt fields.
+function stepIdentity(source,step){const runId=stepIdToken(source?.runId),stepId=stepIdToken(source?.stepId)||(runId&&Number.isSafeInteger(step)&&step>=0?stepIdToken(runId+'-s'+step):''),fingerprint=/^[0-9a-f]{64}$/.test(source?.fingerprint||'')?source.fingerprint:'';return {...(runId?{runId}:{}),...(stepId?{stepId}:{}),...(fingerprint?{fingerprint}:{})};}
+
 // The companion returns a JSON object through the existing authenticated bridge.
-export async function requestLayoutDecision(link,input,signal,onReceipt){
+export async function requestLayoutDecision(link,input,signal,onReceipt,identity){
   const response=await link.request('/api/paper/layout-agent/step',{schema:'falsify.paper-layout-agent-step.v1',consent:true,...input},{signal});
   if(signal?.aborted)throw aborted();
   if(response?.schema!=='falsify.paper-layout-agent-action.v1'||response.projectId!==input.projectId||response.step!==input.step||!response.action)throw new Error('레이아웃 응답이 현재 작업과 일치하지 않습니다.');
-  onReceipt?.({projectId:response.projectId,step:response.step,model:response.model,skillHash:response.skillHash});
+  onReceipt?.({projectId:response.projectId,step:response.step,model:response.model,skillHash:response.skillHash,...stepIdentity(identity,input?.step)});
   return response.action;
 }
 
@@ -69,7 +73,7 @@ export function mountPaperLayoutAgent({doc,host,getSession,getEpoch,getReference
   function reveal(){box.open=true;box.focus?.({preventScroll:true});box.scrollIntoView?.({block:'start'});}
   let referenceBytes=null,controller=null,candidate=null,signature=null,previewTicket=0,previewPage=0,originalIndex=0,previewPages=0,receipts=[],runGoal='',runState=null,persist=false,forceFresh=false,viewerKey='',pendingSave=null,savePromise=null,pendingStep=null,pendingProblem=null,failedRun=null,previewFocus=null,saveGeneration=0;
   const history=new Map(),store=storeFactory();
-  const receiptKey=item=>{const failure=item?.failure&&typeof item.failure==='object'?item.failure:null,request=failure?.request&&typeof failure.request==='object'?failure.request:null;return [item?.projectId??'',item?.step??'',item?.model??'',item?.skillHash??'',failure?.code??'',request?.stepId??'',request?.fingerprint??''].join('\n');};
+  const receiptKey=item=>{const failure=item?.failure&&typeof item.failure==='object'?item.failure:null,request=failure?.request&&typeof failure.request==='object'?failure.request:null;return [item?.projectId??'',item?.step??'',item?.model??'',item?.skillHash??'',failure?.code??'',request?.stepId??'',request?.fingerprint??'',item?.runId??'',item?.stepId??'',item?.fingerprint??''].join('\n');};
   function copyReceipts(list){const out=[],seen=new Set();for(const item of list||[]){if(!item||typeof item!=='object')continue;const key=receiptKey(item);if(seen.has(key))continue;seen.add(key);out.push(item);}return out.length>MAX_LAYOUT_TRACE?out.slice(out.length-MAX_LAYOUT_TRACE):out;}
   function addReceipt(item){if(!item||typeof item!=='object')return;if(receipts.some(r=>receiptKey(r)===receiptKey(item)))return;receipts.push(item);if(receipts.length>MAX_LAYOUT_TRACE)receipts.splice(0,receipts.length-MAX_LAYOUT_TRACE);}
   function recoverableAttempt(base){if(failedRun?.pendingStep)return failedRun;const saved=base?.failedAttempt;if(saved?.pendingStep)return {runId:saved.runId,pendingStep:saved.pendingStep,decisionReceipts:saved.decisionReceipts||[],sessionState:null};return null;}
@@ -158,11 +162,11 @@ export function mountPaperLayoutAgent({doc,host,getSession,getEpoch,getReference
         decide:async input=>{
           check();status.textContent=recovered?'이전 AI 작업의 결과를 확인합니다.':'AI가 배치를 검토하고 있습니다.';if(deliveredAction){pendingStep=null;deliveredAction=null;}
           const payload={...input,instruction:input.instruction+(userGoal?'\nLayout goal: '+userGoal:'')};
-          if(!recovered&&bridge?.state?.().cap?.paperLayoutJobs!==true)return requestLayoutDecision(link,payload,own.signal,addReceipt);
+          if(!recovered&&bridge?.state?.().cap?.paperLayoutJobs!==true)return requestLayoutDecision(link,payload,own.signal,addReceipt,{runId});
           try{
             const instance=bridge?.state?.().cap?.companionInstance;
             const out=await layoutStepDecision(link,{schema:'falsify.paper-layout-agent-step.v1',consent:true,...payload},{runId,signal:own.signal,pendingStep:recovered,companionInstance:instance,onPending:async p=>{check();pendingStep=p||null;if(runState)await remember({...runState,pendingStep});}});
-            recovered=null;deliveredAction=out.response.action.tool;addReceipt({projectId:out.response.projectId,step:input.step,model:out.response.model,skillHash:out.response.skillHash});return out.response.action;
+            recovered=null;deliveredAction=out.response.action.tool;addReceipt({projectId:out.response.projectId,step:out.response.step,model:out.response.model,skillHash:out.response.skillHash,...stepIdentity(out.pendingStep)});return out.response.action;
           }catch(error){const failure=layoutFailureDetails(error);addReceipt({projectId:input.projectId,step:input.step,failure});if(['failed','cancelled','not-admitted'].includes(error.disposition)){pendingStep=null;recovered=null;if(runState)await remember({...runState,pendingStep:null,decisionReceipts:copyReceipts(receipts)});}else if(recovered&&!own.signal.aborted&&error?.name!=='AbortError')pendingProblem=`보류 중인 요청을 확인하지 못했습니다 (${error.recovery==='not-found'?'접수 기록 없음 또는 만료':error.recovery==='mismatch'?'요청·companion 불일치':'연결 오류'}). 다시 시작하면 같은 요청을 조회만 합니다. 버리면 이 후보에서 새 요청으로 이어갈 수 있습니다.`;throw error;}
         },
         compile:async request=>{check();const out=await compiler.compile(request);check();return out;},

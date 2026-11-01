@@ -32,9 +32,11 @@ test('a disconnected handoff exposes the connection error at the revealed panel'
  assert.equal(await agent.start(),false);assert.equal(calls,0);assert.ok(find(host,'PC 연결이 끊겼습니다. 연결 후 다시 누르세요.'));assert.equal(find(host,'AI 배치 다듬기').tag,'summary');
 });
 test('decision uses authenticated JSON bridge and rejects mismatched identity',async()=>{
-  const input={projectId:'a'.repeat(64),step:1,maxSteps:2,instruction:'x',tools:[],observations:[],images:[],sourceFiles:[]};
-  let captured;const link={request:async (...args)=>{captured=args;return {schema:'falsify.paper-layout-agent-action.v1',projectId:input.projectId,step:1,action};}};
-  assert.deepEqual(await requestLayoutDecision(link,input),action);assert.equal(captured[0],'/api/paper/layout-agent/step');assert.equal(captured[1].consent,true);
+  const input={projectId:'a'.repeat(64),step:1,maxSteps:2,instruction:'SECRET-INSTRUCTION',tools:[],observations:[],images:[],sourceFiles:[]};
+  let captured;const link={request:async (...args)=>{captured=args;return {schema:'falsify.paper-layout-agent-action.v1',projectId:input.projectId,step:1,model:'legacy-model',skillHash:'ab'.repeat(32),action};}};
+  const receipts=[];assert.deepEqual(await requestLayoutDecision(link,input,undefined,item=>receipts.push(item),{runId:'caller-run'}),action);assert.equal(captured[0],'/api/paper/layout-agent/step');assert.equal(captured[1].consent,true);assert.equal(captured[1].instruction,'SECRET-INSTRUCTION');assert.equal(captured[1].runId,undefined);
+  assert.equal(receipts[0].runId,'caller-run');assert.equal(receipts[0].stepId,'caller-run-s1');assert.equal(receipts[0].model,'legacy-model');assert.equal(receipts[0].skillHash,'ab'.repeat(32));assert.equal(receipts[0].fingerprint,undefined);assert.equal('instruction' in receipts[0],false);assert.equal('action' in receipts[0],false);
+  const bare=[];await requestLayoutDecision(link,input,undefined,item=>bare.push(item));assert.equal(bare[0].runId,undefined);assert.equal(bare[0].stepId,undefined);
   await assert.rejects(requestLayoutDecision({request:async()=>({schema:'falsify.paper-layout-agent-action.v1',projectId:'wrong',step:1,action})},input));
 });
 test('explicit start retains candidate PDF without changing session and aborts stale runs',async()=>{
@@ -321,4 +323,83 @@ test('invalid action recovery exports its failed receipt and retains the candida
  const link={request:async(path,body)=>{assert.ok(body);const i=requests++;return {schema:'falsify.layout-step-receipt.v1',runId:body.runId,stepId:body.stepId,fingerprint:'a'.repeat(64),state:i?'completed':'failed',...(i?{result:{schema:'falsify.paper-layout-agent-action.v1',projectId:body.request.projectId,step:body.request.step,model:'test',skillHash:'a'.repeat(64),action:{tool:'finish',args:{},message:'Done'}}}:{error:{error:'invalid_action',message:'Rejected'}})};}};
  const host=new Element('host'),agent=mountPaperLayoutAgent({doc:document,host,getSession:()=>session,getEpoch:()=>1,download(){},bridge:{session:()=>link,state:()=>({cap:{paperLayoutJobs:true}})},compilerFactory:()=>({dispose(){}}),readerFactory:()=>({dispose(){}}),runAgent:runPaperLayoutAgent});
  await agent.start();assert.equal(requests,2);const candidate=agent.getCandidate();assert.equal(candidate.artifact.pdfHash,artifact.pdfHash);assert.equal(candidate.decisionReceipts[0].failure.code,'invalid_action');assert.match(candidate.decisionReceipts[0].failure.request.stepId,/-s0$/);assert.equal(candidate.sessionState.decisionReceipts[0].failure.code,'invalid_action');
+ const success=candidate.decisionReceipts.find(item=>item.model==='test');assert.equal(success.skillHash,'a'.repeat(64));assert.equal(success.fingerprint,'a'.repeat(64));assert.match(success.stepId,/-s1$/);assert.equal(success.stepId,success.runId+'-s1');assert.equal('action' in success,false);assert.equal('request' in success,false);
+ const round=await importLayoutRun(await exportLayoutRun(candidate.sessionState));const failed=round.decisionReceipts.find(item=>item.failure),kept=round.decisionReceipts.find(item=>item.model==='test');
+ assert.equal(failed.failure.code,'invalid_action');assert.equal(failed.failure.request.stepId,candidate.decisionReceipts[0].failure.request.stepId);assert.equal(failed.failure.request.fingerprint,'a'.repeat(64));
+ assert.equal(kept.stepId,success.stepId);assert.equal(kept.model,'test');assert.equal(kept.skillHash,success.skillHash);assert.equal(kept.fingerprint,success.fingerprint);assert.equal(JSON.stringify(round.decisionReceipts).includes('Done'),false);assert.equal(JSON.stringify(round.decisionReceipts).includes('documentclass'),false);
+});
+
+test('two same-model step-0 starts keep distinct receipts and export their identity',async()=>{
+ const {runPaperLayoutAgent}=await import('../src/paper-layout-agent.mjs');
+ const project=await makeProject(),artifact=pdfArtifact(project,'%PDF-distinct'),HASH='a'.repeat(64),FP='b'.repeat(64),posts=[];
+ const session={getInputIdentity:()=>({projectId:project.id,changes:[]}),snapshot:()=>({project,changes:[]}),compile:async()=>artifact,getCurrentProject:async()=>project};
+ const link={request:async(path,body)=>{posts.push(body.stepId);return {schema:'falsify.layout-step-receipt.v1',runId:body.runId,stepId:body.stepId,fingerprint:FP,state:'completed',result:{schema:'falsify.paper-layout-agent-action.v1',projectId:body.request.projectId,step:body.request.step,model:'same-model',skillHash:HASH,action:{tool:'finish',args:{},message:'Done'}}};}};
+ const host=new Element('host'),downloads=[];
+ const agent=mountPaperLayoutAgent({doc:document,host,getSession:()=>session,getEpoch:()=>1,download:(...args)=>downloads.push(args),previewFactory:quietPreview,bridge:{session:()=>link,state:()=>({cap:{paperLayoutJobs:true}})},compilerFactory:()=>({dispose(){}}),readerFactory:()=>({dispose(){}}),runAgent:runPaperLayoutAgent});
+ await agent.start({goal:'SECRET-GOAL-MARKER'});await agent.start();
+ const receipts=agent.getCandidate().decisionReceipts;assert.equal(posts.length,2);assert.equal(new Set(posts).size,2);assert.deepEqual(agent.getCandidate().trace.map(entry=>entry.action),['finish','finish']);
+ assert.equal(receipts.length,2);assert.deepEqual(receipts.map(item=>item.stepId),posts);assert.ok(receipts.every(item=>item.model==='same-model'&&item.skillHash===HASH&&item.fingerprint===FP&&item.step===0&&item.stepId===item.runId+'-s0'&&!('request' in item)&&!('instruction' in item)&&!('action' in item)));
+ assert.equal(JSON.stringify(receipts).includes('SECRET-GOAL-MARKER'),false);
+ const round=await importLayoutRun(await exportLayoutRun(agent.getRunState()));assert.equal(round.decisionReceipts.length,2);assert.deepEqual(round.decisionReceipts.map(item=>item.stepId),posts);assert.equal(round.decisionReceipts[0].skillHash,HASH);assert.equal(round.decisionReceipts[1].fingerprint,FP);
+ find(host,'작업 기록 저장').onclick();const record=JSON.parse(new TextDecoder().decode(downloads.at(-1)[0]));assert.equal(record.decisions.length,2);assert.deepEqual(record.decisions.map(item=>item.stepId),posts);assert.equal(record.decisions[0].model,'same-model');assert.equal(JSON.stringify(record.decisions).includes('SECRET-GOAL-MARKER'),false);
+});
+
+test('copied history of one request identity stays one receipt',async()=>{
+ const project=await makeProject(),artifact=pdfArtifact(project,'%PDF-copy'),HASH='c'.repeat(64),FP='d'.repeat(64);
+ const identified={projectId:project.id,step:0,model:'same-model',skillHash:HASH,runId:'run-a',stepId:'run-a-s0',fingerprint:FP};
+ const imported={projectId:project.id,step:0,model:'imported-model',skillHash:HASH};
+ const failure={projectId:project.id,step:0,failure:{code:'invalid_action',reason:'rejected',request:{stepId:'saved-run-s0',fingerprint:FP,runId:'saved-run'}}};
+ const session={getInputIdentity:()=>({projectId:project.id,changes:[]}),snapshot:()=>({project,changes:[]}),compile:async()=>artifact,getCurrentProject:async()=>project};
+ const host=new Element('host');
+ const agent=mountPaperLayoutAgent({doc:document,host,getSession:()=>session,getEpoch:()=>1,download(){},previewFactory:quietPreview,bridge:{session:()=>({request:async()=>{throw new Error('copy must not request');}}),state:()=>({cap:{paperLayoutJobs:true}})},compilerFactory:()=>({dispose(){}}),readerFactory:()=>({dispose(){}}),runAgent:async()=>({project,artifact,status:'unresolved',runState:'paused',sessionState:agent.getRunState()})});
+ await agent.restoreRun(savedState(project,artifact,project,artifact,{decisionReceipts:[identified,{...identified},imported,{...imported},failure,{...failure,failure:{...failure.failure,request:{...failure.failure.request}}}],sourceContext:{projectId:project.id,changesSignature:'[]'}}));
+ await agent.start();
+ const receipts=agent.getCandidate().decisionReceipts;assert.equal(receipts.length,3);
+ assert.equal(receipts.filter(item=>item.stepId==='run-a-s0').length,1);assert.equal(receipts.filter(item=>item.model==='imported-model'&&!item.stepId).length,1);assert.equal(receipts.filter(item=>item.failure?.code==='invalid_action'&&item.failure.request.stepId==='saved-run-s0').length,1);
+ const round=await importLayoutRun(await exportLayoutRun(agent.getRunState()));assert.equal(round.decisionReceipts.length,3);assert.equal(round.decisionReceipts.find(item=>item.failure).failure.code,'invalid_action');assert.equal(round.decisionReceipts.find(item=>item.model==='imported-model').skillHash,HASH);assert.equal(round.decisionReceipts.find(item=>item.stepId==='run-a-s0').fingerprint,FP);
+});
+
+test('recovering the same request does not create another receipt',async()=>{
+ const {runPaperLayoutAgent}=await import('../src/paper-layout-agent.mjs');
+ const project=await makeProject(),artifact=pdfArtifact(project,'%PDF-same'),HASH='a'.repeat(64),FP='b'.repeat(64);
+ const pendingStep={runId:'saved-run',stepId:'saved-run-s0',projectId:project.id,step:0,fingerprint:FP,request:{schema:'falsify.paper-layout-agent-step.v1',projectId:project.id,step:0,consent:true},state:'unknown'};
+ const item={projectId:project.id,step:0,model:'same-model',skillHash:HASH,runId:'saved-run',stepId:'saved-run-s0',fingerprint:FP};
+ const calls=[];
+ const link={request:async(path,body)=>{calls.push(!!body);assert.equal(body,null);return {schema:'falsify.layout-step-receipt.v1',runId:'saved-run',stepId:'saved-run-s0',fingerprint:FP,state:'completed',result:{schema:'falsify.paper-layout-agent-action.v1',projectId:project.id,step:0,model:'same-model',skillHash:HASH,action:{tool:'finish',args:{},message:'Done'}}};}};
+ const session={getInputIdentity:()=>({projectId:project.id,changes:[]}),snapshot:()=>({project,changes:[]}),compile:async()=>artifact,getCurrentProject:async()=>project};
+ const host=new Element('host');
+ const agent=mountPaperLayoutAgent({doc:document,host,getSession:()=>session,getEpoch:()=>1,download(){},storeFactory:memoryStore([]),previewFactory:quietPreview,bridge:{session:()=>link,state:()=>({cap:{paperLayoutJobs:true}})},compilerFactory:()=>({compile:async()=>artifact,dispose(){}}),readerFactory:()=>({dispose(){}}),runAgent:runPaperLayoutAgent});
+ await agent.restoreRun(savedState(project,artifact,project,artifact,{pendingStep,decisionReceipts:[item,{...item}],sourceContext:{projectId:project.id,changesSignature:'[]'}}));
+ await agent.start();
+ assert.deepEqual(calls,[false]);assert.equal(agent.getCandidate().decisionReceipts.length,1);assert.equal(agent.getCandidate().decisionReceipts[0].stepId,'saved-run-s0');assert.equal(agent.getCandidate().decisionReceipts[0].fingerprint,FP);assert.equal(agent.getCandidate().decisionReceipts[0].model,'same-model');assert.equal('request' in agent.getCandidate().decisionReceipts[0],false);
+});
+
+test('unknown GET recovery does not mint a receipt identity',async()=>{
+ const {runPaperLayoutAgent}=await import('../src/paper-layout-agent.mjs');
+ const project=await makeProject(),artifact=pdfArtifact(project,'%PDF-unknown'),HASH='e'.repeat(64);
+ const imported={projectId:project.id,step:0,model:'imported-model',skillHash:HASH};
+ const pendingStep={runId:'saved-run',stepId:'saved-run-s0',projectId:project.id,step:0,request:{schema:'falsify.paper-layout-agent-step.v1',projectId:project.id,step:0},state:'unknown'};
+ const calls=[];
+ const link={request:async(path,body)=>{calls.push(!!body);if(!body)throw Object.assign(new Error('layout_step_not_found'),{httpStatus:404});throw new Error('recovery must not POST');}};
+ const session={getInputIdentity:()=>({projectId:project.id,changes:[]}),snapshot:()=>({project,changes:[]}),compile:async()=>artifact,getCurrentProject:async()=>project};
+ const host=new Element('host');
+ const agent=mountPaperLayoutAgent({doc:document,host,getSession:()=>session,getEpoch:()=>1,download(){},storeFactory:memoryStore([]),previewFactory:quietPreview,bridge:{session:()=>link,state:()=>({cap:{paperLayoutJobs:true}})},compilerFactory:()=>({compile:async()=>artifact,dispose(){}}),readerFactory:()=>({dispose(){}}),runAgent:runPaperLayoutAgent});
+ await agent.restoreRun(savedState(project,artifact,project,artifact,{pendingStep,decisionReceipts:[imported,{...imported}],sourceContext:{projectId:project.id,changesSignature:'[]'}}));
+ await agent.start();await agent.start();
+ const receipts=agent.getCandidate().decisionReceipts||[];
+ assert.deepEqual(calls,[false,false]);assert.equal(receipts.filter(item=>item.model==='imported-model'&&item.skillHash===HASH&&!item.stepId&&!item.runId).length,1);
+ assert.equal(receipts.filter(item=>item.stepId||item.runId||item.failure?.request?.stepId||item.failure?.request?.runId).length,0);
+});
+
+test('legacy step endpoint stamps caller run and step identity',async()=>{
+ const {runPaperLayoutAgent}=await import('../src/paper-layout-agent.mjs');
+ const project=await makeProject(),artifact=pdfArtifact(project,'%PDF-legacy'),HASH='f'.repeat(64);
+ const session={getInputIdentity:()=>({projectId:project.id,changes:[]}),snapshot:()=>({changes:[]}),compile:async()=>artifact,getCurrentProject:async()=>project};
+ const link={request:async(path,body)=>({schema:'falsify.paper-layout-agent-action.v1',projectId:body.projectId,step:body.step,model:'same-model',skillHash:HASH,action:{tool:'finish',args:{},message:'Done'}})};
+ const host=new Element('host');
+ const agent=mountPaperLayoutAgent({doc:document,host,getSession:()=>session,getEpoch:()=>1,download(){},previewFactory:quietPreview,bridge:{session:()=>link,state:()=>({cap:{paperLayoutJobs:false}})},compilerFactory:()=>({dispose(){}}),readerFactory:()=>({dispose(){}}),runAgent:runPaperLayoutAgent});
+ await agent.start({goal:'SECRET-GOAL-MARKER'});await agent.start();
+ const receipts=agent.getCandidate().decisionReceipts;assert.equal(receipts.length,2);assert.equal(new Set(receipts.map(item=>item.stepId)).size,2);
+ assert.ok(receipts.every(item=>item.model==='same-model'&&item.skillHash===HASH&&item.stepId===item.runId+'-s0'&&item.fingerprint===undefined&&!('request' in item)&&!('instruction' in item)&&!('action' in item)));
+ assert.equal(JSON.stringify(receipts).includes('SECRET-GOAL-MARKER'),false);
 });
