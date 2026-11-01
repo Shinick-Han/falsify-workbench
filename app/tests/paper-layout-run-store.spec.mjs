@@ -216,6 +216,47 @@ test('expired-row cleanup that races a newer put of the same runId keeps the new
   clock+=LAYOUT_RUN_TTL_MS;assert.equal(await createLayoutRunStore({indexedDB:idb,now}).get('run-1'),null);assert.equal(runRows(idb).length,0);
 });
 
+function gateProjects(){
+  let armed=false,release=null;const entered=[];
+  return {entered,arm(){armed=true;},async hold(){await until(()=>entered.includes('held'));},release(){release?.();},
+    create:async spec=>{if(armed){armed=false;await new Promise(r=>{release=r;entered.push('held');});}return createLatexProject(spec);}};
+}
+test('the last invoked save wins when an earlier validation finishes later',async()=>{
+  const older=await fixture({runState:'paused'}),newer=await fixture({runState:'completed'});
+  const idb=serialIndexedDB(),store=createLayoutRunStore({indexedDB:idb});
+  await store.setConsent(true);
+  await store.put({...older,stepCount:5},{consent:true});
+  await store.put({...newer,runId:older.runId,stepCount:9},{consent:true});
+  assert.equal((await store.get(older.runId)).stepCount,9,'sequential saves keep the later snapshot');
+  const gate=gateProjects(),raced=serialIndexedDB(),racer=createLayoutRunStore({indexedDB:raced,createLatexProject:gate.create});
+  await racer.setConsent(true);
+  const slowOlder=await fixture({runId:'race-run',runState:'paused'}),fastNewer=await fixture({runId:'race-run',runState:'completed'});
+  gate.arm();
+  const slow=racer.put({...slowOlder,stepCount:5},{consent:true});
+  await gate.hold();
+  const fast=await racer.put({...fastNewer,stepCount:9},{consent:true});
+  gate.release();
+  const slowResult=await slow;
+  assert.equal(fast.persisted,true);assert.equal(slowResult.persisted,false);
+  assert.equal((await racer.get('race-run')).stepCount,9);assert.equal((await racer.get('race-run')).runState,'completed');
+  assert.equal((await createLayoutRunStore({indexedDB:raced}).get('race-run')).stepCount,9);
+  assert.equal((await createLayoutRunStore({indexedDB:raced}).get('race-run')).candidate.artifact.pdfHash,fastNewer.candidate.artifact.pdfHash);
+});
+
+test('clear and dispose discard a save that is still validating',async()=>{
+  const gate=gateProjects(),idb=serialIndexedDB(),store=createLayoutRunStore({indexedDB:idb,createLatexProject:gate.create}),f=await fixture();
+  await store.setConsent(true);gate.arm();
+  const pending=store.put({...f,stepCount:4},{consent:true});
+  await gate.hold();await store.clear();gate.release();
+  assert.equal((await pending).persisted,false);assert.equal(await store.get('run-1'),null);assert.equal(idb.rows(LAYOUT_RUN_DB_NAME,'runs').length,0);
+  const gate2=gateProjects(),idb2=serialIndexedDB(),store2=createLayoutRunStore({indexedDB:idb2,createLatexProject:gate2.create}),f2=await fixture({runId:'run-dispose'});
+  await store2.setConsent(true);gate2.arm();
+  const pending2=store2.put(f2,{consent:true});
+  await gate2.hold();store2.dispose();gate2.release();
+  assert.equal((await pending2).persisted,false);
+  assert.equal(await createLayoutRunStore({indexedDB:idb2}).get('run-dispose'),null);
+});
+
 test('outcome scope, limitations and coverage survive the run codec',async()=>{
   const f=await fixture();const quality={...f.quality,layout:'clear',findings:[],layoutScope:'observed',layoutVerified:false,inspectionStatus:'partial',limitations:['Findings truncated.','Heading could not be uniquely observed.'],coverage:{pages:2,findingsTruncated:true}};
   const out=await decodeLayoutRun(await encodeLayoutRun({...f,quality}));assert.deepEqual(out.quality,quality);

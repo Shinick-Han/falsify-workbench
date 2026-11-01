@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import {requestLayoutDecision,mountPaperLayoutAgent} from '../src/paper-layout-agent-ui.mjs';
 import {hex} from '../src/paragraph-pdf-crypto.mjs';
 import {createLatexProject} from '../src/latex-project.mjs';
+import {createLayoutRunStore,exportLayoutRun,importLayoutRun} from '../src/paper-layout-run-store.mjs';
+import {serialIndexedDB,until} from './serial-indexeddb.mjs';
 
 class Element {
   constructor(tag){this.tag=tag;this.children=[];this.hidden=false;this.disabled=false;this.textContent='';}
@@ -216,6 +218,103 @@ test('large original reference pages stay bounded and cursors preserve all text 
  assert.ok(destroyed>1);await assert.rejects(readLayoutReference({...args,sourcePdfHash:'0'.repeat(64)}));
 });
 
+
+test('resume keeps earlier failure and model receipts without duplicating them',async()=>{
+ const {runPaperLayoutAgent}=await import('../src/paper-layout-agent.mjs');
+ const project=await makeProject(),bytes=Uint8Array.of(1,2),artifact={success:true,projectId:project.id,engine:project.engine,pdfBytes:bytes,pdfHash:hex(bytes)};
+ const session={snapshot:()=>({changes:[]}),compile:async()=>artifact,getCurrentProject:async()=>project,getInputIdentity:()=>({projectId:project.id,changes:[]})};
+ let requests=0;
+ const link={request:async(path,body)=>{assert.ok(body);const i=requests++;return {schema:'falsify.layout-step-receipt.v1',runId:body.runId,stepId:body.stepId,fingerprint:'a'.repeat(64),state:i?'completed':'failed',...(i?{result:{schema:'falsify.paper-layout-agent-action.v1',projectId:body.request.projectId,step:body.request.step,model:'test-model',skillHash:'b'.repeat(64),action:{tool:'finish',args:{},message:'Done'}}}:{error:{error:'invalid_action',message:'Rejected'}})};}};
+ const host=new Element('host'),downloads=[];
+ const agent=mountPaperLayoutAgent({doc:document,host,getSession:()=>session,getEpoch:()=>1,download:(...args)=>downloads.push(args),bridge:{session:()=>link,state:()=>({cap:{paperLayoutJobs:true}})},compilerFactory:()=>({dispose(){}}),readerFactory:()=>({dispose(){}}),previewFactory:quietPreview,runAgent:runPaperLayoutAgent});
+ await agent.start();
+ const first=agent.getCandidate();
+ assert.ok((first.decisionReceipts||[]).some(item=>item.failure?.code==='invalid_action'));
+ assert.ok((first.sessionState.decisionReceipts||[]).some(item=>item.model==='test-model'));
+ await find(host,'AI로 배치 다듬기').onclick();
+ await find(host,'AI로 배치 다듬기').onclick();
+ const codes=(agent.getCandidate().decisionReceipts||[]).map(item=>item.failure?.code||item.model);
+ assert.equal(codes.filter(code=>code==='invalid_action').length,1);
+ assert.ok(codes.includes('test-model'));
+ assert.ok((agent.getRunState().trace||[]).some(entry=>entry.action==='invalid_action'||entry.result?.code==='invalid_action'));
+ find(host,'작업 기록 저장').onclick();
+ const record=JSON.parse(new TextDecoder().decode(downloads.at(-1)[0]));
+ assert.ok((record.decisions||[]).some(item=>item.failure?.code==='invalid_action'));
+ assert.equal((record.decisions||[]).filter(item=>item.failure?.code==='invalid_action').length,1);
+});
+
+test('a preserved PDF keeps the unknown request for one GET, and discard allows a new POST',async()=>{
+ const {runPaperLayoutAgent}=await import('../src/paper-layout-agent.mjs');
+ const base=await makeProject(),edited=await makeProject({files:[{path:'main.tex',bytes:new TextEncoder().encode('\\documentclass{article}\n\\begin{document}RED 71 tuned\\end{document}')}]});
+ const baseline=pdfArtifact(base,'%PDF-baseline'),good=pdfArtifact(edited,'%PDF-good-candidate'),calls=[],downloads=[];
+ const link={request:async(path,body)=>{calls.push({path,post:!!body,stepId:body?.stepId||null});if(body)throw Object.assign(new Error('offline'),{code:'request_failed'});throw Object.assign(new Error('layout_step_not_found'),{httpStatus:404});}};
+ const session={getInputIdentity:()=>({projectId:base.id,changes:[]}),snapshot:()=>({project:base,changes:[]}),compile:async()=>baseline,getCurrentProject:async()=>base};
+ const host=new Element('host');
+ const agent=mountPaperLayoutAgent({doc:document,host,getSession:()=>session,getEpoch:()=>1,download:(...args)=>downloads.push(args),storeFactory:memoryStore([]),previewFactory:quietPreview,bridge:{session:()=>link,state:()=>({cap:{paperLayoutJobs:true,companionInstance:'companion-a'}})},compilerFactory:()=>({compile:async()=>baseline,dispose(){}}),readerFactory:()=>({dispose(){}}),runAgent:runPaperLayoutAgent});
+ await agent.restoreRun(savedState(base,baseline,edited,good,{decisionReceipts:[{projectId:edited.id,step:0,failure:{code:'invalid_action',request:{stepId:'saved-run-s0'}}}],sourceContext:{projectId:base.id,changesSignature:'[]'}}));
+ await find(host,'원본에서 다시 시작').onclick();
+ const failed=agent.getFailedRun(),kept=agent.getRunState();
+ assert.equal(kept.runId,'saved-run');assert.equal(agent.getCandidate().artifact.pdfHash,good.pdfHash);
+ assert.equal(kept.pendingStep.companionInstance,'companion-a');assert.match(kept.pendingStep.stepId,/-s0$/);
+ assert.notEqual(kept.pendingStep.runId,'saved-run');
+ assert.ok((kept.decisionReceipts||[]).some(item=>item.failure?.code==='invalid_action'));
+ assert.ok((failed.decisionReceipts||[]).some(item=>item.failure?.code==='request_failed'));
+ find(host,'후보 PDF 다운로드').onclick();assert.deepEqual(downloads.at(-1)[0],good.pdfBytes);
+ find(host,'작업 기록 저장').onclick();
+ const record=JSON.parse(new TextDecoder().decode(downloads.at(-1)[0]));
+ assert.equal(record.pdfHash,good.pdfHash);assert.equal(record.failedRun.pendingStep.stepId,failed.pendingStep.stepId);
+ assert.ok((record.failedRun.decisionReceipts||[]).some(item=>item.failure?.code==='request_failed'));
+ const round=await importLayoutRun(await exportLayoutRun(kept));
+ assert.equal(round.candidate.artifact.pdfHash,good.pdfHash);assert.equal(round.failedAttempt.pendingStep.stepId,kept.pendingStep.stepId);
+ assert.equal(round.failedAttempt.runId,failed.runId);assert.notEqual(round.runId,round.failedAttempt.runId);
+ const beforeRetry=calls.length;
+ await find(host,'AI로 배치 다듬기').onclick();
+ assert.equal(calls.length,beforeRetry+1);assert.equal(calls.at(-1).post,false);assert.equal(calls.at(-1).path,'/api/paper/layout-agent/jobs/'+kept.pendingStep.stepId);
+ assert.equal(agent.getCandidate().artifact.pdfHash,good.pdfHash);
+ const discard=find(host,'보류 중인 요청 버리기');assert.equal(discard.hidden,false);
+ await discard.onclick();assert.equal(agent.getRunState().pendingStep,null);
+ const posts=calls.length;
+ await find(host,'AI로 배치 다듬기').onclick();
+ assert.equal(calls.at(-1).post,true);assert.ok(calls.length>posts);
+ const host2=new Element('host'),calls2=[];
+ const link2={request:async(path,body)=>{calls2.push({path,post:!!body});if(!body)throw Object.assign(new Error('layout_step_not_found'),{httpStatus:404});throw new Error('restored start must not POST');}};
+ const restored=mountPaperLayoutAgent({doc:document,host:host2,getSession:()=>session,getEpoch:()=>1,download(){},storeFactory:memoryStore([]),previewFactory:quietPreview,bridge:{session:()=>link2,state:()=>({cap:{paperLayoutJobs:true,companionInstance:'companion-a'}})},compilerFactory:()=>({compile:async()=>baseline,dispose(){}}),readerFactory:()=>({dispose(){}}),runAgent:runPaperLayoutAgent});
+ await restored.restoreRun(round);
+ await find(host2,'AI로 배치 다듬기').onclick();
+ assert.equal(calls2.length,1);assert.equal(calls2[0].post,false);assert.equal(calls2[0].path,'/api/paper/layout-agent/jobs/'+kept.pendingStep.stepId);
+ assert.equal(restored.getCandidate().artifact.pdfHash,good.pdfHash);
+});
+
+test('not-admitted clears the pending request and the next click submits again',async()=>{
+ const {runPaperLayoutAgent}=await import('../src/paper-layout-agent.mjs');
+ const project=await makeProject(),artifact=pdfArtifact(project,'%PDF-busy'),calls=[];
+ const link={request:async(path,body)=>{calls.push({post:!!body,path});if(!body)throw new Error('not-admitted must not be looked up');throw Object.assign(new Error('companion_busy'),{httpStatus:409,code:'companion_busy',disposition:'not-admitted'});}};
+ const session={getInputIdentity:()=>({projectId:project.id,changes:[]}),snapshot:()=>({changes:[]}),compile:async()=>artifact,getCurrentProject:async()=>project};
+ const host=new Element('host');
+ const agent=mountPaperLayoutAgent({doc:document,host,getSession:()=>session,getEpoch:()=>1,download(){},storeFactory:memoryStore([]),previewFactory:quietPreview,bridge:{session:()=>link,state:()=>({cap:{paperLayoutJobs:true,companionInstance:'companion-a'}})},compilerFactory:()=>({dispose(){}}),readerFactory:()=>({dispose(){}}),runAgent:runPaperLayoutAgent});
+ await agent.start();
+ assert.equal(calls.length,1);assert.equal(calls[0].post,true);assert.equal(agent.getRunState()?.pendingStep??null,null);
+ await find(host,'AI로 배치 다듬기').onclick();
+ assert.equal(calls.length,2);assert.equal(calls[1].post,true);assert.equal(calls.filter(call=>!call.post).length,0);
+});
+
+test('enabling persistence uses the same save queue and keeps the newer UI run',async()=>{
+ const idb=serialIndexedDB(),inner=createLayoutRunStore({indexedDB:idb}),store={entered:[],attempts:[],armed:false,release(){this._release?.();},async hold(){await until(()=>this.entered.includes('held'));},async put(state,opts){this.attempts.push('enter:'+(state?.stepCount??'?'));if(this.armed){this.armed=false;await new Promise(resolve=>{this._release=resolve;this.entered.push('held');});}const result=await inner.put(state,opts);this.attempts.push('ok:'+state?.stepCount+':'+result?.persisted);return result;},get:(...args)=>inner.get(...args),setConsent:(...args)=>inner.setConsent(...args),dispose(){inner.dispose();}};
+ const base=await makeProject(),baseline=pdfArtifact(base,'%PDF-base'),olderPdf=pdfArtifact(base,'%PDF-step-5'),newerPdf=pdfArtifact(base,'%PDF-step-9');
+ const older=savedState(base,baseline,base,olderPdf,{stepCount:5,runState:'paused'});
+ const newer=savedState(base,baseline,base,newerPdf,{stepCount:9,runState:'completed',decisionReceipts:[{model:'newer-model'}]});
+ const session={getInputIdentity:()=>({projectId:base.id,changes:[]}),snapshot:()=>({changes:[]}),compile:async()=>baseline,getCurrentProject:async()=>base};
+ const host=new Element('host');let activeRunId,advance;
+ const gate=new Promise(resolve=>{advance=resolve;});let entered;const phase=new Promise(resolve=>{entered=resolve;});
+ const agent=mountPaperLayoutAgent({doc:document,host,getSession:()=>session,getEpoch:()=>1,download(){},storeFactory:()=>store,previewFactory:quietPreview,bridge:{session:()=>({request:async()=>{throw new Error('unused');}}),state:()=>({cap:{paperLayoutJobs:true}})},compilerFactory:()=>({dispose(){}}),readerFactory:()=>({dispose(){}}),runAgent:async opts=>{activeRunId=opts.runId;older.runId=newer.runId=opts.runId;opts.onState(older);entered();await gate;opts.onState(newer);return {runId:opts.runId,project:newer.candidate.project,artifact:newer.candidate.artifact,status:'complete',runState:'completed',message:'newer',sessionState:newer};}});
+ const running=agent.start();await phase;await until(()=>store.attempts.some(item=>item.startsWith('ok:5:')));
+ store.armed=true;const persisting=agent.setPersistence(true);await store.hold();advance();store.release();await running;await persisting;
+ const memory=await store.get(activeRunId),reloaded=await createLayoutRunStore({indexedDB:idb}).get(activeRunId);
+ assert.match(activeRunId,/^[A-Za-z0-9._:-]{1,128}$/);assert.notEqual(activeRunId,'saved-run');
+ assert.equal(memory.stepCount,9);assert.equal(memory.candidate.artifact.pdfHash,newerPdf.pdfHash);
+ assert.equal(reloaded.stepCount,9);assert.equal(reloaded.candidate.artifact.pdfHash,newerPdf.pdfHash);
+ assert.ok(store.attempts.some(item=>item.startsWith('ok:9:')));
+});
 
 test('invalid action recovery exports its failed receipt and retains the candidate',async()=>{
  const {runPaperLayoutAgent}=await import('../src/paper-layout-agent.mjs');const project=await makeProject(),bytes=Uint8Array.of(1,2),artifact={success:true,projectId:project.id,engine:project.engine,pdfBytes:bytes,pdfHash:hex(bytes)},session={snapshot:()=>({changes:[]}),compile:async()=>artifact,getCurrentProject:async()=>project};let requests=0;
