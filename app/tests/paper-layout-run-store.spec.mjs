@@ -243,6 +243,44 @@ test('the last invoked save wins when an earlier validation finishes later',asyn
   assert.equal((await createLayoutRunStore({indexedDB:raced}).get('race-run')).candidate.artifact.pdfHash,fastNewer.candidate.artifact.pdfHash);
 });
 
+test('an issued valid save remains when a later invalid save only takes the claim',async()=>{
+  const gate=gateProjects(),idb=serialIndexedDB(),store=createLayoutRunStore({indexedDB:idb,now:()=>1000,createLatexProject:gate.create});
+  await store.setConsent(true);
+  const good=await fixture({runId:'same-run',runState:'paused'});
+  idb.pause();const base=idb.created;
+  const saved=store.put(good);
+  await until(()=>idb.created>=base+1);
+  const bad={...good,baselineProject:{...good.baselineProject,id:'b'.repeat(64)}};
+  gate.arm();
+  const rejected=assert.rejects(store.put(bad),/Invalid or mismatched layout run/);
+  await gate.hold();
+  idb.resume();
+  const result=await saved;
+  gate.release();
+  await rejected;
+  assert.equal(result.persisted,false);
+  const rows=runRows(idb);assert.equal(rows.length,1);
+  const fresh=await createLayoutRunStore({indexedDB:idb,now:()=>1000}).get('same-run');
+  assert.equal(fresh.currentProject.id,good.currentProject.id);
+  assert.equal(fresh.baselineProject.id,good.baselineProject.id);
+});
+
+test('a later valid save issued after an earlier queued save still replaces that row',async()=>{
+  const idb=serialIndexedDB(),store=createLayoutRunStore({indexedDB:idb});
+  await store.setConsent(true);
+  const older=await fixture({runId:'race-issued',runState:'paused'}),newer=await fixture({runId:'race-issued',runState:'completed'});
+  idb.pause();const base=idb.created;
+  const slow=store.put({...older,stepCount:5});
+  await until(()=>idb.created>=base+1);
+  const fast=store.put({...newer,stepCount:9});
+  await until(()=>idb.created>=base+2);
+  idb.resume();
+  const [slowResult,fastResult]=await Promise.all([slow,fast]);
+  assert.equal(slowResult.persisted,false);assert.equal(fastResult.persisted,true);
+  const rows=runRows(idb);assert.equal(rows.length,1);assert.equal((await decodeLayoutRun(rows[0].data)).stepCount,9);
+  assert.equal((await createLayoutRunStore({indexedDB:idb}).get('race-issued')).stepCount,9);
+});
+
 test('clear and dispose discard a save that is still validating',async()=>{
   const gate=gateProjects(),idb=serialIndexedDB(),store=createLayoutRunStore({indexedDB:idb,createLatexProject:gate.create}),f=await fixture();
   await store.setConsent(true);gate.arm();

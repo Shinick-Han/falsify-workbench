@@ -276,11 +276,15 @@ export function createLayoutRunStore({now=Date.now,indexedDB=globalThis.indexedD
           if(disposed||at!==epoch||at<wipeEpoch||!owns(valid.runId,writeId))return {runId:valid.runId,savedAt,persisted:false};
           const db=await open();
           const row={runId:valid.runId,writeId,savedAt,expiresAt:savedAt+LAYOUT_RUN_TTL_MS,data};
-          // The epoch and invocation identity are re-checked when the put is issued: a withdrawal
-          // or a later save before that point means this put is never queued. After it is queued,
-          // only this exact write is rolled back.
+          // Epoch and invocation identity are re-checked when the put is issued. A withdrawal,
+          // clear, dispose, or a later save before that point means this put is never queued.
+          // After it is queued, roll this exact write back only for consent withdrawal, clear,
+          // or dispose. A newer invocation that only took the claim leaves this valid row;
+          // a later issued readwrite transaction overwrites it when that save succeeds.
           const issued=await tx(db,'readwrite',s=>at!==epoch||!owns(valid.runId,writeId)?false:req(s.put(row)).then(()=>true));
-          if(!issued||at!==epoch||!owns(valid.runId,writeId)){if(issued){try{await tx(db,'readwrite',s=>deleteIfSameWrite(s,valid.runId,row));}catch{}}return {runId:valid.runId,savedAt,persisted:false};}
+          const withdrawn=disposed||at!==epoch||at<wipeEpoch;
+          if(!issued||withdrawn){if(issued){try{await tx(db,'readwrite',s=>deleteIfSameWrite(s,valid.runId,row));}catch{}}return {runId:valid.runId,savedAt,persisted:false};}
+          if(!owns(valid.runId,writeId))return {runId:valid.runId,savedAt,persisted:false};
           lastError=null;
           return {runId:valid.runId,savedAt,persisted:true,expiresAt:savedAt+LAYOUT_RUN_TTL_MS};
         }catch(e){if(disposed||at<wipeEpoch)return {runId:valid.runId,savedAt,persisted:false};lastError=storageError(e);return {runId:valid.runId,savedAt,persisted:false,storageError:lastError};}
