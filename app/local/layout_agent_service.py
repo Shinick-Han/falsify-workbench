@@ -39,7 +39,13 @@ class LayoutAgentError(Exception):
             'model_failed': 'The layout decision failed. Check Codex availability and try again.',
             'model_tool_violation': 'The layout decision was rejected because a provider tool was invoked.',
             'invalid_action': 'The layout decision returned an invalid action. Try again.',
-            'skill_unavailable': 'The installed layout guidance is unavailable. Repair the companion installation.'}
+            'skill_unavailable': 'The installed layout guidance is unavailable. Repair the companion installation.',
+            'invalid_request': 'The layout request is invalid.',
+            'fingerprint_mismatch': 'The layout request fingerprint does not match its contents.',
+            'layout_step_conflict': 'This layout step was already submitted with different contents. It was not run again.',
+            'layout_step_not_found': 'The layout step is not known to this companion instance.',
+            'companion_busy': 'The companion is busy. The step was not started; retry is not automatic.',
+            'job_start_failed': 'The layout step could not be started. It was not run.'}
         return {'error': self.code, 'message': messages.get(self.code, 'The layout request could not be processed.')}
 
 PROMPT_CONTRACT = r'''You are choosing one application action, not executing a shell command.
