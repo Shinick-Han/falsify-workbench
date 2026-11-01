@@ -200,6 +200,22 @@ function tx(db,mode,work){
     Promise.resolve(pending).then(v=>{value=v;},e=>{try{t.abort();}catch{}reject(e);});
   });
 }
+// Unique identity of one persisted write. A row is only ever removed by the
+// operation that observed exactly that write, never by key alone.
+export function createWriteIdentity(){
+  const nonce=globalThis.crypto?.randomUUID?.()??`${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;let seq=0;
+  return ()=>`${nonce}:${++seq}`;
+}
+const sameWrite=(stored,row)=>!!stored&&!!row&&stored.writeId===row.writeId&&stored.savedAt===row.savedAt;
+// Compare-and-delete inside the caller's transaction: get, then delete in the
+// same transaction only when the stored row is still the observed write.
+export function deleteIfSameWrite(store,key,row){
+  return new Promise((resolve,reject)=>{
+    const g=store.get(key);
+    g.onerror=()=>reject(g.error);
+    g.onsuccess=()=>{if(!sameWrite(g.result,row)){resolve(false);return;}const d=store.delete(key);d.onsuccess=()=>resolve(true);d.onerror=()=>reject(d.error);};
+  });
+}
 
 /**
  * createLayoutRunStore({now,indexedDB,createLatexProject}) keeps every put in memory
@@ -209,7 +225,7 @@ function tx(db,mode,work){
  * returned as {code,message}, never thrown, so the current candidate is retained.
  */
 export function createLayoutRunStore({now=Date.now,indexedDB=globalThis.indexedDB,createLatexProject=defaultCreateLatexProject}={}){
-  const memory=new Map();let consent=false,epoch=0,dbPromise=null,disposed=false,lastError=null;
+  const memory=new Map(),nextWriteId=createWriteIdentity();let consent=false,epoch=0,dbPromise=null,disposed=false,lastError=null;
   const live=()=>{if(disposed)throw Object.assign(new Error('Layout run store is disposed'),{code:'DISPOSED'});};
   const open=()=>{
     if(!indexedDB||typeof indexedDB.open!=='function')return Promise.reject(Object.assign(new Error('IndexedDB unavailable'),{code:'STORAGE_UNAVAILABLE'}));
@@ -227,7 +243,8 @@ export function createLayoutRunStore({now=Date.now,indexedDB=globalThis.indexedD
     const db=await open();
     const rows=await tx(db,'readonly',s=>req(s.getAll()));
     const stale=rows.filter(r=>!fresh(r)||typeof r.runId!=='string');
-    if(stale.length)await tx(db,'readwrite',s=>Promise.all(stale.map(r=>req(s.delete(r.runId)))));
+    // A newer write of the same runId may land between the read and this cleanup.
+    if(stale.length)await tx(db,'readwrite',s=>Promise.all(stale.map(r=>typeof r.runId==='string'?deleteIfSameWrite(s,r.runId,r):req(s.delete(r.runId)))));
     return rows.filter(r=>fresh(r)&&typeof r.runId==='string');
   }
   return {
@@ -241,9 +258,13 @@ export function createLayoutRunStore({now=Date.now,indexedDB=globalThis.indexedD
       try{
         const data=await encodeLayoutRun(valid,{createLatexProject});
         const db=await open();
-        await tx(db,'readwrite',s=>req(s.put({runId:valid.runId,savedAt,expiresAt:savedAt+LAYOUT_RUN_TTL_MS,data})));
-        // Consent withdrawn while this write was in flight: undo it.
-        if(at!==epoch){await tx(db,'readwrite',s=>req(s.delete(valid.runId)));return {runId:valid.runId,savedAt,persisted:false};}
+        const row={runId:valid.runId,writeId:nextWriteId(),savedAt,expiresAt:savedAt+LAYOUT_RUN_TTL_MS,data};
+        // The epoch is re-checked when the put is issued: a withdrawal before that point
+        // means the put is never queued; after it, the withdrawal's clear is ordered later.
+        const issued=await tx(db,'readwrite',s=>at!==epoch?false:req(s.put(row)).then(()=>true));
+        // Consent withdrawn while this write was in flight: undo only this exact write,
+        // never a newer row of the same runId written after a re-grant.
+        if(!issued||at!==epoch){if(issued)await tx(db,'readwrite',s=>deleteIfSameWrite(s,valid.runId,row));return {runId:valid.runId,savedAt,persisted:false};}
         lastError=null;
         return {runId:valid.runId,savedAt,persisted:true,expiresAt:savedAt+LAYOUT_RUN_TTL_MS};
       }catch(e){lastError=storageError(e);return {runId:valid.runId,savedAt,persisted:false,storageError:lastError};}
@@ -257,7 +278,7 @@ export function createLayoutRunStore({now=Date.now,indexedDB=globalThis.indexedD
       const row=runId===undefined?rows.sort((a,b)=>b.savedAt-a.savedAt)[0]:rows.find(r=>r.runId===runId);
       if(!row)return null;
       try{return await decodeLayoutRun(row.data,{createLatexProject});}
-      catch{try{const db=await open();await tx(db,'readwrite',s=>req(s.delete(row.runId)));}catch{}return null;}
+      catch{try{const db=await open();await tx(db,'readwrite',s=>deleteIfSameWrite(s,row.runId,row));}catch{}return null;}
     },
     async list(){
       live();

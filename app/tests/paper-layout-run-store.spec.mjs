@@ -5,6 +5,7 @@ import {hex} from '../src/paragraph-pdf-crypto.mjs';
 import {createLatexProject} from '../src/latex-project.mjs';
 import {encodeLayoutRun,decodeLayoutRun,exportLayoutRun,importLayoutRun,createLayoutRunStore,LAYOUT_RUN_TTL_MS,LAYOUT_RUN_DB_NAME,MAX_LAYOUT_CHECKPOINTS} from '../src/paper-layout-run-store.mjs';
 import {encodeSourceSession,decodeSourceSession} from '../src/latex-session-archive.mjs';
+import {serialIndexedDB,until} from './serial-indexeddb.mjs';
 
 const enc=new TextEncoder();
 const asset=Uint8Array.of(137,80,78,71,0,1,2,3,255);
@@ -165,4 +166,57 @@ test('source session archive keeps legacy format and roundtrips an optional layo
   const t=JSON.parse(json);t.payload.layoutRun.payload.state.status='completed';await assert.rejects(decodeSourceSession(JSON.stringify(t),{createLatexProject}));
   const foreign=await createLatexProject({files:[{path:'main.tex',bytes:tex('x')}],mainFile:'main.tex',origin:'reconstructed-pdf',sourcePdfHash:'e'.repeat(64)});
   await assert.rejects(encodeSourceSession({...session,project:foreign,layoutRun:f},{createLatexProject}));
+});
+
+// F6: transactions are serialized in creation order like real IndexedDB. These cases
+// order a stale write's rollback/cleanup after a newer row of the same runId.
+const runRows=idb=>idb.rows(LAYOUT_RUN_DB_NAME,'runs').map(([,v])=>v);
+test('late consent-withdrawal rollback never deletes the newer re-consented row of the same runId',async()=>{
+  const idb=serialIndexedDB(),f=await fixture(),store=createLayoutRunStore({indexedDB:idb});
+  await store.setConsent(true);assert.equal((await store.put(f)).persisted,true);
+  idb.pause();const base=idb.created;
+  const a=store.put(f);await until(()=>idb.created>=base+1);            // write A queued
+  const withdrawn=store.setConsent(false);await until(()=>idb.created>=base+2); // clear queued after A
+  await store.setConsent(true);
+  const b=store.put({...f,stepCount:6});await until(()=>idb.created>=base+3);   // re-consented write B
+  idb.resume();
+  assert.equal((await a).persisted,false,'A was withdrawn while in flight');await withdrawn;
+  assert.equal((await b).persisted,true);
+  // A's rollback ran after B committed; B must survive and be the only row.
+  const rows=runRows(idb);assert.equal(rows.length,1);assert.equal((await decodeLayoutRun(rows[0].data)).stepCount,6);
+  assert.equal((await createLayoutRunStore({indexedDB:idb}).get('run-1')).stepCount,6,'newer row survives reload');
+});
+
+test('a write whose epoch changed before it was issued is never queued over a newer row',async()=>{
+  const idb=serialIndexedDB(),f=await fixture(),store=createLayoutRunStore({indexedDB:idb});
+  await store.setConsent(true);
+  const a=store.put(f);                                  // still validating/encoding
+  const withdrawn=store.setConsent(false);await store.setConsent(true);
+  const b=store.put({...f,stepCount:7});
+  const [ra,,rb]=await Promise.all([a,withdrawn,b]);
+  assert.equal(ra.persisted,false);assert.equal(rb.persisted,true);
+  const rows=runRows(idb);assert.equal(rows.length,1);assert.equal((await decodeLayoutRun(rows[0].data)).stepCount,7);
+  assert.equal(typeof rows[0].writeId,'string');
+});
+
+test('expired-row cleanup that races a newer put of the same runId keeps the newer row',async()=>{
+  let clock=1_000_000;const now=()=>clock,idb=serialIndexedDB(),f=await fixture();
+  await createLayoutRunStore({indexedDB:idb,now}).put(f,{consent:true});
+  const reader=createLayoutRunStore({indexedDB:idb,now}),writer=createLayoutRunStore({indexedDB:idb,now});
+  await reader.list();await writer.list();                // open both while the row is still fresh
+  clock+=LAYOUT_RUN_TTL_MS;assert.equal(runRows(idb).length,1);
+  idb.pause();const base=idb.created;
+  const got=reader.get('run-1');await until(()=>idb.created>=base+1);       // reads the expired row
+  const put=writer.put({...f,stepCount:8},{consent:true});await until(()=>idb.created>=base+2);
+  idb.resume();
+  assert.equal(await got,null);assert.equal((await put).persisted,true);
+  const rows=runRows(idb);assert.equal(rows.length,1);assert.equal((await decodeLayoutRun(rows[0].data)).stepCount,8);
+  // A legacy row without writeId is still removed by its own cleanup once expired.
+  idb.dbs.get(LAYOUT_RUN_DB_NAME).get('runs').rows.set('run-1',{...rows[0],writeId:undefined});
+  clock+=LAYOUT_RUN_TTL_MS;assert.equal(await createLayoutRunStore({indexedDB:idb,now}).get('run-1'),null);assert.equal(runRows(idb).length,0);
+});
+
+test('outcome scope, limitations and coverage survive the run codec',async()=>{
+  const f=await fixture();const quality={...f.quality,layout:'clear',findings:[],layoutScope:'observed',layoutVerified:false,inspectionStatus:'partial',limitations:['Findings truncated.','Heading could not be uniquely observed.'],coverage:{pages:2,findingsTruncated:true}};
+  const out=await decodeLayoutRun(await encodeLayoutRun({...f,quality}));assert.deepEqual(out.quality,quality);
 });

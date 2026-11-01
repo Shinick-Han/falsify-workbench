@@ -70,3 +70,46 @@ test('workflow finish stays complete while quality exposes overlap and missing n
  assert.equal(out.sessionState.baselineProject.id,project.id);assert.equal(out.sessionState.baselineArtifact.pdfHash,baseline.pdfHash);assert.equal(out.sessionState.stepCount,6);
  assert.equal(states[1].baselineProject.files[0].bytes,states.at(-1).baselineProject.files[0].bytes,'asset buffers are shared, not cloned per snapshot');
 });
+
+// F4: zero findings from a partial or limited inspection is "no detected issue in the
+// observed scope", not a verified layout. layout:'clear' stays for compatibility.
+test('partial inspection with zero findings is scoped, carries limitations and coverage, and is not verified',()=>{
+ const lim=['Scores measure detected defects only; they are not proof of visual quality.','Heading could not be uniquely observed.'];
+ const q=deriveLayoutOutcome({candidatePdfHash:B,baselinePdfHash:A,comparison:comparison(),inspection:inspection([],{limitations:lim,coverage:{pages:2,profile:{headings:{checked:1,skipped:1}}}})});
+ assert.equal(q.layout,'clear');assert.equal(q.layoutScope,'observed');assert.equal(q.layoutVerified,false);assert.equal(q.inspectionStatus,'partial');
+ assert.deepEqual(q.limitations,lim);assert.deepEqual(q.coverage,{pages:2,profile:{headings:{checked:1,skipped:1}}});
+ // Partial without any limitation text is still only the observed scope.
+ const bare=deriveLayoutOutcome({candidatePdfHash:B,inspection:inspection()});assert.equal(bare.layoutScope,'observed');assert.equal(bare.layoutVerified,false);assert.deepEqual(bare.limitations,[]);
+ // Only an ok inspection without limitations or truncation is complete.
+ const full=deriveLayoutOutcome({candidatePdfHash:B,inspection:inspection([],{status:'ok',limitations:[]})});assert.equal(full.layoutScope,'complete');assert.equal(full.layoutVerified,true);
+ const okLimited=deriveLayoutOutcome({candidatePdfHash:B,inspection:inspection([],{status:'ok',limitations:['Column geometry is invalid or unavailable.']})});assert.equal(okLimited.layoutScope,'observed');assert.equal(okLimited.layoutVerified,false);
+});
+
+test('truncated inspection keeps its issues and always carries the truncation limitation',()=>{
+ const q=deriveLayoutOutcome({candidatePdfHash:B,inspection:inspection([overlap],{status:'ok',limitations:[],coverage:{pages:2,findingsTruncated:true}})});
+ assert.equal(q.layout,'issues');assert.equal(q.layoutVerified,false);assert.equal(q.layoutScope,'observed');assert.ok(q.limitations.includes('Findings truncated.'));assert.equal(q.coverage.findingsTruncated,true);
+ const viaText=deriveLayoutOutcome({candidatePdfHash:B,inspection:inspection([overlap],{limitations:['Findings truncated.','Findings truncated.']})});assert.deepEqual(viaText.limitations,['Findings truncated.']);
+ // Oversized or non-string limitation entries are bounded, never thrown.
+ const noisy=deriveLayoutOutcome({candidatePdfHash:B,inspection:inspection([],{limitations:[42,null,'x'.repeat(1000),...Array.from({length:40},(_,i)=>'L'+i)],coverage:{blob:'y'.repeat(10000)}})});
+ assert.ok(noisy.limitations.length<=25);assert.ok(noisy.limitations.every(s=>typeof s==='string'&&s.length<=300));assert.deepEqual(noisy.coverage,{truncated:true});
+});
+
+test('unavailable, mismatched-hash and issue-bearing inspections never pass',()=>{
+ const unavailable=deriveLayoutOutcome({candidatePdfHash:B,inspection:inspection([],{status:'unavailable',limitations:['MuPDF unavailable.']})});
+ assert.equal(unavailable.layout,'unverified');assert.equal(unavailable.layoutScope,null);assert.equal(unavailable.layoutVerified,false);assert.equal(unavailable.inspectionStatus,'unavailable');assert.deepEqual(unavailable.limitations,['MuPDF unavailable.']);
+ const stale=deriveLayoutOutcome({candidatePdfHash:C,inspection:inspection([],{status:'ok',limitations:[]})});
+ assert.equal(stale.layout,'unverified');assert.equal(stale.layoutVerified,false);assert.equal(stale.inspectionStatus,null);assert.deepEqual(stale.limitations,[]);assert.equal(stale.coverage,null);
+ const active=deriveLayoutOutcome({candidatePdfHash:B,inspection:inspection([overlap],{status:'ok',limitations:[]})});assert.equal(active.layout,'issues');assert.equal(active.layoutScope,'complete');assert.equal(active.layoutVerified,false);
+ const none=deriveLayoutOutcome();assert.equal(none.layoutVerified,false);assert.equal(none.layoutScope,null);assert.deepEqual(none.limitations,[]);
+});
+
+test('agent quality for a partial zero-finding inspection is scoped and carries the audit limitations',async()=>{
+ const project=await createLatexProject({mainFile:'main.tex',files:[{path:'main.tex',bytes:enc.encode('Body. \\vspace{2pt} Text.')}]});
+ const lim=['Scores measure detected defects only; they are not proof of visual quality.','Findings truncated.'];
+ const actions=[action('replace_source',{path:'main.tex',before:'\\vspace{2pt}',after:'\\vspace{3pt}'}),action('compile_pdf'),action('inspect_pdf'),action('finish',{message:'done'})];
+ const out=await runPaperLayoutAgent({project,artifact:artifactFor(project),decide:async()=>actions.shift(),compile:async({project})=>artifactFor(project),
+  inspect:async({artifact})=>({schema:'falsify.layout-quality.v1',status:'partial',pdfHash:artifact.pdfHash,issues:[],coverage:{pages:1,findingsTruncated:false},limitations:lim}),
+  render:async()=>({images:[],coverage:{pages:[],complete:false}})});
+ assert.equal(out.quality.layout,'clear');assert.equal(out.quality.layoutScope,'observed');assert.equal(out.quality.layoutVerified,false);
+ assert.equal(out.quality.inspectionStatus,'partial');assert.deepEqual(out.quality.limitations,lim);assert.equal(out.quality.coverage.pages,1);
+});
