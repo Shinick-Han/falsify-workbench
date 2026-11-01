@@ -178,3 +178,16 @@ test('an unrecoverable pending receipt is only looked up; the user discards it b
  await discard.onclick();assert.equal(agent.getRunState().pendingStep,null);assert.equal(discard.hidden,true);assert.equal(calls.length,2,'discarding sends nothing');
  await find(host,'AI 레이아웃 시작').onclick();assert.deepEqual(calls.map(c=>c.post),[false,false,true],'one new request only after the user continues');assert.equal(agent.getCandidate().artifact.pdfHash,cand.pdfHash);
 });
+
+test('finding regions reach the preview; page inputs stay within the document and partial checks keep scoped wording',async()=>{
+ const project=await makeProject(),artifact=pdfArtifact(project,'%PDF-region-qa'),host=new Element('host'),shown=[];
+ const session={getInputIdentity:()=>({projectId:project.id,changes:[]}),getCurrentProject:async()=>project};
+ const agent=mountPaperLayoutAgent({doc:document,host,getSession:()=>session,getEpoch:()=>1,download(){},storeFactory:memoryStore([]),previewFactory:({onPage})=>({setDocuments:async()=>{},show:async args=>{shown.push(args);const result={original:{pageIndex:args.originalPageIndex,totalPages:2},candidate:{pageIndex:args.candidatePageIndex,totalPages:2}};onPage(result);return result;},dispose(){}})});
+ const state=savedState(project,artifact,project,artifact,{quality:{content:'unchanged',layout:'issues',observedPages:[0],findings:[{code:'text-overlap',pageIndex:1,bbox:[10,20,40,60],document:'candidate'}]}});
+ await agent.restoreRun(state);find(host,'2쪽 · 글자 겹침').onclick();await tick();
+ assert.deepEqual(shown.at(-1).focus,{document:'candidate',bbox:[10,20,40,60]});assert.equal(shown.at(-1).candidatePageIndex,1);
+ const original=find(host,'원본 쪽').children[0];original.value='5';original.onchange();await tick();assert.equal(original.value,'2');assert.equal(shown.at(-1).originalPageIndex,1);assert.equal(shown.at(-1).focus,null);
+ assert.ok(find(host,'배치 전 PDF 2 / 2쪽'));assert.ok(find(host,'원본 페이지 텍스트'));assert.ok(find(host,'후보 페이지 텍스트'));
+ await agent.restoreRun({...state,quality:{content:'unchanged',layout:'clear',layoutScope:'observed',inspectionStatus:'partial',observedPages:[0],findings:[]}});
+ assert.ok(findAll(host,n=>n.textContent?.includes('검사 범위에서 문제 없음')).length);assert.equal(findAll(host,n=>n.textContent?.includes('배치 검사 통과')).length,0);
+});
