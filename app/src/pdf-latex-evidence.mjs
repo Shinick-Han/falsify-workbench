@@ -60,11 +60,12 @@ function lineSeparators(b,styles,refs){
     const left=b.text.slice(ar.start-s.range.start,ar.end-s.range.start),right=b.text.slice(zr.start-s.range.start,zr.end-s.range.start);
     const lt=left.match(/[^\s]+$/u)?.[0],rt=right.match(/^[^\s]+/u)?.[0];
     if(/(?:https?:\/\/|www\.|doi\s*:)[^\s]*$/iu.test(left)||/[=∑∫√≤≥±×÷]/u.test(left+right))continue;
-    if(!lt||!rt||/[-‐‑−/]$/u.test(lt)||!/[\p{L}\p{N}.,;:!?)]$/u.test(lt)||!/^\p{L}/u.test(rt))continue;
+    if(!lt||!rt||/[-‐‑−/]$/u.test(lt)||!/[\p{L}\p{N}.,;:!?)]$/u.test(lt)||!(/^[\p{L}(]/u.test(rt)))continue;
     const before=chars.find(c=>c.end===ar.end),after=chars.find(c=>c.start===zr.start);
     if(!before||!after||!box(before.bbox)||!box(after.bbox))continue;
     const size=styles.get(before.styleId)?.size,vertical=after.bbox[1]-before.bbox[1],overlap=Math.min(a.bbox[2],z.bbox[2])-Math.max(a.bbox[0],z.bbox[0]);
-    if(!(size>0&&vertical>size*.5&&vertical<size*3&&overlap>0))continue;
+    const inline=Math.abs(a.bbox[1]-z.bbox[1])<.5&&after.bbox[0]-before.bbox[2]>size*.2;
+    if(!(size>0&&(inline||vertical>size*.5&&vertical<size*3&&overlap>0)))continue;
     result.push({offset:ar.end,separator:' ',method:'source-line-boundary',status:'proposed',before:refs({pageIndex:s.pageIndex,bbox:before.bbox},{blockId:b.parentBlockId||b.id,range:{start:before.start,end:before.end}}),after:refs({pageIndex:s.pageIndex,bbox:after.bbox},{blockId:b.parentBlockId||b.id,range:{start:after.start,end:after.end}})});
   }
   return result;
@@ -144,7 +145,7 @@ export function buildReconstructionModel({document,flow,links,assets}={}){
     const separators=f.kind!=='asset'?f.blockIds.flatMap(id=>{const b=blocks.get(id);return b?.text?lineSeparators(b,styles,refs):[];}):[];
     const publication=composePublicationText({segments,blocks,styles,joiners:f.joiners,separators});
     const text=publication.text,fontSizes=segments.flatMap(s=>s.styleIds.map(id=>styles.get(id)?.size).filter(Number.isFinite));
-    const regionKind=region?.classification||null,kind=f.kind==='asset'?(region&&!['compound-figure','verified-occlusion'].includes(regionKind)?'unknown':'figure'):f.kind==='heading'?'heading':['header','footer'].includes(f.kind)?'furniture':'paragraph';
+    const regionKind=region?.classification||null,kind=f.kind==='asset'?(region&&!['compound-figure','verified-occlusion'].includes(regionKind)?'unknown':'figure'):f.kind==='caption'?'caption':f.kind==='heading'?'heading':['header','footer'].includes(f.kind)?'furniture':'paragraph';
     const candidates=[];
     for(const id of f.blockIds){const b=blocks.get(id);if(!b?.text)continue;const cs=b.source.characters||[],sizes=cs.map(c=>styles.get(c.styleId)?.size).filter(n=>Number.isFinite(n)&&n>0).sort((a,b)=>a-b),median=sizes[Math.floor(sizes.length/2)];if(median)for(const c of cs){const size=styles.get(c.styleId)?.size;if(box(c.bbox)&&size>0&&size<median*.8&&c.start>=b.source.range.start&&c.end<=b.source.range.end)candidates.push({kind:'script',evidence:[refs({pageIndex:b.source.pageIndex,bbox:c.bbox},{blockId:b.parentBlockId||b.id,range:{start:c.start,end:c.end}})]});}}
     // Separate, smaller inline runs may be reported by MuPDF as distinct blocks.

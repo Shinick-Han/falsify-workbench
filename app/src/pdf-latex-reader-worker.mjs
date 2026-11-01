@@ -3,11 +3,12 @@ import {readDocument} from './paper-document.mjs';
 import {hex} from './paragraph-pdf-crypto.mjs';
 import {auditLatexLayout} from './latex-layout-audit.mjs';
 import * as mupdf from 'mupdf';
+import {auditReconstructionStructure} from './pdf-latex-structure-audit.mjs';
 
 /** Separate entry point to make the worker protocol testable without a DOM. */
 export function installReconstructionReaderWorker(scope,{prepare=prepareReconstruction,read=readDocument,compare=compareReconstruction,audit=auditLatexLayout}={}){
   scope.onmessage=async ({data})=>{
-    const {id,type,bytes,sourceDocument,sourceBytes}=data||{};
+    const {id,type,bytes,sourceDocument,sourceBytes,reconstructionModel}=data||{};
     if(!Number.isSafeInteger(id)||!['read','compare'].includes(type)||!(bytes instanceof Uint8Array)){scope.postMessage({id,type:'error',code:'INVALID_REQUEST'});return;}
     try{
       if(type==='read'){
@@ -21,6 +22,7 @@ export function installReconstructionReaderWorker(scope,{prepare=prepareReconstr
       }else{
         const original=sourceBytes instanceof Uint8Array?await read({file:sourceBytes.slice(),fileHash:hex(sourceBytes)}):sourceDocument;
         const document=await read({file:bytes.slice(),fileHash:hex(bytes)}),result=compare(original,document);
+        if(reconstructionModel){try{result.structureAudit=auditReconstructionStructure({model:reconstructionModel,sourceDocument:original,document,mupdf});}catch{result.structureAudit={schema:'falsify.reconstruction-structure-audit.v1',sourcePdfHash:original.sourceSha256,outputPdfHash:hex(bytes),status:'unavailable'};}}
         try{result.layoutAudit=await audit({bytes:bytes.slice(),mupdf});}
         catch{result.layoutAudit={schema:'falsify.latex-layout-audit.v1',outputPdfHash:hex(bytes),status:'unavailable',findings:[],coverage:null,limitations:['배치 점검을 완료하지 못했습니다.']};}
         scope.postMessage({id,type:'result',result});

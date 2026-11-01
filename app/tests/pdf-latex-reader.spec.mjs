@@ -47,6 +47,16 @@ test('abort before ready never transfers and startup failure or timeout cleans u
 });
 test('worker announces readiness only after installing request handler',()=>{let handlerAtReady=false;const scope={postMessage(m){if(m.type==='ready')handlerAtReady=typeof scope.onmessage==='function';}};installReconstructionReaderWorker(scope);assert.equal(handlerAtReady,true);});
 
+test('structure observations travel with the model and only the matching output retains them',async()=>{
+ for(const stale of [false,true]){
+  const workers=[],reader=createReconstructionReader({workerFactory:()=>{const w=new FakeWorker();workers.push(w);return w;}}),bytes=Uint8Array.of(1,2,3),source={sourceSha256:'a'.repeat(64),pages:[{text:'source'}]},model={sourceSha256:source.sourceSha256,items:[]};
+  const pending=reader.compare({bytes,sourceDocument:source,reconstructionModel:model});await tick();const w=workers[0];assert.deepEqual(w.sent[0].reconstructionModel,model);
+  const structureAudit={schema:'falsify.reconstruction-structure-audit.v1',sourcePdfHash:source.sourceSha256,outputPdfHash:stale?'0'.repeat(64):hex(bytes),coverage:{sourceRegions:0}};
+  w.reply({id:w.sent[0].id,type:'result',result:{schema:'falsify.reconstruction-comparison.v1',sourcePdfHash:source.sourceSha256,baselinePdfHash:hex(bytes),sourcePages:1,baselinePages:1,method:'extracted-token-multiset',readingOrderVerified:false,visualLayoutVerified:false,text:{missing:[],added:[]},numbers:{missing:[],added:[]},structureAudit}});
+  const result=await pending;assert.deepEqual(result.structureAudit,stale?undefined:structureAudit);reader.dispose();
+ }
+});
+
 test('a foreign audit is discarded while the correctly bound PDF comparison remains usable',async()=>{
  const workers=[],reader=createReconstructionReader({workerFactory:()=>{const w=new FakeWorker();workers.push(w);return w;}}),bytes=Uint8Array.of(37,80,68,70,45),source={sourceSha256:'a'.repeat(64),pages:[{text:'Result'}]};
  const pending=reader.compare({bytes,sourceDocument:source});await tick();const w=workers[0];
