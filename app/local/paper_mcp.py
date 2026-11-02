@@ -75,7 +75,6 @@ def _error(code):
 
 
 def _ok(payload, image=None):
-    print("HAS_DATA", "data" in payload, file=sys.stderr)
     content = [TextContent(type="text", text=json.dumps(payload, ensure_ascii=False, separators=(",", ":")))]
     if image is not None:
         content.append(ImageContent(type="image", data=image[0], mimeType=image[1]))
@@ -117,7 +116,7 @@ def _image_result(payload):
     return _ok({k: v for k, v in payload.items() if k != "data"}, (data, mime))
 
 
-def build_server(store, paper_id, file_hash):
+def build_server(store, paper_id, file_hash, enable_analysis=False):
     """FastMCP stdio app bound to one prepared paper. No write or browse tool is registered."""
     server = FastMCP(name=SERVER_NAME, instructions=INSTRUCTIONS + "\nSelected PDF: " + json.dumps({"paperId": paper_id, "fileHash": file_hash}), log_level="ERROR")
 
@@ -145,12 +144,56 @@ def build_server(store, paper_id, file_hash):
         result = _guard(paper_id, file_hash, paperId, lambda: store.render_region(paperId, pageIndex, bbox=bbox, dpi=dpi))
         return result if isinstance(result, CallToolResult) else _image_result(result)
 
+    if enable_analysis:
+        from paper_enrichment import analyze
+
+        @server.tool(annotations=_READONLY)
+        def list_analyses(paperId: str) -> CallToolResult:
+            """List derived OCR/chart results, separate from native PDF objects."""
+            result = _guard(paper_id, file_hash, paperId, lambda: store.list_analyses(paperId))
+            return result if isinstance(result, CallToolResult) else _ok(result)
+
+        @server.tool(annotations=_READONLY)
+        def read_analysis(paperId: str, analysisId: str) -> CallToolResult:
+            """Read a source-bound derived result with raw values, provenance and uncertainty."""
+            result = _guard(paper_id, file_hash, paperId, lambda: store.read_analysis(paperId, analysisId))
+            return result if isinstance(result, CallToolResult) else _ok(result)
+
+        @server.tool(annotations=_READONLY)
+        def ocr_page(paperId: str, pageIndex: int, bbox: list[float] | None = None, language: str = 'en') -> CallToolResult:
+            """Run local OCR on the selected PDF page/region. Produces a transcription, not exact native text."""
+            result = _guard(paper_id, file_hash, paperId, lambda: analyze(
+                {'paperId':paperId, 'fileHash':file_hash, 'kind':'ocr', 'pageIndex':pageIndex, 'bbox':bbox, 'language':language}, store=store))
+            return result if isinstance(result, CallToolResult) else _ok(result)
+
+        @server.tool(annotations=_READONLY)
+        def extract_chart(paperId: str, pageIndex: int, bbox: list[float] | None = None) -> CallToolResult:
+            """Run the local chart model on an original region. Values are model estimates; inspect the source crop."""
+            result = _guard(paper_id, file_hash, paperId, lambda: analyze(
+                {'paperId':paperId, 'fileHash':file_hash, 'kind':'chart', 'pageIndex':pageIndex, 'bbox':bbox, 'language':'en'}, store=store))
+            return result if isinstance(result, CallToolResult) else _ok(result)
+
+        @server.tool(annotations=_READONLY)
+        def digitize_points(paperId: str, pageIndex: int, imageSha256: str, calibration: dict,
+                            points: list[list[float]], bbox: list[float] | None = None, dpi: int = 120) -> CallToolResult:
+            """Convert selected image points using two ticks per axis. Read render_region first.
+
+            calibration={x:{scale:linear|log,points:[{pixel,value},{pixel,value}]},y:same}.
+            points=[[xPixel,yPixel],...]. Pixels refer to that exact PNG, top-left origin.
+            Report estimates and pixel intervals. This does not infer ticks or verify their selection.
+            """
+            from paper_digitizer import digitize
+            result = _guard(paper_id,file_hash,paperId,lambda: digitize(store,paperId,file_hash,pageIndex,
+                imageSha256,calibration,points,bbox=bbox,dpi=dpi))
+            return result if isinstance(result,CallToolResult) else _ok(result)
+
     return server
 
 
 def _parser():
     parser = argparse.ArgumentParser(prog="python app/local/paper_mcp.py", description=__doc__)
     parser.add_argument("--pdf", required=True, help="Read only this PDF. Tools cannot open another file.")
+    parser.add_argument('--analysis', action='store_true', help='Enable explicit local OCR/chart model tools; models run only on request.')
     return parser
 
 
@@ -167,7 +210,7 @@ def main(argv=None) -> int:
         print(_fixed(exc), file=sys.stderr)
         return 2
     logging.getLogger("mcp").setLevel(logging.ERROR)
-    build_server(default_store, summary["paperId"], summary["fileHash"]).run(transport="stdio")
+    build_server(default_store, summary["paperId"], summary["fileHash"], enable_analysis=args.analysis).run(transport="stdio")
     return 0
 
 

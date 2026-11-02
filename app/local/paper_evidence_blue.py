@@ -100,7 +100,7 @@ def _format_block(paper_id, item, kind):
     page, bbox = item.get("pageIndex"), item.get("bbox")
     caption, provenance = item.get("caption"), item.get("provenance")
     complete = (type(page) is int and page >= 0 and (caption is None or type(caption) is str)
-                and (provenance is None or type(provenance) is str))
+                and (provenance is None or isinstance(provenance, (str, dict))))
     try:
         crop = {"paperId": paper_id, "itemId": item_id, "pageIndex": page, "bbox": bbox}
         lines = [
@@ -271,6 +271,24 @@ def context_for_review(paper_id, file_hash, store=None, max_chars=24000):
     require_summary(summary, paper_id=paper_id, file_hash=file_hash)
     metas, unlisted, capped = _collect(store, paper_id, file_hash)
     blocks = [_load_block(store, paper_id, file_hash, meta) for meta in metas]
+    analyses = []
+    if hasattr(store, 'list_analyses'):
+        listing = store.list_analyses(paper_id)
+        if listing.get('fileHash') != file_hash: raise ValueError('paper_evidence_hash_mismatch')
+        for meta in listing.get('items', []):
+            entry = store.read_analysis(paper_id, meta['analysisId'])
+            if entry.get('fileHash') != file_hash: raise ValueError('paper_evidence_hash_mismatch')
+            analysis_id = entry['analysisId']
+            kind = entry['kind']
+            method = entry['data'].get('provenance', {}).get('method')
+            header = ('DERIVED OCR transcription; may contain recognition errors; confidence is engine-reported.' if kind == 'ocr'
+                      else 'DERIVED chart table; caller-selected axis ticks and image points, pixel-calibrated estimates, not measured source data.'
+                      if method == 'caller-selected-ticks-and-points'
+                      else 'DERIVED chart table; numeric values are model estimates, not measured source data.')
+            text = header + '\n' + json.dumps(entry, ensure_ascii=False, separators=(',', ':'))
+            blocks.append(_Block(analysis_id, 'other', text, True))
+            analyses.append({'analysisId':analysis_id, 'kind':kind, 'pageIndex':entry['pageIndex'],
+                             'imageSha256':entry['inputImage']['sha256'], 'provenance':entry['data'].get('provenance')})
     listed_tables = sum(meta.get("type") == "table" for meta in metas)
     listed_figures = sum(meta.get("type") == "figure" for meta in metas)
     counts = summary["counts"]
@@ -286,4 +304,8 @@ def context_for_review(paper_id, file_hash, store=None, max_chars=24000):
         packed = _try_pack(summary, blocks, facts, max_chars, False)
     if packed is None:
         packed = _last_resort(summary, blocks, facts, max_chars)
+    if analyses:
+        omitted = set(packed['coverage']['omittedIds'])
+        packed['coverage']['analyses'] = {'available':len(analyses), 'included':[x for x in analyses if x['analysisId'] not in omitted],
+                                         'omitted':[x['analysisId'] for x in analyses if x['analysisId'] in omitted]}
     return packed

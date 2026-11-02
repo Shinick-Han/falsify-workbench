@@ -40,7 +40,7 @@ def query(data, *, store=None):
     operation = data.get('operation')
     fields = {
         'status': set(), 'list': {'kind', 'pageIndex', 'offset', 'limit'},
-        'item': {'itemId'}, 'render': {'pageIndex', 'bbox', 'dpi'},
+        'item': {'itemId'}, 'render': {'pageIndex', 'bbox', 'dpi'}, 'analyses': set(), 'analysis': {'analysisId'},
     }
     if not isinstance(operation, str) or operation not in fields or set(data) - {'paperId', 'operation'} - fields[operation]:
         raise ValueError('paper_evidence_operation_invalid')
@@ -50,6 +50,8 @@ def query(data, *, store=None):
     store = _store(store)
     try:
         if operation == 'status': return store.status(paper_id)
+        if operation == 'analyses': return store.list_analyses(paper_id)
+        if operation == 'analysis': return store.read_analysis(paper_id, data.get('analysisId'))
         if operation == 'list': return store.list_items(paper_id, kind=data.get('kind'), page_index=data.get('pageIndex'), offset=data.get('offset', 0), limit=data.get('limit', 50))
         if operation == 'item': return store.read_item(paper_id, data.get('itemId'))
         return store.render_region(paper_id, data.get('pageIndex'), bbox=data.get('bbox'), dpi=data.get('dpi', 120))

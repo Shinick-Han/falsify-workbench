@@ -468,7 +468,11 @@
       });
     }
     syncDisabled();
-    return Object.freeze({clear,setBusy,requestEvidence,snapshot});
+    async function ensurePrepared(){
+      if(!included){included=true;box.checked=true;failedHash=null;errorCode=null;}
+      return requestEvidence();
+    }
+    return Object.freeze({clear,setBusy,requestEvidence,ensurePrepared,snapshot});
   }
 
   const api=Object.freeze({create});

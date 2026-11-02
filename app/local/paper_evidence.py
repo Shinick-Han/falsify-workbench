@@ -390,6 +390,13 @@ class EvidenceStore:
         raise KeyError('item')
 
     def render_region(self, paper_id, page_index, bbox=None, dpi=120):
+        return self._render(paper_id, page_index, bbox, dpi, MAX_PIXELS)
+
+    def render_for_analysis(self, paper_id, page_index, bbox=None, dpi=200):
+        """Higher resolution input for an isolated OCR/chart worker, not a new MCP image budget."""
+        return self._render(paper_id, page_index, bbox, dpi, 12_000_000)
+
+    def _render(self, paper_id, page_index, bbox, dpi, pixel_limit):
         if dpi is None:
             dpi = 120
         if type(page_index) is not int or page_index < 0:
@@ -408,10 +415,10 @@ class EvidenceStore:
             page = doc[page_index]
             clip = self._clip(page.rect, bbox)
             width, height = _pixel_size(clip, dpi)
-            if width * height > MAX_PIXELS:
+            if width * height > pixel_limit:
                 raise ValueError('pixels')
             pix = page.get_pixmap(clip=pymupdf.Rect(clip), dpi=dpi, alpha=False)
-            if pix.width * pix.height > MAX_PIXELS:
+            if pix.width * pix.height > pixel_limit:
                 raise ValueError('pixels')
             png, width, height = pix.tobytes('png'), pix.width, pix.height
         finally:
@@ -419,6 +426,46 @@ class EvidenceStore:
         return {'paperId': paper, 'fileHash': file_hash, 'pageIndex': page_index, 'bbox': clip,
             'mimeType': 'image/png', 'data': base64.b64encode(png).decode('ascii'), 'sha256': _sha(png),
             'width': width, 'height': height}
+
+    def add_analysis(self, paper_id, result, fingerprint):
+        """Retain a derived result separately; never rewrite native cells or source PDF bytes."""
+        if not isinstance(result, dict) or result.get('kind') not in ('ocr', 'chart') or not isinstance(fingerprint, str):
+            raise ValueError('analysis_invalid')
+        encoded = __import__('json').dumps(result, ensure_ascii=False, allow_nan=False)
+        if len(encoded.encode('utf-8')) > 2 * 1024 * 1024: raise ValueError('analysis_limit')
+        with self._lock:
+            record = self._live(paper_id)
+            if result.get('paperId') != paper_id or result.get('fileHash') != record['file_hash']:
+                raise ValueError('analysis_hash_mismatch')
+            analyses = record.setdefault('analyses', [])
+            entry = copy.deepcopy(result)
+            entry['analysisId'] = 'a' + secrets.token_hex(12)
+            analyses.append({'fingerprint': fingerprint, 'result': entry})
+            if len(analyses) > 64: del analyses[0]
+            return copy.deepcopy(entry)
+
+    def find_analysis(self, paper_id, fingerprint):
+        with self._lock:
+            record = self._live(paper_id)
+            for entry in reversed(record.get('analyses', [])):
+                if entry['fingerprint'] == fingerprint: return copy.deepcopy(entry['result'])
+        return None
+
+    def list_analyses(self, paper_id):
+        with self._lock:
+            record = self._live(paper_id)
+            items = []
+            for entry in record.get('analyses', []):
+                result = entry['result']
+                items.append({k: copy.deepcopy(result[k]) for k in ('analysisId', 'kind', 'pageIndex', 'bbox', 'inputImage')})
+            return {'paperId': paper_id, 'fileHash': record['file_hash'], 'items': items}
+
+    def read_analysis(self, paper_id, analysis_id):
+        with self._lock:
+            record = self._live(paper_id)
+            for entry in record.get('analyses', []):
+                if entry['result']['analysisId'] == analysis_id: return copy.deepcopy(entry['result'])
+        raise KeyError('analysis')
 
     def _validated_pdf(self, pdf_bytes, file_hash):
         if not isinstance(file_hash, str) or not _HEX.fullmatch(file_hash):
