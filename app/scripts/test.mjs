@@ -1,4 +1,6 @@
 import {spawnSync} from 'node:child_process';
+const paperEvidence = spawnSync(process.execPath, ['--test','tests/paper-evidence-transport.spec.cjs','tests/test_paper_evidence_ui.mjs'], {stdio:'inherit'});
+if(paperEvidence.error || paperEvidence.status!==0)process.exit(paperEvidence.status||1);
 const latex = spawnSync(process.execPath, ['--test','tests/latex-source-project.spec.mjs','tests/latex-compiler.spec.mjs','tests/latex-semantic-edits.spec.mjs','tests/latex-session.spec.mjs','tests/latex-workbench.spec.mjs','tests/latex-session-archive.spec.mjs'], {stdio:'inherit'});
 if(latex.error || latex.status!==0)process.exit(latex.status||1);
 const runtime = spawnSync(process.execPath, ['--test','tests/latex-runtime-catalog.spec.mjs'], {stdio:'inherit'});

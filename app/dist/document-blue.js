@@ -1,6 +1,6 @@
 (function(){
   'use strict';const C=FalsifyDocumentBlue,B=FalsifyLocalBridge,$=s=>document.querySelector(s);
-  let sourceFile=null, visualPicker=null;
+  let sourceFile=null, visualPicker=null, paperEvidenceUI=null;
   let generation=0,doc=null,result=null,findings=[],request=null,busy=false,job=null,jobLink=null,abort=null;
   const P=globalThis.FalsifyPendingJobs||null;let recovering=false;
   let externalCollection=null,externalIdentity=null,externalAliases=[];
@@ -25,10 +25,10 @@
   function saveJSON(data,name){const url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
   // A BLUE job keeps the bridge link it started with for polls and cancel; the bridge refuses to switch while busy.
   function link(){const l=B.session();if(!l)throw new Error('로컬 broker 연결이 없습니다. 위 연결 패널에서 연결하거나 수동 JSON 교환을 쓰세요.');return l;}
-  function controls(){handoffReadiness();visualPicker?.setBusy(busy);const active=!!doc&&!busy;B.busy('blue',busy);$('#doc-blue-start').disabled=!active||!B.capabilities()?.blue||!$('#doc-blue-consent').checked||!FalsifyLab.allowed('blue');$('#doc-blue-request').disabled=!active;$('#doc-blue-apply').disabled=!active;$('#doc-blue-cancel').hidden=!job;$('#doc-blue-budget').disabled=busy;$('#doc-blue-record').disabled=!active||!result||saving;FalsifyLab.busy('blue',busy||saving);renderRecord();document.dispatchEvent(new CustomEvent('falsify:blue-state',{detail:{name:doc?.name||'',busy,hasResult:!!result||!!(externalCollection&&externalIdentity===doc?.fileHash+':'+doc?.sourceHash&&externalCollection.snapshot().batches.length),file:sourceFile,handoff:handoffMode,phase:busy&&!doc?'import':'review'}}));}
+  function controls(){handoffReadiness();visualPicker?.setBusy(busy);paperEvidenceUI?.setBusy(busy);const active=!!doc&&!busy;B.busy('blue',busy);$('#doc-blue-start').disabled=!active||!B.capabilities()?.blue||!$('#doc-blue-consent').checked||!FalsifyLab.allowed('blue');$('#doc-blue-request').disabled=!active;$('#doc-blue-apply').disabled=!active;$('#doc-blue-cancel').hidden=!job;$('#doc-blue-budget').disabled=busy;$('#doc-blue-record').disabled=!active||!result||saving;FalsifyLab.busy('blue',busy||saving);renderRecord();document.dispatchEvent(new CustomEvent('falsify:blue-state',{detail:{name:doc?.name||'',busy,hasResult:!!result||!!(externalCollection&&externalIdentity===doc?.fileHash+':'+doc?.sourceHash&&externalCollection.snapshot().batches.length),file:sourceFile,handoff:handoffMode,phase:busy&&!doc?'import':'review'}}));}
   function cancel(){const old=job,l=jobLink;job=null;jobLink=null;if(old&&l)void l.request('/api/blue/jobs/'+encodeURIComponent(old)+'/cancel',{}).catch(()=>{});}
   function invalidate(){epoch++;savedId=null;saving=false;failure=null;result=null;findings=[];request=null;$('#doc-blue-findings').replaceChildren();$('#doc-blue-result-summary').textContent='';$('#doc-blue-record-status').textContent='';}
-  function clear(keepFile=false,restore=true){if(restore){previousFailure=null;const previous=document.querySelector('#doc-blue-retry-previous');if(previous)previous.hidden=true;}handoffMode=false;visualPicker?.clear();generation++;cancel();abort?.abort();abort=null;doc=null;externalAliases=[];sourceFile=null;relation=null;busy=false;clearSticky();invalidate();if(keepFile!==true)$('#doc-blue-file').value='';$('#doc-blue-response').value='';$('#doc-blue-consent').checked=false;$('#blue-harness-consent').checked=false;if($('#blue-visual-select'))$('#blue-visual-select').checked=false;if($('#blue-visual-consent'))$('#blue-visual-consent').checked=false;if($('#blue-visual-regions'))$('#blue-visual-regions').value='';$('#doc-blue-summary').textContent='아직 파일을 입력하지 않았습니다. 수정 파일 또는 원본/대조군을 직접 선택하세요.';msg('');controls();if(restore)restorePending();}
+  function clear(keepFile=false,restore=true){if(restore){previousFailure=null;const previous=document.querySelector('#doc-blue-retry-previous');if(previous)previous.hidden=true;}handoffMode=false;visualPicker?.clear();paperEvidenceUI?.clear();generation++;cancel();abort?.abort();abort=null;doc=null;externalAliases=[];sourceFile=null;relation=null;busy=false;clearSticky();invalidate();if(keepFile!==true)$('#doc-blue-file').value='';$('#doc-blue-response').value='';$('#doc-blue-consent').checked=false;$('#blue-harness-consent').checked=false;if($('#blue-visual-select'))$('#blue-visual-select').checked=false;if($('#blue-visual-consent'))$('#blue-visual-consent').checked=false;if($('#blue-visual-regions'))$('#blue-visual-regions').value='';$('#doc-blue-summary').textContent='아직 파일을 입력하지 않았습니다. 수정 파일 또는 원본/대조군을 직접 선택하세요.';msg('');controls();if(restore)restorePending();}
   document.addEventListener('falsify:workspace-reset',clear);$('#doc-blue-clear').addEventListener('click',clear);
   // A user-chosen file is an independent BLUE input: clear() drops any RED relation.
   // Replacing the input asks first while a BLUE job runs or a result has not been recorded.
@@ -109,6 +109,9 @@
       body.fileHash=frozen.fileHash;body.visualConsent=true;
       if(new TextEncoder().encode(JSON.stringify(body)).length>4000000)throw new Error('요청 크기 상한을 넘었습니다.');
     }
+    const prepared=await paperEvidenceUI?.requestEvidence();
+    if(current!==generation||doc!==frozen||sourceFile!==visualFile)throw new Error('입력이 바뀌어 요청을 보내지 않았습니다.');
+    if(prepared){body.paperEvidence=prepared;body.paperEvidenceConsent=true;body.fileHash=frozen.fileHash;}
     return body;
   }
   // Server progress phase is shown only as a bounded identifier; known phases get fixed Korean names.
@@ -128,10 +131,16 @@
     for(const f of findings){const section=document.createElement('section');section.className='red-proposal';const title=document.createElement('h3');title.textContent=f.id+' · '+f.label;const quote=document.createElement('blockquote');quote.textContent=f.quote;const reason=document.createElement('p');reason.textContent=f.rationale;section.append(title,quote,reason);for(const e of f.evidence){const loc=document.createElement('p');loc.textContent=e.label+' — '+e.relation;const q=document.createElement('blockquote');q.textContent=e.quote;section.append(loc,q);}const uncertainty=document.createElement('p');uncertainty.className='muted';uncertainty.textContent='한계: '+f.uncertainty;section.append(uncertainty);list.append(section);}
     for(const o of res.visualObservations||[]){const section=document.createElement('section');section.className='red-proposal';const title=document.createElement('h3');title.textContent='시각 관찰 · '+o.id+' · '+o.page+'쪽';const detail=document.createElement('p');detail.textContent=o.observation;const limit=document.createElement('p');limit.className='muted';limit.textContent='한계: '+o.uncertainty+' · 이미지 해시 '+o.sha256;section.append(title,detail,limit);list.append(section);}
     if(res.visualObservations){const note=document.createElement('p');note.className='muted';note.textContent='이미지 바이트와 해시는 검증됨. PDF·텍스트와의 연결은 브라우저가 선언하며 시각 판단의 정확성은 검증되지 않았습니다.';list.append(note);}
+    if(res.coverage?.paperEvidence){const note=document.createElement('p');note.className='muted';const scope=res.coverage.paperEvidence;note.textContent='표·그림 구조 데이터 함께 전달 · '+(scope.truncated?'일부 전달':'준비된 범위 전달')+' · 영역 이미지 열람은 별도입니다.';list.append(note);}
     $('#doc-blue-result-summary').textContent=(provenance==='local-codex'?'로컬 broker 실행 · '+res.model:'수동 응답 · 실행 출처 미검증')+' · 상태 '+res.status+' · 지적 '+findings.length+'개 · 사람 평가는 검수 메뉴에서';
     // Every status branch states delivery coverage and reread, so an abstain or refusal never hides an incomplete review.
     const scope=provenance==='local-codex'?'앱 adapter 호출 '+(res.coverage?.calls||'?')+'회. '+(res.coverage?.complete?'전체 추출 텍스트 전달 완료(탐지 보장 아님).':'전달 미완료.'):'수동 응답의 실행·전달 여부 미검증.';
     msg((res.status==='refusal'?'BLUE 요청 거절. 우회·자동 재시도하지 않습니다.':res.status==='abstain'?'BLUE 판단 유보. 탐지 실패로 변환하지 않습니다.':findings.length+'개 지적 · 입력 인용 일치 확인.')+' '+scope+reread(res,provenance));controls();void saveRecord();}
+  if(globalThis.FalsifyPaperEvidenceUI){
+    const host=document.createElement('div');
+    $('#doc-blue-consent').closest('label').after(host);
+    paperEvidenceUI=FalsifyPaperEvidenceUI.create({host,getSession:()=>B.session(),getSource:()=>doc&&sourceFile?{file:sourceFile,fileHash:doc.fileHash,revision:doc.revision,companionInstance:B.capabilities()?.companionInstance}:null,onChange:()=>{generation++;if(doc)doc.revision=crypto.randomUUID();invalidate();controls();}});
+  }
   if(globalThis.FalsifyBlueVisual){
     const box=document.createElement('div');box.className='mode-note blue-picker';
     const create=(tag,id,text,parent=box)=>{const el=document.createElement(tag);if(id)el.id='blue-'+id;if(text)el.textContent=text;parent.append(el);return el;};
