@@ -152,6 +152,7 @@
     paperEnrichmentUI=FalsifyPaperEnrichmentUI.create({host,
       getSource:()=>doc&&sourceFile?{file:sourceFile,fileHash:doc.fileHash,revision:doc.revision}:null,
       getSession:()=>B.session(),
+        getCapabilities:()=>B.capabilities(),
       preparePaper:async()=>{if(!paperEvidenceUI)throw Error('표·그림 모듈을 준비하세요.');return paperEvidenceUI.ensurePrepared();},
       onBusyChange:value=>{enrichmentBusy=!!value;controls();},
       onResult:async analysis=>{
@@ -159,7 +160,7 @@
         const records=Array.isArray(analysis.results)?analysis.results:[analysis];
         const segments=[...frozen.segments];
         for(const record of records){if(record.kind!=='ocr'||!Array.isArray(record.data?.lines))continue;
-          const text=record.data.lines.map(x=>x.text).filter(x=>typeof x==='string'&&x.trim()).join('\n');if(!text.trim())continue;
+            const text=record.data.lines.map(x=>typeof x.displayText==='string'&&x.displayText.replace(/\s/g,'')===x.text?.replace(/\s/g,'')?x.displayText:x.text).filter(x=>typeof x==='string'&&x.trim()).join('\n');if(!text.trim())continue;
             const id='ocr-page-'+record.pageIndex,existing=segments.findIndex(s=>s.id===id),segment={id,label:'OCR · PDF p. '+(record.pageIndex+1),text};
           if(existing<0)segments.push(segment);else segments[existing]=segment;
         }

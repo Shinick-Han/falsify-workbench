@@ -480,3 +480,21 @@ serial('bridge path refusal is not treated as a lost job',async()=>{
   assert.equal(h.ui.snapshot().receipt,'none');
   assert.equal(h.ui.snapshot().error,'path');
 });
+
+serial('Korean spacing displays separately and keeps every original character',async()=>{
+  const h=world();h.source={file:fileOf(),fileHash:HASH_A,revision:'r1'};
+  h.button('글자 읽기 (OCR)').click();await until(()=>h.posts().length===1,'spacing post');
+  const raw='치료군6.269.8',displayText='치료군 6.2 69.8';
+  h.posts()[0].resolve({state:'completed',result:envelope(HASH_A,ocrData(raw,{lines:[{text:raw,displayText,confidence:.9,bbox:[0,0,20,10]}]}))});
+  await until(()=>h.results.length===1,'spacing result');
+  assert.equal(h.results[0].data.lines[0].text,raw);assert.equal(h.results[0].data.lines[0].displayText,displayText);
+  assert.match(text(h.host),/치료군 6\.2 69\.8/);assert.match(text(detailsNamed(h.host,'띄어쓰기 전 판독문')),/치료군6\.269\.8/);
+});
+
+serial('spacing cannot change a number in the BLUE transcription',async()=>{
+  const h=world();h.source={file:fileOf(),fileHash:HASH_A,revision:'r1'};
+  h.button('글자 읽기 (OCR)').click();await until(()=>h.posts().length===1,'number post');
+  h.posts()[0].resolve({state:'completed',result:envelope(HASH_A,ocrData('7.8',{lines:[{text:'7.8',displayText:'7.9',confidence:.9}]}))});
+  await until(()=>h.results.length===1,'number result');
+  assert.equal(h.results[0].data.lines[0].text,'7.8');assert.equal(h.results[0].data.lines[0].displayText,undefined);
+});

@@ -15,7 +15,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 SCHEMAS = {'ocr': 'falsify.ocr-page.v1', 'chart': 'falsify.chart-data.v1'}
-MODEL_REVISIONS = {'ocr': 'rapidocr-3.10.0-img2table-2.0.0', 'chart': 'google-deplot-6e76d62430da16986be3426bae32301fb9115397'}
+MODEL_REVISIONS = {'ocr': 'rapidocr-3.10.0-img2table-2.0.0-spacing-1', 'chart': 'google-deplot-6e76d62430da16986be3426bae32301fb9115397-geometry-1'}
 RUNTIME_CONFIG = Path.home() / '.falsify' / 'paper-analysis-runtime.json'
 MODEL_GATE = threading.Semaphore(1)
 
@@ -129,6 +129,19 @@ def _map_boxes(data, region, width, height):
     for entry in out.get('lines', []) + out.get('tables', []):
         entry['sourceBbox'] = mapped(entry.get('bbox'))
         for cell in entry.get('cells', []): cell['sourceBbox'] = mapped(cell.get('bbox'))
+        for token in entry.get('tokens',[]):token['sourceBbox']=mapped(token.get('bbox'))
+    def point(p):
+        box=mapped([p[0],p[1],p[0],p[1]]) if isinstance(p,list) and len(p)==2 else None
+        return box[:2] if box else None
+    for cell in out.get('numericCells',[]):
+        if 'sourcePixel' in cell:cell['sourcePoint']=point(cell['sourcePixel'])
+    geometry=out.get('geometry')
+    if isinstance(geometry,dict):
+        geometry['sourcePlotBbox']=mapped(geometry.get('plotBbox'))
+        for axis in geometry.get('axes',{}).values():
+            for tick in axis.get('ticks',[]):tick['sourceBbox']=mapped(tick.get('bbox'))
+        for series in geometry.get('series',[]):
+            for item in series.get('points',[]):item['sourcePoint']=point([item['xPixel'],item['yPixel']])
     return out
 
 
@@ -248,6 +261,9 @@ class AnalysisJobs:
 
 def _worker():
     import contextlib
+    # -I ignores PYTHONIOENCODING; Windows pipe encoding can otherwise be CP949.
+    # The parent decodes this machine-readable response as UTF-8 on every OS.
+    sys.stdout.reconfigure(encoding='utf-8')
     sys.path.insert(0, str(HERE))
     try:
         raw = sys.stdin.buffer.read(42 * 1024 * 1024 + 1)

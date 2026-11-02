@@ -158,13 +158,27 @@ def _default_lines(data, language, issues, versions):
         return False, [], []
     _note_version(issues, versions, 'rapidocr')
     try:
-        raw = _line_engine(language, rapidocr)(data, text_score=0.0)
+        options={'return_word_box':True,'return_single_char_box':True} if language=='ko' else {}
+        raw = _line_engine(language, rapidocr)(data, text_score=0.0,**options)
     except Exception as exc:
         _add(issues, f'line-engine:{type(exc).__name__}')
         return False, [], []
     parsed, transforms = _parse_lines(raw, issues)
     if parsed is None:
         return False, [], []
+    if language=='ko':
+        from paper_ocr_spacing import present
+        words=getattr(raw,'word_results',None)
+        for line in parsed:
+            tokens=[]
+            index=int(line['id'].split('-')[-1])
+            if words is not None and index<len(words):
+                for text,score,polygon in words[index]:
+                    points=polygon.tolist() if hasattr(polygon,'tolist') else polygon
+                    _,box,_=_geometry(points)
+                    if box:tokens.append({'text':text,'confidence':float(score),'bbox':list(box),'polygon':points})
+            line['tokens']=tokens
+            line.update(present(line['text'],tokens))
     return True, parsed, transforms
 
 
@@ -279,6 +293,7 @@ def _flip_records(records, width, height):
         item = dict(entry); item['bbox'] = box(item.get('bbox'))
         if 'polygon' in item: item['polygon'] = [[width-x,height-y] for x,y in item['polygon']]
         if 'cells' in item: item['cells'] = _flip_records(item['cells'],width,height)
+        if 'tokens' in item: item['tokens'] = _flip_records(item['tokens'],width,height)
         out.append(item)
     return out
 
@@ -340,6 +355,7 @@ def _remap_lines(lines, height):
         item['bbox'] = _unmap_box(line.get('bbox'), height)
         if 'polygon' in line:
             item['polygon'] = _unmap_polygon(line.get('polygon'), height)
+        if 'tokens' in line:item['tokens']=_remap_lines(line['tokens'],height)
         remapped.append(item)
     return remapped
 

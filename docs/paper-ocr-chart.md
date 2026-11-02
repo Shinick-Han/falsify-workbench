@@ -17,7 +17,7 @@ OCR은 현재 쪽 전체를 읽습니다. 그래프는 선택한 영역을 읽�
 python app/local/setup-paper-analysis.py
 ```
 
-별도 가상환경에 RapidOCR 3.10.0, img2table 2.0.0, OpenCV contrib, Transformers·PyTorch를 설치하고 공개 DePlot 모델을 받습니다. 첫 OCR 실행 시 선택 언어의 공개 모델을 받습니다. 모델 파일은 Git에 넣지 않습니다. API 키는 필요하지 않습니다. 설치에는 네트워크와 디스크 공간이 필요합니다. PyTorch 설치 종류에 따라 CPU 또는 CUDA를 사용합니다.
+별도 가상환경에 RapidOCR 3.10.0, img2table 2.0.0, OpenCV contrib, Kiwi, Transformers·PyTorch를 설치하고 공개 DePlot 모델을 받습니다. 첫 OCR 실행 시 선택 언어의 공개 모델을 받습니다. 모델 파일은 Git에 넣지 않습니다. API 키는 필요하지 않습니다. 설치에는 네트워크와 디스크 공간이 필요합니다. PyTorch 설치 종류에 따라 CPU 또는 CUDA를 사용합니다.
 
 분석은 요청할 때 자식 프로세스에서 실행합니다. 같은 companion 안에서 모델 프로세스를 겹쳐 띄우지 않으며, 완료·취소 시 종료합니다. Windows 명령 창을 띄우지 않습니다. 입력 PDF를 외부 변환 API에 보내지 않습니다. DePlot 추론은 내려받은 모델과 앱에 포함된 Liberation Sans를 사용하며 오프라인으로 실행합니다.
 
@@ -31,9 +31,9 @@ python app/local/paper_mcp.py --pdf /absolute/path/paper.pdf --analysis
 
 `initialize.instructions`에서 바인딩된 `paperId`와 파일 해시를 읽습니다. 추가 도구는 `list_analyses`, `read_analysis`, `ocr_page`, `extract_chart`, `digitize_points`입니다. 도구로 다른 파일이나 URL을 열 수 없습니다. OCR·그래프 결과는 native PDF 셀과 별도로 저장됩니다.
 
-`ocr_page`는 쪽·영역·언어를 지정합니다. 여러 쪽은 에이전트가 필요한 쪽을 순서대로 호출합니다. `extract_chart`는 원본 영역 이미지를 DePlot 표로 바꿉니다. 값은 모델 추정이며 정확도가 검증된 원시 데이터가 아닙니다.
+`ocr_page`는 쪽·영역·언어를 지정합니다. 여러 쪽은 에이전트가 필요한 쪽을 순서대로 호출합니다. `extract_chart`는 눈금과 곡선을 찾을 수 있는 직교 좌표 그래프를 먼저 픽셀로 측정합니다. 선형·로그 축을 따로 보정하고, 이중 축은 눈금과 곡선의 색으로 연결합니다. 축을 하나로 정할 수 없으면 양쪽 값 후보를 남깁니다. 그 외 그래프는 DePlot 표 변환을 사용합니다. `numericCells.origin`으로 픽셀 측정값과 모델 추정값을 구분합니다.
 
-로그 축처럼 모델의 읽기가 틀리기 쉬운 그래프는 `render_region`으로 원본을 보고 `digitize_points`로 보정할 수 있습니다. 이 도구는 각 축의 눈금 두 개와 점을 이미지 픽셀로 받아 계산합니다.
+자동 눈금 읽기를 직접 보정하려면 `render_region`으로 원본을 보고 `digitize_points`로 보정할 수 있습니다. 이 도구는 각 축의 눈금 두 개와 점을 이미지 픽셀로 받아 계산합니다.
 
 ```json
 {
@@ -56,10 +56,10 @@ python app/local/paper_mcp.py --pdf /absolute/path/paper.pdf --analysis
 
 - 실제 영문 스캔 표: 10개 문자열·3×3 셀 복원. 저대비 이미지도 같은 결과.
 - 90·180·270도 회전한 표에서도 같은 문자열·셀 순서를 복원하고 좌표는 원본 이미지로 되돌림.
-- 실제 한국어: 문구와 숫자를 읽었으나 일부 띄어쓰기가 합쳐짐.
+- 한국어 판독문은 원문 문자열 `text`와 띄어쓰기를 보완한 `displayText`를 함께 제공합니다. 문자·숫자는 바꾸지 않습니다. Kiwi의 문장 띄어쓰기와 OCR 문자 상자의 실제 간격을 사용하며, 원 판독문은 화면에서 펼쳐 볼 수 있습니다. Windows 격리 프로세스의 한국어 응답도 UTF-8로 전달합니다.
 - 실제 막대 그래프: 24·48·36 복원. 선형 꺾은선: 10·20·40·80 복원.
-- 같은 꺾은선을 로그 축으로 바꾸면 DePlot이 오독함. 자동 로그 축 수치 복원은 해결 완료로 보지 않음. 축을 지정하는 계산 경로를 별도로 제공함.
+- 선형·로그·이중 선형·이중 로그 축의 색상 곡선을 실제 OCR과 픽셀 계산으로 확인했습니다. 로그·이중 로그 테스트의 상대 오차는 약 0~3%였습니다. 이는 해당 합성 이미지의 측정 결과입니다. 흑백 곡선 보정, 잘못 읽은 눈금 제외, 축 연결이 모호한 경우도 회귀 검사합니다. 원 눈금·제외한 눈금·입력 픽셀·PDF 위치와 픽셀 폭에 따른 값 구간을 보존합니다.
 
-손글씨·복잡한 수식·중첩 패널·촘촘한 범례·다축 그래프·모든 논문의 OCR 정확도를 보장하지 않습니다. `ready`는 데이터 형식이 준비됐다는 뜻이며 정답 판정이 아닙니다. 모델 원문·판독문·원본 위치를 남겨 재검토할 수 있게 합니다.
+손글씨·복잡한 수식·중첩 패널·촘촘한 범례·같은 색의 여러 곡선은 추가 검토가 필요합니다. 자동 축 보정은 눈금이 읽히는 직교 좌표 그래프를 대상으로 합니다. 픽셀 구간은 OCR·축 선택의 불확실성까지 나타내는 신뢰구간이 아닙니다. `ready`는 데이터 형식이 준비됐다는 뜻이며 정답 판정이 아닙니다. 모델 원문·판독문·원본 위치를 남겨 재검토할 수 있게 합니다.
 
-사용한 구성: [RapidOCR](https://github.com/RapidAI/RapidOCR), [img2table](https://github.com/xavctn/img2table), [DePlot](https://huggingface.co/google/deplot). 축 보정은 [WebPlotDigitizer의 XY 보정 방식](https://www.automeris.io/docs/digitize/)과 같은 선형·로그 보간을 사용합니다. 별도 GUI 앱을 포크하지 않고 기존 MCP에 작은 계산 도구로 구성했습니다.
+사용한 구성: [RapidOCR](https://github.com/RapidAI/RapidOCR), [img2table](https://github.com/xavctn/img2table), [DePlot](https://huggingface.co/google/deplot), [Kiwi](https://github.com/bab2min/kiwipiepy). 축 보정은 [WebPlotDigitizer의 XY 보정 방식](https://www.automeris.io/docs/digitize/)과 같은 선형·로그 보간을 사용합니다. 별도 GUI 앱을 포크하지 않고 기존 MCP에 작은 계산 도구로 구성했습니다.

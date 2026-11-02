@@ -22,7 +22,7 @@ def main():
     # including when an inherited distribution already satisfies pip metadata.
     subprocess.run([str(python), '-m', 'pip', 'install', '--no-deps', '--force-reinstall', 'opencv-contrib-python==5.0.0.93'],
                    check=True, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-    subprocess.run([str(python), '-c', 'import rapidocr,img2table,transformers,torch,cv2; assert hasattr(cv2,"ximgproc"); print("OCR and chart runtime ready")'],
+    subprocess.run([str(python), '-c', 'import rapidocr,img2table,transformers,torch,cv2,kiwipiepy; assert hasattr(cv2,"ximgproc"); print("OCR and chart runtime ready")'],
                    check=True, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     warm = ('from huggingface_hub import snapshot_download; '
             'snapshot_download("google/deplot",revision="6e76d62430da16986be3426bae32301fb9115397",'

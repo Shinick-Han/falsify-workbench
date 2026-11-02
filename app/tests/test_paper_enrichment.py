@@ -843,5 +843,21 @@ class McpTests(StoreCase):
         self.assertEqual(report['code'], 0)
 
 
+class WorkerEncodingTests(unittest.TestCase):
+    def test_worker_protocol_is_utf8_even_when_the_pipe_defaults_to_cp949(self):
+        script = r'''
+import base64, io, json, runpy, sys, types
+sys.stdout.reconfigure(encoding='cp949')
+sys.modules['paper_ocr'] = types.SimpleNamespace(recognize=lambda *a, **k: {'text': '\ud55c\uad6d\uc5b4 \uacb0\uacfc \u2212 7.8'})
+sys.stdin = io.TextIOWrapper(io.BytesIO(json.dumps({'kind':'ocr', 'language':'ko', 'png':base64.b64encode(b'fixture').decode()}).encode()), encoding='utf-8')
+sys.argv = [sys.argv[1], '--worker']
+runpy.run_path(sys.argv[0], run_name='__main__')
+'''
+        completed = subprocess.run([sys.executable, '-I', '-c', script, str(LOCAL / 'paper_enrichment.py')],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        result = json.loads(completed.stdout.decode('utf-8'))
+        self.assertEqual(result, {'ok': True, 'data': {'text': '한국어 결과 − 7.8'}})
+
+
 if __name__ == '__main__':
     unittest.main()

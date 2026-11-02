@@ -152,6 +152,9 @@
         else extra.push('화면: 일부 확신 값은 숫자가 아니어서 비웠습니다.');
       }
       const line={text,confidence};
+      if(typeof raw.displayText==='string'&&raw.displayText.length<=12000&&raw.displayText.replace(/\s/g,'')===text.replace(/\s/g,''))line.displayText=raw.displayText;
+      if(raw.spacing&&Array.isArray(raw.spacing.methods))line.spacing={methods:raw.spacing.methods.filter(x=>typeof x==='string').slice(0,10),numericCuts:(raw.spacing.numericCuts||[]).filter(Number.isSafeInteger),nonWhitespacePreserved:true};
+      if(Array.isArray(raw.tokens))line.tokens=raw.tokens.slice(0,8000).filter(t=>t&&typeof t.text==='string').map(t=>({text:t.text,bbox:copyBBox(t.bbox),sourceBbox:copyBBox(t.sourceBbox)}));
       if(typeof raw.id==='string'&&raw.id.length>=1&&raw.id.length<=160&&!/[\u0000-\u001f]/.test(raw.id))line.id=raw.id;
       const bbox=copyBBox(raw.bbox);
       if(bbox)line.bbox=bbox;
@@ -228,7 +231,7 @@
     }
     const axis=value=>{
       const item=value&&typeof value==='object'&&!Array.isArray(value)?value:{};
-      const scale=item.scale==='linear'||item.scale==='log'||item.scale==='unknown'?item.scale:null;
+      const scale=['linear','log','multiple','unknown'].includes(item.scale)?item.scale:null;
       if(item.scale!=null&&scale==null)extra.push('화면: 확인하지 못한 눈금은 미확인으로 뒀습니다.');
       return {label:typeof item.label==='string'?clip(item.label,200):null,scale:scale||'unknown',unit:typeof item.unit==='string'?clip(item.unit,40):null};
     };
@@ -248,7 +251,8 @@
       axes:{x:axis(data.axes?.x),y:axis(data.axes?.y)},
       provenance:pickedProvenance(data.provenance),
       issues:takeIssues(data.issues,extra),
-      rawOutput
+      rawOutput,
+      ...(data.geometry&&typeof data.geometry==='object'?{geometry:JSON.parse(JSON.stringify(data.geometry))}:{})
     };
   }
   function normalizeResult(result,request){
@@ -279,7 +283,7 @@
     };
   }
 
-  function create({host,getSource,getSession,preparePaper,onResult,onChange,onBusyChange}={}){
+  function create({host,getSource,getSession,getCapabilities,preparePaper,onResult,onChange,onBusyChange}={}){
     if(!host||typeof host.append!=='function'||typeof host.replaceChildren!=='function')throw new TypeError('스캔·그래프 화면 설정이 올바르지 않습니다.');
     if(typeof getSource!=='function'||typeof getSession!=='function'||typeof preparePaper!=='function')throw new TypeError('스캔·그래프 화면 설정이 올바르지 않습니다.');
     const doc=host.ownerDocument||root.document;
@@ -339,6 +343,7 @@
     resultBox.hidden=true;
     picker.append(nav,stage,previewStatus,langLabel,actions);
     details.append(summary,note,picker,progress,resultBox);
+    const setup=el('a','text-button','OCR·그래프 도구 설치 안내');setup.href='guide.html#ocr-chart';setup.target='_blank';setup.rel='noopener';details.append(setup);
     host.append(details);
 
     let page=1,pages=null,languageNow='en',region=null,view=null,overlay=null;
@@ -567,14 +572,14 @@
         for(const row of payload.data.rows)lines.push(csvLine(row));
         return '\uFEFF'+lines.join('\n');
       }
-      const lines=[csvLine(['record','text','confidence','row','column','rowSpan','columnSpan','x0','y0','x1','y1'])];
+      const lines=[csvLine(['record','rawText','text','confidence','row','column','rowSpan','columnSpan','x0','y0','x1','y1'])];
       for(const line of payload.data.lines){
         const box=line.bbox||[];
-        lines.push(csvLine(['line',line.text,line.confidence,'' ,'' ,'' ,'' ,box[0]??'',box[1]??'',box[2]??'',box[3]??'']));
+        lines.push(csvLine(['line',line.text,line.displayText||line.text,line.confidence,'' ,'' ,'' ,'' ,box[0]??'',box[1]??'',box[2]??'',box[3]??'']));
       }
       for(const table of payload.data.tables)for(const cell of table.cells){
         const box=cell.bbox||[];
-        lines.push(csvLine(['cell',cell.text,cell.confidence??'',cell.row,cell.column,cell.rowSpan,cell.columnSpan,box[0]??'',box[1]??'',box[2]??'',box[3]??'']));
+        lines.push(csvLine(['cell',cell.text,cell.text,cell.confidence??'',cell.row,cell.column,cell.rowSpan,cell.columnSpan,box[0]??'',box[1]??'',box[2]??'',box[3]??'']));
       }
       return '\uFEFF'+lines.join('\n');
     }
@@ -588,13 +593,16 @@
       const sourceDetails=el('details','red-help');sourceDetails.append(el('summary',null,'출처·모델'),derivation,provenance,hash);
       resultBox.append(head,el('p','muted',payload.kind==='ocr'?'이미지에서 읽은 글자입니다. 위 원본과 대조할 수 있습니다.':'그래프에서 읽은 추정값입니다. 위 원본과 대조할 수 있습니다.'));
       if(payload.kind==='ocr'){
-        const raw=el('pre',null,payload.data.lines.map(line=>line.text).join('\n'));
+        const raw=el('pre',null,payload.data.lines.map(line=>line.displayText||line.text).join('\n'));
         raw.style.whiteSpace='pre-wrap';
         raw.style.overflowWrap='anywhere';
         raw.style.maxHeight='320px';
         raw.style.overflow='auto';
         if(payload.data.tables.length){const textDetails=el('details','red-help');textDetails.append(el('summary',null,'전체 판독문'),raw);resultBox.append(textDetails);}
         else resultBox.append(raw);
+        if(payload.data.lines.some(line=>line.displayText&&line.displayText!==line.text)){
+          const original=el('details','red-help');original.append(el('summary',null,'띄어쓰기 전 판독문'),el('pre',null,payload.data.lines.map(line=>line.text).join('\n')));resultBox.append(original);
+        }
         if(!payload.data.lines.length&&!payload.data.tables.length)resultBox.append(el('p','muted','읽은 글자가 없습니다.'));
         const conf=payload.data.lines.filter(line=>line.confidence!=null);
         if(conf.length){
@@ -610,7 +618,7 @@
         if(payload.data.title)resultBox.append(el('p',null,'읽은 제목: '+payload.data.title));
         const axisText=side=>{
           const item=payload.data.axes[side];
-          const scale=item.scale==='linear'?'선형':item.scale==='log'?'로그':'미확인';
+          const scale=item.scale==='linear'?'선형':item.scale==='log'?'로그':item.scale==='multiple'?'다중 축':'미확인';
           return (side==='x'?'가로축':'세로축')+' '+(item.label||'이름 없음')+' · 눈금 '+scale+(item.unit?' · 단위 '+item.unit:'');
         };
         sourceDetails.append(el('p','muted',axisText('x')+' / '+axisText('y')));
@@ -726,6 +734,7 @@
       if(kind==='chart'&&!box){say(progress,'그래프는 미리보기에서 영역을 드래그한 뒤 읽습니다.',true);errorCode='region';return;}
       const session=getSession();
       if(!session||typeof session.request!=='function'){say(progress,'PC 연결 후 다시 읽으세요.',true);errorCode='unavailable';return;}
+      if(typeof getCapabilities==='function'&&!getCapabilities()?.paperEnrichment?.supported){say(progress,'PC 연결 프로그램을 최신 버전으로 업데이트하세요.',true);errorCode='unavailable';return;}
       const mine=++flightGen;
       flight=mine;
       const token=epoch,mineAttempt=attempt;

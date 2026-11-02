@@ -406,6 +406,31 @@ def default_engine():
         return _default_engine
 
 
+def _geometry_result(geometry,image):
+    axes=geometry['axes'];rows=[];numeric=[]
+    ambiguous=any(s['axisBinding']=='ambiguous' for s in geometry['series'])
+    columns=['series','axis','x','y'] if not ambiguous else ['series','axis','x','y(left)','y(right)']
+    for series in geometry['series']:
+        for point in series['points']:
+            vals=[point['x'],point.get('y')] if not ambiguous else [point['x'],point['valueCandidates'].get('left'),point['valueCandidates'].get('right')]
+            row=[series['color'],series['axisBinding']]+[None if v is None else format(v,'.8g') for v in vals]
+            index=len(rows);rows.append(row)
+            for col,value in enumerate(vals,2):
+                if value is not None:
+                    cell={'row':index,'column':col,'raw':row[col],'value':value,'unit':None,'origin':'pixel-calibrated',
+                          'sourcePixel':[point['xPixel'],point['yPixel']]}
+                    if col==3 and not ambiguous:cell['pixelInterval']=point.get('pixelInterval')
+                    numeric.append(cell)
+    yaxes=[side for side in ('left','right') if side in axes]
+    result=_result(geometry['status'],image,geometry['issues'],'',
+        {'engine':'opencv+rapidocr','model':'en_PP-OCRv5_rec_mobile','revision':'geometry-1',
+         'device':'cpu','method':'ocr-tick-pixel-calibration'},columns,rows,numeric,
+        None,'xy',{'x':{'label':None,'scale':axes['x']['scale'],'unit':None},
+                   'y':{'label':None,'scale':axes[yaxes[0]]['scale'] if len(yaxes)==1 else 'multiple','unit':None}})
+    result['geometry']=geometry
+    return result
+
+
 def extract_chart(png_bytes, engine=None, options=None):
     """Return a falsify.chart-data.v1 dict. See the module docstring for injection."""
     image, image_issue = _image_info(png_bytes)
@@ -418,6 +443,15 @@ def extract_chart(png_bytes, engine=None, options=None):
         return _unavailable(image, ['options must be a dict'], '', {'engine': None, 'model': None,
             'revision': None, 'device': None, 'method': None})
     title, chart_type, axes, issues = _grounding(options)
+    geometry=None
+    if engine is None and image['width']>=200 and image['height']>=150:
+        try:
+            from paper_chart_geometry import extract_geometry
+            geometry=extract_geometry(png_bytes)
+            if geometry['status'] in ('ready','partial') and geometry['series']:
+                return _geometry_result(geometry,image)
+        except (ImportError,ValueError,TypeError,KeyError):
+            geometry={'status':'unavailable','issues':['geometry-extraction-unavailable']}
     selected = default_engine() if engine is None else engine
     try:
         raw = _invoke(selected, png_bytes, options)
@@ -455,7 +489,9 @@ def extract_chart(png_bytes, engine=None, options=None):
     numeric, numeric_issues = _numeric_cells(rows)
     issues.extend(numeric_issues)
     status = 'partial' if issues else 'ready'
-    return _result(status, image, issues, raw, provenance, columns, rows, numeric, title, chart_type, axes)
+    result=_result(status, image, issues, raw, provenance, columns, rows, numeric, title, chart_type, axes)
+    if geometry is not None:result['geometry']=geometry
+    return result
 
 
 def result_keys():

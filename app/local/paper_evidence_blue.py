@@ -284,6 +284,8 @@ def context_for_review(paper_id, file_hash, store=None, max_chars=24000):
             header = ('DERIVED OCR transcription; may contain recognition errors; confidence is engine-reported.' if kind == 'ocr'
                       else 'DERIVED chart table; caller-selected axis ticks and image points, pixel-calibrated estimates, not measured source data.'
                       if method == 'caller-selected-ticks-and-points'
+                      else 'DERIVED chart table; OCR axis ticks and original curve pixels, calibrated raster estimates. Inspect axis fits, rejected ticks and series binding.'
+                      if method == 'ocr-tick-pixel-calibration'
                       else 'DERIVED chart table; numeric values are model estimates, not measured source data.')
             text = header + '\n' + json.dumps(entry, ensure_ascii=False, separators=(',', ':'))
             blocks.append(_Block(analysis_id, 'other', text, True))
