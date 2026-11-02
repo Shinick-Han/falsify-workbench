@@ -94,7 +94,11 @@ function renderOf(hash, it, over={}){
     data:bytes.toString('base64'), sha256:sha(bytes), width:40, height:20, ...over};
 }
 async function flush(){for(let i=0;i<10;i++)await new Promise(r=>setImmediate(r));}
-async function until(cond, label){for(let i=0;i<50&&!cond();i++)await new Promise(r=>setImmediate(r)); assert.ok(cond(), label);}
+async function until(cond, label){
+  const deadline=Date.now()+2000;
+  while(!cond()&&Date.now()<deadline)await new Promise(r=>setTimeout(r,1));
+  assert.ok(cond(), label);
+}
 
 function harness(onRequest){
   const calls=[], created=[], revoked=[], storage=[];
@@ -348,7 +352,8 @@ serial('the source list pages, the crop is an object URL, and clear revokes it',
   await until(()=>renders(h).length===2, 'second render');
   assert.equal(h.revoked.includes(h.created[0].u), true);
   renders(h)[1].resolve(renderOf(hash, second, {sha256:'ab'.repeat(32)}));
-  await flush();
+  // WebCrypto finishes on a worker thread, independently of event-loop turns.
+  await until(()=>/그리지 못했습니다/.test(text(all(h.host).filter(e=>e.classList.contains('form-feedback')).at(-1))), 'mismatched crop digest');
   assert.equal(img.hidden, true);
   assert.match(text(all(h.host).filter(e=>e.classList.contains('form-feedback')).at(-1)), /그리지 못했습니다/);
   radios[1].dispatchEvent(new Event('change'));
