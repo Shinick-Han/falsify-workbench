@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0-alpha.44
+
+- Separate same-color chart curves and preserve peaks between axis ticks.
+- Keep series IDs in tables/CSV and retain complete chart points in BLUE context.
+- Preserve source pixels, gaps, sampling error and ambiguous crossings.
+
 ## 0.2.0-alpha.43
 
 - 논문 표·그림 구조와 읽기 전용 MCP, 스캔 PDF OCR·그래프 읽기 도구 추가.
