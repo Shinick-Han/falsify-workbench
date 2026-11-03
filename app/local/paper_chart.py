@@ -445,7 +445,7 @@ def extract_chart(png_bytes, engine=None, options=None):
             'revision': None, 'device': None, 'method': None})
     title, chart_type, axes, issues = _grounding(options)
     geometry=None
-    if engine is None and (options.get('chartOptions') is not None or image['width']>=200 and image['height']>=150):
+    if engine is None:
         try:
             from paper_plottracer import trace_geometry
             geometry=trace_geometry(png_bytes,manual=options.get('chartOptions'))

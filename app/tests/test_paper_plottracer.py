@@ -26,6 +26,14 @@ def fixture():
 
 
 class PlotTracerTests(unittest.TestCase):
+    def test_small_chart_cannot_silently_switch_to_a_table_model(self):
+        im = Image.new('RGB', (120, 90), 'white')
+        buf = io.BytesIO(); im.save(buf, format='PNG')
+        with patch.object(paper_chart, 'default_engine', side_effect=AssertionError('model fallback')):
+            result = paper_chart.extract_chart(buf.getvalue())
+        self.assertEqual(result['status'], 'partial')
+        self.assertEqual(result['rows'], [])
+
     def test_negative_curve_keeps_pixels_and_real_units(self):
         png, options = fixture()
         data = paper_chart.extract_chart(png, options={'chartOptions': options})

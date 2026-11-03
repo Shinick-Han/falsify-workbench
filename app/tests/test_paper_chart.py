@@ -279,8 +279,8 @@ class ChartTests(unittest.TestCase):
         chart._default_engine = None
         with patch.object(chart.DeplotEngine, 'generate', return_value='A | B\n1 | 2') as generate, \
                 patch.object(chart, '_load_deplot_stack') as load:
-            first = chart.extract_chart(PNG)
-            second = chart.extract_chart(PNG)
+            first = chart.extract_chart(PNG, engine=chart.default_engine())
+            second = chart.extract_chart(PNG, engine=chart.default_engine())
         load.assert_not_called()
         self.assertEqual(generate.call_count, 2)
         self.assertIs(first['provenance']['engine'], 'transformers')
