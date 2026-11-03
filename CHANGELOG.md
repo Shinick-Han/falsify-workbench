@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0-alpha.45
+
+- Use pinned PlotTracer code for curve extraction and source-bound axis conversion.
+- Add four-tick and curve-color correction in the chart preview, with the same options available through MCP.
+- Keep missing calibration as a partial result instead of substituting a generated numeric table.
+- Run the same JavaScript core in embedded V8 on Windows, macOS and Linux; make the legacy DePlot setup optional.
+- Retain full pixel coordinates for MCP/export and compact curve summaries for BLUE's text context.
+
 ## 0.2.0-alpha.44
 
 - Separate same-color chart curves and preserve peaks between axis ticks.

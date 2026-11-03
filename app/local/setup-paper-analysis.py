@@ -11,6 +11,7 @@ from pathlib import Path
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--runtime', type=Path, default=Path.home()/'.falsify'/'paper-analysis')
+    parser.add_argument('--with-deplot', action='store_true', help='Also install the optional legacy chart-model adapter and weights.')
     args = parser.parse_args()
     target = args.runtime.expanduser().resolve()
     if (target/'ARCHIVED.json').exists(): parser.error('Restore the archived runtime before setup.')
@@ -22,12 +23,15 @@ def main():
     # including when an inherited distribution already satisfies pip metadata.
     subprocess.run([str(python), '-m', 'pip', 'install', '--no-deps', '--force-reinstall', 'opencv-contrib-python==5.0.0.93'],
                    check=True, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-    subprocess.run([str(python), '-c', 'import rapidocr,img2table,transformers,torch,cv2,kiwipiepy; assert hasattr(cv2,"ximgproc"); print("OCR and chart runtime ready")'],
+    subprocess.run([str(python), '-c', 'import rapidocr,img2table,cv2,kiwipiepy; from py_mini_racer import MiniRacer; assert hasattr(cv2,"ximgproc"); c=MiniRacer(); assert c.eval("1+1")==2; c.close(); print("OCR and PlotTracer runtime ready")'],
                    check=True, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     warm = ('from huggingface_hub import snapshot_download; '
             'snapshot_download("google/deplot",revision="6e76d62430da16986be3426bae32301fb9115397",'
             'allow_patterns=["*.json","*.model","model.safetensors"])')
-    subprocess.run([str(python), '-c', warm], check=True, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    if args.with_deplot:
+        subprocess.run([str(python), '-m', 'pip', 'install', '-r', str(Path(__file__).with_name('requirements-paper-chart-model.txt'))],
+                       check=True, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        subprocess.run([str(python), '-c', warm], check=True, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     config = Path.home()/'.falsify'/'paper-analysis-runtime.json'
     config.parent.mkdir(parents=True, exist_ok=True)
     config.write_text(json.dumps({'schema':'falsify.paper-analysis-runtime.v1','python':str(python)}), encoding='utf-8')

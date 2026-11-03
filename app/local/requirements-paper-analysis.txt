@@ -5,8 +5,6 @@ img2table==2.0.0
 opencv-contrib-python==5.0.0.93
 onnxruntime==1.30.0
 Pillow==12.3.0
-transformers==5.16.1
-torch==2.11.0
-safetensors==0.8.0
 kiwipiepy==0.24.1
 kiwipiepy_model==0.24.0
+mini-racer==0.14.1

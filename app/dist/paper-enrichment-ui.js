@@ -5,7 +5,11 @@
    Preview: FalsifyBlueVisual.previewBluePage, loaded only while this details is open.
    Drag boxes are PDF.js viewport points at scale 1 (PDF points), XYXY.
    OCR posts bbox null (full page). Chart posts the selected region.
-   A lost POST receipt is reconciled by the client-generated job id. */
+   A lost POST receipt is reconciled by the client-generated job id.
+   '보정해서 다시 읽기' posts that same chart request plus chartOptions.
+   Axis pixels are the result crop: point() mapped through result.bbox onto inputImage.
+   X uses the x pixel and Y uses the y pixel. Curve colors come from the preview canvas.
+   Changing file, page, or region drops those picks and does not reuse the old image hash. */
 (function(root){
   'use strict';
   const JOBS='/api/paper/evidence/jobs';
@@ -351,6 +355,8 @@
     let controller=null,held=null,displayed=null,errorCode=null,stopReason=null;
     let parentBusy=false;
     let reportedBusy=false;
+    let calView=null;
+    const cal={armed:null,xScale:'linear',yScale:'linear',points:{x1:null,x2:null,y1:null,y2:null},series:[],seq:1,bound:null};
     const bound={hash:undefined};
 
     function say(node,text,isError=false){node.textContent=text;node.classList.toggle('error',!!isError);}
@@ -380,6 +386,8 @@
       clearRegionBtn.disabled=locked||!region;
       cancelBtn.hidden=!(flight||held);
       details.setAttribute('aria-busy',flight?'true':'false');
+      if(!calView)return;
+      for(const node of liveCalButtons())node.disabled=locked||(node===calView.curveBtn&&cal.series.length>=8);
     }
     function sayRegion(){
       if(region)say(previewStatus,'선택 영역 (PDF 점) '+region.bbox.map(n=>String(n)).join(', '));
@@ -407,6 +415,7 @@
     }
     function wipeOutput(){
       displayed=null;
+      calView=null;
       resultBox.hidden=true;
       resultBox.replaceChildren();
     }
@@ -434,6 +443,7 @@
       pageInput.value=String(page);
       dropPreview();
       wipeOutput();
+      resetCalibration();
       if(previous&&hash)say(progress,'다른 파일의 결과는 붙이지 않습니다.');
       else if(!hash)say(progress,'PDF를 선택하세요.');
       else say(progress,'');
@@ -465,6 +475,7 @@
       page=nextPage;
       region=null;
       paintOverlay(null);
+      resetCalibration();
       if(fromUser)emitChange();
       if(details.open)void loadPreview();
       else sayRegion();
@@ -583,7 +594,261 @@
       }
       return '\uFEFF'+lines.join('\n');
     }
+    function parseValue(raw){
+      const text=String(raw??'').trim();
+      if(!/^[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?$/.test(text))return null;
+      const n=Number(text);
+      return finite(n)?n:null;
+    }
+    function cleanName(value){
+      if(typeof value!=='string')return '';
+      const text=value.replace(/[\u0000-\u001f]/g,'').trim();
+      return text.length>160?text.slice(0,160):text;
+    }
+    function liveCalButtons(){
+      if(!calView)return [];
+      const nodes=[calView.xScale,calView.yScale,calView.curveBtn,calView.rereadBtn];
+      for(const key of ['x1','x2','y1','y2'])nodes.push(calView.values[key],calView.arms[key]);
+      for(const row of calView.seriesBox.children)for(const child of row.children||[])if(child.tagName==='BUTTON'||child.tagName==='INPUT')nodes.push(child);
+      return nodes;
+    }
+    function showArmed(){
+      if(!calView)return;
+      for(const key of ['x1','x2','y1','y2','curve'])calView.arms[key].setAttribute('aria-pressed',cal.armed===key?'true':'false');
+    }
+    function showPixel(key){
+      if(!calView)return;
+      const point=cal.points[key];
+      calView.pixels[key].textContent=point&&finite(point.pixel)?String(point.pixel):'미지정';
+    }
+    function rebuildSeries(){
+      if(!calView)return;
+      calView.seriesBox.replaceChildren();
+      for(const [index,series] of cal.series.entries()){
+        const row=el('div','button-row');
+        const name=el('input');
+        name.type='text';
+        name.setAttribute('aria-label','곡선 '+(index+1)+' 이름');
+        name.value=series.name??'';
+        name.addEventListener('input',()=>{series.name=name.value;});
+        const swatch=el('span',null,series.color);
+        swatch.setAttribute('data-curve-id',series.id);
+        const remove=el('button','text-button','빼기');
+        remove.type='button';
+        remove.setAttribute('data-curve-id',series.id);
+        remove.addEventListener('click',()=>{
+          if(parentBusy||flight)return;
+          cal.series=cal.series.filter(item=>item.id!==series.id);
+          rebuildSeries();
+        });
+        row.append(name,swatch,remove);
+        calView.seriesBox.append(row);
+      }
+      if(cal.series.length>=8&&cal.armed==='curve'){cal.armed=null;showArmed();}
+      syncDisabled();
+    }
+    function resetCalibration(){
+      cal.armed=null;
+      cal.xScale='linear';
+      cal.yScale='linear';
+      cal.points={x1:null,x2:null,y1:null,y2:null};
+      cal.series=[];
+      cal.seq=1;
+      cal.bound=null;
+      if(!calView)return;
+      calView.xScale.value='linear';
+      calView.yScale.value='linear';
+      for(const key of ['x1','x2','y1','y2']){
+        calView.values[key].value='';
+        calView.pixels[key].textContent='미지정';
+      }
+      showArmed();
+      rebuildSeries();
+    }
+    function rememberValue(key,raw){
+      const value=parseValue(raw);
+      const pixel=cal.points[key]&&finite(cal.points[key].pixel)?cal.points[key].pixel:null;
+      if(pixel==null&&value==null){cal.points[key]=null;return;}
+      cal.points[key]={pixel,value};
+    }
+    function rememberBinding(payload){
+      cal.bound={fileHash:payload.fileHash,pageIndex:payload.pageIndex,bbox:payload.bbox.map(Number),imageSha256:payload.inputImage.sha256};
+    }
+    function cropMatches(payload){
+      const src=sourceToken();
+      if(!payload||payload.kind!=='chart'||!src)return false;
+      if(payload.fileHash!==src.fileHash||payload.pageIndex!==page-1)return false;
+      if(!region||region.page!==page||region.fileHash!==src.fileHash)return false;
+      return sameBox(region.bbox,payload.bbox);
+    }
+    function cropPixel(pt,payload){
+      const box=payload.bbox,img=payload.inputImage;
+      const spanX=box[2]-box[0],spanY=box[3]-box[1];
+      if(!(spanX>0)||!(spanY>0))return null;
+      const x=(pt.x-box[0])/spanX*img.width;
+      const y=(pt.y-box[1])/spanY*img.height;
+      const slack=0.05;
+      if(x<-slack||y<-slack||x>img.width+slack||y>img.height+slack)return null;
+      return {x:roundPt(Math.max(0,Math.min(img.width,x))),y:roundPt(Math.max(0,Math.min(img.height,y)))};
+    }
+    function sampleColor(event){
+      const canvas=view?.canvas;
+      const rect=canvas?.getBoundingClientRect?.();
+      if(!canvas||!rect||!(rect.width>0)||!(rect.height>0)||typeof canvas.getContext!=='function')return null;
+      const width=canvas.width,height=canvas.height;
+      if(!Number.isSafeInteger(width)||!Number.isSafeInteger(height)||width<1||height<1)return null;
+      const ctx=canvas.getContext('2d');
+      if(!ctx||typeof ctx.getImageData!=='function')return null;
+      const x=Math.floor((event.clientX-rect.left)/rect.width*width);
+      const y=Math.floor((event.clientY-rect.top)/rect.height*height);
+      if(x<0||y<0||x>=width||y>=height)return null;
+      let data;
+      try{data=ctx.getImageData(x,y,1,1)?.data;}catch{return null;}
+      if(!data||data.length<3)return null;
+      const bytes=[data[0],data[1],data[2]].map(n=>Number.isInteger(n)&&n>=0&&n<=255?n.toString(16).padStart(2,'0'):null);
+      if(bytes.some(n=>!n))return null;
+      return '#'+bytes.join('');
+    }
+    function arm(which){
+      if(parentBusy||flight)return;
+      if(which==='curve'&&cal.series.length>=8){say(progress,'곡선은 8개까지입니다.',true);return;}
+      cal.armed=cal.armed===which?null:which;
+      showArmed();
+      if(!cal.armed)return;
+      say(progress,which==='curve'?'원본 미리보기에서 곡선 색을 집으세요.':which.toUpperCase()+' 위치를 원본 미리보기에서 집으세요.');
+    }
+    function commitPick(event){
+      const payload=displayed;
+      const pt=point(event);
+      if(!pt||!view){say(progress,'미리보기를 연 뒤 원본에서 집으세요.',true);return;}
+      if(!cropMatches(payload)){cal.armed=null;showArmed();say(progress,'다른 영역이나 파일의 이미지로는 보정하지 않습니다.',true);return;}
+      const px=cropPixel(pt,payload);
+      if(!px){say(progress,'집은 점이 선택한 그래프 영역 밖입니다.',true);return;}
+      if(cal.armed==='curve'){
+        if(cal.series.length>=8){cal.armed=null;showArmed();say(progress,'곡선은 8개까지입니다.',true);return;}
+        const color=sampleColor(event);
+        if(!color){say(progress,'미리보기 캔버스에서 색을 읽지 못했습니다.',true);return;}
+        cal.series.push({id:'c'+cal.seq,color,name:'곡선 '+(cal.series.length+1)});
+        cal.seq+=1;
+        rememberBinding(payload);
+        cal.armed=null;
+        showArmed();
+        rebuildSeries();
+        return;
+      }
+      const key=cal.armed;
+      if(key!=='x1'&&key!=='x2'&&key!=='y1'&&key!=='y2')return;
+      const previous=cal.points[key];
+      cal.points[key]={pixel:key[0]==='x'?px.x:px.y,value:previous&&finite(previous.value)?previous.value:null};
+      rememberBinding(payload);
+      cal.armed=null;
+      showPixel(key);
+      showArmed();
+    }
+    function axisPair(a,b,scale,extent){
+      if(!a||!b||!finite(a.pixel)||!finite(b.pixel)||!finite(a.value)||!finite(b.value))return {error:'X1, X2, Y1, Y2 위치와 값을 모두 지정하세요.'};
+      if(a.pixel<0||b.pixel<0||a.pixel>extent||b.pixel>extent)return {error:'집은 점이 선택한 그래프 영역 밖입니다.'};
+      if(a.pixel===b.pixel||a.value===b.value)return {error:'같은 축의 두 점과 값은 달라야 합니다.'};
+      if(scale==='log'&&(a.value<=0||b.value<=0))return {error:'로그 눈금에는 0보다 큰 값이 필요합니다.'};
+      return {points:[{pixel:a.pixel,value:a.value},{pixel:b.pixel,value:b.value}]};
+    }
+    function buildChartOptions(){
+      const src=sourceToken();
+      const payload=displayed;
+      const box=region&&src&&region.page===page&&region.fileHash===src.fileHash?region.bbox:null;
+      const boundOk=!cal.bound||(cal.bound.imageSha256===payload?.inputImage?.sha256&&cal.bound.fileHash===payload?.fileHash&&cal.bound.pageIndex===payload?.pageIndex&&sameBox(cal.bound.bbox,payload?.bbox));
+      if(!payload||payload.kind!=='chart'||!src||payload.fileHash!==src.fileHash||payload.pageIndex!==page-1||!box||!sameBox(box,payload.bbox)||!boundOk){
+        return {error:'다른 영역이나 파일의 이미지로는 보정하지 않습니다.'};
+      }
+      const xScale=cal.xScale==='log'?'log':'linear';
+      const yScale=cal.yScale==='log'?'log':'linear';
+      const x=axisPair(cal.points.x1,cal.points.x2,xScale,payload.inputImage.width);
+      if(x.error)return x;
+      const y=axisPair(cal.points.y1,cal.points.y2,yScale,payload.inputImage.height);
+      if(y.error)return y;
+      if(!cal.series.length)return {error:'곡선을 하나 이상 지정하세요.'};
+      if(cal.series.length>8)return {error:'곡선은 8개까지입니다.'};
+      const series=[];
+      const seen=new Set();
+      for(const item of cal.series){
+        if(!item||typeof item.id!=='string'||!item.id||item.id.length>80||seen.has(item.id)||/[\u0000-\u001f]/.test(item.id)||!/^#[0-9a-f]{6}$/.test(item.color))return {error:'곡선 색을 읽지 못했습니다.'};
+        seen.add(item.id);
+        const next={id:item.id,color:item.color};
+        const name=cleanName(item.name);
+        if(name)next.name=name;
+        series.push(next);
+      }
+      return {options:{imageSha256:payload.inputImage.sha256,calibration:{x:{scale:xScale,points:x.points},y:{scale:yScale,points:y.points}},series}};
+    }
+    function reread(){
+      if(parentBusy||flight)return;
+      reconcile();
+      const built=buildChartOptions();
+      if(!built.options){say(progress,built.error,true);errorCode='stale';return;}
+      void start('chart',built.options);
+    }
+    function renderCalibration(parent){
+      const box=el('details','red-help');
+      box.open=false;
+      box.append(el('summary',null,'축·곡선 지정'));
+      box.append(el('p','muted','원본에서 축의 양끝 눈금과 곡선 색을 고르세요. 고른 눈금 사이의 좌표를 읽습니다.'));
+      const xScale=el('select');
+      xScale.setAttribute('aria-label','가로축 눈금');
+      const yScale=el('select');
+      yScale.setAttribute('aria-label','세로축 눈금');
+      for(const select of [xScale,yScale]){
+        const linear=el('option',null,'선형');linear.value='linear';
+        const log=el('option',null,'로그');log.value='log';
+        select.append(linear,log);
+      }
+      xScale.value=cal.xScale==='log'?'log':'linear';
+      yScale.value=cal.yScale==='log'?'log':'linear';
+      xScale.addEventListener('change',()=>{cal.xScale=xScale.value==='log'?'log':'linear';xScale.value=cal.xScale;});
+      yScale.addEventListener('change',()=>{cal.yScale=yScale.value==='log'?'log':'linear';yScale.value=cal.yScale;});
+      const xLabel=el('label',null,'가로축 눈금 ');
+      xLabel.append(xScale);
+      const yLabel=el('label',null,'세로축 눈금 ');
+      yLabel.append(yScale);
+      const values={},pixels={},arms={};
+      const grid=el('div');
+      for(const key of ['x1','x2','y1','y2']){
+        const row=el('div','button-row');
+        const input=el('input');
+        input.type='number';
+        input.step='any';
+        input.setAttribute('aria-label',key.toUpperCase()+' 값');
+        input.value=cal.points[key]&&finite(cal.points[key].value)?String(cal.points[key].value):'';
+        input.addEventListener('input',()=>rememberValue(key,input.value));
+        const pickBtn=el('button','button secondary',key.toUpperCase()+' 집기');
+        pickBtn.type='button';
+        pickBtn.addEventListener('click',()=>arm(key));
+        const pixel=el('span',null,'미지정');
+        pixel.setAttribute('data-axis',key);
+        row.append(input,pickBtn,pixel);
+        grid.append(row);
+        values[key]=input;
+        pixels[key]=pixel;
+        arms[key]=pickBtn;
+      }
+      const curveBtn=el('button','button secondary','곡선 추가');
+      curveBtn.type='button';
+      curveBtn.addEventListener('click',()=>arm('curve'));
+      arms.curve=curveBtn;
+      const seriesBox=el('div');
+      const rereadBtn=el('button','button primary','보정해서 다시 읽기');
+      rereadBtn.type='button';
+      rereadBtn.addEventListener('click',()=>{reread();});
+      box.append(xLabel,yLabel,grid,curveBtn,seriesBox,rereadBtn);
+      parent.append(box);
+      calView={xScale,yScale,values,pixels,arms,seriesBox,curveBtn,rereadBtn};
+      for(const key of ['x1','x2','y1','y2'])showPixel(key);
+      showArmed();
+      rebuildSeries();
+    }
     function paint(payload){
+      const dropCal=payload.kind!=='chart'||(cal.bound&&(cal.bound.imageSha256!==payload.inputImage.sha256||cal.bound.fileHash!==payload.fileHash||cal.bound.pageIndex!==payload.pageIndex||!sameBox(cal.bound.bbox,payload.bbox)));
+      calView=null;
+      if(dropCal)resetCalibration();
       resultBox.replaceChildren();
       resultBox.hidden=false;
       const head=el('h3',null,(payload.pageIndex+1)+'쪽 · '+(payload.kind==='ocr'?'글자 읽기':'그래프')+(payload.data.status==='partial'?' · 일부만 읽힘':''));
@@ -622,8 +887,17 @@
           return (side==='x'?'가로축':'세로축')+' '+(item.label||'이름 없음')+' · 눈금 '+scale+(item.unit?' · 단위 '+item.unit:'');
         };
         sourceDetails.append(el('p','muted',axisText('x')+' / '+axisText('y')));
-        if(payload.data.columns.length||payload.data.rows.length)renderTable(resultBox,payload.data.columns,payload.data.rows);
-        else resultBox.append(el('p','muted','읽은 표가 없습니다.'));
+        if(payload.data.columns.length||payload.data.rows.length){
+          const coordinates=el('details','red-help');
+          coordinates.append(el('summary',null,'좌표 '+payload.data.rows.length+'개 보기'));
+          const scroll=el('div');
+          scroll.style.maxHeight='320px';
+          scroll.style.overflow='auto';
+          renderTable(scroll,payload.data.columns,payload.data.rows);
+          coordinates.append(scroll);
+          resultBox.append(coordinates);
+        }else resultBox.append(el('p','muted','축·곡선 지정에서 눈금과 곡선 색을 고르면 계속 읽을 수 있습니다.'));
+        renderCalibration(resultBox);
         if(payload.data.numericCells.length){
           const more=el('details','red-help');
           more.append(el('summary',null,'추정 숫자'));
@@ -723,13 +997,19 @@
         syncDisabled();
       }
     }
-    async function start(kind){
+    async function start(kind, chartOptions){
       if(parentBusy||flight)return;
       reconcile();
       const src=sourceToken();
       if(!src){say(progress,readSource()?'파일 해시를 확인하세요.':'PDF를 선택하세요.',!!readSource());errorCode='waiting';return;}
-      if(held&&held.fileHash===src.fileHash&&held.revision===src.revision){await resume(src);return;}
-      if(held){invalidate('switch');}
+      if(chartOptions!==undefined){
+        const boxNow=region&&region.page===page&&region.fileHash===src.fileHash?region.bbox:null;
+        const payload=displayed;
+        const fresh=!!(payload&&payload.kind==='chart'&&payload.fileHash===src.fileHash&&payload.pageIndex===page-1&&boxNow&&sameBox(boxNow,payload.bbox)&&chartOptions&&chartOptions.imageSha256===payload.inputImage.sha256);
+        if(!fresh){say(progress,'다른 영역이나 파일의 이미지로는 보정하지 않습니다.',true);errorCode='stale';return;}
+        if(held)invalidate('switch');
+      }else if(held&&held.fileHash===src.fileHash&&held.revision===src.revision){await resume(src);return;}
+      if(held)invalidate('switch');
       const box=kind==='chart'?(region&&region.page===page&&region.fileHash===src.fileHash?region.bbox:null):null;
       if(kind==='chart'&&!box){say(progress,'그래프는 미리보기에서 영역을 드래그한 뒤 읽습니다.',true);errorCode='region';return;}
       const session=getSession();
@@ -743,6 +1023,7 @@
       stopReason=null;
       const requestId=root.crypto.randomUUID().replace(/-/g,'');
       const request={requestId,paperId:null,fileHash:src.fileHash,kind,pageIndex:page-1,bbox:box?box.slice():null,language:languageNow};
+      if(chartOptions!==undefined)request.chartOptions=chartOptions;
       say(progress,'읽는 중입니다.');
       errorCode=null;
       syncDisabled();
@@ -811,14 +1092,20 @@
     chartBtn.addEventListener('click',()=>{void start('chart');});
     clearRegionBtn.addEventListener('click',()=>{
       if(clearRegionBtn.disabled||!region)return;
-      region=null;paintOverlay(null);sayRegion();emitChange();syncDisabled();
+      region=null;paintOverlay(null);sayRegion();resetCalibration();emitChange();syncDisabled();
     });
     cancelBtn.addEventListener('click',userCancel);
-    let drag=null;
+    let drag=null,pickPress=null,regionBefore=null;
     stage.addEventListener('pointerdown',event=>{
       if(parentBusy||flight||!view||event.button)return;
       const startPt=point(event);if(!startPt)return;
+      if(cal.armed){
+        pickPress={x:startPt.x,y:startPt.y,id:event.pointerId};
+        stage.setPointerCapture?.(event.pointerId);
+        return;
+      }
       const had=!!region;
+      regionBefore=region?region.bbox.slice():null;
       region=null;paintOverlay(null);sayRegion();
       drag={...startPt,id:event.pointerId};
       if(had)emitChange();
@@ -831,15 +1118,25 @@
       paintOverlay([Math.min(drag.x,current.x),Math.min(drag.y,current.y),Math.max(drag.x,current.x),Math.max(drag.y,current.y)]);
     });
     stage.addEventListener('pointerup',event=>{
+      if(pickPress&&event.pointerId===pickPress.id){
+        const origin=pickPress;
+        pickPress=null;
+        const current=point(event);
+        if(!current||Math.hypot(current.x-origin.x,current.y-origin.y)>1.5){say(progress,'점이 움직였습니다. 다시 집으세요.',true);return;}
+        commitPick(event);
+        return;
+      }
       if(!view||!drag||event.pointerId!==drag.id)return;
       const current=point(event);
       const box=current?[roundPt(Math.min(drag.x,current.x)),roundPt(Math.min(drag.y,current.y)),roundPt(Math.max(drag.x,current.x)),roundPt(Math.max(drag.y,current.y))]:null;
       drag=null;
-      if(!box||box[2]-box[0]<1||box[3]-box[1]<1){paintOverlay(null);say(previewStatus,'영역이 너무 작습니다. 다시 드래그하세요.',true);return;}
+      if(!box||box[2]-box[0]<1||box[3]-box[1]<1){paintOverlay(null);resetCalibration();say(previewStatus,'영역이 너무 작습니다. 다시 드래그하세요.',true);return;}
       region={page:view.page,fileHash:view.fileHash,bbox:box};
-      paintOverlay(box);sayRegion();emitChange();syncDisabled();
+      paintOverlay(box);sayRegion();
+      if(!regionBefore||!sameBox(regionBefore,box))resetCalibration();
+      emitChange();syncDisabled();
     });
-    stage.addEventListener('pointercancel',()=>{drag=null;paintOverlay(region&&region.bbox);sayRegion();});
+    stage.addEventListener('pointercancel',()=>{drag=null;pickPress=null;paintOverlay(region&&region.bbox);if(!region)resetCalibration();sayRegion();});
 
     function clear(){
       invalidate('clear');
@@ -851,6 +1148,7 @@
       details.open=false;
       dropPreview();
       wipeOutput();
+      resetCalibration();
       say(progress,'');
       errorCode=null;
       parentBusy=false;

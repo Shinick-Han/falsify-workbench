@@ -282,6 +282,8 @@ def context_for_review(paper_id, file_hash, store=None, max_chars=24000):
             kind = entry['kind']
             method = entry['data'].get('provenance', {}).get('method')
             header = ('DERIVED OCR transcription; may contain recognition errors; confidence is engine-reported.' if kind == 'ocr'
+                      else 'DERIVED curve samples; PlotTracer pixel coordinates and source-bound axis calibration. Samples are not independent observations or confidence-interval endpoints.'
+                      if method == 'oss-pixel-calibration'
                       else 'DERIVED chart table; caller-selected axis ticks and image points, pixel-calibrated estimates, not measured source data.'
                       if method == 'caller-selected-ticks-and-points'
                       else 'DERIVED chart table; OCR axis ticks and original curve pixels, calibrated raster estimates. Inspect axis fits, rejected ticks and series binding.'
@@ -292,17 +294,23 @@ def context_for_review(paper_id, file_hash, store=None, max_chars=24000):
             # original point bounds in geometry.series.points. Repeating them
             # again as numericCells can evict the entire recovered chart from
             # BLUE's context. Keep the original analysis intact for MCP/export.
-            if kind == 'chart' and method == 'ocr-tick-pixel-calibration' and isinstance(entry['data'].get('geometry'), dict):
+            if kind == 'chart' and method in ('ocr-tick-pixel-calibration','oss-pixel-calibration') and isinstance(entry['data'].get('geometry'), dict):
                 context_data = {key: value for key, value in entry['data'].items() if key != 'numericCells'}
                 context_data.update(schema='falsify.chart-context.v1', sourceSchema=entry['data']['schema'],
                                     representation='table-and-original-curve-points')
                 context_entry = {**entry, 'data': context_data}
+                if method == 'oss-pixel-calibration':
+                    geometry = entry['data']['geometry']
+                    context_data.pop('geometry', None)
+                    context_data['geometrySummary'] = {key: geometry[key] for key in ('plotBbox','sourcePlotBbox','axes','calibrationSource','pointKind','provenance') if key in geometry}
+                    context_data['curveSources'] = [{key: s[key] for key in ('id','name','color','axisBinding','traceAmbiguous','pointKind') if key in s} for s in geometry.get('series', [])]
+                    context_data['representation'] = 'table-and-geometry-summary'
             text = header + '\n' + json.dumps(context_entry, ensure_ascii=False, separators=(',', ':'))
             blocks.append(_Block(analysis_id, 'other', text, True))
             analyses.append({'analysisId':analysis_id, 'kind':kind, 'pageIndex':entry['pageIndex'],
                              'imageSha256':entry['inputImage']['sha256'], 'provenance':entry['data'].get('provenance')})
             if context_entry is not entry:
-                analyses[-1]['representation'] = 'table-and-original-curve-points'
+                analyses[-1]['representation'] = context_entry['data']['representation']
     listed_tables = sum(meta.get("type") == "table" for meta in metas)
     listed_figures = sum(meta.get("type") == "figure" for meta in metas)
     counts = summary["counts"]

@@ -15,7 +15,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 SCHEMAS = {'ocr': 'falsify.ocr-page.v1', 'chart': 'falsify.chart-data.v1'}
-MODEL_REVISIONS = {'ocr': 'rapidocr-3.10.0-img2table-2.0.0-spacing-1', 'chart': 'google-deplot-6e76d62430da16986be3426bae32301fb9115397-geometry-2'}
+MODEL_REVISIONS = {'ocr': 'rapidocr-3.10.0-img2table-2.0.0-spacing-1', 'chart': 'plottracer-dcc28a5-1'}
 RUNTIME_CONFIG = Path.home() / '.falsify' / 'paper-analysis-runtime.json'
 MODEL_GATE = threading.Semaphore(1)
 
@@ -45,12 +45,16 @@ def store_default():
 
 
 def validate(data, store=None):
-    keys = {'paperId', 'fileHash', 'kind', 'pageIndex', 'bbox', 'language', 'requestId'}
+    keys = {'paperId', 'fileHash', 'kind', 'pageIndex', 'bbox', 'language', 'requestId', 'chartOptions'}
     if not isinstance(data, dict) or not {'paperId', 'fileHash', 'kind', 'pageIndex'} <= set(data) or set(data) - keys:
         raise ValueError('analysis_request_invalid')
     if not isinstance(data['kind'], str) or data['kind'] not in SCHEMAS or type(data['pageIndex']) is not int or data['pageIndex'] < 0:
         raise ValueError('analysis_request_invalid')
     if data.get('language', 'en') not in ('en', 'ko'): raise ValueError('analysis_language_invalid')
+    if 'chartOptions' in data:
+        if data['kind'] != 'chart': raise ValueError('analysis_request_invalid')
+        from paper_plottracer import validate_options
+        validate_options(data['chartOptions'])
     if 'requestId' in data and (not isinstance(data['requestId'], str) or not re.fullmatch(r'[a-f0-9]{32}', data['requestId'])):
         raise ValueError('analysis_request_id_invalid')
     box = data.get('bbox')
@@ -76,24 +80,24 @@ def _stop(process):
     else: process.kill()
 
 
-def run_child(kind, png, language, cancelled, timeout=600):
+def run_child(kind, png, language, cancelled, timeout=600, chart_options=None):
     """Fixed script/argv, private stdin, no shell or retained model process."""
     while not MODEL_GATE.acquire(timeout=0.25):
         if cancelled.is_set(): raise ValueError('analysis_cancelled')
     try:
-        return _run_child(kind, png, language, cancelled, timeout)
+        return _run_child(kind, png, language, cancelled, timeout, chart_options)
     finally:
         MODEL_GATE.release()
 
 
-def _run_child(kind, png, language, cancelled, timeout):
+def _run_child(kind, png, language, cancelled, timeout, chart_options=None):
     if cancelled.is_set(): raise ValueError('analysis_cancelled')
     keep = ('PATH', 'PATHEXT', 'SYSTEMROOT', 'SYSTEMDRIVE', 'WINDIR', 'TEMP', 'TMP', 'HOME', 'USERPROFILE',
             'USERNAME', 'USER', 'LOGNAME', 'APPDATA', 'LOCALAPPDATA', 'HF_HOME', 'HF_HUB_CACHE', 'TRANSFORMERS_CACHE', 'FALSIFY_MODEL_OFFLINE')
     env = {k: os.environ[k] for k in keep if k in os.environ}
     env.update({'PYTHONUTF8': '1', 'PYTHONIOENCODING': 'utf-8', 'OMP_NUM_THREADS': '2', 'MKL_NUM_THREADS': '2', 'TOKENIZERS_PARALLELISM': 'false'})
     if kind == 'chart': env['HF_HUB_OFFLINE'] = '1'
-    encoded = json.dumps({'kind': kind, 'language': language, 'png': base64.b64encode(png).decode('ascii')}).encode()
+    encoded = json.dumps({'kind': kind, 'language': language, 'png': base64.b64encode(png).decode('ascii'), 'chartOptions':chart_options}).encode()
     process = subprocess.Popen([runtime_python(), '-I', str(HERE / 'paper_enrichment.py'), '--worker'],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env,
         creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), shell=False)
@@ -164,7 +168,10 @@ def analyze(data, *, store=None, runner=None, cancelled=None, progress=None):
     png = base64.b64decode(image['data'], validate=True)
     progress({'phase': 'recognizing' if request['kind'] == 'ocr' else 'reading-chart', 'kind': request['kind']})
     started = time.monotonic()
-    result = (runner or run_child)(request['kind'], png, request['language'], cancelled)
+    options = request.get('chartOptions')
+    if options is not None and options['imageSha256'] != image['sha256']:
+        raise ValueError('chart_image_mismatch')
+    result = (runner or run_child)(request['kind'], png, request['language'], cancelled, chart_options=options) if options is not None else (runner or run_child)(request['kind'], png, request['language'], cancelled)
     if cancelled.is_set(): raise ValueError('analysis_cancelled')
     if not isinstance(result, dict) or result.get('schema') != SCHEMAS[request['kind']] or result.get('status') not in ('ready', 'partial', 'unavailable'):
         raise ValueError('analysis_output_invalid')
@@ -276,7 +283,7 @@ def _worker():
                 result = recognize(png, language=request['language'])
             elif request['kind'] == 'chart':
                 from paper_chart import extract_chart
-                result = extract_chart(png)
+                result = extract_chart(png, options={'chartOptions':request['chartOptions']} if request.get('chartOptions') is not None else None)
             else: raise ValueError('analysis_request_invalid')
         response = {'ok': True, 'data': result}
     except ImportError: response = {'ok': False, 'error': 'analysis_dependency_missing'}

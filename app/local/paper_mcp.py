@@ -167,10 +167,20 @@ def build_server(store, paper_id, file_hash, enable_analysis=False):
             return result if isinstance(result, CallToolResult) else _ok(result)
 
         @server.tool(annotations=_READONLY)
-        def extract_chart(paperId: str, pageIndex: int, bbox: list[float] | None = None) -> CallToolResult:
-            """Run the local chart model on an original region. Values are model estimates; inspect the source crop."""
+        def extract_chart(paperId: str, pageIndex: int, bbox: list[float] | None = None,
+                          chartOptions: dict | None = None) -> CallToolResult:
+            """Trace original chart pixels with the pinned PlotTracer engine and OCR ticks.
+
+            If axes need calibration, render_region at the returned inputImage dpi
+            and repeat with chartOptions={imageSha256,calibration,series,plotBbox?}.
+            calibration={x:{scale:linear|log,points:[{pixel,value},{pixel,value}]},y:same}.
+            series=[{id,color:'#rrggbb',name?}], up to 8. plotBbox is in crop pixels.
+            Use exactly that image's sha256. Samples are raster estimates, not
+            automatically identified means or confidence-interval endpoints.
+            """
             result = _guard(paper_id, file_hash, paperId, lambda: analyze(
-                {'paperId':paperId, 'fileHash':file_hash, 'kind':'chart', 'pageIndex':pageIndex, 'bbox':bbox, 'language':'en'}, store=store))
+                {'paperId':paperId, 'fileHash':file_hash, 'kind':'chart', 'pageIndex':pageIndex, 'bbox':bbox, 'language':'en',
+                 **({'chartOptions':chartOptions} if chartOptions is not None else {})}, store=store))
             return result if isinstance(result, CallToolResult) else _ok(result)
 
         @server.tool(annotations=_READONLY)

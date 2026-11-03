@@ -647,6 +647,29 @@ class BlueTests(StoreCase):
         self.assertEqual(stored['data']['numericCells'], data['numericCells'])
         self.assert_pdf_unchanged()
 
+    def test_plottracer_context_keeps_rows_and_source_binding_without_duplicate_geometry(self):
+        import paper_chart
+        geometry = {'schema': 'falsify.chart-geometry.v1', 'status': 'ready', 'issues': [],
+                    'axes': {'x': {'scale': 'linear'}, 'left': {'scale': 'linear'}},
+                    'provenance': {'engine': 'plottracer', 'revision': 'dcc28a5'},
+                    'series': [{'id': 'series-1', 'color': '#123456', 'axisBinding': 'left',
+                                'pointKind': 'curve-sample', 'points': [{'xPixel': 10, 'yPixel': 20, 'x': 1, 'y': -2,
+                                'pixelInterval': [-2.1, -1.9], 'sourcePoint': [72, 100]}]}]}
+        data = paper_chart._geometry_result(geometry, {'sha256': 'c' * 64, 'width': 200, 'height': 100})
+        data['provenance']['method'] = 'oss-pixel-calibration'
+        stored = self.store.add_analysis(self.pid, {'paperId': self.pid, 'fileHash': self.digest,
+            'kind': 'chart', 'pageIndex': 0, 'bbox': OCR_BOX,
+            'inputImage': {'sha256': 'c' * 64, 'width': 200, 'height': 100}, 'data': data}, 'oss-context')
+        packed = blue.context_for_review(self.pid, self.digest, store=self.store)
+        self.assertIn('Samples are not independent observations', packed['text'])
+        projection = json.loads(next(line for line in packed['text'].splitlines() if line.startswith('{"paperId"')))
+        self.assertEqual(projection['data']['rows'], data['rows'])
+        self.assertEqual(projection['data']['curveSources'][0]['color'], '#123456')
+        self.assertEqual(projection['data']['representation'], 'table-and-geometry-summary')
+        self.assertNotIn('numericCells', projection['data'])
+        self.assertNotIn('geometry', projection['data'])
+        self.assertEqual(self.store.read_analysis(self.pid, stored['analysisId']), stored)
+
     def test_derived_ocr_and_chart_are_labeled_and_can_be_omitted(self):
         ocr = self.analyze(self.request(bbox=OCR_BOX))
         chart = self.analyze(self.request(kind='chart', bbox=CHART_BOX))

@@ -423,11 +423,12 @@ def _geometry_result(geometry,image):
                     numeric.append(cell)
     yaxes=[side for side in ('left','right') if side in axes]
     result=_result(geometry['status'],image,geometry['issues'],'',
-        {'engine':'opencv+rapidocr','model':'en_PP-OCRv5_rec_mobile','revision':'geometry-2',
-         'device':'cpu','method':'ocr-tick-pixel-calibration'},columns,rows,numeric,
+        {'engine':geometry.get('provenance',{}).get('engine','opencv+rapidocr'),'model':None if geometry.get('provenance') else 'en_PP-OCRv5_rec_mobile','revision':geometry.get('provenance',{}).get('revision','geometry-2'),
+         'device':'cpu','method':geometry.get('provenance',{}).get('method','ocr-tick-pixel-calibration')},columns,rows,numeric,
         None,'xy',{'x':{'label':None,'scale':axes['x']['scale'],'unit':None},
                    'y':{'label':None,'scale':axes[yaxes[0]]['scale'] if len(yaxes)==1 else 'multiple','unit':None}})
     result['geometry']=geometry
+    result['pointKind']=geometry.get('pointKind','curve-sample')
     return result
 
 
@@ -444,14 +445,22 @@ def extract_chart(png_bytes, engine=None, options=None):
             'revision': None, 'device': None, 'method': None})
     title, chart_type, axes, issues = _grounding(options)
     geometry=None
-    if engine is None and image['width']>=200 and image['height']>=150:
+    if engine is None and (options.get('chartOptions') is not None or image['width']>=200 and image['height']>=150):
         try:
-            from paper_chart_geometry import extract_geometry
-            geometry=extract_geometry(png_bytes)
+            from paper_plottracer import trace_geometry
+            geometry=trace_geometry(png_bytes,manual=options.get('chartOptions'))
             if geometry['status'] in ('ready','partial') and geometry['series']:
                 return _geometry_result(geometry,image)
-        except (ImportError,ValueError,TypeError,KeyError):
-            geometry={'status':'unavailable','issues':['geometry-extraction-unavailable']}
+        except (ImportError,OSError):
+            geometry={'status':'unavailable','issues':['plottracer-runtime-missing'],'series':[],'axes':{}}
+        # A model's parseable table is not an alternative axis calibration.
+        # Keep the source image available so callers can supply ticks/colors.
+        result=_result('partial',image,geometry.get('issues',[]),'',
+            {'engine':'plottracer','model':None,'revision':'dcc28a5da453ff5c4e7cadd4478523560d15c0dc','device':'cpu','method':'calibration-required'},
+            ['series','axis','x','y'],[],[],title,'xy',axes)
+        result['geometry']=geometry
+        result['pointKind']='curve-sample'
+        return result
     selected = default_engine() if engine is None else engine
     try:
         raw = _invoke(selected, png_bytes, options)

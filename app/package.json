@@ -1,11 +1,12 @@
 {
   "name": "falsify-paper-workbench",
-  "version": "0.2.0-alpha.44",
+  "version": "0.2.0-alpha.45",
   "license": "AGPL-3.0-only",
   "private": true,
   "scripts": {
     "build:latex": "node scripts/build-latex-workbench.mjs",
     "build:fonts": "node scripts/build-paper-fonts.mjs",
+    "build:plottracer": "node scripts/build-plottracer.mjs",
     "build:blue-visual": "node scripts/build-blue-visual.mjs",
     "build:import": "node scripts/build-import.mjs",
     "build:preview": "node scripts/build-preview.mjs",
