@@ -15,7 +15,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 SCHEMAS = {'ocr': 'falsify.ocr-page.v1', 'chart': 'falsify.chart-data.v1'}
-MODEL_REVISIONS = {'ocr': 'rapidocr-3.10.0-img2table-2.0.0-spacing-1', 'chart': 'plottracer-dcc28a5-1'}
+MODEL_REVISIONS = {'ocr': 'rapidocr-3.10.0-img2table-2.0.0-spacing-1', 'chart': 'plottracer-dcc28a5-vector-2'}
 RUNTIME_CONFIG = Path.home() / '.falsify' / 'paper-analysis-runtime.json'
 MODEL_GATE = threading.Semaphore(1)
 
@@ -137,15 +137,19 @@ def _map_boxes(data, region, width, height):
     def point(p):
         box=mapped([p[0],p[1],p[0],p[1]]) if isinstance(p,list) and len(p)==2 else None
         return box[:2] if box else None
+    def native_point(item):
+        source = item.get('sourcePoint') if isinstance(item, dict) else None
+        return item.get('sourcePointSpace') == 'page-rect' and isinstance(source, list) and len(source) == 2 and all(type(n) in (int, float) and not isinstance(n, bool) and math.isfinite(n) for n in source)
     for cell in out.get('numericCells',[]):
-        if 'sourcePixel' in cell:cell['sourcePoint']=point(cell['sourcePixel'])
+        if 'sourcePixel' in cell and not native_point(cell): cell['sourcePoint']=point(cell['sourcePixel'])
     geometry=out.get('geometry')
     if isinstance(geometry,dict):
         geometry['sourcePlotBbox']=mapped(geometry.get('plotBbox'))
         for axis in geometry.get('axes',{}).values():
             for tick in axis.get('ticks',[]):tick['sourceBbox']=mapped(tick.get('bbox'))
         for series in geometry.get('series',[]):
-            for item in series.get('points',[]):item['sourcePoint']=point([item['xPixel'],item['yPixel']])
+            for item in series.get('points',[]):
+                if not native_point(item): item['sourcePoint']=point([item['xPixel'],item['yPixel']])
     return out
 
 
@@ -177,6 +181,13 @@ def analyze(data, *, store=None, runner=None, cancelled=None, progress=None):
         raise ValueError('analysis_output_invalid')
     if result.get('image', {}).get('sha256') != image['sha256'] or result['image'].get('width') != image['width'] or result['image'].get('height') != image['height']:
         raise ValueError('analysis_image_mismatch')
+    if request['kind'] == 'chart':
+        from paper_chart_vectors import prefer_native_paths
+        spec = options if isinstance(options, dict) else {}
+        result = prefer_native_paths(store.source_bytes(request['paperId'], request['fileHash']),
+            page_index=request['pageIndex'], crop=image['bbox'], dpi=dpi, width=image['width'],
+            height=image['height'], raster=result, calibration=spec.get('calibration'),
+            series=spec.get('series'), plot_bbox=spec.get('plotBbox'))
     if result['status'] == 'unavailable':
         if any(code in ('rapidocr-missing','img2table-missing') for code in result.get('issues',[])):
             raise ValueError('analysis_dependency_missing')

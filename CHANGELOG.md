@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0-alpha.48
+
+- Read original PDF line and cubic paths with PyMuPDF and retain source commands, style and page coordinates.
+- Route raster curves through pinned WebPlotDigitizer Step/XStep and PlotTracer findLines without refitting user values.
+- Preserve short branches, asymmetric error bars, requested/effective ink colors and measured/interpolated provenance.
+- Read visible replacements using PDF paint order and share the point/series budget across vector and raster results.
+- Verify original path provenance in BLUE and cover the new engine paths in Windows/macOS CI.
+
 ## 0.2.0-alpha.47
 
 - Mount RED chart reading after its deferred preview and analysis dependencies load.
