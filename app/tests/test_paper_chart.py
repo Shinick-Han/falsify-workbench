@@ -369,5 +369,22 @@ class ChartTests(unittest.TestCase):
         self.assertEqual(flagged['issues'], ['generation truncated at 32 tokens'])
 
 
+class GeometryTableTests(unittest.TestCase):
+    def test_same_color_traces_keep_distinct_ids_in_rows_and_pixel_provenance(self):
+        geometry = {'status': 'ready', 'issues': [], 'axes': {'x': {'scale': 'linear'}, 'left': {'scale': 'log'}},
+                    'series': []}
+        for index, y in enumerate((10.0, 7.071), 1):
+            geometry['series'].append({'id': 'series-' + str(index), 'color': '#1a7cbe', 'axisBinding': 'left',
+                'points': [{'x': 1.0, 'y': y, 'xPixel': 120.0, 'yPixel': 320.0 + (index - 1) * 40,
+                            'valueCandidates': {'left': y}, 'pixelInterval': [y - .1, y + .1]}]})
+        result = chart._geometry_result(geometry, {'sha256': SHA, 'width': 640, 'height': 480})
+        self.assertEqual([row[0] for row in result['rows']], ['series-1', 'series-2'])
+        self.assertEqual([row[3] for row in result['rows']], ['10', '7.071'])
+        self.assertEqual(result['numericCells'][1]['sourcePixel'], [120.0, 320.0])
+        self.assertEqual(result['numericCells'][3]['sourcePixel'], [120.0, 360.0])
+        self.assertEqual(result['geometry']['series'][0]['color'], result['geometry']['series'][1]['color'])
+        self.assertTrue(all(cell['origin'] == 'pixel-calibrated' for cell in result['numericCells']))
+
+
 if __name__ == '__main__':
     unittest.main()

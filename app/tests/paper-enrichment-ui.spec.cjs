@@ -469,6 +469,38 @@ serial('ocr table keeps an empty cell and a merged span without inventing text',
   assert.equal(cells[2].textContent,'');
 });
 
+serial('same-color curves keep distinct series in the table and both downloads',async()=>{
+  const blobs=[], previousCreate=URL.createObjectURL, previousRevoke=URL.revokeObjectURL;
+  URL.createObjectURL=blob=>{blobs.push(blob);return 'blob:curves';};
+  URL.revokeObjectURL=()=>{};
+  try{
+    const h=world();h.source={file:fileOf(),fileHash:HASH_A,revision:'r1'};
+    await h.open();
+    const stage=all(h.host).find(el=>el.classList.contains('blue-picker-stage'));
+    stage.dispatchEvent(pointer('pointerdown',0,0));stage.dispatchEvent(pointer('pointerup',150,200));
+    h.button('그래프를 표로 읽기').click();await until(()=>h.posts().length===1,'curve post');
+    const rows=[['series-1','left','1','10'],['series-2','left','1','7.0710678']];
+    const geometry={series:rows.map((row,index)=>({id:row[0],color:'#1f77b4',axisBinding:'left',
+      points:[{x:1,y:Number(row[3]),xPixel:120,yPixel:320+index*40,sourcePoint:[72,100+index*20]}]}))};
+    const data=chartData({columns:['series','axis','x','y'],rows,geometry,numericCells:[],issues:[],rawOutput:'',
+      provenance:{engine:'opencv+rapidocr',method:'ocr-tick-pixel-calibration',revision:'geometry-2',device:'cpu'}});
+    h.posts()[0].resolve({state:'completed',result:envelope(HASH_A,data,{kind:'chart',bbox:[0,0,300,400]})});
+    await until(()=>h.results.length===1,'curve result');
+    assert.deepEqual(all(h.host).filter(el=>el.tagName==='TD').map(el=>el.textContent),rows.flat());
+    h.button('JSON 다운로드').click();h.button('CSV 다운로드').click();await settle();
+    assert.equal(blobs.length,2);
+    const json=JSON.parse(await blobs[0].text()), csv=await blobs[1].text();
+    assert.deepEqual(json.data.geometry,geometry);
+    assert.deepEqual(json.data.rows,rows);
+    assert.match(csv,/series-1/);assert.match(csv,/series-2/);
+    assert.match(csv,/7\.0710678/);assert.match(csv,/10/);
+    assert.doesNotMatch(csv,/8\.4089/);
+  }finally{
+    if(previousCreate)URL.createObjectURL=previousCreate;else delete URL.createObjectURL;
+    if(previousRevoke)URL.revokeObjectURL=previousRevoke;else delete URL.revokeObjectURL;
+  }
+});
+
 serial('bridge path refusal is not treated as a lost job',async()=>{
   const h=world();
   h.source={file:fileOf(),fileHash:HASH_A,revision:'r1'};

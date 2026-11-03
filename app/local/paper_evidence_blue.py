@@ -287,10 +287,22 @@ def context_for_review(paper_id, file_hash, store=None, max_chars=24000):
                       else 'DERIVED chart table; OCR axis ticks and original curve pixels, calibrated raster estimates. Inspect axis fits, rejected ticks and series binding.'
                       if method == 'ocr-tick-pixel-calibration'
                       else 'DERIVED chart table; numeric values are model estimates, not measured source data.')
-            text = header + '\n' + json.dumps(entry, ensure_ascii=False, separators=(',', ':'))
+            context_entry = entry
+            # Pixel-calibrated rows already have their full numeric values and
+            # original point bounds in geometry.series.points. Repeating them
+            # again as numericCells can evict the entire recovered chart from
+            # BLUE's context. Keep the original analysis intact for MCP/export.
+            if kind == 'chart' and method == 'ocr-tick-pixel-calibration' and isinstance(entry['data'].get('geometry'), dict):
+                context_data = {key: value for key, value in entry['data'].items() if key != 'numericCells'}
+                context_data.update(schema='falsify.chart-context.v1', sourceSchema=entry['data']['schema'],
+                                    representation='table-and-original-curve-points')
+                context_entry = {**entry, 'data': context_data}
+            text = header + '\n' + json.dumps(context_entry, ensure_ascii=False, separators=(',', ':'))
             blocks.append(_Block(analysis_id, 'other', text, True))
             analyses.append({'analysisId':analysis_id, 'kind':kind, 'pageIndex':entry['pageIndex'],
                              'imageSha256':entry['inputImage']['sha256'], 'provenance':entry['data'].get('provenance')})
+            if context_entry is not entry:
+                analyses[-1]['representation'] = 'table-and-original-curve-points'
     listed_tables = sum(meta.get("type") == "table" for meta in metas)
     listed_figures = sum(meta.get("type") == "figure" for meta in metas)
     counts = summary["counts"]

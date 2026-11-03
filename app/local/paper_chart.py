@@ -413,7 +413,7 @@ def _geometry_result(geometry,image):
     for series in geometry['series']:
         for point in series['points']:
             vals=[point['x'],point.get('y')] if not ambiguous else [point['x'],point['valueCandidates'].get('left'),point['valueCandidates'].get('right')]
-            row=[series['color'],series['axisBinding']]+[None if v is None else format(v,'.8g') for v in vals]
+            row=[series['id'],series['axisBinding']]+[None if v is None else format(v,'.8g') for v in vals]
             index=len(rows);rows.append(row)
             for col,value in enumerate(vals,2):
                 if value is not None:
@@ -423,7 +423,7 @@ def _geometry_result(geometry,image):
                     numeric.append(cell)
     yaxes=[side for side in ('left','right') if side in axes]
     result=_result(geometry['status'],image,geometry['issues'],'',
-        {'engine':'opencv+rapidocr','model':'en_PP-OCRv5_rec_mobile','revision':'geometry-1',
+        {'engine':'opencv+rapidocr','model':'en_PP-OCRv5_rec_mobile','revision':'geometry-2',
          'device':'cpu','method':'ocr-tick-pixel-calibration'},columns,rows,numeric,
         None,'xy',{'x':{'label':None,'scale':axes['x']['scale'],'unit':None},
                    'y':{'label':None,'scale':axes[yaxes[0]]['scale'] if len(yaxes)==1 else 'multiple','unit':None}})

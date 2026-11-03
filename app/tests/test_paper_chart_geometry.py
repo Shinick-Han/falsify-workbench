@@ -29,14 +29,17 @@ class GeometryTests(unittest.TestCase):
     def test_log_calibration_and_original_pixel_provenance(self):
         png,lines=fixture();result=extract_geometry(png,lines)
         self.assertEqual(result['status'],'ready');self.assertEqual(result['axes']['left']['scale'],'log')
-        for point,value in zip(result['series'][0]['points'],[10,20,40,80]):
-            self.assertLess(abs(point['y']/value-1),.03);self.assertEqual(point['x'],[1,2,3,4][result['series'][0]['points'].index(point)])
+        for x,value in zip([1,2,3,4],[10,20,40,80]):
+            point=min(result['series'][0]['points'],key=lambda p:abs(p['x']-x))
+            self.assertLess(abs(point['x']-x),.025)
+            self.assertLess(abs(point['y']/value-1),.03)
             self.assertEqual(len(point['pixelInterval']),2)
     def test_dual_axes_match_color_and_keep_both_scales(self):
         png,lines=fixture(dual=True);result=extract_geometry(png,lines)
         self.assertEqual({s['axisBinding'] for s in result['series']},{'left','right'})
         right=next(s for s in result['series'] if s['axisBinding']=='right')
-        for p,value in zip(right['points'],[1.875,4.875,7.875,10.875]):self.assertAlmostEqual(p['y'],value,delta=.15)
+        for x,value in zip([1,2,3,4],[1.875,4.875,7.875,10.875]):
+            p=min(right['points'],key=lambda p:abs(p['x']-x));self.assertAlmostEqual(p['y'],value,delta=.15)
     def test_uncolored_dual_axes_are_not_silently_assigned(self):
         png,lines=fixture(dual=True,ambiguous=True);result=extract_geometry(png,lines)
         self.assertEqual(result['status'],'partial')
@@ -59,6 +62,6 @@ class GeometryTests(unittest.TestCase):
                 if pixels[x,y]==(31,119,180):pixels[x,y]=(0,0,0)
         buf=io.BytesIO();im.save(buf,format='PNG');result=extract_geometry(buf.getvalue(),lines)
         self.assertEqual(result['status'],'ready');self.assertEqual(result['series'][0]['color'],'#222222')
-        self.assertAlmostEqual(result['series'][0]['points'][2]['y'],40,delta=1)
+        self.assertAlmostEqual(min(result['series'][0]['points'],key=lambda p:abs(p['x']-3))['y'],40,delta=1)
 
 if __name__=='__main__':unittest.main()

@@ -15,7 +15,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 SCHEMAS = {'ocr': 'falsify.ocr-page.v1', 'chart': 'falsify.chart-data.v1'}
-MODEL_REVISIONS = {'ocr': 'rapidocr-3.10.0-img2table-2.0.0-spacing-1', 'chart': 'google-deplot-6e76d62430da16986be3426bae32301fb9115397-geometry-1'}
+MODEL_REVISIONS = {'ocr': 'rapidocr-3.10.0-img2table-2.0.0-spacing-1', 'chart': 'google-deplot-6e76d62430da16986be3426bae32301fb9115397-geometry-2'}
 RUNTIME_CONFIG = Path.home() / '.falsify' / 'paper-analysis-runtime.json'
 MODEL_GATE = threading.Semaphore(1)
 

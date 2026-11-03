@@ -381,6 +381,16 @@ class AnalyzeTests(StoreCase):
         self.assertEqual(len(self.runner.calls), 2)
         self.assert_pdf_unchanged()
 
+    def test_chart_engine_revision_cannot_reuse_a_previous_geometry_result(self):
+        request = self.request(kind='chart', bbox=CHART_BOX)
+        with patch.dict(enrichment.MODEL_REVISIONS, {'chart': 'previous-geometry'}):
+            previous = self.analyze(request)
+        current = self.analyze(request)
+        self.assertNotEqual(previous['analysisId'], current['analysisId'])
+        self.assertEqual(len(self.runner.calls), 2)
+        self.assertEqual(self.analyze(request)['analysisId'], current['analysisId'])
+        self.assertEqual(len(self.runner.calls), 2)
+
     def test_rejections_do_not_render_or_call_the_runner(self):
         def explode(*_args, **_kwargs):
             raise AssertionError('render')
@@ -598,6 +608,45 @@ class JobTests(StoreCase):
 
 
 class BlueTests(StoreCase):
+    def test_curve_context_keeps_all_points_without_duplicating_numeric_cells(self):
+        import paper_chart
+
+        # Two same-color series: the redundant per-cell copy alone takes the
+        # result over BLUE's budget, although its complete curve data fits.
+        points = [{'xPixel': i + 10, 'yPixel': 20 + series * 30,
+                   'x': i / 10, 'y': 10 - series * 3,
+                   'pixelInterval': [9.8 - series * 3, 10.2 - series * 3],
+                   'valueCandidates': {'left': 10 - series * 3},
+                   'sourcePoint': [72 + i / 2, 100 + series * 15]}
+                  for series in range(2) for i in range(30)]
+        geometry = {'schema': 'falsify.chart-geometry.v1', 'status': 'ready', 'issues': [],
+                    'axes': {'x': {'scale': 'linear'}, 'left': {'scale': 'linear'}},
+                    'series': [{'id': f'series-{index + 1}', 'color': '#1f77b4', 'axisBinding': 'left',
+                                'points': points[index * 30:(index + 1) * 30]}
+                               for index in range(2)]}
+        data = paper_chart._geometry_result(geometry, {'sha256': 'c' * 64, 'width': 200, 'height': 100})
+        result = {'paperId': self.pid, 'fileHash': self.digest, 'kind': 'chart', 'pageIndex': 0,
+                  'bbox': OCR_BOX, 'inputImage': {'sha256': 'c' * 64, 'width': 200, 'height': 100}, 'data': data}
+        stored = self.store.add_analysis(self.pid, result, 'same-color-context')
+        self.assertGreater(len(json.dumps(stored, separators=(',', ':'))), 24000)
+        packed = blue.context_for_review(self.pid, self.digest, store=self.store)
+        self.assertEqual(packed['coverage']['analyses']['omitted'], [])
+        self.assertLessEqual(len(packed['text']), 24000)
+        encoded = next(line for line in packed['text'].splitlines() if line.startswith('{"paperId"'))
+        projection = json.loads(encoded)
+        self.assertEqual(projection['data']['schema'], 'falsify.chart-context.v1')
+        self.assertEqual(projection['data']['sourceSchema'], 'falsify.chart-data.v1')
+        self.assertNotIn('numericCells', projection['data'])
+        self.assertEqual(projection['data']['geometry'], geometry)
+        self.assertEqual(projection['data']['rows'], data['rows'])
+        self.assertEqual({row[0] for row in projection['data']['rows']}, {'series-1', 'series-2'})
+        self.assertEqual(projection['data']['provenance'], data['provenance'])
+        self.assertEqual(packed['coverage']['analyses']['included'][0]['representation'],
+                         'table-and-original-curve-points')
+        self.assertEqual(self.store.read_analysis(self.pid, stored['analysisId']), stored)
+        self.assertEqual(stored['data']['numericCells'], data['numericCells'])
+        self.assert_pdf_unchanged()
+
     def test_derived_ocr_and_chart_are_labeled_and_can_be_omitted(self):
         ocr = self.analyze(self.request(bbox=OCR_BOX))
         chart = self.analyze(self.request(kind='chart', bbox=CHART_BOX))

@@ -149,6 +149,8 @@ def extract_geometry(png_bytes,ocr_lines=None):
     try:
         import cv2 as cv
         import numpy as np
+        from paper_chart_traces import trace_mask
+        from paper_chart_sampling import sample_trace
         image=cv.imdecode(np.frombuffer(png_bytes,dtype=np.uint8),cv.IMREAD_COLOR)
         if image is None:result['issues']=['invalid-image'];return result
         height,width=image.shape[:2];image_info.update(width=width,height=height)
@@ -178,6 +180,7 @@ def extract_geometry(png_bytes,ocr_lines=None):
             if any(min(abs(hue-h),180-abs(hue-h))<9 for h in selected):continue
             selected.append(hue)
             if len(selected)==8:break
+        candidates=[]
         for hue in [*selected,None]:
             if hue is None:
                 cm=(roi[:,:,1]<50)&(roi[:,:,2]<125)
@@ -192,35 +195,53 @@ def extract_geometry(png_bytes,ocr_lines=None):
                         if left<x0<x1<right and top<y0<y1<bottom:cm[max(0,y0-top-3):y1-top,max(0,x0-left-3):x1-left]=False
             else:
                 delta=np.abs(roi[:,:,0].astype(int)-hue);cm=mask&((delta<6)|(delta>174))
-            ys,xs=np.where(cm)
-            if len(xs)<80 or np.ptp(xs)<(right-left)*.35:continue
-            columns=np.unique(xs);thickness=[int((xs==x).sum()) for x in columns[::max(1,len(columns)//50)]]
-            if np.median(thickness)>max(18,(bottom-top)*.035):continue
+            traced=trace_mask(cm, max_gap=max(6, int((right-left)*.025)), min_columns=12)
+            accepted=[]
+            for trace in traced['traces']:
+                columns=trace['columns']
+                if len(columns)<12 or columns[-1]['x']-columns[0]['x']<(right-left)*.35:continue
+                thickness=[c['high']-c['low']+1 for c in columns]
+                if float(np.median(thickness))>max(18,(bottom-top)*.035):continue
+                accepted.append((hue,trace))
+            if accepted:
+                candidates.extend(accepted)
+                result['issues'].extend(code for code in traced.get('issues',[]) if code not in result['issues'])
+        if len(candidates)>64:
+            candidates=candidates[:64];result['issues'].append('curve-count-limit')
+        budget=max(3,480//max(1,len(candidates)))
+        origin_x,origin_y=left+2,top+2
+        tick_columns=[t['pixel']-origin_x for t in axes['x']['usedTicks']]
+        for hue,trace in candidates:
             possible=[s for s in ('left','right') if s in axes]
             binding=possible[0] if len(possible)==1 else 'ambiguous'
             if len(possible)==2 and hue is not None:
                 distances={s:min(abs(hue-axes[s]['hue']),180-abs(hue-axes[s]['hue'])) for s in possible if axes[s]['hue'] is not None}
                 matches=[s for s,d in distances.items() if d<10]
                 if len(matches)==1:binding=matches[0]
-            sample=[t['pixel'] for t in axes['x']['usedTicks']]
-            if len(sample)<3:sample=np.linspace(left+int(xs.min())+2,left+int(xs.max())+2,32).tolist()
+            # Resampled raster strokes have stepped centers. Keep the reduction
+            # error below a quarter of the observed band thickness (0.75–3 px),
+            # rather than spending the row budget describing raster stair steps.
+            tolerance=max(.75,min(3.0,float(np.median([c['high']-c['low']+1 for c in trace['columns']]))*.25))
+            sampled=sample_trace(trace['columns'],x_ticks=tick_columns,max_points=budget,tolerance_px=tolerance)
+            result['issues'].extend(code for code in sampled.get('issues',[]) if code not in result['issues'])
             points=[]
-            for xp in sorted(sample):
-                local=xp-left-2;near=np.abs(xs-local)<=max(2,width*.002)
-                if near.sum()<2:continue
-                yp=float(np.median(ys[near]))+top+2
+            for column in sampled['points']:
+                xp=float(column['x'])+origin_x;yp=float(column['y'])+origin_y
                 values={s:axis_value(axes[s],yp) for s in possible}
-                known=next((t['value'] for t in axes['x']['usedTicks'] if t['pixel']==xp),None)
-                point={'xPixel':float(xp),'yPixel':yp,'x':axis_value(axes['x'],xp) if known is None else known,'valueCandidates':values}
+                point={'xPixel':xp,'yPixel':yp,'x':axis_value(axes['x'],xp),'valueCandidates':values}
                 if binding!='ambiguous':
                     point['y']=values[binding]
-                    low=float(np.min(ys[near]))+top+1.5;high=float(np.max(ys[near]))+top+2.5
+                    low=float(column['low'])+origin_y-.5;high=float(column['high'])+origin_y+.5
                     point['pixelInterval']=sorted([axis_value(axes[binding],low),axis_value(axes[binding],high)])
                 points.append(point)
-            if len(points)<3:continue
+            if len(points)<2:continue
             rgb=cv.cvtColor(np.uint8([[[hue,220,190]]]),cv.COLOR_HSV2RGB)[0,0].tolist() if hue is not None else [34,34,34]
-            result['series'].append({'id':'series-'+str(len(result['series'])+1),'color':'#'+''.join(f'{v:02x}' for v in rgb),'hue':hue,'axisBinding':binding,'points':points})
-            if binding=='ambiguous':result['issues'].append('series-axis-ambiguous')
+            result['series'].append({'id':'series-'+str(len(result['series'])+1),'color':'#'+''.join(f'{v:02x}' for v in rgb),'hue':hue,'axisBinding':binding,'points':points,
+                'gapsPixels':[[float(a)+origin_x,float(b)+origin_x] for a,b in trace.get('gaps',[])],
+                'segments':sampled.get('segments',[]),'traceAmbiguous':bool(trace.get('ambiguous')),
+                'sampling':{'observedColumns':len(trace['columns']),'returnedPoints':len(points),'tolerancePixels':tolerance,'maxDeviationPixels':sampled.get('maxDeviationPixels')}})
+            if trace.get('ambiguous') and 'curve-junction-ambiguous' not in result['issues']:result['issues'].append('curve-junction-ambiguous')
+            if binding=='ambiguous' and 'series-axis-ambiguous' not in result['issues']:result['issues'].append('series-axis-ambiguous')
         if not result['series']:result['issues'].append('colored-continuous-curves-not-found');return result
         result['status']='partial' if result['issues'] else 'ready'
         return result
