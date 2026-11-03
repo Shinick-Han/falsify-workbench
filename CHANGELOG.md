@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0-alpha.46
+
+- Edit extracted table cells and replace selected figure regions in a source-bound PDF copy.
+- Redraw line, scatter and bar charts from editable numeric series using pinned Chart.js and optional explicit error bars.
+- Add page-region selection, PNG/JPEG replacement, image cropping and labels with before/after previews.
+- Record human changes, coordinates and source/output hashes automatically; export a separate JSON record.
+- Send only the generated PDF to BLUE and retain the last output when a later edit fails.
+
 ## 0.2.0-alpha.45
 
 - Use pinned PlotTracer code for curve extraction and source-bound axis conversion.

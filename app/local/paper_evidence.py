@@ -353,6 +353,14 @@ class EvidenceStore:
             self._by_hash[file_hash] = record['paper_id']
             return copy.deepcopy(record['summary'])
 
+    def source_bytes(self, paper_id, file_hash):
+        """Internal immutable byte access for explicit copy exports; never an MCP tool."""
+        with self._lock:
+            record = self._live(paper_id)
+            if record['file_hash'] != file_hash:
+                raise ValueError('paper_evidence_hash_mismatch')
+            return bytes(record['pdf'])
+
     def status(self, paper_id):
         with self._lock:
             return copy.deepcopy(self._live(paper_id)['summary'])
