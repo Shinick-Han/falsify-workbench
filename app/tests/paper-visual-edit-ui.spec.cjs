@@ -148,6 +148,7 @@ function world(over={}){
     if(path==='/api/paper/evidence/query'&&body.operation==='render'){
       return {paperId:'paper-visual',fileHash,pageIndex:body.pageIndex,bbox:body.bbox.slice(),mimeType:'image/png',data:WHITE.toString('base64'),sha256:WHITE_SHA,width:64,height:32};
     }
+    if(path==='/api/paper/chart/prepare'&&over.shapeScene)return {...over.shapeScene,pageIndex:body.pageIndex,bbox:body.bbox};
     if(path==='/api/paper/visual/export')return exportImpl?exportImpl(body):pdfOf(fileHash,'ok');
     throw new Error('unexpected '+path);
   }
@@ -587,4 +588,24 @@ serial('a page region can be edited without an automatically detected figure',as
   assert.equal(h.previews.length,2);
   assert.equal(h.ui.snapshot().pending,0);
   assert.equal(h.calls.some(call=>call.path==='/api/paper/visual/export'),false);
+});
+
+serial('graph edit binds to the visible page after page navigation',async()=>{
+  const mounts=[];
+  globalThis.FalsifyChartShape={};
+  globalThis.FalsifyChartShapeEditor={create:args=>{mounts.push(args);return {destroy(){}};}};
+  try{
+    const h=world({catalog:{items:[],full:{},analyses:[],fullAnalyses:{}},shapeScene:{sceneId:'s',series:[{id:'a',points:[{x:1,y:2}]}]}});
+    h.source={file:fileOf(PDF,'vectors.pdf'),fileHash:HASH,revision:'r1'};
+    await h.ui.refresh();h.button('영역 직접 선택').click();
+    await until(()=>h.labeled('라벨'),'region ready');
+    h.button('다음 쪽').click();
+    await until(()=>h.previews.some(p=>p.page===2),'visible second page');
+    h.button('그래프 고치기').click();
+    await until(()=>mounts.length===1,'graph mounted');
+    const request=h.calls.find(c=>c.path==='/api/paper/chart/prepare');
+    assert.equal(request.body.pageIndex,1);
+    assert.deepEqual(request.body.bbox,[0,0,600,800]);
+    assert.equal(mounts[0].scene.pageIndex,1);
+  }finally{delete globalThis.FalsifyChartShape;delete globalThis.FalsifyChartShapeEditor;}
 });

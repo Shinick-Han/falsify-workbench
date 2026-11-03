@@ -1,4 +1,6 @@
 import {spawnSync} from 'node:child_process';
+const shape = spawnSync(process.execPath, ['--test','tests/chart-shape-core.spec.mjs','tests/chart-shape-editor.spec.mjs','tests/chart-mark-editor.spec.mjs'], {stdio:'inherit'});
+if(shape.error || shape.status!==0)process.exit(shape.status||1);
 const visual = spawnSync(process.execPath, ['--test','tests/paper-chart-redraw.spec.cjs','tests/paper-chart-correction-ui.spec.cjs','tests/paper-visual-edit-ui.spec.cjs','tests/paper-visual-integration.spec.cjs'], {stdio:'inherit'});
 if(visual.error || visual.status!==0)process.exit(visual.status||1);
 const plottracer = spawnSync(process.execPath, ['--test','tests/plottracer-vendor.spec.mjs','tests/paper-plottracer-ui.spec.cjs'], {stdio:'inherit'});

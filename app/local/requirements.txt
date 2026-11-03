@@ -4,3 +4,8 @@ jsonschema==4.26.0
 PyMuPDF==1.28.2
 # Embedded JS execution for the pinned PlotTracer core (ISC; bundled V8 BSD).
 mini-racer==0.14.1
+# Source-style chart editing uses the existing PDF/image and curve extraction stack.
+pikepdf==10.17.0
+Pillow==12.3.0
+numpy==2.5.2
+opencv-contrib-python==5.0.0.93

@@ -29,6 +29,7 @@ import cli_backend
 import editor_service
 import paper_analysis_service
 import paper_evidence_http
+import paper_chart_edit_service
 import paper_enrichment
 import image_edit_service
 import harness_adapter
@@ -154,7 +155,7 @@ def cors_route(method, path):
     analysis_job=PAPER_ANALYSIS_PATH.fullmatch(path)
     if method == 'GET': return path in ('/api/capabilities', pairing.STATUS_PATH) or re.fullmatch(r'/api/(red|blue)/jobs/.+', path) is not None or bool(layout_job and not layout_job[2]) or bool(analysis_job and not analysis_job[2])
     if method == 'POST' and (path == PAPER_ANALYSIS_ROUTE or analysis_job and analysis_job[2]): return True
-    if method == 'POST': return path in ['/api/red/jobs', '/api/blue/jobs', '/api/export', '/api/paper/inspect', *paper_evidence_http.ROUTES, *IMAGE_ROUTES, VISUAL_EDIT_ROUTE, PROFILE_ROUTE, DEPLOY_ROUTE, LAYOUT_AGENT_ROUTE, LAYOUT_JOBS_ROUTE, pairing.REDEEM_PATH, pairing.REVOKE_PATH] or re.fullmatch(r'/api/(red|blue)/jobs/.+/cancel', path) is not None or bool(layout_job and layout_job[2])
+    if method == 'POST': return path in ['/api/red/jobs', '/api/blue/jobs', '/api/export', '/api/paper/inspect', *paper_evidence_http.ROUTES, *paper_chart_edit_service.ROUTES, *IMAGE_ROUTES, VISUAL_EDIT_ROUTE, PROFILE_ROUTE, DEPLOY_ROUTE, LAYOUT_AGENT_ROUTE, LAYOUT_JOBS_ROUTE, pairing.REDEEM_PATH, pairing.REVOKE_PATH] or re.fullmatch(r'/api/(red|blue)/jobs/.+/cancel', path) is not None or bool(layout_job and layout_job[2])
     return False
 
 def no_duplicates(items):
@@ -322,6 +323,7 @@ class Handler(BaseHTTPRequestHandler):
                     'cliSelection': True, 'harnessWrapper': True, 'cliAgents': cli_agents(), 'pdfEditor': pdf_editor,
                     'paperAnalysis': paper_analysis_service.capability(), 'imageEditor': image_edit_service.capability(),
                     'paperEvidence': {'available': paper_analysis_service.capability()['available'], 'schema': 'falsify.paper-evidence.v1', 'ttlSeconds': 43200, 'engine': 'pymupdf'},
+                    'chartEditor': paper_chart_edit_service.capability(),
                     'visualEditor': {'supported': paper_analysis_service.capability()['available'], 'schema': 'falsify.visual-edit-request.v1'}, 'paperEnrichment': paper_enrichment.capability(),
                     'harnessProfileProposal': harness_profile.capability(), 'harnessDeployment': True, 'paperLayoutJobs': True,
                     'workbenchVersion': WORKBENCH_VERSION,
@@ -363,7 +365,7 @@ class Handler(BaseHTTPRequestHandler):
         prefix = '/api/' + role + '/jobs'
         layout_job=LAYOUT_JOB_PATH.fullmatch(path)
         analysis_job=PAPER_ANALYSIS_PATH.fullmatch(path)
-        if path not in ['/api/red/jobs', '/api/blue/jobs', '/api/export', '/api/paper/inspect', *paper_evidence_http.ROUTES, PAPER_ANALYSIS_ROUTE, *IMAGE_ROUTES, VISUAL_EDIT_ROUTE, PROFILE_ROUTE, DEPLOY_ROUTE, LAYOUT_AGENT_ROUTE, LAYOUT_JOBS_ROUTE] and not (path.startswith(prefix + '/') and path.endswith('/cancel')) and not (layout_job and layout_job[2]) and not (analysis_job and analysis_job[2]):
+        if path not in ['/api/red/jobs', '/api/blue/jobs', '/api/export', '/api/paper/inspect', *paper_evidence_http.ROUTES, *paper_chart_edit_service.ROUTES, PAPER_ANALYSIS_ROUTE, *IMAGE_ROUTES, VISUAL_EDIT_ROUTE, PROFILE_ROUTE, DEPLOY_ROUTE, LAYOUT_AGENT_ROUTE, LAYOUT_JOBS_ROUTE] and not (path.startswith(prefix + '/') and path.endswith('/cancel')) and not (layout_job and layout_job[2]) and not (analysis_job and analysis_job[2]):
             self.reply(404, {'error': 'operation_not_allowed'}); return
         try:
             if self.headers.get('Content-Type') != 'application/json': raise ValueError('application/json 필요')
@@ -423,6 +425,14 @@ class Handler(BaseHTTPRequestHandler):
                 with LOCK: admitted = not self.server_closing() and ACTIVE.acquire(blocking=False)
                 if not admitted: self.reply(409, {'error': 'companion_busy'}); return
                 try: result = paper_analysis_service.analyze(request)
+                finally: ACTIVE.release()
+                self.reply(200, result); return
+            if path in paper_chart_edit_service.ROUTES:
+                with LOCK: admitted = not self.server_closing() and ACTIVE.acquire(blocking=False)
+                if not admitted: self.reply(409, {'error': 'companion_busy'}); return
+                try:
+                    action = path.rsplit('/', 1)[-1]
+                    result = getattr(paper_chart_edit_service.default_service, action)(data)
                 finally: ACTIVE.release()
                 self.reply(200, result); return
             if path == VISUAL_EDIT_ROUTE:

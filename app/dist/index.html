@@ -10,6 +10,8 @@
   <link rel="stylesheet" href="styles.css?v=0.2.0-alpha.48">
   <link rel="stylesheet" href="document-red.css?v=0.2.0-alpha.48">
   <link rel="stylesheet" href="paper-visual-edit.css?v=0.2.0-alpha.48">
+  <link rel="stylesheet" href="chart-shape-editor.css?v=0.2.0-alpha.48">
+  <link rel="stylesheet" href="chart-mark-editor.css?v=0.2.0-alpha.48">
   <link rel="stylesheet" href="experiment-ledger.css?v=0.2.0-alpha.48">
   <link rel="stylesheet" href="harness-wrapper.css?v=0.2.0-alpha.48">
   <link rel="stylesheet" href="confluence-store.css?v=0.2.0-alpha.48">
@@ -58,6 +60,9 @@
   <script src="external-red-ui.js?v=0.2.0-alpha.48" defer></script>
   <script src="paper-manual-records.js?v=0.2.0-alpha.48" defer></script>
   <script src="paper-chart-redraw.js?v=0.2.0-alpha.48" defer></script>
+  <script src="chart-shape-core.js?v=0.2.0-alpha.48" defer></script>
+  <script src="chart-shape-editor.js?v=0.2.0-alpha.48" defer></script>
+  <script src="chart-mark-editor.js?v=0.2.0-alpha.48" defer></script>
   <script src="paper-visual-edit-ui.js?v=0.2.0-alpha.48" defer></script>
   <script src="document-red.js?v=0.2.0-alpha.48" defer></script>
   <script src="document-blue-core.js?v=0.2.0-alpha.48" defer></script>
@@ -216,7 +221,7 @@
             </section>
           <section class="visual-assets" id="red-visual-section" aria-label="표·그래프·그림 수정" hidden>
             <div id="red-visual-edit-host"></div>
-            <div id="red-visual-analysis"></div>
+            <details class="red-help"><summary>고급 · 그래프 분석·축 보정</summary><div id="red-visual-analysis"></div></details>
             <p id="red-visual-record-status" class="form-feedback" role="status"></p>
           </section>
 
