@@ -793,6 +793,7 @@
     const regionOps=new Map();
     const itemCache=new Map();
     const analysisCache=new Map();
+    const shapeViews=new Map();
     let chartState=null,figureState=null,chartBlocked=false,output=null,downloadUrl=null,previewUrls=[],imageTask=Promise.resolve(),figureSerial=0;
     let dynamic=[];
 
@@ -827,6 +828,8 @@
       img.hidden=false;
     }
     function resetDrafts(){
+      for(const view of shapeViews.values())view.widget?.destroy?.();
+      shapeViews.clear();
       cellOps.clear();regionOps.clear();itemCache.clear();analysisCache.clear();
       chartState=null;figureState=null;chartBlocked=false;selectedKey=null;
       revokePreviews();
@@ -844,6 +847,7 @@
     }
     function syncDisabled(){
       const lock=parentBusy||applying;
+      for(const view of shapeViews.values())view.panel.inert=lock;
       applyBtn.disabled=lock||pendingCount()===0||!paperId;
       blueBtn.disabled=lock||!outputReady();
       blueBtn.hidden=!outputReady();
@@ -915,6 +919,9 @@
       else for(const item of slice)saved.append(radioRow({id:item.analysisId,kind:item.kind,pageIndex:item.pageIndex},'analysis'));
       sourceTitle.textContent='원본 · '+listTotal;
       savedTitle.textContent='저장된 그래프·스캔 · '+savedItems.length;
+      listPager.hidden=listTotal<=LIST_PAGE;
+      savedTitle.hidden=saved.hidden=savedItems.length===0;
+      savedPager.hidden=savedItems.length<=LIST_PAGE;
       syncDisabled();
     }
     async function loadList(token,src,page){
@@ -1062,8 +1069,60 @@
       paintChanged();
       setImages(null,null);
     }
-    async function paintChart(analysis,token,mine){
+    async function paintShape(analysis,token,mine){
+      if(!root.FalsifyChartShapeEditor?.create||!root.FalsifyChartShape||!bboxOk(analysis.bbox))return false;
+      const key='shape:'+analysis.analysisId;
+      let view=shapeViews.get(key);
+      if(view){chartState=null;figureState=null;workBody.replaceChildren(view.panel);setImages(null,null);return true;}
+      const src=currentSource();
+      const panel=el('div','visual-edit-column');
+      panel.append(el('h3',null,'그래프 · '+(analysis.pageIndex+1)+'쪽'));
+      const shapeHost=el('div');panel.append(shapeHost);
+      workBody.replaceChildren(panel);setImages(null,null);
+      say(status,'곡선을 준비하고 있습니다.');
+      const scene=await session().request('/api/paper/chart/prepare',{paperId,fileHash:src.fileHash,pageIndex:analysis.pageIndex,bbox:analysis.bbox.slice()},{signal:track()});
+      if(!live(token,src)||mine!==selectSerial)return true;
+      if(!scene||!Array.isArray(scene.series)||!scene.series.length)throw err('chart-bad');
+      const tool=scene.mode==='marks'?root.FalsifyChartMarkEditor:root.FalsifyChartShapeEditor;
+      if(!tool?.create)throw err('chart-missing');
+      view={panel,scene,widget:null};shapeViews.set(key,view);
+      const recordScene=value=>({series:value.series});
+      view.widget=tool.create({host:shapeHost,scene,core:root.FalsifyChartShape,
+        onChange:value=>{
+          if(!live(token,src)||parentBusy||applying)return;
+          const operations=value.operations||[];
+          if(!operations.length)regionOps.delete(key);
+          else regionOps.set(key,{wire:{id:'shape-'+scene.sceneId,kind:'chart-shape',plan:{schema:'falsify.chart-edit-plan.v1',paperId,fileHash:src.fileHash,sceneId:scene.sceneId,revision:value.revision||0,operations}},
+            record:{id:'chart-'+scene.sceneId,kind:'chart-shape',assetKind:'graph',pageIndex:scene.pageIndex,bbox:scene.bbox.slice(),before:recordScene(scene),after:recordScene(value.scene),author:'human'}});
+          emit();syncDisabled();
+        },
+        onCommit:()=>{},
+        onRequestExport:async()=>{
+          if(parentBusy||applying)return;
+          if(pendingCount()===0){
+            const current=currentSource();if(!current||!live(token,current))return;
+            const url=root.URL.createObjectURL(current.file),link=el('a');
+            link.href=url;link.download=current.file.name||'paper.pdf';link.click();
+            setTimeout(()=>root.URL.revokeObjectURL(url),1000);return;
+          }
+          await apply();if(outputReady())download.click();
+        }
+      });
+      chartState=null;figureState=null;chartBlocked=false;
+      say(status,scene.mode==='marks'?'점이나 막대의 끝을 끌어 바꾸세요.':'곡선을 끌어 모양을 바꾸세요.');syncDisabled();return true;
+    }
+    async function paintChart(analysis,token,mine,legacy=false){
       figureState=null;
+      if(!legacy&&root.FalsifyChartShapeEditor&&bboxOk(analysis.bbox)){
+        try{if(await paintShape(analysis,token,mine))return;}
+        catch(error){
+          if(token!==generation||mine!==selectSerial)return;
+          const panel=el('div','visual-edit-column');
+          panel.append(el('p','form-feedback','곡선 편집을 준비하지 못했습니다.'));
+          const advanced=el('button','button secondary','고급 · 새 서식으로 그리기');advanced.type='button';
+          advanced.addEventListener('click',()=>{void paintChart(analysis,token,mine,true);});panel.append(advanced);workBody.replaceChildren(panel);return;
+        }
+      }
       const api=root.FalsifyChartRedraw;
       if(!api||typeof api.fromAnalysis!=='function'||typeof api.render!=='function'){say(status,TEXT.chartMissing,true);errorCode='chart-missing';return;}
       let raw=null;
@@ -1312,7 +1371,17 @@
       useCrop.addEventListener('click',()=>{imageTask=applyCrop(nums);});
       box.append(useRegion,useCrop);
       advanced.append(box);
-      panel.append(title,nav,stage,fileLabel,labelInput,labelBtn,advanced);
+      const shapeButton=el('button','button secondary','그래프 고치기');shapeButton.type='button';
+      shapeButton.hidden=!root.FalsifyChartShapeEditor;
+      shapeButton.addEventListener('click',async()=>{
+        if(parentBusy||applying)return;
+        const chosen=figureState;if(!chosen)return;
+        const pageIndex=chosen.page-1;
+        const bbox=pageIndex===chosen.pageIndex?chosen.bbox.slice():[0,0,chosen.view.width,chosen.view.height];
+        try{await paintShape({analysisId:'region-'+chosen.key+'-p'+pageIndex+'-'+bbox.join(','),pageIndex,bbox},generation,selectSerial);}
+        catch{if(figureState===chosen){paintFigureControls();say(status,'곡선을 읽지 못했습니다. 그래프 전체가 들어오도록 영역을 선택하세요.',true);}}
+      });dynamic.push(shapeButton);
+      panel.append(title,shapeButton,nav,stage,fileLabel,labelInput,labelBtn,advanced);
       workBody.replaceChildren(panel);
       dynamic.push(prev,next,file,labelBtn,useRegion,useCrop);
       prev.addEventListener('click',()=>{if(fig.page>1)void setPage(fig.page-1);});
@@ -1349,6 +1418,7 @@
         imageTask=updateFigureBbox(box);
       });
       stage.addEventListener('pointercancel',()=>{drag=null;paintOverlay(fig.bbox);});
+      fig.title=title;
       fig.stage=stage;
       fig.pageLabel=pageLabel;
       fig.prev=prev;
@@ -1375,6 +1445,7 @@
         if(!view||!view.canvas||!finite(view.width)||!finite(view.height)||view.width<=0||view.height<=0){say(status,TEXT.previewFailed,true);return;}
         fig.view={canvas:view.canvas,width:view.width,height:view.height,page:view.page,pages:view.pages};
         fig.pages=view.pages;
+        if(fig.title)fig.title.textContent='그림 · '+view.page+'쪽';
         fig.pageLabel.textContent=view.page+' / '+view.pages+'쪽';
         const frame=el('div','visual-edit-frame');
         const overlay=el('div','visual-edit-selection');
@@ -1588,6 +1659,7 @@
     async function refreshRegionHashes(token,src){
       for(const entry of [...regionOps.values()]){
         const wire=entry.wire;
+        if(wire.kind==='chart-shape')continue;
         const rendered=await renderRegion(wire.pageIndex,wire.bbox);
         if(!live(token,src))throw err('stale');
         if(!rendered||rendered.sha256!==wire.beforeImageSha256)throw err('stale');

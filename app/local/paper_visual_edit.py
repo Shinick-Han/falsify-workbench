@@ -87,12 +87,37 @@ def export_visual(request,*,store=None):
     try:raw=store.source_bytes(paper_id,digest)
     except KeyError:fail('source_expired')
     if sha(raw)!=digest:fail('source_mismatch')
-    doc=pdf.open(stream=raw,filetype='pdf');plans=[];ids=set();issues=[];changes=[]
+    seen_ids=set()
+    for op in ops:
+        if not isinstance(op,dict) or not isinstance(op.get('id'),str) or not 1<=len(op['id'])<=80 or op['id'] in seen_ids:fail('operation_invalid')
+        seen_ids.add(op['id'])
+    shape_ops=[op for op in ops if isinstance(op,dict) and op.get('kind')=='chart-shape']
+    shape_changes=[];shape_issues=[];shape_boxes=[]
+    if shape_ops:
+        from paper_chart_edit_service import default_service
+        for op in shape_ops:
+            if set(op)!={'id','kind','plan'} or not isinstance(op.get('plan'),dict):fail('operation_invalid')
+            plan=op['plan']
+            if plan.get('paperId')!=paper_id or plan.get('fileHash')!=digest:fail('source_mismatch')
+            result=default_service.export(plan,source_override=raw)
+            for change in result['changes']:
+                if any(p==change['pageIndex'] and (pdf.Rect(b)&pdf.Rect(change['bbox'])).get_area()>.01 for p,b in shape_boxes):fail('operations_overlap')
+                shape_boxes.append((change['pageIndex'],change['bbox']))
+            raw=base64.b64decode(result['file'],validate=True)
+            shape_changes.extend(result['changes']);shape_issues.extend(result['verification']['issues'])
+    if shape_ops and len(shape_ops)==len(ops):
+        with pdf.open(stream=raw,filetype='pdf') as check:count=len(check)
+        if len({op.get('id') for op in ops})!=len(ops):fail('operation_invalid')
+        return {'schema':'falsify.visual-edit-export.v1','sourceSha256':digest,'outputSha256':sha(raw),
+            'file':base64.b64encode(raw).decode('ascii'),'pageCount':count,'changes':shape_changes,
+            'verification':{'status':'warning' if shape_issues else 'passed','issues':shape_issues,'pageCount':count}}
+    doc=pdf.open(stream=raw,filetype='pdf');plans=[];ids=set();issues=list(shape_issues);changes=list(shape_changes)
     try:
         source_pages=len(doc)
         for op in ops:
             if not isinstance(op,dict) or not isinstance(op.get('id'),str) or not 1<=len(op['id'])<=80 or op['id'] in ids:fail('operation_invalid')
             ids.add(op['id'])
+            if op.get('kind')=='chart-shape':continue
             if op.get('kind')=='table-cell':
                 if set(op)-{'id','kind','itemId','row','column','before','after'}:fail('operation_invalid')
                 plan=_table_plan(op,store,paper_id,doc)
@@ -110,6 +135,7 @@ def export_visual(request,*,store=None):
                 plan={'op':op,'pageIndex':page_index,'public':public,'rect':rect,'png':png,'before':{'imageSha256':before['sha256']}}
             else:fail('operation_invalid')
             if any(p['pageIndex']==plan['pageIndex'] and (p['public']&plan['public']).get_area()>.01 for p in plans):fail('operations_overlap')
+            if any(page==plan['pageIndex'] and (pdf.Rect(rect)&plan['public']).get_area()>.01 for page,rect in shape_boxes):fail('operations_overlap')
             plans.append(plan)
         # Plan every operation against the immutable source before applying any.
         for number,plan in enumerate(plans):

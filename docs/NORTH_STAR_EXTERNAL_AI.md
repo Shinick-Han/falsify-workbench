@@ -387,3 +387,36 @@ Cursor Grok 4.7 xhigh fast 두 좌석을 계산 코어와 UI 경계로 배치했
 Aside에서 합성 PDF 입력·그래프 영역 지정·실제 OCR/추출·JSON 다운로드를 확인했다. 394점·wpd-step·ready·역방향 되짚기0이며 값 단위 y−x RMSE0.02930(0~10축)이었다. 추출 픽셀 오차와 이 값 단위 지표는 구분한다. 구현·최종 검사·커밋 영수증은 소스 밖 coordination/chart-oss-benchmark-20261103/accuracy-v2/IMPLEMENTATION-REPORT.ko.md 및 검증된 WorkBite T-0152에 남긴다. 공개 웹·설치본은 이번 구현 범위에서 교체하지 않았다.
 
 최종 Windows Python827개 검사(통과819·환경별 제외8·실패0)와 전체 Node 검사, 변경된 벤더·재그리기10개 검사가 통과했다. 최종 Aside 네이티브 차트는 원본 선 명령과 끝점2개를 pdf-vector-calibrated로 반환했다. 회전 페이지의 page.rect/sourcePagePoint, 혼합480점/64계열 예산 및 잘린 계열의 래스터 복원 예산, 전체·일부 교체 이미지의 페인트 순서를 검사했다. 세로선 채점 오류와 교차선 거리 단언 오류 때문에 제품을 변경하지 않고 검사 기준을 고쳤다. 원본·기존 결과는 보존했으며, 이번 작업자 좌석은 산출물 검토 뒤 닫았다.
+
+## 2026-11-03 원본 서식과 곡선 직접 조작 — 조사 단계
+
+사용자는 원본 그래프·표·피규어의 서식을 유지한 채 변경 데이터만 반영하는 것을 요구했다. 사람이 좌표를 일일이 입력하지 않고 곡선을 밀어 bump/peak/well과 위치·높이·폭을 바꾸는 기본 흐름을 원한다. 정확한 좌표는 접힌 고급 기능에 두며, 사람이 쓰지 않는 분석·보정 도구는 API/MCP에 남긴다. 이번 요청은 OSS 조사이며 구현·fork·의존성 설치·배포를 시작하지 않았다.
+
+AUX ChartHandle/Range는 vanilla JS 조작부 후보, MIT ml-peak-shape-generator v5.6.0은 모양 계산 코어 후보로 좁혔다. DSSSP MIT 데모에서 드래그 400Hz/+7dB→658Hz/+9.4dB, wheel Q0.7→0.6을 실제 Aside로 확인했지만 React·오디오 축을 일반 데이터에서 분리하는 비용이 있다. Fityk·SpectraMatcher·Inkscape는 UX/고급 도구 참고이며, Mystique는 라이선스 미확인, Chart2SVG는 확인한 저자 페이지에서 코드·가중치·라이선스를 확인하지 못해 즉시 fork 후보로 확정하지 않는다.
+
+기본 UI는 곡선 선택·직접 이동·폭 손잡이와 되돌리기·원본 비교·다운로드로 구성하는 방향이다. 원본 전체 재피팅/전역 평활화로 변경 범위 밖 데이터나 잡음을 바꾸지 않는다. 국소 변형과 기존 peak 이동/폭 변경은 별도 동작이며 UI와 API/MCP가 같은 코어를 사용해야 한다. 원본 서식 보존은 추출 코어와 별도 출력 검증이 필요하다. 소스 밖 coordination/chart-oss-benchmark-20261103/accuracy-v2/shape-editor-research/RESEARCH.ko.md에 근거·후보·검증 범위를 남긴다. 구현 완료나 일반 정확도 측정을 뜻하지 않는다.
+## 2026-11-03 부품 조합형 편집 실행 계획
+
+사용자는 부품을 조합하는 방향을 선택하고 기존 구현 위에서 가장 빠르고 견고한 구현 계획을 요청했다. [원본 서식 보존형 곡선 편집 계획](PLAN_SOURCE_STYLE_SHAPE_EDITOR.md)에 source base 3721f2e와 공통 장면/operations 계약, 기존 부품, 파일별 소유권, 병렬 작업·통합 순서·완료 기준을 정리했다. 계획 작성만 수행했으며 구현·fork·배포는 시작하지 않았다.
+
+우선 원본 native/raster 각 한 건에서 선택 곡선의 제거·교체와 비편집 영역 보존을 실증한다. 계산 코어·벡터 출력·UI를 병렬 작업하고 래스터 배경 복원/API·MCP/독립 검수를 후속 배치한다. 원본의 고정 축·글꼴·범례를 재생성하지 않고 남기는 것이 기본이다. 기존 image occurrence의 토큰 처리·공유 Form 격리와 curve vector 추출을 재사용하되 seqno를 원본 operator 위치로 간주하지 않는다. 사람 UI와 에이전트는 같은 DOM 없는 JS 코어를 사용하며 BLUE read-only MCP는 유지하고 RED 편집 도구를 분리한다. 세부 구현 결정을 작업자가 추측하지 않도록 계획의 계약/검증과 소유 파일만 발췌해 배정한다.
+## 2026-11-03 원본 서식 곡선 편집 — 통합 진행
+
+사용자가 계획 실행과 Cursor Grok 4.7 xhigh fast 병렬 작업을 승인했다. 계산 코어·native/raster 출력·UI를 파일 경계로 배정했고 조율자가 API·RED 편집 MCP·기존 visual export·기록·BLUE 전달을 연결 중이다. MIT ml-peak-shape-generator Gaussian 원본을 고정하고 같은 JS를 브라우저와 MiniRacer에서 실행한다. AUX는 위젯 의존 비용을 확인해 기존 Pointer Events 조합을 선택했다.
+
+실제 Aside의 합성 PDF에서 곡선 드래그→편집기 내보내기 한 번→다운로드→BLUE 입력을 확인했다. source/output SHA와 3쪽 수·전체 추출 텍스트·그래프 밖 픽셀 대조를 보관했다. 두 native 그래프와 표 셀을 누적한 별도 통합 검사가 통과했다. 실제 SDK stdio의 prepare/preview/export와 author=agent 기록도 확인했다. MCP 이벤트 루프 안에서 MiniRacer 동기 제한을 호출하던 오류와 브라우저 route allowlist 누락을 수정했다. BLUE 모델 호출은 없었다.
+
+통합 중 남은 결함은 dense curve sample/원명령 연결, 래스터 ICCBased 이미지와 국소 마스크, 회전 페이지 좌표였다. 독립 QA는 합성12건 중10통과·2실패를 남겼고 원인에 맞춰 후속 수정자를 배치했다. 원본 fixture의 기본 closePath가 실제 닫힌 선을 만들었던 검사 조건도 공개 fixture에서 open curve로 바로잡았다. 제품이 진짜 원본 폐곡선의 잉크를 삭제하도록 고치지 않는다. 막대·산점 대상별 조작과 드래그 프레임 병합은 후속 병렬 작업 중이다. 완료·일반 정확도·공개 배포로 주장하지 않는다.
+
+
+## 2026-11-03 원본 서식 그래프 편집 — 개발본 검증 완료
+
+곡선 드래그·폭/위치 손잡이, native 막대 끝점과 원형 산점 이동, 되돌리기·원본 비교·즉시 PDF 다운로드를 기존 RED 표·그림 편집에 연결했다. 정밀 좌표와 분석·축 보정은 접혀 있다. UI와 별도 RED MCP의 prepare/preview/export가 같은 해시 고정 Gaussian JS 코어를 사용한다. native 선·cubic은 원본 operand/선택 Form 호출을 수정하고, 불투명 래스터는 원본 이미지 위에 바뀐 픽셀만 합성한다. RGB ICC와 soft mask, 회전 좌표를 보존한다. 원본 문서와 다른 사용 위치를 바꾸지 않는다.
+
+Cursor Grok 4.7 xhigh fast 작업자를 코어·출력·UI·독립 QA·후속 수리·막대/산점·성능으로 나눠 배치했다. 산출물을 검토하고 조율자가 API/MCP·기존 export·회전·래스터/ICC/투명도 및 마지막 페이지 연결을 통합했다. 투명도 helper 좌석은 조사 후 구현이 나오지 않아 정리하고 조율자가 완성했다. provider native 완료를 검증했다고 주장하지 않으며 좌석은 정리했다.
+
+전체 Python 922검사(통과915·환경별 제외7·실패0), 전체 Node와 후속 UI/패키징 검사가 통과했다. 1,000점 드래그의 작업자 브라우저 p95는7.1ms였고 프레임당 최신 포인터만 계산한다. 실제 Aside에서 native 곡선·막대 드래그와 원클릭 PDF 다운로드, undo 후 원본 SHA 일치, 좁은 화면의 비율·접힌 좌표를 확인했다. 생성 PDF와 BLUE 입력 SHA가 같고 BLUE 이벤트에는 file만 있다. BLUE 모델 호출은0회다.
+
+공개 PLOS 논문 Fig3의 래스터 준비는 색조별 중복 추적을 줄인 뒤 약9.1초였다. 편집 사본의17쪽 수·전체 텍스트·영역 밖 픽셀 검사가 통과했다. 이 검사는 원본 보존 검사이며 전체 그래프 수치 복원 정확도를 뜻하지 않는다. 최상위 filled 직사각/원형 mark와 색 래스터가 현재 조작 범위이며, Form 내부 mark·복합/패턴 채움·래스터 검은 곡선 자동 분리는 남은 범위다. 기존 이미지 교체와 고급 재그리기를 유지한다.
+
+구현/검증 자료는 소스 밖 coordination/chart-oss-benchmark-20261103/accuracy-v2/shape-implementation에 보관하고 검증된 WorkBite T-0152에 기록한다. 이번 작업은 개발 소스이며 공개 웹·설치본은 alpha.48을 유지한다. macOS/Windows CI 검사 경로를 추가했으며 이 커밋의 원격 CI·배포는 아직 실행하지 않았다.
