@@ -91,6 +91,8 @@ jobs:
         run: |
           python -m pip install mini-racer==0.14.1 Pillow==12.3.0 opencv-contrib-python==5.0.0.93 PyMuPDF==1.28.2
           python app/tests/test_paper_plottracer.py
+          python app/tests/test_paper_chart_vectors.py
+          python app/tests/test_paper_chart_correction.py
           python app/tests/test_paper_visual_edit.py
       - name: Connection launcher dry-run contracts (PowerShell 7)
         shell: pwsh
@@ -128,6 +130,8 @@ jobs:
         run: |
           python -m pip install mini-racer==0.14.1 Pillow==12.3.0 opencv-contrib-python==5.0.0.93 PyMuPDF==1.28.2
           python app/tests/test_paper_plottracer.py
+          python app/tests/test_paper_chart_vectors.py
+          python app/tests/test_paper_chart_correction.py
           python app/tests/test_paper_visual_edit.py
       - name: Run real macOS handler bundle test
         run: bash scripts/test-macos-handler.sh
@@ -149,6 +153,8 @@ jobs:
         run: |
           python -m pip install mini-racer==0.14.1 Pillow==12.3.0 opencv-contrib-python==5.0.0.93 PyMuPDF==1.28.2
           python app/tests/test_paper_plottracer.py
+          python app/tests/test_paper_chart_vectors.py
+          python app/tests/test_paper_chart_correction.py
           python app/tests/test_paper_visual_edit.py
       - name: Run real macOS handler bundle test
         run: bash scripts/test-macos-handler.sh

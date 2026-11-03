@@ -10,6 +10,7 @@ import math
 from pathlib import Path
 
 UPSTREAM = 'dcc28a5da453ff5c4e7cadd4478523560d15c0dc'
+WPD_COMMIT = '3a3ecb11606945d0701c8a488777e6861be70056'
 BUNDLE = Path(__file__).resolve().parents[1] / 'dist/plottracer-vendor/engine.js'
 MAX_PIXELS = 12_000_000
 
@@ -98,7 +99,7 @@ def _calibration(axis):
 def _sample_path(path, budget):
     """Reuse the existing OpenCV polyline reducer in original path order."""
     if len(path) <= budget:
-        return path, None
+        return path, None, list(range(len(path)))
     import cv2 as cv
     import numpy as np
     from paper_chart_sampling import _simplify_indices, _max_deviation
@@ -109,7 +110,15 @@ def _sample_path(path, budget):
         tolerance *= 2
         chosen = _simplify_indices(records, tolerance, cv, np)
     deviation, _ = _max_deviation(records, [(0, len(records)-1)], set(chosen))
-    return [path[i] for i in chosen], {'issues': ['sampling-point-limit'] if deviation > .751 else [], 'maxDeviationPixels': deviation}
+    return [path[i] for i in chosen], {'issues': ['sampling-point-limit'] if deviation > .751 else [], 'maxDeviationPixels': deviation}, chosen
+
+
+def _hex(rgb):
+    return '#' + ''.join(f'{int(v):02x}' for v in rgb)
+
+
+def _plain_axis(axis):
+    return {'scale': axis['scale'], 'points': [{'pixel': float(point['pixel']), 'value': float(point['value'])} for point in axis['points']]}
 
 
 def trace_geometry(png_bytes, *, manual=None, ocr_lines=None):
@@ -118,7 +127,9 @@ def trace_geometry(png_bytes, *, manual=None, ocr_lines=None):
     result = {'schema': 'falsify.chart-geometry.v1', 'status': 'unavailable',
               'image': {'sha256': hashlib.sha256(png_bytes).hexdigest(), 'width': None, 'height': None},
               'plotBbox': None, 'axes': {}, 'series': [], 'issues': [],
-              'provenance': {'engine': 'plottracer', 'revision': UPSTREAM, 'method': 'oss-pixel-calibration'},
+              'provenance': {'engine': 'plottracer', 'revision': UPSTREAM, 'method': 'oss-pixel-calibration',
+                             'wpdCommit': WPD_COMMIT, 'adapter': 'falsify-plottracer', 'policy': 'auto-route-v1',
+                             'bundleSha256': hashlib.sha256(BUNDLE.read_bytes()).hexdigest()},
               'pointKind': 'curve-sample'}
     with Image.open(io.BytesIO(png_bytes)) as opened:
         width, height = opened.size
@@ -212,45 +223,79 @@ def trace_geometry(png_bytes, *, manual=None, ocr_lines=None):
         box = [left+2, top+2, right-1, bottom-1]
         result['calibrationSource'] = 'ocr-ticks'
     result['plotBbox'] = box
-    region = {'x': box[0], 'y': box[1], 'width': box[2]-box[0], 'height': box[3]-box[1]}
+    region = {'x': float(box[0]), 'y': float(box[1]), 'width': float(box[2]-box[0]), 'height': float(box[3]-box[1]),
+              'route': 'auto', 'manual': manual is not None}
+    trace_colors = []
+    for source in colors:
+        item = {'id': source['id'], 'rgb': [int(v) for v in source['rgb']]}
+        binding = source.get('axisBinding')
+        if binding in ycals:
+            item['calibration'] = {'x': _plain_axis(xcal), 'y': _plain_axis(ycals[binding])}
+        trace_colors.append(item)
     core = Core()
     try:
-        raw = core.trace(image.tobytes(), width, height, [{'id': s['id'], 'rgb': s['rgb']} for s in colors], region, find_lines=manual is None)
+        raw = core.trace(image.tobytes(), width, height, trace_colors, region, find_lines=manual is None)
         candidates = []
         for source, traced in zip(colors, raw.get('series', [])):
-            lines = traced.get('lines', [])
-            accepted = [] if manual is not None else [line for line in lines if len(line.get('points', [])) >= 2 and max(p[0] for p in line['points'])-min(p[0] for p in line['points']) >= region['width']*.35]
-            if len(traced.get('pixels', [])) >= 2:
-                points = traced['pixels']
-                # Color tracing preserves all runs. It is a fallback only for an
-                # explicitly selected color; automatic line detection stays separate.
-                if manual is not None and max(p[0] for p in points)-min(p[0] for p in points) >= region['width']*.25:
-                    accepted = [{'points': points, 'roles': [], 'gaps': [], 'colorTraceFallback': True}]
+            if 'accepted' in traced:
+                # Topology stays on findLines. Isolated curves use WPD or the
+                # measured column runs. Nearest-neighbour order is not a fallback.
+                # Short supported branches are already in accepted; do not drop
+                # them again with a width fraction.
+                accepted = [line for line in traced['accepted'] if len(line.get('points', [])) >= 2]
+            else:
+                lines = [line for line in traced.get('lines', []) if len(line.get('points', [])) >= 2]
+                pixels = traced.get('pixels', [])
+                accepted = lines or ([{'points': pixels, 'roles': [], 'gaps': [], 'colorTraceFallback': True}] if len(pixels) >= 2 else [])
             for line in accepted:
                 candidates.append((source, line, traced))
         budget = max(3, 480 // max(1, len(candidates)))
         for source, line, traced in candidates[:64]:
-            path, reduction = _sample_path(line['points'], budget)
+            path, reduction, indices = _sample_path(line['points'], budget)
             if len(path) < 2:
                 continue
             converted = {side: core.convert({'x': xcal, 'y': cal}, path) for side, cal in ycals.items()}
             binding = source['axisBinding']
             intervals = core.convert({'x': xcal, 'y': ycals[binding]}, [[xp, y] for xp, yp in path for y in (yp-.5, yp+.5)]) if binding != 'ambiguous' else []
+            roles = line.get('roles') or []
+            origins = line.get('origins') or []
+            ink_support = line.get('inkSupport') or []
             points = []
             for index, (xp, yp) in enumerate(path):
+                src = indices[index]
                 values = {side: values[index][1] for side, values in converted.items()}
-                point = {'xPixel': xp, 'yPixel': yp, 'x': next(iter(converted.values()))[index][0], 'valueCandidates': values}
+                role = roles[src] if src < len(roles) and roles[src] else 'measured'
+                origin = origins[src] if src < len(origins) and origins[src] else ('curve-interpolated' if role == 'bridged' else 'pixel-calibrated')
+                point = {'xPixel': xp, 'yPixel': yp, 'x': next(iter(converted.values()))[index][0], 'valueCandidates': values,
+                         'origin': origin, 'role': role}
+                if src < len(ink_support):
+                    point['inkSupport'] = bool(ink_support[src])
                 if binding != 'ambiguous':
                     point['y'] = values[binding]
                     point['pixelInterval'] = sorted(v[1] for v in intervals[index*2:index*2+2])
                 points.append(point)
-            ambiguous = bool(traced.get('unresolved')) or binding == 'ambiguous'
+            ambiguous = bool(traced.get('ambiguous')) or bool(traced.get('unresolved')) or binding == 'ambiguous'
             sampling = {'observedColumns': len(line['points']), 'returnedPoints': len(points), 'tolerancePixels': .75, 'maxDeviationPixels': reduction.get('maxDeviationPixels') if reduction else 0}
-            result['series'].append({'id': 'series-'+str(len(result['series'])+1), 'name': source.get('name'),
-                'color': '#'+''.join(f'{v:02x}' for v in source['rgb']), 'hue': source.get('hue'),
+            requested = traced.get('requestedRgb') or source['rgb']
+            effective = traced.get('effectiveRgb') or source['rgb']
+            series = {'id': 'series-'+str(len(result['series'])+1), 'name': source.get('name'),
+                'color': _hex(effective), 'hue': source.get('hue'),
                 'axisBinding': binding, 'points': points, 'gapsPixels': line.get('gaps', []), 'segments': [],
                 'traceAmbiguous': ambiguous, 'sampling': sampling, 'pointKind': 'curve-sample',
-                'upstreamRoles': list(dict.fromkeys(line.get('roles', [])))})
+                'upstreamRoles': list(dict.fromkeys(role for role in roles if role))}
+            if traced.get('route'):
+                series['traceRoute'] = traced['route']
+                series['requestedColor'] = _hex(requested)
+                series['effectiveColor'] = _hex(effective)
+            if line.get('algorithm'):
+                series['traceAlgorithm'] = line['algorithm']
+            if traced.get('unresolved'):
+                series['unresolvedEvidence'] = traced['unresolved']
+            if traced.get('diagnostics'):
+                series['traceDiagnostics'] = traced['diagnostics']
+            if line.get('closed'):
+                series['traceClosed'] = True
+            result['series'].append(series)
             if binding == 'ambiguous' and 'series-axis-ambiguous' not in result['issues']:
                 result['issues'].append('series-axis-ambiguous')
             if reduction:

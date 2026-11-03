@@ -407,20 +407,9 @@ def default_engine():
 
 
 def _geometry_result(geometry,image):
-    axes=geometry['axes'];rows=[];numeric=[]
-    ambiguous=any(s['axisBinding']=='ambiguous' for s in geometry['series'])
-    columns=['series','axis','x','y'] if not ambiguous else ['series','axis','x','y(left)','y(right)']
-    for series in geometry['series']:
-        for point in series['points']:
-            vals=[point['x'],point.get('y')] if not ambiguous else [point['x'],point['valueCandidates'].get('left'),point['valueCandidates'].get('right')]
-            row=[series['id'],series['axisBinding']]+[None if v is None else format(v,'.8g') for v in vals]
-            index=len(rows);rows.append(row)
-            for col,value in enumerate(vals,2):
-                if value is not None:
-                    cell={'row':index,'column':col,'raw':row[col],'value':value,'unit':None,'origin':'pixel-calibrated',
-                          'sourcePixel':[point['xPixel'],point['yPixel']]}
-                    if col==3 and not ambiguous:cell['pixelInterval']=point.get('pixelInterval')
-                    numeric.append(cell)
+    from paper_chart_vectors import rows_from_geometry
+    columns,rows,numeric=rows_from_geometry(geometry)
+    axes=geometry['axes']
     yaxes=[side for side in ('left','right') if side in axes]
     result=_result(geometry['status'],image,geometry['issues'],'',
         {'engine':geometry.get('provenance',{}).get('engine','opencv+rapidocr'),'model':None if geometry.get('provenance') else 'en_PP-OCRv5_rec_mobile','revision':geometry.get('provenance',{}).get('revision','geometry-2'),

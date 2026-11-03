@@ -12,6 +12,32 @@ SCHEMA = "falsify.paper-evidence.v1"
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
 _CODE = re.compile(r"[a-z0-9_]{1,80}\Z")
 _DELIVERY = "delivery: text for an existing text-only review; not a model tool call; no image bytes in this text"
+_CURVE_KEYS = ('id', 'name', 'color', 'requestedColor', 'effectiveColor', 'axisBinding', 'traceAmbiguous', 'pointKind')
+
+
+def _curve_source(series):
+    """Compact series provenance. Points and numeric cells stay out of this copy."""
+    summary = {key: series[key] for key in _CURVE_KEYS if key in series}
+    points = series.get('points') if isinstance(series.get('points'), list) else []
+    origins, roles = [], []
+    for point in points:
+        if not isinstance(point, dict):
+            continue
+        origin, role = point.get('origin'), point.get('role')
+        if isinstance(origin, str) and origin not in origins:
+            origins.append(origin)
+        if isinstance(role, str) and role not in roles:
+            roles.append(role)
+    if origins:
+        summary['origins'] = origins
+    if roles:
+        summary['roles'] = roles
+    if isinstance(series.get('sampling'), dict):
+        summary['sampling'] = series['sampling']
+    if isinstance(series.get('sourceStroke'), dict):
+        summary['sourceStroke'] = series['sourceStroke']
+    summary['pointCount'] = len(points)
+    return summary
 
 
 class _Block:
@@ -280,9 +306,13 @@ def context_for_review(paper_id, file_hash, store=None, max_chars=24000):
             if entry.get('fileHash') != file_hash: raise ValueError('paper_evidence_hash_mismatch')
             analysis_id = entry['analysisId']
             kind = entry['kind']
-            method = entry['data'].get('provenance', {}).get('method')
+            provenance = entry['data'].get('provenance') if isinstance(entry['data'].get('provenance'), dict) else {}
+            method = provenance.get('method')
+            native = provenance.get('vector') == 'pdf-native-path'
             header = ('DERIVED OCR transcription; may contain recognition errors; confidence is engine-reported.' if kind == 'ocr'
-                      else 'DERIVED curve samples; PlotTracer pixel coordinates and source-bound axis calibration. Samples are not independent observations or confidence-interval endpoints.'
+                      else 'DERIVED PDF path geometry; source endpoints keep their page coordinates and cubic interiors are interpolated samples with a recorded pixel error. This is not experimental observation data or a confidence interval.'
+                      if native
+                      else 'DERIVED curve samples; PlotTracer pixel coordinates and source-bound axis calibration. Samples are not independent observations or confidence-interval endpoints. Point origin and role distinguish measured pixels from interpolated samples such as WPD XStep.'
                       if method == 'oss-pixel-calibration'
                       else 'DERIVED chart table; caller-selected axis ticks and image points, pixel-calibrated estimates, not measured source data.'
                       if method == 'caller-selected-ticks-and-points'
@@ -294,17 +324,19 @@ def context_for_review(paper_id, file_hash, store=None, max_chars=24000):
             # original point bounds in geometry.series.points. Repeating them
             # again as numericCells can evict the entire recovered chart from
             # BLUE's context. Keep the original analysis intact for MCP/export.
-            if kind == 'chart' and method in ('ocr-tick-pixel-calibration','oss-pixel-calibration') and isinstance(entry['data'].get('geometry'), dict):
+            # Native path context keeps the source stroke and a per-series
+            # origin summary instead of a second copy of the sample arrays.
+            if kind == 'chart' and isinstance(entry['data'].get('geometry'), dict) and (native or method in ('ocr-tick-pixel-calibration','oss-pixel-calibration')):
                 context_data = {key: value for key, value in entry['data'].items() if key != 'numericCells'}
                 context_data.update(schema='falsify.chart-context.v1', sourceSchema=entry['data']['schema'],
                                     representation='table-and-original-curve-points')
                 context_entry = {**entry, 'data': context_data}
-                if method == 'oss-pixel-calibration':
+                if native or method == 'oss-pixel-calibration':
                     geometry = entry['data']['geometry']
                     context_data.pop('geometry', None)
-                    context_data['geometrySummary'] = {key: geometry[key] for key in ('plotBbox','sourcePlotBbox','axes','calibrationSource','pointKind','provenance') if key in geometry}
-                    context_data['curveSources'] = [{key: s[key] for key in ('id','name','color','axisBinding','traceAmbiguous','pointKind') if key in s} for s in geometry.get('series', [])]
-                    context_data['representation'] = 'table-and-geometry-summary'
+                    context_data['geometrySummary'] = {key: geometry[key] for key in ('plotBbox','sourcePlotBbox','axes','calibrationSource','pointKind','provenance','vectorSource') if key in geometry}
+                    context_data['curveSources'] = [_curve_source(series) for series in geometry.get('series', [])]
+                    context_data['representation'] = 'table-and-vector-summary' if native else 'table-and-geometry-summary'
             text = header + '\n' + json.dumps(context_entry, ensure_ascii=False, separators=(',', ':'))
             blocks.append(_Block(analysis_id, 'other', text, True))
             analyses.append({'analysisId':analysis_id, 'kind':kind, 'pageIndex':entry['pageIndex'],
