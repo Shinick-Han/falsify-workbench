@@ -1,4 +1,11 @@
 const test=require('node:test');const assert=require('node:assert/strict');const fs=require('node:fs');const vm=require('node:vm');const path=require('node:path');
+test('the page loads chart reading and PDF preview before mounting RED visual integration',()=>{
+ const html=fs.readFileSync(path.join(__dirname,'../dist/index.html'),'utf8');
+ const mount=html.indexOf('src="paper-visual-integration.js');
+ for(const file of ['blue-visual-input.js','paper-enrichment-ui.js','paper-visual-edit-ui.js']){
+  const dependency=html.indexOf('src="'+file);assert.ok(dependency>=0&&dependency<mount,file+' must load first');
+ }
+});
 function boot(){
  const nodes=Object.fromEntries(['red-visual-edit-host','red-visual-section','red-visual-analysis','red-visual-record-status'].map(id=>[id,{hidden:false,textContent:'',append(){}}]));
  const document=new EventTarget();document.readyState='complete';document.getElementById=id=>nodes[id]||null;document.createElement=()=>Object.assign(new EventTarget(),{append(){},click(){},remove(){}});document.querySelectorAll=()=>[];

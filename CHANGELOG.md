@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.0-alpha.47
+
+- Mount RED chart reading after its deferred preview and analysis dependencies load.
+- Check the real entry-page script order as well as isolated controller behavior.
+
 ## 0.2.0-alpha.46
 
 - Edit extracted table cells and replace selected figure regions in a source-bound PDF copy.
