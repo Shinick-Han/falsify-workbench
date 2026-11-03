@@ -89,7 +89,7 @@ jobs:
         run: python -m unittest discover -s app/tests -p test_adapter_environment.py -q
       - name: Pinned PlotTracer embedded engine (no models)
         run: |
-          python -m pip install mini-racer==0.14.1 Pillow==12.3.0 opencv-contrib-python==5.0.0.93 PyMuPDF==1.28.2 pikepdf==10.17.0 mcp==1.30.0
+          python -m pip install -r app/local/requirements-paper-mcp.txt -r app/local/requirements-images.txt
           python app/tests/test_paper_plottracer.py
           python app/tests/test_paper_chart_vectors.py
           python app/tests/test_paper_chart_correction.py
@@ -129,7 +129,7 @@ jobs:
         run: bash scripts/test-posix-connection.sh
       - name: Pinned PlotTracer embedded engine (no models)
         run: |
-          python -m pip install mini-racer==0.14.1 Pillow==12.3.0 opencv-contrib-python==5.0.0.93 PyMuPDF==1.28.2 pikepdf==10.17.0 mcp==1.30.0
+          python -m pip install -r app/local/requirements-paper-mcp.txt -r app/local/requirements-images.txt
           python app/tests/test_paper_plottracer.py
           python app/tests/test_paper_chart_vectors.py
           python app/tests/test_paper_chart_correction.py
@@ -153,7 +153,7 @@ jobs:
         run: bash scripts/test-posix-connection.sh
       - name: Pinned PlotTracer embedded engine (no models)
         run: |
-          python -m pip install mini-racer==0.14.1 Pillow==12.3.0 opencv-contrib-python==5.0.0.93 PyMuPDF==1.28.2 pikepdf==10.17.0 mcp==1.30.0
+          python -m pip install -r app/local/requirements-paper-mcp.txt -r app/local/requirements-images.txt
           python app/tests/test_paper_plottracer.py
           python app/tests/test_paper_chart_vectors.py
           python app/tests/test_paper_chart_correction.py
