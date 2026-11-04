@@ -328,6 +328,7 @@ serial('graph edits replot explicit points and hash the region',async()=>{
   assert.equal(drawn.series[0].points[2].yHigh,7);
   assert.equal(h.renders.at(-1).width,640);
   assert.equal(h.renders.at(-1).height,427);
+  await until(()=>!h.button('PDF에 적용').disabled,'graph preview ready');
   h.button('PDF에 적용').click();
   await until(()=>h.outputs.length===1,'graph out');
   const op=h.calls.filter(call=>call.path==='/api/paper/visual/export').at(-1).body.operations[0];
