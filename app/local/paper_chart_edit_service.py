@@ -153,18 +153,15 @@ class ChartEditService:
                 raise ValueError('chart_source_expired') from None
         return authority()
 
-    def prepare(self, data, *, cancelled=None):
-        from paper_native_worker import budget, check
-        deadline = budget()
-        if not isinstance(data, dict) or set(data) - {'paperId', 'fileHash', 'pageIndex', 'bbox', 'options'}:
-            raise ValueError('chart_prepare_invalid')
-        paper_id, digest = data.get('paperId'), data.get('fileHash')
-        raw = self._source(paper_id, digest)
-        index, bbox = data.get('pageIndex'), data.get('bbox')
+    def _validate_region(self, index, bbox):
         if type(index) is not int or index < 0 or not isinstance(bbox, list) or len(bbox) != 4:
             raise ValueError('chart_region_invalid')
         if any(type(x) not in (int, float) or not math.isfinite(x) for x in bbox) or bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
             raise ValueError('chart_region_invalid')
+
+    def _prepare_region(self, data):
+        index, bbox = data.get('pageIndex'), data.get('bbox')
+        self._validate_region(index, bbox)
         options = data.get('options')
         if options is not None and not isinstance(options, dict):
             raise ValueError('chart_prepare_invalid')
@@ -173,6 +170,16 @@ class ChartEditService:
             raise ValueError('chart_region_invalid')
         if (bbox[2]-bbox[0])*(bbox[3]-bbox[1])*(dpi/72)**2 > 16_000_000:
             raise ValueError('chart_region_invalid')
+        return index, bbox, options
+
+    def prepare(self, data, *, cancelled=None):
+        from paper_native_worker import budget, check
+        deadline = budget()
+        if not isinstance(data, dict) or set(data) - {'paperId', 'fileHash', 'pageIndex', 'bbox', 'options'}:
+            raise ValueError('chart_prepare_invalid')
+        paper_id, digest = data.get('paperId'), data.get('fileHash')
+        raw = self._source(paper_id, digest)
+        index, bbox, options = self._prepare_region(data)
         from paper_native_worker import run
         scene = run('chart_prepare', [raw, index, bbox, options, None], cancelled=cancelled, deadline=deadline)
         scene = copy.deepcopy(scene)
@@ -190,15 +197,7 @@ class ChartEditService:
             self.scenes[scene['sceneId']] = {'scene': scene, 'paperId': paper_id, 'options': copy.deepcopy(data.get('options')), 'expires': now + self.ttl}
         return result
 
-    def _plan(self, data, *, deadline=None, cancelled=None):
-        if not isinstance(data, dict) or set(data) - {'schema', 'paperId', 'fileHash', 'sceneId', 'revision', 'operations'} or data.get('schema') != SCHEMA:
-            raise ValueError('chart_plan_invalid')
-        revision = data.get('revision')
-        if type(revision) is not int or not 0 <= revision <= 1_000_000_000:
-            raise ValueError('chart_revision_invalid')
-        ops = data.get('operations')
-        if not isinstance(ops, list) or len(ops) > MAX_OPERATIONS:
-            raise ValueError('chart_operation_limit')
+    def _validate_operations(self, ops):
         ids = [op.get('id') if isinstance(op, dict) else None for op in ops]
         if any(not isinstance(value, str) or not value for value in ids) or len(set(ids)) != len(ids):
             raise ValueError('chart_plan_invalid')
@@ -207,6 +206,21 @@ class ChartEditService:
                 raise ValueError('chart_operation_limit')
         except (TypeError, OverflowError):
             raise ValueError('chart_plan_invalid') from None
+
+    def _plan_request(self, data):
+        if not isinstance(data, dict) or set(data) - {'schema', 'paperId', 'fileHash', 'sceneId', 'revision', 'operations'} or data.get('schema') != SCHEMA:
+            raise ValueError('chart_plan_invalid')
+        revision = data.get('revision')
+        if type(revision) is not int or not 0 <= revision <= 1_000_000_000:
+            raise ValueError('chart_revision_invalid')
+        ops = data.get('operations')
+        if not isinstance(ops, list) or len(ops) > MAX_OPERATIONS:
+            raise ValueError('chart_operation_limit')
+        self._validate_operations(ops)
+        return revision, ops
+
+    def _plan(self, data, *, deadline=None, cancelled=None):
+        revision, ops = self._plan_request(data)
         raw = self._source(data.get('paperId'), data.get('fileHash'))
         scene_id = data.get('sceneId')
         if not isinstance(scene_id, str):
