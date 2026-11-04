@@ -785,8 +785,8 @@
     actions.append(applyBtn,download,blueBtn);
     host.append(heading,lead,status,retry,layout,actions,outputNote);
 
-    let generation=0,selectSerial=0,chartSerial=0,parentBusy=false,applying=false,errorCode=null;
-    let paperId=null,boundHash=null,boundRevision=null,pageCount=0,flight=null;
+    let generation=0,selectSerial=0,chartSerial=0,listSerial=0,parentBusy=false,applying=false,errorCode=null;
+    let paperId=null,boundHash=null,boundRevision=null,pageCount=0,flight=null,applyOwner=null;
     let listItems=[],listTotal=0,listPage=0,savedItems=[],savedPage=0,selectedKey=null;
     const controllers=[];
     const cellOps=new Map();
@@ -800,7 +800,7 @@
     function track(){const controller=new root.AbortController();controllers.push(controller);return controller.signal;}
     function abortAll(){for(const controller of controllers)controller.abort();controllers.length=0;}
     function bump(){generation++;selectSerial++;chartSerial++;abortAll();return generation;}
-    function live(token,src){return token===generation&&!!src&&src.fileHash===boundHash&&src.revision===boundRevision;}
+    function live(token,src){const current=currentSource();return token===generation&&!!src&&!!current&&src.fileHash===boundHash&&src.revision===boundRevision&&current.fileHash===src.fileHash&&current.revision===src.revision&&current.file===src.file;}
     function currentSource(){
       let value;
       try{value=getSource();}catch{return null;}
@@ -925,15 +925,23 @@
       syncDisabled();
     }
     async function loadList(token,src,page){
-      const signal=track();
-      const data=await session().request(QUERY,{paperId,operation:'list',offset:page*LIST_PAGE,limit:LIST_PAGE},{signal});
-      if(!live(token,src))return;
-      const parsed=validateList(data,paperId,src.fileHash,page*LIST_PAGE);
-      if(!parsed){say(status,TEXT.listFailed,true);errorCode='failed';return;}
-      listItems=parsed.items;
-      listTotal=parsed.total;
-      listPage=page;
-      paintLists();
+      const mine=++listSerial;
+      try{
+        const signal=track();
+        const data=await session().request(QUERY,{paperId,operation:'list',offset:page*LIST_PAGE,limit:LIST_PAGE},{signal});
+        if(!live(token,src)||mine!==listSerial)return;
+        const parsed=validateList(data,paperId,src.fileHash,page*LIST_PAGE);
+        if(!parsed)throw err('listFailed');
+        listItems=parsed.items;
+        listTotal=parsed.total;
+        listPage=page;
+        paintLists();
+        errorCode=null;
+      }catch(error){
+        if(error?.name==='AbortError'||!live(token,src)||mine!==listSerial)return;
+        say(status,TEXT.listFailed,true);
+        errorCode='failed';
+      }
     }
     async function renderRegion(pageIndex,bbox){
       const signal=track();
@@ -1683,44 +1691,51 @@
       if(parentBusy||applying)return;
       const src=currentSource();
       if(!src||src.fileHash!==boundHash||src.revision!==boundRevision||!paperId){say(status,TEXT.stale,true);errorCode='stale';return;}
-      await imageTask;
-      if(figureState)await composeFigure();
-      if(chartState&&editorDirty(chartState))await flushChart(generation);
-      if(chartBlocked){say(status,TEXT.chartInvalid,true);errorCode='invalid';return;}
-      const ops=wires();
-      if(!ops.length){say(status,TEXT.applyNone,true);errorCode='none';return;}
-      if(ops.length>MAX_OPS){say(status,TEXT.applyMax,true);errorCode='max';return;}
       applying=true;
       syncDisabled();
       const token=generation;
       let locked=false;
       try{
+        await imageTask;
+        if(!live(token,src))return;
+        if(figureState)await composeFigure();
+        if(!live(token,src))return;
+        if(chartState&&editorDirty(chartState))await flushChart(token);
+        if(!live(token,src))return;
+        if(chartBlocked){say(status,TEXT.chartInvalid,true);errorCode='invalid';return;}
+        const ops=wires();
+        if(!ops.length){say(status,TEXT.applyNone,true);errorCode='none';return;}
+        if(ops.length>MAX_OPS){say(status,TEXT.applyMax,true);errorCode='max';return;}
+        const draftKey=JSON.stringify(records());
         if(typeof hold==='function'){
           locked=true;
           const ok=await hold({active:true,phase:'apply'});
+          if(!live(token,src))return;
           if(ok===false){say(status,TEXT.hold,true);errorCode='hold';return;}
         }
-        if(!live(token,src)){say(status,TEXT.stale,true);errorCode='stale';return;}
+        if(draftKey!==JSON.stringify(records()))return;
         await refreshRegionHashes(token,src);
+        if(!live(token,src)||draftKey!==JSON.stringify(records()))return;
         const signal=track();
-        const response=await session().request(EXPORT,{schema:REQUEST_SCHEMA,paperId,fileHash:src.fileHash,revision:src.revision,operations:wires()},{signal});
-        if(!live(token,src)){say(status,TEXT.stale,true);errorCode='stale';return;}
+        const response=await session().request(EXPORT,{schema:REQUEST_SCHEMA,paperId,fileHash:src.fileHash,revision:src.revision,operations:ops},{signal});
+        if(!live(token,src)||draftKey!==JSON.stringify(records()))return;
         const verified=await verifyExport(response,src.fileHash,src.revision);
+        if(!live(token,src)||draftKey!==JSON.stringify(records()))return;
         if(!verified){say(status,TEXT.applyFail,true);errorCode='failed';return;}
         output=verified;
-        output.draftKey=JSON.stringify(records());
+        output.draftKey=draftKey;
         paintOutput();
         say(status,TEXT.applyOk);
         errorCode=null;
         try{await deliver();}
-        catch{say(status,TEXT.handoff,true);errorCode='handoff';}
+        catch{if(live(token,src)){say(status,TEXT.handoff,true);errorCode='handoff';}}
       }catch(error){
-        if(error?.name==='AbortError'||!live(token,src)){say(status,TEXT.stale,true);errorCode='stale';return;}
+        if(error?.name==='AbortError'||!live(token,src))return;
         say(status,TEXT.applyFail,true);
         errorCode=codeOf(error)==='stale'?'stale':'failed';
       }finally{
-        applying=false;
         if(locked&&typeof hold==='function'){try{await hold({active:false,phase:'apply'});}catch{}}
+        applying=false;
         syncDisabled();
       }
     }
@@ -1803,7 +1818,7 @@
       bump();
       flight=null;
       parentBusy=false;
-      applying=false;
+      applying=false;applyOwner=null;
       paperId=null;boundHash=null;boundRevision=null;
       resetDrafts();
       listItems=[];listTotal=0;listPage=0;savedItems=[];savedPage=0;

@@ -130,7 +130,7 @@ function world(over={}){
     const rec={path,body,options};
     calls.push(rec);
     if(options?.signal?.aborted)return Promise.reject(Object.assign(new Error('aborted'),{name:'AbortError'}));
-    return Promise.resolve(respond(path,body));
+    return Promise.resolve(over.request ? over.request(path,body,()=>respond(path,body)) : respond(path,body));
   }};
   async function respond(path,body){
     const fileHash=source&&source.fileHash;
@@ -609,4 +609,57 @@ serial('graph edit binds to the visible page after page navigation',async()=>{
     assert.deepEqual(request.body.bbox,[0,0,600,800]);
     assert.equal(mounts[0].scene.pageIndex,1);
   }finally{delete globalThis.FalsifyChartShape;delete globalThis.FalsifyChartShapeEditor;}
+});
+
+serial('apply owns delayed image preparation before a second invocation',async()=>{
+  const held=[];
+  const figure={id:'f1',type:'figure',pageIndex:0,bbox:[10,20,210,160],caption:'그림'};
+  const h=world({hold:info=>{held.push(info.active);},catalog:{items:[figure],full:{f1:figure},analyses:[],fullAnalyses:{}}});
+  h.source={file:fileOf(PDF,'t.pdf'),fileHash:HASH,revision:'r1'};
+  await h.ui.refresh();
+  h.radios()[0].checked=true;h.radios()[0].dispatchEvent(new Event('change'));
+  await until(()=>all(h.host).some(el=>el.type==='file'),'file');
+  let release;const file=all(h.host).find(el=>el.type==='file');
+  file.files=[{...imagePick(GRID,'grid.png','image/png'),arrayBuffer:()=>new Promise(r=>{release=()=>r(Uint8Array.from(GRID).buffer);})}];
+  file.dispatchEvent(new Event('change'));
+  const apply=h.button('PDF에 적용');
+  apply.dispatchEvent(new Event('click'));apply.dispatchEvent(new Event('click'));
+  release();
+  await until(()=>h.outputs.length===1,'output');
+  await settle();
+  assert.deepEqual(held,[true,false]);
+  assert.equal(h.calls.filter(c=>c.path==='/api/paper/visual/export').length,1);
+});
+
+serial('clear during output digest cannot install or announce stale output',async()=>{
+  const h=world();h.source={file:fileOf(PDF,'t.pdf'),fileHash:HASH,revision:'r1'};
+  await h.ui.refresh();h.radios()[0].checked=true;h.radios()[0].dispatchEvent(new Event('change'));
+  await until(()=>h.labeled('행 1 열 1'),'cell');
+  const input=h.labeled('행 1 열 1');input.value='Z';input.dispatchEvent(new Event('input'));
+  const result=await h.pdfOf(HASH,'delayed');h.exportImpl=()=>result;
+  const subtle=crypto.subtle,original=subtle.digest.bind(subtle);let release,entered;
+  const waiting=new Promise(r=>{entered=r;});
+  subtle.digest=async (...args)=>{entered();await new Promise(r=>{release=r;});return original(...args);};
+  try{
+    h.button('PDF에 적용').click();await waiting;
+    h.source=null;h.ui.clear();const status=h.status();release();await settle();
+    assert.equal(h.outputs.length,0);assert.equal(h.ui.snapshot().outputFileHash,null);assert.equal(h.status(),status);
+  }finally{subtle.digest=original;}
+});
+
+serial('latest list navigation wins and a failed request preserves the page',async()=>{
+  const items=Array.from({length:24},(_,i)=>({id:'f'+i,type:'figure',pageIndex:0,bbox:[1,2,30,40],caption:'항목 '+i}));
+  const pending=[];let delay=false;
+  const h=world({catalog:{items,full:{},analyses:[],fullAnalyses:{}},request:(path,body,next)=>{
+    if(delay&&body?.operation==='list')return new Promise((resolve,reject)=>pending.push({body,resolve:()=>resolve(next()),reject}));
+    return next();
+  }});
+  h.source={file:fileOf(PDF,'t.pdf'),fileHash:HASH,revision:'r1'};await h.ui.refresh();
+  h.button('다음 목록').click();await until(()=>h.radios()[0]?.value==='item:f8','page 2');
+  delay=true;h.button('다음 목록').click();h.button('이전 목록').click();
+  assert.deepEqual(pending.map(x=>x.body.offset),[16,0]);
+  pending[1].resolve();await until(()=>h.radios()[0]?.value==='item:f0','page 1');
+  pending[0].resolve();await settle();assert.equal(h.radios()[0].value,'item:f0');
+  h.button('다음 목록').click();pending[2].reject(new Error('offline'));await settle();
+  assert.equal(h.radios()[0].value,'item:f0');assert.equal(h.ui.snapshot().error,'failed');assert.ok(h.status());
 });
