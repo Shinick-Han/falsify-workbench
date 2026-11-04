@@ -1049,14 +1049,16 @@ test('pointer moves coalesce to one frame, pointerup commits that point, and dro
   assert.equal(dropped.host.children.length, 0);
 });
 
-test('a 1000-point drag previews once per frame and records calculation/render cost', () => {
+test('a 2000-point drag previews once per frame and records calculation/render cost', () => {
   const points = [];
-  for (let index = 0; index < 1000; index += 1) points.push({x: index * 0.2, y: 50, sample: index});
+  for (let index = 0; index < 2000; index += 1) points.push({x: index * 0.2, y: 50, sample: index});
   const input = scene();
   input.series = [{id: 'a', name: 'A', color: '#c45c26', points}];
   const session = mount(input);
   const stage = one(session.host, 'falsify-shape-stage');
   pointer(session.dom, stage, 'pointerdown', 100, 50);
+  const tableBody = walk(session.host).find(node => node.tagName === 'TBODY');
+  const firstRow = tableBody.children[0];
   const samples = [];
   for (let index = 0; index < 100; index += 1) {
     const y = 20 + (index % 25);
@@ -1065,13 +1067,14 @@ test('a 1000-point drag previews once per frame and records calculation/render c
     assert.equal(pendingFrames.length, 1);
     const started = performance.now();
     flushFrames();
+    assert.equal(tableBody.children[0], firstRow);
     samples.push(performance.now() - started);
     assert.equal(pendingFrames.length, 0);
   }
   const sorted = [...samples].sort((a, b) => a - b);
   const percentile = ratio => sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(ratio * sorted.length) - 1))];
   const perf = {
-    points: 1000,
+    points: 2000,
     frames: samples.length,
     p50Ms: percentile(0.5),
     p95Ms: percentile(0.95),
@@ -1088,7 +1091,7 @@ test('a 1000-point drag previews once per frame and records calculation/render c
   assert.equal(pendingFrames.length, 0);
   flushFrames();
   assert.equal(session.commits.length, 1);
-  assert.equal(pointsOf(session.editor).length, 1000);
+  assert.equal(pointsOf(session.editor).length, 2000);
   session.editor.destroy();
 });
 

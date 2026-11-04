@@ -670,7 +670,7 @@ export function create(options = {}) {
     redoButton.disabled = !history.canRedo() || !!state.gesture;
     exportButton.disabled = !!state.gesture;
     renderSvg(scene);
-    renderTable(scene);
+    if (!state.gesture) renderTable(scene);
     setStatus(statusText());
   }
 

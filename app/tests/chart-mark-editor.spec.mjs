@@ -446,3 +446,45 @@ test('precision edits the open axis and destroy rejects later calls', () => {
   assert.equal(session.host.children.length, 0);
   assert.throws(() => session.editor.getState(), /destroyed/);
 });
+
+
+test('2000 marks coalesce drag previews and preserve precision rows until commit', () => {
+  const oldRaf = globalThis.requestAnimationFrame, oldCancel = globalThis.cancelAnimationFrame;
+  const frames = new Map(); let next = 0;
+  globalThis.requestAnimationFrame = fn => { frames.set(++next, fn); return next; };
+  globalThis.cancelAnimationFrame = id => frames.delete(id);
+  try {
+    const input = scene();
+    input.series = [{id: 'points', kind: 'scatter', points: Array.from({length: 2000}, (_, i) => ({x: i % 400, y: 100, radius: 3}))}];
+    const session = mount(input);
+    const stage = byClass(session.host, 'falsify-mark-stage')[0];
+    const body = walk(session.host).find(node => node.tagName === 'TBODY');
+    const row = body.children[0];
+    pointer(session.dom, points(session.host)[0], 'pointerdown', 0, 100);
+    for (let i = 0; i < 10; i++) pointer(session.dom, stage, 'pointermove', i + 1, 110);
+    assert.equal(frames.size, 1);
+    const start = performance.now();
+    const callback = [...frames.values()][0]; frames.clear(); callback();
+    console.log(`MARK_DRAG_PERF ${JSON.stringify({marks: 2000, previewMs: performance.now() - start, environment: 'synthetic DOM'})}`);
+    assert.equal(body.children[0], row);
+    pointer(session.dom, stage, 'pointerup', 10, 110);
+    assert.notEqual(body.children[0], row);
+    assert.equal(session.commits.length, 1);
+    session.editor.undo();
+    assert.equal(session.editor.getState().scene.series[0].points[0].x, 0);
+    pointer(session.dom, points(session.host)[0], 'pointerdown', 0, 100);
+    pointer(session.dom, stage, 'pointermove', 20, 120);
+    const stale = [...frames.values()][0];
+    pointer(session.dom, stage, 'pointercancel', 20, 120);
+    assert.equal(frames.size, 0);
+    stale();
+    assert.equal(session.editor.getState().scene.series[0].points[0].x, 0);
+    pointer(session.dom, points(session.host)[0], 'pointerdown', 0, 100);
+    pointer(session.dom, stage, 'pointermove', 30, 130);
+    const destroyedFrame = [...frames.values()][0];
+    session.editor.destroy();
+    assert.equal(frames.size, 0);
+    assert.doesNotThrow(() => destroyedFrame());
+    assert.equal(session.host.children.length, 0);
+  } finally { globalThis.requestAnimationFrame = oldRaf; globalThis.cancelAnimationFrame = oldCancel; }
+});

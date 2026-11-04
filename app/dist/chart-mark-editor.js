@@ -331,6 +331,8 @@ var FalsifyChartMarkEditor = (() => {
       return null;
     }
     function renderTable(scene) {
+      const active = doc.activeElement;
+      const focus = active && precisionBody.contains?.(active) ? [active.getAttribute("data-series-id"), active.getAttribute("data-index"), active.getAttribute("data-axis")] : null;
       precisionBody.replaceChildren();
       for (const series of scene.series || []) {
         const kind = markKind(series);
@@ -359,6 +361,9 @@ var FalsifyChartMarkEditor = (() => {
               input.readOnly = true;
               input.setAttribute("readonly", "");
             }
+            if (focus && focus[0] === String(series.id) && focus[1] === String(index) && focus[2] === axis) queueMicrotask(() => {
+              if (!state.destroyed && doc.activeElement === doc.body) input.focus?.();
+            });
             cell.append(input);
             row.append(cell);
           }
@@ -448,7 +453,7 @@ var FalsifyChartMarkEditor = (() => {
       redoButton.disabled = !history.canRedo() || !!state.gesture;
       exportButton.disabled = !!state.gesture;
       renderMarks(scene);
-      renderTable(scene);
+      if (!state.gesture) renderTable(scene);
       setStatus(statusText());
     }
     function operationFor(pointer) {
@@ -470,9 +475,40 @@ var FalsifyChartMarkEditor = (() => {
       } catch {
       }
     }
+    let previewFrame = 0;
+    let previewScheduled = false;
+    let previewEpoch = 0;
+    function dropPreviewFrame() {
+      previewEpoch += 1;
+      previewScheduled = false;
+      const frame = previewFrame;
+      previewFrame = 0;
+      if (frame && typeof globalThis.cancelAnimationFrame === "function") globalThis.cancelAnimationFrame(frame);
+    }
+    function schedulePreview() {
+      if (state.destroyed || previewScheduled) return;
+      const publish = () => {
+        state.gesture.previewed = true;
+        render();
+        emitChange();
+      };
+      if (typeof globalThis.requestAnimationFrame !== "function") {
+        publish();
+        return;
+      }
+      const epoch = previewEpoch;
+      previewScheduled = true;
+      previewFrame = globalThis.requestAnimationFrame(() => {
+        if (epoch !== previewEpoch || state.destroyed || !state.gesture) return;
+        previewScheduled = false;
+        previewFrame = 0;
+        publish();
+      }) || 0;
+    }
     function endGesture(commit) {
       const gesture = state.gesture;
       if (!gesture) return;
+      dropPreviewFrame();
       const operation = gesture.operation();
       state.gesture = null;
       release(gesture.pointerId);
@@ -485,6 +521,7 @@ var FalsifyChartMarkEditor = (() => {
         return;
       }
       render();
+      if (!commit && gesture.previewed) emitChange();
     }
     function onPointerDown(event) {
       if (state.destroyed || state.compare || state.gesture) return;
@@ -532,8 +569,7 @@ var FalsifyChartMarkEditor = (() => {
       if (!point) return;
       event.preventDefault?.();
       state.gesture.holder.current = point;
-      render();
-      emitChange();
+      schedulePreview();
     }
     function onPointerUp(event) {
       if (!state.gesture || event.pointerId !== state.gesture.pointerId) return;
@@ -653,6 +689,7 @@ var FalsifyChartMarkEditor = (() => {
       redo,
       destroy() {
         if (state.destroyed) return;
+        dropPreviewFrame();
         state.destroyed = true;
         if (state.gesture) {
           release(state.gesture.pointerId);

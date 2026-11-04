@@ -737,3 +737,9 @@ serial('clear releases a pending hold without letting its completion release a r
   await releaseExport();await until(()=>!h.ui.snapshot().applying,'new complete');
   assert.deepEqual(held,[true,false,true,false]);
 });
+
+test('JPEG fallback loads the pure codec lazily without a new script ordering dependency', () => {
+  assert.match(source, /await import\('\.\/paper-visual-codec\.mjs'\)/);
+  assert.ok(source.indexOf("typeof root.createImageBitmap==='function'&&root.document") < source.indexOf("await import('./paper-visual-codec.mjs')"));
+  assert.equal(typeof UI.create, 'function');
+});
