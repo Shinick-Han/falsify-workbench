@@ -28,6 +28,8 @@ const MEDIA_HOST = 'api.media.atlassian.com';
 const MEDIA_BINARY = /^\/file\/[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\/binary$/;
 const MAX_DOWNLOAD_REDIRECTS = 3;
 const MAX_ANCESTORS = 32;
+const UPSTREAM_DEADLINE_MS = 10000;
+const LIST_CONCURRENCY = 5;
 const PAGE_ID = /^[0-9]{1,20}$/;
 const ATTACHMENT_ID = /^(?:att)?[0-9]{1,20}$/;
 const HEX = /^[a-f0-9]{64}$/;
@@ -286,6 +288,53 @@ function allowHost(url) {
   return url.protocol === 'https:' && (url.hostname === 'api.atlassian.com' || url.hostname === 'auth.atlassian.com');
 }
 
+// The deadline covers both response headers and the bounded body, even if a
+// fetch implementation or stream does not itself react to abort.
+async function fetchBounded(fetchImpl, url, init, max) {
+  const controller = new AbortController();
+  let reader;
+  let timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error('upstream deadline'));
+      controller.abort();
+      if (reader) void reader.cancel().catch(() => {});
+    }, UPSTREAM_DEADLINE_MS);
+  });
+  try {
+    return await Promise.race([deadline, (async () => {
+      const response = await fetchImpl(url, { ...init, signal: controller.signal });
+      if (controller.signal.aborted) {
+        if (response.body) void response.body.cancel().catch(() => {});
+        throw new Error('upstream deadline');
+      }
+      if (response.status < 200 || response.status >= 300 || !response.body) {
+        if (response.body) void response.body.cancel().catch(() => {});
+        return new Response(null, { status: response.status, statusText: response.statusText, headers: response.headers });
+      }
+      reader = response.body.getReader();
+      const chunks = [];
+      let size = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > max) {
+          void reader.cancel().catch(() => {});
+          fail(413, 'payload_too_large');
+        }
+        chunks.push(value);
+      }
+      const bytes = new Uint8Array(size);
+      let offset = 0;
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+      return new Response(bytes, { status: response.status, statusText: response.statusText, headers: response.headers });
+    })()]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function callUpstream(fetchImpl, url, init, writeStarted = false) {
   const method = String(init?.method || 'GET').toUpperCase();
   // A mutating call can land before the error is observed. Rate limits are refusals and stay 429
@@ -296,10 +345,11 @@ async function callUpstream(fetchImpl, url, init, writeStarted = false) {
   try {
     const parsed = new URL(url);
     if (!allowHost(parsed)) fail(502, 'redirect_refused');
-    response = await fetchImpl(parsed.toString(), { ...init, redirect: 'manual' });
+    response = await fetchBounded(fetchImpl, parsed.toString(), { ...init, redirect: 'manual' }, 1024 * 1024);
   } catch (error) {
-    if (error instanceof GatewayError) throw error;
+    if (error instanceof GatewayError && error.code !== 'payload_too_large') throw error;
     if (writeStarted || mutating) unknown();
+    if (error instanceof GatewayError) fail(502, 'upstream_invalid');
     fail(502, 'upstream_unavailable');
   }
   if (response.status >= 300 && response.status < 400) {
@@ -471,7 +521,7 @@ async function downloadAttachment(fetchImpl, start, token, cloudId, pageId, atta
     if (sendBearer) headers.Authorization = `Bearer ${token}`;
     let response;
     try {
-      response = await fetchImpl(parsed.origin + parsed.pathname + parsed.search, { method: 'GET', headers, redirect: 'manual' });
+      response = await fetchBounded(fetchImpl, parsed.origin + parsed.pathname + parsed.search, { method: 'GET', headers, redirect: 'manual' }, MAX_ARCHIVE_BYTES);
     } catch (error) {
       if (error instanceof GatewayError) throw error;
       if (writeStarted) fail(409, 'write_unknown', {}, { pageId, readBack: true });
@@ -801,25 +851,31 @@ async function listArchives(ctx, session) {
   const payload = await readUpstreamJson(response);
   const results = Array.isArray(payload?.results) ? payload.results : null;
   if (!results || results.length > 25) fail(502, 'upstream_invalid');
-  const items = [];
-  for (const child of results) {
+  const items = new Array(results.length);
+  let nextIndex = 0;
+  async function listChild() {
+   while (nextIndex < results.length) {
+    const index = nextIndex++;
+    const child = results[index];
     if (!child || !PAGE_ID.test(String(child.id)) || String(child.parentId || config.parent) !== config.parent) continue;
     const page = await getPage(ctx.fetchImpl, base, session.accessToken, String(child.id));
     if (!page || String(page.parentId) !== config.parent || String(page.spaceId) !== SPACE_ID || !readyLabel(page)) continue;
-    try { await assertReadOpen(ctx.fetchImpl, base, session.accessToken, String(page.id)); }
-    catch (error) { if (error instanceof GatewayError && error.status === 403) continue; throw error; }
     const prop = propertyValue(page);
     if (!prop || prop.ready !== true || typeof prop.archiveSha256 !== 'string' || !HEX.test(prop.archiveSha256)) continue;
+    try { await assertReadOpen(ctx.fetchImpl, base, session.accessToken, String(page.id)); }
+    catch (error) { if (error instanceof GatewayError && error.status === 403) continue; throw error; }
     const updatedAt = page.version?.createdAt || page.createdAt;
     const url = webUrl(page);
     if (typeof updatedAt !== 'string' || !url) fail(502, 'upstream_invalid');
     const displayTitle = typeof prop.title === 'string' && prop.title.trim() && prop.title.length <= 500 && !/[\u0000-\u001f\u007f]/.test(prop.title) ? prop.title : String(page.title || '');
-    items.push({ pageId: String(page.id), title: displayTitle, updatedAt, webUrl: url });
+    items[index] = { pageId: String(page.id), title: displayTitle, updatedAt, webUrl: url };
+   }
   }
+  await Promise.all(Array.from({ length: Math.min(LIST_CONCURRENCY, results.length) }, listChild));
   const nextRaw = cursorFromNext(payload?._links?.next, pathname);
   const nextCursor = nextRaw && key ? await seal(key, CURSOR_PURPOSE, { purpose: CURSOR_PURPOSE, cloudId: session.cloudId, parent: config.parent, cursor: nextRaw }) : null;
   if (nextCursor && !CLIENT_CURSOR.test(nextCursor)) fail(502, 'upstream_invalid');
-  return json(200, { items, nextCursor });
+  return json(200, { items: items.filter(Boolean), nextCursor });
 }
 
 async function readArchive(ctx, session, pageId) {

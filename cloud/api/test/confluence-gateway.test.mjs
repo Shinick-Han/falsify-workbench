@@ -1110,4 +1110,77 @@ describe('confluence gateway', { concurrency: false }, () => {
     assert.equal(readBack.json.archiveSha256, semantic);
     assert.equal(upstream.calls.some(call => call.host !== 'api.atlassian.com' && call.host !== 'auth.atlassian.com'), false);
   });
+
+  test('whole upstream deadline aborts stalled fetch and body and preserves unknown write outcome', async () => {
+    installBundle();
+    const minted = await mint();
+    const auth = { Authorization: `Bearer ${minted.session}` };
+    const signals = [];
+    let cancelled = false;
+    let writes = 0;
+    function stalled(kind) {
+      const mock = mockUpstream();
+      return async (url, init) => {
+        const path = new URL(url).pathname;
+        const target = kind === 'write' ? init.method === 'POST' && path.endsWith('/wiki/api/v2/pages')
+          : kind === 'after-write' ? path.endsWith('/pages/9001/attachments')
+          : path.endsWith('/oauth/token/accessible-resources');
+        if (!target) return mock.fetchImpl(url, init);
+        signals.push(init.signal);
+        if (kind === 'write') writes++;
+        if (kind === 'body') return new Response(new ReadableStream({
+          pull() { return new Promise(() => {}); },
+          cancel() { cancelled = true; },
+        }), { status: 200 });
+        return new Promise(() => {});
+      };
+    }
+    const start = Date.now();
+    const [fetchResult, bodyResult, writeResult, afterWrite] = await Promise.all([
+      gateway('/v1/confluence/archives', { headers: auth, fetchImpl: stalled('fetch') }).then(read),
+      gateway('/v1/confluence/archives', { headers: auth, fetchImpl: stalled('body') }).then(read),
+      gateway('/v1/confluence/archives', { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: { archive, teamShare: true }, fetchImpl: stalled('write') }).then(read),
+      gateway('/v1/confluence/archives', { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: { archive, teamShare: true }, fetchImpl: stalled('after-write') }).then(read),
+    ]);
+    assert.ok(Date.now() - start < 15000);
+    assert.equal(fetchResult.json.error.code, 'upstream_unavailable');
+    assert.equal(bodyResult.json.error.code, 'upstream_unavailable');
+    assert.equal(writeResult.json.error.code, 'write_unknown');
+    assert.equal(writeResult.json.readBack, true);
+    assert.equal(writes, 1);
+    assert.equal(afterWrite.json.error.code, 'write_unknown');
+    assert.equal(afterWrite.json.pageId, '9001');
+    assert.equal(afterWrite.json.readBack, true);
+    assert.equal(signals.length, 4);
+    assert.ok(signals.every(signal => signal.aborted));
+    assert.equal(cancelled, true);
+  });
+
+  test('lists 25 children with bounded parallel reads, stable order and restrictions', async () => {
+    installBundle();
+    const minted = await mint();
+    const children = Array.from({ length: 25 }, (_, i) => ({ id: String(9100 + i), parentId: PARENT }));
+    const mock = mockUpstream({ children });
+    let active = 0, peak = 0, reads = 0;
+    const fetchImpl = async (url, init) => {
+      const path = new URL(url).pathname;
+      const match = /\/pages\/(91\d\d)(\/restriction-state)?$/.exec(path);
+      if (!match) return mock.fetchImpl(url, init);
+      active++; peak = Math.max(peak, active); reads++;
+      await new Promise(resolve => setTimeout(resolve, 20));
+      active--;
+      const id = match[1];
+      if (match[2]) return jsonResponse(200, { state: id === '9107' ? 'VIEW_RESTRICTED' : 'OPEN' });
+      return jsonResponse(200, readyPage({ id, ...(id === '9108' ? { properties: { results: [] } } : {}), _links: { webui: `/spaces/Falsify/pages/${id}/Falsify` } }));
+    };
+    const start = Date.now();
+    const listed = await read(await gateway('/v1/confluence/archives', { headers: { Authorization: `Bearer ${minted.session}` }, fetchImpl }));
+    const elapsed = Date.now() - start;
+    assert.equal(listed.status, 200);
+    assert.deepEqual(listed.json.items.map(item => item.pageId), children.map(c => c.id).filter(id => id !== '9107' && id !== '9108'));
+    assert.equal(reads, 49); // Invalid metadata skips one unnecessary restriction request.
+    assert.ok(peak > 1 && peak <= 5, `peak ${peak}`);
+    assert.ok(elapsed < 850, `mock latency ${elapsed}ms; sequential budget is 1000ms`);
+  });
+
 });
