@@ -137,7 +137,25 @@ class ChartEditService:
             raise ValueError('chart_source_mismatch')
         return raw
 
+    def _authority(self, paper_id, digest, raw):
+        from contextlib import contextmanager
+        from paper_evidence import default_store
+        store = self.store if self.store is not None else default_store
+        @contextmanager
+        def authority():
+            try:
+                if hasattr(store, 'source_authority'):
+                    with store.source_authority(paper_id, digest, raw): yield
+                else:
+                    if self._source(paper_id, digest) != raw: raise ValueError('chart_source_mismatch')
+                    yield
+            except KeyError:
+                raise ValueError('chart_source_expired') from None
+        return authority()
+
     def prepare(self, data, *, cancelled=None):
+        from paper_native_worker import budget, check
+        deadline = budget()
         if not isinstance(data, dict) or set(data) - {'paperId', 'fileHash', 'pageIndex', 'bbox', 'options'}:
             raise ValueError('chart_prepare_invalid')
         paper_id, digest = data.get('paperId'), data.get('fileHash')
@@ -156,20 +174,21 @@ class ChartEditService:
         if (bbox[2]-bbox[0])*(bbox[3]-bbox[1])*(dpi/72)**2 > 16_000_000:
             raise ValueError('chart_region_invalid')
         from paper_native_worker import run
-        scene = run('chart_prepare', [raw, index, bbox, options, None], cancelled=cancelled)
+        scene = run('chart_prepare', [raw, index, bbox, options, None], cancelled=cancelled, deadline=deadline)
         scene = copy.deepcopy(scene)
         scene.update(schema='falsify.chart-scene.v1', sceneId=secrets.token_hex(16),
                      sourceFileHash=digest, pageIndex=index, bbox=bbox[:], revision=0)
-        if self._source(paper_id, digest) != raw: raise ValueError('chart_source_mismatch')
+        result = {**_public(scene), 'paperId': paper_id, 'fileHash': digest}
         now = self.clock()
-        with self.lock:
+        with self._authority(paper_id, digest, raw), self.lock:
+            check(deadline, cancelled)
             for key in list(self.scenes):
                 if self.scenes[key]['expires'] <= now:
                     del self.scenes[key]
             while len(self.scenes) >= self.max_scenes:
                 del self.scenes[min(self.scenes, key=lambda k: self.scenes[k]['expires'])]
             self.scenes[scene['sceneId']] = {'scene': scene, 'paperId': paper_id, 'options': copy.deepcopy(data.get('options')), 'expires': now + self.ttl}
-        return {**_public(scene), 'paperId': paper_id, 'fileHash': digest}
+        return result
 
     def _plan(self, data):
         if not isinstance(data, dict) or set(data) - {'schema', 'paperId', 'fileHash', 'sceneId', 'revision', 'operations'} or data.get('schema') != SCHEMA:
@@ -211,18 +230,24 @@ class ChartEditService:
         return raw, scene, edited
 
     def preview(self, data, *, cancelled=None):
+        from paper_native_worker import budget
+        deadline = budget()
         raw, scene, edited = self._plan(data)
         from paper_native_worker import run
-        result = run('chart_preview', [raw, scene, edited], cancelled=cancelled)
+        result = run('chart_preview', [raw, scene, edited], cancelled=cancelled, deadline=deadline)
         png = result['png'] if isinstance(result, dict) else result
         if not isinstance(png, bytes) or not png.startswith(b'\x89PNG\r\n\x1a\n'):
             raise ValueError('chart_preview_invalid')
-        return {'schema': 'falsify.chart-preview.v1', 'sceneId': scene['sceneId'],
+        response = {'schema': 'falsify.chart-preview.v1', 'sceneId': scene['sceneId'],
                 'fileHash': data['fileHash'], 'paperId': data['paperId'], 'revision': data['revision'],
                 'image': _b64(png), 'sha256': _sha(png), 'scene': _public(edited),
                 'issues': result.get('issues', []) if isinstance(result, dict) else []}
+        self._check_publication(data, raw, scene, deadline, cancelled)
+        return response
 
     def export(self, data, *, author='human', source_override=None, cancelled=None):
+        from paper_native_worker import budget
+        deadline = budget()
         raw, scene, edited = self._plan(data)
         options = None
         if source_override is not None and source_override != raw:
@@ -231,19 +256,31 @@ class ChartEditService:
                 if not entry or entry['expires'] <= self.clock(): raise ValueError('chart_scene_expired')
                 options = copy.deepcopy(entry['options'])
         from paper_native_worker import run
-        output, report, pages, issues = run('chart_export', [raw, scene, edited, source_override, options], cancelled=cancelled)
+        output, report, pages, issues = run('chart_export', [raw, scene, edited, source_override, options], cancelled=cancelled, deadline=deadline)
         changes = [] if scene['series'] == edited['series'] else [{
             'id': 'chart-' + scene['sceneId'], 'kind': 'chart-shape', 'assetKind': 'graph',
             'pageIndex': scene['pageIndex'], 'bbox': scene['bbox'], 'author': author,
             'before': {'series': _public(scene)['series']}, 'after': {'series': _public(edited)['series']},
             'operations': copy.deepcopy(data['operations'])}]
-        return {'schema': 'falsify.visual-edit-export.v1', 'sourceSha256': data['fileHash'],
+        response = {'schema': 'falsify.visual-edit-export.v1', 'sourceSha256': data['fileHash'],
                 'outputSha256': _sha(output), 'file': _b64(output), 'pageCount': pages,
                 'revision': data['revision'], 'sceneId': scene['sceneId'], 'changes': changes,
                 'verification': {'status': 'warning' if issues else 'passed', 'issues': issues,
                     'checks': ['page-count', 'extracted-text', 'outside-region-pixels'],
                     'scope': 'source-preservation', 'curveFidelity': 'not-independently-verified'},
                 'report': report}
+        self._check_publication(data, raw, scene, deadline, cancelled)
+        return response
+
+    def _check_publication(self, data, raw, scene, deadline, cancelled):
+        from paper_native_worker import check
+        with self._authority(data['paperId'], data['fileHash'], raw), self.lock:
+            check(deadline, cancelled)
+            entry = self.scenes.get(data['sceneId'])
+            if not entry or entry['expires'] <= self.clock() or entry['scene'] != scene:
+                raise ValueError('chart_scene_expired')
+            if entry['paperId'] != data['paperId']:
+                raise ValueError('chart_source_mismatch')
 
 
 default_service = ChartEditService()

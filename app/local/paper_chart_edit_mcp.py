@@ -9,7 +9,7 @@ import logging
 import sys
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations, CallToolResult
-from paper_mcp import open_selected, _guard, _ok
+from paper_mcp import open_selected, _guard, _ok, _cancellable_thread
 from paper_chart_edit_service import ChartEditService, SCHEMA
 
 
@@ -38,13 +38,13 @@ def build_server(store, paper_id, file_hash, service=None):
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False))
     async def prepare_chart_edit(paperId: str, pageIndex: int, bbox: list[float], options: dict | None = None) -> CallToolResult:
         """Read source geometry and an editable scene for a selected graph region."""
-        return await asyncio.to_thread(call, paperId, lambda: service.prepare({'paperId': paperId, 'fileHash': file_hash,
-            'pageIndex': pageIndex, 'bbox': bbox, 'options': options}))
+        return await _cancellable_thread(lambda cancelled: call(paperId, lambda: service.prepare({'paperId': paperId, 'fileHash': file_hash,
+            'pageIndex': pageIndex, 'bbox': bbox, 'options': options}, cancelled=cancelled)))
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False))
     async def preview_chart_edit(paperId: str, sceneId: str, revision: int, operations: list[dict]) -> CallToolResult:
         """Preview deform/move/resize/set-values operations against the immutable source scene."""
-        result = await asyncio.to_thread(_guard, paper_id, file_hash, paperId, lambda: service.preview(plan(paperId, sceneId, revision, operations)))
+        result = await _cancellable_thread(lambda cancelled: _guard(paper_id, file_hash, paperId, lambda: service.preview(plan(paperId, sceneId, revision, operations), cancelled=cancelled)))
         if isinstance(result, CallToolResult):
             return result
         image = result.pop('image')
@@ -53,7 +53,7 @@ def build_server(store, paper_id, file_hash, service=None):
     @server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=False))
     async def export_chart_edit(paperId: str, sceneId: str, revision: int, operations: list[dict]) -> CallToolResult:
         """Return the edited PDF copy and its hashes/change record. Does not write the input file."""
-        return await asyncio.to_thread(call, paperId, lambda: service.export(plan(paperId, sceneId, revision, operations), author='agent'))
+        return await _cancellable_thread(lambda cancelled: call(paperId, lambda: service.export(plan(paperId, sceneId, revision, operations), author='agent', cancelled=cancelled)))
 
     return server
 

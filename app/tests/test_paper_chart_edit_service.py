@@ -72,6 +72,41 @@ class ChartEditServiceTests(unittest.TestCase):
         self.assertNotIn('_binding', scene)
         self.assertIn('_binding', self.svc.scenes[scene['sceneId']]['scene'])
 
+    def test_eviction_during_preparation_cannot_publish(self):
+        started, release = threading.Event(), threading.Event()
+        def delayed(operation, args, **kwargs):
+            started.set()
+            self.assertTrue(release.wait(10))
+            return fake_prepare(*args[:4])
+        errors = []
+        def prepare():
+            try: self.prepare()
+            except Exception as exc: errors.append(exc)
+        with patch('paper_native_worker.run', side_effect=delayed):
+            thread = threading.Thread(target=prepare)
+            thread.start()
+            self.assertTrue(started.wait(10))
+            with self.store._lock:
+                self.store._drop(self.pid)
+            release.set(); thread.join(10)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(str(errors[0]), 'chart_source_expired')
+        self.assertFalse(self.svc.scenes)
+        self.pid = self.store.prepare(self.raw, self.digest)['paperId']
+        self.assertTrue(self.prepare()['sceneId'])
+
+    def test_preparation_budget_includes_source_lookup(self):
+        import time
+        import paper_native_worker
+        source = self.svc._source
+        def delayed(*args):
+            time.sleep(.05)
+            return source(*args)
+        with patch.object(paper_native_worker, 'TIMEOUT', .01), patch.object(self.svc, '_source', side_effect=delayed):
+            with self.assertRaisesRegex(ValueError, 'native_timeout'): self.prepare()
+        self.assertFalse(self.svc.scenes)
+
     def test_identity_export_preserves_original_bytes_and_no_changes(self):
         result = self.svc.export(self.plan(self.prepare()))
         self.assertEqual(base64.b64decode(result['file']), self.raw)

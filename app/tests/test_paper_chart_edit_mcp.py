@@ -1,12 +1,16 @@
 """Real SDK stdio graph edit round trip, no model calls."""
 import base64
+import asyncio
 import hashlib
 import json
 import sys
 import tempfile
+import threading
+import subprocess
 import unittest
 from datetime import timedelta
 from pathlib import Path
+from unittest.mock import patch
 import anyio
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -15,6 +19,33 @@ from chart_shape_fixture import chart_pdf
 LOCAL = Path(__file__).resolve().parents[1] / 'local'
 
 class ChartMcpTests(unittest.TestCase):
+    def test_cancelled_tool_signals_running_service(self):
+        sys.path.insert(0, str(LOCAL))
+        from paper_chart_edit_mcp import build_server
+        import paper_native_worker as native
+        started, stopped = threading.Event(), threading.Event()
+        children = []
+        original = subprocess.Popen
+        def launch(*args, **kwargs):
+            if '--worker' not in args[0]: return original(*args, **kwargs)
+            process = original([sys.executable, '-c', 'import time; time.sleep(30)'], **kwargs)
+            children.append(process); started.set()
+            return process
+        class Service:
+            def prepare(self, data, *, cancelled):
+                try: return native.run('chart_prepare', [], cancelled=cancelled)
+                finally: stopped.set()
+        tool = build_server(None, 'paper', 'a' * 64, service=Service())._tool_manager._tools['prepare_chart_edit'].fn
+        async def run():
+            task = asyncio.create_task(tool('paper', 0, [0, 0, 10, 10]))
+            self.assertTrue(await asyncio.to_thread(started.wait, 5))
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError): await task
+            self.assertTrue(await asyncio.to_thread(stopped.wait, 5))
+        with patch.object(native.subprocess, 'Popen', side_effect=launch): asyncio.run(run())
+        self.assertEqual(len(children), 1)
+        self.assertIsNotNone(children[0].poll())
+
     def test_native_edit_roundtrip_and_source_binding(self):
         raw = chart_pdf()
         with tempfile.TemporaryDirectory() as folder:

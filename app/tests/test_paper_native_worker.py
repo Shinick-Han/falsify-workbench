@@ -44,4 +44,17 @@ class NativeWorkerTests(unittest.TestCase):
         envelope = native._pack(b'content'); envelope['size'] += 1
         with self.assertRaisesRegex(ValueError, 'native_output_invalid'): native._unpack(envelope)
 
+    def test_invalid_and_oversized_replies(self):
+        original = subprocess.Popen
+        for code in ("print('[]')", "print('x' * 4096)"):
+            def launch(*args, **kwargs):
+                return original([sys.executable, '-c', code], **kwargs)
+            with patch.object(native, 'MAX_RESPONSE', 1024), patch.object(native.subprocess, 'Popen', side_effect=launch):
+                with self.assertRaisesRegex(ValueError, 'native_output_invalid'):
+                    native.run('verify', [])
+
+    def test_nested_dispatch_is_inline(self):
+        with patch.object(native, '_IN_WORKER', True), patch.object(native, '_dispatch', return_value='inline'), patch.object(native.subprocess, 'Popen', side_effect=AssertionError('nested child')):
+            self.assertEqual(native.run('verify', []), 'inline')
+
 if __name__ == '__main__': unittest.main()

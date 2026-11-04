@@ -338,8 +338,11 @@ class EvidenceStore:
         self._lock = threading.Lock()
 
     def prepare(self, pdf_bytes, file_hash, *, cancelled=None):
+        from paper_native_worker import budget, check
+        deadline = budget()
         raw = self._validated_pdf(pdf_bytes, file_hash)
         with self._lock:
+            check(deadline, cancelled)
             self._purge()
             current = self._docs.get(self._by_hash.get(file_hash))
             if current is not None:
@@ -347,10 +350,11 @@ class EvidenceStore:
                 current['summary']['expiresAt'] = _iso(current['expires_at'])
                 return copy.deepcopy(current['summary'])
         from paper_native_worker import run
-        record = run('evidence_extract', [raw, file_hash], cancelled=cancelled)
+        record = run('evidence_extract', [raw, file_hash], cancelled=cancelled, deadline=deadline)
         if record.get('file_hash') != file_hash or record.get('pdf') != raw:
             raise ValueError('native_output_invalid')
         with self._lock:
+            check(deadline, cancelled)
             self._purge()
             current = self._docs.get(self._by_hash.get(file_hash))
             if current is not None:
@@ -368,6 +372,18 @@ class EvidenceStore:
             self._docs[record['paper_id']] = record
             self._by_hash[file_hash] = record['paper_id']
             return copy.deepcopy(record['summary'])
+
+    def source_authority(self, paper_id, file_hash, raw):
+        """Hold source authority across a bounded publication critical section."""
+        from contextlib import contextmanager
+        @contextmanager
+        def authority():
+            with self._lock:
+                record = self._live(paper_id)
+                if record['file_hash'] != file_hash or record['pdf'] != raw:
+                    raise ValueError('paper_evidence_hash_mismatch')
+                yield
+        return authority()
 
     def source_bytes(self, paper_id, file_hash):
         """Internal immutable byte access for explicit copy exports; never an MCP tool."""
@@ -421,6 +437,8 @@ class EvidenceStore:
         return self._render(paper_id, page_index, bbox, dpi, 12_000_000, cancelled=cancelled)
 
     def _render(self, paper_id, page_index, bbox, dpi, pixel_limit, *, cancelled=None):
+        from paper_native_worker import budget, check
+        deadline = budget()
         if dpi is None:
             dpi = 120
         if type(page_index) is not int or page_index < 0:
@@ -435,10 +453,13 @@ class EvidenceStore:
         if page_index >= pages:
             raise ValueError('page_index')
         from paper_native_worker import run
-        clip, png, width, height = run('evidence_render', [raw, page_index, bbox, dpi, pixel_limit], cancelled=cancelled)
-        return {'paperId': paper, 'fileHash': file_hash, 'pageIndex': page_index, 'bbox': clip,
+        clip, png, width, height = run('evidence_render', [raw, page_index, bbox, dpi, pixel_limit], cancelled=cancelled, deadline=deadline)
+        result = {'paperId': paper, 'fileHash': file_hash, 'pageIndex': page_index, 'bbox': clip,
             'mimeType': 'image/png', 'data': base64.b64encode(png).decode('ascii'), 'sha256': _sha(png),
             'width': width, 'height': height}
+        with self.source_authority(paper, file_hash, raw):
+            check(deadline, cancelled)
+        return result
 
     def add_analysis(self, paper_id, result, fingerprint):
         """Retain a derived result separately; never rewrite native cells or source PDF bytes."""

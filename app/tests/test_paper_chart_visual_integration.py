@@ -1,5 +1,5 @@
 """Cumulative source-style charts and existing table editing use one PDF output."""
-import base64, hashlib, sys, unittest
+import base64, hashlib, sys, unittest, subprocess, tempfile, threading, time
 from pathlib import Path
 from unittest.mock import patch
 import pymupdf
@@ -10,6 +10,41 @@ from paper_chart_edit_service import ChartEditService, SCHEMA
 from paper_visual_edit import export_visual
 
 class ChartVisualIntegrationTests(unittest.TestCase):
+    def test_cancel_visual_child_during_chart_and_verify(self):
+        import paper_native_worker as native
+        raw = chart_pdf(); digest = hashlib.sha256(raw).hexdigest()
+        store = EvidenceStore(); pid = store.prepare(raw, digest)['paperId']
+        service = ChartEditService(store)
+        scene = service.prepare({'paperId': pid, 'fileHash': digest, 'pageIndex': 0, 'bbox': [35, 40, 395, 278]})
+        plan = {'schema': SCHEMA, 'paperId': pid, 'fileHash': digest, 'sceneId': scene['sceneId'], 'revision': 0, 'operations': []}
+        request = {'schema': 'falsify.visual-edit-request.v1', 'paperId': pid, 'fileHash': digest, 'revision': 0,
+                   'operations': [{'id': 'chart', 'kind': 'chart-shape', 'plan': plan}]}
+        for target in ('chart_export', 'verify'):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as folder:
+                marker = str(Path(folder) / 'started')
+                script = f'''import sys, time, pathlib, subprocess, asyncio\nsys.path.insert(0, {str(Path(__file__).resolve().parents[1] / 'local')!r})\nimport paper_native_worker as n\noriginal = n._dispatch\ndef dispatch(op, args):\n    if op == {target!r}:\n        pathlib.Path({marker!r}).write_text('started')\n        time.sleep(30)\n    return original(op, args)\nn._dispatch = dispatch\nn._IN_WORKER = True\nsubprocess.Popen = lambda *a, **k: (_ for _ in ()).throw(RuntimeError('nested process'))\nimport json, traceback\ntry:\n    req = json.loads(sys.stdin.buffer.read())\n    result = n._dispatch(req['operation'], n._unpack(req['args']))\n    sys.stdout.write(json.dumps(dict(ok=True, data=n._pack(result))))\nexcept Exception:\n    pathlib.Path({marker!r} + '.error').write_text(traceback.format_exc())\n    raise\n'''
+                original_popen = subprocess.Popen; children = []; errors = []; cancelled = threading.Event()
+                def launch(*args, **kwargs):
+                    if '--worker' not in args[0]: return original_popen(*args, **kwargs)
+                    process = original_popen([sys.executable, '-c', script], **kwargs)
+                    children.append(process)
+                    return process
+                def run():
+                    try: native.run('visual_export', [request, raw, {}, service.scenes], cancelled=cancelled)
+                    except Exception as exc: errors.append(exc)
+                with patch.object(native.subprocess, 'Popen', side_effect=launch):
+                    thread = threading.Thread(target=run); thread.start()
+                    until = time.monotonic() + 20
+                    while not Path(marker).exists() and thread.is_alive() and time.monotonic() < until: time.sleep(.05)
+                    reached = Path(marker).exists()
+                    cancelled.set(); thread.join(15)
+                self.assertTrue(reached, (errors, Path(marker + '.error').read_text() if Path(marker + '.error').exists() else 'no child error'))
+                self.assertFalse(thread.is_alive())
+                self.assertEqual([str(e) for e in errors], ['native_cancelled'])
+                self.assertEqual(len(children), 1)
+                self.assertIsNotNone(children[0].poll())
+        self.assertEqual(native.run('evidence_extract', [raw, digest])['pdf'], raw)
+
     def test_two_native_regions_and_table_keep_previous_edits(self):
         doc=pymupdf.open();page=doc.new_page(width=620,height=320)
         page.insert_text((30,25),'Two independent charts')

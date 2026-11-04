@@ -78,7 +78,8 @@ def export_visual(request,*,store=None,cancelled=None):
     """Snapshot authorized source and selected bindings before native child work."""
     from paper_evidence import default_store
     from paper_chart_edit_service import default_service
-    from paper_native_worker import run
+    from paper_native_worker import run, budget, check
+    deadline = budget()
     store = store if store is not None else default_store
     if not isinstance(request,dict) or request.get('schema') != SCHEMA: fail('request_invalid')
     paper_id, digest, ops = request.get('paperId'), request.get('fileHash'), request.get('operations')
@@ -101,12 +102,27 @@ def export_visual(request,*,store=None,cancelled=None):
                 if entry['paperId'] != paper_id or entry['scene']['sourceFileHash'] != digest: fail('source_mismatch')
                 import copy
                 scenes[scene_id]=copy.deepcopy(entry)
-    result=run('visual_export', [request,raw,items,scenes], cancelled=cancelled)
+    result=run('visual_export', [request,raw,items,scenes], cancelled=cancelled, deadline=deadline)
     try: output=base64.b64decode(result['file'],validate=True)
     except (KeyError,ValueError,TypeError): raise ValueError('native_output_invalid') from None
     if len(output)>50*1024*1024 or sha(output)!=result.get('outputSha256') or result.get('sourceSha256')!=digest:
         raise ValueError('native_output_invalid')
+    with _source_authority(store, paper_id, digest, raw):
+        with default_service.lock:
+            check(deadline, cancelled)
+            for scene_id, entry in scenes.items():
+                current = default_service.scenes.get(scene_id)
+                if current != entry or current['expires'] <= default_service.clock(): raise ValueError('chart_scene_expired')
     return result
+
+def _source_authority(store, paper_id, digest, raw):
+    from contextlib import contextmanager
+    if hasattr(store, 'source_authority'): return store.source_authority(paper_id, digest, raw)
+    @contextmanager
+    def authority():
+        if store.source_bytes(paper_id, digest) != raw: fail('source_mismatch')
+        yield
+    return authority()
 
 def _export_visual_native(request,*,store=None):
     import pymupdf as pdf

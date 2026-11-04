@@ -7,6 +7,14 @@ from paper_enrichment import _stop
 MAX_REQUEST = 80 * 1024 * 1024
 MAX_RESPONSE = 100 * 1024 * 1024
 TIMEOUT = 60
+_IN_WORKER = False
+
+def check(deadline, cancelled=None):
+    if cancelled is not None and cancelled.is_set(): raise ValueError("native_cancelled")
+    if time.monotonic() >= deadline: raise ValueError("native_timeout")
+
+def budget():
+    return time.monotonic() + TIMEOUT
 
 def _pack(value):
     if isinstance(value, bytes):
@@ -25,12 +33,16 @@ def _unpack(value):
     if isinstance(value, list): return [_unpack(v) for v in value]
     return value
 
-def run(operation, args, *, cancelled=None, timeout=TIMEOUT):
+def run(operation, args, *, cancelled=None, timeout=TIMEOUT, deadline=None):
+    if _IN_WORKER:
+        return _dispatch(operation, args)
     started = time.monotonic()
+    deadline = min(deadline, started + timeout) if deadline is not None else started + timeout
+    check(deadline, cancelled)
     encoded = json.dumps({'operation': operation, 'args': _pack(args)}, allow_nan=False).encode('utf-8')
     if len(encoded) > MAX_REQUEST: raise ValueError('native_input_limit')
     if cancelled is not None and cancelled.is_set(): raise ValueError('native_cancelled')
-    if time.monotonic() - started >= timeout: raise ValueError('native_timeout')
+    if time.monotonic() >= deadline: raise ValueError('native_timeout')
     process = subprocess.Popen([sys.executable, '-I', str(HERE / 'paper_native_worker.py'), '--worker'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), shell=False)
     finished = threading.Event(); chunks = []; errors = []
     def write_input():
@@ -55,20 +67,26 @@ def run(operation, args, *, cancelled=None, timeout=TIMEOUT):
         writer.start(); reader.start()
         while not finished.wait(.1):
             if cancelled is not None and cancelled.is_set(): raise ValueError('native_cancelled')
-            if time.monotonic() - started >= timeout: raise ValueError('native_timeout')
+            if time.monotonic() >= deadline: raise ValueError('native_timeout')
         if cancelled is not None and cancelled.is_set(): raise ValueError('native_cancelled')
-        if time.monotonic() - started >= timeout: raise ValueError('native_timeout')
-        if errors: raise ValueError('native_worker_failed')
-        remaining = max(0, timeout - (time.monotonic() - started))
-        try: process.wait(timeout=remaining)
-        except subprocess.TimeoutExpired: raise ValueError('native_timeout') from None
+        if time.monotonic() >= deadline: raise ValueError('native_timeout')
+        if errors: raise ValueError('native_output_invalid')
+        while process.poll() is None:
+            check(deadline, cancelled)
+            try: process.wait(timeout=min(.1, max(0, deadline - time.monotonic())))
+            except subprocess.TimeoutExpired: pass
         if process.returncode: raise ValueError('native_worker_failed')
         try: response = json.loads(b''.join(chunks).decode('utf-8'))
         except (ValueError, UnicodeDecodeError): raise ValueError('native_output_invalid') from None
-        if not response.get('ok'): raise ValueError(response.get('error', 'native_worker_failed'))
-        data = _unpack(response['data'])
+        if not isinstance(response, dict) or type(response.get('ok')) is not bool:
+            raise ValueError('native_output_invalid')
+        if not response['ok']:
+            error = response.get('error')
+            raise ValueError(error if isinstance(error, str) and re.fullmatch(r'[a-z][a-z0-9_]{0,80}', error) else 'native_worker_failed')
+        try: data = _unpack(response['data'])
+        except (KeyError, TypeError, ValueError): raise ValueError('native_output_invalid') from None
         if cancelled is not None and cancelled.is_set(): raise ValueError('native_cancelled')
-        if time.monotonic() - started >= timeout: raise ValueError('native_timeout')
+        if time.monotonic() >= deadline: raise ValueError('native_timeout')
         return data
     finally:
         _stop(process)
@@ -166,6 +184,9 @@ def _dispatch(operation, args):
     raise ValueError('native_operation_invalid')
 
 def _worker():
+    global _IN_WORKER
+    _IN_WORKER = True
+    sys.modules['paper_native_worker'] = sys.modules[__name__]
     sys.path.insert(0, str(HERE))
     try:
         request = json.loads(sys.stdin.buffer.read(MAX_REQUEST + 1).decode('utf-8'))
