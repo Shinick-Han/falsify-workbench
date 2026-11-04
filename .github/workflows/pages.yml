@@ -86,7 +86,9 @@ jobs:
         with:
           node-version: '24'
       - name: Adapter home and CLI directory propagation (no models)
-        run: python -m unittest discover -s app/tests -p test_adapter_environment.py -q
+        run: |
+          python -m unittest discover -s app/tests -p test_adapter_environment.py -q
+          python app/tests/test_paper_analysis_transport.py
       - name: Pinned PlotTracer embedded engine (no models)
         run: |
           python -m pip install -r app/local/requirements-paper-mcp.txt -r app/local/requirements-images.txt
@@ -124,7 +126,9 @@ jobs:
         with:
           python-version: '3.12'
       - name: Adapter home and CLI directory propagation (no models)
-        run: python -m unittest discover -s app/tests -p test_adapter_environment.py -q
+        run: |
+          python -m unittest discover -s app/tests -p test_adapter_environment.py -q
+          python app/tests/test_paper_analysis_transport.py
       - name: Portable POSIX connection tests
         run: bash scripts/test-posix-connection.sh
       - name: Pinned PlotTracer embedded engine (no models)
@@ -148,7 +152,9 @@ jobs:
         with:
           python-version: '3.12'
       - name: Adapter home and CLI directory propagation (no models)
-        run: python -m unittest discover -s app/tests -p test_adapter_environment.py -q
+        run: |
+          python -m unittest discover -s app/tests -p test_adapter_environment.py -q
+          python app/tests/test_paper_analysis_transport.py
       - name: Portable POSIX connection tests
         run: bash scripts/test-posix-connection.sh
       - name: Pinned PlotTracer embedded engine (no models)

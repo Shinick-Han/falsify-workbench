@@ -101,15 +101,29 @@ def _run_child(kind, png, language, cancelled, timeout, chart_options=None):
     process = subprocess.Popen([runtime_python(), '-I', str(HERE / 'paper_enrichment.py'), '--worker'],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env,
         creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), shell=False)
-    started, sent = time.monotonic(), False
+    started = time.monotonic()
+    finished = threading.Event()
+    response, errors = [], []
+
+    def exchange():
+        try:
+            response.append(process.communicate(input=encoded))
+        except Exception as error:
+            errors.append(error)
+        finally:
+            finished.set()
+
+    # Keep one exchange alive until stdin reaches EOF. Retrying communicate
+    # after a short timeout can strand a partial stdin write on POSIX.
+    transport = threading.Thread(target=exchange, daemon=True)
     try:
-        while True:
+        transport.start()
+        while not finished.wait(0.1):
             if cancelled.is_set(): raise ValueError('analysis_cancelled')
             if time.monotonic() - started > timeout: raise ValueError('analysis_timeout')
-            try:
-                stdout, _ = process.communicate(input=encoded if not sent else None, timeout=0.25)
-                break
-            except subprocess.TimeoutExpired: sent = True
+        if cancelled.is_set(): raise ValueError('analysis_cancelled')
+        if errors: raise ValueError('analysis_worker_failed') from errors[0]
+        stdout, _ = response[0]
         if process.returncode or len(stdout) > 2 * 1024 * 1024: raise ValueError('analysis_worker_failed')
         try: envelope = json.loads(stdout.decode('utf-8'))
         except (ValueError, UnicodeDecodeError): raise ValueError('analysis_output_invalid') from None
@@ -118,6 +132,10 @@ def _run_child(kind, png, language, cancelled, timeout, chart_options=None):
     finally:
         _stop(process)
         if process.poll() is None: process.wait(timeout=10)
+        if transport.ident is not None: transport.join(timeout=10)
+        if not transport.is_alive():
+            for pipe in (process.stdin, process.stdout):
+                if pipe is not None and not pipe.closed: pipe.close()
 
 
 def _map_boxes(data, region, width, height):
