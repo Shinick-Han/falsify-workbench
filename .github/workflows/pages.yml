@@ -140,8 +140,10 @@ jobs:
         shell: powershell
         run: ./scripts/test-companion-lifecycle.ps1
   verify-macos-arm:
-    runs-on: macos-26
+    runs-on: macos-15
     steps:
+      - name: Verify ARM64 runner
+        run: test "$(uname -m)" = arm64
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
