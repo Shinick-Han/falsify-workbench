@@ -190,7 +190,7 @@ class ChartEditService:
             self.scenes[scene['sceneId']] = {'scene': scene, 'paperId': paper_id, 'options': copy.deepcopy(data.get('options')), 'expires': now + self.ttl}
         return result
 
-    def _plan(self, data):
+    def _plan(self, data, *, deadline=None, cancelled=None):
         if not isinstance(data, dict) or set(data) - {'schema', 'paperId', 'fileHash', 'sceneId', 'revision', 'operations'} or data.get('schema') != SCHEMA:
             raise ValueError('chart_plan_invalid')
         revision = data.get('revision')
@@ -219,8 +219,8 @@ class ChartEditService:
             if entry['paperId'] != data['paperId'] or entry['scene']['sourceFileHash'] != data['fileHash']:
                 raise ValueError('chart_source_mismatch')
             scene = copy.deepcopy(entry['scene'])
-        from paper_chart_shape_core import evaluate
-        edited = evaluate(scene, ops)
+        from paper_native_worker import run
+        edited = run('chart_evaluate', [scene, ops], cancelled=cancelled, deadline=deadline)
         # Some adapters return the scene inside a result envelope.
         if isinstance(edited, dict) and isinstance(edited.get('scene'), dict):
             edited = edited['scene']
@@ -232,7 +232,7 @@ class ChartEditService:
     def preview(self, data, *, cancelled=None):
         from paper_native_worker import budget
         deadline = budget()
-        raw, scene, edited = self._plan(data)
+        raw, scene, edited = self._plan(data, deadline=deadline, cancelled=cancelled)
         from paper_native_worker import run
         result = run('chart_preview', [raw, scene, edited], cancelled=cancelled, deadline=deadline)
         png = result['png'] if isinstance(result, dict) else result
@@ -248,7 +248,7 @@ class ChartEditService:
     def export(self, data, *, author='human', source_override=None, cancelled=None):
         from paper_native_worker import budget
         deadline = budget()
-        raw, scene, edited = self._plan(data)
+        raw, scene, edited = self._plan(data, deadline=deadline, cancelled=cancelled)
         options = None
         if source_override is not None and source_override != raw:
             with self.lock:

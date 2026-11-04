@@ -121,6 +121,9 @@ def _dispatch(operation, args):
             pix = page.get_pixmap(clip=pymupdf.Rect(clip), dpi=dpi, alpha=False)
             if pix.width * pix.height > pixel_limit: raise ValueError('pixels')
             return [clip, pix.tobytes('png'), pix.width, pix.height]
+    if operation == 'chart_evaluate':
+        from paper_chart_shape_core import evaluate
+        return evaluate(*args)
     if operation == 'chart_preview':
         from paper_chart_paint import render_scene, render_png
         raw, scene, edited = args

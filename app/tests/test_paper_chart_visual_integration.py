@@ -19,7 +19,7 @@ class ChartVisualIntegrationTests(unittest.TestCase):
         plan = {'schema': SCHEMA, 'paperId': pid, 'fileHash': digest, 'sceneId': scene['sceneId'], 'revision': 0, 'operations': []}
         request = {'schema': 'falsify.visual-edit-request.v1', 'paperId': pid, 'fileHash': digest, 'revision': 0,
                    'operations': [{'id': 'chart', 'kind': 'chart-shape', 'plan': plan}]}
-        for target in ('chart_export', 'verify'):
+        for target in ('chart_evaluate', 'chart_export', 'verify'):
             with self.subTest(target=target), tempfile.TemporaryDirectory() as folder:
                 marker = str(Path(folder) / 'started')
                 script = f'''import sys, time, pathlib, subprocess, asyncio\nsys.path.insert(0, {str(Path(__file__).resolve().parents[1] / 'local')!r})\nimport paper_native_worker as n\noriginal = n._dispatch\ndef dispatch(op, args):\n    if op == {target!r}:\n        pathlib.Path({marker!r}).write_text('started')\n        time.sleep(30)\n    return original(op, args)\nn._dispatch = dispatch\nn._IN_WORKER = True\nsubprocess.Popen = lambda *a, **k: (_ for _ in ()).throw(RuntimeError('nested process'))\nimport json, traceback\ntry:\n    req = json.loads(sys.stdin.buffer.read())\n    result = n._dispatch(req['operation'], n._unpack(req['args']))\n    sys.stdout.write(json.dumps(dict(ok=True, data=n._pack(result))))\nexcept Exception:\n    pathlib.Path({marker!r} + '.error').write_text(traceback.format_exc())\n    raise\n'''
@@ -44,6 +44,62 @@ class ChartVisualIntegrationTests(unittest.TestCase):
                 self.assertEqual(len(children), 1)
                 self.assertIsNotNone(children[0].poll())
         self.assertEqual(native.run('evidence_extract', [raw, digest])['pdf'], raw)
+
+    def test_evaluation_timeout_cancel_and_recovery(self):
+        import paper_native_worker as native
+        import paper_chart_shape_core as core
+        raw = chart_pdf(); digest = hashlib.sha256(raw).hexdigest()
+        store = EvidenceStore(); pid = store.prepare(raw, digest)['paperId']
+        service = ChartEditService(store)
+        def prepare():
+            return service.prepare({'paperId': pid, 'fileHash': digest, 'pageIndex': 0, 'bbox': [35, 40, 395, 278]})
+        scene = prepare()
+        plan = {'schema': SCHEMA, 'paperId': pid, 'fileHash': digest, 'sceneId': scene['sceneId'], 'revision': 1, 'operations': []}
+        original_popen = subprocess.Popen
+        with tempfile.TemporaryDirectory() as folder:
+            marker = str(Path(folder) / 'started')
+            script = f"""import sys, time, pathlib
+sys.path.insert(0, {str(Path(__file__).resolve().parents[1] / 'local')!r})
+import paper_native_worker as n
+original = n._dispatch
+def dispatch(op, args):
+    if op == 'chart_evaluate':
+        pathlib.Path({marker!r}).write_text('started')
+        time.sleep(30)
+    return original(op, args)
+n._dispatch = dispatch
+n._worker()
+"""
+            children = []
+            def launch(*args, **kwargs):
+                if '--worker' not in args[0]: return original_popen(*args, **kwargs)
+                process = original_popen([sys.executable, '-c', script], **kwargs)
+                children.append(process)
+                return process
+            with patch.object(core, 'evaluate', side_effect=AssertionError('parent evaluation')):
+                with patch.object(native.subprocess, 'Popen', side_effect=launch), patch.object(native, 'budget', side_effect=lambda: time.monotonic() + 3):
+                    with self.assertRaisesRegex(ValueError, 'native_timeout'): service.preview(plan)
+                self.assertTrue(Path(marker).exists())
+                self.assertIsNotNone(children[-1].poll())
+                Path(marker).unlink()
+                cancelled = threading.Event(); errors = []
+                def export():
+                    try: service.export(plan, cancelled=cancelled)
+                    except Exception as exc: errors.append(exc)
+                with patch.object(native.subprocess, 'Popen', side_effect=launch):
+                    thread = threading.Thread(target=export); thread.start()
+                    until = time.monotonic() + 20
+                    while not Path(marker).exists() and thread.is_alive() and time.monotonic() < until: time.sleep(.05)
+                    reached = Path(marker).exists()
+                    cancelled.set(); thread.join(15)
+                self.assertTrue(reached)
+                self.assertFalse(thread.is_alive())
+                self.assertEqual([str(e) for e in errors], ['native_cancelled'])
+                self.assertIsNotNone(children[-1].poll())
+                fresh = prepare()
+                fresh_plan = {**plan, 'sceneId': fresh['sceneId']}
+                self.assertTrue(service.preview(fresh_plan)['image'])
+                self.assertTrue(service.export(fresh_plan)['file'])
 
     def test_two_native_regions_and_table_keep_previous_edits(self):
         doc=pymupdf.open();page=doc.new_page(width=620,height=320)

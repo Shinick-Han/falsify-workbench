@@ -54,6 +54,7 @@ class ChartEditServiceTests(unittest.TestCase):
         def run(operation, args, **kwargs):
             if operation == 'chart_prepare': return fake_prepare(*args[:4])
             if operation == 'chart_export': return [args[0], {'issues': []}, 1, []]
+            if operation == 'chart_evaluate': return copy.deepcopy(args[0])
             return real_run(operation, args, **kwargs)
         runner_patch = patch('paper_native_worker.run', side_effect=run)
         runner_patch.start()
