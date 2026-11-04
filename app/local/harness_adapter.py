@@ -43,6 +43,15 @@ class AdapterFailure(ValueError):
         return {'schema': 'falsify.adapter-failure.v1', 'code': self.code,
                 'stage': stage, 'recovery': recovery}
 
+def _check_inherited_sources(sources, root):
+    # A mismatch is meaningful only for fixed first-party source paths and valid recorded digests.
+    for name in ('experiments/selfplay_codex.py', 'app/local/harness_adapter.py'):
+        recorded = sources.get(name)
+        if isinstance(recorded, str) and len(recorded) == 64 and all(c in '0123456789abcdef' for c in recorded):
+            try: current = hashlib.sha256((root / name).read_bytes()).hexdigest()
+            except OSError: continue
+            if current != recorded: raise AdapterFailure('settings_mismatch')
+
 def check_first_party_settings(harness):
     """Check only a known v035 runner's recorded source hashes, without importing or executing it."""
     adapter, settings = harness.get('adapter', {}), harness.get('settings', {})
@@ -56,13 +65,7 @@ def check_first_party_settings(harness):
         return
     sources = settings.get('inheritedSources')
     if not isinstance(sources, dict): return
-    # A mismatch is meaningful only for fixed first-party source paths and valid recorded digests.
-    for name in ('experiments/selfplay_codex.py', 'app/local/harness_adapter.py'):
-        recorded = sources.get(name)
-        if isinstance(recorded, str) and len(recorded) == 64 and all(c in '0123456789abcdef' for c in recorded):
-            try: current = hashlib.sha256((root / name).read_bytes()).hexdigest()
-            except OSError: continue
-            if current != recorded: raise AdapterFailure('settings_mismatch')
+    _check_inherited_sources(sources, root)
 
 def validate_shape(value, schema):
     # The CLI uses the same draft and local validation; keep adapter failures fixed and private.
@@ -125,6 +128,17 @@ def run_stdio(argv, stdin, cwd, stdout_path):
                 p.wait()
     with open(stdout_path, 'rb') as f: return f.read(MAX_OUTPUT_BYTES+1)
 
+def _read_https_response(r, tls, deadline):
+    parts, count = [], 0
+    while count <= MAX_OUTPUT_BYTES:
+        remaining = deadline-time.monotonic()
+        if remaining <= 0: raise TimeoutError()
+        tls.settimeout(remaining)
+        part = r.read1(min(8192,MAX_OUTPUT_BYTES+1-count))
+        if not part: break
+        parts.append(part);count += len(part)
+    return b''.join(parts)
+
 def post_https(url, body, content_type='application/json'):
     """One POST to a public HTTPS address (DNS-pinned, no redirects/auth headers/retry); returns raw body."""
     parsed = urlsplit(url)
@@ -146,15 +160,7 @@ def post_https(url, body, content_type='application/json'):
         tls.settimeout(max(.01, deadline-time.monotonic()))
         r = connection.getresponse()
         if not 200 <= r.status < 300: raise ValueError('HTTP status/redirect rejected')
-        parts, count = [], 0
-        while count <= MAX_OUTPUT_BYTES:
-            remaining = deadline-time.monotonic()
-            if remaining <= 0: raise TimeoutError()
-            tls.settimeout(remaining)
-            part = r.read1(min(8192,MAX_OUTPUT_BYTES+1-count))
-            if not part: break
-            parts.append(part);count += len(part)
-        return b''.join(parts)
+        return _read_https_response(r, tls, deadline)
     except (TimeoutError, socket.timeout): raise AdapterFailure('timeout') from None
     except Exception: raise AdapterFailure('unknown') from None
     finally:
