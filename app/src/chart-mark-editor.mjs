@@ -179,12 +179,16 @@ function samePoint(point, next) {
   return Math.abs(point.x - next.x) < NOOP_DISTANCE && Math.abs(point.y - next.y) < NOOP_DISTANCE;
 }
 
-export function create(options = {}) {
-  const host = options.host;
-  const doc = options.document || host?.ownerDocument || globalThis.document;
+function validateEditorInputs(host,doc,options) {
   if (!host || typeof host.append !== 'function') throw new Error('FalsifyChartMarkEditor.create requires a host element');
   if (!doc?.createElement || !doc.createElementNS) throw new Error('FalsifyChartMarkEditor.create requires a document');
   if (!options.scene || !Array.isArray(options.scene.series)) throw new Error('FalsifyChartMarkEditor.create requires a scene with series');
+}
+
+export function create(options = {}) {
+  const host = options.host;
+  const doc = options.document || host?.ownerDocument || globalThis.document;
+  validateEditorInputs(host,doc,options);
 
   const core = resolveCore(options.core);
   const onChange = typeof options.onChange === 'function' ? options.onChange : null;
@@ -550,6 +554,24 @@ export function create(options = {}) {
     if (!commit && gesture.previewed) emitChange();
   }
 
+  function beginGesture(event,point,series,mark,kind,origin) {
+    event.preventDefault?.();
+    const holder = {current: point};
+    state.gesture = {
+      id: nextId(),
+      seriesId: series.id,
+      index: mark.index,
+      kind,
+      origin: {x: origin.x, y: origin.y, axis: origin.axis, baseline: origin.baseline, width: origin.width, radius: origin.radius},
+      pointerId: event.pointerId,
+      holder,
+      operation() { return operationFor(holder.current); },
+    };
+    if (event.pointerId != null && typeof stage.setPointerCapture === 'function') {
+      try { stage.setPointerCapture(event.pointerId); } catch { /* already released */ }
+    }
+  }
+
   function onPointerDown(event) {
     if (state.destroyed || state.compare || state.gesture) return;
     if (event.button != null && event.button !== 0) return;
@@ -567,21 +589,7 @@ export function create(options = {}) {
       render();
       return;
     }
-    event.preventDefault?.();
-    const holder = {current: point};
-    state.gesture = {
-      id: nextId(),
-      seriesId: series.id,
-      index: mark.index,
-      kind,
-      origin: {x: origin.x, y: origin.y, axis: origin.axis, baseline: origin.baseline, width: origin.width, radius: origin.radius},
-      pointerId: event.pointerId,
-      holder,
-      operation() { return operationFor(holder.current); },
-    };
-    if (event.pointerId != null && typeof stage.setPointerCapture === 'function') {
-      try { stage.setPointerCapture(event.pointerId); } catch { /* already released */ }
-    }
+    beginGesture(event,point,series,mark,kind,origin);
     render();
     emitChange();
   }
