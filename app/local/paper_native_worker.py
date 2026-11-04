@@ -33,6 +33,41 @@ def _unpack(value):
     if isinstance(value, list): return [_unpack(v) for v in value]
     return value
 
+def _worker_response(chunks):
+    try: response = json.loads(b''.join(chunks).decode('utf-8'))
+    except (ValueError, UnicodeDecodeError): raise ValueError('native_output_invalid') from None
+    if not isinstance(response, dict) or type(response.get('ok')) is not bool:
+        raise ValueError('native_output_invalid')
+    if not response['ok']:
+        error = response.get('error')
+        raise ValueError(error if isinstance(error, str) and re.fullmatch(r'[a-z][a-z0-9_]{0,80}', error) else 'native_worker_failed')
+    try: data = _unpack(response['data'])
+    except (KeyError, TypeError, ValueError): raise ValueError('native_output_invalid') from None
+    return data
+
+
+def _wait_worker(process, finished, errors, deadline, cancelled):
+    while not finished.wait(.1):
+        if cancelled is not None and cancelled.is_set(): raise ValueError('native_cancelled')
+        if time.monotonic() >= deadline: raise ValueError('native_timeout')
+    if cancelled is not None and cancelled.is_set(): raise ValueError('native_cancelled')
+    if time.monotonic() >= deadline: raise ValueError('native_timeout')
+    if errors: raise ValueError('native_output_invalid')
+    while process.poll() is None:
+        check(deadline, cancelled)
+        try: process.wait(timeout=min(.1, max(0, deadline - time.monotonic())))
+        except subprocess.TimeoutExpired: pass
+
+
+def _cleanup_worker(process, writer, reader):
+    _stop(process)
+    if process.poll() is None: process.wait(timeout=10)
+    for thread in (writer, reader):
+        if thread.ident is not None: thread.join(timeout=10)
+    if not writer.is_alive() and not reader.is_alive():
+        for pipe in (process.stdin, process.stdout):
+            if pipe is not None and not pipe.closed: pipe.close()
+
 def run(operation, args, *, cancelled=None, timeout=TIMEOUT, deadline=None):
     if _IN_WORKER:
         return _dispatch(operation, args)
@@ -65,37 +100,65 @@ def run(operation, args, *, cancelled=None, timeout=TIMEOUT, deadline=None):
     reader = threading.Thread(target=read_output, daemon=True)
     try:
         writer.start(); reader.start()
-        while not finished.wait(.1):
-            if cancelled is not None and cancelled.is_set(): raise ValueError('native_cancelled')
-            if time.monotonic() >= deadline: raise ValueError('native_timeout')
-        if cancelled is not None and cancelled.is_set(): raise ValueError('native_cancelled')
-        if time.monotonic() >= deadline: raise ValueError('native_timeout')
-        if errors: raise ValueError('native_output_invalid')
-        while process.poll() is None:
-            check(deadline, cancelled)
-            try: process.wait(timeout=min(.1, max(0, deadline - time.monotonic())))
-            except subprocess.TimeoutExpired: pass
+        _wait_worker(process, finished, errors, deadline, cancelled)
         if process.returncode: raise ValueError('native_worker_failed')
-        try: response = json.loads(b''.join(chunks).decode('utf-8'))
-        except (ValueError, UnicodeDecodeError): raise ValueError('native_output_invalid') from None
-        if not isinstance(response, dict) or type(response.get('ok')) is not bool:
-            raise ValueError('native_output_invalid')
-        if not response['ok']:
-            error = response.get('error')
-            raise ValueError(error if isinstance(error, str) and re.fullmatch(r'[a-z][a-z0-9_]{0,80}', error) else 'native_worker_failed')
-        try: data = _unpack(response['data'])
-        except (KeyError, TypeError, ValueError): raise ValueError('native_output_invalid') from None
+        data = _worker_response(chunks)
         if cancelled is not None and cancelled.is_set(): raise ValueError('native_cancelled')
         if time.monotonic() >= deadline: raise ValueError('native_timeout')
         return data
     finally:
-        _stop(process)
-        if process.poll() is None: process.wait(timeout=10)
-        for thread in (writer, reader):
-            if thread.ident is not None: thread.join(timeout=10)
-        if not writer.is_alive() and not reader.is_alive():
-            for pipe in (process.stdin, process.stdout):
-                if pipe is not None and not pipe.closed: pipe.close()
+        _cleanup_worker(process, writer, reader)
+
+
+def _render_evidence(args):
+    import pymupdf
+    from paper_evidence import EvidenceStore, _pixel_size
+    raw, index, bbox, dpi, pixel_limit = args
+    with pymupdf.open(stream=raw, filetype='pdf') as doc:
+        page = doc[index]
+        clip = EvidenceStore()._clip(page.rect, bbox)
+        width, height = _pixel_size(clip, dpi)
+        if width * height > pixel_limit: raise ValueError('pixels')
+        pix = page.get_pixmap(clip=pymupdf.Rect(clip), dpi=dpi, alpha=False)
+        if pix.width * pix.height > pixel_limit: raise ValueError('pixels')
+        return [clip, pix.tobytes('png'), pix.width, pix.height]
+
+
+def _rebind_chart(source_override, scene, edited, options):
+    from paper_chart_edit_service import _prepare_backend
+    import copy
+    fresh = _prepare_backend(source_override, scene['pageIndex'], scene['bbox'], options=options, preferred=scene.get('mode','curve'))
+    key = lambda series: json.dumps({'color': series.get('color'), 'style': series.get('style'),
+        'points': [[p['x'], p['y']] for p in series['points']]}, sort_keys=True)
+    original = {}
+    for i, series in enumerate(scene['series']): original.setdefault(key(series), []).append(i)
+    fresh_edited = copy.deepcopy(fresh)
+    if len(fresh['series']) != len(scene['series']): raise ValueError('chart_region_changed')
+    for i, current in enumerate(fresh['series']):
+        matches = original.get(key(current), [])
+        if not matches: raise ValueError('chart_region_changed')
+        fresh_edited['series'][i]['points'] = copy.deepcopy(edited['series'][matches.pop(0)]['points'])
+    return source_override, fresh, fresh_edited
+
+
+def _export_chart(args):
+    from paper_chart_edit_service import _verify_output
+    import pymupdf
+    raw, scene, edited, source_override, options = args
+    if source_override is not None and source_override != raw:
+        raw, scene, edited = _rebind_chart(source_override, scene, edited, options)
+    if scene.get('mode') == 'marks':
+        from paper_chart_marks import export_marks
+        output, report = export_marks(raw, scene, edited)
+    else:
+        from paper_chart_paint import export_scene
+        output, report = export_scene(raw, scene, edited)
+    if not isinstance(output, bytes) or not output.startswith(b'%PDF-'): raise ValueError('chart_export_invalid')
+    with pymupdf.open(stream=output, filetype='pdf') as doc: pages = len(doc)
+    issues = list(report.get('issues', [])) if isinstance(report, dict) else []
+    issues.extend(_verify_output(raw, output, scene))
+    return [output, report, pages, issues]
+
 
 def _dispatch(operation, args):
     if operation == 'chart_prepare':
@@ -110,17 +173,7 @@ def _dispatch(operation, args):
         raw, digest = args
         return EvidenceStore()._extract(raw, digest)
     if operation == 'evidence_render':
-        import pymupdf
-        from paper_evidence import EvidenceStore, _pixel_size
-        raw, index, bbox, dpi, pixel_limit = args
-        with pymupdf.open(stream=raw, filetype='pdf') as doc:
-            page = doc[index]
-            clip = EvidenceStore()._clip(page.rect, bbox)
-            width, height = _pixel_size(clip, dpi)
-            if width * height > pixel_limit: raise ValueError('pixels')
-            pix = page.get_pixmap(clip=pymupdf.Rect(clip), dpi=dpi, alpha=False)
-            if pix.width * pix.height > pixel_limit: raise ValueError('pixels')
-            return [clip, pix.tobytes('png'), pix.width, pix.height]
+        return _render_evidence(args)
     if operation == 'chart_evaluate':
         from paper_chart_shape_core import evaluate
         return evaluate(*args)
@@ -133,35 +186,7 @@ def _dispatch(operation, args):
             return {'png': render_png(output, scene['pageIndex'], scene['bbox'], scene.get('dpi', 72)), 'report': report}
         return render_scene(raw, scene, edited)
     if operation == 'chart_export':
-        from paper_chart_edit_service import _verify_output
-        import pymupdf
-        raw, scene, edited, source_override, options = args
-        if source_override is not None and source_override != raw:
-            from paper_chart_edit_service import _prepare_backend
-            import copy
-            fresh = _prepare_backend(source_override, scene['pageIndex'], scene['bbox'], options=options, preferred=scene.get('mode','curve'))
-            key = lambda series: json.dumps({'color': series.get('color'), 'style': series.get('style'),
-                'points': [[p['x'], p['y']] for p in series['points']]}, sort_keys=True)
-            original = {}
-            for i, series in enumerate(scene['series']): original.setdefault(key(series), []).append(i)
-            fresh_edited = copy.deepcopy(fresh)
-            if len(fresh['series']) != len(scene['series']): raise ValueError('chart_region_changed')
-            for i, current in enumerate(fresh['series']):
-                matches = original.get(key(current), [])
-                if not matches: raise ValueError('chart_region_changed')
-                fresh_edited['series'][i]['points'] = copy.deepcopy(edited['series'][matches.pop(0)]['points'])
-            raw, scene, edited = source_override, fresh, fresh_edited
-        if scene.get('mode') == 'marks':
-            from paper_chart_marks import export_marks
-            output, report = export_marks(raw, scene, edited)
-        else:
-            from paper_chart_paint import export_scene
-            output, report = export_scene(raw, scene, edited)
-        if not isinstance(output, bytes) or not output.startswith(b'%PDF-'): raise ValueError('chart_export_invalid')
-        with pymupdf.open(stream=output, filetype='pdf') as doc: pages = len(doc)
-        issues = list(report.get('issues', [])) if isinstance(report, dict) else []
-        issues.extend(_verify_output(raw, output, scene))
-        return [output, report, pages, issues]
+        return _export_chart(args)
     if operation == 'chart_vectors':
         from paper_chart_vectors import prefer_native_paths
         return prefer_native_paths(args[0], **args[1])
