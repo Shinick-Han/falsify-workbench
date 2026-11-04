@@ -226,20 +226,263 @@ function associateCrossPageCaptions({document, fragments, items, relations, diag
   }
 }
 
-/** Produce a deterministic, source-bound reading order and ownership proposal. */
-export function buildPaperFlow(document, {drawings=document?.drawings || [], links} = {}) {
-  if (document?.schema !== 'falsify.paper-document.v1' || !Array.isArray(document.pages) || !Array.isArray(document.blocks) || !Array.isArray(document.assets)) throw new TypeError('Expected falsify.paper-document.v1');
-  const items=[],relations=[],diagnostics=[],fragments=[],regions=[];
-  const styles=new Map((document.styles || []).map(s=>[s.id,s]));
-  const evidence=(document.occlusions || []).filter(e=>e.sourceSha256===document.sourceSha256 && Array.isArray(e.ranges) && e.proof?.changedChannels===0 && e.proof?.removedCharacters>0);
-  let flowBlocks=document.blocks.flatMap(b=>occlusionFragments(b,evidence.filter(e=>e.pageIndex===b.source?.pageIndex),document.sourceSha256)).flatMap(b=>splitBlock(b,document.sourceSha256,styles));
-  const inline=inlineFragments(flowBlocks,document.sourceSha256);
-  flowBlocks=flowBlocks.flatMap(b=>inline.replacements.has(b.id) ? (inline.replacements.get(b.id) || [b]) : [b]);
-  fragments.push(...flowBlocks.filter(b=>b.parentBlockId));
-  const textBlocks=flowBlocks.filter(b=>b.text);
-  const sizeOf=b=>median((b.source?.characters || []).map(c=>styles.get(c.styleId)?.size).filter(Number.isFinite)) || styles.get(b.styleId)?.size || 0;
-  const bodySize=median(textBlocks.flatMap(b=>(b.source?.characters || []).map(c=>styles.get(c.styleId)?.size).filter(Number.isFinite))) || median(textBlocks.map(sizeOf).filter(Boolean));
-  const linkedEdges=linkedEdgeCandidates(document,links);
+function captureOutlineArtwork({blocks, assets, paths, page, pi, document, make, entries, regions, owned, represented}) {
+  // Outline-heavy forms may have no extractable labels at all. Restrict this
+  // classification to pages without ordinary central body text, and include
+  // every observed occurrence in the measured crop.
+  const centralText=blocks.filter(x=>x.b.text?.trim() && (!boxOK(x.box) || (x.box[1]<page.height*.9 && x.box[3]>page.height*.1)));
+  let form=false;
+  if(paths.length>=2000 && centralText.length===0 && blocks.every(x=>boxOK(x.box)) && assets.every(x=>boxOK(x.box))) {
+    const raw=union([...paths,...blocks.map(x=>x.box),...assets.map(x=>x.box)]);
+    const box=[Math.max(0,raw[0]-1),Math.max(0,raw[1]-1),Math.min(page.width,raw[2]+1),Math.min(page.height,raw[3]+1)];
+    if(boxOK(box) && box[2]-box[0]>page.width*.5 && box[3]-box[1]>page.height*.5 && [...paths,...blocks.map(x=>x.box),...assets.map(x=>x.box)].every(b=>contains(box,b))) {
+      const id=`region-${hex(new TextEncoder().encode(JSON.stringify([document.sourceSha256,pi,box]))).slice(0,24)}`;
+      const entry=make('asset',blocks,assets,box,Math.min(...blocks.map(x=>x.pos ?? Infinity)),0);
+      entry.renderAssetId=id; entries.push(entry);
+      regions.push({id,pageIndex:pi,bbox:[...box],blockIds:blocks.map(x=>x.b.id),assetIds:assets.map(x=>x.a.id),classification:'outline-artwork'});
+      blocks.forEach(x=>owned.add(x.b.id)); assets.forEach(x=>represented.add(x.a.id)); form=true;
+    }
+  }
+  return form;
+}
+
+function captureCompoundFigures({form, blocks, assets, paths, page, pi, document, make, entries, regions, owned, represented, captions, bodySize, sizeOf}) {
+  let plot=false;
+  // Multiple separated image occurrences can be panels of one figure. Use
+  // narrative and caption geometry as hard vertical boundaries; a crop is
+  // accepted only when no excluded text or image intersects it.
+  if(!form) {
+    const central=blocks.filter(x=>x.b.text && boxOK(x.box) && x.box[1]>=page.height*.05 && x.box[3]<=page.height*.9);
+    const narrative=x=>{
+      const lines=x.b.source?.lines || [];
+      return captions.includes(x) || (bodySize && sizeOf(x.b)>=bodySize*.88 && x.box[2]-x.box[0]>=page.width*.3 && (lines.length>=2 || x.b.text.trim().length>=55));
+    };
+    const barriers=central.filter(narrative).sort(geom);
+    const limits=[page.height*.05,...barriers.flatMap(x=>[x.box[1],x.box[3]]),page.height*.9].sort((a,b)=>a-b);
+    for(let i=0;i<limits.length-1;i++) {
+      const top=limits[i],bottom=limits[i+1];
+      if(bottom<=top || barriers.some(x=>x.box[1]<bottom && x.box[3]>top)) continue;
+      const as=assets.filter(x=>!represented.has(x.a.id) && boxOK(x.box) && x.box[1]>=top && x.box[3]<=bottom);
+      if(as.length<2) continue;
+      const labels=central.filter(x=>!owned.has(x.b.id) && !narrative(x) && x.box[1]>=top && x.box[3]<=bottom);
+      if(labels.length<3) continue;
+      const ps=paths.filter(b=>b[1]>=top && b[3]<=bottom);
+      const raw=union([...as.map(x=>x.box),...labels.map(x=>x.box),...ps]);
+      // Painted strokes and glyph ink can extend beyond their geometric
+      // bounds. Include a small margin, subject to the same exclusion check.
+      const box=[Math.max(0,raw[0]-2),Math.max(0,raw[1]-2),Math.min(page.width,raw[2]+2),Math.min(page.height,raw[3]+2)];
+      if(box[2]-box[0]<page.width*.4 || box[3]-box[1]<page.height*.2) continue;
+      if(blocks.some(x=>x.b.text && boxOK(x.box) && overlap(box,x.box) && !labels.includes(x)) || assets.some(x=>boxOK(x.box) && overlap(box,x.box) && !as.includes(x))) continue;
+      const bs=[...labels,...blocks.filter(x=>!owned.has(x.b.id) && (x.b.assetIds || []).some(id=>as.some(a=>a.a.id===id)))];
+      bs.forEach(x=>owned.add(x.b.id)); as.forEach(x=>represented.add(x.a.id));
+      const id=`region-${hex(new TextEncoder().encode(JSON.stringify([document.sourceSha256,pi,box]))).slice(0,24)}`;
+      const entry=make('asset',bs,as,box,Math.min(...bs.map(x=>x.pos ?? Infinity)),Math.min(...bs.map(x=>x.index)));
+      entry.renderAssetId=id; entries.push(entry);
+      regions.push({id,pageIndex:pi,bbox:[...box],blockIds:bs.map(x=>x.b.id),assetIds:as.map(x=>x.a.id),classification:'compound-figure'});
+      plot=true;
+    }
+  }
+  return plot;
+}
+
+function captureVectorPlot({form, plot, plotPaths, plotText, blocks, assets, page, pi, document, make, entries, regions, owned, represented, bodySize, sizeOf, plotBottom}) {
+  // Establish the artwork extent before considering text. Nearby short,
+  // single-line labels may extend just outside it; prose remains independent.
+  if(!form && !plot && plotPaths.length>=1000) {
+    const artwork=union(plotPaths);
+    const plotBlocks=plotText.filter(x=>{
+      const text=x.b.text.trim(), lines=x.b.source?.lines || [];
+      const dx=Math.max(artwork[0]-x.box[2],x.box[0]-artwork[2],0);
+      const dy=Math.max(artwork[1]-x.box[3],x.box[1]-artwork[3],0);
+      const distance=Math.max(10,Math.min(15,(sizeOf(x.b) || x.box[3]-x.box[1])*1.5));
+      const smallArtworkText=contains(artwork,x.box) && bodySize && sizeOf(x.b) && sizeOf(x.b)<=bodySize*.9;
+      return smallArtworkText || (text.length<=30 && text.split(/\s+/).length<=3 && !/[.!?]\s*$/.test(text) && lines.length<=1 &&
+        (text.length<=2 || !bodySize || !sizeOf(x.b) || sizeOf(x.b)<=bodySize*1.1) && dx<=distance && dy<=distance);
+    });
+    let box=union([artwork,...plotBlocks.map(x=>x.box)]);
+    const touching=assets.filter(x=>boxOK(x.box) && overlap(box,x.box));
+    if(touching.every(x=>x.box[0]>=0 && x.box[1]>=page.height*.05 && x.box[2]<=page.width && x.box[3]<=plotBottom)) box=union([box,...touching.map(x=>x.box)]);
+    if(plotBlocks.length>=20 && !blocks.some(x=>x.b.text && boxOK(x.box) && overlap(box,x.box) && !plotBlocks.includes(x)) && touching.every(x=>contains(box,x.box)) && box[2]-box[0]>page.width*.4 && box[3]-box[1]>page.height*.2) {
+      const as=assets.filter(x=>boxOK(x.box) && contains(box,x.box));
+      const figureBlocks=blocks.filter(x=>(x.b.assetIds || []).some(id=>as.some(a=>a.a.id===id)));
+      plotBlocks.push(...figureBlocks.filter(x=>!plotBlocks.includes(x)));
+      plotBlocks.forEach(x=>owned.add(x.b.id)); as.forEach(x=>represented.add(x.a.id));
+      const id=`region-${hex(new TextEncoder().encode(JSON.stringify([document.sourceSha256,pi,box]))).slice(0,24)}`;
+      const entry=make('asset',plotBlocks,as,box,Math.min(...plotBlocks.map(x=>x.pos ?? Infinity)),plotBlocks[0].index);
+      entry.renderAssetId=id;entries.push(entry);
+      regions.push({id,pageIndex:pi,bbox:[...box],blockIds:plotBlocks.map(x=>x.b.id),assetIds:as.map(x=>x.a.id)});
+      plot=true;
+    }
+  }
+  return plot;
+}
+
+function captureVectorTables({form, plot, paths, blocks, assets, pi, document, make, entries, regions, owned, represented}) {
+  const seen=new Set();
+  for(let n=0;n<(form || plot || paths.length>2000?0:paths.length);n++) {
+    if(seen.has(n)) continue;
+    const cluster=[n];seen.add(n);
+    for(let k=0;k<cluster.length;k++) for(let j=0;j<paths.length;j++) {
+      if(seen.has(j)) continue;
+      const a=paths[cluster[k]],b=paths[j];
+      if(a[0]<=b[2]+1 && b[0]<=a[2]+1 && a[1]<=b[3]+1 && b[1]<=a[3]+1) {seen.add(j);cluster.push(j);}
+    }
+    if(cluster.length<10) continue;
+    const boxes=cluster.map(i=>paths[i]), box=union(boxes);
+    const horizontal=boxes.filter(b=>b[2]-b[0]>10 && b[3]-b[1]<3).length;
+    const vertical=boxes.filter(b=>b[3]-b[1]>10 && b[2]-b[0]<3).length;
+    if(horizontal<3 || vertical<3 || box[2]-box[0]<40 || box[3]-box[1]<20) continue;
+    const bs=blocks.filter(x=>x.b.text && !owned.has(x.b.id) && boxOK(x.box) && contains(box,x.box));
+    if(bs.length<4 || blocks.some(x=>x.b.text && boxOK(x.box) && overlap(box,x.box) && !bs.includes(x)) || assets.some(x=>boxOK(x.box) && overlap(box,x.box) && !contains(box,x.box))) continue;
+    const as=assets.filter(x=>!represented.has(x.a.id) && boxOK(x.box) && contains(box,x.box));
+    bs.push(...blocks.filter(x=>!owned.has(x.b.id) && !bs.includes(x) && (x.b.assetIds || []).some(id=>as.some(a=>a.a.id===id))));
+    bs.forEach(x=>owned.add(x.b.id)); as.forEach(x=>represented.add(x.a.id));
+    const id=`region-${hex(new TextEncoder().encode(JSON.stringify([document.sourceSha256,pi,box]))).slice(0,24)}`;
+    const entry=make('asset',bs,as,box,Math.min(...bs.map(x=>x.pos ?? Infinity)),bs[0].index);
+    entry.renderAssetId=id; entries.push(entry);
+    regions.push({id,pageIndex:pi,bbox:[...box],blockIds:bs.map(x=>x.b.id),assetIds:as.map(x=>x.a.id)});
+  }
+}
+
+function captureImageAssets({assets, blocks, pi, document, make, entries, regions, owned, represented, evidence}) {
+  // Group overlapping image occurrences. Only fully contained text is owned as artwork.
+  for(const a of assets) {
+    if(represented.has(a.a.id)) continue;
+    const group=[a];represented.add(a.a.id);
+    if(boxOK(a.box)) for(let i=0;i<group.length;i++) for(const other of assets) if(!represented.has(other.a.id) && boxOK(other.box) && overlap(group[i].box,other.box)) {group.push(other);represented.add(other.a.id);}
+    const box=group.every(x=>boxOK(x.box))?union(group.map(x=>x.box)):null;
+    const proofs=evidence.filter(e=>e.pageIndex===pi && group.some(y=>y.a.id===e.assetId));
+    const confirmed=x=>x.b.text && x.b.source?.range && proofs.some(e=>{const r=x.b.source.range;return e.ranges.some(z=>z.start<=r.start && z.end>=r.end);});
+    const bs=blocks.filter(x=>!owned.has(x.b.id) && ((x.b.assetIds || []).some(id=>group.some(y=>y.a.id===id)) || confirmed(x)));
+    bs.forEach(x=>owned.add(x.b.id));
+    const entry=make('asset',bs,group,box,a.pos,a.index);
+    if(proofs.length && bs.some(confirmed) && boxOK(box)) {
+      const id=`region-${hex(new TextEncoder().encode(JSON.stringify([document.sourceSha256,pi,box]))).slice(0,24)}`;
+      entry.renderAssetId=id;regions.push({id,pageIndex:pi,bbox:[...box],blockIds:bs.map(x=>x.b.id),assetIds:group.map(x=>x.a.id),classification:'verified-occlusion'});
+    }
+    entries.push(entry);
+  }
+}
+
+function classifyPageText({paths, assets, blocks, repeats, linkedEdges, bodySize, sizeOf, page, pi, decoratedFooter, owned, entries, make, flowBlocks}) {
+  const artworkNear=x=>paths.some(p=>overlap(p,x.box)) || assets.some(a=>boxOK(a.box) && a.box[0]<x.box[2]+15 && a.box[2]>x.box[0]-15 && a.box[1]<x.box[3]+15 && a.box[3]>x.box[1]-15);
+  const repeated=x=>repeats.get(textKey(x.b))?.size>=2;
+  const peer=x=>blocks.some(y=>y!==x && y.b.text?.trim() && boxOK(y.box) && repeated(y) && y.box[1]<x.box[3] && x.box[1]<y.box[3] && (y.box[2]<x.box[0] || x.box[2]<y.box[0]) && !artworkNear(y));
+  const separatedBody=x=>blocks.some(y=>y!==x && y.b.text && boxOK(y.box) && y.box[1]>=page.height*.12 && y.box[3]<=page.height*.88);
+  const linked=x=>linkedEdges.find(e=>e.b.id===x.b.id && e.b.source.range.start===x.b.source.range?.start && e.b.source.range.end===x.b.source.range?.end);
+  const inferredEdge=x=>boxOK(x.box) && repeated(x) && bodySize && sizeOf(x.b) && separatedBody(x) && !artworkNear(x) && (sizeOf(x.b)<bodySize*.9 || peer(x) || linked(x));
+  for(const x of blocks) {
+    if(owned.has(x.b.id)) continue;
+    owned.add(x.b.id); const b=x.b, box=x.box;
+    let kind='paragraph';
+    if(b.kind==='figure' || b.kind==='table') kind='asset';
+    else if(b.kind==='caption' || captionText(b.text)) kind='caption';
+    else if(b.kind==='header' || b.kind==='footer') kind=b.kind;
+    else if(/^\s*\d+\s*$/.test(b.text||'') && Number(b.text)===pi+1 && box[1]>page.height*.93 && Math.abs((box[0]+box[2])/2-page.width/2)<page.width*.12 && (sizeOf(b)||0)<bodySize*.9)kind='footer';
+    else if(decoratedFooter.has(b.id)) kind='footer';
+    else if(inferredEdge(x)) {
+      if(box[1]<page.height*.12) kind='header';
+      else if(box[3]>page.height*.88) kind='footer';
+    }
+    else if(b.kind==='heading' || (bodySize>0 && sizeOf(b)>bodySize*1.3 && (b.text || '').trim().length>=12 && (b.text || '').length<150)) kind='heading';
+    entries.push(make(kind,[x],[],box,x.pos,x.index));
+  }
+  // A presumed running edge cannot move past ordinary text already outside it.
+  // Explicit source roles remain authoritative; inferred edges stay in body order.
+  for(const edge of entries.filter(x=>['header','footer'].includes(x.kind))) {
+    if(edge.blockIds.some(id=>flowBlocks.find(b=>b.id===id)?.kind===edge.kind) || !boxOK(edge.box)) continue;
+    const ordinary=entries.filter(x=>['paragraph','heading'].includes(x.kind) && boxOK(x.box) && x.blockIds.some(id=>flowBlocks.find(b=>b.id===id)?.text?.trim()));
+    if(ordinary.some(x=>edge.kind==='header' ? x.box[3]<=edge.box[1] : x.box[1]>=edge.box[3])) edge.kind='paragraph';
+  }
+}
+
+function groupInlineText({flowBlocks, pi, inline, entries}) {
+  // Short adjacent fragments from one parent often describe styled runs of
+  // a single line cluster (for example, an author list and superscripts).
+  const parentGroups=new Map();
+  for(const b of flowBlocks.filter(b=>b.parentBlockId && b.source.pageIndex===pi)) {
+    if(!parentGroups.has(b.parentBlockId)) parentGroups.set(b.parentBlockId,[]);
+    parentGroups.get(b.parentBlockId).push(b);
+  }
+  for(const group of parentGroups.values()) {
+    if(group.length<3 || group.some(b=>inline.groups.some(g=>g.includes(b)))) continue;
+    group.sort((a,b)=>a.source.range.start-b.source.range.start);
+    const box=union(group.map(b=>b.source.bbox));
+    if(!boxOK(box) || box[3]-box[1]>60 || group.some((b,i)=>i && group[i-1].source.range.end!==b.source.range.start)) continue;
+    const members=group.map(b=>entries.find(e=>e.blockIds.length===1 && e.blockIds[0]===b.id));
+    if(members.some(x=>!x || x.kind!=='paragraph')) continue;
+    const first=members[0]; first.blockIds=group.map(b=>b.id); first.inline=true; first.joiners=Array(group.length-1).fill('');
+    first.box=box; first.source.bbox=[...box];
+    for(const member of members.slice(1)) entries.splice(entries.indexOf(member),1);
+  }
+  for(const group of inline.groups) {
+    const members=group.map(b=>entries.find(e=>e.blockIds.length===1 && e.blockIds[0]===b.id));
+    if(members.some(x=>!x || x.kind!=='paragraph')) continue;
+    const first=members[0]; first.blockIds=group.map(b=>b.id); first.inline=true; first.joiners=Array(group.length-1).fill('');
+    first.box=union(members.map(x=>x.box)); first.source.bbox=[...first.box];
+    for(const member of members.slice(1)) entries.splice(entries.indexOf(member),1);
+  }
+}
+
+function orderPageEntries({entries, blocks, page, pi, diagnostics}) {
+  const headers=entries.filter(x=>x.kind==='header').sort(geom), footers=entries.filter(x=>x.kind==='footer').sort(geom);
+  for(const edge of [...headers,...footers]) entries.splice(entries.indexOf(edge),1);
+  let continuousOrder=null;
+  if(entries.some(x=>!boxOK(x.box)) || !Number.isFinite(page.width)) {
+    diagnostics.push({code:'reading-order-fallback',pageIndex:pi,detail:'Missing geometry; reader order retained.'}); entries.sort(reading);
+  } else {
+    // Find central gaps using individual source line boxes, excluding wide spanning lines.
+    const lineBoxes=blocks.filter(x=>x.b.text && !ownedByAsset(x,entries)).flatMap(x=>{const lines=x.b.source?.lines?.map(l=>l.bbox).filter(boxOK) || [];return lines.length?lines:[x.box];}).filter(boxOK);
+    const candidates=[];
+    for(let mid=page.width*.25;mid<=page.width*.75;mid+=Math.max(1,page.width/400)) {
+      const left=lineBoxes.filter(b=>b[2]<mid && b[2]>page.width*.2 && b[2]-b[0]>page.width*.25),right=lineBoxes.filter(b=>b[0]>mid && b[0]<page.width*.8 && b[2]-b[0]>page.width*.25);
+      if(left.length<2 || right.length<2 || !left.some(a=>right.some(b=>a[1]<b[3] && b[1]<a[3]))) continue;
+      const l=Math.max(...left.map(b=>b[2])),r=Math.min(...right.map(b=>b[0]));
+      if(r-l>=Math.max(8,page.width*.015)) candidates.push({mid:(l+r)/2,l,r,score:Math.min(left.length,right.length)});
+    }
+    candidates.sort((a,b)=>b.score-a.score || Math.abs(a.mid-page.width/2)-Math.abs(b.mid-page.width/2));
+    const g=candidates[0];
+    if(!g) {entries.sort(geom); diagnostics.push({code:'single-column-or-unresolved',pageIndex:pi});}
+    else {
+      // A union across two measured caption columns is not a single wide
+      // source line. Keep its first member as the reading-order anchor.
+      const splitCaption=x=>x.kind==='caption' && x.memberBoxes?.length>1 && x.memberBoxes.every(b=>b[2]<=g.mid || b[0]>=g.mid) && x.memberBoxes.some(b=>b[2]<=g.mid) && x.memberBoxes.some(b=>b[0]>=g.mid);
+      for(const item of entries.filter(splitCaption)) item.measuredColumns=2;
+      if(entries.some(splitCaption)) {
+        const layoutBox=x=>splitCaption(x)?x.memberBoxes[0]:x.box;
+        const spans2=entries.filter(x=>!splitCaption(x) && x.box[0]<g.mid && x.box[2]>g.mid).sort(geom);
+        const side2=entries.filter(x=>!spans2.includes(x)), groups2=[];
+        for(const s of spans2) {const last=groups2.at(-1); if(last && s.box[1]<last.bottom) {last.items.push(s);last.bottom=Math.max(last.bottom,s.box[3]);} else groups2.push({items:[s],top:s.box[1],bottom:s.box[3]});}
+        for(const c of side2.filter(x=>x.kind==='caption')) if(side2.some(x=>x!==c && x.kind==='paragraph' && x.box[3]<c.box[1]-5) && !groups2.some(g=>c.box[1]>=g.top && c.box[1]<g.bottom)) groups2.push({items:[],top:c.box[1],bottom:c.box[1]});
+        groups2.sort((a,b)=>a.top-b.top); const bands2=Array.from({length:groups2.length+1},()=>[]);
+        for(const x of side2) {let n=groups2.findIndex(g=>x.box[1]<g.bottom && x.box[3]>g.top);if(n>=0) groups2[n].items.push(x);else {n=groups2.findIndex(g=>x.box[3]<=g.top);bands2[n<0?groups2.length:n].push(x);}}
+        continuousOrder=[];
+        for(let i=0;i<bands2.length;i++) {const xs=bands2[i],left=xs.filter(x=>layoutBox(x)[2]<=g.mid).sort(geom),right=xs.filter(x=>layoutBox(x)[0]>=g.mid).sort(geom),both=(left.length && right.length)||xs.some(splitCaption);for(const x of xs) x.continuousColumns=both?2:1;continuousOrder.push(...left,...right);if(groups2[i]) continuousOrder.push(...groups2[i].items.sort(geom));}
+      }
+      const spans=entries.filter(x=>x.box[0]<g.mid && x.box[2]>g.mid).sort(geom);
+      const side=entries.filter(x=>!spans.includes(x));
+      // Spanning objects define local bands; overlapping side objects stay in the same band.
+      const groups=[]; for(const s of spans) {const last=groups.at(-1);if(last && s.box[1]<last.bottom) {last.items.push(s);last.bottom=Math.max(last.bottom,s.box[3]);} else groups.push({items:[s],top:s.box[1],bottom:s.box[3]});}
+      // A caption beginning below body text starts a new two-column band.
+      for(const c of side.filter(x=>x.kind==='caption')) if(side.some(x=>x!==c && x.kind==='paragraph' && x.box[3]<c.box[1]-5) && !groups.some(g=>c.box[1]>=g.top && c.box[1]<g.bottom)) groups.push({items:[],top:c.box[1],bottom:c.box[1]});
+      groups.sort((a,b)=>a.top-b.top);
+      const bands=Array.from({length:groups.length+1},()=>[]);
+      for(const x of side) {let n=groups.findIndex(g=>x.box[1]<g.bottom && x.box[3]>g.top);if(n>=0) {groups[n].items.push(x);diagnostics.push({code:'band-overlap',pageIndex:pi,itemId:x.id});} else {n=groups.findIndex(g=>x.box[3]<=g.top);bands[n<0?groups.length:n].push(x);}}
+      const orderBand=xs=>{const left=xs.filter(x=>x.box[2]<=g.mid).sort(geom),right=xs.filter(x=>x.box[0]>=g.mid).sort(geom);const both=left.length && right.length;for(const x of xs) {x.columns=both?2:1;x.span=both?'column':'page';}return [...left,...right];};
+      const ordered=[];for(let i=0;i<bands.length;i++){ordered.push(...orderBand(bands[i]));if(groups[i]) ordered.push(...groups[i].items.sort(geom));} entries.splice(0,entries.length,...ordered);
+      diagnostics.push({code:'geometry-order-heuristic',pageIndex:pi,gutter:[g.l,g.r]});
+    }
+  }
+  for(const header of headers) {
+    const at=entries.findIndex(e=>boxOK(e.box) && e.box[1]>=header.box[1]);
+    entries.splice(at<0?entries.length:at,0,header);
+    if(continuousOrder) {const n=continuousOrder.findIndex(e=>boxOK(e.box) && e.box[1]>=header.box[1]);continuousOrder.splice(n<0?continuousOrder.length:n,0,header);}
+  }
+  if(continuousOrder) [...continuousOrder,...footers].forEach((item,i)=>item.continuousPosition=i);
+  return {entries, footers};
+}
+
+function findRepeatedEdges({textBlocks, document, drawings}) {
   const repeats=new Map();
   for(const b of textBlocks) {const page=document.pages.find(p=>p.sourcePageIndex===b.source?.pageIndex),box=b.source?.bbox;if(!page || !boxOK(box) || !(box[1]<page.height*.12 || box[3]>page.height*.88)) continue;const key=b.text.trim().replace(/\s+/g,' ');if(key) {if(!repeats.has(key)) repeats.set(key,new Set()); repeats.get(key).add(b.source.pageIndex);}}
   // A shallow page-wide filled band can sit behind several repeated footer
@@ -265,6 +508,24 @@ export function buildPaperFlow(document, {drawings=document?.drawings || [], lin
       if(matchingPages.length>=3 && bodyPages.length>=2) for(const b of members) decoratedFooter.add(b.id);
     }
   }
+  return {repeats, decoratedFooter};
+}
+
+/** Produce a deterministic, source-bound reading order and ownership proposal. */
+export function buildPaperFlow(document, {drawings=document?.drawings || [], links} = {}) {
+  if (document?.schema !== 'falsify.paper-document.v1' || !Array.isArray(document.pages) || !Array.isArray(document.blocks) || !Array.isArray(document.assets)) throw new TypeError('Expected falsify.paper-document.v1');
+  const items=[],relations=[],diagnostics=[],fragments=[],regions=[];
+  const styles=new Map((document.styles || []).map(s=>[s.id,s]));
+  const evidence=(document.occlusions || []).filter(e=>e.sourceSha256===document.sourceSha256 && Array.isArray(e.ranges) && e.proof?.changedChannels===0 && e.proof?.removedCharacters>0);
+  let flowBlocks=document.blocks.flatMap(b=>occlusionFragments(b,evidence.filter(e=>e.pageIndex===b.source?.pageIndex),document.sourceSha256)).flatMap(b=>splitBlock(b,document.sourceSha256,styles));
+  const inline=inlineFragments(flowBlocks,document.sourceSha256);
+  flowBlocks=flowBlocks.flatMap(b=>inline.replacements.has(b.id) ? (inline.replacements.get(b.id) || [b]) : [b]);
+  fragments.push(...flowBlocks.filter(b=>b.parentBlockId));
+  const textBlocks=flowBlocks.filter(b=>b.text);
+  const sizeOf=b=>median((b.source?.characters || []).map(c=>styles.get(c.styleId)?.size).filter(Number.isFinite)) || styles.get(b.styleId)?.size || 0;
+  const bodySize=median(textBlocks.flatMap(b=>(b.source?.characters || []).map(c=>styles.get(c.styleId)?.size).filter(Number.isFinite))) || median(textBlocks.map(sizeOf).filter(Boolean));
+  const linkedEdges=linkedEdgeCandidates(document,links);
+  const {repeats, decoratedFooter} = findRepeatedEdges({textBlocks, document, drawings});
   for (const page of document.pages) {
     const pi=page.sourcePageIndex;
     const blocks=flowBlocks.map((b,index)=>({b,index,box:b.source?.bbox,pos:b.source?.readerPosition})).filter(x=>x.b.source?.pageIndex===pi);
@@ -275,240 +536,20 @@ export function buildPaperFlow(document, {drawings=document?.drawings || [], lin
     // Connected line grids are evidence of a vector table. Keep captions and
     // notes outside the measured grid and capture the grid with its cell text.
     const paths=drawings.filter(d=>d.pageIndex===pi && boxOK(d.bbox)).map(d=>d.bbox);
-    // Outline-heavy forms may have no extractable labels at all. Restrict this
-    // classification to pages without ordinary central body text, and include
-    // every observed occurrence in the measured crop.
-    const centralText=blocks.filter(x=>x.b.text?.trim() && (!boxOK(x.box) || (x.box[1]<page.height*.9 && x.box[3]>page.height*.1)));
-    let form=false;
-    if(paths.length>=2000 && centralText.length===0 && blocks.every(x=>boxOK(x.box)) && assets.every(x=>boxOK(x.box))) {
-      const raw=union([...paths,...blocks.map(x=>x.box),...assets.map(x=>x.box)]);
-      const box=[Math.max(0,raw[0]-1),Math.max(0,raw[1]-1),Math.min(page.width,raw[2]+1),Math.min(page.height,raw[3]+1)];
-      if(boxOK(box) && box[2]-box[0]>page.width*.5 && box[3]-box[1]>page.height*.5 && [...paths,...blocks.map(x=>x.box),...assets.map(x=>x.box)].every(b=>contains(box,b))) {
-        const id=`region-${hex(new TextEncoder().encode(JSON.stringify([document.sourceSha256,pi,box]))).slice(0,24)}`;
-        const entry=make('asset',blocks,assets,box,Math.min(...blocks.map(x=>x.pos ?? Infinity)),0);
-        entry.renderAssetId=id; entries.push(entry);
-        regions.push({id,pageIndex:pi,bbox:[...box],blockIds:blocks.map(x=>x.b.id),assetIds:assets.map(x=>x.a.id),classification:'outline-artwork'});
-        blocks.forEach(x=>owned.add(x.b.id)); assets.forEach(x=>represented.add(x.a.id)); form=true;
-      }
-    }
+    const form = captureOutlineArtwork({blocks, assets, paths, page, pi, document, make, entries, regions, owned, represented});
     const captions=blocks.filter(x=>boxOK(x.box) && /^\s*(?:extended\s+data\s+)?(?:fig(?:ure)?\.?|table)\s*\d/i.test(x.b.text || ''));
     const plotBottom=Math.min(page.height*.9,...captions.map(x=>x.box[1]));
     const plotText=blocks.filter(x=>x.b.text && boxOK(x.box) && x.box[1]>=page.height*.05 && x.box[3]<=plotBottom);
     const plotPaths=paths.filter(b=>b[0]>=0 && b[1]>=page.height*.05 && b[2]<=page.width && b[3]<=plotBottom);
-    let plot=false;
-    // Multiple separated image occurrences can be panels of one figure. Use
-    // narrative and caption geometry as hard vertical boundaries; a crop is
-    // accepted only when no excluded text or image intersects it.
-    if(!form) {
-      const central=blocks.filter(x=>x.b.text && boxOK(x.box) && x.box[1]>=page.height*.05 && x.box[3]<=page.height*.9);
-      const narrative=x=>{
-        const lines=x.b.source?.lines || [];
-        return captions.includes(x) || (bodySize && sizeOf(x.b)>=bodySize*.88 && x.box[2]-x.box[0]>=page.width*.3 && (lines.length>=2 || x.b.text.trim().length>=55));
-      };
-      const barriers=central.filter(narrative).sort(geom);
-      const limits=[page.height*.05,...barriers.flatMap(x=>[x.box[1],x.box[3]]),page.height*.9].sort((a,b)=>a-b);
-      for(let i=0;i<limits.length-1;i++) {
-        const top=limits[i],bottom=limits[i+1];
-        if(bottom<=top || barriers.some(x=>x.box[1]<bottom && x.box[3]>top)) continue;
-        const as=assets.filter(x=>!represented.has(x.a.id) && boxOK(x.box) && x.box[1]>=top && x.box[3]<=bottom);
-        if(as.length<2) continue;
-        const labels=central.filter(x=>!owned.has(x.b.id) && !narrative(x) && x.box[1]>=top && x.box[3]<=bottom);
-        if(labels.length<3) continue;
-        const ps=paths.filter(b=>b[1]>=top && b[3]<=bottom);
-        const raw=union([...as.map(x=>x.box),...labels.map(x=>x.box),...ps]);
-        // Painted strokes and glyph ink can extend beyond their geometric
-        // bounds. Include a small margin, subject to the same exclusion check.
-        const box=[Math.max(0,raw[0]-2),Math.max(0,raw[1]-2),Math.min(page.width,raw[2]+2),Math.min(page.height,raw[3]+2)];
-        if(box[2]-box[0]<page.width*.4 || box[3]-box[1]<page.height*.2) continue;
-        if(blocks.some(x=>x.b.text && boxOK(x.box) && overlap(box,x.box) && !labels.includes(x)) || assets.some(x=>boxOK(x.box) && overlap(box,x.box) && !as.includes(x))) continue;
-        const bs=[...labels,...blocks.filter(x=>!owned.has(x.b.id) && (x.b.assetIds || []).some(id=>as.some(a=>a.a.id===id)))];
-        bs.forEach(x=>owned.add(x.b.id)); as.forEach(x=>represented.add(x.a.id));
-        const id=`region-${hex(new TextEncoder().encode(JSON.stringify([document.sourceSha256,pi,box]))).slice(0,24)}`;
-        const entry=make('asset',bs,as,box,Math.min(...bs.map(x=>x.pos ?? Infinity)),Math.min(...bs.map(x=>x.index)));
-        entry.renderAssetId=id; entries.push(entry);
-        regions.push({id,pageIndex:pi,bbox:[...box],blockIds:bs.map(x=>x.b.id),assetIds:as.map(x=>x.a.id),classification:'compound-figure'});
-        plot=true;
-      }
-    }
-    // Establish the artwork extent before considering text. Nearby short,
-    // single-line labels may extend just outside it; prose remains independent.
-    if(!form && !plot && plotPaths.length>=1000) {
-      const artwork=union(plotPaths);
-      const plotBlocks=plotText.filter(x=>{
-        const text=x.b.text.trim(), lines=x.b.source?.lines || [];
-        const dx=Math.max(artwork[0]-x.box[2],x.box[0]-artwork[2],0);
-        const dy=Math.max(artwork[1]-x.box[3],x.box[1]-artwork[3],0);
-        const distance=Math.max(10,Math.min(15,(sizeOf(x.b) || x.box[3]-x.box[1])*1.5));
-        const smallArtworkText=contains(artwork,x.box) && bodySize && sizeOf(x.b) && sizeOf(x.b)<=bodySize*.9;
-        return smallArtworkText || (text.length<=30 && text.split(/\s+/).length<=3 && !/[.!?]\s*$/.test(text) && lines.length<=1 &&
-          (text.length<=2 || !bodySize || !sizeOf(x.b) || sizeOf(x.b)<=bodySize*1.1) && dx<=distance && dy<=distance);
-      });
-      let box=union([artwork,...plotBlocks.map(x=>x.box)]);
-      const touching=assets.filter(x=>boxOK(x.box) && overlap(box,x.box));
-      if(touching.every(x=>x.box[0]>=0 && x.box[1]>=page.height*.05 && x.box[2]<=page.width && x.box[3]<=plotBottom)) box=union([box,...touching.map(x=>x.box)]);
-      if(plotBlocks.length>=20 && !blocks.some(x=>x.b.text && boxOK(x.box) && overlap(box,x.box) && !plotBlocks.includes(x)) && touching.every(x=>contains(box,x.box)) && box[2]-box[0]>page.width*.4 && box[3]-box[1]>page.height*.2) {
-        const as=assets.filter(x=>boxOK(x.box) && contains(box,x.box));
-        const figureBlocks=blocks.filter(x=>(x.b.assetIds || []).some(id=>as.some(a=>a.a.id===id)));
-        plotBlocks.push(...figureBlocks.filter(x=>!plotBlocks.includes(x)));
-        plotBlocks.forEach(x=>owned.add(x.b.id)); as.forEach(x=>represented.add(x.a.id));
-        const id=`region-${hex(new TextEncoder().encode(JSON.stringify([document.sourceSha256,pi,box]))).slice(0,24)}`;
-        const entry=make('asset',plotBlocks,as,box,Math.min(...plotBlocks.map(x=>x.pos ?? Infinity)),plotBlocks[0].index);
-        entry.renderAssetId=id;entries.push(entry);
-        regions.push({id,pageIndex:pi,bbox:[...box],blockIds:plotBlocks.map(x=>x.b.id),assetIds:as.map(x=>x.a.id)});
-        plot=true;
-      }
-    }
+    let plot = captureCompoundFigures({form, blocks, assets, paths, page, pi, document, make, entries, regions, owned, represented, captions, bodySize, sizeOf});
+    plot = captureVectorPlot({form, plot, plotPaths, plotText, blocks, assets, page, pi, document, make, entries, regions, owned, represented, bodySize, sizeOf, plotBottom});
     if(!form && !plot && paths.length>2000) diagnostics.push({code:'dense-vector-region-unresolved',pageIndex:pi});
-    const seen=new Set();
-    for(let n=0;n<(form || plot || paths.length>2000?0:paths.length);n++) {
-      if(seen.has(n)) continue;
-      const cluster=[n];seen.add(n);
-      for(let k=0;k<cluster.length;k++) for(let j=0;j<paths.length;j++) {
-        if(seen.has(j)) continue;
-        const a=paths[cluster[k]],b=paths[j];
-        if(a[0]<=b[2]+1 && b[0]<=a[2]+1 && a[1]<=b[3]+1 && b[1]<=a[3]+1) {seen.add(j);cluster.push(j);}
-      }
-      if(cluster.length<10) continue;
-      const boxes=cluster.map(i=>paths[i]), box=union(boxes);
-      const horizontal=boxes.filter(b=>b[2]-b[0]>10 && b[3]-b[1]<3).length;
-      const vertical=boxes.filter(b=>b[3]-b[1]>10 && b[2]-b[0]<3).length;
-      if(horizontal<3 || vertical<3 || box[2]-box[0]<40 || box[3]-box[1]<20) continue;
-      const bs=blocks.filter(x=>x.b.text && !owned.has(x.b.id) && boxOK(x.box) && contains(box,x.box));
-      if(bs.length<4 || blocks.some(x=>x.b.text && boxOK(x.box) && overlap(box,x.box) && !bs.includes(x)) || assets.some(x=>boxOK(x.box) && overlap(box,x.box) && !contains(box,x.box))) continue;
-      const as=assets.filter(x=>!represented.has(x.a.id) && boxOK(x.box) && contains(box,x.box));
-      bs.push(...blocks.filter(x=>!owned.has(x.b.id) && !bs.includes(x) && (x.b.assetIds || []).some(id=>as.some(a=>a.a.id===id))));
-      bs.forEach(x=>owned.add(x.b.id)); as.forEach(x=>represented.add(x.a.id));
-      const id=`region-${hex(new TextEncoder().encode(JSON.stringify([document.sourceSha256,pi,box]))).slice(0,24)}`;
-      const entry=make('asset',bs,as,box,Math.min(...bs.map(x=>x.pos ?? Infinity)),bs[0].index);
-      entry.renderAssetId=id; entries.push(entry);
-      regions.push({id,pageIndex:pi,bbox:[...box],blockIds:bs.map(x=>x.b.id),assetIds:as.map(x=>x.a.id)});
-    }
-    // Group overlapping image occurrences. Only fully contained text is owned as artwork.
-    for(const a of assets) {
-      if(represented.has(a.a.id)) continue;
-      const group=[a];represented.add(a.a.id);
-      if(boxOK(a.box)) for(let i=0;i<group.length;i++) for(const other of assets) if(!represented.has(other.a.id) && boxOK(other.box) && overlap(group[i].box,other.box)) {group.push(other);represented.add(other.a.id);}
-      const box=group.every(x=>boxOK(x.box))?union(group.map(x=>x.box)):null;
-      const proofs=evidence.filter(e=>e.pageIndex===pi && group.some(y=>y.a.id===e.assetId));
-      const confirmed=x=>x.b.text && x.b.source?.range && proofs.some(e=>{const r=x.b.source.range;return e.ranges.some(z=>z.start<=r.start && z.end>=r.end);});
-      const bs=blocks.filter(x=>!owned.has(x.b.id) && ((x.b.assetIds || []).some(id=>group.some(y=>y.a.id===id)) || confirmed(x)));
-      bs.forEach(x=>owned.add(x.b.id));
-      const entry=make('asset',bs,group,box,a.pos,a.index);
-      if(proofs.length && bs.some(confirmed) && boxOK(box)) {
-        const id=`region-${hex(new TextEncoder().encode(JSON.stringify([document.sourceSha256,pi,box]))).slice(0,24)}`;
-        entry.renderAssetId=id;regions.push({id,pageIndex:pi,bbox:[...box],blockIds:bs.map(x=>x.b.id),assetIds:group.map(x=>x.a.id),classification:'verified-occlusion'});
-      }
-      entries.push(entry);
-    }
-    const artworkNear=x=>paths.some(p=>overlap(p,x.box)) || assets.some(a=>boxOK(a.box) && a.box[0]<x.box[2]+15 && a.box[2]>x.box[0]-15 && a.box[1]<x.box[3]+15 && a.box[3]>x.box[1]-15);
-    const repeated=x=>repeats.get(textKey(x.b))?.size>=2;
-    const peer=x=>blocks.some(y=>y!==x && y.b.text?.trim() && boxOK(y.box) && repeated(y) && y.box[1]<x.box[3] && x.box[1]<y.box[3] && (y.box[2]<x.box[0] || x.box[2]<y.box[0]) && !artworkNear(y));
-    const separatedBody=x=>blocks.some(y=>y!==x && y.b.text && boxOK(y.box) && y.box[1]>=page.height*.12 && y.box[3]<=page.height*.88);
-    const linked=x=>linkedEdges.find(e=>e.b.id===x.b.id && e.b.source.range.start===x.b.source.range?.start && e.b.source.range.end===x.b.source.range?.end);
-    const inferredEdge=x=>boxOK(x.box) && repeated(x) && bodySize && sizeOf(x.b) && separatedBody(x) && !artworkNear(x) && (sizeOf(x.b)<bodySize*.9 || peer(x) || linked(x));
-    for(const x of blocks) {
-      if(owned.has(x.b.id)) continue;
-      owned.add(x.b.id); const b=x.b, box=x.box;
-      let kind='paragraph';
-      if(b.kind==='figure' || b.kind==='table') kind='asset';
-      else if(b.kind==='caption' || captionText(b.text)) kind='caption';
-      else if(b.kind==='header' || b.kind==='footer') kind=b.kind;
-      else if(/^\s*\d+\s*$/.test(b.text||'') && Number(b.text)===pi+1 && box[1]>page.height*.93 && Math.abs((box[0]+box[2])/2-page.width/2)<page.width*.12 && (sizeOf(b)||0)<bodySize*.9)kind='footer';
-      else if(decoratedFooter.has(b.id)) kind='footer';
-      else if(inferredEdge(x)) {
-        if(box[1]<page.height*.12) kind='header';
-        else if(box[3]>page.height*.88) kind='footer';
-      }
-      else if(b.kind==='heading' || (bodySize>0 && sizeOf(b)>bodySize*1.3 && (b.text || '').trim().length>=12 && (b.text || '').length<150)) kind='heading';
-      entries.push(make(kind,[x],[],box,x.pos,x.index));
-    }
-    // A presumed running edge cannot move past ordinary text already outside it.
-    // Explicit source roles remain authoritative; inferred edges stay in body order.
-    for(const edge of entries.filter(x=>['header','footer'].includes(x.kind))) {
-      if(edge.blockIds.some(id=>flowBlocks.find(b=>b.id===id)?.kind===edge.kind) || !boxOK(edge.box)) continue;
-      const ordinary=entries.filter(x=>['paragraph','heading'].includes(x.kind) && boxOK(x.box) && x.blockIds.some(id=>flowBlocks.find(b=>b.id===id)?.text?.trim()));
-      if(ordinary.some(x=>edge.kind==='header' ? x.box[3]<=edge.box[1] : x.box[1]>=edge.box[3])) edge.kind='paragraph';
-    }
-    // Short adjacent fragments from one parent often describe styled runs of
-    // a single line cluster (for example, an author list and superscripts).
-    const parentGroups=new Map();
-    for(const b of flowBlocks.filter(b=>b.parentBlockId && b.source.pageIndex===pi)) {
-      if(!parentGroups.has(b.parentBlockId)) parentGroups.set(b.parentBlockId,[]);
-      parentGroups.get(b.parentBlockId).push(b);
-    }
-    for(const group of parentGroups.values()) {
-      if(group.length<3 || group.some(b=>inline.groups.some(g=>g.includes(b)))) continue;
-      group.sort((a,b)=>a.source.range.start-b.source.range.start);
-      const box=union(group.map(b=>b.source.bbox));
-      if(!boxOK(box) || box[3]-box[1]>60 || group.some((b,i)=>i && group[i-1].source.range.end!==b.source.range.start)) continue;
-      const members=group.map(b=>entries.find(e=>e.blockIds.length===1 && e.blockIds[0]===b.id));
-      if(members.some(x=>!x || x.kind!=='paragraph')) continue;
-      const first=members[0]; first.blockIds=group.map(b=>b.id); first.inline=true; first.joiners=Array(group.length-1).fill('');
-      first.box=box; first.source.bbox=[...box];
-      for(const member of members.slice(1)) entries.splice(entries.indexOf(member),1);
-    }
-    for(const group of inline.groups) {
-      const members=group.map(b=>entries.find(e=>e.blockIds.length===1 && e.blockIds[0]===b.id));
-      if(members.some(x=>!x || x.kind!=='paragraph')) continue;
-      const first=members[0]; first.blockIds=group.map(b=>b.id); first.inline=true; first.joiners=Array(group.length-1).fill('');
-      first.box=union(members.map(x=>x.box)); first.source.bbox=[...first.box];
-      for(const member of members.slice(1)) entries.splice(entries.indexOf(member),1);
-    }
+    captureVectorTables({form, plot, paths, blocks, assets, pi, document, make, entries, regions, owned, represented});
+    captureImageAssets({assets, blocks, pi, document, make, entries, regions, owned, represented, evidence});
+    classifyPageText({paths, assets, blocks, repeats, linkedEdges, bodySize, sizeOf, page, pi, decoratedFooter, owned, entries, make, flowBlocks});
+    groupInlineText({flowBlocks, pi, inline, entries});
     groupAndAssociateCaptions({entries, flowBlocks, styles, page, pi, diagnostics, relations});
-    const headers=entries.filter(x=>x.kind==='header').sort(geom), footers=entries.filter(x=>x.kind==='footer').sort(geom);
-    for(const edge of [...headers,...footers]) entries.splice(entries.indexOf(edge),1);
-    let continuousOrder=null;
-    if(entries.some(x=>!boxOK(x.box)) || !Number.isFinite(page.width)) {
-      diagnostics.push({code:'reading-order-fallback',pageIndex:pi,detail:'Missing geometry; reader order retained.'}); entries.sort(reading);
-    } else {
-      // Find central gaps using individual source line boxes, excluding wide spanning lines.
-      const lineBoxes=blocks.filter(x=>x.b.text && !ownedByAsset(x,entries)).flatMap(x=>{const lines=x.b.source?.lines?.map(l=>l.bbox).filter(boxOK) || [];return lines.length?lines:[x.box];}).filter(boxOK);
-      const candidates=[];
-      for(let mid=page.width*.25;mid<=page.width*.75;mid+=Math.max(1,page.width/400)) {
-        const left=lineBoxes.filter(b=>b[2]<mid && b[2]>page.width*.2 && b[2]-b[0]>page.width*.25),right=lineBoxes.filter(b=>b[0]>mid && b[0]<page.width*.8 && b[2]-b[0]>page.width*.25);
-        if(left.length<2 || right.length<2 || !left.some(a=>right.some(b=>a[1]<b[3] && b[1]<a[3]))) continue;
-        const l=Math.max(...left.map(b=>b[2])),r=Math.min(...right.map(b=>b[0]));
-        if(r-l>=Math.max(8,page.width*.015)) candidates.push({mid:(l+r)/2,l,r,score:Math.min(left.length,right.length)});
-      }
-      candidates.sort((a,b)=>b.score-a.score || Math.abs(a.mid-page.width/2)-Math.abs(b.mid-page.width/2));
-      const g=candidates[0];
-      if(!g) {entries.sort(geom); diagnostics.push({code:'single-column-or-unresolved',pageIndex:pi});}
-      else {
-        // A union across two measured caption columns is not a single wide
-        // source line. Keep its first member as the reading-order anchor.
-        const splitCaption=x=>x.kind==='caption' && x.memberBoxes?.length>1 && x.memberBoxes.every(b=>b[2]<=g.mid || b[0]>=g.mid) && x.memberBoxes.some(b=>b[2]<=g.mid) && x.memberBoxes.some(b=>b[0]>=g.mid);
-        for(const item of entries.filter(splitCaption)) item.measuredColumns=2;
-        if(entries.some(splitCaption)) {
-          const layoutBox=x=>splitCaption(x)?x.memberBoxes[0]:x.box;
-          const spans2=entries.filter(x=>!splitCaption(x) && x.box[0]<g.mid && x.box[2]>g.mid).sort(geom);
-          const side2=entries.filter(x=>!spans2.includes(x)), groups2=[];
-          for(const s of spans2) {const last=groups2.at(-1); if(last && s.box[1]<last.bottom) {last.items.push(s);last.bottom=Math.max(last.bottom,s.box[3]);} else groups2.push({items:[s],top:s.box[1],bottom:s.box[3]});}
-          for(const c of side2.filter(x=>x.kind==='caption')) if(side2.some(x=>x!==c && x.kind==='paragraph' && x.box[3]<c.box[1]-5) && !groups2.some(g=>c.box[1]>=g.top && c.box[1]<g.bottom)) groups2.push({items:[],top:c.box[1],bottom:c.box[1]});
-          groups2.sort((a,b)=>a.top-b.top); const bands2=Array.from({length:groups2.length+1},()=>[]);
-          for(const x of side2) {let n=groups2.findIndex(g=>x.box[1]<g.bottom && x.box[3]>g.top);if(n>=0) groups2[n].items.push(x);else {n=groups2.findIndex(g=>x.box[3]<=g.top);bands2[n<0?groups2.length:n].push(x);}}
-          continuousOrder=[];
-          for(let i=0;i<bands2.length;i++) {const xs=bands2[i],left=xs.filter(x=>layoutBox(x)[2]<=g.mid).sort(geom),right=xs.filter(x=>layoutBox(x)[0]>=g.mid).sort(geom),both=(left.length && right.length)||xs.some(splitCaption);for(const x of xs) x.continuousColumns=both?2:1;continuousOrder.push(...left,...right);if(groups2[i]) continuousOrder.push(...groups2[i].items.sort(geom));}
-        }
-        const spans=entries.filter(x=>x.box[0]<g.mid && x.box[2]>g.mid).sort(geom);
-        const side=entries.filter(x=>!spans.includes(x));
-        // Spanning objects define local bands; overlapping side objects stay in the same band.
-        const groups=[]; for(const s of spans) {const last=groups.at(-1);if(last && s.box[1]<last.bottom) {last.items.push(s);last.bottom=Math.max(last.bottom,s.box[3]);} else groups.push({items:[s],top:s.box[1],bottom:s.box[3]});}
-        // A caption beginning below body text starts a new two-column band.
-        for(const c of side.filter(x=>x.kind==='caption')) if(side.some(x=>x!==c && x.kind==='paragraph' && x.box[3]<c.box[1]-5) && !groups.some(g=>c.box[1]>=g.top && c.box[1]<g.bottom)) groups.push({items:[],top:c.box[1],bottom:c.box[1]});
-        groups.sort((a,b)=>a.top-b.top);
-        const bands=Array.from({length:groups.length+1},()=>[]);
-        for(const x of side) {let n=groups.findIndex(g=>x.box[1]<g.bottom && x.box[3]>g.top);if(n>=0) {groups[n].items.push(x);diagnostics.push({code:'band-overlap',pageIndex:pi,itemId:x.id});} else {n=groups.findIndex(g=>x.box[3]<=g.top);bands[n<0?groups.length:n].push(x);}}
-        const orderBand=xs=>{const left=xs.filter(x=>x.box[2]<=g.mid).sort(geom),right=xs.filter(x=>x.box[0]>=g.mid).sort(geom);const both=left.length && right.length;for(const x of xs) {x.columns=both?2:1;x.span=both?'column':'page';}return [...left,...right];};
-        const ordered=[];for(let i=0;i<bands.length;i++){ordered.push(...orderBand(bands[i]));if(groups[i]) ordered.push(...groups[i].items.sort(geom));} entries.splice(0,entries.length,...ordered);
-        diagnostics.push({code:'geometry-order-heuristic',pageIndex:pi,gutter:[g.l,g.r]});
-      }
-    }
-    for(const header of headers) {
-      const at=entries.findIndex(e=>boxOK(e.box) && e.box[1]>=header.box[1]);
-      entries.splice(at<0?entries.length:at,0,header);
-      if(continuousOrder) {const n=continuousOrder.findIndex(e=>boxOK(e.box) && e.box[1]>=header.box[1]);continuousOrder.splice(n<0?continuousOrder.length:n,0,header);}
-    }
-    if(continuousOrder) [...continuousOrder,...footers].forEach((item,i)=>item.continuousPosition=i);
+    const {footers} = orderPageEntries({entries, blocks, page, pi, diagnostics});
     items.push(...[...entries,...footers].map(({box,pos,index,memberBoxes,...item})=>item));
   }
   associateCrossPageCaptions({document, fragments, items, relations, diagnostics, regions});
