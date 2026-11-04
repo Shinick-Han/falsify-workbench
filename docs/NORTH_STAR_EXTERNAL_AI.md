@@ -420,3 +420,13 @@ Cursor Grok 4.7 xhigh fast 작업자를 코어·출력·UI·독립 QA·후속 �
 공개 PLOS 논문 Fig3의 래스터 준비는 색조별 중복 추적을 줄인 뒤 약9.1초였다. 편집 사본의17쪽 수·전체 텍스트·영역 밖 픽셀 검사가 통과했다. 이 검사는 원본 보존 검사이며 전체 그래프 수치 복원 정확도를 뜻하지 않는다. 최상위 filled 직사각/원형 mark와 색 래스터가 현재 조작 범위이며, Form 내부 mark·복합/패턴 채움·래스터 검은 곡선 자동 분리는 남은 범위다. 기존 이미지 교체와 고급 재그리기를 유지한다.
 
 구현/검증 자료는 소스 밖 coordination/chart-oss-benchmark-20261103/accuracy-v2/shape-implementation에 보관하고 검증된 WorkBite T-0152에 기록한다. 이번 작업은 개발 소스이며 공개 웹·설치본은 alpha.48을 유지한다. macOS/Windows CI 검사 경로를 추가했으며 이 커밋의 원격 CI·배포는 아직 실행하지 않았다.
+
+## 2026-11-04 alpha.49 공개 웹·설치본 교체 완료
+
+사용자의 배포 요청에 따라 069b7bd1ad7c1dd665fe68eb8e788572fa397912를 alpha.49로 공개했다. GitHub Actions 41748548511의 Linux·Windows·macOS ARM/Intel 및 Pages 배포가 모두 통과했다. 공개 핵심 자산 10개의 바이트가 해당 커밋과 일치하며, 공개 ZIP 146744000바이트의 SHA-256은 1e3b46014694b525e339b2bd5456b8a3ee53b2b80b7d046327462aed3df70762다. v0.2.0-alpha.49 태그도 같은 커밋을 가리킨다.
+
+설치본 falsify-public의 릴리스 파일 1217개를 대조했고 개인 설정·기록 36개를 보존했다. 기존 서버 진입점을 통해 7816에서 실행 중이며, 실제 HTTP 그래프 준비·미리보기·PDF 생성·undo 원본 바이트 일치가 통과했다. 합성 출력의 페이지·전체 텍스트·영역 밖 픽셀 검사는 passed이며, 일반 논문 전체의 그래프 복원 정확도를 측정한 것은 아니다. 모델 호출은 0회다.
+
+배포 중 Intel용 pikepdf 바이너리 설치를 10.13.0.post1 플랫폼 조건으로 수정했다. POSIX에서 짧은 communicate 제한 뒤 stdin 일부가 남는 교착은 단일 전송과 별도 취소 감시로 해결했다. 실제 지연 입력·취소·시간 제한 3개 회귀 검사를 추가했고 모든 플랫폼에서 통과했다. 미리보기 테스트가 비활성 적용 버튼을 누르던 비동기 순서도 준비 완료를 기다리도록 수정했다.
+
+최종 영수증은 소스 밖 coordination/chart-oss-benchmark-20261103/accuracy-v2/shape-implementation/release-alpha49-published/deployment-status.json에 보관했다. 검증된 WorkBite T-0152에 wb.checkpoint.T0152.20261104.alpha49-deployed로 committed를 확인했다. 포장용 Git worktree는 StorageGuardian이 외부 Git 객체 의존성으로 등록을 거절해 그대로 보존한다. 이 문서의 배포 영수증은 로컬 조율 기록이며 공개 릴리스 커밋을 변경하지 않는다.
