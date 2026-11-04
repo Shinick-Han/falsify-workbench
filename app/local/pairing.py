@@ -209,25 +209,26 @@ def _sddl_aces(sddl):
 
 def _run_icacls(args):
     import subprocess
-    completed = subprocess.run(['icacls', *args], check=False, capture_output=True, text=True,
+    completed = subprocess.run(['icacls', *args], check=False, capture_output=True,
                                **({'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {}))
     if completed.returncode != 0:
         raise PairingError('pairing_store_permissions')
-    return completed.stdout or ''
 
 
 def _windows_user_sid():
     import csv
     import subprocess
-    completed = subprocess.run(['whoami', '/user', '/fo', 'csv', '/nh'], check=False, capture_output=True, text=True,
+    completed = subprocess.run(['whoami', '/user', '/fo', 'csv', '/nh'], check=False, capture_output=True,
                                **({'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {}))
     if completed.returncode != 0 or not completed.stdout.strip():
         raise PairingError('pairing_store_permissions')
     try:
-        row = next(csv.reader([completed.stdout.strip().splitlines()[-1]]))
-    except (StopIteration, csv.Error):
+        # Latin-1 preserves the command's arbitrary account-name bytes while the
+        # CSV delimiters and the machine-readable SID remain ASCII.
+        row = next(csv.reader([completed.stdout.strip().splitlines()[-1].decode('latin-1')]))
+        sid = row[-1].strip().encode('latin-1').decode('ascii') if row else ''
+    except (StopIteration, csv.Error, UnicodeError):
         raise PairingError('pairing_store_permissions') from None
-    sid = row[-1].strip() if row else ''
     if not sid.startswith('S-1-') or sid in _SDDL_ALIASES.values():
         raise PairingError('pairing_store_permissions')
     return sid
