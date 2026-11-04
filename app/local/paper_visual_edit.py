@@ -87,6 +87,7 @@ def export_visual(request,*,store=None):
     try:raw=store.source_bytes(paper_id,digest)
     except KeyError:fail('source_expired')
     if sha(raw)!=digest:fail('source_mismatch')
+    original=raw
     seen_ids=set()
     for op in ops:
         if not isinstance(op,dict) or not isinstance(op.get('id'),str) or not 1<=len(op['id'])<=80 or op['id'] in seen_ids:fail('operation_invalid')
@@ -142,6 +143,8 @@ def export_visual(request,*,store=None):
             op=plan['op'];page=doc[plan['pageIndex']];rect=plan['rect'];public=plan['public']
             record={'id':op['id'],'kind':op['kind'],'pageIndex':plan['pageIndex'],'bbox':list(public),'before':plan['before'],'author':'human'}
             if op['kind']=='table-cell':
+                if plan['before']==plan['after']:
+                    continue
                 span=plan['span'];font,substituted,font_metrics=_font(doc,page,span,plan['after'],number)
                 # Redact only glyphs; leave table rules and images untouched.
                 page.add_redact_annot(rect,fill=False,cross_out=False)
@@ -191,10 +194,25 @@ def export_visual(request,*,store=None):
                 record.update(assetKind=op['assetKind'],after={'imageSha256':sha(image),'replacementSha256':sha(plan['png'])})
                 if op.get('dataChanges') is not None:record['dataChanges']=op['dataChanges']
             changes.append(record)
-        output=doc.tobytes(garbage=4,deflate=True)
-        with pdf.open(stream=output,filetype='pdf') as reopened:
-            if len(reopened)!=source_pages:fail('page_count_changed')
+        output=doc.tobytes(garbage=4,deflate=True) if changes else original
+        from paper_chart_edit_service import _verify_output
+        regions=shape_boxes+[(p['pageIndex'],list(p['public'])) for p in plans if p['op']['kind']!='table-cell' or p['before']!=p['after']]
+        checks=[]
+        try:
+            issues.extend(_verify_output(original,output,None,regions=regions))
+            checks=['page-count']
+            if not any(issue.get('code')=='page-count-changed' for issue in issues):
+                checks.extend(['outside-region-text','outside-region-pixels'])
+            with pdf.open(stream=output,filetype='pdf') as saved:
+                for plan in plans:
+                    if plan['op']['kind']=='table-cell' and plan['before']!=plan['after'] and plan['after']:
+                        if plan['pageIndex']>=len(saved) or normalize(plan['after']) not in normalize(saved[plan['pageIndex']].get_text('text',clip=plan['rect'])):
+                            issues.append({'id':plan['op']['id'],'code':'saved-after-text-unconfirmed'})
+            checks.append('saved-cell-text')
+        except Exception:
+            issues.append({'code':'source-preservation-check-failed'})
         return {'schema':'falsify.visual-edit-export.v1','sourceSha256':digest,'outputSha256':sha(output),
                 'file':base64.b64encode(output).decode('ascii'),'pageCount':source_pages,'changes':changes,
-                'verification':{'status':'warning' if issues else 'passed','issues':issues,'engine':'pymupdf','pageCount':source_pages}}
+                'verification':{'status':'warning' if issues else 'passed','issues':issues,'engine':'pymupdf','pageCount':source_pages,
+                    'checks':checks,'scope':'source-preservation'}}
     finally:doc.close()

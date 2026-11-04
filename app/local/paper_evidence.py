@@ -346,9 +346,22 @@ class EvidenceStore:
                 current['expires_at'] = self._clock() + self._ttl
                 current['summary']['expiresAt'] = _iso(current['expires_at'])
                 return copy.deepcopy(current['summary'])
+        record = self._extract(raw, file_hash)
+        with self._lock:
+            self._purge()
+            current = self._docs.get(self._by_hash.get(file_hash))
+            if current is not None:
+                current['expires_at'] = self._clock() + self._ttl
+                current['summary']['expiresAt'] = _iso(current['expires_at'])
+                return copy.deepcopy(current['summary'])
             while len(self._docs) >= self._max:
                 self._drop(min(self._docs, key=lambda pid: (self._docs[pid]['expires_at'], self._docs[pid]['seq'])))
-            record = self._extract(raw, file_hash)
+            if record['paper_id'] in self._docs:
+                raise RuntimeError('id')
+            self._seq += 1
+            record['seq'] = self._seq
+            record['expires_at'] = self._clock() + self._ttl
+            record['summary']['expiresAt'] = _iso(record['expires_at'])
             self._docs[record['paper_id']] = record
             self._by_hash[file_hash] = record['paper_id']
             return copy.deepcopy(record['summary'])
@@ -534,8 +547,7 @@ class EvidenceStore:
         finally:
             doc.close()
         now = self._clock()
-        paper_id = _new_id(self._docs)
-        self._seq += 1
+        paper_id = _new_id(())
         codes = []
         for name, key in (('page_extract_failed', 'failed'), ('caption_lines_failed', 'lines'),
                 ('page_over_budget', 'budget'), ('rotated_page', 'rotated'), ('cropped_or_offset_page', 'cropped')):
@@ -548,7 +560,7 @@ class EvidenceStore:
                 'figures': sum(item['meta']['type'] == 'figure' for item in items)},
             'engine': ENGINE, 'limitations': codes, 'expiresAt': _iso(now + self._ttl)}
         return {'paper_id': paper_id, 'file_hash': file_hash, 'pdf': raw, 'expires_at': now + self._ttl,
-            'seq': self._seq, 'summary': summary, 'items': items}
+            'seq': 0, 'summary': summary, 'items': items}
 
     def _page_items(self, index, detected):
         matrix = detected['matrix']

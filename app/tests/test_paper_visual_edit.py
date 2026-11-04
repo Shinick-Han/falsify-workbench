@@ -77,6 +77,32 @@ class VisualTests(unittest.TestCase):
         self.raw=sample_pdf(rotate=90,pages=2);self.h=sha(self.raw);self.summary=self.store.prepare(self.raw,self.h);self.pid=self.summary['paperId'];item,c,op=self.cell()
         res=export_visual(self.request([op]),store=self.store)
         with pdf.open(stream=base64.b64decode(res['file']),filetype='pdf') as d:self.assertEqual(d[0].rotation,90);self.assertIn('-7.5',d[0].get_text())
+    def test_noop_cell_keeps_exact_source_bytes(self):
+        item,c,op=self.cell();op['after']=op['before']
+        result=export_visual(self.request([op]),store=self.store)
+        self.assertEqual(base64.b64decode(result['file']),self.raw)
+        self.assertEqual(result['changes'],[])
+        self.assertEqual(result['verification']['status'],'passed')
+
+    def test_saved_output_damage_outside_region_is_reported(self):
+        from paper_chart_edit_service import _verify_output
+        op=self.region();result=export_visual(self.request([op]),store=self.store)
+        output=base64.b64decode(result['file'])
+        with pdf.open(stream=output,filetype='pdf') as doc:
+            doc[1].insert_text((50,50),'damage')
+            damaged=doc.tobytes()
+        issues=_verify_output(self.raw,damaged,None,regions=[(0,op['bbox'])])
+        self.assertTrue(any(i['code']=='outside-region-pixels-changed' and i['pageIndex']==1 for i in issues))
+        self.assertTrue(any(i['code']=='source-text-changed' and i['pageIndex']==1 for i in issues))
+
+    def test_verification_failure_is_downloadable_and_warns(self):
+        from unittest.mock import patch
+        with patch('paper_chart_edit_service._verify_output',side_effect=RuntimeError('failure')):
+            result=export_visual(self.request([self.region()]),store=self.store)
+        self.assertEqual(result['verification']['status'],'warning')
+        self.assertEqual(result['verification']['issues'][-1]['code'],'source-preservation-check-failed')
+        self.assertTrue(base64.b64decode(result['file']).startswith(b'%PDF-'))
+
     def test_unfittable_cell_keeps_source_and_has_no_partial_export(self):
         item,c,op=self.cell();op['after']='A'*4000
         with self.assertRaisesRegex(ValueError,'no_room'):export_visual(self.request([op]),store=self.store)

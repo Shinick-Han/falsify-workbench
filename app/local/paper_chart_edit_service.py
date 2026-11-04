@@ -64,17 +64,36 @@ def _prepare_backend(raw, index, bbox, options=None, preferred=None):
     return scene
 
 
-def _verify_output(source, output, scene):
+def _verify_output(source, output, scene, *, regions=None):
     """Check page count, extracted words and pixels outside the selected crop."""
     import pymupdf
     from PIL import Image, ImageChops, ImageDraw
     issues = []
+    visual = regions is not None
+    if regions is None:
+        regions = [(scene['pageIndex'], scene['bbox'])]
     with pymupdf.open(stream=source, filetype='pdf') as before, pymupdf.open(stream=output, filetype='pdf') as after:
         if len(before) != len(after):
             return [{'code': 'page-count-changed'}]
         for index in range(len(before)):
             left, right = before[index], after[index]
-            if left.get_text() != right.get_text():
+            if visual:
+                def outside_text(page):
+                    boxes = [pymupdf.Rect(b) for p, b in regions if p == index]
+                    chars = []
+                    for block in page.get_text('rawdict').get('blocks', []):
+                        for line in block.get('lines', []):
+                            for span in line.get('spans', []):
+                                for char in span.get('chars', []):
+                                    rect = pymupdf.Rect(char['bbox']) * page.rotation_matrix
+                                    center = (rect.tl + rect.br) / 2
+                                    if not any(center in box for box in boxes):
+                                        chars.append(char['c'])
+                    return ''.join(chars)
+                text_changed = outside_text(left) != outside_text(right)
+            else:
+                text_changed = left.get_text() != right.get_text()
+            if text_changed:
                 issues.append({'code': 'source-text-changed', 'pageIndex': index})
             a, b = left.get_pixmap(alpha=False), right.get_pixmap(alpha=False)
             if (a.width, a.height, a.n) != (b.width, b.height, b.n):
@@ -82,11 +101,12 @@ def _verify_output(source, output, scene):
                 continue
             delta = ImageChops.difference(Image.frombytes('RGB', (a.width, a.height), a.samples),
                                          Image.frombytes('RGB', (b.width, b.height), b.samples))
-            if index == scene['pageIndex']:
-                x0, y0, x1, y1 = scene['bbox']
-                # One antialiased pixel at the selected boundary belongs to the edit.
-                ImageDraw.Draw(delta).rectangle((math.floor(x0)-1, math.floor(y0)-1,
-                                                math.ceil(x1)+1, math.ceil(y1)+1), fill=(0,0,0))
+            for page_index, bbox in regions:
+                if index == page_index:
+                    x0, y0, x1, y1 = bbox
+                    # One antialiased pixel at the selected boundary belongs to the edit.
+                    ImageDraw.Draw(delta).rectangle((math.floor(x0)-1, math.floor(y0)-1,
+                                                    math.ceil(x1)+1, math.ceil(y1)+1), fill=(0,0,0))
             if any(high > 2 for low, high in delta.getextrema()):
                 issues.append({'code': 'outside-region-pixels-changed', 'pageIndex': index})
     return issues
