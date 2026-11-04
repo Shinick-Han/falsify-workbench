@@ -458,3 +458,13 @@ Cursor Grok 4.7 xhigh fast 작업자를 코어·출력·UI·독립 QA·후속 �
 Python 전체 958개 검사에서 950개 통과·시간 기준 1개 실패·7개 제외를 보존하며 전체 통과로 기록하지 않는다. 실패한 stdio 3개 단독 재검사와 editor 51개는 통과했다. 전체 실행의 Windows 출력 해독 오류는 후속 수정·집중 검사로 확인했고, UTF-8 관련 모듈의 HTTP 시간 초과 1건도 최초 실패와 단독 재검사 통과를 함께 남긴다. Paragraph runtime의 sourceBuildVerified=false는 남아 있는 빌드 검증 제약이다.
 
 항목별 상태·정확한 커밋·최종 ZIP SHA·검사 범위는 소스 밖 coordination/tech-debt-audit-20261105/implementation/final-validation.json, debt-ledger.json과 IMPLEMENTATION_REPORT.ko.html에 보관한다. 공개 웹·설치본·실행 중인 사용자 companion은 이번 작업에서 교체하지 않았다. WorkBite T-0152에는 관찰 가능한 checkpoint만 추가하며 전체 프로젝트 Task 완료 상태로 바꾸지 않는다.
+
+## 2026-11-05 alpha.50 공개 배포·설치본 교체와 전체 CCN
+
+사용자 요청으로 553027a2e9057a7ad0c6f1647c7ad4129e45359a를 alpha.50으로 공개했다. GitHub Actions 41891615945의 Linux·Windows·macOS Intel/ARM 검증과 Pages 배포가 모두 통과했다. 공개 자산 13개는 해당 커밋과 바이트가 같고, 공개 ZIP 146800118바이트의 SHA-256은 3884110d04c98843a9dc16d58b5d8140712201ad47abb23895cec70df6ad7545다. 공개 태그도 같은 커밋이다. 초기 ARM runner 배정 실패 뒤 공식 macOS 15 ARM 이미지와 실제 arm64 검사를 사용했으며, 이미지에 고정된 포장 검사도 갱신해 13개를 통과했다. 초기 실패·취소 기록은 보존한다.
+
+설치본 릴리스 파일 1240개를 최종 ZIP과 대조하고 개인 설정·기록 36개와 연결 키를 보존했다. idle companion을 절대경로로 hidden 재시작했고 Owned·descriptor·busy=false를 확인했다. 실제 HTTP 그래프 준비·PNG 미리보기·PDF 생성·undo 원본 바이트 일치가 통과했으며 모델 호출은 0회다. Confluence 공유 API도 기존 변수·데이터를 유지해 worker a26e42d5-2591-407b-9d6b-4f8ac91aabaf로 배포하고 허용된 웹 Origin의 health HTTP200을 확인했다. 배포 backend 소스 b942eef와 최종 릴리스의 cloud/api 내용은 같다. Aside에서도 공개 index HTTP200과 alpha.50 자산 URL을 확인했으며 열려 있던 작업 탭은 보존했다. 브라우저 재페어링 완료를 주장하지 않는다.
+
+Stackbite Codex GPT-6.1 Terra high Fast 통계 작업자에게 읽기 전용 전수 집계를 배정하고 결과를 검토했다. 감사 기준 0ec8f00과 통합본 5627475 양쪽에 같은 Babel/Python AST 측정기를 적용했다. 이후 릴리스의 운영 함수는 같고 버전 상수·CI·포장 테스트만 달라졌다. 자체 운영 JS/Python은 199→202파일, 8127→8233함수, CCN 합계 39842→40209(+0.9%), 평균 4.902→4.884, 중앙값 2→2, p95 18→19, 최대 429→429다. CCN 50 초과 함수는 67→61, 100 초과는 11→7이다. 큰 함수 일부는 줄었지만 전체 합계가 감소하거나 기술 부채가 모두 사라진 결과는 아니다. 남은 최상위는 composeDocument 429, runPaperLayoutAgent 217, buildReconstructionModel 189다.
+
+외부 fork·생성 중복·테스트·도구는 별도 집계했고, 이들을 포함한 파싱 범위는 현재 662파일·49311함수·CCN164249다. PowerShell·shell·SQL·native와 HTML inline script는 측정하지 않았고 파싱 오류·크기 제한 제외는 0이다. 모든 언어의 CCN으로 확대하지 않는다. 소스 밖 coordination/tech-debt-audit-20261105/implementation/release-alpha50/ccn/report.html에 분포·상위 함수·범위·원시 CSV/JSON을 보관하고 deployment-status.json에 공개 자산·ZIP·설치본·실행 검증을 연결한다. Paragraph runtime sourceBuildVerified=false는 유지한다. 이번 영수증은 로컬 조율 기록이며 공개 릴리스 커밋을 바꾸지 않는다.
