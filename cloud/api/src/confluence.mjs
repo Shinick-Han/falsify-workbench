@@ -241,21 +241,27 @@ function html(message, origin) {
   });
 }
 
-async function readBounded(response, max) {
+async function readBounded(response, max, signal) {
   if (!response.body) return new Uint8Array();
   const reader = response.body.getReader();
+  const cancel = () => { void reader.cancel().catch(() => {}); };
+  if (signal?.aborted) { cancel(); throw new Error('request deadline'); }
+  signal?.addEventListener('abort', cancel, { once: true });
   const chunks = [];
   let size = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.byteLength;
-    if (size > max) {
-      await reader.cancel().catch(() => {});
-      return null;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > max) {
+        await reader.cancel().catch(() => {});
+        return null;
+      }
+      chunks.push(value);
     }
-    chunks.push(value);
-  }
+    if (signal?.aborted) throw new Error('request deadline');
+  } finally { signal?.removeEventListener('abort', cancel); }
   const out = new Uint8Array(size);
   let offset = 0;
   for (const chunk of chunks) {
@@ -270,13 +276,13 @@ async function sha256(bytes) {
   return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-async function readRequestJson(request, max) {
+async function readRequestJson(request, max, signal) {
   const type = (request.headers.get('Content-Type') || '').trim();
   if (!/^application\/json(\s*;\s*charset=utf-8)?$/i.test(type)) fail(415, 'unsupported_media_type');
   const declared = request.headers.get('Content-Length');
   if (declared !== null && !(Number(declared) <= max)) fail(413, 'payload_too_large');
   if (!request.body) fail(400, 'invalid_request');
-  const bytes = await readBounded(request, max);
+  const bytes = await readBounded(request, max, signal);
   if (!bytes) fail(413, 'payload_too_large');
   let body;
   try { body = JSON.parse(decoder.decode(bytes)); } catch { fail(400, 'invalid_request'); }
@@ -294,12 +300,19 @@ async function fetchBounded(fetchImpl, url, init, max) {
   const controller = new AbortController();
   let reader;
   let timer;
+  const budget = fetchImpl.budget;
+  if (budget.signal.aborted || Date.now() >= budget.end) throw new Error('request deadline');
+  const abort = () => {
+    controller.abort();
+    if (reader) void reader.cancel().catch(() => {});
+  };
+  budget.signal.addEventListener('abort', abort, { once: true });
   const deadline = new Promise((_, reject) => {
     timer = setTimeout(() => {
       reject(new Error('upstream deadline'));
       controller.abort();
       if (reader) void reader.cancel().catch(() => {});
-    }, UPSTREAM_DEADLINE_MS);
+    }, Math.max(0, Math.min(UPSTREAM_DEADLINE_MS, budget.end - Date.now())));
   });
   try {
     return await Promise.race([deadline, (async () => {
@@ -332,6 +345,7 @@ async function fetchBounded(fetchImpl, url, init, max) {
     })()]);
   } finally {
     clearTimeout(timer);
+    budget.signal.removeEventListener('abort', abort);
   }
 }
 
@@ -696,7 +710,7 @@ function cursorFromNext(next, pathname) {
 async function publish(ctx, session) {
   await requireReady(ctx);
   const config = confluenceConfig(ctx.env);
-  const body = await readRequestJson(ctx.request, MAX_ARCHIVE_BYTES + 8192);
+  const body = await readRequestJson(ctx.request, MAX_ARCHIVE_BYTES + 8192, ctx.budget.signal);
   if (Object.keys(body).some(key => key !== 'archive' && key !== 'teamShare') || !Object.hasOwn(body, 'archive') || !Object.hasOwn(body, 'teamShare')) {
     fail(400, 'invalid_request');
   }
@@ -746,6 +760,7 @@ async function publish(ctx, session) {
     }
   }
   const pageId = page && PAGE_ID.test(String(page.id)) ? String(page.id) : null;
+  if (pageId) ctx.budget.pageId = pageId;
   if (!pageId) fail(created ? 409 : 502, created ? 'write_unknown' : 'upstream_invalid', {}, created ? { readBack: true } : null);
   if (String(page.spaceId || SPACE_ID) !== SPACE_ID || (page.parentId && String(page.parentId) !== parent)) {
     fail(409, 'archive_conflict');
@@ -916,7 +931,7 @@ async function startAuth(ctx) {
   await requireReady(ctx);
   const origin = ctx.request.headers.get('Origin');
   if (!origin || !origins(ctx.settings).has(origin)) fail(403, 'origin_not_allowed');
-  const body = await readRequestJson(ctx.request, 4096);
+  const body = await readRequestJson(ctx.request, 4096, ctx.budget.signal);
   if (Object.keys(body).sort().join() !== 'nonce,returnOrigin') fail(400, 'invalid_request');
   if (typeof body.nonce !== 'string' || !NONCE.test(body.nonce)) fail(400, 'invalid_request');
   let returnOrigin;
@@ -1019,12 +1034,27 @@ export function matchConfluence(pathname) {
 }
 
 export async function handleConfluence(ctx) {
-  const context = {
-    ...ctx,
-    fetchImpl: ctx.fetchImpl || globalThis.fetch.bind(globalThis),
-    now: ctx.now || Date.now,
-    refreshed: null,
+  const controller = new AbortController();
+  const duration = ctx.requestBudgetMs ?? (ctx.request.method === 'POST' && ctx.match.template === '/v1/confluence/archives' ? 80000 : 25000);
+  const budget = { signal: controller.signal, end: Date.now() + duration, mutationStarted: false, pageId: null };
+  const upstream = ctx.fetchImpl || globalThis.fetch.bind(globalThis);
+  const fetchImpl = (url, init) => {
+    if (budget.signal.aborted || Date.now() >= budget.end) throw new Error('request deadline');
+    if (ctx.match.template === '/v1/confluence/archives' && ctx.request.method === 'POST' && /^(POST|PUT)$/.test(init.method || 'GET') && new URL(url).hostname === 'api.atlassian.com') budget.mutationStarted = true;
+    return upstream(url, init);
   };
+  fetchImpl.budget = budget;
+  const context = { ...ctx, fetchImpl, budget, now: ctx.now || Date.now, refreshed: null };
+  const expiry = () => new GatewayError(budget.mutationStarted || budget.pageId ? 409 : 502,
+    budget.mutationStarted || budget.pageId ? 'write_unknown' : 'upstream_unavailable', {},
+    budget.mutationStarted || budget.pageId ? { pageId: budget.pageId, readBack: true } : null);
+  let timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(expiry());
+    }, duration);
+  });
   try {
     const route = ROUTES[ctx.match.template];
     if (!route) fail(404, 'not_found');
@@ -1036,11 +1066,15 @@ export async function handleConfluence(ctx) {
     }
     const handler = route[ctx.request.method];
     if (!handler) fail(405, 'method_not_allowed', { Allow: Object.keys(route).join(', ') });
-    const response = await handler(context);
+    const response = await Promise.race([handler(context), deadline]);
+    if (Date.now() >= budget.end) throw expiry();
     return withSession(response, context);
   } catch (error) {
     const known = error instanceof GatewayError ? error : new GatewayError(500, 'internal_error');
     return withSession(errorResponse(known), context);
+  } finally {
+    clearTimeout(timer);
+    controller.abort();
   }
 }
 
