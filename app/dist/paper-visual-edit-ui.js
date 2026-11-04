@@ -828,6 +828,7 @@
       img.hidden=false;
     }
     function resetDrafts(){
+      imageTask=Promise.resolve();
       for(const view of shapeViews.values())view.widget?.destroy?.();
       shapeViews.clear();
       cellOps.clear();regionOps.clear();itemCache.clear();analysisCache.clear();
@@ -1692,9 +1693,10 @@
       const src=currentSource();
       if(!src||src.fileHash!==boundHash||src.revision!==boundRevision||!paperId){say(status,TEXT.stale,true);errorCode='stale';return;}
       applying=true;
+      const owner={locked:false};
+      applyOwner=owner;
       syncDisabled();
       const token=generation;
-      let locked=false;
       try{
         await imageTask;
         if(!live(token,src))return;
@@ -1708,7 +1710,7 @@
         if(ops.length>MAX_OPS){say(status,TEXT.applyMax,true);errorCode='max';return;}
         const draftKey=JSON.stringify(records());
         if(typeof hold==='function'){
-          locked=true;
+          owner.locked=true;
           const ok=await hold({active:true,phase:'apply'});
           if(!live(token,src))return;
           if(ok===false){say(status,TEXT.hold,true);errorCode='hold';return;}
@@ -1734,9 +1736,10 @@
         say(status,TEXT.applyFail,true);
         errorCode=codeOf(error)==='stale'?'stale':'failed';
       }finally{
-        if(locked&&typeof hold==='function'){try{await hold({active:false,phase:'apply'});}catch{}}
-        applying=false;
-        syncDisabled();
+        if(applyOwner===owner){
+          if(owner.locked&&typeof hold==='function'){owner.locked=false;try{await hold({active:false,phase:'apply'});}catch{}}
+          if(applyOwner===owner){applyOwner=null;applying=false;syncDisabled();}
+        }
       }
     }
     async function loadSource(token,src,signal){
@@ -1818,7 +1821,12 @@
       bump();
       flight=null;
       parentBusy=false;
+      const owner=applyOwner;
       applying=false;applyOwner=null;
+      if(owner?.locked&&typeof hold==='function'){
+        owner.locked=false;
+        try{Promise.resolve(hold({active:false,phase:'apply'})).catch(()=>{});}catch{}
+      }
       paperId=null;boundHash=null;boundRevision=null;
       resetDrafts();
       listItems=[];listTotal=0;listPage=0;savedItems=[];savedPage=0;
