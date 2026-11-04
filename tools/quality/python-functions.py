@@ -3,7 +3,7 @@ import ast
 import json
 import sys
 
-source = sys.stdin.read()
+source = sys.stdin.buffer.read().decode('utf-8')
 tree = ast.parse(source)
 result = []
 
@@ -38,4 +38,4 @@ def visit_scope(node, prefix):
     walk(node)
 
 visit_scope(tree, '')
-print(json.dumps(result))
+sys.stdout.buffer.write((json.dumps(result, ensure_ascii=False) + '\n').encode('utf-8'))

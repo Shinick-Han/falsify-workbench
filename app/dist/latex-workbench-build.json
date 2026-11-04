@@ -79,7 +79,7 @@
     },
     {
       "path": "src/paper-flow.mjs",
-      "sha256": "8cdc529eca04b2d768db525148531fa0e7fc5b48e0b60d217d1574dd737e075d"
+      "sha256": "4b36ad50f1289360e4be5cff89419c8f600024e55cdd1d9b6c6797f38ff96594"
     },
     {
       "path": "src/paper-fonts.mjs",
@@ -236,10 +236,10 @@
   ],
   "output": {
     "path": "latex-workbench.mjs",
-    "sha256": "7195a05f01810e6a041ef6f79c2507b40f348276319b72552204a019364fdbd1"
+    "sha256": "c1b66e1126f41458efbc9db4e9c16c7e39a240a93fc480f089fb6e4d36014656"
   },
   "worker": {
     "path": "pdf-latex-reader-worker.mjs",
-    "sha256": "090901c00851eee933da714b5d23ac85a44e7440f8fa86fd7126da488b015268"
+    "sha256": "d844693dd379a3a2c1f2ef1e6b700db96badd5904679202fcb4a26a619682580"
   }
 }
