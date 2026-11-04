@@ -468,3 +468,11 @@ Python 전체 958개 검사에서 950개 통과·시간 기준 1개 실패·7개
 Stackbite Codex GPT-6.1 Terra high Fast 통계 작업자에게 읽기 전용 전수 집계를 배정하고 결과를 검토했다. 감사 기준 0ec8f00과 통합본 5627475 양쪽에 같은 Babel/Python AST 측정기를 적용했다. 이후 릴리스의 운영 함수는 같고 버전 상수·CI·포장 테스트만 달라졌다. 자체 운영 JS/Python은 199→202파일, 8127→8233함수, CCN 합계 39842→40209(+0.9%), 평균 4.902→4.884, 중앙값 2→2, p95 18→19, 최대 429→429다. CCN 50 초과 함수는 67→61, 100 초과는 11→7이다. 큰 함수 일부는 줄었지만 전체 합계가 감소하거나 기술 부채가 모두 사라진 결과는 아니다. 남은 최상위는 composeDocument 429, runPaperLayoutAgent 217, buildReconstructionModel 189다.
 
 외부 fork·생성 중복·테스트·도구는 별도 집계했고, 이들을 포함한 파싱 범위는 현재 662파일·49311함수·CCN164249다. PowerShell·shell·SQL·native와 HTML inline script는 측정하지 않았고 파싱 오류·크기 제한 제외는 0이다. 모든 언어의 CCN으로 확대하지 않는다. 소스 밖 coordination/tech-debt-audit-20261105/implementation/release-alpha50/ccn/report.html에 분포·상위 함수·범위·원시 CSV/JSON을 보관하고 deployment-status.json에 공개 자산·ZIP·설치본·실행 검증을 연결한다. Paragraph runtime sourceBuildVerified=false는 유지한다. 이번 영수증은 로컬 조율 기록이며 공개 릴리스 커밋을 바꾸지 않는다.
+
+## 2026-11-05 운영 함수 CCN 15 상한 실행
+
+사용자가 잔여 기술 부채 상환을 계속하고 CCN 15 초과 함수가 0개가 될 때까지 병렬 작업을 이어가도록 요청했다. alpha.50 통계의 자체 운영 JS/Python 범위를 유지한다. 시작 기준 bee3952의 202파일·8233함수 중 초과 함수는 540개, 해당 파일은 162개다. 새 운영 helper도 포함하고 기존 측정기·scope·임계값 예외를 바꿔 수치를 낮추지 않는다. 종료 조건은 같은 전수 AST 검사에서 초과 0·파싱 오류 0이며 관련 회귀 검사와 재빌드가 통과하는 것이다.
+
+개발 브랜치는 chore/ccn15-20261105다. Stackbite native Codex GPT-6.1 Terra high Fast 3개 좌석을 app/src 190개, app/local 153개, authored app/dist 188개로 나누고 조율자가 cloud API 9개·전수 검사·생성 자산·테스트 등록·통합을 맡는다. 파일별 의미 있는 책임을 분리하고 기존 내용·출력·오류·취소·RED/BLUE 독립 경로를 보존한다. 작은 커밋과 focused 검사 결과를 계속 받아 통합하며, 다음 묶음을 작업하는 동안 조율자가 앞 묶음을 독립 확인한다. 첫 source 좌석이 StorageGuardian 정리를 코드 수정 금지로 해석해 변경 없이 종료했으므로, 새로 승인된 작업 경계와 확인한 T-0152·보관 lease를 명시해 재배치했다. shared worktree는 자동 등록·정리하지 않는다.
+
+tools/quality/inventory.mjs는 기존 Babel/Python 측정기와 alpha.50의 고정 분류를 재사용한다. 최초 전체 집계 540개가 이전 통계와 일치했고 새 helper 포함·중첩 함수·임계값 경계·파싱 실패 검사가 통과했다. 새 CCN 회귀 spec은 기본 테스트 실행에 포함한다. 작업·상태·원본/통합 커밋·검사 결과는 소스 밖 coordination/tech-debt-audit-20261105/implementation/ccn15-20261105에 보관한다. 부분 통합과 전체 목표 달성은 구분한다. 설치본·공개 웹을 작업 중인 부분 리팩터링으로 교체하지 않는다.
