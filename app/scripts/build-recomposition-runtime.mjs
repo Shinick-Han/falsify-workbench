@@ -1,4 +1,4 @@
-import {build} from 'esbuild';
+import {createRequire} from 'node:module';
 import {createHash} from 'node:crypto';
 import {readFileSync, writeFileSync, mkdirSync, copyFileSync} from 'node:fs';
 import {dirname, join, resolve} from 'node:path';
@@ -8,14 +8,18 @@ const app=resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args=process.argv.slice(2);
 function arg(name) { const i=args.indexOf(name); if(i<0 || !args[i+1]) throw Error(`Required: ${name}`); return resolve(args[i+1]); }
 const modules=arg('--node-modules'), staticDir=arg('--static-fonts'), sourceFonts=arg('--font-sources');
-const vendor=join(app,'dist/recomposition-vendor');
+const outputIndex=args.indexOf('--output');
+const dist=outputIndex<0 ? join(app,'dist') : arg('--output');
+const {build}=createRequire(join(modules,'esbuild/package.json'))('esbuild');
+const vendor=join(dist,'recomposition-vendor');
 const readJSON=p=>JSON.parse(readFileSync(p,'utf8'));
 const hash=b=>createHash('sha256').update(b).digest('hex');
+if(readJSON(join(modules,'esbuild/package.json')).version!=='0.28.2') throw Error('Unexpected esbuild version');
 for(const name of ['typst.ts','typst-ts-web-compiler']) {
  const p=readJSON(join(modules,'@myriaddreamin',name,'package.json'));
  if(p.version!=='0.7.0' || p.license!=='Apache-2.0') throw Error(`Unexpected ${name} version or license`);
 }
-const mupdf=readJSON(join(app,'node_modules/mupdf/package.json'));
+const mupdf=readJSON(join(modules,'mupdf/package.json'));
 if(mupdf.version!=='1.28.1') throw Error('Unexpected MuPDF version');
 const proof=readJSON(join(staticDir,'manifest.json'));
 const pinned={
@@ -53,11 +57,11 @@ copyFileSync(join(modules,'@myriaddreamin/typst.ts/LICENSE'),join(vendor,'LICENS
 writeFileSync(join(vendor,'static-font-provenance.json'),JSON.stringify(proof,null,2)+'\n');
 writeFileSync(join(vendor,'manifest.json'),JSON.stringify({version:'falsify.recomposition-runtime.v1',compilerModule:'../recomposition-typst.mjs',wasm,fonts},null,2)+'\n');
 const common={bundle:true,format:'esm',platform:'neutral',target:'es2022',legalComments:'eof',nodePaths:[modules]};
-await build({...common,entryPoints:[join(app,'src/recomposition-typst.mjs')],outfile:join(app,'dist/recomposition-typst.mjs')});
-await build({...common,entryPoints:[join(app,'src/paper-recompose-runtime.mjs')],outfile:join(app,'dist/paper-recompose-runtime.mjs')});
-await build({...common,entryPoints:[join(app,'src/paper-recompose-worker.mjs')],outfile:join(app,'dist/paper-recompose-worker-core.mjs'),plugins:[{name:'local-vendors',setup(b){
+await build({...common,entryPoints:[join(app,'src/recomposition-typst.mjs')],outfile:join(dist,'recomposition-typst.mjs')});
+await build({...common,entryPoints:[join(app,'src/paper-recompose-runtime.mjs')],outfile:join(dist,'paper-recompose-runtime.mjs')});
+await build({...common,entryPoints:[join(app,'src/paper-recompose-worker.mjs')],outfile:join(dist,'paper-recompose-worker-core.mjs'),plugins:[{name:'local-vendors',setup(b){
  b.onResolve({filter:/^mupdf$/},()=>({path:'./browser-pdf-vendor/mupdf.js',external:true}));
  b.onResolve({filter:/^\.\.\/dist\/blind-pdf\.mjs$/},()=>({path:'./blind-pdf.mjs',external:true}));
 }}]});
-await build({...common,entryPoints:[join(app,'src/paper-recompose-worker-entry.mjs')],outfile:join(app,'dist/paper-recompose-worker.mjs'),external:['./paper-recompose-worker-core.mjs']});
+await build({...common,entryPoints:[join(app,'src/paper-recompose-worker-entry.mjs')],outfile:join(dist,'paper-recompose-worker.mjs'),external:['./paper-recompose-worker-core.mjs']});
 console.log('Built recomposition runtime',wasm.sha256);
