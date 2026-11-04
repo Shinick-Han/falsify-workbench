@@ -373,6 +373,117 @@ class Handler(BaseHTTPRequestHandler):
                 raise
         self.reply(202, {'id': request_id, 'state': 'running'})
 
+    def _post_async_routes(self, path, data, role, layout_job, analysis_job):
+        if path == PAPER_ANALYSIS_ROUTE or analysis_job and analysis_job[2]:
+            def admit_analysis():
+                with LOCK: return not self.server_closing() and ACTIVE.acquire(blocking=False)
+            try:
+                receipt = PAPER_ANALYSIS_JOBS.cancel(analysis_job[1]) if analysis_job else PAPER_ANALYSIS_JOBS.submit(data, admit=admit_analysis, release=ACTIVE.release)
+                self.reply(202 if receipt['state']=='running' else 200, receipt)
+            except ValueError as error: self.reply(409 if str(error)=='companion_busy' else 400, {'error':str(error)})
+            return True
+        if path in paper_evidence_http.ROUTES:
+            with LOCK: admitted = not self.server_closing() and ACTIVE.acquire(blocking=False)
+            if not admitted: self.reply(409, {'error': 'companion_busy'}); return True
+            try:
+                result = (paper_evidence_http.prepare if path.endswith('/prepare') else paper_evidence_http.query)(data)
+            finally: ACTIVE.release()
+            self.reply(200, result); return True
+        if path==LAYOUT_JOBS_ROUTE or layout_job and layout_job[2]:
+            def admit_layout():
+                with LOCK: return not self.server_closing() and ACTIVE.acquire(blocking=False)
+            try:
+                receipt=LAYOUT_JOBS.cancel(layout_job[1],run_id=data.get('runId')) if layout_job else LAYOUT_JOBS.submit(data,admit=admit_layout,release=ACTIVE.release)
+                receipt['companionInstance']=companion_instance_descriptor(self.server.instance_id);self.reply(202 if receipt['state']=='running' else 200,receipt)
+            except layout_agent_service.LayoutAgentError as error: self.reply(error.status,error.payload())
+            return True
+        if path.endswith('/cancel'):
+            with LOCK:
+                job = JOBS.get(path.split('/')[-2])
+                if not job or job['role'] != role: raise ValueError('작업을 찾을 수 없습니다.')
+                job['cancel'].set()
+                if job['state'] == 'completed': job['state'] = 'cancelled'; job.pop('result', None)
+            self.reply(200, {'status': 'cancel_requested'}); return True
+        return False
+
+    def _post_paper_routes(self, path, data):
+        if path == '/api/export':
+            with LOCK: admitted = not self.server_closing() and ACTIVE.acquire(blocking=False)
+            if not admitted: self.reply(409, {'error': '다른 작업을 마친 뒤 내보내세요.'}); return True
+            editor = getattr(self.server, 'pdf_editor', None)
+            try: result = editor.export(data) if editor else handle_export(data)
+            finally: ACTIVE.release()
+            self.reply(200, result); return True
+        if path == '/api/paper/inspect':
+            # Advisory, explicit-click inspection: validated before admission, gated like export (not a JOB, so retained
+            # RED/BLUE results stay protected), never a model call; any helper failure is the fixed unavailable summary.
+            request = paper_analysis_service.validate_request(data)
+            with LOCK: admitted = not self.server_closing() and ACTIVE.acquire(blocking=False)
+            if not admitted: self.reply(409, {'error': 'companion_busy'}); return True
+            try: result = paper_analysis_service.analyze(request)
+            finally: ACTIVE.release()
+            self.reply(200, result); return True
+        if path in paper_chart_edit_service.ROUTES:
+            with LOCK: admitted = not self.server_closing() and ACTIVE.acquire(blocking=False)
+            if not admitted: self.reply(409, {'error': 'companion_busy'}); return True
+            try:
+                action = path.rsplit('/', 1)[-1]
+                result = getattr(paper_chart_edit_service.default_service, action)(data)
+            finally: ACTIVE.release()
+            self.reply(200, result); return True
+        if path == VISUAL_EDIT_ROUTE:
+            with LOCK: admitted = not self.server_closing() and ACTIVE.acquire(blocking=False)
+            if not admitted: self.reply(409, {'error': 'companion_busy'}); return True
+            try:
+                from paper_visual_edit import export_visual
+                result = export_visual(data)
+            finally: ACTIVE.release()
+            self.reply(200, result); return True
+        if path in IMAGE_ROUTES:
+            # Manual RED-only image experiment: bytes, hash and PNG header are validated before admission; the engine runs only
+            # in the isolated child, gated like export (not a JOB, never a model call); fixed error codes only.
+            export = path == '/api/paper/images/export'
+            request = (image_edit_service.validate_export_request if export else image_edit_service.validate_list_request)(data)
+            with LOCK: admitted = not self.server_closing() and ACTIVE.acquire(blocking=False)
+            if not admitted: self.reply(409, {'error': 'companion_busy'}); return True
+            try: result = (image_edit_service.export_image if export else image_edit_service.list_images)(request)
+            except image_edit_service.ImageEditError as error: self.reply(error.status, error.payload()); return True
+            finally: ACTIVE.release()
+            self.reply(200, result); return True
+        return False
+
+    def _post_harness_routes(self, path, data):
+        if path == DEPLOY_ROUTE:
+            with LOCK: admitted = not self.server_closing() and ACTIVE.acquire(blocking=False)
+            if not admitted: self.reply(409, {'error': 'companion_busy'}); return True
+            try:
+                try: result = harness_deployment.deploy(data)
+                except (ValueError, OSError, subprocess.SubprocessError):
+                    self.reply(400, {'error': 'harness_deployment_failed'}); return True
+            finally: ACTIVE.release()
+            self.reply(200, result); return True
+        if path == LAYOUT_AGENT_ROUTE:
+            try: request = layout_agent_service.validate_request(data)
+            except layout_agent_service.LayoutAgentError as error: self.reply(error.status, error.payload()); return True
+            with LOCK: admitted = not self.server_closing() and ACTIVE.acquire(blocking=False)
+            if not admitted: self.reply(409, {'error': 'companion_busy'}); return True
+            try:
+                try: result = layout_agent_service.decide(request)
+                except layout_agent_service.LayoutAgentError as error: self.reply(error.status, error.payload()); return True
+            finally: ACTIVE.release()
+            self.reply(200, result); return True
+        if path == PROFILE_ROUTE:
+            # Explicit-click profile draft: validated before admission, gated like inspect (not a JOB), one prompt-only CLI
+            # call; the proposed executable is never run here. Fixed error codes only.
+            request = harness_profile.validate_request(data)
+            with LOCK: admitted = not self.server_closing() and ACTIVE.acquire(blocking=False)
+            if not admitted: self.reply(409, {'error': 'companion_busy'}); return True
+            try: result = harness_profile.propose(request)
+            except harness_profile.ProposalError as error: self.reply(error.status, error.payload()); return True
+            finally: ACTIVE.release()
+            self.reply(200, result); return True
+        return False
+
     def do_POST(self):
         path = unquote(urlsplit(self.path).path)
         if path == '/api/launcher/restart': self.launcher_restart(); return
@@ -401,108 +512,9 @@ class Handler(BaseHTTPRequestHandler):
             body_digest = request_bytes_digest(raw) if path in ('/api/red/jobs', '/api/blue/jobs') else None
             data = json.loads(raw.decode('utf-8'), object_pairs_hook=no_duplicates, parse_constant=lambda _: (_ for _ in ()).throw(ValueError('nonfinite JSON')))
             if not isinstance(data, dict): raise ValueError('JSON 객체 필요')
-            if path == PAPER_ANALYSIS_ROUTE or analysis_job and analysis_job[2]:
-                def admit_analysis():
-                    with LOCK: return not self.server_closing() and ACTIVE.acquire(blocking=False)
-                try:
-                    receipt = PAPER_ANALYSIS_JOBS.cancel(analysis_job[1]) if analysis_job else PAPER_ANALYSIS_JOBS.submit(data, admit=admit_analysis, release=ACTIVE.release)
-                    self.reply(202 if receipt['state']=='running' else 200, receipt)
-                except ValueError as error: self.reply(409 if str(error)=='companion_busy' else 400, {'error':str(error)})
-                return
-            if path in paper_evidence_http.ROUTES:
-                with LOCK: admitted = not self.server_closing() and ACTIVE.acquire(blocking=False)
-                if not admitted: self.reply(409, {'error': 'companion_busy'}); return
-                try:
-                    result = (paper_evidence_http.prepare if path.endswith('/prepare') else paper_evidence_http.query)(data)
-                finally: ACTIVE.release()
-                self.reply(200, result); return
-            if path==LAYOUT_JOBS_ROUTE or layout_job and layout_job[2]:
-                def admit_layout():
-                    with LOCK: return not self.server_closing() and ACTIVE.acquire(blocking=False)
-                try:
-                    receipt=LAYOUT_JOBS.cancel(layout_job[1],run_id=data.get('runId')) if layout_job else LAYOUT_JOBS.submit(data,admit=admit_layout,release=ACTIVE.release)
-                    receipt['companionInstance']=companion_instance_descriptor(self.server.instance_id);self.reply(202 if receipt['state']=='running' else 200,receipt)
-                except layout_agent_service.LayoutAgentError as error: self.reply(error.status,error.payload())
-                return
-            if path.endswith('/cancel'):
-                with LOCK:
-                    job = JOBS.get(path.split('/')[-2])
-                    if not job or job['role'] != role: raise ValueError('작업을 찾을 수 없습니다.')
-                    job['cancel'].set()
-                    if job['state'] == 'completed': job['state'] = 'cancelled'; job.pop('result', None)
-                self.reply(200, {'status': 'cancel_requested'}); return
-            if path == '/api/export':
-                with LOCK: admitted = not self.server_closing() and ACTIVE.acquire(blocking=False)
-                if not admitted: self.reply(409, {'error': '다른 작업을 마친 뒤 내보내세요.'}); return
-                editor = getattr(self.server, 'pdf_editor', None)
-                try: result = editor.export(data) if editor else handle_export(data)
-                finally: ACTIVE.release()
-                self.reply(200, result); return
-            if path == '/api/paper/inspect':
-                # Advisory, explicit-click inspection: validated before admission, gated like export (not a JOB, so retained
-                # RED/BLUE results stay protected), never a model call; any helper failure is the fixed unavailable summary.
-                request = paper_analysis_service.validate_request(data)
-                with LOCK: admitted = not self.server_closing() and ACTIVE.acquire(blocking=False)
-                if not admitted: self.reply(409, {'error': 'companion_busy'}); return
-                try: result = paper_analysis_service.analyze(request)
-                finally: ACTIVE.release()
-                self.reply(200, result); return
-            if path in paper_chart_edit_service.ROUTES:
-                with LOCK: admitted = not self.server_closing() and ACTIVE.acquire(blocking=False)
-                if not admitted: self.reply(409, {'error': 'companion_busy'}); return
-                try:
-                    action = path.rsplit('/', 1)[-1]
-                    result = getattr(paper_chart_edit_service.default_service, action)(data)
-                finally: ACTIVE.release()
-                self.reply(200, result); return
-            if path == VISUAL_EDIT_ROUTE:
-                with LOCK: admitted = not self.server_closing() and ACTIVE.acquire(blocking=False)
-                if not admitted: self.reply(409, {'error': 'companion_busy'}); return
-                try:
-                    from paper_visual_edit import export_visual
-                    result = export_visual(data)
-                finally: ACTIVE.release()
-                self.reply(200, result); return
-            if path in IMAGE_ROUTES:
-                # Manual RED-only image experiment: bytes, hash and PNG header are validated before admission; the engine runs only
-                # in the isolated child, gated like export (not a JOB, never a model call); fixed error codes only.
-                export = path == '/api/paper/images/export'
-                request = (image_edit_service.validate_export_request if export else image_edit_service.validate_list_request)(data)
-                with LOCK: admitted = not self.server_closing() and ACTIVE.acquire(blocking=False)
-                if not admitted: self.reply(409, {'error': 'companion_busy'}); return
-                try: result = (image_edit_service.export_image if export else image_edit_service.list_images)(request)
-                except image_edit_service.ImageEditError as error: self.reply(error.status, error.payload()); return
-                finally: ACTIVE.release()
-                self.reply(200, result); return
-            if path == DEPLOY_ROUTE:
-                with LOCK: admitted = not self.server_closing() and ACTIVE.acquire(blocking=False)
-                if not admitted: self.reply(409, {'error': 'companion_busy'}); return
-                try:
-                    try: result = harness_deployment.deploy(data)
-                    except (ValueError, OSError, subprocess.SubprocessError):
-                        self.reply(400, {'error': 'harness_deployment_failed'}); return
-                finally: ACTIVE.release()
-                self.reply(200, result); return
-            if path == LAYOUT_AGENT_ROUTE:
-                try: request = layout_agent_service.validate_request(data)
-                except layout_agent_service.LayoutAgentError as error: self.reply(error.status, error.payload()); return
-                with LOCK: admitted = not self.server_closing() and ACTIVE.acquire(blocking=False)
-                if not admitted: self.reply(409, {'error': 'companion_busy'}); return
-                try:
-                    try: result = layout_agent_service.decide(request)
-                    except layout_agent_service.LayoutAgentError as error: self.reply(error.status, error.payload()); return
-                finally: ACTIVE.release()
-                self.reply(200, result); return
-            if path == PROFILE_ROUTE:
-                # Explicit-click profile draft: validated before admission, gated like inspect (not a JOB), one prompt-only CLI
-                # call; the proposed executable is never run here. Fixed error codes only.
-                request = harness_profile.validate_request(data)
-                with LOCK: admitted = not self.server_closing() and ACTIVE.acquire(blocking=False)
-                if not admitted: self.reply(409, {'error': 'companion_busy'}); return
-                try: result = harness_profile.propose(request)
-                except harness_profile.ProposalError as error: self.reply(error.status, error.payload()); return
-                finally: ACTIVE.release()
-                self.reply(200, result); return
+            if Handler._post_async_routes(self, path, data, role, layout_job, analysis_job): return
+            if Handler._post_paper_routes(self, path, data): return
+            if Handler._post_harness_routes(self, path, data): return
             (validate_blue_request if role == 'blue' else validate_request)(data)
             binding = job_binding(data, role, self.server.instance_id)
             # Idempotency stays the parsed, key-sorted fingerprint. requestBytesDigest is the pre-parse wire hash.
