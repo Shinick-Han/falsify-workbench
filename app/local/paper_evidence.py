@@ -158,18 +158,7 @@ def _header_flags(table, placed):
     return flags if any_true else unknown
 
 
-def _table_from_engine(table):
-    rows = table.rows
-    grid = [[None if cell is None else tuple(float(v) for v in cell) for cell in row.cells] for row in rows]
-    if not grid or not any(cell is not None for row in grid for cell in row):
-        return None
-    width = max(len(row) for row in grid)
-    grid = [row + [None] * (width - len(row)) for row in grid]
-    if len(grid) * width > MAX_CELLS:
-        raise RuntimeError('cells')
-    extract = table.extract()
-    placed = [(r, c, cell) for r, row in enumerate(grid) for c, cell in enumerate(row) if cell is not None]
-    headers = _header_flags(table, placed)
+def _table_cells(grid, placed, extract, headers):
     cells = []
     for r, c, box in placed:
         col_span = _col_span(grid, r, c, box)
@@ -179,6 +168,28 @@ def _table_from_engine(table):
             raise RuntimeError('bbox')
         cells.append({'row': r, 'column': c, 'rowSpan': row_span, 'columnSpan': col_span,
             'text': _cell_text(extract, r, c), 'bbox': rounded, 'header': headers[(r, c)]})
+    return cells
+
+
+def _table_grid(table):
+    rows = table.rows
+    grid = [[None if cell is None else tuple(float(v) for v in cell) for cell in row.cells] for row in rows]
+    if not grid or not any(cell is not None for row in grid for cell in row):
+        return None, None
+    width = max(len(row) for row in grid)
+    grid = [row + [None] * (width - len(row)) for row in grid]
+    if len(grid) * width > MAX_CELLS:
+        raise RuntimeError('cells')
+    return grid, width
+
+
+def _table_from_engine(table):
+    grid, width = _table_grid(table)
+    if grid is None: return None
+    extract = table.extract()
+    placed = [(r, c, cell) for r, row in enumerate(grid) for c, cell in enumerate(row) if cell is not None]
+    headers = _header_flags(table, placed)
+    cells = _table_cells(grid, placed, extract, headers)
     if not cells:
         return None
     return {'bbox': _round_box(pymupdf.Rect(table.bbox)) or _union(cell['bbox'] for cell in cells),
@@ -321,6 +332,27 @@ def _new_id(existing, prefix=''):
         if value not in existing:
             return value
     raise RuntimeError('id')
+
+
+def _record_page_limitations(limitations, detected, index):
+    if detected['failed']:
+        limitations['failed'].append(index)
+    if detected['line_failed']:
+        limitations['lines'].append(index)
+    if detected['rotation']:
+        limitations['rotated'].append(index)
+    if detected['cropped']:
+        limitations['cropped'].append(index)
+
+
+def _validate_clip_bbox(bbox, page):
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4 or not all(
+            type(v) in (int, float) and not isinstance(v, bool) and math.isfinite(v) for v in bbox):
+        raise ValueError('bbox')
+    if not (bbox[0] < bbox[2] and bbox[1] < bbox[3]):
+        raise ValueError('bbox')
+    if bbox[0] < page[0] - 1 or bbox[1] < page[1] - 1 or bbox[2] > page[2] + 1 or bbox[3] > page[3] + 1:
+        raise ValueError('bbox')
 
 
 class EvidenceStore:
@@ -543,14 +575,7 @@ class EvidenceStore:
                 except Exception:
                     limitations['failed'].append(index)
                     continue
-                if detected['failed']:
-                    limitations['failed'].append(index)
-                if detected['line_failed']:
-                    limitations['lines'].append(index)
-                if detected['rotation']:
-                    limitations['rotated'].append(index)
-                if detected['cropped']:
-                    limitations['cropped'].append(index)
+                _record_page_limitations(limitations, detected, index)
                 page_items = self._page_items(index, detected)
                 room = MAX_ITEMS - len(items)
                 if len(page_items) > room:
@@ -634,13 +659,7 @@ class EvidenceStore:
             raise ValueError('bbox')
         if bbox is None:
             return page
-        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4 or not all(
-                type(v) in (int, float) and not isinstance(v, bool) and math.isfinite(v) for v in bbox):
-            raise ValueError('bbox')
-        if not (bbox[0] < bbox[2] and bbox[1] < bbox[3]):
-            raise ValueError('bbox')
-        if bbox[0] < page[0] - 1 or bbox[1] < page[1] - 1 or bbox[2] > page[2] + 1 or bbox[3] > page[3] + 1:
-            raise ValueError('bbox')
+        _validate_clip_bbox(bbox, page)
         clipped = _round_box(pymupdf.Rect(bbox) & pymupdf.Rect(page))
         if clipped is None:
             raise ValueError('bbox')
