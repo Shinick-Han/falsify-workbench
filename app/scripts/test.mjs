@@ -20,11 +20,17 @@ const discovered = readdirSync(new URL('../tests/', import.meta.url)).filter(f =
 const runnerSource = readFileSync(new URL(import.meta.url), 'utf8');
 const registeredSource = runnerSource.slice(runnerSource.lastIndexOf('// BEGIN REGISTERED TESTS'));
 const registered = new Set([...registeredSource.matchAll(/[\w.-]+\.(?:spec|test)\.(?:mjs|cjs)/g)].map(m => m[0]));
+const ccn15Tests = discovered.filter(file => /^ccn15-(?:src|ui)-.+\.spec\.(?:mjs|cjs)$/.test(file));
+for (const file of ccn15Tests) registered.add(file);
 const missing = discovered.filter(f => !registered.has(f) && !exemptions.has(f));
 const stale = [...exemptions.keys()].filter(f => !discovered.includes(f) || registered.has(f));
 if (missing.length || stale.length) throw new Error(`Test registration mismatch: missing=${missing.join(', ')} stale exemptions=${stale.join(', ')}`);
 if (process.argv.includes('--check-registration')) { console.log(`Test registration: ${discovered.length} discovered, ${exemptions.size} explicit exemptions`); process.exit(0); }
 // BEGIN REGISTERED TESTS
+if (ccn15Tests.length) {
+  const result = spawnSync(process.execPath, ['--test', ...ccn15Tests.map(file => 'tests/' + file)], {stdio: 'inherit'});
+  if (result.error || result.status !== 0) process.exit(result.status || 1);
+}
 const buildEquivalence = spawnSync(process.execPath, ['--test','tests/recomposition-build-equivalence.spec.mjs','tests/paper-visual-codec.spec.mjs','tests/w3-policy-observations.spec.mjs'], {stdio:'inherit'});
 if(buildEquivalence.error || buildEquivalence.status!==0)process.exit(buildEquivalence.status||1);
 const shape = spawnSync(process.execPath, ['--test','tests/chart-shape-core.spec.mjs','tests/chart-shape-editor.spec.mjs','tests/chart-mark-editor.spec.mjs'], {stdio:'inherit'});
