@@ -13,7 +13,7 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
-// app/src/paragraph-pdf-crypto.mjs
+// src/paragraph-pdf-crypto.mjs
 function rotr(x, n) {
   return (x >>> n | x << 32 - n) >>> 0;
 }
@@ -59,7 +59,7 @@ function sha256(bytes) {
 }
 var K, hex;
 var init_paragraph_pdf_crypto = __esm({
-  "app/src/paragraph-pdf-crypto.mjs"() {
+  "src/paragraph-pdf-crypto.mjs"() {
     K = Uint32Array.from([
       1116352408,
       1899447441,
@@ -130,7 +130,7 @@ var init_paragraph_pdf_crypto = __esm({
   }
 });
 
-// app/src/paper-furniture.mjs
+// src/paper-furniture.mjs
 var paper_furniture_exports = {};
 __export(paper_furniture_exports, {
   buildFurniturePlan: () => buildFurniturePlan
@@ -231,7 +231,7 @@ function buildFurniturePlan({ document, flow, editedBlockIds = [] } = {}) {
 }
 var boxOK3, inside, clone, bytesKey, sameBytes;
 var init_paper_furniture = __esm({
-  "app/src/paper-furniture.mjs"() {
+  "src/paper-furniture.mjs"() {
     init_paragraph_pdf_crypto();
     boxOK3 = (b) => Array.isArray(b) && b.length === 4 && b.every(Number.isFinite) && b[0] < b[2] && b[1] < b[3];
     inside = (b, p) => boxOK3(b) && b[0] >= 0 && b[1] >= 0 && b[2] <= p.width && b[3] <= p.height;
@@ -241,7 +241,7 @@ var init_paper_furniture = __esm({
   }
 });
 
-// app/src/paper-document.mjs
+// src/paper-document.mjs
 init_paragraph_pdf_crypto();
 import * as mupdf from "./browser-pdf-vendor/mupdf.js";
 var HASH = /^[a-f0-9]{64}$/;
@@ -528,7 +528,7 @@ async function readDocument({ file, fileHash, signal } = {}) {
   return model;
 }
 
-// app/src/paper-source-spacing.mjs
+// src/paper-source-spacing.mjs
 init_paragraph_pdf_crypto();
 var abort = (signal) => {
   if (signal?.aborted) throw new DOMException("Source spacing cancelled", "AbortError");
@@ -610,7 +610,7 @@ async function recoverSourceSpaces({ bytes, document, pdfjs, signal } = {}) {
   return { document: view, sourceSha256, evidence };
 }
 
-// app/src/paper-source-links.mjs
+// src/paper-source-links.mjs
 init_paragraph_pdf_crypto();
 import * as mupdf2 from "./browser-pdf-vendor/mupdf.js";
 var abort2 = (signal) => {
@@ -711,7 +711,7 @@ async function readSourceLinks({ bytes, document, signal } = {}) {
   }
 }
 
-// app/src/paper-flow.mjs
+// src/paper-flow.mjs
 init_paragraph_pdf_crypto();
 var boxOK2 = (b) => Array.isArray(b) && b.length === 4 && b.every(Number.isFinite) && b[0] < b[2] && b[1] < b[3];
 var overlap = (a, b) => a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
@@ -724,6 +724,7 @@ var median = (xs) => {
 var reading = (a, b) => (a.pos ?? Infinity) - (b.pos ?? Infinity) || a.index - b.index;
 var geom = (a, b) => a.box[1] - b.box[1] || a.box[0] - b.box[0] || reading(a, b);
 var textKey = (b) => (b.text || "").trim().replace(/\s+/g, " ");
+var captionText = (text) => /^\s*(?:extended\s+data\s+)?(?:fig(?:ure)?\.?|table)\s*\d+[a-z]?\b/i.test(text || "") && !/^\s*(?:extended\s+data\s+)?(?:fig(?:ure)?\.?|table)\s*\d+[a-z]?\s+(?:shows?|is|are|was|were|illustrates?|presents?|reports?|demonstrates?|depicts?|lists?|contains?|summarizes?|provides?|compares?)\b/i.test(text || "");
 var sameNumbers = (a, b, tolerance = 0.01) => Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => Number.isFinite(v) && Number.isFinite(b[i]) && Math.abs(v - b[i]) < tolerance);
 function linkedEdgeCandidates(document, inventory) {
   if (inventory?.schema !== "falsify.paper-source-links.v1" || inventory.sourceSha256 !== document.sourceSha256 || !Array.isArray(inventory.frames) || !Array.isArray(inventory.links)) return [];
@@ -747,15 +748,17 @@ function splitBlock(b, hash2, styles) {
   if (!b.text || !Array.isArray(lines) || lines.length < 2 || !Array.isArray(characters) || !range || lines.some((l) => !boxOK2(l.bbox) || !l.range)) return [b];
   if (lines[0].range.start !== range.start || lines.at(-1).range.end !== range.end || lines.some((l, i) => l.range.start >= l.range.end || i && lines[i - 1].range.end !== l.range.start)) return [b];
   const groups = [];
+  const widestLine = Math.max(...lines.map((l) => l.bbox[2] - l.bbox[0]));
   for (const line of lines) {
     const group = groups.at(-1), prev = group?.at(-1), h = line.bbox[3] - line.bbox[1];
     const gap = prev ? line.bbox[1] - prev.bbox[3] : 0;
     const sameColumn = prev && Math.min(line.bbox[2], prev.bbox[2]) - Math.max(line.bbox[0], prev.bbox[0]) > Math.min(line.bbox[2] - line.bbox[0], prev.bbox[2] - prev.bbox[0]) * 0.3;
+    const samePhysicalLine = prev && Math.abs(line.bbox[1] - prev.bbox[1]) < 0.5 && line.bbox[0] >= prev.bbox[2] - 1 && line.bbox[0] - prev.bbox[2] <= h * 2 && line.bbox[2] - prev.bbox[0] <= widestLine * 1.3;
     const indent = prev && line.bbox[0] - prev.bbox[0] > h;
     const lineSize = (l) => median(characters.filter((c) => c.start >= l.range.start && c.end <= l.range.end).map((c) => styles.get(c.styleId)?.size).filter(Number.isFinite));
     const a = prev && lineSize(prev), z = lineSize(line);
     const sizeChange = a && z && Math.max(a, z) > Math.min(a, z) * 1.2;
-    if (!prev || !sameColumn || gap < -h * 0.5 || gap > h * 0.8 || indent || sizeChange) groups.push([line]);
+    if (!prev || !sameColumn && !samePhysicalLine || gap < -h * 0.5 && !samePhysicalLine || gap > h * 0.8 || indent && !samePhysicalLine || sizeChange) groups.push([line]);
     else group.push(line);
   }
   if (groups.length === 1) return [b];
@@ -828,19 +831,440 @@ function occlusionFragments(block, evidence, hash2) {
   }
   return parts;
 }
-function buildPaperFlow(document, { drawings = document?.drawings || [], links } = {}) {
-  if (document?.schema !== "falsify.paper-document.v1" || !Array.isArray(document.pages) || !Array.isArray(document.blocks) || !Array.isArray(document.assets)) throw new TypeError("Expected falsify.paper-document.v1");
-  const items = [], relations = [], diagnostics = [], fragments = [], regions = [];
-  const styles = new Map((document.styles || []).map((s) => [s.id, s]));
-  const evidence = (document.occlusions || []).filter((e) => e.sourceSha256 === document.sourceSha256 && Array.isArray(e.ranges) && e.proof?.changedChannels === 0 && e.proof?.removedCharacters > 0);
-  let flowBlocks = document.blocks.flatMap((b) => occlusionFragments(b, evidence.filter((e) => e.pageIndex === b.source?.pageIndex), document.sourceSha256)).flatMap((b) => splitBlock(b, document.sourceSha256, styles));
-  const inline = inlineFragments(flowBlocks, document.sourceSha256);
-  flowBlocks = flowBlocks.flatMap((b) => inline.replacements.has(b.id) ? inline.replacements.get(b.id) || [b] : [b]);
-  fragments.push(...flowBlocks.filter((b) => b.parentBlockId));
-  const textBlocks = flowBlocks.filter((b) => b.text);
-  const sizeOf = (b) => median((b.source?.characters || []).map((c) => styles.get(c.styleId)?.size).filter(Number.isFinite)) || styles.get(b.styleId)?.size || 0;
-  const bodySize = median(textBlocks.flatMap((b) => (b.source?.characters || []).map((c) => styles.get(c.styleId)?.size).filter(Number.isFinite))) || median(textBlocks.map(sizeOf).filter(Boolean));
-  const linkedEdges = linkedEdgeCandidates(document, links);
+function groupAndAssociateCaptions({ entries, flowBlocks, styles, page, pi, diagnostics, relations }) {
+  const blockMap = new Map(flowBlocks.map((b) => [b.id, b]));
+  const signature = (e) => {
+    const chars = e.blockIds.flatMap((id3) => blockMap.get(id3)?.source?.characters || []);
+    const counts = /* @__PURE__ */ new Map();
+    for (const c of chars) {
+      const s = styles.get(c.styleId);
+      if (!s?.fontName || !Number.isFinite(s.size)) continue;
+      const key = `${s.fontName.replace(/(?:Bold|Semibold|Italic|Oblique)/gi, "")}|${Math.round(s.size * 10) / 10}`;
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    return [...counts].sort((a, b) => b[1] - a[1])[0]?.[0];
+  };
+  const bounds = (e) => e.blockIds.map((id3) => blockMap.get(id3)?.source?.range).filter(Boolean);
+  const start = (e) => Math.min(...bounds(e).map((r) => r.start));
+  const end = (e) => {
+    const ranges = bounds(e).sort((a, b) => a.start - b.start || a.end - b.end);
+    let last = ranges[0]?.end;
+    for (const r of ranges.slice(1)) {
+      if (r.start > last) break;
+      last = Math.max(last, r.end);
+    }
+    return last;
+  };
+  const lineCount = (e) => e.blockIds.reduce((n, id3) => n + (blockMap.get(id3)?.source?.lines?.length || 0), 0);
+  for (const caption of entries.filter((e) => e.kind === "caption" && boxOK2(e.box))) {
+    let last = caption;
+    const members = [caption];
+    while (true) {
+      const lastEnd = end(last), sig = signature(last);
+      if (!Number.isFinite(lastEnd) || !sig) break;
+      const next = entries.filter((e) => e.kind === "paragraph" && !members.includes(e) && boxOK2(e.box) && start(e) === lastEnd && signature(e) === sig && lineCount(e) >= 1);
+      const eligible = next.filter((e) => {
+        const h = median(last.blockIds.flatMap((id3) => (blockMap.get(id3)?.source?.lines || []).map((l) => boxOK2(l.bbox) ? l.bbox[3] - l.bbox[1] : 0)).filter(Boolean));
+        if (!h) return false;
+        const sameColumn = Math.min(last.box[2], e.box[2]) - Math.max(last.box[0], e.box[0]) > Math.min(last.box[2] - last.box[0], e.box[2] - e.box[0]) * 0.5;
+        const gap = e.box[1] - last.box[3];
+        const adjacent = sameColumn && gap >= -h && gap <= h;
+        const wrap = !sameColumn && e.box[0] > last.box[2] && lineCount(last) >= 2 && lineCount(e) >= 2 && Math.abs(e.box[1] - caption.box[1]) <= h && last.box[3] > e.box[1] + 2 * h;
+        if (!adjacent && !wrap) return false;
+        const corridor = wrap ? [e.box[0], e.box[1], e.box[2], e.box[1] + h] : [Math.min(last.box[0], e.box[0]), Math.min(last.box[3], e.box[1]), Math.max(last.box[2], e.box[2]), Math.max(last.box[3], e.box[1])];
+        return !entries.some((x) => x !== last && x !== e && !members.includes(x) && !["header", "footer"].includes(x.kind) && boxOK2(x.box) && overlap(corridor, x.box));
+      });
+      if (eligible.length !== 1) break;
+      last = eligible[0];
+      members.push(last);
+    }
+    if (members.length > 1) {
+      const ids = [], joiners = [];
+      for (const member of members) {
+        if (ids.length) joiners.push(" ");
+        ids.push(...member.blockIds);
+        if (member.inline) joiners.push(...member.joiners);
+        else for (let i = 1; i < member.blockIds.length; i++) joiners.push("");
+      }
+      caption.blockIds = ids;
+      caption.inline = true;
+      caption.joiners = joiners;
+      caption.memberBoxes = members.map((e) => [...e.box]);
+      caption.box = union(caption.memberBoxes);
+      caption.source.bbox = [...caption.box];
+      for (const member of members.slice(1)) entries.splice(entries.indexOf(member), 1);
+      diagnostics.push({ code: "caption-continuation-grouped", pageIndex: pi, itemId: caption.id, memberItemIds: members.map((e) => e.id), blockIds: [...ids] });
+    }
+  }
+  const captionCandidates = (caption) => {
+    return entries.filter((x) => x.kind === "asset" && boxOK2(x.box) && x.box[0] < caption.box[2] && caption.box[0] < x.box[2]).map((x) => {
+      const position = caption.box[3] <= x.box[1] ? "above" : caption.box[1] >= x.box[3] ? "below" : null;
+      const gap = position === "above" ? x.box[1] - caption.box[3] : position === "below" ? caption.box[1] - x.box[3] : Infinity;
+      const area3 = (x.box[2] - x.box[0]) * (x.box[3] - x.box[1]);
+      return { x, position, gap, area: area3 };
+    }).filter((c) => c.position && c.gap <= Math.max(30, page.height * 0.05)).sort((a, b) => a.gap - b.gap || b.area - a.area);
+  };
+  const captionEntries = entries.filter((x) => x.kind === "caption" && boxOK2(x.box));
+  const clear = captionEntries.filter((c) => !/^\s*table\s*\d/i.test(c.blockIds.map((id3) => flowBlocks.find((b) => b.id === id3)?.text || "").join(""))).map((c) => captionCandidates(c)).filter((xs) => xs.length === 1 || xs.length > 1 && xs[1].gap - xs[0].gap > 10).map((xs) => xs[0].position);
+  const below = clear.filter((x) => x === "below").length, above = clear.filter((x) => x === "above").length, preferred = below >= 2 && above === 0 ? "below" : above >= 2 && below === 0 ? "above" : null;
+  for (const caption of captionEntries) {
+    const table = /^\s*(?:extended\s+data\s+)?table\s*\d/i.test(caption.blockIds.map((id3) => flowBlocks.find((b) => b.id === id3)?.text || "").join(""));
+    let near3 = captionCandidates(caption);
+    if (!table && preferred && near3.length > 1 && near3[1].gap - near3[0].gap <= 10) {
+      const consistent = near3.filter((x) => x.position === preferred);
+      if (consistent.length === 1) near3 = consistent;
+    }
+    const best = near3[0];
+    if (best && (near3.length === 1 || near3[1].gap - best.gap > 10 || table && best.position === "above" && best.area > near3[1].area * 2 && best.gap < near3[1].gap)) {
+      best.x.captionIds.push(...caption.blockIds);
+      best.x.captionPositions ||= {};
+      for (const id3 of caption.blockIds) best.x.captionPositions[id3] = best.position;
+      relations.push({ kind: "caption", assetItemId: best.x.id, captionItemId: caption.id, position: best.position });
+    } else diagnostics.push({ code: "caption-association-unresolved", pageIndex: pi, itemId: caption.id });
+  }
+}
+function associateCrossPageCaptions({ document, fragments, items, relations, diagnostics, regions }) {
+  const blockMap = new Map([...document.blocks, ...fragments].map((b) => [b.id, b]));
+  const frameOK = (p) => p && p.geometry?.frame === "mupdf-display" && sameNumbers(p.geometry.bounds, [0, 0, p.width, p.height]) && Array.isArray(p.geometry.pageTransform) && p.geometry.pageTransform.length === 6 && p.geometry.pageTransform.every(Number.isFinite);
+  for (const page of document.pages) {
+    const next = document.pages.find((p) => p.sourcePageIndex === page.sourcePageIndex + 1);
+    if (!frameOK(page) || !frameOK(next) || !sameNumbers(page.geometry.bounds, next.geometry.bounds) || !sameNumbers(page.geometry.pageTransform, next.geometry.pageTransform)) continue;
+    const current = items.filter((i) => i.source.pageIndex === page.sourcePageIndex && !["header", "footer"].includes(i.kind));
+    const caption = current.at(-1);
+    if (caption?.kind !== "caption" || !boxOK2(caption.source.bbox) || caption.source.bbox[3] < page.height * 0.88 || relations.some((r) => r.kind === "caption" && r.captionItemId === caption.id)) continue;
+    const blocks = caption.blockIds.map((id3) => blockMap.get(id3));
+    if (blocks.some((b) => !b || b.source?.pageIndex !== page.sourcePageIndex || !b.source.range || page.text?.slice(b.source.range.start, b.source.range.end) !== b.text)) continue;
+    const text = blocks.map((b) => b.text).join("");
+    if (!/^\s*(?:extended\s+data\s+)?fig(?:ure)?\.?\s*\d/i.test(text) || !/[.!?][)\]"'\u2019\u201d]*\s*$/.test(text)) continue;
+    const following = items.filter((i) => i.source.pageIndex === next.sourcePageIndex && !["header", "footer"].includes(i.kind));
+    if (following.length !== 1 || following[0].kind !== "asset") continue;
+    const artwork = following[0], box5 = artwork.source.bbox;
+    const region = regions.find((r) => r.id === artwork.renderAssetId && r.pageIndex === next.sourcePageIndex && r.classification === "compound-figure");
+    if (!region || !boxOK2(box5) || !sameNumbers(region.bbox, box5) || box5[2] - box5[0] < next.width * 0.7 || box5[3] - box5[1] < next.height * 0.7 || artwork.captionIds.length || region.blockIds.length !== artwork.blockIds.length || region.assetIds.length !== artwork.assetIds.length || region.blockIds.some((id3) => !artwork.blockIds.includes(id3)) || region.assetIds.some((id3) => !artwork.assetIds.includes(id3))) continue;
+    artwork.captionIds.push(...caption.blockIds);
+    artwork.captionPositions ||= {};
+    for (const id3 of caption.blockIds) artwork.captionPositions[id3] = "above";
+    relations.push({ kind: "caption", assetItemId: artwork.id, captionItemId: caption.id, position: "above", provenance: { rule: "adjacent-page-bottom-caption-full-page-artwork", sourceSha256: document.sourceSha256, captionPageIndex: page.sourcePageIndex, artworkPageIndex: next.sourcePageIndex, frame: "mupdf-display", regionId: region.id } });
+    const unresolved = diagnostics.findIndex((d) => d.code === "caption-association-unresolved" && d.itemId === caption.id);
+    if (unresolved >= 0) diagnostics.splice(unresolved, 1);
+  }
+}
+function captureOutlineArtwork({ blocks, assets, paths, page, pi, document, make, entries, regions, owned, represented }) {
+  const centralText = blocks.filter((x) => x.b.text?.trim() && (!boxOK2(x.box) || x.box[1] < page.height * 0.9 && x.box[3] > page.height * 0.1));
+  let form = false;
+  if (paths.length >= 2e3 && centralText.length === 0 && blocks.every((x) => boxOK2(x.box)) && assets.every((x) => boxOK2(x.box))) {
+    const raw = union([...paths, ...blocks.map((x) => x.box), ...assets.map((x) => x.box)]);
+    const box5 = [Math.max(0, raw[0] - 1), Math.max(0, raw[1] - 1), Math.min(page.width, raw[2] + 1), Math.min(page.height, raw[3] + 1)];
+    if (boxOK2(box5) && box5[2] - box5[0] > page.width * 0.5 && box5[3] - box5[1] > page.height * 0.5 && [...paths, ...blocks.map((x) => x.box), ...assets.map((x) => x.box)].every((b) => contains(box5, b))) {
+      const id3 = `region-${hex(new TextEncoder().encode(JSON.stringify([document.sourceSha256, pi, box5]))).slice(0, 24)}`;
+      const entry = make("asset", blocks, assets, box5, Math.min(...blocks.map((x) => x.pos ?? Infinity)), 0);
+      entry.renderAssetId = id3;
+      entries.push(entry);
+      regions.push({ id: id3, pageIndex: pi, bbox: [...box5], blockIds: blocks.map((x) => x.b.id), assetIds: assets.map((x) => x.a.id), classification: "outline-artwork" });
+      blocks.forEach((x) => owned.add(x.b.id));
+      assets.forEach((x) => represented.add(x.a.id));
+      form = true;
+    }
+  }
+  return form;
+}
+function captureCompoundFigures({ form, blocks, assets, paths, page, pi, document, make, entries, regions, owned, represented, captions, bodySize, sizeOf }) {
+  let plot = false;
+  if (!form) {
+    const central = blocks.filter((x) => x.b.text && boxOK2(x.box) && x.box[1] >= page.height * 0.05 && x.box[3] <= page.height * 0.9);
+    const narrative = (x) => {
+      const lines = x.b.source?.lines || [];
+      return captions.includes(x) || bodySize && sizeOf(x.b) >= bodySize * 0.88 && x.box[2] - x.box[0] >= page.width * 0.3 && (lines.length >= 2 || x.b.text.trim().length >= 55);
+    };
+    const barriers = central.filter(narrative).sort(geom);
+    const limits = [page.height * 0.05, ...barriers.flatMap((x) => [x.box[1], x.box[3]]), page.height * 0.9].sort((a, b) => a - b);
+    for (let i = 0; i < limits.length - 1; i++) {
+      const top = limits[i], bottom = limits[i + 1];
+      if (bottom <= top || barriers.some((x) => x.box[1] < bottom && x.box[3] > top)) continue;
+      const as = assets.filter((x) => !represented.has(x.a.id) && boxOK2(x.box) && x.box[1] >= top && x.box[3] <= bottom);
+      if (as.length < 2) continue;
+      const labels = central.filter((x) => !owned.has(x.b.id) && !narrative(x) && x.box[1] >= top && x.box[3] <= bottom);
+      if (labels.length < 3) continue;
+      const ps = paths.filter((b) => b[1] >= top && b[3] <= bottom);
+      const raw = union([...as.map((x) => x.box), ...labels.map((x) => x.box), ...ps]);
+      const box5 = [Math.max(0, raw[0] - 2), Math.max(0, raw[1] - 2), Math.min(page.width, raw[2] + 2), Math.min(page.height, raw[3] + 2)];
+      if (box5[2] - box5[0] < page.width * 0.4 || box5[3] - box5[1] < page.height * 0.2) continue;
+      if (blocks.some((x) => x.b.text && boxOK2(x.box) && overlap(box5, x.box) && !labels.includes(x)) || assets.some((x) => boxOK2(x.box) && overlap(box5, x.box) && !as.includes(x))) continue;
+      const bs = [...labels, ...blocks.filter((x) => !owned.has(x.b.id) && (x.b.assetIds || []).some((id4) => as.some((a) => a.a.id === id4)))];
+      bs.forEach((x) => owned.add(x.b.id));
+      as.forEach((x) => represented.add(x.a.id));
+      const id3 = `region-${hex(new TextEncoder().encode(JSON.stringify([document.sourceSha256, pi, box5]))).slice(0, 24)}`;
+      const entry = make("asset", bs, as, box5, Math.min(...bs.map((x) => x.pos ?? Infinity)), Math.min(...bs.map((x) => x.index)));
+      entry.renderAssetId = id3;
+      entries.push(entry);
+      regions.push({ id: id3, pageIndex: pi, bbox: [...box5], blockIds: bs.map((x) => x.b.id), assetIds: as.map((x) => x.a.id), classification: "compound-figure" });
+      plot = true;
+    }
+  }
+  return plot;
+}
+function captureVectorPlot({ form, plot, plotPaths, plotText, blocks, assets, page, pi, document, make, entries, regions, owned, represented, bodySize, sizeOf, plotBottom }) {
+  if (!form && !plot && plotPaths.length >= 1e3) {
+    const artwork = union(plotPaths);
+    const plotBlocks = plotText.filter((x) => {
+      const text = x.b.text.trim(), lines = x.b.source?.lines || [];
+      const dx = Math.max(artwork[0] - x.box[2], x.box[0] - artwork[2], 0);
+      const dy = Math.max(artwork[1] - x.box[3], x.box[1] - artwork[3], 0);
+      const distance = Math.max(10, Math.min(15, (sizeOf(x.b) || x.box[3] - x.box[1]) * 1.5));
+      const smallArtworkText = contains(artwork, x.box) && bodySize && sizeOf(x.b) && sizeOf(x.b) <= bodySize * 0.9;
+      return smallArtworkText || text.length <= 30 && text.split(/\s+/).length <= 3 && !/[.!?]\s*$/.test(text) && lines.length <= 1 && (text.length <= 2 || !bodySize || !sizeOf(x.b) || sizeOf(x.b) <= bodySize * 1.1) && dx <= distance && dy <= distance;
+    });
+    let box5 = union([artwork, ...plotBlocks.map((x) => x.box)]);
+    const touching = assets.filter((x) => boxOK2(x.box) && overlap(box5, x.box));
+    if (touching.every((x) => x.box[0] >= 0 && x.box[1] >= page.height * 0.05 && x.box[2] <= page.width && x.box[3] <= plotBottom)) box5 = union([box5, ...touching.map((x) => x.box)]);
+    if (plotBlocks.length >= 20 && !blocks.some((x) => x.b.text && boxOK2(x.box) && overlap(box5, x.box) && !plotBlocks.includes(x)) && touching.every((x) => contains(box5, x.box)) && box5[2] - box5[0] > page.width * 0.4 && box5[3] - box5[1] > page.height * 0.2) {
+      const as = assets.filter((x) => boxOK2(x.box) && contains(box5, x.box));
+      const figureBlocks = blocks.filter((x) => (x.b.assetIds || []).some((id4) => as.some((a) => a.a.id === id4)));
+      plotBlocks.push(...figureBlocks.filter((x) => !plotBlocks.includes(x)));
+      plotBlocks.forEach((x) => owned.add(x.b.id));
+      as.forEach((x) => represented.add(x.a.id));
+      const id3 = `region-${hex(new TextEncoder().encode(JSON.stringify([document.sourceSha256, pi, box5]))).slice(0, 24)}`;
+      const entry = make("asset", plotBlocks, as, box5, Math.min(...plotBlocks.map((x) => x.pos ?? Infinity)), plotBlocks[0].index);
+      entry.renderAssetId = id3;
+      entries.push(entry);
+      regions.push({ id: id3, pageIndex: pi, bbox: [...box5], blockIds: plotBlocks.map((x) => x.b.id), assetIds: as.map((x) => x.a.id) });
+      plot = true;
+    }
+  }
+  return plot;
+}
+function captureVectorTables({ form, plot, paths, blocks, assets, pi, document, make, entries, regions, owned, represented }) {
+  const seen = /* @__PURE__ */ new Set();
+  for (let n = 0; n < (form || plot || paths.length > 2e3 ? 0 : paths.length); n++) {
+    if (seen.has(n)) continue;
+    const cluster = [n];
+    seen.add(n);
+    for (let k = 0; k < cluster.length; k++) for (let j = 0; j < paths.length; j++) {
+      if (seen.has(j)) continue;
+      const a = paths[cluster[k]], b = paths[j];
+      if (a[0] <= b[2] + 1 && b[0] <= a[2] + 1 && a[1] <= b[3] + 1 && b[1] <= a[3] + 1) {
+        seen.add(j);
+        cluster.push(j);
+      }
+    }
+    if (cluster.length < 10) continue;
+    const boxes = cluster.map((i) => paths[i]), box5 = union(boxes);
+    const horizontal = boxes.filter((b) => b[2] - b[0] > 10 && b[3] - b[1] < 3).length;
+    const vertical = boxes.filter((b) => b[3] - b[1] > 10 && b[2] - b[0] < 3).length;
+    if (horizontal < 3 || vertical < 3 || box5[2] - box5[0] < 40 || box5[3] - box5[1] < 20) continue;
+    const bs = blocks.filter((x) => x.b.text && !owned.has(x.b.id) && boxOK2(x.box) && contains(box5, x.box));
+    if (bs.length < 4 || blocks.some((x) => x.b.text && boxOK2(x.box) && overlap(box5, x.box) && !bs.includes(x)) || assets.some((x) => boxOK2(x.box) && overlap(box5, x.box) && !contains(box5, x.box))) continue;
+    const as = assets.filter((x) => !represented.has(x.a.id) && boxOK2(x.box) && contains(box5, x.box));
+    bs.push(...blocks.filter((x) => !owned.has(x.b.id) && !bs.includes(x) && (x.b.assetIds || []).some((id4) => as.some((a) => a.a.id === id4))));
+    bs.forEach((x) => owned.add(x.b.id));
+    as.forEach((x) => represented.add(x.a.id));
+    const id3 = `region-${hex(new TextEncoder().encode(JSON.stringify([document.sourceSha256, pi, box5]))).slice(0, 24)}`;
+    const entry = make("asset", bs, as, box5, Math.min(...bs.map((x) => x.pos ?? Infinity)), bs[0].index);
+    entry.renderAssetId = id3;
+    entries.push(entry);
+    regions.push({ id: id3, pageIndex: pi, bbox: [...box5], blockIds: bs.map((x) => x.b.id), assetIds: as.map((x) => x.a.id) });
+  }
+}
+function captureImageAssets({ assets, blocks, pi, document, make, entries, regions, owned, represented, evidence }) {
+  for (const a of assets) {
+    if (represented.has(a.a.id)) continue;
+    const group = [a];
+    represented.add(a.a.id);
+    if (boxOK2(a.box)) {
+      for (let i = 0; i < group.length; i++) for (const other of assets) if (!represented.has(other.a.id) && boxOK2(other.box) && overlap(group[i].box, other.box)) {
+        group.push(other);
+        represented.add(other.a.id);
+      }
+    }
+    const box5 = group.every((x) => boxOK2(x.box)) ? union(group.map((x) => x.box)) : null;
+    const proofs = evidence.filter((e) => e.pageIndex === pi && group.some((y) => y.a.id === e.assetId));
+    const confirmed = (x) => x.b.text && x.b.source?.range && proofs.some((e) => {
+      const r = x.b.source.range;
+      return e.ranges.some((z) => z.start <= r.start && z.end >= r.end);
+    });
+    const bs = blocks.filter((x) => !owned.has(x.b.id) && ((x.b.assetIds || []).some((id3) => group.some((y) => y.a.id === id3)) || confirmed(x)));
+    bs.forEach((x) => owned.add(x.b.id));
+    const entry = make("asset", bs, group, box5, a.pos, a.index);
+    if (proofs.length && bs.some(confirmed) && boxOK2(box5)) {
+      const id3 = `region-${hex(new TextEncoder().encode(JSON.stringify([document.sourceSha256, pi, box5]))).slice(0, 24)}`;
+      entry.renderAssetId = id3;
+      regions.push({ id: id3, pageIndex: pi, bbox: [...box5], blockIds: bs.map((x) => x.b.id), assetIds: group.map((x) => x.a.id), classification: "verified-occlusion" });
+    }
+    entries.push(entry);
+  }
+}
+function classifyPageText({ paths, assets, blocks, repeats, linkedEdges, bodySize, sizeOf, page, pi, decoratedFooter, owned, entries, make, flowBlocks }) {
+  const artworkNear = (x) => paths.some((p) => overlap(p, x.box)) || assets.some((a) => boxOK2(a.box) && a.box[0] < x.box[2] + 15 && a.box[2] > x.box[0] - 15 && a.box[1] < x.box[3] + 15 && a.box[3] > x.box[1] - 15);
+  const repeated = (x) => repeats.get(textKey(x.b))?.size >= 2;
+  const peer = (x) => blocks.some((y) => y !== x && y.b.text?.trim() && boxOK2(y.box) && repeated(y) && y.box[1] < x.box[3] && x.box[1] < y.box[3] && (y.box[2] < x.box[0] || x.box[2] < y.box[0]) && !artworkNear(y));
+  const separatedBody = (x) => blocks.some((y) => y !== x && y.b.text && boxOK2(y.box) && y.box[1] >= page.height * 0.12 && y.box[3] <= page.height * 0.88);
+  const linked = (x) => linkedEdges.find((e) => e.b.id === x.b.id && e.b.source.range.start === x.b.source.range?.start && e.b.source.range.end === x.b.source.range?.end);
+  const inferredEdge = (x) => boxOK2(x.box) && repeated(x) && bodySize && sizeOf(x.b) && separatedBody(x) && !artworkNear(x) && (sizeOf(x.b) < bodySize * 0.9 || peer(x) || linked(x));
+  for (const x of blocks) {
+    if (owned.has(x.b.id)) continue;
+    owned.add(x.b.id);
+    const b = x.b, box5 = x.box;
+    let kind = "paragraph";
+    if (b.kind === "figure" || b.kind === "table") kind = "asset";
+    else if (b.kind === "caption" || captionText(b.text)) kind = "caption";
+    else if (b.kind === "header" || b.kind === "footer") kind = b.kind;
+    else if (/^\s*\d+\s*$/.test(b.text || "") && Number(b.text) === pi + 1 && box5[1] > page.height * 0.93 && Math.abs((box5[0] + box5[2]) / 2 - page.width / 2) < page.width * 0.12 && (sizeOf(b) || 0) < bodySize * 0.9) kind = "footer";
+    else if (decoratedFooter.has(b.id)) kind = "footer";
+    else if (inferredEdge(x)) {
+      if (box5[1] < page.height * 0.12) kind = "header";
+      else if (box5[3] > page.height * 0.88) kind = "footer";
+    } else if (b.kind === "heading" || bodySize > 0 && sizeOf(b) > bodySize * 1.3 && (b.text || "").trim().length >= 12 && (b.text || "").length < 150) kind = "heading";
+    entries.push(make(kind, [x], [], box5, x.pos, x.index));
+  }
+  for (const edge of entries.filter((x) => ["header", "footer"].includes(x.kind))) {
+    if (edge.blockIds.some((id3) => flowBlocks.find((b) => b.id === id3)?.kind === edge.kind) || !boxOK2(edge.box)) continue;
+    const ordinary = entries.filter((x) => ["paragraph", "heading"].includes(x.kind) && boxOK2(x.box) && x.blockIds.some((id3) => flowBlocks.find((b) => b.id === id3)?.text?.trim()));
+    if (ordinary.some((x) => edge.kind === "header" ? x.box[3] <= edge.box[1] : x.box[1] >= edge.box[3])) edge.kind = "paragraph";
+  }
+}
+function groupInlineText({ flowBlocks, pi, inline, entries }) {
+  const parentGroups = /* @__PURE__ */ new Map();
+  for (const b of flowBlocks.filter((b2) => b2.parentBlockId && b2.source.pageIndex === pi)) {
+    if (!parentGroups.has(b.parentBlockId)) parentGroups.set(b.parentBlockId, []);
+    parentGroups.get(b.parentBlockId).push(b);
+  }
+  for (const group of parentGroups.values()) {
+    if (group.length < 3 || group.some((b) => inline.groups.some((g) => g.includes(b)))) continue;
+    group.sort((a, b) => a.source.range.start - b.source.range.start);
+    const box5 = union(group.map((b) => b.source.bbox));
+    if (!boxOK2(box5) || box5[3] - box5[1] > 60 || group.some((b, i) => i && group[i - 1].source.range.end !== b.source.range.start)) continue;
+    const members = group.map((b) => entries.find((e) => e.blockIds.length === 1 && e.blockIds[0] === b.id));
+    if (members.some((x) => !x || x.kind !== "paragraph")) continue;
+    const first = members[0];
+    first.blockIds = group.map((b) => b.id);
+    first.inline = true;
+    first.joiners = Array(group.length - 1).fill("");
+    first.box = box5;
+    first.source.bbox = [...box5];
+    for (const member of members.slice(1)) entries.splice(entries.indexOf(member), 1);
+  }
+  for (const group of inline.groups) {
+    const members = group.map((b) => entries.find((e) => e.blockIds.length === 1 && e.blockIds[0] === b.id));
+    if (members.some((x) => !x || x.kind !== "paragraph")) continue;
+    const first = members[0];
+    first.blockIds = group.map((b) => b.id);
+    first.inline = true;
+    first.joiners = Array(group.length - 1).fill("");
+    first.box = union(members.map((x) => x.box));
+    first.source.bbox = [...first.box];
+    for (const member of members.slice(1)) entries.splice(entries.indexOf(member), 1);
+  }
+}
+function orderPageEntries({ entries, blocks, page, pi, diagnostics }) {
+  const headers = entries.filter((x) => x.kind === "header").sort(geom), footers = entries.filter((x) => x.kind === "footer").sort(geom);
+  for (const edge of [...headers, ...footers]) entries.splice(entries.indexOf(edge), 1);
+  let continuousOrder = null;
+  if (entries.some((x) => !boxOK2(x.box)) || !Number.isFinite(page.width)) {
+    diagnostics.push({ code: "reading-order-fallback", pageIndex: pi, detail: "Missing geometry; reader order retained." });
+    entries.sort(reading);
+  } else {
+    const lineBoxes = blocks.filter((x) => x.b.text && !ownedByAsset(x, entries)).flatMap((x) => {
+      const lines = x.b.source?.lines?.map((l) => l.bbox).filter(boxOK2) || [];
+      return lines.length ? lines : [x.box];
+    }).filter(boxOK2);
+    const candidates = [];
+    for (let mid = page.width * 0.25; mid <= page.width * 0.75; mid += Math.max(1, page.width / 400)) {
+      const left = lineBoxes.filter((b) => b[2] < mid && b[2] > page.width * 0.2 && b[2] - b[0] > page.width * 0.25), right = lineBoxes.filter((b) => b[0] > mid && b[0] < page.width * 0.8 && b[2] - b[0] > page.width * 0.25);
+      if (left.length < 2 || right.length < 2 || !left.some((a) => right.some((b) => a[1] < b[3] && b[1] < a[3]))) continue;
+      const l = Math.max(...left.map((b) => b[2])), r = Math.min(...right.map((b) => b[0]));
+      if (r - l >= Math.max(8, page.width * 0.015)) candidates.push({ mid: (l + r) / 2, l, r, score: Math.min(left.length, right.length) });
+    }
+    candidates.sort((a, b) => b.score - a.score || Math.abs(a.mid - page.width / 2) - Math.abs(b.mid - page.width / 2));
+    const g = candidates[0];
+    if (!g) {
+      entries.sort(geom);
+      diagnostics.push({ code: "single-column-or-unresolved", pageIndex: pi });
+    } else {
+      const splitCaption = (x) => x.kind === "caption" && x.memberBoxes?.length > 1 && x.memberBoxes.every((b) => b[2] <= g.mid || b[0] >= g.mid) && x.memberBoxes.some((b) => b[2] <= g.mid) && x.memberBoxes.some((b) => b[0] >= g.mid);
+      for (const item of entries.filter(splitCaption)) item.measuredColumns = 2;
+      if (entries.some(splitCaption)) {
+        const layoutBox = (x) => splitCaption(x) ? x.memberBoxes[0] : x.box;
+        const spans2 = entries.filter((x) => !splitCaption(x) && x.box[0] < g.mid && x.box[2] > g.mid).sort(geom);
+        const side2 = entries.filter((x) => !spans2.includes(x)), groups2 = [];
+        for (const s of spans2) {
+          const last = groups2.at(-1);
+          if (last && s.box[1] < last.bottom) {
+            last.items.push(s);
+            last.bottom = Math.max(last.bottom, s.box[3]);
+          } else groups2.push({ items: [s], top: s.box[1], bottom: s.box[3] });
+        }
+        for (const c of side2.filter((x) => x.kind === "caption")) if (side2.some((x) => x !== c && x.kind === "paragraph" && x.box[3] < c.box[1] - 5) && !groups2.some((g2) => c.box[1] >= g2.top && c.box[1] < g2.bottom)) groups2.push({ items: [], top: c.box[1], bottom: c.box[1] });
+        groups2.sort((a, b) => a.top - b.top);
+        const bands2 = Array.from({ length: groups2.length + 1 }, () => []);
+        for (const x of side2) {
+          let n = groups2.findIndex((g2) => x.box[1] < g2.bottom && x.box[3] > g2.top);
+          if (n >= 0) groups2[n].items.push(x);
+          else {
+            n = groups2.findIndex((g2) => x.box[3] <= g2.top);
+            bands2[n < 0 ? groups2.length : n].push(x);
+          }
+        }
+        continuousOrder = [];
+        for (let i = 0; i < bands2.length; i++) {
+          const xs = bands2[i], left = xs.filter((x) => layoutBox(x)[2] <= g.mid).sort(geom), right = xs.filter((x) => layoutBox(x)[0] >= g.mid).sort(geom), both = left.length && right.length || xs.some(splitCaption);
+          for (const x of xs) x.continuousColumns = both ? 2 : 1;
+          continuousOrder.push(...left, ...right);
+          if (groups2[i]) continuousOrder.push(...groups2[i].items.sort(geom));
+        }
+      }
+      const spans = entries.filter((x) => x.box[0] < g.mid && x.box[2] > g.mid).sort(geom);
+      const side = entries.filter((x) => !spans.includes(x));
+      const groups = [];
+      for (const s of spans) {
+        const last = groups.at(-1);
+        if (last && s.box[1] < last.bottom) {
+          last.items.push(s);
+          last.bottom = Math.max(last.bottom, s.box[3]);
+        } else groups.push({ items: [s], top: s.box[1], bottom: s.box[3] });
+      }
+      for (const c of side.filter((x) => x.kind === "caption")) if (side.some((x) => x !== c && x.kind === "paragraph" && x.box[3] < c.box[1] - 5) && !groups.some((g2) => c.box[1] >= g2.top && c.box[1] < g2.bottom)) groups.push({ items: [], top: c.box[1], bottom: c.box[1] });
+      groups.sort((a, b) => a.top - b.top);
+      const bands = Array.from({ length: groups.length + 1 }, () => []);
+      for (const x of side) {
+        let n = groups.findIndex((g2) => x.box[1] < g2.bottom && x.box[3] > g2.top);
+        if (n >= 0) {
+          groups[n].items.push(x);
+          diagnostics.push({ code: "band-overlap", pageIndex: pi, itemId: x.id });
+        } else {
+          n = groups.findIndex((g2) => x.box[3] <= g2.top);
+          bands[n < 0 ? groups.length : n].push(x);
+        }
+      }
+      const orderBand = (xs) => {
+        const left = xs.filter((x) => x.box[2] <= g.mid).sort(geom), right = xs.filter((x) => x.box[0] >= g.mid).sort(geom);
+        const both = left.length && right.length;
+        for (const x of xs) {
+          x.columns = both ? 2 : 1;
+          x.span = both ? "column" : "page";
+        }
+        return [...left, ...right];
+      };
+      const ordered = [];
+      for (let i = 0; i < bands.length; i++) {
+        ordered.push(...orderBand(bands[i]));
+        if (groups[i]) ordered.push(...groups[i].items.sort(geom));
+      }
+      entries.splice(0, entries.length, ...ordered);
+      diagnostics.push({ code: "geometry-order-heuristic", pageIndex: pi, gutter: [g.l, g.r] });
+    }
+  }
+  for (const header of headers) {
+    const at = entries.findIndex((e) => boxOK2(e.box) && e.box[1] >= header.box[1]);
+    entries.splice(at < 0 ? entries.length : at, 0, header);
+    if (continuousOrder) {
+      const n = continuousOrder.findIndex((e) => boxOK2(e.box) && e.box[1] >= header.box[1]);
+      continuousOrder.splice(n < 0 ? continuousOrder.length : n, 0, header);
+    }
+  }
+  if (continuousOrder) [...continuousOrder, ...footers].forEach((item, i) => item.continuousPosition = i);
+  return { entries, footers };
+}
+function findRepeatedEdges({ textBlocks, document, drawings }) {
   const repeats = /* @__PURE__ */ new Map();
   for (const b of textBlocks) {
     const page = document.pages.find((p) => p.sourcePageIndex === b.source?.pageIndex), box5 = b.source?.bbox;
@@ -871,6 +1295,22 @@ function buildPaperFlow(document, { drawings = document?.drawings || [], links }
       if (matchingPages.length >= 3 && bodyPages.length >= 2) for (const b of members) decoratedFooter.add(b.id);
     }
   }
+  return { repeats, decoratedFooter };
+}
+function buildPaperFlow(document, { drawings = document?.drawings || [], links } = {}) {
+  if (document?.schema !== "falsify.paper-document.v1" || !Array.isArray(document.pages) || !Array.isArray(document.blocks) || !Array.isArray(document.assets)) throw new TypeError("Expected falsify.paper-document.v1");
+  const items = [], relations = [], diagnostics = [], fragments = [], regions = [];
+  const styles = new Map((document.styles || []).map((s) => [s.id, s]));
+  const evidence = (document.occlusions || []).filter((e) => e.sourceSha256 === document.sourceSha256 && Array.isArray(e.ranges) && e.proof?.changedChannels === 0 && e.proof?.removedCharacters > 0);
+  let flowBlocks = document.blocks.flatMap((b) => occlusionFragments(b, evidence.filter((e) => e.pageIndex === b.source?.pageIndex), document.sourceSha256)).flatMap((b) => splitBlock(b, document.sourceSha256, styles));
+  const inline = inlineFragments(flowBlocks, document.sourceSha256);
+  flowBlocks = flowBlocks.flatMap((b) => inline.replacements.has(b.id) ? inline.replacements.get(b.id) || [b] : [b]);
+  fragments.push(...flowBlocks.filter((b) => b.parentBlockId));
+  const textBlocks = flowBlocks.filter((b) => b.text);
+  const sizeOf = (b) => median((b.source?.characters || []).map((c) => styles.get(c.styleId)?.size).filter(Number.isFinite)) || styles.get(b.styleId)?.size || 0;
+  const bodySize = median(textBlocks.flatMap((b) => (b.source?.characters || []).map((c) => styles.get(c.styleId)?.size).filter(Number.isFinite))) || median(textBlocks.map(sizeOf).filter(Boolean));
+  const linkedEdges = linkedEdgeCandidates(document, links);
+  const { repeats, decoratedFooter } = findRepeatedEdges({ textBlocks, document, drawings });
   for (const page of document.pages) {
     const pi = page.sourcePageIndex;
     const blocks = flowBlocks.map((b, index) => ({ b, index, box: b.source?.bbox, pos: b.source?.readerPosition })).filter((x) => x.b.source?.pageIndex === pi);
@@ -880,419 +1320,30 @@ function buildPaperFlow(document, { drawings = document?.drawings || [], links }
     const make = (kind, bs, as, box5, pos, index) => ({ id: `flow-${pi}-${serial++}`, kind, blockIds: bs.map((x) => x.b.id), assetIds: as.map((x) => x.a.id), source: { pageIndex: pi, bbox: boxOK2(box5) ? [...box5] : null }, columns: 1, span: "page", captionIds: [], box: box5, pos, index });
     const entries = [];
     const paths = drawings.filter((d) => d.pageIndex === pi && boxOK2(d.bbox)).map((d) => d.bbox);
-    const centralText = blocks.filter((x) => x.b.text?.trim() && (!boxOK2(x.box) || x.box[1] < page.height * 0.9 && x.box[3] > page.height * 0.1));
-    let form = false;
-    if (paths.length >= 2e3 && centralText.length === 0 && blocks.every((x) => boxOK2(x.box)) && assets.every((x) => boxOK2(x.box))) {
-      const raw = union([...paths, ...blocks.map((x) => x.box), ...assets.map((x) => x.box)]);
-      const box5 = [Math.max(0, raw[0] - 1), Math.max(0, raw[1] - 1), Math.min(page.width, raw[2] + 1), Math.min(page.height, raw[3] + 1)];
-      if (boxOK2(box5) && box5[2] - box5[0] > page.width * 0.5 && box5[3] - box5[1] > page.height * 0.5 && [...paths, ...blocks.map((x) => x.box), ...assets.map((x) => x.box)].every((b) => contains(box5, b))) {
-        const id3 = `region-${hex(new TextEncoder().encode(JSON.stringify([document.sourceSha256, pi, box5]))).slice(0, 24)}`;
-        const entry = make("asset", blocks, assets, box5, Math.min(...blocks.map((x) => x.pos ?? Infinity)), 0);
-        entry.renderAssetId = id3;
-        entries.push(entry);
-        regions.push({ id: id3, pageIndex: pi, bbox: [...box5], blockIds: blocks.map((x) => x.b.id), assetIds: assets.map((x) => x.a.id), classification: "outline-artwork" });
-        blocks.forEach((x) => owned.add(x.b.id));
-        assets.forEach((x) => represented.add(x.a.id));
-        form = true;
-      }
-    }
+    const form = captureOutlineArtwork({ blocks, assets, paths, page, pi, document, make, entries, regions, owned, represented });
     const captions = blocks.filter((x) => boxOK2(x.box) && /^\s*(?:extended\s+data\s+)?(?:fig(?:ure)?\.?|table)\s*\d/i.test(x.b.text || ""));
     const plotBottom = Math.min(page.height * 0.9, ...captions.map((x) => x.box[1]));
     const plotText = blocks.filter((x) => x.b.text && boxOK2(x.box) && x.box[1] >= page.height * 0.05 && x.box[3] <= plotBottom);
     const plotPaths = paths.filter((b) => b[0] >= 0 && b[1] >= page.height * 0.05 && b[2] <= page.width && b[3] <= plotBottom);
-    let plot = false;
-    if (!form) {
-      const central = blocks.filter((x) => x.b.text && boxOK2(x.box) && x.box[1] >= page.height * 0.05 && x.box[3] <= page.height * 0.9);
-      const narrative = (x) => {
-        const lines = x.b.source?.lines || [];
-        return captions.includes(x) || bodySize && sizeOf(x.b) >= bodySize * 0.88 && x.box[2] - x.box[0] >= page.width * 0.3 && (lines.length >= 2 || x.b.text.trim().length >= 55);
-      };
-      const barriers = central.filter(narrative).sort(geom);
-      const limits = [page.height * 0.05, ...barriers.flatMap((x) => [x.box[1], x.box[3]]), page.height * 0.9].sort((a, b) => a - b);
-      for (let i = 0; i < limits.length - 1; i++) {
-        const top = limits[i], bottom = limits[i + 1];
-        if (bottom <= top || barriers.some((x) => x.box[1] < bottom && x.box[3] > top)) continue;
-        const as = assets.filter((x) => !represented.has(x.a.id) && boxOK2(x.box) && x.box[1] >= top && x.box[3] <= bottom);
-        if (as.length < 2) continue;
-        const labels = central.filter((x) => !owned.has(x.b.id) && !narrative(x) && x.box[1] >= top && x.box[3] <= bottom);
-        if (labels.length < 3) continue;
-        const ps = paths.filter((b) => b[1] >= top && b[3] <= bottom);
-        const raw = union([...as.map((x) => x.box), ...labels.map((x) => x.box), ...ps]);
-        const box5 = [Math.max(0, raw[0] - 2), Math.max(0, raw[1] - 2), Math.min(page.width, raw[2] + 2), Math.min(page.height, raw[3] + 2)];
-        if (box5[2] - box5[0] < page.width * 0.4 || box5[3] - box5[1] < page.height * 0.2) continue;
-        if (blocks.some((x) => x.b.text && boxOK2(x.box) && overlap(box5, x.box) && !labels.includes(x)) || assets.some((x) => boxOK2(x.box) && overlap(box5, x.box) && !as.includes(x))) continue;
-        const bs = [...labels, ...blocks.filter((x) => !owned.has(x.b.id) && (x.b.assetIds || []).some((id4) => as.some((a) => a.a.id === id4)))];
-        bs.forEach((x) => owned.add(x.b.id));
-        as.forEach((x) => represented.add(x.a.id));
-        const id3 = `region-${hex(new TextEncoder().encode(JSON.stringify([document.sourceSha256, pi, box5]))).slice(0, 24)}`;
-        const entry = make("asset", bs, as, box5, Math.min(...bs.map((x) => x.pos ?? Infinity)), Math.min(...bs.map((x) => x.index)));
-        entry.renderAssetId = id3;
-        entries.push(entry);
-        regions.push({ id: id3, pageIndex: pi, bbox: [...box5], blockIds: bs.map((x) => x.b.id), assetIds: as.map((x) => x.a.id), classification: "compound-figure" });
-        plot = true;
-      }
-    }
-    if (!form && !plot && plotPaths.length >= 1e3) {
-      const artwork = union(plotPaths);
-      const plotBlocks = plotText.filter((x) => {
-        const text = x.b.text.trim(), lines = x.b.source?.lines || [];
-        const dx = Math.max(artwork[0] - x.box[2], x.box[0] - artwork[2], 0);
-        const dy = Math.max(artwork[1] - x.box[3], x.box[1] - artwork[3], 0);
-        const distance = Math.max(10, Math.min(15, (sizeOf(x.b) || x.box[3] - x.box[1]) * 1.5));
-        const smallArtworkText = contains(artwork, x.box) && bodySize && sizeOf(x.b) && sizeOf(x.b) <= bodySize * 0.9;
-        return smallArtworkText || text.length <= 30 && text.split(/\s+/).length <= 3 && !/[.!?]\s*$/.test(text) && lines.length <= 1 && (text.length <= 2 || !bodySize || !sizeOf(x.b) || sizeOf(x.b) <= bodySize * 1.1) && dx <= distance && dy <= distance;
-      });
-      let box5 = union([artwork, ...plotBlocks.map((x) => x.box)]);
-      const touching = assets.filter((x) => boxOK2(x.box) && overlap(box5, x.box));
-      if (touching.every((x) => x.box[0] >= 0 && x.box[1] >= page.height * 0.05 && x.box[2] <= page.width && x.box[3] <= plotBottom)) box5 = union([box5, ...touching.map((x) => x.box)]);
-      if (plotBlocks.length >= 20 && !blocks.some((x) => x.b.text && boxOK2(x.box) && overlap(box5, x.box) && !plotBlocks.includes(x)) && touching.every((x) => contains(box5, x.box)) && box5[2] - box5[0] > page.width * 0.4 && box5[3] - box5[1] > page.height * 0.2) {
-        const as = assets.filter((x) => boxOK2(x.box) && contains(box5, x.box));
-        const figureBlocks = blocks.filter((x) => (x.b.assetIds || []).some((id4) => as.some((a) => a.a.id === id4)));
-        plotBlocks.push(...figureBlocks.filter((x) => !plotBlocks.includes(x)));
-        plotBlocks.forEach((x) => owned.add(x.b.id));
-        as.forEach((x) => represented.add(x.a.id));
-        const id3 = `region-${hex(new TextEncoder().encode(JSON.stringify([document.sourceSha256, pi, box5]))).slice(0, 24)}`;
-        const entry = make("asset", plotBlocks, as, box5, Math.min(...plotBlocks.map((x) => x.pos ?? Infinity)), plotBlocks[0].index);
-        entry.renderAssetId = id3;
-        entries.push(entry);
-        regions.push({ id: id3, pageIndex: pi, bbox: [...box5], blockIds: plotBlocks.map((x) => x.b.id), assetIds: as.map((x) => x.a.id) });
-        plot = true;
-      }
-    }
+    let plot = captureCompoundFigures({ form, blocks, assets, paths, page, pi, document, make, entries, regions, owned, represented, captions, bodySize, sizeOf });
+    plot = captureVectorPlot({ form, plot, plotPaths, plotText, blocks, assets, page, pi, document, make, entries, regions, owned, represented, bodySize, sizeOf, plotBottom });
     if (!form && !plot && paths.length > 2e3) diagnostics.push({ code: "dense-vector-region-unresolved", pageIndex: pi });
-    const seen = /* @__PURE__ */ new Set();
-    for (let n = 0; n < (form || plot || paths.length > 2e3 ? 0 : paths.length); n++) {
-      if (seen.has(n)) continue;
-      const cluster = [n];
-      seen.add(n);
-      for (let k = 0; k < cluster.length; k++) for (let j = 0; j < paths.length; j++) {
-        if (seen.has(j)) continue;
-        const a = paths[cluster[k]], b = paths[j];
-        if (a[0] <= b[2] + 1 && b[0] <= a[2] + 1 && a[1] <= b[3] + 1 && b[1] <= a[3] + 1) {
-          seen.add(j);
-          cluster.push(j);
-        }
-      }
-      if (cluster.length < 10) continue;
-      const boxes = cluster.map((i) => paths[i]), box5 = union(boxes);
-      const horizontal = boxes.filter((b) => b[2] - b[0] > 10 && b[3] - b[1] < 3).length;
-      const vertical = boxes.filter((b) => b[3] - b[1] > 10 && b[2] - b[0] < 3).length;
-      if (horizontal < 3 || vertical < 3 || box5[2] - box5[0] < 40 || box5[3] - box5[1] < 20) continue;
-      const bs = blocks.filter((x) => x.b.text && !owned.has(x.b.id) && boxOK2(x.box) && contains(box5, x.box));
-      if (bs.length < 4 || blocks.some((x) => x.b.text && boxOK2(x.box) && overlap(box5, x.box) && !bs.includes(x)) || assets.some((x) => boxOK2(x.box) && overlap(box5, x.box) && !contains(box5, x.box))) continue;
-      const as = assets.filter((x) => !represented.has(x.a.id) && boxOK2(x.box) && contains(box5, x.box));
-      bs.push(...blocks.filter((x) => !owned.has(x.b.id) && !bs.includes(x) && (x.b.assetIds || []).some((id4) => as.some((a) => a.a.id === id4))));
-      bs.forEach((x) => owned.add(x.b.id));
-      as.forEach((x) => represented.add(x.a.id));
-      const id3 = `region-${hex(new TextEncoder().encode(JSON.stringify([document.sourceSha256, pi, box5]))).slice(0, 24)}`;
-      const entry = make("asset", bs, as, box5, Math.min(...bs.map((x) => x.pos ?? Infinity)), bs[0].index);
-      entry.renderAssetId = id3;
-      entries.push(entry);
-      regions.push({ id: id3, pageIndex: pi, bbox: [...box5], blockIds: bs.map((x) => x.b.id), assetIds: as.map((x) => x.a.id) });
-    }
-    for (const a of assets) {
-      if (represented.has(a.a.id)) continue;
-      const group = [a];
-      represented.add(a.a.id);
-      if (boxOK2(a.box)) {
-        for (let i = 0; i < group.length; i++) for (const other of assets) if (!represented.has(other.a.id) && boxOK2(other.box) && overlap(group[i].box, other.box)) {
-          group.push(other);
-          represented.add(other.a.id);
-        }
-      }
-      const box5 = group.every((x) => boxOK2(x.box)) ? union(group.map((x) => x.box)) : null;
-      const proofs = evidence.filter((e) => e.pageIndex === pi && group.some((y) => y.a.id === e.assetId));
-      const confirmed = (x) => x.b.text && x.b.source?.range && proofs.some((e) => {
-        const r = x.b.source.range;
-        return e.ranges.some((z) => z.start <= r.start && z.end >= r.end);
-      });
-      const bs = blocks.filter((x) => !owned.has(x.b.id) && ((x.b.assetIds || []).some((id3) => group.some((y) => y.a.id === id3)) || confirmed(x)));
-      bs.forEach((x) => owned.add(x.b.id));
-      const entry = make("asset", bs, group, box5, a.pos, a.index);
-      if (proofs.length && bs.some(confirmed) && boxOK2(box5)) {
-        const id3 = `region-${hex(new TextEncoder().encode(JSON.stringify([document.sourceSha256, pi, box5]))).slice(0, 24)}`;
-        entry.renderAssetId = id3;
-        regions.push({ id: id3, pageIndex: pi, bbox: [...box5], blockIds: bs.map((x) => x.b.id), assetIds: group.map((x) => x.a.id), classification: "verified-occlusion" });
-      }
-      entries.push(entry);
-    }
-    const artworkNear = (x) => paths.some((p) => overlap(p, x.box)) || assets.some((a) => boxOK2(a.box) && a.box[0] < x.box[2] + 15 && a.box[2] > x.box[0] - 15 && a.box[1] < x.box[3] + 15 && a.box[3] > x.box[1] - 15);
-    const repeated = (x) => repeats.get(textKey(x.b))?.size >= 2;
-    const peer = (x) => blocks.some((y) => y !== x && y.b.text?.trim() && boxOK2(y.box) && repeated(y) && y.box[1] < x.box[3] && x.box[1] < y.box[3] && (y.box[2] < x.box[0] || x.box[2] < y.box[0]) && !artworkNear(y));
-    const separatedBody = (x) => blocks.some((y) => y !== x && y.b.text && boxOK2(y.box) && y.box[1] >= page.height * 0.12 && y.box[3] <= page.height * 0.88);
-    const linked = (x) => linkedEdges.find((e) => e.b.id === x.b.id && e.b.source.range.start === x.b.source.range?.start && e.b.source.range.end === x.b.source.range?.end);
-    const inferredEdge = (x) => boxOK2(x.box) && repeated(x) && bodySize && sizeOf(x.b) && separatedBody(x) && !artworkNear(x) && (sizeOf(x.b) < bodySize * 0.9 || peer(x) || linked(x));
-    for (const x of blocks) {
-      if (owned.has(x.b.id)) continue;
-      owned.add(x.b.id);
-      const b = x.b, box5 = x.box;
-      let kind = "paragraph";
-      if (b.kind === "figure" || b.kind === "table") kind = "asset";
-      else if (b.kind === "caption" || /^\s*(?:extended\s+data\s+)?(?:fig(?:ure)?\.?|table)\s*\d+[\w.:-]*/i.test(b.text || "")) kind = "caption";
-      else if (b.kind === "header" || b.kind === "footer") kind = b.kind;
-      else if (decoratedFooter.has(b.id)) kind = "footer";
-      else if (inferredEdge(x)) {
-        if (box5[1] < page.height * 0.12) kind = "header";
-        else if (box5[3] > page.height * 0.88) kind = "footer";
-      } else if (b.kind === "heading" || bodySize > 0 && sizeOf(b) > bodySize * 1.3 && (b.text || "").trim().length >= 12 && (b.text || "").length < 150) kind = "heading";
-      entries.push(make(kind, [x], [], box5, x.pos, x.index));
-    }
-    for (const edge of entries.filter((x) => ["header", "footer"].includes(x.kind))) {
-      if (edge.blockIds.some((id3) => flowBlocks.find((b) => b.id === id3)?.kind === edge.kind) || !boxOK2(edge.box)) continue;
-      const ordinary = entries.filter((x) => ["paragraph", "heading"].includes(x.kind) && boxOK2(x.box) && x.blockIds.some((id3) => flowBlocks.find((b) => b.id === id3)?.text?.trim()));
-      if (ordinary.some((x) => edge.kind === "header" ? x.box[3] <= edge.box[1] : x.box[1] >= edge.box[3])) edge.kind = "paragraph";
-    }
-    const parentGroups = /* @__PURE__ */ new Map();
-    for (const b of flowBlocks.filter((b2) => b2.parentBlockId && b2.source.pageIndex === pi)) {
-      if (!parentGroups.has(b.parentBlockId)) parentGroups.set(b.parentBlockId, []);
-      parentGroups.get(b.parentBlockId).push(b);
-    }
-    for (const group of parentGroups.values()) {
-      if (group.length < 3 || group.some((b) => inline.groups.some((g) => g.includes(b)))) continue;
-      group.sort((a, b) => a.source.range.start - b.source.range.start);
-      const box5 = union(group.map((b) => b.source.bbox));
-      if (!boxOK2(box5) || box5[3] - box5[1] > 60 || group.some((b, i) => i && group[i - 1].source.range.end !== b.source.range.start)) continue;
-      const members = group.map((b) => entries.find((e) => e.blockIds.length === 1 && e.blockIds[0] === b.id));
-      if (members.some((x) => !x || x.kind !== "paragraph")) continue;
-      const first = members[0];
-      first.blockIds = group.map((b) => b.id);
-      first.inline = true;
-      first.joiners = Array(group.length - 1).fill("");
-      first.box = box5;
-      first.source.bbox = [...box5];
-      for (const member of members.slice(1)) entries.splice(entries.indexOf(member), 1);
-    }
-    for (const group of inline.groups) {
-      const members = group.map((b) => entries.find((e) => e.blockIds.length === 1 && e.blockIds[0] === b.id));
-      if (members.some((x) => !x || x.kind !== "paragraph")) continue;
-      const first = members[0];
-      first.blockIds = group.map((b) => b.id);
-      first.inline = true;
-      first.joiners = Array(group.length - 1).fill("");
-      first.box = union(members.map((x) => x.box));
-      first.source.bbox = [...first.box];
-      for (const member of members.slice(1)) entries.splice(entries.indexOf(member), 1);
-    }
-    const blockMap2 = new Map(flowBlocks.map((b) => [b.id, b]));
-    const signature = (e) => {
-      const chars = e.blockIds.flatMap((id3) => blockMap2.get(id3)?.source?.characters || []);
-      const counts = /* @__PURE__ */ new Map();
-      for (const c of chars) {
-        const s = styles.get(c.styleId);
-        if (!s?.fontName || !Number.isFinite(s.size)) continue;
-        const key = `${s.fontName.replace(/(?:Bold|Semibold|Italic|Oblique)/gi, "")}|${Math.round(s.size * 10) / 10}`;
-        counts.set(key, (counts.get(key) || 0) + 1);
-      }
-      return [...counts].sort((a, b) => b[1] - a[1])[0]?.[0];
-    };
-    const bounds = (e) => e.blockIds.map((id3) => blockMap2.get(id3)?.source?.range).filter(Boolean);
-    const start = (e) => Math.min(...bounds(e).map((r) => r.start));
-    const end = (e) => {
-      const ranges = bounds(e).sort((a, b) => a.start - b.start || a.end - b.end);
-      let last = ranges[0]?.end;
-      for (const r of ranges.slice(1)) {
-        if (r.start > last) break;
-        last = Math.max(last, r.end);
-      }
-      return last;
-    };
-    const lineCount = (e) => e.blockIds.reduce((n, id3) => n + (blockMap2.get(id3)?.source?.lines?.length || 0), 0);
-    for (const caption of entries.filter((e) => e.kind === "caption" && boxOK2(e.box))) {
-      let last = caption;
-      const members = [caption];
-      while (true) {
-        const lastEnd = end(last), sig = signature(last);
-        if (!Number.isFinite(lastEnd) || !sig) break;
-        const next = entries.filter((e) => e.kind === "paragraph" && !members.includes(e) && boxOK2(e.box) && start(e) === lastEnd && signature(e) === sig && lineCount(e) >= 1);
-        const eligible = next.filter((e) => {
-          const h = median(last.blockIds.flatMap((id3) => (blockMap2.get(id3)?.source?.lines || []).map((l) => boxOK2(l.bbox) ? l.bbox[3] - l.bbox[1] : 0)).filter(Boolean));
-          if (!h) return false;
-          const sameColumn = Math.min(last.box[2], e.box[2]) - Math.max(last.box[0], e.box[0]) > Math.min(last.box[2] - last.box[0], e.box[2] - e.box[0]) * 0.5;
-          const gap = e.box[1] - last.box[3];
-          const adjacent = sameColumn && gap >= -h && gap <= h;
-          const wrap = !sameColumn && e.box[0] > last.box[2] && lineCount(last) >= 2 && lineCount(e) >= 2 && Math.abs(e.box[1] - caption.box[1]) <= h && last.box[3] > e.box[1] + 2 * h;
-          if (!adjacent && !wrap) return false;
-          const corridor = wrap ? [e.box[0], e.box[1], e.box[2], e.box[1] + h] : [Math.min(last.box[0], e.box[0]), Math.min(last.box[3], e.box[1]), Math.max(last.box[2], e.box[2]), Math.max(last.box[3], e.box[1])];
-          return !entries.some((x) => x !== last && x !== e && !members.includes(x) && !["header", "footer"].includes(x.kind) && boxOK2(x.box) && overlap(corridor, x.box));
-        });
-        if (eligible.length !== 1) break;
-        last = eligible[0];
-        members.push(last);
-      }
-      if (members.length > 1) {
-        const ids = [], joiners = [];
-        for (const member of members) {
-          if (ids.length) joiners.push(" ");
-          ids.push(...member.blockIds);
-          if (member.inline) joiners.push(...member.joiners);
-          else for (let i = 1; i < member.blockIds.length; i++) joiners.push("");
-        }
-        caption.blockIds = ids;
-        caption.inline = true;
-        caption.joiners = joiners;
-        caption.memberBoxes = members.map((e) => [...e.box]);
-        caption.box = union(caption.memberBoxes);
-        caption.source.bbox = [...caption.box];
-        for (const member of members.slice(1)) entries.splice(entries.indexOf(member), 1);
-        diagnostics.push({ code: "caption-continuation-grouped", pageIndex: pi, itemId: caption.id, memberItemIds: members.map((e) => e.id), blockIds: [...ids] });
-      }
-    }
-    for (const caption of entries.filter((x) => x.kind === "caption" && boxOK2(x.box))) {
-      const text = caption.blockIds.map((id3) => flowBlocks.find((b) => b.id === id3)?.text || "").join("");
-      const table = /^\s*(?:extended\s+data\s+)?table\s*\d/i.test(text);
-      const near3 = entries.filter((x) => x.kind === "asset" && boxOK2(x.box) && x.box[0] < caption.box[2] && caption.box[0] < x.box[2]).map((x) => {
-        const position = caption.box[3] <= x.box[1] ? "above" : caption.box[1] >= x.box[3] ? "below" : null;
-        const gap = position === "above" ? x.box[1] - caption.box[3] : position === "below" ? caption.box[1] - x.box[3] : Infinity;
-        const area3 = (x.box[2] - x.box[0]) * (x.box[3] - x.box[1]);
-        return { x, position, gap, area: area3 };
-      }).filter((c) => c.position && c.gap <= Math.max(30, page.height * 0.05)).sort((a, b) => a.gap - b.gap || b.area - a.area);
-      const best = near3[0];
-      if (best && (near3.length === 1 || near3[1].gap - best.gap > 10 || table && best.position === "above" && best.area > near3[1].area * 2 && best.gap < near3[1].gap)) {
-        best.x.captionIds.push(...caption.blockIds);
-        best.x.captionPositions ||= {};
-        for (const id3 of caption.blockIds) best.x.captionPositions[id3] = best.position;
-        relations.push({ kind: "caption", assetItemId: best.x.id, captionItemId: caption.id, position: best.position });
-      } else diagnostics.push({ code: "caption-association-unresolved", pageIndex: pi, itemId: caption.id });
-    }
-    const headers = entries.filter((x) => x.kind === "header").sort(geom), footers = entries.filter((x) => x.kind === "footer").sort(geom);
-    for (const edge of [...headers, ...footers]) entries.splice(entries.indexOf(edge), 1);
-    let continuousOrder = null;
-    if (entries.some((x) => !boxOK2(x.box)) || !Number.isFinite(page.width)) {
-      diagnostics.push({ code: "reading-order-fallback", pageIndex: pi, detail: "Missing geometry; reader order retained." });
-      entries.sort(reading);
-    } else {
-      const lineBoxes = blocks.filter((x) => x.b.text && !ownedByAsset(x, entries)).flatMap((x) => {
-        const lines = x.b.source?.lines?.map((l) => l.bbox).filter(boxOK2) || [];
-        return lines.length ? lines : [x.box];
-      }).filter(boxOK2);
-      const candidates = [];
-      for (let mid = page.width * 0.25; mid <= page.width * 0.75; mid += Math.max(1, page.width / 400)) {
-        const left = lineBoxes.filter((b) => b[2] < mid && b[2] > page.width * 0.2 && b[2] - b[0] > page.width * 0.25), right = lineBoxes.filter((b) => b[0] > mid && b[0] < page.width * 0.8 && b[2] - b[0] > page.width * 0.25);
-        if (left.length < 2 || right.length < 2 || !left.some((a) => right.some((b) => a[1] < b[3] && b[1] < a[3]))) continue;
-        const l = Math.max(...left.map((b) => b[2])), r = Math.min(...right.map((b) => b[0]));
-        if (r - l >= Math.max(8, page.width * 0.015)) candidates.push({ mid: (l + r) / 2, l, r, score: Math.min(left.length, right.length) });
-      }
-      candidates.sort((a, b) => b.score - a.score || Math.abs(a.mid - page.width / 2) - Math.abs(b.mid - page.width / 2));
-      const g = candidates[0];
-      if (!g) {
-        entries.sort(geom);
-        diagnostics.push({ code: "single-column-or-unresolved", pageIndex: pi });
-      } else {
-        const splitCaption = (x) => x.kind === "caption" && x.memberBoxes?.length > 1 && x.memberBoxes.every((b) => b[2] <= g.mid || b[0] >= g.mid) && x.memberBoxes.some((b) => b[2] <= g.mid) && x.memberBoxes.some((b) => b[0] >= g.mid);
-        for (const item of entries.filter(splitCaption)) item.measuredColumns = 2;
-        if (entries.some(splitCaption)) {
-          const layoutBox = (x) => splitCaption(x) ? x.memberBoxes[0] : x.box;
-          const spans2 = entries.filter((x) => !splitCaption(x) && x.box[0] < g.mid && x.box[2] > g.mid).sort(geom);
-          const side2 = entries.filter((x) => !spans2.includes(x)), groups2 = [];
-          for (const s of spans2) {
-            const last = groups2.at(-1);
-            if (last && s.box[1] < last.bottom) {
-              last.items.push(s);
-              last.bottom = Math.max(last.bottom, s.box[3]);
-            } else groups2.push({ items: [s], top: s.box[1], bottom: s.box[3] });
-          }
-          for (const c of side2.filter((x) => x.kind === "caption")) if (side2.some((x) => x !== c && x.kind === "paragraph" && x.box[3] < c.box[1] - 5) && !groups2.some((g2) => c.box[1] >= g2.top && c.box[1] < g2.bottom)) groups2.push({ items: [], top: c.box[1], bottom: c.box[1] });
-          groups2.sort((a, b) => a.top - b.top);
-          const bands2 = Array.from({ length: groups2.length + 1 }, () => []);
-          for (const x of side2) {
-            let n = groups2.findIndex((g2) => x.box[1] < g2.bottom && x.box[3] > g2.top);
-            if (n >= 0) groups2[n].items.push(x);
-            else {
-              n = groups2.findIndex((g2) => x.box[3] <= g2.top);
-              bands2[n < 0 ? groups2.length : n].push(x);
-            }
-          }
-          continuousOrder = [];
-          for (let i = 0; i < bands2.length; i++) {
-            const xs = bands2[i], left = xs.filter((x) => layoutBox(x)[2] <= g.mid).sort(geom), right = xs.filter((x) => layoutBox(x)[0] >= g.mid).sort(geom), both = left.length && right.length || xs.some(splitCaption);
-            for (const x of xs) x.continuousColumns = both ? 2 : 1;
-            continuousOrder.push(...left, ...right);
-            if (groups2[i]) continuousOrder.push(...groups2[i].items.sort(geom));
-          }
-        }
-        const spans = entries.filter((x) => x.box[0] < g.mid && x.box[2] > g.mid).sort(geom);
-        const side = entries.filter((x) => !spans.includes(x));
-        const groups = [];
-        for (const s of spans) {
-          const last = groups.at(-1);
-          if (last && s.box[1] < last.bottom) {
-            last.items.push(s);
-            last.bottom = Math.max(last.bottom, s.box[3]);
-          } else groups.push({ items: [s], top: s.box[1], bottom: s.box[3] });
-        }
-        for (const c of side.filter((x) => x.kind === "caption")) if (side.some((x) => x !== c && x.kind === "paragraph" && x.box[3] < c.box[1] - 5) && !groups.some((g2) => c.box[1] >= g2.top && c.box[1] < g2.bottom)) groups.push({ items: [], top: c.box[1], bottom: c.box[1] });
-        groups.sort((a, b) => a.top - b.top);
-        const bands = Array.from({ length: groups.length + 1 }, () => []);
-        for (const x of side) {
-          let n = groups.findIndex((g2) => x.box[1] < g2.bottom && x.box[3] > g2.top);
-          if (n >= 0) {
-            groups[n].items.push(x);
-            diagnostics.push({ code: "band-overlap", pageIndex: pi, itemId: x.id });
-          } else {
-            n = groups.findIndex((g2) => x.box[3] <= g2.top);
-            bands[n < 0 ? groups.length : n].push(x);
-          }
-        }
-        const orderBand = (xs) => {
-          const left = xs.filter((x) => x.box[2] <= g.mid).sort(geom), right = xs.filter((x) => x.box[0] >= g.mid).sort(geom);
-          const both = left.length && right.length;
-          for (const x of xs) {
-            x.columns = both ? 2 : 1;
-            x.span = both ? "column" : "page";
-          }
-          return [...left, ...right];
-        };
-        const ordered = [];
-        for (let i = 0; i < bands.length; i++) {
-          ordered.push(...orderBand(bands[i]));
-          if (groups[i]) ordered.push(...groups[i].items.sort(geom));
-        }
-        entries.splice(0, entries.length, ...ordered);
-        diagnostics.push({ code: "geometry-order-heuristic", pageIndex: pi, gutter: [g.l, g.r] });
-      }
-    }
-    for (const header of headers) {
-      const at = entries.findIndex((e) => boxOK2(e.box) && e.box[1] >= header.box[1]);
-      entries.splice(at < 0 ? entries.length : at, 0, header);
-      if (continuousOrder) {
-        const n = continuousOrder.findIndex((e) => boxOK2(e.box) && e.box[1] >= header.box[1]);
-        continuousOrder.splice(n < 0 ? continuousOrder.length : n, 0, header);
-      }
-    }
-    if (continuousOrder) [...continuousOrder, ...footers].forEach((item, i) => item.continuousPosition = i);
+    captureVectorTables({ form, plot, paths, blocks, assets, pi, document, make, entries, regions, owned, represented });
+    captureImageAssets({ assets, blocks, pi, document, make, entries, regions, owned, represented, evidence });
+    classifyPageText({ paths, assets, blocks, repeats, linkedEdges, bodySize, sizeOf, page, pi, decoratedFooter, owned, entries, make, flowBlocks });
+    groupInlineText({ flowBlocks, pi, inline, entries });
+    groupAndAssociateCaptions({ entries, flowBlocks, styles, page, pi, diagnostics, relations });
+    const { footers } = orderPageEntries({ entries, blocks, page, pi, diagnostics });
     items.push(...[...entries, ...footers].map(({ box: box5, pos, index, memberBoxes, ...item }) => item));
   }
-  const blockMap = new Map([...document.blocks, ...fragments].map((b) => [b.id, b]));
-  const frameOK = (p) => p && p.geometry?.frame === "mupdf-display" && sameNumbers(p.geometry.bounds, [0, 0, p.width, p.height]) && Array.isArray(p.geometry.pageTransform) && p.geometry.pageTransform.length === 6 && p.geometry.pageTransform.every(Number.isFinite);
-  for (const page of document.pages) {
-    const next = document.pages.find((p) => p.sourcePageIndex === page.sourcePageIndex + 1);
-    if (!frameOK(page) || !frameOK(next) || !sameNumbers(page.geometry.bounds, next.geometry.bounds) || !sameNumbers(page.geometry.pageTransform, next.geometry.pageTransform)) continue;
-    const current = items.filter((i) => i.source.pageIndex === page.sourcePageIndex && !["header", "footer"].includes(i.kind));
-    const caption = current.at(-1);
-    if (caption?.kind !== "caption" || !boxOK2(caption.source.bbox) || caption.source.bbox[3] < page.height * 0.88 || relations.some((r) => r.kind === "caption" && r.captionItemId === caption.id)) continue;
-    const blocks = caption.blockIds.map((id3) => blockMap.get(id3));
-    if (blocks.some((b) => !b || b.source?.pageIndex !== page.sourcePageIndex || !b.source.range || page.text?.slice(b.source.range.start, b.source.range.end) !== b.text)) continue;
-    const text = blocks.map((b) => b.text).join("");
-    if (!/^\s*(?:extended\s+data\s+)?fig(?:ure)?\.?\s*\d/i.test(text) || !/[.!?][)\]"'\u2019\u201d]*\s*$/.test(text)) continue;
-    const following = items.filter((i) => i.source.pageIndex === next.sourcePageIndex && !["header", "footer"].includes(i.kind));
-    if (following.length !== 1 || following[0].kind !== "asset") continue;
-    const artwork = following[0], box5 = artwork.source.bbox;
-    const region = regions.find((r) => r.id === artwork.renderAssetId && r.pageIndex === next.sourcePageIndex && r.classification === "compound-figure");
-    if (!region || !boxOK2(box5) || !sameNumbers(region.bbox, box5) || box5[2] - box5[0] < next.width * 0.7 || box5[3] - box5[1] < next.height * 0.7 || artwork.captionIds.length || region.blockIds.length !== artwork.blockIds.length || region.assetIds.length !== artwork.assetIds.length || region.blockIds.some((id3) => !artwork.blockIds.includes(id3)) || region.assetIds.some((id3) => !artwork.assetIds.includes(id3))) continue;
-    artwork.captionIds.push(...caption.blockIds);
-    artwork.captionPositions ||= {};
-    for (const id3 of caption.blockIds) artwork.captionPositions[id3] = "above";
-    relations.push({ kind: "caption", assetItemId: artwork.id, captionItemId: caption.id, position: "above", provenance: { rule: "adjacent-page-bottom-caption-full-page-artwork", sourceSha256: document.sourceSha256, captionPageIndex: page.sourcePageIndex, artworkPageIndex: next.sourcePageIndex, frame: "mupdf-display", regionId: region.id } });
-    const unresolved = diagnostics.findIndex((d) => d.code === "caption-association-unresolved" && d.itemId === caption.id);
-    if (unresolved >= 0) diagnostics.splice(unresolved, 1);
-  }
+  associateCrossPageCaptions({ document, fragments, items, relations, diagnostics, regions });
   return { schema: "falsify.paper-flow.v1", sourceSha256: document.sourceSha256, items, relations, diagnostics, fragments, regions };
 }
 function ownedByAsset(x, entries) {
   return entries.some((e) => e.kind === "asset" && e.blockIds.includes(x.b.id));
 }
 
-// app/src/paper-source-assets.mjs
+// src/paper-source-assets.mjs
 init_paragraph_pdf_crypto();
 import * as mupdf3 from "./browser-pdf-vendor/mupdf.js";
 var abort3 = (signal) => {
@@ -1442,7 +1493,7 @@ async function readSourceAssets({ bytes, document, regions = [], signal } = {}) 
   return { sourceSha256, assets, fonts, drawings, diagnostics };
 }
 
-// app/src/paper-fonts.mjs
+// src/paper-fonts.mjs
 async function inspectFonts(text, fonts = {}) {
   const codepoints = [...new Set(Array.from(text, (c) => c.codePointAt(0)))].filter((cp) => cp !== 9 && cp !== 10 && cp !== 13);
   if (typeof fonts.hasGlyph !== "function") return { status: "unavailable", missing: [], detail: "Font coverage API unavailable; full-font coverage and fallback are unverified." };
@@ -1548,7 +1599,7 @@ async function createFontPlan({ text, fonts = [] }, { mupdf: mupdf7 } = {}) {
   });
 }
 
-// app/src/paper-style-profile.mjs
+// src/paper-style-profile.mjs
 var median2 = (values) => {
   const a = values.filter(Number.isFinite).sort((x, y) => x - y);
   return a.length ? a[Math.floor(a.length / 2)] : null;
@@ -1602,7 +1653,7 @@ function deriveLayoutProfile(document, flow) {
   return { coordinateSpace: "source", bodyFontSize: bodyStats.size, bodyFontNames: bodyStats.fontNames, bodyLineHeight: median2(rhythm), headingFontSize: headingStats.size, headingFontNames: headingStats.fontNames, captionFontSize: captionStats.size, captionFontNames: captionStats.fontNames, captions, headings: byKind("heading").map((b) => ({ text: b.text })), columns };
 }
 
-// app/src/paper-link-plan.mjs
+// src/paper-link-plan.mjs
 init_paragraph_pdf_crypto();
 var overlaps2 = (a, b) => a.start < b.end && b.start < a.end;
 var labelFor = (key) => `link-target-${hex(new TextEncoder().encode(JSON.stringify(key))).slice(0, 24)}`;
@@ -1757,7 +1808,7 @@ function buildLinkPlan({ document, flow, links, edits = [] } = {}) {
   return { schema: "falsify.paper-link-plan.v1", sourceSha256: document.sourceSha256, sourceRuns, sourceAssets, targets, changes, diagnostics };
 }
 
-// app/src/paper-source-glyphs.mjs
+// src/paper-source-glyphs.mjs
 import * as mupdf4 from "./browser-pdf-vendor/mupdf.js";
 function readSourceGlyphs({ bytes, document, changes = /* @__PURE__ */ new Map() }) {
   const styles = new Map((document.styles || []).map((s) => [s.id, s]));
@@ -1837,7 +1888,7 @@ function readSourceGlyphs({ bytes, document, changes = /* @__PURE__ */ new Map()
   return { glyphs, unavailable };
 }
 
-// app/src/paper-source-wrap.mjs
+// src/paper-source-wrap.mjs
 init_paragraph_pdf_crypto();
 var box2 = (b) => Array.isArray(b) && b.length === 4 && b.every(Number.isFinite) && b[0] < b[2] && b[1] < b[3];
 var near2 = (a, b, t = 0.01) => Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= t;
@@ -1903,7 +1954,7 @@ function sourceWrapOffsetsForBlock(block, omissions) {
   return (omissions || []).filter((o) => o.pageIndex === block.source.pageIndex && (o.blockId === block.id || o.blockId === block.parentBlockId) && o.start >= r.start && o.end === o.start + 1 && o.end <= r.end && block.text[o.start - r.start] === "-").map((o) => o.start - r.start);
 }
 
-// app/src/paper-compose.mjs
+// src/paper-compose.mjs
 var abort4 = (signal) => {
   if (signal?.aborted) throw new DOMException("Composition cancelled", "AbortError");
 };
@@ -2603,7 +2654,7 @@ ${document.blocks.map((b) => paragraphContext([b], b.kind || "paragraph", render
   return { linkPlan, layoutProfile, enginePlan, layoutPolicy: { ...policy }, file: new File([bytes], "recomposed.pdf", { type: "application/pdf" }), sha256: sha2562, verification, pageMap: null, blockMap: compiled?.blockMap ?? null, blockSpans: compiled?.blockSpans ?? null, furnitureMap: compiled?.furnitureMap ?? null, warnings };
 }
 
-// app/src/paper-layout-quality.mjs
+// src/paper-layout-quality.mjs
 var valid = (b) => Array.isArray(b) && b.length === 4 && b.every(Number.isFinite) && b[2] > b[0] && b[3] > b[1];
 var area = (b) => Math.max(0, b[2] - b[0]) * Math.max(0, b[3] - b[1]);
 var intersection = (a, b) => [Math.max(a[0], b[0]), Math.max(a[1], b[1]), Math.min(a[2], b[2]), Math.min(a[3], b[3])];
@@ -2882,7 +2933,7 @@ function inspectLayoutQuality({ bytes, mupdf: mupdf7, profile = {}, sourceBytes,
   }
 }
 
-// app/src/paper-output-glyphs.mjs
+// src/paper-output-glyphs.mjs
 function readOutputGlyphs({ bytes, mupdf: mupdf7 }) {
   const doc = mupdf7.Document.openDocument(bytes, "application/pdf");
   const pages = [];
@@ -2935,7 +2986,7 @@ function readOutputGlyphs({ bytes, mupdf: mupdf7 }) {
   return pages;
 }
 
-// app/src/paper-compose-check.mjs
+// src/paper-compose-check.mjs
 var normalize = (value) => value.replace(/\s+/gu, " ").trim();
 function representationComparison(expected, observed, prefix = false) {
   let i = 0, j = 0;
@@ -2962,251 +3013,7 @@ function representationComparison(expected, observed, prefix = false) {
   }
   return { matches: i === expected.length && (prefix || j === observed.length), differences, consumed: j };
 }
-async function checkRecomposition({ bytes, expectedBlocks, edits = {}, pdfjs, exporter, mupdf: mupdf7, expectedFurniture, outputFurniture, bodyFrame, blockSpans, layoutProfile, flowExpectations, sourceBytes, sourcePageIndexes } = {}) {
-  if (!(bytes instanceof Uint8Array) || !bytes.length || !pdfjs?.getDocument) throw new TypeError("PDF bytes and PDF.js are required");
-  if (!Array.isArray(expectedBlocks) || !expectedBlocks.length || expectedBlocks.some((b) => typeof b.id !== "string" || typeof b.text !== "string") || new Set(expectedBlocks.map((b) => b.id)).size !== expectedBlocks.length) throw new TypeError("unique expected blocks are required");
-  if (Object.keys(edits).some((id3) => !expectedBlocks.some((b) => b.id === id3) || typeof edits[id3] !== "string")) throw new TypeError("invalid edit");
-  const findings = [], pages = [], locations = [], spacingEvidence = [];
-  const furnitureEnabled = expectedFurniture !== void 0 || outputFurniture !== void 0 || bodyFrame !== void 0;
-  const furnitureValid = Array.isArray(expectedFurniture) && Array.isArray(outputFurniture) && bodyFrame && ["left", "top", "right", "bottom"].every((k) => Number.isFinite(bodyFrame[k])) && bodyFrame.left < bodyFrame.right && bodyFrame.top < bodyFrame.bottom;
-  if (furnitureEnabled && !furnitureValid) findings.push({ code: "furniture-unavailable", reason: "Furniture declarations, output map or body frame unavailable." });
-  let sourceAssociation = { status: "unavailable", reason: "Complete valid block spans are unavailable." };
-  let selectedSources = null;
-  let furnitureAssets = false;
-  let inspectedItems = 0;
-  let glyphPages = null;
-  if (mupdf7) {
-    try {
-      glyphPages = readOutputGlyphs({ bytes: bytes.slice(), mupdf: mupdf7 });
-    } catch {
-      glyphPages = null;
-    }
-  }
-  const task = pdfjs.getDocument({ data: bytes.slice(), useSystemFonts: true, isEvalSupported: false });
-  let doc;
-  try {
-    doc = await task.promise;
-    if (furnitureValid) {
-      const validSpan = (s) => typeof s?.id === "string" && s.id.length > 0 && Number.isInteger(s.sourcePage) && s.sourcePage >= 0 && [s.start, s.end].every((p) => Number.isInteger(p?.page) && p.page >= 1 && p.page <= doc.numPages && Number.isFinite(p.x) && Number.isFinite(p.y) && (p.id === void 0 || p.id === s.id) && (p.sourcePage === void 0 || p.sourcePage === s.sourcePage)) && s.start.page <= s.end.page;
-      if (Array.isArray(blockSpans) && blockSpans.length && blockSpans.every(validSpan) && new Set(blockSpans.map((s) => s.id)).size === blockSpans.length && blockSpans.every((s, i) => i === 0 || s.start.page >= blockSpans[i - 1].start.page)) {
-        const selections = Array.from({ length: doc.numPages }, (_, i) => blockSpans.find((s) => s.start.page <= i + 1 && s.end.page >= i + 1));
-        if (selections.every(Boolean)) {
-          selectedSources = selections.map((s) => s.sourcePage);
-          sourceAssociation = {
-            status: "declared",
-            pages: selectedSources.map((sourcePage, i) => ({ page: i + 1, sourcePage })),
-            unusedVariants: [...new Set(expectedFurniture.map((t) => t.sourcePage))].filter((p) => !selectedSources.includes(p)),
-            limitation: "Source association is declared by span metadata; PDF bytes establish text and geometry."
-          };
-        }
-      }
-    }
-    for (let n = 1; n <= doc.numPages; n++) {
-      const page = await doc.getPage(n), viewport = page.getViewport({ scale: 1 });
-      const content = await page.getTextContent();
-      const parts = [];
-      let previous = null, ordinal = 0, pendingQuoteSpace = null, lineHeight = 0;
-      const boundaries = [], itemScalars = [];
-      const frame = viewport.transform;
-      const frameSupported = viewport.rotation === 0 && Array.isArray(frame) && frame.length === 6 && frame.every(Number.isFinite) && frame[0] === 1 && frame[1] === 0 && frame[2] === 0 && frame[3] === -1 && Number.isFinite(viewport.width) && Number.isFinite(viewport.height) && viewport.width > 0 && viewport.height > 0;
-      const excluded = /* @__PURE__ */ new Set();
-      if (furnitureValid) {
-        const records = content.items.map((item, index) => {
-          const t = item.transform, style = content.styles?.[item.fontName];
-          if (typeof item.str !== "string" || !item.str.trim() || !frameSupported || !Array.isArray(t) || t.length !== 6 || !t.every(Number.isFinite) || !Number.isFinite(item.width) || item.width < 0 || !Number.isFinite(item.height) || item.height <= 0 || t[0] <= 0 || t[3] <= 0 || Math.abs(t[1]) > 1e-6 || Math.abs(t[2]) > 1e-6 || item.dir !== "ltr" || !Number.isFinite(style?.ascent) || !Number.isFinite(style?.descent) || style.ascent < 0 || style.descent > 0) return null;
-          const [x, y] = viewport.convertToViewportPoint(t[4], t[5]);
-          return { index, item, x, y, top: y - style.ascent * item.height, bottom: y - style.descent * item.height };
-        });
-        const claimed = /* @__PURE__ */ new Set(), mergedMarkers = /* @__PURE__ */ new Set();
-        const pageMarkers = outputFurniture.filter((m) => m?.page === n);
-        for (const run of records.filter(Boolean)) {
-          const group = pageMarkers.filter((m) => m.kind && Math.abs(m.y - run.top) <= Math.max(4, run.item.height) && m.x >= run.x - 2 && m.x < run.x + run.item.width - 0.01).sort((a, b) => a.x - b.x);
-          if (group.length < 2 || Math.abs(group[0].x - run.x) > 2 || group.some((m) => m.kind !== group[0].kind || m.sourcePage !== group[0].sourcePage)) continue;
-          const templates = group.map((m) => expectedFurniture.filter((t) => t.sourcePage === m.sourcePage && t.kind === m.kind && t.occurrences?.some((o) => (o.blockId || o.itemId) === m.id)));
-          if (templates.some((ts) => ts.length !== 1 || !["text", "counter"].includes(ts[0].entryKind))) continue;
-          const expected2 = templates.map((ts) => ts[0].entryKind === "counter" ? `${n} / ${doc.numPages}` : ts[0].text);
-          if (expected2.some((t) => typeof t !== "string") || ![expected2.join(" "), expected2.join("")].some((text) => normalize(text) === normalize(run.item.str))) continue;
-          if (group[0].kind === "header" ? run.top < 0 || run.bottom > bodyFrame.top : run.top < bodyFrame.bottom || run.bottom > viewport.height) continue;
-          excluded.add(run.index);
-          claimed.add(run.index);
-          group.forEach((m) => mergedMarkers.add(m));
-        }
-        for (const marker of outputFurniture.filter((m) => m?.page === n)) {
-          if (mergedMarkers.has(marker)) continue;
-          const matches = expectedFurniture.filter((t) => t?.sourcePage === marker.sourcePage && t.kind === marker.kind && t.occurrences?.some((o) => (o.blockId || o.itemId) === marker.id));
-          if (matches.length !== 1 || !["header", "footer"].includes(marker.kind) || !Number.isFinite(marker.x) || !Number.isFinite(marker.y)) {
-            findings.push({ code: "furniture-unavailable", pageIndex: n - 1, reason: "Invalid or ambiguous furniture map entry." });
-            continue;
-          }
-          const template = matches[0];
-          if (template.entryKind === "asset") {
-            furnitureAssets = true;
-            continue;
-          }
-          const target = template.entryKind === "counter" ? `${n} / ${doc.numPages}` : template.text;
-          if (typeof target !== "string" || !normalize(target)) {
-            findings.push({ code: "furniture-unavailable", pageIndex: n - 1, reason: "Furniture text unavailable." });
-            continue;
-          }
-          const candidates = [];
-          for (let i = 0; i < records.length; i++) {
-            const first = records[i];
-            if (!first || Math.abs(first.x - marker.x) > 2 || Math.abs(first.top - marker.y) > Math.max(4, first.item.height)) continue;
-            let value = "", previousRun = null, indexes = [];
-            for (let j = i; j < records.length; j++) {
-              const run = records[j];
-              if (!run) {
-                if (content.items[j]?.str?.trim()) break;
-                continue;
-              }
-              if (marker.kind === "header" ? run.top < 0 || run.bottom > bodyFrame.top : run.top < bodyFrame.bottom || run.bottom > viewport.height) break;
-              if (previousRun && !/\s$/u.test(value) && !/^\s/u.test(run.item.str)) {
-                const dy = Math.abs(run.y - previousRun.y), h = Math.max(run.item.height, previousRun.item.height), gap = run.x - (previousRun.x + previousRun.item.width);
-                if (previousRun.item.hasEOL || dy > h * 0.5 || gap >= h * 0.3) value += " ";
-                else if (dy > h * 0.1 || gap < -h * 0.1 || gap > h * 0.1) break;
-              }
-              value += run.item.str;
-              indexes.push(j);
-              previousRun = run;
-              if (normalize(value) === normalize(target)) {
-                candidates.push(indexes.slice());
-                break;
-              }
-              if (normalize(value).length > normalize(target).length) break;
-            }
-          }
-          if (candidates.length !== 1 || candidates[0].some((i) => claimed.has(i))) {
-            findings.push({ code: candidates.length ? "ambiguous-furniture" : "missing-furniture", pageIndex: n - 1, id: marker.id });
-            continue;
-          }
-          for (const i of candidates[0]) {
-            excluded.add(i);
-            claimed.add(i);
-          }
-        }
-        if (selectedSources) {
-          const sourcePage = selectedSources[n - 1];
-          for (const marker of pageMarkers) if (marker.sourcePage !== sourcePage)
-            findings.push({ code: "wrong-furniture-source", pageIndex: n - 1, sourcePage: marker.sourcePage, expectedSourcePage: sourcePage });
-          for (const t of expectedFurniture.filter((t2) => t2.sourcePage === sourcePage)) {
-            for (const occurrence of t.occurrences || []) {
-              const id3 = occurrence.blockId || occurrence.itemId;
-              if (!pageMarkers.some((m) => m.sourcePage === sourcePage && m.kind === t.kind && m.id === id3))
-                findings.push({ code: "missing-furniture", pageIndex: n - 1, id: id3, sourcePage, reason: "Template occurrence has no output map entry." });
-            }
-          }
-        }
-        for (const r of records) if (r && !excluded.has(r.index) && (r.bottom <= bodyFrame.top || r.top >= bodyFrame.bottom)) {
-          findings.push({ code: "unexpected-margin-text", pageIndex: n - 1, text: r.item.str });
-        }
-      }
-      for (const [itemIndex, item] of content.items.entries()) {
-        if (typeof item.str !== "string") continue;
-        const t = item.transform, style = content.styles?.[item.fontName];
-        const supported = frameSupported && Array.isArray(t) && t.length === 6 && t.every(Number.isFinite) && Number.isFinite(item.width) && item.width >= 0 && Number.isFinite(item.height) && item.height > 0 && t[0] > 0 && t[3] > 0 && Math.abs(t[1]) < 1e-6 && Math.abs(t[2]) < 1e-6 && item.dir === "ltr" && !style?.vertical;
-        let position = null;
-        if (supported) {
-          const [x, y] = viewport.convertToViewportPoint(t[4], t[5]);
-          if (Number.isFinite(x) && Number.isFinite(y)) position = { x, y, width: item.width, height: item.height };
-        }
-        if (item.str.trim()) {
-          inspectedItems++;
-          if (!position || !Number.isFinite(style?.ascent) || !Number.isFinite(style?.descent) || style.ascent < 0 || style.descent > 0) {
-            findings.push({ code: "unsupported-text-geometry", pageIndex: n - 1, text: item.str });
-          } else {
-            const top = position.y - style.ascent * position.height;
-            const bottom = position.y - style.descent * position.height;
-            if (position.x < -1 || position.x + position.width > viewport.width + 1 || top < -1 || bottom > viewport.height + 1) findings.push({ code: "text-outside-page", pageIndex: n - 1, text: item.str });
-          }
-        }
-        if (excluded.has(itemIndex)) {
-          for (const scalar of item.str) if (!/\s/u.test(scalar)) {
-            itemScalars.push(scalar);
-            ordinal++;
-          }
-          previous = null;
-          continue;
-        }
-        if (pendingQuoteSpace && item.str && !/^\s+$/u.test(item.str)) {
-          if (/^[”’]/u.test(item.str)) {
-            pendingQuoteSpace.rightPosition = position;
-            boundaries.push(pendingQuoteSpace);
-          }
-          pendingQuoteSpace = null;
-        }
-        if (item.str === " " && item.height === 0 && previous?.position && !previous.hasEOL && /^[”’]/u.test(content.items[itemIndex + 1]?.str || "")) {
-          pendingQuoteSpace = { part: parts.length, ordinal, leftPosition: previous.position };
-        }
-        if (previous && item.str && !/\s$/u.test(previous.str) && !/^\s/u.test(item.str)) {
-          if (previous.hasEOL) {
-            const recent = parts.slice(-8).join("");
-            const paragraphGap = position && previous.position && Math.abs(position.y - previous.position.y) > Math.max(position.height, previous.position.height, lineHeight) * 1.9;
-            const columnTurn = /\S[–\-/]$/u.test(recent) && /^[\p{L}\p{N}_−]/u.test(item.str) && position && previous.position && previous.position.y > viewport.height * 0.8 && position.y < viewport.height * 0.2 && position.x > previous.position.x + previous.position.width;
-            const url = /(?:https?:\/\/|www\.)[^\s]*$/iu.test(recent) && (/[./?=&-]$/u.test(recent) || /\p{L}$/u.test(recent) && /^\p{N}/u.test(item.str) || /^[\p{L}\p{N}_-]+[./]/u.test(item.str));
-            if ((!paragraphGap || columnTurn) && (/\S[–\-/]$/u.test(recent) && /^[\p{L}\p{N}_−]/u.test(item.str) || /(?:^|\s)-$/u.test(recent) && /^\p{L}/u.test(item.str) || /\S$/u.test(previous.str) && /^\[/u.test(item.str) || /\S*\/\S*[?=&]$/u.test(previous.str) && /^[\p{L}\p{N}]/u.test(item.str) || url && /^[\p{L}\p{N}]/u.test(item.str))) {
-              boundaries.push({ part: parts.length, ordinal, leftPosition: previous.position, rightPosition: position });
-            }
-            parts.push(" ");
-          } else if (!position || !previous.position) findings.push({ code: "ambiguous-text-geometry", pageIndex: n - 1 });
-          else {
-            const height = Math.max(position.height, previous.position.height);
-            const dy = Math.abs(position.y - previous.position.y);
-            const gap = position.x - (previous.position.x + previous.position.width);
-            if (dy > height * 0.5) parts.push(" ");
-            else if (dy > height * 0.1 || gap < -height * 0.1 || gap > height * 0.1 && gap < height * 0.3) findings.push({ code: "ambiguous-text-geometry", pageIndex: n - 1 });
-            else if (gap >= height * 0.3) parts.push(" ");
-          }
-        }
-        if (previous?.hasEOL && item.str) lineHeight = 0;
-        if (position) lineHeight = Math.max(lineHeight, position.height);
-        parts.push(item.str);
-        for (const scalar of item.str) if (!/\s/u.test(scalar)) {
-          itemScalars.push(scalar);
-          ordinal++;
-        }
-        if (item.str) previous = { str: item.str, hasEOL: item.hasEOL, position };
-        else if (item.hasEOL && previous) previous.hasEOL = true;
-      }
-      if (boundaries.length) {
-        const glyphs = glyphPages?.[n - 1];
-        const mapped = [], encoded = [];
-        if (Array.isArray(glyphs)) {
-          for (let i = 0; i < glyphs.length; i++) {
-            const char = String.fromCodePoint(glyphs[i].scalar);
-            if (!/\s/u.test(char)) {
-              mapped.push(i);
-              encoded.push(char);
-            }
-          }
-        }
-        const glyphKey = (char) => char === "\xB5" ? "\u03BC" : char;
-        const aligned = encoded.length === itemScalars.length && encoded.every((char, i) => glyphKey(char) === glyphKey(itemScalars[i]));
-        for (const boundary of boundaries) {
-          const left = mapped[boundary.ordinal - 1], right = mapped[boundary.ordinal];
-          const near3 = (glyph, pos) => pos && glyph && Math.abs(glyph.origin[1] - pos.y) < Math.max(1, pos.height * 0.2) && glyph.origin[0] >= pos.x - 1 && glyph.origin[0] <= pos.x + pos.width + 1;
-          if (aligned && left !== void 0 && right !== void 0 && left < right && near3(glyphs[left], boundary.leftPosition) && near3(glyphs[right], boundary.rightPosition)) {
-            const spaces = glyphs.slice(left + 1, right).filter((g) => /\s/u.test(String.fromCodePoint(g.scalar)));
-            const resolved = spaces.length ? " " : "";
-            if (parts[boundary.part] !== resolved) spacingEvidence.push({ pageIndex: n - 1, action: resolved ? "retain-encoded-space" : "remove-inferred-space", leftScalar: glyphs[left].scalar, rightScalar: glyphs[right].scalar, leftOrigin: glyphs[left].origin, rightOrigin: glyphs[right].origin, encodedWhitespace: spaces.map((g) => g.scalar) });
-            parts[boundary.part] = resolved;
-          } else {
-            findings.push({ code: "ambiguous-text-geometry", pageIndex: n - 1, reason: "PDF.js may discard an encoded space at a line-final hyphen or citation boundary, or infer one before a closing quote; glyph stream unavailable or misaligned." });
-          }
-        }
-      }
-      pages.push(normalize(parts.join("")));
-      page.cleanup();
-    }
-  } finally {
-    await task.destroy();
-  }
-  if (furnitureValid) {
-    for (const m of outputFurniture) if (!Number.isInteger(m?.page) || m.page < 1 || m.page > (doc?.numPages || 0)) findings.push({ code: "furniture-unavailable", reason: "Furniture map page is invalid." });
-    if (expectedFurniture.some((t) => t.entryKind === "asset")) furnitureAssets = true;
-  }
-  const observed = normalize(pages.join(" "));
-  const expected = normalize(expectedBlocks.map((b) => Object.hasOwn(edits, b.id) ? edits[b.id] : b.text).join(" "));
-  const layoutQuality = inspectLayoutQuality({ bytes, mupdf: mupdf7, profile: layoutProfile, sourceBytes, sourcePageIndexes });
+function compareFloatingCaptions({ flowExpectations, layoutProfile, layoutQuality, expected, observed, expectedBlocks, edits }) {
   let flow = { status: "not-requested" }, flowMatches = false, flowDifferences = [];
   if (flowExpectations !== void 0) {
     const ids = flowExpectations?.floatingCaptionBlockIds, captions = layoutProfile?.captions;
@@ -3249,6 +3056,250 @@ async function checkRecomposition({ bytes, expectedBlocks, edits = {}, pdfjs, ex
       }
     } else flow = { status: "unavailable", reason: "Invalid floating caption declarations." };
   }
+  return { flow, flowMatches, flowDifferences };
+}
+function findFurnitureRuns({ records, content, marker, bodyFrame, viewport, target }) {
+  const candidates = [];
+  for (let i = 0; i < records.length; i++) {
+    const first = records[i];
+    if (!first || Math.abs(first.x - marker.x) > 2 || Math.abs(first.top - marker.y) > Math.max(4, first.item.height)) continue;
+    let value = "", previousRun = null, indexes = [];
+    for (let j = i; j < records.length; j++) {
+      const run = records[j];
+      if (!run) {
+        if (content.items[j]?.str?.trim()) break;
+        continue;
+      }
+      if (marker.kind === "header" ? run.top < 0 || run.bottom > bodyFrame.top : run.top < bodyFrame.bottom || run.bottom > viewport.height) break;
+      if (previousRun && !/\s$/u.test(value) && !/^\s/u.test(run.item.str)) {
+        const dy = Math.abs(run.y - previousRun.y), h = Math.max(run.item.height, previousRun.item.height), gap = run.x - (previousRun.x + previousRun.item.width);
+        if (previousRun.item.hasEOL || dy > h * 0.5 || gap >= h * 0.3) value += " ";
+        else if (dy > h * 0.1 || gap < -h * 0.1 || gap > h * 0.1) break;
+      }
+      value += run.item.str;
+      indexes.push(j);
+      previousRun = run;
+      if (normalize(value) === normalize(target)) {
+        candidates.push(indexes.slice());
+        break;
+      }
+      if (normalize(value).length > normalize(target).length) break;
+    }
+  }
+  return candidates;
+}
+function claimMergedFurniture({ records, pageMarkers, expectedFurniture, n, numPages, bodyFrame, viewport, excluded, claimed, mergedMarkers }) {
+  for (const run of records.filter(Boolean)) {
+    const group = pageMarkers.filter((m) => m.kind && Math.abs(m.y - run.top) <= Math.max(4, run.item.height) && m.x >= run.x - 2 && m.x < run.x + run.item.width - 0.01).sort((a, b) => a.x - b.x);
+    if (group.length < 2 || Math.abs(group[0].x - run.x) > 2 || group.some((m) => m.kind !== group[0].kind || m.sourcePage !== group[0].sourcePage)) continue;
+    const templates = group.map((m) => expectedFurniture.filter((t) => t.sourcePage === m.sourcePage && t.kind === m.kind && t.occurrences?.some((o) => (o.blockId || o.itemId) === m.id)));
+    if (templates.some((ts) => ts.length !== 1 || !["text", "counter"].includes(ts[0].entryKind))) continue;
+    const expected = templates.map((ts) => ts[0].entryKind === "counter" ? `${n} / ${numPages}` : ts[0].text);
+    if (expected.some((t) => typeof t !== "string") || ![expected.join(" "), expected.join("")].some((text) => normalize(text) === normalize(run.item.str))) continue;
+    if (group[0].kind === "header" ? run.top < 0 || run.bottom > bodyFrame.top : run.top < bodyFrame.bottom || run.bottom > viewport.height) continue;
+    excluded.add(run.index);
+    claimed.add(run.index);
+    group.forEach((m) => mergedMarkers.add(m));
+  }
+}
+function inspectPageFurniture({ content, viewport, frameSupported, furnitureValid, expectedFurniture, outputFurniture, bodyFrame, selectedSources, n, numPages, findings }) {
+  const excluded = /* @__PURE__ */ new Set();
+  let furnitureAssets = false;
+  if (furnitureValid) {
+    const records = content.items.map((item, index) => {
+      const t = item.transform, style = content.styles?.[item.fontName];
+      if (typeof item.str !== "string" || !item.str.trim() || !frameSupported || !Array.isArray(t) || t.length !== 6 || !t.every(Number.isFinite) || !Number.isFinite(item.width) || item.width < 0 || !Number.isFinite(item.height) || item.height <= 0 || t[0] <= 0 || t[3] <= 0 || Math.abs(t[1]) > 1e-6 || Math.abs(t[2]) > 1e-6 || item.dir !== "ltr" || !Number.isFinite(style?.ascent) || !Number.isFinite(style?.descent) || style.ascent < 0 || style.descent > 0) return null;
+      const [x, y] = viewport.convertToViewportPoint(t[4], t[5]);
+      return { index, item, x, y, top: y - style.ascent * item.height, bottom: y - style.descent * item.height };
+    });
+    const claimed = /* @__PURE__ */ new Set(), mergedMarkers = /* @__PURE__ */ new Set();
+    const pageMarkers = outputFurniture.filter((m) => m?.page === n);
+    claimMergedFurniture({ records, pageMarkers, expectedFurniture, n, numPages, bodyFrame, viewport, excluded, claimed, mergedMarkers });
+    for (const marker of outputFurniture.filter((m) => m?.page === n)) {
+      if (mergedMarkers.has(marker)) continue;
+      const matches = expectedFurniture.filter((t) => t?.sourcePage === marker.sourcePage && t.kind === marker.kind && t.occurrences?.some((o) => (o.blockId || o.itemId) === marker.id));
+      if (matches.length !== 1 || !["header", "footer"].includes(marker.kind) || !Number.isFinite(marker.x) || !Number.isFinite(marker.y)) {
+        findings.push({ code: "furniture-unavailable", pageIndex: n - 1, reason: "Invalid or ambiguous furniture map entry." });
+        continue;
+      }
+      const template = matches[0];
+      if (template.entryKind === "asset") {
+        furnitureAssets = true;
+        continue;
+      }
+      const target = template.entryKind === "counter" ? `${n} / ${numPages}` : template.text;
+      if (typeof target !== "string" || !normalize(target)) {
+        findings.push({ code: "furniture-unavailable", pageIndex: n - 1, reason: "Furniture text unavailable." });
+        continue;
+      }
+      const candidates = findFurnitureRuns({ records, content, marker, bodyFrame, viewport, target });
+      if (candidates.length !== 1 || candidates[0].some((i) => claimed.has(i))) {
+        findings.push({ code: candidates.length ? "ambiguous-furniture" : "missing-furniture", pageIndex: n - 1, id: marker.id });
+        continue;
+      }
+      for (const i of candidates[0]) {
+        excluded.add(i);
+        claimed.add(i);
+      }
+    }
+    if (selectedSources) {
+      const sourcePage = selectedSources[n - 1];
+      for (const marker of pageMarkers) if (marker.sourcePage !== sourcePage)
+        findings.push({ code: "wrong-furniture-source", pageIndex: n - 1, sourcePage: marker.sourcePage, expectedSourcePage: sourcePage });
+      for (const t of expectedFurniture.filter((t2) => t2.sourcePage === sourcePage)) {
+        for (const occurrence of t.occurrences || []) {
+          const id3 = occurrence.blockId || occurrence.itemId;
+          if (!pageMarkers.some((m) => m.sourcePage === sourcePage && m.kind === t.kind && m.id === id3))
+            findings.push({ code: "missing-furniture", pageIndex: n - 1, id: id3, sourcePage, reason: "Template occurrence has no output map entry." });
+        }
+      }
+    }
+    for (const r of records) if (r && !excluded.has(r.index) && (r.bottom <= bodyFrame.top || r.top >= bodyFrame.bottom)) {
+      findings.push({ code: "unexpected-margin-text", pageIndex: n - 1, text: r.item.str });
+    }
+  }
+  return { excluded, furnitureAssets };
+}
+function resolveGlyphBoundaries({ boundaries, glyphPages, n, itemScalars, parts, spacingEvidence, findings }) {
+  if (boundaries.length) {
+    const glyphs = glyphPages?.[n - 1];
+    const mapped = [], encoded = [];
+    if (Array.isArray(glyphs)) {
+      for (let i = 0; i < glyphs.length; i++) {
+        const char = String.fromCodePoint(glyphs[i].scalar);
+        if (!/\s/u.test(char)) {
+          mapped.push(i);
+          encoded.push(char);
+        }
+      }
+    }
+    const glyphKey = (char) => char === "\xB5" ? "\u03BC" : char;
+    const aligned = encoded.length === itemScalars.length && encoded.every((char, i) => glyphKey(char) === glyphKey(itemScalars[i]));
+    for (const boundary of boundaries) {
+      const left = mapped[boundary.ordinal - 1], right = mapped[boundary.ordinal];
+      const near3 = (glyph, pos) => pos && glyph && Math.abs(glyph.origin[1] - pos.y) < Math.max(1, pos.height * 0.2) && glyph.origin[0] >= pos.x - 1 && glyph.origin[0] <= pos.x + pos.width + 1;
+      if (aligned && left !== void 0 && right !== void 0 && left < right && near3(glyphs[left], boundary.leftPosition) && near3(glyphs[right], boundary.rightPosition)) {
+        const spaces = glyphs.slice(left + 1, right).filter((g) => /\s/u.test(String.fromCodePoint(g.scalar)));
+        const resolved = spaces.length ? " " : "";
+        if (parts[boundary.part] !== resolved) spacingEvidence.push({ pageIndex: n - 1, action: resolved ? "retain-encoded-space" : "remove-inferred-space", leftScalar: glyphs[left].scalar, rightScalar: glyphs[right].scalar, leftOrigin: glyphs[left].origin, rightOrigin: glyphs[right].origin, encodedWhitespace: spaces.map((g) => g.scalar) });
+        parts[boundary.part] = resolved;
+      } else {
+        findings.push({ code: "ambiguous-text-geometry", pageIndex: n - 1, reason: "PDF.js may discard an encoded space at a line-final hyphen or citation boundary, or infer one before a closing quote; glyph stream unavailable or misaligned." });
+      }
+    }
+  }
+}
+function inspectTextGeometry({ item, content, frameSupported, viewport, n, findings }) {
+  const t = item.transform, style = content.styles?.[item.fontName];
+  const supported = frameSupported && Array.isArray(t) && t.length === 6 && t.every(Number.isFinite) && Number.isFinite(item.width) && item.width >= 0 && Number.isFinite(item.height) && item.height > 0 && t[0] > 0 && t[3] > 0 && Math.abs(t[1]) < 1e-6 && Math.abs(t[2]) < 1e-6 && item.dir === "ltr" && !style?.vertical;
+  let position = null;
+  if (supported) {
+    const [x, y] = viewport.convertToViewportPoint(t[4], t[5]);
+    if (Number.isFinite(x) && Number.isFinite(y)) position = { x, y, width: item.width, height: item.height };
+  }
+  if (item.str.trim()) {
+    if (!position || !Number.isFinite(style?.ascent) || !Number.isFinite(style?.descent) || style.ascent < 0 || style.descent > 0) {
+      findings.push({ code: "unsupported-text-geometry", pageIndex: n - 1, text: item.str });
+    } else {
+      const top = position.y - style.ascent * position.height;
+      const bottom = position.y - style.descent * position.height;
+      if (position.x < -1 || position.x + position.width > viewport.width + 1 || top < -1 || bottom > viewport.height + 1) findings.push({ code: "text-outside-page", pageIndex: n - 1, text: item.str });
+    }
+  }
+  return position;
+}
+function appendTextBoundary({ previous, item, position, parts, boundaries, ordinal, lineHeight, viewport, n, findings }) {
+  if (previous && item.str && !/\s$/u.test(previous.str) && !/^\s/u.test(item.str)) {
+    if (previous.hasEOL) {
+      const recent = parts.slice(-8).join("");
+      const paragraphGap = position && previous.position && Math.abs(position.y - previous.position.y) > Math.max(position.height, previous.position.height, lineHeight) * 1.9;
+      const columnTurn = /\S[–\-/]$/u.test(recent) && /^[\p{L}\p{N}_−]/u.test(item.str) && position && previous.position && previous.position.y > viewport.height * 0.8 && position.y < viewport.height * 0.2 && position.x > previous.position.x + previous.position.width;
+      const url = /(?:https?:\/\/|www\.)[^\s]*$/iu.test(recent) && (/[./?=&-]$/u.test(recent) || /\p{L}$/u.test(recent) && /^\p{N}/u.test(item.str) || /^[\p{L}\p{N}_-]+[./]/u.test(item.str));
+      if ((!paragraphGap || columnTurn) && (/\S[–\-/]$/u.test(recent) && /^[\p{L}\p{N}_−]/u.test(item.str) || /(?:^|\s)-$/u.test(recent) && /^\p{L}/u.test(item.str) || /\S$/u.test(previous.str) && /^\[/u.test(item.str) || /\S*\/\S*[?=&]$/u.test(previous.str) && /^[\p{L}\p{N}]/u.test(item.str) || url && /^[\p{L}\p{N}]/u.test(item.str))) {
+        boundaries.push({ part: parts.length, ordinal, leftPosition: previous.position, rightPosition: position });
+      }
+      parts.push(" ");
+    } else if (!position || !previous.position) findings.push({ code: "ambiguous-text-geometry", pageIndex: n - 1 });
+    else {
+      const height = Math.max(position.height, previous.position.height);
+      const dy = Math.abs(position.y - previous.position.y);
+      const gap = position.x - (previous.position.x + previous.position.width);
+      if (dy > height * 0.5) parts.push(" ");
+      else if (dy > height * 0.1 || gap < -height * 0.1 || gap > height * 0.1 && gap < height * 0.3) findings.push({ code: "ambiguous-text-geometry", pageIndex: n - 1 });
+      else if (gap >= height * 0.3) parts.push(" ");
+    }
+  }
+}
+function observePageText({ content, viewport, furnitureValid, expectedFurniture, outputFurniture, bodyFrame, selectedSources, n, numPages, findings, glyphPages, spacingEvidence }) {
+  const parts = [];
+  let inspectedItems = 0;
+  let previous = null, ordinal = 0, pendingQuoteSpace = null, lineHeight = 0;
+  const boundaries = [], itemScalars = [];
+  const frame = viewport.transform;
+  const frameSupported = viewport.rotation === 0 && Array.isArray(frame) && frame.length === 6 && frame.every(Number.isFinite) && frame[0] === 1 && frame[1] === 0 && frame[2] === 0 && frame[3] === -1 && Number.isFinite(viewport.width) && Number.isFinite(viewport.height) && viewport.width > 0 && viewport.height > 0;
+  const furniture = inspectPageFurniture({ content, viewport, frameSupported, furnitureValid, expectedFurniture, outputFurniture, bodyFrame, selectedSources, n, numPages, findings });
+  const excluded = furniture.excluded;
+  for (const [itemIndex, item] of content.items.entries()) {
+    if (typeof item.str !== "string") continue;
+    const position = inspectTextGeometry({ item, content, frameSupported, viewport, n, findings });
+    if (item.str.trim()) inspectedItems++;
+    if (excluded.has(itemIndex)) {
+      for (const scalar of item.str) if (!/\s/u.test(scalar)) {
+        itemScalars.push(scalar);
+        ordinal++;
+      }
+      previous = null;
+      continue;
+    }
+    if (pendingQuoteSpace && item.str && !/^\s+$/u.test(item.str)) {
+      if (/^[”’]/u.test(item.str)) {
+        pendingQuoteSpace.rightPosition = position;
+        boundaries.push(pendingQuoteSpace);
+      }
+      pendingQuoteSpace = null;
+    }
+    if (item.str === " " && item.height === 0 && previous?.position && !previous.hasEOL && /^[”’]/u.test(content.items[itemIndex + 1]?.str || "")) {
+      pendingQuoteSpace = { part: parts.length, ordinal, leftPosition: previous.position };
+    }
+    appendTextBoundary({ previous, item, position, parts, boundaries, ordinal, lineHeight, viewport, n, findings });
+    if (previous?.hasEOL && item.str) lineHeight = 0;
+    if (position) lineHeight = Math.max(lineHeight, position.height);
+    parts.push(item.str);
+    for (const scalar of item.str) if (!/\s/u.test(scalar)) {
+      itemScalars.push(scalar);
+      ordinal++;
+    }
+    if (item.str) previous = { str: item.str, hasEOL: item.hasEOL, position };
+    else if (item.hasEOL && previous) previous.hasEOL = true;
+  }
+  resolveGlyphBoundaries({ boundaries, glyphPages, n, itemScalars, parts, spacingEvidence, findings });
+  return { text: normalize(parts.join("")), inspectedItems, furnitureAssets: furniture.furnitureAssets };
+}
+function associateFurnitureSources({ furnitureValid, blockSpans, numPages, expectedFurniture }) {
+  let sourceAssociation = { status: "unavailable", reason: "Complete valid block spans are unavailable." };
+  let selectedSources = null;
+  if (furnitureValid) {
+    const validSpan = (s) => typeof s?.id === "string" && s.id.length > 0 && Number.isInteger(s.sourcePage) && s.sourcePage >= 0 && [s.start, s.end].every((p) => Number.isInteger(p?.page) && p.page >= 1 && p.page <= numPages && Number.isFinite(p.x) && Number.isFinite(p.y) && (p.id === void 0 || p.id === s.id) && (p.sourcePage === void 0 || p.sourcePage === s.sourcePage)) && s.start.page <= s.end.page;
+    if (Array.isArray(blockSpans) && blockSpans.length && blockSpans.every(validSpan) && new Set(blockSpans.map((s) => s.id)).size === blockSpans.length && blockSpans.every((s, i) => i === 0 || s.start.page >= blockSpans[i - 1].start.page)) {
+      const selections = Array.from({ length: numPages }, (_, i) => blockSpans.find((s) => s.start.page <= i + 1 && s.end.page >= i + 1));
+      if (selections.every(Boolean)) {
+        selectedSources = selections.map((s) => s.sourcePage);
+        sourceAssociation = {
+          status: "declared",
+          pages: selectedSources.map((sourcePage, i) => ({ page: i + 1, sourcePage })),
+          unusedVariants: [...new Set(expectedFurniture.map((t) => t.sourcePage))].filter((p) => !selectedSources.includes(p)),
+          limitation: "Source association is declared by span metadata; PDF bytes establish text and geometry."
+        };
+      }
+    }
+  }
+  return { sourceAssociation, selectedSources };
+}
+function assembleRecompositionReport({ pages, expectedBlocks, edits, bytes, mupdf: mupdf7, layoutProfile, sourceBytes, sourcePageIndexes, flowExpectations, findings, spacingEvidence, locations, exporter, furnitureEnabled, furnitureValid, selectedSources, sourceAssociation, furnitureAssets, inspectedItems }) {
+  const observed = normalize(pages.join(" "));
+  const expected = normalize(expectedBlocks.map((b) => Object.hasOwn(edits, b.id) ? edits[b.id] : b.text).join(" "));
+  const layoutQuality = inspectLayoutQuality({ bytes, mupdf: mupdf7, profile: layoutProfile, sourceBytes, sourcePageIndexes });
+  const { flow, flowMatches, flowDifferences } = compareFloatingCaptions({ flowExpectations, layoutProfile, layoutQuality, expected, observed, expectedBlocks, edits });
   const representation = representationComparison(expected, observed);
   const reportedDifferences = representation.matches ? representation.differences : flowMatches ? flowDifferences : [];
   if (!representation.matches && !flowMatches) findings.push({ code: "content-mismatch", expected, observed });
@@ -3282,8 +3333,51 @@ async function checkRecomposition({ bytes, expectedBlocks, edits = {}, pdfjs, ex
   const independent = typeof exporter === "string" && exporter.trim() && !/pdf\.?js/i.test(exporter) ? { status: "declared", reader: "PDF.js text extraction", exporter, limitation: "Distinct named engines only; exporter identity is caller supplied." } : { status: "unavailable", reader: "PDF.js text extraction", reason: "Exporter path not supplied or uses PDF.js." };
   return { schema: "falsify.recomposition-check.v1", readable: true, layoutQuality, checks: { flow, furniture: furnitureEnabled ? { status: findings.some((f) => f.code === "missing-furniture" || f.code === "unexpected-margin-text" || f.code === "wrong-furniture-source") ? "finding" : !furnitureValid || !selectedSources || findings.some((f) => f.code === "furniture-unavailable" || f.code === "ambiguous-furniture") ? "unavailable" : "checked", sourceAssociation, assets: furnitureAssets ? { status: "unavailable", reason: "Furniture assets require independent visual inspection." } : { status: "not-applicable" } } : void 0, content: { status: findings.some((f) => f.code === "ambiguous-text-geometry" || f.code === "unsupported-text-geometry") ? "unavailable" : observed === expected || flowMatches && !flowDifferences.length ? "pass" : representation.matches || flowMatches ? "normalized" : "finding", comparison: "ordered text with whitespace runs collapsed; ambiguous item geometry is unavailable", representationDifferences: reportedDifferences, spacingEvidence, offsetUnit: "UTF-16 offsets in whitespace-normalized source expectation and PDF.js output; scoped flow differences use caption-local or body-after-caption-removal offsets", limitation: reportedDifferences.length ? "The listed representation differences are not byte-exact preservation." : void 0 }, bounds: { status: findings.some((f) => f.code === "text-outside-page") ? "finding" : !inspectedItems || findings.some((f) => f.code === "unsupported-text-geometry") ? "unavailable" : "checked", limitation: "Extracted upright text items only, estimated from font ascent and descent; PDF.js may omit off-page text. Not clipping or ink bounds." }, movement: alignmentAvailable ? { status: "observed", locations } : { status: "unavailable", locations: null, reason: "Complete ordered text alignment or supported geometry is unavailable." }, independent, visual: { status: "unavailable", reason: "No raster or visibility inspection." }, overlap: { status: "unavailable", reason: "Text and asset ownership not established." }, captionOwnership: { status: "unavailable", reason: "Relations not established from PDF bytes." } }, findings };
 }
+async function checkRecomposition({ bytes, expectedBlocks, edits = {}, pdfjs, exporter, mupdf: mupdf7, expectedFurniture, outputFurniture, bodyFrame, blockSpans, layoutProfile, flowExpectations, sourceBytes, sourcePageIndexes } = {}) {
+  if (!(bytes instanceof Uint8Array) || !bytes.length || !pdfjs?.getDocument) throw new TypeError("PDF bytes and PDF.js are required");
+  if (!Array.isArray(expectedBlocks) || !expectedBlocks.length || expectedBlocks.some((b) => typeof b.id !== "string" || typeof b.text !== "string") || new Set(expectedBlocks.map((b) => b.id)).size !== expectedBlocks.length) throw new TypeError("unique expected blocks are required");
+  if (Object.keys(edits).some((id3) => !expectedBlocks.some((b) => b.id === id3) || typeof edits[id3] !== "string")) throw new TypeError("invalid edit");
+  const findings = [], pages = [], locations = [], spacingEvidence = [];
+  const furnitureEnabled = expectedFurniture !== void 0 || outputFurniture !== void 0 || bodyFrame !== void 0;
+  const furnitureValid = Array.isArray(expectedFurniture) && Array.isArray(outputFurniture) && bodyFrame && ["left", "top", "right", "bottom"].every((k) => Number.isFinite(bodyFrame[k])) && bodyFrame.left < bodyFrame.right && bodyFrame.top < bodyFrame.bottom;
+  if (furnitureEnabled && !furnitureValid) findings.push({ code: "furniture-unavailable", reason: "Furniture declarations, output map or body frame unavailable." });
+  let sourceAssociation = { status: "unavailable", reason: "Complete valid block spans are unavailable." };
+  let selectedSources = null;
+  let furnitureAssets = false;
+  let inspectedItems = 0;
+  let glyphPages = null;
+  if (mupdf7) {
+    try {
+      glyphPages = readOutputGlyphs({ bytes: bytes.slice(), mupdf: mupdf7 });
+    } catch {
+      glyphPages = null;
+    }
+  }
+  const task = pdfjs.getDocument({ data: bytes.slice(), useSystemFonts: true, isEvalSupported: false });
+  let doc;
+  try {
+    doc = await task.promise;
+    ({ sourceAssociation, selectedSources } = associateFurnitureSources({ furnitureValid, blockSpans, numPages: doc.numPages, expectedFurniture }));
+    for (let n = 1; n <= doc.numPages; n++) {
+      const page = await doc.getPage(n), viewport = page.getViewport({ scale: 1 });
+      const content = await page.getTextContent();
+      const observation = observePageText({ content, viewport, furnitureValid, expectedFurniture, outputFurniture, bodyFrame, selectedSources, n, numPages: doc.numPages, findings, glyphPages, spacingEvidence });
+      furnitureAssets ||= observation.furnitureAssets;
+      inspectedItems += observation.inspectedItems;
+      pages.push(observation.text);
+      page.cleanup();
+    }
+  } finally {
+    await task.destroy();
+  }
+  if (furnitureValid) {
+    for (const m of outputFurniture) if (!Number.isInteger(m?.page) || m.page < 1 || m.page > (doc?.numPages || 0)) findings.push({ code: "furniture-unavailable", reason: "Furniture map page is invalid." });
+    if (expectedFurniture.some((t) => t.entryKind === "asset")) furnitureAssets = true;
+  }
+  return assembleRecompositionReport({ pages, expectedBlocks, edits, bytes, mupdf: mupdf7, layoutProfile, sourceBytes, sourcePageIndexes, flowExpectations, findings, spacingEvidence, locations, exporter, furnitureEnabled, furnitureValid, selectedSources, sourceAssociation, furnitureAssets, inspectedItems });
+}
 
-// app/src/browser-fonts.mjs
+// src/browser-fonts.mjs
 var error = (message) => new Error(message);
 function parseFont(bytes) {
   const bad = () => {
@@ -3340,7 +3434,7 @@ function parseFont(bytes) {
   return { family, ...postscriptName ? { postscriptName } : {}, weight, italic: Boolean(selection & 1 || macStyle & 2), fsType };
 }
 
-// app/src/paper-output-profile.mjs
+// src/paper-output-profile.mjs
 var norm2 = (s) => String(s ?? "").replace(/\s+/gu, " ").trim();
 var valid2 = (b) => Array.isArray(b) && b.length === 4 && b.every(Number.isFinite) && b[2] > b[0] && b[3] > b[1];
 var area2 = (b) => (b[2] - b[0]) * (b[3] - b[1]);
@@ -3489,7 +3583,7 @@ function buildOutputProfile({ bytes, mupdf: mupdf7, document = {}, flow = {}, ex
   return { profile, evidence };
 }
 
-// app/src/paper-asset-spans.mjs
+// src/paper-asset-spans.mjs
 var box3 = (b) => Array.isArray(b) && b.length === 4 && b.every(Number.isFinite) && b[0] < b[2] && b[1] < b[3];
 var overlaps3 = (a, b) => a[0] < b[2] && a[2] > b[0] && a[1] < b[3] && a[3] > b[1];
 var inside2 = (b, p, t = 0.5) => b[0] >= p[0] - t && b[1] >= p[1] - t && b[2] <= p[2] + t && b[3] <= p[3] + t;
@@ -3655,11 +3749,11 @@ function resolveOutputAssetSpans({ bytes, mupdf: mupdf7, flow, blockSpans } = {}
   return { spans, evidence };
 }
 
-// app/src/paper-recompose.mjs
+// src/paper-recompose.mjs
 init_paragraph_pdf_crypto();
 import * as mupdf5 from "./browser-pdf-vendor/mupdf.js";
 
-// app/src/table-vendor/detection.mjs
+// src/table-vendor/detection.mjs
 var RULE_COVERAGE = 0.5;
 var RULE_EDGE_MARGIN_PT = 12;
 var ROW_GAP_TOLERANCE = 2;
@@ -4273,7 +4367,7 @@ function detectTables(runs, pageIndex, options = {}, rules = []) {
   return tables;
 }
 
-// app/src/table-adapter.mjs
+// src/table-adapter.mjs
 var TABLE_LIMITS = Object.freeze({ maxBytes: 25 * 1024 * 1024, maxPages: 200, maxRuns: 12e3, maxRules: 12e3, maxChars: 15e4, maxCellChars: 4e3 });
 var SCHEMA = "falsify.source-tables.v1";
 var issued = /* @__PURE__ */ new WeakSet();
@@ -4441,7 +4535,7 @@ function readMuPdfTablePages(bytes, mupdf7) {
   }
 }
 
-// app/src/paper-recompose.mjs
+// src/paper-recompose.mjs
 var abort5 = (signal) => {
   if (signal?.aborted) throw new DOMException("Recomposition cancelled", "AbortError");
 };
@@ -4736,7 +4830,7 @@ async function prepare(request = {}, options = {}) {
   return { ...result, repair: { attempts, selectedAttempt }, revision, bindings, sourceLinks: links, sourceBinding: { spacing: spacing.evidence, sourceSha256: document.sourceSha256, editCount: bindings.length, partCount: changes.length }, sourceAssets: { regions: regions.length, diagnostics: captured.diagnostics } };
 }
 
-// app/src/paper-typst.mjs
+// src/paper-typst.mjs
 function createTypstCompile({ createTypstCompiler, createTypstFontBuilder, loadFonts, getModule, getWrapper }) {
   return async ({ source, files = {}, fonts = {}, signal }) => {
     const abort6 = () => {
@@ -4805,7 +4899,7 @@ function createTypstCompile({ createTypstCompiler, createTypstFontBuilder, loadF
   };
 }
 
-// app/src/paper-recompose-worker.mjs
+// src/paper-recompose-worker.mjs
 init_paragraph_pdf_crypto();
 import * as mupdf6 from "./browser-pdf-vendor/mupdf.js";
 var fail4 = (code, message) => {

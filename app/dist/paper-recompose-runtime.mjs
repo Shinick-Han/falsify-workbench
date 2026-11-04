@@ -1,4 +1,4 @@
-// app/src/paper-recompose-runtime.mjs
+// src/paper-recompose-runtime.mjs
 var nextId = 0;
 var aborted = () => new DOMException("Recomposition cancelled", "AbortError");
 function createRuntime({ workerFactory = () => {

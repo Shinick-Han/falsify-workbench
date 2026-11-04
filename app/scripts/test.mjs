@@ -25,6 +25,8 @@ const stale = [...exemptions.keys()].filter(f => !discovered.includes(f) || regi
 if (missing.length || stale.length) throw new Error(`Test registration mismatch: missing=${missing.join(', ')} stale exemptions=${stale.join(', ')}`);
 if (process.argv.includes('--check-registration')) { console.log(`Test registration: ${discovered.length} discovered, ${exemptions.size} explicit exemptions`); process.exit(0); }
 // BEGIN REGISTERED TESTS
+const buildEquivalence = spawnSync(process.execPath, ['--test','tests/recomposition-build-equivalence.spec.mjs','tests/paper-visual-codec.spec.mjs','tests/w3-policy-observations.spec.mjs'], {stdio:'inherit'});
+if(buildEquivalence.error || buildEquivalence.status!==0)process.exit(buildEquivalence.status||1);
 const shape = spawnSync(process.execPath, ['--test','tests/chart-shape-core.spec.mjs','tests/chart-shape-editor.spec.mjs','tests/chart-mark-editor.spec.mjs'], {stdio:'inherit'});
 if(shape.error || shape.status!==0)process.exit(shape.status||1);
 const visual = spawnSync(process.execPath, ['--test','tests/paper-chart-redraw.spec.cjs','tests/paper-chart-correction-ui.spec.cjs','tests/paper-visual-edit-ui.spec.cjs','tests/paper-visual-integration.spec.cjs'], {stdio:'inherit'});
