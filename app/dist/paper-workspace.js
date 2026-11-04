@@ -476,27 +476,32 @@
       return tables.length?legacyExporterApi():bodyExporter(body);
     };
     const store=()=>{try{return deps.storage||globalThis.localStorage||null;}catch{return null;}};
+    let blobStore=null,disposed=false;
     function blobApi(){
       if(deps.sourceBlobs)return deps.sourceBlobs;
-      const idb=globalThis.indexedDB;
-      if(!idb)return null;
-      const open=()=>new Promise((ok,no)=>{
+      if(blobStore)return blobStore;
+      const idb=globalThis.indexedDB;if(!idb)return null;
+      let opening=null;
+      const open=()=>{if(disposed)return Promise.reject(Error('Workspace disposed'));return opening??=new Promise((ok,no)=>{
         const req=idb.open('falsify.paper-source.v1',1);
         req.onupgradeneeded=()=>{const db=req.result;if(!db.objectStoreNames.contains('files'))db.createObjectStore('files');};
         req.onsuccess=()=>ok(req.result);req.onerror=()=>no(req.error);
+      }).catch(e=>{opening=null;throw e;});};
+      const transaction=async(mode,operation)=>{const db=await open();if(disposed)throw Error('Workspace disposed');return new Promise((ok,no)=>{
+        let value;const tx=db.transaction('files',mode);
+        tx.oncomplete=()=>ok(value);tx.onabort=tx.onerror=()=>no(tx.error||Error('Storage transaction failed'));
+        try{operation(tx.objectStore('files'),v=>{value=v;});}catch(e){try{tx.abort();}catch{}no(e);}
+      });};
+      const request=(method,key,record)=>transaction(method==='get'?'readonly':'readwrite',(store,set)=>{
+        const q=method==='put'?store.put(record,key):store[method](key);q.onsuccess=()=>set(q.result);
       });
-      const done=(q,ok,no)=>{q.onsuccess=()=>ok(q.result);q.onerror=()=>no(q.error);};
-      return {
-        get:hash=>open().then(db=>new Promise((ok,no)=>done(db.transaction('files').objectStore('files').get(hash),ok,no))),
-        put:(hash,record)=>open().then(db=>new Promise((ok,no)=>done(db.transaction('files','readwrite').objectStore('files').put(record,hash),ok,no))),
-        delete:hash=>open().then(db=>new Promise((ok,no)=>done(db.transaction('files','readwrite').objectStore('files').delete(hash),ok,no))),
-        purgeExpired:at=>open().then(db=>new Promise((ok,no)=>{
-          const tx=db.transaction('files','readwrite'),cursor=tx.objectStore('files').openCursor();
-          cursor.onsuccess=()=>{const row=cursor.result;if(!row)return;if(!(row.value?.expiresAt>at))row.delete();row.continue();};
-          tx.oncomplete=()=>{db.close();ok();};tx.onerror=()=>{db.close();no(tx.error);};
-        }))
-      };
+      blobStore={get:hash=>request('get',hash),put:(hash,record)=>request('put',hash,record),delete:hash=>request('delete',hash),
+        purgeExpired:at=>transaction('readwrite',store=>{const cursor=store.openCursor();cursor.onsuccess=()=>{const row=cursor.result;if(!row)return;if(!(row.value?.expiresAt>at))row.delete();row.continue();};}),
+        dispose(){opening?.then(db=>db.close(),()=>{});opening=null;}};
+      return blobStore;
     }
+    const listeners=[];
+    function listen(node,type,handler,options){if(!node)return;node.addEventListener(type,handler,options);listeners.push(()=>node.removeEventListener(type,handler,options));}
     let epoch=0,source=null,session=null,unsub=null,snapshot=null,output=null,inline=null,pageText=null,directEditor=null,committingDirect=false,committingInline=false,composingDirect=false,selectionClickPending=false;
     let fontRevision=0,fontBusy=false;
     let proposalQueue=null,accepted=new Set(),modelById=new Map(),draftRaw=null,pendingFocus=null,pendingResume=null;
@@ -507,7 +512,7 @@
     let beforeMarks=null,afterMarks=null,compareFocus=null,afterCache=null,afterCacheKey=null,generator=null,generatorVersion=0,candidatePreview=null,candidateMarks=null;
     const showChanges=doc.querySelector('#paper-show-changes'),changeStatus=doc.querySelector('#paper-change-status');
     function syncChangeVisibility(){for(const stage of [ui.beforeStage,ui.afterStage])stage.classList.toggle('is-changes-hidden',showChanges?.checked===false);}
-    showChanges?.addEventListener('change',syncChangeVisibility);
+    listen(showChanges,'change',syncChangeVisibility);
     function paintBeforeChanges(){
       beforeMarks?.layer?.remove();beforeMarks=null;
       if(pageText&&marksApi()?.paintPage){
@@ -1440,15 +1445,15 @@
         return {applied:accepted.size};
       }
     }
-    const lastDownload=doc.createElement('button');lastDownload.type='button';lastDownload.className='button secondary';lastDownload.textContent='마지막 생성본 다운로드';lastDownload.hidden=true;ui.current.after(lastDownload);lastDownload.addEventListener('click',()=>{if(output&&!output.blocked)download(output.file,true);});
+    const lastDownload=doc.createElement('button');lastDownload.type='button';lastDownload.className='button secondary';lastDownload.textContent='마지막 생성본 다운로드';lastDownload.hidden=true;ui.current.after(lastDownload);listen(lastDownload,'click',()=>{if(output&&!output.blocked)download(output.file,true);});
     const afterNav=doc.createElement('div'),afterPrev=doc.createElement('button'),afterNext=doc.createElement('button'),afterPosition=doc.createElement('span');
     afterNav.className='paper-after-nav';afterNav.hidden=true;
     for(const b of [afterPrev,afterNext]){b.type='button';b.className='button secondary';}
     afterPrev.textContent='이전';afterNext.textContent='다음';
     afterPrev.setAttribute('aria-label','생성본의 이전 이어지는 쪽');afterNext.setAttribute('aria-label','생성본의 다음 이어지는 쪽');
     afterNav.append(afterPrev,afterPosition,afterNext);ui.afterLabel.after(afterNav);
-    afterPrev.addEventListener('click',()=>{if(afterPart>0){afterPart--;void drawAfter();}});
-    afterNext.addEventListener('click',()=>{if(!afterNext.disabled){afterPart++;void drawAfter();}});
+    listen(afterPrev,'click',()=>{if(afterPart>0){afterPart--;void drawAfter();}});
+    listen(afterNext,'click',()=>{if(!afterNext.disabled){afterPart++;void drawAfter();}});
     function mappedPages(current,count){
       if(current.pageMap==null)return count===pages?[page-1]:null;
       if(!Array.isArray(current.pageMap))return null;
@@ -1960,58 +1965,59 @@
       }
       adoptSegments(segments,matchSegments);
     }
-    ui.file.addEventListener('change',onFileChange);
-    doc.addEventListener('falsify:document',onDocument);
-    doc.addEventListener('falsify:document-clear',clearSource);
-    doc.addEventListener('falsify:workspace-reset',clearSource);
+    listen(ui.file,'change',onFileChange);
+    listen(doc,'falsify:document',onDocument);
+    listen(doc,'falsify:document-clear',clearSource);
+    listen(doc,'falsify:workspace-reset',clearSource);
     function jumpToTyped(){
       const n=Number(String(ui.pageJump.value||'').trim());
       if(!pages||!Number.isInteger(n)||n<1||n>pages){setBeforeStatus('없는 쪽 번호입니다.',true);ui.pageJump.value=pages?String(page):'';return;}
       if(n===page)return;
       void drawBefore(n);
     }
-    ui.prev.addEventListener('click',()=>{if(page>1)void drawBefore(page-1);});
-    ui.next.addEventListener('click',()=>{if(page<pages)void drawBefore(page+1);});
-    ui.pageJump.addEventListener('change',jumpToTyped);
-    ui.pageJump.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();jumpToTyped();}else onKey(e);});
-    ui.zoomIn.addEventListener('click',()=>{const i=ZOOMS.indexOf(zoom);if(i<0||i>=ZOOMS.length-1)return;zoom=ZOOMS[i+1];syncNav();if(source&&source.doc)void drawBefore(page);});
-    ui.zoomOut.addEventListener('click',()=>{const i=ZOOMS.indexOf(zoom);if(i<=0)return;zoom=ZOOMS[i-1];syncNav();if(source&&source.doc)void drawBefore(page);});
-    ui.original.addEventListener('click',()=>{if(source)download(source.file);});
-    ui.current.addEventListener('click',()=>{if(generationApi())void currentAction('download');else if(output&&!output.blocked)download(output.file,true);});
-    doc.querySelector('#paper-recompose')?.addEventListener('change',()=>{scheduleGeneration();renderChrome();});
-    doc.addEventListener('falsify:recomposition-ready',renderChrome);
-    ui.generate.addEventListener('click',()=>{if(!ui.generate.disabled){if(generationApi())void currentAction('preview');else void generate();}});
-    ui.generateCancel?.addEventListener('click',()=>{if(!generating)return;generator?.cancel();abortGen();renderChrome();setGenStatus('생성을 취소했습니다.');});
-    ui.fontLocal?.addEventListener('click',()=>{void importFonts(true);});
-    ui.fontAdd?.addEventListener('click',()=>{ui.fontFiles?.click();});
-    ui.fontFiles?.addEventListener('change',()=>{if(ui.fontFiles.files?.length)void importFonts(false);});
-    ui.team.addEventListener('click',share);
-    ui.blue.addEventListener('click',()=>{if(generationApi())void currentAction('blue');else handoff();});
-    ui.undo.addEventListener('click',()=>{if(session&&snapshot&&snapshot.canUndo)session.undo();});
-    ui.redo.addEventListener('click',()=>{if(session&&snapshot&&snapshot.canRedo)session.redo();});
-    ui.modeText.addEventListener('click',()=>setEditMode('text'));
-    ui.modeTable.addEventListener('click',()=>setEditMode('table'));
-    ui.inlineApply.addEventListener('click',applyInline);
-    ui.inlineCancel.addEventListener('click',closeInline);
-    ui.draftOpt.addEventListener('change',renderChrome);
-    ui.draftSave.addEventListener('click',saveDraft);
-    ui.draftRestore.addEventListener('click',restoreDraft);
-    ui.draftDelete.addEventListener('click',deleteDraft);
-    ui.beforeStage.addEventListener('click',openParagraph);
-    ui.beforeStage.addEventListener('pointerup',captureSelection);
-    ui.beforeStage.addEventListener('mouseup',captureSelection);
-    ui.beforeStage.addEventListener('keyup',captureSelection);
-    ui.root.addEventListener('keydown',onKey);
-    ui.beforeStage.addEventListener('keydown',onKey);
-    ui.inline.addEventListener('keydown',onKey);
-    ui.inlineAfter.addEventListener('keydown',onKey);
-    ui.inlineAfter.addEventListener('input',()=>{queueDraft();scheduleGeneration();});
+    listen(ui.prev,'click',()=>{if(page>1)void drawBefore(page-1);});
+    listen(ui.next,'click',()=>{if(page<pages)void drawBefore(page+1);});
+    listen(ui.pageJump,'change',jumpToTyped);
+    listen(ui.pageJump,'keydown',e=>{if(e.key==='Enter'){e.preventDefault();jumpToTyped();}else onKey(e);});
+    listen(ui.zoomIn,'click',()=>{const i=ZOOMS.indexOf(zoom);if(i<0||i>=ZOOMS.length-1)return;zoom=ZOOMS[i+1];syncNav();if(source&&source.doc)void drawBefore(page);});
+    listen(ui.zoomOut,'click',()=>{const i=ZOOMS.indexOf(zoom);if(i<=0)return;zoom=ZOOMS[i-1];syncNav();if(source&&source.doc)void drawBefore(page);});
+    listen(ui.original,'click',()=>{if(source)download(source.file);});
+    listen(ui.current,'click',()=>{if(generationApi())void currentAction('download');else if(output&&!output.blocked)download(output.file,true);});
+    listen(doc.querySelector('#paper-recompose'),'change',()=>{scheduleGeneration();renderChrome();});
+    listen(doc,'falsify:recomposition-ready',renderChrome);
+    listen(ui.generate,'click',()=>{if(!ui.generate.disabled){if(generationApi())void currentAction('preview');else void generate();}});
+    listen(ui.generateCancel,'click',()=>{if(!generating)return;generator?.cancel();abortGen();renderChrome();setGenStatus('생성을 취소했습니다.');});
+    listen(ui.fontLocal,'click',()=>{void importFonts(true);});
+    listen(ui.fontAdd,'click',()=>{ui.fontFiles?.click();});
+    listen(ui.fontFiles,'change',()=>{if(ui.fontFiles.files?.length)void importFonts(false);});
+    listen(ui.team,'click',share);
+    listen(ui.blue,'click',()=>{if(generationApi())void currentAction('blue');else handoff();});
+    listen(ui.undo,'click',()=>{if(session&&snapshot&&snapshot.canUndo)session.undo();});
+    listen(ui.redo,'click',()=>{if(session&&snapshot&&snapshot.canRedo)session.redo();});
+    listen(ui.modeText,'click',()=>setEditMode('text'));
+    listen(ui.modeTable,'click',()=>setEditMode('table'));
+    listen(ui.inlineApply,'click',applyInline);
+    listen(ui.inlineCancel,'click',closeInline);
+    listen(ui.draftOpt,'change',renderChrome);
+    listen(ui.draftSave,'click',saveDraft);
+    listen(ui.draftRestore,'click',restoreDraft);
+    listen(ui.draftDelete,'click',deleteDraft);
+    listen(ui.beforeStage,'click',openParagraph);
+    listen(ui.beforeStage,'pointerup',captureSelection);
+    listen(ui.beforeStage,'mouseup',captureSelection);
+    listen(ui.beforeStage,'keyup',captureSelection);
+    listen(ui.root,'keydown',onKey);
+    listen(ui.beforeStage,'keydown',onKey);
+    listen(ui.inline,'keydown',onKey);
+    listen(ui.inlineAfter,'keydown',onKey);
+    listen(ui.inlineAfter,'input',()=>{queueDraft();scheduleGeneration();});
     for(const [node,name] of [[ui.original,'download'],[ui.generate,'pencil'],[ui.team,'users'],[ui.blue,'arrow-right'],[ui.undo,'refresh-cw'],[ui.current,'download'],[ui.draftDelete,'x']])paintIcon(node,name);
     renderChrome();renderInline();renderEdits();remindDraft();
     try{const blobs=blobApi();if(blobs?.purgeExpired)void blobs.purgeExpired(now()).catch(()=>{});}catch{}
     if(ui.file.files&&ui.file.files[0])void openFile(ui.file.files[0]);
     function publicOutput(){if(!output||output.blocked)return null;return Object.freeze({file:output.file,sha256:output.sha256,originalSourceSha256:output.originalSourceSha256,verification:published(output.verification),revision:output.revision,pageMap:published(output.pageMap),generationKey:output.key||null});}
-    return {
+    const api={
+      dispose(){if(disposed)return;disposed=true;clearSource();for(const remove of listeners.splice(0))remove();blobStore?.dispose();lastDownload.remove();afterNav.remove();if(globalThis.FalsifyPaperWorkspace===api)delete globalThis.FalsifyPaperWorkspace;},
       acceptProposals,acceptExternalResponse,exportRedBatch,
       getExternalResponses(){return external?external.snapshot():null;},
       getSource(){if(!source||!source.file||!source.fileHash)return null;return Object.freeze({file:source.file,fileHash:source.fileHash,segments:published(source.segments)||[],externalSegments:published(externalSegments(source.segments))||[]});},
@@ -2019,6 +2025,7 @@
       getOutput:publicOutput,
       getCurrentOutput(){const g=generationApi();if(!output||output.blocked||!output.key||!g?.key)return null;try{if(g.key(captureSpec())!==output.key)return null;}catch{return null;}return publicOutput();}
     };
+    return api;
   }
   return {create,pageIndexFromLabel,classifyProposals,anchorFromSelection,clampScale,TTL};
 });

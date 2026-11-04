@@ -19,7 +19,11 @@
     },
     {
       "path": "src/latex-draft-store.mjs",
-      "sha256": "d1a8023c7c63080d752f31babf20c92dee335978a41dcdda737594615d0952d9"
+      "sha256": "1b789a70ff1b91e4677b893ce4295415188d6d57097eb6c6a565b33520e3d2ed"
+    },
+    {
+      "path": "src/latex-draft-transactions.mjs",
+      "sha256": "68ab8d38698635eab7155cce411c4ef249f91b9a26c59b4f1f4022e3662ae404"
     },
     {
       "path": "src/latex-layout-audit.mjs",
@@ -67,7 +71,7 @@
     },
     {
       "path": "src/latex-workbench.mjs",
-      "sha256": "459c8cd14917bdf451ba075957d42396c502655f3f4cad35ac19e267dee5d55c"
+      "sha256": "2551ec8866dcfd4c96515a88992a8060905638903b2f0dc0d8f5b7f827183b59"
     },
     {
       "path": "src/paper-document.mjs",
@@ -232,7 +236,7 @@
   ],
   "output": {
     "path": "latex-workbench.mjs",
-    "sha256": "490593bd3d2213ba54d8d2846df58aa5c7a46447c7df7675722c1781d004eac5"
+    "sha256": "7195a05f01810e6a041ef6f79c2507b40f348276319b72552204a019364fdbd1"
   },
   "worker": {
     "path": "pdf-latex-reader-worker.mjs",
