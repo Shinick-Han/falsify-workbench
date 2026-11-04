@@ -119,7 +119,7 @@ def _point_of(value):
     return None
 
 
-def _freeze_drawing(drawing):
+def _drawing_items(drawing):
     items = []
     for item in drawing.get('items') or []:
         op = item[0]
@@ -131,6 +131,11 @@ def _freeze_drawing(drawing):
             elif hasattr(value, 'x0'):
                 points.append((float(value.x0), float(value.y0), float(value.x1), float(value.y1)))
         items.append((op, points))
+    return items
+
+
+def _freeze_drawing(drawing):
+    items = _drawing_items(drawing)
     color = drawing.get('color')
     seqno = drawing.get('seqno')
     cap = drawing.get('lineCap')
@@ -429,6 +434,44 @@ def _matrix_of(obj):
     return tuple(float(value) for value in matrix)
 
 
+def _update_stroke_style(word, operands, state):
+    if word == 'w':
+        nums = _nums(operands, 1)
+        if nums:
+            state['width'] = nums[0][2]
+    elif word == 'd':
+        state['dashes'] = _dash_value(operands)
+    elif word == 'J':
+        nums = _nums(operands, 1)
+        if nums:
+            state['cap'] = int(round(nums[0][2]))
+    elif word == 'j':
+        nums = _nums(operands, 1)
+        if nums:
+            state['join'] = int(round(nums[0][2]))
+    elif word == 'CA':
+        nums = _nums(operands, 1)
+        if nums:
+            state['opacity'] = nums[0][2]
+
+
+def _update_graphics_state(word, operands, state):
+    if word == 'cm':
+        nums = _nums(operands, 6)
+        if nums:
+            state['ctm'] = _mul(tuple(item[2] for item in nums), state['ctm'])
+    elif word == 'RG':
+        nums = _nums(operands, 3)
+        if nums:
+            state['rgb'] = tuple(item[2] for item in nums)
+    elif word == 'G':
+        nums = _nums(operands, 1)
+        if nums:
+            state['rgb'] = (nums[0][2], nums[0][2], nums[0][2])
+    else:
+        _update_stroke_style(word, operands, state)
+
+
 def _parse_streams(pk, pdf, page_index, page_tm):
     page = pdf.pages[page_index]
     resources = page.obj.get('/Resources')
@@ -463,42 +506,41 @@ def _parse_streams(pk, pdf, page_index, page_tm):
             current['view'].append(view)
             current['points'].append({'x': x, 'y': y, 'ix': ix, 'iy': iy, 'ctm': view_ctm, 'role': role, 'user': user})
 
-        for word, operands, op_index in _commands(pk, tokens):
-            if word == 'q':
-                stack.append({key: value for key, value in state.items()})
-            elif word == 'Q' and stack:
-                state = stack.pop()
-            elif word == 'cm':
-                nums = _nums(operands, 6)
-                if nums:
-                    state['ctm'] = _mul(tuple(item[2] for item in nums), state['ctm'])
-            elif word == 'RG':
-                nums = _nums(operands, 3)
-                if nums:
-                    state['rgb'] = tuple(item[2] for item in nums)
-            elif word == 'G':
-                nums = _nums(operands, 1)
-                if nums:
-                    state['rgb'] = (nums[0][2], nums[0][2], nums[0][2])
-            elif word == 'w':
-                nums = _nums(operands, 1)
-                if nums:
-                    state['width'] = nums[0][2]
-            elif word == 'd':
-                state['dashes'] = _dash_value(operands)
-            elif word == 'J':
-                nums = _nums(operands, 1)
-                if nums:
-                    state['cap'] = int(round(nums[0][2]))
-            elif word == 'j':
-                nums = _nums(operands, 1)
-                if nums:
-                    state['join'] = int(round(nums[0][2]))
-            elif word == 'CA':
-                nums = _nums(operands, 1)
-                if nums:
-                    state['opacity'] = nums[0][2]
-            elif word == 'm':
+        def invoke(operands):
+            names = [item for item in operands if item[0] == 'name']
+            if not names:
+                return
+            target = _lookup(stream_resources, names[0][2])
+            if target is None or not hasattr(target, 'read_bytes'):
+                return
+            subtype = str(target.get('/Subtype'))
+            if subtype == '/Form':
+                child_resources = target.get('/Resources')
+                child = child_resources if child_resources is not None else stream_resources
+                child_id = ('obj', tuple(target.objgen))
+                walk(target.read_bytes(), child, _mul(_matrix_of(target), state['ctm']), child_id,
+                     tuple(target.objgen), {'stream_id': stream_id, 'name_index': names[0][1], 'name': names[0][2]},
+                     depth + 1, ancestors | ({objgen} if objgen is not None else set()))
+            elif subtype == '/Image':
+                images.append(_image_record(pk, target, names[0], state['ctm'], page_tm, stream_id))
+
+        def consume(word):
+            nonlocal path
+            if word in ('s', 'b', 'b*') and current is not None:
+                current['closed'] = True
+            flush()
+            if word in _STROKE:
+                for sub in path:
+                    sub.update({'rgb': state['rgb'], 'width': state['width'], 'dashes': state['dashes'],
+                                'lineCap': state['cap'], 'lineJoin': state['join'], 'opacity': state['opacity'],
+                                'muSeqno': None})
+                    sub['path_id'] = _path_id(sub)
+                    subpaths.append(sub)
+            path = []
+
+        def draw(word, operands, op_index):
+            nonlocal current
+            if word == 'm':
                 nums = _nums(operands, 2)
                 if nums:
                     flush()
@@ -522,37 +564,20 @@ def _parse_streams(pk, pdf, page_index, page_tm):
                     current['ops'].append(('c', op_index))
             elif word == 'h' and current is not None:
                 current['closed'] = True
+
+        for word, operands, op_index in _commands(pk, tokens):
+            if word == 'q':
+                stack.append({key: value for key, value in state.items()})
+            elif word == 'Q' and stack:
+                state = stack.pop()
+            elif word in ('cm', 'RG', 'G', 'w', 'd', 'J', 'j', 'CA'):
+                _update_graphics_state(word, operands, state)
+            elif word in ('m', 'l', 'c', 'h'):
+                draw(word, operands, op_index)
             elif word == 'Do':
-                names = [item for item in operands if item[0] == 'name']
-                if not names:
-                    continue
-                target = _lookup(stream_resources, names[0][2])
-                if target is None or not hasattr(target, 'read_bytes'):
-                    continue
-                subtype = str(target.get('/Subtype'))
-                if subtype == '/Form':
-                    child_resources = target.get('/Resources')
-                    child = child_resources if child_resources is not None else stream_resources
-                    child_id = ('obj', tuple(target.objgen))
-                    walk(target.read_bytes(), child, _mul(_matrix_of(target), state['ctm']), child_id,
-                         tuple(target.objgen), {'stream_id': stream_id, 'name_index': names[0][1], 'name': names[0][2]},
-                         depth + 1, ancestors | ({objgen} if objgen is not None else set()))
-                elif subtype == '/Image':
-                    images.append(_image_record(pk, target, names[0], state['ctm'], page_tm, stream_id))
+                invoke(operands)
             elif word in _CONSUME:
-                if word in ('s', 'b', 'b*') and current is not None:
-                    current['closed'] = True
-                flush()
-                if word in _STROKE:
-                    for sub in path:
-                        sub.update({'rgb': state['rgb'], 'width': state['width'], 'dashes': state['dashes'],
-                                    'lineCap': state['cap'], 'lineJoin': state['join'], 'opacity': state['opacity'],
-                                    'muSeqno': None})
-                        sub['path_id'] = _path_id(sub)
-                        subpaths.append(sub)
-                path = []
-            elif word not in _SKIP_WORDS and word not in ('rg', 'g', 'k', 'K', 're', 'h', 'v', 'y'):
-                continue
+                consume(word)
         flush()
 
     for content_index, stream in enumerate(_contents(pk, page)):
@@ -824,7 +849,7 @@ def _same_series(scene, edited, eps=1e-4):
     return True
 
 
-def _match_native(subpaths, series, bbox, dpi):
+def _bound_native_path(subpaths, series):
     path_id = (series.get('sourceBinding') or {}).get('pathId')
     if path_id:
         found = [sub for sub in subpaths if sub.get('path_id') == path_id]
@@ -832,6 +857,13 @@ def _match_native(subpaths, series, bbox, dpi):
             return found[0]
         if len(found) > 1:
             raise ValueError('ambiguous-path')
+    return None
+
+
+def _match_native(subpaths, series, bbox, dpi):
+    bound = _bound_native_path(subpaths, series)
+    if bound is not None:
+        return bound
     color = _parse_hex(series['color'])
     target = [(float(point['x']), float(point['y'])) for point in series.get('points') or []]
     found = []
@@ -970,6 +1002,25 @@ def _resample_path(bucket, sub, points, page_tm, bbox, dpi):
     _splice(bucket, indexes, _resample_commands(points, ctm, page_tm, bbox, dpi, move=True))
 
 
+def _rewrite_segment(bucket, sub, original_points, edited_points, page_tm, bbox, dpi, groups, original_groups, ctm, position, pdf_segment):
+    span = _span_indexes(groups, position)
+    original_span = _span_indexes(original_groups, position)
+    if all(not _moved_point(original_points[left], edited_points[right]) for left, right in zip(original_span, span)):
+        return
+    edited_span = [edited_points[index] for index in span]
+    if pdf_segment['op'] == 'l' and _colinear_points(edited_span):
+        _set_point_token(bucket, sub['points'][pdf_segment['start']], (edited_span[0]['x'], edited_span[0]['y']), page_tm, bbox, dpi)
+        _set_point_token(bucket, sub['points'][pdf_segment['end']], (edited_span[-1]['x'], edited_span[-1]['y']), page_tm, bbox, dpi)
+        return
+    indexes = [pdf_segment['op_index']]
+    for point_index in pdf_segment['points']:
+        point = sub['points'][point_index]
+        indexes.extend([point['ix'], point['iy']])
+    _splice(bucket, indexes, _resample_commands(edited_span, ctm, page_tm, bbox, dpi, move=False))
+    if position == 0 and _moved_point(original_points[span[0]], edited_points[span[0]]):
+        _set_point_token(bucket, sub['points'][pdf_segment['start']], (edited_span[0]['x'], edited_span[0]['y']), page_tm, bbox, dpi)
+
+
 def _rewrite_subpath(bucket, sub, original_points, edited_points, page_tm, bbox, dpi):
     if len(edited_points) < 2:
         raise ValueError('point-topology')
@@ -989,22 +1040,7 @@ def _rewrite_subpath(bucket, sub, original_points, edited_points, page_tm, bbox,
         return
     ctm = sub['points'][0]['ctm']
     for position, pdf_segment in enumerate(pdf_segments):
-        span = _span_indexes(groups, position)
-        original_span = _span_indexes(original_groups, position)
-        if all(not _moved_point(original_points[left], edited_points[right]) for left, right in zip(original_span, span)):
-            continue
-        edited_span = [edited_points[index] for index in span]
-        if pdf_segment['op'] == 'l' and _colinear_points(edited_span):
-            _set_point_token(bucket, sub['points'][pdf_segment['start']], (edited_span[0]['x'], edited_span[0]['y']), page_tm, bbox, dpi)
-            _set_point_token(bucket, sub['points'][pdf_segment['end']], (edited_span[-1]['x'], edited_span[-1]['y']), page_tm, bbox, dpi)
-            continue
-        indexes = [pdf_segment['op_index']]
-        for point_index in pdf_segment['points']:
-            point = sub['points'][point_index]
-            indexes.extend([point['ix'], point['iy']])
-        _splice(bucket, indexes, _resample_commands(edited_span, ctm, page_tm, bbox, dpi, move=False))
-        if position == 0 and _moved_point(original_points[span[0]], edited_points[span[0]]):
-            _set_point_token(bucket, sub['points'][pdf_segment['start']], (edited_span[0]['x'], edited_span[0]['y']), page_tm, bbox, dpi)
+        _rewrite_segment(bucket, sub, original_points, edited_points, page_tm, bbox, dpi, groups, original_groups, ctm, position, pdf_segment)
 
 
 def _score_image(image, color, bbox, dpi, scene_points):
@@ -1062,6 +1098,25 @@ def _join(tokens, replacements, drops):
     return b''.join(parts)
 
 
+def _drop_native_path(bucket, sub):
+    for point in sub['points']:
+        bucket['drops'].add(point['ix'])
+        bucket['drops'].add(point['iy'])
+    for _, op_index in sub['ops']:
+        bucket['drops'].add(op_index)
+
+
+def _changed_native_series(original, edited, drop):
+    current = original if drop else edited and next((item for item in edited['series'] if item.get('id') == original['id']), None)
+    if current is None:
+        return None
+    if not drop and len(current.get('points') or []) < 2:
+        raise ValueError('point-topology')
+    if not drop and _same_series({'series': [original]}, {'series': [current]}):
+        return None
+    return current
+
+
 def _native_edits(parsed, scene, edited, bbox, dpi, drop):
     by_id = {item['id']: item for item in scene['series']}
     edits = {}
@@ -1069,21 +1124,13 @@ def _native_edits(parsed, scene, edited, bbox, dpi, drop):
     for original in scene['series']:
         if original.get('sourceBinding', {}).get('kind') != 'native-path':
             raise ValueError('mixed-scene')
-        current = original if drop else edited and next((item for item in edited['series'] if item.get('id') == original['id']), None)
+        current = _changed_native_series(original, edited, drop)
         if current is None:
-            continue
-        if not drop and len(current.get('points') or []) < 2:
-            raise ValueError('point-topology')
-        if not drop and _same_series({'series': [original]}, {'series': [current]}):
             continue
         sub = _match_native(parsed['subpaths'], original, bbox, dpi)
         bucket = edits.setdefault(id(sub), {'sub': sub, 'replacements': {}, 'drops': set()})
         if drop:
-            for point in sub['points']:
-                bucket['drops'].add(point['ix'])
-                bucket['drops'].add(point['iy'])
-            for _, op_index in sub['ops']:
-                bucket['drops'].add(op_index)
+            _drop_native_path(bucket, sub)
             changed.append(original['id'])
             continue
         _rewrite_subpath(bucket, sub, original['points'], current['points'], parsed['page_tm'], bbox, dpi)
@@ -1313,6 +1360,53 @@ def _edit_raster_runs(raster, array, original, current, image, bbox, dpi, color,
     return array
 
 
+def _edit_raster_clone(array, alpha, original, current, color, image, bbox, dpi, scale, raster):
+    style = (current or original).get('style') or {}
+    crop_width = float(style.get('width') or original.get('style', {}).get('width') or 1)
+    width = crop_width / scale
+    if alpha is not None:
+        from paper_chart_image_samples import edit_alpha
+        old_points = original['points']
+        new_points = None if current is None else current['points']
+        runs = _branch_runs(old_points) if new_points is None or len(new_points)==len(old_points) else [(None,list(range(len(old_points))))]
+        for _, indexes in runs:
+            old = _image_points([old_points[i] for i in indexes],image,bbox,dpi)
+            new = None if new_points is None else _image_points([new_points[i] for i in indexes],image,bbox,dpi)
+            alpha = edit_alpha(array,alpha,old,new,color,width)
+    array = _edit_raster_runs(raster, array, original, current, image, bbox, dpi, color, width)
+    return array, alpha
+
+
+def _raster_clones(clones, bbox, dpi, raster, np):
+    stream_clones = {}
+    for key, clone in clones.items():
+        image = clone['image']
+        array = _raster_array(image).copy()
+        alpha = None if image.get('alpha') is None else np.frombuffer(image['alpha'],dtype=np.uint8).reshape(image['height'],image['width']).copy()
+        scale = _mean_scale(image, bbox, dpi)
+        for original, current, color in clone['edits']:
+            array, alpha = _edit_raster_clone(array, alpha, original, current, color, image, bbox, dpi, scale, raster)
+        patch = alpha is None
+        if patch:
+            # Keep the original opaque image paint and overlay only changed
+            # source pixels. JPEG decoder/interpolation differences must not
+            # repaint captions, axes or the rest of a shared figure.
+            import cv2
+            changed_mask = np.any(array != _raster_array(image),axis=2).astype(np.uint8)
+            alpha = cv2.dilate(changed_mask,np.ones((3,3),np.uint8))*255
+        samples = np.ascontiguousarray(array, dtype=np.uint8).tobytes()
+        if len(samples) != image['width'] * image['height'] * 3:
+            raise ValueError('bad-image')
+        stream_clones[key] = {'objgen': image['objgen'], 'stream_id': image['stream_id'],
+                              'parent': {'stream_id': image['stream_id'], 'name_index': image['name_index']},
+                              'width': image['width'], 'height': image['height'],
+                              'replacements': {}, 'drops': set(), 'samples': samples,
+                              'alpha': None if alpha is None else alpha.tobytes(),
+                              'preserveRgbSpace': image.get('preserveRgbSpace',False),
+                              'patch':patch, 'originalName':image['name']}
+    return stream_clones
+
+
 def _export_raster(raw, scene, edited, drop):
     import numpy as np
     import paper_chart_raster_edit as raster
@@ -1337,44 +1431,7 @@ def _export_raster(raw, scene, edited, drop):
         changed.append(original['id'])
     if not clones:
         return raw, _report(True, [], False, 'raster')
-    stream_clones = {}
-    for key, clone in clones.items():
-        image = clone['image']
-        array = _raster_array(image).copy()
-        alpha = None if image.get('alpha') is None else np.frombuffer(image['alpha'],dtype=np.uint8).reshape(image['height'],image['width']).copy()
-        scale = _mean_scale(image, bbox, dpi)
-        for original, current, color in clone['edits']:
-            style = (current or original).get('style') or {}
-            crop_width = float(style.get('width') or original.get('style', {}).get('width') or 1)
-            width = crop_width / scale
-            if alpha is not None:
-                from paper_chart_image_samples import edit_alpha
-                old_points = original['points']
-                new_points = None if current is None else current['points']
-                runs = _branch_runs(old_points) if new_points is None or len(new_points)==len(old_points) else [(None,list(range(len(old_points))))]
-                for _, indexes in runs:
-                    old = _image_points([old_points[i] for i in indexes],image,bbox,dpi)
-                    new = None if new_points is None else _image_points([new_points[i] for i in indexes],image,bbox,dpi)
-                    alpha = edit_alpha(array,alpha,old,new,color,width)
-            array = _edit_raster_runs(raster, array, original, current, image, bbox, dpi, color, width)
-        patch = alpha is None
-        if patch:
-            # Keep the original opaque image paint and overlay only changed
-            # source pixels. JPEG decoder/interpolation differences must not
-            # repaint captions, axes or the rest of a shared figure.
-            import cv2
-            changed_mask = np.any(array != _raster_array(image),axis=2).astype(np.uint8)
-            alpha = cv2.dilate(changed_mask,np.ones((3,3),np.uint8))*255
-        samples = np.ascontiguousarray(array, dtype=np.uint8).tobytes()
-        if len(samples) != image['width'] * image['height'] * 3:
-            raise ValueError('bad-image')
-        stream_clones[key] = {'objgen': image['objgen'], 'stream_id': image['stream_id'],
-                              'parent': {'stream_id': image['stream_id'], 'name_index': image['name_index']},
-                              'width': image['width'], 'height': image['height'],
-                              'replacements': {}, 'drops': set(), 'samples': samples,
-                              'alpha': None if alpha is None else alpha.tobytes(),
-                              'preserveRgbSpace': image.get('preserveRgbSpace',False),
-                              'patch':patch, 'originalName':image['name']}
+    stream_clones = _raster_clones(clones, bbox, dpi, raster, np)
     # Image bytes are not content-stream tokens. Build the clone stream from samples.
     output = _apply_images(raw, scene['pageIndex'], parsed, stream_clones)
     return output, _report(False, changed, True, 'raster')
