@@ -1,9 +1,16 @@
 import assert from 'node:assert/strict';
 import {mkdtempSync, mkdirSync, writeFileSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
-import {join} from 'node:path';
+import {basename, dirname, join, resolve} from 'node:path';
 import test from 'node:test';
 import {inventory, productionPath} from './inventory.mjs';
+
+function cleanupFixture(root) {
+  const target = resolve(root);
+  assert.equal(dirname(target), resolve(tmpdir()));
+  assert.ok(basename(target).startsWith('falsify-ccn-'));
+  rmSync(target, {recursive: true, force: true});
+}
 
 test('production scope counts authored dist and new helpers while separating known mirrors', () => {
   for (const path of ['app/src/new-policy.mjs', 'app/local/new_policy.py', 'app/dist/paper-workspace.js', 'cloud/api/src/confluence.mjs']) {
@@ -27,7 +34,7 @@ test('inventory counts nested functions separately and applies a strict greater-
     const over = inventory(root, {paths: ['app/src/example.mjs'], threshold: 1});
     assert.equal(over.aboveThreshold, 2);
     assert.equal(over.errors.length, 0);
-  } finally { rmSync(root, {recursive: true, force: true}); }
+  } finally { cleanupFixture(root); }
 });
 
 test('parse failures remain failures rather than disappearing from the scope', () => {
@@ -39,5 +46,5 @@ test('parse failures remain failures rather than disappearing from the scope', (
     assert.equal(result.files, 1);
     assert.equal(result.errors.length, 1);
     assert.equal(result.errors[0].path, 'app/src/broken.mjs');
-  } finally { rmSync(root, {recursive: true, force: true}); }
+  } finally { cleanupFixture(root); }
 });

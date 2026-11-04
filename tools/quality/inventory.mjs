@@ -35,8 +35,9 @@ function scriptPath(path) {
 }
 
 function readFunctions(root, path, python) {
-  const source = readFileSync(resolve(root, path), 'utf8');
-  if (Buffer.byteLength(source, 'utf8') > 4_000_000) throw Error('File exceeds the 4 MB census limit');
+  const bytes = readFileSync(resolve(root, path));
+  if (bytes.length > 4_000_000) throw Error('File exceeds the 4 MB census limit');
+  const source = new TextDecoder('utf-8', {fatal: true}).decode(bytes);
   const parse = path.endsWith('.py') ? text => pythonFunctions(text, python) : javascriptFunctions;
   return parse(source.replace(/^\uFEFF/, '')).map(fn => ({
     path, id: fn.id, ccn: fn.ccn,
