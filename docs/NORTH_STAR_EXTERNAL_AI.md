@@ -436,3 +436,11 @@ Cursor Grok 4.7 xhigh fast 작업자를 코어·출력·UI·독립 QA·후속 �
 사용자가 브라우저 로컬 네트워크 권한을 허용한 뒤 companion 로그 안내가 나오는 문제를 신고했다. 배포 조율자가 서버를 상대경로 app/local/server.py로 직접 시작한 것이 원인이었다. API는 정상 응답했지만 기존 연결 앱은 절대경로의 설치본만 재사용하므로 Foreign / script argument is not an absolute local path로 거절했다. 웹 배포와 API 검증만으로 클릭 페어링 완료까지 확인한 것으로 취급하지 않는다.
 
 실제 OS PID와 인증된 lifecycle descriptor의 PID·절대 serverPath·busy=false를 대조한 뒤 해당 배포 프로세스에만 정상 종료를 요청했다. 절대경로로 재실행하고 기존 Get-FalsifyPortOccupant=Owned, descriptor HTTP200, Test-FalsifyCompanionDescriptor 오류 없음까지 확인했다. 코드나 권한 검사를 완화하지 않았고 웹·ZIP의 alpha.49 커밋은 유지한다. 브라우저 재연결을 시작했으며 사용자 승인 이후 실제 paired 표시는 별도로 확인해야 한다. 이후 배포 시 API뿐 아니라 기존 연결 앱의 OS 소유권·descriptor 검사를 함께 확인한다.
+
+## 2026-11-05 기술 부채 상환 실행
+
+사용자가 감사에서 정리한 23개 항목의 구현을 승인했다. Stackbite native Codex GPT-6.1 Terra high Fast를 최대 3개 작업자 좌석에 배치하며, 조율자는 파일 소유권·정확한 기준 커밋·검사·후속 wave를 관리한다. 개발 브랜치는 chore/tech-debt-20261105다. 설치본과 공개 배포는 수정하지 않았다.
+
+첫 wave의 비동기 편집 소유권, 백엔드 실행 슬롯·응답 계약·오류 분류·런타임 캐시, 배포 자산·테스트 등록·ZIP 검증·문서 항목 11개를 독립 검토 뒤 통합했다. 편집 후보의 이전 finally가 새 실행을 해제할 수 있어 보완 작업자를 추가 배치했다. 나머지는 비교 화면·저장·해제 수명, Confluence 기한·동시 조회, native 연산 격리·검사, 재현 가능한 빌드·POSIX 재연결, 그래프 드래그·codec 분리, 실제 복잡한 함수의 책임 분리 순서로 진행한다.
+
+소스 밖 coordination/tech-debt-audit-20261105/implementation/debt-ledger.json이 항목별 승인·커밋·검사 영수증이다. 원본 감사는 보존한다. Lizard의 정규식 처리로 함수 범위가 잘못 잡힌 수치는 정정하고, 잘못된 지표를 낮추기 위한 코드 변경은 하지 않는다. WorkBite T-0152의 wb.checkpoint.T0152.20261105.debt-wave1은 committed다. 구현 통과와 원격 CI·공개 배포는 별도 상태로 기록한다.
