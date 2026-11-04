@@ -44,12 +44,7 @@ def store_default():
     return default_store
 
 
-def validate(data, store=None):
-    keys = {'paperId', 'fileHash', 'kind', 'pageIndex', 'bbox', 'language', 'requestId', 'chartOptions'}
-    if not isinstance(data, dict) or not {'paperId', 'fileHash', 'kind', 'pageIndex'} <= set(data) or set(data) - keys:
-        raise ValueError('analysis_request_invalid')
-    if not isinstance(data['kind'], str) or data['kind'] not in SCHEMAS or type(data['pageIndex']) is not int or data['pageIndex'] < 0:
-        raise ValueError('analysis_request_invalid')
+def _validate_options(data):
     if data.get('language', 'en') not in ('en', 'ko'): raise ValueError('analysis_language_invalid')
     if 'chartOptions' in data:
         if data['kind'] != 'chart': raise ValueError('analysis_request_invalid')
@@ -60,6 +55,16 @@ def validate(data, store=None):
     box = data.get('bbox')
     if box is not None and (not isinstance(box, list) or len(box) != 4 or any(type(n) not in (int, float) or not math.isfinite(n) for n in box) or box[2] <= box[0] or box[3] <= box[1]):
         raise ValueError('analysis_region_invalid')
+    return box
+
+
+def validate(data, store=None):
+    keys = {'paperId', 'fileHash', 'kind', 'pageIndex', 'bbox', 'language', 'requestId', 'chartOptions'}
+    if not isinstance(data, dict) or not {'paperId', 'fileHash', 'kind', 'pageIndex'} <= set(data) or set(data) - keys:
+        raise ValueError('analysis_request_invalid')
+    if not isinstance(data['kind'], str) or data['kind'] not in SCHEMAS or type(data['pageIndex']) is not int or data['pageIndex'] < 0:
+        raise ValueError('analysis_request_invalid')
+    box = _validate_options(data)
     try: summary = (store or store_default()).status(data['paperId'])
     except (KeyError, TypeError): raise ValueError('paper_evidence_expired_or_missing') from None
     if data['fileHash'] != summary['fileHash']: raise ValueError('analysis_hash_mismatch')
@@ -88,6 +93,15 @@ def run_child(kind, png, language, cancelled, timeout=600, chart_options=None):
         return _run_child(kind, png, language, cancelled, timeout, chart_options)
     finally:
         MODEL_GATE.release()
+
+
+def _child_response(process, response):
+    stdout, _ = response[0]
+    if process.returncode or len(stdout) > 2 * 1024 * 1024: raise ValueError('analysis_worker_failed')
+    try: envelope = json.loads(stdout.decode('utf-8'))
+    except (ValueError, UnicodeDecodeError): raise ValueError('analysis_output_invalid') from None
+    if not envelope.get('ok'): raise ValueError(envelope.get('error', 'analysis_worker_failed'))
+    return envelope['data']
 
 
 def _run_child(kind, png, language, cancelled, timeout, chart_options=None):
@@ -123,12 +137,7 @@ def _run_child(kind, png, language, cancelled, timeout, chart_options=None):
             if time.monotonic() - started > timeout: raise ValueError('analysis_timeout')
         if cancelled.is_set(): raise ValueError('analysis_cancelled')
         if errors: raise ValueError('analysis_worker_failed') from errors[0]
-        stdout, _ = response[0]
-        if process.returncode or len(stdout) > 2 * 1024 * 1024: raise ValueError('analysis_worker_failed')
-        try: envelope = json.loads(stdout.decode('utf-8'))
-        except (ValueError, UnicodeDecodeError): raise ValueError('analysis_output_invalid') from None
-        if not envelope.get('ok'): raise ValueError(envelope.get('error', 'analysis_worker_failed'))
-        return envelope['data']
+        return _child_response(process, response)
     finally:
         _stop(process)
         if process.poll() is None: process.wait(timeout=10)
@@ -171,6 +180,40 @@ def _map_boxes(data, region, width, height):
     return out
 
 
+def _validate_result(result, request, image):
+    if not isinstance(result, dict) or result.get('schema') != SCHEMAS[request['kind']] or result.get('status') not in ('ready', 'partial', 'unavailable'):
+        raise ValueError('analysis_output_invalid')
+    if result.get('image', {}).get('sha256') != image['sha256'] or result['image'].get('width') != image['width'] or result['image'].get('height') != image['height']:
+        raise ValueError('analysis_image_mismatch')
+
+
+def _require_available(result):
+    if result['status'] == 'unavailable':
+        if any(code in ('rapidocr-missing','img2table-missing') for code in result.get('issues',[])):
+            raise ValueError('analysis_dependency_missing')
+        raise ValueError('analysis_engine_unavailable')
+
+
+def _render_analysis(store, request, cancelled):
+    dpi = 200 if request['kind'] == 'ocr' else 150
+    while True:
+        try: image = store.render_for_analysis(request['paperId'], request['pageIndex'], request['bbox'], dpi=dpi, cancelled=cancelled); break
+        except ValueError as error:
+            if error.args != ('pixels',) or dpi <= 50: raise
+            dpi = int(dpi * 0.75)
+    return image, dpi
+
+
+def _chart_vector_result(store, request, image, dpi, result, options, cancelled):
+    from paper_native_worker import run
+    spec = options if isinstance(options, dict) else {}
+    result = run('chart_vectors', [store.source_bytes(request['paperId'], request['fileHash']),
+        {'page_index':request['pageIndex'], 'crop':image['bbox'], 'dpi':dpi, 'width':image['width'],
+         'height':image['height'], 'raster':result, 'calibration':spec.get('calibration'),
+         'series':spec.get('series'), 'plot_bbox':spec.get('plotBbox')}], cancelled=cancelled)
+    return result
+
+
 def analyze(data, *, store=None, runner=None, cancelled=None, progress=None):
     store = store or store_default()
     request = validate(data, store)
@@ -181,12 +224,7 @@ def analyze(data, *, store=None, runner=None, cancelled=None, progress=None):
     if cached: return cached
     if cancelled.is_set(): raise ValueError('analysis_cancelled')
     progress({'phase': 'rendering', 'kind': request['kind']})
-    dpi = 200 if request['kind'] == 'ocr' else 150
-    while True:
-        try: image = store.render_for_analysis(request['paperId'], request['pageIndex'], request['bbox'], dpi=dpi, cancelled=cancelled); break
-        except ValueError as error:
-            if error.args != ('pixels',) or dpi <= 50: raise
-            dpi = int(dpi * 0.75)
+    image, dpi = _render_analysis(store, request, cancelled)
     png = base64.b64decode(image['data'], validate=True)
     progress({'phase': 'recognizing' if request['kind'] == 'ocr' else 'reading-chart', 'kind': request['kind']})
     started = time.monotonic()
@@ -195,21 +233,10 @@ def analyze(data, *, store=None, runner=None, cancelled=None, progress=None):
         raise ValueError('chart_image_mismatch')
     result = (runner or run_child)(request['kind'], png, request['language'], cancelled, chart_options=options) if options is not None else (runner or run_child)(request['kind'], png, request['language'], cancelled)
     if cancelled.is_set(): raise ValueError('analysis_cancelled')
-    if not isinstance(result, dict) or result.get('schema') != SCHEMAS[request['kind']] or result.get('status') not in ('ready', 'partial', 'unavailable'):
-        raise ValueError('analysis_output_invalid')
-    if result.get('image', {}).get('sha256') != image['sha256'] or result['image'].get('width') != image['width'] or result['image'].get('height') != image['height']:
-        raise ValueError('analysis_image_mismatch')
+    _validate_result(result, request, image)
     if request['kind'] == 'chart':
-        from paper_native_worker import run
-        spec = options if isinstance(options, dict) else {}
-        result = run('chart_vectors', [store.source_bytes(request['paperId'], request['fileHash']),
-            {'page_index':request['pageIndex'], 'crop':image['bbox'], 'dpi':dpi, 'width':image['width'],
-             'height':image['height'], 'raster':result, 'calibration':spec.get('calibration'),
-             'series':spec.get('series'), 'plot_bbox':spec.get('plotBbox')}], cancelled=cancelled)
-    if result['status'] == 'unavailable':
-        if any(code in ('rapidocr-missing','img2table-missing') for code in result.get('issues',[])):
-            raise ValueError('analysis_dependency_missing')
-        raise ValueError('analysis_engine_unavailable')
+        result = _chart_vector_result(store, request, image, dpi, result, options, cancelled)
+    _require_available(result)
     entry = {'paperId': request['paperId'], 'fileHash': request['fileHash'], 'kind': request['kind'],
              'pageIndex': request['pageIndex'], 'bbox': image['bbox'], 'language': request['language'],
              'inputImage': {k: image[k] for k in ('sha256', 'width', 'height')} | {'dpi': dpi},
