@@ -49,6 +49,8 @@ URI_MAX = 184
 REPO_ROOT = Path(__file__).resolve().parents[2]
 KEY_NAME = 'reconnect.key'
 REVOKE_NAME = 'revocations.json'
+# Bound native identity and ACL commands, including under transient system load.
+_WINDOWS_COMMAND_TIMEOUT_SECONDS = 10
 
 
 class PairingError(Exception):
@@ -209,8 +211,12 @@ def _sddl_aces(sddl):
 
 def _run_icacls(args):
     import subprocess
-    completed = subprocess.run(['icacls', *args], check=False, capture_output=True,
-                               **({'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {}))
+    try:
+        completed = subprocess.run(['icacls', *args], check=False, capture_output=True,
+                                   timeout=_WINDOWS_COMMAND_TIMEOUT_SECONDS,
+                                   **({'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {}))
+    except subprocess.TimeoutExpired:
+        raise PairingError('pairing_store_permissions') from None
     if completed.returncode != 0:
         raise PairingError('pairing_store_permissions')
 
@@ -218,8 +224,12 @@ def _run_icacls(args):
 def _windows_user_sid():
     import csv
     import subprocess
-    completed = subprocess.run(['whoami', '/user', '/fo', 'csv', '/nh'], check=False, capture_output=True,
-                               **({'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {}))
+    try:
+        completed = subprocess.run(['whoami', '/user', '/fo', 'csv', '/nh'], check=False, capture_output=True,
+                                   timeout=_WINDOWS_COMMAND_TIMEOUT_SECONDS,
+                                   **({'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {}))
+    except subprocess.TimeoutExpired:
+        raise PairingError('pairing_store_permissions') from None
     if completed.returncode != 0 or not completed.stdout.strip():
         raise PairingError('pairing_store_permissions')
     try:

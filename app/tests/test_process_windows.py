@@ -2,6 +2,7 @@
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -50,6 +51,37 @@ with patch('subprocess.run', side_effect=fake_command):
                                 capture_output=True, env=env)
         self.assertEqual(result.returncode, 0, result.stderr.decode('utf-8', 'replace'))
         self.assertEqual(result.stderr, b'')
+
+    def test_pairing_native_timeout_reaps_child_and_next_check_works(self):
+        real_run = subprocess.run
+        real_popen = subprocess.Popen
+        children = []
+
+        def sleeping_command(args, **kwargs):
+            return real_run([sys.executable, '-c', 'import time; time.sleep(30)'], **kwargs)
+
+        def track_child(*args, **kwargs):
+            child = real_popen(*args, **kwargs)
+            children.append(child)
+            return child
+
+        for check in (lambda: pairing._run_icacls(['file']), pairing._windows_user_sid):
+            with self.subTest(check=check):
+                with patch.object(pairing, '_WINDOWS_COMMAND_TIMEOUT_SECONDS', 0.5), \
+                     patch('subprocess.run', side_effect=sleeping_command), \
+                     patch('subprocess.Popen', side_effect=track_child):
+                    with self.assertRaises(pairing.PairingError) as error:
+                        check()
+                self.assertEqual(error.exception.code, 'pairing_store_permissions')
+                self.assertIsNotNone(children[-1].returncode)
+                self.assertIsNotNone(children[-1].poll())
+                if os.name == 'nt':
+                    # An independent real permission operation still succeeds after the timeout.
+                    with tempfile.TemporaryDirectory() as tmp:
+                        path = Path(tmp) / 'private'
+                        path.write_bytes(b'synthetic')
+                        pairing._restrict_new(path, False)
+                        pairing._assert_private(path, False)
 
     def test_pairing_rejects_non_ascii_sid(self):
         response = SimpleNamespace(returncode=0, stdout=b'"account","S-1-5-21-\xc6"\r\n')
