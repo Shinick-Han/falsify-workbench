@@ -347,9 +347,9 @@
       if(!state.session) throw local('세션이 끝나 보관하지 않았습니다. 로컬 기록은 그대로입니다.');
       return true;
     }
-    function checkArchiveSize(encoded,body,caps){
+    function checkArchiveSize(archiveChars,body,caps){
       const bytes=new TextEncoder().encode(JSON.stringify(body)).length, cap=caps.maxArchiveBytes||MAX_BYTES;
-      if(encoded.length>MAX_CHARS) throw local('보관 글자 수가 로컬 기록 한도(450만 자)를 넘습니다. 잘라서 보내지 않았습니다. 로컬 기록은 그대로입니다.');
+      if(archiveChars>MAX_CHARS) throw local('보관 글자 수가 로컬 기록 한도(450만 자)를 넘습니다. 잘라서 보내지 않았습니다. 로컬 기록은 그대로입니다.');
       if(bytes>cap||bytes>MAX_BYTES) throw local('보관이 UTF-8 크기 한도를 넘습니다. 잘라서 보내지 않았고 자동으로 다시 보내지 않습니다. 로컬 기록은 그대로입니다.');
     }
     function checkStored(data,hash){
@@ -410,7 +410,8 @@
         const hash=await c.archiveHash(archive);
         requireArchiveHash(hash);
         const body={archive,teamShare:true};
-        checkArchiveSize(JSON.stringify(archive),body,caps);
+        const archiveChars=JSON.stringify(archive).length;
+        checkArchiveSize(archiveChars,body,caps);
         if(stamp!==state.stamp) return;
         const data=await api('POST','/v1/confluence/archives',{auth:true,body,stamp,phase:'write'});
         if(stamp!==state.stamp) return;
@@ -445,7 +446,7 @@
         const encoded=JSON.stringify(archive);
         if(encoded.includes('%PDF-')||/"(?:pdf|pdfBytes|sourcePdf|sourcePDF|binary|bytes|contentBase64|gold|harness|attestation)"\s*:/.test(encoded)) throw local('원본 PDF·gold·Harness는 수동 편집 보관에 넣지 않습니다. 올리지 않았습니다.');
         const body={archive,teamShare:true};
-        checkArchiveSize(encoded,body,caps);
+        checkArchiveSize(encoded.length,body,caps);
         if(stamp!==state.stamp) return {cancelled:true};
         const data=await api('POST','/v1/confluence/archives',{auth:true,body,stamp,phase:'write'});
         if(stamp!==state.stamp) return {cancelled:true};
@@ -472,7 +473,7 @@
         const encoded=JSON.stringify(archive);
         if(encoded.includes('%PDF-')||/"(?:pdf|pdfBytes|sourcePdf|sourcePDF|binary|bytes|contentBase64|gold|harness|attestation|response|segments|request)"\s*:/.test(encoded)) throw local('원본 PDF·gold·Harness는 실행 시도 보관에 넣지 않습니다. 올리지 않았습니다.');
         const body={archive,teamShare:true};
-        checkArchiveSize(encoded,body,caps);
+        checkArchiveSize(encoded.length,body,caps);
         if(stamp!==state.stamp) return {cancelled:true};
         const data=await api('POST','/v1/confluence/archives',{auth:true,body,stamp,phase:'write'});
         if(stamp!==state.stamp) return {cancelled:true};
@@ -499,7 +500,7 @@
         const encoded=JSON.stringify(archive);
         if(encoded.includes('%PDF-')) throw local('원본 PDF·gold·Harness는 외부 응답 보관에 넣지 않습니다. 올리지 않았습니다.');
         const body={archive,teamShare:true};
-        checkArchiveSize(encoded,body,caps);
+        checkArchiveSize(encoded.length,body,caps);
         if(stamp!==state.stamp) return {cancelled:true};
         const data=await api('POST','/v1/confluence/archives',{auth:true,body,stamp,phase:'write'});
         if(stamp!==state.stamp) return {cancelled:true};
