@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -165,4 +165,30 @@ test('MuPDF browser CI installs dependencies before the test and rejects a skip'
   assert.throws(() => assertChromeLoaderExecuted('ok 1 - something else\n'), /did not run/);
   assert.equal(assertChromeLoaderExecuted(`ok 4 - ${CHROME_TEST}\n`), 1);
   assert.throws(() => assertChromeLoaderExecuted(`not ok 4 - ${CHROME_TEST}\n`), /failed/);
+});
+
+
+test('Pages deploys the verified dist and requires the produced ZIP acceptance', () => {
+  const deploy = workflow.slice(workflow.indexOf('\n  deploy:'));
+  assert.match(workflow, /actions\/upload-artifact@v4[\s\S]*name: verified-app-dist[\s\S]*path: app\/dist/);
+  assert.match(deploy, /actions\/download-artifact@v4[\s\S]*name: verified-app-dist[\s\S]*path: app\/dist/);
+  assert.doesNotMatch(deploy, /actions\/checkout/);
+  assert.match(workflow, /git worktree add --detach [^\n]+\$GITHUB_SHA/);
+  assert.match(workflow, /FALSIFY_RELEASE_ZIP=[^\n]+test_packaged_harness\.py/);
+  assert.match(readFileSync(join(root, 'scripts/test-macos-native.sh'), 'utf8'), /FALSIFY_RELEASE_ZIP=[^\n]+test_packaged_harness\.py/);
+});
+
+test('test discovery rejects an unregistered spec', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'falsify-discovery-'));
+  try {
+    mkdirSync(join(dir, 'scripts')); mkdirSync(join(dir, 'tests'));
+    const runner = readFileSync(join(root, 'app/scripts/test.mjs'));
+    writeFileSync(join(dir, 'scripts/test.mjs'), runner);
+    for (const name of readdirSync(join(root, 'app/tests'))) {
+      if (/\.(?:spec|test)\.(?:mjs|cjs)$/.test(name)) writeFileSync(join(dir, 'tests', name), '');
+    }
+    execFileSync(process.execPath, [join(dir, 'scripts/test.mjs'), '--check-registration']);
+    writeFileSync(join(dir, 'tests/unregistered.spec.mjs'), '');
+    assert.throws(() => execFileSync(process.execPath, [join(dir, 'scripts/test.mjs'), '--check-registration'], {stdio: 'pipe'}), /Test registration mismatch/);
+  } finally { rmSync(dir, {recursive: true, force: true}); }
 });

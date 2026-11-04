@@ -8,4 +8,4 @@ The eight Noto Serif and Noto Sans static faces derive from Google Fonts commit 
 
 Four Liberation Sans faces come byte-for-byte from the existing PDF.js `dist/vendor/standard_fonts` distribution; their license is included as `LICENSE_LIBERATION`. Their individual hashes are in the runtime manifest. The font set is finite and does not guarantee coverage for every paper or language.
 
-Run the focused tests with `node app/tests/recomposition-vendor.spec.mjs --node-modules <isolated-node_modules> --static-fonts <static-font-proof-directory> --font-sources <font-source-directory>`. They require Python with PyMuPDF to inspect the actual generated PDF font resources. They exercise a real compiler and compiled WebAssembly.Module, not a real-paper roundtrip or browser activation.
+Run `node --test scripts/packaging.spec.mjs` to verify the packaged recomposition WASM, fonts and notices against their pinned profile. This does not rebuild the runtime or prove a real-paper roundtrip or browser activation.
