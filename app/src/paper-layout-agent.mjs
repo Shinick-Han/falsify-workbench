@@ -30,52 +30,59 @@ const patterns = [
 function sourceSignature(text, editStart=-1, editEnd=-1) {
   let out='', depth=0, math=false, comment=false, line='', safe=true;const groups=[];
   const literal=value=>value.replaceAll('<','<<');
-  for(let i=0;i<text.length;) {
-    function checkEditBoundary() {
-      if ((i===editStart || i===editEnd) && (comment || groups.includes('argument') || math || /\\(?:def|gdef|edef|xdef|newcommand|renewcommand|providecommand|DeclareRobustCommand|catcode)\b/.test(line))) safe=false;
+  let i=0,c;
+  function checkEditBoundary() {
+    if ((i===editStart || i===editEnd) && (comment || groups.includes('argument') || math || /\\(?:def|gdef|edef|xdef|newcommand|renewcommand|providecommand|DeclareRobustCommand|catcode)\b/.test(line))) safe=false;
+  }
+  function consumeVerbatim() {
+    if (!comment && !math && c==='\\') {
+    const verb=/^\\verb\*?([^A-Za-z\s])/.exec(text.slice(i));
+    const env=/^\\begin\s*\{(verbatim\*?|lstlisting|minted)\}/.exec(text.slice(i));
+    if (verb || env) {
+      const end=verb ? text.indexOf(verb[1],i+verb[0].length) : text.indexOf('\\end{'+env[1]+'}',i+env[0].length);
+      const stop=end<0 ? text.length : end+(verb?1:('\\end{'+env[1]+'}').length);
+      if(editStart<stop && editEnd>i) safe=false;
+      const segment=text.slice(i,stop); out+=literal(segment); line=segment.includes('\n')?segment.slice(segment.lastIndexOf('\n')+1):line+segment; i=stop; return true;
     }
+    }
+    return false;
+  }
+  function consumeComment() {
+    if (comment) {out+=literal(c); i++; if(c==='\n'){comment=false;line='';} else line+=c; return true;}
+    if (c==='%' ) {comment=true;out+=literal(c);line+=c;i++;return true;}
+    return false;
+  }
+  function consumeLayoutCommand() {
+    if (c==='\\' && !math && !groups.includes('argument') && !/\\(?:def|gdef|edef|xdef|newcommand|renewcommand|providecommand|DeclareRobustCommand|catcode)\b/.test(line)) {
+    let found=false;
+    for(const [re,normal] of patterns) {const m=re.exec(text.slice(i)); if(m){ if(editStart>=0 && ((i<editStart && i+m[0].length>editStart)||(i<editEnd && i+m[0].length>editEnd))) safe=false; out+=normal(m);line+=m[0];i+=m[0].length;found=true;break; }}
+    if(found) return true;
+    }
+    return false;
+  }
+  function consumeEscapedSymbol() {
+    if(c==='\\' && i+1<text.length && !/[A-Za-z@]/.test(text[i+1])) {const pair=text.slice(i,i+2); if(pair==='\\('||pair==='\\[')math=true;else if(pair==='\\)'||pair==='\\]')math=false;out+=literal(pair);line+=pair;i+=2;return true;}
+    return false;
+  }
+  function updateNesting() {
+    if(c==='$') math=!math;
+    if(!math && c==='{'){depth++;groups.push(/\\[A-Za-z@]+\*?(?:\[[^\]]*\])?\s*$/.test(line)||line.trimEnd().endsWith('}')?'argument':'layout');}
+    if(!math && c==='}'){depth--;groups.pop();}
+    if(depth<0) safe=false;
+  }
+  for(;i<text.length;) {
+
     checkEditBoundary();
-    const c=text[i];
-    function consumeVerbatim() {
-      if (!comment && !math && c==='\\') {
-      const verb=/^\\verb\*?([^A-Za-z\s])/.exec(text.slice(i));
-      const env=/^\\begin\s*\{(verbatim\*?|lstlisting|minted)\}/.exec(text.slice(i));
-      if (verb || env) {
-        const end=verb ? text.indexOf(verb[1],i+verb[0].length) : text.indexOf('\\end{'+env[1]+'}',i+env[0].length);
-        const stop=end<0 ? text.length : end+(verb?1:('\\end{'+env[1]+'}').length);
-        if(editStart<stop && editEnd>i) safe=false;
-        const segment=text.slice(i,stop); out+=literal(segment); line=segment.includes('\n')?segment.slice(segment.lastIndexOf('\n')+1):line+segment; i=stop; return true;
-      }
-      }
-      return false;
-    }
+    c=text[i];
+
     if (consumeVerbatim()) continue;
-    function consumeComment() {
-      if (comment) {out+=literal(c); i++; if(c==='\n'){comment=false;line='';} else line+=c; return true;}
-      if (c==='%' ) {comment=true;out+=literal(c);line+=c;i++;return true;}
-      return false;
-    }
+
     if (consumeComment()) continue;
-    function consumeLayoutCommand() {
-      if (c==='\\' && !math && !groups.includes('argument') && !/\\(?:def|gdef|edef|xdef|newcommand|renewcommand|providecommand|DeclareRobustCommand|catcode)\b/.test(line)) {
-      let found=false;
-      for(const [re,normal] of patterns) {const m=re.exec(text.slice(i)); if(m){ if(editStart>=0 && ((i<editStart && i+m[0].length>editStart)||(i<editEnd && i+m[0].length>editEnd))) safe=false; out+=normal(m);line+=m[0];i+=m[0].length;found=true;break; }}
-      if(found) return true;
-      }
-      return false;
-    }
+
     if (consumeLayoutCommand()) continue;
-    function consumeEscapedSymbol() {
-      if(c==='\\' && i+1<text.length && !/[A-Za-z@]/.test(text[i+1])) {const pair=text.slice(i,i+2); if(pair==='\\('||pair==='\\[')math=true;else if(pair==='\\)'||pair==='\\]')math=false;out+=literal(pair);line+=pair;i+=2;return true;}
-      return false;
-    }
+
     if (consumeEscapedSymbol()) continue;
-    function updateNesting() {
-      if(c==='$') math=!math;
-      if(!math && c==='{'){depth++;groups.push(/\\[A-Za-z@]+\*?(?:\[[^\]]*\])?\s*$/.test(line)||line.trimEnd().endsWith('}')?'argument':'layout');}
-      if(!math && c==='}'){depth--;groups.pop();}
-      if(depth<0) safe=false;
-    }
+
     updateNesting();
     out+=literal(c);i++;line=c==='\n'?'':line+c;
   }
