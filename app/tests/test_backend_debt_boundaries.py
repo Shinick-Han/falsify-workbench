@@ -41,6 +41,15 @@ class BackendBoundaryTests(unittest.TestCase):
         server.ACTIVE.release()
         with self.assertRaises(ValueError): server.ACTIVE.release()
 
+    def test_job_construction_failure_releases_admission(self):
+        handler = SimpleNamespace(server_closing=lambda: False, reply=lambda *args: None)
+        with patch.object(server.threading, 'Event', side_effect=RuntimeError('event')):
+            with self.assertRaisesRegex(RuntimeError, 'event'):
+                server.Handler._start_registered_job(handler, {}, 'red', {}, 'fingerprint', 'construction-failure', None)
+        self.assertNotIn('construction-failure', server.JOBS)
+        self.assertTrue(server.ACTIVE.acquire(blocking=False))
+        server.ACTIVE.release()
+
     def test_provider_errors_are_typed_in_both_independent_routes(self):
         for role, request, service in [('red',red_request(),red_service),('blue',BlueTests().request(),blue_service)]:
             for source, expected in [('chatgpt_login_required','auth_required'),('subscription_login_required','auth_required'),

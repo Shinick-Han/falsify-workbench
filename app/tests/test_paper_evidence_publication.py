@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 from test_paper_evidence import sample_pdf
 from paper_evidence import EvidenceStore
+import paper_native_worker
 
 
 class EvidencePublicationTests(unittest.TestCase):
@@ -12,14 +13,17 @@ class EvidencePublicationTests(unittest.TestCase):
         digest = hashlib.sha256(raw).hexdigest()
         store = EvidenceStore()
         entered, release = threading.Event(), threading.Event()
-        extract = store._extract
+        both_entered = threading.Barrier(3)
+        run = paper_native_worker.run
         results, errors = [], []
 
-        def slow(*args):
+        def slow(operation, *args, **kwargs):
+            self.assertEqual(operation, 'evidence_extract')
             entered.set()
-            if not release.wait(5):
+            both_entered.wait(timeout=20)
+            if not release.wait(20):
                 raise RuntimeError('test timeout')
-            return extract(*args)
+            return run(operation, *args, **kwargs)
 
         def prepare():
             try:
@@ -27,16 +31,17 @@ class EvidencePublicationTests(unittest.TestCase):
             except Exception as exc:
                 errors.append(exc)
 
-        with patch.object(store, '_extract', side_effect=slow):
+        with patch.object(paper_native_worker, 'run', side_effect=slow):
             threads = [threading.Thread(target=prepare) for _ in range(2)]
             for thread in threads: thread.start()
             try:
-                self.assertTrue(entered.wait(5))
+                self.assertTrue(entered.wait(20))
+                both_entered.wait(timeout=20)
                 self.assertTrue(store._lock.acquire(timeout=1))
                 store._lock.release()
             finally:
                 release.set()
-                for thread in threads: thread.join(10)
+                for thread in threads: thread.join(60)
         self.assertFalse(errors)
         self.assertEqual(len(results), 2)
         self.assertEqual(results[0]['paperId'], results[1]['paperId'])

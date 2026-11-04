@@ -353,6 +353,26 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(404, {'error': 'not_found'}); return
         mime = 'application/javascript' if target.suffix in ['.js', '.mjs'] else mimetypes.guess_type(target)[0] or 'application/octet-stream'
         self.reply(200, target.read_bytes(), mime)
+    def _start_registered_job(self, data, role, binding, fingerprint, request_id, body_digest):
+        with LOCK:
+            drop_expired_jobs()
+            existing = JOBS.get(request_id)
+            if existing:
+                if existing['role'] != role or existing['fingerprint'] != fingerprint: raise ValueError('같은 요청 ID의 내용이 달라졌습니다.')
+                self.reply(200, {'id': request_id, 'state': existing['state']}); return
+            if len(JOBS) >= 16: raise ValueError('메모리 작업 제한. 완료 후 서버를 재시작하세요.')
+            if self.server_closing() or not ACTIVE.acquire(blocking=False): self.reply(409, {'error': '이미 실행 중입니다. 재시도는 자동 호출되지 않습니다.'}); return
+            try:
+                job = {'id': request_id, 'role': role, 'state': 'running', 'progress': {'completedCalls': 0}, 'cancel': threading.Event(),
+                    'fingerprint': fingerprint, 'requestBytesDigest': body_digest, 'created': time.monotonic(), **binding}
+                JOBS[request_id] = job
+                threading.Thread(target=work, args=(job, data), daemon=True).start()
+            except Exception:
+                JOBS.pop(request_id, None)
+                ACTIVE.release()
+                raise
+        self.reply(202, {'id': request_id, 'state': 'running'})
+
     def do_POST(self):
         path = unquote(urlsplit(self.path).path)
         if path == '/api/launcher/restart': self.launcher_restart(); return
@@ -488,24 +508,7 @@ class Handler(BaseHTTPRequestHandler):
             # Idempotency stays the parsed, key-sorted fingerprint. requestBytesDigest is the pre-parse wire hash.
             fingerprint = json.dumps(data, sort_keys=True, ensure_ascii=False)
             request_id = data['requestId']
-            with LOCK:
-                drop_expired_jobs()
-                existing = JOBS.get(request_id)
-                if existing:
-                    if existing['role'] != role or existing['fingerprint'] != fingerprint: raise ValueError('같은 요청 ID의 내용이 달라졌습니다.')
-                    self.reply(200, {'id': request_id, 'state': existing['state']}); return
-                if len(JOBS) >= 16: raise ValueError('메모리 작업 제한. 완료 후 서버를 재시작하세요.')
-                if self.server_closing() or not ACTIVE.acquire(blocking=False): self.reply(409, {'error': '이미 실행 중입니다. 재시도는 자동 호출되지 않습니다.'}); return
-                job = {'id': request_id, 'role': role, 'state': 'running', 'progress': {'completedCalls': 0}, 'cancel': threading.Event(),
-                    'fingerprint': fingerprint, 'requestBytesDigest': body_digest, 'created': time.monotonic(), **binding}
-                JOBS[request_id] = job
-                try:
-                    threading.Thread(target=work, args=(job, data), daemon=True).start()
-                except Exception:
-                    JOBS.pop(request_id, None)
-                    ACTIVE.release()
-                    raise
-            self.reply(202, {'id': request_id, 'state': 'running'})
+            Handler._start_registered_job(self, data, role, binding, fingerprint, request_id, body_digest)
         except ValueError as error: self.reply(400, {'error': str(error)})
         except Exception: self.reply(500, {'error': '로컬 처리 오류. 파일/설치 상태를 확인하세요.'})
 

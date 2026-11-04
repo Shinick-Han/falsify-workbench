@@ -124,6 +124,121 @@ def _source_authority(store, paper_id, digest, raw):
         yield
     return authority()
 
+def _plan_visual_operations(ops, store, paper_id, doc, shape_boxes, pdf):
+    plans=[];ids=set()
+    for op in ops:
+        if not isinstance(op,dict) or not isinstance(op.get('id'),str) or not 1<=len(op['id'])<=80 or op['id'] in ids:fail('operation_invalid')
+        ids.add(op['id'])
+        if op.get('kind')=='chart-shape':continue
+        if op.get('kind')=='table-cell':
+            if set(op)-{'id','kind','itemId','row','column','before','after'}:fail('operation_invalid')
+            plan=_table_plan(op,store,paper_id,doc)
+        elif op.get('kind')=='region':
+            if set(op)-{'id','kind','assetKind','pageIndex','bbox','beforeImageSha256','png','dataChanges'} or op.get('assetKind') not in ('graph','figure'):fail('operation_invalid')
+            page_index=op.get('pageIndex')
+            if type(page_index) is not int or not 0<=page_index<len(doc):fail('page_invalid')
+            page=doc[page_index];public,rect=_view_box(page,op.get('bbox'))
+            before=store.render_region(paper_id,page_index,bbox=list(public),dpi=150)
+            if op.get('beforeImageSha256')!=before['sha256']:fail('image_mismatch')
+            png=_decode_png(op.get('png'))
+            try:encoded=json.dumps(op.get('dataChanges'),allow_nan=False,ensure_ascii=False)
+            except (ValueError,TypeError):fail('data_changes_invalid')
+            if len(encoded)>512000:fail('data_changes_limit')
+            plan={'op':op,'pageIndex':page_index,'public':public,'rect':rect,'png':png,'before':{'imageSha256':before['sha256']}}
+        else:fail('operation_invalid')
+        if any(p['pageIndex']==plan['pageIndex'] and (p['public']&plan['public']).get_area()>.01 for p in plans):fail('operations_overlap')
+        if any(page==plan['pageIndex'] and (pdf.Rect(rect)&plan['public']).get_area()>.01 for page,rect in shape_boxes):fail('operations_overlap')
+        plans.append(plan)
+    return plans
+
+
+def _apply_visual_cell(doc, page, plan, number, record, issues, pdf):
+    op=plan['op'];rect=plan['rect']
+    span=plan['span'];font,substituted,font_metrics=_font(doc,page,span,plan['after'],number)
+    # Redact only glyphs; leave table rules and images untouched.
+    page.add_redact_annot(rect,fill=False,cross_out=False)
+    page.apply_redactions(images=0,graphics=0,text=0)
+    inset=min(2,rect.width*.03,rect.height*.06)
+    target=pdf.Rect(rect.x0+inset,rect.y0+inset,rect.x1-inset,rect.y1-inset)
+    align=0
+    original_box=span.get('bbox')
+    if original_box:
+        old=pdf.Rect(original_box)
+        target.y0=max(target.y0,min(old.y0,target.y1-5))
+        left_gap=max(inset,old.x0-rect.x0);right_gap=max(inset,rect.x1-old.x1)
+        if abs((old.x0+old.x1)-(rect.x0+rect.x1))<4:
+            align=1
+        elif right_gap<left_gap:
+            align=2;target.x1=rect.x1-right_gap
+        else:target.x0=rect.x0+left_gap
+    size=max(5,min(float(span.get('size',10)),target.height*.7));original_size=size
+    color=span.get('color',0);color=((color>>16&255)/255,(color>>8&255)/255,(color&255)/255)
+    fitted=not plan['after']
+    if plan['after']:
+        length=font_metrics.text_length(plan['after'],fontsize=size)
+        if '\n' not in plan['after'] and '\r' not in plan['after'] and length<=target.width and span.get('origin'):
+            x=target.x1-length if align==2 else (target.x0+target.x1-length)/2 if align==1 else target.x0
+            page.insert_text((x,span['origin'][1]),plan['after'],fontname=font,fontsize=size,color=color,overlay=True)
+            fitted=True
+        else:
+            while size>=5:
+                rc=page.insert_textbox(target,plan['after'],fontname=font,fontsize=size,color=color,rotate=0,align=align,overlay=True)
+                if rc>=0:fitted=True;break
+                size=round(size-.25,3)
+    if not fitted:fail('cell_text_no_room')
+    if substituted:issues.append({'id':op['id'],'code':'font-substituted'})
+    if size<original_size-.1:issues.append({'id':op['id'],'code':'cell-font-reduced','fontSize':size})
+    record.update(after=plan['after'],itemId=op['itemId'],row=op['row'],column=op['column'])
+    # In rotated views extraction still uses unrotated PDF coordinates.
+    if normalize(plan['after']) not in normalize(page.get_text('text',clip=rect)):
+        issues.append({'id':op['id'],'code':'after-text-unconfirmed'})
+
+
+def _apply_visual_plans(doc, plans, changes, issues, pdf):
+    for number,plan in enumerate(plans):
+        op=plan['op'];page=doc[plan['pageIndex']];rect=plan['rect'];public=plan['public']
+        record={'id':op['id'],'kind':op['kind'],'pageIndex':plan['pageIndex'],'bbox':list(public),'before':plan['before'],'author':'human'}
+        if op['kind']=='table-cell':
+            if plan['before']==plan['after']: continue
+            _apply_visual_cell(doc, page, plan, number, record, issues, pdf)
+        else:
+            # Preserve spanning image resources; paint only the exact selected view region.
+            # Pixel blanking can erase neighboring low-resolution source pixels.
+            page.add_redact_annot(rect,fill=False,cross_out=False)
+            page.apply_redactions(images=0,graphics=0,text=0)
+            page.draw_rect(rect,color=None,fill=(1,1,1),overlay=True)
+            page.insert_image(rect,stream=plan['png'],keep_proportion=False,rotate=page.rotation,overlay=True)
+            image=page.get_pixmap(clip=public,dpi=150,alpha=False).tobytes('png')
+            plan['renderedSha256']=sha(image)
+            record.update(assetKind=op['assetKind'],after={'imageSha256':sha(image),'replacementSha256':sha(plan['png'])})
+            if op.get('dataChanges') is not None:record['dataChanges']=op['dataChanges']
+        changes.append(record)
+
+
+def _verify_visual_saved(original, output, regions, plans, issues, pdf):
+    checks=[]
+    try:
+        from paper_native_worker import run
+        issues.extend(run('verify', [original,output,regions]))
+        checks=['page-count']
+        if not any(issue.get('code')=='page-count-changed' for issue in issues):
+            checks.extend(['outside-region-text','outside-region-pixels'])
+        with pdf.open(stream=output,filetype='pdf') as saved:
+            for plan in plans:
+                if plan['op']['kind']=='table-cell' and plan['before']!=plan['after'] and plan['after']:
+                    if plan['pageIndex']>=len(saved) or normalize(plan['after']) not in normalize(saved[plan['pageIndex']].get_text('text',clip=plan['rect'])):
+                        issues.append({'id':plan['op']['id'],'code':'saved-after-text-unconfirmed'})
+                if plan['op']['kind']=='region':
+                    image=saved[plan['pageIndex']].get_pixmap(clip=plan['public'],dpi=150,alpha=False).tobytes('png')
+                    if sha(image)!=plan['renderedSha256']:
+                        issues.append({'id':plan['op']['id'],'code':'saved-image-unconfirmed'})
+        if any(p['op']['kind']=='table-cell' and p['before']!=p['after'] for p in plans): checks.append('saved-cell-text')
+        if any(p['op']['kind']=='region' for p in plans): checks.append('saved-image-render')
+    except Exception:
+        issues.append({'code':'source-preservation-check-failed'})
+    return checks
+
+
 def _export_visual_native(request,*,store=None):
     import pymupdf as pdf
     from paper_evidence import default_store
@@ -174,109 +289,13 @@ def _export_visual_native(request,*,store=None):
     doc=pdf.open(stream=raw,filetype='pdf');plans=[];ids=set();issues=list(shape_issues);changes=list(shape_changes)
     try:
         source_pages=len(doc)
-        for op in ops:
-            if not isinstance(op,dict) or not isinstance(op.get('id'),str) or not 1<=len(op['id'])<=80 or op['id'] in ids:fail('operation_invalid')
-            ids.add(op['id'])
-            if op.get('kind')=='chart-shape':continue
-            if op.get('kind')=='table-cell':
-                if set(op)-{'id','kind','itemId','row','column','before','after'}:fail('operation_invalid')
-                plan=_table_plan(op,store,paper_id,doc)
-            elif op.get('kind')=='region':
-                if set(op)-{'id','kind','assetKind','pageIndex','bbox','beforeImageSha256','png','dataChanges'} or op.get('assetKind') not in ('graph','figure'):fail('operation_invalid')
-                page_index=op.get('pageIndex')
-                if type(page_index) is not int or not 0<=page_index<len(doc):fail('page_invalid')
-                page=doc[page_index];public,rect=_view_box(page,op.get('bbox'))
-                before=store.render_region(paper_id,page_index,bbox=list(public),dpi=150)
-                if op.get('beforeImageSha256')!=before['sha256']:fail('image_mismatch')
-                png=_decode_png(op.get('png'))
-                try:encoded=json.dumps(op.get('dataChanges'),allow_nan=False,ensure_ascii=False)
-                except (ValueError,TypeError):fail('data_changes_invalid')
-                if len(encoded)>512000:fail('data_changes_limit')
-                plan={'op':op,'pageIndex':page_index,'public':public,'rect':rect,'png':png,'before':{'imageSha256':before['sha256']}}
-            else:fail('operation_invalid')
-            if any(p['pageIndex']==plan['pageIndex'] and (p['public']&plan['public']).get_area()>.01 for p in plans):fail('operations_overlap')
-            if any(page==plan['pageIndex'] and (pdf.Rect(rect)&plan['public']).get_area()>.01 for page,rect in shape_boxes):fail('operations_overlap')
-            plans.append(plan)
+        plans=_plan_visual_operations(ops, store, paper_id, doc, shape_boxes, pdf)
         # Plan every operation against the immutable source before applying any.
-        for number,plan in enumerate(plans):
-            op=plan['op'];page=doc[plan['pageIndex']];rect=plan['rect'];public=plan['public']
-            record={'id':op['id'],'kind':op['kind'],'pageIndex':plan['pageIndex'],'bbox':list(public),'before':plan['before'],'author':'human'}
-            if op['kind']=='table-cell':
-                if plan['before']==plan['after']:
-                    continue
-                span=plan['span'];font,substituted,font_metrics=_font(doc,page,span,plan['after'],number)
-                # Redact only glyphs; leave table rules and images untouched.
-                page.add_redact_annot(rect,fill=False,cross_out=False)
-                page.apply_redactions(images=0,graphics=0,text=0)
-                inset=min(2,rect.width*.03,rect.height*.06)
-                target=pdf.Rect(rect.x0+inset,rect.y0+inset,rect.x1-inset,rect.y1-inset)
-                align=0
-                original_box=span.get('bbox')
-                if original_box:
-                    old=pdf.Rect(original_box)
-                    target.y0=max(target.y0,min(old.y0,target.y1-5))
-                    left_gap=max(inset,old.x0-rect.x0);right_gap=max(inset,rect.x1-old.x1)
-                    if abs((old.x0+old.x1)-(rect.x0+rect.x1))<4:
-                        align=1
-                    elif right_gap<left_gap:
-                        align=2;target.x1=rect.x1-right_gap
-                    else:target.x0=rect.x0+left_gap
-                size=max(5,min(float(span.get('size',10)),target.height*.7));original_size=size
-                color=span.get('color',0);color=((color>>16&255)/255,(color>>8&255)/255,(color&255)/255)
-                fitted=not plan['after']
-                if plan['after']:
-                    length=font_metrics.text_length(plan['after'],fontsize=size)
-                    if '\n' not in plan['after'] and '\r' not in plan['after'] and length<=target.width and span.get('origin'):
-                        x=target.x1-length if align==2 else (target.x0+target.x1-length)/2 if align==1 else target.x0
-                        page.insert_text((x,span['origin'][1]),plan['after'],fontname=font,fontsize=size,color=color,overlay=True)
-                        fitted=True
-                    else:
-                        while size>=5:
-                            rc=page.insert_textbox(target,plan['after'],fontname=font,fontsize=size,color=color,rotate=0,align=align,overlay=True)
-                            if rc>=0:fitted=True;break
-                            size=round(size-.25,3)
-                if not fitted:fail('cell_text_no_room')
-                if substituted:issues.append({'id':op['id'],'code':'font-substituted'})
-                if size<original_size-.1:issues.append({'id':op['id'],'code':'cell-font-reduced','fontSize':size})
-                record.update(after=plan['after'],itemId=op['itemId'],row=op['row'],column=op['column'])
-                # In rotated views extraction still uses unrotated PDF coordinates.
-                if normalize(plan['after']) not in normalize(page.get_text('text',clip=rect)):
-                    issues.append({'id':op['id'],'code':'after-text-unconfirmed'})
-            else:
-                # Preserve spanning image resources; paint only the exact selected view region.
-                # Pixel blanking can erase neighboring low-resolution source pixels.
-                page.add_redact_annot(rect,fill=False,cross_out=False)
-                page.apply_redactions(images=0,graphics=0,text=0)
-                page.draw_rect(rect,color=None,fill=(1,1,1),overlay=True)
-                page.insert_image(rect,stream=plan['png'],keep_proportion=False,rotate=page.rotation,overlay=True)
-                image=page.get_pixmap(clip=public,dpi=150,alpha=False).tobytes('png')
-                plan['renderedSha256']=sha(image)
-                record.update(assetKind=op['assetKind'],after={'imageSha256':sha(image),'replacementSha256':sha(plan['png'])})
-                if op.get('dataChanges') is not None:record['dataChanges']=op['dataChanges']
-            changes.append(record)
+        _apply_visual_plans(doc, plans, changes, issues, pdf)
         output=doc.tobytes(garbage=4,deflate=True) if changes else original
         from paper_chart_edit_service import _verify_output
         regions=shape_boxes+[(p['pageIndex'],list(p['public'])) for p in plans if p['op']['kind']!='table-cell' or p['before']!=p['after']]
-        checks=[]
-        try:
-            from paper_native_worker import run
-            issues.extend(run('verify', [original,output,regions]))
-            checks=['page-count']
-            if not any(issue.get('code')=='page-count-changed' for issue in issues):
-                checks.extend(['outside-region-text','outside-region-pixels'])
-            with pdf.open(stream=output,filetype='pdf') as saved:
-                for plan in plans:
-                    if plan['op']['kind']=='table-cell' and plan['before']!=plan['after'] and plan['after']:
-                        if plan['pageIndex']>=len(saved) or normalize(plan['after']) not in normalize(saved[plan['pageIndex']].get_text('text',clip=plan['rect'])):
-                            issues.append({'id':plan['op']['id'],'code':'saved-after-text-unconfirmed'})
-                    if plan['op']['kind']=='region':
-                        image=saved[plan['pageIndex']].get_pixmap(clip=plan['public'],dpi=150,alpha=False).tobytes('png')
-                        if sha(image)!=plan['renderedSha256']:
-                            issues.append({'id':plan['op']['id'],'code':'saved-image-unconfirmed'})
-            if any(p['op']['kind']=='table-cell' and p['before']!=p['after'] for p in plans): checks.append('saved-cell-text')
-            if any(p['op']['kind']=='region' for p in plans): checks.append('saved-image-render')
-        except Exception:
-            issues.append({'code':'source-preservation-check-failed'})
+        checks=_verify_visual_saved(original, output, regions, plans, issues, pdf)
         return {'schema':'falsify.visual-edit-export.v1','sourceSha256':digest,'outputSha256':sha(output),
                 'file':base64.b64encode(output).decode('ascii'),'pageCount':source_pages,'changes':changes,
                 'verification':{'status':'warning' if issues else 'passed','issues':issues,'engine':'pymupdf','pageCount':source_pages,

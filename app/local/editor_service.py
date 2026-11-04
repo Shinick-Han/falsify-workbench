@@ -454,6 +454,18 @@ class PdfEditorService:
         try: return pdf_quality.sanitize(self.quality(*args, edit_plan=plan) if self._qa_takes_plan else self.quality(*args))
         except Exception: return pdf_quality.unavailable()
 
+    def _validate_runtime_receipt(self, report, cap, fail):
+        runtime = report.get('runtime') if isinstance(report.get('runtime'), dict) else {}
+        if runtime.get('wasmSha256') != cap['wasmSha256']:
+            self._invalidate()
+            raise fail('확인된 런타임과 다른 WASM')
+        for key in ('jsSha256', 'manifestSha256'):
+            expected = cap.get('runtime', {}).get(key)
+            if expected and runtime.get(key) and runtime[key] != expected:
+                self._invalidate()
+                raise fail('확인된 런타임과 다른 구성')
+        return runtime
+
     def _result(self, data, edits, cap, report, out, source, plan=None, draft=False):
         fail = lambda what: ValueError(f'PDF 편집기 결과 검증 실패: {what}. {NO_FALLBACK}')
         if report is None: raise fail('보고서 없음')
@@ -472,15 +484,7 @@ class PdfEditorService:
             if report.get('ok') is not True or not isinstance(report.get('selfCheck'), dict) or report['selfCheck'].get('status') != 'passed': raise fail('자기 점검 미통과')
             self_check = report['selfCheck']
         if report.get('outputSha256') != output_hash: raise fail('출력 해시 불일치')
-        runtime = report.get('runtime') if isinstance(report.get('runtime'), dict) else {}
-        if runtime.get('wasmSha256') != cap['wasmSha256']:
-            self._invalidate()
-            raise fail('확인된 런타임과 다른 WASM')
-        for key in ('jsSha256', 'manifestSha256'):
-            expected = cap.get('runtime', {}).get(key)
-            if expected and runtime.get(key) and runtime[key] != expected:
-                self._invalidate()
-                raise fail('확인된 런타임과 다른 구성')
+        runtime = self._validate_runtime_receipt(report, cap, fail)
         if not draft:
             applied = report.get('edits') if isinstance(report.get('edits'), list) else []
             if [(e.get('id'), e.get('pageIndex'), e.get('status')) for e in applied if isinstance(e, dict)] != [(e['id'], e['pageIndex'], 'applied') for e in edits]:
