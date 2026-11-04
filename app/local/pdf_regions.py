@@ -349,16 +349,8 @@ def _rigid(run):
     if any(abs(a - b) > DRIFT_TOL for d in deltas for a, b in zip(d, ref)): return False
     return 0 < max(abs(v) for d in deltas for v in d) <= RIGID_TOL
 
-def check_page(src_page, out_page, model, picks, mupdf, raster, max_chars):
-    """Regional QA of one edited output page against its source page. picks: [(selected source char indices, After,
-    source styles)] for every edit on the page, all resolved. Returns ({code: status}, {limitation keys})."""
-    if src_page.rotation or not _box_eq(src_page.cropbox, src_page.mediabox):
-        return dict.fromkeys(CODES, 'warning'), {'regional_partial'}
-    if out_page.rotation or not _box_eq(out_page.mediabox, src_page.mediabox) or not _box_eq(out_page.cropbox, out_page.mediabox):
-        return {'edited_page_render': 'failed'}, {'regional'}
-    out_model = page_model(out_page, mupdf, max_chars)
-    if out_model is None: return dict.fromkeys(CODES, 'warning'), {'budget'}
-    S, O, res, notes = model.chars, out_model.chars, {}, {'regional'}
+def _align_edited_rows(S, O, picks):
+    """Plan expected edited text and align it to output baselines when possible."""
     selected, first, afters = {}, {}, {}
     for k, (picked, after, _) in enumerate(picks):
         selected.update(dict.fromkeys(picked, k))
@@ -383,6 +375,19 @@ def check_page(src_page, out_page, model, picks, mupdf, raster, max_chars):
     aligned = [j for q in mapped for j in out_rows[q][1]] if strict else []
     strict = strict and ''.join(O[j].c for j in aligned) == ''.join(c for c, _, _ in expected)
     if not strict: used = set()
+    return selected, afters, src_rows, out_rows, row_of, edited, expected, used, aligned, strict
+
+def check_page(src_page, out_page, model, picks, mupdf, raster, max_chars):
+    """Regional QA of one edited output page against its source page. picks: [(selected source char indices, After,
+    source styles)] for every edit on the page, all resolved. Returns ({code: status}, {limitation keys})."""
+    if src_page.rotation or not _box_eq(src_page.cropbox, src_page.mediabox):
+        return dict.fromkeys(CODES, 'warning'), {'regional_partial'}
+    if out_page.rotation or not _box_eq(out_page.mediabox, src_page.mediabox) or not _box_eq(out_page.cropbox, out_page.mediabox):
+        return {'edited_page_render': 'failed'}, {'regional'}
+    out_model = page_model(out_page, mupdf, max_chars)
+    if out_model is None: return dict.fromkeys(CODES, 'warning'), {'budget'}
+    S, O, res, notes = model.chars, out_model.chars, {}, {'regional'}
+    selected, afters, src_rows, out_rows, row_of, edited, expected, used, aligned, strict = _align_edited_rows(S, O, picks)
     blocks, edited_set, by_text = {S[i].block for i in selected}, set(edited), {}
     for q, (_, row) in enumerate(out_rows):
         if q not in used: by_text.setdefault(_text(O, row), []).append(q)

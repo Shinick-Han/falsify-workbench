@@ -263,6 +263,120 @@ def export_pdf(raw, patches):
     output, verification = _export_pdf(raw, patches, False, {'closed': 0})
     return output, verification | {'gapCloseFallback': True}
 
+def _match_source_quote(raw_text, quote):
+    """Resolve one quote within one extracted line and font, retaining neighboring glyphs."""
+    matches = []
+    for block in raw_text['blocks']:
+        for line in block.get('lines', []):
+            for span in line['spans']:
+                chars = span.get('chars', [])
+                text = ''.join(c['c'] for c in chars).replace('\u00a0', ' ')
+                start = text.find(quote)
+                if start >= 0:
+                    if text.find(quote, start + 1) >= 0: raise ValueError('PDF 내 중복 인용')
+                    matches.append((line, span, start))
+    if len(matches) != 1: raise ValueError('한 줄·한 글꼴 안의 고유 인용만 보존 편집할 수 있습니다. 줄바꿈/혼합 글꼴/추출 오차를 확인하세요.')
+    line, span, start = matches[0]
+    chars = span['chars'][start:start + len(quote)]
+    prev = span['chars'][start - 1] if start else None
+    nxt = span['chars'][start + len(quote)] if start + len(quote) < len(span['chars']) else None
+    return line, span, chars, prev, nxt
+
+def _apply_pdf_splices(doc, jobs):
+    """Apply planned replacements in reverse stream order to preserve offsets."""
+    for edits in jobs.values():
+        streams = {}
+        for e in edits:
+            for x, start, end, operand in e['inplace']['splices']: streams.setdefault(x, []).append((start, end, operand))
+        for x, splices in streams.items():
+            data = doc.xref_stream(x)
+            for start, end, operand in sorted(splices, reverse=True): data = data[:start] + operand + data[end:]
+            doc.update_stream(x, data)
+
+def _verify_masked_pixels(pix_a, pix_b, masks):
+    """Reject any raster difference outside the selected edit masks."""
+    bytes_a, bytes_b, stride = pix_a.samples, pix_b.samples, pix_a.stride
+    for y in range(pix_a.height):
+        row_a, row_b = bytes_a[y*stride:(y+1)*stride], bytes_b[y*stride:(y+1)*stride]
+        if row_a == row_b: continue
+        for x in range(pix_a.width):
+            if row_a[x*3:x*3+3] != row_b[x*3:x*3+3] and not any(m.x0 <= x < m.x1 and m.y0 <= y < m.y1 for m in masks):
+                raise ValueError('선택 영역 밖의 픽셀이 바뀌었습니다. 레이아웃 보존 다운로드를 차단합니다.')
+
+def _resolve_source_codec(doc, page, raw_text, span, after, label, fitz, normalize):
+    """Prove that replacement glyphs use the original page font and encoding."""
+    def existing_codec():
+        try: return font_codec(doc, page, span['font'], after, drawn)
+        except ValueError as error: raise ValueError(f"{label}: {error}") from None
+    # Only the page's own font object and byte codes are used (exact outlines and widths).
+    drawn = {c['c'] for c, other_span in page_chars(raw_text) if normalize(other_span['font']) == normalize(span['font'])}
+    codec_error = None
+    if span['font'] in BASE14:
+        # The codec proves each After character against the font's actual /Encoding and the
+        # characters already drawn with it (e.g. WinAnsi curly quotes or the euro sign).
+        try: codec = existing_codec()
+        except ValueError as error:
+            # Report an over-long After first (standard metrics), then the glyph/encoding proof.
+            standard, codec_error = fitz.Font(BASE14[span['font']]), error
+            codec = {'codes': list(after), 'widths': {c: standard.glyph_advance(ord(c)) * 1000 for c in after}}
+    else:
+        # Reuse only the actual embedded font, never substitute a similar-looking font.
+        fonts = []
+        for f in page.get_fonts(full=True):
+            buffer = doc.extract_font(f[0])[3] if f[0] else b''
+            if len(buffer) > 10*1024*1024: raise ValueError('임베디드 글꼴 크기 제한 초과')
+            if normalize(span['font']) in [normalize(name) for name in [f[3], *font_names(buffer)]]: fonts.append((f, buffer))
+        if len(fonts) != 1: raise ValueError('원본 임베디드 글꼴을 고유하게 찾을 수 없습니다.')
+        try:
+            fontbuffer = fonts[0][1]
+            if not fontbuffer: raise ValueError()
+            font = fitz.Font(fontbuffer=fontbuffer)
+        except Exception: raise ValueError('원본 글꼴을 재사용할 수 없습니다. 다른 글꼴로 대체하지 않습니다.') from None
+        fontxref = fonts[0][0][0]
+        # Exactly one font object on this page matches this name (checked above), so spans
+        # carrying the name were drawn with that object.
+        # Type0 goes straight to the codec: its drawn-char + unique CID/ToUnicode + /W proof does
+        # not depend on a Unicode cmap in the program (has_glyph would be a false absence).
+        if doc.xref_get_key(fontxref, 'Subtype')[1] == '/Type0': codec = existing_codec()
+        else:
+            try:
+                codes, _ = page_encoding_codes(doc, fontxref, fontbuffer, after, drawn)
+                codec = {'xref': fontxref, 'resource': font_resource_name(doc, page, fontxref), 'codes': codes, 'codeBytes': 1,
+                    'mapping': parse_to_unicode(doc.xref_stream(int(doc.xref_get_key(fontxref, 'ToUnicode')[1].split()[0])) or b''),
+                    'widths': simple_widths(doc, fontxref)}
+            except ValueError as error:
+                if any(not font.has_glyph(ord(c), fallback=False) for c in after): raise ValueError(f"{label}: {error}") from None
+                raise unsupported(label, 'codec', str(error))
+    return codec, codec_error
+
+def _plan_operator_rewrite(doc, page, codec, quote, span, plan, codes, widths, content_owners, n, followers, shift, label):
+    """Plan original text-operator splices, including provable gap closure."""
+    # Rewrite the original text operator itself so content order and following glyphs stay.
+    # Graphics/text state carries across the page's content streams in order.
+    if not codec['resource'] or font_resource_name(doc, page, codec['xref']) != codec['resource']: raise unsupported(label, 'resource')
+    try: parts = find_show([(x, doc.xref_stream(x)) for x in page.get_contents()], codec['resource'], codec['mapping'], quote,
+        size=span['size'], code_bytes=codec['codeBytes'])
+    except LookupError as error: raise unsupported(label, error.args[0] if error.args else 'content') from None
+    except ValueError as error: raise unsupported(label, error.args[0] if error.args else 'content') from None
+    if not parts: raise unsupported(label, 'not found')
+    if any(content_owners.get(part[5]) != {n} for part in parts): raise unsupported(label, 'shared')
+    # TJ offsets are 1/1000 of the effective font size; the result is re-measured after export.
+    extras_units = [v * 1000 / span['size'] for v in plan['extras']]
+    try: splices, compensation = rewrite_parts(parts, codes, extras_units, lambda code: widths[code], codec['codeBytes'])
+    except (LookupError, KeyError) as error: raise unsupported(label, 'rewrite', str(error)) from None
+    if followers:
+        # The followers move only through the compensating offset after the replacement (natural extras, so it
+        # directly follows the codes). Anything else is not closed here; export_pdf falls back.
+        if len(parts) != 1 or any(extras_units): raise ValueError('gap close: not a single natural operator')
+        start_, end_, items, index, count, _ = parts[0]
+        new, comp = rewrite_items(items, index, count, codes, extras_units, lambda code: widths[code])
+        at = [k for k, (kind, _) in enumerate(items) if kind == 'g'][index] + len(codes)
+        if comp is None or at >= len(new) or new[at] != ('k', comp): raise ValueError('gap close: no compensating offset')
+        new[at] = ('k', comp - shift * 1000 / span['size'])
+        splices, compensation = [(start_, end_, serialize_tj(new, codec['codeBytes']))], [round(new[at][1], 3)]
+    inplace = {'splices': [(part[5], *splice) for part, splice in zip(parts, splices)], 'operators': len(parts), 'compensationUnits': compensation}
+    return inplace
+
 def _export_pdf(raw, patches, close_gaps, state):
     import pymupdf as fitz
     if len(raw) > 25 * 1024 * 1024 or not raw.startswith(b'%PDF-'): raise ValueError('PDF 크기/서명 오류')
@@ -286,24 +400,10 @@ def _export_pdf(raw, patches, close_gaps, state):
             n = int(match[1]) - 1
             if not 0 <= n < doc.page_count: raise ValueError('PDF 페이지 범위 오류')
             page = doc[n]
-            matches = []
             raw_text = rawdict(n)
             quote = p['before'].replace('\u00a0', ' ')
             after = p['after'].replace('\u00a0', ' ')
-            for block in raw_text['blocks']:
-                for line in block.get('lines', []):
-                    for span in line['spans']:
-                        chars = span.get('chars', [])
-                        text = ''.join(c['c'] for c in chars).replace('\u00a0', ' ')
-                        start = text.find(quote)
-                        if start >= 0:
-                            if text.find(quote, start + 1) >= 0: raise ValueError('PDF 내 중복 인용')
-                            matches.append((line, span, start))
-            if len(matches) != 1: raise ValueError('한 줄·한 글꼴 안의 고유 인용만 보존 편집할 수 있습니다. 줄바꿈/혼합 글꼴/추출 오차를 확인하세요.')
-            line, span, start = matches[0]
-            chars = span['chars'][start:start + len(quote)]
-            prev = span['chars'][start - 1] if start else None
-            nxt = span['chars'][start + len(quote)] if start + len(quote) < len(span['chars']) else None
+            line, span, chars, prev, nxt = _match_source_quote(raw_text, quote)
             if tuple(line['dir']) != (1.0, 0.0) or page.rotation != 0: raise ValueError('회전 텍스트/페이지는 보존 편집하지 않습니다.')
             if '\n' in p['after'] or '\r' in p['after']: raise ValueError('한 줄 안의 변경만 지원합니다.')
             # Rendering state of the original glyphs: filled, opaque, horizontal writing mode only.
@@ -311,48 +411,7 @@ def _export_pdf(raw, patches, close_gaps, state):
             trace = [t for t in page.get_texttrace() if any(abs(ch[2][0] - origin[0]) < 0.01 and abs(ch[2][1] - origin[1]) < 0.01 for ch in t['chars'])]
             if not trace or any(t['type'] != 0 or t['opacity'] != 1 or t['wmode'] != 0 for t in trace):
                 raise ValueError(f"{p['label']}: 일반 채움 텍스트가 아닌 원본(외곽선/투명/세로쓰기)은 보존 편집하지 않습니다.")
-            def existing_codec():
-                try: return font_codec(doc, page, span['font'], after, drawn)
-                except ValueError as error: raise ValueError(f"{p['label']}: {error}") from None
-            # Only the page's own font object and byte codes are used (exact outlines and widths).
-            drawn = {c['c'] for c, other_span in page_chars(raw_text) if normalize(other_span['font']) == normalize(span['font'])}
-            codec_error = None
-            if span['font'] in BASE14:
-                # The codec proves each After character against the font's actual /Encoding and the
-                # characters already drawn with it (e.g. WinAnsi curly quotes or the euro sign).
-                try: codec = existing_codec()
-                except ValueError as error:
-                    # Report an over-long After first (standard metrics), then the glyph/encoding proof.
-                    standard, codec_error = fitz.Font(BASE14[span['font']]), error
-                    codec = {'codes': list(after), 'widths': {c: standard.glyph_advance(ord(c)) * 1000 for c in after}}
-            else:
-                # Reuse only the actual embedded font, never substitute a similar-looking font.
-                fonts = []
-                for f in page.get_fonts(full=True):
-                    buffer = doc.extract_font(f[0])[3] if f[0] else b''
-                    if len(buffer) > 10*1024*1024: raise ValueError('임베디드 글꼴 크기 제한 초과')
-                    if normalize(span['font']) in [normalize(name) for name in [f[3], *font_names(buffer)]]: fonts.append((f, buffer))
-                if len(fonts) != 1: raise ValueError('원본 임베디드 글꼴을 고유하게 찾을 수 없습니다.')
-                try:
-                    fontbuffer = fonts[0][1]
-                    if not fontbuffer: raise ValueError()
-                    font = fitz.Font(fontbuffer=fontbuffer)
-                except Exception: raise ValueError('원본 글꼴을 재사용할 수 없습니다. 다른 글꼴로 대체하지 않습니다.') from None
-                fontxref = fonts[0][0][0]
-                # Exactly one font object on this page matches this name (checked above), so spans
-                # carrying the name were drawn with that object.
-                # Type0 goes straight to the codec: its drawn-char + unique CID/ToUnicode + /W proof does
-                # not depend on a Unicode cmap in the program (has_glyph would be a false absence).
-                if doc.xref_get_key(fontxref, 'Subtype')[1] == '/Type0': codec = existing_codec()
-                else:
-                    try:
-                        codes, _ = page_encoding_codes(doc, fontxref, fontbuffer, after, drawn)
-                        codec = {'xref': fontxref, 'resource': font_resource_name(doc, page, fontxref), 'codes': codes, 'codeBytes': 1,
-                            'mapping': parse_to_unicode(doc.xref_stream(int(doc.xref_get_key(fontxref, 'ToUnicode')[1].split()[0])) or b''),
-                            'widths': simple_widths(doc, fontxref)}
-                    except ValueError as error:
-                        if any(not font.has_glyph(ord(c), fallback=False) for c in after): raise ValueError(f"{p['label']}: {error}") from None
-                        raise unsupported(p['label'], 'codec', str(error))
+            codec, codec_error = _resolve_source_codec(doc, page, raw_text, span, after, p['label'], fitz, normalize)
             codes, widths = codec['codes'], codec['widths']
             natural = [widths[code] * span['size'] / 1000 for code in codes]
             rect = fitz.Rect(chars[0]['bbox'])
@@ -411,44 +470,15 @@ def _export_pdf(raw, patches, close_gaps, state):
             if any(area.intersects(widget.rect) for widget in (page.widgets() or [])): raise ValueError('폼 필드와 겹치는 영역은 편집하지 않습니다.')
             for existing in jobs.get(n, []):
                 if area.intersects(existing['rect']): raise ValueError('선택한 PDF 변경 영역이 겹칩니다.')
-            # Rewrite the original text operator itself so content order and following glyphs stay.
-            # Graphics/text state carries across the page's content streams in order.
-            if not codec['resource'] or font_resource_name(doc, page, codec['xref']) != codec['resource']: raise unsupported(p['label'], 'resource')
-            try: parts = find_show([(x, doc.xref_stream(x)) for x in page.get_contents()], codec['resource'], codec['mapping'], quote,
-                size=span['size'], code_bytes=codec['codeBytes'])
-            except LookupError as error: raise unsupported(p['label'], error.args[0] if error.args else 'content') from None
-            except ValueError as error: raise unsupported(p['label'], error.args[0] if error.args else 'content') from None
-            if not parts: raise unsupported(p['label'], 'not found')
-            if any(content_owners.get(part[5]) != {n} for part in parts): raise unsupported(p['label'], 'shared')
-            # TJ offsets are 1/1000 of the effective font size; the result is re-measured after export.
-            extras_units = [v * 1000 / span['size'] for v in plan['extras']]
-            try: splices, compensation = rewrite_parts(parts, codes, extras_units, lambda code: widths[code], codec['codeBytes'])
-            except (LookupError, KeyError) as error: raise unsupported(p['label'], 'rewrite', str(error)) from None
-            if followers:
-                # The followers move only through the compensating offset after the replacement (natural extras, so it
-                # directly follows the codes). Anything else is not closed here; export_pdf falls back.
-                if len(parts) != 1 or any(extras_units): raise ValueError('gap close: not a single natural operator')
-                start_, end_, items, index, count, _ = parts[0]
-                new, comp = rewrite_items(items, index, count, codes, extras_units, lambda code: widths[code])
-                at = [k for k, (kind, _) in enumerate(items) if kind == 'g'][index] + len(codes)
-                if comp is None or at >= len(new) or new[at] != ('k', comp): raise ValueError('gap close: no compensating offset')
-                new[at] = ('k', comp - shift * 1000 / span['size'])
-                splices, compensation = [(start_, end_, serialize_tj(new, codec['codeBytes']))], [round(new[at][1], 3)]
-            inplace = {'splices': [(part[5], *splice) for part, splice in zip(parts, splices)], 'operators': len(parts), 'compensationUnits': compensation}
+            inplace = _plan_operator_rewrite(doc, page, codec, quote, span, plan, codes, widths,
+                content_owners, n, followers, shift, p['label'])
             touched = {(sp[0], sp[1]) for sp in inplace['splices']}
             if any(touched & {(sp[0], sp[1]) for sp in o['inplace']['splices']} for o in jobs.get(n, [])):
                 raise ValueError('같은 원본 텍스트 연산자 안의 여러 변경은 아직 보존 편집하지 않습니다.')
             jobs.setdefault(n, []).append({'patch': p, 'after': after, 'rect': area, 'end': end, 'origin': origin, 'font': codec['resource'],
                 'natural': natural, 'plan': plan, 'size': span['size'], 'spanfont': span['font'], 'selected': selected_chars,
                 'tightened': tightened, 'inplace': inplace, 'codeBytes': codec['codeBytes'], 'shift': dict.fromkeys(moved, shift)})
-        for n, edits in jobs.items():
-            streams = {}
-            for e in edits:
-                for x, start, end, operand in e['inplace']['splices']: streams.setdefault(x, []).append((start, end, operand))
-            for x, splices in streams.items():
-                data = doc.xref_stream(x)
-                for start, end, operand in sorted(splices, reverse=True): data = data[:start] + operand + data[end:]
-                doc.update_stream(x, data)
+        _apply_pdf_splices(doc, jobs)
         output = doc.tobytes(garbage=4, deflate=True)
         verified = fitz.open(stream=output, filetype='pdf')
         try:
@@ -516,13 +546,7 @@ def _export_pdf(raw, patches, close_gaps, state):
                         entry |= {'rewrittenOperators': e['inplace']['operators'], 'compensationUnits': e['inplace']['compensationUnits']}
                         entry['followingTextShift'] = {'pt': round(next(iter(e['shift'].values())), 3), 'glyphs': len(e['shift'])} if e['shift'] else None
                         report.append(entry)
-                bytes_a, bytes_b, stride = pix_a.samples, pix_b.samples, pix_a.stride
-                for y in range(pix_a.height):
-                    row_a, row_b = bytes_a[y*stride:(y+1)*stride], bytes_b[y*stride:(y+1)*stride]
-                    if row_a == row_b: continue
-                    for x in range(pix_a.width):
-                        if row_a[x*3:x*3+3] != row_b[x*3:x*3+3] and not any(m.x0 <= x < m.x1 and m.y0 <= y < m.y1 for m in masks):
-                            raise ValueError('선택 영역 밖의 픽셀이 바뀌었습니다. 레이아웃 보존 다운로드를 차단합니다.')
+                _verify_masked_pixels(pix_a, pix_b, masks)
             return output, {'mode': 'pdf-original-font-single-line', 'pages': doc.page_count, 'rasterDpi': 96,
                 'outsideSelectedAreasUnchanged': True, 'textActuallyRemoved': True, 'unselectedGlyphPositionsUnchanged': not shifted,
                 'unselectedGlyphsShiftedAlongEditedLine': shifted,
