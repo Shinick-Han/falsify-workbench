@@ -103,36 +103,7 @@ function influence(distance, radius) {
   return weight * (1 - t * t * (3 - 2 * t));
 }
 
-function applyDeform(points, operation) {
-  const center = operation.center;
-  if (!Array.isArray(center) || center.length !== 2 || !finite(center[0]) || !finite(center[1])) invalid('center');
-  if (!finite(operation.radius) || !(operation.radius > 0)) invalid('radius');
-  if (!finite(operation.dx) || !finite(operation.dy)) invalid('delta');
-  if (points.length === 0 || (operation.dx === 0 && operation.dy === 0)) return [];
-  let anchor = -1;
-  let nearest = Infinity;
-  for (let index = 0; index < points.length; index += 1) {
-    requirePoint(points[index], index);
-    const distance = Math.hypot(points[index].x - center[0], points[index].y - center[1]);
-    if (distance < nearest) {
-      nearest = distance;
-      anchor = index;
-    }
-  }
-  if (!(nearest <= operation.radius)) return [];
-  const run = branchRuns(points).find(item => item.indexes.includes(anchor));
-  const place = run.indexes.indexOf(anchor);
-  const along = new Map([[anchor, 0]]);
-  for (let step = place - 1; step >= 0; step -= 1) {
-    const index = run.indexes[step];
-    const next = run.indexes[step + 1];
-    along.set(index, along.get(next) + pointDistance(points[index], points[next]));
-  }
-  for (let step = place + 1; step < run.indexes.length; step += 1) {
-    const index = run.indexes[step];
-    const previous = run.indexes[step - 1];
-    along.set(index, along.get(previous) + pointDistance(points[index], points[previous]));
-  }
+function deformAlongBranch(points, operation, along) {
   const changed = [];
   for (const [index, distance] of along) {
     const weight = influence(distance, operation.radius);
@@ -150,6 +121,44 @@ function applyDeform(points, operation) {
   return changed;
 }
 
+function nearestPoint(points, center) {
+  let anchor = -1;
+  let nearest = Infinity;
+  for (let index = 0; index < points.length; index += 1) {
+    requirePoint(points[index], index);
+    const distance = Math.hypot(points[index].x - center[0], points[index].y - center[1]);
+    if (distance < nearest) {
+      nearest = distance;
+      anchor = index;
+    }
+  }
+  return {anchor, nearest};
+}
+
+function applyDeform(points, operation) {
+  const center = operation.center;
+  if (!Array.isArray(center) || center.length !== 2 || !finite(center[0]) || !finite(center[1])) invalid('center');
+  if (!finite(operation.radius) || !(operation.radius > 0)) invalid('radius');
+  if (!finite(operation.dx) || !finite(operation.dy)) invalid('delta');
+  if (points.length === 0 || (operation.dx === 0 && operation.dy === 0)) return [];
+  const {anchor, nearest} = nearestPoint(points, center);
+  if (!(nearest <= operation.radius)) return [];
+  const run = branchRuns(points).find(item => item.indexes.includes(anchor));
+  const place = run.indexes.indexOf(anchor);
+  const along = new Map([[anchor, 0]]);
+  for (let step = place - 1; step >= 0; step -= 1) {
+    const index = run.indexes[step];
+    const next = run.indexes[step + 1];
+    along.set(index, along.get(next) + pointDistance(points[index], points[next]));
+  }
+  for (let step = place + 1; step < run.indexes.length; step += 1) {
+    const index = run.indexes[step];
+    const previous = run.indexes[step - 1];
+    along.set(index, along.get(previous) + pointDistance(points[index], points[previous]));
+  }
+  return deformAlongBranch(points, operation, along);
+}
+
 function applyMove(points, operation) {
   const range = requireRange(operation.range, points.length);
   if (!finite(operation.dx) || !finite(operation.dy)) invalid('delta');
@@ -164,12 +173,7 @@ function applyMove(points, operation) {
   return changed;
 }
 
-function applyResize(points, operation) {
-  const range = requireRange(operation.range, points.length);
-  const anchor = operation.anchor;
-  if (!Array.isArray(anchor) || anchor.length !== 2 || !finite(anchor[0]) || !finite(anchor[1])) invalid('anchor');
-  if (!finite(operation.scaleX) || !(operation.scaleX > 0) || !finite(operation.scaleY) || !(operation.scaleY > 0)) invalid('scale');
-  if (operation.scaleX === 1 && operation.scaleY === 1) return [];
+function resizeRange(points, operation, anchor, range) {
   const changed = [];
   for (let index = range[0]; index <= range[1]; index += 1) {
     requirePoint(points[index], index);
@@ -183,6 +187,15 @@ function applyResize(points, operation) {
     }
   }
   return changed;
+}
+
+function applyResize(points, operation) {
+  const range = requireRange(operation.range, points.length);
+  const anchor = operation.anchor;
+  if (!Array.isArray(anchor) || anchor.length !== 2 || !finite(anchor[0]) || !finite(anchor[1])) invalid('anchor');
+  if (!finite(operation.scaleX) || !(operation.scaleX > 0) || !finite(operation.scaleY) || !(operation.scaleY > 0)) invalid('scale');
+  if (operation.scaleX === 1 && operation.scaleY === 1) return [];
+  return resizeRange(points, operation, anchor, range);
 }
 
 function applySetValues(points, operation) {
