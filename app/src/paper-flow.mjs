@@ -113,6 +113,119 @@ function occlusionFragments(block, evidence, hash) {
   return parts;
 }
 
+function groupAndAssociateCaptions({entries, flowBlocks, styles, page, pi, diagnostics, relations}) {
+  // Group only source-adjacent caption runs with matching measured font and
+  // line geometry. Inline runs retain their exact order and joiners. A column
+  // wrap requires aligned tops and a clear target column; other text is a
+  // barrier even when it happens to use the same small font.
+  const blockMap=new Map(flowBlocks.map(b=>[b.id,b]));
+  const signature=e=>{
+    const chars=e.blockIds.flatMap(id=>blockMap.get(id)?.source?.characters || []);
+    const counts=new Map();
+    for(const c of chars) {const s=styles.get(c.styleId); if(!s?.fontName || !Number.isFinite(s.size)) continue; const key=`${s.fontName.replace(/(?:Bold|Semibold|Italic|Oblique)/gi,'')}|${Math.round(s.size*10)/10}`; counts.set(key,(counts.get(key)||0)+1);}
+    return [...counts].sort((a,b)=>b[1]-a[1])[0]?.[0];
+  };
+  const bounds=e=>e.blockIds.map(id=>blockMap.get(id)?.source?.range).filter(Boolean);
+  const start=e=>Math.min(...bounds(e).map(r=>r.start));
+  // Inline inserts can have independent native ranges far from the host.
+  // Advance only through the host's contiguous source ranges, including all
+  // fragments after such an insert, without treating the insert as an end.
+  const end=e=>{
+    const ranges=bounds(e).sort((a,b)=>a.start-b.start || a.end-b.end);
+    let last=ranges[0]?.end;
+    for(const r of ranges.slice(1)) {if(r.start>last) break; last=Math.max(last,r.end);}
+    return last;
+  };
+  const lineCount=e=>e.blockIds.reduce((n,id)=>n+(blockMap.get(id)?.source?.lines?.length || 0),0);
+  for(const caption of entries.filter(e=>e.kind==='caption' && boxOK(e.box))) {
+    let last=caption;
+    const members=[caption];
+    while(true) {
+      const lastEnd=end(last), sig=signature(last);
+      if(!Number.isFinite(lastEnd) || !sig) break;
+      const next=entries.filter(e=>e.kind==='paragraph' && !members.includes(e) && boxOK(e.box) && start(e)===lastEnd && signature(e)===sig && lineCount(e)>=1);
+      const eligible=next.filter(e=>{
+        const h=median(last.blockIds.flatMap(id=>(blockMap.get(id)?.source?.lines || []).map(l=>boxOK(l.bbox)?l.bbox[3]-l.bbox[1]:0)).filter(Boolean));
+        if(!h) return false;
+        const sameColumn=Math.min(last.box[2],e.box[2])-Math.max(last.box[0],e.box[0])>Math.min(last.box[2]-last.box[0],e.box[2]-e.box[0])*.5;
+        const gap=e.box[1]-last.box[3];
+        const adjacent=sameColumn && gap>=-h && gap<=h;
+        const wrap=!sameColumn && e.box[0]>last.box[2] && lineCount(last)>=2 && lineCount(e)>=2 && Math.abs(e.box[1]-caption.box[1])<=h && last.box[3]>e.box[1]+2*h;
+        if(!adjacent && !wrap) return false;
+        const corridor=wrap ? [e.box[0],e.box[1],e.box[2],e.box[1]+h] : [Math.min(last.box[0],e.box[0]),Math.min(last.box[3],e.box[1]),Math.max(last.box[2],e.box[2]),Math.max(last.box[3],e.box[1])];
+        return !entries.some(x=>x!==last && x!==e && !members.includes(x) && !['header','footer'].includes(x.kind) && boxOK(x.box) && overlap(corridor,x.box));
+      });
+      if(eligible.length!==1) break;
+      last=eligible[0]; members.push(last);
+    }
+    if(members.length>1) {
+      const ids=[],joiners=[];
+      for(const member of members) {if(ids.length) joiners.push(' ');ids.push(...member.blockIds);if(member.inline) joiners.push(...member.joiners); else for(let i=1;i<member.blockIds.length;i++) joiners.push('');}
+      caption.blockIds=ids; caption.inline=true;caption.joiners=joiners;
+      caption.memberBoxes=members.map(e=>[...e.box]);
+      caption.box=union(caption.memberBoxes);caption.source.bbox=[...caption.box];
+      for(const member of members.slice(1)) entries.splice(entries.indexOf(member),1);
+      diagnostics.push({code:'caption-continuation-grouped',pageIndex:pi,itemId:caption.id,memberItemIds:members.map(e=>e.id),blockIds:[...ids]});
+    }
+  }
+  // Match measured caption direction and distance; retain each caption as text.
+  const captionCandidates=caption=>{
+    return entries.filter(x=>x.kind==='asset' && boxOK(x.box) && x.box[0]<caption.box[2] && caption.box[0]<x.box[2]).map(x=>{
+      const position=caption.box[3]<=x.box[1]?'above':caption.box[1]>=x.box[3]?'below':null;
+      const gap=position==='above'?x.box[1]-caption.box[3]:position==='below'?caption.box[1]-x.box[3]:Infinity;
+      const area=(x.box[2]-x.box[0])*(x.box[3]-x.box[1]);
+      return {x,position,gap,area};
+    }).filter(c=>c.position && c.gap<=Math.max(30,page.height*.05)).sort((a,b)=>a.gap-b.gap || b.area-a.area);
+  };
+  const captionEntries=entries.filter(x=>x.kind==='caption'&&boxOK(x.box));
+  const clear=captionEntries.filter(c=>!/^\s*table\s*\d/i.test(c.blockIds.map(id=>flowBlocks.find(b=>b.id===id)?.text||'').join(''))).map(c=>captionCandidates(c)).filter(xs=>xs.length===1||xs.length>1&&xs[1].gap-xs[0].gap>10).map(xs=>xs[0].position);
+  const below=clear.filter(x=>x==='below').length,above=clear.filter(x=>x==='above').length,preferred=below>=2&&above===0?'below':above>=2&&below===0?'above':null;
+  for(const caption of captionEntries) {
+    const table=/^\s*(?:extended\s+data\s+)?table\s*\d/i.test(caption.blockIds.map(id=>flowBlocks.find(b=>b.id===id)?.text||'').join(''));
+    let near=captionCandidates(caption);
+    if(!table&&preferred&&near.length>1&&near[1].gap-near[0].gap<=10){const consistent=near.filter(x=>x.position===preferred);if(consistent.length===1)near=consistent;}
+    const best=near[0];
+    if(best && (near.length===1 || near[1].gap-best.gap>10 || (table && best.position==='above' && best.area>near[1].area*2 && best.gap<near[1].gap))) {
+      best.x.captionIds.push(...caption.blockIds);
+      best.x.captionPositions ||= {};
+      for(const id of caption.blockIds) best.x.captionPositions[id]=best.position;
+      relations.push({kind:'caption',assetItemId:best.x.id,captionItemId:caption.id,position:best.position});
+    } else diagnostics.push({code:'caption-association-unresolved',pageIndex:pi,itemId:caption.id});
+  }
+}
+
+function associateCrossPageCaptions({document, fragments, items, relations, diagnostics, regions}) {
+  // Only a previously established artwork region can follow a bottom caption.
+  // Its labels and panels are owned together; independent text is a barrier.
+  const blockMap=new Map([...document.blocks,...fragments].map(b=>[b.id,b]));
+  const frameOK=p=>p && p.geometry?.frame==='mupdf-display' &&
+    sameNumbers(p.geometry.bounds,[0,0,p.width,p.height]) &&
+    Array.isArray(p.geometry.pageTransform) && p.geometry.pageTransform.length===6 && p.geometry.pageTransform.every(Number.isFinite);
+  for(const page of document.pages) {
+    const next=document.pages.find(p=>p.sourcePageIndex===page.sourcePageIndex+1);
+    if(!frameOK(page) || !frameOK(next) || !sameNumbers(page.geometry.bounds,next.geometry.bounds) || !sameNumbers(page.geometry.pageTransform,next.geometry.pageTransform)) continue;
+    const current=items.filter(i=>i.source.pageIndex===page.sourcePageIndex && !['header','footer'].includes(i.kind));
+    const caption=current.at(-1);
+    if(caption?.kind!=='caption' || !boxOK(caption.source.bbox) || caption.source.bbox[3]<page.height*.88 || relations.some(r=>r.kind==='caption' && r.captionItemId===caption.id)) continue;
+    const blocks=caption.blockIds.map(id=>blockMap.get(id));
+    if(blocks.some(b=>!b || b.source?.pageIndex!==page.sourcePageIndex || !b.source.range || page.text?.slice(b.source.range.start,b.source.range.end)!==b.text)) continue;
+    const text=blocks.map(b=>b.text).join('');
+    if(!/^\s*(?:extended\s+data\s+)?fig(?:ure)?\.?\s*\d/i.test(text) || !/[.!?][)\]"'\u2019\u201d]*\s*$/.test(text)) continue;
+    const following=items.filter(i=>i.source.pageIndex===next.sourcePageIndex && !['header','footer'].includes(i.kind));
+    if(following.length!==1 || following[0].kind!=='asset') continue;
+    const artwork=following[0], box=artwork.source.bbox;
+    const region=regions.find(r=>r.id===artwork.renderAssetId && r.pageIndex===next.sourcePageIndex && r.classification==='compound-figure');
+    if(!region || !boxOK(box) || !sameNumbers(region.bbox,box) || box[2]-box[0]<next.width*.7 || box[3]-box[1]<next.height*.7 || artwork.captionIds.length ||
+      region.blockIds.length!==artwork.blockIds.length || region.assetIds.length!==artwork.assetIds.length ||
+      region.blockIds.some(id=>!artwork.blockIds.includes(id)) || region.assetIds.some(id=>!artwork.assetIds.includes(id))) continue;
+    artwork.captionIds.push(...caption.blockIds); artwork.captionPositions ||= {};
+    for(const id of caption.blockIds) artwork.captionPositions[id]='above';
+    relations.push({kind:'caption',assetItemId:artwork.id,captionItemId:caption.id,position:'above',provenance:{rule:'adjacent-page-bottom-caption-full-page-artwork',sourceSha256:document.sourceSha256,captionPageIndex:page.sourcePageIndex,artworkPageIndex:next.sourcePageIndex,frame:'mupdf-display',regionId:region.id}});
+    const unresolved=diagnostics.findIndex(d=>d.code==='caption-association-unresolved' && d.itemId===caption.id);
+    if(unresolved>=0) diagnostics.splice(unresolved,1);
+  }
+}
+
 /** Produce a deterministic, source-bound reading order and ownership proposal. */
 export function buildPaperFlow(document, {drawings=document?.drawings || [], links} = {}) {
   if (document?.schema !== 'falsify.paper-document.v1' || !Array.isArray(document.pages) || !Array.isArray(document.blocks) || !Array.isArray(document.assets)) throw new TypeError('Expected falsify.paper-document.v1');
@@ -341,84 +454,7 @@ export function buildPaperFlow(document, {drawings=document?.drawings || [], lin
       first.box=union(members.map(x=>x.box)); first.source.bbox=[...first.box];
       for(const member of members.slice(1)) entries.splice(entries.indexOf(member),1);
     }
-    // Group only source-adjacent caption runs with matching measured font and
-    // line geometry. Inline runs retain their exact order and joiners. A column
-    // wrap requires aligned tops and a clear target column; other text is a
-    // barrier even when it happens to use the same small font.
-    const blockMap=new Map(flowBlocks.map(b=>[b.id,b]));
-    const signature=e=>{
-      const chars=e.blockIds.flatMap(id=>blockMap.get(id)?.source?.characters || []);
-      const counts=new Map();
-      for(const c of chars) {const s=styles.get(c.styleId); if(!s?.fontName || !Number.isFinite(s.size)) continue; const key=`${s.fontName.replace(/(?:Bold|Semibold|Italic|Oblique)/gi,'')}|${Math.round(s.size*10)/10}`; counts.set(key,(counts.get(key)||0)+1);}
-      return [...counts].sort((a,b)=>b[1]-a[1])[0]?.[0];
-    };
-    const bounds=e=>e.blockIds.map(id=>blockMap.get(id)?.source?.range).filter(Boolean);
-    const start=e=>Math.min(...bounds(e).map(r=>r.start));
-    // Inline inserts can have independent native ranges far from the host.
-    // Advance only through the host's contiguous source ranges, including all
-    // fragments after such an insert, without treating the insert as an end.
-    const end=e=>{
-      const ranges=bounds(e).sort((a,b)=>a.start-b.start || a.end-b.end);
-      let last=ranges[0]?.end;
-      for(const r of ranges.slice(1)) {if(r.start>last) break; last=Math.max(last,r.end);}
-      return last;
-    };
-    const lineCount=e=>e.blockIds.reduce((n,id)=>n+(blockMap.get(id)?.source?.lines?.length || 0),0);
-    for(const caption of entries.filter(e=>e.kind==='caption' && boxOK(e.box))) {
-      let last=caption;
-      const members=[caption];
-      while(true) {
-        const lastEnd=end(last), sig=signature(last);
-        if(!Number.isFinite(lastEnd) || !sig) break;
-        const next=entries.filter(e=>e.kind==='paragraph' && !members.includes(e) && boxOK(e.box) && start(e)===lastEnd && signature(e)===sig && lineCount(e)>=1);
-        const eligible=next.filter(e=>{
-          const h=median(last.blockIds.flatMap(id=>(blockMap.get(id)?.source?.lines || []).map(l=>boxOK(l.bbox)?l.bbox[3]-l.bbox[1]:0)).filter(Boolean));
-          if(!h) return false;
-          const sameColumn=Math.min(last.box[2],e.box[2])-Math.max(last.box[0],e.box[0])>Math.min(last.box[2]-last.box[0],e.box[2]-e.box[0])*.5;
-          const gap=e.box[1]-last.box[3];
-          const adjacent=sameColumn && gap>=-h && gap<=h;
-          const wrap=!sameColumn && e.box[0]>last.box[2] && lineCount(last)>=2 && lineCount(e)>=2 && Math.abs(e.box[1]-caption.box[1])<=h && last.box[3]>e.box[1]+2*h;
-          if(!adjacent && !wrap) return false;
-          const corridor=wrap ? [e.box[0],e.box[1],e.box[2],e.box[1]+h] : [Math.min(last.box[0],e.box[0]),Math.min(last.box[3],e.box[1]),Math.max(last.box[2],e.box[2]),Math.max(last.box[3],e.box[1])];
-          return !entries.some(x=>x!==last && x!==e && !members.includes(x) && !['header','footer'].includes(x.kind) && boxOK(x.box) && overlap(corridor,x.box));
-        });
-        if(eligible.length!==1) break;
-        last=eligible[0]; members.push(last);
-      }
-      if(members.length>1) {
-        const ids=[],joiners=[];
-        for(const member of members) {if(ids.length) joiners.push(' ');ids.push(...member.blockIds);if(member.inline) joiners.push(...member.joiners); else for(let i=1;i<member.blockIds.length;i++) joiners.push('');}
-        caption.blockIds=ids; caption.inline=true;caption.joiners=joiners;
-        caption.memberBoxes=members.map(e=>[...e.box]);
-        caption.box=union(caption.memberBoxes);caption.source.bbox=[...caption.box];
-        for(const member of members.slice(1)) entries.splice(entries.indexOf(member),1);
-        diagnostics.push({code:'caption-continuation-grouped',pageIndex:pi,itemId:caption.id,memberItemIds:members.map(e=>e.id),blockIds:[...ids]});
-      }
-    }
-    // Match measured caption direction and distance; retain each caption as text.
-    const captionCandidates=caption=>{
-      return entries.filter(x=>x.kind==='asset' && boxOK(x.box) && x.box[0]<caption.box[2] && caption.box[0]<x.box[2]).map(x=>{
-        const position=caption.box[3]<=x.box[1]?'above':caption.box[1]>=x.box[3]?'below':null;
-        const gap=position==='above'?x.box[1]-caption.box[3]:position==='below'?caption.box[1]-x.box[3]:Infinity;
-        const area=(x.box[2]-x.box[0])*(x.box[3]-x.box[1]);
-        return {x,position,gap,area};
-      }).filter(c=>c.position && c.gap<=Math.max(30,page.height*.05)).sort((a,b)=>a.gap-b.gap || b.area-a.area);
-    };
-    const captionEntries=entries.filter(x=>x.kind==='caption'&&boxOK(x.box));
-    const clear=captionEntries.filter(c=>!/^\s*table\s*\d/i.test(c.blockIds.map(id=>flowBlocks.find(b=>b.id===id)?.text||'').join(''))).map(c=>captionCandidates(c)).filter(xs=>xs.length===1||xs.length>1&&xs[1].gap-xs[0].gap>10).map(xs=>xs[0].position);
-    const below=clear.filter(x=>x==='below').length,above=clear.filter(x=>x==='above').length,preferred=below>=2&&above===0?'below':above>=2&&below===0?'above':null;
-    for(const caption of captionEntries) {
-      const table=/^\s*(?:extended\s+data\s+)?table\s*\d/i.test(caption.blockIds.map(id=>flowBlocks.find(b=>b.id===id)?.text||'').join(''));
-      let near=captionCandidates(caption);
-      if(!table&&preferred&&near.length>1&&near[1].gap-near[0].gap<=10){const consistent=near.filter(x=>x.position===preferred);if(consistent.length===1)near=consistent;}
-      const best=near[0];
-      if(best && (near.length===1 || near[1].gap-best.gap>10 || (table && best.position==='above' && best.area>near[1].area*2 && best.gap<near[1].gap))) {
-        best.x.captionIds.push(...caption.blockIds);
-        best.x.captionPositions ||= {};
-        for(const id of caption.blockIds) best.x.captionPositions[id]=best.position;
-        relations.push({kind:'caption',assetItemId:best.x.id,captionItemId:caption.id,position:best.position});
-      } else diagnostics.push({code:'caption-association-unresolved',pageIndex:pi,itemId:caption.id});
-    }
+    groupAndAssociateCaptions({entries, flowBlocks, styles, page, pi, diagnostics, relations});
     const headers=entries.filter(x=>x.kind==='header').sort(geom), footers=entries.filter(x=>x.kind==='footer').sort(geom);
     for(const edge of [...headers,...footers]) entries.splice(entries.indexOf(edge),1);
     let continuousOrder=null;
@@ -475,35 +511,7 @@ export function buildPaperFlow(document, {drawings=document?.drawings || [], lin
     if(continuousOrder) [...continuousOrder,...footers].forEach((item,i)=>item.continuousPosition=i);
     items.push(...[...entries,...footers].map(({box,pos,index,memberBoxes,...item})=>item));
   }
-  // Only a previously established artwork region can follow a bottom caption.
-  // Its labels and panels are owned together; independent text is a barrier.
-  const blockMap=new Map([...document.blocks,...fragments].map(b=>[b.id,b]));
-  const frameOK=p=>p && p.geometry?.frame==='mupdf-display' &&
-    sameNumbers(p.geometry.bounds,[0,0,p.width,p.height]) &&
-    Array.isArray(p.geometry.pageTransform) && p.geometry.pageTransform.length===6 && p.geometry.pageTransform.every(Number.isFinite);
-  for(const page of document.pages) {
-    const next=document.pages.find(p=>p.sourcePageIndex===page.sourcePageIndex+1);
-    if(!frameOK(page) || !frameOK(next) || !sameNumbers(page.geometry.bounds,next.geometry.bounds) || !sameNumbers(page.geometry.pageTransform,next.geometry.pageTransform)) continue;
-    const current=items.filter(i=>i.source.pageIndex===page.sourcePageIndex && !['header','footer'].includes(i.kind));
-    const caption=current.at(-1);
-    if(caption?.kind!=='caption' || !boxOK(caption.source.bbox) || caption.source.bbox[3]<page.height*.88 || relations.some(r=>r.kind==='caption' && r.captionItemId===caption.id)) continue;
-    const blocks=caption.blockIds.map(id=>blockMap.get(id));
-    if(blocks.some(b=>!b || b.source?.pageIndex!==page.sourcePageIndex || !b.source.range || page.text?.slice(b.source.range.start,b.source.range.end)!==b.text)) continue;
-    const text=blocks.map(b=>b.text).join('');
-    if(!/^\s*(?:extended\s+data\s+)?fig(?:ure)?\.?\s*\d/i.test(text) || !/[.!?][)\]"'\u2019\u201d]*\s*$/.test(text)) continue;
-    const following=items.filter(i=>i.source.pageIndex===next.sourcePageIndex && !['header','footer'].includes(i.kind));
-    if(following.length!==1 || following[0].kind!=='asset') continue;
-    const artwork=following[0], box=artwork.source.bbox;
-    const region=regions.find(r=>r.id===artwork.renderAssetId && r.pageIndex===next.sourcePageIndex && r.classification==='compound-figure');
-    if(!region || !boxOK(box) || !sameNumbers(region.bbox,box) || box[2]-box[0]<next.width*.7 || box[3]-box[1]<next.height*.7 || artwork.captionIds.length ||
-      region.blockIds.length!==artwork.blockIds.length || region.assetIds.length!==artwork.assetIds.length ||
-      region.blockIds.some(id=>!artwork.blockIds.includes(id)) || region.assetIds.some(id=>!artwork.assetIds.includes(id))) continue;
-    artwork.captionIds.push(...caption.blockIds); artwork.captionPositions ||= {};
-    for(const id of caption.blockIds) artwork.captionPositions[id]='above';
-    relations.push({kind:'caption',assetItemId:artwork.id,captionItemId:caption.id,position:'above',provenance:{rule:'adjacent-page-bottom-caption-full-page-artwork',sourceSha256:document.sourceSha256,captionPageIndex:page.sourcePageIndex,artworkPageIndex:next.sourcePageIndex,frame:'mupdf-display',regionId:region.id}});
-    const unresolved=diagnostics.findIndex(d=>d.code==='caption-association-unresolved' && d.itemId===caption.id);
-    if(unresolved>=0) diagnostics.splice(unresolved,1);
-  }
+  associateCrossPageCaptions({document, fragments, items, relations, diagnostics, regions});
   return {schema:'falsify.paper-flow.v1',sourceSha256:document.sourceSha256,items,relations,diagnostics,fragments,regions};
 }
 function ownedByAsset(x,entries) {return entries.some(e=>e.kind==='asset' && e.blockIds.includes(x.b.id));}

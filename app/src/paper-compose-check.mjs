@@ -18,6 +18,124 @@ function representationComparison(expected, observed, prefix=false) {
   return {matches:i===expected.length && (prefix || j===observed.length),differences,consumed:j};
 }
 
+function compareFloatingCaptions({flowExpectations, layoutProfile, layoutQuality, expected, observed, expectedBlocks, edits}) {
+  let flow={status:'not-requested'}, flowMatches=false, flowDifferences=[];
+  if(flowExpectations !== undefined) {
+    const ids=flowExpectations?.floatingCaptionBlockIds, captions=layoutProfile?.captions;
+    const removeUnique=(stream,value,allowRepresentations=false)=>{
+      const matches=[];
+      for(let at=0;at<stream.length;at++) {
+        if(at && stream[at-1]!==' ') continue;
+        const match=allowRepresentations ? representationComparison(value,stream.slice(at),true) : {matches:stream.startsWith(value,at),consumed:value.length,differences:[]};
+        const end=at+match.consumed;
+        if(match.matches && (end===stream.length || stream[end]===' ')) matches.push({at,end,differences:match.differences});
+      }
+      if(matches.length!==1) return null;
+      const match=matches[0];return {stream:normalize(stream.slice(0,match.at)+' '+stream.slice(match.end)),differences:match.differences};
+    };
+    if(Array.isArray(ids) && ids.length && new Set(ids).size===ids.length && Array.isArray(captions)) {
+      let left=expected,right=observed,reason=null;
+      for(const id of ids) {
+        const block=expectedBlocks.find(b=>b.id===id), declarations=captions.filter(c=>c.id===id), observations=layoutQuality.captionObservations?.filter(c=>c.id===id && c.status==='observed');
+        const value=block && normalize(Object.hasOwn(edits,id)?edits[id]:block.text);
+        if(!value || declarations.length!==1 || normalize(declarations[0].text||'')!==value || observations?.length!==1) {reason='Caption declaration or independent image association is ambiguous or unavailable.';break;}
+        const sourceCaption=removeUnique(left,value), outputCaption=removeUnique(right,value,true);
+        if(!sourceCaption || !outputCaption) {reason='Caption occurrence is missing or ambiguous.';break;}
+        left=sourceCaption.stream; right=outputCaption.stream;
+        flowDifferences.push(...outputCaption.differences.map(d=>({...d,scope:'caption',captionId:id})));
+      }
+      if(reason) flow={status:'unavailable',reason};
+      else {const body=representationComparison(left,right);flowMatches=body.matches; if(flowMatches) flowDifferences.push(...body.differences.map(d=>({...d,scope:'body-after-caption-removal'})));flow={status:flowMatches?'checked':'finding',comparison:'Ordered body after removing uniquely observed declared captions, allowing documented representation differences.'};}
+    } else flow={status:'unavailable',reason:'Invalid floating caption declarations.'};
+  }
+  return {flow, flowMatches, flowDifferences};
+}
+
+function inspectPageFurniture({content, viewport, frameSupported, furnitureValid, expectedFurniture, outputFurniture, bodyFrame, selectedSources, n, numPages, findings}) {
+    // Match only complete, upright text runs in a reserved vertical band. The
+    // map identifies an occurrence, but bytes and geometry establish its text.
+    const excluded = new Set();
+    let furnitureAssets = false;
+    if (furnitureValid) {
+      const records = content.items.map((item, index) => {
+        const t = item.transform, style = content.styles?.[item.fontName];
+        if (typeof item.str !== 'string' || !item.str.trim() || !frameSupported || !Array.isArray(t) || t.length !== 6 || !t.every(Number.isFinite) ||
+            !Number.isFinite(item.width) || item.width < 0 || !Number.isFinite(item.height) || item.height <= 0 || t[0] <= 0 || t[3] <= 0 || Math.abs(t[1]) > 1e-6 || Math.abs(t[2]) > 1e-6 || item.dir !== 'ltr' ||
+            !Number.isFinite(style?.ascent) || !Number.isFinite(style?.descent) || style.ascent < 0 || style.descent > 0) return null;
+        const [x,y] = viewport.convertToViewportPoint(t[4],t[5]);
+        return {index,item,x,y,top:y-style.ascent*item.height,bottom:y-style.descent*item.height};
+      });
+      const claimed = new Set(), mergedMarkers = new Set();
+      // PDF.js can merge adjacent independently placed furniture into one item.
+      // Claim it only when every mapped member and the entire extracted item agree.
+      const pageMarkers = outputFurniture.filter(m=>m?.page === n);
+      for (const run of records.filter(Boolean)) {
+        const group = pageMarkers.filter(m=>m.kind && Math.abs(m.y-run.top)<=Math.max(4,run.item.height) && m.x>=run.x-2 && m.x<run.x+run.item.width-0.01).sort((a,b)=>a.x-b.x);
+        if (group.length < 2 || Math.abs(group[0].x-run.x)>2 || group.some(m=>m.kind!==group[0].kind || m.sourcePage!==group[0].sourcePage)) continue;
+        const templates=group.map(m=>expectedFurniture.filter(t=>t.sourcePage===m.sourcePage && t.kind===m.kind && t.occurrences?.some(o=>(o.blockId||o.itemId)===m.id)));
+        if (templates.some(ts=>ts.length!==1 || !['text','counter'].includes(ts[0].entryKind))) continue;
+        const expected=templates.map(ts=>ts[0].entryKind==='counter' ? `${n} / ${numPages}` : ts[0].text);
+        // Independently anchored furniture can be merged by PDF.js with or
+        // without a synthetic separator. Verify all member text either way.
+        if (expected.some(t=>typeof t!=='string') || ![expected.join(' '),expected.join('')].some(text=>normalize(text)===normalize(run.item.str))) continue;
+        if (group[0].kind==='header' ? run.top<0 || run.bottom>bodyFrame.top : run.top<bodyFrame.bottom || run.bottom>viewport.height) continue;
+        excluded.add(run.index); claimed.add(run.index);
+        group.forEach(m=>mergedMarkers.add(m));
+      }
+      for (const marker of outputFurniture.filter(m => m?.page === n)) {
+        if (mergedMarkers.has(marker)) continue;
+        const matches = expectedFurniture.filter(t => t?.sourcePage === marker.sourcePage && t.kind === marker.kind &&
+          t.occurrences?.some(o => (o.blockId || o.itemId) === marker.id));
+        if (matches.length !== 1 || !['header','footer'].includes(marker.kind) || !Number.isFinite(marker.x) || !Number.isFinite(marker.y)) {
+          findings.push({code:'furniture-unavailable',pageIndex:n-1,reason:'Invalid or ambiguous furniture map entry.'}); continue;
+        }
+        const template = matches[0];
+        if (template.entryKind === 'asset') { furnitureAssets = true; continue; }
+        const target = template.entryKind === 'counter' ? `${n} / ${numPages}` : template.text;
+        if (typeof target !== 'string' || !normalize(target)) { findings.push({code:'furniture-unavailable',pageIndex:n-1,reason:'Furniture text unavailable.'}); continue; }
+        const candidates = [];
+        for (let i=0;i<records.length;i++) {
+          const first=records[i];
+          if (!first || Math.abs(first.x-marker.x)>2 || Math.abs(first.top-marker.y)>Math.max(4,first.item.height)) continue;
+          let value='', previousRun=null, indexes=[];
+          for (let j=i;j<records.length;j++) {
+            const run=records[j];
+            if (!run) { if (content.items[j]?.str?.trim()) break; continue; }
+            if (marker.kind === 'header' ? run.top < 0 || run.bottom > bodyFrame.top : run.top < bodyFrame.bottom || run.bottom > viewport.height) break;
+            if (previousRun && !/\s$/u.test(value) && !/^\s/u.test(run.item.str)) {
+              const dy=Math.abs(run.y-previousRun.y), h=Math.max(run.item.height,previousRun.item.height), gap=run.x-(previousRun.x+previousRun.item.width);
+              if (previousRun.item.hasEOL || dy>h*.5 || gap>=h*.3) value+=' ';
+              else if (dy>h*.1 || gap < -h*.1 || gap>h*.1) break;
+            }
+            value+=run.item.str; indexes.push(j); previousRun=run;
+            if (normalize(value) === normalize(target)) { candidates.push(indexes.slice()); break; }
+            if (normalize(value).length > normalize(target).length) break;
+          }
+        }
+        if (candidates.length !== 1 || candidates[0].some(i=>claimed.has(i))) {
+          findings.push({code:candidates.length ? 'ambiguous-furniture' : 'missing-furniture',pageIndex:n-1,id:marker.id}); continue;
+        }
+        for (const i of candidates[0]) { excluded.add(i); claimed.add(i); }
+      }
+      if (selectedSources) {
+        const sourcePage = selectedSources[n-1];
+        for (const marker of pageMarkers) if (marker.sourcePage !== sourcePage)
+          findings.push({code:'wrong-furniture-source',pageIndex:n-1,sourcePage:marker.sourcePage,expectedSourcePage:sourcePage});
+        for (const t of expectedFurniture.filter(t=>t.sourcePage===sourcePage)) {
+          for (const occurrence of t.occurrences || []) {
+            const id = occurrence.blockId || occurrence.itemId;
+            if (!pageMarkers.some(m=>m.sourcePage===sourcePage && m.kind===t.kind && m.id===id))
+              findings.push({code:'missing-furniture',pageIndex:n-1,id,sourcePage,reason:'Template occurrence has no output map entry.'});
+          }
+        }
+      }
+      for (const r of records) if (r && !excluded.has(r.index) && (r.bottom <= bodyFrame.top || r.top >= bodyFrame.bottom)) {
+        findings.push({code:'unexpected-margin-text',pageIndex:n-1,text:r.item.str});
+      }
+    }
+return {excluded, furnitureAssets};
+}
+
 export async function checkRecomposition({bytes, expectedBlocks, edits = {}, pdfjs, exporter, mupdf, expectedFurniture, outputFurniture, bodyFrame, blockSpans, layoutProfile, flowExpectations, sourceBytes, sourcePageIndexes} = {}) {
   if (!(bytes instanceof Uint8Array) || !bytes.length || !pdfjs?.getDocument) throw new TypeError('PDF bytes and PDF.js are required');
   if (!Array.isArray(expectedBlocks) || !expectedBlocks.length || expectedBlocks.some(b => typeof b.id !== 'string' || typeof b.text !== 'string') || new Set(expectedBlocks.map(b => b.id)).size !== expectedBlocks.length) throw new TypeError('unique expected blocks are required');
@@ -64,86 +182,9 @@ export async function checkRecomposition({bytes, expectedBlocks, edits = {}, pdf
       const frameSupported = viewport.rotation === 0 && Array.isArray(frame) && frame.length === 6 && frame.every(Number.isFinite) &&
         frame[0] === 1 && frame[1] === 0 && frame[2] === 0 && frame[3] === -1 &&
         Number.isFinite(viewport.width) && Number.isFinite(viewport.height) && viewport.width > 0 && viewport.height > 0;
-      // Match only complete, upright text runs in a reserved vertical band. The
-      // map identifies an occurrence, but bytes and geometry establish its text.
-      const excluded = new Set();
-      if (furnitureValid) {
-        const records = content.items.map((item, index) => {
-          const t = item.transform, style = content.styles?.[item.fontName];
-          if (typeof item.str !== 'string' || !item.str.trim() || !frameSupported || !Array.isArray(t) || t.length !== 6 || !t.every(Number.isFinite) ||
-              !Number.isFinite(item.width) || item.width < 0 || !Number.isFinite(item.height) || item.height <= 0 || t[0] <= 0 || t[3] <= 0 || Math.abs(t[1]) > 1e-6 || Math.abs(t[2]) > 1e-6 || item.dir !== 'ltr' ||
-              !Number.isFinite(style?.ascent) || !Number.isFinite(style?.descent) || style.ascent < 0 || style.descent > 0) return null;
-          const [x,y] = viewport.convertToViewportPoint(t[4],t[5]);
-          return {index,item,x,y,top:y-style.ascent*item.height,bottom:y-style.descent*item.height};
-        });
-        const claimed = new Set(), mergedMarkers = new Set();
-        // PDF.js can merge adjacent independently placed furniture into one item.
-        // Claim it only when every mapped member and the entire extracted item agree.
-        const pageMarkers = outputFurniture.filter(m=>m?.page === n);
-        for (const run of records.filter(Boolean)) {
-          const group = pageMarkers.filter(m=>m.kind && Math.abs(m.y-run.top)<=Math.max(4,run.item.height) && m.x>=run.x-2 && m.x<run.x+run.item.width-0.01).sort((a,b)=>a.x-b.x);
-          if (group.length < 2 || Math.abs(group[0].x-run.x)>2 || group.some(m=>m.kind!==group[0].kind || m.sourcePage!==group[0].sourcePage)) continue;
-          const templates=group.map(m=>expectedFurniture.filter(t=>t.sourcePage===m.sourcePage && t.kind===m.kind && t.occurrences?.some(o=>(o.blockId||o.itemId)===m.id)));
-          if (templates.some(ts=>ts.length!==1 || !['text','counter'].includes(ts[0].entryKind))) continue;
-          const expected=templates.map(ts=>ts[0].entryKind==='counter' ? `${n} / ${doc.numPages}` : ts[0].text);
-          // Independently anchored furniture can be merged by PDF.js with or
-          // without a synthetic separator. Verify all member text either way.
-          if (expected.some(t=>typeof t!=='string') || ![expected.join(' '),expected.join('')].some(text=>normalize(text)===normalize(run.item.str))) continue;
-          if (group[0].kind==='header' ? run.top<0 || run.bottom>bodyFrame.top : run.top<bodyFrame.bottom || run.bottom>viewport.height) continue;
-          excluded.add(run.index); claimed.add(run.index);
-          group.forEach(m=>mergedMarkers.add(m));
-        }
-        for (const marker of outputFurniture.filter(m => m?.page === n)) {
-          if (mergedMarkers.has(marker)) continue;
-          const matches = expectedFurniture.filter(t => t?.sourcePage === marker.sourcePage && t.kind === marker.kind &&
-            t.occurrences?.some(o => (o.blockId || o.itemId) === marker.id));
-          if (matches.length !== 1 || !['header','footer'].includes(marker.kind) || !Number.isFinite(marker.x) || !Number.isFinite(marker.y)) {
-            findings.push({code:'furniture-unavailable',pageIndex:n-1,reason:'Invalid or ambiguous furniture map entry.'}); continue;
-          }
-          const template = matches[0];
-          if (template.entryKind === 'asset') { furnitureAssets = true; continue; }
-          const target = template.entryKind === 'counter' ? `${n} / ${doc.numPages}` : template.text;
-          if (typeof target !== 'string' || !normalize(target)) { findings.push({code:'furniture-unavailable',pageIndex:n-1,reason:'Furniture text unavailable.'}); continue; }
-          const candidates = [];
-          for (let i=0;i<records.length;i++) {
-            const first=records[i];
-            if (!first || Math.abs(first.x-marker.x)>2 || Math.abs(first.top-marker.y)>Math.max(4,first.item.height)) continue;
-            let value='', previousRun=null, indexes=[];
-            for (let j=i;j<records.length;j++) {
-              const run=records[j];
-              if (!run) { if (content.items[j]?.str?.trim()) break; continue; }
-              if (marker.kind === 'header' ? run.top < 0 || run.bottom > bodyFrame.top : run.top < bodyFrame.bottom || run.bottom > viewport.height) break;
-              if (previousRun && !/\s$/u.test(value) && !/^\s/u.test(run.item.str)) {
-                const dy=Math.abs(run.y-previousRun.y), h=Math.max(run.item.height,previousRun.item.height), gap=run.x-(previousRun.x+previousRun.item.width);
-                if (previousRun.item.hasEOL || dy>h*.5 || gap>=h*.3) value+=' ';
-                else if (dy>h*.1 || gap < -h*.1 || gap>h*.1) break;
-              }
-              value+=run.item.str; indexes.push(j); previousRun=run;
-              if (normalize(value) === normalize(target)) { candidates.push(indexes.slice()); break; }
-              if (normalize(value).length > normalize(target).length) break;
-            }
-          }
-          if (candidates.length !== 1 || candidates[0].some(i=>claimed.has(i))) {
-            findings.push({code:candidates.length ? 'ambiguous-furniture' : 'missing-furniture',pageIndex:n-1,id:marker.id}); continue;
-          }
-          for (const i of candidates[0]) { excluded.add(i); claimed.add(i); }
-        }
-        if (selectedSources) {
-          const sourcePage = selectedSources[n-1];
-          for (const marker of pageMarkers) if (marker.sourcePage !== sourcePage)
-            findings.push({code:'wrong-furniture-source',pageIndex:n-1,sourcePage:marker.sourcePage,expectedSourcePage:sourcePage});
-          for (const t of expectedFurniture.filter(t=>t.sourcePage===sourcePage)) {
-            for (const occurrence of t.occurrences || []) {
-              const id = occurrence.blockId || occurrence.itemId;
-              if (!pageMarkers.some(m=>m.sourcePage===sourcePage && m.kind===t.kind && m.id===id))
-                findings.push({code:'missing-furniture',pageIndex:n-1,id,sourcePage,reason:'Template occurrence has no output map entry.'});
-            }
-          }
-        }
-        for (const r of records) if (r && !excluded.has(r.index) && (r.bottom <= bodyFrame.top || r.top >= bodyFrame.bottom)) {
-          findings.push({code:'unexpected-margin-text',pageIndex:n-1,text:r.item.str});
-        }
-      }
+      const furniture = inspectPageFurniture({content, viewport, frameSupported, furnitureValid, expectedFurniture, outputFurniture, bodyFrame, selectedSources, n, numPages:doc.numPages, findings});
+      const excluded = furniture.excluded;
+      furnitureAssets ||= furniture.furnitureAssets;
       for (const [itemIndex, item] of content.items.entries()) {
         if (typeof item.str !== 'string') continue;
         const t = item.transform, style = content.styles?.[item.fontName];
@@ -251,35 +292,7 @@ export async function checkRecomposition({bytes, expectedBlocks, edits = {}, pdf
   const observed = normalize(pages.join(' '));
   const expected = normalize(expectedBlocks.map(b => Object.hasOwn(edits,b.id) ? edits[b.id] : b.text).join(' '));
   const layoutQuality=inspectLayoutQuality({bytes,mupdf,profile:layoutProfile,sourceBytes,sourcePageIndexes});
-  let flow={status:'not-requested'}, flowMatches=false, flowDifferences=[];
-  if(flowExpectations !== undefined) {
-    const ids=flowExpectations?.floatingCaptionBlockIds, captions=layoutProfile?.captions;
-    const removeUnique=(stream,value,allowRepresentations=false)=>{
-      const matches=[];
-      for(let at=0;at<stream.length;at++) {
-        if(at && stream[at-1]!==' ') continue;
-        const match=allowRepresentations ? representationComparison(value,stream.slice(at),true) : {matches:stream.startsWith(value,at),consumed:value.length,differences:[]};
-        const end=at+match.consumed;
-        if(match.matches && (end===stream.length || stream[end]===' ')) matches.push({at,end,differences:match.differences});
-      }
-      if(matches.length!==1) return null;
-      const match=matches[0];return {stream:normalize(stream.slice(0,match.at)+' '+stream.slice(match.end)),differences:match.differences};
-    };
-    if(Array.isArray(ids) && ids.length && new Set(ids).size===ids.length && Array.isArray(captions)) {
-      let left=expected,right=observed,reason=null;
-      for(const id of ids) {
-        const block=expectedBlocks.find(b=>b.id===id), declarations=captions.filter(c=>c.id===id), observations=layoutQuality.captionObservations?.filter(c=>c.id===id && c.status==='observed');
-        const value=block && normalize(Object.hasOwn(edits,id)?edits[id]:block.text);
-        if(!value || declarations.length!==1 || normalize(declarations[0].text||'')!==value || observations?.length!==1) {reason='Caption declaration or independent image association is ambiguous or unavailable.';break;}
-        const sourceCaption=removeUnique(left,value), outputCaption=removeUnique(right,value,true);
-        if(!sourceCaption || !outputCaption) {reason='Caption occurrence is missing or ambiguous.';break;}
-        left=sourceCaption.stream; right=outputCaption.stream;
-        flowDifferences.push(...outputCaption.differences.map(d=>({...d,scope:'caption',captionId:id})));
-      }
-      if(reason) flow={status:'unavailable',reason};
-      else {const body=representationComparison(left,right);flowMatches=body.matches; if(flowMatches) flowDifferences.push(...body.differences.map(d=>({...d,scope:'body-after-caption-removal'})));flow={status:flowMatches?'checked':'finding',comparison:'Ordered body after removing uniquely observed declared captions, allowing documented representation differences.'};}
-    } else flow={status:'unavailable',reason:'Invalid floating caption declarations.'};
-  }
+  const {flow, flowMatches, flowDifferences} = compareFloatingCaptions({flowExpectations, layoutProfile, layoutQuality, expected, observed, expectedBlocks, edits});
   const representation=representationComparison(expected,observed);
   const reportedDifferences=representation.matches ? representation.differences : flowMatches ? flowDifferences : [];
   if (!representation.matches && !flowMatches) findings.push({code:'content-mismatch', expected, observed});
