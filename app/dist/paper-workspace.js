@@ -508,7 +508,7 @@
     let external=null, externalRevision=0, draftTimer=null,combineIds=new Set(),suppressExternalPaint=false,proposalInputs=new Map();
     let editMode='text',tableCtl=null,tableSeq=0,tableBindings=new Map();
     let inspectCtl=null,resumeCtl=null,afterPart=0,afterSourcePage=0;
-    let page=1,pages=0,zoom=1,drawSeq=0,afterSeq=0,loadTask=null,textLayerHandle=null,genCtl=null,genId=0,generating=false,afterTask=null,afterRender=null;
+    let page=1,pages=0,zoom=1,drawSeq=0,afterSeq=0,loadTask=null,loadTimer=null,textLayerHandle=null,genCtl=null,genId=0,generating=false,afterTask=null,afterRender=null;
     let beforeMarks=null,afterMarks=null,compareFocus=null,afterCache=null,afterCacheKey=null,generator=null,generatorVersion=0,candidatePreview=null,candidateMarks=null;
     const showChanges=doc.querySelector('#paper-show-changes'),changeStatus=doc.querySelector('#paper-change-status');
     function syncChangeVisibility(){for(const stage of [ui.beforeStage,ui.afterStage])stage.classList.toggle('is-changes-hidden',showChanges?.checked===false);}
@@ -894,6 +894,7 @@
     function stopPdf(){
       clearTables(true);
       drawSeq++;
+      if(loadTimer!==null){timers.clearTimeout(loadTimer);loadTimer=null;}
       if(resumeCtl){resumeCtl.abort();resumeCtl=null;}
       if(inspectCtl){inspectCtl.abort();inspectCtl=null;}
       try{source&&source.render&&source.render.cancel&&source.render.cancel();}catch{}
@@ -983,9 +984,11 @@
       setStatus('PDF를 이 브라우저에서 여는 중입니다.');
       let settled=false;
       const timer=timers.setTimeout(()=>{
+        if(loadTimer===timer)loadTimer=null;
         if(epoch!==mine||settled)return;settled=true;stopPdf();
         setStatus('60초 안에 PDF를 열지 못해 쪽 보기를 멈췄습니다. 원본 다운로드는 사용할 수 있습니다.',true);
       },60000);
+      loadTimer=timer;
       try{
         const lib=await preview.defaultImport();
         if(epoch!==mine||settled)return;
@@ -995,13 +998,13 @@
         loadTask=task;
         const pdf=await task.promise;
         if(epoch!==mine||settled)return;
-        settled=true;timers.clearTimeout(timer);
+        settled=true;timers.clearTimeout(timer);if(loadTimer===timer)loadTimer=null;
         source.doc=pdf;pages=pdf.numPages;renderChrome();
         setStatus('');
         await drawBefore(1,mine);
       }catch(e){
         if(epoch!==mine||settled)return;
-        settled=true;timers.clearTimeout(timer);
+        settled=true;timers.clearTimeout(timer);if(loadTimer===timer)loadTimer=null;
         const name=e&&e.name;
         const msg=name==='PasswordException'?'암호가 걸린 PDF라 쪽을 그리지 못했습니다.':name==='InvalidPDFException'?'PDF 구조를 읽지 못해 쪽을 그리지 못했습니다.':'이 브라우저에서 쪽을 그리지 못했습니다.';
         setStatus(msg+' 원본 다운로드는 사용할 수 있습니다.',true);

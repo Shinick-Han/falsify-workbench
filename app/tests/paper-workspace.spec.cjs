@@ -1313,7 +1313,7 @@ test('source blob writes wait for transaction completion and reuse their connect
 });
 
 test('dispose and remount detach input listeners and reject stale source',async()=>{
-  const v=mount({hold:true});v.file(pdfFile(pdfBytes('MARKER-A')));await until(()=>v.log.tasks.length,'pending load');v.ws.dispose();assert.equal(v.ws.getSource(),null);
+  const v=mount({hold:true});v.file(pdfFile(pdfBytes('MARKER-A')));await until(()=>v.log.tasks.length,'pending load');assert.equal(v.long.filter(Boolean).length,1);v.ws.dispose();assert.equal(v.long.filter(Boolean).length,0);assert.equal(v.ws.getSource(),null);
   const next=api.create({document:v.document,edits:v.edits,storage:v.storage,sourceBlobs:v.sourceBlobs,subtle:crypto.subtle,timers:{setTimeout,clearTimeout},urls:URL,preview:{pdfParams:Preview.pdfParams,fitScale:Preview.fitScale,defaultImport:async()=>v.lib}});
   v.file(pdfFile(pdfBytes('MARKER-B')));await until(()=>v.log.tasks.length>=2,'new load');v.log.tasks.at(-1).open();await until(()=>next.getSource()?.fileHash===sha(pdfBytes('MARKER-B')),'new source');assert.equal(v.ws.getSource(),null);assert.equal(v.log.tasks.length,2);next.dispose();
 });
