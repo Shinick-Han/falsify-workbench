@@ -430,3 +430,9 @@ Cursor Grok 4.7 xhigh fast 작업자를 코어·출력·UI·독립 QA·후속 �
 배포 중 Intel용 pikepdf 바이너리 설치를 10.13.0.post1 플랫폼 조건으로 수정했다. POSIX에서 짧은 communicate 제한 뒤 stdin 일부가 남는 교착은 단일 전송과 별도 취소 감시로 해결했다. 실제 지연 입력·취소·시간 제한 3개 회귀 검사를 추가했고 모든 플랫폼에서 통과했다. 미리보기 테스트가 비활성 적용 버튼을 누르던 비동기 순서도 준비 완료를 기다리도록 수정했다.
 
 최종 영수증은 소스 밖 coordination/chart-oss-benchmark-20261103/accuracy-v2/shape-implementation/release-alpha49-published/deployment-status.json에 보관했다. 검증된 WorkBite T-0152에 wb.checkpoint.T0152.20261104.alpha49-deployed로 committed를 확인했다. 포장용 Git worktree는 StorageGuardian이 외부 Git 객체 의존성으로 등록을 거절해 그대로 보존한다. 이 문서의 배포 영수증은 로컬 조율 기록이며 공개 릴리스 커밋을 변경하지 않는다.
+
+## 2026-11-04 배포 후 PC 클릭 연결 실행 경로 복구
+
+사용자가 브라우저 로컬 네트워크 권한을 허용한 뒤 companion 로그 안내가 나오는 문제를 신고했다. 배포 조율자가 서버를 상대경로 app/local/server.py로 직접 시작한 것이 원인이었다. API는 정상 응답했지만 기존 연결 앱은 절대경로의 설치본만 재사용하므로 Foreign / script argument is not an absolute local path로 거절했다. 웹 배포와 API 검증만으로 클릭 페어링 완료까지 확인한 것으로 취급하지 않는다.
+
+실제 OS PID와 인증된 lifecycle descriptor의 PID·절대 serverPath·busy=false를 대조한 뒤 해당 배포 프로세스에만 정상 종료를 요청했다. 절대경로로 재실행하고 기존 Get-FalsifyPortOccupant=Owned, descriptor HTTP200, Test-FalsifyCompanionDescriptor 오류 없음까지 확인했다. 코드나 권한 검사를 완화하지 않았고 웹·ZIP의 alpha.49 커밋은 유지한다. 브라우저 재연결을 시작했으며 사용자 승인 이후 실제 paired 표시는 별도로 확인해야 한다. 이후 배포 시 API뿐 아니라 기존 연결 앱의 OS 소유권·descriptor 검사를 함께 확인한다.
