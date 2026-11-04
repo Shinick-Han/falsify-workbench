@@ -444,3 +444,17 @@ Cursor Grok 4.7 xhigh fast 작업자를 코어·출력·UI·독립 QA·후속 �
 첫 wave의 비동기 편집 소유권, 백엔드 실행 슬롯·응답 계약·오류 분류·런타임 캐시, 배포 자산·테스트 등록·ZIP 검증·문서 항목 11개를 독립 검토 뒤 통합했다. 편집 후보의 이전 finally가 새 실행을 해제할 수 있어 보완 작업자를 추가 배치했다. 나머지는 비교 화면·저장·해제 수명, Confluence 기한·동시 조회, native 연산 격리·검사, 재현 가능한 빌드·POSIX 재연결, 그래프 드래그·codec 분리, 실제 복잡한 함수의 책임 분리 순서로 진행한다.
 
 소스 밖 coordination/tech-debt-audit-20261105/implementation/debt-ledger.json이 항목별 승인·커밋·검사 영수증이다. 원본 감사는 보존한다. Lizard의 정규식 처리로 함수 범위가 잘못 잡힌 수치는 정정하고, 잘못된 지표를 낮추기 위한 코드 변경은 하지 않는다. WorkBite T-0152의 wb.checkpoint.T0152.20261105.debt-wave1은 committed다. 구현 통과와 원격 CI·공개 배포는 별도 상태로 기록한다.
+
+## 2026-11-05 기술 부채 상환 통합 결과
+
+감사 F01–F23과 후속 확인 F24–F25를 개발 브랜치 chore/tech-debt-20261105에 통합했다. Stackbite native Codex GPT-6.1 Terra high Fast 좌석을 파일 소유권으로 나누고, 독립 검토에서 발견한 회귀도 후속 작업자로 수정했다. 실행 슬롯 반환, 비동기 편집 소유권, 저장 transaction 수명, 비교 화면 정리, Confluence 전체 요청 기한·동시 조회, native PDF 작업 격리·취소, 재현 가능한 재구성 빌드, POSIX 재연결, 그래프 드래그와 JPEG codec 분리, 핵심 정책 함수 분리가 이번 상환 범위다.
+
+검토 중 추가로 확인한 개발 의존성 advisory 경로를 갱신해 cloud API npm audit 0을 확인했고, Node engine 요구사항을 고정 도구와 같은 22 이상으로 맞췄다. Windows 권한 명령의 지역화된 출력을 Python UTF-8 설정으로 해독하던 문제는 bytes 처리와 엄격한 ASCII SID 추출로 고쳤다. 두 native 명령에 각각 10초 기한을 두었으며, 멈춘 실제 자식 프로세스 회수와 다음 임시 권한 검사 성공을 일반·UTF-8 환경에서 각각 6개 검사로 확인했다. 실제 권한 검사는 유지한다.
+
+같은 AST 측정기를 감사 기준 0ec8f00과 통합 후보 양쪽에 적용한 핵심 CCN은 checkRecomposition 259→28, buildPaperFlow 227→13, _export_pdf 173→16, check_page 102→27, Handler.do_POST 85→29다. 중첩 함수는 별도로 센다. app/src·app/local의 변경 함수에 복잡도 증가 gate를 추가했고, 책임 분리 후의 함수별 감소를 전체 연산 감소나 저장소 전체 복잡도 0으로 표현하지 않는다. Lizard의 stripTextObjects 범위 오류는 코드를 불필요하게 변경하지 않고 측정 정정으로 남겼다.
+
+전체 Node 검사 1,111개 통과·8개 제외, cloud API 57개 통과와 독립 재검토를 기록했다. 이후 작업대의 남은 PDF 열기 타이머를 수정해 focused 62개를 통과했고, POST 분리는 core 45·document broker 17·HTTP 5개와 변경 전후 HTTP 14개 관찰값 일치로 확인했다. Aside에서 실제 브라우저 컴파일러와 PDF.js로 원본 1쪽·수정본 2쪽을 만들고 출력에만 있는 쪽의 원본 canvas·텍스트층 정리와 이전 쪽 복원을 확인했다. Windows PowerShell 7·5.1과 WSL POSIX 검사는 통과했다. macOS native 검사는 이번 로컬 환경에서 실행하지 않았다.
+
+Python 전체 958개 검사에서 950개 통과·시간 기준 1개 실패·7개 제외를 보존하며 전체 통과로 기록하지 않는다. 실패한 stdio 3개 단독 재검사와 editor 51개는 통과했다. 전체 실행의 Windows 출력 해독 오류는 후속 수정·집중 검사로 확인했고, UTF-8 관련 모듈의 HTTP 시간 초과 1건도 최초 실패와 단독 재검사 통과를 함께 남긴다. Paragraph runtime의 sourceBuildVerified=false는 남아 있는 빌드 검증 제약이다.
+
+항목별 상태·정확한 커밋·최종 ZIP SHA·검사 범위는 소스 밖 coordination/tech-debt-audit-20261105/implementation/final-validation.json, debt-ledger.json과 IMPLEMENTATION_REPORT.ko.html에 보관한다. 공개 웹·설치본·실행 중인 사용자 companion은 이번 작업에서 교체하지 않았다. WorkBite T-0152에는 관찰 가능한 checkpoint만 추가하며 전체 프로젝트 Task 완료 상태로 바꾸지 않는다.
