@@ -113,7 +113,19 @@ function isJpeg(bytes){return bytes&&bytes.length>=3&&bytes[0]===0xFF&&bytes[1]=
       while(bytes[offset]===0xFF)offset++;
       const mark=bytes[offset++];
       if(mark===0xD9)break;
-      if(mark===0xDA){
+      if(mark===0xDA)return readScan();
+      const length=readU16();
+      const end=offset+length-2;
+      if(end>bytes.length)throw err('jpeg');
+      if(mark===0xC0)readFrame();
+      else if(mark===0xC2||mark===0xC1||mark===0xC3)throw err('jpeg');
+      else if(mark===0xDB)readQuant(end);
+      else if(mark===0xC4)readHuffman(end);
+      else if(mark===0xDD)restart=(bytes[offset]<<8)|bytes[offset+1];
+      offset=end;
+    }
+    throw err('jpeg');
+    function readScan(){
         const length=readU16();
         const start=offset;
         const count=bytes[offset++];
@@ -122,11 +134,8 @@ function isJpeg(bytes){return bytes&&bytes.length>=3&&bytes[0]===0xFF&&bytes[1]=
         const ss=bytes[offset++],se=bytes[offset++],ah=bytes[offset++];
         if(ss!==0||se!==63||ah!==0||offset!==start+length-2)throw err('jpeg');
         return decodeScan(bytes,offset,frame,quant,huff,scan,restart);
-      }
-      const length=readU16();
-      const end=offset+length-2;
-      if(end>bytes.length)throw err('jpeg');
-      if(mark===0xC0){
+    }
+    function readFrame(){
         const precision=bytes[offset++],height=readU16(),width=readU16(),count=bytes[offset++];
         if(precision!==8||width<1||height<1||width*height>MAX_PIXELS||(count!==1&&count!==3))throw err('jpeg');
         const comps=[];let maxH=1,maxV=1;
@@ -138,8 +147,8 @@ function isJpeg(bytes){return bytes&&bytes.length>=3&&bytes[0]===0xFF&&bytes[1]=
           comps.push({id,h,v,q});
         }
         frame={width,height,comps,maxH,maxV};
-      }else if(mark===0xC2||mark===0xC1||mark===0xC3)throw err('jpeg');
-      else if(mark===0xDB){
+    }
+    function readQuant(end){
         while(offset<end){
           const id=bytes[offset++];
           if((id>>4)!==0||(id&15)>3)throw err('jpeg');
@@ -147,7 +156,8 @@ function isJpeg(bytes){return bytes&&bytes.length>=3&&bytes[0]===0xFF&&bytes[1]=
           for(let i=0;i<64;i++)table[ZIGZAG[i]]=bytes[offset++];
           quant[id&15]=table;
         }
-      }else if(mark===0xC4){
+    }
+    function readHuffman(end){
         while(offset<end){
           const id=bytes[offset++];
           const counts=[];let total=0;
@@ -157,10 +167,7 @@ function isJpeg(bytes){return bytes&&bytes.length>=3&&bytes[0]===0xFF&&bytes[1]=
           const table=buildHuff(counts,symbols);
           ((id>>4)?huff.ac:huff.dc)[id&15]=table;
         }
-      }else if(mark===0xDD)restart=(bytes[offset]<<8)|bytes[offset+1];
-      offset=end;
     }
-    throw err('jpeg');
     function readU16(){const value=(bytes[offset]<<8)|bytes[offset+1];offset+=2;return value;}
   }
   function decodeScan(bytes,offset,frame,quant,huff,scan,restart){
@@ -180,6 +187,10 @@ function isJpeg(bytes){return bytes&&bytes.length>=3&&bytes[0]===0xFF&&bytes[1]=
         reader.marker=-1;rst++;pred.clear();
       }
       index++;
+      const planes=decodePlanes();
+      paintMcu(planes,mx,my);
+    }
+    function decodePlanes(){
       const planes=[];
       for(const part of scan){
         const comp=byId.get(part.id);
@@ -196,6 +207,10 @@ function isJpeg(bytes){return bytes&&bytes.length>=3&&bytes[0]===0xFF&&bytes[1]=
         pred.set(comp.id,previous);
         planes.push({comp,data,v:comp.v});
       }
+
+      return planes;
+    }
+    function paintMcu(planes,mx,my){
       for(let py=0;py<mcuH;py++)for(let px=0;px<mcuW;px++){
         const x=mx*mcuW+px,y=my*mcuH+py;
         if(x>=frame.width||y>=frame.height)continue;
