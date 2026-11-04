@@ -28,10 +28,16 @@ def _span(page,rect):
     spans=[s for b in page.get_text('dict',clip=rect).get('blocks',[]) for l in b.get('lines',[]) for s in l.get('spans',[]) if s.get('text','').strip()]
     return max(spans,key=lambda s:len(s['text'])) if spans else {'font':'Helvetica','size':10,'color':0}
 
-def _font(doc,page,span,text,number):
-    import pymupdf as pdf
-    clean=lambda name:re.sub(r'^[A-Z]{6}\+','',name).replace(' ','').lower()
-    source=clean(span.get('font','Helvetica'));name='FVisual'+str(number)
+def _fallback_font_path(source,text):
+    root=Path(__file__).resolve().parents[1]/'dist'
+    serif=any(s in source for s in ('times','serif','roman','garamond'))
+    if any(ord(c)>0x2ff for c in text):path=root/'font-assets'/('NotoSerifCJKkr-Regular.otf' if serif else 'NotoSansCJKkr-Regular.otf')
+    elif serif:path=root/'font-assets'/('LiberationSerif-Bold.ttf' if 'bold' in source else 'LiberationSerif-Italic.ttf' if any(s in source for s in ('italic','oblique')) else 'LiberationSerif-Regular.ttf')
+    else:path=root/'recomposition-vendor'/('LiberationSans-Bold.ttf' if 'bold' in source else 'LiberationSans-Italic.ttf' if any(s in source for s in ('italic','oblique')) else 'LiberationSans-Regular.ttf')
+    return path
+
+
+def _embedded_font(doc,page,source,name,text,pdf,clean):
     for entry in page.get_fonts(full=True):
         if clean(entry[3])!=source or not entry[0]:continue
         try:
@@ -42,14 +48,19 @@ def _font(doc,page,span,text,number):
                 page.insert_font(fontname=name,fontbuffer=raw)
                 return name,False,font
         except (RuntimeError,ValueError):continue
+    return None
+
+
+def _font(doc,page,span,text,number):
+    import pymupdf as pdf
+    clean=lambda name:re.sub(r'^[A-Z]{6}\+','',name).replace(' ','').lower()
+    source=clean(span.get('font','Helvetica'));name='FVisual'+str(number)
+    embedded=_embedded_font(doc,page,source,name,text,pdf,clean)
+    if embedded is not None:return embedded
     base={'helvetica':'helv','helveticabold':'hebo','helvetica-bold':'hebo','helvetica-oblique':'heit','times-roman':'tiro','timesnewroman':'tiro','times-bold':'tibo','times-italic':'tiit','courier':'cour'}
     builtin=base.get(source)
     if builtin and all(ord(c)<256 or c.isspace() for c in text):return builtin,False,pdf.Font(fontname=builtin)
-    root=Path(__file__).resolve().parents[1]/'dist'
-    serif=any(s in source for s in ('times','serif','roman','garamond'))
-    if any(ord(c)>0x2ff for c in text):path=root/'font-assets'/('NotoSerifCJKkr-Regular.otf' if serif else 'NotoSansCJKkr-Regular.otf')
-    elif serif:path=root/'font-assets'/('LiberationSerif-Bold.ttf' if 'bold' in source else 'LiberationSerif-Italic.ttf' if any(s in source for s in ('italic','oblique')) else 'LiberationSerif-Regular.ttf')
-    else:path=root/'recomposition-vendor'/('LiberationSans-Bold.ttf' if 'bold' in source else 'LiberationSans-Italic.ttf' if any(s in source for s in ('italic','oblique')) else 'LiberationSans-Regular.ttf')
+    path=_fallback_font_path(source,text)
     font=pdf.Font(fontfile=str(path))
     if not all(c.isspace() or font.has_glyph(ord(c)) for c in text):fail('font_glyph_missing')
     page.insert_font(fontname=name,fontfile=str(path))
@@ -74,6 +85,34 @@ def _table_plan(op,store,paper_id,doc):
     page=doc[item['pageIndex']];public,rect=_view_box(page,cell['bbox'])
     return {'op':op,'pageIndex':item['pageIndex'],'public':public,'rect':rect,'span':_span(page,rect),'before':cell['text'],'after':after}
 
+def _snapshot_scenes(ops,default_service,paper_id,digest):
+    scenes = {}
+    with default_service.lock:
+        for op in ops:
+            if isinstance(op,dict) and op.get('kind') == 'chart-shape' and isinstance(op.get('plan'),dict):
+                plan=op['plan']; scene_id=plan.get('sceneId'); entry=default_service.scenes.get(scene_id)
+                if not entry or entry['expires'] <= default_service.clock(): raise ValueError('chart_scene_expired')
+                if entry['paperId'] != paper_id or entry['scene']['sourceFileHash'] != digest: fail('source_mismatch')
+                import copy
+                scenes[scene_id]=copy.deepcopy(entry)
+    return scenes
+
+
+def _validate_scene_snapshots(scenes,default_service):
+    for scene_id, entry in scenes.items():
+        current = default_service.scenes.get(scene_id)
+        if current != entry or current['expires'] <= default_service.clock(): raise ValueError('chart_scene_expired')
+
+
+def _snapshot_table_items(ops,store,paper_id):
+    items = {}
+    for op in ops:
+        if isinstance(op,dict) and op.get('kind') == 'table-cell':
+            item_id = op.get('itemId')
+            items[item_id] = store.read_item(paper_id,item_id)
+    return items
+
+
 def export_visual(request,*,store=None,cancelled=None):
     """Snapshot authorized source and selected bindings before native child work."""
     from paper_evidence import default_store
@@ -88,20 +127,8 @@ def export_visual(request,*,store=None,cancelled=None):
     try: raw = store.source_bytes(paper_id,digest)
     except KeyError: fail('source_expired')
     if sha(raw) != digest: fail('source_mismatch')
-    items = {}
-    for op in ops:
-        if isinstance(op,dict) and op.get('kind') == 'table-cell':
-            item_id = op.get('itemId')
-            items[item_id] = store.read_item(paper_id,item_id)
-    scenes = {}
-    with default_service.lock:
-        for op in ops:
-            if isinstance(op,dict) and op.get('kind') == 'chart-shape' and isinstance(op.get('plan'),dict):
-                plan=op['plan']; scene_id=plan.get('sceneId'); entry=default_service.scenes.get(scene_id)
-                if not entry or entry['expires'] <= default_service.clock(): raise ValueError('chart_scene_expired')
-                if entry['paperId'] != paper_id or entry['scene']['sourceFileHash'] != digest: fail('source_mismatch')
-                import copy
-                scenes[scene_id]=copy.deepcopy(entry)
+    items = _snapshot_table_items(ops,store,paper_id)
+    scenes = _snapshot_scenes(ops,default_service,paper_id,digest)
     result=run('visual_export', [request,raw,items,scenes], cancelled=cancelled, deadline=deadline)
     try: output=base64.b64decode(result['file'],validate=True)
     except (KeyError,ValueError,TypeError): raise ValueError('native_output_invalid') from None
@@ -110,9 +137,7 @@ def export_visual(request,*,store=None,cancelled=None):
     with _source_authority(store, paper_id, digest, raw):
         with default_service.lock:
             check(deadline, cancelled)
-            for scene_id, entry in scenes.items():
-                current = default_service.scenes.get(scene_id)
-                if current != entry or current['expires'] <= default_service.clock(): raise ValueError('chart_scene_expired')
+            _validate_scene_snapshots(scenes,default_service)
     return result
 
 def _source_authority(store, paper_id, digest, raw):
@@ -124,6 +149,26 @@ def _source_authority(store, paper_id, digest, raw):
         yield
     return authority()
 
+def _region_plan(op,store,paper_id,doc):
+    if set(op)-{'id','kind','assetKind','pageIndex','bbox','beforeImageSha256','png','dataChanges'} or op.get('assetKind') not in ('graph','figure'):fail('operation_invalid')
+    page_index=op.get('pageIndex')
+    if type(page_index) is not int or not 0<=page_index<len(doc):fail('page_invalid')
+    page=doc[page_index];public,rect=_view_box(page,op.get('bbox'))
+    before=store.render_region(paper_id,page_index,bbox=list(public),dpi=150)
+    if op.get('beforeImageSha256')!=before['sha256']:fail('image_mismatch')
+    png=_decode_png(op.get('png'))
+    try:encoded=json.dumps(op.get('dataChanges'),allow_nan=False,ensure_ascii=False)
+    except (ValueError,TypeError):fail('data_changes_invalid')
+    if len(encoded)>512000:fail('data_changes_limit')
+    plan={'op':op,'pageIndex':page_index,'public':public,'rect':rect,'png':png,'before':{'imageSha256':before['sha256']}}
+    return plan
+
+
+def _check_visual_overlap(plan,plans,shape_boxes,pdf):
+    if any(p['pageIndex']==plan['pageIndex'] and (p['public']&plan['public']).get_area()>.01 for p in plans):fail('operations_overlap')
+    if any(page==plan['pageIndex'] and (pdf.Rect(rect)&plan['public']).get_area()>.01 for page,rect in shape_boxes):fail('operations_overlap')
+
+
 def _plan_visual_operations(ops, store, paper_id, doc, shape_boxes, pdf):
     plans=[];ids=set()
     for op in ops:
@@ -134,30 +179,14 @@ def _plan_visual_operations(ops, store, paper_id, doc, shape_boxes, pdf):
             if set(op)-{'id','kind','itemId','row','column','before','after'}:fail('operation_invalid')
             plan=_table_plan(op,store,paper_id,doc)
         elif op.get('kind')=='region':
-            if set(op)-{'id','kind','assetKind','pageIndex','bbox','beforeImageSha256','png','dataChanges'} or op.get('assetKind') not in ('graph','figure'):fail('operation_invalid')
-            page_index=op.get('pageIndex')
-            if type(page_index) is not int or not 0<=page_index<len(doc):fail('page_invalid')
-            page=doc[page_index];public,rect=_view_box(page,op.get('bbox'))
-            before=store.render_region(paper_id,page_index,bbox=list(public),dpi=150)
-            if op.get('beforeImageSha256')!=before['sha256']:fail('image_mismatch')
-            png=_decode_png(op.get('png'))
-            try:encoded=json.dumps(op.get('dataChanges'),allow_nan=False,ensure_ascii=False)
-            except (ValueError,TypeError):fail('data_changes_invalid')
-            if len(encoded)>512000:fail('data_changes_limit')
-            plan={'op':op,'pageIndex':page_index,'public':public,'rect':rect,'png':png,'before':{'imageSha256':before['sha256']}}
+            plan=_region_plan(op,store,paper_id,doc)
         else:fail('operation_invalid')
-        if any(p['pageIndex']==plan['pageIndex'] and (p['public']&plan['public']).get_area()>.01 for p in plans):fail('operations_overlap')
-        if any(page==plan['pageIndex'] and (pdf.Rect(rect)&plan['public']).get_area()>.01 for page,rect in shape_boxes):fail('operations_overlap')
+        _check_visual_overlap(plan,plans,shape_boxes,pdf)
         plans.append(plan)
     return plans
 
 
-def _apply_visual_cell(doc, page, plan, number, record, issues, pdf):
-    op=plan['op'];rect=plan['rect']
-    span=plan['span'];font,substituted,font_metrics=_font(doc,page,span,plan['after'],number)
-    # Redact only glyphs; leave table rules and images untouched.
-    page.add_redact_annot(rect,fill=False,cross_out=False)
-    page.apply_redactions(images=0,graphics=0,text=0)
+def _cell_target(rect,span,pdf):
     inset=min(2,rect.width*.03,rect.height*.06)
     target=pdf.Rect(rect.x0+inset,rect.y0+inset,rect.x1-inset,rect.y1-inset)
     align=0
@@ -171,6 +200,16 @@ def _apply_visual_cell(doc, page, plan, number, record, issues, pdf):
         elif right_gap<left_gap:
             align=2;target.x1=rect.x1-right_gap
         else:target.x0=rect.x0+left_gap
+    return target,align
+
+
+def _apply_visual_cell(doc, page, plan, number, record, issues, pdf):
+    op=plan['op'];rect=plan['rect']
+    span=plan['span'];font,substituted,font_metrics=_font(doc,page,span,plan['after'],number)
+    # Redact only glyphs; leave table rules and images untouched.
+    page.add_redact_annot(rect,fill=False,cross_out=False)
+    page.apply_redactions(images=0,graphics=0,text=0)
+    target,align=_cell_target(rect,span,pdf)
     size=max(5,min(float(span.get('size',10)),target.height*.7));original_size=size
     color=span.get('color',0);color=((color>>16&255)/255,(color>>8&255)/255,(color&255)/255)
     fitted=not plan['after']
@@ -215,6 +254,16 @@ def _apply_visual_plans(doc, plans, changes, issues, pdf):
         changes.append(record)
 
 
+def _verify_saved_plan(saved,plan,issues):
+    if plan['op']['kind']=='table-cell' and plan['before']!=plan['after'] and plan['after']:
+        if plan['pageIndex']>=len(saved) or normalize(plan['after']) not in normalize(saved[plan['pageIndex']].get_text('text',clip=plan['rect'])):
+            issues.append({'id':plan['op']['id'],'code':'saved-after-text-unconfirmed'})
+    if plan['op']['kind']=='region':
+        image=saved[plan['pageIndex']].get_pixmap(clip=plan['public'],dpi=150,alpha=False).tobytes('png')
+        if sha(image)!=plan['renderedSha256']:
+            issues.append({'id':plan['op']['id'],'code':'saved-image-unconfirmed'})
+
+
 def _verify_visual_saved(original, output, regions, plans, issues, pdf):
     checks=[]
     try:
@@ -225,13 +274,7 @@ def _verify_visual_saved(original, output, regions, plans, issues, pdf):
             checks.extend(['outside-region-text','outside-region-pixels'])
         with pdf.open(stream=output,filetype='pdf') as saved:
             for plan in plans:
-                if plan['op']['kind']=='table-cell' and plan['before']!=plan['after'] and plan['after']:
-                    if plan['pageIndex']>=len(saved) or normalize(plan['after']) not in normalize(saved[plan['pageIndex']].get_text('text',clip=plan['rect'])):
-                        issues.append({'id':plan['op']['id'],'code':'saved-after-text-unconfirmed'})
-                if plan['op']['kind']=='region':
-                    image=saved[plan['pageIndex']].get_pixmap(clip=plan['public'],dpi=150,alpha=False).tobytes('png')
-                    if sha(image)!=plan['renderedSha256']:
-                        issues.append({'id':plan['op']['id'],'code':'saved-image-unconfirmed'})
+                _verify_saved_plan(saved,plan,issues)
         if any(p['op']['kind']=='table-cell' and p['before']!=p['after'] for p in plans): checks.append('saved-cell-text')
         if any(p['op']['kind']=='region' for p in plans): checks.append('saved-image-render')
     except Exception:
@@ -239,24 +282,17 @@ def _verify_visual_saved(original, output, regions, plans, issues, pdf):
     return checks
 
 
-def _export_visual_native(request,*,store=None):
-    import pymupdf as pdf
-    from paper_evidence import default_store
-    store=store if store is not None else default_store
+def _validate_visual_request(request):
     if not isinstance(request,dict) or set(request)-{'schema','paperId','fileHash','revision','operations'} or request.get('schema')!=SCHEMA:fail('request_invalid')
     digest=request.get('fileHash');paper_id=request.get('paperId');revision=request.get('revision')
     if not isinstance(digest,str) or not HEX.fullmatch(digest) or not isinstance(paper_id,str) or not 1<=len(paper_id)<=160:fail('source_invalid')
     if not isinstance(revision,(str,int)) or isinstance(revision,bool) or len(str(revision))>200:fail('revision_invalid')
     ops=request.get('operations')
     if not isinstance(ops,list) or not 1<=len(ops)<=24:fail('operation_limit')
-    try:raw=store.source_bytes(paper_id,digest)
-    except KeyError:fail('source_expired')
-    if sha(raw)!=digest:fail('source_mismatch')
-    original=raw
-    seen_ids=set()
-    for op in ops:
-        if not isinstance(op,dict) or not isinstance(op.get('id'),str) or not 1<=len(op['id'])<=80 or op['id'] in seen_ids:fail('operation_invalid')
-        seen_ids.add(op['id'])
+    return digest,paper_id,revision,ops
+
+
+def _apply_shape_ops(ops,paper_id,digest,raw,pdf):
     shape_ops=[op for op in ops if isinstance(op,dict) and op.get('kind')=='chart-shape']
     shape_changes=[];shape_issues=[];shape_boxes=[]
     if shape_ops:
@@ -271,21 +307,42 @@ def _export_visual_native(request,*,store=None):
                 shape_boxes.append((change['pageIndex'],change['bbox']))
             raw=base64.b64decode(result['file'],validate=True)
             shape_changes.extend(result['changes']);shape_issues.extend(result['verification']['issues'])
+    return raw,shape_ops,shape_changes,shape_issues,shape_boxes
+
+
+def _shape_only_result(original,raw,digest,shape_boxes,shape_changes,shape_issues,pdf):
+    with pdf.open(stream=raw,filetype='pdf') as check:count=len(check)
+    checks=[]
+    try:
+        from paper_native_worker import run
+        shape_issues.extend(run('verify', [original, raw, shape_boxes]))
+        checks=['page-count']
+        if not any(issue.get('code')=='page-count-changed' for issue in shape_issues):
+            checks.extend(['outside-region-text','outside-region-pixels'])
+    except Exception:
+        shape_issues.append({'code':'source-preservation-check-failed'})
+    return {'schema':'falsify.visual-edit-export.v1','sourceSha256':digest,'outputSha256':sha(raw),
+        'file':base64.b64encode(raw).decode('ascii'),'pageCount':count,'changes':shape_changes,
+        'verification':{'status':'warning' if shape_issues else 'passed','issues':shape_issues,'pageCount':count,
+            'checks':checks,'scope':'source-preservation'}}
+
+
+def _export_visual_native(request,*,store=None):
+    import pymupdf as pdf
+    from paper_evidence import default_store
+    store=store if store is not None else default_store
+    digest,paper_id,revision,ops=_validate_visual_request(request)
+    try:raw=store.source_bytes(paper_id,digest)
+    except KeyError:fail('source_expired')
+    if sha(raw)!=digest:fail('source_mismatch')
+    original=raw
+    seen_ids=set()
+    for op in ops:
+        if not isinstance(op,dict) or not isinstance(op.get('id'),str) or not 1<=len(op['id'])<=80 or op['id'] in seen_ids:fail('operation_invalid')
+        seen_ids.add(op['id'])
+    raw,shape_ops,shape_changes,shape_issues,shape_boxes=_apply_shape_ops(ops,paper_id,digest,raw,pdf)
     if shape_ops and len(shape_ops)==len(ops):
-        with pdf.open(stream=raw,filetype='pdf') as check:count=len(check)
-        checks=[]
-        try:
-            from paper_native_worker import run
-            shape_issues.extend(run('verify', [original, raw, shape_boxes]))
-            checks=['page-count']
-            if not any(issue.get('code')=='page-count-changed' for issue in shape_issues):
-                checks.extend(['outside-region-text','outside-region-pixels'])
-        except Exception:
-            shape_issues.append({'code':'source-preservation-check-failed'})
-        return {'schema':'falsify.visual-edit-export.v1','sourceSha256':digest,'outputSha256':sha(raw),
-            'file':base64.b64encode(raw).decode('ascii'),'pageCount':count,'changes':shape_changes,
-            'verification':{'status':'warning' if shape_issues else 'passed','issues':shape_issues,'pageCount':count,
-                'checks':checks,'scope':'source-preservation'}}
+        return _shape_only_result(original,raw,digest,shape_boxes,shape_changes,shape_issues,pdf)
     doc=pdf.open(stream=raw,filetype='pdf');plans=[];ids=set();issues=list(shape_issues);changes=list(shape_changes)
     try:
         source_pages=len(doc)
