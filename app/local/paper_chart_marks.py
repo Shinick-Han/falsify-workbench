@@ -149,6 +149,35 @@ def _new_sub(state):
     return {'ops': [], 'ctm': state['ctm'], 'complex': False}
 
 
+def _mark_graphics(word, operands, state, note_ctm):
+    if word == 'cm':
+        nums = paint._nums(operands, 6)
+        if nums:
+            state['ctm'] = paint._mul(tuple(item[2] for item in nums), state['ctm'])
+            note_ctm()
+    elif word == 'rg':
+        nums = paint._nums(operands, 3)
+        if nums:
+            state['fill'] = tuple(item[2] for item in nums)
+            state['known'] = True
+    elif word == 'g':
+        nums = paint._nums(operands, 1)
+        if nums:
+            state['fill'] = (nums[0][2], nums[0][2], nums[0][2])
+            state['known'] = True
+    elif word == 'k':
+        fill = _cmyk(operands)
+        if fill:
+            state['fill'] = fill
+            state['known'] = True
+    elif word == 'ca':
+        nums = paint._nums(operands, 1)
+        if nums:
+            state['opacity'] = nums[0][2]
+    elif word in ('scn', 'SCN', 'sc', 'SC'):
+        state['known'] = False
+
+
 def _parse_stream(pk, tokens, display_tm, content_index):
     state, stack = _gstate(), []
     current, subs = None, []
@@ -169,42 +198,24 @@ def _parse_stream(pk, tokens, display_tm, content_index):
         if current is not None and any(abs(left - right) > 1e-6 for left, right in zip(current['ctm'], state['ctm'])):
             current['complex'] = True
 
-    for word, operands, op_index in paint._commands(pk, tokens):
-        if word == 'q':
-            close_sub()
-            stack.append(_copy_state(state))
-            subs = []
-        elif word == 'Q' and stack:
-            close_sub()
-            state = stack.pop()
-            subs = []
-        elif word == 'cm':
+    def cubic_command(operands, op_index):
+        if current is not None:
             nums = paint._nums(operands, 6)
             if nums:
-                state['ctm'] = paint._mul(tuple(item[2] for item in nums), state['ctm'])
                 note_ctm()
-        elif word == 'rg':
-            nums = paint._nums(operands, 3)
-            if nums:
-                state['fill'] = tuple(item[2] for item in nums)
-                state['known'] = True
-        elif word == 'g':
-            nums = paint._nums(operands, 1)
-            if nums:
-                state['fill'] = (nums[0][2], nums[0][2], nums[0][2])
-                state['known'] = True
-        elif word == 'k':
-            fill = _cmyk(operands)
-            if fill:
-                state['fill'] = fill
-                state['known'] = True
-        elif word == 'ca':
-            nums = paint._nums(operands, 1)
-            if nums:
-                state['opacity'] = nums[0][2]
-        elif word in ('scn', 'SCN', 'sc', 'SC'):
-            state['known'] = False
-        elif word == 'm':
+                current['ops'].append(('c', [(item[2], item[1]) for item in nums], op_index))
+
+    def rectangle_command(operands, op_index):
+        nums = paint._nums(operands, 4)
+        close_sub()
+        if nums:
+            ensure()
+            current['ops'].append(('re', [item[2] for item in nums], [item[1] for item in nums], op_index))
+            close_sub()
+
+    def path_command(word, operands, op_index):
+        nonlocal current
+        if word == 'm':
             nums = paint._nums(operands, 2)
             close_sub()
             if nums:
@@ -215,18 +226,10 @@ def _parse_stream(pk, tokens, display_tm, content_index):
             if nums:
                 note_ctm()
                 current['ops'].append(('l', nums[0][2], nums[1][2], nums[0][1], nums[1][1], op_index))
-        elif word == 'c' and current is not None:
-            nums = paint._nums(operands, 6)
-            if nums:
-                note_ctm()
-                current['ops'].append(('c', [(item[2], item[1]) for item in nums], op_index))
+        elif word == 'c':
+            cubic_command(operands, op_index)
         elif word == 're':
-            nums = paint._nums(operands, 4)
-            close_sub()
-            if nums:
-                ensure()
-                current['ops'].append(('re', [item[2] for item in nums], [item[1] for item in nums], op_index))
-                close_sub()
+            rectangle_command(operands, op_index)
         elif word == 'h':
             target = current if current and current['ops'] else (subs[-1] if subs else None)
             if target is not None:
@@ -234,6 +237,20 @@ def _parse_stream(pk, tokens, display_tm, content_index):
         elif word in ('v', 'y'):
             ensure()
             current['complex'] = True
+
+    for word, operands, op_index in paint._commands(pk, tokens):
+        if word == 'q':
+            close_sub()
+            stack.append(_copy_state(state))
+            subs = []
+        elif word == 'Q' and stack:
+            close_sub()
+            state = stack.pop()
+            subs = []
+        elif word in ('cm', 'rg', 'g', 'k', 'ca', 'scn', 'SCN', 'sc', 'SC'):
+            _mark_graphics(word, operands, state, note_ctm)
+        elif word in ('m', 'l', 'c', 're', 'h', 'v', 'y'):
+            path_command(word, operands, op_index)
         elif word in _END:
             close_sub()
             if word in _PAINT:
@@ -315,10 +332,18 @@ def _rect_from_path(ops, matrix):
     return {'mode': 'path', 'box': box, 'corners': stored, 'matrix': list(matrix)}
 
 
-def _circle_from_path(ops, matrix):
-    body = [op for op in ops if op[0] != 'h']
-    if len(body) != 5 or body[0][0] != 'm' or any(op[0] != 'c' for op in body[1:]):
-        return None
+def _valid_circle_controls(controls, ring, cx, cy, radius):
+    for index, (c1, c2, end) in enumerate(controls):
+        expected = _kappa_controls(ring[index], end, (cx, cy), radius)
+        if expected is None:
+            return False
+        limit = max(0.6, radius * 0.08)
+        if paint._dist(c1, expected[0]) > limit or paint._dist(c2, expected[1]) > limit:
+            return False
+    return True
+
+
+def _circle_parts(body):
     start = (body[0][1], body[0][2])
     curves = body[1:]
     ends = [start]
@@ -332,8 +357,21 @@ def _circle_from_path(ops, matrix):
         end = (nums[4][0], nums[5][0])
         controls.append((c1, c2, end))
         ends.append(end)
-    if paint._dist(ends[-1], start) > _EDGE:
+    return start, curves, ends, controls
+
+
+def _circle_display(ring, matrix):
+    shown = [_map(matrix, point) for point in ring]
+    sxs = [point[0] for point in shown]
+    sys = [point[1] for point in shown]
+    rx = (max(sxs) - min(sxs)) / 2.0
+    ry = (max(sys) - min(sys)) / 2.0
+    if abs(rx - ry) > max(0.6, ((rx + ry) / 2.0) * 0.08):
         return None
+    return sxs, sys, rx, ry
+
+
+def _circle_geometry(ends):
     ring = ends[:4]
     cx = sum(point[0] for point in ring) / 4.0
     cy = sum(point[1] for point in ring) / 4.0
@@ -343,20 +381,26 @@ def _circle_from_path(ops, matrix):
         return None
     if max(abs(item - radius) for item in radii) > max(0.6, radius * 0.08):
         return None
-    for index, (c1, c2, end) in enumerate(controls):
-        expected = _kappa_controls(ring[index], end, (cx, cy), radius)
-        if expected is None:
-            return None
-        limit = max(0.6, radius * 0.08)
-        if paint._dist(c1, expected[0]) > limit or paint._dist(c2, expected[1]) > limit:
-            return None
-    shown = [_map(matrix, point) for point in ring]
-    sxs = [point[0] for point in shown]
-    sys = [point[1] for point in shown]
-    rx = (max(sxs) - min(sxs)) / 2.0
-    ry = (max(sys) - min(sys)) / 2.0
-    if abs(rx - ry) > max(0.6, ((rx + ry) / 2.0) * 0.08):
+    return ring, cx, cy, radius
+
+
+def _circle_from_path(ops, matrix):
+    body = [op for op in ops if op[0] != 'h']
+    if len(body) != 5 or body[0][0] != 'm' or any(op[0] != 'c' for op in body[1:]):
         return None
+    parts = _circle_parts(body)
+    if parts is None: return None
+    start, curves, ends, controls = parts
+    if paint._dist(ends[-1], start) > _EDGE:
+        return None
+    geometry = _circle_geometry(ends)
+    if geometry is None: return None
+    ring, cx, cy, radius = geometry
+    if not _valid_circle_controls(controls, ring, cx, cy, radius):
+        return None
+    display = _circle_display(ring, matrix)
+    if display is None: return None
+    sxs, sys, rx, ry = display
     center = _map(matrix, (cx, cy))
     # Rebuild operand axes from the actual number order, not from a parity guess.
     operands = [('x', body[0][3], body[0][1]), ('y', body[0][4], body[0][2])]
@@ -474,6 +518,40 @@ def _edge_group(groups, rect_index, coord):
     return None
 
 
+def _edge_candidates(axis, edges, groups, index, strokes, direction, start, end):
+    candidates = []
+    first, last = edges
+    for edge in edges:
+        group = _edge_group(groups, index, edge)
+        shared = bool(group and group['count'] >= 2)
+        near = _near_axis(strokes, direction, edge, start, end)
+        other = last if abs(edge - first) <= _EDGE else first
+        if (shared or near) and abs(other - edge) > _AXIS_HIT + _EDGE:
+            candidates.append((axis, edge, (2 if shared else 0) + (1 if near else 0)))
+    return candidates
+
+
+def _baseline_candidates(index, rect, horizontal, vertical, strokes):
+    x0, y0, x1, y1 = rect['box']
+    candidates = []
+    candidates.extend(_edge_candidates('y', (y0,y1), horizontal, index, strokes, 'h', x0, x1))
+    candidates.extend(_edge_candidates('x', (x0,x1), vertical, index, strokes, 'v', y0, y1))
+    if not candidates:
+        candidates.append(('y', y1, 0))
+    return candidates
+
+
+def _baseline_geometry(axis, baseline, rect):
+    x0, y0, x1, y1 = rect['box']
+    if axis == 'y':
+        value = y0 if abs(y0 - baseline) > abs(y1 - baseline) else y1
+        center, width = (x0 + x1) / 2.0, x1 - x0
+    else:
+        value = x0 if abs(x0 - baseline) > abs(x1 - baseline) else x1
+        center, width = (y0 + y1) / 2.0, y1 - y0
+    return value, center, width
+
+
 def _assign_baselines(rects, strokes):
     horizontal = _clusters([(rect['box'][1], index) for index, rect in enumerate(rects)]
                            + [(rect['box'][3], index) for index, rect in enumerate(rects)])
@@ -482,23 +560,7 @@ def _assign_baselines(rects, strokes):
     kept = []
     for index, rect in enumerate(rects):
         x0, y0, x1, y1 = rect['box']
-        candidates = []
-        for edge in (y0, y1):
-            group = _edge_group(horizontal, index, edge)
-            shared = bool(group and group['count'] >= 2)
-            near = _near_axis(strokes, 'h', edge, x0, x1)
-            other = y1 if abs(edge - y0) <= _EDGE else y0
-            if (shared or near) and abs(other - edge) > _AXIS_HIT + _EDGE:
-                candidates.append(('y', edge, (2 if shared else 0) + (1 if near else 0)))
-        for edge in (x0, x1):
-            group = _edge_group(vertical, index, edge)
-            shared = bool(group and group['count'] >= 2)
-            near = _near_axis(strokes, 'v', edge, y0, y1)
-            other = x1 if abs(edge - x0) <= _EDGE else x0
-            if (shared or near) and abs(other - edge) > _AXIS_HIT + _EDGE:
-                candidates.append(('x', edge, (2 if shared else 0) + (1 if near else 0)))
-        if not candidates:
-            candidates.append(('y', y1, 0))
+        candidates = _baseline_candidates(index, rect, horizontal, vertical, strokes)
         best = max(item[2] for item in candidates)
         tied = [item for item in candidates if item[2] == best]
         axes = {item[0] for item in tied}
@@ -506,12 +568,7 @@ def _assign_baselines(rects, strokes):
         if len(axes) > 1 or len(coords) > 1:
             continue
         axis, baseline, _score = tied[0]
-        if axis == 'y':
-            value = y0 if abs(y0 - baseline) > abs(y1 - baseline) else y1
-            center, width = (x0 + x1) / 2.0, x1 - x0
-        else:
-            value = x0 if abs(x0 - baseline) > abs(x1 - baseline) else x1
-            center, width = (y0 + y1) / 2.0, y1 - y0
+        value, center, width = _baseline_geometry(axis, baseline, rect)
         if abs(value - baseline) < _MIN_EDGE:
             continue
         rect['axis'] = axis
@@ -872,21 +929,27 @@ def _check(source, scene):
         raise ValueError('bad-page')
 
 
+def _series_points_changed(left, right, eps):
+    changed = False
+    if left.get('kind') not in ('bar', 'scatter') or right.get('kind') != left.get('kind'):
+        raise ValueError('bad-scene')
+    lp, rp = left.get('points') or [], right.get('points') or []
+    if len(lp) != len(rp) or len(lp) != len(left.get('sourceBinding', {}).get('marks') or []):
+        raise ValueError('point-topology')
+    for a, b in zip(lp, rp):
+        if not _finite(b.get('x')) or not _finite(b.get('y')):
+            raise ValueError('bad-scene')
+        if abs(float(a['x']) - float(b['x'])) > eps or abs(float(a['y']) - float(b['y'])) > eps:
+            changed = True
+    return changed
+
+
 def _same_points(original, edited, eps=1e-3):
     if [item.get('id') for item in original] != [item.get('id') for item in edited]:
         raise ValueError('point-topology')
     changed = False
     for left, right in zip(original, edited):
-        if left.get('kind') not in ('bar', 'scatter') or right.get('kind') != left.get('kind'):
-            raise ValueError('bad-scene')
-        lp, rp = left.get('points') or [], right.get('points') or []
-        if len(lp) != len(rp) or len(lp) != len(left.get('sourceBinding', {}).get('marks') or []):
-            raise ValueError('point-topology')
-        for a, b in zip(lp, rp):
-            if not _finite(b.get('x')) or not _finite(b.get('y')):
-                raise ValueError('bad-scene')
-            if abs(float(a['x']) - float(b['x'])) > eps or abs(float(a['y']) - float(b['y'])) > eps:
-                changed = True
+        if _series_points_changed(left, right, eps): changed = True
     return not changed
 
 
@@ -987,6 +1050,28 @@ def _scene_box(scene):
     return [float(value) for value in box], float(dpi)
 
 
+def _edit_mark_series(series, edited_by_id, streams, bbox, dpi, edits, changed):
+    current = edited_by_id.get(series.get('id'))
+    if current is None:
+        raise ValueError('point-topology')
+    bindings = series['sourceBinding']['marks']
+    series_changed = False
+    for mark, before, after in zip(bindings, series['points'], current['points']):
+        if abs(float(before['x']) - float(after['x'])) <= 1e-3 and abs(float(before['y']) - float(after['y'])) <= 1e-3:
+            continue
+        if mark['content'] >= len(streams):
+            raise ValueError('mark-not-found')
+        tokens = streams[mark['content']]
+        bucket = edits.setdefault(mark['content'], {'replacements': {}, 'drops': set()})
+        if series['kind'] == 'bar':
+            wrote = _rewrite_bar(mark, after, bbox, dpi, bucket['replacements'], tokens)
+        else:
+            wrote = _rewrite_scatter(mark, after, bbox, dpi, bucket['replacements'], tokens)
+        series_changed = series_changed or wrote
+    if series_changed:
+        changed.append(series['id'])
+
+
 def export_marks(source, scene, edited):
     """Rewrite bound bar and scatter operands. Identical points return the original bytes."""
     if not isinstance(source, (bytes, bytearray)):
@@ -1006,25 +1091,7 @@ def export_marks(source, scene, edited):
     changed = []
     edited_by_id = {item.get('id'): item for item in edited['series']}
     for series in original:
-        current = edited_by_id.get(series.get('id'))
-        if current is None:
-            raise ValueError('point-topology')
-        bindings = series['sourceBinding']['marks']
-        series_changed = False
-        for mark, before, after in zip(bindings, series['points'], current['points']):
-            if abs(float(before['x']) - float(after['x'])) <= 1e-3 and abs(float(before['y']) - float(after['y'])) <= 1e-3:
-                continue
-            if mark['content'] >= len(streams):
-                raise ValueError('mark-not-found')
-            tokens = streams[mark['content']]
-            bucket = edits.setdefault(mark['content'], {'replacements': {}, 'drops': set()})
-            if series['kind'] == 'bar':
-                wrote = _rewrite_bar(mark, after, bbox, dpi, bucket['replacements'], tokens)
-            else:
-                wrote = _rewrite_scatter(mark, after, bbox, dpi, bucket['replacements'], tokens)
-            series_changed = series_changed or wrote
-        if series_changed:
-            changed.append(series['id'])
+        _edit_mark_series(series, edited_by_id, streams, bbox, dpi, edits, changed)
     if not any(edit['replacements'] for edit in edits.values()):
         return raw, _report(True, [], 'unchanged')
     output = _apply_streams(raw, scene['pageIndex'], streams, edits)
