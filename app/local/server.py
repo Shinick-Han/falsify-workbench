@@ -499,7 +499,12 @@ class Handler(BaseHTTPRequestHandler):
                 job = {'id': request_id, 'role': role, 'state': 'running', 'progress': {'completedCalls': 0}, 'cancel': threading.Event(),
                     'fingerprint': fingerprint, 'requestBytesDigest': body_digest, 'created': time.monotonic(), **binding}
                 JOBS[request_id] = job
-                threading.Thread(target=work, args=(job, data), daemon=True).start()
+                try:
+                    threading.Thread(target=work, args=(job, data), daemon=True).start()
+                except Exception:
+                    JOBS.pop(request_id, None)
+                    ACTIVE.release()
+                    raise
             self.reply(202, {'id': request_id, 'state': 'running'})
         except ValueError as error: self.reply(400, {'error': str(error)})
         except Exception: self.reply(500, {'error': '로컬 처리 오류. 파일/설치 상태를 확인하세요.'})

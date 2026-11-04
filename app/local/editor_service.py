@@ -293,7 +293,7 @@ class PdfEditorService:
         # Source-only edit plan, built in an isolated child before the editor runs; failure degrades to 'unavailable'.
         self.planner = planner or paper_inventory.plan_isolated
         self._lock = threading.Lock()
-        self._cap, self._cap_at, self._node = None, None, None
+        self._cap, self._cap_at, self._node, self._fingerprint = None, None, None, None
         self.leftovers = []
 
     @property
@@ -338,15 +338,44 @@ class PdfEditorService:
                 'build': str(runtime.get('build'))[:80] if runtime.get('build') is not None else None}}
         return cap, node
 
-    def capability(self, refresh=False):
-        """Truthful probe: loads the verified runtime and instantiates WASM; opens no PDF and starts no agent."""
+    def _runtime_fingerprint(self):
+        # Candidate artifacts have fixed names adjacent to the manifest. Content hashes
+        # detect replacements even when timestamps and lengths are preserved.
+        paths = (self.config.manifest, self.config.manifest.parent / 'editcore.js',
+                 self.config.manifest.parent / 'editcore.wasm', self.bridge)
+        values = []
+        for path in paths:
+            try:
+                with path.open('rb') as stream:
+                    digest = hashlib.sha256()
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b''): digest.update(chunk)
+                values.append(digest.hexdigest())
+            except OSError: values.append(None)
+        node = self.config.node or shutil.which('node')
+        try:
+            stat = Path(node).stat()
+            values.append((node, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
+        except (OSError, TypeError): values.append(None)
+        return tuple(values)
+
+    def _capability_snapshot(self, refresh=False):
         with self._lock:
             now = self.clock()
-            if not refresh and self._cap is not None and (self._cap['available'] or now - self._cap_at < self.retry_seconds):
-                return json.loads(json.dumps(self._cap))
-            self._cap, self._node = self._probe()
-            self._cap_at = now
-            return json.loads(json.dumps(self._cap))
+            fingerprint = self._runtime_fingerprint()
+            if (not refresh and self._cap is not None and fingerprint == self._fingerprint
+                    and now - self._cap_at < self.retry_seconds):
+                return json.loads(json.dumps(self._cap)), self._node, fingerprint
+            cap, node = self._probe()
+            if fingerprint != self._runtime_fingerprint():
+                # Do not cache a probe that observed an installation mid-update.
+                self._cap = None
+                return self._unavailable('probe_failed'), None, None
+            self._cap, self._node, self._fingerprint, self._cap_at = cap, node, fingerprint, now
+            return json.loads(json.dumps(cap)), node, fingerprint
+
+    def capability(self, refresh=False):
+        """Probe the verified runtime and cache only while its installation is unchanged."""
+        return self._capability_snapshot(refresh)[0]
 
     def _invalidate(self):
         with self._lock: self._cap = None
@@ -360,10 +389,9 @@ class PdfEditorService:
 
     def export(self, data):
         raw, edits, draft_mode = validate_export(data)
-        cap = self.capability()
+        cap, node, fingerprint = self._capability_snapshot()
         if not cap['available']:
             raise ValueError(f"PDF 편집기를 사용할 수 없습니다 ({cap['error']['code']}): {cap['error']['message']} {NO_FALLBACK}")
-        node = self._node
         directory = Path(tempfile.mkdtemp(prefix='falsify-editor-'))
         names = {'source': 'source.pdf', 'request': 'request.json', 'out': 'output.pdf', 'report': 'report.json'}
         paths = {k: directory / v for k, v in names.items()}
@@ -381,17 +409,28 @@ class PdfEditorService:
             except OSError:
                 self._invalidate()
                 raise ValueError(f"{PROBE_MESSAGES['node_missing']} {NO_FALLBACK}") from None
+            if fingerprint != self._runtime_fingerprint():
+                self._invalidate()
+                raise ValueError(f'PDF 편집기 런타임이 작업 중 바뀌었습니다. {NO_FALLBACK}')
             if hashlib.sha256(paths['source'].read_bytes()).hexdigest() != data['fileHash']: raise ValueError(f'편집기 입력 파일이 바뀌었습니다. {NO_FALLBACK}')
             report = self._read_report(paths['report'])
             try: status = _single_json(result.stdout or b'')
             except (ValueError, UnicodeDecodeError): raise ValueError(f'PDF 편집기 응답 형식 오류. {NO_FALLBACK}') from None
             if result.returncode != 0 or status.get('ok') is not True:
                 if draft_mode and _preserves_draft(status, report, paths['out']):
-                    return self._result(data, edits, cap, report, paths['out'], paths['source'], plan, draft=True)
+                    output = self._result(data, edits, cap, report, paths['out'], paths['source'], plan, draft=True)
+                    if fingerprint != self._runtime_fingerprint():
+                        self._invalidate()
+                        raise ValueError(f'PDF 편집기 런타임이 작업 중 바뀌었습니다. {NO_FALLBACK}')
+                    return output
                 error = (report or {}).get('error') if isinstance((report or {}).get('error'), dict) else {}
                 code = next((c for c in [error.get('code'), status.get('code')] if isinstance(c, str) and CODE.fullmatch(c)), 'EDITOR_FAILED')
                 raise ValueError(f'PDF 편집기가 변경을 적용하지 못했습니다 ({code}).{_refusal_reasons(report)} {NO_FALLBACK}')
-            return self._result(data, edits, cap, report, paths['out'], paths['source'], plan)
+            output = self._result(data, edits, cap, report, paths['out'], paths['source'], plan)
+            if fingerprint != self._runtime_fingerprint():
+                self._invalidate()
+                raise ValueError(f'PDF 편집기 런타임이 작업 중 바뀌었습니다. {NO_FALLBACK}')
+            return output
         finally: self._cleanup(directory, names.values())
 
     def _edit_plan(self, source, source_hash, edits):
@@ -434,7 +473,14 @@ class PdfEditorService:
             self_check = report['selfCheck']
         if report.get('outputSha256') != output_hash: raise fail('출력 해시 불일치')
         runtime = report.get('runtime') if isinstance(report.get('runtime'), dict) else {}
-        if runtime.get('wasmSha256') != cap['wasmSha256']: raise fail('확인된 런타임과 다른 WASM')
+        if runtime.get('wasmSha256') != cap['wasmSha256']:
+            self._invalidate()
+            raise fail('확인된 런타임과 다른 WASM')
+        for key in ('jsSha256', 'manifestSha256'):
+            expected = cap.get('runtime', {}).get(key)
+            if expected and runtime.get(key) and runtime[key] != expected:
+                self._invalidate()
+                raise fail('확인된 런타임과 다른 구성')
         if not draft:
             applied = report.get('edits') if isinstance(report.get('edits'), list) else []
             if [(e.get('id'), e.get('pageIndex'), e.get('status')) for e in applied if isinstance(e, dict)] != [(e['id'], e['pageIndex'], 'applied') for e in edits]:

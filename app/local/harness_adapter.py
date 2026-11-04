@@ -65,16 +65,21 @@ def check_first_party_settings(harness):
             if current != recorded: raise AdapterFailure('settings_mismatch')
 
 def validate_shape(value, schema):
-    kind = schema.get('type')
-    if kind == 'object':
-        if not isinstance(value, dict) or set(value) != set(schema['properties']): raise ValueError('adapter 출력 객체 필드 오류')
-        for k, v in value.items(): validate_shape(v, schema['properties'][k])
-    elif kind == 'array':
-        if not isinstance(value, list) or not schema.get('minItems', 0) <= len(value) <= schema.get('maxItems', 10000): raise ValueError('adapter 출력 배열 제한')
-        for v in value: validate_shape(v, schema['items'])
-    elif kind == 'string' and not isinstance(value, str): raise ValueError('adapter 출력 문자열 필요')
-    elif kind == 'integer' and type(value) is not int: raise ValueError('adapter 출력 정수 필요')
-    if 'enum' in schema and value not in schema['enum']: raise ValueError('adapter 출력 enum 오류')
+    # The CLI uses the same draft and local validation; keep adapter failures fixed and private.
+    from jsonschema import Draft202012Validator
+    from jsonschema.exceptions import ValidationError, SchemaError
+    try:
+        Draft202012Validator.check_schema(schema)
+        Draft202012Validator(schema).validate(value)
+    except (ValidationError, SchemaError) as error:
+        raise ValueError('adapter 출력 schema 오류') from error
+
+
+def cli_failure(code):
+    codes = {'chatgpt_login_required': 'auth_required', 'subscription_login_required': 'auth_required',
+             'FileNotFoundError': 'executable_missing', 'timeout': 'timeout', 'output_limit': 'invalid_output',
+             'response_not_object': 'invalid_output', 'protocol_violation': 'invalid_output'}
+    return AdapterFailure(codes.get(code, 'unknown'))
 
 def invocation(harness, prompt, schema, call, max_calls):
     return {'schema': 'falsify.harness-invocation.v1', 'role': harness['role'],

@@ -1,6 +1,7 @@
 """Fresh bounded BLUE reads: only supplied modified text, never RED plans/gold."""
 import json
 import hashlib
+from harness_adapter import cli_failure
 from harness import resolve, guidance, backend, model_label, builtin, record
 from red_service import (CodexBackend, ClaudeBackend, strict_object, STRING, EVIDENCE, SCAN,
                          evidence_check, validate_request as validate_document)
@@ -243,7 +244,7 @@ def run_review(data, progress, cancelled, backend_factory=CodexBackend, claude_f
         else:
             result = engine.infer(prompt, schema)
         if cancelled.is_set(): raise ValueError('BLUE 취소됨. 결과 폐기')
-        if result['status'] != 'ok': raise ValueError('CLI BLUE 중단: ' + str(result.get('error_code') or result['status']))
+        if result['status'] != 'ok': raise cli_failure(result.get('error_code') or result['status'])
         response = result['response']
         if images and schema is RESULT:
             observations = response.get('visualObservations', [])

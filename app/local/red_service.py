@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from experiments.selfplay_codex import CodexBackend
 from cli_backend import ClaudeBackend
+from harness_adapter import cli_failure
 from harness import resolve, guidance, backend, model_label, builtin, record
 
 VERSION = 'falsify.document-red.v1'
@@ -120,7 +121,7 @@ def run_review(data, progress, cancelled, backend_factory=CodexBackend, claude_f
         calls += 1; progress({'completedCalls': calls - 1, 'requiredCalls': required, 'phase': '검토 중'})
         result = engine.infer(prompt, schema)
         if cancelled.is_set(): raise ValueError('취소됨. 결과는 폐기했습니다.')
-        if result['status'] != 'ok': raise ValueError('CLI 검토 중단: ' + str(result.get('error_code') or result['status']))
+        if result['status'] != 'ok': raise cli_failure(result.get('error_code') or result['status'])
         return result['response']
     notesTrimmed = False
     if len(chunks) > 1:
