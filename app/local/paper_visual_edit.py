@@ -74,7 +74,41 @@ def _table_plan(op,store,paper_id,doc):
     page=doc[item['pageIndex']];public,rect=_view_box(page,cell['bbox'])
     return {'op':op,'pageIndex':item['pageIndex'],'public':public,'rect':rect,'span':_span(page,rect),'before':cell['text'],'after':after}
 
-def export_visual(request,*,store=None):
+def export_visual(request,*,store=None,cancelled=None):
+    """Snapshot authorized source and selected bindings before native child work."""
+    from paper_evidence import default_store
+    from paper_chart_edit_service import default_service
+    from paper_native_worker import run
+    store = store if store is not None else default_store
+    if not isinstance(request,dict) or request.get('schema') != SCHEMA: fail('request_invalid')
+    paper_id, digest, ops = request.get('paperId'), request.get('fileHash'), request.get('operations')
+    if not isinstance(paper_id,str) or not isinstance(digest,str) or not HEX.fullmatch(digest): fail('source_invalid')
+    if not isinstance(ops,list) or not 1 <= len(ops) <= 24: fail('operation_limit')
+    try: raw = store.source_bytes(paper_id,digest)
+    except KeyError: fail('source_expired')
+    if sha(raw) != digest: fail('source_mismatch')
+    items = {}
+    for op in ops:
+        if isinstance(op,dict) and op.get('kind') == 'table-cell':
+            item_id = op.get('itemId')
+            items[item_id] = store.read_item(paper_id,item_id)
+    scenes = {}
+    with default_service.lock:
+        for op in ops:
+            if isinstance(op,dict) and op.get('kind') == 'chart-shape' and isinstance(op.get('plan'),dict):
+                plan=op['plan']; scene_id=plan.get('sceneId'); entry=default_service.scenes.get(scene_id)
+                if not entry or entry['expires'] <= default_service.clock(): raise ValueError('chart_scene_expired')
+                if entry['paperId'] != paper_id or entry['scene']['sourceFileHash'] != digest: fail('source_mismatch')
+                import copy
+                scenes[scene_id]=copy.deepcopy(entry)
+    result=run('visual_export', [request,raw,items,scenes], cancelled=cancelled)
+    try: output=base64.b64decode(result['file'],validate=True)
+    except (KeyError,ValueError,TypeError): raise ValueError('native_output_invalid') from None
+    if len(output)>50*1024*1024 or sha(output)!=result.get('outputSha256') or result.get('sourceSha256')!=digest:
+        raise ValueError('native_output_invalid')
+    return result
+
+def _export_visual_native(request,*,store=None):
     import pymupdf as pdf
     from paper_evidence import default_store
     store=store if store is not None else default_store
@@ -108,10 +142,19 @@ def export_visual(request,*,store=None):
             shape_changes.extend(result['changes']);shape_issues.extend(result['verification']['issues'])
     if shape_ops and len(shape_ops)==len(ops):
         with pdf.open(stream=raw,filetype='pdf') as check:count=len(check)
-        if len({op.get('id') for op in ops})!=len(ops):fail('operation_invalid')
+        checks=[]
+        try:
+            from paper_native_worker import run
+            shape_issues.extend(run('verify', [original, raw, shape_boxes]))
+            checks=['page-count']
+            if not any(issue.get('code')=='page-count-changed' for issue in shape_issues):
+                checks.extend(['outside-region-text','outside-region-pixels'])
+        except Exception:
+            shape_issues.append({'code':'source-preservation-check-failed'})
         return {'schema':'falsify.visual-edit-export.v1','sourceSha256':digest,'outputSha256':sha(raw),
             'file':base64.b64encode(raw).decode('ascii'),'pageCount':count,'changes':shape_changes,
-            'verification':{'status':'warning' if shape_issues else 'passed','issues':shape_issues,'pageCount':count}}
+            'verification':{'status':'warning' if shape_issues else 'passed','issues':shape_issues,'pageCount':count,
+                'checks':checks,'scope':'source-preservation'}}
     doc=pdf.open(stream=raw,filetype='pdf');plans=[];ids=set();issues=list(shape_issues);changes=list(shape_changes)
     try:
         source_pages=len(doc)
@@ -191,6 +234,7 @@ def export_visual(request,*,store=None):
                 page.draw_rect(rect,color=None,fill=(1,1,1),overlay=True)
                 page.insert_image(rect,stream=plan['png'],keep_proportion=False,rotate=page.rotation,overlay=True)
                 image=page.get_pixmap(clip=public,dpi=150,alpha=False).tobytes('png')
+                plan['renderedSha256']=sha(image)
                 record.update(assetKind=op['assetKind'],after={'imageSha256':sha(image),'replacementSha256':sha(plan['png'])})
                 if op.get('dataChanges') is not None:record['dataChanges']=op['dataChanges']
             changes.append(record)
@@ -199,7 +243,8 @@ def export_visual(request,*,store=None):
         regions=shape_boxes+[(p['pageIndex'],list(p['public'])) for p in plans if p['op']['kind']!='table-cell' or p['before']!=p['after']]
         checks=[]
         try:
-            issues.extend(_verify_output(original,output,None,regions=regions))
+            from paper_native_worker import run
+            issues.extend(run('verify', [original,output,regions]))
             checks=['page-count']
             if not any(issue.get('code')=='page-count-changed' for issue in issues):
                 checks.extend(['outside-region-text','outside-region-pixels'])
@@ -208,7 +253,12 @@ def export_visual(request,*,store=None):
                     if plan['op']['kind']=='table-cell' and plan['before']!=plan['after'] and plan['after']:
                         if plan['pageIndex']>=len(saved) or normalize(plan['after']) not in normalize(saved[plan['pageIndex']].get_text('text',clip=plan['rect'])):
                             issues.append({'id':plan['op']['id'],'code':'saved-after-text-unconfirmed'})
-            checks.append('saved-cell-text')
+                    if plan['op']['kind']=='region':
+                        image=saved[plan['pageIndex']].get_pixmap(clip=plan['public'],dpi=150,alpha=False).tobytes('png')
+                        if sha(image)!=plan['renderedSha256']:
+                            issues.append({'id':plan['op']['id'],'code':'saved-image-unconfirmed'})
+            if any(p['op']['kind']=='table-cell' and p['before']!=p['after'] for p in plans): checks.append('saved-cell-text')
+            if any(p['op']['kind']=='region' for p in plans): checks.append('saved-image-render')
         except Exception:
             issues.append({'code':'source-preservation-check-failed'})
         return {'schema':'falsify.visual-edit-export.v1','sourceSha256':digest,'outputSha256':sha(output),

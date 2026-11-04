@@ -337,7 +337,7 @@ class EvidenceStore:
         self._seq = 0
         self._lock = threading.Lock()
 
-    def prepare(self, pdf_bytes, file_hash):
+    def prepare(self, pdf_bytes, file_hash, *, cancelled=None):
         raw = self._validated_pdf(pdf_bytes, file_hash)
         with self._lock:
             self._purge()
@@ -346,7 +346,10 @@ class EvidenceStore:
                 current['expires_at'] = self._clock() + self._ttl
                 current['summary']['expiresAt'] = _iso(current['expires_at'])
                 return copy.deepcopy(current['summary'])
-        record = self._extract(raw, file_hash)
+        from paper_native_worker import run
+        record = run('evidence_extract', [raw, file_hash], cancelled=cancelled)
+        if record.get('file_hash') != file_hash or record.get('pdf') != raw:
+            raise ValueError('native_output_invalid')
         with self._lock:
             self._purge()
             current = self._docs.get(self._by_hash.get(file_hash))
@@ -410,14 +413,14 @@ class EvidenceStore:
                     return body
         raise KeyError('item')
 
-    def render_region(self, paper_id, page_index, bbox=None, dpi=120):
-        return self._render(paper_id, page_index, bbox, dpi, MAX_PIXELS)
+    def render_region(self, paper_id, page_index, bbox=None, dpi=120, *, cancelled=None):
+        return self._render(paper_id, page_index, bbox, dpi, MAX_PIXELS, cancelled=cancelled)
 
-    def render_for_analysis(self, paper_id, page_index, bbox=None, dpi=200):
+    def render_for_analysis(self, paper_id, page_index, bbox=None, dpi=200, *, cancelled=None):
         """Higher resolution input for an isolated OCR/chart worker, not a new MCP image budget."""
-        return self._render(paper_id, page_index, bbox, dpi, 12_000_000)
+        return self._render(paper_id, page_index, bbox, dpi, 12_000_000, cancelled=cancelled)
 
-    def _render(self, paper_id, page_index, bbox, dpi, pixel_limit):
+    def _render(self, paper_id, page_index, bbox, dpi, pixel_limit, *, cancelled=None):
         if dpi is None:
             dpi = 120
         if type(page_index) is not int or page_index < 0:
@@ -431,19 +434,8 @@ class EvidenceStore:
             pages = record['summary']['pageCount']
         if page_index >= pages:
             raise ValueError('page_index')
-        doc = pymupdf.open(stream=raw, filetype='pdf')
-        try:
-            page = doc[page_index]
-            clip = self._clip(page.rect, bbox)
-            width, height = _pixel_size(clip, dpi)
-            if width * height > pixel_limit:
-                raise ValueError('pixels')
-            pix = page.get_pixmap(clip=pymupdf.Rect(clip), dpi=dpi, alpha=False)
-            if pix.width * pix.height > pixel_limit:
-                raise ValueError('pixels')
-            png, width, height = pix.tobytes('png'), pix.width, pix.height
-        finally:
-            doc.close()
+        from paper_native_worker import run
+        clip, png, width, height = run('evidence_render', [raw, page_index, bbox, dpi, pixel_limit], cancelled=cancelled)
         return {'paperId': paper, 'fileHash': file_hash, 'pageIndex': page_index, 'bbox': clip,
             'mimeType': 'image/png', 'data': base64.b64encode(png).decode('ascii'), 'sha256': _sha(png),
             'width': width, 'height': height}

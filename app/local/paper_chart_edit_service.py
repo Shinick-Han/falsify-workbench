@@ -137,7 +137,7 @@ class ChartEditService:
             raise ValueError('chart_source_mismatch')
         return raw
 
-    def prepare(self, data):
+    def prepare(self, data, *, cancelled=None):
         if not isinstance(data, dict) or set(data) - {'paperId', 'fileHash', 'pageIndex', 'bbox', 'options'}:
             raise ValueError('chart_prepare_invalid')
         paper_id, digest = data.get('paperId'), data.get('fileHash')
@@ -155,14 +155,12 @@ class ChartEditService:
             raise ValueError('chart_region_invalid')
         if (bbox[2]-bbox[0])*(bbox[3]-bbox[1])*(dpi/72)**2 > 16_000_000:
             raise ValueError('chart_region_invalid')
-        import pymupdf
-        with pymupdf.open(stream=raw, filetype='pdf') as doc:
-            if index >= len(doc) or not doc[index].rect.contains(pymupdf.Rect(bbox)):
-                raise ValueError('chart_region_invalid')
-        scene = _prepare_backend(raw, index, bbox, options=data.get('options'))
+        from paper_native_worker import run
+        scene = run('chart_prepare', [raw, index, bbox, options, None], cancelled=cancelled)
         scene = copy.deepcopy(scene)
         scene.update(schema='falsify.chart-scene.v1', sceneId=secrets.token_hex(16),
                      sourceFileHash=digest, pageIndex=index, bbox=bbox[:], revision=0)
+        if self._source(paper_id, digest) != raw: raise ValueError('chart_source_mismatch')
         now = self.clock()
         with self.lock:
             for key in list(self.scenes):
@@ -212,15 +210,10 @@ class ChartEditService:
         edited['revision'] = revision
         return raw, scene, edited
 
-    def preview(self, data):
+    def preview(self, data, *, cancelled=None):
         raw, scene, edited = self._plan(data)
-        from paper_chart_paint import render_scene, render_png
-        if scene.get('mode') == 'marks':
-            from paper_chart_marks import export_marks
-            output, report = export_marks(raw, scene, edited)
-            result = {'png':render_png(output, scene['pageIndex'], scene['bbox'], scene.get('dpi',72)), 'report':report}
-        else:
-            result = render_scene(raw, scene, edited)
+        from paper_native_worker import run
+        result = run('chart_preview', [raw, scene, edited], cancelled=cancelled)
         png = result['png'] if isinstance(result, dict) else result
         if not isinstance(png, bytes) or not png.startswith(b'\x89PNG\r\n\x1a\n'):
             raise ValueError('chart_preview_invalid')
@@ -229,44 +222,16 @@ class ChartEditService:
                 'image': _b64(png), 'sha256': _sha(png), 'scene': _public(edited),
                 'issues': result.get('issues', []) if isinstance(result, dict) else []}
 
-    def export(self, data, *, author='human', source_override=None):
+    def export(self, data, *, author='human', source_override=None, cancelled=None):
         raw, scene, edited = self._plan(data)
+        options = None
         if source_override is not None and source_override != raw:
-            # Previous disjoint graph edits can change stream identities. Bind this
-            # region anew, and require its source geometry to be unchanged.
             with self.lock:
-                options = copy.deepcopy(self.scenes[data['sceneId']]['options'])
-            fresh = _prepare_backend(source_override, scene['pageIndex'], scene['bbox'], options=options, preferred=scene.get('mode','curve'))
-            key = lambda s: json.dumps({'color': s.get('color'), 'style': s.get('style'),
-                'points': [[p['x'], p['y']] for p in s['points']]}, sort_keys=True)
-            original = {}
-            for i, series in enumerate(scene['series']):
-                original.setdefault(key(series), []).append(i)
-            fresh_edited = copy.deepcopy(fresh)
-            if len(fresh['series']) != len(scene['series']):
-                raise ValueError('chart_region_changed')
-            for i, current in enumerate(fresh['series']):
-                matches = original.get(key(current), [])
-                if not matches:
-                    raise ValueError('chart_region_changed')
-                index = matches.pop(0)
-                fresh_edited['series'][i]['points'] = copy.deepcopy(edited['series'][index]['points'])
-            raw, paint_scene, paint_edited = source_override, fresh, fresh_edited
-        else:
-            paint_scene, paint_edited = scene, edited
-        if paint_scene.get('mode') == 'marks':
-            from paper_chart_marks import export_marks
-            output, report = export_marks(raw, paint_scene, paint_edited)
-        else:
-            from paper_chart_paint import export_scene
-            output, report = export_scene(raw, paint_scene, paint_edited)
-        if not isinstance(output, bytes) or not output.startswith(b'%PDF-'):
-            raise ValueError('chart_export_invalid')
-        import pymupdf
-        with pymupdf.open(stream=output, filetype='pdf') as doc:
-            pages = len(doc)
-        issues = list(report.get('issues', [])) if isinstance(report, dict) else []
-        issues.extend(_verify_output(raw, output, paint_scene))
+                entry = self.scenes.get(data['sceneId'])
+                if not entry or entry['expires'] <= self.clock(): raise ValueError('chart_scene_expired')
+                options = copy.deepcopy(entry['options'])
+        from paper_native_worker import run
+        output, report, pages, issues = run('chart_export', [raw, scene, edited, source_override, options], cancelled=cancelled)
         changes = [] if scene['series'] == edited['series'] else [{
             'id': 'chart-' + scene['sceneId'], 'kind': 'chart-shape', 'assetKind': 'graph',
             'pageIndex': scene['pageIndex'], 'bbox': scene['bbox'], 'author': author,

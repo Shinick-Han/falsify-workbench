@@ -49,6 +49,15 @@ class ChartEditServiceTests(unittest.TestCase):
             'paper_chart_shape_core': core_module, 'paper_chart_paint': paint_module})
         self.patches.start()
         self.addCleanup(self.patches.stop)
+        import paper_native_worker
+        real_run = paper_native_worker.run
+        def run(operation, args, **kwargs):
+            if operation == 'chart_prepare': return fake_prepare(*args[:4])
+            if operation == 'chart_export': return [args[0], {'issues': []}, 1, []]
+            return real_run(operation, args, **kwargs)
+        runner_patch = patch('paper_native_worker.run', side_effect=run)
+        runner_patch.start()
+        self.addCleanup(runner_patch.stop)
 
     def prepare(self):
         return self.svc.prepare({'paperId': self.pid, 'fileHash': self.digest,

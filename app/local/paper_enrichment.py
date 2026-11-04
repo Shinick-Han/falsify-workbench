@@ -183,7 +183,7 @@ def analyze(data, *, store=None, runner=None, cancelled=None, progress=None):
     progress({'phase': 'rendering', 'kind': request['kind']})
     dpi = 200 if request['kind'] == 'ocr' else 150
     while True:
-        try: image = store.render_for_analysis(request['paperId'], request['pageIndex'], request['bbox'], dpi=dpi); break
+        try: image = store.render_for_analysis(request['paperId'], request['pageIndex'], request['bbox'], dpi=dpi, cancelled=cancelled); break
         except ValueError as error:
             if error.args != ('pixels',) or dpi <= 50: raise
             dpi = int(dpi * 0.75)
@@ -200,12 +200,12 @@ def analyze(data, *, store=None, runner=None, cancelled=None, progress=None):
     if result.get('image', {}).get('sha256') != image['sha256'] or result['image'].get('width') != image['width'] or result['image'].get('height') != image['height']:
         raise ValueError('analysis_image_mismatch')
     if request['kind'] == 'chart':
-        from paper_chart_vectors import prefer_native_paths
+        from paper_native_worker import run
         spec = options if isinstance(options, dict) else {}
-        result = prefer_native_paths(store.source_bytes(request['paperId'], request['fileHash']),
-            page_index=request['pageIndex'], crop=image['bbox'], dpi=dpi, width=image['width'],
-            height=image['height'], raster=result, calibration=spec.get('calibration'),
-            series=spec.get('series'), plot_bbox=spec.get('plotBbox'))
+        result = run('chart_vectors', [store.source_bytes(request['paperId'], request['fileHash']),
+            {'page_index':request['pageIndex'], 'crop':image['bbox'], 'dpi':dpi, 'width':image['width'],
+             'height':image['height'], 'raster':result, 'calibration':spec.get('calibration'),
+             'series':spec.get('series'), 'plot_bbox':spec.get('plotBbox')}], cancelled=cancelled)
     if result['status'] == 'unavailable':
         if any(code in ('rapidocr-missing','img2table-missing') for code in result.get('issues',[])):
             raise ValueError('analysis_dependency_missing')
