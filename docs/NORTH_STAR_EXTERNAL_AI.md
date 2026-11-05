@@ -476,3 +476,15 @@ Stackbite Codex GPT-6.1 Terra high Fast 통계 작업자에게 읽기 전용 전
 개발 브랜치는 chore/ccn15-20261105다. Stackbite native Codex GPT-6.1 Terra high Fast 3개 좌석을 app/src 190개, app/local 153개, authored app/dist 188개로 나누고 조율자가 cloud API 9개·전수 검사·생성 자산·테스트 등록·통합을 맡는다. 파일별 의미 있는 책임을 분리하고 기존 내용·출력·오류·취소·RED/BLUE 독립 경로를 보존한다. 작은 커밋과 focused 검사 결과를 계속 받아 통합하며, 다음 묶음을 작업하는 동안 조율자가 앞 묶음을 독립 확인한다. 첫 source 좌석이 StorageGuardian 정리를 코드 수정 금지로 해석해 변경 없이 종료했으므로, 새로 승인된 작업 경계와 확인한 T-0152·보관 lease를 명시해 재배치했다. shared worktree는 자동 등록·정리하지 않는다.
 
 tools/quality/inventory.mjs는 기존 Babel/Python 측정기와 alpha.50의 고정 분류를 재사용한다. 최초 전체 집계 540개가 이전 통계와 일치했고 새 helper 포함·중첩 함수·임계값 경계·파싱 실패 검사가 통과했다. 새 CCN 회귀 spec은 기본 테스트 실행에 포함한다. 작업·상태·원본/통합 커밋·검사 결과는 소스 밖 coordination/tech-debt-audit-20261105/implementation/ccn15-20261105에 보관한다. 부분 통합과 전체 목표 달성은 구분한다. 설치본·공개 웹을 작업 중인 부분 리팩터링으로 교체하지 않는다.
+
+## 2026-11-05 운영 함수 CCN 15 상한 달성
+
+같은 자체 운영 JS/Python 202파일에서 CCN 15 초과 함수는 540→0개, 최대는 429→15가 됐다. 새 helper·중첩 함수를 포함한 최종 함수 수는 9883개이며 파싱 오류는 0이다. 기존 측정기·scope·상한 예외를 바꾸지 않았다. 역할 분리로 함수 수가 늘어 CCN 합계는 40209→41941이므로 전체 연산량이나 CCN 합계가 감소했다고 해석하지 않는다. 외부 fork·생성 중복·테스트·도구와 미측정 언어까지 상한을 달성했다는 뜻은 아니다.
+
+Stackbite native Codex GPT-6.1 Terra high Fast 작업자를 최대 3개씩 파일 소유권으로 분리해 계속 배치했다. 조율자가 차례로 검토·통합하고 source·UI·native 각 lane을 독립 재측정했다. 목표 달성 후 완료 좌석은 닫고 worktree와 최초 실패 기록을 보존했다. 개발 브랜치는 chore/ccn15-20261105, 소스·재빌드 검증 커밋은 2e6f2b1cfbcd8ec8346acdebec10f0d5826ebf67이다.
+
+전체 app 실행은 Node 집계1126통과·8제외·실패0이며 별도 자체 harness assertion은 합산하지 않았다. Python 최종 전체 재실행은984통과·7제외·1108하위 검사 통과·실패0이다. optional DocVortex 파일은 올바른 별도 runtime에서 실제 PDF 변환1개를 통과했다. cloud57·quality7·packaging13·글꼴/독립 두 경로 재빌드31개, Windows PowerShell7/5.1 총640검사가 통과했다. 브라우저6개 suite, 저장 가져오기70개, 교차 탭 중복 방지와 Aside 실제 입력·RED 가져오기·편집·독립 BLUE도 확인했다. 실제 LaTeX 컴파일과 PDF-only BLUE 전달은 모델 없이 검증했다. 기존 변경 함수 CCN 회귀 gate도 통과했다.
+
+최초 Python 전체 실행의982통과·3실패는 보존한다. DocVortex 의존성은 별도 환경에서 확인했고, native 그래프 시간 초과의 최초 원인은 확정하지 않았다. 최종 전체 재실행은 통과했으며 생산 기한을 늘리지 않았다. 200ms 자식 기동 가정은 기준본·수정본 각각16회 중3회 시간 초과로 재현되어 테스트의 clock/분류 검사와 실제 자식 검사를 분리했다. 수치 편집 금지와 숨은 UI를 전제로 한 오래된 저장 가져오기 검사는 기준본에서도 실패함을 확인한 뒤 현재 계약으로 수정했다. 최종 검토에서 사용하지 않는 자기 호출 helper를 제거했다. 각 최초 값과 후속 결과는 ledger에 함께 남긴다.
+
+보고서는 소스 밖 coordination/tech-debt-audit-20261105/implementation/ccn15-20261105/CCN15_REPORT.ko.html이며 원시 수치는 production-ccn-final.json에 있다. 공개 웹·설치본은 alpha.50 유지, 사용자 companion·개인 설정·기록은 변경하지 않았다. 새 커밋의 원격 macOS CI는 아직 실행하지 않았고 기존 Paragraph runtime sourceBuildVerified=false도 유지한다. WorkBite T-0152는 진행 상태를 유지하고 이번 결과만 checkpoint로 남긴다.
