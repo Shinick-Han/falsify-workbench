@@ -594,6 +594,7 @@
     connect.addEventListener('click',()=>{
       const panel=doc.querySelector?.('.visual-connection-details');
       if(!panel)return;
+      for(let parent=panel.parentElement;parent;parent=parent.parentElement)if(parent.tagName==='DETAILS')parent.open=true;
       panel.open=true;panel.scrollIntoView?.({block:'nearest'});panel.querySelector?.('summary')?.focus?.({preventScroll:true});
     });
     sourceColumn.append(sourceTitle,list,listPager,pickPage,connect,savedTitle,saved,savedPager);
@@ -1196,6 +1197,14 @@
       }catch{if(token===generation)say(status,TEXT.previewFailed,true);}
     }
     pickPage.addEventListener('click',()=>{void selectPage();});
+    const originalAction=el('button','button secondary','그림·그래프 영역 선택');
+    originalAction.type='button';
+    doc.querySelector?.('.paper-edit-tools')?.append(originalAction);
+    originalAction.addEventListener('click',()=>{
+      if(!paperId){connect.click();return;}
+      host.scrollIntoView?.({block:'start'});
+      void selectPage();
+    });
     async function paintFigure(item,token,mine,stillCurrent=()=>true){
       chartState=null;
       const rendered=await renderRegion(item.pageIndex,item.bbox);
@@ -1217,6 +1226,12 @@
       prev.type='button';next.type='button';
       nav.append(prev,next,pageLabel);
       const stage=el('div','visual-edit-stage');
+      const cancel=el('button','button secondary','영역 선택 취소');
+      cancel.type='button';
+      cancel.addEventListener('click',()=>{
+        selectSerial++;figureState=null;selectedKey=null;workBody.replaceChildren();
+        paintLists();say(status,'영역 선택을 취소했습니다.');
+      });
       const fileLabel=el('label','button secondary','바꿀 이미지');
       const file=el('input');
       file.type='file';
@@ -1266,9 +1281,9 @@
         try{await paintShape({analysisId:'region-'+chosen.key+'-p'+pageIndex+'-'+bbox.join(','),pageIndex,bbox},generation,selectSerial);}
         catch{if(figureState===chosen){paintFigureControls();say(status,'곡선을 읽지 못했습니다. 그래프 전체가 들어오도록 영역을 선택하세요.',true);}}
       });dynamic.push(shapeButton);
-      panel.append(title,shapeButton,nav,stage,fileLabel,labelInput,labelBtn,advanced);
+      panel.append(title,shapeButton,nav,stage,cancel,fileLabel,labelInput,labelBtn,advanced);
       workBody.replaceChildren(panel);
-      dynamic.push(prev,next,file,labelBtn,useRegion,useCrop);
+      dynamic.push(prev,next,file,labelBtn,useRegion,useCrop,cancel);
       prev.addEventListener('click',()=>{if(fig.page>1)void setPage(fig.page-1);});
       next.addEventListener('click',()=>{if(!fig.pages||fig.page<fig.pages)void setPage(fig.page+1);});
       let drag=null;

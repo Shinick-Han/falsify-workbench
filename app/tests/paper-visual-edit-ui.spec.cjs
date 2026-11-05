@@ -590,6 +590,9 @@ serial('a page region can be edited without an automatically detected figure',as
   await until(()=>h.labeled('라벨'),'page editor');
   assert.equal(h.previews.length,2);
   assert.equal(h.ui.snapshot().pending,0);
+  h.button('영역 선택 취소').click();
+  assert.equal(h.labeled('라벨'),undefined);
+  assert.equal(h.ui.snapshot().pending,0);
   assert.equal(h.calls.some(call=>call.path==='/api/paper/visual/export'),false);
 });
 
