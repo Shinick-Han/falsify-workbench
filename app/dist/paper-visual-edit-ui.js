@@ -166,6 +166,16 @@
     return out;
   }
   async function decodeNative(bytes){
+    validateNativeImage(bytes);
+    const bitmap=await root.createImageBitmap(new root.Blob([bytes],{type:isPng(bytes)?'image/png':'image/jpeg'}));
+    const canvas=root.document.createElement('canvas');
+    try{
+      if(bitmap.width*bitmap.height>MAX_PIXELS)throw err('imageLimit');
+      canvas.width=bitmap.width;canvas.height=bitmap.height;const ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(bitmap,0,0);
+      return {width:canvas.width,height:canvas.height,rgba:new Uint8Array(ctx.getImageData(0,0,canvas.width,canvas.height).data)};
+    }finally{bitmap.close?.();canvas.width=canvas.height=0;}
+  }
+  function validateNativeImage(bytes){
     if(isPng(bytes)){
       if(bytes.length<24||readU32(bytes,16)*readU32(bytes,20)>MAX_PIXELS)throw err('png');
     }else if(isJpeg(bytes)){
@@ -179,39 +189,15 @@
         }pos+=n;
       }
     }
-    const bitmap=await root.createImageBitmap(new root.Blob([bytes],{type:isPng(bytes)?'image/png':'image/jpeg'}));
-    const canvas=root.document.createElement('canvas');
-    try{
-      if(bitmap.width*bitmap.height>MAX_PIXELS)throw err('imageLimit');
-      canvas.width=bitmap.width;canvas.height=bitmap.height;const ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(bitmap,0,0);
-      return {width:canvas.width,height:canvas.height,rgba:new Uint8Array(ctx.getImageData(0,0,canvas.width,canvas.height).data)};
-    }finally{bitmap.close?.();canvas.width=canvas.height=0;}
   }
   async function decodePng(bytes){
     if(typeof root.createImageBitmap==='function'&&root.document)return decodeNative(bytes);
     if(!isPng(bytes))throw err('png');
-    let offset=8,width=0,height=0,color=0,depth=0,interlace=1,header=false,end=false;
-    const idat=[];
-    while(offset+8<=bytes.length){
-      const length=readU32(bytes,offset);
-      if(offset+12+length>bytes.length)throw err('png');
-      const type=String.fromCharCode(bytes[offset+4],bytes[offset+5],bytes[offset+6],bytes[offset+7]);
-      const data=bytes.subarray(offset+8,offset+8+length);
-      const crc=readU32(bytes,offset+8+length);
-      if(crc!==crc32(bytes.subarray(offset+4,offset+8+length)))throw err('png');
-      offset+=12+length;
-      if(type==='IHDR'){
-        if(data.length!==13)throw err('png');
-        width=readU32(data,0);height=readU32(data,4);depth=data[8];color=data[9];interlace=data[12];
-        if(data[10]!==0||data[11]!==0)throw err('png');
-        header=true;
-      }else if(type==='IDAT')idat.push(data);
-      else if(type==='IEND'){end=true;break;}
-    }
-    if(!header||!end||depth!==8||interlace!==0||width<1||height<1||width*height>MAX_PIXELS)throw err('png');
-    const channels=color===0?1:color===2?3:color===4?2:color===6?4:0;
-    if(!channels)throw err('png');
+    const {width,height,channels,idat}=readPngChunks(bytes);
     const raw=await inflateZlib(concat(idat));
+    return unpackPng(raw,width,height,channels);
+  }
+  function unpackPng(raw,width,height,channels){
     const stride=width*channels;
     if(raw.length!==height*(stride+1))throw err('png');
     const out=new Uint8Array(width*height*4);
@@ -243,6 +229,33 @@
     }
     return {width,height,rgba:out};
   }
+  function readPngChunks(bytes){
+    let offset=8,width=0,height=0,color=0,depth=0,interlace=1,header=false,end=false;
+    const idat=[];
+    while(offset+8<=bytes.length){
+      const length=readU32(bytes,offset);
+      if(offset+12+length>bytes.length)throw err('png');
+      const type=String.fromCharCode(bytes[offset+4],bytes[offset+5],bytes[offset+6],bytes[offset+7]);
+      const data=bytes.subarray(offset+8,offset+8+length);
+      const crc=readU32(bytes,offset+8+length);
+      if(crc!==crc32(bytes.subarray(offset+4,offset+8+length)))throw err('png');
+      offset+=12+length;
+      if(type==='IHDR'){
+        if(data.length!==13)throw err('png');
+        width=readU32(data,0);height=readU32(data,4);depth=data[8];color=data[9];interlace=data[12];
+        if(data[10]!==0||data[11]!==0)throw err('png');
+        header=true;
+      }else if(type==='IDAT')idat.push(data);
+      else if(type==='IEND'){end=true;break;}
+    }
+    validatePngHeader(header,end,depth,interlace,width,height);
+    const channels=color===0?1:color===2?3:color===4?2:color===6?4:0;
+    if(!channels)throw err('png');
+    return {width,height,channels,idat};
+  }
+  function validatePngHeader(header,end,depth,interlace,width,height){
+    if(!header||!end||depth!==8||interlace!==0||width<1||height<1||width*height>MAX_PIXELS)throw err('png');
+  }
   function paeth(a,b,c){const p=a+b-c,pa=Math.abs(p-a),pb=Math.abs(p-b),pc=Math.abs(p-c);return pa<=pb&&pa<=pc?a:pb<=pc?b:c;}
   function cropRgba(image,crop){
     const x=crop.x,y=crop.y,w=crop.w,h=crop.h;
@@ -270,11 +283,8 @@
   function fillAll(image,color){for(let i=0;i<image.rgba.length;i+=4)image.rgba.set(color,i);}
   async function canvasLabel(image,text,at,mode,doc){
     if(!doc||typeof doc.createElement!=='function'||typeof root.ImageData!=='function')return null;
-    let canvas,ctx;
-    try{canvas=doc.createElement('canvas');ctx=canvas&&canvas.getContext&&canvas.getContext('2d');}catch{return null;}
-    if(!ctx||typeof ctx.putImageData!=='function'||typeof ctx.fillText!=='function')return null;
-    const blobber=canvas.convertToBlob||canvas.toBlob;
-    if(typeof blobber!=='function')return null;
+    const setup=labelCanvas(doc);if(!setup)return null;
+    const {canvas,ctx,blobber}=setup;
     canvas.width=image.width;canvas.height=image.height;
     try{
       ctx.putImageData(new root.ImageData(new Uint8ClampedArray(image.rgba),image.width,image.height),0,0);
@@ -351,21 +361,44 @@
     }
     return out;
   }
+  function labelCanvas(doc){
+    let canvas,ctx;
+    try{canvas=doc.createElement('canvas');ctx=canvas&&canvas.getContext&&canvas.getContext('2d');}catch{return null;}
+    if(!ctx||typeof ctx.putImageData!=='function'||typeof ctx.fillText!=='function')return null;
+    const blobber=canvas.convertToBlob||canvas.toBlob;
+    if(typeof blobber!=='function')return null;
+    return {canvas,ctx,blobber};
+  }
   function normalizeChart(chart){
-    if(!chart||typeof chart!=='object'||Array.isArray(chart))return null;
-    if(chart.kind!=='line'&&chart.kind!=='scatter'&&chart.kind!=='bar')return null;
-    if(typeof chart.title!=='string'||chart.title.length>200)return null;
+    if(!chartHeader(chart))return null;
     const xAxis=optionalAxis(chart.xAxis),yAxis=optionalAxis(chart.yAxis);
     if(!xAxis||!yAxis||!Array.isArray(chart.series)||chart.series.length<1||chart.series.length>12)return null;
     const series=[];
     for(let i=0;i<chart.series.length;i++){
-      const entry=chart.series[i];
+      const entry=normalizeSeries(chart.series[i],i);if(!entry)return null;
+      series.push(entry);
+    }
+    return {kind:chart.kind,title:chart.title,xAxis,yAxis,series};
+  }
+  function chartHeader(chart){
+    if(!chart||typeof chart!=='object'||Array.isArray(chart))return false;
+    if(chart.kind!=='line'&&chart.kind!=='scatter'&&chart.kind!=='bar')return false;
+    if(typeof chart.title!=='string'||chart.title.length>200)return false;
+    return true;
+  }
+  function normalizeSeries(entry,i){
       if(!entry||typeof entry!=='object'||!Array.isArray(entry.points)||entry.points.length>MAX_POINTS)return null;
       const id=typeof entry.id==='string'&&idOk(entry.id)?entry.id:'s'+(i+1);
       const name=typeof entry.name==='string'?entry.name.slice(0,120):'';
       const color=/^#[0-9a-fA-F]{6}$/.test(entry.color)?entry.color.toLowerCase():['#246388','#8e302b','#111315','#9a6b00'][i%4];
       const points=[];
       for(const point of entry.points){
+        const next=normalizePoint(point);if(!next)return null;
+        points.push(next);
+      }
+      return {id,name,color,points};
+  }
+  function normalizePoint(point){
         if(!point||typeof point!=='object'||!finite(point.x)||!finite(point.y))return null;
         const next={x:point.x,y:point.y};
         for(const key of ['yLow','yHigh']){
@@ -373,11 +406,7 @@
           if(!finite(point[key]))return null;
           next[key]=point[key];
         }
-        points.push(next);
-      }
-      series.push({id,name,color,points});
-    }
-    return {kind:chart.kind,title:chart.title,xAxis,yAxis,series};
+    return next;
   }
   function editorFromChart(chart){
     const axis=source=>({scale:source.scale,min:source.min==null?'':String(source.min),max:source.max==null?'':String(source.max),label:source.label||''});
@@ -406,8 +435,7 @@
       if(min===null||max===null)return null;
       if(min!=null)out.min=min;
       if(max!=null)out.max=max;
-      if(out.min!=null&&out.max!=null&&out.min>=out.max)return null;
-      if(out.scale==='log'&&((out.min!=null&&out.min<=0)||(out.max!=null&&out.max<=0)))return null;
+      if(!axisDomain(out))return null;
       out.vertical=vertical;
       return out;
     };
@@ -416,8 +444,26 @@
     delete xAxis.vertical;delete yAxis.vertical;
     const series=[];
     for(const entry of editor.series){
+      const value=compileSeries(entry,xAxis,yAxis);if(!value)return null;
+      series.push(value);
+    }
+    return {kind:editor.kind,title:editor.title.trim().slice(0,200),xAxis,yAxis,series};
+  }
+  function axisDomain(out){
+      if(out.min!=null&&out.max!=null&&out.min>=out.max)return false;
+      if(out.scale==='log'&&((out.min!=null&&out.min<=0)||(out.max!=null&&out.max<=0)))return false;
+    return true;
+  }
+  function compileSeries(entry,xAxis,yAxis){
       const points=[];
       for(const point of entry.points){
+        const next=compilePoint(point,xAxis,yAxis);if(!next)return null;
+        points.push(next);
+      }
+      if(!points.length)return null;
+      return {id:entry.id,name:entry.name,color:entry.color,points};
+  }
+  function compilePoint(point,xAxis,yAxis){
         const x=parseNum(point.x,true),y=parseNum(point.y,true);
         const yLow=parseNum(point.yLow,false),yHigh=parseNum(point.yHigh,false);
         if(x===null||y===null||yLow===null||yHigh===null)return null;
@@ -426,12 +472,7 @@
         const next={x,y};
         if(yLow!=null)next.yLow=yLow;
         if(yHigh!=null)next.yHigh=yHigh;
-        points.push(next);
-      }
-      if(!points.length)return null;
-      series.push({id:entry.id,name:entry.name,color:entry.color,points});
-    }
-    return {kind:editor.kind,title:editor.title.trim().slice(0,200),xAxis,yAxis,series};
+    return next;
   }
   function sameJson(a,b){return JSON.stringify(a)===JSON.stringify(b);}
   function validateSummary(data,fileHash){
@@ -446,8 +487,7 @@
     if(!data||data.paperId!==paperId||data.fileHash!==fileHash||!Array.isArray(data.items)||!countOk(data.total)||data.total<offset)return null;
     const items=[];
     for(const raw of data.items){
-      if(!raw||!idOk(raw.id)||(raw.type!=='table'&&raw.type!=='figure')||!Number.isSafeInteger(raw.pageIndex)||raw.pageIndex<0||!bboxOk(raw.bbox))continue;
-      items.push({id:raw.id,type:raw.type,pageIndex:raw.pageIndex,bbox:raw.bbox.slice(),caption:typeof raw.caption==='string'?raw.caption:''});
+      const item=listItem(raw);if(item)items.push(item);
     }
     let next=null;
     if(data.nextOffset!=null){
@@ -456,21 +496,28 @@
     }
     return {items,total:data.total,nextOffset:next};
   }
+  function listItem(raw){
+      if(!raw||!idOk(raw.id)||(raw.type!=='table'&&raw.type!=='figure')||!Number.isSafeInteger(raw.pageIndex)||raw.pageIndex<0||!bboxOk(raw.bbox))return null;
+      return {id:raw.id,type:raw.type,pageIndex:raw.pageIndex,bbox:raw.bbox.slice(),caption:typeof raw.caption==='string'?raw.caption:''};
+  }
   function validateItem(data,paperId,fileHash,itemId){
     if(!data||(data.paperId!=null&&data.paperId!==paperId)||(data.fileHash!=null&&data.fileHash!==fileHash)||data.id!==itemId||(data.type!=='table'&&data.type!=='figure'))return null;
     if(!Number.isSafeInteger(data.pageIndex)||data.pageIndex<0||!bboxOk(data.bbox))return null;
     const item={id:data.id,type:data.type,pageIndex:data.pageIndex,bbox:data.bbox.slice(),caption:typeof data.caption==='string'?data.caption:''};
     if(data.type==='table'){
-      const table=data.table;
+      const table=validateTable(data.table);if(!table)return null;
+      item.table=table;
+    }
+    return item;
+  }
+  function validateTable(table){
       if(!table||!Array.isArray(table.cells))return null;
       const cells=[];
       for(const cell of table.cells){
         if(!cell||!Number.isSafeInteger(cell.row)||!Number.isSafeInteger(cell.column)||cell.row<0||cell.column<0||typeof cell.text!=='string')continue;
         cells.push({row:cell.row,column:cell.column,rowSpan:Number.isSafeInteger(cell.rowSpan)&&cell.rowSpan>0?cell.rowSpan:1,columnSpan:Number.isSafeInteger(cell.columnSpan)&&cell.columnSpan>0?cell.columnSpan:1,text:cell.text,bbox:bboxOk(cell.bbox)?cell.bbox.slice():null});
       }
-      item.table={rows:table.rows,columns:table.columns,cells};
-    }
-    return item;
+      return {rows:table.rows,columns:table.columns,cells};
   }
   function validateRender(data,paperId,fileHash,pageIndex,bbox){
     if(!data||data.paperId!==paperId||data.fileHash!==fileHash||data.pageIndex!==pageIndex||data.mimeType!=='image/png'||!closeBox(bbox,data.bbox))return null;
@@ -749,8 +796,10 @@
       showPng(afterImg,after);
       pair.hidden=!before&&!after;
     }
+    function selectionCurrent(token,mine){return token===generation&&mine===selectSerial;}
+    function selectAllowed(){if(parentBusy||applying){paintLists();return false;}return true;}
     async function select(value){
-      if(parentBusy||applying){paintLists();return;}
+      if(!selectAllowed())return;
       const token=generation;
       const mine=++selectSerial;
       selectedKey=value;
@@ -765,12 +814,12 @@
           if(!item){
             const signal=track();
             const data=await session().request(QUERY,{paperId,operation:'item',itemId:id},{signal});
-            if(token!==generation||mine!==selectSerial)return;
+            if(!selectionCurrent(token,mine))return;
             item=validateItem(data,paperId,boundHash,id);
             if(!item){say(status,TEXT.failed,true);return;}
             itemCache.set(id,item);
           }
-          if(token!==generation||mine!==selectSerial)return;
+          if(!selectionCurrent(token,mine))return;
           if(item.type==='table')paintTable(item);
           else await paintFigure(item,token,mine);
         }else{
@@ -778,22 +827,27 @@
           if(!analysis){
             const signal=track();
             const data=await session().request(QUERY,{paperId,operation:'analysis',analysisId:id},{signal});
-            if(token!==generation||mine!==selectSerial)return;
-            if(!data||data.paperId!==paperId||data.fileHash!==boundHash||data.analysisId!==id){say(status,TEXT.failed,true);return;}
+            if(!selectionCurrent(token,mine))return;
+            if(!validAnalysisResponse(data,id)){say(status,TEXT.failed,true);return;}
             analysis=data;
             analysisCache.set(id,analysis);
           }
-          if(token!==generation||mine!==selectSerial)return;
+          if(!selectionCurrent(token,mine))return;
           if(analysis.kind==='chart')await paintChart(analysis,token,mine);
           else paintOcr(analysis);
         }
       }catch(error){
-        if(error?.name==='AbortError'||token!==generation||mine!==selectSerial)return;
-        say(status,TEXT[codeOf(error)]||TEXT.failed,true);
-        errorCode=codeOf(error);
+        if(!reportSelectionFailure(error,token,mine))return;
       }
       syncDisabled();
     }
+    function reportSelectionFailure(error,token,mine){
+        if(error?.name==='AbortError'||!selectionCurrent(token,mine))return false;
+        say(status,TEXT[codeOf(error)]||TEXT.failed,true);
+        errorCode=codeOf(error);
+      return true;
+    }
+    function validAnalysisResponse(data,id){return !!data&&data.paperId===paperId&&data.fileHash===boundHash&&data.analysisId===id;}
     function paintTable(item){
       figureState=null;chartState=null;
       let page=0;
@@ -910,23 +964,19 @@
       chartState=null;figureState=null;chartBlocked=false;
       say(status,scene.mode==='marks'?'점이나 막대의 끝을 끌어 바꾸세요.':'곡선을 끌어 모양을 바꾸세요.');syncDisabled();return true;
     }
+    function canPaintShape(analysis,legacy){return !legacy&&root.FalsifyChartShapeEditor&&bboxOk(analysis.bbox);}
     async function paintChart(analysis,token,mine,legacy=false){
       figureState=null;
-      if(!legacy&&root.FalsifyChartShapeEditor&&bboxOk(analysis.bbox)){
+      if(canPaintShape(analysis,legacy)){
         try{if(await paintShape(analysis,token,mine))return;}
         catch(error){
-          if(token!==generation||mine!==selectSerial)return;
-          const panel=el('div','visual-edit-column');
-          panel.append(el('p','form-feedback','곡선 편집을 준비하지 못했습니다.'));
-          const advanced=el('button','button secondary','고급 · 새 서식으로 그리기');advanced.type='button';
-          advanced.addEventListener('click',()=>{void paintChart(analysis,token,mine,true);});panel.append(advanced);workBody.replaceChildren(panel);return;
+          if(!selectionCurrent(token,mine))return;
+          paintChartFallback(analysis,token,mine);return;
         }
       }
       const api=root.FalsifyChartRedraw;
-      if(!api||typeof api.fromAnalysis!=='function'||typeof api.render!=='function'){say(status,TEXT.chartMissing,true);errorCode='chart-missing';return;}
-      let raw=null;
-      try{raw=normalizeChart(api.fromAnalysis(analysis));}catch{raw=null;}
-      if(!raw&&analysis.data){try{raw=normalizeChart(api.fromAnalysis(analysis.data));}catch{raw=null;}}
+      if(!chartApiReady(api))return;
+      const raw=readChartAnalysis(api,analysis);
       if(!raw){say(status,TEXT.chartBad,true);errorCode='chart-bad';return;}
       const bbox=bboxOk(analysis.bbox)?analysis.bbox.slice():null;
       chartState={analysis,original:raw,editor:editorFromChart(raw),bbox,pageIndex:analysis.pageIndex,key:'graph:'+analysis.analysisId,opId:'graph-'+analysis.analysisId};
@@ -965,7 +1015,7 @@
       paintSeries();
       let before=null;
       if(bbox)before=await renderRegion(analysis.pageIndex,bbox);
-      if(token!==generation||mine!==selectSerial)return;
+      if(!selectionCurrent(token,mine))return;
       chartState.before=before;
       setImages(before&&before.bytes,null);
       await flushChart(token);
@@ -1042,6 +1092,22 @@
         return row;
       }
     }
+    function chartApiReady(api){
+      if(!api||typeof api.fromAnalysis!=='function'||typeof api.render!=='function'){say(status,TEXT.chartMissing,true);errorCode='chart-missing';return false;}
+      return true;
+    }
+    function readChartAnalysis(api,analysis){
+      let raw=null;
+      try{raw=normalizeChart(api.fromAnalysis(analysis));}catch{raw=null;}
+      if(!raw&&analysis.data){try{raw=normalizeChart(api.fromAnalysis(analysis.data));}catch{raw=null;}}
+      return raw;
+    }
+    function paintChartFallback(analysis,token,mine){
+          const panel=el('div','visual-edit-column');
+          panel.append(el('p','form-feedback','곡선 편집을 준비하지 못했습니다.'));
+          const advanced=el('button','button secondary','고급 · 새 서식으로 그리기');advanced.type='button';
+          advanced.addEventListener('click',()=>{void paintChart(analysis,token,mine,true);});panel.append(advanced);workBody.replaceChildren(panel);
+    }
     let chartQueued=false;
     function queueChart(){
       chartBlocked=false;
@@ -1049,6 +1115,7 @@
       chartQueued=true;
       queueMicrotask(()=>{chartQueued=false;void flushChart(generation);});
     }
+    function chartCurrent(token,mine){return token===generation&&mine===chartSerial&&!!chartState;}
     async function flushChart(token){
       if(!chartState)return;
       const mine=++chartSerial;
@@ -1065,13 +1132,13 @@
         const api=root.FalsifyChartRedraw;
         const ratio=chartState.bbox?(chartState.bbox[3]-chartState.bbox[1])/(chartState.bbox[2]-chartState.bbox[0]):.625;
         const rendered=await api.render({chart:compiled,width:640,height:Math.max(64,Math.min(1600,Math.round(640*ratio))),document:doc});
-        if(token!==generation||mine!==chartSerial||!chartState)return;
+        if(!chartCurrent(token,mine))return;
         const png=rendered&&rendered.png instanceof Uint8Array?rendered.png:null;
         if(!isPng(png))throw err('plotFailed');
         let before=chartState.before;
         if(chartState.bbox){
           before=await renderRegion(chartState.pageIndex,chartState.bbox);
-          if(token!==generation||mine!==chartSerial||!chartState)return;
+          if(!chartCurrent(token,mine))return;
           if(!before)throw err('region');
           chartState.before=before;
         }
@@ -1088,10 +1155,13 @@
         emit();
         syncDisabled();
       }catch(error){
+        reportChartFailure(error,token,mine);
+      }
+    }
+    function reportChartFailure(error,token,mine){
         if(error?.name==='AbortError'||token!==generation||mine!==chartSerial)return;
         say(status,TEXT.plotFailed,true);
         errorCode='plot';
-      }
     }
     function editorDirty(state){
       const current=compileEditor(state.editor);
@@ -1113,7 +1183,7 @@
     async function paintFigure(item,token,mine){
       chartState=null;
       const rendered=await renderRegion(item.pageIndex,item.bbox);
-      if(token!==generation||mine!==selectSerial)return;
+      if(!selectionCurrent(token,mine))return;
       if(!rendered){say(status,TEXT.previewFailed,true);errorCode='preview';return;}
       figureState={key:'figure:'+item.id,opId:'figure-'+item.id,itemId:item.id,pageIndex:item.pageIndex,bbox:item.bbox.slice(),beforeSha:rendered.sha256,beforePng:rendered.bytes,uploaded:null,crop:null,label:null,afterPng:null,page:item.pageIndex+1};
       paintFigureControls();
@@ -1240,8 +1310,8 @@
       if(!src)return;
       try{
         const view=await preview({file:src.file,fileHash:src.fileHash,page:fig.page});
-        if(token!==generation||mine!==selectSerial||figureState!==fig)return;
-        if(!view||!view.canvas||!finite(view.width)||!finite(view.height)||view.width<=0||view.height<=0){say(status,TEXT.previewFailed,true);return;}
+        if(!selectionCurrent(token,mine)||figureState!==fig)return;
+        if(!validPreview(view)){say(status,TEXT.previewFailed,true);return;}
         fig.view={canvas:view.canvas,width:view.width,height:view.height,page:view.page,pages:view.pages};
         fig.pages=view.pages;
         if(fig.title)fig.title.textContent='그림 · '+view.page+'쪽';
@@ -1255,10 +1325,11 @@
         paintOverlay(fig.page===fig.pageIndex+1?fig.bbox:null);
         syncDisabled();
       }catch(error){
-        if(token!==generation||mine!==selectSerial)return;
+        if(!selectionCurrent(token,mine))return;
         say(status,TEXT[codeOf(error)]||TEXT.previewFailed,true);
       }
     }
+    function validPreview(view){return !!view&&!!view.canvas&&finite(view.width)&&finite(view.height)&&view.width>0&&view.height>0;}
     function paintOverlay(box){
       const fig=figureState;
       if(!fig||!fig.overlay||!fig.view)return;
@@ -1280,7 +1351,7 @@
       const fig=figureState;
       const token=generation,mine=selectSerial;
       const rendered=await renderRegion(fig.page-1,bbox);
-      if(token!==generation||mine!==selectSerial||figureState!==fig)return;
+      if(!selectionCurrent(token,mine)||figureState!==fig)return;
       if(!rendered){say(status,TEXT.region,true);return;}
       fig.pageIndex=fig.page-1;
       fig.bbox=bbox.slice();
@@ -1470,18 +1541,48 @@
       if(!isPdf(bytes))return null;
       const hash=await digest(bytes);
       if(hash!==data.outputSha256)return null;
-      if(!Number.isSafeInteger(data.pageCount)||data.pageCount<1||data.pageCount>20000)return null;
-      const verification=data.verification;
-      if(!verification||(verification.status!=='passed'&&verification.status!=='warning')||!Array.isArray(verification.issues)||verification.issues.some(item=>typeof item!=='string'&&!(item&&typeof item.code==='string')))return null;
+      const verification=exportVerification(data);if(!verification)return null;
       if(!Array.isArray(data.changes))return null;
       let changes;
       try{changes=root.structuredClone(data.changes);}catch{return null;}
       return {bytes,hash,source:fileHash,revision,changes,verification:root.structuredClone(verification),pageCount:data.pageCount};
     }
+    function exportVerification(data){
+      if(!Number.isSafeInteger(data.pageCount)||data.pageCount<1||data.pageCount>20000)return null;
+      const verification=data.verification;
+      if(!verification||(verification.status!=='passed'&&verification.status!=='warning')||!Array.isArray(verification.issues)||verification.issues.some(item=>typeof item!=='string'&&!(item&&typeof item.code==='string')))return null;
+      return verification;
+    }
+    function prepareOperations(){
+        if(chartBlocked){say(status,TEXT.chartInvalid,true);errorCode='invalid';return null;}
+        const ops=wires();
+        if(!ops.length){say(status,TEXT.applyNone,true);errorCode='none';return null;}
+        if(ops.length>MAX_OPS){say(status,TEXT.applyMax,true);errorCode='max';return null;}
+      return ops;
+    }
+    function installOutput(verified,draftKey){
+        output=verified;
+        output.draftKey=draftKey;
+        paintOutput();
+        say(status,TEXT.applyOk);
+        errorCode=null;
+    }
+    function applySourceReady(src){
+      if(!src||src.fileHash!==boundHash||src.revision!==boundRevision||!paperId){say(status,TEXT.stale,true);errorCode='stale';return false;}
+      return true;
+    }
+    function draftCurrent(token,src,draftKey){return live(token,src)&&draftKey===JSON.stringify(records());}
+    const APPLY_STALE=Symbol('apply-stale');
+    function requireApplyLive(token,src){if(!live(token,src))throw APPLY_STALE;}
+    function requireDraftCurrent(token,src,draftKey){if(!draftCurrent(token,src,draftKey))throw APPLY_STALE;}
+    function applyBusy(){return parentBusy||applying;}
+    function chartNeedsFlush(){return chartState&&editorDirty(chartState);}
+    function canReleaseApply(owner){return owner.locked&&typeof hold==='function';}
+    function requireUnchangedDraft(draftKey){if(draftKey!==JSON.stringify(records()))throw APPLY_STALE;}
     async function apply(){
-      if(parentBusy||applying)return;
+      if(applyBusy())return;
       const src=currentSource();
-      if(!src||src.fileHash!==boundHash||src.revision!==boundRevision||!paperId){say(status,TEXT.stale,true);errorCode='stale';return;}
+      if(!applySourceReady(src))return;
       applying=true;
       const owner={locked:false};
       applyOwner=owner;
@@ -1489,48 +1590,52 @@
       const token=generation;
       try{
         await imageTask;
-        if(!live(token,src))return;
+        requireApplyLive(token,src);
         if(figureState)await composeFigure();
-        if(!live(token,src))return;
-        if(chartState&&editorDirty(chartState))await flushChart(token);
-        if(!live(token,src))return;
-        if(chartBlocked){say(status,TEXT.chartInvalid,true);errorCode='invalid';return;}
-        const ops=wires();
-        if(!ops.length){say(status,TEXT.applyNone,true);errorCode='none';return;}
-        if(ops.length>MAX_OPS){say(status,TEXT.applyMax,true);errorCode='max';return;}
+        requireApplyLive(token,src);
+        if(chartNeedsFlush())await flushChart(token);
+        requireApplyLive(token,src);
+        const ops=prepareOperations();if(!ops)return;
         const draftKey=JSON.stringify(records());
         if(typeof hold==='function'){
           owner.locked=true;
           const ok=await hold({active:true,phase:'apply'});
-          if(!live(token,src))return;
+          requireApplyLive(token,src);
           if(ok===false){say(status,TEXT.hold,true);errorCode='hold';return;}
         }
-        if(draftKey!==JSON.stringify(records()))return;
+        requireUnchangedDraft(draftKey);
         await refreshRegionHashes(token,src);
-        if(!live(token,src)||draftKey!==JSON.stringify(records()))return;
+        requireDraftCurrent(token,src,draftKey);
         const signal=track();
         const response=await session().request(EXPORT,{schema:REQUEST_SCHEMA,paperId,fileHash:src.fileHash,revision:src.revision,operations:ops},{signal});
-        if(!live(token,src)||draftKey!==JSON.stringify(records()))return;
+        requireDraftCurrent(token,src,draftKey);
         const verified=await verifyExport(response,src.fileHash,src.revision);
-        if(!live(token,src)||draftKey!==JSON.stringify(records()))return;
+        requireDraftCurrent(token,src,draftKey);
         if(!verified){say(status,TEXT.applyFail,true);errorCode='failed';return;}
-        output=verified;
-        output.draftKey=draftKey;
-        paintOutput();
-        say(status,TEXT.applyOk);
-        errorCode=null;
+        installOutput(verified,draftKey);
         try{await deliver();}
-        catch{if(live(token,src)){say(status,TEXT.handoff,true);errorCode='handoff';}}
+        catch{reportHandoffFailure(token,src);}
       }catch(error){
+        if(error===APPLY_STALE)return;
+        reportApplyFailure(error,token,src);
+      }finally{
+        if(applyOwner===owner){
+          if(canReleaseApply(owner)){owner.locked=false;try{await hold({active:false,phase:'apply'});}catch{}}
+          finishApplyOwner(owner);
+        }
+      }
+    }
+    function reportApplyFailure(error,token,src){
         if(error?.name==='AbortError'||!live(token,src))return;
         say(status,TEXT.applyFail,true);
         errorCode=codeOf(error)==='stale'?'stale':'failed';
-      }finally{
-        if(applyOwner===owner){
-          if(owner.locked&&typeof hold==='function'){owner.locked=false;try{await hold({active:false,phase:'apply'});}catch{}}
-          if(applyOwner===owner){applyOwner=null;applying=false;syncDisabled();}
-        }
-      }
+    }
+    function reportHandoffFailure(token,src){if(live(token,src)){say(status,TEXT.handoff,true);errorCode='handoff';}}
+    function finishApplyOwner(owner){if(applyOwner===owner){applyOwner=null;applying=false;syncDisabled();}}
+    function validateSourceBytes(src,bytes){
+        if(bytes.length>MAX_PDF)throw err('limit');
+        if(typeof src.file.size==='number'&&src.file.size!==bytes.length)throw err('hash');
+        if(!isPdf(bytes))throw err('notPdf');
     }
     async function loadSource(token,src,signal){
       try{
@@ -1540,9 +1645,7 @@
         const raw=await src.file.arrayBuffer();
         if(!liveReady(token))return;
         const bytes=raw instanceof Uint8Array?new Uint8Array(raw):new Uint8Array(raw);
-        if(bytes.length>MAX_PDF)throw err('limit');
-        if(typeof src.file.size==='number'&&src.file.size!==bytes.length)throw err('hash');
-        if(!isPdf(bytes))throw err('notPdf');
+        validateSourceBytes(src,bytes);
         const actual=await digest(bytes);
         if(!liveReady(token))return;
         if(actual!==src.fileHash)throw err('hash');
@@ -1560,6 +1663,20 @@
         const page=validateList(listed,paperId,src.fileHash,0);
         const savedPageItems=validateAnalyses(analyses,paperId,src.fileHash);
         if(!page||!savedPageItems)throw err('listFailed');
+        installSourceList(page,savedPageItems);
+      }catch(error){
+        reportSourceFailure(error,token);
+      }finally{syncDisabled();}
+      function liveReady(current){return current===generation;}
+    }
+    function reportSourceFailure(error,token){
+        if(error?.name==='AbortError'||token!==generation)return;
+        const code=codeOf(error);
+        errorCode=code;
+        say(status,TEXT[code]||TEXT.failed,true);
+        retry.hidden=false;
+    }
+    function installSourceList(page,savedPageItems){
         listItems=page.items;
         listTotal=page.total;
         listPage=0;
@@ -1568,14 +1685,6 @@
         paintLists();
         say(status,'표와 그림 '+listTotal+'개 · 저장된 항목 '+savedItems.length+'개');
         errorCode=null;
-      }catch(error){
-        if(error?.name==='AbortError'||token!==generation)return;
-        const code=codeOf(error);
-        errorCode=code;
-        say(status,TEXT[code]||TEXT.failed,true);
-        retry.hidden=false;
-      }finally{syncDisabled();}
-      function liveReady(current){return current===generation;}
     }
     function refresh(){
       const src=currentSource();
