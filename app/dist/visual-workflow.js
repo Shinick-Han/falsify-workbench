@@ -94,6 +94,10 @@
       const zoom=el('div','paper-toolbar');
       for(const id of ['paper-original-download','paper-zoom-out','paper-zoom-label','paper-zoom-in']){const node=$('#'+id);if(node)zoom.append(node);}
       settings.append(zoom);bar.after(settings);
+      paper.addEventListener('click',event=>{
+        const edit=event.target.closest?.('#paper-edits button[data-act="edit"]');
+        if(edit&&!edit.disabled)show('before');
+      },true);
       paper.addEventListener('focusin',event=>{if(event.target.closest?.('#paper-inline'))show('before');});
     }
     setupPaperCompare();
