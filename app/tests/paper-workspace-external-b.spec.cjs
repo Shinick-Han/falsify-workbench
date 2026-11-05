@@ -151,6 +151,17 @@ test('external source excludes synthetic aliases but retains distinct occurrence
   const row=v.get('paper-proposal-list').children[1];assert.equal(v.ws.getExternalResponses().items[1].matchStatus,'missing');assert.equal(row.children[4].children.length,2);
 });
 
+test('manual location shows surrounding text and binds the chosen occurrence without adoption',async()=>{
+  const v=mount(),file=pdfFile(pdfBytes('MARKER-A'));v.file(file);await until(()=>v.ws.getSource()?.fileHash,'source');
+  v.document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file,result:{segments:[{id:'s0',pageIndex:0,text:'First Alpha here. Second Alpha there.'},{id:'s1',pageIndex:1,text:'Elsewhere Alpha ends.'}]}}}));
+  const hash=v.ws.getSource().fileHash;v.ws.acceptExternalResponse({schema:'falsify.external-batch.v1',id:'manual',role:'red',fileHash:hash,raw:'response',items:[{id:'x',kind:'change',before:'Alpha',after:'Beta',matchStatus:'missing',anchor:null}]});
+  const row=v.get('paper-proposal-list').children[0],manual=row.children.find(n=>n.tagName==='details'),select=manual.children.find(n=>n.tagName==='select');
+  assert.equal(select.children.length,4);assert.match(select.children[1].textContent,/1쪽 · First 【Alpha】 here/);assert.match(select.children[3].textContent,/2쪽 · Elsewhere 【Alpha】 ends/);
+  assert.doesNotMatch(select.children[1].textContent,/s0| @ /);const chosen=JSON.parse(select.children[2].value);select.value=select.children[2].value;select.dispatchEvent(new Event('change'));
+  const item=v.ws.getExternalResponses().items[0];assert.equal(item.enabled,false);assert.equal(item.matchStatus,'matched');assert.equal(item.anchor.start,chosen.anchor.start);assert.equal(item.pageIndex,0);
+  assert.match(v.get('paper-proposal-status').textContent,/적용하려면 제안을 선택/);assert.match(v.get('paper-proposal-list').children[0].children[0].children[1].textContent,/선택 안 됨/);
+});
+
 test('workspace imports additively and flush captures selected proposal',async()=>{
   let resolveExport;const requests=[];
   const exporter={prepare(req){requests.push(req);return new Promise(resolve=>{resolveExport=()=>{const bytes=pdfBytes('MARKER-GEN');resolve({file:pdfFile(bytes,'generated.pdf'),sha256:sha(bytes),verification:null,pageMap:null});};});}};

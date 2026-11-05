@@ -924,12 +924,31 @@
         li.append(title,body,accept);ui.proposalList.append(li);
       });
     }
+    function manualOptions(select,before){
+      const empty=doc.createElement('option');empty.value='';empty.textContent='원문 위치 선택';select.replaceChildren(empty);
+      if(!before)return;
+      for(const seg of externalSegments(source?.segments||[])){
+        let at=-1;while((at=seg.text.indexOf(before,at+1))>=0){
+          const option=doc.createElement('option'),end=at+before.length,left=seg.text.slice(Math.max(0,at-45),at),right=seg.text.slice(end,Math.min(seg.text.length,end+45));
+          const context=(left+'【'+before+'】'+right).replace(/\s+/g,' ');
+          option.value=JSON.stringify({segmentId:seg.id,pageIndex:segmentPage(seg),before,anchor:{start:at,end}});
+          option.textContent=(segmentPage(seg)+1)+'쪽 · '+context;select.append(option);
+        }
+      }
+    }
+    function manualLocation(item,host){
+      const select=doc.createElement('select'),before=doc.createElement('input'),search=doc.createElement('button');
+      before.value=item.before||'';before.setAttribute('aria-label','연결할 원문');select.setAttribute('aria-label','원문 위치 선택');search.type='button';search.textContent='원문 찾기';
+      manualOptions(select,before.value);search.addEventListener('click',()=>manualOptions(select,before.value));
+      select.addEventListener('change',()=>{try{if(!select.value)return;const binding=JSON.parse(select.value);void showCandidate(item,{...binding,start:binding.anchor.start,end:binding.anchor.end});external.bind(item.id,binding);setProposalStatus('원문을 연결했습니다. 적용하려면 제안을 선택하세요.');}catch(e){setProposalStatus(safeMessage(e),true);}});
+      const manual=doc.createElement('details'),heading=doc.createElement('summary');heading.textContent='원문에서 직접 찾기';manual.append(heading,before,search,select);host.append(manual);
+    }
     function paintExternal(){
       const rows=external.snapshot().items;proposalInputs=new Map();ui.proposals.hidden=!rows.length;ui.proposalList.replaceChildren();
       for(const item of rows){
         const li=doc.createElement('li'),label=doc.createElement('label'),check=doc.createElement('input'),body=doc.createElement('span'),after=doc.createElement('textarea');
         check.type='checkbox';check.checked=!!item.enabled;check.disabled=item.matchStatus!=='matched';
-        body.textContent=(item.matchStatus==='matched'?'원문 확인됨':item.matches?.length?'이 부분인가요?':'원문 위치 선택')+' · '+String(item.before||'')+' → ';after.value=typeof item.after==='string'?item.after:'';proposalInputs.set(item.id,after);after.setAttribute('aria-label','제안 수정');
+        body.textContent=(item.matchStatus==='matched'?(item.enabled?'원문 연결 · 선택됨':'원문 연결 · 선택 안 됨'):item.matches?.length?'이 부분인가요?':'원문 위치 선택')+' · '+String(item.before||'')+' → ';after.value=typeof item.after==='string'?item.after:'';proposalInputs.set(item.id,after);after.setAttribute('aria-label','제안 수정');
         check.addEventListener('change',()=>{try{if(check.checked){const a=item.anchor;const conflict=(snapshot?.edits||[]).some(e=>e.enabled!==false&&e.segmentId===item.segmentId&&e.anchor.start<a.end&&a.start<e.anchor.end);if(conflict||crossAliasOverlap(item,true))throw Error('기존 편집과 겹칩니다.');}external.setEnabled(item.id,check.checked);}catch(e){check.checked=false;setProposalStatus(safeMessage(e),true);}});
         let composing=false;const saveAfter=()=>{try{suppressExternalPaint=true;external.update(item.id,{after:after.value});}catch(e){setProposalStatus(safeMessage(e),true);}finally{suppressExternalPaint=false;paintBeforeChanges();}};after.addEventListener('input',()=>{queueDraft();if(!composing)saveAfter();});after.addEventListener('compositionstart',()=>{composing=true;});after.addEventListener('compositionend',()=>{composing=false;saveAfter();});after.addEventListener('change',saveAfter);
         label.append(check,body);li.append(label,after);
@@ -945,12 +964,7 @@
           if(candidates.length){addCandidate(li,candidates[0]);if(!candidatePreview)void showCandidate(item,candidates[0]);}
           if(candidates.length>1){const more=doc.createElement('details'),title=doc.createElement('summary');title.textContent='다른 후보 '+(candidates.length-1)+'곳';more.append(title);candidates.slice(1).forEach(m=>addCandidate(more,m));li.append(more);}
         }
-        if(item.matchStatus!=='matched'){
-          const select=doc.createElement('select'),bind=doc.createElement('button'),beforeInput=doc.createElement('input'),search=doc.createElement('button');bind.type='button';bind.textContent='원문 위치 연결';beforeInput.value=item.before||'';beforeInput.setAttribute('aria-label','연결할 원문');search.type='button';search.textContent='원문 찾기';
-          const empty=doc.createElement('option');empty.value='';empty.textContent='원문 위치 선택';select.append(empty);
-          const populate=()=>{select.replaceChildren(empty);const before=beforeInput.value;if(!before)return;for(const seg of externalSegments(source?.segments||[])){let at=-1;while((at=seg.text.indexOf(before,at+1))>=0){const option=doc.createElement('option');option.value=JSON.stringify({segmentId:seg.id,pageIndex:segmentPage(seg),before,anchor:{start:at,end:at+before.length}});option.textContent=(segmentPage(seg)+1)+'쪽 · '+seg.id+' @ '+at;select.append(option);}}};populate();search.addEventListener('click',populate);
-          bind.addEventListener('click',()=>{try{if(!select.value)throw Error('위치를 선택하세요.');external.bind(item.id,JSON.parse(select.value));}catch(e){setProposalStatus(safeMessage(e),true);}});const manual=doc.createElement('details'),heading=doc.createElement('summary');heading.textContent='원문에서 직접 찾기';manual.append(heading,beforeInput,search,select,bind);li.append(manual);
-        }
+        if(item.matchStatus!=='matched')manualLocation(item,li);
         const provenance=doc.createElement('small'),combineCheck=doc.createElement('input'),combineLabel=doc.createElement('label');provenance.textContent='출처 '+item.sourceRefs.length+'개';combineCheck.type='checkbox';combineCheck.checked=combineIds.has(item.id);combineCheck.addEventListener('change',()=>{if(combineCheck.checked)combineIds.add(item.id);else combineIds.delete(item.id);});const combineText=doc.createElement('span');combineText.textContent=' 결합할 제안';combineLabel.append(combineCheck,combineText);li.append(provenance,combineLabel);ui.proposalList.append(li);
       }
       if(rows.length>=2){
