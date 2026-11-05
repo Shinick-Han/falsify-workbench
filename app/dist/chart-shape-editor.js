@@ -38,7 +38,6 @@ var FalsifyChartShapeEditor = (() => {
   var KEY_STEP = 1;
   var KEY_STEP_LARGE = 10;
   var KEY_WIDTH_FACTOR = 1.1;
-  var PRECISION_CAP = 400;
   var SVG_NS = "http://www.w3.org/2000/svg";
   function clone(value) {
     if (typeof structuredClone === "function") return structuredClone(value);
@@ -241,6 +240,23 @@ var FalsifyChartShapeEditor = (() => {
     if (!finite(value) || value <= 0) return 1;
     return Math.min(MAX_SCALE, Math.max(MIN_SCALE, value));
   }
+  function clampPosition(value, low, high) {
+    if (high < low) return (low + high) / 2;
+    return Math.min(high, Math.max(low, value));
+  }
+  function handlePositions(left, center, right, size, scale) {
+    const inset = 12 * scale;
+    const gap = 24 * scale;
+    const anchor = {
+      x: clampPosition(center.x, inset + gap, size.width - inset - gap),
+      y: clampPosition(center.y, inset, size.height - inset)
+    };
+    return [
+      { x: clampPosition(left.x, inset, anchor.x - gap), y: clampPosition(left.y, inset, size.height - inset) },
+      { x: clampPosition(right.x, anchor.x + gap, size.width - inset), y: clampPosition(right.y, inset, size.height - inset) },
+      anchor
+    ];
+  }
   function seriesById(scene, seriesId) {
     return (scene?.series || []).find((item) => item && item.id === seriesId) || null;
   }
@@ -304,6 +320,7 @@ var FalsifyChartShapeEditor = (() => {
     const core = resolveCore(options.core);
     const onChange = typeof options.onChange === "function" ? options.onChange : null;
     const onCommit = typeof options.onCommit === "function" ? options.onCommit : null;
+    const onGestureChange = typeof options.onGestureChange === "function" ? options.onGestureChange : null;
     const onRequestExport = typeof options.onRequestExport === "function" ? options.onRequestExport : null;
     const listeners = [];
     let opSeq = 0;
@@ -337,6 +354,7 @@ var FalsifyChartShapeEditor = (() => {
     redoButton.textContent = "다시 실행";
     compareButton.textContent = "원본 비교";
     exportButton.textContent = "내보내기";
+    exportButton.hidden = options.embedded === true;
     undoButton.setAttribute("aria-label", "되돌리기");
     redoButton.setAttribute("aria-label", "다시 실행");
     compareButton.setAttribute("aria-label", "원본 비교");
@@ -362,7 +380,7 @@ var FalsifyChartShapeEditor = (() => {
     stage.append(background, original, svg);
     const precision = h(doc, "details", "falsify-shape-precision");
     const summary = h(doc, "summary");
-    summary.textContent = "정밀 좌표";
+    summary.textContent = "선택한 점의 정밀 좌표 (px)";
     const algorithm = h(doc, "p", "falsify-shape-algorithm");
     algorithm.textContent = "곡선을 끌어 모양을 바꾸고, 양옆 손잡이는 폭, 가운데 손잡이는 위치와 높이입니다.";
     const keys = h(doc, "p", "falsify-shape-keys");
@@ -488,20 +506,12 @@ var FalsifyChartShapeEditor = (() => {
       return false;
     }
     function renderTable(scene) {
-      if (focusInside(precisionBody)) return;
-      const selected = state.selection?.seriesId;
-      const rows = [];
-      let hidden = 0;
-      for (const series of scene.series || []) {
-        if (selected != null && series.id !== selected) continue;
-        const points = series.points || [];
-        const cap = Math.min(points.length, PRECISION_CAP);
-        hidden += Math.max(0, points.length - cap);
-        for (let index = 0; index < cap; index += 1) {
-          if (!isPoint(points[index])) continue;
-          rows.push({ series, index, point: points[index] });
-        }
-      }
+      const selection = state.selection;
+      if (selection && focusInside(precisionBody)) return;
+      precision.hidden = !selection;
+      const series = selection && seriesById(scene, selection.seriesId);
+      const point = series?.points?.[selection.index];
+      const rows = isPoint(point) ? [{ series, index: selection.index, point }] : [];
       precisionBody.replaceChildren(...rows.map((row) => {
         const tr = h(doc, "tr");
         const name = h(doc, "td");
@@ -531,8 +541,7 @@ var FalsifyChartShapeEditor = (() => {
         tr.append(name, number, xCell, yCell);
         return tr;
       }));
-      limitNote.hidden = hidden === 0;
-      limitNote.textContent = hidden ? `앞 ${PRECISION_CAP}점만 표시합니다. 나머지 ${hidden}점은 표에 없습니다.` : "";
+      limitNote.hidden = true;
     }
     function renderHandles(scene) {
       if (!state.selection || state.compare) return;
@@ -541,16 +550,23 @@ var FalsifyChartShapeEditor = (() => {
       if (points.length < 1) return;
       const left = extreme(points, (point, chosen) => point.x < chosen.x);
       const right = extreme(points, (point, chosen) => point.x > chosen.x);
-      const center = points.reduce((sum, point) => ({ x: sum.x + point.x, y: sum.y + point.y }), { x: 0, y: 0 });
-      center.x /= points.length;
-      center.y /= points.length;
-      const radius = String(Math.round(SCREEN_HANDLE_PX * screenScale() * 1e3) / 1e3);
+      const center = series.points[state.selection.index];
+      if (!isPoint(center)) return;
+      const scale = screenScale();
+      const radius = formatNumber(SCREEN_HANDLE_PX * scale);
+      const [leftPosition, rightPosition, centerPosition] = handlePositions(left, center, right, state.size, scale);
       const handles = [
-        ["width-start", "왼쪽 폭", "falsify-shape-handle falsify-shape-handle-width", left],
-        ["width-end", "오른쪽 폭", "falsify-shape-handle falsify-shape-handle-width", right],
-        ["move", "위치와 높이", "falsify-shape-handle falsify-shape-handle-center", center]
+        ["width-start", "왼쪽 폭", "falsify-shape-handle falsify-shape-handle-width", left, leftPosition],
+        ["width-end", "오른쪽 폭", "falsify-shape-handle falsify-shape-handle-width", right, rightPosition],
+        ["move", "위치와 높이", "falsify-shape-handle falsify-shape-handle-center", center, centerPosition]
       ];
-      for (const [name, label, className, point] of handles) {
+      for (const [name, label, className, actual, point] of handles) {
+        if (actual.x !== point.x || actual.y !== point.y) svg.append(attrs(s(doc, "line", "falsify-shape-handle-guide"), {
+          x1: formatNumber(actual.x),
+          y1: formatNumber(actual.y),
+          x2: formatNumber(point.x),
+          y2: formatNumber(point.y)
+        }));
         svg.append(attrs(s(doc, "circle", className), {
           "data-handle": name,
           cx: formatNumber(point.x),
@@ -558,6 +574,15 @@ var FalsifyChartShapeEditor = (() => {
           r: radius,
           "aria-label": label,
           role: "img"
+        }));
+        svg.append(attrs(s(doc, "circle", "falsify-shape-handle-hit"), {
+          "data-handle": name,
+          cx: formatNumber(point.x),
+          cy: formatNumber(point.y),
+          r: formatNumber(12 * scale),
+          fill: "transparent",
+          "pointer-events": "all",
+          "aria-hidden": "true"
         }));
       }
     }
@@ -585,7 +610,7 @@ var FalsifyChartShapeEditor = (() => {
         const look = presentation(series);
         const paintedPoints = series.style?.closed && points.length > 1 ? [...points, points[0]] : points;
         const haloWidth = String((Number(look["stroke-width"]) || 1.5) + 6);
-        svg.append(attrs(s(doc, "polyline", "falsify-shape-halo"), {
+        svg.append(attrs(s(doc, "polyline", state.selection?.seriesId === series.id ? "falsify-shape-halo is-selected" : "falsify-shape-halo"), {
           ...look,
           points: pointsAttr(paintedPoints),
           "stroke-width": haloWidth,
@@ -604,6 +629,19 @@ var FalsifyChartShapeEditor = (() => {
           stroke: "transparent",
           "stroke-width": "16",
           "data-series-id": String(series.id)
+        }));
+      }
+      if (state.selection) {
+        const series = seriesById(scene, state.selection.seriesId);
+        const selectedPoints = rangePoints(series?.points || [], state.selection.range);
+        svg.append(attrs(s(doc, "polyline", "falsify-shape-range"), {
+          points: pointsAttr(selectedPoints),
+          fill: "none",
+          stroke: "#1d1a16",
+          "stroke-width": "5",
+          "stroke-opacity": "0.35",
+          "pointer-events": "none",
+          "vector-effect": "non-scaling-stroke"
         }));
       }
       renderRadius();
@@ -655,10 +693,12 @@ var FalsifyChartShapeEditor = (() => {
         render();
         emitChange(body);
         emitCommit(body);
+        onGestureChange?.(false);
         return;
       }
       render();
-      if (!commit && gesture.previewed) emitChange(snapshot());
+      if (gesture.previewed) emitChange(snapshot());
+      onGestureChange?.(false);
     }
     function updateGesture(point) {
       const gesture = state.gesture;
@@ -670,7 +710,7 @@ var FalsifyChartShapeEditor = (() => {
       }
       if (gesture.kind === "resize") {
         const denominator = gesture.handle.x - gesture.anchor[0];
-        const scaleX = Math.abs(denominator) < 1e-6 ? 1 : (point.x - gesture.anchor[0]) / denominator;
+        const scaleX = Math.abs(denominator) < 1e-6 ? 1 : (gesture.handle.x + point.x - gesture.origin.x - gesture.anchor[0]) / denominator;
         gesture.op.scaleX = clampScale(scaleX);
         gesture.op.scaleY = 1;
       }
@@ -715,6 +755,7 @@ var FalsifyChartShapeEditor = (() => {
     }
     function beginGesture(event, gesture) {
       state.gesture = gesture;
+      onGestureChange?.(true);
       if (event.pointerId != null && typeof stage.setPointerCapture === "function") {
         try {
           stage.setPointerCapture(event.pointerId);
@@ -729,8 +770,26 @@ var FalsifyChartShapeEditor = (() => {
       const points = series?.points || [];
       if (!points.length || hit.index >= points.length) return null;
       const range = selectionRange(points, hit.index);
-      state.selection = { seriesId: hit.seriesId, range };
+      state.selection = { seriesId: hit.seriesId, range, index: hit.index };
       return series;
+    }
+    function selectedDeform(scene, dx, dy) {
+      const selection = state.selection;
+      const points = seriesById(scene, selection.seriesId)?.points || [];
+      const center = points[selection.index];
+      if (!isPoint(center)) return null;
+      const selected = rangePoints(points, selection.range);
+      const span = selected.reduce((largest, point) => Math.max(largest, distance(center, point)), 0);
+      const radius = span > 0 ? Math.min(MAX_DEFORM_RADIUS, Math.max(MIN_DEFORM_RADIUS, span * 2)) : deformRadius(points, selection.index);
+      return {
+        id: nextId("deform"),
+        kind: "deform",
+        seriesId: selection.seriesId,
+        center: [center.x, center.y],
+        radius,
+        dx,
+        dy
+      };
     }
     function startHandleGesture(event, name, scene, point) {
       const series = seriesById(scene, state.selection.seriesId);
@@ -739,20 +798,15 @@ var FalsifyChartShapeEditor = (() => {
       const left = extreme(spanned, (item, chosen) => item.x < chosen.x);
       const right = extreme(spanned, (item, chosen) => item.x > chosen.x);
       if (name === "move") {
+        const op = selectedDeform(scene, 0, 0);
+        if (!op) return;
         beginGesture(event, {
-          kind: "move",
+          kind: "deform",
           pointerId: event.pointerId,
           settled: false,
           previewed: false,
           origin: point,
-          op: {
-            id: nextId("move"),
-            kind: "move",
-            seriesId: state.selection.seriesId,
-            range: [...state.selection.range],
-            dx: 0,
-            dy: 0
-          },
+          op,
           operation() {
             return this.op;
           }
@@ -858,14 +912,7 @@ var FalsifyChartShapeEditor = (() => {
     }
     function nudge(dx, dy) {
       if (!state.selection || state.compare || state.gesture) return;
-      commitFinished({
-        id: nextId("move"),
-        kind: "move",
-        seriesId: state.selection.seriesId,
-        range: [...state.selection.range],
-        dx,
-        dy
-      });
+      commitFinished(selectedDeform(history.scene(), dx, dy));
     }
     function scaleWidth(factor) {
       if (!state.selection || state.compare || state.gesture) return;
@@ -979,6 +1026,7 @@ var FalsifyChartShapeEditor = (() => {
       });
     }
     function toggleCompare() {
+      if (state.gesture) endGesture(false);
       if (!state.originalPng) {
         state.compare = false;
         render();
@@ -986,7 +1034,6 @@ var FalsifyChartShapeEditor = (() => {
         return;
       }
       state.compare = !state.compare;
-      if (state.gesture) endGesture(false);
       render();
     }
     function requestExport() {
@@ -1010,12 +1057,8 @@ var FalsifyChartShapeEditor = (() => {
       setScene(scene) {
         assertLive();
         if (!scene || !Array.isArray(scene.series)) throw new Error("FalsifyChartShapeEditor.setScene requires a scene with series");
+        if (state.gesture) endGesture(false);
         dropPreviewFrame();
-        if (state.gesture) {
-          state.gesture.settled = true;
-          release(state.gesture.pointerId);
-          state.gesture = null;
-        }
         bindScene(scene);
         render();
         emitChange(snapshot());
@@ -1028,13 +1071,9 @@ var FalsifyChartShapeEditor = (() => {
       redo,
       destroy() {
         if (state.destroyed) return;
+        if (state.gesture) endGesture(false);
         dropPreviewFrame();
         state.destroyed = true;
-        if (state.gesture) {
-          state.gesture.settled = true;
-          release(state.gesture.pointerId);
-          state.gesture = null;
-        }
         for (const off of listeners) off();
         listeners.length = 0;
         if (typeof root.remove === "function") root.remove();
@@ -1122,11 +1161,16 @@ var FalsifyChartShapeEditor = (() => {
 .falsify-shape-radius {
   pointer-events: none;
 }
+.falsify-shape-halo.is-selected { stroke-opacity: 0.6; }
+.falsify-shape-hit { cursor: grab; }
+.falsify-shape-hit:hover { stroke: rgba(29, 26, 22, 0.18); }
 .falsify-shape-radius {
   fill: rgba(29, 26, 22, 0.08);
   stroke: rgba(29, 26, 22, 0.55);
   stroke-width: 1;
 }
+.falsify-shape-handle-guide { stroke: #777064; stroke-width: 1px; vector-effect: non-scaling-stroke; pointer-events: none; }
+.falsify-shape-handle-hit { cursor: pointer; }
 .falsify-shape-handle {
   fill: #fffdf8;
   stroke: #1d1a16;
@@ -1141,6 +1185,7 @@ var FalsifyChartShapeEditor = (() => {
   stroke: #fffdf8;
   cursor: move;
 }
+.falsify-shape-precision[hidden], .falsify-shape-button[hidden] { display: none; }
 .falsify-shape-precision {
   background: #fffdf8;
   border: 1px solid #d9d2c5;
