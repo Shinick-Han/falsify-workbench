@@ -78,7 +78,7 @@
 .falsify-shape-radius {
   pointer-events: none;
 }
-.falsify-shape-halo.is-selected { stroke-opacity: 0.6; }
+.falsify-shape-halo.is-selected { stroke-opacity: 0.22; }
 .falsify-shape-hit { cursor: grab; }
 .falsify-shape-hit:hover { stroke: rgba(29, 26, 22, 0.18); }
 .falsify-shape-radius {

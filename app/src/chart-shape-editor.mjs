@@ -647,17 +647,19 @@ export function create(options = {}) {
       viewBox: `0 0 ${state.size.width} ${state.size.height}`,
       preserveAspectRatio: 'none',
     });
+    const selectedIds = new Set(state.selection && typeof core.linkedSeriesIds === 'function'
+      ? core.linkedSeriesIds(scene, state.selection.seriesId) : [state.selection?.seriesId]);
     for (const series of scene.series || []) {
       const points = series?.points || [];
       if (!points.some(isPoint)) continue;
       const look = presentation(series);
       const paintedPoints = series.style?.closed && points.length > 1 ? [...points, points[0]] : points;
-      const haloWidth = String((Number(look['stroke-width']) || 1.5) + 6);
-      svg.append(attrs(s(doc, 'polyline', state.selection?.seriesId === series.id ? 'falsify-shape-halo is-selected' : 'falsify-shape-halo'), {
+      const haloWidth = String((Number(look['stroke-width']) || 1.5) + 4 * screenScale());
+      svg.append(attrs(s(doc, 'polyline', selectedIds.has(series.id) ? 'falsify-shape-halo is-selected' : 'falsify-shape-halo'), {
         ...look,
         points: pointsAttr(paintedPoints),
         'stroke-width': haloWidth,
-        'stroke-opacity': '0.25',
+        'stroke-opacity': '0',
         'pointer-events': 'none',
       }));
       svg.append(attrs(s(doc, 'polyline', 'falsify-shape-curve'), {
@@ -674,6 +676,7 @@ export function create(options = {}) {
         'data-series-id': String(series.id),
       }));
     }
+    renderConnections(scene);
     if (state.selection) {
       const series = seriesById(scene, state.selection.seriesId);
       const selectedPoints = rangePoints(series?.points || [], state.selection.range);
@@ -685,6 +688,19 @@ export function create(options = {}) {
     }
     renderRadius();
     renderHandles(scene);
+  }
+
+  function renderConnections(scene) {
+    for (const [left, right] of scene.curveLinks || []) {
+      const series = seriesById(scene, left[0]);
+      const a = series?.points[left[1]];
+      const b = seriesById(scene, right[0])?.points[right[1]];
+      if (!isPoint(a) || !isPoint(b) || distance(a, b) < .0001) continue;
+      const look = presentation(series);
+      svg.append(attrs(s(doc, 'polyline', 'falsify-shape-curve falsify-shape-connection'), {
+        ...look, points: pointsAttr([a, b]), 'pointer-events': 'none',
+      }));
+    }
   }
 
   function render(scene = displayedScene()) {
@@ -1213,7 +1229,7 @@ export const EDITOR_CSS = `/* Falsify chart shape editor. No remote assets. */
 .falsify-shape-radius {
   pointer-events: none;
 }
-.falsify-shape-halo.is-selected { stroke-opacity: 0.6; }
+.falsify-shape-halo.is-selected { stroke-opacity: 0.22; }
 .falsify-shape-hit { cursor: grab; }
 .falsify-shape-hit:hover { stroke: rgba(29, 26, 22, 0.18); }
 .falsify-shape-radius {

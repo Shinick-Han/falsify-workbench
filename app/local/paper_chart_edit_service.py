@@ -32,7 +32,7 @@ def _b64(raw):
 def _public(scene):
     """Expose geometry and rendering data, keep source token bindings in the server."""
     keys = ('schema', 'sceneId', 'sourceFileHash', 'pageIndex', 'bbox', 'width', 'height',
-            'plotBbox', 'axes', 'calibration', 'revision', 'backgroundPng', 'originalPng', 'issues', 'mode')
+            'plotBbox', 'axes', 'calibration', 'revision', 'backgroundPng', 'originalPng', 'issues', 'mode', 'curveLinks')
     result = {k: copy.deepcopy(scene[k]) for k in keys if k in scene}
     result['series'] = [{k: copy.deepcopy(s[k]) for k in ('id', 'name', 'kind', 'color', 'style', 'points', 'baseline', 'radius', 'orientation')
                          if k in s} for s in scene.get('series', [])]

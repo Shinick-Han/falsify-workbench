@@ -755,42 +755,8 @@ def _image_occurrence(image):
 
 
 def _raster_public(parsed, bbox, dpi, plot, raster):
-    series = []
-    for image in parsed['images']:
-        if not image['samples'] or not image['width']:
-            continue
-        cv = _raster_array(image)
-        if image.get('alpha') is not None:
-            import numpy as np
-            cv = cv.copy()
-            cv[np.frombuffer(image['alpha'],dtype=np.uint8).reshape(image['height'],image['width']) < 4] = 255
-        traced = raster.trace_series(cv, _plot_in_image(image, bbox, dpi, plot))
-        scale = _mean_scale(image, bbox, dpi)
-        for item in traced:
-            points = []
-            for index, point in enumerate(item['points']):
-                crop = _image_index_to_crop(point, image, bbox, dpi)
-                if plot and not (plot[0] - 1.5 <= crop[0] <= plot[2] + 1.5 and plot[1] - 1.5 <= crop[1] <= plot[3] + 1.5):
-                    continue
-                role = 'source-endpoint' if index in (0, len(item['points']) - 1) else 'curve-sample'
-                points.append({'x': crop[0], 'y': crop[1], 'origin': 'raster-sample', 'role': role,
-                               'branch': item.get('branch')})
-            if len(points) < 2:
-                continue
-            color = '#%02x%02x%02x' % item['color']
-            fingerprint = hashlib.sha256(repr((color, item.get('branch'), [(round(point['x'], 3), round(point['y'], 3)) for point in points])).encode('ascii')).hexdigest()
-            series.append({
-                'id': 'series-%d' % (len(series) + 1),
-                'name': None,
-                'color': color,
-                'style': {'width': float(item['width']) * scale, 'dashes': None, 'opacity': 1.0, 'lineCap': 0, 'lineJoin': 0},
-                'points': points,
-                'sourceBinding': {'kind': 'raster-image', 'fingerprint': fingerprint, 'space': 'crop-pixels',
-                                  'color': list(item['color']), 'imageSize': [image['width'], image['height']],
-                                  'branch': item.get('branch'),
-                                  'imageOccurrence': _image_occurrence(image)},
-            })
-    return series
+    from paper_chart_raster_scene import build
+    return build(parsed, bbox, dpi, plot)
 
 
 def _raster_array(image):
@@ -1316,9 +1282,9 @@ def _check_scene(source, scene):
         raise ValueError('bad-page')
 
 
-def strip_series(source, page_index, bbox, dpi, series):
+def strip_series(source, page_index, bbox, dpi, series, curve_links=None):
     scene = {'schema': 'falsify.chart-scene.v1', 'sourceFileHash': _hash(source), 'pageIndex': page_index,
-             'bbox': list(bbox), 'dpi': dpi, 'series': series}
+             'bbox': list(bbox), 'dpi': dpi, 'series': series, 'curveLinks': curve_links or []}
     pdf, _report = _export(bytes(source), scene, scene, drop=True)
     return pdf
 
@@ -1368,42 +1334,19 @@ def _image_points(points, image, bbox, dpi):
     return [_crop_to_image_index((point['x'], point['y']), image, bbox, dpi) for point in points]
 
 
-def _edit_raster_runs(raster, array, original, current, image, bbox, dpi, color, width):
-    """Edit each explicit branch on its own so a gap is not stroked over."""
-    old_points = original['points']
-    if current is None:
-        for _ident, indexes in _branch_runs(old_points):
-            array = raster.edit_raster(array, _image_points([old_points[index] for index in indexes], image, bbox, dpi),
-                                       None, color, width)
-        return array
-    new_points = current['points']
-    if len(new_points) != len(old_points):
-        return raster.edit_raster(array, _image_points(old_points, image, bbox, dpi),
-                                  _image_points(new_points, image, bbox, dpi), color, width)
-    for _ident, indexes in _branch_runs(old_points):
-        array = raster.edit_raster(
-            array,
-            _image_points([old_points[index] for index in indexes], image, bbox, dpi),
-            _image_points([new_points[index] for index in indexes], image, bbox, dpi),
-            color, width)
-    return array
-
-
-def _edit_raster_clone(array, alpha, original, current, color, image, bbox, dpi, scale, raster):
-    style = (current or original).get('style') or {}
-    crop_width = float(style.get('width') or original.get('style', {}).get('width') or 1)
-    width = crop_width / scale
-    if alpha is not None:
-        from paper_chart_image_samples import edit_alpha
-        old_points = original['points']
-        new_points = None if current is None else current['points']
-        runs = _branch_runs(old_points) if new_points is None or len(new_points)==len(old_points) else [(None,list(range(len(old_points))))]
-        for _, indexes in runs:
-            old = _image_points([old_points[i] for i in indexes],image,bbox,dpi)
-            new = None if new_points is None else _image_points([new_points[i] for i in indexes],image,bbox,dpi)
-            alpha = edit_alpha(array,alpha,old,new,color,width)
-    array = _edit_raster_runs(raster, array, original, current, image, bbox, dpi, color, width)
-    return array, alpha
+def _raster_batch_edits(edits, image, bbox, dpi, scale):
+    batch = []
+    for original, current, color in edits:
+        old = original['points']
+        new = None if current is None else current['points']
+        width = float(((current or original).get('style') or {}).get('width') or 1) / scale
+        if new is not None and len(new) != len(old):
+            batch.append((_image_points(old, image, bbox, dpi), _image_points(new, image, bbox, dpi), color, width))
+            continue
+        for _, indexes in _branch_runs(old):
+            batch.append((_image_points([old[i] for i in indexes], image, bbox, dpi),
+                          None if new is None else _image_points([new[i] for i in indexes], image, bbox, dpi), color, width))
+    return batch
 
 
 def _raster_clones(clones, bbox, dpi, raster, np):
@@ -1413,8 +1356,10 @@ def _raster_clones(clones, bbox, dpi, raster, np):
         array = _raster_array(image).copy()
         alpha = None if image.get('alpha') is None else np.frombuffer(image['alpha'],dtype=np.uint8).reshape(image['height'],image['width']).copy()
         scale = _mean_scale(image, bbox, dpi)
-        for original, current, color in clone['edits']:
-            array, alpha = _edit_raster_clone(array, alpha, original, current, color, image, bbox, dpi, scale, raster)
+        if alpha is None:
+            array = raster.edit_batch(array, _raster_batch_edits(clone['edits'], image, bbox, dpi, scale))
+        else:
+            array, alpha = raster.edit_batch(array, _raster_batch_edits(clone['edits'], image, bbox, dpi, scale), alpha=alpha)
         patch = alpha is None
         if patch:
             # Keep the original opaque image paint and overlay only changed
@@ -1436,6 +1381,34 @@ def _raster_clones(clones, bbox, dpi, raster, np):
     return stream_clones
 
 
+def _raster_edit_targets(images, scene, original, bbox, dpi):
+    from paper_chart_curve_links import linked_ids
+    ids = linked_ids(scene.get('curveLinks', []), original['id'])
+    targets = {}
+    for series in scene['series']:
+        if series['id'] not in ids:
+            continue
+        image, _ = _match_image(images, series, bbox, dpi)
+        targets[json.dumps(_image_occurrence(image), sort_keys=True)] = image
+    return targets
+
+
+def _raster_link_edits(parsed, scene, edited, drop, clones, bbox, dpi):
+    originals = {s['id']: s for s in scene['series']}
+    currents = {s['id']: s for s in (edited or scene)['series']}
+    for left, right in scene.get('curveLinks', []):
+        a, b = originals[left[0]], originals[right[0]]
+        points = [a['points'][left[1]], b['points'][right[1]]]
+        if _dist((points[0]['x'], points[0]['y']), (points[1]['x'], points[1]['y'])) < 1e-4:
+            continue
+        current = None if drop else [currents[left[0]]['points'][left[1]], currents[right[0]]['points'][right[1]]]
+        old = dict(a, points=points, style={'width': min(a['style']['width'], b['style']['width'])})
+        new = None if drop else dict(old, points=current)
+        _, color = _match_image(parsed['images'], a, bbox, dpi)
+        for key, image in _raster_edit_targets(parsed['images'], scene, a, bbox, dpi).items():
+            clones.setdefault(key, {'image': image, 'edits': []})['edits'].append((old, new, color))
+
+
 def _export_raster(raw, scene, edited, drop):
     import numpy as np
     import paper_chart_raster_edit as raster
@@ -1451,13 +1424,17 @@ def _export_raster(raw, scene, edited, drop):
             raise ValueError('point-topology')
         if not drop and _same_series({'series': [original]}, {'series': [current]}):
             continue
-        image, color = _match_image(parsed['images'], original, bbox, dpi)
-        key = json.dumps(_image_occurrence(image), sort_keys=True)
-        clone = clones.setdefault(key, {'image': image, 'edits': []})
-        clone['edits'].append((original, None if drop else current, color))
+        _, color = _match_image(parsed['images'], original, bbox, dpi)
+        # A connected curve may cross several source image tiles. Paint its
+        # changed spans in each owning tile so crossing the seam cannot clip it.
+        targets = _raster_edit_targets(parsed['images'], scene, original, bbox, dpi)
+        for key, image in targets.items():
+            clone = clones.setdefault(key, {'image': image, 'edits': []})
+            clone['edits'].append((original, None if drop else current, color))
         changed.append(original['id'])
     if not clones:
         return raw, _report(True, [], False, 'raster')
+    _raster_link_edits(parsed, scene, edited, drop, clones, bbox, dpi)
     stream_clones = _raster_clones(clones, bbox, dpi, raster, np)
     # Image bytes are not content-stream tokens. Build the clone stream from samples.
     output = _apply_images(raw, scene['pageIndex'], parsed, stream_clones)

@@ -29,7 +29,7 @@
   "esbuild": "0.28.2",
   "bundle": {
     "path": "chart-shape-core.js",
-    "bytes": 15237,
-    "sha256": "1895c131e0c79eca49438b3f3b3fbd720579b80911d2dce4580dcdb1f20bfc9d"
+    "bytes": 18898,
+    "sha256": "db265fa731886d8850f28bc2ad22850ab8eacd525ef647bc196410ad994efb83"
   }
 }

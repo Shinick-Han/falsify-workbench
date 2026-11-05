@@ -21,7 +21,7 @@ var FalsifyChartShape = (() => {
   };
   var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-  // src/chart-shape-core.mjs
+  // app/src/chart-shape-core.mjs
   var chart_shape_core_exports = {};
   __export(chart_shape_core_exports, {
     PROFILE: () => PROFILE,
@@ -29,10 +29,11 @@ var FalsifyChartShape = (() => {
     applyPlan: () => applyPlan,
     applyPlanJSON: () => applyPlanJSON,
     createHistory: () => createHistory,
-    hitTest: () => hitTest
+    hitTest: () => hitTest,
+    linkedSeriesIds: () => linkedSeriesIds
   });
 
-  // vendor-sources/chart-shape/ml-peak-shape-generator/src/util/constants.ts
+  // app/vendor-sources/chart-shape/ml-peak-shape-generator/src/util/constants.ts
   var GAUSSIAN_EXP_FACTOR = -4 * Math.LN2;
   var ROOT_PI_OVER_LN2 = Math.sqrt(Math.PI / Math.LN2);
   var ROOT_LN2 = Math.sqrt(Math.LN2);
@@ -40,12 +41,12 @@ var FalsifyChartShape = (() => {
   var ROOT_2LN2 = Math.sqrt(2 * Math.LN2);
   var ROOT_2LN2_MINUS_ONE = Math.sqrt(2 * Math.LN2) - 1;
 
-  // vendor-sources/chart-shape/ml-peak-shape-generator/src/shapes/1d/gaussian/Gaussian.ts
+  // app/vendor-sources/chart-shape/ml-peak-shape-generator/src/shapes/1d/gaussian/Gaussian.ts
   function gaussianFct(x, fwhm) {
     return Math.exp(GAUSSIAN_EXP_FACTOR * (x / fwhm) ** 2);
   }
 
-  // src/chart-shape-core.mjs
+  // app/src/chart-shape-core.mjs
   var UPSTREAM_COMMIT = "5a87af23408aedf00e35e43ca6648a20cf6455bd";
   var PROFILE = "gaussian";
   var BRANCH_GAP_FLOOR = 12;
@@ -164,11 +165,15 @@ var FalsifyChartShape = (() => {
     }
     return { anchor, nearest };
   }
-  function applyDeform(points, operation) {
+  function validateDeform(operation) {
     const center = operation.center;
     if (!Array.isArray(center) || center.length !== 2 || !finite(center[0]) || !finite(center[1])) invalid("center");
     if (!finite(operation.radius) || !(operation.radius > 0)) invalid("radius");
     if (!finite(operation.dx) || !finite(operation.dy)) invalid("delta");
+  }
+  function applyDeform(points, operation) {
+    validateDeform(operation);
+    const center = operation.center;
     if (points.length === 0 || operation.dx === 0 && operation.dy === 0) return [];
     const { anchor, nearest } = nearestPoint(points, center);
     if (!(nearest <= operation.radius)) return [];
@@ -186,6 +191,82 @@ var FalsifyChartShape = (() => {
       along.set(index, along.get(previous) + pointDistance(points[index], points[previous]));
     }
     return deformAlongBranch(points, operation, along);
+  }
+  function linkedSeriesIds(scene, seriesId) {
+    const found = /* @__PURE__ */ new Set([seriesId]);
+    const pending = [seriesId];
+    while (pending.length) {
+      const current = pending.pop();
+      for (const [a, b] of scene.curveLinks || []) {
+        const next = a[0] === current ? b[0] : b[0] === current ? a[0] : null;
+        if (next === null || found.has(next)) continue;
+        found.add(next);
+        pending.push(next);
+      }
+    }
+    return [...found];
+  }
+  var nodeKey = (seriesId, index) => JSON.stringify([seriesId, index]);
+  function connectNodes(nodes, a, b) {
+    const left = nodes.get(a), right = nodes.get(b);
+    if (!left || !right) invalid("links");
+    const distance = pointDistance(left.point, right.point);
+    left.neighbors.push([b, distance]);
+    right.neighbors.push([a, distance]);
+  }
+  function networkNodes(scene, ids) {
+    const nodes = /* @__PURE__ */ new Map();
+    for (const series of scene.series.filter((s) => ids.includes(s.id))) {
+      series.points.forEach((point, index) => {
+        requirePoint(point, index);
+        nodes.set(nodeKey(series.id, index), { point, seriesId: series.id, index, neighbors: [] });
+      });
+      for (const run of branchRuns(series.points)) {
+        for (let i = 1; i < run.indexes.length; i += 1) {
+          connectNodes(nodes, nodeKey(series.id, run.indexes[i - 1]), nodeKey(series.id, run.indexes[i]));
+        }
+      }
+    }
+    for (const [a, b] of scene.curveLinks || []) {
+      if (ids.includes(a[0]) && ids.includes(b[0])) connectNodes(nodes, nodeKey(...a), nodeKey(...b));
+    }
+    return nodes;
+  }
+  function networkDistances(nodes, start, radius) {
+    const distances = /* @__PURE__ */ new Map([[start, 0]]);
+    const pending = [[start, 0]];
+    while (pending.length) {
+      pending.sort((a, b) => b[1] - a[1]);
+      const [key, distance] = pending.pop();
+      if (distance !== distances.get(key)) continue;
+      for (const [next, length] of nodes.get(key).neighbors) {
+        const value = distance + length;
+        if (value >= radius || value >= (distances.get(next) ?? Infinity)) continue;
+        distances.set(next, value);
+        pending.push([next, value]);
+      }
+    }
+    return distances;
+  }
+  function applyNetworkDeform(scene, series, operation) {
+    validateDeform(operation);
+    const { anchor, nearest } = nearestPoint(series.points, operation.center);
+    const change = { id: operation.id, kind: operation.kind, seriesId: series.id, indexes: [], linked: [] };
+    if (anchor < 0 || nearest > operation.radius || !operation.dx && !operation.dy) return change;
+    const ids = linkedSeriesIds(scene, series.id);
+    const nodes = networkNodes(scene, ids);
+    const distances = networkDistances(nodes, nodeKey(series.id, anchor), operation.radius);
+    const paths = new Map(ids.map((id) => [id, /* @__PURE__ */ new Map()]));
+    for (const [key, distance] of distances) {
+      const node = nodes.get(key);
+      paths.get(node.seriesId).set(node.index, distance);
+    }
+    for (const current of scene.series.filter((s) => ids.includes(s.id))) {
+      const indexes = deformAlongBranch(current.points, operation, paths.get(current.id));
+      if (current.id === series.id) change.indexes = indexes;
+      if (indexes.length) change.linked.push({ seriesId: current.id, indexes });
+    }
+    return change;
   }
   function applyMove(points, operation) {
     const range = requireRange(operation.range, points.length);
@@ -241,6 +322,7 @@ var FalsifyChartShape = (() => {
   function applyOperation(scene, operation) {
     if (!operation || typeof operation !== "object" || typeof operation.id !== "string" || operation.id.length === 0) invalid("operation");
     const series = seriesById(scene, operation.seriesId);
+    if (operation.kind === "deform" && scene.curveLinks?.length) return applyNetworkDeform(scene, series, operation);
     let indexes;
     if (operation.kind === "deform") indexes = applyDeform(series.points, operation);
     else if (operation.kind === "move") indexes = applyMove(series.points, operation);
@@ -358,7 +440,7 @@ var FalsifyChartShape = (() => {
   function applyPlanJSON(sceneJson, operationsJson) {
     return JSON.stringify(applyPlan(JSON.parse(sceneJson), JSON.parse(operationsJson)));
   }
-  var api = { applyPlan, createHistory, hitTest, applyPlanJSON, UPSTREAM_COMMIT, PROFILE };
+  var api = { applyPlan, createHistory, hitTest, applyPlanJSON, linkedSeriesIds, UPSTREAM_COMMIT, PROFILE };
   if (typeof globalThis === "object" && globalThis) globalThis.FalsifyChartShape = api;
   return __toCommonJS(chart_shape_core_exports);
 })();
