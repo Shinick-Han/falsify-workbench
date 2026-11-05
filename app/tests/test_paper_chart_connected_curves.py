@@ -67,6 +67,35 @@ def rendered(raw, page=0):
 
 
 class ConnectedCurveTests(unittest.TestCase):
+    def test_short_aa_connection_is_painted_as_one_bridge_not_two_endpoint_dots(self):
+        from test_paper_chart_raster_edit import embed
+        image = np.full((120, 320, 3), 255, np.uint8)
+        cv2.line(image, (20, 60), (143, 60), COLOR, 1)
+        cv2.line(image, (149, 60), (300, 60), COLOR, 1)
+        for x in (80, 240):
+            cv2.line(image, (x, 40), (x, 80), COLOR, 1)
+            for y in (40, 80):
+                cv2.line(image, (x - 4, y), (x + 4, y), COLOR, 1)
+        raw, _ = embed(image)
+        with pikepdf.open(io.BytesIO(raw)) as pdf:
+            for page in pdf.pages:
+                page.MediaBox = [0, 0, 80, 30]
+                page.Contents = pdf.make_stream(b'q 80 0 0 30 0 0 cm /Im1 Do Q')
+            out = io.BytesIO()
+            pdf.save(out)
+            raw = out.getvalue()
+        built = scene.prepare_scene(raw, 0, [0, 0, 80, 30])
+        _, selected, point = min(((abs(p['x'] - 35.75) + abs(p['y'] - 15), s, p)
+                                 for s in built['series'] for p in s['points']), key=lambda v: v[0])
+        edited = evaluate(built, [{'id': 'gap-drag', 'kind': 'deform', 'seriesId': selected['id'],
+                                  'center': [point['x'], point['y']], 'radius': 6, 'dx': 0, 'dy': -3}])['scene']
+        output, _ = paint.export_scene(raw, built, edited)
+        with pymupdf.open(stream=output, filetype='pdf') as doc:
+            pix = doc[0].get_pixmap(dpi=288, alpha=False)
+            rgb = np.frombuffer(pix.samples, np.uint8).reshape((120, 320, 3))
+        _, _, stats, _ = cv2.connectedComponentsWithStats(raster.color_mask(rgb, COLOR).astype(np.uint8), 8)
+        self.assertEqual(sum(r[cv2.CC_STAT_AREA] > 8 for r in stats[1:]), 1)
+
     def test_aa_ink_keeps_pale_samples_and_excludes_grid_and_other_color(self):
         image = np.array([[COLOR, (140, 175, 233), (185, 185, 185), (240, 100, 30)]], np.uint8)
         self.assertEqual(raster.color_mask(image, COLOR).tolist(), [[True, True, False, False]])

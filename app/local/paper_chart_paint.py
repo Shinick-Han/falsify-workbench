@@ -1398,10 +1398,11 @@ def _raster_link_edits(parsed, scene, edited, drop, clones, bbox, dpi):
     currents = {s['id']: s for s in (edited or scene)['series']}
     for left, right in scene.get('curveLinks', []):
         a, b = originals[left[0]], originals[right[0]]
-        points = [a['points'][left[1]], b['points'][right[1]]]
+        points = [dict(a['points'][left[1]], branch='connection'), dict(b['points'][right[1]], branch='connection')]
         if _dist((points[0]['x'], points[0]['y']), (points[1]['x'], points[1]['y'])) < 1e-4:
             continue
-        current = None if drop else [currents[left[0]]['points'][left[1]], currents[right[0]]['points'][right[1]]]
+        current = None if drop else [dict(currents[left[0]]['points'][left[1]], branch='connection'),
+                                    dict(currents[right[0]]['points'][right[1]], branch='connection')]
         old = dict(a, points=points, style={'width': min(a['style']['width'], b['style']['width'])})
         new = None if drop else dict(old, points=current)
         _, color = _match_image(parsed['images'], a, bbox, dpi)
