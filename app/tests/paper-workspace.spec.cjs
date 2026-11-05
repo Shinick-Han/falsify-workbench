@@ -1329,11 +1329,12 @@ test('current page and previous download follow source and generation state',asy
   v.edits.last.add({pageIndex:0,before:'Alpha',after:'Beta',origin:'human'});await until(()=>instances.length,'generation');
   assert.equal(v.ws.getPageIndex(),0);v.get('paper-page-next').click();await until(()=>v.ws.getPageIndex()===1,'page two');
   const g=instances.at(-1),spec=g.specs.at(-1),file=pdfFile(pdfBytes('MARKER-GEN'));
-  g.callbacks.onResult({file,sha256:sha(pdfBytes('MARKER-GEN')),edits:spec.edits,verification:{status:'failed',checks:[{code:'paragraph-link-unverified',pageIndex:0,status:'failed'},{code:'figure-changed',pageIndex:1,status:'failed'}]},warnings:[],revision:1},{spec,key:key(spec)});
+  g.callbacks.onResult({file,sha256:sha(pdfBytes('MARKER-GEN')),edits:spec.edits,verification:{status:'failed',checks:[{code:'paragraph-link-unverified',pageIndex:0,status:'failed'},{code:'figure-changed',pageIndex:1,status:'failed'},{code:'expected-text-uncomputable',pageIndex:0,status:'failed'},{code:'future-unknown-check',pageIndex:0,status:'failed'}]},warnings:[],revision:1},{spec,key:key(spec)});
   g.callbacks.onState({key:key(spec),phase:'ready'});
   const unverified=v.created.find(n=>n.tagName==='div'&&n.textContent.includes('미확인 · 인용 링크'));
-  const failed=v.created.find(n=>n.tagName==='div'&&n.textContent.includes('확인된 검사 실패 · 그림이 바뀜'));
-  assert.ok(unverified&&failed);unverified.querySelector('button').click();await until(()=>v.ws.getPageIndex()===0,'diagnostic page');
+  const failed=v.created.find(n=>n.tagName==='div'&&n.textContent.includes('확인된 문제 · 그림이 바뀜'));
+  assert.ok(unverified&&failed);assert.ok(v.created.some(n=>n.tagName==='div'&&n.textContent==='미확인 · 검사 결과를 확인하세요'));
+  assert.ok(v.created.some(n=>n.tagName==='pre'&&n.textContent.includes('expected-text-uncomputable')));unverified.querySelector('button').click();await until(()=>v.ws.getPageIndex()===0,'diagnostic page');
   assert.equal(v.ws.getOutput().verification.status,'failed');assert.ok(v.created.some(n=>n.tagName==='pre'&&n.textContent.includes('paragraph-link-unverified')));
   const previous=v.created.find(n=>n.tagName==='button'&&n.textContent.startsWith('이전 생성본 다운로드'));
   assert.ok(previous);assert.equal(previous.hidden,true);

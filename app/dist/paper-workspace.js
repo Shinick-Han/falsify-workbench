@@ -721,11 +721,12 @@
       syncZoom();
     }
     const diagnosticPanel=doc.createElement('div');ui.genStatus.after(diagnosticPanel);
+    const confirmedChecks=new Set(['figure-changed','untouched-text','page-count','removed-before','unchanged-output','glyph-overlap-increased','header-footer-moved','header-footer-style-changed']);
     function diagnosticKind(item){
       if(!item||typeof item!=='object')return '';
       const code=String(item.code||'').toLowerCase().replace(/_/g,'-');
-      if(code.includes('unverified'))return '미확인';
-      if(item.status==='failed')return '확인된 검사 실패';
+      if(/unverified|uncomputable|unavailable|ambiguous|unknown/.test(code))return '미확인';
+      if(item.status==='failed')return confirmedChecks.has(code)?'확인된 문제':'검사 결과 확인 필요';
       return '';
     }
     function diagnosticTarget(item){
@@ -736,7 +737,8 @@
     }
     function addDiagnosticAction(item,kind){
       const target=diagnosticTarget(item),row=doc.createElement('div');
-      row.textContent=kind+' · '+(readableCode(item.code)||'검사 결과를 확인하세요');
+      const code=String(item.code||'').toLowerCase().replace(/_/g,'-');
+      row.textContent=kind+' · '+(CAUSE_TEXT[code]||'검사 결과를 확인하세요');
       if(target){const button=doc.createElement('button');button.type='button';button.className='text-button';button.textContent=(target.index+1)+'쪽 확인';
         button.addEventListener('click',()=>{if(target.edit)void compareEdit(target.edit);else if(canLeaveInline())void drawBefore(target.index+1);});row.append(button);}
       diagnosticPanel.append(row);
