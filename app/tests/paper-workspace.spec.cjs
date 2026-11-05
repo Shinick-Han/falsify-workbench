@@ -1306,6 +1306,21 @@ test('ui-audit-repair: table blur schedules the committed cell identity',async()
   assert.equal(instances.at(-1).specs.at(-1).edits[0].id,v.ws.getEditSnapshot().edits[0].id);assert.doesNotMatch(v.get('paper-generate-status').textContent,/겹/);
 });
 
+test('direct editor controls cancel or commit without interrupting IME',async()=>{
+  const v=mount({paragraphPdf:paragraphMock('Original paragraph.')});v.file(pdfFile(pdfBytes('MARKER-A')));
+  await until(()=>/문단을 클릭/.test(v.get('paper-before-status').textContent),'paragraph');
+  clickParagraph(v);let editor=v.document.activeElement;
+  editor.value='Discarded';editor.dispatchEvent(new Event('input'));
+  const status=v.created.find(n=>n.tagName==='span'&&n.dataset.directStatus==='');assert.match(status.textContent,/입력 중/);
+  const cancel=v.created.find(n=>n.tagName==='button'&&n.textContent==='입력 취소');cancel.click();assert.equal(v.ws.getEditSnapshot().edits.length,0);
+  clickParagraph(v);editor=v.document.activeElement;editor.value='Saved';editor.dispatchEvent(new Event('input'));
+  const done=v.created.filter(n=>n.tagName==='button'&&n.textContent==='완료').at(-1);done.click();assert.equal(v.ws.getEditSnapshot().edits[0].after,'Saved');
+  v.get('paper-undo').click();assert.equal(v.ws.getEditSnapshot().edits.length,0);v.get('paper-redo').click();assert.equal(v.ws.getEditSnapshot().edits[0].after,'Saved');
+  clickParagraph(v);editor=v.document.activeElement;editor.value='IME text';editor.dispatchEvent(new Event('compositionstart'));editor.dispatchEvent(new Event('input'));
+  keydown(editor,{key:'Escape',isComposing:true});assert.equal(v.document.activeElement,editor);editor.dispatchEvent(new Event('compositionend'));
+  keydown(editor,{key:'Escape'});assert.equal(v.ws.getEditSnapshot().edits[0].after,'Saved');
+});
+
 test('current page and previous download follow source and generation state',async()=>{
   const instances=[],key=spec=>JSON.stringify(spec.edits);
   const generation={key,create(callbacks){const instance={callbacks,specs:[],schedule(spec){this.specs.push(structuredClone(spec));},dispose(){},flush(){return new Promise(()=>{});}};instances.push(instance);return instance;}};
