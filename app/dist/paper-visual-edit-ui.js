@@ -543,7 +543,7 @@
     return mapPixelBox(cell.bbox,analysis&&analysis.bbox,image&&image.width,image&&image.height);
   }
 
-  function create({host,getSource,getSession,onOutput,onChange,hold}={}){
+  function create({host,getSource,getSession,onOutput,onChange,hold,getSelectionPage}={}){
     if(!host||typeof host.append!=='function'||typeof getSource!=='function'||typeof getSession!=='function'||typeof onOutput!=='function')throw new TypeError('시각 편집 화면 설정이 올바르지 않습니다.');
     const doc=host.ownerDocument||root.document;
     if(!doc||typeof doc.createElement!=='function')throw new TypeError('시각 편집 화면 설정이 올바르지 않습니다.');
@@ -567,7 +567,7 @@
     retry.hidden=true;
     const layout=el('div','visual-edit-layout');
     const sourceColumn=el('div','visual-edit-column');
-    const sourceTitle=el('h3',null,'원본');
+    const sourceTitle=el('h3',null,'편집 대상 PDF');
     const list=el('div','visual-edit-list');
     list.setAttribute('role','radiogroup');
     list.setAttribute('aria-label','원본 표와 그림');
@@ -1180,6 +1180,9 @@
       return JSON.stringify(state.editor)!==JSON.stringify(editorFromChart(state.original));
     }
     function currentPage(src){
+      if(typeof getSelectionPage==='function'){
+        try{const page=getSelectionPage(src);return Number.isSafeInteger(page)&&page>=0?page:null;}catch{return null;}
+      }
       const workspace=root.FalsifyPaperWorkspace;
       const source=workspace?.getSource?.();
       if(!source||source.file!==src?.file||source.fileHash!==src.fileHash)return null;
@@ -1189,13 +1192,13 @@
     async function selectPage(graphIntent=false){
       if(parentBusy||applying||!paperId)return;
       const token=generation,mine=++selectSerial,src=currentSource(),pageIndex=currentPage(src);
-      if(pageIndex===null){say(status,'원본 페이지를 연 뒤 영역을 선택하세요.',true);return;}
+      if(pageIndex===null){say(status,'현재 쪽과 편집 대상 PDF의 대응을 확인할 수 없습니다.',true);return;}
       try{
         const view=await root.FalsifyBlueVisual.previewBluePage({file:src.file,fileHash:src.fileHash,page:pageIndex+1});
         if(!live(token,src)||mine!==selectSerial||currentPage(src)!==pageIndex)return;
         selectedKey='figure:page-region';paintLists();
         await paintFigure({id:'page-region',pageIndex,bbox:[0,0,view.width,view.height],graphIntent},token,mine,()=>currentPage(src)===pageIndex);
-        if(live(token,src)&&mine===selectSerial&&currentPage(src)===pageIndex)say(status,'페이지에서 고칠 영역을 드래그하세요.');
+        if(live(token,src)&&mine===selectSerial&&currentPage(src)===pageIndex)say(status,'편집 대상 PDF에서 고칠 영역을 드래그하세요.');
       }catch{if(token===generation)say(status,TEXT.previewFailed,true);}
     }
     pickPage.addEventListener('click',()=>{void selectPage();});
