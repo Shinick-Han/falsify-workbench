@@ -161,8 +161,40 @@ export function mountPaperLayoutAgent({doc,host,getSession,getEpoch,getReference
     const inputContext=context(),own=new AbortController(),runId=globalThis.crypto?.randomUUID?.()||'layout-'+Date.now()+'-'+Math.random().toString(36).slice(2);let recovered=attempt?.pendingStep||resume?.pendingStep||null;const prior=candidate,priorRunState=runState;pendingStep=recovered;pendingProblem=null;controller=own;signature={session,epoch:getEpoch(),changes:inputContext?.changesSignature};referenceBytes=null;receipts=mergeRunReceipts(baseResume,resume,attempt);status.textContent=resume?'선택한 후보에서 작업을 이어갑니다.':'현재 선택된 변경으로 PDF를 준비합니다.';const userGoal=goal.value.trim().slice(0,2000);runGoal=userGoal;controls();
     return {resume,attempt,inputContext,own,runId,recovered,prior,priorRunState,userGoal};
   }
+  async function prepareReplacements(project,artifact,compiler,own,check){
+      const allowedReplacements=[],extraFiles=[];
+      for(const file of [...(replacementFiles.files||[])]){if(!/\.(png|jpe?g)$/i.test(file.name)||file.size>25*1024*1024)throw new Error('교체 그림은 25MB 이하 PNG·JPEG 파일을 선택하세요.');const bytes=new Uint8Array(await file.arrayBuffer());check();const ext=/\.png$/i.test(file.name)?'png':'jpg',path='replacements/'+hex(bytes)+'.'+ext;allowedReplacements.push(path);if(!project.files.some(f=>f.path===path)&&!extraFiles.some(f=>f.path===path))extraFiles.push({path,bytes});}
+      if(extraFiles.length){project=await createLatexProject({...project,files:[...project.files,...extraFiles]});artifact=await compiler.compile({project,signal:own.signal});check();if(!artifact.success)throw new Error('교체 그림을 포함한 소스를 생성하지 못했습니다.');}
+      return {project,artifact,allowedReplacements};
+  }
+  async function prepareReference(project,check){
+      let referenceBytes=null,reference=null,structure=null;if(project.origin==='reconstructed-pdf'){const file=getReferenceFile();if(!file?.arrayBuffer)throw new Error('재구성 원본 PDF가 필요합니다.');const bytes=new Uint8Array(await file.arrayBuffer());check();if(hex(bytes)!==project.sourcePdfHash)throw new Error('원본 PDF와 현재 소스가 일치하지 않습니다.');referenceBytes=bytes.slice();if(project.files?.some(f=>f.path==='falsify-layout-structure.json')){const api=await import('./paper-layout-structure.mjs');structure=await api.readLayoutStructure(project);}check();reference={schema:'falsify.paper-layout-reference.v1',sourcePdfHash:project.sourcePdfHash,...(structure?{structure:{schema:structure.schema,sourcePdfHash:structure.sourcePdfHash,unitCount:structure.units.length,columns:structure.plan?.columns}}: {})};}
+      return {referenceBytes,reference,structure};
+  }
+  function finishedLayoutResult(result,runId,inputContext,userGoal,handlers){const keptReceipts=copyReceipts(receipts);const finished={...result,runId,sourceContext:inputContext,originalReference:referenceBytes,goal:userGoal,decisionReceipts:keptReceipts,sessionState:result.sessionState?{...result.sessionState,pendingStep,targets:handlers.getTargetMetadata(result.sessionState.currentProject),sourceContext:inputContext,goal:userGoal,decisionReceipts:keptReceipts}:undefined};
+    return finished;
+  }
+  function shouldKeepPrevious(result,initialHash,prior,resume,attempt){
+        const noNewPdf=!result.artifact?.pdfHash||result.artifact.pdfHash===initialHash;
+        const failedTerminal=['failed','cancelled'].includes(result.runState);
+        return failedTerminal&&noNewPdf&&prior?.artifact?.pdfBytes&&prior.artifact.pdfHash!==result.artifact?.pdfHash&&(!resume||attempt);
+  }
+  function keepPreviousCandidate(result,finished,runId,prior,priorRunState){
+          const failedPending=pendingStep,failedReceipts=copyReceipts(receipts);
+          failedRun={runId,runState:result.runState,status:result.status,message:result.message,trace:result.trace||[],pendingStep:failedPending,decisionReceipts:failedReceipts,sessionState:finished.sessionState};
+          const keptState=prior.sessionState||priorRunState;const merged=copyReceipts([...(keptState?.decisionReceipts||[]),...failedReceipts]);
+          const failedAttempt=failedPending||failedReceipts.length?{runId,pendingStep:failedPending||null,decisionReceipts:failedReceipts}:keptState?.failedAttempt||null;
+          pendingStep=failedPending??keptState?.pendingStep??null;candidate={...prior,decisionReceipts:merged};history.set(prior.runId||prior.artifact.pdfHash||prior.project?.id,candidate);
+    return {keptState,merged,failedAttempt};
+  }
+  function layoutConnection(){reveal();if(controller)return null;const session=getSession(),link=bridge?.session?.();if(!session||!link){status.textContent=!session?'논문을 먼저 여세요.':'PC 연결이 끊겼습니다. 연결 후 다시 누르세요.';return null;}return {session,link};}
+  function layoutHandlers(project,resume,allowedReplacements,check,own){
+      return createLayoutToolHandlers({project:resume?.currentProject||project,targetMetadata:resume?.targets,referenceBytes:referenceBytes||undefined,allowedReplacements,renderRegion:async input=>{check();const bytes=input.args.document==='original'?referenceBytes:input.artifact?.pdfBytes;if(!bytes)throw new Error(input.args.document==='original'?'원본 PDF를 입력하세요.':'현재 소스를 먼저 생성하세요.');return renderLayoutRegion({bytes,args:input.args,loadPdf,doc,signal:own.signal});}});
+  }
+  function previousCandidateStatus(result){return `${result.runState==='cancelled'?'새 실행을 중단해':'새 실행이 실패해'} 이전 후보를 유지합니다 · ${result.message||''}`;}
+  function finishedRunStatus(result){return `${runLabels[result.status]||'작업 종료'} · ${result.message||''}`;}
   start.onclick=async()=>{
-    reveal();if(controller)return false;const session=getSession(),link=bridge?.session?.();if(!session||!link){status.textContent=!session?'논문을 먼저 여세요.':'PC 연결이 끊겼습니다. 연결 후 다시 누르세요.';return false;}
+    const connection=layoutConnection();if(!connection)return false;const {session,link}=connection;
     const initialized=initializeLayoutRun(session);
     const {resume,attempt,inputContext,own,runId,prior,priorRunState,userGoal}=initialized;let recovered=initialized.recovered,deliveredAction=null;
     let compiler,reader;
@@ -172,13 +204,13 @@ export function mountPaperLayoutAgent({doc,host,getSession,getEpoch,getReference
     try{
       compiler=compilerFactory();reader=readerFactory();
       const cancelInitial=()=>session.cancel?.();own.signal.addEventListener('abort',cancelInitial,{once:true});let artifact,project;try{if(resume){artifact=resume.baselineArtifact;project=resume.baselineProject;}else{artifact=await session.compile();project=await session.getCurrentProject();}}finally{own.signal.removeEventListener('abort',cancelInitial);}check();
-      const allowedReplacements=[],extraFiles=[];
-      for(const file of [...(replacementFiles.files||[])]){if(!/\.(png|jpe?g)$/i.test(file.name)||file.size>25*1024*1024)throw new Error('교체 그림은 25MB 이하 PNG·JPEG 파일을 선택하세요.');const bytes=new Uint8Array(await file.arrayBuffer());check();const ext=/\.png$/i.test(file.name)?'png':'jpg',path='replacements/'+hex(bytes)+'.'+ext;allowedReplacements.push(path);if(!project.files.some(f=>f.path===path)&&!extraFiles.some(f=>f.path===path))extraFiles.push({path,bytes});}
-      if(extraFiles.length){project=await createLatexProject({...project,files:[...project.files,...extraFiles]});artifact=await compiler.compile({project,signal:own.signal});check();if(!artifact.success)throw new Error('교체 그림을 포함한 소스를 생성하지 못했습니다.');}
-      referenceBytes=null;let reference=null,structure=null;if(project.origin==='reconstructed-pdf'){const file=getReferenceFile();if(!file?.arrayBuffer)throw new Error('재구성 원본 PDF가 필요합니다.');const bytes=new Uint8Array(await file.arrayBuffer());check();if(hex(bytes)!==project.sourcePdfHash)throw new Error('원본 PDF와 현재 소스가 일치하지 않습니다.');referenceBytes=bytes.slice();if(project.files?.some(f=>f.path==='falsify-layout-structure.json')){const api=await import('./paper-layout-structure.mjs');structure=await api.readLayoutStructure(project);}check();reference={schema:'falsify.paper-layout-reference.v1',sourcePdfHash:project.sourcePdfHash,...(structure?{structure:{schema:structure.schema,sourcePdfHash:structure.sourcePdfHash,unitCount:structure.units.length,columns:structure.plan?.columns}}: {})};}
+      const replacement=await prepareReplacements(project,artifact,compiler,own,check);check();
+      project=replacement.project;artifact=replacement.artifact;const {allowedReplacements}=replacement;
+      const referenceResult=await prepareReference(project,check);check();
+      referenceBytes=referenceResult.referenceBytes;const {reference,structure}=referenceResult;
       if(artifact.projectId!==project.id)throw new Error('현재 소스와 PDF가 일치하지 않습니다.');
       if(!candidate)setCandidate({project,artifact,status:'unresolved',runId,sourceContext:inputContext,originalReference:referenceBytes,message:'검사와 렌더링 전 PDF'});
-      const handlers=createLayoutToolHandlers({project:resume?.currentProject||project,targetMetadata:resume?.targets,referenceBytes:referenceBytes||undefined,allowedReplacements,renderRegion:async input=>{check();const bytes=input.args.document==='original'?referenceBytes:input.artifact?.pdfBytes;if(!bytes)throw new Error(input.args.document==='original'?'원본 PDF를 입력하세요.':'현재 소스를 먼저 생성하세요.');return renderLayoutRegion({bytes,args:input.args,loadPdf,doc,signal:own.signal});}});
+      const handlers=layoutHandlers(project,resume,allowedReplacements,check,own);
       const initialHash=artifact?.pdfHash;
       const result=await runAgent({project,artifact,runId,resumeState:resume||undefined,signal:own.signal,reference,handlers,maxSteps:32,
         onState:state=>{if(own.signal.aborted||!same())return;if(deliveredAction&&state.trace?.at(-1)?.action===deliveredAction){pendingStep=null;deliveredAction=null;}const saved={...state,pendingStep,targets:handlers.getTargetMetadata(state.currentProject),sourceContext:inputContext,goal:userGoal,decisionReceipts:copyReceipts(receipts)};void remember(saved);if(saved.candidate?.artifact?.pdfHash!==initialHash||!candidate){const pair=saved.candidate;if(pair)setCandidate({...pair,runId:saved.runId,status:saved.status,runState:saved.runState,quality:saved.quality,coverage:saved.coverage,trace:saved.trace,sessionState:saved,sourceContext:inputContext,originalReference:referenceBytes,goal:userGoal,decisionReceipts:copyReceipts(receipts),previousCandidate:saved.previousCandidate});}},
@@ -200,19 +232,13 @@ export function mountPaperLayoutAgent({doc,host,getSession,getEpoch,getReference
         render:async ({artifact:a,pages,signal})=>renderDocument(a.pdfBytes,pages,'candidate'),
         onProgress:entry=>{if(!own.signal.aborted&&same())status.textContent=`${actionLabels[entry.action]||'작업'} · ${entry.result?.status==='ok'?'완료':entry.result?.status==='rejected'?'적용하지 못해 다시 조정 중':entry.result?.status==='failed'?'실패':'진행 중'}`;}
       });
-      if(same()){const keptReceipts=copyReceipts(receipts);const finished={...result,runId,sourceContext:inputContext,originalReference:referenceBytes,goal:userGoal,decisionReceipts:keptReceipts,sessionState:result.sessionState?{...result.sessionState,pendingStep,targets:handlers.getTargetMetadata(result.sessionState.currentProject),sourceContext:inputContext,goal:userGoal,decisionReceipts:keptReceipts}:undefined};
+      if(same()){const finished=finishedLayoutResult(result,runId,inputContext,userGoal,handlers);
         // A fresh run, or a recovered attempt, that stopped before producing its own PDF keeps the preceding candidate primary.
-        const noNewPdf=!result.artifact?.pdfHash||result.artifact.pdfHash===initialHash;
-        const failedTerminal=['failed','cancelled'].includes(result.runState);
-        if(failedTerminal&&noNewPdf&&prior?.artifact?.pdfBytes&&prior.artifact.pdfHash!==result.artifact?.pdfHash&&(!resume||attempt)){
-          const failedPending=pendingStep,failedReceipts=copyReceipts(receipts);
-          failedRun={runId,runState:result.runState,status:result.status,message:result.message,trace:result.trace||[],pendingStep:failedPending,decisionReceipts:failedReceipts,sessionState:finished.sessionState};
-          const keptState=prior.sessionState||priorRunState;const merged=copyReceipts([...(keptState?.decisionReceipts||[]),...failedReceipts]);
-          const failedAttempt=failedPending||failedReceipts.length?{runId,pendingStep:failedPending||null,decisionReceipts:failedReceipts}:keptState?.failedAttempt||null;
-          pendingStep=failedPending??keptState?.pendingStep??null;candidate={...prior,decisionReceipts:merged};history.set(prior.runId||prior.artifact.pdfHash||prior.project?.id,candidate);
+        if(shouldKeepPrevious(result,initialHash,prior,resume,attempt)){
+          const {keptState,merged,failedAttempt}=keepPreviousCandidate(result,finished,runId,prior,priorRunState);
           if(keptState)await remember({...keptState,pendingStep,decisionReceipts:merged,...(failedAttempt?{failedAttempt}:{})});else runState=null;paintOutcome();controls();
-          status.textContent=`${result.runState==='cancelled'?'새 실행을 중단해':'새 실행이 실패해'} 이전 후보를 유지합니다 · ${result.message||''}`;
-        }else{failedRun=null;setCandidate(finished);if(finished.sessionState)await remember(finished.sessionState);status.textContent=`${runLabels[result.status]||'작업 종료'} · ${result.message||''}`;}}
+          status.textContent=previousCandidateStatus(result);
+        }else{failedRun=null;setCandidate(finished);if(finished.sessionState)await remember(finished.sessionState);status.textContent=finishedRunStatus(result);}}
     }catch(e){if(e.name!=='AbortError')status.textContent=e.message;else if(same())status.textContent='작업을 중단했습니다.';}finally{compiler?.dispose();reader?.dispose();if(controller===own)controller=null;controls();}
   };
   // Source changes drop the in-memory run; the explicitly saved run store is left for a later explicit restore.
