@@ -216,7 +216,6 @@ export function mountLatexWorkbench(doc=globalThis.document){
   let renderedKey='',leftRendered='';
   function previewPane(i,pdf,current,baseline){const canvas=i?rightCanvas:leftCanvas,a=i?current:baseline,key=a.pdfHash+':'+currentPage;if((i?renderedKey:leftRendered)===key||clearUnavailablePane(i,pdf,canvas))return null;return {canvas,key,frame:i?rightFrame:leftFrame};}
   function clearUnavailablePane(i,pdf,canvas){if(currentPage<pdf.numPages)return false;clearMissingPreviewPane({canvas,overlay:i?rightOverlay:leftOverlay,visibleText,index:i});if(i)renderedKey='';else leftRendered='';return true;}
-  function storeTextView(layerKey,key,textEl,content,layer,viewport){const view=storeTextView(layerKey,key,textEl,content,layer,viewport);return view;}
   function previewSnapshot(){if(!active||!session)return null;const ticket=++renderEpoch,s=session.snapshot(),baseline=s.baseline,current=s.artifact||s.lastArtifact;if(!baseline||!current)return null;return {ticket,baseline,current};}
   function cachePreviewText(key,content){textPages.set(key,content);if(textPages.size>12)textPages.delete(textPages.keys().next().value);}
   function releasePreviewDocuments(cache,docs,current,baseline){for(const[i,pdf]of docs.entries())cache.release((i?current:baseline).pdfHash);}
