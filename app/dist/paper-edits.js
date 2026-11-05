@@ -340,6 +340,7 @@
       });
       commit(state,next);
     }
+    function historyTarget(direction){const list=direction==='undo'?state.past:direction==='redo'?state.future:[];return list.length?clone(list[list.length-1]):null;}
     function undo(){if(!state.past.length)fail('undo-empty','되돌릴 편집이 없습니다.');state.future.push({revision:state.revision,edits:clone(state.edits)});const prev=state.past.pop();state.revision=prev.revision;state.edits=prev.edits;emit(state);}
     function redo(){if(!state.future.length)fail('redo-empty','다시 실행할 편집이 없습니다.');state.past.push({revision:state.revision,edits:clone(state.edits)});const nxt=state.future.pop();state.revision=nxt.revision;state.edits=nxt.edits;emit(state);}
     function subscribe(fn,onError){
@@ -349,7 +350,7 @@
       state.subs.add(sub);let dead=false;
       return function unsubscribe(){if(dead)return;dead=true;state.subs.delete(sub);};
     }
-    return Object.freeze({id:sessionId,snapshot,addSegments,add,update,remove,setEnabled,disableBatch,undo,redo,subscribe});
+    return Object.freeze({id:sessionId,snapshot,addSegments,add,update,remove,setEnabled,disableBatch,historyTarget,undo,redo,subscribe});
   }
   function draft(input){
     allowKeys(input,['snapshot','now'],['snapshot'],'malformed','초안');
