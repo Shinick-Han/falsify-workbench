@@ -1211,10 +1211,11 @@
       if(!selectionCurrent(token,mine)||!stillCurrent())return;
       if(!rendered){say(status,TEXT.previewFailed,true);errorCode='preview';return;}
       figureState={key:'figure:'+item.id,opId:'figure-'+item.id,itemId:item.id,pageIndex:item.pageIndex,bbox:item.bbox.slice(),beforeSha:rendered.sha256,beforePng:rendered.bytes,uploaded:null,crop:null,label:null,afterPng:null,page:item.pageIndex+1};
+      const fig=figureState;
       paintFigureControls();
       setImages(rendered.bytes,null);
       await loadPreview(token,mine,stillCurrent);
-      if(!stillCurrent()&&figureState?.itemId===item.id){figureState=null;workBody.replaceChildren();}
+      if(!stillCurrent()&&figureState===fig){figureState=null;workBody.replaceChildren();}
     }
     function paintFigureControls(){
       const fig=figureState;

@@ -630,6 +630,18 @@ serial('page change during the displayed selection preview clears the old picker
   assert.equal(h.ui.snapshot().pending,0);
 });
 
+serial('stale page preview cannot clear a newer picker',async()=>{
+  let release,attempt=0,page=0;const gate=new Promise(resolve=>{release=resolve;});
+  const h=world({catalog:{items:[],full:{},analyses:[],fullAnalyses:{}},previewWait:()=>++attempt===2?gate:Promise.resolve()});
+  h.source={file:fileOf(PDF,'vectors.pdf'),fileHash:HASH,revision:'r1'};
+  globalThis.FalsifyPaperWorkspace.getPageIndex=()=>page;
+  await h.ui.refresh();h.button('영역 직접 선택').click();
+  await until(()=>attempt===2,'first picker preview');page=1;h.button('영역 직접 선택').click();
+  await until(()=>attempt===4,'second picker preview');release();await settle();
+  assert.ok(h.labeled('라벨'));
+  assert.equal(h.previews.at(-1).page,2);
+});
+
 serial('graph edit binds to the visible page after page navigation',async()=>{
   const mounts=[];
   globalThis.FalsifyChartShape={};
