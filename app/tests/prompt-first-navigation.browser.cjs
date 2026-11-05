@@ -45,6 +45,7 @@ const assert=require('node:assert/strict');
  await mobile.close();
  const desktop=await browser.newPage({viewport:{width:960,height:600},reducedMotion:'reduce'});
  await desktop.goto(process.env.FALSIFY_UI_TEST_URL||'http://127.0.0.1:18806/');await desktop.evaluate(()=>FalsifyVisual.ready);
+ assert.ok(await desktop.locator('.paper-intake > .step-head').isVisible());assert.ok(await desktop.locator('#sign-detail').isVisible());
  await desktop.locator('#paper-file').setInputFiles(require('node:path').join(__dirname,'fixtures/paragraph-audit-synthetic.pdf'));
  await desktop.locator('#paper-before-stage canvas').waitFor({timeout:30000});
  const stageTop=await desktop.locator('#paper-before-stage').evaluate(e=>e.getBoundingClientRect().top);
