@@ -91,3 +91,17 @@ body:has(.rail [data-view=workbench][aria-current=page]) .content{padding-top:8p
 .paper-workspace:not([hidden]) .paper-edit-tools{margin-top:4px}
 .paper-workspace:not([hidden]) .paper-toolbar{gap:4px}
 .paper-workspace:not([hidden]) .paper-toolbar .button{min-height:44px;padding:6px 8px}
+
+/* A loaded RED paper keeps its airport sign while giving the page room. */
+@media(min-width:821px){
+body:has(#view-workbench:not([hidden]) #paper-workspace:not([hidden])) .topbar{height:44px}
+body:has(#view-workbench:not([hidden]) #paper-workspace:not([hidden])) .wayfinding{padding-top:4px;padding-bottom:4px}
+body:has(#view-workbench:not([hidden]) #paper-workspace:not([hidden])) .gate-code{font-size:30px;min-width:48px}
+body:has(#view-workbench:not([hidden]) #paper-workspace:not([hidden])) .sign-message h1{font-size:17px}
+body:has(#view-workbench:not([hidden]) #paper-workspace:not([hidden])) .sign-message p{display:none}
+body:has(#view-workbench:not([hidden]) #paper-workspace:not([hidden])) .sign-action{max-width:none;padding:0;white-space:nowrap;min-height:44px}
+body:has(#view-workbench:not([hidden]) #paper-workspace:not([hidden])) .content{padding-top:8px}
+.paper-intake:has(#paper-workspace:not([hidden]))>.step-head{display:none}
+.paper-intake #paper-workspace:not([hidden]) .paper-page-jump{display:inline-flex;margin:0}
+.paper-workspace:not([hidden]) .paper-compare{margin-top:4px}
+}

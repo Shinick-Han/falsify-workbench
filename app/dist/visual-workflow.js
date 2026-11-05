@@ -66,6 +66,13 @@
     }
     intake('#paper-file','red');intake('#doc-blue-file','blue');
 
+    document.addEventListener('falsify:reveal-prompt',event=>{
+      const role=event.detail?.role;if(role!=='red'&&role!=='blue')return;
+      const prompt=$('#external-'+role+' .prompt-instructions textarea');if(!prompt)return;
+      for(let parent=prompt.parentElement;parent;parent=parent.parentElement)if(parent.tagName==='DETAILS')parent.open=true;
+      prompt.focus();
+    });
+
     const paper=$('#paper-workspace');
     if(paper){
       const visibility=()=>{paper.hidden=!globalThis.FalsifyPaperWorkspace?.getSource?.();};
