@@ -413,38 +413,31 @@ export function createLayoutPreviewController({
 
   // Prepare one side for a request without touching the visible canvas.
   // Resolves to {result, commit, discard}; rejects with AbortError when stale.
-  async function prepareSide(side, pageIndex, requestTicket, focus) {
-    const base = {pageIndex, totalPages: 0, pdfHash: side.document?.pdfHash || null};
-    const noop = () => {};
-    const unavailable = state => sideFocus(side, focus, state, pageIndex);
-    if (!side.document) return {result: {...base, state: 'absent', text: '', focus: unavailable('absent')}, commit: () => blank(side, 'absent'), discard: noop};
-    const owner = side.document;
-    const stale = () => !current(requestTicket) || side.document !== owner;
-    let pdf;
-    try {
-      pdf = await acquire(side);
-    } catch (error) {
-      if (stale()) throw cancelledError();
-      stats.loadFailures++;
-      return {result: {...base, state: 'error', error: error?.message || String(error), text: '', focus: unavailable('error')}, commit: () => blank(side, ''), discard: noop};
-    }
-    if (stale()) throw cancelledError();
-    const totalPages = Number.isSafeInteger(pdf?.numPages) && pdf.numPages >= 0 ? pdf.numPages : 0;
-    const info = {...base, totalPages};
-    if (pageIndex >= totalPages) {
-      stats.outOfRange++;
-      return {result: {...info, state: 'out-of-range', text: '', focus: unavailable('out-of-range')}, commit: () => blank(side, `${owner.pdfHash}:missing`), discard: noop};
-    }
-    const key = `${owner.pdfHash}:${pageIndex}`;
-    const canvas = canvases[side.name];
-    const needsPaint = Boolean(canvas) && side.painted !== key;
-    if (!needsPaint && textCache.has(key)) {
-      stats.renderReuses++;
-      const text = await extractText(null, key);
-      const size = canvas ? {width: canvas.width, height: canvas.height} : {};
-      const focusResult = sideFocus(side, focus, 'ready', pageIndex, side.paintedDisplay, canvas ? size : null);
-      return {result: {...info, state: 'ready', reused: true, ...size, text, focus: focusResult}, commit: () => applyMarker(side, focusResult), discard: noop};
-    }
+  function makePreparedResult({side,focus,pageIndex,display,canvas,width,height,rendered,owner,key,info,needsPaint,text}) {
+      const focusResult = sideFocus(side, focus, 'ready', pageIndex, display, canvas ? {width, height} : null);
+      const commit = () => {
+        if (!rendered) { applyMarker(side, focusResult); return; }
+        canvas.width = width;
+        canvas.height = height;
+        canvas.getContext('2d').drawImage(rendered, 0, 0);
+        if (canvas.dataset) {
+          canvas.dataset.pdfHash = owner.pdfHash;
+          canvas.dataset.pageIndex = String(pageIndex);
+          canvas.dataset.scale = String(renderScale);
+          delete canvas.dataset.focusBbox;
+        }
+        // The fresh page has no outline; keep the clean render as the marker base.
+        dropMarker(side);
+        side.painted = key;
+        side.paintedDisplay = display;
+        stats.paints++;
+        if (focusResult?.state === 'drawn') side.base = rendered; else freeScratch(rendered);
+        applyMarker(side, focusResult);
+      };
+      return {result: {...info, state: 'ready', reused: !needsPaint, width, height, text, focus: focusResult}, commit, discard: () => freeScratch(rendered)};
+  }
+
+  async function renderPreparedSide({pdf,pageIndex,stale,canvas,needsPaint,side,focus,key,info,owner,noop}) {
     const page = await pdf.getPage(pageIndex + 1);
     let scratch = null;
     try {
@@ -479,27 +472,7 @@ export function createLayoutPreviewController({
       if (stale()) throw cancelledError();
       const rendered = scratch;
       scratch = null;
-      const focusResult = sideFocus(side, focus, 'ready', pageIndex, display, canvas ? {width, height} : null);
-      const commit = () => {
-        if (!rendered) { applyMarker(side, focusResult); return; }
-        canvas.width = width;
-        canvas.height = height;
-        canvas.getContext('2d').drawImage(rendered, 0, 0);
-        if (canvas.dataset) {
-          canvas.dataset.pdfHash = owner.pdfHash;
-          canvas.dataset.pageIndex = String(pageIndex);
-          canvas.dataset.scale = String(renderScale);
-          delete canvas.dataset.focusBbox;
-        }
-        // The fresh page has no outline; keep the clean render as the marker base.
-        dropMarker(side);
-        side.painted = key;
-        side.paintedDisplay = display;
-        stats.paints++;
-        if (focusResult?.state === 'drawn') side.base = rendered; else freeScratch(rendered);
-        applyMarker(side, focusResult);
-      };
-      return {result: {...info, state: 'ready', reused: !needsPaint, width, height, text, focus: focusResult}, commit, discard: () => freeScratch(rendered)};
+      return makePreparedResult({side,focus,pageIndex,display,canvas,width,height,rendered,owner,key,info,needsPaint,text});
     } catch (error) {
       if (!isCancellation(error) && !stale()) {
         return {result: {...info, state: 'error', error: error?.message || String(error), text: ''}, commit: () => blank(side, ''), discard: noop};
@@ -509,6 +482,45 @@ export function createLayoutPreviewController({
       freeScratch(scratch);
       try { page.cleanup?.(); } catch { /* cleanup is best effort */ }
     }
+  }
+
+  function previewPageCount(pdf) { return Number.isSafeInteger(pdf?.numPages) && pdf.numPages >= 0 ? pdf.numPages : 0; }
+
+  async function prepareSide(side, pageIndex, requestTicket, focus) {
+    const base = {pageIndex, totalPages: 0, pdfHash: side.document?.pdfHash || null};
+    const noop = () => {};
+    const unavailable = state => sideFocus(side, focus, state, pageIndex);
+    if (!side.document) return {result: {...base, state: 'absent', text: '', focus: unavailable('absent')}, commit: () => blank(side, 'absent'), discard: noop};
+    const owner = side.document;
+    const stale = () => !current(requestTicket) || side.document !== owner;
+    let pdf;
+    try {
+      pdf = await acquire(side);
+    } catch (error) {
+      if (stale()) throw cancelledError();
+      stats.loadFailures++;
+      return {result: {...base, state: 'error', error: error?.message || String(error), text: '', focus: unavailable('error')}, commit: () => blank(side, ''), discard: noop};
+    }
+    if (stale()) throw cancelledError();
+    const totalPages = previewPageCount(pdf);
+    const info = {...base, totalPages};
+    if (pageIndex >= totalPages) {
+      stats.outOfRange++;
+      return {result: {...info, state: 'out-of-range', text: '', focus: unavailable('out-of-range')}, commit: () => blank(side, `${owner.pdfHash}:missing`), discard: noop};
+    }
+    const key = `${owner.pdfHash}:${pageIndex}`;
+    const canvas = canvases[side.name];
+    const needsPaint = Boolean(canvas) && side.painted !== key;
+    if (!needsPaint && textCache.has(key)) {
+      stats.renderReuses++;
+      const text = await extractText(null, key);
+      const size = canvas ? {width: canvas.width, height: canvas.height} : {};
+      const focusResult = sideFocus(side, focus, 'ready', pageIndex, side.paintedDisplay, canvas ? size : null);
+      return {result: {...info, state: 'ready', reused: true, ...size, text, focus: focusResult}, commit: () => applyMarker(side, focusResult), discard: noop};
+    }
+    const prepared = await renderPreparedSide({pdf,pageIndex,stale,canvas,needsPaint,side,focus,key,info,owner,noop});
+    if (stale()) { prepared.discard(); throw cancelledError(); }
+    return prepared;
   }
 
   function setDocuments({original = null, candidate = null} = {}) {
