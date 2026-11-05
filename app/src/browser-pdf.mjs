@@ -284,24 +284,31 @@ function readPage(page) {
   return {chars, images, transform, toPdf, bounds: page.getBounds(), rotation: rotationOf(page)};
 }
 
-function locate(edit, index, models, pageCount, snapshot) {
-  const id = typeof edit?.id === 'string' && edit.id ? edit.id : `edit-${index}`;
-  const pageIndex = edit?.pageIndex;
-  const fail = (code) => ({ok: false, failure: {id, pageIndex: Number.isInteger(pageIndex) ? pageIndex : null, status: 'unapplied', code}});
+function validateEditText(edit, pageIndex, pageCount, fail) {
   if (!edit || typeof edit !== 'object') return fail('invalid-edit');
   if (!Number.isInteger(pageIndex) || pageIndex < 0 || pageIndex >= pageCount) return fail('invalid-page');
   if (typeof edit.before !== 'string' || !edit.before.trim() || edit.before.length > LIMITS.maxChars) return fail('invalid-before');
   if (typeof edit.after !== 'string' || edit.after.length > LIMITS.maxChars) return fail('invalid-after');
+  return null;
+}
+
+function validAnchorRange(anchor) {
+  if (anchor && (anchor.start !== undefined || anchor.end !== undefined)) {
+    if (!Number.isInteger(anchor.start) || !Number.isInteger(anchor.end) || anchor.end <= anchor.start) return false;
+  }
+  return true;
+}
+
+function validateEditAnchor(edit, pageIndex, pageCount, fail) {
   const anchor = edit.anchor && typeof edit.anchor === 'object' ? edit.anchor : null;
   if (anchorConvention(edit, anchor)) return fail('invalid-anchor');
   if (anchor?.bbox && !validBox(anchor.bbox)) return fail('invalid-anchor');
   if (anchor && anchor.occurrence !== undefined && (!Number.isInteger(anchor.occurrence) || anchor.occurrence < 0)) return fail('invalid-anchor');
-  if (anchor && (anchor.start !== undefined || anchor.end !== undefined)) {
-    if (!Number.isInteger(anchor.start) || !Number.isInteger(anchor.end) || anchor.end <= anchor.start) return fail('invalid-anchor');
-  }
-  /* start/end are raw segment offsets. They are not page-string offsets and do not choose a hit. */
-  const model = models[pageIndex];
-  if (model.rotation !== 0) return fail('rotated-page');
+  if (!validAnchorRange(anchor)) return fail('invalid-anchor');
+  return {anchor};
+}
+
+function findAnchoredQuotes(model, edit, anchor) {
   const {text, map} = normalized(model.chars);
   const needle = edit.before.replace(/\s+/g, ' ').trim();
   const hits = [];
@@ -328,10 +335,10 @@ function locate(edit, index, models, pageCount, snapshot) {
     // counts page-global quotes, before geometry, as in the original contract.
     if (requestedOrdinal !== undefined || hits.length > 1) break;
   }
-  const pool = hits;
-  if (!pool.length) return fail(foundQuote ? 'anchor-mismatch' : 'not-found');
-  if (pool.length > 1) return fail('ambiguous');
-  const chars = pool[0].chars;
+  return {hits, foundQuote};
+}
+
+function buildLocatedPlan(edit, id, pageIndex, model, anchor, chars, snapshot, fail) {
   const drawn = chars.filter(ch => ch.c.trim());
   if (!drawn.length) return fail('not-found');
   if (!drawn.every(ch => horizontalLine(chars.filter(item => item.lineId === ch.lineId)))) return fail('rotated-text');
@@ -354,6 +361,26 @@ function locate(edit, index, models, pageCount, snapshot) {
     size: sizes[0], color: drawn[0].color,
     origin: chars[0].pdf, hole: box[1] - box[0], partialLine, rotation: model.rotation,
   }};
+}
+
+function locate(edit, index, models, pageCount, snapshot) {
+  const id = typeof edit?.id === 'string' && edit.id ? edit.id : `edit-${index}`;
+  const pageIndex = edit?.pageIndex;
+  const fail = (code) => ({ok: false, failure: {id, pageIndex: Number.isInteger(pageIndex) ? pageIndex : null, status: 'unapplied', code}});
+  const invalid = validateEditText(edit, pageIndex, pageCount, fail);
+  if (invalid) return invalid;
+  const validated = validateEditAnchor(edit, pageIndex, pageCount, fail);
+  if (validated.ok === false) return validated;
+  const {anchor} = validated;
+  /* start/end are raw segment offsets. They are not page-string offsets and do not choose a hit. */
+  const model = models[pageIndex];
+  if (model.rotation !== 0) return fail('rotated-page');
+  const {hits, foundQuote} = findAnchoredQuotes(model, edit, anchor);
+  const pool = hits;
+  if (!pool.length) return fail(foundQuote ? 'anchor-mismatch' : 'not-found');
+  if (pool.length > 1) return fail('ambiguous');
+  const chars = pool[0].chars;
+  return buildLocatedPlan(edit, id, pageIndex, model, anchor, chars, snapshot, fail);
 }
 
 function layout(plan, model, page) {
