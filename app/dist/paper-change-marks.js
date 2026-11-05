@@ -47,11 +47,13 @@
   }
   function anchoredOffset(location,quote,wanted,hay){
     if(!validLocation(location,quote))return -1;
-    const {text,start,end}=location;
+    const {text,start}=location;
     const source=mapped(text),base=hay.value.indexOf(source.value);
     if(!source.value||base<0||hay.value.indexOf(source.value,base+1)>=0)return -1;
-    const first=source.starts.findIndex(offset=>offset>=start),last=source.ends.findIndex(offset=>offset>=end);
-    if(first<0||last<first||source.starts[first]!==start||source.ends[last]!==end)return -1;
+    const normalized=mapped(quote),lead=normalized.value.indexOf(wanted);
+    const firstStart=start+normalized.starts[lead],lastEnd=start+normalized.ends[lead+wanted.length-1];
+    const first=source.starts.findIndex(offset=>offset===firstStart),last=source.ends.findIndex(offset=>offset===lastEnd);
+    if(first<0||last<first)return -1;
     if(source.value.slice(first,last+1)!==wanted)return -1;
     return base+first;
   }

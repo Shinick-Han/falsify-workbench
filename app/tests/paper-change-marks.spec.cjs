@@ -65,3 +65,15 @@ test('candidate painter places the mark on the second rendered text run',()=>{
   const result=M.paintPage({document:doc,container,items,divs,edits:[{id:'candidate',before:'Alpha',after:'',location:{text,start:11,end:16}}],side:'before'});
   assert.equal(result.count,1);assert.equal(result.layer.children[0].style.left,'120px');assert.equal(result.found[0].itemIndex,1);
 });
+
+test('anchored repeated quote trims boundary whitespace only after validating the exact source range',()=>{
+  const text='Alpha here Alpha there',items=[{str:text}];
+  for(const [before,start,end] of [[' Alpha',10,16],['Alpha ',11,17],[' Alpha ',10,17]]){
+    const edit={id:'p',before,after:'',location:{text,start,end}};
+    const result=M.ranges(items,[edit],'before');assert.deepEqual(result.missing,[]);assert.deepEqual(result.found.map(x=>[x.itemIndex,x.start,x.end]),[[0,11,16]]);
+    const wrong={...edit,location:{text,start:start-1,end:end-1}};assert.deepEqual(M.ranges(items,[wrong],'before').missing,['p']);
+  }
+  const spaced='Alpha here  \n Alpha  there',before=' \n Alpha  ',start=11,end=start+before.length;
+  const result=M.ranges([{str:spaced}],[{id:'p',before,after:'',location:{text:spaced,start,end}}],'before');
+  assert.deepEqual(result.missing,[]);assert.deepEqual(result.found.map(x=>[x.start,x.end]),[[spaced.lastIndexOf('Alpha'),spaced.lastIndexOf('Alpha')+5]]);
+});
