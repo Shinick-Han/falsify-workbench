@@ -642,6 +642,22 @@ serial('stale page preview cannot clear a newer picker',async()=>{
   assert.equal(h.previews.at(-1).page,2);
 });
 
+serial('graph region selection opens shape editor with the drawn page and bounds',async()=>{
+  const mounts=[];globalThis.FalsifyChartShape={};
+  globalThis.FalsifyChartShapeEditor={create:args=>{mounts.push(args);return {destroy(){}};}};
+  try{
+    const h=world({pageIndex:1,catalog:{items:[],full:{},analyses:[],fullAnalyses:{}},shapeScene:{sceneId:'s',series:[{id:'a',points:[{x:1,y:2}]}]}});
+    h.source={file:fileOf(PDF,'vectors.pdf'),fileHash:HASH,revision:'r1'};
+    await h.ui.refresh();h.button('그래프 영역 선택').click();
+    await until(()=>all(h.host).some(el=>el.className.includes('visual-edit-stage'))&&h.previews.length===2,'graph picker');
+    const stage=all(h.host).find(el=>el.className.includes('visual-edit-stage'));
+    stage.dispatchEvent(pointer('pointerdown',10,20));stage.dispatchEvent(pointer('pointerup',110,120));
+    await until(()=>mounts.length===1,'shape editor');
+    const request=h.calls.find(c=>c.path==='/api/paper/chart/prepare');
+    assert.equal(request.body.pageIndex,1);assert.deepEqual(request.body.bbox,[20,40,220,240]);
+  }finally{delete globalThis.FalsifyChartShape;delete globalThis.FalsifyChartShapeEditor;}
+});
+
 serial('graph edit binds to the visible page after page navigation',async()=>{
   const mounts=[];
   globalThis.FalsifyChartShape={};
