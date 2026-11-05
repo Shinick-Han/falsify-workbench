@@ -547,7 +547,7 @@
     const listeners=[];
     function listen(node,type,handler,options){if(!node)return;node.addEventListener(type,handler,options);listeners.push(()=>node.removeEventListener(type,handler,options));}
     let epoch=0,source=null,session=null,unsub=null,snapshot=null,output=null,inline=null,pageText=null,directEditor=null,committingDirect=false,committingInline=false,composingDirect=false,selectionClickPending=false;
-    let fontRevision=0,fontBusy=false;
+    let fontRevision=0,fontBusy=false,outputAt=null,generationFailed=false;
     let proposalQueue=null,accepted=new Set(),modelById=new Map(),draftRaw=null,pendingFocus=null,pendingResume=null;
     let external=null, externalRevision=0, draftTimer=null,combineIds=new Set(),suppressExternalPaint=false,proposalInputs=new Map();
     let editMode='text',tableCtl=null,tableSeq=0,tableBindings=new Map();
@@ -720,17 +720,51 @@
       if((doc.activeElement===ui.prev||doc.activeElement===ui.next)&&ui.prev.disabled&&ui.next.disabled)ui.beforeStage.focus();
       syncZoom();
     }
+    const diagnosticPanel=doc.createElement('div');ui.genStatus.after(diagnosticPanel);
+    function diagnosticKind(item){
+      if(!item||typeof item!=='object')return '';
+      const code=String(item.code||'').toLowerCase().replace(/_/g,'-');
+      if(code.includes('unverified'))return '미확인';
+      if(item.status==='failed')return '확인된 검사 실패';
+      return '';
+    }
+    function diagnosticTarget(item){
+      const id=item.editId||item.id,edit=(output?.edits||[]).find(e=>e.id===id);
+      const index=Number.isSafeInteger(edit?.pageIndex)?edit.pageIndex:item.pageIndex;
+      if(!Number.isSafeInteger(index)||index<0||index>=pages)return null;
+      return {index,edit};
+    }
+    function addDiagnosticAction(item,kind){
+      const target=diagnosticTarget(item),row=doc.createElement('div');
+      row.textContent=kind+' · '+(readableCode(item.code)||'검사 결과를 확인하세요');
+      if(target){const button=doc.createElement('button');button.type='button';button.className='text-button';button.textContent=(target.index+1)+'쪽 확인';
+        button.addEventListener('click',()=>{if(target.edit)void compareEdit(target.edit);else if(canLeaveInline())void drawBefore(target.index+1);});row.append(button);}
+      diagnosticPanel.append(row);
+    }
+    function renderDiagnostics(){
+      diagnosticPanel.replaceChildren();if(!output||output.blocked)return;
+      const items=diagnosticItems(output.warnings,output.verification),seen=new Set();
+      for(const item of items){const kind=diagnosticKind(item),key=JSON.stringify(item);if(!kind||seen.has(key))continue;seen.add(key);addDiagnosticAction(item,kind);}
+      if(!items.length)return;
+      const details=doc.createElement('details'),summary=doc.createElement('summary'),raw=doc.createElement('pre');
+      summary.textContent='검사 상세';raw.textContent=JSON.stringify({warnings:output.warnings,verification:output.verification},null,2);details.append(summary,raw);diagnosticPanel.append(details);
+    }
     function renderOutputNotes(){
       if(ui.outputNotes){
         const v=output?.verification, final=Array.isArray(v?.stages)?v.stages.at(-1)?.verification:v, counts=final?.pageCount;
         const countText=Number.isSafeInteger(counts?.source)&&counts.source===pages&&Number.isSafeInteger(counts.output)&&counts.output>0?' · 원본 '+counts.source+'쪽 → 출력 '+counts.output+'쪽':'';
-        ui.outputNotes.textContent=output&&!output.blocked?('생성 방식: '+(output.recomposition?'전체 논문 새로 배치':'원본에서 선택 구간 편집')+countText+' '+diagnosticText(output.warnings,output.verification)).trim():'';
+        ui.outputNotes.textContent=output&&!output.blocked?('생성 방식: '+(output.recomposition?'전체 논문 새로 배치':'원본에서 선택 구간 편집')+countText+(generationApi()?'':' '+diagnosticText(output.warnings,output.verification))).trim():'';
       }
+    }
+    function renderPreviousDownload(blocked){
+      lastDownload.hidden=!generationApi()||blocked||(!stale()&&!generationFailed);
+      const time=outputAt?' · '+new Date(outputAt).toLocaleString():'';
+      lastDownload.textContent='이전 생성본 다운로드'+time+(generationFailed?' · 최근 생성 실패':' · 현재 편집과 다름');
     }
     function renderDownloadControls(blocked){
       ui.current.disabled=generationApi()?!(source&&source.pdf&&source.fileHash):blocked;
       ui.current.textContent=generationApi()?'현재 파일 다운로드':output&&stale()?'마지막 생성본 다운로드':'현재 생성본 다운로드';
-      if(typeof lastDownload!=='undefined')lastDownload.hidden=!generationApi()||blocked;
+      if(typeof lastDownload!=='undefined')renderPreviousDownload(blocked);
       ui.team.disabled=blocked;
       ui.blue.disabled=generationApi()?!(source&&source.pdf&&source.fileHash):blocked;
     }
@@ -739,6 +773,7 @@
       renderDownloadControls(blocked);
       ui.hash.textContent=output&&!output.blocked?'SHA-256 '+output.sha256:'';
       renderOutputNotes();
+      renderDiagnostics();
       ui.afterLabel.textContent=!output?'아직 생성본이 없습니다':stale()?'마지막 생성본 · 현재 편집과 다름':'현재 생성본';
     }
     function renderDraftControls(ready){
@@ -998,7 +1033,7 @@
       epoch++;tableBindings.clear();abortGen();stopPdf();closeAfter();
       if(typeof unsub==='function')unsub();
       if(directEditor){const editor=directEditor;directEditor=null;composingDirect=false;editor.remove();}
-      unsub=null;session=null;snapshot=null;output=null;inline=null;pageText=null;external=null;externalRevision=0;combineIds=new Set();proposalQueue=null;accepted=new Set();draftRaw=null;pendingResume=null;beforeMarks=afterMarks=null;candidatePreview=null;candidateMarks=null;compareFocus=null;updateChangeStatus();
+      unsub=null;session=null;snapshot=null;output=null;outputAt=null;generationFailed=false;inline=null;pageText=null;external=null;externalRevision=0;combineIds=new Set();proposalQueue=null;accepted=new Set();draftRaw=null;pendingResume=null;beforeMarks=afterMarks=null;candidatePreview=null;candidateMarks=null;compareFocus=null;updateChangeStatus();
       source=null;pages=0;page=1;zoom=1;
       clearStage(ui.beforeStage);clearStage(ui.afterStage);
       renderInline();renderEdits();paintProposals();renderChrome();
@@ -1038,7 +1073,7 @@
       abortGen();stopPdf();closeAfter();
       if(typeof unsub==='function')unsub();
       if(directEditor){const editor=directEditor;directEditor=null;composingDirect=false;editor.remove();}
-      unsub=null;session=null;snapshot=null;output=null;inline=null;pageText=null;external=null;externalRevision=0;combineIds=new Set();proposalQueue=null;accepted=new Set();draftRaw=null;pendingResume=null;beforeMarks=afterMarks=null;candidatePreview=null;candidateMarks=null;compareFocus=null;updateChangeStatus();
+      unsub=null;session=null;snapshot=null;output=null;outputAt=null;generationFailed=false;inline=null;pageText=null;external=null;externalRevision=0;combineIds=new Set();proposalQueue=null;accepted=new Set();draftRaw=null;pendingResume=null;beforeMarks=afterMarks=null;candidatePreview=null;candidateMarks=null;compareFocus=null;updateChangeStatus();
       pages=0;page=1;zoom=1;
       source={file,fileHash:null,name:sessionName(file.name),segments:[],pdf:isPdf(file),doc:null,lib:null,render:null,paragraphPages:new Map()};
       clearStage(ui.beforeStage);clearStage(ui.afterStage);renderInline();renderEdits();paintProposals();renderChrome();
@@ -1845,7 +1880,7 @@
     function ensureGenerator(){
       const g=generationApi();if(!g?.create)return null;if(generator)return generator;
       const version=++generatorVersion;
-      generator=g.create({generate:generateCaptured,onResult:(candidate,meta)=>{if(version!==generatorVersion||!source||source.fileHash!==meta.spec.fileHash)return;let current;try{current=g.key(captureSpec());}catch{return;}if(current!==meta.key)return;output=candidate;output.key=meta.key;afterPart=0;afterSourcePage=page;setGenStatus(output.edits.length?generationLead(output.verification,false)+' '+diagnosticText(output.warnings,output.verification):'선택한 편집이 없어 원본 PDF를 사용합니다.');emit('falsify:paper-workspace-output',published({sha256:output.sha256,revision:output.revision,verification:scrub(output.verification,0)}));renderEdits();void drawAfter();},onState:state=>{if(version!==generatorVersion||!source)return;let current;try{current=g.key(captureSpec());}catch{return;}if(current!==state.key)return;generating=state.phase==='running';if(state.phase==='error')setGenStatus('생성하지 못했습니다. '+generationError(state.error),true);renderChrome();}});return generator;
+      generator=g.create({generate:generateCaptured,onResult:(candidate,meta)=>{if(version!==generatorVersion||!source||source.fileHash!==meta.spec.fileHash)return;let current;try{current=g.key(captureSpec());}catch{return;}if(current!==meta.key)return;output=candidate;outputAt=now();generationFailed=false;output.key=meta.key;afterPart=0;afterSourcePage=page;setGenStatus(output.edits.length?generationLead(output.verification,false):'선택한 편집이 없어 원본 PDF를 사용합니다.');emit('falsify:paper-workspace-output',published({sha256:output.sha256,revision:output.revision,verification:scrub(output.verification,0)}));renderEdits();void drawAfter();},onState:state=>{if(version!==generatorVersion||!source)return;let current;try{current=g.key(captureSpec());}catch{return;}if(current!==state.key)return;generating=state.phase==='running';if(state.phase==='error'){generationFailed=true;setGenStatus('생성하지 못했습니다. '+generationError(state.error),true);}else if(state.phase==='running')generationFailed=false;renderChrome();}});return generator;
     }
     function scheduleGeneration(){if(committingInline||!generationApi()||!source?.pdf||!snapshot)return;try{ensureGenerator().schedule(captureSpec());}catch(e){setGenStatus('현재 편집을 확인하세요. '+safeMessage(e),true);}}
     function planCapturedExport(spec){
@@ -2385,12 +2420,13 @@
     if(ui.file.files&&ui.file.files[0])void openFile(ui.file.files[0]);
     function publicOutput(){if(!output||output.blocked)return null;return Object.freeze({file:output.file,sha256:output.sha256,originalSourceSha256:output.originalSourceSha256,verification:published(output.verification),revision:output.revision,pageMap:published(output.pageMap),generationKey:output.key||null});}
     const api={
-      dispose(){if(disposed)return;disposed=true;clearSource();for(const remove of listeners.splice(0))remove();blobStore?.dispose();lastDownload.remove();afterNav.remove();if(globalThis.FalsifyPaperWorkspace===api)delete globalThis.FalsifyPaperWorkspace;},
+      dispose(){if(disposed)return;disposed=true;clearSource();for(const remove of listeners.splice(0))remove();blobStore?.dispose();lastDownload.remove();diagnosticPanel.remove();afterNav.remove();if(globalThis.FalsifyPaperWorkspace===api)delete globalThis.FalsifyPaperWorkspace;},
       acceptProposals,acceptExternalResponse,exportRedBatch,
       getExternalResponses(){return external?external.snapshot():null;},
       getSource(){if(!source||!source.file||!source.fileHash)return null;return Object.freeze({file:source.file,fileHash:source.fileHash,segments:published(source.segments)||[],externalSegments:published(externalSegments(source.segments))||[]});},
       getEditSnapshot(){const raw=session&&typeof session.snapshot==='function'?session.snapshot():snapshot;return raw?published(raw):null;},
       getOutput:publicOutput,
+      getPageIndex(){return source?.pdf&&pages>0&&Number.isSafeInteger(page)&&page>=1&&page<=pages?page-1:null;},
       getCurrentOutput(){const g=generationApi();if(!output||output.blocked||!output.key||!g?.key)return null;try{if(g.key(captureSpec())!==output.key)return null;}catch{return null;}return publicOutput();}
     };
     return api;
