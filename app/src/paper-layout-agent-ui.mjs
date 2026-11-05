@@ -152,13 +152,19 @@ export function mountPaperLayoutAgent({doc,host,getSession,getEpoch,getReference
   source.onclick=async()=>{if(!candidate?.project)return;try{const zip=await exportLatexProject(candidate.project);download(zip,'layout-candidate-source.zip','application/zip');}catch(e){status.textContent=e.message;}};
   blue.onclick=()=>{if(controller||!freshCandidate()||!candidate?.artifact?.pdfBytes)return;const ev=new CustomEvent('falsify:blue-file',{cancelable:true,detail:{file:new File([candidate.artifact.pdfBytes],'layout-candidate.pdf',{type:'application/pdf'})}});if(doc.dispatchEvent(ev))doc.querySelector('[data-view="blue"]')?.click();};
   adopt.onclick=async()=>{if(controller||!freshCandidate()||!candidate?.project||!loadCandidate)return;const selected=candidate;adopt.disabled=true;try{const zip=await exportLatexProject(selected.project);if(candidate!==selected||!freshCandidate())return;await loadCandidate(new File([zip],'layout-candidate-source.zip',{type:'application/zip'}));}catch(e){status.textContent=e.message;}finally{controls();}};
-  start.onclick=async()=>{
-    reveal();if(controller)return false;const session=getSession(),link=bridge?.session?.();if(!session||!link){status.textContent=!session?'논문을 먼저 여세요.':'PC 연결이 끊겼습니다. 연결 후 다시 누르세요.';return false;}
+  function mergeRunReceipts(baseResume,resume,attempt){return copyReceipts([...(baseResume?.decisionReceipts||[]),...(resume?.decisionReceipts||[]),...(attempt?.decisionReceipts||[])]);}
+  function initializeLayoutRun(session){
     const userFresh=forceFresh;forceFresh=false;
     const baseResume=!userFresh&&freshCandidate()&&!(replacementFiles.files?.length)?candidate?.sessionState:null;
     const attempt=!userFresh&&!(replacementFiles.files?.length)?recoverableAttempt(baseResume):null;
     const resume=attempt?.pendingStep?(attempt.sessionState||resumeForAttempt(baseResume,attempt)||baseResume):baseResume;
-    const inputContext=context(),own=new AbortController(),runId=globalThis.crypto?.randomUUID?.()||'layout-'+Date.now()+'-'+Math.random().toString(36).slice(2);let recovered=attempt?.pendingStep||resume?.pendingStep||null,deliveredAction=null;const prior=candidate,priorRunState=runState;pendingStep=recovered;pendingProblem=null;controller=own;signature={session,epoch:getEpoch(),changes:inputContext?.changesSignature};referenceBytes=null;receipts=copyReceipts([...(baseResume?.decisionReceipts||[]),...(resume?.decisionReceipts||[]),...(attempt?.decisionReceipts||[])]);status.textContent=resume?'선택한 후보에서 작업을 이어갑니다.':'현재 선택된 변경으로 PDF를 준비합니다.';const userGoal=goal.value.trim().slice(0,2000);runGoal=userGoal;controls();
+    const inputContext=context(),own=new AbortController(),runId=globalThis.crypto?.randomUUID?.()||'layout-'+Date.now()+'-'+Math.random().toString(36).slice(2);let recovered=attempt?.pendingStep||resume?.pendingStep||null;const prior=candidate,priorRunState=runState;pendingStep=recovered;pendingProblem=null;controller=own;signature={session,epoch:getEpoch(),changes:inputContext?.changesSignature};referenceBytes=null;receipts=mergeRunReceipts(baseResume,resume,attempt);status.textContent=resume?'선택한 후보에서 작업을 이어갑니다.':'현재 선택된 변경으로 PDF를 준비합니다.';const userGoal=goal.value.trim().slice(0,2000);runGoal=userGoal;controls();
+    return {resume,attempt,inputContext,own,runId,recovered,prior,priorRunState,userGoal};
+  }
+  start.onclick=async()=>{
+    reveal();if(controller)return false;const session=getSession(),link=bridge?.session?.();if(!session||!link){status.textContent=!session?'논문을 먼저 여세요.':'PC 연결이 끊겼습니다. 연결 후 다시 누르세요.';return false;}
+    const initialized=initializeLayoutRun(session);
+    const {resume,attempt,inputContext,own,runId,prior,priorRunState,userGoal}=initialized;let recovered=initialized.recovered,deliveredAction=null;
     let compiler,reader;
     const check=()=>{if(own.signal.aborted||!same())throw aborted();};
     const renderDocument=async (bytes,pages,documentKind)=>{check();const lib=await loadPdf();check();const task=lib.getDocument({data:bytes.slice(),cMapUrl:new URL('vendor/cmaps/',base).href,cMapPacked:true,standardFontDataUrl:new URL('vendor/standard_fonts/',base).href,wasmUrl:new URL('vendor/wasm/',base).href});let document;
