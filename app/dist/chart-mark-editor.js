@@ -168,12 +168,15 @@ var FalsifyChartMarkEditor = (() => {
   function samePoint(point, next) {
     return Math.abs(point.x - next.x) < NOOP_DISTANCE && Math.abs(point.y - next.y) < NOOP_DISTANCE;
   }
-  function create(options = {}) {
-    const host = options.host;
-    const doc = options.document || host?.ownerDocument || globalThis.document;
+  function validateEditorInputs(host, doc, options) {
     if (!host || typeof host.append !== "function") throw new Error("FalsifyChartMarkEditor.create requires a host element");
     if (!doc?.createElement || !doc.createElementNS) throw new Error("FalsifyChartMarkEditor.create requires a document");
     if (!options.scene || !Array.isArray(options.scene.series)) throw new Error("FalsifyChartMarkEditor.create requires a scene with series");
+  }
+  function create(options = {}) {
+    const host = options.host;
+    const doc = options.document || host?.ownerDocument || globalThis.document;
+    validateEditorInputs(host, doc, options);
     const core = resolveCore(options.core);
     const onChange = typeof options.onChange === "function" ? options.onChange : null;
     const onCommit = typeof options.onCommit === "function" ? options.onCommit : null;
@@ -523,23 +526,7 @@ var FalsifyChartMarkEditor = (() => {
       render();
       if (!commit && gesture.previewed) emitChange();
     }
-    function onPointerDown(event) {
-      if (state.destroyed || state.compare || state.gesture) return;
-      if (event.button != null && event.button !== 0) return;
-      const mark = markFrom(event.target);
-      const point = eventPoint(event);
-      if (!mark || !point) return;
-      const scene = history.scene();
-      const series = seriesById(scene, mark.seriesId);
-      const origin = series?.points?.[mark.index];
-      if (!origin || !finite(origin.x) || !finite(origin.y)) return;
-      const kind = mark.kind || markKind(series);
-      state.selection = { seriesId: series.id, index: mark.index, kind };
-      const draggable = kind === "scatter" || mark.handle === "value";
-      if (!draggable) {
-        render();
-        return;
-      }
+    function beginGesture(event, point, series, mark, kind, origin) {
       event.preventDefault?.();
       const holder = { current: point };
       state.gesture = {
@@ -560,6 +547,25 @@ var FalsifyChartMarkEditor = (() => {
         } catch {
         }
       }
+    }
+    function onPointerDown(event) {
+      if (state.destroyed || state.compare || state.gesture) return;
+      if (event.button != null && event.button !== 0) return;
+      const mark = markFrom(event.target);
+      const point = eventPoint(event);
+      if (!mark || !point) return;
+      const scene = history.scene();
+      const series = seriesById(scene, mark.seriesId);
+      const origin = series?.points?.[mark.index];
+      if (!origin || !finite(origin.x) || !finite(origin.y)) return;
+      const kind = mark.kind || markKind(series);
+      state.selection = { seriesId: series.id, index: mark.index, kind };
+      const draggable = kind === "scatter" || mark.handle === "value";
+      if (!draggable) {
+        render();
+        return;
+      }
+      beginGesture(event, point, series, mark, kind, origin);
       render();
       emitChange();
     }

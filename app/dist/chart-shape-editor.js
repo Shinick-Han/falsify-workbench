@@ -289,12 +289,18 @@ var FalsifyChartShapeEditor = (() => {
     if (typeof seriesId !== "string" && typeof seriesId !== "number" || !Number.isInteger(index) || index < 0) return null;
     return { seriesId, index, distance: finite(hit.distance) ? hit.distance : 0 };
   }
-  function create(options = {}) {
-    const host = options.host;
-    const doc = options.document || host?.ownerDocument || globalThis.document;
+  function validateEditorInputs(host, doc, options) {
     if (!host || typeof host.append !== "function") throw new Error("FalsifyChartShapeEditor.create requires a host element");
     if (!doc?.createElement || !doc.createElementNS) throw new Error("FalsifyChartShapeEditor.create requires a document");
     if (!options.scene || !Array.isArray(options.scene.series)) throw new Error("FalsifyChartShapeEditor.create requires a scene with series");
+  }
+  function validPrecisionValue(seriesId, index, axis, value) {
+    return !(seriesId == null || !Number.isInteger(index) || axis !== "x" && axis !== "y" || value == null);
+  }
+  function create(options = {}) {
+    const host = options.host;
+    const doc = options.document || host?.ownerDocument || globalThis.document;
+    validateEditorInputs(host, doc, options);
     const core = resolveCore(options.core);
     const onChange = typeof options.onChange === "function" ? options.onChange : null;
     const onCommit = typeof options.onCommit === "function" ? options.onCommit : null;
@@ -726,6 +732,58 @@ var FalsifyChartShapeEditor = (() => {
       state.selection = { seriesId: hit.seriesId, range };
       return series;
     }
+    function startHandleGesture(event, name, scene, point) {
+      const series = seriesById(scene, state.selection.seriesId);
+      const spanned = rangePoints(series?.points || [], state.selection.range);
+      if (!spanned.length) return;
+      const left = extreme(spanned, (item, chosen) => item.x < chosen.x);
+      const right = extreme(spanned, (item, chosen) => item.x > chosen.x);
+      if (name === "move") {
+        beginGesture(event, {
+          kind: "move",
+          pointerId: event.pointerId,
+          settled: false,
+          previewed: false,
+          origin: point,
+          op: {
+            id: nextId("move"),
+            kind: "move",
+            seriesId: state.selection.seriesId,
+            range: [...state.selection.range],
+            dx: 0,
+            dy: 0
+          },
+          operation() {
+            return this.op;
+          }
+        });
+        return;
+      }
+      const handle = name === "width-start" ? left : right;
+      const anchorPoint = name === "width-start" ? right : left;
+      beginGesture(event, {
+        kind: "resize",
+        pointerId: event.pointerId,
+        settled: false,
+        previewed: false,
+        origin: point,
+        handle: { x: handle.x, y: handle.y },
+        anchor: [anchorPoint.x, anchorPoint.y],
+        op: {
+          id: nextId("resize"),
+          kind: "resize",
+          seriesId: state.selection.seriesId,
+          range: [...state.selection.range],
+          anchor: [anchorPoint.x, anchorPoint.y],
+          scaleX: 1,
+          scaleY: 1
+        },
+        operation() {
+          return this.op;
+        }
+      });
+      return;
+    }
     function onPointerDown(event) {
       if (state.destroyed || state.compare || state.gesture) return;
       if (event.button != null && event.button !== 0) return;
@@ -736,55 +794,7 @@ var FalsifyChartShapeEditor = (() => {
       const name = handleName(event.target);
       const scene = history.scene();
       if (name && state.selection) {
-        const series2 = seriesById(scene, state.selection.seriesId);
-        const spanned = rangePoints(series2?.points || [], state.selection.range);
-        if (!spanned.length) return;
-        const left = extreme(spanned, (item, chosen) => item.x < chosen.x);
-        const right = extreme(spanned, (item, chosen) => item.x > chosen.x);
-        if (name === "move") {
-          beginGesture(event, {
-            kind: "move",
-            pointerId: event.pointerId,
-            settled: false,
-            previewed: false,
-            origin: point,
-            op: {
-              id: nextId("move"),
-              kind: "move",
-              seriesId: state.selection.seriesId,
-              range: [...state.selection.range],
-              dx: 0,
-              dy: 0
-            },
-            operation() {
-              return this.op;
-            }
-          });
-          return;
-        }
-        const handle = name === "width-start" ? left : right;
-        const anchorPoint = name === "width-start" ? right : left;
-        beginGesture(event, {
-          kind: "resize",
-          pointerId: event.pointerId,
-          settled: false,
-          previewed: false,
-          origin: point,
-          handle: { x: handle.x, y: handle.y },
-          anchor: [anchorPoint.x, anchorPoint.y],
-          op: {
-            id: nextId("resize"),
-            kind: "resize",
-            seriesId: state.selection.seriesId,
-            range: [...state.selection.range],
-            anchor: [anchorPoint.x, anchorPoint.y],
-            scaleX: 1,
-            scaleY: 1
-          },
-          operation() {
-            return this.op;
-          }
-        });
+        startHandleGesture(event, name, scene, point);
         return;
       }
       const hit = normalizeHit(core.hitTest(scene, point.x, point.y, SCREEN_HIT_PX * screenScale()));
@@ -894,6 +904,42 @@ var FalsifyChartShapeEditor = (() => {
       emitChange(body);
       setStatus("다시 실행했습니다.");
     }
+    function handleMovementKey(event, key) {
+      const step = event.shiftKey ? KEY_STEP_LARGE : KEY_STEP;
+      if (key === "ArrowUp") nudge(0, -step);
+      else if (key === "ArrowDown") nudge(0, step);
+      else if (key === "ArrowLeft") {
+        if (event.altKey) scaleWidth(1 / KEY_WIDTH_FACTOR);
+        else nudge(-step, 0);
+      } else if (key === "ArrowRight") {
+        if (event.altKey) scaleWidth(KEY_WIDTH_FACTOR);
+        else nudge(step, 0);
+      } else return false;
+      return true;
+    }
+    function handleControlKey(event, key, mod) {
+      if (mod && key.toLowerCase() === "z") {
+        event.preventDefault?.();
+        if (event.shiftKey) redo();
+        else undo();
+        return true;
+      }
+      if (mod && key.toLowerCase() === "y") {
+        event.preventDefault?.();
+        redo();
+        return true;
+      }
+      if (key === "Escape") {
+        event.preventDefault?.();
+        if (state.gesture) endGesture(false);
+        else if (state.selection) {
+          state.selection = null;
+          render();
+        }
+        return true;
+      }
+      return false;
+    }
     function onKeyDown(event) {
       if (state.destroyed) return;
       if (event.key === "Escape" && typingTarget(event.target)) {
@@ -904,37 +950,9 @@ var FalsifyChartShapeEditor = (() => {
       if (typingTarget(event.target)) return;
       const key = String(event.key || "");
       const mod = !!(event.ctrlKey || event.metaKey);
-      if (mod && key.toLowerCase() === "z") {
-        event.preventDefault?.();
-        if (event.shiftKey) redo();
-        else undo();
-        return;
-      }
-      if (mod && key.toLowerCase() === "y") {
-        event.preventDefault?.();
-        redo();
-        return;
-      }
-      if (key === "Escape") {
-        event.preventDefault?.();
-        if (state.gesture) endGesture(false);
-        else if (state.selection) {
-          state.selection = null;
-          render();
-        }
-        return;
-      }
+      if (handleControlKey(event, key, mod)) return;
       if (!state.selection || state.compare || state.gesture) return;
-      const step = event.shiftKey ? KEY_STEP_LARGE : KEY_STEP;
-      if (key === "ArrowUp") nudge(0, -step);
-      else if (key === "ArrowDown") nudge(0, step);
-      else if (key === "ArrowLeft") {
-        if (event.altKey) scaleWidth(1 / KEY_WIDTH_FACTOR);
-        else nudge(-step, 0);
-      } else if (key === "ArrowRight") {
-        if (event.altKey) scaleWidth(KEY_WIDTH_FACTOR);
-        else nudge(step, 0);
-      } else return;
+      if (!handleMovementKey(event, key)) return;
       event.preventDefault?.();
     }
     function onPrecisionChange(event) {
@@ -944,7 +962,7 @@ var FalsifyChartShapeEditor = (() => {
       const index = Number(input.getAttribute("data-index"));
       const axis = input.getAttribute("data-axis");
       const value = readNumber(input.value);
-      if (seriesId == null || !Number.isInteger(index) || axis !== "x" && axis !== "y" || value == null) return;
+      if (!validPrecisionValue(seriesId, index, axis, value)) return;
       const scene = history.scene();
       const series = (scene.series || []).find((item) => String(item.id) === seriesId);
       const point = series?.points?.[index];
