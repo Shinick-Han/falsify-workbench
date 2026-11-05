@@ -248,7 +248,7 @@ def augment(raw, scene):
     import cv2 as cv
     import numpy as np
     import paper_chart_paint as paint
-    from paper_chart_raster_edit import restore_under_mask
+    from paper_chart_background import restore_background
     groups = list(_groups(scene))
     if not groups or len(groups) > 12:
         return scene
@@ -263,7 +263,7 @@ def augment(raw, scene):
         tracks.append(track)
         masks.append(mask)
     cleared = np.logical_or.reduce(masks)
-    base = restore_under_mask(rgb, cleared)
+    base = restore_background(rgb, cleared)
     scene['linearTracks'] = tracks
     scene['linearBasePng'] = _png(cv.cvtColor(base, cv.COLOR_RGB2BGR), cv)
     scene['linearScale'] = scale

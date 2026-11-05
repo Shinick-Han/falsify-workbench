@@ -148,6 +148,21 @@ class LinearChartTests(unittest.TestCase):
         self.assertEqual(_verify_output(raw, output, scene), [])
         self.assertNotEqual(paint.render_png(raw, 0, box, 144), paint.render_png(output, 0, box, 144))
 
+    def test_preview_background_and_pdf_cleanup_keep_observed_neutral_pixels(self):
+        from paper_chart_linear_paint import _clear_overlay
+        raw, box = fixture(); scene = scenes.prepare_scene(raw, 0, box)
+        scale = scene['linearScale']
+        original = cv.imdecode(np.frombuffer(paint.render_png(raw, 0, box, scene['dpi'] * scale), np.uint8), cv.IMREAD_COLOR)
+        masks = [cv.imdecode(np.frombuffer(base64.b64decode(t['sourceMaskPng']), np.uint8), cv.IMREAD_GRAYSCALE) > 0
+                 for t in scene['linearTracks']]
+        mask = np.logical_or.reduce(masks)
+        neutral = (original.max(axis=2).astype(int) - original.min(axis=2) <= 4) & mask & (original.min(axis=2) < 254)
+        self.assertGreater(int(neutral.sum()), 0)
+        preview = cv.imdecode(np.frombuffer(base64.b64decode(scene['linearBasePng']), np.uint8), cv.IMREAD_COLOR)
+        overlay = cv.imdecode(np.frombuffer(_clear_overlay(raw, scene), np.uint8), cv.IMREAD_UNCHANGED)
+        self.assertTrue(np.array_equal(preview[neutral], original[neutral]))
+        self.assertTrue(np.array_equal(overlay[:, :, :3][neutral], original[neutral]))
+
 
 if __name__ == '__main__':
     unittest.main()

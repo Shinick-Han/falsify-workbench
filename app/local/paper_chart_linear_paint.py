@@ -66,14 +66,14 @@ def _clear_overlay(raw, scene):
     import numpy as np
     import paper_chart_paint as paint
     from paper_chart_linear import _rgb
-    from paper_chart_raster_edit import restore_under_mask
+    from paper_chart_background import restore_background
     scale = scene['linearScale']
     rgb = _rgb(paint.render_png(raw, scene['pageIndex'], scene['bbox'], scene['dpi'] * scale), cv, np)
     masks = [cv.imdecode(np.frombuffer(base64.b64decode(t['sourceMaskPng']), np.uint8), cv.IMREAD_GRAYSCALE) > 0
              for t in scene['linearTracks']]
     mask = np.logical_or.reduce(masks)
-    restored = restore_under_mask(rgb, mask)
-    # Only erased source ink is covered; fonts, axes and other page paint remain.
+    restored = restore_background(rgb, mask)
+    # Copy visible neutral paint through the expanded AA cleanup corridor unchanged.
     rgba = np.dstack([cv.cvtColor(restored, cv.COLOR_RGB2BGR), mask.astype(np.uint8) * 255])
     ok, png = cv.imencode('.png', rgba)
     if not ok:
