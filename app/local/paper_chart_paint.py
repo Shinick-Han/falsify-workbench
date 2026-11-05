@@ -17,6 +17,7 @@ path does not paint a white rectangle over the old curve.
 """
 import hashlib
 import io
+import json
 import math
 import zlib
 
@@ -519,10 +520,13 @@ def _parse_streams(pk, pdf, page_index, page_tm):
                 child = child_resources if child_resources is not None else stream_resources
                 child_id = ('obj', tuple(target.objgen))
                 walk(target.read_bytes(), child, _mul(_matrix_of(target), state['ctm']), child_id,
-                     tuple(target.objgen), {'stream_id': stream_id, 'name_index': names[0][1], 'name': names[0][2]},
+                     tuple(target.objgen), {'stream_id': stream_id, 'name_index': names[0][1], 'name': names[0][2],
+                                            'objgen': tuple(target.objgen), 'parent': parent},
                      depth + 1, ancestors | ({objgen} if objgen is not None else set()))
             elif subtype == '/Image':
-                images.append(_image_record(pk, target, names[0], state['ctm'], page_tm, stream_id))
+                image = _image_record(pk, target, names[0], state['ctm'], page_tm, stream_id)
+                image['parent'] = parent
+                images.append(image)
 
         def consume(word):
             nonlocal path
@@ -731,6 +735,25 @@ def _native_public(sub, samples, bbox, dpi, page_tm, number):
     }
 
 
+def _image_parents(image):
+    parents, parent = [], image.get('parent')
+    while parent is not None:
+        parents.append(parent)
+        parent = parent.get('parent')
+    return list(reversed(parents))
+
+
+def _stream_address(stream):
+    return [list(value) if isinstance(value, tuple) else value for value in stream]
+
+
+def _image_occurrence(image):
+    return {'objgen': list(image['objgen']), 'stream': _stream_address(image['stream_id']),
+            'nameIndex': image['name_index'],
+            'ancestors': [{'stream': _stream_address(parent['stream_id']), 'nameIndex': parent['name_index'],
+                           'objgen': list(parent['objgen'])} for parent in _image_parents(image)]}
+
+
 def _raster_public(parsed, bbox, dpi, plot, raster):
     series = []
     for image in parsed['images']:
@@ -765,7 +788,7 @@ def _raster_public(parsed, bbox, dpi, plot, raster):
                 'sourceBinding': {'kind': 'raster-image', 'fingerprint': fingerprint, 'space': 'crop-pixels',
                                   'color': list(item['color']), 'imageSize': [image['width'], image['height']],
                                   'branch': item.get('branch'),
-                                  'imageOccurrence': {'objgen': list(image['objgen']), 'stream': list(image['stream_id']), 'nameIndex': image['name_index']}},
+                                  'imageOccurrence': _image_occurrence(image)},
             })
     return series
 
@@ -1061,6 +1084,12 @@ def _score_image(image, color, bbox, dpi, scene_points):
     return hits
 
 
+def _same_occurrence(image, occurrence):
+    current = _image_occurrence(image)
+    return all(current[key] == occurrence.get(key) for key in ('objgen', 'stream', 'nameIndex')) and (
+        'ancestors' not in occurrence or current['ancestors'] == occurrence['ancestors'])
+
+
 def _match_image(images, series, bbox, dpi):
     color = series['sourceBinding'].get('color')
     if not color:
@@ -1068,7 +1097,7 @@ def _match_image(images, series, bbox, dpi):
     color = tuple(int(channel) for channel in color)
     occurrence = series.get('sourceBinding',{}).get('imageOccurrence')
     if occurrence:
-        matches = [image for image in images if list(image['objgen'])==occurrence.get('objgen') and list(image['stream_id'])==occurrence.get('stream') and image['name_index']==occurrence.get('nameIndex')]
+        matches = [image for image in images if _same_occurrence(image, occurrence)]
         if len(matches)==1:
             return matches[0], color
         raise ValueError('path-not-found')
@@ -1403,7 +1432,7 @@ def _raster_clones(clones, bbox, dpi, raster, np):
                               'replacements': {}, 'drops': set(), 'samples': samples,
                               'alpha': None if alpha is None else alpha.tobytes(),
                               'preserveRgbSpace': image.get('preserveRgbSpace',False),
-                              'patch':patch, 'originalName':image['name']}
+                              'patch':patch, 'originalName':image['name'], 'ancestors': _image_parents(image)}
     return stream_clones
 
 
@@ -1423,9 +1452,7 @@ def _export_raster(raw, scene, edited, drop):
         if not drop and _same_series({'series': [original]}, {'series': [current]}):
             continue
         image, color = _match_image(parsed['images'], original, bbox, dpi)
-        if image['stream_id'][0] != 'page':
-            raise ValueError('nested-form')
-        key = (image['objgen'], image['stream_id'], image['name_index'])
+        key = json.dumps(_image_occurrence(image), sort_keys=True)
         clone = clones.setdefault(key, {'image': image, 'edits': []})
         clone['edits'].append((original, None if drop else current, color))
         changed.append(original['id'])
@@ -1437,30 +1464,73 @@ def _export_raster(raw, scene, edited, drop):
     return output, _report(False, changed, True, 'raster')
 
 
+def _image_rewrite_tree(clones):
+    roots = {}
+    for clone in clones.values():
+        ancestors = clone.get('ancestors', [])
+        root_id = ancestors[0]['stream_id'] if ancestors else clone['stream_id']
+        if root_id[0] != 'page':
+            raise ValueError('path-not-found')
+        node = roots.setdefault(root_id, {'stream_id': root_id, 'forms': {}, 'images': {}})
+        for parent in ancestors:
+            node = node['forms'].setdefault(parent['name_index'], {
+                'stream_id': ('obj', parent['objgen']), 'objgen': parent['objgen'], 'forms': {}, 'images': {}})
+        node['images'][clone['parent']['name_index']] = clone
+    return roots
+
+
+def _image_replacement(pk, pdf, clone):
+    original = _object(pdf, clone['objgen'])
+    return _copy_image_stream(pk, pdf, original, clone['samples'], clone['width'], clone['height'],
+                              clone.get('alpha'), clone.get('preserveRgbSpace', False))
+
+
+def _rewrite_image_node(pk, pdf, parsed, node, resources, existing, blobs):
+    """Clone a Form once for each selected invocation, retaining inherited resources."""
+    xobjects = resources.get('/XObject')
+    if isinstance(xobjects, pk.Dictionary):
+        existing.update(str(key) for key in xobjects.keys())
+    replacements, additions = {}, []
+    for index, clone in node['images'].items():
+        name = _fresh_name(existing, blobs, 'ChartIm')
+        paint_name = b'/' + name.encode('ascii')
+        if clone.get('patch'):
+            paint_name = clone['originalName'].encode('latin1') + b' Do ' + paint_name
+        replacements[index] = paint_name
+        additions.append((name, _image_replacement(pk, pdf, clone)))
+    for index, child in node['forms'].items():
+        original = _object(pdf, child['objgen'])
+        if original.get('/StructParents') is not None or original.get('/StructParent') is not None:
+            raise ValueError('tagged-form')
+        effective = original.get('/Resources')
+        if not isinstance(effective, pk.Dictionary):
+            effective = resources
+        data, nested = _rewrite_image_node(pk, pdf, parsed, child, effective, existing, blobs)
+        replacement = _copy_stream(pk, pdf, original, data)
+        replacement.Resources = effective
+        _isolate(pk, replacement, nested)
+        name = _fresh_name(existing, blobs, 'ChartFm')
+        replacements[index] = b'/' + name.encode('ascii')
+        additions.append((name, replacement))
+    return _join(parsed['streams'][node['stream_id']], replacements, set()), additions
+
+
 def _apply_images(raw, page_index, parsed, clones):
+    from image_occurrence_editor import _effective_resources
     pk, mu = _deps()
     pdf = pk.open(io.BytesIO(raw))
     try:
         page = pdf.pages[page_index]
-        xobjects = page.obj.get('/Resources')
+        resources = _effective_resources(pk, page.obj)
         existing = set()
-        if xobjects is not None and xobjects.get('/XObject') is not None:
-            existing = {str(key) for key in xobjects.get('/XObject').keys()}
         blobs = [b''.join(raw_token for _, raw_token in tokens) for tokens in parsed['streams'].values()]
         additions = []
-        replacements = {}
-        for clone in clones.values():
-            name = _fresh_name(existing, blobs, 'ChartIm')
-            parent = clone['parent']
-            paint_name = b'/' + name.encode('ascii')
-            if clone.get('patch'):
-                paint_name = clone['originalName'].encode('latin1') + b' Do ' + paint_name
-            replacements.setdefault(parent['stream_id'], {})[parent['name_index']] = paint_name
-            original = _object(pdf, clone['objgen'])
-            additions.append((name, _copy_image_stream(pk, pdf, original, clone['samples'], clone['width'], clone['height'], clone.get('alpha'), clone.get('preserveRgbSpace',False))))
+        for stream_id, node in _image_rewrite_tree(clones).items():
+            data, local = _rewrite_image_node(pk, pdf, parsed, node, resources, existing, blobs)
+            additions.extend(local)
+            _write_content(pk, pdf, page, stream_id[2], data)
+        page.Resources = resources
         _isolate(pk, page.obj, additions)
-        for stream_id, reps in replacements.items():
-            _write_content(pk, pdf, page, stream_id[2], _join(parsed['streams'][stream_id], reps, set()))
         return _save(pk, pdf)
     finally:
         pdf.close()

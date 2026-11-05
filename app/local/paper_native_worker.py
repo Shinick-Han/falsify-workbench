@@ -40,7 +40,7 @@ def _worker_response(chunks):
         raise ValueError('native_output_invalid')
     if not response['ok']:
         error = response.get('error')
-        raise ValueError(error if isinstance(error, str) and re.fullmatch(r'[a-z][a-z0-9_]{0,80}', error) else 'native_worker_failed')
+        raise ValueError(error if isinstance(error, str) and re.fullmatch(r'[a-z][a-z0-9_-]{0,80}', error) else 'native_worker_failed')
     try: data = _unpack(response['data'])
     except (KeyError, TypeError, ValueError): raise ValueError('native_output_invalid') from None
     return data
@@ -222,7 +222,7 @@ def _worker():
         response = {'ok': True, 'data': _pack(data)}
     except ValueError as exc:
         code = str(exc)
-        response = {'ok': False, 'error': code if re.fullmatch(r'[a-z][a-z0-9_]{0,80}', code) else 'native_worker_failed'}
+        response = {'ok': False, 'error': code if re.fullmatch(r'[a-z][a-z0-9_-]{0,80}', code) else 'native_worker_failed'}
     except Exception: response = {'ok': False, 'error': 'native_worker_failed'}
     sys.stdout.buffer.write(json.dumps(response, allow_nan=False).encode('utf-8'))
 
