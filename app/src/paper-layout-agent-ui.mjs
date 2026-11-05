@@ -14,17 +14,26 @@ const aborted=()=>new DOMException('취소했습니다.','AbortError');
 const actionLabels={read_source:'소스 확인',replace_source:'배치 수정',compile_pdf:'PDF 생성',inspect_pdf:'겹침·잘림 검사',render_pages:'페이지 확인',render_reference_pages:'원본 페이지 확인',read_reference:'원본 구조 확인',restructure_source:'구조 배치',inspect_document:'문서 찾기',get_block:'블록 확인',render_region:'확대 비교',update_layout:'블록 배치',compare_document:'내용 대조',checkpoint:'후보 저장',restore_revision:'후보 복원',inspect_fonts:'글꼴 확인',set_typography:'서체 적용',read_table:'표 읽기',rebuild_table:'표 재조판',get_figure:'그림 확인',place_figure:'그림 배치',replace_figure:'그림 교체',finish:'마무리'};
 const runLabels={complete:'작업 완료',unresolved:'확인할 부분이 남았습니다',cancelled:'중단했습니다'};
 
-export async function renderLayoutRegion({bytes,args,loadPdf,doc,baseUrl=base,signal}={}){
- const check=()=>{if(signal?.aborted)throw aborted();};check();
+function validateRegionRequest(bytes,args){
  if(!(bytes instanceof Uint8Array)||!['original','candidate'].includes(args?.document)||!Number.isSafeInteger(args.pageIndex)||args.pageIndex<0||!Array.isArray(args.bbox)||args.bbox.length!==4||!args.bbox.every(Number.isFinite))throw new Error('문서·쪽·영역 좌표를 확인하세요.');
  // Untagged calls use the existing PDF.js display-coordinate contract. Numbers
  // alone cannot establish whether an upstream producer supplied this frame.
  const frame=args.coordinateFrame??'pdfjs-display';
  if(!['pdfjs-display','mupdf-display'].includes(frame))throw Object.assign(new Error('표시 좌표를 사용하세요. SyncTeX 원시 좌표는 변환이 필요합니다.'),{code:'INCOMPATIBLE_COORDINATE_FRAME'});
  if(args.scale!==undefined&&(!Number.isFinite(args.scale)||args.scale<0.25||args.scale>4))throw new Error('확대 배율은 0.25–4를 사용하세요.');
+ return frame;
+}
+
+function validateRegionBounds(natural,left,top,right,bottom){
+ if(!Number.isFinite(natural.width)||!Number.isFinite(natural.height)||natural.width<=0||natural.height<=0||left<0||top<0||right>natural.width||bottom>natural.height||right<=left||bottom<=top)throw new Error('페이지 안의 영역 좌표를 사용하세요.');
+}
+
+export async function renderLayoutRegion({bytes,args,loadPdf,doc,baseUrl=base,signal}={}){
+ const check=()=>{if(signal?.aborted)throw aborted();};check();
+ const frame=validateRegionRequest(bytes,args);
  const lib=await loadPdf();check();const task=lib.getDocument({data:bytes.slice(),cMapUrl:new URL('vendor/cmaps/',baseUrl).href,cMapPacked:true,standardFontDataUrl:new URL('vendor/standard_fonts/',baseUrl).href,wasmUrl:new URL('vendor/wasm/',baseUrl).href});let page;
  try{const pdf=await task.promise;check();if(args.pageIndex>=pdf.numPages)throw new Error('요청한 페이지가 없습니다.');page=await pdf.getPage(args.pageIndex+1);check();const natural=page.getViewport({scale:1}),[left,top,right,bottom]=args.bbox;
-  if(!Number.isFinite(natural.width)||!Number.isFinite(natural.height)||natural.width<=0||natural.height<=0||left<0||top<0||right>natural.width||bottom>natural.height||right<=left||bottom<=top)throw new Error('페이지 안의 영역 좌표를 사용하세요.');
+  validateRegionBounds(natural,left,top,right,bottom);
   const width=right-left,height=bottom-top;let scale=Math.min(args.scale??2,Math.sqrt(3996001/(width*height)),4095/width,4095/height),encoded='',pixelWidth=0,pixelHeight=0;
   while(Math.ceil(width*scale)*Math.ceil(height*scale)>4000000)scale*=0.999;
   for(let i=0;i<5;i++){
