@@ -1,4 +1,5 @@
 import {gaussianFct} from '../vendor-sources/chart-shape/ml-peak-shape-generator/src/shapes/1d/gaussian/Gaussian.ts';
+import {editLinearTrack} from './chart-linear-core.mjs';
 
 export const UPSTREAM_COMMIT = '5a87af23408aedf00e35e43ca6648a20cf6455bd';
 export const PROFILE = 'gaussian';
@@ -303,6 +304,7 @@ function applySetValues(points, operation) {
 
 function applyOperation(scene, operation) {
   if (!operation || typeof operation !== 'object' || typeof operation.id !== 'string' || operation.id.length === 0) invalid('operation');
+  if (operation.kind === 'linear-edit') return editLinearTrack(scene, operation);
   const series = seriesById(scene, operation.seriesId);
   if (operation.kind === 'deform' && scene.curveLinks?.length) return applyNetworkDeform(scene, series, operation);
   let indexes;
@@ -316,6 +318,7 @@ function applyOperation(scene, operation) {
 
 export function applyPlan(scene, operations) {
   if (!Array.isArray(operations)) invalid('operations');
+  if (operations.some(op => op?.kind === 'linear-edit') && operations.some(op => op?.kind !== 'linear-edit')) invalid('mixed linear and legacy operations');
   const edited = clone(requireScene(scene));
   const changes = operations.map(operation => applyOperation(edited, operation));
   return {scene: edited, changes};

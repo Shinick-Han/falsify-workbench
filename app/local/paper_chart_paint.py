@@ -1291,6 +1291,10 @@ def strip_series(source, page_index, bbox, dpi, series, curve_links=None):
 
 def _export(raw, scene, edited, drop):
     _check_scene(raw, scene)
+    if not drop and scene.get('linearTracks'):
+        from paper_chart_linear_paint import changed, export_linear
+        if changed(scene, edited):
+            return export_linear(raw, scene, edited)
     if not drop and _same_series(scene, edited):
         return (raw if isinstance(raw, bytes) else bytes(raw), _report(True, [], False, 'unchanged'))
     kinds = {item.get('sourceBinding', {}).get('kind') for item in scene.get('series') or []}

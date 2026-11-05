@@ -1004,7 +1004,7 @@
       const tool=scene.mode==='marks'?root.FalsifyChartMarkEditor:root.FalsifyChartShapeEditor;
       if(!tool?.create)throw err('chart-missing');
       view={panel,scene,widget:null,gestureActive:false};
-      const recordScene=value=>({series:value.series});
+      const recordScene=value=>({series:value.linearTracks?.length?value.linearTracks.map(t=>({id:t.id,color:t.color,points:t.knots})):value.series});
       view.widget=tool.create({host:shapeHost,scene,core:root.FalsifyChartShape,embedded:true,
         onChange:value=>{
           if(!live(token,src)||parentBusy||applying)return;

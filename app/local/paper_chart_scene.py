@@ -79,7 +79,7 @@ def prepare_scene(source, page_index, bbox, options=None):
         background = original
     digest = hashlib.sha256(raw).hexdigest()
     scene_id = hashlib.sha256(('%s\n%s\n%s\n%s' % (digest, page_index, ','.join('%.4f' % v for v in box), dpi)).encode('ascii')).hexdigest()
-    return {
+    scene = {
         'schema': SCHEMA,
         'sceneId': scene_id,
         'sourceFileHash': digest,
@@ -95,3 +95,5 @@ def prepare_scene(source, page_index, bbox, options=None):
         'series': series,
         'curveLinks': links,
     }
+    from paper_chart_linear import augment
+    return augment(raw, scene)

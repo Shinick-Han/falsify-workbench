@@ -384,6 +384,67 @@ function selectMiddle(session) {
   return stage;
 }
 
+function linearScene() {
+  const value = scene();
+  const knots = [{id: 'k0', x: 20, y: 50}, {id: 'k1', x: 100, y: 50}, {id: 'k2', x: 180, y: 50}];
+  value.linearBasePng = 'AAAA';
+  value.linearTracks = [{id: 'line-1', color: '#c45c26', width: 2, knots,
+    sourceKnots: structuredClone(knots), inkPng: 'AAAA',
+    decorations: [{knotId: 'k1', bbox: [96, 40, 104, 60], png: 'AAAA'}]}];
+  return value;
+}
+
+test('linear point moves with decorations and one undo preserves the preceding drag', () => {
+  const lifecycle = [];
+  const s = mount(linearScene(), {embedded: true, onGestureChange: value => lifecycle.push(value)});
+  const stage = one(s.host, 'falsify-shape-stage');
+  const drag = (x, from, to) => {
+    pointer(s.dom, stage, 'pointerdown', x, from);
+    pointer(s.dom, stage, 'pointermove', x, (from + to) / 2);
+    pointer(s.dom, stage, 'pointermove', x, to);
+    pointer(s.dom, stage, 'pointerup', x, to);
+  };
+  drag(100, 50, 30);
+  assert.equal(s.editor.getState().operations.length, 1);
+  const first = s.editor.getState().scene;
+  assert.equal(first.linearTracks[0].knots[1].y, 30);
+  const images = walk(s.host).filter(n => n.tagName === 'IMAGE');
+  assert.equal(images[0].getAttribute('y'), '20');
+  drag(100, 30, 70);
+  assert.equal(s.editor.getState().operations.length, 2);
+  s.editor.undo();
+  assert.deepEqual(s.editor.getState().scene, first);
+  s.editor.undo();
+  assert.deepEqual(s.editor.getState().scene, linearScene());
+  s.editor.redo(); assert.deepEqual(s.editor.getState().scene, first);
+  drag(100, 30, 40);
+  assert.equal(s.editor.getState().canRedo, false);
+  assert.deepEqual(lifecycle, [true, false, true, false, true, false]);
+});
+
+test('linear middle drag inserts one vertex with straight joins; cancellation and click add no steps', () => {
+  const s = mount(linearScene()); const stage = one(s.host, 'falsify-shape-stage');
+  pointer(s.dom, stage, 'pointerdown', 60, 50);
+  pointer(s.dom, stage, 'pointerup', 60, 25);
+  const state = s.editor.getState();
+  assert.equal(state.operations.length, 1);
+  assert.deepEqual(state.scene.linearTracks[0].knots.map(k => [k.x, k.y]), [[20,50],[60,25],[100,50],[180,50]]);
+  const path = walk(s.host).find(n => n.tagName === 'POLYLINE');
+  assert.equal(path.getAttribute('points'), '20,50 60,25 100,50 180,50');
+  pointer(s.dom, stage, 'pointerdown', 60, 25);
+  pointer(s.dom, stage, 'pointermove', 60, 70);
+  pointer(s.dom, stage, 'pointercancel', 60, 70);
+  assert.deepEqual(s.editor.getState().scene, state.scene);
+  pointer(s.dom, stage, 'pointerdown', 60, 25);
+  pointer(s.dom, stage, 'pointerup', 60, 25);
+  assert.equal(s.editor.getState().operations.length, 1);
+  pointer(s.dom, stage, 'pointerdown', 60, 25);
+  pointer(s.dom, stage, 'pointermove', 60, 40);
+  pointer(s.dom, stage, 'pointermove', 60, 25);
+  pointer(s.dom, stage, 'pointerup', 60, 25);
+  assert.equal(s.editor.getState().operations.length, 1);
+});
+
 test('bundle is a local FalsifyChartShapeEditor global and the stylesheet has visible handles', () => {
   assert.equal(cssText, EDITOR_CSS);
   assert.match(cssText, /\.falsify-shape-handle\s*\{[^}]*fill:\s*#fffdf8/s);

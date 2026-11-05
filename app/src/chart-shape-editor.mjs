@@ -4,6 +4,8 @@
 // core is the supplied FalsifyChartShape, or globalThis.FalsifyChartShape when omitted.
 // create() replaces the host's children. Pointer moves stay in the page; export is onRequestExport.
 
+import {createLinearEditor} from './chart-linear-editor.mjs';
+
 const BRANCH_JUMP_FACTOR = 4;
 const SELECT_SPAN_FACTOR = 1.5;
 const DEFORM_RADIUS_FACTOR = 2;
@@ -346,6 +348,8 @@ export function create(options = {}) {
   const host = options.host;
   const doc = options.document || host?.ownerDocument || globalThis.document;
   validateEditorInputs(host,doc,options);
+
+  if (options.scene.linearTracks?.length && options.mode !== 'smooth') return createLinearEditor({...options, document: doc});
 
   const core = resolveCore(options.core);
   const onChange = typeof options.onChange === 'function' ? options.onChange : null;

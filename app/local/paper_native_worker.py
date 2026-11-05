@@ -138,6 +138,8 @@ def _rebind_chart(source_override, scene, edited, options):
         matches = original.get(key(current), [])
         if not matches: raise ValueError('chart_region_changed')
         fresh_edited['series'][i]['points'] = copy.deepcopy(edited['series'][matches.pop(0)]['points'])
+    from paper_chart_linear import rebind_linear
+    rebind_linear(scene, edited, fresh, fresh_edited)
     return source_override, fresh, fresh_edited
 
 
