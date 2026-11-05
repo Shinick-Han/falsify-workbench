@@ -267,7 +267,7 @@
   function matchWatchedJob(data){const found=P.read('blue');if(found.status!=='record'||found.record.requestId!==job||!P.matches(found.record,data))throw new Error('조회한 작업의 식별이 저장한 요청과 달라 적용하지 않았습니다.');return found.record;}
   async function finishWatchFailure(data,strict,matched){
         if(!strict)throw new Error(typeof data.error==='string'?data.error.slice(0,300):'BLUE 취소됨');
-        const found={status:'record',record:matched};if(found.status==='record')await persistWatch(found.record,data);
+        await persistWatch(matched,data);
         const saved=P.read('blue');if(saved.status==='record'&&saved.record.requestId===matched.requestId)rememberTerminal(saved.record);
   }
   async function watchBlue(current,l,strict){
@@ -442,7 +442,7 @@
   async function startWithPending(current){
       if(!helperReady()){msg('대기 기록 도우미가 없거나 손상되어 실행하지 않았습니다. 요청을 보내지 않습니다.',true);return;}
       const pending=P.read('blue');
-      if(pending.status==='record'&&terminalKind(pending.record)&&pending.record.postReceipt!=='unknown'){if(!await discardPrevious(pending.record,current))return;}
+      if(pending.status==='record'&&terminalKind(pending.record)&&pending.record.postReceipt!=='unknown'){if(!await discardPrevious(pending.record,current))return;if(current!==generation)return;}
       if(pending.status==='record'&&(pending.record.disposition==='unknown'||pending.record.postReceipt==='unknown')){showUnknown(pending.record);return;}
       busy=true;controls();
       let l,held=null;
