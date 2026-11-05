@@ -589,7 +589,14 @@
     savedPager.append(savedPrev,savedNext,savedPos);
     const pickPage=el('button','button secondary','영역 직접 선택');
     pickPage.type='button';
-    sourceColumn.append(sourceTitle,list,listPager,pickPage,savedTitle,saved,savedPager);
+    const connect=el('button','button secondary','내 PC 연결');
+    connect.type='button';
+    connect.addEventListener('click',()=>{
+      const panel=doc.querySelector?.('.visual-connection-details');
+      if(!panel)return;
+      panel.open=true;panel.scrollIntoView?.({block:'nearest'});panel.querySelector?.('summary')?.focus?.({preventScroll:true});
+    });
+    sourceColumn.append(sourceTitle,list,listPager,pickPage,connect,savedTitle,saved,savedPager);
     const work=el('div','visual-edit-work');
     const workBody=el('div','visual-edit-body');
     const compare=el('p','form-feedback visual-edit-compare','');
@@ -691,6 +698,7 @@
       blueBtn.hidden=!outputReady();
       retry.disabled=lock;
       pickPage.disabled=lock||!paperId;
+      connect.hidden=!!paperId;
       listPrev.disabled=lock||listPage<=0;
       listNext.disabled=lock||(listPage+1)*LIST_PAGE>=listTotal;
       savedPrev.disabled=lock||savedPage<=0;
@@ -1168,22 +1176,30 @@
       if(current)return !sameJson(current,state.original);
       return JSON.stringify(state.editor)!==JSON.stringify(editorFromChart(state.original));
     }
+    function currentPage(src){
+      const workspace=root.FalsifyPaperWorkspace;
+      const source=workspace?.getSource?.();
+      if(!source||source.file!==src?.file||source.fileHash!==src.fileHash)return null;
+      const page=workspace.getPageIndex?.();
+      return Number.isSafeInteger(page)&&page>=0?page:null;
+    }
     async function selectPage(){
       if(parentBusy||applying||!paperId)return;
-      const token=generation,mine=++selectSerial,src=currentSource();
+      const token=generation,mine=++selectSerial,src=currentSource(),pageIndex=currentPage(src);
+      if(pageIndex===null){say(status,'원본 페이지를 연 뒤 영역을 선택하세요.',true);return;}
       try{
-        const view=await root.FalsifyBlueVisual.previewBluePage({file:src.file,fileHash:src.fileHash,page:1});
-        if(!live(token,src)||mine!==selectSerial)return;
+        const view=await root.FalsifyBlueVisual.previewBluePage({file:src.file,fileHash:src.fileHash,page:pageIndex+1});
+        if(!live(token,src)||mine!==selectSerial||currentPage(src)!==pageIndex)return;
         selectedKey='figure:page-region';paintLists();
-        await paintFigure({id:'page-region',pageIndex:0,bbox:[0,0,view.width,view.height]},token,mine);
-        say(status,'페이지에서 고칠 영역을 드래그하세요.');
+        await paintFigure({id:'page-region',pageIndex,bbox:[0,0,view.width,view.height]},token,mine,()=>currentPage(src)===pageIndex);
+        if(live(token,src)&&mine===selectSerial&&currentPage(src)===pageIndex)say(status,'페이지에서 고칠 영역을 드래그하세요.');
       }catch{if(token===generation)say(status,TEXT.previewFailed,true);}
     }
     pickPage.addEventListener('click',()=>{void selectPage();});
-    async function paintFigure(item,token,mine){
+    async function paintFigure(item,token,mine,stillCurrent=()=>true){
       chartState=null;
       const rendered=await renderRegion(item.pageIndex,item.bbox);
-      if(!selectionCurrent(token,mine))return;
+      if(!selectionCurrent(token,mine)||!stillCurrent())return;
       if(!rendered){say(status,TEXT.previewFailed,true);errorCode='preview';return;}
       figureState={key:'figure:'+item.id,opId:'figure-'+item.id,itemId:item.id,pageIndex:item.pageIndex,bbox:item.bbox.slice(),beforeSha:rendered.sha256,beforePng:rendered.bytes,uploaded:null,crop:null,label:null,afterPng:null,page:item.pageIndex+1};
       paintFigureControls();
