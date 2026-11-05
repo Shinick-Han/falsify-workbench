@@ -92,14 +92,7 @@ async function prepareExclusive(request) {
   const bytes = await readBytes(parsed.file);
   checkAbort(request.signal);
   const sourceSha256 = await sha256(bytes);
-  if (parsed.fileHash && parsed.fileHash !== sourceSha256) {
-    throw new BrowserPdfError('stale-source', '원본 PDF 해시가 편집 세션과 다릅니다. 파일을 다시 연 뒤 적용하세요. 출력은 만들지 않았습니다.', {
-      sourceSha256, expectedSha256: parsed.fileHash,
-    });
-  }
-  const enabled = parsed.edits.filter(edit => edit.enabled !== false);
-  if (!enabled.length) throw new BrowserPdfError('no-edits', '적용할 편집이 없습니다. 원본을 변경된 파일로 반환하지 않습니다.');
-  if (enabled.length > LIMITS.maxEdits) throw new BrowserPdfError('limit', `편집은 한 번에 ${LIMITS.maxEdits}개까지입니다.`);
+  const enabled = validateSourceEdits(parsed, sourceSha256);
 
   let doc;
   try {
@@ -112,48 +105,13 @@ async function prepareExclusive(request) {
       checkAbort(request.signal);
       models.push(readPage(doc.loadPage(i)));
     }
-    const plans = [];
-    const failures = [];
-    enabled.forEach((edit, index) => {
-      const result = locate(edit, index, models, pageCount, snapshot);
-      if (result.ok) plans.push(result.plan);
-      else failures.push(result.failure);
-    });
-    const overlaps = overlapping(plans);
-    if (overlaps.length) failures.push(...overlaps);
-    if (failures.length) throw unsupported(failures, models);
+    const {plans, failures} = locateEditPlans(enabled, models, pageCount, snapshot);
     checkAbort(request.signal);
 
     const warnings = [];
-    const byPage = new Map();
-    for (const plan of plans) {
-      const laid = layout(plan, models[plan.pageIndex], doc.loadPage(plan.pageIndex));
-      if (laid.error) failures.push(failure(plan.edit, plan.pageIndex, laid.error));
-      else {
-        plan.layout = laid;
-        if (plan.anchorApproximate) warnings.push(warn('selection-font-metrics', 'warning', plan.pageIndex, plan.edit.id));
-        if (laid.substituted) warnings.push(warn('font-substituted', 'warning', plan.pageIndex, plan.edit.id));
-        if (laid.lines.length > 1) warnings.push(warn('wrapped-after', 'info', plan.pageIndex, plan.edit.id));
-        if (plan.partialLine) warnings.push(warn('extraction-gap', 'info', plan.pageIndex, plan.edit.id));
-        const list = byPage.get(plan.pageIndex) || [];
-        list.push(plan);
-        byPage.set(plan.pageIndex, list);
-      }
-    }
-    if (failures.length) throw unsupported(failures, models);
+    const byPage = layoutEditPlans(plans, models, doc, failures, warnings);
 
-    for (const [pageIndex, group] of byPage) {
-      checkAbort(request.signal);
-      const turned = group.filter(plan => plan.rotation !== 0);
-      if (turned.length) throw unsupported(turned.map(plan => failure(plan.edit, plan.pageIndex, 'rotated-page')), models);
-      const page = doc.loadPage(pageIndex);
-      const selected = new Set(group.flatMap(plan => plan.chars));
-      const protectedBoxes = removalBoxes(models[pageIndex].chars.filter(ch => !selected.has(ch)));
-      for (const plan of group) redact(page, plan.chars, protectedBoxes);
-      page.applyRedactions(false, mupdf.PDFPage.REDACT_IMAGE_NONE, mupdf.PDFPage.REDACT_LINE_ART_NONE, mupdf.PDFPage.REDACT_TEXT_REMOVE);
-      const piece = group.map(plan => showText(doc, page, plan)).join('');
-      if (piece) appendStream(doc, page, piece);
-    }
+    applyPageEdits(byPage, models, doc, request);
     checkAbort(request.signal);
     const saved = doc.saveToBuffer('garbage=compact');
     const out = new Uint8Array(saved.asUint8Array());
@@ -220,6 +178,69 @@ async function prepareExclusive(request) {
     try { doc?.destroy(); } catch { /* already closed */ }
     for (const face of snapshot || []) { try { face.font?.destroy(); } catch { /* already closed */ } }
   }
+}
+
+function validateSourceEdits(parsed, sourceSha256) {
+  if (parsed.fileHash && parsed.fileHash !== sourceSha256) {
+    throw new BrowserPdfError('stale-source', '원본 PDF 해시가 편집 세션과 다릅니다. 파일을 다시 연 뒤 적용하세요. 출력은 만들지 않았습니다.', {
+      sourceSha256, expectedSha256: parsed.fileHash,
+    });
+  }
+  const enabled = parsed.edits.filter(edit => edit.enabled !== false);
+  if (!enabled.length) throw new BrowserPdfError('no-edits', '적용할 편집이 없습니다. 원본을 변경된 파일로 반환하지 않습니다.');
+  if (enabled.length > LIMITS.maxEdits) throw new BrowserPdfError('limit', `편집은 한 번에 ${LIMITS.maxEdits}개까지입니다.`);
+
+  return enabled;
+}
+
+function locateEditPlans(enabled, models, pageCount, snapshot) {
+    const plans = [];
+    const failures = [];
+    enabled.forEach((edit, index) => {
+      const result = locate(edit, index, models, pageCount, snapshot);
+      if (result.ok) plans.push(result.plan);
+      else failures.push(result.failure);
+    });
+    const overlaps = overlapping(plans);
+    if (overlaps.length) failures.push(...overlaps);
+    if (failures.length) throw unsupported(failures, models);
+    return {plans, failures};
+}
+
+function layoutEditPlans(plans, models, doc, failures, warnings) {
+    const byPage = new Map();
+    for (const plan of plans) {
+      const laid = layout(plan, models[plan.pageIndex], doc.loadPage(plan.pageIndex));
+      if (laid.error) failures.push(failure(plan.edit, plan.pageIndex, laid.error));
+      else {
+        plan.layout = laid;
+        if (plan.anchorApproximate) warnings.push(warn('selection-font-metrics', 'warning', plan.pageIndex, plan.edit.id));
+        if (laid.substituted) warnings.push(warn('font-substituted', 'warning', plan.pageIndex, plan.edit.id));
+        if (laid.lines.length > 1) warnings.push(warn('wrapped-after', 'info', plan.pageIndex, plan.edit.id));
+        if (plan.partialLine) warnings.push(warn('extraction-gap', 'info', plan.pageIndex, plan.edit.id));
+        const list = byPage.get(plan.pageIndex) || [];
+        list.push(plan);
+        byPage.set(plan.pageIndex, list);
+      }
+    }
+    if (failures.length) throw unsupported(failures, models);
+
+    return byPage;
+}
+
+function applyPageEdits(byPage, models, doc, request) {
+    for (const [pageIndex, group] of byPage) {
+      checkAbort(request.signal);
+      const turned = group.filter(plan => plan.rotation !== 0);
+      if (turned.length) throw unsupported(turned.map(plan => failure(plan.edit, plan.pageIndex, 'rotated-page')), models);
+      const page = doc.loadPage(pageIndex);
+      const selected = new Set(group.flatMap(plan => plan.chars));
+      const protectedBoxes = removalBoxes(models[pageIndex].chars.filter(ch => !selected.has(ch)));
+      for (const plan of group) redact(page, plan.chars, protectedBoxes);
+      page.applyRedactions(false, mupdf.PDFPage.REDACT_IMAGE_NONE, mupdf.PDFPage.REDACT_LINE_ART_NONE, mupdf.PDFPage.REDACT_TEXT_REMOVE);
+      const piece = group.map(plan => showText(doc, page, plan)).join('');
+      if (piece) appendStream(doc, page, piece);
+    }
 }
 
 function parseRequest(request) {
