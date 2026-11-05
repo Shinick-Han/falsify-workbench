@@ -157,24 +157,32 @@ export function mountLatexWorkbench(doc=globalThis.document){
     pendingRestore=null;reconstruction=checked;project=model=null;selection=latestState=null;batches=[];proposals=[];currentPage=0;upload=file;uploadHash=hash;active=true;busyImport=true;importError=null;leftCanvas.width=rightCanvas.width=1;renderedKey=leftRendered='';paint();
     try{await start(verified,ticket,{initialArtifact});if(ticket!==epoch||signal?.aborted)throw aborted();if(session.getBaseline()?.pdfHash!==checked.baselinePdfHash)throw new Error('확인한 기준본과 편집기의 기준본이 다릅니다.');doc.dispatchEvent(new CustomEvent('falsify:paper-workspace-source'));return {projectId:verified.id,pdfHash:checked.baselinePdfHash};}catch(e){if(ticket===epoch)deactivate();throw e;}finally{if(ticket===epoch){busyImport=false;paint();}}
   }
+  function rebindSelection(rebound,next,oldSelection){
+    for(const c of rebound.filter(c=>c.rebindDiagnostic&&c.proposalId))for(const peer of rebound.filter(v=>v.proposalId===c.proposalId)){peer.enabled=false;peer.rebindDiagnostic??='같은 제안의 다른 위치를 다시 확인하세요.';}
+    const nextModel=analyzeLatexSource(next),oldNode=model.nodes.find(n=>n.id===oldSelection?.nodeId);
+    const selected=oldNode&&nextModel.nodes.filter(n=>n.path===oldNode.path&&n.kind===oldNode.kind&&n.start===oldNode.start&&n.end===oldNode.end);
+    return selected?.length===1?{...oldSelection,nodeId:selected[0].id}:null;
+  }
+  function updateReboundProposal(p,group){if(group.some(c=>c.rebindDiagnostic)){p.status='unresolved';p.rebindDiagnostic='새 프로젝트에서 위치를 다시 확인하세요.';}else if(group.length){p.anchor=group[0].anchor;if(p.sourceChanges)p.sourceChanges=group.map(c=>({...c}));}}
+  function chooseAddedPath(file,missing,paths){
+      const matches=missing.map(m=>missingTarget(m)).filter(p=>p.split('/').pop()===file.name);
+      const initial=file.webkitRelativePath||([...new Set(matches)].length===1?matches[0]:file.name);
+      const path=globalThis.prompt('추가할 프로젝트 상대 경로',initial);if(path===null)return null;
+      if(paths.has(path))throw new Error(`이미 존재하는 파일입니다: ${path}`);paths.add(path);return path;
+  }
+  function pendingReconstruction(previousReconstruction,next,oldProject){return previousReconstruction?{schema:'falsify.reconstruction-pending.v1',sourcePdfHash:next.sourcePdfHash,reason:'files-added',previous:previousReconstruction.previous||previousReconstruction,previousProject:previousReconstruction.previousProject||reconstructionDescriptor(oldProject)}:null;}
   async function addProjectFiles(files){
     if(!project||!session||!files.length)throw new Error('원본을 먼저 선택하세요.');
     const added=[],paths=new Set(project.files.map(f=>f.path)),missing=analyzeProjectFiles(project).missingFiles;
     for(const file of files){
-      const matches=missing.map(m=>missingTarget(m)).filter(p=>p.split('/').pop()===file.name);
-      const initial=file.webkitRelativePath||([...new Set(matches)].length===1?matches[0]:file.name);
-      const path=globalThis.prompt('추가할 프로젝트 상대 경로',initial);if(path===null)return;
-      if(paths.has(path))throw new Error(`이미 존재하는 파일입니다: ${path}`);paths.add(path);added.push({path,bytes:new Uint8Array(await file.arrayBuffer())});
+      const path=chooseAddedPath(file,missing,paths);if(path===null)return;added.push({path,bytes:new Uint8Array(await file.arrayBuffer())});
     }
     const oldProject=project,changes=pendingRestore?.changes||session.snapshot().changes,previousBaseline=pendingRestore?.baseline||session.getBaseline(),previousReconstruction=reconstruction;
     const next=await createLatexProject({...project,files:[...project.files,...added]});
     const rebound=await rebindChanges(oldProject,next,changes),oldSelection=editor.getUnfinishedEdit()||selection;
-    for(const c of rebound.filter(c=>c.rebindDiagnostic&&c.proposalId))for(const peer of rebound.filter(v=>v.proposalId===c.proposalId)){peer.enabled=false;peer.rebindDiagnostic??='같은 제안의 다른 위치를 다시 확인하세요.';}
-    const nextModel=analyzeLatexSource(next),oldNode=model.nodes.find(n=>n.id===oldSelection?.nodeId);
-    const selected=oldNode&&nextModel.nodes.filter(n=>n.path===oldNode.path&&n.kind===oldNode.kind&&n.start===oldNode.start&&n.end===oldNode.end);
-    selection=selected?.length===1?{...oldSelection,nodeId:selected[0].id}:null;
-    for(const p of proposals){let group=rebound.filter(c=>c.proposalId===p.id);if(!group.length&&p.status==='matched'){const primitives=p.sourceChanges||[p];group=await rebindChanges(oldProject,next,primitives.map((c,i)=>({...c,id:c.id||`${p.id}:${i}`,kind:c.kind||p.kind})));}if(group.some(c=>c.rebindDiagnostic)){p.status='unresolved';p.rebindDiagnostic='새 프로젝트에서 위치를 다시 확인하세요.';}else if(group.length){p.anchor=group[0].anchor;if(p.sourceChanges)p.sourceChanges=group.map(c=>({...c}));}}
-    const ticket=++epoch;reconstruction=previousReconstruction?{schema:'falsify.reconstruction-pending.v1',sourcePdfHash:next.sourcePdfHash,reason:'files-added',previous:previousReconstruction.previous||previousReconstruction,previousProject:previousReconstruction.previousProject||reconstructionDescriptor(oldProject)}:null;renderEpoch++;documentCache?.dispose();documentCache=null;clearPreview();leftCanvas.width=rightCanvas.width=1;renderedKey=leftRendered='';currentPage=0;pendingRestore={changes:rebound,baseline:previousReconstruction?previousBaseline:null};await start(next,ticket,{compile:false});
+    selection=rebindSelection(rebound,next,oldSelection);
+    for(const p of proposals){let group=rebound.filter(c=>c.proposalId===p.id);if(!group.length&&p.status==='matched'){const primitives=p.sourceChanges||[p];group=await rebindChanges(oldProject,next,primitives.map((c,i)=>({...c,id:c.id||`${p.id}:${i}`,kind:c.kind||p.kind})));}updateReboundProposal(p,group);}
+    const ticket=++epoch;reconstruction=pendingReconstruction(previousReconstruction,next,oldProject);renderEpoch++;documentCache?.dispose();documentCache=null;clearPreview();leftCanvas.width=rightCanvas.width=1;renderedKey=leftRendered='';currentPage=0;pendingRestore={changes:rebound,baseline:previousReconstruction?previousBaseline:null};await start(next,ticket,{compile:false});
   }
   async function compileExplicit(){if(!session)return;if(pendingRestore){const restore=pendingRestore,own=epoch;if(reconstruction?.schema==='falsify.reconstruction-lineage.v1'&&restore.baseline?.pdfBytes){await start(project,own,{compile:false,initialArtifact:restore.baseline});}await session.compile();if(restore!==pendingRestore||own!==epoch)return;
       if(reconstruction?.schema==='falsify.reconstruction-pending.v1'){const baseline=session.getBaseline(),comparison=await reconstructionReader.compare({sourceFile:upload,bytes:baseline.pdfBytes});if(restore!==pendingRestore||own!==epoch)return;const metadata=JSON.parse(textFile(project,'falsify-reconstruction.json')),bindings=metadata.bindings.map(({bindingScope,...b})=>({...b,projectId:project.id}));reconstruction=createReconstructionLineage({project,artifact:baseline,comparison,bindings,decisions:metadata.decisions});}
