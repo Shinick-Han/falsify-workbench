@@ -579,7 +579,9 @@
       candidateMarks?.layer?.remove();candidateMarks=null;
       if(!candidatePreview||!pageText||candidatePreview.pageIndex!==pageText.pageIndex||!marksApi()?.paintPage)return;
       const view=layoutView(candidatePreview.segmentId);
-      candidateMarks=marksApi().paintPage({document:doc,container:pageText.pageEl,...view,edits:[{id:'candidate-location',before:candidatePreview.before,after:'',enabled:true}],side:'before'});
+      const segment=source?.segments?.find(s=>s.id===candidatePreview.segmentId);
+      const location=segment?{text:segment.text,start:candidatePreview.start,end:candidatePreview.end}:null;
+      candidateMarks=marksApi().paintPage({document:doc,container:pageText.pageEl,...view,edits:[{id:'candidate-location',before:candidatePreview.before,after:'',enabled:true,location}],side:'before'});
       candidateMarks.layer?.classList.add('paper-candidate-layer');
       pageText.divs.forEach((div,i)=>{if(div?.dataset)div.dataset.i=String(i);});
     }
