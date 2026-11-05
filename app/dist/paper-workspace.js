@@ -546,7 +546,7 @@
     }
     const listeners=[];
     function listen(node,type,handler,options){if(!node)return;node.addEventListener(type,handler,options);listeners.push(()=>node.removeEventListener(type,handler,options));}
-    let epoch=0,source=null,session=null,unsub=null,snapshot=null,output=null,inline=null,pageText=null,directEditor=null,directControls=null,directStatus=null,committingDirect=false,committingInline=false,composingDirect=false,selectionClickPending=false;
+    let epoch=0,source=null,session=null,unsub=null,snapshot=null,output=null,inline=null,pageText=null,directEditor=null,directControls=null,directStatus=null,directResizeObserver=null,committingDirect=false,committingInline=false,composingDirect=false,selectionClickPending=false;
     let fontRevision=0,fontBusy=false,outputAt=null,generationFailed=false;
     let proposalQueue=null,accepted=new Set(),modelById=new Map(),draftRaw=null,pendingFocus=null,pendingResume=null;
     let external=null, externalRevision=0, draftTimer=null,combineIds=new Set(),suppressExternalPaint=false,proposalInputs=new Map(),atomicSelection=false;
@@ -1111,7 +1111,7 @@
       if(draftTimer){timers.clearTimeout(draftTimer);draftTimer=null;}
       epoch++;tableBindings.clear();abortGen();stopPdf();closeAfter();
       if(typeof unsub==='function')unsub();
-      if(directEditor){const editor=directEditor;directEditor=null;composingDirect=false;editor.remove();}directControls?.remove();directControls=null;directStatus=null;
+      if(directEditor){const editor=directEditor;directEditor=null;composingDirect=false;editor.remove();}removeDirectControls();
       unsub=null;session=null;snapshot=null;output=null;outputAt=null;generationFailed=false;inline=null;pageText=null;external=null;externalRevision=0;selectionHistory=new Map();combineIds=new Set();proposalQueue=null;accepted=new Set();draftRaw=null;pendingResume=null;beforeMarks=afterMarks=null;candidatePreview=null;candidateMarks=null;compareFocus=null;updateChangeStatus();
       source=null;pages=0;page=1;zoom=1;
       clearStage(ui.beforeStage);clearStage(ui.afterStage);
@@ -1151,7 +1151,7 @@
       const mine=++epoch;tableBindings.clear();
       abortGen();stopPdf();closeAfter();
       if(typeof unsub==='function')unsub();
-      if(directEditor){const editor=directEditor;directEditor=null;composingDirect=false;editor.remove();}directControls?.remove();directControls=null;directStatus=null;
+      if(directEditor){const editor=directEditor;directEditor=null;composingDirect=false;editor.remove();}removeDirectControls();
       unsub=null;session=null;snapshot=null;output=null;outputAt=null;generationFailed=false;inline=null;pageText=null;external=null;externalRevision=0;selectionHistory=new Map();combineIds=new Set();proposalQueue=null;accepted=new Set();draftRaw=null;pendingResume=null;beforeMarks=afterMarks=null;candidatePreview=null;candidateMarks=null;compareFocus=null;updateChangeStatus();
       pages=0;page=1;zoom=1;
       source={file,fileHash:null,name:sessionName(file.name),segments:[],pdf:isPdf(file),doc:null,lib:null,render:null,paragraphPages:new Map()};
@@ -1366,7 +1366,7 @@
       tableSeq++;if(tableCtl){tableCtl.abort();tableCtl=null;}
       if(pageText?.tableLayer){pageText.tableLayer.remove();pageText.tableLayer=null;}
       if(pageText)pageText.tableCells=null;
-      if(closeInline&&inline?.table&&ui.inlineAfter.value===inline.after){if(directEditor){const editor=directEditor;directEditor=null;composingDirect=false;editor.remove();}directControls?.remove();directControls=null;directStatus=null;inline=null;renderInline();}
+      if(closeInline&&inline?.table&&ui.inlineAfter.value===inline.after){if(directEditor){const editor=directEditor;directEditor=null;composingDirect=false;editor.remove();}removeDirectControls();inline=null;renderInline();}
       say(ui.tableStatus,'');
     }
     function setEditMode(mode){
@@ -1475,15 +1475,27 @@
     function cancelDirect(){
       if(composingDirect)return;closeInline();scheduleGeneration();renderChrome();
     }
+    function removeDirectControls(){
+      directResizeObserver?.disconnect();directResizeObserver=null;directControls?.remove();directControls=null;directStatus=null;
+    }
+    function positionDirectControls(page,editor,bar){
+      if(!Number.isFinite(editor.offsetTop)||!Number.isFinite(editor.offsetHeight))return;
+      const top=editor.offsetTop,bottom=top+editor.offsetHeight,above=top-bar.offsetHeight;
+      bar.style.top=((bottom+bar.offsetHeight>page.clientHeight&&above>=0)?above:bottom)+'px';
+    }
     function makeDirectControls(display,b,w,h,editor){
       const bar=doc.createElement('div'),status=doc.createElement('span'),done=doc.createElement('button'),cancel=doc.createElement('button');
-      Object.assign(bar.style,{position:'absolute',zIndex:'5',left:(b[0]/w*100)+'%',top:(b[3]/h*100)+'%',background:'white'});
+      const left=(b[0]/w*100)+'%';bar.className='paper-direct-controls';
+      Object.assign(bar.style,{position:'absolute',zIndex:'5',left,top:(b[1]/h*100)+'%',width:'calc(100% - '+left+')',display:'flex',flexWrap:'wrap',alignItems:'center',gap:'4px',background:'white'});
       status.dataset.directStatus='';status.setAttribute('aria-live','polite');status.textContent='변경 없음 · 바깥을 누르면 닫힘';directStatus=status;
       done.type=cancel.type='button';done.className=cancel.className='button secondary';done.textContent='완료';cancel.textContent='입력 취소';
       for(const button of [done,cancel])button.addEventListener('pointerdown',e=>e.preventDefault());
       done.addEventListener('click',commitDirect);cancel.addEventListener('click',cancelDirect);
       bar.addEventListener('focusout',e=>{if(directEditor===editor&&!bar.contains(e.relatedTarget)&&e.relatedTarget!==editor)commitDirect();});
-      const hint=doc.createElement('span');hint.textContent=' · Esc 입력 취소 · 기록 후 실행 취소 가능';bar.append(status,done,cancel,hint);display.pageEl.append(bar);return bar;
+      const hint=doc.createElement('span');hint.textContent=' · Esc 입력 취소 · 기록 후 실행 취소 가능';bar.append(status,done,cancel,hint);display.pageEl.append(bar);
+      const position=()=>positionDirectControls(display.pageEl,editor,bar);position();
+      if(typeof globalThis.ResizeObserver==='function'){directResizeObserver=new globalThis.ResizeObserver(position);directResizeObserver.observe(editor);directResizeObserver.observe(bar);directResizeObserver.observe(display.pageEl);}
+      return bar;
     }
     function commitDirect(){
       if(!directEditor||!inline||composingDirect)return;
@@ -1655,7 +1667,7 @@
     function closeInline(){
       if(composingDirect||(!inline&&!directEditor))return;
       if(directEditor){const editor=directEditor;directEditor=null;composingDirect=false;editor.remove();}
-      directControls?.remove();directControls=null;directStatus=null;
+      removeDirectControls();
       const id=inline?.editId;inline=null;renderInline();
       const target=id&&buttons(ui.edits).find(b=>b.dataset.edit===id&&b.dataset.act==='edit');
       if(!committingDirect)(target||ui.beforeStage).focus();
