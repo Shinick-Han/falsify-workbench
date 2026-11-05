@@ -551,6 +551,25 @@ export function createLayoutPreviewController({
     return verify;
   }
 
+  function commitSides(settled, pages, requestedFocus, requestId) {
+    const result = {status: 'ready', requestId};
+    for (const [i, name] of SIDES.entries()) {
+      const r = settled[i];
+      if (r.status === 'fulfilled') {
+        r.value.commit();
+        result[name] = r.value.result;
+      } else {
+        blank(sides[name], '');
+        result[name] = {pageIndex: pages[name], totalPages: 0, pdfHash: sides[name].document?.pdfHash || null, state: 'error', error: r.reason?.message || String(r.reason), text: '',
+          focus: sideFocus(sides[name], requestedFocus, 'error', pages[name])};
+      }
+    }
+    const states = SIDES.map(n => result[n].state);
+    if (states.includes('error')) result.status = states.every(s => s === 'error' || s === 'absent') ? 'error' : 'partial';
+    else if (states.includes('out-of-range')) result.status = 'partial';
+    return result;
+  }
+
   async function show({originalPageIndex = 0, candidatePageIndex = 0, focus} = {}) {
     const pages = {
       original: validatePageIndex(originalPageIndex, 'originalPageIndex'),
@@ -573,21 +592,7 @@ export function createLayoutPreviewController({
       return {status: 'cancelled', requestId};
     }
     inflight = null;
-    const result = {status: 'ready', requestId};
-    for (const [i, name] of SIDES.entries()) {
-      const r = settled[i];
-      if (r.status === 'fulfilled') {
-        r.value.commit();
-        result[name] = r.value.result;
-      } else {
-        blank(sides[name], '');
-        result[name] = {pageIndex: pages[name], totalPages: 0, pdfHash: sides[name].document?.pdfHash || null, state: 'error', error: r.reason?.message || String(r.reason), text: '',
-          focus: sideFocus(sides[name], requestedFocus, 'error', pages[name])};
-      }
-    }
-    const states = SIDES.map(n => result[n].state);
-    if (states.includes('error')) result.status = states.every(s => s === 'error' || s === 'absent') ? 'error' : 'partial';
-    else if (states.includes('out-of-range')) result.status = 'partial';
+    const result = commitSides(settled, pages, requestedFocus, requestId);
     const meta = {
       requestId,
       status: result.status,
@@ -657,6 +662,13 @@ export function createLayoutPreviewController({
     };
   }
 
+  function matchPageScores(scores,to){
+    scores.sort((a,b)=>b.score-a.score);const best=scores[0],second=scores[1];
+    if(!best||best.score<0.45)return {status:'missing',searchedPages:scores.length};
+    if(second&&best.score-second.score<0.1)return {status:'ambiguous',candidates:scores.filter(s=>best.score-s.score<0.1),searchedPages:scores.length};
+    return {status:'matched',document:to,...best,searchedPages:scores.length};
+  }
+
   async function findCorrespondingPage({from='candidate',pageIndex=0}={}) {
     if(!SIDES.includes(from))throw new TypeError('Choose original or candidate');
     validatePageIndex(pageIndex,'pageIndex');await documentsReady;
@@ -675,10 +687,7 @@ export function createLayoutPreviewController({
       scores.push({pageIndex:i,score:text.replace(/\s+/g,' ').trim()===exact?1:common/Math.max(terms.size,other.size,1)});
       if(i%8===7)await new Promise(resolve=>setTimeout(resolve,0));
     }
-    scores.sort((a,b)=>b.score-a.score);const best=scores[0],second=scores[1];
-    if(!best||best.score<0.45)return {status:'missing',searchedPages:scores.length};
-    if(second&&best.score-second.score<0.1)return {status:'ambiguous',candidates:scores.filter(s=>best.score-s.score<0.1),searchedPages:scores.length};
-    return {status:'matched',document:to,...best,searchedPages:scores.length};
+    return matchPageScores(scores,to);
   }
   return {setDocuments, show, cancel, dispose, getStats,findCorrespondingPage};
 }
