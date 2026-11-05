@@ -488,3 +488,13 @@ Stackbite native Codex GPT-6.1 Terra high Fast 작업자를 최대 3개씩 파�
 최초 Python 전체 실행의982통과·3실패는 보존한다. DocVortex 의존성은 별도 환경에서 확인했고, native 그래프 시간 초과의 최초 원인은 확정하지 않았다. 최종 전체 재실행은 통과했으며 생산 기한을 늘리지 않았다. 200ms 자식 기동 가정은 기준본·수정본 각각16회 중3회 시간 초과로 재현되어 테스트의 clock/분류 검사와 실제 자식 검사를 분리했다. 수치 편집 금지와 숨은 UI를 전제로 한 오래된 저장 가져오기 검사는 기준본에서도 실패함을 확인한 뒤 현재 계약으로 수정했다. 최종 검토에서 사용하지 않는 자기 호출 helper를 제거했다. 각 최초 값과 후속 결과는 ledger에 함께 남긴다.
 
 보고서는 소스 밖 coordination/tech-debt-audit-20261105/implementation/ccn15-20261105/CCN15_REPORT.ko.html이며 원시 수치는 production-ccn-final.json에 있다. 공개 웹·설치본은 alpha.50 유지, 사용자 companion·개인 설정·기록은 변경하지 않았다. 새 커밋의 원격 macOS CI는 아직 실행하지 않았고 기존 Paragraph runtime sourceBuildVerified=false도 유지한다. WorkBite T-0152는 진행 상태를 유지하고 이번 결과만 checkpoint로 남긴다.
+
+## 2026-11-05 alpha.51 공개 배포·설치본·공식 GitHub 동기화 완료
+
+사용자가 CCN 상환 버전의 공개 웹·설치본·GitHub 반영을 요청했다. c490db0c1c09eed9ad2be936ccd087b78a187c1d를 alpha.51로 개인 GitHub main과 chore/ccn15-20261105에 push했다. GitHub Actions 41945173264의 Linux·Windows·macOS ARM/Intel 및 Pages 배포가 모두 성공했다. 같은 커밋의 태그 v0.2.0-alpha.51과 prerelease ZIP·manifest·SHA256SUMS를 공개했다. ZIP은146875949바이트, SHA-256은567f8d37ba108919a97334a01c4d0517c859d1f80fe14202e3fbd05eb0ac1723이다. 공개 변경 자산61개와 다운로드 ZIP·manifest·checksum을 실제 대조했다. Aside에서도 공개 RED 입력·외부 응답 가져오기·RED/BLUE 탐색 표시와 alpha.51 진입 자산 URL을 확인했다.
+
+설치본은 기존 릴리스와 새 ZIP의 파일을 대조한 후211개를 교체했고 전체1254파일이 ZIP과 일치한다. 개인 파일36개와 기존 연결 키를 보존했다. 시작 전7816은 비어 있었으므로 기존 launcher 설정과 절대 server.py 경로로 hidden 실행했다. 새 companion PID70768의 Owned·descriptor·busy=false·workbenchVersion alpha.51을 확인했다. 실제 HTTP 합성 그래프 준비·PNG 미리보기·PDF 생성·되돌리기 원본 바이트 일치가 통과했다. 모델 호출은0회이며 브라우저 재페어링 완료를 주장하지 않는다.
+
+공유 Confluence API는 고정 lockfile로 설치한 Wrangler와 기존 배포 절차를 사용해668d83d7-2740-4fc8-bf09-ce4a130b3768로 교체했다. 변경 전후 변수·secret 항목·D1 binding이 같고 허용된 웹 Origin의 health HTTP200·ready=true를 확인했다. 데이터 migration은 수행하지 않았다. Pseudo-Lab/Falsify의 기존 feat/workbench-html-guide-20261012 브랜치도8518c4a82c531f55a0176ae335ce82404f732e06으로 fast-forward했다. tools/workbench 안의1254개 애플리케이션 Git blob·실행 권한은 공개 커밋과 같으며 기존 출처·팀 안내 overlay2개만 별도다. 팀 main·루트 파일은 변경하지 않았다.
+
+출시 커밋에서도 동일 범위202파일·9883함수·최대CCN15·15초과0·파싱오류0을 재확인했다. Paragraph runtime sourceBuildVerified=false는 유지한다. 배포 영수증은 소스 밖 coordination/tech-debt-audit-20261105/implementation/release-alpha51/deployment-status.json이다. StorageGuardian은 포장용 worktree의 외부 Git 객체 의존성 등록을 거절했으므로 보존하고 상위 보관 lease만 갱신했다. 이 영수증 문서는 로컬 조율 기록이며 공개 릴리스 커밋을 바꾸지 않는다.
