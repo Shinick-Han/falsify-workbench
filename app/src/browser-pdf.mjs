@@ -509,6 +509,18 @@ function verify(sourceBytes, outBytes, plans, models, unchanged) {
   catch { throw new BrowserPdfError('engine', '저장 결과를 다시 열 수 없습니다. 파일을 반환하지 않습니다.'); }
   try {
     if (check.countPages() !== models.length) checks.push({pageIndex: null, status: 'failed', code: 'page-count'});
+    verifyUneditedContent(check, plans, models, checks);
+    verifyEditText(check, plans, models, warnings, checks);
+    if (unchanged || (outBytes.length === sourceBytes.length && outBytes.every((byte, index) => byte === sourceBytes[index]))) {
+      checks.push({status: 'failed', code: 'unchanged-output'});
+    }
+  } finally {
+    try { check.destroy(); } catch { /* ignore */ }
+  }
+  return {warnings, checks};
+}
+
+function verifyUneditedContent(check, plans, models, checks) {
     const edited = new Set(plans.map(plan => plan.pageIndex));
     for (let i = 0; i < models.length; i++) {
       const page = check.loadPage(i);
@@ -520,6 +532,9 @@ function verify(sourceBytes, outBytes, plans, models, unchanged) {
         checks.push({pageIndex: i, status: 'failed', code: 'untouched-text'});
       }
     }
+}
+
+function verifyEditText(check, plans, models, warnings, checks) {
     for (const plan of plans) {
       const text = normalizeText(readPage(check.loadPage(plan.pageIndex)).chars);
       const before = plan.edit.before.replace(/\s+/g, ' ').trim();
@@ -533,13 +548,6 @@ function verify(sourceBytes, outBytes, plans, models, unchanged) {
       const expected = Math.max(0, count(sourceText, before) - 1 + count(after, before));
       if (count(text, before) > expected) checks.push({id: plan.edit.id, pageIndex: plan.pageIndex, status: 'failed', code: 'removed-before'});
     }
-    if (unchanged || (outBytes.length === sourceBytes.length && outBytes.every((byte, index) => byte === sourceBytes[index]))) {
-      checks.push({status: 'failed', code: 'unchanged-output'});
-    }
-  } finally {
-    try { check.destroy(); } catch { /* ignore */ }
-  }
-  return {warnings, checks};
 }
 
 function selectedCharIndexes(plans, pageIndex) {
@@ -775,12 +783,17 @@ function base14(fontName, font) {
   const bold = font.isBold();
   const italic = font.isItalic();
   const family = font.isMono() ? 'Courier' : font.isSerif() ? 'Times' : 'Helvetica';
+  const name = base14Style(family, bold, italic);
+  return {name, substituted: true};
+}
+
+function base14Style(family, bold, italic) {
   const name = family === 'Times'
     ? (bold && italic ? 'Times-BoldItalic' : bold ? 'Times-Bold' : italic ? 'Times-Italic' : 'Times-Roman')
     : family === 'Courier'
       ? (bold && italic ? 'Courier-BoldOblique' : bold ? 'Courier-Bold' : italic ? 'Courier-Oblique' : 'Courier')
       : (bold && italic ? 'Helvetica-BoldOblique' : bold ? 'Helvetica-Bold' : italic ? 'Helvetica-Oblique' : 'Helvetica');
-  return {name, substituted: true};
+  return name;
 }
 
 function metrics(name) {
