@@ -1213,7 +1213,8 @@
       figureState={key:'figure:'+item.id,opId:'figure-'+item.id,itemId:item.id,pageIndex:item.pageIndex,bbox:item.bbox.slice(),beforeSha:rendered.sha256,beforePng:rendered.bytes,uploaded:null,crop:null,label:null,afterPng:null,page:item.pageIndex+1};
       paintFigureControls();
       setImages(rendered.bytes,null);
-      await loadPreview(token,mine);
+      await loadPreview(token,mine,stillCurrent);
+      if(!stillCurrent()&&figureState?.itemId===item.id){figureState=null;workBody.replaceChildren();}
     }
     function paintFigureControls(){
       const fig=figureState;
@@ -1332,7 +1333,7 @@
         return {x:roundPt(x),y:roundPt(y)};
       }
     }
-    async function loadPreview(token,mine){
+    async function loadPreview(token,mine,stillCurrent=()=>true){
       const fig=figureState;
       if(!fig)return;
       const src=currentSource();
@@ -1380,9 +1381,9 @@
     }
     async function updateFigureBbox(bbox){
       const fig=figureState;
-      const token=generation,mine=selectSerial;
-      const rendered=await renderRegion(fig.page-1,bbox);
-      if(!selectionCurrent(token,mine)||figureState!==fig)return;
+      const token=generation,mine=selectSerial,page=fig.page;
+      const rendered=await renderRegion(page-1,bbox);
+      if(!selectionCurrent(token,mine)||figureState!==fig||fig.page!==page)return;
       if(!rendered){say(status,TEXT.region,true);return;}
       fig.pageIndex=fig.page-1;
       fig.bbox=bbox.slice();

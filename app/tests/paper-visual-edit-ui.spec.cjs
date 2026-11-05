@@ -619,6 +619,17 @@ serial('page navigation during preview cancels the old selection',async()=>{
   assert.equal(h.labeled('라벨'),undefined);
 });
 
+serial('page change during the displayed selection preview clears the old picker',async()=>{
+  let release,attempt=0,page=0;const gate=new Promise(resolve=>{release=resolve;});
+  const h=world({catalog:{items:[],full:{},analyses:[],fullAnalyses:{}},previewWait:()=>++attempt===2?gate:Promise.resolve()});
+  h.source={file:fileOf(PDF,'vectors.pdf'),fileHash:HASH,revision:'r1'};
+  globalThis.FalsifyPaperWorkspace.getPageIndex=()=>page;
+  await h.ui.refresh();h.button('영역 직접 선택').click();
+  await until(()=>attempt===2,'second preview');page=1;release();await settle();
+  assert.equal(h.labeled('라벨'),undefined);
+  assert.equal(h.ui.snapshot().pending,0);
+});
+
 serial('graph edit binds to the visible page after page navigation',async()=>{
   const mounts=[];
   globalThis.FalsifyChartShape={};
