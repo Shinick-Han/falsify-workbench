@@ -314,12 +314,20 @@ function normalizeHit(hit) {
   return {seriesId, index, distance: finite(hit.distance) ? hit.distance : 0};
 }
 
-export function create(options = {}) {
-  const host = options.host;
-  const doc = options.document || host?.ownerDocument || globalThis.document;
+function validateEditorInputs(host, doc, options) {
   if (!host || typeof host.append !== 'function') throw new Error('FalsifyChartShapeEditor.create requires a host element');
   if (!doc?.createElement || !doc.createElementNS) throw new Error('FalsifyChartShapeEditor.create requires a document');
   if (!options.scene || !Array.isArray(options.scene.series)) throw new Error('FalsifyChartShapeEditor.create requires a scene with series');
+}
+
+function validPrecisionValue(seriesId,index,axis,value) {
+  return !(seriesId == null || !Number.isInteger(index) || (axis !== 'x' && axis !== 'y') || value == null);
+}
+
+export function create(options = {}) {
+  const host = options.host;
+  const doc = options.document || host?.ownerDocument || globalThis.document;
+  validateEditorInputs(host,doc,options);
 
   const core = resolveCore(options.core);
   const onChange = typeof options.onChange === 'function' ? options.onChange : null;
@@ -781,16 +789,7 @@ export function create(options = {}) {
     return series;
   }
 
-  function onPointerDown(event) {
-    if (state.destroyed || state.compare || state.gesture) return;
-    if (event.button != null && event.button !== 0) return;
-    const point = eventPoint(event);
-    if (!point) return;
-    focusRoot();
-    event.preventDefault?.();
-    const name = handleName(event.target);
-    const scene = history.scene();
-    if (name && state.selection) {
+  function startHandleGesture(event, name, scene, point) {
       const series = seriesById(scene, state.selection.seriesId);
       const spanned = rangePoints(series?.points || [], state.selection.range);
       if (!spanned.length) return;
@@ -836,6 +835,20 @@ export function create(options = {}) {
         },
         operation() { return this.op; },
       });
+      return;
+  }
+
+  function onPointerDown(event) {
+    if (state.destroyed || state.compare || state.gesture) return;
+    if (event.button != null && event.button !== 0) return;
+    const point = eventPoint(event);
+    if (!point) return;
+    focusRoot();
+    event.preventDefault?.();
+    const name = handleName(event.target);
+    const scene = history.scene();
+    if (name && state.selection) {
+      startHandleGesture(event, name, scene, point);
       return;
     }
     const hit = normalizeHit(core.hitTest(scene, point.x, point.y, SCREEN_HIT_PX * screenScale()));
@@ -953,37 +966,7 @@ export function create(options = {}) {
     setStatus('다시 실행했습니다.');
   }
 
-  function onKeyDown(event) {
-    if (state.destroyed) return;
-    if (event.key === 'Escape' && typingTarget(event.target)) {
-      event.preventDefault?.();
-      event.target.blur?.();
-      return;
-    }
-    if (typingTarget(event.target)) return;
-    const key = String(event.key || '');
-    const mod = !!(event.ctrlKey || event.metaKey);
-    if (mod && key.toLowerCase() === 'z') {
-      event.preventDefault?.();
-      if (event.shiftKey) redo();
-      else undo();
-      return;
-    }
-    if (mod && key.toLowerCase() === 'y') {
-      event.preventDefault?.();
-      redo();
-      return;
-    }
-    if (key === 'Escape') {
-      event.preventDefault?.();
-      if (state.gesture) endGesture(false);
-      else if (state.selection) {
-        state.selection = null;
-        render();
-      }
-      return;
-    }
-    if (!state.selection || state.compare || state.gesture) return;
+  function handleMovementKey(event,key) {
     const step = event.shiftKey ? KEY_STEP_LARGE : KEY_STEP;
     if (key === 'ArrowUp') nudge(0, -step);
     else if (key === 'ArrowDown') nudge(0, step);
@@ -995,7 +978,47 @@ export function create(options = {}) {
       if (event.altKey) scaleWidth(KEY_WIDTH_FACTOR);
       else nudge(step, 0);
     }
-    else return;
+    else return false;
+    return true;
+  }
+
+  function handleControlKey(event,key,mod) {
+    if (mod && key.toLowerCase() === 'z') {
+      event.preventDefault?.();
+      if (event.shiftKey) redo();
+      else undo();
+      return true;
+    }
+    if (mod && key.toLowerCase() === 'y') {
+      event.preventDefault?.();
+      redo();
+      return true;
+    }
+    if (key === 'Escape') {
+      event.preventDefault?.();
+      if (state.gesture) endGesture(false);
+      else if (state.selection) {
+        state.selection = null;
+        render();
+      }
+      return true;
+    }
+    return false;
+  }
+
+  function onKeyDown(event) {
+    if (state.destroyed) return;
+    if (event.key === 'Escape' && typingTarget(event.target)) {
+      event.preventDefault?.();
+      event.target.blur?.();
+      return;
+    }
+    if (typingTarget(event.target)) return;
+    const key = String(event.key || '');
+    const mod = !!(event.ctrlKey || event.metaKey);
+    if (handleControlKey(event,key,mod)) return;
+    if (!state.selection || state.compare || state.gesture) return;
+    if (!handleMovementKey(event,key)) return;
     event.preventDefault?.();
   }
 
@@ -1006,7 +1029,7 @@ export function create(options = {}) {
     const index = Number(input.getAttribute('data-index'));
     const axis = input.getAttribute('data-axis');
     const value = readNumber(input.value);
-    if (seriesId == null || !Number.isInteger(index) || (axis !== 'x' && axis !== 'y') || value == null) return;
+    if (!validPrecisionValue(seriesId,index,axis,value)) return;
     const scene = history.scene();
     const series = (scene.series || []).find(item => String(item.id) === seriesId);
     const point = series?.points?.[index];
