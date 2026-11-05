@@ -439,11 +439,12 @@
       try{msg('전체 텍스트 호출 예산 확인 후 선택 BLUE harness를 실행합니다.');const started=await postBlue(l,held);if(current!==generation){void l.request('/api/blue/jobs/'+encodeURIComponent(started.id)+'/cancel',{}).catch(()=>{});return;}job=started.id;jobLink=l;controls();await watchBlue(current,l,true);}
       catch(e){if(current===generation)reportCaught(e);}finally{if(current===generation){busy=false;job=null;jobLink=null;controls();}}
   }
+  function unknownPending(pending){return pending.status==='record'&&(pending.record.disposition==='unknown'||pending.record.postReceipt==='unknown');}
   async function startWithPending(current){
       if(!helperReady()){msg('대기 기록 도우미가 없거나 손상되어 실행하지 않았습니다. 요청을 보내지 않습니다.',true);return;}
       const pending=P.read('blue');
       if(pending.status==='record'&&terminalKind(pending.record)&&pending.record.postReceipt!=='unknown'){if(!await discardPrevious(pending.record,current))return;if(current!==generation)return;}
-      if(pending.status==='record'&&(pending.record.disposition==='unknown'||pending.record.postReceipt==='unknown')){showUnknown(pending.record);return;}
+      if(unknownPending(pending)){showUnknown(pending.record);return;}
       busy=true;controls();
       let l,held=null;
       try{l=link();const next=await makeRequest();if(current!==generation)return;held=await holdBlue(next);}
