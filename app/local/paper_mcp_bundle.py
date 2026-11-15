@@ -33,6 +33,7 @@ from paper_registry_identifiers import (
     verify_identifiers_online,
 )
 from paper_figure_forensics import audit_figure_forensics
+from paper_internal_consistency import audit_internal_consistency
 from paper_raw_dataset_audit import audit_raw_datasets
 from paper_supplement_audit import audit_paper_with_supplements, infer_supplement_kind
 from paper_tabular_notebook_loader import parse_ipynb_notebook, parse_xlsx_workbook
@@ -444,6 +445,21 @@ def audit_figures_payload(store, paper_id, file_hash, max_signals=30, dpi=96, ma
         max_figures=max_figures,
         store=store,
     )
+    _assert_no_red_keys(out)
+    return out
+
+
+def audit_internal_consistency_payload(store, paper_id, file_hash, max_signals=30):
+    """Run read-only IMRaD internal sample-size, metric, and protocol consistency audit."""
+    if type(max_signals) is not int or not 1 <= max_signals <= MAX_SIGNALS_LIMIT:
+        raise ValueError("limit")
+    bound_id, actual_hash, summary, raw = _require_bound_pdf(paper_id, store)
+    require_summary(summary, paper_id=bound_id, file_hash=file_hash)
+    page_items = _read_pdf_page_items(raw, MAX_PDF_SUPP_PAGES)
+    table_items = _read_table_items(store, bound_id)
+    out = audit_internal_consistency(page_items, table_items=table_items, max_signals=max_signals)
+    out["paperId"] = bound_id
+    out["fileHash"] = actual_hash
     _assert_no_red_keys(out)
     return out
 

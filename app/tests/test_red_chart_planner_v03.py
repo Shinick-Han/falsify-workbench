@@ -1,6 +1,7 @@
 """Chart planner v0.3 coverage. Stdlib unittest only. Synthetic PDFs stay in memory."""
 import base64
 import hashlib
+import importlib.util
 import json
 import subprocess
 import sys
@@ -14,15 +15,24 @@ import pymupdf
 ROOT = Path(__file__).resolve().parents[2]
 LOCAL = ROOT / 'app' / 'local'
 V03 = ROOT / 'app' / 'examples' / 'adversarial_red_v03'
-sys.path.insert(0, str(V03))
-sys.path.insert(0, str(LOCAL))
+if str(LOCAL) not in sys.path:
+    sys.path.insert(0, str(LOCAL))
 
 from paper_evidence import EvidenceStore  # noqa: E402
 from paper_figure_forensics import audit_figure_forensics  # noqa: E402
 from paper_red_detectability import simulate_red_detectability  # noqa: E402
 from paper_red_planner import HINT_TOKENS, plan_coordinated_mutations  # noqa: E402
 from paper_stealth_audit import audit_pdf_stealth  # noqa: E402
-import runner  # noqa: E402
+
+
+def _load_v03_runner():
+    spec = importlib.util.spec_from_file_location('adversarial_red_v03_runner', V03 / 'runner.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+runner = _load_v03_runner()
 
 
 def _bind(raw):
