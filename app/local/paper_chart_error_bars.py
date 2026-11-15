@@ -44,7 +44,7 @@ def _horizontal_run_widths(fg, np):
 
 
 def _cluster_peak_columns(col_scores, max_gap=2):
-    active = [i for i, v in enumerate(col_scores) if v >= 7]
+    active = [i for i, v in enumerate(col_scores) if v >= 8]
     if not active:
         return []
     clusters = [[active[0]]]
@@ -53,7 +53,15 @@ def _cluster_peak_columns(col_scores, max_gap=2):
             clusters[-1].append(c)
         else:
             clusters.append([c])
-    return [max(cluster, key=lambda c: col_scores[c]) for cluster in clusters]
+    peaks = []
+    n = len(col_scores)
+    for cluster in clusters:
+        best = max(cluster, key=lambda c: col_scores[c])
+        flank_lo = max(col_scores[max(0, cluster[0] - 6):cluster[0]], default=0)
+        flank_hi = max(col_scores[min(n, cluster[-1] + 1):min(n, cluster[-1] + 7)], default=0)
+        if len(cluster) <= 7 or col_scores[best] >= max(flank_lo, flank_hi) + 12:
+            peaks.append(best)
+    return peaks
 
 
 def _contiguous_segments(flags, max_gap=10):
@@ -89,18 +97,34 @@ def _cap_bounds(fg, widths, col, r0, r1, h, w):
     return top, bot, has_top_cap, has_bot_cap
 
 
+def _stem_vertically_isolated(fg, col, r0, r1, w):
+    inner0, inner1 = r0 + 3, r1 - 2
+    if inner1 <= inner0:
+        return False
+    isolated = 0
+    total = inner1 - inner0
+    left_lo, left_hi = max(0, col - 6), max(0, col - 2)
+    right_lo, right_hi = min(w, col + 3), min(w, col + 7)
+    for r in range(inner0, inner1):
+        has_flank = bool(fg[r, left_lo:left_hi].any()) or bool(fg[r, right_lo:right_hi].any())
+        if not has_flank:
+            isolated += 1
+    return isolated >= max(4, int(total * 0.5))
+
+
 def _extract_whisker_from_seg(fg, narrow, widths, col, r0, r1, h, w):
     span = r1 - r0 + 1
-    if span < 8 or span >= int(h * 0.65):
+    if span < 10 or span >= int(h * 0.65):
         return None
     c0, c1 = max(0, col - 1), min(w, col + 2)
     narrow_rows = int(narrow[r0:r1 + 1, c0:c1].any(axis=1).sum())
-    if narrow_rows < max(6, int(span * 0.4)):
+    if narrow_rows < max(8, int(span * 0.5)):
+        return None
+    if not _stem_vertically_isolated(fg, col, r0, r1, w):
         return None
     top, bot, has_top_cap, has_bot_cap = _cap_bounds(fg, widths, col, r0, r1, h, w)
-    if not (has_top_cap or has_bot_cap) and narrow_rows < 12:
+    if not (has_top_cap or has_bot_cap) and narrow_rows < 14:
         return None
-    # Reject continuous steep trace by ensuring neighborhood left/right isn't solid block
     w_band = widths[r0:r1 + 1, c0:c1]
     max_local_w = int(w_band.max()) if w_band.size else 0
     if max_local_w > 28:
@@ -180,12 +204,13 @@ def build_whisker_exclusion_mask(image, frame, error_bars, np):
 
 def _mark_vertical_whisker_excl(excl, fg, widths, col, r0, r1, roi_w):
     for r in range(r0, r1 + 1):
-        # Preserve rows where a continuous curve crosses horizontally past the stem
         has_left = col >= 4 and bool(fg[r, max(0, col - 5):max(0, col - 2)].any())
         has_right = col + 4 < roi_w and bool(fg[r, min(roi_w, col + 3):min(roi_w, col + 6)].any())
         is_cap = r <= r0 + 2 or r >= r1 - 2
-        if is_cap or (not (has_left and has_right) and widths[r, max(0, col)] <= 5):
-            excl[r, max(0, col - 14):min(roi_w, col + 15)] = True
+        if is_cap and widths[r, max(0, col)] <= 28:
+            excl[r, max(0, col - 10):min(roi_w, col + 11)] = True
+        elif not (has_left and has_right) and widths[r, max(0, col)] <= 5:
+            excl[r, max(0, col - 3):min(roi_w, col + 4)] = True
 
 
 def _match_point_for_bar(bar, series_list, frame_span, max_x_dist=14):

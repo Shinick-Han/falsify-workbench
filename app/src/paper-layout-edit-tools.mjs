@@ -112,15 +112,31 @@ function unifyTexFontText(source,args){let out=source.replace(/^\\setsansfont(?:
 function unifyDocumentFonts(current,args){const hasMain=/^\\setmainfont(?:\[[^\n]*\])?\{[^\n]*\}$/m.test(decode(current.files.find(f=>f.path===current.mainFile)));const baseFiles=hasMain?typographyFontFiles(current,args):current.files;return baseFiles.map(f=>/\.tex$/i.test(f.path)?{path:f.path,bytes:enc.encode(unifyTexFontText(decode(f),args))}:f);}
 function typographySource(current,args){let source=decode(current.files.find(f=>f.path===current.mainFile));const marker=/\\begin\{document\}/;if(!marker.test(source))fail('INVALID_PROJECT','Document start unavailable');const prior=/% FALSIFY-TYPOGRAPHY-BEGIN\n\\fontsize\{([\d.]+)bp\}\{([\d.]+)bp\}\\selectfont\n% FALSIFY-TYPOGRAPHY-END\n/.exec(source);const size=args.bodySizeBp??(prior?Number(prior[1]):10),lead=args.leadingBp??(prior?Number(prior[2]):size*1.2);const command=`% FALSIFY-TYPOGRAPHY-BEGIN\n\\fontsize{${size}bp}{${lead}bp}\\selectfont\n% FALSIFY-TYPOGRAPHY-END\n`;source=prior?source.replace(prior[0],()=>command):source.replace(marker,m=>m+'\n'+command);return source;}
 function typographyMetadataFiles(current,metaFile,args){const meta=JSON.parse(decode(metaFile));if(meta.typography){if((args.fontPath||args.family)&&args.unifyDocumentFont!==false){meta.typography.fonts??={};meta.typography.fonts.serif=args.fontPath||args.family;}for(const [arg,key] of [['bodySizeBp','sizeBp'],['leadingBp','leadingBp']])if(arg in args){meta.typography.body??={};meta.typography.roles??={};meta.typography.roles.body??={};meta.typography.body[key]=args[arg];meta.typography.roles.body[key]=args[arg];}return current.files.map(f=>({path:f.path,bytes:f.path===metaFile.path?enc.encode(JSON.stringify(meta)):f.bytes}));}return null;}
+async function verifyRequestedFont(project,args){
+ if(!args.fontPath||args.unifyDocumentFont===false)return;
+ const font=project.files.find(f=>f.path===args.fontPath);
+ const plan=await createFontPlan({text:'A',fonts:[{id:font.path,family:font.path,bytes:font.bytes}]},{mupdf});
+ if(plan.candidates[0].coverage.status==='unavailable')fail('INVALID_FONT','Project font could not be parsed');
+}
+async function applyTypographyFontUpdate(current,structured,args,signal){
+ const wantsUnify=args.unifyDocumentFont===true;
+ const wantsMain=!wantsUnify&&Boolean(args.fontPath||args.family)&&args.unifyDocumentFont!==false;
+ if(!wantsUnify&&!wantsMain)return current;
+ const files=wantsUnify?unifyDocumentFonts(current,args):typographyFontFiles(current,args);
+ let next=await createLatexProject({...current,files});
+ if(structured)next=(await applyLayoutStructure({project:next,plan:readLayoutStructure(next).plan,signal})).project;
+ return next;
+}
 export async function setProjectTypography({project,args={},signal}={}){
  validateProject(project);validateTypography(project,args);
- let current=project;const structured=project.files.some(f=>f.path==='falsify-layout-structure.json');const s=structured?readLayoutStructure(current):null;
- if(args.fontPath&&args.unifyDocumentFont!==false){const font=project.files.find(f=>f.path===args.fontPath);const plan=await createFontPlan({text:'A',fonts:[{id:font.path,family:font.path,bytes:font.bytes}]},{mupdf});if(plan.candidates[0].coverage.status==='unavailable')fail('INVALID_FONT','Project font could not be parsed');}
- if(structured&&('bodySizeBp'in args||'leadingBp'in args)){const replacements=typographyBodyReplacements(current,s,args);current=(await replaceLayoutUnitPayloads({project:current,replacements,signal})).project;}
- if(args.unifyDocumentFont===true){const files=unifyDocumentFonts(current,args);current=await createLatexProject({...current,files});if(structured)current=(await applyLayoutStructure({project:current,plan:readLayoutStructure(current).plan,signal})).project;}
- else if((args.fontPath||args.family)&&args.unifyDocumentFont!==false){const files=typographyFontFiles(current,args);current=await createLatexProject({...current,files});if(structured)current=(await applyLayoutStructure({project:current,plan:readLayoutStructure(current).plan,signal})).project;}
- if(!structured&&('bodySizeBp'in args||'leadingBp'in args)){const source=typographySource(current,args);current=await replaceFile(current,current.mainFile,source);}
+ await verifyRequestedFont(project,args);
+ let current=project;const structured=project.files.some(f=>f.path==='falsify-layout-structure.json');
+ const hasSizing='bodySizeBp'in args||'leadingBp'in args;
+ if(structured&&hasSizing){const replacements=typographyBodyReplacements(current,readLayoutStructure(current),args);current=(await replaceLayoutUnitPayloads({project:current,replacements,signal})).project;}
+ current=await applyTypographyFontUpdate(current,structured,args,signal);
+ if(!structured&&hasSizing)current=await replaceFile(current,current.mainFile,typographySource(current,args));
  const metaFile=current.files.find(f=>f.path==='falsify-reconstruction.json');
- if(metaFile){const files=typographyMetadataFiles(current,metaFile,args);if(files)current=await createLatexProject({...current,files});}
+ const metaFiles=metaFile?typographyMetadataFiles(current,metaFile,args):null;
+ if(metaFiles)current=await createLatexProject({...current,files:metaFiles});
  return {project:current,summary:{updated:Object.keys(args),unifyDocumentFont:Boolean(args.unifyDocumentFont),fontCoverage:'unknown'}};
 }
