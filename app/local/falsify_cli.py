@@ -7,6 +7,8 @@ Usage:
     python app/local/falsify_cli.py red apply --pdf PATH --ops OPS_JSON_OR_PATH --out-pdf BLIND_PDF [--out-gold GOLD_JSON] [--require-clean-stealth]
     python app/local/falsify_cli.py blind verify --pdf BLIND_PDF [--source-pdf SRC_PDF] [--supplement PATH ...]
     python app/local/falsify_cli.py arena score --gold GOLD_JSON --blue BLUE_JSON [--blue BLUE_JSON ...] [--baseline BASELINE_JSON] [--out OUT_JSON]
+    python app/local/falsify_cli.py arena run-round --pdf BLIND_PDF --agent-cmd EXE [--agent-arg VALUE ...] [--source-pdf SRC_PDF] [--supplement PATH ...] [--gold GOLD_JSON] [--baseline BASELINE_JSON] [--agent-timeout 180] [--runs 1] [--out OUT_JSON]
+    python app/local/falsify_cli.py arena distill --round ROUND_JSON [--gold GOLD_JSON] [--max-rules 40] [--out PATCH_JSON]
     python app/local/falsify_cli.py mcp-config --pdf PATH [--workspace DIR] [--analysis] [--oracle] [--supplement PATH ...] [--format json]
 """
 from __future__ import annotations
@@ -1185,6 +1187,115 @@ def _cmd_arena_score(args, deadline: float | None = None) -> tuple[dict, int]:
     return payload, 0
 
 
+def _arena_round_module():
+    try:
+        return importlib.import_module("arena_round")
+    except ImportError:
+        raise _CliError(
+            "arena_round_unavailable",
+            "tools/evaluation/arena_round.py is missing from this installation.",
+            exit_code=2,
+            recovery_hint="Run the CLI from a complete repository checkout.",
+        ) from None
+
+
+def _arena_round_cli_error(exc) -> _CliError:
+    code = str(getattr(exc, "code", "input_invalid"))
+    hints = {
+        "blindness_leak_detected": "Re-export the blind bundle; the cleanroom is never created while leaks remain.",
+        "timeout": "Increase --agent-timeout or shorten the agent command's work.",
+        "agent_argv_invalid": "Pass a real executable with --agent-cmd and plain --agent-arg values.",
+        "agent_required": "Pass --agent-cmd EXE so the round has a BLUE agent to run.",
+        "env_allow_unsupported": "The default adapter keeps harness_adapter's fixed minimal environment.",
+        "gold_ledger_invalid": "Fix the --gold JSON so it is a falsify.red-gold-ledger.v1 object.",
+    }
+    return _CliError(
+        code,
+        f"arena round rejected the request: {code}",
+        exit_code=getattr(exc, "exit_code", 2),
+        recovery_hint=hints.get(code, "Inspect the agent command, the blind bundle, and the gold ledger JSON."),
+    )
+
+
+def _arena_round_supplements(supp_paths: list[str]) -> list[dict]:
+    supplements = []
+    for supp in supp_paths:
+        path = Path(supp)
+        if not path.is_file():
+            raise _CliError("file_not_found", f"Missing --supplement file: {supp}", exit_code=2)
+        supplements.append({"name": path.name, "bytes": path.read_bytes()})
+    return supplements
+
+
+def _arena_round_exit(payload: dict) -> int:
+    if payload.get("ok"):
+        return 0
+    error = payload.get("error")
+    if error in ("blindness_leak_detected", "distill_scrub_failed"):
+        return 3
+    return 124 if error == "timeout" else 2
+
+
+def _cmd_arena_run_round(args, deadline: float | None = None) -> tuple[dict, int]:
+    module = _arena_round_module()
+    pdf_path, pdf_bytes = _require_pdf_bytes(args.pdf)
+    source_bytes = _require_pdf_bytes(args.source_pdf)[1] if args.source_pdf else None
+    supp_paths = _flatten_paths(args.supplement)
+    agent_argv = [args.agent_cmd, *_flatten_paths(args.agent_arg)]
+    gold = _read_json_file(args.gold, label="--gold") if args.gold else None
+    baseline = _read_json_file(args.baseline, label="--baseline") if args.baseline else None
+    _check_deadline(deadline)
+    try:
+        record = module.run_round(
+            pdf_bytes,
+            agent_argv,
+            gold_ledger=gold,
+            blind_supplements=_arena_round_supplements(supp_paths) or None,
+            source_pdf_bytes=source_bytes,
+            runs=args.runs,
+            timeout=args.agent_timeout,
+            baseline_signals=baseline,
+        )
+    except module.ArenaRoundError as exc:
+        raise _arena_round_cli_error(exc) from None
+    _check_deadline(deadline)
+    payload = {
+        "schema": SCHEMA,
+        "ok": bool(record.get("ok", True)),
+        "command": "arena run-round",
+        "round": record,
+    }
+    if record.get("error"):
+        payload["error"] = record["error"]
+    protected = [args.pdf, *([args.source_pdf] if args.source_pdf else []), *supp_paths]
+    if args.out:
+        _write_json_out(args.out, payload, protected)
+    return payload, _arena_round_exit(payload)
+
+
+def _cmd_arena_distill(args, deadline: float | None = None) -> tuple[dict, int]:
+    module = _arena_round_module()
+    round_record = _read_json_file(args.round, label="--round")
+    gold = _read_json_file(args.gold, label="--gold") if args.gold else None
+    _check_deadline(deadline)
+    try:
+        patch = module.distill_round(round_record, gold_ledger=gold, max_rules=args.max_rules)
+    except module.DistillScrubError as exc:
+        raise _CliError(
+            "distill_scrub_failed",
+            f"{len(getattr(exc, 'hits', []))} answer-key pattern(s) survived distillation.",
+            exit_code=3,
+            recovery_hint="Distill aggregate counts only; remove item text, ids, values and answer-key words.",
+        ) from None
+    except module.ArenaRoundError as exc:
+        raise _arena_round_cli_error(exc) from None
+    payload = {"schema": SCHEMA, "ok": True, "command": "arena distill", "harnessPatch": patch}
+    protected = [args.round, *([args.gold] if args.gold else [])]
+    if args.out:
+        _write_json_out(args.out, payload, protected)
+    return payload, 0
+
+
 def _add_blue_parser(subparsers, parent):
     blue = subparsers.add_parser("blue", parents=[parent], help="BLUE verification commands")
     blue_sub = blue.add_subparsers(dest="action", parser_class=_JsonArgumentParser)
@@ -1239,6 +1350,31 @@ def _add_blind_and_arena_parsers(subparsers, parent):
     score.add_argument("--out")
 
 
+    round_cmd = arena_sub.add_parser(
+        "run-round", parents=[parent],
+        help="Run blind BLUE agent commands in a cleanroom and score them",
+    )
+    round_cmd.add_argument("--pdf", required=True)
+    round_cmd.add_argument("--source-pdf")
+    round_cmd.add_argument("--supplement", action="append", nargs="+")
+    round_cmd.add_argument("--gold")
+    round_cmd.add_argument("--baseline")
+    round_cmd.add_argument("--agent-cmd", required=True)
+    round_cmd.add_argument("--agent-arg", action="append", nargs="+")
+    round_cmd.add_argument("--agent-timeout", type=int, default=180)
+    round_cmd.add_argument("--runs", type=int, default=1)
+    round_cmd.add_argument("--out")
+
+    distill = arena_sub.add_parser(
+        "distill", parents=[parent],
+        help="Distill a scored round into an answer-key-free harness patch",
+    )
+    distill.add_argument("--round", required=True)
+    distill.add_argument("--gold")
+    distill.add_argument("--max-rules", type=int, default=40)
+    distill.add_argument("--out")
+
+
 def _build_parser() -> _JsonArgumentParser:
     shared = _JsonArgumentParser(add_help=False)
     shared.add_argument("--timeout", type=float, default=argparse.SUPPRESS)
@@ -1268,6 +1404,8 @@ _DISPATCH = {
     ("red", "apply"): _cmd_red_apply,
     ("blind", "verify"): _cmd_blind_verify,
     ("arena", "score"): _cmd_arena_score,
+    ("arena", "run-round"): _cmd_arena_run_round,
+    ("arena", "distill"): _cmd_arena_distill,
     ("mcp-config", None): _cmd_mcp_config,
 }
 
@@ -1281,7 +1419,7 @@ def main(argv: list[str] | None = None) -> int:
             raise _CliError(
                 "invalid_arguments",
                 "Specify one of: blue scan, blue validate, red targets, red apply, "
-                "blind verify, arena score, mcp-config.",
+                "blind verify, arena score, arena run-round, arena distill, mcp-config.",
                 exit_code=2,
                 recovery_hint="Run with --help to view command groups and actions.",
             )

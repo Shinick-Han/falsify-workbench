@@ -554,16 +554,14 @@ class FalsifyCliAndSkillsTests(unittest.TestCase):
                 self.assertIsInstance(mcp_payload["usage"][client], str)
                 self.assertIn("falsify-paper-evidence", mcp_payload["usage"][client])
 
-            # --workspace emits the C2 flag plus the composition warning until merged.
+            # --workspace emits the merged workspace flag; no composition warning remains.
             ws_code, ws_payload, _ = _run_cli(
                 "mcp-config", "--pdf", str(pdf_path), "--workspace", str(tmp_dir),
             )
             self.assertEqual(ws_code, 0, ws_payload)
             ws_args = ws_payload["servers"]["falsify-paper-evidence"]["args"]
             self.assertEqual(ws_args[ws_args.index("--workspace") + 1], str(tmp_dir.resolve()))
-            self.assertEqual(
-                ws_payload["warnings"], ["workspace flag requires the w7-c2-mcp-workspace merge"]
-            )
+            self.assertEqual(ws_payload["warnings"], [])
             self.assertIn("--workspace", ws_payload["usage"]["claude"])
 
             # Missing PDF is a structured exit-2 error, and help paths exit 0.
@@ -577,6 +575,103 @@ class FalsifyCliAndSkillsTests(unittest.TestCase):
                 )
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.assertIn("usage:", proc.stdout)
+
+    def test_arena_run_round_and_distill_cli(self):
+        raw = _build_synthetic_paper_pdf()
+        agent_source = (
+            "import json, sys\n"
+            "json.loads(sys.stdin.buffer.read())\n"
+            "print(json.dumps({'schema': 'falsify.blue-report.v1', 'findings': [{\n"
+            "    'id': 'b1', 'decision': 'defect', 'family': 'D1', 'pageIndex': 0,\n"
+            "    'quote': 'AUC = 0.94', 'rationale': 'Table S1 conflicts', 'confidence': 0.9}]}))\n"
+        )
+        gold = {
+            "schema": "falsify.red-gold-ledger.v1",
+            "defects": [{
+                "defectId": "g1", "world": "W1", "family": "D1", "difficulty": "L2",
+                "pageIndex": 0, "before": "AUC = 0.41", "after": "AUC = 0.94",
+                "stealthStatus": "clean",
+            }],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            blind = tmp_dir / "blind.pdf"
+            blind.write_bytes(raw)
+            agent = tmp_dir / "agent.py"
+            agent.write_text(agent_source, encoding="utf-8")
+            gold_path = tmp_dir / "gold.json"
+            gold_path.write_text(json.dumps(gold), encoding="utf-8")
+
+            code, payload, _ = _run_cli(
+                "arena", "run-round", "--pdf", str(blind),
+                "--agent-cmd", sys.executable, "--agent-arg", str(agent),
+                "--gold", str(gold_path),
+            )
+            self.assertEqual(code, 0, payload)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["command"], "arena run-round")
+            round_record = payload["round"]
+            self.assertEqual(round_record["schema"], "falsify.arena-round.v1")
+            self.assertEqual(round_record["runs"][0]["exitCode"], 0)
+            self.assertEqual(round_record["evaluation"]["runs"][0]["tp"], 1)
+            self.assertNotIn(str(tmp_dir), json.dumps(payload))
+
+            round_path = tmp_dir / "round.json"
+            round_path.write_text(json.dumps(round_record), encoding="utf-8")
+            distill_code, distill_payload, _ = _run_cli(
+                "arena", "distill", "--round", str(round_path), "--gold", str(gold_path),
+            )
+            self.assertEqual(distill_code, 0, distill_payload)
+            self.assertEqual(distill_payload["command"], "arena distill")
+            patch = distill_payload["harnessPatch"]
+            self.assertEqual(patch["schema"], "falsify.harness-patch.v1")
+            self.assertTrue(patch["answerKeyFree"])
+            self.assertTrue(patch["scrubbed"])
+            self.assertEqual(patch["rules"], [])
+            distilled = json.dumps(distill_payload)
+            for secret in ("AUC = 0.94", "AUC = 0.41", "g1"):
+                self.assertNotIn(secret, distilled)
+
+            silent = tmp_dir / "silent_agent.py"
+            silent.write_text(
+                "import json, sys\n"
+                "json.loads(sys.stdin.buffer.read())\n"
+                "print(json.dumps({'schema': 'falsify.blue-report.v1', 'findings': []}))\n",
+                encoding="utf-8",
+            )
+            miss_code, miss_payload, _ = _run_cli(
+                "arena", "run-round", "--pdf", str(blind),
+                "--agent-cmd", sys.executable, "--agent-arg", str(silent),
+                "--gold", str(gold_path),
+            )
+            self.assertEqual(miss_code, 0, miss_payload)
+            self.assertEqual(miss_payload["round"]["evaluation"]["runs"][0]["fn"], 1)
+            miss_round = tmp_dir / "miss_round.json"
+            miss_round.write_text(json.dumps(miss_payload["round"]), encoding="utf-8")
+            patch_code, patch_payload, _ = _run_cli(
+                "arena", "distill", "--round", str(miss_round), "--gold", str(gold_path),
+            )
+            self.assertEqual(patch_code, 0, patch_payload)
+            miss_patch = patch_payload["harnessPatch"]
+            self.assertTrue(miss_patch["rules"])
+            self.assertIn("L1 → L2 → L3 → L4", miss_patch["redBrief"]["instructionsText"])
+            for secret in ("AUC = 0.94", "AUC = 0.41", "g1"):
+                self.assertNotIn(secret, json.dumps(patch_payload))
+
+            doc = pymupdf.open()
+            page = doc.new_page(width=595, height=842)
+            page.insert_text((72, 72), "Leaked blind body.", fontsize=11)
+            doc.set_metadata({"producer": "gold_ledger", "title": "blind"})
+            leaked = tmp_dir / "leaked.pdf"
+            leaked.write_bytes(doc.tobytes())
+            doc.close()
+            leak_code, leak_payload, _ = _run_cli(
+                "arena", "run-round", "--pdf", str(leaked),
+                "--agent-cmd", sys.executable, "--agent-arg", str(agent),
+            )
+            self.assertEqual(leak_code, 3)
+            self.assertEqual(leak_payload["round"]["error"], "blindness_leak_detected")
+            self.assertEqual(leak_payload["round"]["runCount"], 0)
 
     def test_skills_frontmatter_referenced_paths_and_cli_ccn(self):
         for skill_name in ("falsify-blue-auditor", "falsify-red-injector"):
