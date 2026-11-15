@@ -11,6 +11,9 @@ Usage:
     python app/local/falsify_cli.py arena score --gold GOLD_JSON --blue BLUE_JSON [--blue BLUE_JSON ...] [--baseline BASELINE_JSON] [--out OUT_JSON]
     python app/local/falsify_cli.py arena run-round --pdf BLIND_PDF --agent-cmd EXE [--agent-arg VALUE ...] [--source-pdf SRC_PDF] [--supplement PATH ...] [--gold GOLD_JSON] [--baseline BASELINE_JSON] [--agent-timeout 180] [--runs 1] [--out OUT_JSON]
     python app/local/falsify_cli.py arena distill --round ROUND_JSON [--gold GOLD_JSON] [--max-rules 40] [--out PATCH_JSON]
+    python app/local/falsify_cli.py arena duel --source-pdf SRC_PDF --red-cmd EXE [--red-arg VALUE ...] --blue-cmd EXE [--blue-arg VALUE ...] [--supplement PATH ...] [--holdout-pdf PDF ...] [--min-difficulty L1|L2|L3|L4] [--runs 1] [--agent-timeout 180] [--max-rules 40] [--no-validate-quotes] [--out OUT_JSON]
+    python app/local/falsify_cli.py arena apply-patch --harness HARNESS_JSON --patch PATCH_JSON [--role blue|red] [--max-generations 3] [--baseline-holdout-fp N] [--candidate-holdout-fp N] [--max-instructions-chars 12000] [--out OUT_JSON]
+    python app/local/falsify_cli.py arena benchmark [--mode sensor|agent] [--agent-cmd EXE] [--agent-arg VALUE ...] [--case CASE_ID ...] [--baseline-report REPORT_JSON] [--max-recall-drop 0.0] [--allow-holdout-fp-increase] [--out OUT_JSON]
     python app/local/falsify_cli.py mcp-config (--pdf PATH | --workspace DIR) [--role blue|red|both] [--analysis] [--oracle] [--supplement PATH ...] [--format json]
 """
 from __future__ import annotations
@@ -1558,6 +1561,139 @@ def _cmd_arena_distill(args, deadline: float | None = None) -> tuple[dict, int]:
     return payload, 0
 
 
+def _arena_duel_module():
+    try:
+        return importlib.import_module("arena_duel")
+    except ImportError:
+        raise _CliError(
+            "arena_duel_unavailable",
+            "tools/evaluation/arena_duel.py is missing from this installation.",
+            exit_code=2,
+            recovery_hint="Run the CLI from a complete repository checkout.",
+        ) from None
+
+
+def _benchmark_suite_module():
+    try:
+        return importlib.import_module("benchmark_suite")
+    except ImportError:
+        raise _CliError(
+            "benchmark_suite_unavailable",
+            "tools/evaluation/benchmark_suite.py is missing from this installation.",
+            exit_code=2,
+            recovery_hint="Run the CLI from a complete repository checkout.",
+        ) from None
+
+
+def _arena_duel_cli_error(exc, label: str) -> _CliError:
+    code = str(getattr(exc, "code", "input_invalid"))
+    return _CliError(
+        code,
+        f"arena {label} rejected the request: {code}",
+        exit_code=getattr(exc, "exit_code", 2),
+        recovery_hint="Inspect agent commands, difficulty/blindness gates, generation cap, and holdout FP guard.",
+        extra=dict(getattr(exc, "extra", None) or {}),
+    )
+
+
+def _cmd_arena_duel(args, deadline: float | None = None) -> tuple[dict, int]:
+    module = _arena_duel_module()
+    _src_path, source_bytes = _require_pdf_bytes(args.source_pdf)
+    supp_paths = _flatten_paths(args.supplement)
+    holdout_paths = _flatten_paths(args.holdout_pdf)
+    red_argv = [args.red_cmd, *_flatten_paths(args.red_arg)]
+    blue_argv = [args.blue_cmd, *_flatten_paths(args.blue_arg)]
+    _check_deadline(deadline)
+    try:
+        duel = module.run_duel(
+            source_bytes,
+            red_argv=red_argv,
+            blue_argv=blue_argv,
+            supplements=_arena_round_supplements(supp_paths) or None,
+            holdout_pdfs=_arena_round_supplements(holdout_paths) or None,
+            min_difficulty=args.min_difficulty,
+            runs=args.runs,
+            timeout=args.agent_timeout,
+            validate_quotes=not bool(args.no_validate_quotes),
+            max_rules=args.max_rules,
+        )
+    except module.ArenaDuelError as exc:
+        raise _arena_duel_cli_error(exc, "duel") from None
+    _check_deadline(deadline)
+    payload = {"schema": SCHEMA, "ok": True, "command": "arena duel", "duel": duel}
+    protected = [args.source_pdf, *supp_paths, *holdout_paths]
+    if args.out:
+        _write_json_out(args.out, payload, protected)
+    return payload, 0
+
+
+def _cmd_arena_apply_patch(args, deadline: float | None = None) -> tuple[dict, int]:
+    module = _arena_duel_module()
+    harness_doc = _read_json_file(args.harness, label="--harness")
+    patch_doc = _read_json_file(args.patch, label="--patch")
+    _check_deadline(deadline)
+    try:
+        promotion = module.apply_harness_patch(
+            harness_doc,
+            patch_doc,
+            role=args.role,
+            max_generations=args.max_generations,
+            baseline_holdout_fp=args.baseline_holdout_fp,
+            candidate_holdout_fp=args.candidate_holdout_fp,
+            max_instructions_chars=args.max_instructions_chars,
+        )
+    except module.ArenaDuelError as exc:
+        raise _arena_duel_cli_error(exc, "apply-patch") from None
+    payload = {"schema": SCHEMA, "ok": True, "command": "arena apply-patch", "promotion": promotion}
+    if args.out:
+        _write_json_out(args.out, payload, [args.harness, args.patch])
+    return payload, 0
+
+
+def _benchmark_agent_argv(args) -> list[str] | None:
+    if args.mode != "agent":
+        return None
+    if not args.agent_cmd:
+        raise _CliError(
+            "invalid_arguments",
+            "--agent-cmd is required when --mode agent.",
+            exit_code=2,
+            recovery_hint="Pass --agent-cmd EXE or use --mode sensor.",
+        )
+    return [args.agent_cmd, *_flatten_paths(args.agent_arg)]
+
+
+def _cmd_arena_benchmark(args, deadline: float | None = None) -> tuple[dict, int]:
+    module = _benchmark_suite_module()
+    agent_argv = _benchmark_agent_argv(args)
+    baseline = _read_json_file(args.baseline_report, label="--baseline-report") if args.baseline_report else None
+    case_ids = _flatten_paths(args.case) or None
+    _check_deadline(deadline)
+    try:
+        report = module.run_benchmark_suite(
+            mode=args.mode,
+            case_ids=case_ids,
+            agent_argv=agent_argv,
+            baseline_report=baseline,
+            max_recall_drop=args.max_recall_drop,
+            allow_holdout_fp_increase=bool(args.allow_holdout_fp_increase),
+        )
+    except ValueError as exc:
+        raise _CliError("invalid_arguments", f"Invalid benchmark arguments: {exc}", exit_code=2) from None
+    _check_deadline(deadline)
+    comparison = report.get("comparison")
+    regressed = isinstance(comparison, dict) and comparison.get("passed") is False
+    payload = {"schema": SCHEMA, "ok": not regressed, "command": "arena benchmark", "benchmark": report}
+    if regressed:
+        payload["error"] = "benchmark_regression_detected"
+        payload["message"] = "Benchmark comparison failed recall or holdout pure-FP gate."
+        payload["recoveryHint"] = "Inspect benchmark.comparison.regressions before promoting changes."
+    protected = [args.baseline_report] if args.baseline_report else []
+    if args.out:
+        _write_json_out(args.out, payload, protected)
+    return payload, (3 if regressed else 0)
+
+
 def _add_blue_parser(subparsers, parent):
     blue = subparsers.add_parser("blue", parents=[parent], help="BLUE verification commands")
     blue_sub = blue.add_subparsers(dest="action", parser_class=_JsonArgumentParser)
@@ -1652,6 +1788,53 @@ def _add_blind_and_arena_parsers(subparsers, parent):
     distill.add_argument("--gold")
     distill.add_argument("--max-rules", type=int, default=40)
     distill.add_argument("--out")
+    _add_arena_evolution_parsers(arena_sub, parent)
+
+
+def _add_arena_evolution_parsers(arena_sub, parent):
+    duel = arena_sub.add_parser(
+        "duel", parents=[parent],
+        help="Run an isolated RED vs BLUE duel, quote gate, holdout check, and rule distillation",
+    )
+    duel.add_argument("--source-pdf", required=True)
+    duel.add_argument("--red-cmd", required=True)
+    duel.add_argument("--red-arg", action="append", nargs="+")
+    duel.add_argument("--blue-cmd", required=True)
+    duel.add_argument("--blue-arg", action="append", nargs="+")
+    duel.add_argument("--supplement", action="append", nargs="+")
+    duel.add_argument("--holdout-pdf", action="append", nargs="+")
+    duel.add_argument("--min-difficulty", choices=["L1", "L2", "L3", "L4"], default=None)
+    duel.add_argument("--runs", type=int, default=1)
+    duel.add_argument("--agent-timeout", type=int, default=180)
+    duel.add_argument("--max-rules", type=int, default=40)
+    duel.add_argument("--no-validate-quotes", action="store_true")
+    duel.add_argument("--out")
+
+    apply_patch = arena_sub.add_parser(
+        "apply-patch", parents=[parent],
+        help="Promote a scrubbed harness patch under generation cap and holdout rollback guard",
+    )
+    apply_patch.add_argument("--harness", required=True)
+    apply_patch.add_argument("--patch", required=True)
+    apply_patch.add_argument("--role", choices=["blue", "red"], default=None)
+    apply_patch.add_argument("--max-generations", type=int, default=3)
+    apply_patch.add_argument("--baseline-holdout-fp", type=int, default=None)
+    apply_patch.add_argument("--candidate-holdout-fp", type=int, default=None)
+    apply_patch.add_argument("--max-instructions-chars", type=int, default=12000)
+    apply_patch.add_argument("--out")
+
+    bench = arena_sub.add_parser(
+        "benchmark", parents=[parent],
+        help="Run the 10-case deterministic RED/BLUE + Holdout regression benchmark suite",
+    )
+    bench.add_argument("--mode", choices=["sensor", "agent"], default="sensor")
+    bench.add_argument("--agent-cmd")
+    bench.add_argument("--agent-arg", action="append", nargs="+")
+    bench.add_argument("--case", action="append", nargs="+")
+    bench.add_argument("--baseline-report")
+    bench.add_argument("--max-recall-drop", type=float, default=0.0)
+    bench.add_argument("--allow-holdout-fp-increase", action="store_true")
+    bench.add_argument("--out")
 
 
 def _build_parser() -> _JsonArgumentParser:
@@ -1688,6 +1871,9 @@ _DISPATCH = {
     ("arena", "score"): _cmd_arena_score,
     ("arena", "run-round"): _cmd_arena_run_round,
     ("arena", "distill"): _cmd_arena_distill,
+    ("arena", "duel"): _cmd_arena_duel,
+    ("arena", "apply-patch"): _cmd_arena_apply_patch,
+    ("arena", "benchmark"): _cmd_arena_benchmark,
     ("mcp-config", None): _cmd_mcp_config,
 }
 
@@ -1701,7 +1887,8 @@ def main(argv: list[str] | None = None) -> int:
             raise _CliError(
                 "invalid_arguments",
                 "Specify one of: blue scan, blue validate, red targets, red simulate, red trace, "
-                "red apply, blind verify, arena score, arena run-round, arena distill, mcp-config.",
+                "red apply, blind verify, arena score, arena run-round, arena distill, "
+                "arena duel, arena apply-patch, arena benchmark, mcp-config.",
                 exit_code=2,
                 recovery_hint="Run with --help to view command groups and actions.",
             )

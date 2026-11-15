@@ -249,18 +249,33 @@ class BlueScanFlagTests(unittest.TestCase):
             self.assertTrue(on_payload["sensor"]["figureForensics"]["enabled"])
 
     def test_recompute_raw_unavailable_mocked_and_digest(self):
-        raw = _build_synthetic_paper_pdf()
+        raw = _one_page("We enrolled N = 50 patients in the randomized cohort.")
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             pdf_path = tmp_dir / "paper.pdf"
             pdf_path.write_bytes(raw)
             csv_path = tmp_dir / "Table_S1.csv"
-            csv_path.write_text("cohort,auc\nmain,0.81\n", encoding="utf-8")
+            csv_path.write_text(
+                "subject_id,group,outcome\n1,treat,10\n2,treat,12\n3,ctrl,8\n4,ctrl,9\n",
+                encoding="utf-8",
+            )
 
-            missing_code, missing_payload, _ = _run_cli(
+            live_code, live_payload, _ = _run_cli(
                 "blue", "scan", "--pdf", str(pdf_path),
                 "--supplement", str(csv_path), "--recompute-raw",
             )
+            self.assertEqual(live_code, 0, live_payload)
+            self.assertEqual(live_payload["rawDatasetAudit"]["schema"], "falsify.raw-dataset-audit.v1")
+            self.assertTrue(
+                any(s["kind"] == "raw_dataset_n_mismatch" for s in live_payload["rawDatasetAudit"]["signals"]),
+                live_payload["rawDatasetAudit"],
+            )
+
+            with patch.dict(sys.modules, {"paper_raw_dataset_audit": None}):
+                missing_code, missing_payload = _run_inprocess(
+                    "blue", "scan", "--pdf", str(pdf_path),
+                    "--supplement", str(csv_path), "--recompute-raw",
+                )
             self.assertEqual(missing_code, 2)
             self.assertEqual(missing_payload["error"], "raw_dataset_audit_unavailable")
 
@@ -498,6 +513,101 @@ class McpConfigRoleTests(unittest.TestCase):
                 "falsify-paper-red skipped because --workspace mode is read-only BLUE only",
                 ws_both_payload["warnings"],
             )
+
+
+class ArenaEvolutionCliTests(unittest.TestCase):
+    def test_arena_benchmark_sensor_and_regression_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            out_path = tmp_dir / "bench.json"
+            code, payload, _ = _run_cli(
+                "arena", "benchmark", "--mode", "sensor",
+                "--case", "gold-w2-d2-uri-hijack", "--case", "holdout-benign-multivariable-aor",
+                "--out", str(out_path),
+            )
+            self.assertEqual(code, 0, payload)
+            self.assertTrue(payload["ok"])
+            bench = payload["benchmark"]
+            self.assertEqual(bench["schema"], "falsify.benchmark-report.v1")
+            self.assertEqual(bench["goldSummary"]["recall"], 1.0)
+            self.assertEqual(bench["holdoutSummary"]["totalPureFp"], 0)
+
+            strict_baseline = tmp_dir / "baseline.json"
+            strict_baseline.write_text(json.dumps({
+                "schema": "falsify.benchmark-report.v1",
+                "goldSummary": {"recall": 1.0},
+                "holdoutSummary": {"totalPureFp": -1},
+            }), encoding="utf-8")
+            reg_code, reg_payload, _ = _run_cli(
+                "arena", "benchmark", "--mode", "sensor",
+                "--case", "holdout-benign-multivariable-aor",
+                "--baseline-report", str(strict_baseline),
+            )
+            self.assertEqual(reg_code, 3, reg_payload)
+            self.assertEqual(reg_payload["error"], "benchmark_regression_detected")
+
+    def test_arena_duel_and_apply_patch_cli(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            src_pdf = tmp_dir / "source.pdf"
+            src_pdf.write_bytes(_one_page("Mortality stayed stable across both study arms."))
+            red_py = tmp_dir / "red_agent.py"
+            red_py.write_text(
+                "import json, pathlib, sys\n"
+                "req = json.loads(sys.stdin.buffer.read().decode('utf-8'))\n"
+                "cwd = pathlib.Path.cwd()\n"
+                "(cwd / req['outPdf']).write_bytes((cwd / req['sourcePdf']).read_bytes())\n"
+                "(cwd / req['outGold']).write_text(json.dumps({"
+                "'schema': 'falsify.red-gold-ledger.v1', 'defects': [{"
+                "'defectId': 'g1', 'world': 'W1', 'family': 'D1', 'difficulty': 'L2', "
+                "'pageIndex': 0, 'after': 'Mortality stayed stable across both study arms.', "
+                "'stealthPass': True}]}), encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            blue_py = tmp_dir / "blue_agent.py"
+            blue_py.write_text(
+                "import json\n"
+                "print(json.dumps({'schema': 'falsify.blue-report.v1', 'findings': [{"
+                "'id': 'b1', 'decision': 'defect', 'pageIndex': 0, "
+                "'quote': 'Mortality stayed stable across both study arms.'}]}))\n",
+                encoding="utf-8",
+            )
+            duel_out = tmp_dir / "duel.json"
+            duel_code, duel_payload, _ = _run_cli(
+                "arena", "duel",
+                "--source-pdf", str(src_pdf),
+                "--red-cmd", sys.executable, "--red-arg", str(red_py),
+                "--blue-cmd", sys.executable, "--blue-arg", str(blue_py),
+                "--out", str(duel_out),
+            )
+            self.assertEqual(duel_code, 0, duel_payload)
+            self.assertEqual(duel_payload["duel"]["schema"], "falsify.arena-duel.v1")
+            patch_path = tmp_dir / "patch.json"
+            patch_path.write_text(json.dumps(duel_payload["duel"]["harnessPatch"]), encoding="utf-8")
+            harness_path = tmp_dir / "harness.json"
+            harness_path.write_text(json.dumps({
+                "schema": "falsify.harness.v1",
+                "id": "blue-base",
+                "role": "blue",
+                "instructions": "Verify every claim against the supplied blind bundle.",
+                "generation": 0,
+            }), encoding="utf-8")
+
+            promo_code, promo_payload, _ = _run_cli(
+                "arena", "apply-patch",
+                "--harness", str(harness_path), "--patch", str(patch_path),
+                "--baseline-holdout-fp", "0", "--candidate-holdout-fp", "0",
+            )
+            self.assertEqual(promo_code, 0, promo_payload)
+            self.assertEqual(promo_payload["promotion"]["generation"], 1)
+
+            rollback_code, rollback_payload, _ = _run_cli(
+                "arena", "apply-patch",
+                "--harness", str(harness_path), "--patch", str(patch_path),
+                "--baseline-holdout-fp", "0", "--candidate-holdout-fp", "1",
+            )
+            self.assertEqual(rollback_code, 3, rollback_payload)
+            self.assertEqual(rollback_payload["error"], "holdout_fp_regression")
 
 
 if __name__ == "__main__":
