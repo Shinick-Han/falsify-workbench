@@ -1,5 +1,6 @@
 """Wave 1 A2 comprehensive acceptance tests (parts A-D)."""
 
+import importlib.util
 import io
 import sys
 import unittest
@@ -228,6 +229,7 @@ class PartBNestedFormXObjectTests(unittest.TestCase):
         self.assertEqual(marks.prepare_marks(buf.getvalue(), 0, [0, 0, 400, 300]), [])
 
 
+@unittest.skipUnless(importlib.util.find_spec('py_mini_racer') is not None, 'py_mini_racer not installed')
 class PartCDarkNeutralCurveTests(unittest.TestCase):
     def _dark_chart_array(self, *, with_red=False):
         im = Image.new('RGB', (280, 200), 'white')

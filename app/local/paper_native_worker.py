@@ -6,7 +6,7 @@ sys.path.insert(0, str(HERE))
 from paper_enrichment import _stop
 MAX_REQUEST = 80 * 1024 * 1024
 MAX_RESPONSE = 100 * 1024 * 1024
-TIMEOUT = 60
+TIMEOUT = 90
 _IN_WORKER = False
 
 def check(deadline, cancelled=None):
@@ -68,9 +68,11 @@ def _cleanup_worker(process, writer, reader):
         for pipe in (process.stdin, process.stdout):
             if pipe is not None and not pipe.closed: pipe.close()
 
-def run(operation, args, *, cancelled=None, timeout=TIMEOUT, deadline=None):
+def run(operation, args, *, cancelled=None, timeout=None, deadline=None):
     if _IN_WORKER:
         return _dispatch(operation, args)
+    if timeout is None:
+        timeout = TIMEOUT
     started = time.monotonic()
     deadline = min(deadline, started + timeout) if deadline is not None else started + timeout
     check(deadline, cancelled)
