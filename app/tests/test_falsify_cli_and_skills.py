@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import csv
 import io
 import json
 import os
@@ -24,6 +25,7 @@ for _folder in (str(LOCAL), str(TESTS)):
         sys.path.insert(0, _folder)
 
 import falsify_cli  # noqa: E402
+import blue_report_validate  # noqa: E402
 from test_paper_evidence import draw_table  # noqa: E402
 
 
@@ -404,6 +406,178 @@ class FalsifyCliAndSkillsTests(unittest.TestCase):
             self.assertEqual(s_payload["runs"][0]["tp"], 1)
             self.assertEqual(s_payload["runs"][0]["byWorld"]["W5"]["recall"], 1.0)
 
+    def test_blue_validate_report_gate_csv_and_mcp_config(self):
+        raw = _build_synthetic_paper_pdf()
+        pdf_sha = hashlib.sha256(raw).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            pdf_path = tmp_dir / "blind.pdf"
+            pdf_path.write_bytes(raw)
+            report_path = tmp_dir / "blue.json"
+            report = {
+                "schema": "falsify.blue-report.v1",
+                "paperId": "pid-cli",
+                "findings": [
+                    {
+                        "id": "b1",
+                        "verdictLabel": "아님",
+                        "family": "D1",
+                        "pageIndex": 0,
+                        "quote": "Results: Table S1 reports AUC = 0.94 across N = 200 patients.",
+                        "rationale": "cross-file AUC mismatch",
+                    },
+                    {
+                        "id": "b2",
+                        "verdictLabel": "맞음",
+                        "family": "D3",
+                        "pageIndex": 1,
+                        "quote": "Discussion: Secondary endpoint remained stable.",
+                        "resolutionQuote": "Discussion: Secondary endpoint remained stable.",
+                    },
+                ],
+            }
+            report_path.write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
+            csv_path = tmp_dir / "rows.csv"
+            out_path = tmp_dir / "validated.json"
+
+            code, payload, _ = _run_cli(
+                "blue", "validate",
+                "--pdf", str(pdf_path),
+                "--report", str(report_path),
+                "--csv", str(csv_path),
+                "--out", str(out_path),
+            )
+            self.assertEqual(code, 0, payload)
+            self.assertEqual(payload["schema"], falsify_cli.SCHEMA)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["command"], "blue validate")
+            # The envelope adopts the evidence-store paperId of the PDF so every run on the
+            # same file shares one paper_id in the 12-column CSV.
+            self.assertIsInstance(payload["paperId"], str)
+            self.assertTrue(payload["paperId"])
+            self.assertEqual(payload["fileHash"], pdf_sha)
+            self.assertEqual(payload["quoteCheck"]["missingCount"], 0)
+            self.assertEqual(payload["quoteCheck"]["exactCount"], 2)
+            self.assertEqual(payload["zeroDrop"]["summary"], {
+                "stage1Count": 0, "resolvedOkCount": 1, "reportedDefectCount": 1, "recoveredCount": 0,
+            })
+            self.assertEqual(payload["csv"]["rowCount"], 2)
+            self.assertEqual(payload["warnings"], [])
+            self.assertTrue(out_path.is_file())
+            self.assertEqual(hashlib.sha256(pdf_path.read_bytes()).hexdigest(), pdf_sha)
+            self.assertEqual(json.loads(out_path.read_text(encoding="utf-8"))["command"], "blue validate")
+            header = csv_path.read_text(encoding="utf-8").splitlines()[0]
+            self.assertEqual(header, ",".join(blue_report_validate.CSV_COLUMNS))
+            self.assertNotIn("\ufeff", csv_path.read_text(encoding="utf-8")[:1])
+            csv_rows = list(csv.DictReader(io.StringIO(csv_path.read_text(encoding="utf-8"))))
+            self.assertEqual(len(csv_rows), 2)
+            self.assertEqual({row["paper_id"] for row in csv_rows}, {payload["paperId"]})
+            self.assertEqual([row["label"] for row in csv_rows], ["아님", "맞음"])
+            self.assertEqual({row["defect_type"] for row in csv_rows}, {"D1", "D3"})
+
+            # Hallucinated quote -> exit 3 with the quote-not-found envelope.
+            missing_path = tmp_dir / "missing.json"
+            missing_path.write_text(json.dumps({
+                "findings": [{
+                    "id": "x1",
+                    "verdictLabel": "아님",
+                    "quote": "This sentence is not present in the PDF at all.",
+                }],
+            }, ensure_ascii=False), encoding="utf-8")
+            miss_code, miss_payload, _ = _run_cli(
+                "blue", "validate", "--pdf", str(pdf_path), "--report", str(missing_path),
+            )
+            self.assertEqual(miss_code, 3)
+            self.assertFalse(miss_payload["ok"])
+            self.assertEqual(miss_payload["error"], "quote_not_found")
+            self.assertTrue(miss_payload["recoveryHint"])
+            self.assertGreaterEqual(miss_payload["quoteCheck"]["missingCount"], 1)
+
+            # Malformed JSON -> exit 2 with the standard error envelope.
+            broken_path = tmp_dir / "broken.json"
+            broken_path.write_text("{not json", encoding="utf-8")
+            bad_code, bad_payload, _ = _run_cli(
+                "blue", "validate", "--pdf", str(pdf_path), "--report", str(broken_path),
+            )
+            self.assertEqual(bad_code, 2)
+            self.assertEqual(bad_payload["error"], "invalid_json")
+            self.assertEqual(bad_payload["schema"], falsify_cli.SCHEMA)
+
+            # Forbidden RED keys still exit 3.
+            leak_path = tmp_dir / "leak.json"
+            leak_path.write_text(json.dumps({"findings": [], "candidateRationales": []}), encoding="utf-8")
+            leak_code, leak_payload, _ = _run_cli(
+                "blue", "validate", "--pdf", str(pdf_path), "--report", str(leak_path),
+            )
+            self.assertEqual(leak_code, 3)
+            self.assertEqual(leak_payload["error"], "forbidden_red_key")
+
+            # --out / --csv must refuse to overwrite any input path.
+            for flag in ("--out", "--csv"):
+                ow_code, ow_payload, _ = _run_cli(
+                    "blue", "validate",
+                    "--pdf", str(pdf_path),
+                    "--report", str(report_path),
+                    flag, str(report_path),
+                )
+                self.assertEqual(ow_code, 2, ow_payload)
+                self.assertEqual(ow_payload["error"], "cannot_overwrite_input")
+
+            # mcp-config: pure text generation with absolute paths and exact flags.
+            mcp_code, mcp_payload, _ = _run_cli(
+                "mcp-config",
+                "--pdf", str(pdf_path),
+                "--analysis",
+                "--oracle",
+                "--supplement", str(csv_path),
+            )
+            self.assertEqual(mcp_code, 0, mcp_payload)
+            self.assertEqual(mcp_payload["schema"], "falsify.mcp-config.v1")
+            self.assertTrue(mcp_payload["ok"])
+            self.assertEqual(mcp_payload["command"], "mcp-config")
+            self.assertEqual(mcp_payload["registers"], ["claude", "codex", "gemini"])
+            self.assertEqual(mcp_payload["warnings"], [])
+            self.assertEqual(list(mcp_payload["servers"]), ["falsify-paper-evidence"])
+            server = mcp_payload["servers"]["falsify-paper-evidence"]
+            self.assertEqual(server["command"], sys.executable)
+            self.assertTrue(Path(server["command"]).is_absolute())
+            server_args = server["args"]
+            self.assertTrue(Path(server_args[0]).is_absolute())
+            self.assertEqual(Path(server_args[0]).name, "paper_mcp.py")
+            self.assertEqual(server_args[1:3], ["--pdf", str(pdf_path.resolve())])
+            self.assertEqual(
+                [flag for flag in server_args if flag.startswith("--")],
+                ["--pdf", "--analysis", "--supplement", "--oracle"],
+            )
+            self.assertEqual(server_args[server_args.index("--supplement") + 1], str(csv_path.resolve()))
+            for client in ("claude", "codex", "gemini"):
+                self.assertIsInstance(mcp_payload["usage"][client], str)
+                self.assertIn("falsify-paper-evidence", mcp_payload["usage"][client])
+
+            # --workspace emits the C2 flag plus the composition warning until merged.
+            ws_code, ws_payload, _ = _run_cli(
+                "mcp-config", "--pdf", str(pdf_path), "--workspace", str(tmp_dir),
+            )
+            self.assertEqual(ws_code, 0, ws_payload)
+            ws_args = ws_payload["servers"]["falsify-paper-evidence"]["args"]
+            self.assertEqual(ws_args[ws_args.index("--workspace") + 1], str(tmp_dir.resolve()))
+            self.assertEqual(
+                ws_payload["warnings"], ["workspace flag requires the w7-c2-mcp-workspace merge"]
+            )
+            self.assertIn("--workspace", ws_payload["usage"]["claude"])
+
+            # Missing PDF is a structured exit-2 error, and help paths exit 0.
+            miss_code2, miss_payload2, _ = _run_cli("mcp-config", "--pdf", str(tmp_dir / "nope.pdf"))
+            self.assertEqual(miss_code2, 2)
+            self.assertEqual(miss_payload2["error"], "file_not_found")
+            for cli_args in (["--help"], ["blue", "validate", "--help"]):
+                proc = subprocess.run(
+                    [sys.executable, str(LOCAL / "falsify_cli.py"), *cli_args],
+                    cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8", check=False,
+                )
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertIn("usage:", proc.stdout)
+
     def test_skills_frontmatter_referenced_paths_and_cli_ccn(self):
         for skill_name in ("falsify-blue-auditor", "falsify-red-injector"):
             skill_path = ROOT / ".agents" / "skills" / skill_name / "SKILL.md"
@@ -417,16 +591,17 @@ class FalsifyCliAndSkillsTests(unittest.TestCase):
             for rel in refs:
                 self.assertTrue((ROOT / rel).is_file(), f"Skill {skill_name} references missing path: {rel}")
 
-        # Verify falsify_cli.py stays <= 15 CCN across all functions.
-        proc = subprocess.run(
-            [sys.executable, str(ROOT / "tools" / "quality" / "python-functions.py")],
-            input=(LOCAL / "falsify_cli.py").read_bytes(),
-            capture_output=True,
-            check=True,
-        )
-        funcs = json.loads(proc.stdout.decode("utf-8"))
-        over = [f for f in funcs if f["ccn"] > 15]
-        self.assertEqual(over, [], f"Functions exceeded CCN 15: {over}")
+        # Verify falsify_cli.py and blue_report_validate.py stay <= 15 CCN across all functions.
+        for module_name in ("falsify_cli.py", "blue_report_validate.py"):
+            proc = subprocess.run(
+                [sys.executable, str(ROOT / "tools" / "quality" / "python-functions.py")],
+                input=(LOCAL / module_name).read_bytes(),
+                capture_output=True,
+                check=True,
+            )
+            funcs = json.loads(proc.stdout.decode("utf-8"))
+            over = [f for f in funcs if f["ccn"] > 15]
+            self.assertEqual(over, [], f"{module_name} functions exceeded CCN 15: {over}")
 
     def test_dynamic_delegation_and_timeout_exit_124(self):
         raw = _build_synthetic_paper_pdf()

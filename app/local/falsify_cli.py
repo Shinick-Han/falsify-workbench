@@ -2,10 +2,12 @@
 
 Usage:
     python app/local/falsify_cli.py blue scan --pdf PATH [--supplement PATH ...] [--oracle] [--max-signals 50] [--digest-only] [--out JSON_PATH]
+    python app/local/falsify_cli.py blue validate --pdf BLIND_PDF --report BLUE_REPORT [--ledger CANDIDATES_JSON] [--csv OUT_CSV] [--out JSON_PATH]
     python app/local/falsify_cli.py red targets --pdf PATH [--page N] [--query TEXT] [--include-baseline]
     python app/local/falsify_cli.py red apply --pdf PATH --ops OPS_JSON_OR_PATH --out-pdf BLIND_PDF [--out-gold GOLD_JSON] [--require-clean-stealth]
     python app/local/falsify_cli.py blind verify --pdf BLIND_PDF [--source-pdf SRC_PDF] [--supplement PATH ...]
     python app/local/falsify_cli.py arena score --gold GOLD_JSON --blue BLUE_JSON [--blue BLUE_JSON ...] [--baseline BASELINE_JSON] [--out OUT_JSON]
+    python app/local/falsify_cli.py mcp-config --pdf PATH [--workspace DIR] [--analysis] [--oracle] [--supplement PATH ...] [--format json]
 """
 from __future__ import annotations
 
@@ -35,10 +37,12 @@ for _path in (str(_HERE.parent), str(_EVAL_DIR)):
         sys.path.insert(0, _path)
 
 from agreement_selective import compute_krippendorff_alpha, compute_selective_prediction  # noqa: E402
+from blue_report_validate import BlueReportError, validate_blue_report  # noqa: E402
 from paper_blue_sensor import run_blue_sensor  # noqa: E402
 from paper_chart_edit_service import ChartEditService  # noqa: E402
 from paper_evidence import EvidenceStore  # noqa: E402
 from paper_evidence_text import _open_pdf  # noqa: E402
+import paper_mcp  # noqa: E402
 from paper_mcp import open_selected  # noqa: E402
 import paper_red_mcp  # noqa: E402
 from paper_stealth_audit import (  # noqa: E402
@@ -55,6 +59,10 @@ from paper_supplement_audit import (  # noqa: E402
 from paper_uri_mutator import _HINT_TOKENS  # noqa: E402
 
 SCHEMA = "falsify.agent-cli.v1"
+MCP_CONFIG_SCHEMA = "falsify.mcp-config.v1"
+MCP_SERVER_KEY = "falsify-paper-evidence"
+MCP_REGISTERS = ("claude", "codex", "gemini")
+MCP_WORKSPACE_WARNING = "workspace flag requires the w7-c2-mcp-workspace merge"
 GOLD_LEDGER_SCHEMA = "falsify.red-gold-ledger.v1"
 DIGEST_MAX_BYTES = 12 * 1024
 SUPPORTED_SUPP_EXTS = frozenset({
@@ -406,6 +414,150 @@ def _cmd_blue_scan(args, deadline: float | None = None) -> tuple[dict, int]:
         payload = _compact_blue_payload(payload)
     if args.out:
         _write_json_out(args.out, payload, [args.pdf, *supp_paths])
+    return payload, 0
+
+
+def _guard_output_paths(paths: list[str | None], protected_paths: list[str]):
+    for out_path in paths:
+        if not out_path:
+            continue
+        target = Path(out_path)
+        for src in protected_paths:
+            if src and _same_path(target, Path(src)):
+                raise _CliError(
+                    "cannot_overwrite_input",
+                    f"Output path cannot match an input path: {out_path}",
+                    exit_code=2,
+                    recovery_hint="Write JSON/CSV outputs to paths distinct from --pdf, --report, and --ledger.",
+                )
+
+
+def _cmd_blue_validate(args, deadline: float | None = None) -> tuple[dict, int]:
+    store, summary = _open_pdf_store(args.pdf)
+    pid, fhash = summary["paperId"], summary["fileHash"]
+    report = _read_json_file(args.report, label="--report")
+    ledger = _read_json_file(args.ledger, label="--ledger") if args.ledger else None
+    protected = [args.pdf, args.report, *([args.ledger] if args.ledger else [])]
+    _guard_output_paths([args.csv, args.out], protected)
+    _check_deadline(deadline)
+    result = validate_blue_report(
+        store.source_bytes(pid, fhash), report,
+        ledger=ledger, csv_path=args.csv, paper_id=pid, file_hash=fhash,
+    )
+    _check_deadline(deadline)
+    missing = result["quoteCheck"]["missingCount"]
+    payload = {
+        "schema": SCHEMA,
+        "ok": missing == 0,
+        "command": "blue validate",
+        "paperId": result["paperId"],
+        "fileHash": result["fileHash"],
+        "quoteCheck": result["quoteCheck"],
+        "zeroDrop": result["zeroDrop"],
+        "csv": result["csv"],
+        "warnings": result["warnings"],
+    }
+    exit_code = 0
+    if missing:
+        payload = {
+            **payload,
+            "error": "quote_not_found",
+            "message": f"{missing} quote(s) missing from the PDF after Zero-Drop restoration.",
+            "recoveryHint": (
+                "Re-read each quoted page, copy the verbatim string into quote/excerpt, "
+                "or abstain with verdictLabel 확인필요."
+            ),
+        }
+        exit_code = 3
+    if args.out:
+        _write_json_out(args.out, payload, protected)
+    return payload, exit_code
+
+
+def _require_readable_file(path_str: str, label: str) -> Path:
+    path = Path(path_str)
+    if not path.is_file():
+        raise _CliError(
+            "file_not_found",
+            f"{label} file not found: {path_str}",
+            exit_code=2,
+            recovery_hint=f"Verify the {label} path exists and is readable.",
+        )
+    return path.resolve()
+
+
+def _paper_mcp_script() -> Path:
+    script = _HERE.parent / "paper_mcp.py"
+    if not script.is_file():
+        raise _CliError(
+            "paper_mcp_missing",
+            f"paper_mcp.py not found next to the CLI: {script}",
+            exit_code=2,
+            recovery_hint="Run the CLI from a complete app/local installation.",
+        )
+    return script
+
+
+def _paper_mcp_accepts_workspace() -> bool:
+    factory = getattr(paper_mcp, "_parser", None)
+    if factory is None:
+        return False
+    try:
+        parser = factory()
+    except Exception:
+        return False
+    return any("--workspace" in action.option_strings for action in parser._actions)
+
+
+def _mcp_config_argv(args) -> list[str]:
+    argv = [str(_paper_mcp_script()), "--pdf", str(_require_readable_file(args.pdf, "--pdf"))]
+    if args.analysis:
+        argv.append("--analysis")
+    for supp in _flatten_paths(args.supplement):
+        argv.extend(["--supplement", str(_require_readable_file(supp, "--supplement"))])
+    if args.workspace:
+        argv.extend(["--workspace", str(Path(args.workspace).expanduser().resolve())])
+    if args.oracle:
+        argv.append("--oracle")
+    return argv
+
+
+def _shell_quote(value: str) -> str:
+    text = str(value)
+    return f'"{text}"' if any(ch in text for ch in ' \t"') else text
+
+
+def _mcp_usage(command: str, args: list[str]) -> dict:
+    invocation = " ".join(_shell_quote(part) for part in [command, *args])
+    codex_args = ", ".join(json.dumps(str(part), ensure_ascii=False) for part in args)
+    gemini = {"mcpServers": {MCP_SERVER_KEY: {"command": command, "args": args}}}
+    return {
+        "claude": f"claude mcp add {MCP_SERVER_KEY} -- {invocation}",
+        "codex": (
+            f"[mcp_servers.{MCP_SERVER_KEY}]\n"
+            f"command = {json.dumps(command, ensure_ascii=False)}\n"
+            f"args = [{codex_args}]"
+        ),
+        "gemini": json.dumps(gemini, ensure_ascii=False, indent=2),
+    }
+
+
+def _cmd_mcp_config(args, deadline: float | None = None) -> tuple[dict, int]:
+    _check_deadline(deadline)
+    python_exe = sys.executable or "python"
+    server_args = _mcp_config_argv(args)
+    warnings = []
+    if args.workspace and not _paper_mcp_accepts_workspace():
+        warnings.append(MCP_WORKSPACE_WARNING)
+    payload = {
+        "schema": MCP_CONFIG_SCHEMA,
+        "ok": True,
+        "command": "mcp-config",
+        "servers": {MCP_SERVER_KEY: {"command": python_exe, "args": server_args}},
+        "registers": list(MCP_REGISTERS),
+        "usage": _mcp_usage(python_exe, server_args),
+        "warnings": warnings,
+    }
     return payload, 0
 
 
@@ -1043,6 +1195,15 @@ def _add_blue_parser(subparsers, parent):
     scan.add_argument("--max-signals", type=int, default=50)
     scan.add_argument("--digest-only", action="store_true")
     scan.add_argument("--out")
+    validate = blue_sub.add_parser(
+        "validate", parents=[parent],
+        help="Gate a BLUE report: verbatim quote check, Zero-Drop restoration, 12-column CSV",
+    )
+    validate.add_argument("--pdf", required=True)
+    validate.add_argument("--report", required=True)
+    validate.add_argument("--ledger")
+    validate.add_argument("--csv")
+    validate.add_argument("--out")
 
 
 def _add_red_parser(subparsers, parent):
@@ -1087,15 +1248,27 @@ def _build_parser() -> _JsonArgumentParser:
     _add_blue_parser(sub, shared)
     _add_red_parser(sub, shared)
     _add_blind_and_arena_parsers(sub, shared)
+    mcp_config = sub.add_parser(
+        "mcp-config", parents=[shared],
+        help="Print a stdio MCP client configuration for app/local/paper_mcp.py",
+    )
+    mcp_config.add_argument("--pdf", required=True)
+    mcp_config.add_argument("--workspace")
+    mcp_config.add_argument("--analysis", action="store_true")
+    mcp_config.add_argument("--oracle", action="store_true")
+    mcp_config.add_argument("--supplement", action="append", nargs="+")
+    mcp_config.add_argument("--format", choices=["json"], default="json")
     return root
 
 
 _DISPATCH = {
     ("blue", "scan"): _cmd_blue_scan,
+    ("blue", "validate"): _cmd_blue_validate,
     ("red", "targets"): _cmd_red_targets,
     ("red", "apply"): _cmd_red_apply,
     ("blind", "verify"): _cmd_blind_verify,
     ("arena", "score"): _cmd_arena_score,
+    ("mcp-config", None): _cmd_mcp_config,
 }
 
 
@@ -1107,7 +1280,8 @@ def main(argv: list[str] | None = None) -> int:
         if handler is None:
             raise _CliError(
                 "invalid_arguments",
-                "Specify one of: blue scan, red targets, red apply, blind verify, arena score.",
+                "Specify one of: blue scan, blue validate, red targets, red apply, "
+                "blind verify, arena score, mcp-config.",
                 exit_code=2,
                 recovery_hint="Run with --help to view command groups and actions.",
             )
@@ -1115,8 +1289,8 @@ def main(argv: list[str] | None = None) -> int:
         deadline = (time.monotonic() + timeout_val) if timeout_val is not None and timeout_val > 0 else None
         payload, code = handler(args, deadline)
         return _emit(payload, code)
-    except _CliError as exc:
-        return _emit(_error_payload(exc.code, exc.message, exc.recovery_hint, exc.extra), exc.exit_code)
+    except (_CliError, BlueReportError) as exc:
+        return _emit(_error_payload(exc.code, str(exc), exc.recovery_hint, getattr(exc, "extra", None)), exc.exit_code)
     except TimeoutError:
         return _emit(_error_payload("timeout", "Operation timed out.", "Retry with a higher --timeout."), 124)
     except SystemExit as exc:
