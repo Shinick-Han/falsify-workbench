@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.0-alpha.65
+
+- Fix companion HTTP `supplement_audit` page-text extraction in `paper_evidence_http.py` (`_require_bound_pdf` + `_open_pdf` instead of unsupported `kind='page'` on `EvidenceStore.list_items`) and add end-to-end HTTP adapter regression test in `test_paper_supplement_audit.py`.
+
 ## 0.2.0-alpha.64
 
 - Add BLUE multi-file supplement/code/log bundle cross-verification (`blue-supplement-bundle.js`, `paper_supplement_audit.py`, `paper_evidence_http.py`, `document-blue.js`) detecting orphan cited `Table S*`/`Fig. S*` items (`D4-1`), cross-file `N=` sample-size mismatches (`D1`), and main-vs-supplement metric contradictions (`D1`) while seamlessly attaching `supp-*` segments to local and external BLUE runs.

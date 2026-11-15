@@ -49,9 +49,12 @@ def _query_supplement_audit(paper_id, data, store):
     supplements = data.get('supplements')
     if not isinstance(supplements, list) or len(supplements) > 16:
         raise ValueError('paper_evidence_request_invalid')
+    from paper_evidence_text import _open_pdf, _require_bound_pdf
     from paper_supplement_audit import audit_paper_with_supplements
-    pages_res = store.list_items(paper_id, kind='page', offset=0, limit=500)
-    page_items = [store.read_item(paper_id, m['id']) for m in pages_res.get('items', [])]
+    _, _, _, raw = _require_bound_pdf(paper_id, store)
+    with _open_pdf(raw) as doc:
+        page_items = [{'id': f'p{idx}', 'pageIndex': idx, 'text': doc[idx].get_text('text') or ''}
+                      for idx in range(min(doc.page_count, 80))]
     try:
         return audit_paper_with_supplements(page_items, supplements)
     except ValueError:

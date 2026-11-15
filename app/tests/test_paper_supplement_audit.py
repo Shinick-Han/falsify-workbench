@@ -109,6 +109,38 @@ def test_blindness_guard_rejects_forbidden_red_keys():
         psa.audit_paper_with_supplements("ok", [{"name": "s.txt", "text": "hi", "candidateRationales": ["x"]}])
 
 
+def test_http_supplement_audit_operation_on_prepared_pdf():
+    import base64
+    import hashlib
+    import pymupdf
+    import paper_evidence as pe
+    import paper_evidence_http as http
+
+    doc = pymupdf.open()
+    p = doc.new_page()
+    p.insert_text((72, 72), "Cohort N = 240 patients. Table S1 reports AUC = 0.94. See Table S4.", fontsize=11)
+    raw = doc.tobytes()
+    doc.close()
+
+    store = pe.EvidenceStore()
+    prep = http.prepare({"fileHash": hashlib.sha256(raw).hexdigest(), "file": base64.b64encode(raw).decode("ascii")}, store=store)
+    res = http.query({
+        "paperId": prep["paperId"],
+        "operation": "supplement_audit",
+        "supplements": [{"name": "Table_S1.csv", "text": "Model,AUC\nMain,0.81\n"}],
+    }, store=store)
+    assert res["schema"] == psa.SCHEMA
+    kinds = {s["kind"] for s in res["signals"]}
+    assert "missing_supplementary_item" in kinds
+    assert "cross_file_metric_mismatch" in kinds
+    with pytest.raises(ValueError, match="paper_evidence_request_invalid"):
+        http.query({
+            "paperId": prep["paperId"],
+            "operation": "supplement_audit",
+            "supplements": [{"name": "s.txt", "text": "x", "gold": True}],
+        }, store=store)
+
+
 def test_python_module_ccn_under_15():
     root = Path(__file__).resolve().parents[2]
     src = (root / "app" / "local" / "paper_supplement_audit.py").read_bytes()
