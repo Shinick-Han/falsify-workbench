@@ -286,7 +286,7 @@ def _normalize_single_op(op, idx, store, paper_id, file_hash, service):
         return _normalize_uri_op(op, op_id)
     if kind == 'text-span':
         return _normalize_text_span_op(op, op_id)
-    if kind == 'supplement-edit':
+    if kind in ('supplement-edit', 'supplement-text'):
         return _normalize_supplement_op(op, op_id)
     raise ValueError('visual_operation_invalid')
 

@@ -317,6 +317,7 @@ def _active_supplements(binding, supplements):
 
 def _register_supplement_tools(server, store, binding, supplements):
     from paper_mcp_bundle import (
+        audit_code_supplements_payload,
         audit_supplements_payload,
         list_supplements_payload,
         read_supplement_payload,
@@ -345,6 +346,12 @@ def _register_supplement_tools(server, store, binding, supplements):
     def recompute_raw_supplement(paperId: str, supplementId: str | None = None, maxSignals: int = 50) -> CallToolResult:
         """Read-only recomputation of row-level statistics from one attached supplement against the selected PDF."""
         result = _guard_bound(binding, paperId, lambda: recompute_raw_supplement_payload(store, paperId, binding.file_hash, _active_supplements(binding, supplements), supplement_id=supplementId, max_signals=maxSignals))
+        return result if isinstance(result, CallToolResult) else _ok(result)
+
+    @server.tool(annotations=_READONLY)
+    def audit_code_supplements(paperId: str, supplementId: str | None = None, maxSignals: int = 30) -> CallToolResult:
+        """Read-only static AST and regex audit of attached analysis scripts against the selected PDF."""
+        result = _guard_bound(binding, paperId, lambda: audit_code_supplements_payload(store, paperId, binding.file_hash, _active_supplements(binding, supplements), supplement_id=supplementId, max_signals=maxSignals))
         return result if isinstance(result, CallToolResult) else _ok(result)
 
 

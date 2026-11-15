@@ -228,7 +228,11 @@ class BundleCodePayloadTests(unittest.TestCase):
             store, store.paper_id, store.file_hash, max_signals=10, digest_only=True, include_flow_triage=True,
         )
         self.assertTrue(digest["digestOnly"])
-        self.assertNotIn("flowAndSpinTriage", digest)
+        self.assertTrue(digest["flowAndSpinTriage"]["enabled"])
+        digest_off = bundle.run_blue_sensor_payload(
+            store, store.paper_id, store.file_hash, max_signals=10, digest_only=True, include_flow_triage=False,
+        )
+        self.assertNotIn("flowAndSpinTriage", digest_off)
 
 
 if __name__ == "__main__":

@@ -173,10 +173,9 @@ def _as_list(value):
 
 
 def _pack_flow(report):
-    flow = _as_list(report.get('flowSignals'))
-    if not flow:
-        flow = _as_list(report.get('signals'))
-    return {'flowSignals': flow, 'spinTriageHints': _as_list(report.get('spinTriageHints'))}
+    flow = _as_list(report.get('flowSignals')) or _as_list(report.get('signals'))
+    hints = _as_list(report.get('spinTriageHints')) or _as_list(report.get('triageHints'))
+    return {'flowSignals': flow, 'spinTriageHints': hints}
 
 
 def _attach_flow(triage, main_segs):

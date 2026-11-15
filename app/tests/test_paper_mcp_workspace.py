@@ -35,6 +35,7 @@ ORIGINAL_TOOLS = {
 WORKSPACE_TOOLS = {
     "list_papers", "select_paper", "triage_workspace",
     "list_supplements", "read_supplement", "audit_supplements", "recompute_raw_supplement",
+    "audit_code_supplements",
 }
 DRIVE = re.compile(r"[A-Za-z]:[\\/]")
 SECRET = "SECRET_ANSWER_KEY_BYTES"

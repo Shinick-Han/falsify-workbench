@@ -15,7 +15,13 @@ if str(LOCAL) not in sys.path:
 
 import blue_report_validate as mod  # noqa: E402
 
-FONT = Path(r"C:\Windows\Fonts\segoeui.ttf")
+_FONT_CANDIDATES = (
+    Path(r"C:\Windows\Fonts\segoeui.ttf"),
+    Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+    Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf"),
+    Path("/Library/Fonts/Arial Unicode.ttf"),
+)
+FONT = next((p for p in _FONT_CANDIDATES if p.is_file()), _FONT_CANDIDATES[0])
 LIGATURE_LINES = (
     "con\ufb01dence interval stays wide",
     "the \ufb02ow of patients",

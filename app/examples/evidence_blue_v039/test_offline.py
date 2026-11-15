@@ -261,7 +261,8 @@ class OfflineV039Tests(unittest.TestCase):
             }
 
         fake.audit_flow_and_spin_triage = audit_flow_and_spin_triage
-        self.assertIsNone(runner._run_flow([{'id': 's0', 'text': 'x'}]))
+        with patch.object(runner.importlib.util, 'find_spec', return_value=None):
+            self.assertIsNone(runner._run_flow([{'id': 's0', 'text': 'x'}]))
         self.assertNotIn('paper_flow_and_spin_triage', runner.TRACKED_SOURCES)
         with patch.object(runner.importlib.util, 'find_spec', return_value=object()), \
              patch.object(runner.importlib, 'import_module', return_value=fake):
@@ -270,6 +271,18 @@ class OfflineV039Tests(unittest.TestCase):
         self.assertEqual(packed['flowSignals'][0]['id'], 'f1')
         self.assertEqual(triage['flowAndSpinTriage']['spinTriageHints'][0]['id'], 'h1')
         self.assertEqual(triage['totalSignals'], 1)
+        real_triage = {'totalSignals': 0}
+        real_packed = runner._attach_flow(real_triage, [{
+            'id': 's0',
+            'text': (
+                'This observational retrospective study enrolled N = 80 patients '
+                '(p = 0.42, non-significant). Treatment causally proves survival benefit. '
+                '200 patients were screened, 20 were excluded before randomization, '
+                'and 170 were randomized.'
+            ),
+        }])
+        self.assertEqual(len(real_packed['flowSignals']), 1)
+        self.assertEqual(len(real_packed['spinTriageHints']), 1)
 
     def test_runner_functions_stay_within_ccn_limit(self):
         script = REPO / 'tools' / 'quality' / 'python-functions.py'
