@@ -48,6 +48,9 @@ def color_mask(image, color, tolerance=_TOLERANCE):
     """Source ink and its antialiased mixes with white; exclude achromatic grids."""
     cv2, np = _deps()
     array = _rgb(image)
+    import paper_chart_dark_curve as dark
+    if dark.is_neutral_dark_color(color):
+        return dark.dark_neutral_ink_mask(array, color, tolerance, np)
     target = np.array([int(color[0]), int(color[1]), int(color[2])], dtype=np.int16)
     delta = np.max(np.abs(array.astype(np.int16) - target), axis=2)
     ink = 255.0 - target.astype(np.float32)
@@ -179,6 +182,23 @@ def _corridor(shape, polylines, radius):
     return layer.astype(bool)
 
 
+def _ink_and_structural_guard(array, color, tolerance, cv2, np):
+    import paper_chart_dark_curve as dark
+    ink = color_mask(array, color, tolerance)
+    if not dark.is_neutral_dark_color(color):
+        return ink, None
+    struct = dark.structural_neutral_mask(array, cv2, np)
+    return ink & (~struct), struct
+
+
+def _apply_structural_guard(out, array, guard, soft=None, alpha=None):
+    if guard is not None and bool(guard.any()):
+        out[guard] = array[guard]
+        if soft is not None and alpha is not None:
+            soft[guard] = alpha[guard][:, None]
+    return out
+
+
 def edit_raster(image, points, new_points, color, width, tolerance=_TOLERANCE):
     """Restore the changed span of this curve, then paint its new samples.
 
@@ -193,18 +213,18 @@ def edit_raster(image, points, new_points, color, width, tolerance=_TOLERANCE):
     spans = _changed_spans(points, new_points)
     if not spans:
         return array.copy()
-    ink = color_mask(array, color, tolerance)
+    ink, guard = _ink_and_structural_guard(array, color, tolerance, cv2, np)
     pieces = [points[begin:end + 1] for begin, end in spans if end >= begin]
     mask = _corridor(array.shape[:2], pieces, max(1.0, float(width) * 0.5 + 2.0)) & ink
     base = restore_under_mask(array, mask)
     if new_points is None:
-        return base
+        return _apply_structural_guard(base, array, guard)
     if len(points) != len(new_points):
-        return paint_polyline(base, new_points, color, width)
+        return _apply_structural_guard(paint_polyline(base, new_points, color, width), array, guard)
     out = base
     for begin, end in spans:
         out = paint_polyline(out, new_points[begin:end + 1], color, width)
-    return out
+    return _apply_structural_guard(out, array, guard)
 
 
 def _same_points(points, new_points, eps=1e-4):
@@ -233,10 +253,13 @@ def edit_batch(image, edits, alpha=None):
             ranges = spans if len(points) == len(current) else [(0, len(current) - 1)]
             paints.extend((current[a:b + 1], color, width) for a, b in ranges)
     cleared = np.zeros(array.shape[:2], dtype=bool)
+    combined_guard = np.zeros(array.shape[:2], dtype=bool)
     opacity = {}
     for color, corridor in masks.items():
-        ink = color_mask(array, color)
+        ink, guard = _ink_and_structural_guard(array, color, _TOLERANCE, cv2, np)
         cleared |= corridor & ink
+        if guard is not None:
+            combined_guard |= guard
         if alpha is not None:
             samples = alpha[ink & (alpha > 0)]
             opacity[color] = int(np.median(samples)) if samples.size else 255
@@ -246,6 +269,7 @@ def edit_batch(image, edits, alpha=None):
         out = paint_polyline(out, points, color, width)
         if soft is not None:
             soft = paint_polyline(soft, points, (opacity[tuple(color)],) * 3, width)
+    _apply_structural_guard(out, array, combined_guard, soft=soft, alpha=alpha)
     return out if soft is None else (out, soft[:, :, 0].copy())
 
 
@@ -356,10 +380,10 @@ def _stroke_width(mask, points):
     return float(max(1, 2 * int(samples[len(samples) // 2] / 2)))
 
 
-def _trace_color(array, color, window, tolerance):
+def _trace_color(array, color, window, tolerance, *, custom_ink=None):
     cv2, np = _deps()
     height, width = array.shape[:2]
-    ink = color_mask(array, color, tolerance) & window
+    ink = (custom_ink if custom_ink is not None else color_mask(array, color, tolerance)) & window
     if int(ink.sum()) < _MIN_PIXELS:
         return []
     # Trace only the selected image window, at a bounded working resolution.
@@ -395,9 +419,28 @@ def _trace_color(array, color, window, tolerance):
     return found
 
 
+def _append_traced_color(series, array, color, window, tolerance, bounds, ink, custom_ink=None):
+    x0, y0, x1, y1 = bounds
+    for edge in _trace_color(array, color, window, tolerance, custom_ink=custom_ink):
+        points = edge['points']
+        kept = [point for point in points if x0 - 1 <= point[0] <= x1 + 1 and y0 - 1 <= point[1] <= y1 + 1]
+        if len(kept) < 2:
+            continue
+        series.append({
+            'color': color,
+            'width': _stroke_width(ink, kept),
+            'points': kept,
+            'branch': 'b%d' % len(series),
+            'pixels': int(ink.sum()),
+            'nodes': edge['nodes'],
+            'endKinds': edge['endKinds'],
+        })
+
+
 def trace_series(image, plot_bbox=None, tolerance=_TOLERANCE):
     """Source-bound graph edges; junction identities keep their editing connected."""
     cv2, np = _deps()
+    import paper_chart_dark_curve as dark
     array = _rgb(image)
     height, width = array.shape[:2]
     x0, y0, x1, y1 = (0, 0, width, height) if not plot_bbox else [int(v) for v in plot_bbox]
@@ -405,21 +448,14 @@ def trace_series(image, plot_bbox=None, tolerance=_TOLERANCE):
     x1, y1 = min(width, x1), min(height, y1)
     window = np.zeros((height, width), dtype=bool)
     window[y0:y1, x0:x1] = True
+    bounds = (x0, y0, x1, y1)
     series = []
-    for color in _colors(array[y0:y1, x0:x1]):
+    chromatic = _colors(array[y0:y1, x0:x1])
+    for color in chromatic:
         ink = np.max(np.abs(array.astype(np.int16) - np.array(color, np.int16)), axis=2) <= tolerance
-        for edge in _trace_color(array, color, window, tolerance):
-            points = edge['points']
-            kept = [point for point in points if x0 - 1 <= point[0] <= x1 + 1 and y0 - 1 <= point[1] <= y1 + 1]
-            if len(kept) < 2:
-                continue
-            series.append({
-                'color': color,
-                'width': _stroke_width(ink, kept),
-                'points': kept,
-                'branch': 'b%d' % len(series),
-                'pixels': int(ink.sum()),
-                'nodes': edge['nodes'],
-                'endKinds': edge['endKinds'],
-            })
+        _append_traced_color(series, array, color, window, tolerance, bounds, ink)
+    found_dark = dark.extract_dark_neutral_curve(array, window, chromatic, _MIN_PIXELS, cv2, np)
+    if found_dark is not None:
+        dark_color, dark_mask = found_dark
+        _append_traced_color(series, array, dark_color, window, tolerance, bounds, dark_mask, custom_ink=dark_mask)
     return series
