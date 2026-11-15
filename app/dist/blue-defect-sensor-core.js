@@ -321,16 +321,45 @@
     const merged=[],seen=new Set();
     for(const s of [...listA,...listB]){
       if(!s||typeof s!=='object')continue;
-      const k=signalKey(s);if(seen.has(k))continue;seen.add(k);merged.push(clone(s));
+      const item=clone(s);
+      if(!item.category&&item.family)item.category=item.family;
+      const k=signalKey(item);if(seen.has(k))continue;seen.add(k);merged.push(item);
     }
     return numberSignals(merged);
+  }
+  function normalizeAcroForm(raw){
+    const a=clone(raw);
+    if(a.total===undefined)a.total=a.fieldCount??0;
+    if(a.filled===undefined)a.filled=a.filledCount??0;
+    if(a.blank===undefined)a.blank=a.emptyCount??0;
+    return a;
+  }
+  function mapMismatchEntry(m){
+    const detail=m.status||m.detail||m.doi||'';
+    return {provider:m.source||'BibOracle',refIndex:m.index??m.refIndex??null,detail};
+  }
+  function mapRegistryEntry(r){
+    const detail=r.verdict||r.status||r.summary||'';
+    return {provider:'ClinicalTrials.gov',nctId:r.nctId||r.trialId||'',detail};
+  }
+  function buildOracleEntries(pack){
+    const refs=Array.isArray(pack.mismatchedReferences)?pack.mismatchedReferences:[];
+    const regs=Array.isArray(pack.registryComparisons)?pack.registryComparisons:[];
+    return [...refs.map(mapMismatchEntry),...regs.map(mapRegistryEntry)];
+  }
+  function normalizeOraclePack(raw){
+    const p=clone(raw);
+    if(!Array.isArray(p.entries)&&!Array.isArray(p.items))p.entries=buildOracleEntries(p);
+    return p;
   }
   function copyCompanionSections(out,base,companion){
     for(const k of ['uriLinks','acroForm','oraclePack']){
       if(companion[k])out[k]=clone(companion[k]);
       else if(base[k])out[k]=clone(base[k]);
     }
-    const bib=companion.bibliography?.count?companion.bibliography:base.bibliography;
+    if(out.acroForm)out.acroForm=normalizeAcroForm(out.acroForm);
+    if(out.oraclePack)out.oraclePack=normalizeOraclePack(out.oraclePack);
+    const bib=(companion.bibliography?.count||companion.bibliography?.referenceCount)?companion.bibliography:base.bibliography;
     out.bibliography=clone(bib||{found:false,count:0,maxIndex:0,entries:[]});
   }
   function validateCompanionInputs(browserReport,companionReport){
