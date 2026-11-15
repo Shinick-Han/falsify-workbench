@@ -347,6 +347,24 @@ def _write_json_out(out_path: str, payload: dict, protected_paths: list[str]):
         raise _CliError("output_write_failed", f"Unable to write output JSON: {exc}", exit_code=2) from None
 
 
+def _visual_page_text(page) -> str:
+    words = page.get_text("words") or []
+    if not words:
+        return page.get_text("text") or ""
+    ordered = sorted(words, key=lambda w: (round((w[1] + w[3]) * 0.5 / 4.0), w[0]))
+    lines, cur_band, cur_words = [], None, []
+    for w in ordered:
+        band = round((w[1] + w[3]) * 0.5 / 4.0)
+        if cur_band is not None and band != cur_band:
+            lines.append(" ".join(cur_words))
+            cur_words = []
+        cur_band = band
+        cur_words.append(str(w[4]))
+    if cur_words:
+        lines.append(" ".join(cur_words))
+    return "\n".join(lines)
+
+
 def _cmd_blue_scan(args, deadline: float | None = None) -> tuple[dict, int]:
     if args.max_signals < 1 or args.max_signals > 100:
         raise _CliError("invalid_arguments", "--max-signals must be between 1 and 100.", exit_code=2)
@@ -365,7 +383,7 @@ def _cmd_blue_scan(args, deadline: float | None = None) -> tuple[dict, int]:
         raw = store.source_bytes(pid, fhash)
         with _open_pdf(raw) as doc:
             page_items = [
-                {"id": f"p{idx}", "pageIndex": idx, "text": doc[idx].get_text("text") or ""}
+                {"id": f"p{idx}", "pageIndex": idx, "text": _visual_page_text(doc[idx])}
                 for idx in range(min(doc.page_count, 80))
             ]
         try:
@@ -411,6 +429,17 @@ def _filter_targets(targets: dict, links: list[dict], query: str | None) -> tupl
     return {**targets, "paragraphs": paragraphs, "tables": tables, "figures": figures}, filtered_links
 
 
+def _list_optional_text_spans(pdf_bytes: bytes, page_index: int | None, query: str | None) -> list[dict]:
+    try:
+        mod = importlib.import_module("paper_text_span_mutator")
+    except ImportError:
+        return []
+    fn = getattr(mod, "list_pdf_text_spans", None)
+    if fn is None:
+        return []
+    return list(fn(pdf_bytes, page_index=page_index, query=query, limit=200).get("spans") or [])
+
+
 def _cmd_red_targets(args, deadline: float | None = None) -> tuple[dict, int]:
     store, summary = _open_pdf_store(args.pdf)
     pid, fhash = summary["paperId"], summary["fileHash"]
@@ -430,6 +459,7 @@ def _cmd_red_targets(args, deadline: float | None = None) -> tuple[dict, int]:
         fig["figureIndex"] = idx
     links_res = paper_red_mcp._list_links(store, pid, fhash, page_index=args.page)
     targets, filtered_links = _filter_targets(targets, links_res.get("links", []), args.query)
+    spans = _list_optional_text_spans(store.source_bytes(pid, fhash), args.page, args.query)
     payload = {
         "schema": SCHEMA,
         "ok": True,
@@ -438,6 +468,7 @@ def _cmd_red_targets(args, deadline: float | None = None) -> tuple[dict, int]:
         "fileHash": fhash,
         "pageCount": page_count,
         "paragraphs": targets["paragraphs"],
+        "textSpans": spans,
         "tables": targets["tables"],
         "figures": targets["figures"],
         "links": filtered_links,
@@ -481,7 +512,24 @@ def _apply_text_span_ops(pdf_bytes: bytes, text_ops: list[dict]) -> tuple[bytes,
     mutator = getattr(mod, "mutate_pdf_text_spans", None)
     if mutator is None:
         raise _CliError("text_span_mutator_unavailable", "mutate_pdf_text_spans not found.", exit_code=2)
-    res = mutator(pdf_bytes, text_ops)
+    try:
+        res = mutator(pdf_bytes, text_ops)
+    except ValueError as exc:
+        details = getattr(exc, "details", None)
+        if isinstance(details, dict):
+            raise _CliError(
+                getattr(exc, "code", "text_span_failed"),
+                str(exc),
+                exit_code=2,
+                recovery_hint=str(details.get("recoveryHint") or "Inspect textSpans via 'red targets'."),
+                extra={"nearestCandidates": list(details.get("nearestCandidates") or [])},
+            ) from None
+        raise _CliError(
+            "red_apply_failed",
+            f"Text-span operation failed: {exc}",
+            exit_code=2,
+            recovery_hint="Inspect pageIndex, spanId, and exact before text using 'red targets'.",
+        ) from None
     if isinstance(res, (bytes, bytearray)):
         return bytes(res), [], []
     out_bytes = res.get("pdfBytes") or res.get("pdf_bytes") or pdf_bytes
@@ -537,6 +585,21 @@ def _resolve_table_item_ids(store: EvidenceStore, pid: str, ops: list[dict]) -> 
     return resolved
 
 
+def _enrich_gold_changes(ops: list[dict], changes: list[dict], stealth: dict) -> list[dict]:
+    by_id = {str(op["id"]): op for op in ops if isinstance(op, dict) and op.get("id")}
+    stealth_ok = stealth.get("status") == "clean"
+    enriched = []
+    for idx, chg in enumerate(changes):
+        op = by_id.get(str(chg.get("id") or "")) or (ops[idx] if idx < len(ops) and isinstance(ops[idx], dict) else {})
+        merged = dict(chg)
+        for key in ("world", "family", "difficulty", "rationale", "defectId"):
+            if op.get(key) is not None and merged.get(key) is None:
+                merged[key] = op[key]
+        merged.setdefault("stealthPass", stealth_ok)
+        enriched.append(merged)
+    return enriched
+
+
 def _cmd_red_apply(args, deadline: float | None = None) -> tuple[dict, int]:
     src_path, _ = _require_pdf_bytes(args.pdf)
     out_pdf = Path(args.out_pdf)
@@ -557,9 +620,10 @@ def _cmd_red_apply(args, deadline: float | None = None) -> tuple[dict, int]:
     text_ops = [op for op in resolved_ops if op.get("kind") == "text-span"]
     other_ops = [op for op in resolved_ops if op.get("kind") != "text-span"]
     try:
-        src_bytes, edited_bytes, vis_result = paper_red_mcp._apply_operations(
+        applied = paper_red_mcp._apply_operations(
             store, ChartEditService(store), pid, fhash, other_ops,
         )
+        src_bytes, edited_bytes, vis_result = applied[0], applied[1], applied[2]
     except ValueError as exc:
         raise _CliError(
             "red_apply_failed",
@@ -581,7 +645,7 @@ def _cmd_red_apply(args, deadline: float | None = None) -> tuple[dict, int]:
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
     out_pdf.write_bytes(edited_bytes)
     out_sha = hashlib.sha256(edited_bytes).hexdigest()
-    all_changes = list(vis_result.get("changes") or []) + text_changes
+    all_changes = _enrich_gold_changes(ops, list(vis_result.get("changes") or []) + text_changes, stealth)
     if args.out_gold:
         ledger = {
             "schema": GOLD_LEDGER_SCHEMA,
@@ -592,6 +656,7 @@ def _cmd_red_apply(args, deadline: float | None = None) -> tuple[dict, int]:
             "appliedCount": len(all_changes),
             "operations": ops,
             "changes": all_changes,
+            "defects": all_changes,
             "stealthAudit": stealth,
             "verification": vis_result.get("verification"),
         }
@@ -697,13 +762,37 @@ def _inspect_supplement_blindness(supp_paths: list[str]) -> list[dict]:
     return leaks
 
 
+def _load_blind_verify_supplements(supp_paths: list[str]) -> list[dict]:
+    items = []
+    for p_str in supp_paths:
+        path = Path(p_str)
+        if not path.is_file():
+            raise _CliError("file_not_found", f"Supplement file not found: {p_str}", exit_code=2)
+        ext = path.suffix.lower()
+        if ext not in SUPPORTED_SUPP_EXTS:
+            raise _CliError("unsupported_supplement", f"Unsupported supplement extension: {ext}", exit_code=2)
+        raw = path.read_bytes()
+        if ext == ".pdf":
+            text = "\n".join(_extract_pdf_pages(raw))
+        elif ext == ".docx":
+            text = _extract_docx_text(raw)
+        else:
+            text = raw.decode("utf-8-sig", errors="replace")
+        items.append({"name": path.name, "text": text})
+    return items
+
+
 def _cmd_blind_verify(args, deadline: float | None = None) -> tuple[dict, int]:
     _blind_path, blind_bytes = _require_pdf_bytes(args.pdf)
     src_bytes = _require_pdf_bytes(args.source_pdf)[1] if args.source_pdf else None
     supp_paths = _flatten_paths(args.supplement)
+    supp_dicts = _load_blind_verify_supplements(supp_paths)
     _check_deadline(deadline)
     delegated = _delegate_arena(
         "verify_blind_bundle",
+        blind_pdf_bytes=blind_bytes,
+        blind_supplements=supp_dicts,
+        source_pdf_bytes=src_bytes,
         blind_pdf=args.pdf,
         pdf_path=args.pdf,
         source_pdf=args.source_pdf,
@@ -712,7 +801,7 @@ def _cmd_blind_verify(args, deadline: float | None = None) -> tuple[dict, int]:
     )
     if isinstance(delegated, dict):
         leaks = list(delegated.get("leaks") or delegated.get("issues") or [])
-        clean = bool(delegated.get("clean", not leaks))
+        clean = bool(delegated.get("clean", delegated.get("blindClean", not leaks)))
         payload = {"schema": SCHEMA, "ok": clean, "command": "blind verify", "clean": clean, "leaks": leaks, "delegated": delegated}
         return (payload, 0) if clean else ({**payload, "error": "blindness_leak_detected", "recoveryHint": "Remove leaked RED metadata, annotations, or supplement keys."}, 3)
     leaks = _inspect_pdf_with_source(src_bytes, blind_bytes) if src_bytes is not None else _inspect_pdf_blindness_standalone(blind_bytes)
@@ -910,6 +999,9 @@ def _cmd_arena_score(args, deadline: float | None = None) -> tuple[dict, int]:
     _check_deadline(deadline)
     delegated = _delegate_arena(
         "evaluate_arena_match",
+        gold_ledger=gold_raw,
+        blue_runs=blue_raws,
+        baseline_signals=baseline_raw,
         gold_path=args.gold,
         blue_paths=blue_paths,
         baseline_path=args.baseline,

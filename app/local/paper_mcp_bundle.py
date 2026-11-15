@@ -234,11 +234,29 @@ def read_supplement_payload(paper_id, file_hash, bundle, supplement_id, offset=0
     }
 
 
+def _visual_page_text(page):
+    words = page.get_text("words") or []
+    if not words:
+        return page.get_text("text") or ""
+    ordered = sorted(words, key=lambda w: (round((w[1] + w[3]) * 0.5 / 4.0), w[0]))
+    lines, cur_band, cur_words = [], None, []
+    for w in ordered:
+        band = round((w[1] + w[3]) * 0.5 / 4.0)
+        if cur_band is not None and band != cur_band:
+            lines.append(" ".join(cur_words))
+            cur_words = []
+        cur_band = band
+        cur_words.append(str(w[4]))
+    if cur_words:
+        lines.append(" ".join(cur_words))
+    return "\n".join(lines)
+
+
 def _read_pdf_page_items(raw, max_pages=MAX_PDF_SUPP_PAGES):
     with _open_pdf(raw) as doc:
         limit = min(doc.page_count, max_pages)
         return [
-            {"id": f"p{idx}", "pageIndex": idx, "text": doc[idx].get_text("text") or ""}
+            {"id": f"p{idx}", "pageIndex": idx, "text": _visual_page_text(doc[idx])}
             for idx in range(limit)
         ]
 

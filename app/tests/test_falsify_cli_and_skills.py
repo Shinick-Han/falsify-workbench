@@ -266,8 +266,8 @@ class FalsifyCliAndSkillsTests(unittest.TestCase):
             gold = {
                 "schema": "falsify.red-gold-ledger.v1",
                 "operations": [
-                    {"id": "g1", "kind": "table-cell", "itemId": "t1", "pageIndex": 0, "before": "5", "after": "9"},
-                    {"id": "g2", "kind": "uri-link", "pageIndex": 0, "afterUri": "https://doi.org/10.1000/beta-hijack"},
+                    {"id": "g1", "kind": "table-cell", "itemId": "t1", "pageIndex": 0, "before": "5", "after": "9", "world": "W3", "family": "D3", "difficulty": "L2"},
+                    {"id": "g2", "kind": "uri-link", "pageIndex": 0, "afterUri": "https://doi.org/10.1000/beta-hijack", "world": "W4", "family": "D2", "difficulty": "L1"},
                 ],
             }
             blue1 = {
@@ -281,14 +281,15 @@ class FalsifyCliAndSkillsTests(unittest.TestCase):
                 "schema": "falsify.blue-report.v1",
                 "findings": [
                     {"id": "f1", "verdict": "defect", "pageIndex": 0, "itemId": "t1", "quote": "Table 1 value 9"},
-                    {"id": "f2", "verdict": "defect", "pageIndex": 0, "quote": "10.1000/beta-hijack"},
+                    {"id": "f2", "verdict": "defect", "pageIndex": 0, "quote": "https://doi.org/10.1000/beta-hijack"},
                     {"id": "f3", "verdict": "defect", "pageIndex": 1, "quote": "Unrelated false alarm"},
+                    {"id": "f4", "verdict": "defect", "pageIndex": 1, "quote": "Pre-existing baseline issue in Discussion"},
                 ],
             }
             baseline = {
-                "schema": "falsify.blue-report.v1",
-                "findings": [
-                    {"id": "b1", "verdict": "defect", "pageIndex": 0, "itemId": "t1", "quote": "Table 1 cell 9"},
+                "schema": "falsify.blue-defect-sensor.v1",
+                "signals": [
+                    {"id": "b1", "pageIndex": 1, "excerpt": "Pre-existing baseline issue in Discussion"},
                 ],
             }
             gold_p = tmp_dir / "gold.json"
@@ -309,16 +310,99 @@ class FalsifyCliAndSkillsTests(unittest.TestCase):
                 "--out", str(out_p),
             )
             self.assertEqual(code, 0, payload)
+            self.assertTrue(payload["delegated"])
             self.assertEqual(payload["goldCount"], 2)
             self.assertEqual(len(payload["runs"]), 2)
-            self.assertEqual(payload["runs"][0]["recall"], 1.0)
-            self.assertEqual(payload["runs"][0]["selective"]["abstained_count"], 1)
-            self.assertIsNotNone(payload["runs"][0]["selective"]["aurc"])
-            self.assertEqual(payload["runs"][1]["fp"], 1)
+            self.assertEqual(payload["runs"][0]["recall"], 0.5)
+            self.assertEqual(payload["runs"][0]["uncertainMatchedDefectIds"], ["g2"])
+            self.assertEqual(payload["runs"][0]["selectivePrediction"]["abstainedCount"], 1)
+            self.assertIsNotNone(payload["runs"][0]["selectivePrediction"]["aurc"])
+            self.assertEqual(payload["runs"][1]["recall"], 1.0)
+            self.assertEqual(payload["runs"][1]["pureFp"], 1)
+            self.assertEqual(payload["runs"][1]["preExistingExempted"], 1)
             self.assertIn("nominal", payload["agreement"])
             self.assertIn("ordinal", payload["agreement"])
-            self.assertIsNotNone(payload["baseline"])
+            self.assertIn("feedbackDigest", payload)
+            self.assertEqual(payload["baselineSignalCount"], 1)
             self.assertTrue(out_p.is_file())
+
+    def test_closed_loop_red_text_span_blind_verify_blue_scan_arena_score(self):
+        raw = _build_synthetic_paper_pdf()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            src_pdf = tmp_dir / "paper.pdf"
+            src_pdf.write_bytes(raw)
+            supp_csv = tmp_dir / "Table_S1.csv"
+            supp_csv.write_text("Model,AUC\nMain,0.94\n", encoding="utf-8")
+
+            # 1. Inspect targets including native textSpans
+            t_code, t_payload, _ = _run_cli("red", "targets", "--pdf", str(src_pdf), "--query", "AUC = 0.94")
+            self.assertEqual(t_code, 0, t_payload)
+            self.assertGreaterEqual(len(t_payload["textSpans"]), 1)
+
+            # 2. Self-healing error when text-span before text mismatches
+            bad_code, bad_payload, _ = _run_cli(
+                "red", "apply",
+                "--pdf", str(src_pdf),
+                "--ops", json.dumps([{"kind": "text-span", "pageIndex": 0, "before": "AUC = 0.9999", "after": "AUC = 0.61"}]),
+                "--out-pdf", str(tmp_dir / "bad.pdf"),
+            )
+            self.assertEqual(bad_code, 2)
+            self.assertEqual(bad_payload["error"], "text_span_not_found")
+            self.assertGreaterEqual(len(bad_payload.get("nearestCandidates", [])), 1)
+            self.assertTrue(bad_payload.get("recoveryHint"))
+
+            # 3. Apply native text-span defect creating a cross-file metric mismatch against Table_S1.csv
+            blind_pdf = tmp_dir / "blind.pdf"
+            gold_json = tmp_dir / "gold.json"
+            a_code, a_payload, _ = _run_cli(
+                "red", "apply",
+                "--pdf", str(src_pdf),
+                "--ops", json.dumps([{
+                    "id": "d-span-1",
+                    "kind": "text-span",
+                    "pageIndex": 0,
+                    "before": "AUC = 0.94",
+                    "after": "AUC = 0.61",
+                    "world": "W5",
+                    "family": "D6",
+                    "difficulty": "L2",
+                }]),
+                "--out-pdf", str(blind_pdf),
+                "--out-gold", str(gold_json),
+                "--require-clean-stealth",
+            )
+            self.assertEqual(a_code, 0, a_payload)
+
+            # 4. Verify blind bundle (PDF + supplement) has zero RED leaks
+            v_code, v_payload, _ = _run_cli(
+                "blind", "verify",
+                "--pdf", str(blind_pdf),
+                "--source-pdf", str(src_pdf),
+                "--supplement", str(supp_csv),
+            )
+            self.assertEqual(v_code, 0, v_payload)
+            self.assertTrue(v_payload["clean"])
+
+            # 5. Run headless BLUE scan on blind bundle and score directly in Arena
+            blue_json = tmp_dir / "blue_scan.json"
+            b_code, b_payload, _ = _run_cli(
+                "blue", "scan",
+                "--pdf", str(blind_pdf),
+                "--supplement", str(supp_csv),
+                "--digest-only",
+                "--out", str(blue_json),
+            )
+            self.assertEqual(b_code, 0, b_payload)
+            s_code, s_payload, _ = _run_cli(
+                "arena", "score",
+                "--gold", str(gold_json),
+                "--blue", str(blue_json),
+            )
+            self.assertEqual(s_code, 0, s_payload)
+            self.assertEqual(s_payload["goldCount"], 1)
+            self.assertEqual(s_payload["runs"][0]["tp"], 1)
+            self.assertEqual(s_payload["runs"][0]["byWorld"]["W5"]["recall"], 1.0)
 
     def test_skills_frontmatter_referenced_paths_and_cli_ccn(self):
         for skill_name in ("falsify-blue-auditor", "falsify-red-injector"):
@@ -358,13 +442,14 @@ class FalsifyCliAndSkillsTests(unittest.TestCase):
 
             # 1. text-span missing mutator -> exit 2
             buf = io.StringIO()
-            with patch.object(sys, "stdout", buf):
-                rc = falsify_cli.main([
-                    "red", "apply",
-                    "--pdf", str(pdf_path),
-                    "--ops", json.dumps([{"kind": "text-span", "before": "x", "after": "y"}]),
-                    "--out-pdf", str(out_pdf),
-                ])
+            with patch.dict(sys.modules, {"paper_text_span_mutator": None}):
+                with patch.object(sys, "stdout", buf):
+                    rc = falsify_cli.main([
+                        "red", "apply",
+                        "--pdf", str(pdf_path),
+                        "--ops", json.dumps([{"kind": "text-span", "before": "x", "after": "y"}]),
+                        "--out-pdf", str(out_pdf),
+                    ])
             self.assertEqual(rc, 2)
             self.assertEqual(json.loads(buf.getvalue())["error"], "text_span_mutator_unavailable")
 

@@ -460,7 +460,10 @@ def _bbox_iou(a: tuple[float, float, float, float] | None, b: tuple[float, float
 
 
 def _tokenize(text: str) -> set[str]:
-    return set(_TOKEN_RE.findall(text.lower()))
+    tokens = set(_TOKEN_RE.findall(text.lower()))
+    slash_parts = {part for tok in tokens if '/' in tok for part in tok.split('/') if len(part) >= 3}
+    sub = {part for tok in tokens for part in re.findall(r'[a-z0-9가-힣]{3,}', tok)}
+    return tokens | slash_parts | sub
 
 
 def _text_similarity(text_a: str, text_b: str) -> float:
@@ -473,8 +476,10 @@ def _text_similarity(text_a: str, text_b: str) -> float:
     if len(shorter) >= 6 and shorter in longer:
         sub_score = 0.65 + 0.35 * (len(shorter) / len(longer))
     ta, tb = _tokenize(na), _tokenize(nb)
-    jaccard = (len(ta & tb) / len(ta | tb)) if (ta and tb) else 0.0
-    return max(sub_score, jaccard)
+    shared = ta & tb
+    jaccard = (len(shared) / len(ta | tb)) if (ta and tb) else 0.0
+    id_hit = 0.65 if any(len(t) >= 8 and any(c in t for c in './-') for t in shared) else 0.0
+    return max(sub_score, jaccard, id_hit)
 
 
 def _best_text_similarity(texts_a: list[str], texts_b: list[str]) -> float:
@@ -529,12 +534,10 @@ def _normalize_gold_ledger(gold_ledger) -> list[dict]:
     if isinstance(gold_ledger, list):
         items = gold_ledger
     elif isinstance(gold_ledger, dict):
-        if isinstance(gold_ledger.get('defects'), list):
-            items = gold_ledger['defects']
-        elif isinstance(gold_ledger.get('changes'), list):
-            items = gold_ledger['changes']
-        elif isinstance(gold_ledger.get('entries'), list):
-            items = gold_ledger['entries']
+        for key in ('defects', 'changes', 'entries', 'operations'):
+            if isinstance(gold_ledger.get(key), list):
+                items = gold_ledger[key]
+                break
         else:
             raise ValueError('gold_ledger_invalid')
     else:
@@ -558,7 +561,7 @@ def _finding_status_kind(raw: dict) -> str:
 
 
 def _extract_finding_texts(raw: dict) -> list[str]:
-    texts = [_norm_space(raw.get(k)) for k in ('quote', 'excerpt') if _norm_space(raw.get(k))]
+    texts = [_norm_space(raw.get(k)) for k in ('quote', 'excerpt', 'detail') if _norm_space(raw.get(k))]
     if isinstance(raw.get('evidence'), list):
         for ev in raw['evidence']:
             if isinstance(ev, dict) and _norm_space(ev.get('quote')):
@@ -566,6 +569,21 @@ def _extract_finding_texts(raw: dict) -> list[str]:
     if not texts and _norm_space(raw.get('rationale')):
         texts.append(_norm_space(raw.get('rationale')))
     return texts
+
+
+def _extract_run_findings_raw(run: dict) -> list:
+    if isinstance(run.get('findings'), list):
+        return run['findings']
+    if isinstance(run.get('response'), dict) and isinstance(run['response'].get('findings'), list):
+        return run['response']['findings']
+    if isinstance(run.get('signals'), list):
+        return run['signals']
+    if isinstance(run.get('sensor'), dict):
+        items = list(run['sensor'].get('signals') or [])
+        if isinstance(run.get('supplementAudit'), dict):
+            items.extend(run['supplementAudit'].get('signals') or [])
+        return items
+    return []
 
 
 def _normalize_finding(raw: dict, idx: int) -> dict:
@@ -596,25 +614,30 @@ def _normalize_blue_runs(blue_runs) -> list[dict]:
     for idx, run in enumerate(raw_list):
         if not isinstance(run, dict):
             raise ValueError('blue_run_invalid')
-        findings_raw = run.get('findings')
-        if findings_raw is None and isinstance(run.get('response'), dict):
-            findings_raw = run['response'].get('findings')
-        findings = [_normalize_finding(f, i) for i, f in enumerate(findings_raw or []) if isinstance(f, dict)]
+        findings_raw = _extract_run_findings_raw(run)
+        findings = [_normalize_finding(f, i) for i, f in enumerate(findings_raw) if isinstance(f, dict)]
         run_id = str(run.get('runId') or run.get('id') or f'run-{idx + 1}')
         agent_id = str(run.get('agentId') or run.get('model') or run_id)
         normalized.append({'runId': run_id, 'agentId': agent_id, 'findings': findings})
     return normalized
 
 
-def _normalize_baseline_signals(baseline_signals) -> list[dict]:
+def _extract_baseline_items(baseline_signals) -> list:
     if baseline_signals is None:
         return []
-    if isinstance(baseline_signals, dict):
-        items = baseline_signals.get('signals') or []
-    elif isinstance(baseline_signals, list):
-        items = baseline_signals
-    else:
+    if isinstance(baseline_signals, list):
+        return baseline_signals
+    if not isinstance(baseline_signals, dict):
         raise ValueError('baseline_signals_invalid')
+    for key in ('signals', 'findings'):
+        if isinstance(baseline_signals.get(key), list):
+            return baseline_signals[key]
+    sensor = baseline_signals.get('sensor')
+    return list(sensor.get('signals') or []) if isinstance(sensor, dict) else []
+
+
+def _normalize_baseline_signals(baseline_signals) -> list[dict]:
+    items = _extract_baseline_items(baseline_signals)
     out = []
     for idx, sig in enumerate(items):
         if not isinstance(sig, dict):
