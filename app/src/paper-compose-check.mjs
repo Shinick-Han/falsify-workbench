@@ -119,10 +119,38 @@ function validFurnitureRecord(item,style,frameSupported,t) {
           !Number.isFinite(item.width) || item.width < 0 || !Number.isFinite(item.height) || item.height <= 0 || t[0] <= 0 || t[3] <= 0 || Math.abs(t[1]) > 1e-6 || Math.abs(t[2]) > 1e-6 || item.dir !== 'ltr') && validFurnitureStyle(style);
 }
 
+function spanBoxFromRecords(records, indexes) {
+  const rs = indexes.map(i => records[i]).filter(Boolean);
+  return [Math.min(...rs.map(r=>r.x)), Math.min(...rs.map(r=>r.top)), Math.max(...rs.map(r=>r.x+r.item.width)), Math.max(...rs.map(r=>r.bottom))];
+}
+
+function classifyFooterBandColumn(bbox, midpoint, twoColumn) {
+  if (!twoColumn) return 'left';
+  if (bbox[0] < midpoint - 12 && bbox[2] > midpoint + 12) return 'full';
+  return bbox[0] >= midpoint - 12 ? 'right' : 'left';
+}
+
+function detectFooterBodyOverlap({records, excluded, footerBoxes, bodyFrame, pageIndex, findings}) {
+  if (!footerBoxes.length) return;
+  const round2 = x => Math.round(x * 100) / 100;
+  const mid = (bodyFrame.left + bodyFrame.right) / 2;
+  const body = records.filter(r => r && !excluded.has(r.index));
+  const twoColumn = body.some(r => r.x + r.item.width < mid - 6) && body.some(r => r.x > mid + 6);
+  const colsMatch = (a, b) => a === 'full' || b === 'full' || a === b;
+  for (const fb of footerBoxes) {
+    fb.column = classifyFooterBandColumn(fb.bbox, mid, twoColumn);
+    const hits = body.filter(r => r.bottom > fb.bbox[1] + 1 && r.top < fb.bbox[3] - 1 && colsMatch(classifyFooterBandColumn([r.x, r.top, r.x + r.item.width, r.bottom], mid, twoColumn), fb.column));
+    if (!hits.length) continue;
+    const bodyBbox = [Math.min(...hits.map(r=>r.x)), Math.min(...hits.map(r=>r.top)), Math.max(...hits.map(r=>r.x+r.item.width)), Math.max(...hits.map(r=>r.bottom))];
+    const deltaBp = Math.round((bodyBbox[3] - fb.bbox[1] + 6) * 100) / 100;
+    findings.push({code:'footnote-body-overlap', pageIndex, column:fb.column, deltaBp, footnoteBbox:fb.bbox.map(round2), bodyBbox:bodyBbox.map(round2)});
+  }
+}
+
 function inspectPageFurniture({content, viewport, frameSupported, furnitureValid, expectedFurniture, outputFurniture, bodyFrame, selectedSources, n, numPages, findings}) {
   // Match only complete, upright text runs in a reserved vertical band. The
   // map identifies an occurrence, but bytes and geometry establish its text.
-  const excluded = new Set();
+  const excluded = new Set(), footerBoxes = [];
   let furnitureAssets = false;
   if (furnitureValid) {
     function furnitureRecord(item,index) {
@@ -135,6 +163,9 @@ function inspectPageFurniture({content, viewport, frameSupported, furnitureValid
     const claimed = new Set(), mergedMarkers = new Set();
     const pageMarkers = outputFurniture.filter(m=>m?.page === n);
     claimMergedFurniture({records, pageMarkers, expectedFurniture, n, numPages, bodyFrame, viewport, excluded, claimed, mergedMarkers});
+    for (const run of records.filter(Boolean)) if (excluded.has(run.index) && pageMarkers.some(m=>mergedMarkers.has(m) && m.kind==='footer')) {
+      footerBoxes.push({pageIndex:n-1, bbox:[run.x, run.top, run.x+run.item.width, run.bottom], text:run.item.str});
+    }
     function inspectMarker(marker) {
       if (mergedMarkers.has(marker)) return;
       const matches = expectedFurniture.filter(t => t?.sourcePage === marker.sourcePage && t.kind === marker.kind &&
@@ -151,6 +182,7 @@ function inspectPageFurniture({content, viewport, frameSupported, furnitureValid
         findings.push({code:candidates.length ? 'ambiguous-furniture' : 'missing-furniture',pageIndex:n-1,id:marker.id}); return;
       }
       for (const i of candidates[0]) { excluded.add(i); claimed.add(i); }
+      if (marker.kind === 'footer') footerBoxes.push({pageIndex:n-1, bbox:spanBoxFromRecords(records, candidates[0]), text:target});
     }
     for (const marker of outputFurniture.filter(m => m?.page === n)) inspectMarker(marker);
     inspectSelectedSources();
@@ -171,8 +203,9 @@ function inspectPageFurniture({content, viewport, frameSupported, furnitureValid
     for (const r of records) if (r && !excluded.has(r.index) && (r.bottom <= bodyFrame.top || r.top >= bodyFrame.bottom)) {
       findings.push({code:'unexpected-margin-text',pageIndex:n-1,text:r.item.str});
     }
+    detectFooterBodyOverlap({records, excluded, footerBoxes, bodyFrame, pageIndex:n-1, findings});
   }
-  return {excluded, furnitureAssets};
+  return {excluded, furnitureAssets, footerBoxes};
 }
 
 function resolveGlyphBoundaries({boundaries, glyphPages, n, itemScalars, parts, spacingEvidence, findings}) {
@@ -313,7 +346,7 @@ function observePageText({content, viewport, furnitureValid, expectedFurniture, 
   }
   for (const [itemIndex, item] of content.items.entries()) observeItem(itemIndex,item);
   resolveGlyphBoundaries({boundaries, glyphPages, n, itemScalars, parts, spacingEvidence, findings});
-  return {text:normalize(parts.join('')), inspectedItems, furnitureAssets:furniture.furnitureAssets};
+  return {text:normalize(parts.join('')), inspectedItems, furnitureAssets:furniture.furnitureAssets, footerBoxes:furniture.footerBoxes};
 }
 
 function associateFurnitureSources({furnitureValid, blockSpans, numPages, expectedFurniture}) {
@@ -337,10 +370,17 @@ function associateFurnitureSources({furnitureValid, blockSpans, numPages, expect
   return {sourceAssociation, selectedSources};
 }
 
-function assembleRecompositionReport({pages, expectedBlocks, edits, bytes, mupdf, layoutProfile, sourceBytes, sourcePageIndexes, flowExpectations, findings, spacingEvidence, locations, exporter, furnitureEnabled, furnitureValid, selectedSources, sourceAssociation, furnitureAssets, inspectedItems}) {
+function assembleRecompositionReport({pages, expectedBlocks, edits, bytes, mupdf, layoutProfile, observedFooters, sourceBytes, sourcePageIndexes, flowExpectations, findings, spacingEvidence, locations, exporter, furnitureEnabled, furnitureValid, selectedSources, sourceAssociation, furnitureAssets, inspectedItems}) {
   const observed = normalize(pages.join(' '));
   const expected = normalize(expectedBlocks.map(b => Object.hasOwn(edits,b.id) ? edits[b.id] : b.text).join(' '));
-  const layoutQuality=inspectLayoutQuality({bytes,mupdf,profile:layoutProfile,sourceBytes,sourcePageIndexes});
+  const mergedProfile = observedFooters?.length ? {...(layoutProfile || {}), footers:[...(layoutProfile?.footers || []), ...observedFooters]} : layoutProfile;
+  const layoutQuality=inspectLayoutQuality({bytes,mupdf,profile:mergedProfile,sourceBytes,sourcePageIndexes});
+  for (const issue of layoutQuality.issues || []) if (issue.type === 'footnote-body-overlap') {
+    const col = issue.evidence?.column || 'left';
+    if (!findings.some(f => f.code === 'footnote-body-overlap' && f.pageIndex === issue.pageIndex && (f.column === col || f.column === 'full' || col === 'full'))) {
+      findings.push({code:'footnote-body-overlap', pageIndex:issue.pageIndex, column:col, deltaBp:issue.evidence?.deltaBp, footnoteBbox:issue.evidence?.footnoteBbox, bodyBbox:issue.evidence?.bodyBbox});
+    }
+  }
   const {flow, flowMatches, flowDifferences} = compareFloatingCaptions({flowExpectations, layoutProfile, layoutQuality, expected, observed, expectedBlocks, edits});
   const representation=representationComparison(expected,observed);
   const reportedDifferences=representation.matches ? representation.differences : flowMatches ? flowDifferences : [];
@@ -402,6 +442,7 @@ export async function checkRecomposition({bytes, expectedBlocks, edits = {}, pdf
   let furnitureAssets = false;
   let inspectedItems = 0;
   let glyphPages = null;
+  const observedFooters = [];
   if (mupdf) {
     try { glyphPages = readOutputGlyphs({bytes:bytes.slice(), mupdf}); } catch { glyphPages = null; }
   }
@@ -415,6 +456,7 @@ export async function checkRecomposition({bytes, expectedBlocks, edits = {}, pdf
       const content = await page.getTextContent();
       const observation = observePageText({content, viewport, furnitureValid, expectedFurniture, outputFurniture, bodyFrame, selectedSources, n, numPages:doc.numPages, findings, glyphPages, spacingEvidence});
       furnitureAssets ||= observation.furnitureAssets;
+      if (observation.footerBoxes?.length) observedFooters.push(...observation.footerBoxes);
       inspectedItems += observation.inspectedItems;
       pages.push(observation.text);
       page.cleanup();
@@ -427,5 +469,5 @@ export async function checkRecomposition({bytes, expectedBlocks, edits = {}, pdf
       if (expectedFurniture.some(t=>t.entryKind === 'asset')) furnitureAssets = true;
     }
   }
-  return assembleRecompositionReport({pages, expectedBlocks, edits, bytes, mupdf, layoutProfile, sourceBytes, sourcePageIndexes, flowExpectations, findings, spacingEvidence, locations, exporter, furnitureEnabled, furnitureValid, selectedSources, sourceAssociation, furnitureAssets, inspectedItems});
+  return assembleRecompositionReport({pages, expectedBlocks, edits, bytes, mupdf, layoutProfile, observedFooters, sourceBytes, sourcePageIndexes, flowExpectations, findings, spacingEvidence, locations, exporter, furnitureEnabled, furnitureValid, selectedSources, sourceAssociation, furnitureAssets, inspectedItems});
 }
