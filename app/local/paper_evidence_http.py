@@ -45,6 +45,32 @@ def _query_blue_sensor(paper_id, data, store):
     return run_blue_sensor(paper_id, max_signals=max_signals, include_external_oracle=include_external, store=store)
 
 
+def _query_supplement_audit(paper_id, data, store):
+    supplements = data.get('supplements')
+    if not isinstance(supplements, list) or len(supplements) > 16:
+        raise ValueError('paper_evidence_request_invalid')
+    from paper_supplement_audit import audit_paper_with_supplements
+    pages_res = store.list_items(paper_id, kind='page', offset=0, limit=500)
+    page_items = [store.read_item(paper_id, m['id']) for m in pages_res.get('items', [])]
+    try:
+        return audit_paper_with_supplements(page_items, supplements)
+    except ValueError:
+        raise ValueError('paper_evidence_request_invalid') from None
+
+
+_QUERY_HANDLERS = {
+    'status': lambda pid, _d, store: store.status(pid),
+    'analyses': lambda pid, _d, store: store.list_analyses(pid),
+    'analysis': lambda pid, d, store: store.read_analysis(pid, d.get('analysisId')),
+    'list': lambda pid, d, store: store.list_items(
+        pid, kind=d.get('kind'), page_index=d.get('pageIndex'), offset=d.get('offset', 0), limit=d.get('limit', 50)),
+    'item': lambda pid, d, store: store.read_item(pid, d.get('itemId')),
+    'blue_sensor': _query_blue_sensor,
+    'supplement_audit': _query_supplement_audit,
+    'render': lambda pid, d, store: store.render_region(pid, d.get('pageIndex'), bbox=d.get('bbox'), dpi=d.get('dpi', 120)),
+}
+
+
 def query(data, *, store=None):
     if not isinstance(data, dict):
         raise ValueError('paper_evidence_request_invalid')
@@ -53,6 +79,7 @@ def query(data, *, store=None):
         'status': set(), 'list': {'kind', 'pageIndex', 'offset', 'limit'},
         'item': {'itemId'}, 'render': {'pageIndex', 'bbox', 'dpi'}, 'analyses': set(), 'analysis': {'analysisId'},
         'blue_sensor': {'maxSignals', 'includeExternalOracle'},
+        'supplement_audit': {'supplements'},
     }
     if not isinstance(operation, str) or operation not in fields or set(data) - {'paperId', 'operation'} - fields[operation]:
         raise ValueError('paper_evidence_operation_invalid')
@@ -61,12 +88,6 @@ def query(data, *, store=None):
         raise ValueError('paper_evidence_id_invalid')
     store = _store(store)
     try:
-        if operation == 'status': return store.status(paper_id)
-        if operation == 'analyses': return store.list_analyses(paper_id)
-        if operation == 'analysis': return store.read_analysis(paper_id, data.get('analysisId'))
-        if operation == 'list': return store.list_items(paper_id, kind=data.get('kind'), page_index=data.get('pageIndex'), offset=data.get('offset', 0), limit=data.get('limit', 50))
-        if operation == 'item': return store.read_item(paper_id, data.get('itemId'))
-        if operation == 'blue_sensor': return _query_blue_sensor(paper_id, data, store)
-        return store.render_region(paper_id, data.get('pageIndex'), bbox=data.get('bbox'), dpi=data.get('dpi', 120))
+        return _QUERY_HANDLERS[operation](paper_id, data, store)
     except KeyError:
         raise ValueError('paper_evidence_expired_or_missing') from None
