@@ -35,6 +35,7 @@ from paper_registry_identifiers import (
 from paper_figure_forensics import audit_figure_forensics
 from paper_raw_dataset_audit import audit_raw_datasets
 from paper_supplement_audit import audit_paper_with_supplements, infer_supplement_kind
+from paper_tabular_notebook_loader import parse_ipynb_notebook, parse_xlsx_workbook
 
 MAX_SUPPLEMENTS = 12
 MAX_BUNDLE_BYTES = 25 * 1024 * 1024
@@ -44,7 +45,7 @@ MAX_SIGNALS_LIMIT = 100
 MAX_ORACLE_REFS = 50
 TEXT_EXTENSIONS = frozenset({
     ".csv", ".tsv", ".json", ".md", ".txt", ".log",
-    ".py", ".r", ".sql", ".tex", ".yaml", ".yml",
+    ".py", ".r", ".rmd", ".qmd", ".sql", ".tex", ".yaml", ".yml",
 })
 FORBIDDEN_RED_KEYS = frozenset({
     "before", "after", "patch", "gold", "why_hard", "candidateRationales",
@@ -129,7 +130,11 @@ def _extract_docx_text(raw):
     return "\n".join(paragraphs)
 
 
-def _decode_supplement(ext, raw):
+def _decode_supplement(ext, raw, name="supplement"):
+    if ext == ".xlsx":
+        return parse_xlsx_workbook(raw, name=name or "workbook.xlsx")
+    if ext == ".ipynb":
+        return parse_ipynb_notebook(raw, name=name or "notebook.ipynb")
     if ext == ".json":
         return _extract_json_text(raw)
     if ext in TEXT_EXTENSIONS:
@@ -156,7 +161,26 @@ def _load_one_supplement(raw_path, index, running_bytes):
         raise ValueError("paper_evidence_supplement_invalid") from None
     if len(raw) != size:
         raise ValueError("paper_evidence_supplement_invalid")
-    text = _decode_supplement(path.suffix.lower(), raw)
+    decoded = _decode_supplement(path.suffix.lower(), raw, path.name)
+    entry = _bundle_entry(path, index, raw, decoded)
+    return entry, running_bytes + len(raw)
+
+
+def _decoded_parts(name, decoded):
+    if not isinstance(decoded, dict):
+        return decoded, {}
+    extra = {}
+    low = str(name or "").lower()
+    if low.endswith(".xlsx"):
+        extra["sheets"] = decoded.get("sheets") or []
+        extra["formulaSignals"] = decoded.get("formulaSignals") or []
+    if low.endswith(".ipynb"):
+        extra["notebook"] = decoded
+    return decoded.get("text") or "", extra
+
+
+def _bundle_entry(path, index, raw, decoded):
+    text, extra = _decoded_parts(path.name, decoded)
     entry = {
         "supplementId": f"supp-{index + 1}",
         "name": path.name,
@@ -166,7 +190,8 @@ def _load_one_supplement(raw_path, index, running_bytes):
         "charCount": len(text),
         "text": text,
     }
-    return entry, running_bytes + len(raw)
+    entry.update(extra)
+    return entry
 
 
 def load_selected_supplements(paths):
@@ -316,6 +341,8 @@ def _compact_sensor_digest(res):
         "signals": signals,
         "bibliography": res.get("bibliography"),
     }
+    if "internalConsistency" in res:
+        digest["internalConsistency"] = res["internalConsistency"]
     if res.get("figureForensics") is not None:
         digest["figureForensics"] = res["figureForensics"]
     if res.get("flowAndSpinTriage") is not None:
@@ -437,7 +464,10 @@ def recompute_raw_supplement_payload(store, paper_id, file_hash, bundle, supplem
     return out
 
 
-def _sensor_call(file_hash, max_signals, store, include_figure_forensics, include_flow_triage):
+def _sensor_call(
+    file_hash, max_signals, store, include_figure_forensics, include_flow_triage,
+    include_internal_consistency=False,
+):
     kwargs = {
         "file_hash": file_hash,
         "max_signals": max_signals,
@@ -448,6 +478,8 @@ def _sensor_call(file_hash, max_signals, store, include_figure_forensics, includ
     accepted = inspect.signature(paper_blue_sensor.run_blue_sensor).parameters
     if "include_flow_triage" in accepted:
         kwargs["include_flow_triage"] = include_flow_triage
+    if "include_internal_consistency" in accepted:
+        kwargs["include_internal_consistency"] = include_internal_consistency
     return kwargs
 
 
@@ -469,6 +501,7 @@ def audit_code_supplements_payload(store, paper_id, file_hash, bundle, supplemen
 def run_blue_sensor_payload(
     store, paper_id, file_hash, max_signals=50, digest_only=False,
     include_figure_forensics=False, include_flow_triage=False,
+    include_internal_consistency=False,
 ):
     """Run offline Layer 0 BLUE PDF forensic sensor and optionally compact to digestOnly."""
     if type(digest_only) is not bool:
@@ -477,9 +510,14 @@ def run_blue_sensor_payload(
         raise ValueError("include_figure_forensics")
     if type(include_flow_triage) is not bool:
         raise ValueError("include_flow_triage")
+    if type(include_internal_consistency) is not bool:
+        raise ValueError("include_internal_consistency")
     res = paper_blue_sensor.run_blue_sensor(
         paper_id,
-        **_sensor_call(file_hash, max_signals, store, include_figure_forensics, include_flow_triage),
+        **_sensor_call(
+            file_hash, max_signals, store, include_figure_forensics, include_flow_triage,
+            include_internal_consistency,
+        ),
     )
     return _compact_sensor_digest(res) if digest_only else res
 
