@@ -703,3 +703,15 @@ PDF는 원래 페이지 위에서 데이터 획만 지우고 직선 경로와 �
 - **다자간 `N×M` 아레나 토너먼트, 이종 BLUE 앙상블 합의기, 캠페인 `--resume` & 32케이스 벤치마크 `v4` (`w11-a1`, `w11-a2`)**: `arena_tournament.py`(`falsify arena tournament`)로 복수 RED×BLUE 라운드로빈 대결의 Laplace Bradley-Terry·순서 불변 배치 Elo·Pareto 리더보드를 산출하고, `blue_ensemble.py`(`falsify blue ensemble`)로 소수 모델 단독 결함 지적을 삭제 없이 `확인필요`로 보존·확정하며, `arena_campaign.py`에 `--checkpoint-dir`/`--resume`/`--max-total-seconds`를 추가하고, `benchmark_suite.py`(`corpusVersion = "v4"`)를 18종 Gold + 14종 Benign-Trap Holdout 총 32케이스로 확장했다.
 
 통합 검증에서 생산 코드 복잡도 254개 파일 13,345개 함수 `max CCN = 15`(`>15: 0`, 파싱 오류 0), 복잡도 래칫 통과, 앱 Node·Cloud API(57개)·패키징(13개)·브라우저 합성 회귀 전 스위트 통과, 포터블 러너(`v033`~`v041` 66개 및 `adversarial_red_v01`~`v04` 27개 총 93개) 통과, 평가·벤치마크 스위트 105개 통과, 앱 Python 계약 스위트 1,361개 통과·7개 건너뜀·실패 0개를 확인한다(`sourceBuildVerified: false` 유지). 결과를 `0.2.0-alpha.72`로 패키징해 GitHub `main`·릴리스 태그·Pages·로컬 `falsify-public` 설치본 및 `Pseudo-Lab/Falsify` 피처 브랜치(`feat/workbench-html-guide-20261012`)에 동기화하며, 영수증과 WorkBite 대기 기록(`T-0152`)은 소스 밖 `coordination/agent-first6-wave11-20261116`에 보관한다.
+
+## 2026-11-16 Wave 12 실전 평가 결함 수정 및 alpha.73 배포
+
+공개 프리프린트 3편 실전 평가(`coordination/field-eval-20261116`, Git 외부)에서 드러난 결함을 고쳤다. 조율자는 인수인계서의 주장을 `6f48b92`에서 재현해 계획서(`coordination/wave12-plan-20261116/PLAN.md`)를 쓰고, 파일 경계가 분리된 5개 작업 트리(`w12-r1`, `w12-b1`, `w12-b2`, `w12-b3`, `w12-a1`)를 OpenCode Seat의 동일 모델 하위 작업자에게 맡긴 뒤 브랜치별 diff·단위 테스트·실전 수용 수치를 직접 검수해 병합했다.
+
+- `w12-r1`: 서브셋 폰트 재등록, 단어 단위 삽입(` ` 제거), 같은 스팬 오른쪽 단어 폭 제한. 실전 3건 `red apply` 종료 코드 0.
+- `w12-b1`: 줄바꿈 DOI 묶음 판정. 원본 DOI 신호 15 → 0, 변조본 1건.
+- `w12-b3`: 정수 스팬 색 `0xRRGGBB` 해석, 산문 줄 숫자 눈금 제외. 숨은 텍스트 51 → 0, 축 1 → 0.
+- `w12-b2`: 인용 검증기 시각 순서 폴백(`visual_order`). 누락 3 → 0.
+- `w12-a1`: 변경 토큰 근거 매칭, 다른 페이지 모순, 결합 골드, 분할 지적. 실전 `fn` 6 → 0.
+
+미해결: 변조기의 읽기 순서 누출(`readingOrderOk: false`)은 `w12-r2` 조사 보고서(`coordination/wave12-plan-20261116/W12-R2-report.md`)까지만 진행했다. 실전 BLUE 재현율 10/10은 이 누출이 있는 변조본에서 나온 값이다.
