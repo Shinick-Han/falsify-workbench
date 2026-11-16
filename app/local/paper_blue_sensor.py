@@ -216,19 +216,85 @@ def _parse_author_year_with_boxes(ref_lines):
     return entries
 
 
+_DOI_URI_PREFIXES = ("doi:", "https://doi.org/")
+_LINE_BIN_POINTS = 3.0
+
+
+def _doi_value_offset(token):
+    """Offset of the DOI value inside a token such as ``doi:10.1/x`` or a bare DOI."""
+    low = (token or "").lower()
+    best = -1
+    for prefix in _DOI_URI_PREFIXES:
+        pos = low.rfind(prefix)
+        if pos >= 0:
+            best = max(best, pos + len(prefix))
+    return max(best, 0)
+
+
+def _is_complete_doi_token(token):
+    offset = _doi_value_offset(token)
+    value = _clean_doi_token(token[offset:] if offset else token)
+    return bool(_VALID_DOI_RE.fullmatch(value))
+
+
+def _ends_with_wrapped_doi(text):
+    """True when the last whitespace token is a DOI prefix left dangling by a line break."""
+    tokens = (text or "").rsplit(None, 1)
+    if not tokens:
+        return False
+    last = tokens[-1]
+    if not last.lower().startswith(_DOI_URI_PREFIXES):
+        return False
+    return not _is_complete_doi_token(last)
+
+
+def _join_wrapped_doi(prev, nxt):
+    """Join the next line without a space only when it completes a parseable DOI."""
+    joined = prev + nxt
+    if _VALID_DOI_RE.match(joined, _doi_value_offset(joined)):
+        return joined
+    return prev + " " + nxt
+
+
+def _join_entry_lines(lines):
+    """Space-joined reference text, with line-wrapped DOIs re-joined without the break."""
+    parts = []
+    for _page, _bbox, txt in lines:
+        text = (txt or "").strip()
+        if not text:
+            continue
+        if parts and _ends_with_wrapped_doi(parts[-1]):
+            parts[-1] = _join_wrapped_doi(parts[-1], text)
+        else:
+            parts.append(text)
+    return " ".join(parts)
+
+
+def _merged_dois(raw_text, dewrapped_text):
+    dois = _extract_valid_dois(raw_text)
+    seen = {d.lower() for d in dois}
+    for doi in _extract_valid_dois(dewrapped_text):
+        if doi.lower() not in seen:
+            seen.add(doi.lower())
+            dois.append(doi)
+    return dois
+
+
 def _finalize_entries(raw_entries):
     out = []
     for entry in raw_entries:
         raw_text = " ".join(ln[2] for ln in entry["lines"] if ln[2]).strip()
         if not raw_text:
             continue
+        dewrapped_text = _join_entry_lines(entry["lines"])
         years = _YEAR.findall(raw_text)
         out.append({
             "index": entry["index"],
             "pageIndex": entry["pageIndex"],
             "lines": entry["lines"],
             "rawText": raw_text,
-            "dois": _extract_valid_dois(raw_text),
+            "dewrappedText": dewrapped_text,
+            "dois": _merged_dois(raw_text, dewrapped_text),
             "pmids": _extract_pmids(raw_text),
             "year": int(years[-1]) if years else None,
         })
@@ -301,13 +367,23 @@ def _normalize_article_uri(uri):
     return ("uri", f"{parts.netloc.lower()}{path}{'?' + query if query else ''}")
 
 
-def _check_link_mismatch(page_idx, uri, visible_text, matched_entry):
+def _visible_doi_candidates(visible_text, matched_entry):
+    candidates = _extract_valid_dois(visible_text)
+    seen = {d.lower() for d in candidates}
+    for doi in (matched_entry["dois"] if matched_entry else []):
+        if doi.lower() not in seen:
+            seen.add(doi.lower())
+            candidates.append(doi)
+    return candidates
+
+
+def _check_link_mismatch(page_idx, uri, visible_text, matched_entry, excerpt_text=None):
     uri_dois = _extract_valid_dois(uri)
     uri_pmids = _extract_pmids(uri)
-    vis_dois = _extract_valid_dois(visible_text) or (matched_entry["dois"] if matched_entry else [])
+    vis_dois = _visible_doi_candidates(visible_text, matched_entry)
     vis_pmids = _extract_pmids(visible_text) or (matched_entry["pmids"] if matched_entry else [])
     ref_idx = matched_entry["index"] if matched_entry else None
-    excerpt = visible_text or (matched_entry["rawText"] if matched_entry else uri)
+    excerpt = excerpt_text or visible_text or (matched_entry["rawText"] if matched_entry else uri)
 
     if uri_dois and vis_dois and uri_dois[0].lower() not in {d.lower() for d in vis_dois}:
         return _signal(
@@ -326,18 +402,32 @@ def _check_link_mismatch(page_idx, uri, visible_text, matched_entry):
     return None
 
 
-def _process_one_link(page, idx, link, page_entries, entry_targets):
+def _rect_words(words, rect):
+    """Words whose centre point falls inside the link rectangle, in reading order."""
+    picked = []
+    for word in words or ():
+        centre = pymupdf.Point((word[0] + word[2]) / 2.0, (word[1] + word[3]) / 2.0)
+        if rect.contains(centre):
+            picked.append(word)
+    picked.sort(key=lambda word: (round(word[1] / _LINE_BIN_POINTS), word[0]))
+    return picked
+
+
+def _link_visible_text(words, rect):
+    return " ".join(word[4] for word in _rect_words(words, rect)).strip()
+
+
+def _link_fragment(idx, link, words, page_entries, entry_targets):
     uri = str(link.get("uri") or "").strip()
     if not uri or not _is_external_uri(uri):
         return None
     rect = pymupdf.Rect(link["from"]) if link.get("from") else pymupdf.Rect(0, 0, 0, 0)
-    visible_text = " ".join(page.get_text("text", clip=rect + (-2, -2, 2, 2)).split())
+    visible_text = _link_visible_text(words, rect)
     matched = _match_link_to_entry(idx, rect, page_entries)
     uri_dois = _extract_valid_dois(uri)
     target = _normalize_article_uri(uri)
     if matched is not None and target is not None:
         entry_targets[id(matched)].add(target)
-    sig = _check_link_mismatch(idx, uri, visible_text, matched)
     vis_dois = _extract_valid_dois(visible_text) or (matched["dois"] if matched else [])
     record = {
         "pageIndex": idx,
@@ -347,7 +437,67 @@ def _process_one_link(page, idx, link, page_entries, entry_targets):
         "uriDoi": uri_dois[0] if uri_dois else None,
         "refIndex": matched["index"] if matched else None,
     }
-    return sig, bool(uri_dois), record
+    return {
+        "pageIndex": idx,
+        "uri": uri,
+        "text": visible_text,
+        "rect": rect,
+        "entry": matched,
+        "hasDoi": bool(uri_dois),
+        "record": record,
+    }
+
+
+def _collect_link_fragments(doc, page_limit, by_page, entry_targets):
+    fragments, records = [], []
+    total_links, doi_links = 0, 0
+    for idx in range(page_limit):
+        page = doc[idx]
+        links = page.get_links() or []
+        if not links:
+            continue
+        words = page.get_text("words") or []
+        for link in links:
+            fragment = _link_fragment(idx, link, words, by_page.get(idx, []), entry_targets)
+            if fragment is None:
+                continue
+            total_links += 1
+            doi_links += 1 if fragment["hasDoi"] else 0
+            fragments.append(fragment)
+            if len(records) < MAX_LINKS_RETURNED:
+                records.append(fragment["record"])
+    return fragments, records, total_links, doi_links
+
+
+def _fragment_order_key(fragment):
+    """Order fragments by the bibliography line they cover, then by position on the page."""
+    entry = fragment["entry"]
+    rect = fragment["rect"]
+    y_key, x_key = round(rect.y0 / _LINE_BIN_POINTS), round(rect.x0, 1)
+    if entry is None:
+        return (y_key, y_key, x_key)
+    best_pos, best_area = len(entry["lines"]), 0.0
+    for pos, (page_idx, bbox, _txt) in enumerate(entry["lines"]):
+        if page_idx != fragment["pageIndex"]:
+            continue
+        area = (rect & (pymupdf.Rect(bbox) + (-2.5, -2.5, 2.5, 2.5))).get_area()
+        if area > best_area:
+            best_area, best_pos = area, pos
+    return (best_pos, y_key, x_key)
+
+
+def _group_link_fragments(fragments):
+    """Group same-page fragments sharing a /URI and a bibliography entry, in reading order."""
+    groups, order = {}, []
+    for fragment in fragments:
+        key = (fragment["pageIndex"], fragment["uri"], fragment["record"]["refIndex"])
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(fragment)
+    for key in order:
+        groups[key].sort(key=_fragment_order_key)
+    return [groups[key] for key in order]
 
 
 def _scan_page_links(doc, page_limit, entries):
@@ -357,26 +507,22 @@ def _scan_page_links(doc, page_limit, entries):
         entry_targets[id(entry)].update(("doi", d.lower()) for d in entry["dois"])
         entry_targets[id(entry)].update(("pmid", p) for p in entry["pmids"])
 
-    signals, link_records = [], []
-    total_links, doi_links, mismatch_count = 0, 0, 0
-    for idx in range(page_limit):
-        page = doc[idx]
-        for link in page.get_links() or []:
-            processed = _process_one_link(page, idx, link, by_page.get(idx, []), entry_targets)
-            if processed is None:
-                continue
-            sig, has_doi, record = processed
-            total_links += 1
-            doi_links += 1 if has_doi else 0
-            if sig is not None:
-                mismatch_count += 1
-                signals.append(sig)
-            if len(link_records) < MAX_LINKS_RETURNED:
-                link_records.append(record)
+    fragments, link_records, total_links, doi_links = _collect_link_fragments(
+        doc, page_limit, by_page, entry_targets,
+    )
+    signals = []
+    for group in _group_link_fragments(fragments):
+        first = group[0]
+        joined = "".join(fragment["text"] for fragment in group)
+        sig = _check_link_mismatch(
+            first["pageIndex"], first["uri"], joined, first["entry"], excerpt_text=first["text"],
+        )
+        if sig is not None:
+            signals.append(sig)
     return signals, entry_targets, {
         "total": total_links,
         "doiLinks": doi_links,
-        "mismatchCount": mismatch_count,
+        "mismatchCount": len(signals),
         "sharedTargetCount": 0,
         "links": link_records,
     }
@@ -521,7 +667,10 @@ def _find_malformed_doi_tokens(text):
 def _detect_malformed_dois(entries, link_records):
     signals, seen = [], set()
     for entry in entries:
+        dewrapped_bad = set(_find_malformed_doi_tokens(entry.get("dewrappedText") or entry["rawText"]))
         for tok in _find_malformed_doi_tokens(entry["rawText"]):
+            if tok not in dewrapped_bad:
+                continue
             key = (entry["pageIndex"], tok)
             if key in seen:
                 continue
