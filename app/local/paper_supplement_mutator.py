@@ -125,10 +125,13 @@ def _named(entry, index, suffix):
 
 
 def _raw_of(rec):
-    raw = rec.get('rawBytes') if isinstance(rec, dict) else None
-    if isinstance(raw, (bytes, bytearray)) and raw:
-        return bytes(raw)
-    encoded = rec.get('contentBase64') if isinstance(rec, dict) else None
+    if not isinstance(rec, dict):
+        return None
+    for key in ('rawBytes', 'bytes'):
+        raw = rec.get(key)
+        if isinstance(raw, (bytes, bytearray)) and raw:
+            return bytes(raw)
+    encoded = rec.get('contentBase64')
     if not isinstance(encoded, str) or not encoded:
         return None
     try:
@@ -204,7 +207,7 @@ def _plain_text_dict(entry):
         return False
     if entry.get('format') in ('xlsx', 'ipynb'):
         return False
-    if entry.get('rawBytes') is not None or entry.get('contentBase64'):
+    if entry.get('rawBytes') is not None or entry.get('bytes') is not None or entry.get('contentBase64'):
         return False
     name = str(entry.get('name') or '').lower()
     return not name.endswith(('.xlsx', '.ipynb'))

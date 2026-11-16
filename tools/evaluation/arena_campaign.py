@@ -600,9 +600,11 @@ def _checkpoint_harness(ctx: dict):
 
 
 def _runtime_state(ctx: dict) -> dict:
+    bench = ctx['bench']
+    clean_bench = {k: v for k, v in bench.items() if k != 'caseResults'} if isinstance(bench, dict) else bench
     return {
         'metrics': ctx['metrics'],
-        'bench': ctx['bench'],
+        'bench': clean_bench,
         'holdoutPureFp': ctx['holdout_fp'],
         'stealthYield': ctx.get('stealth_yield'),
     }

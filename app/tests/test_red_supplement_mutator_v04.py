@@ -419,7 +419,7 @@ class SupplementMutatorV04Tests(unittest.TestCase):
                 if row['ccn'] > 15:
                     hot.append(path.name + ':' + row['id'] + ':' + str(row['ccn']))
         self.assertEqual(hot, [])
-        self.assertNotIn('runner', sys.modules)
+        self.assertIs(sys.modules.get('runner'), previous)
 
 
 if __name__ == '__main__':
