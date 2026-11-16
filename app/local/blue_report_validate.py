@@ -104,6 +104,9 @@ _TYPO_REPL = {
     "\u200b": "", "\ufeff": "", "\u00ad": "",
 }
 _WRAP_HYPHENS = frozenset("-\u2010\u2011\u2012\u2013\u2014\u2015\u2212")
+_VISUAL_BASELINE_TOLERANCE = 3.5
+_VISUAL_OPENERS = "([{"
+_VISUAL_CLOSERS = ")]}.,;:!?"
 _REPAIR_ACTIONS = (
     "replace_quote_with_verbatim_substring",
     "downgrade_verdictLabel_to_확인필요",
@@ -142,8 +145,12 @@ def _fail(code: str, message: str, *, exit_code: int = 2, recovery_hint: str = "
 
 
 def collapse_ws(value) -> str:
-    """Collapse every whitespace run (including soft hyphens) into single spaces."""
-    return _WS_RE.sub(" ", str(value or "").replace(_SOFT_HYPHEN, "")).strip()
+    """Collapse every whitespace run (including soft hyphens and NULs) into single spaces.
+
+    Subset fonts without a space glyph leave ``\\x00`` where a rewritten word
+    space should be, so a NUL is treated as the space it stands in for.
+    """
+    return _WS_RE.sub(" ", str(value or "").replace(_SOFT_HYPHEN, "").replace("\x00", " ")).strip()
 
 
 def normalize_verdict_label(raw) -> str:
@@ -477,11 +484,105 @@ def _restore_preserved_text(page, lines: list[dict]) -> None:
         line["text"] = raw
 
 
+def _rect_distance(first: list[float], second: list[float]) -> float:
+    """Approximate gap between two boxes (zero when they touch or overlap)."""
+    gap_x = max(first[0] - second[2], second[0] - first[2], 0.0)
+    gap_y = max(first[1] - second[3], second[1] - first[3], 0.0)
+    return math.hypot(gap_x, gap_y)
+
+
+def _nearest_line_column(bbox: list[float], lines: list[dict]) -> str:
+    """Column label of the visually closest extracted line (see ``_order_blocks``)."""
+    column, best = "full", None
+    for line in lines:
+        distance = _rect_distance(bbox, line["bbox"])
+        if best is None or distance < best:
+            column, best = line.get("column") or "full", distance
+    return column
+
+
+def _visual_words(page, lines: list[dict]) -> list[dict]:
+    """Word boxes with their reading column, NULs already folded into spaces."""
+    words = []
+    for raw in page.get_text("words") or []:
+        text = collapse_ws(raw[4])
+        if not text:
+            continue
+        bbox = [round(float(value), 2) for value in raw[:4]]
+        words.append({"bbox": bbox, "text": text, "column": _nearest_line_column(bbox, lines)})
+    return words
+
+
+def _visual_line_runs(words: list[dict], column: str) -> list[dict]:
+    """Cluster one column's words into visual lines by baseline proximity."""
+    runs: list[dict] = []
+    current = [word for word in words if word["column"] == column]
+    for word in sorted(current, key=lambda item: (item["bbox"][3], item["bbox"][0])):
+        baseline = word["bbox"][3]
+        if runs and baseline - runs[-1]["baseline"] <= _VISUAL_BASELINE_TOLERANCE:
+            runs[-1]["words"].append(word)
+            continue
+        runs.append({"column": column, "baseline": baseline, "words": [word]})
+    return runs
+
+
+def _visual_band(runs: list[dict]) -> list[dict]:
+    """Left column before right column, each top to bottom."""
+    def key(run):
+        return run["baseline"], min(word["bbox"][0] for word in run["words"])
+
+    return (sorted((run for run in runs if run["column"] == "left"), key=key)
+            + sorted((run for run in runs if run["column"] == "right"), key=key))
+
+
+def _visual_order(runs: list[dict]) -> list[dict]:
+    """Order visual lines: full-width runs split the bands around them."""
+    ordered, remaining = [], [run for run in runs if run["column"] != "full"]
+    for full in sorted((run for run in runs if run["column"] == "full"),
+                       key=lambda run: (run["baseline"], min(w["bbox"][0] for w in run["words"]))):
+        above = [run for run in remaining if run["baseline"] < full["baseline"]]
+        remaining = [run for run in remaining if run["baseline"] >= full["baseline"]]
+        ordered.extend(_visual_band(above))
+        ordered.append(full)
+    ordered.extend(_visual_band(remaining))
+    return ordered
+
+
+def _join_visual_lines(runs: list[dict]) -> dict:
+    """Join ordered visual lines with single spaces and map char ranges to word boxes."""
+    parts: list[str] = []
+    words: list[dict] = []
+    cursor = 0
+    for run in runs:
+        for word in sorted(run["words"], key=lambda item: item["bbox"][0]):
+            if parts:
+                parts.append(" ")
+                cursor += 1
+            start = cursor
+            parts.append(word["text"])
+            cursor += len(word["text"])
+            words.append({"start": start, "end": cursor, "bbox": word["bbox"]})
+    return {"text": "".join(parts), "words": words}
+
+
+def _visual_text(page, lines: list[dict]) -> dict:
+    """Reading-order text: words sorted by column then baseline, not by block order."""
+    words = _visual_words(page, lines)
+    runs = [run for column in ("left", "right", "full")
+            for run in _visual_line_runs(words, column)]
+    return _join_visual_lines(_visual_order(runs))
+
+
 def _page_record(page, idx: int) -> dict:
     lines = _extract_page_lines(page, idx)
     _restore_preserved_text(page, lines)
     text, spans, preserved, origins, wraps = _join_lines(lines)
-    return {"pageIndex": idx, "lines": lines, "spans": spans, **_index_fields(text, preserved, origins, wraps)}
+    visual = _visual_text(page, lines)
+    return {
+        "pageIndex": idx, "lines": lines, "spans": spans,
+        "visualText": visual["text"], "visualWords": visual["words"],
+        **_index_fields(text, preserved, origins, wraps),
+    }
 
 
 def _page_records(pdf_bytes: bytes) -> list[dict]:
@@ -501,8 +602,10 @@ def _scoped_pages(pages: list[dict], page_index: int | None) -> list[dict]:
     return pages
 
 
-def _quote_hit(status: str, mode: str, page: dict, start: int, end: int) -> dict:
-    return {"status": status, "matchMode": mode, "page": page, "span": (start, end)}
+def _quote_hit(status: str, mode: str, page: dict, start: int, end: int,
+               bbox: list[float] | None = None) -> dict:
+    return {"status": status, "matchMode": mode, "page": page, "span": (start, end),
+            "bbox": bbox}
 
 
 def _mapped_span(origins: list[int], pos: int, length: int) -> tuple[int, int] | None:
@@ -576,15 +679,100 @@ def _locate_folded(pages: list[dict], quote: str) -> dict | None:
     return None
 
 
+def _space_hugs_punctuation(text: str, idx: int) -> bool:
+    """True for a space right after an opener or right before a closer."""
+    if idx and text[idx - 1] in _VISUAL_OPENERS:
+        return True
+    for pos in range(idx + 1, len(text)):
+        char = text[pos]
+        if not char.isspace():
+            return char in _VISUAL_CLOSERS
+    return False
+
+
+def _drop_bracket_spaces(text: str, origins: list[int]) -> tuple[str, list[int]]:
+    """Drop spaces hugging brackets and closing punctuation, keeping source indexes.
+
+    Visual layout splits a glyph run such as ``(0.25)`` into separate words, so
+    ``( 0.25 )`` and ``(0.25)`` must compare equal on the visual path.
+    """
+    out, mapped = [], []
+    for idx, char in enumerate(text):
+        if char.isspace() and _space_hugs_punctuation(text, idx):
+            continue
+        out.append(char)
+        mapped.append(origins[idx])
+    return "".join(out), mapped
+
+
+def _fold_visual(value) -> tuple[str, list[int]]:
+    """Fold typography in reading-order text and index it back to ``visualText``."""
+    folded, origins = _collapse_mapped(*_expand_mapped(value))
+    return _drop_bracket_spaces(folded, origins)
+
+
+def _visual_index(page: dict) -> dict:
+    cached = page.get("visualIndex")
+    if cached is None:
+        folded, origins = _fold_visual(page.get("visualText") or "")
+        cached = {"text": folded, "origins": origins}
+        page["visualIndex"] = cached
+    return cached
+
+
+def _visual_bbox(page: dict, origins: list[int], pos: int, length: int) -> list[float] | None:
+    last = pos + length - 1
+    if pos < 0 or last >= len(origins):
+        return None
+    start, end = origins[pos], origins[last] + 1
+    boxes = [
+        word["bbox"] for word in page.get("visualWords") or []
+        if word["end"] > start and word["start"] < end
+    ]
+    if not boxes:
+        return None
+    return [
+        round(min(box[0] for box in boxes), 2),
+        round(min(box[1] for box in boxes), 2),
+        round(max(box[2] for box in boxes), 2),
+        round(max(box[3] for box in boxes), 2),
+    ]
+
+
+def _locate_visual(pages: list[dict], needle: str) -> dict | None:
+    """Last resort: find the quote in reading-order text, ignoring block order.
+
+    The returned span indexes ``visualText`` (not the block-order page text), so
+    callers must use the hit ``bbox`` instead of ``_span_bbox``.
+    """
+    folded, _origins = _fold_visual(needle)
+    if not folded:
+        return None
+    for page in pages:
+        if not page.get("visualText"):
+            continue
+        index = _visual_index(page)
+        pos = index["text"].find(folded)
+        if pos < 0:
+            continue
+        bbox = _visual_bbox(page, index["origins"], pos, len(folded))
+        return _quote_hit("normalized", "visual_order", page, pos, pos + len(folded), bbox)
+    return None
+
+
 def _locate_quote(pages: list[dict], quote: str, page_index: int | None) -> dict | None:
     """Locate a quote inside its declared page (when given) or across all pages.
 
     Exact whitespace-collapsed text wins, then case folding, then typographic and
     line-wrap hyphen folding. Folded hits keep a span in the primary page text.
+    Reading-order (visual) text is only searched when both fail, because it
+    exists to rejoin glyph runs that the text layer split into separate blocks.
     """
     needle = collapse_ws(quote)
     scoped = _scoped_pages(pages, page_index)
-    return _locate_exact(scoped, needle) or _locate_folded(scoped, needle)
+    return (_locate_exact(scoped, needle)
+            or _locate_folded(scoped, needle)
+            or _locate_visual(scoped, needle))
 
 
 def _span_bbox(page: dict, span: tuple[int, int]) -> list[float] | None:
@@ -1352,6 +1540,7 @@ def _wrap_pdf(located: dict | None) -> dict | None:
         "matchMode": located.get("matchMode"),
         "page": located["page"],
         "span": located["span"],
+        "bbox": located.get("bbox"),
     }
 
 
@@ -1404,7 +1593,7 @@ def _found_quote_record(finding: dict, index: int, quote: str, located: dict) ->
     return {
         **base,
         "pageIndex": located["page"]["pageIndex"],
-        "bbox": _span_bbox(located["page"], located["span"]),
+        "bbox": located.get("bbox") or _span_bbox(located["page"], located["span"]),
     }
 
 

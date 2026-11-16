@@ -41,6 +41,65 @@ def _build_pdf() -> bytes:
     return raw
 
 
+VISUAL_SIZE = 11
+VISUAL_HEAD = "The total sampling time is 100 us computed via 10 independent replicas"
+VISUAL_GAP = "of 25"
+VISUAL_TAIL = "us."
+VISUAL_SENTENCE = f"{VISUAL_HEAD} {VISUAL_GAP} {VISUAL_TAIL}"
+LEFT_COLUMN = ("Alpha beta gamma", "delta epsilon zeta", "eta theta iota")
+RIGHT_HEAD = "kappa lambda"
+RIGHT_GAP = "nu"
+RIGHT_TAIL = "xi omicron"
+
+
+def _write_gap_line(page, origin, head: str, gap: str, tail: str) -> float:
+    """Write head, tail, then the gap word on one baseline, gap word last.
+
+    The text layer lists the gap word after the tail, so only reading order can
+    put it back between them.
+    """
+    space = pymupdf.get_text_length(" ", fontsize=VISUAL_SIZE)
+    gap_x = origin[0] + pymupdf.get_text_length(head, fontsize=VISUAL_SIZE) + space
+    tail_x = gap_x + pymupdf.get_text_length(gap, fontsize=VISUAL_SIZE) + space
+    page.insert_text(origin, head, fontsize=VISUAL_SIZE)
+    page.insert_text((tail_x, origin[1]), tail, fontsize=VISUAL_SIZE)
+    page.insert_text((gap_x, origin[1]), gap, fontsize=VISUAL_SIZE, overlay=True)
+    return gap_x
+
+
+def _reflow_pdf() -> bytes:
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    _write_gap_line(page, (72, 120), VISUAL_HEAD, VISUAL_GAP, VISUAL_TAIL)
+    raw = doc.tobytes()
+    doc.close()
+    return raw
+
+
+def _two_column_pdf() -> bytes:
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((72, 200), "\n".join(LEFT_COLUMN), fontsize=VISUAL_SIZE)
+    _write_gap_line(page, (320, 200), RIGHT_HEAD, RIGHT_GAP, RIGHT_TAIL)
+    page.insert_text((320, 213), "pi rho sigma", fontsize=VISUAL_SIZE)
+    raw = doc.tobytes()
+    doc.close()
+    return raw
+
+
+def _nul_pdf() -> bytes:
+    """Page whose text layer keeps a NUL where a rewritten word space belongs."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((72, 120), "placeholder", fontsize=VISUAL_SIZE)
+    stream = (b"BT 1 0 0 1 72 700 Tm /helv 11 Tf "
+              b"(the binding energies are as\\000exact rather\\000than relative) Tj ET")
+    doc.update_stream(page.get_contents()[0], stream)
+    raw = doc.tobytes()
+    doc.close()
+    return raw
+
+
 def _report(findings, **extra) -> dict:
     return {
         "schema": "falsify.blue-report.v1",
@@ -135,6 +194,69 @@ class QuoteGateTests(unittest.TestCase):
             self.pdf, _report([{"id": "e1", "quote": MISSING_QUOTE}]), max_candidates=1
         )
         self.assertEqual(len(out["quoteCheck"]["quotes"][0]["nearestCandidates"]), 1)
+
+
+class VisualReadingOrderTests(unittest.TestCase):
+    """Reading-order fallback for glyph runs the text layer split by block order."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reflow_pdf = _reflow_pdf()
+        cls.column_pdf = _two_column_pdf()
+        cls.nul_pdf = _nul_pdf()
+
+    def _quotes(self, pdf: bytes, quotes) -> dict:
+        findings = [
+            {"id": ident, "verdictLabel": "아님", "pageIndex": 0, "quote": quote}
+            for ident, quote in quotes
+        ]
+        out = mod.validate_blue_report(pdf, _report(findings))
+        return {quote["findingId"]: quote for quote in out["quoteCheck"]["quotes"]}
+
+    def test_reflowed_gap_word_matches_sentence_in_visual_order(self):
+        quotes = self._quotes(self.reflow_pdf, [
+            ("whole", VISUAL_SENTENCE),
+            ("head", VISUAL_HEAD),
+        ])
+        whole = quotes["whole"]
+        self.assertEqual(whole["status"], "normalized")
+        self.assertEqual(whole["matchMode"], "visual_order")
+        bbox = whole["bbox"]
+        self.assertLessEqual(bbox[0], 73.0)
+        self.assertGreater(bbox[2], 400.0)
+        self.assertGreater(bbox[3] - bbox[1], 8.0)
+        self.assertEqual(whole["pageIndex"], 0)
+        self.assertEqual(quotes["head"]["status"], "exact")
+        self.assertEqual(quotes["head"]["matchMode"], "exact")
+
+    def test_same_height_columns_are_not_joined(self):
+        quotes = self._quotes(self.column_pdf, [
+            ("inside", f"{RIGHT_HEAD} {RIGHT_GAP} {RIGHT_TAIL}"),
+            ("seam", "gamma kappa lambda"),
+        ])
+        inside = quotes["inside"]
+        self.assertEqual(inside["status"], "normalized")
+        self.assertEqual(inside["matchMode"], "visual_order")
+        self.assertGreaterEqual(inside["bbox"][0], 320.0)
+        self.assertEqual(quotes["seam"]["status"], "missing")
+        self.assertIsNone(quotes["seam"]["bbox"])
+
+    def test_nul_placeholder_matches_a_quote_with_spaces(self):
+        self.assertEqual(mod.collapse_ws("as\x00exact"), "as exact")
+        record = self._quotes(self.nul_pdf, [("nul", "as exact rather than relative")])["nul"]
+        self.assertNotEqual(record["status"], "missing")
+        self.assertEqual(record["status"], "normalized")
+        self.assertIsNotNone(record["bbox"])
+        self.assertGreater(record["bbox"][2], record["bbox"][0])
+
+    def test_quote_absent_from_the_pdf_stays_missing(self):
+        record = self._quotes(self.reflow_pdf, [
+            ("gone", "This sentence never appears in the manuscript at all"),
+        ])["gone"]
+        self.assertEqual(record["status"], "missing")
+        self.assertIsNone(record["pageIndex"])
+        self.assertIsNone(record["bbox"])
+        self.assertGreaterEqual(len(record["nearestCandidates"]), 1)
 
 
 class ZeroDropTests(unittest.TestCase):
