@@ -121,11 +121,33 @@ def _truncated_pdf():
     return _close(doc)
 
 
+def _prose_numbers_pdf():
+    doc, page = _page()
+    page.insert_text(
+        (40, 660),
+        "the ring rises from 60 to 160 lowers mean RMSE from 178.77 to 141.82 MPa",
+        fontsize=10,
+        fontname="helv",
+    )
+    _bars(page, 620, 700)
+    return _close(doc)
+
+
 def _stealth_pdf():
     doc, page = _page()
     page.insert_text((72, 80), "tinyhidden", fontsize=0.8, fontname="helv")
     page.insert_text((72, 160), "whitehidden", fontsize=12, fontname="helv", color=(1, 1, 1))
     page.insert_text((700, 80), "offpageXX", fontsize=11, fontname="helv")
+    return _close(doc)
+
+
+def _colour_text_pdf():
+    doc, page = _page()
+    page.insert_text((72, 100), "[12]", fontsize=10, fontname="helv", color=(0, 0, 1))
+    page.insert_text((72, 130), "doi.org/10.1000/xyz", fontsize=10, fontname="helv", color=(0, 0.2, 0.8))
+    page.insert_text((72, 160), "darkredlabel", fontsize=10, fontname="helv", color=(0.6, 0.05, 0.05))
+    page.insert_text((72, 190), "darkgreenlabel", fontsize=10, fontname="helv", color=(0.05, 0.4, 0.1))
+    page.insert_text((72, 220), "whiteonly", fontsize=12, fontname="helv", color=(1, 1, 1))
     return _close(doc)
 
 
@@ -229,6 +251,19 @@ class HiddenTextTests(unittest.TestCase):
         result = sec.audit_pdf_security(_white_on_dark_pdf())
         self.assertEqual(_of(result, "hidden_pdf_text_layer"), [])
 
+    def test_blue_and_dark_colour_text_is_not_hidden(self):
+        raw = _colour_text_pdf()
+        result = sec.audit_pdf_security(raw)
+        signals = _of(result, "hidden_pdf_text_layer")
+        self.assertEqual([signal["excerpt"] for signal in signals], ["whiteonly"])
+        self.assertEqual(signals[0]["computed"]["reason"], "near-white")
+        with pymupdf.open(stream=raw, filetype="pdf") as doc:
+            text = doc[0].get_text()
+        self.assertIn("[12]", text)
+        self.assertIn("doi.org/10.1000/xyz", text)
+        self.assertIn("darkredlabel", text)
+        self.assertIn("darkgreenlabel", text)
+
     def test_scanned_ocr_layer_is_silent(self):
         result = sec.audit_pdf_security(_scanned_pdf())
         self.assertEqual(result["signals"], [])
@@ -312,6 +347,15 @@ class SubpanelAndAxisTests(unittest.TestCase):
         self.assertEqual(_of(self._run(_linear_pdf()), "axis_scale_distortion"), [])
         self.assertEqual(_of(self._run(_log_pdf()), "axis_scale_distortion"), [])
         self.assertEqual(_of(self._run(_slope_pdf(break_marker=True)), "axis_scale_distortion"), [])
+
+    def test_prose_numbers_are_not_axis_ticks(self):
+        self.assertEqual(_of(self._run(_prose_numbers_pdf()), "axis_scale_distortion"), [])
+
+    def test_tick_row_without_alpha_words_is_still_read(self):
+        raw = _nonmono_pdf()
+        with pymupdf.open(stream=raw, filetype="pdf") as doc:
+            ticks = fig._word_ticks(doc[0])
+        self.assertEqual([tick["text"] for tick in ticks], ["0", "20", "15", "40"])
 
 
 class BundleQualityTests(unittest.TestCase):

@@ -100,10 +100,10 @@ def _channels(color):
 
 
 def _int_channels(color):
+    # PyMuPDF encodes text span colours as a 0xRRGGBB integer, so 0x0000FF is
+    # pure blue, not the grey level 255. Every integer is an sRGB triple here.
     if color < 0:
         return None
-    if color <= 255:
-        return (color, color, color)
     return ((color >> 16) & 255, (color >> 8) & 255, color & 255)
 
 

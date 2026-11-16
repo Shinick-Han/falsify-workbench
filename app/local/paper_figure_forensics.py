@@ -809,22 +809,53 @@ def _page_words(page):
         return []
 
 
+_PROSE_WORD_RE = re.compile(r"[A-Za-z]{3,}")
+
+
+def _line_key(word):
+    if not isinstance(word, (list, tuple)) or len(word) < 7:
+        return None
+    return (word[5], word[6])
+
+
+def _prose_lines(words):
+    # A line carrying two or more alphabetic words is prose, not a tick row, so
+    # numbers such as "from 178.77 to 141.82 MPa" must not become axis ticks.
+    counts = {}
+    for word in words:
+        key = _line_key(word)
+        if key is None or _PROSE_WORD_RE.search(str(word[4])) is None:
+            continue
+        counts[key] = counts.get(key, 0) + 1
+    return frozenset(key for key, count in counts.items() if count >= 2)
+
+
+def _word_tick(word, prose):
+    if not isinstance(word, (list, tuple)) or len(word) < 5:
+        return None
+    if _line_key(word) in prose:
+        return None
+    value = _tick_value(str(word[4]))
+    if value is None:
+        return None
+    x0, y0, x1, y1 = (float(word[0]), float(word[1]), float(word[2]), float(word[3]))
+    return {
+        "value": value,
+        "text": str(word[4]),
+        "bbox": (x0, y0, x1, y1),
+        "cx": (x0 + x1) / 2.0,
+        "cy": (y0 + y1) / 2.0,
+    }
+
+
 def _word_ticks(page):
+    words = _page_words(page)
+    prose = _prose_lines(words)
     ticks = []
-    for word in _page_words(page):
-        if not isinstance(word, (list, tuple)) or len(word) < 5:
-            continue
-        value = _tick_value(str(word[4]))
-        if value is None:
-            continue
-        x0, y0, x1, y1 = (float(word[0]), float(word[1]), float(word[2]), float(word[3]))
-        ticks.append({
-            "value": value,
-            "text": str(word[4]),
-            "bbox": (x0, y0, x1, y1),
-            "cx": (x0 + x1) / 2.0,
-            "cy": (y0 + y1) / 2.0,
-        })
+    for word in words:
+        tick = _word_tick(word, prose)
+        if tick is not None:
+            ticks.append(tick)
     return ticks
 
 
