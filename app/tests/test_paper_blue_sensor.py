@@ -337,5 +337,89 @@ class HttpAndOracleIntegrationTests(unittest.TestCase):
         self.assertTrue(any(s["kind"] == "doi_not_found" for s in res["signals"]))
 
 
+class WrappedDoiLinkTests(unittest.TestCase):
+    """Line-wrapped DOIs and split /URI link rectangles must not raise false DOI signals."""
+
+    def setUp(self):
+        self._net = patch.object(socket, "create_connection", side_effect=_no_network)
+        self._net.start()
+        self.store = pe.EvidenceStore()
+
+    def tearDown(self):
+        self._net.stop()
+
+    def _scan(self, raw):
+        summary = self.store.prepare(raw, sha(raw))
+        return sensor.run_blue_sensor(summary["paperId"], summary["fileHash"], store=self.store)
+
+    def _wrapped_link_pdf(self, uri_suffix):
+        doc = pymupdf.open()
+        p0 = doc.new_page(width=595, height=842)
+        p0.insert_text((72, 70), "References", fontsize=12)
+        p0.insert_text((72, 100), "[1] Kim J. Alloy behaviour study. Acta Materialia. 2003.", fontsize=9.5)
+        p0.insert_text((72, 116), "doi:10.1016/j.msea.", fontsize=9.5)
+        p0.insert_text((72, 132), "2003.10.257.", fontsize=9.5)
+        uri = "https://doi.org/10.1016/j.msea." + uri_suffix
+        for rect in ((70, 106, 240, 122), (70, 122, 180, 138)):
+            p0.insert_link({"kind": pymupdf.LINK_URI, "from": pymupdf.Rect(*rect), "uri": uri})
+        raw = doc.tobytes()
+        doc.close()
+        return raw
+
+    def _wrapped_entry_pdf(self, first_line, second_line):
+        doc = pymupdf.open()
+        p0 = doc.new_page(width=595, height=842)
+        p0.insert_text((72, 70), "References", fontsize=12)
+        p0.insert_text((72, 100), "[1] Kim J. Wrapped metadata study. Journal of Tests. 2019.", fontsize=9.5)
+        p0.insert_text((72, 116), first_line, fontsize=9.5)
+        p0.insert_text((72, 132), second_line, fontsize=9.5)
+        raw = doc.tobytes()
+        doc.close()
+        return raw
+
+    def test_split_link_rectangles_with_shared_uri_raise_no_signal(self):
+        res = self._scan(self._wrapped_link_pdf("2003.10.257"))
+        self.assertEqual(res["signals"], [])
+        self.assertEqual(res["uriLinks"]["total"], 2)
+        self.assertEqual(res["uriLinks"]["mismatchCount"], 0)
+
+    def test_split_link_rectangles_with_hijacked_uri_raise_one_signal(self):
+        res = self._scan(self._wrapped_link_pdf("2003.10.999"))
+        mismatches = [s for s in res["signals"] if s["kind"] == "uri_visible_doi_mismatch"]
+        self.assertEqual(len(mismatches), 1)
+        sig = mismatches[0]
+        self.assertEqual(sig["reported"]["visibleDoi"], "10.1016/j.msea.2003.10.257")
+        self.assertEqual(sig["computed"]["uriDoi"], "10.1016/j.msea.2003.10.999")
+        self.assertEqual(sig["pageIndex"], 0)
+        self.assertEqual(sig["excerpt"], "doi:10.1016/j.msea.")
+        self.assertEqual([s for s in res["signals"] if s["kind"] == "malformed_doi"], [])
+
+    def test_doi_wrapped_after_prefix_or_slash_is_not_malformed(self):
+        cases = (
+            ("doi:", "10.1038/s41524-019-0153-8."),
+            ("doi:10.", "1038/s41524-019-0153-8."),
+            ("doi:10.1016/", "j.actamat.2016.08.081."),
+        )
+        for first_line, second_line in cases:
+            res = self._scan(self._wrapped_entry_pdf(first_line, second_line))
+            malformed = [s for s in res["signals"] if s["kind"] == "malformed_doi"]
+            self.assertEqual(malformed, [], msg=first_line)
+
+    def test_genuinely_malformed_doi_is_still_reported(self):
+        doc = pymupdf.open()
+        p0 = doc.new_page(width=595, height=842)
+        p0.insert_text((72, 70), "References", fontsize=12)
+        p0.insert_text((72, 100), "[1] Lee K. Valid prior study. Lancet. 2021.", fontsize=9.5)
+        p0.insert_text((72, 116), "[2] Chen W. Corrupt DOI reference. Nature. 2022. doi:10.10/x", fontsize=9.5)
+        raw = doc.tobytes()
+        doc.close()
+
+        res = self._scan(raw)
+        malformed = [s for s in res["signals"] if s["kind"] == "malformed_doi"]
+        self.assertEqual(len(malformed), 1)
+        self.assertEqual(malformed[0]["reported"]["token"], "doi:10.10/x")
+        self.assertEqual(malformed[0]["reported"]["refIndex"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()
