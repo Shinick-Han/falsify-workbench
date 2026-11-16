@@ -8,9 +8,10 @@ import re
 import pymupdf
 
 from paper_evidence_text import _order_blocks
-from paper_stealth_audit import BLINDNESS_META_PATTERNS
+from paper_stealth_audit import (BLINDNESS_META_PATTERNS, count_tail_order_jumps, page_font_inventory)
 from paper_supplement_audit import infer_supplement_kind
 from paper_visual_edit import _font, _span
+import preserve
 
 SCHEMA = 'falsify.text-span-mutation.v1'
 LIST_SCHEMA = 'falsify.text-span-list.v1'
@@ -555,28 +556,95 @@ def _text_change_record(plan: dict) -> dict:
         'fontSubstituted': plan['fontSubstituted'],
         'fontSize': round(float(plan['fittedSize']), 2),
         'originalFontSize': round(float(plan['origSize']), 2),
+        'stealth': 'append-insert',
     }
 
 
-def mutate_pdf_text_spans(pdf_bytes: bytes, operations: list[dict]) -> dict:
-    """Apply stealth glyph-only text-span replacements on an in-memory PDF copy."""
-    raw = _require_pdf_bytes(pdf_bytes)
-    if not isinstance(operations, list):
-        raise ValueError('text_span_operations_invalid')
-    if not operations:
-        return {
-            'schema': SCHEMA,
-            'sourceSha256': _sha256(raw),
-            'outputSha256': _sha256(raw),
-            'appliedCount': 0,
-            'changes': [],
-            'modifiedRegions': [],
-            'pdfBytes': raw,
-        }
+def _plan_rects(doc, validated: list[dict]) -> dict:
+    """Resolve every operation's target rectangle on the unedited document."""
+    by_page: dict[int, list[dict]] = {}
+    for op in validated:
+        by_page.setdefault(op['pageIndex'], []).append(op)
+    rects = {}
+    for page_idx, page_ops in by_page.items():
+        page = doc[page_idx]
+        page_lines = _extract_page_lines(page, page_idx)
+        prior_rects: list = []
+        for op in page_ops:
+            rect = _match_span_rect(page, page_lines, op)
+            if any((r & rect).get_area() > 0.01 for r in prior_rects):
+                raise SpanMutationError('text_span_operations_overlap', {
+                    'pageIndex': op['pageIndex'],
+                    'nearestCandidates': _nearest_line_candidates(page_lines, op['before']),
+                    'recoveryHint': 'Two text-span operations target overlapping regions on the same page.',
+                })
+            prior_rects.append(rect)
+            rects[op['id']] = rect
+    return rects
+
+
+def _preserve_patch(op: dict, rect) -> dict:
+    """One preserve patch: the caller-verified box scopes the quote to this occurrence."""
+    return {
+        'label': f"PDF p. {op['pageIndex'] + 1}",
+        'before': op['before'],
+        'after': op['after'],
+        'rect': [round(float(v), 3) for v in (rect.x0, rect.y0, rect.x1, rect.y1)],
+    }
+
+
+def _try_inplace(raw: bytes, items: list[dict]) -> tuple[bytes, set, dict]:
+    """Rewrite the original text operators in place; returns (bytes, applied ids, failure reasons).
+
+    The whole batch is attempted first because preserve verifies every edited page; a patch that
+    cannot be proved is then retried alone so the rest keep their traceless route.
+    """
+    patches = [_preserve_patch(item['op'], item['rect']) for item in items]
+    try:
+        out_bytes, _verification = preserve.export_pdf(raw, patches)
+        return out_bytes, {item['op']['id'] for item in items}, {}
+    except ValueError:
+        pass
+    current, applied, failures = raw, set(), {}
+    for item in items:
+        try:
+            current, _verification = preserve.export_pdf(current, [_preserve_patch(item['op'], item['rect'])])
+            applied.add(item['op']['id'])
+        except ValueError as exc:
+            failures[item['op']['id']] = str(exc)[:240]
+    return current, applied, failures
+
+
+def _inplace_record(out_doc, op: dict, rect) -> dict:
+    """Change record for an operator rewrite: measured position, original font, no substitution."""
+    page = out_doc[op['pageIndex']]
+    hits = page.search_for(op['after'], clip=rect + (-2, -2, 2, 2))
+    box = pymupdf.Rect(hits[0]) if hits else rect
+    span = _span(page, box)
+    size = round(float(span.get('size') or 0.0), 2)
+    return {
+        'id': op['id'],
+        'kind': 'text-span',
+        'pageIndex': op['pageIndex'],
+        'bbox': [round(min(rect.x0, box.x0), 2), round(min(rect.y0, box.y0), 2),
+                 round(max(rect.x1, box.x1), 2), round(max(rect.y1, box.y1), 2)],
+        'before': op['before'],
+        'after': op['after'],
+        'occurrence': op['occurrence'],
+        'font': str(span.get('font') or ''),
+        'fontSubstituted': False,
+        'fontSize': size,
+        'originalFontSize': size,
+        'stealth': 'in-place-operator',
+        'logicalTextOrderPreserved': True,
+    }
+
+
+def _apply_redact_insert(raw: bytes, ops: list[dict]) -> tuple[bytes, list[dict], list[dict]]:
+    """Fallback route: redact the matched box and append the replacement text (leaves a trace)."""
     with pymupdf.open(stream=raw, filetype='pdf') as doc:
-        validated = [_validate_text_op(op, len(doc), i) for i, op in enumerate(operations)]
         by_page: dict[int, list[dict]] = {}
-        for op in validated:
+        for op in ops:
             by_page.setdefault(op['pageIndex'], []).append(op)
         all_plans = []
         font_idx = 0
@@ -596,14 +664,91 @@ def mutate_pdf_text_spans(pdf_bytes: bytes, operations: list[dict]) -> dict:
             for plan in page_plans:
                 changes.append(_text_change_record(plan))
                 modified_regions.append({'pageIndex': plan['op']['pageIndex'], 'bbox': plan['modBbox']})
-        out_bytes = doc.tobytes(garbage=4, deflate=True)
+        return doc.tobytes(garbage=4, deflate=True), changes, modified_regions
+
+
+def _trace_report(raw: bytes, out_bytes: bytes, regions: list[dict], fallback_ids) -> dict:
+    """Cheap text-layer trace check: appended text, new subset fonts, reading-order jumps."""
+    touched = sorted({region['pageIndex'] for region in regions})
+    with pymupdf.open(stream=raw, filetype='pdf') as before, pymupdf.open(stream=out_bytes, filetype='pdf') as after:
+        font_ok = all(page_font_inventory(before[i]) == page_font_inventory(after[i]) for i in touched)
+        jumps = sum(max(0, count_tail_order_jumps(after[i], i) - count_tail_order_jumps(before[i], i))
+            for i in touched)
+    return {
+        'readingOrderOk': jumps == 0,
+        'appendOrderJumps': jumps,
+        'fontInventoryPreserved': font_ok,
+        'appendInsertOps': sorted(fallback_ids),
+    }
+
+
+def _empty_result(raw: bytes) -> dict:
+    return {
+        'schema': SCHEMA,
+        'sourceSha256': _sha256(raw),
+        'outputSha256': _sha256(raw),
+        'appliedCount': 0,
+        'changes': [],
+        'modifiedRegions': [],
+        'inPlaceCount': 0,
+        'fallbackCount': 0,
+        'fallbackReasons': {},
+        'trace': {'readingOrderOk': True, 'appendOrderJumps': 0, 'fontInventoryPreserved': True, 'appendInsertOps': []},
+        'pdfBytes': raw,
+    }
+
+
+def mutate_pdf_text_spans(pdf_bytes: bytes, operations: list[dict], allow_trace: bool = True) -> dict:
+    """Apply stealth text-span replacements on an in-memory PDF copy.
+
+    Each operation is first written into the document's own text operator (original font object,
+    original word gaps, no redaction and no appended text object). Only when that cannot be proved
+    is the old redact-and-insert route used, and every such operation is reported as
+    `stealth: 'append-insert'`. With `allow_trace=False` a PDF that still carries a text-layer
+    trace is refused instead of being returned.
+    """
+    raw = _require_pdf_bytes(pdf_bytes)
+    if not isinstance(operations, list):
+        raise ValueError('text_span_operations_invalid')
+    if not operations:
+        return _empty_result(raw)
+    with pymupdf.open(stream=raw, filetype='pdf') as doc:
+        validated = [_validate_text_op(op, len(doc), i) for i, op in enumerate(operations)]
+        rects = _plan_rects(doc, validated)
+    items = [{'op': op, 'rect': rects[op['id']]} for op in validated]
+    out_bytes, applied, failures = _try_inplace(raw, items)
+    fallback = [op for op in validated if op['id'] not in applied]
+    fallback_changes = []
+    if fallback:
+        out_bytes, fallback_changes, _fallback_regions = _apply_redact_insert(out_bytes, fallback)
+    with pymupdf.open(stream=out_bytes, filetype='pdf') as out_doc:
+        by_id = {change['id']: change for change in fallback_changes}
+        changes = [_inplace_record(out_doc, item['op'], item['rect']) if item['op']['id'] in applied
+                   else by_id[item['op']['id']] for item in items]
+    regions = [{'pageIndex': change['pageIndex'], 'bbox': change['bbox']} for change in changes]
+    trace = _trace_report(raw, out_bytes, regions, failures)
+    if not allow_trace and (trace['appendInsertOps'] or not trace['readingOrderOk']
+            or not trace['fontInventoryPreserved']):
+        raise SpanMutationError('text_span_trace_detected', {
+            'pageIndex': None,
+            'trace': trace,
+            'fallbackReasons': failures,
+            'recoveryHint': (
+                'This replacement cannot be written into the original text operator without leaving a '
+                'text-layer trace; pass allow_trace or pick an equal-or-shorter replacement inside one line and font.'
+            ),
+        })
     return {
         'schema': SCHEMA,
         'sourceSha256': _sha256(raw),
         'outputSha256': _sha256(out_bytes),
         'appliedCount': len(changes),
         'changes': changes,
-        'modifiedRegions': modified_regions,
+        'modifiedRegions': regions,
+        'inPlaceCount': len(applied),
+        'fallbackCount': len(fallback),
+        'fallbackReasons': failures,
+        'trace': trace,
         'pdfBytes': out_bytes,
     }
 

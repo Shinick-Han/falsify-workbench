@@ -149,6 +149,17 @@ class StealthAuditTests(unittest.TestCase):
         self.assertEqual(audit['status'], 'warning')
         self.assertTrue(any(i['code'] == 'append_order_jump' for i in audit['issues']))
 
+    def test_added_subset_font_is_flagged_as_text_layer_trace(self):
+        doc = pymupdf.open(stream=self.raw, filetype='pdf')
+        doc[0].insert_text((70, 120), 'appended replacement', fontsize=11, fontname='LSerif',
+                           fontfile=str(ROOT / 'app' / 'dist' / 'font-assets' / 'LiberationSerif-Regular.ttf'))
+        edited = doc.tobytes()
+        doc.close()
+        audit = audit_pdf_stealth(self.raw, edited, modified_regions=[{'pageIndex': 0, 'bbox': [60, 100, 300, 130]}])
+        self.assertFalse(audit['checks']['fontInventoryPreserved'])
+        self.assertEqual(audit['status'], 'warning')
+        self.assertTrue(any(i['code'] == 'font_inventory_changed' for i in audit['issues']))
+
     def test_exterior_pixels_and_harsh_boundary_seam_detected(self):
         # 1. Exterior pixel damage inside 6pt crop outside bbox + 2pt
         doc = pymupdf.open(stream=self.raw, filetype='pdf')

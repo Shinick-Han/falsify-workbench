@@ -232,5 +232,73 @@ class ExistingBehaviourTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 'text_span_operations_overlap')
 
 
+class InPlaceRouteTests(unittest.TestCase):
+    """A provable replacement is written into the original operator: no appended text, no new font."""
+
+    def test_operator_rewrite_keeps_reading_order_and_font_inventory(self):
+        raw = _single_span_pdf('value 10 and 20 and 25 here')
+        result = mutate_pdf_text_spans(raw, [{
+            'id': 'inplace-1',
+            'kind': 'text-span',
+            'pageIndex': 0,
+            'before': '10',
+            'after': '25',
+        }])
+        self.assertEqual((result['inPlaceCount'], result['fallbackCount']), (1, 0))
+        self.assertEqual(result['changes'][0]['stealth'], 'in-place-operator')
+        self.assertTrue(result['trace']['readingOrderOk'])
+        self.assertTrue(result['trace']['fontInventoryPreserved'])
+        page = pymupdf.open(stream=result['pdfBytes'], filetype='pdf')[0]
+        self.assertIn('value 25 and 20 and 25', page.get_text('text'))
+        self.assertNotIn('\x00', page.get_text('text'))
+
+    def test_unprovable_replacement_falls_back_and_is_reported(self):
+        raw = _single_span_pdf('alpha beta gamma')
+        op = {'id': 'fallback-1', 'kind': 'text-span', 'pageIndex': 0, 'before': 'beta', 'after': 'zeta'}
+        result = mutate_pdf_text_spans(raw, [op])
+        self.assertEqual((result['inPlaceCount'], result['fallbackCount']), (0, 1))
+        self.assertEqual(result['changes'][0]['stealth'], 'append-insert')
+        self.assertEqual(result['trace']['appendInsertOps'], ['fallback-1'])
+        self.assertTrue(result['fallbackReasons']['fallback-1'])
+
+    def test_strict_caller_refuses_a_traced_replacement(self):
+        raw = _single_span_pdf('alpha beta gamma')
+        op = {'id': 'strict-1', 'kind': 'text-span', 'pageIndex': 0, 'before': 'beta', 'after': 'zeta'}
+        with self.assertRaises(SpanMutationError) as ctx:
+            mutate_pdf_text_spans(raw, [op], allow_trace=False)
+        self.assertEqual(ctx.exception.code, 'text_span_trace_detected')
+        self.assertEqual(ctx.exception.details['trace']['appendInsertOps'], ['strict-1'])
+
+    def test_empty_operation_list_reports_zero_trace(self):
+        raw = _single_span_pdf('Nothing changes here.')
+        result = mutate_pdf_text_spans(raw, [])
+        self.assertEqual(result['inPlaceCount'], 0)
+        self.assertTrue(result['trace']['readingOrderOk'])
+
+
+class WordRewriteUnitTests(unittest.TestCase):
+    """Word-by-word rewrite keeps the source TJ word gaps and pins the following glyph."""
+
+    def test_word_gaps_survive_and_following_glyph_stays(self):
+        import pdf_typography as typography
+        items = [('g', 10), ('g', 11), ('k', -260), ('g', 12), ('g', 13), ('k', -260), ('g', 14)]
+        widths = {10: 500, 11: 500, 12: 600, 13: 600, 14: 400, 20: 600, 21: 600, 22: 500, 23: 500}
+        codes = [[20, 21], [22, 23]]
+        new, deltas = typography.rewrite_words(items, 0, 4, codes, lambda code: widths[code])
+        gaps = [value for kind, value in new if kind == 'k']
+        self.assertEqual([value for kind, value in new if kind == 'g'], [20, 21, 22, 23, 14])
+        self.assertEqual(deltas, [200.0, -200.0])
+        # The gap after each word absorbs that word's width change: -260 + 200, then -260 - 200.
+        self.assertEqual(gaps, [-60.0, -460.0])
+
+    def test_a_cut_ligature_is_refused(self):
+        import pdf_typography as typography
+        bounds = typography._glyph_bounds(['f', 'fi', 'x'], 0)
+        with self.assertRaises(LookupError):
+            typography._selection_glyphs(bounds, 2, 3)
+        start, count = typography._selection_glyphs(bounds, 0, 3)
+        self.assertEqual((start, count), (0, 2))
+
+
 if __name__ == '__main__':
     unittest.main()

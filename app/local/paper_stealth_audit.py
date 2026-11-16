@@ -290,6 +290,27 @@ def _check_reading_order(src_doc, out_doc, modified_pages):
     return not issues, issues
 
 
+def page_font_inventory(page):
+    """Sorted font descriptors of one page (type, basefont, resource name, encoding, embedded)."""
+    return sorted((f[1], f[2], f[3], f[4], f[5], f[6] != 0) for f in page.get_fonts(full=True))
+
+
+def count_tail_order_jumps(page, page_index):
+    """Number of append_order_jump findings on one page (text inserted at the stream tail)."""
+    return len(_tail_order_jumps(page, page_index))
+
+
+def _check_font_inventory(src_doc, out_doc, touched):
+    """An edited page must keep its own font resources: a new subset font is a text-layer trace."""
+    issues = []
+    for idx in sorted(touched):
+        if idx >= len(src_doc) or idx >= len(out_doc):
+            continue
+        if page_font_inventory(out_doc[idx]) != page_font_inventory(src_doc[idx]):
+            issues.append({'code': 'font_inventory_changed', 'severity': 'warning', 'pageIndex': idx})
+    return not issues, issues
+
+
 def _pixel_box(bbox, crop, width, height, pad=0.0):
     sx = width / crop.width
     sy = height / crop.height
@@ -387,6 +408,8 @@ def audit_pdf_stealth(source_pdf_bytes: bytes, edited_pdf_bytes: bytes, modified
         issues.extend(unmod_issues)
         order_ok, order_issues = _check_reading_order(src_doc, out_doc, touched)
         issues.extend(order_issues)
+        font_ok, font_issues = _check_font_inventory(src_doc, out_doc, touched)
+        issues.extend(font_issues)
         ext_ok, seam_issues, seam_metrics = _check_boundary_seams(src_doc, out_doc, regions)
         issues.extend(seam_issues)
         blind_issues = _scan_blindness_leaks(src_bytes, src_doc, out_bytes, out_doc)
@@ -396,6 +419,7 @@ def audit_pdf_stealth(source_pdf_bytes: bytes, edited_pdf_bytes: bytes, modified
         'pageCountPreserved': pages_ok,
         'unmodifiedPagesIdentical': unmod_ok,
         'readingOrderOk': order_ok,
+        'fontInventoryPreserved': font_ok,
         'exteriorPixelsPreserved': ext_ok,
         'blindnessClean': not blind_issues,
     }

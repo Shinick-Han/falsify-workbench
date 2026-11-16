@@ -190,12 +190,14 @@ def _make_show(value, operands, decode, mapping, tm, state, default, size, e, ke
             else: items.append(('k', v))
     else: raise LookupError(value)
     glyphs = [v for k, v in items if k == 'g']
-    if any(len(mapping.get(g, '')) != 1 for g in glyphs): raise LookupError('undecodable')
+    # A ligature code maps to two or more characters; only codes with no mapping are undecodable here.
+    pieces = [mapping.get(g, '').replace('\u00a0', ' ') for g in glyphs]
+    if any(not piece for piece in pieces): raise LookupError('undecodable')
     m = _mul(tm, state['ctm'])
     sx, sy = (m[0] ** 2 + m[1] ** 2) ** 0.5 * state['fs'], (m[2] ** 2 + m[3] ** 2) ** 0.5 * state['fs']
     spacing = any(state[k] != v for k, v in default.items())
     wrong_size = size is not None and (abs(sx - sy) > 0.01 or abs(sx - size) > 0.01)
-    return (last[2], e, items, ''.join(mapping[g] for g in glyphs).replace(' ', ' '), spacing, wrong_size, key)
+    return (last[2], e, items, ''.join(pieces), spacing, wrong_size, key, pieces)
 
 
 def _set_font_spacing(value, operands, state):
@@ -238,9 +240,13 @@ def _apply_text_state(value, operands, state, stack, tm, font, resource):
     return state, tm
 
 
-def find_show(data, resource, mapping, before, size=None, code_bytes=1):
+def find_show(data, resource, mapping, before, size=None, code_bytes=1, squeeze=False):
     """Locate `before` in consecutive Tj/TJ operators of font `resource` (one source line may be
     split into several text objects, e.g. around a hyphen).
+
+    With `squeeze=True` the word spaces of `before` are ignored while matching, because a word gap
+    is a TJ offset in most typeset PDFs and never a drawn space glyph. This is how a whole phrase
+    is located in the original operators without adding a space glyph.
 
     `data` is one content stream (bytes) or the page's content streams in order as a list of
     (key, bytes); graphics and text state carry across streams as in the concatenated page
@@ -251,8 +257,8 @@ def find_show(data, resource, mapping, before, size=None, code_bytes=1):
     index..index+count of that operator are selected. Returns None when not present; raises
     LookupError when a unique, decodable match cannot be proved (non-default Tc/Tw/Tz/Ts at a
     matched operator, matched operator's effective font size different from `size` or
-    anisotropic, q/Q imbalance, incomplete or undecodable codes, quote operators, duplicate
-    matches, malformed or stream-crossing arrays).
+    anisotropic, q/Q imbalance, incomplete codes, quote operators, duplicate matches, malformed
+    or stream-crossing arrays, or a selection that cuts a ligature glyph in half).
 
     Bounded state model: q/Q save and restore the spacing state, the font resource, the Tf size
     and the CTM; BT resets and Tm sets the text matrix (Td/TD/T* only translate), and the scale of
@@ -286,31 +292,71 @@ def find_show(data, resource, mapping, before, size=None, code_bytes=1):
             operands = []
         if array is not None: raise LookupError('array')
     if stack: raise LookupError('unbalanced q')
-    return _find_show_parts(shows, before)
+    return _find_show_parts(shows, before, squeeze)
 
 
-def _find_show_parts(shows, before):
-    found, runs, run = [], [], []
+def _glyph_bounds(pieces, offset, squeeze=False):
+    """[(glyph index, char start, char end)] for one show, in absolute character offsets.
+
+    With `squeeze` the word spaces are dropped from the character stream, because typeset PDFs
+    express a word gap as a TJ offset rather than a space glyph.
+    """
+    bounds, at = [], offset
+    for index, piece in enumerate(pieces):
+        kept = piece.replace(' ', '') if squeeze else piece
+        bounds.append((index, at, at + len(kept)))
+        at += len(kept)
+    return bounds
+
+
+def _show_text(pieces, squeeze=False):
+    return ''.join(p.replace(' ', '') if squeeze else p for p in pieces)
+
+
+def _selection_glyphs(bounds, lo, hi):
+    """Glyph index/count covering characters [lo, hi), or LookupError when a ligature is cut."""
+    first = next((index for index, start, _ in bounds if start == lo), None)
+    last = next((index for index, _, end in bounds if end == hi), None)
+    if first is None or last is None: raise LookupError('ligature')
+    count = sum(1 for _, start, _ in bounds if lo <= start < hi)
+    if count <= 0: raise LookupError('partial')
+    return first, count
+
+
+def _runs(shows):
+    """Consecutive shows drawn with the same font; None separates runs."""
+    runs, run = [], []
     for show in shows + [None]:
         if show is None:
             if run: runs.append(run)
             run = []
         else: run.append(show)
-    for run in runs:
-        text = ''.join(show[3] for show in run)
-        at = text.find(before)
-        if at < 0: continue
-        if text.find(before, at + 1) >= 0: raise LookupError('duplicate')
-        parts, offset, left = [], 0, len(before)
-        for start, end, items, chunk, spacing, wrong_size, key in run:
-            lo, hi = max(at - offset, 0), min(at + len(before) - offset, len(chunk))
-            if lo < hi:
-                if spacing: raise LookupError('spacing state')
-                if wrong_size: raise LookupError('font size')
-                parts.append((start, end, items, lo, hi - lo, key)); left -= hi - lo
-            offset += len(chunk)
-        if left: raise LookupError('partial')
-        found.append(parts)
+    return runs
+
+
+def _run_parts(run, needle, squeeze):
+    """Glyph parts of one run whose text contains `needle` exactly once, else None."""
+    chunks = [(_show_text(show[7], squeeze), show) for show in run]
+    text = ''.join(chunk for chunk, _ in chunks)
+    at = text.find(needle)
+    if at < 0: return None
+    if text.find(needle, at + 1) >= 0: raise LookupError('duplicate')
+    parts, offset, left = [], 0, len(needle)
+    for chunk, (start, end, items, _chars, spacing, wrong_size, key, pieces) in chunks:
+        lo, hi = max(at - offset, 0), min(at + len(needle) - offset, len(chunk))
+        if lo < hi:
+            if spacing: raise LookupError('spacing state')
+            if wrong_size: raise LookupError('font size')
+            index, count = _selection_glyphs(_glyph_bounds(pieces, offset, squeeze), offset + lo, offset + hi)
+            parts.append((start, end, items, index, count, key)); left -= hi - lo
+        offset += len(chunk)
+    if left: raise LookupError('partial')
+    return parts
+
+
+def _find_show_parts(shows, before, squeeze=False):
+    needle = before.replace(' ', '') if squeeze else before
+    found = [parts for parts in (_run_parts(run, needle, squeeze) for run in _runs(shows)) if parts is not None]
     if len(found) > 1: raise LookupError('duplicate')
     return found[0] if found else None
 
@@ -366,3 +412,102 @@ def rewrite_parts(parts, codes, extras_units, widths_units, code_bytes=1):
         new, comp = rewrite_items(items, index, count, codes if k == 0 else [], extras_units if k == 0 else [], widths_units)
         splices.append((start, end, serialize_tj(new, code_bytes))); compensation.append(None if comp is None else round(comp, 3))
     return splices, compensation
+
+
+# --- word-by-word in-place rewrite (word gaps are TJ offsets, never space glyphs) -------------
+
+def _glyph_items(items):
+    """[(item position, glyph index, code)] for one operator's item list."""
+    out, glyph = [], 0
+    for pos, (kind, value) in enumerate(items):
+        if kind == 'g':
+            out.append((pos, glyph, value)); glyph += 1
+    return out
+
+
+def _word_glyph_groups(items, index, count, words):
+    """[(glyph indices, separator item position or None)] one entry per word.
+
+    A word gap is the widest TJ offsets inside the selection: they must be clearly larger than
+    any kerning offset, otherwise the split is not provable.
+    """
+    glyphs = [(pos, g, code) for pos, g, code in _glyph_items(items) if index <= g < index + count]
+    if len(glyphs) != count: raise LookupError('selection outside operator')
+    if words == 1: return [([g for _, g, _ in glyphs], None)]
+    gaps = [pos for pos in range(glyphs[0][0], glyphs[-1][0]) if items[pos][0] == 'k']
+    if len(gaps) < words - 1: raise LookupError('words')
+    cut = sorted(sorted(gaps, key=lambda pos: abs(items[pos][1]), reverse=True)[:words - 1])
+    if min(abs(items[pos][1]) for pos in cut) < 0.30 * max(abs(items[pos][1]) for pos in cut):
+        raise LookupError('words')
+    groups, start = [], glyphs[0][0]
+    for pos in cut:
+        groups.append(([g for at, g, _ in glyphs if start <= at < pos], pos)); start = pos
+    groups.append(([g for at, g, _ in glyphs if at >= start], None))
+    if any(not members for members, _ in groups): raise LookupError('words')
+    return groups
+
+
+def _word_delta(by_glyph, members, codes, widths_units):
+    """Advance change (1/1000 text space) of one replaced word; kerning offsets inside it stay."""
+    if len(members) != len(codes): raise LookupError('words')
+    old = sum(widths_units(by_glyph[g][1]) for g in members)
+    return sum(widths_units(code) for code in codes) - old
+
+
+def rewrite_words(items, index, count, word_codes, widths_units, code_bytes=1):
+    """Replace a selected glyph run word by word inside its original TJ/Tj operator.
+
+    Every word keeps its glyph count, its kerning offsets and its slot: the code of glyph i of
+    word k is replaced by the code of character i, and the TJ offset that follows the word absorbs
+    the width change so the next word and everything after the selection stay at their positions.
+    """
+    groups = _word_glyph_groups(items, index, count, len(word_codes))
+    by_glyph = {g: (pos, code) for pos, g, code in _glyph_items(items)}
+    deltas, head, drop, seps, tail = [], {}, set(), {}, None
+    for (members, sep), codes in zip(groups, word_codes):
+        deltas.append(round(_word_delta(by_glyph, members, codes, widths_units), 3))
+        head[members[0]] = codes
+        drop.update(members[1:])
+        if sep is not None: seps[sep] = deltas[-1]
+        else: tail = deltas[-1]
+    out, glyph, i, tail_at = [], 0, 0, None
+    last_glyph = groups[-1][0][-1]
+    while i < len(items):
+        kind, value = items[i]
+        if kind == 'g':
+            if glyph in head:
+                for code in head[glyph]: out.append(('g', code))
+            elif glyph not in drop: out.append((kind, value))
+            if glyph == last_glyph: tail_at = len(out)
+            glyph += 1; i += 1; continue
+        out.append(('k', value + seps[i]) if i in seps else (kind, value)); i += 1
+    if tail is not None and tail_at is not None and abs(tail) > 1e-9:
+        out = _insert_trailing_gap(out, tail_at, tail)
+    return out, deltas
+
+
+def _insert_trailing_gap(out, at, delta):
+    """Add the width change to the first TJ offset after the selection, or insert one."""
+    for pos in range(at, len(out)):
+        kind, value = out[pos]
+        if kind == 'g': out.insert(pos, ('k', delta)); return out
+        if kind == 'k': out[pos] = ('k', value + delta); return out
+    out.append(('k', delta))
+    return out
+
+
+def verify_words(chars, squeezed, natural, origin, size, end):
+    """Check a word-by-word replacement: same baseline, natural glyph widths, original extent.
+
+    Word gaps are TJ offsets, so the extracted glyph run carries no space character; spacing is
+    asserted where it is observable (each word's first glyph keeps the original word start, which
+    the caller verified through unchanged neighbouring glyph positions).
+    """
+    text = ''.join(c['c'] for c in chars).replace('\u00a0', ' ')
+    if text != squeezed: raise ValueError('삽입 글자열 추출 검증 실패')
+    if abs(chars[0]['origin'][0] - origin[0]) > 0.01 or any(abs(c['origin'][1] - origin[1]) > 0.01 for c in chars):
+        raise ValueError('삽입 텍스트의 시작점/기준선이 원본과 다릅니다.')
+    for c, w in zip(chars, natural):
+        if abs((c['bbox'][2] - c['bbox'][0]) - w) > 0.01: raise ValueError('삽입 글리프 폭이 원본 글꼴 폭과 다릅니다(가로 비율 변경).')
+    if chars[-1]['bbox'][2] > end + EPS: raise ValueError('삽입 텍스트가 원래 영역 밖으로 나갑니다.')
+    return {'wordGapMode': 'tj-offset', 'measuredGlyphWidthsPt': [round(n, 3) for n in natural[:1]]}

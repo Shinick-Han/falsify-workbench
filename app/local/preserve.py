@@ -14,7 +14,7 @@ import struct
 from typing import NamedTuple
 
 from pdf_typography import (EPS, MAX_TRACKING_EM, MICRO_OVERLAP_PT, MIN_SPACE_RATIO, TIGHT_SPACE_RATIO, find_show, plan_fit,
-    rewrite_items, rewrite_parts, serialize_tj, source_space_range, verify_fit)
+    rewrite_items, rewrite_parts, rewrite_words, serialize_tj, source_space_range, verify_fit, verify_words)
 from pdf_font_codec import font_codec  # Base14/Type0 existing-font codec (separate module).
 
 def font_names(buffer):
@@ -178,7 +178,11 @@ def _encode_page_chars(after, reverse, widths, first, symbolic_tt, fontbuffer, d
             gid = truetype_symbolic_gid(fontbuffer, code)
             if gid == 0: absent.append(c); continue
             if gid is None: unproven.append(c); continue
-        if width <= 0 or c not in drawn: unproven.append(c); continue
+        if width <= 0: unproven.append(c); continue
+        # A word space is normally drawn as a TJ gap, never as a glyph, so "drawn with this font"
+        # can never be proven for it. Its advance is taken from the font's own /Widths entry.
+        if c not in drawn and c != ' ':
+            unproven.append(c); continue
         codes.append(code); units += width
     return codes, units, absent, ambiguous, unproven
 
@@ -191,6 +195,37 @@ def _raise_encoding_errors(absent, ambiguous, unproven):
         if ambiguous: parts.append('글리프 매핑이 모호한 문자: ' + describe(ambiguous))
         if unproven: parts.append('원본에서 이 글꼴로 그려진 적이 없어 글리프를 검증할 수 없는 문자: ' + describe(unproven))
         raise ValueError('; '.join(parts) + '. 대체 글꼴을 쓰지 않습니다. 원본 문서에 이 글꼴로 이미 나오는 문자만 사용하도록 After를 수정하세요.')
+
+
+def _object_source(doc, kind, value):
+    """Source text of a PDF value, resolving one indirect reference.
+
+    LaTeX-produced PDFs commonly store /Widths, /FirstChar or /ToUnicode as indirect objects;
+    reading only inline arrays would report every such subset font as unverifiable.
+    """
+    if kind == 'xref':
+        try:
+            return doc.xref_object(int(value.split()[0])) or ''
+        except (ValueError, RuntimeError):
+            return ''
+    return value if kind in ('array', 'int', 'real', 'string', 'name') else ''
+
+
+def _int_value(doc, key_value):
+    """Integer value of a direct or indirect PDF integer, else None."""
+    kind, value = key_value
+    if kind == 'int':
+        return int(value)
+    match = re.match(r'\s*(-?\d+)', _object_source(doc, kind, value))
+    return int(match[1]) if match else None
+
+
+def _width_units(doc, key_value):
+    """/Widths entries in 1/1000 text space, direct array or indirect object."""
+    kind, value = key_value
+    if kind not in ('array', 'xref'):
+        return []
+    return [float(w) for w in re.findall(r'-?\d+(?:\.\d+)?', _object_source(doc, kind, value))]
 
 
 def page_encoding_codes(doc, xref, fontbuffer, after, drawn):
@@ -208,9 +243,8 @@ def page_encoding_codes(doc, xref, fontbuffer, after, drawn):
     if get('Subtype')[1] not in ['/TrueType', '/Type1', '/MMType1'] or get('ToUnicode')[0] != 'xref':
         raise ValueError('원본 subset 글꼴의 문자 매핑(ToUnicode)을 검증할 수 없습니다. 원본 글꼴의 문자로 수정하세요.')
     mapping = parse_to_unicode(doc.xref_stream(int(get('ToUnicode')[1].split()[0])) or b'')
-    first = int(get('FirstChar')[1]) if get('FirstChar')[0] == 'int' else None
-    widths = [float(w) for w in re.findall(r'-?\d+(?:\.\d+)?', get('Widths')[1])] if get('Widths')[0] == 'array' else []
-    last = int(get('LastChar')[1]) if get('LastChar')[0] == 'int' else None
+    first, last = _int_value(doc, get('FirstChar')), _int_value(doc, get('LastChar'))
+    widths = _width_units(doc, get('Widths'))
     if mapping is None or first is None or last is None or not widths or len(widths) != last - first + 1:
         raise ValueError('원본 subset 글꼴의 문자 매핑(ToUnicode/Widths)을 검증할 수 없습니다. 원본 글꼴의 문자로 수정하세요.')
     symbolic_tt = get('Subtype')[1] == '/TrueType' and get('Encoding')[0] == 'null'
@@ -228,8 +262,10 @@ def font_resource_name(doc, page, xref):
 def simple_widths(doc, xref):
     """{code: width in 1/1000 text space} from a simple font's /FirstChar and /Widths."""
     get = lambda key: doc.xref_get_key(xref, key)
-    first = int(get('FirstChar')[1])
-    return {first + i: float(w) for i, w in enumerate(re.findall(r'-?\d+(?:\.\d+)?', get('Widths')[1]))}
+    first = _int_value(doc, get('FirstChar'))
+    if first is None:
+        raise ValueError('원본 글꼴의 /FirstChar를 검증할 수 없습니다.')
+    return {first + i: w for i, w in enumerate(_width_units(doc, get('Widths')))}
 
 # Why an in-place rewrite of the original text operator could not be proved (find_show codes).
 INPLACE_REASONS = {
@@ -241,6 +277,8 @@ INPLACE_REASONS = {
     'duplicate': '같은 텍스트가 콘텐츠 안에서 여러 번 나와 고유하게 특정할 수 없습니다',
     "'": "따옴표 텍스트 연산자(')로 그려진 텍스트입니다", '"': '따옴표 텍스트 연산자(")로 그려진 텍스트입니다',
     'partial': '선택한 텍스트가 같은 글꼴의 연속된 텍스트 연산자 안에 있지 않습니다(다른 글꼴/객체로 나뉨)',
+    'words': '단어 수가 달라 원본 단어 간격을 그대로 유지할 수 없습니다',
+    'ligature': '선택 영역이 합자(ligature) 글리프의 중간에서 시작/끝나 원본 글리프 코드를 나눌 수 없습니다',
     'not found': '선택한 텍스트를 페이지 콘텐츠의 원래 텍스트 연산자에서 찾을 수 없습니다(폼 XObject 등)',
     'shared': '선택한 텍스트가 여러 페이지가 공유하는 콘텐츠 스트림에 있습니다',
     'resource': '페이지 리소스에서 원래 글꼴 객체의 이름을 고유하게 찾을 수 없습니다',
@@ -301,8 +339,20 @@ class _SourceMatch(NamedTuple):
     previous: object
     next: object
 
-def _match_source_quote(raw_text, quote):
-    """Resolve one quote within one extracted line and font, retaining neighboring glyphs."""
+def _quote_hits(chars, rect):
+    """True when the selected glyph run overlaps the caller's target rectangle."""
+    boxes = [c.get('bbox') for c in chars if c.get('bbox')]
+    if not boxes: return False
+    union = (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes))
+    return rect.intersects(union)
+
+def _match_source_quote(raw_text, quote, rect=None):
+    """Resolve one quote within one extracted line and font, retaining neighboring glyphs.
+
+    `rect` scopes the search to the caller's already-verified target area, so a quote that also
+    occurs elsewhere in the document still resolves to exactly one place (RED text spans carry
+    page/bbox/occurrence evidence).
+    """
     matches = []
     for block in raw_text['blocks']:
         for line in block.get('lines', []):
@@ -310,9 +360,11 @@ def _match_source_quote(raw_text, quote):
                 chars = span.get('chars', [])
                 text = ''.join(c['c'] for c in chars).replace('\u00a0', ' ')
                 start = text.find(quote)
-                if start >= 0:
-                    if text.find(quote, start + 1) >= 0: raise ValueError('PDF 내 중복 인용')
+                while start >= 0:
                     matches.append((line, span, start))
+                    start = text.find(quote, start + 1)
+    if rect is not None:
+        matches = [m for m in matches if _quote_hits(m[1]['chars'][m[2]:m[2] + len(quote)], rect)]
     if len(matches) != 1: raise ValueError('한 줄·한 글꼴 안의 고유 인용만 보존 편집할 수 있습니다. 줄바꿈/혼합 글꼴/추출 오차를 확인하세요.')
     line, span, start = matches[0]
     chars = span['chars'][start:start + len(quote)]
@@ -518,6 +570,77 @@ def _validate_patch_area(page, area, jobs, n):
         if area.intersects(existing['rect']): raise ValueError('선택한 PDF 변경 영역이 겹칩니다.')
 
 
+def _plan_word_geometry(p, source, original, n, raw_text, inks, fitz):
+    """Selection bound for a word-by-word patch: nothing outside the selection moves."""
+    rect = fitz.Rect(source.chars[0]['bbox'])
+    for c in source.chars[1:]: rect |= fitz.Rect(c['bbox'])
+    tightened = _tighten_selection(rect, source.previous, source.next)
+    selected = {id(c) for c in source.chars}
+    if n not in inks: inks[n] = ink_boxes(original[n], raw_text)
+    _foreign_overlap(p, raw_text, selected, set(), source.chars[0]['origin'], inks[n], rect, rect, fitz)
+    return _EditGeometry(rect, rect.x1, selected, tightened, [], set(), 0.0)
+
+
+def _plan_word_rewrite(doc, page, quote, span, codecs, code_bytes, label):
+    """Splice the original operator's own glyph codes, word by word, keeping its TJ word gaps."""
+    if not codecs[0]['resource'] or font_resource_name(doc, page, codecs[0]['xref']) != codecs[0]['resource']:
+        raise unsupported(label, 'resource')
+    try:
+        parts = find_show([(x, doc.xref_stream(x)) for x in page.get_contents()], codecs[0]['resource'],
+            codecs[0]['mapping'], quote, size=span['size'], code_bytes=code_bytes, squeeze=True)
+    except LookupError as error: raise unsupported(label, error.args[0] if error.args else 'content') from None
+    if not parts: raise unsupported(label, 'not found')
+    if len(parts) != 1: raise unsupported(label, 'partial')
+    start, end, items, index, count, key = parts[0]
+    widths = codecs[0]['widths']
+    try:
+        new_items, deltas = rewrite_words(items, index, count, [c['codes'] for c in codecs],
+            lambda code: widths[code], code_bytes)
+    except (LookupError, KeyError) as error: raise unsupported(label, 'rewrite', str(error)) from None
+    splices = [(key, start, end, serialize_tj(new_items, code_bytes))]
+    return {'splices': splices, 'operators': 1, 'compensationUnits': deltas, 'wordGaps': len(codecs) - 1}
+
+
+def _word_job(p, after, origin, span, codecs, geometry, inplace, code_bytes):
+    words = after.split(' ')
+    widths = codecs[0]['widths']
+    codes = [code for codec in codecs for code in codec['codes']]
+    return {'patch': p, 'after': after, 'afterSqueezed': ''.join(words),
+        'natural': [widths[code] * span['size'] / 1000 for code in codes],
+        'rect': geometry.area, 'end': geometry.end, 'origin': origin, 'font': codecs[0]['resource'],
+        'plan': {'wordGaps': len(words) - 1}, 'size': span['size'], 'spanfont': span['font'],
+        'selected': geometry.selected, 'tightened': geometry.tightened, 'inplace': inplace,
+        'codeBytes': code_bytes, 'shift': {}, 'wordMode': True}
+
+
+def _word_patch_requested(p, quote):
+    """True when a patch targets one already-verified box and carries word spaces."""
+    return ' ' in quote and p.get('rect') is not None
+
+
+def _assert_no_splice_overlap(inplace, jobs, n):
+    """Two edits in the same original text operator are not supported yet."""
+    touched = {(sp[0], sp[1]) for sp in inplace['splices']}
+    if any(touched & {(sp[0], sp[1]) for sp in o['inplace']['splices']} for o in jobs.get(n, [])):
+        raise ValueError('같은 원본 텍스트 연산자 안의 여러 변경은 아직 보존 편집하지 않습니다.')
+
+
+def _apply_word_patch(p, doc, page, source, span, quote, after, original, jobs, raw_text, inks, n, normalize, fitz, origin):
+    """Plan a RED word-by-word in-place patch and append its job."""
+    if len(quote.split(' ')) != len(after.split(' ')): raise unsupported(p['label'], 'words')
+    geometry = _plan_word_geometry(p, source, original, n, raw_text, inks, fitz)
+    codecs = [_resolve_source_codec(doc, page, raw_text, span, word, p['label'], fitz, normalize)[0]
+        for word in after.split(' ')]
+    if not codecs[0].get('resource') or not codecs[0].get('mapping'):
+        raise unsupported(p['label'], 'resource')
+    _validate_patch_area(page, geometry.area, jobs, n)
+    inplace = _plan_word_rewrite(doc, page, quote, span, codecs, codecs[0]['codeBytes'], p['label'])
+    touched = {(sp[0], sp[1]) for sp in inplace['splices']}
+    if any(touched & {(sp[0], sp[1]) for sp in o['inplace']['splices']} for o in jobs.get(n, [])):
+        raise ValueError('같은 원본 텍스트 연산자 안의 여러 변경은 아직 보존 편집하지 않습니다.')
+    jobs.setdefault(n, []).append(_word_job(p, after, origin, span, codecs, geometry, inplace, codecs[0]['codeBytes']))
+
+
 def _plan_pdf_patch(p, doc, original, jobs, rawdict, document_raw, inks, content_owners, normalize, close_gaps, state, fitz):
     match = re.fullmatch(r'PDF p\. (\d+)', p['label'])
     if not match: raise ValueError('PDF 원본 페이지 위치가 필요합니다.')
@@ -527,11 +650,14 @@ def _plan_pdf_patch(p, doc, original, jobs, rawdict, document_raw, inks, content
     raw_text = rawdict(n)
     quote = p['before'].replace('\u00a0', ' ')
     after = p['after'].replace('\u00a0', ' ')
-    source = _match_source_quote(raw_text, quote)
+    source = _match_source_quote(raw_text, quote, _patch_rect(p, fitz))
     line, span, chars = source.line, source.span, source.chars
     if tuple(line['dir']) != (1.0, 0.0) or page.rotation != 0: raise ValueError('회전 텍스트/페이지는 보존 편집하지 않습니다.')
     if '\n' in p['after'] or '\r' in p['after']: raise ValueError('한 줄 안의 변경만 지원합니다.')
     origin = _validate_source_trace(p, page, chars)
+    if _word_patch_requested(p, quote):
+        _apply_word_patch(p, doc, page, source, span, quote, after, original, jobs, raw_text, inks, n, normalize, fitz, origin)
+        return
     codec, codec_error = _resolve_source_codec(doc, page, raw_text, span, after, p['label'], fitz, normalize)
     codes, widths = codec['codes'], codec['widths']
     natural = [widths[code] * span['size'] / 1000 for code in codes]
@@ -545,12 +671,19 @@ def _plan_pdf_patch(p, doc, original, jobs, rawdict, document_raw, inks, content
     _validate_patch_area(page, area, jobs, n)
     inplace = _plan_operator_rewrite(doc, page, codec, quote, span, plan, codes, widths,
         content_owners, n, followers, shift, p['label'])
-    touched = {(sp[0], sp[1]) for sp in inplace['splices']}
-    if any(touched & {(sp[0], sp[1]) for sp in o['inplace']['splices']} for o in jobs.get(n, [])):
-        raise ValueError('같은 원본 텍스트 연산자 안의 여러 변경은 아직 보존 편집하지 않습니다.')
+    _assert_no_splice_overlap(inplace, jobs, n)
     jobs.setdefault(n, []).append({'patch': p, 'after': after, 'rect': area, 'end': end, 'origin': origin, 'font': codec['resource'],
         'natural': natural, 'plan': plan, 'size': span['size'], 'spanfont': span['font'], 'selected': selected_chars,
         'tightened': tightened, 'inplace': inplace, 'codeBytes': codec['codeBytes'], 'shift': dict.fromkeys(moved, shift)})
+
+def _patch_rect(p, fitz):
+    """Optional caller-verified target box for a patch (RED text spans carry one)."""
+    box = p.get('rect')
+    if (isinstance(box, (list, tuple)) and len(box) == 4
+            and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in box) and box[2] > box[0] and box[3] > box[1]):
+        return fitz.Rect(*box)
+    return None
+
 
 def _verify_page_text(n, a, b, page_jobs, masks, fitz):
     text_a, text_b = a.get_text().replace('\u00a0', ' '), b.get_text().replace('\u00a0', ' ')
@@ -558,9 +691,15 @@ def _verify_page_text(n, a, b, page_jobs, masks, fitz):
     for e in page_jobs:
         masks.append((e['rect'] * fitz.Matrix(4/3, 4/3) + (-2, -2, 2, 2)).irect)
         before = e['patch']['before'].replace('\u00a0', ' ')
+        after = e['after']
         # The original string must be actually removed, not hidden under a white rectangle.
-        if before in text_b or e['after'] not in text_b: raise ValueError('PDF 텍스트 제거/삽입 검증에 실패했습니다.')
-        expected = expected.replace(before, e['after'], 1)
+        # A token repeated on the page is verified by occurrence count instead of absence.
+        if text_a.count(before) == 1:
+            if before in text_b or after not in text_b: raise ValueError('PDF 텍스트 제거/삽입 검증에 실패했습니다.')
+        elif (text_b.count(before) != text_a.count(before) - 1
+                or text_b.count(after) != text_a.count(after) + 1):
+            raise ValueError('PDF 텍스트 제거/삽입 검증에 실패했습니다.')
+        expected = expected.replace(before, after, 1)
     # Reading order: the same words in the same order. A shorter replacement leaves white
     # space inside the selection, which an extractor may report as a line break; that is
     # recorded, not treated as reordering.
@@ -581,7 +720,8 @@ def _match_unselected_glyphs(n, b, page_jobs, rawdict, selected, shifts):
         if hit is None: raise ValueError(f"선택하지 않은 문자 {c['c']!r}의 위치/글꼴이 바뀌었습니다 (x={c['origin'][0]:.3f}). 레이아웃 보존 다운로드를 차단합니다.")
         candidates.pop(hit)
     rest = [cs for v in pool.values() for cs in v]
-    if len(rest) != sum(len(e['after']) for e in page_jobs): raise ValueError('선택 영역 밖에 추가/누락된 문자가 있습니다.')
+    if len(rest) != sum(len(e.get('afterSqueezed') or e['after']) for e in page_jobs):
+        raise ValueError('선택 영역 밖에 추가/누락된 문자가 있습니다.')
     return rest
 
 
@@ -602,7 +742,8 @@ def _verify_page_glyphs(n, b, page_jobs, rawdict, normalize, report, exact_extra
             'reusedOriginalFontObject': True, 'codeBytes': e['codeBytes'], 'fontSizePt': e['size'],
             'baselineY': round(e['origin'][1], 3), 'logicalTextOrderPreserved': True,
             'exactExtractedTextOnPage': exact_extraction, 'microOverlapTightening': e['tightened']}
-        measured = verify_fit(glyphs, e['after'], e['natural'], e['plan'], e['origin'], e['size'], e['end'])
+        measured = (verify_words(glyphs, e['afterSqueezed'], e['natural'], e['origin'], e['size'], e['end'])
+            if e.get('wordMode') else verify_fit(glyphs, e['after'], e['natural'], e['plan'], e['origin'], e['size'], e['end']))
         entry['spacing'] = {k: v for k, v in e['plan'].items() if k != 'extras'} | measured
         entry |= {'rewrittenOperators': e['inplace']['operators'], 'compensationUnits': e['inplace']['compensationUnits']}
         entry['followingTextShift'] = {'pt': round(next(iter(e['shift'].values())), 3), 'glyphs': len(e['shift'])} if e['shift'] else None
