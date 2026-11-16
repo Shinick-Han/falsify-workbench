@@ -355,6 +355,252 @@ class ArenaEvaluationTests(unittest.TestCase):
         self.assertEqual(report['runs'][0]['tp'], 1)
 
 
+class ChangedTokenEvidenceTests(unittest.TestCase):
+    """Changed-token evidence rules, wrapped-line coupling, and split classification."""
+
+    def _run(self, gold_items, findings, baseline=None):
+        gold = {'schema': 'falsify.red-gold-ledger.v1', 'defects': gold_items}
+        blue = {'runId': 'changed-token-blue', 'findings': findings}
+        return mod.evaluate_arena_match(gold, [blue], baseline_signals=baseline)['runs'][0]
+
+    def test_short_changed_value_cited_only_in_rationale_matches(self):
+        gold = [{
+            'defectId': 'g-short',
+            'world': 'W1',
+            'family': 'D1',
+            'difficulty': 'L2',
+            'pageIndex': 0,
+            'before': 'the retention coefficient was 0.11 for the cohort',
+            'after': 'the retention coefficient was 0.44 for the cohort',
+            'rationale': 'Section 2 prints a retention coefficient of 0.44 for the cohort that Section 1 measured as 0.11.',
+        }]
+        findings = [{
+            'id': 'f-short',
+            'decision': 'defect',
+            'pageIndex': 0,
+            'quote': 'reported effect size in the second table',
+            'rationale': 'the value 0.44 differs from 0.11 in the first table',
+        }]
+        run = self._run(gold, findings)
+        self.assertEqual(run['tp'], 1)
+        self.assertEqual(run['fn'], 0)
+        self.assertEqual(run['pureFp'], 0)
+        self.assertEqual(run['missedDefectIds'], [])
+        pair = run['matchedPairs'][0]
+        self.assertEqual(pair['defectId'], 'g-short')
+        self.assertGreaterEqual(pair['score'], 0.55)
+        self.assertLessEqual(pair['score'], 0.75)
+
+    def test_uri_link_gold_matches_visible_identifier_citation(self):
+        gold = [{
+            'defectId': 'g-link',
+            'kind': 'uri-link',
+            'world': 'W2',
+            'family': 'D2',
+            'difficulty': 'L2',
+            'pageIndex': 4,
+            'beforeUri': 'https://doi.org/10.7777/alpha000',
+            'afterUri': 'https://doi.org/10.7777/zeta999',
+            'rationale': 'Reference 9 prints 10.7777/alpha000 while its embedded link targets 10.7777/zeta999.',
+        }]
+        findings = [{
+            'id': 'f-link',
+            'decision': 'defect',
+            'pageIndex': 4,
+            'quote': '10.7777/alpha000',
+            'rationale': 'the embedded target is 10.7777/zeta999 for that reference',
+        }]
+        run = self._run(gold, findings)
+        self.assertEqual(run['tp'], 1)
+        self.assertEqual(run['fn'], 0)
+        self.assertEqual(run['pureFp'], 0)
+
+    def test_cross_page_contradiction_matches_with_rationale_overlap(self):
+        gold = [{
+            'defectId': 'g-cross',
+            'world': 'W1',
+            'family': 'D1',
+            'difficulty': 'L3',
+            'pageIndex': 2,
+            'before': 'the assay held 0.30 units',
+            'after': 'the assay held 0.90 units',
+            'rationale': 'Section 3 contrasts the abstract value 0.30 with the section value 0.90 for the identical sample set.',
+        }]
+        findings = [{
+            'id': 'f-cross',
+            'decision': 'defect',
+            'pageIndex': 0,
+            'quote': 'abstract reports 0.30 units',
+            'rationale': 'the abstract states 0.30 but the section states 0.90 for the same sample set',
+        }]
+        run = self._run(gold, findings)
+        self.assertEqual(run['tp'], 1)
+        self.assertEqual(run['fn'], 0)
+        self.assertEqual(run['pureFp'], 0)
+
+    def test_cross_page_numeric_overlap_without_rationale_overlap_stays_unmatched(self):
+        gold = [{
+            'defectId': 'g-chance',
+            'world': 'W5',
+            'family': 'D5',
+            'difficulty': 'L3',
+            'pageIndex': 6,
+            'before': 'the cluster score read 0.30',
+            'after': 'the cluster score read 0.90',
+            'rationale': 'Discussion restates the retention rate for the collapsed model.',
+        }]
+        findings = [{
+            'id': 'f-chance',
+            'decision': 'defect',
+            'pageIndex': 9,
+            'quote': 'grid values 0.30 and 0.90',
+            'rationale': 'Table 4 caption lists the axis tick labels.',
+        }]
+        run = self._run(gold, findings)
+        self.assertEqual(run['tp'], 0)
+        self.assertEqual(run['fn'], 1)
+        self.assertEqual(run['pureFp'], 1)
+        self.assertEqual([fp['findingId'] for fp in run['pureFalsePositives']], ['f-chance'])
+
+    def test_wrapped_two_line_gold_is_coupled_to_the_matching_finding(self):
+        gold = [
+            {
+                'defectId': 'g-line-a',
+                'world': 'W5',
+                'family': 'D3',
+                'difficulty': 'L4',
+                'pageIndex': 8,
+                'bbox': [100.0, 400.0, 160.0, 410.0],
+                'before': 'as nominal',
+                'after': 'as scaled',
+                'rationale': 'Section 5 says affinities should be read as scaled rather than bounded values.',
+            },
+            {
+                'defectId': 'g-line-b',
+                'world': 'W5',
+                'family': 'D3',
+                'difficulty': 'L4',
+                'pageIndex': 8,
+                'bbox': [60.0, 412.0, 120.0, 422.0],
+                'before': 'than fixed',
+                'after': 'than bounded',
+                'rationale': 'Second half of the same two-line rewrite.',
+            },
+        ]
+        findings = [{
+            'id': 'f-line',
+            'decision': 'defect',
+            'pageIndex': 8,
+            'quote': 'considered as scaled rather than bounded',
+            'rationale': 'the sentence now reads as scaled and than bounded, so the earlier as nominal / than fixed wording was inverted',
+        }]
+        run = self._run(gold, findings)
+        self.assertEqual(run['tp'], 2)
+        self.assertEqual(run['fn'], 0)
+        self.assertEqual(run['pureFp'], 0)
+        self.assertEqual(run['missedDefectIds'], [])
+        coupled = [pair for pair in run['matchedPairs'] if pair.get('coupledWith')]
+        self.assertEqual(len(coupled), 1)
+        self.assertEqual(coupled[0]['findingId'], 'f-line')
+        self.assertIn(coupled[0]['coupledWith'], {'g-line-a', 'g-line-b'})
+
+    def test_split_observation_of_matched_gold_is_not_a_pure_false_positive(self):
+        gold = [{
+            'defectId': 'g-split',
+            'world': 'W3',
+            'family': 'D6',
+            'difficulty': 'L2',
+            'pageIndex': 1,
+            'before': 'offset = 1.0\nscale = 5.0',
+            'after': 'offset = 3.0\nscale = 7.0',
+            'rationale': 'Both constants in the snippet were rewritten.',
+        }]
+        findings = [
+            {'id': 'f-first', 'decision': 'defect', 'pageIndex': 1, 'quote': 'offset = 3.0'},
+            {'id': 'f-second', 'decision': 'defect', 'pageIndex': 1, 'quote': 'scale = 7.0'},
+        ]
+        run = self._run(gold, findings)
+        self.assertEqual(run['tp'], 1)
+        self.assertEqual(run['fn'], 0)
+        self.assertEqual(run['pureFp'], 0)
+        self.assertEqual(run['precision'], 1.0)
+        self.assertEqual(run['splitOfMatchedCount'], 1)
+        self.assertEqual(run['splitOfMatchedFindingIds'], ['f-second'])
+        self.assertEqual(run['pureFalsePositives'], [])
+
+    def test_same_page_without_the_changed_value_stays_unmatched(self):
+        gold = [{
+            'defectId': 'g-quiet',
+            'world': 'W1',
+            'family': 'D1',
+            'difficulty': 'L2',
+            'pageIndex': 2,
+            'before': 'the mean settled at 0.45 units',
+            'after': 'the mean settled at 0.55 units',
+            'rationale': 'The reported mean moved from 0.45 to 0.55.',
+        }]
+        findings = [{
+            'id': 'f-quiet',
+            'decision': 'defect',
+            'pageIndex': 2,
+            'quote': 'the mean is summarised in Table 5',
+            'rationale': 'Table 5 caption wording is inconsistent with the column order.',
+        }]
+        run = self._run(gold, findings)
+        self.assertEqual(run['tp'], 0)
+        self.assertEqual(run['fn'], 1)
+        self.assertEqual(run['pureFp'], 1)
+
+    def test_gold_without_changed_tokens_never_triggers_evidence_rules(self):
+        target = mod._normalize_gold_item({'defectId': 'g-noverb', 'pageIndex': 0}, 0)
+        finding = mod._normalize_finding(
+            {'id': 'f-noverb', 'decision': 'defect', 'pageIndex': 0, 'quote': 'caption placement'},
+            0,
+        )
+        self.assertEqual(target['afterTokens'], set())
+        self.assertEqual(target['beforeTokens'], set())
+        self.assertEqual(mod._same_location_changed_token_score(target, finding), 0.0)
+        self.assertEqual(mod._cross_page_contradiction_score(target, finding), 0.0)
+        self.assertEqual(mod._match_score(target, finding), 0.0)
+
+    def test_baseline_signals_without_changed_tokens_keep_exemption(self):
+        baseline = {
+            'schema': 'falsify.blue-defect-sensor.v1',
+            'signals': [{
+                'id': 'sens-keep',
+                'family': 'D2',
+                'pageIndex': 5,
+                'excerpt': 'reference 4 citation style differs from the journal template',
+            }],
+        }
+        gold = [{
+            'defectId': 'g-other',
+            'world': 'W1',
+            'family': 'D1',
+            'difficulty': 'L1',
+            'pageIndex': 1,
+            'before': 'the subgroup total read 24 percent',
+            'after': 'the subgroup total read 42 percent',
+        }]
+        findings = [{
+            'id': 'f-base',
+            'decision': 'defect',
+            'pageIndex': 5,
+            'excerpt': 'reference 4 citation style differs from the journal template',
+            'rationale': 'pre-existing style drift, not a RED edit',
+        }]
+        run = self._run(gold, findings, baseline)
+        self.assertEqual(run['tp'], 0)
+        self.assertEqual(run['pureFp'], 0)
+        self.assertEqual(run['preExistingExempted'], 1)
+        self.assertEqual(run['exemptedFindingIds'], ['f-base'])
+        normalized = mod._normalize_baseline_signals(baseline)
+        self.assertNotIn('afterTokens', normalized[0])
+        self.assertNotIn('beforeTokens', normalized[0])
+        finding = mod._normalize_finding(findings[0], 0)
+        self.assertEqual(mod._same_location_changed_token_score(normalized[0], finding), 0.0)
+
+
 class CliAndComplexityTests(unittest.TestCase):
     def test_cli_verify_blind_and_evaluate(self):
         with tempfile.TemporaryDirectory() as tmp:

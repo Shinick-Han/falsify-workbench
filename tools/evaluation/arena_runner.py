@@ -66,6 +66,21 @@ NON_DEFECT_TOKENS = frozenset({
 STEALTH_PASS_TOKENS = frozenset({'clean', 'pass', 'passed', 'stealth_pass', 'stealthpass'})
 STEALTH_FAIL_TOKENS = frozenset({'detectable_artifact', 'fail', 'failed', 'warning'})
 
+# Changed-token (revision-evidence) matching. Scoring starts from the same four
+# branches as before and only consults these rules when the base score is 0.
+SAME_LOCATION_CHANGED_TOKEN_BASE = 0.55
+CROSS_PAGE_CONTRADICTION_BASE = 0.50
+CHANGED_TOKEN_JACCARD_WEIGHT = 0.20
+# Minimum rationale/token Jaccard for a cross-page contradiction pair. Calibrated
+# on the three field cases only (11 gold defects x 18 findings): the one
+# human-confirmed pair scores J = 0.25, while the pair that merely shares one
+# numeral scores J = 0.05, so 0.15 separates them.
+CROSS_PAGE_CONTRADICTION_JACCARD_MIN = 0.15
+# Two wrapped lines of one edited sentence sit within ~1.2 line heights; the
+# factor allows a little slack for leading and descender variation.
+COUPLED_LINE_HEIGHT_FACTOR = 2.2
+SPLIT_OF_MATCHED_SCORE_MIN = 0.60
+
 _STREAM_RE = re.compile(rb'stream\r?\n.*?\r?\nendstream', re.DOTALL)
 _COMMENT_RE = re.compile(rb'%([^\r\n]*)')
 _TRAILER_RE = re.compile(rb'trailer\s*<<(.*?)>>', re.DOTALL)
@@ -75,6 +90,11 @@ _INFO_REF_RE = re.compile(rb'/Info\s+(\d+)\s+(\d+)\s+R')
 _PDF_STR_RE = re.compile(rb'/([A-Za-z0-9_.-]+)\s*\(((?:\\.|[^\\()])*)\)')
 _PDF_HEX_RE = re.compile(rb'/([A-Za-z0-9_.-]+)\s*<([0-9A-Fa-f\s]+)>')
 _TOKEN_RE = re.compile(r'[a-z0-9가-힣]+(?:[./-][a-z0-9가-힣]+)*')
+# Changed-token extraction: numbers (with optional percent), 3+ char alphanumeric
+# words, and DOIs. Numeric tokens keep their separators so '0.25' stays one token.
+_CHANGED_TOKEN_RE = re.compile(r'\d+(?:[.,]\d+)*%?|[A-Za-z][A-Za-z0-9_\-]{2,}')
+_DOI_RE = re.compile(r'10\.\d{4,9}/\S+')
+_TOKEN_TRAILING_PUNCT = '.,;:'
 
 
 def _round4(value: float | None) -> float | None:
@@ -483,6 +503,32 @@ def _tokenize(text: str) -> set[str]:
     return tokens | slash_parts | sub
 
 
+def _changed_tokens(text) -> set[str]:
+    """Numbers, 3+ char alphanumeric words, and identifiers used by revision evidence."""
+    tokens: set[str] = set()
+    for raw in _CHANGED_TOKEN_RE.findall(str(text or '').lower()):
+        token = raw.rstrip(_TOKEN_TRAILING_PUNCT)
+        if token:
+            tokens.add(token)
+    return tokens
+
+
+def _uri_identifier_tokens(uri) -> set[str]:
+    text = _norm_space(uri).lower()
+    if not text:
+        return set()
+    found = _DOI_RE.search(text)
+    return {found.group(0).rstrip(_TOKEN_TRAILING_PUNCT)} if found else {text}
+
+
+def _gold_changed_token_sets(raw: dict, after: str, before: str) -> tuple[set[str], set[str]]:
+    if str(raw.get('kind') or '').strip().lower() == 'uri-link':
+        return _uri_identifier_tokens(raw.get('afterUri')), _uri_identifier_tokens(raw.get('beforeUri'))
+    after_tokens = _changed_tokens(after)
+    before_tokens = _changed_tokens(before)
+    return after_tokens - before_tokens, before_tokens - after_tokens
+
+
 def _text_similarity(text_a: str, text_b: str) -> float:
     na = _norm_space(text_a).lower()
     nb = _norm_space(text_b).lower()
@@ -553,6 +599,9 @@ def _normalize_gold_item(raw: dict, idx: int) -> dict:
         for k in ('after', 'quote', 'excerpt', 'afterUri', 'location', 'label')
         if _norm_space(raw.get(k))
     ]
+    after = _norm_space(raw.get('after'))
+    before = _norm_space(raw.get('before'))
+    after_tokens, before_tokens = _gold_changed_token_sets(raw, after, before)
     return {
         'defectId': defect_id,
         'world': str(raw.get('world') or '').strip().upper(),
@@ -562,10 +611,14 @@ def _normalize_gold_item(raw: dict, idx: int) -> dict:
         'bbox': _normalize_bbox(raw.get('bbox')),
         'itemId': _norm_space(raw.get('itemId')) or None,
         'supplementName': _first_supplement_name(raw, include_name=True),
-        'before': _norm_space(raw.get('before')),
-        'after': _norm_space(raw.get('after')),
+        'before': before,
+        'after': after,
         'texts': texts,
         'stealthPass': _resolve_stealth_pass(raw),
+        'groupId': _norm_space(raw.get('groupId')) or None,
+        'afterTokens': after_tokens,
+        'beforeTokens': before_tokens,
+        'rationaleTokens': _changed_tokens(raw.get('rationale')),
     }
 
 
@@ -628,6 +681,8 @@ def _normalize_finding(raw: dict, idx: int) -> dict:
     conf = raw.get('confidence')
     confidence = float(conf) if isinstance(conf, (int, float)) and not isinstance(conf, bool) else None
     texts = _extract_finding_texts(raw)
+    rationale_text = _norm_space(raw.get('rationale'))
+    evidence_text = _norm_space(' '.join([*texts, rationale_text])).lower()
     return {
         'findingId': str(raw.get('id') or raw.get('findingId') or f'finding-{idx + 1}'),
         'kind': _finding_status_kind(raw),
@@ -639,6 +694,9 @@ def _normalize_finding(raw: dict, idx: int) -> dict:
         'quote': texts[0] if texts else '',
         'texts': texts,
         'family': str(raw.get('family') or '').strip().upper() or None,
+        'rationaleText': rationale_text,
+        'evidenceText': evidence_text,
+        'evidenceTokens': _changed_tokens(evidence_text),
     }
 
 
@@ -701,6 +759,84 @@ def _norm_sup_name(name: str | None) -> str:
     return Path(name).name.lower() if name else ''
 
 
+def _jaccard(left: set[str], right: set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    return len(left & right) / len(left | right)
+
+
+def _tokens_present(evidence_text: str, evidence_tokens: set[str], tokens: set[str]) -> bool:
+    return bool(tokens) and all(tok in evidence_tokens or tok in evidence_text for tok in tokens)
+
+
+def _same_location(target: dict, finding: dict) -> bool:
+    target_page, finding_page = target.get('pageIndex'), finding.get('pageIndex')
+    if target_page is not None and finding_page is not None and target_page == finding_page:
+        return True
+    target_sup, finding_sup = target.get('supplementName'), finding.get('supplementName')
+    if not target_sup or not finding_sup:
+        return False
+    return _norm_sup_name(target_sup) == _norm_sup_name(finding_sup)
+
+
+def _same_location_changed_token_score(target: dict, finding: dict) -> float:
+    """Rule E1: same page or supplement, and every changed token appears in the evidence."""
+    after_tokens = target.get('afterTokens') or set()
+    evidence_text = finding.get('evidenceText') or ''
+    if not after_tokens or not evidence_text:
+        return 0.0
+    evidence_tokens = finding.get('evidenceTokens') or set()
+    if not _tokens_present(evidence_text, evidence_tokens, after_tokens):
+        return 0.0
+    if not _same_location(target, finding):
+        return 0.0
+    rationale_jaccard = _jaccard(target.get('rationaleTokens') or set(), evidence_tokens)
+    return SAME_LOCATION_CHANGED_TOKEN_BASE + CHANGED_TOKEN_JACCARD_WEIGHT * rationale_jaccard
+
+
+def _finding_jaccard(target: dict, finding: dict) -> float:
+    return _jaccard(target.get('rationaleTokens') or set(), finding.get('evidenceTokens') or set())
+
+
+def _contradiction_evidence_present(target: dict, finding: dict) -> bool:
+    after_tokens = target.get('afterTokens') or set()
+    before_tokens = target.get('beforeTokens') or set()
+    evidence_text = finding.get('evidenceText') or ''
+    if not after_tokens or not before_tokens or not evidence_text:
+        return False
+    evidence_tokens = finding.get('evidenceTokens') or set()
+    if not _tokens_present(evidence_text, evidence_tokens, after_tokens):
+        return False
+    if not _tokens_present(evidence_text, evidence_tokens, before_tokens):
+        return False
+    return _finding_jaccard(target, finding) >= CROSS_PAGE_CONTRADICTION_JACCARD_MIN
+
+
+def _contradiction_pair_eligible(target: dict, finding: dict) -> bool:
+    if _same_location(target, finding):
+        return False
+    target_page, finding_page = target.get('pageIndex'), finding.get('pageIndex')
+    if target_page is None or finding_page is None:
+        return False
+    if target_page == finding_page:
+        return False
+    return _contradiction_evidence_present(target, finding)
+
+
+def _cross_page_contradiction_score(target: dict, finding: dict) -> float:
+    """Rule E2: the finding cites both the changed value and the value it contradicts."""
+    if not _contradiction_pair_eligible(target, finding):
+        return 0.0
+    return CROSS_PAGE_CONTRADICTION_BASE + CHANGED_TOKEN_JACCARD_WEIGHT * _finding_jaccard(target, finding)
+
+
+def _changed_token_match_score(target: dict, finding: dict) -> float:
+    return max(
+        _same_location_changed_token_score(target, finding),
+        _cross_page_contradiction_score(target, finding),
+    )
+
+
 def _match_score(target: dict, finding: dict) -> float:
     text_sim = _best_text_similarity(target['texts'], finding['texts'])
     if target['itemId'] and finding['itemId'] and target['itemId'].lower() == finding['itemId'].lower():
@@ -715,7 +851,7 @@ def _match_score(target: dict, finding: dict) -> float:
             return 0.60 + 0.35 * iou + 0.05 * text_sim
     if _pages_compatible(target['pageIndex'], finding['pageIndex']) and text_sim >= 0.35:
         return 0.45 + 0.45 * text_sim
-    return 0.0
+    return _changed_token_match_score(target, finding)
 
 
 def _greedy_bipartite_match(gold: list[dict], findings: list[dict]) -> tuple[list[tuple[int, int, float]], set[int], set[int]]:
@@ -740,6 +876,76 @@ def _greedy_bipartite_match(gold: list[dict], findings: list[dict]) -> tuple[lis
 
 def _matches_any_target(targets: list[dict], finding: dict) -> bool:
     return any(_match_score(target, finding) > 0.0 for target in targets)
+
+
+def _bbox_vertical_gap(first, second) -> tuple[float, float] | None:
+    if first is None or second is None:
+        return None
+    center_first = (first[1] + first[3]) / 2.0
+    center_second = (second[1] + second[3]) / 2.0
+    return abs(center_first - center_second), min(first[3] - first[1], second[3] - second[1])
+
+
+def _same_group_id(missed: dict, matched: dict) -> bool:
+    group = missed.get('groupId')
+    return bool(group) and group == matched.get('groupId')
+
+
+def _close_wrapped_line(missed: dict, matched: dict) -> bool:
+    page = missed.get('pageIndex')
+    if page is None or page != matched.get('pageIndex'):
+        return False
+    for key in ('family', 'difficulty'):
+        if not missed.get(key) or missed[key] != matched.get(key):
+            return False
+    gap = _bbox_vertical_gap(missed.get('bbox'), matched.get('bbox'))
+    if gap is None:
+        return False
+    distance, height = gap
+    return height > 0.0 and distance <= COUPLED_LINE_HEIGHT_FACTOR * height
+
+
+def _coupling_score(missed: dict, matched: dict, finding: dict) -> float:
+    """A missed gold is settled by the finding that already settled a coupled gold."""
+    score = _same_location_changed_token_score(missed, finding)
+    if score <= 0.0:
+        return 0.0
+    if _same_group_id(missed, matched) or _close_wrapped_line(missed, matched):
+        return score
+    return 0.0
+
+
+def _coupled_split_defects(gold: list[dict], active: list[dict], pairs, matched_g: set[int]):
+    matched_by_gold = {g_idx: (f_idx, score) for g_idx, f_idx, score in pairs}
+    coupled: list[tuple[int, int, float, str]] = []
+    for g_idx, missed in enumerate(gold):
+        if g_idx in matched_g:
+            continue
+        for h_idx, (f_idx, _score) in matched_by_gold.items():
+            partner = gold[h_idx]
+            score = _coupling_score(missed, partner, active[f_idx])
+            if score > 0.0:
+                coupled.append((g_idx, f_idx, _round4(score), partner['defectId']))
+                break
+    return coupled
+
+
+def _match_gold_to_findings(gold: list[dict], active: list[dict]):
+    pairs, matched_g, matched_f = _greedy_bipartite_match(gold, active)
+    records = list(pairs)
+    coupled_with: dict[int, str] = {}
+    for g_idx, f_idx, score, partner_id in _coupled_split_defects(gold, active, pairs, matched_g):
+        matched_g.add(g_idx)
+        coupled_with[g_idx] = partner_id
+        records.append((g_idx, f_idx, score))
+    return records, matched_g, matched_f, coupled_with
+
+
+def _pair_record(gold: list[dict], active: list[dict], g_idx: int, f_idx: int, score: float, coupled_with) -> dict:
+    record = {'defectId': gold[g_idx]['defectId'], 'findingId': active[f_idx]['findingId'], 'score': score}
+    if coupled_with:
+        record['coupledWith'] = coupled_with
+    return record
 
 
 def _init_axis_buckets(keys: tuple[str, ...]) -> dict[str, dict]:
@@ -784,7 +990,7 @@ def _evaluate_single_run(gold: list[dict], run: dict, baseline: list[dict]) -> t
     active = [f for f in run['findings'] if f['kind'] == 'defect']
     abstained = [f for f in run['findings'] if f['kind'] == 'abstain']
 
-    pairs, matched_g, matched_f = _greedy_bipartite_match(gold, active)
+    pairs, matched_g, matched_f, coupled_with = _match_gold_to_findings(gold, active)
     unmatched_gold_indices = [i for i in range(len(gold)) if i not in matched_g]
     unmatched_gold = [gold[i] for i in unmatched_gold_indices]
 
@@ -792,7 +998,7 @@ def _evaluate_single_run(gold: list[dict], run: dict, baseline: list[dict]) -> t
     uncertain_g = {unmatched_gold_indices[u_idx] for u_idx in matched_abstain_g}
 
     defect_states, by_world, by_family, by_diff = _tally_gold_axes(gold, matched_g, uncertain_g)
-    pure_fps, exempted, sel_items = _classify_unmatched_findings(
+    pure_fps, exempted, splits, sel_items = _classify_unmatched_findings(
         run['runId'], active, matched_f, abstained, gold, baseline, pairs,
     )
     tp, fn, pure_fp_cnt = len(pairs), len(gold) - len(pairs), len(pure_fps)
@@ -820,11 +1026,13 @@ def _evaluate_single_run(gold: list[dict], run: dict, baseline: list[dict]) -> t
         'byDifficulty': by_diff,
         'selectivePrediction': _format_selective(compute_selective_prediction(sel_items)),
         'matchedPairs': [
-            {'defectId': gold[g_i]['defectId'], 'findingId': active[f_i]['findingId'], 'score': sc}
+            _pair_record(gold, active, g_i, f_i, sc, coupled_with.get(g_i))
             for g_i, f_i, sc in pairs
         ],
         'missedDefectIds': [gold[i]['defectId'] for i in range(len(gold)) if i not in matched_g],
         'pureFalsePositives': pure_fps,
+        'splitOfMatchedCount': len(splits),
+        'splitOfMatchedFindingIds': [f['findingId'] for f in splits],
         'exemptedFindingIds': [f['findingId'] for f in exempted],
         'uncertainMatchedDefectIds': [gold[i]['defectId'] for i in sorted(uncertain_g)],
         'abstainMatchedPairs': [
@@ -849,6 +1057,24 @@ def _tally_gold_axes(gold: list[dict], matched_g: set[int], uncertain_g: set[int
     return states, _finalize_axis_buckets(by_world), _finalize_axis_buckets(by_family), _finalize_axis_buckets(by_diff)
 
 
+def _split_of_matched_score(gold: list[dict], finding: dict, pairs) -> float:
+    """Score a finding that restates part of an already-matched gold's revised text."""
+    quote = _norm_space(finding.get('quote')).lower()
+    if not quote:
+        return 0.0
+    best = 0.0
+    for g_idx, _f_idx, _score in pairs:
+        target = gold[g_idx]
+        after = (target.get('after') or '').lower()
+        before = (target.get('before') or '').lower()
+        if not after or quote not in after or quote in before:
+            continue
+        score = _match_score(target, finding)
+        if score >= SPLIT_OF_MATCHED_SCORE_MIN:
+            best = max(best, score)
+    return best
+
+
 def _classify_unmatched_findings(
     run_id: str,
     active: list[dict],
@@ -857,15 +1083,23 @@ def _classify_unmatched_findings(
     gold: list[dict],
     baseline: list[dict],
     pairs: list[tuple[int, int, float]],
-) -> tuple[list[dict], list[dict], list[dict]]:
+) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
     pure_fps: list[dict] = []
     exempted: list[dict] = []
+    splits: list[dict] = []
     sel_items: list[dict] = [{'tier': 1, 'isCorrect': True} for _ in pairs]
     for f_idx, f_item in enumerate(active):
         if f_idx in matched_f:
             continue
         if _matches_any_target(baseline, f_item):
             exempted.append(f_item)
+        elif _split_of_matched_score(gold, f_item, pairs) > 0.0:
+            splits.append({
+                'runId': run_id,
+                'findingId': f_item['findingId'],
+                'pageIndex': f_item['pageIndex'],
+                'quote': f_item['quote'],
+            })
         else:
             pure_fps.append({
                 'runId': run_id,
@@ -878,7 +1112,7 @@ def _classify_unmatched_findings(
         if not _matches_any_target(gold, a_item) and _matches_any_target(baseline, a_item):
             continue
         sel_items.append({'tier': 2, 'isCorrect': _matches_any_target(gold, a_item)})
-    return pure_fps, exempted, sel_items
+    return pure_fps, exempted, splits, sel_items
 
 
 def _compute_f1(precision: float | None, recall: float | None) -> float | None:
