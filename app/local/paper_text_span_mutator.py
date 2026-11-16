@@ -334,17 +334,24 @@ def _line_for_rect(page_lines: list[dict], rect: pymupdf.Rect) -> dict | None:
     return best
 
 
-def _max_line_width(page, page_lines: list[dict], rect: pymupdf.Rect, matched_line: dict | None) -> float:
+def _same_line_ys(rect: pymupdf.Rect) -> float:
+    return max(4.0, rect.height * 0.55)
+
+
+def _max_line_width(page, page_lines, rect: pymupdf.Rect, matched_line: dict | None, orig_size: float) -> float:
     rect_cy = (rect.y0 + rect.y1) / 2.0
-    right_neighbors = []
-    for ln in page_lines:
-        for sp in ln['spans']:
-            sb = sp['bbox']
-            sp_cy = (sb[1] + sb[3]) / 2.0
-            if abs(sp_cy - rect_cy) <= max(4.0, rect.height * 0.55) and sb[0] >= rect.x1 - 1.5:
-                right_neighbors.append(sb[0])
+    tol = _same_line_ys(rect)
+    right_neighbors = [
+        sp['bbox'][0]
+        for ln in page_lines for sp in ln['spans']
+        if abs((sp['bbox'][1] + sp['bbox'][3]) / 2.0 - rect_cy) <= tol and sp['bbox'][0] >= rect.x1 - 1.5
+    ]
+    right_neighbors.extend(
+        w[0] for w in page.get_text('words')
+        if abs((w[1] + w[3]) / 2.0 - rect_cy) <= tol and w[0] >= rect.x1 - 1.0
+    )
     if right_neighbors:
-        return max(rect.width, min(right_neighbors) - rect.x0 - 0.5)
+        return max(rect.width, min(right_neighbors) - rect.x0 - max(1.2, orig_size * 0.18))
     page_w = float(page.rect.width)
     col = matched_line.get('column', 'full') if matched_line else 'full'
     col_right = page_w * 0.48 if col == 'left' else page_w - 36.0
@@ -352,21 +359,90 @@ def _max_line_width(page, page_lines: list[dict], rect: pymupdf.Rect, matched_li
     return max(rect.width, min(col_right, max(blk_right + 24.0, rect.x1 + 36.0)) - rect.x0)
 
 
-def _fit_font_size(font_metrics, text: str, orig_size: float, max_width: float) -> tuple[float | None, float | None]:
-    if not text:
-        return orig_size, 0.0
+def _orig_words(page, rect: pymupdf.Rect) -> list:
+    """Original words under the match rect, left to right, captured before redaction."""
+    clip = rect + (-0.5, -0.5, 0.5, 0.5)
+    try:
+        words = page.get_text('words', clip=clip) or []
+    except (RuntimeError, ValueError):
+        return []
+    return sorted(words, key=lambda w: w[0])
+
+
+def _mean_word_gap(orig_words: list, size: float, orig_size: float) -> float:
+    """Original mean word gap, scaled with the font size so shrinking stays proportional."""
+    gaps = [orig_words[i + 1][0] - orig_words[i][2] for i in range(len(orig_words) - 1)]
+    gaps = [g for g in gaps if g > 0.5]
+    if gaps and orig_size > 0:
+        return sum(gaps) / len(gaps) * size / orig_size
+    return size * 0.28
+
+
+def _word_positions(font_metrics, words, size: float, orig_words: list, start_x: float,
+                    keep_original: bool, orig_size: float) -> list[tuple[float, str]]:
+    """Place replacement words one by one; never emit a space character."""
+    if keep_original:
+        return [(float(ow[0]), word) for word, ow in zip(words, orig_words)]
+    gap = _mean_word_gap(orig_words, size, orig_size)
+    positions, x = [], start_x
+    for word in words:
+        positions.append((x, word))
+        x += font_metrics.text_length(word, fontsize=size) + gap
+    return positions
+
+
+def _layout_end_x(font_metrics, positions: list[tuple[float, str]], size: float) -> float:
+    if not positions:
+        return 0.0
+    x, word = positions[-1]
+    return x + font_metrics.text_length(word, fontsize=size)
+
+
+def _fit_mode(font_metrics, words, orig_words: list, size: float, orig_size: float,
+              rect: pymupdf.Rect, keep_modes: tuple, limit: float) -> tuple[bool | None, list]:
+    for keep in keep_modes:
+        positions = _word_positions(font_metrics, words, size, orig_words, rect.x0, keep, orig_size)
+        if _layout_end_x(font_metrics, positions, size) <= limit + 0.5:
+            return keep, positions
+    return None, []
+
+
+def _fit_word_layout(font_metrics, words, orig_words: list, orig_size: float,
+                     rect: pymupdf.Rect, max_width: float) -> tuple[float | None, bool | None, list]:
+    """Largest font size that fits the budget, preferring the original word x positions."""
+    if not words:
+        return orig_size, True, []
     min_size = min(orig_size, max(5.5, orig_size * 0.78))
-    size = orig_size
-    while size >= min_size - 1e-6:
-        width = font_metrics.text_length(text, fontsize=size)
-        if width <= max_width + 0.5:
-            return round(size, 3), width
-        size -= 0.25
-    return None, None
+    keep_modes = (True, False) if len(words) == len(orig_words) else (False,)
+    limit = rect.x0 + max_width
+    keep, positions = _fit_mode(font_metrics, words, orig_words, orig_size, orig_size, rect, keep_modes, limit)
+    if keep is not None:
+        return orig_size, keep, positions
+    keep, positions = _fit_mode(font_metrics, words, orig_words, min_size, orig_size, rect, keep_modes, limit)
+    if keep is None:
+        return None, None, []
+    best = (min_size, keep, positions)
+    low, high = min_size, orig_size
+    for _ in range(24):
+        mid = (low + high) / 2.0
+        mode, layout = _fit_mode(font_metrics, words, orig_words, mid, orig_size, rect, keep_modes, limit)
+        if mode is None:
+            high = mid
+            continue
+        best, low = (round(mid, 3), mode, layout), mid
+    return best
 
 
 def _color_tuple(color_int: int) -> tuple[float, float, float]:
     return ((color_int >> 16 & 255) / 255.0, (color_int >> 8 & 255) / 255.0, (color_int & 255) / 255.0)
+
+
+def _font_error(page_lines: list[dict], op: dict, exc: Exception) -> SpanMutationError:
+    return SpanMutationError('text_span_font_missing', {
+        'pageIndex': op['pageIndex'],
+        'nearestCandidates': _nearest_line_candidates(page_lines, op['before']),
+        'recoveryHint': f'Font cannot render replacement glyphs ({exc}); use ASCII/standard characters.',
+    })
 
 
 def _plan_page_text_op(doc, page, page_lines: list[dict], op: dict, font_idx: int, prior_rects: list) -> dict:
@@ -384,14 +460,14 @@ def _plan_page_text_op(doc, page, page_lines: list[dict], op: dict, font_idx: in
     try:
         font_name, substituted, font_metrics = _font(doc, page, span, op['after'], font_idx)
     except ValueError as exc:
-        raise SpanMutationError('text_span_font_missing', {
-            'pageIndex': op['pageIndex'],
-            'nearestCandidates': _nearest_line_candidates(page_lines, op['before']),
-            'recoveryHint': f'Font cannot render replacement glyphs ({exc}); use ASCII/standard characters.',
-        }) from None
+        raise _font_error(page_lines, op, exc) from None
     orig_size = max(4.0, float(span.get('size') or 10.0))
-    max_width = _max_line_width(page, page_lines, rect, matched_line)
-    fitted_size, fitted_width = _fit_font_size(font_metrics, op['after'], orig_size, max_width)
+    words = op['after'].split()
+    orig_words = _orig_words(page, rect)
+    max_width = _max_line_width(page, page_lines, rect, matched_line, orig_size)
+    fitted_size, keep_original, positions = _fit_word_layout(
+        font_metrics, words, orig_words, orig_size, rect, max_width,
+    )
     if fitted_size is None:
         raise SpanMutationError('text_span_no_room', {
             'pageIndex': op['pageIndex'],
@@ -402,7 +478,7 @@ def _plan_page_text_op(doc, page, page_lines: list[dict], op: dict, font_idx: in
             ),
         })
     origin_y = float(span['origin'][1]) if span.get('origin') else float(rect.y1 - max(1.0, fitted_size * 0.2))
-    mod_x1 = max(rect.x1, rect.x0 + fitted_width)
+    mod_x1 = max(rect.x1, rect.x0 + _layout_end_x(font_metrics, positions, fitted_size))
     return {
         'op': op,
         'rect': rect,
@@ -413,7 +489,48 @@ def _plan_page_text_op(doc, page, page_lines: list[dict], op: dict, font_idx: in
         'origSize': orig_size,
         'originY': origin_y,
         'color': _color_tuple(int(span.get('color') or 0)),
+        'doc': doc,
+        'span': span,
+        'fontIdx': font_idx,
+        'origWords': orig_words,
+        'words': words,
+        'keepOriginal': keep_original,
+        'maxWidth': max_width,
     }
+
+
+def _insert_plan_words(page, plan: dict) -> None:
+    """Re-register the font after redaction, then place words without any space glyph."""
+    op = plan['op']
+    words = plan['words']
+    if not words:
+        return
+    try:
+        font_name, substituted, font_metrics = _font(
+            plan['doc'], page, plan['span'], op['after'], plan['fontIdx'],
+        )
+    except ValueError as exc:
+        raise SpanMutationError('text_span_font_missing', {
+            'pageIndex': op['pageIndex'],
+            'recoveryHint': f'Font cannot render replacement glyphs ({exc}); use ASCII/standard characters.',
+        }) from None
+    plan['fontName'], plan['fontSubstituted'] = font_name, substituted
+    positions = _word_positions(
+        font_metrics, words, plan['fittedSize'], plan['origWords'], plan['rect'].x0,
+        plan['keepOriginal'], plan['origSize'],
+    )
+    for x, word in positions:
+        page.insert_text(
+            (x, plan['originY']),
+            word,
+            fontname=font_name,
+            fontsize=plan['fittedSize'],
+            color=plan['color'],
+            overlay=True,
+        )
+    plan['modBbox'][2] = round(
+        max(float(plan['rect'].x1), _layout_end_x(font_metrics, positions, plan['fittedSize'])), 2,
+    )
 
 
 def _apply_page_text_plans(page, plans: list[dict]) -> None:
@@ -421,16 +538,7 @@ def _apply_page_text_plans(page, plans: list[dict]) -> None:
         page.add_redact_annot(plan['rect'], fill=False, cross_out=False)
     page.apply_redactions(images=0, graphics=0, text=0)
     for plan in plans:
-        op = plan['op']
-        if op['after']:
-            page.insert_text(
-                (plan['rect'].x0, plan['originY']),
-                op['after'],
-                fontname=plan['fontName'],
-                fontsize=plan['fittedSize'],
-                color=plan['color'],
-                overlay=True,
-            )
+        _insert_plan_words(page, plan)
 
 
 def _text_change_record(plan: dict) -> dict:
