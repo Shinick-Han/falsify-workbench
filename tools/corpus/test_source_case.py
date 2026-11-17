@@ -148,8 +148,9 @@ class SourceCaseTests(unittest.TestCase):
 
     def test_fixture_arithmetic(self):
         payload = _load_json(FIXTURE / "inputs" / "values.json")["values"]
-        texts = {key: item["text"] for key, item in payload.items()}
-        values = {key: Decimal(item["text"]) for key, item in payload.items()}
+        numeric = {key: item for key, item in payload.items() if not key.startswith("ph_")}
+        texts = {key: item["text"] for key, item in numeric.items()}
+        values = {key: Decimal(item["text"]) for key, item in numeric.items()}
         self.assertEqual(values["n_excluded_ineligible"] + values["n_excluded_declined"], values["n_excluded"])
         self.assertEqual(values["n_screened"], values["n_excluded"] + values["n_randomized"])
         self.assertEqual(values["n_randomized"], values["n_alloc_fx"] + values["n_alloc_pb"])
