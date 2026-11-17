@@ -480,47 +480,13 @@ def _sensor_kwargs(max_signals, include_figure_forensics, include_flow_triage,
     return bundle_mod, kwargs
 
 
-def _needs_direct_outline(options, kwargs):
-    """True when the bundle payload cannot accept the outline flag."""
-    if not options["includeArgumentOutline"]:
-        return False
-    return "include_argument_outline" not in kwargs
-
-
-def _outline_missing(sensor, options):
-    if not options["includeArgumentOutline"]:
-        return False
-    if not isinstance(sensor, dict):
-        return True
-    return not isinstance(sensor.get("argumentOutline"), dict)
-
-
-def _direct_outline_sensor(store, opened, options):
-    import paper_blue_sensor
-    return paper_blue_sensor.run_blue_sensor(
-        opened["paperId"],
-        file_hash=opened["fileHash"],
-        max_signals=options["maxSignals"],
-        include_figure_forensics=options["includeFigureForensics"],
-        include_flow_triage=options["includeFlowTriage"],
-        include_internal_consistency=options["includeInternalConsistency"],
-        include_argument_outline=True,
-        store=store,
-    )
-
-
 def _sensor_for_paper(store, opened, options):
     bundle_mod, kwargs = _sensor_kwargs(
         options["maxSignals"], options["includeFigureForensics"],
         options["includeFlowTriage"], options["includeInternalConsistency"],
         options["includeArgumentOutline"])
-    if _needs_direct_outline(options, kwargs):
-        return _direct_outline_sensor(store, opened, options)
-    sensor = bundle_mod.run_blue_sensor_payload(
+    return bundle_mod.run_blue_sensor_payload(
         store, opened["paperId"], opened["fileHash"], **kwargs)
-    if _outline_missing(sensor, options):
-        return _direct_outline_sensor(store, opened, options)
-    return sensor
 
 
 def _paper_signals(store, opened, bundle, options, sensor):
@@ -541,8 +507,8 @@ def _paper_signals(store, opened, bundle, options, sensor):
 def _compact_outline(summary):
     if not isinstance(summary, dict):
         return None
-    import falsify_cli
-    return falsify_cli._compact_argument_outline(summary)
+    from paper_blue_sensor import compact_argument_outline
+    return compact_argument_outline(summary)
 
 
 def _outline_from_sensor(sensor, options):
@@ -599,13 +565,22 @@ def _signals_from_payload(payload):
     return [item for item in signals if isinstance(item, dict)]
 
 
+def _cache_key_options(options):
+    """Keep flag-off keys equal to the keys from before this option existed."""
+    if options.get("includeArgumentOutline") is True:
+        return options
+    keyed = dict(options)
+    keyed.pop("includeArgumentOutline", None)
+    return keyed
+
+
 def _load_triage_payload(cache, store, opened, bundle, options):
     if cache is None:
         return _signal_payload(store, opened, bundle, options)
     from paper_evidence_cache import compute_cache_key
     key = compute_cache_key(
         "workspace-triage", opened["fileHash"],
-        supplements=_supplement_rows(bundle), options=options)
+        supplements=_supplement_rows(bundle), options=_cache_key_options(options))
     payload, _hit = cache.get_or_compute(key, lambda: _signal_payload(store, opened, bundle, options))
     if isinstance(payload, dict):
         return payload

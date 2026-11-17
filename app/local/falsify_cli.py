@@ -58,7 +58,7 @@ for _path in (str(_HERE.parent), str(_EVAL_DIR)):
 from agreement_selective import compute_krippendorff_alpha, compute_selective_prediction  # noqa: E402
 from blue_report_validate import BlueReportError, finalize_blue_report, validate_blue_report  # noqa: E402
 from falsify_corpus_cli import CorpusCliError  # noqa: E402
-from paper_blue_sensor import run_blue_sensor  # noqa: E402
+from paper_blue_sensor import compact_argument_outline, run_blue_sensor  # noqa: E402
 from paper_chart_edit_service import ChartEditService  # noqa: E402
 from paper_evidence import EvidenceStore  # noqa: E402
 from paper_evidence_text import _open_pdf  # noqa: E402
@@ -604,14 +604,7 @@ def _reject_manuscript_date_without_oracle(value, oracle):
 
 
 def _compact_argument_outline(summary: dict) -> dict:
-    compact = dict(summary)
-    compact["triageHints"] = list(compact.get("triageHints") or [])[:5]
-    compact.pop("outline", None)
-    compact.pop("claimEvidenceMap", None)
-    digest = compact.get("digest")
-    if isinstance(digest, str) and len(digest) > 400:
-        compact["digest"] = digest[:400]
-    return compact
+    return compact_argument_outline(summary)
 
 
 def _compute_blue_scan_payload(store, pid: str, fhash: str, args, deadline) -> tuple[dict, list[str]]:

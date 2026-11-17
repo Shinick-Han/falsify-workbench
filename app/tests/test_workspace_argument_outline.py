@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "local"))
 import falsify_cli  # noqa: E402
 import paper_blue_sensor  # noqa: E402
 import paper_evidence  # noqa: E402
+import paper_mcp_bundle  # noqa: E402
 import paper_mcp_workspace  # noqa: E402
 
 ALPHA = (
@@ -121,6 +122,76 @@ class WorkspaceArgumentOutlineTests(unittest.TestCase):
                 self.assertLessEqual(len(pack.get("triageHints") or []), 5)
                 self.assertTrue(all(hint.get("advisoryOnly") is True for hint in pack["triageHints"]))
             self.assertTrue(by_name["beta.pdf"]["argumentOutline"]["triageHints"])
+
+    def test_outline_flag_does_not_change_ranking_signals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _workspace(root)
+            store = paper_evidence.EvidenceStore(max_documents=4)
+            off = _triage(root, store)
+            on = _triage(root, store, include_argument_outline=True)
+            self.assertEqual(
+                [item["name"] for item in on["rankedPapers"]],
+                [item["name"] for item in off["rankedPapers"]],
+            )
+            self.assertEqual(len(on["rankedPapers"]), 2)
+            for off_item, on_item in zip(off["rankedPapers"], on["rankedPapers"]):
+                self.assertEqual(on_item["totalSignals"], off_item["totalSignals"])
+                self.assertEqual(on_item["priorityScore"], off_item["priorityScore"])
+                self.assertEqual(on_item["byFamily"], off_item["byFamily"])
+                self.assertNotIn("argumentOutline", off_item)
+                self.assertEqual(set(on_item) - set(off_item), {"argumentOutline"})
+                self.assertEqual(
+                    {key: value for key, value in on_item.items() if key != "argumentOutline"},
+                    off_item,
+                )
+            summary, paths, paired = paper_mcp_workspace._scan(root, 32)
+            compared = 0
+            for entry in summary["papers"]:
+                if entry["masked"]:
+                    continue
+                opened = paper_mcp_workspace.paper_mcp.open_selected(store, paths[entry["paperId"]])
+                bundle = paper_mcp_workspace._load_paired_bundle(paired.get(entry["paperId"], ()))
+                off_payload = paper_mcp_workspace._signal_payload(
+                    store, opened, bundle,
+                    paper_mcp_workspace._triage_options(25, False, False, False, False, False))
+                on_payload = paper_mcp_workspace._signal_payload(
+                    store, opened, bundle,
+                    paper_mcp_workspace._triage_options(25, False, False, False, False, True))
+                self.assertEqual(off_payload["signals"], on_payload["signals"])
+                self.assertNotIn("argumentOutline", off_payload)
+                self.assertEqual(set(on_payload) - set(off_payload), {"argumentOutline"})
+                self.assertNotIn("outline", on_payload["argumentOutline"])
+                self.assertNotIn("claimEvidenceMap", on_payload["argumentOutline"])
+                compared += 1
+            self.assertEqual(compared, 2)
+
+    def test_digest_keeps_compact_outline_only_when_requested(self):
+        raw = {
+            "schema": "x",
+            "signals": [{"family": "D1", "kind": "sample"}],
+            "argumentOutline": {
+                "schema": "falsify.argument-outline.v1",
+                "triageHints": [{"advisoryOnly": True, "n": index} for index in range(6)],
+                "outline": [{"role": "claim"}],
+                "claimEvidenceMap": [{"claim": "x"}],
+                "digest": "d" * 500,
+            },
+        }
+        off = paper_mcp_bundle._compact_sensor_digest(raw)
+        explicit = paper_mcp_bundle._compact_sensor_digest(raw, include_argument_outline=False)
+        on = paper_mcp_bundle._compact_sensor_digest(raw, include_argument_outline=True)
+        self.assertEqual(off, explicit)
+        self.assertNotIn("argumentOutline", off)
+        self.assertEqual(off["signals"], on["signals"])
+        self.assertEqual(set(on) - set(off), {"argumentOutline"})
+        packed = on["argumentOutline"]
+        self.assertEqual(packed, paper_blue_sensor.compact_argument_outline(raw["argumentOutline"]))
+        self.assertEqual(packed, falsify_cli._compact_argument_outline(raw["argumentOutline"]))
+        self.assertEqual(len(packed["triageHints"]), 5)
+        self.assertEqual(len(packed["digest"]), 400)
+        self.assertNotIn("outline", packed)
+        self.assertNotIn("claimEvidenceMap", packed)
 
     def test_cache_misses_when_outline_flag_changes(self):
         with tempfile.TemporaryDirectory() as tmp:
