@@ -4,6 +4,7 @@ import contextlib
 import hashlib
 import io
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -168,6 +169,29 @@ class SourceCaseTests(unittest.TestCase):
         self._percent(values, texts, "ae_fx_k", "n_analyzed_fx", "ae_fx_pct")
         self._percent(values, texts, "ae_pb_k", "n_analyzed_pb", "ae_pb_pct")
 
+    def test_week8_intervals_match_normal_approximation(self):
+        values = _load_json(FIXTURE / "inputs" / "values.json")["values"]
+        fx = _reconstructed_ci(values, "chg_w8_fx", "chg_w8_fx_lo", "chg_w8_fx_hi")
+        pb = _reconstructed_ci(values, "chg_w8_pb", "chg_w8_pb_lo", "chg_w8_pb_hi")
+        diff = _reconstructed_ci(values, "diff_w8", "diff_w8_lo", "diff_w8_hi")
+        self.assertEqual(fx["low"], values["chg_w8_fx_lo"]["text"])
+        self.assertEqual(fx["high"], values["chg_w8_fx_hi"]["text"])
+        self.assertEqual(pb["low"], values["chg_w8_pb_lo"]["text"])
+        self.assertEqual(pb["high"], values["chg_w8_pb_hi"]["text"])
+        self.assertEqual(diff["low"], values["diff_w8_lo"]["text"])
+        self.assertEqual(diff["high"], values["diff_w8_hi"]["text"])
+        places = _decimal_places(values["diff_w8"]["text"])
+        self.assertEqual(f"{fx['point'] - pb['point']:.{places}f}", values["diff_w8"]["text"])
+        se_diff = math.sqrt(fx["se"] ** 2 + pb["se"] ** 2)
+        half = _NORMAL_95 * se_diff
+        self.assertLessEqual(abs(diff["lo"] - (diff["point"] - half)), 0.1)
+        self.assertLessEqual(abs(diff["hi"] - (diff["point"] + half)), 0.1)
+        printed_p = values["p_primary"]["text"]
+        z = abs(diff["point"]) / se_diff
+        self.assertEqual(_expected_p_text(_two_sided_normal_p(z), printed_p), printed_p)
+        self._assert_plausible_sd(fx["se"], values["n_analyzed_fx"]["text"])
+        self._assert_plausible_sd(pb["se"], values["n_analyzed_pb"]["text"])
+
     def test_warnings_for_unused_and_unreferenced(self):
         with tempfile.TemporaryDirectory() as tmp:
             case = _copy_case(tmp)
@@ -288,6 +312,11 @@ class SourceCaseTests(unittest.TestCase):
         self.assertNotIn(str(FIXTURE), buf.getvalue())
         self.assertEqual(source_case.main([]), 2)
 
+    def _assert_plausible_sd(self, se, n_text):
+        sd = se * math.sqrt(float(n_text))
+        self.assertGreaterEqual(sd, 8)
+        self.assertLessEqual(sd, 30)
+
     def _between(self, values, point, low, high):
         self.assertLessEqual(values[low], values[point])
         self.assertLessEqual(values[point], values[high])
@@ -331,6 +360,40 @@ def _link_dir(link, target):
             text=True,
         )
         return completed.returncode == 0 and link.exists()
+
+
+_NORMAL_95 = 1.96
+
+
+def _decimal_places(text):
+    if "." not in text:
+        return 0
+    return len(text.split(".", 1)[1])
+
+
+def _reconstructed_ci(values, point_key, lo_key, hi_key):
+    point = float(values[point_key]["text"])
+    lo = float(values[lo_key]["text"])
+    hi = float(values[hi_key]["text"])
+    se = (hi - lo) / (2.0 * _NORMAL_95)
+    return {
+        "point": point,
+        "lo": lo,
+        "hi": hi,
+        "se": se,
+        "low": f"{point - _NORMAL_95 * se:.{_decimal_places(values[lo_key]['text'])}f}",
+        "high": f"{point + _NORMAL_95 * se:.{_decimal_places(values[hi_key]['text'])}f}",
+    }
+
+
+def _two_sided_normal_p(z):
+    return math.erfc(z / math.sqrt(2.0))
+
+
+def _expected_p_text(computed, printed):
+    if computed < 0.001:
+        return "<0.001"
+    return f"{computed:.{_decimal_places(printed)}f}"
 
 
 def _abstract(tex):
