@@ -1,0 +1,19 @@
+{
+  "schema": "falsify.source-mutation.v1",
+  "caseId": "meta-minimal",
+  "mutationSetId": "p02-pair-fig-bar",
+  "mutations": [
+    {
+      "defectId": "fig-bar",
+      "operator": "set_text",
+      "valueId": "rd_s1",
+      "text": "7.0",
+      "surfaces": [
+        "figure:F1"
+      ],
+      "family": "D1",
+      "difficulty": "L4",
+      "rationale": "Figure F1 first-study bar no longer matches the printed risk difference of 8.0."
+    }
+  ]
+}

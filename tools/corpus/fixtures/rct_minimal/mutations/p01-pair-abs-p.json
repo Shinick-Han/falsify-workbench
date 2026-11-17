@@ -1,0 +1,19 @@
+{
+  "schema": "falsify.source-mutation.v1",
+  "caseId": "rct-minimal",
+  "mutationSetId": "p01-pair-abs-p",
+  "mutations": [
+    {
+      "defectId": "abs-p",
+      "operator": "set_text",
+      "valueId": "p_primary",
+      "text": "0.009",
+      "surfaces": [
+        "tex:abstract"
+      ],
+      "family": "D1",
+      "difficulty": "L3",
+      "rationale": "Abstract primary p value no longer matches the results sentence and Table T2."
+    }
+  ]
+}
