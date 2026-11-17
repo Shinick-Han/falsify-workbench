@@ -11,7 +11,7 @@
       "surfaces": ["tex:abstract"],
       "family": "D1",
       "difficulty": "L3",
-      "rationale": "Breaks the relation that the pooled risk difference equals the difference of the summed arm proportions on the abstract, while the results, the effect table, and the figure caption still show 10.0."
+      "rationale": "Breaks the relation that the pooled risk difference equals the inverse-variance weighted mean of the study risk differences on the abstract, while the results, the effect table, and the figure caption still show 9.7."
     }
   ]
 }

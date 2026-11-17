@@ -2,7 +2,7 @@
 
 ## 1. Experimental Setup
 
-Fictional single-cohort comparison of the QS-4 strip with a two-reader panel for nacre spot at Brindle Annex Clinic and Quill Lane Ward. No real participants were enrolled. Percentages are 100 times the stated numerator divided by the stated denominator, rounded half up to one decimal. Interval endpoints are outward-rounded Wald bounds and contain the printed percentage.
+Fictional single-cohort comparison of the QS-4 strip with a two-reader panel for nacre spot at Brindle Annex Clinic and Quill Lane Ward. No real participants were enrolled. Percentages are 100 times the stated numerator divided by the stated denominator, rounded half up to one decimal. Interval endpoints are 95% Wald bounds with multiplier 1.96, rounded half up to one decimal, and contain the printed percentage.
 
 ## 2. Raw Numeric Data
 

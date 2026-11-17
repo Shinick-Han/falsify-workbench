@@ -31,6 +31,8 @@ _OPERATORS = {
 }
 _EXEMPT_KEYS = ("kind", "family", "excerptContains", "reason")
 _TENTH = Decimal("0.1")
+_Z = Decimal("1.96")
+_HUNDRED = Decimal(100)
 _STUDIES = ("s1", "s2", "s3", "s4", "s5", "s6")
 _DTA_PCTS = (
     ("tp", "n_ref_pos", "sens_pct"),
@@ -49,6 +51,15 @@ _DTA_CIS = (
     ("prev_pct", "prev_lo", "prev_hi"),
     ("sens6_pct", "sens6_lo", "sens6_hi"),
     ("spec6_pct", "spec6_lo", "spec6_hi"),
+)
+_DTA_WALD = (
+    ("tp", "n_ref_pos", "sens_lo", "sens_hi"),
+    ("tn", "n_ref_neg", "spec_lo", "spec_hi"),
+    ("tp", "n_idx_pos", "ppv_lo", "ppv_hi"),
+    ("tn", "n_idx_neg", "npv_lo", "npv_hi"),
+    ("n_ref_pos", "n_analyzed", "prev_lo", "prev_hi"),
+    ("tp6", "n_ref_pos", "sens6_lo", "sens6_hi"),
+    ("tn6", "n_ref_neg", "spec6_lo", "spec6_hi"),
 )
 
 
@@ -112,8 +123,60 @@ def _has_role(values, words):
 
 
 def _pct(numerator, denominator):
-    ratio = Decimal(numerator) / Decimal(denominator) * Decimal(100)
-    return ratio.quantize(_TENTH, rounding=ROUND_HALF_UP)
+    ratio = Decimal(numerator) / Decimal(denominator) * _HUNDRED
+    return _half_up(ratio)
+
+
+def _half_up(value):
+    return value.quantize(_TENTH, rounding=ROUND_HALF_UP)
+
+
+def _proportion_interval(events, total):
+    proportion = Decimal(events) / Decimal(total)
+    se = (proportion * (1 - proportion) / Decimal(total)).sqrt()
+    low = (proportion - _Z * se) * _HUNDRED
+    high = (proportion + _Z * se) * _HUNDRED
+    return _half_up(low), _half_up(high)
+
+
+def _risk_parts(events, size, control_events, control_size):
+    treated = Decimal(events) / Decimal(size)
+    control = Decimal(control_events) / Decimal(control_size)
+    diff = (treated - control) * _HUNDRED
+    variance = treated * (1 - treated) / Decimal(size)
+    variance += control * (1 - control) / Decimal(control_size)
+    return diff, variance.sqrt() * _HUNDRED
+
+
+def _study_parts(values, name):
+    return _risk_parts(
+        _int(values, f"e_{name}"),
+        _int(values, f"n_{name}"),
+        _int(values, f"c_{name}"),
+        _int(values, f"n_{name}"),
+    )
+
+
+def _inverse_variance(parts):
+    weights = [Decimal(1) / ((se / _HUNDRED) ** 2) for _diff, se in parts]
+    total = sum(weights, Decimal(0))
+    pooled = sum((diff * weight for (diff, _se), weight in zip(parts, weights)), Decimal(0))
+    pooled /= total
+    se = _HUNDRED / total.sqrt()
+    q = Decimal(0)
+    for (diff, _se), weight in zip(parts, weights):
+        gap = (diff - pooled) / _HUNDRED
+        q += weight * gap * gap
+    return weights, total, pooled, se, q
+
+
+def _i2_percent(q, df):
+    if q <= 0:
+        return Decimal(0)
+    raw = (q - df) / q * _HUNDRED
+    if raw < 0:
+        return Decimal(0)
+    return raw
 
 
 def _rendered_tex(case):
@@ -303,6 +366,16 @@ class DiagnosticAccuracyArithmeticTests(unittest.TestCase):
             self.assertLessEqual(_dec(values, low), _dec(values, estimate), estimate)
             self.assertLessEqual(_dec(values, estimate), _dec(values, high), estimate)
 
+    def test_wald_intervals(self):
+        values = _values(_fixture("dta_minimal"))
+        for numerator, denominator, low, high in _DTA_WALD:
+            expected_low, expected_high = _proportion_interval(
+                _int(values, numerator),
+                _int(values, denominator),
+            )
+            self.assertEqual(_dec(values, low), expected_low, low)
+            self.assertEqual(_dec(values, high), expected_high, high)
+
 
 class MetaAnalysisArithmeticTests(unittest.TestCase):
     def test_flow_adds(self):
@@ -345,16 +418,26 @@ class MetaAnalysisArithmeticTests(unittest.TestCase):
         for name in _STUDIES:
             self._assert_difference(values, f"e_{name}", f"n_{name}", f"c_{name}", f"n_{name}", f"rd_{name}")
             self._assert_contains(values, f"rd_{name}", f"lo_{name}", f"hi_{name}")
-        self._assert_difference(values, "e_tx", "n_tx", "e_ctrl", "n_ctrl", "rd_pool")
         self._assert_contains(values, "rd_pool", "rd_lo", "rd_hi")
 
-    def test_heterogeneity_formula(self):
+    def test_inverse_variance_pool(self):
         values = _values(_fixture("meta_minimal"))
-        q = _dec(values, "q_stat")
-        df = _dec(values, "q_df")
-        self.assertEqual(df, Decimal(_int(values, "n_included") - 1))
-        expected = ((q - df) / q * Decimal(100)).quantize(_TENTH, rounding=ROUND_HALF_UP)
-        self.assertEqual(_dec(values, "i2_pct"), expected)
+        parts = [_study_parts(values, name) for name in _STUDIES]
+        weights, total, pooled, se, q = _inverse_variance(parts)
+        for name, (diff, spread), weight in zip(_STUDIES, parts, weights):
+            self.assertEqual(_dec(values, f"rd_{name}"), _half_up(diff), name)
+            self.assertEqual(_dec(values, f"lo_{name}"), _half_up(diff - _Z * spread), name)
+            self.assertEqual(_dec(values, f"hi_{name}"), _half_up(diff + _Z * spread), name)
+            share = _half_up(weight / total * _HUNDRED)
+            self.assertEqual(_dec(values, f"w_{name}"), share, name)
+        self.assertEqual(_dec(values, "rd_pool"), _half_up(pooled))
+        self.assertEqual(_dec(values, "rd_lo"), _half_up(pooled - _Z * se))
+        self.assertEqual(_dec(values, "rd_hi"), _half_up(pooled + _Z * se))
+        df = Decimal(len(_STUDIES) - 1)
+        self.assertEqual(_dec(values, "q_stat"), _half_up(q))
+        self.assertEqual(_dec(values, "q_df"), df)
+        self.assertEqual(_int(values, "n_included") - 1, len(_STUDIES) - 1)
+        self.assertEqual(_dec(values, "i2_pct"), _half_up(_i2_percent(q, df)))
 
     def _assert_difference(self, values, events, size, control_events, control_size, key):
         diff = (

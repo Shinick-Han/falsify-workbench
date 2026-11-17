@@ -2,7 +2,7 @@
 
 ## 1. Experimental Setup
 
-Fictional review of Mothwick compress versus plain wrap for clearance of brindle ache. No real participants were enrolled. Each risk difference is 100 times the treated proportion minus the plain-wrap proportion. The pooled difference uses the summed counts. Weights are the printed analysis weights. The I2 percentage is 100 times (Q minus degrees of freedom) divided by Q, rounded half up to one decimal.
+Fictional review of Mothwick compress versus plain wrap for clearance of brindle ache. No real participants were enrolled. Each risk difference is 100 times the treated proportion minus the plain-wrap proportion. Study intervals are Wald intervals with multiplier 1.96. The pooled difference is the fixed-effect inverse-variance weighted mean: each weight is one divided by the squared standard error, and the printed weight is that weight as a percentage of the total. The pooled interval uses multiplier 1.96 on one divided by the square root of the sum of the weights. Cochran's Q uses those weights. Degrees of freedom are the number of studies minus one. I2 is the larger of zero and 100 times (Q minus those degrees of freedom) divided by Q. Risk differences, weights, endpoints, Q, and I2 are rounded half up to one decimal.
 
 ## 2. Raw Numeric Data
 
@@ -32,4 +32,4 @@ Fictional review of Mothwick compress versus plain wrap for clearance of brindle
 
 ## 3. Observations
 
-The case is fictional. Identification minus duplicates equals records screened, screening exclusions leave the full-text count, and full-text exclusions leave the included count. Exclusion reasons sum to the full-text exclusion count. Study events and arm sizes sum to the pooled columns, and the weights sum to 100.0.
+The case is fictional. Identification minus duplicates equals records screened, screening exclusions leave the full-text count, and full-text exclusions leave the included count. Exclusion reasons sum to the full-text exclusion count. Study events and arm sizes sum to the pooled columns. The printed weights are inverse-variance shares and sum to 100.0. The pooled risk difference is the inverse-variance weighted mean.

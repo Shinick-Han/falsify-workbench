@@ -7,11 +7,11 @@
       "defectId": "d1",
       "operator": "set_text",
       "valueId": "w_s1",
-      "text": "28.0",
+      "text": "40.0",
       "surfaces": ["table:T2"],
       "family": "D1",
       "difficulty": "L3",
-      "rationale": "Breaks the relation that the study weights in the effect table sum to 100.0."
+      "rationale": "Breaks the relation that the Northline weight equals its inverse-variance share of the total weight, so the effect-table weights no longer sum to 100.0."
     }
   ]
 }
