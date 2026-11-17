@@ -1,0 +1,17 @@
+{
+  "schema": "falsify.source-mutation.v1",
+  "caseId": "survival-minimal",
+  "mutationSetId": "m04-all-surv",
+  "mutations": [
+    {
+      "defectId": "all-surv",
+      "operator": "set_text",
+      "valueId": "s_k12",
+      "text": "70.0",
+      "surfaces": "*",
+      "family": "D1",
+      "difficulty": "L2",
+      "rationale": "Breaks the relation that 12-month Kelp-9 survival equals the product of the band steps, and places 70.0 outside the printed interval 75.5 to 86.7."
+    }
+  ]
+}
