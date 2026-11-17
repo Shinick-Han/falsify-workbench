@@ -22,6 +22,7 @@ import hosted_runtime.service as service_module
 from hosted_runtime import (EvidenceError, RuntimeConfig, RuntimeService, ServiceError,
                             Store, StoreError, StoreNotFound)
 from hosted_runtime.evidence import configure_store
+from paper_native_worker import TIMEOUT as NATIVE_TIMEOUT
 from hosted_runtime.pdf_input import extract_pdf
 from paper_evidence import EvidenceStore
 from paper_evidence_blue import context_for_review
@@ -62,14 +63,27 @@ PDF = fixture()
 PDF_SHA = hashlib.sha256(PDF).hexdigest()
 
 
-def wait_state(service, owner, job_id, states=TERMINAL, timeout=15.0):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        snapshot = service.get_job(owner, job_id)
-        if snapshot['state'] in states:
-            return snapshot
+# Evidence extract and visual export each run in a paper_native_worker
+# subprocess budgeted at NATIVE_TIMEOUT, one after the other. The stored
+# terminal state is the completion signal. A 15s cap sits inside that
+# budget and loses its headroom under CPU load (idle about 0.3s, saturated
+# about 12s).
+JOB_WAIT_SECONDS = NATIVE_TIMEOUT * 2 + 15
+
+
+def wait_state(service, owner, job_id, states=TERMINAL, timeout=JOB_WAIT_SECONDS):
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        last = service.get_job(owner, job_id)
+        state = last['state']
+        if state in states:
+            return last
+        if state in TERMINAL:
+            raise AssertionError('job reached %s, expected %s' % (state, states))
         time.sleep(0.02)
-    raise AssertionError('job did not reach %s' % (states,))
+    seen = None if last is None else last['state']
+    raise AssertionError('job did not reach %s (last state %s)' % (states, seen))
 
 
 def red_result(data):
