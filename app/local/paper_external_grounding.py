@@ -12,8 +12,12 @@ import ssl
 import time
 from urllib.parse import quote, urlencode
 
-PROVIDERS = ('crossref', 'europepmc')
-HOSTS = {'crossref': 'api.crossref.org', 'europepmc': 'www.ebi.ac.uk'}
+PROVIDERS = ('crossref', 'europepmc', 'openalex')
+HOSTS = {
+    'crossref': 'api.crossref.org',
+    'europepmc': 'www.ebi.ac.uk',
+    'openalex': 'api.openalex.org',
+}
 MAX_BYTES = 500_000
 MAX_ABSTRACT_CHARS = 3500
 MAX_REFS = 50
@@ -71,6 +75,20 @@ _EOC_TITLE_RE = re.compile(
     re.IGNORECASE,
 )
 _RAW_RETRACTION_ACK_RE = re.compile(r'(?:\bretracted\b|\bretraction\b|철회)', re.IGNORECASE)
+_PARTIAL_DATE_RE = re.compile(r'^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?$')
+_OPENALEX_DOI_PATH_RE = re.compile(r'^/works/https://doi\.org/10\.\d{4,9}/[^\s?#]+$')
+_OPENALEX_SEARCH_PATH_RE = re.compile(r'^/works\?search=[^&]+&per-page=3$')
+_OPENALEX_FORBIDDEN_RE = re.compile(r'(?:mailto|api_key|apikey|email)=', re.IGNORECASE)
+CHRONOLOGY_NOTE = (
+    'Advisory only: preprint revisions, "in press" and online-first records can '
+    'legitimately postdate a manuscript date.'
+)
+_TIER_SUMMARY_KEYS = {
+    'high': 'corroborationHigh',
+    'medium': 'corroborationMedium',
+    'low': 'corroborationLow',
+    'conflict': 'corroborationConflict',
+}
 
 
 def plain(value):
@@ -80,10 +98,20 @@ def plain(value):
     return re.sub(r'\s+', ' ', html.unescape(re.sub(r'<[^>]*>', ' ', str(value)))).strip()
 
 
+def _openalex_path_allowed(path):
+    if _OPENALEX_FORBIDDEN_RE.search(path):
+        return False
+    if _OPENALEX_DOI_PATH_RE.fullmatch(path):
+        return True
+    return _OPENALEX_SEARCH_PATH_RE.fullmatch(path) is not None
+
+
 def _validate_request(provider, path):
     if provider not in HOSTS:
         raise ValueError('unknown_provider')
     if not isinstance(path, str) or not path.startswith('/') or any(ord(c) < 32 for c in path):
+        raise ValueError('invalid_api_path')
+    if provider == 'openalex' and not _openalex_path_allowed(path):
         raise ValueError('invalid_api_path')
     return HOSTS[provider]
 
@@ -257,6 +285,97 @@ def _crossref_year(row):
     return None
 
 
+def _valid_calendar_day(year, month, day):
+    try:
+        datetime(year, month, day)
+    except ValueError:
+        return False
+    return True
+
+
+def _parse_manuscript_date(value):
+    """Accept YYYY, YYYY-MM, or YYYY-MM-DD. Anything else is invalid_manuscript_date."""
+    if not isinstance(value, str):
+        raise ValueError('invalid_manuscript_date')
+    match = _PARTIAL_DATE_RE.fullmatch(value)
+    if not match:
+        raise ValueError('invalid_manuscript_date')
+    year = int(match.group(1))
+    month = int(match.group(2)) if match.group(2) else None
+    day = int(match.group(3)) if match.group(3) else None
+    if year < 1 or (month is not None and not 1 <= month <= 12):
+        raise ValueError('invalid_manuscript_date')
+    if day is not None and not _valid_calendar_day(year, month, day):
+        raise ValueError('invalid_manuscript_date')
+    return (year, month, day)
+
+
+def _try_partial_date(value):
+    try:
+        return _parse_manuscript_date(value)
+    except ValueError:
+        return None
+
+
+def _int_date_part(value):
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
+def _format_ymd(nums):
+    if not nums or nums[0] < 1:
+        return None
+    year = nums[0]
+    if len(nums) == 1:
+        return f'{year:04d}'
+    month = nums[1]
+    if not 1 <= month <= 12:
+        return f'{year:04d}'
+    if len(nums) == 2:
+        return f'{year:04d}-{month:02d}'
+    if not _valid_calendar_day(year, month, nums[2]):
+        return f'{year:04d}-{month:02d}'
+    return f'{year:04d}-{month:02d}-{nums[2]:02d}'
+
+
+def _first_crossref_date_parts(row):
+    for field in ('published', 'published-print', 'published-online', 'issued'):
+        block = row.get(field)
+        if not isinstance(block, dict):
+            continue
+        parts = block.get('date-parts')
+        if isinstance(parts, list) and parts and isinstance(parts[0], list):
+            return parts[0]
+    return None
+
+
+def _crossref_publication_date(row):
+    raw_parts = _first_crossref_date_parts(row)
+    if not raw_parts:
+        return None
+    nums = []
+    for value in raw_parts[:3]:
+        num = _int_date_part(value)
+        if num is None:
+            break
+        nums.append(num)
+    return _format_ymd(nums)
+
+
+def _epmc_publication_date(row):
+    for key in ('firstPublicationDate', 'electronicPublicationDate', 'printPublicationDate'):
+        raw = plain(row.get(key) or '')
+        if _try_partial_date(raw):
+            return raw
+    year = plain(row.get('pubYear') or '')
+    if _try_partial_date(year):
+        return year
+    return None
+
+
 def _crossref_authors(row):
     authors_list, surnames = [], []
     for a in (row.get('author') or [])[:12]:
@@ -365,6 +484,7 @@ def _normalize_crossref_work(row, response_hash, retrieved_at):
     if not title and not doi:
         return None
     retracted, rtype, rdetails = _crossref_retraction_info(row, title)
+    publication_date = _crossref_publication_date(row)
     text = f"Title: {title}\nAuthors: {authors}\nYear: {year or ''}\nDOI: {doi}"
     if abstract:
         text += f"\nAbstract{' (TRUNCATED PREFIX)' if truncated else ''}: {abstract}"
@@ -372,6 +492,7 @@ def _normalize_crossref_work(row, response_hash, retrieved_at):
         'provider': 'crossref', 'doi': doi, 'title': title,
         'authors': authors, 'authorSurnames': surnames,
         'year': year, 'abstract': abstract, 'abstractTruncated': truncated, 'url': url,
+        'publicationDate': publication_date,
         'retracted': retracted, 'retractionType': rtype, 'retractionDetails': rdetails,
         'kind': 'metadata-and-abstract' if abstract else 'metadata-only',
         'text': text, 'textSha256': hashlib.sha256(text.encode('utf-8')).hexdigest(),
@@ -398,6 +519,7 @@ def _normalize_epmc_work(row, response_hash, retrieved_at):
     if not title and not doi:
         return None
     retracted, rtype, rdetails = _epmc_retraction_info(row, title)
+    publication_date = _epmc_publication_date(row)
     text = f"Title: {title}\nAuthors: {authors[:1000]}\nYear: {year or ''}\nDOI: {doi}"
     if abstract:
         text += f"\nAbstract{' (TRUNCATED PREFIX)' if truncated else ''}: {abstract}"
@@ -405,6 +527,7 @@ def _normalize_epmc_work(row, response_hash, retrieved_at):
         'provider': 'europepmc', 'doi': doi, 'title': title,
         'authors': authors[:1000], 'authorSurnames': surnames,
         'year': year, 'abstract': abstract, 'abstractTruncated': truncated, 'url': url,
+        'publicationDate': publication_date,
         'retracted': retracted, 'retractionType': rtype, 'retractionDetails': rdetails,
         'kind': 'metadata-and-abstract' if abstract else 'metadata-only',
         'text': text, 'textSha256': hashlib.sha256(text.encode('utf-8')).hexdigest(),
@@ -558,16 +681,349 @@ def _resolve_entry_retraction(raw_text, records):
     return {'retracted': True, 'retractionType': rtype, 'retractionDetails': details}
 
 
-def _verify_doi_entry(parsed, transport):
-    doi = parsed['doi']
-    cr_rec, cr_receipt = _query_crossref_doi(doi, transport)
-    epmc_rows, epmc_receipt = _query_epmc(f'DOI:"{doi}"', transport, query_type='doi')
-    receipts = [cr_receipt, epmc_receipt]
-    epmc_rec = next((r for r in epmc_rows if r['doi'].lower() == doi.lower()), epmc_rows[0] if epmc_rows else None)
-    record = epmc_rec if (epmc_rec and epmc_rec['abstract'] and (not cr_rec or not cr_rec['abstract'])) else (cr_rec or epmc_rec)
-    primary = _pick_primary_receipt(receipts, record['provider'] if record else 'crossref')
-    base = {'index': parsed['index'], 'rawText': parsed['rawText'], 'parsed': parsed, 'requests': receipts,
-            'provider': primary['provider'], 'responseSha256': primary['responseSha256'], 'retrievedAt': primary['retrievedAt']}
+def _normalize_title(text):
+    lowered = (text or '').lower().strip()
+    spaced = re.sub(r'[^a-z0-9\s]', ' ', lowered)
+    return re.sub(r'\s+', ' ', spaced).strip()
+
+
+def _levenshtein_distance(left, right):
+    if left == right:
+        return 0
+    if len(left) < len(right):
+        left, right = right, left
+    previous = list(range(len(right) + 1))
+    for index, ch in enumerate(left, 1):
+        current = [index]
+        for inner, other in enumerate(right, 1):
+            insert_cost = current[inner - 1] + 1
+            delete_cost = previous[inner] + 1
+            replace_cost = previous[inner - 1] + (ch != other)
+            current.append(min(insert_cost, delete_cost, replace_cost))
+        previous = current
+    return previous[-1]
+
+
+def _levenshtein_ratio(left, right):
+    total = len(left) + len(right)
+    if total == 0:
+        return 100
+    distance = _levenshtein_distance(left, right)
+    return int(round((total - distance) * 100 / total))
+
+
+def _titles_match(candidate, found):
+    """True when normalized Levenshtein ratio is above 70, or a short title is contained."""
+    left = _normalize_title(candidate)
+    right = _normalize_title(found)
+    if not left or not right:
+        return False, None
+    ratio = _levenshtein_ratio(left, right)
+    if len(left.split()) < 4 and left in right:
+        return True, ratio
+    return ratio > 70, ratio
+
+
+def _score_title(parsed, record):
+    candidate = parsed.get('titleCandidate') or parsed.get('rawText') or ''
+    title = (record or {}).get('title') or ''
+    return _titles_match(candidate, title)
+
+
+def _index_fact(state, ratio, record):
+    provider = record.get('provider') if isinstance(record, dict) else None
+    date = record.get('publicationDate') if isinstance(record, dict) else None
+    return {'state': state, 'ratio': ratio, 'record': record, 'date': date, 'provider': provider}
+
+
+def _receipt_is_error(receipt):
+    if not isinstance(receipt, dict):
+        return True
+    if receipt.get('errorCode'):
+        return True
+    return receipt.get('status') == 'failed'
+
+
+def _best_search_hit(parsed, records):
+    best_match, best_any = None, None
+    for record in records:
+        matched, ratio = _score_title(parsed, record)
+        if ratio is None:
+            continue
+        if best_any is None or ratio > best_any['ratio']:
+            best_any = {'record': record, 'ratio': ratio}
+        if matched and (best_match is None or ratio > best_match['ratio']):
+            best_match = {'record': record, 'ratio': ratio}
+    return best_match, best_any
+
+
+def _search_index_fact(parsed, records):
+    best_match, best_any = _best_search_hit(parsed, records)
+    if best_match:
+        return _index_fact('match', best_match['ratio'], best_match['record'])
+    if best_any:
+        return _index_fact('miss', best_any['ratio'], best_any['record'])
+    return _index_fact('miss', None, None)
+
+
+def _doi_index_fact(parsed, record):
+    _matched, ratio = _score_title(parsed, record)
+    state = 'conflict' if _is_chimera_mismatch(_compare_record(parsed, record)) else 'match'
+    return _index_fact(state, ratio, record)
+
+
+def _provider_fact(parsed, receipt, records, doi_lookup):
+    usable = [record for record in records if record]
+    if _receipt_is_error(receipt):
+        return _index_fact('error', None, None)
+    if not usable:
+        return _index_fact('miss', None, None)
+    if doi_lookup:
+        return _doi_index_fact(parsed, usable[0])
+    return _search_index_fact(parsed, usable)
+
+
+def _years_compatible(left, right):
+    left_year, right_year = left.get('year'), right.get('year')
+    if left_year and right_year and abs(int(left_year) - int(right_year)) > 1:
+        return False
+    return True
+
+
+def _records_agree(left, right):
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return False
+    left_doi = (left.get('doi') or '').lower()
+    right_doi = (right.get('doi') or '').lower()
+    if left_doi and right_doi:
+        return left_doi == right_doi and _years_compatible(left, right)
+    matched, _ratio = _titles_match(left.get('title') or '', right.get('title') or '')
+    if not matched:
+        return False
+    return _years_compatible(left, right)
+
+
+def _needs_openalex(crossref, europepmc):
+    if crossref['state'] != 'match' or europepmc['state'] != 'match':
+        return True
+    return not _records_agree(crossref.get('record'), europepmc.get('record'))
+
+
+def _openalex_names(row):
+    displays, surnames = [], []
+    for item in (row.get('authorships') or [])[:12]:
+        if not isinstance(item, dict):
+            continue
+        author = item.get('author') if isinstance(item.get('author'), dict) else {}
+        display = plain(author.get('display_name') or item.get('raw_author_name') or '')
+        if display:
+            displays.append(display)
+        surname = _extract_surname(display)
+        if surname:
+            surnames.append(surname)
+    return '; '.join(displays)[:1000], surnames
+
+
+def _openalex_publication_date(row):
+    raw = plain(row.get('publication_date') or '')
+    if _try_partial_date(raw):
+        return raw
+    year = row.get('publication_year')
+    if isinstance(year, int) and year >= 1:
+        return f'{year:04d}'
+    return None
+
+
+def _openalex_url(doi, row):
+    if doi:
+        return 'https://doi.org/' + quote(doi, safe='/')
+    return plain(row.get('id') or '')
+
+
+def _normalize_openalex_work(row, response_hash, retrieved_at):
+    if not isinstance(row, dict):
+        return None
+    doi = _clean_doi(plain(row.get('doi') or '')) or ''
+    title = plain(row.get('display_name') or '')
+    if not title and not doi:
+        return None
+    authors, surnames = _openalex_names(row)
+    year_raw = row.get('publication_year')
+    year = year_raw if isinstance(year_raw, int) else None
+    text = f"Title: {title}\nAuthors: {authors}\nYear: {year or ''}\nDOI: {doi}"
+    return {
+        'provider': 'openalex', 'doi': doi, 'title': title,
+        'authors': authors, 'authorSurnames': surnames,
+        'year': year, 'abstract': '', 'abstractTruncated': False,
+        'url': _openalex_url(doi, row),
+        'publicationDate': _openalex_publication_date(row),
+        'retracted': False, 'retractionType': None, 'retractionDetails': None,
+        'kind': 'metadata-only',
+        'text': text, 'textSha256': hashlib.sha256(text.encode('utf-8')).hexdigest(),
+        'responseSha256': response_hash, 'retrievedAt': retrieved_at,
+    }
+
+
+def _openalex_rows(data):
+    if not isinstance(data, dict):
+        return None
+    results = data.get('results')
+    if isinstance(results, list):
+        return results[:3]
+    if data.get('display_name') or data.get('doi') or data.get('id'):
+        return [data]
+    if data.get('publication_year') is not None:
+        return [data]
+    return None
+
+
+def _openalex_doi_path(doi):
+    return '/works/https://doi.org/' + quote(doi, safe='/:')
+
+
+def _openalex_search_path(title):
+    return '/works?' + urlencode([('search', title[:300]), ('per-page', '3')])
+
+
+def _openalex_path(parsed):
+    if parsed.get('doi'):
+        return _openalex_doi_path(parsed['doi']), 'doi'
+    title = (parsed.get('titleCandidate') or parsed.get('rawText') or '').strip()
+    if not title:
+        return None, 'bibliographic'
+    return _openalex_search_path(title), 'bibliographic'
+
+
+def _openalex_receipt(query_type, retrieved_at, status, http_status, response_hash, error_code=None):
+    receipt = {
+        'provider': 'openalex', 'queryType': query_type, 'status': status,
+        'httpStatus': http_status, 'responseSha256': response_hash, 'retrievedAt': retrieved_at,
+    }
+    if error_code:
+        receipt['errorCode'] = error_code
+    return receipt
+
+
+def _openalex_http_status(http_status):
+    if http_status == 200:
+        return 'ok'
+    if http_status == 404:
+        return 'not_found'
+    return 'failed'
+
+
+def _normalize_openalex_rows(rows, response_hash, retrieved_at):
+    records = []
+    for item in rows[:3]:
+        record = _normalize_openalex_work(item, response_hash, retrieved_at)
+        if record is not None:
+            records.append(record)
+    return records
+
+
+def _query_openalex(parsed, transport):
+    """One OpenAlex call: DOI lookup when a DOI is printed, otherwise a 3-hit title search."""
+    retrieved_at = datetime.now(timezone.utc).isoformat()
+    path, query_type = _openalex_path(parsed)
+    if path is None or not _openalex_path_allowed(path):
+        return [], _openalex_receipt(query_type, retrieved_at, 'failed', None, None, 'invalid_api_path')
+    status, data, response_hash, error = _call_transport(transport, 'openalex', path)
+    receipt = _openalex_receipt(
+        query_type, retrieved_at, _openalex_http_status(status), status, response_hash, error,
+    )
+    if error or status == 404:
+        return [], receipt
+    rows = _openalex_rows(data)
+    if rows is None:
+        receipt.update(status='failed', errorCode='api_records_shape')
+        return [], receipt
+    return _normalize_openalex_rows(rows, response_hash, retrieved_at), receipt
+
+
+def _best_title_ratio(facts):
+    ratios = [fact['ratio'] for fact in facts if isinstance(fact.get('ratio'), int)]
+    if not ratios:
+        return None
+    return max(ratios)
+
+
+def _matched_year_is_far(parsed, fact):
+    printed = parsed.get('year')
+    record = fact.get('record')
+    if fact.get('state') != 'match' or not printed or not isinstance(record, dict):
+        return False
+    found = record.get('year')
+    if not isinstance(found, int):
+        return False
+    return abs(int(printed) - found) > 1
+
+
+def _tier_for(parsed, facts):
+    states = [fact['state'] for fact in facts]
+    if 'conflict' in states:
+        return 'conflict'
+    if 'match' not in states:
+        return 'low'
+    if any(_matched_year_is_far(parsed, fact) for fact in facts):
+        return 'medium'
+    return 'high'
+
+
+def _ensure_missing_note(result, tier):
+    if tier != 'low':
+        return
+    scope = result.get('scope') or ''
+    if MISSING_MATCH_NOTE not in scope:
+        result['scope'] = f'{scope} {MISSING_MATCH_NOTE}'.strip()
+
+
+def _provider_match_date(facts, retrieved):
+    matches = [fact for fact in facts if fact.get('state') == 'match' and fact.get('date')]
+    if not matches:
+        return None
+    provider = retrieved.get('provider') if isinstance(retrieved, dict) else None
+    for fact in matches:
+        if provider and fact.get('provider') == provider:
+            return fact['date']
+    return matches[0]['date']
+
+
+def _chronology_payload(parsed, facts, retrieved):
+    printed = parsed.get('year') if isinstance(parsed.get('year'), int) else None
+    return {'printedYear': printed, 'providerDate': _provider_match_date(facts, retrieved)}
+
+
+def _strip_publication_date(record):
+    if isinstance(record, dict):
+        record.pop('publicationDate', None)
+
+
+def _annotate_bibliography_entry(parsed, result, transport, crossref_fact, europepmc_fact):
+    facts = [crossref_fact, europepmc_fact]
+    if _needs_openalex(crossref_fact, europepmc_fact):
+        records, receipt = _query_openalex(parsed, transport)
+        openalex_fact = _provider_fact(parsed, receipt, records, bool(parsed.get('doi')))
+        result['requests'] = list(result.get('requests') or []) + [receipt]
+    else:
+        openalex_fact = _index_fact('skipped', None, None)
+    facts.append(openalex_fact)
+    tier = _tier_for(parsed, facts)
+    result['corroboration'] = {
+        'tier': tier,
+        'indices': {
+            'crossref': crossref_fact['state'],
+            'europepmc': europepmc_fact['state'],
+            'openalex': openalex_fact['state'],
+        },
+        'titleRatio': _best_title_ratio(facts),
+    }
+    _ensure_missing_note(result, tier)
+    result['_chronology'] = _chronology_payload(parsed, facts, result.get('retrievedRecord'))
+    _strip_publication_date(result.get('retrievedRecord'))
+    return result
+
+
+def _doi_status_result(parsed, base, cr_receipt, record, cr_rec, epmc_rec):
     if cr_receipt['httpStatus'] == 404:
         ret_meta = _resolve_entry_retraction(parsed['rawText'], [epmc_rec] if epmc_rec else [])
         return {**base, 'status': 'doi_not_found_in_crossref', 'retrievedRecord': record, 'scope': CROSSREF_404_NOTE, **ret_meta}
@@ -580,6 +1036,22 @@ def _verify_doi_entry(parsed, transport):
                 'scope': SCOPE_NOTE + ' Retrieved DOI metadata strongly diverges from reference text (D2/chimera candidate).'}
     ret_meta = _resolve_entry_retraction(parsed['rawText'], [cr_rec, epmc_rec])
     return {**base, 'status': 'verified_match', 'retrievedRecord': record, 'matchDetails': comp, 'scope': SCOPE_NOTE, **ret_meta}
+
+
+def _verify_doi_entry(parsed, transport):
+    doi = parsed['doi']
+    cr_rec, cr_receipt = _query_crossref_doi(doi, transport)
+    epmc_rows, epmc_receipt = _query_epmc(f'DOI:"{doi}"', transport, query_type='doi')
+    receipts = [cr_receipt, epmc_receipt]
+    epmc_rec = next((r for r in epmc_rows if r['doi'].lower() == doi.lower()), epmc_rows[0] if epmc_rows else None)
+    record = epmc_rec if (epmc_rec and epmc_rec['abstract'] and (not cr_rec or not cr_rec['abstract'])) else (cr_rec or epmc_rec)
+    primary = _pick_primary_receipt(receipts, record['provider'] if record else 'crossref')
+    base = {'index': parsed['index'], 'rawText': parsed['rawText'], 'parsed': parsed, 'requests': receipts,
+            'provider': primary['provider'], 'responseSha256': primary['responseSha256'], 'retrievedAt': primary['retrievedAt']}
+    result = _doi_status_result(parsed, base, cr_receipt, record, cr_rec, epmc_rec)
+    crossref_fact = _provider_fact(parsed, cr_receipt, [cr_rec] if cr_rec else [], True)
+    europepmc_fact = _provider_fact(parsed, epmc_receipt, [epmc_rec] if epmc_rec else [], True)
+    return _annotate_bibliography_entry(parsed, result, transport, crossref_fact, europepmc_fact)
 
 
 def _metadata_query_string(parsed):
@@ -609,17 +1081,7 @@ def _rank_best_candidate(parsed, candidates):
     return best, best_comp
 
 
-def _verify_metadata_entry(parsed, transport):
-    query = _metadata_query_string(parsed)
-    cr_rows, cr_receipt = _query_crossref_bib(query, transport)
-    epmc_query = f'TITLE:"{parsed["titleCandidate"][:140]}"' if len(parsed.get('titleCandidate') or '') >= 15 else query
-    epmc_rows, epmc_receipt = _query_epmc(epmc_query, transport, query_type='bibliographic')
-    receipts = [cr_receipt, epmc_receipt]
-    candidates = cr_rows + epmc_rows
-    best, comp = _rank_best_candidate(parsed, candidates)
-    primary = _pick_primary_receipt(receipts, best['provider'] if best else None)
-    base = {'index': parsed['index'], 'rawText': parsed['rawText'], 'parsed': parsed, 'requests': receipts,
-            'provider': primary['provider'], 'responseSha256': primary['responseSha256'], 'retrievedAt': primary['retrievedAt']}
+def _metadata_status_result(parsed, base, receipts, best, comp):
     if not any(r['status'] == 'ok' for r in receipts):
         return {**base, 'status': 'lookup_failed', 'retrievedRecord': None, 'scope': SCOPE_NOTE,
                 'retracted': False, 'retractionType': None}
@@ -632,10 +1094,42 @@ def _verify_metadata_entry(parsed, transport):
             'scope': f'{SCOPE_NOTE} {MISSING_MATCH_NOTE}'}
 
 
+def _verify_metadata_entry(parsed, transport):
+    query = _metadata_query_string(parsed)
+    cr_rows, cr_receipt = _query_crossref_bib(query, transport)
+    epmc_query = f'TITLE:"{parsed["titleCandidate"][:140]}"' if len(parsed.get('titleCandidate') or '') >= 15 else query
+    epmc_rows, epmc_receipt = _query_epmc(epmc_query, transport, query_type='bibliographic')
+    receipts = [cr_receipt, epmc_receipt]
+    candidates = cr_rows + epmc_rows
+    best, comp = _rank_best_candidate(parsed, candidates)
+    primary = _pick_primary_receipt(receipts, best['provider'] if best else None)
+    base = {'index': parsed['index'], 'rawText': parsed['rawText'], 'parsed': parsed, 'requests': receipts,
+            'provider': primary['provider'], 'responseSha256': primary['responseSha256'], 'retrievedAt': primary['retrievedAt']}
+    result = _metadata_status_result(parsed, base, receipts, best, comp)
+    crossref_fact = _provider_fact(parsed, cr_receipt, cr_rows, False)
+    europepmc_fact = _provider_fact(parsed, epmc_receipt, epmc_rows, False)
+    return _annotate_bibliography_entry(parsed, result, transport, crossref_fact, europepmc_fact)
+
+
 def _verify_one(parsed, transport):
     if parsed['doi']:
         return _verify_doi_entry(parsed, transport)
     return _verify_metadata_entry(parsed, transport)
+
+
+def _summary_counts():
+    return {
+        'verifiedMatch': 0, 'verifiedByMetadata': 0, 'metadataMismatch': 0,
+        'doiNotFoundInCrossref': 0, 'unverifiedNoMatch': 0, 'lookupFailed': 0,
+        'retractedCount': 0,
+        'corroborationHigh': 0, 'corroborationMedium': 0,
+        'corroborationLow': 0, 'corroborationConflict': 0,
+        'openAlexCalls': 0,
+    }
+
+
+def _count_openalex_calls(item):
+    return sum(1 for req in item.get('requests') or [] if req.get('provider') == 'openalex')
 
 
 def _summarize_bib_results(results, truncated):
@@ -647,15 +1141,17 @@ def _summarize_bib_results(results, truncated):
         'unverified_no_match': 'unverifiedNoMatch',
         'lookup_failed': 'lookupFailed',
     }
-    counts = {key: 0 for key in status_keys.values()}
-    retracted_count = 0
+    counts = _summary_counts()
     for item in results:
         mapped = status_keys.get(item['status'])
         if mapped:
             counts[mapped] += 1
         if item.get('retracted') is True:
-            retracted_count += 1
-    counts['retractedCount'] = retracted_count
+            counts['retractedCount'] += 1
+        tier_key = _TIER_SUMMARY_KEYS.get((item.get('corroboration') or {}).get('tier'))
+        if tier_key:
+            counts[tier_key] += 1
+        counts['openAlexCalls'] += _count_openalex_calls(item)
     non_failed = len(results) - counts['lookupFailed']
     status = 'completed' if non_failed == len(results) else 'partial' if non_failed > 0 else 'failed'
     return {
@@ -668,24 +1164,100 @@ def _summarize_bib_results(results, truncated):
     }
 
 
-def verify_bibliography(references, *, max_refs=25, transport=fetch_json):
-    """Deterministically verify up to max_refs (1..50) bibliography entries against Crossref and Europe PMC."""
+def _certainly_after(reference, manuscript):
+    """Flag only at the coarsest precision both dates share."""
+    ref_year, ref_month, ref_day = reference
+    man_year, man_month, man_day = manuscript
+    if ref_day and man_day and ref_month and man_month:
+        return (ref_year, ref_month, ref_day) > (man_year, man_month, man_day)
+    if ref_month and man_month:
+        return (ref_year, ref_month) > (man_year, man_month)
+    return ref_year > man_year
+
+
+def _format_chronology_hint(item, reference_date, manuscript_text, basis):
+    return {
+        'code': 'citation_postdates_manuscript',
+        'advisoryOnly': True,
+        'refIndex': item.get('index'),
+        'referenceDate': reference_date,
+        'manuscriptDate': manuscript_text,
+        'basis': basis,
+        'note': CHRONOLOGY_NOTE,
+    }
+
+
+def _hint_from_provider_date(item, provider_date, manuscript_text, manuscript_parts):
+    parsed = _try_partial_date(provider_date)
+    if not parsed or not _certainly_after(parsed, manuscript_parts):
+        return None
+    return _format_chronology_hint(item, provider_date, manuscript_text, 'provider_record')
+
+
+def _hint_from_printed_year(item, printed_year, manuscript_text, manuscript_parts):
+    if not isinstance(printed_year, int):
+        return None
+    if not _certainly_after((printed_year, None, None), manuscript_parts):
+        return None
+    return _format_chronology_hint(item, f'{printed_year:04d}', manuscript_text, 'printed_year')
+
+
+def _chronology_hint(item, chrono, manuscript_text, manuscript_parts):
+    if not chrono:
+        return None
+    provider_date = chrono.get('providerDate')
+    if provider_date:
+        return _hint_from_provider_date(item, provider_date, manuscript_text, manuscript_parts)
+    return _hint_from_printed_year(item, chrono.get('printedYear'), manuscript_text, manuscript_parts)
+
+
+def _collect_chronology(results, manuscript_text, manuscript_parts):
+    hints = []
+    for item in results:
+        chrono = item.pop('_chronology', None)
+        if manuscript_parts is None:
+            continue
+        hint = _chronology_hint(item, chrono, manuscript_text, manuscript_parts)
+        if hint:
+            hints.append(hint)
+    if manuscript_parts is None:
+        return None
+    return hints
+
+
+def _empty_bibliography(manuscript_parts):
+    result = {
+        'status': 'empty', 'checkedCount': 0, 'truncated': False,
+        'summary': _summary_counts(),
+        'results': [], 'limitations': f'{SCOPE_NOTE} {MISSING_MATCH_NOTE}',
+    }
+    if manuscript_parts is not None:
+        result['triageHints'] = []
+    return result
+
+
+def verify_bibliography(references, *, max_refs=25, transport=fetch_json, manuscript_date=None):
+    """Verify up to max_refs (1..50) bibliography entries against Crossref and Europe PMC.
+
+    OpenAlex is queried only when those two do not both return a consistent match, and each
+    such call counts toward the same per-run reference limit. manuscript_date, when given as
+    YYYY, YYYY-MM, or YYYY-MM-DD, adds advisory triageHints and is never a defect.
+    """
+    manuscript_parts = _parse_manuscript_date(manuscript_date) if manuscript_date is not None else None
     if type(max_refs) is not int or not 1 <= max_refs <= MAX_REFS:
         raise ValueError('max_refs_bound')
     if not isinstance(references, list):
         raise ValueError('references_invalid')
     sliced = [parse_reference_entry(r) for r in references[:max_refs]]
     if not sliced:
-        return {
-            'status': 'empty', 'checkedCount': 0, 'truncated': False,
-            'summary': {'verifiedMatch': 0, 'verifiedByMetadata': 0, 'metadataMismatch': 0,
-                        'doiNotFoundInCrossref': 0, 'unverifiedNoMatch': 0, 'lookupFailed': 0,
-                        'retractedCount': 0},
-            'results': [], 'limitations': f'{SCOPE_NOTE} {MISSING_MATCH_NOTE}',
-        }
+        return _empty_bibliography(manuscript_parts)
     with ThreadPoolExecutor(max_workers=4) as pool:
         results = list(pool.map(lambda p: _verify_one(p, transport), sliced))
-    return _summarize_bib_results(results, len(references) > max_refs)
+    hints = _collect_chronology(results, manuscript_date, manuscript_parts)
+    out = _summarize_bib_results(results, len(references) > max_refs)
+    if hints is not None:
+        out['triageHints'] = hints
+    return out
 
 
 def _iter_segments(segments_or_text):
