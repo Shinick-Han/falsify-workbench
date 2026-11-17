@@ -266,6 +266,323 @@ class ClinicalTrialsTests(unittest.TestCase):
             pct.fetch_trial_record('NCT123')
 
 
+class CorroborationAndChronologyTests(unittest.TestCase):
+    def setUp(self):
+        self._net = patch.object(socket, 'create_connection', side_effect=no_network)
+        self._net.start()
+
+    def tearDown(self):
+        self._net.stop()
+
+    def test_title_ratio_boundaries_and_short_title_bypass(self):
+        candidate = 'a' * 50
+        at_70 = 'a' * 20 + 'b' * 30
+        at_71 = 'a' * 21 + 'b' * 29
+        self.assertEqual(peg._levenshtein_ratio(candidate, at_70), 70)
+        self.assertEqual(peg._levenshtein_ratio(candidate, at_71), 71)
+        self.assertEqual(peg._titles_match(candidate, at_70), (False, 70))
+        self.assertEqual(peg._titles_match(candidate, at_71), (True, 71))
+
+        tail = ' zz' * 40
+        short_match, short_ratio = peg._titles_match('aa bb cc', 'aa bb cc' + tail)
+        self.assertLessEqual(short_ratio, 70)
+        self.assertTrue(short_match)
+        long_match, long_ratio = peg._titles_match('aa bb cc dd', 'aa bb cc dd' + tail)
+        self.assertLessEqual(long_ratio, 70)
+        self.assertFalse(long_match)
+
+    def test_openalex_request_validation_refuses_other_paths_and_hosts(self):
+        self.assertIn('openalex', peg.PROVIDERS)
+        self.assertEqual(peg.HOSTS['openalex'], 'api.openalex.org')
+        self.assertEqual(
+            peg._validate_request('openalex', '/works/https://doi.org/10.1000/abc'),
+            'api.openalex.org',
+        )
+        self.assertEqual(
+            peg._validate_request('openalex', '/works?search=heart+failure&per-page=3'),
+            'api.openalex.org',
+        )
+        self.assertEqual(peg._validate_request('crossref', '/works/10.1000%2Fabc'), 'api.crossref.org')
+        refused = (
+            '/authors/A1',
+            '/works/W123',
+            '/works?search=heart&per-page=5',
+            '/works?search=heart&per-page=3&mailto=a@b.c',
+            '/works?filter=title.search:heart',
+            '/works/https://example.org/10.1000/abc',
+            '/works?search=heart&per-page=3&api_key=secret',
+        )
+        for path in refused:
+            with self.assertRaisesRegex(ValueError, 'invalid_api_path'):
+                peg._validate_request('openalex', path)
+        with self.assertRaisesRegex(ValueError, 'unknown_provider'):
+            peg._validate_request('api.openalex.org', '/works?search=heart&per-page=3')
+
+    def test_high_tier_skips_openalex_and_adds_no_chronology_key(self):
+        ref = '[1] Smith J. Effects of aspirin on cardiovascular mortality. Lancet. 2021; doi:10.1000/agree1'
+        calls = []
+
+        def transport(provider, path):
+            calls.append((provider, path))
+            if provider == 'openalex':
+                raise AssertionError(path)
+            if provider == 'crossref':
+                return _crossref_doi('10.1000/agree1', 'Effects of aspirin on cardiovascular mortality', 'Smith', 2021)
+            if provider == 'europepmc':
+                return _epmc_hit('10.1000/agree1', 'Effects of aspirin on cardiovascular mortality', 'Smith J', '2021')
+            raise AssertionError((provider, path))
+
+        out = peg.verify_bibliography([ref], transport=transport)
+        item = out['results'][0]
+        self.assertEqual(item['status'], 'verified_match')
+        self.assertEqual(item['corroboration']['tier'], 'high')
+        self.assertEqual(item['corroboration']['indices'], {
+            'crossref': 'match', 'europepmc': 'match', 'openalex': 'skipped',
+        })
+        self.assertIsInstance(item['corroboration']['titleRatio'], int)
+        self.assertGreater(item['corroboration']['titleRatio'], 70)
+        self.assertNotIn('triageHints', out)
+        self.assertNotIn('triageHints', item)
+        self.assertNotIn('_chronology', item)
+        self.assertNotIn('publicationDate', item['retrievedRecord'])
+        self.assertFalse(any(provider == 'openalex' for provider, _path in calls))
+        self.assertEqual(out['summary']['openAlexCalls'], 0)
+        self.assertEqual(out['summary']['corroborationHigh'], 1)
+        allowed = {
+            'index', 'rawText', 'parsed', 'requests', 'provider', 'responseSha256', 'retrievedAt',
+            'status', 'retrievedRecord', 'matchDetails', 'scope', 'retracted', 'retractionType',
+            'corroboration',
+        }
+        self.assertEqual(set(item), allowed)
+        self.assertNotIn('triageHints', set(out) - {'status', 'checkedCount', 'truncated', 'summary', 'results', 'limitations'})
+
+    def test_medium_conflict_and_low_tiers(self):
+        refs = [
+            '[1] Smith J. Effects of aspirin on cardiovascular mortality. Lancet. 2021; doi:10.1000/yeargap2',
+            '[2] Lee K. Novel immunotherapy for pancreatic cancer. Science. 2023; doi:10.1000/chimera1',
+            '[3] Unknown Z. Completely unindexed unpublished workshop handout. 2019.',
+            '[4] Doe A. Fabricated study on unicorns. Nature. 2024; doi:10.1000/missing404',
+        ]
+        calls = []
+
+        def transport(provider, path):
+            calls.append((provider, path))
+            if provider == 'crossref' and 'yeargap2' in path:
+                return _crossref_doi('10.1000/yeargap2', 'Effects of aspirin on cardiovascular mortality', 'Smith', 2018)
+            if provider == 'europepmc' and 'yeargap2' in path:
+                return _epmc_hit('10.1000/yeargap2', 'Effects of aspirin on cardiovascular mortality', 'Smith J', '2018')
+            if provider == 'crossref' and 'chimera1' in path:
+                return _crossref_doi('10.1000/chimera1', 'Soil microbiome diversity in boreal forests', 'Gonzalez', 2016)
+            if provider == 'crossref' and 'missing404' in path:
+                return 404, None, hashlib.sha256(b'404').hexdigest()
+            if provider == 'openalex' and ('chimera1' in path or 'missing404' in path):
+                empty = {'results': []}
+                return 200, empty, sha_json(empty)
+            if provider == 'openalex' and 'search=' in path:
+                self.assertTrue(path.endswith('&per-page=3'))
+                self.assertNotIn('mailto', path)
+                empty = {'results': []}
+                return 200, empty, sha_json(empty)
+            if provider == 'crossref':
+                empty = {'message': {'items': []}}
+                return 200, empty, sha_json(empty)
+            empty = {'resultList': {'result': []}}
+            return 200, empty, sha_json(empty)
+
+        out = peg.verify_bibliography(refs, transport=transport)
+        medium, conflict, low, doi_low = out['results']
+        self.assertEqual(medium['status'], 'verified_match')
+        self.assertEqual(medium['corroboration']['tier'], 'medium')
+        self.assertEqual(medium['corroboration']['indices']['openalex'], 'skipped')
+        self.assertEqual(conflict['status'], 'metadata_mismatch')
+        self.assertEqual(conflict['corroboration']['tier'], 'conflict')
+        self.assertEqual(conflict['corroboration']['indices']['crossref'], 'conflict')
+        self.assertEqual(conflict['corroboration']['indices']['openalex'], 'miss')
+        self.assertNotIn('fabricat', conflict['corroboration']['tier'])
+        self.assertEqual(low['status'], 'unverified_no_match')
+        self.assertEqual(low['corroboration']['tier'], 'low')
+        self.assertEqual(low['corroboration']['indices']['openalex'], 'miss')
+        self.assertIn(peg.MISSING_MATCH_NOTE, low['scope'])
+        self.assertNotIn('phantom', json.dumps(low['corroboration']))
+        self.assertEqual(doi_low['status'], 'doi_not_found_in_crossref')
+        self.assertEqual(doi_low['corroboration']['tier'], 'low')
+        self.assertIn('404', doi_low['scope'])
+        self.assertIn(peg.MISSING_MATCH_NOTE, doi_low['scope'])
+        self.assertEqual(out['summary']['corroborationMedium'], 1)
+        self.assertEqual(out['summary']['corroborationConflict'], 1)
+        self.assertEqual(out['summary']['corroborationLow'], 2)
+        self.assertEqual(out['summary']['openAlexCalls'], 3)
+        self.assertLessEqual(out['summary']['openAlexCalls'], out['checkedCount'])
+        self.assertTrue(any(provider == 'openalex' and 'chimera1' in path for provider, path in calls))
+        self.assertFalse(any(provider == 'openalex' and 'yeargap2' in path for provider, path in calls))
+
+    def test_openalex_queried_on_miss_and_disagreement_and_counted(self):
+        refs = [
+            '[1] Smith J. Effects of aspirin on cardiovascular mortality. Lancet. 2021; doi:10.1000/miss1',
+            '[2] Smith J. Effects of aspirin on cardiovascular mortality. Lancet. 2021; doi:10.1000/split1',
+        ]
+        calls = []
+
+        def transport(provider, path):
+            calls.append((provider, path))
+            if provider == 'crossref' and 'miss1' in path:
+                return 404, None, hashlib.sha256(b'404').hexdigest()
+            if provider == 'europepmc' and 'miss1' in path:
+                empty = {'resultList': {'result': []}}
+                return 200, empty, sha_json(empty)
+            if provider == 'openalex' and 'miss1' in path:
+                self.assertIn('/works/https://doi.org/10.1000/miss1', path)
+                work = _openalex_work(
+                    '10.1000/miss1', 'Effects of aspirin on cardiovascular mortality', 'John Smith', 2021, '2021-04-01',
+                )
+                return 200, work, sha_json(work)
+            if provider == 'crossref' and 'split1' in path:
+                return _crossref_doi('10.1000/split1', 'Effects of aspirin on cardiovascular mortality', 'Smith', 2021)
+            if provider == 'europepmc' and 'split1' in path:
+                return _epmc_hit('10.9999/other', 'Effects of aspirin on cardiovascular mortality', 'Smith J', '2021')
+            if provider == 'openalex' and 'split1' in path:
+                empty = {'results': []}
+                return 200, empty, sha_json(empty)
+            raise AssertionError((provider, path))
+
+        out = peg.verify_bibliography(refs, max_refs=25, transport=transport)
+        missed, split = out['results']
+        self.assertEqual(missed['status'], 'doi_not_found_in_crossref')
+        self.assertEqual(missed['corroboration']['tier'], 'high')
+        self.assertEqual(missed['corroboration']['indices'], {
+            'crossref': 'miss', 'europepmc': 'miss', 'openalex': 'match',
+        })
+        self.assertEqual(split['corroboration']['indices']['crossref'], 'match')
+        self.assertEqual(split['corroboration']['indices']['europepmc'], 'match')
+        self.assertEqual(split['corroboration']['indices']['openalex'], 'miss')
+        self.assertEqual(out['summary']['openAlexCalls'], 2)
+        self.assertLessEqual(out['summary']['openAlexCalls'], 25)
+        self.assertEqual(sum(1 for provider, _path in calls if provider == 'openalex'), 2)
+
+    def test_chronology_precision_bases_and_invalid_date(self):
+        agreeing = '[1] Smith J. Effects of aspirin on cardiovascular mortality. Lancet. 2021; doi:10.1000/time1'
+        printed_only = '[2] Smith J. Effects of aspirin on cardiovascular mortality. Lancet. 2022.'
+
+        def transport(provider, path):
+            if provider == 'crossref' and 'time1' in path:
+                return _crossref_doi(
+                    '10.1000/time1', 'Effects of aspirin on cardiovascular mortality', 'Smith', 2021, [2021, 6, 15],
+                )
+            if provider == 'europepmc' and 'time1' in path:
+                return _epmc_hit(
+                    '10.1000/time1', 'Effects of aspirin on cardiovascular mortality', 'Smith J', '2021',
+                    abstract='Aspirin reduced events.', date='2021-06-15',
+                )
+            if provider == 'openalex':
+                raise AssertionError(path)
+            if provider == 'crossref':
+                empty = {'message': {'items': []}}
+                return 200, empty, sha_json(empty)
+            empty = {'resultList': {'result': []}}
+            return 200, empty, sha_json(empty)
+
+        later = peg.verify_bibliography([agreeing], manuscript_date='2020-01-01', transport=transport)
+        self.assertEqual(len(later['triageHints']), 1)
+        hint = later['triageHints'][0]
+        self.assertEqual(hint['code'], 'citation_postdates_manuscript')
+        self.assertIs(hint['advisoryOnly'], True)
+        self.assertEqual(hint['basis'], 'provider_record')
+        self.assertEqual(hint['referenceDate'], '2021-06-15')
+        self.assertEqual(hint['manuscriptDate'], '2020-01-01')
+        self.assertEqual(hint['refIndex'], 1)
+        self.assertIn('preprint revisions', hint['note'])
+        self.assertIn('"in press"', hint['note'])
+        self.assertIn('online-first', hint['note'])
+        self.assertEqual(later['summary']['verifiedMatch'], 1)
+        self.assertNotIn('citation_postdates_manuscript', later['summary'])
+        self.assertEqual(later['results'][0]['corroboration']['indices']['openalex'], 'skipped')
+        suppressed = peg.verify_bibliography(
+            ['[9] Smith J. Effects of aspirin on cardiovascular mortality. Lancet. 2022; doi:10.1000/time1'],
+            manuscript_date='2021',
+            transport=_dated_transport([2020, 1, 1]),
+        )
+        self.assertEqual(suppressed['triageHints'], [])
+        self.assertEqual(suppressed['results'][0]['corroboration']['tier'], 'medium')
+
+        month = peg.verify_bibliography([agreeing], manuscript_date='2021-05', transport=_dated_transport([2021, 6]))
+        self.assertEqual(month['triageHints'][0]['referenceDate'], '2021-06')
+        self.assertEqual(month['triageHints'][0]['basis'], 'provider_record')
+        same_month = peg.verify_bibliography(
+            [agreeing], manuscript_date='2021-06-20', transport=_dated_transport([2021, 6]),
+        )
+        self.assertEqual(same_month['triageHints'], [])
+        full = peg.verify_bibliography(
+            [agreeing], manuscript_date='2021-06-14', transport=_dated_transport([2021, 6, 15]),
+        )
+        self.assertEqual(full['triageHints'][0]['referenceDate'], '2021-06-15')
+        same_year = peg.verify_bibliography(
+            [agreeing], manuscript_date='2021', transport=_dated_transport([2021, 12, 31]),
+        )
+        self.assertEqual(same_year['triageHints'], [])
+
+        printed = peg.verify_bibliography([printed_only], manuscript_date='2020', transport=transport)
+        self.assertEqual(len(printed['triageHints']), 1)
+        self.assertEqual(printed['triageHints'][0]['basis'], 'printed_year')
+        self.assertEqual(printed['triageHints'][0]['referenceDate'], '2022')
+        self.assertEqual(printed['triageHints'][0]['refIndex'], 2)
+        same_printed = peg.verify_bibliography([printed_only], manuscript_date='2022', transport=transport)
+        self.assertEqual(same_printed['triageHints'], [])
+
+        for bad in ('2020-13', '2020-02-31', '2020/01/01', '2020-1-01', 2020, ''):
+            with self.assertRaises(ValueError) as caught:
+                peg.verify_bibliography([printed_only], manuscript_date=bad, transport=transport)
+            self.assertEqual(caught.exception.args[0], 'invalid_manuscript_date')
+
+
+def _crossref_doi(doi, title, family, year, date_parts=None):
+    data = {'message': {
+        'DOI': doi,
+        'title': [title],
+        'author': [{'given': 'Ann', 'family': family}],
+        'published': {'date-parts': [date_parts or [year]]},
+    }}
+    return 200, data, sha_json(data)
+
+
+def _epmc_hit(doi, title, author, year, abstract='', date=None):
+    row = {'doi': doi, 'title': title, 'authorString': author, 'pubYear': str(year)}
+    if abstract:
+        row['abstractText'] = abstract
+    if date:
+        row['firstPublicationDate'] = date
+    data = {'resultList': {'result': [row]}}
+    return 200, data, sha_json(data)
+
+
+def _openalex_work(doi, title, name, year, date=None):
+    work = {
+        'doi': 'https://doi.org/' + doi,
+        'display_name': title,
+        'publication_year': year,
+        'authorships': [{'author': {'display_name': name}}],
+    }
+    if date:
+        work['publication_date'] = date
+    return work
+
+
+def _dated_transport(date_parts):
+    def transport(provider, path):
+        if provider == 'crossref':
+            return _crossref_doi(
+                '10.1000/time1', 'Effects of aspirin on cardiovascular mortality', 'Smith', date_parts[0], date_parts,
+            )
+        if provider == 'europepmc':
+            months = f'-{date_parts[1]:02d}' if len(date_parts) > 1 else ''
+            days = f'-{date_parts[2]:02d}' if len(date_parts) > 2 else ''
+            return _epmc_hit(
+                '10.1000/time1', 'Effects of aspirin on cardiovascular mortality', 'Smith J', str(date_parts[0]),
+                date=f'{date_parts[0]:04d}{months}{days}',
+            )
+        raise AssertionError((provider, path))
+    return transport
+
+
 class SecurityBoundaryTests(unittest.TestCase):
     def test_rejects_non_global_ips_and_bad_providers(self):
         private_addr = [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('127.0.0.1', 443))]
