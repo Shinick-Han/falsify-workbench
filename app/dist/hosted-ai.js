@@ -1502,7 +1502,7 @@
               el('option',{value:'red',textContent:'RED · 결함 주입'}),
               el('option',{value:'blue',textContent:'BLUE · 결함 검증'})))),
         el('details',{className:'red-help hosted-ai-advanced',id:'hosted-ai-advanced'},
-          el('summary',{textContent:'고급 설정 · 구조화 근거'}),
+          el('summary',{textContent:'고급 설정 · 모델·근거'}),
           el('div',{className:'hosted-ai-grid'},
             el('label',{for:'hosted-ai-model'},'모델',el('select',{id:'hosted-ai-model'})),
             el('label',{for:'hosted-ai-effort'},'추론 강도',el('select',{id:'hosted-ai-effort'}))),
