@@ -15,6 +15,7 @@
   <link rel="stylesheet" href="experiment-ledger.css?v=0.2.0-alpha.73">
   <link rel="stylesheet" href="harness-wrapper.css?v=0.2.0-alpha.73">
   <link rel="stylesheet" href="confluence-store.css?v=0.2.0-alpha.73">
+  <link rel="stylesheet" href="hosted-ai.css?v=0.2.0-alpha.73">
   <link rel="stylesheet" href="image-editor.css?v=0.2.0-alpha.73">
   <link rel="stylesheet" href="visual-workflow.css?v=0.2.0-alpha.73">
   <link rel="stylesheet" href="paper-workspace.css?v=0.2.0-alpha.73">
@@ -83,6 +84,7 @@
   <script src="blue-supplement-bundle.js?v=0.2.0-alpha.73" defer></script>
   <script src="coevolution-arena.js?v=0.2.0-alpha.73" defer></script>
   <script src="cloud-config.js?v=0.2.0-alpha.73" defer></script>
+  <script src="hosted-ai.js?v=0.2.0-alpha.73" defer></script>
   <script src="vendor/file-drop.umd.js?v=0.2.0-alpha.73" defer></script>
   <script src="visual-workflow.js?v=0.2.0-alpha.73" defer></script>
   <script src="confluence-store.js?v=0.2.0-alpha.73" defer></script>
@@ -152,6 +154,7 @@
           </div>
         </section>
         <section class="view role-view" id="view-workbench" aria-label="논문 실험 RED">
+          <section class="hosted-ai" id="hosted-ai" aria-labelledby="hosted-ai-title"></section>
           <section class="role-step document-red paper-intake" aria-labelledby="intake-title">
             <div class="step-head"><span class="step-code" aria-hidden="true">1</span><div><h2 id="intake-title">입력 · 논문 파일</h2><p>PDF · DOCX · ODT · HTML · TXT/MD/LaTeX/CSV · 최대 25MiB. 추출은 이 브라우저에서 합니다.</p></div></div>
             <div class="document-upload"><label class="file-label" for="paper-file">RED 논문 파일<input type="file" id="paper-file" accept=".pdf,.docx,.odt,.txt,.md,.markdown,.text,.html,.htm,.tex,.zip,.json,.csv,.tsv,.rst"></label><button type="button" class="text-button" id="import-cancel" hidden>추출 취소</button><p id="import-status" class="form-feedback" role="status" aria-live="polite"></p></div>

@@ -4,22 +4,40 @@ import hashlib
 from harness_adapter import cli_failure
 from harness import resolve, guidance, backend, model_label, builtin, record
 from red_service import (CodexBackend, ClaudeBackend, strict_object, STRING, EVIDENCE, SCAN,
-                         evidence_check, validate_request as validate_document)
+                         evidence_check, validate_request as validate_document, _match_offsets)
 from blue_visual import validate_visual, infer_visual, HEX
 from blue_evidence_refs import build_evidence_refs, is_evidence_ref_id, resolve_evidence_ref
 from blue_structured_reread import (
     MAX_OMITTED_SELECTIONS, build_omitted_catalog, format_reread_items,
     is_evitem_anchor, render_auto_visual_crops, resolve_evitem_target, trim_reread_items,
 )
+import review_limits
+from red_service import _batch_segments
 
 VERSION = 'falsify.document-blue.v1'
 STATUS = {'type': 'string', 'enum': ['ok', 'abstain', 'refusal']}
 FINDING = strict_object({'id': STRING, 'segmentId': STRING, 'quote': STRING,
     'rationale': STRING, 'evidence': {'type': 'array', 'items': EVIDENCE, 'minItems': 1, 'maxItems': 6},
-    'uncertainty': STRING})
-RESULT = strict_object({'status': STATUS, 'findings': {'type': 'array', 'items': FINDING, 'maxItems': 12}})
-VISUAL_OBSERVATION = strict_object({'id': STRING, 'sha256': STRING, 'page': {'type': 'integer'}, 'bbox': {'type': 'array', 'items': {'type': 'number'}, 'minItems': 4, 'maxItems': 4}, 'observation': STRING, 'uncertainty': STRING})
-VISUAL_RESULT = strict_object({'status': STATUS, 'findings': {'type': 'array', 'items': FINDING, 'maxItems': 12}, 'visualObservations': {'type': 'array', 'items': VISUAL_OBSERVATION, 'maxItems': 12}})
+    'uncertainty': {'type': ['string', 'null']}})
+OCCURRENCE_FINDING = strict_object({**FINDING['properties'], 'occurrence': {'type': ['integer', 'null'], 'minimum': 0}})
+
+
+def result_schema(limits, allow_occurrence=False, max_findings=None):
+    finding = OCCURRENCE_FINDING if allow_occurrence else FINDING
+    if max_findings is None:
+        max_findings = limits['blue_findings_per_batch'] if limits['hosted'] else limits['blue_max_findings']
+    return strict_object({'status': STATUS,
+                          'findings': {'type': 'array', 'items': finding, 'maxItems': max_findings}})
+
+
+RESULT = result_schema(review_limits.LOCAL)
+VISUAL_OBSERVATION = strict_object({'id': STRING, 'sha256': STRING, 'page': {'type': 'integer'}, 'bbox': {'type': 'array', 'items': {'type': 'number'}, 'minItems': 4, 'maxItems': 4}, 'observation': STRING, 'uncertainty': {'type': ['string', 'null']}})
+
+
+def visual_result_schema(limits, allow_occurrence=False, max_findings=None):
+    return strict_object({**result_schema(limits, allow_occurrence, max_findings)['properties'],
+                          'visualObservations': {'type': 'array', 'items': VISUAL_OBSERVATION, 'maxItems': limits['blue_max_findings']}})
+
 KEYS = {'schema', 'revision', 'requestId', 'sourceHash', 'segments', 'maxCalls', 'consent'}
 # Multi-chunk evidence reread: N scans -> 1 target selection -> 1 final pass over raw windows.
 MAX_PROMPT = 100000          # backend max_prompt_chars; selection/final prompts incl. harness guidance stay within it
@@ -56,18 +74,19 @@ def paper_context(data):
 
 _EXTERNAL_PROVIDERS = (['crossref', 'europepmc'], ['crossref', 'europepmc', 'clinicaltrials'])
 _BLUE_EXTRA_KEYS = {'harness', 'harnessCanonical', 'executionConsent', 'visualEvidence', 'visualConsent',
-                    'fileHash', 'paperEvidence', 'paperEvidenceConsent', 'autoVisualReread'}
+                    'fileHash', 'paperEvidence', 'paperEvidenceConsent', 'autoVisualReread', 'allowOccurrenceTargeting'}
 _DOC_STRIP_KEYS = _BLUE_EXTRA_KEYS - {'executionConsent'}
 
 
-def visual_inputs(data):
+def visual_inputs(data, limits=None):
+    limits = limits or review_limits.LOCAL
     # A paper-evidence request has a PDF hash even when no visual image was selected.
     if 'paperEvidence' in data and 'visualEvidence' not in data:
         strip = {'fileHash', 'visualConsent'} if data.get('visualConsent') is True and isinstance(data.get('autoVisualReread'), bool) else {'fileHash'}
         envelope = {k: v for k, v in data.items() if k not in strip}
     else:
         envelope = data
-    return validate_visual(envelope)
+    return validate_visual(envelope, limits['max_images'])
 
 def external_literature_enabled(harness):
     """Explicit custom-code opt-in; never relax default/builtin BLUE tool permissions."""
@@ -103,24 +122,40 @@ def _validate_blue_segments(data):
 
 
 def validate_request(data):
+    limits = review_limits.for_data(data)
     if not isinstance(data, dict) or not KEYS <= set(data) or set(data) - KEYS - _BLUE_EXTRA_KEYS or data.get('schema') != VERSION:
         raise ValueError('BLUE는 허용된 문서 텍스트 필드만 받습니다. RED 계획·정답·파일명은 보내지 마세요.')
     _validate_blue_segments(data)
-    if type(data.get('maxCalls')) is not int or not 1 <= data['maxCalls'] <= 32:
-        raise ValueError('호출 예산(1–32)을 확인하세요.')
+    harness, _ = resolve(data, 'blue')
+    call_limit = min(limits['max_calls'], harness['maxCalls'] if limits['hosted'] else 32)
+    if type(data.get('maxCalls')) is not int or not 1 <= data['maxCalls'] <= call_limit:
+        raise ValueError(f'호출 예산(1–{call_limit})을 확인하세요.')
+    if 'allowOccurrenceTargeting' in data and type(data['allowOccurrenceTargeting']) is not bool:
+        raise ValueError('allowOccurrenceTargeting 값이 올바르지 않습니다.')
     _validate_auto_visual(data)
     paper_context(data)
-    images = visual_inputs(data)
-    harness, _ = resolve(data, 'blue')
+    images = visual_inputs(data, limits)
     if (images or data.get('autoVisualReread') is True) and not _visual_adapter_supported(harness):
         raise ValueError('visual_provider_unsupported')
     if not builtin(harness) and data.get('executionConsent') is not True:
         raise ValueError('사용자 harness 실행/전송 동의가 필요합니다.')
+    if limits['hosted'] and 'paperEvidence' not in data and data.get('autoVisualReread') is not True:
+        segments = data.get('segments')
+        if not isinstance(segments, list) or not 1 <= len(segments) <= limits['max_segments']:
+            raise ValueError('추출 문단/페이지가 필요합니다.')
+        source = '\n\n'.join(s['text'] for s in segments)
+        if len(source) > limits['source_chars'] or '\0' in source or \
+                hashlib.sha256(source.encode('utf-8')).hexdigest() != data.get('sourceHash'):
+            raise ValueError('원문 크기/해시가 일치하지 않습니다.')
+        batches = _batch_segments(segments, limits['blue_batch_chars'])
+        image_groups = max(1, (len(images) + limits['images_per_batch'] - 1) // limits['images_per_batch'])
+        return batches, len(batches) * image_groups
     # Shared document validation must not treat BLUE strategy as a RED harness. The budget is checked
     # here because multi-chunk BLUE needs N scans + selection + final (N+2), not RED's N+1.
     doc_data = {k: v for k, v in data.items() if k not in _DOC_STRIP_KEYS}
     chunks, required = validate_document({**doc_data, 'schema': 'falsify.document-red.v1', 'level': 1,
-                                          'maxCalls': 32, 'harness': {**harness, 'role': 'red', 'maxCalls': 32}})
+                                          'maxCalls': limits['max_calls'],
+                                          'harness': {**harness, 'role': 'red', 'maxCalls': limits['max_calls']}})
     if len(chunks) > 1: required = len(chunks) + 2
     if required > min(data['maxCalls'], harness['maxCalls']):
         raise ValueError(f'전체 추출 텍스트 검토와 근거 재독에는 {required}회 호출이 필요합니다. 현재 예산에서는 시작하지 않습니다.')
@@ -132,18 +167,40 @@ def _validate_delivered_finding(f, delivered):
             if not any(quote in text for text in delivered.get(sid, ())):
                 raise ValueError('BLUE 지적/근거 인용이 최종 단계에 전달된 원문 창이나 검증된 스캔 인용에 없습니다.')
 
-def _validate_finding(f, source, ids, delivered):
+class AmbiguousLocation(ValueError):
+    """A quote matches more than once and the caller must choose; never silently pick an offset."""
+
+
+def _resolve_finding_span(f, source, allow_occurrence=False):
+    text = source[f['segmentId']]
+    offsets = _match_offsets(text, f['quote'])
+    if not offsets:
+        raise ValueError('BLUE 지적 위치가 원문에 없거나 중복됩니다.')
+    occurrence = f.get('occurrence')
+    if occurrence is not None and (type(occurrence) is not int or not 0 <= occurrence < len(offsets)):
+        raise ValueError('BLUE 지적 위치가 원문에 없거나 중복됩니다.')
+    if len(offsets) > 1 and occurrence is None:
+        raise AmbiguousLocation('BLUE 지적 인용이 여러 위치와 일치합니다. 위치를 선택해야 합니다.')
+    index = 0 if occurrence is None else occurrence
+    f['occurrence'] = index
+    f['span'] = [offsets[index], offsets[index] + len(f['quote'])]
+    return f['span']
+
+
+def _validate_finding(f, source, ids, delivered, allow_occurrence=False):
     if not 1 <= len(f['id']) <= 80 or f['id'] in ids: raise ValueError('BLUE 지적 ID 오류')
     ids.add(f['id'])
-    if f['segmentId'] not in source or not f['quote'].strip() or len(f['quote']) > 4000 or source[f['segmentId']].count(f['quote']) != 1:
+    if f['segmentId'] not in source or not f['quote'].strip() or len(f['quote']) > 4000:
         raise ValueError('BLUE 지적 위치가 원문에 없거나 중복됩니다.')
-    if not f['rationale'].strip() or len(f['rationale']) > 3000 or not f['uncertainty'].strip() or len(f['uncertainty']) > 1500:
+    _resolve_finding_span(f, source, allow_occurrence=allow_occurrence)
+    uncertainty = f.get('uncertainty')
+    if not f['rationale'].strip() or len(f['rationale']) > 3000 or (uncertainty is not None and (not isinstance(uncertainty, str) or len(uncertainty) > 1500)):
         raise ValueError('BLUE 설명/한계 제한 초과')
     evidence_check(f['evidence'], source)
     _validate_delivered_finding(f, delivered)
 
 
-def validate_findings(response, segments, delivered=None):
+def validate_findings(response, segments, delivered=None, allow_occurrence=False):
     """delivered: segmentId -> texts the final pass actually received (raw windows, validated scan quotes).
     None means the whole supplied text was in the same call (single chunk)."""
     source = {s['id']: s['text'] for s in segments}
@@ -151,18 +208,37 @@ def validate_findings(response, segments, delivered=None):
         raise ValueError('유보/거절 응답에는 지적이 없어야 합니다.')
     ids = set()
     for f in response['findings']:
-        _validate_finding(f, source, ids, delivered)
+        _validate_finding(f, source, ids, delivered, allow_occurrence=allow_occurrence)
 
 
-def segment_index(segments, budget):
-    """Bounded deterministic map of the supplied text. One entry per INDEX_PART so a long segment
+def partition_findings(response, segments, delivered=None, allow_occurrence=False):
+    """Accepted findings keep their re-anchored span; ambiguous quotes become explicit location requests.
+    One invalid item never discards the other valid findings."""
+    source = {s['id']: s['text'] for s in segments}
+    if response.get('status') != 'ok' and response.get('findings'):
+        return [], [{'index': index, 'code': 'status_mismatch'} for index, _ in enumerate(response['findings'])], []
+    ids, accepted, rejected, unresolved = set(), [], [], []
+    for index, finding in enumerate(response.get('findings') or []):
+        try:
+            _validate_finding(finding, source, ids, delivered, allow_occurrence=allow_occurrence)
+            accepted.append(finding)
+        except AmbiguousLocation:
+            unresolved.append({'index': index, 'code': 'ambiguous_location',
+                               'message': '인용이 여러 위치와 일치합니다. 정확한 위치를 선택하세요.'})
+        except ValueError as error:
+            rejected.append({'index': index, 'code': 'finding_invalid', 'message': str(error)})
+    return accepted, rejected, unresolved
+
+
+def segment_index(segments, budget, part=INDEX_PART):
+    """Bounded deterministic map of the supplied text. One entry per part so a long segment
     stays addressable by offset; previews shrink before entries are dropped (reported)."""
-    parts = [(s, off) for s in segments for off in range(0, len(s['text']), INDEX_PART)]
+    parts = [(s, off) for s in segments for off in range(0, len(s['text']), part)]
     for size in (240, 120, 60, 0):
         entries, used = [], 2
         for s, off in parts:
             entry = {'segmentId': s['id'], 'label': s['label'], 'offset': off,
-                     'chars': len(s['text'][off:off + INDEX_PART]), 'preview': s['text'][off:off + size]}
+                     'chars': len(s['text'][off:off + part]), 'preview': s['text'][off:off + size]}
             used += len(json.dumps(entry, ensure_ascii=False)) + 2
             if used > budget: break
             entries.append(entry)
@@ -199,7 +275,8 @@ def _validated_target(t, source, visible, catalog, delivered_spans, omitted_cata
     return key, {'segmentId': t['segmentId'], 'offset': offset, 'anchor': anchor}
 
 
-def validate_targets(selection, source, visible, catalog=None, delivered_spans=(), omitted_catalog=None):
+def validate_targets(selection, source, visible, catalog=None, delivered_spans=(), omitted_catalog=None,
+                     max_targets=MAX_TARGETS):
     """visible: segmentId -> texts the selection pass actually received (index previews, validated note
     quotes). An evidence-ref id is resolved only from the host catalog sent with this call.
     An evitem:<itemId> anchor is resolved only from the omitted-evidence catalog sent with this call.
@@ -208,7 +285,7 @@ def validate_targets(selection, source, visible, catalog=None, delivered_spans=(
     catalog = catalog or {}
     if selection['status'] != 'ok' and selection['targets']:
         raise ValueError('유보/거절 응답에는 재독 대상이 없어야 합니다.')
-    if not isinstance(selection['targets'], list) or len(selection['targets']) > MAX_TARGETS:
+    if not isinstance(selection['targets'], list) or len(selection['targets']) > max_targets:
         raise ValueError('BLUE 재독 대상 수 제한 초과')
     targets, seen, state = [], set(), {'evitem_count': 0}
     for t in selection['targets']:
@@ -217,14 +294,14 @@ def validate_targets(selection, source, visible, catalog=None, delivered_spans=(
             seen.add(key); targets.append(validated)
     return targets
 
-def reread_windows(targets, segments, budget):
+def reread_windows(targets, segments, budget, window=WINDOW):
     """Deterministic raw windows centred on each validated anchor. Each target wants min(segment, WINDOW)
     chars; a smaller budget is water-filled and reported as truncated, never silently dropped."""
     text_targets = [t for t in targets if 'evidenceItemId' not in t]
     if not text_targets:
         return [], False
     source = {s['id']: s['text'] for s in segments}
-    needs = [min(len(source[t['segmentId']]), WINDOW) for t in text_targets]
+    needs = [min(len(source[t['segmentId']]), window) for t in text_targets]
     shares, left = [0] * len(text_targets), budget
     for k, i in enumerate(sorted(range(len(text_targets)), key=lambda i: (needs[i], i))):
         shares[i] = min(needs[i], left // (len(text_targets) - k)); left -= shares[i]
@@ -256,7 +333,8 @@ def _validate_visual_observations(response, refs_or_data):
     if response['status'] != 'ok' and observations: raise ValueError('visual_observations_invalid')
     ids = set()
     for observation in observations:
-        if not observation['id'].strip() or len(observation['id']) > 80 or observation['id'] in ids or not observation['observation'].strip() or len(observation['observation']) > 3000 or not observation['uncertainty'].strip() or len(observation['uncertainty']) > 1500: raise ValueError('visual_observations_invalid')
+        uncertainty = observation.get('uncertainty')
+        if not observation['id'].strip() or len(observation['id']) > 80 or observation['id'] in ids or not observation['observation'].strip() or len(observation['observation']) > 3000 or (uncertainty is not None and (not isinstance(uncertainty, str) or len(uncertainty) > 1500)): raise ValueError('visual_observations_invalid')
         ids.add(observation['id'])
         if not any(all(observation[k] == item[k] for k in ('sha256','page','bbox')) for item in refs): raise ValueError('visual_reference_invalid')
 
@@ -293,10 +371,12 @@ def _blue_policy(harness, structured):
     return policy, external
 
 
-def _selection_prompt(policy, notes, data, structured=None):
+def _selection_prompt(policy, notes, data, structured=None, limits=None):
+    limits = limits or review_limits.LOCAL
+    max_prompt, max_targets = limits['blue_max_prompt'], limits['blue_max_targets']
     omitted_catalog, _ = build_omitted_catalog(structured, data)
     head = (policy + 'Evidence reread selection. Chunk notes are lossy and may omit qualifiers. '
-        f'Choose up to {MAX_TARGETS} places whose RAW supplied text must be reread before the final judgment, '
+        f'Choose up to {max_targets} places whose RAW supplied text must be reread before the final judgment, '
         'including cross-section conditions (Methods/Results qualifiers, limitations) the notes may have omitted. '
         'evidenceRefs lists only exact text already in this prompt. Each id binds one source span [start,end) '
         'and before/after context from that delivered text. A repeated literal has one id per offset; '
@@ -312,31 +392,32 @@ def _selection_prompt(policy, notes, data, structured=None):
             'evidenceRefsTruncated': False, 'evidenceRefs': []}
     if omitted_catalog:
         base['omittedEvidenceRefs'] = omitted_catalog
-    while omitted_catalog and MAX_PROMPT - len(head + json.dumps(base, ensure_ascii=False)) - 16 < 0:
+    while omitted_catalog and max_prompt - len(head + json.dumps(base, ensure_ascii=False)) - 16 < 0:
         omitted_catalog.pop()
     if 'omittedEvidenceRefs' in base and not omitted_catalog:
         base.pop('omittedEvidenceRefs')
-    room = MAX_PROMPT - len(head + json.dumps(base, ensure_ascii=False)) - 16
+    room = max_prompt - len(head + json.dumps(base, ensure_ascii=False)) - 16
     if room < 0: raise ValueError('BLUE 재독 선택 프롬프트가 상한을 넘습니다. 호출하지 않습니다.')
-    index, cut = segment_index(data['segments'], min(INDEX_BUDGET, room))
+    index, cut = segment_index(data['segments'], min(limits['blue_index_budget'], room), limits['blue_index_part'])
     quotes = [(e['segmentId'], e['quote']) for n in notes for e in n['evidence']]
     payload = {**base, 'indexTruncated': cut, 'segmentIndex': index}
     bare = len(head + json.dumps(payload, ensure_ascii=False))
-    refs, refs_cut, spans = build_evidence_refs(data['segments'], index, quotes, max(0, MAX_PROMPT - bare - 16 + 2))
+    refs, refs_cut, spans = build_evidence_refs(data['segments'], index, quotes, max(0, max_prompt - bare - 16 + 2))
     payload['evidenceRefs'] = refs
     payload['evidenceRefsTruncated'] = refs_cut
     prompt = head + json.dumps(payload, ensure_ascii=False)
-    if len(prompt) > MAX_PROMPT and payload['evidenceRefs']:
+    if len(prompt) > max_prompt and payload['evidenceRefs']:
         # Fitting is exact for the refs array; this only covers the index-size approximation.
         payload['evidenceRefs'] = []
         payload['evidenceRefsTruncated'] = True
         prompt = head + json.dumps(payload, ensure_ascii=False)
-    if len(prompt) > MAX_PROMPT:
+    if len(prompt) > max_prompt:
         raise ValueError('BLUE 재독 선택 프롬프트가 상한을 넘습니다. 호출하지 않습니다.')
     return prompt, index, quotes, payload, spans
 
 
-def _first_review_prompts(policy, final, chunks):
+def _first_review_prompts(policy, final, chunks, limits=None):
+    max_prompt = (limits or review_limits.LOCAL)['blue_max_prompt']
     # Model-independent prompts are built and bounded before any backend exists (JSON escaping can expand text).
     if len(chunks) == 1:
         first = [policy + final + 'Use only quotations supplied here. Abstain where the evidence is insufficient. '
@@ -345,22 +426,24 @@ def _first_review_prompts(policy, final, chunks):
         first = [policy + 'Read every fragment, summarize claims and qualifications in <=2500 chars. '
             'Quote up to four exact excerpts (<=600 chars each), including possible inconsistencies. '
             + json.dumps({'part': i+1, 'parts': len(chunks), 'segments': chunk}, ensure_ascii=False) for i, chunk in enumerate(chunks)]
-    if any(len(p) > MAX_PROMPT for p in first):
-        raise ValueError(f'BLUE 호출 프롬프트가 {MAX_PROMPT}자 상한을 넘습니다. 모델을 호출하지 않습니다.')
+    if any(len(p) > max_prompt for p in first):
+        raise ValueError(f'BLUE 호출 프롬프트가 {max_prompt}자 상한을 넘습니다. 모델을 호출하지 않습니다.')
     return first
 
 
-def _reread_prompt(policy, final, targets, data, notes, reread_items=(), visual_reserve=0):
+def _reread_prompt(policy, final, targets, data, notes, reread_items=(), visual_reserve=0, limits=None):
+    limits = limits or review_limits.LOCAL
     head = (policy + final + 'rereadWindows are RAW supplied text at the given source offsets [start,end) and may be '
         'partial; text outside them and outside exact note quotes is NOT available here. Use only quotations present '
         'in rereadWindows or exact note quotes. Abstain where the evidence is insufficient. ')
     if reread_items:
         head += 'rereadEvidenceItems are structured table/figure/chart records fetched on demand for selected omitted items. '
     items_list = list(reread_items)
-    budget = MAX_CONTEXT
-    limit = MAX_PROMPT - visual_reserve
+    budget = limits['blue_max_context']
+    limit = limits['blue_max_prompt'] - visual_reserve
+    window = max(1, budget // limits['blue_max_targets'])
     while True:
-        windows, truncated = reread_windows(targets, data['segments'], budget)
+        windows, truncated = reread_windows(targets, data['segments'], budget, window)
         if not windows and not items_list:
             raise ValueError('선택된 재독 원문을 프롬프트 상한 안에 전달할 수 없습니다. 요약만으로 판단하지 않습니다.')
         payload = {'allChunkNotes': notes, 'rereadWindows': windows}
@@ -402,8 +485,9 @@ def _visual_prompt_suffix(refs):
               'Reference exact sha256, page and bbox. An observation is a model judgment, not verified image correctness.')
 
 
-def _prepare_visual_call(data, structured, images, initial_refs, item_ids):
-    if data.get('autoVisualReread') is not True or not structured or len(images) >= 6:
+def _prepare_visual_call(data, structured, images, initial_refs, item_ids, limits=None):
+    limits = limits or review_limits.LOCAL
+    if data.get('autoVisualReread') is not True or not structured or len(images) >= limits['max_images']:
         return images, initial_refs, 0
     if item_ids is not None and not item_ids:
         return images, initial_refs, 0
@@ -422,20 +506,26 @@ def _paper_evidence_coverage(structured, data, selected_items, auto_crops):
     return pe_cov
 
 
-def _invoke_blue_call(engine, prompt, schema, call_images, call_refs, cancelled):
-    if call_images and schema is RESULT:
+def _invoke_blue_call(engine, prompt, schema, call_images, call_refs, cancelled, limits=None, on_result=None):
+    limits = limits or review_limits.LOCAL
+    findings_schema = 'findings' in (schema.get('properties') or {})
+    if call_images and findings_schema:
         prompt += _visual_prompt_suffix(call_refs)
-        if len(prompt) > MAX_PROMPT:
+        if len(prompt) > limits['blue_max_prompt']:
             raise ValueError('BLUE visual prompt limit')
-        result = infer_visual(engine, prompt, VISUAL_RESULT, call_images)
+        allow_occ = 'occurrence' in ((schema.get('properties') or {}).get('findings', {})
+                                     .get('items', {}).get('properties') or {})
+        result = infer_visual(engine, prompt, visual_result_schema(limits, allow_occ), call_images)
     else:
         result = engine.infer(prompt, schema)
+    if on_result is not None:
+        on_result(result)
     if cancelled.is_set():
         raise ValueError('BLUE 취소됨. 결과 폐기')
     if result['status'] != 'ok':
         raise cli_failure(result.get('error_code') or result['status'])
     response = result['response']
-    if call_images and schema is RESULT:
+    if call_images and findings_schema:
         _validate_visual_observations(response, call_refs)
     return response
 
@@ -457,25 +547,37 @@ def _selected_item_ids(targets):
     return [t['evidenceItemId'] for t in targets if 'evidenceItemId' in t]
 
 
-def _run_single_chunk(data, structured, images, initial_refs, first, invoke, finish, visual_observations):
-    call_images, call_refs, auto_crops = _prepare_visual_call(data, structured, images, initial_refs, None)
-    response = invoke(first[0], RESULT, 'reviewing', call_images, call_refs)
-    validate_findings(response, data['segments'])
+def _run_single_chunk(data, structured, images, initial_refs, first, invoke, finish, visual_observations, limits, schema):
+    call_images, call_refs, auto_crops = _prepare_visual_call(data, structured, images, initial_refs, None, limits)
+    response = invoke(first[0], schema, 'reviewing', call_images, call_refs)
+    accepted, rejected, unresolved = partition_findings(
+        response, data['segments'], allow_occurrence=data.get('allowOccurrenceTargeting') is True) if limits['hosted'] else (None, None, None)
+    if not limits['hosted']:
+        validate_findings(response, data['segments'])
+        accepted, rejected, unresolved = response['findings'], [], []
     if call_images:
-        visual_observations.extend(response['visualObservations'])
-    return finish(response['status'], response['findings'], 1, reread_record('not-needed'),
+        visual_observations.extend(response.get('visualObservations') or [])
+    status = response['status']
+    if status == 'ok' and not accepted and (rejected or unresolved):
+        status = 'abstain'
+    return finish(status, accepted, 1, reread_record('not-needed'), rejected=rejected, unresolved=unresolved,
                   selected_items=[] if structured else None, auto_crops=auto_crops, used_visual=bool(call_images))
 
 
-def _run_multi_chunk(data, structured, images, initial_refs, first, chunks, policy, final, source, invoke, finish, progress, visual_observations, calls, required):
+def _run_multi_chunk(data, structured, images, initial_refs, first, chunks, policy, final, source, invoke, finish,
+                     progress, visual_observations, calls, required, limits, schema):
+    allow_occ = data.get('allowOccurrenceTargeting') is True
     notes, scan_status, done_chunks = _scan_chunks(first, source, invoke)
     if notes is None:
         return finish(scan_status, [], done_chunks, reread_record('incomplete'), complete=False)
-    prompt, index, quotes, payload, spans = _selection_prompt(policy, notes, data, structured)
-    selection = invoke(prompt, SELECTION, 'selecting')
+    selection_schema = SELECTION if limits['blue_max_targets'] == MAX_TARGETS else strict_object(
+        {'status': STATUS, 'targets': {'type': 'array', 'items': TARGET, 'maxItems': limits['blue_max_targets']}})
+    prompt, index, quotes, payload, spans = _selection_prompt(policy, notes, data, structured, limits)
+    selection = invoke(prompt, selection_schema, 'selecting')
     visible = _selection_visible(index, quotes)
     omitted_map = {r['refId']: r for r in payload.get('omittedEvidenceRefs', [])}
-    targets = validate_targets(selection, source, visible, {r['id']: r for r in payload['evidenceRefs']}, spans, omitted_map)
+    targets = validate_targets(selection, source, visible, {r['id']: r for r in payload['evidenceRefs']}, spans,
+                               omitted_map, limits['blue_max_targets'])
     if selection['status'] != 'ok':
         return finish(selection['status'], [], len(chunks), reread_record('incomplete'))
     if not targets:  # never a summary-only final judgment
@@ -483,44 +585,168 @@ def _run_multi_chunk(data, structured, images, initial_refs, first, chunks, poli
     progress({'completedCalls': calls(), 'requiredCalls': required, 'phase': 'reread'})
     selected_items = _selected_item_ids(targets)
     reread_items = format_reread_items(data['paperEvidence']['paperId'], data['fileHash'], selected_items) if selected_items else []
-    call_images, call_refs, auto_crops = _prepare_visual_call(data, structured, images, initial_refs, selected_items)
+    call_images, call_refs, auto_crops = _prepare_visual_call(data, structured, images, initial_refs, selected_items, limits)
     visual_reserve = len(_visual_prompt_suffix(call_refs)) if call_images else 0
-    prompt, windows, truncated = _reread_prompt(policy, final, targets, data, notes, reread_items, visual_reserve)
-    response = invoke(prompt, RESULT, 'finalizing', call_images, call_refs)
-    validate_findings(response, data['segments'], _final_delivered(windows, notes))
+    prompt, windows, truncated = _reread_prompt(policy, final, targets, data, notes, reread_items, visual_reserve, limits)
+    response = invoke(prompt, schema, 'finalizing', call_images, call_refs)
+    accepted, rejected, unresolved = (partition_findings(
+        response, data['segments'], _final_delivered(windows, notes), allow_occurrence=allow_occ)
+        if limits['hosted'] else (None, None, None))
+    if not limits['hosted']:
+        validate_findings(response, data['segments'], _final_delivered(windows, notes))
+        accepted, rejected, unresolved = response['findings'], [], []
     if call_images:
-        visual_observations.extend(response['visualObservations'])
-    return finish(response['status'], response['findings'], len(chunks),
+        visual_observations.extend(response.get('visualObservations') or [])
+    status = response['status']
+    if status == 'ok' and not accepted and (rejected or unresolved):
+        status = 'abstain'
+    return finish(status, accepted, len(chunks),
                   reread_record('incomplete' if truncated else 'completed', targets, windows, truncated),
+                  rejected=rejected, unresolved=unresolved,
                   windows=windows, selected_items=selected_items if structured else None,
                   auto_crops=auto_crops, used_visual=bool(call_images))
 
 
-def run_review(data, progress, cancelled, backend_factory=CodexBackend, claude_factory=ClaudeBackend):
+def image_batches(images, per_batch):
+    """Provider-sized image groups; every supplied image is covered, none is silently dropped."""
+    return [images[i:i + per_batch] for i in range(0, len(images), per_batch)] or [[]]
+
+
+def _run_hosted_blue(data, text_batches, images, initial_refs, policy, final, invoke, cancelled, limits,
+                     harness, harness_hash, usage_totals, provider_state, visual_observations):
+    """Full-text provider-sized batches with optional image batches. The whole supplied text is covered across
+    batches; a budget stop is reported with the remaining batches rather than hidden."""
+    allow_occ = data.get('allowOccurrenceTargeting') is True
+    schema = result_schema(limits, allow_occ)
+    per_images = limits['images_per_batch']
+    image_groups = image_batches(images, per_images)
+    ref_groups = image_batches(initial_refs, per_images)
+    total_pairs = len(text_batches) * len(image_groups)
+    budget = max(1, min(int(data['maxCalls']), int(harness['maxCalls']), total_pairs))
+    accepted, rejected, unresolved, statuses = [], [], [], []
+    completed, seen_keys, seen_ids, seen_observations = 0, set(), set(), set()
+    for text_index, batch in enumerate(text_batches):
+        delivered = {}
+        for segment in batch:
+            delivered.setdefault(segment['id'], []).append(segment['text'])
+        for image_index, (group, refs) in enumerate(zip(image_groups, ref_groups)):
+            if completed >= budget:
+                break
+            prompt = (policy + final + f'This is text batch {text_index + 1} of {len(text_batches)} of the supplied '
+                      'document. Read every fragment in this batch; other batches are reviewed separately. '
+                      f'Propose up to {limits["blue_findings_per_batch"]} findings. '
+                      + json.dumps({'batch': text_index + 1, 'segments': batch}, ensure_ascii=False))
+            response = invoke(prompt, schema, 'reviewing', group, refs)
+            statuses.append(response.get('status'))
+            completed += 1
+            if response.get('status') != 'ok':
+                rejected.append({'textBatch': text_index + 1, 'imageBatch': image_index + 1,
+                                 'code': 'model_' + str(response.get('status'))})
+                continue
+            part, bad, ambiguous = partition_findings(response, data['segments'], delivered,
+                                                       allow_occurrence=allow_occ)
+            for item in bad + ambiguous:
+                item['textBatch'] = text_index + 1
+                item['imageBatch'] = image_index + 1
+            for finding in part:
+                key = (finding['segmentId'], finding['quote'], finding['rationale'])
+                if key in seen_keys:
+                    continue
+                if finding['id'] in seen_ids:
+                    suffix = '-b%d' % completed
+                    finding['id'] = finding['id'][:80 - len(suffix)] + suffix
+                seen_keys.add(key); seen_ids.add(finding['id'])
+                accepted.append(finding)
+            rejected.extend(bad); unresolved.extend(ambiguous)
+            if group:
+                for observation in response.get('visualObservations') or []:
+                    key = (observation.get('id'), observation.get('sha256'), observation.get('page'),
+                           tuple(observation.get('bbox') or ()))
+                    if key not in seen_observations:
+                        seen_observations.add(key)
+                        visual_observations.append(observation)
+        if completed >= budget:
+            break
+    status = 'ok' if accepted else (statuses[-1] if statuses and statuses[-1] != 'ok' else 'abstain')
+    complete = completed == total_pairs
+    completed_text = min(len(text_batches), (completed + len(image_groups) - 1) // len(image_groups)) if image_groups else 0
+    remaining = []
+    for text_index in range(completed_text, len(text_batches)):
+        remaining.append({'textBatch': text_index + 1, 'segmentIds': list(dict.fromkeys(s['id'] for s in text_batches[text_index])),
+                          'chars': sum(len(s['text']) for s in text_batches[text_index]),
+                          'imageBatches': len(image_groups)})
+    provider = {'id': 'anthropic-api', 'models': sorted(provider_state['models']),
+                'requestId': provider_state['request_id']}
+    result = {'schema': VERSION, 'revision': data['revision'], 'sourceHash': data['sourceHash'],
+              'status': status, 'findings': accepted, 'usage': usage_totals, 'provider': provider,
+              'harness': harness, 'harnessHash': harness_hash, 'model': model_label(harness), **record(harness),
+              'coverage': {'complete': complete, 'calls': completed, 'textBatches': len(text_batches),
+                           'imageBatches': len(image_groups), 'completedPairs': completed,
+                           'remainingBatches': remaining,
+                           'resultCoverage': {'accepted': len(accepted), 'rejected': len(rejected),
+                                              'unresolved': len(unresolved), 'rejectedItems': rejected,
+                                              'unresolvedItems': unresolved},
+                           'meaning': ('Every supplied text batch (and image batch) was reviewed and valid findings were '
+                                       'accumulated. ' if complete else
+                                       'The job call budget ended before every batch; remaining text batches are listed '
+                                       'and are not claimed as reviewed. ')
+                                      + 'This is batch coverage, not proof that the paper has no other defects.'},
+              'isolation': ISOLATION}
+    if images:
+        result['visualObservations'] = visual_observations
+        result['visualScope'] = ('Image bytes and hashes verified; PDF and extracted text association is client-declared; '
+                                 'image interpretation is unverified.')
+    return result
+
+
+def run_review(data, progress, cancelled, backend_factory=CodexBackend, claude_factory=ClaudeBackend, hosted_factory=None):
     chunks, required = validate_request(data)
-    images, initial_refs = visual_inputs(data), _initial_visual_refs(data)
+    limits = review_limits.for_data(data)
+    allow_occ = data.get('allowOccurrenceTargeting') is True
+    schema = RESULT if not limits['hosted'] and not allow_occ else result_schema(limits, allow_occ)
+    images, initial_refs = visual_inputs(data, limits), _initial_visual_refs(data)
     structured = paper_context(data)
     harness, harness_hash = resolve(data, 'blue')
     source = {s['id']: s['text'] for s in data['segments']}
     calls = 0
+    usage_totals = {}
+    provider_state = {'request_id': None, 'models': set()}
+    def accumulate(result):
+        for key, value in (result.get('usage') or {}).items():
+            if type(value) is int and value >= 0:
+                usage_totals[key] = usage_totals.get(key, 0) + value
+        if isinstance(result.get('request_id'), str):
+            provider_state['request_id'] = result['request_id']
+        if isinstance(result.get('provider_model'), str):
+            provider_state['models'].add(result['provider_model'])
     policy, external = _blue_policy(harness, structured)
-    final = ('Return up to 12 findings, each at a unique exact source quote (<=4000 chars), '
-        'with rationale <=3000 chars, exact evidence and uncertainty <=1500 chars. ')
-    first = _first_review_prompts(policy, final, chunks)
+    final = (f'Return up to {limits["blue_max_findings"]} findings, each at an exact source quote (<=4000 chars; '
+             'set occurrence when the quote appears more than once), with rationale <=3000 chars, exact evidence. '
+             'Uncertainty is optional; use null when absent (otherwise <=1500 chars). ')
+    first = _first_review_prompts(policy, final, chunks, limits)
     # A new backend and ephemeral CLI session; no shared RED conversation or notes.
-    engine = backend(data, 'blue', required, backend_factory, claude_factory)
-    def invoke(prompt, schema, phase, call_images=(), call_refs=()):
+    backend_limits = {'max_prompt_chars': limits['blue_max_prompt'], 'timeout_seconds': limits['timeout_seconds']}
+    if limits['hosted']:
+        backend_limits.update(max_tokens=limits['provider_max_tokens'], max_images=limits['image_capacity'])
+    engine = backend(data, 'blue', required, backend_factory, claude_factory,
+                    limits=backend_limits, hosted_factory=hosted_factory)
+    budget = min(int(data['maxCalls']), int(harness['maxCalls']))
+    def invoke(prompt, call_schema, phase, call_images=(), call_refs=()):
         nonlocal calls
         if cancelled.is_set(): raise ValueError('BLUE 취소됨')
-        if calls >= required: raise ValueError('BLUE 호출 예산 초과')
-        if len(prompt) > MAX_PROMPT: raise ValueError('BLUE 프롬프트 상한 초과. 호출하지 않습니다.')
+        if calls >= min(required, budget): raise ValueError('BLUE 호출 예산 초과')
+        if len(prompt) > limits['blue_max_prompt']: raise ValueError('BLUE 프롬프트 상한 초과. 호출하지 않습니다.')
         progress({'completedCalls': calls, 'requiredCalls': required, 'phase': phase})
         calls += 1
-        return _invoke_blue_call(engine, prompt, schema, call_images, call_refs, cancelled)
+        return _invoke_blue_call(engine, prompt, call_schema, call_images, call_refs, cancelled, limits,
+                                 on_result=accumulate)
     visual_observations = []
-    def finish(status, findings, completed, reread, complete=True, windows=(), selected_items=None, auto_crops=0, used_visual=False):
+    def finish(status, findings, completed, reread, complete=True, windows=(), selected_items=None, auto_crops=0,
+               used_visual=False, rejected=(), unresolved=()):
         coverage = {'complete': complete, 'calls': calls, 'chunks': len(chunks), 'completedChunks': completed, 'reread': reread,
-                    'rereadWindows': [{'segmentId': w['segmentId'], 'start': w['start'], 'end': w['end']} for w in windows]}
+                    'rereadWindows': [{'segmentId': w['segmentId'], 'start': w['start'], 'end': w['end']} for w in windows],
+                    'resultCoverage': {'accepted': len(findings), 'rejected': len(rejected), 'unresolved': len(unresolved),
+                                       'rejectedItems': list(rejected), 'unresolvedItems': list(unresolved)}}
         if complete: coverage['meaning'] = MEANING
         if structured: coverage['paperEvidence'] = _paper_evidence_coverage(structured, data, selected_items, auto_crops)
         if external:
@@ -529,9 +755,17 @@ def run_review(data, progress, cancelled, backend_factory=CodexBackend, claude_f
                 'verification': 'custom-script-unverified',
                 'meaning': '사용자 코드의 외부 문헌 조회 허용. 실제 조회 성공·범위는 harness 감사기록에서 확인; 앱이 독립 검증하지 않음.'}
         extra = {'visualObservations': visual_observations, 'visualScope': 'Image bytes and hashes verified; PDF and extracted text association is client-declared; image interpretation is unverified.'} if used_visual else {}
+        provider = {'id': 'anthropic-api' if limits['hosted'] else 'cli', 'models': sorted(provider_state['models']),
+                    'requestId': provider_state['request_id']}
         return {**extra, 'schema': VERSION, 'revision': data['revision'], 'sourceHash': data['sourceHash'], 'status': status, 'findings': findings,
+            'usage': usage_totals, 'provider': provider,
             'harness': harness, 'harnessHash': harness_hash, 'model': model_label(harness), **record(harness),
             'coverage': coverage, 'isolation': ISOLATION}
+    if limits['hosted'] and structured is None and data.get('autoVisualReread') is not True:
+        return _run_hosted_blue(data, chunks, images, initial_refs, policy, final, invoke, cancelled, limits,
+                                harness, harness_hash, usage_totals, provider_state, visual_observations)
     if len(chunks) == 1:
-        return _run_single_chunk(data, structured, images, initial_refs, first, invoke, finish, visual_observations)
-    return _run_multi_chunk(data, structured, images, initial_refs, first, chunks, policy, final, source, invoke, finish, progress, visual_observations, lambda: calls, required)
+        return _run_single_chunk(data, structured, images, initial_refs, first, invoke, finish, visual_observations,
+                                 limits, schema)
+    return _run_multi_chunk(data, structured, images, initial_refs, first, chunks, policy, final, source, invoke, finish,
+                            progress, visual_observations, lambda: calls, required, limits, schema)

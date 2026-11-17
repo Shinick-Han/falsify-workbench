@@ -22,7 +22,20 @@
     // Operator-supplied archive parent in space 65737. Created under workspace page 66042.
     "CONFLUENCE_PARENT_PAGE_ID": "8355842",
     "ATLASSIAN_CLIENT_ID": "LQL1zmOGHXyk8V4ShnSdPJCc5MzJWYDN",
-    "CONFLUENCE_ONLY": "true"
+    "CONFLUENCE_ONLY": "true",
+    // Hosted AI execution is off by default. Enabling it mounts /v1/ai/* and keeps password session
+    // management usable while CONFLUENCE_ONLY stays on. No live runtime is assumed: AI_RUNTIME_URL is
+    // empty until a deployment sets the container-internal origin, and HOSTED_AI_SERVICE_TOKEN is a
+    // secret (set with `wrangler secret put`), never a var. Limits are per owner and per hour.
+    "AI_HOSTING_ENABLED": "false",
+    "AI_RUNTIME_URL": "",
+    "AI_MAX_UPLOAD_BYTES": "33554432",
+    "AI_MAX_PROMPT_CHARS": "8000",
+    "AI_MAX_CALLS_PER_JOB": "24",
+    "AI_DEFAULT_CALLS": "12",
+    "AI_UPLOADS_PER_OWNER_HOUR": "60",
+    "AI_JOBS_PER_OWNER_HOUR": "20",
+    "AI_ACTIVE_JOBS_PER_OWNER": "3"
   },
   // Platform invocation logs are off (they carry client request metadata); the Worker emits one
   // structured line per request with route template, method, status and duration only.
@@ -43,7 +56,16 @@
         "CONFLUENCE_SPACE_ID": "65737",
         "CONFLUENCE_PARENT_PAGE_ID": "8355842",
         "ATLASSIAN_CLIENT_ID": "LQL1zmOGHXyk8V4ShnSdPJCc5MzJWYDN",
-        "CONFLUENCE_ONLY": "true"
+        "CONFLUENCE_ONLY": "true",
+        "AI_HOSTING_ENABLED": "false",
+        "AI_RUNTIME_URL": "",
+        "AI_MAX_UPLOAD_BYTES": "33554432",
+        "AI_MAX_PROMPT_CHARS": "8000",
+        "AI_MAX_CALLS_PER_JOB": "24",
+        "AI_DEFAULT_CALLS": "12",
+        "AI_UPLOADS_PER_OWNER_HOUR": "60",
+        "AI_JOBS_PER_OWNER_HOUR": "20",
+        "AI_ACTIVE_JOBS_PER_OWNER": "3"
       },
       "d1_databases": [{ "binding": "DB", "database_name": "falsify-harness-records-staging", "database_id": "43f6eef6-84a4-4039-9cd5-4e3520cea4e6", "migrations_dir": "migrations" }]
     }

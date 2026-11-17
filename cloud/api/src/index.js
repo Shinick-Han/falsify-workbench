@@ -5,7 +5,10 @@ import { Buffer } from 'node:buffer';
 import { scrypt, timingSafeEqual } from 'node:crypto';
 import H from '../../../app/dist/harness-core.js';
 import { validatePayload, publicPayload, payloadHash } from '../../../app/dist/cloud-records-core.mjs';
-import { handleConfluence, matchConfluence, confluenceOnly, LEGACY_WRITES } from './confluence.mjs';
+import { handleConfluence, matchConfluence, confluenceOnly, LEGACY_WRITES, budgetedFetch } from './confluence.mjs';
+import { hostingEnabled } from './ai-identity.mjs';
+import { aiFetch } from './ai-runtime-client.mjs';
+import { handleAiRequest, matchAi } from './ai-gateway.mjs';
 
 const SCHEMA = 'falsify.cloud.v1';
 const MAX_BODY_BYTES = 256 * 1024;
@@ -21,7 +24,14 @@ const USERNAME = /^[A-Za-z0-9_-]{3,32}$/;
 const CURSOR = /^[1-9][0-9]{0,15}$/;
 const UNSAFE_NAME = /[\p{Cc}\u200B\u200C\u200E\u200F\u2028\u2029\u202A-\u202E\u2066-\u2069\uFEFF]/u;
 const ALLOW_METHODS = 'GET, POST, PATCH, DELETE';
-const ALLOW_HEADERS = 'authorization, content-type, if-match';
+const ALLOW_HEADERS = 'authorization, content-type, if-match, x-falsify-file-name';
+// With hosted AI enabled, password session management is not tied to the Confluence archive.
+const HOSTED_AUTH_ROUTES = new Set([
+  'POST /v1/auth/register',
+  'POST /v1/auth/login',
+  'POST /v1/auth/password',
+  'POST /v1/logout',
+]);
 // Fixed memory-hard parameters; stored hashes name them so a mismatch fails closed instead of downgrading.
 const SCRYPT = { N: 32768, r: 8, p: 3, maxmem: 64 * 1024 * 1024 };
 const SCRYPT_PREFIX = `scrypt$${SCRYPT.N}$${SCRYPT.r}$${SCRYPT.p}$`;
@@ -700,7 +710,10 @@ async function dispatchApiRequest(request, env, url, matched, config) {
     });
   }
   if (!Object.hasOwn(methods, request.method)) throw fail(405, 'method_not_allowed', { Allow: Object.keys(methods).join(', ') });
-  if (confluenceOnly(env) && LEGACY_WRITES.has(`${request.method} ${matched.template}`)) throw fail(410, 'storage_moved');
+  const legacyKey = `${request.method} ${matched.template}`;
+  if (confluenceOnly(env) && LEGACY_WRITES.has(legacyKey) && !(hostingEnabled(env) && HOSTED_AUTH_ROUTES.has(legacyKey))) {
+    throw fail(410, 'storage_moved');
+  }
   if (matched.id !== null && !UUID.test(matched.id)) throw fail(404, 'not_found');
   return methods[request.method]({ request, env, url, id: matched.id, settings: config });
 }
@@ -712,14 +725,30 @@ export default {
     const origin = request.headers.get('Origin');
     const config = settings(env);
     const allowed = origin !== null && config.origins.has(origin);
-    const confluence = matchConfluence(url.pathname);
-    const matched = confluence ? null : route(url.pathname);
-    const logRoute = confluence?.template ?? matched?.template ?? 'unmatched';
+    const ai = matchAi(url.pathname);
+    const confluence = ai ? null : matchConfluence(url.pathname);
+    const matched = ai || confluence ? null : route(url.pathname);
+    const logRoute = ai?.template ?? confluence?.template ?? matched?.template ?? 'unmatched';
     let response;
     try {
       // The OAuth callback is a top-level navigation from Atlassian, not a frontend XHR.
       if (!(confluence?.template === '/v1/confluence/auth/callback') && origin !== null && !allowed) throw fail(403, 'origin_not_allowed');
-      if (confluence) {
+      if (ai) {
+        response = await handleAiRequest({
+          request,
+          env,
+          url,
+          match: ai,
+          params: ai.params,
+          fetchImpl: budgetedFetch(aiFetch(env), 15000),
+          deps: {
+            getDb: () => database(env),
+            rateLimit,
+            releaseSlot,
+            authenticatePassword: () => authenticate(request, database(env)),
+          },
+        });
+      } else if (confluence) {
         response = await handleConfluence({ request, env, url, match: confluence, settings: config });
       } else {
         response = await dispatchApiRequest(request, env, url, matched, config);

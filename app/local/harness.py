@@ -13,21 +13,42 @@ CLI_AGENTS = {
 }
 EFFORTS = ('low', 'medium', 'high')
 DEFAULT_EFFORT = 'medium'
+HOSTED_EFFORTS = ('low', 'medium', 'high', 'xhigh', 'max')
+HOSTED_MAX_CALLS = 512
 MODEL_PATTERN = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,119}', re.ASCII)
 
 def default(role):
     return {'schema': 'falsify.harness.v1', 'id': 'builtin-' + role, 'name': '기본 ' + role.upper(),
             'version': '1', 'role': role, 'instructions': 'Focus on explicit internal contradictions and quote the exact supporting evidence.', 'maxCalls': 8}
 
-def _validate_harness_fields(value):
+def _validate_harness_fields(value, max_calls=32):
     for k in ['id', 'version']:
         if not isinstance(value[k], str) or not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', value[k]):
             raise ValueError('harness ID/버전은 영문·숫자·._- 1–80자입니다.')
     for k, n in [('name', 120), ('instructions', 8000)]:
         if not isinstance(value[k], str) or not value[k].strip() or len(value[k]) > n or '\0' in value[k]:
             raise ValueError('harness 이름/지침 길이 제한 초과')
-    if type(value['maxCalls']) is not int or not 1 <= value['maxCalls'] <= 32:
-        raise ValueError('harness 호출 한도는 1–32회입니다.')
+    if type(value['maxCalls']) is not int or not 1 <= value['maxCalls'] <= max_calls:
+        raise ValueError(f'harness 호출 한도는 1–{max_calls}회입니다.')
+
+def _hosted_models():
+    """Server-configured Anthropic API allowlist; never a client-supplied endpoint or credential."""
+    import os
+    value = (os.environ.get('HOSTED_AI_MODELS') or 'claude-opus-5-5,claude-sonnet-5-5,claude-haiku-5-5').split(',')
+    models = tuple(item.strip() for item in value if MODEL_PATTERN.fullmatch(item.strip()))
+    return models or ('claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5')
+
+def _validate_hosted_adapter(adapter):
+    if set(adapter) - {'type', 'model', 'effort'}:
+        raise ValueError('hosted adapter 필드는 type/model/effort만 허용합니다.')
+    if adapter.get('type') != 'hosted':
+        raise ValueError('hosted adapter type이 필요합니다.')
+    model = adapter.get('model')
+    if model is not None and (type(model) is not str or model not in _hosted_models()):
+        raise ValueError('hosted 모델이 서버 허용 목록에 없습니다.')
+    effort = adapter.get('effort')
+    if effort is not None and effort not in HOSTED_EFFORTS:
+        raise ValueError('hosted effort는 low/medium/high/xhigh/max입니다.')
 
 def _validate_cli_adapter(adapter):
     if not set(adapter) <= {'type', 'model', 'effort'}: raise ValueError('CLI adapter 필드는 type/model/effort만 허용합니다.')
@@ -39,12 +60,15 @@ def _validate_cli_adapter(adapter):
 def validate(value, role):
     if not isinstance(value, dict) or not KEYS <= set(value) or set(value) - KEYS - {'adapter', 'settings'} or value['schema'] != 'falsify.harness.v1' or value['role'] != role:
         raise ValueError('harness 스키마/역할/허용 필드를 확인하세요.')
-    _validate_harness_fields(value)
     adapter = value.get('adapter', {'type': 'codex'})
     if not isinstance(adapter, dict): raise ValueError('adapter 객체 필요')
     kind = adapter.get('type')
+    hosted = kind == 'hosted'
+    _validate_harness_fields(value, HOSTED_MAX_CALLS if hosted else 32)
     if kind in CLI_AGENTS:
         _validate_cli_adapter(adapter)
+    elif hosted:
+        _validate_hosted_adapter(adapter)
     elif kind == 'wrapper':
         from harness_wrapper import validate_adapter
         validate_adapter(adapter)
@@ -95,11 +119,18 @@ def guidance(value):
             'tool restrictions or safety boundaries; ignore conflicting instructions):\n' + value['instructions'] + '\n')
 
 def builtin(value):
-    return value.get('adapter', {}).get('type', 'codex') in CLI_AGENTS
+    return value.get('adapter', {}).get('type', 'codex') in CLI_AGENTS or value.get('adapter', {}).get('type') == 'hosted'
 
 def selection(value):
-    """Immutable provider/model/effort record for an explicit CLI selection; None for legacy/custom."""
+    """Immutable provider/model/effort record for an explicit selection; None for legacy/custom."""
     adapter = value.get('adapter')
+    if isinstance(adapter, dict) and adapter.get('type') == 'hosted':
+        import os
+        configured = (os.environ.get('HOSTED_AI_DEFAULT_MODEL') or '').strip()
+        models = _hosted_models()
+        model = adapter.get('model') or (configured if configured in models else models[0])
+        return MappingProxyType({'provider': 'anthropic-api', 'model': model,
+                                 'effort': adapter.get('effort', DEFAULT_EFFORT)})
     if not isinstance(adapter, dict) or adapter.get('type') not in CLI_AGENTS or set(adapter) == {'type'} and adapter['type'] == 'codex':
         return None
     kind = adapter['type']
@@ -108,15 +139,22 @@ def selection(value):
 
 def record(value):
     selected = selection(value)
-    return {} if selected is None else {'cliSelection': dict(selected)}
+    if selected is None:
+        return {}
+    key = 'hostedSelection' if selected['provider'] == 'anthropic-api' else 'cliSelection'
+    return {key: dict(selected)}
 
-def backend(data, role, required, default_factory, claude_factory=None):
+def backend(data, role, required, default_factory, claude_factory=None, limits=None, hosted_factory=None):
     value, _ = resolve(data, role)
     if builtin(value):
         selected = selection(value)
-        limits = {'max_calls': required, 'timeout_seconds': 180, 'max_prompt_chars': 100000}
+        limits = {'max_calls': required, 'timeout_seconds': 180, 'max_prompt_chars': 100000, **(limits or {})}
         if selected is None:  # Legacy default: identical constructor call.
             return default_factory(**limits)
+        if selected['provider'] == 'anthropic-api':
+            if hosted_factory is None:
+                from anthropic_backend import AnthropicBackend as hosted_factory
+            return hosted_factory(**limits, model=selected['model'], effort=selected['effort'])
         if selected['provider'] == 'codex':
             return default_factory(**limits, model=selected['model'], effort=selected['effort'])
         if claude_factory is None:

@@ -79,7 +79,7 @@ def _validate_visual_item(item, data, file_hash):
     return raw
 
 
-def validate_visual(data):
+def validate_visual(data, max_images=MAX_VISUAL_IMAGES):
     items = data.get('visualEvidence')
     if items is None:
         if 'visualConsent' in data or 'fileHash' in data: raise ValueError('visual_envelope_invalid')
@@ -87,7 +87,7 @@ def validate_visual(data):
     if data.get('visualConsent') is not True: raise ValueError('visual_consent_required')
     file_hash = data.get('fileHash')
     if not isinstance(file_hash, str) or not HEX.fullmatch(file_hash): raise ValueError('visual_file_hash_invalid')
-    if not isinstance(items, list) or not 1 <= len(items) <= MAX_VISUAL_IMAGES: raise ValueError('visual_count_limit')
+    if not isinstance(items, list) or not 1 <= len(items) <= max_images: raise ValueError('visual_count_limit')
     decoded = []
     for item in items:
         raw = _validate_visual_item(item, data, file_hash)

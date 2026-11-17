@@ -1,0 +1,653 @@
+'use strict';
+// Focused Node regression for the hosted AI web client. Synthetic DOM, storage and fetch only.
+// No browser, network, real account, provider call, private paper or answer key.
+import {test,after} from 'node:test';
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+import {createHash} from 'node:crypto';
+import vm from 'node:vm';
+import {fileURLToPath} from 'node:url';
+
+const source=await readFile(fileURLToPath(new URL('../dist/hosted-ai.js',import.meta.url)),'utf8');
+const context=vm.createContext({console,URL,Event,setTimeout,clearTimeout,TextEncoder});
+vm.runInContext(source,context,{filename:'hosted-ai.js'});
+const api=context.FalsifyHostedAi;
+const webcrypto=globalThis.crypto;
+const SESSION_KEY='falsify.hosted-ai.session.v1';
+const RUNS_KEY='falsify.hosted-ai.runs.v1';
+const TOKEN='fss_'+'A'.repeat(43);
+const FUTURE=new Date(Date.now()+864e5).toISOString();
+const CAPS={enabled:true,provider:'anthropic',execution:'server',
+  models:['claude-opus-5-5','claude-sonnet-5-5'],efforts:['low','medium','high'],
+  limits:{maxUploadBytes:33554432,maxPromptChars:8000}};
+const BYTES=Buffer.from('%PDF-1.7 synthetic hosted-ai fixture bytes\n%%EOF\n');
+const SHA=createHash('sha256').update(BYTES).digest('hex');
+const FILE_NAME='Synthetic paper.pdf';
+const PROMPT='Check the methods section only.';
+const live=[];
+after(()=>{for(const entry of live){try{entry.app.destroy();}catch{}}});
+
+const job=(over={})=>Object.assign({
+  id:'job-1',role:'red',state:'queued',
+  progress:{completedCalls:0,requiredCalls:3,phase:'queued'},
+  model:'claude-opus-5-5',effort:'high',provider:'anthropic',
+  usage:null,result:null,artifacts:[],
+  createdAt:'2026-11-17T00:00:00.000Z',updatedAt:'2026-11-17T00:00:01.000Z'
+},over);
+
+class El extends EventTarget{
+  constructor(tag,owner){
+    super();
+    Object.assign(this,{tagName:String(tag).toUpperCase(),ownerDocument:owner,children:[],parent:null,attrs:{},dataset:{},_text:'',
+      id:'',className:'',value:'',checked:false,disabled:false,hidden:false,type:'',files:[],download:'',href:'',rel:''});
+  }
+  get textContent(){return this._text+this.children.map(child=>typeof child==='string'?child:child.textContent).join('');}
+  set textContent(value){this.children=[];this._text=String(value);}
+  append(...kids){
+    for(const kid of kids){
+      if(kid&&typeof kid==='object') kid.parent=this;
+      this.children.push(kid);
+    }
+  }
+  replaceChildren(...kids){this.textContent='';this.append(...kids);}
+  setAttribute(key,value){this.attrs[key]=String(value);if(key==='id')this.id=String(value);}
+  getAttribute(key){return Object.prototype.hasOwnProperty.call(this.attrs,key)?this.attrs[key]:null;}
+  click(){if(!this.disabled)this.dispatchEvent(new Event('click'));}
+  change(value){
+    if(value!==undefined) this.value=value;
+    this.dispatchEvent(new Event('change'));
+  }
+  *walk(){yield this;for(const child of this.children) if(child&&typeof child==='object'&&child.walk) yield* child.walk();}
+  find(predicate){for(const node of this.walk()) if(predicate(node)) return node;return null;}
+  querySelector(selector){
+    if(typeof selector!=='string'||!selector.startsWith('#')) return null;
+    const id=selector.slice(1);
+    return this.find(node=>node.id===id);
+  }
+}
+function makeDocument(){
+  const doc=new EventTarget();
+  const body=new El('body',doc);
+  doc.body=body;
+  doc.activeElement=body;
+  doc.readyState='complete';
+  doc.created=[];
+  doc.createElement=tag=>{const node=new El(tag,doc);doc.created.push(node);return node;};
+  doc.getElementById=id=>body.find(node=>node.id===id);
+  return doc;
+}
+function storageStub(map){
+  return {
+    map,
+    getItem:key=>map.has(key)?map.get(key):null,
+    setItem:(key,value)=>{map.set(key,String(value));},
+    removeItem:key=>{map.delete(key);}
+  };
+}
+function setup(options={}){
+  const doc=makeDocument();
+  const host=new El('section',doc);
+  host.id='hosted-ai';
+  doc.body.append(host);
+  const store=options.store||new Map();
+  const calls=[];
+  const objects=[];
+  class TURL extends URL{
+    static createObjectURL(blob){objects.push(blob);return 'blob:hosted/'+objects.length;}
+    static revokeObjectURL(){objects.revoked=(objects.revoked||0)+1;}
+  }
+  const fetchStub=async(url,init={})=>{
+    const record={url:String(url),path:new URL(url).pathname,method:String(init.method||'GET').toUpperCase(),
+      headers:Object.assign({},init.headers||{}),body:init.body,init};
+    calls.push(record);
+    const route=options.routes?options.routes(record):{status:404,body:{error:{code:'not_found'}}};
+    if(route==='hang') return new Promise((resolve,reject)=>{
+      if(init.signal) init.signal.addEventListener('abort',()=>reject(Object.assign(Error('aborted'),{name:'AbortError'})));
+    });
+    return {
+      ok:route.status>=200&&route.status<300,
+      status:route.status,
+      text:async()=>route.body===undefined?'':(typeof route.body==='string'?route.body:JSON.stringify(route.body)),
+      blob:async()=>route.blob||new Blob([route.blobText||'{}'],{type:'application/json'})
+    };
+  };
+  const config=options.config||Object.freeze({
+    apiBase:'https://worker.test',provider:'confluence',
+    hostedAi:Object.freeze({enabled:true,apiBase:'https://worker.test'})
+  });
+  const app=api.create({
+    document:doc,host,fetch:fetchStub,storage:storageStub(store),crypto:options.crypto===undefined?webcrypto:options.crypto,
+    URL:TURL,TextEncoder,AbortController,
+    setTimeout:(fn,ms)=>setTimeout(fn,Math.min(Number(ms)||0,15)),clearTimeout,
+    config:()=>config,
+    sessionProvider:options.sessionProvider||(()=>undefined)
+  });
+  const $=id=>host.find(node=>node.id===id);
+  const text=id=>{const node=$(id);return node?node.textContent:'';};
+  const isVisible=id=>{
+    let node=$(id);
+    if(!node) return false;
+    for(;node;node=node.parent) if(node.hidden) return false;
+    return true;
+  };
+  const entry={app,doc,host,$,text,isVisible,calls,store,objects,
+    anchors:()=>doc.created.filter(node=>node.tagName==='A'),
+    storedText:()=>[...store.entries()].map(([key,value])=>key+'='+value).join('\n'),
+    destroy:()=>app.destroy()};
+  live.push(entry);
+  return entry;
+}
+const until=async(predicate,label)=>{
+  for(let i=0;i<600&&!predicate();i++) await new Promise(resolve=>setTimeout(resolve,5));
+  assert.ok(predicate(),label);
+};
+function makeRouter(options={}){
+  let jobGetCount=0,jobsPostCount=0,loginCount=0,uploadCount=0,cancelCount=0,artifactCount=0;
+  const router=record=>{
+    const path=record.path;
+    if(path==='/v1/ai/capabilities') return options.caps===null
+      ?{status:503,body:{error:{code:'ai_unavailable',retryable:true}}}
+      :{status:200,body:options.caps||CAPS};
+    if(path==='/v1/auth/login'){
+      loginCount++;
+      if(options.login) return options.login(record);
+      return {status:200,body:{token:TOKEN,author:{id:'author-1',username:'synthetic',displayName:'Synthetic Reviewer'},expiresAt:FUTURE}};
+    }
+    if(path==='/v1/logout') return {status:200,body:{revoked:true}};
+    if(path==='/v1/ai/uploads'){
+      uploadCount++;
+      if(options.uploads) return options.uploads(record);
+      return {status:201,body:{upload:{id:'up-1',sha256:SHA,name:FILE_NAME,mime:'application/pdf',
+        bytes:BYTES.length,createdAt:'2026-11-17T00:00:00.000Z',deduplicated:false}}};
+    }
+    if(path==='/v1/ai/jobs'&&record.method==='POST'){
+      jobsPostCount++;
+      if(options.jobsPost) return options.jobsPost(record);
+      return {status:202,body:{job:job({state:'queued'}),replayed:false}};
+    }
+    if(/^\/v1\/ai\/jobs\/[^/]+\/artifacts\/[^/]+$/.test(path)){
+      artifactCount++;
+      if(options.artifact) return options.artifact(record);
+      return {status:200,blob:new Blob(['synthetic artifact'],{type:'application/json'})};
+    }
+    if(/^\/v1\/ai\/jobs\/[^/]+\/cancel$/.test(path)&&record.method==='POST'){
+      cancelCount++;
+      if(options.cancel) return options.cancel(record);
+      return {status:202,body:{job:job({state:'cancelling'})}};
+    }
+    if(/^\/v1\/ai\/jobs\/[^/]+$/.test(path)&&record.method==='GET'){
+      jobGetCount++;
+      if(options.jobGet) return options.jobGet(record,jobGetCount);
+      return {status:200,body:{job:job({state:'completed'})}};
+    }
+    return {status:404,body:{error:{code:'not_found',requestId:'req_unknown'}}};
+  };
+  router.counts=()=>({jobGetCount,jobsPostCount,loginCount,uploadCount,cancelCount,artifactCount});
+  return router;
+}
+async function signIn(entry){
+  entry.$('hosted-ai-username').value='synthetic';
+  entry.$('hosted-ai-password').value='correct horse battery';
+  entry.$('hosted-ai-login-form').dispatchEvent(new Event('submit'));
+  await until(()=>entry.store.has(SESSION_KEY),'login stores the session');
+  await until(()=>entry.isVisible('hosted-ai-config'),'config panel opens after login');
+}
+async function selectFile(entry,bytes,{name=FILE_NAME,type='application/pdf'}={}){
+  const input=entry.$('hosted-ai-file');
+  input.files=[{name,size:bytes.length,type,
+    arrayBuffer:async()=>bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength)}];
+  input.dispatchEvent(new Event('change'));
+  await until(()=>/sha256/.test(entry.text('hosted-ai-file-status')),'file hash is shown');
+}
+function setPrompt(entry,value){
+  const node=entry.$('hosted-ai-prompt');
+  node.value=value;
+  node.dispatchEvent(new Event('input'));
+}
+const runsOf=map=>JSON.parse(map.get(RUNS_KEY)||'{"runs":{},"active":""}');
+
+test('disabled cloud configuration renders a truthful inert panel with the local fallback',async()=>{
+  const entry=setup({config:Object.freeze({apiBase:'https://worker.test',provider:'confluence',
+    hostedAi:Object.freeze({enabled:false,apiBase:'https://worker.test'})})});
+  await entry.app.ready;
+  assert.equal(entry.calls.length,0,'no request when hostedAi.enabled is false');
+  assert.equal(entry.$('hosted-ai-disabled').hidden,false);
+  assert.match(entry.text('hosted-ai-disabled-message'),/켜져 있지 않습니다/);
+  assert.match(entry.text('hosted-ai-disabled-message'),/아무것도 보내지 않습니다/);
+  assert.equal(entry.$('hosted-ai-config').hidden,true);
+  assert.equal(entry.$('hosted-ai-login-form').hidden,true);
+  assert.match(entry.text('hosted-ai-disabled'),/로컬 실행 연결/);
+  assert.match(entry.text('hosted-ai-disabled'),/사용 설명서/);
+});
+
+test('capabilities that are off or unreachable disable the panel without sending a job',async()=>{
+  const off=setup({routes:makeRouter({caps:{enabled:false,provider:'anthropic',execution:'server',models:[],efforts:[],limits:{}}})});
+  await off.app.ready;
+  assert.equal(off.calls.length,1);
+  assert.match(off.text('hosted-ai-disabled-message'),/웹 실행을 켜지 않았습니다/);
+  assert.equal(off.$('hosted-ai-config').hidden,true);
+
+  const unreachable=setup({routes:makeRouter({caps:null})});
+  await unreachable.app.ready;
+  assert.match(unreachable.text('hosted-ai-disabled-message'),/확인하지 못했습니다/);
+  assert.match(unreachable.text('hosted-ai-disabled-message'),/아무 작업도 보내지 않습니다/);
+  assert.equal(unreachable.calls.filter(call=>call.method==='POST').length,0);
+
+  const badBase=setup({config:Object.freeze({apiBase:'http://insecure.example',provider:'confluence',
+    hostedAi:Object.freeze({enabled:true,apiBase:'http://insecure.example'})})});
+  await badBase.app.ready;
+  assert.equal(badBase.calls.length,0);
+  assert.match(badBase.text('hosted-ai-disabled-message'),/https 주소/);
+});
+
+test('login gate sends only username and password and keeps the password out of storage and DOM',async()=>{
+  const router=makeRouter({jobGet:()=>({status:200,body:{job:job({state:'completed'})}})});
+  const entry=setup({routes:router});
+  await entry.app.ready;
+  assert.equal(entry.$('hosted-ai-login-form').hidden,false);
+  assert.equal(entry.$('hosted-ai-config').hidden,true);
+  assert.equal(entry.$('hosted-ai-run').disabled,true);
+
+  await signIn(entry);
+
+  const login=entry.calls.find(call=>call.path==='/v1/auth/login');
+  assert.equal(login.method,'POST');
+  assert.equal(login.headers['Content-Type'],'application/json');
+  assert.deepEqual(JSON.parse(login.body),{username:'synthetic',password:'correct horse battery'});
+  assert.equal(entry.$('hosted-ai-password').value,'','password field cleared');
+  assert.match(entry.text('hosted-ai-session'),/Synthetic Reviewer/);
+
+  const probes=entry.calls.filter(call=>call.path==='/v1/ai/capabilities');
+  assert.equal(probes.length,2,'capabilities is re-read with the session');
+  assert.equal(probes[0].headers.Authorization,undefined);
+  assert.equal(probes[1].headers.Authorization,'Bearer '+TOKEN);
+
+  const stored=entry.storedText();
+  assert.ok(!stored.includes('correct horse battery'),'password is never persisted');
+  assert.ok(!entry.doc.body.textContent.includes(TOKEN),'session token is not rendered');
+  assert.ok(!stored.includes(TOKEN)||stored.includes('"token":"'+TOKEN+'"'),'token only lives in its session record');
+
+  entry.$('hosted-ai-logout').click();
+  await until(()=>!entry.store.has(SESSION_KEY),'logout clears the stored session');
+  await until(()=>entry.$('hosted-ai-login-form').hidden===false,'login form returns');
+  const logoutCall=entry.calls.find(call=>call.path==='/v1/logout');
+  assert.equal(logoutCall.method,'POST');
+  assert.equal(logoutCall.headers.Authorization,'Bearer '+TOKEN);
+  assert.equal(entry.store.has(RUNS_KEY),false);
+});
+
+test('upload uses raw bytes, content type and an encoded file name, then submits one idempotent job',async()=>{
+  const router=makeRouter();
+  const entry=setup({routes:router});
+  await entry.app.ready;
+  await signIn(entry);
+  await selectFile(entry,BYTES);
+  assert.match(entry.text('hosted-ai-file-status'),new RegExp('sha256 '+SHA));
+  assert.match(entry.text('hosted-ai-file-status'),/bytes|KiB|MiB/);
+
+  setPrompt(entry,PROMPT);
+  entry.$('hosted-ai-role').value='red';
+  assert.equal(entry.$('hosted-ai-run').disabled,false);
+  entry.$('hosted-ai-run').click();
+  await until(()=>entry.calls.some(call=>call.path==='/v1/ai/jobs'&&call.method==='POST'),'job submitted');
+
+  const upload=entry.calls.find(call=>call.path==='/v1/ai/uploads');
+  assert.equal(upload.method,'POST');
+  assert.equal(upload.headers.Authorization,'Bearer '+TOKEN);
+  assert.equal(upload.headers['Content-Type'],'application/pdf');
+  assert.equal(upload.headers['X-Falsify-File-Name'],encodeURIComponent(FILE_NAME));
+  assert.equal(Buffer.from(upload.body).equals(BYTES),true,'raw file bytes are uploaded');
+  assert.equal(entry.calls.filter(call=>call.path==='/v1/ai/uploads').length,1);
+
+  const post=entry.calls.find(call=>call.path==='/v1/ai/jobs'&&call.method==='POST');
+  assert.equal(post.headers['Content-Type'],'application/json');
+  assert.equal(post.headers.Authorization,'Bearer '+TOKEN);
+  const body=JSON.parse(post.body);
+  assert.deepEqual(Object.keys(body).sort(),['effort','idempotencyKey','model','prompt','role','uploadId']);
+  assert.equal(body.role,'red');
+  assert.equal(body.prompt,PROMPT);
+  assert.equal(body.uploadId,'up-1');
+  assert.equal(body.model,'claude-opus-5-5');
+  assert.equal(body.effort,'high');
+  assert.match(body.idempotencyKey,/^fssjob-[0-9a-f]{40}$/);
+  assert.ok(!/harness|anthropic|apiKey|provider/i.test(post.body),'no key, provider or harness field is sent');
+
+  const runs=runsOf(entry.store);
+  const digest=Object.keys(runs.runs)[0];
+  assert.match(digest,/^[0-9a-f]{64}$/);
+  assert.equal(runs.active,digest);
+  assert.equal(runs.runs[digest].key,body.idempotencyKey);
+  assert.equal(runs.runs[digest].jobId,'job-1');
+  assert.equal(runs.runs[digest].pending,false);
+  assert.ok(!entry.storedText().includes(PROMPT),'the review instruction is not persisted');
+
+  await until(()=>entry.isVisible('hosted-ai-job'),'job panel opens');
+  assert.match(entry.text('hosted-ai-job-state'),/대기 중|실행 중/);
+});
+
+test('a model or effort change derives a new key and submits normally instead of conflicting',async()=>{
+  let postCount=0;
+  const router=makeRouter({
+    jobsPost:record=>{
+      postCount++;
+      const body=JSON.parse(record.body);
+      return {status:202,body:{job:job({id:'job-'+postCount,state:'completed',
+        progress:{completedCalls:1,requiredCalls:1,phase:'done'},
+        model:body.model,effort:body.effort,result:{counts:{rejected:0,unresolved:0}}})}};
+    }
+  });
+  const entry=setup({routes:router});
+  await entry.app.ready;
+  await signIn(entry);
+  await selectFile(entry,BYTES);
+  setPrompt(entry,PROMPT);
+  const posts=()=>entry.calls.filter(call=>call.path==='/v1/ai/jobs'&&call.method==='POST');
+
+  entry.$('hosted-ai-run').click();
+  await until(()=>posts().length===1,'first submit');
+  const first=JSON.parse(posts()[0].body);
+  assert.equal(first.model,'claude-opus-5-5');
+  assert.equal(first.effort,'high');
+  await until(()=>/완료/.test(entry.text('hosted-ai-job-state')),'first run completes');
+
+  entry.$('hosted-ai-run').click();
+  await new Promise(resolve=>setTimeout(resolve,80));
+  assert.equal(posts().length,1,'identical inputs restore the stored job instead of resubmitting');
+
+  entry.$('hosted-ai-model').value='claude-sonnet-5-5';
+  entry.$('hosted-ai-model').dispatchEvent(new Event('change'));
+  entry.$('hosted-ai-effort').value='medium';
+  entry.$('hosted-ai-effort').dispatchEvent(new Event('change'));
+  assert.equal(entry.$('hosted-ai-run').disabled,false);
+  entry.$('hosted-ai-run').click();
+  await until(()=>posts().length===2,'a changed model and effort submits a new request');
+  const second=JSON.parse(posts()[1].body);
+  assert.equal(second.model,'claude-sonnet-5-5');
+  assert.equal(second.effort,'medium');
+  assert.equal(second.role,first.role);
+  assert.equal(second.prompt,first.prompt);
+  assert.equal(second.uploadId,first.uploadId);
+  assert.notEqual(second.idempotencyKey,first.idempotencyKey,'the digest covers model and effort');
+  assert.match(second.idempotencyKey,/^fssjob-[0-9a-f]{40}$/);
+  assert.equal(new Set([first.idempotencyKey,second.idempotencyKey]).size,2);
+
+  const runs=Object.values(runsOf(entry.store).runs);
+  assert.equal(runs.length,2);
+  assert.equal(runs.filter(run=>run.jobId).length,2);
+  assert.deepEqual(runs.map(run=>run.key).sort(),[first.idempotencyKey,second.idempotencyKey].sort());
+  assert.ok(!entry.storedText().includes(PROMPT),'the instruction is still not persisted');
+});
+
+test('reload reuses the stored job and idempotency key without a second submission',async()=>{
+  const shared=new Map();
+  const first=setup({store:shared,routes:makeRouter({
+    jobsPost:()=>({status:202,body:{job:job({state:'running',progress:{completedCalls:1,requiredCalls:3,phase:'analyzing'}}),replayed:false}}),
+    jobGet:()=>({status:200,body:{job:job({state:'completed',progress:{completedCalls:3,requiredCalls:3,phase:'done'},
+      result:{items:[{id:'d1',status:'rejected',title:'Synthetic rejected claim'}]},artifacts:[]})}})
+  })});
+  await first.app.ready;
+  await signIn(first);
+  await selectFile(first,BYTES);
+  setPrompt(first,PROMPT);
+  first.$('hosted-ai-run').click();
+  await until(()=>/완료/.test(first.text('hosted-ai-job-state')),'first run completes');
+  const key=runsOf(shared).runs[runsOf(shared).active].key;
+  first.app.destroy();
+
+  const second=setup({store:shared,routes:makeRouter({
+    jobsPost:()=>{throw Error('a reload must never submit a second paid run');},
+    jobGet:()=>({status:200,body:{job:job({state:'completed',progress:{completedCalls:3,requiredCalls:3,phase:'done'},
+      result:{items:[{id:'d1',status:'rejected',title:'Synthetic rejected claim'}]},artifacts:[]})}})
+  })});
+  await second.app.ready;
+  await until(()=>/완료/.test(second.text('hosted-ai-job-state')),'stored job is restored');
+  assert.equal(second.calls.filter(call=>call.path==='/v1/ai/jobs'&&call.method==='POST').length,0);
+  const get=second.calls.find(call=>call.path==='/v1/ai/jobs/job-1'&&call.method==='GET');
+  assert.equal(get.headers.Authorization,'Bearer '+TOKEN);
+  assert.equal(runsOf(shared).runs[runsOf(shared).active].key,key,'the same key is kept');
+  assert.match(second.text('hosted-ai-result-counts'),/거절 1/);
+  assert.equal(second.calls.some(call=>call.path==='/v1/auth/login'),false,'stored session is reused');
+});
+
+test('polling shows queued, running and completed progress with truthful counts',async()=>{
+  const snapshots=[
+    job({state:'queued',progress:{completedCalls:0,requiredCalls:4,phase:'queued'}}),
+    job({state:'running',progress:{completedCalls:2,requiredCalls:4,phase:'analyzing'}}),
+    job({state:'completed',progress:{completedCalls:4,requiredCalls:4,phase:'validating'},
+      result:{schema:'falsify.document-red.v1',status:'ok',
+        coverage:{complete:true,resultCoverage:{accepted:1,rejected:2,unresolved:1,
+          rejectedItems:[{index:0,code:'numeric_drift'},{index:3,code:'condition_omission'}],
+          unresolvedItems:[{index:2,code:'ambiguous_location'}]}},
+        candidates:[{id:'c1'},{id:'c2'},{id:'c3'},{id:'c4'}]}})
+  ];
+  const entry=setup({routes:makeRouter({jobGet:(record,count)=>({status:200,body:{job:snapshots[Math.min(count,snapshots.length)-1]}})})});
+  await entry.app.ready;
+  await signIn(entry);
+  await selectFile(entry,BYTES);
+  setPrompt(entry,PROMPT);
+  entry.$('hosted-ai-run').click();
+  await until(()=>/완료/.test(entry.text('hosted-ai-job-state')),'job completes through polling');
+  assert.match(entry.text('hosted-ai-job-state'),/완료 · completed/);
+  assert.match(entry.text('hosted-ai-job-progress'),/완료 호출 4 \/ 4/);
+  assert.match(entry.text('hosted-ai-job-progress'),/단계 validating/);
+  assert.match(entry.text('hosted-ai-result-counts'),/항목 4/);
+  assert.match(entry.text('hosted-ai-result-counts'),/수용 1/);
+  assert.match(entry.text('hosted-ai-result-counts'),/거절 2/);
+  assert.match(entry.text('hosted-ai-result-counts'),/미해결 1/);
+  assert.match(entry.text('hosted-ai-job-usage'),/서버가 제공하지 않음/);
+  const items=entry.$('hosted-ai-result-items').children.map(child=>child.textContent).join('\n');
+  assert.match(items,/numeric_drift/);
+  assert.match(items,/condition_omission/);
+  assert.match(items,/ambiguous_location/);
+  assert.equal(entry.$('hosted-ai-result-note').textContent,'','a complete run does not claim partial coverage');
+  assert.equal(entry.calls.filter(call=>call.path==='/v1/ai/jobs'&&call.method==='POST').length,1);
+});
+
+test('interrupted jobs show partial results and are never replayed automatically',async()=>{
+  const entry=setup({routes:makeRouter({
+    jobGet:()=>({status:200,body:{job:job({state:'interrupted',progress:{completedCalls:1,requiredCalls:4,phase:'analyzing'},
+      result:{schema:'falsify.document-blue.v1',status:'ok',
+        coverage:{complete:false,resultCoverage:{accepted:0,rejected:1,unresolved:1,
+          rejectedItems:[{index:0,code:'partial_reject'}],
+          unresolvedItems:[{index:1,code:'ambiguous_location'}]}},
+        findings:[{id:'p1'},{id:'p2'}]},
+      artifacts:[{id:'art-partial',name:'review-partial.json',mime:'application/json',bytes:42,sha256:'ab'.repeat(32)}]})}})
+  })});
+  await entry.app.ready;
+  await signIn(entry);
+  await selectFile(entry,BYTES);
+  setPrompt(entry,PROMPT);
+  entry.$('hosted-ai-run').click();
+  await until(()=>/중단됨/.test(entry.text('hosted-ai-job-state')),'interrupted state is shown');
+  assert.match(entry.text('hosted-ai-job-state'),/interrupted/);
+  assert.match(entry.text('hosted-ai-result-counts'),/부분 결과/);
+  assert.match(entry.text('hosted-ai-result-counts'),/수용 0/);
+  assert.match(entry.text('hosted-ai-result-counts'),/거절 1/);
+  assert.match(entry.text('hosted-ai-result-counts'),/미해결 1/);
+  assert.match(entry.text('hosted-ai-result-note'),/일부 결과만/);
+  assert.match(entry.text('hosted-ai-result-note'),/다시 실행하지 않았습니다/);
+  assert.equal(entry.$('hosted-ai-artifacts-section').hidden,false);
+  assert.match(entry.text('hosted-ai-artifacts'),/review-partial\.json/);
+  assert.equal(entry.$('hosted-ai-cancel').hidden,true);
+  assert.equal(entry.calls.filter(call=>call.path==='/v1/ai/jobs'&&call.method==='POST').length,1);
+});
+
+test('cancel posts once and follows cancelling to cancelled without resubmitting',async()=>{
+  let allowCancelled=false;
+  const router=makeRouter({
+    jobsPost:()=>({status:202,body:{job:job({state:'running',progress:{completedCalls:1,requiredCalls:3,phase:'analyzing'}}),replayed:false}}),
+    cancel:()=>({status:202,body:{job:job({state:'cancelling',progress:{completedCalls:1,requiredCalls:3,phase:'analyzing'}})}}),
+    jobGet:()=>{
+      const state=allowCancelled?'cancelled':(router.counts().cancelCount>0?'cancelling':'running');
+      return {status:200,body:{job:job({state,progress:{completedCalls:1,requiredCalls:3,phase:'analyzing'}})}};
+    }
+  });
+  const entry=setup({routes:router});
+  await entry.app.ready;
+  await signIn(entry);
+  await selectFile(entry,BYTES);
+  setPrompt(entry,PROMPT);
+  entry.$('hosted-ai-run').click();
+  await until(()=>entry.$('hosted-ai-cancel').hidden===false,'cancel becomes available');
+  entry.$('hosted-ai-cancel').click();
+  await until(()=>/취소 중/.test(entry.text('hosted-ai-job-state')),'cancelling is shown');
+  const cancel=entry.calls.find(call=>call.path==='/v1/ai/jobs/job-1/cancel');
+  assert.equal(cancel.method,'POST');
+  assert.equal(cancel.headers.Authorization,'Bearer '+TOKEN);
+  allowCancelled=true;
+  await until(()=>/취소됨/.test(entry.text('hosted-ai-job-state')),'cancelled is shown');
+  assert.equal(entry.$('hosted-ai-cancel').hidden,true);
+  assert.equal(entry.calls.filter(call=>call.path==='/v1/ai/jobs'&&call.method==='POST').length,1);
+  assert.equal(entry.calls.filter(call=>call.path==='/v1/ai/jobs/job-1/cancel').length,1);
+});
+
+test('owner-scoped 404s stop polling and never echo server detail text',async()=>{
+  const entry=setup({routes:makeRouter({
+    jobGet:()=>({status:404,body:{error:{code:'not_found',message:'PRIVATE_PAPER_MARKER',requestId:'req_synthetic_7',retryable:false}}})
+  })});
+  await entry.app.ready;
+  await signIn(entry);
+  await selectFile(entry,BYTES);
+  setPrompt(entry,PROMPT);
+  entry.$('hosted-ai-run').click();
+  await until(()=>/찾지 못했습니다/.test(entry.text('hosted-ai-error')),'404 is explained honestly');
+  assert.match(entry.text('hosted-ai-error'),/다른 계정의 작업이거나 만료/);
+  assert.match(entry.text('hosted-ai-error'),/req_synthetic_7/);
+  assert.ok(!entry.doc.body.textContent.includes('PRIVATE_PAPER_MARKER'),'server message text is not echoed');
+  const reads=entry.calls.filter(call=>call.method==='GET'&&call.path==='/v1/ai/jobs/job-1').length;
+  await new Promise(resolve=>setTimeout(resolve,80));
+  const laterReads=entry.calls.filter(call=>call.method==='GET'&&call.path==='/v1/ai/jobs/job-1').length;
+  assert.equal(laterReads,reads,'polling stops after a 404');
+  assert.equal(entry.calls.filter(call=>call.path==='/v1/ai/jobs'&&call.method==='POST').length,1);
+});
+
+test('artifact download uses the authenticated session and a blob link',async()=>{
+  const artifact={id:'art-1',name:'review.json',mime:'application/json',bytes:42,sha256:'cd'.repeat(32)};
+  const entry=setup({routes:makeRouter({
+    jobGet:()=>({status:200,body:{job:job({state:'completed',progress:{completedCalls:3,requiredCalls:3,phase:'done'},artifacts:[artifact]})}}),
+    artifact:()=>({status:200,blob:new Blob(['{"synthetic":true}'],{type:'application/json'})})
+  })});
+  await entry.app.ready;
+  await signIn(entry);
+  await selectFile(entry,BYTES);
+  setPrompt(entry,PROMPT);
+  entry.$('hosted-ai-run').click();
+  await until(()=>entry.$('hosted-ai-artifacts-section').hidden===false,'artifact list is shown');
+  const button=entry.$('hosted-ai-artifacts').find(node=>node.tagName==='BUTTON');
+  assert.ok(button,'download button exists');
+  button.click();
+  await until(()=>entry.objects.length===1,'blob link is created');
+  const request=entry.calls.find(call=>call.path==='/v1/ai/jobs/job-1/artifacts/art-1');
+  assert.equal(request.method,'GET');
+  assert.equal(request.headers.Authorization,'Bearer '+TOKEN);
+  const anchor=entry.anchors().find(node=>node.download);
+  assert.equal(anchor.download,'review.json');
+  assert.equal(anchor.href,'blob:hosted/1');
+  assert.match(entry.text('hosted-ai-download-status'),/내려받았습니다/);
+  assert.ok(!entry.doc.body.textContent.includes('Bearer '),'bearer header is never rendered');
+});
+
+test('model, effort and usage are rendered exactly as the server reported them',async()=>{
+  const entry=setup({routes:makeRouter({
+    jobGet:()=>({status:200,body:{job:job({state:'completed',
+      progress:{completedCalls:2,requiredCalls:2,phase:'done'},
+      model:'claude-sonnet-5-5',effort:'medium',provider:'anthropic',
+      usage:{inputTokens:11,outputTokens:22,cacheReadInputTokens:0,cacheCreationInputTokens:5},
+      result:{counts:{rejected:0,unresolved:0}}})}})
+  })});
+  await entry.app.ready;
+  await signIn(entry);
+  await selectFile(entry,BYTES);
+  setPrompt(entry,PROMPT);
+  entry.$('hosted-ai-run').click();
+  await until(()=>/완료/.test(entry.text('hosted-ai-job-state')),'job completes');
+  assert.match(entry.text('hosted-ai-job-model'),/모델: claude-sonnet-5-5/);
+  assert.match(entry.text('hosted-ai-job-model'),/추론 강도: medium/);
+  assert.match(entry.text('hosted-ai-job-model'),/실행: anthropic/);
+  assert.match(entry.text('hosted-ai-job-usage'),/입력 11/);
+  assert.match(entry.text('hosted-ai-job-usage'),/출력 22/);
+  assert.match(entry.text('hosted-ai-job-usage'),/캐시 읽기 0/);
+  assert.match(entry.text('hosted-ai-job-usage'),/캐시 생성 5/);
+
+  const silent=setup({routes:makeRouter({
+    jobGet:()=>({status:200,body:{job:job({state:'completed',progress:{completedCalls:1,requiredCalls:1,phase:'done'},
+      model:undefined,effort:undefined,usage:undefined,result:null})}})
+  })});
+  await silent.app.ready;
+  await signIn(silent);
+  await selectFile(silent,BYTES);
+  setPrompt(silent,PROMPT);
+  silent.$('hosted-ai-run').click();
+  await until(()=>/완료/.test(silent.text('hosted-ai-job-state')),'silent job completes');
+  assert.match(silent.text('hosted-ai-job-model'),/모델: 서버가 제공하지 않음/);
+  assert.match(silent.text('hosted-ai-job-model'),/추론 강도: 서버가 제공하지 않음/);
+  assert.match(silent.text('hosted-ai-job-usage'),/서버가 제공하지 않음/);
+  assert.ok(!/입력 0|출력 0/.test(silent.text('hosted-ai-job-usage')),'missing usage is not invented');
+  assert.equal(silent.$('hosted-ai-result-section').hidden,true);
+});
+
+test('a file over the advertised limit is rejected in the browser before any upload',async()=>{
+  const small=Buffer.alloc(20,7);
+  const entry=setup({routes:makeRouter({caps:{...CAPS,limits:{maxUploadBytes:10,maxPromptChars:8000}}})});
+  await entry.app.ready;
+  await signIn(entry);
+  const input=entry.$('hosted-ai-file');
+  input.files=[{name:'Synthetic over-limit.pdf',size:small.length,type:'application/pdf',
+    arrayBuffer:async()=>small.buffer.slice(small.byteOffset,small.byteOffset+small.byteLength)}];
+  input.dispatchEvent(new Event('change'));
+  await until(()=>/한도/.test(entry.text('hosted-ai-error')),'limit error is shown');
+  assert.match(entry.text('hosted-ai-error'),/넘어 업로드하지 않았습니다/);
+  assert.match(entry.text('hosted-ai-file-status'),/한도/);
+  setPrompt(entry,PROMPT);
+  assert.equal(entry.$('hosted-ai-run').disabled,true);
+  entry.$('hosted-ai-run').click();
+  await new Promise(resolve=>setTimeout(resolve,60));
+  assert.equal(entry.calls.some(call=>call.path==='/v1/ai/uploads'),false,'no upload was sent');
+  assert.equal(entry.calls.some(call=>call.path==='/v1/ai/jobs'),false,'no job was sent');
+});
+
+test('an idempotency conflict is reported and not retried',async()=>{
+  const entry=setup({routes:makeRouter({
+    jobsPost:()=>({status:409,body:{error:{code:'idempotency_conflict',message:'conflict',requestId:'req_conflict',retryable:false}}})
+  })});
+  await entry.app.ready;
+  await signIn(entry);
+  await selectFile(entry,BYTES);
+  setPrompt(entry,PROMPT);
+  entry.$('hosted-ai-run').click();
+  await until(()=>/다시 보내지 않았습니다/.test(entry.text('hosted-ai-error')),'conflict is explained');
+  assert.match(entry.text('hosted-ai-error'),/다른 내용/);
+  assert.match(entry.text('hosted-ai-error'),/req_conflict/);
+  await new Promise(resolve=>setTimeout(resolve,80));
+  assert.equal(entry.calls.filter(call=>call.path==='/v1/ai/jobs'&&call.method==='POST').length,1);
+});
+
+test('an injected page session skips the password form and authenticates the API calls',async()=>{
+  const entry=setup({routes:makeRouter({jobGet:()=>({status:200,body:{job:job({state:'completed'})}})}),
+    sessionProvider:()=>({token:()=>TOKEN})});
+  await entry.app.ready;
+  assert.equal(entry.$('hosted-ai-login-form').hidden,true);
+  assert.equal(entry.$('hosted-ai-external').hidden,true);
+  assert.match(entry.text('hosted-ai-session'),/페이지 세션/);
+  assert.equal(entry.$('hosted-ai-logout').hidden,true);
+  assert.equal(entry.calls.find(call=>call.path==='/v1/ai/capabilities').headers.Authorization,'Bearer '+TOKEN);
+  await selectFile(entry,BYTES);
+  setPrompt(entry,PROMPT);
+  entry.$('hosted-ai-run').click();
+  await until(()=>entry.calls.some(call=>call.path==='/v1/ai/jobs'&&call.method==='POST'),'hook session can submit');
+  assert.equal(entry.calls.find(call=>call.path==='/v1/ai/jobs'&&call.method==='POST').headers.Authorization,'Bearer '+TOKEN);
+  assert.ok(!entry.store.has(SESSION_KEY),'a hook token is not copied into storage');
+});
+
+test('an over-long instruction is blocked by the advertised character limit',async()=>{
+  const entry=setup({routes:makeRouter({caps:{...CAPS,limits:{maxUploadBytes:33554432,maxPromptChars:20}}})});
+  await entry.app.ready;
+  await signIn(entry);
+  await selectFile(entry,BYTES);
+  setPrompt(entry,'x'.repeat(21));
+  assert.equal(entry.$('hosted-ai-run').disabled,true);
+  assert.match(entry.text('hosted-ai-prompt-count'),/21 \/ 20/);
+  entry.$('hosted-ai-run').click();
+  await new Promise(resolve=>setTimeout(resolve,60));
+  assert.equal(entry.calls.some(call=>call.path==='/v1/ai/jobs'),false);
+});

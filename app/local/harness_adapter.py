@@ -25,6 +25,10 @@ FAILURES = {
     'settings_mismatch': ('preflight', 'refresh_harness'),
     'executable_missing': ('launch', 'install_executable'),
     'auth_required': ('preflight', 'sign_in'),
+    'provider_not_configured': ('preflight', 'configure_provider'),
+    'rate_limited': ('execution', 'retry_manually'),
+    'provider_unavailable': ('execution', 'retry_manually'),
+    'provider_rejected': ('execution', 'inspect_configuration'),
     'timeout': ('execution', 'retry_manually'),
     'invalid_output': ('output', 'check_adapter'),
     'process_exit': ('execution', 'check_adapter'),
@@ -80,6 +84,11 @@ def validate_shape(value, schema):
 
 def cli_failure(code):
     codes = {'chatgpt_login_required': 'auth_required', 'subscription_login_required': 'auth_required',
+             'config_error': 'provider_not_configured', 'auth_required': 'auth_required',
+             'rate_limited': 'rate_limited', 'overloaded': 'provider_unavailable',
+             'provider_error': 'provider_unavailable', 'transport_error': 'provider_unavailable',
+             'permission_denied': 'provider_rejected', 'request_too_large': 'provider_rejected',
+             'not_found': 'provider_rejected', 'invalid_request': 'provider_rejected',
              'FileNotFoundError': 'executable_missing', 'timeout': 'timeout', 'output_limit': 'invalid_output',
              'response_not_object': 'invalid_output', 'protocol_violation': 'invalid_output'}
     return AdapterFailure(codes.get(code, 'unknown'))

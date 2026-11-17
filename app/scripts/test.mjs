@@ -45,6 +45,8 @@ const latex = spawnSync(process.execPath, ['--test','tests/latex-source-project.
 if(latex.error || latex.status!==0)process.exit(latex.status||1);
 const runtime = spawnSync(process.execPath, ['--test','tests/latex-runtime-catalog.spec.mjs'], {stdio:'inherit'});
 if(runtime.error || runtime.status!==0)process.exit(runtime.status||1);
+const hostedAi = spawnSync(process.execPath, ['--test','tests/hosted-ai.spec.mjs'], {stdio:'inherit'});
+if(hostedAi.error || hostedAi.status!==0)process.exit(hostedAi.status||1);
 const layoutAudit = spawnSync(process.execPath, ['--test','tests/latex-layout-audit.spec.mjs'], {stdio:'inherit'});
 if(layoutAudit.error || layoutAudit.status!==0)process.exit(layoutAudit.status||1);
 const layoutAgent = spawnSync(process.execPath, ['--test','tests/paper-layout-outcome.spec.mjs','tests/paper-layout-resume.spec.mjs','tests/paper-layout-run-store.spec.mjs','tests/latex-draft-store.spec.mjs','tests/paper-layout-preview.spec.mjs','tests/paper-layout-targets.spec.mjs','tests/paper-layout-reliability.spec.mjs','tests/paper-layout-agent.spec.mjs','tests/paper-layout-agent-ui.spec.mjs','tests/paper-layout-structure.spec.mjs','tests/paper-layout-toolkit.spec.mjs','tests/paper-layout-document-tools.spec.mjs','tests/paper-layout-pagination.spec.mjs','tests/paper-layout-edit-tools.spec.mjs','tests/paper-layout-asset-tools.spec.mjs','tests/paper-layout-region.spec.mjs','tests/layout-agent-skill.spec.mjs'], {stdio:'inherit'});

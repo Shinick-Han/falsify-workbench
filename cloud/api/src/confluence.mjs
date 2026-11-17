@@ -650,6 +650,36 @@ function withSession(response, ctx) {
   return new Response(response.body, { status: response.status, headers });
 }
 
+// Wraps a fetch with the request budget the upstream helpers require. Callers that resolve identity
+// outside handleConfluence (hosted AI ownership) use this so callUpstream/fetchBounded stay uniform.
+export function budgetedFetch(fetchImpl, durationMs = 15000) {
+  const controller = new AbortController();
+  const budget = { signal: controller.signal, end: Date.now() + durationMs, mutationStarted: false, pageId: null };
+  const bounded = (url, init) => {
+    if (budget.signal.aborted || Date.now() >= budget.end) throw new Error('request deadline');
+    return fetchImpl(url, init);
+  };
+  bounded.budget = budget;
+  return bounded;
+}
+
+// Resolves the Atlassian account behind a sealed session for hosted AI ownership. This reads the
+// current user on the confined per-site base only; it needs neither the archive parent page nor any
+// archive readiness, and it never treats the site cloudId as a user. An unresolved identity is a 401.
+export async function currentUserIdentity(ctx) {
+  const session = await bearerSession(ctx);
+  const base = cloudBase(session.cloudId);
+  const response = await callUpstream(ctx.fetchImpl, `${base}/wiki/rest/api/user/current`, {
+    headers: authHeaders(session.accessToken),
+  });
+  if (response.status === 401 || response.status === 403 || response.status === 404) fail(401, 'unauthorized');
+  if (response.status < 200 || response.status >= 300) fail(502, 'upstream_unavailable');
+  const body = await readUpstreamJson(response);
+  const accountId = body && typeof body.accountId === 'string' ? body.accountId : '';
+  if (!/^[A-Za-z0-9._:-]{1,128}$/.test(accountId)) fail(401, 'unauthorized');
+  return { cloudId: session.cloudId, accountId, session, refreshed: ctx.refreshed || null };
+}
+
 function summaryHtml(archive, archiveSha256) {
   const manual = archive.kind === 'paper-edit' ? ' Text and edits only. The source PDF binary is not stored.' : '';
   return '<p>Falsify team archive (' + escapeHtml(archive.kind) + '). Title ' + escapeHtml(archive.title) + '. Id ' + escapeHtml(archive.id)

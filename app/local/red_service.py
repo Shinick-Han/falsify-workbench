@@ -9,6 +9,7 @@ from experiments.selfplay_codex import CodexBackend
 from cli_backend import ClaudeBackend
 from harness_adapter import cli_failure
 from harness import resolve, guidance, backend, model_label, builtin, record
+import review_limits
 
 VERSION = 'falsify.document-red.v1'
 CHUNK = 36000
@@ -58,19 +59,43 @@ def _validate_segments(segments):
             raise ValueError('문단 텍스트/위치가 올바르지 않습니다.')
 
 
-def _chunk_segments(segments):
+def _batch_segments(segments, budget):
+    """Split the supplied text into provider-sized batches without dropping or rewriting any text."""
+    batches, current, size = [], [], 0
+    for segment in segments:
+        text = segment['text']
+        for start in range(0, len(text), budget):
+            fragment = {'id': segment['id'], 'label': segment['label'], 'text': text[start:start + budget]}
+            if current and size + len(fragment['text']) > budget:
+                batches.append(current); current, size = [], 0
+            current.append(fragment); size += len(fragment['text'])
+    if current: batches.append(current)
+    return batches
+
+
+def _batch_record(index, batch):
+    return {'index': index + 1, 'segmentIds': list(dict.fromkeys(s['id'] for s in batch)),
+            'chars': sum(len(s['text']) for s in batch)}
+
+
+def _chunk_segments(segments, chunk=CHUNK):
     chunks, current, count = [], [], 0
     for s in segments:
-        for start in range(0, len(s['text']), CHUNK):
-            fragment = {'id': s['id'], 'label': s['label'], 'text': s['text'][start:start + CHUNK]}
-            if current and count + len(fragment['text']) > CHUNK:
+        for start in range(0, len(s['text']), chunk):
+            fragment = {'id': s['id'], 'label': s['label'], 'text': s['text'][start:start + chunk]}
+            if current and count + len(fragment['text']) > chunk:
                 chunks.append(current); current, count = [], 0
             current.append(fragment); count += len(fragment['text'])
     if current: chunks.append(current)
     return chunks
 
 
+def _calls_for(chunks):
+    return 1 if len(chunks) == 1 else len(chunks) + 1
+
+
 def _validate_review_envelope(data):
+    limits = review_limits.for_data(data)
     if not isinstance(data, dict) or data.get('schema') != VERSION or data.get('consent') is not True:
         raise ValueError('요청 스키마와 명시적 모델 전송 동의가 필요합니다.')
     for field in ['revision', 'requestId']:
@@ -79,32 +104,36 @@ def _validate_review_envelope(data):
     import re
     if not re.fullmatch(r'[A-Za-z0-9_:-]+', data['requestId']): raise ValueError('요청 ID에 허용되지 않은 문자가 있습니다.')
     attack_types(data)
-    if type(data.get('maxCalls')) is not int or not 1 <= data['maxCalls'] <= 32:
-        raise ValueError('호출 예산(1–32)과 단계(1–3)를 확인하세요.')
     harness, _ = resolve(data, 'red')
+    call_limit = min(limits['max_calls'], harness['maxCalls'] if limits['hosted'] else 32)
+    if type(data.get('maxCalls')) is not int or not 1 <= data['maxCalls'] <= call_limit:
+        raise ValueError(f'호출 예산(1–{call_limit})과 단계(1–3)를 확인하세요.')
     if data.get('explanationLanguage', 'ko') not in ('ko', 'en'):
         raise ValueError('근거 언어는 ko 또는 en입니다.')
     if not builtin(harness) and data.get('executionConsent') is not True:
         raise ValueError('사용자 harness 실행/전송 동의가 필요합니다.')
     if 'allowOccurrenceTargeting' in data and type(data['allowOccurrenceTargeting']) is not bool:
         raise ValueError('allowOccurrenceTargeting 값이 올바르지 않습니다.')
-    return harness
+    return harness, limits
 
 
 def validate_request(data):
-    harness = _validate_review_envelope(data)
+    harness, limits = _validate_review_envelope(data)
     if 'paperEvidence' in data or 'paperEvidenceConsent' in data:
         from red_multimodal import resolve_paper_context
         resolve_paper_context(data)
     segments = data.get('segments')
-    if not isinstance(segments, list) or not 1 <= len(segments) <= 10000:
+    if not isinstance(segments, list) or not 1 <= len(segments) <= limits['max_segments']:
         raise ValueError('추출 문단/페이지가 필요합니다.')
     _validate_segments(segments)
     source = '\n\n'.join(s['text'] for s in segments)
-    if len(source) > 1000000 or '\0' in source or hashlib.sha256(source.encode('utf-8')).hexdigest() != data.get('sourceHash'):
+    if len(source) > limits['source_chars'] or '\0' in source or hashlib.sha256(source.encode('utf-8')).hexdigest() != data.get('sourceHash'):
         raise ValueError('원문 크기/해시가 일치하지 않습니다.')
-    chunks = _chunk_segments(segments)
-    calls = 1 if len(chunks) == 1 else len(chunks) + 1
+    chunks = _chunk_segments(segments, limits['red_chunk_chars'])
+    if limits['hosted'] and 'paperEvidence' not in data and 'paperEvidenceConsent' not in data:
+        batches = _batch_segments(segments, limits['red_batch_chars'])
+        return batches, len(batches)
+    calls = _calls_for(chunks)
     if calls > min(data['maxCalls'], harness['maxCalls']):
         raise ValueError(f'전체 추출 텍스트 검토에는 {calls}회 호출이 필요합니다. 현재 예산에서는 시작하지 않습니다.')
     return chunks, calls
@@ -180,15 +209,52 @@ def validate_candidates(response, segments, allow_occurrence=False):
         _validate_candidate(c, source, ids, allow_occurrence=allow_occurrence)
 
 
-def _trim_notes(notes, notesTrimmed):
-    room = max(400, NOTES_BUDGET // len(notes))
+_VALIDATION_CODES = (
+    ('공격 위치 인용', 'attack_location'),
+    ('근거/한계', 'rationale_limit'),
+    ('모델이 원문에 없는 근거', 'evidence_not_in_source'),
+    ('변경문', 'replacement_invalid'),
+    ('후보 ID', 'candidate_id'),
+    ('요청과 다른 공격 유형', 'attack_type_mismatch'),
+    ('취소', 'cancelled'),
+)
+
+
+def validation_code(message):
+    text = str(message)
+    for prefix, code in _VALIDATION_CODES:
+        if text.startswith(prefix):
+            return code
+    return 'candidate_invalid'
+
+
+def partition_candidates(response, segments, allow_occurrence=False):
+    """Keep every independently valid candidate; report rejected items instead of failing the whole result."""
+    source = {s['id']: s['text'] for s in segments}
+    rejected = []
+    if response.get('status') != 'ok' and response.get('candidates'):
+        return [], [{'index': index, 'code': 'status_mismatch'} for index, _ in enumerate(response['candidates'])], []
+    ids, accepted = set(), []
+    for index, candidate in enumerate(response.get('candidates') or []):
+        try:
+            _validate_candidate(candidate, source, ids, allow_occurrence=allow_occurrence)
+            accepted.append(candidate)
+        except ValueError as error:
+            rejected.append({'index': index, 'code': validation_code(error)})
+    return accepted, rejected, []
+
+
+def _trim_notes(notes, notesTrimmed, budget=NOTES_BUDGET):
+    room = max(400, budget // len(notes))
     for n in notes:
         if len(n['summary']) > room:
             n['summary'] = n['summary'][:room].rstrip() + '…'; notesTrimmed = True
     return notesTrimmed
 
 
-def _candidate_request(data, chunks, notes):
+def _candidate_request(data, chunks, notes, limits=None):
+    limits = limits or review_limits.LOCAL
+    max_candidates = limits['red_candidates_per_batch'] if limits['hosted'] else limits['red_max_candidates']
     selected = attack_types(data)
     legacy = type(data.get('level')) is int and data['level'] in (1, 2, 3) and selected == [TYPES[data['level'] - 1]]
     level_extra = {'level': data['level']} if legacy or data.get('level') == 4 else {}
@@ -198,7 +264,8 @@ def _candidate_request(data, chunks, notes):
     if allow_occ:
         props['occurrence'] = {'type': ['integer', 'null'], 'minimum': 0}
     candidate_schema = CANDIDATE if legacy and not allow_occ else strict_object(props)
-    result_schema = strict_object({'status': RESULT['properties']['status'], 'candidates': {'type': 'array', 'items': candidate_schema, 'maxItems': 12}})
+    result_schema = strict_object({'status': RESULT['properties']['status'],
+                                   'candidates': {'type': 'array', 'items': candidate_schema, 'maxItems': max_candidates}})
     if data.get('paperEvidence') is not None:
         from red_multimodal import extend_candidate_schema
         result_schema = extend_candidate_schema(result_schema)
@@ -232,26 +299,108 @@ def _build_red_policy(data, harness, structured):
     return policy
 
 
-def run_review(data, progress, cancelled, backend_factory=CodexBackend, claude_factory=ClaudeBackend):
+def _run_hosted_red(data, batches, policy, invoke, harness, harness_hash, limits, usage_totals, provider_state):
+    """Provider-sized candidate batches; every batch is validated and accumulated. A budget that cannot cover all
+    batches yields an explicit partial result with the remaining coverage instead of a silent truncation."""
+    selected = attack_types(data)
+    allow_occ = data.get('allowOccurrenceTargeting') is True
+    budget = max(1, min(int(data['maxCalls']), int(harness['maxCalls']), len(batches)))
+    accepted, rejected, unresolved, statuses = [], [], [], []
+    completed = 0
+    for index, batch in enumerate(batches[:budget]):
+        _, payload, schema = _candidate_request(data, [batch], [], limits)
+        prompt = (policy + f'This is batch {index + 1} of {len(batches)} of the supplied document. Read every fragment '
+                  f'in this batch and propose up to {limits["red_candidates_per_batch"]} candidates '
+                  + ('at exact quotations (set occurrence when repeated)' if allow_occ else 'at exact unique quotations')
+                  + '. Do not omit a supported candidate to save space; other batches are handled separately. '
+                  + json.dumps({'batch': index + 1, **payload}, ensure_ascii=False))
+        response = invoke(prompt, schema)
+        statuses.append(response.get('status'))
+        completed = index + 1
+        if response.get('status') != 'ok':
+            rejected.append({'batch': index + 1, 'code': 'model_' + str(response.get('status'))})
+            continue
+        part, bad, ambiguous = partition_candidates(response, data['segments'], allow_occurrence=allow_occ)
+        kept = []
+        for candidate in part:
+            if 'attackTypes' in candidate or 'level' in candidate:
+                try:
+                    if any(t not in selected for t in attack_types(candidate)):
+                        bad.append({'index': -1, 'code': 'attack_type_mismatch'})
+                        continue
+                except ValueError:
+                    bad.append({'index': -1, 'code': 'attack_type_mismatch'})
+                    continue
+            kept.append(candidate)
+        for item in bad + ambiguous:
+            item['batch'] = index + 1
+        accepted.extend(kept); rejected.extend(bad); unresolved.extend(ambiguous)
+    seen = set()
+    for candidate in accepted:
+        if candidate['id'] in seen:
+            suffix = '-b%d' % len(seen)
+            candidate['id'] = (candidate['id'][:80 - len(suffix)] + suffix)
+        seen.add(candidate['id'])
+    status = 'ok' if accepted else (statuses[-1] if statuses and statuses[-1] != 'ok' else 'abstain')
+    complete = completed == len(batches)
+    remaining = [_batch_record(i, batch) for i, batch in enumerate(batches[completed:], start=completed)]
+    provider = {'id': 'anthropic-api', 'models': sorted(provider_state['models']),
+                'requestId': provider_state['request_id']}
+    return {'schema': VERSION, 'revision': data['revision'], 'sourceHash': data['sourceHash'],
+            'status': status, 'candidates': accepted,
+            'usage': usage_totals, 'provider': provider,
+            'harness': harness, 'harnessHash': harness_hash,
+            'coverage': {'complete': complete, 'calls': completed, 'batches': len(batches), 'completedBatches': completed,
+                         'remainingBatches': remaining,
+                         'resultCoverage': {'accepted': len(accepted), 'rejected': len(rejected),
+                                            'unresolved': len(unresolved), 'rejectedItems': rejected,
+                                            'unresolvedItems': unresolved},
+                         'meaning': ('Every supplied text batch was reviewed and validated candidates were accumulated. '
+                                     if complete else
+                                     'The job call budget ended before every batch; the remaining batches are listed and '
+                                     'not claimed as reviewed. ') + '표·수식·이미지 및 과학적 타당성 검증 아님.'},
+            'model': model_label(harness), **record(harness)}
+
+
+def run_review(data, progress, cancelled, backend_factory=CodexBackend, claude_factory=ClaudeBackend, hosted_factory=None):
     chunks, required = validate_request(data)
+    limits = review_limits.for_data(data)
     harness, harness_hash = resolve(data, 'red')
     structured = None
     if 'paperEvidence' in data:
         from red_multimodal import resolve_paper_context
         structured = resolve_paper_context(data)
-    engine = backend(data, 'red', required, backend_factory, claude_factory)
+    backend_limits = {'max_prompt_chars': limits['prompt_chars'], 'timeout_seconds': limits['timeout_seconds']}
+    if limits['hosted']:
+        backend_limits.update(max_tokens=limits['provider_max_tokens'], max_images=limits['image_capacity'])
+    engine = backend(data, 'red', required, backend_factory, claude_factory,
+                    limits=backend_limits, hosted_factory=hosted_factory)
     source = {s['id']: s['text'] for s in data['segments']}
     notes = []
     policy = _build_red_policy(data, harness, structured)
     calls = 0
+    usage_totals = {}
+    provider_state = {'request_id': None, 'models': set()}
+    def accumulate(result):
+        for key, value in (result.get('usage') or {}).items():
+            if type(value) is int and value >= 0:
+                usage_totals[key] = usage_totals.get(key, 0) + value
+        if isinstance(result.get('request_id'), str):
+            provider_state['request_id'] = result['request_id']
+        if isinstance(result.get('provider_model'), str):
+            provider_state['models'].add(result['provider_model'])
     def invoke(prompt, schema):
         nonlocal calls
         if cancelled.is_set(): raise ValueError('취소됨. 이미 시작된 CLI 호출은 종료/시간 제한까지 실행될 수 있습니다.')
         calls += 1; progress({'completedCalls': calls - 1, 'requiredCalls': required, 'phase': '검토 중'})
         result = engine.infer(prompt, schema)
+        accumulate(result)
         if cancelled.is_set(): raise ValueError('취소됨. 결과는 폐기했습니다.')
         if result['status'] != 'ok': raise cli_failure(result.get('error_code') or result['status'])
         return result['response']
+    if limits['hosted'] and structured is None:
+        return _run_hosted_red(data, chunks, policy, invoke, harness, harness_hash, limits,
+                               usage_totals, provider_state)
     notesTrimmed = False
     if len(chunks) > 1:
         for i, chunk in enumerate(chunks):
@@ -263,25 +412,48 @@ def run_review(data, progress, cancelled, backend_factory=CodexBackend, claude_f
                     'coverage': {'complete': False, 'completedChunks': i + 1, 'chunks': len(chunks), 'calls': calls}}
             evidence_check(note['evidence'], source, 600)
             summary = note['summary']
-            if len(summary) > MAX_NOTE:
-                summary = summary[:MAX_NOTE].rstrip() + '…'; notesTrimmed = True
+            if len(summary) > limits['red_max_note']:
+                summary = summary[:limits['red_max_note']].rstrip() + '…'; notesTrimmed = True
             notes.append({**note, 'summary': summary})
-        notesTrimmed = _trim_notes(notes, notesTrimmed)
-    selected, payload, result_schema = _candidate_request(data, chunks, notes)
+        notesTrimmed = _trim_notes(notes, notesTrimmed, limits['red_notes_budget'])
+    selected, payload, result_schema = _candidate_request(data, chunks, notes, limits)
     allow_occ = data.get('allowOccurrenceTargeting') is True
     quote_rule = 'at exact quotations (set occurrence when repeated)' if allow_occ else 'at exact unique quotations'
-    response = invoke(policy + f'All extracted text has been supplied in this call or previous chunk reads. Propose up to 12 candidates {quote_rule}. '
+    response = invoke(policy + f'All extracted text has been supplied in this call or previous chunk reads. Propose up to {limits["red_max_candidates"]} candidates {quote_rule}. '
         'Each candidate needs a clear causal/logical rationale (<=3000 chars), exact evidence quotes, before/after <=4000 chars. Uncertainty is optional; use null when absent (otherwise <=1500 chars). '
         'A candidate is a hypothesis, not proof. Use only quoted text available here; abstain if unsupported. Return only selected attack types. '
         + json.dumps(payload, ensure_ascii=False), result_schema)
-    validate_candidates(response, data['segments'], allow_occurrence=allow_occ)
+    if limits['hosted']:
+        accepted, rejected, unresolved = partition_candidates(response, data['segments'], allow_occurrence=allow_occ)
+    else:
+        validate_candidates(response, data['segments'], allow_occurrence=allow_occ)
+        accepted, rejected, unresolved = response['candidates'], [], []
+    for item in rejected:
+        index = item['index']
+        candidate = (response.get('candidates') or [])[index]
+        if 'attackTypes' in candidate or 'level' in candidate:
+            try:
+                if any(t not in selected for t in attack_types(candidate)):
+                    item['code'] = 'attack_type_mismatch'
+            except ValueError:
+                item['code'] = 'attack_type_mismatch'
+    if not limits['hosted'] and any(any(t not in selected for t in attack_types(c)) for c in response['candidates'] if 'attackTypes' in c or 'level' in c):
+        raise ValueError('요청과 다른 공격 유형의 후보')
     if structured is not None:
         from red_multimodal import validate_visual_edits
-        validate_visual_edits(response, data['paperEvidence']['paperId'])
-    if any(any(t not in selected for t in attack_types(c)) for c in response['candidates'] if 'attackTypes' in c or 'level' in c): raise ValueError('요청과 다른 공격 유형의 후보')
+        validate_visual_edits({**response, 'candidates': accepted}, data['paperEvidence']['paperId'])
+    status = response.get('status')
+    if status == 'ok' and not accepted and (rejected or unresolved):
+        status = 'abstain'
     extra = {'paperEvidenceCoverage': structured['coverage']} if structured is not None else {}
-    return {'schema': VERSION, 'revision': data['revision'], 'sourceHash': data['sourceHash'], **response, **extra,
+    provider = {'id': 'anthropic-api' if limits['hosted'] else 'cli', 'models': sorted(provider_state['models']),
+                'requestId': provider_state['request_id']}
+    return {'schema': VERSION, 'revision': data['revision'], 'sourceHash': data['sourceHash'], **response,
+        'status': status, 'candidates': accepted, **extra,
+        'usage': usage_totals, 'provider': provider,
         'harness': harness, 'harnessHash': harness_hash,
         'coverage': {'complete': True, 'completedChunks': len(chunks), 'chunks': len(chunks), 'calls': calls,
+            'resultCoverage': {'accepted': len(accepted), 'rejected': len(rejected), 'unresolved': len(unresolved),
+                               'rejectedItems': rejected, 'unresolvedItems': unresolved},
             'meaning': '전체 추출 텍스트 전달 완료. 표·수식·이미지 및 과학적 타당성 검증 아님.'
                  + (' 청크 요약을 예산에 맞게 줄였습니다.' if notesTrimmed else '')}, 'model': model_label(harness), **record(harness)}
