@@ -10,3 +10,4 @@
 /app/vendor-sources/chart-shape/** -text whitespace=-blank-at-eol,-blank-at-eof
 /app/dist/chart-shape-vendor/** -text whitespace=-blank-at-eol,-blank-at-eof
 /app/dist/chart-shape-core.js -text
+/app/vendor-sources/paper-orchestra/** -text whitespace=-blank-at-eol,-blank-at-eof

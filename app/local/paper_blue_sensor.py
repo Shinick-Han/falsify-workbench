@@ -30,12 +30,14 @@ from paper_evidence_text import (
     _strip_furniture,
     list_references,
 )
+from paper_argument_outline import audit_argument_outline
 from paper_external_grounding import (
     MAX_BYTES as ORACLE_MAX_BYTES,
     TIMEOUT_SECONDS as ORACLE_TIMEOUT,
     USER_AGENT as ORACLE_USER_AGENT,
     _compare_record,
     _is_chimera_mismatch,
+    _parse_manuscript_date,
     _read_bounded_body,
     _resolve_global_ip,
     fetch_json,
@@ -987,15 +989,13 @@ def _oracle_trial_checks(page_texts, trial_transport):
 
 def _run_external_oracle(
     paper_id, entries, page_texts, store, bib_transport, trial_transport,
-    extracted_identifiers=None, identifier_transport=None,
+    extracted_identifiers=None, identifier_transport=None, manuscript_date=None,
 ):
     refs = list_references(paper_id, offset=0, limit=MAX_ORACLE_REFS, store=store).get("references") or []
     if not refs and entries:
         refs = [{"index": e["index"], "rawText": e["rawText"], "doi": e["dois"][0] if e["dois"] else None, "year": e["year"]}
                 for e in entries[:MAX_ORACLE_REFS]]
-    bib_out = verify_bibliography(refs, max_refs=MAX_ORACLE_REFS, transport=bib_transport or fetch_json) if refs else {
-        "status": "empty", "checkedCount": 0, "summary": {}, "results": [],
-    }
+    bib_out, citation_hints = _verified_bibliography(refs, bib_transport, manuscript_date)
     updated_results, dc_count = _apply_datacite_fallback(bib_out.get("results", []), bib_transport)
     bib_summary = dict(bib_out.get("summary") or {})
     if dc_count:
@@ -1015,7 +1015,7 @@ def _run_external_oracle(
         "identifierChecks": {k: v for k, v in id_res.items() if k != "signals"},
     }
     _assert_no_red_keys(oracle_pack)
-    return bib_signals + id_signals + trial_signals, oracle_pack
+    return bib_signals + id_signals + trial_signals, oracle_pack, citation_hints
 
 
 def _dedupe_and_number(signals, max_signals):
@@ -1120,6 +1120,62 @@ def _internal_consistency_pack(page_texts, max_signals, store, paper_id):
     return ic_sigs, summary
 
 
+def _validate_manuscript_date(manuscript_date):
+    if manuscript_date is None:
+        return
+    _parse_manuscript_date(manuscript_date)
+
+
+def _argument_outline_pack(page_texts, max_signals):
+    report = audit_argument_outline(segments=page_texts, limit=max_signals)
+    _assert_no_red_keys(report)
+    hints = list(report.get("triageHints") or [])
+    return {
+        "schema": report.get("schema", "falsify.argument-outline.v1"),
+        "enabled": True,
+        "signalCount": 0,
+        "hintCount": report.get("hintCount", len(hints)),
+        "triageHints": hints,
+        "truncatedHints": bool(report.get("truncatedHints")),
+        "outline": list(report.get("outline") or []),
+        "claimEvidenceMap": list(report.get("claimEvidenceMap") or []),
+        "digest": report.get("digest") or "",
+        "signals": [],
+    }
+
+
+def _citation_postdate_hints(bib_out, manuscript_date):
+    if manuscript_date is None:
+        return []
+    hints = []
+    for hint in bib_out.get("triageHints") or []:
+        if isinstance(hint, dict) and hint.get("code") == "citation_postdates_manuscript":
+            hints.append(hint)
+    return hints
+
+
+def _verified_bibliography(refs, transport, manuscript_date):
+    if not refs and manuscript_date is None:
+        empty = {"status": "empty", "checkedCount": 0, "summary": {}, "results": []}
+        return empty, []
+    kwargs = {"max_refs": MAX_ORACLE_REFS, "transport": transport or fetch_json}
+    if manuscript_date is not None:
+        kwargs["manuscript_date"] = manuscript_date
+    bib_out = verify_bibliography(refs, **kwargs)
+    return bib_out, _citation_postdate_hints(bib_out, manuscript_date)
+
+
+def _extend_report_hints(result, summaries, citation_hints):
+    hints = []
+    outline = summaries.get("argumentOutline")
+    if isinstance(outline, dict):
+        hints.extend(outline.get("triageHints") or [])
+    hints.extend(citation_hints or [])
+    if hints:
+        result["triageHints"] = hints
+    return result
+
+
 def _meta_and_tables_pack(page_texts, max_signals, store, paper_id):
     mt_res = audit_meta_and_tables(
         page_texts, table_items=_bound_flow_tables(store, paper_id), max_signals=max_signals,
@@ -1148,7 +1204,7 @@ def _pdf_security_pack(raw, max_signals):
 def _collect_optional_packs(
     paper_id, actual_hash, raw, page_texts, max_signals, store,
     include_figure_forensics, include_flow_triage, include_internal_consistency,
-    include_meta_and_tables, include_pdf_security,
+    include_meta_and_tables, include_pdf_security, include_argument_outline=False,
 ):
     extra_sigs = []
     summaries = {}
@@ -1167,6 +1223,8 @@ def _collect_optional_packs(
     if include_pdf_security:
         sigs, summaries["pdfSecurity"] = _pdf_security_pack(raw, max_signals)
         extra_sigs.extend(sigs)
+    if include_argument_outline:
+        summaries["argumentOutline"] = _argument_outline_pack(page_texts, max_signals)
     return extra_sigs, summaries
 
 
@@ -1185,9 +1243,11 @@ def run_blue_sensor(
     bib_transport=None,
     trial_transport=None,
     identifier_transport=None,
+    manuscript_date=None,
     include_figure_forensics=False,
     include_flow_triage=False,
     include_internal_consistency=False,
+    include_argument_outline=False,
     include_meta_and_tables=False,
     include_pdf_security=False,
 ):
@@ -1199,10 +1259,12 @@ def run_blue_sensor(
             ("include_figure_forensics", include_figure_forensics),
             ("include_flow_triage", include_flow_triage),
             ("include_internal_consistency", include_internal_consistency),
+            ("include_argument_outline", include_argument_outline),
             ("include_meta_and_tables", include_meta_and_tables),
             ("include_pdf_security", include_pdf_security),
         ),
     )
+    _validate_manuscript_date(manuscript_date)
     store = _default_store() if store is None else store
     paper_id, actual_hash, summary, raw = _require_bound_pdf(paper_id, store)
     require_summary(summary, paper_id=paper_id, file_hash=file_hash)
@@ -1223,17 +1285,18 @@ def run_blue_sensor(
     id_offline_sigs = id_audit["signals"]
     extracted_identifiers = id_audit["identifiers"]
     d1_sigs = _collect_d1_signals(paper_id, actual_hash, max_signals, store)
-    oracle_sigs, oracle_pack = (
+    oracle_sigs, oracle_pack, citation_hints = (
         _run_external_oracle(
             paper_id, entries, page_texts, store, bib_transport, trial_transport,
             extracted_identifiers=extracted_identifiers, identifier_transport=identifier_transport,
+            manuscript_date=manuscript_date,
         )
-        if include_external_oracle else ([], None)
+        if include_external_oracle else ([], None, [])
     )
     opt_sigs, opt_summaries = _collect_optional_packs(
         paper_id, actual_hash, raw, page_texts, max_signals, store,
         include_figure_forensics, include_flow_triage, include_internal_consistency,
-        include_meta_and_tables, include_pdf_security,
+        include_meta_and_tables, include_pdf_security, include_argument_outline,
     )
     all_signals = (
         link_sigs + shared_sigs + dup_sigs + cite_sigs + mal_sigs
@@ -1261,5 +1324,6 @@ def run_blue_sensor(
     }
     for key, pack_summary in opt_summaries.items():
         _attach_named(result, key, pack_summary)
+    _extend_report_hints(result, opt_summaries, citation_hints)
     _assert_no_red_keys(result)
     return result

@@ -119,3 +119,16 @@ python app/local/falsify_cli.py blue finalize --pdf BLIND.pdf --report BLUE_REPO
 - **PRISMA & Meta-analysis + Cross-table `N` (`--meta-tables` / MCP `audit_meta_and_tables`)**: `app/local/paper_meta_and_table_audit.py` deterministically audits PRISMA screening arithmetic (`prisma_flow_mismatch`), forest-plot study weights (`meta_weight_sum_mismatch`), Cochran's $Q$/$I^2$ heterogeneity (`meta_heterogeneity_mismatch`), inverse-variance pooled estimates (`meta_pooled_effect_mismatch`), and cross-table arm denominators (`cross_table_sample_size_mismatch`, exempting explicit per-protocol/completer subsets).
 - **PDF Stealth Security & Sub-panel/Axis Forensics (`--pdf-security` / MCP `audit_pdf_security`, `evidence_blue_v041`)**: `app/local/paper_pdf_security_forensics.py` detects micro-font/white-on-white/`3 Tr` hidden text (`hidden_pdf_text_layer`, exempting full-page scanned OCR overlays) and agent prompt-injection directives (`prompt_injection_directive`), while `paper_figure_forensics.py` adds intra-figure gutter-split sub-panel reuse (`composite_subpanel_duplicate`) and non-monotonic/truncated bar axes (`axis_scale_distortion`).
 - **Content-addressed cache, SARIF 2.1.0 & Ensemble Consensus**: Pass `--cache-dir DIR` on `blue scan` / `blue scan-workspace`, export OASIS SARIF 2.1.0 via `--sarif OUT.sarif`, inspect schemas via `falsify schemas`, and merge heterogeneous blind BLUE reports via `falsify blue ensemble --report B1.json --report B2.json [--pdf BLIND.pdf]` (`falsify.blue-ensemble.v1`, preserving minority defect flags as `확인필요`).
+
+## 8. Argument outline and citation chronology
+
+Run the scan with the argument outline enabled before treating a conclusion as a finding:
+
+```bash
+python app/local/falsify_cli.py blue scan --pdf CANDIDATE.pdf --argument-outline [--oracle --manuscript-date YYYY-MM-DD] --digest-only
+```
+
+- Treat `conclusion_claim_without_results_support`, `causal_or_absolute_language_without_hedge`, `limitations_absent`, and `citation_postdates_manuscript` as leads to verify, never as findings by themselves.
+- For each conclusion, first argue that it does not follow from the Results. Report only what can be quoted verbatim.
+- Read `corroboration.tier`. `low` is "not found", never "fabricated".
+- `--manuscript-date` accepts `YYYY`, `YYYY-MM`, or `YYYY-MM-DD`. An invalid date exits `2`.
