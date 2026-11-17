@@ -67,3 +67,9 @@
 .hosted-ai-diff p{grid-template-columns:1fr}
 .hosted-ai-diff-label{padding-top:0}
 }
+
+/* Secondary invite registration under the primary login. Collapsed by default. */
+.hosted-ai-register{max-width:420px;margin:10px 0 0;padding:0}
+.hosted-ai-register>summary{cursor:pointer;min-height:38px;padding:8px 0;font-size:12px;font-weight:600}
+.hosted-ai-register label{margin-top:10px}
+.hosted-ai-register .button-row{margin:12px 0 0}

@@ -538,6 +538,102 @@
       return storedSession();
     }
 
+    function normalizeAuthor(value){
+      if(!value||typeof value!=='object') return null;
+      return {
+        id:typeof value.id==='string'?value.id.slice(0,64):'',
+        username:safeName(value.username),
+        displayName:safeName(value.displayName)
+      };
+    }
+    function adoptSession(data){
+      const token=typeof data.token==='string'?data.token:'';
+      if(!TOKEN_RE.test(token)) throw Object.assign(Error('bad token'),{kind:'protocol'});
+      const session={
+        source:'password',token,apiBase:state.apiBase,
+        author:normalizeAuthor(data.author),
+        expiresAt:typeof data.expiresAt==='string'?data.expiresAt:''
+      };
+      state.session=session;
+      state.restored=false;
+      writeStore(SESSION_KEY,{apiBase:session.apiBase,token:session.token,
+        author:session.author,expiresAt:session.expiresAt});
+      return session;
+    }
+    async function afterSignIn(){
+      state.error='';
+      await probe();
+      await restore();
+    }
+    function registerInputs(){
+      return {
+        username:String(nodes.registerUsername.value||'').trim(),
+        password:String(nodes.registerPassword.value||''),
+        displayName:String(nodes.registerDisplayName.value||'').trim(),
+        inviteCode:String(nodes.registerInvite.value||'').trim()
+      };
+    }
+    function registerValidation(input){
+      if(!/^[A-Za-z0-9_-]{3,32}$/.test(input.username)){
+        return '아이디는 3–32자의 영문·숫자·_·-만 쓸 수 있습니다.';
+      }
+      const password=[...input.password.normalize('NFC')].length;
+      if(password<12||password>128) return '비밀번호는 12자 이상이어야 합니다.';
+      if(input.displayName&&[...input.displayName.normalize('NFC')].length>60){
+        return '표시 이름은 60자 이하로 입력하세요.';
+      }
+      if(!input.inviteCode) return '초대 코드를 입력하세요.';
+      return '';
+    }
+    function registerBody(input){
+      const body={username:input.username,password:input.password,inviteCode:input.inviteCode};
+      if(input.displayName) body.displayName=input.displayName;
+      return body;
+    }
+    function registerFailureText(error){
+      const status=error?Number(error.status):0;
+      if(status===400||status===401) return '가입 정보를 확인하세요.';
+      if(status===403) return '초대 코드가 유효하지 않습니다.';
+      if(status===409) return '이미 사용 중인 아이디입니다.';
+      if(status===410) return '이 서버는 초대 가입을 받지 않습니다.';
+      if(status===429) return '요청이 너무 많습니다. 잠시 뒤 다시 시도하세요.';
+      if(error&&error.kind) return describe(error,'register');
+      return '가입하지 못했습니다. 초대 코드를 확인하세요.';
+    }
+    function setRegisterStatus(text,isError){
+      nodes.registerStatus.textContent=text;
+      nodes.registerStatus.className=isError?'form-feedback error':'form-feedback';
+    }
+    function clearRegisterFields(){
+      for(const node of [nodes.registerUsername,nodes.registerPassword,
+        nodes.registerDisplayName,nodes.registerInvite]){
+        if(node) node.value='';
+      }
+    }
+    async function register(){
+      if(state.busy||state.gate==='disabled'||!state.apiBase) return;
+      const input=registerInputs();
+      const problem=registerValidation(input);
+      if(problem){setRegisterStatus(problem,true);return;}
+      state.busy='register';state.error='';
+      nodes.register.disabled=true;
+      setRegisterStatus('계정을 만드는 중…',false);
+      try{
+        const data=await jsonCall('/v1/auth/register',{
+          method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify(registerBody(input)),timeout:TIMEOUTS.auth
+        });
+        adoptSession(data);
+        state.status='가입하고 로그인했습니다.';
+        clearRegisterFields();
+        setRegisterStatus('',false);
+        await afterSignIn();
+      }catch(error){
+        setRegisterStatus(registerFailureText(error),true);
+      }finally{
+        state.busy='';nodes.register.disabled=false;render();
+      }
+    }
     async function login(){
       if(state.busy||state.gate==='disabled'||!state.apiBase) return;
       const username=String(nodes.username.value||'').trim();
@@ -550,24 +646,10 @@
           method:'POST',headers:{'Content-Type':'application/json'},
           body:JSON.stringify({username,password}),timeout:TIMEOUTS.auth
         });
-        const token=typeof data.token==='string'?data.token:'';
-        if(!TOKEN_RE.test(token)) throw Object.assign(Error('bad token'),{kind:'protocol'});
-        const author=data.author&&typeof data.author==='object'?{
-          id:typeof data.author.id==='string'?data.author.id.slice(0,64):'',
-          username:safeName(data.author.username),
-          displayName:safeName(data.author.displayName)
-        }:null;
-        const session={source:'password',token,apiBase:state.apiBase,author,
-          expiresAt:typeof data.expiresAt==='string'?data.expiresAt:''};
-        state.session=session;
-        state.restored=false;
-        writeStore(SESSION_KEY,{apiBase:session.apiBase,token:session.token,author:session.author,expiresAt:session.expiresAt});
+        adoptSession(data);
         state.status='로그인했습니다.';
         nodes.username.value='';
-        nodes.password.value='';
-        state.error='';
-        await probe();
-        await restore();
+        await afterSignIn();
       }catch(error){
         fail(describe(error,'login'));
       }finally{
@@ -1380,6 +1462,19 @@
         el('div',{className:'button-row'},
           el('button',{id:'hosted-ai-login',type:'button',className:'button primary',textContent:'로그인'})));
       loginForm.addEventListener('submit',event=>{if(event&&event.preventDefault)event.preventDefault();login();});
+      const registerPanel=el('details',{id:'hosted-ai-register-panel',className:'red-help hosted-ai-register',hidden:true},
+        el('summary',{textContent:'초대 코드로 계정 만들기'}),
+        el('label',{for:'hosted-ai-register-username'},'아이디',
+          el('input',{id:'hosted-ai-register-username',type:'text',autocomplete:'username',maxlength:'32',spellcheck:'false'})),
+        el('label',{for:'hosted-ai-register-password'},'비밀번호 (12자 이상)',
+          el('input',{id:'hosted-ai-register-password',type:'password',autocomplete:'new-password',maxlength:'128'})),
+        el('label',{for:'hosted-ai-register-display-name'},'표시 이름 (선택)',
+          el('input',{id:'hosted-ai-register-display-name',type:'text',autocomplete:'nickname',maxlength:'60'})),
+        el('label',{for:'hosted-ai-register-invite'},'초대 코드',
+          el('input',{id:'hosted-ai-register-invite',type:'password',autocomplete:'off',spellcheck:'false',maxlength:'128'})),
+        el('div',{className:'button-row'},
+          el('button',{id:'hosted-ai-register',type:'button',className:'button primary',textContent:'계정 만들기'})),
+        el('p',{id:'hosted-ai-register-status',className:'form-feedback',role:'status','aria-live':'polite'}));
 
       const sessionRow=el('div',{id:'hosted-ai-session',className:'hosted-ai-session',hidden:true},
         el('p',{id:'hosted-ai-session-text'}),
@@ -1405,11 +1500,12 @@
           el('label',{for:'hosted-ai-role'},'역할',
             el('select',{id:'hosted-ai-role'},
               el('option',{value:'red',textContent:'RED · 결함 주입'}),
-              el('option',{value:'blue',textContent:'BLUE · 결함 검증'}))),
-          el('label',{for:'hosted-ai-model'},'모델',el('select',{id:'hosted-ai-model'})),
-          el('label',{for:'hosted-ai-effort'},'추론 강도',el('select',{id:'hosted-ai-effort'}))),
+              el('option',{value:'blue',textContent:'BLUE · 결함 검증'})))),
         el('details',{className:'red-help hosted-ai-advanced',id:'hosted-ai-advanced'},
           el('summary',{textContent:'고급 설정 · 구조화 근거'}),
+          el('div',{className:'hosted-ai-grid'},
+            el('label',{for:'hosted-ai-model'},'모델',el('select',{id:'hosted-ai-model'})),
+            el('label',{for:'hosted-ai-effort'},'추론 강도',el('select',{id:'hosted-ai-effort'}))),
           el('label',{className:'check-row',for:'hosted-ai-use-evidence'},
             el('input',{id:'hosted-ai-use-evidence',type:'checkbox',checked:true}),
             el('span',{},'표·그림 구조화 근거 사용',
@@ -1456,13 +1552,18 @@
             el('button',{id:'hosted-ai-blue-handoff',type:'button',className:'button primary',textContent:'이 수정본으로 BLUE 검토'}))),
         el('p',{id:'hosted-ai-edited-status',className:'form-feedback',role:'status','aria-live':'polite'}));
 
-      host.append(loginForm,sessionRow,externalBox,disabledBox,configBox);
+      host.append(loginForm,registerPanel,sessionRow,externalBox,disabledBox,configBox);
 
       Object.assign(nodes,{
         status:find('hosted-ai-status'),error:find('hosted-ai-error'),
         loginForm,sessionRow,externalBox,disabledBox,
         sessionText:find('hosted-ai-session-text'),logout:find('hosted-ai-logout'),
         username:find('hosted-ai-username'),password:find('hosted-ai-password'),login:find('hosted-ai-login'),
+        registerPanel,registerUsername:find('hosted-ai-register-username'),
+        registerPassword:find('hosted-ai-register-password'),
+        registerDisplayName:find('hosted-ai-register-display-name'),
+        registerInvite:find('hosted-ai-register-invite'),
+        register:find('hosted-ai-register'),registerStatus:find('hosted-ai-register-status'),
         recheck:find('hosted-ai-recheck'),
         disabledMessage:find('hosted-ai-disabled-message'),
         config:configBox,
@@ -1495,6 +1596,7 @@
       nodes.useEvidence.addEventListener('change',()=>{state.useEvidence=nodes.useEvidence.checked===true;render();});
       nodes.prompt.addEventListener('input',()=>{render();});
       nodes.login.addEventListener('click',()=>{login();});
+      nodes.register.addEventListener('click',()=>{register();});
       nodes.logout.addEventListener('click',()=>{logout();});
       nodes.recheck.addEventListener('click',()=>{recheck();});
       nodes.run.addEventListener('click',()=>{run();});
@@ -1857,6 +1959,7 @@
     }
     function renderGate(ctx){
       setHidden(nodes.loginForm,ctx.locked||ctx.signed||ctx.hook);
+      setHidden(nodes.registerPanel,ctx.locked||ctx.signed||ctx.hook);
       setHidden(nodes.externalBox,ctx.locked||ctx.signed||!ctx.hook);
       renderSessionRow(ctx);
       setHidden(nodes.disabledBox,!ctx.locked);

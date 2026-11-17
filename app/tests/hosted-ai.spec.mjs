@@ -24,6 +24,7 @@ const BYTES=Buffer.from('%PDF-1.7 synthetic hosted-ai fixture bytes\n%%EOF\n');
 const SHA=createHash('sha256').update(BYTES).digest('hex');
 const FILE_NAME='Synthetic paper.pdf';
 const PROMPT='Check the methods section only.';
+const INVITE='fsi_'+'B'.repeat(43);
 const live=[];
 after(()=>{for(const entry of live){try{entry.app.destroy();}catch{}}});
 
@@ -153,6 +154,11 @@ function makeRouter(options={}){
       if(options.login) return options.login(record);
       return {status:200,body:{token:TOKEN,author:{id:'author-1',username:'synthetic',displayName:'Synthetic Reviewer'},expiresAt:FUTURE}};
     }
+    if(path==='/v1/auth/register'){
+      if(options.register) return options.register(record);
+      return {status:201,body:{token:TOKEN,
+        author:{id:'author-2',username:'invited',displayName:'Invited Reviewer'},expiresAt:FUTURE}};
+    }
     if(path==='/v1/logout') return {status:200,body:{revoked:true}};
     if(path==='/v1/ai/uploads'){
       uploadCount++;
@@ -203,6 +209,13 @@ function setPrompt(entry,value){
   const node=entry.$('hosted-ai-prompt');
   node.value=value;
   node.dispatchEvent(new Event('input'));
+}
+function fillRegistration(entry,{username='invited_user',password='correct horse battery',
+  displayName='Invited Reviewer',inviteCode=INVITE}={}){
+  entry.$('hosted-ai-register-username').value=username;
+  entry.$('hosted-ai-register-password').value=password;
+  entry.$('hosted-ai-register-display-name').value=displayName;
+  entry.$('hosted-ai-register-invite').value=inviteCode;
 }
 const runsOf=map=>JSON.parse(map.get(RUNS_KEY)||'{"runs":{},"active":""}');
 
@@ -1255,4 +1268,127 @@ test('the prompt limit falls back to 32000 when capabilities omit it',async()=>{
   await signIn(entry);
   assert.match(entry.text('hosted-ai-prompt-label'),/32000/);
   assert.match(entry.text('hosted-ai-prompt-count'),/0 \/ 32000/);
+});
+test('invite registration adopts the returned session immediately',async()=>{
+  const entry=setup({routes:makeRouter()});
+  await entry.app.ready;
+  assert.equal(entry.$('hosted-ai-register-panel').hidden,false);
+  assert.equal(entry.$('hosted-ai-register-panel').getAttribute('open'),null,
+    'registration stays collapsed under the primary login');
+  fillRegistration(entry);
+  entry.$('hosted-ai-register').click();
+  await until(()=>entry.store.has(SESSION_KEY),'session stored');
+  const call=entry.calls.find(item=>item.path==='/v1/auth/register');
+  assert.equal(call.method,'POST');
+  assert.equal(call.headers['Content-Type'],'application/json');
+  assert.deepEqual(JSON.parse(call.body),{
+    username:'invited_user',password:'correct horse battery',
+    displayName:'Invited Reviewer',inviteCode:INVITE
+  });
+  assert.equal(entry.$('hosted-ai-login-form').hidden,true);
+  assert.equal(entry.$('hosted-ai-register-panel').hidden,true);
+  await until(()=>entry.isVisible('hosted-ai-config'),'config opens after registration');
+  const probes=entry.calls.filter(item=>item.path==='/v1/ai/capabilities');
+  assert.equal(probes.at(-1).headers.Authorization,'Bearer '+TOKEN);
+  assert.match(entry.text('hosted-ai-session'),/Invited Reviewer/);
+  for(const id of ['hosted-ai-register-username','hosted-ai-register-password',
+    'hosted-ai-register-display-name','hosted-ai-register-invite']){
+    assert.equal(entry.$(id).value,'','registration fields are cleared after success');
+  }
+  const stored=entry.storedText(),dom=entry.doc.body.textContent;
+  assert.ok(!stored.includes('correct horse battery'),'password is never persisted');
+  assert.ok(!stored.includes(INVITE),'invite code is never persisted');
+  assert.ok(!dom.includes('correct horse battery'),'password is never rendered as text');
+  assert.ok(!dom.includes(INVITE),'invite code is never rendered as text');
+  await selectFile(entry,BYTES);
+  setPrompt(entry,PROMPT);
+  assert.equal(entry.$('hosted-ai-run').disabled,false,'registration leaves the panel run-ready');
+});
+
+test('an invalid invitation shows a fixed error, preserves drafts and creates no session',async()=>{
+  const entry=setup({routes:makeRouter({
+    register:()=>({status:403,body:{error:{code:'invalid_invitation',
+      message:'SECRET_INVITE_DETAIL',retryable:false}}})
+  })});
+  await entry.app.ready;
+  fillRegistration(entry);
+  entry.$('hosted-ai-register').click();
+  await until(()=>/초대 코드/.test(entry.text('hosted-ai-register-status')),'fixed invitation error');
+  assert.equal(entry.store.has(SESSION_KEY),false);
+  assert.equal(entry.$('hosted-ai-login-form').hidden,false);
+  assert.equal(entry.$('hosted-ai-register-panel').hidden,false);
+  assert.equal(entry.$('hosted-ai-register-password').value,'correct horse battery',
+    'draft password is preserved on failure');
+  assert.equal(entry.$('hosted-ai-register-invite').value,INVITE,
+    'draft invite is preserved on failure');
+  assert.equal(entry.$('hosted-ai-register-username').value,'invited_user');
+  assert.ok(!entry.doc.body.textContent.includes('SECRET_INVITE_DETAIL'));
+  assert.ok(!entry.storedText().includes('correct horse battery'));
+  assert.match(entry.$('hosted-ai-register-status').className,/error/);
+});
+
+test('registration failures use concise fixed messages and never create a session',async()=>{
+  const cases=[
+    [400,/가입 정보/],
+    [401,/가입 정보/],
+    [409,/이미 사용 중/],
+    [410,/초대 가입/],
+    [429,/요청이 너무 많습니다/]
+  ];
+  for(const [status,pattern] of cases){
+    const entry=setup({routes:makeRouter({
+      register:()=>({status,body:{error:{code:'fixed',message:'SERVER_DETAIL',retryable:false}}})
+    })});
+    await entry.app.ready;
+    fillRegistration(entry);
+    entry.$('hosted-ai-register').click();
+    await until(()=>pattern.test(entry.text('hosted-ai-register-status')),'message for '+status);
+    assert.equal(entry.store.has(SESSION_KEY),false,'no session for '+status);
+    assert.equal(entry.$('hosted-ai-login-form').hidden,false,'login stays for '+status);
+    assert.ok(!entry.doc.body.textContent.includes('SERVER_DETAIL'),'server text is not echoed');
+  }
+});
+
+test('registration validates the existing username and 12-character password rules first',async()=>{
+  const entry=setup({routes:makeRouter()});
+  await entry.app.ready;
+  fillRegistration(entry,{username:'ab'});
+  entry.$('hosted-ai-register').click();
+  await until(()=>/3–32/.test(entry.text('hosted-ai-register-status')),'username rule');
+  assert.equal(entry.calls.some(call=>call.path==='/v1/auth/register'),false);
+  fillRegistration(entry,{username:'invited_user',password:'short'});
+  entry.$('hosted-ai-register').click();
+  await until(()=>/12자 이상/.test(entry.text('hosted-ai-register-status')),'password rule');
+  assert.equal(entry.calls.some(call=>call.path==='/v1/auth/register'),false);
+  assert.equal(entry.$('hosted-ai-register-username').value,'invited_user');
+  assert.equal(entry.$('hosted-ai-register-password').value,'short','draft is preserved');
+});
+
+test('model and effort controls live inside the existing advanced section',async()=>{
+  const entry=setup({routes:makeRouter()});
+  await entry.app.ready;
+  await signIn(entry);
+  const advanced=entry.$('hosted-ai-advanced');
+  assert.equal(advanced.tagName,'DETAILS');
+  assert.equal(advanced.getAttribute('open'),null,'advanced settings stay collapsed');
+  const inside=node=>{
+    for(let parent=node;parent;parent=parent.parent) if(parent===advanced) return true;
+    return false;
+  };
+  assert.ok(inside(entry.$('hosted-ai-model')),'model select is inside the advanced section');
+  assert.ok(inside(entry.$('hosted-ai-effort')),'effort select is inside the advanced section');
+  assert.ok(!inside(entry.$('hosted-ai-role')),'role stays primary');
+  assert.ok(!inside(entry.$('hosted-ai-prompt')),'prompt stays primary');
+});
+test('registration omits an empty optional display name',async()=>{
+  const entry=setup({routes:makeRouter()});
+  await entry.app.ready;
+  const order=entry.host.children.map(node=>node.id);
+  assert.ok(order.indexOf('hosted-ai-login-form')<order.indexOf('hosted-ai-register-panel'),
+    'registration sits under the primary login');
+  fillRegistration(entry,{displayName:''});
+  entry.$('hosted-ai-register').click();
+  await until(()=>entry.store.has(SESSION_KEY),'session stored');
+  const body=JSON.parse(entry.calls.find(item=>item.path==='/v1/auth/register').body);
+  assert.deepEqual(Object.keys(body).sort(),['inviteCode','password','username']);
 });

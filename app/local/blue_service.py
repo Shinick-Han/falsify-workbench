@@ -346,19 +346,21 @@ def reread_record(status, targets=(), windows=(), truncated=False):
             'deliveredChars': sum(w['end'] - w['start'] for w in windows), 'truncated': truncated,
             'meaning': REREAD[status]}
 
-def _visual_observation_ok(observation, ids, refs):
+def _visual_observation_error(observation, ids, refs):
     if not isinstance(observation, dict):
-        return False
+        return 'visual_observations_invalid'
     uncertainty = observation.get('uncertainty')
     identifier = observation.get('id')
     text = observation.get('observation')
     if not isinstance(identifier, str) or not identifier.strip() or len(identifier) > 80 or identifier in ids:
-        return False
+        return 'visual_observations_invalid'
     if not isinstance(text, str) or not text.strip() or len(text) > 3000:
-        return False
+        return 'visual_observations_invalid'
     if uncertainty is not None and (not isinstance(uncertainty, str) or len(uncertainty) > 1500):
-        return False
-    return any(all(observation.get(k) == item.get(k) for k in ('sha256', 'page', 'bbox')) for item in refs)
+        return 'visual_observations_invalid'
+    if not any(all(observation.get(k) == item.get(k) for k in ('sha256', 'page', 'bbox')) for item in refs):
+        return 'visual_reference_invalid'
+    return None
 
 
 def _validate_visual_observations(response, refs_or_data):
@@ -368,8 +370,9 @@ def _validate_visual_observations(response, refs_or_data):
         raise ValueError('visual_observations_invalid')
     ids = set()
     for observation in observations:
-        if not _visual_observation_ok(observation, ids, refs):
-            raise ValueError('visual_observations_invalid')
+        error = _visual_observation_error(observation, ids, refs)
+        if error:
+            raise ValueError(error)
         ids.add(observation['id'])
 
 
