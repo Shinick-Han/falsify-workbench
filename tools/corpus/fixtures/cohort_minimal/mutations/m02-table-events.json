@@ -1,0 +1,17 @@
+{
+  "schema": "falsify.source-mutation.v1",
+  "caseId": "cohort-minimal",
+  "mutationSetId": "m02-table-events",
+  "mutations": [
+    {
+      "defectId": "tab-events",
+      "operator": "set_text",
+      "valueId": "ev_exp",
+      "text": "58",
+      "surfaces": ["table:T2"],
+      "family": "D1",
+      "difficulty": "L3",
+      "rationale": "Table T2 exposed dusk-spot count disagrees with the Results sentence."
+    }
+  ]
+}
