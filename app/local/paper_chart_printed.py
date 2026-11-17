@@ -98,7 +98,7 @@ def parse_printed_values(spans, *, default_source='ocr'):
 
 
 def _fitz_module():
-    import fitz
+    import pymupdf as fitz
     return fitz
 
 

@@ -6,7 +6,7 @@
 
 작업·파일은 사용자에 연결하고 SQLite와 파일 저장소로 재시작 뒤 복구한다. 서버가 표·그림 구조화 근거를 만들고 텍스트·표 셀 수정 PDF를 생성한다. 브라우저에서 합성 PDF 업로드→실제 Anthropic RED→선택 적용→PDF 다운로드→같은 SHA-256의 PDF를 BLUE로 전달→실제 BLUE 결과를 확인했다. 런타임 재시작 뒤 결과·사용량 보존도 확인했다. 키는 서버 환경에만 보관한다. 차트 좌표 적용·시각 영역 선택 UI와 범용 제공자 도구 루프는 이번 호스팅 범위에 포함되지 않는다.
 
-최종 집중 Python 105개, 웹 실행 Node 43개 통과. 생산 코드 268개 파일·14,043개 함수의 max CCN 15, 15 초과 0개다. 전체 Python 검사에서 발견한 시각 오류 코드 회귀는 수정하고 영향 범위를 재검증했다. 해당 수정 뒤 전체 스위트를 다시 통과했다고 주장하지 않는다. 평가 도구가 신규 provider·usage 필드를 원본 그대로 수용하도록 계약을 동기화한다. 공개 배포는 alpha.75로 진행 중이다. alpha.74의 출시 태그·ZIP은 변경하지 않는다. 완료 영수증은 소스 밖 `C:/Users/user/AppData/Local/Falsify/orchestration/hosted-api-20261117`에 기록한다. WorkBite는 binding_unavailable로 기록을 쓰지 못했으며 기존 경로를 자동 등록하지 않았다.
+최종 집중 Python 105개, 웹 실행 Node 43개 통과. 생산 코드 268개 파일·14,043개 함수의 max CCN 15, 15 초과 0개다. 전체 Python 검사에서 발견한 시각 오류 코드 회귀는 수정하고 영향 범위를 재검증했다. 해당 수정 뒤 전체 스위트를 다시 통과했다고 주장하지 않는다. 평가 도구가 신규 provider·usage 필드를 원본 그대로 수용하도록 계약을 동기화한다. 정식 pymupdf import로 MCP 표준 출력 경고 오염도 고치고 실제 SDK 초기화·호출 검사 7개를 통과했다. 공개 배포는 alpha.76으로 진행 중이다. alpha.74·75의 출시 태그·ZIP은 변경하지 않는다. 완료 영수증은 소스 밖 `C:/Users/user/AppData/Local/Falsify/orchestration/hosted-api-20261117`에 기록한다. WorkBite는 binding_unavailable로 기록을 쓰지 못했으며 기존 경로를 자동 등록하지 않았다.
 
 ## 현재 운영 기준 — 수정·검증·배포까지 기본 완료
 
