@@ -107,6 +107,35 @@ class SourceCaseTests(unittest.TestCase):
         flat = [cell for row in table["rows"] for cell in row]
         self.assertTrue(any(isinstance(cell, str) and "-12.4" in cell for cell in flat))
 
+    def test_citation_override_replaces_one_key(self):
+        resolved = resolve_case(FIXTURE, [
+            {"valueId": "n_screened", "text": "301", "surfaces": ["tex:abstract"]},
+            {
+                "citeKey": "chen2022",
+                "withKey": "hale2018",
+                "surfaces": ["tex:discussion"],
+                "occurrence": 1,
+            },
+        ])
+        self.assertIn("301", resolved["tex"])
+        self.assertIn(r"\cite{hale2018}", resolved["tex"])
+        self.assertNotIn(r"\cite{chen2022}", resolved["tex"])
+        self.assertIn("chen2022", resolved["tex"])
+        pairs = {(item["valueId"], item["surface"]) for item in resolved["overridesApplied"]}
+        self.assertIn(("n_screened", "tex:abstract"), pairs)
+        self.assertIn(("chen2022", "tex:discussion"), pairs)
+        self.assertNotIn(("chen2022", "tex:bibliography"), pairs)
+
+    def test_citation_override_unknown_and_unbound(self):
+        unknown = {"citeKey": "nope2020", "withKey": "hale2018", "surfaces": ["tex:discussion"]}
+        unbound = {"citeKey": "chen2022", "withKey": "hale2018", "surfaces": ["tex:abstract"]}
+        with self.assertRaises(SourceCaseError) as missing:
+            resolve_case(FIXTURE, [unknown])
+        self.assertEqual(missing.exception.code, "unknown_citation")
+        with self.assertRaises(SourceCaseError) as absent:
+            resolve_case(FIXTURE, [unbound])
+        self.assertEqual(absent.exception.code, "override_unbound")
+
     def test_surface_override_is_local(self):
         resolved = resolve_case(FIXTURE, [{
             "valueId": "n_randomized",

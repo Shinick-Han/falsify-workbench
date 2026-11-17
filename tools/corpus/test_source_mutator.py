@@ -1,5 +1,7 @@
 """Tests for the source mutator, its ledger, and the fixture mutation sets."""
 
+import contextlib
+import io
 import json
 import os
 import re
@@ -21,7 +23,7 @@ for entry in (EVAL, CORPUS):
 import arena_runner
 import source_mutator
 from render import RenderError, find_engine
-from source_case import list_bindings, load_case
+from source_case import list_bindings, load_case, resolve_case
 from source_mutator import (
     MINIMIZE_LIMITATION,
     REMOVE_HEDGE,
@@ -321,6 +323,179 @@ class OperatorTests(unittest.TestCase):
             with self.assertRaises(MutationError) as caught:
                 plan_mutations(FIXTURE, spec)
             self.assertEqual(caught.exception.code, "schema_invalid")
+
+
+def _cite(cite_key, with_key, surfaces, **extra):
+    item = {
+        "defectId": extra.pop("defectId", "d1"),
+        "operator": "swap_citation",
+        "citeKey": cite_key,
+        "withKey": with_key,
+        "surfaces": surfaces,
+        "family": extra.pop("family", "D2"),
+        "difficulty": extra.pop("difficulty", "L3"),
+        "rationale": extra.pop(
+            "rationale",
+            "The sentence cites a source that does not support the claim.",
+        ),
+    }
+    item.update(extra)
+    return item
+
+
+class CitationOperatorTests(unittest.TestCase):
+    def test_each_error_code(self):
+        unknown = _spec([_cite("chen2022", "missing2020", ["tex:discussion"])])
+        unbound = _spec([_cite("chen2022", "hale2018", ["tex:abstract"])])
+        later = _spec([_cite("chen2022", "hale2018", ["tex:discussion"], occurrence=3)])
+        same = _spec([_cite("chen2022", "chen2022", ["tex:discussion"])])
+        conflict = _spec([
+            _cite("chen2022", "hale2018", ["tex:discussion"], defectId="d1"),
+            _cite("chen2022", "brant2021", ["tex:discussion"], defectId="d2"),
+        ])
+        samples = (
+            (unknown, "unknown_value"),
+            (unbound, "surface_unbound"),
+            (later, "surface_unbound"),
+            (same, "no_change"),
+            (conflict, "conflict"),
+        )
+        for spec, code in samples:
+            with self.subTest(code=code):
+                with self.assertRaises(MutationError) as caught:
+                    plan_mutations(FIXTURE, spec)
+                self.assertEqual(caught.exception.code, code)
+
+    def test_schema_rejects_a_non_citation_shape(self):
+        shapes = (
+            _cite("chen2022", "hale2018", "*"),
+            _cite("chen2022", "hale2018", ["tex:discussion", "tex:introduction"]),
+            _cite("chen2022", "hale2018", ["figure:F1"]),
+            _cite("chen2022", "hale2018", ["tex:discussion"], occurrence=0),
+            _cite("chen2022", "hale2018", ["tex:discussion"], family="D1"),
+            _cite("chen2022", "hale2018", ["tex:discussion"], note="extra"),
+        )
+        for spec_item in shapes:
+            with self.subTest(item=spec_item):
+                with self.assertRaises(MutationError) as caught:
+                    plan_mutations(FIXTURE, _spec([spec_item]))
+                self.assertEqual(caught.exception.code, "schema_invalid")
+
+    def test_occurrence_selects_the_later_cite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            case = _copy_case(tmp)
+            path = case / "source" / "paper.tex"
+            text = path.read_text(encoding="utf-8")
+            line = (
+                "Readers should not treat FX-217, Northbridge Clinical Unit, "
+                "or Larkspur Research Ward as real \\cite{chen2022}.\n"
+            )
+            self.assertEqual(text.count(line), 1)
+            path.write_text(text.replace(line, line + line, 1), encoding="utf-8", newline="\n")
+            spec = _spec([_cite("chen2022", "hale2018", ["tex:discussion"], occurrence=2)])
+            plan = plan_mutations(case, spec)
+            resolved = resolve_case(case, plan["overrides"])
+            first, second = _discussion_cites(resolved["tex"])
+            self.assertEqual(first, r"\cite{chen2022}")
+            self.assertEqual(second, r"\cite{hale2018}")
+            self.assertEqual(plan["defects"][0]["changedSurfaces"], ["tex:discussion"])
+
+    def test_renumbering_is_accounted_on_every_visible_unit(self):
+        spec = _spec([_cite("hale2018", "ibrahim2017", ["tex:introduction"])])
+        plan = plan_mutations(FIXTURE, spec)
+        defect = plan["defects"][0]
+        self.assertEqual(defect["changedSurfaces"], ["tex:introduction", "tex:bibliography"])
+        with tempfile.TemporaryDirectory() as tmp:
+            build_twin(FIXTURE, spec, Path(tmp) / "out", compile_pdf=False)
+            contexts = _load(Path(tmp) / "out" / "sealed" / "gold-ledger.json")["defects"][0]["source"]["contexts"]
+        surfaces = [item["surface"] for item in contexts]
+        self.assertIn("tex:introduction", surfaces)
+        self.assertIn("tex:bibliography", surfaces)
+        flow = next(item for item in contexts if "Flow diagrams" in item["after"])
+        self.assertIn("[4, 5, 6]", flow["before"])
+        self.assertIn("[4, 5, 1]", flow["after"])
+        bibliography = [item for item in contexts if item["surface"] == "tex:bibliography"]
+        self.assertGreaterEqual(len(bibliography), 2)
+        self.assertTrue(any(item["before"] != item["after"] for item in bibliography))
+        self.assertNotIn("\\", flow["after"])
+
+    def test_unaccounted_figure_cite_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            case = _copy_case(tmp)
+            path = case / "inputs" / "figures.json"
+            data = _load(path)
+            data["figures"][0]["caption"] += r" \cite{hale2018}"
+            path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8", newline="\n")
+            spec = _spec([_cite("hale2018", "ibrahim2017", ["tex:introduction"])])
+            with self.assertRaises(MutationError) as caught:
+                plan_mutations(case, spec)
+            self.assertEqual(caught.exception.code, "diff_mismatch")
+
+    def test_ledger_shape_blindness_and_determinism(self):
+        spec = _spec([_cite("chen2022", "hale2018", ["tex:discussion"])], set_id="m-cite")
+        first = plan_mutations(FIXTURE, spec)
+        second = plan_mutations(FIXTURE, spec)
+        self.assertEqual(first, second)
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out"
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                code = source_mutator.main([
+                    "build", str(FIXTURE), "--spec", str(_write_spec(tmp, spec)),
+                    "--out", str(out), "--no-compile",
+                ])
+            self.assertEqual(code, 0)
+            printed = stdout.getvalue()
+            printed_keys = set()
+            _walk_keys(json.loads(printed), printed_keys)
+            self.assertTrue(_SECRET_KEYS.isdisjoint(printed_keys))
+            self.assertNotIn(spec["mutations"][0]["rationale"], printed)
+            self.assertNotIn(first["defects"][0]["before"], printed)
+            ledger = _load(out / "sealed" / "gold-ledger.json")
+            defect = ledger["defects"][0]
+            self.assertEqual(defect["kind"], "source-citation")
+            self.assertEqual(defect["family"], "D2")
+            self.assertEqual(defect["source"]["operator"], "swap_citation")
+            self.assertEqual(defect["source"]["valueId"], "chen2022")
+            self.assertEqual(defect["before"], "chen2022")
+            self.assertEqual(defect["after"], "hale2018")
+            self.assertEqual(defect["source"]["changedSurfaces"], ["tex:discussion"])
+            self.assertEqual(defect["source"]["unchangedSurfaces"], ["tex:introduction"])
+            self.assertEqual(len(defect["source"]["contexts"]), 1)
+            context = defect["source"]["contexts"][0]
+            self.assertIn("[5]", context["before"])
+            self.assertIn("[1]", context["after"])
+            self.assertEqual(defect["quote"], context["after"])
+            self.assertNotIn("chen2022", defect["quote"])
+            self.assertNotIn("hale2018", defect["quote"])
+            twin = _load(out / "twin.json")
+            keys = set()
+            _walk_keys(twin, keys)
+            self.assertTrue(_SECRET_KEYS.isdisjoint(keys))
+            self.assertNotIn(defect["rationale"], json.dumps(twin))
+            again = plan_mutations(FIXTURE, spec)
+            self.assertEqual(again, first)
+
+    def test_fixture_cite_sets_keep_one_surface(self):
+        paths = sorted((CORPUS / "fixtures").glob("*/mutations/m*-cite-*.json"))
+        self.assertEqual(len(paths), 3)
+        for path in paths:
+            with self.subTest(spec=path.name):
+                spec = load_spec(path)
+                defect = plan_mutations(path.parents[1], spec)["defects"][0]
+                self.assertEqual(defect["changedSurfaces"], spec["mutations"][0]["surfaces"])
+                self.assertEqual(spec["mutations"][0]["family"], "D2")
+
+
+def _discussion_cites(tex: str) -> list[str]:
+    section = tex.split(r"\section{Discussion}", 1)[1].split(r"\section{", 1)[0]
+    return re.findall(r"\\cite\{[^}]+\}", section)
+
+
+def _write_spec(tmp, spec) -> Path:
+    path = Path(tmp) / "spec.json"
+    path.write_text(json.dumps(spec) + "\n", encoding="utf-8", newline="\n")
+    return path
 
 
 class BuildTests(unittest.TestCase):
