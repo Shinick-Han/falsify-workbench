@@ -16,3 +16,14 @@ JSON goes to stdout. Exit `0` is success, `2` is usage or an invalid case, and `
 Table cells are read with the vendored `extract_metrics.py` (`find_raw_data_section`, `parse_markdown_tables`). Table ids come from `### Table <ID>: <label>` headings. `verify_receipt` accepts CRLF copies because hashes are computed after LF normalization.
 
 The fixture `fixtures/rct_minimal/` is a fictional FX-217 versus placebo trial. It is not a real study.
+
+## Rendering
+
+`render.py` turns a resolved source case into deterministic LaTeX. It replaces `\falsifytable`, `\falsifyfigure`, and `\falsifybibliography`, draws figures with the vendored matplotlib helper, and can compile `paper.pdf` with `pdflatex`.
+
+```
+python tools/corpus/render.py render CASE_DIR --out DIR [--overrides FILE] [--no-compile]
+python tools/corpus/render.py twin CASE_DIR --out DIR --overrides FILE [--no-compile]
+```
+
+JSON goes to stdout. Exit `0` is success, `2` is usage or an invalid case, `3` is a refusal, and `124` is a compile timeout. Paths in JSON stay relative to the output directory. Figure rendering uses `requirements.txt`, which pins `matplotlib==3.11.2` for this corpus tooling only.
