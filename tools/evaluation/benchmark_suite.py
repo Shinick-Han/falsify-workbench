@@ -2,6 +2,7 @@
 
 Sensor mode scores the offline BLUE layer-0 stack. Agent mode scores an
 injected runner or a stdio BLUE agent. Reports use falsify.benchmark-report.v1.
+Corpus v5 keeps every v4 case and appends source-native cases at score time.
 """
 from __future__ import annotations
 
@@ -180,7 +181,7 @@ _RAND_N_RE = re.compile(
     r'|\brandomized\b(?:(?!\.).){0,70}\bN\s*=\s*(\d+)\b',
     re.IGNORECASE,
 )
-CORPUS_VERSION = 'v4'
+CORPUS_VERSION = 'v5'
 
 
 def _repo_root() -> Path:
@@ -900,7 +901,7 @@ def _case_holdout_completers() -> dict:
 
 
 def build_benchmark_corpus() -> list[dict]:
-    """Return the 18 gold cases and 14 benign-trap holdout cases."""
+    """Return the v4 corpus: 18 gold cases and 14 benign-trap holdout cases."""
     return [
         _case_stat(),
         _case_uri(),
@@ -1767,7 +1768,9 @@ def _score_run(case, run) -> dict:
     _ensure_local()
     import arena_runner
 
-    evaluation = arena_runner.evaluate_arena_match(case['goldLedger'], run)
+    evaluation = arena_runner.evaluate_arena_match(
+        case['goldLedger'], run, baseline_signals=case.get('baselineSignals'),
+    )
     return evaluation['runs'][0]
 
 
@@ -2013,18 +2016,85 @@ def compare_benchmark_reports(baseline_report, current_report, *, max_recall_dro
     }
 
 
-def _build_report(mode, cases, summaries, baseline, max_recall_drop, allow_fp) -> dict:
-    gold_pairs, hold_pairs = _split_cases(cases, summaries)
-    report = {
-        'schema': SCHEMA,
-        'corpusVersion': CORPUS_VERSION,
-        'mode': mode,
-        'caseCount': len(cases),
-        'goldSummary': _gold_summary(gold_pairs),
-        'holdoutSummary': _holdout_summary(hold_pairs),
-        'caseResults': [_case_result(case, summary) for case, summary in zip(cases, summaries)],
-        'comparison': None,
-    }
+def _producer_key(case) -> str:
+    if case.get('producer') == 'source-native':
+        return 'source-native'
+    return 'v4'
+
+
+def _corpus_version(value):
+    version = CORPUS_VERSION if value is None else value
+    if version not in ('v4', 'v5'):
+        raise ValueError('corpus_version_invalid')
+    return version
+
+
+def _by_producer(pairs) -> dict:
+    grouped = {'v4': [], 'source-native': []}
+    for case, summary in pairs:
+        grouped[_producer_key(case)].append((case, summary))
+    return {name: _gold_summary(items) for name, items in grouped.items()}
+
+
+def _excluded_status() -> dict:
+    return {'built': [], 'refused': [], 'skipped': [{'reason': 'excluded'}]}
+
+
+def _idle_status() -> dict:
+    return {'built': [], 'refused': [], 'skipped': []}
+
+
+def _status_for_cases(cases) -> dict:
+    built = [case['caseId'] for case in cases if case.get('producer') == 'source-native']
+    return {'built': built, 'refused': [], 'skipped': []}
+
+
+def _known_v4_ids(cases) -> set:
+    return {case['caseId'] for case in cases}
+
+
+def _only_v4_ids(case_ids, known) -> bool:
+    if not case_ids:
+        return False
+    return all(item in known for item in case_ids)
+
+
+def _load_source_cases(fixtures_root):
+    import benchmark_source_cases
+
+    return benchmark_source_cases.load_source_cases(fixtures_root)
+
+
+def _source_extra(version, include, case_ids, base, fixtures_root, source_cases, source_status):
+    if version != 'v5':
+        return [], None
+    enabled = include is not False
+    if source_cases is not None and enabled:
+        return list(source_cases), source_status or _status_for_cases(source_cases)
+    if not enabled:
+        return [], _excluded_status()
+    if _only_v4_ids(case_ids, _known_v4_ids(base)):
+        return [], _idle_status()
+    found, status = _load_source_cases(fixtures_root)
+    return found, status
+
+
+def _select_corpus(cases, case_ids, version, include, fixtures_root, source_cases, source_status):
+    if cases is not None:
+        selected = _select_cases(cases, case_ids)
+        status = None
+        if version == 'v5':
+            status = source_status if source_status is not None else _status_for_cases(selected)
+        return selected, status
+    base = build_benchmark_corpus()
+    extra, status = _source_extra(
+        version, include, case_ids, base, fixtures_root, source_cases, source_status,
+    )
+    return _select_cases([*base, *extra], case_ids), status
+
+
+def _finish_report(report, baseline, max_recall_drop, allow_fp) -> dict:
+    report['comparison'] = None
     if baseline is not None:
         report['comparison'] = compare_benchmark_reports(
             baseline, report,
@@ -2034,13 +2104,36 @@ def _build_report(mode, cases, summaries, baseline, max_recall_drop, allow_fp) -
     return report
 
 
-def run_benchmark_suite(mode='sensor', *, cases=None, case_ids=None, agent_argv=None, runner_fn=None, baseline_report=None, max_recall_drop=0.0, allow_holdout_fp_increase=False) -> dict:
-    """Score the synthetic corpus with the layer-0 sensor or a BLUE agent."""
+def _build_report(mode, cases, summaries, baseline, max_recall_drop, allow_fp, version, source_status) -> dict:
+    gold_pairs, hold_pairs = _split_cases(cases, summaries)
+    gold = _gold_summary(gold_pairs)
+    if version == 'v5':
+        gold['byProducer'] = _by_producer(gold_pairs)
+    report = {
+        'schema': SCHEMA,
+        'corpusVersion': version,
+        'mode': mode,
+        'caseCount': len(cases),
+        'goldSummary': gold,
+        'holdoutSummary': _holdout_summary(hold_pairs),
+        'caseResults': [_case_result(case, summary) for case, summary in zip(cases, summaries)],
+    }
+    if version == 'v5':
+        report['sourceCases'] = source_status if source_status is not None else _idle_status()
+    return _finish_report(report, baseline, max_recall_drop, allow_fp)
+
+
+def run_benchmark_suite(mode='sensor', *, cases=None, case_ids=None, agent_argv=None, runner_fn=None, baseline_report=None, max_recall_drop=0.0, allow_holdout_fp_increase=False, corpus_version=None, include_source_cases=None, fixtures_root=None, source_cases=None, source_case_status=None) -> dict:
+    """Score v4, or v5 (v4 plus source-native cases), with the layer-0 sensor or a BLUE agent."""
     _validate_mode(mode, agent_argv, runner_fn)
-    selected = _select_cases(cases if cases is not None else build_benchmark_corpus(), case_ids)
+    version = _corpus_version(corpus_version)
+    selected, status = _select_corpus(
+        cases, case_ids, version, include_source_cases, fixtures_root, source_cases, source_case_status,
+    )
     summaries = [_evaluate_case(case, mode, agent_argv, runner_fn) for case in selected]
     return _build_report(
         mode, selected, summaries, baseline_report, max_recall_drop, allow_holdout_fp_increase,
+        version, status,
     )
 
 
@@ -2053,6 +2146,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument('--baseline-report', type=Path)
     parser.add_argument('--max-recall-drop', type=float, default=0.0)
     parser.add_argument('--out', type=Path)
+    parser.add_argument('--corpus-version', choices=('v4', 'v5'))
+    parser.add_argument('--no-source-cases', action='store_true')
+    parser.add_argument('--fixtures-root', type=Path)
     return parser
 
 
@@ -2095,12 +2191,16 @@ def main(argv=None) -> int:
     parser = _parser()
     try:
         args = parser.parse_args(argv)
+        include = False if args.no_source_cases else None
         report = run_benchmark_suite(
             args.mode,
             case_ids=list(args.case or []),
             agent_argv=_agent_argv(args),
             baseline_report=_load_baseline(args.baseline_report),
             max_recall_drop=args.max_recall_drop,
+            corpus_version=args.corpus_version,
+            include_source_cases=include,
+            fixtures_root=args.fixtures_root,
         )
     except SystemExit as exc:
         return _exit_code(exc)
