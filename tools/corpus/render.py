@@ -2,7 +2,8 @@
 
 ``assemble_case`` is pure. Figure drawing reuses the vendored matplotlib
 helper. Compilation, when requested, shells out to ``pdflatex`` with a fixed
-argument list and source-date environment.
+argument list and source-date environment. Vendored table and figure checks
+refuse ERROR findings before compilation.
 """
 
 from __future__ import annotations
@@ -31,7 +32,11 @@ _FONTENC_LINE = re.compile(r"^\\usepackage(?:\[[^\]]*\])?\{fontenc\}[^\n]*\n", r
 _DATE_CMD = re.compile(r"\\date\s*\{")
 _BEGIN_DOC = re.compile(r"^\\begin\{document\}", re.M)
 _SANITY = "upstream/skills/section-writing-agent/scripts/latex_sanity.py"
+_TABLE_LINT = "upstream/skills/section-writing-agent/scripts/table_lint.py"
+_FIGURE_LINT = "upstream/skills/plotting-agent/scripts/figure_lint.py"
 _PLOTTER = "upstream/skills/plotting-agent/scripts/render_matplotlib.py"
+_CONCLUSION = re.compile(r"\\section\*?\{\s*Conclusion", re.IGNORECASE)
+_WARNING_FIELDS = ("code", "env", "figure", "line", "message", "severity")
 _AUX = (".aux", ".log", ".out")
 _DRIVE = re.compile(r"[A-Za-z]:[\\/]")
 _CITE_RE = re.compile(r"\\cite\{([^}]+)\}")
@@ -297,6 +302,97 @@ def _require_sane(tex: str) -> None:
         raise RenderError("latex_sanity", findings)
 
 
+def _table_findings(tex: str) -> list[dict]:
+    module = load_vendor_module(_TABLE_LINT)
+    match = _CONCLUSION.search(tex)
+    concl_at = match.start() if match else len(tex)
+    found = []
+    for table in module.find_tables(tex):
+        found.extend(module.lint_table(table, after_conclusion=table["start"] > concl_at))
+    return found
+
+
+def _needs_figure_lint(figures, referenced) -> bool:
+    if figures:
+        return True
+    return bool(referenced)
+
+
+def _caption_map(figures) -> dict:
+    mapped = {}
+    for figure in figures:
+        mapped[str(figure["figureId"])] = str(figure.get("caption") or "")
+    return mapped
+
+
+def _figure_directory(figures_dir) -> Path:
+    directory = Path(figures_dir)
+    if not directory.is_dir():
+        directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def _figure_findings(figures, figures_dir, tex: str) -> list[dict]:
+    module = load_vendor_module(_FIGURE_LINT)
+    referenced = module.referenced_figures(tex)
+    if not _needs_figure_lint(figures, referenced):
+        return []
+    directory = _figure_directory(figures_dir)
+    return module.lint(str(directory), _caption_map(figures), tex)
+
+
+def _is_error(item: dict) -> bool:
+    return item.get("severity") == "ERROR"
+
+
+def _refuse(code: str, findings: list[dict]) -> list[dict]:
+    errors = [item for item in findings if _is_error(item)]
+    if errors:
+        raise RenderError(code, errors)
+    return [item for item in findings if item.get("severity") == "WARN"]
+
+
+def _public_warning(lint: str, item: dict) -> dict:
+    record = {"lint": lint}
+    for field in _WARNING_FIELDS:
+        if field in item:
+            record[field] = item[field]
+    return record
+
+
+def _public_warnings(lint: str, findings: list[dict]) -> list[dict]:
+    return [_public_warning(lint, item) for item in findings]
+
+
+def _warning_sort_key(item: dict):
+    return (
+        str(item.get("lint", "")),
+        str(item.get("code", "")),
+        str(item.get("figure", "")),
+        item.get("line", 0),
+        str(item.get("env", "")),
+        str(item.get("message", "")),
+    )
+
+
+def _sorted_warnings(items: list[dict]) -> list[dict]:
+    return sorted(items, key=_warning_sort_key)
+
+
+def _table_warnings(tex: str) -> list[dict]:
+    kept = _refuse("table_lint", _table_findings(tex))
+    return _sorted_warnings(_public_warnings("table_lint", kept))
+
+
+def _figure_warnings(figures, figures_dir, tex: str) -> list[dict]:
+    kept = _refuse("figure_lint", _figure_findings(figures, figures_dir, tex))
+    return _sorted_warnings(_public_warnings("figure_lint", kept))
+
+
+def _merged_warnings(table_items, figure_items) -> list[dict]:
+    return _sorted_warnings(list(table_items) + list(figure_items))
+
+
 def _figure_jobs(figures) -> list[dict]:
     jobs = []
     for figure in figures:
@@ -310,7 +406,7 @@ def _figure_jobs(figures) -> list[dict]:
 
 
 def assemble_case(resolved) -> dict:
-    """Replace source directives and return TeX plus figure jobs."""
+    """Replace source directives and return TeX, figure jobs, and table warnings."""
     tex = _normalize(str(resolved.get("tex") or ""))
     tables = list(resolved.get("tables") or [])
     figures = list(resolved.get("figures") or [])
@@ -320,7 +416,11 @@ def assemble_case(resolved) -> dict:
     )
     assembled = _insert_preamble(body)
     _require_sane(assembled)
-    return {"tex": assembled, "figures": _figure_jobs(figures)}
+    return {
+        "tex": assembled,
+        "figures": _figure_jobs(figures),
+        "lintWarnings": _table_warnings(assembled),
+    }
 
 
 def _load_plotter():
@@ -620,8 +720,11 @@ def render_case(case_dir, out_dir, *, overrides=None, compile_pdf=True) -> dict:
     dest = _prepare_out(out_dir)
     _write_tex(dest, assembled["tex"])
     figures = render_figures(assembled["figures"], dest / "figures")
+    figure_warnings = _figure_warnings(resolved["figures"], dest / "figures", assembled["tex"])
     compiled = _finish_compile(dest, compile_pdf)
-    return _payload(resolved, dest, figures, compiled)
+    payload = _payload(resolved, dest, figures, compiled)
+    payload["lintWarnings"] = _merged_warnings(assembled["lintWarnings"], figure_warnings)
+    return payload
 
 
 def _diff_count(left: str, right: str) -> int:
