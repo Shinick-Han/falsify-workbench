@@ -1,0 +1,18 @@
+{
+  "schema": "falsify.source-mutation.v1",
+  "caseId": "rct-minimal",
+  "mutationSetId": "m08-cite-sites",
+  "mutations": [
+    {
+      "defectId": "cite-sites",
+      "operator": "swap_citation",
+      "citeKey": "chen2022",
+      "withKey": "hale2018",
+      "surfaces": ["tex:discussion"],
+      "occurrence": 1,
+      "family": "D2",
+      "difficulty": "L3",
+      "rationale": "The discussion sentence says the named sites are not real institutions, but the swapped note is about symptom scales."
+    }
+  ]
+}

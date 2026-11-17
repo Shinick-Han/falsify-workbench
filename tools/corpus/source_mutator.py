@@ -19,6 +19,8 @@ import render
 from render import RenderError, assemble_case
 from source_case import (
     SourceCaseError,
+    _citation_spans,
+    _citing_surfaces,
     _close_abstract,
     _open_tex_state,
     list_bindings,
@@ -73,8 +75,13 @@ _VALUE_TOKEN_RE = re.compile(r"\{\{v:([a-z][a-z0-9_]{0,47})\}\}")
 _FAMILIES = frozenset({"D1", "D2", "D3", "D4", "D5", "D6", "D7", "S1"})
 _LEVELS = frozenset({"L1", "L2", "L3", "L4"})
 _PHRASE_FAMILIES = frozenset({"S1", "D3"})
+_CITE_FAMILY = "D2"
 _COMMON_KEYS = {
     "defectId", "operator", "valueId", "surfaces", "family", "difficulty", "rationale",
+}
+_CITE_KEYS = {
+    "defectId", "operator", "surfaces", "family", "difficulty", "rationale",
+    "citeKey", "withKey", "occurrence",
 }
 _OPERATOR_KEYS = {
     "set_text": {"text"},
@@ -84,7 +91,9 @@ _OPERATOR_KEYS = {
     "swap_values": {"withValueId"},
     "set_phrase": {"text"},
     "apply_template": {"template"},
+    "swap_citation": set(),
 }
+_BIBITEM_RE = re.compile(r"^\\bibitem\{([^}]+)\}\s*(.*)$")
 _SECRET_KEYS = {
     "before", "after", "rationale", "defectId", "operationId", "overridesApplied",
 }
@@ -206,12 +215,52 @@ def _validate_operator_fields(item: dict) -> dict:
     return {}
 
 
+def _require_cite_key(value, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise MutationError("schema_invalid", label)
+    return value
+
+
+def _require_occurrence(item: dict) -> int:
+    occurrence = item.get("occurrence", 1)
+    if type(occurrence) is not int or occurrence < 1:
+        raise MutationError("schema_invalid", "occurrence")
+    return occurrence
+
+
+def _require_cite_surface(value) -> str:
+    if not isinstance(value, list) or len(value) != 1:
+        raise MutationError("schema_invalid", "surfaces")
+    surface = value[0]
+    if not isinstance(surface, str) or not surface.startswith("tex:") or surface == "tex:":
+        raise MutationError("schema_invalid", "surfaces")
+    return surface
+
+
+def _validate_citation(item: dict) -> dict:
+    _reject_extra(item, _CITE_KEYS)
+    _require_id(item.get("defectId"), "defectId")
+    if item.get("family") != _CITE_FAMILY:
+        raise MutationError("schema_invalid", "family")
+    _require_level(item.get("difficulty"))
+    _require_rationale(item.get("rationale"))
+    surface = _require_cite_surface(item.get("surfaces"))
+    cleaned = {key: item[key] for key in _CITE_KEYS if key in item}
+    cleaned["citeKey"] = _require_cite_key(item.get("citeKey"), "citeKey")
+    cleaned["withKey"] = _require_cite_key(item.get("withKey"), "withKey")
+    cleaned["occurrence"] = _require_occurrence(item)
+    cleaned["surfaces"] = [surface]
+    return cleaned
+
+
 def _validate_mutation(item) -> dict:
     if not isinstance(item, dict):
         raise MutationError("schema_invalid", "mutation")
     operator = item.get("operator")
     if operator not in _OPERATOR_KEYS:
         _unknown_operator(operator)
+    if operator == "swap_citation":
+        return _validate_citation(item)
     allowed = _COMMON_KEYS | _OPERATOR_KEYS[operator]
     _reject_extra(item, allowed)
     _require_id(item.get("defectId"), "defectId")
@@ -532,6 +581,186 @@ def _current_map(case_dir) -> dict:
     }
 
 
+def _reference_keys(case_dir) -> set:
+    loaded = load_case(case_dir)
+    files = loaded["manifest"]["files"]
+    raw = json.loads(loaded["texts"][files["references"]])
+    keys = set()
+    for item in raw.get("references") or []:
+        if isinstance(item, dict) and isinstance(item.get("key"), str):
+            keys.add(item["key"])
+    return keys
+
+
+def _require_pool(keys: set, item: dict) -> None:
+    if item["citeKey"] not in keys:
+        raise MutationError("unknown_value", item["citeKey"])
+    if item["withKey"] not in keys:
+        raise MutationError("unknown_value", item["withKey"])
+
+
+def _require_cited(tex: str, item: dict) -> None:
+    surface = item["surfaces"][0]
+    spans = _citation_spans(tex, surface, item["citeKey"])
+    if item["occurrence"] > len(spans):
+        raise MutationError("surface_unbound", surface)
+
+
+def _claim_citation(item: dict, seen: set) -> None:
+    key = (item["surfaces"][0], item["citeKey"], item["occurrence"])
+    if key in seen:
+        raise MutationError("conflict", item["citeKey"])
+    seen.add(key)
+
+
+def _memory_lines(resolved) -> tuple[list[str], list]:
+    body_lines, body_tags = _walk_body(resolved)
+    full_lines = assemble_case(resolved)["tex"].splitlines()
+    return full_lines, _align_tags(body_lines, body_tags, full_lines)
+
+
+def _cite_numbers(tex, references) -> dict:
+    ordered = render._order_references(tex, references)
+    return {str(ref["key"]): index + 1 for index, ref in enumerate(ordered)}
+
+
+def _view(case_dir, overrides) -> dict:
+    resolved = resolve_case(case_dir, overrides or None)
+    lines, tags = _memory_lines(resolved)
+    return {
+        "lines": lines,
+        "tags": tags,
+        "numbers": _cite_numbers(resolved["tex"], resolved["references"]),
+        "applied": list(resolved["overridesApplied"]),
+        "tex": resolved["tex"],
+    }
+
+
+def _expand_cites(line: str, numbers: dict) -> str:
+    def replacer(match):
+        labels = []
+        for key in match.group(1).split(","):
+            cleaned = key.strip()
+            if cleaned not in numbers:
+                raise MutationError("diff_mismatch", "citation")
+            labels.append(str(numbers[cleaned]))
+        return "[" + ", ".join(labels) + "]"
+    return render._CITE_RE.sub(replacer, line)
+
+
+def _visible_bib(line: str, numbers: dict) -> str:
+    match = _BIBITEM_RE.match(line.strip())
+    if match is None or match.group(1) not in numbers:
+        raise MutationError("diff_mismatch", "citation")
+    return f"[{numbers[match.group(1)]}] {_detex(match.group(2))}"
+
+
+def _visible_line(line: str, numbers: dict) -> str:
+    if r"\bibitem" in line:
+        return _visible_bib(line, numbers)
+    return _detex(_expand_cites(line, numbers))
+
+
+def _require_same_shape(left: dict, right: dict) -> None:
+    if len(left["lines"]) != len(right["lines"]) or left["tags"] != right["tags"]:
+        raise MutationError("diff_mismatch", "lines")
+
+
+def _reject_mixed_line(clean, base, full, index: int) -> None:
+    if clean is None:
+        return
+    changed_value = clean["lines"][index] != base["lines"][index]
+    changed_cite = base["lines"][index] != full["lines"][index]
+    if changed_value and changed_cite:
+        raise MutationError("diff_mismatch", "citation")
+
+
+def _visible_changes(case_dir, base, full) -> list[dict]:
+    base_view = _view(case_dir, base)
+    full_view = _view(case_dir, full)
+    clean_view = None if not base else _view(case_dir, None)
+    _require_same_shape(base_view, full_view)
+    contexts = []
+    for index, tag in enumerate(full_view["tags"]):
+        _reject_mixed_line(clean_view, base_view, full_view, index)
+        before = _visible_line(base_view["lines"][index], base_view["numbers"])
+        after = _visible_line(full_view["lines"][index], full_view["numbers"])
+        if before == after:
+            continue
+        if not isinstance(tag, str) or not tag.startswith("tex:"):
+            raise MutationError("diff_mismatch", "citation")
+        contexts.append({"surface": tag, "before": before, "after": after})
+    return contexts
+
+
+def _raw_surfaces(base_view: dict, full_view: dict) -> list[str]:
+    _require_same_shape(base_view, full_view)
+    found = []
+    pairs = zip(base_view["lines"], full_view["lines"], full_view["tags"])
+    for left, right, tag in pairs:
+        if left == right:
+            continue
+        if not isinstance(tag, str) or not tag.startswith("tex:"):
+            raise MutationError("diff_mismatch", "citation")
+        if tag not in found:
+            found.append(tag)
+    return found
+
+
+def _applied_cite_surfaces(applied, cite_key: str, target: str) -> list[str]:
+    found = set()
+    for item in applied:
+        if item.get("valueId") != cite_key or item.get("before") == item.get("after"):
+            continue
+        found.add(item.get("surface"))
+    ordered = [target]
+    if "tex:bibliography" in found:
+        ordered.append("tex:bibliography")
+    if set(ordered) != found:
+        raise MutationError("diff_mismatch", "citation")
+    return ordered
+
+
+def _cite_override(item: dict) -> dict:
+    return {
+        "citeKey": item["citeKey"],
+        "withKey": item["withKey"],
+        "surfaces": list(item["surfaces"]),
+        "occurrence": item["occurrence"],
+    }
+
+
+def _unchanged_cites(tex: str, cite_key: str, changed: list[str]) -> list[str]:
+    return [surface for surface in _citing_surfaces(tex, cite_key) if surface not in changed]
+
+
+def _append_citation(item, case_dir, overrides, defects) -> None:
+    override = _cite_override(item)
+    base = list(overrides)
+    overrides.append(override)
+    contexts = _visible_changes(case_dir, base, overrides)
+    if not contexts:
+        raise MutationError("no_change", item["citeKey"])
+    base_view = _view(case_dir, base)
+    full_view = _view(case_dir, overrides)
+    target = item["surfaces"][0]
+    changed = _applied_cite_surfaces(full_view["applied"], item["citeKey"], target)
+    if set(changed) != set(_raw_surfaces(base_view, full_view)):
+        raise MutationError("diff_mismatch", "citation")
+    defects.append({
+        "defectId": item["defectId"],
+        "overrideIndexes": [len(overrides) - 1],
+        "before": item["citeKey"],
+        "after": item["withKey"],
+        "changedSurfaces": changed,
+        "unchangedSurfaces": _unchanged_cites(base_view["tex"], item["citeKey"], changed),
+    })
+
+
+def _value_overrides(overrides) -> list:
+    return [item for item in overrides if "citeKey" not in item]
+
+
 def plan_mutations(case_dir, spec) -> dict:
     """Return a sealed mutation plan. Does not write."""
     checked = _validate_spec(spec)
@@ -541,9 +770,23 @@ def plan_mutations(case_dir, spec) -> dict:
     overrides = []
     defects = []
     seen = set()
+    cite_seen = set()
+    clean_tex = None
+    keys = None
     for item in checked["mutations"]:
-        changes = _apply_mutation(item, current, seen)
-        _record_defect(item, changes, overrides, defects, current)
+        if item["operator"] != "swap_citation":
+            changes = _apply_mutation(item, current, seen)
+            _record_defect(item, changes, overrides, defects, current)
+            continue
+        if keys is None:
+            keys = _reference_keys(case_dir)
+            clean_tex = resolve_case(case_dir)["tex"]
+        _require_pool(keys, item)
+        if item["citeKey"] == item["withKey"]:
+            raise MutationError("no_change", item["citeKey"])
+        _claim_citation(item, cite_seen)
+        _require_cited(clean_tex, item)
+        _append_citation(item, case_dir, overrides, defects)
     return {
         "schema": PLAN_SCHEMA,
         "caseId": checked["caseId"],
@@ -974,7 +1217,7 @@ def _find_page(pages, needle: str, hint: str):
 
 
 def _search_hint(quote: str, after: str) -> str:
-    if not after or after == quote or len(after) > 48:
+    if not after or after == quote or len(after) > 48 or after not in quote:
         return ""
     return after
 
@@ -1030,15 +1273,27 @@ def _quote_location(contexts, defect_plan, defect_resolved, root, compiled):
     return _figure_quote(contexts, defect_plan, defect_resolved, root, compiled)
 
 
-def _kind(value_id: str) -> str:
+def _kind(value_id: str, operator: str = "") -> str:
+    if operator == "swap_citation":
+        return "source-citation"
     if value_id.startswith("ph_"):
         return "source-phrase"
     return "source-value"
 
 
-def _defect_entry(mutation, defect_plan, overrides, roles, clean_resolved, defect_resolved, lines, tags, root, compiled):
-    contexts = _contexts(
+def _defect_contexts(mutation, defect_plan, overrides, roles, clean_resolved, defect_resolved, lines, tags, cite_contexts):
+    if mutation.get("operator") == "swap_citation":
+        if not cite_contexts:
+            raise MutationError("diff_mismatch", "citation")
+        return list(cite_contexts)
+    return _contexts(
         defect_plan, overrides, roles, clean_resolved, defect_resolved, lines, tags,
+    )
+
+
+def _defect_entry(mutation, defect_plan, overrides, roles, clean_resolved, defect_resolved, lines, tags, root, compiled, cite_contexts=None):
+    contexts = _defect_contexts(
+        mutation, defect_plan, overrides, roles, clean_resolved, defect_resolved, lines, tags, cite_contexts,
     )
     quote, location, page = _quote_location(
         contexts, defect_plan, defect_resolved, root, compiled,
@@ -1046,7 +1301,7 @@ def _defect_entry(mutation, defect_plan, overrides, roles, clean_resolved, defec
     return {
         "defectId": mutation["defectId"],
         "operationId": mutation["defectId"],
-        "kind": _kind(mutation["valueId"]),
+        "kind": _kind(mutation.get("valueId", mutation.get("citeKey", "")), mutation.get("operator", "")),
         "pageIndex": page,
         "bbox": None,
         "itemId": None,
@@ -1061,7 +1316,7 @@ def _defect_entry(mutation, defect_plan, overrides, roles, clean_resolved, defec
         "rationale": mutation["rationale"],
         "stealthStatus": "not_audited",
         "source": {
-            "valueId": mutation["valueId"],
+            "valueId": mutation.get("valueId", mutation.get("citeKey")),
             "operator": mutation["operator"],
             "changedSurfaces": list(defect_plan["changedSurfaces"]),
             "unchangedSurfaces": list(defect_plan["unchangedSurfaces"]),
@@ -1084,10 +1339,15 @@ def _ledger(case_dir, root: Path, spec, plan: dict, compiled: bool) -> dict:
     clean_lines, tags = _tagged(case_dir, root / "clean" / "paper.tex", None)
     defect_lines, _defect_tags = _tagged(case_dir, root / "defect" / "paper.tex", plan["overrides"])
     lines = (clean_lines, defect_lines)
+    cite_contexts = None
+    if any(item.get("operator") == "swap_citation" for item in mutations):
+        cite_contexts = _visible_changes(
+            case_dir, _value_overrides(plan["overrides"]), plan["overrides"],
+        )
     defects = [
         _defect_entry(
             mutation, defect_plan, plan["overrides"], roles,
-            clean_resolved, defect_resolved, lines, tags, root, compiled,
+            clean_resolved, defect_resolved, lines, tags, root, compiled, cite_contexts,
         )
         for mutation, defect_plan in zip(mutations, plan["defects"])
     ]
