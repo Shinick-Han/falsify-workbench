@@ -5,7 +5,9 @@ import contextlib
 import importlib
 import io
 import json
+import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -17,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 LOCAL = ROOT / "app" / "local"
 CASE = ROOT / "tools" / "corpus" / "fixtures" / "rct_minimal"
 SPEC = CASE / "mutations" / "m01-abstract-p.json"
+OTHER_SPEC = ROOT / "tools" / "corpus" / "fixtures" / "dta_minimal" / "mutations" / "m01-abstract-sens.json"
 if str(LOCAL) not in sys.path:
     sys.path.insert(0, str(LOCAL))
 
@@ -52,6 +55,24 @@ def _run(argv: list[str]) -> tuple[int, dict, str]:
     raw = buf.getvalue()
     payload = json.loads(raw) if raw.strip() else {}
     return code, payload, raw
+
+
+def _spawn(argv: list[str]) -> tuple[int, dict, str, str]:
+    env = os.environ.copy()
+    env["PYTHONUTF8"] = "1"
+    proc = subprocess.run(
+        [sys.executable, "app/local/falsify_cli.py", *argv],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        check=False,
+    )
+    raw = proc.stdout
+    payload = json.loads(raw) if raw.strip() else {}
+    return proc.returncode, payload, raw, proc.stderr
 
 
 def _keys(node, found: set[str]) -> None:
@@ -234,6 +255,7 @@ class CorpusCommandTests(unittest.TestCase):
                 ])
         self.assertEqual(tex, 2)
         self.assertEqual(tex_payload["error"], "dependency_missing")
+        self.assertEqual(tex_payload["corpusCode"], "engine_unavailable")
         self.assertEqual(tex_payload["dependency"], "pdflatex")
         self.assertIn("pdflatex", tex_payload["message"])
         _assert_blind(self, tex_payload, tex_raw)
@@ -263,6 +285,8 @@ class CorpusCommandTests(unittest.TestCase):
                 ])
         self.assertEqual(code, 3)
         self.assertEqual(payload["error"], "diff_mismatch")
+        self.assertEqual(payload["corpusCode"], "diff_mismatch")
+        self.assertNotIn("SECRET_VALUE", payload["message"])
         _assert_blind(self, payload, raw)
 
     def test_verify_refusal_prints_report_without_sealed_detail(self):
@@ -374,6 +398,84 @@ class CorpusEndToEndTests(unittest.TestCase):
             for row in report["report"]["defects"]:
                 self.assertEqual(set(row), {"defectId", "layer0Detected"})
             _assert_blind(self, report, report_raw, allow_defect_id=True)
+
+
+class CorpusScriptTests(unittest.TestCase):
+    """Subprocess coverage for `python app/local/falsify_cli.py corpus ...`.
+
+    tools-absent stays on the patched unit test: neither --root nor an
+    existing environment variable selects the tools/corpus directory.
+    """
+
+    def _same(self, args: list[str], error: str, exit_code: int) -> dict:
+        script_code, script_payload, script_raw, script_err = _spawn(args)
+        module_code, module_payload, module_raw = _run(args)
+        self.assertNotIn("Traceback", script_err, script_err)
+        self.assertEqual(script_code, exit_code, script_raw + script_err)
+        self.assertEqual(module_code, exit_code, module_raw)
+        self.assertEqual(script_payload["error"], error)
+        for key in ("error", "message", "recoveryHint", "corpusCode", "reason"):
+            self.assertEqual(script_payload.get(key), module_payload.get(key), key)
+        self.assertNotEqual(script_payload.get("recoveryHint"), "Inspect inputs and flags.")
+        self.assertNotIn("_CliError", script_payload["message"])
+        _assert_blind(self, script_payload, script_raw)
+        _assert_blind(self, module_payload, module_raw)
+        return script_payload
+
+    def test_missing_build_dir(self):
+        payload = self._same(
+            ["corpus", "verify", "--build", str(ROOT / "missing-build-dir"), "--case", str(CASE)],
+            "file_not_found",
+            2,
+        )
+        self.assertIn("--build", payload["message"])
+        self.assertIn("--build", payload["recoveryHint"])
+
+    def test_spec_from_another_case(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = self._same(
+                [
+                    "corpus", "mutate", "--case", str(CASE), "--spec", str(OTHER_SPEC),
+                    "--out", str(Path(tmp) / "out"), "--no-compile",
+                ],
+                "schema_invalid",
+                2,
+            )
+        self.assertEqual(payload["corpusCode"], "schema_invalid")
+        self.assertEqual(payload["reason"], "caseId")
+        self.assertIn("caseId", payload["recoveryHint"])
+
+    def test_nonempty_out_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "build"
+            out.mkdir()
+            (out / "paper.tex").write_text("already built\n", encoding="utf-8")
+            payload = self._same(
+                [
+                    "corpus", "mutate", "--case", str(CASE), "--spec", str(SPEC),
+                    "--out", str(out), "--no-compile",
+                ],
+                "out_dir_not_empty",
+                3,
+            )
+        self.assertEqual(payload["corpusCode"], "out_dir_not_empty")
+        self.assertEqual(payload["reason"], "directory not empty")
+        self.assertIn("--out", payload["recoveryHint"])
+
+    @unittest.skipUnless(_have_module("matplotlib"), "matplotlib")
+    def test_build_no_compile_succeeds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "clean"
+            code, payload, raw, err = _spawn([
+                "corpus", "build", "--case", str(CASE), "--out", str(out), "--no-compile",
+            ])
+            self.assertNotIn("Traceback", err, err)
+            self.assertEqual(code, 0, raw + err)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["command"], "corpus build")
+            self.assertFalse(payload["compiled"])
+            self.assertTrue((out / "paper.tex").is_file())
+            _assert_blind(self, payload, raw)
 
 
 if __name__ == "__main__":

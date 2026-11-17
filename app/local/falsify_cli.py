@@ -57,6 +57,7 @@ for _path in (str(_HERE.parent), str(_EVAL_DIR)):
 
 from agreement_selective import compute_krippendorff_alpha, compute_selective_prediction  # noqa: E402
 from blue_report_validate import BlueReportError, finalize_blue_report, validate_blue_report  # noqa: E402
+from falsify_corpus_cli import CorpusCliError  # noqa: E402
 from paper_blue_sensor import run_blue_sensor  # noqa: E402
 from paper_chart_edit_service import ChartEditService  # noqa: E402
 from paper_evidence import EvidenceStore  # noqa: E402
@@ -2695,7 +2696,7 @@ def main(argv: list[str] | None = None) -> int:
         deadline = (time.monotonic() + timeout_val) if timeout_val is not None and timeout_val > 0 else None
         payload, code = handler(args, deadline)
         return _emit(payload, code)
-    except (_CliError, BlueReportError) as exc:
+    except (_CliError, BlueReportError, CorpusCliError) as exc:
         return _emit(_error_payload(exc.code, str(exc), exc.recovery_hint, getattr(exc, "extra", None)), exc.exit_code)
     except TimeoutError:
         return _emit(_error_payload("timeout", "Operation timed out.", "Retry with a higher --timeout."), 124)

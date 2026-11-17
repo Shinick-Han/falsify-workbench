@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import re
 import sys
 import time
@@ -29,23 +30,133 @@ def _repo() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+_AGENT_SCHEMA = "falsify.agent-cli.v1"
+_BANNED_REASON = frozenset({
+    "before", "after", "rationale", "defectId", "operationId", "overridesApplied",
+})
+_REASON_TOKEN = re.compile(r"^[A-Za-z][A-Za-z0-9_.:*-]{0,47}$")
+_REASON_WORDS = frozenset({
+    "directory not empty", "not a directory", "phrase value", "absolute path",
+    "line map", "table row", "missing pdf", "file path", "case directory",
+    "value id", "value text", "value note", "figure id", "figure spec",
+})
+_CANONICAL = {
+    "schema_invalid": "schema invalid",
+    "unknown_value": "unknown value",
+    "surface_unbound": "surface unbound",
+    "unknown_operator": "unknown operator",
+    "not_numeric": "not numeric",
+    "no_change": "no change",
+    "template_no_match": "template no match",
+    "duplicate_defect": "duplicate defect",
+    "conflict": "conflicting mutations",
+    "diff_mismatch": "diff mismatch",
+    "out_dir_not_empty": "output directory not empty",
+    "unknown_directive": "unknown directive",
+    "latex_sanity": "latex sanity",
+    "figure_spec": "figure spec",
+    "compile_failed": "compile failed",
+    "no_overrides": "no overrides",
+    "absolute_path": "absolute path",
+    "missing_file": "missing file",
+    "unparsable": "unparsable",
+    "not_compiled": "not compiled",
+    "bundle_not_empty": "bundle not empty",
+    "path_escape": "path escape",
+}
+_REASON_HINTS = {
+    ("schema_invalid", "caseId"): "Pass a --spec whose caseId equals the --case directory's caseId.",
+    ("out_dir_not_empty", "directory not empty"): "Empty --out, or pass a new empty directory.",
+    ("out_dir_not_empty", "not a directory"): "Pass a directory to --out, not a file.",
+    ("out_dir_not_empty", "output directory not empty"): "Empty --out, or pass a new empty directory.",
+}
+_CODE_HINTS = {
+    "schema_invalid": "Fix the spec or case so its schema, caseId, and fields match.",
+    "unknown_value": "Set valueId to an id the case defines.",
+    "surface_unbound": "Name a surface that binds the value, or use *.",
+    "unknown_operator": "Use a supported operator such as set_text, shift_number, or set_phrase.",
+    "not_numeric": "Use a numeric operator only on a numeric value.",
+    "no_change": "Change the text, delta, or factor so the rendered value differs.",
+    "template_no_match": "Use a phrase the template can rewrite.",
+    "duplicate_defect": "Give every defect a distinct id.",
+    "conflict": "Remove the second mutation on the same value and surface.",
+    "diff_mismatch": "Rebuild into an empty --out directory so the files match the plan.",
+    "out_dir_not_empty": "Empty --out, or pass a new empty directory.",
+    "unknown_directive": "Remove the unknown directive from the case source.",
+    "latex_sanity": "Fix the case source so the TeX sanity checks pass.",
+    "figure_spec": "Correct the figure spec in the case.",
+    "compile_failed": "Fix the case TeX, or pass --no-compile.",
+    "no_overrides": "Change the spec so the mutation overrides a bound value.",
+    "absolute_path": "Keep case paths inside the case directory.",
+    "missing_file": "Restore the missing file in the build or case directory.",
+    "unparsable": "Replace the unreadable JSON or PDF in the build.",
+    "not_compiled": "Rerun without --no-compile so the twin has a PDF.",
+    "bundle_not_empty": "Pass an empty directory to --bundle-out.",
+    "path_escape": "Keep every case file path inside the case directory.",
+    "invalid_input": "Check the case directory and flags.",
+    "mutation_failed": "Check the mutation spec against the case.",
+    "render_failed": "Check the case and pass an empty --out directory.",
+    "gate_report": "Rerun verify against a twin build directory.",
+}
+
+
+class CorpusCliError(Exception):
+    """Structured corpus failure caught by the running falsify_cli.main.
+
+    Script launch loads falsify_cli as __main__. Importing it again would
+    raise a second module's _CliError, which that main() does not recognise.
+    """
+
+    def __init__(self, code: str, message: str, *, exit_code: int = 2,
+                 recovery_hint: str = "", extra: dict | None = None):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.exit_code = exit_code
+        self.recovery_hint = recovery_hint
+        self.extra = dict(extra or {})
+
+
 def _schema() -> str:
-    return importlib.import_module("falsify_cli").SCHEMA
+    mod = sys.modules.get("falsify_cli") or sys.modules.get("__main__")
+    found = getattr(mod, "SCHEMA", "") if mod is not None else ""
+    if isinstance(found, str) and found.startswith("falsify."):
+        return found
+    return _AGENT_SCHEMA
 
 
 def _error(code: str, message: str, exit_code: int, hint: str, extra: dict | None = None):
-    cli = importlib.import_module("falsify_cli")
-    raise cli._CliError(code, message, exit_code=exit_code, recovery_hint=hint, extra=extra)
+    raise CorpusCliError(code, message, exit_code=exit_code, recovery_hint=hint, extra=extra)
 
 
 def _check(deadline):
-    importlib.import_module("falsify_cli")._check_deadline(deadline)
+    if deadline is not None and time.monotonic() > deadline:
+        _error(
+            "timeout",
+            "Command exceeded configured timeout.",
+            124,
+            "Increase --timeout or narrow the requested page/signal scope.",
+        )
+
+
+def _same_path(first: Path, second: Path) -> bool:
+    left = os.path.normcase(os.path.realpath(str(first)))
+    right = os.path.normcase(os.path.realpath(str(second)))
+    return left == right
 
 
 def _guard(path, protected) -> None:
     if not path:
         return
-    importlib.import_module("falsify_cli")._guard_output_paths([path], protected)
+    target = Path(path)
+    for src in protected:
+        if src and _same_path(target, Path(src)):
+            _error(
+                "cannot_overwrite_input",
+                "Output path cannot match an input path.",
+                2,
+                "Pass an --out or --bundle-out path distinct from --case, --spec, and --build.",
+            )
 
 
 def _tools_root() -> Path:
@@ -79,40 +190,91 @@ def _tools_unavailable():
     )
 
 
-def _missing_dep(name: str):
+def _safe_reason(text: str) -> str:
+    if text in _REASON_WORDS:
+        return text
+    if _REASON_TOKEN.fullmatch(text) and text not in _BANNED_REASON and not _DRIVE.search(text):
+        return text
+    return ""
+
+
+def _public_reason(code: str, exc) -> str:
+    if exc is not None:
+        detail = _safe_reason(str(exc).strip())
+        if detail:
+            return detail
+    return _CANONICAL.get(code, "")
+
+
+def _hint_for(code: str, reason: str, fallback: str) -> str:
+    specific = _REASON_HINTS.get((code, reason))
+    if specific:
+        return specific
+    return _CODE_HINTS.get(code, fallback)
+
+
+def _message(prefix: str, code: str, reason: str) -> str:
+    if reason:
+        return f"{prefix} ({code}: {reason})."
+    return f"{prefix} ({code})."
+
+
+def _caused(code: str, prefix: str, exit_code: int, fallback: str, exc) -> None:
+    reason = _public_reason(code, exc)
+    extra = {"corpusCode": code}
+    if reason:
+        extra["reason"] = reason
+    _error(code, _message(prefix, code, reason), exit_code, _hint_for(code, reason, fallback), extra)
+
+
+def _missing_dep(name: str, corpus_code: str = ""):
+    extra = {"dependency": name}
+    if corpus_code:
+        extra["corpusCode"] = corpus_code
     _error(
         "dependency_missing",
         f"Missing dependency: {name}.",
         2,
         f"Install {name}. For TeX, install pdflatex or pass --no-compile.",
-        extra={"dependency": name},
+        extra=extra,
     )
 
 
-def _timeout():
+def _timeout(exc=None):
+    code = getattr(exc, "code", "") if exc is not None else ""
+    extra = {"corpusCode": code} if code else None
     _error(
         "timeout",
         "Command exceeded configured timeout.",
         124,
         "Increase --timeout or pass --no-compile.",
+        extra=extra,
     )
 
 
-def _input_error(code: str):
-    _error(code or "invalid_input", "Corpus input was rejected.", 2, "Check the case directory and flags.")
+def _input_error(code: str, exc=None):
+    _caused(code or "invalid_input", "Corpus input was rejected", 2, "Check the case directory and flags.", exc)
 
 
-def _mutation_error(code: str):
+def _mutation_error(exc):
+    code = getattr(exc, "code", "") or "mutation_failed"
     exit_code = 3 if code == "diff_mismatch" else 2
-    _error(code or "mutation_failed", "Mutation was rejected.", exit_code, "Check the mutation spec against the case.")
+    _caused(code, "Mutation was rejected", exit_code, "Check the mutation spec against the case.", exc)
 
 
-def _render_error(code: str):
-    _error(code or "render_failed", "Render was refused.", 3, "Check the case and choose an empty --out directory.")
+def _render_error(exc):
+    code = getattr(exc, "code", "") or "render_failed"
+    _caused(code, "Render was refused", 3, "Check the case and choose an empty --out directory.", exc)
 
 
 def _vendor_error():
-    _error("vendor_unverified", "Vendored corpus helper failed its receipt check.", 3, "Restore tools/corpus vendor files.")
+    _error(
+        "vendor_unverified",
+        "Vendored corpus helper failed its receipt check.",
+        3,
+        "Restore tools/corpus vendor files.",
+        extra={"corpusCode": "vendor_unverified"},
+    )
 
 
 def _dep_name(code: str) -> str:
@@ -141,17 +303,17 @@ def _reraise(exc: Exception) -> None:
     name = type(exc).__name__
     code = getattr(exc, "code", "") or ""
     if name == "GateTimeout" or code == "compile_timeout":
-        _timeout()
+        _timeout(exc)
     if code in ("figure_engine_unavailable", "engine_unavailable"):
-        _missing_dep(_dep_name(code))
+        _missing_dep(_dep_name(code), code)
     if name == "SourceCaseError":
-        _input_error(code)
+        _input_error(code, exc)
     if name == "MutationError":
-        _mutation_error(code)
+        _mutation_error(exc)
     if name == "RenderError":
-        _render_error(code)
+        _render_error(exc)
     if name == "GateError":
-        _input_error(code)
+        _input_error(code, exc)
     if name == "ValueError" and str(exc) == "vendor_unverified":
         _vendor_error()
     raise exc
