@@ -519,6 +519,7 @@ def _text_override():
 
 @unittest.skipUnless(find_engine(), "pdflatex unavailable")
 class PdfTests(unittest.TestCase):
+    @unittest.skipUnless(_have_matplotlib(), "matplotlib unavailable")
     def test_fixture_pdf_is_byte_identical_across_directories(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -555,6 +556,7 @@ class PdfTests(unittest.TestCase):
             for word in words:
                 self.assertIn(word, info["text"])
 
+    @unittest.skipUnless(_have_matplotlib(), "matplotlib unavailable")
     def test_twin_pdf_text_metadata_and_fonts(self):
         value_id, before, after = _text_override()
         with tempfile.TemporaryDirectory() as tmp:

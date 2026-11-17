@@ -68,6 +68,14 @@ def _have_pymupdf() -> bool:
     return pymupdf is not None
 
 
+def _have_matplotlib() -> bool:
+    try:
+        import matplotlib
+    except ImportError:
+        return False
+    return matplotlib is not None
+
+
 class PureHelperTests(unittest.TestCase):
     def test_normalize_joins_hyphenation_and_space(self):
         raw = "partici-\npants   were\nenrolled"
@@ -298,6 +306,7 @@ def _plan(overrides=None):
 
 
 @unittest.skipUnless(find_engine(), "pdflatex")
+@unittest.skipUnless(_have_matplotlib(), "matplotlib unavailable")
 class EndToEndTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

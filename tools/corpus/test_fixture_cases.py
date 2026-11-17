@@ -79,6 +79,14 @@ def _read_json(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
+def _have_matplotlib():
+    try:
+        import matplotlib
+    except ImportError:
+        return False
+    return matplotlib is not None
+
+
 def _values(case):
     return _read_json(case / "inputs" / "values.json")["values"]
 
@@ -216,6 +224,7 @@ class FixtureCaseTests(unittest.TestCase):
         for case in _cases():
             self.assertGreaterEqual(_multi_surface_count(_bound(case)), 5, case.name)
 
+    @unittest.skipUnless(_have_matplotlib(), "matplotlib unavailable")
     def test_render_tex_is_stable(self):
         for case in _cases():
             self.assertEqual(_rendered_tex(case), _rendered_tex(case), case.name)
@@ -249,6 +258,7 @@ class FixtureCaseTests(unittest.TestCase):
                 self._check_exemptions(path)
 
     @unittest.skipUnless(shutil.which("pdflatex"), "pdflatex is not on PATH")
+    @unittest.skipUnless(_have_matplotlib(), "matplotlib unavailable")
     def test_pdf_page_count(self):
         for case in _cases():
             with tempfile.TemporaryDirectory() as tmp:

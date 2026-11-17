@@ -405,6 +405,8 @@ class CitationOperatorTests(unittest.TestCase):
         plan = plan_mutations(FIXTURE, spec)
         defect = plan["defects"][0]
         self.assertEqual(defect["changedSurfaces"], ["tex:introduction", "tex:bibliography"])
+        if not _have_matplotlib():
+            self.skipTest("matplotlib unavailable")
         with tempfile.TemporaryDirectory() as tmp:
             build_twin(FIXTURE, spec, Path(tmp) / "out", compile_pdf=False)
             contexts = _load(Path(tmp) / "out" / "sealed" / "gold-ledger.json")["defects"][0]["source"]["contexts"]
@@ -436,6 +438,8 @@ class CitationOperatorTests(unittest.TestCase):
         first = plan_mutations(FIXTURE, spec)
         second = plan_mutations(FIXTURE, spec)
         self.assertEqual(first, second)
+        if not _have_matplotlib():
+            self.skipTest("matplotlib unavailable")
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "out"
             stdout = io.StringIO()
@@ -498,6 +502,15 @@ def _write_spec(tmp, spec) -> Path:
     return path
 
 
+def _have_matplotlib() -> bool:
+    try:
+        import matplotlib
+    except ImportError:
+        return False
+    return matplotlib is not None
+
+
+@unittest.skipUnless(_have_matplotlib(), "matplotlib unavailable")
 class BuildTests(unittest.TestCase):
     def test_fixture_sets_match_their_surfaces(self):
         expected = {
@@ -768,21 +781,22 @@ class CliTests(unittest.TestCase):
 
     def test_build_mismatch_and_timeout_exit_codes(self):
         spec = MUTATIONS / "m01-abstract-p.json"
-        with tempfile.TemporaryDirectory() as tmp:
-            out = Path(tmp) / "out"
-            code = source_mutator.main([
-                "build", str(FIXTURE), "--spec", str(spec), "--out", str(out), "--no-compile",
-            ])
-            self.assertEqual(code, 0)
-            self.assertTrue((out / "sealed" / "gold-ledger.json").is_file())
-            real = source_mutator.plan_mutations
-            with mock.patch.object(source_mutator, "plan_mutations", side_effect=_extra(real)):
-                mismatch = source_mutator.main([
-                    "build", str(FIXTURE), "--spec", str(spec),
-                    "--out", str(Path(tmp) / "bad"), "--no-compile",
+        if _have_matplotlib():
+            with tempfile.TemporaryDirectory() as tmp:
+                out = Path(tmp) / "out"
+                code = source_mutator.main([
+                    "build", str(FIXTURE), "--spec", str(spec), "--out", str(out), "--no-compile",
                 ])
-            self.assertEqual(mismatch, 3)
-            self.assertFalse((Path(tmp) / "bad" / "sealed").exists())
+                self.assertEqual(code, 0)
+                self.assertTrue((out / "sealed" / "gold-ledger.json").is_file())
+                real = source_mutator.plan_mutations
+                with mock.patch.object(source_mutator, "plan_mutations", side_effect=_extra(real)):
+                    mismatch = source_mutator.main([
+                        "build", str(FIXTURE), "--spec", str(spec),
+                        "--out", str(Path(tmp) / "bad"), "--no-compile",
+                    ])
+                self.assertEqual(mismatch, 3)
+                self.assertFalse((Path(tmp) / "bad" / "sealed").exists())
         with mock.patch.object(
             source_mutator.render, "render_twin", side_effect=RenderError("compile_timeout", "pdflatex"),
         ):
@@ -790,6 +804,8 @@ class CliTests(unittest.TestCase):
                 "build", str(FIXTURE), "--spec", str(spec), "--out", str(Path(tempfile.gettempdir()) / "unused-out"),
             ])
         self.assertEqual(timed, 124)
+        if not _have_matplotlib():
+            self.skipTest("matplotlib unavailable")
 
 
 def _cli(args):
@@ -805,6 +821,7 @@ def _cli(args):
 
 
 @unittest.skipUnless(find_engine(), "pdflatex unavailable")
+@unittest.skipUnless(_have_matplotlib(), "matplotlib unavailable")
 class PdfMutationTests(unittest.TestCase):
     def test_each_fixture_mutation_compiles(self):
         for spec_path in sorted(MUTATIONS.glob("*.json")):
