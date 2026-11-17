@@ -117,6 +117,18 @@ def _raise_timeout(*_args, **_kwargs):
     raise GateTimeout()
 
 
+def _mutation_set_ids(case_dir: Path) -> list[str]:
+    folder = case_dir / "mutations"
+    found = []
+    for path in sorted(folder.glob("*.json")):
+        data = json.loads(path.read_text(encoding="utf-8"))
+        set_id = data.get("mutationSetId")
+        if not isinstance(set_id, str) or not set_id:
+            raise AssertionError(f"missing mutationSetId in {path.name}")
+        found.append(set_id)
+    return sorted(set(found))
+
+
 def _assert_blind(test: unittest.TestCase, payload: dict, raw: str, *, allow_defect_id: bool = False) -> None:
     found: set[str] = set()
     _keys(payload, found)
@@ -138,20 +150,10 @@ class CorpusListTests(unittest.TestCase):
         self.assertEqual(payload["command"], "corpus list")
         self.assertEqual(payload["root"], "tools/corpus/fixtures")
         by_id = {item["caseId"]: item for item in payload["cases"]}
-        self.assertEqual(
-            by_id["rct-minimal"]["mutationSetIds"],
-            [
-                "m01-abstract-p",
-                "m02-table-n",
-                "m03-figure-y",
-                "m04-all-estimate",
-                "m05-strengthen-claim",
-                "m06-minimize-limitation",
-                "m07-remove-hedge",
-            ],
-        )
-        self.assertEqual(len(by_id["dta-minimal"]["mutationSetIds"]), 4)
-        self.assertEqual(len(by_id["meta-minimal"]["mutationSetIds"]), 4)
+        fixtures = CASE.parent
+        self.assertEqual(by_id["rct-minimal"]["mutationSetIds"], _mutation_set_ids(CASE))
+        self.assertEqual(by_id["dta-minimal"]["mutationSetIds"], _mutation_set_ids(fixtures / "dta_minimal"))
+        self.assertEqual(by_id["meta-minimal"]["mutationSetIds"], _mutation_set_ids(fixtures / "meta_minimal"))
         self.assertNotIn("Abstract p value disagrees", raw)
         _assert_blind(self, payload, raw)
 
