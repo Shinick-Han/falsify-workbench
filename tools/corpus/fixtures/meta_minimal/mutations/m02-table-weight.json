@@ -1,0 +1,17 @@
+{
+  "schema": "falsify.source-mutation.v1",
+  "caseId": "meta-minimal",
+  "mutationSetId": "m02-table-weight",
+  "mutations": [
+    {
+      "defectId": "d1",
+      "operator": "set_text",
+      "valueId": "w_s1",
+      "text": "40.0",
+      "surfaces": ["table:T2"],
+      "family": "D1",
+      "difficulty": "L3",
+      "rationale": "Breaks the relation that the Northline weight equals its inverse-variance share of the total weight, so the effect-table weights no longer sum to 100.0."
+    }
+  ]
+}

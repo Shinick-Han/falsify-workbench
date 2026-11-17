@@ -1,0 +1,17 @@
+{
+  "schema": "falsify.source-mutation.v1",
+  "caseId": "meta-minimal",
+  "mutationSetId": "m04-claim-spin",
+  "mutations": [
+    {
+      "defectId": "d1",
+      "operator": "set_phrase",
+      "valueId": "ph_concl_claim",
+      "text": "The Mothwick compress is clearly superior to plain wrap and further reports are unnecessary.",
+      "surfaces": ["tex:discussion"],
+      "family": "S1",
+      "difficulty": "L3",
+      "rationale": "Breaks the relation between the conclusion and the hedge about wide intervals, and between the conclusion and the limitation of one clearance definition and a fixed-effect model."
+    }
+  ]
+}

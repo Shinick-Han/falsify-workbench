@@ -1,0 +1,70 @@
+\documentclass[11pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage[margin=1in]{geometry}
+\usepackage{caption}
+\usepackage{array}
+\begin{document}
+\title{QS-4 strip for nacre spot against a panel reference in one adult cohort}
+\author{Brindle Annex Study Group}
+\maketitle
+\begin{abstract}
+Adults with a suspected nacre spot were seen at Brindle Annex Clinic and Quill Lane Ward.
+Investigators screened {{v:n_screened}} adults, {{v:n_eligible}} adults remained eligible, and {{v:n_analyzed}} adults were analyzed.
+At the prespecified strip score of {{v:cut_main}}, sensitivity was {{v:sens_pct}}\%
+({{v:tp}} of {{v:n_ref_pos}} reference-positive readings, 95\% CI {{v:sens_lo}} to {{v:sens_hi}})
+and specificity was {{v:spec_pct}}\%
+({{v:tn}} of {{v:n_ref_neg}} reference-negative readings, 95\% CI {{v:spec_lo}} to {{v:spec_hi}}).
+Positive predictive value was {{v:ppv_pct}}\% (95\% CI {{v:ppv_lo}} to {{v:ppv_hi}})
+and negative predictive value was {{v:npv_pct}}\% (95\% CI {{v:npv_lo}} to {{v:npv_hi}}).
+The prevalence of a reference-positive spot was {{v:prev_pct}}\% (95\% CI {{v:prev_lo}} to {{v:prev_hi}}).
+\end{abstract}
+\section{Introduction}
+Nacre spot is an oval pale plaque. A color strip is sometimes read at the first visit, before a panel has reviewed the paired swab.
+Descriptions of the plaque, of strip reading, and of panel references supply the terms used here \cite{brindle2016,quill2018,moth2019}.
+A count table, a Wald interval, and the dependence of predictive values on prevalence are the reporting pieces this cohort uses \cite{pavelic2019,halden2017,orrin2020}.
+The mix of spots and the choice of score change those pieces \cite{keel2021,wynn2015}.
+The report below applies the QS-4 strip once, at the prespecified score and at one stricter score, against one panel reference.
+\section{Methods}
+Adults attending Brindle Annex Clinic or Quill Lane Ward were screened when a clinician suspected a nacre spot.
+An adult remained eligible when the plaque could be photographed and a paired swab could be taken.
+The index strip was QS-4, read by eye under the room lamp. The prespecified positive score was {{v:cut_main}}.
+A stricter score of {{v:cut_high}} was tabulated beside it.
+The reference was a two-reader panel of the paired swab. Disagreement was settled by joint review. The readers did not see the strip score.
+Sensitivity divides true positives by reference-positive readings.
+Specificity divides true negatives by reference-negative readings.
+Positive predictive value divides true positives by strip-positive readings, and negative predictive value divides true negatives by strip-negative readings.
+Prevalence divides reference-positive readings by analyzed readings.
+Each percentage and each 95\% Wald interval is rounded half up to one decimal place.
+The Wald interval uses the multiplier 1.96.
+\section{Results}
+Of {{v:n_screened}} adults screened, {{v:n_ex_crit}} missed the plaque criteria and {{v:n_ex_decl}} declined.
+Those two groups sum to {{v:n_excluded}} adults who left before the strip, leaving {{v:n_eligible}} eligible adults.
+Insufficient swabs numbered {{v:n_ex_spec}} and withdrawals numbered {{v:n_ex_wd}}, so {{v:n_ex_analysis}} eligible adults were not analyzed.
+The analyzed count was {{v:n_analyzed}}.
+The panel called {{v:n_ref_pos}} readings positive and {{v:n_ref_neg}} readings negative.
+At score {{v:cut_main}} the strip was positive on {{v:n_idx_pos}} readings and negative on {{v:n_idx_neg}} readings.
+True positives, false positives, false negatives, and true negatives were {{v:tp}}, {{v:fp}}, {{v:fn}}, and {{v:tn}}.
+\falsifytable{T1}
+Sensitivity was {{v:sens_pct}}\% (95\% CI {{v:sens_lo}} to {{v:sens_hi}}) and specificity was {{v:spec_pct}}\% (95\% CI {{v:spec_lo}} to {{v:spec_hi}}).
+Positive predictive value was {{v:ppv_pct}}\% ({{v:tp}} of {{v:n_idx_pos}}, 95\% CI {{v:ppv_lo}} to {{v:ppv_hi}}).
+Negative predictive value was {{v:npv_pct}}\% ({{v:tn}} of {{v:n_idx_neg}}, 95\% CI {{v:npv_lo}} to {{v:npv_hi}}).
+Prevalence was {{v:prev_pct}}\% ({{v:n_ref_pos}} of {{v:n_analyzed}}, 95\% CI {{v:prev_lo}} to {{v:prev_hi}}).
+At score {{v:cut_high}} the four cells were {{v:tp6}}, {{v:fp6}}, {{v:fn6}}, and {{v:tn6}}.
+Sensitivity was {{v:sens6_pct}}\% (95\% CI {{v:sens6_lo}} to {{v:sens6_hi}}) and specificity was {{v:spec6_pct}}\% (95\% CI {{v:spec6_lo}} to {{v:spec6_hi}}).
+\falsifytable{T2}
+\falsifyfigure{F1}
+\section{Discussion}
+{{v:ph_concl_claim}}
+The stricter score exchanged sensitivity for specificity, which is the pattern expected when a higher bar is applied to the same readings \cite{wynn2015,keel2021}.
+{{v:ph_hedge}}
+Predictive values belong to this prevalence and would be recomputed if the mix of spots changed \cite{orrin2020}.
+Limitations.
+{{v:ph_limit}}
+The strip was read at a single visit, and both wards used the same lamp and the same panel rules \cite{moth2019,halden2017}.
+\falsifybibliography
+\end{document}
