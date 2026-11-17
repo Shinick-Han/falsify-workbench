@@ -950,5 +950,386 @@ class DefinitionAndSourceTests(unittest.TestCase):
         return json.loads(stdout)
 
 
+try:
+    import pymupdf
+except ImportError:
+    pymupdf = None
+
+
+def _answer_key_names(value, found):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if str(key).lower() in mod.ANSWER_KEY_FIELDS:
+                found.add(str(key))
+            _answer_key_names(child, found)
+    elif isinstance(value, list):
+        for child in value:
+            _answer_key_names(child, found)
+
+
+def _arena_report():
+    gold = {
+        'schema': 'falsify.red-gold-ledger.v1',
+        'defects': [{
+            'defectId': 'g1',
+            'world': 'W1',
+            'family': 'D1',
+            'difficulty': 'L1',
+            'pageIndex': 0,
+            'after': 'alpha beta gamma',
+        }],
+    }
+    run_one = {
+        'runId': 'run-1',
+        'findings': [
+            {'id': 'hit', 'decision': 'defect', 'pageIndex': 0, 'quote': 'alpha beta gamma'},
+            {'id': 'fp-1', 'decision': 'defect', 'pageIndex': 2, 'quote': 'zebra quilt mosaic'},
+        ],
+    }
+    run_two = {
+        'runId': 'run-2',
+        'findings': [
+            {'id': 'fp-2', 'decision': 'defect', 'pageIndex': 4, 'quote': 'marble sundial echo'},
+        ],
+    }
+    return arena_runner.evaluate_arena_match(gold, [run_one, run_two])
+
+
+def _write_pdf(path: Path, pages: list[str]) -> None:
+    document = pymupdf.open()
+    try:
+        for text in pages:
+            page = document.new_page(width=1200, height=1800)
+            y = 48.0
+            for line in text.split('\n') or ['']:
+                page.insert_text((36, y), line, fontsize=11)
+                y += 16
+        document.save(path)
+    finally:
+        document.close()
+
+
+def _blank_pages(count: int, fills: dict[int, str]) -> list[str]:
+    pages = ['unrelated page text stays put'] * count
+    for index, text in fills.items():
+        pages[index] = text
+    return pages
+
+
+class SourceDiffersTests(unittest.TestCase):
+    def test_whitespace_collapse_and_category_counts(self):
+        finding = _finding('r', 'a', 'quote alpha', claim='alpha is overstated')
+        same = mod.prepare_packet(
+            [finding],
+            context={'a': 'alpha\n\tbeta  gamma'},
+            source_context={'a': 'alpha beta gamma'},
+            seed='same',
+        )
+        item_id = same['items'][0]['itemId']
+        agreed = mod.reconcile(
+            same,
+            _response('A', [(item_id, 'pure_fp')]),
+            _response('B', [(item_id, 'pure_fp')]),
+        )
+        self.assertIs(agreed['items'][0]['sourceDiffers'], False)
+        self.assertEqual(agreed['summary']['categoryCounts'], {
+            'real_source_defect': 0,
+            'spin_boundary': 0,
+            'gold_error': 0,
+            'pure_fp': 1,
+            'needs_review': 0,
+        })
+
+        changed = mod.prepare_packet(
+            [finding],
+            context={'a': 'alpha beta gamma'},
+            source_context={'a': 'alpha beta delta'},
+            seed='changed',
+        )
+        differed = mod.reconcile(
+            changed,
+            _response('A', [(item_id, 'gold_error')]),
+            _response('B', [(item_id, 'gold_error')]),
+        )
+        self.assertIs(differed['items'][0]['sourceDiffers'], True)
+        self.assertEqual(differed['summary']['categoryCounts']['gold_error'], 1)
+        self.assertTrue(differed['items'][0]['agreed'])
+
+        bare = mod.prepare_packet([finding], seed='bare')
+        missing = mod.reconcile(
+            bare,
+            _response('A', [(item_id, 'pure_fp')]),
+            _response('B', [(item_id, 'spin_boundary')]),
+        )
+        self.assertIsNone(missing['items'][0]['sourceDiffers'])
+        self.assertEqual(missing['summary']['categoryCounts']['needs_review'], 1)
+        self.assertEqual(missing['summary']['counts']['pure_fp'], 0)
+
+
+@unittest.skipUnless(pymupdf is not None, 'PyMuPDF is not installed')
+class FromEvaluationTests(unittest.TestCase):
+    def _main(self, args):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = mod.main(args)
+        text = buf.getvalue()
+        self.assertTrue(text.isascii(), text)
+        return code, json.loads(text)
+
+    def test_quote_found_missing_neighbour_and_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            same = 'alpha beta zebra quilt mosaic delta epsilon'
+            changed = 'alpha beta zebra quilt puzzle delta epsilon'
+            blind = root / 'blind.pdf'
+            source = root / 'source.pdf'
+            _write_pdf(blind, _blank_pages(5, {
+                1: 'neighbour holds marble sundial echo beside the margin',
+                2: same,
+                3: 'nothing on the stated page of the off-by-one finding',
+            }))
+            _write_pdf(source, _blank_pages(5, {
+                1: 'neighbour holds marble sundial echo beside the margin',
+                2: same,
+                3: 'neighbour holds marble sundial echo beside the margin',
+            }))
+            findings = [
+                _finding('run', 'found', 'zebra\nquilt\tmosaic', page=2),
+                _finding('run', 'neighbour', 'marble sundial echo', page=0),
+                _finding('run', 'missing', 'absolutely absent phrase', page=2),
+            ]
+            packet = mod.packet_from_evaluation(findings, blind, source_pdf=source, seed='pdf')
+            self.assertEqual(packet, mod.packet_from_evaluation(findings, blind, source_pdf=source, seed='pdf'))
+            by_id = {item['findingId']: item for item in packet['items']}
+            found = _judge(packet, by_id['found']['itemId'])
+            self.assertIn('zebra quilt mosaic', mod._collapse(found['context']))
+            self.assertLessEqual(len(found['context']), 1200)
+            self.assertNotIn('quoteNotFound', found)
+            self.assertEqual(mod._collapse(found['context']), mod._collapse(found['sourceContext']))
+            self.assertEqual(mod._collapse(by_id['found']['sourceContext']), mod._collapse(found['sourceContext']))
+
+            neighbour = _judge(packet, by_id['neighbour']['itemId'])
+            self.assertIn('marble sundial echo', mod._collapse(neighbour['context']))
+            self.assertNotIn('quoteNotFound', neighbour)
+            self.assertEqual(
+                mod._collapse(neighbour['context']),
+                mod._collapse(neighbour['sourceContext']),
+            )
+
+            missing = _judge(packet, by_id['missing']['itemId'])
+            self.assertNotIn('context', missing)
+            self.assertNotIn('sourceContext', missing)
+            self.assertIs(missing['quoteNotFound'], True)
+            self.assertIs(by_id['missing']['quoteNotFound'], True)
+            self.assertNotIn('context', by_id['missing'])
+
+            differed = mod.packet_from_evaluation(
+                [_finding('run', 'found', 'zebra quilt mosaic', page=2)],
+                blind,
+                source_pdf=_source_with_change(root, changed),
+                seed='diff',
+            )
+            judge = _judge(differed)
+            self.assertNotEqual(mod._collapse(judge['context']), mod._collapse(judge['sourceContext']))
+
+    def test_context_cap_on_a_long_page(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            before = '\n'.join(f'before token {index:03d} xxxx' for index in range(40))
+            after = '\n'.join(f'after token {index:03d} yyyy' for index in range(40))
+            page = before + '\nUNIQUE QUOTE TOKEN\n' + after
+            path = root / 'long.pdf'
+            _write_pdf(path, [page])
+            packet = mod.packet_from_evaluation(
+                [_finding('run', 'long', 'UNIQUE QUOTE TOKEN', page=0)],
+                path,
+                seed='cap',
+            )
+            context = _judge(packet)['context']
+            self.assertEqual(len(context), 1200)
+            self.assertIn('UNIQUE QUOTE TOKEN', context)
+            self.assertNotIn('sourceContext', _judge(packet))
+
+    def test_arena_fields_and_guard(self):
+        report = _arena_report()
+        names = set()
+        _answer_key_names(report, names)
+        self.assertEqual(names, {'defectId'})
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            evaluation = root / 'evaluation.json'
+            blind = root / 'blind.pdf'
+            source = root / 'source.pdf'
+            packet_path = root / 'packet.json'
+            other_path = root / 'packet-again.json'
+            _write_pdf(blind, _blank_pages(5, {
+                2: 'alpha beta zebra quilt mosaic delta epsilon',
+                4: 'prior words marble sundial echo later words',
+            }))
+            _write_pdf(source, _blank_pages(5, {
+                2: 'alpha beta zebra quilt mosaic delta epsilon',
+                4: 'prior words marble sundial shifted later words',
+            }))
+            evaluation.write_text(json.dumps(report), encoding='utf-8')
+            blue = root / 'blue.json'
+            blue.write_text(json.dumps({
+                'runId': 'run-1',
+                'findings': [{'id': 'fp-1', 'suspicion': 'the mosaic is not in the table', 'findingType': 'D1'}],
+            }), encoding='utf-8')
+            code, summary = self._main([
+                'from-evaluation', '--evaluation', str(evaluation),
+                '--blind-pdf', str(blind), '--source-pdf', str(source),
+                '--blue-report', str(blue), '--seed', 'arena', '--out', str(packet_path),
+            ])
+            self.assertEqual(code, 0)
+            self.assertEqual(summary['command'], 'from-evaluation')
+            self.assertEqual(summary['items'], 2)
+            self.assertEqual(summary['quoteNotFound'], 0)
+            self.assertEqual(summary['modelCalls'], 0)
+            self.assertTrue(json.dumps(summary).isascii())
+            packet_text = packet_path.read_text(encoding='utf-8')
+            self.assertNotIn(str(root), packet_text)
+            packet = json.loads(packet_text)
+            _assert_no_score_keys(self, packet)
+            self.assertEqual(packet['modelCalls'], 0)
+            by_finding = {item['findingId']: item for item in packet['items']}
+            self.assertEqual(by_finding['fp-1']['claim'], 'the mosaic is not in the table')
+            self.assertEqual(by_finding['fp-1']['defectType'], 'D1')
+            self.assertFalse(mod._source_differs(by_finding['fp-1'], _judge(packet, by_finding['fp-1']['itemId'])))
+            self.assertTrue(mod._source_differs(by_finding['fp-2'], _judge(packet, by_finding['fp-2']['itemId'])))
+            code, again = self._main([
+                'from-evaluation', '--evaluation', str(evaluation),
+                '--blind-pdf', str(blind), '--source-pdf', str(source),
+                '--blue-report', str(blue), '--seed', 'arena', '--out', str(other_path),
+            ])
+            self.assertEqual(code, 0)
+            self.assertEqual(again, summary)
+            self.assertEqual(other_path.read_bytes(), packet_path.read_bytes())
+
+            for key, value in (
+                ('before', 'original sentence'),
+                ('after', 'changed sentence'),
+                ('gold', {'defectId': 'g9'}),
+                ('rationale', 'why the edit is hard'),
+                ('patch', 'x'),
+                ('why_hard', 'because'),
+                ('candidateRationales', ['a']),
+            ):
+                poisoned = json.loads(json.dumps(report))
+                poisoned[key] = value
+                path = root / f'bad-{key}.json'
+                path.write_text(json.dumps(poisoned), encoding='utf-8')
+                code, summary = self._main([
+                    'from-evaluation', '--evaluation', str(path),
+                    '--blind-pdf', str(blind), '--out', str(packet_path),
+                ])
+                self.assertEqual(code, 3, key)
+                self.assertEqual(summary['error'], 'answer_key_field')
+
+    def test_cli_round_trip_reconcile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            evaluation = root / 'evaluation.json'
+            blind = root / 'blind.pdf'
+            source = root / 'source.pdf'
+            packet_path = root / 'packet.json'
+            response_a = root / 'a.json'
+            response_b = root / 'b.json'
+            result_path = root / 'result.json'
+            csv_path = root / 'result.csv'
+            report = _arena_report()
+            evaluation.write_text(json.dumps(report), encoding='utf-8')
+            blue_one = root / 'blue-1.json'
+            blue_two = root / 'blue-2.json'
+            blue_one.write_text(json.dumps({
+                'runId': 'run-1',
+                'findings': [{'id': 'fp-1', 'suspicion': 'mosaic is not in the table', 'findingType': 'D1'}],
+            }), encoding='utf-8')
+            blue_two.write_text(json.dumps({
+                'runId': 'run-2',
+                'findings': [{'id': 'fp-2', 'suspicion': 'sundial moved', 'findingType': 'D3'}],
+            }), encoding='utf-8')
+            _write_pdf(blind, _blank_pages(5, {
+                2: 'alpha beta zebra quilt mosaic delta epsilon',
+                4: 'prior words marble sundial echo later words',
+            }))
+            _write_pdf(source, _blank_pages(5, {
+                2: 'alpha beta zebra quilt mosaic delta epsilon',
+                4: 'prior words marble sundial shifted later words',
+            }))
+            code, summary = self._main([
+                'from-evaluation', '--evaluation', str(evaluation),
+                '--blind-pdf', str(blind), '--source-pdf', str(source),
+                '--blue-report', str(blue_one), '--blue-report', str(blue_two),
+                '--seed', 'round', '--out', str(packet_path),
+            ])
+            self.assertEqual(code, 0)
+            self.assertEqual(summary['ok'], True)
+            packet = json.loads(packet_path.read_text(encoding='utf-8'))
+            ids = [item['itemId'] for item in packet['items']]
+            response_a.write_text(json.dumps(_response('A', [
+                (ids[0], 'gold_error'),
+                (ids[1], 'gold_error'),
+            ])), encoding='utf-8')
+            response_b.write_text(json.dumps(_response('B', [
+                (ids[0], 'gold_error'),
+                (ids[1], 'pure_fp'),
+            ])), encoding='utf-8')
+            code, summary = self._main([
+                'reconcile', '--packet', str(packet_path),
+                '--response-a', str(response_a), '--response-b', str(response_b),
+                '--out', str(result_path), '--csv', str(csv_path),
+            ])
+            self.assertEqual(code, 0)
+            self.assertEqual(summary['modelCalls'], 0)
+            self.assertEqual(summary['scoreChanged'], False)
+            self.assertEqual(summary['categoryCounts']['gold_error'], 1)
+            self.assertEqual(summary['categoryCounts']['needs_review'], 1)
+            result_text = result_path.read_text(encoding='utf-8')
+            self.assertNotIn(str(root), result_text)
+            result = json.loads(result_text)
+            rows = {row['findingId']: row for row in result['items']}
+            self.assertIs(rows['fp-1']['sourceDiffers'], False)
+            self.assertIs(rows['fp-2']['sourceDiffers'], True)
+            self.assertEqual(rows['fp-1']['preliminary'], 'gold_error')
+            self.assertEqual(rows['fp-2']['preliminary'], 'needs_review')
+            self.assertEqual(result['summary']['categoryCounts']['gold_error'], 1)
+            _assert_no_score_keys(self, result)
+            with csv_path.open(encoding='utf-8', newline='') as handle:
+                csv_rows = list(csv.DictReader(handle))
+            self.assertEqual(csv_rows[0]['sourceDiffers'], 'false')
+            self.assertEqual(csv_rows[1]['sourceDiffers'], 'true')
+
+
+def _source_with_change(root: Path, changed: str) -> Path:
+    path = root / 'source-changed.pdf'
+    _write_pdf(path, _blank_pages(5, {2: changed}))
+    return path
+
+
+class MissingPdfLibraryTests(unittest.TestCase):
+    def test_from_evaluation_exits_2_when_pymupdf_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            evaluation = root / 'evaluation.json'
+            packet_path = root / 'packet.json'
+            evaluation.write_text(json.dumps([
+                _finding('run', 'f', 'quoted line', page=0),
+            ]), encoding='utf-8')
+            buf = io.StringIO()
+            with mock.patch.dict(sys.modules, {'pymupdf': None}):
+                with redirect_stdout(buf):
+                    code = mod.main([
+                        'from-evaluation', '--evaluation', str(evaluation),
+                        '--blind-pdf', str(root / 'missing.pdf'), '--out', str(packet_path),
+                    ])
+            summary = json.loads(buf.getvalue())
+            self.assertEqual(code, 2)
+            self.assertEqual(summary['error'], 'dependency_missing')
+            self.assertEqual(summary['command'], 'from-evaluation')
+            self.assertTrue(buf.getvalue().isascii())
+            self.assertFalse(packet_path.exists())
+
+
 if __name__ == '__main__':
     unittest.main()

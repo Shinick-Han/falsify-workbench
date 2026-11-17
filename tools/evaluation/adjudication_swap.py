@@ -4,6 +4,11 @@ The tool builds two judge packets whose item order and category order differ,
 then keeps a preliminary label only when both answers agree. It never calls a
 model and never writes a score. A person still confirms every item.
 
+``from-evaluation`` turns an arena evaluation's unmatched findings into that
+same packet, using the blind PDF for context and, when given, the source PDF
+for the passage in the same place. PyMuPDF is imported only when that command
+runs.
+
 Category ids are the four buckets named for this pass. The review workbench
 exports a different eight-way vocabulary (``supported``, ``pre-existing``,
 ``spin-boundary``, ``gold-error``, ``unsupported``, and three others), so those
@@ -39,9 +44,13 @@ ANSWER_KEY_FIELDS = frozenset({
     'before', 'after', 'gold', 'rationale', 'defectid', 'patch',
     'why_hard', 'candidaterationales',
 })
+# evaluate_arena_match writes defectId on matchedPairs and abstainMatchedPairs.
+# The other answer-key names are not part of that report and stay refused.
+EVALUATION_ANSWER_KEYS = ANSWER_KEY_FIELDS - {'defectid'}
 # A BLUE report's `rationale` is that finding's own explanation, not gold.
 BLUE_REPORT_KEY_FIELDS = ANSWER_KEY_FIELDS - {'rationale'}
 CONTEXT_LIMIT = 1200
+_ANCHOR_WORDS = 6
 CLAIM_LIMIT = 600
 # Joined claim text is the first non-empty of these fields, whitespace-collapsed
 # and capped at 600 characters. On a BLUE report, `rationale` is BLUE's own
@@ -74,7 +83,7 @@ _KEY_DEPTH = 16
 CSV_COLUMNS = (
     'itemId', 'runId', 'findingId', 'pageIndex', 'quote',
     'categoryA', 'categoryB', 'agreed', 'preliminary', 'label',
-    'reasonCode', 'humanReviewRequired', 'finalCategory',
+    'reasonCode', 'sourceDiffers', 'humanReviewRequired', 'finalCategory',
 )
 
 
@@ -259,6 +268,326 @@ def _collapse(value) -> str:
     if not isinstance(value, str):
         return ''
     return ' '.join(value.replace('\u00ad', '').replace('\x00', ' ').split())
+
+
+def _reject_evaluation(value) -> None:
+    if _answer_key_hit(value, EVALUATION_ANSWER_KEYS):
+        raise AdjudicationError('answer_key_field', 3)
+
+
+def _is_gap_char(ch: str) -> bool:
+    return ch == '\x00' or ch.isspace()
+
+
+def _skip_gap(text: str, index: int) -> int:
+    size = len(text)
+    while index < size and (text[index] == '\u00ad' or _is_gap_char(text[index])):
+        index += 1
+    return index
+
+
+def _collapse_origins(text: str) -> tuple[str, list[int]]:
+    """Whitespace-collapsed text, and the original index of each collapsed char."""
+    chars: list[str] = []
+    origins: list[int] = []
+    index = 0
+    size = len(text)
+    while index < size:
+        if text[index] == '\u00ad':
+            index += 1
+            continue
+        if _is_gap_char(text[index]):
+            gap_at = index
+            index = _skip_gap(text, index)
+            if chars:
+                chars.append(' ')
+                origins.append(gap_at)
+            continue
+        chars.append(text[index])
+        origins.append(index)
+        index += 1
+    return ''.join(chars), origins
+
+
+def _fit_window(length: int, start: int, end: int) -> tuple[int, int]:
+    if length <= CONTEXT_LIMIT:
+        return 0, length
+    span = max(0, end - start)
+    if span >= CONTEXT_LIMIT:
+        return start, min(length, start + CONTEXT_LIMIT)
+    extra = CONTEXT_LIMIT - span
+    begin = start - (extra // 2)
+    finish = end + (extra - extra // 2)
+    if begin < 0:
+        finish = min(length, finish - begin)
+        begin = 0
+    if finish > length:
+        begin = max(0, begin - (finish - length))
+        finish = length
+    return begin, finish
+
+
+def _window(text: str, start: int, end: int) -> str:
+    begin, finish = _fit_window(len(text), start, end)
+    return text[begin:finish]
+
+
+def _search_pages(page_index, page_count: int) -> list[int]:
+    if type(page_index) is not int:
+        return []
+    found = []
+    seen = set()
+    for index in (page_index, page_index - 1, page_index + 1):
+        if index < 0 or index >= page_count or index in seen:
+            continue
+        seen.add(index)
+        found.append(index)
+    return found
+
+
+def _span_from_match(text: str, origins: list[int], start: int, needle_len: int) -> tuple[int, int]:
+    last = start + needle_len - 1
+    return origins[start], min(len(text), origins[last] + 1)
+
+
+def _hit_on_page(text: str, needle: str) -> dict | None:
+    collapsed, origins = _collapse_origins(text)
+    found = collapsed.find(needle)
+    if found < 0:
+        return None
+    start, end = _span_from_match(text, origins, found, len(needle))
+    return {
+        'text': text,
+        'collapsed': collapsed,
+        'origins': origins,
+        'match': found,
+        'needle': len(needle),
+        'start': start,
+        'end': end,
+        'context': _window(text, start, end),
+    }
+
+
+def _page_text(document, index: int) -> str:
+    text = document[index].get_text('text', sort=True)
+    if isinstance(text, str):
+        return text
+    return ''
+
+
+def _locate_quote(document, page_index, quote: str):
+    needle = _collapse(quote)
+    if not needle:
+        return None
+    for index in _search_pages(page_index, document.page_count):
+        hit = _hit_on_page(_page_text(document, index), needle)
+        if hit is not None:
+            return index, hit
+    return None
+
+
+def _edge_words(collapsed: str, start: int, needle: int) -> tuple[str, str]:
+    before = collapsed[:start].strip()
+    after = collapsed[start + needle:].strip()
+    prefix = ''
+    suffix = ''
+    if before:
+        prefix = ' '.join(before.split(' ')[-_ANCHOR_WORDS:])
+    if after:
+        suffix = ' '.join(after.split(' ')[:_ANCHOR_WORDS])
+    return prefix, suffix
+
+
+def _skip_one_space(text: str, index: int) -> int:
+    if index < len(text) and text[index] == ' ':
+        return index + 1
+    return index
+
+
+def _trim_gap_end(collapsed: str, suffix_at: int) -> int:
+    if suffix_at > 0 and collapsed[suffix_at - 1] == ' ':
+        return suffix_at - 1
+    return suffix_at
+
+
+def _gap_with_both(collapsed: str, prefix: str, suffix: str):
+    search = 0
+    limit = len(collapsed)
+    while search < limit:
+        at = collapsed.find(prefix, search)
+        if at < 0:
+            return None
+        start = _skip_one_space(collapsed, at + len(prefix))
+        suffix_at = collapsed.find(suffix, start)
+        if suffix_at >= 0:
+            return start, _trim_gap_end(collapsed, suffix_at)
+        search = at + 1
+    return None
+
+
+def _gap_after_prefix(collapsed: str, prefix: str):
+    at = collapsed.find(prefix)
+    if at < 0:
+        return None
+    return _skip_one_space(collapsed, at + len(prefix)), len(collapsed)
+
+
+def _gap_before_suffix(collapsed: str, suffix: str):
+    at = collapsed.find(suffix)
+    if at < 0:
+        return None
+    return 0, _trim_gap_end(collapsed, at)
+
+
+def _gap_between(collapsed: str, prefix: str, suffix: str):
+    if prefix and suffix:
+        return _gap_with_both(collapsed, prefix, suffix)
+    if prefix:
+        return _gap_after_prefix(collapsed, prefix)
+    if suffix:
+        return _gap_before_suffix(collapsed, suffix)
+    if collapsed:
+        return 0, len(collapsed)
+    return None
+
+
+def _collapsed_window(text: str, origins: list[int], gap: tuple[int, int]) -> str:
+    start, end = gap
+    if not origins or start >= len(origins):
+        return _window(text, len(text), len(text))
+    orig_start = origins[start]
+    if end <= start:
+        return _window(text, orig_start, orig_start)
+    last = min(end, len(origins)) - 1
+    orig_end = min(len(text), origins[last] + 1)
+    return _window(text, orig_start, orig_end)
+
+
+def _source_context(page_text: str, prefix: str, suffix: str) -> str | None:
+    collapsed, origins = _collapse_origins(page_text)
+    if not prefix and not suffix:
+        if not collapsed:
+            return None
+        return _window(page_text, 0, len(page_text))
+    gap = _gap_between(collapsed, prefix, suffix)
+    if gap is None:
+        return None
+    return _collapsed_window(page_text, origins, gap)
+
+
+def _source_on_page(document, page_index: int, hit: dict) -> str | None:
+    if page_index < 0 or page_index >= document.page_count:
+        return None
+    prefix, suffix = _edge_words(hit['collapsed'], hit['match'], hit['needle'])
+    return _source_context(_page_text(document, page_index), prefix, suffix)
+
+
+def _row_key(row: dict) -> str:
+    return f"{row['runId']}:{row['findingId']}"
+
+
+def _contexts_for_findings(blind, source, findings: list[dict]):
+    context = {}
+    source_context = {}
+    missing = []
+    for row in findings:
+        located = _locate_quote(blind, row.get('pageIndex'), row['quote'])
+        if located is None:
+            missing.append(_row_key(row))
+            continue
+        page, hit = located
+        context[_row_key(row)] = hit['context']
+        if source is None:
+            continue
+        extracted = _source_on_page(source, page, hit)
+        if extracted is not None:
+            source_context[_row_key(row)] = extracted
+    return context, source_context, missing
+
+
+def _mapping_or_none(mapping: dict) -> dict | None:
+    if mapping:
+        return mapping
+    return None
+
+
+def _missing_item_ids(findings: list[dict], missing_keys: list[str]) -> set[str]:
+    wanted = set(missing_keys)
+    found = set()
+    for row in findings:
+        if _row_key(row) in wanted:
+            found.add(_item_id(row['runId'], row['findingId'], row['quote']))
+    return found
+
+
+def _mark_group(items: list, item_ids: set[str]) -> None:
+    for item in items:
+        if item.get('itemId') in item_ids:
+            item.pop('context', None)
+            item['quoteNotFound'] = True
+
+
+def _mark_unlocated(packet: dict, item_ids: set[str]) -> None:
+    if not item_ids:
+        return
+    groups = [packet['items']]
+    for block in packet['passes']:
+        groups.append(block['items'])
+    for group in groups:
+        _mark_group(group, item_ids)
+
+
+def _load_pymupdf():
+    try:
+        import pymupdf
+    except ImportError as exc:
+        raise AdjudicationError('dependency_missing', 2) from exc
+    return pymupdf
+
+
+def _close_quietly(document) -> None:
+    if document is None:
+        return
+    close = getattr(document, 'close', None)
+    if close is not None:
+        close()
+
+
+def _open_pdf(path: Path):
+    module = _load_pymupdf()
+    try:
+        return module.open(path)
+    except Exception as exc:
+        raise AdjudicationError('input_invalid', 2) from exc
+
+
+def _packet_from_pdfs(findings, blind_path, source_path, blue, seed: str) -> dict:
+    blind = _open_pdf(blind_path)
+    source = None
+    try:
+        if source_path is not None:
+            source = _open_pdf(source_path)
+        context, source_context, missing = _contexts_for_findings(blind, source, findings)
+    finally:
+        _close_quietly(blind)
+        _close_quietly(source)
+    packet = prepare_packet(
+        findings,
+        context=_mapping_or_none(context),
+        source_context=_mapping_or_none(source_context),
+        blue_reports=blue,
+        seed=seed,
+    )
+    _mark_unlocated(packet, _missing_item_ids(findings, missing))
+    return packet
+
+
+def packet_from_evaluation(evaluation, blind_pdf, *, source_pdf=None, blue_reports=None, seed: str = '') -> dict:
+    """Same packet as ``prepare``, with context taken from the PDFs."""
+    _reject_evaluation(evaluation)
+    findings = collect_findings(evaluation)
+    source_path = None if source_pdf is None else Path(source_pdf)
+    return _packet_from_pdfs(findings, Path(blind_pdf), source_path, blue_reports, seed)
 
 
 def _capped_field(raw: dict, keys: tuple[str, ...]) -> str:
@@ -511,6 +840,17 @@ def _pass_block_by_id(packet: dict, pass_id: str) -> dict:
     raise AdjudicationError('packet_invalid', 2)
 
 
+def _pass_items(block: dict) -> dict[str, dict]:
+    items = block.get('items')
+    if not isinstance(items, list):
+        return {}
+    found = {}
+    for item in items:
+        if isinstance(item, dict) and isinstance(item.get('itemId'), str):
+            found[item['itemId']] = item
+    return found
+
+
 def _category_ids_of(block: dict) -> list[str]:
     rows = block.get('categories')
     if not isinstance(rows, list) or not rows:
@@ -610,7 +950,33 @@ def _decision(cat_a, cat_b, claim_missing: bool, has_source: bool) -> dict:
     }
 
 
-def _result_row(item: dict, cat_a, cat_b) -> dict:
+def _string_field(item: dict, key: str) -> str | None:
+    value = item.get(key)
+    if isinstance(value, str):
+        return value
+    return None
+
+
+def _pair_texts(operator: dict, judge) -> tuple[str | None, str | None]:
+    context = _string_field(operator, 'context')
+    source = _string_field(operator, 'sourceContext')
+    if isinstance(judge, dict):
+        if context is None:
+            context = _string_field(judge, 'context')
+        if source is None:
+            source = _string_field(judge, 'sourceContext')
+    return context, source
+
+
+def _source_differs(operator: dict, judge):
+    """True when both passages exist and differ after whitespace collapse."""
+    context, source = _pair_texts(operator, judge)
+    if context is None or source is None:
+        return None
+    return _collapse(context) != _collapse(source)
+
+
+def _result_row(item: dict, judge, cat_a, cat_b) -> dict:
     decision = _decision(cat_a, cat_b, _claim_missing(item), _has_source(item))
     return {
         'itemId': item['itemId'],
@@ -624,6 +990,7 @@ def _result_row(item: dict, cat_a, cat_b) -> dict:
         'preliminary': decision['preliminary'],
         'label': decision['label'],
         'reasonCode': decision['reasonCode'],
+        'sourceDiffers': _source_differs(item, judge),
         'humanReviewRequired': True,
         'finalCategory': None,
     }
@@ -651,6 +1018,16 @@ def _pick_rate(choices: dict[str, str], item_ids: list[str], first: str):
     return _round4(hits / picks)
 
 
+def _preliminary_counts(rows: list[dict]) -> dict[str, int]:
+    counts = {cid: 0 for cid in CATEGORY_IDS}
+    counts[UNRESOLVED] = 0
+    for row in rows:
+        preliminary = row['preliminary']
+        if preliminary in counts:
+            counts[preliminary] += 1
+    return counts
+
+
 def _summary(rows: list[dict], rate_a, rate_b) -> dict:
     counts = {cid: 0 for cid in CATEGORY_IDS}
     needs = 0
@@ -668,6 +1045,7 @@ def _summary(rows: list[dict], rate_a, rate_b) -> dict:
     rate = None if total == 0 else _round4(agreed / total)
     return {
         'counts': counts,
+        'categoryCounts': _preliminary_counts(rows),
         'needsReview': needs,
         'agreementRate': rate,
         'orderSensitiveCount': order_sensitive,
@@ -686,8 +1064,9 @@ def reconcile(packet, response_a, response_b) -> dict:
     choices_a = _read_response(response_a, 'A', known)
     choices_b = _read_response(response_b, 'B', known)
     by_id = {item['itemId']: item for item in packet['items']}
+    judges = _pass_items(_pass_block_by_id(packet, 'A'))
     rows = [
-        _result_row(by_id[item_id], choices_a.get(item_id), choices_b.get(item_id))
+        _result_row(by_id[item_id], judges.get(item_id), choices_a.get(item_id), choices_b.get(item_id))
         for item_id in item_ids
     ]
     rate_a = _pick_rate(choices_a, item_ids, _category_ids_of(_pass_block_by_id(packet, 'A'))[0])
@@ -811,11 +1190,43 @@ def _reconcile_summary(result: dict) -> dict:
         'items': len(result['items']),
         'agreed': _agreed_count(result['items']),
         'needsReview': summary['needsReview'],
+        'categoryCounts': summary['categoryCounts'],
         'agreementRate': summary['agreementRate'],
         'orderSensitiveCount': summary['orderSensitiveCount'],
         'modelCalls': summary['modelCalls'],
         'scoreChanged': summary['scoreChanged'],
     }
+
+
+def _quote_not_found_count(packet: dict) -> int:
+    total = 0
+    for item in packet['items']:
+        if item.get('quoteNotFound') is True:
+            total += 1
+    return total
+
+
+def _from_evaluation_summary(packet: dict) -> dict:
+    return {
+        'ok': True,
+        'command': 'from-evaluation',
+        'schema': PACKET_SCHEMA,
+        'items': len(packet['items']),
+        'quoteNotFound': _quote_not_found_count(packet),
+        'modelCalls': 0,
+    }
+
+
+def _cmd_from_evaluation(args) -> dict:
+    packet = packet_from_evaluation(
+        _load_json(args.evaluation),
+        args.blind_pdf,
+        source_pdf=args.source_pdf,
+        blue_reports=_load_blue_reports(args.blue_report),
+        seed=args.seed,
+    )
+    _write_json(args.out, packet)
+    return packet
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -830,6 +1241,13 @@ def _build_parser() -> argparse.ArgumentParser:
     prepare.add_argument('--blue-report', type=Path, action='append')
     prepare.add_argument('--seed', default='')
     prepare.add_argument('--out', type=Path, required=True)
+    from_eval = sub.add_parser('from-evaluation')
+    from_eval.add_argument('--evaluation', type=Path, required=True)
+    from_eval.add_argument('--blind-pdf', type=Path, required=True)
+    from_eval.add_argument('--source-pdf', type=Path)
+    from_eval.add_argument('--blue-report', type=Path, action='append')
+    from_eval.add_argument('--seed', default='')
+    from_eval.add_argument('--out', type=Path, required=True)
     reconcile_cmd = sub.add_parser('reconcile')
     reconcile_cmd.add_argument('--packet', type=Path, required=True)
     reconcile_cmd.add_argument('--response-a', type=Path, required=True)
@@ -843,6 +1261,9 @@ def _run_command(args) -> int:
     if args.command == 'prepare':
         _emit(_prepare_summary(_cmd_prepare(args)))
         return 0
+    if args.command == 'from-evaluation':
+        _emit(_from_evaluation_summary(_cmd_from_evaluation(args)))
+        return 0
     if args.command == 'reconcile':
         _emit(_reconcile_summary(_cmd_reconcile(args)))
         return 0
@@ -851,7 +1272,7 @@ def _run_command(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI: prepare a swapped packet, or reconcile two judge responses."""
+    """CLI: prepare a swapped packet, fill one from an arena evaluation, or reconcile."""
     try:
         args = _build_parser().parse_args(argv)
     except SystemExit as exc:
