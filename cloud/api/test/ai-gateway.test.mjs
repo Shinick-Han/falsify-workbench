@@ -1501,7 +1501,7 @@ test('long prompts and larger job bodies are accepted within the configured cap'
   });
 });
 
-test('migration 0004 and wrangler keep the policy defaults inert', () => {
+test('migration 0004 and deployed wrangler keep credentials secret and usage policy optional', () => {
   const migration = readFileSync(path.join(apiRoot, 'migrations', '0003_hosted_ai.sql'), 'utf8');
   assert.match(migration, /CREATE TABLE ai_uploads/);
   assert.match(migration, /CREATE TABLE ai_jobs/);
@@ -1516,14 +1516,14 @@ test('migration 0004 and wrangler keep the policy defaults inert', () => {
   assert.equal(usage.includes('api_key'), false);
   assert.equal(/ADD COLUMN .*balance/i.test(usage), false, 'no fabricated balance column is stored');
   const wrangler = readFileSync(path.join(apiRoot, 'wrangler.jsonc'), 'utf8');
-  assert.equal(wrangler.split('"AI_HOSTING_ENABLED": "false"').length, 3);
+  assert.equal(wrangler.split('"AI_HOSTING_ENABLED": "true"').length, 3);
   assert.equal(wrangler.split('"AI_OWNER_TOKEN_BUDGET": "0"').length, 3);
   assert.equal(wrangler.split('"AI_TOKEN_WINDOW_SECONDS": "86400"').length, 3);
-  assert.equal(wrangler.includes('"AI_HOSTING_ENABLED": "true"'), false);
   assert.equal(/"HOSTED_AI_SERVICE_TOKEN"\s*:/.test(wrangler), false, 'the service token is a secret, never a var');
   assert.equal(/"ANTHROPIC_API_KEY"\s*:/.test(wrangler), false);
   assert.equal(wrangler.includes('sk-ant-'), false);
-  assert.match(wrangler, /"AI_RUNTIME_URL": ""/);
+  assert.match(wrangler, /"AI_RUNTIME_URL": "https:\/\/falsify-runtime\.shinick\.dev\/production"/);
+  assert.match(wrangler, /"AI_RUNTIME_URL": "https:\/\/falsify-runtime\.shinick\.dev\/staging"/);
   assert.match(wrangler, /"AI_MAX_UPLOAD_BYTES": "33554432"/);
   assert.equal(wrangler.split('"CONFLUENCE_ONLY": "true"').length, 3);
 });

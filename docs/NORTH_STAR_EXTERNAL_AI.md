@@ -1,5 +1,13 @@
 # Falsify 외부 AI RED BLUE 작업 흐름 North Star
 
+## 2026-11-17 운영자 API 웹 실행
+
+운영자 Anthropic 키로 로그인 후 웹에서 RED/BLUE를 실행한다. CLI·companion 연결은 웹 실행의 필수 조건이 아니다. OpenCode 부모와 네이티브 하위 작업자 3명의 실제 설정은 모두 OpenRouter `deepseek/deepseek-v4.1-flash-1017#high`(설치 카탈로그 Fast)로 확인했다. 구현 기준 `5e7f0bd`, 최종 작업자 커밋 `a14b988`을 조율자가 통합했다. [구현 계약](hosted-api-execution-plan-20261117.md).
+
+작업·파일은 사용자에 연결하고 SQLite와 파일 저장소로 재시작 뒤 복구한다. 서버가 표·그림 구조화 근거를 만들고 텍스트·표 셀 수정 PDF를 생성한다. 브라우저에서 합성 PDF 업로드→실제 Anthropic RED→선택 적용→PDF 다운로드→같은 SHA-256의 PDF를 BLUE로 전달→실제 BLUE 결과를 확인했다. 런타임 재시작 뒤 결과·사용량 보존도 확인했다. 키는 서버 환경에만 보관한다. 차트 좌표 적용·시각 영역 선택 UI와 범용 제공자 도구 루프는 이번 호스팅 범위에 포함되지 않는다.
+
+최종 집중 Python 105개, 웹 실행 Node 43개 통과. 생산 코드 268개 파일·14,043개 함수의 max CCN 15, 15 초과 0개다. 전체 Python 검사에서 발견한 시각 오류 코드 회귀는 수정하고 영향 범위를 재검증했다. 해당 수정 뒤 전체 스위트를 다시 통과했다고 주장하지 않는다. 공개 배포는 alpha.74로 진행 중이다. 완료 영수증은 소스 밖 `C:/Users/user/AppData/Local/Falsify/orchestration/hosted-api-20261117`에 기록한다. WorkBite는 binding_unavailable로 기록을 쓰지 못했으며 기존 경로를 자동 등록하지 않았다.
+
 ## 현재 운영 기준 — 수정·검증·배포까지 기본 완료
 
 2026-11-05 사용자가 배포를 기본 동작으로 지정했다. Falsify Workbench의 코드 수정과 기능 구현은 검증 후 GitHub main·버전 태그·릴리스 ZIP, 공개 웹, 이 PC 설치본을 같은 릴리스로 교체하고 실행 확인까지 마치는 것을 기본 완료 범위로 한다. 통상적인 배포와 필요한 companion 재시작은 별도 확인을 다시 요청하지 않는다. 기존의 “배포는 별도” 기록은 당시 범위이며 이후 작업에는 이 상시 승인을 적용한다.

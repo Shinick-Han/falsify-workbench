@@ -23,12 +23,10 @@
     "CONFLUENCE_PARENT_PAGE_ID": "8355842",
     "ATLASSIAN_CLIENT_ID": "LQL1zmOGHXyk8V4ShnSdPJCc5MzJWYDN",
     "CONFLUENCE_ONLY": "true",
-    // Hosted AI execution is off by default. Enabling it mounts /v1/ai/* and keeps password session
-    // management usable while CONFLUENCE_ONLY stays on. No live runtime is assumed: AI_RUNTIME_URL is
-    // empty until a deployment sets the container-internal origin, and HOSTED_AI_SERVICE_TOKEN is a
-    // secret (set with `wrangler secret put`), never a var. Limits are per owner and per hour.
-    "AI_HOSTING_ENABLED": "false",
-    "AI_RUNTIME_URL": "",
+    // Hosted execution uses the operator runtime and password sessions; Confluence archives remain
+    // separate. HOSTED_AI_SERVICE_TOKEN is a Wrangler secret, never a checked-in var.
+    "AI_HOSTING_ENABLED": "true",
+    "AI_RUNTIME_URL": "https://falsify-runtime.shinick.dev/production",
     "AI_MAX_UPLOAD_BYTES": "33554432",
     "AI_MAX_PROMPT_CHARS": "32000",
     "AI_MAX_CALLS_PER_JOB": "24",
@@ -62,8 +60,8 @@
         "CONFLUENCE_PARENT_PAGE_ID": "8355842",
         "ATLASSIAN_CLIENT_ID": "LQL1zmOGHXyk8V4ShnSdPJCc5MzJWYDN",
         "CONFLUENCE_ONLY": "true",
-        "AI_HOSTING_ENABLED": "false",
-        "AI_RUNTIME_URL": "",
+        "AI_HOSTING_ENABLED": "true",
+        "AI_RUNTIME_URL": "https://falsify-runtime.shinick.dev/staging",
         "AI_MAX_UPLOAD_BYTES": "33554432",
         "AI_MAX_PROMPT_CHARS": "32000",
         "AI_MAX_CALLS_PER_JOB": "24",
