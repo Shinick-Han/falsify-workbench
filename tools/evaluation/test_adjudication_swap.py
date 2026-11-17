@@ -183,11 +183,11 @@ class PacketTests(unittest.TestCase):
 class ReconcileTests(unittest.TestCase):
     def _packet(self):
         findings = [
-            _finding('r', 'a', 'quote alpha'),
-            _finding('r', 'b', 'quote beta'),
-            _finding('r', 'c', 'quote gamma'),
-            _finding('r', 'd', 'quote delta'),
-            _finding('r', 'e', 'quote epsilon'),
+            _finding('r', 'a', 'quote alpha', claim='alpha overstates the rate'),
+            _finding('r', 'b', 'quote beta', claim='beta disagrees with the table'),
+            _finding('r', 'c', 'quote gamma', claim='gamma sits on a spin boundary'),
+            _finding('r', 'd', 'quote delta', claim='delta is internally inconsistent'),
+            _finding('r', 'e', 'quote epsilon', claim='epsilon is not supported'),
         ]
         return mod.prepare_packet(findings, seed='reconcile')
 
@@ -238,7 +238,11 @@ class ReconcileTests(unittest.TestCase):
         _assert_no_score_keys(self, result)
 
     def test_position_bias_rates_ignore_abstain_and_missing(self):
-        findings = [_finding('r', 'a', 'quote a'), _finding('r', 'b', 'quote b'), _finding('r', 'c', 'quote c')]
+        findings = [
+            _finding('r', 'a', 'quote a', claim='a is wrong'),
+            _finding('r', 'b', 'quote b', claim='b is overstated'),
+            _finding('r', 'c', 'quote c', claim='c is unsupported'),
+        ]
         packet = mod.prepare_packet(findings, seed='bias')
         ids = [item['itemId'] for item in packet['items']]
         first_b = _category_ids(packet, 'B')[0]
@@ -378,7 +382,10 @@ class CliTests(unittest.TestCase):
     def test_cli_round_trip_csv_and_cp949_stdout(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            findings = [_finding('run', 'f1', '본문 인용 ⚠'), _finding('run', 'f2', '다른 문장')]
+            findings = [
+                _finding('run', 'f1', '본문 인용 ⚠', claim='경고 수치가 본문과 다르다'),
+                _finding('run', 'f2', '다른 문장', claim='다른 문장이 결과를 과장한다'),
+            ]
             findings_path = root / 'findings.json'
             context_path = root / 'context.json'
             packet_path = root / 'packet.json'
@@ -459,6 +466,284 @@ class CliTests(unittest.TestCase):
         functions = json.loads(proc.stdout)
         violations = [fn['id'] for fn in functions if fn['ccn'] > 15]
         self.assertEqual(violations, [])
+
+
+def _judge(packet, item_id=None):
+    items = packet['passes'][0]['items']
+    if item_id is None:
+        return items[0]
+    for item in items:
+        if item['itemId'] == item_id:
+            return item
+    raise AssertionError(item_id)
+
+
+class ClaimJoinTests(unittest.TestCase):
+    def test_join_by_finding_id_and_run_id_keeps_plain_fields(self):
+        plain = _finding('run-1', 'fp-1', 'quoted line', claim='kept claim', defectType='S1', family='D9')
+        reports = [
+            {'runId': 'other', 'findings': [{'id': 'fp-1', 'runId': 'run-1', 'suspicion': 'override', 'family': 'D3'}]},
+            {'runId': 'run-1', 'findings': [{'id': 'fp-1', 'runId': 'other', 'suspicion': 'blocked', 'family': 'D2'}]},
+            {'runId': 'run-1', 'findings': [{'id': 'fp-1', 'suspicion': 'second', 'findingType': 'D4'}]},
+        ]
+        packet = mod.prepare_packet([plain], blue_reports=reports, seed='join')
+        judge = _judge(packet)
+        self.assertEqual(judge['claim'], 'kept claim')
+        self.assertEqual(judge['defectType'], 'S1')
+        self.assertNotIn('claimMissing', judge)
+        self.assertEqual(packet['claimMissingCount'], 0)
+
+        joined = mod.prepare_packet(
+            [_finding('run-1', 'fp-1', 'quoted line')],
+            blue_reports=[{'runId': 'run-1', 'findings': [{'id': 'fp-1', 'suspicion': 'numbers disagree', 'findingType': 'D1'}]}],
+        )
+        self.assertEqual(_judge(joined)['claim'], 'numbers disagree')
+        self.assertEqual(_judge(joined)['defectType'], 'D1')
+
+        mismatched = mod.prepare_packet(
+            [_finding('run-1', 'fp-1', 'quoted line')],
+            blue_reports=[{'runId': 'run-2', 'findings': [{'id': 'fp-1', 'suspicion': 'nope', 'family': 'D2'}]}],
+        )
+        self.assertTrue(_judge(mismatched)['claimMissing'])
+        self.assertNotIn('defectType', _judge(mismatched))
+        self.assertEqual(mismatched['claimMissingCount'], 1)
+
+        by_note = mod.prepare_packet(
+            [_finding('run-1', 'fp-1', 'quoted line')],
+            blue_reports=[{'findings': [{'findingId': 'fp-1', 'note': 'from note', 'defectFamily': 'S1'}]}],
+        )
+        self.assertEqual(_judge(by_note)['claim'], 'from note')
+        self.assertEqual(_judge(by_note)['defectType'], 'S1')
+
+        override = mod.prepare_packet(
+            [_finding('run-1', 'fp-1', 'quoted line')],
+            blue_reports=[{'runId': 'other', 'findings': [{
+                'id': 'fp-1', 'runId': 'run-1', 'suspicion': 'override', 'family': 'D3',
+            }]}],
+        )
+        self.assertEqual(_judge(override)['claim'], 'override')
+        self.assertEqual(_judge(override)['defectType'], 'D3')
+        blocked = mod.prepare_packet(
+            [_finding('run-1', 'fp-1', 'quoted line')],
+            blue_reports=[{'runId': 'run-1', 'findings': [{
+                'id': 'fp-1', 'runId': 'other', 'suspicion': 'blocked', 'family': 'D2',
+            }]}],
+        )
+        self.assertTrue(_judge(blocked)['claimMissing'])
+        by_report_number = mod.prepare_packet(
+            [_finding('', 'ZD-1', 'quoted line')],
+            blue_reports=[{'findings': [{'reportNumber': 'ZD-1', 'note': 'restored', 'defectFamily': 'D2'}]}],
+        )
+        self.assertEqual(_judge(by_report_number)['claim'], 'restored')
+        self.assertEqual(_judge(by_report_number)['defectType'], 'D2')
+
+        first = mod.prepare_packet(
+            [_finding('r', 'f', 'q')],
+            blue_reports=[
+                {'runId': 'r', 'findings': [{'id': 'f', 'suspicion': 'first', 'family': 'D1'}]},
+                {'runId': 'r', 'findings': [{'id': 'f', 'suspicion': 'second', 'family': 'D2'}]},
+            ],
+        )
+        self.assertEqual(_judge(first)['claim'], 'first')
+        self.assertEqual(_judge(first)['defectType'], 'D1')
+
+        own_family = mod.prepare_packet([
+            _finding('r', 'f', 'q', family='   ', findingType='', defect_type='  D4-1 ', defectFamily='D1'),
+        ])
+        self.assertEqual(_judge(own_family)['defectType'], 'D4-1')
+        self.assertTrue(_judge(own_family)['claimMissing'])
+
+    def test_claim_and_defect_type_collapse_and_cap_at_600(self):
+        spaced = '  alpha \n\t beta  '
+        packet = mod.prepare_packet([_finding('r', 'f', 'q', suspicion=spaced, family='  D1 \n type ')])
+        self.assertEqual(_judge(packet)['claim'], 'alpha beta')
+        self.assertEqual(_judge(packet)['defectType'], 'D1 type')
+
+        long_claim = '가' * 650
+        long_type = 'T' * 650
+        capped = mod.prepare_packet([_finding('r', 'f', 'q', note=long_claim, defect_type=long_type)])
+        self.assertEqual(_judge(capped)['claim'], '가' * 600)
+        self.assertEqual(len(_judge(capped)['claim']), 600)
+        self.assertEqual(_judge(capped)['defectType'], 'T' * 600)
+
+    def test_claim_missing_overrides_agreeing_verdicts(self):
+        packet = mod.prepare_packet([_finding('r', 'a', 'quote')], seed='missing', source_context={'a': 'original differs'})
+        self.assertEqual(packet['claimMissingCount'], 1)
+        self.assertTrue(packet['items'][0]['claimMissing'])
+        item_id = packet['items'][0]['itemId']
+        result = mod.reconcile(
+            packet,
+            _response('A', [(item_id, 'pure_fp')]),
+            _response('B', [(item_id, 'pure_fp')]),
+        )
+        row = result['items'][0]
+        self.assertEqual(row['categoryA'], 'pure_fp')
+        self.assertEqual(row['categoryB'], 'pure_fp')
+        self.assertFalse(row['agreed'])
+        self.assertEqual(row['preliminary'], 'needs_review')
+        self.assertEqual(row['label'], '확인필요')
+        self.assertEqual(row['reasonCode'], 'claim_missing')
+        self.assertTrue(row['humanReviewRequired'])
+        self.assertIsNone(row['finalCategory'])
+        self.assertEqual(result['summary']['needsReview'], 1)
+        self.assertEqual(result['summary']['agreementRate'], 0.0)
+
+    def test_rationale_on_a_blue_report_still_exits_3(self):
+        report = {'runId': 'r', 'findings': [{
+            'id': 'f', 'suspicion': 'visible claim', 'rationale': 'the real explanation', 'family': 'D1',
+        }]}
+        with self.assertRaises(mod.AdjudicationError) as caught:
+            mod.prepare_packet([_finding('r', 'f', 'q')], blue_reports=[report])
+        self.assertEqual(caught.exception.code, 'answer_key_field')
+        self.assertEqual(caught.exception.exit_code, 3)
+        with self.assertRaises(mod.AdjudicationError) as nested:
+            mod.prepare_packet(
+                [_finding('r', 'f', 'q', claim='stated')],
+                source_context={'f': {'gold': 'leaked'}},
+            )
+        self.assertEqual(nested.exception.exit_code, 3)
+
+
+class DefinitionAndSourceTests(unittest.TestCase):
+    def test_definitions_follow_each_pass_order(self):
+        findings = [_finding('r', f'f{index}', f'quote {index}', claim=f'claim {index}') for index in range(4)]
+        packet = mod.prepare_packet(findings, seed='defs')
+        self.assertEqual(set(mod.DEFINITIONS), set(mod.CATEGORY_IDS))
+        for block in packet['passes']:
+            ids = [row['id'] for row in block['categories']]
+            self.assertEqual(
+                [row['definition'] for row in block['categories']],
+                [mod.DEFINITIONS[cid] for cid in ids],
+            )
+            text = block['instruction']
+            positions = [text.index(f'{row["id"]}: {row["definition"]}') for row in block['categories']]
+            self.assertEqual(positions, sorted(positions))
+            self.assertIn('Judge the allegation in claim against quote/context.', text)
+            self.assertIn('The answer is preliminary and a person decides.', text)
+            self.assertIn('"category": "abstain"', text)
+        self.assertNotEqual(_category_ids(packet, 'A'), _category_ids(packet, 'B'))
+        self.assertNotEqual(_category_ids(packet, 'B')[0], _category_ids(packet, 'A')[0])
+        self.assertIn('injected changes', mod.DEFINITIONS['real_source_defect'])
+        self.assertIn('careful reviewers', mod.DEFINITIONS['spin_boundary'])
+        self.assertIn('source context is shown and differs', mod.DEFINITIONS['gold_error'])
+        self.assertIn('consistent with the rest of the paper', mod.DEFINITIONS['pure_fp'])
+
+    def test_gold_error_needs_source_context_and_keeps_agreement_when_it_differs(self):
+        finding = _finding('r', 'a', 'injected quote', claim='the rate is wrong')
+        bare = mod.prepare_packet([finding], seed='gold')
+        item_id = bare['items'][0]['itemId']
+        self.assertNotIn('sourceContext', _judge(bare))
+        withheld = mod.reconcile(
+            bare,
+            _response('A', [(item_id, 'gold_error')]),
+            _response('B', [(item_id, 'gold_error')]),
+        )
+        row = withheld['items'][0]
+        self.assertEqual(row['categoryA'], 'gold_error')
+        self.assertEqual(row['categoryB'], 'gold_error')
+        self.assertFalse(row['agreed'])
+        self.assertEqual(row['preliminary'], 'needs_review')
+        self.assertEqual(row['reasonCode'], 'gold_error_without_source')
+
+        shown = mod.prepare_packet(
+            [finding],
+            seed='gold',
+            source_context={'a': 'original quote differs'},
+        )
+        self.assertEqual(_judge(shown)['sourceContext'], 'original quote differs')
+        self.assertEqual(shown['items'][0]['sourceContext'], 'original quote differs')
+        agreed = mod.reconcile(
+            shown,
+            _response('A', [(item_id, 'gold_error')]),
+            _response('B', [(item_id, 'gold_error')]),
+        )
+        kept = agreed['items'][0]
+        self.assertTrue(kept['agreed'])
+        self.assertEqual(kept['preliminary'], 'gold_error')
+        self.assertEqual(kept['label'], '정답지 오류 (Gold v2 후보)')
+        self.assertIsNone(kept['reasonCode'])
+        self.assertTrue(kept['humanReviewRequired'])
+        self.assertIsNone(kept['finalCategory'])
+        self.assertEqual(agreed['summary']['counts']['gold_error'], 1)
+
+        long_text = '나' * 1300
+        capped = mod.prepare_packet([finding], source_context={'r:a': long_text})
+        self.assertEqual(len(_judge(capped)['sourceContext']), 1200)
+
+    def test_cli_blue_report_and_source_context_round_trip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            findings_path = root / 'findings.json'
+            report_one = root / 'blue-1.json'
+            report_two = root / 'blue-2.json'
+            source_path = root / 'source.json'
+            packet_path = root / 'packet.json'
+            findings_path.write_text(json.dumps([
+                _finding('run', 'f1', '본문 인용'),
+                _finding('run', 'f2', '다른 문장', claim='이미 있는 주장'),
+            ], ensure_ascii=False), encoding='utf-8')
+            report_one.write_text(json.dumps({
+                'runId': 'run',
+                'findings': [{'id': 'f1', 'suspicion': '수치가 표와 다르다', 'findingType': 'D1'}],
+            }, ensure_ascii=False), encoding='utf-8')
+            report_two.write_text(json.dumps({
+                'runId': 'run',
+                'findings': [{'id': 'f2', 'note': '덮어쓰면 안 된다', 'family': 'D9'}],
+            }, ensure_ascii=False), encoding='utf-8')
+            source_path.write_text(json.dumps({'f1': '원문 문장'}, ensure_ascii=False), encoding='utf-8')
+            env = os.environ.copy()
+            env['PYTHONIOENCODING'] = 'cp949'
+            env['PYTHONUTF8'] = '0'
+            prepared = self._run(env, [
+                'prepare', '--findings', str(findings_path),
+                '--blue-report', str(report_one), '--blue-report', str(report_two),
+                '--source-context', str(source_path), '--seed', 'rev', '--out', str(packet_path),
+            ])
+            self.assertEqual(prepared['ok'], True)
+            self.assertEqual(prepared['items'], 2)
+            packet_text = packet_path.read_text(encoding='utf-8')
+            self.assertNotIn(str(root), packet_text)
+            packet = json.loads(packet_text)
+            self.assertEqual(packet['claimMissingCount'], 0)
+            by_finding = {item['findingId']: item for item in packet['items']}
+            self.assertEqual(by_finding['f1']['claim'], '수치가 표와 다르다')
+            self.assertEqual(by_finding['f1']['defectType'], 'D1')
+            self.assertEqual(by_finding['f1']['sourceContext'], '원문 문장')
+            self.assertEqual(by_finding['f2']['claim'], '이미 있는 주장')
+            self.assertEqual(by_finding['f2']['defectType'], 'D9')
+            judge = _judge(packet, by_finding['f1']['itemId'])
+            self.assertEqual(judge['claim'], '수치가 표와 다르다')
+            self.assertEqual(judge['sourceContext'], '원문 문장')
+            self.assertNotIn('runId', judge)
+
+            leaked = root / 'leaked.json'
+            leaked.write_text(json.dumps({'findings': [{'id': 'f1', 'before': '10'}]}), encoding='utf-8')
+            code, summary = self._main([
+                'prepare', '--findings', str(findings_path), '--blue-report', str(leaked),
+                '--out', str(packet_path),
+            ])
+            self.assertEqual(code, 3)
+            self.assertEqual(summary['error'], 'answer_key_field')
+
+    def _main(self, args):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = mod.main(args)
+        text = buf.getvalue()
+        self.assertTrue(text.isascii(), text)
+        return code, json.loads(text)
+
+    def _run(self, env, args):
+        proc = subprocess.run(
+            [sys.executable, str(CLI_PATH), *args],
+            capture_output=True,
+            check=False,
+            env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode('cp949', errors='replace'))
+        stdout = proc.stdout.decode('cp949')
+        self.assertTrue(stdout.isascii(), stdout)
+        return json.loads(stdout)
 
 
 if __name__ == '__main__':

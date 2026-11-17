@@ -40,6 +40,32 @@ ANSWER_KEY_FIELDS = frozenset({
     'why_hard', 'candidaterationales',
 })
 CONTEXT_LIMIT = 1200
+CLAIM_LIMIT = 600
+# blue_report_validate stores the explanation in `rationale` (csv_evidence,
+# has_resolution_basis, recovered findings). That name is an answer-key field,
+# so a report carrying it is refused and the value is not read. `suspicion`
+# and `note` are the non-colliding allegation texts in that module.
+CLAIM_FIELDS = ('claim', 'suspicion', 'note')
+DEFECT_FIELDS = ('defectType', 'family', 'findingType', 'defect_type', 'defectFamily')
+BLUE_ID_FIELDS = ('findingId', 'id', 'reportNumber', 'candidateId')
+DEFINITIONS = {
+    'real_source_defect': (
+        'The passage really is inconsistent or wrong, and the same problem is in the '
+        'original publication (it was not introduced by the injected changes).'
+    ),
+    'spin_boundary': (
+        'The wording overstates or sits at the edge of spin; a matter of emphasis on '
+        'which careful reviewers could disagree, not a factual inconsistency.'
+    ),
+    'gold_error': (
+        'The passage differs from the original publication, or the problem follows from '
+        'such a difference, so the answer key may be missing or mislabelling an entry. '
+        'Choose it only when source context is shown and differs.'
+    ),
+    'pure_fp': (
+        'The allegation does not hold; the passage is consistent with the rest of the paper.'
+    ),
+}
 _KEY_DEPTH = 16
 CSV_COLUMNS = (
     'itemId', 'runId', 'findingId', 'pageIndex', 'quote',
@@ -225,18 +251,129 @@ def _lookup_context(row: dict, item_id: str, context: dict | None) -> str | None
     return None
 
 
-def _catalog_row(raw, context) -> dict:
+def _collapse(value) -> str:
+    if not isinstance(value, str):
+        return ''
+    return ' '.join(value.replace('\u00ad', '').replace('\x00', ' ').split())
+
+
+def _capped_field(raw: dict, keys: tuple[str, ...]) -> str:
+    for key in keys:
+        text = _collapse(raw.get(key))
+        if text:
+            return text[:CLAIM_LIMIT]
+    return ''
+
+
+def _annotation(raw: dict) -> tuple[str, str]:
+    if not isinstance(raw, dict):
+        return '', ''
+    return _capped_field(raw, CLAIM_FIELDS), _capped_field(raw, DEFECT_FIELDS)
+
+
+def _prefer(primary: str, fallback: str) -> str:
+    if primary:
+        return primary
+    return fallback
+
+
+def _filled(own: tuple[str, str], matched) -> tuple[str, str]:
+    claim, defect = own
+    if matched is None:
+        return claim, defect
+    extra_claim, extra_defect = _annotation(matched)
+    return _prefer(claim, extra_claim), _prefer(defect, extra_defect)
+
+
+def _blue_finding_id(raw: dict) -> str:
+    for key in BLUE_ID_FIELDS:
+        value = raw.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ''
+
+
+def _report_run(report: dict) -> str:
+    value = report.get('runId')
+    if isinstance(value, str):
+        return value
+    return ''
+
+
+def _finding_run(report_run: str, finding: dict) -> str:
+    value = finding.get('runId')
+    if isinstance(value, str) and value:
+        return value
+    return report_run
+
+
+def _iter_blue(reports):
+    if reports is None:
+        return
+    if not isinstance(reports, list):
+        raise AdjudicationError('blue_report_invalid', 2)
+    for report in reports:
+        if not isinstance(report, dict):
+            raise AdjudicationError('blue_report_invalid', 2)
+        _reject_answer_keys(report)
+        findings = report.get('findings', [])
+        if not isinstance(findings, list):
+            raise AdjudicationError('blue_report_invalid', 2)
+        report_run = _report_run(report)
+        for finding in findings:
+            if not isinstance(finding, dict):
+                raise AdjudicationError('blue_report_invalid', 2)
+            yield report_run, finding
+
+
+def _blue_rows(reports) -> list[tuple[str, str, dict]]:
+    rows = []
+    for report_run, finding in _iter_blue(reports):
+        finding_id = _blue_finding_id(finding)
+        if finding_id:
+            rows.append((_finding_run(report_run, finding), finding_id, finding))
+    return rows
+
+
+def _runs_compatible(packet_run: str, blue_run: str) -> bool:
+    if packet_run and blue_run:
+        return packet_run == blue_run
+    return True
+
+
+def _match_blue(row: dict, indexed: list) -> dict | None:
+    for run_id, finding_id, finding in indexed:
+        if finding_id != row['findingId']:
+            continue
+        if _runs_compatible(row['runId'], run_id):
+            return finding
+    return None
+
+
+def _stamp_claim(row: dict, claim: str, defect: str) -> None:
+    if claim:
+        row['claim'] = claim
+    else:
+        row['claimMissing'] = True
+    if defect:
+        row['defectType'] = defect
+
+
+def _catalog_row(raw, context, source_context, indexed) -> dict:
     row = _normalize_finding(raw)
+    claim, defect = _filled(_annotation(raw), _match_blue(row, indexed))
     item_id = _item_id(row['runId'], row['findingId'], row['quote'])
     row['itemId'] = item_id
     row['context'] = _lookup_context(row, item_id, context)
+    row['sourceContext'] = _lookup_context(row, item_id, source_context)
+    _stamp_claim(row, claim, defect)
     return row
 
 
-def _build_catalog(findings, context) -> list[dict]:
+def _build_catalog(findings, context, source_context, indexed) -> list[dict]:
     if not isinstance(findings, list):
         raise AdjudicationError('findings_invalid', 2)
-    rows = [_catalog_row(item, context) for item in findings]
+    rows = [_catalog_row(item, context, source_context, indexed) for item in findings]
     ids = [row['itemId'] for row in rows]
     if len(ids) != len(set(ids)):
         raise AdjudicationError('duplicate_item', 2)
@@ -244,40 +381,53 @@ def _build_catalog(findings, context) -> list[dict]:
 
 
 def _category_rows(ids: list[str]) -> list[dict]:
-    return [{'id': cid, 'label': LABELS[cid]} for cid in ids]
+    return [
+        {'id': cid, 'label': LABELS[cid], 'definition': DEFINITIONS[cid]}
+        for cid in ids
+    ]
 
 
 def _instruction(pass_id: str, categories: list[dict]) -> str:
-    listed = ', '.join(row['id'] for row in categories)
+    listed = '; '.join(f"{row['id']}: {row['definition']}" for row in categories)
     shape = (
         '{"schema": "%s", "passId": "%s", "verdicts": [{"itemId","category","reason"}]}'
         % (RESPONSE_SCHEMA, pass_id)
     )
     return (
-        f'Pass {pass_id}. Choose exactly one category id for each item from: {listed}. '
-        f'You may answer "category": "abstain". Reply with JSON only: {shape}'
+        f'Pass {pass_id}. Judge the allegation in claim against quote/context. '
+        f'Choose exactly one category id for each item. '
+        f'Categories in this pass, with definitions: {listed}. '
+        f'You may answer "category": "abstain". '
+        f'The answer is preliminary and a person decides. '
+        f'Reply with JSON only: {shape}'
     )
 
 
-def _judge_item(row: dict) -> dict:
-    item = {
-        'itemId': row['itemId'],
-        'pageIndex': row['pageIndex'],
-        'quote': row['quote'],
-    }
-    if row.get('context') is not None:
-        item['context'] = row['context']
+def _project(row: dict, base: dict, names: tuple[str, ...]) -> dict:
+    item = dict(base)
+    for name in names:
+        value = row.get(name)
+        if value is not None:
+            item[name] = value
     return item
 
 
+def _judge_item(row: dict) -> dict:
+    return _project(row, {
+        'itemId': row['itemId'],
+        'pageIndex': row['pageIndex'],
+        'quote': row['quote'],
+    }, ('claim', 'defectType', 'claimMissing', 'context', 'sourceContext'))
+
+
 def _operator_item(row: dict) -> dict:
-    return {
+    return _project(row, {
         'itemId': row['itemId'],
         'runId': row['runId'],
         'findingId': row['findingId'],
         'pageIndex': row['pageIndex'],
         'quote': row['quote'],
-    }
+    }, ('claim', 'defectType', 'claimMissing', 'sourceContext'))
 
 
 def _pass_block(pass_id: str, category_ids: list[str], rows: list[dict]) -> dict:
@@ -290,6 +440,14 @@ def _pass_block(pass_id: str, category_ids: list[str], rows: list[dict]) -> dict
     }
 
 
+def _claim_missing_count(rows: list[dict]) -> int:
+    total = 0
+    for row in rows:
+        if row.get('claimMissing') is True:
+            total += 1
+    return total
+
+
 def _assemble_packet(rows: list[dict], seed: str) -> dict:
     item_ids = [row['itemId'] for row in rows]
     by_id = {row['itemId']: row for row in rows}
@@ -297,6 +455,7 @@ def _assemble_packet(rows: list[dict], seed: str) -> dict:
     return {
         'schema': PACKET_SCHEMA,
         'seed': seed,
+        'claimMissingCount': _claim_missing_count(rows),
         'items': [_operator_item(row) for row in rows],
         'passes': [
             _pass_block('A', list(CATEGORY_IDS), [by_id[item_id] for item_id in item_ids]),
@@ -306,14 +465,22 @@ def _assemble_packet(rows: list[dict], seed: str) -> dict:
     }
 
 
-def prepare_packet(findings, *, context=None, seed: str = '') -> dict:
+def _optional_mapping(value, code: str) -> None:
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        raise AdjudicationError(code, 2)
+    _reject_answer_keys(value)
+
+
+def prepare_packet(findings, *, context=None, source_context=None, blue_reports=None, seed: str = '') -> dict:
     """Two presentation orders of the same findings. Same input, same bytes."""
     if not isinstance(seed, str):
         raise AdjudicationError('seed_invalid', 2)
-    if context is not None and not isinstance(context, dict):
-        raise AdjudicationError('context_invalid', 2)
-    _reject_answer_keys(context)
-    return _assemble_packet(_build_catalog(findings, context), seed)
+    _optional_mapping(context, 'context_invalid')
+    _optional_mapping(source_context, 'source_context_invalid')
+    indexed = _blue_rows(blue_reports)
+    return _assemble_packet(_build_catalog(findings, context, source_context, indexed), seed)
 
 
 def _known_item_ids(packet: dict) -> list[str]:
@@ -393,18 +560,41 @@ def _reason_code(cat_a, cat_b) -> str:
     return 'order_sensitive'
 
 
-def _decision(cat_a, cat_b) -> dict:
-    agreed = (
-        cat_a is not None
-        and cat_b is not None
-        and cat_a == cat_b
-        and cat_a != ABSTAIN
-    )
+def _forced_review(reason: str) -> dict:
+    return {
+        'agreed': False,
+        'preliminary': UNRESOLVED,
+        'label': UNRESOLVED_LABEL,
+        'reasonCode': reason,
+    }
+
+
+def _agreed_category(cat_a, cat_b):
+    if cat_a is None or cat_b is None or cat_a != cat_b or cat_a == ABSTAIN:
+        return None
+    return cat_a
+
+
+def _claim_missing(item: dict) -> bool:
+    return item.get('claimMissing') is True
+
+
+def _has_source(item: dict) -> bool:
+    value = item.get('sourceContext')
+    return isinstance(value, str) and bool(value)
+
+
+def _decision(cat_a, cat_b, claim_missing: bool, has_source: bool) -> dict:
+    if claim_missing:
+        return _forced_review('claim_missing')
+    agreed = _agreed_category(cat_a, cat_b)
+    if agreed == 'gold_error' and not has_source:
+        return _forced_review('gold_error_without_source')
     if agreed:
         return {
             'agreed': True,
-            'preliminary': cat_a,
-            'label': LABELS[cat_a],
+            'preliminary': agreed,
+            'label': LABELS[agreed],
             'reasonCode': None,
         }
     return {
@@ -416,7 +606,7 @@ def _decision(cat_a, cat_b) -> dict:
 
 
 def _result_row(item: dict, cat_a, cat_b) -> dict:
-    decision = _decision(cat_a, cat_b)
+    decision = _decision(cat_a, cat_b, _claim_missing(item), _has_source(item))
     return {
         'itemId': item['itemId'],
         'runId': item.get('runId', ''),
@@ -553,9 +743,26 @@ def _findings_argument(args) -> list:
     raise AdjudicationError('findings_invalid', 2)
 
 
+def _optional_json(path):
+    if path is None:
+        return None
+    return _load_json(path)
+
+
+def _load_blue_reports(paths):
+    if not paths:
+        return None
+    return [_load_json(path) for path in paths]
+
+
 def _cmd_prepare(args) -> dict:
-    context = _load_json(args.context) if args.context is not None else None
-    packet = prepare_packet(_findings_argument(args), context=context, seed=args.seed)
+    packet = prepare_packet(
+        _findings_argument(args),
+        context=_optional_json(args.context),
+        source_context=_optional_json(args.source_context),
+        blue_reports=_load_blue_reports(args.blue_report),
+        seed=args.seed,
+    )
     _write_json(args.out, packet)
     return packet
 
@@ -614,6 +821,8 @@ def _build_parser() -> argparse.ArgumentParser:
     source.add_argument('--evaluation', type=Path)
     source.add_argument('--findings', type=Path)
     prepare.add_argument('--context', type=Path)
+    prepare.add_argument('--source-context', type=Path)
+    prepare.add_argument('--blue-report', type=Path, action='append')
     prepare.add_argument('--seed', default='')
     prepare.add_argument('--out', type=Path, required=True)
     reconcile_cmd = sub.add_parser('reconcile')
