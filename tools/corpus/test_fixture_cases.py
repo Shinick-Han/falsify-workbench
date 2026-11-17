@@ -1,6 +1,7 @@
 """Checks for every source-case fixture under tools/corpus/fixtures."""
 
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -20,6 +21,7 @@ _FAMILIES = {"D1", "D2", "D3", "D4", "D5", "D6", "D7", "S1"}
 _LEVELS = {"L1", "L2", "L3", "L4"}
 _PHRASE_FAMILIES = {"S1", "D3"}
 _TEMPLATES = {"strengthen_claim", "remove_hedge", "minimize_limitation"}
+_ABS_PATH = re.compile(r"[A-Za-z]:[\\/]|/Users/|/home/")
 _OPERATORS = {
     "set_text",
     "shift_number",
@@ -286,11 +288,18 @@ class FixtureCaseTests(unittest.TestCase):
         self.assertIn(operator, _OPERATORS)
         self.assertIn(spec["family"], _FAMILIES)
         self.assertIn(spec["difficulty"], _LEVELS)
-        self.assertIn("relation", spec["rationale"].lower())
+        self._check_rationale(spec["rationale"])
         value_id = spec["valueId"]
         self.assertIn(value_id, bound)
         self._check_surfaces(spec["surfaces"], bound[value_id])
         self._check_operator(spec, operator, bound)
+
+    def _check_rationale(self, text):
+        self.assertIsInstance(text, str)
+        self.assertGreaterEqual(len(text.strip()), 20)
+        self.assertNotIn("{{", text)
+        self.assertNotIn("\\", text)
+        self.assertIsNone(_ABS_PATH.search(text))
 
     def _check_surfaces(self, surfaces, known):
         if surfaces == "*":
