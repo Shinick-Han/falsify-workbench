@@ -14,6 +14,8 @@ The fixtures under `tools/corpus/fixtures/` are fictional. They are not real stu
 | `fixtures/cohort_minimal` | `cohort-minimal` | `clinical-cohort` | 9 |
 | `fixtures/survival_minimal` | `survival-minimal` | `time-to-event` | 9 |
 
+To write a new synthetic case, follow `.agents/skills/falsify-corpus-author/SKILL.md`. The skill is instructions only. Nothing in this repository calls a model to author a case. `app/tests/test_corpus_author_skill.py` checks the skill's commands against the tools' argparse.
+
 ## List cases
 
 `corpus list` prints case ids and mutation set ids. It does not print rationales or values.
@@ -40,6 +42,8 @@ python tools/corpus/vendor.py verify
 
 The renderer writes three preamble injections, each at most once. `\input{glyphtounicode}` and `\pdfgentounicode=1` make pdfTeX emit ToUnicode maps. `\usepackage{lmodern}` is placed on the line after the case's `fontenc` package, or immediately before `\begin{document}` when that package is absent. When the case does not already set `\date`, `\date{}` is inserted before `\begin{document}`.
 
+Vendored `table_lint` runs after that LaTeX is assembled. Vendored `figure_lint` runs after the figures are drawn and before `pdflatex`. An ERROR finding refuses with `table_lint` or `figure_lint` (exit `3`). A WARN finding does not refuse. `render.py render` prints `lintWarnings`, a sorted list of `{lint, code, count}`. Rendering these five fixtures without `pdflatex` warned only `no-label`, `no-metric-direction`, and `no-pipeline-figure`. Those codes are upstream ML-paper conventions. They do not refuse.
+
 ```
 python tools/corpus/render.py render tools/corpus/fixtures/rct_minimal --out DIR
 python app/local/falsify_cli.py corpus build --case tools/corpus/fixtures/rct_minimal --out DIR
@@ -65,9 +69,10 @@ DIR/defect/   the same layout with the overrides applied
 DIR/twin.json
 DIR/sealed/mutation-plan.json
 DIR/sealed/gold-ledger.json
+DIR/sealed/defect-lint-warnings.json    only when the defect warning counts differ
 ```
 
-`twin.json` is the twin payload with `overridesApplied` replaced by `overridesAppliedCount`. Defect ids, rationales, and before/after text stay in `sealed/`. `corpus mutate` prints counts and relative changed paths only.
+`twin.json` is the twin payload with `overridesApplied` replaced by `overridesAppliedCount`. Both sides carry the clean side's `lintWarnings`. `render.py twin` prints those same public counts. When the defect side's counts differ, `sealed/defect-lint-warnings.json` (`falsify.defect-lint-warnings.v1`) holds the defect counts, and they are not printed. Defect ids, rationales, and before/after text stay in `sealed/`. `corpus mutate` prints counts and relative changed paths only.
 
 Each defect's `source.contexts` has one entry for every changed visible unit, and several entries may share a surface. A changed body line, table row (header included), or caption is the de-TeXed text of that unit as the PDF shows it, including TeX dashes (`---` is an em dash). A figure value used under `spec` (the plotted data, including axis labels) records the numeric rendering and `figureFile`, and `figures/<ID>.png` must change. A figure value used only in the caption changes `paper.tex` and, when compiled, `paper.pdf`; that context is the caption text and has no `figureFile`. A value used in both records both. A PNG that changes without a plotted binding, or stays byte-identical when there is one, is `diff_mismatch`. When a text unit changed, the defect's top-level `quote` is text from the defect document. When the only change is a plotted figure, `quote` is the numeric rendering.
 
@@ -208,17 +213,20 @@ Exit `2` is usage or invalid input:
 - `python tools/corpus/twin_gate.py verify missing-build --case tools/corpus/fixtures/rct_minimal` → `missing_file`
 - `python app/local/falsify_cli.py corpus verify --build missing-build --case tools/corpus/fixtures/rct_minimal` → `file_not_found`
 - `python tools/corpus/pair_corpus.py build --fixtures missing-fixtures --out DIR` → `invalid_input`
-- `python tools/corpus/pair_corpus.py build --fixtures tools/corpus/fixtures --out NONEMPTY` → `output_not_empty`
 - `python tools/corpus/pair_corpus.py measure` on a corpus whose `runs/` has no JSON → `runs_empty`
 - `python tools/corpus/twin_gate.py verify DIR --case tools/corpus/fixtures/rct_minimal --bundle-out BUNDLE` when `BUNDLE` already has files → `bundle_not_empty`
 - `python app/local/falsify_cli.py corpus verify --build DIR --case tools/corpus/fixtures/rct_minimal --bundle-out BUNDLE` when `BUNDLE` already has files → `bundle_not_empty`
 - A missing subcommand on `source_case.py`, `render.py`, `source_mutator.py`, `twin_gate.py`, `pdf_twin.py`, or `pair_corpus.py` → usage text on stderr, exit `2`
 
-Exit `3` is a refusal. A non-empty `--out` exited `3` with `out_dir_not_empty` for all three of these CLIs (`corpus mutate` uses the same render refusal):
+Exit `3` is a refusal. A non-empty `--out` exited `3` with `out_dir_not_empty` for `render.py render`, `source_mutator.py build`, `falsify corpus build`, `falsify corpus mutate`, `pdf_twin.py make`, and `pair_corpus.py build`:
 
 - `python tools/corpus/render.py render tools/corpus/fixtures/rct_minimal --out NONEMPTY`
 - `python tools/corpus/source_mutator.py build tools/corpus/fixtures/rct_minimal --spec tools/corpus/fixtures/rct_minimal/mutations/p01-pair-abs-p.json --out NONEMPTY`
 - `python app/local/falsify_cli.py corpus build --case tools/corpus/fixtures/rct_minimal --out NONEMPTY`
 - `python app/local/falsify_cli.py corpus mutate --case tools/corpus/fixtures/rct_minimal --spec tools/corpus/fixtures/rct_minimal/mutations/p01-pair-abs-p.json --out NONEMPTY`
+- `python tools/corpus/pdf_twin.py make BUNDLE --out NONEMPTY`
+- `python tools/corpus/pair_corpus.py build --fixtures tools/corpus/fixtures --out NONEMPTY`
 
-`twin_gate.py verify DIR --case tools/corpus/fixtures/rct_minimal` on a build whose defect `paper.tex` no longer matched the plan exited `3`. The report had `"pass": false`, check `truth`, code `defect_not_plan`. The same build under `python app/local/falsify_cli.py corpus verify --build DIR --case tools/corpus/fixtures/rct_minimal` exited `3` with `error` `gate_refused` and the same failure. Replacing one arm's `agentId` and running `python tools/corpus/pair_corpus.py measure --corpus DIR --out REPORT.json` exited `3` with `arms_not_comparable`. `pdf_twin.py` returns `3` for `verification_failed` and `2` for its other `PdfTwinError` codes. `render.py` and `source_mutator.py` map a compile timeout to `124`. `vendor.py verify` on this checkout exited `0`; the script returns `3` when the receipt payload is not ok. This run did not hit a compile timeout, a vendor-receipt failure, or a `pdf_twin.py` `verification_failed`.
+`render.py` also exits `3` for `table_lint` and `figure_lint` when the vendored linter returns an ERROR.
+
+`twin_gate.py verify DIR --case tools/corpus/fixtures/rct_minimal` on a build whose defect `paper.tex` no longer matched the plan exited `3`. The report had `"pass": false`, check `truth`, code `defect_not_plan`. The same build under `python app/local/falsify_cli.py corpus verify --build DIR --case tools/corpus/fixtures/rct_minimal` exited `3` with `error` `gate_refused` and the same failure. Replacing one arm's `agentId` and running `python tools/corpus/pair_corpus.py measure --corpus DIR --out REPORT.json` exited `3` with `arms_not_comparable`. `pdf_twin.py` returns `3` for `verification_failed` and `out_dir_not_empty`, and `2` for its other `PdfTwinError` codes (`path_leak`, `engine_missing`, `bundle_invalid`). `render.py` and `source_mutator.py` map a compile timeout to `124`. `vendor.py verify` on this checkout exited `0`; the script returns `3` when the receipt payload is not ok. This run did not hit a compile timeout, a vendor-receipt failure, or a `pdf_twin.py` `verification_failed`.
