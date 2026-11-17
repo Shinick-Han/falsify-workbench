@@ -1,0 +1,61 @@
+{
+  "schema": "falsify.source-values.v1",
+  "values": {
+    "n_screened": {"text": "500", "note": "adults screened"},
+    "n_ex_crit": {"text": "50", "note": "excluded, plaque criteria missed"},
+    "n_ex_decl": {"text": "30", "note": "excluded, declined"},
+    "n_excluded": {"text": "80", "note": "n_ex_crit + n_ex_decl"},
+    "n_eligible": {"text": "420", "note": "n_screened - n_excluded"},
+    "n_ex_spec": {"text": "12", "note": "eligible, insufficient swab"},
+    "n_ex_wd": {"text": "8", "note": "eligible, withdrawal"},
+    "n_ex_analysis": {"text": "20", "note": "n_ex_spec + n_ex_wd"},
+    "n_analyzed": {"text": "400", "note": "n_eligible - n_ex_analysis"},
+    "tp": {"text": "144", "note": "true positive at score 4"},
+    "fp": {"text": "24", "note": "false positive at score 4"},
+    "fn": {"text": "16", "note": "false negative at score 4"},
+    "tn": {"text": "216", "note": "true negative at score 4"},
+    "n_ref_pos": {"text": "160", "note": "tp + fn"},
+    "n_ref_neg": {"text": "240", "note": "fp + tn"},
+    "n_idx_pos": {"text": "168", "note": "tp + fp"},
+    "n_idx_neg": {"text": "232", "note": "fn + tn"},
+    "sens_pct": {"text": "90.0", "note": "100 * tp / n_ref_pos"},
+    "sens_lo": {"text": "85.3", "note": "Wald low, contains sens_pct"},
+    "sens_hi": {"text": "94.7", "note": "Wald high, contains sens_pct"},
+    "spec_pct": {"text": "90.0", "note": "100 * tn / n_ref_neg"},
+    "spec_lo": {"text": "86.2", "note": "Wald low, contains spec_pct"},
+    "spec_hi": {"text": "93.8", "note": "Wald high, contains spec_pct"},
+    "ppv_pct": {"text": "85.7", "note": "100 * tp / n_idx_pos"},
+    "ppv_lo": {"text": "80.4", "note": "Wald low, contains ppv_pct"},
+    "ppv_hi": {"text": "91.1", "note": "Wald high, contains ppv_pct"},
+    "npv_pct": {"text": "93.1", "note": "100 * tn / n_idx_neg"},
+    "npv_lo": {"text": "89.8", "note": "Wald low, contains npv_pct"},
+    "npv_hi": {"text": "96.4", "note": "Wald high, contains npv_pct"},
+    "prev_pct": {"text": "40.0", "note": "100 * n_ref_pos / n_analyzed"},
+    "prev_lo": {"text": "35.1", "note": "Wald low, contains prev_pct"},
+    "prev_hi": {"text": "44.9", "note": "Wald high, contains prev_pct"},
+    "cut_main": {"text": "4", "note": "prespecified positive score"},
+    "cut_high": {"text": "6", "note": "stricter score"},
+    "tp6": {"text": "112", "note": "true positive at score 6"},
+    "fp6": {"text": "8", "note": "false positive at score 6"},
+    "fn6": {"text": "48", "note": "false negative at score 6"},
+    "tn6": {"text": "232", "note": "true negative at score 6"},
+    "sens6_pct": {"text": "70.0", "note": "100 * tp6 / n_ref_pos"},
+    "sens6_lo": {"text": "62.8", "note": "Wald low, contains sens6_pct"},
+    "sens6_hi": {"text": "77.2", "note": "Wald high, contains sens6_pct"},
+    "spec6_pct": {"text": "96.7", "note": "100 * tn6 / n_ref_neg"},
+    "spec6_lo": {"text": "94.3", "note": "Wald low, contains spec6_pct"},
+    "spec6_hi": {"text": "99.0", "note": "Wald high, contains spec6_pct"},
+    "ph_concl_claim": {
+      "text": "The QS-4 strip separated panel-positive from panel-negative nacre spots at the prespecified score.",
+      "note": "conclusion claim"
+    },
+    "ph_hedge": {
+      "text": "Predictive values may differ in a cohort whose prevalence is not like this one.",
+      "note": "hedge"
+    },
+    "ph_limit": {
+      "text": "One panel assigned the reference labels, so a wrong panel label would move every accuracy estimate.",
+      "note": "limitation sentence"
+    }
+  }
+}

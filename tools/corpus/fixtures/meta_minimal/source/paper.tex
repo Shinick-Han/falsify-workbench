@@ -1,0 +1,60 @@
+\documentclass[11pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage[margin=1in]{geometry}
+\usepackage{caption}
+\usepackage{array}
+\begin{document}
+\title{Mothwick compress and symptom clearance: a review of small parallel comparisons}
+\author{Grove Room Review Group}
+\maketitle
+\begin{abstract}
+Small reports compared a Mothwick compress with plain wrap for clearance of brindle ache.
+{{v:n_included}} studies remained in the quantitative summary.
+The pooled risk difference, taken from the summed proportions, was {{v:rd_pool}} percentage points
+(95\% CI {{v:rd_lo}} to {{v:rd_hi}}).
+Heterogeneity was Q = {{v:q_stat}}, df = {{v:q_df}}, and $I^{2} = {{v:i2_pct}}\%$.
+\end{abstract}
+\section{Introduction}
+Brindle ache is a short-lived burning discomfort. A cloth compress has been compared with plain wrap in several small parallel groups, with clearance counted on a shared day \cite{quill2021,brindle2015}.
+Northline, Keelhorn, Orrin, Pavelic, Suttor, and Wynnell each reported that comparison \cite{northline2014,keelhorn2016,orrin2017,pavelic2018,suttor2019,wynnell2020}.
+This review pools those reports. It does not add unpublished counts.
+\section{Methods}
+Reports were eligible when both groups were followed to the clearance day and the event counts were printed for each group.
+Clearance was the absence of brindle ache on day {{v:day_clear}}.
+The effect is the risk difference in percentage points, one hundred times the treated proportion minus the plain-wrap proportion.
+The pooled risk difference uses the summed event counts and the summed group sizes, and its interval is a Wald interval on those two proportions.
+Each report also has its own Wald interval.
+Analysis weights are the numbers printed in the effect table. They are scaled so that the study weights sum to {{v:w_sum}}.
+Heterogeneity is Cochran's Q, with degrees of freedom equal to the number of studies minus one.
+The $I^{2}$ percentage is one hundred times (Q minus those degrees of freedom) divided by Q \cite{brindle2015}.
+\section{Results}
+Records identified through database searching: {{v:n_identified}}.
+Duplicates removed: {{v:n_duplicates}}.
+Records screened: {{v:n_screened}}.
+Records excluded: {{v:n_rec_excl}}.
+Full-text articles assessed for eligibility: {{v:n_fulltext}}.
+Full-text articles excluded: {{v:n_ft_excl}}.
+Studies included in the meta-analysis: {{v:n_included}}.
+The full-text reports were excluded because the population did not match (n = {{v:n_ex_pop}}), the comparator was not plain wrap (n = {{v:n_ex_comp}}), clearance on day {{v:day_clear}} was not reported (n = {{v:n_ex_out}}), or the same cohort had already been reported (n = {{v:n_ex_cohort}}).
+\falsifytable{T1}
+Summed clearance events were {{v:e_tx}} of {{v:n_tx}} with the compress and {{v:e_ctrl}} of {{v:n_ctrl}} with plain wrap.
+The pooled risk difference was {{v:rd_pool}} percentage points (95\% CI {{v:rd_lo}} to {{v:rd_hi}}).
+Study risk differences ran from {{v:rd_s5}} to {{v:rd_s4}} percentage points.
+The analysis weights sum to {{v:w_sum}}.
+Heterogeneity was Q = {{v:q_stat}}, df = {{v:q_df}}, and $I^{2} = {{v:i2_pct}}\%$.
+\falsifytable{T2}
+\falsifyfigure{F1}
+\section{Discussion}
+{{v:ph_concl_claim}}
+{{v:ph_hedge}}
+Several study intervals included a null difference, so the pooled estimate should not be read as a precise ranking of the reports \cite{brindle2015}.
+The clearance wording follows one definition, and a report that counted a different day would not have entered the table \cite{quill2021}.
+Limitations.
+{{v:ph_limit}}
+\falsifybibliography
+\end{document}

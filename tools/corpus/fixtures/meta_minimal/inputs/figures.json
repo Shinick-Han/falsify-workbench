@@ -1,0 +1,29 @@
+{
+  "schema": "falsify.source-figures.v1",
+  "figures": [
+    {
+      "figureId": "F1",
+      "caption": "Study risk differences for symptom clearance. The pooled risk difference is {{v:rd_pool}} percentage points.",
+      "spec": {
+        "type": "bar",
+        "aspect_ratio": "16:9",
+        "xlabel": "Study",
+        "ylabel": "Risk difference (percentage points)",
+        "x_labels": ["Northline", "Keelhorn", "Orrin", "Pavelic", "Suttor", "Wynnell"],
+        "series": [
+          {
+            "name": "Risk difference",
+            "y": [
+              "{{v:rd_s1}}",
+              "{{v:rd_s2}}",
+              "{{v:rd_s3}}",
+              "{{v:rd_s4}}",
+              "{{v:rd_s5}}",
+              "{{v:rd_s6}}"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}
