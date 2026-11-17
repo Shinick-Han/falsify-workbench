@@ -1,7 +1,9 @@
 """Turn a mutation spec into a sealed source twin.
 
 ``plan_mutations`` is pure. ``build_twin`` renders through ``render_twin``
-and writes the blind twin plus the sealed plan and gold ledger.
+and writes the blind twin plus the sealed plan and gold ledger. Public lint
+counts are the clean side. A differing defect aggregate is written only under
+``sealed/``.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ from source_case import (
 SCHEMA = "falsify.source-mutation.v1"
 PLAN_SCHEMA = "falsify.source-mutation-plan.v1"
 LEDGER_SCHEMA = "falsify.red-gold-ledger.v1"
+DEFECT_LINT_SCHEMA = "falsify.defect-lint-warnings.v1"
 STRENGTHEN_CLAIM = (
     (r"\bwere associated with\b", "caused"),
     (r"\bwas associated with\b", "caused"),
@@ -1417,13 +1420,19 @@ def _remove_tree(path: Path) -> None:
         shutil.rmtree(path)
 
 
-def _write_bundle(root: Path, twin: dict, plan: dict, ledger: dict) -> None:
+def _defect_lint_payload(warnings: list[dict]) -> dict:
+    return {"schema": DEFECT_LINT_SCHEMA, "lintWarnings": warnings}
+
+
+def _write_bundle(root: Path, twin: dict, plan: dict, ledger: dict, defect_warnings=None) -> None:
     _write_json(root / "twin.json", _redact_twin(twin))
     sealed = root / "sealed"
     sealed.mkdir()
     try:
         _write_json(sealed / "mutation-plan.json", plan)
         _write_json(sealed / "gold-ledger.json", ledger)
+        if defect_warnings is not None:
+            _write_json(sealed / "defect-lint-warnings.json", _defect_lint_payload(defect_warnings))
     except Exception:
         _remove_tree(sealed)
         raise
@@ -1449,9 +1458,10 @@ def build_twin(case_dir, spec, out_dir, *, compile_pdf=True) -> dict:
     root = Path(out_dir)
     try:
         twin = render.render_twin(case_dir, root, plan["overrides"], compile_pdf=compile_pdf)
+        defect_warnings = twin.pop(render.DEFECT_LINT_KEY, None)
         _correspond(case_dir, root, plan, twin)
         ledger = _ledger(case_dir, root, spec, plan, compile_pdf)
-        _write_bundle(root, twin, plan, ledger)
+        _write_bundle(root, twin, plan, ledger, defect_warnings)
     except MutationError:
         _remove_tree(root / "sealed")
         raise

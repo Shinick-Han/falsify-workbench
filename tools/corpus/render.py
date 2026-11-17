@@ -3,7 +3,8 @@
 ``assemble_case`` is pure. Figure drawing reuses the vendored matplotlib
 helper. Compilation, when requested, shells out to ``pdflatex`` with a fixed
 argument list and source-date environment. Vendored table and figure checks
-refuse ERROR findings before compilation.
+refuse ERROR findings before compilation. WARN findings are published as
+aggregated counts, with no message text and no source position.
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ _TABLE_LINT = "upstream/skills/section-writing-agent/scripts/table_lint.py"
 _FIGURE_LINT = "upstream/skills/plotting-agent/scripts/figure_lint.py"
 _PLOTTER = "upstream/skills/plotting-agent/scripts/render_matplotlib.py"
 _CONCLUSION = re.compile(r"\\section\*?\{\s*Conclusion", re.IGNORECASE)
-_WARNING_FIELDS = ("code", "env", "figure", "line", "message", "severity")
+DEFECT_LINT_KEY = "defectLintWarnings"
 _AUX = (".aux", ".log", ".out")
 _DRIVE = re.compile(r"[A-Za-z]:[\\/]")
 _CITE_RE = re.compile(r"\\cite\{([^}]+)\}")
@@ -352,45 +353,59 @@ def _refuse(code: str, findings: list[dict]) -> list[dict]:
     return [item for item in findings if item.get("severity") == "WARN"]
 
 
-def _public_warning(lint: str, item: dict) -> dict:
-    record = {"lint": lint}
-    for field in _WARNING_FIELDS:
-        if field in item:
-            record[field] = item[field]
-    return record
+def _aggregate(lint: str, findings: list[dict]) -> list[dict]:
+    counts = {}
+    for item in findings:
+        code = str(item.get("code", ""))
+        counts[code] = counts.get(code, 0) + 1
+    return [{"lint": lint, "code": code, "count": counts[code]} for code in sorted(counts)]
 
 
-def _public_warnings(lint: str, findings: list[dict]) -> list[dict]:
-    return [_public_warning(lint, item) for item in findings]
+def _merge_counts(groups) -> list[dict]:
+    counts = {}
+    for group in groups:
+        for item in group:
+            key = (str(item["lint"]), str(item["code"]))
+            counts[key] = counts.get(key, 0) + int(item["count"])
+    return [
+        {"lint": lint, "code": code, "count": counts[(lint, code)]}
+        for lint, code in sorted(counts)
+    ]
 
 
-def _warning_sort_key(item: dict):
-    return (
-        str(item.get("lint", "")),
-        str(item.get("code", "")),
-        str(item.get("figure", "")),
-        item.get("line", 0),
-        str(item.get("env", "")),
-        str(item.get("message", "")),
-    )
-
-
-def _sorted_warnings(items: list[dict]) -> list[dict]:
-    return sorted(items, key=_warning_sort_key)
+def _copy_counts(items) -> list[dict]:
+    copied = []
+    for item in items:
+        copied.append({
+            "lint": str(item["lint"]),
+            "code": str(item["code"]),
+            "count": int(item["count"]),
+        })
+    return copied
 
 
 def _table_warnings(tex: str) -> list[dict]:
     kept = _refuse("table_lint", _table_findings(tex))
-    return _sorted_warnings(_public_warnings("table_lint", kept))
+    return _aggregate("table_lint", kept)
 
 
 def _figure_warnings(figures, figures_dir, tex: str) -> list[dict]:
     kept = _refuse("figure_lint", _figure_findings(figures, figures_dir, tex))
-    return _sorted_warnings(_public_warnings("figure_lint", kept))
+    return _aggregate("figure_lint", kept)
 
 
 def _merged_warnings(table_items, figure_items) -> list[dict]:
-    return _sorted_warnings(list(table_items) + list(figure_items))
+    return _merge_counts([list(table_items), list(figure_items)])
+
+
+def _publish_clean_warnings(clean: dict, defect: dict):
+    clean_rows = _copy_counts(clean["lintWarnings"])
+    defect_rows = _copy_counts(defect["lintWarnings"])
+    clean["lintWarnings"] = clean_rows
+    defect["lintWarnings"] = [dict(item) for item in clean_rows]
+    if defect_rows == clean_rows:
+        return None
+    return defect_rows
 
 
 def _figure_jobs(figures) -> list[dict]:
@@ -763,14 +778,28 @@ def _twin_payload(root: Path, clean: dict, defect: dict) -> dict:
     }
 
 
-def render_twin(case_dir, out_dir, overrides, *, compile_pdf=True) -> dict:
-    """Render a clean twin and a defect twin that applies ``overrides``."""
+def render_twin_parts(case_dir, out_dir, overrides, *, compile_pdf=True):
+    """Return the public twin and differing defect lint counts, if any."""
     if not overrides:
         raise RenderError("no_overrides", "empty")
     root = _prepare_out(out_dir)
     clean = render_case(case_dir, root / "clean", overrides=None, compile_pdf=compile_pdf)
     defect = render_case(case_dir, root / "defect", overrides=overrides, compile_pdf=compile_pdf)
-    return _twin_payload(root, clean, defect)
+    sealed = _publish_clean_warnings(clean, defect)
+    return _twin_payload(root, clean, defect), sealed
+
+
+def render_twin(case_dir, out_dir, overrides, *, compile_pdf=True) -> dict:
+    """Render a clean twin and a defect twin that applies ``overrides``.
+
+    Both public sides carry the clean aggregated counts. When the defect
+    counts differ, they are attached under ``DEFECT_LINT_KEY`` for the
+    sealed writer and are removed before stdout is printed.
+    """
+    payload, sealed = render_twin_parts(case_dir, out_dir, overrides, compile_pdf=compile_pdf)
+    if sealed is not None:
+        payload[DEFECT_LINT_KEY] = sealed
+    return payload
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -830,6 +859,8 @@ def _reject_child(key, value) -> None:
 
 
 def _emit(payload) -> None:
+    if isinstance(payload, dict):
+        payload.pop(DEFECT_LINT_KEY, None)
     _reject_absolute(payload)
     text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     if _DRIVE.search(text):
