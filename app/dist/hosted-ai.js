@@ -742,17 +742,18 @@
     function runDigestKey(value){return typeof value==='string'&&/^[0-9a-f]{64}$/.test(value);}
     function runKeyText(value){return typeof value==='string'&&value.length>=8&&value.length<=128;}
     function shortEntryText(value,max){return typeof value==='string'?value.slice(0,max):'';}
+    function entryText(value){return typeof value==='string'?value:'';}
     function normalizeRunEntry(digest,entry){
       if(!runDigestKey(digest)||!entry||typeof entry!=='object') return null;
       if(entry.apiBase!==state.apiBase||!runKeyText(entry.key)) return null;
       return {
         apiBase:entry.apiBase,key:entry.key,role:entry.role==='blue'?'blue':'red',
-        uploadId:shortEntryText(entry.uploadId,200),sha256:shortEntryText(entry.sha256,128),
-        jobId:shortEntryText(entry.jobId,128),pending:entry.pending===true,
+        uploadId:entryText(entry.uploadId),sha256:entryText(entry.sha256),
+        jobId:entryText(entry.jobId),pending:entry.pending===true,
         kind:entry.kind==='apply'?'apply':'review',
-        reviewJobId:shortEntryText(entry.reviewJobId,128),
+        reviewJobId:entryText(entry.reviewJobId),
         model:shortEntryText(entry.model,64),effort:shortEntryText(entry.effort,16),
-        updatedAt:shortEntryText(entry.updatedAt,40)
+        updatedAt:entryText(entry.updatedAt)
       };
     }
     function readRunsDoc(){
