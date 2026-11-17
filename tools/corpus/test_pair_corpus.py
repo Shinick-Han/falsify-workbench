@@ -293,6 +293,32 @@ class PairCorpusStubTests(unittest.TestCase):
         self.assertTrue(pair_corpus._BANNED.isdisjoint(keys))
 
 
+class PairOutDirTests(unittest.TestCase):
+    def test_nonempty_out_exits_3_and_keeps_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out = root / "out"
+            out.mkdir()
+            kept = out / "keep.txt"
+            kept.write_text("safe", encoding="utf-8")
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                code = pair_corpus.main([
+                    "build",
+                    "--fixtures",
+                    str(FIX),
+                    "--out",
+                    str(out),
+                ])
+            payload = json.loads(buffer.getvalue())
+            self.assertEqual(code, 3)
+            self.assertEqual(set(payload), {"error", "schema"})
+            self.assertEqual(payload["error"], "out_dir_not_empty")
+            self.assertEqual(payload["schema"], pair_corpus.SCHEMA)
+            self.assertEqual(kept.read_text(encoding="utf-8"), "safe")
+            self.assertEqual([path.name for path in out.iterdir()], ["keep.txt"])
+
+
 class PairCorpusEndToEndTests(unittest.TestCase):
     @unittest.skipUnless(_ready(), "pdflatex, PyMuPDF, or matplotlib is unavailable")
     def test_one_real_pair_set(self):

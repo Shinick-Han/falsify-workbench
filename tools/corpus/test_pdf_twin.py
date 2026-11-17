@@ -1,5 +1,6 @@
 """Tests for the PDF-edited counterpart of a source-native bundle."""
 
+import io
 import json
 import os
 import re
@@ -8,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 
 CORPUS = Path(__file__).resolve().parent
@@ -291,7 +293,7 @@ class IdFormTests(unittest.TestCase):
 
 
 class UsageTests(unittest.TestCase):
-    def test_nonempty_out_exits_2_and_keeps_files(self):
+    def test_nonempty_out_exits_3_and_keeps_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             out = root / "out"
@@ -301,12 +303,15 @@ class UsageTests(unittest.TestCase):
             with self.assertRaises(pdf_twin.PdfTwinError) as caught:
                 pdf_twin.make_pdf_twin(root / "no-bundle", out)
             self.assertEqual(caught.exception.code, "out_dir_not_empty")
-            code = pdf_twin.main(["make", str(root / "no-bundle"), "--out", str(out)])
-            self.assertEqual(code, 2)
+            err = io.StringIO()
+            with redirect_stderr(err):
+                code = pdf_twin.main(["make", str(root / "no-bundle"), "--out", str(out)])
+            self.assertEqual(code, 3)
+            self.assertEqual(err.getvalue(), "out_dir_not_empty: out_dir_not_empty\n")
             self.assertEqual(kept.read_text(encoding="utf-8"), "safe")
             self.assertEqual([path.name for path in out.iterdir()], ["keep.txt"])
 
-    def test_out_file_exits_2_and_is_not_deleted(self):
+    def test_out_file_exits_3_and_is_not_deleted(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             target = root / "out.pdf"
@@ -315,7 +320,7 @@ class UsageTests(unittest.TestCase):
                 pdf_twin.make_pdf_twin(root / "no-bundle", target)
             self.assertEqual(caught.exception.code, "out_dir_not_empty")
             code = pdf_twin.main(["make", str(root / "no-bundle"), "--out", str(target)])
-            self.assertEqual(code, 2)
+            self.assertEqual(code, 3)
             self.assertEqual(target.read_bytes(), b"not-a-directory")
 
     def test_usage_and_invalid_bundle_exit_2(self):

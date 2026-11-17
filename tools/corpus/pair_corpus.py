@@ -355,7 +355,7 @@ def build_corpus(fixtures, out_dir, *, sets_glob=None, layer0_runs=False) -> dic
         raise PairError("sets_missing")
     out = Path(out_dir)
     if out.exists() and any(out.iterdir()):
-        raise PairError("output_not_empty")
+        raise PairError("out_dir_not_empty", 3)
     work = Path(tempfile.mkdtemp(prefix="pair-corpus-"))
     try:
         records = [_compile_at(spec, work, index) for index, spec in enumerate(specs)]
