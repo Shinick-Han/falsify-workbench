@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import pymupdf
 
@@ -379,6 +380,23 @@ class CliTests(unittest.TestCase):
             saved_harness = json.loads(harness.read_text(encoding='utf-8'))
             self.assertEqual(saved['finalHarnessSha256'], payload['finalHarnessSha256'])
             self.assertEqual(saved_harness['generation'], 1)
+
+
+class BenchmarkBindingTests(unittest.TestCase):
+    def test_bind_bench_pins_corpus_v4(self):
+        seen = {}
+
+        def fake_suite(*args, **kwargs):
+            seen['args'] = args
+            seen['kwargs'] = dict(kwargs)
+            return {'corpusVersion': kwargs.get('corpus_version')}
+
+        with patch.object(mod.benchmark_suite, 'run_benchmark_suite', fake_suite):
+            report = mod._bind_bench()(0, {'schema': 'falsify.harness.v1'})
+        self.assertEqual(seen['args'], ())
+        self.assertEqual(seen['kwargs'].get('mode'), 'sensor')
+        self.assertEqual(seen['kwargs'].get('corpus_version'), 'v4')
+        self.assertEqual(report['corpusVersion'], 'v4')
 
 
 class ComplexityGateTests(unittest.TestCase):

@@ -19,7 +19,7 @@ Usage:
     python app/local/falsify_cli.py arena apply-patch --harness HARNESS_JSON --patch PATCH_JSON [--role blue|red] [--max-generations 3] [--baseline-holdout-fp N] [--candidate-holdout-fp N] [--max-instructions-chars 12000] [--compact-rules] [--out OUT_JSON]
     python app/local/falsify_cli.py arena evolve --source-pdf SRC_PDF [SRC_PDF ...] [--supplement PATH ...] [--holdout-pdf PDF ...] [--harness HARNESS_JSON] [--red-harness RED_HARNESS_JSON] [--role blue|red|both] --red-cmd EXE [--red-arg VALUE ...] --blue-cmd EXE [--blue-arg VALUE ...] [--generations 3] [--min-difficulty L1|L2|L3|L4] [--runs 1] [--agent-timeout 180] [--max-rules 40] [--max-recall-drop 0.0] [--compact-rules] [--checkpoint-dir DIR] [--resume] [--max-total-seconds S] [--out OUT_JSON] [--out-harness HARNESS_OUT] [--out-red-harness RED_HARNESS_OUT]
     python app/local/falsify_cli.py arena tournament --source-pdf SRC_PDF [SRC_PDF ...] --red-entry SPEC [--red-entry SPEC ...] --blue-entry SPEC [--blue-entry SPEC ...] [--supplement PATH ...] [--holdout-pdf PDF ...] [--min-difficulty L1|L2|L3|L4] [--agent-timeout 180] [--no-validate-quotes] [--out OUT_JSON]
-    python app/local/falsify_cli.py arena benchmark [--mode sensor|agent] [--agent-cmd EXE] [--agent-arg VALUE ...] [--case CASE_ID ...] [--baseline-report REPORT_JSON] [--max-recall-drop 0.0] [--allow-holdout-fp-increase] [--out OUT_JSON]
+    python app/local/falsify_cli.py arena benchmark [--mode sensor|agent] [--agent-cmd EXE] [--agent-arg VALUE ...] [--case CASE_ID ...] [--baseline-report REPORT_JSON] [--max-recall-drop 0.0] [--allow-holdout-fp-increase] [--corpus-version v4|v5] [--fixtures-root DIR] [--no-source-cases] [--out OUT_JSON]
     python app/local/falsify_cli.py corpus list [--root DIR]
     python app/local/falsify_cli.py corpus build --case DIR --out DIR [--no-compile]
     python app/local/falsify_cli.py corpus mutate --case DIR --spec FILE --out DIR [--no-compile]
@@ -2302,11 +2302,31 @@ def _benchmark_agent_argv(args) -> list[str] | None:
     return [args.agent_cmd, *_flatten_paths(args.agent_arg)]
 
 
+def _benchmark_corpus_request(args) -> dict:
+    version = getattr(args, "corpus_version", None) or "v4"
+    if version not in ("v4", "v5"):
+        raise _CliError(
+            "invalid_arguments",
+            "Benchmark corpus version must be v4 or v5.",
+            exit_code=2,
+            recovery_hint="Pass --corpus-version v4 or --corpus-version v5.",
+        )
+    include_source_cases = None
+    if getattr(args, "no_source_cases", False):
+        include_source_cases = False
+    return {
+        "corpus_version": version,
+        "include_source_cases": include_source_cases,
+        "fixtures_root": getattr(args, "fixtures_root", None),
+    }
+
+
 def _cmd_arena_benchmark(args, deadline: float | None = None) -> tuple[dict, int]:
     module = _benchmark_suite_module()
     agent_argv = _benchmark_agent_argv(args)
     baseline = _read_json_file(args.baseline_report, label="--baseline-report") if args.baseline_report else None
     case_ids = _flatten_paths(args.case) or None
+    corpus = _benchmark_corpus_request(args)
     _check_deadline(deadline)
     try:
         report = module.run_benchmark_suite(
@@ -2316,6 +2336,9 @@ def _cmd_arena_benchmark(args, deadline: float | None = None) -> tuple[dict, int
             baseline_report=baseline,
             max_recall_drop=args.max_recall_drop,
             allow_holdout_fp_increase=bool(args.allow_holdout_fp_increase),
+            corpus_version=corpus["corpus_version"],
+            include_source_cases=corpus["include_source_cases"],
+            fixtures_root=corpus["fixtures_root"],
         )
     except ValueError as exc:
         raise _CliError("invalid_arguments", f"Invalid benchmark arguments: {exc}", exit_code=2) from None
@@ -2579,6 +2602,9 @@ def _add_arena_evolution_parsers(arena_sub, parent):
     bench.add_argument("--baseline-report")
     bench.add_argument("--max-recall-drop", type=float, default=0.0)
     bench.add_argument("--allow-holdout-fp-increase", action="store_true")
+    bench.add_argument("--corpus-version", choices=["v4", "v5"], default="v4")
+    bench.add_argument("--fixtures-root")
+    bench.add_argument("--no-source-cases", action="store_true")
     bench.add_argument("--out")
 
 

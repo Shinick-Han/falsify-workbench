@@ -232,7 +232,8 @@ def _bind_duel(red_argv, blue_argv, holdout_pdfs, min_difficulty, runs, timeout,
 def _bind_bench():
     def benchmark_fn(generation_index, candidate_harness):
         del generation_index, candidate_harness
-        return benchmark_suite.run_benchmark_suite(mode='sensor')
+        # The promotion gate is calibrated on corpus v4.
+        return benchmark_suite.run_benchmark_suite(mode='sensor', corpus_version='v4')
 
     return benchmark_fn
 
