@@ -1,10 +1,10 @@
 ## Unreleased
 
-- `pdf_twin.py make`와 `pair_corpus.py build`는 출력 디렉터리가 비어 있지 않으면 `out_dir_not_empty`로 끝납니다(종료 코드 3). `pair_corpus`의 `output_not_empty`와 종료 코드 2는 더 이상 쓰지 않습니다. 탐지 성능은 측정하지 않았습니다.
-- `render.py`는 LaTeX를 조립한 뒤 벤더 `table_lint`를 실행하고, 그림을 그린 뒤 `pdflatex` 전에 `figure_lint`를 실행합니다. ERROR는 `table_lint` 또는 `figure_lint`로 종료 코드 3입니다. WARN은 `{lint, code, count}` 목록인 `lintWarnings`로 나갑니다. 쌍둥이 표준출력과 `twin.json`은 정상본 개수를 담고, 결함본 개수가 다르면 `sealed/defect-lint-warnings.json`(`falsify.defect-lint-warnings.v1`)에 둡니다. 이 픽스처의 경고는 `no-label`, `no-metric-direction`, `no-pipeline-figure`뿐이며 거절하지 않습니다. 이 경고가 탐지에 미치는 영향은 측정하지 않았습니다.
+- `pdf_twin.py make`와 `pair_corpus.py build`는 출력 디렉터리가 비어 있지 않으면 `out_dir_not_empty`로 끝납니다(종료 코드 3). `pair_corpus`의 `output_not_empty`와 종료 코드 2는 더 이상 쓰지 않습니다.
+- `render.py`는 LaTeX를 조립한 뒤 벤더 `table_lint`를 실행하고, 그림을 그린 뒤 `pdflatex` 전에 `figure_lint`를 실행합니다. ERROR는 `table_lint` 또는 `figure_lint`로 종료 코드 3입니다. WARN은 `{lint, code, count}` 목록인 `lintWarnings`로 나갑니다. 쌍둥이 표준출력과 `twin.json`은 정상본 개수를 담고, 결함본 개수가 다르면 `sealed/defect-lint-warnings.json`(`falsify.defect-lint-warnings.v1`)에 둡니다. 현재 픽스처 다섯 개와 변형 집합 46개에서 나오는 경고는 `no-label`, `no-metric-direction`, `no-pipeline-figure`뿐이며 거절하지 않습니다. 이 경고가 탐지에 미치는 영향은 측정하지 않았습니다.
 - `blue scan-workspace --argument-outline`과 MCP `triage_workspace`의 `includeArgumentOutline`(기본값 false)은 순위가 매겨진 논문마다 짧은 조언용 `argumentOutline`을 더합니다. 신호, 점수, 순위, 플래그가 꺼진 캐시 키는 바뀌지 않습니다. `--manuscript-date`는 `blue scan --oracle`에만 있습니다. 재현율과 거짓 양성은 측정하지 않았습니다.
 - 합성 소스 사례를 쓰는 지침을 `.agents/skills/falsify-corpus-author/SKILL.md`에 넣었습니다. 저장소는 그 사례를 만들 때 모델을 호출하지 않으며, `app/tests/test_corpus_author_skill.py`가 문서의 명령을 도구 argparse와 맞춥니다. 새 사례의 판정 성능은 측정하지 않았습니다.
-- 호스팅 증거 검사는 고정 15초 대신, 작업의 저장된 종료 상태를 네이티브 워커 제한 시간에서 뽑은 예산 동안 기다립니다. 대기 시간 분포는 측정하지 않았습니다.
+- 호스팅 증거 검사는 고정 15초 대신, 작업의 저장된 종료 상태를 네이티브 워커 제한 시간에서 뽑은 예산 동안 기다립니다. CPU를 가득 채운 상태에서 50회 돌렸을 때 실패는 0회였고 가장 긴 대기는 약 12초였습니다. 원래 실패는 재현하지 못했습니다.
 
 ## 0.2.0-alpha.77 — 2026-11-17
 
