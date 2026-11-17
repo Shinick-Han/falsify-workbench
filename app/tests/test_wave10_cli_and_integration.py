@@ -247,6 +247,69 @@ class Wave10CliAndIntegrationTests(unittest.TestCase):
             encoded = json.dumps(digest, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             self.assertLess(len(encoded), 12 * 1024)
 
+    def test_argument_outline_flag_and_manuscript_date_exit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pdf = root / "outline.pdf"
+            doc = pymupdf.open()
+            try:
+                page = doc.new_page(width=595, height=842)
+                y_pos = 72
+                for line in (
+                    "Abstract",
+                    "The response rate was 40% in the enrolled cohort overall across follow-up.",
+                    "Results",
+                    "Adverse events were similar between arms and no serious events were attributed to study treatment.",
+                    "Discussion",
+                    "The cohort completed follow-up and investigators recorded outcomes on the prespecified form today.",
+                ):
+                    page.insert_text((72, y_pos), line, fontsize=11)
+                    y_pos += 16
+                pdf.write_bytes(doc.tobytes())
+            finally:
+                doc.close()
+
+            base_code, base = _run_cli(["blue", "scan", "--pdf", str(pdf)])
+            self.assertEqual(base_code, 0)
+            self.assertNotIn("argumentOutline", base["sensor"])
+            self.assertNotIn("triageHints", base["sensor"])
+
+            on_code, on = _run_cli(["blue", "scan", "--pdf", str(pdf), "--argument-outline"])
+            self.assertEqual(on_code, 0)
+            self.assertEqual(on["sensor"]["signals"], base["sensor"]["signals"])
+            self.assertEqual(on["sensor"]["signalCount"], base["sensor"]["signalCount"])
+            pack = on["sensor"]["argumentOutline"]
+            self.assertEqual(pack["schema"], "falsify.argument-outline.v1")
+            self.assertEqual(pack["signalCount"], 0)
+            self.assertTrue(pack["triageHints"])
+            self.assertTrue(all(hint.get("advisoryOnly") is True for hint in pack["triageHints"]))
+
+            dated_code, dated = _run_cli([
+                "blue", "scan", "--pdf", str(pdf), "--manuscript-date", "2020-01-01",
+            ])
+            self.assertEqual(dated_code, 0)
+            self.assertEqual(dated["sensor"]["fileHash"], base["sensor"]["fileHash"])
+            self.assertEqual(dated["sensor"]["signals"], base["sensor"]["signals"])
+            self.assertNotIn("argumentOutline", dated["sensor"])
+            self.assertNotIn("triageHints", dated["sensor"])
+            dated_body = {key: value for key, value in dated["sensor"].items() if key != "paperId"}
+            base_body = {key: value for key, value in base["sensor"].items() if key != "paperId"}
+            self.assertEqual(dated_body, base_body)
+
+            bad_code, bad = _run_cli([
+                "blue", "scan", "--pdf", str(pdf), "--manuscript-date", "2020-13",
+            ])
+            self.assertEqual(bad_code, 2)
+            self.assertEqual(bad["error"], "invalid_arguments")
+
+            digest_code, digest = _run_cli([
+                "blue", "scan", "--pdf", str(pdf), "--argument-outline", "--digest-only",
+            ])
+            self.assertEqual(digest_code, 0)
+            encoded = json.dumps(digest, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            self.assertLess(len(encoded), 12 * 1024)
+            self.assertNotIn("outline", digest["sensor"]["argumentOutline"])
+
     def test_blind_verify_xlsx_and_ipynb_clean_vs_leaked(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

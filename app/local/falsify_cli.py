@@ -1,7 +1,7 @@
 """Unified headless agent JSON CLI for falsify RED/BLUE workflows.
 
 Usage:
-    python app/local/falsify_cli.py blue scan --pdf PATH [--supplement PATH ...] [--oracle] [--figure-forensics] [--flow-triage] [--internal-consistency] [--meta-tables] [--pdf-security] [--recompute-raw] [--audit-code] [--cache-dir DIR] [--sarif SARIF_PATH] [--max-signals 50] [--digest-only] [--out JSON_PATH]
+    python app/local/falsify_cli.py blue scan --pdf PATH [--supplement PATH ...] [--oracle] [--figure-forensics] [--flow-triage] [--internal-consistency] [--argument-outline] [--manuscript-date YYYY-MM-DD] [--meta-tables] [--pdf-security] [--recompute-raw] [--audit-code] [--cache-dir DIR] [--sarif SARIF_PATH] [--max-signals 50] [--digest-only] [--out JSON_PATH]
     python app/local/falsify_cli.py blue scan-workspace --workspace DIR [--max-papers 32] [--max-signals-per-paper 25] [--figure-forensics] [--no-recompute-raw] [--no-flow-triage] [--no-internal-consistency] [--cache-dir DIR] [--out JSON_PATH]
     python app/local/falsify_cli.py blue validate --pdf BLIND_PDF --report BLUE_REPORT [--supplement PATH ...] [--ledger CANDIDATES_JSON] [--emit-repair-pack] [--csv OUT_CSV] [--out JSON_PATH]
     python app/local/falsify_cli.py blue finalize --pdf BLIND_PDF --report BLUE_REPORT [--repairs REPAIRS_JSON] [--supplement PATH ...] [--ledger CANDIDATES_JSON] [--out-report FINAL_REPORT_JSON] [--csv OUT_CSV] [--sarif SARIF_PATH] [--out JSON_PATH]
@@ -368,6 +368,10 @@ def _strip_bulky_sensor_fields(sensor: dict) -> dict:
         ic["signals"] = [_trim_signal(s) for s in ic.get("signals") or []]
         ic["triageHints"] = list(ic.get("triageHints") or [])[:5]
         compact["internalConsistency"] = ic
+    if isinstance(compact.get("argumentOutline"), dict):
+        compact["argumentOutline"] = _compact_argument_outline(compact["argumentOutline"])
+    if isinstance(compact.get("triageHints"), list):
+        compact["triageHints"] = compact["triageHints"][:5]
     compact["signals"] = [_trim_signal(s) for s in compact.get("signals") or []]
     return compact
 
@@ -557,11 +561,39 @@ def _scan_options_dict(args) -> dict:
         "figureForensics": bool(getattr(args, "figure_forensics", False)),
         "flowTriage": bool(getattr(args, "flow_triage", False)),
         "internalConsistency": bool(getattr(args, "internal_consistency", False)),
+        "argumentOutline": bool(getattr(args, "argument_outline", False)),
+        "manuscriptDate": getattr(args, "manuscript_date", None),
         "metaTables": bool(getattr(args, "meta_tables", False)),
         "pdfSecurity": bool(getattr(args, "pdf_security", False)),
         "recomputeRaw": bool(getattr(args, "recompute_raw", False)),
         "auditCode": bool(getattr(args, "audit_code", False)),
     }
+
+
+def _reject_manuscript_date(value):
+    if value is None:
+        return
+    from paper_external_grounding import _parse_manuscript_date
+    try:
+        _parse_manuscript_date(value)
+    except ValueError:
+        raise _CliError(
+            "invalid_arguments",
+            "--manuscript-date must be YYYY, YYYY-MM, or YYYY-MM-DD.",
+            exit_code=2,
+            recovery_hint="Pass a real calendar date as YYYY, YYYY-MM, or YYYY-MM-DD.",
+        ) from None
+
+
+def _compact_argument_outline(summary: dict) -> dict:
+    compact = dict(summary)
+    compact["triageHints"] = list(compact.get("triageHints") or [])[:5]
+    compact.pop("outline", None)
+    compact.pop("claimEvidenceMap", None)
+    digest = compact.get("digest")
+    if isinstance(digest, str) and len(digest) > 400:
+        compact["digest"] = digest[:400]
+    return compact
 
 
 def _compute_blue_scan_payload(store, pid: str, fhash: str, args, deadline) -> tuple[dict, list[str]]:
@@ -571,6 +603,8 @@ def _compute_blue_scan_payload(store, pid: str, fhash: str, args, deadline) -> t
         include_figure_forensics=bool(getattr(args, "figure_forensics", False)),
         include_flow_triage=bool(getattr(args, "flow_triage", False)),
         include_internal_consistency=bool(getattr(args, "internal_consistency", False)),
+        include_argument_outline=bool(getattr(args, "argument_outline", False)),
+        manuscript_date=getattr(args, "manuscript_date", None),
         include_meta_and_tables=bool(getattr(args, "meta_tables", False)),
         include_pdf_security=bool(getattr(args, "pdf_security", False)),
         store=store,
@@ -596,6 +630,7 @@ def _compute_blue_scan_payload(store, pid: str, fhash: str, args, deadline) -> t
 
 
 def _cmd_blue_scan(args, deadline: float | None = None) -> tuple[dict, int]:
+    _reject_manuscript_date(getattr(args, "manuscript_date", None))
     if args.max_signals < 1 or args.max_signals > 100:
         raise _CliError("invalid_arguments", "--max-signals must be between 1 and 100.", exit_code=2)
     store, summary = _open_pdf_store(args.pdf)
@@ -2287,6 +2322,8 @@ def _add_blue_parser(subparsers, parent):
     scan.add_argument("--figure-forensics", action="store_true")
     scan.add_argument("--flow-triage", action="store_true")
     scan.add_argument("--internal-consistency", action="store_true")
+    scan.add_argument("--argument-outline", action="store_true")
+    scan.add_argument("--manuscript-date", default=None)
     scan.add_argument("--meta-tables", action="store_true")
     scan.add_argument("--pdf-security", action="store_true")
     scan.add_argument("--recompute-raw", action="store_true")

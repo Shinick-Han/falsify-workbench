@@ -42,3 +42,10 @@ Optional local paper analysis (downloaded separately by setup-paper-analysis.py)
   https://huggingface.co/google/deplot
 Model weights and native Python wheels are not bundled in the Workbench source ZIP.
 Existing bundled Liberation Sans is used for DePlot's prompt header.
+
+Corpus tooling:
+- PaperOrchestra community skill pack by Ar9av, MIT, commit 6a319132932ee031e2d759b0f7f5075cf77bd1cf.
+  16 unmodified files under app/vendor-sources/paper-orchestra/upstream/ with receipt
+  app/vendor-sources/paper-orchestra/receipt.json, used only by tools/corpus (not by the
+  companion, the hosted runtime or the browser app).
+- paper_argument_outline.py, the v0.4.2 bundle instructions and the OpenAlex/title-distance/chronology logic adapt methods from the same project without copying its code.

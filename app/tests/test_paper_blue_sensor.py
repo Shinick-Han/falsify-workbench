@@ -421,5 +421,172 @@ class WrappedDoiLinkTests(unittest.TestCase):
         self.assertEqual(malformed[0]["reported"]["refIndex"], 2)
 
 
+def _line_pdf(lines):
+    doc = pymupdf.open()
+    try:
+        page = doc.new_page(width=595, height=842)
+        y_pos = 72
+        for line in lines:
+            if line:
+                page.insert_text((72, y_pos), line, fontsize=11)
+            y_pos += 16
+        return doc.tobytes()
+    finally:
+        doc.close()
+
+
+_OUTLINE_LINES = (
+    "Abstract",
+    "The response rate was 40% in the enrolled cohort overall across follow-up.",
+    "Results",
+    "Adverse events were similar between arms and no serious events were attributed to study treatment.",
+    "Discussion",
+    "The cohort completed follow-up and investigators recorded outcomes on the prespecified form today.",
+)
+_CITATION_LINE = (
+    "[1] Smith J. Effects of aspirin on cardiovascular mortality. Lancet. 2021. doi:10.1000/time1"
+)
+
+
+def _crossref_time(date_parts):
+    data = {"message": {
+        "DOI": "10.1000/time1",
+        "title": ["Effects of aspirin on cardiovascular mortality"],
+        "author": [{"given": "Ann", "family": "Smith"}],
+        "published": {"date-parts": [date_parts]},
+    }}
+    return 200, data, _sha_json(data)
+
+
+def _epmc_time(date_text):
+    data = {"resultList": {"result": [{
+        "doi": "10.1000/time1",
+        "title": "Effects of aspirin on cardiovascular mortality",
+        "authorString": "Smith J",
+        "pubYear": "2021",
+        "firstPublicationDate": date_text,
+    }]}}
+    return 200, data, _sha_json(data)
+
+
+def _chronology_transport(provider, path):
+    if provider == "crossref" and "time1" in path:
+        return _crossref_time([2021, 6, 15])
+    if provider == "europepmc" and "time1" in path:
+        return _epmc_time("2021-06-15")
+    if provider == "openalex":
+        empty = {"results": []}
+        return 200, empty, _sha_json(empty)
+    if provider == "datacite":
+        return 404, None, hashlib.sha256(b"not found").hexdigest()
+    raise AssertionError((provider, path))
+
+
+class ArgumentOutlineSensorTests(unittest.TestCase):
+    def setUp(self):
+        self._net = patch.object(socket, "create_connection", side_effect=_no_network)
+        self._net.start()
+        self.store = pe.EvidenceStore()
+
+    def tearDown(self):
+        self._net.stop()
+
+    def test_flag_off_matches_default_and_adds_no_outline(self):
+        raw = _line_pdf(_OUTLINE_LINES)
+        summary = self.store.prepare(raw, sha(raw))
+        base = sensor.run_blue_sensor(summary["paperId"], summary["fileHash"], store=self.store)
+        off = sensor.run_blue_sensor(
+            summary["paperId"], summary["fileHash"], store=self.store,
+            include_argument_outline=False, manuscript_date=None,
+        )
+        self.assertEqual(off, base)
+        self.assertNotIn("argumentOutline", base)
+        self.assertNotIn("triageHints", base)
+
+    def test_flag_on_keeps_signals_and_marks_hints_advisory(self):
+        raw = _line_pdf(_OUTLINE_LINES)
+        summary = self.store.prepare(raw, sha(raw))
+        kwargs = {"store": self.store}
+        base = sensor.run_blue_sensor(summary["paperId"], summary["fileHash"], **kwargs)
+        on = sensor.run_blue_sensor(
+            summary["paperId"], summary["fileHash"], include_argument_outline=True, **kwargs,
+        )
+        self.assertEqual(on["signalCount"], base["signalCount"])
+        self.assertEqual(on["signals"], base["signals"])
+        pack = on["argumentOutline"]
+        self.assertEqual(pack["schema"], "falsify.argument-outline.v1")
+        self.assertEqual(pack["signals"], [])
+        self.assertEqual(pack["signalCount"], 0)
+        self.assertGreaterEqual(pack["hintCount"], 1)
+        self.assertTrue(pack["triageHints"])
+        self.assertTrue(all(hint.get("advisoryOnly") is True for hint in pack["triageHints"]))
+        self.assertEqual(on["triageHints"], pack["triageHints"])
+        stripped = dict(on)
+        stripped.pop("argumentOutline")
+        stripped.pop("triageHints")
+        self.assertEqual(stripped, base)
+
+    def test_invalid_outline_flag_and_manuscript_date_use_value_error(self):
+        with self.assertRaises(ValueError) as bad_flag:
+            sensor.run_blue_sensor("unused", include_argument_outline="yes")
+        self.assertEqual(bad_flag.exception.args[0], "include_argument_outline")
+        for bad_date in ("2020-13", "2020-02-31", "2020/01/01", "2020-1-01", 2020, ""):
+            with self.assertRaises(ValueError) as bad:
+                sensor.run_blue_sensor("unused", manuscript_date=bad_date)
+            self.assertEqual(bad.exception.args[0], "invalid_manuscript_date")
+
+    def test_red_key_in_outline_report_is_still_refused(self):
+        raw = _line_pdf(("Abstract", "A short methods note for the sensor refusal check today."))
+        summary = self.store.prepare(raw, sha(raw))
+        planted = {
+            "schema": "falsify.argument-outline.v1",
+            "signals": [{"kind": "planted", "gold": "hidden"}],
+            "triageHints": [{"kind": "limitations_absent", "advisoryOnly": True}],
+            "hintCount": 1,
+        }
+        with patch("paper_blue_sensor.audit_argument_outline", return_value=planted):
+            with self.assertRaisesRegex(ValueError, "forbidden_red_key"):
+                sensor.run_blue_sensor(
+                    summary["paperId"], summary["fileHash"], store=self.store,
+                    include_argument_outline=True,
+                )
+
+    def test_manuscript_date_is_forwarded_and_hint_stays_advisory(self):
+        raw = _line_pdf(("References", _CITATION_LINE))
+        summary = self.store.prepare(raw, sha(raw))
+        common = {
+            "store": self.store,
+            "include_external_oracle": True,
+            "bib_transport": _chronology_transport,
+        }
+        base = sensor.run_blue_sensor(summary["paperId"], summary["fileHash"], **common)
+        dated = sensor.run_blue_sensor(
+            summary["paperId"], summary["fileHash"], manuscript_date="2020-01-01", **common,
+        )
+        self.assertEqual(dated["signalCount"], base["signalCount"])
+        self.assertEqual(dated["signals"], base["signals"])
+        self.assertNotIn("triageHints", base)
+        hints = dated["triageHints"]
+        self.assertEqual(len(hints), 1)
+        hint = hints[0]
+        self.assertEqual(hint["code"], "citation_postdates_manuscript")
+        self.assertIs(hint["advisoryOnly"], True)
+        self.assertEqual(hint["manuscriptDate"], "2020-01-01")
+        self.assertNotIn("citation_postdates_manuscript", {s.get("kind") for s in dated["signals"]})
+        calls = []
+
+        def boom(provider, path):
+            calls.append(provider)
+            raise AssertionError("transport should not run for an invalid date")
+
+        with self.assertRaises(ValueError) as bad:
+            sensor.run_blue_sensor(
+                summary["paperId"], manuscript_date="2020-13",
+                include_external_oracle=True, bib_transport=boom, store=self.store,
+            )
+        self.assertEqual(bad.exception.args[0], "invalid_manuscript_date")
+        self.assertEqual(calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()
