@@ -882,7 +882,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _exit_code(exc: PdfTwinError) -> int:
-    if exc.code == "verification_failed":
+    if exc.code in {"verification_failed", "out_dir_not_empty"}:
         return 3
     return 2
 
