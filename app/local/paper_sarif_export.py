@@ -377,6 +377,55 @@ _CATALOG_ROWS = (
         ("schema", "rankedPapers"),
         (("schema", "string"), ("rankedPapers", "array"), ("paperCount", "integer")),
     ),
+    (
+        "falsify.source-case.v1", "cli",
+        "Synthetic source-case manifest read by corpus list, build, and mutate.",
+        "falsify_cli.py corpus list",
+        ("schema", "caseId"),
+        (("schema", "string"), ("caseId", "string"), ("domain", "string"), ("files", "object")),
+    ),
+    (
+        "falsify.source-mutation.v1", "cli",
+        "Mutation-set spec read by corpus mutate. Answer-key text stays in the spec file.",
+        "falsify_cli.py corpus mutate",
+        ("schema", "caseId", "mutationSetId"),
+        (("schema", "string"), ("caseId", "string"), ("mutationSetId", "string"), ("mutations", "array")),
+    ),
+    (
+        "falsify.source-mutation-plan.v1", "cli",
+        "Sealed mutation plan written under the twin sealed directory and read by corpus verify.",
+        "falsify_cli.py corpus mutate",
+        ("schema", "caseId", "mutationSetId"),
+        (("schema", "string"), ("caseId", "string"), ("mutationSetId", "string"), ("overrides", "array"), ("defects", "array")),
+    ),
+    (
+        "falsify.source-twin.v1", "cli",
+        "Clean and defect render record written to twin.json by corpus mutate.",
+        "falsify_cli.py corpus mutate",
+        ("schema", "caseId"),
+        (("schema", "string"), ("caseId", "string"), ("clean", "object"), ("defect", "object"), ("changedFiles", "array")),
+    ),
+    (
+        "falsify.source-twin-gate.v1", "cli",
+        "Twin gate report emitted by corpus verify. Refusal still prints the report.",
+        "falsify_cli.py corpus verify",
+        ("schema", "caseId", "pass"),
+        (("schema", "string"), ("caseId", "string"), ("mutationSetId", "string"), ("pass", "boolean"), ("checks", "array"), ("failures", "array"), ("defects", "array")),
+    ),
+    (
+        "falsify.source-bundle.v1", "cli",
+        "Bundle manifest written by corpus verify when the gate passes and --bundle-out is set.",
+        "falsify_cli.py corpus verify",
+        ("schema", "caseId", "mutationSetId"),
+        (("schema", "string"), ("caseId", "string"), ("mutationSetId", "string"), ("files", "array")),
+    ),
+    (
+        "falsify.source-baseline-exemptions.v1", "cli",
+        "Clean-paper signal exemptions read by corpus verify from the case gate file.",
+        "falsify_cli.py corpus verify",
+        ("schema", "exemptions"),
+        (("schema", "string"), ("exemptions", "array")),
+    ),
 )
 
 

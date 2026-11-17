@@ -1,7 +1,7 @@
 """End-to-end Orchestrator seam tests for Wave 11 (Agent-First 6th Round).
 
 Covers CLI, MCP, SARIF, Cache, Ensemble, Supplement Mutator, and Arena integration across:
-- `falsify schemas` & `falsify schemas --id ...` (14 JSON Schema contracts)
+- `falsify schemas` & `falsify schemas --id ...` (21 JSON Schema contracts)
 - `falsify blue scan --meta-tables --pdf-security --cache-dir --sarif` + `--digest-only`
 - `falsify blue scan-workspace --cache-dir` with `.xlsx` + `.ipynb` supplement pairing
 - `falsify blue ensemble` consensus + minority defect preservation as `확인필요` + SARIF/CSV
@@ -194,7 +194,7 @@ class Wave11CliAndIntegrationTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         catalog = payload["catalog"]
         self.assertEqual(catalog["schema"], "falsify.schema-catalog.v1")
-        self.assertEqual(len(catalog["schemas"]), 14)
+        self.assertEqual(len(catalog["schemas"]), 21)
         schema_ids = [item["schemaId"] for item in catalog["schemas"]]
         self.assertIn("falsify.argument-outline.v1", schema_ids)
         outline_at = schema_ids.index("falsify.argument-outline.v1")
