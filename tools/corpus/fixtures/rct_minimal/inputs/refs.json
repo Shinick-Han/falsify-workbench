@@ -1,0 +1,53 @@
+{
+  "schema": "falsify.source-references.v1",
+  "references": [
+    {
+      "key": "hale2018",
+      "authors": ["Hale M", "Quinn P"],
+      "title": "Score scales for fictional symptoms",
+      "venue": "Journal of Fictional Measurement",
+      "year": 2018,
+      "synthetic": true
+    },
+    {
+      "key": "okonkwo2020",
+      "authors": ["Okonkwo A", "Berger L"],
+      "title": "Two-arm designs in invented trials",
+      "venue": "Northbridge Methods Annals",
+      "year": 2020,
+      "synthetic": true
+    },
+    {
+      "key": "brant2021",
+      "authors": ["Brant S"],
+      "title": "Placebo responses on the Fictional Symptom Score",
+      "venue": "Larkspur Review of Trials",
+      "year": 2021,
+      "synthetic": true
+    },
+    {
+      "key": "voss2019",
+      "authors": ["Voss E", "Ibarra N"],
+      "title": "Flow diagrams for synthetic randomized studies",
+      "venue": "Workshop Notes in Fictional Statistics",
+      "year": 2019,
+      "synthetic": true
+    },
+    {
+      "key": "chen2022",
+      "authors": ["Chen R"],
+      "title": "Reporting proportions without external registries",
+      "venue": "Annals of Invented Medicine",
+      "year": 2022,
+      "synthetic": true
+    },
+    {
+      "key": "ibrahim2017",
+      "authors": ["Ibrahim H", "Solano C"],
+      "title": "Confidence intervals for fictional mean changes",
+      "venue": "Records of the Imaginary Biostatistics Society",
+      "year": 2017,
+      "synthetic": true
+    }
+  ]
+}
