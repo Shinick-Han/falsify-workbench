@@ -284,23 +284,48 @@ class Wave10CliAndIntegrationTests(unittest.TestCase):
             self.assertTrue(pack["triageHints"])
             self.assertTrue(all(hint.get("advisoryOnly") is True for hint in pack["triageHints"]))
 
-            dated_code, dated = _run_cli([
-                "blue", "scan", "--pdf", str(pdf), "--manuscript-date", "2020-01-01",
-            ])
-            self.assertEqual(dated_code, 0)
-            self.assertEqual(dated["sensor"]["fileHash"], base["sensor"]["fileHash"])
-            self.assertEqual(dated["sensor"]["signals"], base["sensor"]["signals"])
-            self.assertNotIn("argumentOutline", dated["sensor"])
-            self.assertNotIn("triageHints", dated["sensor"])
-            dated_body = {key: value for key, value in dated["sensor"].items() if key != "paperId"}
-            base_body = {key: value for key, value in base["sensor"].items() if key != "paperId"}
-            self.assertEqual(dated_body, base_body)
+            scanned = []
+
+            def _refuse_open(*_args, **_kwargs):
+                scanned.append("open")
+                raise AssertionError("scan performed")
+
+            def _refuse_sensor(*_args, **_kwargs):
+                scanned.append("sensor")
+                raise AssertionError("scan performed")
+
+            original_open = falsify_cli._open_pdf_store
+            original_sensor = falsify_cli.run_blue_sensor
+            falsify_cli._open_pdf_store = _refuse_open
+            falsify_cli.run_blue_sensor = _refuse_sensor
+            try:
+                dated_code, dated = _run_cli([
+                    "blue", "scan", "--pdf", str(pdf), "--manuscript-date", "2020-01-01",
+                ])
+                month_code, month = _run_cli([
+                    "blue", "scan", "--pdf", str(pdf), "--manuscript-date", "2026-11",
+                ])
+            finally:
+                falsify_cli._open_pdf_store = original_open
+                falsify_cli.run_blue_sensor = original_sensor
+            self.assertEqual(scanned, [])
+            self.assertEqual(dated_code, 2)
+            self.assertEqual(dated["error"], "invalid_arguments")
+            self.assertEqual(dated["message"], "--manuscript-date requires --oracle.")
+            self.assertIn("--oracle", dated["recoveryHint"])
+            self.assertNotIn("sensor", dated)
+            self.assertEqual(month_code, 2)
+            self.assertEqual(month["message"], "--manuscript-date requires --oracle.")
+            falsify_cli._reject_manuscript_date("2020-01-01")
+            falsify_cli._reject_manuscript_date("2026-11")
+            falsify_cli._reject_manuscript_date_without_oracle("2020-01-01", True)
 
             bad_code, bad = _run_cli([
                 "blue", "scan", "--pdf", str(pdf), "--manuscript-date", "2020-13",
             ])
             self.assertEqual(bad_code, 2)
             self.assertEqual(bad["error"], "invalid_arguments")
+            self.assertIn("YYYY", bad["message"])
 
             digest_code, digest = _run_cli([
                 "blue", "scan", "--pdf", str(pdf), "--argument-outline", "--digest-only",

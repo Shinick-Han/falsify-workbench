@@ -295,6 +295,19 @@ _CATALOG_ROWS = (
         (("schema", "string"), ("signals", "array"), ("triageHints", "array")),
     ),
     (
+        "falsify.argument-outline.v1", "blue",
+        "Advisory argument outline: claim-to-evidence map and D3/S1 triage hints; never emits signals.",
+        "falsify_cli.py blue scan --argument-outline",
+        ("schema", "triageHints"),
+        (
+            ("schema", "string"),
+            ("triageHints", "array"),
+            ("outline", "array"),
+            ("claimEvidenceMap", "array"),
+            ("signals", "array"),
+        ),
+    ),
+    (
         "falsify.blue-report.v1", "blue",
         "BLUE findings consumed by validate and emitted by finalize.",
         "falsify_cli.py blue validate",
