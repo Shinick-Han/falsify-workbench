@@ -1,0 +1,17 @@
+{
+  "schema": "falsify.source-mutation.v1",
+  "caseId": "rct-minimal",
+  "mutationSetId": "m03-figure-y",
+  "mutations": [
+    {
+      "defectId": "fig-y",
+      "operator": "set_text",
+      "valueId": "chg_w8_fx",
+      "text": "-3.0",
+      "surfaces": ["figure:F1"],
+      "family": "D1",
+      "difficulty": "L4",
+      "rationale": "Figure F1 week-8 FX-217 bar disagrees with the printed estimate."
+    }
+  ]
+}
