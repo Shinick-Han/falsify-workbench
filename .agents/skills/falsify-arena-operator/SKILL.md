@@ -63,7 +63,7 @@ python app/local/falsify_cli.py arena evolve --source-pdf SOURCE.pdf --holdout-p
 
 ## 5. Synthetic regression gate
 
-`falsify arena benchmark` is the synthetic regression gate for the v4 32-case Gold + Benign-Trap Holdout corpus (18 Gold + 14 Holdout). The benchmark corpus also has a v5 that keeps those cases and adds source-native cases built with pdfLaTeX when the suite runs. The CLI and the campaign promotion gate stay on v4 by default; request v5 with `--corpus-version v5` (`--fixtures-root DIR` selects the source fixtures, and `--no-source-cases` scores the v4 cases while recording the exclusion). Pass `--baseline-report` to compare against a saved report; a recall drop or a holdout false-positive increase fails the gate, so do not promote that harness.
+`falsify arena benchmark` is the synthetic regression gate. Wave 11 expands the `v3` 24-case suite to the `v4` 32-case Gold + Benign-Trap Holdout corpus (18 Gold + 14 Holdout). The benchmark corpus also has a v5 that keeps those cases and adds source-native cases built with pdfLaTeX when the suite runs. The CLI and the campaign promotion gate stay on v4 by default; request v5 with `--corpus-version v5` (`--fixtures-root DIR` selects the source fixtures, and `--no-source-cases` scores the v4 cases while recording the exclusion). Pass `--baseline-report` to compare against a saved report; a recall drop or a holdout false-positive increase fails the gate, so do not promote that harness.
 
 ```bash
 python app/local/falsify_cli.py arena benchmark --mode sensor --baseline-report PREVIOUS.json --max-recall-drop 0.0 --out BENCH.json
