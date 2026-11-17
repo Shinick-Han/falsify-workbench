@@ -39,13 +39,17 @@ ANSWER_KEY_FIELDS = frozenset({
     'before', 'after', 'gold', 'rationale', 'defectid', 'patch',
     'why_hard', 'candidaterationales',
 })
+# A BLUE report's `rationale` is that finding's own explanation, not gold.
+BLUE_REPORT_KEY_FIELDS = ANSWER_KEY_FIELDS - {'rationale'}
 CONTEXT_LIMIT = 1200
 CLAIM_LIMIT = 600
-# blue_report_validate stores the explanation in `rationale` (csv_evidence,
-# has_resolution_basis, recovered findings). That name is an answer-key field,
-# so a report carrying it is refused and the value is not read. `suspicion`
-# and `note` are the non-colliding allegation texts in that module.
-CLAIM_FIELDS = ('claim', 'suspicion', 'note')
+# Joined claim text is the first non-empty of these fields, whitespace-collapsed
+# and capped at 600 characters. On a BLUE report, `rationale` is BLUE's own
+# explanation and is allowed; prefixes already written by blue_report_validate
+# (auto-downgrade, Zero-Drop recovery) are passed through and not stripped.
+# Findings, context, source context and responses still refuse `rationale`.
+# A plain finding that already has `claim` keeps it.
+CLAIM_FIELDS = ('claim', 'rationale', 'suspicion', 'note')
 DEFECT_FIELDS = ('defectType', 'family', 'findingType', 'defect_type', 'defectFamily')
 BLUE_ID_FIELDS = ('findingId', 'id', 'reportNumber', 'candidateId')
 DEFINITIONS = {
@@ -83,38 +87,38 @@ class AdjudicationError(ValueError):
         super().__init__(code)
 
 
-def _answer_key_hit(value, depth: int = 0) -> str | None:
+def _answer_key_hit(value, fields: frozenset[str], depth: int = 0) -> str | None:
     if depth > _KEY_DEPTH:
         return None
     if isinstance(value, dict):
-        return _dict_key_hit(value, depth)
+        return _dict_key_hit(value, fields, depth)
     if isinstance(value, list):
-        return _list_key_hit(value, depth)
+        return _list_key_hit(value, fields, depth)
     return None
 
 
-def _dict_key_hit(value: dict, depth: int) -> str | None:
+def _dict_key_hit(value: dict, fields: frozenset[str], depth: int) -> str | None:
     for key, child in value.items():
-        if str(key).lower() in ANSWER_KEY_FIELDS:
+        if str(key).lower() in fields:
             return str(key)
-        hit = _answer_key_hit(child, depth + 1)
+        hit = _answer_key_hit(child, fields, depth + 1)
         if hit:
             return hit
     return None
 
 
-def _list_key_hit(value: list, depth: int) -> str | None:
+def _list_key_hit(value: list, fields: frozenset[str], depth: int) -> str | None:
     for child in value:
-        hit = _answer_key_hit(child, depth + 1)
+        hit = _answer_key_hit(child, fields, depth + 1)
         if hit:
             return hit
     return None
 
 
-def _reject_answer_keys(value) -> None:
+def _reject_answer_keys(value, fields: frozenset[str] = ANSWER_KEY_FIELDS) -> None:
     if value is None:
         return
-    if _answer_key_hit(value):
+    if _answer_key_hit(value, fields):
         raise AdjudicationError('answer_key_field', 3)
 
 
@@ -315,7 +319,7 @@ def _iter_blue(reports):
     for report in reports:
         if not isinstance(report, dict):
             raise AdjudicationError('blue_report_invalid', 2)
-        _reject_answer_keys(report)
+        _reject_answer_keys(report, BLUE_REPORT_KEY_FIELDS)
         findings = report.get('findings', [])
         if not isinstance(findings, list):
             raise AdjudicationError('blue_report_invalid', 2)
@@ -537,6 +541,7 @@ def _one_verdict(raw, known: set[str], seen: set[str]) -> tuple[str, str]:
 def _read_response(response, expected_pass: str, known: set[str]) -> dict[str, str]:
     if not isinstance(response, dict):
         raise AdjudicationError('response_invalid', 2)
+    _reject_answer_keys(response)
     if response.get('schema') != RESPONSE_SCHEMA:
         raise AdjudicationError('response_schema', 2)
     if response.get('passId') != expected_pass:

@@ -290,6 +290,19 @@ class ReconcileTests(unittest.TestCase):
         self.assertEqual(dup.exception.code, 'duplicate_item')
         self.assertEqual(dup.exception.exit_code, 2)
 
+    def test_response_answer_key_still_exits_3(self):
+        packet = self._packet()
+        item_id = packet['items'][0]['itemId']
+        other = _response('B', [(item_id, 'pure_fp')])
+        for key in ('rationale', 'before', 'defectId'):
+            leaked = _response('A', [(item_id, 'pure_fp')])
+            leaked['verdicts'][0][key] = 'hidden'
+            with self.subTest(key=key):
+                with self.assertRaises(mod.AdjudicationError) as caught:
+                    mod.reconcile(packet, leaked, other)
+                self.assertEqual(caught.exception.code, 'answer_key_field')
+                self.assertEqual(caught.exception.exit_code, 3)
+
 
 class CollectTests(unittest.TestCase):
     def test_collect_findings_from_arena_report(self):
@@ -588,20 +601,136 @@ class ClaimJoinTests(unittest.TestCase):
         self.assertEqual(result['summary']['needsReview'], 1)
         self.assertEqual(result['summary']['agreementRate'], 0.0)
 
-    def test_rationale_on_a_blue_report_still_exits_3(self):
+    def test_blue_rationale_becomes_claim_and_other_roles_still_exit_3(self):
+        finding = _finding('r', 'f', 'quoted line')
+        spaced = '  rate \n\t differs\tfrom the table  '
         report = {'runId': 'r', 'findings': [{
-            'id': 'f', 'suspicion': 'visible claim', 'rationale': 'the real explanation', 'family': 'D1',
+            'id': 'f',
+            'rationale': spaced,
+            'suspicion': 'should not win',
+            'note': 'also later',
+            'family': 'D1',
         }]}
-        with self.assertRaises(mod.AdjudicationError) as caught:
-            mod.prepare_packet([_finding('r', 'f', 'q')], blue_reports=[report])
-        self.assertEqual(caught.exception.code, 'answer_key_field')
-        self.assertEqual(caught.exception.exit_code, 3)
-        with self.assertRaises(mod.AdjudicationError) as nested:
-            mod.prepare_packet(
-                [_finding('r', 'f', 'q', claim='stated')],
-                source_context={'f': {'gold': 'leaked'}},
+        packet = mod.prepare_packet([finding], blue_reports=[report], seed='rationale')
+        self.assertEqual(packet, mod.prepare_packet([finding], blue_reports=[report], seed='rationale'))
+        self.assertEqual(_judge(packet)['claim'], 'rate differs from the table')
+        self.assertEqual(_judge(packet)['defectType'], 'D1')
+
+        ordered = [_finding('r', 'a', 'quote a'), _finding('r', 'b', 'quote b')]
+        ordered_reports = [{'runId': 'r', 'findings': [
+            {'id': 'a', 'rationale': 'claim a'},
+            {'id': 'b', 'rationale': 'claim b'},
+        ]}]
+        ordered_packet = mod.prepare_packet(ordered, blue_reports=ordered_reports, seed='order')
+        self.assertEqual(
+            ordered_packet,
+            mod.prepare_packet(ordered, blue_reports=ordered_reports, seed='order'),
+        )
+        self.assertNotEqual(_pass_ids(ordered_packet, 'A'), _pass_ids(ordered_packet, 'B'))
+        self.assertEqual(
+            [item['claim'] for item in ordered_packet['passes'][0]['items']],
+            ['claim a', 'claim b'],
+        )
+
+        both = {'runId': 'r', 'findings': [{
+            'id': 'f',
+            'claim': '  stated claim  ',
+            'rationale': 'hidden explanation',
+            'suspicion': 'later',
+        }]}
+        self.assertEqual(
+            _judge(mod.prepare_packet([finding], blue_reports=[both]))['claim'],
+            'stated claim',
+        )
+        blank_claim = {'runId': 'r', 'findings': [{
+            'id': 'f', 'claim': ' \n\t ', 'rationale': 'real text',
+        }]}
+        self.assertEqual(
+            _judge(mod.prepare_packet([finding], blue_reports=[blank_claim]))['claim'],
+            'real text',
+        )
+        kept = mod.prepare_packet(
+            [_finding('r', 'f', 'quoted line', claim='kept claim')],
+            blue_reports=[{'runId': 'r', 'findings': [{'id': 'f', 'rationale': 'from blue'}]}],
+        )
+        self.assertEqual(_judge(kept)['claim'], 'kept claim')
+
+        prefix = '[인용 미검증 자동 강등] 인용이 원문에서 확인되지 않았다'
+        recovered = (
+            '[Zero-Drop 자동 복원] 1단계 의심 원장에 기록되었으나 2단계 판정에서 '
+            '해소 근거 없이 누락됨: numbers disagree'
+        )
+        downgraded = '[인용 미검증 자동 강등]  line\nbreak'
+        for text, expected in (
+            (prefix, prefix),
+            (recovered, recovered),
+            (downgraded, '[인용 미검증 자동 강등] line break'),
+        ):
+            shown = mod.prepare_packet(
+                [finding],
+                blue_reports=[{'findings': [{'findingId': 'f', 'rationale': text}]}],
             )
-        self.assertEqual(nested.exception.exit_code, 3)
+            self.assertEqual(_judge(shown)['claim'], expected)
+
+        long_rationale = '가' * 650
+        capped = mod.prepare_packet(
+            [finding],
+            blue_reports=[{'findings': [{'id': 'f', 'rationale': long_rationale}]}],
+        )
+        self.assertEqual(_judge(capped)['claim'], '가' * 600)
+
+        for key, value in (
+            ('before', '10'),
+            ('after', '20'),
+            ('gold', True),
+            ('defectId', 'g1'),
+            ('patch', 'x'),
+            ('why_hard', 'because'),
+            ('candidateRationales', ['a']),
+        ):
+            leaked = {'findings': [{'id': 'f', 'rationale': 'visible', key: value}]}
+            with self.subTest(key=key):
+                with self.assertRaises(mod.AdjudicationError) as caught:
+                    mod.prepare_packet([finding], blue_reports=[leaked])
+                self.assertEqual(caught.exception.code, 'answer_key_field')
+                self.assertEqual(caught.exception.exit_code, 3)
+
+        nested = {'findings': [{'id': 'f', 'rationale': 'visible', 'detail': {'Before': 'x'}}]}
+        with self.assertRaises(mod.AdjudicationError) as nested_hit:
+            mod.prepare_packet([finding], blue_reports=[nested])
+        self.assertEqual(nested_hit.exception.exit_code, 3)
+        self.assertEqual(nested_hit.exception.code, 'answer_key_field')
+
+        ledger = {
+            'schema': 'falsify.red-gold-ledger.v1',
+            'defects': [{
+                'defectId': 'g1',
+                'before': 'original sentence',
+                'after': 'changed sentence',
+                'rationale': 'why this edit is hard',
+            }],
+        }
+        with self.assertRaises(mod.AdjudicationError) as ledger_hit:
+            mod.prepare_packet([finding], blue_reports=[ledger])
+        self.assertEqual(ledger_hit.exception.code, 'answer_key_field')
+        self.assertEqual(ledger_hit.exception.exit_code, 3)
+
+        with self.assertRaises(mod.AdjudicationError) as plain:
+            mod.prepare_packet(
+                [_finding('r', 'f', 'quoted line', rationale='hidden')],
+                blue_reports=[{'findings': [{'id': 'f', 'rationale': 'allowed here'}]}],
+            )
+        self.assertEqual(plain.exception.exit_code, 3)
+        for kwargs in (
+            {'context': {'f': {'rationale': 'leaked'}}},
+            {'source_context': {'f': {'rationale': 'leaked'}}},
+            {'source_context': {'f': {'gold': 'leaked'}}},
+        ):
+            with self.subTest(kwargs=sorted(kwargs)):
+                with self.assertRaises(mod.AdjudicationError) as other:
+                    mod.prepare_packet([finding], **kwargs)
+                self.assertEqual(other.exception.exit_code, 3)
+                self.assertEqual(other.exception.code, 'answer_key_field')
 
 
 class DefinitionAndSourceTests(unittest.TestCase):
@@ -724,6 +853,81 @@ class DefinitionAndSourceTests(unittest.TestCase):
             ])
             self.assertEqual(code, 3)
             self.assertEqual(summary['error'], 'answer_key_field')
+
+    def test_cli_rationale_guard_is_scoped_to_input_role(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            findings_path = root / 'findings.json'
+            clean_path = root / 'clean.json'
+            context_path = root / 'context.json'
+            source_path = root / 'source.json'
+            blue_path = root / 'blue.json'
+            ledger_path = root / 'ledger.json'
+            packet_path = root / 'packet.json'
+            clean_path.write_text(
+                json.dumps([_finding('r', 'f', 'quoted line')]),
+                encoding='utf-8',
+            )
+            findings_path.write_text(
+                json.dumps([_finding('r', 'f', 'quoted line', rationale='hidden')]),
+                encoding='utf-8',
+            )
+            context_path.write_text(
+                json.dumps({'f': {'rationale': 'leaked'}}),
+                encoding='utf-8',
+            )
+            source_path.write_text(
+                json.dumps({'f': {'rationale': 'leaked'}}),
+                encoding='utf-8',
+            )
+            blue_path.write_text(json.dumps({
+                'runId': 'r',
+                'findings': [{
+                    'id': 'f',
+                    'rationale': '  rate \n differs  ',
+                    'findingType': 'D1',
+                }],
+            }, ensure_ascii=False), encoding='utf-8')
+            ledger_path.write_text(json.dumps({
+                'schema': 'falsify.red-gold-ledger.v1',
+                'defects': [{
+                    'defectId': 'g1',
+                    'before': 'original sentence',
+                    'after': 'changed sentence',
+                }],
+            }), encoding='utf-8')
+
+            code, summary = self._main([
+                'prepare', '--findings', str(findings_path), '--out', str(packet_path),
+            ])
+            self.assertEqual(code, 3)
+            self.assertEqual(summary['error'], 'answer_key_field')
+            for flag, path in (('--context', context_path), ('--source-context', source_path)):
+                code, summary = self._main([
+                    'prepare', '--findings', str(clean_path), flag, str(path),
+                    '--out', str(packet_path),
+                ])
+                self.assertEqual(code, 3, flag)
+                self.assertEqual(summary['error'], 'answer_key_field')
+
+            code, summary = self._main([
+                'prepare', '--findings', str(clean_path), '--blue-report', str(ledger_path),
+                '--out', str(packet_path),
+            ])
+            self.assertEqual(code, 3)
+            self.assertEqual(summary['error'], 'answer_key_field')
+
+            code, summary = self._main([
+                'prepare', '--findings', str(clean_path), '--blue-report', str(blue_path),
+                '--seed', 'role', '--out', str(packet_path),
+            ])
+            self.assertEqual(code, 0)
+            self.assertEqual(summary['ok'], True)
+            packet = json.loads(packet_path.read_text(encoding='utf-8'))
+            self.assertNotIn(str(root), packet_path.read_text(encoding='utf-8'))
+            self.assertEqual(packet['items'][0]['claim'], 'rate differs')
+            self.assertEqual(_judge(packet)['claim'], 'rate differs')
+            self.assertEqual(packet['items'][0]['defectType'], 'D1')
 
     def _main(self, args):
         buf = io.StringIO()
