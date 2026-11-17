@@ -355,6 +355,14 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(ledger["defects"][0]["stealthStatus"], "clean")
         self.assertTrue(ledger["sourceSha256"])
         self.assertTrue(ledger["blindPdfSha256"])
+        claims = next(item for item in report["checks"] if item["check"] == "claims")
+        self.assertTrue(claims["pass"])
+        self.assertNotIn("skipped", claims["details"])
+        self.assertEqual(claims["details"]["cleanUnsupported"], 0)
+        self.assertEqual(claims["details"]["cleanMissing"], 0)
+        self.assertEqual(claims["details"]["defectUnsupported"], 1)
+        self.assertEqual(claims["details"]["defectMissing"], 1)
+        self.assertEqual(claims["details"]["notApplicable"], 0)
 
     def test_repeat_run_is_byte_identical(self):
         first = Path(self.tmp.name) / "bundle-a"
@@ -408,6 +416,47 @@ class EndToEndTests(unittest.TestCase):
         })
         _write_json(path, payload)
         self._assert_refusal(self.build, case, "exemption_unused")
+
+    def test_claims_rejects_an_undeclared_number(self):
+        self._assert_refusal(self.extra, self.case, "undeclared_number")
+
+    def test_claims_rejects_a_ledger_number_absent_from_the_pdf(self):
+        build = Path(self.tmp.name) / "absent-number"
+        if build.exists():
+            shutil.rmtree(build)
+        shutil.copytree(self.build, build)
+        ledger = json.loads((build / "sealed" / "gold-ledger.json").read_text(encoding="utf-8"))
+        ledger["defects"][0]["source"]["contexts"][0]["after"] = AFTER.replace("p=0.04", "p=0.99")
+        _write_json(build / "sealed" / "gold-ledger.json", ledger)
+        self._assert_refusal(build, self.case, "number_not_visible")
+
+    def test_claims_rejects_a_clean_pdf_built_from_edited_values(self):
+        build = Path(self.tmp.name) / "edited-clean"
+        if build.exists():
+            shutil.rmtree(build)
+        shutil.copytree(self.build, build)
+        shutil.copyfile(build / "defect" / "paper.pdf", build / "clean" / "paper.pdf")
+        self._assert_refusal(build, self.case, "clean_mismatch")
+
+    def test_claim_cli_prints_unsupported_tokens_without_truth(self):
+        from claim_check import main as claim_main
+
+        pdf = self.build / "defect" / "paper.pdf"
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = claim_main(["check", str(pdf), "--case", str(self.case)])
+        self.assertEqual(code, 3)
+        self.assertEqual(stderr.getvalue(), "")
+        report = json.loads(stdout.getvalue())
+        self.assertEqual(report["schema"], "falsify.claim-check.v1")
+        self.assertEqual(report["unsupportedCount"], 1)
+        self.assertEqual(report["missingCount"], 1)
+        self.assertEqual(report["surfaces"][0]["unsupported"], ["0.04"])
+        self.assertNotIn("0.004", stdout.getvalue())
+        found = set()
+        _keys(report, found)
+        self.assertNotIn("missing", found)
 
     def test_tampered_clean_tex(self):
         build = Path(self.tmp.name) / "tampered-build"
