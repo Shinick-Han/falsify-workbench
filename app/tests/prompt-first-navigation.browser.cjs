@@ -1,8 +1,10 @@
 const {chromium}=require('playwright');
 const assert=require('node:assert/strict');
+const OFFLINE_CONFIG='globalThis.FalsifyCloudConfig=Object.freeze({apiBase:"https://falsify-cloud-api.ai-gongbu.workers.dev",provider:"confluence",hostedAi:Object.freeze({enabled:false,apiBase:""})});';
+const offline=page=>page.route('**/cloud-config.js*',route=>route.fulfill({status:200,contentType:'text/javascript',body:OFFLINE_CONFIG}));
 (async()=>{const browser=await chromium.launch({channel:process.platform==='win32'?'msedge':undefined,headless:true});try{
  const page=await browser.newPage({reducedMotion:'reduce'}),errors=[];page.on('pageerror',e=>errors.push(e.message));
- await page.goto(process.env.FALSIFY_UI_TEST_URL||'http://127.0.0.1:18806/');await page.evaluate(()=>FalsifyVisual.ready);
+ await offline(page);await page.goto(process.env.FALSIFY_UI_TEST_URL||'http://127.0.0.1:18806/');await page.evaluate(()=>FalsifyVisual.ready);
  for(const [role,view,file,answer] of [['red','workbench','#paper-file','#external-red-paste'],['blue','blue','#doc-blue-file','#external-blue textarea[aria-label="BLUE 외부 응답"]']]){
   await page.locator('.rail [data-view="'+view+'"]').click();
   const advanced=page.locator('#'+role+'-advanced-tools');assert.equal(await advanced.evaluate(e=>e.open),false);
@@ -29,7 +31,7 @@ const assert=require('node:assert/strict');
  }
  await page.locator('.rail [data-view="results"]').click();await page.locator('.brand').click();await page.waitForFunction(()=>document.querySelector('#local-bridge').closest('.visual-advanced-execution')?.id==='red-advanced-tools');
  const mobile=await browser.newPage({viewport:{width:390,height:844},reducedMotion:'reduce'});
- await mobile.goto(process.env.FALSIFY_UI_TEST_URL||'http://127.0.0.1:18806/');await mobile.evaluate(()=>FalsifyVisual.ready);
+ await offline(mobile);await mobile.goto(process.env.FALSIFY_UI_TEST_URL||'http://127.0.0.1:18806/');await mobile.evaluate(()=>FalsifyVisual.ready);
  await mobile.locator('#paper-file').setInputFiles(require('node:path').join(__dirname,'fixtures/paragraph-audit-synthetic.pdf'));
  await mobile.locator('#paper-before-stage canvas').waitFor({timeout:30000});
  assert.ok(await mobile.locator('#paper-before-stage').evaluate(e=>e.getBoundingClientRect().top<innerHeight));

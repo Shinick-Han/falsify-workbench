@@ -54,6 +54,7 @@ async function main() {
     let sessionChecks = 0;
     await context.route('**/*', route => {
       const url = new URL(route.request().url());
+      if (url.pathname.endsWith('/cloud-config.js')) return route.fulfill({status:200,contentType:'text/javascript',body:'globalThis.FalsifyCloudConfig=Object.freeze({apiBase:"https://falsify-cloud-api.ai-gongbu.workers.dev",provider:"confluence",hostedAi:Object.freeze({enabled:false,apiBase:""})});'});
       if (url.protocol === 'data:' || url.protocol === 'blob:' || (url.origin === origin)) return route.continue();
       return route.abort('blockedbyclient');
     });

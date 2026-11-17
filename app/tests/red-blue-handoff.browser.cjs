@@ -8,6 +8,7 @@ const fs=require('node:fs/promises');
   try{
     const page=await browser.newPage({viewport:{width:1440,height:1000}}),posts=[];
     page.on('request',r=>{if(r.method()==='POST'&&/\/api\/(?:blue|red)\/jobs/.test(r.url()))posts.push(r.url());});
+    await page.route('**/cloud-config.js*',route=>route.fulfill({status:200,contentType:'text/javascript',body:'globalThis.FalsifyCloudConfig=Object.freeze({apiBase:"https://falsify-cloud-api.ai-gongbu.workers.dev",provider:"confluence",hostedAi:Object.freeze({enabled:false,apiBase:""})});'}));
     await page.goto(process.env.WORKBENCH_URL||'http://127.0.0.1:18780/');
     await page.locator('#paper-file').setInputFiles(path.join(__dirname,'fixtures/handoff-paper.pdf'));
     await page.getByText(/이 쪽의 문단 선택/).click();

@@ -8,6 +8,7 @@ const path=require('node:path');
   try{
     const page=await browser.newPage({viewport:{width:1440,height:1000}}),errors=[];
     page.on('pageerror',e=>errors.push(e.message));
+    await page.route('**/cloud-config.js*',route=>route.fulfill({status:200,contentType:'text/javascript',body:'globalThis.FalsifyCloudConfig=Object.freeze({apiBase:"https://falsify-cloud-api.ai-gongbu.workers.dev",provider:"confluence",hostedAi:Object.freeze({enabled:false,apiBase:""})});'}));
     await page.goto(process.env.WORKBENCH_URL||'http://127.0.0.1:18781/#harness');
     await page.evaluate(()=>FalsifyLab.ready);
     const base=await page.evaluate(()=>FalsifyHarness.builtin('blue'));

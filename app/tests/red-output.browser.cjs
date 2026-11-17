@@ -26,7 +26,7 @@ const before='shows a modest benefit',after='shows no benefit',marker='FALSIFY R
  try{for(const [name,width,height] of [['desktop',1440,1000],['mobile',390,844]]){
   const r={name,checks:{},errors:[],requests:[],downloads:[]};results.push(r);const ctx=await browser.newContext({viewport:{width,height},reducedMotion:'reduce',acceptDownloads:true}),page=await ctx.newPage();
   page.on('pageerror',e=>r.errors.push(e.message));page.on('request',req=>{if(req.method()==='POST'||/\/api\/(?:red|blue)\/jobs/.test(req.url()))r.requests.push({method:req.method(),url:req.url()});});page.on('download',dl=>r.downloads.push(dl));
-  await page.route('**/*',route=>{const u=new URL(route.request().url());return u.hostname==='127.0.0.1'||u.hostname==='localhost'?route.continue():route.fulfill({status:401,body:''});});
+  await page.route('**/*',route=>{const u=new URL(route.request().url());if(u.pathname.endsWith('/cloud-config.js'))return route.fulfill({status:200,contentType:'text/javascript',body:'globalThis.FalsifyCloudConfig=Object.freeze({apiBase:"https://falsify-cloud-api.ai-gongbu.workers.dev",provider:"confluence",hostedAi:Object.freeze({enabled:false,apiBase:""})});'});return u.hostname==='127.0.0.1'||u.hostname==='localhost'?route.continue():route.fulfill({status:401,body:''});});
   try{
    await page.goto(url);await page.evaluate(()=>FalsifyVisual.ready);await page.locator('#paper-file').setInputFiles({name:'synthetic.pdf',mimeType:'application/pdf',buffer:source});
    await page.locator('#document-red').waitFor({state:'attached',timeout:90000});await page.waitForFunction(()=>!document.querySelector('#document-red').hidden,null,{timeout:90000});
