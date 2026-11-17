@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -173,6 +174,24 @@ class PdfTwinTests(unittest.TestCase):
             self.assertEqual((first / "sealed" / "gold-ledger.json").read_bytes(), (second / "sealed" / "gold-ledger.json").read_bytes())
             self.assertEqual((first / "sealed" / "pair.json").read_bytes(), (second / "sealed" / "pair.json").read_bytes())
 
+    def test_same_bundle_has_one_hash_across_twenty_makes(self):
+        hashes = set()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for index in range(20):
+                out = root / str(index)
+                pdf_twin.make_pdf_twin(self.m01, out)
+                hashes.add(pdf_twin._sha256((out / "blind" / "paper.pdf").read_bytes()))
+        self.assertEqual(len(hashes), 1)
+
+    def test_empty_out_dir_is_replaced(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out"
+            out.mkdir()
+            report = pdf_twin.make_pdf_twin(self.m01, out)
+            self.assertEqual(report["status"], "applied")
+            self.assertTrue((out / "blind" / "paper.pdf").is_file())
+
     def test_stdout_and_blind_files_hide_the_answer_key(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "out"
@@ -211,7 +230,94 @@ class PdfTwinTests(unittest.TestCase):
             self.assertFalse(out.exists())
 
 
+def _fixed_pdf() -> bytes:
+    import pymupdf
+
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "p=0.004")
+    doc.set_metadata({
+        "producer": "pdf-twin-test",
+        "creationDate": "D:20200101000000Z",
+        "modDate": "D:20200101000000Z",
+    })
+    doc.xref_set_key(-1, "ID", "[<01010101010101010101010101010101><01010101010101010101010101010101>]")
+    return doc.tobytes(
+        garbage=0,
+        deflate=False,
+        no_new_id=True,
+        encryption=int(pymupdf.mupdf.PDF_ENCRYPT_KEEP),
+    )
+
+
+def _swap_id(data: bytes, body: bytes) -> bytes:
+    match = re.search(br"/ID\s*\[[^\]]*\]", data)
+    if match is None:
+        raise AssertionError("id missing")
+    return data[:match.start()] + b"/ID[" + body + b"]" + data[match.end():]
+
+
+@unittest.skipUnless(_have_pymupdf(), "pymupdf")
+class IdFormTests(unittest.TestCase):
+    def test_hex_and_literal_ids_collapse_to_one_document(self):
+        base = _fixed_pdf()
+        forms = [
+            base,
+            _swap_id(base, b"<00112233445566778899AABBCCDDEEFF><FFEEDDCCBBAA99887766554433221100>"),
+            _swap_id(base, b"<00112233445566778899AABBCCDDEEFF>(a\\\\b\\(c\\)\\141)"),
+            _swap_id(base, b"<00112233445566778899AABBCCDDEEFF>(ab]cd)"),
+            _swap_id(base, b"(\\\\(\\)\\141)(zz\\(q\\\\))"),
+        ]
+        import pymupdf
+
+        for item in forms:
+            pymupdf.TOOLS.reset_mupdf_warnings()
+            with pymupdf.open(stream=item, filetype="pdf") as doc:
+                self.assertFalse(doc.is_repaired)
+                self.assertIn("p=0.004", doc[0].get_text("text") or "")
+            self.assertEqual(pymupdf.TOOLS.mupdf_warnings(), "")
+        stabilized = [pdf_twin._stabilize(item) for item in forms]
+        self.assertEqual(len({item for item in stabilized}), 1)
+        self.assertEqual(pdf_twin._stabilize(stabilized[0]), stabilized[0])
+        pymupdf.TOOLS.reset_mupdf_warnings()
+        with pymupdf.open(stream=stabilized[0], filetype="pdf") as doc:
+            self.assertFalse(doc.is_repaired)
+            self.assertIn("p=0.004", doc[0].get_text("text") or "")
+            self.assertEqual(doc.metadata["creationDate"], "D:20200101000000Z")
+            self.assertEqual(doc.metadata["modDate"], "D:20200101000000Z")
+            self.assertEqual(doc.metadata["producer"], "pdf-twin-test")
+        self.assertEqual(pymupdf.TOOLS.mupdf_warnings(), "")
+        self.assertTrue(pdf_twin._startxref_ok(stabilized[0]))
+
+
 class UsageTests(unittest.TestCase):
+    def test_nonempty_out_exits_2_and_keeps_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out = root / "out"
+            out.mkdir()
+            kept = out / "keep.txt"
+            kept.write_text("safe", encoding="utf-8")
+            with self.assertRaises(pdf_twin.PdfTwinError) as caught:
+                pdf_twin.make_pdf_twin(root / "no-bundle", out)
+            self.assertEqual(caught.exception.code, "out_dir_not_empty")
+            code = pdf_twin.main(["make", str(root / "no-bundle"), "--out", str(out)])
+            self.assertEqual(code, 2)
+            self.assertEqual(kept.read_text(encoding="utf-8"), "safe")
+            self.assertEqual([path.name for path in out.iterdir()], ["keep.txt"])
+
+    def test_out_file_exits_2_and_is_not_deleted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "out.pdf"
+            target.write_bytes(b"not-a-directory")
+            with self.assertRaises(pdf_twin.PdfTwinError) as caught:
+                pdf_twin.make_pdf_twin(root / "no-bundle", target)
+            self.assertEqual(caught.exception.code, "out_dir_not_empty")
+            code = pdf_twin.main(["make", str(root / "no-bundle"), "--out", str(target)])
+            self.assertEqual(code, 2)
+            self.assertEqual(target.read_bytes(), b"not-a-directory")
+
     def test_usage_and_invalid_bundle_exit_2(self):
         self.assertEqual(pdf_twin.main(["make"]), 2)
         with tempfile.TemporaryDirectory() as tmp:
