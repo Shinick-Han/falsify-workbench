@@ -2,7 +2,7 @@
 
 Usage:
     python app/local/falsify_cli.py blue scan --pdf PATH [--supplement PATH ...] [--oracle [--manuscript-date YYYY[-MM[-DD]]]] [--figure-forensics] [--flow-triage] [--internal-consistency] [--argument-outline] [--meta-tables] [--pdf-security] [--recompute-raw] [--audit-code] [--cache-dir DIR] [--sarif SARIF_PATH] [--max-signals 50] [--digest-only] [--out JSON_PATH]
-    python app/local/falsify_cli.py blue scan-workspace --workspace DIR [--max-papers 32] [--max-signals-per-paper 25] [--figure-forensics] [--no-recompute-raw] [--no-flow-triage] [--no-internal-consistency] [--cache-dir DIR] [--out JSON_PATH]
+    python app/local/falsify_cli.py blue scan-workspace --workspace DIR [--max-papers 32] [--max-signals-per-paper 25] [--figure-forensics] [--no-recompute-raw] [--no-flow-triage] [--no-internal-consistency] [--argument-outline] [--cache-dir DIR] [--out JSON_PATH]
     python app/local/falsify_cli.py blue validate --pdf BLIND_PDF --report BLUE_REPORT [--supplement PATH ...] [--ledger CANDIDATES_JSON] [--emit-repair-pack] [--csv OUT_CSV] [--out JSON_PATH]
     python app/local/falsify_cli.py blue finalize --pdf BLIND_PDF --report BLUE_REPORT [--repairs REPAIRS_JSON] [--supplement PATH ...] [--ledger CANDIDATES_JSON] [--out-report FINAL_REPORT_JSON] [--csv OUT_CSV] [--sarif SARIF_PATH] [--out JSON_PATH]
     python app/local/falsify_cli.py blue ensemble --report PATH --report PATH [--report PATH ...] [--rater-id ID ...] [--pdf BLIND_PDF] [--supplement PATH ...] [--ledger CANDIDATES_JSON] [--min-consensus K] [--csv OUT_CSV] [--sarif SARIF_PATH] [--out JSON_PATH]
@@ -704,6 +704,7 @@ def _cmd_blue_scan_workspace(args, deadline: float | None = None) -> tuple[dict,
             recompute_raw=not bool(args.no_recompute_raw),
             include_flow_triage=not bool(getattr(args, "no_flow_triage", False)),
             include_internal_consistency=not bool(getattr(args, "no_internal_consistency", False)),
+            include_argument_outline=bool(getattr(args, "argument_outline", False)),
             cache_dir=getattr(args, "cache_dir", None),
         )
     except ValueError as exc:
@@ -2388,6 +2389,7 @@ def _add_blue_parser(subparsers, parent):
     scan_ws.add_argument("--no-recompute-raw", action="store_true")
     scan_ws.add_argument("--no-flow-triage", action="store_true")
     scan_ws.add_argument("--no-internal-consistency", action="store_true")
+    scan_ws.add_argument("--argument-outline", action="store_true")
     scan_ws.add_argument("--cache-dir")
     scan_ws.add_argument("--out")
     validate = blue_sub.add_parser(
