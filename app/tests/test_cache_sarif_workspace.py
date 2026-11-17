@@ -387,6 +387,7 @@ class WorkspaceCacheTests(unittest.TestCase):
         signature = inspect.signature(paper_mcp_workspace.triage_workspace)
         self.assertIs(signature.parameters["include_flow_triage"].default, True)
         self.assertIs(signature.parameters["include_internal_consistency"].default, True)
+        self.assertIs(signature.parameters["include_argument_outline"].default, False)
         self.assertIsNone(signature.parameters["cache_dir"].default)
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -394,12 +395,42 @@ class WorkspaceCacheTests(unittest.TestCase):
                 paper_mcp_workspace.triage_workspace(root, include_flow_triage="yes")
             with self.assertRaisesRegex(ValueError, "include_internal_consistency"):
                 paper_mcp_workspace.triage_workspace(root, include_internal_consistency=1)
+            with self.assertRaisesRegex(ValueError, "include_argument_outline"):
+                paper_mcp_workspace.triage_workspace(root, include_argument_outline=1)
             session = paper_mcp_workspace.WorkspaceSession(object(), root)
             server = paper_mcp.build_workspace_server(session)
-            tool = server._tool_manager._tools["triage_workspace"].fn
+            registered = server._tool_manager._tools["triage_workspace"]
+            tool = registered.fn
             params = inspect.signature(tool).parameters
             self.assertIs(params["includeFlowTriage"].default, True)
             self.assertIs(params["includeInternalConsistency"].default, True)
+            self.assertIs(params["includeArgumentOutline"].default, False)
+            schema = registered.parameters["properties"]["includeArgumentOutline"]
+            self.assertEqual(schema["type"], "boolean")
+            self.assertIs(schema.get("default"), False)
+
+    def test_flag_off_cache_key_matches_pre_outline_options(self):
+        file_hash = "ab" * 32
+        base_options = {
+            "maxSignals": 25,
+            "includeFigureForensics": False,
+            "recomputeRaw": True,
+            "includeFlowTriage": True,
+            "includeInternalConsistency": True,
+        }
+        off_options = paper_mcp_workspace._triage_options(25, False, True, True, True, False)
+        on_options = paper_mcp_workspace._triage_options(25, False, True, True, True, True)
+        base_key = cache.compute_cache_key("workspace-triage", file_hash, options=base_options)
+        off_key = cache.compute_cache_key(
+            "workspace-triage", file_hash,
+            options=paper_mcp_workspace._cache_key_options(off_options))
+        on_key = cache.compute_cache_key(
+            "workspace-triage", file_hash,
+            options=paper_mcp_workspace._cache_key_options(on_options))
+        self.assertEqual(off_key, base_key)
+        self.assertNotEqual(on_key, base_key)
+        self.assertNotIn("includeArgumentOutline", paper_mcp_workspace._cache_key_options(off_options))
+        self.assertIs(paper_mcp_workspace._cache_key_options(on_options)["includeArgumentOutline"], True)
 
     def test_pairs_xlsx_ipynb_rmd_and_qmd_without_answer_keys(self):
         with tempfile.TemporaryDirectory() as tmp:

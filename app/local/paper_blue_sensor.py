@@ -1144,6 +1144,18 @@ def _argument_outline_pack(page_texts, max_signals):
     }
 
 
+def compact_argument_outline(summary: dict) -> dict:
+    """Drop bulky outline fields and cap the advisory hint list."""
+    compact = dict(summary)
+    compact["triageHints"] = list(compact.get("triageHints") or [])[:5]
+    compact.pop("outline", None)
+    compact.pop("claimEvidenceMap", None)
+    digest = compact.get("digest")
+    if isinstance(digest, str) and len(digest) > 400:
+        compact["digest"] = digest[:400]
+    return compact
+
+
 def _citation_postdate_hints(bib_out, manuscript_date):
     if manuscript_date is None:
         return []

@@ -315,7 +315,7 @@ def audit_supplements_payload(store, paper_id, file_hash, bundle, max_signals=50
     return out
 
 
-def _compact_sensor_digest(res):
+def _compact_sensor_digest(res, include_argument_outline=False):
     signals = res.get("signals") or []
     by_family = {}
     for sig in signals:
@@ -347,6 +347,9 @@ def _compact_sensor_digest(res):
     for opt_key in ("internalConsistency", "figureForensics", "flowAndSpinTriage", "metaAndTables", "pdfSecurity"):
         if res.get(opt_key) is not None:
             digest[opt_key] = res[opt_key]
+    outline = res.get("argumentOutline")
+    if include_argument_outline and isinstance(outline, dict):
+        digest["argumentOutline"] = paper_blue_sensor.compact_argument_outline(outline)
     return digest
 
 
@@ -510,6 +513,7 @@ def audit_pdf_security_payload(store, paper_id, file_hash, bundle=None, max_sign
 def _sensor_call(
     file_hash, max_signals, store, include_figure_forensics, include_flow_triage,
     include_internal_consistency=False, include_meta_and_tables=False, include_pdf_security=False,
+    include_argument_outline=False,
 ):
     kwargs = {
         "file_hash": file_hash,
@@ -524,6 +528,7 @@ def _sensor_call(
         ("include_internal_consistency", include_internal_consistency),
         ("include_meta_and_tables", include_meta_and_tables),
         ("include_pdf_security", include_pdf_security),
+        ("include_argument_outline", include_argument_outline),
     )
     for name, val in optional_flags:
         if name in accepted:
@@ -556,7 +561,7 @@ def run_blue_sensor_payload(
     store, paper_id, file_hash, max_signals=50, digest_only=False,
     include_figure_forensics=False, include_flow_triage=False,
     include_internal_consistency=False, include_meta_and_tables=False,
-    include_pdf_security=False,
+    include_pdf_security=False, include_argument_outline=False,
 ):
     """Run offline Layer 0 BLUE PDF forensic sensor and optionally compact to digestOnly."""
     _require_sensor_bools((
@@ -566,15 +571,19 @@ def run_blue_sensor_payload(
         ("include_internal_consistency", include_internal_consistency),
         ("include_meta_and_tables", include_meta_and_tables),
         ("include_pdf_security", include_pdf_security),
+        ("include_argument_outline", include_argument_outline),
     ))
     res = paper_blue_sensor.run_blue_sensor(
         paper_id,
         **_sensor_call(
             file_hash, max_signals, store, include_figure_forensics, include_flow_triage,
             include_internal_consistency, include_meta_and_tables, include_pdf_security,
+            include_argument_outline,
         ),
     )
-    return _compact_sensor_digest(res) if digest_only else res
+    if not digest_only:
+        return res
+    return _compact_sensor_digest(res, include_argument_outline=include_argument_outline)
 
 
 def verify_references_payload(

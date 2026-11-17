@@ -414,13 +414,15 @@ def _require_bool(value, code):
 
 
 def _validate_triage_limits(max_signals, include_figure_forensics, recompute_raw,
-                            include_flow_triage=True, include_internal_consistency=True):
+                            include_flow_triage=True, include_internal_consistency=True,
+                            include_argument_outline=False):
     if type(max_signals) is not int or not 1 <= max_signals <= 100:
         raise ValueError("limit")
     _require_bool(include_figure_forensics, "include_figure_forensics")
     _require_bool(recompute_raw, "recompute_raw")
     _require_bool(include_flow_triage, "include_flow_triage")
     _require_bool(include_internal_consistency, "include_internal_consistency")
+    _require_bool(include_argument_outline, "include_argument_outline")
 
 
 def _triage_store(store, max_papers):
@@ -462,7 +464,8 @@ def _accept_sensor_flag(params, kwargs, name, value):
         raise ValueError(name)
 
 
-def _sensor_kwargs(max_signals, include_figure_forensics, include_flow_triage, include_internal_consistency):
+def _sensor_kwargs(max_signals, include_figure_forensics, include_flow_triage,
+                   include_internal_consistency, include_argument_outline=False):
     import inspect
     import paper_mcp_bundle as bundle_mod
     params = inspect.signature(bundle_mod.run_blue_sensor_payload).parameters
@@ -473,15 +476,22 @@ def _sensor_kwargs(max_signals, include_figure_forensics, include_flow_triage, i
     }
     _accept_sensor_flag(params, kwargs, "include_flow_triage", include_flow_triage)
     _accept_sensor_flag(params, kwargs, "include_internal_consistency", include_internal_consistency)
+    _accept_sensor_flag(params, kwargs, "include_argument_outline", include_argument_outline)
     return bundle_mod, kwargs
 
 
-def _paper_signals(store, opened, bundle, options):
+def _sensor_for_paper(store, opened, options):
     bundle_mod, kwargs = _sensor_kwargs(
         options["maxSignals"], options["includeFigureForensics"],
-        options["includeFlowTriage"], options["includeInternalConsistency"])
-    signals = _signals_of(bundle_mod.run_blue_sensor_payload(
-        store, opened["paperId"], opened["fileHash"], **kwargs))
+        options["includeFlowTriage"], options["includeInternalConsistency"],
+        options["includeArgumentOutline"])
+    return bundle_mod.run_blue_sensor_payload(
+        store, opened["paperId"], opened["fileHash"], **kwargs)
+
+
+def _paper_signals(store, opened, bundle, options, sensor):
+    import paper_mcp_bundle as bundle_mod
+    signals = _signals_of(sensor)
     if not bundle:
         return signals
     limit = options["maxSignals"]
@@ -494,14 +504,28 @@ def _paper_signals(store, opened, bundle, options):
     return signals
 
 
+def _compact_outline(summary):
+    if not isinstance(summary, dict):
+        return None
+    from paper_blue_sensor import compact_argument_outline
+    return compact_argument_outline(summary)
+
+
+def _outline_from_sensor(sensor, options):
+    if not options["includeArgumentOutline"] or not isinstance(sensor, dict):
+        return None
+    return _compact_outline(sensor.get("argumentOutline"))
+
+
 def _triage_options(max_signals, include_figure_forensics, recompute_raw, include_flow_triage,
-                    include_internal_consistency):
+                    include_internal_consistency, include_argument_outline):
     return {
         "maxSignals": max_signals,
         "includeFigureForensics": include_figure_forensics,
         "recomputeRaw": recompute_raw,
         "includeFlowTriage": include_flow_triage,
         "includeInternalConsistency": include_internal_consistency,
+        "includeArgumentOutline": include_argument_outline,
     }
 
 
@@ -524,7 +548,12 @@ def _supplement_rows(bundle):
 
 
 def _signal_payload(store, opened, bundle, options):
-    return {"signals": _paper_signals(store, opened, bundle, options)}
+    sensor = _sensor_for_paper(store, opened, options)
+    payload = {"signals": _paper_signals(store, opened, bundle, options, sensor)}
+    outline = _outline_from_sensor(sensor, options)
+    if outline is not None:
+        payload["argumentOutline"] = outline
+    return payload
 
 
 def _signals_from_payload(payload):
@@ -536,20 +565,40 @@ def _signals_from_payload(payload):
     return [item for item in signals if isinstance(item, dict)]
 
 
-def _load_signals(cache, store, opened, bundle, options):
+def _cache_key_options(options):
+    """Keep flag-off keys equal to the keys from before this option existed."""
+    if options.get("includeArgumentOutline") is True:
+        return options
+    keyed = dict(options)
+    keyed.pop("includeArgumentOutline", None)
+    return keyed
+
+
+def _load_triage_payload(cache, store, opened, bundle, options):
     if cache is None:
-        return _signals_from_payload(_signal_payload(store, opened, bundle, options))
+        return _signal_payload(store, opened, bundle, options)
     from paper_evidence_cache import compute_cache_key
     key = compute_cache_key(
         "workspace-triage", opened["fileHash"],
-        supplements=_supplement_rows(bundle), options=options)
+        supplements=_supplement_rows(bundle), options=_cache_key_options(options))
     payload, _hit = cache.get_or_compute(key, lambda: _signal_payload(store, opened, bundle, options))
-    return _signals_from_payload(payload)
+    if isinstance(payload, dict):
+        return payload
+    return {"signals": []}
 
 
-def _rank_from_signals(opened, entry, bundle, signals):
+def _stored_outline(payload, options):
+    if not options["includeArgumentOutline"] or not isinstance(payload, dict):
+        return None
+    outline = payload.get("argumentOutline")
+    if isinstance(outline, dict):
+        return outline
+    return None
+
+
+def _rank_from_signals(opened, entry, bundle, signals, outline=None):
     by_family = _family_counts(signals)
-    return {
+    rank = {
         "paperId": opened["paperId"],
         "name": entry["name"],
         "totalSignals": len(signals),
@@ -557,13 +606,18 @@ def _rank_from_signals(opened, entry, bundle, signals):
         "pairedSupplementCount": len(bundle),
         "priorityScore": _priority_score(by_family),
     }
+    if outline is not None:
+        rank["argumentOutline"] = outline
+    return rank
 
 
 def _rank_body(store, path, entry, paired_paths, cache, options):
     opened = paper_mcp.open_selected(store, path)
     bundle = _load_paired_bundle(paired_paths)
-    signals = _load_signals(cache, store, opened, bundle, options)
-    return _rank_from_signals(opened, entry, bundle, signals)
+    payload = _load_triage_payload(cache, store, opened, bundle, options)
+    return _rank_from_signals(
+        opened, entry, bundle, _signals_from_payload(payload),
+        _stored_outline(payload, options))
 
 
 def _open_triage_cache(cache_dir):
@@ -630,17 +684,18 @@ def _rank_key(item):
 
 def triage_workspace(root, *, max_papers=MAX_WORKSPACE_PAPERS, max_signals_per_paper=25,
                      include_figure_forensics=False, recompute_raw=True, store=None,
-                     include_flow_triage=True, include_internal_consistency=True, cache_dir=None):
+                     include_flow_triage=True, include_internal_consistency=True, cache_dir=None,
+                     include_argument_outline=False):
     """Rank unmasked workspace PDFs. The result never contains a filesystem path."""
     _validate_triage_limits(
         max_signals_per_paper, include_figure_forensics, recompute_raw,
-        include_flow_triage, include_internal_consistency)
+        include_flow_triage, include_internal_consistency, include_argument_outline)
     summary, paths, paired = _scan(root, max_papers)
     active = _triage_store(store, max_papers)
     cache = _open_triage_cache(cache_dir)
     options = _triage_options(
         max_signals_per_paper, include_figure_forensics, recompute_raw,
-        include_flow_triage, include_internal_consistency)
+        include_flow_triage, include_internal_consistency, include_argument_outline)
     ranked = []
     for entry in summary["papers"]:
         if entry["masked"]:
@@ -692,13 +747,15 @@ def register_workspace_tools(server, session):
     @server.tool(name="triage_workspace", annotations=paper_mcp._READONLY)
     def triage_workspace_tool(maxSignalsPerPaper: int = 25, includeFigureForensics: bool = False,
                               recomputeRaw: bool = True, includeFlowTriage: bool = True,
-                              includeInternalConsistency: bool = True) -> CallToolResult:
+                              includeInternalConsistency: bool = True,
+                              includeArgumentOutline: bool = False) -> CallToolResult:
         """Read-only batch ranking of unmasked workspace PDFs. No filesystem path is returned."""
         try:
             payload = triage_workspace(
                 session.root, max_papers=session.max_papers, max_signals_per_paper=maxSignalsPerPaper,
                 include_figure_forensics=includeFigureForensics, recompute_raw=recomputeRaw,
                 include_flow_triage=includeFlowTriage, include_internal_consistency=includeInternalConsistency,
+                include_argument_outline=includeArgumentOutline,
                 store=session.store)
         except ValueError as exc:
             return paper_mcp._error(paper_mcp._fixed(exc))
