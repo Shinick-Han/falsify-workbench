@@ -58,7 +58,12 @@ _CLAIMS_SKIP = (
     "experimental log stores value tokens, so a source case cannot pass without "
     "changing the vendored patterns"
 )
-_HYPHEN_RE = re.compile(r"([A-Za-z])-\n([a-z])")
+_SOFT_HYPHEN_RE = re.compile(r"([A-Za-z])-\n([a-z])")
+_REAL_HYPHEN_RE = re.compile(r"(\d)-\n([A-Za-z])")
+_HYPHEN_DIGIT_RE = re.compile(r"([A-Za-z])-\n(\d)")
+_INSIDE_HYPHEN_RE = re.compile(r"(\d-[A-Za-z]{1,3})\n([a-z]{1,8})(?![A-Za-z])")
+_FIGURE_RE = re.compile(r"Figure \d+: .*?(?=Figure \d+:|\[\d+\] [A-Z]|$)")
+_BIB_RE = re.compile(r"\[\d+\] [A-Z].*?\d{4}\.")
 _DRIVE_RE = re.compile(
     r"(?<![A-Za-z0-9])[A-Za-z]:[\\/][A-Za-z0-9._ -]{1,40}"
     r"(?:[\\/][A-Za-z0-9._ -]+)+"
@@ -415,9 +420,73 @@ def _check_clean_layer0(state: dict, deadline) -> tuple[list[dict], dict]:
     return failures, details
 
 
+def _strip_folio(page: str, number: int) -> str:
+    lines = page.splitlines()
+    while lines and not lines[-1].strip():
+        lines.pop()
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    folio = str(number)
+    if lines and lines[0].strip() == folio:
+        lines = lines[1:]
+    if lines and lines[-1].strip() == folio:
+        lines = lines[:-1]
+    return "\n".join(lines)
+
+
+def _without_folios(text: str) -> str:
+    if "\f" not in text:
+        return text
+    pages = text.split("\f")
+    parts = [_strip_folio(page, index + 1) for index, page in enumerate(pages)]
+    return "\n".join(parts)
+
+
+def _join_breaks(text: str) -> str:
+    previous = None
+    while text != previous:
+        previous = text
+        text = _SOFT_HYPHEN_RE.sub(r"\1\2", text)
+        text = _REAL_HYPHEN_RE.sub(r"\1-\2", text)
+        text = _HYPHEN_DIGIT_RE.sub(r"\1-\2", text)
+        text = _INSIDE_HYPHEN_RE.sub(r"\1\2", text)
+    return text
+
+
+def _bib_index(entry: str) -> int:
+    match = re.search(r"\d+", entry)
+    if match is None:
+        return 0
+    return int(match.group())
+
+
+def _stabilize_layout(text: str) -> str:
+    figures = _FIGURE_RE.findall(text)
+    entries = _BIB_RE.findall(text)
+    if not figures and not entries:
+        return text
+    body = _collapse(_BIB_RE.sub(" ", _FIGURE_RE.sub(" ", text)))
+    trailer = " ".join(figures + sorted(entries, key=_bib_index))
+    whole = _collapse(body + " " + trailer)
+    if sorted(text.split()) != sorted(whole.split()):
+        return text
+    return whole
+
+
 def normalize_pdf_text(text: str) -> str:
-    """Join end-of-line hyphenation and collapse whitespace."""
-    return _collapse(_HYPHEN_RE.sub(r"\1\2", str(text or "")))
+    """Canonical PDF text for both survival counts and whole-document diffs.
+
+    A line or page break may fall anywhere, including after a real hyphen
+    (``8-\\nweek`` becomes ``8-week``) and inside a hyphenated word
+    (``8-we\\nek`` becomes ``8-week``). A letter hyphenation break
+    (``partici-\\npants``) joins without the hyphen. Pages are separated by
+    a form feed; a line that is only that page's running number is removed,
+    so the folio cannot create or hide a difference. Figure captions and
+    bibliography entries are then gathered into one stable trailer, because
+    a float can move an unchanged reference across a page break.
+    """
+    plain = _join_breaks(_without_folios(str(text or "")))
+    return _stabilize_layout(_collapse(plain))
 
 
 def _pdf_pages(data: bytes) -> list[str]:
@@ -429,16 +498,8 @@ def _pdf_pages(data: bytes) -> list[str]:
         raise GateError("unparsable") from None
 
 
-def _joined(pages: list[str]) -> str:
-    return normalize_pdf_text("\n".join(pages))
-
-
-def _line_limit(pages: list[str]) -> int:
-    longest = 0
-    for page in pages:
-        for line in page.splitlines() or [""]:
-            longest = max(longest, len(line))
-    return longest
+def _document(pages: list[str]) -> str:
+    return "\f".join(pages)
 
 
 def _words(text: str) -> list[str]:
@@ -450,48 +511,48 @@ def _only_words(left: str, right: str) -> list[str]:
     return [word for word in _words(left) if word not in blocked]
 
 
-def _pair_present(before: str, after: str, clean: str, defect: str) -> bool:
-    if not before or not after:
-        return False
-    if before not in clean or before in defect:
-        return False
-    return after in defect and after not in clean
+def _longer_first(before: str, after: str):
+    patterns = ((before, "b"), (after, "a"))
+    return tuple(sorted(patterns, key=lambda item: len(item[0]), reverse=True))
 
 
-def _window(words: list[str], token: str) -> str:
-    for index, word in enumerate(words):
-        if token == word or token in word:
-            start = max(0, index - 4)
-            end = min(len(words), index + 5)
-            return " ".join(words[start:end])
-    return ""
+def _take_pattern(text: str, index: int, patterns, counts: dict) -> int:
+    for pattern, label in patterns:
+        if pattern and text.startswith(pattern, index):
+            counts[label] += 1
+            return len(pattern)
+    return 0
 
 
-def _windows_present(before: str, after: str, clean: str, defect: str) -> bool:
-    removed = _only_words(before, after)
-    added = _only_words(after, before)
-    if not removed or not added:
-        return False
-    before_words = _words(before)
-    after_words = _words(after)
-    for token in removed:
-        needle = _window(before_words, token)
-        if not needle or needle not in clean or needle in defect:
-            return False
-    for token in added:
-        needle = _window(after_words, token)
-        if not needle or needle not in defect or needle in clean:
-            return False
-    return True
+def _count_pair(text: str, before: str, after: str) -> tuple[int, int]:
+    counts = {"b": 0, "a": 0}
+    patterns = _longer_first(before, after)
+    index = 0
+    limit = len(text)
+    while index < limit:
+        step = _take_pattern(text, index, patterns, counts)
+        index += step or 1
+    return counts["b"], counts["a"]
 
 
 def context_survives(before: str, after: str, clean: str, defect: str, line_limit: int) -> bool:
-    """Return whether a changed context is visible on the expected side only."""
-    if _pair_present(before, after, clean, defect):
-        return True
-    if max(len(before), len(after)) <= line_limit:
+    """Return whether after increased and before decreased by the same amount.
+
+    Counts use the canonical PDF text, so the same sentence may occur
+    elsewhere and a break may fall after a real hyphen or inside a hyphenated
+    word. A context whose before and after strings are equal, or that leaves
+    the document unchanged, fails. ``line_limit`` is retained for callers.
+    """
+    del line_limit
+    before_n = normalize_pdf_text(before)
+    after_n = normalize_pdf_text(after)
+    if not before_n or not after_n or before_n == after_n:
         return False
-    return _windows_present(before, after, clean, defect)
+    clean_before, clean_after = _count_pair(normalize_pdf_text(clean), before_n, after_n)
+    defect_before, defect_after = _count_pair(normalize_pdf_text(defect), before_n, after_n)
+    gained = defect_after - clean_after
+    lost = clean_before - defect_before
+    return gained > 0 and gained == lost
 
 
 def _contexts(defect: dict) -> list[dict]:
@@ -517,19 +578,23 @@ def _png_bytes(root: Path, name: str) -> bytes | None:
     return _read_bytes(root / "figures" / name)
 
 
-def _text_context_ok(context: dict, clean: str, defect: str, line_limit: int) -> bool:
+def _image_context(context: dict) -> bool:
+    return isinstance(context.get("figureFile"), str)
+
+
+def _text_context_ok(context: dict, clean: str, defect: str) -> bool:
     before = context.get("before")
     after = context.get("after")
     if not isinstance(before, str) or not isinstance(after, str):
         return False
-    return context_survives(_collapse(before), _collapse(after), clean, defect, line_limit)
+    return context_survives(before, after, clean, defect, 0)
 
 
-def _one_survival(defect: dict, clean: str, defect_text: str, state: dict, line_limit: int) -> list[dict]:
+def _one_survival(defect: dict, clean: str, defect_text: str, state: dict) -> list[dict]:
     failures = []
     for context in _contexts(defect):
         surface = str(context.get("surface") or "")
-        if surface.startswith("figure:"):
+        if _image_context(context):
             name = _figure_name(context)
             left = _png_bytes(state["root"] / "clean", name)
             right = _png_bytes(state["root"] / "defect", name)
@@ -537,8 +602,8 @@ def _one_survival(defect: dict, clean: str, defect_text: str, state: dict, line_
                 code = "figure_unchanged" if left == right and left is not None else "defect_not_visible"
                 failures.append(_failure("defect_survival", code, name or surface))
             continue
-        if surface.startswith("tex:") or surface.startswith("table:"):
-            if not _text_context_ok(context, clean, defect_text, line_limit):
+        if surface.startswith(("tex:", "table:", "figure:")):
+            if not _text_context_ok(context, clean, defect_text):
                 failures.append(_failure("defect_survival", "defect_not_visible", surface))
     return failures
 
@@ -548,13 +613,12 @@ def _check_survival(state: dict) -> tuple[list[dict], dict]:
     defect_pages = _pdf_pages(state["defect_pdf"])
     state["clean_pages"] = clean_pages
     state["defect_pages"] = defect_pages
-    clean = _joined(clean_pages)
-    defect = _joined(defect_pages)
-    limit = max(_line_limit(clean_pages), _line_limit(defect_pages))
+    clean = _document(clean_pages)
+    defect = _document(defect_pages)
     failures = []
     for item in state["ledger"].get("defects") or []:
         if isinstance(item, dict):
-            failures.extend(_one_survival(item, clean, defect, state, limit))
+            failures.extend(_one_survival(item, clean, defect, state))
     return failures, {"contexts": len(failures)}
 
 
@@ -572,18 +636,44 @@ def word_hunks(left: list[str], right: list[str]) -> list[list[str]]:
     return hunks
 
 
+def _pair_tokens(before: str, after: str) -> set[str]:
+    left = normalize_pdf_text(before)
+    right = normalize_pdf_text(after)
+    return set(_only_words(left, right)) | set(_only_words(right, left))
+
+
 def _context_tokens(defect: dict) -> set[str]:
     tokens = set()
     for context in _contexts(defect):
-        surface = str(context.get("surface") or "")
-        if not surface.startswith("tex:") and not surface.startswith("table:"):
+        if _image_context(context):
             continue
         before = context.get("before")
         after = context.get("after")
         if isinstance(before, str) and isinstance(after, str):
-            tokens.update(_only_words(before, after))
-            tokens.update(_only_words(after, before))
+            tokens.update(_pair_tokens(before, after))
     return tokens
+
+
+def _plain_contexts(defect: dict) -> list[dict]:
+    found = []
+    for context in _contexts(defect):
+        if _image_context(context):
+            continue
+        before = context.get("before")
+        after = context.get("after")
+        if isinstance(before, str) and isinstance(after, str):
+            found.append(context)
+    return found
+
+
+def _context_matches(context: dict, hunks: list[list[str]]) -> bool:
+    tokens = _pair_tokens(str(context.get("before") or ""), str(context.get("after") or ""))
+    if not tokens:
+        return False
+    for hunk in hunks:
+        if _hunk_covered(hunk, tokens):
+            return True
+    return False
 
 
 def _hunk_covered(hunk: list[str], tokens: set[str]) -> bool:
@@ -595,12 +685,17 @@ def _hunk_covered(hunk: list[str], tokens: set[str]) -> bool:
 
 
 def hunks_attributed(clean_pages: list[list[str]], defect_pages: list[list[str]], tokens: set[str]) -> list[list[str]]:
-    """Return word hunks that no defect token explains."""
+    """Return whole-document word hunks that no defect token explains.
+
+    Pages are one word stream. Breaks must already have been removed by
+    ``normalize_pdf_text``; a moved page does not create a hunk by itself.
+    """
+    left = [word for page in clean_pages for word in page]
+    right = [word for page in defect_pages for word in page]
     unexplained = []
-    for left, right in zip(clean_pages, defect_pages):
-        for hunk in word_hunks(left, right):
-            if hunk and not _hunk_covered(hunk, tokens):
-                unexplained.append(hunk)
+    for hunk in word_hunks(left, right):
+        if hunk and not _hunk_covered(hunk, tokens):
+            unexplained.append(hunk)
     return unexplained
 
 
@@ -609,7 +704,7 @@ def _changed_figures(ledger: dict) -> set[str]:
     for defect in ledger.get("defects") or []:
         if isinstance(defect, dict):
             for context in _contexts(defect):
-                if str(context.get("surface") or "").startswith("figure:"):
+                if isinstance(context.get("figureFile"), str):
                     names.add(_figure_name(context))
     return {name for name in names if name}
 
@@ -643,21 +738,38 @@ def _image_counts(data: bytes) -> list[int]:
         return [len(page.get_images()) for page in doc]
 
 
+def _image_total(data: bytes) -> int:
+    return sum(_image_counts(data))
+
+
+def _diff_failures(clean_words, defect_words, tokens, contexts) -> list[dict]:
+    failures = []
+    hunks = word_hunks(clean_words, defect_words)
+    for hunk in hunks:
+        if hunk and not _hunk_covered(hunk, tokens):
+            failures.append(_failure("diff_attribution", "unexplained_diff", " ".join(hunk)))
+    for context in contexts:
+        if not _context_matches(context, hunks):
+            failures.append(_failure(
+                "diff_attribution", "unexplained_diff", str(context.get("surface") or "context"),
+            ))
+    return failures
+
+
 def _check_diff(state: dict) -> tuple[list[dict], dict]:
     clean_pages = state.get("clean_pages") or _pdf_pages(state["clean_pdf"])
     defect_pages = state.get("defect_pages") or _pdf_pages(state["defect_pdf"])
-    failures = []
-    if len(clean_pages) != len(defect_pages):
-        failures.append(_failure("diff_attribution", "page_count_differs", "pages"))
-    else:
-        tokens = set()
-        for defect in state["ledger"].get("defects") or []:
-            if isinstance(defect, dict):
-                tokens.update(_context_tokens(defect))
-        for hunk in hunks_attributed(_page_words(clean_pages), _page_words(defect_pages), tokens):
-            failures.append(_failure("diff_attribution", "unexplained_diff", " ".join(hunk)))
-        if _image_counts(state["clean_pdf"]) != _image_counts(state["defect_pdf"]):
-            failures.append(_failure("diff_attribution", "unexplained_figure_change", "image count"))
+    tokens = set()
+    contexts = []
+    for defect in state["ledger"].get("defects") or []:
+        if isinstance(defect, dict):
+            tokens.update(_context_tokens(defect))
+            contexts.extend(_plain_contexts(defect))
+    clean_words = normalize_pdf_text(_document(clean_pages)).split()
+    defect_words = normalize_pdf_text(_document(defect_pages)).split()
+    failures = _diff_failures(clean_words, defect_words, tokens, contexts)
+    if _image_total(state["clean_pdf"]) != _image_total(state["defect_pdf"]):
+        failures.append(_failure("diff_attribution", "unexplained_figure_change", "image count"))
     failures.extend(_figure_failures(state))
     return failures, {"pages": len(clean_pages)}
 
@@ -666,23 +778,42 @@ def _signal_key(signal: dict) -> tuple:
     return (signal.get("kind"), signal.get("family"), _collapse(signal.get("excerpt")))
 
 
-def _overlaps(excerpt: str, context: str) -> bool:
-    left = _collapse(excerpt)
-    right = _collapse(context)
-    if not left or not right:
-        return False
-    if left in right or right in left:
+def _core_token(word: str) -> str:
+    return word.strip(".,;:()[]")
+
+
+def _changed_cores(before: str, after: str) -> set[str]:
+    found = set()
+    for word in _only_words(before, after) + _only_words(after, before):
+        core = _core_token(word)
+        if len(core) >= 4:
+            found.add(core)
+    return found
+
+
+def _contains_context(excerpt: str, text: str) -> bool:
+    return len(text) >= 4 and text in excerpt
+
+
+def _quotes_changed_unit(excerpt: str, before: str, after: str) -> bool:
+    excerpt_n = normalize_pdf_text(excerpt)
+    before_n = normalize_pdf_text(before)
+    after_n = normalize_pdf_text(after)
+    if _contains_context(excerpt_n, before_n) or _contains_context(excerpt_n, after_n):
         return True
-    shared = set(left.split()) & set(right.split())
-    return any(len(word) >= 4 for word in shared)
+    for core in _changed_cores(before_n, after_n):
+        if core in excerpt_n:
+            return True
+    return False
 
 
 def _signal_hits(signal: dict, defect: dict) -> bool:
     excerpt = str(signal.get("excerpt") or "")
     for context in _contexts(defect):
-        for key in ("before", "after"):
-            value = context.get(key)
-            if isinstance(value, str) and _overlaps(excerpt, value):
+        before = context.get("before")
+        after = context.get("after")
+        if isinstance(before, str) and isinstance(after, str):
+            if _quotes_changed_unit(excerpt, before, after):
                 return True
     return False
 
