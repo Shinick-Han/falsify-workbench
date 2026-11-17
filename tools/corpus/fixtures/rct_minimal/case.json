@@ -1,0 +1,17 @@
+{
+  "schema": "falsify.source-case.v1",
+  "caseId": "rct-minimal",
+  "title": "FX-217 versus placebo in fictional score syndrome: a synthetic two-arm trial",
+  "domain": "clinical-rct",
+  "synthetic": true,
+  "oracleScope": "P0",
+  "documentClass": "article",
+  "files": {
+    "idea": "inputs/idea.md",
+    "log": "inputs/experimental_log.md",
+    "values": "inputs/values.json",
+    "figures": "inputs/figures.json",
+    "references": "inputs/refs.json",
+    "tex": "source/paper.tex"
+  }
+}

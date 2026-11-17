@@ -1,0 +1,76 @@
+{
+  "schema": "falsify.vendor-receipt.v1",
+  "name": "paper-orchestra",
+  "repository": "https://github.com/Ar9av/PaperOrchestra",
+  "commit": "6a319132932ee031e2d759b0f7f5075cf77bd1cf",
+  "license": "MIT",
+  "licenseFile": "upstream/LICENSE",
+  "hash": "c0ce3e0fca5a2e8968e6d418590f2fdf321d9fdb466c8aadab7c1c27c6d2f6fa",
+  "modified": false,
+  "files": [
+    {
+      "path": "upstream/LICENSE",
+      "sha256": "52030b80f98030f9a776c4b73eaf80b66bf82608e533be59023f84d015d2646a"
+    },
+    {
+      "path": "upstream/skills/content-refinement-agent/references/claim-evidence-map.md",
+      "sha256": "06e049ebb22f75c2227ee41ecba8db80cbc6c255423b777fd1b91d460e87e639"
+    },
+    {
+      "path": "upstream/skills/content-refinement-agent/references/da-reviewer.md",
+      "sha256": "d118d0ffc91e54f0a9045c1faa041d5c797ea2d5cce5200bf0d9daf3586df4ad"
+    },
+    {
+      "path": "upstream/skills/content-refinement-agent/references/reverse-outline.md",
+      "sha256": "806a278802b3d687ad0ca3c0c395db0f92599963cd3658186f32eaad1fe2b13f"
+    },
+    {
+      "path": "upstream/skills/content-refinement-agent/scripts/reverse_outline.py",
+      "sha256": "9281d75ad757577e3f8e2d0e6dafaf0b93ddcaca71d7efa30dbabf85ac64f873"
+    },
+    {
+      "path": "upstream/skills/paper-orchestra/references/io-contract.md",
+      "sha256": "78371f9c365f03beb21c60afbfb2dbfd764d97bdaeb95acd8b3460de7cbff76d"
+    },
+    {
+      "path": "upstream/skills/paper-orchestra/scripts/anti_leakage_check.py",
+      "sha256": "e03bb92fd934673085bcb45a61de7bf2ea15c8328a9c4063cf80c9e669e615e6"
+    },
+    {
+      "path": "upstream/skills/paper-orchestra/scripts/claim_evidence_gate.py",
+      "sha256": "7408af66c831fd29c4730b065b5cfadf8d262ff3aed0c59544a1fdd37e54416e"
+    },
+    {
+      "path": "upstream/skills/plotting-agent/references/chart-patterns.md",
+      "sha256": "d7bcb33896cd06a90d7c621804bd94d4a25ee8dc00d6227a439a6ec678f0adf5"
+    },
+    {
+      "path": "upstream/skills/plotting-agent/scripts/figure_lint.py",
+      "sha256": "22ca9ba880d0ebc8b4cc84e5da5dc6dde86b12da7eb4753aaf4bc47905ca5782"
+    },
+    {
+      "path": "upstream/skills/plotting-agent/scripts/render_matplotlib.py",
+      "sha256": "7df685330bcaa90f9f7e78950842f497f79d57ecf9c4baeabc52e43cb460378b"
+    },
+    {
+      "path": "upstream/skills/section-writing-agent/scripts/extract_metrics.py",
+      "sha256": "c5f1649a7cac7e36f884c02c582f222155b80a4d638d248412252ef057a5a8ce"
+    },
+    {
+      "path": "upstream/skills/section-writing-agent/scripts/latex_sanity.py",
+      "sha256": "36bfc1bf06fcff4ec7dbbea430a85678c8fc5d047cec5bd2c257efd6771df97a"
+    },
+    {
+      "path": "upstream/skills/section-writing-agent/scripts/orphan_cite_gate.py",
+      "sha256": "5fbab45fa24eb472a047ce13ab59efb465a6ed22a4d3495a5f68def5f611e415"
+    },
+    {
+      "path": "upstream/skills/section-writing-agent/scripts/table_lint.py",
+      "sha256": "991b48e96fa848ad21eab8e50fc6c8be8214ed710c4fe7d373bcc5dec653496c"
+    },
+    {
+      "path": "upstream/skills/shared/ai_failure_modes.md",
+      "sha256": "fecd998ff10fc2eb44266022e2de48fb914a8e8eacc2fc4d7ab9d3fecd031a94"
+    }
+  ]
+}
