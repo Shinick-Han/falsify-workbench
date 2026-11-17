@@ -1,0 +1,17 @@
+{
+  "schema": "falsify.source-mutation.v1",
+  "caseId": "cohort-minimal",
+  "mutationSetId": "m03-figure-risk",
+  "mutations": [
+    {
+      "defectId": "fig-risk",
+      "operator": "set_text",
+      "valueId": "risk_exp_pct",
+      "text": "40.0",
+      "surfaces": ["figure:F1"],
+      "family": "D1",
+      "difficulty": "L4",
+      "rationale": "Figure F1 exposed overall bar disagrees with the printed exposed risk."
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "schema": "falsify.source-case.v1",
+  "caseId": "cohort-minimal",
+  "title": "Hearthsalt lozenge use and dusk-spot in one adult cohort",
+  "domain": "clinical-cohort",
+  "synthetic": true,
+  "oracleScope": "P0",
+  "documentClass": "article",
+  "files": {
+    "idea": "inputs/idea.md",
+    "log": "inputs/experimental_log.md",
+    "values": "inputs/values.json",
+    "figures": "inputs/figures.json",
+    "references": "inputs/refs.json",
+    "tex": "source/paper.tex"
+  }
+}

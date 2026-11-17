@@ -1,0 +1,17 @@
+{
+  "schema": "falsify.source-mutation.v1",
+  "caseId": "cohort-minimal",
+  "mutationSetId": "m05-claim-spin",
+  "mutations": [
+    {
+      "defectId": "spin-claim",
+      "operator": "apply_template",
+      "valueId": "ph_concl_claim",
+      "template": "strengthen_claim",
+      "surfaces": "*",
+      "family": "S1",
+      "difficulty": "L2",
+      "rationale": "The conclusion replaces association wording with a causal claim."
+    }
+  ]
+}
