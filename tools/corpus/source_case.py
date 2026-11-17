@@ -767,12 +767,197 @@ def _file_hash(path: Path) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _cite_override(item: dict) -> tuple:
+    cite_key = item.get("citeKey")
+    with_key = item.get("withKey")
+    surfaces = item.get("surfaces")
+    occurrence = item.get("occurrence", 1)
+    if not isinstance(cite_key, str) or not isinstance(with_key, str):
+        _fail("schema_invalid", "citation override")
+    if not isinstance(surfaces, list) or len(surfaces) != 1:
+        _fail("schema_invalid", "citation override")
+    if not isinstance(surfaces[0], str) or not surfaces[0].startswith("tex:"):
+        _fail("schema_invalid", "citation override")
+    if type(occurrence) is not int or occurrence < 1:
+        _fail("schema_invalid", "citation override")
+    return cite_key, with_key, surfaces[0], occurrence
+
+
+def _split_overrides(overrides):
+    values = []
+    cites = []
+    for item in overrides or []:
+        if not isinstance(item, dict):
+            _fail("schema_invalid", "override")
+        if "citeKey" in item and "valueId" in item:
+            _fail("schema_invalid", "override")
+        if "citeKey" in item:
+            cites.append(_cite_override(item))
+            continue
+        values.append(item)
+    return values, cites
+
+
+def _group_spans(line: str, offset: int, match, cite_key: str) -> list:
+    found = []
+    body = match.group(1)
+    body_start = match.start(1)
+    pos = 0
+    for part in body.split(","):
+        if part.strip() == cite_key:
+            local = part.find(cite_key)
+            start = offset + body_start + pos + local
+            found.append((start, start + len(cite_key)))
+        pos += len(part) + 1
+    return found
+
+
+def _line_spans(line, offset, current, in_abstract, surface, cite_key) -> list:
+    found = []
+    for match in _CITE_RE.finditer(line):
+        chosen = _pick_surface(line, match.start(), current, in_abstract)
+        if chosen == surface:
+            found.extend(_group_spans(line, offset, match, cite_key))
+    return found
+
+
+def _citation_spans(tex: str, surface: str, cite_key: str) -> list:
+    """Return source spans of ``cite_key`` on one tex surface, in reading order."""
+    current = "tex:front"
+    in_abstract = False
+    spans = []
+    offset = 0
+    for line in tex.splitlines(keepends=True):
+        current, in_abstract = _open_tex_state(line, current, in_abstract)
+        spans.extend(_line_spans(line, offset, current, in_abstract, surface, cite_key))
+        in_abstract = _close_abstract(line, in_abstract)
+        offset += len(line)
+    return spans
+
+
+def _citing_surfaces(tex: str, cite_key: str) -> list:
+    current = "tex:front"
+    in_abstract = False
+    found = []
+    for line in tex.splitlines(keepends=True):
+        current, in_abstract = _open_tex_state(line, current, in_abstract)
+        _collect_cite_surfaces(line, current, in_abstract, cite_key, found)
+        in_abstract = _close_abstract(line, in_abstract)
+    return found
+
+
+def _collect_cite_surfaces(line, current, in_abstract, cite_key, found) -> None:
+    for match in _CITE_RE.finditer(line):
+        chosen = _pick_surface(line, match.start(), current, in_abstract)
+        keys = [part.strip() for part in match.group(1).split(",")]
+        if cite_key in keys and chosen not in found:
+            found.append(chosen)
+
+
+def _bibliography_order(tex: str, references) -> list:
+    ordered = []
+    seen = set()
+    for match in _CITE_RE.finditer(tex):
+        for key in match.group(1).split(","):
+            cleaned = key.strip()
+            if cleaned and cleaned not in seen:
+                seen.add(cleaned)
+                ordered.append(cleaned)
+    for ref in references:
+        key = ref.get("key") if isinstance(ref, dict) else None
+        if key and key not in seen:
+            seen.add(key)
+            ordered.append(key)
+    return ordered
+
+
+def _known_cite_keys(references) -> set:
+    keys = set()
+    for ref in references:
+        if isinstance(ref, dict) and isinstance(ref.get("key"), str):
+            keys.add(ref["key"])
+    return keys
+
+
+def _require_cite_pool(references, cite_key: str, with_key: str) -> None:
+    known = _known_cite_keys(references)
+    if cite_key not in known:
+        _fail("unknown_citation", cite_key)
+    if with_key not in known:
+        _fail("unknown_citation", with_key)
+
+
+def _reject_span_overlap(located) -> None:
+    spans = sorted(item[0] for item in located)
+    for earlier, later in zip(spans, spans[1:]):
+        if earlier[1] > later[0]:
+            _fail("override_conflict", "citation")
+
+
+def _locate_cites(tex, references, cites) -> list:
+    located = []
+    for cite_key, with_key, surface, occurrence in cites:
+        _require_cite_pool(references, cite_key, with_key)
+        spans = _citation_spans(tex, surface, cite_key)
+        if occurrence > len(spans):
+            _fail("override_unbound", surface)
+        if cite_key == with_key:
+            _fail("schema_invalid", "citation override")
+        located.append((spans[occurrence - 1], cite_key, with_key, surface))
+    _reject_span_overlap(located)
+    return located
+
+
+def _record_bibliography(applied, located, before, after) -> None:
+    previous = ",".join(before)
+    current = ",".join(after)
+    seen = set()
+    for _span, cite_key, _with_key, _surface in located:
+        if cite_key in seen:
+            continue
+        seen.add(cite_key)
+        applied.append({
+            "valueId": cite_key,
+            "surface": "tex:bibliography",
+            "before": previous,
+            "after": current,
+        })
+
+
+def _apply_cite_overrides(tex: str, references, cites, applied) -> str:
+    """Replace citation keys. Value overrides cannot name a cite key."""
+    if not cites:
+        return tex
+    before = _bibliography_order(tex, references)
+    located = _locate_cites(tex, references, cites)
+    ordered = sorted(located, key=lambda item: item[0][0], reverse=True)
+    for (start, end), cite_key, with_key, surface in ordered:
+        tex = tex[:start] + with_key + tex[end:]
+        applied.append({
+            "valueId": cite_key,
+            "surface": surface,
+            "before": cite_key,
+            "after": with_key,
+        })
+    after = _bibliography_order(tex, references)
+    if after != before:
+        _record_bibliography(applied, located, before, after)
+    return tex
+
+
 def resolve_case(case_dir, overrides=None) -> dict:
-    """Substitute tokens. Overrides may target one surface or ``\"*\"``."""
+    """Substitute tokens. Overrides may target one surface or ``\"*\"``.
+
+    A citation override (``citeKey``, ``withKey``, one ``tex:`` surface,
+    optional ``occurrence``) rewrites one citation key. ``{{v:ID}}`` overrides
+    do not name citation keys, and ``render.py`` is unchanged.
+    """
     model = _load_model(case_dir)
-    mapping = _override_map(model, overrides)
+    value_overrides, cite_overrides = _split_overrides(overrides)
+    mapping = _override_map(model, value_overrides)
     files = model["manifest"]["files"]
     tex = _render_tex(model["texts"][files["tex"]], mapping)
+    tex = _apply_cite_overrides(tex, model["references"], cite_overrides, mapping["applied"])
     tables = _render_tables(model["tables"], mapping)
     figures = _render_figures(model["figures"], mapping)
     _reject_marker(json.dumps(tables), "table")

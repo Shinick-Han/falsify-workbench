@@ -32,8 +32,11 @@ BLIND_SCHEMA = 'falsify.blind-verification.v1'
 ARENA_SCHEMA = 'falsify.arena-evaluation.v1'
 
 WORLDS = ('W1', 'W2', 'W3', 'W4', 'W5')
+# D1–D7 stay in every byFamily object. Families the report validator also
+# accepts (S1, D4-1) are added by the axis tally only when gold contains them.
 FAMILIES = ('D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7')
 DIFFICULTIES = ('L1', 'L2', 'L3', 'L4')
+CONTEXT_PRODUCERS = frozenset({'source-native', 'pdf-mutation'})
 
 PDF_LEAK_TOKENS = (
     'falsify', 'falsify-red', 'red-plan', 'red_plan', 'gold_ledger', 'gold-ledger',
@@ -568,6 +571,37 @@ def _resolve_stealth_pass(raw: dict) -> bool | None:
     return None
 
 
+def _raw_not_audited(raw: dict) -> bool:
+    return str(raw.get('stealthStatus') or '').strip().lower() == 'not_audited'
+
+
+def _ledger_producer(gold_ledger) -> str:
+    if not isinstance(gold_ledger, dict):
+        return ''
+    producer = gold_ledger.get('producer')
+    if not isinstance(producer, str):
+        return ''
+    return producer.strip()
+
+
+def _context_pairs(raw: dict) -> tuple[tuple[str, str], ...]:
+    source = raw.get('source')
+    if not isinstance(source, dict):
+        return ()
+    contexts = source.get('contexts')
+    if not isinstance(contexts, list):
+        return ()
+    pairs = []
+    for item in contexts:
+        if not isinstance(item, dict):
+            continue
+        after = _norm_space(item.get('after'))
+        if not after:
+            continue
+        pairs.append((after, _norm_space(item.get('before'))))
+    return tuple(pairs)
+
+
 def _first_supplement_name(raw: dict, *, include_name: bool = False) -> str | None:
     keys = (
         ('supplementName', 'supplementFile', 'supplement', 'name')
@@ -615,6 +649,7 @@ def _normalize_gold_item(raw: dict, idx: int) -> dict:
         'after': after,
         'texts': texts,
         'stealthPass': _resolve_stealth_pass(raw),
+        'stealthNotAudited': _raw_not_audited(raw),
         'groupId': _norm_space(raw.get('groupId')) or None,
         'afterTokens': after_tokens,
         'beforeTokens': before_tokens,
@@ -634,7 +669,17 @@ def _normalize_gold_ledger(gold_ledger) -> list[dict]:
             raise ValueError('gold_ledger_invalid')
     else:
         raise ValueError('gold_ledger_invalid')
-    return [_normalize_gold_item(d, i) for i, d in enumerate(items) if isinstance(d, dict)]
+    use_contexts = _ledger_producer(gold_ledger) in CONTEXT_PRODUCERS
+    return [_prepare_gold_item(d, i, use_contexts) for i, d in enumerate(items) if isinstance(d, dict)]
+
+
+def _prepare_gold_item(raw: dict, idx: int, use_contexts: bool) -> dict:
+    item = _normalize_gold_item(raw, idx)
+    if use_contexts:
+        pairs = _context_pairs(raw)
+        if pairs:
+            item['contextPairs'] = pairs
+    return item
 
 
 def _finding_status_kind(raw: dict) -> str:
@@ -837,7 +882,7 @@ def _changed_token_match_score(target: dict, finding: dict) -> float:
     )
 
 
-def _match_score(target: dict, finding: dict) -> float:
+def _quote_match_score(target: dict, finding: dict) -> float:
     text_sim = _best_text_similarity(target['texts'], finding['texts'])
     if target['itemId'] and finding['itemId'] and target['itemId'].lower() == finding['itemId'].lower():
         if _pages_compatible(target['pageIndex'], finding['pageIndex']):
@@ -852,6 +897,33 @@ def _match_score(target: dict, finding: dict) -> float:
     if _pages_compatible(target['pageIndex'], finding['pageIndex']) and text_sim >= 0.35:
         return 0.45 + 0.45 * text_sim
     return _changed_token_match_score(target, finding)
+
+
+def _context_view(target: dict, after: str, before: str) -> dict:
+    after_tokens = _changed_tokens(after)
+    before_tokens = _changed_tokens(before)
+    return {
+        'pageIndex': target.get('pageIndex'),
+        'bbox': target.get('bbox'),
+        'itemId': target.get('itemId'),
+        'supplementName': target.get('supplementName'),
+        'texts': [after],
+        'afterTokens': after_tokens - before_tokens,
+        'beforeTokens': before_tokens - after_tokens,
+        'rationaleTokens': target.get('rationaleTokens') or set(),
+    }
+
+
+def _context_match_score(target: dict, finding: dict) -> float:
+    """Score source.contexts after-text with the quote rule and page tolerance."""
+    best = 0.0
+    for after, before in target.get('contextPairs') or ():
+        best = max(best, _quote_match_score(_context_view(target, after, before), finding))
+    return best
+
+
+def _match_score(target: dict, finding: dict) -> float:
+    return max(_quote_match_score(target, finding), _context_match_score(target, finding))
 
 
 def _greedy_bipartite_match(gold: list[dict], findings: list[dict]) -> tuple[list[tuple[int, int, float]], set[int], set[int]]:
@@ -1040,6 +1112,7 @@ def _evaluate_single_run(gold: list[dict], run: dict, baseline: list[dict]) -> t
             for g_i, f_i, sc in abstain_pairs
         ],
     }
+    _record_not_audited(run_summary, gold)
     return run_summary, defect_states, sel_items
 
 
@@ -1075,6 +1148,23 @@ def _split_of_matched_score(gold: list[dict], finding: dict, pairs) -> float:
     return best
 
 
+def _matched_context_score(gold: list[dict], finding: dict, pairs) -> float:
+    best = 0.0
+    seen: set[int] = set()
+    for g_idx, _finding_idx, _score in pairs:
+        if g_idx in seen:
+            continue
+        seen.add(g_idx)
+        best = max(best, _context_match_score(gold[g_idx], finding))
+    return best
+
+
+def _is_repeat_of_matched(gold: list[dict], finding: dict, pairs) -> bool:
+    if _split_of_matched_score(gold, finding, pairs) > 0.0:
+        return True
+    return _matched_context_score(gold, finding, pairs) > 0.0
+
+
 def _classify_unmatched_findings(
     run_id: str,
     active: list[dict],
@@ -1093,7 +1183,7 @@ def _classify_unmatched_findings(
             continue
         if _matches_any_target(baseline, f_item):
             exempted.append(f_item)
-        elif _split_of_matched_score(gold, f_item, pairs) > 0.0:
+        elif _is_repeat_of_matched(gold, f_item, pairs):
             splits.append({
                 'runId': run_id,
                 'findingId': f_item['findingId'],
@@ -1123,8 +1213,18 @@ def _compute_f1(precision: float | None, recall: float | None) -> float | None:
     return _round4(2.0 * precision * recall / (precision + recall))
 
 
+def _counts_toward_stealth(item: dict) -> bool:
+    return item['stealthPass'] is True and not item.get('stealthNotAudited')
+
+
+def _record_not_audited(summary: dict, gold: list[dict]) -> None:
+    count = sum(1 for item in gold if item.get('stealthNotAudited'))
+    if count:
+        summary['stealthNotAudited'] = count
+
+
 def _compute_stealth_yield(gold: list[dict], matched_g: set[int]) -> tuple[int, int, float | None]:
-    stealth_indices = [i for i, item in enumerate(gold) if item['stealthPass'] is True]
+    stealth_indices = [i for i, item in enumerate(gold) if _counts_toward_stealth(item)]
     if not stealth_indices:
         return 0, 0, None
     evaded = sum(1 for i in stealth_indices if i not in matched_g)
@@ -1226,7 +1326,7 @@ def evaluate_arena_match(
         state_matrix.append(states)
         pooled_selective_items.extend(sel_items)
 
-    return {
+    report = {
         'schema': ARENA_SCHEMA,
         'goldCount': len(gold),
         'runCount': len(runs),
@@ -1237,6 +1337,13 @@ def evaluate_arena_match(
         'selectivePrediction': _format_selective(compute_selective_prediction(pooled_selective_items)),
         'feedbackDigest': _build_feedback_digest(gold, state_matrix, run_summaries),
     }
+    _record_producer(report, _ledger_producer(gold_ledger))
+    return report
+
+
+def _record_producer(report: dict, producer: str) -> None:
+    if producer:
+        report['goldProducer'] = producer
 
 
 def _build_cli_parser() -> argparse.ArgumentParser:

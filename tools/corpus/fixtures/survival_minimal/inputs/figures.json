@@ -1,0 +1,27 @@
+{
+  "schema": "falsify.source-figures.v1",
+  "figures": [
+    {
+      "figureId": "F1",
+      "caption": "Flare-free survival percent at the end of each band. At {{v:m12}} months the Kelp-9 estimate is {{v:s_k12}} and the blank estimate is {{v:s_b12}}.",
+      "spec": {
+        "type": "line",
+        "aspect_ratio": "16:9",
+        "xlabel": "Month",
+        "ylabel": "Flare-free survival (%)",
+        "series": [
+          {
+            "name": "Kelp-9",
+            "x": ["{{v:m3}}", "{{v:m6}}", "{{v:m9}}", "{{v:m12}}"],
+            "y": ["{{v:s_k3}}", "{{v:s_k6}}", "{{v:s_k9}}", "{{v:s_k12}}"]
+          },
+          {
+            "name": "Blank",
+            "x": ["{{v:m3}}", "{{v:m6}}", "{{v:m9}}", "{{v:m12}}"],
+            "y": ["{{v:s_b3}}", "{{v:s_b6}}", "{{v:s_b9}}", "{{v:s_b12}}"]
+          }
+        ]
+      }
+    }
+  ]
+}

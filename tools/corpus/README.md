@@ -34,7 +34,7 @@ The renderer also writes three preamble injections, each at most once. `\input{g
 
 `source_mutator.py` turns a `falsify.source-mutation.v1` spec into overrides, renders the clean and defect twin with `render.py`, and writes a sealed gold ledger. It makes no model calls and does not call a network.
 
-A spec names a `mutationSetId` and a list of mutations. Each mutation has a `defectId`, an operator (`set_text`, `shift_number`, `scale_number`, `transpose_digits`, `swap_values`, `set_phrase`, `apply_template`), a `valueId`, `surfaces` (`"*"` or a list), a `family`, a `difficulty`, and a `rationale`. Phrase operators accept only `ph_` values and families `S1` or `D3`. `apply_template` uses the built-in `strengthen_claim`, `remove_hedge`, or `minimize_limitation` rule table.
+A spec names a `mutationSetId` and a list of mutations. Each mutation has a `defectId`, an operator (`set_text`, `shift_number`, `scale_number`, `transpose_digits`, `swap_values`, `set_phrase`, `apply_template`, `swap_citation`), a `valueId` (`swap_citation` uses `citeKey`, `withKey`, one `tex:` surface, and optional 1-based `occurrence` instead), `surfaces` (`"*"` or a list), a `family`, a `difficulty`, and a `rationale`. Phrase operators accept only `ph_` values and families `S1` or `D3`. `swap_citation` is family `D2`. `apply_template` uses the built-in `strengthen_claim`, `remove_hedge`, or `minimize_limitation` rule table.
 
 ```
 python tools/corpus/source_mutator.py plan CASE_DIR --spec SPEC

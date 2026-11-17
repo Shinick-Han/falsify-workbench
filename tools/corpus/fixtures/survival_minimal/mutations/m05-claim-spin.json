@@ -1,0 +1,17 @@
+{
+  "schema": "falsify.source-mutation.v1",
+  "caseId": "survival-minimal",
+  "mutationSetId": "m05-claim-spin",
+  "mutations": [
+    {
+      "defectId": "claim-spin",
+      "operator": "apply_template",
+      "valueId": "ph_concl_claim",
+      "template": "strengthen_claim",
+      "surfaces": "*",
+      "family": "S1",
+      "difficulty": "L2",
+      "rationale": "Rewrites the conclusion claim from an association into causal wording that the hedge and the limitation do not support."
+    }
+  ]
+}
