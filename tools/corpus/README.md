@@ -27,3 +27,5 @@ python tools/corpus/render.py twin CASE_DIR --out DIR --overrides FILE [--no-com
 ```
 
 JSON goes to stdout. Exit `0` is success, `2` is usage or an invalid case, `3` is a refusal, and `124` is a compile timeout. Paths in JSON stay relative to the output directory. Figure rendering uses `requirements.txt`, which pins `matplotlib==3.11.2` for this corpus tooling only.
+
+The renderer also writes three preamble injections, each at most once. `\input{glyphtounicode}` and `\pdfgentounicode=1` make pdfTeX emit ToUnicode maps so ligatures and dashes survive text extraction. `\usepackage{lmodern}` is placed on the line after the case's `fontenc` package, or immediately before `\begin{document}` when that package is absent, so the embedded fonts are outline fonts. When the case does not already set `\date`, `\date{}` is inserted before `\begin{document}` and the epoch date from `SOURCE_DATE_EPOCH=0` is not printed.

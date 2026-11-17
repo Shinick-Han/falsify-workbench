@@ -24,6 +24,12 @@ from vendor import load_vendor_module
 SCHEMA = "falsify.source-render.v1"
 TWIN_SCHEMA = "falsify.source-twin.v1"
 _DETERMINISM = r"\pdfinfoomitdate=1 \pdftrailerid{} \pdfsuppressptexinfo=-1"
+_TOUNICODE_LINES = (r"\input{glyphtounicode}", r"\pdfgentounicode=1")
+_LMODERN = r"\usepackage{lmodern}"
+_EMPTY_DATE = r"\date{}"
+_FONTENC_LINE = re.compile(r"^\\usepackage(?:\[[^\]]*\])?\{fontenc\}[^\n]*\n", re.M)
+_DATE_CMD = re.compile(r"\\date\s*\{")
+_BEGIN_DOC = re.compile(r"^\\begin\{document\}", re.M)
 _SANITY = "upstream/skills/section-writing-agent/scripts/latex_sanity.py"
 _PLOTTER = "upstream/skills/plotting-agent/scripts/render_matplotlib.py"
 _AUX = (".aux", ".log", ".out")
@@ -220,13 +226,64 @@ def _iter_lines(tex: str) -> list[str]:
     return [part + "\n" for part in parts]
 
 
-def _insert_preamble(tex: str) -> str:
+def _insert_determinism(tex: str) -> str:
     if _DETERMINISM in tex:
         return tex
     match = re.search(r"^\\documentclass[^\n]*\n", tex, re.M)
     if match is None:
         return _DETERMINISM + "\n" + tex
     return tex[: match.end()] + _DETERMINISM + "\n" + tex[match.end() :]
+
+
+def _after(tex: str, needle: str, block: str) -> str:
+    index = tex.find(needle)
+    if index < 0:
+        return block + tex
+    return tex[: index + len(needle)] + block + tex[index + len(needle) :]
+
+
+def _missing_block(tex: str, lines) -> str:
+    missing = [line for line in lines if line not in tex]
+    if not missing:
+        return ""
+    return "\n".join(missing) + "\n"
+
+
+def _insert_tounicode(tex: str) -> str:
+    block = _missing_block(tex, _TOUNICODE_LINES)
+    if not block:
+        return tex
+    return _after(tex, _DETERMINISM + "\n", block)
+
+
+def _insert_before_document(tex: str, block: str) -> str:
+    match = _BEGIN_DOC.search(tex)
+    if match is None:
+        return tex + block
+    return tex[: match.start()] + block + tex[match.start() :]
+
+
+def _insert_lmodern(tex: str) -> str:
+    if _LMODERN in tex:
+        return tex
+    line = _LMODERN + "\n"
+    match = _FONTENC_LINE.search(tex)
+    if match is not None:
+        return tex[: match.end()] + line + tex[match.end() :]
+    return _insert_before_document(tex, line)
+
+
+def _insert_empty_date(tex: str) -> str:
+    if _DATE_CMD.search(tex):
+        return tex
+    return _insert_before_document(tex, _EMPTY_DATE + "\n")
+
+
+def _insert_preamble(tex: str) -> str:
+    tex = _insert_determinism(tex)
+    tex = _insert_tounicode(tex)
+    tex = _insert_lmodern(tex)
+    return _insert_empty_date(tex)
 
 
 def _require_sane(tex: str) -> None:

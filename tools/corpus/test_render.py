@@ -102,6 +102,10 @@ def _cli(args):
     )
 
 
+def _bare(tex):
+    return {"tex": tex, "tables": [], "figures": [], "references": []}
+
+
 def _assert_no_absolute(test, text):
     test.assertIsNone(_ABS.search(text), text[-400:])
 
@@ -217,6 +221,59 @@ class AssemblyTests(unittest.TestCase):
         resolved["tex"] = tex_in[: end + 1] + line + tex_in[end + 1 :]
         tex = assemble_case(resolved)["tex"]
         self.assertEqual(tex.count(line.strip()), 1)
+
+    def test_text_layer_injections_once_and_byte_identical(self):
+        first = assemble_case(resolve_case(FIXTURE))["tex"]
+        second = assemble_case(resolve_case(FIXTURE))["tex"]
+        self.assertEqual(first.encode("utf-8"), second.encode("utf-8"))
+        for line in (
+            r"\input{glyphtounicode}",
+            r"\pdfgentounicode=1",
+            r"\usepackage{lmodern}",
+            r"\date{}",
+        ):
+            self.assertEqual(first.count(line), 1, line)
+        begin = first.find(r"\begin{document}")
+        for line in (r"\input{glyphtounicode}", r"\pdfgentounicode=1", r"\usepackage{lmodern}", r"\date{}"):
+            self.assertLess(first.find(line), begin, line)
+        self.assertIn("\\usepackage[T1]{fontenc}\n\\usepackage{lmodern}\n", first)
+        self.assertIn("\\date{}\n\\begin{document}\n", first)
+        self.assertLess(first.find(r"\input{glyphtounicode}"), first.find(r"\pdfgentounicode=1"))
+
+    def test_lmodern_and_date_follow_case_preamble(self):
+        no_fontenc = assemble_case(_bare(
+            "\\documentclass{article}\n\\begin{document}\n\\end{document}\n"
+        ))["tex"]
+        self.assertEqual(no_fontenc.count(r"\usepackage{lmodern}"), 1)
+        self.assertIn("\\usepackage{lmodern}\n\\date{}\n\\begin{document}\n", no_fontenc)
+        dated = assemble_case(_bare(
+            "\\documentclass{article}\n"
+            "\\usepackage[T1]{fontenc}\n"
+            "\\date{March 2020}\n"
+            "\\begin{document}\n"
+            "\\end{document}\n"
+        ))["tex"]
+        self.assertIn(
+            "\\usepackage[T1]{fontenc}\n\\usepackage{lmodern}\n\\date{March 2020}\n",
+            dated,
+        )
+        self.assertNotIn(r"\date{}", dated)
+        self.assertEqual(dated.count(r"\usepackage{lmodern}"), 1)
+        self.assertEqual(dated.count(r"\input{glyphtounicode}"), 1)
+        self.assertEqual(dated.count(r"\pdfgentounicode=1"), 1)
+        kept = assemble_case(_bare(
+            "\\documentclass{article}\n"
+            "\\usepackage[T1]{fontenc}\n"
+            "\\usepackage{lmodern}\n"
+            "\\input{glyphtounicode}\n"
+            "\\pdfgentounicode=1\n"
+            "\\begin{document}\n"
+            "\\end{document}\n"
+        ))["tex"]
+        self.assertEqual(kept.count(r"\usepackage{lmodern}"), 1)
+        self.assertEqual(kept.count(r"\input{glyphtounicode}"), 1)
+        self.assertEqual(kept.count(r"\pdfgentounicode=1"), 1)
+        self.assertEqual(kept.count(r"\date{}"), 1)
 
     def test_sanity_failure(self):
         with self.assertRaises(RenderError) as caught:
@@ -380,22 +437,47 @@ def _pdf_info(path):
     try:
         meta = doc.metadata or {}
         fonts = set()
+        types = set()
         chunks = []
         for index in range(doc.page_count):
             page = doc[index]
             chunks.append(page.get_text())
             for font in page.get_fonts():
                 fonts.add(font[3])
+                types.add(str(font[2]))
         return {
             "producer": meta.get("producer"),
             "creator": meta.get("creator"),
             "creationDate": meta.get("creationDate"),
             "fonts": fonts,
+            "types": types,
+            "page_texts": chunks,
             "text": "".join(chunks),
             "pages": doc.page_count,
         }
     finally:
         doc.close()
+
+
+def _bad_controls(text):
+    return [
+        hex(ord(char))
+        for char in text
+        if char not in "\n\t" and (ord(char) < 0x20 or ord(char) == 0xFFFD)
+    ]
+
+
+def _ligature_words(tex):
+    start, end = _abstract_bounds(tex)
+    plain = "\n".join(tex.splitlines()[start + 1 : end]).replace(r"\%", "%")
+    words = []
+    for word in re.findall(r"[A-Za-z]+", plain):
+        if word in words:
+            continue
+        folded = word.lower()
+        if "fi" in folded or "ff" in folded or "fl" in folded:
+            words.append(word)
+    return words
 
 
 def _norm_text(text):
@@ -462,6 +544,16 @@ class PdfTests(unittest.TestCase):
             info = _pdf_info(first_dir / "paper.pdf")
             self.assertEqual(info["pages"], first["pageCount"])
             self.assertTrue(info["fonts"])
+            self.assertTrue(info["types"])
+            self.assertNotIn("Type3", {item.replace(" ", "") for item in info["types"]})
+            for text in info["page_texts"]:
+                self.assertEqual(_bad_controls(text), [])
+            self.assertNotIn("1970", info["text"])
+            words = _ligature_words(resolve_case(FIXTURE)["tex"])
+            self.assertIn("fictional", words)
+            self.assertIn("difference", words)
+            for word in words:
+                self.assertIn(word, info["text"])
 
     def test_twin_pdf_text_metadata_and_fonts(self):
         value_id, before, after = _text_override()
