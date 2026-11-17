@@ -30,7 +30,7 @@ PAIR_SCHEMA = "falsify.source-pdf-pair.v1"
 LEDGER_SCHEMA = "falsify.red-gold-ledger.v1"
 BUNDLE_SCHEMA = "falsify.source-bundle.v1"
 _ABS_RE = re.compile(r"[A-Za-z]:[\\/]|/Users/|/home/")
-_ID_RE = re.compile(rb"/ID\s*\[\s*<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*\]")
+_PLACEHOLDER_ID = "0101" * 8
 _ENGINE = None
 
 
@@ -700,32 +700,122 @@ def _public(plans, stealth: str) -> dict:
     }
 
 
-def _blank_ids(data: bytes, matches) -> bytes:
-    blank = bytearray(data)
-    for match in matches:
-        blank[match.start(1):match.end(1)] = b"0" * (match.end(1) - match.start(1))
-        blank[match.start(2):match.end(2)] = b"0" * (match.end(2) - match.start(2))
-    return bytes(blank)
+def _rewrite_id(data: bytes, token: str) -> bytes:
+    """Write both trailer /ID strings through PyMuPDF and keep every other object."""
+    import pymupdf
+
+    with pymupdf.open(stream=data, filetype="pdf") as doc:
+        doc.xref_set_key(-1, "ID", f"[<{token}><{token}>]")
+        return doc.tobytes(
+            garbage=0,
+            deflate=False,
+            deflate_images=False,
+            deflate_fonts=False,
+            clean=False,
+            expand=False,
+            ascii=False,
+            pretty=False,
+            linear=False,
+            use_objstms=0,
+            no_new_id=True,
+            preserve_metadata=1,
+            encryption=int(pymupdf.mupdf.PDF_ENCRYPT_KEEP),
+        )
 
 
-def _fill_ids(data: bytes, matches, digest: bytes) -> bytes:
-    out = bytearray(data)
-    for match in matches:
-        first = match.end(1) - match.start(1)
-        second = match.end(2) - match.start(2)
-        block = (digest * (first + second + len(digest)))[:first + second]
-        out[match.start(1):match.end(1)] = block[:first]
-        out[match.start(2):match.end(2)] = block[first:first + second]
-    return bytes(out)
+def _id_token(data: bytes) -> str:
+    pinned = _rewrite_id(data, _PLACEHOLDER_ID)
+    digest = bytearray(hashlib.sha256(pinned).digest()[:16])
+    for index, value in enumerate(digest):
+        if value == 0:
+            digest[index] = 1
+    return bytes(digest).hex().upper()
+
+
+def _pdf_string(obj) -> bytes:
+    import pymupdf
+
+    text = pymupdf.mupdf.pdf_to_str_buf(obj)
+    if isinstance(text, bytes):
+        return text
+    return str(text).encode("utf-8", "surrogateescape")
+
+
+def _trailer_ids(doc) -> tuple[bytes, bytes]:
+    import pymupdf
+
+    pdf = pymupdf._as_pdf_document(doc)
+    found = pymupdf.mupdf.pdf_dict_get(pymupdf.mupdf.pdf_trailer(pdf), pymupdf.PDF_NAME("ID"))
+    if not found.m_internal or pymupdf.mupdf.pdf_array_len(found) != 2:
+        return b"", b""
+    first = _pdf_string(pymupdf.mupdf.pdf_array_get(found, 0))
+    second = _pdf_string(pymupdf.mupdf.pdf_array_get(found, 1))
+    return first, second
+
+
+def _ids_match(data: bytes, token: str) -> bool:
+    import pymupdf
+
+    expect = bytes.fromhex(token)
+    with pymupdf.open(stream=data, filetype="pdf") as doc:
+        first, second = _trailer_ids(doc)
+    return first == expect and second == expect
+
+
+def _repair_warning(data: bytes) -> str:
+    import pymupdf
+
+    pymupdf.TOOLS.reset_mupdf_warnings()
+    with pymupdf.open(stream=data, filetype="pdf") as doc:
+        repaired = bool(doc.is_repaired)
+        if doc.page_count:
+            doc[0].get_text("text")
+        warning = pymupdf.TOOLS.mupdf_warnings() or ""
+    pymupdf.TOOLS.reset_mupdf_warnings()
+    if repaired:
+        return warning or "repaired"
+    if "repair" in warning.lower():
+        return warning
+    return ""
+
+
+def _startxref_ok(data: bytes) -> bool:
+    at = data.rfind(b"startxref")
+    if at < 0:
+        return False
+    parts = data[at + len(b"startxref"):].split()
+    if not parts or not parts[0].isdigit():
+        return False
+    offset = int(parts[0])
+    if offset >= len(data):
+        return False
+    head = data[offset:offset + 8]
+    return head.startswith(b"xref") or bool(head[:1].isdigit())
 
 
 def _stabilize(data: bytes) -> bytes:
-    """Replace the engine's random trailer /ID with a hash of the other bytes."""
-    matches = list(_ID_RE.finditer(data))
-    if not matches:
-        return data
-    digest = hashlib.sha256(_blank_ids(data, matches)).hexdigest().upper().encode("ascii")
-    return _fill_ids(data, matches, digest)
+    """Replace the engine's random trailer /ID with a hash of the other objects.
+
+    PyMuPDF writes the id as a hex string or a literal string, including
+    escaped parentheses and backslashes. Setting the trailer through the
+    library and saving with ``no_new_id`` keeps that choice from leaking
+    into the bytes. The reopened file must keep its text, xref, and id.
+    """
+    token = _id_token(data)
+    out = _rewrite_id(data, token)
+    if _document(data) != _document(out):
+        raise PdfTwinError("verification_failed")
+    if _repair_warning(out) or not _startxref_ok(out) or not _ids_match(out, token):
+        raise PdfTwinError("verification_failed")
+    return out
+
+
+def _out_occupied(out: Path) -> bool:
+    if not out.exists():
+        return False
+    if not out.is_dir():
+        return True
+    return any(out.iterdir())
 
 
 def _write(out_dir, pdf: bytes, ledger, pair) -> None:
@@ -739,8 +829,10 @@ def _write(out_dir, pdf: bytes, ledger, pair) -> None:
         (blind / "paper.pdf").write_bytes(pdf)
         (sealed / "gold-ledger.json").write_text(_dump(ledger), encoding="utf-8", newline="\n")
         (sealed / "pair.json").write_text(_dump(pair), encoding="utf-8", newline="\n")
+        if _out_occupied(out):
+            raise PdfTwinError("out_dir_not_empty")
         if out.exists():
-            shutil.rmtree(out)
+            out.rmdir()
         shutil.move(str(temp), str(out))
     except Exception:
         shutil.rmtree(temp, ignore_errors=True)
@@ -756,6 +848,9 @@ def _edited_bytes(clean: bytes, chosen, result):
 
 def make_pdf_twin(bundle_dir, out_dir) -> dict:
     """Edit ``sealed/clean.pdf`` and write the blind PDF, ledger, and pair record."""
+    out = Path(out_dir)
+    if _out_occupied(out):
+        raise PdfTwinError("out_dir_not_empty")
     bundle = _load_bundle(bundle_dir)
     mutate, error, audit = _engine()
     plans = _prepare(bundle["clean"], bundle["defects"])
