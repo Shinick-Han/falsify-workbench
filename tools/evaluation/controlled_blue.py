@@ -50,7 +50,9 @@ RESULT_REQUIRED = {'schema', 'revision', 'sourceHash', 'status', 'findings', 'ha
 # Keys blue_service.finish adds beyond the findings contract. cliSelection is harness.record
 # for an explicit CLI selection (provider, model, effort). isolation is always set.
 # coverage is the call record. These are kept verbatim; the preparer does not drop them before hashing.
-RESULT_OPTIONAL = {'coverage', 'isolation', 'cliSelection'}
+RESULT_OPTIONAL = {'coverage', 'isolation', 'cliSelection', 'usage', 'provider'}
+USAGE_KEYS = {'input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'}
+PROVIDER_IDS = {'cli', 'anthropic-api'}
 MACHINE_SETTINGS = {'auditDirectory'}
 # Joined supplied text and segment count match app/local/red_service.py validate_request,
 # which BLUE reuses. A packet holds several full copies, so it is larger than one paper.
@@ -457,7 +459,38 @@ def _check_trial_shape(trial, index, errors):
                     errors.append(field + '.result.cliSelection')
                 elif any(not isinstance(selection[key], str) or not selection[key].strip() for key in ('provider', 'model', 'effort')):
                     errors.append(field + '.result.cliSelection')
+            _check_result_metadata(result, field + '.result', errors)
     return True
+
+
+def _check_usage_metadata(usage, field, errors):
+    if not isinstance(usage, dict) or set(usage) - USAGE_KEYS:
+        errors.append(field)
+    elif any(type(value) is not int or value < 0 for value in usage.values()):
+        errors.append(field)
+
+
+def _check_provider_metadata(provider, field, errors):
+    if not isinstance(provider, dict) or set(provider) != {'id', 'models', 'requestId'}:
+        errors.append(field)
+        return
+    models = provider['models']
+    request_id = provider['requestId']
+    if provider['id'] not in PROVIDER_IDS:
+        errors.append(field)
+    if (not isinstance(models, list)
+            or any(not isinstance(model, str) or not model.strip() or len(model) > 120 for model in models)):
+        errors.append(field)
+    if request_id is not None and (not isinstance(request_id, str) or not request_id.strip()):
+        errors.append(field)
+
+
+def _check_result_metadata(result, field, errors):
+    """Provider/usage metadata is preserved verbatim but must stay bounded and truthful."""
+    if 'usage' in result:
+        _check_usage_metadata(result['usage'], field + '.usage', errors)
+    if 'provider' in result:
+        _check_provider_metadata(result['provider'], field + '.provider', errors)
 
 
 def _check_gold(packet, fixed, errors):

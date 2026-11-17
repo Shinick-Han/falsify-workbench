@@ -304,6 +304,8 @@ class GoldAndModelTests(unittest.TestCase):
         self.assertEqual(saved, live)
         self.assertIn('isolation', live)
         self.assertEqual(set(live['cliSelection']), {'provider', 'model', 'effort'})
+        self.assertEqual(live['provider'], {'id': 'cli', 'models': [], 'requestId': None})
+        self.assertEqual(live['usage'], {})
         packet = blue_finish.packet_with_live_results()
         original = packet['trials'][0]['result']
         self.assertEqual(original, live)
@@ -318,6 +320,18 @@ class GoldAndModelTests(unittest.TestCase):
         self.assertTrue(row['included'])
         self.assertEqual(row['class'], 'completed-zero-findings')
         self.assertEqual(summary['arms']['ORIGINAL']['counts']['completed-zero-findings'], 1)
+
+    def test_result_usage_and_provider_shape_are_validated(self):
+        packet = blue_finish.packet_with_live_results()
+        result = packet['trials'][0]['result']
+        result['usage'] = {'input_tokens': -1, 'estimatedCost': 3}
+        result['provider'] = {'id': 'invented', 'models': ['not a model'], 'requestId': 7, 'balance': 1}
+        packet['trials'][0]['rawResponseSha256'] = prep.canonical_digest(result)
+        with self.assertRaises(prep.PrepError) as caught:
+            prep.prepare(packet)
+        errors = caught.exception.errors
+        self.assertIn('trials[0].result.usage', errors)
+        self.assertIn('trials[0].result.provider', errors)
 
     def test_browser_harness_canonical_uses_resolve_hash(self):
         harness = blue_finish.finish_harness()
