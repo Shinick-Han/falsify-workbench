@@ -1,0 +1,25 @@
+# Runtime-only Python dependencies for app/local/hosted_runtime and the existing evidence,
+# PDF and chart engines it imports. Versions are the repository pins from
+# app/local/requirements.txt (Linux resolution); the darwin-x86_64 pikepdf variant is omitted.
+#
+# Justification (import sites):
+# - PyMuPDF    hosted_runtime/pdf_input.py, paper_text_span_mutator.py, paper_evidence.py,
+#              paper_visual_edit.py  (PDF parse/render/mutate)
+# - pikepdf    paper_chart_paint.py (XObject image decode), paper_chart_edit_service.capability()
+# - numpy      paper_chart_* (paint/linear/geometry/sampling/background/curve links)
+# - Pillow     paper_chart_edit_service._verify_output, paper_chart_image_samples
+# - opencv-contrib-python
+#              paper_chart_edit_service.capability(), paper_chart_paint/geometry/sampling/
+#              linear_paint, paper_plottracer (image sampling and masks)
+# - mini-racer paper_chart_shape_core.py, paper_plottracer.py, paper_chart_edit_service.capability()
+#              (pinned V8 bundles under app/dist)
+# - jsonschema anthropic_backend.py, harness_adapter.py (local structured-output validation)
+#
+# Nothing here is a provider SDK: the Anthropic backend uses urllib/ssl from the stdlib.
+jsonschema==4.26.0
+PyMuPDF==1.28.2
+mini-racer==0.14.1
+pikepdf==10.17.0
+Pillow==12.3.0
+numpy==2.5.2
+opencv-contrib-python==5.0.0.93

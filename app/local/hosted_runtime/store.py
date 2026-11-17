@@ -12,11 +12,12 @@ import hashlib
 import json
 import os
 import sqlite3
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 TERMINAL_STATES = frozenset({'cancelled', 'completed', 'failed', 'interrupted'})
 ACTIVE_STATES = ('queued', 'running', 'cancelling')
 _UNSET = object()
@@ -56,7 +57,7 @@ class JobIdConflict(StoreError):
 
 
 class Store:
-    """One state directory may be shared by several runtime processes."""
+    """Durable state for one state directory; RuntimeService enforces a single writer."""
 
     def __init__(self, state_dir):
         self.state_dir = Path(state_dir)
@@ -116,7 +117,7 @@ class Store:
                 version = conn.execute('PRAGMA user_version').fetchone()[0]
                 if version > SCHEMA_VERSION:
                     raise StoreError('state_schema_unsupported')
-                if version not in (0, 1, SCHEMA_VERSION):
+                if version not in (0, 1, 2, SCHEMA_VERSION):
                     raise StoreError('state_schema_unsupported')
                 conn.execute("""CREATE TABLE IF NOT EXISTS schema_meta (
                     key TEXT PRIMARY KEY, value TEXT NOT NULL)""")
@@ -154,6 +155,7 @@ class Store:
                     provider_request_id TEXT,
                     apply_only INTEGER NOT NULL DEFAULT 0,
                     use_evidence INTEGER NOT NULL DEFAULT 1,
+                    upload_id TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     completed_at TEXT,
@@ -177,7 +179,12 @@ class Store:
                         conn.execute('ALTER TABLE jobs ADD COLUMN apply_only INTEGER NOT NULL DEFAULT 0')
                     if 'use_evidence' not in columns:
                         conn.execute('ALTER TABLE jobs ADD COLUMN use_evidence INTEGER NOT NULL DEFAULT 1')
-                if version in (0, 1):
+                if version in (1, 2):
+                    columns = {row['name'] for row in
+                               conn.execute('PRAGMA table_info(jobs)').fetchall()}
+                    if 'upload_id' not in columns:
+                        conn.execute('ALTER TABLE jobs ADD COLUMN upload_id TEXT')
+                if version in (0, 1, 2):
                     conn.execute('PRAGMA user_version=%d' % SCHEMA_VERSION)
                 conn.execute("INSERT INTO schema_meta(key, value) VALUES('version', ?) "
                              "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -316,13 +323,15 @@ class Store:
             'providerRequestId': row['provider_request_id'],
             'applyOnly': bool(row['apply_only']),
             'useEvidence': bool(row['use_evidence']),
+            'uploadId': row['upload_id'],
             'createdAt': row['created_at'],
             'updatedAt': row['updated_at'],
             'completedAt': row['completed_at'],
         }
 
     def create_job(self, *, owner_id, job_id, idempotency_key, request_hash, role,
-                   model, effort, provider, progress, apply_only=False, use_evidence=True):
+                   model, effort, provider, progress, apply_only=False, use_evidence=True,
+                   upload_id=None):
         """Insert a queued job or return the existing idempotent job."""
         now = utc_now()
         with self._write() as conn:
@@ -337,11 +346,12 @@ class Store:
             try:
                 conn.execute(
                     'INSERT INTO jobs(id, owner_id, idempotency_key, request_hash, role, state, '
-                    'progress, model, effort, provider, apply_only, use_evidence, created_at, updated_at) '
-                    'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    'progress, model, effort, provider, apply_only, use_evidence, upload_id, '
+                    'created_at, updated_at) '
+                    'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                     (job_id, owner_id, idempotency_key, request_hash, role, 'queued',
                      _dump(progress), model, effort, provider, 1 if apply_only else 0,
-                     1 if use_evidence else 0, now, now))
+                     1 if use_evidence else 0, upload_id, now, now))
             except sqlite3.IntegrityError:
                 row = conn.execute('SELECT * FROM jobs WHERE owner_id=? AND idempotency_key=?',
                                    (owner_id, idempotency_key)).fetchone()
@@ -516,11 +526,11 @@ class Store:
 
     # ------------------------------------------------------------------ retention
     def prune_jobs(self, *, retention_seconds, now=None):
-        """Delete only terminal jobs older than the retention window."""
+        """Delete terminal jobs and unreferenced uploads outside the retention window."""
         if not retention_seconds or retention_seconds <= 0:
             return 0
-        cutoff = (datetime.now(timezone.utc).timestamp() - retention_seconds)
-        cutoff_iso = datetime.fromtimestamp(cutoff, timezone.utc).isoformat(
+        current = time.time() if now is None else float(now)
+        cutoff_iso = datetime.fromtimestamp(current - retention_seconds, timezone.utc).isoformat(
             timespec='milliseconds').replace('+00:00', 'Z')
         with self._write() as conn:
             rows = conn.execute(
@@ -529,7 +539,11 @@ class Store:
             job_ids = [row['id'] for row in rows]
             for job_id in job_ids:
                 conn.execute('DELETE FROM jobs WHERE id=?', (job_id,))
-        if job_ids:
+            uploads = conn.execute(
+                "DELETE FROM uploads WHERE created_at < ? "
+                "AND id NOT IN (SELECT upload_id FROM jobs WHERE upload_id IS NOT NULL)",
+                (cutoff_iso,)).rowcount
+        if job_ids or uploads:
             self._collect_blobs()
         return len(job_ids)
 

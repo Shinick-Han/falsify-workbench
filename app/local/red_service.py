@@ -94,6 +94,16 @@ def _calls_for(chunks):
     return 1 if len(chunks) == 1 else len(chunks) + 1
 
 
+class ReviewCancelled(ValueError):
+    """Cancellation that retains provider usage already returned for paid calls."""
+
+    def __init__(self, message='취소됨. 결과는 폐기했습니다.', usage=None, request_id=None, models=()):
+        super().__init__(message)
+        self.usage = dict(usage or {})
+        self.request_id = request_id
+        self.models = tuple(models)
+
+
 def _validate_review_envelope(data):
     limits = review_limits.for_data(data)
     if not isinstance(data, dict) or data.get('schema') != VERSION or data.get('consent') is not True:
@@ -394,11 +404,11 @@ def run_review(data, progress, cancelled, backend_factory=CodexBackend, claude_f
             provider_state['models'].add(result['provider_model'])
     def invoke(prompt, schema):
         nonlocal calls
-        if cancelled.is_set(): raise ValueError('취소됨. 이미 시작된 CLI 호출은 종료/시간 제한까지 실행될 수 있습니다.')
+        if cancelled.is_set(): raise ReviewCancelled('취소됨. 이미 시작된 CLI 호출은 종료/시간 제한까지 실행될 수 있습니다.', usage_totals, provider_state['request_id'], provider_state['models'])
         calls += 1; progress({'completedCalls': calls - 1, 'requiredCalls': required, 'phase': '검토 중'})
         result = engine.infer(prompt, schema)
         accumulate(result)
-        if cancelled.is_set(): raise ValueError('취소됨. 결과는 폐기했습니다.')
+        if cancelled.is_set(): raise ReviewCancelled('취소됨. 결과는 폐기했습니다.', usage_totals, provider_state['request_id'], provider_state['models'])
         if result['status'] != 'ok': raise cli_failure(result.get('error_code') or result['status'])
         return result['response']
     if limits['hosted'] and structured is None:

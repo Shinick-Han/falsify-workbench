@@ -4,17 +4,19 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from pathlib import Path
 
 from .config import EFFORTS, RuntimeConfig
 from .evidence import (EvidenceError, apply_edits as apply_evidence_edits,
-                       artifact as evidence_artifact, configure_store,
-                       handle as evidence_handle, prepare as prepare_evidence,
-                       release_store)
+                       artifact as evidence_artifact, check_text_ambiguity,
+                       configure_store, handle as evidence_handle,
+                       prepare as prepare_evidence, release_store)
 from .pdf_input import PdfInputError, extract_pdf
 from .store import (IdempotencyConflict, JobIdConflict, Store, StoreError,
                     StoreNotFound)
@@ -81,6 +83,8 @@ FAILURE_MESSAGES = {
     'apply_verify_failed': 'The edited PDF failed hash or page-count verification.',
     'apply_edit_incomplete': 'One or more selected edits could not be fully applied.',
     'apply_edit_invalid': 'A selected text edit could not be applied safely.',
+    'apply_edit_trace': 'A selected text edit would leave a text-layer trace.',
+    'apply_edit_ambiguous': 'A selected text edit matches multiple locations; choose one explicitly.',
     'visual_edit_invalid': 'A selected table/figure edit is invalid for this PDF.',
     'visual_edit_kind_unsupported': 'This visual edit kind is not supported for apply.',
 }
@@ -219,11 +223,19 @@ def _extraction_document(upload, extraction):
 
 
 def _apply_pdf_edits(pdf_bytes, edits):
-    from paper_text_span_mutator import mutate_pdf_text_spans
-    outcome = mutate_pdf_text_spans(pdf_bytes, edits)
+    from paper_text_span_mutator import SpanMutationError, mutate_pdf_text_spans
+    check_text_ambiguity(pdf_bytes, list(edits))
+    try:
+        outcome = mutate_pdf_text_spans(pdf_bytes, edits, allow_trace=False)
+    except SpanMutationError as error:
+        if getattr(error, 'code', None) == 'text_span_trace_detected':
+            raise EvidenceError('apply_edit_trace') from None
+        raise EvidenceError('edit_invalid') from None
+    except Exception:
+        raise EvidenceError('edit_invalid') from None
     data = outcome.get('pdfBytes') if isinstance(outcome, dict) else None
     if not isinstance(data, (bytes, bytearray)) or not data:
-        raise ValueError('edit_output_invalid')
+        raise EvidenceError('edit_invalid')
     return bytes(data)
 
 
@@ -246,6 +258,190 @@ class _JobRequest:
     cancelled: threading.Event
 
 
+JOB_BODY_KEYS = {'jobId', 'ownerId', 'idempotencyKey', 'requestHash', 'role', 'prompt',
+                 'uploadId', 'model', 'effort', 'budget', 'harness', 'edits',
+                 'visualEdits', 'attackTypes', 'level', 'applyOnly', 'useEvidence'}
+HARNESS_KEYS = {'schema', 'id', 'name', 'version', 'role', 'instructions', 'maxCalls', 'adapter'}
+
+
+def _require(condition):
+    if not condition:
+        raise ServiceError('invalid_request', 400)
+
+
+def _job_owner(body, owner_id, check_owner):
+    _require(isinstance(body, dict))
+    _require(not (set(body) - JOB_BODY_KEYS))
+    supplied = body.get('ownerId')
+    _require(isinstance(supplied, str))
+    check_owner(supplied)
+    if owner_id is None:
+        owner_id = supplied
+    check_owner(owner_id)
+    _require(owner_id == supplied)
+    return owner_id
+
+
+def _job_ids(body):
+    job_id = body.get('jobId')
+    _require(isinstance(job_id, str) and JOB_ID_RE.fullmatch(job_id) is not None)
+    idempotency = body.get('idempotencyKey')
+    _require(isinstance(idempotency, str) and OPAQUE_RE.fullmatch(idempotency) is not None)
+    request_hash = body.get('requestHash')
+    _require(isinstance(request_hash, str) and HASH_RE.fullmatch(request_hash) is not None)
+    return job_id, idempotency, request_hash
+
+
+def _job_flags(body):
+    role = body.get('role')
+    _require(role in ('red', 'blue'))
+    apply_only = body.get('applyOnly', False)
+    _require(type(apply_only) is bool)
+    use_evidence = body.get('useEvidence', True)
+    _require(type(use_evidence) is bool)
+    _require(not (apply_only and role != 'red'))
+    return role, apply_only, use_evidence
+
+
+def _job_prompt(body, apply_only):
+    prompt = body.get('prompt')
+    if apply_only and prompt is None:
+        prompt = ''
+    _require(isinstance(prompt, str) and len(prompt) <= 8000 and '\0' not in prompt)
+    if not apply_only:
+        _require(bool(prompt.strip()))
+    return prompt
+
+
+def _job_upload_id(body):
+    upload_id = body.get('uploadId')
+    _require(isinstance(upload_id, str) and 1 <= len(upload_id) <= 128)
+    return upload_id
+
+
+def _job_model(config, body):
+    model = body.get('model', config.default_model)
+    _require(isinstance(model, str) and model in config.models)
+    effort = body.get('effort', config.default_effort)
+    _require(isinstance(effort, str) and effort in EFFORTS and effort in config.efforts)
+    return model, effort
+
+
+def _job_budget(body, apply_only, default_calls):
+    budget = body.get('budget')
+    requested_calls = None
+    if budget is not None:
+        _require(isinstance(budget, dict) and not (set(budget) - {'maxCalls'}))
+        if 'maxCalls' in budget:
+            requested = budget['maxCalls']
+            _require(type(requested) is int and 0 <= requested <= 512)
+            _require(not (requested == 0 and not apply_only))
+            requested_calls = requested
+    if requested_calls == 0:
+        return 1
+    maximum = default_calls if requested_calls is None else min(requested_calls, default_calls)
+    return max(1, maximum)
+
+
+def _job_harness(body):
+    harness = body.get('harness')
+    if harness is None:
+        return
+    _require(isinstance(harness, dict) and not (set(harness) - HARNESS_KEYS))
+    adapter = harness.get('adapter')
+    _require(isinstance(adapter, dict) and adapter.get('type') == 'hosted')
+    _require(not (set(adapter) - {'type', 'model', 'effort'}))
+
+
+def _job_edits(body, role, apply_only):
+    edits = body.get('edits')
+    if edits is not None:
+        _require(role == 'red' and isinstance(edits, list) and len(edits) <= 100)
+        _require(all(isinstance(edit, dict) for edit in edits))
+    visual_edits = body.get('visualEdits')
+    if visual_edits is not None:
+        _require(role == 'red' and apply_only and isinstance(visual_edits, list)
+                 and len(visual_edits) <= 12)
+        _require(all(isinstance(edit, dict) for edit in visual_edits))
+    if apply_only:
+        _require(bool(edits or visual_edits))
+    return edits, visual_edits
+
+
+def _job_attack(body):
+    attack_types = body.get('attackTypes')
+    if attack_types is not None:
+        _require(isinstance(attack_types, list))
+        try:
+            from red_service import attack_types as validate_attack_types
+            attack_types = validate_attack_types({'attackTypes': attack_types})
+        except Exception:
+            raise ServiceError('invalid_request', 400) from None
+    level = body.get('level')
+    if level is not None:
+        _require(type(level) is int and level in (1, 2, 3, 4))
+    return attack_types, level
+
+
+def _pid_alive(pid):
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    if pid == os.getpid():
+        return True
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _acquire_state_lock(state_dir):
+    """Fail closed when another RuntimeService owns this state directory."""
+    path = Path(state_dir) / 'runtime.lock'
+    for _attempt in range(2):
+        try:
+            descriptor = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                content = path.read_text(encoding='ascii')
+            except OSError:
+                content = ''
+            pid = None
+            try:
+                pid = int(content.splitlines()[0].strip())
+            except (IndexError, ValueError):
+                pid = None
+            if pid is not None and _pid_alive(pid):
+                raise StoreError('state_in_use') from None
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                raise StoreError('state_in_use') from None
+            continue
+        except OSError:
+            raise StoreError('state_in_use') from None
+        try:
+            os.write(descriptor, ('%d\n' % os.getpid()).encode('ascii'))
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        return path
+    raise StoreError('state_in_use')
+
+
+def _release_state_lock(path):
+    if path is None:
+        return
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
 class RuntimeService:
     PROGRESS_INTERVAL_SECONDS = 0.5
 
@@ -256,18 +452,28 @@ class RuntimeService:
         self.store = store if store is not None else Store(config.state_dir)
         self.review_runner = review_runner
         self.backend_factory = backend_factory
-        self.evidence_store = configure_store()
         self._events = {}
         self._lock = threading.RLock()
         self._closed = False
-        self.recovered = self.store.mark_recovered(_failure('runtime_restarted'))
-        if config.job_retention_seconds:
-            try:
-                self.store.prune_jobs(retention_seconds=config.job_retention_seconds)
-            except StoreError:
-                pass
-        self._executor = ThreadPoolExecutor(max_workers=config.max_concurrency,
-                                            thread_name_prefix='falsify-hosted')
+        self._state_lock_path = _acquire_state_lock(self.store.state_dir)
+        configured = False
+        try:
+            self.evidence_store = configure_store()
+            configured = True
+            self.recovered = self.store.mark_recovered(_failure('runtime_restarted'))
+            if config.job_retention_seconds:
+                try:
+                    self.store.prune_jobs(retention_seconds=config.job_retention_seconds)
+                except StoreError:
+                    pass
+            self._executor = ThreadPoolExecutor(max_workers=config.max_concurrency,
+                                                thread_name_prefix='falsify-hosted')
+        except BaseException:
+            _release_state_lock(self._state_lock_path)
+            self._state_lock_path = None
+            if configured:
+                release_store()
+            raise
 
     # ------------------------------------------------------------------- uploads
     def create_upload(self, owner_id, name, mime, data):
@@ -321,6 +527,7 @@ class RuntimeService:
                 progress=progress,
                 apply_only=validated['applyOnly'],
                 use_evidence=validated['useEvidence'],
+                upload_id=upload['id'],
             )
         except IdempotencyConflict:
             raise ServiceError('idempotency_conflict', 409) from None
@@ -489,7 +696,8 @@ class RuntimeService:
             )
             result = self._run_engine(envelope, request)
             if request.cancelled.is_set():
-                self._finish_cancelled(request)
+                self._finish_cancelled(request, usage=_usage(result),
+                                       provider_request_id=_provider_request_id(result))
                 return
             if not isinstance(result, dict) \
                     or result.get('schema') != (
@@ -506,6 +714,10 @@ class RuntimeService:
                     return
                 try:
                     edited = _apply_pdf_edits(raw, list(request.edits))
+                except EvidenceError as error:
+                    self._fail(request, error.code, result=result, usage=usage,
+                               provider_request_id=provider_request_id)
+                    return
                 except Exception:
                     self._fail(request, 'edit_invalid', result=result, usage=usage,
                                provider_request_id=provider_request_id)
@@ -535,8 +747,9 @@ class RuntimeService:
         except StoreError:
             self._fail(request, 'input_unavailable')
         except Exception as error:
-            if request.cancelled.is_set():
-                self._finish_cancelled(request)
+            if request.cancelled.is_set() or type(error).__name__ == 'ReviewCancelled':
+                self._finish_cancelled(request, usage=getattr(error, 'usage', None),
+                                       provider_request_id=getattr(error, 'request_id', None))
             else:
                 self._fail(request, _classify_engine_error(error))
         finally:
@@ -623,7 +836,8 @@ class RuntimeService:
 
     def _fail(self, request, code, *, result=None, usage=None, provider_request_id=None):
         if request.cancelled.is_set():
-            self._finish_cancelled(request)
+            self._finish_cancelled(request, usage=usage,
+                                   provider_request_id=provider_request_id)
             return
         kwargs = {'failure': _failure(code, provider_request_id), 'completed': True}
         if result is not None:
@@ -640,11 +854,18 @@ class RuntimeService:
         if not ok:
             self._finish_cancelled(request)
 
-    def _finish_cancelled(self, request):
+    def _finish_cancelled(self, request, *, usage=None, provider_request_id=None):
+        kwargs = {'completed': True}
+        if usage is not None:
+            normalized = _usage({'usage': usage})
+            if normalized is not None:
+                kwargs['usage'] = normalized
+        if provider_request_id is not None:
+            kwargs['provider_request_id'] = provider_request_id
         try:
             self.store.transition(request.owner_id, request.job_id,
                                   ('queued', 'running', 'cancelling'), 'cancelled',
-                                  completed=True)
+                                  **kwargs)
         except StoreError:
             pass
 
@@ -660,129 +881,18 @@ class RuntimeService:
             raise ServiceError('not_found', 404)
 
     def _validate_job(self, body, owner_id):
-        if not isinstance(body, dict):
-            raise ServiceError('invalid_request', 400)
-        allowed = {'jobId', 'ownerId', 'idempotencyKey', 'requestHash', 'role', 'prompt',
-                   'uploadId', 'model', 'effort', 'budget', 'harness', 'edits',
-                   'visualEdits', 'attackTypes', 'level', 'applyOnly', 'useEvidence'}
-        if set(body) - allowed:
-            raise ServiceError('invalid_request', 400)
-        supplied_owner = body.get('ownerId')
-        if not isinstance(supplied_owner, str):
-            raise ServiceError('invalid_request', 400)
-        self._check_owner(supplied_owner)
-        if owner_id is None:
-            owner_id = supplied_owner
-        self._check_owner(owner_id)
-        if owner_id != supplied_owner:
-            raise ServiceError('invalid_request', 400)
-
-        job_id = body.get('jobId')
-        if not isinstance(job_id, str) or not JOB_ID_RE.fullmatch(job_id):
-            raise ServiceError('invalid_request', 400)
-        idempotency = body.get('idempotencyKey')
-        if not isinstance(idempotency, str) or not OPAQUE_RE.fullmatch(idempotency):
-            raise ServiceError('invalid_request', 400)
-        request_hash = body.get('requestHash')
-        if not isinstance(request_hash, str) or not HASH_RE.fullmatch(request_hash):
-            raise ServiceError('invalid_request', 400)
-        role = body.get('role')
-        if role not in ('red', 'blue'):
-            raise ServiceError('invalid_request', 400)
-        apply_only = body.get('applyOnly', False)
-        if type(apply_only) is not bool:
-            raise ServiceError('invalid_request', 400)
-        use_evidence = body.get('useEvidence', True)
-        if type(use_evidence) is not bool:
-            raise ServiceError('invalid_request', 400)
-        if apply_only and role != 'red':
-            raise ServiceError('invalid_request', 400)
-        prompt = body.get('prompt')
-        if apply_only:
-            if prompt is None:
-                prompt = ''
-            if not isinstance(prompt, str) or len(prompt) > 8000 or '\0' in prompt:
-                raise ServiceError('invalid_request', 400)
-        elif not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 8000 \
-                or '\0' in prompt:
-            raise ServiceError('invalid_request', 400)
-        upload_id = body.get('uploadId')
-        if not isinstance(upload_id, str) or not 1 <= len(upload_id) <= 128:
-            raise ServiceError('invalid_request', 400)
-
-        if 'model' in body:
-            model = body['model']
-            if not isinstance(model, str) or model not in self.config.models:
-                raise ServiceError('invalid_request', 400)
-        else:
-            model = self.config.default_model
-        if 'effort' in body:
-            effort = body['effort']
-            if not isinstance(effort, str) or effort not in EFFORTS \
-                    or effort not in self.config.efforts:
-                raise ServiceError('invalid_request', 400)
-        else:
-            effort = self.config.default_effort
-
-        budget = body.get('budget')
-        requested_calls = None
-        if budget is not None:
-            if not isinstance(budget, dict) or set(budget) - {'maxCalls'}:
-                raise ServiceError('invalid_request', 400)
-            if 'maxCalls' in budget:
-                requested = budget['maxCalls']
-                if type(requested) is not int or not 0 <= requested <= 512:
-                    raise ServiceError('invalid_request', 400)
-                if requested == 0 and not apply_only:
-                    raise ServiceError('invalid_request', 400)
-                requested_calls = requested
-        if requested_calls == 0:
-            max_calls = 1
-        else:
-            max_calls = min(requested_calls if requested_calls is not None
-                            else self.config.max_calls, self.config.max_calls)
-            max_calls = max(1, max_calls)
-
-        harness = body.get('harness')
-        if harness is not None:
-            if not isinstance(harness, dict) \
-                    or set(harness) - {'schema', 'id', 'name', 'version', 'role',
-                                       'instructions', 'maxCalls', 'adapter'}:
-                raise ServiceError('invalid_request', 400)
-            adapter = harness.get('adapter')
-            if not isinstance(adapter, dict) or adapter.get('type') != 'hosted' \
-                    or set(adapter) - {'type', 'model', 'effort'}:
-                raise ServiceError('invalid_request', 400)
-
-        edits = body.get('edits')
-        if edits is not None:
-            if role != 'red' or not isinstance(edits, list) or len(edits) > 100 \
-                    or any(not isinstance(edit, dict) for edit in edits):
-                raise ServiceError('invalid_request', 400)
-        visual_edits = body.get('visualEdits')
-        if visual_edits is not None:
-            if role != 'red' or not apply_only or not isinstance(visual_edits, list) \
-                    or len(visual_edits) > 12 \
-                    or any(not isinstance(edit, dict) for edit in visual_edits):
-                raise ServiceError('invalid_request', 400)
-        if apply_only and not edits and not visual_edits:
-            raise ServiceError('invalid_request', 400)
-
-        attack_types = body.get('attackTypes')
-        if attack_types is not None:
-            if not isinstance(attack_types, list):
-                raise ServiceError('invalid_request', 400)
-            try:
-                from red_service import attack_types as validate_attack_types
-                attack_types = validate_attack_types({'attackTypes': attack_types})
-            except Exception:
-                raise ServiceError('invalid_request', 400) from None
-        level = body.get('level')
-        if level is not None and (type(level) is not int or level not in (1, 2, 3, 4)):
-            raise ServiceError('invalid_request', 400)
-
+        owner = _job_owner(body, owner_id, self._check_owner)
+        job_id, idempotency, request_hash = _job_ids(body)
+        role, apply_only, use_evidence = _job_flags(body)
+        prompt = _job_prompt(body, apply_only)
+        upload_id = _job_upload_id(body)
+        model, effort = _job_model(self.config, body)
+        max_calls = _job_budget(body, apply_only, self.config.max_calls)
+        _job_harness(body)
+        edits, visual_edits = _job_edits(body, role, apply_only)
+        attack_types, level = _job_attack(body)
         return {
-            'owner_id': owner_id,
+            'owner_id': owner,
             'jobId': job_id,
             'idempotencyKey': idempotency,
             'requestHash': request_hash,
@@ -812,6 +922,9 @@ class RuntimeService:
             if not getattr(self, '_store_released', False):
                 self._store_released = True
                 release_store()
+            lock_path = getattr(self, '_state_lock_path', None)
+            self._state_lock_path = None
+        _release_state_lock(lock_path)
 
     def __enter__(self):
         return self

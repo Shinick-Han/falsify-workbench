@@ -4,7 +4,8 @@ import hashlib
 from harness_adapter import cli_failure
 from harness import resolve, guidance, backend, model_label, builtin, record
 from red_service import (CodexBackend, ClaudeBackend, strict_object, STRING, EVIDENCE, SCAN,
-                         evidence_check, validate_request as validate_document, _match_offsets)
+                         evidence_check, validate_request as validate_document, _match_offsets,
+                         ReviewCancelled)
 from blue_visual import validate_visual, infer_visual, HEX
 from blue_evidence_refs import build_evidence_refs, is_evidence_ref_id, resolve_evidence_ref
 from blue_structured_reread import (
@@ -523,8 +524,6 @@ def _invoke_blue_call(engine, prompt, schema, call_images, call_refs, cancelled,
         result = engine.infer(prompt, schema)
     if on_result is not None:
         on_result(result)
-    if cancelled.is_set():
-        raise ValueError('BLUE 취소됨. 결과 폐기')
     if result['status'] != 'ok':
         raise cli_failure(result.get('error_code') or result['status'])
     response = result['response']
@@ -736,13 +735,15 @@ def run_review(data, progress, cancelled, backend_factory=CodexBackend, claude_f
     budget = min(int(data['maxCalls']), int(harness['maxCalls']))
     def invoke(prompt, call_schema, phase, call_images=(), call_refs=()):
         nonlocal calls
-        if cancelled.is_set(): raise ValueError('BLUE 취소됨')
+        if cancelled.is_set(): raise ReviewCancelled('BLUE 취소됨. 결과 폐기', usage_totals, provider_state['request_id'], provider_state['models'])
         if calls >= min(required, budget): raise ValueError('BLUE 호출 예산 초과')
         if len(prompt) > limits['blue_max_prompt']: raise ValueError('BLUE 프롬프트 상한 초과. 호출하지 않습니다.')
         progress({'completedCalls': calls, 'requiredCalls': required, 'phase': phase})
         calls += 1
-        return _invoke_blue_call(engine, prompt, call_schema, call_images, call_refs, cancelled, limits,
-                                 on_result=accumulate)
+        response = _invoke_blue_call(engine, prompt, call_schema, call_images, call_refs, cancelled, limits,
+                                     on_result=accumulate)
+        if cancelled.is_set(): raise ReviewCancelled('BLUE 취소됨. 결과 폐기', usage_totals, provider_state['request_id'], provider_state['models'])
+        return response
     visual_observations = []
     def finish(status, findings, completed, reread, complete=True, windows=(), selected_items=None, auto_crops=0,
                used_visual=False, rejected=(), unresolved=()):

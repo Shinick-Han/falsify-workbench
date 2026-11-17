@@ -448,7 +448,8 @@ test('interrupted jobs show partial results and are never replayed automatically
   const entry=setup({routes:makeRouter({
     jobGet:()=>({status:200,body:{job:job({state:'interrupted',progress:{completedCalls:1,requiredCalls:4,phase:'analyzing'},
       result:{schema:'falsify.document-blue.v1',status:'ok',
-        coverage:{complete:false,resultCoverage:{accepted:0,rejected:1,unresolved:1,
+        coverage:{complete:false,remainingBatches:['p3-b1..p3-b4'],
+          resultCoverage:{accepted:0,rejected:1,unresolved:1,
           rejectedItems:[{index:0,code:'partial_reject'}],
           unresolvedItems:[{index:1,code:'ambiguous_location'}]}},
         findings:[{id:'p1'},{id:'p2'}]},
@@ -465,6 +466,7 @@ test('interrupted jobs show partial results and are never replayed automatically
   assert.match(entry.text('hosted-ai-result-counts'),/수용 0/);
   assert.match(entry.text('hosted-ai-result-counts'),/거절 1/);
   assert.match(entry.text('hosted-ai-result-counts'),/미해결 1/);
+  assert.match(entry.text('hosted-ai-result-counts'),/미검토 배치 1개/);
   assert.match(entry.text('hosted-ai-result-note'),/일부 결과만/);
   assert.match(entry.text('hosted-ai-result-note'),/다시 실행하지 않았습니다/);
   assert.equal(entry.$('hosted-ai-artifacts-section').hidden,false);
@@ -776,7 +778,9 @@ test('selected RED candidates become one apply-only job with exact page, before/
   ]);
   assert.deepEqual(apply.visualEdits,[{kind:'table-cell',itemId:'tbl-1',row:0,column:2,
     before:'4.2',after:'5.8',rationale:RED_RATIONALE}]);
-  for(const key of ['model','effort','budget','harness']){
+  assert.equal(apply.model,'claude-opus-5-5');
+  assert.equal(apply.effort,'high');
+  for(const key of ['budget','harness']){
     assert.ok(!Object.hasOwn(apply,key),'apply-only job has no '+key);
   }
   assert.equal(apply.useEvidence,true,'visual table edits need structured evidence');
@@ -793,6 +797,11 @@ test('selected RED candidates become one apply-only job with exact page, before/
   assert.match(entry.text('hosted-ai-result-counts'),/모델 호출 없음/);
   assert.match(entry.text('hosted-ai-result-counts'),new RegExp('출력 sha256 '+EDITED_SHA));
   assert.match(entry.text('hosted-ai-result-note'),/검증 결과를 기록했습니다/);
+  const stored=entry.storedText();
+  for(const value of [RED_RATIONALE,RED_BEFORE_1,RED_AFTER_1,PROMPT]){
+    assert.ok(!stored.includes(value),'RED text and instruction stay out of sessionStorage');
+  }
+  assert.ok(!entry.doc.body.textContent.includes(TOKEN),'the session token is never rendered');
 
   entry.$('hosted-ai-edited-download').click();
   await until(()=>entry.objects.length===1,'the edited PDF is fetched as a blob');
@@ -923,11 +932,13 @@ test('candidates the gateway would reject are not offered for apply',async()=>{
       {id:'ok',segmentId:'p1-b1',before:'valid original',after:'valid replacement'},
       {id:'bad-segment',segmentId:'page-1',before:'nope',after:'nope two'},
       {id:'noop',segmentId:'p1-b1',before:'same text',after:'same text'},
-      {id:'toolong',segmentId:'p1-b1',before:'x'.repeat(4001),after:'short'}
+      {id:'toolong',segmentId:'p1-b1',before:'x'.repeat(4001),after:'short'},
+      {id:'multiline',segmentId:'p1-b2',before:'line one\nline two',after:'merged line'}
     ],
     visualEdits:[
       {kind:'chart-point',itemId:'fig-1',seriesId:'s',pointIndex:0,beforeY:1,afterY:2,rationale:'chart rationale'},
-      {kind:'table-cell',itemId:'tbl-1',row:0,column:0,before:'4.2',after:'5.8'}
+      {kind:'table-cell',itemId:'tbl-1',row:0,column:0,before:'4.2',after:'5.8'},
+      {kind:'table-cell',itemId:'tbl-2',row:1,column:1,before:'7',after:'9',rationale:'line one\nline two'}
     ]
   };
   const router=makeRouter({
@@ -938,16 +949,22 @@ test('candidates the gateway would reject are not offered for apply',async()=>{
   const boxes=[...entry.$('hosted-ai-candidates').walk()].filter(node=>node.tagName==='INPUT');
   assert.equal(boxes.length,1,'only the submittable candidate is offered');
   assert.match(entry.text('hosted-ai-chart-note'),/1건/);
-  assert.match(entry.text('hosted-ai-selection-note'),/4개 후보는/);
-  assert.equal([...entry.$('hosted-ai-visual-candidates').walk()].filter(node=>node.tagName==='INPUT').length,0,
-    'a table-cell edit without a rationale is not offered');
+  assert.match(entry.text('hosted-ai-selection-note'),/5개 후보는/);
+  const visualBoxes=[...entry.$('hosted-ai-visual-candidates').walk()].filter(node=>node.tagName==='INPUT');
+  assert.equal(visualBoxes.length,1,'only the table-cell with a usable rationale is offered');
+  assert.match(entry.text('hosted-ai-visual-candidates'),/tbl-2/);
+  assert.ok(!entry.text('hosted-ai-visual-candidates').includes('tbl-1'),'a rationale-less cell is hidden');
   checkCandidate(entry,boxes[0].id);
+  checkCandidate(entry,visualBoxes[0].id);
   entry.$('hosted-ai-apply').click();
   await until(()=>entry.calls.filter(call=>call.path==='/v1/ai/jobs').length===2,'the valid candidate is applied');
   const apply=JSON.parse(entry.calls.filter(call=>call.path==='/v1/ai/jobs')[1].body);
   assert.deepEqual(apply.edits,[{pageIndex:0,before:'valid original',after:'valid replacement',occurrence:0}]);
-  assert.deepEqual(apply.visualEdits,[]);
-  assert.equal(apply.useEvidence,false,'text-only apply does not build structured evidence');
+  assert.deepEqual(apply.visualEdits,[{kind:'table-cell',itemId:'tbl-2',row:1,column:1,
+    before:'7',after:'9',rationale:'line one line two'}]);
+  assert.equal(apply.useEvidence,true,'a selected table edit needs structured evidence');
+  assert.equal(apply.model,'claude-opus-5-5');
+  assert.equal(apply.effort,'high');
 });
 
 test('an apply-only job is polled until the edited PDF appears',async()=>{
@@ -979,4 +996,179 @@ test('an apply-only job is polled until the edited PDF appears',async()=>{
   await until(()=>entry.isVisible('hosted-ai-edited-section'),'apply polling reaches the edited PDF');
   assert.ok(applyPolls>=2,'the apply job was polled at least twice');
   assert.equal(entry.calls.filter(call=>call.path==='/v1/ai/jobs').length,2,'only review and apply were submitted');
+});
+
+test('hosted intake accepts PDF bytes only and rejects text files client-side',async()=>{
+  const entry=setup({routes:makeRouter({jobGet:()=>({status:200,body:{job:job({state:'completed'})}})})});
+  await entry.app.ready;
+  await signIn(entry);
+  assert.equal(entry.$('hosted-ai-file').getAttribute('accept'),'.pdf,application/pdf');
+  assert.match(entry.text('hosted-ai-file-hint'),/PDF만 지원/);
+  const input=entry.$('hosted-ai-file');
+  const text=Buffer.from('# synthetic notes\nnot a paper\n');
+  input.files=[{name:'notes.md',size:text.length,type:'text/markdown',
+    arrayBuffer:async()=>text.buffer.slice(text.byteOffset,text.byteOffset+text.length)}];
+  input.dispatchEvent(new Event('change'));
+  await until(()=>/PDF/.test(entry.text('hosted-ai-error')),'the non-PDF file is rejected');
+  assert.match(entry.text('hosted-ai-file-status'),/PDF/);
+  setPrompt(entry,PROMPT);
+  assert.equal(entry.$('hosted-ai-run').disabled,true);
+  entry.$('hosted-ai-run').click();
+  await new Promise(resolve=>setTimeout(resolve,60));
+  assert.equal(entry.calls.some(call=>call.path==='/v1/ai/uploads'),false,'no upload is attempted');
+  assert.equal(entry.calls.some(call=>call.path==='/v1/ai/jobs'),false,'no job is attempted');
+  await selectFile(entry,BYTES);
+  assert.equal(entry.$('hosted-ai-run').disabled,false,'a real PDF is still accepted');
+});
+
+test('a server 415 is explained as PDF-only',async()=>{
+  const entry=setup({routes:makeRouter({
+    uploads:()=>({status:415,body:{error:{code:'unsupported_media_type',retryable:false}}})
+  })});
+  await entry.app.ready;
+  await signIn(entry);
+  await selectFile(entry,BYTES);
+  setPrompt(entry,PROMPT);
+  entry.$('hosted-ai-run').click();
+  await until(()=>/PDF만 지원/.test(entry.text('hosted-ai-error')),'415 is explained');
+});
+
+test('a 401 on job submit ends the session and clears the stored token',async()=>{
+  const entry=setup({routes:makeRouter({
+    jobsPost:()=>({status:401,body:{error:{code:'unauthorized',retryable:false}}})
+  })});
+  await entry.app.ready;
+  await signIn(entry);
+  await selectFile(entry,BYTES);
+  setPrompt(entry,PROMPT);
+  entry.$('hosted-ai-run').click();
+  await until(()=>/세션이 끝났습니다/.test(entry.text('hosted-ai-error')),'401 ends the session');
+  assert.equal(entry.store.has(SESSION_KEY),false);
+  assert.equal(entry.$('hosted-ai-login-form').hidden,false);
+  assert.equal(entry.$('hosted-ai-config').hidden,true);
+});
+
+test('a 401 on an artifact download ends the session instead of leaving a signed-in panel',async()=>{
+  const flow=editFlow({router:{
+    artifact:()=>({status:401,body:{error:{code:'unauthorized',retryable:false}}})
+  }});
+  const entry=flow.entry;
+  await startReview(entry);
+  checkCandidate(entry,'hosted-ai-candidate-0');
+  await applySelected(entry);
+  entry.$('hosted-ai-edited-download').click();
+  await until(()=>/세션이 끝났습니다/.test(entry.text('hosted-ai-error')),'artifact 401 ends the session');
+  assert.equal(entry.store.has(SESSION_KEY),false);
+  assert.equal(entry.$('hosted-ai-login-form').hidden,false);
+});
+
+test('a 429 submission is reported once without an automatic retry',async()=>{
+  const entry=setup({routes:makeRouter({
+    jobsPost:()=>({status:429,body:{error:{code:'rate_limited',retryable:true}}})
+  })});
+  await entry.app.ready;
+  await signIn(entry);
+  await selectFile(entry,BYTES);
+  setPrompt(entry,PROMPT);
+  entry.$('hosted-ai-run').click();
+  await until(()=>/요청이 너무 많습니다/.test(entry.text('hosted-ai-error')),'429 is explained');
+  await new Promise(resolve=>setTimeout(resolve,80));
+  assert.equal(entry.calls.filter(call=>call.path==='/v1/ai/jobs'&&call.method==='POST').length,1,
+    'a rate limit is not retried automatically');
+});
+
+test('verified PDF bytes are declared as application/pdf even if the browser reports another type',async()=>{
+  const entry=setup({routes:makeRouter()});
+  await entry.app.ready;
+  await signIn(entry);
+  await selectFile(entry,BYTES,{name:'Synthetic paper.pdf',type:'text/plain'});
+  setPrompt(entry,PROMPT);
+  entry.$('hosted-ai-run').click();
+  await until(()=>entry.calls.some(call=>call.path==='/v1/ai/jobs'&&call.method==='POST'),'job submitted');
+  const upload=entry.calls.find(call=>call.path==='/v1/ai/uploads');
+  assert.equal(upload.headers['Content-Type'],'application/pdf');
+});
+
+test('applying RED candidates requires the RED source file, not a newly selected one',async()=>{
+  const flow=editFlow();
+  const entry=flow.entry;
+  await startReview(entry);
+  checkCandidate(entry,'hosted-ai-candidate-0');
+  const other=Buffer.from('%PDF-1.7 synthetic other paper\n%%EOF\n');
+  await selectFile(entry,other,{name:'Other paper.pdf'});
+  assert.equal(entry.$('hosted-ai-apply').disabled,true);
+  assert.match(entry.text('hosted-ai-apply-status'),/RED 원본과 다릅니다/);
+  entry.$('hosted-ai-apply').click();
+  await new Promise(resolve=>setTimeout(resolve,60));
+  assert.equal(flow.posts.filter(body=>body.applyOnly===true).length,0,'no apply job is sent for another file');
+});
+test('queued and running jobs do not present placeholder usage as provider-reported',async()=>{
+  const zeroUsage={inputTokens:0,outputTokens:0,cacheReadInputTokens:0,cacheCreationInputTokens:0};
+  const entry=setup({routes:makeRouter({
+    jobsPost:()=>({status:202,body:{job:job({state:'queued',usage:zeroUsage}),replayed:false}}),
+    jobGet:()=>({status:200,body:{job:job({state:'running',usage:zeroUsage})}})
+  })});
+  await entry.app.ready;
+  await signIn(entry);
+  await selectFile(entry,BYTES);
+  setPrompt(entry,PROMPT);
+  entry.$('hosted-ai-run').click();
+  await until(()=>/아직 보고되지 않음/.test(entry.text('hosted-ai-job-usage')),'placeholder usage is not reported');
+  assert.ok(!/입력 0|출력 0/.test(entry.text('hosted-ai-job-usage')));
+  entry.app.destroy();
+});
+test('reload after handoff keeps the edited upload as the BLUE input',async()=>{
+  const shared=new Map();
+  const first=editFlow({store:shared});
+  await startReview(first.entry);
+  checkCandidate(first.entry,'hosted-ai-candidate-0');
+  await applySelected(first.entry);
+  first.entry.$('hosted-ai-blue-handoff').click();
+  await until(()=>first.uploads.length===2,'the edited upload is registered');
+  first.entry.app.destroy();
+
+  const second=editFlow({store:shared,router:{
+    jobGet:record=>{
+      if(record.path==='/v1/ai/jobs/job-apply') return {status:200,body:{job:applyJob()}};
+      if(record.path==='/v1/ai/jobs/job-red') return {status:200,body:{job:reviewJob()}};
+      return {status:404,body:{error:{code:'not_found'}}};
+    }
+  }});
+  await second.entry.app.ready;
+  await until(()=>new RegExp(EDITED_SHA).test(second.entry.text('hosted-ai-file-status')),
+    'the edited upload is restored from sessionStorage');
+  assert.match(second.entry.text('hosted-ai-file-status'),/RED 수정본 입력/);
+  const uploadsBefore=second.uploads.length;
+  second.entry.$('hosted-ai-role').value='blue';
+  second.entry.$('hosted-ai-role').dispatchEvent(new Event('change'));
+  setPrompt(second.entry,'Verify the edited paper independently.');
+  second.entry.$('hosted-ai-run').click();
+  await until(()=>second.posts.some(body=>body.role==='blue'),'the BLUE job starts from the restored input');
+  const blue=second.posts.find(body=>body.role==='blue');
+  assert.equal(blue.uploadId,EDITED_UPLOAD);
+  assert.equal(second.uploads.length,uploadsBefore,'the existing edited upload is reused');
+});
+test('apply-only jobs send resolved model/effort and derive a new key when the defaults change',async()=>{
+  const first=editFlow();
+  await startReview(first.entry);
+  checkCandidate(first.entry,'hosted-ai-candidate-0');
+  await applySelected(first.entry);
+  const applyA=first.posts.find(body=>body.applyOnly===true);
+  assert.ok(applyA,'the first apply job is submitted');
+  assert.equal(applyA.model,'claude-opus-5-5');
+  assert.equal(applyA.effort,'high');
+
+  const changedCaps={...CAPS,models:['claude-sonnet-5-5','claude-opus-5-5'],efforts:['low','medium']};
+  const second=editFlow({router:{caps:changedCaps}});
+  await startReview(second.entry);
+  checkCandidate(second.entry,'hosted-ai-candidate-0');
+  await applySelected(second.entry);
+  const applyB=second.posts.find(body=>body.applyOnly===true);
+  assert.ok(applyB,'the second apply job is submitted');
+  assert.equal(applyB.model,'claude-sonnet-5-5');
+  assert.equal(applyB.effort,'low');
+  assert.notEqual(applyB.idempotencyKey,applyA.idempotencyKey,
+    'a changed default model/effort derives a different apply key');
+  assert.equal(JSON.stringify(applyB.edits),JSON.stringify(applyA.edits),
+    'only the resolved defaults changed between the two apply requests');
 });

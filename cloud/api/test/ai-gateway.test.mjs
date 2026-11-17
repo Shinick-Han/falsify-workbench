@@ -743,19 +743,23 @@ test('active-job cap reconciles with the runtime instead of leaking abandoned ro
     assert.equal(await stubCalls(mf, '/internal/v1/jobs', 'POST'), 1, 'only the new job is submitted');
   });
 
-  await withApp(bindings, async (mf, call) => {
+  await withApp({ ...bindings, AI_STUB_MODE: 'runtime-down' }, async (mf, call) => {
     const ada = await register(mf, call, 'unreconciled');
-    const up = await upload(call, ada.body.token, pdfBytes('unreconciled'));
     const d1 = await mf.getD1Database('DB');
     const author = await d1.prepare('SELECT id FROM authors WHERE username = ?1').bind('unreconciled').first();
+    const ownerId = `usr:${author.id}`;
+    const at = new Date().toISOString();
+    // The upload is seeded directly: the runtime is unreachable in this scenario.
+    await d1.prepare('INSERT INTO ai_uploads (id, owner_id, sha256, name, mime, bytes, runtime_upload_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)')
+      .bind(UUID_A, ownerId, 'b'.repeat(64), 'paper.pdf', 'application/pdf', 10, 'rt-seeded', at).run();
     const staleId = '66666666-6666-4666-8666-666666666666';
-    // The runtime does not know this row, so reconciliation fails and the row must stay untouched.
-    await seedGatewayJob(mf, { id: staleId, ownerId: `usr:${author.id}`, state: 'running' });
-    const res = await postJob(call, ada.body.token, jobBody(up.body.upload.id, { idempotencyKey: 'op-reconcile-0002' }));
+    // The runtime is unreachable, so reconciliation cannot refresh the row and it must stay untouched.
+    await seedGatewayJob(mf, { id: staleId, ownerId, state: 'running' });
+    const res = await postJob(call, ada.body.token, jobBody(UUID_A, { idempotencyKey: 'op-reconcile-0002' }));
     assert.equal(res.status, 429);
     assert.equal(res.body.error.code, 'rate_limited');
     const stale = await d1.prepare('SELECT state FROM ai_jobs WHERE id = ?1').bind(staleId).first();
-    assert.equal(stale.state, 'running', 'a reconciliation error leaves the index unchanged');
+    assert.equal(stale.state, 'running', 'a runtime outage leaves the index unchanged');
     const leaked = await d1.prepare('SELECT COUNT(*) AS count FROM ai_jobs WHERE idempotency_key = ?1').bind('op-reconcile-0002').first();
     assert.equal(leaked.count, 0, 'the refused submission is rolled back');
     assert.equal(await stubCalls(mf, '/internal/v1/jobs', 'POST'), 0);
@@ -920,18 +924,6 @@ test('runtime outage is 503 ai_unavailable and never a fabricated state', async 
     const unchanged = await d1.prepare('SELECT state FROM ai_jobs WHERE id = ?1').bind('33333333-3333-4333-8333-333333333333').first();
     assert.equal(unchanged.state, 'queued', 'no state is invented while the runtime is down');
   });
-
-  // A runtime that lost a job this gateway owns is unavailable, not a fabricated 404 or state.
-  await withApp({ AI_HOSTING_ENABLED: 'true', CONFLUENCE_ONLY: 'false' }, async (mf, call) => {
-    const ada = await register(mf, call, 'lost');
-    const d1 = await mf.getD1Database('DB');
-    const author = await d1.prepare('SELECT id FROM authors WHERE username = ?1').bind('lost').first();
-    const ownerId = `usr:${author.id}`;
-    await seedGatewayJob(mf, { id: '44444444-4444-4444-8444-444444444444', ownerId });
-    const status = await call('GET', '/v1/ai/jobs/44444444-4444-4444-8444-444444444444', { token: ada.body.token });
-    assert.equal(status.status, 503);
-    assert.equal(status.body.error.code, 'ai_unavailable');
-  });
 });
 
 test('per-owner rate limits are configurable and isolated', async () => {
@@ -1035,28 +1027,31 @@ test('RED edit selection is validated, forwarded and part of the idempotency has
     const body = jobBody(up.body.upload.id, {
       idempotencyKey: 'op-edits-0001',
       edits: [TEXT_EDIT],
-      visualEdits: [TABLE_EDIT, CHART_EDIT],
       useEvidence: false,
       budget: { maxCalls: 5 },
     });
     const created = await postJob(call, ada.body.token, body);
     assert.equal(created.status, 202);
     const jobId = created.body.job.id;
+    assert.equal(created.body.job.applyOnly, false);
+    assert.equal(created.body.job.useEvidence, false, 'request flags are projected into the snapshot');
     const payload = await stubJobPayload(mf, jobId);
     assert.deepEqual(payload.edits, [{ pageIndex: 0, before: '12.4%', after: '14.1%', occurrence: 0, id: 'edit-1' }]);
-    assert.deepEqual(payload.visualEdits, [TABLE_EDIT, CHART_EDIT]);
+    assert.equal(payload.visualEdits, undefined, 'visual edits require the apply-only path');
     assert.equal(payload.useEvidence, false);
     assert.equal(payload.applyOnly, undefined, 'the default is omitted from the wire');
     assert.deepEqual(payload.budget, { maxCalls: 5 });
     assert.equal(payload.harness.maxCalls, 5);
     assert.deepEqual(Object.keys(payload).sort(), [
       'budget', 'effort', 'harness', 'idempotencyKey', 'jobId', 'model', 'ownerId',
-      'prompt', 'requestHash', 'role', 'uploadId', 'edits', 'visualEdits', 'useEvidence',
+      'prompt', 'requestHash', 'role', 'uploadId', 'edits', 'useEvidence',
     ].sort());
 
     const replay = await postJob(call, ada.body.token, body);
     assert.equal(replay.status, 200);
     assert.equal(replay.body.replayed, true);
+    assert.equal(replay.body.job.applyOnly, false);
+    assert.equal(replay.body.job.useEvidence, false, 'a replay keeps the request flags');
     assert.equal(await stubCalls(mf, '/internal/v1/jobs', 'POST'), 1);
 
     const changed = await postJob(call, ada.body.token, { ...body, edits: [{ ...TEXT_EDIT, after: '14.2%' }] });
@@ -1098,18 +1093,20 @@ test('edit and apply-only validation is strict', async () => {
     const blueUpload = await upload(call, bea.body.token, pdfBytes('strict-blue'));
     const base = jobBody(redUpload.body.upload.id, { idempotencyKey: 'op-strict-0001' });
     const many = Array.from({ length: 101 }, (_, i) => ({ pageIndex: 0, before: `a${i}`, after: `b${i}` }));
-    const manyVisual = Array.from({ length: 25 }, (_, i) => ({ ...TABLE_EDIT, itemId: `table-${i}` }));
+    const manyVisual = Array.from({ length: 13 }, (_, i) => ({ ...TABLE_EDIT, itemId: `table-${i}` }));
+    const twelveVisual = Array.from({ length: 12 }, (_, i) => ({ ...TABLE_EDIT, itemId: `table-${i}` }));
     const cases = [
       [{ edits: many }, 'more than 100 text edits'],
-      [{ visualEdits: manyVisual }, 'more than 24 visual edits'],
+      [{ applyOnly: true, visualEdits: manyVisual, edits: [TEXT_EDIT] }, 'more than 12 visual edits'],
+      [{ visualEdits: [TABLE_EDIT] }, 'visual edits without apply-only'],
       [{ edits: [{ ...TEXT_EDIT, executable: '/bin/sh' }] }, 'text edit executable'],
       [{ edits: [{ ...TEXT_EDIT, apiKey: 'sk-synthetic' }] }, 'text edit apiKey'],
       [{ edits: [{ ...TEXT_EDIT, path: '../../etc/passwd' }] }, 'text edit path'],
-      [{ visualEdits: [{ ...TABLE_EDIT, command: 'rm -rf /' }] }, 'visual edit command'],
-      [{ visualEdits: [{ ...TABLE_EDIT, kind: 'region' }] }, 'unsupported visual kind'],
-      [{ visualEdits: [{ kind: 'table-cell', itemId: 't', row: 0, column: 0, before: 'a', after: 'b' }] }, 'missing rationale'],
-      [{ visualEdits: [{ ...CHART_EDIT, beforeY: '12.4' }] }, 'non numeric chart value'],
-      [{ visualEdits: [{ ...CHART_EDIT, afterY: 12.4 }] }, 'unchanged chart value'],
+      [{ applyOnly: true, visualEdits: [{ ...TABLE_EDIT, command: 'rm -rf /' }] }, 'visual edit command'],
+      [{ applyOnly: true, visualEdits: [{ ...TABLE_EDIT, kind: 'region' }] }, 'unsupported visual kind'],
+      [{ applyOnly: true, visualEdits: [{ kind: 'table-cell', itemId: 't', row: 0, column: 0, before: 'a', after: 'b' }] }, 'missing rationale'],
+      [{ applyOnly: true, visualEdits: [{ ...CHART_EDIT, beforeY: '12.4' }] }, 'non numeric chart value'],
+      [{ applyOnly: true, visualEdits: [{ ...CHART_EDIT, afterY: 12.4 }] }, 'unchanged chart value'],
       [{ edits: [{ before: 'a', after: 'b' }] }, 'missing pageIndex'],
       [{ edits: [{ ...TEXT_EDIT, bbox: [0, 0, 1] }] }, 'short bbox'],
       [{ edits: [{ ...TEXT_EDIT, after: TEXT_EDIT.before }] }, 'identical replacement'],
@@ -1119,7 +1116,7 @@ test('edit and apply-only validation is strict', async () => {
       [{ applyOnly: true, edits: [TEXT_EDIT], budget: { maxCalls: 5 } }, 'apply-only with a call budget'],
       [{ role: 'blue', uploadId: blueUpload.body.upload.id, applyOnly: true, edits: [TEXT_EDIT] }, 'apply-only for BLUE'],
       [{ role: 'blue', uploadId: blueUpload.body.upload.id, edits: [TEXT_EDIT] }, 'edits for BLUE'],
-      [{ role: 'blue', uploadId: blueUpload.body.upload.id, visualEdits: [TABLE_EDIT] }, 'visual edits for BLUE'],
+      [{ role: 'blue', uploadId: blueUpload.body.upload.id, applyOnly: true, visualEdits: [TABLE_EDIT] }, 'visual edits for BLUE'],
     ];
     for (const [override, label] of cases) {
       const res = await postJob(call, ada.body.token, { ...base, ...override });
@@ -1129,6 +1126,22 @@ test('edit and apply-only validation is strict', async () => {
       assert.equal(res.text.includes('/bin/sh'), false, label);
     }
     assert.equal(await stubCalls(mf, '/internal/v1/jobs', 'POST'), 0, 'invalid selections never reach the runtime');
+
+    // Twelve coordinated visual operations is the runtime limit and must be accepted.
+    const atLimit = await postJob(call, ada.body.token, {
+      role: 'red',
+      prompt: 'Review this synthetic paper and list contradictions.',
+      uploadId: redUpload.body.upload.id,
+      idempotencyKey: 'op-strict-0012',
+      model: 'claude-sonnet-5-5',
+      effort: 'high',
+      budget: { maxCalls: 0 },
+      applyOnly: true,
+      visualEdits: twelveVisual,
+    });
+    assert.equal(atLimit.status, 202, '12 visual edits are accepted');
+    assert.equal((await stubJobPayload(mf, atLimit.body.job.id)).visualEdits.length, 12);
+    assert.equal(await stubCalls(mf, '/internal/v1/jobs', 'POST'), 1);
   });
 });
 
@@ -1145,27 +1158,33 @@ test('apply-only RED jobs carry a zero call budget and still cancel', async () =
       ...jobBody(up.body.upload.id, { idempotencyKey: 'op-apply-0001' }),
       applyOnly: true,
       edits: [TEXT_EDIT],
+      visualEdits: [TABLE_EDIT],
       budget: { maxCalls: 0 },
     });
     assert.equal(created.status, 202);
     assert.equal(created.body.job.progress.requiredCalls, 0);
     assert.equal(created.body.job.state, 'queued');
+    assert.equal(created.body.job.applyOnly, true, 'apply-only is projected into the snapshot');
+    assert.equal(created.body.job.useEvidence, true, 'useEvidence defaults to true');
     const payload = await stubJobPayload(mf, created.body.job.id);
     assert.equal(payload.applyOnly, true);
     assert.deepEqual(payload.budget, { maxCalls: 0 });
     assert.equal(payload.harness.maxCalls, 0);
     assert.deepEqual(payload.edits, [{ pageIndex: 0, before: '12.4%', after: '14.1%', occurrence: 0, id: 'edit-1' }]);
-    assert.equal(payload.visualEdits, undefined);
+    assert.deepEqual(payload.visualEdits, [TABLE_EDIT], 'visual edits are accepted on the apply-only path');
 
     const replay = await postJob(call, ada.body.token, {
       ...jobBody(up.body.upload.id, { idempotencyKey: 'op-apply-0001' }),
       applyOnly: true,
       edits: [TEXT_EDIT],
+      visualEdits: [TABLE_EDIT],
       budget: { maxCalls: 0 },
     });
     assert.equal(replay.status, 200);
     assert.equal(replay.body.replayed, true);
     assert.equal(replay.body.job.id, created.body.job.id);
+    assert.equal(replay.body.job.applyOnly, true, 'a replay keeps applyOnly');
+    assert.equal(replay.body.job.useEvidence, true, 'a replay keeps the useEvidence default');
     assert.equal(await stubCalls(mf, '/internal/v1/jobs', 'POST'), 1);
 
     const cancel = await call('POST', `/v1/ai/jobs/${created.body.job.id}/cancel`, { token: ada.body.token });
@@ -1187,7 +1206,6 @@ test('edited.pdf streams to the owner and re-uploads unchanged as a BLUE input',
     const red = await postJob(call, ada.body.token, jobBody(up.body.upload.id, {
       idempotencyKey: 'op-handoff-0001',
       edits: [TEXT_EDIT],
-      visualEdits: [TABLE_EDIT],
     }));
     assert.equal(red.status, 202);
     const jobId = red.body.job.id;
@@ -1328,6 +1346,88 @@ test('owner token budget gates model jobs on recorded usage and skips apply-only
     assert.equal(await ownerUsage(mf, ownerId), 113, 'all-time recorded usage is unchanged');
     const nextWindow = await postJob(call, ada.body.token, jobBody(up.body.upload.id, { idempotencyKey: 'op-budget-0004' }));
     assert.equal(nextWindow.status, 202, 'the previous window no longer counts');
+  });
+});
+
+test('an unpolled terminal job blocks the next submit once its usage is reconciled', async () => {
+  await withApp({
+    AI_HOSTING_ENABLED: 'true',
+    CONFLUENCE_ONLY: 'false',
+    AI_MAX_UPLOAD_BYTES: '4096',
+    AI_ACTIVE_JOBS_PER_OWNER: '5',
+    AI_OWNER_TOKEN_BUDGET: '20',
+    AI_TOKEN_WINDOW_SECONDS: '3600',
+  }, async (mf, call) => {
+    const ada = await register(mf, call, 'unpolled');
+    const up = await upload(call, ada.body.token, pdfBytes('unpolled'));
+    const d1 = await mf.getD1Database('DB');
+
+    // Job A finishes in the runtime, but the client never polls it.
+    const first = await postJob(call, ada.body.token, jobBody(up.body.upload.id, { idempotencyKey: 'op-unpolled-0001' }));
+    assert.equal(first.status, 202);
+    await d1.prepare("UPDATE ai_stub_jobs SET state = 'completed' WHERE id = ?1").bind(first.body.job.id).run();
+    const before = await d1.prepare('SELECT usage_recorded_at FROM ai_jobs WHERE id = ?1').bind(first.body.job.id).first();
+    assert.equal(before.usage_recorded_at, null, 'nothing is recorded until the gateway observes it');
+
+    // The next submit reconciles the owner's active rows first, sees the spent 23 tokens, and refuses.
+    const blocked = await postJob(call, ada.body.token, jobBody(up.body.upload.id, { idempotencyKey: 'op-unpolled-0002' }));
+    assert.equal(blocked.status, 429);
+    assert.equal(blocked.body.error.code, 'owner_budget_exhausted');
+    const recorded = await d1.prepare(
+      'SELECT state, input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens FROM ai_jobs WHERE id = ?1'
+    ).bind(first.body.job.id).first();
+    assert.equal(recorded.state, 'completed', 'reconciliation recorded the terminal state');
+    assert.deepEqual(
+      [recorded.input_tokens, recorded.output_tokens, recorded.cache_read_input_tokens, recorded.cache_creation_input_tokens],
+      [11, 7, 2, 3]
+    );
+    assert.equal(await stubCalls(mf, '/internal/v1/jobs', 'POST'), 1, 'the blocked submit never created a job');
+    assert.equal(
+      (await d1.prepare("SELECT COUNT(*) AS count FROM ai_jobs WHERE idempotency_key = 'op-unpolled-0002'").first()).count,
+      0,
+      'the refused submission is rolled back'
+    );
+  });
+});
+
+test('a runtime 404 for an indexed job becomes terminal interrupted, not a permanent 503', async () => {
+  await withApp({
+    AI_HOSTING_ENABLED: 'true',
+    CONFLUENCE_ONLY: 'false',
+    AI_MAX_UPLOAD_BYTES: '4096',
+    AI_ACTIVE_JOBS_PER_OWNER: '5',
+  }, async (mf, call) => {
+    const ada = await register(mf, call, 'lostjob');
+    const other = await register(mf, call, 'lostother');
+    const up = await upload(call, ada.body.token, pdfBytes('lost-job'));
+    const created = await postJob(call, ada.body.token, jobBody(up.body.upload.id, { idempotencyKey: 'op-lost-0001' }));
+    assert.equal(created.status, 202);
+    const jobId = created.body.job.id;
+    const d1 = await mf.getD1Database('DB');
+    // The runtime loses the job (restart or state loss).
+    await d1.prepare('DELETE FROM ai_stub_jobs WHERE id = ?1').bind(jobId).run();
+
+    const status = await call('GET', `/v1/ai/jobs/${jobId}`, { token: ada.body.token });
+    assert.equal(status.status, 200, 'a lost job is terminal, not a permanent 503');
+    assert.equal(status.body.job.state, 'interrupted');
+    assert.equal(status.body.job.failure.code, 'runtime_job_missing');
+    assert.equal(status.body.job.failure.retryable, false);
+    const row = await d1.prepare('SELECT state FROM ai_jobs WHERE id = ?1').bind(jobId).first();
+    assert.equal(row.state, 'interrupted', 'the index stops retrying the lost job');
+
+    const again = await call('GET', `/v1/ai/jobs/${jobId}`, { token: ada.body.token });
+    assert.equal(again.status, 200);
+    assert.equal(again.body.job.state, 'interrupted');
+
+    const cancel = await call('POST', `/v1/ai/jobs/${jobId}/cancel`, { token: ada.body.token });
+    assert.equal(cancel.status, 202);
+    assert.equal(cancel.body.job.state, 'interrupted', 'cancel is idempotent for a lost job');
+
+    const artifact = await call('GET', `/v1/ai/jobs/${jobId}/artifacts/artifact-1`, { token: ada.body.token });
+    assert.equal(artifact.status, 404, 'a missing artifact is a consistent 404');
+
+    const foreign = await call('GET', `/v1/ai/jobs/${jobId}`, { token: other.body.token });
+    assert.equal(foreign.status, 404, 'owner isolation is unchanged');
   });
 });
 

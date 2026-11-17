@@ -21,7 +21,8 @@ const HASH = /^[a-f0-9]{64}$/;
 const MAX_JOB_BODY_BYTES = 64 * 1024;
 const MAX_UPLOAD_BOUND = 64 * 1024 * 1024;
 const MAX_TEXT_EDITS = 100;
-const MAX_VISUAL_EDITS = 24;
+// The runtime's visual-edit engine accepts at most 12 coordinated visual operations.
+const MAX_VISUAL_EDITS = 12;
 const ROLES = ['red', 'blue'];
 const STATES = ['queued', 'running', 'cancelling', 'cancelled', 'completed', 'failed', 'interrupted'];
 const DEFAULT_MODELS = ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5'];
@@ -360,12 +361,37 @@ function failureView(value) {
 
 // Projects a runtime snapshot onto the contract shape. Nothing is invented: a state outside the
 // allowlist is a runtime contract violation (503), and absent fields are omitted rather than zeroed.
-function publicSnapshot(value, { fallbackId, fallbackRole, includeResult }) {
+// applyOnly/useEvidence are request facts, so a runtime that omits them falls back to what the
+// gateway recorded (defaults false/true).
+function snapshotFlags(value, fallbackApplyOnly, fallbackUseEvidence) {
+  return {
+    applyOnly: typeof value?.applyOnly === 'boolean' ? value.applyOnly : fallbackApplyOnly === true,
+    useEvidence: typeof value?.useEvidence === 'boolean' ? value.useEvidence : fallbackUseEvidence !== false,
+  };
+}
+
+function storedFlags(row) {
+  let parsed = null;
+  try { parsed = row?.snapshot ? JSON.parse(row.snapshot) : null; } catch { parsed = null; }
+  const flags = snapshotFlags(parsed, false, true);
+  return { fallbackApplyOnly: flags.applyOnly, fallbackUseEvidence: flags.useEvidence };
+}
+
+function publicSnapshot(value, {
+  fallbackId,
+  fallbackRole,
+  includeResult,
+  fallbackApplyOnly = false,
+  fallbackUseEvidence = true,
+}) {
   if (!isObject(value) || !STATES.includes(value.state)) aiFail(503, 'ai_unavailable');
+  const flags = snapshotFlags(value, fallbackApplyOnly, fallbackUseEvidence);
   const snapshot = {
     id: typeof value.id === 'string' && UUID.test(value.id) ? value.id : fallbackId,
     role: value.role === 'blue' ? 'blue' : (value.role === 'red' ? 'red' : fallbackRole),
     state: value.state,
+    applyOnly: flags.applyOnly,
+    useEvidence: flags.useEvidence,
   };
   const progress = progressView(value.progress);
   if (progress) snapshot.progress = progress;
@@ -390,11 +416,13 @@ function publicSnapshot(value, { fallbackId, fallbackRole, includeResult }) {
   return snapshot;
 }
 
-function queuedSnapshot({ id, role, model, effort, maxCalls, at }) {
+function queuedSnapshot({ id, role, model, effort, maxCalls, at, applyOnly, useEvidence }) {
   return {
     id,
     role,
     state: 'queued',
+    applyOnly,
+    useEvidence,
     progress: { completedCalls: 0, requiredCalls: maxCalls, phase: 'queued' },
     model,
     effort,
@@ -402,6 +430,26 @@ function queuedSnapshot({ id, role, model, effort, maxCalls, at }) {
     usage: { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
     artifacts: [],
     createdAt: at,
+    updatedAt: at,
+  };
+}
+
+// A runtime 404 for a job this gateway owns means the runtime lost its worker/state. The contract's
+// "interrupted" state is exactly that: terminal, not complete, and never automatically replayed.
+function lostSnapshot(id, role, at, { fallbackApplyOnly = false, fallbackUseEvidence = true } = {}) {
+  return {
+    id,
+    role,
+    state: 'interrupted',
+    applyOnly: fallbackApplyOnly,
+    useEvidence: fallbackUseEvidence,
+    progress: { phase: 'interrupted' },
+    provider: 'anthropic',
+    failure: {
+      code: 'runtime_job_missing',
+      message: 'The runtime no longer has this job.',
+      retryable: false,
+    },
     updatedAt: at,
   };
 }
@@ -566,15 +614,17 @@ function validateVisualEdit(op) {
 }
 
 // Edit selections are RED-only: BLUE must stay blind and only ever receives the edited PDF bytes.
+// Visual operations always run through the apply-only path; a model-driven job cannot carry them.
 function validateEdits(value, role) {
   if (value === undefined) return [];
   if (role !== 'red' || !Array.isArray(value) || value.length > MAX_TEXT_EDITS) aiFail(400, 'invalid_request');
   return value.map(validateTextEdit);
 }
 
-function validateVisualEdits(value, role) {
+function validateVisualEdits(value, role, applyOnly) {
   if (value === undefined) return [];
-  if (role !== 'red' || !Array.isArray(value) || value.length > MAX_VISUAL_EDITS) aiFail(400, 'invalid_request');
+  if (!applyOnly || role !== 'red') aiFail(400, 'invalid_request');
+  if (!Array.isArray(value) || value.length > MAX_VISUAL_EDITS) aiFail(400, 'invalid_request');
   return value.map(validateVisualEdit);
 }
 
@@ -612,13 +662,13 @@ function tokenCount(usage, key) {
 }
 
 // Refreshes the owner's active rows from the runtime before refusing a new job, so work that
-// finished while nobody polled stops consuming the active-job cap. The scan is bounded, and a
-// runtime error leaves that row exactly as it was.
+// finished while nobody polled stops consuming the active-job cap or hiding recorded usage. The
+// scan is bounded; a runtime 404 marks the row interrupted, and other runtime errors leave it as is.
 async function reconcileActiveJobs(db, env, ownerId, excludeId, limit) {
   const bound = Math.min(Math.max(Number(limit) || 1, 1), MAX_RECONCILE_ROWS);
   const rows = await db
     .prepare(
-      "SELECT id, role FROM ai_jobs WHERE owner_id = ?1 AND id <> ?2 AND state IN ('queued', 'running', 'cancelling') ORDER BY created_at LIMIT ?3"
+      "SELECT id, role, snapshot FROM ai_jobs WHERE owner_id = ?1 AND id <> ?2 AND state IN ('queued', 'running', 'cancelling') ORDER BY created_at LIMIT ?3"
     )
     .bind(ownerId, excludeId, bound)
     .all();
@@ -629,9 +679,14 @@ async function reconcileActiveJobs(db, env, ownerId, excludeId, limit) {
         fallbackId: row.id,
         fallbackRole: row.role,
         includeResult: false,
+        ...storedFlags(row),
       });
       if (TERMINAL_STATES.has(snapshot.state)) await persistSnapshot(db, ownerId, snapshot);
-    } catch { /* reconciliation is best-effort; the index row is unchanged */ }
+    } catch (error) {
+      if (error instanceof AiError && error.code === 'not_found') {
+        await persistSnapshot(db, ownerId, lostSnapshot(row.id, row.role, nowIso(), storedFlags(row)));
+      }
+    }
   }
 }
 
@@ -664,7 +719,7 @@ async function createJob(ctx) {
   const useEvidence = body.useEvidence !== false;
   // Selected RED edits are applied by the engine; BLUE never sees the selection, only the bytes.
   const edits = validateEdits(body.edits, body.role);
-  const visualEdits = validateVisualEdits(body.visualEdits, body.role);
+  const visualEdits = validateVisualEdits(body.visualEdits, body.role, applyOnly);
   if (applyOnly) {
     if (body.role !== 'red') aiFail(400, 'invalid_request');
     if (edits.length + visualEdits.length === 0) aiFail(400, 'invalid_request');
@@ -705,7 +760,7 @@ async function createJob(ctx) {
   const slot = await deps.rateLimit(db, bucket, settings.jobsPerOwnerHour);
   const jobId = await jobIdFor(ctx.ownerId, body.idempotencyKey, requestHash);
   const at = nowIso();
-  const queued = queuedSnapshot({ id: jobId, role: body.role, model, effort, maxCalls, at });
+  const queued = queuedSnapshot({ id: jobId, role: body.role, model, effort, maxCalls, at, applyOnly, useEvidence });
   // The unique (owner, idempotency key) insert is the reservation: a duplicate never reaches the
   // runtime, and a distinct key on an active-heavy owner is rolled back before it can count.
   const reserved = await db
@@ -733,6 +788,7 @@ async function createJob(ctx) {
           fallbackId: row.id,
           fallbackRole: row.role,
           includeResult: true,
+          ...storedFlags(row),
         });
         await persistSnapshot(db, ctx.ownerId, snapshot);
       } catch {
@@ -747,7 +803,11 @@ async function createJob(ctx) {
     aiFail(409, 'idempotency_conflict');
   }
   // The policy gate runs only for a new job: a duplicate replay above creates no spend and is never
-  // blocked. It reserves no tokens for in-flight jobs, so this is a pre-flight limit, not a balance.
+  // blocked. Refresh this owner's active rows first so an unpolled but finished job cannot hide its
+  // recorded usage. Apply-only makes no model calls and skips the gate entirely.
+  if (!applyOnly && settings.ownerTokenBudget > 0) {
+    await reconcileActiveJobs(db, env, ctx.ownerId, jobId, settings.activeJobsPerOwner + 5);
+  }
   try {
     await enforceOwnerBudget(db, ctx, settings, { applyOnly });
   } catch (error) {
@@ -760,8 +820,8 @@ async function createJob(ctx) {
     .bind(ctx.ownerId)
     .first();
   if ((active?.count ?? 0) > settings.activeJobsPerOwner) {
-    // Jobs that finished while nobody polled must not hold the active-job cap forever. Reconcile a
-    // bounded set of this owner's active rows, then re-count. Runtime errors leave rows unchanged.
+    // A bounded reconcile frees rows the runtime already finished; a 404 marks a lost job
+    // interrupted, and other runtime errors leave the row unchanged.
     await reconcileActiveJobs(db, env, ctx.ownerId, jobId, settings.activeJobsPerOwner + 5);
     active = await db
       .prepare("SELECT COUNT(*) AS count FROM ai_jobs WHERE owner_id = ?1 AND state IN ('queued', 'running', 'cancelling')")
@@ -809,6 +869,8 @@ async function createJob(ctx) {
     fallbackId: jobId,
     fallbackRole: body.role,
     includeResult: true,
+    fallbackApplyOnly: applyOnly,
+    fallbackUseEvidence: useEvidence,
   });
   await persistSnapshot(db, ctx.ownerId, snapshot);
   return json(result.status === 200 ? 200 : 202, { job: snapshot, replayed: false });
@@ -817,7 +879,7 @@ async function createJob(ctx) {
 async function ownedJob(db, ctx) {
   if (!UUID.test(ctx.params.id)) aiFail(404, 'not_found');
   const row = await db
-    .prepare('SELECT id, role FROM ai_jobs WHERE id = ?1 AND owner_id = ?2')
+    .prepare('SELECT id, role, snapshot FROM ai_jobs WHERE id = ?1 AND owner_id = ?2')
     .bind(ctx.params.id, ctx.ownerId)
     .first();
   // Foreign and missing jobs are indistinguishable.
@@ -825,25 +887,29 @@ async function ownedJob(db, ctx) {
   return row;
 }
 
-// A runtime that does not know a job this gateway owns has lost its state; that is unavailable,
-// not a foreign job (which is rejected from D1 before this call).
-async function runtimeJobSnapshot(call) {
+// A runtime 404 for a job this gateway owns lost its state. Persist the terminal "interrupted"
+// snapshot so status and cancel stop retrying, and return it instead of a permanent 503. An
+// unreachable runtime is still a 503.
+async function runtimeJobSnapshot(db, ownerId, row, call) {
   try {
     return await call();
   } catch (error) {
-    if (error instanceof AiError && error.code === 'not_found') aiFail(503, 'ai_unavailable');
-    throw error;
+    if (!(error instanceof AiError) || error.code !== 'not_found') throw error;
+    const snapshot = lostSnapshot(row.id, row.role, nowIso(), storedFlags(row));
+    await persistSnapshot(db, ownerId, snapshot);
+    return snapshot;
   }
 }
 
 async function getJob(ctx) {
   const db = ctx.deps.getDb();
   const row = await ownedJob(db, ctx);
-  const runtime = await runtimeJobSnapshot(() => getRuntimeJob(ctx.env, { ownerId: ctx.ownerId, jobId: row.id }));
+  const runtime = await runtimeJobSnapshot(db, ctx.ownerId, row, () => getRuntimeJob(ctx.env, { ownerId: ctx.ownerId, jobId: row.id }));
   const snapshot = publicSnapshot(runtime, {
     fallbackId: row.id,
     fallbackRole: row.role,
     includeResult: true,
+    ...storedFlags(row),
   });
   await persistSnapshot(db, ctx.ownerId, snapshot);
   return json(200, { job: snapshot });
@@ -852,11 +918,12 @@ async function getJob(ctx) {
 async function cancelJob(ctx) {
   const db = ctx.deps.getDb();
   const row = await ownedJob(db, ctx);
-  const runtime = await runtimeJobSnapshot(() => cancelRuntimeJob(ctx.env, { ownerId: ctx.ownerId, jobId: row.id }));
+  const runtime = await runtimeJobSnapshot(db, ctx.ownerId, row, () => cancelRuntimeJob(ctx.env, { ownerId: ctx.ownerId, jobId: row.id }));
   const snapshot = publicSnapshot(runtime, {
     fallbackId: row.id,
     fallbackRole: row.role,
     includeResult: true,
+    ...storedFlags(row),
   });
   await persistSnapshot(db, ctx.ownerId, snapshot);
   return json(202, { job: snapshot });

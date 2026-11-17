@@ -1,5 +1,6 @@
 """Offline hosted evidence/apply tests on synthetic PDFs (no private papers)."""
 
+import base64
 import hashlib
 import json
 import sys
@@ -16,13 +17,16 @@ if str(LOCAL) not in sys.path:
 
 import pymupdf
 
+import paper_visual_edit
 import hosted_runtime.service as service_module
-from hosted_runtime import EvidenceError, RuntimeConfig, RuntimeService, ServiceError
+from hosted_runtime import (EvidenceError, RuntimeConfig, RuntimeService, ServiceError,
+                            Store, StoreError, StoreNotFound)
 from hosted_runtime.evidence import configure_store
 from hosted_runtime.pdf_input import extract_pdf
 from paper_evidence import EvidenceStore
 from paper_evidence_blue import context_for_review
 from red_multimodal import resolve_paper_context
+from red_service import ReviewCancelled
 
 OWNER = 'usr:33333333-3333-3333-3333-333333333333'
 OTHER = 'usr:44444444-4444-4444-4444-444444444444'
@@ -144,6 +148,51 @@ class EvidenceBase(unittest.TestCase):
         cell = next(cell for cell in item['table']['cells']
                     if cell['text'] == text_value)
         return summary, item, cell
+
+
+class CancellationTests(EvidenceBase):
+    def test_review_cancelled_persists_provider_usage(self):
+        class CancelRunner:
+            def __call__(self, data, progress, cancelled):
+                raise ReviewCancelled(
+                    'cancelled after a paid call',
+                    usage={'input_tokens': 5, 'output_tokens': 2,
+                           'cache_read_input_tokens': 1,
+                           'cache_creation_input_tokens': 0},
+                    request_id='req_cancel_usage')
+
+        service = self.service(CancelRunner())
+        upload = self.upload(service)
+        snapshot, _ = service.submit_job(self.body(
+            upload, job_id='job-cancel-usage', key='idem-cancel-usage',
+            request_hash='hash-cancel-usage'))
+        done = wait_state(service, OWNER, snapshot['id'], {'cancelled'})
+        self.assertEqual(done['state'], 'cancelled')
+        self.assertEqual(done['usage'], {'inputTokens': 5, 'outputTokens': 2,
+                                         'cacheReadInputTokens': 1,
+                                         'cacheCreationInputTokens': 0})
+        self.assertEqual(done['providerRequestId'], 'req_cancel_usage')
+        self.assertNotIn('result', done)
+
+    def test_cancel_after_result_persists_usage(self):
+        class CancelAfterResult:
+            def __call__(self, data, progress, cancelled):
+                result = red_result(data)
+                result['usage'] = {'input_tokens': 3, 'output_tokens': 1}
+                result['provider'] = {'id': 'anthropic-api', 'models': [MODEL],
+                                      'requestId': 'req_after_result'}
+                cancelled.set()
+                return result
+
+        service = self.service(CancelAfterResult())
+        upload = self.upload(service)
+        snapshot, _ = service.submit_job(self.body(
+            upload, job_id='job-cancel-after', key='idem-cancel-after',
+            request_hash='hash-cancel-after'))
+        done = wait_state(service, OWNER, snapshot['id'], {'cancelled'})
+        self.assertEqual(done['usage'], {'inputTokens': 3, 'outputTokens': 1})
+        self.assertEqual(done['providerRequestId'], 'req_after_result')
+        self.assertNotIn('result', done)
 
 
 class EvidenceTests(EvidenceBase):
@@ -284,8 +333,8 @@ class ApplyTests(EvidenceBase):
                           'row': cell['row'], 'column': cell['column'],
                           'before': '7', 'after': '8',
                           'rationale': 'Keep table and prose aligned.'}],
-            edits=[{'pageIndex': 0, 'before': 'The count was 9',
-                    'after': 'The count was 8'}])
+            edits=[{'pageIndex': 0, 'before': 'was',
+                    'after': 'is'}])
         snapshot, replayed = service.submit_job(body)
         self.assertFalse(replayed)
         done = wait_state(service, OWNER, snapshot['id'], {'completed'})
@@ -320,7 +369,7 @@ class ApplyTests(EvidenceBase):
 
         extracted = extract_pdf(edited)
         prose = '\n\n'.join(s['text'] for s in extracted['segments'])
-        self.assertIn('The count was 8', prose)
+        self.assertIn('The count is 9', prose)
         self.assertNotIn('The count was 9', prose)
         edited_store = EvidenceStore(max_documents=2)
         edited_summary = edited_store.prepare(edited, hashlib.sha256(edited).hexdigest())
@@ -397,8 +446,8 @@ class ApplyTests(EvidenceBase):
             job_id='job-apply-text', key='idem-apply-text',
             request_hash='hash-apply-text',
             budget={'maxCalls': 0},
-            edits=[{'pageIndex': 0, 'before': 'The count was 9',
-                    'after': 'The count was 8'}])
+            edits=[{'pageIndex': 0, 'before': 'was',
+                    'after': 'is'}])
         snapshot, _ = service.submit_job(body)
         done = wait_state(service, OWNER, snapshot['id'], {'completed'})
         self.assertTrue(done['applyOnly'])
@@ -414,7 +463,7 @@ class ApplyTests(EvidenceBase):
         edited_meta = next(a for a in done['artifacts'] if a['name'] == 'edited.pdf')
         _, edited = service.get_artifact(OWNER, done['id'], edited_meta['id'])
         prose = '\n\n'.join(s['text'] for s in extract_pdf(edited)['segments'])
-        self.assertIn('The count was 8', prose)
+        self.assertIn('The count is 9', prose)
         self.assertNotIn('The count was 9', prose)
         apply_meta = next(a for a in done['artifacts'] if a['name'] == 'apply.json')
         _, apply_raw = service.get_artifact(OWNER, done['id'], apply_meta['id'])
@@ -423,6 +472,75 @@ class ApplyTests(EvidenceBase):
         self.assertEqual(apply['outputSha256'], hashlib.sha256(edited).hexdigest())
         self.assertEqual(apply['visualEdits']['requested'], 0)
         self.assertEqual(apply['textEdits']['applied'], 1)
+
+    def test_traced_text_edit_fails_without_edited_pdf(self):
+        service = self.service(FakeRunner())
+        upload = self.upload(service)
+        body = self.body(
+            upload, prompt=None, applyOnly=True, useEvidence=False,
+            job_id='job-apply-trace', key='idem-apply-trace',
+            request_hash='hash-apply-trace',
+            edits=[{'pageIndex': 0, 'before': 'The count was 9',
+                    'after': 'The count was 8'}])
+        snapshot, _ = service.submit_job(body)
+        done = wait_state(service, OWNER, snapshot['id'], {'failed'})
+        self.assertEqual(done['failure']['code'], 'apply_edit_trace')
+        names = [a['name'] for a in done['artifacts']]
+        self.assertNotIn('edited.pdf', names)
+        self.assertNotIn('apply.json', names)
+        self.assertEqual(service.store.read_upload_bytes(OWNER, upload['id'])[1], PDF)
+
+    def test_ambiguous_text_edit_fails_before_mutation(self):
+        service = self.service(FakeRunner())
+        document = pymupdf.open()
+        page = document.new_page()
+        page.insert_text((72, 72), 'The value 10 and the value 20.', fontsize=11)
+        raw = document.tobytes()
+        document.close()
+        upload = self.upload(service, data=raw)
+        body = self.body(
+            upload, prompt=None, applyOnly=True, useEvidence=False,
+            job_id='job-apply-ambiguous', key='idem-apply-ambiguous',
+            request_hash='hash-apply-ambiguous',
+            edits=[{'pageIndex': 0, 'before': 'value', 'after': 'number'}])
+        snapshot, _ = service.submit_job(body)
+        done = wait_state(service, OWNER, snapshot['id'], {'failed'})
+        self.assertEqual(done['failure']['code'], 'apply_edit_ambiguous')
+        self.assertNotIn('edited.pdf', [a['name'] for a in done['artifacts']])
+        self.assertEqual(service.store.read_upload_bytes(OWNER, upload['id'])[1], raw)
+
+    def test_visual_verification_warning_fails_apply(self):
+        runner = FakeRunner()
+        service = self.service(runner)
+        upload = self.upload(service)
+        _, item, cell = self.table_cell(service)
+        source = PDF
+        fake = {
+            'schema': 'falsify.visual-edit-export.v1',
+            'sourceSha256': PDF_SHA,
+            'outputSha256': hashlib.sha256(source).hexdigest(),
+            'file': base64.b64encode(source).decode('ascii'),
+            'pageCount': 1,
+            'changes': [{'id': 've-1', 'pageIndex': 0, 'bbox': [0, 0, 1, 1]}],
+            'verification': {'status': 'warning',
+                             'issues': [{'code': 'saved-cell-text-unconfirmed'}],
+                             'checks': ['page-count']},
+        }
+        body = self.body(
+            upload, prompt=None, applyOnly=True, useEvidence=False,
+            job_id='job-vis-warning', key='idem-vis-warning',
+            request_hash='hash-vis-warning',
+            visualEdits=[{'kind': 'table-cell', 'itemId': item['id'],
+                          'row': cell['row'], 'column': cell['column'],
+                          'before': '7', 'after': '8', 'rationale': 'Selected.'}])
+        with patch.object(paper_visual_edit, 'export_visual', return_value=fake):
+            snapshot, _ = service.submit_job(body)
+            done = wait_state(service, OWNER, snapshot['id'], {'failed'})
+        self.assertEqual(done['failure']['code'], 'apply_verify_failed')
+        names = [a['name'] for a in done['artifacts']]
+        self.assertNotIn('edited.pdf', names)
+        self.assertNotIn('apply.json', names)
+        self.assertEqual(service.store.read_upload_bytes(OWNER, upload['id'])[1], PDF)
 
     def test_use_evidence_false_still_prepares_evidence_for_visual_apply(self):
         runner = FakeRunner()
@@ -440,6 +558,43 @@ class ApplyTests(EvidenceBase):
         self.assertFalse(done['useEvidence'])
         self.assertIn('evidence.json', [a['name'] for a in done['artifacts']])
         self.assertIn('edited.pdf', [a['name'] for a in done['artifacts']])
+
+
+class UploadRetentionTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+
+    def test_upload_only_blob_is_deleted_after_retention(self):
+        upload, _ = self.store.put_upload(OWNER, 'orphan.pdf', 'application/pdf', PDF)
+        blob = self.store._blob_path(upload['sha256'])
+        self.assertTrue(blob.is_file())
+        self.store.prune_jobs(retention_seconds=1, now=time.time() + 10)
+        with self.assertRaises(StoreNotFound):
+            self.store.get_upload(OWNER, upload['id'])
+        self.assertFalse(blob.exists())
+
+    def test_referenced_upload_is_preserved(self):
+        upload, _ = self.store.put_upload(OWNER, 'kept.pdf', 'application/pdf', PDF)
+        self.store.create_job(
+            owner_id=OWNER, job_id='job-kept-upload', idempotency_key='idem-kept-upload',
+            request_hash='hash-kept-upload', role='red', model=MODEL, effort='high',
+            provider='anthropic', progress={'completedCalls': 0, 'requiredCalls': 12,
+                                            'phase': 'queued'}, upload_id=upload['id'])
+        self.store.prune_jobs(retention_seconds=1, now=time.time() + 10)
+        self.assertEqual(self.store.get_upload(OWNER, upload['id'])['id'], upload['id'])
+        self.assertTrue(self.store._blob_path(upload['sha256']).is_file())
+
+
+class RuntimeLockTests(EvidenceBase):
+    def test_second_service_fails_closed_without_disturbing_first(self):
+        first = self.service(FakeRunner())
+        self.assertTrue(first.health()['ready'])
+        with self.assertRaises(StoreError) as error:
+            RuntimeService(self.config(), review_runner=FakeRunner())
+        self.assertEqual(error.exception.code, 'state_in_use')
+        self.assertTrue(first.health()['ready'])
 
 
 if __name__ == '__main__':

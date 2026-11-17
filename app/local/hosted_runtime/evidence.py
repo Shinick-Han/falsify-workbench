@@ -219,6 +219,28 @@ def _minimal_changes(changes):
     return result
 
 
+def check_text_ambiguity(pdf_bytes, text_edits):
+    """Refuse implicit occurrence 0 when a quote has multiple page matches."""
+    import pymupdf
+    with pymupdf.open(stream=pdf_bytes, filetype='pdf') as document:
+        for operation in text_edits:
+            if not isinstance(operation, dict):
+                raise EvidenceError('apply_edit_invalid')
+            if 'spanId' in operation or 'bbox' in operation:
+                continue
+            page_index = operation.get('pageIndex')
+            before = operation.get('before')
+            if type(page_index) is not int or not 0 <= page_index < document.page_count \
+                    or not isinstance(before, str) or not before:
+                continue
+            try:
+                matches = document[page_index].search_for(before)
+            except Exception:
+                raise EvidenceError('apply_edit_invalid') from None
+            if len(matches) > 1:
+                raise EvidenceError('apply_edit_ambiguous')
+
+
 def apply_edits(store, summary, visual_edits, text_edits, source_bytes, revision, *,
                 cancelled=None):
     """Apply selected table-cell and text-span edits to an exact source PDF copy."""
@@ -256,13 +278,26 @@ def apply_edits(store, summary, visual_edits, text_edits, source_bytes, revision
                 or visual_result.get('outputSha256') != _sha(current)
                 or visual_result.get('pageCount') != source_pages):
             raise EvidenceError('apply_verify_failed')
+        visual_verification = visual_result.get('verification')
+        if (not isinstance(visual_verification, dict)
+                or visual_verification.get('status') != 'passed'):
+            raise EvidenceError('apply_verify_failed')
         if len(visual_result.get('changes') or []) != len(operations):
             raise EvidenceError('apply_edit_incomplete')
     text_result = None
     if text_edits:
-        from paper_text_span_mutator import mutate_pdf_text_spans
+        from paper_text_span_mutator import SpanMutationError, mutate_pdf_text_spans
+        check_text_ambiguity(current, list(text_edits))
         try:
-            text_result = mutate_pdf_text_spans(current, list(text_edits))
+            text_result = mutate_pdf_text_spans(current, list(text_edits),
+                                               allow_trace=False)
+        except SpanMutationError as error:
+            if cancelled is not None and cancelled.is_set():
+                raise EvidenceError('evidence_cancelled') from None
+            code = getattr(error, 'code', None)
+            if code == 'text_span_trace_detected':
+                raise EvidenceError('apply_edit_trace') from None
+            raise EvidenceError('apply_edit_invalid') from None
         except Exception:
             if cancelled is not None and cancelled.is_set():
                 raise EvidenceError('evidence_cancelled') from None

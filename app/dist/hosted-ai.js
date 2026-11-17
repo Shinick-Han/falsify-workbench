@@ -12,7 +12,6 @@
   const RUNS_LIMIT=6;
   const TOKEN_RE=/^fss_[A-Za-z0-9_-]{43}$/;
   const HEADER_TOKEN_RE=/^[\x21-\x7e]{8,4096}$/;
-  const MIME_TYPES=['application/pdf','application/octet-stream','text/plain'];
   const TERMINAL_STATES=['cancelled','completed','failed','interrupted'];
   const POLL_DELAYS=[1200,2000,3000,5000,8000,12000];
   const MAX_POLL_FAILURES=6;
@@ -84,6 +83,13 @@
     return n+' bytes';
   }
   function codePoints(text){return [...String(text??'')].length;}
+  /* The hosted runtime extracts PDFs only (%PDF- magic) and rejects text/plain at execution. */
+  function isPdfBytes(bytes){
+    return !!bytes&&bytes.byteLength>=5&&bytes[0]===0x25&&bytes[1]===0x50&&bytes[2]===0x44
+      &&bytes[3]===0x46&&bytes[4]===0x2d;
+  }
+  /* Mirrors the gateway's editText rejection: a control character would make the whole apply job 400. */
+  const CONTROL_CHARS=/[\u0000-\u001f\u007f]/;
   function safeToken(value,maxLength=80){
     return typeof value==='string'&&value.length<=maxLength&&/^[A-Za-z0-9_.:-]+$/.test(value)?value:'';
   }
@@ -106,11 +112,14 @@
       const row=Number(edit.row),column=Number(edit.column);
       const before=typeof edit.before==='string'?edit.before:'';
       const after=typeof edit.after==='string'?edit.after:'';
-      const rationale=typeof edit.rationale==='string'?edit.rationale.trim():'';
-      /* The gateway requires a non-empty rationale for every visual edit and rejects no-op or
-         over-long replacements, so only submittable table cells are offered here. */
-      if(!itemId||!Number.isSafeInteger(row)||row<0||!Number.isSafeInteger(column)||column<0
+      const rationale=typeof edit.rationale==='string'
+        ?edit.rationale.replace(CONTROL_CHARS,' ').replace(/\s+/g,' ').trim():'';
+      /* The gateway requires a non-empty single-line rationale for every visual edit and rejects no-op or
+         over-long replacements, so the rationale is normalized while exact cell text is never altered. */
+      if(!itemId||!Number.isSafeInteger(row)||row<0||row>100000
+        ||!Number.isSafeInteger(column)||column<0||column>100000
         ||!before||before.length>4000||after.length>4000||after===before
+        ||CONTROL_CHARS.test(before)||CONTROL_CHARS.test(after)
         ||!rationale||rationale.length>3000){skipped++;return;}
       const key='visual:'+itemId+':'+row+':'+column;
       if(visual.some(entry=>entry.key===key)) return;
@@ -126,7 +135,10 @@
       const pageIndex=pageIndexFromSegmentId(candidate.segmentId);
       if(pageIndex===null){skipped++;continue;}
       const after=typeof candidate.after==='string'?candidate.after:'';
-      if(before.length>4000||after.length>4000||after===before){skipped++;continue;}
+      if(before.length>4000||after.length>4000||after===before
+        ||CONTROL_CHARS.test(before)||CONTROL_CHARS.test(after)){skipped++;continue;}
+      if(Number.isSafeInteger(candidate.occurrence)
+        &&(candidate.occurrence<0||candidate.occurrence>100000)){skipped++;continue;}
       const occurrence=Number.isSafeInteger(candidate.occurrence)&&candidate.occurrence>=0?candidate.occurrence:0;
       const attackTypes=Array.isArray(candidate.attackTypes)
         ?candidate.attackTypes.filter(type=>typeof type==='string'&&/^[A-Za-z0-9_-]{1,40}$/.test(type)).slice(0,12)
@@ -292,7 +304,7 @@
       if(status===409) return '같은 요청 키에 다른 내용이 이미 접수되어 있습니다. 다시 보내지 않았습니다. 이전 결과를 확인하거나 새 검토로 시작하세요.';
       if(status===410) return '이 서버는 지금 이 로그인 방식을 받지 않습니다(운영자 설정). 웹 실행 로그인을 설정해야 합니다.';
       if(status===413) return '파일이 서버 크기 한도를 넘습니다.';
-      if(status===415) return '지원하지 않는 파일 형식입니다. PDF 또는 텍스트 파일만 올릴 수 있습니다.';
+      if(status===415) return '지원하지 않는 파일 형식입니다. 웹 실행은 PDF만 지원합니다.';
       if(status===429) return '요청이 너무 많습니다. 잠시 뒤 다시 시도하세요.';
       if(status===503) return '웹 실행 엔진이 지금 응답하지 않습니다. 잠시 뒤 다시 시도하거나 로컬 실행을 사용하세요.';
       if(status===400) return '요청이 올바르지 않습니다. 입력을 확인하세요.';
@@ -327,6 +339,25 @@
     function setStatus(message){
       state.status=message;
       render();
+    }
+    /* A 401 means the Falsify session is no longer valid: end it once, everywhere, instead of leaving a
+       signed-in panel. The deterministic key lets the same inputs reload the server job after re-login. */
+    function sessionEnded(error){
+      if(!error||error.status!==401) return false;
+      stopPoll();
+      if(state.session&&state.session.source!=='hook') dropSessionStores();
+      state.session=null;
+      state.gate='ready';
+      state.busy='';
+      state.downloadStatus='';
+      state.editedStatus='';
+      /* Owner-scoped in-memory review/apply state belongs to the ended session; do not carry it across
+         a re-login. The server keeps the job, and the same inputs derive the same key after re-login. */
+      state.job=null;state.jobKind='review';state.upload=null;state.file=null;state.fileSha='';state.fileError='';
+      state.originalInput=null;state.blueSource=null;
+      resetReview();
+      fail('세션이 끝났습니다. 다시 로그인한 뒤 같은 파일·지시로 실행하면 서버의 기존 작업을 다시 불러옵니다(새 유료 호출 없음).');
+      return true;
     }
 
     function normalizeCapabilities(data){
@@ -566,6 +597,11 @@
           state.fileError=`${name||'선택한 파일'} 파일이 서버 한도 ${sizeLabel(limit)}(${limit} bytes)를 넘어 업로드하지 않았습니다.`;
           fail(state.fileError);render();return;
         }
+        if(!isPdfBytes(bytes)){
+          state.file=null;state.fileSha='';
+          state.fileError=`${name||'선택한 파일'}은 PDF가 아닙니다. 웹 실행은 PDF만 지원합니다. TXT·DOCX 등은 PDF로 변환하거나 「로컬 실행 연결」을 쓰세요.`;
+          fail(state.fileError);render();return;
+        }
         state.fileSha=await sha256Hex(bytes);
         const stored=readUploadStore();
         state.upload=stored&&stored.sha256===state.fileSha?stored:null;
@@ -610,7 +646,13 @@
       if(bytes.byteLength>limit){
         throw Object.assign(Error('too large'),{kind:'local',message:`파일이 서버 한도 ${sizeLabel(limit)}(${limit} bytes)를 넘어 업로드하지 않았습니다.`});
       }
-      const mime=MIME_TYPES.includes(file.type)?file.type:'application/octet-stream';
+      if(!isPdfBytes(bytes)){
+        throw Object.assign(Error('not pdf'),{kind:'local',
+          message:'웹 실행은 PDF만 지원합니다. TXT·DOCX 등은 PDF로 변환하거나 「로컬 실행 연결」을 쓰세요.'});
+      }
+      /* Verified PDF bytes are always declared as PDF; a browser-reported text/plain type would make the
+         runtime reject the job at execution even though the bytes are a PDF. */
+      const mime='application/pdf';
       const name=safeName(file.name)||'upload.bin';
       const descriptor=await postUpload(bytes,mime,name);
       if(descriptor.sha256!==state.fileSha){
@@ -764,6 +806,7 @@
         if(role==='red') resetCandidates();
         applyJob(job,{replayed:data.replayed===true});
       }catch(error){
+        if(sessionEnded(error)) return;
         if(error&&error.kind==='local'&&error.message){
           fail(error.message);
         }else if(error&&(error.kind==='network'||error.kind==='timeout')){
@@ -825,6 +868,7 @@
       const reviewUpload=state.reviewUpload;
       if(!reviewUpload||!reviewUpload.id) return 'RED 원본 업로드를 찾지 못했습니다. RED 검토를 다시 불러오세요.';
       if(state.upload&&state.upload.id!==reviewUpload.id) return '현재 입력이 RED 원본과 다릅니다. 원본 파일을 다시 고르거나 「원본 입력으로 돌아가기」를 누른 뒤 적용하세요.';
+      if(state.fileSha&&reviewUpload.sha256&&state.fileSha!==reviewUpload.sha256) return '선택한 파일이 RED 원본과 다릅니다. RED 원본을 다시 고르거나 「원본 입력으로 돌아가기」를 누른 뒤 적용하세요.';
       if(!Object.keys(state.selection).length) return '적용할 후보를 선택하세요.';
       return '';
     }
@@ -838,12 +882,17 @@
       if(edits.length>MAX_EDITS||visualEdits.length>MAX_VISUAL_EDITS){fail('선택한 변경이 서버 한도를 넘습니다. 일부만 선택하세요.');return;}
       const review=state.reviewJob;
       const reviewUpload=state.reviewUpload;
+      /* Send the currently resolved allowed choices explicitly. The gateway hashes model/effort into the
+         request hash, so a later server default change must not reinterpret an existing client key. */
+      const model=selectedValue(nodes.model)||state.model;
+      const effort=selectedValue(nodes.effort)||state.effort;
       state.busy='apply';state.error='';state.editedStatus='';
       setStatus('선택한 변경을 PDF에 적용하는 작업을 접수하는 중…');
       render();
       let digest='';
       try{
-        digest=await digestOf('apply\nred\n'+reviewUpload.id+'\n'+APPLY_PROMPT+'\n'+JSON.stringify({edits,visualEdits}));
+        digest=await digestOf('apply\nred\n'+reviewUpload.id+'\n'+APPLY_PROMPT+'\n'+model+'\n'+effort
+          +'\n'+JSON.stringify({edits,visualEdits}));
         state.activeDigest=digest;
         const key='fssjob-'+digest.slice(0,40);
         const doc=readRunsDoc();
@@ -863,6 +912,8 @@
           /* Structured evidence is only needed to place table-cell edits; text spans are applied directly. */
           useEvidence:visualEdits.length>0
         };
+        if(model) body.model=model;
+        if(effort) body.effort=effort;
         const serialized=JSON.stringify(body);
         const bytes=Encoder?new Encoder().encode(serialized).byteLength:serialized.length;
         if(bytes>MAX_JOB_BODY_BYTES){
@@ -876,17 +927,18 @@
         const job=data.job&&typeof data.job==='object'?data.job:null;
         if(!job||typeof job.id!=='string'||!job.id) throw Object.assign(Error('bad job'),{kind:'protocol'});
         saveRun(digest,{key,role:'red',uploadId:reviewUpload.id,sha256:reviewUpload.sha256,
-          jobId:job.id,pending:false,kind:'apply',reviewJobId:review.id,model:'',effort:''});
+          jobId:job.id,pending:false,kind:'apply',reviewJobId:review.id,model,effort});
         state.jobKind='apply';
         state.busy='';
         applyJob(job,{replayed:data.replayed===true});
         state.status='선택한 변경을 적용하는 작업을 접수했습니다. 완료되면 수정본 PDF를 BLUE로 넘길 수 있습니다.';
       }catch(error){
+        if(sessionEnded(error)) return;
         if(error&&(error.kind==='network'||error.kind==='timeout')){
           try{
             if(digest){
               saveRun(digest,{key:'fssjob-'+digest.slice(0,40),role:'red',uploadId:reviewUpload.id,
-                sha256:reviewUpload.sha256,jobId:'',pending:true,kind:'apply',reviewJobId:review.id,model:'',effort:''});
+                sha256:reviewUpload.sha256,jobId:'',pending:true,kind:'apply',reviewJobId:review.id,model,effort});
             }
           }catch{}
           fail('적용 제출 응답을 확인하지 못했습니다. 접수되었는지 알 수 없어 자동으로 다시 보내지 않았습니다. 같은 후보 선택으로 다시 적용하면 같은 요청 키를 재사용합니다.');
@@ -918,13 +970,7 @@
           schedulePoll();
         }
       }catch(error){
-        if(error&&error.status===401){
-          stopPoll();
-          if(state.session&&state.session.source!=='hook'){dropSessionStores();state.session=null;}
-          state.gate='ready';
-          fail('세션이 끝났습니다. 다시 로그인하면 서버에 남아 있는 작업을 다시 확인할 수 있습니다.');
-          return;
-        }
+        if(sessionEnded(error)){return;}
         state.pollFailures++;
         if(error&&error.status===404){
           stopPoll();
@@ -983,6 +1029,7 @@
         state.status='취소를 요청했습니다. 이미 시작한 호출은 끝난 뒤 결과가 버려집니다.';
         if(TERMINAL_STATES.includes(job.state)){stopPoll();state.pollAttempt=0;}else{schedulePoll();}
       }catch(error){
+        if(sessionEnded(error)) return;
         fail(describe(error,'cancel'));
       }finally{
         state.busy='';render();
@@ -1007,6 +1054,7 @@
         state.downloadStatus='결과 파일을 내려받았습니다: '+safeName(artifact.name)+'. 링크는 이 페이지 메모리에만 있습니다.';
         void rid;
       }catch(error){
+        if(sessionEnded(error)) return;
         state.downloadStatus='';
         fail(describe(error,'artifact'));
       }finally{
@@ -1063,6 +1111,7 @@
         state.editedStatus='수정본을 BLUE 입력으로 등록했습니다. BLUE 검토 지시를 입력하고 실행하세요. RED 결과·후보·근거는 BLUE로 보내지 않습니다.';
         state.status='BLUE 입력이 준비되었습니다.';
       }catch(error){
+        if(sessionEnded(error)) return;
         state.editedStatus='';
         fail(describe(error,'handoff'));
       }finally{
@@ -1194,9 +1243,10 @@
           '의 수동 JSON 교환 절차를 따르세요. 이 패널은 위 상태에서 서버로 아무 작업도 보내지 않습니다.'));
 
       const configBox=el('div',{id:'hosted-ai-config',hidden:true},
-        el('label',{for:'hosted-ai-file'},'검토할 논문 파일 (PDF · TXT · MD)',
-          el('input',{id:'hosted-ai-file',type:'file',accept:'.pdf,.txt,.md,.markdown,.text'})),
+        el('label',{for:'hosted-ai-file'},'검토할 논문 파일 (PDF)',
+          el('input',{id:'hosted-ai-file',type:'file',accept:'.pdf,application/pdf'})),
         el('p',{id:'hosted-ai-file-status',className:'muted',textContent:'아직 파일을 고르지 않았습니다.'}),
+        el('p',{id:'hosted-ai-file-hint',className:'muted',textContent:'웹 실행은 PDF만 지원합니다. TXT·DOCX 등은 PDF로 변환하거나 「로컬 실행 연결」을 쓰세요.'}),
         el('div',{className:'button-row',id:'hosted-ai-input-actions',hidden:true},
           el('button',{id:'hosted-ai-restore-original',type:'button',className:'text-button',textContent:'원본 입력으로 돌아가기'})),
         el('div',{className:'hosted-ai-grid'},
@@ -1373,6 +1423,9 @@
     function usageText(){
       const job=state.job;
       if(!job) return '';
+      /* The gateway fills a zero placeholder while a job is queued/running; those are not provider-reported
+         values, so do not present them as usage. */
+      if(!TERMINAL_STATES.includes(job.state)) return '사용량: 아직 보고되지 않음';
       const usage=job.usage&&typeof job.usage==='object'?job.usage:null;
       if(!usage) return '사용량: 서버가 제공하지 않음';
       const fields=[['inputTokens','입력'],['outputTokens','출력'],['cacheReadInputTokens','캐시 읽기'],['cacheCreationInputTokens','캐시 생성']];
@@ -1555,7 +1608,9 @@
       if(visualApplied!==null) parts.push('표 셀 '+visualApplied+'건 적용');
       const output=typeof result.outputSha256==='string'&&/^[0-9a-f]{64}$/.test(result.outputSha256)
         ?result.outputSha256:'';
-      return {parts,output,verified:!!(result.verification&&typeof result.verification==='object')};
+      const verification=result.verification&&typeof result.verification==='object'
+        ?result.verification:null;
+      return {parts,output,verified:!!verification&&Object.keys(verification).length>0};
     }
 
     function render(){

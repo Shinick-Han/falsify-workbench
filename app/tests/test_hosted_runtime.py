@@ -528,11 +528,11 @@ class EditTests(BaseRuntimeTest):
         runner = FakeRunner()
         service = self.service(runner)
         upload = self.upload(service, data=synthetic_pdf(
-            [['The trial reported 12 events in total.']]))
+            [['The trial was positive.']]))
         snapshot, _ = service.submit_job(self.body(
             upload, job_id='job-edit-0001', key='idem-edit-01',
-            edits=[{'pageIndex': 0, 'before': '12 events',
-                    'after': '13 events'}]))
+            edits=[{'pageIndex': 0, 'before': 'was',
+                    'after': 'is'}]))
         done = wait_state(service, OWNER, snapshot['id'], {'completed', 'failed'})
         self.assertEqual(done['state'], 'completed')
         names = [artifact['name'] for artifact in done['artifacts']]

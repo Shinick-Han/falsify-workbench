@@ -51,15 +51,15 @@ class FakeProvider:
             segment = None
             for match in re.finditer(r'"id": "(p\d+-b\d+)", "label": "([^"]*)", "text": "((?:[^"\\]|\\.)*)"', prompt):
                 text = json.loads('"' + match.group(3) + '"')
-                if 'Table 1. Merged' in text:
+                if 'Groups' in text:
                     segment = match.group(1)
                     break
             assert segment is not None, 'table caption segment missing from RED prompt'
             candidate = {
                 'id': 'red-candidate-1', 'segmentId': segment, 'attackTypes': ['contradiction'],
-                'before': 'Table 1. Merged', 'after': 'Table 1. Merged (revised)',
+                'before': 'Groups', 'after': 'Group',
                 'rationale': RED_SENTINEL, 'uncertainty': None,
-                'evidence': [{'segmentId': segment, 'quote': 'Table 1. Merged', 'relation': 'source'}],
+                'evidence': [{'segmentId': segment, 'quote': 'Groups', 'relation': 'source'}],
             }
             self.red = candidate
             response = {'status': 'ok', 'candidates': [candidate], 'visualEdits': []}
@@ -164,8 +164,8 @@ class HostedEvidenceFlowTests(unittest.TestCase):
             self.assertIn('cell text is raw and uncorrected', red_prompt)
 
             # User selects the prose candidate and applies it without another model call.
-            edit = {'id': 'edit-1', 'pageIndex': 0, 'before': 'Table 1. Merged',
-                    'after': 'Table 1. Merged (revised)', 'occurrence': 0}
+            edit = {'id': 'edit-1', 'pageIndex': 0, 'before': 'Groups',
+                    'after': 'Group', 'occurrence': 0}
             apply_body = {'jobId': 'evidence-apply-1', 'ownerId': OWNER,
                           'idempotencyKey': 'evidence-apply-idem-1', 'requestHash': 'evidence-apply-hash-1',
                           'role': 'red', 'prompt': 'Apply the selected change.',
@@ -186,7 +186,8 @@ class HostedEvidenceFlowTests(unittest.TestCase):
             self.assertEqual(sha(edited_pdf), edited_artifact['sha256'])
             with pymupdf.open(stream=edited_pdf, filetype='pdf') as doc:
                 text = doc[0].get_text('text')
-            self.assertIn('Table 1. Merged (revised)', text)
+            self.assertIn('Group', text)
+            self.assertNotIn('Groups', text)
             self.assertNotIn(RED_SENTINEL, text)
 
             # BLUE receives only the exact edited PDF bytes, not RED candidates/rationale.
@@ -205,8 +206,10 @@ class HostedEvidenceFlowTests(unittest.TestCase):
             self.assertEqual(blue['result']['findings'], [])
             blue_prompts = [prompt for prompt in provider.prompts
                             if 'SOURCE_PDF_STRUCTURED_EVIDENCE_V1' in prompt
-                            and 'Table 1. Merged (revised)' in prompt]
+                            and 'Group' in prompt]
             self.assertTrue(blue_prompts, 'BLUE did not receive structured evidence from the edited PDF')
+            self.assertIn('Group', blue_prompts[-1])
+            self.assertNotIn('Groups', blue_prompts[-1])
             self.assertIn('Figure 1. Mark', blue_prompts[-1])
             self.assertNotIn(RED_SENTINEL, blue_prompts[-1])
             self.assertNotIn('"candidates"', blue_prompts[-1])

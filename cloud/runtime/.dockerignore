@@ -1,0 +1,13 @@
+# This file is installed at the root of the staged build context by cloud/runtime/build.sh.
+# Docker only applies a .dockerignore that sits at the build-context root, so it is inert when
+# someone builds straight from the repository root (which would need its own root copy).
+.git
+.git/**
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/node_modules
+**/.wrangler
+**/.DS_Store
+**/*.log
+cloud/runtime/.build
