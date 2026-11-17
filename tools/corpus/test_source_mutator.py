@@ -402,7 +402,21 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(defect["source"]["valueId"], "p_primary")
         context = defect["source"]["contexts"][0]
         self.assertEqual(context["surface"], "tex:abstract")
+        self.assertEqual(len(defect["source"]["contexts"]), 1)
         self.assertNotIn("\\", context["after"])
+
+    def test_table_mutation_records_every_changed_row(self):
+        spec = load_spec(MUTATIONS / "m02-table-n.json")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out"
+            build_twin(FIXTURE, spec, out, compile_pdf=False)
+            contexts = _load(out / "sealed" / "gold-ledger.json")["defects"][0]["source"]["contexts"]
+            self.assertEqual([item["surface"] for item in contexts], ["table:T2", "table:T2", "table:T2"])
+            self.assertIn("(n=90)", contexts[0]["after"])
+            self.assertIn("45/90", contexts[1]["after"])
+            self.assertIn("20/90", contexts[2]["after"])
+            self.assertIn("\u2014", contexts[2]["after"])
+            self.assertNotIn("---", contexts[2]["after"])
 
     def _assert_blind(self, out, ledger):
         secrets = [ledger["defects"][0]["defectId"], ledger["defects"][0]["rationale"]]

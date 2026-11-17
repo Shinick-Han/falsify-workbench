@@ -52,3 +52,17 @@ DIR/sealed/gold-ledger.json
 ```
 
 `twin.json` is the `render_twin` payload with `overridesApplied` replaced by `overridesAppliedCount`. Defect ids, rationales, and before/after text stay in `sealed/`. JSON on stdout has no absolute paths. Exit `0` is success, `2` is an invalid spec or case, `3` is `diff_mismatch` or another refusal, and `124` is a compile timeout.
+
+Each defect's `source.contexts` has one entry for every changed visible unit, and several entries may share a surface. A changed body line, table row (header included), or caption is the de-TeXed text of that unit as the PDF shows it, including TeX dashes (`---` is an em dash). A changed figure also records the numeric rendering and `figureFile`. The defect's top-level `quote` remains text from the defect document that a finding can match.
+
+## Twin gate
+
+`twin_gate.py` checks a build from `source_mutator.py` and writes a benchmark bundle only when every check passes. It reads overrides from `sealed/mutation-plan.json`.
+
+```
+python tools/corpus/twin_gate.py verify BUILD_DIR --case CASE_DIR [--bundle-out DIR]
+```
+
+Exit `0` passes and writes the bundle, `2` is invalid input, `3` is a gate refusal with no bundle, and `124` is a timeout. The bundle layout is `blind/paper.pdf`, `manifest.json`, and `sealed/` (`gold-ledger.json`, `baseline-signals.json`, `clean.pdf`, `gate.json`).
+
+PDF text is compared in one canonical form. Line and page breaks may fall anywhere, including after a real hyphen and inside a hyphenated word; a running page number cannot create or hide a difference; figure captions and bibliography entries are placed in a stable trailer so a float moving across a page is not a new edit. Survival counts occurrences: for each context, the after text occurs more often in the defect document than in the clean one, and the before text less often, by the same amount. Attribution diffs that whole document. Every hunk must be covered by a ledger context, and every text context must correspond to a real difference. A new Layer 0 signal is a detection only when its excerpt quotes a changed unit of a defect.

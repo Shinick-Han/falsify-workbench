@@ -73,6 +73,81 @@ class PureHelperTests(unittest.TestCase):
         raw = "partici-\npants   were\nenrolled"
         self.assertEqual(normalize_pdf_text(raw), "participants were enrolled")
 
+    def test_reflow_keeps_a_real_hyphen_and_ignores_page_breaks(self):
+        sentence = "Inference is unaffected by the 8-week follow-up and the 40 discontinuations."
+        broken = "Inference is unaffected by the 8-\nweek follow-up and the 40 discontinuations."
+        self.assertEqual(normalize_pdf_text(broken), normalize_pdf_text(sentence))
+        self.assertEqual(normalize_pdf_text("8-\nweek"), "8-week")
+        self.assertEqual(normalize_pdf_text("see 8-we\nek now"), "see 8-week now")
+        reference = (
+            "[6] Ibrahim H, Solano C. Confidence intervals for fictional mean changes. "
+            "Records of the Imaginary Biostatistics Society. 2017."
+        )
+        figure = "Figure 1: Mean Fictional Symptom Score change at week 4 and week 8."
+        clean = "\f".join([
+            "Claim stays 8-week here.\n" + figure + "\n" + reference + "\n1",
+            "2",
+        ])
+        defect = "\f".join([
+            "Claim stays 8-\nweek here.\n1",
+            reference + "\n" + figure + "\n2",
+        ])
+        self.assertEqual(normalize_pdf_text(clean), normalize_pdf_text(defect))
+        self.assertNotIn("8- week", normalize_pdf_text(defect))
+
+    def test_survival_counts_a_repeated_context(self):
+        before = "-2.6, p=0.004)."
+        after = "-2.6, p=0.04)."
+        clean = f"abstract {before} results {before}"
+        defect = f"abstract {after} results {before}"
+        self.assertTrue(context_survives(before, after, clean, defect, 200))
+
+    def test_survival_counts_when_one_side_contains_the_other(self):
+        self.assertTrue(context_survives(
+            "p=0.040", "p=0.04", "value p=0.040.", "value p=0.04.", 80,
+        ))
+        self.assertTrue(context_survives(
+            "p=0.04", "p=0.040", "value p=0.04.", "value p=0.040.", 80,
+        ))
+
+    def test_survival_rejects_a_context_with_no_visible_change(self):
+        self.assertFalse(context_survives("same words", "same words", "same words", "same words", 40))
+        wrapped = "Inference is unaffected by the 8-\nweek follow-up and the 40 discontinuations."
+        after = "Inference is unaffected by the 8-week follow-up and the 40 discontinuations."
+        before = "Inference is limited by the 8-week follow-up and the 40 discontinuations."
+        clean = "Inference is limited by the 8-week follow-up and the 40 discontinuations."
+        self.assertTrue(context_survives(before, after, clean, wrapped, 200))
+
+    def test_body_rows_need_their_own_tokens(self):
+        clean = ["Endpoint FX-217 (n=100) Response 45/100 event 20/100".split()]
+        defect = ["Endpoint FX-217 (n=90) Response 45/90 event 20/90".split()]
+        header = {"(n=100)", "(n=90)"}
+        unexplained = [" ".join(hunk) for hunk in hunks_attributed(clean, defect, header)]
+        self.assertIn("45/100 45/90", unexplained)
+        self.assertIn("20/100 20/90", unexplained)
+        covered = header | {"45/100", "45/90", "20/100", "20/90"}
+        self.assertEqual(hunks_attributed(clean, defect, covered), [])
+
+    def test_layer0_signal_must_quote_the_changed_unit(self):
+        defect = {"source": {"contexts": [
+            {
+                "surface": "table:T2",
+                "before": "Endpoint FX-217 (n=100) Placebo (n=100) Contrast",
+                "after": "Endpoint FX-217 (n=90) Placebo (n=100) Contrast",
+            },
+            {
+                "surface": "table:T2",
+                "before": "Response, n (%) 45/100 (45.0%) 28/100 (28.0%) 17.0",
+                "after": "Response, n (%) 45/90 (45.0%) 28/100 (28.0%) 17.0",
+            },
+        ]}}
+        row = {"excerpt": "Response, n (%) 45/90 (45.0%) 28/100 (28.0%) 17.0 Any"}
+        header = {"excerpt": "FX-217 (n=90)"}
+        shared = {"excerpt": "The participants were randomized into Response groups"}
+        self.assertTrue(twin_gate._signal_hits(row, defect))
+        self.assertTrue(twin_gate._signal_hits(header, defect))
+        self.assertFalse(twin_gate._signal_hits(shared, defect))
+
     def test_context_uses_full_sentence_when_it_is_unique(self):
         clean = "intro " + BEFORE + " tail"
         defect = "intro " + AFTER + " tail"

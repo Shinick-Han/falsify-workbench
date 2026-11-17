@@ -706,6 +706,10 @@ def _correspond(case_dir, root: Path, plan: dict, twin: dict) -> None:
     _explain_files(diffs, plan, twin["changedFiles"])
 
 
+def _ligatures(text: str) -> str:
+    return text.replace("---", "\u2014").replace("--", "\u2013")
+
+
 def _detex(line: str) -> str:
     text = line
     for old, new in _UNESCAPE:
@@ -713,23 +717,45 @@ def _detex(line: str) -> str:
     text = text.replace("\\\\", " ")
     text = _COMMAND_RE.sub(" ", text)
     text = text.replace("{", " ").replace("}", " ").replace("$", "")
-    return re.sub(r"\s+", " ", text).strip()
+    return _ligatures(re.sub(r"\s+", " ", text).strip())
 
 
-def _first_diff_on(surface, clean_lines, defect_lines, tags) -> int:
+def _changed_line(clean_line: str, defect_line: str):
+    if clean_line == defect_line:
+        return None
+    before = _detex(clean_line)
+    after = _detex(defect_line)
+    if before == after:
+        return None
+    return before, after
+
+
+def _is_caption(left: str, right: str) -> bool:
+    return "\\caption{" in left or "\\caption{" in right
+
+
+def _body_contexts(surface, clean_lines, defect_lines, tags) -> list[dict]:
+    found = []
     for index, tag in enumerate(tags):
-        if tag == surface and clean_lines[index] != defect_lines[index]:
-            return index
-    raise MutationError("diff_mismatch", "surface")
+        if tag != surface:
+            continue
+        pair = _changed_line(clean_lines[index], defect_lines[index])
+        if pair is None:
+            continue
+        found.append({"surface": surface, "before": pair[0], "after": pair[1]})
+    return found
 
 
-def _tex_context(surface, clean_lines, defect_lines, tags) -> dict:
-    index = _first_diff_on(surface, clean_lines, defect_lines, tags)
-    return {
-        "surface": surface,
-        "before": _detex(clean_lines[index]),
-        "after": _detex(defect_lines[index]),
-    }
+def _caption_contexts(surface, clean_lines, defect_lines, tags) -> list[dict]:
+    found = []
+    for index, tag in enumerate(tags):
+        if tag != surface or not _is_caption(clean_lines[index], defect_lines[index]):
+            continue
+        pair = _changed_line(clean_lines[index], defect_lines[index])
+        if pair is None:
+            continue
+        found.append({"surface": surface, "before": pair[0], "after": pair[1]})
+    return found
 
 
 def _find_table(resolved, table_id: str) -> dict:
@@ -749,29 +775,22 @@ def _table_rows(table: dict) -> list:
 
 
 def _join_cells(cells) -> str:
-    return re.sub(r"\s+", " ", " ".join(str(cell) for cell in cells)).strip()
+    return _ligatures(_collapse(" ".join(str(cell) for cell in cells)))
 
 
-def _changed_row(clean_table: dict, defect_table: dict, side: int) -> str:
-    clean_rows = _table_rows(clean_table)
-    defect_rows = _table_rows(defect_table)
-    for pair in zip(clean_rows, defect_rows):
-        left = _join_cells(pair[0])
-        right = _join_cells(pair[1])
-        if left != right:
-            return right if side else left
-    raise MutationError("diff_mismatch", "table row")
-
-
-def _table_context(surface: str, clean_resolved, defect_resolved) -> dict:
+def _table_contexts(surface: str, clean_resolved, defect_resolved) -> list[dict]:
     table_id = surface.split(":", 1)[1]
-    clean_table = _find_table(clean_resolved, table_id)
-    defect_table = _find_table(defect_resolved, table_id)
-    return {
-        "surface": surface,
-        "before": _changed_row(clean_table, defect_table, 0),
-        "after": _changed_row(clean_table, defect_table, 1),
-    }
+    clean_rows = _table_rows(_find_table(clean_resolved, table_id))
+    defect_rows = _table_rows(_find_table(defect_resolved, table_id))
+    if len(clean_rows) != len(defect_rows):
+        raise MutationError("diff_mismatch", "table row")
+    found = []
+    for clean_row, defect_row in zip(clean_rows, defect_rows):
+        before = _join_cells(clean_row)
+        after = _join_cells(defect_row)
+        if before != after:
+            found.append({"surface": surface, "before": before, "after": after})
+    return found
 
 
 def _figure_context(surface: str, defect_plan: dict) -> dict:
@@ -784,20 +803,26 @@ def _figure_context(surface: str, defect_plan: dict) -> dict:
     }
 
 
-def _one_context(surface, defect_plan, clean_resolved, defect_resolved, lines, tags) -> dict:
+def _surface_contexts(surface, defect_plan, clean_resolved, defect_resolved, lines, tags):
+    clean_lines, defect_lines = lines
     if surface.startswith("figure:"):
-        return _figure_context(surface, defect_plan)
+        caption = _caption_contexts(surface, clean_lines, defect_lines, tags)
+        return [_figure_context(surface, defect_plan), *caption]
     if surface.startswith("table:"):
-        return _table_context(surface, clean_resolved, defect_resolved)
-    return _tex_context(surface, lines[0], lines[1], tags)
+        rows = _table_contexts(surface, clean_resolved, defect_resolved)
+        return rows + _caption_contexts(surface, clean_lines, defect_lines, tags)
+    return _body_contexts(surface, clean_lines, defect_lines, tags)
 
 
 def _contexts(defect_plan, clean_resolved, defect_resolved, lines, tags) -> list[dict]:
     contexts = []
     for surface in defect_plan["changedSurfaces"]:
-        contexts.append(_one_context(
+        batch = _surface_contexts(
             surface, defect_plan, clean_resolved, defect_resolved, lines, tags,
-        ))
+        )
+        if not batch:
+            raise MutationError("diff_mismatch", "surface")
+        contexts.extend(batch)
     return contexts
 
 
