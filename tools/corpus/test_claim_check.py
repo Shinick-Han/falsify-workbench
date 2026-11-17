@@ -73,6 +73,13 @@ class TokenTests(unittest.TestCase):
         self.assertEqual(tokens_of(_strip_counter("Table 2: week 4 and week 8", "table")), ["4", "8"])
         self.assertEqual(tokens_of(_strip_counter("Figure 1: scores 4 and 6", "figure")), ["4", "6"])
 
+    def test_math_subscripts_are_indexes_and_literal_factors_stay(self):
+        source = _plain(r"$p_1(1-p_1)/n_1+p_0(1-p_0)/n_0$ and 1.96 and $1/a-1/n_1$")
+        printed = "p1(1−p1)/n1 +p0(1−p0)/n0 and 1.96 and 1/a −1/n1"
+        self.assertEqual(tokens_of(source), ["1", "1", "1.96", "1", "1"])
+        self.assertEqual(tokens_of(printed), tokens_of(source))
+        self.assertNotIn("0", tokens_of(source))
+
     def test_citation_keys_and_superscripts_are_not_printed_claims(self):
         cited = _plain(r"see \cite{hale2018,okonkwo2020} and keep 3")
         powered = _plain(r"and $I^{2} = 0.0\%$")
@@ -80,6 +87,8 @@ class TokenTests(unittest.TestCase):
         self.assertEqual(tokens_of(powered), ["0.0%"])
         self.assertNotIn("2018", tokens_of(cited))
         self.assertNotIn("2", tokens_of(powered))
+        self.assertEqual(tokens_of("Ward as real [5]."), [])
+        self.assertEqual(tokens_of("Ward as real [1]."), [])
 
 
 @unittest.skipUnless(_ready(), "pdflatex, pymupdf, matplotlib")
@@ -89,7 +98,7 @@ class CleanPdfTests(unittest.TestCase):
         cls.tmp = tempfile.TemporaryDirectory()
         root = Path(cls.tmp.name)
         cls.pdfs = {}
-        for name in ("rct_minimal", "meta_minimal", "dta_minimal"):
+        for name in ("rct_minimal", "meta_minimal", "dta_minimal", "cohort_minimal", "survival_minimal"):
             dest = root / name
             render.render_case(FIXTURES / name, dest, compile_pdf=True)
             cls.pdfs[name] = (dest / "paper.pdf").read_bytes()
@@ -122,13 +131,14 @@ class CleanPdfTests(unittest.TestCase):
     def test_phrase_and_citation_defects_do_not_decide_the_check(self):
         pdf = self.pdfs["rct_minimal"]
         case = FIXTURES / "rct_minimal"
-        for kind in ("source-phrase", "source-citation"):
+        for kind, reason in (("source-phrase", "phrase"), ("source-citation", "citation")):
             ledger = {"defects": [{"kind": kind, "source": {"contexts": [
                 {"surface": "tex:discussion", "before": "may", "after": "will"},
             ]}}]}
             failures, details = gate_claims(pdf, pdf, case, ledger)
             self.assertEqual(failures, [], kind)
             self.assertEqual(details["notApplicable"], 1, kind)
+            self.assertEqual(details["notApplicableReasons"][reason], 1, kind)
 
     def test_a_figure_drawing_is_not_a_printed_token(self):
         pdf = self.pdfs["rct_minimal"]
@@ -139,12 +149,25 @@ class CleanPdfTests(unittest.TestCase):
             "figureFile": "figures/F1.png",
         }]}}]}
         failures, details = gate_claims(pdf, pdf, FIXTURES / "rct_minimal", ledger)
+        self.assertEqual(failures, [])
         self.assertEqual(details["defectUnsupported"], 0)
-        self.assertEqual(failures, [{
-            "check": "claims",
-            "code": "number_not_visible",
-            "detail": "figure:F1",
-        }])
+        self.assertEqual(details["notApplicable"], 1)
+        self.assertEqual(details["notApplicableReasons"]["figure_image_only"], 1)
+
+    def test_a_figure_with_text_still_needs_a_visible_token(self):
+        pdf = self.pdfs["rct_minimal"]
+        ledger = {"defects": [{"kind": "source-value", "source": {"contexts": [
+            {
+                "surface": "figure:F1",
+                "before": "-12.4",
+                "after": "-3.0",
+                "figureFile": "figures/F1.png",
+            },
+            {"surface": "tex:results", "before": "change -12.4", "after": "change -3.0"},
+        ]}}]}
+        failures, details = gate_claims(pdf, pdf, FIXTURES / "rct_minimal", ledger)
+        self.assertEqual(details["notApplicable"], 0)
+        self.assertIn("number_not_visible", {item["code"] for item in failures})
 
 
 class CliTests(unittest.TestCase):

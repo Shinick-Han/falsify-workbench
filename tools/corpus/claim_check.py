@@ -3,9 +3,10 @@
 The idea of checking claims against the experimental log comes from
 PaperOrchestra, MIT, commit 6a319132932ee031e2d759b0f7f5075cf77bd1cf.
 Section counters, page folios, citation marks, reference-list entries,
-table and figure counters, and the literal 95% confidence label are
-read off the document structure and left out of the claim multiset.
-A figure drawing is an image, so the printed claim is its caption.
+table and figure counters, the literal 95% confidence label, and math
+subscripts are read off the document structure and left out of the claim
+multiset. A figure drawing is an image, so a defect whose every context
+is that image is not a printed claim.
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ _SUPER_RE = re.compile(r"\^\{[^{}]*\}")
 _COMMAND_RE = re.compile(r"\\[A-Za-z]+")
 _BRACE_RE = re.compile(r"\\(title|author)\{([^{}]*)\}")
 _MARK_RE = re.compile(r"\[[0-9][0-9,\s]*\]")
+_SUB_RE = re.compile(r"_\{[^{}]*\}|_\d+")
 _CONF_RE = re.compile(r"(?<![\d.])95\s*%(?=\s*(?:CI|Wald|interval)\b)")
 _NUM_RE = re.compile(r"(?<![A-Za-z0-9.])(-?\d+(?:\.\d+)?%?)")
 _TABLE_PREFIX = re.compile(r"^\s*Table\s+\d+\s*:\s*", re.IGNORECASE)
@@ -70,6 +72,7 @@ def _plain(line: str) -> str:
     text = _SUPER_RE.sub(" ", text)
     for old, new in _UNESCAPE:
         text = text.replace(old, new)
+    text = _SUB_RE.sub(" ", text)
     text = text.replace("\\\\", " ")
     text = _COMMAND_RE.sub(" ", text)
     text = text.replace("{", " ").replace("}", " ").replace("$", "")
@@ -78,7 +81,9 @@ def _plain(line: str) -> str:
 
 
 def _strip_structural(text: str) -> str:
-    return _CONF_RE.sub(" ", _MARK_RE.sub(" ", text))
+    text = _SUB_RE.sub(" ", text)
+    text = _MARK_RE.sub(" ", text)
+    return _CONF_RE.sub(" ", text)
 
 
 def tokens_of(text: str) -> list[str]:
@@ -558,6 +563,24 @@ def _printed(defect: dict) -> list[dict]:
     return [item for item in _contexts(defect) if not item.get("figureFile")]
 
 
+def _image_only(defect: dict) -> bool:
+    contexts = _contexts(defect)
+    if not contexts:
+        return False
+    return all(item.get("figureFile") for item in contexts)
+
+
+def _skip_reason(defect: dict) -> str:
+    kind = defect.get("kind")
+    if kind == "source-phrase":
+        return "phrase"
+    if kind == "source-citation":
+        return "citation"
+    if kind == "source-value" and _image_only(defect):
+        return "figure_image_only"
+    return ""
+
+
 def _pair_delta(before: str, after: str) -> tuple[Counter, Counter]:
     return _diff(_counts(after), _counts(before))
 
@@ -586,18 +609,21 @@ def _one_defect(defect: dict, introduced: dict, removed: dict) -> bool:
     return True
 
 
-def _ledger_delta(ledger: dict) -> tuple[dict, dict, list, int]:
+def _ledger_delta(ledger: dict) -> tuple[dict, dict, list, Counter]:
     introduced = {}
     removed = {}
     numeric = []
-    skipped = 0
+    reasons = Counter()
     for defect in ledger.get("defects") or []:
-        if isinstance(defect, dict) and defect.get("kind") in _KINDS_SKIP:
-            skipped += 1
+        if not isinstance(defect, dict):
+            continue
+        reason = _skip_reason(defect)
+        if reason:
+            reasons[reason] += 1
             continue
         if _one_defect(defect, introduced, removed):
             numeric.append(defect)
-    return introduced, removed, numeric, skipped
+    return introduced, removed, numeric, reasons
 
 
 def _unequal(expected: dict, actual: dict) -> str:
@@ -663,11 +689,19 @@ def _defect_failures(defect: dict, introduced: dict, removed: dict, numeric: lis
     return failures
 
 
+def _reason_counts(reasons: Counter) -> dict:
+    return {
+        "citation": reasons.get("citation", 0),
+        "figure_image_only": reasons.get("figure_image_only", 0),
+        "phrase": reasons.get("phrase", 0),
+    }
+
+
 def gate_claims(clean_pdf, defect_pdf, case_dir, ledger) -> tuple[list[dict], dict]:
-    """Apply the sealed ledger rule. Phrase and citation defects do not decide it."""
+    """Apply the sealed ledger rule. Phrase, citation, and figure-image defects do not decide it."""
     clean = check_pdf(clean_pdf, case_dir)
     defect = check_pdf(defect_pdf, case_dir)
-    introduced, removed, numeric, skipped = _ledger_delta(ledger if isinstance(ledger, dict) else {})
+    introduced, removed, numeric, reasons = _ledger_delta(ledger if isinstance(ledger, dict) else {})
     failures = _clean_failure(clean)
     failures.extend(_defect_failures(defect, introduced, removed, numeric))
     details = {
@@ -675,7 +709,8 @@ def gate_claims(clean_pdf, defect_pdf, case_dir, ledger) -> tuple[list[dict], di
         "cleanUnsupported": clean["unsupportedCount"],
         "defectMissing": defect["missingCount"],
         "defectUnsupported": defect["unsupportedCount"],
-        "notApplicable": skipped,
+        "notApplicable": sum(reasons.values()),
+        "notApplicableReasons": _reason_counts(reasons),
     }
     return failures, details
 
