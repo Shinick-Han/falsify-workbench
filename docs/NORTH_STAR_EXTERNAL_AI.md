@@ -6,7 +6,11 @@
 
 작업·파일은 사용자에 연결하고 SQLite와 파일 저장소로 재시작 뒤 복구한다. 서버가 표·그림 구조화 근거를 만들고 텍스트·표 셀 수정 PDF를 생성한다. 브라우저에서 합성 PDF 업로드→실제 Anthropic RED→선택 적용→PDF 다운로드→같은 SHA-256의 PDF를 BLUE로 전달→실제 BLUE 결과를 확인했다. 런타임 재시작 뒤 결과·사용량 보존도 확인했다. 키는 서버 환경에만 보관한다. 차트 좌표 적용·시각 영역 선택 UI와 범용 제공자 도구 루프는 이번 호스팅 범위에 포함되지 않는다.
 
-최종 집중 Python 105개, 웹 실행 Node 43개 통과. 생산 코드 268개 파일·14,043개 함수의 max CCN 15, 15 초과 0개다. 전체 Python 검사에서 발견한 시각 오류 코드 회귀는 수정하고 영향 범위를 재검증했다. 해당 수정 뒤 전체 스위트를 다시 통과했다고 주장하지 않는다. 평가 도구가 신규 provider·usage 필드를 원본 그대로 수용하도록 계약을 동기화한다. 정식 pymupdf import로 MCP 표준 출력 경고 오염도 고치고 실제 SDK 초기화·호출 검사 7개를 통과했다. 공개 배포는 alpha.76으로 진행 중이다. alpha.74·75의 출시 태그·ZIP은 변경하지 않는다. 완료 영수증은 소스 밖 `C:/Users/user/AppData/Local/Falsify/orchestration/hosted-api-20261117`에 기록한다. WorkBite는 binding_unavailable로 기록을 쓰지 못했으며 기존 경로를 자동 등록하지 않았다.
+최종 릴리스 `0.2.0-alpha.76`(`d38be546b633fcd954ed7bff574f0bd726464850`)의 GitHub main·태그·릴리스 ZIP·공개 Pages·설치본·운영/스테이징 런타임 교체를 완료했다. [GitHub Actions 배포 검사](https://github.com/Shinick-Han/falsify-workbench/actions/runs/44017914653)는 Linux·Windows·macOS ARM/Intel 작업 전체 성공이다. Linux 앱 Python 1,467개 중 1,428개 통과·39개 건너뜀, 평가 115개와 Cloud API 78개 통과. 조율자의 웹 실행 Node 43개, 집중 Python 105개, 실제 MCP SDK 7개, ZIP 수용 검사를 통과했다. Windows 별도 앱 전수 검사에서는 소켓 연결 초기화 오류 1개가 있었고 해당 항목의 독립 재실행이 통과했다.
+
+생산 코드 268개 파일·14,043개 함수 max CCN 15, 15 초과 0개다. 공개 index·cloud-config·hosted-ai의 SHA-256이 배포 소스와 일치한다. 실제 공개 웹에서 로그인 준비 상태를 확인했고, 런타임 교체 뒤 완료 결과·사용량·파일 해시 보존을 재확인했다. 검증용 계정 3개는 폐기했다. 키와 가입 코드는 공개 저장소에 넣지 않았다. 배포 영수증과 로그는 소스 밖 `C:/Users/user/AppData/Local/Falsify/orchestration/hosted-api-20261117`에 둔다. WorkBite는 재확인해도 binding_unavailable로 기록을 쓰지 못했으며 로컬 영수증으로 보존했다.
+
+추가 UX 검수에서 남은 항목: `prompt-first-navigation.browser.cjs`의 모바일 직접 편집 미리보기가 화면 아래로 밀리는 현상, `harness-cleanup.browser.cjs`의 오래된 편집 화면 진입 타임아웃. 후자는 테스트 동선과 실제 제품 결함을 구분해 재현해야 한다. 호스팅 그래프 좌표 적용·시각 영역 선택 UI는 별도 기능 범위다. alpha.74·75 태그와 ZIP은 변경하지 않았다.
 
 ## 현재 운영 기준 — 수정·검증·배포까지 기본 완료
 
