@@ -1,0 +1,19 @@
+{
+  "schema": "falsify.source-mutation.v1",
+  "caseId": "survival-minimal",
+  "mutationSetId": "p03-pair-sample-end",
+  "mutations": [
+    {
+      "defectId": "sample-end",
+      "operator": "set_text",
+      "valueId": "n_end_k",
+      "text": "141",
+      "surfaces": [
+        "tex:results"
+      ],
+      "family": "D1",
+      "difficulty": "L3",
+      "rationale": "Kelp-9 adults still under observation no longer equals the prior risk set minus later events and censoring."
+    }
+  ]
+}

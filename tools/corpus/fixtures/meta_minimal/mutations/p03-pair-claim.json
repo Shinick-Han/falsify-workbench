@@ -1,0 +1,19 @@
+{
+  "schema": "falsify.source-mutation.v1",
+  "caseId": "meta-minimal",
+  "mutationSetId": "p03-pair-claim",
+  "mutations": [
+    {
+      "defectId": "claim",
+      "operator": "apply_template",
+      "valueId": "ph_concl_claim",
+      "template": "strengthen_claim",
+      "surfaces": [
+        "tex:discussion"
+      ],
+      "family": "S1",
+      "difficulty": "L3",
+      "rationale": "The conclusion that the compress was associated with clearance is rewritten as a causal claim."
+    }
+  ]
+}

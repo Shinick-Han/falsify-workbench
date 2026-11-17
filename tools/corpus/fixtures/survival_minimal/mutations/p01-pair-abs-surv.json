@@ -1,0 +1,19 @@
+{
+  "schema": "falsify.source-mutation.v1",
+  "caseId": "survival-minimal",
+  "mutationSetId": "p01-pair-abs-surv",
+  "mutations": [
+    {
+      "defectId": "abs-surv",
+      "operator": "set_text",
+      "valueId": "s_k12",
+      "text": "80.1",
+      "surfaces": [
+        "tex:abstract"
+      ],
+      "family": "D1",
+      "difficulty": "L3",
+      "rationale": "Abstract month-12 Kelp-9 survival no longer matches the results sentence or its interval."
+    }
+  ]
+}
