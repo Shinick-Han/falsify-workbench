@@ -53,11 +53,6 @@ _CHECK_NAMES = (
     "citations",
     "claims",
 )
-_CLAIMS_SKIP = (
-    "claim_evidence_gate treats 95% CI labels as unsupported claims and the "
-    "experimental log stores value tokens, so a source case cannot pass without "
-    "changing the vendored patterns"
-)
 _SOFT_HYPHEN_RE = re.compile(r"([A-Za-z])-\n([a-z])")
 _REAL_HYPHEN_RE = re.compile(r"(\d)-\n([A-Za-z])")
 _HYPHEN_DIGIT_RE = re.compile(r"([A-Za-z])-\n(\d)")
@@ -1025,8 +1020,17 @@ def _check_citations(state: dict) -> tuple[list[dict], dict]:
 
 
 def _check_claims(state: dict) -> tuple[list[dict], dict]:
-    del state
-    return [], {"skipped": _CLAIMS_SKIP}
+    import claim_check
+
+    try:
+        return claim_check.gate_claims(
+            state["clean_pdf"],
+            state["defect_pdf"],
+            state["case_dir"],
+            state["ledger"],
+        )
+    except claim_check.ClaimError:
+        return [_failure("claims", "unparsable", "pdf")], {"error": "unparsable"}
 
 
 def _defect_rows(state: dict) -> list[dict]:

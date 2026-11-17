@@ -30,6 +30,7 @@ _OPERATORS = {
     "swap_values",
     "set_phrase",
     "apply_template",
+    "swap_citation",
 }
 _EXEMPT_KEYS = ("kind", "family", "excerptContains", "reason")
 _TENTH = Decimal("0.1")
@@ -289,6 +290,8 @@ class FixtureCaseTests(unittest.TestCase):
         self.assertIn(spec["family"], _FAMILIES)
         self.assertIn(spec["difficulty"], _LEVELS)
         self._check_rationale(spec["rationale"])
+        if operator == "swap_citation":
+            return
         value_id = spec["valueId"]
         self.assertIn(value_id, bound)
         self._check_surfaces(spec["surfaces"], bound[value_id])
