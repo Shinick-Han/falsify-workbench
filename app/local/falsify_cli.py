@@ -20,6 +20,10 @@ Usage:
     python app/local/falsify_cli.py arena evolve --source-pdf SRC_PDF [SRC_PDF ...] [--supplement PATH ...] [--holdout-pdf PDF ...] [--harness HARNESS_JSON] [--red-harness RED_HARNESS_JSON] [--role blue|red|both] --red-cmd EXE [--red-arg VALUE ...] --blue-cmd EXE [--blue-arg VALUE ...] [--generations 3] [--min-difficulty L1|L2|L3|L4] [--runs 1] [--agent-timeout 180] [--max-rules 40] [--max-recall-drop 0.0] [--compact-rules] [--checkpoint-dir DIR] [--resume] [--max-total-seconds S] [--out OUT_JSON] [--out-harness HARNESS_OUT] [--out-red-harness RED_HARNESS_OUT]
     python app/local/falsify_cli.py arena tournament --source-pdf SRC_PDF [SRC_PDF ...] --red-entry SPEC [--red-entry SPEC ...] --blue-entry SPEC [--blue-entry SPEC ...] [--supplement PATH ...] [--holdout-pdf PDF ...] [--min-difficulty L1|L2|L3|L4] [--agent-timeout 180] [--no-validate-quotes] [--out OUT_JSON]
     python app/local/falsify_cli.py arena benchmark [--mode sensor|agent] [--agent-cmd EXE] [--agent-arg VALUE ...] [--case CASE_ID ...] [--baseline-report REPORT_JSON] [--max-recall-drop 0.0] [--allow-holdout-fp-increase] [--out OUT_JSON]
+    python app/local/falsify_cli.py corpus list [--root DIR]
+    python app/local/falsify_cli.py corpus build --case DIR --out DIR [--no-compile]
+    python app/local/falsify_cli.py corpus mutate --case DIR --spec FILE --out DIR [--no-compile]
+    python app/local/falsify_cli.py corpus verify --build DIR --case DIR [--bundle-out DIR]
     python app/local/falsify_cli.py schemas [--id SCHEMA_ID] [--out OUT_JSON]
     python app/local/falsify_cli.py mcp-config (--pdf PATH | --workspace DIR) [--role blue|red|both] [--analysis] [--oracle] [--supplement PATH ...] [--format json]
 """
@@ -53,6 +57,7 @@ for _path in (str(_HERE.parent), str(_EVAL_DIR)):
 
 from agreement_selective import compute_krippendorff_alpha, compute_selective_prediction  # noqa: E402
 from blue_report_validate import BlueReportError, finalize_blue_report, validate_blue_report  # noqa: E402
+from falsify_corpus_cli import CorpusCliError  # noqa: E402
 from paper_blue_sensor import run_blue_sensor  # noqa: E402
 from paper_chart_edit_service import ChartEditService  # noqa: E402
 from paper_evidence import EvidenceStore  # noqa: E402
@@ -2577,6 +2582,42 @@ def _add_arena_evolution_parsers(arena_sub, parent):
     bench.add_argument("--out")
 
 
+def _add_corpus_parser(subparsers, parent):
+    corpus = subparsers.add_parser("corpus", parents=[parent], help="Source-corpus case commands")
+    corpus_sub = corpus.add_subparsers(dest="action", parser_class=_JsonArgumentParser)
+    listing = corpus_sub.add_parser("list", parents=[parent], help="List cases and their mutation set ids")
+    listing.add_argument("--root")
+    build = corpus_sub.add_parser("build", parents=[parent], help="Render one clean source case")
+    build.add_argument("--case", required=True)
+    build.add_argument("--out", required=True)
+    build.add_argument("--no-compile", action="store_true")
+    mutate = corpus_sub.add_parser("mutate", parents=[parent], help="Build a clean/defect twin from a mutation spec")
+    mutate.add_argument("--case", required=True)
+    mutate.add_argument("--spec", required=True)
+    mutate.add_argument("--out", required=True)
+    mutate.add_argument("--no-compile", action="store_true")
+    verify = corpus_sub.add_parser("verify", parents=[parent], help="Gate a source twin and optionally write a bundle")
+    verify.add_argument("--build", required=True)
+    verify.add_argument("--case", required=True)
+    verify.add_argument("--bundle-out")
+
+
+def _cmd_corpus_list(args, deadline: float | None = None) -> tuple[dict, int]:
+    return importlib.import_module("falsify_corpus_cli").cmd_list(args, deadline)
+
+
+def _cmd_corpus_build(args, deadline: float | None = None) -> tuple[dict, int]:
+    return importlib.import_module("falsify_corpus_cli").cmd_build(args, deadline)
+
+
+def _cmd_corpus_mutate(args, deadline: float | None = None) -> tuple[dict, int]:
+    return importlib.import_module("falsify_corpus_cli").cmd_mutate(args, deadline)
+
+
+def _cmd_corpus_verify(args, deadline: float | None = None) -> tuple[dict, int]:
+    return importlib.import_module("falsify_corpus_cli").cmd_verify(args, deadline)
+
+
 def _build_parser() -> _JsonArgumentParser:
     shared = _JsonArgumentParser(add_help=False)
     shared.add_argument("--timeout", type=float, default=argparse.SUPPRESS)
@@ -2586,6 +2627,7 @@ def _build_parser() -> _JsonArgumentParser:
     _add_blue_parser(sub, shared)
     _add_red_parser(sub, shared)
     _add_blind_and_arena_parsers(sub, shared)
+    _add_corpus_parser(sub, shared)
     schemas = sub.add_parser(
         "schemas", parents=[shared],
         help="List or inspect Falsify JSON Schema contracts for agent tool integration",
@@ -2626,6 +2668,10 @@ _DISPATCH = {
     ("arena", "evolve"): _cmd_arena_evolve,
     ("arena", "tournament"): _cmd_arena_tournament,
     ("arena", "benchmark"): _cmd_arena_benchmark,
+    ("corpus", "list"): _cmd_corpus_list,
+    ("corpus", "build"): _cmd_corpus_build,
+    ("corpus", "mutate"): _cmd_corpus_mutate,
+    ("corpus", "verify"): _cmd_corpus_verify,
     ("schemas", None): _cmd_schemas,
     ("mcp-config", None): _cmd_mcp_config,
 }
@@ -2641,7 +2687,8 @@ def main(argv: list[str] | None = None) -> int:
                 "invalid_arguments",
                 "Specify one of: blue scan, blue scan-workspace, blue validate, blue finalize, red targets, red plan, "
                 "red simulate, red trace, red apply, blind verify, arena score, arena run-round, "
-                "arena distill, arena duel, arena apply-patch, arena evolve, arena benchmark, mcp-config.",
+                "arena distill, arena duel, arena apply-patch, arena evolve, arena benchmark, mcp-config, "
+                "corpus list, corpus build, corpus mutate, corpus verify.",
                 exit_code=2,
                 recovery_hint="Run with --help to view command groups and actions.",
             )
@@ -2649,7 +2696,7 @@ def main(argv: list[str] | None = None) -> int:
         deadline = (time.monotonic() + timeout_val) if timeout_val is not None and timeout_val > 0 else None
         payload, code = handler(args, deadline)
         return _emit(payload, code)
-    except (_CliError, BlueReportError) as exc:
+    except (_CliError, BlueReportError, CorpusCliError) as exc:
         return _emit(_error_payload(exc.code, str(exc), exc.recovery_hint, getattr(exc, "extra", None)), exc.exit_code)
     except TimeoutError:
         return _emit(_error_payload("timeout", "Operation timed out.", "Retry with a higher --timeout."), 124)
