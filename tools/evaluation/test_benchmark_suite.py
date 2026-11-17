@@ -264,7 +264,7 @@ class CorpusTests(unittest.TestCase):
         holdout = [case for case in corpus if case['isHoldout']]
         self.assertEqual(len(gold), 18)
         self.assertEqual(len(holdout), 14)
-        self.assertEqual(bench.CORPUS_VERSION, 'v4')
+        self.assertEqual(bench.CORPUS_VERSION, 'v5')
         self.assertEqual(bench.SCHEMA, 'falsify.benchmark-report.v1')
         endpoint = next(case for case in gold if case['caseId'] == 'gold-w5-d5-endpoint-swap-l4')
         self.assertEqual(endpoint['difficulty'], 'L4')
@@ -281,7 +281,7 @@ class CorpusTests(unittest.TestCase):
 
 class SensorBenchmarkTests(unittest.TestCase):
     def test_sensor_mode_layer0_recall_and_clean_holdout(self):
-        report = bench.run_benchmark_suite(mode='sensor')
+        report = bench.run_benchmark_suite(mode='sensor', corpus_version='v4')
         self.assertEqual(report['schema'], bench.SCHEMA)
         self.assertEqual(report['corpusVersion'], 'v4')
         gold = report['goldSummary']
@@ -333,7 +333,7 @@ class SensorBenchmarkTests(unittest.TestCase):
     def test_merged_wave9_sensors_lift_layer0_recall(self):
         if not _wave9_sensors_available():
             return
-        report = bench.run_benchmark_suite(mode='sensor')
+        report = bench.run_benchmark_suite(mode='sensor', corpus_version='v4')
         self.assertEqual(report['goldSummary']['layer0Recall'], 1.0)
         by_id = {row['caseId']: row for row in report['caseResults']}
         for case_id in HOOK_LAYER0_CASES:
@@ -342,7 +342,7 @@ class SensorBenchmarkTests(unittest.TestCase):
 
     def test_dynamic_hooks_ignore_triage_hints(self):
         with patch.dict(sys.modules, _stub_modules()):
-            report = bench.run_benchmark_suite(mode='sensor')
+            report = bench.run_benchmark_suite(mode='sensor', corpus_version='v4')
         gold = report['goldSummary']
         self.assertEqual(gold['layer0Recall'], 1.0)
         self.assertEqual(report['holdoutSummary']['totalPureFp'], 0)
@@ -372,7 +372,9 @@ class SensorBenchmarkTests(unittest.TestCase):
         self.assertGreaterEqual(len(claims), 1)
         excerpt = case['goldLedger']['defects'][0]['excerpt']
         self.assertTrue(any(excerpt[:40] in signal['excerpt'] or signal['excerpt'][:40] in excerpt for signal in claims))
-        scored = bench.run_benchmark_suite(mode='sensor', case_ids=[case['caseId']])
+        scored = bench.run_benchmark_suite(
+            mode='sensor', case_ids=[case['caseId']], corpus_version='v4',
+        )
         row = scored['caseResults'][0]
         self.assertGreaterEqual(row['tp'], 1)
         self.assertEqual(row['fn'], 0)
@@ -388,7 +390,7 @@ class SensorBenchmarkTests(unittest.TestCase):
 
         with patch.object(importlib.util, 'find_spec', side_effect=_hidden):
             report = bench.run_benchmark_suite(
-                mode='sensor', case_ids=list(V3_GOLD_CASES + V3_HOLDOUT_CASES),
+                mode='sensor', case_ids=list(V3_GOLD_CASES + V3_HOLDOUT_CASES), corpus_version='v4',
             )
         by_id = {row['caseId']: row for row in report['caseResults']}
         for case_id in V3_GOLD_CASES:
@@ -400,7 +402,7 @@ class SensorBenchmarkTests(unittest.TestCase):
 
     def test_v4_layer0_cases_match_and_holdouts_stay_clean(self):
         report = bench.run_benchmark_suite(
-            mode='sensor', case_ids=list(V4_GOLD_CASES + V4_HOLDOUT_CASES),
+            mode='sensor', case_ids=list(V4_GOLD_CASES + V4_HOLDOUT_CASES), corpus_version='v4',
         )
         self.assertEqual(report['goldSummary']['layer0Recall'], 1.0)
         self.assertEqual(report['goldSummary']['semanticRecall'], 0.0)
@@ -428,7 +430,7 @@ class SensorBenchmarkTests(unittest.TestCase):
         }
         with patch.dict(sys.modules, modules):
             report = bench.run_benchmark_suite(
-                mode='sensor', case_ids=list(V4_GOLD_CASES + V4_HOLDOUT_CASES),
+                mode='sensor', case_ids=list(V4_GOLD_CASES + V4_HOLDOUT_CASES), corpus_version='v4',
             )
         self.assertEqual(report['goldSummary']['layer0Recall'], 1.0)
         self.assertEqual(report['holdoutSummary']['totalPureFp'], 0)
@@ -440,12 +442,16 @@ class SensorBenchmarkTests(unittest.TestCase):
 
 class AgentRunnerTests(unittest.TestCase):
     def test_semantic_runner_recalls_l4_and_naive_runner_flags_holdout(self):
-        semantic = bench.run_benchmark_suite(mode='agent', runner_fn=_semantic_runner)
+        semantic = bench.run_benchmark_suite(
+            mode='agent', runner_fn=_semantic_runner, corpus_version='v4',
+        )
         self.assertEqual(semantic['goldSummary']['recall'], 1.0)
         self.assertEqual(semantic['goldSummary']['semanticRecall'], 1.0)
         self.assertEqual(semantic['holdoutSummary']['totalPureFp'], 0)
 
-        naive = bench.run_benchmark_suite(mode='agent', runner_fn=_naive_runner)
+        naive = bench.run_benchmark_suite(
+            mode='agent', runner_fn=_naive_runner, corpus_version='v4',
+        )
         self.assertGreaterEqual(naive['holdoutSummary']['totalPureFp'], 1)
         flagged = [
             row for row in naive['holdoutSummary']['cases']
@@ -491,7 +497,7 @@ class ComparisonTests(unittest.TestCase):
 
 class CliTests(unittest.TestCase):
     def test_cli_baseline_exit_codes(self):
-        report = bench.run_benchmark_suite(mode='sensor')
+        report = bench.run_benchmark_suite(mode='sensor', corpus_version='v4')
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             baseline = root / 'baseline.json'
@@ -535,7 +541,7 @@ class CliTests(unittest.TestCase):
 
     def _run(self, *args):
         return subprocess.run(
-            [sys.executable, str(CLI_PATH), *args],
+            [sys.executable, str(CLI_PATH), '--corpus-version', 'v4', *args],
             capture_output=True, text=True, check=False,
         )
 
