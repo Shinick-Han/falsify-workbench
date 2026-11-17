@@ -45,11 +45,18 @@ Errors: 400 invalid_request, 401 unauthorized, 413 payload_too_large, 415 unsupp
 ### `POST /v1/ai/jobs`
 ```json
 { "role": "red", "prompt": "...", "uploadId": "<uuid>", "idempotencyKey": "opaque-8..128",
-  "model": "claude-opus-5-5", "effort": "high", "budget": { "maxCalls": 12 } }
+  "model": "claude-opus-5-5", "effort": "high", "budget": { "maxCalls": 12 },
+  "useEvidence": true, "applyOnly": false,
+  "edits": [ { "id": "e1", "pageIndex": 0, "before": "...", "after": "...", "occurrence": 0 } ],
+  "visualEdits": [ { "kind": "table-cell", "itemId": "t1", "row": 1, "column": 2,
+                     "before": "5", "after": "9", "rationale": "..." } ] }
 ```
 `prompt` is the user's review instruction (<= 8000 chars). `model`/`effort` are optional server-allowlisted choices.
 `harness` is optional and must not carry endpoints, paths, keys or executable code. `budget` is advisory; the server
-applies its own hard budget. `202`: `{ "job": <snapshot>, "replayed": false }`.
+applies its own hard budget. `useEvidence` defaults true and prepares the existing EvidenceStore table/figure context
+for the job. `applyOnly` (RED only) applies selected `edits`/`visualEdits` to the source upload without a model call;
+`edits` are text-span operations and `visualEdits` are the existing table-cell/chart-point shapes. Selection changes are
+part of the request hash/idempotency. `202`: `{ "job": <snapshot>, "replayed": false }`.
 Same owner + idempotencyKey + same request hash: `200` with the existing snapshot and `replayed: true`;
 same key with a different request hash: `409 idempotency_conflict`. A replayed submission never triggers another paid call.
 
@@ -59,7 +66,9 @@ same key with a different request hash: `409 idempotency_conflict`. A replayed s
   "progress": { "completedCalls": 2, "requiredCalls": 5, "phase": "analyzing" },
   "model": "claude-opus-5-5", "effort": "high", "provider": "anthropic",
   "usage": { "inputTokens": 1, "outputTokens": 2, "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0 },
-  "result": { ... }, "artifacts": [ { "id": "...", "name": "review.json", "mime": "application/json", "bytes": 42, "sha256": "..." } ],
+  "result": { ... }, "artifacts": [ { "id": "...", "name": "review.json|extracted.json|evidence.json|edited.pdf|apply.json",
+                                     "mime": "...", "bytes": 42, "sha256": "..." } ],
+  "useEvidence": true, "applyOnly": false,
   "failure": { "code": "auth_required", "message": "...", "requestId": "req_...", "retryable": false },
   "createdAt": "...", "updatedAt": "...", "completedAt": "..." }
 ```
@@ -95,6 +104,7 @@ Every request carries `X-Falsify-Service-Token: <HOSTED_AI_SERVICE_TOKEN>` and `
 - `POST /internal/v1/jobs` -> `202`/`200` with the snapshot. Body:
   `{ "jobId": "...", "ownerId": "...", "idempotencyKey": "...", "requestHash": "...", "role": "red|blue",
      "prompt": "...", "uploadId": "...", "model": "...", "effort": "...", "budget": { "maxCalls": 12 },
+     "useEvidence": true, "applyOnly": false, "edits": [...], "visualEdits": [...],
      "harness": { ... } }`. Duplicate `(ownerId, idempotencyKey)` + same hash returns the existing job.
 - `GET /internal/v1/jobs/<jobId>` (owner header) -> snapshot.
 - `POST /internal/v1/jobs/<jobId>/cancel` -> snapshot.
@@ -107,7 +117,8 @@ Every request carries `X-Falsify-Service-Token: <HOSTED_AI_SERVICE_TOKEN>` and `
 header, optional `ANTHROPIC_BASE_URL` (https only, tests inject transport), `HOSTED_AI_SERVICE_TOKEN`,
 `HOSTED_AI_STATE_DIR`, `HOSTED_AI_MODELS` (default `claude-opus-5-5,claude-sonnet-5-5,claude-haiku-5-5`),
 `HOSTED_AI_DEFAULT_MODEL`, `HOSTED_AI_MAX_UPLOAD_BYTES`, `HOSTED_AI_MAX_CONCURRENCY`, `HOSTED_AI_MAX_CALLS`,
-`HOSTED_AI_JOB_RETENTION_SECONDS`, per-batch tuning: `HOSTED_AI_RED_BATCH_CHARS`,
+`HOSTED_AI_JOB_RETENTION_SECONDS`, an in-memory/durable EvidenceStore capacity for the active PDFs,
+per-batch tuning: `HOSTED_AI_RED_BATCH_CHARS`,
 `HOSTED_AI_BLUE_BATCH_CHARS`, `HOSTED_AI_RED_CANDIDATES_PER_BATCH`, `HOSTED_AI_BLUE_FINDINGS_PER_BATCH`,
 `HOSTED_AI_IMAGES_PER_BATCH`, `HOSTED_AI_MAX_OUTPUT_TOKENS`, `HOSTED_AI_IMAGE_CAPACITY`.
 
@@ -121,9 +132,19 @@ header, optional `ANTHROPIC_BASE_URL` (https only, tests inject transport), `HOS
   from the wire schema and still enforced locally with `jsonschema` after parsing. Never silently accept invalid output.
 - Images: base64 `image` blocks (`image/png|jpeg|webp|gif`), no fixed six-image cap; batching by provider capacity.
 - Usage is mapped from the response `usage` object; `request-id` header and `model`/`stop_reason` are recorded.
+- Evidence: the runtime prepares the uploaded PDF with the existing EvidenceStore/table/figure engines and adds an
+  `evidence.json` summary artifact. RED and BLUE envelopes receive `paperEvidence`/consent/fileHash, so structured
+  table/figure context and omitted-evidence reread use the existing engines. `applyOnly` never calls the provider.
 - Errors map to fixed codes: 400 `invalid_request`, 401 `auth_required`, 403 `permission_denied`, 404 `not_found`,
   413 `request_too_large`, 429 `rate_limited` (retryable), 500/529 `provider_error`/`overloaded` (retryable),
   504/transport timeout `timeout`. No automatic paid retry at submit time.
+
+## Owner-paid budget policy
+
+The Worker may enforce a configurable per-owner token budget from recorded terminal job usage (windowed policy).
+This is an enforceable policy gate, not an exact provider balance: in-flight jobs reserve call slots, not estimated
+tokens. `applyOnly` jobs bypass the token gate because they make no provider calls. No balance or cost is fabricated;
+usage is copied only from provider responses.
 
 ## Harness adapter
 

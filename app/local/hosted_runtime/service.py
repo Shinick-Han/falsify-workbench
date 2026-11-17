@@ -11,6 +11,10 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from .config import EFFORTS, RuntimeConfig
+from .evidence import (EvidenceError, apply_edits as apply_evidence_edits,
+                       artifact as evidence_artifact, configure_store,
+                       handle as evidence_handle, prepare as prepare_evidence,
+                       release_store)
 from .pdf_input import PdfInputError, extract_pdf
 from .store import (IdempotencyConflict, JobIdConflict, Store, StoreError,
                     StoreNotFound)
@@ -66,6 +70,19 @@ FAILURE_MESSAGES = {
     'provider_not_configured': 'The hosted provider key is not configured.',
     'provider_unavailable': 'The hosted provider is temporarily unavailable.',
     'provider_rejected': 'The provider rejected the hosted request.',
+    'evidence_expired': 'The prepared PDF evidence is no longer available.',
+    'evidence_unavailable': 'The prepared PDF evidence is unavailable.',
+    'evidence_cancelled': 'Evidence preparation was cancelled.',
+    'evidence_too_large': 'The PDF exceeds the structured evidence limit.',
+    'evidence_input_invalid': 'The PDF could not be prepared as structured evidence.',
+    'evidence_extraction_failed': 'Structured table/figure evidence could not be prepared.',
+    'apply_source_mismatch': 'The apply request does not match the stored source PDF.',
+    'apply_no_edits': 'No selected edits were supplied for the apply request.',
+    'apply_verify_failed': 'The edited PDF failed hash or page-count verification.',
+    'apply_edit_incomplete': 'One or more selected edits could not be fully applied.',
+    'apply_edit_invalid': 'A selected text edit could not be applied safely.',
+    'visual_edit_invalid': 'A selected table/figure edit is invalid for this PDF.',
+    'visual_edit_kind_unsupported': 'This visual edit kind is not supported for apply.',
 }
 RETRYABLE_FAILURES = frozenset({'rate_limited', 'timeout', 'provider_error', 'overloaded', 'provider_unavailable'})
 RETRYABLE_ERRORS = frozenset({'ai_unavailable'})
@@ -144,7 +161,8 @@ def build_harness(role, prompt, max_calls, model, effort):
 
 
 def build_review_envelope(role, *, revision, request_id, source_hash, segments, prompt,
-                         model, effort, max_calls, attack_types=None, level=None):
+                         model, effort, max_calls, attack_types=None, level=None,
+                         paper_evidence=None, file_hash=None):
     """Build the documented hosted envelope.  Both roles use the hosted harness shape."""
     harness = build_harness(role, prompt, max_calls, model, effort)
     if role == 'red':
@@ -162,9 +180,8 @@ def build_review_envelope(role, *, revision, request_id, source_hash, segments, 
             envelope['attackTypes'] = list(attack_types)
         else:
             envelope['level'] = 4 if level is None else level
-        return envelope
-    if role == 'blue':
-        return {
+    elif role == 'blue':
+        envelope = {
             'schema': 'falsify.document-blue.v1',
             'revision': revision,
             'requestId': request_id,
@@ -174,7 +191,13 @@ def build_review_envelope(role, *, revision, request_id, source_hash, segments, 
             'consent': True,
             'harness': harness,
         }
-    raise ValueError('role_invalid')
+    else:
+        raise ValueError('role_invalid')
+    if paper_evidence is not None:
+        envelope['paperEvidence'] = dict(paper_evidence)
+        envelope['paperEvidenceConsent'] = True
+        envelope['fileHash'] = file_hash
+    return envelope
 
 
 def _extraction_document(upload, extraction):
@@ -215,8 +238,11 @@ class _JobRequest:
     effort: str
     max_calls: int
     edits: tuple
+    visual_edits: tuple
     attack_types: tuple
     level: int
+    apply_only: bool
+    use_evidence: bool
     cancelled: threading.Event
 
 
@@ -230,6 +256,7 @@ class RuntimeService:
         self.store = store if store is not None else Store(config.state_dir)
         self.review_runner = review_runner
         self.backend_factory = backend_factory
+        self.evidence_store = configure_store()
         self._events = {}
         self._lock = threading.RLock()
         self._closed = False
@@ -278,7 +305,7 @@ class RuntimeService:
             raise ServiceError('not_found', 404) from None
         progress = {
             'completedCalls': 0,
-            'requiredCalls': validated['maxCalls'],
+            'requiredCalls': 0 if validated['applyOnly'] else validated['maxCalls'],
             'phase': 'queued',
         }
         try:
@@ -292,6 +319,8 @@ class RuntimeService:
                 effort=validated['effort'],
                 provider=self.config.provider,
                 progress=progress,
+                apply_only=validated['applyOnly'],
+                use_evidence=validated['useEvidence'],
             )
         except IdempotencyConflict:
             raise ServiceError('idempotency_conflict', 409) from None
@@ -309,8 +338,11 @@ class RuntimeService:
             effort=validated['effort'],
             max_calls=validated['maxCalls'],
             edits=tuple(validated['edits'] or ()),
+            visual_edits=tuple(validated['visualEdits'] or ()),
             attack_types=tuple(validated['attackTypes']) if validated['attackTypes'] is not None else None,
             level=validated['level'],
+            apply_only=validated['applyOnly'],
+            use_evidence=validated['useEvidence'],
             cancelled=threading.Event(),
         )
         self._schedule(request)
@@ -374,6 +406,8 @@ class RuntimeService:
             'model': job['model'],
             'effort': job['effort'],
             'provider': job['provider'],
+            'applyOnly': job.get('applyOnly', False),
+            'useEvidence': job.get('useEvidence', True),
             'artifacts': artifacts,
             'createdAt': job['createdAt'],
             'updatedAt': job['updatedAt'],
@@ -410,14 +444,17 @@ class RuntimeService:
                 return
             self.store.update_progress(request.owner_id, request.job_id, {
                 'completedCalls': 0,
-                'requiredCalls': request.max_calls,
-                'phase': 'running',
+                'requiredCalls': 0 if request.apply_only else request.max_calls,
+                'phase': 'applying' if request.apply_only else 'running',
             })
             upload, raw = self.store.read_upload_bytes(request.owner_id, request.upload_id)
             if upload['mime'] == 'text/plain':
                 raise ServiceError('unsupported_media_type', 415)
             if request.cancelled.is_set():
                 self._finish_cancelled(request)
+                return
+            if request.apply_only:
+                self._execute_apply(request, upload, raw)
                 return
             extraction = extract_pdf(raw)
             self.store.add_artifact(request.owner_id, request.job_id, 'extracted.json',
@@ -426,6 +463,15 @@ class RuntimeService:
             if request.cancelled.is_set():
                 self._finish_cancelled(request)
                 return
+            evidence = self._prepare_evidence(request, upload, raw)
+            if request.cancelled.is_set():
+                self._finish_cancelled(request)
+                return
+            evidence_handle_value = None
+            if evidence is not None:
+                counts = evidence.get('counts') if isinstance(evidence.get('counts'), dict) else {}
+                if (int(counts.get('tables', 0) or 0) + int(counts.get('figures', 0) or 0)) > 0:
+                    evidence_handle_value = evidence_handle(evidence)
             envelope = build_review_envelope(
                 request.role,
                 revision=upload['sha256'],
@@ -438,6 +484,8 @@ class RuntimeService:
                 max_calls=request.max_calls,
                 attack_types=request.attack_types,
                 level=request.level,
+                paper_evidence=evidence_handle_value,
+                file_hash=upload['sha256'] if evidence_handle_value is not None else None,
             )
             result = self._run_engine(envelope, request)
             if request.cancelled.is_set():
@@ -480,6 +528,8 @@ class RuntimeService:
                 self._finish_cancelled(request)
         except PdfInputError as error:
             self._fail(request, error.code)
+        except EvidenceError as error:
+            self._fail(request, error.code)
         except ServiceError as error:
             self._fail(request, error.code)
         except StoreError:
@@ -492,6 +542,44 @@ class RuntimeService:
         finally:
             with self._lock:
                 self._events.pop(request.job_id, None)
+
+    def _prepare_evidence(self, request, upload, raw):
+        """Prepare and record evidence when requested, or when visual apply needs it."""
+        required = request.use_evidence or (request.apply_only and bool(request.visual_edits))
+        if not required:
+            return None
+        summary = prepare_evidence(self.evidence_store, raw, upload['sha256'],
+                                   cancelled=request.cancelled)
+        self.store.add_artifact(request.owner_id, request.job_id, 'evidence.json',
+                                'application/json',
+                                _json_bytes(evidence_artifact(self.evidence_store, summary)))
+        if request.cancelled.is_set():
+            self._finish_cancelled(request)
+            return None
+        return summary
+
+    def _execute_apply(self, request, upload, raw):
+        """Apply only selected edits; no model call, no invented usage."""
+        evidence = self._prepare_evidence(request, upload, raw)
+        if request.cancelled.is_set():
+            self._finish_cancelled(request)
+            return
+        output, apply_summary = apply_evidence_edits(
+            self.evidence_store, evidence, list(request.visual_edits),
+            list(request.edits), raw, upload['sha256'],
+            cancelled=request.cancelled)
+        if request.cancelled.is_set():
+            self._finish_cancelled(request)
+            return
+        self.store.add_artifact(request.owner_id, request.job_id, 'edited.pdf',
+                                'application/pdf', output)
+        self.store.add_artifact(request.owner_id, request.job_id, 'apply.json',
+                                'application/json', _json_bytes(apply_summary))
+        ok = self.store.transition(
+            request.owner_id, request.job_id, ('running',), 'completed',
+            result=apply_summary, usage=None, provider_request_id=None, completed=True)
+        if not ok:
+            self._finish_cancelled(request)
 
     def _run_engine(self, data, request):
         progress = self._progress_callback(request)
@@ -576,7 +664,7 @@ class RuntimeService:
             raise ServiceError('invalid_request', 400)
         allowed = {'jobId', 'ownerId', 'idempotencyKey', 'requestHash', 'role', 'prompt',
                    'uploadId', 'model', 'effort', 'budget', 'harness', 'edits',
-                   'attackTypes', 'level'}
+                   'visualEdits', 'attackTypes', 'level', 'applyOnly', 'useEvidence'}
         if set(body) - allowed:
             raise ServiceError('invalid_request', 400)
         supplied_owner = body.get('ownerId')
@@ -601,8 +689,21 @@ class RuntimeService:
         role = body.get('role')
         if role not in ('red', 'blue'):
             raise ServiceError('invalid_request', 400)
+        apply_only = body.get('applyOnly', False)
+        if type(apply_only) is not bool:
+            raise ServiceError('invalid_request', 400)
+        use_evidence = body.get('useEvidence', True)
+        if type(use_evidence) is not bool:
+            raise ServiceError('invalid_request', 400)
+        if apply_only and role != 'red':
+            raise ServiceError('invalid_request', 400)
         prompt = body.get('prompt')
-        if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 8000 \
+        if apply_only:
+            if prompt is None:
+                prompt = ''
+            if not isinstance(prompt, str) or len(prompt) > 8000 or '\0' in prompt:
+                raise ServiceError('invalid_request', 400)
+        elif not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 8000 \
                 or '\0' in prompt:
             raise ServiceError('invalid_request', 400)
         upload_id = body.get('uploadId')
@@ -630,12 +731,17 @@ class RuntimeService:
                 raise ServiceError('invalid_request', 400)
             if 'maxCalls' in budget:
                 requested = budget['maxCalls']
-                if type(requested) is not int or not 1 <= requested <= 512:
+                if type(requested) is not int or not 0 <= requested <= 512:
+                    raise ServiceError('invalid_request', 400)
+                if requested == 0 and not apply_only:
                     raise ServiceError('invalid_request', 400)
                 requested_calls = requested
-        max_calls = min(requested_calls if requested_calls is not None
-                        else self.config.max_calls, self.config.max_calls)
-        max_calls = max(1, max_calls)
+        if requested_calls == 0:
+            max_calls = 1
+        else:
+            max_calls = min(requested_calls if requested_calls is not None
+                            else self.config.max_calls, self.config.max_calls)
+            max_calls = max(1, max_calls)
 
         harness = body.get('harness')
         if harness is not None:
@@ -653,6 +759,14 @@ class RuntimeService:
             if role != 'red' or not isinstance(edits, list) or len(edits) > 100 \
                     or any(not isinstance(edit, dict) for edit in edits):
                 raise ServiceError('invalid_request', 400)
+        visual_edits = body.get('visualEdits')
+        if visual_edits is not None:
+            if role != 'red' or not apply_only or not isinstance(visual_edits, list) \
+                    or len(visual_edits) > 12 \
+                    or any(not isinstance(edit, dict) for edit in visual_edits):
+                raise ServiceError('invalid_request', 400)
+        if apply_only and not edits and not visual_edits:
+            raise ServiceError('invalid_request', 400)
 
         attack_types = body.get('attackTypes')
         if attack_types is not None:
@@ -679,8 +793,11 @@ class RuntimeService:
             'effort': effort,
             'maxCalls': max_calls,
             'edits': edits,
+            'visualEdits': visual_edits,
             'attackTypes': attack_types,
             'level': level,
+            'applyOnly': apply_only,
+            'useEvidence': use_evidence,
         }
 
     # --------------------------------------------------------------------- close
@@ -692,6 +809,9 @@ class RuntimeService:
         self._executor.shutdown(wait=True, cancel_futures=True)
         with self._lock:
             self._events.clear()
+            if not getattr(self, '_store_released', False):
+                self._store_released = True
+                release_store()
 
     def __enter__(self):
         return self

@@ -1,6 +1,7 @@
 // Hosted AI gateway (contract docs/hosted-ai-contract-20261117.md).
 // Authenticates one stable owner, keeps an idempotent job index in D1 and proxies every execution
-// to the container-internal runtime. No prompt, upload bytes or provider error text is stored here.
+// to the container-internal runtime. No prompt, upload bytes, edit rationale or provider error text
+// is stored here. Owner-paid policy is a pre-flight gate over recorded usage, never a spend balance.
 import { SESSION_HEADER } from './confluence.mjs';
 import { AiError, aiFail, hostingEnabled, resolveAiOwner, sha256Hex } from './ai-identity.mjs';
 import {
@@ -19,6 +20,8 @@ const EFFORT_TOKEN = /^[a-z]{1,16}$/;
 const HASH = /^[a-f0-9]{64}$/;
 const MAX_JOB_BODY_BYTES = 64 * 1024;
 const MAX_UPLOAD_BOUND = 64 * 1024 * 1024;
+const MAX_TEXT_EDITS = 100;
+const MAX_VISUAL_EDITS = 24;
 const ROLES = ['red', 'blue'];
 const STATES = ['queued', 'running', 'cancelling', 'cancelled', 'completed', 'failed', 'interrupted'];
 const DEFAULT_MODELS = ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5'];
@@ -26,6 +29,12 @@ const DEFAULT_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 // Fixed upload allowlist. Anything else is 415 before a byte is forwarded.
 const MIME_TYPES = ['application/pdf', 'application/octet-stream', 'text/plain'];
 const CONTROL = /[\u0000-\u001f\u007f]/;
+const TEXT_EDIT_KEYS = ['id', 'pageIndex', 'before', 'after', 'occurrence', 'bbox', 'spanId'];
+// Mirrors app/local/red_multimodal.py: both visual kinds are strict objects with these exact keys.
+const VISUAL_EDIT_KEYS = {
+  'table-cell': ['kind', 'itemId', 'row', 'column', 'before', 'after', 'rationale'],
+  'chart-point': ['kind', 'itemId', 'seriesId', 'pointIndex', 'beforeY', 'afterY', 'rationale'],
+};
 
 export const AI_ALLOW_METHODS = 'GET, POST, OPTIONS';
 export const AI_ALLOW_HEADERS = 'authorization, content-type, x-falsify-file-name';
@@ -39,17 +48,23 @@ const MESSAGES = {
   payload_too_large: 'The request body exceeds the hosted limit.',
   unsupported_media_type: 'The upload type is not supported.',
   rate_limited: 'Too many hosted AI requests; retry later.',
+  owner_budget_exhausted: 'The owner token budget for this window is exhausted.',
   idempotency_conflict: 'This idempotency key is already used for a different request.',
   ai_unavailable: 'Hosted AI execution is temporarily unavailable.',
   internal_error: 'Internal error.',
 };
-const RETRYABLE = new Set(['rate_limited', 'ai_unavailable', 'internal_error']);
+const RETRYABLE = new Set(['rate_limited', 'owner_budget_exhausted', 'ai_unavailable', 'internal_error']);
 
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 
 function positiveInt(value, fallback) {
   const n = Number(value);
   return Number.isSafeInteger(n) && n > 0 ? n : fallback;
+}
+
+function nonNegativeInt(value, fallback) {
+  const n = Number(value);
+  return Number.isSafeInteger(n) && n >= 0 ? n : fallback;
 }
 
 function csv(value, fallback, pattern) {
@@ -72,6 +87,10 @@ export function aiSettings(env) {
     uploadsPerOwnerHour: positiveInt(env?.AI_UPLOADS_PER_OWNER_HOUR, 60),
     jobsPerOwnerHour: positiveInt(env?.AI_JOBS_PER_OWNER_HOUR, 20),
     activeJobsPerOwner: positiveInt(env?.AI_ACTIVE_JOBS_PER_OWNER, 3),
+    // Owner-paid policy: 0 disables the token gate. It counts only usage recorded from terminal
+    // snapshots, so it is a coarse pre-flight policy, not an exact provider balance.
+    ownerTokenBudget: nonNegativeInt(env?.AI_OWNER_TOKEN_BUDGET, 0),
+    tokenWindowSeconds: positiveInt(env?.AI_TOKEN_WINDOW_SECONDS, 86400),
     models,
     efforts,
     defaultModel: models.includes(requestedModel) ? requestedModel : models[0],
@@ -394,10 +413,35 @@ async function persistSnapshot(db, ownerId, snapshot) {
     fallbackRole: snapshot.role,
     includeResult: false,
   });
+  // Provider usage is recorded once, when the job is first seen terminal. Later reads must not move
+  // that usage into another budget window, and a job without reported usage records zero tokens.
+  const terminal = TERMINAL_STATES.has(stored.state) ? 1 : 0;
+  const usage = stored.usage || {};
   try {
     await db
-      .prepare('UPDATE ai_jobs SET state = ?1, snapshot = ?2, updated_at = ?3, completed_at = ?4 WHERE id = ?5 AND owner_id = ?6')
-      .bind(stored.state, JSON.stringify(stored), stored.updatedAt ?? nowIso(), stored.completedAt ?? null, stored.id, ownerId)
+      .prepare(
+        `UPDATE ai_jobs SET state = ?1, snapshot = ?2, updated_at = ?3, completed_at = ?4,
+           input_tokens = CASE WHEN ?5 = 1 AND usage_recorded_at IS NULL THEN ?6 ELSE input_tokens END,
+           output_tokens = CASE WHEN ?5 = 1 AND usage_recorded_at IS NULL THEN ?7 ELSE output_tokens END,
+           cache_read_input_tokens = CASE WHEN ?5 = 1 AND usage_recorded_at IS NULL THEN ?8 ELSE cache_read_input_tokens END,
+           cache_creation_input_tokens = CASE WHEN ?5 = 1 AND usage_recorded_at IS NULL THEN ?9 ELSE cache_creation_input_tokens END,
+           usage_recorded_at = CASE WHEN ?5 = 1 THEN COALESCE(usage_recorded_at, ?10) ELSE usage_recorded_at END
+         WHERE id = ?11 AND owner_id = ?12`
+      )
+      .bind(
+        stored.state,
+        JSON.stringify(stored),
+        stored.updatedAt ?? nowIso(),
+        stored.completedAt ?? null,
+        terminal,
+        tokenCount(usage, 'inputTokens'),
+        tokenCount(usage, 'outputTokens'),
+        tokenCount(usage, 'cacheReadInputTokens'),
+        tokenCount(usage, 'cacheCreationInputTokens'),
+        nowIso(),
+        stored.id,
+        ownerId,
+      )
       .run();
   } catch { /* the runtime remains the source of truth */ }
 }
@@ -443,6 +487,130 @@ async function jobIdFor(ownerId, idempotencyKey, requestHash) {
 const TERMINAL_STATES = new Set(['cancelled', 'completed', 'failed', 'interrupted']);
 const MAX_RECONCILE_ROWS = 25;
 
+// ---- RED edit selection -------------------------------------------------------------------
+// Only the selected operations travel to the runtime. Every allowed key is a scalar or a bounded
+// numeric box, so no endpoint, path, credential or executable can be smuggled through an edit.
+
+function editText(value, { max, allowEmpty }) {
+  if (typeof value !== 'string' || CONTROL.test(value)) aiFail(400, 'invalid_request');
+  if (!allowEmpty && !value.trim()) aiFail(400, 'invalid_request');
+  if (value.length > max) aiFail(400, 'invalid_request');
+  return value;
+}
+
+function editCount(value, max) {
+  if (!Number.isSafeInteger(value) || value < 0 || value > max) aiFail(400, 'invalid_request');
+  return value;
+}
+
+function validateBbox(value) {
+  if (!Array.isArray(value) || value.length !== 4) aiFail(400, 'invalid_request');
+  const box = [];
+  for (const item of value) {
+    if (typeof item !== 'number' || !Number.isFinite(item) || Math.abs(item) > 1e6) aiFail(400, 'invalid_request');
+    box.push(item);
+  }
+  if (box[2] <= box[0] || box[3] <= box[1]) aiFail(400, 'invalid_request');
+  return box;
+}
+
+function validateTextEdit(op) {
+  if (!isObject(op)) aiFail(400, 'invalid_request');
+  if (Object.keys(op).some(key => !TEXT_EDIT_KEYS.includes(key))) aiFail(400, 'invalid_request');
+  // pageIndex is required by the text-span engine; before/after are its replacement contract.
+  if (!Object.hasOwn(op, 'pageIndex')) aiFail(400, 'invalid_request');
+  const pageIndex = editCount(op.pageIndex, 100000);
+  const before = editText(op.before, { max: 4000, allowEmpty: false });
+  const after = editText(op.after, { max: 4000, allowEmpty: true });
+  if (after === before) aiFail(400, 'invalid_request');
+  const edit = { pageIndex, before, after };
+  if (op.occurrence !== undefined) edit.occurrence = editCount(op.occurrence, 100000);
+  if (op.spanId !== undefined) edit.spanId = editText(op.spanId, { max: 120, allowEmpty: false });
+  if (op.bbox !== undefined) edit.bbox = validateBbox(op.bbox);
+  if (op.id !== undefined) edit.id = editText(op.id, { max: 80, allowEmpty: false });
+  return edit;
+}
+
+function validateVisualEdit(op) {
+  if (!isObject(op)) aiFail(400, 'invalid_request');
+  const kind = op.kind;
+  const keys = VISUAL_EDIT_KEYS[kind];
+  if (!keys) aiFail(400, 'invalid_request');
+  if (Object.keys(op).some(key => !keys.includes(key))) aiFail(400, 'invalid_request');
+  for (const key of keys) {
+    if (!Object.hasOwn(op, key)) aiFail(400, 'invalid_request');
+  }
+  const itemId = editText(op.itemId, { max: 160, allowEmpty: false });
+  const rationale = editText(op.rationale, { max: 3000, allowEmpty: false });
+  if (kind === 'table-cell') {
+    const before = editText(op.before, { max: 4000, allowEmpty: true });
+    const after = editText(op.after, { max: 4000, allowEmpty: true });
+    if (after === before) aiFail(400, 'invalid_request');
+    return {
+      kind,
+      itemId,
+      row: editCount(op.row, 100000),
+      column: editCount(op.column, 100000),
+      before,
+      after,
+      rationale,
+    };
+  }
+  const seriesId = editText(op.seriesId, { max: 120, allowEmpty: false });
+  const pointIndex = editCount(op.pointIndex, 100000);
+  for (const key of ['beforeY', 'afterY']) {
+    if (typeof op[key] !== 'number' || !Number.isFinite(op[key]) || Math.abs(op[key]) > 1e12) aiFail(400, 'invalid_request');
+  }
+  if (op.beforeY === op.afterY) aiFail(400, 'invalid_request');
+  return { kind, itemId, seriesId, pointIndex, beforeY: op.beforeY, afterY: op.afterY, rationale };
+}
+
+// Edit selections are RED-only: BLUE must stay blind and only ever receives the edited PDF bytes.
+function validateEdits(value, role) {
+  if (value === undefined) return [];
+  if (role !== 'red' || !Array.isArray(value) || value.length > MAX_TEXT_EDITS) aiFail(400, 'invalid_request');
+  return value.map(validateTextEdit);
+}
+
+function validateVisualEdits(value, role) {
+  if (value === undefined) return [];
+  if (role !== 'red' || !Array.isArray(value) || value.length > MAX_VISUAL_EDITS) aiFail(400, 'invalid_request');
+  return value.map(validateVisualEdit);
+}
+
+// ---- owner-paid policy --------------------------------------------------------------------
+
+function budgetWindow(windowSeconds, nowMs = Date.now()) {
+  const nowSeconds = Math.floor(nowMs / 1000);
+  const startSeconds = nowSeconds - (nowSeconds % windowSeconds);
+  return {
+    startIso: new Date(startSeconds * 1000).toISOString(),
+    retryAfter: Math.max(1, startSeconds + windowSeconds - nowSeconds),
+  };
+}
+
+// Pre-flight gate over usage recorded from terminal snapshots. In-flight jobs reserve call slots
+// (rate + active caps), never estimated tokens, so this is a policy limit, not a spend balance.
+async function enforceOwnerBudget(db, ctx, settings, { applyOnly }) {
+  if (applyOnly || settings.ownerTokenBudget <= 0) return;
+  const window = budgetWindow(settings.tokenWindowSeconds);
+  const row = await db
+    .prepare(
+      `SELECT COALESCE(SUM(input_tokens + output_tokens + cache_read_input_tokens + cache_creation_input_tokens), 0) AS used
+       FROM ai_jobs WHERE owner_id = ?1 AND usage_recorded_at IS NOT NULL AND usage_recorded_at >= ?2`
+    )
+    .bind(ctx.ownerId, window.startIso)
+    .first();
+  if (Number(row?.used ?? 0) >= settings.ownerTokenBudget) {
+    aiFail(429, 'owner_budget_exhausted', { 'Retry-After': String(window.retryAfter) });
+  }
+}
+
+function tokenCount(usage, key) {
+  const n = Number(usage?.[key]);
+  return Number.isSafeInteger(n) && n >= 0 ? n : 0;
+}
+
 // Refreshes the owner's active rows from the runtime before refusing a new job, so work that
 // finished while nobody polled stops consuming the active-job cap. The scan is bounded, and a
 // runtime error leaves that row exactly as it was.
@@ -472,7 +640,10 @@ async function createJob(ctx) {
   const db = deps.getDb();
   const body = await readJsonBody(request, MAX_JOB_BODY_BYTES);
   const keys = Object.keys(body);
-  const allowed = ['role', 'prompt', 'uploadId', 'idempotencyKey', 'model', 'effort', 'budget', 'harness'];
+  const allowed = [
+    'role', 'prompt', 'uploadId', 'idempotencyKey', 'model', 'effort', 'budget', 'harness',
+    'applyOnly', 'edits', 'visualEdits', 'useEvidence',
+  ];
   if (keys.some(key => !allowed.includes(key))) aiFail(400, 'invalid_request');
   for (const required of ['role', 'prompt', 'uploadId', 'idempotencyKey']) {
     if (!Object.hasOwn(body, required)) aiFail(400, 'invalid_request');
@@ -487,8 +658,27 @@ async function createJob(ctx) {
   const effort = body.effort === undefined ? settings.defaultEffort : body.effort;
   if (typeof model !== 'string' || !settings.models.includes(model)) aiFail(400, 'invalid_request');
   if (typeof effort !== 'string' || !settings.efforts.includes(effort)) aiFail(400, 'invalid_request');
+  if (body.applyOnly !== undefined && typeof body.applyOnly !== 'boolean') aiFail(400, 'invalid_request');
+  if (body.useEvidence !== undefined && typeof body.useEvidence !== 'boolean') aiFail(400, 'invalid_request');
+  const applyOnly = body.applyOnly === true;
+  const useEvidence = body.useEvidence !== false;
+  // Selected RED edits are applied by the engine; BLUE never sees the selection, only the bytes.
+  const edits = validateEdits(body.edits, body.role);
+  const visualEdits = validateVisualEdits(body.visualEdits, body.role);
+  if (applyOnly) {
+    if (body.role !== 'red') aiFail(400, 'invalid_request');
+    if (edits.length + visualEdits.length === 0) aiFail(400, 'invalid_request');
+  }
   let maxCalls = settings.defaultCalls;
-  if (body.budget !== undefined) {
+  if (applyOnly) {
+    // Apply-only performs no model calls: the budget stays in the job contract as an explicit zero.
+    if (body.budget !== undefined) {
+      if (!isObject(body.budget)) aiFail(400, 'invalid_request');
+      if (Object.keys(body.budget).some(key => key !== 'maxCalls')) aiFail(400, 'invalid_request');
+      if (body.budget.maxCalls !== undefined && body.budget.maxCalls !== 0) aiFail(400, 'invalid_request');
+    }
+    maxCalls = 0;
+  } else if (body.budget !== undefined) {
     if (!isObject(body.budget)) aiFail(400, 'invalid_request');
     if (Object.keys(body.budget).some(key => key !== 'maxCalls')) aiFail(400, 'invalid_request');
     if (body.budget.maxCalls !== undefined) {
@@ -503,8 +693,14 @@ async function createJob(ctx) {
     .bind(body.uploadId, ctx.ownerId)
     .first();
   if (!upload) aiFail(400, 'invalid_request');
-  // Prompt text is hashed for idempotency and forwarded, never written to D1.
-  const requestHash = await sha256Hex(JSON.stringify([body.role, prompt, body.uploadId, model, effort, maxCalls]));
+  // Prompt text and edit selections are hashed for idempotency and forwarded, never written to D1.
+  // Plain jobs keep their previous hash; any changed selection becomes a different request.
+  const hashParts = [body.role, prompt, body.uploadId, model, effort, maxCalls];
+  if (applyOnly) hashParts.push(['applyOnly']);
+  if (!useEvidence) hashParts.push(['noEvidence']);
+  if (edits.length) hashParts.push(['edits', edits]);
+  if (visualEdits.length) hashParts.push(['visualEdits', visualEdits]);
+  const requestHash = await sha256Hex(JSON.stringify(hashParts));
   const bucket = await bucketKey('ai-job:', ctx.ownerId);
   const slot = await deps.rateLimit(db, bucket, settings.jobsPerOwnerHour);
   const jobId = await jobIdFor(ctx.ownerId, body.idempotencyKey, requestHash);
@@ -550,6 +746,15 @@ async function createJob(ctx) {
     }
     aiFail(409, 'idempotency_conflict');
   }
+  // The policy gate runs only for a new job: a duplicate replay above creates no spend and is never
+  // blocked. It reserves no tokens for in-flight jobs, so this is a pre-flight limit, not a balance.
+  try {
+    await enforceOwnerBudget(db, ctx, settings, { applyOnly });
+  } catch (error) {
+    await db.prepare('DELETE FROM ai_jobs WHERE id = ?1 AND owner_id = ?2').bind(jobId, ctx.ownerId).run();
+    await deps.releaseSlot(db, bucket, slot);
+    throw error;
+  }
   let active = await db
     .prepare("SELECT COUNT(*) AS count FROM ai_jobs WHERE owner_id = ?1 AND state IN ('queued', 'running', 'cancelling')")
     .bind(ctx.ownerId)
@@ -570,22 +775,26 @@ async function createJob(ctx) {
   }
   let result;
   try {
-    result = await createRuntimeJob(env, {
+    // Defaults that the runtime already assumes are omitted so plain jobs keep the exact previous
+    // wire shape; the new keys appear only when the request actually uses them.
+    const runtimePayload = {
+      jobId,
       ownerId: ctx.ownerId,
-      payload: {
-        jobId,
-        ownerId: ctx.ownerId,
-        idempotencyKey: body.idempotencyKey,
-        requestHash,
-        role: body.role,
-        prompt,
-        uploadId: upload.runtime_upload_id,
-        model,
-        effort,
-        budget: { maxCalls },
-        harness,
-      },
-    });
+      idempotencyKey: body.idempotencyKey,
+      requestHash,
+      role: body.role,
+      prompt,
+      uploadId: upload.runtime_upload_id,
+      model,
+      effort,
+      budget: { maxCalls },
+      harness,
+    };
+    if (applyOnly) runtimePayload.applyOnly = true;
+    if (!useEvidence) runtimePayload.useEvidence = false;
+    if (edits.length) runtimePayload.edits = edits;
+    if (visualEdits.length) runtimePayload.visualEdits = visualEdits;
+    result = await createRuntimeJob(env, { ownerId: ctx.ownerId, payload: runtimePayload });
   } catch (error) {
     // No accepted job is reported as accepted. The gateway index row is rolled back so the client
     // can retry; the runtime deduplicates (ownerId, idempotencyKey) and the same hash, so a retry

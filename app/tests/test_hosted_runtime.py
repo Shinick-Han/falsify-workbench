@@ -186,7 +186,7 @@ class DurableJobTests(BaseRuntimeTest):
         self.assertNotIn('failure', done)
         self.assertIn('completedAt', done)
         names = [artifact['name'] for artifact in done['artifacts']]
-        self.assertEqual(names, ['extracted.json', 'review.json'])
+        self.assertEqual(names, ['extracted.json', 'evidence.json', 'review.json'])
         review = next(a for a in done['artifacts'] if a['name'] == 'review.json')
         meta, data = service.get_artifact(OWNER, done['id'], review['id'])
         self.assertEqual(meta, review)

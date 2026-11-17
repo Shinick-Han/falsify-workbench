@@ -24,6 +24,10 @@ secret, migration or deployment was created by the implementation workers.
   the public internet; only the Worker (service binding or a private authenticated origin) may reach it.
 - Persistent volume: mount `HOSTED_AI_STATE_DIR` (default is required explicitly). It holds the SQLite index and
   content-addressed blobs. A restart marks in-flight jobs `interrupted`; no paid call is replayed.
+- Structured evidence: the runtime prepares the uploaded PDF with the existing EvidenceStore/table/figure engines,
+  writes `evidence.json`, and passes `paperEvidence`/consent/fileHash to RED/BLUE. `applyOnly` applies selected
+  text/table-cell edits without a model call and emits `edited.pdf` + `apply.json`. The web client downloads that exact
+  PDF and re-uploads it as the BLUE input; BLUE receives no RED candidates/rationale/gold.
 - Concurrency/budget: `HOSTED_AI_MAX_CONCURRENCY` (default 2), `HOSTED_AI_MAX_CALLS` (default 12, hard max 512),
   `HOSTED_AI_MAX_UPLOAD_BYTES` (default 32 MiB), `HOSTED_AI_JOB_RETENTION_SECONDS`. Per-batch provider capacity is
   tuned with `HOSTED_AI_RED_BATCH_CHARS`/`HOSTED_AI_BLUE_BATCH_CHARS` (default 100k chars),
@@ -41,7 +45,9 @@ Non-secret vars (`cloud/api/wrangler.jsonc`):
 `AI_HOSTING_ENABLED` (false by default), `AI_RUNTIME_URL` (private runtime origin; empty means 503
 `ai_unavailable`), `AI_MAX_UPLOAD_BYTES`, `AI_MAX_PROMPT_CHARS`, `AI_MAX_CALLS_PER_JOB`, `AI_DEFAULT_CALLS`,
 `AI_UPLOADS_PER_OWNER_HOUR`, `AI_JOBS_PER_OWNER_HOUR`, `AI_ACTIVE_JOBS_PER_OWNER`, `AI_MODELS`, `AI_EFFORTS`.
-Secret: `HOSTED_AI_SERVICE_TOKEN` (`wrangler secret put`).
+Secret: `HOSTED_AI_SERVICE_TOKEN` (`wrangler secret put`). Owner-paid policy: `AI_OWNER_TOKEN_BUDGET` (0 = disabled)
+and `AI_TOKEN_WINDOW_SECONDS`; usage is recorded from terminal provider responses and is an enforceable policy gate,
+not an exact spend balance. In-flight jobs reserve call slots, not estimated tokens; apply-only jobs bypass the token gate.
 Optional binding: an `AI_RUNTIME` service binding with a `fetch` method takes precedence over `AI_RUNTIME_URL`
 and avoids public egress.
 
@@ -50,8 +56,9 @@ hosted users/owners work without a Confluence archive connection. A site `cloudI
 
 ## D1 migration
 
-Apply `cloud/api/migrations/0003_hosted_ai.sql` before enabling `AI_HOSTING_ENABLED`. It adds `ai_uploads` and
-`ai_jobs` only; no bytes or prompts. Do not run it against production until the coordinator approves the release.
+Apply `cloud/api/migrations/0003_hosted_ai.sql` and `0004_owner_usage.sql` before enabling `AI_HOSTING_ENABLED`.
+They add `ai_uploads`, `ai_jobs`, recorded provider usage columns and indexes only; no bytes, prompts or results.
+Do not run them against production until the coordinator approves the release.
 
 ## Verification before enabling
 
@@ -63,9 +70,9 @@ Apply `cloud/api/migrations/0003_hosted_ai.sql` before enabling `AI_HOSTING_ENAB
 
 ## Known limits
 
-- The runtime currently extracts PDF body text. Visual crops, table/figure structured evidence and edited-PDF upload
-  are not wired into the hosted job UI; the provider backend and batch logic accept images (up to the configured
-  capacity, in per-request groups), and the runtime supports an explicit `edits` list for an edited PDF artifact,
-  but the default web flow is text review. `AI_RUNTIME_URL`/secret/migration remain unset until deployment.
+- Structured table/figure evidence, selected text/table-cell edits and edited-PDF download/BLUE handoff are wired for
+  hosted jobs. Chart-point apply is rejected with a fixed code (discovery still appears in RED context). Visual crops
+  are accepted by the provider backend in per-request groups but the default hosted UI does not yet collect crop
+  selections. `AI_RUNTIME_URL`/secret/migrations remain unset until deployment.
 - The Worker buffers an upload to compute its hash before forwarding (bounded by `AI_MAX_UPLOAD_BYTES`).
 - No public listing of jobs; the client stores its job id and reads it back.
