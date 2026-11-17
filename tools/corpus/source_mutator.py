@@ -69,6 +69,7 @@ _VALUE_RE = re.compile(r"^[a-z][a-z0-9_]{0,47}$")
 _NUMBER_RE = re.compile(r"^-?\d+(\.\d+)?$")
 _ABS_RE = re.compile(r"[A-Za-z]:[\\/]|/Users/|/home/")
 _COMMAND_RE = re.compile(r"\\[A-Za-z]+")
+_VALUE_TOKEN_RE = re.compile(r"\{\{v:([a-z][a-z0-9_]{0,47})\}\}")
 _FAMILIES = frozenset({"D1", "D2", "D3", "D4", "D5", "D6", "D7", "S1"})
 _LEVELS = frozenset({"L1", "L2", "L3", "L4"})
 _PHRASE_FAMILIES = frozenset({"S1", "D3"})
@@ -673,19 +674,80 @@ def _figure_surfaces(plan: dict) -> list[str]:
     return found
 
 
-def _allowed_files(diffs, plan: dict, changed_files) -> set[str]:
+def _collect_ids(node, found: set[str]) -> None:
+    if isinstance(node, str):
+        found.update(_VALUE_TOKEN_RE.findall(node))
+    elif isinstance(node, dict):
+        for value in node.values():
+            _collect_ids(value, found)
+    elif isinstance(node, list):
+        for value in node:
+            _collect_ids(value, found)
+
+
+def _token_ids(node) -> set[str]:
+    found = set()
+    _collect_ids(node, found)
+    return found
+
+
+def _figure_roles(case_dir) -> dict[str, dict[str, set[str]]]:
+    loaded = load_case(case_dir)
+    files = loaded["manifest"]["files"]
+    raw = json.loads(loaded["texts"][files["figures"]])
+    roles = {}
+    for figure in raw.get("figures") or []:
+        roles[str(figure["figureId"])] = {
+            "caption": _token_ids(figure.get("caption")),
+            "spec": _token_ids(figure.get("spec")),
+        }
+    return roles
+
+
+def _role(roles, surface: str) -> dict:
+    role = roles.get(surface.split(":", 1)[1])
+    if role is None:
+        raise MutationError("diff_mismatch", "figure")
+    return role
+
+
+def _values_on(overrides, surface: str) -> set[str]:
+    found = set()
+    for item in overrides:
+        if surface in item["surfaces"]:
+            found.add(item["valueId"])
+    return found
+
+
+def _defect_overrides(overrides, indexes) -> list:
+    return [overrides[index] for index in indexes]
+
+
+def _png_name(surface: str) -> str:
+    return "figures/" + surface.split(":", 1)[1] + ".png"
+
+
+def _plotted_files(case_dir, plan: dict) -> set[str]:
+    roles = _figure_roles(case_dir)
+    found = set()
+    for surface in _figure_surfaces(plan):
+        if _values_on(plan["overrides"], surface) & _role(roles, surface)["spec"]:
+            found.add(_png_name(surface))
+    return found
+
+
+def _allowed_files(diffs, plotted, changed_files) -> set[str]:
     allowed = set()
     if diffs:
         allowed.add("paper.tex")
-    for surface in _figure_surfaces(plan):
-        allowed.add("figures/" + surface.split(":", 1)[1] + ".png")
+    allowed.update(plotted)
     if "paper.pdf" in changed_files and allowed:
         allowed.add("paper.pdf")
     return allowed
 
 
-def _explain_files(diffs, plan: dict, changed_files) -> None:
-    allowed = _allowed_files(diffs, plan, changed_files)
+def _explain_files(diffs, plotted, changed_files) -> None:
+    allowed = _allowed_files(diffs, plotted, changed_files)
     for path in changed_files:
         if path not in allowed:
             raise MutationError("diff_mismatch", "file")
@@ -703,7 +765,7 @@ def _correspond(case_dir, root: Path, plan: dict, twin: dict) -> None:
         raise MutationError("diff_mismatch", "lines")
     diffs = _diff_indexes(clean_lines, defect_lines)
     _explain_lines(diffs, defect_tags, plan)
-    _explain_files(diffs, plan, twin["changedFiles"])
+    _explain_files(diffs, _plotted_files(case_dir, plan), twin["changedFiles"])
 
 
 def _ligatures(text: str) -> str:
@@ -794,31 +856,42 @@ def _table_contexts(surface: str, clean_resolved, defect_resolved) -> list[dict]
 
 
 def _figure_context(surface: str, defect_plan: dict) -> dict:
-    figure_id = surface.split(":", 1)[1]
     return {
         "surface": surface,
         "before": defect_plan["before"],
         "after": defect_plan["after"],
-        "figureFile": "figures/" + figure_id + ".png",
+        "figureFile": _png_name(surface),
     }
 
 
-def _surface_contexts(surface, defect_plan, clean_resolved, defect_resolved, lines, tags):
+def _figure_contexts(surface, defect_plan, overrides, roles, clean_lines, defect_lines, tags):
+    role = _role(roles, surface)
+    values = _values_on(_defect_overrides(overrides, defect_plan["overrideIndexes"]), surface)
+    contexts = []
+    if values & role["spec"]:
+        contexts.append(_figure_context(surface, defect_plan))
+    if values & role["caption"]:
+        contexts.extend(_caption_contexts(surface, clean_lines, defect_lines, tags))
+    return contexts
+
+
+def _surface_contexts(surface, defect_plan, overrides, roles, clean_resolved, defect_resolved, lines, tags):
     clean_lines, defect_lines = lines
     if surface.startswith("figure:"):
-        caption = _caption_contexts(surface, clean_lines, defect_lines, tags)
-        return [_figure_context(surface, defect_plan), *caption]
+        return _figure_contexts(
+            surface, defect_plan, overrides, roles, clean_lines, defect_lines, tags,
+        )
     if surface.startswith("table:"):
         rows = _table_contexts(surface, clean_resolved, defect_resolved)
         return rows + _caption_contexts(surface, clean_lines, defect_lines, tags)
     return _body_contexts(surface, clean_lines, defect_lines, tags)
 
 
-def _contexts(defect_plan, clean_resolved, defect_resolved, lines, tags) -> list[dict]:
+def _contexts(defect_plan, overrides, roles, clean_resolved, defect_resolved, lines, tags) -> list[dict]:
     contexts = []
     for surface in defect_plan["changedSurfaces"]:
         batch = _surface_contexts(
-            surface, defect_plan, clean_resolved, defect_resolved, lines, tags,
+            surface, defect_plan, overrides, roles, clean_resolved, defect_resolved, lines, tags,
         )
         if not batch:
             raise MutationError("diff_mismatch", "surface")
@@ -963,8 +1036,10 @@ def _kind(value_id: str) -> str:
     return "source-value"
 
 
-def _defect_entry(mutation, defect_plan, clean_resolved, defect_resolved, lines, tags, root, compiled):
-    contexts = _contexts(defect_plan, clean_resolved, defect_resolved, lines, tags)
+def _defect_entry(mutation, defect_plan, overrides, roles, clean_resolved, defect_resolved, lines, tags, root, compiled):
+    contexts = _contexts(
+        defect_plan, overrides, roles, clean_resolved, defect_resolved, lines, tags,
+    )
     quote, location, page = _quote_location(
         contexts, defect_plan, defect_resolved, root, compiled,
     )
@@ -1003,6 +1078,7 @@ def _hash_pdf(path: Path, compiled: bool):
 
 def _ledger(case_dir, root: Path, spec, plan: dict, compiled: bool) -> dict:
     mutations = _validate_spec(spec)["mutations"]
+    roles = _figure_roles(case_dir)
     clean_resolved = resolve_case(case_dir)
     defect_resolved = resolve_case(case_dir, plan["overrides"])
     clean_lines, tags = _tagged(case_dir, root / "clean" / "paper.tex", None)
@@ -1010,7 +1086,8 @@ def _ledger(case_dir, root: Path, spec, plan: dict, compiled: bool) -> dict:
     lines = (clean_lines, defect_lines)
     defects = [
         _defect_entry(
-            mutation, defect_plan, clean_resolved, defect_resolved, lines, tags, root, compiled,
+            mutation, defect_plan, plan["overrides"], roles,
+            clean_resolved, defect_resolved, lines, tags, root, compiled,
         )
         for mutation, defect_plan in zip(mutations, plan["defects"])
     ]

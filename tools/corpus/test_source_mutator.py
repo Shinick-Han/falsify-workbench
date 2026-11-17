@@ -438,6 +438,104 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(miss["aggregate"]["tp"], 0)
         self.assertEqual(miss["aggregate"]["pureFp"], 1)
 
+    def test_caption_only_figure_binding_leaves_the_png(self):
+        spec = _spec([_mut("set_text", "rd_pool", ["figure:F1"], text="15.0")])
+        spec["caseId"] = "meta-minimal"
+        case = CORPUS / "fixtures" / "meta_minimal"
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out"
+            summary = build_twin(case, spec, out, compile_pdf=False)
+            self.assertEqual(summary["changedFiles"], ["paper.tex"])
+            contexts = _load(out / "sealed" / "gold-ledger.json")["defects"][0]["source"]["contexts"]
+            self.assertEqual(len(contexts), 1)
+            self.assertEqual(contexts[0]["surface"], "figure:F1")
+            self.assertNotIn("figureFile", contexts[0])
+            self.assertIn("9.7", contexts[0]["before"])
+            self.assertIn("15.0", contexts[0]["after"])
+            self.assertEqual(
+                (out / "clean" / "figures" / "F1.png").read_bytes(),
+                (out / "defect" / "figures" / "F1.png").read_bytes(),
+            )
+
+    def test_plotted_figure_binding_changes_the_png_only(self):
+        spec = load_spec(MUTATIONS / "m03-figure-y.json")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out"
+            summary = build_twin(FIXTURE, spec, out, compile_pdf=False)
+            self.assertEqual(summary["changedFiles"], ["figures/F1.png"])
+            contexts = _load(out / "sealed" / "gold-ledger.json")["defects"][0]["source"]["contexts"]
+            self.assertEqual(contexts, [{
+                "surface": "figure:F1",
+                "before": "-12.4",
+                "after": "-3.0",
+                "figureFile": "figures/F1.png",
+            }])
+
+    def test_value_in_caption_and_spec_records_both(self):
+        spec = _spec([_mut("set_text", "cut_main", ["figure:F1"], text="9")])
+        spec["caseId"] = "dta-minimal"
+        case = CORPUS / "fixtures" / "dta_minimal"
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out"
+            summary = build_twin(case, spec, out, compile_pdf=False)
+            self.assertEqual(summary["changedFiles"], ["paper.tex", "figures/F1.png"])
+            contexts = _load(out / "sealed" / "gold-ledger.json")["defects"][0]["source"]["contexts"]
+            plotted = [item for item in contexts if "figureFile" in item]
+            caption = [item for item in contexts if "figureFile" not in item]
+            self.assertEqual(plotted, [{
+                "surface": "figure:F1",
+                "before": "4",
+                "after": "9",
+                "figureFile": "figures/F1.png",
+            }])
+            self.assertEqual(len(caption), 1)
+            self.assertEqual(caption[0]["surface"], "figure:F1")
+            self.assertIn("scores 4 and", caption[0]["before"])
+            self.assertIn("scores 9 and", caption[0]["after"])
+            self.assertNotEqual(
+                (out / "clean" / "figures" / "F1.png").read_bytes(),
+                (out / "defect" / "figures" / "F1.png").read_bytes(),
+            )
+
+    def test_png_listed_without_a_plotted_binding_is_mismatch(self):
+        spec = _spec([_mut("set_text", "rd_pool", ["figure:F1"], text="15.0")])
+        spec["caseId"] = "meta-minimal"
+        case = CORPUS / "fixtures" / "meta_minimal"
+        real = source_mutator.render.render_twin
+
+        def wrapped(case_dir, root, overrides, *, compile_pdf=True):
+            twin = real(case_dir, root, overrides, compile_pdf=compile_pdf)
+            files = list(twin["changedFiles"])
+            if "figures/F1.png" not in files:
+                files.append("figures/F1.png")
+            twin["changedFiles"] = files
+            return twin
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(source_mutator.render, "render_twin", side_effect=wrapped):
+                with self.assertRaises(MutationError) as caught:
+                    build_twin(case, spec, Path(tmp) / "out", compile_pdf=False)
+            self.assertEqual(caught.exception.code, "diff_mismatch")
+            self.assertEqual(str(caught.exception), "file")
+
+    def test_missing_png_for_a_plotted_binding_is_mismatch(self):
+        spec = load_spec(MUTATIONS / "m03-figure-y.json")
+        real = source_mutator.render.render_twin
+
+        def wrapped(case_dir, root, overrides, *, compile_pdf=True):
+            twin = real(case_dir, root, overrides, compile_pdf=compile_pdf)
+            twin["changedFiles"] = [
+                item for item in twin["changedFiles"] if item != "figures/F1.png"
+            ]
+            return twin
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(source_mutator.render, "render_twin", side_effect=wrapped):
+                with self.assertRaises(MutationError) as caught:
+                    build_twin(FIXTURE, spec, Path(tmp) / "out", compile_pdf=False)
+            self.assertEqual(caught.exception.code, "diff_mismatch")
+            self.assertEqual(str(caught.exception), "file")
+
     def test_diff_mismatch_leaves_no_sealed_directory(self):
         real = source_mutator.plan_mutations
         spec = _spec([_mut("set_text", "p_primary", ["tex:abstract"], text=_other("p_primary"))])
