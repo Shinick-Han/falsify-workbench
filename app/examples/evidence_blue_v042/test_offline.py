@@ -386,6 +386,38 @@ class OfflineV042Tests(unittest.TestCase):
         segments = [{'id': 's0', 'text': EXACT_LINE}]
         self.assertEqual(self._stages(runner, segments), self._stages(runner.v041, segments))
 
+    def test_over_budget_argument_shed_keeps_inherited_signals(self):
+        inherited = {
+            'layer0StatSignals': [{'id': str(index), 'kind': 'stat', 'excerpt': 's' * 80} for index in range(4)],
+            'supplementSignals': [{'id': str(index), 'kind': 'supp', 'excerpt': 'u' * 80} for index in range(4)],
+            'rawDatasetSignals': [{'id': str(index), 'kind': 'raw', 'excerpt': 'r' * 80} for index in range(4)],
+            'codeAuditSignals': [{'id': str(index), 'kind': 'code', 'excerpt': 'c' * 80} for index in range(4)],
+            'internalConsistencySignals': [{'id': str(index), 'kind': 'ic', 'excerpt': 'i' * 80} for index in range(4)],
+            'internalConsistencyHints': [{'id': str(index), 'kind': 'hint', 'excerpt': 'n' * 80} for index in range(4)],
+            'pdfSecuritySignals': [{'id': str(index), 'kind': 'sec', 'excerpt': 'p' * 80} for index in range(4)],
+            'metaTableSignals': [{'id': str(index), 'kind': 'meta', 'excerpt': 'm' * 80} for index in range(4)],
+        }
+        room = runner._digest_room()
+        full = dict(inherited)
+        full['devilsAdvocate'] = runner.DA_TEXT
+        full['argumentOutlineAdvisory'] = True
+        full['argumentHints'] = [
+            {'id': str(index), 'excerpt': 'h' * 400, 'label': 'unverified'} for index in range(20)
+        ]
+        gap = room - len(json.dumps(inherited, ensure_ascii=False, separators=(',', ':')))
+        full['argumentOutlineDigest'] = 'd' * (gap + 5000)
+        shed = {key: value for key, value in full.items() if key not in ('argumentOutlineDigest', 'argumentHints')}
+        self.assertGreater(len(json.dumps(full, ensure_ascii=False, separators=(',', ':'))), room)
+        self.assertLessEqual(len(json.dumps(shed, ensure_ascii=False, separators=(',', ':'))), room)
+        parsed = json.loads(runner._format_bounded_digest(full)[len(runner.DIGEST_HEADER):])
+        alone = json.loads(runner.v041._format_bounded_digest(inherited)[len(runner.v041.DIGEST_HEADER):])
+        for key, value in inherited.items():
+            kept = json.dumps(parsed[key], ensure_ascii=False, separators=(',', ':'))
+            expected = json.dumps(alone[key], ensure_ascii=False, separators=(',', ':'))
+            self.assertEqual(kept, expected)
+            self.assertEqual(kept, json.dumps(value, ensure_ascii=False, separators=(',', ':')))
+        self.assertEqual(parsed['devilsAdvocate'], runner.DA_TEXT)
+
     def test_owned_functions_stay_within_ccn_limit(self):
         paths = [
             HERE / 'runner.py',

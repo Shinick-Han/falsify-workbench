@@ -176,24 +176,25 @@ def _trim_text(compact, key, limit):
 
 
 def _shrink_v042(compact, step):
-    if step == 19:
-        _trim_list(compact, 'argumentHints', 8)
-        return
-    if step == 20:
+    """Shed advisory outline text before inherited signal lists."""
+    if step == 0:
         _trim_text(compact, 'argumentOutlineDigest', 800)
         return
-    if step == 21:
+    if step == 1:
+        _trim_list(compact, 'argumentHints', 8)
+        return
+    if step == 2:
         compact.pop('argumentHints', None)
         return
-    if step == 22:
+    if step == 3:
         compact.pop('argumentOutlineDigest', None)
 
 
 def _shrink_digest_step(compact, step):
-    if step < 19:
-        v041._shrink_digest_step(compact, step)
+    if step < 4:
+        _shrink_v042(compact, step)
         return
-    _shrink_v042(compact, step)
+    v041._shrink_digest_step(compact, step - 4)
 
 
 def _digest_room():

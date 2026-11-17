@@ -122,6 +122,54 @@ def _by_prefix(report, prefix):
     raise AssertionError(prefix)
 
 
+STRUCTURED_MISMATCH = [
+    {
+        "pageIndex": 0,
+        "text": (
+            "Abstract\n"
+            "Background: Fatigue is common after surgery and reduces quality of life in many patients worldwide.\n"
+            "Results: The treatment reduced fatigue scores by 45% compared with placebo (p = 0.03) in the full cohort.\n"
+            "Conclusions: This trial proves that the drug eliminates postoperative fatigue in all adults and should be standard care."
+        ),
+    },
+    {
+        "pageIndex": 1,
+        "text": (
+            "Methods\n"
+            "We randomized 200 adults to drug or placebo for 12 weeks at two centers and measured fatigue by questionnaire at each visit.\n"
+            "Results\n"
+            "Fatigue scores fell by 12% in the drug group and 9% in the placebo group over 12 weeks (p = 0.21) with wide intervals.\n"
+            "Adverse events were similar between arms and no serious events were attributed to study treatment by investigators."
+        ),
+    },
+    {
+        "pageIndex": 2,
+        "text": (
+            "Discussion\n"
+            "Our findings definitively establish a 45% reduction in fatigue and demonstrate that the drug causes recovery in surgical patients.\n"
+            "Conclusion\n"
+            "The drug eliminates fatigue after surgery and clinicians should adopt it immediately for all patients."
+        ),
+    },
+]
+MATCHING_SENTENCE = (
+    "The treatment reduced fatigue scores by 45% compared with placebo (p = 0.03) in the full cohort of adults."
+)
+
+
+def _matching_tail():
+    return [
+        {
+            "pageIndex": 2,
+            "text": "Discussion\nThis study has several limitations including a single centre and a short follow-up period today.",
+        },
+        {
+            "pageIndex": 3,
+            "text": "Conclusion\nThese findings suggest that treatment may be associated with lower fatigue in this cohort today.",
+        },
+    ]
+
+
 def _ccn_over(path):
     proc = subprocess.run(
         [sys.executable, str(REPO / "tools" / "quality" / "python-functions.py")],
@@ -361,6 +409,80 @@ class ArgumentOutlineTests(unittest.TestCase):
             audit.audit_argument_outline(segments="Abstract\nHello", limit=0)
         with self.assertRaisesRegex(ValueError, "limit"):
             audit.audit_argument_outline(segments="Abstract\nHello", limit=True)
+
+    def test_structured_abstract_is_not_evidence(self):
+        report = audit.audit_argument_outline(segments=STRUCTURED_MISMATCH)
+        self.assertEqual(
+            [row["section"] for row in report["outline"]],
+            ["abstract", "methods", "results", "discussion", "conclusion"],
+        )
+        claims = {(row["section"], row["value"]): row for row in report["claimEvidenceMap"]}
+        for value in ("45%", "0.03"):
+            row = claims[("abstract", value)]
+            self.assertEqual(row["status"], "unsupported")
+            self.assertIsNone(row["evidencePageIndex"])
+        discussion = claims[("discussion", "45%")]
+        self.assertEqual(discussion["status"], "unsupported")
+        self.assertIsNone(discussion["evidencePageIndex"])
+        self.assertNotIn("12%", {row["value"] for row in report["claimEvidenceMap"]})
+        self.assertNotIn("9%", {row["value"] for row in report["claimEvidenceMap"]})
+        self.assertNotIn("0.21", {row["value"] for row in report["claimEvidenceMap"]})
+        topic = next(row["topicSentence"] for row in report["outline"] if row["section"] == "results")
+        self.assertIn("12%", topic)
+        self.assertIn("9%", topic)
+        self.assertIn("0.21", topic)
+        hints = [hint for hint in report["triageHints"] if hint["kind"] == "conclusion_claim_without_results_support"]
+        excerpts = {hint["section"]: hint["excerpt"] for hint in hints}
+        self.assertIn("45%", excerpts["abstract"])
+        self.assertIn("0.03", excerpts["abstract"])
+        self.assertIn("45%", excerpts["discussion"])
+        for row in report["claimEvidenceMap"]:
+            self.assertNotEqual(row["evidencePageIndex"], 0)
+
+    def test_matching_abstracts_emit_no_claim_hint(self):
+        unstructured = [
+            {"pageIndex": 0, "text": "Abstract\n" + MATCHING_SENTENCE},
+            {"pageIndex": 1, "text": "Results\n" + MATCHING_SENTENCE},
+            *_matching_tail(),
+        ]
+        plain = audit.audit_argument_outline(segments=unstructured)
+        self.assertNotIn("conclusion_claim_without_results_support", _kinds(plain))
+        self.assertTrue(all(row["status"] == "supported" for row in plain["claimEvidenceMap"]))
+        self.assertTrue(all(row["evidencePageIndex"] == 1 for row in plain["claimEvidenceMap"]))
+        structured = [
+            {
+                "pageIndex": 0,
+                "text": (
+                    "Abstract\n"
+                    "Objective: Fatigue after surgery is the endpoint of this randomized comparison today.\n"
+                    "Aims: The trial compared drug and placebo at two centers over twelve weeks of follow-up.\n"
+                    "Interpretation: The estimates should be read with the body of the paper today overall.\n"
+                    "결과: " + MATCHING_SENTENCE + "\n"
+                    "Results: " + MATCHING_SENTENCE
+                ),
+            },
+            {
+                "pageIndex": 1,
+                "text": (
+                    "1. Methods\n"
+                    "We randomized 200 adults to drug or placebo for 12 weeks at two centers "
+                    "and measured fatigue by questionnaire at each visit."
+                ),
+            },
+            {"pageIndex": 4, "text": "Results\n" + MATCHING_SENTENCE},
+            *_matching_tail(),
+        ]
+        report = audit.audit_argument_outline(segments=structured)
+        self.assertNotIn("conclusion_claim_without_results_support", _kinds(report))
+        sections = {row["section"] for row in report["outline"]}
+        self.assertIn("abstract", sections)
+        self.assertIn("methods", sections)
+        abstract_claims = [row for row in report["claimEvidenceMap"] if row["section"] == "abstract"]
+        self.assertTrue(any(row["claim"].startswith("결과:") for row in abstract_claims))
+        self.assertTrue(any(row["claim"].startswith("Results:") for row in abstract_claims))
+        for row in abstract_claims:
+            self.assertEqual(row["status"], "supported")
+            self.assertEqual(row["evidencePageIndex"], 4)
 
     def test_owned_functions_stay_within_ccn_limit(self):
         over = _ccn_over(REPO / "app" / "local" / "paper_argument_outline.py")

@@ -204,8 +204,16 @@ def _push(state, page_index, line):
     state["lines"].append(line.strip())
 
 
+def _stays_in_abstract(state, section, rest):
+    """Keep a same-line IMRaD label inside a structured abstract."""
+    return state["section"] == "abstract" and section is not None and bool(rest)
+
+
 def _consume(page, line, state, rows):
     section, rest = consistency._split_heading(line)
+    if _stays_in_abstract(state, section, rest):
+        _push(state, page["pageIndex"], line)
+        return
     if section is not None:
         _flush(state, rows)
         state["section"] = section
@@ -383,6 +391,8 @@ def _quant_values(sentence):
 
 
 def _is_results_blob(paragraph):
+    if paragraph["section"] == "abstract":
+        return False
     if paragraph["section"] == "results":
         return True
     return paragraph["text"].lower().startswith("table")
