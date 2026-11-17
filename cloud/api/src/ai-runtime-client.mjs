@@ -33,22 +33,39 @@ function positiveInt(value, fallback) {
 
 // Runtime configuration is server environment only. An empty or unusable URL is "not deployed yet",
 // never a live assumption: callers turn that into 503 ai_unavailable.
+function runtimeTransportAllowed(url) {
+  if (url.protocol === 'https:') return true;
+  return url.protocol === 'http:'
+    && (url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '[::1]');
+}
+
+function runtimeBase(raw) {
+  if (!raw) return null;
+  let url;
+  try { url = new URL(raw); } catch { return null; }
+  if (!runtimeTransportAllowed(url)) return null;
+  if (url.username || url.password || url.search || url.hash) return null;
+  return url.origin + url.pathname.replace(/\/+$/, '');
+}
+
+function runtimeToken(env) {
+  const raw = typeof env?.HOSTED_AI_SERVICE_TOKEN === 'string' ? env.HOSTED_AI_SERVICE_TOKEN : '';
+  const usable = raw.length >= 16 && raw.length <= 512 && !/[\u0000-\u001f]/.test(raw);
+  return usable ? raw : null;
+}
+
+function runtimeConfiguredBase(env) {
+  const parsed = runtimeBase(String(env?.AI_RUNTIME_URL || '').trim());
+  if (parsed) return parsed;
+  return bindingFetch(env) ? PLACEHOLDER_ORIGIN : null;
+}
+
 export function runtimeConfig(env) {
-  const raw = String(env?.AI_RUNTIME_URL || '').trim();
-  let base = null;
-  try {
-    const url = new URL(raw);
-    const loopback = url.protocol === 'http:'
-      && (url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '[::1]');
-    if ((url.protocol === 'https:' || loopback) && !url.username && !url.password && !url.search && !url.hash) {
-      base = url.origin + url.pathname.replace(/\/+$/, '');
-    }
-  } catch { /* unset or malformed */ }
-  const bound = env?.AI_RUNTIME && typeof env.AI_RUNTIME.fetch === 'function';
-  if (!base && bound) base = PLACEHOLDER_ORIGIN;
-  const rawToken = typeof env?.HOSTED_AI_SERVICE_TOKEN === 'string' ? env.HOSTED_AI_SERVICE_TOKEN : '';
-  const usableToken = rawToken.length >= 16 && rawToken.length <= 512 && !/[\u0000-\u001f]/.test(rawToken);
-  return { base, token: usableToken ? rawToken : null, timeoutMs: positiveInt(env?.AI_RUNTIME_TIMEOUT_MS, 20000) };
+  return {
+    base: runtimeConfiguredBase(env),
+    token: runtimeToken(env),
+    timeoutMs: positiveInt(env?.AI_RUNTIME_TIMEOUT_MS, 20000),
+  };
 }
 
 export function runtimeAvailable(env) {

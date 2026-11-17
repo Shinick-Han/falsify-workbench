@@ -21,11 +21,11 @@ def default(role):
     return {'schema': 'falsify.harness.v1', 'id': 'builtin-' + role, 'name': '기본 ' + role.upper(),
             'version': '1', 'role': role, 'instructions': 'Focus on explicit internal contradictions and quote the exact supporting evidence.', 'maxCalls': 8}
 
-def _validate_harness_fields(value, max_calls=32):
+def _validate_harness_fields(value, max_calls=32, max_instructions=8000):
     for k in ['id', 'version']:
         if not isinstance(value[k], str) or not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', value[k]):
             raise ValueError('harness ID/버전은 영문·숫자·._- 1–80자입니다.')
-    for k, n in [('name', 120), ('instructions', 8000)]:
+    for k, n in [('name', 120), ('instructions', max_instructions)]:
         if not isinstance(value[k], str) or not value[k].strip() or len(value[k]) > n or '\0' in value[k]:
             raise ValueError('harness 이름/지침 길이 제한 초과')
     if type(value['maxCalls']) is not int or not 1 <= value['maxCalls'] <= max_calls:
@@ -37,6 +37,16 @@ def _hosted_models():
     value = (os.environ.get('HOSTED_AI_MODELS') or 'claude-opus-5-5,claude-sonnet-5-5,claude-haiku-5-5').split(',')
     models = tuple(item.strip() for item in value if MODEL_PATTERN.fullmatch(item.strip()))
     return models or ('claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5')
+
+def _hosted_prompt_chars():
+    import os
+    raw = os.environ.get('HOSTED_AI_MAX_PROMPT_CHARS')
+    try:
+        value = int(raw, 10) if raw else 32000
+    except (TypeError, ValueError):
+        value = 32000
+    return value if 1000 <= value <= 200000 else 32000
+
 
 def _validate_hosted_adapter(adapter):
     if set(adapter) - {'type', 'model', 'effort'}:
@@ -64,7 +74,8 @@ def validate(value, role):
     if not isinstance(adapter, dict): raise ValueError('adapter 객체 필요')
     kind = adapter.get('type')
     hosted = kind == 'hosted'
-    _validate_harness_fields(value, HOSTED_MAX_CALLS if hosted else 32)
+    _validate_harness_fields(value, HOSTED_MAX_CALLS if hosted else 32,
+                            _hosted_prompt_chars() if hosted else 8000)
     if kind in CLI_AGENTS:
         _validate_cli_adapter(adapter)
     elif hosted:

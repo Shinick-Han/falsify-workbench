@@ -104,26 +104,39 @@ class ReviewCancelled(ValueError):
         self.models = tuple(models)
 
 
-def _validate_review_envelope(data):
-    limits = review_limits.for_data(data)
+def _envelope_base(data, limits):
     if not isinstance(data, dict) or data.get('schema') != VERSION or data.get('consent') is not True:
         raise ValueError('요청 스키마와 명시적 모델 전송 동의가 필요합니다.')
     for field in ['revision', 'requestId']:
         if not isinstance(data.get(field), str) or not 1 <= len(data[field]) <= 160:
             raise ValueError('문서/요청 리비전이 필요합니다.')
     import re
-    if not re.fullmatch(r'[A-Za-z0-9_:-]+', data['requestId']): raise ValueError('요청 ID에 허용되지 않은 문자가 있습니다.')
+    if not re.fullmatch(r'[A-Za-z0-9_:-]+', data['requestId']):
+        raise ValueError('요청 ID에 허용되지 않은 문자가 있습니다.')
     attack_types(data)
-    harness, _ = resolve(data, 'red')
+
+
+def _envelope_budget(data, limits, harness):
     call_limit = min(limits['max_calls'], harness['maxCalls'] if limits['hosted'] else 32)
     if type(data.get('maxCalls')) is not int or not 1 <= data['maxCalls'] <= call_limit:
         raise ValueError(f'호출 예산(1–{call_limit})과 단계(1–3)를 확인하세요.')
+
+
+def _envelope_policy(data, harness):
     if data.get('explanationLanguage', 'ko') not in ('ko', 'en'):
         raise ValueError('근거 언어는 ko 또는 en입니다.')
     if not builtin(harness) and data.get('executionConsent') is not True:
         raise ValueError('사용자 harness 실행/전송 동의가 필요합니다.')
     if 'allowOccurrenceTargeting' in data and type(data['allowOccurrenceTargeting']) is not bool:
         raise ValueError('allowOccurrenceTargeting 값이 올바르지 않습니다.')
+
+
+def _validate_review_envelope(data):
+    limits = review_limits.for_data(data)
+    _envelope_base(data, limits)
+    harness, _ = resolve(data, 'red')
+    _envelope_budget(data, limits, harness)
+    _envelope_policy(data, harness)
     return harness, limits
 
 
@@ -312,42 +325,39 @@ def _build_red_policy(data, harness, structured):
     return policy
 
 
-def _run_hosted_red(data, batches, policy, invoke, harness, harness_hash, limits, usage_totals, provider_state):
-    """Provider-sized candidate batches; every batch is validated and accumulated. A budget that cannot cover all
-    batches yields an explicit partial result with the remaining coverage instead of a silent truncation."""
-    selected = attack_types(data)
-    allow_occ = data.get('allowOccurrenceTargeting') is True
-    budget = max(1, min(int(data['maxCalls']), int(harness['maxCalls']), len(batches)))
-    accepted, rejected, unresolved, statuses = [], [], [], []
-    completed = 0
-    for index, batch in enumerate(batches[:budget]):
-        _, payload, schema = _candidate_request(data, [batch], [], limits)
-        prompt = (policy + f'This is batch {index + 1} of {len(batches)} of the supplied document. Read every fragment '
-                  f'in this batch and propose up to {limits["red_candidates_per_batch"]} candidates '
-                  + ('at exact quotations (set occurrence when repeated)' if allow_occ else 'at exact unique quotations')
-                  + '. Do not omit a supported candidate to save space; other batches are handled separately. '
-                  + json.dumps({'batch': index + 1, **payload}, ensure_ascii=False))
-        response = invoke(prompt, schema)
-        statuses.append(response.get('status'))
-        completed = index + 1
-        if response.get('status') != 'ok':
-            rejected.append({'batch': index + 1, 'code': 'model_' + str(response.get('status'))})
+def _hosted_red_batch(data, batch, index, total, policy, invoke, limits, selected, allow_occ):
+    _, payload, schema = _candidate_request(data, [batch], [], limits)
+    prompt = (policy + f'This is batch {index + 1} of {total} of the supplied document. Read every fragment '
+              f'in this batch and propose up to {limits["red_candidates_per_batch"]} candidates '
+              + ('at exact quotations (set occurrence when repeated)' if allow_occ else 'at exact unique quotations')
+              + '. Do not omit a supported candidate to save space; other batches are handled separately. '
+              + json.dumps({'batch': index + 1, **payload}, ensure_ascii=False))
+    response = invoke(prompt, schema)
+    if response.get('status') != 'ok':
+        return [], [{'batch': index + 1, 'code': 'model_' + str(response.get('status'))}], [], response.get('status')
+    part, bad, ambiguous = partition_candidates(response, data['segments'], allow_occurrence=allow_occ)
+    kept = []
+    for candidate in part:
+        if _hosted_candidate_type_bad(candidate, selected):
+            bad.append({'index': -1, 'code': 'attack_type_mismatch'})
             continue
-        part, bad, ambiguous = partition_candidates(response, data['segments'], allow_occurrence=allow_occ)
-        kept = []
-        for candidate in part:
-            if 'attackTypes' in candidate or 'level' in candidate:
-                try:
-                    if any(t not in selected for t in attack_types(candidate)):
-                        bad.append({'index': -1, 'code': 'attack_type_mismatch'})
-                        continue
-                except ValueError:
-                    bad.append({'index': -1, 'code': 'attack_type_mismatch'})
-                    continue
-            kept.append(candidate)
-        for item in bad + ambiguous:
-            item['batch'] = index + 1
-        accepted.extend(kept); rejected.extend(bad); unresolved.extend(ambiguous)
+        kept.append(candidate)
+    for item in bad + ambiguous:
+        item['batch'] = index + 1
+    return kept, bad, ambiguous, response.get('status')
+
+
+def _hosted_candidate_type_bad(candidate, selected):
+    if 'attackTypes' not in candidate and 'level' not in candidate:
+        return False
+    try:
+        return any(t not in selected for t in attack_types(candidate))
+    except ValueError:
+        return True
+
+
+def _hosted_red_result(data, batches, completed, accepted, rejected, unresolved, statuses,
+                       limits, harness, harness_hash, usage_totals, provider_state):
     seen = set()
     for candidate in accepted:
         if candidate['id'] in seen:
@@ -363,8 +373,8 @@ def _run_hosted_red(data, batches, policy, invoke, harness, harness_hash, limits
             'status': status, 'candidates': accepted,
             'usage': usage_totals, 'provider': provider,
             'harness': harness, 'harnessHash': harness_hash,
-            'coverage': {'complete': complete, 'calls': completed, 'batches': len(batches), 'completedBatches': completed,
-                         'remainingBatches': remaining,
+            'coverage': {'complete': complete, 'calls': completed, 'batches': len(batches),
+                         'completedBatches': completed, 'remainingBatches': remaining,
                          'resultCoverage': {'accepted': len(accepted), 'rejected': len(rejected),
                                             'unresolved': len(unresolved), 'rejectedItems': rejected,
                                             'unresolvedItems': unresolved},
@@ -375,63 +385,98 @@ def _run_hosted_red(data, batches, policy, invoke, harness, harness_hash, limits
             'model': model_label(harness), **record(harness)}
 
 
+def _run_hosted_red(data, batches, policy, invoke, harness, harness_hash, limits, usage_totals, provider_state):
+    """Provider-sized candidate batches; partial coverage is explicit, never a silent truncation."""
+    selected = attack_types(data)
+    allow_occ = data.get('allowOccurrenceTargeting') is True
+    budget = max(1, min(int(data['maxCalls']), int(harness['maxCalls']), len(batches)))
+    accepted, rejected, unresolved, statuses = [], [], [], []
+    completed = 0
+    for index, batch in enumerate(batches[:budget]):
+        kept, bad, ambiguous, response_status = _hosted_red_batch(
+            data, batch, index, len(batches), policy, invoke, limits, selected, allow_occ)
+        accepted.extend(kept); rejected.extend(bad); unresolved.extend(ambiguous)
+        statuses.append(response_status)
+        completed = index + 1
+    return _hosted_red_result(data, batches, completed, accepted, rejected, unresolved, statuses,
+                              limits, harness, harness_hash, usage_totals, provider_state)
+
+
+def _red_engine(data, required, limits, backend_factory, claude_factory, hosted_factory):
+    backend_limits = {'max_prompt_chars': limits['prompt_chars'], 'timeout_seconds': limits['timeout_seconds']}
+    if limits['hosted']:
+        backend_limits.update(max_tokens=limits['provider_max_tokens'], max_images=limits['image_capacity'])
+    return backend(data, 'red', required, backend_factory, claude_factory,
+                   limits=backend_limits, hosted_factory=hosted_factory)
+
+
+def _accumulate(result, usage_totals, provider_state):
+    for key, value in (result.get('usage') or {}).items():
+        if type(value) is int and value >= 0:
+            usage_totals[key] = usage_totals.get(key, 0) + value
+    if isinstance(result.get('request_id'), str):
+        provider_state['request_id'] = result['request_id']
+    if isinstance(result.get('provider_model'), str):
+        provider_state['models'].add(result['provider_model'])
+
+
 def run_review(data, progress, cancelled, backend_factory=CodexBackend, claude_factory=ClaudeBackend, hosted_factory=None):
     chunks, required = validate_request(data)
     limits = review_limits.for_data(data)
     harness, harness_hash = resolve(data, 'red')
-    structured = None
-    if 'paperEvidence' in data:
-        from red_multimodal import resolve_paper_context
-        structured = resolve_paper_context(data)
-    backend_limits = {'max_prompt_chars': limits['prompt_chars'], 'timeout_seconds': limits['timeout_seconds']}
-    if limits['hosted']:
-        backend_limits.update(max_tokens=limits['provider_max_tokens'], max_images=limits['image_capacity'])
-    engine = backend(data, 'red', required, backend_factory, claude_factory,
-                    limits=backend_limits, hosted_factory=hosted_factory)
-    source = {s['id']: s['text'] for s in data['segments']}
-    notes = []
+    structured = _red_structured(data)
+    engine = _red_engine(data, required, limits, backend_factory, claude_factory, hosted_factory)
     policy = _build_red_policy(data, harness, structured)
-    calls = 0
+    calls = {'n': 0}
     usage_totals = {}
     provider_state = {'request_id': None, 'models': set()}
-    def accumulate(result):
-        for key, value in (result.get('usage') or {}).items():
-            if type(value) is int and value >= 0:
-                usage_totals[key] = usage_totals.get(key, 0) + value
-        if isinstance(result.get('request_id'), str):
-            provider_state['request_id'] = result['request_id']
-        if isinstance(result.get('provider_model'), str):
-            provider_state['models'].add(result['provider_model'])
     def invoke(prompt, schema):
-        nonlocal calls
-        if cancelled.is_set(): raise ReviewCancelled('취소됨. 이미 시작된 CLI 호출은 종료/시간 제한까지 실행될 수 있습니다.', usage_totals, provider_state['request_id'], provider_state['models'])
-        calls += 1; progress({'completedCalls': calls - 1, 'requiredCalls': required, 'phase': '검토 중'})
+        if cancelled.is_set():
+            raise ReviewCancelled('취소됨. 이미 시작된 CLI 호출은 종료/시간 제한까지 실행될 수 있습니다.', usage_totals, provider_state['request_id'], provider_state['models'])
+        calls['n'] += 1
+        progress({'completedCalls': calls['n'] - 1, 'requiredCalls': required, 'phase': '검토 중'})
         result = engine.infer(prompt, schema)
-        accumulate(result)
-        if cancelled.is_set(): raise ReviewCancelled('취소됨. 결과는 폐기했습니다.', usage_totals, provider_state['request_id'], provider_state['models'])
-        if result['status'] != 'ok': raise cli_failure(result.get('error_code') or result['status'])
+        _accumulate(result, usage_totals, provider_state)
+        if cancelled.is_set():
+            raise ReviewCancelled('취소됨. 결과는 폐기했습니다.', usage_totals, provider_state['request_id'], provider_state['models'])
+        if result['status'] != 'ok':
+            raise cli_failure(result.get('error_code') or result['status'])
         return result['response']
     if limits['hosted'] and structured is None:
         return _run_hosted_red(data, chunks, policy, invoke, harness, harness_hash, limits,
                                usage_totals, provider_state)
+    return _run_legacy_red(data, chunks, required, limits, harness, harness_hash, structured, policy,
+                           invoke, calls, usage_totals, provider_state)
+
+
+def _red_structured(data):
+    if 'paperEvidence' not in data:
+        return None
+    from red_multimodal import resolve_paper_context
+    return resolve_paper_context(data)
+
+
+def _legacy_notes(data, chunks, invoke, policy, source, limits, notes):
     notesTrimmed = False
-    if len(chunks) > 1:
-        for i, chunk in enumerate(chunks):
-            note = invoke(policy + 'Read every supplied fragment. Summarize claim/conditions and quote at most four relevant exact source excerpts (each <= 600 chars). '
-                + json.dumps({'part': i + 1, 'parts': len(chunks), 'segments': chunk}, ensure_ascii=False), SCAN)
-            if note['status'] != 'ok':
-                return {'schema': VERSION, 'revision': data['revision'], 'sourceHash': data['sourceHash'], 'status': note['status'], 'candidates': [],
-                    'harness': harness, 'harnessHash': harness_hash, 'model': model_label(harness), **record(harness),
-                    'coverage': {'complete': False, 'completedChunks': i + 1, 'chunks': len(chunks), 'calls': calls}}
-            evidence_check(note['evidence'], source, 600)
-            summary = note['summary']
-            if len(summary) > limits['red_max_note']:
-                summary = summary[:limits['red_max_note']].rstrip() + '…'; notesTrimmed = True
-            notes.append({**note, 'summary': summary})
-        notesTrimmed = _trim_notes(notes, notesTrimmed, limits['red_notes_budget'])
-    selected, payload, result_schema = _candidate_request(data, chunks, notes, limits)
+    for i, chunk in enumerate(chunks):
+        note = invoke(policy + 'Read every supplied fragment. Summarize claim/conditions and quote at most four relevant exact source excerpts (each <= 600 chars). '
+            + json.dumps({'part': i + 1, 'parts': len(chunks), 'segments': chunk}, ensure_ascii=False), SCAN)
+        if note['status'] != 'ok':
+            return note['status'], i + 1
+        evidence_check(note['evidence'], source, 600)
+        summary = note['summary']
+        if len(summary) > limits['red_max_note']:
+            summary = summary[:limits['red_max_note']].rstrip() + '…'
+            notesTrimmed = True
+        notes.append({**note, 'summary': summary})
+    notesTrimmed = _trim_notes(notes, notesTrimmed, limits['red_notes_budget'])
+    return None, notesTrimmed
+
+
+def _legacy_candidates(data, chunks, notes, policy, invoke, limits, selected):
     allow_occ = data.get('allowOccurrenceTargeting') is True
     quote_rule = 'at exact quotations (set occurrence when repeated)' if allow_occ else 'at exact unique quotations'
+    _, payload, result_schema = _candidate_request(data, chunks, notes, limits)
     response = invoke(policy + f'All extracted text has been supplied in this call or previous chunk reads. Propose up to {limits["red_max_candidates"]} candidates {quote_rule}. '
         'Each candidate needs a clear causal/logical rationale (<=3000 chars), exact evidence quotes, before/after <=4000 chars. Uncertainty is optional; use null when absent (otherwise <=1500 chars). '
         'A candidate is a hypothesis, not proof. Use only quoted text available here; abstain if unsupported. Return only selected attack types. '
@@ -441,32 +486,71 @@ def run_review(data, progress, cancelled, backend_factory=CodexBackend, claude_f
     else:
         validate_candidates(response, data['segments'], allow_occurrence=allow_occ)
         accepted, rejected, unresolved = response['candidates'], [], []
-    for item in rejected:
-        index = item['index']
-        candidate = (response.get('candidates') or [])[index]
-        if 'attackTypes' in candidate or 'level' in candidate:
-            try:
-                if any(t not in selected for t in attack_types(candidate)):
-                    item['code'] = 'attack_type_mismatch'
-            except ValueError:
-                item['code'] = 'attack_type_mismatch'
-    if not limits['hosted'] and any(any(t not in selected for t in attack_types(c)) for c in response['candidates'] if 'attackTypes' in c or 'level' in c):
+    _mark_attack_mismatches(response, rejected, selected)
+    if not limits['hosted'] and _has_attack_mismatch(response, selected):
         raise ValueError('요청과 다른 공격 유형의 후보')
-    if structured is not None:
-        from red_multimodal import validate_visual_edits
-        validate_visual_edits({**response, 'candidates': accepted}, data['paperEvidence']['paperId'])
+    return response, accepted, rejected, unresolved
+
+
+def _mark_attack_mismatches(response, rejected, selected):
+    for item in rejected:
+        index = item.get('index')
+        candidates = response.get('candidates') or []
+        if not isinstance(index, int) or not 0 <= index < len(candidates):
+            continue
+        candidate = candidates[index]
+        try:
+            if any(t not in selected for t in attack_types(candidate)):
+                item['code'] = 'attack_type_mismatch'
+        except ValueError:
+            item['code'] = 'attack_type_mismatch'
+
+
+def _has_attack_mismatch(response, selected):
+    return any(any(t not in selected for t in attack_types(candidate))
+               for candidate in response['candidates']
+               if 'attackTypes' in candidate or 'level' in candidate)
+
+
+def _legacy_document(data, chunks, limits, harness, harness_hash, structured, response,
+                     accepted, rejected, unresolved, usage_totals, provider_state, calls, notesTrimmed):
     status = response.get('status')
     if status == 'ok' and not accepted and (rejected or unresolved):
         status = 'abstain'
-    extra = {'paperEvidenceCoverage': structured['coverage']} if structured is not None else {}
     provider = {'id': 'anthropic-api' if limits['hosted'] else 'cli', 'models': sorted(provider_state['models']),
                 'requestId': provider_state['request_id']}
+    extra = {'paperEvidenceCoverage': structured['coverage']} if structured is not None else {}
     return {'schema': VERSION, 'revision': data['revision'], 'sourceHash': data['sourceHash'], **response,
         'status': status, 'candidates': accepted, **extra,
         'usage': usage_totals, 'provider': provider,
         'harness': harness, 'harnessHash': harness_hash,
-        'coverage': {'complete': True, 'completedChunks': len(chunks), 'chunks': len(chunks), 'calls': calls,
+        'coverage': {'complete': True, 'completedChunks': len(chunks), 'chunks': len(chunks), 'calls': calls['n'],
             'resultCoverage': {'accepted': len(accepted), 'rejected': len(rejected), 'unresolved': len(unresolved),
                                'rejectedItems': rejected, 'unresolvedItems': unresolved},
             'meaning': '전체 추출 텍스트 전달 완료. 표·수식·이미지 및 과학적 타당성 검증 아님.'
-                 + (' 청크 요약을 예산에 맞게 줄였습니다.' if notesTrimmed else '')}, 'model': model_label(harness), **record(harness)}
+                 + (' 청크 요약을 예산에 맞게 줄였습니다.' if notesTrimmed else '')},
+        'model': model_label(harness), **record(harness)}
+
+
+def _run_legacy_red(data, chunks, required, limits, harness, harness_hash, structured, policy,
+                    invoke, calls, usage_totals, provider_state):
+    source = {s['id']: s['text'] for s in data['segments']}
+    notes = []
+    if len(chunks) > 1:
+        notes_status, notes_info = _legacy_notes(data, chunks, invoke, policy, source, limits, notes)
+    else:
+        notes_status, notes_info = None, False
+    if notes_status is not None:
+        return {'schema': VERSION, 'revision': data['revision'], 'sourceHash': data['sourceHash'],
+                'status': notes_status, 'candidates': [],
+                'harness': harness, 'harnessHash': harness_hash, 'model': model_label(harness), **record(harness),
+                'coverage': {'complete': False, 'completedChunks': notes_info, 'chunks': len(chunks),
+                             'calls': calls['n']}}
+    selected = attack_types(data)
+    response, accepted, rejected, unresolved = _legacy_candidates(
+        data, chunks, notes, policy, invoke, limits, selected)
+    if structured is not None:
+        from red_multimodal import validate_visual_edits
+        validate_visual_edits({**response, 'candidates': accepted}, data['paperEvidence']['paperId'])
+    return _legacy_document(data, chunks, limits, harness, harness_hash, structured, response,
+                            accepted, rejected, unresolved, usage_totals, provider_state, calls, notes_info)

@@ -151,6 +151,56 @@ def _usage(result):
     return usage or None
 
 
+def _count(value):
+    return value if type(value) is int and value >= 0 else None
+
+
+def _clean_progress(value):
+    if not isinstance(value, dict):
+        return None
+    completed = value.get('completedCalls')
+    required = value.get('requiredCalls')
+    phase = value.get('phase')
+    if type(completed) is not int or not 0 <= completed <= 10000:
+        return None
+    if type(required) is not int or not 1 <= required <= 10000:
+        return None
+    if not isinstance(phase, str) or not phase.strip() or len(phase) > 64 \
+            or any(ord(c) < 32 for c in phase):
+        phase = 'running'
+    return {'completedCalls': completed, 'requiredCalls': required, 'phase': phase}
+
+
+def _terminal_progress(result, terminal, *, apply_only=False):
+    """Derive final progress from review coverage; omit unknown counts rather than inventing them."""
+    if apply_only:
+        return {'completedCalls': 0, 'requiredCalls': 0, 'phase': 'completed'}
+    progress = {'phase': terminal}
+    if not isinstance(result, dict):
+        return progress
+    coverage = result.get('coverage')
+    if not isinstance(coverage, dict):
+        return progress
+    actual = _count(coverage.get('calls'))
+    if terminal == 'completed':
+        progress['phase'] = 'partial' if coverage.get('complete') is False else 'completed'
+        text_batches = _count(coverage.get('textBatches'))
+        image_batches = _count(coverage.get('imageBatches'))
+        if text_batches is not None and image_batches is not None:
+            total = text_batches * image_batches
+        else:
+            total = _count(coverage.get('batches'))
+            if total is None:
+                total = _count(coverage.get('chunks'))
+        if actual is not None:
+            progress['completedCalls'] = actual
+        if total is not None:
+            progress['requiredCalls'] = total
+    elif actual is not None:
+        progress['completedCalls'] = actual
+    return progress
+
+
 def build_harness(role, prompt, max_calls, model, effort):
     return {
         'schema': 'falsify.harness.v1',
@@ -303,11 +353,11 @@ def _job_flags(body):
     return role, apply_only, use_evidence
 
 
-def _job_prompt(body, apply_only):
+def _job_prompt(body, apply_only, max_prompt_chars):
     prompt = body.get('prompt')
     if apply_only and prompt is None:
         prompt = ''
-    _require(isinstance(prompt, str) and len(prompt) <= 8000 and '\0' not in prompt)
+    _require(isinstance(prompt, str) and len(prompt) <= max_prompt_chars and '\0' not in prompt)
     if not apply_only:
         _require(bool(prompt.strip()))
     return prompt
@@ -637,107 +687,14 @@ class RuntimeService:
     # ------------------------------------------------------------------ execution
     def _execute(self, request):
         try:
-            try:
-                job = self.store.get_job(request.owner_id, request.job_id)
-            except StoreNotFound:
+            started = self._begin_execution(request)
+            if started is None:
                 return
-            if request.cancelled.is_set() or job['state'] == 'cancelling':
-                self._finish_cancelled(request)
-                return
-            if job['state'] != 'queued':
-                return
-            if not self.store.transition(request.owner_id, request.job_id, ('queued',), 'running'):
-                self._finish_cancelled(request)
-                return
-            self.store.update_progress(request.owner_id, request.job_id, {
-                'completedCalls': 0,
-                'requiredCalls': 0 if request.apply_only else request.max_calls,
-                'phase': 'applying' if request.apply_only else 'running',
-            })
-            upload, raw = self.store.read_upload_bytes(request.owner_id, request.upload_id)
-            if upload['mime'] == 'text/plain':
-                raise ServiceError('unsupported_media_type', 415)
-            if request.cancelled.is_set():
-                self._finish_cancelled(request)
-                return
+            upload, raw = started
             if request.apply_only:
                 self._execute_apply(request, upload, raw)
-                return
-            extraction = extract_pdf(raw)
-            self.store.add_artifact(request.owner_id, request.job_id, 'extracted.json',
-                                    'application/json',
-                                    _json_bytes(_extraction_document(upload, extraction)))
-            if request.cancelled.is_set():
-                self._finish_cancelled(request)
-                return
-            evidence = self._prepare_evidence(request, upload, raw)
-            if request.cancelled.is_set():
-                self._finish_cancelled(request)
-                return
-            evidence_handle_value = None
-            if evidence is not None:
-                counts = evidence.get('counts') if isinstance(evidence.get('counts'), dict) else {}
-                if (int(counts.get('tables', 0) or 0) + int(counts.get('figures', 0) or 0)) > 0:
-                    evidence_handle_value = evidence_handle(evidence)
-            envelope = build_review_envelope(
-                request.role,
-                revision=upload['sha256'],
-                request_id=request.job_id,
-                source_hash=extraction['sourceHash'],
-                segments=extraction['segments'],
-                prompt=request.prompt,
-                model=request.model,
-                effort=request.effort,
-                max_calls=request.max_calls,
-                attack_types=request.attack_types,
-                level=request.level,
-                paper_evidence=evidence_handle_value,
-                file_hash=upload['sha256'] if evidence_handle_value is not None else None,
-            )
-            result = self._run_engine(envelope, request)
-            if request.cancelled.is_set():
-                self._finish_cancelled(request, usage=_usage(result),
-                                       provider_request_id=_provider_request_id(result))
-                return
-            if not isinstance(result, dict) \
-                    or result.get('schema') != (
-                        'falsify.document-red.v1' if request.role == 'red'
-                        else 'falsify.document-blue.v1'):
-                raise ServiceError('invalid_output', 502)
-            usage = _usage(result)
-            provider_request_id = _provider_request_id(result)
-            if request.role == 'red' and request.edits:
-                self.store.add_artifact(request.owner_id, request.job_id, 'review.json',
-                                        'application/json', _json_bytes(result))
-                if request.cancelled.is_set():
-                    self._finish_cancelled(request)
-                    return
-                try:
-                    edited = _apply_pdf_edits(raw, list(request.edits))
-                except EvidenceError as error:
-                    self._fail(request, error.code, result=result, usage=usage,
-                               provider_request_id=provider_request_id)
-                    return
-                except Exception:
-                    self._fail(request, 'edit_invalid', result=result, usage=usage,
-                               provider_request_id=provider_request_id)
-                    return
-                if request.cancelled.is_set():
-                    self._finish_cancelled(request)
-                    return
-                self.store.add_artifact(request.owner_id, request.job_id, 'edited.pdf',
-                                        'application/pdf', edited)
-                ok = self.store.transition(
-                    request.owner_id, request.job_id, ('running',), 'completed',
-                    result=result, usage=usage, provider_request_id=provider_request_id,
-                    completed=True)
             else:
-                ok = self.store.complete_job(
-                    request.owner_id, request.job_id,
-                    result=result, result_bytes=_json_bytes(result), usage=usage,
-                    provider_request_id=provider_request_id)
-            if not ok:
-                self._finish_cancelled(request)
+                self._execute_review(request, upload, raw)
         except PdfInputError as error:
             self._fail(request, error.code)
         except EvidenceError as error:
@@ -755,6 +712,126 @@ class RuntimeService:
         finally:
             with self._lock:
                 self._events.pop(request.job_id, None)
+
+    def _begin_execution(self, request):
+        try:
+            job = self.store.get_job(request.owner_id, request.job_id)
+        except StoreNotFound:
+            return None
+        if request.cancelled.is_set() or job['state'] == 'cancelling':
+            self._finish_cancelled(request)
+            return None
+        if job['state'] != 'queued':
+            return None
+        if not self.store.transition(request.owner_id, request.job_id, ('queued',), 'running'):
+            self._finish_cancelled(request)
+            return None
+        self.store.update_progress(request.owner_id, request.job_id, {
+            'completedCalls': 0,
+            'requiredCalls': 0 if request.apply_only else request.max_calls,
+            'phase': 'applying' if request.apply_only else 'running',
+        })
+        upload, raw = self.store.read_upload_bytes(request.owner_id, request.upload_id)
+        if upload['mime'] == 'text/plain':
+            raise ServiceError('unsupported_media_type', 415)
+        if request.cancelled.is_set():
+            self._finish_cancelled(request)
+            return None
+        return upload, raw
+
+    def _execute_review(self, request, upload, raw):
+        extraction = extract_pdf(raw)
+        self.store.add_artifact(request.owner_id, request.job_id, 'extracted.json',
+                                'application/json',
+                                _json_bytes(_extraction_document(upload, extraction)))
+        if request.cancelled.is_set():
+            self._finish_cancelled(request)
+            return
+        evidence = self._prepare_evidence(request, upload, raw)
+        if request.cancelled.is_set():
+            self._finish_cancelled(request)
+            return
+        evidence_handle_value = self._evidence_handle_value(evidence)
+        envelope = build_review_envelope(
+            request.role,
+            revision=upload['sha256'],
+            request_id=request.job_id,
+            source_hash=extraction['sourceHash'],
+            segments=extraction['segments'],
+            prompt=request.prompt,
+            model=request.model,
+            effort=request.effort,
+            max_calls=request.max_calls,
+            attack_types=request.attack_types,
+            level=request.level,
+            paper_evidence=evidence_handle_value,
+            file_hash=upload['sha256'] if evidence_handle_value is not None else None,
+        )
+        result = self._run_engine(envelope, request)
+        if request.cancelled.is_set():
+            self._finish_cancelled(request, usage=_usage(result),
+                                   provider_request_id=_provider_request_id(result),
+                                   result=result)
+            return
+        if not self._review_result_ok(result, request.role):
+            raise ServiceError('invalid_output', 502)
+        self._complete_review(request, upload, raw, result)
+
+    @staticmethod
+    def _evidence_handle_value(evidence):
+        if evidence is None:
+            return None
+        counts = evidence.get('counts') if isinstance(evidence.get('counts'), dict) else {}
+        if int(counts.get('tables', 0) or 0) + int(counts.get('figures', 0) or 0) > 0:
+            return evidence_handle(evidence)
+        return None
+
+    @staticmethod
+    def _review_result_ok(result, role):
+        expected = ('falsify.document-red.v1' if role == 'red'
+                    else 'falsify.document-blue.v1')
+        return isinstance(result, dict) and result.get('schema') == expected
+
+    def _complete_review(self, request, upload, raw, result):
+        usage = _usage(result)
+        provider_request_id = _provider_request_id(result)
+        final_progress = _terminal_progress(result, 'completed')
+        if request.role != 'red' or not request.edits:
+            ok = self.store.complete_job(
+                request.owner_id, request.job_id,
+                result=result, result_bytes=_json_bytes(result), usage=usage,
+                provider_request_id=provider_request_id, progress=final_progress)
+        else:
+            self.store.add_artifact(request.owner_id, request.job_id, 'review.json',
+                                    'application/json', _json_bytes(result))
+            if request.cancelled.is_set():
+                self._finish_cancelled(request, usage=usage,
+                                       provider_request_id=provider_request_id,
+                                       result=result)
+                return
+            try:
+                edited = _apply_pdf_edits(raw, list(request.edits))
+            except EvidenceError as error:
+                self._fail(request, error.code, result=result, usage=usage,
+                           provider_request_id=provider_request_id)
+                return
+            except Exception:
+                self._fail(request, 'edit_invalid', result=result, usage=usage,
+                           provider_request_id=provider_request_id)
+                return
+            if request.cancelled.is_set():
+                self._finish_cancelled(request, usage=usage,
+                                       provider_request_id=provider_request_id,
+                                       result=result)
+                return
+            self.store.add_artifact(request.owner_id, request.job_id, 'edited.pdf',
+                                    'application/pdf', edited)
+            ok = self.store.transition(
+                request.owner_id, request.job_id, ('running',), 'completed',
+                progress=final_progress, result=result, usage=usage,
+                provider_request_id=provider_request_id, completed=True)
+        if not ok:
+            self._finish_cancelled(request)
 
     def _prepare_evidence(self, request, upload, raw):
         """Prepare and record evidence when requested, or when visual apply needs it."""
@@ -790,6 +867,7 @@ class RuntimeService:
                                 'application/json', _json_bytes(apply_summary))
         ok = self.store.transition(
             request.owner_id, request.job_id, ('running',), 'completed',
+            progress={'completedCalls': 0, 'requiredCalls': 0, 'phase': 'completed'},
             result=apply_summary, usage=None, provider_request_id=None, completed=True)
         if not ok:
             self._finish_cancelled(request)
@@ -809,37 +887,28 @@ class RuntimeService:
         last = {'persisted': False, 'phase': None, 'time': 0.0}
 
         def report(value):
-            if request.cancelled.is_set() or not isinstance(value, dict):
+            clean = _clean_progress(value)
+            if request.cancelled.is_set() or clean is None:
                 return
-            completed = value.get('completedCalls')
-            required = value.get('requiredCalls')
-            phase = value.get('phase')
-            if type(completed) is not int or not 0 <= completed <= 10000:
-                return
-            if type(required) is not int or not 1 <= required <= 10000:
-                return
-            if not isinstance(phase, str) or not phase.strip() or len(phase) > 64 \
-                    or any(ord(c) < 32 for c in phase):
-                phase = 'running'
             now = time.monotonic()
-            if (not last['persisted'] or phase != last['phase']
+            if (not last['persisted'] or clean['phase'] != last['phase']
                     or now - last['time'] >= self.PROGRESS_INTERVAL_SECONDS):
-                progress = {'completedCalls': completed, 'requiredCalls': required,
-                            'phase': phase}
                 try:
-                    self.store.update_progress(request.owner_id, request.job_id, progress)
+                    self.store.update_progress(request.owner_id, request.job_id, clean)
                 except StoreError:
                     return
-                last.update(persisted=True, phase=phase, time=now)
+                last.update(persisted=True, phase=clean['phase'], time=now)
 
         return report
 
     def _fail(self, request, code, *, result=None, usage=None, provider_request_id=None):
         if request.cancelled.is_set():
             self._finish_cancelled(request, usage=usage,
-                                   provider_request_id=provider_request_id)
+                                   provider_request_id=provider_request_id,
+                                   result=result)
             return
-        kwargs = {'failure': _failure(code, provider_request_id), 'completed': True}
+        kwargs = {'failure': _failure(code, provider_request_id), 'completed': True,
+                  'progress': _terminal_progress(result, 'failed')}
         if result is not None:
             kwargs['result'] = result
         if usage is not None:
@@ -854,8 +923,9 @@ class RuntimeService:
         if not ok:
             self._finish_cancelled(request)
 
-    def _finish_cancelled(self, request, *, usage=None, provider_request_id=None):
-        kwargs = {'completed': True}
+    def _finish_cancelled(self, request, *, usage=None, provider_request_id=None, result=None):
+        kwargs = {'completed': True,
+                  'progress': _terminal_progress(result, 'cancelled')}
         if usage is not None:
             normalized = _usage({'usage': usage})
             if normalized is not None:
@@ -884,7 +954,7 @@ class RuntimeService:
         owner = _job_owner(body, owner_id, self._check_owner)
         job_id, idempotency, request_hash = _job_ids(body)
         role, apply_only, use_evidence = _job_flags(body)
-        prompt = _job_prompt(body, apply_only)
+        prompt = _job_prompt(body, apply_only, self.config.max_prompt_chars)
         upload_id = _job_upload_id(body)
         model, effort = _job_model(self.config, body)
         max_calls = _job_budget(body, apply_only, self.config.max_calls)

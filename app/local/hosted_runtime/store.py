@@ -481,8 +481,8 @@ class Store:
 
     def complete_job(self, owner_id, job_id, *, result, result_bytes, usage,
                      provider_request_id=None, artifact_name='review.json',
-                     artifact_mime='application/json'):
-        """Atomically persist the result and its review artifact, then mark completed."""
+                     artifact_mime='application/json', progress=None):
+        """Atomically persist the final progress, result and review artifact, then mark completed."""
         raw = bytes(result_bytes)
         sha = hashlib.sha256(raw).hexdigest()
         self._write_blob(raw)
@@ -494,11 +494,17 @@ class Store:
                 raise StoreNotFound()
             if row['state'] != 'running':
                 return False
+            fields = ["state='completed'", 'result=?', 'usage=?', 'provider_request_id=?',
+                      'completed_at=?', 'updated_at=?']
+            params = [_dump(result), _dump(usage) if usage is not None else None,
+                      provider_request_id, now, now]
+            if progress is not None:
+                fields.insert(1, 'progress=?')
+                params.insert(0, _dump(progress))
+            params.extend([job_id, owner_id])
             conn.execute(
-                "UPDATE jobs SET state='completed', result=?, usage=?, provider_request_id=?, "
-                "completed_at=?, updated_at=? WHERE id=? AND owner_id=? AND state='running'",
-                (_dump(result), _dump(usage) if usage is not None else None,
-                 provider_request_id, now, now, job_id, owner_id))
+                'UPDATE jobs SET ' + ', '.join(fields) +
+                " WHERE id=? AND owner_id=? AND state='running'", params)
             self._insert_artifact(conn, owner_id, job_id, artifact_name, artifact_mime,
                                   sha, len(raw), now)
             return True

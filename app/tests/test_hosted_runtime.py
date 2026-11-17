@@ -19,9 +19,9 @@ if str(LOCAL) not in sys.path:
 
 import pymupdf
 
-from hosted_runtime import (PdfInputError, RuntimeConfig, RuntimeService, ServiceError,
-                            Store, StoreNotFound, build_review_envelope, create_server,
-                            extract_pdf)
+from hosted_runtime import (ConfigError, PdfInputError, RuntimeConfig, RuntimeService,
+                            ServiceError, Store, StoreNotFound, build_review_envelope,
+                            create_server, extract_pdf)
 from hosted_runtime.service import build_harness
 
 OWNER = 'usr:11111111-1111-1111-1111-111111111111'
@@ -100,6 +100,26 @@ class FakeRunner:
         else:
             result['findings'] = []
         return result
+
+
+class RuntimeConfigTests(unittest.TestCase):
+    def test_prompt_cap_default_and_env(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = RuntimeConfig(state_dir=Path(directory), service_token=TOKEN)
+            self.assertEqual(config.max_prompt_chars, 32000)
+            configured = RuntimeConfig.from_env({
+                'HOSTED_AI_STATE_DIR': directory,
+                'HOSTED_AI_SERVICE_TOKEN': TOKEN,
+                'HOSTED_AI_MAX_PROMPT_CHARS': '45000',
+            })
+            self.assertEqual(configured.max_prompt_chars, 45000)
+
+    def test_prompt_cap_range(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for value in (999, 200001):
+                with self.assertRaises(ConfigError):
+                    RuntimeConfig(state_dir=Path(directory), service_token=TOKEN,
+                                  max_prompt_chars=value)
 
 
 class BaseRuntimeTest(unittest.TestCase):
@@ -205,6 +225,17 @@ class DurableJobTests(BaseRuntimeTest):
         cancelled = service.cancel_job(OWNER, done['id'])
         self.assertEqual(cancelled['state'], 'completed')
 
+    def test_long_prompt_uses_runtime_cap_not_legacy_8000(self):
+        runner = FakeRunner()
+        service = self.service(runner)
+        upload = self.upload(service)
+        snapshot, _ = service.submit_job(self.body(
+            upload, job_id='job-long-prompt', key='idem-long-prompt',
+            request_hash='hash-long-prompt', prompt='x' * 9000))
+        done = wait_state(service, OWNER, snapshot['id'], {'completed'})
+        self.assertEqual(done['state'], 'completed')
+        self.assertEqual(len(runner.calls[0]['harness']['instructions']), 9000)
+
     def test_duplicate_submit_runs_runner_once(self):
         runner = FakeRunner()
         service = self.service(runner)
@@ -279,6 +310,7 @@ class DurableJobTests(BaseRuntimeTest):
         self.assertNotIn('result', done)
         self.assertNotIn('review.json', [a['name'] for a in done['artifacts']])
         self.assertEqual(len(runner.calls), 1)
+        self.assertEqual(done['progress']['phase'], 'cancelled')
 
     def test_restart_recovery_marks_interrupted_without_replay(self):
         store = Store(self.state_dir)
@@ -340,6 +372,7 @@ class DurableJobTests(BaseRuntimeTest):
         self.assertEqual(done['failure']['code'], 'invalid_output')
         self.assertNotIn('result', done)
         self.assertFalse(any(a['name'] == 'review.json' for a in done['artifacts']))
+        self.assertEqual(done['progress']['phase'], 'failed')
 
     def test_usage_and_request_id_only_copy_returned_values(self):
         def factory(data):
@@ -679,7 +712,7 @@ class HttpTests(BaseRuntimeTest):
             port, 'POST', '/internal/v1/jobs',
             body=json.dumps(self.body(upload, job_id='job-bad-prompt',
                                       key='idem-bad-0001',
-                                      prompt=marker + 'x' * 8100)).encode(),
+                                      prompt=marker + 'x' * 33000)).encode(),
             content_type='application/json')
         self.assertEqual(status, 400)
         self.assertEqual(json.loads(data)['error']['code'], 'invalid_request')
@@ -720,6 +753,58 @@ class HttpTests(BaseRuntimeTest):
         head, _, body = response.partition(b'\r\n\r\n')
         self.assertIn(b' 200 ', head.split(b'\r\n')[0])
         self.assertEqual(json.loads(body)['state'], 'completed')
+
+    def test_completed_progress_matches_result_coverage(self):
+        def factory(data):
+            return {'schema': data['schema'], 'revision': data['revision'],
+                    'sourceHash': data['sourceHash'], 'status': 'ok',
+                    'candidates': [], 'usage': {'input_tokens': 9, 'output_tokens': 4},
+                    'coverage': {'complete': True, 'calls': 5, 'batches': 5,
+                                 'completedBatches': 5}}
+        service = self.service(FakeRunner(result_factory=factory))
+        _, port = self._serve(service)
+        upload = self.upload(service)
+        status, _, data = self._request(
+            port, 'POST', '/internal/v1/jobs',
+            body=json.dumps(self.body(upload, job_id='job-final-progress',
+                                      key='idem-final-progress',
+                                      request_hash='hash-final-progress')).encode(),
+            content_type='application/json')
+        self.assertEqual(status, 202)
+        job_id = json.loads(data)['id']
+        wait_state(service, OWNER, job_id, {'completed'})
+        status, _, raw = self._request(port, 'GET', '/internal/v1/jobs/' + job_id)
+        self.assertEqual(status, 200)
+        snapshot = json.loads(raw)
+        self.assertEqual(snapshot['state'], 'completed')
+        self.assertEqual(snapshot['progress'], {'completedCalls': 5, 'requiredCalls': 5,
+                                                'phase': 'completed'})
+        self.assertEqual(json.loads(json.dumps(snapshot)), snapshot)
+
+    def test_partial_progress_is_final_and_truthful(self):
+        def factory(data):
+            return {'schema': data['schema'], 'revision': data['revision'],
+                    'sourceHash': data['sourceHash'], 'status': 'ok',
+                    'candidates': [], 'usage': {'input_tokens': 2},
+                    'coverage': {'complete': False, 'calls': 2, 'batches': 5,
+                                 'completedBatches': 2}}
+        service = self.service(FakeRunner(result_factory=factory))
+        _, port = self._serve(service)
+        upload = self.upload(service)
+        status, _, data = self._request(
+            port, 'POST', '/internal/v1/jobs',
+            body=json.dumps(self.body(upload, job_id='job-partial-progress',
+                                      key='idem-partial-progress',
+                                      request_hash='hash-partial-progress')).encode(),
+            content_type='application/json')
+        self.assertEqual(status, 202)
+        job_id = json.loads(data)['id']
+        wait_state(service, OWNER, job_id, {'completed'})
+        status, _, raw = self._request(port, 'GET', '/internal/v1/jobs/' + job_id)
+        snapshot = json.loads(raw)
+        self.assertEqual(snapshot['state'], 'completed')
+        self.assertEqual(snapshot['progress'], {'completedCalls': 2, 'requiredCalls': 5,
+                                                'phase': 'partial'})
 
     def test_oversized_upload_is_rejected_before_read(self):
         service = self.service(FakeRunner(), max_upload_bytes=1024)

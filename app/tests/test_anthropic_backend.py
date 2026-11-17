@@ -167,6 +167,14 @@ class HostedHarnessTests(unittest.TestCase):
         self.assertEqual(harness.model_label(value), 'claude-opus-5-5')
         self.assertTrue(harness.builtin(value))
 
+    def test_hosted_prompt_above_legacy_8000_is_allowed_within_capacity(self):
+        value = self.hosted()
+        value['instructions'] = 'B' * 9000
+        harness.validate(value, 'red')
+        cli = {**harness.default('red'), 'instructions': 'B' * 9000}
+        with self.assertRaises(ValueError):
+            harness.validate(cli, 'red')
+
     def test_hosted_budget_above_cli_limit_but_still_bounded(self):
         harness.validate(self.hosted(max_calls=100), 'red')
         with self.assertRaises(ValueError):

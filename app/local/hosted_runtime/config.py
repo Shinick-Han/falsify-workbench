@@ -16,6 +16,7 @@ DEFAULT_MODELS = ('claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5')
 DEFAULT_MAX_UPLOAD_BYTES = 33554432
 DEFAULT_MAX_CONCURRENCY = 2
 DEFAULT_MAX_CALLS = 12
+DEFAULT_MAX_PROMPT_CHARS = 32000
 DEFAULT_RETENTION_SECONDS = 7 * 24 * 60 * 60
 DEFAULT_BIND = '127.0.0.1'
 DEFAULT_PORT = 8787
@@ -54,6 +55,57 @@ def _env_list(env, name, default):
     return values
 
 
+def _check_token(token):
+    if not isinstance(token, str) or not token:
+        raise ConfigError('HOSTED_AI_SERVICE_TOKEN is required')
+    if len(token) > 4096 or any(ch.isspace() for ch in token):
+        raise ConfigError('HOSTED_AI_SERVICE_TOKEN must be a single token')
+
+
+def _check_models(models, default_model):
+    models = tuple(models)
+    if not models or any(not isinstance(m, str) or not m for m in models):
+        raise ConfigError('HOSTED_AI_MODELS must list non-empty model ids')
+    if len(set(models)) != len(models):
+        raise ConfigError('HOSTED_AI_MODELS must not repeat a model')
+    if default_model not in models:
+        raise ConfigError('HOSTED_AI_DEFAULT_MODEL must be in HOSTED_AI_MODELS')
+    return models
+
+
+def _check_efforts(efforts, default_effort):
+    efforts = tuple(efforts)
+    if not efforts or any(e not in EFFORTS for e in efforts):
+        raise ConfigError('efforts must be a subset of the allowlist')
+    if default_effort not in efforts:
+        raise ConfigError('the default effort must be in the effort allowlist')
+    return efforts
+
+
+def _check_limits(max_upload_bytes, max_concurrency, max_calls, max_prompt_chars,
+                  job_retention_seconds):
+    if isinstance(max_upload_bytes, bool) or not 1 <= int(max_upload_bytes) <= 1 << 30:
+        raise ConfigError('HOSTED_AI_MAX_UPLOAD_BYTES must be 1..1073741824')
+    if isinstance(max_concurrency, bool) or not 1 <= int(max_concurrency) <= 32:
+        raise ConfigError('HOSTED_AI_MAX_CONCURRENCY must be 1..32')
+    if isinstance(max_calls, bool) or not 1 <= int(max_calls) <= 512:
+        raise ConfigError('HOSTED_AI_MAX_CALLS must be 1..512')
+    if isinstance(max_prompt_chars, bool) or not 1000 <= int(max_prompt_chars) <= 200000:
+        raise ConfigError('HOSTED_AI_MAX_PROMPT_CHARS must be 1000..200000')
+    if isinstance(job_retention_seconds, bool) or not 0 <= int(job_retention_seconds) <= 315360000:
+        raise ConfigError('HOSTED_AI_JOB_RETENTION_SECONDS must be 0..315360000')
+    return (int(max_upload_bytes), int(max_concurrency), int(max_calls),
+            int(max_prompt_chars), int(job_retention_seconds))
+
+
+def _check_bind(bind_host, bind_port):
+    if not isinstance(bind_host, str) or not bind_host:
+        raise ConfigError('HOSTED_AI_BIND must be a host address')
+    if isinstance(bind_port, bool) or not 0 <= int(bind_port) <= 65535:
+        raise ConfigError('HOSTED_AI_PORT must be 0..65535')
+    return int(bind_port)
+
+
 @dataclass(frozen=True)
 class RuntimeConfig:
     """Validated runtime settings.  ``service_token`` is excluded from repr."""
@@ -67,6 +119,7 @@ class RuntimeConfig:
     max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES
     max_concurrency: int = DEFAULT_MAX_CONCURRENCY
     max_calls: int = DEFAULT_MAX_CALLS
+    max_prompt_chars: int = DEFAULT_MAX_PROMPT_CHARS
     job_retention_seconds: int = DEFAULT_RETENTION_SECONDS
     bind_host: str = DEFAULT_BIND
     bind_port: int = DEFAULT_PORT
@@ -75,42 +128,22 @@ class RuntimeConfig:
 
     def __post_init__(self):
         state_dir = Path(self.state_dir).expanduser()
-        if not isinstance(self.service_token, str) or not self.service_token:
-            raise ConfigError('HOSTED_AI_SERVICE_TOKEN is required')
-        if len(self.service_token) > 4096 or any(ch.isspace() for ch in self.service_token):
-            raise ConfigError('HOSTED_AI_SERVICE_TOKEN must be a single token')
-        models = tuple(self.models)
-        if not models or any(not isinstance(m, str) or not m for m in models):
-            raise ConfigError('HOSTED_AI_MODELS must list non-empty model ids')
-        if len(set(models)) != len(models):
-            raise ConfigError('HOSTED_AI_MODELS must not repeat a model')
-        if self.default_model not in models:
-            raise ConfigError('HOSTED_AI_DEFAULT_MODEL must be in HOSTED_AI_MODELS')
-        efforts = tuple(self.efforts)
-        if not efforts or any(e not in EFFORTS for e in efforts):
-            raise ConfigError('efforts must be a subset of the allowlist')
-        if self.default_effort not in efforts:
-            raise ConfigError('the default effort must be in the effort allowlist')
-        if isinstance(self.max_upload_bytes, bool) or not 1 <= int(self.max_upload_bytes) <= 1 << 30:
-            raise ConfigError('HOSTED_AI_MAX_UPLOAD_BYTES must be 1..1073741824')
-        if isinstance(self.max_concurrency, bool) or not 1 <= int(self.max_concurrency) <= 32:
-            raise ConfigError('HOSTED_AI_MAX_CONCURRENCY must be 1..32')
-        if isinstance(self.max_calls, bool) or not 1 <= int(self.max_calls) <= 512:
-            raise ConfigError('HOSTED_AI_MAX_CALLS must be 1..512')
-        if isinstance(self.job_retention_seconds, bool) or not 0 <= int(self.job_retention_seconds) <= 315360000:
-            raise ConfigError('HOSTED_AI_JOB_RETENTION_SECONDS must be 0..315360000')
-        if not isinstance(self.bind_host, str) or not self.bind_host:
-            raise ConfigError('HOSTED_AI_BIND must be a host address')
-        if isinstance(self.bind_port, bool) or not 0 <= int(self.bind_port) <= 65535:
-            raise ConfigError('HOSTED_AI_PORT must be 0..65535')
+        _check_token(self.service_token)
+        models = _check_models(self.models, self.default_model)
+        efforts = _check_efforts(self.efforts, self.default_effort)
+        max_upload, max_concurrency, max_calls, max_prompt, retention = _check_limits(
+            self.max_upload_bytes, self.max_concurrency, self.max_calls,
+            self.max_prompt_chars, self.job_retention_seconds)
+        bind_port = _check_bind(self.bind_host, self.bind_port)
         object.__setattr__(self, 'state_dir', state_dir)
         object.__setattr__(self, 'models', models)
         object.__setattr__(self, 'efforts', efforts)
-        object.__setattr__(self, 'max_upload_bytes', int(self.max_upload_bytes))
-        object.__setattr__(self, 'max_concurrency', int(self.max_concurrency))
-        object.__setattr__(self, 'max_calls', int(self.max_calls))
-        object.__setattr__(self, 'job_retention_seconds', int(self.job_retention_seconds))
-        object.__setattr__(self, 'bind_port', int(self.bind_port))
+        object.__setattr__(self, 'max_upload_bytes', max_upload)
+        object.__setattr__(self, 'max_concurrency', max_concurrency)
+        object.__setattr__(self, 'max_calls', max_calls)
+        object.__setattr__(self, 'max_prompt_chars', max_prompt)
+        object.__setattr__(self, 'job_retention_seconds', retention)
+        object.__setattr__(self, 'bind_port', bind_port)
 
     @classmethod
     def from_env(cls, env=None):
@@ -134,6 +167,8 @@ class RuntimeConfig:
             max_concurrency=_env_int(values, 'HOSTED_AI_MAX_CONCURRENCY',
                                      DEFAULT_MAX_CONCURRENCY, 1, 32),
             max_calls=_env_int(values, 'HOSTED_AI_MAX_CALLS', DEFAULT_MAX_CALLS, 1, 512),
+            max_prompt_chars=_env_int(values, 'HOSTED_AI_MAX_PROMPT_CHARS',
+                                      DEFAULT_MAX_PROMPT_CHARS, 1000, 200000),
             job_retention_seconds=_env_int(values, 'HOSTED_AI_JOB_RETENTION_SECONDS',
                                            DEFAULT_RETENTION_SECONDS, 0, 315360000),
             bind_host=values.get('HOSTED_AI_BIND') or DEFAULT_BIND,

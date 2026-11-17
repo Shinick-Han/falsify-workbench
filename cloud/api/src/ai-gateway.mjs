@@ -18,7 +18,7 @@ const IDEMPOTENCY_KEY = /^[A-Za-z0-9._:-]{8,128}$/;
 const MODEL_TOKEN = /^[A-Za-z0-9._:-]{1,64}$/;
 const EFFORT_TOKEN = /^[a-z]{1,16}$/;
 const HASH = /^[a-f0-9]{64}$/;
-const MAX_JOB_BODY_BYTES = 64 * 1024;
+const MAX_JOB_BODY_BYTES = 256 * 1024;
 const MAX_UPLOAD_BOUND = 64 * 1024 * 1024;
 const MAX_TEXT_EDITS = 100;
 // The runtime's visual-edit engine accepts at most 12 coordinated visual operations.
@@ -82,7 +82,7 @@ export function aiSettings(env) {
   return {
     enabled: hostingEnabled(env),
     maxUploadBytes: Math.min(positiveInt(env?.AI_MAX_UPLOAD_BYTES, 32 * 1024 * 1024), MAX_UPLOAD_BOUND),
-    maxPromptChars: Math.min(positiveInt(env?.AI_MAX_PROMPT_CHARS, 8000), 100000),
+    maxPromptChars: Math.min(positiveInt(env?.AI_MAX_PROMPT_CHARS, 32000), 200000),
     maxCallsPerJob,
     defaultCalls: Math.min(positiveInt(env?.AI_DEFAULT_CALLS, 12), maxCallsPerJob),
     uploadsPerOwnerHour: positiveInt(env?.AI_UPLOADS_PER_OWNER_HOUR, 60),
@@ -377,6 +377,40 @@ function storedFlags(row) {
   return { fallbackApplyOnly: flags.applyOnly, fallbackUseEvidence: flags.useEvidence };
 }
 
+function snapshotIdentity(value, { fallbackId, fallbackRole, fallbackApplyOnly, fallbackUseEvidence }) {
+  const flags = snapshotFlags(value, fallbackApplyOnly, fallbackUseEvidence);
+  return {
+    id: typeof value.id === 'string' && UUID.test(value.id) ? value.id : fallbackId,
+    role: value.role === 'blue' ? 'blue' : (value.role === 'red' ? 'red' : fallbackRole),
+    state: value.state,
+    applyOnly: flags.applyOnly,
+    useEvidence: flags.useEvidence,
+  };
+}
+
+function addSnapshotDetails(snapshot, value, includeResult) {
+  const progress = progressView(value.progress);
+  if (progress) snapshot.progress = progress;
+  const model = shortString(value.model, 64);
+  if (model) snapshot.model = model;
+  const effort = shortString(value.effort, 16);
+  if (effort) snapshot.effort = effort;
+  snapshot.provider = 'anthropic';
+  const usage = usageView(value.usage);
+  if (usage) snapshot.usage = usage;
+  const artifacts = artifactList(value.artifacts);
+  if (artifacts) snapshot.artifacts = artifacts;
+  const createdAt = shortString(value.createdAt, 40);
+  if (createdAt) snapshot.createdAt = createdAt;
+  const updatedAt = shortString(value.updatedAt, 40);
+  if (updatedAt) snapshot.updatedAt = updatedAt;
+  if (includeResult && isObject(value.result)) snapshot.result = value.result;
+  const failure = isObject(value.failure) ? failureView(value.failure) : null;
+  if (failure) snapshot.failure = failure;
+  const completedAt = shortString(value.completedAt, 40);
+  if (completedAt) snapshot.completedAt = completedAt;
+}
+
 function publicSnapshot(value, {
   fallbackId,
   fallbackRole,
@@ -385,34 +419,8 @@ function publicSnapshot(value, {
   fallbackUseEvidence = true,
 }) {
   if (!isObject(value) || !STATES.includes(value.state)) aiFail(503, 'ai_unavailable');
-  const flags = snapshotFlags(value, fallbackApplyOnly, fallbackUseEvidence);
-  const snapshot = {
-    id: typeof value.id === 'string' && UUID.test(value.id) ? value.id : fallbackId,
-    role: value.role === 'blue' ? 'blue' : (value.role === 'red' ? 'red' : fallbackRole),
-    state: value.state,
-    applyOnly: flags.applyOnly,
-    useEvidence: flags.useEvidence,
-  };
-  const progress = progressView(value.progress);
-  if (progress) snapshot.progress = progress;
-  const model = shortString(value.model, 64);
-  const effort = shortString(value.effort, 16);
-  if (model) snapshot.model = model;
-  if (effort) snapshot.effort = effort;
-  snapshot.provider = 'anthropic';
-  const usage = usageView(value.usage);
-  if (usage) snapshot.usage = usage;
-  const artifacts = artifactList(value.artifacts);
-  if (artifacts) snapshot.artifacts = artifacts;
-  const createdAt = shortString(value.createdAt, 40);
-  const updatedAt = shortString(value.updatedAt, 40);
-  if (createdAt) snapshot.createdAt = createdAt;
-  if (updatedAt) snapshot.updatedAt = updatedAt;
-  if (includeResult && isObject(value.result)) snapshot.result = value.result;
-  const failure = isObject(value.failure) ? failureView(value.failure) : null;
-  if (failure) snapshot.failure = failure;
-  const completedAt = shortString(value.completedAt, 40);
-  if (completedAt) snapshot.completedAt = completedAt;
+  const snapshot = snapshotIdentity(value, { fallbackId, fallbackRole, fallbackApplyOnly, fallbackUseEvidence });
+  addSnapshotDetails(snapshot, value, includeResult);
   return snapshot;
 }
 
@@ -496,6 +504,20 @@ async function persistSnapshot(db, ownerId, snapshot) {
 
 // The client harness may only restate server-allowlisted values; whatever it sends, the runtime
 // receives the canonical hosted shape without endpoints, paths, credentials or code.
+const HARNESS_KEYS = ['schema', 'id', 'name', 'version', 'role', 'instructions', 'maxCalls', 'adapter'];
+const HARNESS_ADAPTER_KEYS = ['type', 'model', 'effort'];
+
+function keysWithin(value, allowed) {
+  return !Object.keys(value).some(key => !allowed.includes(key));
+}
+
+function validateHarnessAdapter(adapter, settings) {
+  if (!isObject(adapter) || !keysWithin(adapter, HARNESS_ADAPTER_KEYS)) aiFail(400, 'invalid_request');
+  if (adapter.type !== 'hosted') aiFail(400, 'invalid_request');
+  if (adapter.model !== undefined && !settings.models.includes(adapter.model)) aiFail(400, 'invalid_request');
+  if (adapter.effort !== undefined && !settings.efforts.includes(adapter.effort)) aiFail(400, 'invalid_request');
+}
+
 function validateHarness(value, { role, prompt, maxCalls, model, effort, settings }) {
   const canonical = {
     schema: 'falsify.harness.v1',
@@ -508,19 +530,10 @@ function validateHarness(value, { role, prompt, maxCalls, model, effort, setting
     adapter: { type: 'hosted', model, effort },
   };
   if (value === undefined) return canonical;
-  if (!isObject(value)) aiFail(400, 'invalid_request');
-  const allowed = ['schema', 'id', 'name', 'version', 'role', 'instructions', 'maxCalls', 'adapter'];
-  if (Object.keys(value).some(key => !allowed.includes(key))) aiFail(400, 'invalid_request');
+  if (!isObject(value) || !keysWithin(value, HARNESS_KEYS)) aiFail(400, 'invalid_request');
   if (value.schema !== undefined && value.schema !== 'falsify.harness.v1') aiFail(400, 'invalid_request');
   if (value.role !== undefined && value.role !== role) aiFail(400, 'invalid_request');
-  if (value.adapter !== undefined) {
-    if (!isObject(value.adapter) || Object.keys(value.adapter).some(key => !['type', 'model', 'effort'].includes(key))) {
-      aiFail(400, 'invalid_request');
-    }
-    if (value.adapter.type !== 'hosted') aiFail(400, 'invalid_request');
-    if (value.adapter.model !== undefined && !settings.models.includes(value.adapter.model)) aiFail(400, 'invalid_request');
-    if (value.adapter.effort !== undefined && !settings.efforts.includes(value.adapter.effort)) aiFail(400, 'invalid_request');
-  }
+  if (value.adapter !== undefined) validateHarnessAdapter(value.adapter, settings);
   return canonical;
 }
 
@@ -690,190 +703,279 @@ async function reconcileActiveJobs(db, env, ownerId, excludeId, limit) {
   }
 }
 
-async function createJob(ctx) {
-  const { request, env, settings, deps } = ctx;
-  const db = deps.getDb();
-  const body = await readJsonBody(request, MAX_JOB_BODY_BYTES);
-  const keys = Object.keys(body);
-  const allowed = [
-    'role', 'prompt', 'uploadId', 'idempotencyKey', 'model', 'effort', 'budget', 'harness',
-    'applyOnly', 'edits', 'visualEdits', 'useEvidence',
-  ];
-  if (keys.some(key => !allowed.includes(key))) aiFail(400, 'invalid_request');
-  for (const required of ['role', 'prompt', 'uploadId', 'idempotencyKey']) {
+// ---- job submission -----------------------------------------------------------------------
+
+const JOB_KEYS = [
+  'role', 'prompt', 'uploadId', 'idempotencyKey', 'model', 'effort', 'budget', 'harness',
+  'applyOnly', 'edits', 'visualEdits', 'useEvidence',
+];
+const REQUIRED_JOB_KEYS = ['role', 'prompt', 'uploadId', 'idempotencyKey'];
+const BUDGET_KEYS = ['maxCalls'];
+
+function validateJobEnvelope(body) {
+  if (!keysWithin(body, JOB_KEYS)) aiFail(400, 'invalid_request');
+  for (const required of REQUIRED_JOB_KEYS) {
     if (!Object.hasOwn(body, required)) aiFail(400, 'invalid_request');
   }
   if (!ROLES.includes(body.role)) aiFail(400, 'invalid_request');
   if (typeof body.prompt !== 'string') aiFail(400, 'invalid_request');
-  const prompt = body.prompt.normalize('NFC').trim();
-  if (!prompt || [...prompt].length > settings.maxPromptChars) aiFail(400, 'invalid_request');
   if (typeof body.uploadId !== 'string' || !UUID.test(body.uploadId)) aiFail(400, 'invalid_request');
   if (typeof body.idempotencyKey !== 'string' || !IDEMPOTENCY_KEY.test(body.idempotencyKey)) aiFail(400, 'invalid_request');
+}
+
+function normalizePrompt(body, settings) {
+  const prompt = body.prompt.normalize('NFC').trim();
+  if (!prompt || [...prompt].length > settings.maxPromptChars) aiFail(400, 'invalid_request');
+  return prompt;
+}
+
+function selectJobModel(body, settings) {
   const model = body.model === undefined ? settings.defaultModel : body.model;
   const effort = body.effort === undefined ? settings.defaultEffort : body.effort;
   if (typeof model !== 'string' || !settings.models.includes(model)) aiFail(400, 'invalid_request');
   if (typeof effort !== 'string' || !settings.efforts.includes(effort)) aiFail(400, 'invalid_request');
+  return { model, effort };
+}
+
+function readJobFlags(body) {
   if (body.applyOnly !== undefined && typeof body.applyOnly !== 'boolean') aiFail(400, 'invalid_request');
   if (body.useEvidence !== undefined && typeof body.useEvidence !== 'boolean') aiFail(400, 'invalid_request');
-  const applyOnly = body.applyOnly === true;
-  const useEvidence = body.useEvidence !== false;
-  // Selected RED edits are applied by the engine; BLUE never sees the selection, only the bytes.
-  const edits = validateEdits(body.edits, body.role);
-  const visualEdits = validateVisualEdits(body.visualEdits, body.role, applyOnly);
-  if (applyOnly) {
-    if (body.role !== 'red') aiFail(400, 'invalid_request');
-    if (edits.length + visualEdits.length === 0) aiFail(400, 'invalid_request');
-  }
-  let maxCalls = settings.defaultCalls;
+  return { applyOnly: body.applyOnly === true, useEvidence: body.useEvidence !== false };
+}
+
+function readBudget(body) {
+  if (body.budget === undefined) return null;
+  if (!isObject(body.budget) || !keysWithin(body.budget, BUDGET_KEYS)) aiFail(400, 'invalid_request');
+  return body.budget;
+}
+
+function jobMaxCalls(body, settings, applyOnly) {
+  const budget = readBudget(body);
   if (applyOnly) {
     // Apply-only performs no model calls: the budget stays in the job contract as an explicit zero.
-    if (body.budget !== undefined) {
-      if (!isObject(body.budget)) aiFail(400, 'invalid_request');
-      if (Object.keys(body.budget).some(key => key !== 'maxCalls')) aiFail(400, 'invalid_request');
-      if (body.budget.maxCalls !== undefined && body.budget.maxCalls !== 0) aiFail(400, 'invalid_request');
-    }
-    maxCalls = 0;
-  } else if (body.budget !== undefined) {
-    if (!isObject(body.budget)) aiFail(400, 'invalid_request');
-    if (Object.keys(body.budget).some(key => key !== 'maxCalls')) aiFail(400, 'invalid_request');
-    if (body.budget.maxCalls !== undefined) {
-      if (!Number.isSafeInteger(body.budget.maxCalls) || body.budget.maxCalls < 1) aiFail(400, 'invalid_request');
-      maxCalls = Math.min(body.budget.maxCalls, settings.maxCallsPerJob);
-    }
+    if (budget?.maxCalls !== undefined && budget.maxCalls !== 0) aiFail(400, 'invalid_request');
+    return 0;
   }
+  const requested = budget?.maxCalls;
+  if (requested === undefined) return settings.defaultCalls;
+  if (!Number.isSafeInteger(requested) || requested < 1) aiFail(400, 'invalid_request');
+  return Math.min(requested, settings.maxCallsPerJob);
+}
+
+function jobEdits(body, role, applyOnly) {
+  const edits = validateEdits(body.edits, role);
+  const visualEdits = validateVisualEdits(body.visualEdits, role, applyOnly);
+  if (applyOnly) {
+    if (role !== 'red') aiFail(400, 'invalid_request');
+    if (edits.length + visualEdits.length === 0) aiFail(400, 'invalid_request');
+  }
+  return { edits, visualEdits };
+}
+
+function parseJobRequest(body, settings) {
+  validateJobEnvelope(body);
+  const prompt = normalizePrompt(body, settings);
+  const { model, effort } = selectJobModel(body, settings);
+  const { applyOnly, useEvidence } = readJobFlags(body);
+  const maxCalls = jobMaxCalls(body, settings, applyOnly);
+  const { edits, visualEdits } = jobEdits(body, body.role, applyOnly);
   const harness = validateHarness(body.harness, { role: body.role, prompt, maxCalls, model, effort, settings });
-  // The upload must exist and belong to this owner before the runtime is involved.
-  const upload = await db
-    .prepare('SELECT runtime_upload_id FROM ai_uploads WHERE id = ?1 AND owner_id = ?2')
-    .bind(body.uploadId, ctx.ownerId)
-    .first();
-  if (!upload) aiFail(400, 'invalid_request');
-  // Prompt text and edit selections are hashed for idempotency and forwarded, never written to D1.
+  return {
+    role: body.role,
+    prompt,
+    uploadId: body.uploadId,
+    idempotencyKey: body.idempotencyKey,
+    model,
+    effort,
+    applyOnly,
+    useEvidence,
+    maxCalls,
+    edits,
+    visualEdits,
+    harness,
+  };
+}
+
+// A duplicate submit is answered from the runtime's live state (a read, never a paid call); if the
+// runtime is unreachable or no longer knows the job, the stored snapshot is returned instead.
+async function replayJob(db, env, ownerId, row, requestHash) {
+  if (!row || row.request_hash !== requestHash) aiFail(409, 'idempotency_conflict');
+  let snapshot = null;
+  try {
+    const runtime = await getRuntimeJob(env, { ownerId, jobId: row.id });
+    snapshot = publicSnapshot(runtime, {
+      fallbackId: row.id,
+      fallbackRole: row.role,
+      includeResult: true,
+      ...storedFlags(row),
+    });
+    await persistSnapshot(db, ownerId, snapshot);
+  } catch {
+    snapshot = null;
+  }
+  if (!snapshot) {
+    try { snapshot = JSON.parse(row.snapshot); } catch { snapshot = null; }
+  }
+  if (!isObject(snapshot)) aiFail(503, 'ai_unavailable');
+  return json(200, { job: snapshot, replayed: true });
+}
+
+function jobHashParts(job) {
   // Plain jobs keep their previous hash; any changed selection becomes a different request.
-  const hashParts = [body.role, prompt, body.uploadId, model, effort, maxCalls];
-  if (applyOnly) hashParts.push(['applyOnly']);
-  if (!useEvidence) hashParts.push(['noEvidence']);
-  if (edits.length) hashParts.push(['edits', edits]);
-  if (visualEdits.length) hashParts.push(['visualEdits', visualEdits]);
-  const requestHash = await sha256Hex(JSON.stringify(hashParts));
+  const parts = [job.role, job.prompt, job.uploadId, job.model, job.effort, job.maxCalls];
+  if (job.applyOnly) parts.push(['applyOnly']);
+  if (!job.useEvidence) parts.push(['noEvidence']);
+  if (job.edits.length) parts.push(['edits', job.edits]);
+  if (job.visualEdits.length) parts.push(['visualEdits', job.visualEdits]);
+  return parts;
+}
+
+// The unique (owner, idempotency key) insert is the reservation: a duplicate never reaches the
+// runtime, and a distinct key on an active-heavy owner is rolled back before it can count.
+async function reserveJob(db, env, ctx, deps, settings, job) {
+  const requestHash = await sha256Hex(JSON.stringify(jobHashParts(job)));
   const bucket = await bucketKey('ai-job:', ctx.ownerId);
   const slot = await deps.rateLimit(db, bucket, settings.jobsPerOwnerHour);
-  const jobId = await jobIdFor(ctx.ownerId, body.idempotencyKey, requestHash);
+  const reservation = {
+    requestHash,
+    bucket,
+    slot,
+    jobId: await jobIdFor(ctx.ownerId, job.idempotencyKey, requestHash),
+  };
   const at = nowIso();
-  const queued = queuedSnapshot({ id: jobId, role: body.role, model, effort, maxCalls, at, applyOnly, useEvidence });
-  // The unique (owner, idempotency key) insert is the reservation: a duplicate never reaches the
-  // runtime, and a distinct key on an active-heavy owner is rolled back before it can count.
+  const queued = queuedSnapshot({
+    id: reservation.jobId,
+    role: job.role,
+    model: job.model,
+    effort: job.effort,
+    maxCalls: job.maxCalls,
+    at,
+    applyOnly: job.applyOnly,
+    useEvidence: job.useEvidence,
+  });
   const reserved = await db
     .prepare(
       `INSERT INTO ai_jobs (id, owner_id, role, idempotency_key, request_hash, upload_id, model, effort, state, snapshot, created_at, updated_at)
        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'queued', ?9, ?10, ?10)
        ON CONFLICT (owner_id, idempotency_key) DO NOTHING`
     )
-    .bind(jobId, ctx.ownerId, body.role, body.idempotencyKey, requestHash, body.uploadId, model, effort, JSON.stringify(queued), at)
+    .bind(
+      reservation.jobId, ctx.ownerId, job.role, job.idempotencyKey, requestHash,
+      job.uploadId, job.model, job.effort, JSON.stringify(queued), at
+    )
     .run();
-  if (reserved.meta.changes !== 1) {
-    await deps.releaseSlot(db, bucket, slot);
-    const row = await db
-      .prepare('SELECT id, role, request_hash, snapshot FROM ai_jobs WHERE owner_id = ?1 AND idempotency_key = ?2')
-      .bind(ctx.ownerId, body.idempotencyKey)
-      .first();
-    if (row && row.request_hash === requestHash) {
-      // A duplicate submit is answered from the runtime's live state, which is a read: it can never
-      // buy another paid call. If the runtime is unreachable (or no longer knows the job), fall back
-      // to the stored snapshot below.
-      let snapshot = null;
-      try {
-        const runtime = await getRuntimeJob(env, { ownerId: ctx.ownerId, jobId: row.id });
-        snapshot = publicSnapshot(runtime, {
-          fallbackId: row.id,
-          fallbackRole: row.role,
-          includeResult: true,
-          ...storedFlags(row),
-        });
-        await persistSnapshot(db, ctx.ownerId, snapshot);
-      } catch {
-        snapshot = null;
-      }
-      if (!snapshot) {
-        try { snapshot = JSON.parse(row.snapshot); } catch { snapshot = null; }
-      }
-      if (!isObject(snapshot)) aiFail(503, 'ai_unavailable');
-      return json(200, { job: snapshot, replayed: true });
-    }
-    aiFail(409, 'idempotency_conflict');
-  }
-  // The policy gate runs only for a new job: a duplicate replay above creates no spend and is never
-  // blocked. Refresh this owner's active rows first so an unpolled but finished job cannot hide its
-  // recorded usage. Apply-only makes no model calls and skips the gate entirely.
-  if (!applyOnly && settings.ownerTokenBudget > 0) {
-    await reconcileActiveJobs(db, env, ctx.ownerId, jobId, settings.activeJobsPerOwner + 5);
+  if (reserved.meta.changes === 1) return { reservation };
+  await deps.releaseSlot(db, bucket, slot);
+  const row = await db
+    .prepare('SELECT id, role, request_hash, snapshot FROM ai_jobs WHERE owner_id = ?1 AND idempotency_key = ?2')
+    .bind(ctx.ownerId, job.idempotencyKey)
+    .first();
+  return { replay: await replayJob(db, env, ctx.ownerId, row, requestHash) };
+}
+
+async function rollbackReservation(db, deps, ownerId, reservation) {
+  try {
+    await db.prepare('DELETE FROM ai_jobs WHERE id = ?1 AND owner_id = ?2').bind(reservation.jobId, ownerId).run();
+  } catch { /* the row is inert until a runtime snapshot confirms it */ }
+  await deps.releaseSlot(db, reservation.bucket, reservation.slot);
+}
+
+async function activeJobCount(db, ownerId) {
+  const row = await db
+    .prepare("SELECT COUNT(*) AS count FROM ai_jobs WHERE owner_id = ?1 AND state IN ('queued', 'running', 'cancelling')")
+    .bind(ownerId)
+    .first();
+  return Number(row?.count ?? 0);
+}
+
+// The policy gate runs only for a new job: a duplicate replay above creates no spend and is never
+// blocked. Refresh this owner's active rows first so an unpolled but finished job cannot hide its
+// recorded usage. Apply-only makes no model calls and skips the gate entirely.
+async function applyJobPolicy(db, env, ctx, deps, settings, job, reservation) {
+  if (!job.applyOnly && settings.ownerTokenBudget > 0) {
+    await reconcileActiveJobs(db, env, ctx.ownerId, reservation.jobId, settings.activeJobsPerOwner + 5);
   }
   try {
-    await enforceOwnerBudget(db, ctx, settings, { applyOnly });
+    await enforceOwnerBudget(db, ctx, settings, { applyOnly: job.applyOnly });
   } catch (error) {
-    await db.prepare('DELETE FROM ai_jobs WHERE id = ?1 AND owner_id = ?2').bind(jobId, ctx.ownerId).run();
-    await deps.releaseSlot(db, bucket, slot);
+    await rollbackReservation(db, deps, ctx.ownerId, reservation);
     throw error;
   }
-  let active = await db
-    .prepare("SELECT COUNT(*) AS count FROM ai_jobs WHERE owner_id = ?1 AND state IN ('queued', 'running', 'cancelling')")
-    .bind(ctx.ownerId)
-    .first();
-  if ((active?.count ?? 0) > settings.activeJobsPerOwner) {
+  let active = await activeJobCount(db, ctx.ownerId);
+  if (active > settings.activeJobsPerOwner) {
     // A bounded reconcile frees rows the runtime already finished; a 404 marks a lost job
     // interrupted, and other runtime errors leave the row unchanged.
-    await reconcileActiveJobs(db, env, ctx.ownerId, jobId, settings.activeJobsPerOwner + 5);
-    active = await db
-      .prepare("SELECT COUNT(*) AS count FROM ai_jobs WHERE owner_id = ?1 AND state IN ('queued', 'running', 'cancelling')")
-      .bind(ctx.ownerId)
-      .first();
+    await reconcileActiveJobs(db, env, ctx.ownerId, reservation.jobId, settings.activeJobsPerOwner + 5);
+    active = await activeJobCount(db, ctx.ownerId);
   }
-  if ((active?.count ?? 0) > settings.activeJobsPerOwner) {
-    await db.prepare('DELETE FROM ai_jobs WHERE id = ?1 AND owner_id = ?2').bind(jobId, ctx.ownerId).run();
-    await deps.releaseSlot(db, bucket, slot);
+  if (active > settings.activeJobsPerOwner) {
+    await rollbackReservation(db, deps, ctx.ownerId, reservation);
     aiFail(429, 'rate_limited', { 'Retry-After': '60' });
   }
+}
+
+// Defaults that the runtime already assumes are omitted so plain jobs keep the exact previous wire
+// shape; the new keys appear only when the request actually uses them.
+function runtimeJobPayload(job, reservation, upload, ownerId) {
+  const payload = {
+    jobId: reservation.jobId,
+    ownerId,
+    idempotencyKey: job.idempotencyKey,
+    requestHash: reservation.requestHash,
+    role: job.role,
+    prompt: job.prompt,
+    uploadId: upload.runtime_upload_id,
+    model: job.model,
+    effort: job.effort,
+    budget: { maxCalls: job.maxCalls },
+    harness: job.harness,
+  };
+  if (job.applyOnly) payload.applyOnly = true;
+  if (!job.useEvidence) payload.useEvidence = false;
+  if (job.edits.length) payload.edits = job.edits;
+  if (job.visualEdits.length) payload.visualEdits = job.visualEdits;
+  return payload;
+}
+
+async function submitJobToRuntime(db, env, ctx, deps, job, upload, reservation) {
   let result;
   try {
-    // Defaults that the runtime already assumes are omitted so plain jobs keep the exact previous
-    // wire shape; the new keys appear only when the request actually uses them.
-    const runtimePayload = {
-      jobId,
+    result = await createRuntimeJob(env, {
       ownerId: ctx.ownerId,
-      idempotencyKey: body.idempotencyKey,
-      requestHash,
-      role: body.role,
-      prompt,
-      uploadId: upload.runtime_upload_id,
-      model,
-      effort,
-      budget: { maxCalls },
-      harness,
-    };
-    if (applyOnly) runtimePayload.applyOnly = true;
-    if (!useEvidence) runtimePayload.useEvidence = false;
-    if (edits.length) runtimePayload.edits = edits;
-    if (visualEdits.length) runtimePayload.visualEdits = visualEdits;
-    result = await createRuntimeJob(env, { ownerId: ctx.ownerId, payload: runtimePayload });
+      payload: runtimeJobPayload(job, reservation, upload, ctx.ownerId),
+    });
   } catch (error) {
     // No accepted job is reported as accepted. The gateway index row is rolled back so the client
     // can retry; the runtime deduplicates (ownerId, idempotencyKey) and the same hash, so a retry
     // cannot buy a second paid call.
-    try {
-      await db.prepare('DELETE FROM ai_jobs WHERE id = ?1 AND owner_id = ?2').bind(jobId, ctx.ownerId).run();
-    } catch { /* the row is inert until a runtime snapshot confirms it */ }
-    await deps.releaseSlot(db, bucket, slot);
+    await rollbackReservation(db, deps, ctx.ownerId, reservation);
     throw error;
   }
   const snapshot = publicSnapshot(result.snapshot, {
-    fallbackId: jobId,
-    fallbackRole: body.role,
+    fallbackId: reservation.jobId,
+    fallbackRole: job.role,
     includeResult: true,
-    fallbackApplyOnly: applyOnly,
-    fallbackUseEvidence: useEvidence,
+    fallbackApplyOnly: job.applyOnly,
+    fallbackUseEvidence: job.useEvidence,
   });
   await persistSnapshot(db, ctx.ownerId, snapshot);
   return json(result.status === 200 ? 200 : 202, { job: snapshot, replayed: false });
+}
+
+async function createJob(ctx) {
+  const { request, env, settings, deps } = ctx;
+  const db = deps.getDb();
+  const job = parseJobRequest(await readJsonBody(request, MAX_JOB_BODY_BYTES), settings);
+  // The upload must exist and belong to this owner before the runtime is involved.
+  const upload = await db
+    .prepare('SELECT runtime_upload_id FROM ai_uploads WHERE id = ?1 AND owner_id = ?2')
+    .bind(job.uploadId, ctx.ownerId)
+    .first();
+  if (!upload) aiFail(400, 'invalid_request');
+  const reserved = await reserveJob(db, env, ctx, deps, settings, job);
+  if (reserved.replay) return reserved.replay;
+  await applyJobPolicy(db, env, ctx, deps, settings, job, reserved.reservation);
+  return submitJobToRuntime(db, env, ctx, deps, job, upload, reserved.reservation);
 }
 
 async function ownedJob(db, ctx) {

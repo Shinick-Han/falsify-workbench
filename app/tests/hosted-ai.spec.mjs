@@ -217,14 +217,13 @@ test('disabled cloud configuration renders a truthful inert panel with the local
   assert.equal(entry.$('hosted-ai-config').hidden,true);
   assert.equal(entry.$('hosted-ai-login-form').hidden,true);
   assert.match(entry.text('hosted-ai-disabled'),/로컬 실행 연결/);
-  assert.match(entry.text('hosted-ai-disabled'),/사용 설명서/);
 });
 
 test('capabilities that are off or unreachable disable the panel without sending a job',async()=>{
   const off=setup({routes:makeRouter({caps:{enabled:false,provider:'anthropic',execution:'server',models:[],efforts:[],limits:{}}})});
   await off.app.ready;
   assert.equal(off.calls.length,1);
-  assert.match(off.text('hosted-ai-disabled-message'),/웹 실행을 켜지 않았습니다/);
+  assert.match(off.text('hosted-ai-disabled-message'),/켜져 있지 않습니다/);
   assert.equal(off.$('hosted-ai-config').hidden,true);
 
   const unreachable=setup({routes:makeRouter({caps:null})});
@@ -414,7 +413,7 @@ test('polling shows queued, running and completed progress with truthful counts'
   const snapshots=[
     job({state:'queued',progress:{completedCalls:0,requiredCalls:4,phase:'queued'}}),
     job({state:'running',progress:{completedCalls:2,requiredCalls:4,phase:'analyzing'}}),
-    job({state:'completed',progress:{completedCalls:4,requiredCalls:4,phase:'validating'},
+    job({state:'completed',progress:{completedCalls:4,requiredCalls:4,phase:'completed'},
       result:{schema:'falsify.document-red.v1',status:'ok',
         coverage:{complete:true,resultCoverage:{accepted:1,rejected:2,unresolved:1,
           rejectedItems:[{index:0,code:'numeric_drift'},{index:3,code:'condition_omission'}],
@@ -430,7 +429,7 @@ test('polling shows queued, running and completed progress with truthful counts'
   await until(()=>/완료/.test(entry.text('hosted-ai-job-state')),'job completes through polling');
   assert.match(entry.text('hosted-ai-job-state'),/완료 · completed/);
   assert.match(entry.text('hosted-ai-job-progress'),/완료 호출 4 \/ 4/);
-  assert.match(entry.text('hosted-ai-job-progress'),/단계 validating/);
+  assert.match(entry.text('hosted-ai-job-progress'),/단계 completed/);
   assert.match(entry.text('hosted-ai-result-counts'),/항목 4/);
   assert.match(entry.text('hosted-ai-result-counts'),/수용 1/);
   assert.match(entry.text('hosted-ai-result-counts'),/거절 2/);
@@ -833,7 +832,11 @@ test('BLUE handoff uploads the exact edited bytes and sends no RED result, candi
   await until(()=>entry.$('hosted-ai-role').value==='blue','the role switches to BLUE');
   assert.match(entry.text('hosted-ai-file-status'),new RegExp(EDITED_SHA));
   assert.match(entry.text('hosted-ai-file-status'),/RED 수정본 입력/);
-  assert.match(entry.text('hosted-ai-edited-status'),/RED 결과·후보·근거는 BLUE로 보내지 않습니다/);
+  assert.match(entry.text('hosted-ai-edited-status'),/BLUE 입력으로 등록했습니다/);
+  assert.equal(entry.isVisible('hosted-ai-selection'),false,'the RED candidate editor is hidden after handoff');
+  assert.equal(entry.isVisible('hosted-ai-handoff-context'),true);
+  assert.match(entry.text('hosted-ai-handoff-context'),/수정본으로 BLUE 검토 중/);
+  assert.equal(entry.text('hosted-ai-apply-status'),'','no mismatch warning for the expected handoff');
   assert.equal(entry.$('hosted-ai-prompt').value,'','the RED instruction is not carried over');
 
   const bluePrompt='Verify the edited paper independently.';
@@ -856,6 +859,8 @@ test('BLUE handoff uploads the exact edited bytes and sends no RED result, candi
   await until(()=>entry.$('hosted-ai-input-actions').hidden===false,'the original input can be restored');
   entry.$('hosted-ai-restore-original').click();
   await until(()=>entry.$('hosted-ai-role').value==='red','restoring returns to RED');
+  assert.equal(entry.isVisible('hosted-ai-selection'),true,'the RED editor returns with the original input');
+  assert.equal(entry.isVisible('hosted-ai-handoff-context'),false);
   assert.match(entry.text('hosted-ai-file-status'),new RegExp(SHA));
   assert.equal(entry.$('hosted-ai-prompt').value,'');
   assert.match(entry.text('hosted-ai-edited-status'),/원본 입력으로 돌아왔습니다/);
@@ -1171,4 +1176,83 @@ test('apply-only jobs send resolved model/effort and derive a new key when the d
     'a changed default model/effort derives a different apply key');
   assert.equal(JSON.stringify(applyB.edits),JSON.stringify(applyA.edits),
     'only the resolved defaults changed between the two apply requests');
+});
+test('terminal jobs never show stale in-progress counters or phases',async()=>{
+  const entry=setup({routes:makeRouter({
+    jobsPost:()=>({status:202,body:{job:job({id:'job-stale',state:'completed',
+      progress:{completedCalls:0,requiredCalls:1,phase:'검토 중'},usage:null}),replayed:false}})
+  })});
+  await entry.app.ready;
+  await signIn(entry);
+  await selectFile(entry,BYTES);
+  setPrompt(entry,PROMPT);
+  entry.$('hosted-ai-run').click();
+  await until(()=>/완료/.test(entry.text('hosted-ai-job-state')),'job completes');
+  assert.equal(entry.$('hosted-ai-job-progress').textContent,'','stale terminal progress is hidden');
+  assert.equal(entry.text('hosted-ai-progress'),entry.text('hosted-ai-job-state'),
+    'the live region shows only the terminal state');
+  assert.ok(!/완료 호출|단계/.test(entry.text('hosted-ai-progress')));
+});
+
+test('terminal jobs show server-supplied final progress and usage',async()=>{
+  const entry=setup({routes:makeRouter({
+    jobsPost:()=>({status:202,body:{job:job({id:'job-final',state:'completed',
+      progress:{completedCalls:3,requiredCalls:3,phase:'completed'},
+      usage:{inputTokens:5,outputTokens:7,cacheReadInputTokens:0,cacheCreationInputTokens:0}}),replayed:false}})
+  })});
+  await entry.app.ready;
+  await signIn(entry);
+  await selectFile(entry,BYTES);
+  setPrompt(entry,PROMPT);
+  entry.$('hosted-ai-run').click();
+  await until(()=>/완료/.test(entry.text('hosted-ai-job-state')),'job completes');
+  assert.match(entry.text('hosted-ai-job-progress'),/완료 호출 3 \/ 3/);
+  assert.match(entry.text('hosted-ai-job-progress'),/단계 completed/);
+  assert.match(entry.text('hosted-ai-job-usage'),/입력 5/);
+  assert.match(entry.text('hosted-ai-job-usage'),/출력 7/);
+});
+
+test('terminal progress with requiredCalls 0 hides the call counts',async()=>{
+  const entry=setup({routes:makeRouter({
+    jobsPost:()=>({status:202,body:{job:job({id:'job-zero',role:'red',state:'completed',
+      progress:{completedCalls:0,requiredCalls:0,phase:'completed'},
+      model:undefined,effort:undefined,usage:null,result:null,artifacts:[]}),replayed:false}})
+  })});
+  await entry.app.ready;
+  await signIn(entry);
+  await selectFile(entry,BYTES);
+  setPrompt(entry,PROMPT);
+  entry.$('hosted-ai-run').click();
+  await until(()=>/완료/.test(entry.text('hosted-ai-job-state')),'job completes');
+  assert.equal(entry.text('hosted-ai-job-progress'),'단계 completed');
+  assert.ok(!/완료 호출/.test(entry.text('hosted-ai-job-progress')));
+});
+
+test('the prompt limit follows capabilities and allows 9000 characters when the server does',async()=>{
+  const caps={...CAPS,limits:{maxUploadBytes:33554432,maxPromptChars:32000}};
+  const entry=setup({routes:makeRouter({
+    caps,
+    jobsPost:()=>({status:202,body:{job:job({state:'completed'}),replayed:false}})
+  })});
+  await entry.app.ready;
+  await signIn(entry);
+  await selectFile(entry,BYTES);
+  assert.match(entry.text('hosted-ai-prompt-label'),/32000/);
+  assert.match(entry.text('hosted-ai-prompt-count'),/0 \/ 32000/);
+  setPrompt(entry,'x'.repeat(9000));
+  assert.match(entry.text('hosted-ai-prompt-count'),/9000 \/ 32000/);
+  assert.equal(entry.$('hosted-ai-run').disabled,false,'9000 characters is allowed by the server limit');
+  entry.$('hosted-ai-run').click();
+  await until(()=>entry.calls.some(call=>call.path==='/v1/ai/jobs'&&call.method==='POST'),'job submitted');
+  const body=JSON.parse(entry.calls.find(call=>call.path==='/v1/ai/jobs'&&call.method==='POST').body);
+  assert.equal(body.prompt.length,9000);
+});
+
+test('the prompt limit falls back to 32000 when capabilities omit it',async()=>{
+  const caps={...CAPS,limits:{}};
+  const entry=setup({routes:makeRouter({caps})});
+  await entry.app.ready;
+  await signIn(entry);
+  assert.match(entry.text('hosted-ai-prompt-label'),/32000/);
+  assert.match(entry.text('hosted-ai-prompt-count'),/0 \/ 32000/);
 });

@@ -454,6 +454,7 @@ class ApplyTests(EvidenceBase):
         self.assertFalse(done['useEvidence'])
         self.assertEqual(done['progress']['completedCalls'], 0)
         self.assertEqual(done['progress']['requiredCalls'], 0)
+        self.assertEqual(done['progress']['phase'], 'completed')
         self.assertEqual(runner.calls, [])
         names = [a['name'] for a in done['artifacts']]
         self.assertIn('edited.pdf', names)

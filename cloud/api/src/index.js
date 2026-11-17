@@ -718,6 +718,59 @@ async function dispatchApiRequest(request, env, url, matched, config) {
   return methods[request.method]({ request, env, url, id: matched.id, settings: config });
 }
 
+// AI, Confluence and legacy records routes stay distinct; AI paths never fall through to the others.
+function matchRequest(pathname) {
+  const ai = matchAi(pathname);
+  if (ai) return { ai, confluence: null, matched: null };
+  const confluence = matchConfluence(pathname);
+  if (confluence) return { ai: null, confluence, matched: null };
+  return { ai: null, confluence: null, matched: route(pathname) };
+}
+
+function logRouteFor({ ai, confluence, matched }) {
+  return ai?.template ?? confluence?.template ?? matched?.template ?? 'unmatched';
+}
+
+// The OAuth callback is a top-level navigation from Atlassian, not a frontend XHR.
+function originGateOpen(confluence, origin, allowed) {
+  if (confluence?.template === '/v1/confluence/auth/callback') return true;
+  return origin === null || allowed;
+}
+
+function aiDependencies(request, env) {
+  return {
+    getDb: () => database(env),
+    rateLimit,
+    releaseSlot,
+    authenticatePassword: () => authenticate(request, database(env)),
+  };
+}
+
+async function dispatchRequest(request, env, url, matched, config) {
+  if (matched.ai) {
+    return handleAiRequest({
+      request,
+      env,
+      url,
+      match: matched.ai,
+      params: matched.ai.params,
+      fetchImpl: budgetedFetch(aiFetch(env), 15000),
+      deps: aiDependencies(request, env),
+    });
+  }
+  if (matched.confluence) {
+    return handleConfluence({ request, env, url, match: matched.confluence, settings: config });
+  }
+  return dispatchApiRequest(request, env, url, matched.matched, config);
+}
+
+function normalizeError(error, logRoute) {
+  if (error instanceof ApiError) return error;
+  // Only the error class name is logged: messages can carry SQL, tokens or payload fragments.
+  console.error(JSON.stringify({ event: 'unhandled_error', route: logRoute, name: error?.name ?? 'unknown' }));
+  return fail(500, 'internal_error');
+}
+
 export default {
   async fetch(request, env) {
     const started = Date.now();
@@ -725,41 +778,14 @@ export default {
     const origin = request.headers.get('Origin');
     const config = settings(env);
     const allowed = origin !== null && config.origins.has(origin);
-    const ai = matchAi(url.pathname);
-    const confluence = ai ? null : matchConfluence(url.pathname);
-    const matched = ai || confluence ? null : route(url.pathname);
-    const logRoute = ai?.template ?? confluence?.template ?? matched?.template ?? 'unmatched';
+    const matched = matchRequest(url.pathname);
+    const logRoute = logRouteFor(matched);
     let response;
     try {
-      // The OAuth callback is a top-level navigation from Atlassian, not a frontend XHR.
-      if (!(confluence?.template === '/v1/confluence/auth/callback') && origin !== null && !allowed) throw fail(403, 'origin_not_allowed');
-      if (ai) {
-        response = await handleAiRequest({
-          request,
-          env,
-          url,
-          match: ai,
-          params: ai.params,
-          fetchImpl: budgetedFetch(aiFetch(env), 15000),
-          deps: {
-            getDb: () => database(env),
-            rateLimit,
-            releaseSlot,
-            authenticatePassword: () => authenticate(request, database(env)),
-          },
-        });
-      } else if (confluence) {
-        response = await handleConfluence({ request, env, url, match: confluence, settings: config });
-      } else {
-        response = await dispatchApiRequest(request, env, url, matched, config);
-      }
+      if (!originGateOpen(matched.confluence, origin, allowed)) throw fail(403, 'origin_not_allowed');
+      response = await dispatchRequest(request, env, url, matched, config);
     } catch (error) {
-      if (!(error instanceof ApiError)) {
-        // Only the error class name is logged: messages can carry SQL, tokens or payload fragments.
-        console.error(JSON.stringify({ event: 'unhandled_error', route: logRoute, name: error?.name ?? 'unknown' }));
-        error = fail(500, 'internal_error');
-      }
-      response = errorResponse(error);
+      response = errorResponse(normalizeError(error, logRoute));
     }
     // Logs carry the route template, method, status and timing only: no URL, ids, query, body, token or IP.
     console.log(JSON.stringify({ event: 'request', method: request.method, route: logRoute, status: response.status, ms: Date.now() - started }));

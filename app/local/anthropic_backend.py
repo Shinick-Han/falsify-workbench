@@ -124,6 +124,85 @@ def _http_transport(request, timeout_seconds):
         raise ConnectionError('transport_error') from error
 
 
+def _response_parts(response):
+    if not isinstance(response, dict):
+        return None, {}, None
+    headers = {str(k).lower(): str(v) for k, v in (response.get('headers') or {}).items()}
+    return response.get('status'), headers, response.get('body')
+
+
+def _decode_json(body):
+    try:
+        return json.loads(body.decode('utf-8')) if isinstance(body, bytes) else body
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+
+def _apply_http_error(status, headers, body, result):
+    payload = _decode_json(body)
+    payload = payload if isinstance(payload, dict) else {}
+    error = payload.get('error') if isinstance(payload.get('error'), dict) else {}
+    code = _error_code(status, error.get('type'))
+    request_id = payload.get('request_id')
+    result.update(status='timeout' if code == 'timeout' else 'error', error_code=code,
+                  error_request_id=request_id if isinstance(request_id, str) else result['request_id'],
+                  retryable=retryable(code) or status == 429)
+    if status == 429:
+        result['retry_after'] = headers.get('retry-after')
+
+
+def _apply_message_meta(message, result):
+    returned_model = message.get('model')
+    result['provider_model'] = returned_model if isinstance(returned_model, str) else None
+    result['observed_models'] = [returned_model] if result['provider_model'] else []
+    result['stop_reason'] = message.get('stop_reason') if isinstance(message.get('stop_reason'), str) else None
+    usage = message.get('usage')
+    if isinstance(usage, dict):
+        result['usage'] = {k: v for k, v in usage.items()
+                           if type(v) is int and v >= 0 and ('token' in k or k in ('input_tokens', 'output_tokens'))}
+
+
+def _valid_content(content, result):
+    if not isinstance(content, list):
+        result.update(status='error', error_code='invalid_output')
+        return False
+    if any(isinstance(block, dict) and block.get('type') in ('tool_use', 'server_tool_use', 'mcp_tool_use')
+           for block in content):
+        result['observed_tool_calls'] = 1
+        result.update(status='error', error_code='invalid_output')
+        return False
+    if result['stop_reason'] == 'refusal':
+        result.update(status='error', error_code='invalid_request')
+        return False
+    if result['stop_reason'] == 'max_tokens':
+        result.update(status='error', error_code='output_limit')
+        return False
+    return True
+
+
+def _apply_structured_text(text, schema, result):
+    if not text.strip():
+        result.update(status='error', error_code='invalid_output')
+        return
+    try:
+        value = json.loads(text, parse_constant=lambda _: (_ for _ in ()).throw(ValueError('nonfinite')))
+    except ValueError:
+        value = None
+    if type(value) is not dict or not _valid_schema(value, schema):
+        result.update(status='error', error_code='invalid_output')
+        return
+    result.update(status='ok', response=value)
+
+
+def _valid_schema(value, schema):
+    try:
+        from jsonschema import Draft202012Validator
+        Draft202012Validator(schema).validate(value)
+        return True
+    except Exception:
+        return False
+
+
 class AnthropicBackend:
     """Drop-in ``infer``/``infer_visual`` engine backend with a bounded call budget."""
 
@@ -239,80 +318,25 @@ class AnthropicBackend:
         return result
 
     def _interpret(self, response, schema, result):
-        status = response.get('status') if isinstance(response, dict) else None
-        headers = {str(k).lower(): str(v) for k, v in (response.get('headers') or {}).items()} if isinstance(response, dict) else {}
-        body = response.get('body') if isinstance(response, dict) else None
+        status, headers, body = _response_parts(response)
         result['request_id'] = headers.get('request-id')
         if not isinstance(status, int):
             result.update(status='error', error_code='transport_error', retryable=True)
             return
         if status != 200:
-            payload = {}
-            try:
-                payload = json.loads(body.decode('utf-8')) if isinstance(body, bytes) else (body or {})
-            except (ValueError, UnicodeDecodeError):
-                payload = {}
-            error = payload.get('error') if isinstance(payload, dict) else None
-            error_type = error.get('type') if isinstance(error, dict) else None
-            request_id = payload.get('request_id') if isinstance(payload, dict) else None
-            code = _error_code(status, error_type)
-            result.update(status='timeout' if code == 'timeout' else 'error', error_code=code,
-                          error_request_id=request_id if isinstance(request_id, str) else result['request_id'],
-                          retryable=retryable(code) or (status == 429))
-            if status == 429:
-                result['retry_after'] = headers.get('retry-after')
+            _apply_http_error(status, headers, body, result)
             return
-        try:
-            message = json.loads(body.decode('utf-8')) if isinstance(body, bytes) else body
-        except (ValueError, UnicodeDecodeError):
-            result.update(status='error', error_code='invalid_output')
-            return
+        message = _decode_json(body)
         if not isinstance(message, dict):
             result.update(status='error', error_code='invalid_output')
             return
-        returned_model = message.get('model')
-        result['provider_model'] = returned_model if isinstance(returned_model, str) else None
-        result['observed_models'] = [returned_model] if result['provider_model'] else []
-        result['stop_reason'] = message.get('stop_reason') if isinstance(message.get('stop_reason'), str) else None
-        usage = message.get('usage')
-        if isinstance(usage, dict):
-            result['usage'] = {k: v for k, v in usage.items()
-                               if type(v) is int and v >= 0 and ('token' in k or k in ('input_tokens', 'output_tokens'))}
+        _apply_message_meta(message, result)
         content = message.get('content')
-        if not isinstance(content, list):
-            result.update(status='error', error_code='invalid_output')
+        if not _valid_content(content, result):
             return
-        if any(isinstance(b, dict) and b.get('type') in ('tool_use', 'server_tool_use', 'mcp_tool_use') for b in content):
-            result['observed_tool_calls'] = 1
-            result.update(status='error', error_code='invalid_output')
-            return
-        if result['stop_reason'] == 'refusal':
-            result.update(status='error', error_code='invalid_request')
-            return
-        if result['stop_reason'] == 'max_tokens':
-            result.update(status='error', error_code='output_limit')
-            return
-        text = ''.join(b.get('text', '') for b in content if isinstance(b, dict) and b.get('type') == 'text')
-        if not text.strip():
-            result.update(status='error', error_code='invalid_output')
-            return
-        try:
-            value = json.loads(text, parse_constant=lambda _: (_ for _ in ()).throw(ValueError('nonfinite')))
-        except ValueError:
-            result.update(status='error', error_code='invalid_output')
-            return
-        if type(value) is not dict:
-            result.update(status='error', error_code='invalid_output')
-            return
-        try:
-            from jsonschema import Draft202012Validator
-            Draft202012Validator(schema).validate(value)
-        except Exception:
-            result.update(status='error', error_code='invalid_output')
-            return
-        result.update(status='ok', response=value)
-        if result['stop_reason'] is None:
-            result['stop_reason'] = None
+        text = ''.join(block.get('text', '') for block in content
+                       if isinstance(block, dict) and block.get('type') == 'text')
+        _apply_structured_text(text, schema, result)
 
     def infer(self, prompt, schema):
         return self._run(prompt, schema)

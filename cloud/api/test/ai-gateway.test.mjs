@@ -465,7 +465,7 @@ test('hosting off leaves legacy gateways unchanged and exposes enabled:false', a
       execution: 'server',
       models: DEFAULT_MODELS,
       efforts: DEFAULT_EFFORTS,
-      limits: { maxUploadBytes: 4096, maxPromptChars: 8000 },
+      limits: { maxUploadBytes: 4096, maxPromptChars: 32000 },
     });
     assert.equal(JSON.stringify(capabilities.body).includes('key'), false);
     const blocked = await upload(call, created.body.token, pdfBytes('disabled'));
@@ -691,7 +691,7 @@ test('job idempotency, validation, clamping and active-job cap', async () => {
     const invalid = [
       [{ role: 'green' }, 'role'],
       [{ prompt: '   ' }, 'empty prompt'],
-      [{ prompt: 'x'.repeat(9000) }, 'long prompt'],
+      [{ prompt: 'x'.repeat(32001) }, 'long prompt'],
       [{ uploadId: uploadB.body.upload.id }, 'foreign upload'],
       [{ uploadId: '11111111-1111-4111-8111-111111111112' }, 'unknown upload'],
       [{ model: 'gpt-synthetic' }, 'model allowlist'],
@@ -1428,6 +1428,76 @@ test('a runtime 404 for an indexed job becomes terminal interrupted, not a perma
 
     const foreign = await call('GET', `/v1/ai/jobs/${jobId}`, { token: other.body.token });
     assert.equal(foreign.status, 404, 'owner isolation is unchanged');
+  });
+});
+
+test('long prompts and larger job bodies are accepted within the configured cap', async () => {
+  await withApp({
+    AI_HOSTING_ENABLED: 'true',
+    CONFLUENCE_ONLY: 'false',
+    AI_MAX_UPLOAD_BYTES: '4096',
+    AI_ACTIVE_JOBS_PER_OWNER: '6',
+  }, async (mf, call) => {
+    const ada = await register(mf, call, 'longprompt');
+    const up = await upload(call, ada.body.token, pdfBytes('long-prompt'));
+    const uploadId = up.body.upload.id;
+
+    const capabilities = await call('GET', '/v1/ai/capabilities');
+    assert.equal(capabilities.status, 200);
+    assert.equal(capabilities.body.limits.maxPromptChars, 32000, 'the default prompt cap is 32000');
+
+    // The legacy 8000-character limit is not mandatory: a complete long BLUE prompt is accepted.
+    const longPrompt = 'Review this synthetic paper. '.padEnd(9000, 'x');
+    assert.equal(longPrompt.length, 9000);
+    const accepted = await postJob(call, ada.body.token, jobBody(uploadId, {
+      idempotencyKey: 'op-long-0001',
+      prompt: longPrompt,
+    }));
+    assert.equal(accepted.status, 202);
+    assert.equal((await stubJobPayload(mf, accepted.body.job.id)).prompt.length, 9000);
+
+    // Apply-only keeps the same prompt handling and the zero call budget.
+    const applyOnly = await postJob(call, ada.body.token, {
+      ...jobBody(uploadId, { idempotencyKey: 'op-long-apply-0001', prompt: longPrompt, budget: { maxCalls: 0 } }),
+      applyOnly: true,
+      edits: [TEXT_EDIT],
+    });
+    assert.equal(applyOnly.status, 202);
+    assert.equal(applyOnly.body.job.progress.requiredCalls, 0);
+
+    const tooLong = await postJob(call, ada.body.token, jobBody(uploadId, {
+      idempotencyKey: 'op-long-too-0001',
+      prompt: 'x'.repeat(32001),
+    }));
+    assert.equal(tooLong.status, 400);
+    assert.equal(tooLong.body.error.code, 'invalid_request');
+  });
+
+  // A body above the old 64 KiB limit but under 256 KiB is accepted; a body above 256 KiB is 413.
+  await withApp({
+    AI_HOSTING_ENABLED: 'true',
+    CONFLUENCE_ONLY: 'false',
+    AI_MAX_UPLOAD_BYTES: '4096',
+    AI_ACTIVE_JOBS_PER_OWNER: '2',
+    AI_MAX_PROMPT_CHARS: '200000',
+  }, async (mf, call) => {
+    const ada = await register(mf, call, 'bigbody');
+    const up = await upload(call, ada.body.token, pdfBytes('big-body'));
+    const capabilities = await call('GET', '/v1/ai/capabilities');
+    assert.equal(capabilities.body.limits.maxPromptChars, 200000, 'the env override is reflected');
+
+    const large = await postJob(call, ada.body.token, jobBody(up.body.upload.id, {
+      idempotencyKey: 'op-big-0001',
+      prompt: 'y'.repeat(70000),
+    }));
+    assert.equal(large.status, 202, 'a job body above the old 64 KiB limit is accepted');
+
+    const oversized = await postJob(call, ada.body.token, jobBody(up.body.upload.id, {
+      idempotencyKey: 'op-big-0002',
+      prompt: 'z'.repeat(300000),
+    }));
+    assert.equal(oversized.status, 413);
+    assert.equal(oversized.body.error.code, 'payload_too_large', 'the body limit stays an explicit bound');
   });
 });
 

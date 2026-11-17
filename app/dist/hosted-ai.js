@@ -15,7 +15,7 @@
   const TERMINAL_STATES=['cancelled','completed','failed','interrupted'];
   const POLL_DELAYS=[1200,2000,3000,5000,8000,12000];
   const MAX_POLL_FAILURES=6;
-  const MAX_PROMPT_FALLBACK=8000;
+  const MAX_PROMPT_FALLBACK=32000;
   const MAX_UPLOAD_FALLBACK=33554432;
   const TIMEOUTS={auth:20000,upload:60000,job:20000,cancel:20000,artifact:120000};
   /* Apply-only jobs carry no model call. The gateway still requires a prompt, so this fixed, deterministic
@@ -100,78 +100,116 @@
     const page=Number(match[1]);
     return Number.isSafeInteger(page)&&page>=1?page-1:null;
   }
-  function parseRedCandidates(result){
-    const text=[],visual=[];
-    let chartOnly=0,skipped=0;
-    const source=result&&typeof result==='object'?result:null;
-    const pushVisual=edit=>{
-      if(!edit||typeof edit!=='object'){skipped++;return;}
-      const kind=typeof edit.kind==='string'?edit.kind:'';
-      if(kind!=='table-cell'){if(kind==='chart-point') chartOnly++;else skipped++;return;}
-      const itemId=safeToken(edit.itemId,160);
-      const row=Number(edit.row),column=Number(edit.column);
-      const before=typeof edit.before==='string'?edit.before:'';
-      const after=typeof edit.after==='string'?edit.after:'';
-      const rationale=typeof edit.rationale==='string'
-        ?edit.rationale.replace(CONTROL_CHARS,' ').replace(/\s+/g,' ').trim():'';
-      /* The gateway requires a non-empty single-line rationale for every visual edit and rejects no-op or
-         over-long replacements, so the rationale is normalized while exact cell text is never altered. */
-      if(!itemId||!Number.isSafeInteger(row)||row<0||row>100000
-        ||!Number.isSafeInteger(column)||column<0||column>100000
-        ||!before||before.length>4000||after.length>4000||after===before
-        ||CONTROL_CHARS.test(before)||CONTROL_CHARS.test(after)
-        ||!rationale||rationale.length>3000){skipped++;return;}
-      const key='visual:'+itemId+':'+row+':'+column;
-      if(visual.some(entry=>entry.key===key)) return;
-      visual.push({key,kind,itemId,row,column,before,after,rationale:rationale.slice(0,3000)});
+  function normalizedRationale(edit){
+    if(typeof edit.rationale!=='string') return '';
+    return edit.rationale.replace(CONTROL_CHARS,' ').replace(/\s+/g,' ').trim();
+  }
+  function validCount(value,min,max){
+    return Number.isSafeInteger(value)&&value>=min&&value<=max;
+  }
+  function validVisualEdit(itemId,row,column,before,after,rationale){
+    if(!itemId||!validCount(row,0,100000)||!validCount(column,0,100000)) return false;
+    if(!before||before.length>4000||after.length>4000||after===before) return false;
+    if(CONTROL_CHARS.test(before)||CONTROL_CHARS.test(after)) return false;
+    return !!rationale&&rationale.length<=3000;
+  }
+  function parseVisualEdit(edit){
+    if(!edit||typeof edit!=='object') return {status:'skip'};
+    if(edit.kind!=='table-cell') return {status:edit.kind==='chart-point'?'chart':'skip'};
+    const itemId=safeToken(edit.itemId,160);
+    const row=Number(edit.row),column=Number(edit.column);
+    const before=typeof edit.before==='string'?edit.before:'';
+    const after=typeof edit.after==='string'?edit.after:'';
+    const rationale=normalizedRationale(edit);
+    if(!validVisualEdit(itemId,row,column,before,after,rationale)) return {status:'skip'};
+    return {status:'ok',edit:{kind:'table-cell',itemId,row,column,before,after,
+      rationale:rationale.slice(0,3000),key:'visual:'+itemId+':'+row+':'+column}};
+  }
+  function collectVisualEdit(edit,visual,counters){
+    const parsed=parseVisualEdit(edit);
+    if(parsed.status==='chart'){counters.chartOnly++;return;}
+    if(parsed.status!=='ok'){counters.skipped++;return;}
+    if(visual.some(entry=>entry.key===parsed.edit.key)) return;
+    visual.push(parsed.edit);
+  }
+  function candidateOccurrence(value){
+    if(!Number.isSafeInteger(value)) return 0;
+    return validCount(value,0,100000)?value:null;
+  }
+  function candidateAttackTypes(candidate){
+    if(!Array.isArray(candidate.attackTypes)) return [];
+    return candidate.attackTypes
+      .filter(type=>typeof type==='string'&&/^[A-Za-z0-9_-]{1,40}$/.test(type)).slice(0,12);
+  }
+  function candidateTextRange(before,after){
+    if(!before||before.length>4000||after.length>4000||after===before) return false;
+    return !CONTROL_CHARS.test(before)&&!CONTROL_CHARS.test(after);
+  }
+  function parseTextCandidate(candidate,index){
+    if(!candidate||typeof candidate!=='object') return null;
+    const before=typeof candidate.before==='string'?candidate.before:'';
+    const after=typeof candidate.after==='string'?candidate.after:'';
+    const pageIndex=pageIndexFromSegmentId(candidate.segmentId);
+    if(pageIndex===null||!candidateTextRange(before,after)) return null;
+    const occurrence=candidateOccurrence(candidate.occurrence);
+    if(occurrence===null) return null;
+    const id=safeToken(candidate.id)||('candidate-'+index);
+    return {
+      key:'text:'+index+':'+id,id,index,pageIndex,segmentId:String(candidate.segmentId),
+      before,after,occurrence,attackTypes:candidateAttackTypes(candidate),
+      rationale:typeof candidate.rationale==='string'?candidate.rationale.slice(0,2000):''
     };
-    if(source&&Array.isArray(source.visualEdits)) for(const edit of source.visualEdits) pushVisual(edit);
-    const candidates=source&&Array.isArray(source.candidates)?source.candidates:[];
-    for(const [index,candidate] of candidates.entries()){
-      if(candidate&&Array.isArray(candidate.visualEdits)) for(const edit of candidate.visualEdits) pushVisual(edit);
-      if(!candidate||typeof candidate!=='object'){skipped++;continue;}
-      const before=typeof candidate.before==='string'?candidate.before:'';
-      if(!before){skipped++;continue;}
-      const pageIndex=pageIndexFromSegmentId(candidate.segmentId);
-      if(pageIndex===null){skipped++;continue;}
-      const after=typeof candidate.after==='string'?candidate.after:'';
-      if(before.length>4000||after.length>4000||after===before
-        ||CONTROL_CHARS.test(before)||CONTROL_CHARS.test(after)){skipped++;continue;}
-      if(Number.isSafeInteger(candidate.occurrence)
-        &&(candidate.occurrence<0||candidate.occurrence>100000)){skipped++;continue;}
-      const occurrence=Number.isSafeInteger(candidate.occurrence)&&candidate.occurrence>=0?candidate.occurrence:0;
-      const attackTypes=Array.isArray(candidate.attackTypes)
-        ?candidate.attackTypes.filter(type=>typeof type==='string'&&/^[A-Za-z0-9_-]{1,40}$/.test(type)).slice(0,12)
-        :[];
-      const id=safeToken(candidate.id)||('candidate-'+index);
-      text.push({
-        key:'text:'+index+':'+id,id,index,pageIndex,segmentId:String(candidate.segmentId),
-        before,after,occurrence,attackTypes,
-        rationale:typeof candidate.rationale==='string'?candidate.rationale.slice(0,2000):''
-      });
-    }
-    const signature=JSON.stringify({
+  }
+  function candidateSignature(text,visual,counters){
+    return JSON.stringify({
       text:text.map(entry=>[entry.key,entry.pageIndex,entry.occurrence,entry.before,entry.after]),
       visual:visual.map(entry=>[entry.key,entry.before,entry.after]),
-      chartOnly,skipped
+      chartOnly:counters.chartOnly,skipped:counters.skipped
     });
-    return {text,visual,chartOnly,skipped,signature};
+  }
+  function parseRedCandidates(result){
+    const text=[],visual=[],counters={chartOnly:0,skipped:0};
+    const source=result&&typeof result==='object'?result:null;
+    const topVisuals=source&&Array.isArray(source.visualEdits)?source.visualEdits:[];
+    for(const edit of topVisuals) collectVisualEdit(edit,visual,counters);
+    const candidates=source&&Array.isArray(source.candidates)?source.candidates:[];
+    for(const [index,candidate] of candidates.entries()){
+      const nested=candidate&&Array.isArray(candidate.visualEdits)?candidate.visualEdits:[];
+      for(const edit of nested) collectVisualEdit(edit,visual,counters);
+      const normalized=parseTextCandidate(candidate,index);
+      if(normalized) text.push(normalized); else counters.skipped++;
+    }
+    return {text,visual,chartOnly:counters.chartOnly,skipped:counters.skipped,
+      signature:candidateSignature(text,visual,counters)};
   }
 
+  function resolveDomDependencies(options){
+    return {
+      doc:options.document||document,
+      host:options.host||null,
+      storage:options.storage||sessionStorage,
+      now:options.now||(()=>Date.now()),
+      setT:options.setTimeout||((fn,ms)=>setTimeout(fn,ms)),
+      clearT:options.clearTimeout||(id=>clearTimeout(id))
+    };
+  }
+  function resolveApiDependencies(options){
+    return {
+      fetchImpl:options.fetch||((url,init)=>fetch(url,init)),
+      cryptoApi:options.crypto||(typeof crypto!=='undefined'?crypto:null),
+      UrlApi:options.URL||URL,
+      Encoder:options.TextEncoder||TextEncoder,
+      Abort:options.AbortController||(typeof AbortController!=='undefined'?AbortController:null),
+      configFn:options.config||(()=>(typeof globalThis!=='undefined'?globalThis.FalsifyCloudConfig:undefined)),
+      providerFn:options.sessionProvider||(()=>(typeof globalThis!=='undefined'?globalThis.FalsifyHostedSession:undefined))
+    };
+  }
+  function resolveDependencies(options){
+    return Object.assign(resolveDomDependencies(options),resolveApiDependencies(options));
+  }
   function create(options={}){
-    const doc=options.document||document;
-    const host=options.host||null;
-    const fetchImpl=options.fetch||((url,init)=>fetch(url,init));
-    const storage=options.storage||sessionStorage;
-    const cryptoApi=options.crypto||(typeof crypto!=='undefined'?crypto:null);
-    const now=options.now||(()=>Date.now());
-    const setT=options.setTimeout||((fn,ms)=>setTimeout(fn,ms));
-    const clearT=options.clearTimeout||(id=>clearTimeout(id));
-    const UrlApi=options.URL||URL;
-    const Encoder=options.TextEncoder||TextEncoder;
-    const Abort=options.AbortController||(typeof AbortController!=='undefined'?AbortController:null);
-    const configFn=options.config||(()=>(typeof globalThis!=='undefined'?globalThis.FalsifyCloudConfig:undefined));
-    const providerFn=options.sessionProvider||(()=>(typeof globalThis!=='undefined'?globalThis.FalsifyHostedSession:undefined));
+    const deps=resolveDependencies(options);
+    const {doc,host,storage,now,setT,clearT,fetchImpl,cryptoApi,UrlApi,Encoder,Abort,configFn,providerFn}=deps;
 
     const state={
       apiBase:'', gate:'checking', disabledMessage:'', status:'', error:'',
@@ -233,8 +271,7 @@
       const author=s.author||{};
       const name=safeName(author.displayName||author.username)||'사용자';
       const user=safeName(author.username);
-      const expires=s.expiresAt&&Number.isFinite(Date.parse(s.expiresAt))?` · 세션 만료 ${new Date(s.expiresAt).toISOString().slice(0,16).replace('T',' ')} UTC`:'';
-      return `로그인됨: ${name}${user&&user!==name?` (${user})`:''}${expires}`;
+      return `로그인됨: ${name}${user&&user!==name?` (${user})`:''}`;
     }
     function currentToken(){return state.session?state.session.token:'';}
 
@@ -311,19 +348,30 @@
       if(status>=500) return '서버 오류입니다. 자동으로 다시 시도하지 않았습니다.';
       return '요청을 처리하지 못했습니다.';
     }
+    function isTransportError(error){
+      if(!error) return false;
+      return error.kind==='network'||error.kind==='timeout'||error.kind==='config'||error.kind==='protocol';
+    }
+    function loginFailureText(error){
+      if(!error) return '';
+      if(error.status===401) return '아이디 또는 비밀번호가 올바르지 않습니다.';
+      if(error.code==='membership_required') return '이 계정은 팀 멤버로 승인되지 않았습니다. 운영자에게 확인하세요.';
+      if(error.status===410) return '이 서버는 비밀번호 로그인을 받지 않습니다(Confluence 전용 설정일 수 있습니다). 운영자가 웹 실행 로그인을 켜야 합니다.';
+      return '';
+    }
     function describe(error,context){
       if(error&&error.kind==='local'&&error.message) return String(error.message);
-      if(error&&(error.kind==='network'||error.kind==='timeout'||error.kind==='config'||error.kind==='protocol')) return networkText(error)+failureSuffix(error);
-      const base=httpText(error);
-      if(context==='login'&&error&&error.status===401) return '아이디 또는 비밀번호가 올바르지 않습니다.';
-      if(context==='login'&&(error&&error.code)==='membership_required') return '이 계정은 팀 멤버로 승인되지 않았습니다. 운영자에게 확인하세요.';
-      if(context==='login'&&error&&error.status===410) return '이 서버는 비밀번호 로그인을 받지 않습니다(Confluence 전용 설정일 수 있습니다). 운영자가 웹 실행 로그인을 켜야 합니다.';
-      return base+failureSuffix(error);
+      if(isTransportError(error)) return networkText(error)+failureSuffix(error);
+      if(context==='login'){
+        const login=loginFailureText(error);
+        if(login) return login;
+      }
+      return httpText(error)+failureSuffix(error);
     }
 
     function capabilitiesFailure(error){
       const detail=describe(error,'capabilities');
-      return `웹 실행 기능을 확인하지 못했습니다. ${detail} 이 패널은 아무 작업도 보내지 않습니다. 로컬 실행 연결 또는 수동 JSON 교환을 대신 쓰세요.`;
+      return `웹 실행 기능을 확인하지 못했습니다. ${detail} 이 패널은 아무 작업도 보내지 않습니다.`;
     }
     function disable(message){
       state.gate='disabled';
@@ -356,7 +404,7 @@
       state.job=null;state.jobKind='review';state.upload=null;state.file=null;state.fileSha='';state.fileError='';
       state.originalInput=null;state.blueSource=null;
       resetReview();
-      fail('세션이 끝났습니다. 다시 로그인한 뒤 같은 파일·지시로 실행하면 서버의 기존 작업을 다시 불러옵니다(새 유료 호출 없음).');
+      fail('세션이 끝났습니다. 다시 로그인해 주세요.');
       return true;
     }
 
@@ -375,6 +423,29 @@
       };
     }
 
+    function probeAuthText(error){
+      if(!(error&&(error.status===401||error.status===403))) return '';
+      if(state.session&&state.session.source!=='hook'){
+        dropSessionStores();
+        state.session=null;
+        return '세션이 끝났습니다. 다시 로그인해 주세요.';
+      }
+      if(state.session){
+        state.session=null;
+        return '페이지 로그인 세션을 확인하지 못했습니다. 다시 확인하세요.';
+      }
+      return '웹 실행이 설정되어 있습니다. 로그인해 주세요.';
+    }
+    function applyCapabilities(caps){
+      state.capabilities=caps;
+      state.gate='ready';
+      state.model=caps.models.includes(state.model)?state.model:(caps.models[0]||'');
+      state.effort=caps.efforts.includes(state.effort)?state.effort
+        :(caps.efforts.includes('high')?'high':(caps.efforts[0]||''));
+      fillSelect(nodes.model,caps.models,'서버 기본값');
+      fillSelect(nodes.effort,caps.efforts,'서버 기본값');
+      state.status=state.session?'웹 실행 준비됨.':'웹 실행이 설정되어 있습니다. 로그인하면 실행할 수 있습니다.';
+    }
     async function probe(){
       state.capabilities=null;
       state.status='웹 실행 기능을 확인하는 중…';
@@ -384,18 +455,10 @@
       try{
         data=await jsonCall('/v1/ai/capabilities',{token:currentToken(),timeout:TIMEOUTS.auth});
       }catch(error){
-        if(error&&(error.status===401||error.status===403)){
-          if(state.session&&state.session.source!=='hook'){
-            dropSessionStores();
-            state.session=null;
-            state.status='세션이 끝났습니다. 다시 로그인하면 웹 실행을 이어서 쓸 수 있습니다. 진행 중인 작업은 서버에 남아 있습니다.';
-          }else if(state.session){
-            state.session=null;
-            state.status='페이지 로그인 세션이 서버에서 확인되지 않습니다. 로그인 상태를 다시 확인하세요.';
-          }else{
-            state.status='웹 실행이 설정되어 있습니다. 로그인하면 사용할 수 있는 모델과 한도를 확인합니다.';
-          }
+        const authText=probeAuthText(error);
+        if(authText){
           state.gate='ready';
+          state.status=authText;
           render();
           return;
         }
@@ -405,22 +468,16 @@
       }
       const caps=normalizeCapabilities(data);
       if(!caps){
-        disable('서버의 웹 실행 설정(capabilities)을 해석하지 못했습니다. 운영자 배포 설정을 확인해야 합니다. 로컬 실행 연결은 그대로 쓸 수 있습니다.');
+        disable('웹 실행 설정을 확인하지 못했습니다. 운영자 설정을 확인해야 합니다.');
         render();
         return;
       }
       if(caps.enabled!==true){
-        disable('운영자가 서버에서 웹 실행을 켜지 않았습니다(capabilities.enabled=false). 로컬 companion·CLI 실행이나 수동 JSON 교환을 대신 쓰세요.');
+        disable('이 배포에서는 웹 실행이 켜져 있지 않습니다.');
         render();
         return;
       }
-      state.capabilities=caps;
-      state.gate='ready';
-      state.model=caps.models.includes(state.model)?state.model:(caps.models[0]||'');
-      state.effort=caps.efforts.includes(state.effort)?state.effort:(caps.efforts.includes('high')?'high':(caps.efforts[0]||''));
-      fillSelect(nodes.model,caps.models,'서버 기본값');
-      fillSelect(nodes.effort,caps.efforts,'서버 기본값');
-      state.status=state.session?'웹 실행 준비됨.':'웹 실행이 설정되어 있습니다. 로그인하면 실행할 수 있습니다.';
+      applyCapabilities(caps);
       render();
     }
 
@@ -445,21 +502,21 @@
       try{config=configFn();}catch{config=null;}
       const hosted=config&&config.hostedAi&&typeof config.hostedAi==='object'?config.hostedAi:null;
       if(!hosted||hosted.enabled!==true){
-        disable('이 페이지에서는 웹 실행이 켜져 있지 않습니다(운영자 설정 hostedAi.enabled=false). 이 패널은 서버로 아무것도 보내지 않습니다.');
+        disable('이 배포에서는 웹 실행이 켜져 있지 않습니다. 이 패널은 서버로 아무것도 보내지 않습니다.');
         render();
         finish();
         return;
       }
       const base=parseBase(hosted.apiBase,true)||parseBase(config&&config.apiBase,true);
       if(!base){
-        disable('웹 실행 서버 주소(hostedAi.apiBase)가 올바른 https 주소가 아닙니다. 운영자 설정을 확인해야 합니다. 이 패널은 서버로 아무것도 보내지 않습니다.');
+        disable('웹 실행 서버 주소가 올바른 https 주소가 아닙니다. 운영자 설정을 확인해야 합니다. 이 패널은 서버로 아무것도 보내지 않습니다.');
         render();
         finish();
         return;
       }
       state.apiBase=base;
       if(!(cryptoApi&&cryptoApi.subtle&&typeof cryptoApi.subtle.digest==='function')){
-        disable('이 브라우저에서는 웹 실행을 쓸 수 없습니다(보안 컨텍스트의 crypto.subtle 필요). https 페이지에서 열거나 로컬 실행을 쓰세요.');
+        disable('이 브라우저에서는 웹 실행을 사용할 수 없습니다. https 페이지에서 열어 주세요.');
         render();
         finish();
         return;
@@ -504,11 +561,8 @@
           expiresAt:typeof data.expiresAt==='string'?data.expiresAt:''};
         state.session=session;
         state.restored=false;
-        if(writeStore(SESSION_KEY,{apiBase:session.apiBase,token:session.token,author:session.author,expiresAt:session.expiresAt})){
-          state.status='로그인했습니다.';
-        }else{
-          state.status='로그인했습니다. 이 브라우저는 세션 저장을 막아 새로고침하면 다시 로그인해야 합니다.';
-        }
+        writeStore(SESSION_KEY,{apiBase:session.apiBase,token:session.token,author:session.author,expiresAt:session.expiresAt});
+        state.status='로그인했습니다.';
         nodes.username.value='';
         nodes.password.value='';
         state.error='';
@@ -569,45 +623,57 @@
       writeStore(UPLOAD_KEY,{apiBase:state.apiBase,id:upload.id,sha256:upload.sha256,name:upload.name,mime:upload.mime,bytes:upload.bytes,deduplicated:upload.deduplicated===true});
     }
 
+    function selectedFile(){
+      const files=nodes.file&&nodes.file.files?nodes.file.files:[];
+      return files&&files[0]?files[0]:null;
+    }
+    function fileSizeProblem(file,name,limit){
+      if(!(Number(file.size)>0)) return (name||'선택한 파일')+'이 비어 있어 업로드할 수 없습니다.';
+      if(Number(file.size)>limit) return `${name||'선택한 파일'} 파일이 서버 한도 ${sizeLabel(limit)}(${limit} bytes)를 넘어 업로드하지 않았습니다.`;
+      return '';
+    }
+    function bytesSizeProblem(bytes,limit,name){
+      if(bytes.byteLength<=limit) return '';
+      return `${name||'선택한 파일'} 파일이 서버 한도 ${sizeLabel(limit)}(${limit} bytes)를 넘어 업로드하지 않았습니다.`;
+    }
+    function pdfProblem(bytes,name){
+      if(isPdfBytes(bytes)) return '';
+      return `${name||'선택한 파일'}은 PDF가 아닙니다. 다른 형식은 PDF로 변환하세요.`;
+    }
+    function setFileProblem(message){
+      state.file=null;state.fileSha='';state.fileError=message;
+      fail(message);render();
+    }
+    async function adoptFileHash(bytes){
+      state.fileSha=await sha256Hex(bytes);
+      const stored=readUploadStore();
+      state.upload=stored&&stored.sha256===state.fileSha?stored:null;
+      state.status=state.upload?'이미 등록된 파일입니다.':'실행 준비가 되었습니다.';
+      state.error='';
+      render();
+    }
     async function onFile(){
       state.file=null;state.fileSha='';state.fileError='';state.upload=null;state.error='';
       state.blueSource=null;state.editedStatus='';
-      const files=nodes.file&&nodes.file.files?nodes.file.files:[];
-      const file=files&&files[0]?files[0]:null;
+      const file=selectedFile();
       if(!file){render();return;}
-      if(state.gate!=='ready'||!state.capabilities){fail('먼저 로그인하고 서버 한도를 확인하세요.');render();return;}
-      const name=safeName(file.name);
-      const limit=maxUpload();
-      if(!(Number(file.size)>0)){
-        state.fileError=(name||'선택한 파일')+'이 비어 있어 업로드할 수 없습니다.';
-        fail(state.fileError);render();return;
+      if(state.gate!=='ready'||!state.capabilities){
+        fail('먼저 로그인하고 서버 한도를 확인하세요.');render();return;
       }
-      if(Number(file.size)>limit){
-        state.fileError=`${name||'선택한 파일'} 파일이 서버 한도 ${sizeLabel(limit)}(${limit} bytes)를 넘어 업로드하지 않았습니다.`;
-        fail(state.fileError);render();return;
-      }
+      const name=safeName(file.name),limit=maxUpload();
+      const problem=fileSizeProblem(file,name,limit);
+      if(problem){setFileProblem(problem);return;}
       state.file=file;
       state.status='파일 해시를 계산하는 중…';
       render();
       try{
         const bytes=new Uint8Array(await file.arrayBuffer());
         if(state.file!==file) return;
-        if(bytes.byteLength>limit){
-          state.file=null;
-          state.fileError=`${name||'선택한 파일'} 파일이 서버 한도 ${sizeLabel(limit)}(${limit} bytes)를 넘어 업로드하지 않았습니다.`;
-          fail(state.fileError);render();return;
-        }
-        if(!isPdfBytes(bytes)){
-          state.file=null;state.fileSha='';
-          state.fileError=`${name||'선택한 파일'}은 PDF가 아닙니다. 웹 실행은 PDF만 지원합니다. TXT·DOCX 등은 PDF로 변환하거나 「로컬 실행 연결」을 쓰세요.`;
-          fail(state.fileError);render();return;
-        }
-        state.fileSha=await sha256Hex(bytes);
-        const stored=readUploadStore();
-        state.upload=stored&&stored.sha256===state.fileSha?stored:null;
-        state.status=state.upload?'같은 파일이 이미 서버에 등록되어 있어 다시 올리지 않습니다.':'파일을 올릴 준비가 되었습니다. 실행 버튼을 누르면 업로드와 접수를 한 번에 합니다.';
-        state.error='';
-        render();
+        const sizeProblem=bytesSizeProblem(bytes,limit,name);
+        if(sizeProblem){setFileProblem(sizeProblem);return;}
+        const notPdf=pdfProblem(bytes,name);
+        if(notPdf){setFileProblem(notPdf);return;}
+        await adoptFileHash(bytes);
       }catch(error){
         state.fileSha='';
         fail(describe(error,'upload'));
@@ -648,7 +714,7 @@
       }
       if(!isPdfBytes(bytes)){
         throw Object.assign(Error('not pdf'),{kind:'local',
-          message:'웹 실행은 PDF만 지원합니다. TXT·DOCX 등은 PDF로 변환하거나 「로컬 실행 연결」을 쓰세요.'});
+          message:'PDF만 지원합니다. 다른 형식은 PDF로 변환하세요.'});
       }
       /* Verified PDF bytes are always declared as PDF; a browser-reported text/plain type would make the
          runtime reject the job at execution even though the bytes are a PDF. */
@@ -673,29 +739,33 @@
     }
 
     /* ---------- runs / idempotency ---------- */
+    function runDigestKey(value){return typeof value==='string'&&/^[0-9a-f]{64}$/.test(value);}
+    function runKeyText(value){return typeof value==='string'&&value.length>=8&&value.length<=128;}
+    function shortEntryText(value,max){return typeof value==='string'?value.slice(0,max):'';}
+    function normalizeRunEntry(digest,entry){
+      if(!runDigestKey(digest)||!entry||typeof entry!=='object') return null;
+      if(entry.apiBase!==state.apiBase||!runKeyText(entry.key)) return null;
+      return {
+        apiBase:entry.apiBase,key:entry.key,role:entry.role==='blue'?'blue':'red',
+        uploadId:shortEntryText(entry.uploadId,200),sha256:shortEntryText(entry.sha256,128),
+        jobId:shortEntryText(entry.jobId,128),pending:entry.pending===true,
+        kind:entry.kind==='apply'?'apply':'review',
+        reviewJobId:shortEntryText(entry.reviewJobId,128),
+        model:shortEntryText(entry.model,64),effort:shortEntryText(entry.effort,16),
+        updatedAt:shortEntryText(entry.updatedAt,40)
+      };
+    }
     function readRunsDoc(){
       const data=readJsonStore(RUNS_KEY);
       const runs=data&&data.runs&&typeof data.runs==='object'?data.runs:{};
       const clean={};
       for(const [digest,entry] of Object.entries(runs)){
-        if(!/^[0-9a-f]{64}$/.test(digest)||!entry||typeof entry!=='object') continue;
-        if(entry.apiBase!==state.apiBase) continue;
-        if(typeof entry.key!=='string'||entry.key.length<8||entry.key.length>128) continue;
-        clean[digest]={
-          apiBase:entry.apiBase,key:entry.key,role:entry.role==='blue'?'blue':'red',
-          uploadId:typeof entry.uploadId==='string'?entry.uploadId:'',
-          sha256:typeof entry.sha256==='string'?entry.sha256:'',
-          jobId:typeof entry.jobId==='string'?entry.jobId:'',
-          pending:entry.pending===true,
-          kind:entry.kind==='apply'?'apply':'review',
-          reviewJobId:typeof entry.reviewJobId==='string'?entry.reviewJobId:'',
-          model:typeof entry.model==='string'?entry.model.slice(0,64):'',
-          effort:typeof entry.effort==='string'?entry.effort.slice(0,16):'',
-          updatedAt:typeof entry.updatedAt==='string'?entry.updatedAt:''
-        };
+        const normalized=normalizeRunEntry(digest,entry);
+        if(normalized) clean[digest]=normalized;
       }
       return {runs:clean,active:data&&typeof data.active==='string'?data.active:''};
     }
+
     function saveRun(digest,entry){      const doc=readRunsDoc();
       doc.runs[digest]=Object.assign({},entry,{apiBase:state.apiBase,updatedAt:new Date(now()).toISOString()});
       doc.active=digest;
@@ -752,38 +822,91 @@
     }
 
     /* ---------- run / submit ---------- */
-    async function run(){
-      if(state.busy||state.gate!=='ready'||!state.session||!state.capabilities) return;
+    function reviewInputs(){
       const role=nodes.role.value==='blue'?'blue':'red';
       const prompt=String(nodes.prompt.value||'').normalize('NFC').trim();
-      const model=selectedValue(nodes.model)||state.model;
-      const effort=selectedValue(nodes.effort)||state.effort;
-      const useEvidence=state.useEvidence===true;
+      return {
+        role,prompt,
+        model:selectedValue(nodes.model)||state.model,
+        effort:selectedValue(nodes.effort)||state.effort,
+        useEvidence:state.useEvidence===true
+      };
+    }
+    function reviewInputProblem(prompt){
       const max=maxPrompt();
-      if(!prompt){fail('검토 지시를 입력하세요.');return;}
-      if(codePoints(prompt)>max){fail(`검토 지시가 서버 한도 ${max}자를 넘습니다.`);return;}
-      if(!state.file&&!state.upload){fail(state.fileError||'검토할 파일을 먼저 고르세요.');return;}
+      if(!prompt) return '검토 지시를 입력하세요.';
+      if(codePoints(prompt)>max) return `검토 지시가 서버 한도 ${max}자를 넘습니다.`;
+      if(!state.file&&!state.upload) return state.fileError||'검토할 파일을 먼저 고르세요.';
       if(state.job&&!TERMINAL_STATES.includes(state.job.state)){
-        fail('이미 실행 중인 작업이 있습니다. 완료·취소·중단된 뒤에 새 작업을 실행할 수 있습니다.');
+        return '이미 실행 중인 작업이 있습니다. 완료·취소·중단된 뒤에 새 작업을 실행할 수 있습니다.';
+      }
+      return '';
+    }
+    function reviewKeyInput(role,upload,input){
+      return `${role}\n${upload.id}\n${input.prompt}\n${input.model}\n${input.effort}\n`
+        +`${input.useEvidence?'evidence':'no-evidence'}`;
+    }
+    function reviewBody(role,input,upload,key){
+      const body={role,prompt:input.prompt,uploadId:upload.id,idempotencyKey:key,
+        useEvidence:input.useEvidence};
+      if(input.model) body.model=input.model;
+      if(input.effort) body.effort=input.effort;
+      return body;
+    }
+    function saveReviewRun(digest,input,upload,jobId,pending){
+      saveRun(digest,{
+        key:'fssjob-'+digest.slice(0,40),role:input.role,uploadId:upload.id,
+        sha256:upload.sha256,jobId:jobId||'',pending:pending===true,kind:'review',
+        model:input.model,effort:input.effort
+      });
+    }
+    async function submitReviewJob(body){
+      const data=await jsonCall('/v1/ai/jobs',{
+        method:'POST',token:currentToken(),headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(body),timeout:TIMEOUTS.job
+      });
+      const job=data.job&&typeof data.job==='object'?data.job:null;
+      if(!job||typeof job.id!=='string'||!job.id) throw Object.assign(Error('bad job'),{kind:'protocol'});
+      return {job,replayed:data.replayed===true};
+    }
+    async function pendingReviewDigest(digest,input,upload){
+      if(digest) return digest;
+      const known=upload||state.upload;
+      return known?await digestOf(reviewKeyInput(input.role,known,input)):'';
+    }
+    async function handleReviewFailure(error,digest,input,upload){
+      if(sessionEnded(error)) return;
+      if(error&&error.kind==='local'&&error.message){fail(error.message);return;}
+      if(error&&(error.kind==='network'||error.kind==='timeout')){
+        try{
+          const nextDigest=await pendingReviewDigest(digest,input,upload);
+          const known=upload||state.upload;
+          if(nextDigest&&known) saveReviewRun(nextDigest,input,known,'',true);
+        }catch{}
+        fail('제출 응답을 확인하지 못했습니다. 자동으로 다시 보내지 않았습니다. 같은 입력으로 다시 실행하면 기존 요청 키를 재사용합니다.');
         return;
       }
+      fail(describe(error,'submit'));
+    }
+    async function run(){
+      if(state.busy||state.gate!=='ready'||!state.session||!state.capabilities) return;
+      const input=reviewInputs();
+      const problem=reviewInputProblem(input.prompt);
+      if(problem){fail(problem);return;}
       state.busy='upload';state.error='';state.downloadStatus='';state.editedStatus='';
       setStatus('파일을 서버에 등록하는 중…');
       let upload=null,digest='';
       try{
         upload=await ensureUpload();
-        /* The key must match the gateway's request hash: role, upload, instruction, model, effort and the
-           structured-evidence switch. Changing any of them is a different request, not an idempotent replay. */
-        digest=await digestOf(`${role}\n${upload.id}\n${prompt}\n${model}\n${effort}\n${useEvidence?'evidence':'no-evidence'}`);
+        digest=await digestOf(reviewKeyInput(input.role,upload,input));
         state.activeDigest=digest;
         const key='fssjob-'+digest.slice(0,40);
         state.jobKind='review';
-        if(role==='red') state.reviewUpload=upload;
-        const doc=readRunsDoc();
-        const existing=doc.runs[digest];
+        if(input.role==='red') state.reviewUpload=upload;
+        const existing=readRunsDoc().runs[digest];
         if(existing&&existing.jobId&&!existing.pending){
           activateRun(digest);
-          state.status='같은 파일·역할·지시·모델·강도·근거 설정으로 이미 접수한 작업을 다시 불러옵니다. 새 유료 호출은 없습니다.';
+          state.status='이미 접수한 작업을 다시 불러옵니다. 새 호출은 없습니다.';
           render();
           state.busy='';
           await refreshJob(existing.jobId);
@@ -791,42 +914,16 @@
         }
         state.busy='submit';
         setStatus('작업을 접수하는 중…');
-        const body={role,prompt,uploadId:upload.id,idempotencyKey:key};
-        if(model) body.model=model;
-        if(effort) body.effort=effort;
-        body.useEvidence=useEvidence;
-        const data=await jsonCall('/v1/ai/jobs',{
-          method:'POST',token:currentToken(),headers:{'Content-Type':'application/json'},
-          body:JSON.stringify(body),timeout:TIMEOUTS.job
-        });
-        const job=data.job&&typeof data.job==='object'?data.job:null;
-        if(!job||typeof job.id!=='string'||!job.id) throw Object.assign(Error('bad job'),{kind:'protocol'});
-        saveRun(digest,{key,role,uploadId:upload.id,sha256:upload.sha256,jobId:job.id,pending:false,kind:'review',model,effort});
+        const body=reviewBody(input.role,input,upload,key);
+        const {job,replayed}=await submitReviewJob(body);
+        saveReviewRun(digest,input,upload,job.id,false);
         state.busy='';
-        if(role==='red') resetCandidates();
-        applyJob(job,{replayed:data.replayed===true});
+        if(input.role==='red') resetCandidates();
+        applyJob(job,{replayed});
       }catch(error){
-        if(sessionEnded(error)) return;
-        if(error&&error.kind==='local'&&error.message){
-          fail(error.message);
-        }else if(error&&(error.kind==='network'||error.kind==='timeout')){
-          try{
-            if(!digest){
-              const knownUpload=upload||state.upload;
-              if(knownUpload) digest=await digestOf(`${role}\n${knownUpload.id}\n${prompt}\n${model}\n${effort}\n${useEvidence?'evidence':'no-evidence'}`);
-            }
-            if(digest&&(upload||state.upload)){
-              const knownUpload=upload||state.upload;
-              saveRun(digest,{key:'fssjob-'+digest.slice(0,40),role,uploadId:knownUpload.id,sha256:knownUpload.sha256,jobId:'',pending:true,kind:'review',model,effort});
-            }
-          }catch{}
-          fail('제출 응답을 확인하지 못했습니다. 접수되었는지 알 수 없어 자동으로 다시 보내지 않았습니다. 같은 파일·역할·지시·모델·강도·근거 설정으로 다시 실행하면 같은 요청 키를 재사용하므로 서버가 기존 작업을 돌려주고, 새 유료 호출은 생기지 않습니다.');
-        }else{
-          fail(describe(error,'submit'));
-        }
+        await handleReviewFailure(error,digest,input,upload);
       }finally{
-        state.busy='';
-        render();
+        state.busy='';render();
       }
     }
 
@@ -872,86 +969,133 @@
       if(!Object.keys(state.selection).length) return '적용할 후보를 선택하세요.';
       return '';
     }
+    function resolvedChoice(node,stateValue){
+      return selectedValue(node)||stateValue;
+    }
+    function applyKeyInput(reviewUpload,model,effort,edits,visualEdits){
+      return 'apply\nred\n'+reviewUpload.id+'\n'+APPLY_PROMPT+'\n'+model+'\n'+effort
+        +'\n'+JSON.stringify({edits,visualEdits});
+    }
+    function applyBody(reviewUpload,key,model,effort,edits,visualEdits){
+      const body={
+        role:'red',prompt:APPLY_PROMPT,uploadId:reviewUpload.id,idempotencyKey:key,
+        applyOnly:true,edits,visualEdits,
+        useEvidence:visualEdits.length>0
+      };
+      if(model) body.model=model;
+      if(effort) body.effort=effort;
+      return body;
+    }
+    function serializedBodySize(body){
+      const serialized=JSON.stringify(body);
+      const bytes=Encoder?new Encoder().encode(serialized).byteLength:serialized.length;
+      if(bytes>MAX_JOB_BODY_BYTES){
+        throw Object.assign(Error('job body too large'),{kind:'local',
+          message:'선택한 변경이 한 요청 크기 한도(약 60KB)를 넘습니다. 일부 후보만 선택해 다시 적용하세요.'});
+      }
+      return serialized;
+    }
+    function applySelectionProblem(edits,visualEdits){
+      if(!edits.length&&!visualEdits.length) return '적용할 후보를 선택하세요.';
+      if(edits.length>MAX_EDITS||visualEdits.length>MAX_VISUAL_EDITS){
+        return '선택한 변경이 서버 한도를 넘습니다. 일부만 선택하세요.';
+      }
+      return '';
+    }
+    function saveApplyRun(digest,review,reviewUpload,model,effort,jobId,pending){
+      saveRun(digest,{
+        key:'fssjob-'+digest.slice(0,40),role:'red',uploadId:reviewUpload.id,
+        sha256:reviewUpload.sha256,jobId:jobId||'',pending:pending===true,kind:'apply',
+        reviewJobId:review.id,model,effort
+      });
+    }
+    async function submitApplyJob(serialized){
+      const data=await jsonCall('/v1/ai/jobs',{method:'POST',token:currentToken(),
+        headers:{'Content-Type':'application/json'},body:serialized,timeout:TIMEOUTS.job});
+      const job=data.job&&typeof data.job==='object'?data.job:null;
+      if(!job||typeof job.id!=='string'||!job.id) throw Object.assign(Error('bad job'),{kind:'protocol'});
+      return {job,replayed:data.replayed===true};
+    }
+    async function handleApplyFailure(error,digest,review,reviewUpload,model,effort){
+      if(sessionEnded(error)) return;
+      const network=error&&(error.kind==='network'||error.kind==='timeout');
+      if(network){
+        try{ if(digest) saveApplyRun(digest,review,reviewUpload,model,effort,'',true); }catch{}
+        fail('적용 제출 응답을 확인하지 못했습니다. 자동으로 다시 보내지 않았습니다. 같은 후보 선택으로 다시 적용하면 기존 요청 키를 재사용합니다.');
+        return;
+      }
+      fail(describe(error,'apply'));
+    }
     async function applySelection(){
       if(state.busy||state.gate!=='ready'||!state.session||!state.capabilities) return;
       const blocker=applyBlocker();
       if(blocker){fail(blocker);return;}
-      const selected=selectedEntries();
-      const {edits,visualEdits}=buildApplyEdits(selected);
-      if(!edits.length&&!visualEdits.length){fail('적용할 후보를 선택하세요.');return;}
-      if(edits.length>MAX_EDITS||visualEdits.length>MAX_VISUAL_EDITS){fail('선택한 변경이 서버 한도를 넘습니다. 일부만 선택하세요.');return;}
-      const review=state.reviewJob;
-      const reviewUpload=state.reviewUpload;
-      /* Send the currently resolved allowed choices explicitly. The gateway hashes model/effort into the
-         request hash, so a later server default change must not reinterpret an existing client key. */
-      const model=selectedValue(nodes.model)||state.model;
-      const effort=selectedValue(nodes.effort)||state.effort;
+      const {edits,visualEdits}=buildApplyEdits(selectedEntries());
+      const selectionProblem=applySelectionProblem(edits,visualEdits);
+      if(selectionProblem){fail(selectionProblem);return;}
+      const review=state.reviewJob,reviewUpload=state.reviewUpload;
+      const model=resolvedChoice(nodes.model,state.model);
+      const effort=resolvedChoice(nodes.effort,state.effort);
       state.busy='apply';state.error='';state.editedStatus='';
       setStatus('선택한 변경을 PDF에 적용하는 작업을 접수하는 중…');
       render();
       let digest='';
       try{
-        digest=await digestOf('apply\nred\n'+reviewUpload.id+'\n'+APPLY_PROMPT+'\n'+model+'\n'+effort
-          +'\n'+JSON.stringify({edits,visualEdits}));
+        digest=await digestOf(applyKeyInput(reviewUpload,model,effort,edits,visualEdits));
         state.activeDigest=digest;
         const key='fssjob-'+digest.slice(0,40);
-        const doc=readRunsDoc();
-        const existing=doc.runs[digest];
+        const existing=readRunsDoc().runs[digest];
         if(existing&&existing.jobId&&!existing.pending){
           activateRun(digest);
           state.jobKind='apply';
-          state.status='같은 선택으로 이미 접수한 적용 작업을 다시 불러옵니다. 새 작업은 만들지 않습니다.';
+          state.status='이미 접수한 적용 작업을 다시 불러옵니다.';
           render();
           state.busy='';
           await refreshJob(existing.jobId);
           return;
         }
-        const body={
-          role:'red',prompt:APPLY_PROMPT,uploadId:reviewUpload.id,idempotencyKey:key,
-          applyOnly:true,edits,visualEdits,
-          /* Structured evidence is only needed to place table-cell edits; text spans are applied directly. */
-          useEvidence:visualEdits.length>0
-        };
-        if(model) body.model=model;
-        if(effort) body.effort=effort;
-        const serialized=JSON.stringify(body);
-        const bytes=Encoder?new Encoder().encode(serialized).byteLength:serialized.length;
-        if(bytes>MAX_JOB_BODY_BYTES){
-          throw Object.assign(Error('job body too large'),{kind:'local',
-            message:'선택한 변경이 한 요청 크기 한도(약 60KB)를 넘습니다. 일부 후보만 선택해 다시 적용하세요.'});
-        }
-        const data=await jsonCall('/v1/ai/jobs',{
-          method:'POST',token:currentToken(),headers:{'Content-Type':'application/json'},
-          body:serialized,timeout:TIMEOUTS.job
-        });
-        const job=data.job&&typeof data.job==='object'?data.job:null;
-        if(!job||typeof job.id!=='string'||!job.id) throw Object.assign(Error('bad job'),{kind:'protocol'});
-        saveRun(digest,{key,role:'red',uploadId:reviewUpload.id,sha256:reviewUpload.sha256,
-          jobId:job.id,pending:false,kind:'apply',reviewJobId:review.id,model,effort});
+        const body=applyBody(reviewUpload,key,model,effort,edits,visualEdits);
+        const serialized=serializedBodySize(body);
+        const {job,replayed}=await submitApplyJob(serialized);
+        saveApplyRun(digest,review,reviewUpload,model,effort,job.id,false);
         state.jobKind='apply';
         state.busy='';
-        applyJob(job,{replayed:data.replayed===true});
+        applyJob(job,{replayed});
         state.status='선택한 변경을 적용하는 작업을 접수했습니다. 완료되면 수정본 PDF를 BLUE로 넘길 수 있습니다.';
       }catch(error){
-        if(sessionEnded(error)) return;
-        if(error&&(error.kind==='network'||error.kind==='timeout')){
-          try{
-            if(digest){
-              saveRun(digest,{key:'fssjob-'+digest.slice(0,40),role:'red',uploadId:reviewUpload.id,
-                sha256:reviewUpload.sha256,jobId:'',pending:true,kind:'apply',reviewJobId:review.id,model,effort});
-            }
-          }catch{}
-          fail('적용 제출 응답을 확인하지 못했습니다. 접수되었는지 알 수 없어 자동으로 다시 보내지 않았습니다. 같은 후보 선택으로 다시 적용하면 같은 요청 키를 재사용합니다.');
-        }else{
-          fail(describe(error,'apply'));
-        }
+        await handleApplyFailure(error,digest,review,reviewUpload,model,effort);
       }finally{
-        state.busy='';
-        render();
+        state.busy='';render();
       }
     }
 
     /* ---------- job ---------- */
+    function updatePollState(poll){
+      if(TERMINAL_STATES.includes(state.job.state)){
+        stopPoll();
+        state.pollAttempt=0;
+        if(state.jobKind==='review'&&state.job.role==='red') adoptReview(state.job);
+        return;
+      }
+      schedulePoll();
+    }
+    function handlePollFailure(error){
+      state.pollFailures++;
+      if(error&&error.status===404){
+        stopPoll();
+        state.job=null;
+        clearActiveJob(state.activeDigest);
+        fail(describe(error,'job')+' 같은 파일·역할·지시·모델·강도로 다시 실행하면 접수 기록을 새로 확인합니다.');
+        return;
+      }
+      if(state.pollFailures>=MAX_POLL_FAILURES){
+        stopPoll();
+        fail('작업 상태를 확인하지 못했습니다. 「상태 새로고침」으로 다시 확인하세요.');
+        return;
+      }
+      if(state.job&&!TERMINAL_STATES.includes(state.job.state)) schedulePoll();
+      state.status='작업 상태를 확인하지 못해 다시 확인합니다.';
+    }
     async function refreshJob(id,opts={}){
       if(!state.session||!id) return;
       const poll=opts.poll===true;
@@ -962,35 +1106,16 @@
         state.pollFailures=0;
         state.job=data.job;
         if(!poll) state.status='작업 상태를 새로 불러왔습니다.';
-        if(TERMINAL_STATES.includes(state.job.state)){
-          stopPoll();
-          state.pollAttempt=0;
-          if(state.jobKind==='review'&&state.job.role==='red') adoptReview(state.job);
-        }else{
-          schedulePoll();
-        }
+        updatePollState(poll);
       }catch(error){
-        if(sessionEnded(error)){return;}
-        state.pollFailures++;
-        if(error&&error.status===404){
-          stopPoll();
-          state.job=null;
-          clearActiveJob(state.activeDigest);
-          fail(describe(error,'job')+' 같은 파일·역할·지시·모델·강도로 다시 실행하면 접수 기록을 새로 확인합니다.');
-          return;
-        }
-        if(state.pollFailures>=MAX_POLL_FAILURES){
-          stopPoll();
-          fail('작업 상태를 계속 확인하지 못했습니다. 서버의 작업은 그대로 있습니다. 「상태 새로고침」으로 다시 확인하세요.');
-          return;
-        }
-        if(state.job&&!TERMINAL_STATES.includes(state.job.state)) schedulePoll();
-        state.status='작업 상태를 확인하지 못해 다시 확인합니다.';
+        if(sessionEnded(error)) return;
+        handlePollFailure(error);
       }finally{
         if(!poll){state.busy='';}
         render();
       }
     }
+
     function schedulePoll(){
       if(state.pollTimer) return;
       const delay=POLL_DELAYS[Math.min(state.pollAttempt,POLL_DELAYS.length-1)];
@@ -1011,7 +1136,7 @@
       state.job=job;
       state.pollFailures=0;
       state.status=opts.replayed===true
-        ?'이미 접수된 작업을 다시 불러왔습니다. 새 유료 호출은 없습니다.'
+        ?'이미 접수된 작업을 다시 불러왔습니다.'
         :'작업이 접수되었습니다. 진행 상태를 계속 확인합니다.';
       if(!TERMINAL_STATES.includes(job.state)) schedulePoll();
       else if(state.jobKind==='review'&&job.role==='red') adoptReview(job);
@@ -1051,7 +1176,7 @@
         anchor.hidden=true;
         anchor.click();
         const rid=later(()=>{try{UrlApi.revokeObjectURL(href);}catch{}},30000);
-        state.downloadStatus='결과 파일을 내려받았습니다: '+safeName(artifact.name)+'. 링크는 이 페이지 메모리에만 있습니다.';
+        state.downloadStatus='결과 파일을 내려받았습니다: '+safeName(artifact.name)+'.';
         void rid;
       }catch(error){
         if(sessionEnded(error)) return;
@@ -1081,35 +1206,49 @@
     }
 
     /* ---------- edited PDF -> BLUE input ---------- */
+    function canHandoff(){
+      return !state.busy&&state.gate==='ready'&&!!state.session&&!!state.capabilities;
+    }
+    async function editedHandoffBytes(job,artifact){
+      const blob=await artifactBlob(job.id,artifact);
+      const bytes=new Uint8Array(await blob.arrayBuffer());
+      if(!bytes.byteLength){
+        throw Object.assign(Error('empty'),{kind:'local',message:'수정본 파일이 비어 있습니다.'});
+      }
+      const sha=await sha256Hex(bytes);
+      const recorded=typeof artifact.sha256==='string'?artifact.sha256:'';
+      if(recorded&&recorded!==sha) throw Object.assign(Error('artifact hash mismatch'),{kind:'protocol'});
+      const name=safeName(artifact.name)||('edited-'+sha.slice(0,8)+'.pdf');
+      return {bytes,sha,name};
+    }
+    function rememberOriginalInput(){
+      if(state.originalInput) return;
+      state.originalInput={file:state.file,fileSha:state.fileSha,upload:state.upload||state.reviewUpload};
+    }
+    async function registerBlueInput(job,artifact,payload){
+      const upload=await postUpload(payload.bytes,'application/pdf',payload.name);
+      if(upload.sha256!==payload.sha) throw Object.assign(Error('upload hash mismatch'),{kind:'protocol'});
+      rememberOriginalInput();
+      state.file=fileLike(payload.bytes,payload.name,'application/pdf');
+      state.fileSha=payload.sha;
+      state.upload=upload;
+      storeUpload(upload);
+      state.blueSource={applyJobId:job.id,artifactId:artifact.id,sha256:payload.sha};
+      if(nodes.role) nodes.role.value='blue';
+      if(nodes.prompt) nodes.prompt.value='';
+      state.editedStatus='수정본을 BLUE 입력으로 등록했습니다. BLUE 검토 지시를 입력하고 실행하세요.';
+      state.status='BLUE 입력이 준비되었습니다.';
+    }
     async function handoffToBlue(){
-      if(state.busy||state.gate!=='ready'||!state.session||!state.capabilities) return;
+      if(!canHandoff()) return;
       const job=state.job;
       const artifact=editedArtifact();
       if(!job||!artifact){fail('BLUE로 넘길 수정본 PDF가 없습니다.');return;}
       state.busy='handoff';state.error='';state.editedStatus='수정본을 불러와 BLUE 입력으로 등록하는 중…';
       render();
       try{
-        const blob=await artifactBlob(job.id,artifact);
-        const bytes=new Uint8Array(await blob.arrayBuffer());
-        if(!bytes.byteLength) throw Object.assign(Error('empty'),{kind:'local',message:'수정본 파일이 비어 있습니다.'});
-        const sha=await sha256Hex(bytes);
-        const recorded=typeof artifact.sha256==='string'?artifact.sha256:'';
-        if(recorded&&recorded!==sha) throw Object.assign(Error('artifact hash mismatch'),{kind:'protocol'});
-        const name=safeName(artifact.name)||('edited-'+sha.slice(0,8)+'.pdf');
-        const upload=await postUpload(bytes,'application/pdf',name);
-        if(upload.sha256!==sha) throw Object.assign(Error('upload hash mismatch'),{kind:'protocol'});
-        if(!state.originalInput){
-          state.originalInput={file:state.file,fileSha:state.fileSha,upload:state.upload||state.reviewUpload};
-        }
-        state.file=fileLike(bytes,name,'application/pdf');
-        state.fileSha=sha;
-        state.upload=upload;
-        storeUpload(upload);
-        state.blueSource={applyJobId:job.id,artifactId:artifact.id,sha256:sha};
-        if(nodes.role) nodes.role.value='blue';
-        if(nodes.prompt) nodes.prompt.value='';
-        state.editedStatus='수정본을 BLUE 입력으로 등록했습니다. BLUE 검토 지시를 입력하고 실행하세요. RED 결과·후보·근거는 BLUE로 보내지 않습니다.';
-        state.status='BLUE 입력이 준비되었습니다.';
+        const payload=await editedHandoffBytes(job,artifact);
+        await registerBlueInput(job,artifact,payload);
       }catch(error){
         if(sessionEnded(error)) return;
         state.editedStatus='';
@@ -1118,6 +1257,7 @@
         state.busy='';render();
       }
     }
+
     function restoreOriginalInput(){
       if(state.busy||!state.originalInput) return;
       const original=state.originalInput;
@@ -1134,36 +1274,33 @@
     }
 
     /* ---------- restore ---------- */
-    async function restore(){
-      if(state.gate!=='ready'||!state.session||!state.capabilities||state.restored) return;
-      state.restored=true;
+    function activeRunEntry(){
       const doc=readRunsDoc();
       const digest=doc.active;
       const entry=digest&&doc.runs[digest]?doc.runs[digest]:null;
-      if(!entry) return;
-      state.activeDigest=digest;
-      const upload=readUploadStore();
-      if(entry.kind==='apply'){
-        state.jobKind='apply';
-        state.reviewUpload=reviewUploadDescriptor(entry,upload);
-        if(upload) state.upload=upload;
-        if(typeof entry.jobId==='string'&&entry.jobId){
-          state.status='이전 적용 작업을 불러오는 중…';
-          render();
-          await refreshJob(entry.jobId);
-          const artifact=editedArtifact();
-          if(artifact&&upload&&artifact.sha256===upload.sha256){
-            state.blueSource={applyJobId:entry.jobId,artifactId:artifact.id,sha256:upload.sha256};
-          }
-          if(entry.reviewJobId) await restoreReview(entry.reviewJobId);
-          return;
-        }
+      return {digest,entry};
+    }
+    async function restoreApplyEntry(entry,upload){
+      state.jobKind='apply';
+      state.reviewUpload=reviewUploadDescriptor(entry,upload);
+      if(upload) state.upload=upload;
+      if(typeof entry.jobId!=='string'||!entry.jobId){
         if(entry.pending===true){
-          state.status='이전 적용 제출의 접수 여부를 확인하지 못했습니다. 같은 후보 선택으로 다시 적용하면 같은 요청 키를 재사용합니다.';
+          state.status='이전 적용 제출의 접수 여부를 확인하지 못했습니다. 같은 후보 선택으로 다시 적용하면 기존 요청 키를 재사용합니다.';
           render();
         }
         return;
       }
+      state.status='이전 적용 작업을 불러오는 중…';
+      render();
+      await refreshJob(entry.jobId);
+      const artifact=editedArtifact();
+      if(artifact&&upload&&artifact.sha256===upload.sha256){
+        state.blueSource={applyJobId:entry.jobId,artifactId:artifact.id,sha256:upload.sha256};
+      }
+      if(entry.reviewJobId) await restoreReview(entry.reviewJobId);
+    }
+    async function restoreReviewEntry(entry,upload){
       state.jobKind='review';
       state.reviewUpload=reviewUploadDescriptor(entry,upload);
       if(upload&&(!entry.sha256||upload.sha256===entry.sha256)) state.upload=upload;
@@ -1178,6 +1315,17 @@
         render();
       }
     }
+    async function restore(){
+      if(state.gate!=='ready'||!state.session||!state.capabilities||state.restored) return;
+      state.restored=true;
+      const {digest,entry}=activeRunEntry();
+      if(!entry) return;
+      state.activeDigest=digest;
+      const upload=readUploadStore();
+      if(entry.kind==='apply') return restoreApplyEntry(entry,upload);
+      return restoreReviewEntry(entry,upload);
+    }
+
     /* The RED review that produced the candidates is a free owner-scoped read; it never starts work. */
     async function restoreReview(jobId){
       try{
@@ -1187,14 +1335,20 @@
     }
 
     /* ---------- rendering ---------- */
+    function elementProperty(key){
+      return key==='hidden'||key==='disabled'||key==='checked'||key==='value'||key==='id'||key==='type';
+    }
+    function setElementProp(node,key,value){
+      if(key==='textContent'){node.textContent=String(value);return;}
+      if(key==='className'){node.className=String(value);return;}
+      if(elementProperty(key)){node[key]=value;return;}
+      node.setAttribute(key,String(value));
+    }
     function el(tag,props,...kids){
       const node=doc.createElement(tag);
       for(const [key,value] of Object.entries(props||{})){
         if(value===undefined||value===null||value===false) continue;
-        if(key==='textContent') node.textContent=String(value);
-        else if(key==='className') node.className=String(value);
-        else if(key==='hidden'||key==='disabled'||key==='checked'||key==='value'||key==='id'||key==='type') node[key]=value;
-        else node.setAttribute(key,String(value));
+        setElementProp(node,key,value);
       }
       for(const kid of kids){
         if(kid===null||kid===undefined||kid===false) continue;
@@ -1210,14 +1364,14 @@
         el('div',{className:'step-head'},
           el('span',{className:'step-code','aria-hidden':'true',textContent:'AI'}),
           el('div',{},
-            el('h2',{id:'hosted-ai-title',textContent:'웹 실행 · 운영자 API'}),
-            el('p',{id:'hosted-ai-intro',className:'muted',textContent:'로그인하면 PDF를 올려 RED/BLUE 검토를 서버에서 실행합니다. RED 후보를 골라 수정본 PDF를 만들고 그 파일만 BLUE로 넘길 수 있습니다. API 키·로컬 경로 입력은 없습니다. 로컬 CLI·companion은 선택 사항입니다.'}))),
+            el('h2',{id:'hosted-ai-title',textContent:'웹 실행'}),
+            el('p',{id:'hosted-ai-intro',className:'muted',textContent:'로그인 → PDF → 검토 지시 → 실행 → 후보 선택 → 수정본 적용 → BLUE 순서로 진행합니다.'}))),
         el('p',{id:'hosted-ai-status',className:'form-feedback',role:'status','aria-live':'polite'}),
         el('p',{id:'hosted-ai-error',className:'form-feedback error',role:'alert',hidden:true}));
 
       const loginForm=el('form',{id:'hosted-ai-login-form',className:'hosted-ai-login',hidden:true,novalidate:'true'},
         el('h3',{textContent:'로그인'}),
-        el('p',{className:'muted',textContent:'Falsify 계정으로 로그인합니다. 비밀번호는 전송만 하고 저장하지 않으며, 새로고침하면 다시 입력합니다.'}),
+        el('p',{className:'muted',textContent:'Falsify 계정으로 로그인합니다.'}),
         el('label',{for:'hosted-ai-username'},'아이디',
           el('input',{id:'hosted-ai-username',type:'text',autocomplete:'username',maxlength:'200',spellcheck:'false'})),
         el('label',{for:'hosted-ai-password'},'비밀번호',
@@ -1231,22 +1385,19 @@
         el('button',{id:'hosted-ai-logout',type:'button',className:'text-button',textContent:'로그아웃'}));
 
       const externalBox=el('div',{id:'hosted-ai-external',hidden:true},
-        el('p',{className:'muted',textContent:'이 페이지의 로그인 세션이 필요합니다. 로그인한 뒤 「로그인 상태 다시 확인」을 누르세요. 이 패널은 비밀번호를 묻지 않습니다.'}),
+        el('p',{className:'muted',textContent:'페이지 로그인이 필요합니다. 로그인한 뒤 다시 확인하세요.'}),
         el('div',{className:'button-row'},
           el('button',{id:'hosted-ai-recheck',type:'button',className:'button secondary',textContent:'로그인 상태 다시 확인'})));
 
       const disabledBox=el('div',{id:'hosted-ai-disabled',hidden:true},
         el('p',{id:'hosted-ai-disabled-message'}),
-        el('p',{className:'muted'},
-          '선택 사항인 로컬 실행은 이 페이지의 「로컬 실행 연결」 패널에서 companion과 토큰으로 연결하거나, ',
-          el('a',{className:'text-link',href:'./guide.html',target:'_blank',rel:'noopener noreferrer',textContent:'사용 설명서'}),
-          '의 수동 JSON 교환 절차를 따르세요. 이 패널은 위 상태에서 서버로 아무 작업도 보내지 않습니다.'));
+        el('p',{className:'muted',textContent:'선택 사항인 로컬 실행은 「로컬 실행 연결」을 참고하세요. 이 패널은 서버로 아무 작업도 보내지 않습니다.'}));
 
       const configBox=el('div',{id:'hosted-ai-config',hidden:true},
         el('label',{for:'hosted-ai-file'},'검토할 논문 파일 (PDF)',
           el('input',{id:'hosted-ai-file',type:'file',accept:'.pdf,application/pdf'})),
         el('p',{id:'hosted-ai-file-status',className:'muted',textContent:'아직 파일을 고르지 않았습니다.'}),
-        el('p',{id:'hosted-ai-file-hint',className:'muted',textContent:'웹 실행은 PDF만 지원합니다. TXT·DOCX 등은 PDF로 변환하거나 「로컬 실행 연결」을 쓰세요.'}),
+        el('p',{id:'hosted-ai-file-hint',className:'muted',textContent:'PDF만 지원합니다. 다른 형식은 PDF로 변환하세요.'}),
         el('div',{className:'button-row',id:'hosted-ai-input-actions',hidden:true},
           el('button',{id:'hosted-ai-restore-original',type:'button',className:'text-button',textContent:'원본 입력으로 돌아가기'})),
         el('div',{className:'hosted-ai-grid'},
@@ -1261,8 +1412,8 @@
           el('label',{className:'check-row',for:'hosted-ai-use-evidence'},
             el('input',{id:'hosted-ai-use-evidence',type:'checkbox',checked:true}),
             el('span',{},'표·그림 구조화 근거 사용',
-              el('small',{textContent:'서버가 입력 PDF에서 표·그림 근거를 추출해 RED/BLUE 검토에 사용합니다. 끄면 텍스트만 검토합니다. 기본값은 켜짐입니다.'})))),
-        el('label',{for:'hosted-ai-prompt',id:'hosted-ai-prompt-label',textContent:'검토 지시 (최대 8000자)'}),
+              el('small',{textContent:'표·그림 근거를 함께 검토합니다. 기본값은 켜짐입니다.'})))),
+        el('label',{for:'hosted-ai-prompt',id:'hosted-ai-prompt-label',textContent:'검토 지시'}),
         el('textarea',{id:'hosted-ai-prompt',rows:'4',spellcheck:'false'}),
         el('p',{id:'hosted-ai-prompt-count',className:'muted',textContent:'0자'}),
         el('div',{className:'button-row'},
@@ -1276,6 +1427,7 @@
           el('p',{id:'hosted-ai-job-model',className:'muted'}),
           el('p',{id:'hosted-ai-job-usage',className:'muted'}),
           el('p',{id:'hosted-ai-job-failure',className:'form-feedback error',role:'alert',hidden:true})),
+        el('p',{id:'hosted-ai-handoff-context',className:'muted',hidden:true}),
         el('section',{id:'hosted-ai-selection',hidden:true,'aria-label':'RED 후보 선택과 수정본 만들기'},
           el('h3',{textContent:'RED 후보 · 수정본 만들기'}),
           el('p',{id:'hosted-ai-selection-note',className:'muted'}),
@@ -1292,7 +1444,7 @@
           el('p',{id:'hosted-ai-result-note',className:'muted'})),
         el('section',{id:'hosted-ai-artifacts-section',hidden:true,'aria-label':'결과 파일'},
           el('h3',{textContent:'결과 파일'}),
-          el('p',{className:'muted',textContent:'내려받기는 로그인 세션으로 인증합니다. 결과 링크는 이 페이지 메모리에만 있습니다.'}),
+          el('p',{className:'muted',textContent:'로그인 세션으로 인증해 내려받습니다.'}),
           el('ul',{id:'hosted-ai-artifacts',className:'hosted-ai-items'}),
           el('p',{id:'hosted-ai-download-status',className:'form-feedback',role:'status','aria-live':'polite'})),
         el('section',{id:'hosted-ai-edited-section',hidden:true,'aria-label':'수정본과 BLUE 연결'},
@@ -1322,6 +1474,7 @@
         progress:find('hosted-ai-progress'),
         jobBox:find('hosted-ai-job'),jobState:find('hosted-ai-job-state'),jobProgress:find('hosted-ai-job-progress'),
         jobModel:find('hosted-ai-job-model'),jobUsage:find('hosted-ai-job-usage'),jobFailure:find('hosted-ai-job-failure'),
+        handoffContext:find('hosted-ai-handoff-context'),
         selectionSection:find('hosted-ai-selection'),selectionNote:find('hosted-ai-selection-note'),
         candidates:find('hosted-ai-candidates'),visualCandidates:find('hosted-ai-visual-candidates'),
         chartNote:find('hosted-ai-chart-note'),apply:find('hosted-ai-apply'),applyStatus:find('hosted-ai-apply-status'),
@@ -1374,22 +1527,32 @@
     }
     function clearList(node){if(node)node.textContent='';}
 
+    function fileIdentity(file,upload){
+      const name=safeName(file&&file.name)||safeName(upload&&upload.name)||'선택한 파일';
+      const size=sizeLabel(file?file.size:(upload?upload.bytes:0));
+      return name+' · '+size;
+    }
+    function fileHashText(upload){
+      if(state.fileSha) return 'sha256 '+state.fileSha;
+      if(upload&&upload.sha256) return 'sha256 '+upload.sha256;
+      return '해시 계산 중…';
+    }
+    function uploadRegistrationText(upload){
+      if(!upload) return '';
+      if(state.fileSha&&upload.sha256!==state.fileSha) return '';
+      return upload.deduplicated?'서버 등록됨 · 기존 업로드 재사용':'서버 등록됨 · 새 업로드';
+    }
     function fileStatusText(){
       if(state.fileError) return state.fileError;
       const file=state.file,upload=state.upload;
       if(!file&&!upload) return '아직 파일을 고르지 않았습니다.';
-      const name=safeName(file&&file.name)||safeName(upload&&upload.name)||'선택한 파일';
-      const size=sizeLabel(file?file.size:(upload?upload.bytes:0));
-      const parts=[name+' · '+size];
-      if(state.fileSha) parts.push('sha256 '+state.fileSha);
-      else if(upload&&upload.sha256) parts.push('sha256 '+upload.sha256);
-      else parts.push('해시 계산 중…');
-      if(upload&&(!state.fileSha||upload.sha256===state.fileSha)){
-        parts.push(upload.deduplicated?'서버 등록됨 · 기존 업로드 재사용':'서버 등록됨 · 새 업로드');
-      }
+      const parts=[fileIdentity(file,upload),fileHashText(upload)];
+      const registration=uploadRegistrationText(upload);
+      if(registration) parts.push(registration);
       if(state.blueSource&&upload&&state.blueSource.sha256===upload.sha256) parts.push('RED 수정본 입력');
       return parts.join(' · ');
     }
+
     function roleLabel(){return nodes.role&&nodes.role.value==='blue'?'BLUE 검토 실행':'RED 검토 실행';}
     function jobStateText(){
       const job=state.job;
@@ -1398,19 +1561,38 @@
       const label=STATE_LABELS[raw];
       return label?label+' · '+raw:(raw||'상태 정보 없음');
     }
-    function jobProgressText(){
-      const job=state.job;
-      if(!job) return '';
-      const p=job.progress&&typeof job.progress==='object'?job.progress:{};
-      const done=Number.isFinite(Number(p.completedCalls))&&Number(p.completedCalls)>=0?Math.floor(Number(p.completedCalls)):null;
-      const required=Number.isFinite(Number(p.requiredCalls))&&Number(p.requiredCalls)>0?Math.floor(Number(p.requiredCalls)):null;
-      const phase=typeof p.phase==='string'?safeName(p.phase):'';
+    const TERMINAL_PHASES=['completed','complete','done','partial','failed','cancelled','canceled','interrupted'];
+    function isFinalPhase(phase){return TERMINAL_PHASES.includes(phase);}
+    function progressNumbers(progress){
+      const p=progress&&typeof progress==='object'?progress:{};
+      const done=Number.isFinite(Number(p.completedCalls))&&Number(p.completedCalls)>=0
+        ?Math.floor(Number(p.completedCalls)):null;
+      const required=Number.isFinite(Number(p.requiredCalls))&&Number(p.requiredCalls)>0
+        ?Math.floor(Number(p.requiredCalls)):null;
+      return {done,required,phase:typeof p.phase==='string'?safeName(p.phase):''};
+    }
+    function finalProgressText(done,required,phase){
+      if(!isFinalPhase(phase)) return '';
+      const parts=[];
+      if(required!==null&&done!==null) parts.push('완료 호출 '+done+' / '+required);
+      parts.push('단계 '+phase);
+      return parts.join(' · ');
+    }
+    function liveProgressText(done,required,phase){
       const parts=[];
       if(done!==null) parts.push('완료 호출 '+done+(required!==null?' / '+required:''));
       else parts.push('호출 진행 정보 없음');
       if(phase) parts.push('단계 '+phase);
       return parts.join(' · ');
     }
+    function jobProgressText(){
+      const job=state.job;
+      if(!job) return '';
+      const {done,required,phase}=progressNumbers(job.progress);
+      if(TERMINAL_STATES.includes(job.state)) return finalProgressText(done,required,phase);
+      return liveProgressText(done,required,phase);
+    }
+
     function jobModelText(){
       const job=state.job;
       if(!job) return '';
@@ -1461,58 +1643,78 @@
     /* The hosted runtime returns a falsify.document-red/blue.v1 document whose coverage reports accepted,
        rejected and unresolved items (coverage.resultCoverage). Older/other shapes are read defensively; a
        count is shown only when the server actually reported it. */
-    function summarizeResult(result){
-      const out={available:false,total:null,accepted:null,rejected:null,unresolved:null,partial:false,incomplete:false,rows:[]};
-      if(!result||typeof result!=='object') return out;
-      out.available=true;
-      const number=value=>value===null||value===undefined
-        ?null
-        :(Number.isFinite(Number(value))&&Number(value)>=0?Math.floor(Number(value)):null);
-      const aggregate=result.counts&&typeof result.counts==='object'?result.counts
-        :(result.summary&&typeof result.summary==='object'?result.summary:{});
+    function numericOrNull(value){
+      if(value===null||value===undefined) return null;
+      if(!Number.isFinite(Number(value))||Number(value)<0) return null;
+      return Math.floor(Number(value));
+    }
+    function firstNumber(...values){
+      for(const value of values){
+        const found=numericOrNull(value);
+        if(found!==null) return found;
+      }
+      return null;
+    }
+    function coverageView(result){
       const coverage=result.coverage&&typeof result.coverage==='object'?result.coverage:null;
       const reported=coverage&&coverage.resultCoverage&&typeof coverage.resultCoverage==='object'
         ?coverage.resultCoverage:null;
-      const firstNumber=(...values)=>{
-        for(const value of values){const found=number(value);if(found!==null) return found;}
-        return null;
+      const aggregate=result.counts&&typeof result.counts==='object'?result.counts
+        :(result.summary&&typeof result.summary==='object'?result.summary:{});
+      return {coverage,reported,aggregate};
+    }
+    function coverageCounts(reported,aggregate,result){
+      return {
+        accepted:firstNumber(reported&&reported.accepted,aggregate.accepted),
+        rejected:firstNumber(reported&&reported.rejected,aggregate.rejected,result.rejected),
+        unresolved:firstNumber(reported&&reported.unresolved,aggregate.unresolved,result.unresolved)
       };
-      out.accepted=firstNumber(reported&&reported.accepted,aggregate.accepted);
-      out.rejected=firstNumber(reported&&reported.rejected,aggregate.rejected,result.rejected);
-      out.unresolved=firstNumber(reported&&reported.unresolved,aggregate.unresolved,result.unresolved);
+    }
+    function appendCoverageRows(rows,items,status){
+      const list=Array.isArray(items)?items:[];
+      for(const item of list){
+        if(rows.length>=12) return;
+        rows.push({status,label:itemLabel(item)});
+      }
+    }
+    function firstItemList(result){
+      for(const key of ITEM_KEYS){
+        if(Array.isArray(result[key])) return result[key];
+      }
+      return null;
+    }
+    function legacyCoverageRows(out,list){
+      let rejected=0,unresolved=0;
+      for(const item of list){
+        const status=String(item&&(item.status||item.state||item.verdict)||'').toLowerCase();
+        if(status==='rejected') rejected++;
+        if(status==='unresolved') unresolved++;
+        if((status==='rejected'||status==='unresolved')&&out.rows.length<12){
+          out.rows.push({status,label:itemLabel(item)});
+        }
+      }
+      if(out.rejected===null) out.rejected=rejected;
+      if(out.unresolved===null) out.unresolved=unresolved;
+    }
+    function summarizeResult(result){
+      const out={available:false,total:null,accepted:null,rejected:null,unresolved:null,
+        partial:false,incomplete:false,rows:[],remaining:0};
+      if(!result||typeof result!=='object') return out;
+      out.available=true;
+      const {coverage,reported,aggregate}=coverageView(result);
+      const counts=coverageCounts(reported,aggregate,result);
+      out.accepted=counts.accepted;
+      out.rejected=counts.rejected;
+      out.unresolved=counts.unresolved;
       out.partial=result.partial===true;
       out.incomplete=!!(coverage&&coverage.complete===false);
-      const remaining=coverage&&Array.isArray(coverage.remainingBatches)?coverage.remainingBatches:[];
-      out.remaining=remaining.length;
-      const rejectedItems=reported&&Array.isArray(reported.rejectedItems)?reported.rejectedItems:[];
-      const unresolvedItems=reported&&Array.isArray(reported.unresolvedItems)?reported.unresolvedItems:[];
-      for(const item of rejectedItems){
-        if(out.rows.length>=12) break;
-        out.rows.push({status:'rejected',label:itemLabel(item)});
-      }
-      for(const item of unresolvedItems){
-        if(out.rows.length>=12) break;
-        out.rows.push({status:'unresolved',label:itemLabel(item)});
-      }
-      let list=null;
-      for(const key of ITEM_KEYS){
-        if(Array.isArray(result[key])){list=result[key];break;}
-      }
+      out.remaining=coverage&&Array.isArray(coverage.remainingBatches)?coverage.remainingBatches.length:0;
+      appendCoverageRows(out.rows,reported&&reported.rejectedItems,'rejected');
+      appendCoverageRows(out.rows,reported&&reported.unresolvedItems,'unresolved');
+      const list=firstItemList(result);
       if(list){
         out.total=list.length;
-        if(!out.rows.length){
-          let rejected=0,unresolved=0;
-          for(const item of list){
-            const status=String(item&&(item.status||item.state||item.verdict)||'').toLowerCase();
-            if(status==='rejected'||status==='unresolved'){
-              if(status==='rejected') rejected++;
-              else unresolved++;
-              if(out.rows.length<12) out.rows.push({status,label:itemLabel(item)});
-            }
-          }
-          if(out.rejected===null) out.rejected=rejected;
-          if(out.unresolved===null) out.unresolved=unresolved;
-        }
+        if(!out.rows.length) legacyCoverageRows(out,list);
       }
       if(out.total===null&&out.accepted!==null&&out.rejected!==null&&out.unresolved!==null){
         out.total=out.accepted+out.rejected+out.unresolved;
@@ -1556,10 +1758,56 @@
         el('p',{},el('span',{className:'hosted-ai-diff-label is-after',textContent:'변경 후'}),el('code',{textContent:edit.after||'(삭제)'})));
       return el('div',{className:'hosted-ai-candidate'},head,diff);
     }
+    function renderCandidateLists(review,list,visual){
+      const signature=state.candidateSignature+'|'+state.selectionVersion;
+      if(builtSignature===signature) return;
+      clearList(nodes.candidates);clearList(nodes.visualCandidates);
+      if(list.length){
+        nodes.candidates.append(el('h4',{textContent:'텍스트 후보 ('+list.length+')'}));
+        for(const candidate of list) nodes.candidates.append(textCandidateNode(candidate));
+      }
+      if(visual.length){
+        nodes.visualCandidates.append(el('h4',{textContent:'표 셀 후보 ('+visual.length+')'}));
+        for(const [index,edit] of visual.entries()) nodes.visualCandidates.append(visualCandidateNode(edit,index));
+      }
+      nodes.chartNote.textContent=state.chartOnly?'차트 포인트 변경 '+state.chartOnly+'건은 이 화면에서 적용하지 않습니다.':'';
+      setHidden(nodes.chartNote,!state.chartOnly);
+      builtSignature=signature;
+    }
+    function renderSelectionStatus(review){
+      const partial=summarizeResult(review.result).incomplete;
+      const skipped=state.skippedCandidates?' '+state.skippedCandidates+'개 후보는 적용 조건에 맞지 않아 표시하지 않았습니다.':'';
+      nodes.selectionNote.textContent='RED '+review.id.slice(0,8)+'… 결과입니다. 선택한 변경만 PDF에 적용합니다.'
+        +(partial?' 일부 배치만 검토했습니다.':'')+skipped;
+      const count=Object.keys(state.selection).length;
+      const blocker=applyBlocker();
+      nodes.apply.disabled=!!blocker||!!state.busy||state.gate!=='ready'||!state.session;
+      nodes.apply.textContent='선택한 후보를 PDF에 적용'+(count?' ('+count+')':'');
+      nodes.applyStatus.textContent=blocker||('선택 '+count+'개 · 선택한 변경만 PDF에 적용합니다.');
+    }
+    function isEditedInput(){
+      const upload=state.upload;
+      return !!state.blueSource&&!!upload&&state.blueSource.sha256===upload.sha256;
+    }
+    function handoffContextText(){
+      const blue=nodes.role&&nodes.role.value==='blue';
+      if(isEditedInput()){
+        if(blue) return '수정본으로 BLUE 검토 중입니다.';
+        return '수정본 입력입니다. 「원본 입력으로 돌아가기」로 RED 후보 편집을 다시 사용할 수 있습니다.';
+      }
+      return blue?'BLUE 검토 중입니다.':'';
+    }
+    function renderHandoffContext(){
+      const text=handoffContextText();
+      nodes.handoffContext.textContent=text;
+      setHidden(nodes.handoffContext,!text);
+      return (nodes.role&&nodes.role.value==='blue')||isEditedInput();
+    }
     function renderCandidates(){
+      const hideEditor=renderHandoffContext();
       const review=state.reviewJob;
       const list=state.candidates,visual=state.visualCandidates;
-      const show=!!review&&(list.length>0||visual.length>0||state.chartOnly>0);
+      const show=!hideEditor&&!!review&&(list.length>0||visual.length>0||state.chartOnly>0);
       setHidden(nodes.selectionSection,!show);
       if(!show){
         clearList(nodes.candidates);clearList(nodes.visualCandidates);
@@ -1567,30 +1815,8 @@
         nodes.applyStatus.textContent='';
         return;
       }
-      const signature=state.candidateSignature+'|'+state.selectionVersion;
-      if(builtSignature!==signature){
-        clearList(nodes.candidates);clearList(nodes.visualCandidates);
-        if(list.length){
-          nodes.candidates.append(el('h4',{textContent:'텍스트 후보 ('+list.length+')'}));
-          for(const candidate of list) nodes.candidates.append(textCandidateNode(candidate));
-        }
-        if(visual.length){
-          nodes.visualCandidates.append(el('h4',{textContent:'표 셀 후보 ('+visual.length+')'}));
-          for(const [index,edit] of visual.entries()) nodes.visualCandidates.append(visualCandidateNode(edit,index));
-        }
-        nodes.chartNote.textContent=state.chartOnly?'차트 포인트 변경 '+state.chartOnly+'건은 이 화면에서 적용하지 않습니다.':'';
-        setHidden(nodes.chartNote,!state.chartOnly);
-        builtSignature=signature;
-      }
-      const partial=summarizeResult(review.result).incomplete;
-      const skipped=state.skippedCandidates?' '+state.skippedCandidates+'개 후보는 위치·길이·중복 조건 때문에 적용할 수 없어 표시하지 않았습니다.':'';
-      nodes.selectionNote.textContent='RED '+review.id.slice(0,8)+'… 결과 · 위치는 추출 세그먼트(p<쪽>-b<블록>)에서 계산합니다. 선택한 변경만 PDF에 적용합니다.'
-        +(partial?' 이 RED 결과는 일부 배치만 검토했습니다.':'')+skipped;
-      const count=Object.keys(state.selection).length;
-      const blocker=applyBlocker();
-      nodes.apply.disabled=!!blocker||!!state.busy||state.gate!=='ready'||!state.session;
-      nodes.apply.textContent='선택한 후보를 PDF에 적용'+(count?' ('+count+')':'');
-      nodes.applyStatus.textContent=blocker||('선택 '+count+'개 · 적용 작업은 모델을 호출하지 않고 PDF만 수정합니다.');
+      renderCandidateLists(review,list,visual);
+      renderSelectionStatus(review);
     }
 
     /* The runtime's apply-only result is falsify.hosted-apply.v1 (counts + hashes), not a review document.
@@ -1613,144 +1839,226 @@
       return {parts,output,verified:!!verification&&Object.keys(verification).length>0};
     }
 
-    function render(){
-      if(!nodes.status) return;
-      const caps=state.capabilities;
-      const signed=!!state.session;
+    function renderContext(){
+      const caps=state.capabilities,signed=!!state.session;
+      return {caps,signed,locked:state.gate==='disabled',hook:hookPresent(),busy:!!state.busy,
+        operate:state.gate==='ready'&&!!caps&&signed};
+    }
+    function renderStatus(){
       nodes.status.textContent=state.status||'';
       nodes.error.textContent=state.error||'';
       setHidden(nodes.error,!state.error);
-
-      const locked=state.gate==='disabled';
-      setHidden(nodes.loginForm,!(state.gate!=='disabled'&&!signed&&!hookPresent()));
-      setHidden(nodes.externalBox,!(state.gate!=='disabled'&&!signed&&hookPresent()));
-      setHidden(nodes.sessionRow,!(signed&&!locked));
-      setHidden(nodes.logout,!signed||state.session.source==='hook');
-      if(signed) nodes.sessionText.textContent=sessionLabel();
-      setHidden(nodes.disabledBox,state.gate!=='disabled');
-      if(state.gate==='disabled') nodes.disabledMessage.textContent=state.disabledMessage||'';
-
-      const operate=state.gate==='ready'&&!!caps&&signed;
-      setHidden(nodes.config,!operate);
-
-      const max=caps?caps.maxPromptChars:MAX_PROMPT_FALLBACK;
+    }
+    function renderSessionRow(ctx){
+      setHidden(nodes.sessionRow,!ctx.signed||ctx.locked);
+      setHidden(nodes.logout,!ctx.signed||(state.session&&state.session.source==='hook'));
+      if(ctx.signed) nodes.sessionText.textContent=sessionLabel();
+    }
+    function renderGate(ctx){
+      setHidden(nodes.loginForm,ctx.locked||ctx.signed||ctx.hook);
+      setHidden(nodes.externalBox,ctx.locked||ctx.signed||!ctx.hook);
+      renderSessionRow(ctx);
+      setHidden(nodes.disabledBox,!ctx.locked);
+      if(ctx.locked) nodes.disabledMessage.textContent=state.disabledMessage||'';
+    }
+    function renderPromptMeta(ctx){
+      const max=ctx.caps?ctx.caps.maxPromptChars:MAX_PROMPT_FALLBACK;
       if(nodes.prompt){
-        if(nodes.prompt.getAttribute('maxlength')!==String(max)) nodes.prompt.setAttribute('maxlength',String(max));
+        if(nodes.prompt.getAttribute('maxlength')!==String(max)){
+          nodes.prompt.setAttribute('maxlength',String(max));
+        }
         nodes.promptLabel.textContent='검토 지시 (최대 '+max+'자)';
       }
       const count=codePoints(nodes.prompt?nodes.prompt.value:'');
       nodes.promptCount.textContent=count+' / '+max+'자';
+      return {max,count};
+    }
+    function selectedModelValue(caps){
+      if(caps.models.includes(state.model)) return state.model;
+      return caps.models[0]||'';
+    }
+    function selectedEffortValue(caps){
+      if(caps.efforts.includes(state.effort)) return state.effort;
+      if(caps.efforts.includes('high')) return 'high';
+      return caps.efforts[0]||'';
+    }
+    function renderSelectValues(caps){
+      if(!caps) return;
+      if(nodes.model) nodes.model.value=selectedModelValue(caps);
+      if(nodes.effort) nodes.effort.value=selectedEffortValue(caps);
+    }
+    function renderInputState(ctx){
       nodes.fileStatus.textContent=fileStatusText();
       if(nodes.useEvidence) nodes.useEvidence.checked=state.useEvidence===true;
       if(nodes.role) nodes.role.value=nodes.role.value==='blue'?'blue':'red';
-      if(caps){
-        if(nodes.model) nodes.model.value=caps.models.includes(state.model)?state.model:(caps.models[0]||'');
-        if(nodes.effort) nodes.effort.value=caps.efforts.includes(state.effort)?state.effort:(caps.efforts.includes('high')?'high':(caps.efforts[0]||''));
-      }
-
+      renderSelectValues(ctx.caps);
+    }
+    function renderRestoreAction(){
       const restoreAvailable=!!state.originalInput&&(!state.upload||!state.originalInput.upload
         ||state.upload.id!==state.originalInput.upload.id);
       setHidden(nodes.inputActions,!restoreAvailable);
       nodes.restoreOriginal.disabled=!!state.busy;
-
+    }
+    function runAvailability(ctx,meta){
       const activeJob=!!state.job&&!TERMINAL_STATES.includes(state.job.state);
-      const overPrompt=count>max;
       const fileReady=!!(state.file&&state.fileSha)||!!state.upload;
-      const canRun=operate&&signed&&!!caps&&fileReady&&!state.busy&&!activeJob&&!state.fileError&&count>0&&!overPrompt;
-      nodes.run.disabled=!canRun;
-      nodes.run.textContent=state.busy==='upload'?'파일 업로드 중…':state.busy==='submit'?'작업 접수 중…':roleLabel();
-      const busy=!!state.busy;
-      nodes.file.disabled=!operate||busy;
-      nodes.role.disabled=!operate||busy;
-      nodes.prompt.disabled=!operate||busy;
-      nodes.model.disabled=!operate||busy||!caps||caps.models.length===0;
-      nodes.effort.disabled=!operate||busy||!caps||caps.efforts.length===0;
-      setHidden(nodes.cancel,!(activeJob&&signed));
-      nodes.cancel.disabled=busy;
-      setHidden(nodes.refresh,!(state.job&&!busy&&!state.pollTimer&&(activeJob||state.pollFailures>0)));
-
+      const canRun=ctx.operate&&ctx.signed&&!!ctx.caps&&fileReady&&!ctx.busy&&!activeJob
+        &&!state.fileError&&meta.count>0&&meta.count<=meta.max;
+      return {activeJob,fileReady,canRun};
+    }
+    function refreshVisible(ctx,activeJob){
+      return !!state.job&&!ctx.busy&&!state.pollTimer&&(activeJob||state.pollFailures>0);
+    }
+    function renderRunButtons(ctx,availability){
+      nodes.run.disabled=!availability.canRun;
+      nodes.run.textContent=state.busy==='upload'?'파일 업로드 중…'
+        :state.busy==='submit'?'작업 접수 중…':roleLabel();
+      setHidden(nodes.cancel,!(availability.activeJob&&ctx.signed));
+      nodes.cancel.disabled=ctx.busy;
+      setHidden(nodes.refresh,!refreshVisible(ctx,availability.activeJob));
+    }
+    function renderInputDisabled(ctx){
+      nodes.file.disabled=!ctx.operate||ctx.busy;
+      nodes.role.disabled=!ctx.operate||ctx.busy;
+      nodes.prompt.disabled=!ctx.operate||ctx.busy;
+      nodes.model.disabled=!ctx.operate||ctx.busy||!ctx.caps||ctx.caps.models.length===0;
+      nodes.effort.disabled=!ctx.operate||ctx.busy||!ctx.caps||ctx.caps.efforts.length===0;
+    }
+    function renderJobSection(){
       setHidden(nodes.jobBox,!state.job);
-      if(state.job){
-        nodes.jobState.textContent=jobStateText();
-        nodes.jobProgress.textContent=jobProgressText();
-        nodes.jobModel.textContent=jobModelText();
-        nodes.jobUsage.textContent=usageText();
-        const failure=failureLine();
-        nodes.jobFailure.textContent=failure;
-        setHidden(nodes.jobFailure,!failure);
-        nodes.progress.textContent=`${jobStateText()} · ${jobProgressText()}`;
-      }else{
+      if(!state.job){
         nodes.progress.textContent='';
         setHidden(nodes.jobFailure,true);
         nodes.jobFailure.textContent='';
+        return;
       }
-
-      renderCandidates();
-
+      nodes.jobState.textContent=jobStateText();
+      const progressText=jobProgressText();
+      nodes.jobProgress.textContent=progressText;
+      nodes.jobModel.textContent=jobModelText();
+      nodes.jobUsage.textContent=usageText();
+      const failure=failureLine();
+      nodes.jobFailure.textContent=failure;
+      setHidden(nodes.jobFailure,!failure);
+      nodes.progress.textContent=progressText?`${jobStateText()} · ${progressText}`:jobStateText();
+    }
+    function resultCountParts(summary){
+      const parts=[];
+      if(summary.total!==null) parts.push('항목 '+summary.total);
+      if(summary.accepted!==null) parts.push('수용 '+summary.accepted);
+      if(summary.rejected!==null) parts.push('거절 '+summary.rejected);
+      if(summary.unresolved!==null) parts.push('미해결 '+summary.unresolved);
+      if(summary.partial||summary.incomplete) parts.push('부분 결과');
+      if(summary.remaining) parts.push('미검토 배치 '+summary.remaining+'개');
+      return parts;
+    }
+    function appendResultRows(rows){
+      for(const row of rows){
+        nodes.resultItems.append(el('li',{className:'hosted-ai-item'},
+          el('span',{className:'hosted-ai-item-status',textContent:row.status==='rejected'?'거절':'미해결'}),
+          el('span',{className:'hosted-ai-item-name',textContent:row.label||'(설명 없음)'})));
+      }
+    }
+    function resultNotes(summary){
+      const notes=[];
+      if(summary.partial||summary.incomplete||state.job.state==='interrupted'){
+        notes.push('일부 결과만 있습니다. 미검토 배치는 자동으로 다시 실행하지 않았습니다.');
+      }
+      if(summary.total===null&&summary.accepted===null&&summary.rejected===null
+        &&summary.unresolved===null){
+        notes.push('결과 요약 형식이 이 화면과 다릅니다. 결과 파일이 있으면 내려받아 확인하세요.');
+      }
+      return notes;
+    }
+    function renderReviewResult(summary){
+      const parts=resultCountParts(summary);
+      nodes.resultCounts.textContent=parts.length?parts.join(' · '):'서버가 항목 수를 제공하지 않았습니다.';
+      appendResultRows(summary.rows);
+      const notes=resultNotes(summary);
+      nodes.resultNote.textContent=notes.join(' ');
+      setHidden(nodes.resultNote,!notes.length);
+    }
+    function renderApplyResult(applied){
+      const parts=applied.parts.slice();
+      if(applied.output) parts.push('출력 sha256 '+applied.output);
+      parts.push('모델 호출 없음');
+      nodes.resultCounts.textContent=parts.join(' · ');
+      nodes.resultNote.textContent=applied.verified
+        ?'서버가 출력 해시와 쪽수 검증 결과를 기록했습니다.'
+        :'서버가 검증 기록을 제공하지 않았습니다.';
+      setHidden(nodes.resultNote,!nodes.resultNote.textContent);
+    }
+    function renderResults(){
       const applied=state.job?applySummary(state.job.result):null;
       const summary=state.job&&!applied?summarizeResult(state.job.result):null;
       const showResult=!!applied||(!!summary&&summary.available);
       setHidden(nodes.resultSection,!showResult);
       clearList(nodes.resultItems);
-      if(applied){
-        const parts=applied.parts.slice();
-        if(applied.output) parts.push('출력 sha256 '+applied.output);
-        parts.push('모델 호출 없음');
-        nodes.resultCounts.textContent=parts.join(' · ');
-        nodes.resultNote.textContent=applied.verified
-          ?'서버가 출력 해시와 쪽수 검증 결과를 기록했습니다.'
-          :'서버가 검증 기록을 제공하지 않았습니다.';
-        setHidden(nodes.resultNote,!nodes.resultNote.textContent);
-      }else if(showResult){
-        const parts=[];
-        if(summary.total!==null) parts.push('항목 '+summary.total);
-        if(summary.accepted!==null) parts.push('수용 '+summary.accepted);
-        if(summary.rejected!==null) parts.push('거절 '+summary.rejected);
-        if(summary.unresolved!==null) parts.push('미해결 '+summary.unresolved);
-        if(summary.partial||summary.incomplete) parts.push('부분 결과');
-        if(summary.remaining) parts.push('미검토 배치 '+summary.remaining+'개');
-        nodes.resultCounts.textContent=parts.length?parts.join(' · '):'서버가 항목 수를 제공하지 않았습니다.';
-        for(const row of summary.rows){
-          nodes.resultItems.append(el('li',{className:'hosted-ai-item'},
-            el('span',{className:'hosted-ai-item-status',textContent:row.status==='rejected'?'거절':'미해결'}),
-            el('span',{className:'hosted-ai-item-name',textContent:row.label||'(설명 없음)'})));
-        }
-        const notes=[];
-        if(summary.partial||summary.incomplete||state.job.state==='interrupted') notes.push('실행이 완료되지 않아 일부 결과만 있을 수 있습니다. 서버가 보고한 미검토 배치는 다시 실행하기 전까지 검토되지 않았습니다. 자동으로 다시 실행하지 않았습니다.');
-        if(summary.total===null&&summary.accepted===null&&summary.rejected===null&&summary.unresolved===null) notes.push('결과 요약 형식이 이 화면과 다릅니다. 결과 파일이 있으면 내려받아 확인하세요.');
-        nodes.resultNote.textContent=notes.join(' ');
-        setHidden(nodes.resultNote,!notes.length);
-      }
-
-      const artifacts=state.job&&Array.isArray(state.job.artifacts)
-        ?state.job.artifacts.filter(a=>a&&typeof a.id==='string'&&a.id)
-        :[];
+      if(applied) return renderApplyResult(applied);
+      if(showResult) renderReviewResult(summary);
+    }
+    function artifactListForJob(){
+      if(!state.job||!Array.isArray(state.job.artifacts)) return [];
+      return state.job.artifacts.filter(artifact=>artifact&&typeof artifact.id==='string'&&artifact.id);
+    }
+    function artifactMetaText(artifact){
+      return [artifact.mime,sizeLabel(artifact.bytes)]
+        .filter(value=>typeof value==='string'&&value&&value!=='크기 정보 없음').join(' · ')
+        ||'파일 정보 없음';
+    }
+    function renderArtifacts(){
+      const artifacts=artifactListForJob();
       setHidden(nodes.artifactsSection,!artifacts.length);
       clearList(nodes.artifacts);
       for(const artifact of artifacts){
         const button=el('button',{type:'button',className:'button secondary',textContent:'내려받기'});
         button.addEventListener('click',()=>{downloadArtifact(artifact);});
-        const meta=[artifact.mime,sizeLabel(artifact.bytes)].filter(value=>typeof value==='string'&&value&&value!=='크기 정보 없음');
         nodes.artifacts.append(el('li',{className:'hosted-ai-item hosted-ai-artifact'},
           el('span',{className:'hosted-ai-item-name',textContent:safeName(artifact.name)||'결과 파일'}),
-          el('span',{className:'muted',textContent:meta.join(' · ')||'파일 정보 없음'}),
+          el('span',{className:'muted',textContent:artifactMetaText(artifact)}),
           button));
       }
       nodes.downloadStatus.textContent=state.downloadStatus||'';
-
+    }
+    function editedMetaText(edited){
+      const meta=[safeName(edited.name)||'수정본 PDF'];
+      if(typeof edited.sha256==='string'&&edited.sha256) meta.push('sha256 '+edited.sha256);
+      meta.push(sizeLabel(edited.bytes));
+      if((state.blueSource&&state.blueSource.sha256===edited.sha256)
+        ||(state.upload&&edited.sha256&&state.upload.sha256===edited.sha256)){
+        meta.push('BLUE 입력으로 등록됨');
+      }
+      return meta.join(' · ');
+    }
+    function renderEdited(){
       const edited=editedArtifact();
       setHidden(nodes.editedSection,!edited);
       if(edited){
-        const meta=[safeName(edited.name)||'수정본 PDF'];
-        if(typeof edited.sha256==='string'&&edited.sha256) meta.push('sha256 '+edited.sha256);
-        meta.push(sizeLabel(edited.bytes));
-        if((state.blueSource&&state.blueSource.sha256===edited.sha256)
-          ||(state.upload&&edited.sha256&&state.upload.sha256===edited.sha256)) meta.push('BLUE 입력으로 등록됨');
-        nodes.editedNote.textContent='수정본: '+meta.join(' · ')+'. BLUE에는 이 파일만 전달하며 RED 결과·후보·근거는 보내지 않습니다.';
+        nodes.editedNote.textContent='수정본: '+editedMetaText(edited)
+          +'. BLUE에는 이 수정본만 전달하며 RED 결과·후보·근거는 보내지 않습니다.';
         nodes.editedDownload.disabled=!!state.busy;
         nodes.handoff.disabled=!!state.busy;
       }
       nodes.editedStatus.textContent=state.editedStatus||'';
+    }
+    function render(){
+      if(!nodes.status) return;
+      const ctx=renderContext();
+      renderStatus();
+      renderGate(ctx);
+      setHidden(nodes.config,!ctx.operate);
+      if(!ctx.operate) return;
+      const meta=renderPromptMeta(ctx);
+      renderInputState(ctx);
+      renderRestoreAction();
+      const availability=runAvailability(ctx,meta);
+      renderRunButtons(ctx,availability);
+      renderInputDisabled(ctx);
+      renderJobSection();
+      renderCandidates();
+      renderResults();
+      renderArtifacts();
+      renderEdited();
     }
 
     function snapshot(){

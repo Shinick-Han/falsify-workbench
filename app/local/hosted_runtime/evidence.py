@@ -94,9 +94,7 @@ def handle(summary):
     return {'paperId': summary['paperId'], 'fileHash': summary['fileHash']}
 
 
-def artifact(store, summary):
-    """Bounded evidence.json: store summary and ids/types/pages/captions/counts only."""
-    paper_id = summary['paperId']
+def _artifact_items(store, paper_id):
     items = []
     offset = 0
     total = 0
@@ -124,11 +122,16 @@ def artifact(store, summary):
         raise EvidenceError('evidence_unavailable') from None
     except Exception:
         raise EvidenceError('evidence_unavailable') from None
+    return items, total
+
+
+def artifact(store, summary):
+    """Bounded evidence.json: store summary and ids/types/pages/captions/counts only."""
+    items, total = _artifact_items(store, summary['paperId'])
     counts = summary.get('counts') if isinstance(summary.get('counts'), dict) else {}
-    total_items = int(counts.get('tables', 0) or 0) + int(counts.get('figures', 0) or 0)
     if not total:
-        total = total_items
-    bounded = {
+        total = int(counts.get('tables', 0) or 0) + int(counts.get('figures', 0) or 0)
+    return {
         'schema': 'falsify.hosted-evidence.v1',
         'summary': {key: summary.get(key) for key in (
             'schema', 'paperId', 'fileHash', 'status', 'pageCount', 'counts',
@@ -144,7 +147,60 @@ def artifact(store, summary):
                         'document bytes stay in the evidence store.'),
         },
     }
-    return bounded
+
+
+def _table_position(edit):
+    item_id = edit.get('itemId')
+    row, column = edit.get('row'), edit.get('column')
+    if (not isinstance(item_id, str) or not item_id
+            or type(row) is not int or row < 0
+            or type(column) is not int or column < 0):
+        raise EvidenceError('visual_edit_invalid')
+    return item_id, row, column
+
+
+def _table_cell(store, summary, edit):
+    item_id, row, column = _table_position(edit)
+    try:
+        item = store.read_item(summary['paperId'], item_id)
+    except (KeyError, ValueError):
+        raise EvidenceError('visual_edit_invalid') from None
+    if not isinstance(item, dict) or item.get('type') != 'table':
+        raise EvidenceError('visual_edit_invalid')
+    table = item.get('table') if isinstance(item.get('table'), dict) else {}
+    cell = next((candidate for candidate in (table.get('cells') or [])
+                 if candidate.get('row') == row and candidate.get('column') == column), None)
+    if cell is None or edit.get('before') != cell.get('text'):
+        raise EvidenceError('visual_edit_invalid')
+    return item_id, row, column
+
+
+def _validate_table_replacement(before, after, rationale):
+    if (not isinstance(after, str) or len(after) > 4000
+            or after == before or '\x00' in after):
+        raise EvidenceError('visual_edit_invalid')
+    if rationale is not None and (not isinstance(rationale, str)
+                                  or len(rationale) > 3000):
+        raise EvidenceError('visual_edit_invalid')
+
+
+def _table_operation(store, summary, edit, index):
+    if not isinstance(edit, dict):
+        raise EvidenceError('visual_edit_invalid')
+    if edit.get('kind') != 'table-cell':
+        raise EvidenceError('visual_edit_kind_unsupported')
+    item_id, row, column = _table_cell(store, summary, edit)
+    before, after = edit.get('before'), edit.get('after')
+    _validate_table_replacement(before, after, edit.get('rationale'))
+    return {
+        'id': 've-%d' % (index + 1),
+        'kind': 'table-cell',
+        'itemId': item_id,
+        'row': row,
+        'column': column,
+        'before': before,
+        'after': after,
+    }
 
 
 def _table_operations(store, summary, visual_edits):
@@ -154,45 +210,7 @@ def _table_operations(store, summary, visual_edits):
         raise EvidenceError('visual_edit_invalid')
     operations = []
     for index, edit in enumerate(visual_edits):
-        if not isinstance(edit, dict):
-            raise EvidenceError('visual_edit_invalid')
-        kind = edit.get('kind')
-        if kind != 'table-cell':
-            raise EvidenceError('visual_edit_kind_unsupported')
-        item_id = edit.get('itemId')
-        row, column = edit.get('row'), edit.get('column')
-        before, after = edit.get('before'), edit.get('after')
-        if (not isinstance(item_id, str) or not item_id
-                or type(row) is not int or row < 0
-                or type(column) is not int or column < 0):
-            raise EvidenceError('visual_edit_invalid')
-        try:
-            item = store.read_item(summary['paperId'], item_id)
-        except (KeyError, ValueError):
-            raise EvidenceError('visual_edit_invalid') from None
-        if not isinstance(item, dict) or item.get('type') != 'table':
-            raise EvidenceError('visual_edit_invalid')
-        cells = item.get('table', {}).get('cells') if isinstance(item.get('table'), dict) else None
-        cell = next((candidate for candidate in (cells or [])
-                     if candidate.get('row') == row and candidate.get('column') == column), None)
-        if cell is None or before != cell.get('text'):
-            raise EvidenceError('visual_edit_invalid')
-        if (not isinstance(after, str) or len(after) > 4000
-                or after == before or '\x00' in after):
-            raise EvidenceError('visual_edit_invalid')
-        rationale = edit.get('rationale')
-        if rationale is not None and (not isinstance(rationale, str)
-                                      or len(rationale) > 3000):
-            raise EvidenceError('visual_edit_invalid')
-        operations.append({
-            'id': 've-%d' % (index + 1),
-            'kind': 'table-cell',
-            'itemId': item_id,
-            'row': row,
-            'column': column,
-            'before': before,
-            'after': after,
-        })
+        operations.append(_table_operation(store, summary, edit, index))
     return operations
 
 
@@ -241,80 +259,97 @@ def check_text_ambiguity(pdf_bytes, text_edits):
                 raise EvidenceError('apply_edit_ambiguous')
 
 
-def apply_edits(store, summary, visual_edits, text_edits, source_bytes, revision, *,
-                cancelled=None):
-    """Apply selected table-cell and text-span edits to an exact source PDF copy."""
-    source_sha = _sha(source_bytes)
+def _validate_apply_source(summary, visual_edits, source_sha):
     if visual_edits and summary is None:
         raise EvidenceError('apply_source_mismatch')
     if summary is not None and summary.get('fileHash') != source_sha:
         raise EvidenceError('apply_source_mismatch')
-    operations = _table_operations(store, summary, visual_edits)
-    if not operations and not text_edits:
-        raise EvidenceError('apply_no_edits')
-    current = source_bytes
-    source_pages = _page_count(source_bytes)
-    visual_result = None
-    if operations:
-        from paper_visual_edit import export_visual
-        request = {
-            'schema': 'falsify.visual-edit-request.v1',
-            'paperId': summary['paperId'],
-            'fileHash': summary['fileHash'],
-            'revision': str(revision),
-            'operations': operations,
-        }
-        try:
-            visual_result = export_visual(request, store=store, cancelled=cancelled)
-        except Exception:
-            if cancelled is not None and cancelled.is_set():
-                raise EvidenceError('evidence_cancelled') from None
-            raise EvidenceError('visual_edit_invalid') from None
-        try:
-            current = base64.b64decode(visual_result['file'], validate=True)
-        except (KeyError, TypeError, ValueError):
-            raise EvidenceError('apply_verify_failed') from None
-        if (visual_result.get('sourceSha256') != source_sha
-                or visual_result.get('outputSha256') != _sha(current)
-                or visual_result.get('pageCount') != source_pages):
-            raise EvidenceError('apply_verify_failed')
-        visual_verification = visual_result.get('verification')
-        if (not isinstance(visual_verification, dict)
-                or visual_verification.get('status') != 'passed'):
-            raise EvidenceError('apply_verify_failed')
-        if len(visual_result.get('changes') or []) != len(operations):
-            raise EvidenceError('apply_edit_incomplete')
-    text_result = None
-    if text_edits:
-        from paper_text_span_mutator import SpanMutationError, mutate_pdf_text_spans
-        check_text_ambiguity(current, list(text_edits))
-        try:
-            text_result = mutate_pdf_text_spans(current, list(text_edits),
-                                               allow_trace=False)
-        except SpanMutationError as error:
-            if cancelled is not None and cancelled.is_set():
-                raise EvidenceError('evidence_cancelled') from None
-            code = getattr(error, 'code', None)
-            if code == 'text_span_trace_detected':
-                raise EvidenceError('apply_edit_trace') from None
-            raise EvidenceError('apply_edit_invalid') from None
-        except Exception:
-            if cancelled is not None and cancelled.is_set():
-                raise EvidenceError('evidence_cancelled') from None
-            raise EvidenceError('apply_edit_invalid') from None
-        output = text_result.get('pdfBytes') if isinstance(text_result, dict) else None
-        if (not isinstance(output, (bytes, bytearray))
-                or text_result.get('sourceSha256') != _sha(current)
-                or text_result.get('outputSha256') != _sha(output)):
-            raise EvidenceError('apply_verify_failed')
-        if text_result.get('appliedCount') != len(text_edits):
-            raise EvidenceError('apply_edit_incomplete')
-        current = bytes(output)
-    output_sha = _sha(current)
+
+
+def _decode_visual_output(visual_result):
+    try:
+        return base64.b64decode(visual_result['file'], validate=True)
+    except (KeyError, TypeError, ValueError):
+        raise EvidenceError('apply_verify_failed') from None
+
+
+def _verify_visual_result(visual_result, current, source_sha, source_pages, operations):
+    if (visual_result.get('sourceSha256') != source_sha
+            or visual_result.get('outputSha256') != _sha(current)
+            or visual_result.get('pageCount') != source_pages):
+        raise EvidenceError('apply_verify_failed')
+    verification = visual_result.get('verification')
+    if (not isinstance(verification, dict)
+            or verification.get('status') != 'passed'):
+        raise EvidenceError('apply_verify_failed')
+    if len(visual_result.get('changes') or []) != len(operations):
+        raise EvidenceError('apply_edit_incomplete')
+
+
+def _run_visual_edit(store, summary, operations, source_bytes, source_sha,
+                     source_pages, revision, cancelled):
+    if not operations:
+        return source_bytes, None
+    from paper_visual_edit import export_visual
+    request = {
+        'schema': 'falsify.visual-edit-request.v1',
+        'paperId': summary['paperId'],
+        'fileHash': summary['fileHash'],
+        'revision': str(revision),
+        'operations': operations,
+    }
+    try:
+        visual_result = export_visual(request, store=store, cancelled=cancelled)
+    except Exception:
+        if cancelled is not None and cancelled.is_set():
+            raise EvidenceError('evidence_cancelled') from None
+        raise EvidenceError('visual_edit_invalid') from None
+    current = _decode_visual_output(visual_result)
+    _verify_visual_result(visual_result, current, source_sha, source_pages, operations)
+    return current, visual_result
+
+
+def _run_text_mutation(current, text_edits, cancelled):
+    from paper_text_span_mutator import SpanMutationError, mutate_pdf_text_spans
+    check_text_ambiguity(current, list(text_edits))
+    try:
+        return mutate_pdf_text_spans(current, list(text_edits), allow_trace=False)
+    except SpanMutationError as error:
+        if cancelled is not None and cancelled.is_set():
+            raise EvidenceError('evidence_cancelled') from None
+        if getattr(error, 'code', None) == 'text_span_trace_detected':
+            raise EvidenceError('apply_edit_trace') from None
+        raise EvidenceError('apply_edit_invalid') from None
+    except Exception:
+        if cancelled is not None and cancelled.is_set():
+            raise EvidenceError('evidence_cancelled') from None
+        raise EvidenceError('apply_edit_invalid') from None
+
+
+def _verify_text_result(text_result, current, text_edits):
+    output = text_result.get('pdfBytes') if isinstance(text_result, dict) else None
+    if (not isinstance(output, (bytes, bytearray))
+            or text_result.get('sourceSha256') != _sha(current)
+            or text_result.get('outputSha256') != _sha(output)):
+        raise EvidenceError('apply_verify_failed')
+    if text_result.get('appliedCount') != len(text_edits):
+        raise EvidenceError('apply_edit_incomplete')
+    return bytes(output)
+
+
+def _run_text_edit(current, text_edits, cancelled):
+    if not text_edits:
+        return current, None
+    text_result = _run_text_mutation(current, text_edits, cancelled)
+    return _verify_text_result(text_result, current, text_edits), text_result
+
+
+def _verify_output_pdf(current, source_pages):
     if len(current) < 8 or not current.startswith(b'%PDF-') or _page_count(current) != source_pages:
         raise EvidenceError('apply_verify_failed')
-    visual_changes = _minimal_changes(visual_result.get('changes')) if visual_result else []
-    text_changes = _minimal_changes(text_result.get('changes')) if text_result else []
+
+
+def _verification_view(visual_result, text_result):
     verification = {}
     if visual_result:
         detail = visual_result.get('verification') if isinstance(
@@ -324,7 +359,14 @@ def apply_edits(store, summary, visual_edits, text_edits, source_bytes, revision
         verification['visualChecks'] = list(detail.get('checks') or [])
     if text_result:
         verification['textFallbackCount'] = text_result.get('fallbackCount', 0)
-    apply_summary = {
+    return verification
+
+
+def _apply_summary(source_sha, output_sha, source_pages, operations, visual_result,
+                   text_edits, text_result):
+    visual_changes = _minimal_changes(visual_result.get('changes')) if visual_result else []
+    text_changes = _minimal_changes(text_result.get('changes')) if text_result else []
+    return {
         'schema': 'falsify.hosted-apply.v1',
         'applyOnly': True,
         'sourceSha256': source_sha,
@@ -342,8 +384,27 @@ def apply_edits(store, summary, visual_edits, text_edits, source_bytes, revision
             'rejected': 0,
             'changes': text_changes,
         },
-        'verification': verification,
+        'verification': _verification_view(visual_result, text_result),
         'meaning': ('Selected table-cell and text-span edits applied to an exact source copy; '
                     'output hash and page count verified. No model call and no token usage.'),
     }
+
+
+def apply_edits(store, summary, visual_edits, text_edits, source_bytes, revision, *,
+                cancelled=None):
+    """Apply selected table-cell and text-span edits to an exact source PDF copy."""
+    source_sha = _sha(source_bytes)
+    _validate_apply_source(summary, visual_edits, source_sha)
+    operations = _table_operations(store, summary, visual_edits)
+    if not operations and not text_edits:
+        raise EvidenceError('apply_no_edits')
+    source_pages = _page_count(source_bytes)
+    current, visual_result = _run_visual_edit(
+        store, summary, operations, source_bytes, source_sha, source_pages,
+        revision, cancelled)
+    current, text_result = _run_text_edit(current, text_edits, cancelled)
+    _verify_output_pdf(current, source_pages)
+    output_sha = _sha(current)
+    apply_summary = _apply_summary(source_sha, output_sha, source_pages, operations,
+                                   visual_result, text_edits, text_result)
     return current, apply_summary
