@@ -21,6 +21,11 @@
   const GET_TRIES=3;
   const DERIVATION='모델이 이미지에서 추정해 읽은 결과입니다. 측정값으로 확정하지 않았고 검수된 인용이 아닙니다.';
   const PATH_MSG='허용되지 않은 로컬 경로입니다.';
+  const HOSTED_OFFLINE='웹 실행 서버에 연결하지 못했습니다. 잠시 후 다시 시도하세요.';
+  function hostedPaperMode(){
+    const api=root.FalsifyPaperVisualIntegration;
+    return !!(api&&typeof api.paperUsesHosted==='function'&&api.paperUsesHosted());
+  }
   function failureText(code){
     const reasons={analysis_dependency_missing:'PC에 OCR·그래프 분석 도구를 설치하세요.',
       analysis_runtime_missing:'PC의 분석 실행 환경을 다시 설치하세요.',
@@ -1105,8 +1110,8 @@
       return true;
     }
     function availableSession(session){
-      if(!session||typeof session.request!=='function'){say(progress,'PC 연결 후 다시 읽으세요.',true);errorCode='unavailable';return false;}
-      if(typeof getCapabilities==='function'&&!getCapabilities()?.paperEnrichment?.supported){say(progress,'PC 연결 프로그램을 최신 버전으로 업데이트하세요.',true);errorCode='unavailable';return false;}
+      if(!session||typeof session.request!=='function'){say(progress,hostedPaperMode()?HOSTED_OFFLINE:'PC 연결 후 다시 읽으세요.',true);errorCode='unavailable';return false;}
+      if(typeof getCapabilities==='function'&&!getCapabilities()?.paperEnrichment?.supported){say(progress,hostedPaperMode()?HOSTED_OFFLINE:'PC 연결 프로그램을 최신 버전으로 업데이트하세요.',true);errorCode='unavailable';return false;}
       return true;
     }
     function handlePostFailure(error){

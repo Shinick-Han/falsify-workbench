@@ -96,6 +96,37 @@
       chartEdits:items.map(toVisualChartEdit).filter(Boolean)
     };
   }
+  const HOSTED_OFFLINE='웹 실행 서버에 연결하지 못했습니다. 잠시 후 다시 시도하세요.';
+  function bridge(){return root.FalsifyLocalBridge||null;}
+  function localOn(){
+    const link=bridge();
+    if(!link||typeof link.state!=='function'||typeof link.session!=='function') return false;
+    try{return !!(link.state()&&link.state().connected&&link.session());}catch{return false;}
+  }
+  function hostedOn(){
+    const hosted=root.FalsifyHostedPaperSession;
+    return !!(hosted&&typeof hosted.available==='function'&&hosted.available());
+  }
+  function paperSession(){
+    const link=bridge();
+    if(localOn()) return link.session();
+    if(hostedOn()) return root.FalsifyHostedPaperSession.session();
+    return link&&typeof link.session==='function'?link.session():null;
+  }
+  function paperCapabilities(){
+    const link=bridge();
+    if(localOn()) return typeof link.capabilities==='function'?link.capabilities():null;
+    if(hostedOn()) return root.FalsifyHostedPaperSession.capabilities();
+    return link&&typeof link.capabilities==='function'?link.capabilities():null;
+  }
+  function paperUsesHosted(){return !localOn()&&hostedOn();}
+  function prepareError(){return paperUsesHosted()?HOSTED_OFFLINE:'PDF와 PC 연결을 확인하세요.';}
+  function prepareKey(src){
+    const caps=paperCapabilities();
+    const kind=localOn()?'local':(hostedOn()?'hosted':'bridge');
+    const instance=caps&&caps.companionInstance||null;
+    return kind+':'+src.fileHash+':'+JSON.stringify(instance);
+  }
   function describe(value){
     if(typeof value==='string'&&value.length<=8000)return value;
     const raw=JSON.stringify(value??null);
@@ -159,8 +190,8 @@
       return ()=>{if(released)return;released=true;localBusy=false;sync();};
     }
     async function prepare(){
-      const src=source(),session=B.session();if(!src||!session)throw Error('PDF와 PC 연결을 확인하세요.');
-      const key=src.fileHash+':'+JSON.stringify(B.capabilities?.()?.companionInstance??null);
+      const src=source(),session=paperSession();if(!src||!session)throw Error(prepareError());
+      const key=prepareKey(src);
       if(prepared?.key===key)return prepared.promise;
       const pending=(async()=>{
         const bytes=new Uint8Array(await src.file.arrayBuffer());if(await hash(bytes)!==src.fileHash)throw Error('원본 파일이 달라졌습니다.');
@@ -189,9 +220,9 @@
         if(source()?.fileHash===src.fileHash){lastRecordHash=output.outputFileHash;say('변경 전후와 위치를 사람 편집 기록에 남겼습니다.');}
       }catch{say('PDF는 준비됐습니다. 전체 변경 기록은 JSON으로 저장하세요.');}
     }
-    editor=root.FalsifyVisualEditUI.create({host,getSource:source,getSelectionPage:selectionPage,getSession:()=>B.session(),hold:request=>{if(!request)return hold();if(request.active){editorRelease=hold();return !!editorRelease;}editorRelease?.();editorRelease=null;return true;},onChange:value=>{stagedChanges=structuredClone(value.changes||[]);},onOutput});
+    editor=root.FalsifyVisualEditUI.create({host,getSource:source,getSelectionPage:selectionPage,getSession:()=>paperSession(),hold:request=>{if(!request)return hold();if(request.active){editorRelease=hold();return !!editorRelease;}editorRelease?.();editorRelease=null;return true;},onChange:value=>{stagedChanges=structuredClone(value.changes||[]);},onOutput});
     if(root.FalsifyPaperEnrichmentUI&&analysisHost){
-      enrichment=root.FalsifyPaperEnrichmentUI.create({host:analysisHost,getSource:source,getSession:()=>B.session(),getCapabilities:()=>B.capabilities(),preparePaper:prepare,
+      enrichment=root.FalsifyPaperEnrichmentUI.create({host:analysisHost,getSource:source,getSession:()=>paperSession(),getCapabilities:()=>paperCapabilities(),preparePaper:prepare,
         onBusyChange:value=>{enrichmentBusy=!!value;sync();},
         onResult:result=>{if(result.kind==='chart'&&editor.setAnalysis)editor.setAnalysis(result);else if(result.kind==='ocr'&&editor.setOcrAnalysis)editor.setOcrAnalysis(result);else void editor.refresh?.();}});
     }
@@ -204,7 +235,9 @@
     doc.addEventListener('falsify:paper-workspace-source',refresh);
     doc.addEventListener('falsify:paper-workspace-output',refresh);
     doc.addEventListener('falsify:document-clear',refresh);
-    doc.addEventListener('falsify:local-bridge',()=>{prepared=null;sync();if(source()&&!editor.snapshot?.()?.paperId)void editor.refresh?.();});
+    function resetPrepared(){prepared=null;sync();if(source()&&!editor.snapshot?.()?.paperId)void editor.refresh?.();}
+    doc.addEventListener('falsify:local-bridge',resetPrepared);
+    doc.addEventListener('falsify:hosted-paper',resetPrepared);
     doc.addEventListener('falsify:document-state',event=>{const value=!!event.detail?.busy;if(redBusy!==value){redBusy=value;sync();}});
     function stageFromProposals(snapshotOrItems,options={}){
       const src=source();
@@ -217,7 +250,7 @@
     }
     refresh();return {refresh,source,editor,enrichment,stageFromProposals};
   }
-  const api={mount,manualEdits,tableCellPatchesFromProposals,visualChartEditsFromProposals,stageExternalProposals};
+  const api={mount,manualEdits,tableCellPatchesFromProposals,visualChartEditsFromProposals,stageExternalProposals,paperSession,paperCapabilities,paperUsesHosted};
   root.FalsifyVisualEditIntegration=api;
   root.FalsifyPaperVisualIntegration=api;
   if(typeof module==='object'&&module.exports)module.exports=api;

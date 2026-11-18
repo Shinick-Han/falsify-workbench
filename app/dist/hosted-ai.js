@@ -209,6 +209,39 @@
   function resolveDependencies(options){
     return Object.assign(resolveDomDependencies(options),resolveApiDependencies(options));
   }
+  let paperToolsState=null;
+  let paperAuthImpl=async()=>{const error=Error('auth');error.httpStatus=401;throw error;};
+  function paperFlag(tools, key){
+    if(!tools||typeof tools[key]!=='boolean') return null;
+    return tools[key];
+  }
+  function samePaperTools(a, b){
+    if(!!a!==!!b) return false;
+    if(!a||!b) return !a&&!b;
+    return a.enabled===b.enabled
+      &&paperFlag(a,'visualEditor')===paperFlag(b,'visualEditor')
+      &&paperFlag(a,'chartEdit')===paperFlag(b,'chartEdit')
+      &&paperFlag(a,'analysis')===paperFlag(b,'analysis');
+  }
+  function paperToolsOf(data){
+    const raw=data&&data.paperTools;
+    if(!raw||typeof raw!=='object'||Array.isArray(raw)||raw.enabled!==true) return null;
+    const out={enabled:true};
+    if(typeof raw.visualEditor==='boolean') out.visualEditor=raw.visualEditor;
+    if(typeof raw.chartEdit==='boolean') out.chartEdit=raw.chartEdit;
+    if(typeof raw.analysis==='boolean') out.analysis=raw.analysis;
+    return Object.freeze(out);
+  }
+  function emitPaperTools(doc){
+    if(!doc||typeof doc.dispatchEvent!=='function'||typeof CustomEvent!=='function') return;
+    try{doc.dispatchEvent(new CustomEvent('falsify:hosted-paper'));}catch{}
+  }
+  function publishPaperTools(doc, tools){
+    const next=tools&&tools.enabled===true?tools:null;
+    if(samePaperTools(paperToolsState, next)) return;
+    paperToolsState=next;
+    emitPaperTools(doc);
+  }
   function create(options={}){
     const deps=resolveDependencies(options);
     const {doc,host,storage,now,setT,clearT,fetchImpl,cryptoApi,UrlApi,Encoder,Abort,configFn,providerFn}=deps;
@@ -463,6 +496,7 @@
       state.capabilities=null;
       state.status='';
       stopPoll();
+      publishPaperTools(doc, null);
     }
     function fail(message){
       state.error=message;
@@ -515,7 +549,8 @@
         models,efforts,
         modelProviders:readModelProviders(data),
         maxUploadBytes:positiveInt(limits.maxUploadBytes)||MAX_UPLOAD_FALLBACK,
-        maxPromptChars:positiveInt(limits.maxPromptChars)||MAX_PROMPT_FALLBACK
+        maxPromptChars:positiveInt(limits.maxPromptChars)||MAX_PROMPT_FALLBACK,
+        paperTools:paperToolsOf(data)
       };
     }
 
@@ -552,6 +587,7 @@
       fillSelect(nodes.model,caps.models,'서버 기본값',caps.modelProviders);
       fillSelect(nodes.effort,caps.efforts,'서버 기본값');
       state.status=readyStatus();
+      publishPaperTools(doc, caps.paperTools);
     }
     async function probe(){
       state.capabilities=null;
@@ -564,6 +600,7 @@
       }catch(error){
         const authText=probeAuthText(error);
         if(authText){
+          publishPaperTools(doc, null);
           state.gate='ready';
           state.status=authText;
           render();
@@ -2343,8 +2380,24 @@
       return {gate:state.gate,signed:!!state.session,busy:state.busy,jobId:state.job?state.job.id:'',hasCapabilities:!!state.capabilities};
     }
 
+    async function paperToken(){
+      if(openMode()) return openBearer();
+      if(!currentToken()&&hookPresent()) await refreshHookSession();
+      return currentToken();
+    }
+    async function paperAuth(){
+      if(!state.apiBase) await ready;
+      const token=await paperToken();
+      if(!state.apiBase||!token){
+        const error=Error('auth');
+        error.httpStatus=401;
+        throw error;
+      }
+      return {apiBase:state.apiBase,token};
+    }
+    paperAuthImpl=paperAuth;
     if(host){build();start();}
-    return {ready,mount:(node)=>{if(node){host=node;build();start();}return ready;},destroy,state:snapshot};
+    return {ready,mount:(node)=>{if(node){host=node;build();start();}return ready;},destroy,state:snapshot,paperAuth};
   }
 
   function autoMount(){
@@ -2356,8 +2409,16 @@
     create({document,host});
   }
 
-  const api={create,version:VERSION};
-  if(typeof globalThis!=='undefined') globalThis.FalsifyHostedAi=api;
+  const api={
+    create,
+    version:VERSION,
+    paperAuth:(...args)=>paperAuthImpl(...args),
+    get paperTools(){return paperToolsState;}
+  };
+  if(typeof globalThis!=='undefined'){
+    globalThis.FalsifyHostedAi=api;
+    globalThis.FalsifyHostedAI=api;
+  }
   if(typeof document!=='undefined'){
     if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',autoMount,{once:true});
     else if(document.readyState) autoMount();

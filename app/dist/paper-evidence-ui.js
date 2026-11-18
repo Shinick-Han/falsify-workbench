@@ -10,12 +10,17 @@
   const MAX_PDF=25*1024*1024;
   const MAX_PIXELS=2000000;
   const HEX=/^[0-9a-f]{64}$/;
+  const HOSTED_OFFLINE='웹 실행 서버에 연결하지 못했습니다. 잠시 후 다시 시도하세요.';
+  function hostedPaperMode(){
+    const api=root.FalsifyPaperVisualIntegration;
+    return !!(api&&typeof api.paperUsesHosted==='function'&&api.paperUsesHosted());
+  }
   const TEXT={
     idle:'현재는 텍스트만 검토합니다.',
     waiting:'PDF를 선택하세요.',
     preparing:'표 셀과 그림 위치를 준비하고 있습니다.',
     textOnly:'텍스트만 검토합니다.',
-    unavailable:'PC 연결 후 다시 준비하세요.',
+    get unavailable(){return hostedPaperMode()?HOSTED_OFFLINE:'PC 연결 후 다시 준비하세요.';},
     path:'이 화면의 연결 모듈이 표·그림 경로를 아직 허용하지 않습니다. 텍스트 검토는 계속할 수 있습니다.',
     failed:'표·그림 준비에 실패했습니다. 다시 준비를 누르세요.',
     hash:'원본 파일이 바뀌어 표·그림을 준비하지 않았습니다. 파일을 다시 선택하세요.',
