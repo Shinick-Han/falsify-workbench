@@ -105,6 +105,23 @@
     if(button.textContent!==action)button.textContent=action;
     button.disabled=!nextAction;button.hidden=busy;
   }
+  function hostedBlueReady(){
+    try{
+      if(globalThis.FalsifyCloudConfig?.hostedAi?.enabled!==true)return false;
+      const cfg=$('#hosted-ai-config');return !!(cfg&&!cfg.hidden&&sourceFile&&/\.pdf$/i.test(sourceFile.name||''));
+    }catch{return false;}
+  }
+  function prepareHostedBlue(){
+    const role=$('#hosted-ai-role');if(role&&role.value!=='blue'){role.value='blue';role.dispatchEvent(new Event('change',{bubbles:true}));}
+    const prompt=$('#hosted-ai-prompt'),preset=$('#hosted-ai-preset-default');
+    if(prompt&&!prompt.value.trim()&&preset)preset.click();
+    revealControl($('#hosted-ai-run')||prompt);
+  }
+  function offlineBlueChoice(){
+    if(hostedBlueReady()){nextAction=prepareHostedBlue;return {text:'변경본이 준비됐습니다. 아래 웹 실행에서 바로 BLUE 검토를 시작하세요.',action:'웹 BLUE 검토 준비'};}
+    nextAction=()=>revealControl(document.querySelector('#external-blue textarea')||$('#doc-blue-response'));
+    return {text:'변경본이 준비됐습니다. 원하는 AI의 BLUE 답변을 가져오세요.',action:'AI 답변 가져오기'};
+  }
   function handoffChoice(pending){
     let text='',action='다음';
 
@@ -118,7 +135,7 @@
       const terminal=terminalKind(pending.record);action=terminal?'이전 요청 정리':'이전 요청 확인';
       nextAction=terminal?()=>void onDiscard():()=>{void recoverBlue();revealControl($('#doc-blue-pending-discard'));};
     }
-    else if(!B.capabilities()?.blue){text='변경본이 준비됐습니다. 원하는 AI의 BLUE 답변을 가져오세요.';action='AI 답변 가져오기';nextAction=()=>revealControl(document.querySelector('#external-blue textarea')||$('#doc-blue-response'));}
+    else if(!B.capabilities()?.blue)return offlineBlueChoice();
     else if(!FalsifyLab.allowed('blue')){text='변경본이 준비됐습니다. 선택한 BLUE 하네스를 확인하세요.';action='하네스 확인';nextAction=()=>revealControl(!$('#blue-harness-consent').checked?$('#blue-harness-consent'):$('#blue-harness'));}
     else if(!$('#doc-blue-consent').checked){text='이 변경본을 선택한 BLUE 도구에 보내 검토합니다.';action='이 파일로 BLUE 검토 시작';nextAction=()=>{$('#doc-blue-consent').checked=true;$('#doc-blue-consent').dispatchEvent(new Event('change'));$('#doc-blue-start').click();};}
     else{text='변경본과 BLUE 도구가 준비됐습니다.';action='BLUE 검토 시작';nextAction=()=>$('#doc-blue-start').click();}
@@ -255,7 +272,7 @@
     stage.addEventListener('pointercancel',()=>{drag=null;paint(null);});
     consent.addEventListener('change',changed);visualPicker={clear:clearPicker,setBusy:value=>{select.disabled=consent.disabled=value;prev.disabled=value||!view||view.page<=1;next.disabled=value||!view||view.page>=view.pages;whole.disabled=value||!view||!view.wholeFits;},selection:()=>chosen?[{page:chosen.page,bbox:[...chosen.bbox]}]:[]};
   }
-  $('#doc-blue-consent').addEventListener('change',controls);document.addEventListener('falsify:harness-consent',controls);
+  $('#doc-blue-consent').addEventListener('change',controls);document.addEventListener('falsify:harness-consent',controls);document.addEventListener('falsify:hosted-ai-state',handoffReadiness);
   document.addEventListener('falsify:harness-change',e=>{if(e.detail.role!=='blue')return;generation++;if(doc)doc.revision=crypto.randomUUID();invalidate();controls();msg('harness 변경: 이전 응답 무효화. 저장한 실행 기록은 보존됩니다.');});
   $('#doc-blue-budget').addEventListener('change',()=>{generation++;if(doc)doc.revision=crypto.randomUUID();invalidate();controls();msg('예산 변경: 이전 응답을 무효화했습니다.');});
   $('#doc-blue-request').addEventListener('click',async()=>{if(!doc||busy)return;const current=generation;try{const next=result&&request?request:await makeRequest();if(current!==generation)return;request=next;saveJSON(request,'falsify-document-blue-request.json');msg('논문과 BLUE harness 요청 저장. 모델은 호출하지 않았습니다. RED 계획·검수 기록은 포함하지 않습니다.');}catch(e){if(current===generation)msg(e.message,true);}});

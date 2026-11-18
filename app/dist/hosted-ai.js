@@ -21,6 +21,9 @@
   /* Apply-only jobs carry no model call. The gateway still requires a prompt, so this fixed, deterministic
      instruction is used and hashed with the selection; the user's RED instruction is never resent. */
   const APPLY_PROMPT='Apply the selected RED edits to the uploaded PDF only.';
+  const DEFAULT_RED_PROMPT='첨부한 논문에 대해 내·외부 근거로 검증 가능한 은닉 결함 후보(D1 수치·표·그림 불일치, D2 참고문헌·링크 왜곡, D3 논리 모순·과장, D4-1 결과 지위 오표기, S1 기전 극성 역전)를 원문 인용과 함께 제안하세요. 의도적 오류임을 드러내는 메타 문구는 넣지 마세요.';
+  const DEFAULT_BLUE_P0_PROMPT='첨부한 PDF만 사용해 독립·맹검 2단계 검증을 수행하세요. 웹 검색이나 외부 기억 없이 D1(수치·표·통계 불일치), D2(참고문헌·링크 오류), D3/D4-1/S1(논리 모순·지위 오표기·기전 역전) 의심 지점을 원문 인용과 근거로 빠짐없이 보고하세요.';
+  const DEFAULT_BLUE_P2_PROMPT='첨부한 PDF와 구조화 표·그림 근거를 교차 대조해 독립 검증을 수행하세요. 본문-표-그림 수치 불일치, 참고문헌·등록부 왜곡, 논리 비약을 원문 인용과 근거로 구분해 보고하세요.';
   const MAX_EDITS=100;
   const MAX_VISUAL_EDITS=12;
   const MAX_JOB_BODY_BYTES=60000;
@@ -256,16 +259,31 @@
       selection:{}, selectionVersion:0,
       editedStatus:'', originalInput:null, blueSource:null, useEvidence:true,
       pollTimer:null, pollAttempt:0, pollFailures:0, downloadStatus:'', timers:new Set(),
-      hookError:null
+      hookError:null, recordedJobs:new Set(), lastLedgerRedId:null, lastLedgerRunId:null, handoffSourceRunId:null,
+      pendingExternal:null
     };
     const nodes={};
+    const docListeners=[];
     let readyResolve=null;
     let builtSignature='';
+    let builtFindingsSignature='';
     const ready=new Promise(resolve=>{readyResolve=resolve;});
 
     function later(fn,ms){const id=setT(()=>{state.timers.delete(id);fn();},ms);state.timers.add(id);return id;}
     function cancelLater(id){if(id===null||id===undefined)return;state.timers.delete(id);clearT(id);}
-    function destroy(){for(const id of [...state.timers])cancelLater(id);state.pollTimer=null;}
+    function onDoc(type,handler){
+      if(!doc||typeof doc.addEventListener!=='function') return;
+      doc.addEventListener(type,handler);
+      docListeners.push([type,handler]);
+    }
+    function destroy(){
+      for(const id of [...state.timers])cancelLater(id);
+      for(const [type,handler] of docListeners){
+        if(doc&&typeof doc.removeEventListener==='function') doc.removeEventListener(type,handler);
+      }
+      docListeners.length=0;
+      state.pollTimer=null;
+    }
 
     function readStore(key){try{return storage.getItem(key);}catch{return null;}}
     function writeStore(key,value){try{storage.setItem(key,JSON.stringify(value));return true;}catch{return false;}}
@@ -693,8 +711,14 @@
       await probe();
       showGuestStartError();
       await restore();
+      await flushPendingExternal();
       render();
       finish();
+    }
+    async function flushPendingExternal(){
+      if(!state.pendingExternal||state.file||state.upload) return;
+      const pending=state.pendingExternal;state.pendingExternal=null;
+      await adoptExternalFile(pending.file,pending.roleHint);
     }
     function finish(){if(readyResolve){readyResolve({state:snapshot()});readyResolve=null;}}
 
@@ -939,6 +963,44 @@
         fail(describe(error,'upload'));
         render();
       }
+    }
+    function isActiveJob(){
+      return !!state.job&&!TERMINAL_STATES.includes(state.job.state);
+    }
+    function externalBusy(){return !!(state.busy||isActiveJob());}
+    function validExternalSize(size,limit){return Number(size)>0&&Number(size)<=limit;}
+    function applyExternalRole(roleHint){
+      if(roleHint!=='blue') state.blueSource=null;
+      if(nodes.role&&(roleHint==='red'||roleHint==='blue')) nodes.role.value=roleHint;
+    }
+    async function readExternalPdfBytes(file,limit){
+      const bytes=new Uint8Array(await file.arrayBuffer());
+      if(externalBusy()||!isPdfBytes(bytes)||bytes.byteLength>limit) return null;
+      return bytes;
+    }
+    async function adoptExternalFile(file,roleHint){
+      if(!file||typeof file.arrayBuffer!=='function'||externalBusy()) return;
+      if(state.gate!=='ready'||!state.capabilities){state.pendingExternal={file,roleHint};return;}
+      const limit=maxUpload();
+      if(!validExternalSize(file.size,limit)) return;
+      try{
+        const bytes=await readExternalPdfBytes(file,limit);
+        if(!bytes) return;
+        state.file=file;state.fileError='';state.error='';state.editedStatus='';
+        applyExternalRole(roleHint);
+        await adoptFileHash(bytes);
+      }catch{}
+    }
+    function syncRoleFromView(view){
+      if(!nodes.role||state.busy||isActiveJob()) return;
+      if(view==='blue'&&nodes.role.value!=='blue'){nodes.role.value='blue';render();}
+      else if(view==='workbench'&&nodes.role.value==='blue'&&!isEditedInput()){nodes.role.value='red';render();}
+    }
+    function clearSharedFile(){
+      if(state.busy||isActiveJob()) return;
+      state.file=null;state.fileSha='';state.fileError='';state.upload=null;state.blueSource=null;
+      if(nodes.file) nodes.file.value='';
+      render();
     }
 
     async function postUpload(bytes,mime,name){
@@ -1506,6 +1568,16 @@
       if(nodes.prompt) nodes.prompt.value='';
       state.editedStatus='수정본을 BLUE 입력으로 등록했습니다. BLUE 검토 지시를 입력하고 실행하세요.';
       state.status='BLUE 입력이 준비되었습니다.';
+      forwardHandoffToBlueView();
+    }
+    function forwardHandoffToBlueView(){
+      if(!doc||typeof doc.querySelector!=='function'||typeof doc.dispatchEvent!=='function'||typeof CustomEvent!=='function') return;
+      const blueNav=doc.querySelector('.rail [data-view="blue"]');
+      if(!blueNav||!state.file) return;
+      try{
+        const allowed=doc.dispatchEvent(new CustomEvent('falsify:blue-file',{cancelable:true,detail:{file:state.file,sourceRunId:state.lastLedgerRedId||null}}));
+        if(allowed&&typeof blueNav.click==='function') blueNav.click();
+      }catch{}
     }
     async function handoffToBlue(){
       if(!canHandoff()) return;
@@ -1700,7 +1772,10 @@
             el('span',{},'표·그림 구조화 근거 사용',
               el('small',{textContent:'표·그림 근거를 함께 검토합니다. 기본값은 켜짐입니다.'})))),
         el('label',{for:'hosted-ai-prompt',id:'hosted-ai-prompt-label',textContent:'검토 지시'}),
-        el('textarea',{id:'hosted-ai-prompt',rows:'4',spellcheck:'false'}),
+        el('div',{id:'hosted-ai-presets',className:'hosted-ai-presets'},
+          el('button',{id:'hosted-ai-preset-default',type:'button',className:'button secondary',textContent:'추천 지시 채우기 (결함 제안)'}),
+          el('button',{id:'hosted-ai-preset-p2',type:'button',className:'button secondary',textContent:'교차 검증 지시 채우기',hidden:true})),
+        el('textarea',{id:'hosted-ai-prompt',rows:'4',spellcheck:'false',placeholder:'위 추천 지시 버튼을 누르거나 검토 지시를 직접 입력하세요.'}),
         el('p',{id:'hosted-ai-prompt-count',className:'muted',textContent:'0자'}),
         el('div',{className:'button-row'},
           el('button',{id:'hosted-ai-run',type:'button',className:'button primary',textContent:'RED 검토 실행',disabled:true}),
@@ -1726,8 +1801,11 @@
         el('section',{id:'hosted-ai-result-section',hidden:true,'aria-label':'결과 요약'},
           el('h3',{textContent:'결과 요약'}),
           el('p',{id:'hosted-ai-result-counts'}),
+          el('div',{id:'hosted-ai-findings',className:'hosted-ai-candidates',hidden:true}),
           el('ul',{id:'hosted-ai-result-items',className:'hosted-ai-items'}),
-          el('p',{id:'hosted-ai-result-note',className:'muted'})),
+          el('p',{id:'hosted-ai-result-note',className:'muted'}),
+          el('div',{id:'hosted-ai-ledger-actions',className:'button-row',hidden:true},
+            el('button',{id:'hosted-ai-open-review',type:'button',className:'button secondary',textContent:'검수(H1)에서 결과 판정하기'}))),
         el('section',{id:'hosted-ai-artifacts-section',hidden:true,'aria-label':'결과 파일'},
           el('h3',{textContent:'결과 파일'}),
           el('p',{className:'muted',textContent:openMode()?'게스트 세션으로 인증해 내려받습니다.':'로그인 세션으로 인증해 내려받습니다.'}),
@@ -1761,6 +1839,7 @@
         inputActions:find('hosted-ai-input-actions'),restoreOriginal:find('hosted-ai-restore-original'),
         role:find('hosted-ai-role'),model:find('hosted-ai-model'),effort:find('hosted-ai-effort'),
         useEvidence:find('hosted-ai-use-evidence'),
+        presets:find('hosted-ai-presets'),presetDefault:find('hosted-ai-preset-default'),presetP2:find('hosted-ai-preset-p2'),
         prompt:find('hosted-ai-prompt'),promptLabel:find('hosted-ai-prompt-label'),promptCount:find('hosted-ai-prompt-count'),
         run:find('hosted-ai-run'),cancel:find('hosted-ai-cancel'),refresh:find('hosted-ai-refresh'),
         progress:find('hosted-ai-progress'),
@@ -1771,7 +1850,9 @@
         candidates:find('hosted-ai-candidates'),visualCandidates:find('hosted-ai-visual-candidates'),
         chartNote:find('hosted-ai-chart-note'),apply:find('hosted-ai-apply'),applyStatus:find('hosted-ai-apply-status'),
         resultSection:find('hosted-ai-result-section'),resultCounts:find('hosted-ai-result-counts'),
+        findings:find('hosted-ai-findings'),
         resultItems:find('hosted-ai-result-items'),resultNote:find('hosted-ai-result-note'),
+        ledgerActions:find('hosted-ai-ledger-actions'),openReview:find('hosted-ai-open-review'),
         artifactsSection:find('hosted-ai-artifacts-section'),artifacts:find('hosted-ai-artifacts'),
         downloadStatus:find('hosted-ai-download-status'),
         editedSection:find('hosted-ai-edited-section'),editedNote:find('hosted-ai-edited-note'),
@@ -1784,6 +1865,8 @@
       nodes.model.addEventListener('change',()=>{state.model=nodes.model.value;render();});
       nodes.effort.addEventListener('change',()=>{state.effort=nodes.effort.value;render();});
       nodes.useEvidence.addEventListener('change',()=>{state.useEvidence=nodes.useEvidence.checked===true;render();});
+      nodes.presetDefault.addEventListener('click',()=>{applyPreset('default');});
+      nodes.presetP2.addEventListener('click',()=>{applyPreset('p2');});
       nodes.prompt.addEventListener('input',()=>{render();});
       nodes.login.addEventListener('click',()=>{login();});
       nodes.register.addEventListener('click',()=>{register();});
@@ -1796,6 +1879,35 @@
       nodes.restoreOriginal.addEventListener('click',()=>{restoreOriginalInput();});
       nodes.editedDownload.addEventListener('click',()=>{const artifact=editedArtifact();if(artifact) downloadArtifact(artifact);});
       nodes.handoff.addEventListener('click',()=>{handoffToBlue();});
+      nodes.openReview.addEventListener('click',()=>{openHostedReview();});
+    }
+    function presetListFor(role){
+      const presets=typeof globalThis!=='undefined'?globalThis.FalsifyPromptInstructions?.PRESETS:null;
+      const list=presets?presets[role]:null;
+      return Array.isArray(list)?list:[];
+    }
+    function resolvePresetPrompt(kind){
+      const blue=nodes.role?.value==='blue';
+      const role=blue?'blue':'red';
+      const idx=blue&&kind==='p2'?1:0;
+      const entry=presetListFor(role)[idx];
+      if(entry&&typeof entry.prompt==='string'&&entry.prompt) return entry.prompt;
+      if(!blue) return DEFAULT_RED_PROMPT;
+      return kind==='p2'?DEFAULT_BLUE_P2_PROMPT:DEFAULT_BLUE_P0_PROMPT;
+    }
+    function applyPreset(kind){
+      if(!nodes.prompt||nodes.prompt.disabled) return;
+      const text=resolvePresetPrompt(kind).slice(0,maxPrompt());
+      nodes.prompt.value=text;
+      render();
+      if(nodes.run&&!nodes.run.disabled&&typeof nodes.run.focus==='function') nodes.run.focus({preventScroll:true});
+    }
+    function wireSharedWorkspace(){
+      onDoc('falsify:document',event=>{const f=event&&event.detail&&event.detail.file;if(f) void adoptExternalFile(f,'red');});
+      onDoc('falsify:blue-file',event=>{const d=event&&event.detail;if(d&&d.file){state.handoffSourceRunId=d.sourceRunId||state.lastLedgerRedId||null;void adoptExternalFile(d.file,'blue');}});
+      onDoc('falsify:blue-state',event=>{const d=event&&event.detail;if(d&&d.file&&d.file!==state.file&&(!isEditedInput()||d.handoff)) void adoptExternalFile(d.file,'blue');});
+      onDoc('falsify:view-change',event=>{syncRoleFromView(event&&event.detail&&event.detail.view);});
+      onDoc('falsify:workspace-reset',()=>{clearSharedFile();});
     }
     function find(id){return host?host.querySelector('#'+id):null;}
 
@@ -2285,15 +2397,149 @@
       }
       return notes;
     }
+    function hasFindingBody(item){
+      return Boolean(item.quote||item.rationale||item.summary||item.message);
+    }
+    function isAcceptedFinding(item){
+      if(!item||typeof item!=='object') return false;
+      const st=String(item.status||item.state||'').toLowerCase();
+      if(st==='rejected'||st==='unresolved') return false;
+      return hasFindingBody(item);
+    }
+    function acceptedBlueFindings(){
+      const res=state.job?.role==='blue'?state.job.result:null;
+      const list=res&&Array.isArray(res.findings)?res.findings:[];
+      return list.filter(isAcceptedFinding);
+    }
+    function findingLocation(item){
+      return item.locationLabel||item.label||item.segmentId||(item.page?item.page+'쪽':'');
+    }
+    function findingKind(item){
+      return item.findingType||item.defectFamily||item.severity||item.verdictLabel||'';
+    }
+    function findingHeaderText(item,index){
+      const loc=safeName(findingLocation(item));
+      const kind=safeName(findingKind(item));
+      const parts=['지적 '+(index+1)];
+      if(loc) parts.push(loc);
+      if(kind) parts.push(kind);
+      return parts.join(' · ');
+    }
+    function trimmedText(value){return typeof value==='string'?value.trim():'';}
+    function findingReasonText(item){
+      return trimmedText(item.rationale)||trimmedText(item.summary)||trimmedText(item.message);
+    }
+    function blueFindingNode(item,index){
+      const head=el('p',{className:'hosted-ai-candidate-head'},
+        el('strong',{textContent:findingHeaderText(item,index)}));
+      const box=el('div',{className:'hosted-ai-candidate'},head);
+      const quote=trimmedText(item.quote);
+      if(quote){
+        box.append(el('div',{className:'hosted-ai-diff'},
+          el('p',{},el('span',{className:'hosted-ai-diff-label',textContent:'원문 인용'}),el('code',{textContent:quote}))));
+      }
+      const reason=findingReasonText(item);
+      if(reason) box.append(el('p',{textContent:reason}));
+      const limit=trimmedText(item.uncertainty);
+      if(limit) box.append(el('p',{className:'muted',textContent:'한계: '+limit}));
+      return box;
+    }
+    function renderBlueFindings(){
+      if(!nodes.findings) return;
+      const list=acceptedBlueFindings();
+      setHidden(nodes.findings,!list.length);
+      const sig=state.job?state.job.id+':'+list.length:'';
+      if(builtFindingsSignature===sig) return;
+      clearList(nodes.findings);
+      if(list.length){
+        nodes.findings.append(el('h4',{textContent:'수용된 BLUE 지적 ('+list.length+')'}));
+        for(const [index,item] of list.entries()) nodes.findings.append(blueFindingNode(item,index));
+      }
+      builtFindingsSignature=sig;
+    }
+    function boundedOr(value,max,fallback){
+      const text=trimmedText(value);
+      return text?text.slice(0,max):fallback;
+    }
+    function buildBlueLedgerEntry(item,index){
+      const id='hb-'+(index+1),segId='hs-'+index;
+      const segText='['+id+'] '+boundedOr(item.quote,1800,'['+id+']');
+      const rationale=boundedOr(item.rationale||item.summary,2800,'웹 AI 검토 지적');
+      const uncertainty=boundedOr(item.uncertainty,1400,'웹 AI 실행 결과 · 원문 대조 필요');
+      const fallbackLabel='구간 '+(index+1);
+      const label=safeName(findingLocation(item))||fallbackLabel;
+      return {
+        segment:{id:segId,label:label.slice(0,180),text:segText},
+        finding:{id,segmentId:segId,quote:segText,rationale,uncertainty,
+          evidence:[{segmentId:segId,quote:segText,relation:'원문 인용'}]}
+      };
+    }
+    function ledgerApis(){
+      const g=typeof globalThis!=='undefined'?globalThis:null;
+      const lab=g?.FalsifyLab,harness=g?.FalsifyHarness;
+      if(typeof lab?.record!=='function'||typeof harness?.builtin!=='function') return null;
+      return {lab,harness};
+    }
+    function currentFileHash(){
+      const h=state.upload?.sha256||state.fileSha||'';
+      return /^[0-9a-f]{64}$/.test(h)?h:'';
+    }
+    function currentSourceName(fallback){
+      return safeName(state.file?.name||state.upload?.name||fallback)||fallback;
+    }
+    function canRecordBlueJob(job){
+      return Boolean(job&&job.role==='blue'&&job.state==='completed'&&!state.recordedJobs.has(job.id));
+    }
+    async function submitBlueLedger(job,apis,fileHash,rawFindings){
+      const entries=rawFindings.map((item,idx)=>buildBlueLedgerEntry(item,idx));
+      const segments=entries.length?entries.map(x=>x.segment):[{id:'hs-0',label:'전체 문서',text:'[무결함 검토 완료]'}];
+      const sourceHash=await digestOf(segments.map(s=>s.text).join('\n\n'));
+      const revision='hosted-'+job.id.slice(0,48);
+      const docRecord={revision,fileHash,sourceHash,name:currentSourceName('hosted.pdf'),format:'PDF',segments};
+      const req={harness:apis.harness.builtin('blue'),maxCalls:8,requestId:'hosted:'+job.id};
+      const res={schema:'falsify.document-blue.v1',revision,sourceHash,status:'ok',findings:entries.map(x=>x.finding)};
+      return apis.lab.record('blue',docRecord,req,res,'manual-unverified',{});
+    }
+    async function maybeRecordBlueLedger(){
+      const job=state.job;
+      if(!canRecordBlueJob(job)) return;
+      const apis=ledgerApis(),fileHash=currentFileHash();
+      if(!apis||!fileHash) return;
+      const rawFindings=acceptedBlueFindings().slice(0,12);
+      if(!rawFindings.length&&!Array.isArray(job.result?.findings)) return;
+      state.recordedJobs.add(job.id);
+      try{
+        const runId=await submitBlueLedger(job,apis,fileHash,rawFindings);
+        if(typeof runId==='string'&&runId){state.lastLedgerRunId=runId;renderLedgerAction();}
+      }catch{}
+    }
+    function renderLedgerAction(){
+      if(!nodes.ledgerActions) return;
+      const show=Boolean(state.lastLedgerRunId&&state.job?.role==='blue'&&state.job?.state==='completed');
+      setHidden(nodes.ledgerActions,!show);
+    }
+    async function openHostedReview(){
+      const lab=typeof globalThis!=='undefined'?globalThis.FalsifyLab:null;
+      if(typeof lab?.review==='function'&&state.lastLedgerRunId){
+        try{await lab.review(state.lastLedgerRunId);}catch{}
+      }
+      const btn=typeof doc?.querySelector==='function'?doc.querySelector('.rail [data-view="review"]'):null;
+      if(typeof btn?.click==='function') btn.click();
+    }
     function renderReviewResult(summary){
       const parts=resultCountParts(summary);
       nodes.resultCounts.textContent=parts.length?parts.join(' · '):'서버가 항목 수를 제공하지 않았습니다.';
+      renderBlueFindings();
       appendResultRows(summary.rows);
       const notes=resultNotes(summary);
       nodes.resultNote.textContent=notes.join(' ');
       setHidden(nodes.resultNote,!notes.length);
+      renderLedgerAction();
+      void maybeRecordBlueLedger();
     }
     function renderApplyResult(applied){
+      setHidden(nodes.findings,true);
+      setHidden(nodes.ledgerActions,true);
       const parts=applied.parts.slice();
       if(applied.output) parts.push('출력 sha256 '+applied.output);
       parts.push('모델 호출 없음');
@@ -2309,6 +2555,7 @@
       const showResult=!!applied||(!!summary&&summary.available);
       setHidden(nodes.resultSection,!showResult);
       clearList(nodes.resultItems);
+      if(!showResult){setHidden(nodes.findings,true);setHidden(nodes.ledgerActions,true);}
       if(applied) return renderApplyResult(applied);
       if(showResult) renderReviewResult(summary);
     }
@@ -2356,15 +2603,45 @@
       }
       nodes.editedStatus.textContent=state.editedStatus||'';
     }
+    function renderPresetControls(ctx){
+      if(!nodes.presetDefault||!nodes.presetP2) return;
+      const blue=nodes.role&&nodes.role.value==='blue';
+      nodes.presetDefault.textContent=blue?'추천 지시 채우기 (맹검 검증)':'추천 지시 채우기 (결함 제안)';
+      nodes.presetDefault.disabled=!ctx.operate||ctx.busy;
+      setHidden(nodes.presetP2,!blue);
+      nodes.presetP2.disabled=!ctx.operate||ctx.busy;
+    }
+    function hasCompletedBlueResult(){
+      const j=state.job;
+      return Boolean(j&&j.role==='blue'&&j.state==='completed'&&j.result);
+    }
+    function hostedStateDetail(ctx,availability){
+      const activeJob=Boolean(availability?.activeJob);
+      return {
+        operate:Boolean(ctx.operate),gate:state.gate,role:nodes.role?.value==='blue'?'blue':'red',
+        hasFile:Boolean(availability?.fileReady),fileName:currentSourceName(''),
+        busy:Boolean(ctx.busy||activeJob),activeJob,
+        jobKind:state.jobKind,jobState:state.job?.state||'',
+        candidateCount:state.candidates.length+state.visualCandidates.length,
+        selectedCount:Object.keys(state.selection).length,
+        hasEditedPdf:Boolean(editedArtifact()),
+        hasBlueResult:hasCompletedBlueResult()
+      };
+    }
+    function emitHostedState(ctx,availability){
+      if(typeof doc?.dispatchEvent!=='function'||typeof CustomEvent!=='function') return;
+      try{doc.dispatchEvent(new CustomEvent('falsify:hosted-ai-state',{detail:hostedStateDetail(ctx,availability)}));}catch{}
+    }
     function render(){
       if(!nodes.status) return;
       const ctx=renderContext();
       renderStatus();
       renderGate(ctx);
       setHidden(nodes.config,!ctx.operate);
-      if(!ctx.operate) return;
+      if(!ctx.operate){emitHostedState(ctx,null);return;}
       const meta=renderPromptMeta(ctx);
       renderInputState(ctx);
+      renderPresetControls(ctx);
       renderRestoreAction();
       const availability=runAvailability(ctx,meta);
       renderRunButtons(ctx,availability);
@@ -2374,6 +2651,7 @@
       renderResults();
       renderArtifacts();
       renderEdited();
+      emitHostedState(ctx,availability);
     }
 
     function snapshot(){
@@ -2396,6 +2674,7 @@
       return {apiBase:state.apiBase,token};
     }
     paperAuthImpl=paperAuth;
+    wireSharedWorkspace();
     if(host){build();start();}
     return {ready,mount:(node)=>{if(node){host=node;build();start();}return ready;},destroy,state:snapshot,paperAuth};
   }

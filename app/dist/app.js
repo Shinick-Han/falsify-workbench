@@ -5,7 +5,7 @@
   const views={workbench:'논문 실험 / RED',blue:'논문 실험 / BLUE',review:'검수',results:'결과 기록',agents:'Harness'};
   const routes={workbench:'red',blue:'blue',review:'review',results:'results',agents:'harness'};
   const fromHash=hash=>Object.keys(routes).find(key=>'#'+routes[key]===hash)||null;
-  let view=fromHash(location.hash)||'workbench',documentProgress=null,blueProgress=null,flapTimer;
+  let view=fromHash(location.hash)||'workbench',documentProgress=null,blueProgress=null,hostedProgress=null,flapTimer;
   let importEpoch=0,importController=null,importedDocument=null,importedFile=null;
 
   function focusTarget(element){if(!element)return;for(let p=element.parentElement;p;p=p.parentElement)if(p.tagName==='DETAILS')p.open=true;element.scrollIntoView({block:'center'});element.focus({preventScroll:true});}
@@ -14,13 +14,22 @@
     const changed=next!==view;view=next;
     if(push&&location.hash!=='#'+routes[next])history.pushState({view:next},'','#'+routes[next]);
     render();
+    document.dispatchEvent(new CustomEvent('falsify:view-change',{detail:{view:next}}));
     if(changed){scrollTo(0,0);$('#main').focus({preventScroll:true});}
   }
   function followLocation(){const next=fromHash(location.hash);if(next&&next!==view)navigate(next,false);}
+  function hostedBlueSign(){
+    const h=hostedProgress;if(!h?.operate||h.role!=='blue')return null;
+    const detail=h.fileName||blueProgress?.name||'';
+    if(h.busy)return {gate:'B1',title:'BLUE 웹 검토 중입니다',detail,label:'진행 상태 보기',action:()=>focusTarget($('#hosted-ai-progress'))};
+    if(h.hasBlueResult)return {gate:'B1',title:'BLUE 결과를 확인하세요',detail,label:'결과 보기',action:()=>focusTarget($('#hosted-ai-result-section'))};
+    if(h.hasFile||blueProgress?.name)return {gate:'B1',title:'논문을 검토할 준비가 됐습니다',detail,label:'웹 BLUE 실행',action:()=>focusTarget($('#hosted-ai-preset-default')||$('#hosted-ai-prompt'))};
+    return null;
+  }
   function blueSignSpec(){
       if(blueProgress?.busy)return {gate:'B1',title:blueProgress.phase==='import'?'변경본을 읽고 있습니다':'BLUE 검토 중입니다',detail:blueProgress.name,label:'진행 상태 보기',action:()=>focusTarget($('#doc-blue-progress'))};
       if(blueProgress?.hasResult)return {gate:'B1',title:'BLUE 결과를 확인하세요',detail:blueProgress.name,label:'결과 보기',action:()=>{const external=globalThis.FalsifyDocumentBlueExternal?.getExternalResponses?.();const target=external?.items?.length?$('#external-blue'):$('#doc-blue-findings').closest('.role-step');focusTarget(target);}};
-
+      const hosted=hostedBlueSign();if(hosted)return hosted;
       if(blueProgress?.name)return {gate:'B1',title:'논문을 검토할 준비가 됐습니다',detail:blueProgress.name,label:'지시문 작성',action:()=>focusTarget($('#external-blue .prompt-instructions textarea')||$('#external-blue textarea[aria-label="BLUE 외부 응답"]'))};
       return {gate:'B1',title:'BLUE 검토 파일을 입력하세요',detail:'BLUE(블라인드 검증기)가 정답지 없이 결함을 찾아낼 시험 논문을 직접 고르세요.',label:'BLUE 파일 입력',action:()=>focusTarget($('#doc-blue-file'))};
   }
@@ -31,9 +40,24 @@
     if(view==='blue')return blueSignSpec();
     return redSignSpec();
   }
+  function hostedRedSign(){
+    const h=hostedProgress;if(!h?.operate||h.role==='blue')return null;
+    const detail=h.fileName||documentProgress?.name||'';
+    if(h.busy)return {gate:'R1',title:h.jobKind==='apply'?'선택한 변경을 PDF에 적용 중입니다':'RED 웹 검토 중입니다',detail,label:'진행 상태 보기',action:()=>focusTarget($('#hosted-ai-progress'))};
+    if(h.hasEditedPdf)return {gate:'R1',title:'수정본 PDF가 준비됐습니다',detail,label:'BLUE로 검증하기',action:()=>focusTarget($('#hosted-ai-blue-handoff'))};
+    if(h.candidateCount>0)return {gate:'R1',title:'후보를 선택하고 PDF에 적용하세요',detail:(detail?detail+' · ':'')+h.candidateCount+'개 후보'+(h.selectedCount?' · '+h.selectedCount+'개 선택':''),label:'후보 선택으로',action:()=>focusTarget($('#hosted-ai-selection input')||$('#hosted-ai-apply'))};
+    if(h.hasFile&&!documentProgress?.busy&&!documentProgress?.count&&!documentProgress?.hasResult)return {gate:'R1',title:'원문을 직접 고치거나 웹 AI 검토를 실행하세요',detail,label:'웹 AI 실행으로',action:()=>focusTarget($('#hosted-ai-preset-default')||$('#hosted-ai-prompt'))};
+    return null;
+  }
+  function latexSignSpec(){
+    const ws=globalThis.FalsifyLatexWorkbench;if(!ws?.active)return null;
+    const source=ws.getSource?.(),state=ws.getSession?.()?.snapshot();
+    const title=state?.busy?'PDF를 만들고 있습니다':state?.error?'원본 파일을 확인하세요':state?.artifact?'원본을 눌러 수정하세요':source?'PDF 만들기를 눌러 시작하세요':'LaTeX 원본을 읽고 있습니다';
+    return {gate:'R1',title,detail:state?.error?.message||source?.file?.name||'',label:state?.artifact?'수정본 보기':'편집 화면 보기',action:()=>focusTarget($('#latex-source-workbench'))};
+  }
   function redSignSpec(){
-    const sourceWorkspace=globalThis.FalsifyLatexWorkbench;
-    if(sourceWorkspace?.active){const source=sourceWorkspace.getSource?.(),state=sourceWorkspace.getSession?.()?.snapshot();return {gate:'R1',title:state?.busy?'PDF를 만들고 있습니다':state?.error?'원본 파일을 확인하세요':state?.artifact?'원본을 눌러 수정하세요':source?'PDF 만들기를 눌러 시작하세요':'LaTeX 원본을 읽고 있습니다',detail:state?.error?.message||source?.file?.name||'',label:state?.artifact?'수정본 보기':'편집 화면 보기',action:()=>focusTarget($('#latex-source-workbench'))};}
+    const latex=latexSignSpec();if(latex)return latex;
+    const hosted=hostedRedSign();if(hosted)return hosted;
     if(documentProgress){
       const p=documentProgress,detail=p.name+' · '+p.count+'개 후보'+(p.count?' · '+(p.selected||0)+'개 선택':'');
       if(p.busy)return {gate:'R1',title:'RED 검토 중입니다',detail,label:'진행 상태 보기',action:()=>focusTarget($('#red-progress'))};
@@ -55,11 +79,16 @@
     void message.offsetWidth;message.classList.add('flipping');
     flapTimer=setTimeout(()=>{message.querySelectorAll('.flap-leaf').forEach(e=>e.remove());message.classList.remove('flipping');},300);
   }
+  function currentPaperName(){
+    if(view==='workbench')return documentProgress?.name||hostedProgress?.fileName||'Falsify';
+    if(view==='blue')return blueProgress?.name||(hostedProgress?.role==='blue'?hostedProgress.fileName:'')||'Falsify';
+    return 'Falsify';
+  }
   function render(){
     document.querySelectorAll('.view').forEach(e=>e.hidden=e.id!=='view-'+view);
     document.querySelectorAll('.rail [data-view]').forEach(e=>{if(e.dataset.view===view)e.setAttribute('aria-current','page');else e.removeAttribute('aria-current');});
     $('.paper-nav-group').dataset.current=String(view==='workbench'||view==='blue');
-    $('#location-name').textContent=views[view];$('#paper-name').textContent=view==='workbench'&&documentProgress?documentProgress.name:'Falsify';
+    $('#location-name').textContent=views[view];$('#paper-name').textContent=currentPaperName();
     const spec=signSpec(),previous={title:$('#sign-title').textContent,detail:$('#sign-detail').textContent};
     $('#gate-code').textContent=spec.gate;$('#sign-title').textContent=spec.title;$('#sign-detail').textContent=spec.detail;$('#sign-action-label').textContent=spec.label;
     if(previous.title!==spec.title)animateSign(previous,spec);
@@ -112,6 +141,7 @@
   document.addEventListener('falsify:document-state',event=>{documentProgress=event.detail;render();});
   document.addEventListener('falsify:latex-state',render);
   document.addEventListener('falsify:blue-state',event=>{blueProgress=event.detail;render();});
+  document.addEventListener('falsify:hosted-ai-state',event=>{hostedProgress=event.detail;render();});
   document.addEventListener('click',event=>{
     const button=event.target.closest('button');if(!button||button.disabled)return;
     if(button.dataset.view)navigate(button.dataset.view);

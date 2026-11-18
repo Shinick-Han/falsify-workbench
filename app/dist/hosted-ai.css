@@ -4,7 +4,7 @@
 .hosted-ai .step-head{display:flex;gap:14px;align-items:flex-start;margin-bottom:6px}
 .hosted-ai .step-head h2{margin:0 0 4px}
 .hosted-ai .step-head p{max-width:78ch;color:var(--muted);font-size:13px}
-.hosted-ai .step-code{width:34px;background:var(--ink);color:var(--yellow)}
+.hosted-ai .step-code{width:34px;background:var(--ink);color:var(--paper)}
 .hosted-ai p{margin:6px 0}
 .hosted-ai .muted{color:var(--muted);font-size:12px;line-height:1.55;overflow-wrap:anywhere}
 .hosted-ai .form-feedback{font-size:12px;color:var(--muted);margin:8px 0;min-height:20px;overflow-wrap:anywhere}
@@ -73,3 +73,5 @@
 .hosted-ai-register>summary{cursor:pointer;min-height:38px;padding:8px 0;font-size:12px;font-weight:600}
 .hosted-ai-register label{margin-top:10px}
 .hosted-ai-register .button-row{margin:12px 0 0}
+.hosted-ai-presets{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 6px}
+@media(max-width:700px){.hosted-ai-presets{flex-direction:column}.hosted-ai-presets .button{width:100%;justify-content:center}}

@@ -186,7 +186,7 @@ th,td{font-size:12px}
 .import-preview{ margin:20px 0; padding:20px; background:var(--surface, #f3f4f4); border-radius:12px; }
 .import-preview .section-heading{ align-items:center; }
 .import-preview h3{ margin:0; }
-.import-preview textarea{ font-family:Georgia, "Times New Roman", serif; white-space:pre-wrap; }
+.import-preview textarea{ white-space:pre-wrap; }
 .import-preview select{ width:100%; }
 .import-preview .button-row{ flex-wrap:wrap; }
 #import-summary,#import-warning{ overflow-wrap:anywhere; }

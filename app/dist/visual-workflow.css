@@ -64,6 +64,9 @@
 .visual-advanced-execution>summary{padding:16px 0;font-weight:600;cursor:pointer}
 .visual-advanced-execution>.role-step{margin-top:16px}
 .visual-advanced-execution .visual-connection{margin:16px 0}
+.visual-external-disclosure{margin:18px 0 0;padding-top:6px;border-top:1px solid var(--line)}
+.open-access-plan-note{display:none;margin-top:8px}
+[data-open-access] .open-access-plan-note{display:block}
 @media(max-width:640px){.blue-handoff-ready{flex-direction:column;align-items:stretch}.blue-handoff-ready .button{width:100%}}
 
 /* Keep the selected paper and page controls close to the intake. */

@@ -45,7 +45,7 @@ const latex = spawnSync(process.execPath, ['--test','tests/latex-source-project.
 if(latex.error || latex.status!==0)process.exit(latex.status||1);
 const runtime = spawnSync(process.execPath, ['--test','tests/latex-runtime-catalog.spec.mjs'], {stdio:'inherit'});
 if(runtime.error || runtime.status!==0)process.exit(runtime.status||1);
-const hostedAi = spawnSync(process.execPath, ['--test','tests/hosted-ai.spec.mjs','tests/open-access.spec.mjs','tests/hosted-paper-session.spec.mjs','tests/hosted-paper-panels.spec.mjs'], {stdio:'inherit'});
+const hostedAi = spawnSync(process.execPath, ['--test','tests/hosted-ai.spec.mjs','tests/open-access.spec.mjs','tests/hosted-paper-session.spec.mjs','tests/hosted-paper-panels.spec.mjs','tests/ux-phase1.spec.mjs'], {stdio:'inherit'});
 if(hostedAi.error || hostedAi.status!==0)process.exit(hostedAi.status||1);
 const layoutAudit = spawnSync(process.execPath, ['--test','tests/latex-layout-audit.spec.mjs'], {stdio:'inherit'});
 if(layoutAudit.error || layoutAudit.status!==0)process.exit(layoutAudit.status||1);

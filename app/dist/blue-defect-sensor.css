@@ -2,7 +2,7 @@
 .blue-sensor-panel {
   background: var(--paper, #fff);
   border: 1px solid var(--line, #d9dde0);
-  border-radius: 10px;
+  border-radius: var(--radius, 6px);
   padding: 18px 20px;
   margin: 0 0 20px;
   min-width: 0;
@@ -28,16 +28,16 @@
 .blue-oracle-tier {
   display: inline-block;
   padding: 2px 8px;
-  border-radius: 4px;
-  background: var(--charcoal, #202326);
-  color: var(--yellow, #ffcc00);
+  border-radius: 3px;
+  background: var(--ink, #111315);
+  color: var(--paper, #fff);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.02em;
 }
 
 .blue-oracle-tier.is-p2 {
-  background: var(--yellow, #ffcc00);
+  background: var(--surface, #f3f4f4);
   color: var(--ink, #111315);
   border: 1px solid var(--ink, #111315);
 }
@@ -124,7 +124,7 @@
 }
 
 .blue-verdict-label.is-recovered {
-  background: var(--yellow, #ffcc00);
+  background: var(--surface, #f3f4f4);
   border: 1px solid var(--ink, #111315);
 }
 

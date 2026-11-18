@@ -69,8 +69,8 @@
   display: inline-block;
   margin: 8px 0 0;
   padding: 4px 10px;
-  border-radius: 4px;
-  background: var(--yellow, #ffcc00);
+  border-radius: 3px;
+  background: var(--surface, #f3f4f4);
   color: var(--ink, #111315);
   border: 1px solid var(--ink, #111315);
   font-size: 12px;

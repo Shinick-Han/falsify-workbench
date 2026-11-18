@@ -1,6 +1,6 @@
 /* Manual provenance review on the existing airport review route. */
-.paper-manual-records{margin-top:28px;padding:0 0 8px;border-top:5px solid var(--ink);background:var(--paper);color:var(--ink);min-width:0}
-.paper-manual-kicker{display:flex;align-items:center;gap:12px;margin:0 0 12px;padding:10px 14px;background:var(--yellow);color:var(--ink);border-bottom:4px solid var(--ink);font-weight:700}
+.paper-manual-records{margin-top:28px;padding:0 0 8px;border-top:2px solid var(--ink);background:var(--paper);color:var(--ink);min-width:0}
+.paper-manual-kicker{display:flex;align-items:center;gap:12px;margin:0 0 12px;padding:10px 14px;background:var(--surface);color:var(--ink);border-left:4px solid var(--yellow);border-bottom:1px solid var(--line);font-weight:700}
 .paper-manual-kicker span{display:grid;place-items:center;width:36px;height:36px;background:var(--ink);color:var(--paper);font-size:12px}
 .paper-manual-records h3,.paper-manual-records h4{margin:14px 0 8px;font-size:16px;letter-spacing:-0.02em}
 .paper-manual-records .muted,.paper-manual-status{color:var(--muted);font-size:13px;line-height:1.6}

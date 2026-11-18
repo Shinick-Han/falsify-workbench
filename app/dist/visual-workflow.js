@@ -14,6 +14,9 @@
       return !!(data&&Object.prototype.hasOwnProperty.call(data,'openAccess'));
     }catch{return false;}
   }
+  function hostedEnabled(){
+    try{return globalThis.FalsifyCloudConfig?.hostedAi?.enabled===true;}catch{return false;}
+  }
   function disclosure(summary,nodes){const d=el('details','visual-details'),s=el('summary','',summary);d.append(s,...nodes);return d;}
   function decorate(node,name){if(!node)return;const paint=()=>{if(!node.querySelector('svg'))node.prepend(icon(name));};paint();new MutationObserver(paint).observe(node,{childList:true});}
   function choose(role,hash){const s=$('#'+role+'-harness');if(!s||s.disabled)return false;if(![...s.options].some(o=>o.value===hash))return false;if(s.value!==hash){s.value=hash;s.dispatchEvent(new Event('change',{bubbles:true}));}return true;}
@@ -95,13 +98,28 @@
       const after=button('file-text','수정본',()=>show('after'));
       function show(side){compare.dataset.mobileSide=side;before.setAttribute('aria-pressed',String(side==='before'));after.setAttribute('aria-pressed',String(side==='after'));}
       bar.append(before,after);
-      for(const id of ['paper-undo','paper-current-download']){const control=$('#'+id);if(control)bar.append(control);}
+      for(const id of ['paper-undo','paper-redo','paper-current-download']){const control=$('#'+id);if(control)bar.append(control);}
       compare.after(bar);show('before');
-      const settings=disclosure('글꼴 · 변경 표시 · 확대',[]);
+      compare.dataset.desktopLayout='split';
+      const toolbar=paper.querySelector('.paper-toolbar');
+      if(toolbar){
+        const layoutBtn=button('monitor','1단 크게 보기',()=>{
+          const next=compare.dataset.desktopLayout==='single'?'split':'single';
+          compare.dataset.desktopLayout=next;
+          layoutBtn.setAttribute('aria-pressed',String(next==='single'));
+          layoutBtn.querySelector('span').textContent=next==='single'?'2단 나란히 보기':'1단 크게 보기';
+        },'button secondary paper-layout-toggle');
+        layoutBtn.id='paper-layout-toggle';layoutBtn.setAttribute('aria-pressed','false');
+        toolbar.append(layoutBtn);
+      }
+      const genBtn=$('#paper-generate'),handoffBtn=$('#paper-blue-handoff');
+      if(genBtn){genBtn.classList.remove('primary');genBtn.classList.add('secondary');}
+      if(handoffBtn){handoffBtn.classList.remove('secondary');handoffBtn.classList.add('primary');}
+      const settings=disclosure('글꼴 · 변경 표시 · 원본 파일',[]);
       for(const selector of ['.paper-font-tools','.paper-compare-tools']){const node=paper.querySelector(selector);if(node)settings.append(node);}
-      const zoom=el('div','paper-toolbar');
-      for(const id of ['paper-original-download','paper-zoom-out','paper-zoom-label','paper-zoom-in']){const node=$('#'+id);if(node)zoom.append(node);}
-      settings.append(zoom);bar.after(settings);
+      const origDownload=$('#paper-original-download');
+      if(origDownload){const row=el('div','button-row');row.append(origDownload);settings.append(row);}
+      bar.after(settings);
       paper.addEventListener('click',event=>{
         const edit=event.target.closest?.('#paper-edits button[data-act="edit"]');
         if(edit&&!edit.disabled)show('before');
@@ -112,6 +130,33 @@
 
     // Fold extracted text, never the real result or editing controls.
     const preview=$('#import-preview');if(preview){const d=disclosure('논문 내용 보기',[]);d.classList.add('visual-extraction');preview.before(d);d.append(preview);d.hidden=preview.hidden;new MutationObserver(()=>{d.hidden=preview.hidden;}).observe(preview,{attributes:true,attributeFilter:['hidden']});}
+    function mountExternalPanel(role,advancedRole){
+      const externalPanel=$('#external-'+role);if(!externalPanel)return;
+      if(!hostedEnabled()){advancedRole.before(externalPanel);return;}
+      const label=role==='red'?'외부 AI 복붙으로 진행 (ChatGPT · Claude 수동 교환)':'외부 AI 복붙으로 진행 (BLUE 응답 붙여넣기)';
+      const extWrap=disclosure(label,[externalPanel]);
+      extWrap.classList.add('visual-external-disclosure');
+      advancedRole.before(extWrap);
+    }
+    function markBlueBridgeControls(selection){
+      for(const node of [selection,$('#doc-blue-budget')?.closest('details'),$('#doc-blue-consent')?.closest('label'),$('.blue-picker')]){
+        if(node)try{node.setAttribute('data-requires-bridge','');}catch{}
+      }
+    }
+    function setupHarnessShelf(role,selection){
+      if(!selection)return;
+      const native=$('#'+role+'-harness'),trigger=button(role==='red'?'pencil':'search','',()=>{shelf.open=!shelf.open;trigger.setAttribute('aria-expanded',String(shelf.open));},'visual-tool');
+      trigger.setAttribute('aria-label',role.toUpperCase()+' 도구 바꾸기');trigger.setAttribute('aria-expanded','false');
+      trigger.append(icon('chevron-down'));
+      const shelf=disclosure('다른 도구',[]),choices=el('div','visual-tool-list');shelf.classList.add('visual-shelf');shelf.append(choices);
+      const nodes=[...selection.children],external=$('#'+role+'-harness-consent')?.closest('label');
+      const advanced=disclosure('실행기 · 모델 · 세부 설정',nodes.filter(n=>n!==external));selection.prepend(trigger,shelf,advanced);
+      function paint(){const option=native.selectedOptions[0];trigger.querySelector('span').textContent=option?option.textContent.replace(/ · [a-f0-9]{8}$/,''):'도구 준비 중';trigger.disabled=native.disabled;
+        for(const b of document.querySelectorAll('.visual-library-use[data-role="'+role+'"]'))b.disabled=native.disabled;
+        choices.replaceChildren(...[...native.options].map(o=>{const b=button(role==='red'?'pencil':'search',o.textContent.replace(/ · [a-f0-9]{8}$/,''),()=>{if(choose(role,o.value)){shelf.open=false;trigger.setAttribute('aria-expanded','false');paint();}},'visual-tool-choice');b.setAttribute('aria-pressed',String(native.value===o.value));b.disabled=native.disabled;return b;}));}
+      shelf.addEventListener('toggle',()=>trigger.setAttribute('aria-expanded',String(shelf.open)));
+      native.addEventListener('change',paint);new MutationObserver(paint).observe(native,{childList:true,attributes:true,attributeFilter:['disabled'],subtree:true});paint();
+    }
     function setupRole(role,root){
       const items=[...root.querySelectorAll(':scope > .role-step')];steps[role]=items;
       for(const [i,section] of items.entries()){
@@ -131,42 +176,31 @@
       const runNote=el('p','visual-next');runNote.setAttribute('role','status');start?.closest('.button-row')?.after(runNote);
       state[role].note=runNote;
       const advancedRole=disclosure('자동 실행·도구 설정',items.slice(1));advancedRole.id=role+'-advanced-tools';advancedRole.classList.add('visual-advanced-execution');advancedRoles[role]=advancedRole;root.append(advancedRole);
-      const externalPanel=$('#external-'+role);if(externalPanel)advancedRole.before(externalPanel);
+      mountExternalPanel(role,advancedRole);
       // Keep the visible transmission scope beside the consent checkbox.
       const selection=$('#'+role+'-harness')?.closest('.harness-selection');
-      if(selection){
-        const native=$('#'+role+'-harness'),trigger=button(role==='red'?'pencil':'search','',()=>{shelf.open=!shelf.open;trigger.setAttribute('aria-expanded',String(shelf.open));},'visual-tool');
-        trigger.setAttribute('aria-label',role.toUpperCase()+' 도구 바꾸기');trigger.setAttribute('aria-expanded','false');
-        trigger.append(icon('chevron-down'));
-        const shelf=disclosure('다른 도구',[]),choices=el('div','visual-tool-list');shelf.classList.add('visual-shelf');shelf.append(choices);
-        const nodes=[...selection.children],external=$('#'+role+'-harness-consent')?.closest('label');
-        const advanced=disclosure('실행기 · 모델 · 세부 설정',nodes.filter(n=>n!==external));selection.prepend(trigger,shelf,advanced);
-        function paint(){const option=native.selectedOptions[0];trigger.querySelector('span').textContent=option?option.textContent.replace(/ · [a-f0-9]{8}$/,''):'도구 준비 중';trigger.disabled=native.disabled;
-          for(const b of document.querySelectorAll('.visual-library-use[data-role="'+role+'"]'))b.disabled=native.disabled;
-          choices.replaceChildren(...[...native.options].map(o=>{const b=button(role==='red'?'pencil':'search',o.textContent.replace(/ · [a-f0-9]{8}$/,''),()=>{if(choose(role,o.value)){shelf.open=false;trigger.setAttribute('aria-expanded','false');paint();}},'visual-tool-choice');b.setAttribute('aria-pressed',String(native.value===o.value));b.disabled=native.disabled;return b;}));}
-        shelf.addEventListener('toggle',()=>trigger.setAttribute('aria-expanded',String(shelf.open)));
-        native.addEventListener('change',paint);new MutationObserver(paint).observe(native,{childList:true,attributes:true,attributeFilter:['disabled'],subtree:true});paint();
-      }
+      if(role==='blue')markBlueBridgeControls(selection);
+      setupHarnessShelf(role,selection);
     }
     for(const [role,root] of [['red',$('#view-workbench')],['blue',$('#document-blue')]])setupRole(role,root);
-    function manualSign(){
-      const title=$('#sign-title');
-      if(!title||title.textContent!=='RED 실행 설정을 확인하세요')return;
-      title.textContent='원본에서 직접 고치세요';
-      const detail=$('#sign-detail');if(detail)detail.textContent='쪽을 보고 글자를 고칩니다. AI 실행과 외부 제안은 선택입니다.';
-      const label=$('#sign-action-label');if(label)label.textContent='원본 편집으로';
+    function updateAdvancedSummary(role,s,progress){
+      const advancedTitle=advancedRoles[role]?.querySelector(':scope > summary');if(!advancedTitle)return;
+      const linked=Boolean(globalThis.FalsifyLocalBridge?.state()?.connected);
+      const linkLabel=pageOpen()?'웹 실행':(linked?'내 PC 연결됨':'내 PC 연결 안 됨');
+      const status=s.busy?role.toUpperCase()+' 진행 중':(progress?.textContent.trim()||linkLabel);
+      advancedTitle.textContent='자동 실행·도구 설정 · '+status;
     }
     function render(role,detail){
       const s=state[role];if(detail!==undefined)Object.assign(s,detail||{name:'',busy:false,hasResult:false});
       const progress=$(role==='red'?'#red-progress':'#doc-blue-progress');
-      const advancedTitle=advancedRoles[role]?.querySelector(':scope > summary');if(advancedTitle){const linked=!!globalThis.FalsifyLocalBridge?.state()?.connected;const linkLabel=pageOpen()?'웹 실행':(linked?'내 PC 연결됨':'내 PC 연결 안 됨');advancedTitle.textContent='자동 실행·도구 설정 · '+(s.busy?role.toUpperCase()+' 진행 중':(progress?.textContent.trim()||linkLabel));}
+      updateAdvancedSummary(role,s,progress);
       const sections=steps[role];if(!sections?.length)return;
-      const hasFile=!!s.name,hasResult=!!s.hasResult;
+      const hasFile=Boolean(s.name),hasResult=Boolean(s.hasResult);
+      if(role==='blue'&&(s.busy||hasResult)&&advancedRoles.blue)advancedRoles.blue.open=true;
       // Empty future steps stay as small destinations; no forced RED -> BLUE sequence.
       sections[1]?.classList.toggle('visual-waiting',!hasFile);sections[2]?.classList.toggle('visual-waiting',!hasResult&&!s.busy);
       sections[0]?.classList.toggle('visual-done',hasFile);sections[1]?.classList.toggle('visual-current',hasFile&&!hasResult);sections[2]?.classList.toggle('visual-current',hasResult);
       renderNote(role,s,hasFile,progress);
-      manualSign();
     }
     function renderNote(role,s,hasFile,progress){
       const start=$(role==='red'?'#red-start':'#doc-blue-start'),connected=FalsifyLocalBridge?.state()?.connected;
@@ -201,19 +235,6 @@
         if(progress)new MutationObserver(()=>render(role)).observe(progress,{childList:true,characterData:true,subtree:true});
         render(role);
       }
-      manualSign();
-      const signTitle=$('#sign-title');
-      if(signTitle)new MutationObserver(()=>manualSign()).observe(signTitle,{childList:true,characterData:true,subtree:true});
-      const signAction=$('#sign-action');
-      if(signAction)signAction.addEventListener('click',event=>{
-        if($('#sign-title')?.textContent!=='원본에서 직접 고치세요')return;
-        event.stopImmediatePropagation();
-        const target=$('#paper-before-stage')||$('#paper-workspace');
-        if(!target)return;
-        if(typeof target.scrollIntoView==='function')target.scrollIntoView({block:'center'});
-        if(typeof target.focus==='function')target.focus({preventScroll:true});
-      },true);
-
     }
     observeRoleState();
 
@@ -229,7 +250,30 @@
       }
     }
     setupBridge();
-    function placeBridge(){if(!bridge)return;const current=document.querySelector('.rail [data-view][aria-current="page"]')?.dataset.view,role=current==='blue'?'blue':current==='workbench'?'red':null;bridge.hidden=!role;if(role&&advancedRoles[role])advancedRoles[role].append(bridge);}
+    const hostedAi=$('#hosted-ai');
+    function syncHostedBlueSelect(){
+      const roleSel=$('#hosted-ai-role');
+      if(roleSel&&!roleSel.disabled&&roleSel.value!=='blue'){roleSel.value='blue';roleSel.dispatchEvent(new Event('change'));}
+    }
+    function mountHostedAfterStep(role){
+      const step=steps[role]?.[0];if(step&&step.nextElementSibling!==hostedAi)step.after(hostedAi);
+      hostedAi.hidden=false;
+    }
+    function placeHostedAi(){
+      if(!hostedAi)return;
+      if(!hostedEnabled()){hostedAi.hidden=true;return;}
+      for(const note of document.querySelectorAll('[data-open-access-note]'))note.hidden=true;
+      const current=document.querySelector('.rail [data-view][aria-current="page"]')?.dataset.view;
+      if(current==='blue'){mountHostedAfterStep('blue');syncHostedBlueSelect();}
+      else if(current==='workbench')mountHostedAfterStep('red');
+      else hostedAi.hidden=true;
+    }
+    function placeBridge(){
+      placeHostedAi();
+      if(!bridge)return;
+      const current=document.querySelector('.rail [data-view][aria-current="page"]')?.dataset.view,role=current==='blue'?'blue':current==='workbench'?'red':null;
+      bridge.hidden=!role;if(role&&advancedRoles[role])advancedRoles[role].append(bridge);
+    }
     const rail=$('.rail');if(rail)new MutationObserver(placeBridge).observe(rail,{subtree:true,attributes:true,attributeFilter:['aria-current']});placeBridge();
     for(const [id,name] of [['red-download','download'],['doc-blue-record','check'],['red-record','check'],['evaluation-save','check'],['bridge-launch','plug'],['bridge-connect','plug'],['harness-register','plus'],['harness-download','download']])decorate($('#'+id),name);
 
@@ -255,16 +299,39 @@
       }
     }
     setupLibrary();
-    const architecture=$('.connection-plan');if(architecture){const d=disclosure('실행 구조 · 고급 안내',[]);architecture.before(d);d.append(architecture);}
+    const architecture=$('.connection-plan');
+    if(architecture){
+      const openNote=el('p','muted open-access-plan-note','웹 실행 모드에서는 브라우저가 선택한 PDF와 검토 지시만 HTTPS로 전달하며, 별도 로컬 프로그램 설치나 API 키 입력을 요구하지 않습니다.');
+      const d=disclosure('실행 구조 · 고급 안내',[]);
+      architecture.before(d);d.append(architecture,openNote);
+    }
     // Symbolic human judgments delegate to the existing selects/validators. No
     // decision, reason, score or approval is inferred by this presentation layer.
+    const OVERALL_VERDICT_NAMES=Object.freeze({
+      supported:['check','근거 충분'],
+      unsupported:['x','근거 부족'],
+      mixed:['check-check','일부 적절'],
+      uncertain:['circle-question-mark','유보']
+    });
+    const ITEM_VERDICT_NAMES=Object.freeze({
+      pending:['refresh-cw','미판정'],
+      detected:['check','찾음 (적중)'],
+      missed:['x','놓침 (미탐)'],
+      supported:['check','타당함 (적중)'],
+      'pre-existing':['file-text','원본 기존 오류'],
+      'spin-boundary':['settings-2','해석·수위 경계'],
+      'gold-error':['circle-alert','정답표 오류'],
+      unsupported:['x','오탐 (기각)'],
+      mixed:['check-check','일부 타당'],
+      uncertain:['circle-question-mark','확인필요']
+    });
     function verdictButtons(select){
       if(select.dataset.visualVerdict)return;select.dataset.visualVerdict='true';
       // Buttons must not live inside a label: the label's default activation
       // can forward a click to another labelable descendant and change verdict.
       const wrapping=select.closest('label');if(wrapping){const field=el('div','visual-verdict-field'),caption=el('span','visual-field-label','판정');wrapping.before(field);field.append(caption,select);wrapping.remove();}
       const label=document.querySelector('label[for="'+select.id+'"]'),group=el('div','visual-verdicts');group.setAttribute('role','group');group.setAttribute('aria-label',label?.textContent||'사람 판정');
-      const names={supported:['check','맞음'],unsupported:['x','아님'],mixed:['check-check','일부'],uncertain:['circle-question-mark','모름'],detected:['check','찾음'],missed:['x','놓침'],pending:['refresh-cw','미판정']};
+      const names=select.id==='evaluation-verdict'?OVERALL_VERDICT_NAMES:ITEM_VERDICT_NAMES;
       for(const option of select.options){const pair=names[option.value];if(!pair)continue;const b=button(pair[0],pair[1],()=>{if(select.disabled)return;select.value=option.value;select.dispatchEvent(new Event('change',{bubbles:true}));paint();},'visual-verdict');b.title=option.textContent;b.setAttribute('aria-label',option.textContent);b.dataset.value=option.value;group.append(b);}
       function paint(){for(const b of group.children){b.disabled=select.disabled;b.setAttribute('aria-pressed',String(b.dataset.value===select.value));}}
       select.hidden=true;select.after(group);select.addEventListener('change',paint);new MutationObserver(paint).observe(select,{attributes:true,attributeFilter:['disabled']});paint();
