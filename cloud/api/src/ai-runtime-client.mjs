@@ -83,11 +83,11 @@ function runtimeFailure(status) {
   return new AiError(503, 'ai_unavailable');
 }
 
-async function send(env, pathname, { method = 'GET', ownerId, headers = {}, body } = {}) {
+async function send(env, pathname, { method = 'GET', ownerId, headers = {}, body, timeoutMs } = {}) {
   const config = runtimeConfig(env);
   if (!config.base || !config.token) aiFail(503, 'ai_unavailable');
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), config.timeoutMs);
+  const timer = setTimeout(() => controller.abort(), positiveInt(timeoutMs, config.timeoutMs));
   try {
     return await aiFetch(env)(config.base + pathname, {
       method,
@@ -166,6 +166,33 @@ export async function cancelRuntimeJob(env, { ownerId, jobId }) {
     headers: { 'Content-Type': 'application/json' },
   });
   return readRuntimeJson(response);
+}
+
+const PAPER_TIMEOUT_MS = 120000;
+const PAPER_RESPONSE_MAX = 64 * 1024 * 1024;
+
+async function paperResponseText(response) {
+  let bytes;
+  try {
+    bytes = new Uint8Array(await response.arrayBuffer());
+  } catch {
+    aiFail(503, 'ai_unavailable');
+  }
+  if (bytes.byteLength > PAPER_RESPONSE_MAX) aiFail(502, 'runtime_unavailable');
+  return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+}
+
+// Paper calls are not model calls. The body is forwarded as given; the caller decides what is verbatim.
+export async function postRuntimePaper(env, { ownerId, path, body }) {
+  const response = await send(env, '/internal/v1/paper', {
+    method: 'POST',
+    ownerId,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ownerId, path, body }),
+    timeoutMs: PAPER_TIMEOUT_MS,
+  });
+  if (response.status >= 300 && response.status < 400) aiFail(503, 'ai_unavailable');
+  return { status: response.status, text: await paperResponseText(response) };
 }
 
 // Returns the raw runtime Response; the caller streams the bytes and never buffers them in D1.
