@@ -41,4 +41,6 @@
 }
 
 .paper-visual-edit .visual-edit-layout.visual-edit-focused{grid-template-columns:minmax(0,1fr)}
- .paper-visual-edit .visual-edit-column[hidden]{display:none}
+.paper-visual-edit .visual-edit-column[hidden]{display:none}
+.visual-chain-banner{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;padding:14px 16px;margin:10px 0;background:var(--surface,#f3f4f4);border:1px solid var(--line,#d9dde0);border-left:4px solid var(--ink,#111315);border-radius:6px}
+.visual-chain-note{margin:0;font-size:13px;line-height:1.6;color:var(--ink,#111315);max-width:68ch}

@@ -115,7 +115,7 @@
       const genBtn=$('#paper-generate'),handoffBtn=$('#paper-blue-handoff');
       if(genBtn){genBtn.classList.remove('primary');genBtn.classList.add('secondary');}
       if(handoffBtn){handoffBtn.classList.remove('secondary');handoffBtn.classList.add('primary');}
-      const settings=disclosure('글꼴 · 변경 표시 · 원본 파일',[]);
+      const settings=disclosure('글꼴 · 변경 표시 · 확대',[]);
       for(const selector of ['.paper-font-tools','.paper-compare-tools']){const node=paper.querySelector(selector);if(node)settings.append(node);}
       const origDownload=$('#paper-original-download');
       if(origDownload){const row=el('div','button-row');row.append(origDownload);settings.append(row);}

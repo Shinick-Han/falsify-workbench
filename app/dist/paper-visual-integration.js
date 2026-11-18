@@ -151,9 +151,22 @@
     const analysisHost=doc.getElementById('red-visual-analysis'),status=doc.getElementById('red-visual-record-status');
     let editor=null,enrichment=null,localBusy=false,enrichmentBusy=false,redBusy=false,announced=false,sourceKey='',prepared=null,recordId=null,recordRevision=0,editorRelease=null,stagedChanges=[],lastRecordHash=null;
     const say=text=>{if(status)status.textContent=text;};
-    let fullRecord=null;
+    let fullRecord=null,chainAutoFocus=false;
+    const chainBanner=doc.createElement('div');chainBanner.id='red-visual-chain-banner';chainBanner.className='visual-chain-banner';chainBanner.hidden=true;
+    const chainNote=doc.createElement('p');chainNote.id='red-visual-chain-note';chainNote.className='visual-chain-note';
+    const chainBtn=doc.createElement('button');chainBtn.id='red-visual-chain-apply';chainBtn.type='button';chainBtn.className='button primary';
+    chainBtn.textContent='본문 수정 반영하고 표·그래프 열기';
+    chainBanner.append(chainNote,chainBtn);
+    if(typeof host.before==='function')host.before(chainBanner);else section.append(chainBanner);
     const recordButton=doc.createElement('button');recordButton.type='button';recordButton.className='button secondary';recordButton.textContent='변경 기록 JSON 저장';recordButton.hidden=true;
     section.append(recordButton);
+    chainBtn.addEventListener('click',()=>{
+      const genBtn=doc.getElementById('paper-generate');
+      if(!genBtn||genBtn.disabled)return;
+      chainAutoFocus=true;chainBtn.disabled=true;
+      chainNote.textContent='본문 수정본 PDF를 만드는 중입니다… 완료되면 표·그래프·그림 편집기가 바로 열립니다.';
+      genBtn.click();
+    });
     recordButton.addEventListener('click',()=>{
       if(!fullRecord)return;
       const url=root.URL.createObjectURL(new root.Blob([JSON.stringify(fullRecord,null,2)],{type:'application/json'}));
@@ -226,15 +239,47 @@
         onBusyChange:value=>{enrichmentBusy=!!value;sync();},
         onResult:result=>{if(result.kind==='chart'&&editor.setAnalysis)editor.setAnalysis(result);else if(result.kind==='ocr'&&editor.setOcrAnalysis)editor.setOcrAnalysis(result);else void editor.refresh?.();}});
     }
+    function hasOriginalPdf(){
+      const original=root.FalsifyPaperWorkspace?.getSource?.();
+      return Boolean(original?.file&&original.fileHash&&(/\.pdf$/i.test(original.file.name)||original.file.type==='application/pdf'));
+    }
+    function pendingTextEditsCount(){
+      if(!hasOriginalPdf()||source())return 0;
+      const edits=root.FalsifyPaperWorkspace?.getEditSnapshot?.()?.edits;
+      return Array.isArray(edits)?edits.filter(e=>e&&e.enabled!==false).length:0;
+    }
+    function syncChainBanner(pendingCount,hasSource){
+      chainBanner.hidden=pendingCount===0;
+      host.hidden=pendingCount>0;
+      if(pendingCount>0){
+        const genBtn=doc.getElementById('paper-generate');
+        chainBtn.disabled=Boolean(genBtn&&genBtn.disabled);
+        if(!chainAutoFocus){
+          chainNote.textContent='본문 수정 '+pendingCount+'건이 아직 PDF에 반영되지 않았습니다. 먼저 본문 수정본을 만들면 그 PDF 위에서 표·그래프·그림을 바로 이어서 고칠 수 있습니다.';
+        }
+        return;
+      }
+      if(chainAutoFocus&&hasSource){
+        chainAutoFocus=false;
+        section.scrollIntoView?.({block:'nearest'});
+      }else if(!hasSource){
+        chainAutoFocus=false;
+      }
+    }
     function refresh(){
-      const src=source(),key=src?src.fileHash+':'+src.revision:'';
-      section.hidden=!src;
+      const src=source(),pendingCount=pendingTextEditsCount(),key=src?src.fileHash+':'+src.revision:'pending:'+pendingCount;
+      section.hidden=!src&&pendingCount===0;
+      syncChainBanner(pendingCount,Boolean(src));
       if(key!==sourceKey){sourceKey=key;prepared=null;recordId=null;recordRevision=0;stagedChanges=[];lastRecordHash=null;fullRecord=null;recordButton.hidden=true;editor.clear?.();enrichment?.clear?.();say('');if(src)void editor.refresh?.();}
       sync();
     }
     doc.addEventListener('falsify:paper-workspace-source',refresh);
     doc.addEventListener('falsify:paper-workspace-output',refresh);
     doc.addEventListener('falsify:document-clear',refresh);
+    if(typeof MutationObserver==='function'){
+      const editsList=doc.getElementById('paper-edits');
+      if(editsList)new MutationObserver(refresh).observe(editsList,{childList:true,subtree:true});
+    }
     function resetPrepared(){prepared=null;sync();if(source()&&!editor.snapshot?.()?.paperId)void editor.refresh?.();}
     doc.addEventListener('falsify:local-bridge',resetPrepared);
     doc.addEventListener('falsify:hosted-paper',resetPrepared);

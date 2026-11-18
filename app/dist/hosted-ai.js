@@ -2429,6 +2429,11 @@
     function findingReasonText(item){
       return trimmedText(item.rationale)||trimmedText(item.summary)||trimmedText(item.message);
     }
+    function dispatchBlueLocate(item,quote){
+      if(typeof doc?.dispatchEvent!=='function'||typeof CustomEvent!=='function') return;
+      const detail={quote,page:item.page,pageIndex:item.pageIndex,label:findingLocation(item)};
+      try{doc.dispatchEvent(new CustomEvent('falsify:blue-locate',{detail}));}catch{}
+    }
     function blueFindingNode(item,index){
       const head=el('p',{className:'hosted-ai-candidate-head'},
         el('strong',{textContent:findingHeaderText(item,index)}));
@@ -2442,6 +2447,11 @@
       if(reason) box.append(el('p',{textContent:reason}));
       const limit=trimmedText(item.uncertainty);
       if(limit) box.append(el('p',{className:'muted',textContent:'한계: '+limit}));
+      if(quote||findingLocation(item)){
+        const locateBtn=el('button',{type:'button',className:'button secondary blue-locate-btn',textContent:'원문에서 보기'});
+        locateBtn.addEventListener('click',()=>{dispatchBlueLocate(item,quote);});
+        box.append(locateBtn);
+      }
       return box;
     }
     function renderBlueFindings(){
