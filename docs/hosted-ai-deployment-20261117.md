@@ -73,6 +73,14 @@ Do not run them against production until the coordinator approves the release.
    duplicate submission (no second provider call), owner isolation with two accounts, and runtime-down 503.
 3. Live provider smoke is coordinator-owned. Never use private papers or answer keys as fixtures/logs.
 
+## Paper tools
+
+`POST /internal/v1/paper` reuses the companion paper handlers (evidence prepare/query, visual export, chart prepare, and analysis jobs). It is off unless `HOSTED_PAPER_TOOLS=1` (`0` or unset leaves it off). While off, `/internal/v1/health` is unchanged. While on, health adds `paperTools` with `enabled`, `visualEditor`, `chartEdit`, and `analysis`.
+
+This route's JSON limit is 29360128 bytes (28 MiB). Other routes keep the 1 MiB JSON limit. Service-token auth is the same as the other internal routes; the owner id is the body's `ownerId`. Each owner keeps at most 2 prepared papers for 2 hours. The runtime tracks at most `HOSTED_PAPER_MAX_OWNERS` owners (default 32, least-recently-used, idle 2 hours). CPU paper calls share `HOSTED_PAPER_MAX_CONCURRENCY` (default 2) and return `429 paper_busy` immediately when it is full. Analysis jobs allow 1 active job per owner and `HOSTED_PAPER_MAX_ANALYSIS` globally (default 1), also `429 paper_busy`. These calls do not enter the RED/BLUE review worker and do not spend model tokens.
+
+Analysis jobs need the optional paper-analysis interpreter on the host. Run `python app/local/setup-paper-analysis.py` once (it writes `~/.falsify/paper-analysis-runtime.json`) or set `FALSIFY_PAPER_ANALYSIS_PYTHON` to that interpreter. Until then `paperTools.analysis` is false. Evidence, visual export, and chart prepare do not need that interpreter.
+
 ## Known limits
 
 - Structured table/figure evidence, selected text/table-cell edits and edited-PDF download/BLUE handoff are wired for
