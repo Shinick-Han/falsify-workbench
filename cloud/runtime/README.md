@@ -37,6 +37,10 @@ nothing is baked into the image):
 | `HOSTED_AI_PORT` | no | Bind port (default `8787`, matching `EXPOSE`). |
 | `ANTHROPIC_WORKSPACE_ID` | no | Sent as `anthropic-workspace-id` when set. |
 | `ANTHROPIC_BASE_URL` | no | HTTPS provider endpoint override (tests inject transport instead). |
+| `OPENAI_API_KEY` | yes for OpenAI model jobs | Read only by `openai_backend.py`; never logged or returned. |
+| `OPENAI_ORG_ID` | no | Sent as `OpenAI-Organization` when set. |
+| `OPENAI_PROJECT_ID` | no | Sent as `OpenAI-Project` when set. |
+| `OPENAI_BASE_URL` | no | HTTPS provider endpoint override (`http://127.0.0.1` allowed for tests). |
 | `HOSTED_AI_MODELS` | no | Comma-separated model allowlist. |
 | `HOSTED_AI_DEFAULT_MODEL` | no | Default model (must be in the allowlist). |
 | `HOSTED_AI_DEFAULT_EFFORT` | no | Default effort (must be in the effort allowlist). |
