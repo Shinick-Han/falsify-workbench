@@ -156,6 +156,7 @@ test('the bridge and click pairing do not call loopback while open access is on'
 test('the page wires open-access before hosted AI and hides bridge-only sections',()=>{
   const scripts=[...html.matchAll(/<script src="([^"]+)"/g)].map(item=>item[1].split('?')[0]);
   assert.ok(scripts.indexOf('cloud-config.js')<scripts.indexOf('open-access.js'));
+  assert.ok(scripts.indexOf('open-access.js')<scripts.indexOf('app.js'));
   assert.ok(scripts.indexOf('open-access.js')<scripts.indexOf('hosted-ai.js'));
   assert.match(html,/id="local-bridge"[^>]*data-requires-bridge/);
   assert.match(html,/class="connection-plan"[^>]*data-requires-bridge/);

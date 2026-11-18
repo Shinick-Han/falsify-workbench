@@ -55,6 +55,7 @@ jobs:
           node app/tests/red-output.browser.cjs
           FALSIFY_UI_TEST_URL=http://127.0.0.1:7851/ node app/tests/paper-direct-recompose.browser.cjs
           node app/tests/harness-comparison.browser.cjs
+          node app/tests/open-access.browser.cjs
           node --test scripts/packaging.spec.mjs
           node --test scripts/event-page.spec.mjs
           node scripts/build-event-page.mjs --check

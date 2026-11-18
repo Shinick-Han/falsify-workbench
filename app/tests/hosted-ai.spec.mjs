@@ -1409,7 +1409,8 @@ function guestProvider(tokens){
   let index=0;
   return {
     invalidated:[],
-    token(){return tokens[Math.min(index,tokens.length-1)];},
+    calls:0,
+    token(){this.calls++;return tokens[Math.min(index,tokens.length-1)];},
     invalidate(){this.invalidated.push(index);index++;}
   };
 }
@@ -1423,17 +1424,26 @@ async function prepareOpenRun(entry){
 }
 
 test('open mode hides sign-in controls and says the panel is ready without login',async()=>{
-  const entry=openEntry(makeRouter(),guestProvider([GUEST_A]));
+  const provider=guestProvider([GUEST_A]);
+  const entry=openEntry(makeRouter(),provider);
   await entry.app.ready;
   assert.equal(entry.$('hosted-ai-login-form').hidden,true);
   assert.equal(entry.$('hosted-ai-register-panel').hidden,true);
   assert.equal(entry.$('hosted-ai-logout').hidden,true);
-  assert.match(entry.text('hosted-ai-status'),/로그인 없이/);
+  assert.match(entry.text('hosted-ai-status'),/로그인 없이 사용할 수 있습니다\. 웹 실행 준비됨/);
   assert.match(entry.text('hosted-ai-intro'),/로그인 없이/);
   assert.match(entry.text('hosted-ai-session'),/로그인 없이/);
-  assert.equal(entry.calls.find(call=>call.path==='/v1/ai/capabilities').headers.Authorization,'Bearer '+GUEST_A);
+  assert.equal(entry.calls.find(call=>call.path==='/v1/ai/capabilities').headers.Authorization,undefined);
+  assert.equal(provider.calls,0,'showing ready does not mint a guest');
   assert.equal(entry.calls.some(call=>String(call.url).includes('127.0.0.1')),false);
   assert.equal(entry.storedText().includes(GUEST_A),false);
+  await prepareOpenRun(entry);
+  assert.equal(provider.calls,0,'choosing a file does not mint a guest');
+  entry.$('hosted-ai-run').click();
+  await until(()=>provider.calls===1,'the first run mints one guest');
+  await until(()=>entry.calls.some(call=>call.path==='/v1/ai/uploads'),'upload uses the minted guest');
+  assert.equal(entry.calls.find(call=>call.path==='/v1/ai/uploads').headers.Authorization,'Bearer '+GUEST_A);
+  assert.equal(provider.calls,1);
 });
 
 test('a 401 on an open-mode AI call refreshes the hook token once',async()=>{
@@ -1503,6 +1513,9 @@ test('a failed guest session shows the open-access error and no login form',asyn
     token(){const error=Error('guest');error.status=403;error.code='invalid_access_key';throw error;}
   });
   await entry.app.ready;
+  assert.equal(entry.$('hosted-ai-error').hidden,true);
+  await prepareOpenRun(entry);
+  entry.$('hosted-ai-run').click();
   await until(()=>/링크가 올바르지 않습니다/.test(entry.text('hosted-ai-error')),'guest error is visible');
   assert.equal(entry.$('hosted-ai-login-form').hidden,true);
   assert.equal(entry.$('hosted-ai-register-panel').hidden,true);

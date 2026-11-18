@@ -526,9 +526,7 @@
       return '웹 실행이 설정되어 있습니다. 로그인해 주세요.';
     }
     function readyStatus(){
-      if(openMode()) return state.session
-        ?'로그인 없이 사용할 수 있습니다. 웹 실행 준비됨.'
-        :'로그인 없이 사용할 수 있습니다. 세션을 확인하지 못했습니다.';
+      if(openMode()) return '로그인 없이 사용할 수 있습니다. 웹 실행 준비됨.';
       return state.session?'웹 실행 준비됨.':'웹 실행이 설정되어 있습니다. 로그인하면 실행할 수 있습니다.';
     }
     function applyCapabilities(caps){
@@ -631,12 +629,21 @@
     function finish(){if(readyResolve){readyResolve({state:snapshot()});readyResolve=null;}}
 
     async function resolveSession(){
+      if(openMode()) return null;
       if(hookPresent()){
         const token=await hookToken();
         if(token) return {source:'hook',token,apiBase:state.apiBase,author:null,expiresAt:''};
         return null;
       }
       return storedSession();
+    }
+    async function openBearer(){
+      if(state.session&&state.session.token) return state.session.token;
+      if(!openMode()) return '';
+      const token=await hookToken();
+      if(!token) return '';
+      state.session={source:'hook',token,apiBase:state.apiBase,author:null,expiresAt:''};
+      return token;
     }
 
     function normalizeAuthor(value){
@@ -1073,7 +1080,8 @@
       fail(describe(error,'submit'));
     }
     async function run(){
-      if(state.busy||state.gate!=='ready'||!state.session||!state.capabilities) return;
+      if(state.busy||state.gate!=='ready'||!state.capabilities) return;
+      if(!state.session&&!await openBearer()){showGuestStartError();return;}
       const input=reviewInputs();
       const problem=reviewInputProblem(input.prompt);
       if(problem){fail(problem);return;}
@@ -1211,7 +1219,8 @@
       fail(describe(error,'apply'));
     }
     async function applySelection(){
-      if(state.busy||state.gate!=='ready'||!state.session||!state.capabilities) return;
+      if(state.busy||state.gate!=='ready'||!state.capabilities) return;
+      if(!state.session&&!await openBearer()){showGuestStartError();return;}
       const blocker=applyBlocker();
       if(blocker){fail(blocker);return;}
       const {edits,visualEdits}=buildApplyEdits(selectedEntries());
@@ -2056,7 +2065,7 @@
     function renderContext(){
       const caps=state.capabilities,signed=!!state.session;
       return {caps,signed,locked:state.gate==='disabled',hook:hookPresent(),busy:!!state.busy,
-        operate:state.gate==='ready'&&!!caps&&signed};
+        operate:state.gate==='ready'&&!!caps&&(signed||openMode())};
     }
     function renderStatus(){
       nodes.status.textContent=state.status||'';
@@ -2069,15 +2078,16 @@
       return '로그인 세션이 없습니다. 아이디와 비밀번호로 로그인하세요.';
     }
     function renderSessionRow(ctx){
-      setHidden(nodes.sessionRow,!ctx.signed||ctx.locked);
+      const show=!ctx.locked&&(ctx.signed||(openMode()&&!!ctx.caps));
+      setHidden(nodes.sessionRow,!show);
       if(!openMode()) setHidden(nodes.logout,!ctx.signed||(state.session&&state.session.source==='hook'));
-      if(ctx.signed) nodes.sessionText.textContent=sessionLabel();
+      if(show) nodes.sessionText.textContent=sessionLabel()||'로그인 없이 사용할 수 있습니다.';
     }
     function authGateHidden(open,ctx){
       return open||ctx.locked||ctx.signed||ctx.hook;
     }
     function renderExternalNote(open,ctx){
-      setHidden(nodes.externalBox,ctx.locked||ctx.signed||!ctx.hook);
+      setHidden(nodes.externalBox,open||ctx.locked||ctx.signed||!ctx.hook);
       if(nodes.externalNote){
         nodes.externalNote.textContent=open
           ?'게스트 세션을 확인하지 못했습니다. 아래 상태 확인을 다시 누르세요.'
@@ -2137,7 +2147,7 @@
     function runAvailability(ctx,meta){
       const activeJob=!!state.job&&!TERMINAL_STATES.includes(state.job.state);
       const fileReady=!!(state.file&&state.fileSha)||!!state.upload;
-      const canRun=ctx.operate&&ctx.signed&&!!ctx.caps&&fileReady&&!ctx.busy&&!activeJob
+      const canRun=ctx.operate&&(ctx.signed||openMode())&&!!ctx.caps&&fileReady&&!ctx.busy&&!activeJob
         &&!state.fileError&&meta.count>0&&meta.count<=meta.max;
       return {activeJob,fileReady,canRun};
     }
