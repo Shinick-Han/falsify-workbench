@@ -1,3 +1,11 @@
+## 0.2.0-alpha.81 — 2026-11-18
+
+- 호스팅 런타임은 `HOSTED_PAPER_TOOLS=1`일 때 `POST /internal/v1/paper`에서 companion과 같은 함수로 evidence prepare·query, visual export, chart prepare, 분석 작업 제출·조회·취소를 실행합니다. 그 밖은 `404 paper_path_unsupported`입니다. 소유자마다 논문은 2개, 유휴 7200초이고, 소유자는 32명까지 두며 넘치면 분석 중이 아닌 가장 오래된 소유자를 지웁니다. CPU 호출은 동시에 2개까지이며 가득 차면 기다리지 않고 `429 paper_busy`입니다. 분석 작업은 소유자당 1개, 전체 1개이고 넘치면 같은 코드입니다. 이 호출은 RED/BLUE 작업 실행기를 쓰지 않습니다. 이 경로의 JSON 한도는 29360128바이트입니다. `/internal/v1/health`는 켜져 있을 때만 `paperTools`를 넣습니다.
+- Worker `POST /v1/ai/paper`가 그 요청을 런타임으로 보냅니다. `AI_PAPER_TOOLS_ENABLED`가 `true`일 때만 열리고, 운영과 `event`의 `wrangler.jsonc`가 그 값입니다. wrangler가 덮어쓰지 않은 기본 상한은 본문 29360128바이트, 준비 시간당 30회(게스트 10회), 호출 시간당 600회(게스트 240회), 전체 호출 3000회입니다. `/api/paper/evidence/prepare`만 준비 한도에 들고, 나머지 논문 호출은 호출 한도에만 듭니다. 게스트 준비 PDF의 디코드 크기는 운영·행사 `AI_GUEST_MAX_UPLOAD_BYTES` 20971520바이트, 그 밖은 `AI_MAX_UPLOAD_BYTES` 33554432바이트를 넘지 않습니다. `GET /v1/ai/capabilities`는 켜져 있을 때만 `paperTools` `{"enabled": true}`를 줍니다.
+- 「표·그래프·그림 고치기」와 표·그림·분석 패널은 PC companion이 연결되어 있으면 그 세션을 쓰고, 아니면 `paperTools`가 켜진 호스팅 세션을 씁니다. 호스팅일 때 연결 실패 문구는 「웹 실행 서버에 연결하지 못했습니다. 잠시 후 다시 시도하세요.」이고 버튼은 「웹 실행 다시 시도」입니다.
+- 「글 편집」은 포인터 위치에서 선택 끝점을 정합니다. 여러 영역에 걸치면 「선택이 여러 영역에 걸쳐 있습니다. 한 영역 안에서 다시 선택하세요.」이고, 회전된 글자는 「회전된 글자는 글 편집으로 넣을 수 없습니다. 표·그래프·그림 고치기를 쓰세요.」입니다.
+- 그림 안 글자를 만들 때 편집이 폼 스트림에 있으면 리소스 이름을 먼저 끌어올립니다. 만든 PDF가 그림을 깨뜨리면 그 파일 대신 「그림 안 글자를 고치면 그림이 깨져서 만들지 않았습니다. 표·그래프·그림 고치기를 쓰세요.」를 돌려줍니다.
+
 ## 0.2.0-alpha.80 — 2026-11-18
 
 - 호스팅 런타임에 OpenAI Responses 백엔드(`app/local/openai_backend.py`)를 더했습니다. 키는 서버의 `OPENAI_API_KEY`만 읽습니다. 구조화 출력은 `text.format`의 `json_schema`이고 `strict`는 true입니다. 노력도 `low`·`medium`·`high`·`xhigh`·`max`는 모델별 `reasoning.effort`로 대응합니다. `max`는 그 모델이 지원하는 가장 높은 값이고, `xhigh`는 지원하면 `xhigh`, 아니면 `high`입니다. 이 모듈은 유료 호출을 스스로 재시도하지 않습니다.

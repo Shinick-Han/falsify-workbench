@@ -51,7 +51,7 @@ function fixture(extra = '') {
   <meta charset="utf-8">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; connect-src 'self' http://127.0.0.1:* https://falsify-cloud-api.ai-gongbu.workers.dev; object-src 'none'">
   <title>Falsify · Paper Workbench</title>
-  ${extra}<script src="cloud-config.js?v=0.2.0-alpha.80" defer></script>
+  ${extra}<script src="cloud-config.js?v=0.2.0-alpha.81" defer></script>
 </head>
 </html>
 `;
@@ -80,11 +80,11 @@ test('api base must be a canonical https origin', () => {
 });
 
 test('event HTML keeps every other byte, with or without open-access.js', () => {
-  for (const extra of ['', '<script src="open-access.js?v=0.2.0-alpha.80" defer></script>\n  ']) {
+  for (const extra of ['', '<script src="open-access.js?v=0.2.0-alpha.81" defer></script>\n  ']) {
     const index = fixture(extra);
     const planned = planEventFiles(index, DEFAULT_EVENT_API_BASE);
     assert.equal(revertEventHtml(planned.html, index, DEFAULT_EVENT_API_BASE), index);
-    assert.equal(count(planned.html, 'open-access.js?v=0.2.0-alpha.80'), count(index, 'open-access.js?v=0.2.0-alpha.80'));
+    assert.equal(count(planned.html, 'open-access.js?v=0.2.0-alpha.81'), count(index, 'open-access.js?v=0.2.0-alpha.81'));
     assert.match(planned.html, /<title>Falsify · Paper Workbench · Event<\/title>/);
     assert.match(planned.html, /<meta name="robots" content="noindex">/);
   }
