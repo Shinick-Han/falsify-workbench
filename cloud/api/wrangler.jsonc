@@ -42,6 +42,7 @@
     // Main Pages app is open: guests need no login and no access key. Caps bound the operator cost;
     // AI_OPEN_ACCESS=false is the kill switch. Claude and OpenAI ids match the runtime HOSTED_AI_MODELS.
     "AI_OPEN_ACCESS": "true",
+    "AI_PAPER_TOOLS_ENABLED": "true",
     "AI_MODELS": "claude-opus-5-5,claude-sonnet-5-5,claude-haiku-5-5,gpt-6.2-astra,gpt-5.5,gpt-5.4-mini",
     "AI_GUEST_SESSION_SECONDS": "21600",
     "AI_GUESTS_PER_IP_HOUR": "20",
@@ -104,6 +105,7 @@
         "CONFLUENCE_ONLY": "true",
         "AI_HOSTING_ENABLED": "true",
         "AI_OPEN_ACCESS": "true",
+        "AI_PAPER_TOOLS_ENABLED": "true",
         // Claude and OpenAI ids; the runtime HOSTED_AI_MODELS must list the same set.
         "AI_MODELS": "claude-opus-5-5,claude-sonnet-5-5,claude-haiku-5-5,gpt-6.2-astra,gpt-5.5,gpt-5.4-mini",
         "AI_RUNTIME_URL": "https://falsify-runtime.shinick.dev/production",
