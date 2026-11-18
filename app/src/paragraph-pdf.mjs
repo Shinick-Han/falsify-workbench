@@ -8,6 +8,7 @@ import {parseFont} from './browser-fonts.mjs';
 import {deriveSourceTables, bindSourceTables} from './paragraph-source-tables.mjs';
 import {trySourceMarkerEdits} from './paragraph-pdf-marker-path.mjs';
 import {scanTextShows} from './paragraph-pdf-content-operators.mjs';
+import {FIGURE_TEXT_REFUSAL, assessFigureText, formStreamsHoldEdits, promoteFormResources} from './paragraph-pdf-figure-resources.mjs';
 
 export const COORDINATE_SPACE = 'top-left-page';
 export const LIMITS = Object.freeze({maxFileBytes: 25 * 1024 * 1024});
@@ -242,6 +243,32 @@ function readEditSnapshot(request) {
   return {requestedEdits,fileHash};
 }
 
+async function sourceBytesForFigure(bytes, edits, request) {
+  if (request?.rewriteFigureResources === false) return bytes;
+  try {
+    const mupdf = await import('./browser-pdf-vendor/mupdf.js');
+    checkAbort(request.signal);
+    if (!formStreamsHoldEdits(bytes, edits, mupdf)) return bytes;
+    return promoteFormResources(bytes, mupdf);
+  } catch (error) {
+    checkAbort(request.signal);
+    if (error?.code === 'figure-text-corrupt') throw error;
+    return bytes;
+  }
+}
+
+async function rejectBrokenFigure(sourceBytes, outputBytes, edits, signal) {
+  try {
+    const mupdf = await import('./browser-pdf-vendor/mupdf.js');
+    checkAbort(signal);
+    const problem = assessFigureText(sourceBytes, outputBytes, edits, mupdf);
+    if (problem) throw new ParagraphPdfError('figure-text-corrupt', FIGURE_TEXT_REFUSAL, problem);
+  } catch (error) {
+    checkAbort(signal);
+    if (error?.code === 'figure-text-corrupt') throw error;
+  }
+}
+
 function markerResult(marker, request, hash, fontSnapshot) {
     const sha256 = hex(marker.bytes), warnings = [];
     const pageMap=Array.from({length:marker.pageCount},(_,i)=>({sourcePageIndex:i,outputPageIndex:i,continuationPageIndices:[]}));
@@ -265,14 +292,16 @@ export async function prepare(request = {}) {
   const enabled = requestedEdits.filter(edit => edit?.enabled !== false);
   if (!enabled?.length) throw new ParagraphPdfError('no-edits', 'At least one enabled edit is required.');
   const edits = enabled.map((e, index) => ({id: e?.id || `edit-${index}`, pageIndex: e?.pageIndex, before: e?.before, after: e?.after}));
+  const editBytes = await sourceBytesForFigure(bytes, edits, request);
   let marker = null;
   try {
     const mupdf = await import('./browser-pdf-vendor/mupdf.js');
     checkAbort(request.signal);
-    marker = await trySourceMarkerEdits({bytes, edits, fontSnapshot, signal:request.signal}, {mupdf, scanTextShows});
+    marker = await trySourceMarkerEdits({bytes: editBytes, edits, fontSnapshot, signal:request.signal}, {mupdf, scanTextShows});
   } catch { checkAbort(request.signal); }
   checkAbort(request.signal);
   if (marker) {
+    await rejectBrokenFigure(bytes, marker.bytes, edits, request.signal);
     return markerResult(marker, request, hash, fontSnapshot);
   }
   const {engineFactory: createEngine, info} = await loadRuntime();
@@ -297,8 +326,8 @@ export async function prepare(request = {}) {
   checkAbort(request.signal);
   // Matching remains exact and all-or-nothing. Duplicate Before text is an
   // explicit AMBIGUOUS_MATCH; selection metadata never silently relocates it.
-  const reconciled = await reconcileEdits(bytes, edits, engineFactory, request.signal);
-  const {pdf, report} = await editPdf({sourceBytes: bytes, edits: reconciled.edits, reflow: true}, {engineFactory, runtimeInfo: info, draft: true,
+  const reconciled = await reconcileEdits(editBytes, edits, engineFactory, request.signal);
+  const {pdf, report} = await editPdf({sourceBytes: editBytes, edits: reconciled.edits, reflow: true}, {engineFactory, runtimeInfo: info, draft: true,
     documentFlow: 'compatible-groups', annotationAdapter: lazyAnnotationAdapter(request.signal)});
   checkAbort(request.signal);
   const sha256 = hex(pdf);
@@ -314,6 +343,7 @@ export async function prepare(request = {}) {
     quality: {independent: false, method: 'PDFium saved-file self-check', limitations: 'Same-engine structural checks; independent typography and visual QA are required.'},
     reconciliation: reconciled.diagnostics, report,
   };
+  await rejectBrokenFigure(bytes, pdf, edits, request.signal);
   const name = String(request.file?.name || 'document.pdf').replace(/\.pdf$/i, '') + '-edited.pdf';
   return {file: new File([pdf], name, {type: 'application/pdf'}), sha256, verification,
     pageMap: report.pagination.sourcePageMap, warnings};
