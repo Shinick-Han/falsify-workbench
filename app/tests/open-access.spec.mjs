@@ -153,6 +153,39 @@ test('the bridge and click pairing do not call loopback while open access is on'
   }
 });
 
+test('a page with no access key mints an empty guest body only when a token is requested',async()=>{
+  const page=load({config:openConfig(),hash:'',response:guestResponse()});
+  assert.equal(page.calls.length,0,'load does not mint');
+  assert.equal(page.location.hash,'');
+  const session=page.context.FalsifyHostedSession;
+  assert.equal(await session.token(),TOKEN);
+  assert.equal(page.calls.length,1);
+  assert.equal(page.calls[0].url,'https://worker.test/v1/ai/guest');
+  assert.equal(page.calls[0].init.body,'{}');
+  assert.equal(page.store.map.has('falsify.open-access.key.v1'),false);
+  await session.token();
+  assert.equal(page.calls.length,1,'a later run or apply reuses the guest');
+});
+
+test('the shipped main config enables guest open access and keeps the gateway',async()=>{
+  const cfgText=await readFile(fileURLToPath(new URL('../dist/cloud-config.js',import.meta.url)),'utf8');
+  assert.match(cfgText,/openAccess:\s*Object\.freeze\(\{\s*enabled:\s*true\s*\}\)/);
+  assert.equal(/CLIENT_SECRET|ATLASSIAN_CLIENT_SECRET|password|apiKey/i.test(cfgText),false);
+  const sandbox={};
+  vm.runInNewContext(cfgText,sandbox);
+  const cfg=sandbox.FalsifyCloudConfig;
+  assert.equal(cfg.apiBase,'https://falsify-cloud-api.ai-gongbu.workers.dev');
+  assert.equal(cfg.provider,'confluence');
+  assert.deepEqual(JSON.parse(JSON.stringify(cfg.hostedAi)),{enabled:true,apiBase:cfg.apiBase});
+  assert.deepEqual(JSON.parse(JSON.stringify(cfg.openAccess)),{enabled:true});
+  assert.equal(Object.isFrozen(cfg),true);
+  assert.equal(Object.isFrozen(cfg.openAccess),true);
+  assert.equal(Object.isFrozen(cfg.hostedAi),true);
+  const page=load({config:cfg,hash:'',response:guestResponse()});
+  assert.equal(page.document.documentElement.dataset.openAccess,'');
+  assert.equal(page.calls.length,0,'installing the shipped config does not mint');
+});
+
 test('the page wires open-access before hosted AI and hides bridge-only sections',()=>{
   const scripts=[...html.matchAll(/<script src="([^"]+)"/g)].map(item=>item[1].split('?')[0]);
   assert.ok(scripts.indexOf('cloud-config.js')<scripts.indexOf('open-access.js'));
