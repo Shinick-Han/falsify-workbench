@@ -583,7 +583,7 @@ test('model, effort and usage are rendered exactly as the server reported them',
   await until(()=>/완료/.test(entry.text('hosted-ai-job-state')),'job completes');
   assert.match(entry.text('hosted-ai-job-model'),/모델: claude-sonnet-5-5/);
   assert.match(entry.text('hosted-ai-job-model'),/추론 강도: medium/);
-  assert.match(entry.text('hosted-ai-job-model'),/실행: anthropic/);
+  assert.match(entry.text('hosted-ai-job-model'),/실행: Claude/);
   assert.match(entry.text('hosted-ai-job-usage'),/입력 11/);
   assert.match(entry.text('hosted-ai-job-usage'),/출력 22/);
   assert.match(entry.text('hosted-ai-job-usage'),/캐시 읽기 0/);
@@ -1520,4 +1520,84 @@ test('a failed guest session shows the open-access error and no login form',asyn
   assert.equal(entry.$('hosted-ai-login-form').hidden,true);
   assert.equal(entry.$('hosted-ai-register-panel').hidden,true);
   assert.equal(entry.storedText().includes('invalid_access_key'),false);
+});
+
+function selectShape(select){
+  const groups=[];
+  const flat=[];
+  for(const child of select.children){
+    if(child.tagName==='OPTGROUP'){
+      groups.push({
+        label:child.getAttribute('label'),
+        values:child.children.filter(node=>node.tagName==='OPTION').map(node=>node.value),
+      });
+    }else if(child.tagName==='OPTION') flat.push(child.value);
+  }
+  return {groups,flat};
+}
+
+test('model select stays a flat list when capabilities omit modelProviders',async()=>{
+  const entry=setup({routes:makeRouter()});
+  await entry.app.ready;
+  assert.deepEqual(selectShape(entry.$('hosted-ai-model')),{groups:[],flat:CAPS.models});
+  assert.deepEqual(selectShape(entry.$('hosted-ai-effort')),{groups:[],flat:CAPS.efforts});
+});
+
+test('mixed modelProviders group Claude and OpenAI and label the job provider',async()=>{
+  const models=['gpt-5.4','claude-sonnet-5-5','o3','custom-model','claude-haiku-5-5'];
+  const caps={
+    ...CAPS,
+    provider:'mixed',
+    models,
+    modelProviders:{
+      'gpt-5.4':'openai',
+      'claude-sonnet-5-5':'anthropic',
+      o3:'openai',
+      'custom-model':'other',
+      'claude-haiku-5-5':'anthropic',
+    },
+  };
+  const entry=setup({routes:makeRouter({
+    caps,
+    jobGet:()=>({status:200,body:{job:job({
+      state:'completed',
+      progress:{completedCalls:1,requiredCalls:1,phase:'done'},
+      model:'gpt-5.4',effort:'high',provider:'openai',
+      usage:{inputTokens:1,outputTokens:2,cacheReadInputTokens:0,cacheCreationInputTokens:0},
+      result:{counts:{rejected:0,unresolved:0}},
+    })}}),
+  })});
+  await entry.app.ready;
+  assert.deepEqual(selectShape(entry.$('hosted-ai-model')),{
+    groups:[
+      {label:'Claude',values:['claude-sonnet-5-5','claude-haiku-5-5']},
+      {label:'OpenAI',values:['gpt-5.4','o3']},
+    ],
+    flat:['custom-model'],
+  });
+  assert.deepEqual(selectShape(entry.$('hosted-ai-effort')),{groups:[],flat:CAPS.efforts});
+  await signIn(entry);
+  await selectFile(entry,BYTES);
+  setPrompt(entry,PROMPT);
+  entry.$('hosted-ai-run').click();
+  await until(()=>/완료/.test(entry.text('hosted-ai-job-state')),'labeled job completes');
+  assert.match(entry.text('hosted-ai-job-model'),/모델: gpt-5.4/);
+  assert.match(entry.text('hosted-ai-job-model'),/실행: OpenAI/);
+
+  const unknown=setup({routes:makeRouter({
+    jobGet:()=>({status:200,body:{job:job({
+      state:'completed',
+      progress:{completedCalls:1,requiredCalls:1,phase:'done'},
+      provider:'custom-runtime',
+      result:{counts:{rejected:0,unresolved:0}},
+    })}}),
+  })});
+  await unknown.app.ready;
+  assert.deepEqual(selectShape(unknown.$('hosted-ai-model')).groups,[],'missing modelProviders stays flat');
+  await signIn(unknown);
+  await selectFile(unknown,BYTES);
+  setPrompt(unknown,PROMPT);
+  unknown.$('hosted-ai-run').click();
+  await until(()=>/완료/.test(unknown.text('hosted-ai-job-state')),'unknown provider job completes');
+  assert.match(unknown.text('hosted-ai-job-model'),/실행: custom-runtime/);
 });

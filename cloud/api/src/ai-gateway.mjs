@@ -33,6 +33,7 @@ const ROLES = ['red', 'blue'];
 const STATES = ['queued', 'running', 'cancelling', 'cancelled', 'completed', 'failed', 'interrupted'];
 const DEFAULT_MODELS = ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5'];
 const DEFAULT_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+const SNAPSHOT_PROVIDERS = ['anthropic', 'openai'];
 // Fixed upload allowlist. Anything else is 415 before a byte is forwarded.
 const MIME_TYPES = ['application/pdf', 'application/octet-stream', 'text/plain'];
 const CONTROL = /[\u0000-\u001f\u007f]/;
@@ -81,10 +82,52 @@ function csv(value, fallback, pattern) {
   return items.length ? [...new Set(items)] : fallback.slice();
 }
 
+// claude-* is anthropic. gpt-* and o<digit>* (o3, o3-mini) are openai. Anything else is not a provider.
+export function providerForModel(model) {
+  if (typeof model !== 'string') return null;
+  if (model.startsWith('claude-')) return 'anthropic';
+  if (model.startsWith('gpt-')) return 'openai';
+  if (/^o\d/.test(model)) return 'openai';
+  return null;
+}
+
+// Tokens with no provider are dropped. An explicit AI_MODELS list that matches the token pattern
+// but names no allowed model stays empty and does not fall back to the Claude defaults.
+// Unset, blank, and lists with no token at all keep DEFAULT_MODELS, the same as csv().
+function listedModels(value) {
+  const tokens = String(value || '').split(',').map(item => item.trim()).filter(item => MODEL_TOKEN.test(item));
+  if (!tokens.length) return DEFAULT_MODELS.slice();
+  const allowed = [];
+  for (const token of tokens) {
+    if (providerForModel(token) && !allowed.includes(token)) allowed.push(token);
+  }
+  return allowed;
+}
+
+function catalogProvider(models) {
+  let provider = null;
+  for (const model of models) {
+    const next = providerForModel(model);
+    if (!next) continue;
+    if (!provider) provider = next;
+    else if (provider !== next) return 'mixed';
+  }
+  return provider || 'mixed';
+}
+
+function modelProvidersFor(models) {
+  const modelProviders = {};
+  for (const model of models) {
+    const provider = providerForModel(model);
+    if (provider) modelProviders[model] = provider;
+  }
+  return modelProviders;
+}
+
 export function aiSettings(env) {
   const maxCallsPerJob = Math.min(positiveInt(env?.AI_MAX_CALLS_PER_JOB, 24), 64);
   const maxUploadBytes = Math.min(positiveInt(env?.AI_MAX_UPLOAD_BYTES, 32 * 1024 * 1024), MAX_UPLOAD_BOUND);
-  const models = csv(env?.AI_MODELS, DEFAULT_MODELS, MODEL_TOKEN);
+  const models = listedModels(env?.AI_MODELS);
   const efforts = csv(env?.AI_EFFORTS, DEFAULT_EFFORTS, EFFORT_TOKEN);
   const requestedModel = String(env?.AI_DEFAULT_MODEL || '');
   const requestedEffort = String(env?.AI_DEFAULT_EFFORT || '');
@@ -124,7 +167,7 @@ export function aiSettings(env) {
     guestTokenBudget: nonNegativeInt(env?.AI_GUEST_TOKEN_BUDGET, 0),
     models,
     efforts,
-    defaultModel: models.includes(requestedModel) ? requestedModel : models[0],
+    defaultModel: models.includes(requestedModel) ? requestedModel : (models[0] || ''),
     defaultEffort: efforts.includes(requestedEffort) ? requestedEffort : (efforts.includes('high') ? 'high' : efforts[0]),
     mimeTypes: MIME_TYPES.slice(),
   };
@@ -433,7 +476,7 @@ async function createUpload(ctx) {
 function capabilitiesResponse(settings) {
   return json(200, {
     enabled: settings.enabled,
-    provider: 'anthropic',
+    provider: catalogProvider(settings.models),
     execution: 'server',
     models: settings.models,
     efforts: settings.efforts,
@@ -442,6 +485,7 @@ function capabilitiesResponse(settings) {
       enabled: settings.openAccess,
       accessKeyRequired: settings.openAccess === true && settings.openAccessKey.length > 0,
     },
+    modelProviders: modelProvidersFor(settings.models),
   });
 }
 
@@ -528,6 +572,15 @@ function storedFlags(row) {
   return { fallbackApplyOnly: flags.applyOnly, fallbackUseEvidence: flags.useEvidence };
 }
 
+function storedCatalog(row) {
+  let parsed = null;
+  try { parsed = row?.snapshot ? JSON.parse(row.snapshot) : null; } catch { parsed = null; }
+  if (!isObject(parsed)) return { provider: null };
+  if (SNAPSHOT_PROVIDERS.includes(parsed.provider)) return { provider: parsed.provider };
+  const model = typeof parsed.model === 'string' ? parsed.model : null;
+  return { provider: providerForModel(model) };
+}
+
 function snapshotIdentity(value, { fallbackId, fallbackRole, fallbackApplyOnly, fallbackUseEvidence }) {
   const flags = snapshotFlags(value, fallbackApplyOnly, fallbackUseEvidence);
   return {
@@ -539,6 +592,11 @@ function snapshotIdentity(value, { fallbackId, fallbackRole, fallbackApplyOnly, 
   };
 }
 
+function snapshotProvider(value) {
+  if (SNAPSHOT_PROVIDERS.includes(value?.provider)) return value.provider;
+  return providerForModel(shortString(value?.model, 64));
+}
+
 function addSnapshotDetails(snapshot, value, includeResult) {
   const progress = progressView(value.progress);
   if (progress) snapshot.progress = progress;
@@ -546,7 +604,8 @@ function addSnapshotDetails(snapshot, value, includeResult) {
   if (model) snapshot.model = model;
   const effort = shortString(value.effort, 16);
   if (effort) snapshot.effort = effort;
-  snapshot.provider = 'anthropic';
+  const provider = snapshotProvider(value);
+  if (provider) snapshot.provider = provider;
   const usage = usageView(value.usage);
   if (usage) snapshot.usage = usage;
   const artifacts = artifactList(value.artifacts);
@@ -585,7 +644,7 @@ function queuedSnapshot({ id, role, model, effort, maxCalls, at, applyOnly, useE
     progress: { completedCalls: 0, requiredCalls: maxCalls, phase: 'queued' },
     model,
     effort,
-    provider: 'anthropic',
+    provider: providerForModel(model),
     usage: { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
     artifacts: [],
     createdAt: at,
@@ -595,22 +654,23 @@ function queuedSnapshot({ id, role, model, effort, maxCalls, at, applyOnly, useE
 
 // A runtime 404 for a job this gateway owns means the runtime lost its worker/state. The contract's
 // "interrupted" state is exactly that: terminal, not complete, and never automatically replayed.
-function lostSnapshot(id, role, at, { fallbackApplyOnly = false, fallbackUseEvidence = true } = {}) {
-  return {
+function lostSnapshot(id, role, at, { fallbackApplyOnly = false, fallbackUseEvidence = true, provider = null } = {}) {
+  const snapshot = {
     id,
     role,
     state: 'interrupted',
     applyOnly: fallbackApplyOnly,
     useEvidence: fallbackUseEvidence,
     progress: { phase: 'interrupted' },
-    provider: 'anthropic',
-    failure: {
-      code: 'runtime_job_missing',
-      message: 'The runtime no longer has this job.',
-      retryable: false,
-    },
-    updatedAt: at,
   };
+  if (SNAPSHOT_PROVIDERS.includes(provider)) snapshot.provider = provider;
+  snapshot.failure = {
+    code: 'runtime_job_missing',
+    message: 'The runtime no longer has this job.',
+    retryable: false,
+  };
+  snapshot.updatedAt = at;
+  return snapshot;
 }
 
 // Best-effort index refresh: a status read must not fail because the local index write failed.
@@ -1186,7 +1246,7 @@ async function runtimeJobSnapshot(db, ownerId, row, call) {
     return await call();
   } catch (error) {
     if (!(error instanceof AiError) || error.code !== 'not_found') throw error;
-    const snapshot = lostSnapshot(row.id, row.role, nowIso(), storedFlags(row));
+    const snapshot = lostSnapshot(row.id, row.role, nowIso(), { ...storedFlags(row), ...storedCatalog(row) });
     await persistSnapshot(db, ownerId, snapshot);
     return snapshot;
   }

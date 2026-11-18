@@ -52,7 +52,7 @@ Records, `/v1/me`, logout, password change, session revoke, and Confluence rejec
 
 ## Settings
 
-All optional. Unset values use the default. Non-guest owners keep `AI_UPLOADS_PER_OWNER_HOUR`, `AI_JOBS_PER_OWNER_HOUR`, `AI_ACTIVE_JOBS_PER_OWNER`, `AI_MAX_CALLS_PER_JOB`, `AI_MAX_UPLOAD_BYTES`, and `AI_OWNER_TOKEN_BUDGET`.
+All optional. Unset values use the default. Non-guest owners keep `AI_UPLOADS_PER_OWNER_HOUR`, `AI_JOBS_PER_OWNER_HOUR`, `AI_ACTIVE_JOBS_PER_OWNER`, `AI_MAX_CALLS_PER_JOB`, `AI_MAX_UPLOAD_BYTES`, and `AI_OWNER_TOKEN_BUDGET`. `AI_MODELS` may list OpenAI ids (`gpt-*` and `o` followed by a digit) as well as Claude ids.
 
 | Name | Kind | Default | Effect |
 |---|---|---|---|
