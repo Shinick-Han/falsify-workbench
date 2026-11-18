@@ -11,7 +11,8 @@ const sourceBuild=JSON.parse(fs.readFileSync(path.join(dist,'latex-workbench-bui
 const digest=b=>require('node:crypto').createHash('sha256').update(b).digest('hex');
 check('source bundle matches its recorded output',sourceBuild.output.path==='latex-workbench.mjs'&&digest(fs.readFileSync(path.join(dist,sourceBuild.output.path)))===sourceBuild.output.sha256);
 const consumed=new Set(sourceBuild.inputs.filter(i=>i.path.startsWith('dist/')&&digest(fs.readFileSync(path.join(dist,i.path.slice(5))))===i.sha256).map(i=>i.path.slice(5)));
-check('all authored browser modules are reachable',authored.every(f=>scripts.includes(f)||consumed.has(f)));
+const eventScripts=[...fs.readFileSync(path.join(dist,'event.html'),'utf8').matchAll(/<script\b[^>]*\bsrc="([^"]+)"/g)].map(m=>m[1].split('?')[0]);
+check('all authored browser modules are reachable',authored.every(f=>scripts.includes(f)||eventScripts.includes(f)||consumed.has(f)));
 const ids=[...html.matchAll(/\bid="([^"]+)"/g)].map(m=>m[1]);check('static IDs are unique',ids.length===new Set(ids).size);
 const sources=authored.filter(f=>f!=='document-import.js').map(f=>fs.readFileSync(path.join(dist,f),'utf8')).join('\n');
 // paper-workspace is now the independent PDF editor, not the removed AMAS demo.

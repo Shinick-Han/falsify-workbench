@@ -33,6 +33,22 @@ export const RECOMPOSITION_WASM_SHA256 = '1fc968438a672366dfec39c96c842c26ed29ca
 export const LATEX_WASM = 'app/dist/latex-compiler-vendor/busytex.wasm';
 export const LATEX_MANIFEST_SHA256 = '3f9a3b4f5ee5cd82530a83f6afa596a0dcd163359d89c4850af9e853455e485b';
 export const LATEX_LUA_MANIFEST_SHA256 = '90fd272bbdd003afb3e869dfeb369b881a814ea47dd27a98b4b87639559f6deb';
+// Pages serves these from app/dist. Source-release ZIPs keep the default page only.
+export const EVENT_RELEASE_PATHS = Object.freeze([
+  'app/dist/event.html',
+  'app/dist/cloud-config.event.js',
+]);
+
+export function sourceReleasePathspec() {
+  return ['.', ...EVENT_RELEASE_PATHS.map(path => `:(exclude)${path}`)];
+}
+
+export function archiveCommittedSource(rootDir, commit, archive, version) {
+  execFileSync('git', [
+    '-C', rootDir, 'archive', '--format=zip', `--prefix=falsify-workbench-v${version}/`,
+    '-o', archive, commit, '--', ...sourceReleasePathspec(),
+  ], {windowsHide: true});
+}
 
 const forbidden = /(?:^|\/)(?:\.venv|\.local|node_modules|\.pdf-editor\.local\.json|\.runtime[^/]*|output|tmp)(?:\/|$)|^experiments\/|\.(?:pdf|docx|wav|mp3|wasm)$/i;
 const pdfjsWasm = new Set(PDFJS_WASM);
@@ -191,7 +207,7 @@ function main() {
   mkdirSync(directory, { recursive: true });
   const name = `falsify-workbench-v${version}.zip`;
   const archive = join(directory, name);
-  execFileSync('git', ['-C', root, 'archive', '--format=zip', `--prefix=falsify-workbench-v${version}/`, '-o', archive, commit], { windowsHide: true });
+  archiveCommittedSource(root, commit, archive, version);
   const bytes = readFileSync(archive);
   const sha256 = createHash('sha256').update(bytes).digest('hex');
   const receipt = { schema: 'falsify.source-release.v1', version, commit,
