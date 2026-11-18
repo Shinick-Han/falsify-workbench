@@ -132,6 +132,10 @@ npx wrangler d1 migrations apply <event-database-name> --env event --remote
 
 Those commands are for the operator at deploy time.
 
+## Paper tools
+
+`POST /v1/ai/paper` stays off unless `AI_PAPER_TOOLS_ENABLED` is the string `true`. The kill switch is `AI_PAPER_TOOLS_ENABLED=false`: the route is `404 paper_tools_disabled` and the runtime is not called. A guest then spends at most `AI_GUEST_PAPER_PREPARES_PER_HOUR` (10) prepares and `AI_GUEST_PAPER_CALLS_PER_HOUR` (240) calls; a member spends `AI_PAPER_PREPARES_PER_HOUR` (30) and `AI_PAPER_CALLS_PER_HOUR` (600). Those four caps are per owner. Everyone also shares `AI_PAPER_CALLS_GLOBAL_PER_HOUR` (3000). Prepare paths are evidence prepare and chart prepare, and the decoded PDF is bounded by the guest or member upload cap. Every paper call, including a poll, spends a call. Paper calls do not spend the token budget. The JSON body cap is `AI_PAPER_MAX_BODY_BYTES` (29360128).
+
 ## Kill switch
 
 Set the var `AI_OPEN_ACCESS` to `false` and redeploy. Minting returns `403 open_access_disabled`. Every `fsg_` bearer on `/v1/ai/*` returns the same `403`, including sessions that were already issued. Password sessions and Confluence sessions keep working. Hosting can stay on.

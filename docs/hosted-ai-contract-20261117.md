@@ -93,6 +93,27 @@ In-flight provider calls are not aborted mid-request; results after cancellation
 Owner-only. Raw bytes with the stored content type and `Content-Disposition: attachment; filename="..."`,
 `Cache-Control: no-store`. A missing/foreign artifact is `404 not_found`.
 
+### `POST /v1/ai/paper`
+Bearer auth matches `POST /v1/ai/jobs` (guest `fsg_` or member). Body is exactly `{"path":"<paper path>","body":<object|null>}`.
+`path` is one of `/api/paper/evidence/prepare`, `/api/paper/evidence/query`, `/api/paper/visual/export`,
+`/api/paper/chart/prepare`, `/api/paper/evidence/jobs`, `/api/paper/evidence/jobs/<32 lowercase hex>`,
+or that job path plus `/cancel`. Any other path is `404 paper_path_unsupported` and does not call the runtime.
+A 2xx runtime response is returned verbatim. A runtime error whose `error.code` matches `^[a-z][a-z0-9_]{0,63}$`
+keeps the runtime status and that code inside the usual `{error:{code,message,requestId,retryable}}` envelope;
+the runtime message is not copied. Any other runtime error body is `502 runtime_unavailable`. Transport failure
+stays `503 ai_unavailable`.
+
+The route is absent unless `AI_PAPER_TOOLS_ENABLED` is `true`. Otherwise it is `404 paper_tools_disabled` with no
+runtime call, and `GET /v1/ai/capabilities` does not include `paperTools`. When the flag is `true`, capabilities add
+`"paperTools":{"enabled":true}`. The Worker forwards `POST {AI_RUNTIME_URL}/internal/v1/paper` with the existing
+service-token header and JSON `{"ownerId","path","body"}`, timeout 120s. Raw JSON is capped by
+`AI_PAPER_MAX_BODY_BYTES` (default 29360128, at most 64 MiB). On the two prepare paths, a string `file` is sized
+from its base64 length before decoding: guests use `AI_GUEST_MAX_UPLOAD_BYTES`, members use `AI_MAX_UPLOAD_BYTES`.
+Every call, including polls, spends `AI_PAPER_CALLS_PER_HOUR` (600) per member or `AI_GUEST_PAPER_CALLS_PER_HOUR`
+(240) per guest, and `AI_PAPER_CALLS_GLOBAL_PER_HOUR` (3000) for everyone. Prepare paths also spend
+`AI_PAPER_PREPARES_PER_HOUR` (30) or `AI_GUEST_PAPER_PREPARES_PER_HOUR` (10), per owner. No model call and no
+token-budget change. CORS matches the other `/v1/ai/*` routes. Counters reuse `rate_counters`.
+
 ## Internal runtime API (`app/local/hosted_runtime`, container-internal)
 
 Every request carries `X-Falsify-Service-Token: <HOSTED_AI_SERVICE_TOKEN>` and `X-Falsify-Owner-Id: <ownerId>`

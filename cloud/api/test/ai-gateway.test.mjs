@@ -211,6 +211,27 @@ async function stubFetch(url, init, env) {
     if (terminal) snapshot.completedAt = at;
     return reply(200, snapshot);
   }
+  if (requestUrl.pathname === '/internal/v1/paper' && method === 'POST') {
+    const payloadText = typeof init.body === 'string' ? init.body : '';
+    if (db) {
+      await db.prepare('INSERT INTO ai_stub_paper (owner_header, service_token, payload) VALUES (?1, ?2, ?3)')
+        .bind(headers.get('X-Falsify-Owner-Id') || '', headers.get('X-Falsify-Service-Token') || '', payloadText)
+        .run();
+    }
+    let payload = {};
+    try { payload = JSON.parse(payloadText); } catch { payload = {}; }
+    const probe = payload && payload.body && payload.body.stub;
+    if (probe === 'throw') throw new Error('socket');
+    if (probe === 'malformed') return new Response('not-json', { status: 500 });
+    if (probe === 'bad-code') return reply(400, { error: { code: 'Not_A_Code', detail: 'secret paper text' } });
+    if (probe === 'long-code') return reply(400, { error: { code: 'a'.repeat(65) } });
+    if (probe === 'error') return reply(400, { error: { code: 'paper_evidence_expired_or_missing', message: 'secret paper text' } });
+    if (probe === 'busy') return reply(429, { error: { code: 'paper_busy' } });
+    if (probe === 'visual') return reply(400, { error: { code: 'visual_region_invalid' } });
+    if (probe === 'analysis') return reply(429, { error: { code: 'analysis_busy' } });
+    if (probe === 'unsupported') return reply(404, { error: { code: 'paper_path_unsupported' } });
+    return reply(200, { marker: 'PAPER-OK', echoed: payload });
+  }
   return new Response('unmocked', { status: 404 });
 }
 
@@ -218,6 +239,7 @@ const STUB_TABLES = [
   'CREATE TABLE ai_stub_calls (seq INTEGER PRIMARY KEY AUTOINCREMENT, host TEXT NOT NULL, path TEXT NOT NULL, method TEXT NOT NULL)',
   'CREATE TABLE ai_stub_uploads (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, sha256 TEXT NOT NULL, bytes INTEGER NOT NULL)',
   'CREATE TABLE ai_stub_jobs (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, state TEXT NOT NULL, upload_id TEXT NOT NULL, model TEXT, effort TEXT, max_calls INTEGER, prompt TEXT, created_at TEXT NOT NULL, payload TEXT)',
+  'CREATE TABLE ai_stub_paper (seq INTEGER PRIMARY KEY AUTOINCREMENT, owner_header TEXT NOT NULL, service_token TEXT NOT NULL, payload TEXT NOT NULL)',
 ];
 
 function migrationStatements() {
@@ -2327,5 +2349,365 @@ test('job snapshots keep a runtime provider and otherwise derive one from the mo
     }));
     assert.equal(reasoning.status, 202);
     assert.equal(reasoning.body.job.provider, 'openai');
+  });
+});
+
+const PAPER_ON = {
+  AI_HOSTING_ENABLED: 'true',
+  AI_PAPER_TOOLS_ENABLED: 'true',
+  CONFLUENCE_ONLY: 'false',
+  AI_OPEN_ACCESS: 'true',
+};
+const PAPER_QUERY = '/api/paper/evidence/query';
+const PAPER_JOB = 'ab'.repeat(16);
+const ENABLED_CAPABILITIES = {
+  enabled: true,
+  provider: 'anthropic',
+  execution: 'server',
+  models: DEFAULT_MODELS,
+  efforts: DEFAULT_EFFORTS,
+  limits: { maxUploadBytes: 4096, maxPromptChars: 32000 },
+  openAccess: { enabled: false, accessKeyRequired: false },
+  modelProviders: {
+    'claude-opus-5-5': 'anthropic',
+    'claude-sonnet-5-5': 'anthropic',
+    'claude-haiku-5-5': 'anthropic',
+  },
+};
+
+function postPaper(c, token, body) {
+  return c('POST', '/v1/ai/paper', { token, body });
+}
+
+async function stubPaper(instance) {
+  const d1 = await instance.getD1Database('DB');
+  const listed = await d1.prepare('SELECT owner_header, service_token, payload FROM ai_stub_paper ORDER BY seq').all();
+  return listed.results.map(row => ({
+    ownerHeader: row.owner_header,
+    serviceToken: row.service_token,
+    payload: JSON.parse(row.payload),
+  }));
+}
+
+test('paper tool settings default off and keep the contract hour caps', () => {
+  const settings = aiSettings({});
+  assert.equal(settings.paperTools, false);
+  assert.equal(settings.paperMaxBodyBytes, 29360128);
+  assert.equal(settings.paperPreparesPerHour, 30);
+  assert.equal(settings.paperCallsPerHour, 600);
+  assert.equal(settings.guestPaperPreparesPerHour, 10);
+  assert.equal(settings.guestPaperCallsPerHour, 240);
+  assert.equal(settings.paperCallsGlobalPerHour, 3000);
+  assert.equal(aiSettings({ AI_PAPER_TOOLS_ENABLED: 'false' }).paperTools, false);
+  assert.equal(aiSettings({ AI_PAPER_TOOLS_ENABLED: 'TRUE' }).paperTools, false);
+  const on = aiSettings({ AI_PAPER_TOOLS_ENABLED: 'true', AI_PAPER_MAX_BODY_BYTES: '100' });
+  assert.equal(on.paperTools, true);
+  assert.equal(on.paperMaxBodyBytes, 100);
+  assert.equal(aiSettings({ AI_PAPER_TOOLS_ENABLED: true }).paperTools, true);
+  assert.equal(aiSettings({ AI_PAPER_MAX_BODY_BYTES: String(80 * 1024 * 1024) }).paperMaxBodyBytes, 64 * 1024 * 1024);
+});
+
+test('paper tools stay absent by default and capabilities match the base bytes', async () => {
+  await withApp({ AI_HOSTING_ENABLED: 'true', CONFLUENCE_ONLY: 'false' }, async (mf, call) => {
+    const capabilities = await call('GET', '/v1/ai/capabilities');
+    assert.equal(JSON.stringify(capabilities.body), JSON.stringify(ENABLED_CAPABILITIES));
+    assert.equal(Object.hasOwn(capabilities.body, 'paperTools'), false);
+    const denied = await postPaper(call, undefined, { path: PAPER_QUERY, body: null });
+    assert.equal(denied.status, 404);
+    assert.equal(denied.body.error.code, 'paper_tools_disabled');
+    assert.equal(await stubCalls(mf, '/internal/v1/paper', 'POST'), 0);
+    const preflight = await call('OPTIONS', '/v1/ai/paper', {
+      headers: { Origin: ORIGIN, 'Access-Control-Request-Method': 'POST' },
+    });
+    assert.equal(preflight.status, 204);
+    assert.equal(preflight.headers.get('Access-Control-Allow-Origin'), ORIGIN);
+  });
+  await withApp({ AI_HOSTING_ENABLED: 'true', AI_PAPER_TOOLS_ENABLED: 'false', CONFLUENCE_ONLY: 'false' }, async (mf, call) => {
+    const capabilities = await call('GET', '/v1/ai/capabilities');
+    assert.equal(JSON.stringify(capabilities.body), JSON.stringify(ENABLED_CAPABILITIES));
+    const denied = await postPaper(call, undefined, { path: PAPER_QUERY, body: null });
+    assert.equal(denied.status, 404);
+    assert.equal(denied.body.error.code, 'paper_tools_disabled');
+    assert.equal(await stubCalls(mf, '/internal/v1/paper', 'POST'), 0);
+  });
+});
+
+test('enabled paper capabilities add only paperTools and still serve a member when hosting is off', async () => {
+  await withApp({
+    AI_HOSTING_ENABLED: 'false',
+    AI_PAPER_TOOLS_ENABLED: 'true',
+    CONFLUENCE_ONLY: 'false',
+  }, async (mf, call) => {
+    const capabilities = await call('GET', '/v1/ai/capabilities');
+    assert.equal(capabilities.body.enabled, false);
+    assert.deepEqual(capabilities.body.paperTools, { enabled: true });
+    assert.deepEqual(Object.keys(capabilities.body), [
+      'enabled', 'provider', 'execution', 'models', 'efforts', 'limits', 'openAccess', 'modelProviders', 'paperTools',
+    ]);
+    const ada = await register(mf, call, 'paperhost');
+    const forwarded = await postPaper(call, ada.body.token, { path: PAPER_QUERY, body: { operation: 'status' } });
+    assert.equal(forwarded.status, 200);
+    assert.equal(forwarded.body.marker, 'PAPER-OK');
+    assert.equal(await stubCalls(mf, '/internal/v1/jobs', 'POST'), 0);
+  });
+});
+
+test('paper forwards guest and member bodies verbatim and does not spend the token budget', async () => {
+  await withApp({
+    ...PAPER_ON,
+    AI_GUEST_TOKEN_BUDGET: '10',
+    AI_OWNER_TOKEN_BUDGET: '100',
+  }, async (mf, call) => {
+    const capabilities = await call('GET', '/v1/ai/capabilities');
+    assert.deepEqual(capabilities.body.paperTools, { enabled: true });
+    assert.equal(JSON.stringify({ ...ENABLED_CAPABILITIES, paperTools: { enabled: true } }), JSON.stringify({
+      ...capabilities.body,
+      openAccess: ENABLED_CAPABILITIES.openAccess,
+    }));
+    const uploadFlight = await call('OPTIONS', '/v1/ai/uploads', {
+      headers: {
+        Origin: ORIGIN,
+        'Access-Control-Request-Method': 'POST',
+        'Access-Control-Request-Headers': 'authorization,content-type,x-falsify-file-name',
+      },
+    });
+    const paperFlight = await call('OPTIONS', '/v1/ai/paper', {
+      headers: {
+        Origin: ORIGIN,
+        'Access-Control-Request-Method': 'POST',
+        'Access-Control-Request-Headers': 'authorization,content-type,x-falsify-file-name',
+      },
+    });
+    assert.equal(paperFlight.status, 204);
+    assert.equal(paperFlight.headers.get('Access-Control-Allow-Methods'), uploadFlight.headers.get('Access-Control-Allow-Methods'));
+    assert.equal(paperFlight.headers.get('Access-Control-Allow-Headers'), uploadFlight.headers.get('Access-Control-Allow-Headers'));
+    assert.equal(paperFlight.headers.get('Access-Control-Max-Age'), uploadFlight.headers.get('Access-Control-Max-Age'));
+    assert.equal(paperFlight.headers.get('Cache-Control'), 'no-store');
+
+    const missing = await postPaper(call, undefined, { path: PAPER_QUERY, body: null });
+    assert.equal(missing.status, 401);
+    assert.equal(missing.body.error.code, 'unauthorized');
+    const garbage = await postPaper(call, 'fss_' + 'a'.repeat(43), { path: PAPER_QUERY, body: null });
+    assert.equal(garbage.status, 401);
+    assert.equal(garbage.body.error.code, 'unauthorized');
+    const unknownGuest = await postPaper(call, 'fsg_' + 'b'.repeat(43), { path: PAPER_QUERY, body: null });
+    assert.equal(unknownGuest.status, 401);
+    assert.equal(unknownGuest.body.error.code, 'unauthorized');
+    assert.equal(await stubCalls(mf, '/internal/v1/paper', 'POST'), 0);
+
+    const ada = await register(mf, call, 'papermember');
+    const memberBody = { path: PAPER_QUERY, body: { operation: 'status' } };
+    const member = await postPaper(call, ada.body.token, memberBody);
+    const memberRows = await stubPaper(mf);
+    assert.equal(member.status, 200);
+    assert.equal(member.text, JSON.stringify({ marker: 'PAPER-OK', echoed: memberRows[0].payload }));
+    assert.deepEqual(memberRows[0].payload, { ownerId: memberRows[0].ownerHeader, path: memberBody.path, body: memberBody.body });
+    assert.equal(memberRows[0].serviceToken, SERVICE_TOKEN);
+    assert.match(memberRows[0].ownerHeader, /^usr:/);
+
+    const method = await call('GET', '/v1/ai/paper', { token: ada.body.token });
+    assert.equal(method.status, 405);
+    assert.equal(method.body.error.code, 'method_not_allowed');
+
+    await seedUsageJob(mf, { id: '22222222-2222-4222-8222-222222222222', ownerId: OTHER_GUEST, input: 10 });
+    const guestToken = (await mintGuest(call)).body.guest.token;
+    const guestBody = { path: `/api/paper/evidence/jobs/${PAPER_JOB}`, body: null };
+    const guest = await postPaper(call, guestToken, guestBody);
+    const guestRow = (await stubPaper(mf)).at(-1);
+    assert.equal(guest.status, 200);
+    assert.equal(guest.text, JSON.stringify({ marker: 'PAPER-OK', echoed: guestRow.payload }));
+    assert.match(guestRow.ownerHeader, /^gst:/);
+    assert.equal(guestRow.payload.path, guestBody.path);
+    assert.equal(guestRow.payload.body, null);
+    const guestUpload = await upload(call, guestToken, pdfBytes('paper-budget'));
+    const blocked = await postJob(call, guestToken, jobBody(guestUpload.body.upload.id, { idempotencyKey: 'op-paper-budget' }));
+    assert.equal(blocked.status, 429);
+    assert.equal(blocked.body.error.code, 'owner_budget_exhausted');
+
+    for (const path of [
+      '/api/paper/evidence/jobs',
+      `/api/paper/evidence/jobs/${PAPER_JOB}/cancel`,
+      '/api/paper/visual/export',
+      '/api/paper/chart/prepare',
+    ]) {
+      const allowed = await postPaper(call, ada.body.token, { path, body: { marker: path } });
+      assert.equal(allowed.status, 200, path);
+      assert.equal((await stubPaper(mf)).at(-1).payload.path, path);
+    }
+    const before = await stubCalls(mf, '/internal/v1/paper', 'POST');
+    const unsupported = await postPaper(call, ada.body.token, { path: '/api/paper/chart/export', body: null });
+    assert.equal(unsupported.status, 404);
+    assert.equal(unsupported.body.error.code, 'paper_path_unsupported');
+    assert.equal(await stubCalls(mf, '/internal/v1/paper', 'POST'), before);
+    const foreign = await call('POST', '/v1/ai/paper', {
+      token: ada.body.token,
+      body: { path: PAPER_QUERY, body: null },
+      headers: { Origin: 'https://evil.example' },
+    });
+    assert.equal(foreign.status, 403);
+    assert.equal(foreign.body.error.code, 'origin_not_allowed');
+  });
+});
+
+test('paper rejects extra keys, unknown paths and oversize bodies before the runtime', async () => {
+  await withApp({
+    ...PAPER_ON,
+    AI_PAPER_MAX_BODY_BYTES: '512',
+    AI_MAX_UPLOAD_BYTES: '8',
+    AI_GUEST_MAX_UPLOAD_BYTES: '3',
+  }, async (mf, call) => {
+    const ada = await register(mf, call, 'paperstrict');
+    const guest = (await mintGuest(call)).body.guest.token;
+    const extra = await postPaper(call, ada.body.token, { path: PAPER_QUERY, body: null, extra: 1 });
+    assert.equal(extra.status, 400);
+    assert.equal(extra.body.error.code, 'invalid_request');
+    const missingBody = await postPaper(call, ada.body.token, { path: PAPER_QUERY });
+    assert.equal(missingBody.status, 400);
+    assert.equal(missingBody.body.error.code, 'invalid_request');
+    const arrayBody = await postPaper(call, ada.body.token, { path: PAPER_QUERY, body: [] });
+    assert.equal(arrayBody.status, 400);
+    assert.equal(arrayBody.body.error.code, 'invalid_request');
+    const upper = await postPaper(call, ada.body.token, { path: `/api/paper/evidence/jobs/${'AB'.repeat(16)}`, body: null });
+    assert.equal(upper.status, 404);
+    assert.equal(upper.body.error.code, 'paper_path_unsupported');
+    const preview = await postPaper(call, ada.body.token, { path: '/api/paper/chart/preview', body: {} });
+    assert.equal(preview.status, 404);
+    assert.equal(preview.body.error.code, 'paper_path_unsupported');
+    const raw = await call('POST', '/v1/ai/paper', { token: ada.body.token, raw: 'x'.repeat(600) });
+    assert.equal(raw.status, 413);
+    assert.equal(raw.body.error.code, 'payload_too_large');
+    const four = Buffer.from('abcd').toString('base64');
+    const nine = Buffer.from('abcdefghi').toString('base64');
+    const three = Buffer.from('abc').toString('base64');
+    const prepare = file => ({ path: '/api/paper/evidence/prepare', body: { fileHash: 'cd'.repeat(32), file } });
+    const guestOver = await postPaper(call, guest, prepare(four));
+    assert.equal(guestOver.status, 413);
+    assert.equal(guestOver.body.error.code, 'payload_too_large');
+    const memberOver = await postPaper(call, ada.body.token, prepare(nine));
+    assert.equal(memberOver.status, 413);
+    assert.equal(memberOver.body.error.code, 'payload_too_large');
+    assert.equal(await stubCalls(mf, '/internal/v1/paper', 'POST'), 0);
+    const guestOk = await postPaper(call, guest, prepare(three));
+    assert.equal(guestOk.status, 200);
+    assert.equal((await stubPaper(mf)).at(-1).payload.body.file, three);
+    const memberOk = await postPaper(call, ada.body.token, prepare(four));
+    assert.equal(memberOk.status, 200);
+    assert.equal((await stubPaper(mf)).at(-1).payload.body.file, four);
+    assert.match((await stubPaper(mf)).at(-1).ownerHeader, /^usr:/);
+    assert.match((await stubPaper(mf))[0].ownerHeader, /^gst:/);
+  });
+});
+
+test('paper prepare and call caps are per owner and a rejected prepare returns its call slot', async () => {
+  await withApp({
+    ...PAPER_ON,
+    AI_PAPER_PREPARES_PER_HOUR: '1',
+    AI_GUEST_PAPER_PREPARES_PER_HOUR: '1',
+    AI_PAPER_CALLS_PER_HOUR: '2',
+    AI_GUEST_PAPER_CALLS_PER_HOUR: '10',
+    AI_PAPER_CALLS_GLOBAL_PER_HOUR: '100',
+  }, async (mf, call) => {
+    const ada = await register(mf, call, 'paperprepa');
+    const bea = await register(mf, call, 'paperprepb');
+    const guest = (await mintGuest(call)).body.guest.token;
+    const prepare = token => postPaper(call, token, { path: '/api/paper/chart/prepare', body: {} });
+    const query = token => postPaper(call, token, { path: PAPER_QUERY, body: null });
+    assert.equal((await prepare(ada.body.token)).status, 200);
+    const second = await prepare(ada.body.token);
+    assert.equal(second.status, 429);
+    assert.equal(second.body.error.code, 'rate_limited');
+    assert.match(second.headers.get('Retry-After'), /^[1-9][0-9]*$/);
+    assert.equal((await query(ada.body.token)).status, 200, 'the rejected prepare gives the call slot back');
+    const capped = await query(ada.body.token);
+    assert.equal(capped.status, 429);
+    assert.equal(capped.body.error.code, 'rate_limited');
+    assert.equal((await prepare(bea.body.token)).status, 200, 'member prepare caps are per owner');
+    assert.equal((await prepare(guest)).status, 200);
+    assert.equal((await prepare(guest)).status, 429);
+    assert.equal((await query(guest)).status, 200, 'a guest prepare cap does not block a later guest call');
+    assert.equal(await stubCalls(mf, '/internal/v1/paper', 'POST'), 5);
+  });
+});
+
+test('paper call caps are separate for guests and members and polls count', async () => {
+  await withApp({
+    ...PAPER_ON,
+    AI_PAPER_CALLS_PER_HOUR: '2',
+    AI_GUEST_PAPER_CALLS_PER_HOUR: '1',
+    AI_PAPER_PREPARES_PER_HOUR: '100',
+    AI_GUEST_PAPER_PREPARES_PER_HOUR: '100',
+    AI_PAPER_CALLS_GLOBAL_PER_HOUR: '100',
+  }, async (mf, call) => {
+    const ada = await register(mf, call, 'papercalla');
+    const bea = await register(mf, call, 'papercallb');
+    const guest = (await mintGuest(call)).body.guest.token;
+    const poll = { path: `/api/paper/evidence/jobs/${PAPER_JOB}`, body: null };
+    assert.equal((await postPaper(call, ada.body.token, { path: PAPER_QUERY, body: null })).status, 200);
+    assert.equal((await postPaper(call, ada.body.token, poll)).status, 200);
+    assert.equal((await postPaper(call, ada.body.token, poll)).status, 429);
+    assert.equal((await postPaper(call, bea.body.token, { path: PAPER_QUERY, body: null })).status, 200);
+    assert.equal((await postPaper(call, guest, { path: PAPER_QUERY, body: null })).status, 200);
+    assert.equal((await postPaper(call, guest, poll)).status, 429);
+    assert.equal((await postPaper(call, bea.body.token, poll)).status, 200, 'a guest call cap does not spend a member slot');
+  });
+});
+
+test('paper global call cap stops every owner after the shared budget', async () => {
+  await withApp({
+    ...PAPER_ON,
+    AI_PAPER_CALLS_PER_HOUR: '100',
+    AI_GUEST_PAPER_CALLS_PER_HOUR: '100',
+    AI_PAPER_CALLS_GLOBAL_PER_HOUR: '2',
+  }, async (mf, call) => {
+    const ada = await register(mf, call, 'papergloba');
+    const bea = await register(mf, call, 'paperglobb');
+    const guest = (await mintGuest(call)).body.guest.token;
+    const query = { path: PAPER_QUERY, body: null };
+    assert.equal((await postPaper(call, ada.body.token, query)).status, 200);
+    assert.equal((await postPaper(call, guest, query)).status, 200);
+    const blocked = await postPaper(call, bea.body.token, query);
+    assert.equal(blocked.status, 429);
+    assert.equal(blocked.body.error.code, 'rate_limited');
+    assert.equal((await postPaper(call, ada.body.token, query)).status, 429);
+    assert.equal(await stubCalls(mf, '/internal/v1/paper', 'POST'), 2);
+  });
+});
+
+test('paper runtime errors pass through allowlisted codes and drop malformed bodies', async () => {
+  await withApp(PAPER_ON, async (mf, call) => {
+    const ada = await register(mf, call, 'papererr');
+    const send = stub => postPaper(call, ada.body.token, { path: PAPER_QUERY, body: { stub } });
+    const expired = await send('error');
+    assert.equal(expired.status, 400);
+    assert.equal(expired.body.error.code, 'paper_evidence_expired_or_missing');
+    assert.equal(expired.text.includes('secret paper text'), false);
+    const busy = await send('busy');
+    assert.equal(busy.status, 429);
+    assert.equal(busy.body.error.code, 'paper_busy');
+    assert.equal(busy.body.error.retryable, true);
+    const visual = await send('visual');
+    assert.equal(visual.status, 400);
+    assert.equal(visual.body.error.code, 'visual_region_invalid');
+    const analysis = await send('analysis');
+    assert.equal(analysis.status, 429);
+    assert.equal(analysis.body.error.code, 'analysis_busy');
+    const bad = await send('bad-code');
+    assert.equal(bad.status, 502);
+    assert.equal(bad.body.error.code, 'runtime_unavailable');
+    assert.equal(bad.text.includes('secret paper text'), false);
+    const malformed = await send('malformed');
+    assert.equal(malformed.status, 502);
+    assert.equal(malformed.body.error.code, 'runtime_unavailable');
+    const longCode = await send('long-code');
+    assert.equal(longCode.status, 502);
+    assert.equal(longCode.body.error.code, 'runtime_unavailable');
+    const unsupported = await send('unsupported');
+    assert.equal(unsupported.status, 404);
+    assert.equal(unsupported.body.error.code, 'paper_path_unsupported');
+    assert.ok(await stubCalls(mf, '/internal/v1/paper', 'POST') >= 1);
+    const down = await send('throw');
+    assert.equal(down.status, 503);
+    assert.equal(down.body.error.code, 'ai_unavailable');
+    assert.equal(down.text.includes('socket'), false);
   });
 });

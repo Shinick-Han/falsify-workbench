@@ -11,6 +11,7 @@ import {
   createRuntimeUpload,
   getRuntimeArtifact,
   getRuntimeJob,
+  postRuntimePaper,
 } from './ai-runtime-client.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -61,6 +62,9 @@ const MESSAGES = {
   owner_budget_exhausted: 'The owner token budget for this window is exhausted.',
   idempotency_conflict: 'This idempotency key is already used for a different request.',
   ai_unavailable: 'Hosted AI execution is temporarily unavailable.',
+  paper_tools_disabled: 'Paper tools are not enabled.',
+  paper_path_unsupported: 'That paper path is not supported.',
+  runtime_unavailable: 'The paper runtime response could not be used.',
   internal_error: 'Internal error.',
 };
 const RETRYABLE = new Set(['rate_limited', 'owner_budget_exhausted', 'ai_unavailable', 'internal_error']);
@@ -170,7 +174,18 @@ export function aiSettings(env) {
     defaultModel: models.includes(requestedModel) ? requestedModel : (models[0] || ''),
     defaultEffort: efforts.includes(requestedEffort) ? requestedEffort : (efforts.includes('high') ? 'high' : efforts[0]),
     mimeTypes: MIME_TYPES.slice(),
+    paperTools: paperToolsEnabled(env),
+    paperMaxBodyBytes: Math.min(positiveInt(env?.AI_PAPER_MAX_BODY_BYTES, 29360128), 64 * 1024 * 1024),
+    paperPreparesPerHour: positiveInt(env?.AI_PAPER_PREPARES_PER_HOUR, 30),
+    paperCallsPerHour: positiveInt(env?.AI_PAPER_CALLS_PER_HOUR, 600),
+    guestPaperPreparesPerHour: positiveInt(env?.AI_GUEST_PAPER_PREPARES_PER_HOUR, 10),
+    guestPaperCallsPerHour: positiveInt(env?.AI_GUEST_PAPER_CALLS_PER_HOUR, 240),
+    paperCallsGlobalPerHour: positiveInt(env?.AI_PAPER_CALLS_GLOBAL_PER_HOUR, 3000),
   };
+}
+
+function paperToolsEnabled(env) {
+  return env?.AI_PAPER_TOOLS_ENABLED === true || env?.AI_PAPER_TOOLS_ENABLED === 'true';
 }
 
 function guestSecret(env) {
@@ -197,6 +212,8 @@ function effectiveAiSettings(settings, ownerId) {
     jobsPerOwnerHour: settings.guestJobsPerOwnerHour,
     activeJobsPerOwner: settings.guestActiveJobsPerOwner,
     ownerTokenBudget: settings.guestTokenBudget,
+    paperPreparesPerHour: settings.guestPaperPreparesPerHour,
+    paperCallsPerHour: settings.guestPaperCallsPerHour,
   };
 }
 
@@ -474,7 +491,7 @@ async function createUpload(ctx) {
 }
 
 function capabilitiesResponse(settings) {
-  return json(200, {
+  const body = {
     enabled: settings.enabled,
     provider: catalogProvider(settings.models),
     execution: 'server',
@@ -486,7 +503,9 @@ function capabilitiesResponse(settings) {
       accessKeyRequired: settings.openAccess === true && settings.openAccessKey.length > 0,
     },
     modelProviders: modelProvidersFor(settings.models),
-  });
+  };
+  if (settings.paperTools) body.paperTools = { enabled: true };
+  return json(200, body);
 }
 
 // Only a body the runtime actually returned is reported; unknown fields are dropped, and the
@@ -1363,6 +1382,121 @@ async function createGuest(ctx) {
   return insertGuestSession(db, settings);
 }
 
+// CONTRACT-W19 item 1. Same paths the companion already serves; anything else never reaches the runtime.
+const PAPER_PATHS = [
+  /^\/api\/paper\/evidence\/prepare$/,
+  /^\/api\/paper\/evidence\/query$/,
+  /^\/api\/paper\/visual\/export$/,
+  /^\/api\/paper\/chart\/prepare$/,
+  /^\/api\/paper\/evidence\/jobs$/,
+  /^\/api\/paper\/evidence\/jobs\/[a-f0-9]{32}$/,
+  /^\/api\/paper\/evidence\/jobs\/[a-f0-9]{32}\/cancel$/,
+];
+const RUNTIME_CODE = /^[a-z][a-z0-9_]{0,63}$/;
+
+function allowedPaperPath(path) {
+  return typeof path === 'string' && PAPER_PATHS.some(pattern => pattern.test(path));
+}
+
+function paperPrepare(path) {
+  return path === '/api/paper/evidence/prepare' || path === '/api/paper/chart/prepare';
+}
+
+function paperRequest(body) {
+  if (!isObject(body)) aiFail(400, 'invalid_request');
+  const keys = Object.keys(body);
+  if (keys.some(key => key !== 'path' && key !== 'body')) aiFail(400, 'invalid_request');
+  if (!Object.hasOwn(body, 'path') || !Object.hasOwn(body, 'body')) aiFail(400, 'invalid_request');
+  if (!allowedPaperPath(body.path)) aiFail(404, 'paper_path_unsupported');
+  if (body.body !== null && !isObject(body.body)) aiFail(400, 'invalid_request');
+  return { path: body.path, body: body.body };
+}
+
+function base64DecodedLength(value) {
+  if (typeof value !== 'string') return -1;
+  if (value.length === 0) return 0;
+  const pad = value.endsWith('==') ? 2 : value.endsWith('=') ? 1 : 0;
+  return Math.floor((value.length * 3) / 4) - pad;
+}
+
+function assertPrepareSize(path, inner, maxBytes) {
+  if (!paperPrepare(path) || !isObject(inner) || !Object.hasOwn(inner, 'file')) return;
+  const decoded = base64DecodedLength(inner.file);
+  if (decoded < 0) aiFail(400, 'invalid_request');
+  if (decoded > maxBytes) aiFail(413, 'payload_too_large');
+}
+
+async function reservePaper(db, deps, settings, ownerId, prepare) {
+  const callBucket = await bucketKey('ai-paper-call:', ownerId);
+  const callSlot = await deps.rateLimit(db, callBucket, settings.paperCallsPerHour);
+  let globalSlot;
+  try {
+    globalSlot = await deps.rateLimit(db, 'ai-paper-calls:all', settings.paperCallsGlobalPerHour);
+  } catch (error) {
+    await deps.releaseSlot(db, callBucket, callSlot);
+    throw error;
+  }
+  if (!prepare) return;
+  try {
+    const prepareBucket = await bucketKey('ai-paper-prepare:', ownerId);
+    await deps.rateLimit(db, prepareBucket, settings.paperPreparesPerHour);
+  } catch (error) {
+    await deps.releaseSlot(db, 'ai-paper-calls:all', globalSlot);
+    await deps.releaseSlot(db, callBucket, callSlot);
+    throw error;
+  }
+}
+
+function runtimeCode(text) {
+  let parsed;
+  try { parsed = JSON.parse(text); } catch { return ''; }
+  const code = isObject(parsed) && isObject(parsed.error) ? parsed.error.code : '';
+  return typeof code === 'string' && RUNTIME_CODE.test(code) ? code : '';
+}
+
+function paperSuccess(status, text) {
+  return new Response(text, {
+    status,
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+    },
+  });
+}
+
+function paperFailure(status, text, requestId) {
+  const code = runtimeCode(text);
+  if (!code || status < 400 || status > 599) return errorResponse(new AiError(502, 'runtime_unavailable'), requestId);
+  return json(status, {
+    error: {
+      code,
+      message: MESSAGES[code] || 'The paper request was rejected.',
+      requestId,
+      retryable: code === 'paper_busy' || RETRYABLE.has(code),
+    },
+  });
+}
+
+async function createPaper(ctx) {
+  const envelope = paperRequest(await readJsonBody(ctx.request, ctx.settings.paperMaxBodyBytes));
+  assertPrepareSize(envelope.path, envelope.body, ctx.settings.maxUploadBytes);
+  await reservePaper(ctx.deps.getDb(), ctx.deps, ctx.settings, ctx.ownerId, paperPrepare(envelope.path));
+  const result = await postRuntimePaper(ctx.env, {
+    ownerId: ctx.ownerId,
+    path: envelope.path,
+    body: envelope.body,
+  });
+  if (result.status >= 200 && result.status < 300) return paperSuccess(result.status, result.text);
+  return paperFailure(result.status, result.text, ctx.requestId);
+}
+
+function paperRouteOpen(template, settings) {
+  if (template !== '/v1/ai/paper') return false;
+  if (!settings.paperTools) aiFail(404, 'paper_tools_disabled');
+  return true;
+}
+
 const AI_ROUTES = {
   '/v1/ai/capabilities': { GET: ctx => capabilitiesResponse(ctx.settings) },
   '/v1/ai/guest': { POST: ctx => createGuest(ctx) },
@@ -1371,6 +1505,7 @@ const AI_ROUTES = {
   '/v1/ai/jobs/:id': { GET: ctx => getJob(ctx) },
   '/v1/ai/jobs/:id/cancel': { POST: ctx => cancelJob(ctx) },
   '/v1/ai/jobs/:id/artifacts/:artifactId': { GET: ctx => getArtifact(ctx) },
+  '/v1/ai/paper': { POST: ctx => createPaper(ctx) },
 };
 
 export function matchAi(pathname) {
@@ -1446,8 +1581,10 @@ export async function handleAiRequest(ctx) {
     // not touch D1. A valid guest bearer is the one case that reads the session, and only to
     // report that guest's upload cap through the existing limits object.
     if (ctx.match.template === '/v1/ai/capabilities') return publicCapabilities(ctx, settings);
-    // A disabled deployment behaves like it has no other hosted AI routes.
-    if (!settings.enabled) aiFail(404, 'not_found');
+    // Paper tools have their own kill switch and do not spend a model budget, so hosting can stay off.
+    // Off: 404 before auth and before any runtime call. On: the same owner resolution as /v1/ai/jobs.
+    const paperOpen = paperRouteOpen(ctx.match.template, settings);
+    if (!paperOpen && !settings.enabled) aiFail(404, 'not_found');
     // Guest minting is unsigned. Every other route resolves one owner first.
     const owner = ctx.match.template === '/v1/ai/guest' ? null : await resolveAiOwner({
       request: ctx.request,
