@@ -13,9 +13,9 @@
 #              linear_paint, paper_plottracer (image sampling and masks)
 # - mini-racer paper_chart_shape_core.py, paper_plottracer.py, paper_chart_edit_service.capability()
 #              (pinned V8 bundles under app/dist)
-# - jsonschema anthropic_backend.py, harness_adapter.py (local structured-output validation)
+# - jsonschema anthropic_backend.py, openai_backend.py, harness_adapter.py (local structured-output validation)
 #
-# Nothing here is a provider SDK: the Anthropic backend uses urllib/ssl from the stdlib.
+# Nothing here is a provider SDK: the Anthropic and OpenAI backends use urllib/ssl from the stdlib.
 jsonschema==4.26.0
 PyMuPDF==1.28.2
 mini-racer==0.14.1
