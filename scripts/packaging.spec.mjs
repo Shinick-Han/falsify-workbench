@@ -11,6 +11,7 @@ import {
   assertShippableSource, unexpectedReleasePaths, verifyVendoredMupdfWasm, verifyParagraphRuntime,
   RECOMPOSITION_WASM, RECOMPOSITION_WASM_SHA256, verifyRecompositionRuntime,
   LATEX_WASM, LATEX_MANIFEST_SHA256, verifyLatexRuntime,
+  EVENT_RELEASE_PATHS, sourceReleasePathspec, archiveCommittedSource,
 } from './package-release.mjs';
 import { assertChromeLoaderExecuted, CHROME_TEST } from './assert-browser-pdf-executed.mjs';
 
@@ -197,5 +198,47 @@ test('test discovery rejects an unregistered spec', () => {
     execFileSync(process.execPath, [join(dir, 'scripts/test.mjs'), '--check-registration']);
     writeFileSync(join(dir, 'tests/unregistered.spec.mjs'), '');
     assert.throws(() => execFileSync(process.execPath, [join(dir, 'scripts/test.mjs'), '--check-registration'], {stdio: 'pipe'}), /Test registration mismatch/);
+  } finally { rmSync(dir, {recursive: true, force: true}); }
+});
+
+function zipNames(file) {
+  const data = readFileSync(file);
+  const eocd = data.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+  if (eocd < 0) throw new Error('ZIP end record missing');
+  const count = data.readUInt16LE(eocd + 8);
+  if (count === 0xffff) throw new Error('ZIP64 listing is not used for this fixture');
+  let offset = data.readUInt32LE(eocd + 16);
+  const names = [];
+  for (let i = 0; i < count; i += 1) {
+    if (data.readUInt32LE(offset) !== 0x02014b50) throw new Error('ZIP central header missing');
+    const nameLen = data.readUInt16LE(offset + 28);
+    const extraLen = data.readUInt16LE(offset + 30);
+    const commentLen = data.readUInt16LE(offset + 32);
+    names.push(data.subarray(offset + 46, offset + 46 + nameLen).toString('utf8'));
+    offset += 46 + nameLen + extraLen + commentLen;
+  }
+  return names;
+}
+
+test('source release ZIP omits the event page', () => {
+  assert.deepEqual([...EVENT_RELEASE_PATHS], ['app/dist/event.html', 'app/dist/cloud-config.event.js']);
+  assert.deepEqual(sourceReleasePathspec(), ['.', ':(exclude)app/dist/event.html', ':(exclude)app/dist/cloud-config.event.js']);
+  const dir = mkdtempSync(join(tmpdir(), 'falsify-event-pack-'));
+  try {
+    const git = (...args) => execFileSync('git', ['-C', dir, ...args], {encoding: 'utf8', windowsHide: true});
+    git('init', '-b', 'main');
+    mkdirSync(join(dir, 'app/dist'), {recursive: true});
+    writeFileSync(join(dir, 'README'), 'keep\n');
+    writeFileSync(join(dir, 'app/dist/index.html'), '<html>default</html>\n');
+    writeFileSync(join(dir, 'app/dist/event.html'), '<html>event</html>\n');
+    writeFileSync(join(dir, 'app/dist/cloud-config.event.js'), 'event\n');
+    git('add', '.');
+    git('-c', 'user.name=event-page', '-c', 'user.email=event-page@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-m', 'fixture');
+    const archive = join(dir, 'release.zip');
+    archiveCommittedSource(dir, git('rev-parse', 'HEAD').trim(), archive, '0.0.0-test');
+    const names = zipNames(archive);
+    assert.equal(names.some(name => name.endsWith('README')), true);
+    assert.equal(names.some(name => name.endsWith('app/dist/index.html')), true);
+    for (const path of EVENT_RELEASE_PATHS) assert.equal(names.some(name => name.endsWith(path)), false, path);
   } finally { rmSync(dir, {recursive: true, force: true}); }
 });
