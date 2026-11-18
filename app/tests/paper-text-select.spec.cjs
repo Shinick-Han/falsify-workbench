@@ -267,7 +267,8 @@ function expectAnchored(result, text) {
       const status = document.querySelector('#paper-generate-status')?.textContent || '';
       const editStatus = document.querySelector('#paper-edit-status')?.textContent || '';
       const edits = window.FalsifyPaperWorkspace?.getEditSnapshot?.()?.edits || [];
-      if (!output?.file) return {ok: false, status, editStatus, edits: edits.map(edit => ({before: edit.before, after: edit.after}))};
+      // A failed generation keeps the previous output on screen; judge by the status, not by its presence.
+      if (!output?.file || /생성하지 못했습니다|만들지 않았습니다/.test(status)) return {ok: false, status, editStatus, edits: edits.map(edit => ({before: edit.before, after: edit.after}))};
       const bytes = [...new Uint8Array(await output.file.arrayBuffer())];
       return {ok: true, status, editStatus, sha256: output.sha256, bytes, verification: output.verification?.status || '', checks: JSON.stringify(output.verification || {}).slice(0, 1500)};
     });
