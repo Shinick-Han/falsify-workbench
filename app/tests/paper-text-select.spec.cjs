@@ -266,7 +266,7 @@ function expectAnchored(result, text) {
       const edits = window.FalsifyPaperWorkspace?.getEditSnapshot?.()?.edits || [];
       if (!output?.file) return {ok: false, status, editStatus, edits: edits.map(edit => ({before: edit.before, after: edit.after}))};
       const bytes = [...new Uint8Array(await output.file.arrayBuffer())];
-      return {ok: true, status, sha256: output.sha256, bytes, verification: output.verification?.status || ''};
+      return {ok: true, status, editStatus, sha256: output.sha256, bytes, verification: output.verification?.status || '', checks: JSON.stringify(output.verification || {}).slice(0, 1500)};
     });
     if (roundtrip.ok) {
       const extracted = spawnSync(python, ['-c', 'import sys,pymupdf; doc=pymupdf.open(stream=sys.stdin.buffer.read(), filetype="pdf"); print(doc[0].get_text("text"))'], {input: Buffer.from(roundtrip.bytes)});
@@ -274,9 +274,10 @@ function expectAnchored(result, text) {
       roundtrip.text = text;
       delete roundtrip.bytes;
       assert.equal(extracted.status, 0, extracted.stderr.toString());
-      assert.match(text, /69%/);
-      assert.match(text, /96%/);
-      assert.equal((text.match(/69%/g) || []).length, 1);
+      const facts = JSON.stringify({status: roundtrip.status, verification: roundtrip.verification, editStatus: roundtrip.editStatus, checks: roundtrip.checks, sha256: roundtrip.sha256});
+      assert.match(text, /69%/, facts);
+      assert.match(text, /96%/, facts);
+      assert.equal((text.match(/69%/g) || []).length, 1, facts);
     }
     console.log(JSON.stringify({roundtrip: {...roundtrip, bytes: undefined}}, null, 2));
     if (!roundtrip.ok) console.log('ROUNDTRIP_UNAVAILABLE ' + JSON.stringify({status: roundtrip.status, editStatus: roundtrip.editStatus, edits: roundtrip.edits}));
