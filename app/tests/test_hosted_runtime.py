@@ -3,6 +3,7 @@
 import hashlib
 import http.client
 import json
+import os
 import socket
 import sys
 import tempfile
@@ -10,6 +11,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -22,6 +24,7 @@ import pymupdf
 from hosted_runtime import (ConfigError, PdfInputError, RuntimeConfig, RuntimeService,
                             ServiceError, Store, StoreNotFound, build_review_envelope,
                             create_server, extract_pdf)
+from hosted_runtime.config import DEFAULT_MODELS, provider_for_model
 from hosted_runtime.service import build_harness
 
 OWNER = 'usr:11111111-1111-1111-1111-111111111111'
@@ -113,6 +116,35 @@ class RuntimeConfigTests(unittest.TestCase):
                 'HOSTED_AI_MAX_PROMPT_CHARS': '45000',
             })
             self.assertEqual(configured.max_prompt_chars, 45000)
+            self.assertEqual(configured.models, DEFAULT_MODELS)
+            self.assertEqual(configured.provider, 'anthropic')
+            self.assertEqual(configured.public_health(True)['providers'], ['anthropic'])
+
+    def test_mixed_allowlist_rejects_unknown_ids(self):
+        self.assertEqual(DEFAULT_MODELS, ('claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5'))
+        self.assertEqual(provider_for_model('claude-haiku-5-5'), 'anthropic')
+        self.assertEqual(provider_for_model('gpt-5'), 'openai')
+        self.assertEqual(provider_for_model('o3-mini'), 'openai')
+        for model in ('opus', 'o', 'gpt', 'GPT-5', 'claude', ''):
+            self.assertIsNone(provider_for_model(model))
+        with tempfile.TemporaryDirectory() as directory:
+            mixed = RuntimeConfig(
+                state_dir=Path(directory), service_token=TOKEN,
+                models=('claude-opus-5-5', 'gpt-5', 'o3'), default_model='claude-opus-5-5')
+            self.assertEqual(mixed.provider, 'anthropic')
+            self.assertEqual(mixed.public_health(True)['providers'], ['anthropic', 'openai'])
+            openai_first = RuntimeConfig.from_env({
+                'HOSTED_AI_STATE_DIR': directory,
+                'HOSTED_AI_SERVICE_TOKEN': TOKEN,
+                'HOSTED_AI_MODELS': 'gpt-5,claude-opus-5-5',
+            })
+            self.assertEqual(openai_first.models, ('gpt-5', 'claude-opus-5-5'))
+            self.assertEqual(openai_first.provider, 'openai')
+            self.assertEqual(openai_first.public_health(False)['provider'], 'openai')
+            for models in (('claude-opus-5-5', 'llama-3'), ('gpt',), ('o',)):
+                with self.assertRaises(ConfigError):
+                    RuntimeConfig(state_dir=Path(directory), service_token=TOKEN,
+                                  models=models, default_model=models[0])
 
     def test_prompt_cap_range(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -529,6 +561,11 @@ class EnvelopeTests(unittest.TestCase):
         self.assertEqual(red['sourceHash'], 'b' * 64)
         self.assertEqual(red['segments'], segments)
         self.assertEqual(red['harness'], build_harness('red', 'Review.', 12, MODEL, 'high'))
+        self.assertEqual((red['harness']['id'], red['harness']['name']),
+                         ('hosted-anthropic', 'Hosted Anthropic'))
+        openai = build_harness('red', 'Review.', 4, 'gpt-5', 'medium')
+        self.assertEqual((openai['id'], openai['name'], openai['adapter']['model']),
+                         ('hosted-openai', 'Hosted OpenAI', 'gpt-5'))
         self.assertEqual(red['harness']['adapter'],
                          {'type': 'hosted', 'model': MODEL, 'effort': 'high'})
         self.assertEqual(set(red['harness']),
@@ -639,6 +676,7 @@ class HttpTests(BaseRuntimeTest):
         self.assertEqual(status, 200)
         health = json.loads(data)
         self.assertEqual(health, {'ok': True, 'provider': 'anthropic',
+                                  'providers': ['anthropic'],
                                   'models': [MODEL], 'version': health['version'],
                                   'ready': True})
         status, _, _ = self._request(port, 'HEAD', '/internal/v1/health')
@@ -815,6 +853,106 @@ class HttpTests(BaseRuntimeTest):
             body=b'x' * 2048)
         self.assertEqual(status, 413)
         self.assertEqual(json.loads(data)['error']['code'], 'payload_too_large')
+
+
+class ProviderRoutingTests(BaseRuntimeTest):
+    def test_claude_job_keeps_anthropic_when_allowlist_starts_with_openai(self):
+        runner = FakeRunner()
+        service = RuntimeService(self.config(
+            models=('gpt-5', MODEL), default_model='gpt-5'), review_runner=runner)
+        self.addCleanup(service.close)
+        self.assertEqual(service.health()['provider'], 'openai')
+        self.assertEqual(service.health()['providers'], ['anthropic', 'openai'])
+        upload = self.upload(service)
+        snapshot, replayed = service.submit_job(self.body(
+            upload, model=MODEL, job_id='job-claude-route', key='idem-claude-route',
+            request_hash='hash-claude-route'))
+        self.assertFalse(replayed)
+        done = wait_state(service, OWNER, snapshot['id'])
+        self.assertEqual(done['state'], 'completed', done)
+        self.assertEqual(done['provider'], 'anthropic')
+        self.assertEqual(runner.calls[0]['harness']['id'], 'hosted-anthropic')
+        self.assertEqual(runner.calls[0]['harness']['name'], 'Hosted Anthropic')
+
+    def test_openai_job_records_provider_and_usage_from_fake_factory(self):
+        import red_service
+        created = []
+
+        class FakeOpenAI:
+            def __init__(self, *args, **kwargs):
+                created.append(kwargs)
+
+            def infer(self, prompt, schema):
+                return {
+                    'status': 'ok',
+                    'response': {'status': 'abstain', 'candidates': []},
+                    'usage': {'input_tokens': 5, 'output_tokens': 2,
+                              'cache_read_input_tokens': 1, 'cache_creation_input_tokens': 0},
+                    'request_id': 'req_openai_fake',
+                }
+
+        real_backend = red_service.backend
+
+        def routed(*args, **kwargs):
+            kwargs['openai_factory'] = FakeOpenAI
+            return real_backend(*args, **kwargs)
+
+        env = {'HOSTED_AI_MODELS': 'claude-opus-5-5,gpt-5,o3', 'OPENAI_API_KEY': 'test-only-key'}
+        with patch.dict(os.environ, env), patch('red_service.backend', routed):
+            service = RuntimeService(self.config(
+                models=('claude-opus-5-5', 'gpt-5', 'o3'), default_model='claude-opus-5-5',
+                max_calls=4))
+            self.addCleanup(service.close)
+            upload = self.upload(service)
+            snapshot, _ = service.submit_job(self.body(
+                upload, model='gpt-5', effort='high', useEvidence=False,
+                job_id='job-openai-0001', key='idem-openai-0001', request_hash='hash-openai-0001'))
+            done = wait_state(service, OWNER, snapshot['id'], timeout=20)
+        self.assertEqual(done['state'], 'completed', done)
+        self.assertEqual(done['provider'], 'openai')
+        self.assertEqual(done['usage'], {'inputTokens': 5, 'outputTokens': 2,
+                                         'cacheReadInputTokens': 1, 'cacheCreationInputTokens': 0})
+        self.assertEqual(done['result']['harness']['id'], 'hosted-openai')
+        self.assertEqual(done['result']['harness']['name'], 'Hosted OpenAI')
+        self.assertEqual(done['result']['hostedSelection']['provider'], 'openai-api')
+        self.assertEqual(created[0]['model'], 'gpt-5')
+        self.assertEqual(created[0]['effort'], 'high')
+        self.assertEqual(len(created), 1)
+
+    def test_missing_openai_key_fails_before_the_factory(self):
+        import red_service
+        created = []
+
+        class FakeOpenAI:
+            def __init__(self, *args, **kwargs):
+                created.append(kwargs)
+
+            def infer(self, prompt, schema):
+                created.append('infer')
+                return {'status': 'ok', 'response': {'status': 'abstain', 'candidates': []}, 'usage': {}}
+
+        real_backend = red_service.backend
+
+        def routed(*args, **kwargs):
+            kwargs['openai_factory'] = FakeOpenAI
+            return real_backend(*args, **kwargs)
+
+        env = {'HOSTED_AI_MODELS': 'claude-opus-5-5,gpt-5', 'OPENAI_API_KEY': '   ',
+               'ANTHROPIC_API_KEY': 'test-only-key'}
+        with patch.dict(os.environ, env), patch('red_service.backend', routed):
+            service = RuntimeService(self.config(
+                models=(MODEL, 'gpt-5'), default_model=MODEL, max_calls=2))
+            self.addCleanup(service.close)
+            upload = self.upload(service)
+            snapshot, _ = service.submit_job(self.body(
+                upload, model='gpt-5', useEvidence=False, job_id='job-openai-nokey',
+                key='idem-openai-nokey', request_hash='hash-openai-nokey'))
+            done = wait_state(service, OWNER, snapshot['id'], timeout=20)
+        self.assertEqual(done['state'], 'failed', done)
+        self.assertEqual(done['failure']['code'], 'provider_not_configured')
+        self.assertEqual(done['provider'], 'openai')
+        self.assertNotIn('test-only-key', json.dumps(done))
+        self.assertEqual(created, [])
 
 
 if __name__ == '__main__':

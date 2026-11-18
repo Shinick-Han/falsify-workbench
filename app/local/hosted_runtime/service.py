@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import EFFORTS, RuntimeConfig
+from .config import EFFORTS, RuntimeConfig, provider_for_model
 from .evidence import (EvidenceError, apply_edits as apply_evidence_edits,
                        artifact as evidence_artifact, check_text_ambiguity,
                        configure_store, handle as evidence_handle,
@@ -90,6 +90,7 @@ FAILURE_MESSAGES = {
 }
 RETRYABLE_FAILURES = frozenset({'rate_limited', 'timeout', 'provider_error', 'overloaded', 'provider_unavailable'})
 RETRYABLE_ERRORS = frozenset({'ai_unavailable'})
+_PROVIDER_KEY_ENV = {'anthropic': 'ANTHROPIC_API_KEY', 'openai': 'OPENAI_API_KEY'}
 
 
 class ServiceError(Exception):
@@ -201,11 +202,33 @@ def _terminal_progress(result, terminal, *, apply_only=False):
     return progress
 
 
+def _harness_identity(model):
+    if provider_for_model(model) == 'openai':
+        return 'hosted-openai', 'Hosted OpenAI'
+    return 'hosted-anthropic', 'Hosted Anthropic'
+
+
+def _provider_key_configured(provider):
+    name = _PROVIDER_KEY_ENV.get(provider)
+    if name is None:
+        return False
+    value = os.environ.get(name, '')
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _job_provider(model):
+    provider = provider_for_model(model)
+    if provider not in ('anthropic', 'openai'):
+        raise ServiceError('invalid_request', 400)
+    return provider
+
+
 def build_harness(role, prompt, max_calls, model, effort):
+    harness_id, name = _harness_identity(model)
     return {
         'schema': 'falsify.harness.v1',
-        'id': 'hosted-anthropic',
-        'name': 'Hosted Anthropic',
+        'id': harness_id,
+        'name': name,
         'version': '1',
         'role': role,
         'instructions': prompt,
@@ -573,7 +596,7 @@ class RuntimeService:
                 role=validated['role'],
                 model=validated['model'],
                 effort=validated['effort'],
-                provider=self.config.provider,
+                provider=_job_provider(validated['model']),
                 progress=progress,
                 apply_only=validated['applyOnly'],
                 use_evidence=validated['useEvidence'],
@@ -740,6 +763,9 @@ class RuntimeService:
         return upload, raw
 
     def _execute_review(self, request, upload, raw):
+        if self._missing_provider_key(request):
+            self._fail(request, 'provider_not_configured')
+            return
         extraction = extract_pdf(raw)
         self.store.add_artifact(request.owner_id, request.job_id, 'extracted.json',
                                 'application/json',
@@ -871,6 +897,12 @@ class RuntimeService:
             result=apply_summary, usage=None, provider_request_id=None, completed=True)
         if not ok:
             self._finish_cancelled(request)
+
+    def _missing_provider_key(self, request):
+        """Real engines only. Injected runners stay offline and do not read provider keys."""
+        if self.review_runner is not None:
+            return False
+        return not _provider_key_configured(provider_for_model(request.model))
 
     def _run_engine(self, data, request):
         progress = self._progress_callback(request)
