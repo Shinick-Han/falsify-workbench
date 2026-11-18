@@ -5373,12 +5373,12 @@ function createEngineModule() {
 
 // src/paragraph-vendor/engine/type3surgery.js
 init_shadingsurgery();
-function applyType3LeftoverSurgery(savedBytes, jobs) {
+function applyType3LeftoverSurgery(savedBytes2, jobs) {
   jobs = (jobs || []).filter(
     (j) => j && j.seg && (j.state || []).some((o) => o.t3 && o.glyphs && o.glyphs.length)
   );
   if (!jobs.length) return null;
-  const saved = latin(savedBytes);
+  const saved = latin(savedBytes2);
   const sp = parsePdf(saved);
   if (!sp) return null;
   let next = sp.size;
@@ -5511,14 +5511,14 @@ function mergeFonts(body, usedNames, fontNums) {
     )
   );
   if (!missing.length) return body;
-  const entries2 = missing.map((n) => `/${n} ${fontNums[n]} 0 R`).join(" ");
+  const entries3 = missing.map((n) => `/${n} ${fontNums[n]} 0 R`).join(" ");
   let newRes;
   if (fontDict)
     newRes = resDict.replace(
       fontDict,
-      fontDict.replace(/^<</, `<< ${entries2} `)
+      fontDict.replace(/^<</, `<< ${entries3} `)
     );
-  else newRes = resDict.replace(/^<</, `<< /Font << ${entries2} >> `);
+  else newRes = resDict.replace(/^<</, `<< /Font << ${entries3} >> `);
   return body.replace(resDict, newRes);
 }
 function appendRevision(src, rootNum, size3, pageRewrites, newObjs) {
@@ -11121,11 +11121,11 @@ async function loadQuality(override) {
 }
 function captureConsole(keepText) {
   const saved = { warn: console.warn, error: console.error, log: console.log };
-  const entries2 = [];
+  const entries3 = [];
   let count = 0;
   const sink = (level) => (...args) => {
     count++;
-    if (keepText) entries2.push(level + ": " + args.map(String).join(" "));
+    if (keepText) entries3.push(level + ": " + args.map(String).join(" "));
   };
   console.warn = sink("warn");
   console.error = sink("error");
@@ -11133,7 +11133,7 @@ function captureConsole(keepText) {
   return {
     restore() {
       Object.assign(console, saved);
-      return keepText ? { count, entries: entries2 } : { count };
+      return keepText ? { count, entries: entries3 } : { count };
     }
   };
 }
@@ -11588,8 +11588,8 @@ function parseFont(bytes2) {
     return { names: names2, os2: os22, head: head2 };
   }
   const { names, os2, head } = requiredTables();
-  const n = names.offset, entries2 = u16(n + 2), strings = n + u16(n + 4), end = n + names.length;
-  if (n + 6 + entries2 * 12 > end || strings > end) bad();
+  const n = names.offset, entries3 = u16(n + 2), strings = n + u16(n + 4), end = n + names.length;
+  if (n + 6 + entries3 * 12 > end || strings > end) bad();
   const values = /* @__PURE__ */ new Map();
   function decodeName(platform, encoding, length, start) {
     let text3;
@@ -11602,7 +11602,7 @@ function parseFont(bytes2) {
     return text3;
   }
   function readNames() {
-    for (let i = 0; i < entries2; i++) {
+    for (let i = 0; i < entries3; i++) {
       const p = n + 6 + i * 12, platform = u16(p), encoding = u16(p + 2), language = u16(p + 4), id2 = u16(p + 6), length = u16(p + 8), start = strings + u16(p + 10);
       if (start > end || length > end - start) bad();
       if (![1, 2, 6, 16, 17].includes(id2)) continue;
@@ -12263,6 +12263,398 @@ function scanTextShows(input, { measure } = {}) {
   return { shows, diagnostics };
 }
 
+// src/paragraph-pdf-figure-resources.mjs
+var KINDS = ["ExtGState", "Font", "XObject", "ColorSpace", "Properties", "Pattern", "Shading"];
+var DELIM = "%()<>[]{}/%";
+var FIGURE_TEXT_REFUSAL = "\uADF8\uB9BC \uC548 \uAE00\uC790\uB97C \uACE0\uCE58\uBA74 \uADF8\uB9BC\uC774 \uAE68\uC838\uC11C \uB9CC\uB4E4\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4. \uD45C\xB7\uADF8\uB798\uD504\xB7\uADF8\uB9BC \uACE0\uCE58\uAE30\uB97C \uC4F0\uC138\uC694.";
+function latin2(bytes2) {
+  let text3 = "";
+  for (let i = 0; i < bytes2.length; i++) text3 += String.fromCharCode(bytes2[i]);
+  return text3;
+}
+function ascii(text3) {
+  return Uint8Array.from(text3, (ch) => ch.charCodeAt(0));
+}
+function isDelim(byte) {
+  return byte <= 32 || DELIM.indexOf(String.fromCharCode(byte)) >= 0;
+}
+function liveDict(dict) {
+  return Boolean(dict && !dict.isNull() && dict.isDictionary());
+}
+function childDict(dict, key3) {
+  if (!liveDict(dict)) return null;
+  const child = dict.get(key3);
+  return liveDict(child) ? child : null;
+}
+function entries2(dict) {
+  if (!liveDict(dict)) return [];
+  const out = [];
+  dict.forEach((value, key3) => out.push([String(key3).replace(/^\//, ""), value]));
+  return out;
+}
+function isForm(obj) {
+  if (!obj || obj.isNull?.() || !obj.isStream?.()) return false;
+  try {
+    return obj.get("Subtype")?.asName?.() === "Form";
+  } catch {
+    return false;
+  }
+}
+function concatBytes(parts) {
+  let size3 = 0;
+  for (const part of parts) size3 += part.length;
+  const out = new Uint8Array(size3);
+  let at = 0;
+  for (const part of parts) {
+    out.set(part, at);
+    at += part.length;
+  }
+  return out;
+}
+function skipLine(bytes2, i) {
+  while (i < bytes2.length && bytes2[i] !== 10 && bytes2[i] !== 13) i++;
+  return i;
+}
+function skipLiteral(bytes2, i) {
+  let depth = 1;
+  i++;
+  while (i < bytes2.length && depth) {
+    if (bytes2[i] === 92) {
+      i += 2;
+      continue;
+    }
+    if (bytes2[i] === 40) depth++;
+    else if (bytes2[i] === 41) depth--;
+    i++;
+  }
+  return i;
+}
+function skipHex(bytes2, i) {
+  i++;
+  while (i < bytes2.length && bytes2[i] !== 62) i++;
+  return i < bytes2.length ? i + 1 : i;
+}
+function skipInert(bytes2, i) {
+  const c = bytes2[i];
+  if (c === 37) return skipLine(bytes2, i);
+  if (c === 40) return skipLiteral(bytes2, i);
+  if (c === 60 && bytes2[i + 1] !== 60) return skipHex(bytes2, i);
+  return i;
+}
+function pushName(bytes2, i, map, parts) {
+  let j = i + 1;
+  while (j < bytes2.length && !isDelim(bytes2[j])) j++;
+  const next = map.get(latin2(bytes2.subarray(i + 1, j)));
+  parts.push(next ? ascii("/" + next) : bytes2.subarray(i, j));
+  return j;
+}
+function rewriteNames(bytes2, map) {
+  const parts = [];
+  let i = 0;
+  while (i < bytes2.length) {
+    const skipped = skipInert(bytes2, i);
+    if (skipped > i) {
+      parts.push(bytes2.subarray(i, skipped));
+      i = skipped;
+      continue;
+    }
+    if (bytes2[i] === 47) {
+      i = pushName(bytes2, i, map, parts);
+      continue;
+    }
+    parts.push(bytes2.subarray(i, i + 1));
+    i++;
+  }
+  return concatBytes(parts);
+}
+function freshName(taken, counter) {
+  let name = "Fg" + counter.n;
+  while (taken.has(name)) {
+    counter.n += 1;
+    name = "Fg" + counter.n;
+  }
+  counter.n += 1;
+  taken.add(name);
+  return name;
+}
+function ensureDict(doc, parent, key3) {
+  const current = parent.get(key3);
+  if (liveDict(current)) return current;
+  return parent.put(key3, doc.newDictionary());
+}
+function placeOnPages(doc, pages, kind, name, value) {
+  for (const page of pages) ensureDict(doc, ensureDict(doc, page, "Resources"), kind).put(name, value);
+}
+function renameKinds(doc, pages, taken, counter, resources) {
+  const map = /* @__PURE__ */ new Map();
+  for (const kind of KINDS) {
+    const dict = childDict(resources, kind);
+    for (const [name, value] of entries2(dict)) {
+      const renamed = freshName(taken, counter);
+      dict.delete(name);
+      dict.put(renamed, value);
+      map.set(name, renamed);
+      placeOnPages(doc, pages, kind, renamed, value);
+    }
+  }
+  return map;
+}
+function promoteForm(doc, pages, taken, counter, seen, obj) {
+  if (!isForm(obj)) return;
+  const id2 = obj.isIndirect() ? obj.asIndirect() : 0;
+  if (id2 && seen.has(id2)) return;
+  if (id2) seen.add(id2);
+  const resources = childDict(obj, "Resources");
+  if (!resources) return;
+  for (const [, value] of entries2(childDict(resources, "XObject"))) promoteForm(doc, pages, taken, counter, seen, value);
+  const map = renameKinds(doc, pages, taken, counter, resources);
+  if (map.size) obj.writeStream(rewriteNames(obj.readStream().asUint8Array(), map));
+}
+function pageObjects(doc) {
+  const pages = [];
+  for (let i = 0; i < doc.countPages(); i++) pages.push(doc.findPage(i));
+  return pages;
+}
+function takenNames(pages) {
+  const taken = /* @__PURE__ */ new Set();
+  for (const page of pages) {
+    const resources = childDict(page, "Resources");
+    for (const kind of KINDS) for (const [name] of entries2(childDict(resources, kind))) taken.add(name);
+  }
+  return taken;
+}
+function savedBytes(doc) {
+  const saved = doc.saveToBuffer("garbage=0,compress=false");
+  try {
+    return saved.asUint8Array().slice();
+  } finally {
+    saved.destroy();
+  }
+}
+function promoteFormResources(bytes2, mupdf) {
+  const doc = new mupdf.PDFDocument(bytes2);
+  try {
+    const pages = pageObjects(doc);
+    const taken = takenNames(pages);
+    const counter = { n: 1 };
+    const seen = /* @__PURE__ */ new Set();
+    for (const page of pages) {
+      for (const [, value] of entries2(childDict(childDict(page, "Resources"), "XObject"))) {
+        promoteForm(doc, pages, taken, counter, seen, value);
+      }
+    }
+    return savedBytes(doc);
+  } finally {
+    doc.destroy();
+  }
+}
+function pdfLiteral(text3) {
+  if (typeof text3 !== "string" || !text3) return "";
+  let out = "(";
+  for (const ch of text3) {
+    const code = ch.charCodeAt(0);
+    if (code < 32 || code > 126) return "";
+    if (ch === "(" || ch === ")" || ch === "\\") out += "\\";
+    out += ch;
+  }
+  return out + ")";
+}
+function editNeedles(edits) {
+  const needles = [];
+  if (!Array.isArray(edits)) return needles;
+  for (const edit of edits) {
+    const literal = pdfLiteral(edit?.before);
+    if (literal) needles.push(ascii(literal));
+  }
+  return needles;
+}
+function indexOfBytes(hay, needle) {
+  if (!needle.length || hay.length < needle.length) return -1;
+  for (let i = 0; i <= hay.length - needle.length; i++) {
+    let same = true;
+    for (let j = 0; j < needle.length; j++) if (hay[i + j] !== needle[j]) same = false;
+    if (same) return i;
+  }
+  return -1;
+}
+function formHolds(obj, needles, seen) {
+  if (!isForm(obj)) return false;
+  const id2 = obj.isIndirect() ? obj.asIndirect() : 0;
+  if (id2 && seen.has(id2)) return false;
+  if (id2) seen.add(id2);
+  const raw = obj.readStream().asUint8Array();
+  for (const needle of needles) if (indexOfBytes(raw, needle) >= 0) return true;
+  for (const [, value] of entries2(childDict(childDict(obj, "Resources"), "XObject"))) {
+    if (formHolds(value, needles, seen)) return true;
+  }
+  return false;
+}
+function documentHolds(doc, needles) {
+  const seen = /* @__PURE__ */ new Set();
+  for (let index = 0; index < doc.countPages(); index++) {
+    const resources = childDict(doc.findPage(index), "Resources");
+    for (const [, value] of entries2(childDict(resources, "XObject"))) {
+      if (formHolds(value, needles, seen)) return true;
+    }
+  }
+  return false;
+}
+function formStreamsHoldEdits(bytes2, edits, mupdf) {
+  const needles = editNeedles(edits);
+  if (!needles.length) return false;
+  const doc = new mupdf.PDFDocument(bytes2);
+  try {
+    return documentHolds(doc, needles);
+  } finally {
+    doc.destroy();
+  }
+}
+function tokensOf(bytes2) {
+  const out = [];
+  let i = 0;
+  while (i < bytes2.length) {
+    const skipped = skipInert(bytes2, i);
+    if (skipped > i) {
+      i = skipped;
+      continue;
+    }
+    if (bytes2[i] <= 32) {
+      i++;
+      continue;
+    }
+    if (bytes2[i] === 47) {
+      const start2 = i + 1;
+      i++;
+      while (i < bytes2.length && !isDelim(bytes2[i])) i++;
+      out.push("/" + latin2(bytes2.subarray(start2, i)));
+      continue;
+    }
+    const start = i;
+    while (i < bytes2.length && !isDelim(bytes2[i])) i++;
+    if (i === start) i++;
+    else out.push(latin2(bytes2.subarray(start, i)));
+  }
+  return out;
+}
+function previousName(tokens2, index) {
+  for (let i = index - 1; i >= 0; i--) {
+    const token = tokens2[i];
+    if (token.startsWith("/")) return token.slice(1);
+    if (!/^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(token)) return "";
+  }
+  return "";
+}
+function missingExtGState(tokens2, resources) {
+  const have = new Set(entries2(childDict(resources, "ExtGState")).map(([name]) => name));
+  const missing = [];
+  for (let i = 0; i < tokens2.length; i++) {
+    if (tokens2[i] !== "gs") continue;
+    const name = previousName(tokens2, i);
+    if (name && !have.has(name)) missing.push(name);
+  }
+  return missing;
+}
+function contentStreams(obj) {
+  if (isForm(obj)) return [obj];
+  const contents = obj.get?.("Contents");
+  if (!contents || contents.isNull?.()) return [];
+  if (contents.isArray?.()) {
+    const out = [];
+    contents.forEach((item) => {
+      if (item?.isStream?.()) out.push(item);
+    });
+    return out;
+  }
+  return contents.isStream?.() ? [contents] : [];
+}
+function scanObject(obj, resources, seen, missing) {
+  if (!obj || obj.isNull?.()) return;
+  const id2 = obj.isIndirect?.() ? obj.asIndirect() : 0;
+  if (id2 && seen.has(id2)) return;
+  if (id2) seen.add(id2);
+  for (const stream2 of contentStreams(obj)) {
+    const found = missingExtGState(tokensOf(stream2.readStream().asUint8Array()), resources);
+    for (const name of found) missing.push(name);
+  }
+  for (const [, value] of entries2(childDict(resources, "XObject"))) {
+    if (isForm(value)) scanObject(value, childDict(value, "Resources"), seen, missing);
+  }
+}
+function missingExtGStates(bytes2, mupdf) {
+  const doc = new mupdf.PDFDocument(bytes2);
+  try {
+    const missing = [];
+    const seen = /* @__PURE__ */ new Set();
+    for (const page of pageObjects(doc)) scanObject(page, childDict(page, "Resources"), seen, missing);
+    return [...new Set(missing)];
+  } finally {
+    doc.destroy();
+  }
+}
+function documentText(bytes2, mupdf) {
+  const doc = mupdf.Document.openDocument(bytes2, "application/pdf");
+  try {
+    const parts = [];
+    for (let i = 0; i < doc.countPages(); i++) {
+      const page = doc.loadPage(i);
+      const text3 = page.toStructuredText();
+      try {
+        parts.push(text3.asText());
+      } finally {
+        text3.destroy();
+        page.destroy();
+      }
+    }
+    return parts.join(" ");
+  } finally {
+    doc.destroy();
+  }
+}
+function textTokens(text3) {
+  if (typeof text3 !== "string") return [];
+  return text3.replace(/\s+/g, " ").trim().split(" ").map(normalizeToken).filter(Boolean);
+}
+function normalizeToken(word) {
+  return word.replace(/^[^\p{L}\p{N}%]+|[^\p{L}\p{N}%]+$/gu, "");
+}
+function sameSpan(words, index, drop) {
+  for (let k = 0; k < drop.length; k++) if (words[index + k] !== drop[k]) return false;
+  return true;
+}
+function withoutPhrase(words, phrase) {
+  const drop = textTokens(phrase);
+  if (!drop.length) return words;
+  for (let i = 0; i + drop.length <= words.length; i++) {
+    if (!sameSpan(words, i, drop)) continue;
+    return words.slice(0, i).concat(words.slice(i + drop.length));
+  }
+  return words;
+}
+function lostWords(beforeText, afterText, edits) {
+  let before = textTokens(beforeText);
+  let after = textTokens(afterText);
+  for (const edit of edits || []) {
+    before = withoutPhrase(before, edit?.before);
+    after = withoutPhrase(after, edit?.after);
+  }
+  const counts = /* @__PURE__ */ new Map();
+  for (const word of after) counts.set(word, (counts.get(word) || 0) + 1);
+  const lost = [];
+  for (const word of before) {
+    const have = counts.get(word) || 0;
+    if (!have) lost.push(word);
+    else counts.set(word, have - 1);
+  }
+  return lost;
+}
+function assessFigureText(source2, output, edits, mupdf) {
+  const missing = missingExtGStates(output, mupdf);
+  if (missing.length) return { missing };
+  const lost = lostWords(documentText(source2, mupdf), documentText(output, mupdf), edits);
+  if (lost.length) return { lost };
+  return null;
+}
+
 // src/paragraph-pdf.mjs
 var COORDINATE_SPACE = "top-left-page";
 var LIMITS2 = Object.freeze({ maxFileBytes: 25 * 1024 * 1024 });
@@ -12506,6 +12898,30 @@ function readEditSnapshot(request) {
   }
   return { requestedEdits, fileHash };
 }
+async function sourceBytesForFigure(bytes2, edits, request) {
+  if (request?.rewriteFigureResources === false) return bytes2;
+  try {
+    const mupdf = await import("./browser-pdf-vendor/mupdf.js");
+    checkAbort(request.signal);
+    if (!formStreamsHoldEdits(bytes2, edits, mupdf)) return bytes2;
+    return promoteFormResources(bytes2, mupdf);
+  } catch (error2) {
+    checkAbort(request.signal);
+    if (error2?.code === "figure-text-corrupt") throw error2;
+    return bytes2;
+  }
+}
+async function rejectBrokenFigure(sourceBytes, outputBytes, edits, signal) {
+  try {
+    const mupdf = await import("./browser-pdf-vendor/mupdf.js");
+    checkAbort(signal);
+    const problem = assessFigureText(sourceBytes, outputBytes, edits, mupdf);
+    if (problem) throw new ParagraphPdfError("figure-text-corrupt", FIGURE_TEXT_REFUSAL, problem);
+  } catch (error2) {
+    checkAbort(signal);
+    if (error2?.code === "figure-text-corrupt") throw error2;
+  }
+}
 function markerResult(marker, request, hash, fontSnapshot) {
   const sha2562 = hex(marker.bytes), warnings = [];
   const pageMap = Array.from({ length: marker.pageCount }, (_, i) => ({ sourcePageIndex: i, outputPageIndex: i, continuationPageIndices: [] }));
@@ -12547,16 +12963,18 @@ async function prepare(request = {}) {
   const enabled = requestedEdits.filter((edit) => edit?.enabled !== false);
   if (!enabled?.length) throw new ParagraphPdfError("no-edits", "At least one enabled edit is required.");
   const edits = enabled.map((e, index) => ({ id: e?.id || `edit-${index}`, pageIndex: e?.pageIndex, before: e?.before, after: e?.after }));
+  const editBytes = await sourceBytesForFigure(bytes2, edits, request);
   let marker = null;
   try {
     const mupdf = await import("./browser-pdf-vendor/mupdf.js");
     checkAbort(request.signal);
-    marker = await trySourceMarkerEdits({ bytes: bytes2, edits, fontSnapshot, signal: request.signal }, { mupdf, scanTextShows });
+    marker = await trySourceMarkerEdits({ bytes: editBytes, edits, fontSnapshot, signal: request.signal }, { mupdf, scanTextShows });
   } catch {
     checkAbort(request.signal);
   }
   checkAbort(request.signal);
   if (marker) {
+    await rejectBrokenFigure(bytes2, marker.bytes, edits, request.signal);
     return markerResult(marker, request, hash, fontSnapshot);
   }
   const { engineFactory: createEngine, info } = await loadRuntime();
@@ -12595,8 +13013,8 @@ async function prepare(request = {}) {
     return engine;
   };
   checkAbort(request.signal);
-  const reconciled = await reconcileEdits(bytes2, edits, engineFactory, request.signal);
-  const { pdf, report } = await editPdf({ sourceBytes: bytes2, edits: reconciled.edits, reflow: true }, {
+  const reconciled = await reconcileEdits(editBytes, edits, engineFactory, request.signal);
+  const { pdf, report } = await editPdf({ sourceBytes: editBytes, edits: reconciled.edits, reflow: true }, {
     engineFactory,
     runtimeInfo: info,
     draft: true,
@@ -12632,6 +13050,7 @@ async function prepare(request = {}) {
     reconciliation: reconciled.diagnostics,
     report
   };
+  await rejectBrokenFigure(bytes2, pdf, edits, request.signal);
   const name = String(request.file?.name || "document.pdf").replace(/\.pdf$/i, "") + "-edited.pdf";
   return {
     file: new File([pdf], name, { type: "application/pdf" }),

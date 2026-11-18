@@ -478,6 +478,10 @@
     for(const [k,v] of Object.entries(value)){if(SECRET.test(k)||draftUnsafe(v,depth+1))return true;}
     return false;
   }
+  function generationStatus(e,fallback){
+    if(e&&e.code==='figure-text-corrupt')return '그림 안 글자를 고치면 그림이 깨져서 만들지 않았습니다. 표·그래프·그림 고치기를 쓰세요.';
+    return fallback;
+  }
   function safeMessage(e){
     const m=e&&typeof e.message==='string'?e.message:'';
     if(!m||m.length>240||/[<>]/.test(m))return '이유를 표시하지 않습니다.';
@@ -2248,7 +2252,7 @@
     function ensureGenerator(){
       const g=generationApi();if(!g?.create)return null;if(generator)return generator;
       const version=++generatorVersion;
-      generator=g.create({generate:generateCaptured,onResult:(candidate,meta)=>{if(version!==generatorVersion||!source||source.fileHash!==meta.spec.fileHash)return;let current;try{current=g.key(captureSpec());}catch{return;}if(current!==meta.key)return;output=candidate;outputAt=now();generationFailed=false;output.key=meta.key;afterPart=0;afterSourcePage=page;setGenStatus(output.edits.length?generationLead(output.verification,false):'선택한 편집이 없어 원본 PDF를 사용합니다.');emit('falsify:paper-workspace-output',published({sha256:output.sha256,revision:output.revision,verification:scrub(output.verification,0)}));renderEdits();void drawAfter();},onState:state=>{if(version!==generatorVersion||!source)return;let current;try{current=g.key(captureSpec());}catch{return;}if(current!==state.key)return;generating=state.phase==='running';if(state.phase==='error'){generationFailed=true;setGenStatus('생성하지 못했습니다. '+generationError(state.error),true);}else if(state.phase==='running')generationFailed=false;renderChrome();}});return generator;
+      generator=g.create({generate:generateCaptured,onResult:(candidate,meta)=>{if(version!==generatorVersion||!source||source.fileHash!==meta.spec.fileHash)return;let current;try{current=g.key(captureSpec());}catch{return;}if(current!==meta.key)return;output=candidate;outputAt=now();generationFailed=false;output.key=meta.key;afterPart=0;afterSourcePage=page;setGenStatus(output.edits.length?generationLead(output.verification,false):'선택한 편집이 없어 원본 PDF를 사용합니다.');emit('falsify:paper-workspace-output',published({sha256:output.sha256,revision:output.revision,verification:scrub(output.verification,0)}));renderEdits();void drawAfter();},onState:state=>{if(version!==generatorVersion||!source)return;let current;try{current=g.key(captureSpec());}catch{return;}if(current!==state.key)return;generating=state.phase==='running';if(state.phase==='error'){generationFailed=true;setGenStatus(generationStatus(state.error,'생성하지 못했습니다. '+generationError(state.error)),true);}else if(state.phase==='running')generationFailed=false;renderChrome();}});return generator;
     }
     function scheduleGeneration(){if(committingInline||!generationApi()||!source?.pdf||!snapshot)return;try{ensureGenerator().schedule(captureSpec());}catch(e){setGenStatus('현재 편집을 확인하세요. '+safeMessage(e),true);}}
     function planCapturedExport(spec){
@@ -2387,7 +2391,7 @@
     function reportGenerationFailure(e,mine,epochAt,hash,ctl){
         if(!generationSourceLive(mine,epochAt,hash))return;
         if(ctl.signal&&ctl.signal.aborted){setGenStatus('생성을 중단했습니다. 마지막 생성본은 그대로입니다.');return;}
-        setGenStatus('생성하지 못했습니다. 마지막 생성본은 그대로입니다. '+generationError(e),true);
+        setGenStatus(generationStatus(e,'생성하지 못했습니다. 마지막 생성본은 그대로입니다. '+generationError(e)),true);
     }
     function finishGeneration(ctl,mine,epochAt){if(genCtl===ctl)genCtl=null;if(mine===genId&&epoch===epochAt){generating=false;renderChrome();}}
     function planGeneratedTableFit(candidate,result,edits,recompose){
