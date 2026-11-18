@@ -2,8 +2,9 @@
 // Authenticates one stable owner, keeps an idempotent job index in D1 and proxies every execution
 // to the container-internal runtime. No prompt, upload bytes, edit rationale or provider error text
 // is stored here. Owner-paid policy is a pre-flight gate over recorded usage, never a spend balance.
+import { timingSafeEqual } from 'node:crypto';
 import { SESSION_HEADER } from './confluence.mjs';
-import { AiError, aiFail, hostingEnabled, resolveAiOwner, sha256Hex } from './ai-identity.mjs';
+import { AiError, aiFail, hostingEnabled, openAccessEnabled, resolveAiOwner, resolveGuestOwner, sha256Hex } from './ai-identity.mjs';
 import {
   cancelRuntimeJob,
   createRuntimeJob,
@@ -20,6 +21,11 @@ const EFFORT_TOKEN = /^[a-z]{1,16}$/;
 const HASH = /^[a-f0-9]{64}$/;
 const MAX_JOB_BODY_BYTES = 256 * 1024;
 const MAX_UPLOAD_BOUND = 64 * 1024 * 1024;
+const DEFAULT_GUEST_MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+const GUEST_JOB_BUCKET = 'ai-guest-jobs:all';
+const GUEST_UPLOAD_BUCKET = 'ai-guest-uploads:all';
+const GUEST_READ_BUCKET = 'ai-guest-reads:all';
+const GUEST_ARTIFACT_BUCKET = 'ai-guest-artifacts:all';
 const MAX_TEXT_EDITS = 100;
 // The runtime's visual-edit engine accepts at most 12 coordinated visual operations.
 const MAX_VISUAL_EDITS = 12;
@@ -49,6 +55,8 @@ const MESSAGES = {
   payload_too_large: 'The request body exceeds the hosted limit.',
   unsupported_media_type: 'The upload type is not supported.',
   rate_limited: 'Too many hosted AI requests; retry later.',
+  open_access_disabled: 'Open access is not enabled.',
+  invalid_access_key: 'The access key is not valid.',
   owner_budget_exhausted: 'The owner token budget for this window is exhausted.',
   idempotency_conflict: 'This idempotency key is already used for a different request.',
   ai_unavailable: 'Hosted AI execution is temporarily unavailable.',
@@ -75,13 +83,14 @@ function csv(value, fallback, pattern) {
 
 export function aiSettings(env) {
   const maxCallsPerJob = Math.min(positiveInt(env?.AI_MAX_CALLS_PER_JOB, 24), 64);
+  const maxUploadBytes = Math.min(positiveInt(env?.AI_MAX_UPLOAD_BYTES, 32 * 1024 * 1024), MAX_UPLOAD_BOUND);
   const models = csv(env?.AI_MODELS, DEFAULT_MODELS, MODEL_TOKEN);
   const efforts = csv(env?.AI_EFFORTS, DEFAULT_EFFORTS, EFFORT_TOKEN);
   const requestedModel = String(env?.AI_DEFAULT_MODEL || '');
   const requestedEffort = String(env?.AI_DEFAULT_EFFORT || '');
   return {
     enabled: hostingEnabled(env),
-    maxUploadBytes: Math.min(positiveInt(env?.AI_MAX_UPLOAD_BYTES, 32 * 1024 * 1024), MAX_UPLOAD_BOUND),
+    maxUploadBytes,
     maxPromptChars: Math.min(positiveInt(env?.AI_MAX_PROMPT_CHARS, 32000), 200000),
     maxCallsPerJob,
     defaultCalls: Math.min(positiveInt(env?.AI_DEFAULT_CALLS, 12), maxCallsPerJob),
@@ -92,11 +101,59 @@ export function aiSettings(env) {
     // snapshots, so it is a coarse pre-flight policy, not an exact provider balance.
     ownerTokenBudget: nonNegativeInt(env?.AI_OWNER_TOKEN_BUDGET, 0),
     tokenWindowSeconds: positiveInt(env?.AI_TOKEN_WINDOW_SECONDS, 86400),
+    openAccess: openAccessEnabled(env),
+    openAccessKey: guestSecret(env),
+    guestSessionSeconds: positiveInt(env?.AI_GUEST_SESSION_SECONDS, 21600),
+    guestsPerIpHour: positiveInt(env?.AI_GUESTS_PER_IP_HOUR, 10),
+    guestsPerHour: positiveInt(env?.AI_GUESTS_PER_HOUR, 600),
+    guestUploadsPerOwnerHour: positiveInt(env?.AI_GUEST_UPLOADS_PER_OWNER_HOUR, 10),
+    guestUploadsPerHour: positiveInt(env?.AI_GUEST_UPLOADS_PER_HOUR, 300),
+    // Never wider than the deployment upload cap. The page reads this through limits.maxUploadBytes
+    // only when the caller is a guest; unsigned capabilities keep maxUploadBytes.
+    guestMaxUploadBytes: Math.min(positiveInt(env?.AI_GUEST_MAX_UPLOAD_BYTES, DEFAULT_GUEST_MAX_UPLOAD_BYTES), maxUploadBytes),
+    guestJobsPerOwnerHour: positiveInt(env?.AI_GUEST_JOBS_PER_OWNER_HOUR, 6),
+    guestActiveJobsPerOwner: positiveInt(env?.AI_GUEST_ACTIVE_JOBS_PER_OWNER, 1),
+    guestMaxCallsPerJob: positiveInt(env?.AI_GUEST_MAX_CALLS_PER_JOB, 8),
+    guestJobsPerHour: positiveInt(env?.AI_GUEST_JOBS_PER_HOUR, 150),
+    // One active guest job polled at the page's 12s steady rate is 300 reads an hour.
+    // 600 leaves room for cancel, replay and a manual refresh. 45000 is 150 jobs at that rate.
+    guestJobReadsPerOwnerHour: positiveInt(env?.AI_GUEST_JOB_READS_PER_OWNER_HOUR, 600),
+    guestJobReadsPerHour: positiveInt(env?.AI_GUEST_JOB_READS_PER_HOUR, 45000),
+    guestArtifactsPerOwnerHour: positiveInt(env?.AI_GUEST_ARTIFACTS_PER_OWNER_HOUR, 60),
+    guestArtifactsPerHour: positiveInt(env?.AI_GUEST_ARTIFACTS_PER_HOUR, 1200),
+    guestTokenBudget: nonNegativeInt(env?.AI_GUEST_TOKEN_BUDGET, 0),
     models,
     efforts,
     defaultModel: models.includes(requestedModel) ? requestedModel : models[0],
     defaultEffort: efforts.includes(requestedEffort) ? requestedEffort : (efforts.includes('high') ? 'high' : efforts[0]),
     mimeTypes: MIME_TYPES.slice(),
+  };
+}
+
+function guestSecret(env) {
+  const raw = env?.AI_OPEN_ACCESS_KEY;
+  return typeof raw === 'string' ? raw : '';
+}
+
+function isGuestOwner(ownerId) {
+  return typeof ownerId === 'string' && ownerId.startsWith('gst:');
+}
+
+// Password and Confluence owners keep today's settings object. A guest uses the tighter caps,
+// and the token budget below sums every gst: owner instead of one row.
+function effectiveAiSettings(settings, ownerId) {
+  if (!isGuestOwner(ownerId)) return settings;
+  const maxCallsPerJob = Math.min(settings.guestMaxCallsPerJob, settings.maxCallsPerJob);
+  return {
+    ...settings,
+    guestScope: true,
+    maxCallsPerJob,
+    defaultCalls: Math.min(settings.defaultCalls, maxCallsPerJob),
+    maxUploadBytes: settings.guestMaxUploadBytes,
+    uploadsPerOwnerHour: settings.guestUploadsPerOwnerHour,
+    jobsPerOwnerHour: settings.guestJobsPerOwnerHour,
+    activeJobsPerOwner: settings.guestActiveJobsPerOwner,
+    ownerTokenBudget: settings.guestTokenBudget,
   };
 }
 
@@ -233,34 +290,77 @@ function uploadView(row, deduplicated) {
 
 const UPLOAD_COLUMNS = 'id, sha256, name, mime, bytes, created_at';
 
-async function createUpload(ctx) {
-  const { request, env, settings, deps } = ctx;
-  const db = deps.getDb();
-  const mime = (request.headers.get('Content-Type') || '').trim().toLowerCase().split(';')[0].trim();
-  if (!settings.mimeTypes.includes(mime)) aiFail(415, 'unsupported_media_type');
-  const name = uploadName(request.headers.get('X-Falsify-File-Name'));
-  const bytes = await readBoundedBytes(request, settings.maxUploadBytes);
-  if (bytes.byteLength === 0) aiFail(400, 'invalid_request');
-  const sha256 = await sha256Bytes(bytes);
-  const bucket = await bucketKey('ai-upload:', ctx.ownerId);
-  const slot = await deps.rateLimit(db, bucket, settings.uploadsPerOwnerHour);
-  // Same owner + same bytes reuses the stored upload and never forwards the file again.
-  const existing = await db
-    .prepare(`SELECT ${UPLOAD_COLUMNS} FROM ai_uploads WHERE owner_id = ?1 AND sha256 = ?2`)
-    .bind(ctx.ownerId, sha256)
-    .first();
-  if (existing) return json(200, { upload: uploadView(existing, true) });
-  let created;
+// Guest counters are separate from password/Confluence buckets. A null slot means "not a guest".
+async function claimGuestCounter(db, deps, settings, bucket, limit) {
+  if (settings.guestScope !== true) return null;
+  return deps.rateLimit(db, bucket, limit);
+}
+
+async function releaseGuestCounter(db, deps, bucket, slot) {
+  if (slot === null || slot === undefined) return;
+  await deps.releaseSlot(db, bucket, slot);
+}
+
+async function claimGuestPair(db, deps, settings, ownerId, spec) {
+  if (settings.guestScope !== true) return null;
+  const ownerBucket = await bucketKey(spec.ownerPrefix, ownerId);
+  const ownerSlot = await deps.rateLimit(db, ownerBucket, spec.ownerLimit);
   try {
-    created = await createRuntimeUpload(env, { ownerId: ctx.ownerId, name, mime, bytes });
+    const globalSlot = await deps.rateLimit(db, spec.globalBucket, spec.globalLimit);
+    return { ownerBucket, ownerSlot, globalSlot };
   } catch (error) {
-    await deps.releaseSlot(db, bucket, slot);
+    await deps.releaseSlot(db, ownerBucket, ownerSlot);
     throw error;
   }
-  if (typeof created.upload.sha256 === 'string' && HASH.test(created.upload.sha256) && created.upload.sha256 !== sha256) {
-    await deps.releaseSlot(db, bucket, slot);
-    aiFail(503, 'ai_unavailable');
+}
+
+async function releaseGuestPair(db, deps, spec, pair) {
+  if (!pair) return;
+  await deps.releaseSlot(db, pair.ownerBucket, pair.ownerSlot);
+  await deps.releaseSlot(db, spec.globalBucket, pair.globalSlot);
+}
+
+// Runs fn only after the guest follow cap is reserved. A thrown runtime error gives the slot back
+// so an outage does not burn the hour; a response keeps it because the runtime was reached.
+async function guestRuntime(db, deps, settings, ownerId, spec, fn) {
+  const pair = await claimGuestPair(db, deps, settings, ownerId, spec);
+  try {
+    return await fn();
+  } catch (error) {
+    await releaseGuestPair(db, deps, spec, pair);
+    throw error;
   }
+}
+
+function guestFollowSpec(settings, kind) {
+  if (kind === 'artifact') {
+    return {
+      ownerPrefix: 'ai-guest-artifact:',
+      ownerLimit: settings.guestArtifactsPerOwnerHour,
+      globalBucket: GUEST_ARTIFACT_BUCKET,
+      globalLimit: settings.guestArtifactsPerHour,
+    };
+  }
+  return {
+    ownerPrefix: 'ai-guest-read:',
+    ownerLimit: settings.guestJobReadsPerOwnerHour,
+    globalBucket: GUEST_READ_BUCKET,
+    globalLimit: settings.guestJobReadsPerHour,
+  };
+}
+
+async function releaseUploadSlots(db, deps, bucket, slot, guestSlot) {
+  await deps.releaseSlot(db, bucket, slot);
+  await releaseGuestCounter(db, deps, GUEST_UPLOAD_BUCKET, guestSlot);
+}
+
+function reportedDigestMismatch(created, sha256) {
+  const reported = created.upload.sha256;
+  return typeof reported === 'string' && HASH.test(reported) && reported !== sha256;
+}
+
+async function insertUpload(input, created) {
+  const { ctx, db, sha256, name, mime, bytes } = input;
   const id = crypto.randomUUID();
   const at = nowIso();
   const inserted = await db
@@ -283,6 +383,53 @@ async function createUpload(ctx) {
   });
 }
 
+async function storeRuntimeUpload(input) {
+  const { ctx, db, env, deps, bucket, slot, guestSlot, name, mime, bytes, sha256 } = input;
+  let created;
+  try {
+    created = await createRuntimeUpload(env, { ownerId: ctx.ownerId, name, mime, bytes });
+  } catch (error) {
+    await releaseUploadSlots(db, deps, bucket, slot, guestSlot);
+    throw error;
+  }
+  if (reportedDigestMismatch(created, sha256)) {
+    await releaseUploadSlots(db, deps, bucket, slot, guestSlot);
+    aiFail(503, 'ai_unavailable');
+  }
+  return insertUpload(input, created);
+}
+
+async function takeGuestUploadSlot(db, deps, settings, bucket, slot) {
+  try {
+    return await claimGuestCounter(db, deps, settings, GUEST_UPLOAD_BUCKET, settings.guestUploadsPerHour);
+  } catch (error) {
+    await deps.releaseSlot(db, bucket, slot);
+    throw error;
+  }
+}
+
+async function createUpload(ctx) {
+  const { request, env, settings, deps } = ctx;
+  const db = deps.getDb();
+  const mime = (request.headers.get('Content-Type') || '').trim().toLowerCase().split(';')[0].trim();
+  if (!settings.mimeTypes.includes(mime)) aiFail(415, 'unsupported_media_type');
+  const name = uploadName(request.headers.get('X-Falsify-File-Name'));
+  const bytes = await readBoundedBytes(request, settings.maxUploadBytes);
+  if (bytes.byteLength === 0) aiFail(400, 'invalid_request');
+  const sha256 = await sha256Bytes(bytes);
+  const bucket = await bucketKey('ai-upload:', ctx.ownerId);
+  const slot = await deps.rateLimit(db, bucket, settings.uploadsPerOwnerHour);
+  // Same owner + same bytes reuses the stored upload and never forwards the file again.
+  const existing = await db
+    .prepare(`SELECT ${UPLOAD_COLUMNS} FROM ai_uploads WHERE owner_id = ?1 AND sha256 = ?2`)
+    .bind(ctx.ownerId, sha256)
+    .first();
+  if (existing) return json(200, { upload: uploadView(existing, true) });
+  // New runtime uploads only. The claim is after the dedup lookup and before the forward.
+  const guestSlot = await takeGuestUploadSlot(db, deps, settings, bucket, slot);
+  return storeRuntimeUpload({ ctx, db, env, deps, bucket, slot, guestSlot, name, mime, bytes, sha256 });
+}
+
 function capabilitiesResponse(settings) {
   return json(200, {
     enabled: settings.enabled,
@@ -291,6 +438,10 @@ function capabilitiesResponse(settings) {
     models: settings.models,
     efforts: settings.efforts,
     limits: { maxUploadBytes: settings.maxUploadBytes, maxPromptChars: settings.maxPromptChars },
+    openAccess: {
+      enabled: settings.openAccess,
+      accessKeyRequired: settings.openAccess === true && settings.openAccessKey.length > 0,
+    },
   });
 }
 
@@ -643,6 +794,19 @@ function validateVisualEdits(value, role, applyOnly) {
 
 // ---- owner-paid policy --------------------------------------------------------------------
 
+function usageSince(guestScope) {
+  const owner = guestScope ? "owner_id LIKE 'gst:%'" : 'owner_id = ?1';
+  const since = guestScope ? '?1' : '?2';
+  return `SELECT COALESCE(SUM(input_tokens + output_tokens + cache_read_input_tokens + cache_creation_input_tokens), 0) AS used FROM ai_jobs WHERE ${owner} AND usage_recorded_at IS NOT NULL AND usage_recorded_at >= ${since}`;
+}
+
+async function recordedUsage(db, ctx, settings, startIso) {
+  const guest = settings.guestScope === true;
+  const statement = db.prepare(usageSince(guest));
+  const row = guest ? await statement.bind(startIso).first() : await statement.bind(ctx.ownerId, startIso).first();
+  return Number(row?.used ?? 0);
+}
+
 function budgetWindow(windowSeconds, nowMs = Date.now()) {
   const nowSeconds = Math.floor(nowMs / 1000);
   const startSeconds = nowSeconds - (nowSeconds % windowSeconds);
@@ -657,14 +821,7 @@ function budgetWindow(windowSeconds, nowMs = Date.now()) {
 async function enforceOwnerBudget(db, ctx, settings, { applyOnly }) {
   if (applyOnly || settings.ownerTokenBudget <= 0) return;
   const window = budgetWindow(settings.tokenWindowSeconds);
-  const row = await db
-    .prepare(
-      `SELECT COALESCE(SUM(input_tokens + output_tokens + cache_read_input_tokens + cache_creation_input_tokens), 0) AS used
-       FROM ai_jobs WHERE owner_id = ?1 AND usage_recorded_at IS NOT NULL AND usage_recorded_at >= ?2`
-    )
-    .bind(ctx.ownerId, window.startIso)
-    .first();
-  if (Number(row?.used ?? 0) >= settings.ownerTokenBudget) {
+  if (await recordedUsage(db, ctx, settings, window.startIso) >= settings.ownerTokenBudget) {
     aiFail(429, 'owner_budget_exhausted', { 'Retry-After': String(window.retryAfter) });
   }
 }
@@ -798,11 +955,16 @@ function parseJobRequest(body, settings) {
 
 // A duplicate submit is answered from the runtime's live state (a read, never a paid call); if the
 // runtime is unreachable or no longer knows the job, the stored snapshot is returned instead.
-async function replayJob(db, env, ownerId, row, requestHash) {
+async function replayJob(db, env, deps, settings, ownerId, row, requestHash) {
   if (!row || row.request_hash !== requestHash) aiFail(409, 'idempotency_conflict');
+  const spec = guestFollowSpec(settings, 'read');
+  // The cap refusal must escape. A later runtime miss still falls back to the stored snapshot.
+  const pair = await claimGuestPair(db, deps, settings, ownerId, spec);
   let snapshot = null;
+  let reached = false;
   try {
     const runtime = await getRuntimeJob(env, { ownerId, jobId: row.id });
+    reached = true;
     snapshot = publicSnapshot(runtime, {
       fallbackId: row.id,
       fallbackRole: row.role,
@@ -811,6 +973,7 @@ async function replayJob(db, env, ownerId, row, requestHash) {
     });
     await persistSnapshot(db, ownerId, snapshot);
   } catch {
+    if (!reached) await releaseGuestPair(db, deps, spec, pair);
     snapshot = null;
   }
   if (!snapshot) {
@@ -832,14 +995,38 @@ function jobHashParts(job) {
 
 // The unique (owner, idempotency key) insert is the reservation: a duplicate never reaches the
 // runtime, and a distinct key on an active-heavy owner is rolled back before it can count.
+async function claimGuestJobSlot(db, deps, settings) {
+  return claimGuestCounter(db, deps, settings, GUEST_JOB_BUCKET, settings.guestJobsPerHour);
+}
+
+async function releaseGuestJobSlot(db, deps, slot) {
+  if (slot === null || slot === undefined) return;
+  await deps.releaseSlot(db, GUEST_JOB_BUCKET, slot);
+}
+
 async function reserveJob(db, env, ctx, deps, settings, job) {
   const requestHash = await sha256Hex(JSON.stringify(jobHashParts(job)));
+  // A duplicate key is a read, not a new job. Resolve it before either hourly slot is taken,
+  // so a full guest or owner cap still returns the existing job.
+  const prior = await db
+    .prepare('SELECT id, role, request_hash, snapshot FROM ai_jobs WHERE owner_id = ?1 AND idempotency_key = ?2')
+    .bind(ctx.ownerId, job.idempotencyKey)
+    .first();
+  if (prior) return { replay: await replayJob(db, env, deps, settings, ctx.ownerId, prior, requestHash) };
   const bucket = await bucketKey('ai-job:', ctx.ownerId);
   const slot = await deps.rateLimit(db, bucket, settings.jobsPerOwnerHour);
+  let guestSlot = null;
+  try {
+    guestSlot = await claimGuestJobSlot(db, deps, settings);
+  } catch (error) {
+    await deps.releaseSlot(db, bucket, slot);
+    throw error;
+  }
   const reservation = {
     requestHash,
     bucket,
     slot,
+    guestSlot,
     jobId: await jobIdFor(ctx.ownerId, job.idempotencyKey, requestHash),
   };
   const at = nowIso();
@@ -866,11 +1053,12 @@ async function reserveJob(db, env, ctx, deps, settings, job) {
     .run();
   if (reserved.meta.changes === 1) return { reservation };
   await deps.releaseSlot(db, bucket, slot);
+  await releaseGuestJobSlot(db, deps, guestSlot);
   const row = await db
     .prepare('SELECT id, role, request_hash, snapshot FROM ai_jobs WHERE owner_id = ?1 AND idempotency_key = ?2')
     .bind(ctx.ownerId, job.idempotencyKey)
     .first();
-  return { replay: await replayJob(db, env, ctx.ownerId, row, requestHash) };
+  return { replay: await replayJob(db, env, deps, settings, ctx.ownerId, row, requestHash) };
 }
 
 async function rollbackReservation(db, deps, ownerId, reservation) {
@@ -878,6 +1066,7 @@ async function rollbackReservation(db, deps, ownerId, reservation) {
     await db.prepare('DELETE FROM ai_jobs WHERE id = ?1 AND owner_id = ?2').bind(reservation.jobId, ownerId).run();
   } catch { /* the row is inert until a runtime snapshot confirms it */ }
   await deps.releaseSlot(db, reservation.bucket, reservation.slot);
+  await releaseGuestJobSlot(db, deps, reservation.guestSlot);
 }
 
 async function activeJobCount(db, ownerId) {
@@ -1006,7 +1195,8 @@ async function runtimeJobSnapshot(db, ownerId, row, call) {
 async function getJob(ctx) {
   const db = ctx.deps.getDb();
   const row = await ownedJob(db, ctx);
-  const runtime = await runtimeJobSnapshot(db, ctx.ownerId, row, () => getRuntimeJob(ctx.env, { ownerId: ctx.ownerId, jobId: row.id }));
+  const runtime = await guestRuntime(db, ctx.deps, ctx.settings, ctx.ownerId, guestFollowSpec(ctx.settings, 'read'), () =>
+    runtimeJobSnapshot(db, ctx.ownerId, row, () => getRuntimeJob(ctx.env, { ownerId: ctx.ownerId, jobId: row.id })));
   const snapshot = publicSnapshot(runtime, {
     fallbackId: row.id,
     fallbackRole: row.role,
@@ -1020,7 +1210,8 @@ async function getJob(ctx) {
 async function cancelJob(ctx) {
   const db = ctx.deps.getDb();
   const row = await ownedJob(db, ctx);
-  const runtime = await runtimeJobSnapshot(db, ctx.ownerId, row, () => cancelRuntimeJob(ctx.env, { ownerId: ctx.ownerId, jobId: row.id }));
+  const runtime = await guestRuntime(db, ctx.deps, ctx.settings, ctx.ownerId, guestFollowSpec(ctx.settings, 'read'), () =>
+    runtimeJobSnapshot(db, ctx.ownerId, row, () => cancelRuntimeJob(ctx.env, { ownerId: ctx.ownerId, jobId: row.id })));
   const snapshot = publicSnapshot(runtime, {
     fallbackId: row.id,
     fallbackRole: row.role,
@@ -1048,7 +1239,8 @@ async function getArtifact(ctx) {
   const row = await ownedJob(db, ctx);
   const artifactId = String(ctx.params.artifactId || '');
   if (!ARTIFACT_ID.test(artifactId)) aiFail(404, 'not_found');
-  const response = await getRuntimeArtifact(ctx.env, { ownerId: ctx.ownerId, jobId: row.id, artifactId });
+  const response = await guestRuntime(db, ctx.deps, ctx.settings, ctx.ownerId, guestFollowSpec(ctx.settings, 'artifact'), () =>
+    getRuntimeArtifact(ctx.env, { ownerId: ctx.ownerId, jobId: row.id, artifactId }));
   return new Response(response.body, {
     status: 200,
     headers: {
@@ -1060,8 +1252,60 @@ async function getArtifact(ctx) {
   });
 }
 
+const GUEST_BODY_BYTES = 1024;
+
+function base64url(bytes) {
+  let text = '';
+  for (const b of bytes) text += String.fromCharCode(b);
+  return btoa(text).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
+}
+
+function guestAccessKey(body) {
+  if (Object.keys(body).some(key => key !== 'accessKey')) aiFail(400, 'invalid_request');
+  if (!Object.hasOwn(body, 'accessKey')) return '';
+  const value = body.accessKey;
+  if (typeof value !== 'string' || [...value].length > 128) aiFail(400, 'invalid_request');
+  return value;
+}
+
+async function sameAccessKey(secret, presented) {
+  const encode = value => crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+  const [left, right] = await Promise.all([encode(secret), encode(presented)]);
+  return timingSafeEqual(new Uint8Array(left), new Uint8Array(right));
+}
+
+async function assertAccessKey(settings, presented) {
+  if (!settings.openAccessKey) return;
+  if (!await sameAccessKey(settings.openAccessKey, presented)) aiFail(403, 'invalid_access_key');
+}
+
+async function insertGuestSession(db, settings) {
+  const guestId = crypto.randomUUID();
+  const token = 'fsg_' + base64url(crypto.getRandomValues(new Uint8Array(32)));
+  const nowMs = Date.now();
+  const expiresAt = nowMs + settings.guestSessionSeconds * 1000;
+  await db.prepare(
+    'INSERT INTO guest_sessions (token_hash, guest_id, created_at, expires_at) VALUES (?1, ?2, ?3, ?4)'
+  ).bind(await sha256Hex(token), guestId, nowMs, expiresAt).run();
+  return json(201, { guest: { token, expiresAt: new Date(expiresAt).toISOString() } });
+}
+
+// Minting is public. The IP and global caps run before the key check and before any insert,
+// so a guess cannot create a row and cannot probe the key without spending a slot.
+async function createGuest(ctx) {
+  const { request, settings, deps } = ctx;
+  if (!settings.openAccess) aiFail(403, 'open_access_disabled');
+  const presented = guestAccessKey(await readJsonBody(request, GUEST_BODY_BYTES));
+  const db = deps.getDb();
+  await deps.rateLimit(db, await bucketKey('guest:ip:', deps.clientIp()), settings.guestsPerIpHour);
+  await deps.rateLimit(db, 'guest:all', settings.guestsPerHour);
+  await assertAccessKey(settings, presented);
+  return insertGuestSession(db, settings);
+}
+
 const AI_ROUTES = {
   '/v1/ai/capabilities': { GET: ctx => capabilitiesResponse(ctx.settings) },
+  '/v1/ai/guest': { POST: ctx => createGuest(ctx) },
   '/v1/ai/uploads': { POST: ctx => createUpload(ctx) },
   '/v1/ai/jobs': { POST: ctx => createJob(ctx) },
   '/v1/ai/jobs/:id': { GET: ctx => getJob(ctx) },
@@ -1081,7 +1325,47 @@ export function matchAi(pathname) {
   return null;
 }
 
-// ctx: { request, env, url, match, fetchImpl, deps: { getDb, rateLimit, releaseSlot, authenticatePassword } }
+function allowMethods(template) {
+  return template === '/v1/ai/guest' ? 'POST, OPTIONS' : AI_ALLOW_METHODS;
+}
+
+function bearerToken(request) {
+  const header = request.headers.get('Authorization');
+  if (header === null) return '';
+  const match = /^Bearer (\S+)$/.exec(header);
+  return match ? match[1] : '';
+}
+
+// Invalid, expired and non-guest bearers keep the public 200. Only a live guest session changes limits.
+async function optionalGuestOwner(ctx, settings) {
+  if (settings.openAccess !== true) return null;
+  const token = bearerToken(ctx.request);
+  if (!token.startsWith('fsg_')) return null;
+  if (typeof ctx.deps?.getDb !== 'function') return null;
+  try {
+    return await resolveGuestOwner(ctx.deps.getDb(), token, Date.now());
+  } catch {
+    return null;
+  }
+}
+
+async function publicCapabilities(ctx, settings) {
+  if (ctx.request.method !== 'GET') aiFail(405, 'method_not_allowed', { Allow: 'GET' });
+  const guest = await optionalGuestOwner(ctx, settings);
+  const view = guest ? effectiveAiSettings(settings, guest.ownerId) : settings;
+  return capabilitiesResponse(view);
+}
+
+function aiHandler(ctx, settings, requestId, owner) {
+  const route = AI_ROUTES[ctx.match.template];
+  if (!route) aiFail(404, 'not_found');
+  const handler = route[ctx.request.method];
+  if (!handler) aiFail(405, 'method_not_allowed', { Allow: Object.keys(route).join(', ') });
+  const bound = owner ? effectiveAiSettings(settings, owner.ownerId) : settings;
+  return handler({ ...ctx, settings: bound, ownerId: owner ? owner.ownerId : undefined, requestId });
+}
+
+// ctx: { request, env, url, match, fetchImpl, deps: { getDb, rateLimit, releaseSlot, authenticatePassword, clientIp } }
 export async function handleAiRequest(ctx) {
   const requestId = newRequestId();
   let refreshed = null;
@@ -1091,33 +1375,29 @@ export async function handleAiRequest(ctx) {
       return new Response(null, {
         status: 204,
         headers: {
-          'Access-Control-Allow-Methods': AI_ALLOW_METHODS,
+          'Access-Control-Allow-Methods': allowMethods(ctx.match.template),
           'Access-Control-Allow-Headers': AI_ALLOW_HEADERS,
           'Access-Control-Max-Age': '600',
           'Cache-Control': 'no-store',
         },
       });
     }
-    // Capabilities are public: a signed-out or disabled page must be able to show enabled:false and
-    // the model/limit catalog without a session. Nothing here reads D1 or the provider.
-    if (ctx.match.template === '/v1/ai/capabilities') {
-      if (ctx.request.method !== 'GET') aiFail(405, 'method_not_allowed', { Allow: 'GET' });
-      return capabilitiesResponse(settings);
-    }
+    // Capabilities stay public. Unsigned and non-guest callers get the deployment catalog and do
+    // not touch D1. A valid guest bearer is the one case that reads the session, and only to
+    // report that guest's upload cap through the existing limits object.
+    if (ctx.match.template === '/v1/ai/capabilities') return publicCapabilities(ctx, settings);
     // A disabled deployment behaves like it has no other hosted AI routes.
     if (!settings.enabled) aiFail(404, 'not_found');
-    const owner = await resolveAiOwner({
+    // Guest minting is unsigned. Every other route resolves one owner first.
+    const owner = ctx.match.template === '/v1/ai/guest' ? null : await resolveAiOwner({
       request: ctx.request,
       env: ctx.env,
       authenticatePassword: ctx.deps.authenticatePassword,
+      getDb: ctx.deps.getDb,
       fetchImpl: ctx.fetchImpl,
     });
-    refreshed = owner.refreshed;
-    const route = AI_ROUTES[ctx.match.template];
-    if (!route) aiFail(404, 'not_found');
-    const handler = route[ctx.request.method];
-    if (!handler) aiFail(405, 'method_not_allowed', { Allow: Object.keys(route).join(', ') });
-    const response = await handler({ ...ctx, settings, ownerId: owner.ownerId, requestId });
+    refreshed = owner ? owner.refreshed : null;
+    const response = await aiHandler(ctx, settings, requestId, owner);
     return withRefreshed(response, refreshed);
   } catch (error) {
     const known = toAiError(error);
