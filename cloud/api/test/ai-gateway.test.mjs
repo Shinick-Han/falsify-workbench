@@ -9,7 +9,7 @@ import { createCipheriv, createHash, randomBytes, scryptSync } from 'node:crypto
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { aiSettings } from '../src/ai-gateway.mjs';
+import { aiSettings, providerForModel } from '../src/ai-gateway.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const apiRoot = path.resolve(here, '..');
@@ -64,6 +64,11 @@ async function stubFetch(url, init, env) {
   const headers = new Headers((init && init.headers) || {});
   const mode = String((env && env.AI_STUB_MODE) || '');
   const db = env && env.DB;
+  const providerField = () => {
+    const reported = String((env && env.AI_STUB_PROVIDER) || '');
+    if (reported === 'omit') return {};
+    return { provider: reported || 'anthropic' };
+  };
   const EDITED_PDF = new TextEncoder().encode('%PDF-1.7 synthetic edited output ART-MARK');
   const reply = (status, body, extra) => new Response(body === null ? null : JSON.stringify(body), {
     status,
@@ -129,7 +134,7 @@ async function stubFetch(url, init, env) {
       progress: { completedCalls: 0, requiredCalls: payload.budget.maxCalls, phase: 'queued' },
       model: payload.model,
       effort: payload.effort,
-      provider: 'anthropic',
+      ...providerField(),
       usage: { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
       artifacts: [],
       createdAt: at,
@@ -151,7 +156,7 @@ async function stubFetch(url, init, env) {
       progress: { completedCalls: 1, requiredCalls: job.max_calls, phase: 'cancelling' },
       model: job.model,
       effort: job.effort,
-      provider: 'anthropic',
+      ...providerField(),
       usage: { inputTokens: 11, outputTokens: 7 },
       artifacts: [],
       createdAt: at,
@@ -193,7 +198,7 @@ async function stubFetch(url, init, env) {
       progress: { completedCalls: 2, requiredCalls: job.max_calls, phase: terminal ? job.state : 'analyzing' },
       model: job.model,
       effort: job.effort,
-      provider: 'anthropic',
+      ...providerField(),
       usage: { inputTokens: 11, outputTokens: 7, cacheReadInputTokens: 2, cacheCreationInputTokens: 3 },
       result: { findings: [{ marker: 'RESULT-MARKER' }] },
       artifacts: [
@@ -468,6 +473,11 @@ test('hosting off leaves legacy gateways unchanged and exposes enabled:false', a
       efforts: DEFAULT_EFFORTS,
       limits: { maxUploadBytes: 4096, maxPromptChars: 32000 },
       openAccess: { enabled: false, accessKeyRequired: false },
+      modelProviders: {
+        'claude-opus-5-5': 'anthropic',
+        'claude-sonnet-5-5': 'anthropic',
+        'claude-haiku-5-5': 'anthropic',
+      },
     });
     assert.equal(JSON.stringify(capabilities.body).includes('key'), false);
     const blocked = await upload(call, created.body.token, pdfBytes('disabled'));
@@ -2174,4 +2184,146 @@ test('migration 0005 stores guest token hashes and indexes expiry', () => {
   assert.match(sql, /CREATE INDEX guest_sessions_expires ON guest_sessions \(expires_at\)/);
   assert.equal(sql.includes('api_key'), false);
   assert.equal(/\btoken TEXT\b/.test(sql), false);
+});
+
+const DEFAULT_CAPABILITIES = {
+  enabled: false,
+  provider: 'anthropic',
+  execution: 'server',
+  models: DEFAULT_MODELS,
+  efforts: DEFAULT_EFFORTS,
+  limits: { maxUploadBytes: 4096, maxPromptChars: 32000 },
+  openAccess: { enabled: false, accessKeyRequired: false },
+};
+
+test('providerForModel maps claude, gpt and o-digit ids and rejects the rest', () => {
+  assert.equal(providerForModel('claude-opus-5-5'), 'anthropic');
+  assert.equal(providerForModel('claude-haiku-5-5'), 'anthropic');
+  assert.equal(providerForModel('gpt-5.4'), 'openai');
+  assert.equal(providerForModel('gpt-4o'), 'openai');
+  assert.equal(providerForModel('o3'), 'openai');
+  assert.equal(providerForModel('o3-mini'), 'openai');
+  assert.equal(providerForModel('o1'), 'openai');
+  assert.equal(providerForModel('llama-3'), null);
+  assert.equal(providerForModel('gemini-2.5'), null);
+  assert.equal(providerForModel('Claude-opus-5-5'), null);
+  assert.equal(providerForModel('omni'), null);
+  assert.equal(providerForModel('o'), null);
+  assert.equal(providerForModel('gpt'), null);
+  assert.equal(providerForModel(''), null);
+  assert.equal(providerForModel(null), null);
+});
+
+test('AI_MODELS drops ids with no provider and does not restore Claude when every id is unknown', () => {
+  assert.deepEqual(aiSettings({}).models, DEFAULT_MODELS);
+  assert.deepEqual(aiSettings({ AI_MODELS: '' }).models, DEFAULT_MODELS);
+  assert.deepEqual(aiSettings({ AI_MODELS: '???' }).models, DEFAULT_MODELS);
+  const mixed = aiSettings({ AI_MODELS: 'claude-sonnet-5-5, llama-3, gpt-5.4, o3, claude-sonnet-5-5' });
+  assert.deepEqual(mixed.models, ['claude-sonnet-5-5', 'gpt-5.4', 'o3']);
+  assert.equal(mixed.defaultModel, 'claude-sonnet-5-5');
+  const rejected = aiSettings({ AI_MODELS: 'llama-3,gemini-2.5' });
+  assert.deepEqual(rejected.models, []);
+  assert.equal(rejected.defaultModel, '');
+  const openai = aiSettings({ AI_MODELS: 'gpt-5.4,o3-mini', AI_DEFAULT_MODEL: 'o3-mini' });
+  assert.deepEqual(openai.models, ['gpt-5.4', 'o3-mini']);
+  assert.equal(openai.defaultModel, 'o3-mini');
+});
+
+test('default capabilities add modelProviders and leave every other field unchanged', async () => {
+  await withApp({ AI_HOSTING_ENABLED: 'false', CONFLUENCE_ONLY: 'false' }, async (_mf, call) => {
+    const capabilities = await call('GET', '/v1/ai/capabilities');
+    assert.equal(capabilities.status, 200);
+    assert.deepEqual(Object.keys(capabilities.body), [
+      'enabled', 'provider', 'execution', 'models', 'efforts', 'limits', 'openAccess', 'modelProviders',
+    ]);
+    const { modelProviders, ...rest } = capabilities.body;
+    assert.deepEqual(rest, DEFAULT_CAPABILITIES);
+    assert.deepEqual(modelProviders, {
+      'claude-opus-5-5': 'anthropic',
+      'claude-sonnet-5-5': 'anthropic',
+      'claude-haiku-5-5': 'anthropic',
+    });
+  });
+});
+
+test('capabilities report one provider or mixed and drop unknown AI_MODELS ids', async () => {
+  const host = { AI_HOSTING_ENABLED: 'true', CONFLUENCE_ONLY: 'false', AI_MAX_UPLOAD_BYTES: '4096' };
+  await withApp({ ...host, AI_MODELS: 'claude-sonnet-5-5,llama-3,gpt-5.4,o3,not a token' }, async (mf, call) => {
+    const capabilities = await call('GET', '/v1/ai/capabilities');
+    assert.equal(capabilities.status, 200);
+    assert.equal(capabilities.body.provider, 'mixed');
+    assert.deepEqual(capabilities.body.models, ['claude-sonnet-5-5', 'gpt-5.4', 'o3']);
+    assert.deepEqual(capabilities.body.modelProviders, {
+      'claude-sonnet-5-5': 'anthropic',
+      'gpt-5.4': 'openai',
+      'o3': 'openai',
+    });
+    const ada = await register(mf, call, 'mixedmodels');
+    const up = await upload(call, ada.body.token, pdfBytes('mixed'));
+    const rejected = await postJob(call, ada.body.token, jobBody(up.body.upload.id, { model: 'llama-3' }));
+    assert.equal(rejected.status, 400);
+    assert.equal(rejected.body.error.code, 'invalid_request');
+  });
+
+  await withApp({ ...host, AI_MODELS: 'gpt-5.4,o3-mini' }, async (_mf, call) => {
+    const capabilities = await call('GET', '/v1/ai/capabilities');
+    assert.equal(capabilities.body.provider, 'openai');
+    assert.deepEqual(capabilities.body.models, ['gpt-5.4', 'o3-mini']);
+    assert.deepEqual(capabilities.body.modelProviders, { 'gpt-5.4': 'openai', 'o3-mini': 'openai' });
+  });
+
+  await withApp({ ...host, AI_MODELS: 'llama-3,gemini-2.5' }, async (mf, call) => {
+    const capabilities = await call('GET', '/v1/ai/capabilities');
+    assert.deepEqual(capabilities.body.models, []);
+    assert.deepEqual(capabilities.body.modelProviders, {});
+    assert.equal(capabilities.body.provider, 'mixed', 'an explicit list with no provider does not become Claude');
+    const ada = await register(mf, call, 'emptycatalog');
+    const up = await upload(call, ada.body.token, pdfBytes('empty-catalog'));
+    const rejected = await postJob(call, ada.body.token, jobBody(up.body.upload.id));
+    assert.equal(rejected.status, 400);
+    assert.equal(rejected.body.error.code, 'invalid_request');
+  });
+});
+
+test('job snapshots keep a runtime provider and otherwise derive one from the model', async () => {
+  const host = {
+    AI_HOSTING_ENABLED: 'true',
+    CONFLUENCE_ONLY: 'false',
+    AI_MAX_UPLOAD_BYTES: '4096',
+    AI_MODELS: 'claude-sonnet-5-5,gpt-5.4,o3',
+  };
+  await withApp({ ...host, AI_STUB_PROVIDER: 'openai' }, async (mf, call) => {
+    const ada = await register(mf, call, 'passthru');
+    const up = await upload(call, ada.body.token, pdfBytes('pass'));
+    const created = await postJob(call, ada.body.token, jobBody(up.body.upload.id, {
+      model: 'claude-sonnet-5-5',
+      idempotencyKey: 'op-pass-0001',
+    }));
+    assert.equal(created.status, 202);
+    assert.equal(created.body.job.model, 'claude-sonnet-5-5');
+    assert.equal(created.body.job.provider, 'openai', 'an anthropic or openai runtime provider is passed through');
+  });
+
+  await withApp({ ...host, AI_STUB_PROVIDER: 'other-vendor' }, async (mf, call) => {
+    const ada = await register(mf, call, 'fallback');
+    const up = await upload(call, ada.body.token, pdfBytes('fall'));
+    const gpt = await postJob(call, ada.body.token, jobBody(up.body.upload.id, {
+      model: 'gpt-5.4',
+      idempotencyKey: 'op-fall-gpt1',
+    }));
+    assert.equal(gpt.status, 202);
+    assert.equal(gpt.body.job.provider, 'openai');
+    const claude = await postJob(call, ada.body.token, jobBody(up.body.upload.id, {
+      model: 'claude-sonnet-5-5',
+      idempotencyKey: 'op-fall-claude',
+    }));
+    assert.equal(claude.status, 202);
+    assert.equal(claude.body.job.provider, 'anthropic');
+    const reasoning = await postJob(call, ada.body.token, jobBody(up.body.upload.id, {
+      model: 'o3',
+      idempotencyKey: 'op-fall-o3xx',
+    }));
+    assert.equal(reasoning.status, 202);
+    assert.equal(reasoning.body.job.provider, 'openai');
+  });
 });

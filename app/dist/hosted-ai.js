@@ -25,6 +25,8 @@
   const MAX_VISUAL_EDITS=12;
   const MAX_JOB_BODY_BYTES=60000;
   const STATE_LABELS={queued:'대기 중',running:'실행 중',cancelling:'취소 중',cancelled:'취소됨',completed:'완료',failed:'실패',interrupted:'중단됨(불완전)'};
+  const PROVIDER_LABELS={anthropic:'Claude',openai:'OpenAI'};
+  const PROVIDER_GROUP_ORDER=['anthropic','openai'];
   const FAILURE_LABELS={
     auth_required:'서버의 제공자 인증이 필요합니다',
     permission_denied:'서버 계정에 이 실행 권한이 없습니다',
@@ -490,6 +492,17 @@
       return true;
     }
 
+    function readModelProviders(data){
+      const raw=data.modelProviders;
+      if(!raw||typeof raw!=='object'||Array.isArray(raw)) return null;
+      const map={};
+      for(const key of Object.keys(raw)){
+        if(!/^[A-Za-z0-9._-]{1,64}$/.test(key)) continue;
+        if(raw[key]!=='anthropic'&&raw[key]!=='openai') continue;
+        map[key]=raw[key];
+      }
+      return map;
+    }
     function normalizeCapabilities(data){
       if(!data||typeof data!=='object') return null;
       const models=Array.isArray(data.models)?data.models.filter(m=>typeof m==='string'&&/^[A-Za-z0-9._-]{1,64}$/.test(m)).slice(0,20):[];
@@ -500,6 +513,7 @@
         provider:typeof data.provider==='string'?data.provider.slice(0,32):'',
         execution:typeof data.execution==='string'?data.execution.slice(0,32):'',
         models,efforts,
+        modelProviders:readModelProviders(data),
         maxUploadBytes:positiveInt(limits.maxUploadBytes)||MAX_UPLOAD_FALLBACK,
         maxPromptChars:positiveInt(limits.maxPromptChars)||MAX_PROMPT_FALLBACK
       };
@@ -535,7 +549,7 @@
       state.model=caps.models.includes(state.model)?state.model:(caps.models[0]||'');
       state.effort=caps.efforts.includes(state.effort)?state.effort
         :(caps.efforts.includes('high')?'high':(caps.efforts[0]||''));
-      fillSelect(nodes.model,caps.models,'서버 기본값');
+      fillSelect(nodes.model,caps.models,'서버 기본값',caps.modelProviders);
       fillSelect(nodes.effort,caps.efforts,'서버 기본값');
       state.status=readyStatus();
     }
@@ -574,7 +588,25 @@
       render();
     }
 
-    function fillSelect(select,values,emptyLabel){
+    function providerLabel(provider){
+      return Object.prototype.hasOwnProperty.call(PROVIDER_LABELS,provider)?PROVIDER_LABELS[provider]:String(provider);
+    }
+    function fillFlatOptions(select,values){
+      for(const value of values) select.append(el('option',{value:value,textContent:value}));
+    }
+    function fillGroupedOptions(select,values,modelProviders){
+      const placed=new Set();
+      for(const provider of PROVIDER_GROUP_ORDER){
+        const members=values.filter(value=>modelProviders[value]===provider);
+        if(!members.length) continue;
+        const group=el('optgroup',{label:providerLabel(provider)});
+        fillFlatOptions(group,members);
+        select.append(group);
+        for(const member of members) placed.add(member);
+      }
+      fillFlatOptions(select,values.filter(value=>!placed.has(value)));
+    }
+    function fillSelect(select,values,emptyLabel,modelProviders){
       if(!select) return;
       select.textContent='';
       if(!values.length){
@@ -582,7 +614,8 @@
         select.value='';
         return;
       }
-      for(const value of values) select.append(el('option',{value:value,textContent:value}));
+      if(modelProviders) fillGroupedOptions(select,values,modelProviders);
+      else fillFlatOptions(select,values);
       select.value=values.includes(select.value)?select.value:values[0];
     }
 
@@ -1822,7 +1855,7 @@
       const parts=[];
       parts.push('모델: '+(typeof job.model==='string'&&job.model?job.model.slice(0,64):'서버가 제공하지 않음'));
       parts.push('추론 강도: '+(typeof job.effort==='string'&&job.effort?job.effort.slice(0,16):'서버가 제공하지 않음'));
-      if(typeof job.provider==='string'&&job.provider) parts.push('실행: '+job.provider.slice(0,32));
+      if(typeof job.provider==='string'&&job.provider) parts.push('실행: '+providerLabel(job.provider).slice(0,32));
       return parts.join(' · ');
     }
     function usageText(){
