@@ -2610,7 +2610,8 @@ test('paper prepare and call caps are per owner and a rejected prepare returns i
     const ada = await register(mf, call, 'paperprepa');
     const bea = await register(mf, call, 'paperprepb');
     const guest = (await mintGuest(call)).body.guest.token;
-    const prepare = token => postPaper(call, token, { path: '/api/paper/chart/prepare', body: {} });
+    const prepare = token => postPaper(call, token, { path: '/api/paper/evidence/prepare', body: { fileHash: 'a'.repeat(64), file: 'JVBERi0x' } });
+    const chart = token => postPaper(call, token, { path: '/api/paper/chart/prepare', body: {} });
     const query = token => postPaper(call, token, { path: PAPER_QUERY, body: null });
     assert.equal((await prepare(ada.body.token)).status, 200);
     const second = await prepare(ada.body.token);
@@ -2625,7 +2626,8 @@ test('paper prepare and call caps are per owner and a rejected prepare returns i
     assert.equal((await prepare(guest)).status, 200);
     assert.equal((await prepare(guest)).status, 429);
     assert.equal((await query(guest)).status, 200, 'a guest prepare cap does not block a later guest call');
-    assert.equal(await stubCalls(mf, '/internal/v1/paper', 'POST'), 5);
+    assert.equal((await chart(guest)).status, 200, 'chart prepare is an ordinary call, not a PDF prepare');
+    assert.equal(await stubCalls(mf, '/internal/v1/paper', 'POST'), 6);
   });
 });
 

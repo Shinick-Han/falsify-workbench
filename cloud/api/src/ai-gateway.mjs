@@ -1398,8 +1398,10 @@ function allowedPaperPath(path) {
   return typeof path === 'string' && PAPER_PATHS.some(pattern => pattern.test(path));
 }
 
+// Only evidence prepare uploads a PDF; chart prepare works on an already prepared paper and counts
+// as an ordinary call, so editing several charts does not use up the prepare limit.
 function paperPrepare(path) {
-  return path === '/api/paper/evidence/prepare' || path === '/api/paper/chart/prepare';
+  return path === '/api/paper/evidence/prepare';
 }
 
 function paperRequest(body) {
