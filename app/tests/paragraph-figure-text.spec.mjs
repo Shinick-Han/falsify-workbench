@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
-import {readFileSync} from 'node:fs';
+import {existsSync, readFileSync} from 'node:fs';
 import {dirname, join, resolve} from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
 import {test} from 'node:test';
@@ -8,7 +8,8 @@ import * as mupdf from '../dist/browser-pdf-vendor/mupdf.js';
 
 const app = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const {prepare} = await import(pathToFileURL(resolve(app, 'dist/paragraph-pdf.mjs')).href);
-const python = 'C:\\Users\\user\\source\\falsify\\coordination\\ocr-chart-wave-20261103\\runtime\\Scripts\\python.exe';
+const localPython = 'C:\\Users\\user\\source\\falsify\\coordination\\ocr-chart-wave-20261103\\runtime\\Scripts\\python.exe';
+const python = process.env.PYTHON_EXECUTABLE || process.env.FALSIFY_PYTHON || (existsSync(localPython) ? localPython : 'python');
 const refusal = '그림 안 글자를 고치면 그림이 깨져서 만들지 않았습니다. 표·그래프·그림 고치기를 쓰세요.';
 const kept = ['3%', '23%', '28%', '44%', '73%', 'AcuteUTI', 'PulmEmbol', 'HeartFail', 'SepsisCase', 'StrokeUnit', 'Body', 'paragraph', 'remains', 'outside', 'the', 'figure.'];
 

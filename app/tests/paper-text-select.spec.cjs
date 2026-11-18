@@ -8,7 +8,8 @@ const path = require('node:path');
 
 const root = path.resolve(__dirname, '../..');
 const dist = path.join(root, 'app/dist');
-const python = process.env.FALSIFY_PYTHON || 'C:\\Users\\user\\source\\falsify\\coordination\\ocr-chart-wave-20261103\\runtime\\Scripts\\python.exe';
+const localPython = 'C:\\Users\\user\\source\\falsify\\coordination\\ocr-chart-wave-20261103\\runtime\\Scripts\\python.exe';
+const python = process.env.PYTHON_EXECUTABLE || process.env.FALSIFY_PYTHON || (fs.existsSync(localPython) ? localPython : 'python');
 const probe = process.env.TEXT_SELECT_PROBE === '1';
 const fixture = path.join(__dirname, 'fixtures', 'text_select_heatmap.py');
 
