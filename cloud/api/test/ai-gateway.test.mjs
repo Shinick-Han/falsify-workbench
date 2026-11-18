@@ -215,7 +215,7 @@ const STUB_TABLES = [
 ];
 
 function migrationStatements() {
-  const sql = ['0001_shared_records.sql', '0002_invite_membership.sql', '0003_hosted_ai.sql', '0004_owner_usage.sql']
+  const sql = ['0001_shared_records.sql', '0002_invite_membership.sql', '0003_hosted_ai.sql', '0004_owner_usage.sql', '0005_guest_sessions.sql']
     .map(name => readFileSync(path.join(apiRoot, 'migrations', name), 'utf8'))
     .join('\n');
   return sql.split('\n').filter(line => !line.trim().startsWith('--')).join('\n').split(';').map(s => s.trim()).filter(Boolean);
@@ -466,6 +466,7 @@ test('hosting off leaves legacy gateways unchanged and exposes enabled:false', a
       models: DEFAULT_MODELS,
       efforts: DEFAULT_EFFORTS,
       limits: { maxUploadBytes: 4096, maxPromptChars: 32000 },
+      openAccess: { enabled: false, accessKeyRequired: false },
     });
     assert.equal(JSON.stringify(capabilities.body).includes('key'), false);
     const blocked = await upload(call, created.body.token, pdfBytes('disabled'));
@@ -1526,4 +1527,397 @@ test('migration 0004 and deployed wrangler keep credentials secret and usage pol
   assert.match(wrangler, /"AI_RUNTIME_URL": "https:\/\/falsify-runtime\.shinick\.dev\/staging"/);
   assert.match(wrangler, /"AI_MAX_UPLOAD_BYTES": "33554432"/);
   assert.equal(wrangler.split('"CONFLUENCE_ONLY": "true"').length, 3);
+});
+
+const GUEST_TOKEN = /^fsg_[A-Za-z0-9_-]{43}$/;
+const ACCESS_KEY = 'booth-example-key';
+const OTHER_GUEST = 'gst:33333333-3333-4333-8333-333333333333';
+
+function mintGuest(c, accessKey, headers = {}) {
+  const body = accessKey === undefined ? {} : { accessKey };
+  return c('POST', '/v1/ai/guest', { body, headers });
+}
+
+const fromIp = address => ({ 'CF-Connecting-IP': address });
+
+async function guestRow(instance, token) {
+  const d1 = await instance.getD1Database('DB');
+  return d1.prepare('SELECT token_hash, guest_id, created_at, expires_at, revoked_at FROM guest_sessions WHERE token_hash = ?1')
+    .bind(sha256(token)).first();
+}
+
+test('open access off rejects guest minting and every fsg bearer', async () => {
+  const issued = await withApp({
+    AI_HOSTING_ENABLED: 'true',
+    AI_OPEN_ACCESS: 'true',
+    CONFLUENCE_ONLY: 'false',
+  }, async (mf, call) => {
+    const minted = await mintGuest(call);
+    assert.equal(minted.status, 201);
+    return minted.body.guest.token;
+  });
+
+  await withApp({
+    AI_HOSTING_ENABLED: 'true',
+    AI_OPEN_ACCESS: 'false',
+    AI_OPEN_ACCESS_KEY: ACCESS_KEY,
+    CONFLUENCE_ONLY: 'false',
+  }, async (mf, call) => {
+    const capabilities = await call('GET', '/v1/ai/capabilities');
+    assert.equal(capabilities.status, 200);
+    assert.equal(capabilities.body.enabled, true);
+    assert.deepEqual(capabilities.body.openAccess, { enabled: false, accessKeyRequired: false });
+    assert.equal(JSON.stringify(capabilities.body).includes(ACCESS_KEY), false);
+
+    const minted = await mintGuest(call, ACCESS_KEY);
+    assert.equal(minted.status, 403);
+    assert.equal(minted.body.error.code, 'open_access_disabled');
+    assert.equal(minted.body.error.retryable, false);
+    assert.equal(typeof minted.body.error.requestId, 'string');
+    assert.equal(JSON.stringify(minted.body).includes(ACCESS_KEY), false);
+
+    for (const token of [issued, 'fsg_' + 'a'.repeat(43), 'fsg_short']) {
+      const denied = await upload(call, token, pdfBytes('closed-' + token.length));
+      assert.equal(denied.status, 403, token.slice(0, 12));
+      assert.equal(denied.body.error.code, 'open_access_disabled');
+      assert.equal(JSON.stringify(denied.body).includes(token), false);
+    }
+
+    const ada = await register(mf, call, 'stillada');
+    const allowed = await upload(call, ada.body.token, pdfBytes('password-stays'));
+    assert.equal(allowed.status, 201, 'password owners keep the hosted routes');
+  });
+
+  await withApp({ AI_HOSTING_ENABLED: 'false', AI_OPEN_ACCESS: 'true', CONFLUENCE_ONLY: 'false' }, async (mf, call) => {
+    const hidden = await mintGuest(call);
+    assert.equal(hidden.status, 404);
+    assert.equal(hidden.body.error.code, 'not_found');
+    const probe = await call('GET', '/v1/ai/capabilities');
+    assert.equal(probe.body.enabled, false);
+    assert.equal(probe.body.openAccess.enabled, true, 'the flag is reported even while hosting routes are absent');
+  });
+});
+
+test('a guest session is hashed, expires, and runs jobs as gst', async () => {
+  await withApp({
+    AI_HOSTING_ENABLED: 'true',
+    AI_OPEN_ACCESS: 'true',
+    CONFLUENCE_ONLY: 'false',
+    AI_GUEST_SESSION_SECONDS: '3600',
+    AI_GUEST_MAX_CALLS_PER_JOB: '8',
+    AI_MAX_CALLS_PER_JOB: '24',
+    AI_GUEST_ACTIVE_JOBS_PER_OWNER: '3',
+    AI_GUEST_JOBS_PER_OWNER_HOUR: '6',
+    AI_GUESTS_PER_IP_HOUR: '10',
+  }, async (mf, call) => {
+    const capabilities = await call('GET', '/v1/ai/capabilities');
+    assert.deepEqual(capabilities.body.openAccess, { enabled: true, accessKeyRequired: false });
+    assert.equal(JSON.stringify(capabilities.body).includes(ACCESS_KEY), false);
+
+    const minted = await mintGuest(call);
+    assert.equal(minted.status, 201);
+    assert.equal(minted.headers.get('Cache-Control'), 'no-store');
+    assert.deepEqual(Object.keys(minted.body).sort(), ['guest']);
+    assert.deepEqual(Object.keys(minted.body.guest).sort(), ['expiresAt', 'token']);
+    const token = minted.body.guest.token;
+    assert.match(token, GUEST_TOKEN);
+    const expiresAt = Date.parse(minted.body.guest.expiresAt);
+    assert.ok(Math.abs(expiresAt - (Date.now() + 3600 * 1000)) < 10000);
+
+    const row = await guestRow(mf, token);
+    assert.equal(row.token_hash, sha256(token));
+    assert.match(row.guest_id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    assert.equal(row.revoked_at, null);
+    assert.equal(JSON.stringify(row).includes(token), false);
+    const ownerId = `gst:${row.guest_id}`;
+
+    const up = await upload(call, token, pdfBytes('guest-round-trip'));
+    assert.equal(up.status, 201);
+    const d1 = await mf.getD1Database('DB');
+    const stored = await d1.prepare('SELECT owner_id FROM ai_uploads WHERE id = ?1').bind(up.body.upload.id).first();
+    assert.equal(stored.owner_id, ownerId);
+
+    const capped = await postJob(call, token, jobBody(up.body.upload.id, {
+      idempotencyKey: 'op-guest-capped-01',
+      budget: { maxCalls: 20 },
+    }));
+    assert.equal(capped.status, 202);
+    assert.equal(capped.body.job.progress.requiredCalls, 8);
+    const stub = await d1.prepare('SELECT owner_id, max_calls FROM ai_stub_jobs WHERE id = ?1').bind(capped.body.job.id).first();
+    assert.equal(stub.owner_id, ownerId);
+    assert.equal(stub.max_calls, 8);
+
+    const defaults = await postJob(call, token, jobBody(up.body.upload.id, {
+      idempotencyKey: 'op-guest-default-1',
+      budget: undefined,
+    }));
+    assert.equal(defaults.status, 202);
+    assert.equal(defaults.body.job.progress.requiredCalls, 8);
+
+    const revoked = await mintGuest(call);
+    const revokedToken = revoked.body.guest.token;
+    await d1.prepare('UPDATE guest_sessions SET revoked_at = ?1 WHERE token_hash = ?2')
+      .bind(Date.now(), sha256(revokedToken)).run();
+    const revokedUpload = await upload(call, revokedToken, pdfBytes('revoked-guest'));
+    assert.equal(revokedUpload.status, 401);
+    assert.equal(revokedUpload.body.error.code, 'unauthorized');
+
+    await d1.prepare('UPDATE guest_sessions SET expires_at = ?1 WHERE token_hash = ?2')
+      .bind(Date.now() - 1000, sha256(token)).run();
+    const expired = await upload(call, token, pdfBytes('expired-guest'));
+    assert.equal(expired.status, 401);
+    assert.equal(expired.body.error.code, 'unauthorized');
+
+    const unknown = await upload(call, 'fsg_' + 'b'.repeat(43), pdfBytes('unknown-guest'));
+    assert.equal(unknown.status, 401);
+    assert.equal(unknown.body.error.code, 'unauthorized');
+    const malformed = await upload(call, 'fsg_short', pdfBytes('malformed-guest'));
+    assert.equal(malformed.status, 401);
+    assert.equal(malformed.body.error.code, 'unauthorized');
+  });
+});
+
+test('guest minting requires the access key only when one is configured', async () => {
+  await withApp({
+    AI_HOSTING_ENABLED: 'true',
+    AI_OPEN_ACCESS: 'true',
+    AI_OPEN_ACCESS_KEY: ACCESS_KEY,
+    CONFLUENCE_ONLY: 'false',
+    AI_GUESTS_PER_IP_HOUR: '10',
+  }, async (mf, call) => {
+    const capabilities = await call('GET', '/v1/ai/capabilities');
+    assert.deepEqual(capabilities.body.openAccess, { enabled: true, accessKeyRequired: true });
+    assert.equal(JSON.stringify(capabilities.body).includes(ACCESS_KEY), false);
+
+    const missing = await mintGuest(call);
+    assert.equal(missing.status, 403);
+    assert.equal(missing.body.error.code, 'invalid_access_key');
+    assert.equal(missing.body.error.retryable, false);
+    const wrong = await mintGuest(call, 'wrong-example-key');
+    assert.equal(wrong.status, 403);
+    assert.equal(wrong.body.error.code, 'invalid_access_key');
+    assert.equal(JSON.stringify(wrong.body).includes('wrong-example-key'), false);
+    const right = await mintGuest(call, ACCESS_KEY);
+    assert.equal(right.status, 201);
+    assert.match(right.body.guest.token, GUEST_TOKEN);
+    assert.equal(JSON.stringify(right.body).includes(ACCESS_KEY), false);
+
+    const tooLong = await mintGuest(call, 'k'.repeat(129));
+    assert.equal(tooLong.status, 400);
+    assert.equal(tooLong.body.error.code, 'invalid_request');
+    const extra = await call('POST', '/v1/ai/guest', { body: { accessKey: ACCESS_KEY, note: 'synthetic-marker' } });
+    assert.equal(extra.status, 400);
+    assert.equal(JSON.stringify(extra.body).includes('synthetic-marker'), false);
+    const text = await call('POST', '/v1/ai/guest', { raw: '{}', headers: { 'Content-Type': 'text/plain' } });
+    assert.equal(text.status, 415);
+    const huge = await mintGuest(call, 'k'.repeat(2000));
+    assert.equal(huge.status, 413);
+    assert.equal(huge.body.error.code, 'payload_too_large');
+
+    const get = await call('GET', '/v1/ai/guest');
+    assert.equal(get.status, 405);
+    assert.equal(get.headers.get('Allow'), 'POST');
+    const preflight = await call('OPTIONS', '/v1/ai/guest', {
+      headers: { Origin: ORIGIN, 'Access-Control-Request-Method': 'POST' },
+    });
+    assert.equal(preflight.status, 204);
+    assert.equal(preflight.headers.get('Access-Control-Allow-Methods'), 'POST, OPTIONS');
+    assert.equal(preflight.headers.get('Access-Control-Allow-Origin'), ORIGIN);
+    const evil = await call('POST', '/v1/ai/guest', {
+      body: {},
+      headers: { Origin: 'https://evil.example' },
+    });
+    assert.equal(evil.status, 403);
+    assert.equal(evil.body.error.code, 'origin_not_allowed');
+  });
+});
+
+test('guest mint caps are per IP and global', async () => {
+  await withApp({
+    AI_HOSTING_ENABLED: 'true',
+    AI_OPEN_ACCESS: 'true',
+    CONFLUENCE_ONLY: 'false',
+    AI_GUESTS_PER_IP_HOUR: '1',
+    AI_GUESTS_PER_HOUR: '10',
+  }, async (mf, call) => {
+    const first = await mintGuest(call, undefined, fromIp('203.0.113.10'));
+    assert.equal(first.status, 201);
+    const again = await mintGuest(call, undefined, fromIp('203.0.113.10'));
+    assert.equal(again.status, 429);
+    assert.equal(again.body.error.code, 'rate_limited');
+    assert.match(again.headers.get('Retry-After'), /^[1-9][0-9]*$/);
+    const other = await mintGuest(call, undefined, fromIp('203.0.113.11'));
+    assert.equal(other.status, 201);
+  });
+
+  await withApp({
+    AI_HOSTING_ENABLED: 'true',
+    AI_OPEN_ACCESS: 'true',
+    CONFLUENCE_ONLY: 'false',
+    AI_GUESTS_PER_IP_HOUR: '10',
+    AI_GUESTS_PER_HOUR: '2',
+  }, async (mf, call) => {
+    assert.equal((await mintGuest(call, undefined, fromIp('203.0.113.21'))).status, 201);
+    assert.equal((await mintGuest(call, undefined, fromIp('203.0.113.22'))).status, 201);
+    const blocked = await mintGuest(call, undefined, fromIp('203.0.113.23'));
+    assert.equal(blocked.status, 429);
+    assert.equal(blocked.body.error.code, 'rate_limited');
+  });
+});
+
+test('guest work caps leave password and Confluence owners on their own limits', async () => {
+  await withApp({
+    ...CONFLUENCE_ENV,
+    CONFLUENCE_ONLY: 'false',
+    AI_HOSTING_ENABLED: 'true',
+    AI_OPEN_ACCESS: 'true',
+    AI_GUESTS_PER_IP_HOUR: '10',
+    AI_GUEST_UPLOADS_PER_OWNER_HOUR: '1',
+    AI_UPLOADS_PER_OWNER_HOUR: '4',
+    AI_GUEST_JOBS_PER_OWNER_HOUR: '5',
+    AI_JOBS_PER_OWNER_HOUR: '4',
+    AI_GUEST_ACTIVE_JOBS_PER_OWNER: '1',
+    AI_ACTIVE_JOBS_PER_OWNER: '3',
+    AI_GUEST_JOBS_PER_HOUR: '2',
+    AI_GUEST_MAX_CALLS_PER_JOB: '8',
+    AI_MAX_CALLS_PER_JOB: '4',
+  }, async (mf, call) => {
+    const alpha = confluenceSession({ accountId: 'acct-guest-limit' });
+    const guestA = (await mintGuest(call)).body.guest.token;
+    const guestB = (await mintGuest(call)).body.guest.token;
+    const guestC = (await mintGuest(call)).body.guest.token;
+    const ada = await register(mf, call, 'capada');
+
+    const firstUpload = await upload(call, guestA, pdfBytes('guest-a'));
+    assert.equal(firstUpload.status, 201);
+    const secondUpload = await upload(call, guestA, pdfBytes('guest-a-again'));
+    assert.equal(secondUpload.status, 429);
+    const passwordUploads = [
+      await upload(call, ada.body.token, pdfBytes('ada-1')),
+      await upload(call, ada.body.token, pdfBytes('ada-2')),
+    ];
+    assert.deepEqual(passwordUploads.map(item => item.status), [201, 201]);
+    const confluenceUpload = await upload(call, alpha, pdfBytes('confluence-stays'));
+    assert.equal(confluenceUpload.status, 201);
+    const d1 = await mf.getD1Database('DB');
+    const confluenceOwner = await d1.prepare('SELECT owner_id FROM ai_uploads WHERE id = ?1').bind(confluenceUpload.body.upload.id).first();
+    assert.equal(confluenceOwner.owner_id, atlOwner(CLOUD, 'acct-guest-limit'));
+    assert.equal(confluenceOwner.owner_id.startsWith('gst:'), false);
+
+    const uploadB = await upload(call, guestB, pdfBytes('guest-b'));
+    const uploadC = await upload(call, guestC, pdfBytes('guest-c'));
+    assert.equal(uploadB.status, 201);
+    assert.equal(uploadC.status, 201);
+
+    const jobA = await postJob(call, guestA, jobBody(firstUpload.body.upload.id, {
+      idempotencyKey: 'op-guest-a-0001',
+      budget: { maxCalls: 6 },
+    }));
+    assert.equal(jobA.status, 202);
+    assert.equal(jobA.body.job.progress.requiredCalls, 4, 'guest calls are also capped by AI_MAX_CALLS_PER_JOB');
+    const jobA2 = await postJob(call, guestA, jobBody(firstUpload.body.upload.id, {
+      idempotencyKey: 'op-guest-a-0002',
+    }));
+    assert.equal(jobA2.status, 429);
+    const ownerA = await d1.prepare('SELECT owner_id FROM ai_uploads WHERE id = ?1').bind(firstUpload.body.upload.id).first();
+    const rowsA = await d1.prepare('SELECT COUNT(*) AS count FROM ai_jobs WHERE owner_id = ?1').bind(ownerA.owner_id).first();
+    assert.equal(rowsA.count, 1, 'the active-cap rejection rolls the extra guest job back');
+
+    const jobB = await postJob(call, guestB, jobBody(uploadB.body.upload.id, { idempotencyKey: 'op-guest-b-0001' }));
+    assert.equal(jobB.status, 202);
+    const jobC = await postJob(call, guestC, jobBody(uploadC.body.upload.id, { idempotencyKey: 'op-guest-c-0001' }));
+    assert.equal(jobC.status, 429, 'the global guest job cap stops the third guest');
+
+    const passwordJob = await postJob(call, ada.body.token, jobBody(passwordUploads[0].body.upload.id, {
+      idempotencyKey: 'op-ada-cap-0001',
+      budget: { maxCalls: 2 },
+    }));
+    const passwordJob2 = await postJob(call, ada.body.token, jobBody(passwordUploads[0].body.upload.id, {
+      idempotencyKey: 'op-ada-cap-0002',
+      budget: { maxCalls: 2 },
+    }));
+    assert.equal(passwordJob.status, 202);
+    assert.equal(passwordJob2.status, 202);
+    assert.equal(passwordJob.body.job.progress.requiredCalls, 2);
+  });
+});
+
+test('the guest token budget sums gst owners and does not spend the password budget', async () => {
+  await withApp({
+    AI_HOSTING_ENABLED: 'true',
+    AI_OPEN_ACCESS: 'true',
+    CONFLUENCE_ONLY: 'false',
+    AI_GUEST_TOKEN_BUDGET: '10',
+    AI_OWNER_TOKEN_BUDGET: '100',
+    AI_TOKEN_WINDOW_SECONDS: '86400',
+    AI_GUEST_JOBS_PER_OWNER_HOUR: '6',
+    AI_GUEST_ACTIVE_JOBS_PER_OWNER: '3',
+    AI_GUEST_JOBS_PER_HOUR: '20',
+  }, async (mf, call) => {
+    await seedUsageJob(mf, { id: '22222222-2222-4222-8222-222222222222', ownerId: OTHER_GUEST, input: 10 });
+    const token = (await mintGuest(call)).body.guest.token;
+    const up = await upload(call, token, pdfBytes('guest-budget'));
+    assert.equal(up.status, 201);
+    const blocked = await postJob(call, token, jobBody(up.body.upload.id, { idempotencyKey: 'op-guest-budget-1' }));
+    assert.equal(blocked.status, 429);
+    assert.equal(blocked.body.error.code, 'owner_budget_exhausted');
+    assert.match(blocked.headers.get('Retry-After'), /^[1-9][0-9]*$/);
+
+    const applyOnly = await postJob(call, token, {
+      ...jobBody(up.body.upload.id, { idempotencyKey: 'op-guest-budget-2', budget: { maxCalls: 0 } }),
+      applyOnly: true,
+      edits: [TEXT_EDIT],
+    });
+    assert.equal(applyOnly.status, 202, 'apply-only still skips the token gate');
+
+    const ada = await register(mf, call, 'budgetada');
+    const adaUpload = await upload(call, ada.body.token, pdfBytes('ada-budget'));
+    const adaJob = await postJob(call, ada.body.token, jobBody(adaUpload.body.upload.id, { idempotencyKey: 'op-ada-budget-1' }));
+    assert.equal(adaJob.status, 202, 'the password owner keeps AI_OWNER_TOKEN_BUDGET');
+  });
+});
+
+test('an issued fsg bearer is rejected on non-AI routes like an unknown bearer', async () => {
+  await withApp({
+    ...CONFLUENCE_ENV,
+    CONFLUENCE_ONLY: 'false',
+    AI_HOSTING_ENABLED: 'true',
+    AI_OPEN_ACCESS: 'true',
+  }, async (mf, call) => {
+    const token = (await mintGuest(call)).body.guest.token;
+    const unknown = 'unknown-bearer-not-a-session';
+    const routes = [
+      ['GET', '/v1/records'],
+      ['POST', '/v1/records', { kind: 'harness', payload: {} }],
+      ['GET', '/v1/me'],
+      ['POST', '/v1/logout'],
+      ['POST', '/v1/auth/password', { currentPassword: PASSWORD, newPassword: NEXT }],
+      ['POST', '/v1/auth/sessions/revoke'],
+      ['GET', '/v1/confluence/archives'],
+    ];
+    for (const [method, pathname, body] of routes) {
+      const guest = await call(method, pathname, { token, body });
+      const other = await call(method, pathname, { token: unknown, body });
+      assert.equal(guest.status, other.status, `${method} ${pathname}`);
+      assert.equal(guest.body.error.code, other.body.error.code, `${method} ${pathname}`);
+      assert.equal(guest.body.error.message, other.body.error.message, `${method} ${pathname}`);
+      assert.equal(guest.status, 401, `${method} ${pathname}`);
+      assert.equal(guest.body.error.code, 'unauthorized');
+      assert.equal(JSON.stringify(guest.body).includes(token), false);
+    }
+    const still = await upload(call, token, pdfBytes('guest-after-non-ai'));
+    assert.equal(still.status, 201, 'the guest session is still an AI owner');
+  });
+});
+
+test('migration 0005 stores guest token hashes and indexes expiry', () => {
+  const sql = readFileSync(path.join(apiRoot, 'migrations', '0005_guest_sessions.sql'), 'utf8');
+  assert.match(sql, /CREATE TABLE guest_sessions/);
+  assert.match(sql, /token_hash TEXT PRIMARY KEY/);
+  assert.match(sql, /guest_id TEXT NOT NULL UNIQUE/);
+  assert.match(sql, /expires_at INTEGER NOT NULL/);
+  assert.match(sql, /revoked_at INTEGER/);
+  assert.match(sql, /CREATE INDEX guest_sessions_expires ON guest_sessions \(expires_at\)/);
+  assert.equal(sql.includes('api_key'), false);
+  assert.equal(/\btoken TEXT\b/.test(sql), false);
 });

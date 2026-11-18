@@ -743,6 +743,7 @@ function aiDependencies(request, env) {
     rateLimit,
     releaseSlot,
     authenticatePassword: () => authenticate(request, database(env)),
+    clientIp: () => clientIp(request),
   };
 }
 

@@ -2,8 +2,9 @@
 // Authenticates one stable owner, keeps an idempotent job index in D1 and proxies every execution
 // to the container-internal runtime. No prompt, upload bytes, edit rationale or provider error text
 // is stored here. Owner-paid policy is a pre-flight gate over recorded usage, never a spend balance.
+import { timingSafeEqual } from 'node:crypto';
 import { SESSION_HEADER } from './confluence.mjs';
-import { AiError, aiFail, hostingEnabled, resolveAiOwner, sha256Hex } from './ai-identity.mjs';
+import { AiError, aiFail, hostingEnabled, openAccessEnabled, resolveAiOwner, sha256Hex } from './ai-identity.mjs';
 import {
   cancelRuntimeJob,
   createRuntimeJob,
@@ -49,6 +50,8 @@ const MESSAGES = {
   payload_too_large: 'The request body exceeds the hosted limit.',
   unsupported_media_type: 'The upload type is not supported.',
   rate_limited: 'Too many hosted AI requests; retry later.',
+  open_access_disabled: 'Open access is not enabled.',
+  invalid_access_key: 'The access key is not valid.',
   owner_budget_exhausted: 'The owner token budget for this window is exhausted.',
   idempotency_conflict: 'This idempotency key is already used for a different request.',
   ai_unavailable: 'Hosted AI execution is temporarily unavailable.',
@@ -92,11 +95,48 @@ export function aiSettings(env) {
     // snapshots, so it is a coarse pre-flight policy, not an exact provider balance.
     ownerTokenBudget: nonNegativeInt(env?.AI_OWNER_TOKEN_BUDGET, 0),
     tokenWindowSeconds: positiveInt(env?.AI_TOKEN_WINDOW_SECONDS, 86400),
+    openAccess: openAccessEnabled(env),
+    openAccessKey: guestSecret(env),
+    guestSessionSeconds: positiveInt(env?.AI_GUEST_SESSION_SECONDS, 21600),
+    guestsPerIpHour: positiveInt(env?.AI_GUESTS_PER_IP_HOUR, 10),
+    guestsPerHour: positiveInt(env?.AI_GUESTS_PER_HOUR, 600),
+    guestUploadsPerOwnerHour: positiveInt(env?.AI_GUEST_UPLOADS_PER_OWNER_HOUR, 10),
+    guestJobsPerOwnerHour: positiveInt(env?.AI_GUEST_JOBS_PER_OWNER_HOUR, 6),
+    guestActiveJobsPerOwner: positiveInt(env?.AI_GUEST_ACTIVE_JOBS_PER_OWNER, 1),
+    guestMaxCallsPerJob: positiveInt(env?.AI_GUEST_MAX_CALLS_PER_JOB, 8),
+    guestJobsPerHour: positiveInt(env?.AI_GUEST_JOBS_PER_HOUR, 150),
+    guestTokenBudget: nonNegativeInt(env?.AI_GUEST_TOKEN_BUDGET, 0),
     models,
     efforts,
     defaultModel: models.includes(requestedModel) ? requestedModel : models[0],
     defaultEffort: efforts.includes(requestedEffort) ? requestedEffort : (efforts.includes('high') ? 'high' : efforts[0]),
     mimeTypes: MIME_TYPES.slice(),
+  };
+}
+
+function guestSecret(env) {
+  const raw = env?.AI_OPEN_ACCESS_KEY;
+  return typeof raw === 'string' ? raw : '';
+}
+
+function isGuestOwner(ownerId) {
+  return typeof ownerId === 'string' && ownerId.startsWith('gst:');
+}
+
+// Password and Confluence owners keep today's settings object. A guest uses the tighter caps,
+// and the token budget below sums every gst: owner instead of one row.
+function effectiveAiSettings(settings, ownerId) {
+  if (!isGuestOwner(ownerId)) return settings;
+  const maxCallsPerJob = Math.min(settings.guestMaxCallsPerJob, settings.maxCallsPerJob);
+  return {
+    ...settings,
+    guestScope: true,
+    maxCallsPerJob,
+    defaultCalls: Math.min(settings.defaultCalls, maxCallsPerJob),
+    uploadsPerOwnerHour: settings.guestUploadsPerOwnerHour,
+    jobsPerOwnerHour: settings.guestJobsPerOwnerHour,
+    activeJobsPerOwner: settings.guestActiveJobsPerOwner,
+    ownerTokenBudget: settings.guestTokenBudget,
   };
 }
 
@@ -291,6 +331,10 @@ function capabilitiesResponse(settings) {
     models: settings.models,
     efforts: settings.efforts,
     limits: { maxUploadBytes: settings.maxUploadBytes, maxPromptChars: settings.maxPromptChars },
+    openAccess: {
+      enabled: settings.openAccess,
+      accessKeyRequired: settings.openAccess === true && settings.openAccessKey.length > 0,
+    },
   });
 }
 
@@ -643,6 +687,19 @@ function validateVisualEdits(value, role, applyOnly) {
 
 // ---- owner-paid policy --------------------------------------------------------------------
 
+function usageSince(guestScope) {
+  const owner = guestScope ? "owner_id LIKE 'gst:%'" : 'owner_id = ?1';
+  const since = guestScope ? '?1' : '?2';
+  return `SELECT COALESCE(SUM(input_tokens + output_tokens + cache_read_input_tokens + cache_creation_input_tokens), 0) AS used FROM ai_jobs WHERE ${owner} AND usage_recorded_at IS NOT NULL AND usage_recorded_at >= ${since}`;
+}
+
+async function recordedUsage(db, ctx, settings, startIso) {
+  const guest = settings.guestScope === true;
+  const statement = db.prepare(usageSince(guest));
+  const row = guest ? await statement.bind(startIso).first() : await statement.bind(ctx.ownerId, startIso).first();
+  return Number(row?.used ?? 0);
+}
+
 function budgetWindow(windowSeconds, nowMs = Date.now()) {
   const nowSeconds = Math.floor(nowMs / 1000);
   const startSeconds = nowSeconds - (nowSeconds % windowSeconds);
@@ -657,14 +714,7 @@ function budgetWindow(windowSeconds, nowMs = Date.now()) {
 async function enforceOwnerBudget(db, ctx, settings, { applyOnly }) {
   if (applyOnly || settings.ownerTokenBudget <= 0) return;
   const window = budgetWindow(settings.tokenWindowSeconds);
-  const row = await db
-    .prepare(
-      `SELECT COALESCE(SUM(input_tokens + output_tokens + cache_read_input_tokens + cache_creation_input_tokens), 0) AS used
-       FROM ai_jobs WHERE owner_id = ?1 AND usage_recorded_at IS NOT NULL AND usage_recorded_at >= ?2`
-    )
-    .bind(ctx.ownerId, window.startIso)
-    .first();
-  if (Number(row?.used ?? 0) >= settings.ownerTokenBudget) {
+  if (await recordedUsage(db, ctx, settings, window.startIso) >= settings.ownerTokenBudget) {
     aiFail(429, 'owner_budget_exhausted', { 'Retry-After': String(window.retryAfter) });
   }
 }
@@ -832,14 +882,32 @@ function jobHashParts(job) {
 
 // The unique (owner, idempotency key) insert is the reservation: a duplicate never reaches the
 // runtime, and a distinct key on an active-heavy owner is rolled back before it can count.
+async function claimGuestJobSlot(db, deps, settings) {
+  if (settings.guestScope !== true) return null;
+  return deps.rateLimit(db, GUEST_JOB_BUCKET, settings.guestJobsPerHour);
+}
+
+async function releaseGuestJobSlot(db, deps, slot) {
+  if (slot === null || slot === undefined) return;
+  await deps.releaseSlot(db, GUEST_JOB_BUCKET, slot);
+}
+
 async function reserveJob(db, env, ctx, deps, settings, job) {
   const requestHash = await sha256Hex(JSON.stringify(jobHashParts(job)));
   const bucket = await bucketKey('ai-job:', ctx.ownerId);
   const slot = await deps.rateLimit(db, bucket, settings.jobsPerOwnerHour);
+  let guestSlot = null;
+  try {
+    guestSlot = await claimGuestJobSlot(db, deps, settings);
+  } catch (error) {
+    await deps.releaseSlot(db, bucket, slot);
+    throw error;
+  }
   const reservation = {
     requestHash,
     bucket,
     slot,
+    guestSlot,
     jobId: await jobIdFor(ctx.ownerId, job.idempotencyKey, requestHash),
   };
   const at = nowIso();
@@ -866,6 +934,7 @@ async function reserveJob(db, env, ctx, deps, settings, job) {
     .run();
   if (reserved.meta.changes === 1) return { reservation };
   await deps.releaseSlot(db, bucket, slot);
+  await releaseGuestJobSlot(db, deps, guestSlot);
   const row = await db
     .prepare('SELECT id, role, request_hash, snapshot FROM ai_jobs WHERE owner_id = ?1 AND idempotency_key = ?2')
     .bind(ctx.ownerId, job.idempotencyKey)
@@ -878,6 +947,7 @@ async function rollbackReservation(db, deps, ownerId, reservation) {
     await db.prepare('DELETE FROM ai_jobs WHERE id = ?1 AND owner_id = ?2').bind(reservation.jobId, ownerId).run();
   } catch { /* the row is inert until a runtime snapshot confirms it */ }
   await deps.releaseSlot(db, reservation.bucket, reservation.slot);
+  await releaseGuestJobSlot(db, deps, reservation.guestSlot);
 }
 
 async function activeJobCount(db, ownerId) {
@@ -1060,8 +1130,61 @@ async function getArtifact(ctx) {
   });
 }
 
+const GUEST_BODY_BYTES = 1024;
+const GUEST_JOB_BUCKET = 'ai-guest-jobs:all';
+
+function base64url(bytes) {
+  let text = '';
+  for (const b of bytes) text += String.fromCharCode(b);
+  return btoa(text).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
+}
+
+function guestAccessKey(body) {
+  if (Object.keys(body).some(key => key !== 'accessKey')) aiFail(400, 'invalid_request');
+  if (!Object.hasOwn(body, 'accessKey')) return '';
+  const value = body.accessKey;
+  if (typeof value !== 'string' || [...value].length > 128) aiFail(400, 'invalid_request');
+  return value;
+}
+
+async function sameAccessKey(secret, presented) {
+  const encode = value => crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+  const [left, right] = await Promise.all([encode(secret), encode(presented)]);
+  return timingSafeEqual(new Uint8Array(left), new Uint8Array(right));
+}
+
+async function assertAccessKey(settings, presented) {
+  if (!settings.openAccessKey) return;
+  if (!await sameAccessKey(settings.openAccessKey, presented)) aiFail(403, 'invalid_access_key');
+}
+
+async function insertGuestSession(db, settings) {
+  const guestId = crypto.randomUUID();
+  const token = 'fsg_' + base64url(crypto.getRandomValues(new Uint8Array(32)));
+  const nowMs = Date.now();
+  const expiresAt = nowMs + settings.guestSessionSeconds * 1000;
+  await db.prepare(
+    'INSERT INTO guest_sessions (token_hash, guest_id, created_at, expires_at) VALUES (?1, ?2, ?3, ?4)'
+  ).bind(await sha256Hex(token), guestId, nowMs, expiresAt).run();
+  return json(201, { guest: { token, expiresAt: new Date(expiresAt).toISOString() } });
+}
+
+// Minting is public. The IP and global caps run before the key check and before any insert,
+// so a guess cannot create a row and cannot probe the key without spending a slot.
+async function createGuest(ctx) {
+  const { request, settings, deps } = ctx;
+  if (!settings.openAccess) aiFail(403, 'open_access_disabled');
+  const presented = guestAccessKey(await readJsonBody(request, GUEST_BODY_BYTES));
+  const db = deps.getDb();
+  await deps.rateLimit(db, await bucketKey('guest:ip:', deps.clientIp()), settings.guestsPerIpHour);
+  await deps.rateLimit(db, 'guest:all', settings.guestsPerHour);
+  await assertAccessKey(settings, presented);
+  return insertGuestSession(db, settings);
+}
+
 const AI_ROUTES = {
   '/v1/ai/capabilities': { GET: ctx => capabilitiesResponse(ctx.settings) },
+  '/v1/ai/guest': { POST: ctx => createGuest(ctx) },
   '/v1/ai/uploads': { POST: ctx => createUpload(ctx) },
   '/v1/ai/jobs': { POST: ctx => createJob(ctx) },
   '/v1/ai/jobs/:id': { GET: ctx => getJob(ctx) },
@@ -1081,7 +1204,20 @@ export function matchAi(pathname) {
   return null;
 }
 
-// ctx: { request, env, url, match, fetchImpl, deps: { getDb, rateLimit, releaseSlot, authenticatePassword } }
+function allowMethods(template) {
+  return template === '/v1/ai/guest' ? 'POST, OPTIONS' : AI_ALLOW_METHODS;
+}
+
+function aiHandler(ctx, settings, requestId, owner) {
+  const route = AI_ROUTES[ctx.match.template];
+  if (!route) aiFail(404, 'not_found');
+  const handler = route[ctx.request.method];
+  if (!handler) aiFail(405, 'method_not_allowed', { Allow: Object.keys(route).join(', ') });
+  const bound = owner ? effectiveAiSettings(settings, owner.ownerId) : settings;
+  return handler({ ...ctx, settings: bound, ownerId: owner ? owner.ownerId : undefined, requestId });
+}
+
+// ctx: { request, env, url, match, fetchImpl, deps: { getDb, rateLimit, releaseSlot, authenticatePassword, clientIp } }
 export async function handleAiRequest(ctx) {
   const requestId = newRequestId();
   let refreshed = null;
@@ -1091,7 +1227,7 @@ export async function handleAiRequest(ctx) {
       return new Response(null, {
         status: 204,
         headers: {
-          'Access-Control-Allow-Methods': AI_ALLOW_METHODS,
+          'Access-Control-Allow-Methods': allowMethods(ctx.match.template),
           'Access-Control-Allow-Headers': AI_ALLOW_HEADERS,
           'Access-Control-Max-Age': '600',
           'Cache-Control': 'no-store',
@@ -1106,18 +1242,16 @@ export async function handleAiRequest(ctx) {
     }
     // A disabled deployment behaves like it has no other hosted AI routes.
     if (!settings.enabled) aiFail(404, 'not_found');
-    const owner = await resolveAiOwner({
+    // Guest minting is unsigned. Every other route resolves one owner first.
+    const owner = ctx.match.template === '/v1/ai/guest' ? null : await resolveAiOwner({
       request: ctx.request,
       env: ctx.env,
       authenticatePassword: ctx.deps.authenticatePassword,
+      getDb: ctx.deps.getDb,
       fetchImpl: ctx.fetchImpl,
     });
-    refreshed = owner.refreshed;
-    const route = AI_ROUTES[ctx.match.template];
-    if (!route) aiFail(404, 'not_found');
-    const handler = route[ctx.request.method];
-    if (!handler) aiFail(405, 'method_not_allowed', { Allow: Object.keys(route).join(', ') });
-    const response = await handler({ ...ctx, settings, ownerId: owner.ownerId, requestId });
+    refreshed = owner ? owner.refreshed : null;
+    const response = await aiHandler(ctx, settings, requestId, owner);
     return withRefreshed(response, refreshed);
   } catch (error) {
     const known = toAiError(error);
