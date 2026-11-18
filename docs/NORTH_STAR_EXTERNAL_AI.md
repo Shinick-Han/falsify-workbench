@@ -6,7 +6,7 @@
 
 작업·파일은 사용자에 연결하고 SQLite와 파일 저장소로 재시작 뒤 복구한다. 서버가 표·그림 구조화 근거를 만들고 텍스트·표 셀 수정 PDF를 생성한다. 브라우저에서 합성 PDF 업로드→실제 Anthropic RED→선택 적용→PDF 다운로드→같은 SHA-256의 PDF를 BLUE로 전달→실제 BLUE 결과를 확인했다. 런타임 재시작 뒤 결과·사용량 보존도 확인했다. 키는 서버 환경에만 보관한다. 차트 좌표 적용·시각 영역 선택 UI와 범용 제공자 도구 루프는 이번 호스팅 범위에 포함되지 않는다.
 
-최종 릴리스 `0.2.0-alpha.77`의 GitHub main·태그·릴리스 ZIP·공개 Pages를 갱신했다. 릴리스 커밋 `0cf35ca5c5e76a58f65c1bc2eda30d8783c22071`의 첫 CI는 matplotlib이 없는 runner에서 `tools/corpus` 테스트 13개가 실패했고, 테스트 건너뛰기 조건만 고친 `b483591d3d52f93b313da490856730f5259e81e5`에 태그를 달았다. [GitHub Actions 배포 검사](https://github.com/Shinick-Han/falsify-workbench/actions/runs/44101439530)는 Linux·Windows·macOS ARM/Intel 작업 전체 성공이다. Linux 앱 Python 1,515개 중 1,473개 통과·42개 건너뜀, 평가 175개 중 174개 통과·1개 건너뜀, 코퍼스 173개 중 126개 통과·47개 건너뜀, Cloud API 78개 통과, ZIP 수용 검사 통과. 짝 코퍼스는 결정적 Layer 0 센서로만 측정했고 모델 기반 탐지기는 실행하지 않았다. 설치본과 운영/스테이징 런타임은 alpha.77로 교체하지 않았다.
+최종 릴리스 `0.2.0-alpha.78`의 GitHub main·태그·릴리스 ZIP·공개 Pages를 갱신했다. 태그는 릴리스 커밋 `09aa59b4f413e2a6a5732e3b8382cd8ff55d92d8`에 달았다. [GitHub Actions 배포 검사](https://github.com/Shinick-Han/falsify-workbench/actions/runs/44231127081)는 Linux·Windows·macOS ARM/Intel 작업 전체 성공이다. Linux 앱 Python 1,523개 중 1,481개 통과·42개 건너뜀, 평가 175개 중 174개 통과·1개 건너뜀, 코퍼스 186개 중 135개 통과·51개 건너뜀, ZIP 수용 검사 통과. 렌더 lint 경고와 논증 개요는 재현율·거짓 양성을 측정하지 않았고 모델 기반 탐지기는 실행하지 않았다. 설치본과 운영/스테이징 런타임은 alpha.78로 교체하지 않았다
 
 생산 코드 268개 파일·14,043개 함수 max CCN 15, 15 초과 0개다. 공개 index·cloud-config·hosted-ai의 SHA-256이 배포 소스와 일치한다. 실제 공개 웹에서 로그인 준비 상태를 확인했고, 런타임 교체 뒤 완료 결과·사용량·파일 해시 보존을 재확인했다. 검증용 계정 3개는 폐기했다. 키와 가입 코드는 공개 저장소에 넣지 않았다. 배포 영수증과 로그는 소스 밖 `C:/Users/user/AppData/Local/Falsify/orchestration/hosted-api-20261117`에 둔다. WorkBite는 재확인해도 binding_unavailable로 기록을 쓰지 못했으며 로컬 영수증으로 보존했다.
 
