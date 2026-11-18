@@ -25,7 +25,8 @@
   function jsonDownload(value,name){download(new TextEncoder().encode(JSON.stringify(value,null,2)),name,'application/json');}
   function download(bytes,name,type){const url=URL.createObjectURL(new Blob([bytes],{type}));const a=document.createElement('a');a.href=url;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);}
   // Every job/export binds one bridge link for its whole life (start, polls, cancel); the bridge refuses to switch while busy.
-  function link(){const l=B.session();if(!l)throw new Error('로컬 broker 연결이 없습니다. 위 연결 패널에서 연결하거나 수동 JSON 교환을 쓰세요.');return l;}
+  function hostedOpen(){try{const cfg=globalThis.FalsifyCloudConfig;return !!(cfg&&cfg.openAccess&&cfg.openAccess.enabled===true);}catch{return false;}}
+  function link(){if(hostedOpen())throw new Error('RED 검토·수정 적용·BLUE 검토는 위쪽 웹 실행 패널에서 로그인 없이 실행하세요.');const l=B.session();if(!l)throw new Error('로컬 broker 연결이 없습니다. 위 연결 패널에서 연결하거나 수동 JSON 교환을 쓰세요.');return l;}
   function connection(){const s=B.state(),cap=s.cap;
     $('#red-connection').textContent=s.status==='checking'?'로컬 실행 상태 확인 중':s.connected?(s.status==='paired'?'페어링된 로컬 broker':'로컬 broker 연결')+(cap?.red?' · 실행 CLI·모델은 아래 Harness 선택을 따릅니다'+(cap.cliSelection?'':' · 이 companion은 기본 Codex CLI'+(cap.model?' ('+cap.model+')':'')+'만 지원 (CLI 선택은 최신 companion 필요)')+' · 사용자 harness는 자체 모델/도구를 사용하며 내부 격리는 미검증':' · 이 broker는 RED 실행을 지원하지 않습니다.'):'로컬 broker 연결 없음 · 외부 RED 응답을 가져오거나 위 연결 패널에서 연결하세요.';}
   // The record button is ledger-mounted; bridge changes before that only refresh the connection line.

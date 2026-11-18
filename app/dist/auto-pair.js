@@ -5,6 +5,10 @@
 (function(root){
   'use strict';
   const ORIGIN='https://shinick-han.github.io',HOST='127.0.0.1',STORE='falsify.reconnect.v1';
+  function openAccessEnabled(){
+    const cfg=typeof globalThis==='object'&&globalThis.FalsifyCloudConfig;
+    return !!(cfg&&cfg.openAccess&&cfg.openAccess.enabled===true);
+  }
   const NONCE=/^[A-Za-z0-9_-]{43}$/,CRED=/^rc1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
   const ALPHABET='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
   const DEADLINE_MS=120000,INTERVAL_MS=1000;
@@ -96,6 +100,7 @@
       try{if(memory)memory.removeItem(STORE);}catch{}
     }
     function forget(){
+      if(openAccessEnabled()){dropLocal();return null;}
       const saved=read();
       if(saved){
         try{void fetchImpl('http://'+HOST+':'+saved.port+'/api/pair/revoke',{method:'POST',headers:{Authorization:'Bearer '+saved.credential,'Content-Type':'application/json'},body:JSON.stringify({schema:'falsify.pair-revoke.v1'}),credentials:'omit',redirect:'error',cache:'no-store',mode:'cors',referrerPolicy:'no-referrer',targetAddressSpace:'loopback'}).catch(()=>{});}catch{}
@@ -127,6 +132,7 @@
     }
     let generation=0;
     async function begin({bridge,port,open}){
+      if(openAccessEnabled()) return {ok:false,error:'open-access',skipped:true};
       const held=bridge.hold(port);
       if(!held.ok)return held;
       const mine=++generation;
@@ -152,6 +158,7 @@
       }finally{if(!success)release();}
     }
     async function refresh(bridge){
+      if(openAccessEnabled()) return {ok:false,skipped:true};
       if(!bridge||bridge.state().mode==='local'||bridge.state().status==='paired'||bridge.state().status==='connecting')return {ok:false,skipped:true};
       const saved=read();
       if(!saved)return {ok:false,skipped:true};
@@ -185,5 +192,18 @@
   let storage=null;try{storage=root.sessionStorage;}catch{storage=null;}
   const api=create({fetch:(...args)=>root.fetch(...args),storage,random:buf=>root.crypto.getRandomValues(buf)});
   root.FalsifyAutoPair=api;
-  if(root.FalsifyLocalBridge)api.attach(root.FalsifyLocalBridge,root.document);
+  function arm(){
+    if(openAccessEnabled()) return;
+    if(root.FalsifyLocalBridge) api.attach(root.FalsifyLocalBridge,root.document);
+  }
+  function scheduleArm(){
+    if(typeof root.FalsifyCloudConfig!=='undefined'){arm();return;}
+    const doc=root.document;
+    if(doc&&typeof doc.addEventListener==='function'&&(doc.readyState==='loading'||doc.readyState==='interactive')){
+      doc.addEventListener('DOMContentLoaded',arm,{once:true});
+      return;
+    }
+    arm();
+  }
+  scheduleArm();
 })(typeof window==='object'?window:globalThis);

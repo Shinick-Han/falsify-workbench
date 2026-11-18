@@ -220,7 +220,8 @@
       candidates:[], visualCandidates:[], chartOnly:0, skippedCandidates:0, candidateSignature:'',
       selection:{}, selectionVersion:0,
       editedStatus:'', originalInput:null, blueSource:null, useEvidence:true,
-      pollTimer:null, pollAttempt:0, pollFailures:0, downloadStatus:'', timers:new Set()
+      pollTimer:null, pollAttempt:0, pollFailures:0, downloadStatus:'', timers:new Set(),
+      hookError:null
     };
     const nodes={};
     let readyResolve=null;
@@ -240,13 +241,54 @@
       try{const data=JSON.parse(raw);return data&&typeof data==='object'?data:null;}catch{return null;}
     }
 
+    function openMode(){
+      let config=null;
+      try{config=configFn();}catch{config=null;}
+      return !!(config&&config.openAccess&&config.openAccess.enabled===true);
+    }
     function hookPresent(){const provider=providerFn();return !!provider&&typeof provider.token==='function';}
+    function safeHookError(error){
+      const status=Number(error&&error.status)||0;
+      const code=allowlistedCode(error&&error.code);
+      const retry=Number(error&&error.retryAfter);
+      const out={status,code};
+      if(Number.isFinite(retry)&&retry>0&&retry<=86400) out.retryAfter=Math.ceil(retry);
+      return out;
+    }
     async function hookToken(){
       const provider=providerFn();
       if(!provider||typeof provider.token!=='function') return '';
       let value=null;
-      try{value=await provider.token();}catch{value=null;}
-      return typeof value==='string'&&HEADER_TOKEN_RE.test(value)?value:'';
+      try{value=await provider.token();}catch(error){
+        value=null;
+        state.hookError=safeHookError(error);
+      }
+      const token=typeof value==='string'&&HEADER_TOKEN_RE.test(value)?value:'';
+      if(token) state.hookError=null;
+      return token;
+    }
+    function hookSessionActive(opts){
+      return !!(opts&&!opts.refreshed&&state.session&&state.session.source==='hook');
+    }
+    async function refreshHookSession(){
+      const provider=providerFn();
+      if(provider&&typeof provider.invalidate==='function'){
+        try{provider.invalidate();}catch{}
+      }
+      const token=await hookToken();
+      if(!token){state.session=null;return '';}
+      state.session={source:'hook',token,apiBase:state.apiBase,author:null,expiresAt:''};
+      return token;
+    }
+    async function withHookRetry(run,opts={}){
+      try{
+        return await run(opts);
+      }catch(error){
+        if(!(error&&error.status===401&&hookSessionActive(opts))) throw error;
+        const token=await refreshHookSession();
+        if(!token) throw error;
+        return run(Object.assign({},opts,{token,refreshed:true}));
+      }
     }
 
     function storedSession(){
@@ -267,7 +309,7 @@
     function sessionLabel(){
       const s=state.session;
       if(!s) return '';
-      if(s.source==='hook') return '로그인됨(페이지 세션)';
+      if(s.source==='hook') return openMode()?'로그인 없이 사용 중':'로그인됨(페이지 세션)';
       const author=s.author||{};
       const name=safeName(author.displayName||author.username)||'사용자';
       const user=safeName(author.username);
@@ -297,26 +339,52 @@
         if(timer!==null)clearT(timer);
       }
     }
-    async function jsonCall(path,opts={}){
-      const res=await http(path,opts);
-      let data=null;
+    function headerValue(res,name){
+      const headers=res&&res.headers;
+      if(!headers||typeof headers.get!=='function') return '';
+      const value=headers.get(name);
+      return typeof value==='string'?value:'';
+    }
+    function retryAfterOf(res){
+      const raw=headerValue(res,'Retry-After').trim();
+      if(!raw) return 0;
+      if(/^\d+$/.test(raw)){
+        const seconds=Number(raw);
+        return seconds>=0&&seconds<=86400?seconds:0;
+      }
+      const when=Date.parse(raw);
+      if(!Number.isFinite(when)) return 0;
+      const delta=Math.ceil((when-now())/1000);
+      return delta>0&&delta<=86400?delta:0;
+    }
+    function errorFromResponse(res,data){
+      const error=Error('http '+res.status);
+      error.status=Number(res.status)||0;
+      const detail=data&&data.error&&typeof data.error==='object'?data.error:null;
+      error.code=detail?allowlistedCode(detail.code):'';
+      error.requestId=detail?allowlistedId(detail.requestId):'';
+      error.retryable=!!(detail&&detail.retryable===true);
+      const retryAfter=retryAfterOf(res);
+      if(retryAfter) error.retryAfter=retryAfter;
+      return error;
+    }
+    async function readJsonBody(res){
       try{
         const text=await res.text();
-        data=text?JSON.parse(text):null;
-      }catch{data=null;}
-      if(!res.ok){
-        const error=Error('http '+res.status);
-        error.status=Number(res.status)||0;
-        const detail=data&&data.error&&typeof data.error==='object'?data.error:null;
-        error.code=detail?allowlistedCode(detail.code):'';
-        error.requestId=detail?allowlistedId(detail.requestId):'';
-        error.retryable=!!(detail&&detail.retryable===true);
-        throw error;
-      }
+        return text?JSON.parse(text):null;
+      }catch{return null;}
+    }
+    async function jsonCallOnce(path,opts={}){
+      const res=await http(path,opts);
+      const data=await readJsonBody(res);
+      if(!res.ok) throw errorFromResponse(res,data);
       if(!data||typeof data!=='object'){
         throw Object.assign(Error('unexpected response'),{kind:'protocol'});
       }
       return data;
+    }
+    async function jsonCall(path,opts={}){
+      return withHookRetry(next=>jsonCallOnce(path,next),opts);
     }
 
     function failureSuffix(error){
@@ -333,7 +401,21 @@
       if(error&&error.kind==='protocol') return '서버 응답을 해석하지 못했습니다. 자동으로 다시 시도하지 않습니다.';
       return '서버에 연결하지 못했습니다. 네트워크를 확인한 뒤 다시 시도하세요. 자동으로 다시 보내지 않았습니다.';
     }
+    function retryWaitText(error){
+      const wait=Number(error&&error.retryAfter);
+      if(Number.isFinite(wait)&&wait>0) return '요청이 너무 많습니다. '+Math.ceil(wait)+'초 뒤에 다시 시도하세요.';
+      return '요청이 너무 많습니다. 잠시 기다린 뒤 다시 시도하세요.';
+    }
+    function openStatusText(error){
+      if(!openMode()||!error) return '';
+      if(error.status===403&&error.code==='open_access_disabled') return '지금은 행사 웹 실행이 닫혀 있습니다.';
+      if(error.status===403&&error.code==='invalid_access_key') return '링크가 올바르지 않습니다. 부스의 QR로 다시 열어 주세요.';
+      if(error.status===429) return retryWaitText(error);
+      return '';
+    }
     function httpText(error){
+      const special=openStatusText(error);
+      if(special) return special;
       const status=error?error.status:0;
       if(status===401) return '로그인이 필요합니다. 세션이 끝났으면 다시 로그인하세요.';
       if(status===403) return '이 계정에는 이 작업 권한이 없습니다.';
@@ -404,7 +486,7 @@
       state.job=null;state.jobKind='review';state.upload=null;state.file=null;state.fileSha='';state.fileError='';
       state.originalInput=null;state.blueSource=null;
       resetReview();
-      fail('세션이 끝났습니다. 다시 로그인해 주세요.');
+      fail(openMode()?'세션을 다시 받지 못했습니다. 페이지를 새로 고친 뒤 다시 시도하세요.':'세션이 끝났습니다. 다시 로그인해 주세요.');
       return true;
     }
 
@@ -423,7 +505,14 @@
       };
     }
 
+    function openProbeText(error){
+      if(!openMode()||!(error&&(error.status===401||error.status===403))) return '';
+      state.session=null;
+      return '로그인 없이 사용할 수 있습니다. 세션을 확인하지 못했습니다.';
+    }
     function probeAuthText(error){
+      const open=openProbeText(error);
+      if(open) return open;
       if(!(error&&(error.status===401||error.status===403))) return '';
       if(state.session&&state.session.source!=='hook'){
         dropSessionStores();
@@ -436,6 +525,12 @@
       }
       return '웹 실행이 설정되어 있습니다. 로그인해 주세요.';
     }
+    function readyStatus(){
+      if(openMode()) return state.session
+        ?'로그인 없이 사용할 수 있습니다. 웹 실행 준비됨.'
+        :'로그인 없이 사용할 수 있습니다. 세션을 확인하지 못했습니다.';
+      return state.session?'웹 실행 준비됨.':'웹 실행이 설정되어 있습니다. 로그인하면 실행할 수 있습니다.';
+    }
     function applyCapabilities(caps){
       state.capabilities=caps;
       state.gate='ready';
@@ -444,7 +539,7 @@
         :(caps.efforts.includes('high')?'high':(caps.efforts[0]||''));
       fillSelect(nodes.model,caps.models,'서버 기본값');
       fillSelect(nodes.effort,caps.efforts,'서버 기본값');
-      state.status=state.session?'웹 실행 준비됨.':'웹 실행이 설정되어 있습니다. 로그인하면 실행할 수 있습니다.';
+      state.status=readyStatus();
     }
     async function probe(){
       state.capabilities=null;
@@ -494,6 +589,11 @@
     }
 
     /* ---------- session ---------- */
+    function showGuestStartError(){
+      if(!(openMode()&&!state.session&&state.hookError)) return;
+      state.error=describe(state.hookError,'guest');
+      render();
+    }
     async function start(){
       state.gate='checking';
       state.status='웹 실행 상태를 확인하는 중…';
@@ -523,6 +623,7 @@
       }
       state.session=await resolveSession();
       await probe();
+      showGuestStartError();
       await restore();
       render();
       finish();
@@ -1269,16 +1370,21 @@
         state.busy='';render();
       }
     }
-    async function artifactBlob(jobId,artifact){
+    async function artifactBlobOnce(jobId,artifact,opts={}){
       const res=await http('/v1/ai/jobs/'+encodeURIComponent(jobId)+'/artifacts/'+encodeURIComponent(artifact.id),{
-        token:currentToken(),timeout:TIMEOUTS.artifact
+        token:opts.token||currentToken(),timeout:TIMEOUTS.artifact
       });
       if(!res.ok){
         const error=Error('http '+res.status);
         error.status=Number(res.status)||0;
+        const retryAfter=retryAfterOf(res);
+        if(retryAfter) error.retryAfter=retryAfter;
         throw error;
       }
       return res.blob();
+    }
+    async function artifactBlob(jobId,artifact){
+      return withHookRetry(opts=>artifactBlobOnce(jobId,artifact,opts));
     }
     function editedArtifact(){
       const job=state.job;
@@ -1448,7 +1554,9 @@
           el('span',{className:'step-code','aria-hidden':'true',textContent:'AI'}),
           el('div',{},
             el('h2',{id:'hosted-ai-title',textContent:'웹 실행'}),
-            el('p',{id:'hosted-ai-intro',className:'muted',textContent:'로그인 → PDF → 검토 지시 → 실행 → 후보 선택 → 수정본 적용 → BLUE 순서로 진행합니다.'}))),
+            el('p',{id:'hosted-ai-intro',className:'muted',textContent:openMode()
+              ?'로그인 없이 PDF를 올리고 RED 검토, 수정 적용, BLUE 검토를 실행합니다.'
+              :'로그인 → PDF → 검토 지시 → 실행 → 후보 선택 → 수정본 적용 → BLUE 순서로 진행합니다.'}))),
         el('p',{id:'hosted-ai-status',className:'form-feedback',role:'status','aria-live':'polite'}),
         el('p',{id:'hosted-ai-error',className:'form-feedback error',role:'alert',hidden:true}));
 
@@ -1481,13 +1589,15 @@
         el('button',{id:'hosted-ai-logout',type:'button',className:'text-button',textContent:'로그아웃'}));
 
       const externalBox=el('div',{id:'hosted-ai-external',hidden:true},
-        el('p',{className:'muted',textContent:'페이지 로그인이 필요합니다. 로그인한 뒤 다시 확인하세요.'}),
+        el('p',{id:'hosted-ai-external-note',className:'muted',textContent:'페이지 로그인이 필요합니다. 로그인한 뒤 다시 확인하세요.'}),
         el('div',{className:'button-row'},
           el('button',{id:'hosted-ai-recheck',type:'button',className:'button secondary',textContent:'로그인 상태 다시 확인'})));
 
       const disabledBox=el('div',{id:'hosted-ai-disabled',hidden:true},
         el('p',{id:'hosted-ai-disabled-message'}),
-        el('p',{className:'muted',textContent:'선택 사항인 로컬 실행은 「로컬 실행 연결」을 참고하세요. 이 패널은 서버로 아무 작업도 보내지 않습니다.'}));
+        el('p',{className:'muted',textContent:openMode()
+          ?'이 패널은 서버로 아무 작업도 보내지 않습니다.'
+          :'선택 사항인 로컬 실행은 「로컬 실행 연결」을 참고하세요. 이 패널은 서버로 아무 작업도 보내지 않습니다.'}));
 
       const configBox=el('div',{id:'hosted-ai-config',hidden:true},
         el('label',{for:'hosted-ai-file'},'검토할 논문 파일 (PDF)',
@@ -1541,7 +1651,7 @@
           el('p',{id:'hosted-ai-result-note',className:'muted'})),
         el('section',{id:'hosted-ai-artifacts-section',hidden:true,'aria-label':'결과 파일'},
           el('h3',{textContent:'결과 파일'}),
-          el('p',{className:'muted',textContent:'로그인 세션으로 인증해 내려받습니다.'}),
+          el('p',{className:'muted',textContent:openMode()?'게스트 세션으로 인증해 내려받습니다.':'로그인 세션으로 인증해 내려받습니다.'}),
           el('ul',{id:'hosted-ai-artifacts',className:'hosted-ai-items'}),
           el('p',{id:'hosted-ai-download-status',className:'form-feedback',role:'status','aria-live':'polite'})),
         el('section',{id:'hosted-ai-edited-section',hidden:true,'aria-label':'수정본과 BLUE 연결'},
@@ -1558,6 +1668,7 @@
         status:find('hosted-ai-status'),error:find('hosted-ai-error'),
         loginForm,sessionRow,externalBox,disabledBox,
         sessionText:find('hosted-ai-session-text'),logout:find('hosted-ai-logout'),
+        externalNote:find('hosted-ai-external-note'),
         username:find('hosted-ai-username'),password:find('hosted-ai-password'),login:find('hosted-ai-login'),
         registerPanel,registerUsername:find('hosted-ai-register-username'),
         registerPassword:find('hosted-ai-register-password'),
@@ -1616,7 +1727,7 @@
       state.restored=false;
       if(!state.session){
         state.busy='';
-        fail(hookPresent()?'페이지 로그인 세션을 찾지 못했습니다. 로그인한 뒤 다시 확인하세요.':'로그인 세션이 없습니다. 아이디와 비밀번호로 로그인하세요.');
+        fail(missingSessionText());
         return;
       }
       await probe();
@@ -1952,15 +2063,35 @@
       nodes.error.textContent=state.error||'';
       setHidden(nodes.error,!state.error);
     }
+    function missingSessionText(){
+      if(openMode()) return '게스트 세션을 받지 못했습니다. 잠시 뒤 다시 확인하세요.';
+      if(hookPresent()) return '페이지 로그인 세션을 찾지 못했습니다. 로그인한 뒤 다시 확인하세요.';
+      return '로그인 세션이 없습니다. 아이디와 비밀번호로 로그인하세요.';
+    }
     function renderSessionRow(ctx){
       setHidden(nodes.sessionRow,!ctx.signed||ctx.locked);
-      setHidden(nodes.logout,!ctx.signed||(state.session&&state.session.source==='hook'));
+      if(!openMode()) setHidden(nodes.logout,!ctx.signed||(state.session&&state.session.source==='hook'));
       if(ctx.signed) nodes.sessionText.textContent=sessionLabel();
     }
-    function renderGate(ctx){
-      setHidden(nodes.loginForm,ctx.locked||ctx.signed||ctx.hook);
-      setHidden(nodes.registerPanel,ctx.locked||ctx.signed||ctx.hook);
+    function authGateHidden(open,ctx){
+      return open||ctx.locked||ctx.signed||ctx.hook;
+    }
+    function renderExternalNote(open,ctx){
       setHidden(nodes.externalBox,ctx.locked||ctx.signed||!ctx.hook);
+      if(nodes.externalNote){
+        nodes.externalNote.textContent=open
+          ?'게스트 세션을 확인하지 못했습니다. 아래 상태 확인을 다시 누르세요.'
+          :'페이지 로그인이 필요합니다. 로그인한 뒤 다시 확인하세요.';
+      }
+      if(nodes.recheck) nodes.recheck.textContent=open?'다시 확인':'로그인 상태 다시 확인';
+    }
+    function renderGate(ctx){
+      const open=openMode();
+      const hideAuth=authGateHidden(open,ctx);
+      setHidden(nodes.loginForm,hideAuth);
+      setHidden(nodes.registerPanel,hideAuth);
+      setHidden(nodes.logout,open||!ctx.signed||(state.session&&state.session.source==='hook'));
+      renderExternalNote(open,ctx);
       renderSessionRow(ctx);
       setHidden(nodes.disabledBox,!ctx.locked);
       if(ctx.locked) nodes.disabledMessage.textContent=state.disabledMessage||'';
