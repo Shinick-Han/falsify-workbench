@@ -184,7 +184,7 @@ test('a stored member session is reused and paper calls post path plus body',asy
   assert.equal(exported.ok,true);
   const raw=entry.calls.filter(call=>call.path==='/v1/ai/paper').at(-1).body;
   assert.equal(raw.split(file).length,2,'the PDF body is serialized once');
-  await assert.rejects(session.request('/api/blue/jobs',{}),/허용되지 않은 로컬 경로/);
+  await assert.rejects(session.request('/api/blue/jobs',{}),/허용되지 않은 요청/);
   assert.equal(entry.calls.filter(call=>call.path==='/v1/ai/paper').length,3);
   const controller=new AbortController();
   hung=session.request('/api/paper/evidence/jobs/'+'ab'.repeat(16),null,{signal:controller.signal});

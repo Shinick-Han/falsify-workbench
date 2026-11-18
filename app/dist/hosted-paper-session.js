@@ -32,18 +32,18 @@
     });
   }
   function aborted(){
-    const error=new Error('로컬 요청을 중단했습니다.');
+    const error=new Error('요청을 중단했습니다.');
     error.name='AbortError';
     return error;
   }
   function authFailed(){
-    const error=new Error('로컬 broker가 인증을 거부했습니다 (401). 토큰·포트·--web-origin을 확인하세요.');
+    const error=new Error('웹 실행 세션을 만들지 못했습니다. 페이지를 새로 고친 뒤 다시 시도하세요.');
     error.httpStatus=401;
     return error;
   }
-  function badPath(){return new Error('허용되지 않은 로컬 경로입니다.');}
+  function badPath(){return new Error('허용되지 않은 요청입니다.');}
   function networkError(){
-    return new Error('로컬 broker에 닿지 못했습니다. 서버 미실행·포트 불일치·--web-origin 누락(CORS 거부)·브라우저 로컬 네트워크 권한 차단 중 하나일 수 있습니다. 브라우저는 원인을 구분해 알려주지 않습니다.');
+    return new Error('웹 실행 서버에 연결하지 못했습니다. 잠시 후 다시 시도하세요.');
   }
   function pathOk(path){return typeof path==='string'&&PATH.test(path);}
   function signalOf(opts){return opts&&typeof opts==='object'?opts.signal:undefined;}
@@ -52,9 +52,11 @@
     return !!(session&&typeof session.apiBase==='string'&&session.apiBase&&typeof session.token==='string'&&session.token);
   }
   function statusMessage(status, code){
-    if(status===401||status===403) return '로컬 broker가 인증을 거부했습니다 ('+status+'). 토큰·포트·--web-origin을 확인하세요.';
+    if(status===401||status===403) return '웹 실행 세션이 만료되었습니다 ('+status+'). 페이지를 새로 고친 뒤 다시 시도하세요.';
+    if(code==='paper_busy') return '웹 실행 서버가 다른 작업을 처리하고 있습니다. 잠시 후 다시 시도하세요.';
+    if(code==='rate_limited') return '시간당 사용 한도에 도달했습니다. 잠시 후 다시 시도하세요.';
     if(code) return code;
-    return '로컬 요청 실패 ('+status+')';
+    return '웹 실행 요청 실패 ('+status+')';
   }
   function errorCode(detail, data){
     if(detail&&typeof detail.code==='string'&&CODE.test(detail.code)) return detail.code;
@@ -105,9 +107,9 @@
   }
   function acceptBody(res, data, signal){
     if(stopped(signal)) throw aborted();
-    if(res&&(res.redirected||res.type==='opaqueredirect')) throw new Error('로컬 broker 리디렉션을 거부했습니다.');
+    if(res&&(res.redirected||res.type==='opaqueredirect')) throw new Error('웹 실행 서버의 리디렉션을 거부했습니다.');
     if(!res||!res.ok) throw statusError(res&&res.status||0, data);
-    if(!data||typeof data!=='object'||Array.isArray(data)) throw new Error('로컬 broker 응답이 JSON 객체가 아닙니다.');
+    if(!data||typeof data!=='object'||Array.isArray(data)) throw new Error('웹 실행 서버 응답이 JSON 객체가 아닙니다.');
     return data;
   }
   async function request(path, body, opts){
