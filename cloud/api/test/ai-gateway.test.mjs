@@ -1528,16 +1528,18 @@ test('migration 0004 and deployed wrangler keep credentials secret and usage pol
   assert.equal(usage.includes('api_key'), false);
   assert.equal(/ADD COLUMN .*balance/i.test(usage), false, 'no fabricated balance column is stored');
   const wrangler = readFileSync(path.join(apiRoot, 'wrangler.jsonc'), 'utf8');
-  assert.equal(wrangler.split('"AI_HOSTING_ENABLED": "true"').length, 3);
-  assert.equal(wrangler.split('"AI_OWNER_TOKEN_BUDGET": "0"').length, 3);
-  assert.equal(wrangler.split('"AI_TOKEN_WINDOW_SECONDS": "86400"').length, 3);
+  // production, staging and the guest-only event environment.
+  assert.equal(wrangler.split('"AI_HOSTING_ENABLED": "true"').length, 4);
+  assert.equal(wrangler.split('"AI_OWNER_TOKEN_BUDGET": "0"').length, 4);
+  assert.equal(wrangler.split('"AI_TOKEN_WINDOW_SECONDS": "86400"').length, 4);
+  assert.equal(/"AI_OPEN_ACCESS_KEY"\s*:/.test(wrangler), false, 'the event access key is a secret, never a var');
   assert.equal(/"HOSTED_AI_SERVICE_TOKEN"\s*:/.test(wrangler), false, 'the service token is a secret, never a var');
   assert.equal(/"ANTHROPIC_API_KEY"\s*:/.test(wrangler), false);
   assert.equal(wrangler.includes('sk-ant-'), false);
   assert.match(wrangler, /"AI_RUNTIME_URL": "https:\/\/falsify-runtime\.shinick\.dev\/production"/);
   assert.match(wrangler, /"AI_RUNTIME_URL": "https:\/\/falsify-runtime\.shinick\.dev\/staging"/);
   assert.match(wrangler, /"AI_MAX_UPLOAD_BYTES": "33554432"/);
-  assert.equal(wrangler.split('"CONFLUENCE_ONLY": "true"').length, 3);
+  assert.equal(wrangler.split('"CONFLUENCE_ONLY": "true"').length, 4);
 });
 
 const GUEST_TOKEN = /^fsg_[A-Za-z0-9_-]{43}$/;

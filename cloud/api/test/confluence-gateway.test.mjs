@@ -898,9 +898,9 @@ describe('confluence gateway', { concurrency: false }, () => {
     assert.equal(wrangler.includes('ATLASSIAN_CLIENT_SECRET'), false);
     assert.equal(wrangler.includes('CONFLUENCE_SESSION_KEY'), false);
     assert.equal(wrangler.includes('424242'), false);
-    assert.equal(wrangler.split('"CONFLUENCE_PARENT_PAGE_ID": "8355842"').length, 3);
-    assert.equal(wrangler.split('"ATLASSIAN_CLIENT_ID": "LQL1zmOGHXyk8V4ShnSdPJCc5MzJWYDN"').length, 3);
-    assert.equal(wrangler.split('"CONFLUENCE_ONLY": "true"').length, 3);
+    assert.equal(wrangler.split('"CONFLUENCE_PARENT_PAGE_ID": "8355842"').length, 4);
+    assert.equal(wrangler.split('"ATLASSIAN_CLIENT_ID": "LQL1zmOGHXyk8V4ShnSdPJCc5MzJWYDN"').length, 4);
+    assert.equal(wrangler.split('"CONFLUENCE_ONLY": "true"').length, 4);
     assert.equal(wrangler.includes('"CONFLUENCE_ONLY": "false"'), false);
     assert.match(wrangler, /"REMOTE_PROVIDER": "confluence"/);
     assert.match(wrangler, /"database_name": "falsify-harness-records"/);

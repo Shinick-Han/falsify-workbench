@@ -705,7 +705,9 @@ test('invite CLI: argument validation and environment mapping match wrangler.jso
   assert.equal(cli.parseArgs(['admit', '--env', 'staging', '--username', 'Alice']).username, 'alice');
   const config = readFileSync(path.join(apiRoot, 'wrangler.jsonc'), 'utf8');
   const names = [...config.matchAll(/"database_name": "([^"]+)"/g)].map(m => m[1]);
-  assert.deepEqual(names, [cli.ENVIRONMENTS.production.database, cli.ENVIRONMENTS.staging.database]);
+  // The guest-only event database has no invite flow, so the CLI maps only production and staging.
+  assert.deepEqual(names, [cli.ENVIRONMENTS.production.database, cli.ENVIRONMENTS.staging.database, 'falsify-harness-records-event']);
+  assert.equal(Object.hasOwn(cli.ENVIRONMENTS, 'event'), false);
   const args = cli.wranglerArgs('staging', 'SELECT 1;');
   assert.deepEqual(args.slice(1, 6), ['d1', 'execute', 'falsify-harness-records-staging', '--remote', '--config']);
   assert.ok(args.includes('--env') && args[args.indexOf('--env') + 1] === 'staging');
