@@ -20,6 +20,12 @@
   const TTL=12*60*60*1000;
   const SVG='http://www.w3.org/2000/svg';
   const round=n=>Math.round(n*1000)/1000;
+  const SELECTION_UNLOCATED='선택한 글의 위치를 한 곳으로 확정하지 못해 편집으로 넣지 않았습니다.';
+  const SELECTION_MULTI='선택이 여러 영역에 걸쳐 있습니다. 한 영역 안에서 다시 선택하세요.';
+  const SELECTION_ROTATED='회전된 글자는 글 편집으로 넣을 수 없습니다. 표·그래프·그림 고치기를 쓰세요.';
+  const SELECTION_PAGE='회전된 쪽은 위쪽 원점 좌표로 확정할 수 없어 편집으로 넣지 않았습니다.';
+  const REGION_GAP=48;
+  const POINTER_RADIUS=12;
 
   function pageIndexFromLabel(label){
     const m=/^PDF p\. (\d+)$/.exec(String(label||''));
@@ -194,7 +200,16 @@
       ordered=index.spans.slice(first,last+1);
       start=ordered[0].start;end=ordered[ordered.length-1].end;
     }
-    return {ordered,start,end};
+    return trimBlankEdges(ordered,start,end);
+  }
+  function trimBlankEdges(ordered,start,end){
+    let first=0,last=ordered.length-1;
+    while(last>first&&end<=ordered[last].start){last-=1;end=ordered[last].end;}
+    while(first<last&&start>=ordered[first].end){first+=1;start=ordered[first].start;}
+    while(last>first&&!String(ordered[last].str||'').trim()){last-=1;end=ordered[last].end;}
+    while(first<last&&!String(ordered[first].str||'').trim()){first+=1;start=ordered[first].start;}
+    if(!(start<end))return null;
+    return {ordered:ordered.slice(first,last+1),start,end};
   }
   function selectionBox(range,ordered,start,end,items,viewBox){
     let bbox=validBbox(range&&range.domBox)?range.domBox.map(round):null;
@@ -230,20 +245,100 @@
     }
     return true;
   }
-  function anchorFromSelection(items,viewBox,hitIndexes,geometry){
-    const dimensions=selectionDimensions(items,viewBox,geometry);if(!dimensions)return null;
+  function itemRotated(item){
+    const tr=item&&item.transform||[];
+    const rise=Math.abs(Number(tr[1])||0),shear=Math.abs(Number(tr[2])||0);
+    return rise>=0.001||shear>=0.001;
+  }
+  function boxGap(a,b){
+    const dx=Math.max(0,Math.max(a[0],b[0])-Math.min(a[2],b[2]));
+    const dy=Math.max(0,Math.max(a[1],b[1])-Math.min(a[3],b[3]));
+    return Math.hypot(dx,dy);
+  }
+  function spanBoxes(items,viewBox,ordered){
+    const boxes=[];
+    for(const span of ordered){
+      const box=itemTopLeft(items[span.i],viewBox);
+      if(box)boxes.push(box);
+    }
+    return boxes;
+  }
+  function unionRegions(boxes){
+    if(boxes.length<2)return boxes.length;
+    const parent=boxes.map((_,i)=>i);
+    const find=i=>parent[i]===i?i:(parent[i]=find(parent[i]));
+    for(let i=0;i<boxes.length;i++){
+      for(let j=i+1;j<boxes.length;j++){
+        if(boxGap(boxes[i],boxes[j])>REGION_GAP)continue;
+        parent[find(j)]=find(i);
+      }
+    }
+    const roots=new Set();
+    for(let i=0;i<boxes.length;i++)roots.add(find(i));
+    return roots.size;
+  }
+  function localSlice(span,ordered,start,end){
+    const localStart=span===ordered[0]?start-span.start:0;
+    const localEnd=span===ordered[ordered.length-1]?end-span.start:span.str.length;
+    return localStart!==0||localEnd!==span.str.length;
+  }
+  function rotatedKind(items,selected){
+    const {ordered,start,end}=selected;
+    let rotated=0,partial=false;
+    for(const span of ordered){
+      if(!itemRotated(items[span.i]))continue;
+      rotated+=1;
+      if(localSlice(span,ordered,start,end))partial=true;
+    }
+    if(!rotated)return '';
+    if(partial)return 'partial';
+    return ordered.length===rotated?'whole':'mixed';
+  }
+  function locateSelection(items,viewBox,hitIndexes,geometry){
+    const dimensions=selectionDimensions(items,viewBox,geometry);
+    if(!dimensions)return {reason:'dimensions'};
     const {meta,pageWidth,pageHeight}=dimensions;
     const index=indexItems(items);
     const range=meta.range&&typeof meta.range==='object'?meta.range:null;
-    const selected=selectionRange(index,range,hitIndexes);if(!selected)return null;
+    const selected=selectionRange(index,range,hitIndexes);
+    if(!selected)return {reason:'range'};
     const {ordered,start,end}=selected;
-    if(!contiguousSelection(index,ordered,start,end))return null;
+    if(!contiguousSelection(index,ordered,start,end))return {reason:'contiguous'};
     const before=index.text.slice(start,end);
-    if(!before.trim())return null;
+    if(!before.trim())return {reason:'blank'};
     const occurrence=occurrenceOf(index.text,before,start);
-    if(!Number.isSafeInteger(occurrence))return null;
-    const bbox=selectionBox(range,ordered,start,end,items,viewBox);if(!bbox)return null;
-    return {before,anchor:{bbox,coordinate:'top-left',pageWidth:round(pageWidth),pageHeight:round(pageHeight),rotation:0,occurrence,start,end}};
+    if(!Number.isSafeInteger(occurrence))return {reason:'occurrence'};
+    const bbox=selectionBox(range,ordered,start,end,items,viewBox);
+    if(!bbox)return {reason:'bbox'};
+    return {located:{before,anchor:{bbox,coordinate:'top-left',pageWidth:round(pageWidth),pageHeight:round(pageHeight),rotation:0,occurrence,start,end}}};
+  }
+  function decideSelection(items,viewBox,hits,geometry,turnedPage){
+    if(turnedPage)return {status:SELECTION_PAGE,branch:'page-rotation'};
+    if(!hits||!hits.length)return {status:SELECTION_UNLOCATED,branch:'!hits.length'};
+    const index=indexItems(items);
+    const range=geometry&&geometry.range;
+    const selected=selectionRange(index,range,hits);
+    if(selected&&unionRegions(spanBoxes(items,viewBox,selected.ordered))>1)return {status:SELECTION_MULTI,branch:'multi-region'};
+    const kind=selected?rotatedKind(items,selected):'';
+    if(kind==='partial'||kind==='mixed')return {status:SELECTION_ROTATED,branch:'rotated-text'};
+    const found=locateSelection(items,viewBox,hits,geometry);
+    if(!found.located)return {status:SELECTION_UNLOCATED,branch:'!located:'+found.reason};
+    return {located:found.located};
+  }
+  function anchorFromSelection(items,viewBox,hitIndexes,geometry){
+    return locateSelection(items,viewBox,hitIndexes,geometry).located||null;
+  }
+  function percentBounds(text,start,end){
+    const re=/\d+(?:\.\d+)?%/g;
+    const fromOff=Math.min(start,end),toOff=Math.max(start,end);
+    let match;
+    while((match=re.exec(text))){
+      const from=match.index,to=from+match[0].length;
+      const point=fromOff===toOff;
+      const inside=point?fromOff>=from&&fromOff<=to:fromOff<to&&toOff>from;
+      if(inside&&!(fromOff===from&&toOff===to))return {start:from,end:to};
+    }
+    return null;
   }
   function visualAnchor(items,viewBox,before,geometry){
     if(pageRotation(geometry&&geometry.rotation)!==0)return null;
@@ -546,7 +641,7 @@
     }
     const listeners=[];
     function listen(node,type,handler,options){if(!node)return;node.addEventListener(type,handler,options);listeners.push(()=>node.removeEventListener(type,handler,options));}
-    let epoch=0,source=null,session=null,unsub=null,snapshot=null,output=null,inline=null,pageText=null,directEditor=null,directControls=null,directStatus=null,directResizeObserver=null,committingDirect=false,committingInline=false,composingDirect=false,selectionClickPending=false;
+    let epoch=0,source=null,session=null,unsub=null,snapshot=null,output=null,inline=null,pageText=null,directEditor=null,directControls=null,directStatus=null,directResizeObserver=null,committingDirect=false,committingInline=false,composingDirect=false,selectionClickPending=false,pointerOrigin=null;
     let fontRevision=0,fontBusy=false,outputAt=null,generationFailed=false;
     let proposalQueue=null,accepted=new Set(),modelById=new Map(),draftRaw=null,pendingFocus=null,pendingResume=null;
     let external=null, externalRevision=0, draftTimer=null,combineIds=new Set(),suppressExternalPaint=false,proposalInputs=new Map(),atomicSelection=false;
@@ -1455,6 +1550,8 @@
     function openDirectEditor(display,geometry){
       const b=geometry?.bbox,w=geometry?.width||display?.pageWidth,h=geometry?.height||display?.pageHeight;
       if(!display||!validBbox(b)||!(w>0&&h>0)){focusInline();return;}
+      if(directEditor){const previous=directEditor;directEditor=null;previous.remove();}
+      removeDirectControls();
       const editor=doc.createElement('textarea');
       editor.value=inline.after;editor.maxLength=4000;editor.spellcheck=false;
       editor.setAttribute('aria-label',(display.pageIndex+1)+'쪽 직접 편집');
@@ -1608,17 +1705,179 @@
       if(!selectionInside(range,sel,textEl))return null;
       return {sel,textEl,range};
     }
-    function captureSelection(event){
-      const captured=readSelection(event);if(!captured)return;
-      const {sel,textEl,range}=captured;
-      if(inline&&ui.inlineAfter.value!==inline.after){canLeaveInline();return;}
-      if(pageText.rotation){setEditStatus('회전된 쪽은 위쪽 원점 좌표로 확정할 수 없어 편집으로 넣지 않았습니다.',true);return;}
+    function markBranch(code){if(ui.editStatus&&ui.editStatus.dataset)ui.editStatus.dataset.branch=code;}
+    function spanText(span){return String(span&&span.textContent||'');}
+    function layerSpans(){
+      const textEl=pageText&&pageText.textEl;
+      if(!textEl||typeof textEl.querySelectorAll!=='function')return [];
+      return [...textEl.querySelectorAll('span')].filter(span=>span.dataset&&span.dataset.i!=null);
+    }
+    function clientRect(span){return span&&typeof span.getBoundingClientRect==='function'?span.getBoundingClientRect():null;}
+    function rectDistance(rect,x,y){
+      if(!rect)return Infinity;
+      const dx=x<rect.left?rect.left-x:x>rect.right?x-rect.right:0;
+      const dy=y<rect.top?rect.top-y:y>rect.bottom?y-rect.bottom:0;
+      return Math.hypot(dx,dy);
+    }
+    function pointInRect(rect,x,y){return !!rect&&x>=rect.left&&x<=rect.right&&y>=rect.top&&y<=rect.bottom;}
+    function containingSpan(spans,x,y){
+      let best=null,score=Infinity;
+      for(const span of spans){
+        const rect=clientRect(span);
+        if(!pointInRect(rect,x,y))continue;
+        const dist=Math.hypot(x-(rect.left+rect.right)/2,y-(rect.top+rect.bottom)/2);
+        if(dist<score){score=dist;best=span;}
+      }
+      return best;
+    }
+    function nearestSpan(spans,x,y){
+      let best=null,score=POINTER_RADIUS;
+      for(const span of spans){
+        const dist=rectDistance(clientRect(span),x,y);
+        if(dist<=score){score=dist;best=span;}
+      }
+      return best;
+    }
+    function caretHit(x,y){
+      if(typeof doc.caretPositionFromPoint==='function'){
+        const pos=doc.caretPositionFromPoint(x,y);
+        if(pos&&pos.offsetNode)return {node:pos.offsetNode,offset:pos.offset};
+      }
+      if(typeof doc.caretRangeFromPoint==='function'){
+        const range=doc.caretRangeFromPoint(x,y);
+        if(range)return {node:range.startContainer,offset:range.startOffset};
+      }
+      return null;
+    }
+    function offsetAlong(span,x,y){
+      const rect=clientRect(span),len=spanText(span).length;
+      if(!len||!rect)return 0;
+      const vertical=rect.height>rect.width*1.2;
+      const spanPx=vertical?rect.height:rect.width;
+      if(!(spanPx>0))return 0;
+      const delta=vertical?y-rect.top:x-rect.left;
+      return Math.max(0,Math.min(len,Math.round(delta/spanPx*len)));
+    }
+    function nearerEdge(span,x,y){
+      const rect=clientRect(span),len=spanText(span).length;
+      if(!rect)return 0;
+      const vertical=rect.height>rect.width*1.2;
+      const mid=vertical?(rect.top+rect.bottom)/2:(rect.left+rect.right)/2;
+      return (vertical?y:x)<mid?0:len;
+    }
+    function offsetInSpan(span,x,y){
+      const caret=caretHit(x,y);
+      const el=caret&&itemElement(caret.node,pageText.textEl);
+      if(el===span){
+        const offset=charOffset(span,caret.node,caret.offset);
+        if(Number.isInteger(offset))return Math.max(0,Math.min(spanText(span).length,offset));
+      }
+      return offsetAlong(span,x,y);
+    }
+    function glyphSpans(){return layerSpans().filter(span=>spanText(span).trim());}
+    function resolveTextPoint(x,y){
+      const spans=glyphSpans();
+      const direct=containingSpan(spans,x,y);
+      if(direct)return {span:direct,offset:offsetInSpan(direct,x,y)};
+      const near=nearestSpan(spans,x,y);
+      if(!near)return null;
+      return {span:near,offset:nearerEdge(near,x,y)};
+    }
+    function textChild(kid){
+      if(kid.nodeType===3)return kid;
+      if(kid.firstChild&&kid.firstChild.nodeType===3)return kid.firstChild;
+      return kid;
+    }
+    function endpointNode(span,offset){
+      const kids=span.childNodes?Array.from(span.childNodes):[];
+      if(!kids.length)return {node:span,offset:0};
+      let acc=0;
+      for(const kid of kids){
+        const len=String(kid.textContent||kid.nodeValue||'').length;
+        if(offset<=acc+len)return {node:textChild(kid),offset:Math.max(0,Math.min(len,offset-acc))};
+        acc+=len;
+      }
+      const last=kids[kids.length-1];
+      return {node:textChild(last),offset:String(last.textContent||'').length};
+    }
+    function textRange(start,end){
+      const ai=Number(start.span.dataset.i),bi=Number(end.span.dataset.i);
+      const flip=ai>bi||(ai===bi&&start.offset>end.offset);
+      const a=flip?end:start,b=flip?start:end;
+      if(Number(a.span.dataset.i)===Number(b.span.dataset.i)&&a.offset===b.offset)return null;
+      if(typeof doc.createRange!=='function')return null;
+      const range=doc.createRange();
+      const from=endpointNode(a.span,a.offset),to=endpointNode(b.span,b.offset);
+      range.setStart(from.node,from.offset);
+      range.setEnd(to.node,to.offset);
+      return range;
+    }
+    function widenRotated(start,end){
+      const item=pageText.items[Number(start.span.dataset.i)];
+      if(start.span!==end.span||!itemRotated(item))return [start,end];
+      return [{span:start.span,offset:0},{span:end.span,offset:spanText(end.span).length}];
+    }
+    function dragPoints(event,origin){
+      if(!origin||editMode!=='text'||!pageText||!pageText.textEl)return null;
+      const up=event.type==='pointerup'||event.type==='mouseup';
+      if(!up||!Number.isFinite(event.clientX)||!Number.isFinite(event.clientY))return null;
+      if(Math.hypot(event.clientX-origin.x,event.clientY-origin.y)<5)return null;
+      const start=resolveTextPoint(origin.x,origin.y),end=resolveTextPoint(event.clientX,event.clientY);
+      if(!start||!end)return null;
+      return widenRotated(start,end);
+    }
+    function applyGeometricSelection(event){
+      const origin=pointerOrigin;
+      pointerOrigin=null;
+      const ends=dragPoints(event,origin);
+      if(!ends)return false;
+      let range=null;
+      try{range=textRange(ends[0],ends[1]);}catch{return false;}
+      if(!range||range.collapsed)return false;
+      const sel=typeof doc.getSelection==='function'?doc.getSelection():null;
+      if(!sel||typeof sel.removeAllRanges!=='function'||typeof sel.addRange!=='function')return false;
+      sel.removeAllRanges();
+      sel.addRange(range);
+      return true;
+    }
+    function expandPercentSelection(event){
+      if(editMode!=='text'||!pageText||!pageText.textEl||!Number.isFinite(event.clientX)||!Number.isFinite(event.clientY))return false;
+      const hit=resolveTextPoint(event.clientX,event.clientY);
+      if(!hit)return false;
+      const token=percentBounds(spanText(hit.span),hit.offset,hit.offset);
+      if(!token)return false;
+      const sel=typeof doc.getSelection==='function'?doc.getSelection():null;
+      if(!sel||typeof sel.removeAllRanges!=='function')return false;
+      let range=null;
+      try{range=textRange({span:hit.span,offset:token.start},{span:hit.span,offset:token.end});}catch{return false;}
+      if(!range)return false;
+      sel.removeAllRanges();
+      sel.addRange(range);
+      return true;
+    }
+    function rememberPointer(event){
+      if(!event||event.button!==0||editMode!=='text'||fieldTarget(event.target)||!pageText||!pageText.textEl){pointerOrigin=null;return;}
+      if(!Number.isFinite(event.clientX)||!Number.isFinite(event.clientY)){pointerOrigin=null;return;}
+      pointerOrigin={x:event.clientX,y:event.clientY};
+    }
+    function decideCaptured(captured){
       const geometry={rotation:0,pageWidth:pageText.pageWidth,pageHeight:pageText.pageHeight};
-      const hits=selectionHits(range,sel,textEl,geometry);
-      if(!hits.length){setEditStatus('선택한 글의 위치를 한 곳으로 확정하지 못해 편집으로 넣지 않았습니다.',true);return;}
-      const located=anchorFromSelection(pageText.items,pageText.viewBox,hits,geometry);
-      if(!located){setEditStatus('선택한 글의 위치를 한 곳으로 확정하지 못해 편집으로 넣지 않았습니다.',true);return;}
-      openSelectedText(located,range,event);
+      const hits=selectionHits(captured.range,captured.sel,captured.textEl,geometry);
+      return decideSelection(pageText.items,pageText.viewBox,hits,geometry,pageText.rotation);
+    }
+    function repeatedClick(event){return !!event&&(event.type==='dblclick'||(event.type==='mouseup'&&event.detail>=2));}
+    function captureSelection(event){
+      const up=event&&(event.type==='pointerup'||event.type==='mouseup');
+      const dragged=up&&applyGeometricSelection(event);
+      if(!dragged&&repeatedClick(event))expandPercentSelection(event);
+      const captured=readSelection(event);
+      if(!captured)return;
+      if(inline&&ui.inlineAfter.value!==inline.after){canLeaveInline();return;}
+      const decision=decideCaptured(captured);
+      if(decision.status){markBranch(decision.branch);setEditStatus(decision.status,true);return;}
+      markBranch('anchored');
+      setEditStatus('');
+      openSelectedText(decision.located,captured.range,event);
     }
     function loadInline(edit){
       if(!canLeaveInline())return;
@@ -2515,7 +2774,9 @@
     listen(ui.draftRestore,'click',restoreDraft);
     listen(ui.draftDelete,'click',deleteDraft);
     listen(ui.beforeStage,'click',openParagraph);
+    listen(ui.beforeStage,'pointerdown',rememberPointer);
     listen(ui.beforeStage,'pointerup',captureSelection);
+    listen(ui.beforeStage,'dblclick',captureSelection);
     listen(ui.beforeStage,'mouseup',captureSelection);
     listen(ui.beforeStage,'keyup',captureSelection);
     listen(ui.root,'keydown',onKey);
