@@ -1,3 +1,10 @@
+## 0.2.0-alpha.83 — 2026-11-18
+
+- BLUE 화면에 브라우저 로컬 PDF 대조 뷰어(`app/dist/blue-paper-reader.js`, `#blue-paper-viewer`)를 추가했습니다. 네트워크 호출 없이 `FalsifyPreview`(PDF.js)와 `FalsifyChangeMarks` 정규화를 재사용해 데스크톱 2단 고정 대조(`원문과 나란히 보기` ↔ `1단 위아래 보기`)를 지원하며, 웹 BLUE·로컬 BLUE·외부 응답·Layer 0 센서 카드의 `원문에서 보기` 클릭 시 해당 쪽을 찾아 인용 구간을 강조(`.blue-quote-highlight`)합니다.
+- RED 표·그래프·그림 통합(`app/dist/paper-visual-integration.js`)에서 미생성 본문 편집이 있을 때 `editor.getSource() === null` 계보 계약은 유지하면서 `본문 수정 반영하고 표·그래프 열기`(`#red-visual-chain-apply`) 배너를 노출해, 원클릭으로 생성본 PDF를 만들고 그 위에서 시각 편집기를 이어 열 수 있게 했습니다.
+- 사람 검수 작업대(`app/dist/review-workbench.js`) 상단에 4분할 실시간 집계 타일(`#review-scoreboard`: 주입 결함 탐지 / 타당 지적 / 순수 오탐 / 기존·경계·오류)과 `미판정만 보기`(`#review-filter-pending`)·`다음 미판정으로`(`#review-next-pending`) 진행 도구를 추가했습니다.
+- RED 캔버스 보조 설정 요약 문구를 `글꼴 · 변경 표시 · 확대`로 유지해 LaTeX 소스 프로젝트 브라우저 회귀 계약과 일치시켰습니다.
+
 ## 0.2.0-alpha.82 — 2026-11-18
 
 - RED(`#paper-file`)·BLUE(`#doc-blue-file`) 논문 입력과 웹 실행(`#hosted-ai`) 사이에 로컬 파일 공유 버스를 연결했습니다. PDF를 한 번 고르면 로컬 SHA-256만 계산해 웹 실행 입력 상태를 채우며, 실행 버튼을 누르기 전에는 업로드나 게스트 세션 발급을 호출하지 않습니다. RED 수정본을 BLUE로 넘기면 BLUE 화면으로 이동하며 맹검 입력만 전달합니다.
