@@ -1,3 +1,10 @@
+## 0.2.0-alpha.80 — 2026-11-18
+
+- 호스팅 런타임에 OpenAI Responses 백엔드(`app/local/openai_backend.py`)를 더했습니다. 키는 서버의 `OPENAI_API_KEY`만 읽습니다. 구조화 출력은 `text.format`의 `json_schema`이고 `strict`는 true입니다. 노력도 `low`·`medium`·`high`·`xhigh`·`max`는 모델별 `reasoning.effort`로 대응합니다. `max`는 그 모델이 지원하는 가장 높은 값이고, `xhigh`는 지원하면 `xhigh`, 아니면 `high`입니다. 이 모듈은 유료 호출을 스스로 재시도하지 않습니다.
+- `claude-*`는 `anthropic`, `gpt-*`와 `o` 다음에 숫자가 오는 이름은 `openai`, 그 밖은 허용하지 않습니다. Python `provider_for_model`과 Worker `providerForModel`이 같은 규칙입니다. 작업의 `provider`는 그 작업 모델에서 정합니다.
+- `GET /v1/ai/capabilities`는 나열된 모델마다 `modelProviders`를 줍니다. 화면의 모델 목록은 `Claude`와 `OpenAI` 그룹으로 나뉩니다.
+- 기본 페이지는 로그인 없이 열리고, 게스트 세션은 접속 키 없이 발급됩니다. 페이지를 열 때는 발급하지 않고, 실행이나 적용이 API를 필요로 할 때만 `POST /v1/ai/guest`를 호출합니다. PC companion은 페이지를 열거나 호스팅 실행을 시작하는 조건이 아닙니다. 운영 Worker와 `event` Worker는 `AI_OPEN_ACCESS`가 `true`이고 모델은 `claude-opus-5-5`·`claude-sonnet-5-5`·`claude-haiku-5-5`·`gpt-6.2-astra`·`gpt-5.5`·`gpt-5.4-mini`입니다. 운영 게스트 상한은 세션 21600초, IP당 시간당 발급 20회, 전체 발급 300회, 업로드 10회·전체 120회, 본문 20971520바이트, 작업 6회·전체 40회, 동시 작업 1개, 작업당 호출 8회, 토큰 예산 3000000(86400초)입니다. 행사 Worker는 IP당 발급 60회와 토큰 예산 4000000이고 나머지 게스트 상한은 같습니다.
+
 ## 0.2.0-alpha.79 — 2026-11-18
 
 - `POST /v1/ai/guest`는 호스팅이 켜져 있고 `AI_OPEN_ACCESS`가 `true`일 때만 게스트를 발급합니다. 토큰은 `fsg_`와 base64url 43자이고, 소유자는 세션마다 `gst:<uuid v4>`입니다. 이 베어러는 `/v1/ai/*`에서만 받고, 기록·Confluence·비밀번호·로그아웃은 알 수 없는 토큰과 같이 거절합니다. 오픈 액세스가 꺼져 있으면 발급과 이후 `fsg_` 사용은 `403 open_access_disabled`이고, 호스팅이 꺼져 있으면 그 경로는 `404`입니다.
