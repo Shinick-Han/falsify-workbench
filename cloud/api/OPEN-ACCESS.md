@@ -48,9 +48,11 @@ Records, `/v1/me`, logout, password change, session revoke, and Confluence rejec
 
 `enabled` follows `AI_OPEN_ACCESS`. `accessKeyRequired` is true only when open access is on and `AI_OPEN_ACCESS_KEY` is a non-empty string. When open access is off the pair is `false` / `false`, even if a key is still stored. The key value is never returned.
 
+`limits` keeps its existing shape. Unsigned callers, password sessions, Confluence sessions, and an `fsg_` bearer that is missing, expired, unknown, or sent while open access is off all see `limits.maxUploadBytes` at `AI_MAX_UPLOAD_BYTES`, and the response stays `200`. A valid `fsg_` bearer is the guest case: that same field becomes `min(AI_GUEST_MAX_UPLOAD_BYTES, AI_MAX_UPLOAD_BYTES)`. The event page sends the guest bearer on this probe, which is how it learns the cap. No extra field is added. `maxPromptChars` is unchanged.
+
 ## Settings
 
-All optional. Unset values use the default. Non-guest owners keep `AI_UPLOADS_PER_OWNER_HOUR`, `AI_JOBS_PER_OWNER_HOUR`, `AI_ACTIVE_JOBS_PER_OWNER`, `AI_MAX_CALLS_PER_JOB`, and `AI_OWNER_TOKEN_BUDGET`.
+All optional. Unset values use the default. Non-guest owners keep `AI_UPLOADS_PER_OWNER_HOUR`, `AI_JOBS_PER_OWNER_HOUR`, `AI_ACTIVE_JOBS_PER_OWNER`, `AI_MAX_CALLS_PER_JOB`, `AI_MAX_UPLOAD_BYTES`, and `AI_OWNER_TOKEN_BUDGET`.
 
 | Name | Kind | Default | Effect |
 |---|---|---|---|
@@ -58,16 +60,24 @@ All optional. Unset values use the default. Non-guest owners keep `AI_UPLOADS_PE
 | `AI_OPEN_ACCESS_KEY` | secret | empty | non-empty requires `accessKey` on `POST /v1/ai/guest` |
 | `AI_GUEST_SESSION_SECONDS` | var | `21600` | session lifetime |
 | `AI_GUESTS_PER_IP_HOUR` | var | `10` | new sessions per IP per hour |
-| `AI_GUESTS_PER_HOUR` | var | `600` | new sessions for the whole worker per hour |
-| `AI_GUEST_UPLOADS_PER_OWNER_HOUR` | var | `10` | uploads for one `gst:` owner |
-| `AI_GUEST_JOBS_PER_OWNER_HOUR` | var | `6` | jobs for one `gst:` owner |
+| `AI_GUESTS_PER_HOUR` | var | `600` | new sessions for the whole worker per hour, including rotating IPs |
+| `AI_GUEST_UPLOADS_PER_OWNER_HOUR` | var | `10` | uploads for one `gst:` owner, including a same-byte repeat |
+| `AI_GUEST_UPLOADS_PER_HOUR` | var | `300` | new runtime uploads for every `gst:` owner combined |
+| `AI_GUEST_MAX_UPLOAD_BYTES` | var | `20971520` | guest body cap; never above `AI_MAX_UPLOAD_BYTES` (itself at most 64 MiB) |
+| `AI_GUEST_JOBS_PER_OWNER_HOUR` | var | `6` | jobs for one `gst:` owner, including `applyOnly` |
 | `AI_GUEST_ACTIVE_JOBS_PER_OWNER` | var | `1` | queued, running, or cancelling jobs for one guest |
 | `AI_GUEST_MAX_CALLS_PER_JOB` | var | `8` | also capped by `AI_MAX_CALLS_PER_JOB` |
-| `AI_GUEST_JOBS_PER_HOUR` | var | `150` | jobs for every `gst:` owner combined |
-| `AI_GUEST_TOKEN_BUDGET` | var | `0` | `0` is off. Otherwise the sum of recorded terminal usage for every `gst:` owner in `AI_TOKEN_WINDOW_SECONDS` |
+| `AI_GUEST_JOBS_PER_HOUR` | var | `150` | jobs for every `gst:` owner combined, including `applyOnly` |
+| `AI_GUEST_JOB_READS_PER_OWNER_HOUR` | var | `600` | status polls, cancels, and idempotent replays for one guest |
+| `AI_GUEST_JOB_READS_PER_HOUR` | var | `45000` | those runtime reads for every guest combined |
+| `AI_GUEST_ARTIFACTS_PER_OWNER_HOUR` | var | `60` | artifact downloads for one guest |
+| `AI_GUEST_ARTIFACTS_PER_HOUR` | var | `1200` | artifact downloads for every guest combined |
+| `AI_GUEST_TOKEN_BUDGET` | var | `0` | `0` is off. Otherwise the sum of recorded terminal usage for every `gst:` owner in `AI_TOKEN_WINDOW_SECONDS`. `applyOnly` does not spend it |
 | `AI_TOKEN_WINDOW_SECONDS` | var | `86400` | existing window, shared with the per-owner budget |
 
-IP buckets store a truncated hash. A failed access-key check still spends a mint slot.
+IP buckets store a truncated hash. A failed access-key check still spends a mint slot. A same-byte upload repeat spends the per-owner upload slot and does not spend `AI_GUEST_UPLOADS_PER_HOUR`, because the runtime is not called. The global upload slot is taken only after that lookup and before the runtime forward. An oversized guest body is refused before either upload slot is taken.
+
+Job reads are counted only after the job is known to belong to the caller. A missing or foreign id is `404` and does not spend the cap. The global read default is 150 jobs at the page's steady 12 second poll (300 reads an hour). The per-owner default leaves margin for cancel, replay, and a manual refresh. Artifact bodies are streamed from the runtime; the gateway caps how many, not how large each one is.
 
 ## Worst case at the defaults
 
@@ -77,7 +87,19 @@ Paid calls per hour are bounded by the tighter of the per-guest product and the 
 
 `min(600 × 6, 150) × min(8, 24) = 150 × 8 = 1200` provider calls per hour.
 
-The per-guest product alone would be `600 × 6 × 8 = 28800`. The global job cap is what stops that. The active-job cap limits concurrency, not this hourly total, once jobs finish. Uploads are separate: `600 × 10 = 6000` guest uploads per hour. There is no second global upload cap. The token budget default `0` does not reduce the 1200. `applyOnly` jobs spend a job slot and make no provider call, so they do not add to the 1200.
+The per-guest product alone would be `600 × 6 × 8 = 28800`. The global job cap is what stops that. The active-job cap limits concurrency, not this hourly total, once jobs finish. The token budget default `0` does not reduce the 1200. `applyOnly` jobs spend a per-owner slot and a global job slot and make no provider call, so they do not add to the 1200.
+
+New runtime uploads per hour:
+
+`min(AI_GUESTS_PER_HOUR × AI_GUEST_UPLOADS_PER_OWNER_HOUR, AI_GUEST_UPLOADS_PER_HOUR) = min(600 × 10, 300) = 300`
+
+Bytes per hour, using the guest body cap:
+
+`300 × min(AI_GUEST_MAX_UPLOAD_BYTES, AI_MAX_UPLOAD_BYTES) = 300 × 20971520 = 6291456000`
+
+That is 300 uploads and 6291456000 bytes. Without the global upload cap the same defaults would be `600 × 10 = 6000` uploads, and without the guest byte cap each of those could be `AI_MAX_UPLOAD_BYTES` (32 MiB).
+
+Status, cancel, and idempotent replay together are at most `min(600 × 600, 45000) = 45000` runtime reads an hour. They do not start a provider call. A replay does not spend a job slot, including when the hourly job cap is already full. A different request under the same key is still `409` and does not spend a slot either. Artifact downloads are at most `min(600 × 60, 1200) = 1200` an hour. Rotating the client IP does not raise minting past `AI_GUESTS_PER_HOUR` (600).
 
 An anonymous caller can mint sessions, upload, and run jobs until those caps. They cannot read another owner's jobs, records, or Confluence archives, and they cannot change a password or revoke a password session.
 

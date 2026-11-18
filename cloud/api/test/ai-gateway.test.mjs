@@ -9,6 +9,7 @@ import { createCipheriv, createHash, randomBytes, scryptSync } from 'node:crypto
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { aiSettings } from '../src/ai-gateway.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const apiRoot = path.resolve(here, '..');
@@ -1907,6 +1908,259 @@ test('an issued fsg bearer is rejected on non-AI routes like an unknown bearer',
     }
     const still = await upload(call, token, pdfBytes('guest-after-non-ai'));
     assert.equal(still.status, 201, 'the guest session is still an AI owner');
+  });
+});
+
+const GUEST_OPEN = {
+  AI_HOSTING_ENABLED: 'true',
+  AI_OPEN_ACCESS: 'true',
+  CONFLUENCE_ONLY: 'false',
+  AI_MAX_UPLOAD_BYTES: '4096',
+};
+
+function applyOnlyBody(uploadId, key) {
+  return {
+    ...jobBody(uploadId, { idempotencyKey: key, budget: { maxCalls: 0 } }),
+    applyOnly: true,
+    edits: [TEXT_EDIT],
+  };
+}
+
+test('guest limit defaults stay inside the deployment upload cap', () => {
+  const settings = aiSettings({});
+  assert.equal(settings.maxUploadBytes, 32 * 1024 * 1024);
+  assert.equal(settings.guestMaxUploadBytes, 20 * 1024 * 1024);
+  assert.equal(settings.guestUploadsPerHour, 300);
+  assert.equal(settings.guestJobReadsPerOwnerHour, 600);
+  assert.equal(settings.guestJobReadsPerHour, 45000);
+  assert.equal(settings.guestArtifactsPerOwnerHour, 60);
+  assert.equal(settings.guestArtifactsPerHour, 1200);
+  const capped = aiSettings({ AI_MAX_UPLOAD_BYTES: '100', AI_GUEST_MAX_UPLOAD_BYTES: '1000' });
+  assert.equal(capped.maxUploadBytes, 100);
+  assert.equal(capped.guestMaxUploadBytes, 100);
+  const nonGuest = aiSettings({ AI_MAX_UPLOAD_BYTES: '1000', AI_GUEST_MAX_UPLOAD_BYTES: '40' });
+  assert.equal(nonGuest.maxUploadBytes, 1000);
+  assert.equal(nonGuest.guestMaxUploadBytes, 40);
+});
+
+test('guest uploads are capped globally and by a byte limit the guest learns from limits', async () => {
+  await withApp({
+    ...GUEST_OPEN,
+    AI_MAX_UPLOAD_BYTES: '100',
+    AI_GUEST_MAX_UPLOAD_BYTES: '40',
+    AI_GUEST_UPLOADS_PER_HOUR: '2',
+    AI_GUEST_UPLOADS_PER_OWNER_HOUR: '5',
+    AI_UPLOADS_PER_OWNER_HOUR: '5',
+  }, async (mf, call) => {
+    const token = (await mintGuest(call)).body.guest.token;
+    const ada = await register(mf, call, 'uploadcap');
+    const unsigned = await call('GET', '/v1/ai/capabilities');
+    const asGuest = await call('GET', '/v1/ai/capabilities', { token });
+    const asPassword = await call('GET', '/v1/ai/capabilities', { token: ada.body.token });
+    const unknown = await call('GET', '/v1/ai/capabilities', { token: 'fsg_' + 'c'.repeat(43) });
+    assert.equal(unsigned.body.limits.maxUploadBytes, 100);
+    assert.equal(asGuest.status, 200);
+    assert.equal(asGuest.body.limits.maxUploadBytes, 40);
+    assert.equal(asGuest.body.limits.maxPromptChars, unsigned.body.limits.maxPromptChars);
+    assert.equal(asPassword.body.limits.maxUploadBytes, 100);
+    assert.equal(unknown.status, 200);
+    assert.equal(unknown.body.limits.maxUploadBytes, 100);
+    assert.deepEqual(Object.keys(asGuest.body.limits).sort(), ['maxPromptChars', 'maxUploadBytes']);
+
+    const tooBig = await upload(call, token, Buffer.alloc(41, 0x25));
+    assert.equal(tooBig.status, 413);
+    assert.equal(tooBig.body.error.code, 'payload_too_large');
+    assert.equal(await stubCalls(mf, '/internal/v1/uploads', 'POST'), 0, 'an oversized body is not forwarded');
+
+    const first = await upload(call, token, Buffer.alloc(40, 0x25));
+    assert.equal(first.status, 201);
+    const dedup = await upload(call, token, Buffer.alloc(40, 0x25), { name: 'again.pdf' });
+    assert.equal(dedup.status, 200);
+    assert.equal(dedup.body.upload.deduplicated, true);
+    assert.equal(await stubCalls(mf, '/internal/v1/uploads', 'POST'), 1, 'a repeat does not reach the runtime');
+
+    const other = (await mintGuest(call, undefined, fromIp('203.0.113.31'))).body.guest.token;
+    const second = await upload(call, other, Buffer.alloc(40, 0x26));
+    assert.equal(second.status, 201, 'a same-byte repeat does not spend the global upload cap');
+    const thirdToken = (await mintGuest(call, undefined, fromIp('203.0.113.32'))).body.guest.token;
+    const third = await upload(call, thirdToken, Buffer.alloc(40, 0x27));
+    assert.equal(third.status, 429);
+    assert.equal(third.body.error.code, 'rate_limited');
+    assert.match(third.headers.get('Retry-After'), /^[1-9][0-9]*$/);
+    assert.equal(await stubCalls(mf, '/internal/v1/uploads', 'POST'), 2, 'the blocked guest is not forwarded');
+
+    const password = await upload(call, ada.body.token, Buffer.alloc(80, 0x28));
+    assert.equal(password.status, 201, 'password owners keep AI_MAX_UPLOAD_BYTES');
+    const passwordTooBig = await upload(call, ada.body.token, Buffer.alloc(101, 0x28));
+    assert.equal(passwordTooBig.status, 413);
+  });
+
+  await withApp({
+    ...GUEST_OPEN,
+    AI_MAX_UPLOAD_BYTES: '30',
+    AI_GUEST_MAX_UPLOAD_BYTES: '1000',
+  }, async (mf, call) => {
+    const token = (await mintGuest(call)).body.guest.token;
+    const caps = await call('GET', '/v1/ai/capabilities', { token });
+    assert.equal(caps.body.limits.maxUploadBytes, 30, 'the guest cap cannot exceed AI_MAX_UPLOAD_BYTES');
+    assert.equal((await call('GET', '/v1/ai/capabilities')).body.limits.maxUploadBytes, 30);
+    assert.equal((await upload(call, token, Buffer.alloc(30, 0x25))).status, 201);
+    assert.equal((await upload(call, token, Buffer.alloc(31, 0x26))).status, 413);
+  });
+
+  await withApp({
+    AI_HOSTING_ENABLED: 'true',
+    AI_OPEN_ACCESS: 'false',
+    CONFLUENCE_ONLY: 'false',
+  }, async (mf, call) => {
+    const unsigned = await call('GET', '/v1/ai/capabilities');
+    const caps = await call('GET', '/v1/ai/capabilities', { token: 'fsg_' + 'd'.repeat(43) });
+    assert.equal(caps.status, 200);
+    assert.equal(caps.body.limits.maxUploadBytes, unsigned.body.limits.maxUploadBytes);
+    assert.deepEqual(caps.body.openAccess, { enabled: false, accessKeyRequired: false });
+  });
+});
+
+test('apply-only guest jobs count toward the guest job caps', async () => {
+  await withApp({
+    ...GUEST_OPEN,
+    AI_GUEST_JOBS_PER_OWNER_HOUR: '1',
+    AI_GUEST_JOBS_PER_HOUR: '10',
+    AI_GUEST_ACTIVE_JOBS_PER_OWNER: '5',
+    AI_GUEST_TOKEN_BUDGET: '1',
+  }, async (mf, call) => {
+    const token = (await mintGuest(call)).body.guest.token;
+    const up = await upload(call, token, pdfBytes('apply-owner'));
+    const first = await postJob(call, token, applyOnlyBody(up.body.upload.id, 'op-apply-owner-1'));
+    assert.equal(first.status, 202);
+    assert.equal(first.body.job.applyOnly, true);
+    const second = await postJob(call, token, applyOnlyBody(up.body.upload.id, 'op-apply-owner-2'));
+    assert.equal(second.status, 429);
+    assert.equal(second.body.error.code, 'rate_limited');
+    const rows = await (await mf.getD1Database('DB')).prepare('SELECT COUNT(*) AS count FROM ai_jobs').first();
+    assert.equal(rows.count, 1);
+    assert.equal(await stubCalls(mf, '/internal/v1/jobs', 'POST'), 1);
+  });
+
+  await withApp({
+    ...GUEST_OPEN,
+    AI_GUEST_JOBS_PER_OWNER_HOUR: '6',
+    AI_GUEST_JOBS_PER_HOUR: '1',
+    AI_GUEST_ACTIVE_JOBS_PER_OWNER: '5',
+  }, async (mf, call) => {
+    const tokenA = (await mintGuest(call, undefined, fromIp('203.0.113.40'))).body.guest.token;
+    const tokenB = (await mintGuest(call, undefined, fromIp('203.0.113.41'))).body.guest.token;
+    const upA = await upload(call, tokenA, pdfBytes('apply-global-a'));
+    const upB = await upload(call, tokenB, pdfBytes('apply-global-b'));
+    const first = await postJob(call, tokenA, applyOnlyBody(upA.body.upload.id, 'op-apply-global-1'));
+    assert.equal(first.status, 202);
+    const blocked = await postJob(call, tokenB, jobBody(upB.body.upload.id, { idempotencyKey: 'op-apply-global-2' }));
+    assert.equal(blocked.status, 429);
+    assert.equal(blocked.body.error.code, 'rate_limited');
+    assert.equal(await stubCalls(mf, '/internal/v1/jobs', 'POST'), 1, 'the second guest does not reach the runtime');
+    const ada = await register(mf, call, 'applyada');
+    const adaUp = await upload(call, ada.body.token, pdfBytes('apply-ada'));
+    const adaJob = await postJob(call, ada.body.token, jobBody(adaUp.body.upload.id, { idempotencyKey: 'op-apply-ada-1' }));
+    assert.equal(adaJob.status, 202, 'password jobs do not spend the guest job cap');
+  });
+});
+
+test('guest status, cancel, replay and artifact calls are capped before the runtime', async () => {
+  await withApp({
+    ...GUEST_OPEN,
+    AI_GUEST_JOBS_PER_HOUR: '5',
+    AI_GUEST_JOBS_PER_OWNER_HOUR: '5',
+    AI_GUEST_ACTIVE_JOBS_PER_OWNER: '5',
+    AI_GUEST_JOB_READS_PER_OWNER_HOUR: '1',
+    AI_GUEST_JOB_READS_PER_HOUR: '10',
+  }, async (mf, call) => {
+    const token = (await mintGuest(call)).body.guest.token;
+    const other = (await mintGuest(call, undefined, fromIp('203.0.113.50'))).body.guest.token;
+    const up = await upload(call, token, pdfBytes('reads'));
+    const created = await postJob(call, token, jobBody(up.body.upload.id, { idempotencyKey: 'op-reads-0001' }));
+    assert.equal(created.status, 202);
+    const jobId = created.body.job.id;
+    assert.equal((await call('GET', `/v1/ai/jobs/${jobId}`, { token })).status, 200);
+    const again = await call('GET', `/v1/ai/jobs/${jobId}`, { token });
+    assert.equal(again.status, 429);
+    assert.equal(again.body.error.code, 'rate_limited');
+    const foreign = await call('GET', `/v1/ai/jobs/${jobId}`, { token: other });
+    assert.equal(foreign.status, 404);
+    const otherUp = await upload(call, other, pdfBytes('reads-other'));
+    const otherJob = await postJob(call, other, jobBody(otherUp.body.upload.id, { idempotencyKey: 'op-reads-0002' }));
+    assert.equal(otherJob.status, 202);
+    const otherStatus = await call('GET', `/v1/ai/jobs/${otherJob.body.job.id}`, { token: other });
+    assert.equal(otherStatus.status, 200, 'another guest keeps their own read cap');
+    assert.equal(await stubCalls(mf, `/internal/v1/jobs/${jobId}`, 'GET'), 1, 'the refused poll does not reach the runtime');
+  });
+
+  await withApp({
+    ...GUEST_OPEN,
+    AI_GUEST_JOBS_PER_HOUR: '1',
+    AI_GUEST_JOBS_PER_OWNER_HOUR: '4',
+    AI_GUEST_ACTIVE_JOBS_PER_OWNER: '4',
+    AI_GUEST_JOB_READS_PER_OWNER_HOUR: '10',
+    AI_GUEST_JOB_READS_PER_HOUR: '5',
+  }, async (mf, call) => {
+    const token = (await mintGuest(call)).body.guest.token;
+    const up = await upload(call, token, pdfBytes('replay-cap'));
+    const created = await postJob(call, token, jobBody(up.body.upload.id, { idempotencyKey: 'op-replay-0001' }));
+    assert.equal(created.status, 202);
+    const replay = await postJob(call, token, jobBody(up.body.upload.id, { idempotencyKey: 'op-replay-0001' }));
+    assert.equal(replay.status, 200);
+    assert.equal(replay.body.replayed, true);
+    const extra = await postJob(call, token, jobBody(up.body.upload.id, { idempotencyKey: 'op-replay-0002' }));
+    assert.equal(extra.status, 429, 'a replay does not free a guest job slot for a new job');
+    assert.equal(await stubCalls(mf, '/internal/v1/jobs', 'POST'), 1);
+  });
+
+  await withApp({
+    ...GUEST_OPEN,
+    AI_GUEST_JOBS_PER_HOUR: '4',
+    AI_GUEST_JOBS_PER_OWNER_HOUR: '4',
+    AI_GUEST_ACTIVE_JOBS_PER_OWNER: '4',
+    AI_GUEST_JOB_READS_PER_OWNER_HOUR: '10',
+    AI_GUEST_JOB_READS_PER_HOUR: '1',
+  }, async (mf, call) => {
+    const token = (await mintGuest(call)).body.guest.token;
+    const up = await upload(call, token, pdfBytes('follow'));
+    const created = await postJob(call, token, jobBody(up.body.upload.id, { idempotencyKey: 'op-follow-0001' }));
+    const jobId = created.body.job.id;
+    const cancel = await call('POST', `/v1/ai/jobs/${jobId}/cancel`, { token });
+    assert.equal(cancel.status, 202);
+    const replay = await postJob(call, token, jobBody(up.body.upload.id, { idempotencyKey: 'op-follow-0001' }));
+    assert.equal(replay.status, 429, 'cancel and replay share the guest read cap');
+    assert.equal(await stubCalls(mf, `/internal/v1/jobs/${jobId}`, 'GET'), 0);
+    const ada = await register(mf, call, 'readada');
+    const adaUp = await upload(call, ada.body.token, pdfBytes('read-ada'));
+    const adaJob = await postJob(call, ada.body.token, jobBody(adaUp.body.upload.id, { idempotencyKey: 'op-follow-ada' }));
+    assert.equal(adaJob.status, 202);
+    assert.equal((await call('GET', `/v1/ai/jobs/${adaJob.body.job.id}`, { token: ada.body.token })).status, 200);
+    assert.equal((await call('POST', `/v1/ai/jobs/${adaJob.body.job.id}/cancel`, { token: ada.body.token })).status, 202);
+  });
+
+  await withApp({
+    ...GUEST_OPEN,
+    AI_GUEST_ACTIVE_JOBS_PER_OWNER: '3',
+    AI_GUEST_JOB_READS_PER_HOUR: '10',
+    AI_GUEST_ARTIFACTS_PER_OWNER_HOUR: '5',
+    AI_GUEST_ARTIFACTS_PER_HOUR: '1',
+  }, async (mf, call) => {
+    const token = (await mintGuest(call)).body.guest.token;
+    const up = await upload(call, token, pdfBytes('artifact'));
+    const created = await postJob(call, token, jobBody(up.body.upload.id, { idempotencyKey: 'op-art-0001' }));
+    const jobId = created.body.job.id;
+    const file = await call('GET', `/v1/ai/jobs/${jobId}/artifacts/artifact-1`, { token });
+    assert.equal(file.status, 200);
+    const again = await call('GET', `/v1/ai/jobs/${jobId}/artifacts/artifact-1`, { token });
+    assert.equal(again.status, 429);
+    assert.equal(again.body.error.code, 'rate_limited');
+    assert.equal(await stubCalls(mf, `/internal/v1/jobs/${jobId}/artifacts/artifact-1`, 'GET'), 1);
+    const ada = await register(mf, call, 'artada');
+    const adaUp = await upload(call, ada.body.token, pdfBytes('art-ada'));
+    const adaJob = await postJob(call, ada.body.token, jobBody(adaUp.body.upload.id, { idempotencyKey: 'op-art-ada' }));
+    const adaFile = await call('GET', `/v1/ai/jobs/${adaJob.body.job.id}/artifacts/artifact-1`, { token: ada.body.token });
+    assert.equal(adaFile.status, 200, 'password downloads do not spend the guest artifact cap');
   });
 });
 
