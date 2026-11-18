@@ -1,4 +1,4 @@
-## Unreleased
+## 0.2.0-alpha.78 — 2026-11-18
 
 - `pdf_twin.py make`와 `pair_corpus.py build`는 출력 디렉터리가 비어 있지 않으면 `out_dir_not_empty`로 끝납니다(종료 코드 3). `pair_corpus`의 `output_not_empty`와 종료 코드 2는 더 이상 쓰지 않습니다.
 - `render.py`는 LaTeX를 조립한 뒤 벤더 `table_lint`를 실행하고, 그림을 그린 뒤 `pdflatex` 전에 `figure_lint`를 실행합니다. ERROR는 `table_lint` 또는 `figure_lint`로 종료 코드 3입니다. WARN은 `{lint, code, count}` 목록인 `lintWarnings`로 나갑니다. 쌍둥이 표준출력과 `twin.json`은 정상본 개수를 담고, 결함본 개수가 다르면 `sealed/defect-lint-warnings.json`(`falsify.defect-lint-warnings.v1`)에 둡니다. 현재 픽스처 다섯 개와 변형 집합 46개에서 나오는 경고는 `no-label`, `no-metric-direction`, `no-pipeline-figure`뿐이며 거절하지 않습니다. 이 경고가 탐지에 미치는 영향은 측정하지 않았습니다.
