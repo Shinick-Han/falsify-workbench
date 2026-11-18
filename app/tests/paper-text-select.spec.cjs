@@ -252,13 +252,16 @@ function expectAnchored(result, text) {
     await editor.waitFor();
     const anchored = await outcome(page);
     assert.equal(anchored.editor, '96%');
+    // An earlier output (the untouched original) may already exist; wait for the one made from this edit.
+    const prior = await page.evaluate(() => window.FalsifyPaperWorkspace?.getOutput?.()?.sha256 || '');
     await editor.fill('69%');
     await page.locator('.paper-direct-controls').getByRole('button', {name: '완료', exact: true}).click();
-    await page.waitForFunction(() => {
+    await page.waitForFunction(prior => {
       const output = window.FalsifyPaperWorkspace?.getOutput?.();
       const status = document.querySelector('#paper-generate-status')?.textContent || '';
-      return !!output || /생성하지 못했습니다|만들지 않았습니다|확인하세요/.test(status);
-    }, null, {timeout: 120000});
+      if (/생성하지 못했습니다|만들지 않았습니다|확인하세요/.test(status)) return true;
+      return !!output && output.sha256 !== prior && !/선택한 편집이 없어/.test(status);
+    }, prior, {timeout: 120000});
     roundtrip = await page.evaluate(async () => {
       const output = window.FalsifyPaperWorkspace?.getOutput?.();
       const status = document.querySelector('#paper-generate-status')?.textContent || '';
