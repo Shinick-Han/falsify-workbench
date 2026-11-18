@@ -592,6 +592,7 @@
     const pickGraph=el('button','button secondary','그래프 영역 선택');pickGraph.type='button';
     const connect=el('button','button secondary','내 PC 연결');
     connect.type='button';
+    try{connect.setAttribute('data-requires-bridge','');}catch{}
     connect.addEventListener('click',()=>{
       const panel=doc.querySelector?.('.visual-connection-details');
       if(!panel)return;

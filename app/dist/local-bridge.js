@@ -2,6 +2,18 @@
 (function(root){
   'use strict';
   const HOST='127.0.0.1',DEFAULT_PORT=7816,WEB_ORIGIN='https://shinick-han.github.io';
+  const OPEN_MESSAGE='행사 페이지에서는 내 PC 연결을 사용하지 않습니다. 웹 실행 패널을 사용하세요.';
+  function openAccessEnabled(){
+    const cfg=typeof globalThis==='object'&&globalThis.FalsifyCloudConfig;
+    return !!(cfg&&cfg.openAccess&&cfg.openAccess.enabled===true);
+  }
+  function waitForConfig(){
+    if(typeof globalThis==='object'&&globalThis.FalsifyCloudConfig) return Promise.resolve();
+    const doc=typeof document==='undefined'?null:document;
+    if(!doc||typeof doc.addEventListener!=='function') return Promise.resolve();
+    if(doc.readyState!=='loading'&&doc.readyState!=='interactive') return Promise.resolve();
+    return new Promise(resolve=>{doc.addEventListener('DOMContentLoaded',()=>resolve(),{once:true});});
+  }
   const PATH=/^\/api\/(?:capabilities|export|paper\/(?:inspect|visual\/export|chart\/(?:prepare|preview|export)|evidence\/(?:prepare|query|jobs(?:\/[a-f0-9]{32}(?:\/cancel)?)?)|images(?:\/export)?|layout-agent\/(?:step|jobs(?:\/[A-Za-z0-9._-]+(?:\/cancel)?)?))|harness\/profile\/propose|harness\/deploy|(?:red|blue)\/jobs(?:\/[A-Za-z0-9%._~-]+(?:\/cancel)?)?)$/;
   // Strict decimal port only; host and scheme are never user input.
   function parsePort(value){const s=String(value??'').trim();if(s==='')return DEFAULT_PORT;if(!/^[1-9][0-9]{3,4}$/.test(s))return null;const n=Number(s);return n>=1024&&n<=65535?n:null;}
@@ -99,6 +111,7 @@
       if(typeof path!=='string'||!PATH.test(path)||/\/\.{1,2}(?:\/|$)/.test(path))throw new Error('허용되지 않은 로컬 경로입니다.');
     }
     async function call(l,path,body,options){
+      if(openAccessEnabled()) throw new Error(OPEN_MESSAGE);
       validateRequest(l,path);
       const init=requestInit(l,body);
       const signal=options&&typeof options==='object'?options.signal:undefined;if(signal)init.signal=signal;
@@ -114,6 +127,8 @@
     function session(){const l=link;if(!l||!l.alive||!(status==='local'||status==='paired'))return null;return Object.freeze({request:(path,body,options)=>call(l,path,body,options)});}
     async function boot(){
       if(!local){changed();return;}
+      await waitForConfig();
+      if(openAccessEnabled()){status='manual';changed();return;}
       try{const r=await fetchImpl('/api/session',{cache:'no-store',redirect:'error'});if(!r.ok)throw new Error();const s=await r.json();if(!validToken(s?.token))throw new Error();
         const l={token:s.token,base:'',remote:false,alive:true,inflight:0},next=capSnapshot(await call(l,'/api/capabilities'));if(!next){drop(l);throw new Error();}
         link=l;cap=next;status='local';error='';}
@@ -123,6 +138,7 @@
     // Pairing only verifies authenticated capabilities. It never starts jobs, records consent or calls a CLI.
     async function pair(rawToken,rawPort){
       const fail=message=>{error=message;changed();return {ok:false,error:message};};
+      if(openAccessEnabled())return fail(OPEN_MESSAGE);
       if(local)return fail('로컬 작업대는 same-origin 세션을 사용합니다. 페어링이 필요 없습니다.');
       if(frozen())return fail('RED/BLUE 작업 중에는 연결을 바꿀 수 없습니다.');
       const p=parsePort(rawPort);if(p===null)return fail(PORT_ERROR);
@@ -139,11 +155,12 @@
       const revoke=link&&link.remote&&typeof link.token==='string'&&link.token.startsWith('rc1.')?{token:link.token,base:link.base}:null;
       attempt++;drop(link);link=null;cap=null;status='manual';error='';
       let forgotten=null;try{forgotten=forget();}catch{forgotten=null;}
-      if(revoke&&revoke.token!==forgotten)void fetchImpl(revoke.base+'/api/pair/revoke',{method:'POST',headers:{Authorization:'Bearer '+revoke.token,'Content-Type':'application/json'},body:JSON.stringify({schema:'falsify.pair-revoke.v1'}),credentials:'omit',redirect:'error',cache:'no-store',mode:'cors',targetAddressSpace:'loopback'}).catch(()=>{});
+      if(revoke&&revoke.token!==forgotten&&!openAccessEnabled())void fetchImpl(revoke.base+'/api/pair/revoke',{method:'POST',headers:{Authorization:'Bearer '+revoke.token,'Content-Type':'application/json'},body:JSON.stringify({schema:'falsify.pair-revoke.v1'}),credentials:'omit',redirect:'error',cache:'no-store',mode:'cors',targetAddressSpace:'loopback'}).catch(()=>{});
       changed();return {ok:true};}
     // Click-pairing holds the panel in 'connecting' until redeem finishes. It does not open a model request.
     function hold(rawPort){
       const fail=message=>{error=message;changed();return {ok:false,error:message};};
+      if(openAccessEnabled())return fail(OPEN_MESSAGE);
       if(local)return fail('로컬 작업대는 same-origin 세션을 사용합니다. 페어링이 필요 없습니다.');
       if(frozen())return fail('RED/BLUE 작업 중에는 연결을 바꿀 수 없습니다.');
       if(link||status==='connecting')return fail('이미 연결되었거나 연결 확인 중입니다. 다시 열려면 먼저 연결을 해제하세요.');
@@ -156,6 +173,7 @@
     // Browsers cannot report whether a falsify:// handler exists, so success here only means the request was handed over.
     function launch(rawPort,open){
       const fail=message=>{error=message;changed();return {ok:false,error:message};};
+      if(openAccessEnabled())return fail(OPEN_MESSAGE);
       if(local)return fail('로컬 작업대는 same-origin 세션을 사용합니다. 터미널 열기가 필요 없습니다.');
       if(frozen())return fail('RED/BLUE 작업 중에는 연결을 바꿀 수 없습니다.');
       if(link||status==='connecting')return fail('이미 연결되었거나 연결 확인 중입니다. 다시 열려면 먼저 연결을 해제하세요.');
@@ -204,7 +222,9 @@
       const linked=s.status==='paired'||s.status==='connecting';
       renderControls(s,linked);
       const p=linked?s.port:parsePort(portEl?.value)??s.port;if(commandEl)commandEl.textContent=command(p,kind);if(launcherEl)launcherEl.textContent=launcher(p,kind);
-      for(const a of doc.querySelectorAll?.('[data-bridge-local]')||[])a.href='http://127.0.0.1:'+(s.mode==='local'?s.port:p)+'/';
+      if(!openAccessEnabled()){
+        for(const a of doc.querySelectorAll?.('[data-bridge-local]')||[])a.href='http://127.0.0.1:'+(s.mode==='local'?s.port:p)+'/';
+      }
     }
     render();
     doc.addEventListener('falsify:local-bridge',e=>render(e.detail));

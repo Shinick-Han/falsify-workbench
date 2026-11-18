@@ -6,6 +6,14 @@
   function icon(name){const svg=document.createElementNS(NS,'svg'),use=document.createElementNS(NS,'use');svg.setAttribute('viewBox','0 0 24 24');svg.setAttribute('aria-hidden','true');use.setAttribute('href','./vendor/lucide.svg#'+name);svg.append(use);return svg;}
   function el(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text)e.textContent=text;return e;}
   function button(name,label,action,cls='button secondary'){const b=el('button',cls);b.type='button';b.append(icon(name),el('span','',label));b.addEventListener('click',action);return b;}
+  function pageOpen(){
+    try{
+      const cfg=globalThis.FalsifyCloudConfig;
+      if(cfg&&cfg.openAccess&&cfg.openAccess.enabled===true) return true;
+      const data=document.documentElement&&document.documentElement.dataset;
+      return !!(data&&Object.prototype.hasOwnProperty.call(data,'openAccess'));
+    }catch{return false;}
+  }
   function disclosure(summary,nodes){const d=el('details','visual-details'),s=el('summary','',summary);d.append(s,...nodes);return d;}
   function decorate(node,name){if(!node)return;const paint=()=>{if(!node.querySelector('svg'))node.prepend(icon(name));};paint();new MutationObserver(paint).observe(node,{childList:true});}
   function choose(role,hash){const s=$('#'+role+'-harness');if(!s||s.disabled)return false;if(![...s.options].some(o=>o.value===hash))return false;if(s.value!==hash){s.value=hash;s.dispatchEvent(new Event('change',{bubbles:true}));}return true;}
@@ -151,7 +159,7 @@
     function render(role,detail){
       const s=state[role];if(detail!==undefined)Object.assign(s,detail||{name:'',busy:false,hasResult:false});
       const progress=$(role==='red'?'#red-progress':'#doc-blue-progress');
-      const advancedTitle=advancedRoles[role]?.querySelector(':scope > summary');if(advancedTitle)advancedTitle.textContent='자동 실행·도구 설정 · '+(s.busy?role.toUpperCase()+' 진행 중':(progress?.textContent.trim()|| (globalThis.FalsifyLocalBridge?.state()?.connected?'내 PC 연결됨':'내 PC 연결 안 됨')));
+      const advancedTitle=advancedRoles[role]?.querySelector(':scope > summary');if(advancedTitle){const linked=!!globalThis.FalsifyLocalBridge?.state()?.connected;const linkLabel=pageOpen()?'웹 실행':(linked?'내 PC 연결됨':'내 PC 연결 안 됨');advancedTitle.textContent='자동 실행·도구 설정 · '+(s.busy?role.toUpperCase()+' 진행 중':(progress?.textContent.trim()||linkLabel));}
       const sections=steps[role];if(!sections?.length)return;
       const hasFile=!!s.name,hasResult=!!s.hasResult;
       // Empty future steps stay as small destinations; no forced RED -> BLUE sequence.
@@ -167,13 +175,13 @@
       if(s.note&&s.note.textContent!==note)s.note.textContent=note;
       if(s.note)s.note.hidden=!note;
       const connect=s.connect;
-      if(connect)connect.hidden=!hasFile||connected||s.busy||!!progress?.textContent.trim();
+      if(connect)connect.hidden=pageOpen()||!hasFile||connected||s.busy||!!progress?.textContent.trim();
     }
     function noteFor(role,s,hasFile,start,connected){
       let note='';
       if(s.busy)note='검토 중';
       else if(!hasFile)note='먼저 논문을 놓아주세요.';
-      else if(!connected)note=''; // The connection action below opens the existing PC panel.
+      else if(!connected)note=pageOpen()?'RED·BLUE 검토는 위쪽 웹 실행 패널에서 실행합니다.':'';
       else if(!$(role==='red'?'#red-consent':'#doc-blue-consent')?.checked)note='논문 전송에 동의하면 검토를 시작할 수 있습니다.';
       else if(start?.disabled&&!FalsifyLab.allowed(role))note='선택한 도구의 실행 설정을 확인하세요.';
       return note;
@@ -187,7 +195,7 @@
         const connect=button('plug','내 PC 연결',()=>{
           const panel=$('.visual-connection-details');if(!panel)return;
           panel.open=true;panel.scrollIntoView({block:'nearest'});panel.querySelector('summary')?.focus({preventScroll:true});
-        });connect.hidden=true;state[role].connect=connect;state[role].note?.after(connect);
+        });try{connect.setAttribute('data-requires-bridge','');}catch{}connect.hidden=true;state[role].connect=connect;state[role].note?.after(connect);
         if(start)new MutationObserver(()=>render(role)).observe(start,{attributes:true,attributeFilter:['disabled']});
         const progress=$(role==='red'?'#red-progress':'#doc-blue-progress');
         if(progress)new MutationObserver(()=>render(role)).observe(progress,{childList:true,characterData:true,subtree:true});

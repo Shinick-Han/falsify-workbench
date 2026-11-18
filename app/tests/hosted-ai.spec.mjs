@@ -108,6 +108,11 @@ function setup(options={}){
     return {
       ok:route.status>=200&&route.status<300,
       status:route.status,
+      headers:{get(name){
+        const bag=route.headers||{};
+        const key=Object.keys(bag).find(item=>item.toLowerCase()===String(name).toLowerCase());
+        return key==null?null:String(bag[key]);
+      }},
       text:async()=>route.body===undefined?'':(typeof route.body==='string'?route.body:JSON.stringify(route.body)),
       blob:async()=>route.blob||new Blob([route.blobText||'{}'],{type:'application/json'})
     };
@@ -1391,4 +1396,115 @@ test('registration omits an empty optional display name',async()=>{
   await until(()=>entry.store.has(SESSION_KEY),'session stored');
   const body=JSON.parse(entry.calls.find(item=>item.path==='/v1/auth/register').body);
   assert.deepEqual(Object.keys(body).sort(),['inviteCode','password','username']);
+});
+
+const GUEST_A='fsg_'+'a'.repeat(43);
+const GUEST_B='fsg_'+'b'.repeat(43);
+const OPEN_CONFIG=Object.freeze({
+  apiBase:'https://worker.test',provider:'confluence',
+  hostedAi:Object.freeze({enabled:true,apiBase:'https://worker.test'}),
+  openAccess:Object.freeze({enabled:true})
+});
+function guestProvider(tokens){
+  let index=0;
+  return {
+    invalidated:[],
+    token(){return tokens[Math.min(index,tokens.length-1)];},
+    invalidate(){this.invalidated.push(index);index++;}
+  };
+}
+function openEntry(routes,provider){
+  return setup({config:OPEN_CONFIG,sessionProvider:()=>provider,routes});
+}
+async function prepareOpenRun(entry){
+  await entry.app.ready;
+  await selectFile(entry,BYTES);
+  setPrompt(entry,PROMPT);
+}
+
+test('open mode hides sign-in controls and says the panel is ready without login',async()=>{
+  const entry=openEntry(makeRouter(),guestProvider([GUEST_A]));
+  await entry.app.ready;
+  assert.equal(entry.$('hosted-ai-login-form').hidden,true);
+  assert.equal(entry.$('hosted-ai-register-panel').hidden,true);
+  assert.equal(entry.$('hosted-ai-logout').hidden,true);
+  assert.match(entry.text('hosted-ai-status'),/로그인 없이/);
+  assert.match(entry.text('hosted-ai-intro'),/로그인 없이/);
+  assert.match(entry.text('hosted-ai-session'),/로그인 없이/);
+  assert.equal(entry.calls.find(call=>call.path==='/v1/ai/capabilities').headers.Authorization,'Bearer '+GUEST_A);
+  assert.equal(entry.calls.some(call=>String(call.url).includes('127.0.0.1')),false);
+  assert.equal(entry.storedText().includes(GUEST_A),false);
+});
+
+test('a 401 on an open-mode AI call refreshes the hook token once',async()=>{
+  const provider=guestProvider([GUEST_A,GUEST_B]);
+  let posts=0;
+  const entry=openEntry(makeRouter({
+    jobsPost:record=>{
+      posts++;
+      if(posts===1){
+        assert.equal(record.headers.Authorization,'Bearer '+GUEST_A);
+        return {status:401,body:{error:{code:'unauthorized',retryable:false}}};
+      }
+      assert.equal(record.headers.Authorization,'Bearer '+GUEST_B);
+      return {status:202,body:{job:job({state:'queued'}),replayed:false}};
+    }
+  }),provider);
+  await prepareOpenRun(entry);
+  entry.$('hosted-ai-run').click();
+  await until(()=>posts===2,'one refresh follows the 401');
+  await new Promise(resolve=>setTimeout(resolve,40));
+  assert.equal(posts,2);
+  assert.equal(provider.invalidated.length,1);
+  assert.equal(entry.calls.some(call=>String(call.url).includes('127.0.0.1')),false);
+});
+
+test('a second open-mode 401 does not refresh again',async()=>{
+  const provider=guestProvider([GUEST_A,GUEST_B]);
+  const entry=openEntry(makeRouter({
+    jobsPost:()=>({status:401,body:{error:{code:'unauthorized',retryable:false}}})
+  }),provider);
+  await prepareOpenRun(entry);
+  entry.$('hosted-ai-run').click();
+  await until(()=>/세션을 다시 받지 못했습니다/.test(entry.text('hosted-ai-error')),'second 401 stops');
+  await new Promise(resolve=>setTimeout(resolve,40));
+  assert.equal(entry.calls.filter(call=>call.path==='/v1/ai/jobs'&&call.method==='POST').length,2);
+  assert.equal(provider.invalidated.length,1);
+});
+
+test('open mode explains closed access, a bad link, and Retry-After',async()=>{
+  const closed=openEntry(makeRouter({
+    jobsPost:()=>({status:403,body:{error:{code:'open_access_disabled',retryable:false}}})
+  }),guestProvider([GUEST_A]));
+  await prepareOpenRun(closed);
+  closed.$('hosted-ai-run').click();
+  await until(()=>/지금은 행사 웹 실행이 닫혀 있습니다/.test(closed.text('hosted-ai-error')),'closed access');
+  assert.equal(closed.calls.filter(call=>call.path==='/v1/ai/jobs').length,1);
+
+  const link=openEntry(makeRouter({
+    jobsPost:()=>({status:403,body:{error:{code:'invalid_access_key',retryable:false}}})
+  }),guestProvider([GUEST_A]));
+  await prepareOpenRun(link);
+  link.$('hosted-ai-run').click();
+  await until(()=>/링크가 올바르지 않습니다/.test(link.text('hosted-ai-error')),'bad link');
+
+  const limited=openEntry(makeRouter({
+    jobsPost:()=>({status:429,headers:{'Retry-After':'12'},body:{error:{code:'rate_limited',retryable:true}}})
+  }),guestProvider([GUEST_A]));
+  await prepareOpenRun(limited);
+  limited.$('hosted-ai-run').click();
+  await until(()=>/12초 뒤에 다시 시도하세요/.test(limited.text('hosted-ai-error')),'retry after');
+  await new Promise(resolve=>setTimeout(resolve,40));
+  assert.equal(limited.calls.filter(call=>call.path==='/v1/ai/jobs').length,1);
+});
+
+test('a failed guest session shows the open-access error and no login form',async()=>{
+  const entry=openEntry(makeRouter(),{
+    token(){const error=Error('guest');error.status=403;error.code='invalid_access_key';throw error;}
+  });
+  await entry.app.ready;
+  await until(()=>/링크가 올바르지 않습니다/.test(entry.text('hosted-ai-error')),'guest error is visible');
+  assert.equal(entry.$('hosted-ai-login-form').hidden,true);
+  assert.equal(entry.$('hosted-ai-register-panel').hidden,true);
+  assert.equal(entry.storedText().includes('invalid_access_key'),false);
 });
