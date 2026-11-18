@@ -7,9 +7,12 @@ const guestToken='fsg_'+'a'.repeat(43);
 const eventConfig='globalThis.FalsifyCloudConfig=Object.freeze({apiBase:'+JSON.stringify(api)+',provider:"confluence",hostedAi:Object.freeze({enabled:true,apiBase:'+JSON.stringify(api)+'}),openAccess:Object.freeze({enabled:true})});';
 const loginConfig='globalThis.FalsifyCloudConfig=Object.freeze({apiBase:'+JSON.stringify(api)+',provider:"confluence",hostedAi:Object.freeze({enabled:true,apiBase:'+JSON.stringify(api)+'})});';
 let configMode='event';
+let paperToolsEnabled=false;
 function capabilities(){
   const open=configMode!=='login';
-  return {enabled:true,provider:'synthetic',execution:'server',models:['synthetic-model'],efforts:['high'],limits:{maxUploadBytes:33554432,maxPromptChars:8000},openAccess:{enabled:open,accessKeyRequired:configMode==='event'}};
+  const body={enabled:true,provider:'synthetic',execution:'server',models:['synthetic-model'],efforts:['high'],limits:{maxUploadBytes:33554432,maxPromptChars:8000},openAccess:{enabled:open,accessKeyRequired:configMode==='event'}};
+  if(paperToolsEnabled) body.paperTools={enabled:true};
+  return body;
 }
 function job(state){return {id:'job-1',role:'red',state,progress:{completedCalls:state==='completed'?1:0,requiredCalls:1,phase:state},model:'synthetic-model',effort:'high',provider:'synthetic',usage:null,result:null,artifacts:[],createdAt:'2026-11-18T00:00:00.000Z',updatedAt:'2026-11-18T00:00:00.000Z'};}
 function send(res,status,type,body){res.writeHead(status,{'Content-Type':type});res.end(body);}
@@ -149,7 +152,39 @@ async function untilCount(list,count,label){
     assert.equal(plainGuests.length,0);
     assert.deepEqual(plainCaps.at(-1).openAccess,{enabled:false,accessKeyRequired:false});
     assert.deepEqual(plainErrors,[]);
-    console.log('PASS open-access browser: keyed guest, shipped page hides login and bridge and mints {}, login config stays closed');
+
+    paperToolsEnabled=true;
+    configMode='event';
+    const paperContext=await browser.newContext({viewport:{width:1280,height:900}});
+    const paper=await paperContext.newPage(),paperErrors=[],paperGuests=[],paperCaps=[];
+    paper.on('pageerror',error=>paperErrors.push(error.message));
+    await mockApi(paper,paperGuests,paperCaps);
+    await paper.goto(origin+'/index.html#k='+encodeURIComponent(key));
+    await paper.waitForFunction(()=>globalThis.FalsifyHostedPaperSession&&FalsifyHostedPaperSession.available()&&(document.querySelector('#hosted-ai-status')?.textContent||'').includes('웹 실행 준비됨'));
+    assert.equal(paperGuests.length,0,'paper tools do not mint a guest on load');
+    assert.equal(paperCaps.at(-1).paperTools.enabled,true);
+    const visiblePc=await paper.evaluate(()=>{
+      const needle='PC 연결';
+      function shown(el){
+        for(let node=el;node&&node.nodeType===1;node=node.parentElement){
+          const style=getComputedStyle(node);
+          if(style.display==='none'||style.visibility==='hidden'||node.hidden) return false;
+        }
+        return true;
+      }
+      const hits=[];
+      const walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
+      let current;
+      while((current=walker.nextNode())){
+        if(!current.nodeValue||!current.nodeValue.includes(needle)) continue;
+        if(shown(current.parentElement)) hits.push(current.nodeValue.trim().slice(0,120));
+      }
+      return hits;
+    });
+    assert.deepEqual(visiblePc,[]);
+    assert.deepEqual(paperErrors,[]);
+    await paperContext.close();
+    console.log('PASS open-access browser: keyed guest, shipped page hides login and bridge and mints {}, login config stays closed, paper tools hide PC connect copy');
     await loginContext.close();
   }finally{await browser?.close();server.close();}
 })().catch(error=>{console.error(error);process.exitCode=1;server.close();});

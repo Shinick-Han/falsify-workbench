@@ -188,17 +188,27 @@
     // Every status branch states delivery coverage and reread, so an abstain or refusal never hides an incomplete review.
     const scope=provenance==='local-codex'?'앱 adapter 호출 '+(res.coverage?.calls||'?')+'회. '+(res.coverage?.complete?'전체 추출 텍스트 전달 완료(탐지 보장 아님).':'전달 미완료.'):'수동 응답의 실행·전달 여부 미검증.';
     msg((res.status==='refusal'?'BLUE 요청 거절. 우회·자동 재시도하지 않습니다.':res.status==='abstain'?'BLUE 판단 유보. 탐지 실패로 변환하지 않습니다.':findings.length+'개 지적 · 입력 인용 일치 확인.')+' '+scope+reread(res,provenance));controls();void saveRecord();}
+  function panelSession(){
+    const api=globalThis.FalsifyPaperVisualIntegration;
+    if(api&&typeof api.paperSession==='function') return api.paperSession();
+    return B.session();
+  }
+  function panelCapabilities(){
+    const api=globalThis.FalsifyPaperVisualIntegration;
+    if(api&&typeof api.paperCapabilities==='function') return api.paperCapabilities();
+    return B.capabilities();
+  }
   if(globalThis.FalsifyPaperEvidenceUI){
     const host=document.createElement('div');
     $('#doc-blue-consent').closest('label').after(host);
-    paperEvidenceUI=FalsifyPaperEvidenceUI.create({host,getSession:()=>B.session(),getSource:()=>doc&&sourceFile?{file:sourceFile,fileHash:doc.fileHash,revision:doc.revision,companionInstance:B.capabilities()?.companionInstance}:null,onChange:()=>{generation++;if(doc)doc.revision=crypto.randomUUID();invalidate();controls();}});
+    paperEvidenceUI=FalsifyPaperEvidenceUI.create({host,getSession:panelSession,getSource:()=>doc&&sourceFile?{file:sourceFile,fileHash:doc.fileHash,revision:doc.revision,companionInstance:B.capabilities()?.companionInstance}:null,onChange:()=>{generation++;if(doc)doc.revision=crypto.randomUUID();invalidate();controls();}});
   }
   if(globalThis.FalsifyPaperEnrichmentUI){
     const host=document.createElement('div');host.id='blue-enrichment';$('#doc-blue-consent').closest('label').after(host);
     paperEnrichmentUI=FalsifyPaperEnrichmentUI.create({host,
       getSource:()=>doc&&sourceFile?{file:sourceFile,fileHash:doc.fileHash,revision:doc.revision}:null,
-      getSession:()=>B.session(),
-        getCapabilities:()=>B.capabilities(),
+      getSession:panelSession,
+        getCapabilities:panelCapabilities,
       preparePaper:async()=>{if(!paperEvidenceUI)throw Error('표·그림 모듈을 준비하세요.');return paperEvidenceUI.ensurePrepared();},
       onBusyChange:value=>{enrichmentBusy=!!value;controls();},
       onResult:async analysis=>{

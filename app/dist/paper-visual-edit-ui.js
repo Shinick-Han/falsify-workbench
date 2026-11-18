@@ -12,6 +12,11 @@
   const EXPORT_SCHEMA='falsify.visual-edit-export.v1';
   const EVIDENCE_SCHEMA='falsify.paper-evidence.v1';
   const HEX=/^[0-9a-f]{64}$/;
+  const HOSTED_OFFLINE='웹 실행 서버에 연결하지 못했습니다. 잠시 후 다시 시도하세요.';
+  function hostedPaperMode(){
+    const api=root.FalsifyPaperVisualIntegration;
+    return !!(api&&typeof api.paperUsesHosted==='function'&&api.paperUsesHosted());
+  }
   const MAX_PDF=25*1024*1024;
   const MAX_IMAGE=4*1024*1024;
   const MAX_PIXELS=4000000;
@@ -25,7 +30,7 @@
     hash:'원본 파일이 바뀌어 열지 않았습니다.',
     notPdf:'PDF가 아니라 열지 않았습니다.',
     limit:'25 MiB를 넘는 PDF는 열지 않습니다.',
-    unavailable:'PC 연결 후 다시 시도하세요.',
+    get unavailable(){return hostedPaperMode()?HOSTED_OFFLINE:'PC 연결 후 다시 시도하세요.';},
     failed:'불러오지 못했습니다.',
     expired:'준비한 표·그림이 만료되었습니다. 다시 불러오세요.',
     busy:'다른 작업이 끝난 뒤 적용하세요.',
@@ -706,6 +711,17 @@
       listPos.textContent=listTotal?((listPage+1)+' / '+Math.max(1,Math.ceil(listTotal/LIST_PAGE))):'';
       savedPos.textContent=savedItems.length?((savedPage+1)+' / '+Math.max(1,Math.ceil(savedItems.length/LIST_PAGE))):'';
     }
+    function paintConnect(hasPaper){
+      const hosted=hostedPaperMode();
+      connect.hidden=!!hasPaper||hosted;
+      connect.textContent=hosted?'웹 실행 다시 시도':'내 PC 연결';
+    }
+    function watchConnect(){
+      if(typeof doc.addEventListener!=='function') return;
+      const paint=()=>paintConnect(paperId);
+      doc.addEventListener('falsify:hosted-paper',paint);
+      doc.addEventListener('falsify:local-bridge',paint);
+    }
     function syncDisabled(){
       const lock=parentBusy||applying;
       for(const view of shapeViews.values())view.panel.inert=lock;
@@ -715,7 +731,7 @@
       retry.disabled=lock;
       pickPage.disabled=lock||!paperId;
       pickGraph.disabled=pickPage.disabled;
-      connect.hidden=!!paperId;
+      paintConnect(paperId);
       syncPagers(lock);
       for(const button of graphDrafts.querySelectorAll?.('button')||[])button.disabled=lock||graphGestureActive();
       for(const node of dynamic)node.disabled=lock||node._softLock===true;
@@ -1883,6 +1899,7 @@
     listNext.addEventListener('click',()=>{if((listPage+1)*LIST_PAGE<listTotal&&paperId)void loadList(generation,currentSource(),listPage+1);});
     savedPrev.addEventListener('click',()=>{if(savedPage>0){savedPage--;paintLists();}});
     savedNext.addEventListener('click',()=>{if((savedPage+1)*LIST_PAGE<savedItems.length){savedPage++;paintLists();}});
+    watchConnect();
     syncDisabled();
     return Object.freeze({setBusy,refresh,clear,snapshot,setAnalysis,setOcrAnalysis:setAnalysis});
   }
