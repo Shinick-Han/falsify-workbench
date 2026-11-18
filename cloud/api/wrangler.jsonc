@@ -73,6 +73,49 @@
         "AI_TOKEN_WINDOW_SECONDS": "86400"
       },
       "d1_databases": [{ "binding": "DB", "database_name": "falsify-harness-records-staging", "database_id": "43f6eef6-84a4-4039-9cd5-4e3520cea4e6", "migrations_dir": "migrations" }]
+    },
+    "event": {
+      // Open-access booth page (event.html). Guests only; shares the production runtime.
+      // HOSTED_AI_SERVICE_TOKEN and AI_OPEN_ACCESS_KEY are Wrangler secrets, never vars.
+      "name": "falsify-cloud-api-event",
+      "vars": {
+        "ALLOWED_ORIGINS": "https://shinick-han.github.io",
+        "REMOTE_PROVIDER": "confluence",
+        "CONFLUENCE_SITE_URL": "https://falsify.atlassian.net",
+        "CONFLUENCE_SPACE_KEY": "Falsify",
+        "CONFLUENCE_SPACE_ID": "65737",
+        "CONFLUENCE_PARENT_PAGE_ID": "8355842",
+        "ATLASSIAN_CLIENT_ID": "LQL1zmOGHXyk8V4ShnSdPJCc5MzJWYDN",
+        "CONFLUENCE_ONLY": "true",
+        "AI_HOSTING_ENABLED": "true",
+        "AI_OPEN_ACCESS": "true",
+        // Claude and OpenAI ids; the runtime HOSTED_AI_MODELS must list the same set.
+        "AI_MODELS": "claude-opus-5-5,claude-sonnet-5-5,claude-haiku-5-5,gpt-6.2-astra,gpt-5.5,gpt-5.4-mini",
+        "AI_RUNTIME_URL": "https://falsify-runtime.shinick.dev/production",
+        "AI_MAX_UPLOAD_BYTES": "33554432",
+        "AI_MAX_PROMPT_CHARS": "32000",
+        "AI_MAX_CALLS_PER_JOB": "24",
+        "AI_DEFAULT_CALLS": "12",
+        "AI_UPLOADS_PER_OWNER_HOUR": "60",
+        "AI_JOBS_PER_OWNER_HOUR": "20",
+        "AI_ACTIVE_JOBS_PER_OWNER": "3",
+        "AI_OWNER_TOKEN_BUDGET": "0",
+        "AI_TOKEN_WINDOW_SECONDS": "86400",
+        "AI_GUEST_SESSION_SECONDS": "21600",
+        "AI_GUESTS_PER_IP_HOUR": "60",
+        "AI_GUESTS_PER_HOUR": "300",
+        "AI_GUEST_UPLOADS_PER_OWNER_HOUR": "10",
+        "AI_GUEST_UPLOADS_PER_HOUR": "120",
+        "AI_GUEST_MAX_UPLOAD_BYTES": "20971520",
+        "AI_GUEST_JOBS_PER_OWNER_HOUR": "6",
+        "AI_GUEST_ACTIVE_JOBS_PER_OWNER": "1",
+        "AI_GUEST_MAX_CALLS_PER_JOB": "8",
+        "AI_GUEST_JOBS_PER_HOUR": "40",
+        // Sum of recorded guest usage per AI_TOKEN_WINDOW_SECONDS; sized well under the operator balance.
+        "AI_GUEST_TOKEN_BUDGET": "4000000"
+      },
+      "d1_databases": [{ "binding": "DB", "database_name": "falsify-harness-records-event", "database_id": "939f0444-c8d6-4d3f-b9ca-e1def3bdfc4f", "migrations_dir": "migrations" }]
     }
   }
 }
+
