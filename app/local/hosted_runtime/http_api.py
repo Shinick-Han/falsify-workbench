@@ -23,7 +23,9 @@ ARTIFACT_PATH = re.compile(
 UPLOADS_PATH = '/internal/v1/uploads'
 JOBS_PATH = '/internal/v1/jobs'
 HEALTH_PATH = '/internal/v1/health'
+PAPER_PATH = '/internal/v1/paper'
 JSON_LIMIT = 1 << 20
+PAPER_JSON_LIMIT = 29360128
 
 
 def _no_duplicates(items):
@@ -177,8 +179,11 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._authenticate():
             return
         try:
-            owner = self._owner()
             path = self._path()
+            if path == PAPER_PATH:
+                self._paper()
+                return
+            owner = self._owner()
             if path == UPLOADS_PATH:
                 self._upload(owner)
                 return
@@ -197,6 +202,17 @@ class _Handler(BaseHTTPRequestHandler):
             self._error(error)
         except Exception:
             self._error(ServiceError('internal_error', 500))
+
+    def _paper(self):
+        if not self.server.service.config.paper_tools:
+            self.close_connection = True
+            raise ServiceError('paper_tools_disabled', 404)
+        content_type = (self.headers.get('Content-Type') or '').split(';', 1)[0].strip().lower()
+        if content_type != 'application/json':
+            raise ServiceError('invalid_request', 400)
+        raw = self._read_body(PAPER_JSON_LIMIT)
+        status, payload = self.server.service.paper.handle(_json_body(raw))
+        self._reply(status, payload)
 
     def _upload(self, owner):
         parsed = urlsplit(self.path)

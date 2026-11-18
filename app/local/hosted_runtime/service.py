@@ -41,6 +41,9 @@ ERROR_MESSAGES = {
     'idempotency_conflict': 'This idempotency key was already used with a different request.',
     'job_id_conflict': 'This job id is already in use.',
     'payload_too_large': 'The request body exceeds the configured limit.',
+    'paper_tools_disabled': 'Paper tools are disabled.',
+    'paper_path_unsupported': 'This paper path is not supported.',
+    'paper_busy': 'The paper runtime is busy.',
     'upload_empty': 'The uploaded file is empty.',
     'unsupported_media_type': 'This file type is not supported.',
     'method_not_allowed': 'This HTTP method is not allowed.',
@@ -541,6 +544,8 @@ class RuntimeService:
                     pass
             self._executor = ThreadPoolExecutor(max_workers=config.max_concurrency,
                                                 thread_name_prefix='falsify-hosted')
+            from .paper_tools import PaperTools
+            self.paper = PaperTools(config)
         except BaseException:
             _release_state_lock(self._state_lock_path)
             self._state_lock_path = None
@@ -705,7 +710,10 @@ class RuntimeService:
         return result
 
     def health(self):
-        return self.config.public_health(self.store.ping())
+        payload = self.config.public_health(self.store.ping())
+        if self.config.paper_tools:
+            payload['paperTools'] = self.paper.health()
+        return payload
 
     # ------------------------------------------------------------------ execution
     def _execute(self, request):
@@ -1018,6 +1026,9 @@ class RuntimeService:
             if self._closed:
                 return
             self._closed = True
+        paper = getattr(self, 'paper', None)
+        if paper is not None:
+            paper.close()
         self._executor.shutdown(wait=True, cancel_futures=True)
         with self._lock:
             self._events.clear()

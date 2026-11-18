@@ -61,6 +61,32 @@ def _env_int(env, name, default, low, high):
     return value
 
 
+def _env_flag(env, name):
+    raw = env.get(name)
+    if raw in (None, '', '0'):
+        return False
+    if raw != '1':
+        raise ConfigError(f'{name} must be 0 or 1')
+    return True
+
+
+def _paper_limit(name, value, low, high):
+    if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+        raise ConfigError(f'{name} is out of range')
+    return value
+
+
+def _check_paper(enabled, max_owners, max_concurrency, max_analysis):
+    if not isinstance(enabled, bool):
+        raise ConfigError('HOSTED_PAPER_TOOLS must be boolean')
+    return (
+        enabled,
+        _paper_limit('HOSTED_PAPER_MAX_OWNERS', max_owners, 1, 1024),
+        _paper_limit('HOSTED_PAPER_MAX_CONCURRENCY', max_concurrency, 1, 32),
+        _paper_limit('HOSTED_PAPER_MAX_ANALYSIS', max_analysis, 1, 32),
+    )
+
+
 def _env_list(env, name, default):
     raw = env.get(name)
     if raw is None or raw == '':
@@ -143,6 +169,10 @@ class RuntimeConfig:
     bind_port: int = DEFAULT_PORT
     provider: str = 'anthropic'
     version: str = _VERSION
+    paper_tools: bool = False
+    paper_max_owners: int = 32
+    paper_max_concurrency: int = 2
+    paper_max_analysis: int = 1
 
     def __post_init__(self):
         state_dir = Path(self.state_dir).expanduser()
@@ -153,6 +183,9 @@ class RuntimeConfig:
             self.max_upload_bytes, self.max_concurrency, self.max_calls,
             self.max_prompt_chars, self.job_retention_seconds)
         bind_port = _check_bind(self.bind_host, self.bind_port)
+        enabled, owners, paper_concurrency, paper_analysis = _check_paper(
+            self.paper_tools, self.paper_max_owners, self.paper_max_concurrency,
+            self.paper_max_analysis)
         object.__setattr__(self, 'state_dir', state_dir)
         object.__setattr__(self, 'models', models)
         object.__setattr__(self, 'provider', provider_for_model(models[0]))
@@ -163,6 +196,10 @@ class RuntimeConfig:
         object.__setattr__(self, 'max_prompt_chars', max_prompt)
         object.__setattr__(self, 'job_retention_seconds', retention)
         object.__setattr__(self, 'bind_port', bind_port)
+        object.__setattr__(self, 'paper_tools', enabled)
+        object.__setattr__(self, 'paper_max_owners', owners)
+        object.__setattr__(self, 'paper_max_concurrency', paper_concurrency)
+        object.__setattr__(self, 'paper_max_analysis', paper_analysis)
 
     @classmethod
     def from_env(cls, env=None):
@@ -192,6 +229,10 @@ class RuntimeConfig:
                                            DEFAULT_RETENTION_SECONDS, 0, 315360000),
             bind_host=values.get('HOSTED_AI_BIND') or DEFAULT_BIND,
             bind_port=_env_int(values, 'HOSTED_AI_PORT', DEFAULT_PORT, 0, 65535),
+            paper_tools=_env_flag(values, 'HOSTED_PAPER_TOOLS'),
+            paper_max_owners=_env_int(values, 'HOSTED_PAPER_MAX_OWNERS', 32, 1, 1024),
+            paper_max_concurrency=_env_int(values, 'HOSTED_PAPER_MAX_CONCURRENCY', 2, 1, 32),
+            paper_max_analysis=_env_int(values, 'HOSTED_PAPER_MAX_ANALYSIS', 1, 1, 32),
         )
 
     def public_health(self, ready):
