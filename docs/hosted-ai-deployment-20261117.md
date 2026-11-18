@@ -35,9 +35,14 @@ secret, migration or deployment was created by the implementation workers.
   `HOSTED_AI_IMAGES_PER_BATCH` (default 8), `HOSTED_AI_MAX_OUTPUT_TOKENS` (default 32000) and
   `HOSTED_AI_IMAGE_CAPACITY` (default 64). Overall coverage is reported by batch; a budget stop lists remaining
   batches instead of silently truncating.
-- Secrets (runtime): `ANTHROPIC_API_KEY`, `HOSTED_AI_SERVICE_TOKEN` (shared with the Worker; length >= 16).
+- Secrets (runtime): `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` (required only when an OpenAI model is listed),
+  `HOSTED_AI_SERVICE_TOKEN` (shared with the Worker; length >= 16).
   `ANTHROPIC_WORKSPACE_ID` is required for the currently unscoped key and is sent as `anthropic-workspace-id`.
-  Optional `ANTHROPIC_BASE_URL` must be https. Never put any of these in the image, repository or client bundle.
+  Optional `ANTHROPIC_BASE_URL` must be https. Optional `OPENAI_BASE_URL` must be https, or `http://127.0.0.1`
+  for tests. Optional `OPENAI_ORG_ID` and `OPENAI_PROJECT_ID` are sent only by the OpenAI backend.
+  `HOSTED_AI_MODELS` stays the Claude default unless the operator lists more ids. `claude-*` selects Anthropic;
+  `gpt-*` and an id that starts with `o` plus a digit (for example `o3`) select OpenAI. Any other id is rejected.
+  Never put any of these in the image, repository or client bundle.
 
 ## Worker configuration
 

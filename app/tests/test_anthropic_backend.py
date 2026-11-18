@@ -1,8 +1,10 @@
 """Anthropic API backend contracts: offline transport only, no live calls or credentials."""
 import json
+import os
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'local'))
 
@@ -192,6 +194,71 @@ class HostedHarnessTests(unittest.TestCase):
         value['adapter']['url'] = 'https://example.test'
         with self.assertRaises(ValueError):
             harness.validate(value, 'red')
+
+    def test_openai_selection_record_and_injected_factory(self):
+        env = {'HOSTED_AI_MODELS': 'claude-opus-5-5,gpt-5,o3'}
+        with patch.dict(os.environ, env):
+            value = harness.validate(self.hosted(model='gpt-5'), 'red')
+            selected = harness.selection(value)
+            self.assertEqual((selected['provider'], selected['model'], selected['effort']),
+                             ('openai-api', 'gpt-5', 'high'))
+            recorded = harness.record(value)
+            self.assertEqual(recorded['hostedSelection']['provider'], 'openai-api')
+            self.assertNotIn('cliSelection', recorded)
+            reasoning = harness.validate(self.hosted(model='o3', effort='max'), 'red')
+            self.assertEqual(harness.selection(reasoning)['provider'], 'openai-api')
+            self.assertEqual(harness.record(reasoning)['hostedSelection']['effort'], 'max')
+            created = []
+
+            class Factory:
+                def __init__(self, *args, **kwargs):
+                    created.append(kwargs)
+
+            engine = harness.backend({'harness': value}, 'red', 2, object, openai_factory=Factory)
+            self.assertIsInstance(engine, Factory)
+            self.assertEqual(created[0]['model'], 'gpt-5')
+            self.assertEqual(created[0]['effort'], 'high')
+            with self.assertRaises(ValueError):
+                harness.validate(self.hosted(model='llama-3'), 'red')
+
+    def test_openai_backend_import_is_lazy(self):
+        env = {'HOSTED_AI_MODELS': 'claude-opus-5-5,gpt-5'}
+        with patch.dict(os.environ, env):
+            value = self.hosted(model='gpt-5')
+            seen = []
+            real_import = __import__
+
+            def tracking(name, *args, **kwargs):
+                if name == 'openai_backend':
+                    seen.append(name)
+                    raise ImportError('openai_backend')
+                return real_import(name, *args, **kwargs)
+
+            with patch('builtins.__import__', tracking):
+                with self.assertRaises(ImportError):
+                    harness.backend({'harness': value}, 'red', 2, object)
+            self.assertEqual(seen, ['openai_backend'])
+
+    def test_claude_hosted_backend_ignores_openai_factory(self):
+        env = {'HOSTED_AI_MODELS': 'claude-opus-5-5,gpt-5'}
+        with patch.dict(os.environ, env):
+            value = harness.validate(self.hosted(), 'red')
+            self.assertEqual(harness.selection(value)['provider'], 'anthropic-api')
+            self.assertEqual(harness.record(value)['hostedSelection']['provider'], 'anthropic-api')
+
+            class Hosted:
+                def __init__(self, *args, **kwargs):
+                    self.kwargs = kwargs
+
+            class OpenAI:
+                def __init__(self, *args, **kwargs):
+                    raise AssertionError('openai factory')
+
+            engine = harness.backend({'harness': value}, 'red', 2, object,
+                                     hosted_factory=Hosted, openai_factory=OpenAI)
+            self.assertIsInstance(engine, Hosted)
+            self.assertEqual(engine.kwargs['model'], 'claude-opus-5-5')
+            self.assertEqual(engine.kwargs['effort'], 'high')
 
 
 if __name__ == '__main__':

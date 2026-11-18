@@ -32,11 +32,26 @@ def _validate_harness_fields(value, max_calls=32, max_instructions=8000):
         raise ValueError(f'harness 호출 한도는 1–{max_calls}회입니다.')
 
 def _hosted_models():
-    """Server-configured Anthropic API allowlist; never a client-supplied endpoint or credential."""
+    """Server-configured hosted model allowlist; never a client-supplied endpoint or credential."""
     import os
     value = (os.environ.get('HOSTED_AI_MODELS') or 'claude-opus-5-5,claude-sonnet-5-5,claude-haiku-5-5').split(',')
     models = tuple(item.strip() for item in value if MODEL_PATTERN.fullmatch(item.strip()))
     return models or ('claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5')
+
+def _hosted_model(adapter):
+    import os
+    configured = (os.environ.get('HOSTED_AI_DEFAULT_MODEL') or '').strip()
+    models = _hosted_models()
+    return adapter.get('model') or (configured if configured in models else models[0])
+
+def _hosted_api_provider(model):
+    from hosted_runtime.config import provider_for_model
+    kind = provider_for_model(model)
+    if kind == 'anthropic':
+        return 'anthropic-api'
+    if kind == 'openai':
+        return 'openai-api'
+    return None
 
 def _hosted_prompt_chars():
     import os
@@ -55,6 +70,8 @@ def _validate_hosted_adapter(adapter):
         raise ValueError('hosted adapter type이 필요합니다.')
     model = adapter.get('model')
     if model is not None and (type(model) is not str or model not in _hosted_models()):
+        raise ValueError('hosted 모델이 서버 허용 목록에 없습니다.')
+    if _hosted_api_provider(_hosted_model(adapter)) is None:
         raise ValueError('hosted 모델이 서버 허용 목록에 없습니다.')
     effort = adapter.get('effort')
     if effort is not None and effort not in HOSTED_EFFORTS:
@@ -136,11 +153,11 @@ def selection(value):
     """Immutable provider/model/effort record for an explicit selection; None for legacy/custom."""
     adapter = value.get('adapter')
     if isinstance(adapter, dict) and adapter.get('type') == 'hosted':
-        import os
-        configured = (os.environ.get('HOSTED_AI_DEFAULT_MODEL') or '').strip()
-        models = _hosted_models()
-        model = adapter.get('model') or (configured if configured in models else models[0])
-        return MappingProxyType({'provider': 'anthropic-api', 'model': model,
+        model = _hosted_model(adapter)
+        provider = _hosted_api_provider(model)
+        if provider is None:
+            raise ValueError('hosted 모델이 서버 허용 목록에 없습니다.')
+        return MappingProxyType({'provider': provider, 'model': model,
                                  'effort': adapter.get('effort', DEFAULT_EFFORT)})
     if not isinstance(adapter, dict) or adapter.get('type') not in CLI_AGENTS or set(adapter) == {'type'} and adapter['type'] == 'codex':
         return None
@@ -152,10 +169,11 @@ def record(value):
     selected = selection(value)
     if selected is None:
         return {}
-    key = 'hostedSelection' if selected['provider'] == 'anthropic-api' else 'cliSelection'
+    key = 'hostedSelection' if selected['provider'] in ('anthropic-api', 'openai-api') else 'cliSelection'
     return {key: dict(selected)}
 
-def backend(data, role, required, default_factory, claude_factory=None, limits=None, hosted_factory=None):
+def backend(data, role, required, default_factory, claude_factory=None, limits=None, hosted_factory=None,
+            openai_factory=None):
     value, _ = resolve(data, role)
     if builtin(value):
         selected = selection(value)
@@ -166,6 +184,10 @@ def backend(data, role, required, default_factory, claude_factory=None, limits=N
             if hosted_factory is None:
                 from anthropic_backend import AnthropicBackend as hosted_factory
             return hosted_factory(**limits, model=selected['model'], effort=selected['effort'])
+        if selected['provider'] == 'openai-api':
+            if openai_factory is None:
+                from openai_backend import OpenAIBackend as openai_factory
+            return openai_factory(**limits, model=selected['model'], effort=selected['effort'])
         if selected['provider'] == 'codex':
             return default_factory(**limits, model=selected['model'], effort=selected['effort'])
         if claude_factory is None:

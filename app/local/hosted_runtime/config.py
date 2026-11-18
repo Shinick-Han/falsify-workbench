@@ -1,8 +1,8 @@
 """Server-only configuration for the hosted AI runtime.
 
 The service token is held in a non-rendering field: configuration and errors must never
-print it.  The Anthropic API key is deliberately not part of this object; only the provider
-backend reads it from the process environment.
+print it.  Provider API keys are deliberately not part of this object; only the provider
+backend reads them from the process environment.
 """
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ DEFAULT_MAX_PROMPT_CHARS = 32000
 DEFAULT_RETENTION_SECONDS = 7 * 24 * 60 * 60
 DEFAULT_BIND = '127.0.0.1'
 DEFAULT_PORT = 8787
-PROVIDER = 'anthropic'
 
 try:  # build identity is a plain first-party constant; keep the import optional for tests.
     from build_info import WORKBENCH_VERSION as _VERSION
@@ -30,6 +29,23 @@ except Exception:  # pragma: no cover - only when run outside the workbench sour
 
 class ConfigError(ValueError):
     """Fixed-code configuration failure; the message never contains a secret."""
+
+
+def provider_for_model(model):
+    """Return ``anthropic`` or ``openai`` for an allowlisted model id, else ``None``."""
+    if not isinstance(model, str) or not model:
+        return None
+    if model.startswith('claude-'):
+        return 'anthropic'
+    if model.startswith('gpt-') or (len(model) > 1 and model[0] == 'o' and model[1].isdigit()):
+        return 'openai'
+    return None
+
+
+def _allowlist_providers(models):
+    found = {provider_for_model(model) for model in models}
+    found.discard(None)
+    return sorted(found)
 
 
 def _env_int(env, name, default, low, high):
@@ -70,6 +86,8 @@ def _check_models(models, default_model):
         raise ConfigError('HOSTED_AI_MODELS must not repeat a model')
     if default_model not in models:
         raise ConfigError('HOSTED_AI_DEFAULT_MODEL must be in HOSTED_AI_MODELS')
+    if any(provider_for_model(model) is None for model in models):
+        raise ConfigError('HOSTED_AI_MODELS contains a model with no provider')
     return models
 
 
@@ -123,7 +141,7 @@ class RuntimeConfig:
     job_retention_seconds: int = DEFAULT_RETENTION_SECONDS
     bind_host: str = DEFAULT_BIND
     bind_port: int = DEFAULT_PORT
-    provider: str = PROVIDER
+    provider: str = 'anthropic'
     version: str = _VERSION
 
     def __post_init__(self):
@@ -137,6 +155,7 @@ class RuntimeConfig:
         bind_port = _check_bind(self.bind_host, self.bind_port)
         object.__setattr__(self, 'state_dir', state_dir)
         object.__setattr__(self, 'models', models)
+        object.__setattr__(self, 'provider', provider_for_model(models[0]))
         object.__setattr__(self, 'efforts', efforts)
         object.__setattr__(self, 'max_upload_bytes', max_upload)
         object.__setattr__(self, 'max_concurrency', max_concurrency)
@@ -179,6 +198,7 @@ class RuntimeConfig:
         return {
             'ok': True,
             'provider': self.provider,
+            'providers': _allowlist_providers(self.models),
             'models': list(self.models),
             'version': self.version,
             'ready': bool(ready),
