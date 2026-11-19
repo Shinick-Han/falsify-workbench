@@ -17,7 +17,7 @@ import {
 } from './store.mjs';
 import { parseCsvSet, sha256Hex } from './text.mjs';
 
-function progress(io, line) {
+export function progress(io, line) {
   io.stderr.write(`[booth] ${line}\n`);
 }
 
@@ -25,15 +25,15 @@ function print(io, value) {
   io.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
-function clientFor(ctx) {
+export function clientFor(ctx) {
   return createClient({ apiBase: resolveApiBase(ctx.config, ctx.flags), token: ctx.token });
 }
 
-function dataDir(ctx) {
+export function dataDir(ctx) {
   return resolveDataDir(ctx.config, ctx.flags);
 }
 
-function receiptSet(flags) {
+export function receiptSet(flags) {
   const set = parseCsvSet(flags.only);
   if (!set) return null;
   for (const receipt of set) {
@@ -67,7 +67,7 @@ function selected(row, { only, statuses, outcomes }) {
   return true;
 }
 
-async function listPages(client, flags, { onePage = false } = {}) {
+export async function listPages(client, flags, { onePage = false } = {}) {
   const limit = flags.limit !== undefined && flags.limit !== true ? Number(flags.limit) : 100;
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
     throw new BoothError('booth_config', 'limit must be an integer from 1 to 200');
@@ -144,7 +144,7 @@ export async function pull(ctx) {
   print(ctx.io, { dataDir: dir, saved, skipped, kept, withdrawn, seen: submissions.length });
 }
 
-function forgetWithdrawn(io, dir, row) {
+export function forgetWithdrawn(io, dir, row) {
   fs.rmSync(submissionDir(dir, row.receipt), { recursive: true, force: true });
   fs.rmSync(path.join(dir, 'blue', row.receipt), { recursive: true, force: true });
   const added = appendWithdrawnTombstone(dir, row);
@@ -152,7 +152,7 @@ function forgetWithdrawn(io, dir, row) {
   return 'withdrawn';
 }
 
-async function archiveSubmission(io, client, dir, row) {
+export async function archiveSubmission(io, client, dir, row) {
   if (!/^F-\d{4,}$/.test(row.receipt)) throw new BoothError('booth_api', 'server returned a bad receipt');
   if (row.status === 'withdrawn') return forgetWithdrawn(io, dir, row);
   const folder = submissionDir(dir, row.receipt);
@@ -221,7 +221,7 @@ function submissionPdfSha256(dir, row) {
   return row.pdfSha256;
 }
 
-function blueMaxBytes(flags) {
+export function blueMaxBytes(flags) {
   if (flags.maxBytes === undefined || flags.maxBytes === true) return BLUE_MAX_PDF_BYTES;
   const value = Number(flags.maxBytes);
   if (!Number.isSafeInteger(value) || value < 1 || value > BLUE_MAX_PDF_BYTES_CAP) {
@@ -251,20 +251,23 @@ function assertLocalPdf(file, receipt, maxBytes) {
   }
 }
 
+// Batch BLUE waits for close unless --allow-open. The live watch loop is the exception by design.
+export async function assertClosedUnlessAllowed(ctx) {
+  if (ctx.flags.allowOpen === true) return;
+  const settings = await clientFor(ctx).json('/v1/booth/admin/settings');
+  if (!settings || settings.submissionsOpen !== false) {
+    throw new BoothError(
+      'booth_config',
+      'submissions are open; BLUE shares the production runtime, not the visitor path. Pass --allow-open to start anyway',
+    );
+  }
+}
+
 export async function blue(ctx) {
   const dir = dataDir(ctx);
   const plan = resolveBluePlan(ctx.config, ctx.flags);
   const maxBytes = blueMaxBytes(ctx.flags);
-  if (ctx.flags.allowOpen !== true) {
-    const gate = clientFor(ctx);
-    const settings = await gate.json('/v1/booth/admin/settings');
-    if (!settings || settings.submissionsOpen !== false) {
-      throw new BoothError(
-        'booth_config',
-        'submissions are open; BLUE shares the production runtime, not the visitor path. Pass --allow-open to start anyway',
-      );
-    }
-  }
+  await assertClosedUnlessAllowed(ctx);
   const rows = activeRows(localRows(dir, ctx.flags));
   const tasks = [];
   for (const row of rows) {
@@ -318,7 +321,7 @@ function dryBlueAction(dir, task) {
   };
 }
 
-async function runBlue(io, client, dir, plan, task) {
+export async function runBlue(io, client, dir, plan, task) {
   const receipt = task.row.receipt;
   const label = `${receipt} ${task.profile.name} #${task.repeat}`;
   const recordFile = blueRecordPath(dir, receipt, task.profile.name, task.repeat, task.hash);
@@ -381,8 +384,9 @@ async function runBlue(io, client, dir, plan, task) {
     return { ok: true, receipt, profile: task.profile.name, repeat: task.repeat, state: job.state, jobId: job.id, replayed, resumed: false };
   } catch (error) {
     const message = error instanceof BoothError ? `${error.code}: ${error.message}` : error.message;
+    const code = error instanceof BoothError ? error.code : 'booth_internal';
     progress(io, `blue ${label} failed ${message}`);
-    return { ok: false, receipt, profile: task.profile.name, repeat: task.repeat, error: message };
+    return { ok: false, receipt, profile: task.profile.name, repeat: task.repeat, error: message, code };
   }
 }
 
@@ -462,7 +466,7 @@ export async function judge(ctx) {
   print(ctx.io, { judged: actions.length });
 }
 
-function compactSummary(item, outcome) {
+export function compactSummary(item, outcome) {
   const summary = {
     suggestedOutcome: outcome,
     edits: (item.edits || []).map(edit => ({ index: edit.index, pageIndex: edit.pageIndex, verdict: edit.verdict })),

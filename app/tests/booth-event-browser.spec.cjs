@@ -48,7 +48,13 @@ const cors = {
   'Access-Control-Allow-Headers': '*',
 };
 
-async function stubApi(route, submissions) {
+const PENDING = {receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:00.000Z', published: false};
+const MISSED = {
+  receipt: 'F-0042', status: 'judged', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:00.000Z',
+  published: true, outcome: 'missed', publicNote: '표 1의 점수 변경을 AI가 놓쳤어요.', prizeMessage: '부스에서 스티커를 받아 가세요', publishedAt: '2026-11-22T01:02:00.000Z',
+};
+
+async function stubApi(route, submissions, claims) {
   const request = route.request();
   const url = new URL(request.url());
   if (!url.href.startsWith(api)) return route.abort();
@@ -68,7 +74,7 @@ async function stubApi(route, submissions) {
   }
   if (url.pathname === '/v1/booth/config') {
     return json(route, 200, {
-      enabled: true, submissionsOpen: true, announcement: '행사 안내', consentVersion: '2026-11-22.v1',
+      enabled: true, submissionsOpen: true, announcement: '행사 안내', consentVersion: '2026-11-22.v2',
       limits: {maxDeclared: 5, maxReason: 500, maxNickname: 24, maxPdfBytes: 16777216},
       missions: [{
         paperId: '2309.15217',
@@ -93,7 +99,24 @@ async function stubApi(route, submissions) {
       course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:00.000Z',
     });
   }
+  if (request.method() === 'POST' && url.pathname === '/v1/booth/claim') {
+    claims.push(JSON.parse(request.postData() || '{}'));
+    return json(route, 200, claims.length <= 2 ? PENDING : MISSED);
+  }
   return json(route, 404, {error: {code: 'not_found'}});
+}
+
+/* Visible buttons and links in the selector need a 44px box; the page must not scroll sideways. */
+async function phoneAudit(page, selector) {
+  return page.evaluate(scope => {
+    const small = [...document.querySelectorAll(scope + ' button, ' + scope + ' a.button')]
+      .filter(node => node.offsetParent !== null)
+      .map(node => ({text: node.textContent.trim(), rect: node.getBoundingClientRect()}))
+      .filter(item => item.rect.width < 44 || item.rect.height < 44)
+      .map(item => item.text + ' ' + Math.round(item.rect.width) + 'x' + Math.round(item.rect.height));
+    const seen = document.querySelectorAll(scope + ' button, ' + scope + ' a.button');
+    return {small, seen: [...seen].filter(node => node.offsetParent !== null).length, overflow: document.documentElement.scrollWidth - window.innerWidth};
+  }, selector);
 }
 
 async function main() {
@@ -102,6 +125,7 @@ async function main() {
   let browser = null;
   const pageErrors = [];
   const submissions = [];
+  const claims = [];
   try {
   await server.ready;
   browser = await chromium.launch({
@@ -114,11 +138,13 @@ async function main() {
     });
     page.setDefaultTimeout(90000);
     page.on('pageerror', error => pageErrors.push(error.message));
+    page.on('dialog', dialog => { void dialog.accept(); });
+    await page.clock.install();
     const base = 'http://127.0.0.1:' + port + '/';
     await page.route('**/*', route => {
       const url = route.request().url();
       if (url.startsWith(base)) return route.continue();
-      return stubApi(route, submissions);
+      return stubApi(route, submissions, claims);
     });
     await page.goto(base + 'event.html');
     await page.getByRole('button', {name: '5쪽으로 가기'}).waitFor();
@@ -155,6 +181,7 @@ async function main() {
     });
     await page.locator('#booth-rows select').selectOption('number');
     await page.locator('#booth-rows textarea').fill('표의 점수를 0.95에서 0.50으로 바꿨습니다');
+    assert.match(await page.locator('#booth-consent-copy').textContent(), /제출하면 바로 수정본 PDF만 AI 검증을 위해 모델 제공자\(Anthropic\)에 보내고/);
     await page.locator('#booth-consent').check();
     await page.locator('#booth-submit-button').click();
     const submitted = await page.waitForFunction(() => {
@@ -171,6 +198,43 @@ async function main() {
     assert.equal(posted.includes('edited.pdf'), true);
     assert.equal(posted.includes('0.50'), true);
     assert.equal(posted.includes('0.95'), true);
+    assert.equal(posted.includes('2026-11-22.v2'), true);
+    const live = page.locator('#booth-receipt #booth-live');
+    await live.waitFor();
+    assert.match(await page.locator('#booth-live-title').textContent(), /AI가 결함을 찾는 중이에요\. 보통 1~3분 걸려요/);
+    assert.equal(await page.locator('#booth-live-again').isHidden(), true);
+    for (let round = 1; round <= 3; round += 1) {
+      await page.clock.fastForward(15000);
+      const started = Date.now();
+      while (claims.length < round && Date.now() - started < 10000) await new Promise(resolve => setTimeout(resolve, 50));
+      assert.equal(claims.length, round);
+    }
+    assert.deepEqual(claims[0], {receipt: 'F-0042', claimKey: '7Q3K-M9XD'});
+    await page.waitForFunction(() => document.querySelector('#booth-live-title')?.textContent === 'AI가 못 찾았어요!');
+    assert.equal(await page.locator('#booth-live-prize').textContent(), '부스에서 스티커를 받아 가세요');
+    assert.equal(await page.locator('#booth-live-note').textContent(), '표 1의 점수 변경을 AI가 놓쳤어요.');
+    const again = page.getByRole('button', {name: '다시 도전하기'});
+    assert.equal(await again.isVisible(), true);
+    await page.setViewportSize({width: 360, height: 800});
+    const audit = await phoneAudit(page, '#booth');
+    assert.deepEqual(audit.small, []);
+    assert.equal(audit.seen >= 3, true);
+    assert.equal(audit.overflow <= 0, true, 'horizontal overflow ' + audit.overflow);
+    await page.clock.fastForward(60000);
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.equal(claims.length, 3);
+    await again.click();
+    await page.waitForFunction(() => document.querySelector('#booth-receipt')?.hidden === true);
+    assert.equal(await page.locator('#booth-submit').isHidden(), true);
+    assert.equal(await page.locator('#booth-missions').isVisible(), true);
+    assert.equal(await page.locator('#booth-consent').isChecked(), false);
+    assert.equal(await page.locator('#paper-file').inputValue(), '');
+    await page.locator('#booth-result-link').click();
+    await page.locator('#booth-receipts-list').getByRole('button', {name: /F-0042/}).waitFor();
+    const resultAudit = await phoneAudit(page, '#booth-result');
+    assert.deepEqual(resultAudit.small, []);
+    assert.equal(resultAudit.seen >= 2, true);
+    assert.equal(resultAudit.overflow <= 0, true, 'result overflow ' + resultAudit.overflow);
     assert.equal(pageErrors.join('\n'), '');
   } catch (error) {
     const shot = '/tmp/booth-event-browser.png';

@@ -33,9 +33,11 @@ function judge(edit, finding) {
   return { verdict, ratio, numHit };
 }
 
-export function matchEdit(edit, wrappedFindings) {
+// The best match plus the finding it came from (null when missed).
+export function matchEditDetailed(edit, wrappedFindings) {
   const page = edit.pageIndex;
   let best = null;
+  let bestFinding = null;
   for (const wrapped of wrappedFindings) {
     const finding = wrapped.finding || wrapped;
     if (!findingPageIndexes(finding).has(page)) continue;
@@ -52,9 +54,28 @@ export function matchEdit(edit, wrappedFindings) {
         repeat: wrapped.repeat ?? null,
         quote: bestQuote(finding).slice(0, 240),
       };
+      bestFinding = finding;
     }
   }
-  if (!best) return { verdict: 'missed', ratio: 0, numHit: false, profile: '', repeat: null, quote: '' };
+  if (!best) return { match: { verdict: 'missed', ratio: 0, numHit: false, profile: '', repeat: null, quote: '' }, finding: null };
+  return { match: best, finding: bestFinding };
+}
+
+export function matchEdit(edit, wrappedFindings) {
+  return matchEditDetailed(edit, wrappedFindings).match;
+}
+
+// Across every declared edit: the strongest match and its finding, or null when all are missed.
+export function bestMatchedFinding(row, wrappedFindings) {
+  const declared = Array.isArray(row.declared) ? row.declared : [];
+  let best = null;
+  for (const edit of declared) {
+    const { match, finding } = matchEditDetailed(edit, wrappedFindings);
+    if (!finding) continue;
+    if (!best || match.rank > best.match.rank || (match.rank === best.match.rank && match.ratio > best.match.ratio)) {
+      best = { match, finding };
+    }
+  }
   return best;
 }
 

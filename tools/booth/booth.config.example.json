@@ -11,7 +11,40 @@
         "maxCalls": 8,
         "useEvidence": true,
         "promptFile": "prompts/blue-example.txt"
+      },
+      {
+        "name": "live",
+        "model": "claude-sonnet-5-5",
+        "effort": "high",
+        "maxCalls": 8,
+        "useEvidence": true,
+        "promptFile": "prompts/blue-live.txt"
+      },
+      {
+        "name": "final",
+        "model": "claude-opus-5-5",
+        "effort": "high",
+        "maxCalls": 12,
+        "useEvidence": true,
+        "promptFile": "prompts/blue-live.txt"
       }
     ]
+  },
+  "live": {
+    "liveProfile": "live",
+    "finalProfile": "final",
+    "concurrency": 12,
+    "intervalSec": 10,
+    "retries": 2,
+    "retryBackoffMs": 5000,
+    "prizeMessage": "AI가 놓쳤습니다! 부스 스태프에게 이 화면을 보여 주시면 확인 후 작은 선물을 드립니다.",
+    "finalPrizeMessage": "정밀 재검증에서도 AI가 놓쳤습니다. 최종 경품 명단은 운영진이 확인한 뒤 안내합니다.",
+    "finalCaughtMessage": "빠른 AI는 이겼어요! 정밀 AI는 찾아냈지만, 받은 즉석 선물은 그대로 유효합니다.",
+    "publicNote": {
+      "caught": "AI가 심어 둔 결함을 찾았습니다. (AI가 짚은 곳: {page}쪽)\nAI가 짚은 문장: \"{quote}\"\nAI 설명: {rationale}",
+      "partial": "AI가 심어 둔 결함에 거의 다가갔습니다. 이번에는 찾은 것으로 봅니다. (AI가 짚은 곳: {page}쪽)\nAI가 짚은 문장: \"{quote}\"\nAI 설명: {rationale}",
+      "missed": "AI는 다른 곳을 짚었습니다. AI가 먼저 본 곳은 {page}쪽이었고, 심어 둔 결함은 AI 눈을 피했습니다.",
+      "missedNone": "AI가 이번 수정본에서 결함을 짚지 못했습니다. 심어 둔 결함은 AI 눈을 피했습니다."
+    }
   }
 }

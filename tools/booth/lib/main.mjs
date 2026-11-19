@@ -6,6 +6,7 @@ import {
 import { USAGE } from './constants.mjs';
 import { loadConfig, readToken } from './config.mjs';
 import { BoothError } from './errors.mjs';
+import { finalCommand, watch } from './live.mjs';
 
 const COMMANDS = {
   status,
@@ -22,6 +23,8 @@ const COMMANDS = {
   open: openBooth,
   close: closeBooth,
   announce,
+  watch,
+  final: finalCommand,
 };
 
 export async function main(argv, io = { stdout: process.stdout, stderr: process.stderr, env: process.env }) {

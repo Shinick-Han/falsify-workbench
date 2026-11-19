@@ -30,6 +30,26 @@ node tools/booth/booth.mjs --config booth.local.json blue \
 
 `--concurrency` 는 이 프로세스 안의 동시 BLUE 작업 수입니다. 서버의 `BOOTH_OPERATOR_ACTIVE_JOBS` 이하로 두세요.
 
+### 라이브 판정 (`live` 절)
+
+부스에서는 RED(AI 심기 도움)를 끕니다. 방문자가 제출하면 `watch` 가 곧바로 BLUE를 돌려 1~3분 안에 결과를 게시하고, 마감 뒤 `final` 이 놓친 접수를 더 센 모델로 다시 봅니다. 프로파일은 `blue.profiles[]` 에 `live` (Claude Sonnet 5.5, effort high)와 `final` (Claude Opus 5.5, effort high)로 둡니다. 둘 다 `prompts/blue-live.txt` 를 씁니다. 이 프롬프트는 `blue-example.txt` 규칙에 더해 rationale을 한국어 두 문장 이내로, quote를 PDF 원문 그대로 쓰게 합니다. `--profile` 없는 `blue` 는 `live`·`final` 프로파일을 건너뜁니다.
+
+| 키 | 기본값 | 뜻 |
+|---|---|---|
+| `liveProfile` / `finalProfile` | `live` / `final` | `watch` 와 `final` 이 쓸 프로파일 이름 |
+| `concurrency` | `12` | 동시 BLUE 작업 수. `--concurrency` 가 덮어씁니다 |
+| `intervalSec` | `10` | 목록을 다시 읽는 간격(초). `--interval` 이 덮어씁니다 |
+| `retries` | `2` | BLUE·폴링 실패 때 추가 시도 횟수. 대기는 `retryBackoffMs` 에서 두 배씩 늘어납니다 |
+| `retryBackoffMs` | `5000` | 첫 재시도 전 대기(ms) |
+| `prizeMessage` | 없음 | 라이브에서 `missed` 인 접수에만 붙는 경품 안내(500자 이하) |
+| `finalPrizeMessage` | `prizeMessage` | `final --apply` 뒤에도 `missed` 인 접수의 안내 |
+| `finalCaughtMessage` | "빠른 AI는 이겼어요! 정밀 AI는 찾아냈지만, 받은 즉석 선물은 그대로 유효합니다." | 라이브에서 놓쳤지만 `final` 에서 `caught`·`partial` 이 된 접수의 안내. 이미 받은 즉석 선물은 유효합니다 |
+| `publicNote.caught` / `partial` / `missed` / `missedNone` | 아래 | 방문자에게 보이는 결과 문장(1000자 이하) |
+
+`publicNote` 틀에는 `{page}` (AI finding 의 1부터 세는 쪽), `{quote}` (AI가 짚은 문장, 약 200자에서 자름), `{rationale}` (AI 설명, 약 300자에서 자름)만 들어갑니다. 방문자가 적은 이유·유형·수정 문장은 넣지 않습니다. `caught`·`partial` 은 가장 잘 맞은 finding, `missed` 는 AI가 처음 짚은 finding 의 쪽을 씁니다. 이 쪽은 AI가 짚은 곳의 쪽이라 심어 둔 쪽과 다를 수 있습니다(예: 수정은 3쪽, AI 인용은 4쪽). 그래서 틀은 "AI가 짚은 곳: {page}쪽" 처럼 AI 쪽으로 적습니다. finding 이 없으면 `missedNone` 입니다. 전체는 1000자에서 자릅니다.
+
+방문자에게 보이는 outcome 뜻: `caught` AI가 찾음, `partial` 거의 찾음(찾은 것으로 보고 경품 없음), `missed` AI가 놓침(스태프 확인 뒤 부스에서 작은 선물, 마감 뒤 Opus 재검증 대상), `invalid` 결함으로 받지 않음.
+
 ## 명령
 
 | 명령 | 하는 일 |
@@ -46,21 +66,25 @@ node tools/booth/booth.mjs --config booth.local.json blue \
 | `missions get\|set\|warm` | 미션 목록. 행사 파일은 `tools/booth/missions.aws-community-day-2026.json` 입니다. `warm` 은 설정된 미션마다 `GET /v1/papers/pdf` 로 라이선스와 캐시를 확인하고 크기와 실패를 보고합니다. `warm --write` 는 받은 PDF의 `sourceSha256` 을 미션에 저장하고 `pageHint` 는 그대로 둡니다 |
 | `open` / `close` | 접수 개방. `close --dry-run` 은 요청을 보내지 않습니다 |
 | `announce` | `--text`, `--file`, `--clear` |
+| `watch` | 접수가 열린 동안 계속 돕니다. `--interval` 초마다 `received` 를 읽고 `--concurrency` 개까지 동시에: `status: reviewing` PATCH → PDF 받기(`pull` 과 같은 sha256·길이 검사) → `live` 프로파일 BLUE(`blue --allow-open` 과 같고 idempotency 키도 같음) → 채점 → `{status: judged, outcome, publicNote, aiSummary, published: true}` (`missed` 면 `prizeMessage` 도)를 PATCH 한 번으로 보냅니다. 철회(409)나 PDF 없음은 건너뛰고 로그에 남깁니다. 재시도까지 실패하면 `reviewing` 으로 두고 `operatorNote: live: failed <code>` 를 남깁니다. Ctrl-C 로 멈추면 하던 작업은 다음 시작 때 같은 작업으로 이어 갑니다(새 과금 없음). 이어 가기 표시는 `dataDir/live/<접수번호>.json` 이라서 `watch` 는 운영 서버 한 대에서만 돌립니다. 다른 호스트나 다른 `dataDir` 에서 켜면 이어 가지 못합니다. `--cycles <n>` 은 n번 돌고 남은 작업을 마친 뒤 끝냅니다 |
+| `final` | 마감 뒤. 라이브 outcome 이 `missed` 인 `judged` 접수(`--only` 로 좁힘)를 `final` 프로파일로 다시 돌리고 채점해 `final/candidates.json` (`--out`)에 접수번호·라이브 판정·최종 판정·대표 인용·쪽을 씁니다. 기본은 게시하지 않습니다. 사람이 본 뒤 `--apply` 가 최종 outcome·publicNote·aiSummary 를 PATCH 합니다. 이미 끝난 작업은 다시 과금하지 않습니다. 여전히 `missed` 면 `finalPrizeMessage`, `caught`·`partial` 이 되면 `finalCaughtMessage` 를 `prizeMessage` 로 씁니다. outcome 과 publicNote 는 final 결과를 따릅니다. 접수가 열려 있으면 `--allow-open` 없이 시작하지 않습니다 |
 
 `blue`, `judge`, `publish`, `draw`, `close` 는 `--dry-run` 으로 요청 없이 예정 동작만 보여 줍니다. `draw --dry-run` 은 목록을 읽은 뒤 당첨만 출력하고 파일과 PATCH는 만들지 않습니다.
 
-진행 문장은 stderr, 결과는 stdout JSON 입니다.
+진행 문장은 stderr, 결과는 stdout JSON 입니다. `watch` 는 주기마다 JSON 한 줄(`type`, `queued`, `inFlight`, `done`, `failed`, `failedReceipts`, `skipped`, 접수→게시 `p50Sec`/`p95Sec`)을 씁니다. 마지막 줄은 `end`, Ctrl-C 면 `stopped` (종료 코드 130)입니다.
 
 ## 부스 당일
 
 1. 문을 열기 전에 `missions set tools/booth/missions.aws-community-day-2026.json`, `missions warm --write`, `open`, 필요하면 `announce`.
-2. 30분마다 `pull` (상태 필터 없이). 수정본 PDF는 접수와 함께 서버에 있습니다. `pull` 은 `pdfSha256` 과 `pdfBytes` 가 맞는 것만 보관합니다. 받은 PDF는 브라우저에 내장된 PDF 보기에서만 여세요. 데스크톱 PDF 프로그램으로 열지 마세요. 철회되면 서버 PDF가 지워지고, 다음 `pull` 이 로컬 보관본도 지웁니다.
-3. 마감하면 `close`.
-4. `blue`. 먼저 `--dry-run`. 접수가 아직 열려 있으면 거절합니다. BLUE는 방문자 제출 경로가 아니라 프로덕션 런타임을 같이 씁니다. 그래도 돌리려면 `--allow-open`.
-5. `score` 로 제안 확인. 사람이 본 뒤에만 `judge`.
-6. `publish --prize '부스에서 이 화면을 보여 주세요'`.
-7. 경품이 추첨이면 `draw --count 3 --prize '…'`. 기본은 AI가 놓친(`missed`) 접수입니다.
-8. `export --format common` 과 `--format score`, `--format key`.
+2. 문을 연 뒤 운영 노트북에서 `watch` 를 띄워 둡니다. stdout 의 `failed` 가 늘면 그 접수를 확인하세요. 끊겼다면 다시 `watch` 를 켜면 이어 갑니다.
+3. 30분마다 `pull` (상태 필터 없이). 수정본 PDF는 접수와 함께 서버에 있습니다. `pull` 은 `pdfSha256` 과 `pdfBytes` 가 맞는 것만 보관합니다. 받은 PDF는 브라우저에 내장된 PDF 보기에서만 여세요. 데스크톱 PDF 프로그램으로 열지 마세요. 철회되면 서버 PDF가 지워지고, 다음 `pull` 이 로컬 보관본도 지웁니다.
+4. 마감하면 `close`. `watch` 가 남은 작업을 마치면 Ctrl-C.
+5. `final` 로 놓친 접수를 Opus로 다시 보고 `final/candidates.json` 을 사람이 확인한 뒤 `final --apply`. 최종 경품 명단은 사람이 정합니다.
+6. 라이브 판정을 쓰지 않을 때만 `blue`. 먼저 `--dry-run`. 접수가 아직 열려 있으면 거절합니다. BLUE는 방문자 제출 경로가 아니라 프로덕션 런타임을 같이 씁니다. 그래도 돌리려면 `--allow-open`.
+7. `score` 로 제안 확인. 사람이 본 뒤에만 `judge`.
+8. `publish --prize '부스에서 이 화면을 보여 주세요'`.
+9. 경품이 추첨이면 `draw --count 3 --prize '…'`. 기본은 AI가 놓친(`missed`) 접수입니다.
+10. `export --format common` 과 `--format score`, `--format key`.
 
 ## 채점
 
