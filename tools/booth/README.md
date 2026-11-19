@@ -43,9 +43,10 @@ node tools/booth/booth.mjs --config booth.local.json blue \
 | `retryBackoffMs` | `5000` | 첫 재시도 전 대기(ms) |
 | `prizeMessage` | 없음 | 라이브에서 `missed` 인 접수에만 붙는 경품 안내(500자 이하) |
 | `finalPrizeMessage` | `prizeMessage` | `final --apply` 뒤에도 `missed` 인 접수의 안내 |
+| `finalCaughtMessage` | "빠른 AI는 이겼어요! 정밀 AI는 찾아냈지만, 받은 즉석 선물은 그대로 유효합니다." | 라이브에서 놓쳤지만 `final` 에서 `caught`·`partial` 이 된 접수의 안내. 이미 받은 즉석 선물은 유효합니다 |
 | `publicNote.caught` / `partial` / `missed` / `missedNone` | 아래 | 방문자에게 보이는 결과 문장(1000자 이하) |
 
-`publicNote` 틀에는 `{page}` (AI finding 의 1부터 세는 쪽), `{quote}` (AI가 짚은 문장, 약 200자에서 자름), `{rationale}` (AI 설명, 약 300자에서 자름)만 들어갑니다. 방문자가 적은 이유·유형·수정 문장은 넣지 않습니다. `caught`·`partial` 은 가장 잘 맞은 finding, `missed` 는 AI가 처음 짚은 finding 의 쪽을 씁니다. finding 이 없으면 `missedNone` 입니다. 전체는 1000자에서 자릅니다.
+`publicNote` 틀에는 `{page}` (AI finding 의 1부터 세는 쪽), `{quote}` (AI가 짚은 문장, 약 200자에서 자름), `{rationale}` (AI 설명, 약 300자에서 자름)만 들어갑니다. 방문자가 적은 이유·유형·수정 문장은 넣지 않습니다. `caught`·`partial` 은 가장 잘 맞은 finding, `missed` 는 AI가 처음 짚은 finding 의 쪽을 씁니다. 이 쪽은 AI가 짚은 곳의 쪽이라 심어 둔 쪽과 다를 수 있습니다(예: 수정은 3쪽, AI 인용은 4쪽). 그래서 틀은 "AI가 짚은 곳: {page}쪽" 처럼 AI 쪽으로 적습니다. finding 이 없으면 `missedNone` 입니다. 전체는 1000자에서 자릅니다.
 
 방문자에게 보이는 outcome 뜻: `caught` AI가 찾음, `partial` 거의 찾음(찾은 것으로 보고 경품 없음), `missed` AI가 놓침(스태프 확인 뒤 부스에서 작은 선물, 마감 뒤 Opus 재검증 대상), `invalid` 결함으로 받지 않음.
 
@@ -65,8 +66,8 @@ node tools/booth/booth.mjs --config booth.local.json blue \
 | `missions get\|set\|warm` | 미션 목록. 행사 파일은 `tools/booth/missions.aws-community-day-2026.json` 입니다. `warm` 은 설정된 미션마다 `GET /v1/papers/pdf` 로 라이선스와 캐시를 확인하고 크기와 실패를 보고합니다. `warm --write` 는 받은 PDF의 `sourceSha256` 을 미션에 저장하고 `pageHint` 는 그대로 둡니다 |
 | `open` / `close` | 접수 개방. `close --dry-run` 은 요청을 보내지 않습니다 |
 | `announce` | `--text`, `--file`, `--clear` |
-| `watch` | 접수가 열린 동안 계속 돕니다. `--interval` 초마다 `received` 를 읽고 `--concurrency` 개까지 동시에: `status: reviewing` PATCH → PDF 받기(`pull` 과 같은 sha256·길이 검사) → `live` 프로파일 BLUE(`blue --allow-open` 과 같고 idempotency 키도 같음) → 채점 → `{status: judged, outcome, publicNote, aiSummary, published: true}` (`missed` 면 `prizeMessage` 도)를 PATCH 한 번으로 보냅니다. 철회(409)나 PDF 없음은 건너뛰고 로그에 남깁니다. 재시도까지 실패하면 `reviewing` 으로 두고 `operatorNote: live: failed <code>` 를 남깁니다. Ctrl-C 로 멈추면 하던 작업은 다음 시작 때 같은 작업으로 이어 갑니다(새 과금 없음). `--cycles <n>` 은 n번 돌고 남은 작업을 마친 뒤 끝냅니다 |
-| `final` | 마감 뒤. 라이브 outcome 이 `missed` 인 `judged` 접수(`--only` 로 좁힘)를 `final` 프로파일로 다시 돌리고 채점해 `final/candidates.json` (`--out`)에 접수번호·라이브 판정·최종 판정·대표 인용·쪽을 씁니다. 기본은 게시하지 않습니다. 사람이 본 뒤 `--apply` 가 최종 outcome·publicNote·aiSummary 를 PATCH 합니다. 이미 끝난 작업은 다시 과금하지 않습니다. 여전히 `missed` 면 `finalPrizeMessage`, 아니면 `prizeMessage` 를 비웁니다. 접수가 열려 있으면 `--allow-open` 없이 시작하지 않습니다 |
+| `watch` | 접수가 열린 동안 계속 돕니다. `--interval` 초마다 `received` 를 읽고 `--concurrency` 개까지 동시에: `status: reviewing` PATCH → PDF 받기(`pull` 과 같은 sha256·길이 검사) → `live` 프로파일 BLUE(`blue --allow-open` 과 같고 idempotency 키도 같음) → 채점 → `{status: judged, outcome, publicNote, aiSummary, published: true}` (`missed` 면 `prizeMessage` 도)를 PATCH 한 번으로 보냅니다. 철회(409)나 PDF 없음은 건너뛰고 로그에 남깁니다. 재시도까지 실패하면 `reviewing` 으로 두고 `operatorNote: live: failed <code>` 를 남깁니다. Ctrl-C 로 멈추면 하던 작업은 다음 시작 때 같은 작업으로 이어 갑니다(새 과금 없음). 이어 가기 표시는 `dataDir/live/<접수번호>.json` 이라서 `watch` 는 운영 서버 한 대에서만 돌립니다. 다른 호스트나 다른 `dataDir` 에서 켜면 이어 가지 못합니다. `--cycles <n>` 은 n번 돌고 남은 작업을 마친 뒤 끝냅니다 |
+| `final` | 마감 뒤. 라이브 outcome 이 `missed` 인 `judged` 접수(`--only` 로 좁힘)를 `final` 프로파일로 다시 돌리고 채점해 `final/candidates.json` (`--out`)에 접수번호·라이브 판정·최종 판정·대표 인용·쪽을 씁니다. 기본은 게시하지 않습니다. 사람이 본 뒤 `--apply` 가 최종 outcome·publicNote·aiSummary 를 PATCH 합니다. 이미 끝난 작업은 다시 과금하지 않습니다. 여전히 `missed` 면 `finalPrizeMessage`, `caught`·`partial` 이 되면 `finalCaughtMessage` 를 `prizeMessage` 로 씁니다. outcome 과 publicNote 는 final 결과를 따릅니다. 접수가 열려 있으면 `--allow-open` 없이 시작하지 않습니다 |
 
 `blue`, `judge`, `publish`, `draw`, `close` 는 `--dry-run` 으로 요청 없이 예정 동작만 보여 줍니다. `draw --dry-run` 은 목록을 읽은 뒤 당첨만 출력하고 파일과 PATCH는 만들지 않습니다.
 

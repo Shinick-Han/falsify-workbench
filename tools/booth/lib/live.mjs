@@ -400,7 +400,8 @@ async function finalOne(env, row) {
 async function applyFinal(env, item) {
   const prize = env.live.finalPrizeMessage || env.live.prizeMessage;
   const body = judgedBody(env, item.verdict, { round: 'final', liveOutcome: item.liveVerdict, prize });
-  if (item.verdict.outcome !== 'missed') body.prizeMessage = null;
+  // Missed live, found in the final round: the instant prize stays valid, so the message says so.
+  if (item.verdict.outcome !== 'missed') body.prizeMessage = env.live.finalCaughtMessage;
   try {
     await patchRow(env.client, item.receipt, body);
   } catch (error) {

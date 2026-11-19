@@ -9,15 +9,15 @@ import { BoothError } from './errors.mjs';
 const CONFIG_KEYS = ['apiBase', 'dataDir', 'blue', 'live'];
 const LIVE_KEYS = [
   'liveProfile', 'finalProfile', 'concurrency', 'intervalSec', 'retries', 'retryBackoffMs',
-  'prizeMessage', 'finalPrizeMessage', 'publicNote',
+  'prizeMessage', 'finalPrizeMessage', 'finalCaughtMessage', 'publicNote',
 ];
 export const NOTE_KEYS = ['caught', 'partial', 'missed', 'missedNone'];
 
 // Visitor-facing Korean. {page} is the finding's 1-based page, {quote} its sentence, {rationale} its reason.
 // Nothing here comes from the visitor's declared edit.
 export const DEFAULT_NOTES = Object.freeze({
-  caught: 'AI가 {page}쪽에서 심어 둔 결함을 찾았습니다.\nAI가 짚은 문장: "{quote}"\nAI 설명: {rationale}',
-  partial: 'AI가 {page}쪽에서 심어 둔 결함에 거의 다가갔습니다. 이번에는 찾은 것으로 봅니다.\nAI가 짚은 문장: "{quote}"\nAI 설명: {rationale}',
+  caught: 'AI가 심어 둔 결함을 찾았습니다. (AI가 짚은 곳: {page}쪽)\nAI가 짚은 문장: "{quote}"\nAI 설명: {rationale}',
+  partial: 'AI가 심어 둔 결함에 거의 다가갔습니다. 이번에는 찾은 것으로 봅니다. (AI가 짚은 곳: {page}쪽)\nAI가 짚은 문장: "{quote}"\nAI 설명: {rationale}',
   missed: 'AI는 다른 곳을 짚었습니다. AI가 먼저 본 곳은 {page}쪽이었고, 심어 둔 결함은 AI 눈을 피했습니다.',
   missedNone: 'AI가 이번 수정본에서 결함을 짚지 못했습니다. 심어 둔 결함은 AI 눈을 피했습니다.',
 });
@@ -32,6 +32,7 @@ export function defaultLive() {
     retryBackoffMs: 5000,
     prizeMessage: '',
     finalPrizeMessage: '',
+    finalCaughtMessage: '빠른 AI는 이겼어요! 정밀 AI는 찾아냈지만, 받은 즉석 선물은 그대로 유효합니다.',
     publicNote: { ...DEFAULT_NOTES },
   };
 }
@@ -57,7 +58,9 @@ function normalizeLive(raw) {
   if (raw.retries !== undefined) live.retries = integer(raw.retries, 'live.retries', 0, 10);
   if (raw.retryBackoffMs !== undefined) live.retryBackoffMs = integer(raw.retryBackoffMs, 'live.retryBackoffMs', 0, 600000);
   if (raw.prizeMessage !== undefined) live.prizeMessage = boundedString(raw.prizeMessage, 'live.prizeMessage', 500);
-  if (raw.finalPrizeMessage !== undefined) live.finalPrizeMessage = boundedString(raw.finalPrizeMessage, 'live.finalPrizeMessage', 500);
+  for (const key of ['finalPrizeMessage', 'finalCaughtMessage']) {
+    if (raw[key] !== undefined) live[key] = boundedString(raw[key], `live.${key}`, 500);
+  }
   if (raw.publicNote !== undefined) {
     rejectUnknown(raw.publicNote, NOTE_KEYS, 'live.publicNote');
     for (const key of NOTE_KEYS) {

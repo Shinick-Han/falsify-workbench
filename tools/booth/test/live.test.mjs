@@ -117,7 +117,7 @@ function writeConfig(dir, apiBase, { blue = {}, live = {} } = {}) {
       ],
       ...blue,
     },
-    live: { concurrency: 4, intervalSec: 1, retries: 2, retryBackoffMs: 20, prizeMessage: 'PRIZE_LIVE', finalPrizeMessage: 'PRIZE_FINAL', ...live },
+    live: { concurrency: 4, intervalSec: 1, retries: 2, retryBackoffMs: 20, prizeMessage: 'PRIZE_LIVE', finalPrizeMessage: 'PRIZE_FINAL', finalCaughtMessage: 'FINAL_CAUGHT', ...live },
   };
   const file = path.join(dir, 'booth.json');
   fs.writeFileSync(file, JSON.stringify(config));
@@ -157,7 +157,9 @@ test('public note uses only the AI finding, page, quote and rationale', () => {
   const long = { segmentId: 'p7-b2', quote: 'x '.repeat(400), rationale: '이유 '.repeat(400) };
   const note = buildPublicNote({ outcome: 'caught', matched: long, first: long, templates: DEFAULT_NOTES });
   assert.equal(note.length <= 1000, true);
-  assert.equal(note.includes('7쪽'), true);
+  assert.equal(note.includes('AI가 짚은 곳: 7쪽'), true);
+  const partial = buildPublicNote({ outcome: 'partial', matched: long, first: long, templates: DEFAULT_NOTES });
+  assert.match(partial, /거의 다가갔습니다\. 이번에는 찾은 것으로 봅니다\. \(AI가 짚은 곳: 7쪽\)/);
   const quote = /"([^"]*)"/.exec(note)[1];
   assert.equal(quote.length <= 200, true);
   const missed = buildPublicNote({ outcome: 'missed', matched: null, first: HOSTED.findings[0], templates: DEFAULT_NOTES });
@@ -177,7 +179,7 @@ test('watch: received -> reviewing -> judged + published; missed gets the prize'
     assert.equal(caught.outcome, 'caught');
     assert.equal(caught.published, true);
     assert.equal(caught.prizeMessage, null);
-    assert.match(caught.publicNote, /5쪽/);
+    assert.match(caught.publicNote, /\(AI가 짚은 곳: 5쪽\)/);
     assert.equal(caught.publicNote.includes('For faithfulness, the Ragas prediction are in general highly accurate.'), true);
     assert.equal(caught.publicNote.length <= 1000, true);
     assert.equal(caught.aiSummary.round, 'live');
@@ -262,6 +264,27 @@ test('watch: a poll failure is retried; a job that keeps failing is left reviewi
   });
 });
 
+test('final --apply keeps the instant prize valid with the default finalCaughtMessage', async () => {
+  const result = body => (body.model === 'claude-opus-5-5' ? { ...HOSTED, findings: [...HOSTED.findings, OPUS_EXTRA] } : HOSTED);
+  await withFake({ submissions: [missedRow(2)], result }, async (fake, dir) => {
+    const config = writeConfig(dir, fake.url);
+    const raw = JSON.parse(fs.readFileSync(config, 'utf8'));
+    delete raw.live.finalCaughtMessage;
+    fs.writeFileSync(config, JSON.stringify(raw));
+    assert.equal((await run(['--config', config, 'watch', '--cycles', '1'])).code, 0);
+    assert.equal(find(fake, 'F-0002').prizeMessage, 'PRIZE_LIVE');
+    const applied = await run(['--config', config, 'final', '--apply', '--allow-open']);
+    assert.equal(applied.code, 0, applied.stderr);
+    const item = find(fake, 'F-0002');
+    assert.equal(item.outcome, 'caught');
+    assert.equal(item.prizeMessage, '빠른 AI는 이겼어요! 정밀 AI는 찾아냈지만, 받은 즉석 선물은 그대로 유효합니다.');
+    assert.match(item.publicNote, /주석자 수가/);
+    const last = fake.state.patches.filter(patch => patch.receipt === 'F-0002').at(-1).body;
+    assert.equal(last.prizeMessage, '빠른 AI는 이겼어요! 정밀 AI는 찾아냈지만, 받은 즉석 선물은 그대로 유효합니다.');
+    assert.equal(last.outcome, 'caught');
+  });
+});
+
 test('watch: a missing PDF is skipped, logged and not retried', async () => {
   await withFake({ submissions: [caughtRow(1)], result: HOSTED, pdfs: new Map() }, async (fake, dir) => {
     const config = writeConfig(dir, fake.url);
@@ -334,8 +357,9 @@ test('final: Opus round on live misses; dry by default, --apply PATCHes', async 
     assert.equal([...fake.state.jobs.values()].filter(job => job.model === 'claude-opus-5-5').length, 2);
     const caught = find(fake, 'F-0002');
     assert.equal(caught.outcome, 'caught');
-    assert.equal(caught.prizeMessage, null);
-    assert.match(caught.publicNote, /2쪽/);
+    assert.equal(caught.prizeMessage, 'FINAL_CAUGHT');
+    assert.match(caught.publicNote, /AI가 짚은 곳: 2쪽/);
+    assert.match(caught.publicNote, /^AI가 심어 둔 결함을 찾았습니다/);
     assert.match(caught.publicNote, /주석자 수가/);
     assert.equal(caught.aiSummary.round, 'final');
     assert.equal(caught.aiSummary.liveOutcome, 'missed');
