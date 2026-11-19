@@ -30,6 +30,16 @@
 .booth-status-line{font-size:18px;font-weight:800}
 .booth fieldset{margin:14px 0;padding:8px 12px 12px;border:1px solid var(--line);border-radius:4px}
 .booth legend{padding:0 6px;font-weight:800}
+/* Live AI result card. Same card on the receipt screen and on #booth-result. */
+.booth-live{margin:14px 0 0;padding:14px;background:var(--paper);color:var(--ink);border:2px solid var(--ink);border-radius:4px;min-width:0}
+.booth-live-title{font-size:20px;font-weight:800;line-height:1.35;overflow-wrap:anywhere}
+.booth-live[data-state="pending"] .booth-live-title{font-size:16px;font-weight:700}
+.booth-live[data-state="missed"]{background:var(--yellow);border-width:3px}
+.booth-live-prize{padding:8px 10px;background:var(--paper);border:2px solid var(--ink);border-radius:4px;font-size:18px;font-weight:800;white-space:pre-wrap;overflow-wrap:anywhere}
+.booth-live-note{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.5}
+.booth-receipts{margin-top:14px}
+.booth-receipts-list,#booth-receipts-list{display:flex;flex-direction:column;gap:8px}
+.booth .booth-receipt-item{width:100%;min-height:48px;text-align:left;font-variant-numeric:tabular-nums}
 @media(min-width:480px){
 .booth{padding:18px 20px}
 .booth .button-row{flex-direction:row;flex-wrap:wrap}
