@@ -314,11 +314,13 @@ function errorResponse(error, requestId) {
   }, error.headers || {});
 }
 
+// Retry-After is exposed on every response so a browser can read a 429 wait even without a refreshed session.
+const EXPOSE_HEADERS = `${SESSION_HEADER}, Retry-After`;
+
 function withRefreshed(response, refreshed) {
-  if (!refreshed) return response;
   const headers = new Headers(response.headers);
-  headers.set(SESSION_HEADER, refreshed);
-  headers.set('Access-Control-Expose-Headers', SESSION_HEADER);
+  if (refreshed) headers.set(SESSION_HEADER, refreshed);
+  headers.set('Access-Control-Expose-Headers', EXPOSE_HEADERS);
   return new Response(response.body, { status: response.status, headers });
 }
 

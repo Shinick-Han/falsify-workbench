@@ -398,3 +398,36 @@ Sources: RISK round 2 (`wt/reports/risk.md` "## Round 2") and the SEARCH cross-r
 - R4-14 `missions warm --write` stores each mission's fetched `sourceSha256` (and keeps `pageHint`) into booth settings.
 - R4-15 BLUE refuses a local PDF over `--max-bytes` (default 16777216) or not starting with `%PDF-`; README and the runbook
   say booth PDFs are opened only in a browser's built-in PDF viewer, never a desktop viewer.
+
+## 13. Live BLUE (2026-11-19, release 0.2.0-alpha.85; binding; supersedes §1 steps 5-6, R2-6 and R4-11 where they differ)
+
+**Flow**
+- L-1 RED (AI planting help) stays off at the booth. The operator runs `booth watch` (tools/booth) on one host while
+  submissions are open. Every `--interval` seconds (default 10) it lists `received` rows and, up to `--concurrency` at a
+  time (default 12), PATCHes `status: reviewing`, pulls the PDF (same sha256 and length checks as `pull`), runs BLUE with
+  the `live` profile (Claude Sonnet 5.5), scores it, and sends one PATCH
+  `{ status: "judged", outcome, publicNote, aiSummary, published: true }` (plus `prizeMessage` when `missed`).
+  So a visitor's row goes `received` -> `reviewing` -> `judged` + published, usually within 1-3 minutes.
+  A withdraw (409) or missing PDF is skipped. A run that still fails after retries stays `reviewing` with
+  `operatorNote: live: failed <code>`. A restart resumes the same job without a new charge.
+- L-2 After closing, `booth final` re-runs the `final` profile (Claude Opus 5.5) on live `missed` rows and writes
+  `final/candidates.json`. Nothing is published until a person reviews it and runs `final --apply`. An instant prize
+  already given stays valid when the final round catches the defect. A person confirms the final prize list.
+- L-3 `publicNote` uses only the AI finding's page, quote and rationale, never the visitor's reason, type or edited text.
+
+**Claim polling (FE)**
+- L-4 After a submit, the page polls `POST /v1/booth/claim` every 15 s for the first 3 minutes, then every 30 s, and stops
+  at 15 minutes (the visitor can still check by hand). An unpublished row shows as pending. A `429` waits for
+  `Retry-After` when it is readable, else 60 s; a Retry-After wait only lengthens a step.
+- L-5 `Access-Control-Expose-Headers` on booth, `/v1/ai/*` and `/v1/papers/*` responses is
+  `X-Falsify-Confluence-Session, Retry-After` on every response, not only when a session refreshed.
+- L-6 Event vars: `BOOTH_CLAIMS_PER_IP_HOUR` "8000" and `BOOTH_CLAIMS_PER_HOUR` "15000" (venue NAT plus polling).
+  Code defaults (120 and 2000), `AI_RUNTIME_URL` and `BOOTH_OPERATOR_ACTIVE_JOBS` are unchanged.
+
+**Consent v2**
+- L-7 Event `BOOTH_CONSENT_VERSION` is `2026-11-22.v2`. The v2 copy says the edited PDF alone is sent to Anthropic right
+  after submitting, and may be sent once more after closing; the declared edits are never sent. The code default stays
+  `2026-11-22.v1`. A submit with any other version is still 409 `consent_outdated`.
+- L-8 The FE keys the consent copy by version (`CONSENT_COPY` in `app/dist/booth.js`, holding v1 and v2) and shows the text
+  for the `consentVersion` that `GET /v1/booth/config` returns. A version with no copy on the page cannot be submitted, and
+  the page asks the visitor to reload. Changing the copy means a new version on both sides.

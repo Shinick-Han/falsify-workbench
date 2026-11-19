@@ -477,15 +477,15 @@ test('operator id, gateway defaults and migration 0006 keep secrets out of the s
     '"AI_GUEST_APPLY_JOBS_PER_HOUR": "600"',
     '"AI_GUEST_MODEL_JOBS": "false"',
     '"BOOTH_SUBMISSIONS_PER_IP_HOUR": "400"',
-    '"BOOTH_CLAIMS_PER_IP_HOUR": "2000"',
-    '"BOOTH_CLAIMS_PER_HOUR": "5000"',
+    '"BOOTH_CLAIMS_PER_IP_HOUR": "8000"',
+    '"BOOTH_CLAIMS_PER_HOUR": "15000"',
     '"BOOTH_OPERATOR_ACTIVE_JOBS": "2"',
     '"PAPER_SEARCH_PER_IP_HOUR": "2000"',
     '"PAPER_PDF_PER_IP_HOUR": "600"',
   ]) {
     assert.equal(wrangler.split(literal).length, 2, literal);
   }
-  assert.match(wrangler, /"BOOTH_CONSENT_VERSION": "2026-11-22.v1"/);
+  assert.match(wrangler, /"BOOTH_CONSENT_VERSION": "2026-11-22.v2"/);
   assert.match(wrangler, /"AI_GUESTS_PER_IP_HOUR": "600"/);
   const boothSource = readFileSync(path.join(apiRoot, 'src/booth.mjs'), 'utf8');
   assert.match(boothSource, /const SEQ_ATTEMPTS = 5/);
@@ -978,6 +978,9 @@ test('per-owner, per-IP and claim buckets stop the next submission', async () =>
     });
     assert.equal(blocked.status, 429);
     assert.equal(blocked.body.error.code, 'rate_limited');
+    // The claim route has no session, yet the browser must still read the wait for its poll schedule.
+    assert.ok(Number(blocked.headers.get('Retry-After')) > 0);
+    assert.equal(blocked.headers.get('Access-Control-Expose-Headers'), 'X-Falsify-Confluence-Session, Retry-After');
     const d1 = await mf.getD1Database('DB');
     const global = await d1.prepare(`SELECT count FROM rate_counters WHERE bucket = 'booth-claim:all'`).first();
     assert.equal(Number(global.count) >= 1, true);
@@ -1494,14 +1497,14 @@ test('a confluence session inside the refresh window is copied onto booth succes
     assert.equal(typeof seal, 'string');
     assert.equal(seal.length > 20, true);
     assert.equal(seal === session, false);
-    assert.equal(created.headers.get('Access-Control-Expose-Headers'), 'X-Falsify-Confluence-Session');
+    assert.equal(created.headers.get('Access-Control-Expose-Headers'), 'X-Falsify-Confluence-Session, Retry-After');
     const denied = await submitPdf(call, session, Buffer.from('not a pdf'));
     assert.equal(denied.status, 400);
     assert.equal(denied.body.error.code, 'invalid_pdf');
     const again = denied.headers.get('X-Falsify-Confluence-Session');
     assert.equal(typeof again, 'string');
     assert.equal(again.length > 20, true);
-    assert.equal(denied.headers.get('Access-Control-Expose-Headers'), 'X-Falsify-Confluence-Session');
+    assert.equal(denied.headers.get('Access-Control-Expose-Headers'), 'X-Falsify-Confluence-Session, Retry-After');
   });
 });
 

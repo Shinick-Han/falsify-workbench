@@ -138,10 +138,11 @@
         "AI_GUEST_TOKEN_BUDGET": "4000000",
         // Booth submissions for the event page. BOOTH_OPERATOR_TOKEN stays a Wrangler secret.
         "BOOTH_ENABLED": "true",
-        "BOOTH_CONSENT_VERSION": "2026-11-22.v1",
+        "BOOTH_CONSENT_VERSION": "2026-11-22.v2",
         "BOOTH_SUBMISSIONS_PER_IP_HOUR": "400",
-        "BOOTH_CLAIMS_PER_IP_HOUR": "2000",
-        "BOOTH_CLAIMS_PER_HOUR": "5000",
+        // Visitors poll the claim route for the live result from behind one venue NAT.
+        "BOOTH_CLAIMS_PER_IP_HOUR": "8000",
+        "BOOTH_CLAIMS_PER_HOUR": "15000",
         "BOOTH_OPERATOR_ACTIVE_JOBS": "2",
         "BOOTH_MAX_PDF_BYTES": "16777216",
         "BOOTH_STORED_PDF_BYTES": "3221225472",

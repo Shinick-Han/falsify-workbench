@@ -758,6 +758,7 @@ test('search and pdf rate limits return 429 and roll back the earlier slot', asy
   assert.equal(error.code, 'rate_limited');
   assert.equal(error.retryable, true);
   assert.equal(second.headers.get('retry-after'), '30');
+  assert.equal(second.headers.get('access-control-expose-headers'), 'X-Falsify-Confluence-Session, Retry-After');
   assert.equal(routed.calls.length, 1);
   assert.equal(tracked.rateCalls[0].bucket.startsWith('paper-search:owner:'), true);
   assert.equal(tracked.rateCalls[0].bucket.includes(AUTHOR), false);

@@ -714,6 +714,7 @@ test('job idempotency, validation, clamping and active-job cap', async () => {
     assert.equal(capped.status, 429);
     assert.equal(capped.body.error.code, 'rate_limited');
     assert.ok(Number(capped.headers.get('Retry-After')) > 0);
+    assert.equal(capped.headers.get('Access-Control-Expose-Headers'), 'X-Falsify-Confluence-Session, Retry-After');
 
     const d1 = await mf.getD1Database('DB');
     const stubJob = await d1.prepare('SELECT max_calls FROM ai_stub_jobs WHERE id = ?1').bind(jobId).first();
