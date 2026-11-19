@@ -462,26 +462,37 @@ function configView(settings, env) {
   };
 }
 
+function requireChars(value, min, max) {
+  if (typeof value !== 'string' || chars(value) < min || chars(value) > max) boothFail(400, 'invalid_request');
+  return value;
+}
+
+function requirePageIndex(value) {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 9999) boothFail(400, 'invalid_request');
+}
+
+function copySegmentId(item, out) {
+  if (!Object.hasOwn(item, 'segmentId')) return;
+  if (typeof item.segmentId !== 'string' || chars(item.segmentId) < 1 || chars(item.segmentId) > 120) {
+    boothFail(400, 'invalid_request');
+  }
+  out.segmentId = item.segmentId;
+}
+
 function parseDeclaredItem(item) {
   if (!isObject(item) || !keysOk(item, DECLARED_KEYS, DECLARED_REQUIRED)) boothFail(400, 'invalid_request');
-  if (!Number.isSafeInteger(item.pageIndex) || item.pageIndex < 0 || item.pageIndex > 9999) boothFail(400, 'invalid_request');
-  if (typeof item.before !== 'string' || chars(item.before) < 1 || chars(item.before) > 2000) boothFail(400, 'invalid_request');
-  if (typeof item.after !== 'string' || chars(item.after) > 2000) boothFail(400, 'invalid_request');
+  requirePageIndex(item.pageIndex);
+  const before = requireChars(item.before, 1, 2000);
+  const after = requireChars(item.after, 0, 2000);
   if (!DEFECTS.includes(item.defectType)) boothFail(400, 'invalid_request');
-  if (typeof item.reason !== 'string' || chars(item.reason) < 1 || chars(item.reason) > MAX_REASON) boothFail(400, 'invalid_request');
   const out = {
     pageIndex: item.pageIndex,
-    before: item.before,
-    after: item.after,
+    before,
+    after,
     defectType: item.defectType,
-    reason: item.reason,
+    reason: requireChars(item.reason, 1, MAX_REASON),
   };
-  if (Object.hasOwn(item, 'segmentId')) {
-    if (typeof item.segmentId !== 'string' || chars(item.segmentId) < 1 || chars(item.segmentId) > 120) {
-      boothFail(400, 'invalid_request');
-    }
-    out.segmentId = item.segmentId;
-  }
+  copySegmentId(item, out);
   return out;
 }
 
@@ -534,32 +545,42 @@ function parseSubmission(body) {
   };
 }
 
+function requireMissionId(value) {
+  if (typeof value !== 'string' || value.length > 40 || !SLUG.test(value)) boothFail(400, 'invalid_request');
+  return value;
+}
+
+function copyMissionPageHint(item, mission) {
+  if (!Object.hasOwn(item, 'pageHint')) return;
+  if (!Number.isSafeInteger(item.pageHint) || item.pageHint < 1 || item.pageHint > 9999) boothFail(400, 'invalid_request');
+  mission.pageHint = item.pageHint;
+}
+
+function copyMissionSourceHash(item, mission) {
+  if (!Object.hasOwn(item, 'sourceSha256')) return;
+  if (typeof item.sourceSha256 !== 'string' || !HEX64.test(item.sourceSha256)) boothFail(400, 'invalid_request');
+  mission.sourceSha256 = item.sourceSha256;
+}
+
 function parseMission(item) {
   if (!isObject(item) || !keysOk(item, MISSION_KEYS, MISSION_REQUIRED)) boothFail(400, 'invalid_request');
-  if (typeof item.id !== 'string' || item.id.length > 40 || !SLUG.test(item.id)) boothFail(400, 'invalid_request');
-  if (typeof item.title !== 'string' || chars(item.title) < 1 || chars(item.title) > 300) boothFail(400, 'invalid_request');
+  const id = requireMissionId(item.id);
+  const title = requireChars(item.title, 1, 300);
   if (item.source !== 'arxiv') boothFail(400, 'invalid_request');
-  if (typeof item.paperId !== 'string' || chars(item.paperId) < 1 || chars(item.paperId) > 64) boothFail(400, 'invalid_request');
-  if (typeof item.license !== 'string' || chars(item.license) < 1 || chars(item.license) > 40) boothFail(400, 'invalid_request');
+  const paperId = requireChars(item.paperId, 1, 64);
+  const license = requireChars(item.license, 1, 40);
   if (!MISSION_COURSES.includes(item.course)) boothFail(400, 'invalid_request');
-  if (typeof item.hint !== 'string' || chars(item.hint) > 300) boothFail(400, 'invalid_request');
   const mission = {
-    id: item.id,
-    title: item.title,
+    id,
+    title,
     source: 'arxiv',
-    paperId: item.paperId,
-    license: item.license,
+    paperId,
+    license,
     course: item.course,
-    hint: item.hint,
+    hint: requireChars(item.hint, 0, 300),
   };
-  if (Object.hasOwn(item, 'pageHint')) {
-    if (!Number.isSafeInteger(item.pageHint) || item.pageHint < 1 || item.pageHint > 9999) boothFail(400, 'invalid_request');
-    mission.pageHint = item.pageHint;
-  }
-  if (Object.hasOwn(item, 'sourceSha256')) {
-    if (typeof item.sourceSha256 !== 'string' || !HEX64.test(item.sourceSha256)) boothFail(400, 'invalid_request');
-    mission.sourceSha256 = item.sourceSha256;
-  }
+  copyMissionPageHint(item, mission);
+  copyMissionSourceHash(item, mission);
   return mission;
 }
 
@@ -1011,13 +1032,7 @@ async function getAdmin(ctx) {
   return json(200, adminView(await adminRow(ctx.deps.getDb(), ctx.match.params.receipt)));
 }
 
-async function patchAdmin(ctx) {
-  await requireOperator(ctx);
-  const patch = parsePatch(await readJsonBody(ctx.request));
-  const db = ctx.deps.getDb();
-  const row = await adminRow(db, ctx.match.params.receipt);
-  const noteOnly = Object.keys(patch).every(key => key === 'operatorNote');
-  if (row.status === 'withdrawn' && !noteOnly) boothFail(409, 'withdrawn');
+function patchAssignments(patch) {
   const sets = [];
   const binds = [];
   const set = (column, value) => {
@@ -1039,6 +1054,17 @@ async function patchAdmin(ctx) {
       sets.push(`published_at = COALESCE(published_at, ?${binds.length})`);
     } else sets.push('published_at = NULL');
   }
+  return { sets, binds };
+}
+
+async function patchAdmin(ctx) {
+  await requireOperator(ctx);
+  const patch = parsePatch(await readJsonBody(ctx.request));
+  const db = ctx.deps.getDb();
+  const row = await adminRow(db, ctx.match.params.receipt);
+  const noteOnly = Object.keys(patch).every(key => key === 'operatorNote');
+  if (row.status === 'withdrawn' && !noteOnly) boothFail(409, 'withdrawn');
+  const { sets, binds } = patchAssignments(patch);
   if (sets.length) {
     binds.push(nowIso());
     sets.push(`updated_at = ?${binds.length}`);
