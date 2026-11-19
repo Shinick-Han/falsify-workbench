@@ -340,3 +340,61 @@ paper workspace (`FalsifyPaperWorkspace`) and the PDF is generated in the browse
 **E2E / BROWSER**
 - R3-10 The E2E flow submits multipart with an edited PDF made locally (e.g. PyMuPDF text replacement); BROWSER phase 2
   drives the paper workspace edit -> generate -> booth submit path.
+
+## 12. Round-4 amendments (2026-11-19): storage, CPU, atomic writes, consent (binding; supersede earlier text where they differ)
+
+Sources: RISK round 2 (`wt/reports/risk.md` "## Round 2") and the SEARCH cross-review (`wt/reports/search-review-api.md`).
+
+**Submission body and limits (API)**
+- R4-1 Parse with the runtime's native `request.formData()`; never decode the PDF as text. Exactly two fields, in any order:
+  `meta` (a text field) and `pdf` (a file field with a filename and type `application/pdf`); anything else is 400
+  `invalid_request`. `editedSha256` is the SHA-256 of the `pdf` file's bytes as received; compute one digest and cut
+  chunks with `subarray`. Require `Content-Length` (else 411 `length_required`) and reject it above
+  `BOOTH_MAX_PDF_BYTES` + 65536 before reading the body (413 `payload_too_large`); re-check the file size after parsing.
+- R4-2 Interop vector, used by both the API and FE tests: the 109 bytes
+  `"%PDF-1.7\n% falsify booth interop fixture\n1 0 obj << /Type /Catalog >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n"` have SHA-256 `241e9c74200e288d5bc4b11ef565745b1c5495930790689240bb7168ad111019`.
+- R4-3 `paper.sourceSha256` (hex64) is now **required**; equal to `editedSha256` -> 400 `pdf_unchanged`. When the
+  submission's `paper.source` is `mission` and that mission in `booth_settings` has a `sourceSha256`, a different value is
+  400 `paper_not_allowed`. Missions may also carry optional `pageHint` (1-based) and `sourceSha256`; validate and return them.
+- R4-4 Stored-bytes cap `BOOTH_STORED_PDF_BYTES` (default 2147483648; event 3221225472): the sum of `pdf_bytes` over rows
+  that still have files, plus this file, must not exceed it, else 503 `storage_full` (retryable false). Event vars:
+  `BOOTH_MAX_PDF_BYTES` 16777216, `BOOTH_STORED_PDF_BYTES` 3221225472, and `env.event.limits.cpu_ms` 5000 (production
+  and staging unchanged). Measure a 16 MiB submit under Miniflare and report CPU/wall time.
+
+**Atomic writes (API)**
+- R4-5 One `db.batch` per attempt: (a) `INSERT INTO booth_submissions … SELECT … WHERE` seq is still `MAX(seq)+1` AND the
+  owner's non-withdrawn count < `BOOTH_SUBMISSIONS_PER_OWNER` AND the stored-bytes predicate holds; (b) one
+  `INSERT INTO booth_files (submission_id, idx, data) SELECT ?1, ?2, ?3 WHERE EXISTS (SELECT 1 FROM booth_submissions WHERE id = ?1)`
+  per 512 KiB chunk, the chunk always a bound parameter. If the row did not land, re-read and answer 429 `rate_limited`
+  (owner cap), 503 `storage_full`, 409 `already_submitted`, or retry the whole batch for a seq race (max 5). Release the
+  hourly slots taken for an attempt that did not land. Tests: two overlapping submits at the owner cap (exactly one wins),
+  the global hourly cap actually returning 429, a forced seq conflict retrying, a rejected attempt leaving zero chunk rows.
+- R4-6 Admin PDF streams one `idx` row per read (a `ReadableStream`), with `Content-Length` = `pdf_bytes` and
+  `X-Falsify-Pdf-Sha256`. List and detail queries never select `booth_files.data`.
+- R4-7 Withdraw = one batch: the R2-4 tombstone (also set `operator_note` to NULL) + `DELETE FROM booth_files` for that id.
+  Admin DELETE also removes the chunks in the same batch.
+
+**Auth and envelope (API)**
+- R4-8 Booth maps `membership_required` and `open_access_disabled` to 403 with those codes (as `/v1/ai/*` does), adds them
+  to its messages, and returns a Confluence refresh (`X-Falsify-Confluence-Session` + `Access-Control-Expose-Headers`) on
+  success and error responses exactly like `withRefreshed` in ai-gateway.mjs.
+- R4-9 Claim/withdraw always run the constant-time compare (dummy digest when the receipt is unknown).
+- R4-10 `AI_MODEL_JOBS_OPERATOR_ONLY` (event `true`, default off): any job other than red `applyOnly` from an owner other
+  than `opr:booth` is 403 `model_jobs_operator_only` before upload lookup, rate slots or runtime; capabilities report
+  `modelJobs`/`blueJobs` false for such viewers. `BOOTH_OPERATOR_TOKEN_BUDGET` (default 0 = no gate) applies the existing
+  owner token-budget gate to `opr:booth` so the operator can set a BLUE spend ceiling without a code change.
+
+**FE**
+- R4-11 Consent copy (replaces R3-8; version stays `2026-11-22.v1` because nothing is deployed):
+  "제출한 수정본 PDF와 결함 설명(쪽·유형·이유)은 가짜연구소 Falsify 스터디가 저장하고 운영자가 읽습니다. 마감 후 AI 검증에는 수정본 PDF만 모델 제공자(Anthropic 또는 OpenAI)에 보내며, 결함 설명은 AI에 보내지 않습니다. 이름·연락처는 받지 않으니 이유란에도 적지 마세요. 원 논문은 미션이나 검색에서 고른 공개 논문(CC BY·CC BY-SA·CC0)이며, 수정본을 스터디 밖에 공개할 때는 저자·arXiv 번호·라이선스와 수정 사실을 밝히고, CC BY-SA 논문의 수정본은 같은 라이선스로 공개합니다. 결과와 경품 안내는 접수번호와 확인키로만 확인할 수 있습니다. 확인키로 언제든 철회할 수 있습니다. 철회하면 서버의 수정본 PDF·설명·결과를 바로 지우고, 운영자 보관본은 다음 동기화 때 지웁니다. 이미 AI 검증에 보낸 사본은 모델 제공자에게서 회수할 수 없고, 웹 실행 서버 사본은 7일, 데이터베이스 백업은 최대 30일 뒤에 사라집니다. 보관 자료는 스터디 종료 후 삭제합니다."
+- R4-12 FormData: `meta` as a string field, `pdf` as a `File` named `edited.pdf` with type `application/pdf`; send
+  `paper.sourceSha256` from the loaded original (compute it if the workspace hash is not SHA-256 hex). Korean messages for
+  411/413 (show the 16MB limit from `BOOTH_MAX_PDF_BYTES` if the API exposes it, else a generic size message), 503
+  `storage_full` ("오늘 접수 저장 공간이 가득 찼습니다. 부스 운영자에게 알려 주세요."), `model_jobs_operator_only`. Add the
+  R4-2 vector to booth.spec.mjs.
+
+**OPS**
+- R4-13 BLUE-while-open message: say BLUE shares the production runtime (not the visitor path); keep `--allow-open`.
+- R4-14 `missions warm --write` stores each mission's fetched `sourceSha256` (and keeps `pageHint`) into booth settings.
+- R4-15 BLUE refuses a local PDF over `--max-bytes` (default 16777216) or not starting with `%PDF-`; README and the runbook
+  say booth PDFs are opened only in a browser's built-in PDF viewer, never a desktop viewer.
