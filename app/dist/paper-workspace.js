@@ -451,7 +451,46 @@
     }
     return parts.length?'진단: '+parts.join(' · ')+'. PDF 내용에는 넣지 않습니다.':'';
   }
-  function generationLead(verification,stale){
+  /* index.html has no booth.enabled, so the paragraph list stays closed there. */
+  function eventBoothOpen(){
+    try{
+      const config=globalThis.FalsifyCloudConfig;
+      return !!(config&&config.booth&&config.booth.enabled===true);
+    }catch{return false;}
+  }
+  function isUnverifiedLink(item){
+    const code=String(item&&item.code||'').toLowerCase().replace(/_/g,'-');
+    return code==='paragraph-link-unverified';
+  }
+  function unverifiedLinkCount(verification,warnings){
+    const seen=new Set();
+    let n=0;
+    for(const item of diagnosticItems(warnings,verification)){
+      if(!isUnverifiedLink(item))continue;
+      const key=JSON.stringify(item);
+      if(seen.has(key))continue;
+      seen.add(key);
+      n+=1;
+    }
+    return n;
+  }
+  function boothReadyLead(verification,warnings){
+    if(!eventBoothOpen())return '';
+    const n=unverifiedLinkCount(verification,warnings);
+    if(!n)return '수정본을 만들었습니다.';
+    return '수정본을 만들었습니다. 인용 링크 '+n+'곳은 확인하지 못했지만 제출에는 문제없습니다.';
+  }
+  const BOOTH_FIGURE_REFUSAL='이 문장은 휴대폰에서 바로 고칠 수 없어요. 같은 쪽의 다른 문장이나 숫자를 골라 주세요.';
+  function boothFigureRefusal(error){
+    if(!eventBoothOpen()||!error)return '';
+    const code=typeof error.code==='string'?error.code:'';
+    const message=typeof error.message==='string'?error.message:'';
+    if(code==='figure-text-corrupt'||message.includes('표·그래프·그림'))return BOOTH_FIGURE_REFUSAL;
+    return '';
+  }
+  function generationLead(verification,stale,warnings){
+    const booth=boothReadyLead(verification,warnings);
+    if(booth)return booth;
     const status=verification&&typeof verification.status==='string'?verification.status:'';
     const pages=verification?.report?.selfCheck?.pages;
     const afterChecks=Array.isArray(pages)?pages.flatMap(p=>Array.isArray(p?.after_checks)?p.after_checks:[]):[];
@@ -479,8 +518,24 @@
     return false;
   }
   function generationStatus(e,fallback){
+    const booth=boothFigureRefusal(e);
+    if(booth)return booth;
     if(e&&e.code==='figure-text-corrupt')return '그림 안 글자를 고치면 그림이 깨져서 만들지 않았습니다. 표·그래프·그림 고치기를 쓰세요.';
     return fallback;
+  }
+  function generationFailureText(e){
+    const booth=boothFigureRefusal(e);
+    if(booth)return booth;
+    return '현재 파일을 만들지 못했습니다. '+safeMessage(e);
+  }
+  function verificationLabel(status){
+    if(eventBoothOpen())return '확인';
+    if(status==='failed'||status==='warning')return '검증 '+status;
+    return '검증';
+  }
+  function boothStatusTail(lead,noted,tableNote){
+    if(typeof lead==='string'&&lead.startsWith('수정본을 만들었습니다.'))return '';
+    return (noted?' '+noted:'')+(tableNote||'');
   }
   function safeMessage(e){
     const m=e&&typeof e.message==='string'?e.message:'';
@@ -845,13 +900,53 @@
         button.addEventListener('click',()=>{if(target.edit)void compareEdit(target.edit);else if(canLeaveInline())void drawBefore(target.index+1);});row.append(button);}
       diagnosticPanel.append(row);
     }
+    function hideLinkRow(item){
+      return eventBoothOpen()&&isUnverifiedLink(item);
+    }
+    function linkList(links){
+      const list=doc.createElement('ul');
+      const seen=new Set();
+      for(const item of links){
+        const text=diagnosticLine(item);
+        if(!text||seen.has(text)||text.includes('failed'))continue;
+        seen.add(text);
+        const li=doc.createElement('li');
+        li.textContent=text;
+        list.append(li);
+      }
+      return list.children.length?list:null;
+    }
+    function fillInspection(details,links){
+      const summary=doc.createElement('summary');
+      summary.textContent='검사 상세';
+      details.append(summary);
+      if(!eventBoothOpen()){
+        const raw=doc.createElement('pre');
+        raw.textContent=JSON.stringify({warnings:output.warnings,verification:output.verification},null,2);
+        details.append(raw);
+        return true;
+      }
+      details.className='paper-check-details';
+      details.open=false;
+      const list=linkList(links);
+      if(!list)return false;
+      details.append(list);
+      return true;
+    }
     function renderDiagnostics(){
       diagnosticPanel.replaceChildren();if(!output||output.blocked)return;
-      const items=diagnosticItems(output.warnings,output.verification),seen=new Set();
-      for(const item of items){const kind=diagnosticKind(item),key=JSON.stringify(item);if(!kind||seen.has(key))continue;seen.add(key);addDiagnosticAction(item,kind);}
+      const items=diagnosticItems(output.warnings,output.verification),seen=new Set(),links=[];
+      for(const item of items){
+        const kind=diagnosticKind(item),key=JSON.stringify(item);
+        if(!kind||seen.has(key))continue;
+        seen.add(key);
+        if(hideLinkRow(item)){links.push(item);continue;}
+        addDiagnosticAction(item,kind);
+      }
       if(!items.length)return;
-      const details=doc.createElement('details'),summary=doc.createElement('summary'),raw=doc.createElement('pre');
-      summary.textContent='검사 상세';raw.textContent=JSON.stringify({warnings:output.warnings,verification:output.verification},null,2);details.append(summary,raw);diagnosticPanel.append(details);
+      const details=doc.createElement('details');
+      if(!fillInspection(details,links))return;
+      diagnosticPanel.append(details);
     }
     function renderOutputNotes(){
       if(ui.outputNotes){
@@ -1016,7 +1111,7 @@
       if(!phrases.length)return null;
       const span=doc.createElement('span');span.className=failed?'paper-edit-cause is-failed':'paper-edit-cause';
       const status=verification&&typeof verification.status==='string'?verification.status:'';
-      span.textContent=(status==='failed'||status==='warning'?'검증 '+status:'검증')+' · '+phrases.join(' · ');
+      span.textContent=verificationLabel(status)+' · '+phrases.join(' · ');
       return span;
     }
     function paintProposals(){
@@ -1448,13 +1543,6 @@
       if(!pageText)return;
       pageText.paragraphList?.remove();pageText.paragraphMarker?.remove();
       pageText.paragraphList=null;pageText.paragraphMarker=null;pageText.paragraphs=null;
-    }
-    /* index.html has no booth.enabled, so the paragraph list stays closed there. */
-    function eventBoothOpen(){
-      try{
-        const config=globalThis.FalsifyCloudConfig;
-        return !!(config&&config.booth&&config.booth.enabled===true);
-      }catch{return false;}
     }
     function renderParagraphs(display){
       const list=doc.createElement('details');list.className='paper-paragraph-list';list.open=eventBoothOpen();
@@ -2275,7 +2363,7 @@
     function ensureGenerator(){
       const g=generationApi();if(!g?.create)return null;if(generator)return generator;
       const version=++generatorVersion;
-      generator=g.create({generate:generateCaptured,onResult:(candidate,meta)=>{if(version!==generatorVersion||!source||source.fileHash!==meta.spec.fileHash)return;let current;try{current=g.key(captureSpec());}catch{return;}if(current!==meta.key)return;output=candidate;outputAt=now();generationFailed=false;output.key=meta.key;afterPart=0;afterSourcePage=page;setGenStatus(output.edits.length?generationLead(output.verification,false):'선택한 편집이 없어 원본 PDF를 사용합니다.');emit('falsify:paper-workspace-output',published({sha256:output.sha256,revision:output.revision,verification:scrub(output.verification,0)}));announceGenerated(output);renderEdits();void drawAfter();},onState:state=>{if(version!==generatorVersion||!source)return;let current;try{current=g.key(captureSpec());}catch{return;}if(current!==state.key)return;generating=state.phase==='running';if(state.phase==='error'){generationFailed=true;setGenStatus(generationStatus(state.error,'생성하지 못했습니다. '+generationError(state.error)),true);}else if(state.phase==='running')generationFailed=false;renderChrome();}});return generator;
+      generator=g.create({generate:generateCaptured,onResult:(candidate,meta)=>{if(version!==generatorVersion||!source||source.fileHash!==meta.spec.fileHash)return;let current;try{current=g.key(captureSpec());}catch{return;}if(current!==meta.key)return;output=candidate;outputAt=now();generationFailed=false;output.key=meta.key;afterPart=0;afterSourcePage=page;setGenStatus(output.edits.length?generationLead(output.verification,false,output.warnings):'선택한 편집이 없어 원본 PDF를 사용합니다.');emit('falsify:paper-workspace-output',published({sha256:output.sha256,revision:output.revision,verification:scrub(output.verification,0)}));announceGenerated(output);renderEdits();void drawAfter();},onState:state=>{if(version!==generatorVersion||!source)return;let current;try{current=g.key(captureSpec());}catch{return;}if(current!==state.key)return;generating=state.phase==='running';if(state.phase==='error'){generationFailed=true;setGenStatus(generationStatus(state.error,'생성하지 못했습니다. '+generationError(state.error)),true);}else if(state.phase==='running')generationFailed=false;renderChrome();}});return generator;
     }
     function scheduleGeneration(){if(committingInline||!generationApi()||!source?.pdf||!snapshot)return;try{ensureGenerator().schedule(captureSpec());}catch(e){setGenStatus('현재 편집을 확인하세요. '+safeMessage(e),true);}}
     function planCapturedExport(spec){
@@ -2335,7 +2423,7 @@
     async function currentAction(action){
       const actionEpoch=epoch;
       try{const spec=captureSpec(),result=await ensureGenerator().flush(spec);if(actionEpoch!==epoch)return;if(action==='download')download(result.file,true);else if(action==='blue'){const ev=new CustomEvent('falsify:blue-file',{cancelable:true,detail:{file:new File([result.file],'paper.pdf',{type:'application/pdf'})}});if(!doc.dispatchEvent(ev)){setGenStatus('BLUE가 인계를 받지 않았습니다.',true);return;}const nav=[...doc.querySelectorAll('[data-view="blue"]')].find(b=>b.getClientRects&&b.getClientRects().length)||doc.querySelector('[data-view="blue"]');nav?.click();}}
-      catch(e){if(actionEpoch===epoch)setGenStatus('현재 파일을 만들지 못했습니다. '+safeMessage(e),true);}
+      catch(e){if(actionEpoch===epoch)setGenStatus(generationFailureText(e),true);}
     }
     function prepareGeneration(){
       if(!canLeaveInline())return null;
@@ -2408,8 +2496,9 @@
         const noted=diagnosticText(output.warnings,output.verification);
         emit('falsify:paper-workspace-output',published({sha256:output.sha256,revision:output.revision,verification:scrub(output.verification,0)}));
         announceGenerated(output);
+        const lead=generationLead(output.verification,stale(),output.warnings);
         if(recompose)setGenStatus(output.verification?.status==='finding'?'PDF를 만들었습니다. 내용 확인 항목은 파일 정보에서 볼 수 있습니다.':'PDF를 만들었습니다.');
-        else setGenStatus(generationLead(output.verification,stale())+(noted?' '+noted:'')+tableNote);
+        else setGenStatus(lead+boothStatusTail(lead,noted,tableNote));
         renderEdits();
     }
     function reportGenerationFailure(e,mine,epochAt,hash,ctl){

@@ -46,4 +46,5 @@
 #hosted-ai-result-counts,#hosted-ai-file-status,#hosted-ai-edited-note,#hosted-ai-status,#hosted-ai-apply-status,#paper-output-hash,.booth .form-feedback,.form-feedback{overflow-wrap:anywhere;min-width:0}
 .hosted-ai-diff-label,.hosted-ai-candidates h4,.hosted-ai-candidate-head small,.hosted-ai-candidate details summary,.hosted-ai-item-status,.hosted-ai-item.muted,.hosted-ai-item>span.muted,.check-row small,#paper-name,#location-name,.location{font-size:12px}
 .page-foot,.text-link,.status-label,.compact>span,th,td,.connection-plan li strong,.connection-plan li span,.brand-sub,.nav-code{font-size:12px}
+.paper-check-details summary{min-height:44px}
 }

@@ -6,7 +6,7 @@
   'use strict';
   const RECEIPT_KEY='falsify.booth.receipts.v1';
   const RECEIPT_CAP=10;
-  const CONSENT_COPY='제출한 수정본 PDF와 결함 설명(쪽·유형·이유)은 가짜연구소 Falsify 스터디가 저장하고 운영자가 읽습니다. 마감 후 AI 검증에는 수정본 PDF만 모델 제공자(Anthropic 또는 OpenAI)에 보내며, 결함 설명은 AI에 보내지 않습니다. 이름·연락처는 받지 않으니 이유란에도 적지 마세요. 원 논문은 CC BY·CC BY-SA·CC0 공개 논문이며, 수정본을 스터디 밖에 공개할 때는 저자·arXiv 번호·라이선스와 수정 사실을 밝힙니다. 결과와 경품 안내는 접수번호와 확인키로만 확인할 수 있습니다. 확인키로 언제든 철회할 수 있고, 철회하면 설명·결과·수정본 PDF가 서버에서 즉시 삭제되며 운영자 보관본도 지웁니다. 보관 자료는 스터디 종료 후 삭제합니다.';
+  const CONSENT_COPY='제출한 수정본 PDF와 결함 설명(쪽·유형·이유)은 가짜연구소 Falsify 스터디가 저장하고 운영자가 읽습니다. 마감 후 AI 검증에는 수정본 PDF만 모델 제공자(Anthropic 또는 OpenAI)에 보내며, 결함 설명은 AI에 보내지 않습니다. 이름·연락처는 받지 않으니 이유란에도 적지 마세요. 원 논문은 미션이나 검색에서 고른 공개 논문(CC BY·CC BY-SA·CC0)이며, 수정본을 스터디 밖에 공개할 때는 저자·arXiv 번호·라이선스와 수정 사실을 밝히고, CC BY-SA 논문의 수정본은 같은 라이선스로 공개합니다. 결과와 경품 안내는 접수번호와 확인키로만 확인할 수 있습니다. 확인키로 언제든 철회할 수 있습니다. 철회하면 서버의 수정본 PDF·설명·결과를 바로 지우고, 운영자 보관본은 다음 동기화 때 지웁니다. 이미 AI 검증에 보낸 사본은 모델 제공자에게서 회수할 수 없고, 웹 실행 서버 사본은 7일, 데이터베이스 백업은 최대 30일 뒤에 사라집니다. 보관 자료는 스터디 종료 후 삭제합니다.';
   const PICK_PAPER='미션이나 검색에서 논문을 골라 시작해 주세요';
   const CONSENT_VERSION='2026-11-22.v1';
   const CROCKFORD='0123456789ABCDEFGHJKMNPQRSTVWXYZ';
@@ -30,6 +30,9 @@
     rate_limited:'요청이 너무 많습니다. 잠시 뒤 다시 시도해 주세요.',
     license_not_allowed:'이 논문은 부스가 허용하는 라이선스(CC BY, CC BY-SA, CC0)가 아닙니다.',
     payload_too_large:'논문 파일이 너무 커서 열 수 없습니다.',
+    length_required:'요청 크기를 확인하지 못했습니다. 파일이 너무 크면 제출할 수 없습니다.',
+    storage_full:'오늘 접수 저장 공간이 가득 찼습니다. 부스 운영자에게 알려 주세요.',
+    model_jobs_operator_only:'이 행사 화면에서는 AI 검증을 실행하지 않습니다. 수정본은 부스 제출로 보내 주세요.',
     not_found:'접수번호 또는 확인키가 맞지 않습니다.',
     paper_not_allowed:'이 논문의 라이선스는 부스 제출에 쓸 수 없습니다. CC BY, CC BY-SA, CC0 논문만 제출할 수 있습니다.',
     invalid_pdf:'수정본 PDF를 확인하지 못했습니다. PDF 파일을 다시 만들어 주세요.',
@@ -41,11 +44,22 @@
     network:'서버에 연결하지 못했습니다. 네트워크를 확인한 뒤 다시 시도해 주세요.'
   };
 
+  /* 411/413 name the cap only when the booth config exposes it. Otherwise the generic size line stays. */
+  let exposedPdfBytes=0;
+  function sizeMb(code, extra){
+    if(code!=='payload_too_large'&&code!=='length_required') return 0;
+    const raw=extra&&extra.maxPdfBytes!=null?extra.maxPdfBytes:exposedPdfBytes;
+    const n=Number(raw);
+    if(!Number.isSafeInteger(n)||n<1048576||n>33554432) return 0;
+    return Math.round(n/1048576);
+  }
   function errorMessage(code, extra){
     const known=typeof code==='string'&&Object.prototype.hasOwnProperty.call(ERROR_TEXT,code)?code:'';
     if(known==='already_submitted'&&extra&&typeof extra.receipt==='string'&&/^F-\d{4,}$/.test(extra.receipt)){
       return '이미 제출된 수정본입니다. 접수번호 '+extra.receipt+'로 결과를 확인하세요.';
     }
+    const mb=sizeMb(known, extra);
+    if(mb) return '수정본 PDF는 '+mb+'MB 이하만 제출할 수 있습니다.';
     return known?ERROR_TEXT[known]:'요청을 처리하지 못했습니다. 잠시 뒤 다시 시도해 주세요.';
   }
   function normalizeClaimKey(value){
@@ -161,14 +175,19 @@
     body.editedSha256=editedSha256;
     return {ok:true,body};
   }
-  /* Exactly two parts: meta JSON text, then the edited PDF. */
+  /* The pdf part is always a File named edited.pdf. The visitor's download name stays local. */
+  function editedPdfFile(file){
+    if(!file||typeof file.arrayBuffer!=='function'||typeof File!=='function') return null;
+    try{return new File([file],'edited.pdf',{type:'application/pdf'});}
+    catch{return null;}
+  }
   function submissionForm(body, file){
     if(!body||typeof body!=='object'||typeof FormData!=='function') return null;
-    if(!file||typeof file.arrayBuffer!=='function') return null;
+    const pdf=editedPdfFile(file);
+    if(!pdf) return null;
     const form=new FormData();
     form.append('meta', JSON.stringify(body));
-    const name=typeof file.name==='string'&&file.name?file.name.slice(0,180):'edited.pdf';
-    form.append('pdf', file, name);
+    form.append('pdf', pdf);
     return form;
   }
   function isReceiptRecord(item){
@@ -546,6 +565,23 @@
       if(!SHA256.test(hash)&&detail&&typeof detail.sourceFileHash==='string') hash=detail.sourceFileHash;
       return SHA256.test(hash)?hash:'';
     }
+    /* Workspace fileHash is not always SHA-256 hex. The original bytes are the fallback. */
+    async function originalSha(detail){
+      const known=sourceHashOf(detail);
+      if(known) return known;
+      return digestSourceFile();
+    }
+    async function digestSourceFile(){
+      const ws=workspace();
+      let file=null;
+      try{
+        const source=ws&&typeof ws.getSource==='function'?ws.getSource():null;
+        file=source&&source.file;
+      }catch{file=null;}
+      if(!file||typeof file.arrayBuffer!=='function') return '';
+      try{return await digestHex(new Uint8Array(await file.arrayBuffer()));}
+      catch{return '';}
+    }
     function editSignature(edits){
       return edits.map(edit=>[edit.pageIndex,edit.segmentId,edit.before,edit.after].join('\u0000')).join('\u0001');
     }
@@ -604,7 +640,7 @@
         say('booth-submit-status','수정본 PDF의 해시를 계산하지 못했습니다.');
         return;
       }
-      sourceSha=sourceHashOf(detail);
+      sourceSha=await originalSha(detail);
       if(sourceSha&&sourceSha===hash){
         clearGenerated();
         renderRows();
@@ -910,8 +946,16 @@
       }catch{}
       say('booth-status','복사하지 못했습니다. 접수번호와 확인키를 직접 적어 두세요.');
     }
+    function rememberPdfLimit(data){
+      const limits=data&&data.limits&&typeof data.limits==='object'?data.limits:null;
+      const raw=limits&&(Object.prototype.hasOwnProperty.call(limits,'maxPdfBytes')?limits.maxPdfBytes:limits.maxUploadBytes);
+      const n=Number(raw);
+      if(!Number.isSafeInteger(n)||n<1048576||n>33554432){exposedPdfBytes=0;return;}
+      exposedPdfBytes=n;
+    }
     function applyConfig(data){
       liveConfig=data;
+      rememberPdfLimit(data);
       host.hidden=false;
       setHidden('booth-search',false);
       const announcement=typeof data.announcement==='string'?data.announcement.trim():'';

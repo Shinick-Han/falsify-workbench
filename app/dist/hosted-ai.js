@@ -500,7 +500,13 @@
       if(error.status===410) return '이 서버는 비밀번호 로그인을 받지 않습니다(Confluence 전용 설정일 수 있습니다). 운영자가 웹 실행 로그인을 켜야 합니다.';
       return '';
     }
+    function operatorOnlyModelText(error){
+      if(error&&error.code==='model_jobs_operator_only') return '이 행사 화면에서는 AI 검증을 실행하지 않습니다. 수정본은 부스 제출로 보내 주세요.';
+      return '';
+    }
     function describe(error,context){
+      const closed=operatorOnlyModelText(error);
+      if(closed) return closed;
       if(error&&error.kind==='local'&&error.message) return String(error.message);
       if(isTransportError(error)) return networkText(error)+failureSuffix(error);
       if(context==='login'){
