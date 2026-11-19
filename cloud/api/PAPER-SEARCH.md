@@ -84,7 +84,7 @@ The only query key is `id`. It must match the whole value, never a URL:
 
 Anything else, including a version with more than three digits, is `400 invalid_request` before a rate-limit slot or an upstream call.
 
-The license check is arXiv OAI-PMH `GetRecord` with `metadataPrefix=arXiv` and identifier `oai:arXiv.org:<id without version>`. Allowed licenses are CC BY (any version), CC BY-SA, and CC0 / public domain. CC BY-NC, CC BY-ND, the arXiv non-exclusive licence, and a record with no `<license>` are `403 license_not_allowed`. `idDoesNotExist` is `404 not_found`. The verdict is cached for 24 hours under the versionless id, so `2503.10497` and `2503.10497v2` share it. Upstream failures are not cached.
+The license check is arXiv OAI-PMH `GetRecord` with `metadataPrefix=arXiv` and identifier `oai:arXiv.org:<id without version>`. Allowed licenses are CC BY (any version), CC BY-SA, and CC0 / public domain. CC BY-NC, CC BY-ND, the arXiv non-exclusive licence, and a record with no `<license>` are `403 license_not_allowed`. `idDoesNotExist` is `404 not_found`. The verdict is cached for 24 hours under the versionless id, so `2503.10497` and `2503.10497v2` share it. Upstream failures are not cached. A denied or missing id never stores PDF bytes.
 
 On an allow, the handler fetches `https://arxiv.org/pdf/<id>` using the caller's id, version included. The response requires HTTP 200, a PDF content type (`application/pdf` or `application/octet-stream`, or a missing type), and a body that starts with `%PDF-`. The size cap is the caller's effective upload cap from `aiSettings`: `guestMaxUploadBytes` when `ownerId` starts with `gst:`, otherwise `maxUploadBytes`.
 
@@ -100,11 +100,13 @@ X-Content-Type-Options: nosniff
 
 `X-Falsify-Paper-License` is the licence id (`cc-by-4.0`, `cc-by-sa-4.0`, `cc0`, or the version that was in the OAI URL). An old-style id keeps its slash on the upstream path (`/pdf/hep-th/9901001`) but the filename replaces `/` with `-` (`arxiv-hep-th-9901001.pdf`) so the header stays one file name.
 
+The visitor response stays `Cache-Control: no-store`. After a successful allow, the PDF bytes are also stored in the worker cache for 24 hours. The key is the validated id, version included, so `2503.10497` and `2503.10497v2` do not share a file. A later request for that id returns those bytes and does not call OAI-PMH or `arxiv.org`. The caller's upload cap is applied to the cached bytes: a guest whose cap is smaller than the stored file gets `413 payload_too_large` and the cache entry is left in place for a caller with a higher cap.
+
 Size cap:
 
-- `Content-Length` above the cap: `413 payload_too_large`. The body is cancelled and not buffered.
-- No `Content-Length`: bytes are counted into a buffer up to the cap. Crossing the cap before EOF is still a JSON `413`, and no partial PDF is returned. An accepted PDF was held in memory only because the length was not known up front.
-- `Content-Length` within the cap: the `%PDF-` prefix is checked, then the rest is streamed and not held. If the body later exceeds the cap because `Content-Length` lied, the `200` is already committed and the stream errors. The client sees a broken download, not a JSON `413`.
+- `Content-Length` above the cap: `413 payload_too_large`. The body is cancelled and not stored.
+- Otherwise the body is counted up to the cap, whether or not `Content-Length` was present. Crossing the cap, including a header that understated the size, is a JSON `413`. The partial body is discarded and not cached.
+- An accepted PDF is held so it can be written to the 24 hour cache, then returned with `no-store`.
 
 A non-PDF upstream, including a `200` that is HTML or that does not start with `%PDF-`, is `502 upstream_invalid`.
 
@@ -127,7 +129,7 @@ Other env vars:
 | Name | Kind | Effect |
 |---|---|---|
 | `PAPER_SEARCH_ENABLED` | var | `true` turns the routes on. Unset is `404` before auth |
-| `OPENALEX_API_KEY` | secret | optional. Sent only as `api_key` on `api.openalex.org`. A value outside `[A-Za-z0-9._~-]{1,200}` is ignored. Never logged and never sent to arXiv |
+| `OPENALEX_API_KEY` | secret | optional. Sent only as `Authorization: Bearer` on the first `api.openalex.org` request. Never placed in the URL, logged, or sent to arXiv. A redirect drops it. A value outside `[A-Za-z0-9._~-]{1,200}` is ignored |
 | `AI_MAX_UPLOAD_BYTES` | var | PDF cap for non-guest owners. Existing default 32 MiB, hard max 64 MiB |
 | `AI_GUEST_MAX_UPLOAD_BYTES` | var | PDF cap for `gst:` owners. Existing default 20 MiB, never above the deployment cap |
 | `AI_OPEN_ACCESS` | var | required for an `fsg_` bearer, unchanged |
@@ -153,7 +155,7 @@ Every upstream request sets:
 User-Agent: falsify-workbench-booth/1.0 (+https://github.com/Shinick-Han/falsify-workbench)
 ```
 
-There is no `mailto` parameter and no email address. Fetch uses `redirect: 'manual'`. A redirect is followed only for `https://arxiv.org/` and `https://export.arxiv.org/`, at most three hops, with no userinfo and no port other than 443. Any other hop, including `http://` and a look-alike host, is `502 redirect_refused` and is not requested. An OpenAlex redirect that fails this rule is treated as an OpenAlex failure and falls back to arXiv instead of following it. A PDF redirect that fails it fails the request.
+There is no `mailto` parameter and no email address. `OPENALEX_API_KEY` is `Authorization: Bearer <key>` on that one OpenAlex request and is not a query parameter. Fetch uses `redirect: 'manual'`. A redirect is followed only for `https://arxiv.org/` and `https://export.arxiv.org/`, at most three hops, with no userinfo and no port other than 443. Any other hop, including `http://` and a look-alike host, is `502 redirect_refused` and is not requested. An OpenAlex redirect that fails this rule is treated as an OpenAlex failure and falls back to arXiv instead of following it. A PDF redirect that fails it fails the request.
 
 ## Licence rule
 

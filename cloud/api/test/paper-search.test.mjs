@@ -62,11 +62,14 @@ function memoryCache() {
     async match(request) {
       const hit = store.get(request.url);
       if (!hit) return undefined;
-      return new Response(hit, { status: 200, headers: { 'Content-Type': 'application/json; charset=utf-8' } });
+      return new Response(hit.body.slice(), { status: hit.status, headers: hit.headers });
     },
     async put(request, response) {
-      store.set(request.url, await response.text());
+      const headers = {};
+      response.headers.forEach((value, key) => { headers[key] = value; });
+      store.set(request.url, { body: new Uint8Array(await response.arrayBuffer()), status: response.status, headers });
     },
+    entries() { return [...store.entries()]; },
     get size() { return store.size; },
   };
 }
@@ -341,8 +344,10 @@ test('OpenAlex happy path maps a synthetic work and keeps the fixed upstream pol
   assert.equal(upstream.searchParams.get('filter'), 'best_oa_location.source.id:S4306400194,best_oa_location.license:cc-by|cc-by-sa|public-domain');
   assert.equal(upstream.searchParams.get('per_page'), '10');
   assert.equal(upstream.searchParams.get('search'), 'graph nets');
-  assert.equal(upstream.searchParams.get('api_key'), 'booth-example-key');
+  assert.equal(upstream.searchParams.has('api_key'), false);
   assert.equal(upstream.searchParams.has('mailto'), false);
+  assert.equal(routed.calls[0].href.includes('booth-example-key'), false);
+  assert.equal(new Headers(routed.calls[0].init.headers).get('authorization'), 'Bearer booth-example-key');
   assert.equal(JSON.stringify(body).includes('booth-example-key'), false);
   assertUpstreamIdentity(routed.calls);
 });
@@ -375,8 +380,11 @@ test('OpenAlex failure falls back to the arXiv Atom API with licenseVerified fal
   assert.equal(Array.from(body.results[0].abstract).length, 700);
   assert.equal(body.hasMore, true);
   assert.deepEqual(routed.calls.map(call => call.host), ['api.openalex.org', 'export.arxiv.org']);
+  assert.equal(routed.calls[0].href.includes('booth-example-key'), false);
+  assert.equal(new Headers(routed.calls[0].init.headers).get('authorization'), 'Bearer booth-example-key');
   assert.equal(routed.calls[1].href.includes('booth-example-key'), false);
   assert.equal(routed.calls[1].href.includes('api_key'), false);
+  assert.equal(new Headers(routed.calls[1].init.headers).get('authorization'), null);
   assertUpstreamIdentity(routed.calls);
 });
 
@@ -619,7 +627,7 @@ test('non-PDF upstream is an error', async () => {
   }
 });
 
-test('oversize PDFs are 413, and a lying Content-Length aborts the stream', async () => {
+test('oversize PDFs are 413, including a Content-Length that understates the body', async () => {
   const capped = { AI_MAX_UPLOAD_BYTES: '32' };
   const declared = routes({
     'oaipmh.arxiv.org': () => new Response(oaiXml(CC_BY), { status: 200, headers: { 'Content-Type': 'text/xml' } }),
@@ -669,8 +677,8 @@ test('oversize PDFs are 413, and a lying Content-Length aborts the stream', asyn
     deps: testDeps().deps,
     fetchImpl: lying.fetchImpl,
   });
-  assert.equal(streamed.status, 200);
-  await assert.rejects(() => streamed.arrayBuffer());
+  assert.equal(streamed.status, 413);
+  assert.equal((await errorOf(streamed)).code, 'payload_too_large');
 });
 
 test('a redirect to a foreign host is refused and an arXiv hop is followed', async () => {
@@ -828,6 +836,96 @@ test('a guest uses guestMaxUploadBytes and a password owner keeps maxUploadBytes
   });
   assert.equal(user.status, 200);
   assert.equal((await user.arrayBuffer()).byteLength, 80);
+});
+
+test('an allowed PDF cache hit serves bytes with no upstream call, and a denied id stores none', async () => {
+  const pdf = pdfBytes(80);
+  let fetches = 0;
+  const routed = routes({
+    'oaipmh.arxiv.org': () => {
+      fetches += 1;
+      return new Response(oaiXml(CC_BY), { status: 200, headers: { 'Content-Type': 'text/xml' } });
+    },
+    'arxiv.org': () => {
+      fetches += 1;
+      return new Response(pdf, { status: 200, headers: { 'Content-Type': 'application/pdf' } });
+    },
+  });
+  const cache = memoryCache();
+  const deps = testDeps().deps;
+  const first = await send({
+    pathname: '/v1/papers/pdf',
+    query: 'id=2503.00071',
+    token: SESSION,
+    deps,
+    cache,
+    fetchImpl: routed.fetchImpl,
+  });
+  assert.equal(first.status, 200);
+  assert.equal(first.headers.get('cache-control'), 'no-store');
+  assert.equal(first.headers.get('x-falsify-paper-license'), 'cc-by-4.0');
+  assert.deepEqual(new Uint8Array(await first.arrayBuffer()), pdf);
+  assert.equal(fetches, 2);
+  const second = await send({
+    pathname: '/v1/papers/pdf',
+    query: 'id=2503.00071',
+    token: SESSION,
+    deps,
+    cache,
+    fetchImpl: routed.fetchImpl,
+  });
+  assert.equal(second.status, 200);
+  assert.equal(second.headers.get('cache-control'), 'no-store');
+  assert.deepEqual(new Uint8Array(await second.arrayBuffer()), pdf);
+  assert.equal(fetches, 2);
+
+  const guestDeps = testDeps({
+    db: {
+      prepare() {
+        return { bind() { return this; }, async first() { return { guest_id: GUEST_ID }; } };
+      },
+    },
+  });
+  const guest = await send({
+    pathname: '/v1/papers/pdf',
+    query: 'id=2503.00071',
+    token: GUEST,
+    env: { AI_OPEN_ACCESS: 'true', AI_MAX_UPLOAD_BYTES: '1000', AI_GUEST_MAX_UPLOAD_BYTES: '50' },
+    deps: guestDeps.deps,
+    cache,
+    fetchImpl: routed.fetchImpl,
+  });
+  assert.equal(guest.status, 413);
+  assert.equal((await errorOf(guest)).code, 'payload_too_large');
+  assert.equal(fetches, 2);
+
+  const deniedCache = memoryCache();
+  const denied = routes({
+    'oaipmh.arxiv.org': () => new Response(oaiXml(CC_BY_NC), { status: 200, headers: { 'Content-Type': 'text/xml' } }),
+    'arxiv.org': () => { throw new Error('denied id must not fetch pdf bytes'); },
+  });
+  const blocked = await send({
+    pathname: '/v1/papers/pdf',
+    query: 'id=2503.00072',
+    token: SESSION,
+    deps: testDeps().deps,
+    cache: deniedCache,
+    fetchImpl: denied.fetchImpl,
+  });
+  assert.equal(blocked.status, 403);
+  const again = await send({
+    pathname: '/v1/papers/pdf',
+    query: 'id=2503.00072',
+    token: SESSION,
+    deps: testDeps().deps,
+    cache: deniedCache,
+    fetchImpl: denied.fetchImpl,
+  });
+  assert.equal(again.status, 403);
+  assert.equal(denied.calls.every(call => call.host === 'oaipmh.arxiv.org'), true);
+  assert.equal(denied.calls.length, 1);
+  const pdfEntries = deniedCache.entries().filter(([url, hit]) => url.includes('/papers/pdf') || String(hit.headers['content-type'] || '').includes('pdf'));
+  assert.equal(pdfEntries.length, 0);
 });
 
 test('both upstreams failing is 503 and is not cached', async () => {

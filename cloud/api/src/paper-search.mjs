@@ -299,6 +299,38 @@ async function readCacheJson(cache, request) {
   }
 }
 
+async function readCachedPdf(cache, request) {
+  if (!cache) return null;
+  try {
+    const hit = await cache.match(request);
+    if (!hit) return null;
+    const bytes = new Uint8Array(await hit.arrayBuffer());
+    const licenseId = hit.headers.get('x-falsify-paper-license') || '';
+    if (!looksLikePdf(bytes) || !/^[a-z0-9._-]{1,64}$/.test(licenseId)) return null;
+    return { bytes, licenseId };
+  } catch {
+    return null;
+  }
+}
+
+async function writeCachedPdf(cache, request, bytes, licenseId) {
+  if (!cache || typeof cache.put !== 'function') return;
+  if (!looksLikePdf(bytes) || !/^[a-z0-9._-]{1,64}$/.test(licenseId)) return;
+  const response = new Response(bytes, {
+    status: 200,
+    headers: {
+      'Content-Type': 'application/pdf',
+      'X-Falsify-Paper-License': licenseId,
+      'Cache-Control': `public, max-age=${LICENSE_CACHE_SECONDS}`,
+    },
+  });
+  try {
+    await cache.put(request, response);
+  } catch {
+    // A cache that refuses the PDF must not fail the visitor request.
+  }
+}
+
 async function writeCacheJson(cache, request, payload, maxAge) {
   if (!cache || typeof cache.put !== 'function') return;
   const response = new Response(JSON.stringify(payload), {
@@ -344,17 +376,21 @@ function redirectTarget(response, current) {
 }
 
 // redirect:manual. A hop is followed only to https://arxiv.org/ or https://export.arxiv.org/.
-async function upstreamFetch(fetchImpl, target, accept) {
+// extraHeaders (the OpenAlex bearer) are attached only to the first request, and only when that
+// host is api.openalex.org, so a redirect cannot carry the key.
+async function upstreamFetch(fetchImpl, target, accept, extraHeaders = null) {
   if (typeof fetchImpl !== 'function') aiFail(503, 'upstream_unavailable');
   let current = new URL(target);
   assertHttps(current, INITIAL_HOSTS);
   for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
+    const headers = { 'User-Agent': USER_AGENT, Accept: accept };
+    if (hop === 0 && current.hostname === 'api.openalex.org' && extraHeaders) Object.assign(headers, extraHeaders);
     let response;
     try {
       response = await fetchImpl(current.toString(), {
         method: 'GET',
         redirect: 'manual',
-        headers: { 'User-Agent': USER_AGENT, Accept: accept },
+        headers,
       });
     } catch (error) {
       if (error instanceof AiError) throw error;
@@ -430,11 +466,10 @@ function contentTypeAllowsPdf(response) {
   return type.includes('application/pdf') || type.includes('application/octet-stream');
 }
 
-// Content-Length above the cap is a JSON 413 before any success header is sent.
-// Without Content-Length the body is buffered up to the cap, so crossing the cap is still a JSON 413
-// and no partial PDF is returned. With a Content-Length inside the cap the remainder is streamed
-// and not held. If that stream later passes the cap (the header lied), the 200 is already committed
-// and the body errors instead of turning into a JSON 413.
+// Content-Length above the cap is a JSON 413 before the body is read.
+// Otherwise the body is counted up to the cap. Crossing the cap, including when Content-Length
+// understated the size, is a JSON 413 and the partial bytes are discarded. An accepted PDF is
+// returned whole so the caller can cache it. Nothing over the cap is cached.
 async function openPdfBody(response, maxBytes) {
   if (response.status !== 200) {
     await cancelBody(response);
@@ -481,45 +516,6 @@ async function openPdfBody(response, maxBytes) {
   if (!looksLikePdf(head)) {
     await reader.cancel().catch(() => {});
     aiFail(502, 'upstream_invalid');
-  }
-  if (declared !== null) {
-    let sent = 0;
-    let queuedHead = false;
-    return new ReadableStream({
-      async pull(controller) {
-        try {
-          if (!queuedHead) {
-            queuedHead = true;
-            sent += head.byteLength;
-            if (sent > maxBytes) {
-              await reader.cancel().catch(() => {});
-              controller.error(new Error('payload_too_large'));
-              return;
-            }
-            controller.enqueue(head);
-            return;
-          }
-          const { done, value } = await reader.read();
-          if (done) {
-            controller.close();
-            return;
-          }
-          sent += value.byteLength;
-          if (sent > maxBytes) {
-            await reader.cancel().catch(() => {});
-            controller.error(new Error('payload_too_large'));
-            return;
-          }
-          controller.enqueue(value);
-        } catch (error) {
-          try { await reader.cancel(); } catch { /* already closed */ }
-          controller.error(error);
-        }
-      },
-      cancel() {
-        return reader.cancel().catch(() => {});
-      },
-    });
   }
   const chunks = [head];
   let size = head.byteLength;
@@ -636,20 +632,21 @@ function mapOpenAlex(payload, page) {
   return { source: 'arxiv', page, hasMore, results };
 }
 
-function openAlexUrl(query, page, apiKey) {
+function openAlexUrl(query, page) {
   const params = new URLSearchParams();
   params.set('search', query);
   params.set('filter', OPENALEX_FILTER);
   params.set('per_page', String(PAGE_SIZE));
   params.set('page', String(page));
   params.set('select', OPENALEX_SELECT);
-  if (apiKey) params.set('api_key', apiKey);
   return `https://api.openalex.org/works?${params.toString()}`;
 }
 
 async function searchOpenAlex(fetchImpl, query, page, apiKey) {
+  // The key is a header only. It is never a query parameter and never sent to arXiv.
+  const headers = apiKey ? { Authorization: `Bearer ${apiKey}` } : null;
   try {
-    const response = await upstreamFetch(fetchImpl, openAlexUrl(query, page, apiKey), 'application/json');
+    const response = await upstreamFetch(fetchImpl, openAlexUrl(query, page), 'application/json', headers);
     if (response.status !== 200) {
       await cancelBody(response);
       return null;
@@ -861,11 +858,21 @@ async function handleSearch(ctx, ownerId) {
 async function handlePdf(ctx, ownerId) {
   const id = pdfId(requestUrl(ctx));
   await limitPdf(ctx, ownerId);
+  const cap = uploadCap(ctx.env, ownerId);
+  const cache = resolveCache(ctx);
+  // Version stays in the key: 2503.10497 and 2503.10497v2 are different files.
+  const request = cacheRequest('/papers/pdf', { id });
+  const cached = await readCachedPdf(cache, request);
+  if (cached) {
+    if (cached.bytes.byteLength > cap) aiFail(413, 'payload_too_large');
+    return pdfResponse(cached.bytes, id, cached.licenseId);
+  }
   const verdict = await licenseVerdict(ctx, id);
   if (verdict.kind === 'missing') aiFail(404, 'not_found');
   if (verdict.kind !== 'allow') aiFail(403, 'license_not_allowed');
   const response = await upstreamFetch(ctx.fetchImpl, pdfFetchUrl(id), 'application/pdf');
-  const body = await openPdfBody(response, uploadCap(ctx.env, ownerId));
+  const body = await openPdfBody(response, cap);
+  await writeCachedPdf(cache, request, body, verdict.id);
   return pdfResponse(body, id, verdict.id);
 }
 
