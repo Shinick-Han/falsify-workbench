@@ -505,6 +505,8 @@ test('operator id, gateway defaults and migration 0006 keep secrets out of the s
   assert.equal(wrangler.split('"BOOTH_MAX_PDF_BYTES": "16777216"').length, 2);
   assert.equal(wrangler.split('"BOOTH_STORED_PDF_BYTES": "3221225472"').length, 2);
   assert.equal(wrangler.split('"AI_MODEL_JOBS_OPERATOR_ONLY": "true"').length, 2);
+  assert.equal(wrangler.split('"AI_PAPER_TOOLS_ENABLED": "true"').length, 2);
+  assert.equal(wrangler.split('"AI_PAPER_TOOLS_ENABLED": "false"').length, 2);
   assert.equal(wrangler.includes('BOOTH_OPERATOR_TOKEN_BUDGET'), false);
   assert.equal(wrangler.includes('BOOTH_TEST_SEQ_BIAS'), false);
   assert.equal(wrangler.includes('BOOTH_PARSE_TIMING'), false);
