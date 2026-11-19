@@ -2208,6 +2208,13 @@
       if(generating)throw new Error('다른 PDF 생성이 진행 중입니다.');
     }
     function validateRedBatchBytes(actual,result,bytes){if(actual!==result.sha256||new TextDecoder().decode(bytes.subarray(0,1024)).indexOf('%PDF-')<0)throw new Error('생성 파일을 확인하지 못했습니다.');}
+    /* Successful generation tells the booth the PDF bytes. The event is not cancelable. */
+    function announceGenerated(candidate){
+      if(!candidate||!isFile(candidate.file)||typeof doc?.dispatchEvent!=='function'||typeof CustomEvent!=='function')return;
+      const sourceFileHash=HEX.test(candidate.originalSourceSha256||'')?candidate.originalSourceSha256:(source&&HEX.test(source.fileHash||'')?source.fileHash:'');
+      const edits=published(Array.isArray(candidate.edits)?candidate.edits:[])||[];
+      try{doc.dispatchEvent(new CustomEvent('falsify:paper-generated',{cancelable:false,detail:{file:candidate.file,sourceFileHash,revision:candidate.revision,edits}}));}catch{}
+    }
     async function exportRedBatch({fileHash,revision,patches,isCurrent}){
       requireRedBatchSource(fileHash);
       const file=source.file, epochAt=epoch, workspaceRevision=snapshot.revision;
@@ -2227,6 +2234,7 @@
         const bytes=new Uint8Array(await result.file.arrayBuffer()),actual=await sha256Hex(bytes);
         ensureRedBatchLive(live,mine,ctl);
         validateRedBatchBytes(actual,result,bytes);
+        announceGenerated({file:result.file,originalSourceSha256:fileHash,revision,edits});
         return {file:result.file,bytes,sha256:actual,verification:result.verification??null,revision,workspaceRevision,batch:published(batch)};
       }finally{if(genCtl===ctl)genCtl=null;if(mine===genId&&epoch===epochAt){generating=false;renderChrome();}}
     }
@@ -2252,7 +2260,7 @@
     function ensureGenerator(){
       const g=generationApi();if(!g?.create)return null;if(generator)return generator;
       const version=++generatorVersion;
-      generator=g.create({generate:generateCaptured,onResult:(candidate,meta)=>{if(version!==generatorVersion||!source||source.fileHash!==meta.spec.fileHash)return;let current;try{current=g.key(captureSpec());}catch{return;}if(current!==meta.key)return;output=candidate;outputAt=now();generationFailed=false;output.key=meta.key;afterPart=0;afterSourcePage=page;setGenStatus(output.edits.length?generationLead(output.verification,false):'선택한 편집이 없어 원본 PDF를 사용합니다.');emit('falsify:paper-workspace-output',published({sha256:output.sha256,revision:output.revision,verification:scrub(output.verification,0)}));renderEdits();void drawAfter();},onState:state=>{if(version!==generatorVersion||!source)return;let current;try{current=g.key(captureSpec());}catch{return;}if(current!==state.key)return;generating=state.phase==='running';if(state.phase==='error'){generationFailed=true;setGenStatus(generationStatus(state.error,'생성하지 못했습니다. '+generationError(state.error)),true);}else if(state.phase==='running')generationFailed=false;renderChrome();}});return generator;
+      generator=g.create({generate:generateCaptured,onResult:(candidate,meta)=>{if(version!==generatorVersion||!source||source.fileHash!==meta.spec.fileHash)return;let current;try{current=g.key(captureSpec());}catch{return;}if(current!==meta.key)return;output=candidate;outputAt=now();generationFailed=false;output.key=meta.key;afterPart=0;afterSourcePage=page;setGenStatus(output.edits.length?generationLead(output.verification,false):'선택한 편집이 없어 원본 PDF를 사용합니다.');emit('falsify:paper-workspace-output',published({sha256:output.sha256,revision:output.revision,verification:scrub(output.verification,0)}));announceGenerated(output);renderEdits();void drawAfter();},onState:state=>{if(version!==generatorVersion||!source)return;let current;try{current=g.key(captureSpec());}catch{return;}if(current!==state.key)return;generating=state.phase==='running';if(state.phase==='error'){generationFailed=true;setGenStatus(generationStatus(state.error,'생성하지 못했습니다. '+generationError(state.error)),true);}else if(state.phase==='running')generationFailed=false;renderChrome();}});return generator;
     }
     function scheduleGeneration(){if(committingInline||!generationApi()||!source?.pdf||!snapshot)return;try{ensureGenerator().schedule(captureSpec());}catch(e){setGenStatus('현재 편집을 확인하세요. '+safeMessage(e),true);}}
     function planCapturedExport(spec){
@@ -2384,6 +2392,7 @@
         output=candidate;afterPart=0;afterSourcePage=page;
         const noted=diagnosticText(output.warnings,output.verification);
         emit('falsify:paper-workspace-output',published({sha256:output.sha256,revision:output.revision,verification:scrub(output.verification,0)}));
+        announceGenerated(output);
         if(recompose)setGenStatus(output.verification?.status==='finding'?'PDF를 만들었습니다. 내용 확인 항목은 파일 정보에서 볼 수 있습니다.':'PDF를 만들었습니다.');
         else setGenStatus(generationLead(output.verification,stale())+(noted?' '+noted:'')+tableNote);
         renderEdits();

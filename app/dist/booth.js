@@ -1,16 +1,17 @@
 /* Event-page booth panel. Renders only when FalsifyCloudConfig.booth.enabled and
    GET /v1/booth/config reports enabled. Declared reasons leave the browser only in
-   POST /v1/booth/submissions. Claim keys are stored on this device, capped at 10. */
+   the meta part of POST /v1/booth/submissions. The pdf part is the workspace file.
+   Claim keys are stored on this device, capped at 10. */
 (function(root){
   'use strict';
   const RECEIPT_KEY='falsify.booth.receipts.v1';
   const RECEIPT_CAP=10;
-  const CONSENT_COPY='제출한 수정본 PDF와 결함 설명(쪽·유형·이유)은 가짜연구소 Falsify 스터디가 저장하고 운영자가 읽습니다. 마감 후 AI 검증에는 수정본 PDF만 모델 제공자(Anthropic 또는 OpenAI)에 보내며, 결함 설명은 AI에 보내지 않습니다. 이름·연락처는 받지 않으니 이유란에도 적지 마세요. 원 논문은 CC BY·CC BY-SA·CC0 공개 논문이며, 수정본을 스터디 밖에 공개할 때는 저자·arXiv 번호·라이선스와 수정 사실을 밝힙니다. 결과와 경품 안내는 접수번호와 확인키로만 확인할 수 있습니다. 확인키로 언제든 철회할 수 있고, 철회하면 설명과 결과는 즉시 삭제되며 수정본 PDF는 운영자 보관본에서 지우고 서버 사본은 7일 안에 자동 삭제됩니다. 보관 자료는 스터디 종료 후 삭제합니다.';
+  const CONSENT_COPY='제출한 수정본 PDF와 결함 설명(쪽·유형·이유)은 가짜연구소 Falsify 스터디가 저장하고 운영자가 읽습니다. 마감 후 AI 검증에는 수정본 PDF만 모델 제공자(Anthropic 또는 OpenAI)에 보내며, 결함 설명은 AI에 보내지 않습니다. 이름·연락처는 받지 않으니 이유란에도 적지 마세요. 원 논문은 CC BY·CC BY-SA·CC0 공개 논문이며, 수정본을 스터디 밖에 공개할 때는 저자·arXiv 번호·라이선스와 수정 사실을 밝힙니다. 결과와 경품 안내는 접수번호와 확인키로만 확인할 수 있습니다. 확인키로 언제든 철회할 수 있고, 철회하면 설명·결과·수정본 PDF가 서버에서 즉시 삭제되며 운영자 보관본도 지웁니다. 보관 자료는 스터디 종료 후 삭제합니다.';
   const PICK_PAPER='미션이나 검색에서 논문을 골라 시작해 주세요';
   const CONSENT_VERSION='2026-11-22.v1';
   const CROCKFORD='0123456789ABCDEFGHJKMNPQRSTVWXYZ';
   const CONTROL=/[\u0000-\u001f\u007f]/;
-  const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const SHA256=/^[0-9a-f]{64}$/;
   const ARXIV_ID=/^(?:\d{4}\.\d{4,5}(?:v\d{1,3})?|[a-z-]+(?:\.[A-Z]{2})?\/\d{7}(?:v\d{1,3})?)$/;
   const LICENSE_RE=/^(?:cc-by(?:-\d+\.\d+)?|cc-by-sa(?:-\d+\.\d+)?|cc0(?:-1\.0)?|public-domain)$/;
   const DEFECT_TYPES=[
@@ -31,6 +32,9 @@
     payload_too_large:'논문 파일이 너무 커서 열 수 없습니다.',
     not_found:'접수번호 또는 확인키가 맞지 않습니다.',
     paper_not_allowed:'이 논문의 라이선스는 부스 제출에 쓸 수 없습니다. CC BY, CC BY-SA, CC0 논문만 제출할 수 있습니다.',
+    invalid_pdf:'수정본 PDF를 확인하지 못했습니다. PDF 파일을 다시 만들어 주세요.',
+    pdf_mismatch:'수정본 PDF와 해시가 일치하지 않습니다. 다시 만들어 제출해 주세요.',
+    pdf_unchanged:'수정본이 원본과 같습니다. 편집을 적용한 PDF를 만들어 주세요.',
     session_missing:'게스트 세션이 없어 요청을 보내지 못했습니다. 페이지를 새로 고친 뒤 다시 시도해 주세요.',
     invalid_request:'입력 내용을 확인해 주세요.',
     forbidden:'이 작업은 할 수 없습니다.',
@@ -98,6 +102,8 @@
     const body={source:paper.source,id};
     if(title) body.title=title;
     body.license=license;
+    const sourceSha256=typeof paper.sourceSha256==='string'&&SHA256.test(paper.sourceSha256)?paper.sourceSha256:'';
+    if(sourceSha256) body.sourceSha256=sourceSha256;
     return body;
   }
   function declaredItem(row, limits, types){
@@ -123,7 +129,7 @@
     ordered.reason=item.reason;
     return ordered;
   }
-  /* Wire body uses only contract keys. Nickname PII fails closed before the request. */
+  /* Meta has no job id. editedSha256 is the lowercase SHA-256 of the PDF part. */
   function buildSubmission(input){
     const source=input&&typeof input==='object'?input:{};
     const limits=limitsOf(source);
@@ -131,7 +137,6 @@
     const nick=nicknameProblem(nickname,limits.maxNickname);
     if(nick) return {ok:false,code:nick};
     if(source.consent!==true) return {ok:false,code:'invalid_request'};
-    if(typeof source.jobId!=='string'||!UUID.test(source.jobId)) return {ok:false,code:'invalid_request'};
     if(source.course!=='quick'&&source.course!=='deep') return {ok:false,code:'invalid_request'};
     const consentVersion=typeof source.consentVersion==='string'&&source.consentVersion?source.consentVersion:CONSENT_VERSION;
     if(consentVersion.length>80||CONTROL.test(consentVersion)) return {ok:false,code:'invalid_request'};
@@ -147,10 +152,24 @@
     }
     const paper=paperBody(source.paper);
     if(!paper) return {ok:false,code:'paper_not_allowed'};
-    const body={jobId:source.jobId,course:source.course,declared,paper};
+    const editedSha256=typeof source.editedSha256==='string'&&SHA256.test(source.editedSha256)?source.editedSha256:'';
+    if(!editedSha256) return {ok:false,code:'invalid_request'};
+    if(paper.sourceSha256&&paper.sourceSha256===editedSha256) return {ok:false,code:'pdf_unchanged'};
+    const body={course:source.course,declared,paper};
     if(nickname) body.nickname=nickname;
     body.consentVersion=consentVersion;
+    body.editedSha256=editedSha256;
     return {ok:true,body};
+  }
+  /* Exactly two parts: meta JSON text, then the edited PDF. */
+  function submissionForm(body, file){
+    if(!body||typeof body!=='object'||typeof FormData!=='function') return null;
+    if(!file||typeof file.arrayBuffer!=='function') return null;
+    const form=new FormData();
+    form.append('meta', JSON.stringify(body));
+    const name=typeof file.name==='string'&&file.name?file.name.slice(0,180):'edited.pdf';
+    form.append('pdf', file, name);
+    return form;
   }
   function isReceiptRecord(item){
     return !!item&&typeof item==='object'
@@ -224,6 +243,7 @@
     const config=typeof configFn==='function'?configFn():configFn;
     if(!boothConfigured(config)) return {destroy(){}};
     const fetchImpl=opts.fetch||(typeof root.fetch==='function'?root.fetch.bind(root):null);
+    const cryptoApi=opts.crypto||root.crypto||null;
     const storage=opts.storage||root.localStorage;
     const sessionFn=opts.session||(()=>root.FalsifyHostedSession);
     const location=opts.location||root.location||{hash:''};
@@ -233,7 +253,11 @@
     let course='quick';
     let paper=null;
     let boothFile=null;
-    let applyDetail=null;
+    let generatedFile=null;
+    let generatedHash='';
+    let sourceSha='';
+    let adoptedCount=0;
+    let adoptedSignature='';
     let rows=[];
     let searchPage=1;
     let searchQuery='';
@@ -280,7 +304,9 @@
         el('div',{id:'booth-search-pages',className:'button-row',hidden:true})),
       el('form',{id:'booth-submit',hidden:true},
         el('h3',{textContent:'수정본 제출'}),
-        el('p',{className:'muted',textContent:'적용된 변경마다 결함 유형과 이유를 적습니다. 이유 없이 제출할 수 없습니다.'}),
+        el('p',{className:'muted',textContent:'작업대에서 고친 뒤 수정본을 만들고, 변경마다 결함 유형과 이유를 적습니다. 이유 없이 제출할 수 없습니다.'}),
+        el('div',{className:'button-row'},
+          el('button',{id:'booth-make',type:'button',className:'button primary',textContent:'제출할 수정본 만들기'})),
         el('div',{id:'booth-rows'}),
         el('fieldset',{id:'booth-courses'},el('legend',{textContent:'코스'})),
         el('label',{for:'booth-nickname'},'별명 (선택, 이름·연락처는 적지 마세요)',
@@ -350,7 +376,12 @@
       const base=apiBaseOf(typeof configFn==='function'?configFn():config);
       if(!base||typeof fetchImpl!=='function') throw coded('network');
       const headers={Accept:'application/json'};
-      if(spec.body!==undefined) headers['Content-Type']='application/json';
+      let payload;
+      if(spec.form) payload=spec.form;
+      else if(spec.body!==undefined){
+        headers['Content-Type']='application/json';
+        payload=JSON.stringify(spec.body);
+      }
       if(spec.auth){
         const token=await bearer();
         if(!token) throw coded('session_missing');
@@ -360,7 +391,7 @@
       try{
         res=await fetchImpl(base+path,{
           method:spec.method||'GET',headers,
-          body:spec.body===undefined?undefined:JSON.stringify(spec.body),
+          body:payload,
           credentials:'omit',cache:'no-store',redirect:'error'
         });
       }catch{throw coded('network');}
@@ -433,7 +464,7 @@
       const button=byId('booth-submit-button');
       if(!button) return;
       const consent=byId('booth-consent');
-      const ready=submissionsOpen()&&consent&&consent.checked&&rows.length>0&&!!applyDetail;
+      const ready=submissionsOpen()&&consent&&consent.checked&&rows.length>0&&!!generatedFile&&SHA256.test(generatedHash);
       button.disabled=!ready;
     }
     function renderRows(){
@@ -461,16 +492,29 @@
         row.select=select;
         row.reasonInput=reason;
       }
-      setHidden('booth-submit',!applyDetail);
+      setHidden('booth-submit',!paper);
       refreshSubmitButton();
     }
-    function takeApply(detail){
-      if(!detail||typeof detail.jobId!=='string'||!UUID.test(detail.jobId)) return;
-      if(!Array.isArray(detail.edits)) return;
-      const limits=limitsOf(liveConfig);
+    function pdfMagic(bytes){
+      return !!bytes&&bytes.length>=5&&bytes[0]===0x25&&bytes[1]===0x50&&bytes[2]===0x44&&bytes[3]===0x46&&bytes[4]===0x2d;
+    }
+    async function digestHex(bytes){
+      const subtle=cryptoApi&&cryptoApi.subtle;
+      if(!subtle||typeof subtle.digest!=='function') return '';
+      const view=bytes instanceof Uint8Array?bytes:new Uint8Array(bytes);
+      const digest=await subtle.digest('SHA-256', view);
+      let hex='';
+      for(const byte of new Uint8Array(digest)) hex+=byte.toString(16).padStart(2,'0');
+      return SHA256.test(hex)?hex:'';
+    }
+    function workspace(){
+      try{return root.FalsifyPaperWorkspace||null;}catch{return null;}
+    }
+    function enabledEdits(list){
       const edits=[];
-      for(const edit of detail.edits){
-        if(!edit||typeof edit!=='object') continue;
+      const source=Array.isArray(list)?list:[];
+      for(const edit of source){
+        if(!edit||typeof edit!=='object'||edit.enabled===false) continue;
         if(!Number.isSafeInteger(edit.pageIndex)||typeof edit.before!=='string'||typeof edit.after!=='string') continue;
         edits.push({
           pageIndex:edit.pageIndex,
@@ -478,14 +522,120 @@
           before:edit.before,after:edit.after,defectType:'',reason:''
         });
       }
-      applyDetail={jobId:detail.jobId,artifactId:typeof detail.artifactId==='string'?detail.artifactId:'',fileName:typeof detail.fileName==='string'?detail.fileName:'edited.pdf'};
-      const extra=edits.length>limits.maxDeclared;
-      rows=(extra?edits.slice(0,limits.maxDeclared):edits);
-      say('booth-submit-status',extra?'제출은 '+limits.maxDeclared+'건까지입니다. 앞의 '+limits.maxDeclared+'건만 포함합니다.':'');
-      if(!rows.length) say('booth-submit-status','적용된 텍스트 변경이 없어 제출할 항목이 없습니다.');
-      renderRows();
+      return edits;
+    }
+    /* Snapshot wins when the workspace is open. Otherwise the generation event's edits. */
+    function editsFor(detail){
+      const ws=workspace();
+      if(ws&&typeof ws.getEditSnapshot==='function'){
+        let snap=null;
+        try{snap=ws.getEditSnapshot();}catch{snap=null;}
+        if(snap&&Array.isArray(snap.edits)) return enabledEdits(snap.edits);
+      }
+      return enabledEdits(detail&&detail.edits);
+    }
+    function sourceHashOf(detail){
+      const ws=workspace();
+      let hash='';
+      if(ws&&typeof ws.getSource==='function'){
+        try{
+          const source=ws.getSource();
+          hash=source&&typeof source.fileHash==='string'?source.fileHash:'';
+        }catch{hash='';}
+      }
+      if(!SHA256.test(hash)&&detail&&typeof detail.sourceFileHash==='string') hash=detail.sourceFileHash;
+      return SHA256.test(hash)?hash:'';
+    }
+    function editSignature(edits){
+      return edits.map(edit=>[edit.pageIndex,edit.segmentId,edit.before,edit.after].join('\u0000')).join('\u0001');
+    }
+    function showSubmitForm(){
       const form=byId('booth-submit');
       if(form&&typeof form.scrollIntoView==='function') form.scrollIntoView({block:'start'});
+    }
+    /* More than the declared cap is a visitor choice, not a silent slice. */
+    function adoptRows(edits){
+      const limits=limitsOf(liveConfig);
+      adoptedCount=edits.length;
+      adoptedSignature=editSignature(edits);
+      if(edits.length>limits.maxDeclared){
+        rows=[];
+        say('booth-submit-status','켠 편집이 '+edits.length+'건입니다. 제출하려면 켠 편집을 '+limits.maxDeclared+'건 이하로 남겨 주세요.');
+        renderRows();
+        return;
+      }
+      if(!edits.length){
+        rows=[];
+        say('booth-submit-status','켠 편집이 없습니다. 바꿀 곳을 켠 뒤 다시 만들어 주세요.');
+        renderRows();
+        return;
+      }
+      rows=edits;
+      say('booth-submit-status','');
+      renderRows();
+      showSubmitForm();
+    }
+    function clearGenerated(){
+      generatedFile=null;
+      generatedHash='';
+      sourceSha='';
+      adoptedCount=0;
+      adoptedSignature='';
+      rows=[];
+    }
+    async function adoptGenerated(detail){
+      const file=detail&&detail.file;
+      if(!file||typeof file.arrayBuffer!=='function'){
+        say('booth-submit-status',errorMessage('invalid_pdf'));
+        return;
+      }
+      let bytes=null;
+      try{bytes=new Uint8Array(await file.arrayBuffer());}catch{bytes=null;}
+      if(!pdfMagic(bytes)){
+        clearGenerated();
+        renderRows();
+        say('booth-submit-status',errorMessage('invalid_pdf'));
+        return;
+      }
+      const hash=await digestHex(bytes);
+      if(!hash){
+        clearGenerated();
+        renderRows();
+        say('booth-submit-status','수정본 PDF의 해시를 계산하지 못했습니다.');
+        return;
+      }
+      sourceSha=sourceHashOf(detail);
+      if(sourceSha&&sourceSha===hash){
+        clearGenerated();
+        renderRows();
+        say('booth-submit-status',errorMessage('pdf_unchanged'));
+        return;
+      }
+      generatedFile=file;
+      generatedHash=hash;
+      adoptRows(editsFor(detail));
+    }
+    async function makeSubmissionPdf(){
+      if(!paper){say('booth-submit-status',PICK_PAPER);return;}
+      const ws=workspace();
+      let current=null;
+      try{
+        if(ws&&typeof ws.getCurrentOutput==='function') current=ws.getCurrentOutput();
+        else if(ws&&typeof ws.getOutput==='function') current=ws.getOutput();
+      }catch{current=null;}
+      if(current&&current.file){
+        await adoptGenerated({
+          file:current.file,
+          sourceFileHash:typeof current.originalSourceSha256==='string'?current.originalSourceSha256:'',
+          revision:current.revision
+        });
+        return;
+      }
+      const button=doc.getElementById('paper-generate');
+      if(!button){say('booth-submit-status','논문 작업대를 찾지 못했습니다.');return;}
+      if(button.disabled){say('booth-submit-status','지금은 수정본을 만들 수 없습니다. 작업대에서 편집을 확인한 뒤 다시 눌러 주세요.');return;}
+      say('booth-submit-status','수정본 PDF를 만들고 있습니다.');
+      button.click();
     }
     function licenseId(paperLike){
       if(!paperLike||paperLike.license==null) return '';
@@ -493,6 +643,7 @@
       return typeof paperLike.license.id==='string'?paperLike.license.id:'';
     }
     function bindPaper(next, file){
+      const previous=boothFile;
       paper=next&&(next.source==='arxiv'||next.source==='mission')?{
         source:next.source,
         id:typeof next.id==='string'?next.id:'',
@@ -500,8 +651,16 @@
         license:typeof next.license==='string'?next.license:''
       }:null;
       boothFile=file||null;
+      if(previous!==boothFile) clearGenerated();
+      setHidden('booth-submit',!paper);
+      renderRows();
     }
-    function clearPaper(){paper=null;boothFile=null;}
+    function clearPaper(){
+      paper=null;
+      boothFile=null;
+      clearGenerated();
+      renderRows();
+    }
     async function openPdf(id, next, nameHint){
       const path=paperPdfPath(id);
       if(!path){say('booth-search-status',errorMessage('invalid_request'));return;}
@@ -510,7 +669,7 @@
       try{payload=await request(path,{method:'GET',auth:true,pdf:true});}
       catch(error){say('booth-search-status',errorMessage(error.code,error));return;}
       const bytes=payload.bytes;
-      if(!bytes||bytes.length<5||bytes[0]!==0x25||bytes[1]!==0x50||bytes[2]!==0x44||bytes[3]!==0x46||bytes[4]!==0x2d){
+      if(!pdfMagic(bytes)){
         say('booth-search-status',errorMessage('invalid_request'));
         return;
       }
@@ -533,7 +692,7 @@
       bindPaper(picked,file);
       input.dispatchEvent(new Event('change',{bubbles:true}));
       if(typeof input.scrollIntoView==='function') input.scrollIntoView({block:'center'});
-      say('booth-search-status','논문을 열었습니다. RED에서 결함을 넣은 뒤 수정본을 적용하세요.');
+      say('booth-search-status','논문을 열었습니다. 작업대에서 고친 뒤 「제출할 수정본 만들기」를 누르세요.');
     }
     function startPaper(next, id){
       if(next.course==='quick'||next.course==='deep') course=next.course;
@@ -618,8 +777,24 @@
       if(event&&typeof event.preventDefault==='function') event.preventDefault();
       if(!submissionsOpen()){say('booth-submit-status',errorMessage('booth_closed'));return;}
       if(!paper){say('booth-submit-status',PICK_PAPER);refreshSubmitButton();return;}
+      if(!generatedFile||!SHA256.test(generatedHash)){
+        say('booth-submit-status','제출할 수정본이 없습니다. 「제출할 수정본 만들기」를 눌러 주세요.');
+        refreshSubmitButton();
+        return;
+      }
+      const live=editsFor(null);
+      if(workspace()&&editSignature(live)!==adoptedSignature){
+        say('booth-submit-status','편집이 바뀌었습니다. 「제출할 수정본 만들기」를 다시 눌러 주세요.');
+        return;
+      }
+      const limits=limitsOf(liveConfig);
+      if(live.length>limits.maxDeclared){
+        adoptRows(live);
+        return;
+      }
+      const paperPayload=Object.assign({},paper);
+      if(sourceSha) paperPayload.sourceSha256=sourceSha;
       const built=buildSubmission({
-        jobId:applyDetail&&applyDetail.jobId,
         course,consent:!!(byId('booth-consent')&&byId('booth-consent').checked),
         consentVersion:liveConfig&&liveConfig.consentVersion||CONSENT_VERSION,
         rows:rows.map(row=>({
@@ -627,15 +802,18 @@
           defectType:row.select?row.select.value:row.defectType,
           reason:row.reasonInput?row.reasonInput.value:row.reason
         })),
-        paper,nickname:byId('booth-nickname')?byId('booth-nickname').value:'',
+        paper:paperPayload,nickname:byId('booth-nickname')?byId('booth-nickname').value:'',
+        editedSha256:generatedHash,
         limits:liveConfig&&liveConfig.limits,defectTypes:typesOf(liveConfig).map(item=>item.id)
       });
       if(!built.ok){say('booth-submit-status',errorMessage(built.code));return;}
+      const form=submissionForm(built.body,generatedFile);
+      if(!form){say('booth-submit-status',errorMessage('invalid_request'));return;}
       const button=byId('booth-submit-button');
       if(button) button.disabled=true;
       say('booth-submit-status','제출하는 중…');
       try{
-        const data=await request('/v1/booth/submissions',{method:'POST',auth:true,body:built.body});
+        const data=await request('/v1/booth/submissions',{method:'POST',auth:true,form});
         const claimKey=typeof data.claimKey==='string'?data.claimKey:'';
         if(data&&data.receipt&&claimKey){
           rememberReceipt(storage,{receipt:data.receipt,claimKey,createdAt:typeof data.createdAt==='string'?data.createdAt:new Date().toISOString()});
@@ -728,6 +906,7 @@
       searchPage=1;
       void runSearch();
     });
+    on(byId('booth-make'),'click',()=>{void makeSubmissionPdf();});
     on(byId('booth-submit'),'submit',event=>{void submitBooth(event);});
     on(byId('booth-consent'),'change',refreshSubmitButton);
     on(byId('booth-copy'),'click',()=>{void copyReceipt();});
@@ -736,7 +915,7 @@
     on(byId('booth-withdraw-confirm'),'click',()=>{void withdraw();});
     on(resultLink,'click',openResult);
     on(byId('booth-receipt-result'),'click',openResult);
-    on(doc,'falsify:hosted-apply-complete',event=>{takeApply(event&&event.detail);});
+    on(doc,'falsify:paper-generated',event=>{void adoptGenerated(event&&event.detail);});
     on(doc,'falsify:document',event=>{
       const file=event&&event.detail&&event.detail.file;
       if(boothFile&&file===boothFile) return;
@@ -756,7 +935,7 @@
 
   if(boothConfigured(readConfig())) mount();
   root.FalsifyBooth={
-    normalizeClaimKey,normalizeReceipt,buildSubmission,errorMessage,
+    normalizeClaimKey,normalizeReceipt,buildSubmission,submissionForm,errorMessage,
     readReceipts,rememberReceipt,paperSearchPath,paperPdfPath,
     CONSENT_COPY,RECEIPT_KEY,RECEIPT_CAP,mount
   };

@@ -1220,7 +1220,7 @@
       if(!state.session&&!await openBearer()){showGuestStartError();return;}
       const input=reviewInputs();
       if(!modelJobsAllowed()){
-        fail('이 행사 화면에서는 모델 검토를 실행하지 않습니다.');
+        fail(boothInsteadOfAi()?BOOTH_NOTE:'이 행사 화면에서는 모델 검토를 실행하지 않습니다.');
         return;
       }
       if(input.role==='blue'&&!blueJobsAllowed()){
@@ -1344,9 +1344,19 @@
       if(!allowed&&nodes.role&&nodes.role.value==='blue') nodes.role.value='red';
       return allowed;
     }
-    /* capabilities.modelJobs === false hides the model RED/BLUE run. Apply stays. */
+    /* capabilities.modelJobs === false hides the model RED/BLUE run. Apply stays,
+       except on the event page, where the booth note replaces run and apply. */
+    const BOOTH_NOTE='이 행사 화면에서는 AI를 실행하지 않습니다. 논문 작업대에서 수정본을 만든 뒤 부스 제출을 이용해 주세요.';
     function modelJobsAllowed(){
       return !(state.capabilities&&state.capabilities.modelJobs===false);
+    }
+    function eventBooth(){
+      let config=null;
+      try{config=configFn();}catch{config=null;}
+      return !!(config&&config.booth&&config.booth.enabled===true);
+    }
+    function boothInsteadOfAi(){
+      return eventBooth()&&!modelJobsAllowed();
     }
     function applyModelPolicy(){
       const allowed=modelJobsAllowed();
@@ -1358,6 +1368,17 @@
       setHidden(nodes.promptCount,!allowed);
       setHidden(nodes.run,!allowed);
       return allowed;
+    }
+    function applyBoothNote(){
+      const on=boothInsteadOfAi();
+      if(nodes.boothNote){
+        nodes.boothNote.textContent=BOOTH_NOTE;
+        setHidden(nodes.boothNote,!on);
+      }
+      if(!on) return;
+      setHidden(nodes.run,true);
+      setHidden(nodes.apply,true);
+      setHidden(nodes.selectionSection,true);
     }
     function announceCapabilities(){
       const caps=state.capabilities;
@@ -1441,6 +1462,7 @@
     }
     async function applySelection(){
       if(state.busy||state.gate!=='ready'||!state.capabilities) return;
+      if(boothInsteadOfAi()){fail(BOOTH_NOTE);return;}
       if(!state.session&&!await openBearer()){showGuestStartError();return;}
       const blocker=applyBlocker();
       if(blocker){fail(blocker);return;}
@@ -1843,6 +1865,7 @@
           :'선택 사항인 로컬 실행은 「로컬 실행 연결」을 참고하세요. 이 패널은 서버로 아무 작업도 보내지 않습니다.'}));
 
       const configBox=el('div',{id:'hosted-ai-config',hidden:true},
+        el('p',{id:'hosted-ai-booth-note',className:'muted',hidden:true}),
         el('label',{for:'hosted-ai-file'},'검토할 논문 파일 (PDF)',
           el('input',{id:'hosted-ai-file',type:'file',accept:'.pdf,application/pdf'})),
         el('p',{id:'hosted-ai-file-status',className:'muted',textContent:'아직 파일을 고르지 않았습니다.'}),
@@ -1927,7 +1950,7 @@
         register:find('hosted-ai-register'),registerStatus:find('hosted-ai-register-status'),
         recheck:find('hosted-ai-recheck'),
         disabledMessage:find('hosted-ai-disabled-message'),
-        config:configBox,
+        config:configBox,boothNote:find('hosted-ai-booth-note'),
         file:find('hosted-ai-file'),fileStatus:find('hosted-ai-file-status'),
         inputActions:find('hosted-ai-input-actions'),restoreOriginal:find('hosted-ai-restore-original'),
         role:find('hosted-ai-role'),roleField:find('hosted-ai-role-field'),roleBlue:find('hosted-ai-role-blue'),
@@ -2700,6 +2723,7 @@
     }
     function renderOpenIntro(){
       if(!nodes.intro||!openMode()) return;
+      if(boothInsteadOfAi()){nodes.intro.textContent=BOOTH_NOTE;return;}
       const blue=blueJobsAllowed();
       const model=modelJobsAllowed();
       if(!model&&!blue){
@@ -2780,6 +2804,7 @@
       renderResults();
       renderArtifacts();
       renderEdited();
+      applyBoothNote();
       announceApplyComplete();
       emitHostedState(ctx,availability);
     }
