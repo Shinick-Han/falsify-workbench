@@ -98,6 +98,18 @@ test('submission bodies use only contract keys and reject nickname PII', () => {
   assert.equal(JSON.stringify(built.body).includes(RATIONALE), false);
   assert.equal(JSON.stringify(built.body).includes('quick'), true);
   assert.equal(built.body.consentVersion, '2026-11-22.v1');
+  const tabbed = booth.buildSubmission({
+    course: 'quick', consent: true, editedSha256: EDITED_SHA,
+    paper: {source: 'arxiv', id: '2309.15217', title: 'Synthetic title', license: 'cc-by-4.0'},
+    rows: [{pageIndex: 4, segmentId: 'paragraph:4:p4', before: '0.95\t0.78', after: '0.50\t0.78', defectType: 'number', reason: '표의 점수'}],
+  });
+  assert.equal(tabbed.ok, true);
+  assert.equal(tabbed.body.declared[0].before, '0.95\t0.78');
+  assert.equal(booth.buildSubmission({
+    course: 'quick', consent: true, editedSha256: EDITED_SHA,
+    paper: {source: 'arxiv', id: '2309.15217', license: 'cc-by-4.0'},
+    rows: [{pageIndex: 4, before: '0.95\u0000', after: '0.50', defectType: 'number', reason: '표의 점수'}],
+  }).code, 'invalid_request');
   const file = new File([EDITED], 'edited.pdf', {type: 'application/pdf'});
   const form = booth.submissionForm(built.body, file);
   assert.deepEqual([...form.keys()], ['meta', 'pdf']);
@@ -427,9 +439,20 @@ test('the event panel submits contract fields and keeps claim and search auth ap
   assert.equal(pageButtons[0].textContent, '8쪽으로 가기');
   const startPaper = controls.find(node => node.tagName === 'button' && /이 논문으로 시작/.test(node.textContent));
   assert.ok(startPaper);
+  ids.get('paper-file').addEventListener('change', () => {
+    const file = ids.get('paper-file').files && ids.get('paper-file').files[0];
+    doc.dispatchEvent({type: 'falsify:document-clear'});
+    doc.dispatchEvent({type: 'falsify:document', detail: {file, fileHash: 'not-the-opened-pdf'}});
+  });
   startPaper.dispatchEvent({type: 'click'});
   await new Promise(resolve => setTimeout(resolve, 0));
   assert.match(ids.get('booth-search-status').textContent, /논문을 열었습니다/);
+  assert.equal(ids.get('booth-submit').hidden, false);
+  doc.dispatchEvent({type: 'falsify:document-clear'});
+  assert.equal(ids.get('booth-submit').hidden, true);
+  startPaper.dispatchEvent({type: 'click'});
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(ids.get('booth-submit').hidden, false);
   const sourceBytes = Buffer.from('%PDF-1.7 synthetic booth paper\n%%EOF\n');
   const sourceHash = createHash('sha256').update(sourceBytes).digest('hex');
   const edited = new File([EDITED], 'visitor-notes.txt', {type: 'text/plain'});

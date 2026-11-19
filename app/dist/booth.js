@@ -105,6 +105,12 @@
     if(CONTROL.test(value)||value.length>max) return null;
     return value;
   }
+  /* Extracted PDF lines keep tab and newline. Other controls still cannot be declared. */
+  function paperText(value){
+    if(typeof value!=='string') return null;
+    if(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)||value.length>2000) return null;
+    return value;
+  }
   function paperIdOf(paper){
     return cleanText(typeof paper.id==='string'?paper.id.trim():'',64);
   }
@@ -140,8 +146,8 @@
     return Number.isSafeInteger(pageIndex)&&pageIndex>=0&&pageIndex<=9999;
   }
   function declaredTexts(row, limits){
-    const before=cleanText(row.before,2000);
-    const after=cleanText(row.after,2000);
+    const before=paperText(row.before);
+    const after=paperText(row.after);
     const reason=cleanText(typeof row.reason==='string'?row.reason.trim():'',limits.maxReason);
     if(before===null||after===null||reason===null||!before||!reason) return null;
     return {before,after,reason};
@@ -339,6 +345,22 @@
     if(content&&typeof content.insertBefore==='function') content.insertBefore(host,content.firstChild||null);
     else if(doc.body&&typeof doc.body.append==='function') doc.body.append(host);
   }
+  /* Event visitors cannot run BLUE. index.html has no booth.enabled, so this stays a no-op there. */
+  function railBlue(doc){
+    if(!doc||typeof doc.querySelector!=='function') return null;
+    return doc.querySelector('.rail [data-view="blue"]');
+  }
+  function blueItem(button){
+    if(!button||typeof button.closest!=='function') return null;
+    return button.closest('li');
+  }
+  function setRailBlue(doc, hidden){
+    const button=railBlue(doc);
+    if(!button) return;
+    button.hidden=!!hidden;
+    const item=blueItem(button);
+    if(item) item.hidden=!!hidden;
+  }
 
   function mount(options){
     const ctx=mountContext(options);
@@ -357,6 +379,10 @@
     let course='quick';
     let paper=null;
     let boothFile=null;
+    let openedPaper=null;
+    let openedFile=null;
+    let openedHash='';
+    let ownOpen=false;
     let generatedFile=null;
     let generatedHash='';
     let sourceSha='';
@@ -451,6 +477,7 @@
             el('button',{id:'booth-withdraw-confirm',type:'button',className:'button primary',hidden:true,textContent:'철회를 확인합니다'}))),
         el('p',{id:'booth-result-error',className:'form-feedback error',role:'alert','aria-live':'polite'})));
     placeBooth(doc, host);
+    setRailBlue(doc, true);
 
     function coded(code, data, status){
       const error=Error(code||'invalid_request');
@@ -797,6 +824,49 @@
       clearGenerated();
       renderRows();
     }
+    /* openPdf's own change handler clears the workspace, then loads this same PDF. */
+    function rememberOpened(file){
+      openedPaper=paper?{source:paper.source,id:paper.id,title:paper.title,license:paper.license}:null;
+      openedFile=file||null;
+      openedHash='';
+    }
+    function detailFile(event){
+      const detail=event&&event.detail;
+      return detail&&detail.file||null;
+    }
+    function detailHash(event){
+      const detail=event&&event.detail;
+      if(!detail) return '';
+      const hash=typeof detail.fileHash==='string'?detail.fileHash:(typeof detail.sha256==='string'?detail.sha256:'');
+      return SHA256.test(hash)?hash:'';
+    }
+    function sameOpenedDocument(event){
+      const file=detailFile(event);
+      if(openedFile&&file===openedFile) return true;
+      if(boothFile&&file===boothFile) return true;
+      const hash=detailHash(event);
+      return !!(openedHash&&hash&&openedHash===hash);
+    }
+    function openedBindFile(event){
+      return openedFile||detailFile(event);
+    }
+    function onBoothDocument(event){
+      if(!sameOpenedDocument(event)){
+        openedFile=null;
+        openedHash='';
+        openedPaper=null;
+        clearPaper();
+        return;
+      }
+      if(!paper&&openedPaper) bindPaper(openedPaper, openedBindFile(event));
+    }
+    function onBoothClear(){
+      if(ownOpen) return;
+      openedFile=null;
+      openedHash='';
+      openedPaper=null;
+      clearPaper();
+    }
     function headerValue(headers, name){
       if(!headers||typeof headers.get!=='function') return '';
       return headers.get(name)||'';
@@ -833,7 +903,11 @@
       const picked=next&&typeof next==='object'?Object.assign({},next):null;
       if(picked&&headerLicense) picked.license=headerLicense;
       bindPaper(picked,file);
-      input.dispatchEvent(new Event('change',{bubbles:true}));
+      rememberOpened(file);
+      ownOpen=true;
+      try{input.dispatchEvent(new Event('change',{bubbles:true}));}
+      finally{ownOpen=false;}
+      void digestHex(bytes).then(hash=>{if(openedFile===file&&SHA256.test(hash)) openedHash=hash;});
       if(typeof input.scrollIntoView==='function') input.scrollIntoView({block:'center'});
       say('booth-search-status','논문을 열었습니다. 작업대에서 고친 뒤 「제출할 수정본 만들기」를 누르세요.');
     }
@@ -1115,7 +1189,7 @@
       try{
         const data=await request('/v1/booth/config',{method:'GET',auth:false});
         if(closed) return;
-        if(!data||data.enabled!==true){host.remove();return;}
+        if(!data||data.enabled!==true){setRailBlue(doc,false);host.remove();return;}
         applyConfig(data);
       }catch{
         if(closed) return;
@@ -1140,17 +1214,14 @@
     on(resultLink,'click',openResult);
     on(byId('booth-receipt-result'),'click',openResult);
     on(doc,'falsify:paper-generated',event=>{void adoptGenerated(event&&event.detail);});
-    on(doc,'falsify:document',event=>{
-      const file=event&&event.detail&&event.detail.file;
-      if(boothFile&&file===boothFile) return;
-      clearPaper();
-    });
-    on(doc,'falsify:document-clear',clearPaper);
+    on(doc,'falsify:document',onBoothDocument);
+    on(doc,'falsify:document-clear',onBoothClear);
     on(root,'hashchange',()=>{showResult(false);});
     showResult(false);
     void loadConfig();
     return {destroy(){
       closed=true;
+      setRailBlue(doc,false);
       for(const [target,type,handler] of listeners){
         if(target&&typeof target.removeEventListener==='function') target.removeEventListener(type,handler);
       }
