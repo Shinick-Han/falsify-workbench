@@ -1,8 +1,11 @@
-/* Event-page booth panel. Renders only when FalsifyCloudConfig.booth.enabled and
-   GET /v1/booth/config reports enabled. Declared reasons leave the browser only in
-   the meta part of POST /v1/booth/submissions. The pdf part is the workspace file.
-   Claim keys are stored on this device, capped at 10; the result view lists the newest 5.
-   After submit the claim view is polled until the operator publishes the AI result. */
+/* Event-page booth flow. Renders only when FalsifyCloudConfig.booth.enabled and
+   GET /v1/booth/config reports enabled. Four steps, mirrored on
+   document.documentElement.dataset.boothStep: pick (missions, search, my records),
+   edit (the paper workspace), send (declare, consent, submit) and ticket (waiting,
+   result or lookup). Declared reasons leave the browser only in the meta part of
+   POST /v1/booth/submissions. The pdf part is the workspace file. Claim keys, the paper
+   title and the changed pages are stored on this device, capped at 10; the ticket lists
+   the newest 5. After submit the claim view is polled until the operator publishes. */
 (function(root){
   'use strict';
   const RECEIPT_KEY='falsify.booth.receipts.v1';
@@ -22,10 +25,36 @@
   const POLL_STOP_AT=900000;
   const POLL_429_MS=60000;
   const PENDING_COPY='AI가 결함을 찾는 중이에요. 보통 1~3분 걸려요. 이 화면을 닫아도 접수번호와 확인키로 나중에 볼 수 있어요.';
-  const RESULT_TITLE={
-    caught:'AI가 찾아냈어요',partial:'AI가 거의 찾았어요',missed:'AI가 못 찾았어요!',
-    invalid:'결함으로 인정되지 않았어요',judged:'결과가 나왔어요'
+  /* Headline as [plain lead, 600-weight phrase]. partial counts as found. */
+  const HEADLINE={
+    caught:['AI가 ','찾아냈어요'],partial:['AI가 ','거의 찾았어요'],missed:['AI가 ','못 찾았어요'],
+    invalid:['결함으로 ','인정되지 않았어요'],judged:['','결과가 나왔어요'],withdrawn:['제출을 ','철회했어요']
   };
+  const STAMP={
+    missed:{kind:'pass',word:'통과',latin:'PASSED'},
+    caught:{kind:'fail',word:'적발',latin:'DETECTED'},
+    partial:{kind:'fail',word:'적발',latin:'DETECTED'},
+    invalid:{kind:'void',word:'무효',latin:'VOID'},
+    withdrawn:{kind:'void',word:'철회',latin:'WITHDRAWN'}
+  };
+  /* Three-line consent summary per version. The full text stays CONSENT_COPY[version]. */
+  const CONSENT_SUMMARY=Object.freeze({
+    '2026-11-22.v1':Object.freeze(['수정본 PDF만 마감 후 AI(Anthropic 또는 OpenAI)에 보내요.','이름·연락처는 받지 않아요.','확인키로 언제든 철회할 수 있어요.']),
+    '2026-11-22.v2':Object.freeze(['수정본 PDF만 AI(Anthropic)에 보내요.','이름·연락처는 받지 않아요.','확인키로 언제든 철회할 수 있어요.'])
+  });
+  const HERO_COPY='공개 논문 한 곳을 몰래 고쳐 보세요. AI가 2분 안에 찾아내는지 겨룹니다. AI가 놓치면 부스에서 선물을 드려요.';
+  const CAPTURE_COPY='이 티켓을 캡처해 두세요. 화면을 닫아도 「내 기록」에서 접수번호와 확인키로 다시 볼 수 있어요.';
+  const LOCK_COPY='이 설명은 AI에게 보내지 않아요. 판정이 맞는지 운영진만 확인해요.';
+  const GENERIC_HINT='숫자, 결론 문장, 표 값 중 한 곳을 골라 티 나지 않게 바꿔 보세요.';
+  const CAUGHT_TIP='숫자 하나만 바꾸면 AI가 앞뒤 문장과 대조해서 찾아내요. 결론 문장이나 실험 설계를 노려 보세요.';
+  const MAKE_FAILED='수정본을 만들지 못했어요. 고친 곳을 확인한 뒤 「다음」을 다시 눌러 주세요.';
+  const MAKE_WAIT_MS=90000;
+  const MAKE_RETRY_MS=500;
+  const DIFF_CONTEXT=24;
+  const TOKEN_GROW=40;
+  const NOTE_PAGE=/\(AI가 짚은 곳:\s*(\d{1,5}|\?)쪽\)/;
+  const NOTE_QUOTE=/^AI가 짚은 문장:\s*"(.*)"$/;
+  const NOTE_OPINION=/^AI 설명:\s*(.*)$/;
   const CROCKFORD='0123456789ABCDEFGHJKMNPQRSTVWXYZ';
   const CONTROL=/[\u0000-\u001f\u007f]/;
   const SHA256=/^[0-9a-f]{64}$/;
@@ -35,8 +64,6 @@
     {id:'number',label:'수치·통계'},{id:'figure',label:'그림·표'},{id:'citation',label:'인용·출처'},
     {id:'logic',label:'논리·결론'},{id:'method',label:'방법·실험 설계'},{id:'other',label:'기타'}
   ];
-  const COURSES=[{id:'quick',label:'빠른 코스'},{id:'deep',label:'정밀 코스'}];
-  const STATUS_LABEL={received:'접수됨',reviewing:'검토 중',judged:'판정됨',invalid:'무효',withdrawn:'철회됨'};
   const ERROR_TEXT={
     booth_closed:'지금은 접수를 받지 않습니다. 운영 안내를 확인해 주세요.',
     consent_outdated:'동의 문구가 갱신되었습니다. 페이지를 새로 고친 뒤 다시 동의해 주세요.',
@@ -270,19 +297,49 @@
       &&normalizeClaimKey(item.claimKey)===item.claimKey
       &&typeof item.createdAt==='string'&&item.createdAt.length<=40;
   }
+  /* 1-based changed pages, unique and sorted, at most 20. */
+  function receiptPages(value){
+    if(!Array.isArray(value)) return [];
+    const pages=value.filter(n=>Number.isSafeInteger(n)&&n>=1&&n<=10000);
+    return [...new Set(pages)].sort((a,b)=>a-b).slice(0,20);
+  }
+  /* Required receipt, claimKey and createdAt. Paper title, pages, count and last outcome are optional. */
+  function receiptRecord(item){
+    const out={receipt:item.receipt,claimKey:item.claimKey,createdAt:item.createdAt};
+    const title=cleanText(typeof item.title==='string'?item.title.trim():'',300);
+    if(title) out.title=title;
+    const pages=receiptPages(item.pages);
+    if(pages.length) out.pages=pages;
+    if(Number.isSafeInteger(item.count)&&item.count>=1&&item.count<=100) out.count=item.count;
+    if(typeof item.outcome==='string'&&Object.prototype.hasOwnProperty.call(STAMP,item.outcome)) out.outcome=item.outcome;
+    return out;
+  }
   function readReceipts(storage){
     if(!storage||typeof storage.getItem!=='function') return [];
     let data=null;
     try{data=JSON.parse(storage.getItem(RECEIPT_KEY)||'');}catch{return [];}
     if(!Array.isArray(data)) return [];
-    return data.filter(isReceiptRecord).slice(0,RECEIPT_CAP);
+    return data.filter(isReceiptRecord).slice(0,RECEIPT_CAP).map(receiptRecord);
+  }
+  function writeReceipts(storage, list){
+    try{storage.setItem(RECEIPT_KEY,JSON.stringify(list));return true;}catch{return false;}
+  }
+  /* Remembers the last published outcome of a stored receipt without moving it. */
+  function noteReceiptOutcome(storage, receipt, outcome){
+    if(!storage||typeof storage.setItem!=='function') return false;
+    if(!Object.prototype.hasOwnProperty.call(STAMP,outcome)) return false;
+    const list=readReceipts(storage);
+    const hit=list.find(item=>item.receipt===receipt);
+    if(!hit||hit.outcome===outcome) return false;
+    hit.outcome=outcome;
+    return writeReceipts(storage,list);
   }
   function rememberReceipt(storage, record){
-    const next=isReceiptRecord(record)?record:null;
+    const next=isReceiptRecord(record)?receiptRecord(record):null;
     if(!next||!storage||typeof storage.setItem!=='function') return readReceipts(storage);
     const kept=readReceipts(storage).filter(item=>item.receipt!==next.receipt);
     const capped=[next,...kept].slice(0,RECEIPT_CAP);
-    try{storage.setItem(RECEIPT_KEY,JSON.stringify(capped));}catch{return readReceipts(storage);}
+    if(!writeReceipts(storage,capped)) return readReceipts(storage);
     return capped;
   }
   function recentReceipts(storage){
@@ -291,6 +348,11 @@
   function consentCopyFor(version){
     if(typeof version!=='string'||!Object.prototype.hasOwnProperty.call(CONSENT_COPY,version)) return '';
     return CONSENT_COPY[version];
+  }
+  /* No summary for a version without full text, so it cannot be agreed to. */
+  function consentSummaryFor(version){
+    if(!consentCopyFor(version)||!Object.prototype.hasOwnProperty.call(CONSENT_SUMMARY,version)) return [];
+    return CONSENT_SUMMARY[version].slice();
   }
   /* 15 s for the first 3 min, then 30 s up to 15 min. A Retry-After wait only lengthens a step. -1 stops. */
   function nextPollDelay(elapsedMs, retryMs){
@@ -312,17 +374,123 @@
     return typeof value==='string'?value.slice(0,1000):'';
   }
   function publishedState(data){
-    if(Object.prototype.hasOwnProperty.call(RESULT_TITLE,data.outcome)) return data.outcome;
+    if(['caught','partial','missed','invalid'].includes(data.outcome)) return data.outcome;
     return data.status==='invalid'?'invalid':'judged';
   }
-  /* Visitor card for a claim view. Unpublished rows stay pending, so polling goes on. */
+  function stampFor(state){
+    return Object.prototype.hasOwnProperty.call(STAMP,state)?STAMP[state]:null;
+  }
+  function headlineView(state){
+    const parts=HEADLINE[state];
+    return {title:parts[0]+parts[1],lead:parts[0],strong:parts[1],stamp:stampFor(state)};
+  }
+  /* Visitor ticket for a claim view. Unpublished rows stay pending, so polling goes on.
+     Any published prizeMessage becomes the gift ticket. */
   function resultView(input){
     const data=input&&typeof input==='object'?input:{};
-    if(data.status==='withdrawn') return {state:'withdrawn',title:STATUS_LABEL.withdrawn,note:'',prize:'',final:true};
-    if(data.published!==true) return {state:'pending',title:PENDING_COPY,note:'',prize:'',final:false};
+    if(data.status==='withdrawn') return Object.assign({state:'withdrawn',note:'',prize:'',final:true},headlineView('withdrawn'));
+    if(data.published!==true) return {state:'pending',title:PENDING_COPY,lead:'',strong:'',stamp:null,note:'',prize:'',final:false};
     const state=publishedState(data);
-    const prize=state==='missed'&&typeof data.prizeMessage==='string'?data.prizeMessage.slice(0,500):'';
-    return {state,title:RESULT_TITLE[state],note:plainNote(data.publicNote),prize,final:true};
+    const prize=typeof data.prizeMessage==='string'?data.prizeMessage.trim().slice(0,500):'';
+    return Object.assign({state,note:plainNote(data.publicNote),prize,final:true},headlineView(state));
+  }
+  function noteLine(raw, out, rest){
+    const line=raw.trim();
+    const quote=NOTE_QUOTE.exec(line);
+    if(quote){if(!out.quote) out.quote=quote[1].trim();return;}
+    const opinion=NOTE_OPINION.exec(line);
+    if(opinion){if(!out.opinion) out.opinion=opinion[1].trim();return;}
+    const page=NOTE_PAGE.exec(line);
+    if(page){
+      if(!out.page&&page[1]!=='?') out.page=page[1];
+      const left=(line.slice(0,page.index)+' '+line.slice(page.index+page[0].length)).replace(/\s+/g,' ').trim();
+      if(left) rest.push(left);
+      return;
+    }
+    if(line) rest.push(line);
+  }
+  /* Known CLI lines of tools/booth publicNote templates: "(AI가 짚은 곳: N쪽)",
+     'AI가 짚은 문장: "…"' and "AI 설명: …". Everything else stays plain text. */
+  function parsePublicNote(value){
+    const out={page:'',quote:'',opinion:'',text:''};
+    const rest=[];
+    for(const line of plainNote(value).split('\n')) noteLine(line,out,rest);
+    out.text=rest.join('\n');
+    return out;
+  }
+  function commonPrefix(a, b){
+    const max=Math.min(a.length,b.length);
+    let n=0;
+    while(n<max&&a[n]===b[n]) n+=1;
+    return n;
+  }
+  function commonSuffix(a, b, prefix){
+    const max=Math.min(a.length,b.length)-prefix;
+    let n=0;
+    while(n<max&&a[a.length-1-n]===b[b.length-1-n]) n+=1;
+    return n;
+  }
+  function wordChar(ch){
+    return typeof ch==='string'&&ch!==''&&!/\s/.test(ch);
+  }
+  /* Grows the changed region to whole words, so 0.95 → 0.50 reads as one token. */
+  function widenPrefix(a, b, prefix){
+    let n=prefix;
+    let left=TOKEN_GROW;
+    while(n>0&&left>0&&wordChar(a[n-1])&&(wordChar(a[n])||wordChar(b[n]))){n-=1;left-=1;}
+    return n;
+  }
+  function widenSuffix(a, b, suffix){
+    let n=suffix;
+    let left=TOKEN_GROW;
+    while(n>0&&left>0&&wordChar(a[a.length-n])&&(wordChar(a[a.length-n-1])||wordChar(b[b.length-n-1]))){n-=1;left-=1;}
+    return n;
+  }
+  /* Only the changed region with a little context on each side. */
+  function diffParts(before, after, context){
+    const a=typeof before==='string'?before:'';
+    const b=typeof after==='string'?after:'';
+    const around=Number.isSafeInteger(context)&&context>=0?context:DIFF_CONTEXT;
+    const prefix=widenPrefix(a,b,commonPrefix(a,b));
+    const suffix=widenSuffix(a,b,Math.min(commonSuffix(a,b,prefix),a.length-prefix,b.length-prefix));
+    const start=Math.max(0,prefix-around);
+    const end=Math.min(a.length,a.length-suffix+around);
+    return {
+      lead:(start>0?'…':'')+a.slice(start,prefix),
+      removed:a.slice(prefix,a.length-suffix),
+      added:b.slice(prefix,b.length-suffix),
+      tail:a.slice(a.length-suffix,end)+(end<a.length?'…':'')
+    };
+  }
+  /* Chances left on this browser: the per-guest cap minus stored receipts, never below 0. */
+  function chancesLeft(cap, used){
+    const total=Number.isSafeInteger(cap)&&cap>0?cap:5;
+    const count=Number.isSafeInteger(used)&&used>0?used:0;
+    return Math.max(0,total-count);
+  }
+  function formatClock(ms){
+    const total=Math.max(0,Math.floor((Number(ms)||0)/1000));
+    return Math.floor(total/60)+':'+String(total%60).padStart(2,'0');
+  }
+  function formatDuration(ms){
+    const n=Number(ms);
+    if(!Number.isFinite(n)||n<0) return '';
+    const total=Math.round(n/1000);
+    const minutes=Math.floor(total/60);
+    return minutes?minutes+'분 '+(total%60)+'초':total+'초';
+  }
+  function licenseLabel(id){
+    const text=typeof id==='string'?id.trim().toLowerCase():'';
+    const match=/^(cc-by-sa|cc-by|cc0|public-domain)(?:-(\d+\.\d+))?$/.exec(text);
+    if(!match) return '';
+    const name={'cc-by-sa':'CC BY-SA','cc-by':'CC BY','cc0':'CC0','public-domain':'Public domain'}[match[1]];
+    return match[2]?name+' '+match[2]:name;
+  }
+  /* "Ragas: Automated…" reads as "Ragas" on the ticket. */
+  function shortTitle(title){
+    const text=typeof title==='string'?title.trim():'';
+    const head=text.split(/:\s/)[0];
+    return head.length>28?head.slice(0,27).trimEnd()+'…':head;
   }
   function capMessage(cap){
     return '한 사람당 '+cap+'번까지 제출할 수 있어요. 이번 도전은 여기까지예요! 아래 접수 목록에서 결과를 확인해 주세요.';
@@ -387,9 +555,21 @@
       storage:opts.storage||root.localStorage,
       sessionFn:opts.session||(()=>root.FalsifyHostedSession),
       location:opts.location||root.location||{hash:''},
-      later:typeof opts.setTimeout==='function'?opts.setTimeout:(typeof root.setTimeout==='function'?root.setTimeout.bind(root):null),
-      cancel:typeof opts.clearTimeout==='function'?opts.clearTimeout:(typeof root.clearTimeout==='function'?root.clearTimeout.bind(root):null),
-      now:typeof opts.now==='function'?opts.now:()=>Date.now()
+      ...timerServices(opts)
+    };
+  }
+  function rootTimer(opts, name){
+    if(typeof opts[name]==='function') return opts[name];
+    return typeof root[name]==='function'?root[name].bind(root):null;
+  }
+  /* Poll timers and the ticket clock can be injected for tests. */
+  function timerServices(opts){
+    return {
+      later:rootTimer(opts,'setTimeout'),
+      cancel:rootTimer(opts,'clearTimeout'),
+      now:typeof opts.now==='function'?opts.now:()=>Date.now(),
+      every:rootTimer(opts,'setInterval'),
+      stopEvery:rootTimer(opts,'clearInterval')
     };
   }
   function mountContext(options){
@@ -437,25 +617,34 @@
     const later=ctx.later;
     const cancel=ctx.cancel;
     const now=ctx.now;
+    const every=ctx.every;
+    const stopEvery=ctx.stopEvery;
     const listeners=[];
+    const course='quick';
     let poll={token:0,timer:null,startedAt:0,receipt:'',claimKey:''};
     let closed=false;
     let liveConfig=null;
-    let course='quick';
+    let step='pick';
     let paper=null;
+    let hint='';
     let boothFile=null;
     let openedPaper=null;
     let openedFile=null;
     let openedHash='';
     let ownOpen=false;
+    let opening=false;
     let generatedFile=null;
     let generatedHash='';
     let sourceSha='';
-    let adoptedCount=0;
     let adoptedSignature='';
     let rows=[];
     let searchPage=1;
     let searchQuery='';
+    let making=null;
+    let makeSeq=0;
+    let ticket=null;
+    let clock=null;
+    let editObserver=null;
 
     function on(target,type,handler){
       if(!target||typeof target.addEventListener!=='function') return;
@@ -474,84 +663,211 @@
       for(const kid of kids) if(kid!=null&&kid!==false) node.append(kid);
       return node;
     }
+    function svg(tag, attrs, ...kids){
+      if(typeof doc.createElementNS!=='function') return null;
+      const node=doc.createElementNS('http://www.w3.org/2000/svg',tag);
+      for(const [key,value] of Object.entries(attrs||{})) node.setAttribute(key,String(value));
+      for(const kid of kids) if(kid) node.append(kid);
+      return node;
+    }
     function byId(id){return doc.getElementById(id);}
     function setText(id,text){const node=byId(id);if(node) node.textContent=text||'';}
     function setHidden(id,hidden){const node=byId(id);if(node) node.hidden=!!hidden;}
+    function setAttr(id,key,value){const node=byId(id);if(node&&typeof node.setAttribute==='function') node.setAttribute(key,value);}
     function say(id,text){setText(id,text||'');}
+    function kidsOf(node, ...kids){
+      if(!node) return;
+      node.textContent='';
+      for(const kid of kids) if(kid!=null&&kid!==false) node.append(kid);
+    }
 
-    const host=el('section',{id:'booth',className:'booth',hidden:true,'aria-label':'부스 제출'});
-    const resultLink=el('a',{id:'booth-result-link',href:'#booth-result',className:'button secondary',textContent:'결과 확인'});
-    const head=el('div',{className:'booth-head'},
-      el('span',{className:'step-code','aria-hidden':'true',textContent:'B'}),
-      el('div',{},
-        el('h2',{id:'booth-title',textContent:'부스 제출'}),
-        el('p',{id:'booth-announce',className:'booth-announce',hidden:true}),
-        el('p',{id:'booth-status',className:'form-feedback',role:'status','aria-live':'polite'})));
-    head.append(resultLink);
-    host.append(
-      head,
-      el('section',{id:'booth-missions','aria-label':'미션 논문'}),
-      el('form',{id:'booth-search',className:'booth-search',hidden:true},
-        el('label',{for:'booth-search-q'},'논문 검색',
-          el('input',{id:'booth-search-q',type:'search',maxlength:'200',placeholder:'제목 또는 주제',autocomplete:'off'})),
-        el('div',{className:'button-row'},
-          el('button',{id:'booth-search-go',type:'submit',className:'button primary',textContent:'검색'})),
-        el('p',{id:'booth-search-status',className:'form-feedback',role:'status','aria-live':'polite'}),
-        el('div',{id:'booth-search-results'}),
-        el('div',{id:'booth-search-pages',className:'button-row',hidden:true})),
-      el('form',{id:'booth-submit',hidden:true},
-        el('h3',{textContent:'수정본 제출'}),
-        el('p',{className:'muted',textContent:'작업대에서 고친 뒤 수정본을 만들고, 변경마다 결함 유형과 이유를 적습니다. 이유 없이 제출할 수 없습니다.'}),
-        el('div',{className:'button-row'},
-          el('button',{id:'booth-make',type:'button',className:'button primary',textContent:'제출할 수정본 만들기'})),
-        el('div',{id:'booth-rows'}),
-        el('fieldset',{id:'booth-courses'},el('legend',{textContent:'코스'})),
-        el('label',{for:'booth-nickname'},'별명 (선택, 이름·연락처는 적지 마세요)',
-          el('input',{id:'booth-nickname',type:'text',maxlength:'24',autocomplete:'off',spellcheck:'false'})),
-        el('label',{className:'check-row',for:'booth-consent'},
-          el('input',{id:'booth-consent',type:'checkbox'}),
-          el('span',{id:'booth-consent-copy',textContent:CONSENT_COPY[CONSENT_VERSION]})),
-        el('div',{className:'button-row'},
-          el('button',{id:'booth-submit-button',type:'submit',className:'button primary',textContent:'제출',disabled:true})),
-        el('p',{id:'booth-submit-status',className:'form-feedback',role:'alert','aria-live':'polite'})),
-      el('section',{id:'booth-receipt',className:'booth-receipt',hidden:true,'aria-label':'접수 확인'},
-        el('p',{className:'booth-kicker',textContent:'접수번호'}),
-        el('p',{id:'booth-receipt-code',className:'booth-key'}),
-        el('p',{className:'booth-kicker',textContent:'확인키'}),
-        el('p',{id:'booth-claim-code',className:'booth-key'}),
-        el('div',{className:'button-row'},
-          el('button',{id:'booth-copy',type:'button',className:'button primary',textContent:'접수번호와 확인키 복사'}),
-          el('a',{id:'booth-receipt-result',href:'#booth-result',className:'button secondary',textContent:'결과 확인'})),
-        el('p',{className:'muted',textContent:'확인키는 제출한 이 화면에서만 크게 보입니다. 이 브라우저에 최대 10건을 저장합니다.'}),
-        el('div',{id:'booth-receipt-live'})),
-      el('section',{id:'booth-result',hidden:true,'aria-label':'제출 결과'},
-        el('h2',{textContent:'제출 결과'}),
-        el('form',{id:'booth-claim-form'},
-          el('label',{for:'booth-claim-receipt'},'접수번호',
-            el('input',{id:'booth-claim-receipt',type:'text',autocomplete:'off',spellcheck:'false',placeholder:'F-0042'})),
-          el('label',{for:'booth-claim-key'},'확인키',
-            el('input',{id:'booth-claim-key',type:'text',autocomplete:'off',spellcheck:'false',placeholder:'7Q3K-M9XD'})),
-          el('div',{className:'button-row'},
-            el('button',{type:'submit',className:'button primary',textContent:'결과 보기'}))),
-        el('div',{id:'booth-result-body',hidden:true},
-          el('p',{id:'booth-result-status',className:'booth-status-line'}),
-          el('div',{id:'booth-result-live'}),
-          el('div',{className:'button-row'},
-            el('button',{id:'booth-withdraw',type:'button',className:'button secondary',textContent:'제출 철회'}),
-            el('button',{id:'booth-withdraw-confirm',type:'button',className:'button primary',hidden:true,textContent:'철회를 확인합니다'}))),
-        el('p',{id:'booth-result-error',className:'form-feedback error',role:'alert','aria-live':'polite'}),
+    /* Stamp ink texture. Hidden zero-size SVG, referenced from booth.css as url(#booth-ink). */
+    function inkFilter(){
+      return svg('svg',{width:'0',height:'0',class:'booth-defs','aria-hidden':'true',focusable:'false'},
+        svg('filter',{id:'booth-ink'},
+          svg('feTurbulence',{type:'fractalNoise',baseFrequency:'1.1',numOctaves:'2',seed:'7',result:'n'}),
+          svg('feColorMatrix',{in:'n',type:'matrix',values:'0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 -1.4 1.3',result:'m'}),
+          svg('feComposite',{in:'SourceGraphic',in2:'m',operator:'in'})));
+    }
+    function lockIcon(){
+      return svg('svg',{width:'11',height:'13',viewBox:'0 0 12 14','aria-hidden':'true',focusable:'false',class:'booth-lock-icon'},
+        svg('rect',{x:'1',y:'6',width:'10',height:'7.5',rx:'1.5',fill:'currentColor'}),
+        svg('path',{d:'M3.5 6V4.2a2.5 2.5 0 0 1 5 0V6',fill:'none',stroke:'currentColor','stroke-width':'1.6'}));
+    }
+    function mark(){
+      return el('span',{className:'booth-mk','aria-hidden':'true',textContent:'F'});
+    }
+    function stepBar(backId, backText, label, done){
+      const prog=el('div',{className:'booth-prog','aria-hidden':'true'});
+      for(let i=1;i<=3;i+=1) prog.append(el('i',{className:i<=done?'on':''}));
+      return el('div',{className:'booth-stepbar'},
+        el('div',{className:'booth-stepbar-row'},
+          el('button',{id:backId,type:'button',className:'booth-back',textContent:backText}),
+          el('b',{textContent:label})),
+        prog);
+    }
+    function stripItem(n, text){
+      return el('li',{},el('span',{textContent:n}),text);
+    }
+    function field(id, label, props){
+      return el('label',{for:id,className:'booth-field'},el('span',{className:'booth-klab',textContent:label}),
+        el('input',Object.assign({id,type:'text',autocomplete:'off',spellcheck:'false'},props||{})));
+    }
+    function buildRecords(){
+      return el('section',{id:'booth-result',className:'booth-records',hidden:true,'aria-label':'내 기록'},
+        el('button',{id:'booth-records-back',type:'button',className:'booth-back',textContent:'← 처음으로'}),
+        el('h2',{className:'booth-headline small'},'내 ',el('b',{textContent:'기록'})),
+        el('p',{className:'booth-small',textContent:'접수번호와 확인키를 넣으면 도전 티켓을 다시 볼 수 있어요.'}),
+        el('form',{id:'booth-claim-form',className:'booth-panel'},
+          field('booth-claim-receipt','접수번호',{placeholder:'F-0042'}),
+          field('booth-claim-key','확인키',{placeholder:'7Q3K-M9XD'}),
+          el('button',{type:'submit',className:'booth-btn ink',textContent:'결과 보기'})),
+        el('p',{id:'booth-result-error',className:'booth-feedback',role:'alert','aria-live':'polite'}),
         el('section',{id:'booth-receipts',className:'booth-receipts',hidden:true,'aria-label':'이 브라우저의 접수'},
-          el('h3',{textContent:'이 브라우저의 접수'}),
-          el('div',{id:'booth-receipts-list'}))));
-    const liveCard=el('article',{id:'booth-live',className:'booth-live',hidden:true,role:'status','aria-live':'polite','data-state':'pending'},
-      el('p',{id:'booth-live-title',className:'booth-live-title'}),
-      el('p',{id:'booth-live-prize',className:'booth-live-prize',hidden:true}),
-      el('p',{id:'booth-live-note',className:'booth-live-note',hidden:true}),
-      el('p',{id:'booth-live-error',className:'form-feedback',hidden:true}),
-      el('div',{className:'button-row'},
-        el('button',{id:'booth-live-recheck',type:'button',className:'button secondary',hidden:true,textContent:'결과 다시 보기'}),
-        el('button',{id:'booth-live-again',type:'button',className:'button primary',hidden:true,textContent:'다시 도전하기'})));
-    host.append(liveCard);
+          el('p',{className:'booth-klab',textContent:'이 브라우저의 접수'}),
+          el('div',{id:'booth-receipts-list',className:'booth-hist'})));
+    }
+    function buildSearch(){
+      return el('details',{id:'booth-search-box',className:'booth-more'},
+        el('summary',{textContent:'다른 공개 논문 직접 찾기'}),
+        el('form',{id:'booth-search',className:'booth-search',hidden:true},
+          el('label',{for:'booth-search-q',className:'booth-field'},el('span',{className:'booth-klab',textContent:'논문 검색 · CC BY, CC BY-SA, CC0만'}),
+            el('input',{id:'booth-search-q',type:'search',maxlength:'200',placeholder:'제목 또는 주제',autocomplete:'off'})),
+          el('button',{id:'booth-search-go',type:'submit',className:'booth-btn line',textContent:'검색'}),
+          el('p',{id:'booth-search-status',className:'booth-feedback',role:'status','aria-live':'polite'}),
+          el('div',{id:'booth-search-results',className:'booth-search-results'}),
+          el('div',{id:'booth-search-pages',className:'booth-row',hidden:true})));
+    }
+    function buildPick(){
+      const top=el('header',{className:'booth-top'},mark(),
+        el('span',{className:'booth-nm',textContent:'Falsify'}),
+        el('a',{id:'booth-result-link',href:'#booth-result',className:'booth-toplink',textContent:'내 기록'}));
+      const landing=el('div',{id:'booth-landing',className:'booth-landing'},
+        el('div',{className:'booth-hero'},
+          el('p',{className:'booth-lab',textContent:'AI REVIEW CHALLENGE'}),
+          el('h2',{id:'booth-title',className:'booth-headline hero'},'AI를 ',el('b',{textContent:'속일 수'}),el('br'),'있을까요?'),
+          el('p',{className:'booth-copy',textContent:HERO_COPY})),
+        el('ol',{className:'booth-strip','aria-label':'도전 순서'},stripItem('1','논문 고르기'),stripItem('2','몰래 고치기'),stripItem('3','AI 검증')),
+        el('p',{id:'booth-announce',className:'booth-announce',hidden:true}),
+        el('p',{id:'booth-status',className:'booth-feedback',role:'status','aria-live':'polite'}),
+        el('section',{id:'booth-missions',className:'booth-missions','aria-label':'미션 논문'}),
+        el('p',{id:'booth-mission-status',className:'booth-feedback',role:'status','aria-live':'polite'}),
+        buildSearch());
+      return el('div',{id:'booth-step-pick',className:'booth-step'},top,landing,buildRecords());
+    }
+    function buildEdit(){
+      return el('div',{id:'booth-step-edit',className:'booth-step',hidden:true},
+        stepBar('booth-edit-back','← 논문 고르기','2 / 3 몰래 고치기',2),
+        el('p',{id:'booth-hint',className:'booth-hint'}),
+        el('div',{id:'booth-dock',className:'booth-dock'},
+          el('p',{id:'booth-dock-status',className:'booth-dock-status',role:'status','aria-live':'polite'}),
+          el('div',{className:'booth-dock-count'},
+            el('span',{id:'booth-dock-count',textContent:'고친 곳 0개'}),
+            el('small',{textContent:'여러 곳을 고쳐도 돼요'})),
+          el('button',{id:'booth-next',type:'button',className:'booth-btn ink',textContent:'다음',disabled:true})));
+    }
+    function buildConsent(){
+      return el('div',{id:'booth-consent-panel',className:'booth-panel booth-consent'},
+        el('ul',{id:'booth-consent-summary',className:'booth-consent-summary'}),
+        el('details',{id:'booth-consent-full',className:'booth-consent-full'},
+          el('summary',{textContent:'동의 내용 전체 보기'}),
+          el('p',{id:'booth-consent-copy',className:'booth-consent-copy',textContent:CONSENT_COPY[CONSENT_VERSION]}),
+          el('p',{id:'booth-consent-version',className:'booth-mono-meta'})),
+        el('label',{className:'booth-check',for:'booth-consent'},
+          el('input',{id:'booth-consent',type:'checkbox'}),
+          el('span',{textContent:'동의 내용을 읽었고 동의해요'})));
+    }
+    function buildSend(){
+      return el('form',{id:'booth-submit',className:'booth-step',hidden:true,novalidate:'novalidate'},
+        stepBar('booth-send-back','← 고치기','3 / 3 AI에게 제출',3),
+        el('div',{id:'booth-rows',className:'booth-rows'}),
+        el('details',{className:'booth-more booth-nick'},
+          el('summary',{textContent:'별명 남기기 (선택)'}),
+          el('label',{for:'booth-nickname',className:'booth-field'},el('span',{className:'booth-klab',textContent:'별명 · 이름이나 연락처는 적지 마세요'}),
+            el('input',{id:'booth-nickname',type:'text',maxlength:'24',autocomplete:'off',spellcheck:'false'}))),
+        buildConsent(),
+        el('button',{id:'booth-submit-button',type:'submit',className:'booth-btn ink wide',textContent:'AI에게 제출하기',disabled:true}),
+        el('p',{id:'booth-submit-status',className:'booth-feedback',role:'alert','aria-live':'polite'}));
+    }
+    function cell(label, id, className){
+      return el('div',{id:id+'-cell',className:'booth-cell'},
+        el('dt',{className:'booth-klab',textContent:label}),
+        el('dd',{id,className}));
+    }
+    function buildReviewTicket(){
+      return el('article',{id:'booth-ticket',className:'booth-tk booth-tk-v','data-state':'pending','aria-label':'AI 검증 티켓'},
+        el('div',{className:'booth-sec'},
+          el('p',{className:'booth-lab',textContent:'FALSIFY · AI REVIEW TICKET'}),
+          el('dl',{className:'booth-grid2'},
+            cell('접수번호','booth-receipt-code','booth-code'),
+            cell('확인키','booth-claim-code','booth-code'),
+            cell('논문','booth-ticket-paper','booth-val'),
+            cell('고친 곳','booth-ticket-pages','booth-val'),
+            cell('검증 시간','booth-ticket-duration','booth-val')),
+          el('button',{id:'booth-copy',type:'button',className:'booth-btn line slim',textContent:'접수번호와 확인키 복사'}),
+          el('p',{id:'booth-copy-status',className:'booth-small',role:'status','aria-live':'polite'})),
+        el('div',{className:'booth-cut','aria-hidden':'true'}),
+        el('div',{id:'booth-ticket-wait',className:'booth-sec'},
+          el('div',{className:'booth-status-row'},
+            el('b',{id:'booth-ticket-state',textContent:'AI가 논문을 읽는 중'}),
+            el('span',{id:'booth-ticket-elapsed',className:'booth-elapsed',textContent:'0:00'})),
+          el('div',{className:'booth-track','aria-hidden':'true'},el('i')),
+          el('canvas',{id:'booth-barcode',className:'booth-barcode','aria-hidden':'true',height:'34'})),
+        el('div',{id:'booth-ticket-result',className:'booth-sec booth-res',hidden:true},
+          el('div',{},
+            el('p',{className:'booth-klab',textContent:'AI 검증 결과'}),
+            el('p',{id:'booth-ticket-date',className:'booth-small'})),
+          el('div',{id:'booth-stamp',className:'booth-stamp','aria-hidden':'true'},
+            el('b',{id:'booth-stamp-word'}),
+            el('span',{id:'booth-stamp-latin'}))));
+    }
+    function buildProgress(){
+      return el('ol',{id:'booth-ticket-steps',className:'booth-list'},
+        el('li',{className:'done'},el('i'),'수정본 받음'),
+        el('li',{className:'now'},el('i'),'AI가 앞뒤 문장과 표를 대조하는 중'),
+        el('li',{className:'wait'},el('i'),'결과'));
+    }
+    function buildGift(){
+      return el('article',{id:'booth-gift',className:'booth-tk booth-tk-v booth-gift',hidden:true,'aria-label':'교환권'},
+        el('div',{className:'booth-sec booth-gift-sec'},
+          el('div',{},
+            el('p',{className:'booth-klab',textContent:'교환권 · 1인 1회'}),
+            el('p',{id:'booth-live-prize',className:'booth-gift-text'}),
+            el('p',{className:'booth-small',textContent:'부스에서 이 화면을 보여 주세요.'})),
+          el('span',{className:'booth-code booth-gift-code','aria-hidden':'true',textContent:'GIFT'})));
+    }
+    function buildWithdraw(){
+      return el('details',{id:'booth-withdraw-box',className:'booth-more booth-quiet'},
+        el('summary',{textContent:'제출 철회'}),
+        el('div',{className:'booth-withdraw-body'},
+          el('p',{className:'booth-small',textContent:'철회하면 서버의 수정본 PDF·설명·결과를 바로 지워요. 이미 AI 검증에 보낸 사본은 모델 제공자에게서 회수할 수 없어요.'}),
+          el('button',{id:'booth-withdraw',type:'button',className:'booth-btn line',textContent:'이 제출 철회하기'}),
+          el('button',{id:'booth-withdraw-confirm',type:'button',className:'booth-btn ink',hidden:true,textContent:'철회를 확인합니다'})));
+    }
+    function buildTicket(){
+      return el('section',{id:'booth-receipt',className:'booth-step booth-ticket-step',hidden:true,'aria-label':'도전 티켓'},
+        el('header',{className:'booth-top'},mark(),
+          el('span',{className:'booth-nm',textContent:'도전 티켓'}),
+          el('span',{id:'booth-chances-top',className:'booth-toplabel'})),
+        buildReviewTicket(),
+        el('div',{id:'booth-live',className:'booth-live','data-state':'pending'},
+          buildProgress(),
+          el('p',{id:'booth-live-capture',className:'booth-small',textContent:CAPTURE_COPY}),
+          el('div',{id:'booth-verdict',className:'booth-verdict',hidden:true},
+            el('h2',{id:'booth-live-title',className:'booth-headline',role:'status','aria-live':'polite'}),
+            el('p',{id:'booth-live-page',className:'booth-mono-meta',hidden:true})),
+          buildGift(),
+          el('div',{id:'booth-live-note',className:'booth-panel booth-note',hidden:true}),
+          el('p',{id:'booth-live-tip',className:'booth-small',hidden:true,textContent:CAUGHT_TIP}),
+          el('p',{id:'booth-live-error',className:'booth-feedback',role:'alert',hidden:true}),
+          el('button',{id:'booth-live-recheck',type:'button',className:'booth-btn line wide',hidden:true,textContent:'결과 다시 보기'}),
+          el('button',{id:'booth-live-again',type:'button',className:'booth-btn ink wide',hidden:true,textContent:'다시 도전하기'}),
+          el('div',{id:'booth-history',className:'booth-hist',hidden:true,'aria-label':'이 브라우저의 도전 기록'}),
+          buildWithdraw()));
+    }
+
+    const host=el('section',{id:'booth',className:'booth',hidden:true,'aria-label':'부스 도전'});
+    host.append(...[inkFilter(),buildPick(),buildEdit(),buildSend(),buildTicket()].filter(Boolean));
     placeBooth(doc, host);
     setRailBlue(doc, true);
 
@@ -637,19 +953,31 @@
       if(spec.pdf) return pdfResult(res);
       return jsonResult(res);
     }
+    function leaveResultHash(){
+      try{if(location.hash==='#booth-result') location.hash='#booth';}catch{}
+    }
+    function showRecords(visible){
+      setHidden('booth-result',!visible);
+      setHidden('booth-landing',!!visible);
+      if(!visible) return;
+      prefillClaim();
+      renderReceipts();
+    }
+    /* #booth-result is "내 기록" inside the pick step. */
     function showResult(force){
-      const on=force===true||location.hash==='#booth-result';
-      setHidden('booth-result',!on);
-      if(!on) return;
-      const node=byId('booth-result');
-      if(node&&typeof node.scrollIntoView==='function') node.scrollIntoView({block:'start'});
+      const visible=force===true||location.hash==='#booth-result';
+      if(visible&&step!=='pick') setStep('pick');
+      if(step==='pick') showRecords(visible);
     }
     function openResult(event){
       if(event&&typeof event.preventDefault==='function') event.preventDefault();
       try{location.hash='#booth-result';}catch{}
-      prefillClaim();
-      renderReceipts();
       showResult(true);
+    }
+    function closeRecords(){
+      leaveResultHash();
+      showRecords(false);
+      say('booth-result-error','');
     }
     function prefillClaim(){
       const latest=readReceipts(storage)[0];
@@ -664,24 +992,6 @@
       const clean=list.filter(item=>item&&typeof item.id==='string'&&typeof item.label==='string');
       return clean.length?clean:DEFECT_TYPES;
     }
-    function coursesOf(data){
-      const list=data&&Array.isArray(data.courses)?data.courses:[];
-      const clean=list.filter(item=>item&&(item.id==='quick'||item.id==='deep')&&typeof item.label==='string');
-      return clean.length?clean:COURSES;
-    }
-    function renderCourses(){
-      const box=byId('booth-courses');
-      if(!box) return;
-      box.textContent='';
-      box.append(el('legend',{textContent:'코스'}));
-      const courses=coursesOf(liveConfig);
-      if(!courses.some(item=>item.id===course)) course=courses[0].id;
-      for(const item of courses){
-        const input=el('input',{type:'radio',name:'booth-course',value:item.id,checked:item.id===course});
-        input.addEventListener('change',()=>{if(input.checked) course=item.id;});
-        box.append(el('label',{className:'booth-choice'},input,el('span',{textContent:item.label})));
-      }
-    }
     function submissionsOpen(){
       return !liveConfig||liveConfig.submissionsOpen!==false;
     }
@@ -692,32 +1002,57 @@
       const ready=submissionsOpen()&&!!consentCopyFor(liveConsentVersion())&&consent&&consent.checked&&rows.length>0&&!!generatedFile&&SHA256.test(generatedHash);
       button.disabled=!ready;
     }
+    function flat(text){
+      return String(text).replace(/\s+/g,' ');
+    }
+    /* Mono diff of the changed region only: removed struck through, added on --ev-mark. */
+    function diffNode(row){
+      const parts=diffParts(row.before,row.after);
+      return el('p',{className:'booth-diff'},
+        parts.lead?el('span',{className:'ctx',textContent:flat(parts.lead)}):null,
+        parts.removed?el('del',{className:'del',textContent:flat(parts.removed)}):null,
+        el('ins',{className:parts.added?'ins':'ins gone',textContent:parts.added?flat(parts.added):'(지움)'}),
+        parts.tail?el('span',{className:'ctx',textContent:flat(parts.tail)}):null);
+    }
+    function chipRow(row, types){
+      const box=el('div',{className:'booth-chips',role:'group','aria-label':'결함 유형'});
+      const chips=[];
+      function paint(){
+        for(const [id,chip] of chips){
+          const pressed=id===row.defectType;
+          chip.className=pressed?'booth-chip on':'booth-chip';
+          chip.setAttribute('aria-pressed',String(pressed));
+        }
+      }
+      if(!types.some(type=>type.id===row.defectType)) row.defectType='';
+      for(const type of types){
+        const chip=el('button',{type:'button',className:'booth-chip',textContent:type.label,'aria-pressed':'false'});
+        chip.addEventListener('click',()=>{row.defectType=type.id;paint();});
+        chips.push([type.id,chip]);
+        box.append(chip);
+      }
+      paint();
+      return box;
+    }
+    function rowPanel(row, types){
+      const reason=el('textarea',{rows:'3',maxlength:String(limitsOf(liveConfig).maxReason),placeholder:'어디를 어떻게 바꿨고, 왜 결함인지 적어 주세요'});
+      reason.value=row.reason||'';
+      reason.addEventListener('input',()=>{row.reason=reason.value;});
+      row.reasonInput=reason;
+      return el('article',{className:'booth-panel booth-card'},
+        el('p',{className:'booth-klab',textContent:'내가 숨긴 결함 · '+(row.pageIndex+1)+'쪽'}),
+        diffNode(row),
+        el('p',{className:'booth-klab gap',textContent:'어떤 결함인가요'}),
+        chipRow(row,types),
+        el('label',{className:'booth-field'},el('span',{className:'booth-klab',textContent:'왜 결함인가요'}),reason),
+        el('p',{className:'booth-lock'},lockIcon(),el('span',{textContent:LOCK_COPY})));
+    }
     function renderRows(){
       const box=byId('booth-rows');
       if(!box) return;
       box.textContent='';
       const types=typesOf(liveConfig);
-      for(const row of rows){
-        const select=el('select',{'aria-label':'결함 유형'});
-        select.append(el('option',{value:'',textContent:'유형 선택'}));
-        for(const type of types) select.append(el('option',{value:type.id,textContent:type.label}));
-        if(row.defectType) select.value=row.defectType;
-        select.addEventListener('change',()=>{row.defectType=select.value;});
-        row.defectType=select.value||'';
-        const reason=el('textarea',{rows:'3',maxlength:String(limitsOf(liveConfig).maxReason),placeholder:'이 변경이 어떤 결함인지 적어 주세요'});
-        reason.value=row.reason||'';
-        reason.addEventListener('input',()=>{row.reason=reason.value;});
-        const page=el('p',{className:'booth-page',textContent:(row.pageIndex+1)+'쪽'});
-        const diff=el('div',{className:'booth-diff'},
-          el('p',{},el('span',{className:'booth-diff-label',textContent:'변경 전'}),el('code',{textContent:row.before})),
-          el('p',{},el('span',{className:'booth-diff-label',textContent:'변경 후'}),el('code',{textContent:row.after||'(삭제)'})));
-        box.append(el('article',{className:'booth-card'},page,diff,
-          el('label',{},'결함 유형',select),
-          el('label',{},'이유',reason)));
-        row.select=select;
-        row.reasonInput=reason;
-      }
-      setHidden('booth-submit',!paper);
+      for(const row of rows) box.append(rowPanel(row,types));
       refreshSubmitButton();
     }
     function pdfMagic(bytes){
@@ -791,93 +1126,163 @@
     function editSignature(edits){
       return edits.map(edit=>[edit.pageIndex,edit.segmentId,edit.before,edit.after].join('\u0000')).join('\u0001');
     }
-    function showSubmitForm(){
-      const form=byId('booth-submit');
-      if(form&&typeof form.scrollIntoView==='function') form.scrollIntoView({block:'start'});
+    function report(text){
+      say('booth-submit-status',text);
+      if(making) say('booth-dock-status',text);
+    }
+    /* Same edits as last time keep their chips and reasons. */
+    function keepDeclared(edits, previous){
+      return edits.map((edit,index)=>{
+        const old=previous[index];
+        const reason=old.reasonInput?old.reasonInput.value:old.reason;
+        return Object.assign(edit,{defectType:old.defectType||'',reason:reason||''});
+      });
     }
     /* More than the declared cap is a visitor choice, not a silent slice. */
     function adoptRows(edits){
       const limits=limitsOf(liveConfig);
-      adoptedCount=edits.length;
+      const same=rows.length===edits.length&&rows.length>0&&editSignature(edits)===adoptedSignature;
       adoptedSignature=editSignature(edits);
       if(edits.length>limits.maxDeclared){
         rows=[];
-        say('booth-submit-status','켠 편집이 '+edits.length+'건입니다. 제출하려면 켠 편집을 '+limits.maxDeclared+'건 이하로 남겨 주세요.');
+        report('고친 곳이 '+edits.length+'개예요. 제출하려면 '+limits.maxDeclared+'개 이하로 남겨 주세요.');
         renderRows();
-        return;
+        return false;
       }
       if(!edits.length){
         rows=[];
-        say('booth-submit-status','켠 편집이 없습니다. 바꿀 곳을 켠 뒤 다시 만들어 주세요.');
+        report('고친 곳이 없어요. 바꿀 곳을 고친 뒤 다시 눌러 주세요.');
         renderRows();
-        return;
+        return false;
       }
-      rows=edits;
+      rows=same?keepDeclared(edits,rows):edits;
       say('booth-submit-status','');
       renderRows();
-      showSubmitForm();
+      return true;
     }
     function clearGenerated(){
       generatedFile=null;
       generatedHash='';
       sourceSha='';
-      adoptedCount=0;
       adoptedSignature='';
       rows=[];
     }
-    async function adoptGenerated(detail){
+    function rejectGenerated(text){
+      clearGenerated();
+      renderRows();
+      report(text);
+      return false;
+    }
+    async function adoptFile(detail){
       const file=detail&&detail.file;
-      if(!file||typeof file.arrayBuffer!=='function'){
-        say('booth-submit-status',errorMessage('invalid_pdf'));
-        return;
-      }
+      if(!file||typeof file.arrayBuffer!=='function'){report(errorMessage('invalid_pdf'));return false;}
       let bytes=null;
       try{bytes=new Uint8Array(await file.arrayBuffer());}catch{bytes=null;}
-      if(!pdfMagic(bytes)){
-        clearGenerated();
-        renderRows();
-        say('booth-submit-status',errorMessage('invalid_pdf'));
-        return;
-      }
+      if(!pdfMagic(bytes)) return rejectGenerated(errorMessage('invalid_pdf'));
       const hash=await digestHex(bytes);
-      if(!hash){
-        clearGenerated();
-        renderRows();
-        say('booth-submit-status','수정본 PDF의 해시를 계산하지 못했습니다.');
-        return;
-      }
+      if(!hash) return rejectGenerated('수정본 PDF의 해시를 계산하지 못했습니다.');
       sourceSha=await originalSha(detail);
-      if(sourceSha&&sourceSha===hash){
-        clearGenerated();
-        renderRows();
-        say('booth-submit-status',errorMessage('pdf_unchanged'));
-        return;
-      }
+      if(sourceSha&&sourceSha===hash) return rejectGenerated(errorMessage('pdf_unchanged'));
       generatedFile=file;
       generatedHash=hash;
-      adoptRows(editsFor(detail));
+      return adoptRows(editsFor(detail));
     }
-    async function makeSubmissionPdf(){
-      if(!paper){say('booth-submit-status',PICK_PAPER);return;}
+    async function adoptGenerated(detail){
+      const ok=await adoptFile(detail);
+      settleMake(ok);
+      return ok;
+    }
+    function currentOutput(){
       const ws=workspace();
-      let current=null;
       try{
-        if(ws&&typeof ws.getCurrentOutput==='function') current=ws.getCurrentOutput();
-        else if(ws&&typeof ws.getOutput==='function') current=ws.getOutput();
-      }catch{current=null;}
+        if(ws&&typeof ws.getCurrentOutput==='function') return ws.getCurrentOutput();
+        if(ws&&typeof ws.getOutput==='function') return ws.getOutput();
+      }catch{return null;}
+      return null;
+    }
+    /* The old 「제출할 수정본 만들기」 path: adopt the current output, else ask the workspace to generate.
+       'done' adopted (or refused), 'waiting' for falsify:paper-generated, 'busy' generator running, 'error'. */
+    async function makeSubmissionPdf(waiting){
+      if(!paper){report(PICK_PAPER);return 'error';}
+      const current=currentOutput();
       if(current&&current.file){
         await adoptGenerated({
           file:current.file,
           sourceFileHash:typeof current.originalSourceSha256==='string'?current.originalSourceSha256:'',
           revision:current.revision
         });
-        return;
+        return 'done';
       }
       const button=doc.getElementById('paper-generate');
-      if(!button){say('booth-submit-status','논문 작업대를 찾지 못했습니다.');return;}
-      if(button.disabled){say('booth-submit-status','지금은 수정본을 만들 수 없습니다. 작업대에서 편집을 확인한 뒤 다시 눌러 주세요.');return;}
-      say('booth-submit-status','수정본 PDF를 만들고 있습니다.');
+      if(!button){report('논문 작업대를 찾지 못했습니다.');return 'error';}
+      if(waiting) return button.disabled?'waiting':'idle';
+      if(button.disabled) return 'busy';
       button.click();
+      return 'waiting';
+    }
+    function liveEditCount(){
+      return editsFor(null).length;
+    }
+    function renderDock(){
+      const count=liveEditCount();
+      setText('booth-dock-count','고친 곳 '+count+'개');
+      const next=byId('booth-next');
+      if(next) next.disabled=count===0||!!making;
+    }
+    function makeTimer(){
+      return typeof root.setTimeout==='function'?root.setTimeout.bind(root):null;
+    }
+    function cancelMake(){
+      making=null;
+      setAttr('booth-dock','data-busy','false');
+    }
+    function settleMake(ok){
+      if(!making) return;
+      cancelMake();
+      if(ok){
+        say('booth-dock-status','');
+        setStep('send');
+        return;
+      }
+      renderDock();
+    }
+    function failMake(text){
+      report(text);
+      settleMake(false);
+    }
+    /* 「다음」 builds the submission PDF, then opens send. Failure stays in edit with a message. */
+    function beginMake(){
+      if(making||closed) return;
+      if(!liveEditCount()){renderDock();return;}
+      makeSeq+=1;
+      making={token:makeSeq,startedAt:now(),waiting:false,idleSince:0};
+      say('booth-dock-status','수정본을 만드는 중…');
+      setAttr('booth-dock','data-busy','true');
+      renderDock();
+      void makeStep(makeSeq);
+    }
+    function makeLive(token){
+      return !closed&&!!making&&making.token===token;
+    }
+    /* After a click the generator either announces the PDF or stops with its button enabled again. */
+    function makeStalled(outcome){
+      if(outcome!=='idle'){making.idleSince=0;return false;}
+      if(!making.idleSince) making.idleSince=now();
+      return now()-making.idleSince>=3000;
+    }
+    async function makeStep(token){
+      if(!makeLive(token)) return;
+      const outcome=await makeSubmissionPdf(making.waiting);
+      if(!makeLive(token)||outcome==='done') return;
+      if(outcome==='error'){settleMake(false);return;}
+      if(outcome==='waiting') making.waiting=true;
+      const timer=makeTimer();
+      if(!timer){
+        if(outcome==='busy') failMake(MAKE_FAILED);
+        return;
+      }
+      if(makeStalled(outcome)||now()-making.startedAt>=MAKE_WAIT_MS){failMake(MAKE_FAILED);return;}
+      timer(()=>{void makeStep(token);},MAKE_RETRY_MS);
     }
     function licenseId(paperLike){
       if(!paperLike||paperLike.license==null) return '';
@@ -894,14 +1299,17 @@
       }:null;
       boothFile=file||null;
       if(previous!==boothFile) clearGenerated();
-      setHidden('booth-submit',!paper);
       renderRows();
     }
+    /* Losing the paper in edit or send returns to pick. */
     function clearPaper(){
       paper=null;
       boothFile=null;
       clearGenerated();
       renderRows();
+      if(step!=='edit'&&step!=='send') return;
+      cancelMake();
+      setStep('pick');
     }
     /* openPdf's own change handler clears the workspace, then loads this same PDF. */
     function rememberOpened(file){
@@ -963,21 +1371,7 @@
       transfer.items.add(file);
       input.files=transfer.files;
     }
-    async function openPdf(id, next, nameHint){
-      const path=paperPdfPath(id);
-      if(!path){say('booth-search-status',errorMessage('invalid_request'));return;}
-      say('booth-search-status','논문을 불러오는 중…');
-      let payload=null;
-      try{payload=await request(path,{method:'GET',auth:true,pdf:true});}
-      catch(error){say('booth-search-status',errorMessage(error.code,error));return;}
-      const bytes=payload.bytes;
-      if(!pdfMagic(bytes)){say('booth-search-status',errorMessage('invalid_request'));return;}
-      const file=pdfFile(bytes, pdfFileName(headerValue(payload.headers,'Content-Disposition'), nameHint));
-      if(!file){say('booth-search-status','이 브라우저에서 논문 파일을 만들지 못했습니다.');return;}
-      const input=doc.getElementById('paper-file');
-      if(!input){say('booth-search-status','논문 입력을 찾지 못했습니다.');return;}
-      try{assignInputFile(input, file);}
-      catch{say('booth-search-status','논문 파일을 작업대에 넣지 못했습니다.');return;}
+    function loadIntoWorkspace(input, file, payload, next, bytes){
       const headerLicense=headerValue(payload.headers,'X-Falsify-Paper-License');
       const picked=next&&typeof next==='object'?Object.assign({},next):null;
       if(picked&&headerLicense) picked.license=headerLicense;
@@ -987,13 +1381,43 @@
       try{input.dispatchEvent(new Event('change',{bubbles:true}));}
       finally{ownOpen=false;}
       void digestHex(bytes).then(hash=>{if(openedFile===file&&SHA256.test(hash)) openedHash=hash;});
-      if(typeof input.scrollIntoView==='function') input.scrollIntoView({block:'center'});
-      say('booth-search-status','논문을 열었습니다. 작업대에서 고친 뒤 「제출할 수정본 만들기」를 누르세요.');
     }
-    function startPaper(next, id){
-      if(next.course==='quick'||next.course==='deep') course=next.course;
-      renderCourses();
-      void openPdf(id,next,'arxiv-'+String(id).replace(/[^\w.-]+/g,'_')+'.pdf');
+    async function openPdf(id, next, nameHint, statusId){
+      const path=paperPdfPath(id);
+      if(!path){say(statusId,errorMessage('invalid_request'));return false;}
+      say(statusId,'논문을 불러오는 중…');
+      let payload=null;
+      try{payload=await request(path,{method:'GET',auth:true,pdf:true});}
+      catch(error){say(statusId,errorMessage(error.code,error));return false;}
+      const bytes=payload.bytes;
+      if(!pdfMagic(bytes)){say(statusId,errorMessage('invalid_request'));return false;}
+      const file=pdfFile(bytes, pdfFileName(headerValue(payload.headers,'Content-Disposition'), nameHint));
+      if(!file){say(statusId,'이 브라우저에서 논문 파일을 만들지 못했습니다.');return false;}
+      const input=doc.getElementById('paper-file');
+      if(!input){say(statusId,'논문 입력을 찾지 못했습니다.');return false;}
+      try{assignInputFile(input, file);}
+      catch{say(statusId,'논문 파일을 작업대에 넣지 못했습니다.');return false;}
+      loadIntoWorkspace(input,file,payload,next,bytes);
+      say(statusId,'');
+      return true;
+    }
+    function renderHint(){
+      const node=byId('booth-hint');
+      kidsOf(node,el('span',{className:'booth-klab',textContent:'힌트'}),' · '+(hint||GENERIC_HINT));
+    }
+    function enterEdit(pageHint){
+      setStep('edit');
+      if(pageHint) followPageHint(pageHint);
+    }
+    async function startPaper(next, id, statusId, pageHint){
+      if(opening) return false;
+      opening=true;
+      let ok=false;
+      try{ok=await openPdf(id,next,'arxiv-'+String(id).replace(/[^\w.-]+/g,'_')+'.pdf',statusId);}
+      finally{opening=false;}
+      if(!ok||closed) return false;
+      enterEdit(pageHint);
+      return true;
     }
     function missionPage(mission){
       const n=mission&&mission.pageHint;
@@ -1008,81 +1432,84 @@
       if(typeof jump.dispatchEvent==='function') jump.dispatchEvent(new Event('change',{bubbles:true}));
       return true;
     }
+    /* The workspace reads the PDF after the change event, so the hint page retries for up to 8 s. */
     function followPageHint(n){
       if(showMissionPage(n)) return;
-      const later=typeof root.setTimeout==='function'?root.setTimeout:null;
-      if(!later) return;
-      let left=40;
+      const timer=makeTimer();
+      if(!timer) return;
+      let left=80;
       const tick=()=>{
-        if(closed||showMissionPage(n)) return;
+        if(closed||step!=='edit'||showMissionPage(n)) return;
         left-=1;
-        if(left>0) later(tick,100);
+        if(left>0) timer(tick,100);
       };
-      later(tick,100);
+      timer(tick,100);
     }
     function missionPaper(mission){
-      return {
-        source:'mission',id:mission.paperId,title:typeof mission.title==='string'?mission.title:'',
-        license:typeof mission.license==='string'?mission.license:'',course:mission.course
-      };
+      return {source:'mission',id:mission.paperId,title:typeof mission.title==='string'?mission.title:'',
+        license:typeof mission.license==='string'?mission.license:''};
     }
-    function missionGoButton(mission){
+    /* One tap: load the paper (unless it is already open), jump to the hint page, then edit. */
+    function chooseMission(mission){
+      hint=typeof mission.hint==='string'?mission.hint.trim():'';
       const n=missionPage(mission);
-      if(!n) return null;
-      const go=el('button',{type:'button',className:'button secondary',textContent:n+'쪽으로 가기'});
-      go.addEventListener('click',()=>{
-        if(!(paper&&paper.id===mission.paperId)) startPaper(missionPaper(mission),mission.paperId);
-        followPageHint(n);
-      });
-      return go;
+      if(paper&&paper.source==='mission'&&paper.id===mission.paperId){enterEdit(n);return;}
+      void startPaper(missionPaper(mission),mission.paperId,'booth-mission-status',n);
+    }
+    function ticketStub(n){
+      const parts=n?[el('span',{className:'n',textContent:String(n)}),el('span',{className:'u',textContent:'쪽'})]:[];
+      return el('span',{className:'stub'},...parts,el('span',{className:'go',textContent:'도전 →'}));
+    }
+    function paperTicket(label, title, line, n){
+      return el('button',{type:'button',className:'booth-tk booth-tk-h booth-mission'},
+        el('span',{className:'main'},
+          label?el('span',{className:'booth-lab',textContent:label}):null,
+          el('span',{className:'title',textContent:title}),
+          line?el('span',{className:'hint',textContent:line}):null),
+        ticketStub(n));
+    }
+    function missionTicket(mission){
+      const n=missionPage(mission);
+      const title=typeof mission.title==='string'&&mission.title?mission.title:mission.paperId;
+      const label=[ARXIV_ID.test(mission.paperId)?'arXiv '+mission.paperId:'',licenseLabel(mission.license)].filter(Boolean).join(' · ');
+      const button=paperTicket(label,title,typeof mission.hint==='string'?mission.hint:'',n);
+      button.setAttribute('aria-label',title+(n?' · '+n+'쪽에서 도전':' · 도전'));
+      button.addEventListener('click',()=>{chooseMission(mission);});
+      return button;
     }
     function renderMissions(){
       const box=byId('booth-missions');
       if(!box||!liveConfig) return;
       box.textContent='';
       const missions=Array.isArray(liveConfig.missions)?liveConfig.missions:[];
-      if(!missions.length){box.hidden=true;return;}
-      box.hidden=false;
-      box.append(el('h3',{textContent:'미션 논문'}));
-      for(const mission of missions){
-        if(!mission||typeof mission!=='object'||typeof mission.paperId!=='string') continue;
-        const button=el('button',{type:'button',className:'button primary',textContent:'이 논문으로 시작'});
-        button.addEventListener('click',()=>{startPaper(missionPaper(mission),mission.paperId);});
-        const meta=[mission.license,mission.course==='any'?'코스 선택':mission.course].filter(Boolean).join(' · ');
-        box.append(el('article',{className:'booth-card'},
-          el('h3',{textContent:mission.title||mission.paperId}),
-          mission.hint?el('p',{textContent:mission.hint}):null,
-          meta?el('p',{className:'muted',textContent:meta}):null,
-          button,
-          missionGoButton(mission)));
-      }
-    }
-    function searchAuthors(item){
-      return Array.isArray(item.authors)?item.authors.slice(0,6).join(', '):'';
+      const valid=missions.filter(mission=>mission&&typeof mission==='object'&&typeof mission.paperId==='string');
+      box.hidden=!valid.length;
+      for(const mission of valid) box.append(missionTicket(mission));
     }
     function searchMeta(item){
-      return [searchAuthors(item),item.year,licenseId(item)].filter(value=>value!=null&&value!=='').join(' · ');
+      const authors=Array.isArray(item.authors)?item.authors.slice(0,3).join(', '):'';
+      return [authors,item.year].filter(value=>value!=null&&value!=='').join(' · ');
     }
     function searchResultCard(item){
-      const button=el('button',{type:'button',className:'button primary',textContent:'이 논문으로 시작'});
+      const title=typeof item.title==='string'&&item.title?item.title:item.id;
+      const label=['arXiv '+item.id,licenseLabel(licenseId(item))].filter(Boolean).join(' · ');
+      const button=paperTicket(label,title,String(searchMeta(item)),0);
+      button.setAttribute('aria-label',title+' · 이 논문으로 도전');
       button.addEventListener('click',()=>{
-        startPaper({source:'arxiv',id:item.id,title:typeof item.title==='string'?item.title:'',license:licenseId(item),course:'any'},item.id);
+        hint='';
+        void startPaper({source:'arxiv',id:item.id,title:typeof item.title==='string'?item.title:'',license:licenseId(item)},item.id,'booth-search-status',0);
       });
-      const meta=searchMeta(item);
-      return el('article',{className:'booth-card'},
-        el('h3',{textContent:item.title||item.id}),
-        meta?el('p',{className:'muted',textContent:String(meta)}):null,
-        button);
+      return button;
     }
     function searchPager(pages, payload){
       pages.hidden=searchPage<=1&&!(payload&&payload.hasMore);
       if(searchPage>1){
-        const prev=el('button',{type:'button',className:'button secondary',textContent:'이전'});
+        const prev=el('button',{type:'button',className:'booth-btn line',textContent:'이전'});
         prev.addEventListener('click',()=>{searchPage-=1;void runSearch();});
         pages.append(prev);
       }
       if(payload&&payload.hasMore&&searchPage<5){
-        const next=el('button',{type:'button',className:'button secondary',textContent:'다음'});
+        const next=el('button',{type:'button',className:'booth-btn line',textContent:'다음'});
         next.addEventListener('click',()=>{searchPage+=1;void runSearch();});
         pages.append(next);
       }
@@ -1109,14 +1536,6 @@
       try{renderSearch(await request(path,{method:'GET',auth:true}));}
       catch(error){say('booth-search-status',errorMessage(error.code,error));}
     }
-    function showReceipt(data, claimKey){
-      setText('booth-receipt-code',data.receipt||'');
-      setText('booth-claim-code',claimKey||'');
-      setHidden('booth-claim-code',!claimKey);
-      setHidden('booth-receipt',false);
-      const node=byId('booth-receipt');
-      if(node&&typeof node.scrollIntoView==='function') node.scrollIntoView({block:'center'});
-    }
     function stopEvent(event){
       if(event&&typeof event.preventDefault==='function') event.preventDefault();
     }
@@ -1130,13 +1549,19 @@
     function submissionStale(live){
       return !!(workspace()&&editSignature(live)!==adoptedSignature);
     }
+    function rowReason(row){
+      return row.reasonInput?row.reasonInput.value:row.reason;
+    }
     function rowPayload(row){
       return {
         pageIndex:row.pageIndex,segmentId:row.segmentId,before:row.before,after:row.after,
-        defectType:row.select?row.select.value:row.defectType,
-        reason:row.reasonInput?row.reasonInput.value:row.reason
+        defectType:row.defectType,reason:rowReason(row)
       };
     }
+    function rowsIncomplete(){
+      return rows.some(row=>!row.defectType||!String(rowReason(row)||'').trim());
+    }
+    /* The course choice is hidden at the booth: every submission is the quick course. */
     function submissionInput(paperPayload){
       const consent=byId('booth-consent');
       const nickname=byId('booth-nickname');
@@ -1151,62 +1576,72 @@
         defectTypes:typesOf(liveConfig).map(item=>item.id)
       };
     }
-    function rememberClaim(data, claimKey){
-      if(!(data&&data.receipt&&claimKey)) return;
-      const createdAt=typeof data.createdAt==='string'?data.createdAt:new Date().toISOString();
-      rememberReceipt(storage,{receipt:data.receipt,claimKey,createdAt});
+    /* Title and changed pages are kept with the receipt on this device only. */
+    function ticketMeta(data, claimKey){
+      return {
+        receipt:typeof data.receipt==='string'?data.receipt:'',claimKey,
+        createdAt:typeof data.createdAt==='string'?data.createdAt:new Date(now()).toISOString(),
+        title:paper&&paper.title?paper.title:'',
+        pages:receiptPages(rows.map(row=>row.pageIndex+1)),
+        count:rows.length
+      };
+    }
+    function rememberClaim(meta){
+      if(!(meta.receipt&&meta.claimKey)) return;
+      rememberReceipt(storage,meta);
     }
     function showKnownReceipt(error){
       if(error.code!=='already_submitted'||!error.receipt) return;
       const known=readReceipts(storage).find(item=>item.receipt===error.receipt);
-      showReceipt({receipt:error.receipt},known?known.claimKey:'');
+      if(known) void lookupRecord(known.receipt,known.claimKey);
     }
-    async function submitBooth(event){
-      stopEvent(event);
+    function preflight(){
       const block=submissionBlock();
       if(block){
         say('booth-submit-status',blockMessage(block));
         if(block!=='closed') refreshSubmitButton();
-        return;
+        return false;
       }
       const live=editsFor(null);
       if(submissionStale(live)){
-        say('booth-submit-status','편집이 바뀌었습니다. 「제출할 수정본 만들기」를 다시 눌러 주세요.');
-        return;
+        say('booth-submit-status','고친 곳이 바뀌었어요. 「← 고치기」에서 「다음」을 다시 눌러 주세요.');
+        return false;
       }
-      const limits=limitsOf(liveConfig);
-      if(live.length>limits.maxDeclared){adoptRows(live);return;}
+      if(live.length>limitsOf(liveConfig).maxDeclared){adoptRows(live);return false;}
+      if(rowsIncomplete()){
+        say('booth-submit-status','고친 곳마다 결함 유형을 고르고 이유를 적어 주세요.');
+        return false;
+      }
+      return true;
+    }
+    function submissionFormFor(){
       const paperPayload=Object.assign({},paper);
       if(sourceSha) paperPayload.sourceSha256=sourceSha;
       const built=buildSubmission(submissionInput(paperPayload));
-      if(!built.ok){say('booth-submit-status',errorMessage(built.code));return;}
+      if(!built.ok){say('booth-submit-status',errorMessage(built.code));return null;}
       const form=submissionForm(built.body,generatedFile);
-      if(!form){say('booth-submit-status',errorMessage('invalid_request'));return;}
+      if(!form) say('booth-submit-status',errorMessage('invalid_request'));
+      return form;
+    }
+    async function submitBooth(event){
+      stopEvent(event);
+      if(!preflight()) return;
+      const form=submissionFormFor();
+      if(!form) return;
       const button=byId('booth-submit-button');
       if(button) button.disabled=true;
       say('booth-submit-status','제출하는 중…');
       try{
         const data=await request('/v1/booth/submissions',{method:'POST',auth:true,form});
-        const claimKey=typeof data.claimKey==='string'?data.claimKey:'';
-        rememberClaim(data, claimKey);
-        showReceipt(data,claimKey);
-        say('booth-submit-status','제출했습니다. 확인키를 이 화면에서 확인해 두세요.');
-        followSubmission(data, claimKey);
+        const meta=ticketMeta(data,typeof data.claimKey==='string'?data.claimKey:'');
+        rememberClaim(meta);
+        say('booth-submit-status','');
+        followSubmission(data,meta);
       }catch(error){
         say('booth-submit-status',submitFailureText(error));
         showKnownReceipt(error);
         refreshSubmitButton();
       }
-    }
-    function renderClaim(data){
-      setHidden('booth-result-body',false);
-      setHidden('booth-withdraw-confirm',true);
-      const status=STATUS_LABEL[data.status]||data.status||'';
-      const courseLabel=data.course==='deep'?'정밀 코스':data.course==='quick'?'빠른 코스':'';
-      setText('booth-result-status',[data.receipt,status,courseLabel,data.declaredCount!=null?data.declaredCount+'건':''].filter(Boolean).join(' · '));
-      const withdrawn=data.status==='withdrawn';
-      setHidden('booth-withdraw',withdrawn);
-      say('booth-result-error','');
     }
     function claimFields(){
       const receipt=byId('booth-claim-receipt');
@@ -1228,39 +1663,60 @@
       if(!fields.receipt||!fields.claimKey){say('booth-result-error',errorMessage('not_found'));return;}
       await lookupRecord(fields.receipt,fields.claimKey);
     }
+    function metaFor(receipt, claimKey){
+      const known=readReceipts(storage).find(item=>item.receipt===receipt);
+      return Object.assign({},known||{},{receipt,claimKey});
+    }
+    /* A lookup opens the ticket only once the claim view answers. */
     async function lookupRecord(receipt, claimKey){
+      const inTicket=step==='ticket';
       say('booth-result-error','');
-      stopPolling();
+      liveError('');
       let data=null;
       try{data=await claimRequest(receipt,claimKey);}
-      catch(error){say('booth-result-error',errorMessage(error.code,error));return;}
+      catch(error){
+        const text=errorMessage(error.code,error);
+        if(inTicket) liveError(text);
+        else say('booth-result-error',text);
+        return;
+      }
       if(closed) return;
-      placeLive('booth-result-live');
+      stopPolling();
+      openTicket(metaFor(receipt,claimKey));
       if(!applyClaim(data).final) beginPolling(receipt,claimKey,false);
     }
     async function withdraw(){
-      const fields=claimFields();
-      if(!fields.receipt||!fields.claimKey){say('booth-result-error',errorMessage('not_found'));return;}
+      if(!ticket||!ticket.receipt||!ticket.claimKey){liveError(errorMessage('not_found'));return;}
+      const body={receipt:ticket.receipt,claimKey:ticket.claimKey};
       stopPolling();
       try{
-        const data=await request('/v1/booth/withdraw',{method:'POST',auth:false,body:fields});
-        placeLive('booth-result-live');
+        const data=await request('/v1/booth/withdraw',{method:'POST',auth:false,body});
+        setHidden('booth-withdraw-confirm',true);
         applyClaim(data);
-      }catch(error){say('booth-result-error',errorMessage(error.code,error));}
+      }catch(error){
+        liveError(errorMessage(error.code,error));
+        if(!closed&&ticket) beginPolling(body.receipt,body.claimKey,false);
+      }
     }
     function blockMessage(block){
       if(block==='closed') return errorMessage('booth_closed');
       if(block==='consent') return CONSENT_MISSING;
       if(block==='pick') return PICK_PAPER;
-      return '제출할 수정본이 없습니다. 「제출할 수정본 만들기」를 눌러 주세요.';
+      return '제출할 수정본이 없어요. 「← 고치기」로 돌아가 「다음」을 다시 눌러 주세요.';
     }
     function liveConsentVersion(){
       const version=liveConfig&&liveConfig.consentVersion;
       return typeof version==='string'&&version?version:CONSENT_VERSION;
     }
+    /* Summary, full versioned text and the checkbox. An unknown version cannot be agreed to. */
     function applyConsent(){
-      const text=consentCopyFor(liveConsentVersion());
+      const version=liveConsentVersion();
+      const text=consentCopyFor(version);
+      const summary=consentSummaryFor(version);
       setText('booth-consent-copy',text||CONSENT_MISSING);
+      setText('booth-consent-version',text?'동의 버전 · '+version:'');
+      const lines=summary.length?summary.map(line=>el('li',{textContent:line})):[el('li',{className:'missing',textContent:CONSENT_MISSING})];
+      kidsOf(byId('booth-consent-summary'),...lines);
       const box=byId('booth-consent');
       if(!box) return;
       if(!text) box.checked=false;
@@ -1269,6 +1725,9 @@
     function perOwnerCap(){
       return declaredCap(liveConfig&&liveConfig.limits&&liveConfig.limits.perOwner);
     }
+    function chances(){
+      return chancesLeft(perOwnerCap(),readReceipts(storage).length);
+    }
     /* The per-guest cap is a 429 with no Retry-After. Booth CORS hides that header today,
        so a visible wait means a short rate limit and local receipts decide the cap copy. */
     function submitFailureText(error){
@@ -1276,38 +1735,174 @@
       renderReceipts();
       const cap=perOwnerCap();
       if(readReceipts(storage).length>=cap) return capMessage(cap);
-      return '제출이 잠시 막혔어요. 한 사람당 '+cap+'번까지 제출할 수 있어요. 이미 '+cap+'번 냈다면 「결과 확인」에서 결과를 보고, 아니면 잠시 뒤 다시 시도해 주세요.';
-    }
-    function placeLive(slotId){
-      const slot=byId(slotId);
-      if(!slot) return;
-      if(liveCard.parentNode!==slot){
-        if(typeof liveCard.remove==='function') liveCard.remove();
-        slot.append(liveCard);
-      }
-      liveCard.hidden=false;
+      return '제출이 잠시 막혔어요. 한 사람당 '+cap+'번까지 제출할 수 있어요. 이미 '+cap+'번 냈다면 「내 기록」에서 결과를 보고, 아니면 잠시 뒤 다시 시도해 주세요.';
     }
     function liveError(text){
       setText('booth-live-error',text);
       setHidden('booth-live-error',!text);
     }
+    function openTicket(meta){
+      ticket=meta;
+      setHidden('booth-withdraw-confirm',true);
+      const box=byId('booth-withdraw-box');
+      if(box) box.open=false;
+      say('booth-copy-status','');
+      leaveResultHash();
+      setStep('ticket');
+    }
+    function createdAtOf(data){
+      if(typeof data.createdAt==='string'&&Number.isFinite(Date.parse(data.createdAt))) return data.createdAt;
+      return ticket&&ticket.createdAt||'';
+    }
+    function countOf(data, meta){
+      if(Number.isSafeInteger(data.declaredCount)&&data.declaredCount>0) return data.declaredCount;
+      return Number.isSafeInteger(meta.count)?meta.count:0;
+    }
+    function pagesLabel(pages, count){
+      const list=Array.isArray(pages)&&pages.length?pages.join(', ')+'쪽':'';
+      return [list,count?count+'곳':''].filter(Boolean).join(' · ');
+    }
+    function renderTicketTop(data){
+      const meta=ticket||{};
+      setText('booth-receipt-code',meta.receipt||(typeof data.receipt==='string'?data.receipt:''));
+      setText('booth-claim-code',meta.claimKey||'');
+      setHidden('booth-claim-code-cell',!meta.claimKey);
+      setText('booth-ticket-paper',shortTitle(meta.title));
+      setHidden('booth-ticket-paper-cell',!meta.title);
+      const pages=pagesLabel(meta.pages,countOf(data,meta));
+      setText('booth-ticket-pages',pages);
+      setHidden('booth-ticket-pages-cell',!pages);
+    }
+    function tickClock(){
+      if(clock) setText('booth-ticket-elapsed',formatClock(now()-clock.at));
+    }
+    function stopClock(){
+      if(clock&&clock.id!=null&&stopEvery) stopEvery(clock.id);
+      clock=null;
+    }
+    function startClock(at){
+      stopClock();
+      const started=Date.parse(at||'');
+      if(!Number.isFinite(started)){setText('booth-ticket-elapsed','');return;}
+      clock={at:started,id:null};
+      tickClock();
+      if(every) clock.id=every(tickClock,1000);
+    }
+    function paintBars(pen, code, width, height){
+      let hash=2166136261;
+      let x=0;
+      while(x<width){
+        for(let i=0;i<code.length&&x<width;i+=1){
+          hash=Math.imul(hash^code.charCodeAt(i),16777619)>>>0;
+          const bar=1+(hash%3);
+          pen.fillRect(x,0,bar,height);
+          x+=bar+1+((hash>>3)%3);
+        }
+      }
+    }
+    /* Slim barcode drawn from receipt and claim key. Decorative only. */
+    function drawBarcode(){
+      const canvas=byId('booth-barcode');
+      if(!canvas||typeof canvas.getContext!=='function'||!ticket) return;
+      const width=Math.max(1,Math.round(canvas.clientWidth||300));
+      const height=34;
+      const ratio=Math.min(3,Number(root.devicePixelRatio)||1);
+      canvas.width=Math.round(width*ratio);
+      canvas.height=Math.round(height*ratio);
+      const pen=canvas.getContext('2d');
+      if(!pen) return;
+      pen.setTransform(ratio,0,0,ratio,0,0);
+      pen.clearRect(0,0,width,height);
+      pen.fillStyle='#16191e';
+      paintBars(pen,[ticket.receipt,ticket.claimKey].filter(Boolean).join('-')||'FALSIFY',width,height);
+    }
+    function renderPending(data){
+      setText('booth-ticket-state',data.status==='reviewing'?'AI가 논문을 읽는 중':'AI 검증 차례를 기다리는 중');
+      setText('booth-live-title','');
+      setHidden('booth-ticket-duration-cell',true);
+      setHidden('booth-live-tip',true);
+      startClock(createdAtOf(data));
+      drawBarcode();
+    }
+    function dateLabel(ms){
+      const at=new Date(ms);
+      return [at.getFullYear(),String(at.getMonth()+1).padStart(2,'0'),String(at.getDate()).padStart(2,'0')].join('.');
+    }
+    function renderStamp(stamp){
+      const node=byId('booth-stamp');
+      if(!node) return;
+      node.hidden=!stamp;
+      if(!stamp) return;
+      node.className='booth-stamp '+stamp.kind;
+      setText('booth-stamp-word',stamp.word);
+      setText('booth-stamp-latin',stamp.latin);
+    }
+    function renderDuration(data){
+      const published=Date.parse(typeof data.publishedAt==='string'?data.publishedAt:'');
+      const created=Date.parse(createdAtOf(data));
+      const known=Number.isFinite(published)&&Number.isFinite(created)&&published>=created;
+      setText('booth-ticket-duration',known?formatDuration(published-created):'');
+      setHidden('booth-ticket-duration-cell',!known);
+      setText('booth-ticket-date',Number.isFinite(published)?dateLabel(published):'');
+    }
+    function renderVerdict(view, data){
+      stopClock();
+      kidsOf(byId('booth-live-title'),view.lead||null,el('b',{textContent:view.strong}));
+      renderStamp(view.stamp);
+      renderDuration(data);
+      setHidden('booth-live-tip',!(view.state==='caught'||view.state==='partial'));
+    }
+    function noteParts(parsed, state){
+      const parts=[];
+      const structured=!!(parsed.quote||parsed.opinion);
+      if(parsed.text&&!structured) parts.push(el('p',{className:'booth-klab',textContent:state==='missed'?'AI가 의심한 곳':'AI 메모'}));
+      if(parsed.text) parts.push(el('p',{className:'booth-txt',textContent:parsed.text}));
+      if(parsed.quote) parts.push(el('blockquote',{className:'booth-quote',textContent:parsed.quote}));
+      if(parsed.opinion) parts.push(el('p',{className:'booth-klab gap',textContent:'AI 의견'}),el('p',{className:'booth-txt',textContent:parsed.opinion}));
+      return parts;
+    }
+    function renderNote(view){
+      const parsed=parsePublicNote(view.note);
+      setText('booth-live-page',parsed.page?'AI가 짚은 곳 · '+parsed.page+'쪽':'');
+      setHidden('booth-live-page',!parsed.page);
+      const parts=noteParts(parsed,view.state);
+      kidsOf(byId('booth-live-note'),...parts);
+      setHidden('booth-live-note',!parts.length);
+    }
+    function renderGift(prize){
+      setText('booth-live-prize',prize);
+      setHidden('booth-gift',!prize);
+    }
+    function renderChances(){
+      const left=chances();
+      setText('booth-chances-top','기회 '+left+'번 남음');
+      setText('booth-live-again','다시 도전하기 · 기회 '+left+'번 남음');
+    }
     function renderLive(data){
       const view=resultView(data);
-      liveCard.setAttribute('data-state',view.state);
-      setText('booth-live-title',view.title);
-      setText('booth-live-prize',view.prize);
-      setHidden('booth-live-prize',!view.prize);
-      setText('booth-live-note',view.note);
-      setHidden('booth-live-note',!view.note);
+      setAttr('booth-live','data-state',view.state);
+      setAttr('booth-ticket','data-state',view.state);
+      renderTicketTop(data);
+      for(const id of ['booth-ticket-wait','booth-ticket-steps','booth-live-capture']) setHidden(id,view.final);
+      for(const id of ['booth-ticket-result','booth-verdict']) setHidden(id,!view.final);
+      if(view.final) renderVerdict(view,data);
+      else renderPending(data);
+      renderGift(view.prize);
+      renderNote(view);
       setHidden('booth-live-again',!view.final);
+      setHidden('booth-withdraw-box',view.state==='withdrawn');
       setHidden('booth-live-recheck',true);
       liveError('');
       return view;
     }
     function applyClaim(data){
-      renderClaim(data);
-      const view=renderLive(data);
-      if(view.final) stopPolling();
+      const view=renderLive(data&&typeof data==='object'?data:{});
+      if(view.final){
+        stopPolling();
+        if(ticket) noteReceiptOutcome(storage,ticket.receipt,view.state);
+      }
+      renderReceipts();
+      renderChances();
       return view;
     }
     function stopPolling(){
@@ -1354,33 +1949,35 @@
       if(!poll.receipt||!poll.claimKey) return;
       beginPolling(poll.receipt,poll.claimKey,true);
     }
-    function followSubmission(data, claimKey){
+    function followSubmission(data, meta){
       renderReceipts();
-      if(!data.receipt||!claimKey) return;
-      fillClaim({receipt:data.receipt,claimKey});
-      placeLive('booth-receipt-live');
-      renderLive({status:data.status||'received',published:false});
-      beginPolling(data.receipt,claimKey,false);
+      if(!meta.receipt||!meta.claimKey) return;
+      fillClaim(meta);
+      openTicket(meta);
+      applyClaim({receipt:meta.receipt,status:data.status||'received',published:false,createdAt:meta.createdAt,declaredCount:data.declaredCount});
+      beginPolling(meta.receipt,meta.claimKey,false);
     }
-    function receiptTime(value){
-      const at=new Date(value);
-      if(!Number.isFinite(at.getTime())) return '';
-      return String(at.getHours()).padStart(2,'0')+':'+String(at.getMinutes()).padStart(2,'0');
+    /* Receipt, short paper title and the stamp word once a result is known. */
+    function historyRow(item){
+      const stamp=stampFor(item.outcome);
+      const left=[item.receipt,shortTitle(item.title)].filter(Boolean).join(' · ');
+      const button=el('button',{type:'button',className:'booth-hist-row'+(stamp?' '+stamp.kind:'')},
+        el('span',{className:'l',textContent:left}),
+        el('span',{className:'r',textContent:stamp?stamp.word:'결과 보기'}));
+      button.addEventListener('click',()=>{fillClaim(item);void lookupRecord(item.receipt,item.claimKey);});
+      return button;
     }
     function renderReceipts(){
-      const box=byId('booth-receipts-list');
-      if(!box) return;
-      box.textContent='';
       const list=recentReceipts(storage);
-      setHidden('booth-receipts',!list.length);
-      for(const item of list){
-        const label=[item.receipt,receiptTime(item.createdAt)].filter(Boolean).join(' · ');
-        const button=el('button',{type:'button',className:'button secondary booth-receipt-item',textContent:label});
-        button.addEventListener('click',()=>{fillClaim(item);void lookupRecord(item.receipt,item.claimKey);});
-        box.append(button);
+      for(const [boxId,sectionId] of [['booth-receipts-list','booth-receipts'],['booth-history','booth-history']]){
+        const box=byId(boxId);
+        if(!box) continue;
+        box.textContent='';
+        for(const item of list) box.append(historyRow(item));
+        setHidden(sectionId,!list.length);
       }
     }
-    /* A reload within 15 min of the newest receipt, or a #booth-result visit, picks the card up again. */
+    /* A reload within 15 min of the newest receipt, or a #booth-result visit, picks the ticket up again. */
     function resumeLatest(){
       const latest=readReceipts(storage)[0];
       if(!latest) return;
@@ -1388,7 +1985,6 @@
       const fresh=Number.isFinite(created)&&now()-created<POLL_STOP_AT;
       if(location.hash!=='#booth-result'&&!fresh) return;
       fillClaim(latest);
-      showResult(true);
       void lookupRecord(latest.receipt,latest.claimKey);
     }
     function resetWorkspace(){
@@ -1396,37 +1992,64 @@
       if(clear&&typeof clear.click==='function'){clear.click();return;}
       if(typeof Event==='function'&&typeof doc.dispatchEvent==='function') doc.dispatchEvent(new Event('falsify:document-clear'));
     }
-    function leaveResult(){
-      setHidden('booth-result',true);
-      setHidden('booth-result-body',true);
-      try{if(location.hash==='#booth-result') location.hash='#booth';}catch{}
-    }
-    /* Back to the mission list with no paper, no rows and an unticked consent. */
+    /* Back to pick with no paper, no rows and an unticked consent, as the old retry did. */
     function startAgain(){
       stopPolling();
-      liveCard.hidden=true;
-      setHidden('booth-receipt',true);
-      setText('booth-receipt-code','');
-      setText('booth-claim-code','');
+      stopClock();
+      cancelMake();
+      ticket=null;
       const consent=byId('booth-consent');
       if(consent) consent.checked=false;
-      leaveResult();
+      leaveResultHash();
+      showRecords(false);
       resetWorkspace();
       clearPaper();
-      say('booth-submit-status','');
-      say('booth-search-status','');
-      if(typeof host.scrollIntoView==='function') host.scrollIntoView({block:'start'});
+      hint='';
+      for(const id of ['booth-submit-status','booth-search-status','booth-mission-status','booth-dock-status','booth-copy-status']) say(id,'');
+      liveError('');
+      setStep('pick');
+      refreshSubmitButton();
     }
     async function copyReceipt(){
-      const text=[byId('booth-receipt-code')&&byId('booth-receipt-code').textContent,byId('booth-claim-code')&&byId('booth-claim-code').textContent].filter(Boolean).join('\n');
+      const text=ticket?[ticket.receipt,ticket.claimKey].filter(Boolean).join('\n'):'';
       try{
-        if(root.navigator&&root.navigator.clipboard&&typeof root.navigator.clipboard.writeText==='function'){
+        if(text&&root.navigator&&root.navigator.clipboard&&typeof root.navigator.clipboard.writeText==='function'){
           await root.navigator.clipboard.writeText(text);
-          say('booth-status','접수번호와 확인키를 복사했습니다.');
+          say('booth-copy-status','접수번호와 확인키를 복사했어요.');
           return;
         }
       }catch{}
-      say('booth-status','복사하지 못했습니다. 접수번호와 확인키를 직접 적어 두세요.');
+      say('booth-copy-status','복사하지 못했어요. 접수번호와 확인키를 직접 적어 두세요.');
+    }
+    function scrollTop(){
+      try{if(typeof root.scrollTo==='function') root.scrollTo(0,0);}catch{}
+    }
+    const STEP_NODES={pick:'booth-step-pick',edit:'booth-step-edit',send:'booth-submit',ticket:'booth-receipt'};
+    /* The one place the step changes. event-theme.css reads html[data-booth-step]. */
+    function setStep(next){
+      step=next;
+      for(const [name,id] of Object.entries(STEP_NODES)) setHidden(id,name!==next);
+      const html=doc.documentElement;
+      if(html&&html.dataset) html.dataset.boothStep=next;
+      if(next!=='ticket') stopClock();
+      if(next==='edit'){renderHint();renderDock();}
+      if(next==='send'){renderRows();applyConsent();}
+      scrollTop();
+    }
+    function clearStep(){
+      const html=doc.documentElement;
+      if(html&&html.dataset) delete html.dataset.boothStep;
+    }
+    function onEditsChanged(){
+      if(!making) say('booth-dock-status','');
+      renderDock();
+    }
+    function watchEdits(){
+      const list=byId('paper-edits');
+      const Observer=root.MutationObserver;
+      if(!list||typeof Observer!=='function') return;
+      editObserver=new Observer(()=>{if(step==='edit') renderDock();});
+      editObserver.observe(list,{childList:true,subtree:true,characterData:true});
     }
     function rememberPdfLimit(data){
       const limits=data&&data.limits&&typeof data.limits==='object'?data.limits:null;
@@ -1445,11 +2068,11 @@
       setHidden('booth-announce',!announcement);
       if(!submissionsOpen()) say('booth-status',errorMessage('booth_closed'));
       renderMissions();
-      renderCourses();
       applyConsent();
       refreshSubmitButton();
       prefillClaim();
       renderReceipts();
+      renderChances();
       showResult(false);
       resumeLatest();
     }
@@ -1457,7 +2080,7 @@
       try{
         const data=await request('/v1/booth/config',{method:'GET',auth:false});
         if(closed) return;
-        if(!data||data.enabled!==true){setRailBlue(doc,false);host.remove();return;}
+        if(!data||data.enabled!==true){setRailBlue(doc,false);clearStep();host.remove();return;}
         applyConfig(data);
       }catch{
         if(closed) return;
@@ -1472,27 +2095,37 @@
       searchPage=1;
       void runSearch();
     });
-    on(byId('booth-make'),'click',()=>{void makeSubmissionPdf();});
+    on(byId('booth-next'),'click',beginMake);
+    on(byId('booth-edit-back'),'click',()=>{cancelMake();setStep('pick');});
+    on(byId('booth-send-back'),'click',()=>{setStep('edit');});
     on(byId('booth-submit'),'submit',event=>{void submitBooth(event);});
     on(byId('booth-consent'),'change',refreshSubmitButton);
     on(byId('booth-copy'),'click',()=>{void copyReceipt();});
     on(byId('booth-claim-form'),'submit',event=>{void lookup(event);});
+    on(byId('booth-records-back'),'click',closeRecords);
     on(byId('booth-withdraw'),'click',()=>{setHidden('booth-withdraw-confirm',false);});
     on(byId('booth-withdraw-confirm'),'click',()=>{void withdraw();});
     on(byId('booth-live-again'),'click',startAgain);
     on(byId('booth-live-recheck'),'click',recheck);
-    on(resultLink,'click',openResult);
-    on(byId('booth-receipt-result'),'click',openResult);
+    on(byId('booth-result-link'),'click',openResult);
     on(doc,'falsify:paper-generated',event=>{void adoptGenerated(event&&event.detail);});
+    on(doc,'falsify:paper-workspace-edits',onEditsChanged);
     on(doc,'falsify:document',onBoothDocument);
     on(doc,'falsify:document-clear',onBoothClear);
     on(root,'hashchange',()=>{showResult(false);});
+    on(root,'resize',()=>{if(step==='ticket') drawBarcode();});
+    watchEdits();
+    setStep('pick');
     showResult(false);
     void loadConfig();
     return {destroy(){
       closed=true;
       stopPolling();
+      stopClock();
+      cancelMake();
+      if(editObserver) editObserver.disconnect();
       setRailBlue(doc,false);
+      clearStep();
       for(const [target,type,handler] of listeners){
         if(target&&typeof target.removeEventListener==='function') target.removeEventListener(type,handler);
       }
@@ -1504,7 +2137,8 @@
   root.FalsifyBooth={
     normalizeClaimKey,normalizeReceipt,buildSubmission,submissionForm,errorMessage,
     readReceipts,rememberReceipt,recentReceipts,paperSearchPath,paperPdfPath,
-    consentCopyFor,nextPollDelay,retryAfterMs,resultView,capMessage,
-    CONSENT_COPY,CONSENT_VERSION,RECEIPT_KEY,RECEIPT_CAP,RECENT_CAP,mount
+    consentCopyFor,consentSummaryFor,nextPollDelay,retryAfterMs,resultView,capMessage,
+    parsePublicNote,diffParts,chancesLeft,formatClock,formatDuration,noteReceiptOutcome,licenseLabel,shortTitle,
+    CONSENT_COPY,CONSENT_SUMMARY,CONSENT_VERSION,RECEIPT_KEY,RECEIPT_CAP,RECENT_CAP,mount
   };
 })(typeof window==='object'?window:globalThis);
