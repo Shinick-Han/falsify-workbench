@@ -501,6 +501,7 @@ test('hosting off leaves legacy gateways unchanged and exposes enabled:false', a
         'claude-haiku-5-5': 'anthropic',
       },
       blueJobs: true,
+      modelJobs: true,
     });
     assert.equal(JSON.stringify(capabilities.body).includes('key'), false);
     const blocked = await upload(call, created.body.token, pdfBytes('disabled'));
@@ -2220,6 +2221,7 @@ const DEFAULT_CAPABILITIES = {
   limits: { maxUploadBytes: 4096, maxPromptChars: 32000 },
   openAccess: { enabled: false, accessKeyRequired: false },
   blueJobs: true,
+  modelJobs: true,
 };
 
 test('providerForModel maps claude, gpt and o-digit ids and rejects the rest', () => {
@@ -2260,7 +2262,7 @@ test('default capabilities add modelProviders and leave every other field unchan
     const capabilities = await call('GET', '/v1/ai/capabilities');
     assert.equal(capabilities.status, 200);
     assert.deepEqual(Object.keys(capabilities.body), [
-      'enabled', 'provider', 'execution', 'models', 'efforts', 'limits', 'openAccess', 'modelProviders', 'blueJobs',
+      'enabled', 'provider', 'execution', 'models', 'efforts', 'limits', 'openAccess', 'modelProviders', 'blueJobs', 'modelJobs',
     ]);
     const { modelProviders, ...rest } = capabilities.body;
     assert.deepEqual(rest, DEFAULT_CAPABILITIES);
@@ -2376,6 +2378,7 @@ const ENABLED_CAPABILITIES = {
     'claude-haiku-5-5': 'anthropic',
   },
   blueJobs: true,
+  modelJobs: true,
 };
 
 function postPaper(c, token, body) {
@@ -2445,7 +2448,7 @@ test('enabled paper capabilities add only paperTools and still serve a member wh
     assert.equal(capabilities.body.enabled, false);
     assert.deepEqual(capabilities.body.paperTools, { enabled: true });
     assert.deepEqual(Object.keys(capabilities.body), [
-      'enabled', 'provider', 'execution', 'models', 'efforts', 'limits', 'openAccess', 'modelProviders', 'blueJobs', 'paperTools',
+      'enabled', 'provider', 'execution', 'models', 'efforts', 'limits', 'openAccess', 'modelProviders', 'blueJobs', 'modelJobs', 'paperTools',
     ]);
     const ada = await register(mf, call, 'paperhost');
     const forwarded = await postPaper(call, ada.body.token, { path: PAPER_QUERY, body: { operation: 'status' } });

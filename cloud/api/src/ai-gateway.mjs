@@ -4,7 +4,7 @@
 // is stored here. Owner-paid policy is a pre-flight gate over recorded usage, never a spend balance.
 import { timingSafeEqual } from 'node:crypto';
 import { SESSION_HEADER } from './confluence.mjs';
-import { AiError, aiFail, hostingEnabled, openAccessEnabled, resolveAiOwner, resolveGuestOwner, sha256Hex } from './ai-identity.mjs';
+import { AiError, aiFail, hostingEnabled, openAccessEnabled, resolveAiOwner, resolveGuestOwner, resolveOperatorOwner, sha256Hex } from './ai-identity.mjs';
 import {
   cancelRuntimeJob,
   createRuntimeJob,
@@ -61,6 +61,7 @@ const MESSAGES = {
   rate_limited: 'Too many hosted AI requests; retry later.',
   open_access_disabled: 'Open access is not enabled.',
   guest_blue_disabled: 'Guest BLUE jobs are not enabled.',
+  guest_model_disabled: 'Guest model jobs are not enabled.',
   invalid_access_key: 'The access key is not valid.',
   owner_budget_exhausted: 'The owner token budget for this window is exhausted.',
   idempotency_conflict: 'This idempotency key is already used for a different request.',
@@ -171,6 +172,8 @@ export function aiSettings(env) {
     guestApplyJobsPerHour: positiveInt(env?.AI_GUEST_APPLY_JOBS_PER_HOUR, positiveInt(env?.AI_GUEST_JOBS_PER_HOUR, 150)),
     // Unset means guests may still start BLUE. Only an explicit false closes it.
     guestBlue: guestBlueEnabled(env),
+    // Unset means a guest may still start a model job. Only an explicit false leaves apply-only RED.
+    guestModelJobs: guestModelJobsEnabled(env),
     operatorJobsPerHour: positiveInt(env?.BOOTH_OPERATOR_JOBS_PER_HOUR, 600),
     operatorActiveJobs: positiveInt(env?.BOOTH_OPERATOR_ACTIVE_JOBS, 4),
     operatorUploadsPerHour: positiveInt(env?.BOOTH_OPERATOR_UPLOADS_PER_HOUR, 600),
@@ -204,6 +207,11 @@ function paperToolsEnabled(env) {
 
 function guestBlueEnabled(env) {
   if (env?.AI_GUEST_BLUE === false || env?.AI_GUEST_BLUE === 'false') return false;
+  return true;
+}
+
+function guestModelJobsEnabled(env) {
+  if (env?.AI_GUEST_MODEL_JOBS === false || env?.AI_GUEST_MODEL_JOBS === 'false') return false;
   return true;
 }
 
@@ -532,7 +540,7 @@ async function createUpload(ctx) {
   return storeRuntimeUpload({ ctx, db, env, deps, bucket, slot, guestSlot, name, mime, bytes, sha256 });
 }
 
-function capabilitiesResponse(settings) {
+function capabilitiesResponse(settings, operatorView = false) {
   const body = {
     enabled: settings.enabled,
     provider: catalogProvider(settings.models),
@@ -545,9 +553,10 @@ function capabilitiesResponse(settings) {
       accessKeyRequired: settings.openAccess === true && settings.openAccessKey.length > 0,
     },
     modelProviders: modelProvidersFor(settings.models),
-    // Unsigned and guest views are what this object reports. Both are false only when open access
-    // is on and guest BLUE is explicitly disabled; every other configuration stays true.
-    blueJobs: !(settings.openAccess === true && settings.guestBlue === false),
+    // Unsigned and guest views use the same rule for both flags: false only when open access is on
+    // and that flag is explicitly disabled. A valid operator bearer forces both true.
+    blueJobs: operatorView || !(settings.openAccess === true && settings.guestBlue === false),
+    modelJobs: operatorView || !(settings.openAccess === true && settings.guestModelJobs === false),
   };
   if (settings.paperTools) body.paperTools = { enabled: true };
   return json(200, body);
@@ -1284,9 +1293,13 @@ async function createJob(ctx) {
   const { request, env, settings, deps } = ctx;
   const db = deps.getDb();
   const job = parseJobRequest(await readJsonBody(request, MAX_JOB_BODY_BYTES), settings);
-  // A disabled guest BLUE job stops here: no upload lookup, rate slot or runtime call.
+  // Guest BLUE and guest model jobs stop here: no upload lookup, rate slot or runtime call.
+  // A disabled BLUE job keeps its own code even when model jobs are also disabled.
   if (settings.guestScope === true && settings.guestBlue === false && job.role === 'blue') {
     aiFail(403, 'guest_blue_disabled');
+  }
+  if (settings.guestScope === true && settings.guestModelJobs === false && !(job.role === 'red' && job.applyOnly === true)) {
+    aiFail(403, 'guest_model_disabled');
   }
   // The upload must exist and belong to this owner before the runtime is involved.
   const upload = await db
@@ -1587,6 +1600,18 @@ function bearerToken(request) {
   return match ? match[1] : '';
 }
 
+// A valid operator bearer is recognized without D1. A wrong fso_ stays on the public 200.
+async function optionalOperator(ctx) {
+  const token = bearerToken(ctx.request);
+  if (!token.startsWith('fso_')) return false;
+  try {
+    await resolveOperatorOwner(ctx.env, token);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // Invalid, expired and non-guest bearers keep the public 200. Only a live guest session changes limits.
 async function optionalGuestOwner(ctx, settings) {
   if (settings.openAccess !== true) return null;
@@ -1602,6 +1627,8 @@ async function optionalGuestOwner(ctx, settings) {
 
 async function publicCapabilities(ctx, settings) {
   if (ctx.request.method !== 'GET') aiFail(405, 'method_not_allowed', { Allow: 'GET' });
+  // The operator page must still see that BLUE and model jobs exist for the operator.
+  if (await optionalOperator(ctx)) return capabilitiesResponse(settings, true);
   const guest = await optionalGuestOwner(ctx, settings);
   const view = guest ? effectiveAiSettings(settings, guest.ownerId) : settings;
   return capabilitiesResponse(view);
