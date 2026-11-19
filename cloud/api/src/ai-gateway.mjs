@@ -62,6 +62,7 @@ const MESSAGES = {
   open_access_disabled: 'Open access is not enabled.',
   guest_blue_disabled: 'Guest BLUE jobs are not enabled.',
   guest_model_disabled: 'Guest model jobs are not enabled.',
+  model_jobs_operator_only: 'Model jobs are limited to the booth operator.',
   invalid_access_key: 'The access key is not valid.',
   owner_budget_exhausted: 'The owner token budget for this window is exhausted.',
   idempotency_conflict: 'This idempotency key is already used for a different request.',
@@ -178,7 +179,10 @@ export function aiSettings(env) {
     operatorActiveJobs: positiveInt(env?.BOOTH_OPERATOR_ACTIVE_JOBS, 4),
     operatorUploadsPerHour: positiveInt(env?.BOOTH_OPERATOR_UPLOADS_PER_HOUR, 600),
     operatorMaxCallsPerJob: Math.min(positiveInt(env?.BOOTH_OPERATOR_MAX_CALLS_PER_JOB, maxCallsPerJob), 64),
+    // 0 leaves the existing owner token-budget gate off for opr:booth. A positive value is that gate.
     operatorTokenBudget: nonNegativeInt(env?.BOOTH_OPERATOR_TOKEN_BUDGET, 0),
+    // Unset means any owner may start a model job. Only an explicit true reserves them for opr:booth.
+    modelJobsOperatorOnly: modelJobsOperatorOnly(env),
     // One active guest job polled at the page's 12s steady rate is 300 reads an hour.
     // 600 leaves room for cancel, replay and a manual refresh. 45000 is 150 jobs at that rate.
     guestJobReadsPerOwnerHour: positiveInt(env?.AI_GUEST_JOB_READS_PER_OWNER_HOUR, 600),
@@ -213,6 +217,10 @@ function guestBlueEnabled(env) {
 function guestModelJobsEnabled(env) {
   if (env?.AI_GUEST_MODEL_JOBS === false || env?.AI_GUEST_MODEL_JOBS === 'false') return false;
   return true;
+}
+
+function modelJobsOperatorOnly(env) {
+  return env?.AI_MODEL_JOBS_OPERATOR_ONLY === true || env?.AI_MODEL_JOBS_OPERATOR_ONLY === 'true';
 }
 
 function guestApplySeparated(env) {
@@ -553,10 +561,15 @@ function capabilitiesResponse(settings, operatorView = false) {
       accessKeyRequired: settings.openAccess === true && settings.openAccessKey.length > 0,
     },
     modelProviders: modelProvidersFor(settings.models),
-    // Unsigned and guest views use the same rule for both flags: false only when open access is on
-    // and that flag is explicitly disabled. A valid operator bearer forces both true.
-    blueJobs: operatorView || !(settings.openAccess === true && settings.guestBlue === false),
-    modelJobs: operatorView || !(settings.openAccess === true && settings.guestModelJobs === false),
+    // When model jobs are operator-only, every non-operator view reports both flags false.
+    // Otherwise unsigned and guest views are false only when open access is on and that flag
+    // is explicitly disabled. A valid operator bearer forces both true.
+    blueJobs: settings.modelJobsOperatorOnly === true && !operatorView
+      ? false
+      : operatorView || !(settings.openAccess === true && settings.guestBlue === false),
+    modelJobs: settings.modelJobsOperatorOnly === true && !operatorView
+      ? false
+      : operatorView || !(settings.openAccess === true && settings.guestModelJobs === false),
   };
   if (settings.paperTools) body.paperTools = { enabled: true };
   return json(200, body);
@@ -1293,13 +1306,16 @@ async function createJob(ctx) {
   const { request, env, settings, deps } = ctx;
   const db = deps.getDb();
   const job = parseJobRequest(await readJsonBody(request, MAX_JOB_BODY_BYTES), settings);
-  // Guest BLUE and guest model jobs stop here: no upload lookup, rate slot or runtime call.
-  // A disabled BLUE job keeps its own code even when model jobs are also disabled.
+  // Guest BLUE, then guest model jobs, then the operator-only gate. Each one stops before
+  // upload lookup, a rate slot or a runtime call. A disabled BLUE job keeps its own code.
   if (settings.guestScope === true && settings.guestBlue === false && job.role === 'blue') {
     aiFail(403, 'guest_blue_disabled');
   }
   if (settings.guestScope === true && settings.guestModelJobs === false && !(job.role === 'red' && job.applyOnly === true)) {
     aiFail(403, 'guest_model_disabled');
+  }
+  if (settings.modelJobsOperatorOnly === true && !isOperatorOwner(ctx.ownerId) && !(job.role === 'red' && job.applyOnly === true)) {
+    aiFail(403, 'model_jobs_operator_only');
   }
   // The upload must exist and belong to this owner before the runtime is involved.
   const upload = await db
