@@ -1,13 +1,13 @@
-// Booth submissions (contract docs/booth-contract-20261120.md section 5).
-// Visitors submit one completed RED apply-only job. The claim key is returned once.
+// Booth submissions (contract docs/booth-contract-20261120.md sections 5 and 11).
+// Visitors submit an edited PDF. The claim key is returned once.
 // owner_id and claim_hash are never returned. No IP, user agent or token is stored here.
+// These routes do not call the runtime.
 import { timingSafeEqual } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import { AiError, resolveAiOwner, sha256Hex } from './ai-identity.mjs';
-import { getRuntimeArtifact, getRuntimeJob } from './ai-runtime-client.mjs';
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const RECEIPT = /^F-\d{4,}$/;
+const HEX64 = /^[0-9a-f]{64}$/;
 const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 const COURSES = ['quick', 'deep'];
 const DEFECTS = ['number', 'figure', 'citation', 'logic', 'method', 'other'];
@@ -18,8 +18,10 @@ const PATCH_STATUSES = ['received', 'reviewing', 'judged', 'invalid'];
 const OUTCOMES = ['missed', 'caught', 'partial', 'invalid'];
 const MISSION_COURSES = ['quick', 'deep', 'any'];
 const SLUG = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
-const SUBMIT_KEYS = ['jobId', 'course', 'declared', 'paper', 'nickname', 'consentVersion'];
-const SUBMIT_REQUIRED = ['jobId', 'course', 'declared', 'consentVersion'];
+const SUBMIT_KEYS = ['course', 'declared', 'paper', 'nickname', 'consentVersion', 'editedSha256'];
+const SUBMIT_REQUIRED = ['course', 'declared', 'consentVersion', 'editedSha256'];
+const PAPER_KEYS = ['source', 'id', 'title', 'license', 'sourceSha256'];
+const PAPER_REQUIRED = ['source', 'id', 'title', 'license'];
 const DECLARED_KEYS = ['pageIndex', 'segmentId', 'before', 'after', 'defectType', 'reason'];
 const DECLARED_REQUIRED = ['pageIndex', 'before', 'after', 'defectType', 'reason'];
 const CLAIM_KEYS = ['receipt', 'claimKey'];
@@ -28,6 +30,11 @@ const SETTINGS_KEYS = ['submissionsOpen', 'missions', 'announcement'];
 const MISSION_KEYS = ['id', 'title', 'source', 'paperId', 'license', 'course', 'hint'];
 const MAX_JSON_BYTES = 64 * 1024;
 const SUMMARY_MAX_BYTES = 16 * 1024;
+const PDF_CHUNK_BYTES = 512 * 1024;
+const PDF_BODY_SLACK = 64 * 1024;
+const PDF_HARD_CAP = 32 * 1024 * 1024;
+const PDF_DEFAULT_BYTES = 20 * 1024 * 1024;
+const PDF_MAGIC = [0x25, 0x50, 0x44, 0x46, 0x2d]; // %PDF-
 const CLAIM_PREFIX = 'booth-claim:v1:';
 // Claim and withdraw share one bucket so the two key checks cannot double the guess rate.
 const CLAIM_BUCKET_PREFIX = 'booth-claim:ip:';
@@ -60,18 +67,19 @@ const MESSAGES = {
   rate_limited: 'Too many booth requests; retry later.',
   booth_closed: 'Booth submissions are closed.',
   consent_outdated: 'The consent version is out of date.',
-  job_not_ready: 'The job is not ready for submission.',
-  already_submitted: 'This job was already submitted.',
+  already_submitted: 'This PDF was already submitted.',
   pii_not_allowed: 'The nickname looks like contact information.',
   paper_not_allowed: 'This paper is not allowed for a booth submission.',
-  artifact_expired: 'The edited PDF is no longer available.',
+  invalid_pdf: 'The file is not a PDF.',
+  pdf_mismatch: 'The PDF does not match the declared hash.',
+  pdf_unchanged: 'The PDF is unchanged from the source.',
   withdrawn: 'This submission was withdrawn.',
   ai_unavailable: 'Hosted AI execution is temporarily unavailable.',
   internal_error: 'Internal error.',
 };
 const RETRYABLE = new Set(['rate_limited', 'ai_unavailable', 'internal_error']);
 
-const ADMIN_SELECT = `id, seq, receipt, status, course, nickname, declared, paper, job_id, artifact_id,
+const ADMIN_SELECT = `id, seq, receipt, status, course, nickname, declared, paper, pdf_sha256, pdf_bytes, source_sha256,
   outcome, operator_note, public_note, prize_message, ai_summary, published_at, created_at, updated_at`;
 
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -107,6 +115,19 @@ function boothLimits(env) {
     claimsPerIpHour: positiveInt(env?.BOOTH_CLAIMS_PER_IP_HOUR, 120),
     claimsPerHour: positiveInt(env?.BOOTH_CLAIMS_PER_HOUR, 2000),
   };
+}
+
+// Unset uses the guest upload default (20 MiB). A larger setting still stops at 32 MiB.
+function maxPdfBytes(env) {
+  const guestDefault = positiveInt(env?.AI_GUEST_MAX_UPLOAD_BYTES, PDF_DEFAULT_BYTES);
+  const resolved = positiveInt(env?.BOOTH_MAX_PDF_BYTES, guestDefault);
+  return Math.min(resolved, PDF_HARD_CAP);
+}
+
+// Test probe only. Unset in production, and then the header is absent.
+function timingHeaders(env, parseMs) {
+  if (env?.BOOTH_PARSE_TIMING !== '1' || typeof parseMs !== 'number') return {};
+  return { 'X-Falsify-Parse-Ms': parseMs.toFixed(3) };
 }
 
 function boothFail(status, code, options = {}) {
@@ -246,6 +267,144 @@ async function readJsonBody(request, max = MAX_JSON_BYTES) {
   return parsed;
 }
 
+function indexOfBytes(hay, needle, from) {
+  const limit = hay.length - needle.length;
+  if (needle.length === 0 || from > limit) return -1;
+  const first = needle[0];
+  for (let i = Math.max(0, from); i <= limit; i++) {
+    if (hay[i] !== first) continue;
+    let matched = true;
+    for (let j = 1; j < needle.length; j++) {
+      if (hay[i + j] !== needle[j]) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched) return i;
+  }
+  return -1;
+}
+
+function boundaryMarker(contentType) {
+  const match = /;\s*boundary\s*=\s*(?:"([^"]*)"|([^";\s]+))/i.exec(contentType);
+  const boundary = match ? (match[1] ?? match[2]) : '';
+  if (!boundary || boundary.length > 70) boothFail(400, 'invalid_request');
+  return new TextEncoder().encode(`--${boundary}`);
+}
+
+function partName(headerBytes) {
+  let text;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(headerBytes);
+  } catch {
+    boothFail(400, 'invalid_request');
+  }
+  const match = /content-disposition\s*:[^\r\n]*\bname\s*=\s*(?:"([^"]*)"|([^";\r\n\s]+))/i.exec(text);
+  if (!match) boothFail(400, 'invalid_request');
+  return match[1] ?? match[2];
+}
+
+function parseMultipart(bytes, marker) {
+  const headerBreak = new Uint8Array([13, 10, 13, 10]);
+  const parts = [];
+  let pos = indexOfBytes(bytes, marker, 0);
+  if (pos < 0) boothFail(400, 'invalid_request');
+  while (pos >= 0) {
+    let cursor = pos + marker.length;
+    if (bytes[cursor] === 45 && bytes[cursor + 1] === 45) break;
+    if (bytes[cursor] !== 13 || bytes[cursor + 1] !== 10) boothFail(400, 'invalid_request');
+    cursor += 2;
+    const headerEnd = indexOfBytes(bytes, headerBreak, cursor);
+    if (headerEnd < 0 || headerEnd - cursor > 8192) boothFail(400, 'invalid_request');
+    const name = partName(bytes.subarray(cursor, headerEnd));
+    const dataStart = headerEnd + 4;
+    const next = indexOfBytes(bytes, marker, dataStart);
+    if (next < 0) boothFail(400, 'invalid_request');
+    let dataEnd = next;
+    if (dataEnd < 2 || bytes[dataEnd - 2] !== 13 || bytes[dataEnd - 1] !== 10) boothFail(400, 'invalid_request');
+    dataEnd -= 2;
+    if (dataEnd < dataStart) boothFail(400, 'invalid_request');
+    parts.push({ name, data: bytes.subarray(dataStart, dataEnd) });
+    if (parts.length > 2) boothFail(400, 'invalid_request');
+    pos = next;
+  }
+  if (parts.length !== 2) boothFail(400, 'invalid_request');
+  let meta = null;
+  let pdf = null;
+  for (const part of parts) {
+    if (part.name === 'meta' && !meta) meta = part.data;
+    else if (part.name === 'pdf' && !pdf) pdf = part.data;
+    else boothFail(400, 'invalid_request');
+  }
+  if (!meta || !pdf) boothFail(400, 'invalid_request');
+  return { meta, pdf };
+}
+
+function parseMeta(bytes) {
+  let parsed;
+  try {
+    parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  } catch {
+    boothFail(400, 'invalid_request');
+  }
+  if (!isObject(parsed)) boothFail(400, 'invalid_request');
+  return parsed;
+}
+
+// Body cap first, then the multipart scan. PDF content checks happen later.
+async function readSubmissionParts(request, env) {
+  const type = (request.headers.get('Content-Type') || '').trim();
+  if (!/^multipart\/form-data\b/i.test(type)) boothFail(415, 'unsupported_media_type');
+  const marker = boundaryMarker(type);
+  const bytes = await readBoundedBytes(request, maxPdfBytes(env) + PDF_BODY_SLACK);
+  const started = performance.now();
+  const parts = parseMultipart(bytes, marker);
+  const parseMs = performance.now() - started;
+  return { meta: parseMeta(parts.meta), pdf: parts.pdf, parseMs };
+}
+
+function startsWithPdf(bytes) {
+  if (bytes.byteLength < PDF_MAGIC.length) return false;
+  for (let i = 0; i < PDF_MAGIC.length; i++) {
+    if (bytes[i] !== PDF_MAGIC[i]) return false;
+  }
+  return true;
+}
+
+async function sha256Bytes(bytes) {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  const digest = await crypto.subtle.digest('SHA-256', copy);
+  return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function chunkPdf(bytes) {
+  const chunks = [];
+  for (let offset = 0; offset < bytes.byteLength; offset += PDF_CHUNK_BYTES) {
+    const end = Math.min(offset + PDF_CHUNK_BYTES, bytes.byteLength);
+    const copy = new Uint8Array(end - offset);
+    copy.set(bytes.subarray(offset, end));
+    chunks.push(copy.buffer);
+  }
+  return chunks;
+}
+
+// Miniflare returns a BLOB as a number array. The runtime may return bytes.
+function blobBytes(value) {
+  if (value instanceof Uint8Array) return value;
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  if (Array.isArray(value)) return Uint8Array.from(value);
+  boothFail(500, 'internal_error');
+}
+
+function reject(ctx, parseMs, status, code, options = {}) {
+  boothFail(status, code, {
+    ...options,
+    headers: { ...timingHeaders(ctx.env, parseMs), ...(options.headers || {}) },
+  });
+}
+
 function parseJsonValue(value) {
   if (typeof value !== 'string') return null;
   try {
@@ -353,14 +512,19 @@ function parseDeclared(value) {
 
 function parsePaper(value) {
   if (value === undefined || value === null || !isObject(value)) boothFail(400, 'paper_not_allowed');
-  if (!keysOk(value, ['source', 'id', 'title', 'license'], ['source', 'id', 'title', 'license'])) {
-    boothFail(400, 'invalid_request');
-  }
+  if (!keysOk(value, PAPER_KEYS, PAPER_REQUIRED)) boothFail(400, 'invalid_request');
   if (!PAPER_SOURCES.includes(value.source)) boothFail(400, 'paper_not_allowed');
   if (typeof value.license !== 'string' || !PAPER_LICENSE.test(value.license)) boothFail(400, 'paper_not_allowed');
   if (typeof value.id !== 'string' || chars(value.id) < 1 || chars(value.id) > 64) boothFail(400, 'invalid_request');
   if (typeof value.title !== 'string' || chars(value.title) > 300) boothFail(400, 'invalid_request');
-  return { source: value.source, id: value.id, title: value.title, license: value.license };
+  let sourceSha256 = null;
+  if (Object.hasOwn(value, 'sourceSha256')) {
+    if (typeof value.sourceSha256 !== 'string' || !HEX64.test(value.sourceSha256)) boothFail(400, 'invalid_request');
+    sourceSha256 = value.sourceSha256;
+  }
+  const paper = { source: value.source, id: value.id, title: value.title, license: value.license };
+  if (sourceSha256) paper.sourceSha256 = sourceSha256;
+  return { paper, sourceSha256 };
 }
 
 function parseNickname(value) {
@@ -374,16 +538,18 @@ function parseNickname(value) {
 
 function parseSubmission(body) {
   if (!keysOk(body, SUBMIT_KEYS, SUBMIT_REQUIRED)) boothFail(400, 'invalid_request');
-  if (typeof body.jobId !== 'string' || !UUID.test(body.jobId)) boothFail(400, 'invalid_request');
+  if (typeof body.editedSha256 !== 'string' || !HEX64.test(body.editedSha256)) boothFail(400, 'invalid_request');
   if (!COURSES.includes(body.course)) boothFail(400, 'invalid_request');
   if (typeof body.consentVersion !== 'string') boothFail(400, 'invalid_request');
+  const paper = parsePaper(body.paper);
   return {
-    jobId: body.jobId,
     course: body.course,
     declared: parseDeclared(body.declared),
-    paper: parsePaper(body.paper),
+    paper: paper.paper,
+    sourceSha256: paper.sourceSha256,
     nickname: parseNickname(body.nickname),
     consentVersion: body.consentVersion,
+    editedSha256: body.editedSha256,
   };
 }
 
@@ -461,77 +627,45 @@ function parsePatch(body) {
   return out;
 }
 
-function editedPdf(artifacts) {
-  if (!Array.isArray(artifacts)) return null;
-  for (const item of artifacts) {
-    if (!isObject(item) || item.name !== 'edited.pdf') continue;
-    if (typeof item.id !== 'string' || !item.id || item.id.length > 128) continue;
-    return item.id;
-  }
-  return null;
-}
-
-function snapshotOf(row) {
-  const parsed = parseJsonValue(row?.snapshot);
-  return isObject(parsed) ? parsed : {};
-}
-
-async function artifactFromRuntime(env, ownerId, jobId) {
-  try {
-    const runtime = await getRuntimeJob(env, { ownerId, jobId });
-    return editedPdf(runtime?.artifacts);
-  } catch (error) {
-    if (error instanceof AiError && error.code === 'not_found') return null;
-    throw error;
-  }
-}
-
-// Role, applyOnly and state come from the stored row. A snapshot with no artifact list is the
-// only case that may call the runtime, and it does so once, as the caller.
-async function readyArtifact(ctx, ownerId, row) {
-  const snapshot = snapshotOf(row);
-  if (row.role !== 'red' || snapshot.applyOnly !== true || row.state !== 'completed') {
-    boothFail(409, 'job_not_ready');
-  }
-  const stored = editedPdf(snapshot.artifacts);
-  if (stored) return stored;
-  const missingList = !Array.isArray(snapshot.artifacts) || snapshot.artifacts.length === 0;
-  if (!missingList) boothFail(409, 'job_not_ready');
-  const live = await artifactFromRuntime(ctx.env, ownerId, row.id);
-  if (!live) boothFail(409, 'job_not_ready');
-  return live;
-}
-
 function isUniqueError(error) {
   const text = `${error?.message || ''} ${error?.cause?.message || ''}`;
   return /UNIQUE constraint failed/i.test(text);
 }
 
 const INSERT_SQL = `INSERT INTO booth_submissions (
-  id, seq, receipt, claim_hash, owner_id, job_id, artifact_id, course, nickname,
+  id, seq, receipt, claim_hash, owner_id, pdf_sha256, pdf_bytes, source_sha256, course, nickname,
   declared, paper, consent_version, status, created_at, updated_at
-) SELECT ?1, next.seq, next.receipt, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'received', ?11, ?11
+) SELECT ?1, next.seq, next.receipt, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'received', ?12, ?12
 FROM (
   SELECT COALESCE(MAX(seq), 0) + 1 AS seq,
          'F-' || printf('%04d', COALESCE(MAX(seq), 0) + 1) AS receipt
   FROM booth_submissions
 ) AS next
-WHERE next.seq = ?12`;
+WHERE next.seq = ?13`;
+
+async function discardAttempt(db, id) {
+  await db.batch([
+    db.prepare('DELETE FROM booth_files WHERE submission_id = ?1').bind(id),
+    db.prepare('DELETE FROM booth_submissions WHERE id = ?1').bind(id),
+  ]);
+}
 
 async function insertSubmission(db, fields) {
+  const chunks = chunkPdf(fields.pdf);
   for (let attempt = 0; attempt < SEQ_ATTEMPTS; attempt++) {
     const preview = await db.prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM booth_submissions').first();
     const seq = Number(preview?.seq);
     if (!Number.isSafeInteger(seq) || seq < 1) boothFail(500, 'internal_error');
     const receipt = formatReceipt(seq);
     const claimHash = await sha256Hex(`${CLAIM_PREFIX}${receipt}:${fields.normalizedKey}`);
-    try {
-      const result = await db.prepare(INSERT_SQL).bind(
+    const statements = [
+      db.prepare(INSERT_SQL).bind(
         fields.id,
         claimHash,
         fields.ownerId,
-        fields.jobId,
-        fields.artifactId,
+        fields.pdfSha256,
+        fields.pdfBytes,
+        fields.sourceSha256,
         fields.course,
         fields.nickname,
         JSON.stringify(fields.declared),
@@ -539,17 +673,28 @@ async function insertSubmission(db, fields) {
         fields.consentVersion,
         fields.createdAt,
         seq,
-      ).run();
-      if (Number(result?.meta?.changes) !== 1) continue;
+      ),
+      ...chunks.map((data, idx) => db.prepare(
+        'INSERT INTO booth_files (submission_id, idx, data) VALUES (?1, ?2, ?3)'
+      ).bind(fields.id, idx, data)),
+    ];
+    try {
+      const results = await db.batch(statements);
+      if (Number(results?.[0]?.meta?.changes) !== 1) {
+        await discardAttempt(db, fields.id);
+        continue;
+      }
       const stored = await db.prepare('SELECT receipt, created_at FROM booth_submissions WHERE id = ?1').bind(fields.id).first();
       if (!stored || stored.receipt !== receipt) {
-        await db.prepare('DELETE FROM booth_submissions WHERE id = ?1').bind(fields.id).run();
+        await discardAttempt(db, fields.id);
         continue;
       }
       return { receipt: stored.receipt, createdAt: stored.created_at };
     } catch (error) {
       if (error instanceof AiError) throw error;
-      const existing = await db.prepare('SELECT receipt FROM booth_submissions WHERE job_id = ?1').bind(fields.jobId).first();
+      const existing = await db.prepare(
+        'SELECT receipt FROM booth_submissions WHERE owner_id = ?1 AND pdf_sha256 = ?2'
+      ).bind(fields.ownerId, fields.pdfSha256).first();
       if (existing?.receipt) boothFail(409, 'already_submitted', { extra: { receipt: existing.receipt } });
       if (attempt === SEQ_ATTEMPTS - 1 || !isUniqueError(error)) throw error;
     }
@@ -646,8 +791,9 @@ function adminView(row) {
     nickname: row.nickname ?? null,
     declared: Array.isArray(declared) ? declared : [],
     paper: isObject(paper) ? paper : null,
-    jobId: row.job_id,
-    artifactId: row.artifact_id,
+    pdfSha256: row.pdf_sha256,
+    pdfBytes: Number(row.pdf_bytes),
+    sourceSha256: row.source_sha256 ?? null,
     outcome: row.outcome ?? null,
     operatorNote: row.operator_note ?? null,
     publicNote: row.public_note ?? null,
@@ -700,23 +846,32 @@ async function getConfig(ctx) {
 
 async function postSubmission(ctx) {
   const owner = await requireVisitor(ctx);
-  const submission = parseSubmission(await readJsonBody(ctx.request));
+  const parts = await readSubmissionParts(ctx.request, ctx.env);
+  const submission = parseSubmission(parts.meta);
   const db = ctx.deps.getDb();
   const settings = publicSettings(await settingsMap(db), ctx.env);
-  if (!settings.submissionsOpen) boothFail(403, 'booth_closed');
-  if (submission.consentVersion !== consentVersionOf(ctx.env)) boothFail(409, 'consent_outdated');
-  const job = await db.prepare(
-    'SELECT id, role, state, snapshot FROM ai_jobs WHERE id = ?1 AND owner_id = ?2'
-  ).bind(submission.jobId, owner.ownerId).first();
-  if (!job) boothFail(404, 'not_found');
-  const artifactId = await readyArtifact(ctx, owner.ownerId, job);
-  const duplicate = await db.prepare('SELECT receipt FROM booth_submissions WHERE job_id = ?1').bind(submission.jobId).first();
-  if (duplicate?.receipt) boothFail(409, 'already_submitted', { extra: { receipt: duplicate.receipt } });
+  if (!settings.submissionsOpen) reject(ctx, parts.parseMs, 403, 'booth_closed');
+  if (submission.consentVersion !== consentVersionOf(ctx.env)) reject(ctx, parts.parseMs, 409, 'consent_outdated');
+  const pdf = parts.pdf;
+  const limit = maxPdfBytes(ctx.env);
+  if (pdf.byteLength === 0 || !startsWithPdf(pdf)) reject(ctx, parts.parseMs, 400, 'invalid_pdf');
+  if (pdf.byteLength > limit) reject(ctx, parts.parseMs, 413, 'payload_too_large');
+  const digest = await sha256Bytes(pdf);
+  if (!hashesEqual(digest, submission.editedSha256)) reject(ctx, parts.parseMs, 400, 'pdf_mismatch');
+  if (submission.sourceSha256 && hashesEqual(digest, submission.sourceSha256)) {
+    reject(ctx, parts.parseMs, 400, 'pdf_unchanged');
+  }
+  const duplicate = await db.prepare(
+    'SELECT receipt FROM booth_submissions WHERE owner_id = ?1 AND pdf_sha256 = ?2'
+  ).bind(owner.ownerId, digest).first();
+  if (duplicate?.receipt) {
+    reject(ctx, parts.parseMs, 409, 'already_submitted', { extra: { receipt: duplicate.receipt } });
+  }
   const limits = boothLimits(ctx.env);
   const owned = await db.prepare(
     `SELECT COUNT(*) AS count FROM booth_submissions WHERE owner_id = ?1 AND status <> 'withdrawn'`
   ).bind(owner.ownerId).first();
-  if (Number(owned?.count ?? 0) >= limits.perOwner) boothFail(429, 'rate_limited');
+  if (Number(owned?.count ?? 0) >= limits.perOwner) reject(ctx, parts.parseMs, 429, 'rate_limited');
   const charged = await chargeSubmission(ctx, limits);
   try {
     const createdAt = nowIso();
@@ -724,8 +879,10 @@ async function postSubmission(ctx) {
     const stored = await insertSubmission(db, {
       id: crypto.randomUUID(),
       ownerId: owner.ownerId,
-      jobId: submission.jobId,
-      artifactId,
+      pdfSha256: digest,
+      pdfBytes: pdf.byteLength,
+      sourceSha256: submission.sourceSha256,
+      pdf,
       course: submission.course,
       nickname: submission.nickname,
       declared: submission.declared,
@@ -741,7 +898,7 @@ async function postSubmission(ctx) {
       course: submission.course,
       declaredCount: submission.declared.length,
       createdAt: stored.createdAt,
-    });
+    }, timingHeaders(ctx.env, parts.parseMs));
   } catch (error) {
     await releaseSubmission(ctx, charged);
     throw error;
@@ -759,13 +916,16 @@ async function postWithdraw(ctx) {
   const db = ctx.deps.getDb();
   const row = await loadClaim(db, body.receipt, body.claimKey);
   const at = nowIso();
-  await db.prepare(
-    `UPDATE booth_submissions
-     SET status = 'withdrawn', declared = '[]', nickname = NULL, paper = NULL,
-         public_note = NULL, prize_message = NULL, ai_summary = NULL, outcome = NULL,
-         published_at = NULL, updated_at = ?2
-     WHERE id = ?1`
-  ).bind(row.id, at).run();
+  await db.batch([
+    db.prepare(
+      `UPDATE booth_submissions
+       SET status = 'withdrawn', declared = '[]', nickname = NULL, paper = NULL,
+           public_note = NULL, prize_message = NULL, ai_summary = NULL, outcome = NULL,
+           published_at = NULL, updated_at = ?2
+       WHERE id = ?1`
+    ).bind(row.id, at),
+    db.prepare('DELETE FROM booth_files WHERE submission_id = ?1').bind(row.id),
+  ]);
   const fresh = await db.prepare(`SELECT ${CLAIM_SELECT} FROM booth_submissions WHERE id = ?1`).bind(row.id).first();
   return json(200, claimView(fresh));
 }
@@ -838,7 +998,10 @@ async function deleteAdmin(ctx) {
   await requireOperator(ctx);
   const db = ctx.deps.getDb();
   const row = await adminRow(db, ctx.match.params.receipt);
-  await db.prepare('DELETE FROM booth_submissions WHERE id = ?1').bind(row.id).run();
+  await db.batch([
+    db.prepare('DELETE FROM booth_files WHERE submission_id = ?1').bind(row.id),
+    db.prepare('DELETE FROM booth_submissions WHERE id = ?1').bind(row.id),
+  ]);
   return json(204, null);
 }
 
@@ -846,30 +1009,40 @@ async function getAdminPdf(ctx) {
   await requireOperator(ctx);
   const receipt = ctx.match?.params?.receipt;
   if (typeof receipt !== 'string' || !RECEIPT.test(receipt)) boothFail(404, 'not_found');
-  // owner_id stays out of AdminView. The PDF proxy is the one reader, and it forwards that stored owner.
-  const row = await ctx.deps.getDb().prepare(
-    'SELECT owner_id, job_id, artifact_id, receipt, status FROM booth_submissions WHERE receipt = ?1'
+  const db = ctx.deps.getDb();
+  const row = await db.prepare(
+    'SELECT id, receipt, status, pdf_sha256, pdf_bytes FROM booth_submissions WHERE receipt = ?1'
   ).bind(receipt).first();
   if (!row) boothFail(404, 'not_found');
   if (row.status === 'withdrawn') boothFail(404, 'withdrawn');
-  let response;
-  try {
-    response = await getRuntimeArtifact(ctx.env, {
-      ownerId: row.owner_id,
-      jobId: row.job_id,
-      artifactId: row.artifact_id,
-    });
-  } catch (error) {
-    if (error instanceof AiError && error.code === 'not_found') boothFail(404, 'artifact_expired');
-    throw error;
+  const listed = await db.prepare(
+    'SELECT idx, data FROM booth_files WHERE submission_id = ?1 ORDER BY idx ASC'
+  ).bind(row.id).all();
+  const rows = listed.results || [];
+  const parts = [];
+  let total = 0;
+  for (let i = 0; i < rows.length; i++) {
+    if (Number(rows[i].idx) !== i) boothFail(500, 'internal_error');
+    const bytes = blobBytes(rows[i].data);
+    parts.push(bytes);
+    total += bytes.byteLength;
   }
-  return new Response(response.body, {
+  if (!parts.length || total !== Number(row.pdf_bytes)) boothFail(500, 'internal_error');
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) {
+    body.set(part, offset);
+    offset += part.byteLength;
+  }
+  return new Response(body, {
     status: 200,
     headers: {
       'Content-Type': 'application/pdf',
       'Content-Disposition': `attachment; filename="${row.receipt}.pdf"`,
+      'Content-Length': String(total),
       'Cache-Control': 'no-store',
       'X-Content-Type-Options': 'nosniff',
+      'X-Falsify-Pdf-Sha256': row.pdf_sha256,
     },
   });
 }
