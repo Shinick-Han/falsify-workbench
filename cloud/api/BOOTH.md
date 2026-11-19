@@ -28,7 +28,7 @@ npx wrangler d1 migrations apply falsify-harness-records-event --env event --rem
 
 Run both commands from `cloud/api`. `--remote` writes the event database. Do not point it at production.
 
-Event vars (already in `wrangler.jsonc`, not secrets): `AI_GUESTS_PER_IP_HOUR=600`, `AI_GUESTS_PER_HOUR=800`, `AI_GUEST_UPLOADS_PER_HOUR=400`, `AI_GUEST_JOBS_PER_OWNER_HOUR=20`, `AI_GUEST_APPLY_JOBS_PER_HOUR=600`, `AI_GUEST_BLUE=false`, `AI_GUEST_MODEL_JOBS=false`, `BOOTH_ENABLED=true`, `BOOTH_CONSENT_VERSION=2026-11-22.v1`, `BOOTH_SUBMISSIONS_PER_IP_HOUR=400`, `BOOTH_CLAIMS_PER_IP_HOUR=2000`, `BOOTH_CLAIMS_PER_HOUR=5000`, `BOOTH_OPERATOR_ACTIVE_JOBS=2`, `PAPER_SEARCH_ENABLED=true`, `PAPER_SEARCH_PER_IP_HOUR=2000`, `PAPER_PDF_PER_IP_HOUR=600`. Production and staging vars are unchanged.
+Event vars (already in `wrangler.jsonc`, not secrets): `AI_GUESTS_PER_IP_HOUR=600`, `AI_GUESTS_PER_HOUR=800`, `AI_GUEST_UPLOADS_PER_HOUR=400`, `AI_GUEST_JOBS_PER_OWNER_HOUR=20`, `AI_GUEST_APPLY_JOBS_PER_HOUR=600`, `AI_GUEST_BLUE=false`, `AI_GUEST_MODEL_JOBS=false`, `AI_MODEL_JOBS_OPERATOR_ONLY=true`, `BOOTH_ENABLED=true`, `BOOTH_CONSENT_VERSION=2026-11-22.v1`, `BOOTH_SUBMISSIONS_PER_IP_HOUR=400`, `BOOTH_CLAIMS_PER_IP_HOUR=2000`, `BOOTH_CLAIMS_PER_HOUR=5000`, `BOOTH_OPERATOR_ACTIVE_JOBS=2`, `BOOTH_MAX_PDF_BYTES=16777216`, `BOOTH_STORED_PDF_BYTES=3221225472`, `PAPER_SEARCH_ENABLED=true`, `PAPER_SEARCH_PER_IP_HOUR=2000`, `PAPER_PDF_PER_IP_HOUR=600`. The event environment also sets `limits.cpu_ms` to 5000. Production stays at 1000. Production and staging vars are unchanged. `BOOTH_OPERATOR_TOKEN_BUDGET` is not an event var. It defaults to 0, which leaves the operator token-budget gate off.
 
 ## Routes
 
@@ -52,23 +52,31 @@ The operator bearer is rejected on `POST /v1/booth/submissions` with `403 forbid
 
 `GET /v1/booth/admin/submissions` takes `status` (comma-separated), `after` (seq cursor, exclusive) and `limit` (1..200, default 100). The page is ordered by `seq`. `nextAfter` is the last seq on the page when another row remains, otherwise null.
 
-`POST /v1/booth/submissions` is `multipart/form-data` with exactly two parts: `meta` (JSON text) and `pdf` (the edited PDF). `meta` is the submission object without `jobId`, plus `editedSha256` (lowercase hex SHA-256 of the PDF bytes) and optional `paper.sourceSha256` (lowercase hex). The operator bearer is still `403 forbidden` before the body is read.
+`POST /v1/booth/submissions` is `multipart/form-data` parsed with `request.formData()`. The PDF is never decoded as text. Exactly two fields, in either order: `meta` (a text field) and `pdf` (a file field with a filename and type `application/pdf`). Anything else is `400 invalid_request`. `meta` is the submission object without `jobId`, plus `editedSha256` (lowercase hex SHA-256 of the PDF file bytes) and required `paper.sourceSha256` (lowercase hex). The operator bearer is still `403 forbidden` before the body is read.
 
-`BOOTH_MAX_PDF_BYTES` defaults to `AI_GUEST_MAX_UPLOAD_BYTES` when that is a positive integer, otherwise 20 MiB. The resolved value is capped at 32 MiB. The whole multipart body must be at most that limit plus 64 KiB (`413 payload_too_large`). The PDF part has the same byte cap. It must be non-empty and start with `%PDF-`. The server SHA-256 must equal `editedSha256`, and it must differ from `paper.sourceSha256` when that field is present. The same owner and the same PDF hash is `409 already_submitted` with the earlier receipt. A different owner may submit those same bytes.
+`Content-Length` is required (`411 length_required`). A declared length above `BOOTH_MAX_PDF_BYTES` plus 65536 is `413 payload_too_large` before the body is read. The PDF file size is checked again after parsing.
 
-The PDF is stored in `booth_files` as 512 KiB BLOBs, in one `db.batch` with the submission row. `pdf_sha256`, `pdf_bytes` and `source_sha256` are columns on `booth_submissions`. There is no `job_id` or `artifact_id`. Visitor submission does not call the runtime.
+`BOOTH_MAX_PDF_BYTES` defaults to `AI_GUEST_MAX_UPLOAD_BYTES` when that is a positive integer, otherwise 20 MiB. The resolved value is capped at 32 MiB. The event Worker sets it to 16777216. The PDF must be non-empty and start with `%PDF-`. One SHA-256 of those bytes must equal `editedSha256`, and it must differ from `paper.sourceSha256` (`400 pdf_unchanged`). The same owner and the same PDF hash is `409 already_submitted` with the earlier receipt. A different owner may submit those same bytes.
 
-The admin PDF route reads those chunks in `idx` order and returns `application/pdf` with `X-Falsify-Pdf-Sha256`. The file name is the receipt. The admin view has `pdfSha256`, `pdfBytes` and `sourceSha256` instead of `jobId` and `artifactId`.
+`BOOTH_STORED_PDF_BYTES` defaults to 2147483648. The event Worker sets it to 3221225472. The cap is the sum of `pdf_bytes` on rows that still have `booth_files` rows, plus this file. A withdrawn row keeps `pdf_bytes` but its files are gone, so it does not count. Over the cap is `503 storage_full`, and that code is not retryable.
 
-Checks run in this order: authentication, `Content-Type` and the whole-body cap, multipart and `meta` shape (including the paper allowlist and the nickname), `submissionsOpen`, consent, then the PDF checks (magic, part length, hash, source hash, duplicate), the owner cap, and the rate buckets.
+The PDF is stored in `booth_files` as 512 KiB BLOBs. One `db.batch` inserts the submission row and the chunks. The row insert is `INSERT … SELECT … WHERE` the next seq is still `MAX(seq)+1`, the owner's non-withdrawn count is under `BOOTH_SUBMISSIONS_PER_OWNER`, and the stored-bytes sum still fits. Each chunk is `INSERT … SELECT` bound bytes `WHERE EXISTS` the new row, so a rejected row leaves no chunk. If the row does not land, the handler re-reads and answers `429 rate_limited` (owner cap), `503 storage_full`, `409 already_submitted`, or retries the whole batch for a seq race, at most 5 times. An attempt that does not land gives back the hourly slots. `pdf_sha256`, `pdf_bytes` and `source_sha256` are columns on `booth_submissions`. There is no `job_id` or `artifact_id`. Visitor submission does not call the runtime.
 
-Claim and withdraw share one per-IP hourly bucket (`BOOTH_CLAIMS_PER_IP_HOUR`, default 120) and one global hourly bucket (`BOOTH_CLAIMS_PER_HOUR`, default 2000). A global rejection gives the per-IP slot back. Receipt numbers retry up to 5 times on a seq collision.
+The admin PDF route reads one `idx` at a time through a stream and returns `application/pdf` with `Content-Length` equal to `pdf_bytes` and `X-Falsify-Pdf-Sha256`. List and detail queries do not select `booth_files.data`. The file name is the receipt. The admin view has `pdfSha256`, `pdfBytes` and `sourceSha256` instead of `jobId` and `artifactId`.
 
-`paper.source` must be `arxiv` or `mission`. `paper.license` must be `cc-by`, `cc-by-<n.n>`, `cc-by-sa`, `cc-by-sa-<n.n>`, `cc0`, `cc0-1.0`, or `public-domain`. Anything else, including a missing paper, is `400 paper_not_allowed`.
+Checks run in this order: authentication, `Content-Length` (missing is 411, over the body cap is 413, both before the body is read), form fields and `meta` shape (including required `sourceSha256`, the paper allowlist and the nickname), `submissionsOpen`, consent, then the PDF checks (magic, file size, hash, unchanged source, mission source hash), the duplicate lookup, the rate buckets, and the atomic batch. The batch's `WHERE` also enforces the owner cap and the stored-bytes cap. A closed booth still wins over a bad PDF. `411` and `413` happen before the closed and consent checks.
 
-Withdraw is a tombstone. It keeps the id, seq, receipt, course, PDF hash, PDF byte length, source hash, consent version, claim hash, operator note, and timestamps, and it clears the nickname, paper, declared defects, public note, prize, AI summary, outcome, and publication time. It also deletes that submission's `booth_files` rows. `DELETE` deletes the row and the chunks together. `created_at` stays; `updated_at` becomes the withdraw time. Withdrawn rows do not count toward `BOOTH_SUBMISSIONS_PER_OWNER`. The admin PDF route answers `404 withdrawn` before it reads any chunk. The PDF hash stays on the row, so that owner cannot submit the same bytes again.
+Claim and withdraw share one per-IP hourly bucket (`BOOTH_CLAIMS_PER_IP_HOUR`, default 120) and one global hourly bucket (`BOOTH_CLAIMS_PER_HOUR`, default 2000). A global rejection gives the per-IP slot back. Both always run the constant-time claim-key compare, using a dummy digest when the receipt is unknown. An unknown receipt and a wrong key are both `404 not_found`. Receipt numbers retry up to 5 times on a seq collision.
 
-A valid `fso_` bearer on `GET /v1/ai/capabilities` reports `blueJobs: true` and `modelJobs: true`. Unsigned and guest views report each flag false only when open access is on and that flag is explicitly false. `AI_GUEST_MODEL_JOBS` defaults to true. When it is false, a guest job must be RED and `applyOnly`; anything else is `403 guest_model_disabled` before upload lookup. A disabled BLUE job still returns `guest_blue_disabled`.
+`paper.source` must be `arxiv` or `mission`. `paper.license` must be `cc-by`, `cc-by-<n.n>`, `cc-by-sa`, `cc-by-sa-<n.n>`, `cc0`, `cc0-1.0`, or `public-domain`. Anything else, including a missing paper, is `400 paper_not_allowed`. `paper.sourceSha256` is required. When `paper.source` is `mission` and that mission in `booth_settings` has a `sourceSha256`, a different value is `400 paper_not_allowed`. A mission may also carry `pageHint` (an integer from 1 to 9999) and `sourceSha256` (lowercase hex). Both are returned on `GET /v1/booth/config`.
+
+Withdraw is one batch: the tombstone plus `DELETE FROM booth_files` for that id. It keeps the id, seq, receipt, course, PDF hash, PDF byte length, source hash, consent version, claim hash, and `created_at`. It sets `operator_note` to NULL and clears the nickname, paper, declared defects, public note, prize, AI summary, outcome, and publication time. `updated_at` becomes the withdraw time. `DELETE` deletes the row and the chunks together. Withdrawn rows do not count toward `BOOTH_SUBMISSIONS_PER_OWNER`. The admin PDF route answers `404 withdrawn` before it reads any chunk. The PDF hash stays on the row, so that owner cannot submit the same bytes again. A withdrawn row still accepts a later `operatorNote` patch.
+
+A valid `fso_` bearer on `GET /v1/ai/capabilities` reports `blueJobs: true` and `modelJobs: true`. Unsigned and guest views report each flag false only when open access is on and that flag is explicitly false. `AI_GUEST_MODEL_JOBS` defaults to true. When it is false, a guest job must be RED and `applyOnly`; anything else is `403 guest_model_disabled` before upload lookup. A disabled BLUE job still returns `guest_blue_disabled`. `AI_MODEL_JOBS_OPERATOR_ONLY` defaults off and is `true` on the event Worker. When it is on, any job other than RED `applyOnly` from an owner other than `opr:booth` is `403 model_jobs_operator_only` before upload lookup, rate slots or the runtime, and non-operator capability views report both flags false. The operator can still start any job. The check order is BLUE, then guest model jobs, then this gate. `BOOTH_OPERATOR_TOKEN_BUDGET` defaults to 0. A positive value applies the existing owner token-budget gate to `opr:booth`.
+
+`membership_required` and `open_access_disabled` are `403` with those codes, the same messages as `/v1/ai/*`, and they are not retryable. A Confluence session that refreshes inside the 60 second skew is copied onto booth success and error responses as `X-Falsify-Confluence-Session`, with `Access-Control-Expose-Headers` set to that name.
+
+`BOOTH_PARSE_TIMING=1` and `BOOTH_TEST_SEQ_BIAS` are test-only. Neither is an operator var, and neither is set in `wrangler.jsonc`. The timing header is `X-Falsify-Parse-Ms`. The seq bias makes the first insert attempt expect a later receipt number so the retry lands the real one.
 
 ## Error codes
 
@@ -76,13 +84,16 @@ A valid `fso_` bearer on `GET /v1/ai/capabilities` reports `blueJobs: true` and 
 |---|---|---|
 | `not_found` | 404 | Booth disabled, unknown path, unknown receipt, wrong claim key |
 | `unauthorized` | 401 | Missing bearer, wrong or unset operator token, any other rejected session |
+| `membership_required` | 403 | Password bearer whose team membership is not active |
+| `open_access_disabled` | 403 | `fsg_` bearer while `AI_OPEN_ACCESS` is off |
 | `forbidden` | 403 | Operator calling submit, or a non-operator calling an admin route |
 | `booth_closed` | 403 | `submissionsOpen` is false |
 | `guest_blue_disabled` | 403 | Guest `role:"blue"` job while `AI_GUEST_BLUE` is false. Checked before upload lookup, rate slots and runtime calls |
 | `invalid_request` | 400 | Body shape, types, or lengths |
 | `pii_not_allowed` | 400 | Nickname contains `@` or 7 consecutive digits |
-| `paper_not_allowed` | 400 | Paper is missing, or its source or license is not on the allowlist |
+| `paper_not_allowed` | 400 | Paper is missing, its source or license is not on the allowlist, or a mission `sourceSha256` does not match |
 | `guest_model_disabled` | 403 | Guest job is not RED `applyOnly` while `AI_GUEST_MODEL_JOBS` is false. Checked before upload lookup |
+| `model_jobs_operator_only` | 403 | A non-operator job is not RED `applyOnly` while `AI_MODEL_JOBS_OPERATOR_ONLY` is true. Checked after the guest gates and before upload lookup |
 | `consent_outdated` | 409 | `consentVersion` is not `BOOTH_CONSENT_VERSION` |
 | `invalid_pdf` | 400 | The PDF part is empty or does not start with `%PDF-` |
 | `pdf_mismatch` | 400 | The PDF bytes do not match `editedSha256` |
@@ -91,10 +102,12 @@ A valid `fso_` bearer on `GET /v1/ai/capabilities` reports `blueJobs: true` and 
 | `withdrawn` | 409 or 404 | PATCH on a withdrawn row with anything other than `operatorNote` is 409. The admin PDF of a withdrawn row is 404 |
 | `rate_limited` | 429 | Per-owner row cap, per-IP hour, global hour, or the claim-key bucket |
 | `method_not_allowed` | 405 | Verb does not match the route |
-| `payload_too_large` | 413 | Multipart body over the PDF cap plus 64 KiB, or a PDF part over `BOOTH_MAX_PDF_BYTES`. JSON bodies over 64 KiB use the same code |
+| `length_required` | 411 | `POST /v1/booth/submissions` has no `Content-Length` |
+| `payload_too_large` | 413 | Declared body over the PDF cap plus 64 KiB, or a PDF part over `BOOTH_MAX_PDF_BYTES`. JSON bodies over 64 KiB use the same code |
+| `storage_full` | 503 | Stored PDF bytes plus this file would exceed `BOOTH_STORED_PDF_BYTES` |
 | `unsupported_media_type` | 415 | Submissions require `multipart/form-data`. JSON routes require `application/json` |
 
-`rate_limited` is retryable. The other booth codes are not.
+`rate_limited` is retryable. `storage_full`, `length_required`, `membership_required`, `open_access_disabled` and `model_jobs_operator_only` are not. The other booth codes are not.
 
 ## Privacy
 
@@ -103,5 +116,5 @@ A valid `fso_` bearer on `GET /v1/ai/capabilities` reports `blueJobs: true` and 
 - `owner_id` and `claim_hash` are never returned. The admin PDF is read from `booth_files`. It does not use `owner_id` and it does not call the runtime.
 - Booth tables do not store an IP address, user agent or token. Rate limits use the existing truncated hash buckets.
 - `aiSummary` is operator JSON (at most 16 KiB) and is never included in the visitor claim view.
-- `prizeMessage`, `outcome`, `publicNote` and `publishedAt` are omitted from the claim view until the row is published. Withdraw clears those fields, the nickname, the paper, and the declared defects, and it deletes the stored PDF chunks.
-- On the event Worker, `AI_GUEST_BLUE=false` and `AI_GUEST_MODEL_JOBS=false`. A guest cannot start a BLUE job or a model job. Unsigned and guest capability views report `blueJobs: false` and `modelJobs: false`. A valid operator bearer still sees both as true. When either flag is unset, that kind of guest job stays allowed and the matching capability stays true.
+- `prizeMessage`, `outcome`, `publicNote` and `publishedAt` are omitted from the claim view until the row is published. Withdraw clears those fields, the nickname, the paper, the declared defects, and the operator note, and it deletes the stored PDF chunks.
+- On the event Worker, `AI_GUEST_BLUE=false`, `AI_GUEST_MODEL_JOBS=false` and `AI_MODEL_JOBS_OPERATOR_ONLY=true`. A guest cannot start a BLUE job or a model job. A password or Confluence owner cannot start one either, except a RED `applyOnly` job. Unsigned and other non-operator capability views report `blueJobs: false` and `modelJobs: false`. A valid operator bearer still sees both as true and can still start any job. When the operator-only flag is unset, the older guest flags decide.
