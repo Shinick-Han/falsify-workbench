@@ -50,6 +50,8 @@ Preflight answers `OPTIONS` with methods `GET, POST, PATCH, PUT, DELETE, OPTIONS
 
 The operator bearer is rejected on `POST /v1/booth/submissions` with `403 forbidden`. Any other valid bearer on an admin route is `403 forbidden`. A missing bearer is `401 unauthorized`.
 
+`GET /v1/booth/config` needs no bearer and does not write. `limits` is integers only. It keeps `maxDeclared` (5, the same maximum the submit parser enforces), `maxReason` (500), and `maxNickname` (24). It also returns `maxPdfBytes`, the effective PDF cap, and `perOwner`, from `BOOTH_SUBMISSIONS_PER_OWNER` (default 5). `maxPdfBytes` is `BOOTH_MAX_PDF_BYTES` when that is a positive integer, otherwise `AI_GUEST_MAX_UPLOAD_BYTES` when that is a positive integer, otherwise 20971520, and never above 33554432. The event Worker therefore publishes 16777216, which is the number the page uses for "16MB 이하". The object does not include secrets, hourly caps, or the storage cap.
+
 `GET /v1/booth/admin/submissions` takes `status` (comma-separated), `after` (seq cursor, exclusive) and `limit` (1..200, default 100). The page is ordered by `seq`. `nextAfter` is the last seq on the page when another row remains, otherwise null.
 
 `POST /v1/booth/submissions` is `multipart/form-data` parsed with `request.formData()`. The PDF is never decoded as text. Exactly two fields, in either order: `meta` (a text field) and `pdf` (a file field with a filename and type `application/pdf`). Anything else is `400 invalid_request`. `meta` is the submission object without `jobId`, plus `editedSha256` (lowercase hex SHA-256 of the PDF file bytes) and required `paper.sourceSha256` (lowercase hex). The operator bearer is still `403 forbidden` before the body is read.
