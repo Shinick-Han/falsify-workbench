@@ -1,14 +1,31 @@
 /* Event-page booth panel. Renders only when FalsifyCloudConfig.booth.enabled and
    GET /v1/booth/config reports enabled. Declared reasons leave the browser only in
    the meta part of POST /v1/booth/submissions. The pdf part is the workspace file.
-   Claim keys are stored on this device, capped at 10. */
+   Claim keys are stored on this device, capped at 10; the result view lists the newest 5.
+   After submit the claim view is polled until the operator publishes the AI result. */
 (function(root){
   'use strict';
   const RECEIPT_KEY='falsify.booth.receipts.v1';
   const RECEIPT_CAP=10;
-  const CONSENT_COPY='제출한 수정본 PDF와 결함 설명(쪽·유형·이유)은 가짜연구소 Falsify 스터디가 저장하고 운영자가 읽습니다. 마감 후 AI 검증에는 수정본 PDF만 모델 제공자(Anthropic 또는 OpenAI)에 보내며, 결함 설명은 AI에 보내지 않습니다. 이름·연락처는 받지 않으니 이유란에도 적지 마세요. 원 논문은 미션이나 검색에서 고른 공개 논문(CC BY·CC BY-SA·CC0)이며, 수정본을 스터디 밖에 공개할 때는 저자·arXiv 번호·라이선스와 수정 사실을 밝히고, CC BY-SA 논문의 수정본은 같은 라이선스로 공개합니다. 결과와 경품 안내는 접수번호와 확인키로만 확인할 수 있습니다. 확인키로 언제든 철회할 수 있습니다. 철회하면 서버의 수정본 PDF·설명·결과를 바로 지우고, 운영자 보관본은 다음 동기화 때 지웁니다. 이미 AI 검증에 보낸 사본은 모델 제공자에게서 회수할 수 없고, 웹 실행 서버 사본은 7일, 데이터베이스 백업은 최대 30일 뒤에 사라집니다. 보관 자료는 스터디 종료 후 삭제합니다.';
+  /* Keyed by the consentVersion GET /v1/booth/config returns. A version with no text here cannot be submitted. */
+  const CONSENT_COPY=Object.freeze({
+    '2026-11-22.v1':'제출한 수정본 PDF와 결함 설명(쪽·유형·이유)은 가짜연구소 Falsify 스터디가 저장하고 운영자가 읽습니다. 마감 후 AI 검증에는 수정본 PDF만 모델 제공자(Anthropic 또는 OpenAI)에 보내며, 결함 설명은 AI에 보내지 않습니다. 이름·연락처는 받지 않으니 이유란에도 적지 마세요. 원 논문은 미션이나 검색에서 고른 공개 논문(CC BY·CC BY-SA·CC0)이며, 수정본을 스터디 밖에 공개할 때는 저자·arXiv 번호·라이선스와 수정 사실을 밝히고, CC BY-SA 논문의 수정본은 같은 라이선스로 공개합니다. 결과와 경품 안내는 접수번호와 확인키로만 확인할 수 있습니다. 확인키로 언제든 철회할 수 있습니다. 철회하면 서버의 수정본 PDF·설명·결과를 바로 지우고, 운영자 보관본은 다음 동기화 때 지웁니다. 이미 AI 검증에 보낸 사본은 모델 제공자에게서 회수할 수 없고, 웹 실행 서버 사본은 7일, 데이터베이스 백업은 최대 30일 뒤에 사라집니다. 보관 자료는 스터디 종료 후 삭제합니다.',
+    '2026-11-22.v2':'제출한 수정본 PDF와 결함 설명(쪽·유형·이유)은 가짜연구소 Falsify 스터디가 저장하고 운영자가 읽습니다. 제출하면 바로 수정본 PDF만 AI 검증을 위해 모델 제공자(Anthropic)에 보내고, 마감 후 한 번 더 보낼 수 있습니다. 결함 설명은 AI에 보내지 않습니다. 이름·연락처는 받지 않으니 이유란에도 적지 마세요. 원 논문은 미션이나 검색에서 고른 공개 논문(CC BY·CC BY-SA·CC0)이며, 수정본을 스터디 밖에 공개할 때는 저자·arXiv 번호·라이선스와 수정 사실을 밝히고, CC BY-SA 논문의 수정본은 같은 라이선스로 공개합니다. AI 결과와 경품 안내는 접수번호와 확인키로만 확인할 수 있습니다. 확인키로 언제든 철회할 수 있습니다. 철회하면 서버의 수정본 PDF·설명·결과를 바로 지우고, 운영자 보관본은 다음 동기화 때 지웁니다. 이미 AI 검증에 보낸 사본은 모델 제공자에게서 회수할 수 없고, 웹 실행 서버 사본은 7일, 데이터베이스 백업은 최대 30일 뒤에 사라집니다. 보관 자료는 스터디 종료 후 삭제합니다.'
+  });
+  const CONSENT_MISSING='이 화면에 아직 새 동의 문구가 없어 제출할 수 없습니다. 페이지를 새로 고친 뒤 다시 시도해 주세요.';
   const PICK_PAPER='미션이나 검색에서 논문을 골라 시작해 주세요';
   const CONSENT_VERSION='2026-11-22.v1';
+  const RECENT_CAP=5;
+  const POLL_FAST_MS=15000;
+  const POLL_SLOW_MS=30000;
+  const POLL_FAST_UNTIL=180000;
+  const POLL_STOP_AT=900000;
+  const POLL_429_MS=60000;
+  const PENDING_COPY='AI가 결함을 찾는 중이에요. 보통 1~3분 걸려요. 이 화면을 닫아도 접수번호와 확인키로 나중에 볼 수 있어요.';
+  const RESULT_TITLE={
+    caught:'AI가 찾아냈어요',partial:'AI가 거의 찾았어요',missed:'AI가 못 찾았어요!',
+    invalid:'결함으로 인정되지 않았어요',judged:'결과가 나왔어요'
+  };
   const CROCKFORD='0123456789ABCDEFGHJKMNPQRSTVWXYZ';
   const CONTROL=/[\u0000-\u001f\u007f]/;
   const SHA256=/^[0-9a-f]{64}$/;
@@ -20,7 +37,6 @@
   ];
   const COURSES=[{id:'quick',label:'빠른 코스'},{id:'deep',label:'정밀 코스'}];
   const STATUS_LABEL={received:'접수됨',reviewing:'검토 중',judged:'판정됨',invalid:'무효',withdrawn:'철회됨'};
-  const OUTCOME_LABEL={missed:'놓침',caught:'잡힘',partial:'일부 확인',invalid:'무효'};
   const ERROR_TEXT={
     booth_closed:'지금은 접수를 받지 않습니다. 운영 안내를 확인해 주세요.',
     consent_outdated:'동의 문구가 갱신되었습니다. 페이지를 새로 고친 뒤 다시 동의해 주세요.',
@@ -269,6 +285,48 @@
     try{storage.setItem(RECEIPT_KEY,JSON.stringify(capped));}catch{return readReceipts(storage);}
     return capped;
   }
+  function recentReceipts(storage){
+    return readReceipts(storage).slice(0,RECENT_CAP);
+  }
+  function consentCopyFor(version){
+    if(typeof version!=='string'||!Object.prototype.hasOwnProperty.call(CONSENT_COPY,version)) return '';
+    return CONSENT_COPY[version];
+  }
+  /* 15 s for the first 3 min, then 30 s up to 15 min. A Retry-After wait only lengthens a step. -1 stops. */
+  function nextPollDelay(elapsedMs, retryMs){
+    const elapsed=Number(elapsedMs)>0?Number(elapsedMs):0;
+    const base=elapsed<POLL_FAST_UNTIL?POLL_FAST_MS:POLL_SLOW_MS;
+    const wait=Math.max(base,Number(retryMs)>0?Number(retryMs):0);
+    return elapsed+wait<=POLL_STOP_AT?wait:-1;
+  }
+  /* Delta seconds or an HTTP date. Anything else is 0, meaning no hint. */
+  function retryAfterMs(value, nowMs){
+    const text=typeof value==='string'?value.trim():'';
+    if(!text) return 0;
+    if(/^\d{1,7}$/.test(text)) return Math.min(Number(text)*1000,POLL_STOP_AT);
+    const at=Date.parse(text);
+    if(!Number.isFinite(at)) return 0;
+    return Math.min(Math.max(at-Number(nowMs||0),0),POLL_STOP_AT);
+  }
+  function plainNote(value){
+    return typeof value==='string'?value.slice(0,1000):'';
+  }
+  function publishedState(data){
+    if(Object.prototype.hasOwnProperty.call(RESULT_TITLE,data.outcome)) return data.outcome;
+    return data.status==='invalid'?'invalid':'judged';
+  }
+  /* Visitor card for a claim view. Unpublished rows stay pending, so polling goes on. */
+  function resultView(input){
+    const data=input&&typeof input==='object'?input:{};
+    if(data.status==='withdrawn') return {state:'withdrawn',title:STATUS_LABEL.withdrawn,note:'',prize:'',final:true};
+    if(data.published!==true) return {state:'pending',title:PENDING_COPY,note:'',prize:'',final:false};
+    const state=publishedState(data);
+    const prize=state==='missed'&&typeof data.prizeMessage==='string'?data.prizeMessage.slice(0,500):'';
+    return {state,title:RESULT_TITLE[state],note:plainNote(data.publicNote),prize,final:true};
+  }
+  function capMessage(cap){
+    return '한 사람당 '+cap+'번까지 제출할 수 있어요. 이번 도전은 여기까지예요! 아래 접수 목록에서 결과를 확인해 주세요.';
+  }
   function paperSearchPath(query, page){
     const q=typeof query==='string'?query.trim():'';
     const n=Number(page);
@@ -328,7 +386,10 @@
       cryptoApi:opts.crypto||root.crypto||null,
       storage:opts.storage||root.localStorage,
       sessionFn:opts.session||(()=>root.FalsifyHostedSession),
-      location:opts.location||root.location||{hash:''}
+      location:opts.location||root.location||{hash:''},
+      later:typeof opts.setTimeout==='function'?opts.setTimeout:(typeof root.setTimeout==='function'?root.setTimeout.bind(root):null),
+      cancel:typeof opts.clearTimeout==='function'?opts.clearTimeout:(typeof root.clearTimeout==='function'?root.clearTimeout.bind(root):null),
+      now:typeof opts.now==='function'?opts.now:()=>Date.now()
     };
   }
   function mountContext(options){
@@ -373,7 +434,11 @@
     const storage=ctx.storage;
     const sessionFn=ctx.sessionFn;
     const location=ctx.location;
+    const later=ctx.later;
+    const cancel=ctx.cancel;
+    const now=ctx.now;
     const listeners=[];
+    let poll={token:0,timer:null,startedAt:0,receipt:'',claimKey:''};
     let closed=false;
     let liveConfig=null;
     let course='quick';
@@ -445,7 +510,7 @@
           el('input',{id:'booth-nickname',type:'text',maxlength:'24',autocomplete:'off',spellcheck:'false'})),
         el('label',{className:'check-row',for:'booth-consent'},
           el('input',{id:'booth-consent',type:'checkbox'}),
-          el('span',{id:'booth-consent-copy',textContent:CONSENT_COPY})),
+          el('span',{id:'booth-consent-copy',textContent:CONSENT_COPY[CONSENT_VERSION]})),
         el('div',{className:'button-row'},
           el('button',{id:'booth-submit-button',type:'submit',className:'button primary',textContent:'제출',disabled:true})),
         el('p',{id:'booth-submit-status',className:'form-feedback',role:'alert','aria-live':'polite'})),
@@ -457,7 +522,8 @@
         el('div',{className:'button-row'},
           el('button',{id:'booth-copy',type:'button',className:'button primary',textContent:'접수번호와 확인키 복사'}),
           el('a',{id:'booth-receipt-result',href:'#booth-result',className:'button secondary',textContent:'결과 확인'})),
-        el('p',{className:'muted',textContent:'확인키는 제출한 이 화면에서만 크게 보입니다. 이 브라우저에 최대 10건을 저장합니다.'})),
+        el('p',{className:'muted',textContent:'확인키는 제출한 이 화면에서만 크게 보입니다. 이 브라우저에 최대 10건을 저장합니다.'}),
+        el('div',{id:'booth-receipt-live'})),
       el('section',{id:'booth-result',hidden:true,'aria-label':'제출 결과'},
         el('h2',{textContent:'제출 결과'}),
         el('form',{id:'booth-claim-form'},
@@ -469,20 +535,31 @@
             el('button',{type:'submit',className:'button primary',textContent:'결과 보기'}))),
         el('div',{id:'booth-result-body',hidden:true},
           el('p',{id:'booth-result-status',className:'booth-status-line'}),
-          el('p',{id:'booth-result-outcome',className:'booth-status-line'}),
-          el('p',{id:'booth-result-note'}),
-          el('p',{id:'booth-result-prize',className:'booth-key',hidden:true}),
+          el('div',{id:'booth-result-live'}),
           el('div',{className:'button-row'},
             el('button',{id:'booth-withdraw',type:'button',className:'button secondary',textContent:'제출 철회'}),
             el('button',{id:'booth-withdraw-confirm',type:'button',className:'button primary',hidden:true,textContent:'철회를 확인합니다'}))),
-        el('p',{id:'booth-result-error',className:'form-feedback error',role:'alert','aria-live':'polite'})));
+        el('p',{id:'booth-result-error',className:'form-feedback error',role:'alert','aria-live':'polite'}),
+        el('section',{id:'booth-receipts',className:'booth-receipts',hidden:true,'aria-label':'이 브라우저의 접수'},
+          el('h3',{textContent:'이 브라우저의 접수'}),
+          el('div',{id:'booth-receipts-list'}))));
+    const liveCard=el('article',{id:'booth-live',className:'booth-live',hidden:true,role:'status','aria-live':'polite','data-state':'pending'},
+      el('p',{id:'booth-live-title',className:'booth-live-title'}),
+      el('p',{id:'booth-live-prize',className:'booth-live-prize',hidden:true}),
+      el('p',{id:'booth-live-note',className:'booth-live-note',hidden:true}),
+      el('p',{id:'booth-live-error',className:'form-feedback',hidden:true}),
+      el('div',{className:'button-row'},
+        el('button',{id:'booth-live-recheck',type:'button',className:'button secondary',hidden:true,textContent:'결과 다시 보기'}),
+        el('button',{id:'booth-live-again',type:'button',className:'button primary',hidden:true,textContent:'다시 도전하기'})));
+    host.append(liveCard);
     placeBooth(doc, host);
     setRailBlue(doc, true);
 
-    function coded(code, data, status){
+    function coded(code, data, status, retryMs){
       const error=Error(code||'invalid_request');
       error.code=code||'invalid_request';
       error.status=status||0;
+      error.retryAfter=retryMs||0;
       error.receipt=data&&typeof data.receipt==='string'?data.receipt:'';
       return error;
     }
@@ -540,7 +617,8 @@
       if(res&&res.ok) return data;
       const status=statusOf(res);
       const fallback=status===429?'rate_limited':'invalid_request';
-      throw coded(errorCodeFrom(data)||fallback,data,status);
+      const retry=status===429?retryAfterMs(headerValue(res.headers,'Retry-After'),now()):0;
+      throw coded(errorCodeFrom(data)||fallback,data,status,retry);
     }
     async function request(path, spec){
       const base=requestBase();
@@ -570,6 +648,7 @@
       if(event&&typeof event.preventDefault==='function') event.preventDefault();
       try{location.hash='#booth-result';}catch{}
       prefillClaim();
+      renderReceipts();
       showResult(true);
     }
     function prefillClaim(){
@@ -610,7 +689,7 @@
       const button=byId('booth-submit-button');
       if(!button) return;
       const consent=byId('booth-consent');
-      const ready=submissionsOpen()&&consent&&consent.checked&&rows.length>0&&!!generatedFile&&SHA256.test(generatedHash);
+      const ready=submissionsOpen()&&!!consentCopyFor(liveConsentVersion())&&consent&&consent.checked&&rows.length>0&&!!generatedFile&&SHA256.test(generatedHash);
       button.disabled=!ready;
     }
     function renderRows(){
@@ -1043,6 +1122,7 @@
     }
     function submissionBlock(){
       if(!submissionsOpen()) return 'closed';
+      if(!consentCopyFor(liveConsentVersion())) return 'consent';
       if(!paper) return 'pick';
       if(!generatedFile||!SHA256.test(generatedHash)) return 'missing';
       return '';
@@ -1062,7 +1142,7 @@
       const nickname=byId('booth-nickname');
       return {
         course,consent:!!(consent&&consent.checked),
-        consentVersion:liveConfig&&liveConfig.consentVersion||CONSENT_VERSION,
+        consentVersion:liveConsentVersion(),
         rows:rows.map(rowPayload),
         paper:paperPayload,
         nickname:nickname?nickname.value:'',
@@ -1084,11 +1164,9 @@
     async function submitBooth(event){
       stopEvent(event);
       const block=submissionBlock();
-      if(block==='closed'){say('booth-submit-status',errorMessage('booth_closed'));return;}
-      if(block==='pick'){say('booth-submit-status',PICK_PAPER);refreshSubmitButton();return;}
-      if(block==='missing'){
-        say('booth-submit-status','제출할 수정본이 없습니다. 「제출할 수정본 만들기」를 눌러 주세요.');
-        refreshSubmitButton();
+      if(block){
+        say('booth-submit-status',blockMessage(block));
+        if(block!=='closed') refreshSubmitButton();
         return;
       }
       const live=editsFor(null);
@@ -1113,8 +1191,9 @@
         rememberClaim(data, claimKey);
         showReceipt(data,claimKey);
         say('booth-submit-status','제출했습니다. 확인키를 이 화면에서 확인해 두세요.');
+        followSubmission(data, claimKey);
       }catch(error){
-        say('booth-submit-status',errorMessage(error.code,{receipt:error.receipt}));
+        say('booth-submit-status',submitFailureText(error));
         showKnownReceipt(error);
         refreshSubmitButton();
       }
@@ -1125,32 +1204,218 @@
       const status=STATUS_LABEL[data.status]||data.status||'';
       const courseLabel=data.course==='deep'?'정밀 코스':data.course==='quick'?'빠른 코스':'';
       setText('booth-result-status',[data.receipt,status,courseLabel,data.declaredCount!=null?data.declaredCount+'건':''].filter(Boolean).join(' · '));
-      const outcome=data.published&&data.outcome?OUTCOME_LABEL[data.outcome]||data.outcome:'';
-      setText('booth-result-outcome',outcome?('판정 '+outcome):'');
-      setHidden('booth-result-outcome',!outcome);
-      setText('booth-result-note',data.published&&typeof data.publicNote==='string'?data.publicNote:'');
-      const prize=data.published&&typeof data.prizeMessage==='string'?data.prizeMessage:'';
-      setText('booth-result-prize',prize);
-      setHidden('booth-result-prize',!prize);
       const withdrawn=data.status==='withdrawn';
       setHidden('booth-withdraw',withdrawn);
       say('booth-result-error','');
     }
+    function claimFields(){
+      const receipt=byId('booth-claim-receipt');
+      const key=byId('booth-claim-key');
+      return {receipt:normalizeReceipt(receipt?receipt.value:''),claimKey:normalizeClaimKey(key?key.value:'')};
+    }
+    function fillClaim(item){
+      const receipt=byId('booth-claim-receipt');
+      const key=byId('booth-claim-key');
+      if(receipt) receipt.value=item.receipt;
+      if(key) key.value=item.claimKey;
+    }
+    function claimRequest(receipt, claimKey){
+      return request('/v1/booth/claim',{method:'POST',auth:false,body:{receipt,claimKey}});
+    }
     async function lookup(event){
-      if(event&&typeof event.preventDefault==='function') event.preventDefault();
-      const receipt=normalizeReceipt(byId('booth-claim-receipt')?byId('booth-claim-receipt').value:'');
-      const claimKey=normalizeClaimKey(byId('booth-claim-key')?byId('booth-claim-key').value:'');
-      if(!receipt||!claimKey){say('booth-result-error',errorMessage('not_found'));return;}
+      stopEvent(event);
+      const fields=claimFields();
+      if(!fields.receipt||!fields.claimKey){say('booth-result-error',errorMessage('not_found'));return;}
+      await lookupRecord(fields.receipt,fields.claimKey);
+    }
+    async function lookupRecord(receipt, claimKey){
       say('booth-result-error','');
-      try{renderClaim(await request('/v1/booth/claim',{method:'POST',auth:false,body:{receipt,claimKey}}));}
-      catch(error){say('booth-result-error',errorMessage(error.code,error));}
+      stopPolling();
+      let data=null;
+      try{data=await claimRequest(receipt,claimKey);}
+      catch(error){say('booth-result-error',errorMessage(error.code,error));return;}
+      if(closed) return;
+      placeLive('booth-result-live');
+      if(!applyClaim(data).final) beginPolling(receipt,claimKey,false);
     }
     async function withdraw(){
-      const receipt=normalizeReceipt(byId('booth-claim-receipt')?byId('booth-claim-receipt').value:'');
-      const claimKey=normalizeClaimKey(byId('booth-claim-key')?byId('booth-claim-key').value:'');
-      if(!receipt||!claimKey){say('booth-result-error',errorMessage('not_found'));return;}
-      try{renderClaim(await request('/v1/booth/withdraw',{method:'POST',auth:false,body:{receipt,claimKey}}));}
-      catch(error){say('booth-result-error',errorMessage(error.code,error));}
+      const fields=claimFields();
+      if(!fields.receipt||!fields.claimKey){say('booth-result-error',errorMessage('not_found'));return;}
+      stopPolling();
+      try{
+        const data=await request('/v1/booth/withdraw',{method:'POST',auth:false,body:fields});
+        placeLive('booth-result-live');
+        applyClaim(data);
+      }catch(error){say('booth-result-error',errorMessage(error.code,error));}
+    }
+    function blockMessage(block){
+      if(block==='closed') return errorMessage('booth_closed');
+      if(block==='consent') return CONSENT_MISSING;
+      if(block==='pick') return PICK_PAPER;
+      return '제출할 수정본이 없습니다. 「제출할 수정본 만들기」를 눌러 주세요.';
+    }
+    function liveConsentVersion(){
+      const version=liveConfig&&liveConfig.consentVersion;
+      return typeof version==='string'&&version?version:CONSENT_VERSION;
+    }
+    function applyConsent(){
+      const text=consentCopyFor(liveConsentVersion());
+      setText('booth-consent-copy',text||CONSENT_MISSING);
+      const box=byId('booth-consent');
+      if(!box) return;
+      if(!text) box.checked=false;
+      box.disabled=!text;
+    }
+    function perOwnerCap(){
+      return declaredCap(liveConfig&&liveConfig.limits&&liveConfig.limits.perOwner);
+    }
+    /* The per-guest cap is a 429 with no Retry-After. Booth CORS hides that header today,
+       so a visible wait means a short rate limit and local receipts decide the cap copy. */
+    function submitFailureText(error){
+      if(error.code!=='rate_limited'||error.retryAfter>0) return errorMessage(error.code,{receipt:error.receipt});
+      renderReceipts();
+      const cap=perOwnerCap();
+      if(readReceipts(storage).length>=cap) return capMessage(cap);
+      return '제출이 잠시 막혔어요. 한 사람당 '+cap+'번까지 제출할 수 있어요. 이미 '+cap+'번 냈다면 「결과 확인」에서 결과를 보고, 아니면 잠시 뒤 다시 시도해 주세요.';
+    }
+    function placeLive(slotId){
+      const slot=byId(slotId);
+      if(!slot) return;
+      if(liveCard.parentNode!==slot){
+        if(typeof liveCard.remove==='function') liveCard.remove();
+        slot.append(liveCard);
+      }
+      liveCard.hidden=false;
+    }
+    function liveError(text){
+      setText('booth-live-error',text);
+      setHidden('booth-live-error',!text);
+    }
+    function renderLive(data){
+      const view=resultView(data);
+      liveCard.setAttribute('data-state',view.state);
+      setText('booth-live-title',view.title);
+      setText('booth-live-prize',view.prize);
+      setHidden('booth-live-prize',!view.prize);
+      setText('booth-live-note',view.note);
+      setHidden('booth-live-note',!view.note);
+      setHidden('booth-live-again',!view.final);
+      setHidden('booth-live-recheck',true);
+      liveError('');
+      return view;
+    }
+    function applyClaim(data){
+      renderClaim(data);
+      const view=renderLive(data);
+      if(view.final) stopPolling();
+      return view;
+    }
+    function stopPolling(){
+      poll.token+=1;
+      if(poll.timer!=null&&cancel) cancel(poll.timer);
+      poll.timer=null;
+    }
+    function beginPolling(receipt, claimKey, immediate){
+      stopPolling();
+      poll.startedAt=now();
+      poll.receipt=receipt;
+      poll.claimKey=claimKey;
+      setHidden('booth-live-recheck',true);
+      if(immediate) void pollOnce(poll.token);
+      else schedulePoll(poll.token,0);
+    }
+    function pollStopped(){
+      poll.timer=null;
+      setHidden('booth-live-recheck',false);
+    }
+    function schedulePoll(token, retryMs){
+      const delay=nextPollDelay(now()-poll.startedAt,retryMs);
+      if(delay<0){pollStopped();return;}
+      if(!later) return;
+      poll.timer=later(()=>{void pollOnce(token);},delay);
+    }
+    function pollFailed(token, error){
+      if(error.code==='not_found'){liveError(errorMessage('not_found'));pollStopped();return;}
+      schedulePoll(token,error.status===429?(error.retryAfter||POLL_429_MS):0);
+    }
+    async function pollOnce(token){
+      if(closed||token!==poll.token) return;
+      poll.timer=null;
+      let data=null;
+      try{data=await claimRequest(poll.receipt,poll.claimKey);}
+      catch(error){
+        if(!closed&&token===poll.token) pollFailed(token,error);
+        return;
+      }
+      if(closed||token!==poll.token) return;
+      if(!applyClaim(data).final) schedulePoll(token,0);
+    }
+    function recheck(){
+      if(!poll.receipt||!poll.claimKey) return;
+      beginPolling(poll.receipt,poll.claimKey,true);
+    }
+    function followSubmission(data, claimKey){
+      renderReceipts();
+      if(!data.receipt||!claimKey) return;
+      fillClaim({receipt:data.receipt,claimKey});
+      placeLive('booth-receipt-live');
+      renderLive({status:data.status||'received',published:false});
+      beginPolling(data.receipt,claimKey,false);
+    }
+    function receiptTime(value){
+      const at=new Date(value);
+      if(!Number.isFinite(at.getTime())) return '';
+      return String(at.getHours()).padStart(2,'0')+':'+String(at.getMinutes()).padStart(2,'0');
+    }
+    function renderReceipts(){
+      const box=byId('booth-receipts-list');
+      if(!box) return;
+      box.textContent='';
+      const list=recentReceipts(storage);
+      setHidden('booth-receipts',!list.length);
+      for(const item of list){
+        const label=[item.receipt,receiptTime(item.createdAt)].filter(Boolean).join(' · ');
+        const button=el('button',{type:'button',className:'button secondary booth-receipt-item',textContent:label});
+        button.addEventListener('click',()=>{fillClaim(item);void lookupRecord(item.receipt,item.claimKey);});
+        box.append(button);
+      }
+    }
+    /* A reload within 15 min of the newest receipt, or a #booth-result visit, picks the card up again. */
+    function resumeLatest(){
+      const latest=readReceipts(storage)[0];
+      if(!latest) return;
+      const created=Date.parse(latest.createdAt);
+      const fresh=Number.isFinite(created)&&now()-created<POLL_STOP_AT;
+      if(location.hash!=='#booth-result'&&!fresh) return;
+      fillClaim(latest);
+      showResult(true);
+      void lookupRecord(latest.receipt,latest.claimKey);
+    }
+    function resetWorkspace(){
+      const clear=byId('import-clear');
+      if(clear&&typeof clear.click==='function'){clear.click();return;}
+      if(typeof Event==='function'&&typeof doc.dispatchEvent==='function') doc.dispatchEvent(new Event('falsify:document-clear'));
+    }
+    function leaveResult(){
+      setHidden('booth-result',true);
+      setHidden('booth-result-body',true);
+      try{if(location.hash==='#booth-result') location.hash='#booth';}catch{}
+    }
+    /* Back to the mission list with no paper, no rows and an unticked consent. */
+    function startAgain(){
+      stopPolling();
+      liveCard.hidden=true;
+      setHidden('booth-receipt',true);
+      setText('booth-receipt-code','');
+      setText('booth-claim-code','');
+      const consent=byId('booth-consent');
+      if(consent) consent.checked=false;
+      leaveResult();
+      resetWorkspace();
+      clearPaper();
+      say('booth-submit-status','');
+      say('booth-search-status','');
+      if(typeof host.scrollIntoView==='function') host.scrollIntoView({block:'start'});
     }
     async function copyReceipt(){
       const text=[byId('booth-receipt-code')&&byId('booth-receipt-code').textContent,byId('booth-claim-code')&&byId('booth-claim-code').textContent].filter(Boolean).join('\n');
@@ -1181,9 +1446,12 @@
       if(!submissionsOpen()) say('booth-status',errorMessage('booth_closed'));
       renderMissions();
       renderCourses();
+      applyConsent();
       refreshSubmitButton();
       prefillClaim();
+      renderReceipts();
       showResult(false);
+      resumeLatest();
     }
     async function loadConfig(){
       try{
@@ -1211,6 +1479,8 @@
     on(byId('booth-claim-form'),'submit',event=>{void lookup(event);});
     on(byId('booth-withdraw'),'click',()=>{setHidden('booth-withdraw-confirm',false);});
     on(byId('booth-withdraw-confirm'),'click',()=>{void withdraw();});
+    on(byId('booth-live-again'),'click',startAgain);
+    on(byId('booth-live-recheck'),'click',recheck);
     on(resultLink,'click',openResult);
     on(byId('booth-receipt-result'),'click',openResult);
     on(doc,'falsify:paper-generated',event=>{void adoptGenerated(event&&event.detail);});
@@ -1221,6 +1491,7 @@
     void loadConfig();
     return {destroy(){
       closed=true;
+      stopPolling();
       setRailBlue(doc,false);
       for(const [target,type,handler] of listeners){
         if(target&&typeof target.removeEventListener==='function') target.removeEventListener(type,handler);
@@ -1232,7 +1503,8 @@
   if(boothConfigured(readConfig())) mount();
   root.FalsifyBooth={
     normalizeClaimKey,normalizeReceipt,buildSubmission,submissionForm,errorMessage,
-    readReceipts,rememberReceipt,paperSearchPath,paperPdfPath,
-    CONSENT_COPY,RECEIPT_KEY,RECEIPT_CAP,mount
+    readReceipts,rememberReceipt,recentReceipts,paperSearchPath,paperPdfPath,
+    consentCopyFor,nextPollDelay,retryAfterMs,resultView,capMessage,
+    CONSENT_COPY,CONSENT_VERSION,RECEIPT_KEY,RECEIPT_CAP,RECENT_CAP,mount
   };
 })(typeof window==='object'?window:globalThis);

@@ -158,8 +158,8 @@ test('submission bodies use only contract keys and reject nickname PII', () => {
     limits: {maxDeclared: 8},
     rows: eight.concat([{pageIndex: 8, before: 'before 8', after: 'after', defectType: 'other', reason: '이유'}]),
   }).code, 'invalid_request');
-  assert.equal(booth.CONSENT_COPY, '제출한 수정본 PDF와 결함 설명(쪽·유형·이유)은 가짜연구소 Falsify 스터디가 저장하고 운영자가 읽습니다. 마감 후 AI 검증에는 수정본 PDF만 모델 제공자(Anthropic 또는 OpenAI)에 보내며, 결함 설명은 AI에 보내지 않습니다. 이름·연락처는 받지 않으니 이유란에도 적지 마세요. 원 논문은 미션이나 검색에서 고른 공개 논문(CC BY·CC BY-SA·CC0)이며, 수정본을 스터디 밖에 공개할 때는 저자·arXiv 번호·라이선스와 수정 사실을 밝히고, CC BY-SA 논문의 수정본은 같은 라이선스로 공개합니다. 결과와 경품 안내는 접수번호와 확인키로만 확인할 수 있습니다. 확인키로 언제든 철회할 수 있습니다. 철회하면 서버의 수정본 PDF·설명·결과를 바로 지우고, 운영자 보관본은 다음 동기화 때 지웁니다. 이미 AI 검증에 보낸 사본은 모델 제공자에게서 회수할 수 없고, 웹 실행 서버 사본은 7일, 데이터베이스 백업은 최대 30일 뒤에 사라집니다. 보관 자료는 스터디 종료 후 삭제합니다.');
-  assert.equal(booth.CONSENT_COPY.includes('2026-11-22.v1'), false);
+  assert.equal(booth.CONSENT_COPY['2026-11-22.v1'], '제출한 수정본 PDF와 결함 설명(쪽·유형·이유)은 가짜연구소 Falsify 스터디가 저장하고 운영자가 읽습니다. 마감 후 AI 검증에는 수정본 PDF만 모델 제공자(Anthropic 또는 OpenAI)에 보내며, 결함 설명은 AI에 보내지 않습니다. 이름·연락처는 받지 않으니 이유란에도 적지 마세요. 원 논문은 미션이나 검색에서 고른 공개 논문(CC BY·CC BY-SA·CC0)이며, 수정본을 스터디 밖에 공개할 때는 저자·arXiv 번호·라이선스와 수정 사실을 밝히고, CC BY-SA 논문의 수정본은 같은 라이선스로 공개합니다. 결과와 경품 안내는 접수번호와 확인키로만 확인할 수 있습니다. 확인키로 언제든 철회할 수 있습니다. 철회하면 서버의 수정본 PDF·설명·결과를 바로 지우고, 운영자 보관본은 다음 동기화 때 지웁니다. 이미 AI 검증에 보낸 사본은 모델 제공자에게서 회수할 수 없고, 웹 실행 서버 사본은 7일, 데이터베이스 백업은 최대 30일 뒤에 사라집니다. 보관 자료는 스터디 종료 후 삭제합니다.');
+  assert.equal(booth.CONSENT_COPY['2026-11-22.v1'].includes('2026-11-22.v1'), false);
 });
 
 test('the R4-2 interop vector is the edited.pdf part', async () => {
@@ -249,101 +249,103 @@ test('server error codes become the booth messages', () => {
   assert.match(booth.errorMessage('mystery'), /처리하지 못했습니다/);
 });
 
-test('the event panel submits contract fields and keeps claim and search auth apart', async () => {
-  function page() {
-    const ids = new Map();
-    class Node {
-      constructor(tag) {
-        this.tagName = tag;
-        this.children = [];
-        this.parentNode = null;
-        this.hidden = false;
-        this.disabled = false;
-        this.value = '';
-        this.checked = false;
-        this.className = '';
-        this.type = '';
-        this._text = '';
-        this._id = '';
-        this.listeners = new Map();
-      }
-      get id() { return this._id; }
-      set id(value) {
-        if (this._id) ids.delete(this._id);
-        this._id = value || '';
-        if (this._id) ids.set(this._id, this);
-      }
-      get firstChild() { return this.children.find(kid => kid && typeof kid === 'object') || null; }
-      get textContent() {
-        return this._text + this.children.map(kid => typeof kid === 'string' ? kid : kid.textContent).join('');
-      }
-      set textContent(value) { this.children = []; this._text = String(value ?? ''); }
-      setAttribute() {}
-      append(...kids) {
-        for (const kid of kids) {
-          if (kid == null || kid === false) continue;
-          if (typeof kid === 'object') kid.parentNode = this;
-          this.children.push(kid);
-        }
-      }
-      insertBefore(node, ref) {
-        node.parentNode = this;
-        const at = this.children.indexOf(ref);
-        if (at < 0) this.children.unshift(node);
-        else this.children.splice(at, 0, node);
-      }
-      remove() {
-        if (!this.parentNode) return;
-        const at = this.parentNode.children.indexOf(this);
-        if (at >= 0) this.parentNode.children.splice(at, 1);
-        this.parentNode = null;
-      }
-      addEventListener(type, fn) { this.listeners.set(type, [...(this.listeners.get(type) || []), fn]); }
-      removeEventListener(type, fn) {
-        this.listeners.set(type, (this.listeners.get(type) || []).filter(item => item !== fn));
-      }
-      click() { this.dispatchEvent({type: 'click'}); }
-      dispatchEvent(event) { for (const fn of this.listeners.get(event.type) || []) fn(event); }
-      querySelector(selector) {
-        const visit = node => {
-          if (selector === '.content' && node.className === 'content') return node;
-          for (const kid of node.children) {
-            if (kid && typeof kid === 'object') {
-              const found = visit(kid);
-              if (found) return found;
-            }
-          }
-          return null;
-        };
-        return visit(this);
-      }
-      scrollIntoView() {}
+/* Synthetic DOM the booth mount builds into. ids maps element ids to nodes. */
+function page() {
+  const ids = new Map();
+  class Node {
+    constructor(tag) {
+      this.tagName = tag;
+      this.children = [];
+      this.parentNode = null;
+      this.hidden = false;
+      this.disabled = false;
+      this.value = '';
+      this.checked = false;
+      this.className = '';
+      this.type = '';
+      this._text = '';
+      this._id = '';
+      this.listeners = new Map();
     }
-    const doc = {
-      listeners: new Map(),
-      createElement: tag => new Node(tag),
-      getElementById: id => ids.get(id) || null,
-      addEventListener(type, fn) { this.listeners.set(type, [...(this.listeners.get(type) || []), fn]); },
-      removeEventListener(type, fn) {
-        this.listeners.set(type, (this.listeners.get(type) || []).filter(item => item !== fn));
-      },
-      dispatchEvent(event) { for (const fn of this.listeners.get(event.type) || []) fn(event); },
-    };
-    const body = new Node('body');
-    const main = new Node('main');
-    main.id = 'main';
-    const content = new Node('div');
-    content.className = 'content';
-    body.append(main);
-    const paperInput = new Node('input');
-    paperInput.id = 'paper-file';
-    const generate = new Node('button');
-    generate.id = 'paper-generate';
-    content.append(paperInput, generate);
-    main.append(content);
-    doc.body = body;
-    return {doc, content, ids};
+    get id() { return this._id; }
+    set id(value) {
+      if (this._id) ids.delete(this._id);
+      this._id = value || '';
+      if (this._id) ids.set(this._id, this);
+    }
+    get firstChild() { return this.children.find(kid => kid && typeof kid === 'object') || null; }
+    get textContent() {
+      return this._text + this.children.map(kid => typeof kid === 'string' ? kid : kid.textContent).join('');
+    }
+    set textContent(value) { this.children = []; this._text = String(value ?? ''); }
+    setAttribute() {}
+    append(...kids) {
+      for (const kid of kids) {
+        if (kid == null || kid === false) continue;
+        if (typeof kid === 'object') kid.parentNode = this;
+        this.children.push(kid);
+      }
+    }
+    insertBefore(node, ref) {
+      node.parentNode = this;
+      const at = this.children.indexOf(ref);
+      if (at < 0) this.children.unshift(node);
+      else this.children.splice(at, 0, node);
+    }
+    remove() {
+      if (!this.parentNode) return;
+      const at = this.parentNode.children.indexOf(this);
+      if (at >= 0) this.parentNode.children.splice(at, 1);
+      this.parentNode = null;
+    }
+    addEventListener(type, fn) { this.listeners.set(type, [...(this.listeners.get(type) || []), fn]); }
+    removeEventListener(type, fn) {
+      this.listeners.set(type, (this.listeners.get(type) || []).filter(item => item !== fn));
+    }
+    click() { this.dispatchEvent({type: 'click'}); }
+    dispatchEvent(event) { for (const fn of this.listeners.get(event.type) || []) fn(event); }
+    querySelector(selector) {
+      const visit = node => {
+        if (selector === '.content' && node.className === 'content') return node;
+        for (const kid of node.children) {
+          if (kid && typeof kid === 'object') {
+            const found = visit(kid);
+            if (found) return found;
+          }
+        }
+        return null;
+      };
+      return visit(this);
+    }
+    scrollIntoView() {}
   }
+  const doc = {
+    listeners: new Map(),
+    createElement: tag => new Node(tag),
+    getElementById: id => ids.get(id) || null,
+    addEventListener(type, fn) { this.listeners.set(type, [...(this.listeners.get(type) || []), fn]); },
+    removeEventListener(type, fn) {
+      this.listeners.set(type, (this.listeners.get(type) || []).filter(item => item !== fn));
+    },
+    dispatchEvent(event) { for (const fn of this.listeners.get(event.type) || []) fn(event); },
+  };
+  const body = new Node('body');
+  const main = new Node('main');
+  main.id = 'main';
+  const content = new Node('div');
+  content.className = 'content';
+  body.append(main);
+  const paperInput = new Node('input');
+  paperInput.id = 'paper-file';
+  const generate = new Node('button');
+  generate.id = 'paper-generate';
+  content.append(paperInput, generate);
+  main.append(content);
+  doc.body = body;
+  return {doc, content, ids};
+}
+
+test('the event panel submits contract fields and keeps claim and search auth apart', async () => {
   const skipped = page();
   let created = false;
   booth.mount({
@@ -754,6 +756,341 @@ test('a cold #booth-result load keeps the hash and index routes still resolve', 
   review.listeners.popstate();
   assert.equal(review.location.hash, '#booth-result');
   assert.deepEqual(review.urls, []);
+});
+
+test('the claim poll runs every 15 s for 3 min, every 30 s to 15 min, and honours Retry-After', () => {
+  const delays = [];
+  let elapsed = 0;
+  for (;;) {
+    const delay = booth.nextPollDelay(elapsed, 0);
+    if (delay < 0) break;
+    delays.push(delay);
+    elapsed += delay;
+  }
+  assert.equal(delays.filter(ms => ms === 15000).length, 12);
+  assert.equal(delays.slice(0, 12).every(ms => ms === 15000), true);
+  assert.equal(delays.slice(12).every(ms => ms === 30000), true);
+  assert.equal(elapsed, 900000);
+  assert.equal(booth.nextPollDelay(900000, 0), -1);
+  assert.equal(booth.nextPollDelay(30000, 45000), 45000);
+  assert.equal(booth.nextPollDelay(30000, 5000), 15000);
+  assert.equal(booth.nextPollDelay(200000, 0), 30000);
+  assert.equal(booth.nextPollDelay(880000, 0), -1);
+  assert.equal(booth.nextPollDelay(800000, 200000), -1);
+  assert.equal(booth.retryAfterMs('45', 0), 45000);
+  assert.equal(booth.retryAfterMs(' 7 ', 0), 7000);
+  assert.equal(booth.retryAfterMs('99999', 0), 900000);
+  const at = Date.parse('2026-11-22T01:00:00Z');
+  assert.equal(booth.retryAfterMs('Sun, 22 Nov 2026 01:01:00 GMT', at), 60000);
+  assert.equal(booth.retryAfterMs('Sun, 22 Nov 2026 00:59:00 GMT', at), 0);
+  assert.equal(booth.retryAfterMs('soon', at), 0);
+  assert.equal(booth.retryAfterMs(null, at), 0);
+});
+
+test('each claim state maps to the visitor card copy', () => {
+  const pending = booth.resultView({status: 'reviewing', published: false});
+  assert.equal(pending.state, 'pending');
+  assert.equal(pending.final, false);
+  assert.equal(pending.title, 'AI가 결함을 찾는 중이에요. 보통 1~3분 걸려요. 이 화면을 닫아도 접수번호와 확인키로 나중에 볼 수 있어요.');
+  assert.equal(booth.resultView({status: 'received', published: false}).state, 'pending');
+  assert.equal(booth.resultView({status: 'judged', published: false, outcome: 'missed'}).state, 'pending');
+  const caught = booth.resultView({status: 'judged', published: true, outcome: 'caught', publicNote: '3쪽 표의 값을 짚었어요', prizeMessage: 'ignored'});
+  assert.deepEqual(plain(caught), {state: 'caught', title: 'AI가 찾아냈어요', note: '3쪽 표의 값을 짚었어요', prize: '', final: true});
+  const partial = booth.resultView({status: 'judged', published: true, outcome: 'partial', publicNote: '쪽은 맞았어요'});
+  assert.equal(partial.title, 'AI가 거의 찾았어요');
+  assert.equal(partial.note, '쪽은 맞았어요');
+  const missed = booth.resultView({status: 'judged', published: true, outcome: 'missed', publicNote: 'Opus 라운드로 갑니다', prizeMessage: '부스에서 스티커를 받아 가세요'});
+  assert.deepEqual(plain(missed), {state: 'missed', title: 'AI가 못 찾았어요!', note: 'Opus 라운드로 갑니다', prize: '부스에서 스티커를 받아 가세요', final: true});
+  const invalid = booth.resultView({status: 'invalid', published: true, outcome: 'invalid', publicNote: '바뀐 곳이 없어요'});
+  assert.equal(invalid.title, '결함으로 인정되지 않았어요');
+  assert.equal(booth.resultView({status: 'invalid', published: true}).title, '결함으로 인정되지 않았어요');
+  const withdrawn = booth.resultView({status: 'withdrawn', published: false});
+  assert.equal(withdrawn.title, '철회됨');
+  assert.equal(withdrawn.final, true);
+  assert.equal(booth.resultView(null).state, 'pending');
+  const markup = booth.resultView({status: 'judged', published: true, outcome: 'missed', publicNote: '<img src=x onerror=alert(1)>', prizeMessage: '<b>prize</b>'});
+  assert.equal(markup.note, '<img src=x onerror=alert(1)>');
+  assert.equal(markup.prize, '<b>prize</b>');
+  assert.equal(boothSource.includes('innerHTML'), false);
+  assert.equal(boothSource.includes('insertAdjacentHTML'), false);
+});
+
+test('consent copy is a map keyed by version and an unknown version has no text', () => {
+  assert.deepEqual(Object.keys(booth.CONSENT_COPY), ['2026-11-22.v1', '2026-11-22.v2']);
+  assert.equal(booth.consentCopyFor('2026-11-22.v1'), booth.CONSENT_COPY['2026-11-22.v1']);
+  assert.equal(booth.consentCopyFor('2026-11-22.v2'), '제출한 수정본 PDF와 결함 설명(쪽·유형·이유)은 가짜연구소 Falsify 스터디가 저장하고 운영자가 읽습니다. 제출하면 바로 수정본 PDF만 AI 검증을 위해 모델 제공자(Anthropic)에 보내고, 마감 후 한 번 더 보낼 수 있습니다. 결함 설명은 AI에 보내지 않습니다. 이름·연락처는 받지 않으니 이유란에도 적지 마세요. 원 논문은 미션이나 검색에서 고른 공개 논문(CC BY·CC BY-SA·CC0)이며, 수정본을 스터디 밖에 공개할 때는 저자·arXiv 번호·라이선스와 수정 사실을 밝히고, CC BY-SA 논문의 수정본은 같은 라이선스로 공개합니다. AI 결과와 경품 안내는 접수번호와 확인키로만 확인할 수 있습니다. 확인키로 언제든 철회할 수 있습니다. 철회하면 서버의 수정본 PDF·설명·결과를 바로 지우고, 운영자 보관본은 다음 동기화 때 지웁니다. 이미 AI 검증에 보낸 사본은 모델 제공자에게서 회수할 수 없고, 웹 실행 서버 사본은 7일, 데이터베이스 백업은 최대 30일 뒤에 사라집니다. 보관 자료는 스터디 종료 후 삭제합니다.');
+  assert.equal(booth.consentCopyFor('2026-11-22.v3'), '');
+  assert.equal(booth.consentCopyFor('toString'), '');
+  assert.equal(booth.consentCopyFor(undefined), '');
+  assert.equal(booth.CONSENT_VERSION, '2026-11-22.v1');
+});
+
+test('the result view lists this browser\'s newest 5 receipts', () => {
+  const storage = memoryStorage();
+  for (let i = 1; i <= 7; i += 1) {
+    booth.rememberReceipt(storage, {receipt: 'F-' + String(i).padStart(4, '0'), claimKey: '7Q3K-M9XD', createdAt: '2026-11-22T01:0' + i + ':00Z'});
+  }
+  const recent = booth.recentReceipts(storage);
+  assert.equal(recent.length, 5);
+  assert.deepEqual(plain(recent.map(item => item.receipt)), ['F-0007', 'F-0006', 'F-0005', 'F-0004', 'F-0003']);
+  assert.equal(recent[0].claimKey, '7Q3K-M9XD');
+  assert.equal(booth.readReceipts(storage).length, 7);
+  assert.equal(booth.recentReceipts(null).length, 0);
+  assert.match(booth.capMessage(5), /5번까지/);
+});
+
+function nodesOf(node) {
+  const out = [];
+  const visit = item => { out.push(item); for (const kid of item.children) if (kid && typeof kid === 'object') visit(kid); };
+  visit(node);
+  return out;
+}
+const settle = async () => { for (let i = 0; i < 6; i += 1) await new Promise(resolve => setTimeout(resolve, 0)); };
+/* Mounted booth with a fake clock. claims is a list of claim replies (a body, or {status, headers, body}). */
+function liveBooth(options = {}) {
+  const {doc, ids} = page();
+  const storage = options.storage || memoryStorage();
+  const calls = [];
+  const clock = {t: options.now || Date.parse('2026-11-22T01:00:30Z')};
+  const timers = [];
+  let timerId = 0;
+  const claims = (options.claims || []).slice();
+  const reply = (status, body, headers = {}) => ({
+    ok: status >= 200 && status < 300, status,
+    headers: {get(name) { return Object.prototype.hasOwnProperty.call(headers, name) ? headers[name] : null; }},
+    json: async () => body,
+  });
+  const fetchImpl = async (url, init = {}) => {
+    const path = String(url);
+    calls.push({path, at: clock.t, body: typeof init.body === 'string' ? JSON.parse(init.body) : null});
+    if (path.endsWith('/v1/booth/config')) {
+      return reply(200, {enabled: true, submissionsOpen: true, consentVersion: options.consentVersion || '2026-11-22.v2',
+        limits: {maxDeclared: 5, maxReason: 500, maxNickname: 24, perOwner: 5},
+        missions: [{paperId: '2503.10497', title: 'Synthetic mission', license: 'cc-by-4.0', course: 'quick'}]});
+    }
+    if (path.endsWith('/v1/booth/claim')) {
+      const next = claims.length > 1 ? claims.shift() : claims[0];
+      if (next && next.status && next.body) return reply(next.status, next.body, next.headers);
+      return reply(200, next);
+    }
+    if (path.endsWith('/v1/booth/submissions')) {
+      if (options.submitStatus) return reply(options.submitStatus, {error: {code: 'rate_limited'}});
+      return reply(201, {receipt: 'F-0042', claimKey: '7Q3K-M9XD', status: 'received', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:30Z'});
+    }
+    if (path.includes('/v1/papers/pdf')) {
+      const bytes = Buffer.from('%PDF-1.7 synthetic booth paper\n%%EOF\n');
+      return {ok: true, status: 200, headers: {get(name) { return name === 'X-Falsify-Paper-License' ? 'cc-by-4.0' : null; }},
+        arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength), json: async () => ({})};
+    }
+    return reply(404, {error: {code: 'not_found'}});
+  };
+  const location = {hash: options.hash || ''};
+  const handle = booth.mount({
+    document: doc, fetch: fetchImpl, storage, location,
+    config: () => ({booth: {enabled: true}, apiBase: 'https://event.example'}),
+    session: () => ({token: async () => 'fsg_' + 'a'.repeat(43)}),
+    setTimeout: (fn, ms) => { timerId += 1; timers.push({id: timerId, fn, ms}); return timerId; },
+    clearTimeout: id => { const at = timers.findIndex(item => item.id === id); if (at >= 0) timers.splice(at, 1); },
+    now: () => clock.t,
+  });
+  async function tick() {
+    assert.equal(timers.length, 1, 'one poll timer pending');
+    const next = timers.shift();
+    clock.t += next.ms;
+    next.fn();
+    await settle();
+    return next.ms;
+  }
+  const claimCalls = () => calls.filter(call => call.path.endsWith('/v1/booth/claim'));
+  return {doc, ids, storage, calls, claimCalls, timers, clock, tick, handle, location};
+}
+async function submitThroughBooth(h) {
+  const sourceBytes = Buffer.from('%PDF-1.7 synthetic booth paper\n%%EOF\n');
+  const sourceHash = createHash('sha256').update(sourceBytes).digest('hex');
+  boothContext.FalsifyPaperWorkspace = {
+    getSource: () => ({fileHash: sourceHash, file: new File([sourceBytes], 'source.pdf', {type: 'application/pdf'})}),
+    getEditSnapshot: () => ({revision: 1, edits: [{enabled: true, pageIndex: 1, segmentId: 'p2', before: BEFORE, after: AFTER}]}),
+    getCurrentOutput: () => null,
+  };
+  nodesOf(h.ids.get('booth-missions')).find(node => node.tagName === 'button' && /이 논문으로 시작/.test(node.textContent)).dispatchEvent({type: 'click'});
+  await settle();
+  h.doc.dispatchEvent({type: 'falsify:paper-generated', detail: {
+    file: new File([EDITED], 'edited.pdf', {type: 'application/pdf'}), sourceFileHash: sourceHash, revision: 1,
+    edits: [{pageIndex: 1, segmentId: 'p2', before: BEFORE, after: AFTER}],
+  }});
+  await waitFor(() => /변경 전/.test(h.ids.get('booth-rows').textContent));
+  const rowNodes = nodesOf(h.ids.get('booth-rows'));
+  rowNodes.find(node => node.tagName === 'select').value = 'number';
+  rowNodes.find(node => node.tagName === 'textarea').value = '평균을 바꿨습니다';
+  h.ids.get('booth-consent').checked = true;
+  h.ids.get('booth-consent').dispatchEvent({type: 'change'});
+  h.ids.get('booth-submit').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+}
+
+test('the receipt screen polls the claim view until the AI result is published', async () => {
+  const h = liveBooth({claims: [
+    {receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1, published: false},
+    {status: 429, headers: {'Retry-After': '45'}, body: {error: {code: 'rate_limited'}}},
+    {status: 429, body: {error: {code: 'rate_limited'}}},
+    {receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1, published: false},
+    {receipt: 'F-0042', status: 'judged', course: 'quick', declaredCount: 1, published: true, outcome: 'missed',
+      publicNote: '<b>표</b> 값 변경을 놓쳤어요', prizeMessage: '부스에서 작은 선물을 받아 가세요', publishedAt: '2026-11-22T01:03:00Z'},
+  ]});
+  await settle();
+  assert.match(h.ids.get('booth-consent-copy').textContent, /제출하면 바로 수정본 PDF만 AI 검증을 위해 모델 제공자\(Anthropic\)에 보내고/);
+  await submitThroughBooth(h);
+  assert.equal(h.ids.get('booth-receipt-code').textContent, 'F-0042');
+  const card = h.ids.get('booth-live');
+  assert.equal(card.parentNode, h.ids.get('booth-receipt-live'));
+  assert.equal(card.hidden, false);
+  assert.match(h.ids.get('booth-live-title').textContent, /AI가 결함을 찾는 중이에요/);
+  assert.equal(h.ids.get('booth-live-again').hidden, true);
+  assert.equal(h.claimCalls().length, 0);
+  assert.equal(await h.tick(), 15000);
+  assert.deepEqual(h.claimCalls()[0].body, {receipt: 'F-0042', claimKey: '7Q3K-M9XD'});
+  assert.equal(await h.tick(), 15000);
+  assert.equal(await h.tick(), 45000);
+  assert.equal(await h.tick(), 60000);
+  assert.match(h.ids.get('booth-live-title').textContent, /찾는 중/);
+  assert.equal(await h.tick(), 15000);
+  assert.equal(h.claimCalls().length, 5);
+  assert.equal(h.timers.length, 0);
+  assert.equal(h.ids.get('booth-live-title').textContent, 'AI가 못 찾았어요!');
+  assert.equal(h.ids.get('booth-live-prize').textContent, '부스에서 작은 선물을 받아 가세요');
+  assert.equal(h.ids.get('booth-live-prize').hidden, false);
+  assert.equal(h.ids.get('booth-live-note').textContent, '<b>표</b> 값 변경을 놓쳤어요');
+  assert.equal(h.ids.get('booth-live-again').hidden, false);
+  assert.equal(h.ids.get('booth-live-again').textContent, '다시 도전하기');
+  assert.equal(h.ids.get('booth-receipts').hidden, false);
+  assert.match(h.ids.get('booth-receipts-list').textContent, /F-0042/);
+  h.ids.get('booth-live-again').click();
+  assert.equal(h.ids.get('booth-receipt').hidden, true);
+  assert.equal(h.ids.get('booth-live').hidden, true);
+  assert.equal(h.ids.get('booth-submit').hidden, true);
+  assert.equal(h.ids.get('booth-consent').checked, false);
+  assert.equal(h.ids.get('booth-rows').textContent, '');
+  assert.equal(h.ids.get('booth-missions').hidden, false);
+  assert.equal(h.timers.length, 0);
+  h.handle.destroy();
+});
+
+test('polling stops after 15 min with a recheck button and lookups reuse the card', async () => {
+  const pending = {receipt: 'F-0042', status: 'received', course: 'quick', declaredCount: 1, published: false};
+  const h = liveBooth({claims: [pending]});
+  await settle();
+  h.ids.get('booth-claim-receipt').value = 'f-0042';
+  h.ids.get('booth-claim-key').value = '7q3k m9xd';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(h.ids.get('booth-live').parentNode, h.ids.get('booth-result-live'));
+  assert.match(h.ids.get('booth-live-title').textContent, /찾는 중/);
+  const delays = [];
+  while (h.timers.length) delays.push(await h.tick());
+  assert.equal(delays.length, 12 + 24);
+  assert.equal(delays.reduce((sum, ms) => sum + ms, 0), 900000);
+  assert.equal(h.claimCalls().length, 1 + 36);
+  assert.equal(h.ids.get('booth-live-recheck').hidden, false);
+  assert.equal(h.ids.get('booth-live-recheck').textContent, '결과 다시 보기');
+  h.ids.get('booth-live-recheck').click();
+  await settle();
+  assert.equal(h.claimCalls().length, 38);
+  assert.equal(h.ids.get('booth-live-recheck').hidden, true);
+  assert.equal(h.timers.length, 1);
+  assert.equal(h.timers[0].ms, 15000);
+  h.handle.destroy();
+  assert.equal(h.timers.length, 0);
+});
+
+test('every final outcome shows its copy and the retry button', async () => {
+  const cases = [
+    ['caught', 'AI가 찾아냈어요'], ['partial', 'AI가 거의 찾았어요'],
+    ['missed', 'AI가 못 찾았어요!'], ['invalid', '결함으로 인정되지 않았어요'],
+  ];
+  for (const [outcome, title] of cases) {
+    const h = liveBooth({claims: [{receipt: 'F-0042', status: outcome === 'invalid' ? 'invalid' : 'judged', course: 'quick', declaredCount: 1,
+      published: true, outcome, publicNote: 'note ' + outcome, prizeMessage: 'prize ' + outcome}]});
+    await settle();
+    h.ids.get('booth-claim-receipt').value = 'F-0042';
+    h.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+    h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+    await settle();
+    assert.equal(h.ids.get('booth-live-title').textContent, title, outcome);
+    assert.equal(h.ids.get('booth-live-note').textContent, 'note ' + outcome);
+    assert.equal(h.ids.get('booth-live-prize').hidden, outcome !== 'missed');
+    assert.equal(h.ids.get('booth-live-again').hidden, false);
+    assert.equal(h.timers.length, 0);
+    h.handle.destroy();
+  }
+  const w = liveBooth({claims: [{receipt: 'F-0042', status: 'withdrawn', course: 'quick', declaredCount: 1, published: false}]});
+  await settle();
+  w.ids.get('booth-claim-receipt').value = 'F-0042';
+  w.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+  w.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.match(w.ids.get('booth-result-status').textContent, /철회됨/);
+  assert.equal(w.ids.get('booth-live-title').textContent, '철회됨');
+  assert.equal(w.ids.get('booth-live-again').hidden, false);
+  w.handle.destroy();
+});
+
+test('a cold reload with a stored receipt resumes polling and lists receipts', async () => {
+  const storage = memoryStorage();
+  booth.rememberReceipt(storage, {receipt: 'F-0041', claimKey: 'AAAA-BBBB', createdAt: '2026-11-22T00:10:00Z'});
+  booth.rememberReceipt(storage, {receipt: 'F-0042', claimKey: '7Q3K-M9XD', createdAt: '2026-11-22T01:00:00Z'});
+  const h = liveBooth({storage, claims: [
+    {receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1, published: false},
+    {receipt: 'F-0042', status: 'judged', course: 'quick', declaredCount: 1, published: true, outcome: 'caught', publicNote: '잡았어요'},
+  ]});
+  await settle();
+  assert.equal(h.claimCalls().length, 1);
+  assert.deepEqual(h.claimCalls()[0].body, {receipt: 'F-0042', claimKey: '7Q3K-M9XD'});
+  assert.equal(h.ids.get('booth-result').hidden, false);
+  assert.match(h.ids.get('booth-live-title').textContent, /찾는 중/);
+  const items = nodesOf(h.ids.get('booth-receipts-list')).filter(node => node.tagName === 'button');
+  assert.deepEqual(items.map(node => node.textContent.split(' · ')[0]), ['F-0042', 'F-0041']);
+  assert.equal(await h.tick(), 15000);
+  assert.equal(h.ids.get('booth-live-title').textContent, 'AI가 찾아냈어요');
+  items[1].click();
+  await settle();
+  assert.deepEqual(h.claimCalls().at(-1).body, {receipt: 'F-0041', claimKey: 'AAAA-BBBB'});
+  h.handle.destroy();
+  const stale = liveBooth({storage, now: Date.parse('2026-11-22T03:00:00Z'), claims: [{receipt: 'F-0042', status: 'reviewing', published: false}]});
+  await settle();
+  assert.equal(stale.claimCalls().length, 0);
+  assert.equal(stale.ids.get('booth-result').hidden, true);
+  stale.handle.destroy();
+  const hashed = liveBooth({storage, hash: '#booth-result', now: Date.parse('2026-11-22T03:00:00Z'), claims: [{receipt: 'F-0042', status: 'reviewing', published: false}]});
+  await settle();
+  assert.equal(hashed.claimCalls().length, 1);
+  assert.equal(hashed.timers.length, 1);
+  hashed.handle.destroy();
+});
+
+test('an unknown consent version blocks submit and the guest cap gets a friendly line', async () => {
+  const h = liveBooth({consentVersion: '2026-11-22.v9'});
+  await settle();
+  assert.match(h.ids.get('booth-consent-copy').textContent, /새 동의 문구가 없어 제출할 수 없습니다/);
+  assert.equal(h.ids.get('booth-consent').disabled, true);
+  await submitThroughBooth(h);
+  assert.equal(h.calls.some(call => call.path.endsWith('/v1/booth/submissions')), false);
+  assert.match(h.ids.get('booth-submit-status').textContent, /새 동의 문구가 없어/);
+  assert.equal(h.ids.get('booth-submit-button').disabled, true);
+  h.handle.destroy();
+  const storage = memoryStorage();
+  for (let i = 1; i <= 5; i += 1) booth.rememberReceipt(storage, {receipt: 'F-000' + i, claimKey: '7Q3K-M9XD', createdAt: '2026-11-21T01:00:00Z'});
+  const capped = liveBooth({storage, submitStatus: 429});
+  await settle();
+  await submitThroughBooth(capped);
+  assert.equal(capped.calls.filter(call => call.path.endsWith('/v1/booth/submissions')).length, 1);
+  assert.match(capped.ids.get('booth-submit-status').textContent, /한 사람당 5번까지 제출할 수 있어요/);
+  assert.equal(capped.ids.get('booth-receipts').hidden, false);
+  capped.handle.destroy();
+  const fresh = liveBooth({submitStatus: 429});
+  await settle();
+  await submitThroughBooth(fresh);
+  assert.match(fresh.ids.get('booth-submit-status').textContent, /잠시 막혔어요/);
+  fresh.handle.destroy();
 });
 
 class El extends EventTarget {
