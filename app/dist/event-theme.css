@@ -11,6 +11,14 @@ body{
   font-family:var(--ev-sans,"Pretendard",-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Noto Sans KR","Malgun Gothic",sans-serif);
   -webkit-text-size-adjust:100%;text-size-adjust:100%;overflow-x:hidden
 }
+/* Short screens (a foldable's outer display, landscape): keep the page image under about
+   38% of the height so the paragraph cards show above the dock. */
+@media(max-height:760px){
+  body{
+    --tk-inset:max(clamp(44px,17vw,80px),calc((min(100vw,480px) - 32px - 29vh) / 2));
+    --tk-inset:max(clamp(44px,17vw,80px),calc((min(100vw,480px) - 32px - 29dvh) / 2))
+  }
+}
 .app-shell{margin:0 auto;max-width:480px;min-height:100vh;min-height:100dvh;background:var(--ev-ground,#eef0f1)}
 #main,.content{min-width:0}
 .content{max-width:none;margin:0;padding:16px 16px calc(76px + 28px + env(safe-area-inset-bottom,0px))}
