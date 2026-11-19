@@ -144,6 +144,68 @@ serial('without paperTools the visual editor still asks for the PC',async()=>{
   assert.equal(integration.paperUsesHosted(),false);
 });
 
+serial('booth mode without paperTools hides the visual entry and does not ask for a PC',async()=>{
+  HASH=await sha256(PDF);
+  const previousConfig=globalThis.FalsifyCloudConfig;
+  const previousTools=globalThis.FalsifyHostedAI.paperTools;
+  const previousBridge=globalThis.FalsifyLocalBridge;
+  const previousEditor=globalThis.FalsifyVisualEditUI;
+  const previousDoc=globalThis.document;
+  const previousWorkspace=globalThis.FalsifyPaperWorkspace;
+  const note='행사 화면에서는 본문 글자만 고칠 수 있어요. 표 안 숫자는 같은 쪽 문장 속 숫자로 바꿔 보세요.';
+  try{
+    globalThis.FalsifyCloudConfig={booth:{enabled:true}};
+    globalThis.FalsifyHostedAI.paperTools=null;
+    globalThis.FalsifyLocalBridge={state:()=>({connected:false}),session:()=>null,capabilities:()=>null};
+    const calls={refresh:0};
+    globalThis.FalsifyVisualEditUI={create(){return {setBusy(){},clear(){},refresh(){calls.refresh++;},snapshot:()=>({})};}};
+    const nodes={};
+    const document=new EventTarget();
+    document.readyState='complete';
+    document.getElementById=id=>nodes[id]||null;
+    document.createElement=()=>Object.assign(new EventTarget(),{append(){},click(){},remove(){},hidden:true,className:'',textContent:''});
+    document.querySelectorAll=()=>[];
+    for(const id of ['red-visual-edit-host','red-visual-section','red-visual-analysis','red-visual-record-status']){
+      nodes[id]={hidden:id==='red-visual-section',textContent:'',append(){}};
+    }
+    const bytes=Uint8Array.from(PDF);
+    const file={name:'t.pdf',size:bytes.length,type:'application/pdf',arrayBuffer:async()=>bytes.slice().buffer};
+    globalThis.FalsifyPaperWorkspace={
+      getSource:()=>({file,fileHash:HASH,segments:[]}),
+      getCurrentOutput:()=>null,
+      getEditSnapshot:()=>({revision:0,edits:[]}),
+      getPageIndex:()=>0
+    };
+    globalThis.document=document;
+    const mounted=integration.mount();
+    assert.ok(mounted);
+    assert.equal(nodes['red-visual-section'].hidden,true);
+    assert.equal(calls.refresh,0);
+    const before=fetched.length;
+    const host=element('div');
+    host.ownerDocument={createElement:tag=>element(tag),addEventListener(){}};
+    const ui=UI.create({host,getSource:()=>({file:fileOf(PDF),fileHash:HASH,revision:'r1'}),getSession:()=>integration.paperSession(),onOutput(){}});
+    await ui.refresh();
+    const status=all(host).find(el=>el.getAttribute('aria-live')==='polite');
+    assert.equal(status.textContent,note);
+    assert.equal(all(host).some(el=>String(el.textContent).includes('PC 연결 후 다시 시도하세요.')),false);
+    const connect=all(host).find(el=>el.tagName==='BUTTON'&&el.getAttribute('data-requires-bridge')==='');
+    assert.equal(connect.hidden,true);
+    assert.equal(fetched.length,before);
+    globalThis.FalsifyHostedAI.paperTools={enabled:true};
+    document.dispatchEvent(new Event('falsify:hosted-paper'));
+    assert.equal(nodes['red-visual-section'].hidden,false);
+    assert.equal(calls.refresh,1);
+  }finally{
+    globalThis.FalsifyCloudConfig=previousConfig;
+    globalThis.FalsifyHostedAI.paperTools=previousTools;
+    globalThis.FalsifyLocalBridge=previousBridge;
+    globalThis.FalsifyVisualEditUI=previousEditor;
+    globalThis.document=previousDoc;
+    globalThis.FalsifyPaperWorkspace=previousWorkspace;
+  }
+});
+
 serial('paperTools routes prepare, query, and export through /v1/ai/paper',async()=>{
   HASH=await sha256(PDF);
   globalThis.prepareStatus=null;
