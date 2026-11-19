@@ -9,6 +9,7 @@ import { handleConfluence, matchConfluence, confluenceOnly, LEGACY_WRITES, budge
 import { hostingEnabled } from './ai-identity.mjs';
 import { aiFetch } from './ai-runtime-client.mjs';
 import { handleAiRequest, matchAi } from './ai-gateway.mjs';
+import { handleBoothRequest, matchBooth } from './booth.mjs';
 
 const SCHEMA = 'falsify.cloud.v1';
 const MAX_BODY_BYTES = 256 * 1024;
@@ -718,17 +719,19 @@ async function dispatchApiRequest(request, env, url, matched, config) {
   return methods[request.method]({ request, env, url, id: matched.id, settings: config });
 }
 
-// AI, Confluence and legacy records routes stay distinct; AI paths never fall through to the others.
+// Booth, AI, Confluence and legacy records routes stay distinct; none of them fall through.
 function matchRequest(pathname) {
+  const booth = matchBooth(pathname);
+  if (booth) return { booth, ai: null, confluence: null, matched: null };
   const ai = matchAi(pathname);
-  if (ai) return { ai, confluence: null, matched: null };
+  if (ai) return { booth: null, ai, confluence: null, matched: null };
   const confluence = matchConfluence(pathname);
-  if (confluence) return { ai: null, confluence, matched: null };
-  return { ai: null, confluence: null, matched: route(pathname) };
+  if (confluence) return { booth: null, ai: null, confluence, matched: null };
+  return { booth: null, ai: null, confluence: null, matched: route(pathname) };
 }
 
-function logRouteFor({ ai, confluence, matched }) {
-  return ai?.template ?? confluence?.template ?? matched?.template ?? 'unmatched';
+function logRouteFor({ booth, ai, confluence, matched }) {
+  return booth?.template ?? ai?.template ?? confluence?.template ?? matched?.template ?? 'unmatched';
 }
 
 // The OAuth callback is a top-level navigation from Atlassian, not a frontend XHR.
@@ -748,6 +751,17 @@ function aiDependencies(request, env) {
 }
 
 async function dispatchRequest(request, env, url, matched, config) {
+  if (matched.booth) {
+    const fetchImpl = budgetedFetch(aiFetch(env), 15000);
+    return handleBoothRequest({
+      request,
+      env,
+      url,
+      match: matched.booth,
+      fetchImpl,
+      deps: { ...aiDependencies(request, env), fetchImpl },
+    });
+  }
   if (matched.ai) {
     return handleAiRequest({
       request,
