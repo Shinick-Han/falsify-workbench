@@ -295,3 +295,48 @@ Limits via `deps.rateLimit`: `PAPER_SEARCH_PER_OWNER_HOUR` 60, `PAPER_SEARCH_PER
 - R2-18 `missions warm`: GET `/v1/papers/pdf?id=...` for every configured mission with the operator token (verifies licence and warms the PDF cache); report sizes and failures.
 
 **Verdict vocabulary (all exports)**: Workbench BLUE `verdictLabel` uses `아님` = the passage is wrong (defect found), `확인필요` = suspicious, needs verification, `맞음` = passage is fine. The common CSV column 판정(아님/확인필요) carries these words as-is.
+
+## 11. Round-3 amendments (2026-11-19): submissions carry the edited PDF (binding; supersede §5.1, §5.3, §7 and R2 where they differ)
+
+Why: the hosted applyOnly job only applies candidates from a completed hosted model RED review. Human edits are made in the
+paper workspace (`FalsifyPaperWorkspace`) and the PDF is generated in the browser, so no server job exists for them.
+
+**API**
+- R3-1 `POST /v1/booth/submissions` is `multipart/form-data` with exactly two parts: `meta` (JSON text: the §5.3 object
+  **without** `jobId`, plus `editedSha256` = lowercase hex SHA-256 of the PDF bytes, and optional `paper.sourceSha256`
+  hex64) and `pdf` (the edited PDF). Limits: `BOOTH_MAX_PDF_BYTES` (default = `AI_GUEST_MAX_UPLOAD_BYTES` default 20 MiB,
+  hard cap 32 MiB); whole body <= that + 64 KiB (413 `payload_too_large`). Checks after the §5.3 order (closed, consent):
+  non-empty, `%PDF-` magic (else 400 `invalid_pdf`), server SHA-256 equals `editedSha256` (else 400 `pdf_mismatch`),
+  differs from `paper.sourceSha256` when given (else 400 `pdf_unchanged`); same owner + same PDF hash already
+  submitted -> 409 `already_submitted` with the receipt. All job/artifact checks are removed. Auth unchanged (visitor bearer).
+- R3-2 Storage: new table `booth_files (submission_id TEXT NOT NULL, idx INTEGER NOT NULL, data BLOB NOT NULL,
+  PRIMARY KEY (submission_id, idx))`, 512 KiB chunks, written together with the submission row in one `db.batch`.
+  `booth_submissions` drops `job_id` and `artifact_id` and adds `pdf_sha256 TEXT NOT NULL`, `pdf_bytes INTEGER NOT NULL`,
+  `source_sha256 TEXT`, with `UNIQUE (owner_id, pdf_sha256)`. Nothing is deployed yet, so edit `0006_booth.sql` in place.
+- R3-3 `GET /v1/booth/admin/submissions/:receipt/pdf` streams the chunks in `idx` order (no runtime call);
+  `X-Falsify-Pdf-Sha256` header; 404 `withdrawn` for withdrawn rows. AdminView replaces `jobId`/`artifactId` with
+  `pdfSha256`, `pdfBytes`, `sourceSha256`.
+- R3-4 Withdraw (R2-4 tombstone) also deletes that submission's `booth_files` rows. DELETE does too.
+- R3-5 The runtime is not used by visitor submissions at all.
+
+**FE**
+- R3-6 The booth flow uses the paper workspace, not the hosted panel: edits from `FalsifyPaperWorkspace.getEditSnapshot()`
+  (enabled edits: pageIndex, segmentId, before, after), source from `getSource()`, and the PDF the workspace generates.
+  `app/dist/paper-workspace.js` joins the FE scope for one small change only: after every successful generation, dispatch a
+  non-cancelable `document` CustomEvent `falsify:paper-generated` with `{ file, sourceFileHash, revision, edits }` (reuse an
+  existing hook instead if one already exists). The booth panel offers "제출할 수정본 만들기" (triggers the workspace's own
+  generation when there is no current output), pre-fills one declared row per enabled edit (max 5; with more, ask the
+  visitor to keep at most 5 enabled), computes `editedSha256` with `crypto.subtle`, and posts FormData (`meta` JSON +
+  `pdf`). Map the new error codes (`invalid_pdf`, `pdf_mismatch`, `pdf_unchanged`) to Korean messages.
+- R3-7 On the event page, when `capabilities.modelJobs === false`, the hosted AI panel shows a short note that this page
+  runs no AI and points to the booth flow, instead of its run/apply controls. index.html is unchanged.
+- R3-8 Consent copy (replaces R2-12, same version `2026-11-22.v1`):
+  "제출한 수정본 PDF와 결함 설명(쪽·유형·이유)은 가짜연구소 Falsify 스터디가 저장하고 운영자가 읽습니다. 마감 후 AI 검증에는 수정본 PDF만 모델 제공자(Anthropic 또는 OpenAI)에 보내며, 결함 설명은 AI에 보내지 않습니다. 이름·연락처는 받지 않으니 이유란에도 적지 마세요. 원 논문은 CC BY·CC BY-SA·CC0 공개 논문이며, 수정본을 스터디 밖에 공개할 때는 저자·arXiv 번호·라이선스와 수정 사실을 밝힙니다. 결과와 경품 안내는 접수번호와 확인키로만 확인할 수 있습니다. 확인키로 언제든 철회할 수 있고, 철회하면 설명·결과·수정본 PDF가 서버에서 즉시 삭제되며 운영자 보관본도 지웁니다. 보관 자료는 스터디 종료 후 삭제합니다."
+
+**OPS**
+- R3-9 AdminView field change (R3-3). `pull` verifies the downloaded PDF against `pdfSha256`; the BLUE idempotency key
+  uses `pdfSha256` (this satisfies R2-14). Update the fake API.
+
+**E2E / BROWSER**
+- R3-10 The E2E flow submits multipart with an edited PDF made locally (e.g. PyMuPDF text replacement); BROWSER phase 2
+  drives the paper workspace edit -> generate -> booth submit path.
