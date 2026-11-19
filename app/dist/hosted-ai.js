@@ -260,7 +260,7 @@
       editedStatus:'', originalInput:null, blueSource:null, useEvidence:true,
       pollTimer:null, pollAttempt:0, pollFailures:0, downloadStatus:'', timers:new Set(),
       hookError:null, recordedJobs:new Set(), lastLedgerRedId:null, lastLedgerRunId:null, handoffSourceRunId:null,
-      pendingExternal:null
+      pendingExternal:null, applyEdits:new Map(), announcedApply:new Set()
     };
     const nodes={};
     const docListeners=[];
@@ -568,7 +568,10 @@
         modelProviders:readModelProviders(data),
         maxUploadBytes:positiveInt(limits.maxUploadBytes)||MAX_UPLOAD_FALLBACK,
         maxPromptChars:positiveInt(limits.maxPromptChars)||MAX_PROMPT_FALLBACK,
-        paperTools:paperToolsOf(data)
+        paperTools:paperToolsOf(data),
+        /* Absent or any value other than false keeps today's controls (index.html). */
+        blueJobs:data.blueJobs!==false,
+        modelJobs:data.modelJobs!==false
       };
     }
 
@@ -606,6 +609,7 @@
       fillSelect(nodes.effort,caps.efforts,'서버 기본값');
       state.status=readyStatus();
       publishPaperTools(doc, caps.paperTools);
+      announceCapabilities();
     }
     async function probe(){
       state.capabilities=null;
@@ -1215,6 +1219,14 @@
       if(state.busy||state.gate!=='ready'||!state.capabilities) return;
       if(!state.session&&!await openBearer()){showGuestStartError();return;}
       const input=reviewInputs();
+      if(!modelJobsAllowed()){
+        fail('이 행사 화면에서는 모델 검토를 실행하지 않습니다.');
+        return;
+      }
+      if(input.role==='blue'&&!blueJobsAllowed()){
+        fail('이 행사 화면에서는 BLUE 검토를 실행하지 않습니다.');
+        return;
+      }
       const problem=reviewInputProblem(input.prompt);
       if(problem){fail(problem);return;}
       state.busy='upload';state.error='';state.downloadStatus='';state.editedStatus='';
@@ -1279,6 +1291,83 @@
           before:edit.before,after:edit.after,rationale:edit.rationale});
       }
       return {edits,visualEdits};
+    }
+    /* Booth hears the applied text only. Rationale and visual edits stay out of this event. */
+    function publicApplyEdit(candidate){
+      const edit={pageIndex:candidate.pageIndex};
+      if(typeof candidate.segmentId==='string'&&candidate.segmentId&&candidate.segmentId.length<=120){
+        edit.segmentId=candidate.segmentId;
+      }
+      edit.before=candidate.before;
+      edit.after=candidate.after;
+      return edit;
+    }
+    function rememberApplyEdits(jobId,candidates){
+      if(typeof jobId!=='string'||!jobId||!Array.isArray(candidates)) return;
+      state.applyEdits.set(jobId,candidates.map(publicApplyEdit));
+    }
+    function namedEditedPdf(job){
+      const list=job&&Array.isArray(job.artifacts)?job.artifacts:[];
+      return list.find(artifact=>artifact&&artifact.name==='edited.pdf'&&typeof artifact.id==='string'&&artifact.id)||null;
+    }
+    function applyCompleteDetail(){
+      const job=state.job;
+      if(!job||job.role!=='red'||job.state!=='completed') return null;
+      const result=job.result&&typeof job.result==='object'?job.result:null;
+      const applyOnly=job.applyOnly===true||state.jobKind==='apply'
+        ||!!(result&&result.schema==='falsify.hosted-apply.v1');
+      if(!applyOnly) return null;
+      const artifact=namedEditedPdf(job);
+      if(!artifact) return null;
+      const stored=state.applyEdits.get(job.id)||[];
+      return {
+        jobId:job.id,
+        artifactId:artifact.id,
+        fileName:safeName(artifact.name)||'edited.pdf',
+        edits:stored.map(edit=>Object.assign({},edit))
+      };
+    }
+    function announceApplyComplete(){
+      const detail=applyCompleteDetail();
+      if(!detail||state.announcedApply.has(detail.jobId)) return;
+      state.announcedApply.add(detail.jobId);
+      if(typeof doc?.dispatchEvent!=='function'||typeof CustomEvent!=='function') return;
+      try{doc.dispatchEvent(new CustomEvent('falsify:hosted-apply-complete',{detail}));}catch{}
+    }
+    /* capabilities.blueJobs === false hides guest BLUE. Missing or true is the default page. */
+    function blueJobsAllowed(){
+      return !(state.capabilities&&state.capabilities.blueJobs===false);
+    }
+    function applyBluePolicy(){
+      const allowed=blueJobsAllowed();
+      setHidden(nodes.roleBlue,!allowed);
+      if(!allowed&&nodes.role&&nodes.role.value==='blue') nodes.role.value='red';
+      return allowed;
+    }
+    /* capabilities.modelJobs === false hides the model RED/BLUE run. Apply stays. */
+    function modelJobsAllowed(){
+      return !(state.capabilities&&state.capabilities.modelJobs===false);
+    }
+    function applyModelPolicy(){
+      const allowed=modelJobsAllowed();
+      setHidden(nodes.roleField,!allowed);
+      setHidden(nodes.advanced,!allowed);
+      setHidden(nodes.presets,!allowed);
+      setHidden(nodes.promptLabel,!allowed);
+      setHidden(nodes.prompt,!allowed);
+      setHidden(nodes.promptCount,!allowed);
+      setHidden(nodes.run,!allowed);
+      return allowed;
+    }
+    function announceCapabilities(){
+      const caps=state.capabilities;
+      if(!caps||typeof doc?.dispatchEvent!=='function'||typeof CustomEvent!=='function') return;
+      try{
+        doc.dispatchEvent(new CustomEvent('falsify:hosted-capabilities',{detail:{
+          blueJobs:caps.blueJobs!==false,
+          modelJobs:caps.modelJobs!==false
+        }}));
+      }catch{}
     }
     function applyBlocker(){
       const review=state.reviewJob;
@@ -1355,7 +1444,8 @@
       if(!state.session&&!await openBearer()){showGuestStartError();return;}
       const blocker=applyBlocker();
       if(blocker){fail(blocker);return;}
-      const {edits,visualEdits}=buildApplyEdits(selectedEntries());
+      const picked=selectedEntries();
+      const {edits,visualEdits}=buildApplyEdits(picked);
       const selectionProblem=applySelectionProblem(edits,visualEdits);
       if(selectionProblem){fail(selectionProblem);return;}
       const review=state.reviewJob,reviewUpload=state.reviewUpload;
@@ -1371,6 +1461,7 @@
         const key='fssjob-'+digest.slice(0,40);
         const existing=readRunsDoc().runs[digest];
         if(existing&&existing.jobId&&!existing.pending){
+          rememberApplyEdits(existing.jobId,picked.text);
           activateRun(digest);
           state.jobKind='apply';
           state.status='이미 접수한 적용 작업을 다시 불러옵니다.';
@@ -1383,6 +1474,7 @@
         const serialized=serializedBodySize(body);
         const {job,replayed}=await submitApplyJob(serialized);
         saveApplyRun(digest,review,reviewUpload,model,effort,job.id,false);
+        rememberApplyEdits(job.id,picked.text);
         state.jobKind='apply';
         state.busy='';
         applyJob(job,{replayed});
@@ -1580,7 +1672,7 @@
       }catch{}
     }
     async function handoffToBlue(){
-      if(!canHandoff()) return;
+      if(!blueJobsAllowed()||!canHandoff()) return;
       const job=state.job;
       const artifact=editedArtifact();
       if(!job||!artifact){fail('BLUE로 넘길 수정본 PDF가 없습니다.');return;}
@@ -1758,10 +1850,10 @@
         el('div',{className:'button-row',id:'hosted-ai-input-actions',hidden:true},
           el('button',{id:'hosted-ai-restore-original',type:'button',className:'text-button',textContent:'원본 입력으로 돌아가기'})),
         el('div',{className:'hosted-ai-grid'},
-          el('label',{for:'hosted-ai-role'},'역할',
+          el('label',{id:'hosted-ai-role-field',for:'hosted-ai-role'},'역할',
             el('select',{id:'hosted-ai-role'},
               el('option',{value:'red',textContent:'RED · 결함 주입'}),
-              el('option',{value:'blue',textContent:'BLUE · 결함 검증'})))),
+              el('option',{id:'hosted-ai-role-blue',value:'blue',textContent:'BLUE · 결함 검증'})))),
         el('details',{className:'red-help hosted-ai-advanced',id:'hosted-ai-advanced'},
           el('summary',{textContent:'고급 설정 · 모델·근거'}),
           el('div',{className:'hosted-ai-grid'},
@@ -1812,7 +1904,7 @@
           el('ul',{id:'hosted-ai-artifacts',className:'hosted-ai-items'}),
           el('p',{id:'hosted-ai-download-status',className:'form-feedback',role:'status','aria-live':'polite'})),
         el('section',{id:'hosted-ai-edited-section',hidden:true,'aria-label':'수정본과 BLUE 연결'},
-          el('h3',{textContent:'수정본 · BLUE로 넘기기'}),
+          el('h3',{id:'hosted-ai-edited-title',textContent:'수정본 · BLUE로 넘기기'}),
           el('p',{id:'hosted-ai-edited-note',className:'muted'}),
           el('div',{className:'button-row'},
             el('button',{id:'hosted-ai-edited-download',type:'button',className:'button secondary',textContent:'수정본 PDF 내려받기'}),
@@ -1823,6 +1915,7 @@
 
       Object.assign(nodes,{
         status:find('hosted-ai-status'),error:find('hosted-ai-error'),
+        intro:find('hosted-ai-intro'),
         loginForm,sessionRow,externalBox,disabledBox,
         sessionText:find('hosted-ai-session-text'),logout:find('hosted-ai-logout'),
         externalNote:find('hosted-ai-external-note'),
@@ -1837,7 +1930,9 @@
         config:configBox,
         file:find('hosted-ai-file'),fileStatus:find('hosted-ai-file-status'),
         inputActions:find('hosted-ai-input-actions'),restoreOriginal:find('hosted-ai-restore-original'),
-        role:find('hosted-ai-role'),model:find('hosted-ai-model'),effort:find('hosted-ai-effort'),
+        role:find('hosted-ai-role'),roleField:find('hosted-ai-role-field'),roleBlue:find('hosted-ai-role-blue'),
+        advanced:find('hosted-ai-advanced'),
+        model:find('hosted-ai-model'),effort:find('hosted-ai-effort'),
         useEvidence:find('hosted-ai-use-evidence'),
         presets:find('hosted-ai-presets'),presetDefault:find('hosted-ai-preset-default'),presetP2:find('hosted-ai-preset-p2'),
         prompt:find('hosted-ai-prompt'),promptLabel:find('hosted-ai-prompt-label'),promptCount:find('hosted-ai-prompt-count'),
@@ -1855,7 +1950,8 @@
         ledgerActions:find('hosted-ai-ledger-actions'),openReview:find('hosted-ai-open-review'),
         artifactsSection:find('hosted-ai-artifacts-section'),artifacts:find('hosted-ai-artifacts'),
         downloadStatus:find('hosted-ai-download-status'),
-        editedSection:find('hosted-ai-edited-section'),editedNote:find('hosted-ai-edited-note'),
+        editedSection:find('hosted-ai-edited-section'),editedTitle:find('hosted-ai-edited-title'),
+        editedNote:find('hosted-ai-edited-note'),
         editedDownload:find('hosted-ai-edited-download'),handoff:find('hosted-ai-blue-handoff'),
         editedStatus:find('hosted-ai-edited-status')
       });
@@ -2602,14 +2698,34 @@
       }
       return meta.join(' · ');
     }
+    function renderOpenIntro(){
+      if(!nodes.intro||!openMode()) return;
+      const blue=blueJobsAllowed();
+      const model=modelJobsAllowed();
+      if(!model&&!blue){
+        nodes.intro.textContent='로그인 없이 고른 변경을 PDF에 적용합니다. 모델 RED·BLUE 검토는 이 행사 화면에서 열리지 않습니다.';
+        return;
+      }
+      if(!model){
+        nodes.intro.textContent='로그인 없이 고른 변경을 PDF에 적용하고 BLUE 검토를 실행합니다. 모델 RED 검토는 이 행사 화면에서 열리지 않습니다.';
+        return;
+      }
+      nodes.intro.textContent=blue
+        ?'로그인 없이 PDF를 올리고 RED 검토, 수정 적용, BLUE 검토를 실행합니다.'
+        :'로그인 없이 PDF를 올리고 RED 검토와 수정 적용을 실행합니다. BLUE 검토는 이 행사 화면에서 열리지 않습니다.';
+    }
     function renderEdited(){
       const edited=editedArtifact();
+      const allowBlue=blueJobsAllowed();
       setHidden(nodes.editedSection,!edited);
       if(edited){
-        nodes.editedNote.textContent='수정본: '+editedMetaText(edited)
-          +'. BLUE에는 이 수정본만 전달하며 RED 결과·후보·근거는 보내지 않습니다.';
+        if(nodes.editedTitle) nodes.editedTitle.textContent=allowBlue?'수정본 · BLUE로 넘기기':'수정본';
+        nodes.editedNote.textContent='수정본: '+editedMetaText(edited)+(allowBlue
+          ?'. BLUE에는 이 수정본만 전달하며 RED 결과·후보·근거는 보내지 않습니다.'
+          :'. 이 화면에서는 BLUE 검토를 실행하지 않습니다.');
         nodes.editedDownload.disabled=!!state.busy;
         nodes.handoff.disabled=!!state.busy;
+        setHidden(nodes.handoff,!allowBlue);
       }
       nodes.editedStatus.textContent=state.editedStatus||'';
     }
@@ -2651,16 +2767,20 @@
       if(!ctx.operate){emitHostedState(ctx,null);return;}
       const meta=renderPromptMeta(ctx);
       renderInputState(ctx);
+      applyBluePolicy();
+      renderOpenIntro();
       renderPresetControls(ctx);
       renderRestoreAction();
       const availability=runAvailability(ctx,meta);
       renderRunButtons(ctx,availability);
+      applyModelPolicy();
       renderInputDisabled(ctx);
       renderJobSection();
       renderCandidates();
       renderResults();
       renderArtifacts();
       renderEdited();
+      announceApplyComplete();
       emitHostedState(ctx,availability);
     }
 

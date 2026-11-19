@@ -7,6 +7,7 @@
   const KEY_STORE='falsify.open-access.key.v1';
   const GUEST_PREFIX='falsify.open-access.guest.v1:';
   const NOTE='RED 검토, 수정 적용, BLUE 검토는 웹 실행 패널에서 로그인 없이 실행합니다.';
+  const NOTE_NO_BLUE='RED 검토와 수정 적용은 웹 실행 패널에서 로그인 없이 실행합니다. BLUE 검토는 이 행사 화면에서 열리지 않습니다.';
 
   function readConfig(){
     try{return root.FalsifyCloudConfig||null;}catch{return null;}
@@ -202,12 +203,31 @@
       if(node&&typeof node.removeAttribute==='function') node.removeAttribute('href');
     }
   }
+  function notes(){
+    const doc=root.document;
+    if(!doc||typeof doc.querySelectorAll!=='function') return [];
+    try{return [...doc.querySelectorAll('[data-open-access-note]')];}catch{return [];}
+  }
+  /* blueJobs === false must not promise a guest BLUE run. Absent or true keeps NOTE. */
+  function applyBlueNote(allowed){
+    const text=allowed===false?NOTE_NO_BLUE:NOTE;
+    for(const node of notes()) if(node) node.textContent=text;
+  }
+  function watchCapabilities(){
+    const doc=root.document;
+    if(!doc||typeof doc.addEventListener!=='function') return;
+    doc.addEventListener('falsify:hosted-capabilities',event=>{
+      const detail=event&&event.detail;
+      applyBlueNote(!(detail&&detail.blueJobs===false));
+    });
+  }
   function install(){
     markPage();
     captureFragment();
     clearLoopback();
     placeAfter('hosted-ai');
     placeInside('view-blue');
+    watchCapabilities();
     root.FalsifyHostedSession={token,invalidate};
   }
   if(enabled()) install();
