@@ -1065,6 +1065,64 @@ test('booth mode opens the paragraph list and blueJobs false hides the paper han
     shut.ws.dispose();
   }finally{restore();}
 });
+test('booth mode maps generation status and figure refusals without the English verification word',async()=>{
+  const previousConfig=globalThis.FalsifyCloudConfig;
+  const restore=()=>{if(previousConfig===undefined)delete globalThis.FalsifyCloudConfig;else globalThis.FalsifyCloudConfig=previousConfig;};
+  const refusal='그림 안 글자를 고치면 그림이 깨져서 만들지 않았습니다. 표·그래프·그림 고치기를 쓰세요.';
+  const boothRefusal='이 문장은 휴대폰에서 바로 고칠 수 없어요. 같은 쪽의 다른 문장이나 숫자를 골라 주세요.';
+  const bytes=pdfBytes('MARKER-GEN');
+  function exporter(mode){
+    return {prepare:async()=>{
+      if(mode.fail==='figure')throw Object.assign(new Error(refusal),{code:'figure-text-corrupt'});
+      if(mode.fail==='similar')throw Object.assign(new Error('표·그래프·그림 고치기를 쓰세요.'),{code:'figure-raster-refused'});
+      const file=new File([bytes],'checked.pdf',{type:'application/pdf'});
+      return {file,sha256:sha(bytes),verification:{status:'failed',checks:[],warnings:[]},warnings:[
+        {code:'paragraph-link-unverified',severity:'warning',pageIndex:0,editId:'e1'},
+        {code:'paragraph-link-unverified',severity:'warning',pageIndex:1,editId:'e2'}
+      ]};
+    }};
+  }
+  try{
+    globalThis.FalsifyCloudConfig={booth:{enabled:true}};
+    const mode={fail:''};
+    const booth=mount({exporter:exporter(mode)});
+    booth.file(pdfFile(pdfBytes('MARKER-A')));
+    await until(()=>booth.ws.getSource()&&booth.edits.last,'booth source');
+    booth.edits.last.add({pageIndex:0,before:'Alpha',after:'Beta',origin:'human'});
+    booth.get('paper-generate').click();
+    await until(()=>/수정본을 만들었습니다/.test(booth.get('paper-generate-status').textContent),'booth lead');
+    const status=booth.get('paper-generate-status').textContent;
+    assert.equal(status,'수정본을 만들었습니다. 인용 링크 2곳은 확인하지 못했지만 제출에는 문제없습니다.');
+    assert.equal(/\bfailed\b/.test(status),false);
+    assert.equal(/\bfailed\b/.test(textOf(booth.get('paper-edits'))),false);
+    assert.equal(booth.ws.getOutput().verification.status,'failed');
+    const details=[...booth.created].reverse().find(e=>e.tagName==='details'&&e.parentElement&&e.children[0]&&e.children[0].textContent==='검사 상세');
+    assert.equal(details.open,false);
+    assert.equal(details.className,'paper-check-details');
+    assert.match(textOf(details),/인용 링크의 위치를 확인하지 못함/);
+    const outside=(details.parentElement.children||[]).filter(child=>child!==details).map(textOf).join('');
+    assert.equal(outside.includes('인용 링크'),false);
+    assert.equal(outside.includes('failed'),false);
+    mode.fail='figure';
+    booth.get('paper-generate').click();
+    await until(()=>booth.get('paper-generate-status').textContent===boothRefusal,'booth figure refusal');
+    assert.equal(booth.get('paper-generate-status').textContent.includes('표·그래프·그림'),false);
+    mode.fail='similar';
+    booth.get('paper-generate').click();
+    await until(()=>booth.get('paper-generate-status').textContent===boothRefusal,'similar refusal');
+    booth.ws.dispose();
+    restore();
+    const indexMode={fail:'figure'};
+    const index=mount({exporter:exporter(indexMode)});
+    index.file(pdfFile(pdfBytes('MARKER-A')));
+    await until(()=>index.ws.getSource()&&index.edits.last,'index source');
+    index.edits.last.add({pageIndex:0,before:'Alpha',after:'Beta',origin:'human'});
+    index.get('paper-generate').click();
+    await until(()=>index.get('paper-generate-status').textContent===refusal,'index figure refusal');
+    assert.equal(index.get('paper-generate-status').textContent.includes(boothRefusal),false);
+    index.ws.dispose();
+  }finally{restore();}
+});
 test('paragraph: a late inspection is aborted and cannot bind the next source; drag selection remains available',async()=>{
   let resolveA,signalA;
   const adapter=paragraphMock('New paragraph.',{inspectPage:async({file,pageIndex,signal})=>{
