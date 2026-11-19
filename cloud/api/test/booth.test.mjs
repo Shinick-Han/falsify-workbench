@@ -362,6 +362,7 @@ test('operator id, gateway defaults and migration 0006 keep secrets out of the s
   assert.equal(OWNER_ID.test('gst:11111111-1111-4111-8111-111111111111'), true);
   const settings = aiSettings({});
   assert.equal(settings.guestBlue, true);
+  assert.equal(settings.guestModelJobs, true);
   assert.equal(settings.guestApplyJobsSeparated, false);
   assert.equal(settings.guestApplyJobsPerHour, settings.guestJobsPerHour);
   assert.equal(settings.operatorJobsPerHour, 600);
@@ -371,11 +372,13 @@ test('operator id, gateway defaults and migration 0006 keep secrets out of the s
   assert.equal(settings.operatorTokenBudget, 0);
   const event = aiSettings({
     AI_GUEST_BLUE: 'false',
+    AI_GUEST_MODEL_JOBS: 'false',
     AI_GUEST_JOBS_PER_HOUR: '40',
     AI_GUEST_APPLY_JOBS_PER_HOUR: '600',
     BOOTH_OPERATOR_MAX_CALLS_PER_JOB: '80',
   });
   assert.equal(event.guestBlue, false);
+  assert.equal(event.guestModelJobs, false);
   assert.equal(event.guestApplyJobsSeparated, true);
   assert.equal(event.guestApplyJobsPerHour, 600);
   assert.equal(event.operatorMaxCallsPerJob, 64);
@@ -392,8 +395,26 @@ test('operator id, gateway defaults and migration 0006 keep secrets out of the s
   assert.equal(wrangler.split('"AI_GUEST_BLUE": "false"').length, 2);
   assert.equal(wrangler.split('"AI_GUEST_APPLY_JOBS_PER_HOUR": "600"').length, 2);
   assert.equal(wrangler.split('"PAPER_SEARCH_ENABLED": "true"').length, 2);
+  for (const literal of [
+    '"AI_GUESTS_PER_HOUR": "800"',
+    '"AI_GUEST_UPLOADS_PER_HOUR": "400"',
+    '"AI_GUEST_JOBS_PER_OWNER_HOUR": "20"',
+    '"AI_GUEST_APPLY_JOBS_PER_HOUR": "600"',
+    '"AI_GUEST_MODEL_JOBS": "false"',
+    '"BOOTH_SUBMISSIONS_PER_IP_HOUR": "400"',
+    '"BOOTH_CLAIMS_PER_IP_HOUR": "2000"',
+    '"BOOTH_CLAIMS_PER_HOUR": "5000"',
+    '"BOOTH_OPERATOR_ACTIVE_JOBS": "2"',
+    '"PAPER_SEARCH_PER_IP_HOUR": "2000"',
+    '"PAPER_PDF_PER_IP_HOUR": "600"',
+  ]) {
+    assert.equal(wrangler.split(literal).length, 2, literal);
+  }
   assert.match(wrangler, /"BOOTH_CONSENT_VERSION": "2026-11-22.v1"/);
   assert.match(wrangler, /"AI_GUESTS_PER_IP_HOUR": "600"/);
+  const boothSource = readFileSync(path.join(apiRoot, 'src/booth.mjs'), 'utf8');
+  assert.match(boothSource, /const SEQ_ATTEMPTS = 5/);
+  assert.match(boothSource, /claimsPerHour: positiveInt\(env\?\.BOOTH_CLAIMS_PER_HOUR, 2000\)/);
   assert.equal(/"BOOTH_OPERATOR_TOKEN"\s*:/.test(wrangler), false);
 });
 
@@ -572,6 +593,7 @@ test('visitor submit, claim, publish, withdraw and admin pdf', async () => {
     assert.equal(withdrawn.status, 200);
     assert.equal(withdrawn.body.status, 'withdrawn');
     assert.equal(withdrawn.body.published, false);
+    assert.equal(withdrawn.body.declaredCount, 0);
     assert.equal(Object.hasOwn(withdrawn.body, 'prizeMessage'), false);
     const blocked = await call('PATCH', `/v1/booth/admin/submissions/${receipt}`, {
       token: OPERATOR,
@@ -591,6 +613,37 @@ test('visitor submit, claim, publish, withdraw and admin pdf', async () => {
     assert.equal(detail.status, 200);
     assert.equal(JSON.stringify(detail.body).includes('claim_hash'), false);
     assert.equal(JSON.stringify(detail.body).includes(ready.ownerId), false);
+    assert.deepEqual(detail.body.declared, []);
+    assert.equal(detail.body.nickname, null);
+    assert.equal(detail.body.paper, null);
+    assert.equal(detail.body.aiSummary, null);
+    assert.equal(detail.body.outcome, null);
+    assert.equal(detail.body.publicNote, null);
+    assert.equal(detail.body.course, 'quick');
+    assert.equal(detail.body.jobId, ready.jobId);
+    const tomb = await d1.prepare(
+      `SELECT declared, nickname, paper, public_note, prize_message, ai_summary, outcome, published_at,
+              operator_note, course, consent_version, job_id, created_at
+       FROM booth_submissions WHERE receipt = ?1`
+    ).bind(receipt).first();
+    assert.equal(tomb.declared, '[]');
+    assert.equal(tomb.nickname, null);
+    assert.equal(tomb.paper, null);
+    assert.equal(tomb.public_note, null);
+    assert.equal(tomb.prize_message, null);
+    assert.equal(tomb.ai_summary, null);
+    assert.equal(tomb.outcome, null);
+    assert.equal(tomb.published_at, null);
+    assert.equal(tomb.operator_note, '철회됨');
+    assert.equal(tomb.course, 'quick');
+    assert.equal(tomb.consent_version, CONSENT);
+    assert.equal(tomb.job_id, ready.jobId);
+    assert.equal(tomb.created_at, created.body.createdAt);
+    const pdfGets = await stubCalls(mf, `/internal/v1/jobs/${ready.jobId}/artifacts/gone-artifact`, 'GET');
+    const hiddenPdf = await call('GET', `/v1/booth/admin/submissions/${receipt}/pdf`, { token: OPERATOR });
+    assert.equal(hiddenPdf.status, 404);
+    assert.equal(hiddenPdf.body.error.code, 'withdrawn');
+    assert.equal(await stubCalls(mf, `/internal/v1/jobs/${ready.jobId}/artifacts/gone-artifact`, 'GET'), pdfGets);
   });
 });
 
@@ -660,6 +713,31 @@ test('submit rejects a foreign, unready, duplicate-shaped, closed or private nic
     });
     assert.equal(extra.status, 400);
     assert.equal(extra.body.error.code, 'invalid_request');
+    const withoutPaper = submissionBody(live.jobId);
+    delete withoutPaper.paper;
+    const noPaper = await call('POST', '/v1/booth/submissions', { token: guestA, body: withoutPaper });
+    assert.equal(noPaper.status, 400);
+    assert.equal(noPaper.body.error.code, 'paper_not_allowed');
+    const uploaded = await call('POST', '/v1/booth/submissions', {
+      token: guestA,
+      body: submissionBody(live.jobId, { paper: { source: 'upload', id: 'local-1', title: 'Local', license: 'cc-by' } }),
+    });
+    assert.equal(uploaded.status, 400);
+    assert.equal(uploaded.body.error.code, 'paper_not_allowed');
+    const noncommercial = await call('POST', '/v1/booth/submissions', {
+      token: guestA,
+      body: submissionBody(live.jobId, { paper: { source: 'arxiv', id: '2503.10497', title: 'Synthetic paper', license: 'cc-by-nc-4.0' } }),
+    });
+    assert.equal(noncommercial.status, 400);
+    assert.equal(noncommercial.body.error.code, 'paper_not_allowed');
+    const mission = await readyJob(mf, call, guestA, 'op-booth-lic001');
+    const allowedLicense = await call('POST', '/v1/booth/submissions', {
+      token: guestA,
+      body: submissionBody(mission.jobId, {
+        paper: { source: 'mission', id: 'mission-1', title: 'Mission paper', license: 'public-domain' },
+      }),
+    });
+    assert.equal(allowedLicense.status, 201);
     const missing = await call('PUT', '/v1/booth/no-such');
     assert.equal(missing.status, 404);
     assert.equal(missing.body.error.code, 'not_found');
@@ -768,15 +846,23 @@ test('per-owner, per-IP and claim buckets stop the next submission', async () =>
   await withApp({ BOOTH_SUBMISSIONS_PER_OWNER: '5' }, async (mf, call) => {
     const guest = (await mintGuest(call, fromIp('203.0.113.20'))).body.guest.token;
     const other = (await mintGuest(call, fromIp('203.0.113.21'))).body.guest.token;
+    let first = null;
     for (let i = 1; i <= 5; i++) {
       const ready = await readyJob(mf, call, guest, `op-booth-cap0${i}`);
       const created = await call('POST', '/v1/booth/submissions', { token: guest, body: submissionBody(ready.jobId) });
       assert.equal(created.status, 201, `submission ${i}`);
+      if (!first) first = created.body;
     }
     const extraReady = await readyJob(mf, call, guest, 'op-booth-cap06');
     const extra = await call('POST', '/v1/booth/submissions', { token: guest, body: submissionBody(extraReady.jobId) });
     assert.equal(extra.status, 429);
     assert.equal(extra.body.error.code, 'rate_limited');
+    const dropped = await call('POST', '/v1/booth/withdraw', {
+      body: { receipt: first.receipt, claimKey: first.claimKey },
+    });
+    assert.equal(dropped.status, 200);
+    const freed = await call('POST', '/v1/booth/submissions', { token: guest, body: submissionBody(extraReady.jobId) });
+    assert.equal(freed.status, 201, 'a withdrawn row does not count toward the owner cap');
     const second = await readyJob(mf, call, other, 'op-booth-cap07');
     const allowed = await call('POST', '/v1/booth/submissions', { token: other, body: submissionBody(second.jobId) });
     assert.equal(allowed.status, 201);
@@ -821,6 +907,26 @@ test('per-owner, per-IP and claim buckets stop the next submission', async () =>
     assert.equal(limited.status, 429);
     assert.equal(limited.body.error.code, 'rate_limited');
   });
+
+  await withApp({ BOOTH_CLAIMS_PER_HOUR: '1', BOOTH_CLAIMS_PER_IP_HOUR: '10' }, async (mf, call) => {
+    const guest = (await mintGuest(call)).body.guest.token;
+    const ready = await readyJob(mf, call, guest, 'op-booth-claimg');
+    const created = await call('POST', '/v1/booth/submissions', { token: guest, body: submissionBody(ready.jobId) });
+    const ok = await call('POST', '/v1/booth/claim', {
+      headers: fromIp('203.0.113.50'),
+      body: { receipt: created.body.receipt, claimKey: created.body.claimKey },
+    });
+    assert.equal(ok.status, 200);
+    const blocked = await call('POST', '/v1/booth/claim', {
+      headers: fromIp('203.0.113.51'),
+      body: { receipt: created.body.receipt, claimKey: created.body.claimKey },
+    });
+    assert.equal(blocked.status, 429);
+    assert.equal(blocked.body.error.code, 'rate_limited');
+    const d1 = await mf.getD1Database('DB');
+    const global = await d1.prepare(`SELECT count FROM rate_counters WHERE bucket = 'booth-claim:all'`).first();
+    assert.equal(Number(global.count) >= 1, true);
+  });
 });
 
 test('guest BLUE is refused before a rate slot when disabled and allowed when unset', async () => {
@@ -851,6 +957,8 @@ test('guest BLUE is refused before a rate slot when disabled and allowed when un
     const asGuest = await call('GET', '/v1/ai/capabilities', { token: guest });
     assert.equal(unsigned.body.blueJobs, false);
     assert.equal(asGuest.body.blueJobs, false);
+    assert.equal(unsigned.body.modelJobs, true);
+    assert.equal(asGuest.body.modelJobs, true);
     const ada = await register(mf, call, 'blueada');
     const adaUp = await upload(call, ada.body.token, pdfBytes('blue-ada'));
     const adaBlue = await call('POST', '/v1/ai/jobs', {
@@ -872,8 +980,66 @@ test('guest BLUE is refused before a rate slot when disabled and allowed when un
     assert.equal((await call('GET', '/v1/ai/capabilities', { token: guest })).body.blueJobs, true);
   });
 
-  await withApp({ AI_OPEN_ACCESS: 'false', AI_GUEST_BLUE: 'false' }, async (_mf, call) => {
-    assert.equal((await call('GET', '/v1/ai/capabilities')).body.blueJobs, true);
+  await withApp({ AI_OPEN_ACCESS: 'false', AI_GUEST_BLUE: 'false', AI_GUEST_MODEL_JOBS: 'false' }, async (_mf, call) => {
+    const unsigned = await call('GET', '/v1/ai/capabilities');
+    assert.equal(unsigned.body.blueJobs, true);
+    assert.equal(unsigned.body.modelJobs, true);
+    const asOperator = await call('GET', '/v1/ai/capabilities', { token: OPERATOR });
+    assert.equal(asOperator.body.blueJobs, true);
+    assert.equal(asOperator.body.modelJobs, true);
+  });
+});
+
+test('guest model jobs stop before a rate slot and a valid operator still sees both flags', async () => {
+  await withApp({
+    AI_GUEST_MODEL_JOBS: 'false',
+    AI_GUEST_BLUE: 'false',
+    AI_OPEN_ACCESS: 'true',
+    AI_GUEST_JOBS_PER_HOUR: '1',
+    AI_GUEST_JOBS_PER_OWNER_HOUR: '5',
+    AI_GUEST_ACTIVE_JOBS_PER_OWNER: '4',
+  }, async (mf, call) => {
+    const guest = (await mintGuest(call)).body.guest.token;
+    const missing = '66666666-6666-4666-8666-666666666666';
+    const blue = await call('POST', '/v1/ai/jobs', {
+      token: guest,
+      body: jobBody(missing, { role: 'blue', idempotencyKey: 'op-model-blue' }),
+    });
+    assert.equal(blue.status, 403);
+    assert.equal(blue.body.error.code, 'guest_blue_disabled');
+    const model = await call('POST', '/v1/ai/jobs', {
+      token: guest,
+      body: jobBody(missing, { idempotencyKey: 'op-model-red' }),
+    });
+    assert.equal(model.status, 403);
+    assert.equal(model.body.error.code, 'guest_model_disabled');
+    assert.equal(await stubCalls(mf, '/internal/v1/jobs', 'POST'), 0);
+    const up = await upload(call, guest, pdfBytes('model-off'));
+    const apply = await call('POST', '/v1/ai/jobs', {
+      token: guest,
+      body: applyOnlyBody(up.body.upload.id, 'op-model-apply'),
+    });
+    assert.equal(apply.status, 202, 'the refused model job did not spend the guest job slot');
+    const unsigned = await call('GET', '/v1/ai/capabilities');
+    const asGuest = await call('GET', '/v1/ai/capabilities', { token: guest });
+    const asWrong = await call('GET', '/v1/ai/capabilities', { token: WRONG_OPERATOR });
+    for (const view of [unsigned, asGuest, asWrong]) {
+      assert.equal(view.status, 200);
+      assert.equal(view.body.blueJobs, false);
+      assert.equal(view.body.modelJobs, false);
+    }
+    const asOperator = await call('GET', '/v1/ai/capabilities', { token: OPERATOR });
+    assert.equal(asOperator.status, 200);
+    assert.equal(asOperator.body.blueJobs, true);
+    assert.equal(asOperator.body.modelJobs, true);
+    assert.equal(asOperator.body.openAccess.enabled, true);
+    const ada = await register(mf, call, 'modelada');
+    const adaUp = await upload(call, ada.body.token, pdfBytes('model-ada'));
+    const adaJob = await call('POST', '/v1/ai/jobs', {
+      token: ada.body.token,
+      body: jobBody(adaUp.body.upload.id, { idempotencyKey: 'op-model-ada' }),
+    });
+    assert.equal(adaJob.status, 202, 'a password owner can still run a model job');
   });
 });
 
