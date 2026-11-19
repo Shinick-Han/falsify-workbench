@@ -1306,16 +1306,17 @@ async function createJob(ctx) {
   const { request, env, settings, deps } = ctx;
   const db = deps.getDb();
   const job = parseJobRequest(await readJsonBody(request, MAX_JOB_BODY_BYTES), settings);
-  // Guest BLUE, then guest model jobs, then the operator-only gate. Each one stops before
-  // upload lookup, a rate slot or a runtime call. A disabled BLUE job keeps its own code.
+  // When operator-only is on, that refusal comes before the guest flags so an event guest
+  // sees model_jobs_operator_only. Guest codes stay in force when the flag is off.
+  // Each refusal stops before upload lookup, a rate slot, or a runtime call.
+  if (settings.modelJobsOperatorOnly === true && !isOperatorOwner(ctx.ownerId) && !(job.role === 'red' && job.applyOnly === true)) {
+    aiFail(403, 'model_jobs_operator_only');
+  }
   if (settings.guestScope === true && settings.guestBlue === false && job.role === 'blue') {
     aiFail(403, 'guest_blue_disabled');
   }
   if (settings.guestScope === true && settings.guestModelJobs === false && !(job.role === 'red' && job.applyOnly === true)) {
     aiFail(403, 'guest_model_disabled');
-  }
-  if (settings.modelJobsOperatorOnly === true && !isOperatorOwner(ctx.ownerId) && !(job.role === 'red' && job.applyOnly === true)) {
-    aiFail(403, 'model_jobs_operator_only');
   }
   // The upload must exist and belong to this owner before the runtime is involved.
   const upload = await db
