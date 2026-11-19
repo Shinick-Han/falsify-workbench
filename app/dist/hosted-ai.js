@@ -213,7 +213,13 @@
     return Object.assign(resolveDomDependencies(options),resolveApiDependencies(options));
   }
   let paperToolsState=null;
+  /* Last announced guest flags. null until announceCapabilities. Read-only copies only. */
+  let publishedCapabilities=null;
   let paperAuthImpl=async()=>{const error=Error('auth');error.httpStatus=401;throw error;};
+  function hostedCapabilities(){
+    if(!publishedCapabilities) return null;
+    return {blueJobs:publishedCapabilities.blueJobs===true,modelJobs:publishedCapabilities.modelJobs===true};
+  }
   function paperFlag(tools, key){
     if(!tools||typeof tools[key]!=='boolean') return null;
     return tools[key];
@@ -1215,18 +1221,24 @@
       }
       fail(describe(error,'submit'));
     }
+    function refuseClosedModelRun(){
+      if(modelJobsAllowed()) return false;
+      fail(boothInsteadOfAi()?BOOTH_NOTE:'이 행사 화면에서는 모델 검토를 실행하지 않습니다.');
+      return true;
+    }
+    function refuseClosedReview(input){
+      if(refuseClosedModelRun()) return true;
+      if(input.role==='blue'&&!blueJobsAllowed()){
+        fail('이 행사 화면에서는 BLUE 검토를 실행하지 않습니다.');
+        return true;
+      }
+      return false;
+    }
     async function run(){
       if(state.busy||state.gate!=='ready'||!state.capabilities) return;
       if(!state.session&&!await openBearer()){showGuestStartError();return;}
       const input=reviewInputs();
-      if(!modelJobsAllowed()){
-        fail(boothInsteadOfAi()?BOOTH_NOTE:'이 행사 화면에서는 모델 검토를 실행하지 않습니다.');
-        return;
-      }
-      if(input.role==='blue'&&!blueJobsAllowed()){
-        fail('이 행사 화면에서는 BLUE 검토를 실행하지 않습니다.');
-        return;
-      }
+      if(refuseClosedReview(input)) return;
       const problem=reviewInputProblem(input.prompt);
       if(problem){fail(problem);return;}
       state.busy='upload';state.error='';state.downloadStatus='';state.editedStatus='';
@@ -1382,11 +1394,12 @@
     }
     function announceCapabilities(){
       const caps=state.capabilities;
-      if(!caps||typeof doc?.dispatchEvent!=='function'||typeof CustomEvent!=='function') return;
+      publishedCapabilities=caps?{blueJobs:caps.blueJobs!==false,modelJobs:caps.modelJobs!==false}:null;
+      if(!publishedCapabilities||typeof doc?.dispatchEvent!=='function'||typeof CustomEvent!=='function') return;
       try{
         doc.dispatchEvent(new CustomEvent('falsify:hosted-capabilities',{detail:{
-          blueJobs:caps.blueJobs!==false,
-          modelJobs:caps.modelJobs!==false
+          blueJobs:publishedCapabilities.blueJobs,
+          modelJobs:publishedCapabilities.modelJobs
         }}));
       }catch{}
     }
@@ -2847,6 +2860,7 @@
     create,
     version:VERSION,
     paperAuth:(...args)=>paperAuthImpl(...args),
+    capabilities:hostedCapabilities,
     get paperTools(){return paperToolsState;}
   };
   if(typeof globalThis!=='undefined'){

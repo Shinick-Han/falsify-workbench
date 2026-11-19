@@ -865,12 +865,20 @@
       const time=outputAt?' · '+new Date(outputAt).toLocaleString():'';
       lastDownload.textContent='이전 생성본 다운로드'+time+(generationFailed?' · 최근 생성 실패':' · 현재 편집과 다름');
     }
+    /* Same flag as hosted-ai: FalsifyHostedAi.capabilities().blueJobs === false. Missing means the index handoff stays. */
+    function blueHandoffClosed(){
+      const read=globalThis.FalsifyHostedAi&&globalThis.FalsifyHostedAi.capabilities;
+      const caps=typeof read==='function'?read():null;
+      return !!(caps&&caps.blueJobs===false);
+    }
     function renderDownloadControls(blocked){
       ui.current.disabled=generationApi()?!(source&&source.pdf&&source.fileHash):blocked;
       ui.current.textContent=generationApi()?'현재 파일 다운로드':output&&stale()?'마지막 생성본 다운로드':'현재 생성본 다운로드';
       if(typeof lastDownload!=='undefined')renderPreviousDownload(blocked);
       ui.team.disabled=blocked;
-      ui.blue.disabled=generationApi()?!(source&&source.pdf&&source.fileHash):blocked;
+      const closed=blueHandoffClosed();
+      ui.blue.hidden=closed;
+      ui.blue.disabled=closed||(generationApi()?!(source&&source.pdf&&source.fileHash):blocked);
     }
     function renderOutputChrome(){
       const blocked=!output||output.blocked;
@@ -1441,8 +1449,15 @@
       pageText.paragraphList?.remove();pageText.paragraphMarker?.remove();
       pageText.paragraphList=null;pageText.paragraphMarker=null;pageText.paragraphs=null;
     }
+    /* index.html has no booth.enabled, so the paragraph list stays closed there. */
+    function eventBoothOpen(){
+      try{
+        const config=globalThis.FalsifyCloudConfig;
+        return !!(config&&config.booth&&config.booth.enabled===true);
+      }catch{return false;}
+    }
     function renderParagraphs(display){
-      const list=doc.createElement('details');list.className='paper-paragraph-list';
+      const list=doc.createElement('details');list.className='paper-paragraph-list';list.open=eventBoothOpen();
       const summary=doc.createElement('summary');summary.textContent='이 쪽의 문단 선택 ('+display.paragraphs.length+')';list.append(summary);
       const marker=doc.createElement('div');marker.className='paper-paragraph-marker';marker.hidden=true;marker.setAttribute('aria-hidden','true');display.pageEl.append(marker);
       const mark=p=>{
@@ -2751,6 +2766,7 @@
     }
     listen(ui.file,'change',onFileChange);
     listen(doc,'falsify:document',onDocument);
+    listen(doc,'falsify:hosted-capabilities',()=>{renderDownloadControls(!output||output.blocked);});
     listen(doc,'falsify:document-clear',clearSource);
     listen(doc,'falsify:workspace-reset',clearSource);
     function jumpToTyped(){
@@ -2810,7 +2826,14 @@
       getEditSnapshot(){const raw=session&&typeof session.snapshot==='function'?session.snapshot():snapshot;return raw?published(raw):null;},
       getOutput:publicOutput,
       getPageIndex(){return source?.pdf&&pages>0&&Number.isSafeInteger(page)&&page>=1&&page<=pages?page-1:null;},
-      getCurrentOutput(){const g=generationApi();if(!output||output.blocked||!output.key||!g?.key)return null;try{if(g.key(captureSpec())!==output.key)return null;}catch{return null;}return publicOutput();}
+      getCurrentOutput(){const g=generationApi();if(!output||output.blocked||!output.key||!g?.key)return null;try{if(g.key(captureSpec())!==output.key)return null;}catch{return null;}return publicOutput();},
+      showPage(n){
+        if(!Number.isInteger(n)||n<1||!source||!source.doc||n>pages) return false;
+        if(!canLeaveInline()) return false;
+        if(n!==page) void drawBefore(n);
+        if(typeof ui.beforeStage.scrollIntoView==='function') ui.beforeStage.scrollIntoView({block:'center'});
+        return true;
+      }
     };
     return api;
   }

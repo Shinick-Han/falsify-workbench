@@ -40,11 +40,18 @@
     if(view==='blue')return blueSignSpec();
     return redSignSpec();
   }
+  /* FalsifyHostedAi.capabilities() is null until the panel announces. Only blueJobs === false leaves BLUE. */
+  function editedPdfSign(detail){
+    const read=globalThis.FalsifyHostedAi&&globalThis.FalsifyHostedAi.capabilities;
+    const caps=typeof read==='function'?read():null;
+    if(caps&&caps.blueJobs===false)return {gate:'R1',title:'수정본 PDF가 준비됐습니다',detail,label:'부스에 제출하기',action:()=>focusTarget($('#booth'))};
+    return {gate:'R1',title:'수정본 PDF가 준비됐습니다',detail,label:'BLUE로 검증하기',action:()=>focusTarget($('#hosted-ai-blue-handoff'))};
+  }
   function hostedRedSign(){
     const h=hostedProgress;if(!h?.operate||h.role==='blue')return null;
     const detail=h.fileName||documentProgress?.name||'';
     if(h.busy)return {gate:'R1',title:h.jobKind==='apply'?'선택한 변경을 PDF에 적용 중입니다':'RED 웹 검토 중입니다',detail,label:'진행 상태 보기',action:()=>focusTarget($('#hosted-ai-progress'))};
-    if(h.hasEditedPdf)return {gate:'R1',title:'수정본 PDF가 준비됐습니다',detail,label:'BLUE로 검증하기',action:()=>focusTarget($('#hosted-ai-blue-handoff'))};
+    if(h.hasEditedPdf)return editedPdfSign(detail);
     if(h.candidateCount>0)return {gate:'R1',title:'후보를 선택하고 PDF에 적용하세요',detail:(detail?detail+' · ':'')+h.candidateCount+'개 후보'+(h.selectedCount?' · '+h.selectedCount+'개 선택':''),label:'후보 선택으로',action:()=>focusTarget($('#hosted-ai-selection input')||$('#hosted-ai-apply'))};
     if(h.hasFile&&!documentProgress?.busy&&!documentProgress?.count&&!documentProgress?.hasResult)return {gate:'R1',title:'원문을 직접 고치거나 웹 AI 검토를 실행하세요',detail,label:'웹 AI 실행으로',action:()=>focusTarget($('#hosted-ai-preset-default')||$('#hosted-ai-prompt'))};
     return null;

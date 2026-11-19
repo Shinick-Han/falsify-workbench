@@ -699,6 +699,47 @@
       renderCourses();
       void openPdf(id,next,'arxiv-'+String(id).replace(/[^\w.-]+/g,'_')+'.pdf');
     }
+    function missionPage(mission){
+      const n=mission&&mission.pageHint;
+      return Number.isInteger(n)&&n>=1&&n<=9999?n:0;
+    }
+    function showMissionPage(n){
+      const ws=workspace();
+      if(ws&&typeof ws.showPage==='function'&&ws.showPage(n)===true) return true;
+      const jump=byId('paper-page-jump');
+      if(!jump||jump.disabled) return false;
+      jump.value=String(n);
+      if(typeof jump.dispatchEvent==='function') jump.dispatchEvent(new Event('change',{bubbles:true}));
+      return true;
+    }
+    function followPageHint(n){
+      if(showMissionPage(n)) return;
+      const later=typeof root.setTimeout==='function'?root.setTimeout:null;
+      if(!later) return;
+      let left=40;
+      const tick=()=>{
+        if(closed||showMissionPage(n)) return;
+        left-=1;
+        if(left>0) later(tick,100);
+      };
+      later(tick,100);
+    }
+    function missionPaper(mission){
+      return {
+        source:'mission',id:mission.paperId,title:typeof mission.title==='string'?mission.title:'',
+        license:typeof mission.license==='string'?mission.license:'',course:mission.course
+      };
+    }
+    function missionGoButton(mission){
+      const n=missionPage(mission);
+      if(!n) return null;
+      const go=el('button',{type:'button',className:'button secondary',textContent:n+'쪽으로 가기'});
+      go.addEventListener('click',()=>{
+        if(!(paper&&paper.id===mission.paperId)) startPaper(missionPaper(mission),mission.paperId);
+        followPageHint(n);
+      });
+      return go;
+    }
     function renderMissions(){
       const box=byId('booth-missions');
       if(!box||!liveConfig) return;
@@ -710,18 +751,14 @@
       for(const mission of missions){
         if(!mission||typeof mission!=='object'||typeof mission.paperId!=='string') continue;
         const button=el('button',{type:'button',className:'button primary',textContent:'이 논문으로 시작'});
-        button.addEventListener('click',()=>{
-          startPaper({
-            source:'mission',id:mission.paperId,title:typeof mission.title==='string'?mission.title:'',
-            license:typeof mission.license==='string'?mission.license:'',course:mission.course
-          },mission.paperId);
-        });
+        button.addEventListener('click',()=>{startPaper(missionPaper(mission),mission.paperId);});
         const meta=[mission.license,mission.course==='any'?'코스 선택':mission.course].filter(Boolean).join(' · ');
         box.append(el('article',{className:'booth-card'},
           el('h3',{textContent:mission.title||mission.paperId}),
           mission.hint?el('p',{textContent:mission.hint}):null,
           meta?el('p',{className:'muted',textContent:meta}):null,
-          button));
+          button,
+          missionGoButton(mission)));
       }
     }
     function renderSearch(payload){
