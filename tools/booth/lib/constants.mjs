@@ -55,7 +55,7 @@ Commands:
   blue [--profile <name>] [--model <id>] [--effort <id>] [--max-calls <n>]
        [--use-evidence true|false] [--prompt-file <file>] [--harness-file <file>]
        [--concurrency <n>] [--repeat <n>] [--only <receipts>] [--status a,b]
-       [--dry-run]
+       [--dry-run] [--allow-open]
   score [--only <receipts>] [--status a,b]
   judge [--only <receipts>] [--outcome missed|caught|partial|invalid] [--dry-run]
   publish [--only <receipts>] [--status a,b] [--public-note <text>] [--prize <text>] [--dry-run]
@@ -64,12 +64,16 @@ Commands:
   export --format common|score|key|jsonl [--out <file>] [--only <receipts>] [--status a,b]
   missions get [--out <file>]
   missions set <file>
+  missions warm
   open
   close [--dry-run]
   announce (--text <text> | --file <file> | --clear)
 
 BLUE uploads the edited PDF and posts the operator profile only.
 Declared edits, reasons, types, nickname and paper metadata are not part of that request.
+blue refuses to start while submissions are open unless --allow-open is set.
+draw defaults to outcome missed.
+CSV cells that start with =, +, -, @, tab or CR are prefixed with '.
 score writes score.json and does not publish.
 Progress goes to stderr. Command results go to stdout as JSON.
 `;

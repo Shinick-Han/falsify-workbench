@@ -26,7 +26,7 @@ node tools/booth/booth.mjs --config booth.local.json blue \
 
 `promptFile` 과 `harnessFile` 은 설정 파일 위치 기준입니다. `--prompt-file` 과 `--harness-file` 은 현재 디렉터리 기준입니다.
 
-같은 접수·프로파일·반복·설정은 항상 같은 idempotency 키(sha256)를 씁니다. 끝난 작업은 로컬 기록을 다시 읽고, 기록이 없으면 서버가 같은 키를 재생합니다. 실패한 작업은 다시 과금하지 않습니다. 새로 돌리려면 프롬프트나 모델처럼 설정을 바꾸세요.
+같은 접수·프로파일·반복·설정·수정본 PDF sha256은 항상 같은 idempotency 키(sha256)를 씁니다. PDF 바이트가 바뀌면 키가 바뀌고 새 작업이 됩니다. 끝난 작업은 로컬 기록을 다시 읽고, 기록이 없으면 서버가 같은 키를 재생합니다. 실패한 작업은 다시 과금하지 않습니다. 같은 PDF로 다시 돌리려면 프롬프트나 모델처럼 설정을 바꾸세요.
 
 `--concurrency` 는 이 프로세스 안의 동시 BLUE 작업 수입니다. 서버의 `BOOTH_OPERATOR_ACTIVE_JOBS` 이하로 두세요.
 
@@ -36,14 +36,14 @@ node tools/booth/booth.mjs --config booth.local.json blue \
 |---|---|
 | `status` | 공개 설정, 운영 설정, 상태별 건수 |
 | `list` | 운영자 목록. `--status`, `--after`, `--limit` |
-| `pull` | 접수마다 `submission.json` 과 `edited.pdf`, sha256. 같은 `updatedAt` 이면 PDF를 다시 받지 않습니다 |
-| `blue` | 수정본 PDF를 올리고 `role: blue` 작업을 만들어 폴링한 뒤 결과를 저장 |
+| `pull` | 접수마다 `submission.json` 과 `edited.pdf`, sha256. 같은 `updatedAt` 이면 PDF를 다시 받지 않습니다. 철회분은 로컬 파일과 BLUE 기록을 지우고 `withdrawn.log` 에 시각·접수번호·seq만 남깁니다 |
+| `blue` | 수정본 PDF를 올리고 `role: blue` 작업을 만들어 폴링한 뒤 결과를 저장합니다. 접수가 열려 있으면 `--allow-open` 없이 시작하지 않습니다 |
 | `score` | 선언한 수정과 BLUE 인용을 맞춰 `score.json` 에 제안만 씁니다. 게시하지 않습니다 |
 | `judge` | 제안을 `status: judged` 와 `outcome` 으로 PATCH. `published` 는 건드리지 않습니다 |
 | `publish` / `unpublish` | 게시 플래그. 기본 대상은 `judged` |
-| `draw` | `crypto.randomInt` 로 당첨을 골라 `draws/*.json` 에 남깁니다. `--prize` 가 있으면 그 문장을 PATCH |
-| `export` | `common`, `score`, `key`, `jsonl`. 철회한 접수는 빠집니다 |
-| `missions get\|set` | 미션 목록 |
+| `draw` | `crypto.randomInt` 로 당첨을 고릅니다. 기본 outcome 은 `missed` 라서 경품은 AI가 놓친 결함에 갑니다. `--prize` 가 있으면 그 문장을 PATCH |
+| `export` | `common`, `score`, `key`, `jsonl`. 철회한 접수는 빠집니다. CSV 칸이 `=`, `+`, `-`, `@`, 탭, CR로 시작하면 `'` 를 붙입니다 |
+| `missions get\|set\|warm` | 미션 목록. 행사 파일은 `tools/booth/missions.aws-community-day-2026.json` 입니다. `warm` 은 설정된 미션마다 `GET /v1/papers/pdf` 로 라이선스와 캐시를 확인하고 크기와 실패를 보고합니다 |
 | `open` / `close` | 접수 개방. `close --dry-run` 은 요청을 보내지 않습니다 |
 | `announce` | `--text`, `--file`, `--clear` |
 
@@ -53,13 +53,13 @@ node tools/booth/booth.mjs --config booth.local.json blue \
 
 ## 부스 당일
 
-1. 문을 열기 전에 `open` 과 `missions set`, 필요하면 `announce`.
-2. 30분마다 `pull`. 런타임은 수정본 PDF를 7일만 보관하므로 행사 중에 받아 두세요. 만료되면 `artifact_expired` 이고, 이미 받은 파일은 남겨 둡니다.
+1. 문을 열기 전에 `missions set tools/booth/missions.aws-community-day-2026.json`, `missions warm`, `open`, 필요하면 `announce`.
+2. 30분마다 `pull` (상태 필터 없이). 런타임은 수정본 PDF를 7일만 보관하므로 행사 중에 받아 두세요. 만료되면 `artifact_expired` 이고, 이미 받은 파일은 남겨 둡니다. 철회된 접수는 로컬에서 지워집니다.
 3. 마감하면 `close`.
-4. `blue`. 먼저 `--dry-run`.
+4. `blue`. 먼저 `--dry-run`. 접수가 아직 열려 있으면 거절합니다. 그때도 돌리려면 `--allow-open`.
 5. `score` 로 제안 확인. 사람이 본 뒤에만 `judge`.
 6. `publish --prize '부스에서 이 화면을 보여 주세요'`.
-7. 경품이 추첨이면 `draw --count 3 --prize '…'`.
+7. 경품이 추첨이면 `draw --count 3 --prize '…'`. 기본은 AI가 놓친(`missed`) 접수입니다.
 8. `export --format common` 과 `--format score`, `--format key`.
 
 ## 채점

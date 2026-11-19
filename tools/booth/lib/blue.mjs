@@ -123,9 +123,12 @@ export function configHash(profile) {
   return sha256Hex(stableStringify(profileFingerprint(profile)));
 }
 
-// Same receipt, profile, repeat and settings always yield the same server key.
-export function idempotencyKey({ receipt, profileName, repeatIndex, configHash: hash }) {
-  const key = sha256Hex(`${receipt}\n${profileName}\n${repeatIndex}\n${hash}`);
+// Same receipt, profile, repeat, settings and edited PDF always yield the same server key.
+export function idempotencyKey({ receipt, profileName, repeatIndex, configHash: hash, pdfSha256 }) {
+  if (typeof pdfSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(pdfSha256)) {
+    throw new BoothError('booth_config', 'pdf sha256 shape');
+  }
+  const key = sha256Hex(`${receipt}\n${profileName}\n${repeatIndex}\n${hash}\n${pdfSha256}`);
   if (!IDEMPOTENCY_KEY.test(key)) throw new BoothError('booth_config', 'idempotency key failed shape check');
   return key;
 }

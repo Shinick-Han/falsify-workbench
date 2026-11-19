@@ -57,8 +57,12 @@ export function numberAppears(quote, number) {
   return new RegExp(`(?<![\\d.])${escaped}(?![\\d.])`).test(String(quote ?? ''));
 }
 
+// Spreadsheet formula injection. A leading apostrophe is applied before quoting.
+const FORMULA_PREFIX = /^[=+\-@\t\r]/;
+
 export function csvCell(value) {
-  const text = value == null ? '' : String(value);
+  let text = value == null ? '' : String(value);
+  if (FORMULA_PREFIX.test(text)) text = `'${text}`;
   if (/[",\r\n]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
   return text;
 }

@@ -41,6 +41,26 @@ export function submissionDir(dataDir, receipt) {
   return path.join(dataDir, 'submissions', receipt);
 }
 
+export function withdrawnLogPath(dataDir) {
+  return path.join(dataDir, 'withdrawn.log');
+}
+
+// One line per receipt: time, receipt, seq, withdrawn. No nickname or declared text.
+export function appendWithdrawnTombstone(dataDir, row) {
+  assertReceipt(row.receipt);
+  const file = withdrawnLogPath(dataDir);
+  const prior = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+  const already = prior.split('\n').some(line => {
+    const fields = line.split('\t');
+    return fields[1] === row.receipt && fields[3] === 'withdrawn';
+  });
+  if (already) return false;
+  fs.mkdirSync(dataDir, { recursive: true });
+  const seq = Number.isSafeInteger(row.seq) ? String(row.seq) : '';
+  fs.appendFileSync(file, `${new Date().toISOString()}\t${row.receipt}\t${seq}\twithdrawn\n`);
+  return true;
+}
+
 export function pdfPath(dataDir, receipt) {
   return path.join(submissionDir(dataDir, receipt), 'edited.pdf');
 }

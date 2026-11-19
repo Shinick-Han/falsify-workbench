@@ -12,8 +12,8 @@ import { createClient } from './http.mjs';
 import { mapPool } from './pool.mjs';
 import { scoreSubmission } from './score.mjs';
 import {
-  blueRecordPath, fileSha256, listReceipts, loadBlueRecords, loadSubmission,
-  pdfPath, readJsonOptional, submissionDir, writeAtomic, writeJson,
+  appendWithdrawnTombstone, blueRecordPath, fileSha256, listReceipts, loadBlueRecords,
+  loadSubmission, pdfPath, readJsonOptional, submissionDir, writeAtomic, writeJson,
 } from './store.mjs';
 import { parseCsvSet, sha256Hex } from './text.mjs';
 
@@ -132,18 +132,29 @@ export async function pull(ctx) {
   let saved = 0;
   let skipped = 0;
   let kept = 0;
+  let withdrawn = 0;
   for (const row of submissions) {
     if (only && !only.has(row.receipt)) continue;
     const result = await archiveSubmission(ctx.io, client, dir, row);
     if (result === 'saved') saved += 1;
     else if (result === 'kept') kept += 1;
+    else if (result === 'withdrawn') withdrawn += 1;
     else skipped += 1;
   }
-  print(ctx.io, { dataDir: dir, saved, skipped, kept, seen: submissions.length });
+  print(ctx.io, { dataDir: dir, saved, skipped, kept, withdrawn, seen: submissions.length });
+}
+
+function forgetWithdrawn(io, dir, row) {
+  fs.rmSync(submissionDir(dir, row.receipt), { recursive: true, force: true });
+  fs.rmSync(path.join(dir, 'blue', row.receipt), { recursive: true, force: true });
+  const added = appendWithdrawnTombstone(dir, row);
+  progress(io, `pull ${row.receipt} withdrawn; local files removed${added ? '' : '; tombstone already recorded'}`);
+  return 'withdrawn';
 }
 
 async function archiveSubmission(io, client, dir, row) {
   if (!/^F-\d{4,}$/.test(row.receipt)) throw new BoothError('booth_api', 'server returned a bad receipt');
+  if (row.status === 'withdrawn') return forgetWithdrawn(io, dir, row);
   const folder = submissionDir(dir, row.receipt);
   const pdf = path.join(folder, 'edited.pdf');
   const hashFile = path.join(folder, 'pdf.sha256');
@@ -158,6 +169,7 @@ async function archiveSubmission(io, client, dir, row) {
   try {
     bytes = await client.bytes(`/v1/booth/admin/submissions/${encodeURIComponent(row.receipt)}/pdf`);
   } catch (error) {
+    if (error instanceof BoothError && error.code === 'withdrawn') return forgetWithdrawn(io, dir, row);
     if (error instanceof BoothError && error.code === 'artifact_expired' && fs.existsSync(pdf)) {
       writeJson(meta, row);
       progress(io, `pull ${row.receipt} remote PDF expired; local file kept`);
@@ -176,6 +188,16 @@ async function archiveSubmission(io, client, dir, row) {
 export async function blue(ctx) {
   const dir = dataDir(ctx);
   const plan = resolveBluePlan(ctx.config, ctx.flags);
+  if (ctx.flags.allowOpen !== true) {
+    const gate = clientFor(ctx);
+    const settings = await gate.json('/v1/booth/admin/settings');
+    if (!settings || settings.submissionsOpen !== false) {
+      throw new BoothError(
+        'booth_config',
+        'submissions are open; pass --allow-open to run BLUE while visitors share the runtime',
+      );
+    }
+  }
   const rows = activeRows(localRows(dir, ctx.flags));
   const tasks = [];
   for (const row of rows) {
@@ -201,15 +223,21 @@ export async function blue(ctx) {
   }
 }
 
-function dryBlueAction(dir, task) {
+function blueKey(dir, task) {
   const file = pdfPath(dir, task.row.receipt);
-  const settings = buildBlueRequest({ pdfPath: file, profile: task.profile });
-  const key = idempotencyKey({
+  return idempotencyKey({
     receipt: task.row.receipt,
     profileName: task.profile.name,
     repeatIndex: task.repeat,
     configHash: task.hash,
+    pdfSha256: fileSha256(file),
   });
+}
+
+function dryBlueAction(dir, task) {
+  const file = pdfPath(dir, task.row.receipt);
+  const settings = buildBlueRequest({ pdfPath: file, profile: task.profile });
+  const key = blueKey(dir, task);
   return {
     receipt: task.row.receipt,
     profile: task.profile.name,
@@ -226,13 +254,8 @@ async function runBlue(io, client, dir, plan, task) {
   const receipt = task.row.receipt;
   const label = `${receipt} ${task.profile.name} #${task.repeat}`;
   const recordFile = blueRecordPath(dir, receipt, task.profile.name, task.repeat, task.hash);
-  const key = idempotencyKey({
-    receipt,
-    profileName: task.profile.name,
-    repeatIndex: task.repeat,
-    configHash: task.hash,
-  });
   try {
+    const key = blueKey(dir, task);
     const existing = readJsonOptional(recordFile);
     if (existing?.job && existing.idempotencyKey === key && TERMINAL_JOB.has(existing.job.state)) {
       if (existing.job.state === 'completed') {
@@ -439,7 +462,7 @@ export async function draw(ctx) {
   if (!Number.isSafeInteger(count) || count < 1 || count > 1000) throw new BoothError('booth_config', 'count must be an integer from 1 to 1000');
   const only = receiptSet(ctx.flags);
   const statuses = statusSet(ctx.flags, ['judged']);
-  const outcomes = outcomeSet(ctx.flags.outcome || 'caught');
+  const outcomes = outcomeSet(ctx.flags.outcome || 'missed');
   const prize = textFlag(ctx.flags.prize, 'prizeMessage', 500);
   const client = clientFor(ctx);
   const { submissions } = await listPages(client, { status: [...statuses].join(','), limit: 200 });
@@ -535,7 +558,40 @@ export async function missions(ctx) {
     print(ctx.io, settings);
     return;
   }
-  throw new BoothError('booth_config', 'missions needs get or set');
+  if (sub === 'warm') {
+    await warmMissions(ctx, client);
+    return;
+  }
+  throw new BoothError('booth_config', 'missions needs get, set or warm');
+}
+
+async function warmMissions(ctx, client) {
+  const settings = await client.json('/v1/booth/admin/settings');
+  const configured = Array.isArray(settings.missions) ? settings.missions : [];
+  const missions = [];
+  const failures = [];
+  for (const mission of configured) {
+    const id = mission && typeof mission.id === 'string' ? mission.id : '';
+    const paperId = mission && typeof mission.paperId === 'string' ? mission.paperId : '';
+    if (!paperId) {
+      failures.push({ id, paperId, code: 'booth_config' });
+      progress(ctx.io, `warm ${id || '(missing id)'} failed booth_config`);
+      continue;
+    }
+    try {
+      const bytes = await client.bytes(`/v1/papers/pdf?id=${encodeURIComponent(paperId)}`);
+      missions.push({ id, paperId, bytes: bytes.length, sha256: sha256Hex(bytes) });
+      progress(ctx.io, `warm ${id} paper=${paperId} bytes=${bytes.length}`);
+    } catch (error) {
+      const code = error instanceof BoothError ? error.code : 'booth_api';
+      failures.push({ id, paperId, code });
+      progress(ctx.io, `warm ${id} paper=${paperId} failed ${code}`);
+    }
+  }
+  print(ctx.io, { missions, failures });
+  if (failures.length) {
+    throw new BoothError('booth_api', `${failures.length} of ${configured.length} mission PDF(s) failed`, { exitCode: 2 });
+  }
 }
 
 function validateMissions(value) {
