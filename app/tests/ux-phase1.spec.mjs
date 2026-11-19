@@ -141,7 +141,12 @@ test('Wayfinding sign reflects hosted AI state across RED and BLUE without break
   const appSrc=await readDist('app.js');
   const nodes=new Map(),listeners={};
   const node=sel=>{
-    if(!nodes.has(sel)) nodes.set(sel,{textContent:'',dataset:{},classList:{remove(){},add(){}},addEventListener(){},querySelectorAll:()=>[],focus(){},scrollIntoView(){},closest(){return this;}});
+    if(!nodes.has(sel)) nodes.set(sel,{
+      textContent:'',dataset:{},classList:{remove(){},add(){}},listeners:{},
+      addEventListener(type,fn){(this.listeners[type]||(this.listeners[type]=[])).push(fn);},
+      querySelectorAll:()=>[],focus(){this.focused=true;},scrollIntoView(){},closest(){return this;},
+      click(){for(const fn of this.listeners.click||[]) fn({type:'click',target:this});}
+    });
     return nodes.get(sel);
   };
   const document={querySelector:node,querySelectorAll:()=>[],addEventListener:(t,fn)=>{listeners[t]=fn;},dispatchEvent(){}};
@@ -156,6 +161,18 @@ test('Wayfinding sign reflects hosted AI state across RED and BLUE without break
   listeners['falsify:hosted-ai-state']({detail:{operate:true,role:'red',hasFile:true,fileName:'trial.pdf',busy:false,candidateCount:3,selectedCount:2,hasEditedPdf:true}});
   assert.equal(node('#sign-title').textContent,'수정본 PDF가 준비됐습니다');
   assert.equal(node('#sign-action-label').textContent,'BLUE로 검증하기');
+
+  ctx.FalsifyHostedAi={capabilities:()=>({blueJobs:false,modelJobs:false})};
+  listeners['falsify:hosted-ai-state']({detail:{operate:true,role:'red',hasFile:true,fileName:'trial.pdf',busy:false,candidateCount:0,selectedCount:0,hasEditedPdf:true}});
+  assert.equal(node('#sign-action-label').textContent,'부스에 제출하기');
+  node('#sign-action').click();
+  assert.equal(node('#booth').focused,true);
+
+  ctx.FalsifyHostedAi={capabilities:()=>({blueJobs:true,modelJobs:true})};
+  listeners['falsify:hosted-ai-state']({detail:{operate:true,role:'red',hasFile:true,fileName:'trial.pdf',busy:false,candidateCount:0,selectedCount:0,hasEditedPdf:true}});
+  assert.equal(node('#sign-action-label').textContent,'BLUE로 검증하기');
+  node('#sign-action').click();
+  assert.equal(node('#hosted-ai-blue-handoff').focused,true);
 });
 
 test('visual-workflow defines all 8 Arena finding verdicts without dropping pre-existing, spin-boundary, or gold-error',async()=>{

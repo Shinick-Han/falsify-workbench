@@ -1031,6 +1031,40 @@ test('paragraph list: native button opens the same source binding and stale page
   v.get('paper-file').files=[];v.get('paper-file').dispatchEvent(new Event('change'));
   assert.ok(!stage.children.includes(old));oldButton.click();assert.equal(v.get('paper-inline').hidden,true);
 });
+test('booth mode opens the paragraph list and blueJobs false hides the paper handoff',async()=>{
+  const previousConfig=globalThis.FalsifyCloudConfig,previousHosted=globalThis.FalsifyHostedAi;
+  const restore=()=>{
+    if(previousConfig===undefined)delete globalThis.FalsifyCloudConfig;else globalThis.FalsifyCloudConfig=previousConfig;
+    if(previousHosted===undefined)delete globalThis.FalsifyHostedAi;else globalThis.FalsifyHostedAi=previousHosted;
+  };
+  try{
+    globalThis.FalsifyCloudConfig={booth:{enabled:true}};
+    globalThis.FalsifyHostedAi={capabilities:()=>({blueJobs:false,modelJobs:false})};
+    const open=mount({paragraphPdf:paragraphMock('Booth paragraph.')});
+    assert.equal(open.get('paper-blue-handoff').hidden,true);
+    assert.equal(open.get('paper-blue-handoff').disabled,true);
+    open.file(pdfFile(pdfBytes('MARKER-A')));
+    await until(()=>/문단을 클릭/.test(open.get('paper-before-status').textContent),'booth paragraphs');
+    const list=open.get('paper-before-stage').children.find(e=>e.tagName==='details');
+    assert.equal(list.className,'paper-paragraph-list');
+    assert.equal(list.open,true);
+    open.ws.dispose();
+    restore();
+    const shut=mount({paragraphPdf:paragraphMock('Closed paragraph.')});
+    shut.file(pdfFile(pdfBytes('MARKER-A')));
+    await until(()=>/문단을 클릭/.test(shut.get('paper-before-status').textContent),'index paragraphs');
+    const closed=shut.get('paper-before-stage').children.find(e=>e.tagName==='details');
+    assert.equal(closed.open,false);
+    assert.equal(shut.get('paper-blue-handoff').hidden,false);
+    shut.document.dispatchEvent(new Event('falsify:hosted-capabilities'));
+    assert.equal(shut.get('paper-blue-handoff').hidden,false);
+    globalThis.FalsifyHostedAi={capabilities:()=>({blueJobs:false,modelJobs:true})};
+    shut.document.dispatchEvent(new Event('falsify:hosted-capabilities'));
+    assert.equal(shut.get('paper-blue-handoff').hidden,true);
+    assert.equal(shut.get('paper-blue-handoff').disabled,true);
+    shut.ws.dispose();
+  }finally{restore();}
+});
 test('paragraph: a late inspection is aborted and cannot bind the next source; drag selection remains available',async()=>{
   let resolveA,signalA;
   const adapter=paragraphMock('New paragraph.',{inspectPage:async({file,pageIndex,signal})=>{

@@ -311,7 +311,10 @@ test('the event panel submits contract fields and keeps claim and search auth ap
     const path = String(url);
     const payload = path.endsWith('/v1/booth/config')
       ? {enabled: true, submissionsOpen: true, announcement: '행사 안내', consentVersion: '2026-11-22.v1',
-        missions: [{paperId: '2503.10497', title: 'Synthetic mission', license: 'cc-by-4.0', course: 'quick'}]}
+        missions: [
+          {paperId: '2503.10497', title: 'Synthetic mission', license: 'cc-by-4.0', course: 'quick', hint: '8쪽 표를 고치세요', pageHint: 8},
+          {paperId: '2503.10498', title: 'Plain mission', pageHint: '8'},
+        ]}
       : path.endsWith('/v1/booth/submissions')
         ? {receipt: 'F-0042', claimKey: '7Q3K-M9XD', status: 'received', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:00Z'}
         : path.endsWith('/v1/booth/claim')
@@ -355,6 +358,7 @@ test('the event panel submits contract fields and keeps claim and search auth ap
   assert.equal(ids.get('booth-search').hidden, false);
   assert.match(ids.get('booth-announce').textContent, /행사 안내/);
   assert.match(ids.get('booth-missions').textContent, /Synthetic mission/);
+  assert.match(ids.get('booth-missions').textContent, /8쪽 표를 고치세요/);
   const controls = [];
   const walk = node => {
     controls.push(node);
@@ -364,6 +368,9 @@ test('the event panel submits contract fields and keeps claim and search auth ap
   assert.match(ids.get('booth-submit-status').textContent, /미션이나 검색에서 논문을 골라 시작해 주세요/);
   assert.equal(calls.some(call => call.url.endsWith('/v1/booth/submissions')), false);
   walk(ids.get('booth-missions'));
+  const pageButtons = controls.filter(node => node.tagName === 'button' && /쪽으로 가기/.test(node.textContent || ''));
+  assert.equal(pageButtons.length, 1);
+  assert.equal(pageButtons[0].textContent, '8쪽으로 가기');
   const startPaper = controls.find(node => node.tagName === 'button' && /이 논문으로 시작/.test(node.textContent));
   assert.ok(startPaper);
   startPaper.dispatchEvent({type: 'click'});
@@ -373,11 +380,15 @@ test('the event panel submits contract fields and keeps claim and search auth ap
   const sourceHash = createHash('sha256').update(sourceBytes).digest('hex');
   const edited = new File([EDITED], 'edited.pdf', {type: 'application/pdf'});
   let workspaceEdits = [{enabled: true, pageIndex: 1, segmentId: 'p2-b1', before: BEFORE, after: AFTER}];
+  const hintedPages = [];
   boothContext.FalsifyPaperWorkspace = {
     getSource: () => ({fileHash: sourceHash}),
     getEditSnapshot: () => ({revision: 3, edits: workspaceEdits}),
     getCurrentOutput: () => null,
+    showPage(n) { hintedPages.push(n); return true; },
   };
+  pageButtons[0].dispatchEvent({type: 'click'});
+  assert.deepEqual(hintedPages, [8]);
   let generateClicks = 0;
   ids.get('paper-generate').addEventListener('click', () => { generateClicks += 1; });
   ids.get('booth-make').click();
@@ -612,6 +623,7 @@ test('a completed RED apply emits the booth event and keeps BLUE when blueJobs i
   const route = router(CAPS);
   const entry = setup({routes: route});
   await signIn(entry);
+  assert.deepEqual(plain(hosted.capabilities()), {blueJobs: true, modelJobs: true});
   assert.equal(entry.$('hosted-ai-role-blue').hidden, false);
   assert.equal(entry.$('hosted-ai-run').hidden, false);
   await selectFile(entry);
@@ -643,6 +655,7 @@ test('blueJobs false hides hosted BLUE run and the RED to BLUE handoff', async (
   const route = router({...CAPS, blueJobs: false});
   const entry = setup({routes: route});
   await signIn(entry);
+  assert.deepEqual(plain(hosted.capabilities()), {blueJobs: false, modelJobs: true});
   assert.equal(entry.$('hosted-ai-role-blue').hidden, true);
   await selectFile(entry);
   const prompt = entry.$('hosted-ai-prompt');
