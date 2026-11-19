@@ -64,7 +64,7 @@ node tools/booth/booth.mjs --config booth.local.json blue \
 
 ## 채점
 
-`score` 는 각 선언 수정에 대해, 같은 페이지의 BLUE `quote` / `sourceQuote` 와 선언한 after 문장이 겹치거나, before 와 after 사이에서 바뀐 숫자가 인용에 있으면 잡았다고 봅니다. 문장이 그대로 들어가면 `caught`, 겹침이 약하거나 숫자만 맞으면 `partial`, 아니면 `missed` 입니다. 접수의 제안 outcome 은 전부 caught 이면 `caught`, 전부 missed 이면 `missed`, 그 밖에는 `partial` 입니다.
+`score` 는 각 선언 수정에 대해, 같은 페이지의 BLUE `quote` / `sourceQuote` / `evidence[].quote` 와 선언한 after 문장이 겹치거나, before 와 after 사이에서 바뀐 숫자가 인용·근거 인용·`rationale` 에 있으면 잡았다고 봅니다. 호스티드 BLUE finding 에는 `pageIndex` 가 없으므로 페이지는 `segmentId` 의 `p<N>-` (1부터 시작하는 물리 페이지)에서 읽고, finding 자신의 `segmentId` 나 `evidence[].segmentId` 가 가리키는 모든 페이지를 같은 페이지로 칩니다. 내보내기의 물리 페이지는 finding 자신의 `segmentId` 페이지입니다. 문장이 그대로 들어가면 `caught`, 겹침이 약하거나 숫자만 맞으면 `partial`, 아니면 `missed` 입니다. 접수의 제안 outcome 은 전부 caught 이면 `caught`, 전부 missed 이면 `missed`, 그 밖에는 `partial` 입니다.
 
 ## 판정 단어
 

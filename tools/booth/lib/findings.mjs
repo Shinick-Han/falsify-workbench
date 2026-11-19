@@ -14,10 +14,40 @@ export function isUsableFinding(finding) {
 }
 
 // pageIndex is 0-based. The hosted prompt's `page` field is 1-based.
-export function findingPageIndex(finding) {
-  if (Number.isInteger(finding.pageIndex) && finding.pageIndex >= 0 && finding.pageIndex <= 9999) return finding.pageIndex;
-  if (Number.isInteger(finding.page) && finding.page >= 1 && finding.page <= 10000) return finding.page - 1;
+// Hosted BLUE findings carry neither; their segmentId "p<N>-..." names the 1-based physical page.
+function declaredPageIndex(item) {
+  if (Number.isInteger(item.pageIndex) && item.pageIndex >= 0 && item.pageIndex <= 9999) return item.pageIndex;
+  if (Number.isInteger(item.page) && item.page >= 1 && item.page <= 10000) return item.page - 1;
   return null;
+}
+
+export function segmentPageIndex(segmentId) {
+  const match = /^p(\d{1,5})-/.exec(typeof segmentId === 'string' ? segmentId : '');
+  if (!match) return null;
+  const page = Number(match[1]);
+  return page >= 1 && page <= 10000 ? page - 1 : null;
+}
+
+function itemPageIndex(item) {
+  if (!item || typeof item !== 'object') return null;
+  const declared = declaredPageIndex(item);
+  return declared != null ? declared : segmentPageIndex(item.segmentId);
+}
+
+// The finding's primary page: the page of its own quote.
+export function findingPageIndex(finding) {
+  return itemPageIndex(finding);
+}
+
+// Every page a finding points at: its own quote plus each cited evidence segment.
+export function findingPageIndexes(finding) {
+  const pages = new Set();
+  const evidence = Array.isArray(finding?.evidence) ? finding.evidence : [];
+  for (const item of [finding, ...evidence]) {
+    const index = itemPageIndex(item);
+    if (index != null) pages.add(index);
+  }
+  return pages;
 }
 
 export function physicalPage(finding) {
