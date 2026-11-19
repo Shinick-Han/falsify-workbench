@@ -11,7 +11,8 @@ const RECEIPT = /^F-\d{4,}$/;
 const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 const COURSES = ['quick', 'deep'];
 const DEFECTS = ['number', 'figure', 'citation', 'logic', 'method', 'other'];
-const PAPER_SOURCES = ['arxiv', 'mission', 'upload'];
+const PAPER_SOURCES = ['arxiv', 'mission'];
+const PAPER_LICENSE = /^(?:cc-by(?:-sa)?(?:-\d+\.\d+)?|cc0(?:-1\.0)?|public-domain)$/;
 const STATUSES = ['received', 'reviewing', 'judged', 'invalid', 'withdrawn'];
 const PATCH_STATUSES = ['received', 'reviewing', 'judged', 'invalid'];
 const OUTCOMES = ['missed', 'caught', 'partial', 'invalid'];
@@ -30,8 +31,10 @@ const SUMMARY_MAX_BYTES = 16 * 1024;
 const CLAIM_PREFIX = 'booth-claim:v1:';
 // Claim and withdraw share one bucket so the two key checks cannot double the guess rate.
 const CLAIM_BUCKET_PREFIX = 'booth-claim:ip:';
+const CLAIM_GLOBAL_BUCKET = 'booth-claim:all';
 const SUBMIT_BUCKET_PREFIX = 'booth-submit:ip:';
 const SUBMIT_GLOBAL_BUCKET = 'booth-submit:all';
+const SEQ_ATTEMPTS = 5;
 
 const COURSE_VIEW = [
   { id: 'quick', label: '빠른 코스' },
@@ -60,8 +63,9 @@ const MESSAGES = {
   job_not_ready: 'The job is not ready for submission.',
   already_submitted: 'This job was already submitted.',
   pii_not_allowed: 'The nickname looks like contact information.',
+  paper_not_allowed: 'This paper is not allowed for a booth submission.',
   artifact_expired: 'The edited PDF is no longer available.',
-  withdrawn: 'A withdrawn submission cannot be changed that way.',
+  withdrawn: 'This submission was withdrawn.',
   ai_unavailable: 'Hosted AI execution is temporarily unavailable.',
   internal_error: 'Internal error.',
 };
@@ -101,6 +105,7 @@ function boothLimits(env) {
     perIpHour: positiveInt(env?.BOOTH_SUBMISSIONS_PER_IP_HOUR, 60),
     perHour: positiveInt(env?.BOOTH_SUBMISSIONS_PER_HOUR, 600),
     claimsPerIpHour: positiveInt(env?.BOOTH_CLAIMS_PER_IP_HOUR, 120),
+    claimsPerHour: positiveInt(env?.BOOTH_CLAIMS_PER_HOUR, 2000),
   };
 }
 
@@ -347,14 +352,14 @@ function parseDeclared(value) {
 }
 
 function parsePaper(value) {
-  if (value === undefined) return null;
-  if (!isObject(value) || !keysOk(value, ['source', 'id', 'title', 'license'], ['source', 'id', 'title', 'license'])) {
+  if (value === undefined || value === null || !isObject(value)) boothFail(400, 'paper_not_allowed');
+  if (!keysOk(value, ['source', 'id', 'title', 'license'], ['source', 'id', 'title', 'license'])) {
     boothFail(400, 'invalid_request');
   }
-  if (!PAPER_SOURCES.includes(value.source)) boothFail(400, 'invalid_request');
+  if (!PAPER_SOURCES.includes(value.source)) boothFail(400, 'paper_not_allowed');
+  if (typeof value.license !== 'string' || !PAPER_LICENSE.test(value.license)) boothFail(400, 'paper_not_allowed');
   if (typeof value.id !== 'string' || chars(value.id) < 1 || chars(value.id) > 64) boothFail(400, 'invalid_request');
   if (typeof value.title !== 'string' || chars(value.title) > 300) boothFail(400, 'invalid_request');
-  if (typeof value.license !== 'string' || chars(value.license) > 40) boothFail(400, 'invalid_request');
   return { source: value.source, id: value.id, title: value.title, license: value.license };
 }
 
@@ -514,7 +519,7 @@ FROM (
 WHERE next.seq = ?12`;
 
 async function insertSubmission(db, fields) {
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < SEQ_ATTEMPTS; attempt++) {
     const preview = await db.prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM booth_submissions').first();
     const seq = Number(preview?.seq);
     if (!Number.isSafeInteger(seq) || seq < 1) boothFail(500, 'internal_error');
@@ -546,7 +551,7 @@ async function insertSubmission(db, fields) {
       if (error instanceof AiError) throw error;
       const existing = await db.prepare('SELECT receipt FROM booth_submissions WHERE job_id = ?1').bind(fields.jobId).first();
       if (existing?.receipt) boothFail(409, 'already_submitted', { extra: { receipt: existing.receipt } });
-      if (attempt === 1 || !isUniqueError(error)) throw error;
+      if (attempt === SEQ_ATTEMPTS - 1 || !isUniqueError(error)) throw error;
     }
   }
   boothFail(500, 'internal_error');
@@ -574,8 +579,15 @@ async function releaseSubmission(ctx, charged) {
 
 async function chargeClaim(ctx) {
   const db = ctx.deps.getDb();
+  const limits = boothLimits(ctx.env);
   const bucket = await bucketKey(CLAIM_BUCKET_PREFIX, clientIp(ctx));
-  await ctx.deps.rateLimit(db, bucket, boothLimits(ctx.env).claimsPerIpHour);
+  const ipSlot = await ctx.deps.rateLimit(db, bucket, limits.claimsPerIpHour);
+  try {
+    await ctx.deps.rateLimit(db, CLAIM_GLOBAL_BUCKET, limits.claimsPerHour);
+  } catch (error) {
+    await ctx.deps.releaseSlot(db, bucket, ipSlot);
+    throw error;
+  }
 }
 
 function claimView(row) {
@@ -701,7 +713,9 @@ async function postSubmission(ctx) {
   const duplicate = await db.prepare('SELECT receipt FROM booth_submissions WHERE job_id = ?1').bind(submission.jobId).first();
   if (duplicate?.receipt) boothFail(409, 'already_submitted', { extra: { receipt: duplicate.receipt } });
   const limits = boothLimits(ctx.env);
-  const owned = await db.prepare('SELECT COUNT(*) AS count FROM booth_submissions WHERE owner_id = ?1').bind(owner.ownerId).first();
+  const owned = await db.prepare(
+    `SELECT COUNT(*) AS count FROM booth_submissions WHERE owner_id = ?1 AND status <> 'withdrawn'`
+  ).bind(owner.ownerId).first();
   if (Number(owned?.count ?? 0) >= limits.perOwner) boothFail(429, 'rate_limited');
   const charged = await chargeSubmission(ctx, limits);
   try {
@@ -747,7 +761,9 @@ async function postWithdraw(ctx) {
   const at = nowIso();
   await db.prepare(
     `UPDATE booth_submissions
-     SET status = 'withdrawn', prize_message = NULL, published_at = NULL, updated_at = ?2
+     SET status = 'withdrawn', declared = '[]', nickname = NULL, paper = NULL,
+         public_note = NULL, prize_message = NULL, ai_summary = NULL, outcome = NULL,
+         published_at = NULL, updated_at = ?2
      WHERE id = ?1`
   ).bind(row.id, at).run();
   const fresh = await db.prepare(`SELECT ${CLAIM_SELECT} FROM booth_submissions WHERE id = ?1`).bind(row.id).first();
@@ -832,9 +848,10 @@ async function getAdminPdf(ctx) {
   if (typeof receipt !== 'string' || !RECEIPT.test(receipt)) boothFail(404, 'not_found');
   // owner_id stays out of AdminView. The PDF proxy is the one reader, and it forwards that stored owner.
   const row = await ctx.deps.getDb().prepare(
-    'SELECT owner_id, job_id, artifact_id, receipt FROM booth_submissions WHERE receipt = ?1'
+    'SELECT owner_id, job_id, artifact_id, receipt, status FROM booth_submissions WHERE receipt = ?1'
   ).bind(receipt).first();
   if (!row) boothFail(404, 'not_found');
+  if (row.status === 'withdrawn') boothFail(404, 'withdrawn');
   let response;
   try {
     response = await getRuntimeArtifact(ctx.env, {
