@@ -91,7 +91,7 @@ function containsSentinel(state) {
 test('--help prints every command', async () => {
   const result = await run(['--help'], { env: { FALSIFY_BOOTH_TOKEN: '' } });
   assert.equal(result.code, 0);
-  for (const name of ['status', 'list', 'pull', 'blue', 'score', 'judge', 'publish', 'unpublish', 'draw', 'export', 'missions', 'open', 'close', 'announce']) {
+  for (const name of ['status', 'list', 'pull', 'blue', 'score', 'judge', 'publish', 'unpublish', 'draw', 'export', 'missions', 'open', 'close', 'announce', '--allow-open', 'missions warm']) {
     assert.equal(result.stdout.includes(name), true, name);
   }
 });
@@ -106,12 +106,22 @@ test('pull, blind BLUE, resume, score, judge, publish, draw, export, settings', 
   try {
     const pulled = await run([...base, 'pull']);
     assert.equal(pulled.code, 0, pulled.stderr);
+    assert.equal(JSON.parse(pulled.stdout).withdrawn, 1);
     const again = await run([...base, 'pull']);
     assert.equal(again.code, 0, again.stderr);
+    assert.equal(JSON.parse(again.stdout).withdrawn, 1);
     assert.equal(fake.state.pdfGets['F-0001'], 1);
     assert.equal(fs.existsSync(path.join(dir, 'data', 'submissions', 'F-0001', 'edited.pdf')), true);
+    assert.equal(fs.existsSync(path.join(dir, 'data', 'submissions', 'F-0003')), false);
+    assert.equal(fake.state.pdfGets['F-0003'], undefined);
+    const tombstone = fs.readFileSync(path.join(dir, 'data', 'withdrawn.log'), 'utf8').trim().split('\n');
+    assert.equal(tombstone.length, 1);
+    assert.match(tombstone[0], /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\tF-0003\t3\twithdrawn$/);
+    assert.equal(tombstone[0].includes('SENTINEL'), false);
+    const tombstoneAgain = fs.readFileSync(path.join(dir, 'data', 'withdrawn.log'), 'utf8').trim().split('\n');
+    assert.equal(tombstoneAgain.length, 1);
 
-    const first = await run([...base, 'blue', '--only', 'F-0001,F-0002']);
+    const first = await run([...base, 'blue', '--allow-open', '--only', 'F-0001,F-0002']);
     assert.equal(first.code, 0, first.stderr);
     assert.equal(containsSentinel(fake.state), '');
     const jobBodies = fake.state.requests.filter(request => request.method === 'POST' && request.url === '/v1/ai/jobs');
@@ -128,14 +138,14 @@ test('pull, blind BLUE, resume, score, judge, publish, draw, export, settings', 
     assert.ok(fake.state.maxJobInFlight <= 2);
     assert.ok(fake.state.maxJobInFlight >= 1);
 
-    const replay = await run([...base, 'blue', '--only', 'F-0001']);
+    const replay = await run([...base, 'blue', '--allow-open', '--only', 'F-0001']);
     assert.equal(replay.code, 0, replay.stderr);
     assert.equal(fake.state.newJobs, 2);
     const postsAfterResume = fake.state.requests.filter(request => request.method === 'POST' && request.url === '/v1/ai/jobs').length;
     assert.equal(postsAfterResume, 2);
 
     fs.rmSync(path.join(dir, 'data', 'blue', 'F-0002'), { recursive: true, force: true });
-    const serverReplay = await run([...base, 'blue', '--only', 'F-0002']);
+    const serverReplay = await run([...base, 'blue', '--allow-open', '--only', 'F-0002']);
     assert.equal(serverReplay.code, 0, serverReplay.stderr);
     assert.equal(fake.state.newJobs, 2);
     assert.equal(serverReplay.stdout.includes('"replayed": true'), true);
@@ -236,7 +246,7 @@ test('dry-run blue and judge send nothing', async () => {
   }));
   const config = writeConfig(dir, 'http://127.0.0.1:1');
   try {
-    const blue = await run(['--config', config, 'blue', '--dry-run']);
+    const blue = await run(['--config', config, 'blue', '--dry-run', '--allow-open']);
     assert.equal(blue.code, 0, blue.stderr);
     assert.equal(blue.stdout.includes('F-0004'), true);
     assert.equal(blue.stdout.includes('SENTINEL_AFTER_zz91'), false);
@@ -260,7 +270,7 @@ test('queued BLUE jobs are polled until completed', async () => {
   try {
     const pulled = await run(['--config', config, 'pull', '--only', 'F-0005']);
     assert.equal(pulled.code, 0, pulled.stderr);
-    const result = await run(['--config', config, 'blue', '--only', 'F-0005']);
+    const result = await run(['--config', config, 'blue', '--allow-open', '--only', 'F-0005']);
     assert.equal(result.code, 0, result.stderr);
     assert.equal(result.stdout.includes('"state": "completed"'), true);
     assert.ok(fake.state.jobs.size === 1);
@@ -285,7 +295,7 @@ test('concurrency stays at the configured limit', async () => {
   try {
     const pulled = await run(['--config', config, 'pull']);
     assert.equal(pulled.code, 0, pulled.stderr);
-    const result = await run(['--config', config, 'blue', '--concurrency', '2']);
+    const result = await run(['--config', config, 'blue', '--allow-open', '--concurrency', '2']);
     assert.equal(result.code, 0, result.stderr);
     assert.equal(fake.state.maxJobInFlight, 2);
     assert.equal(fake.state.newJobs, 4);
@@ -307,6 +317,209 @@ test('wrong bearer is unauthorized and a foreign bearer is forbidden', async () 
     assert.equal(foreign.code, 2);
     assert.equal(foreign.stderr.includes('forbidden'), true);
     assert.equal(foreign.stderr.includes(`fso_${'b'.repeat(43)}`), false);
+  } finally {
+    await fake.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function quietRow(seq, extra = {}) {
+  return submission(seq, {
+    nickname: `g${seq}`,
+    paper: null,
+    declared: [{ pageIndex: 0, before: 'a', after: 'b', defectType: 'other', reason: 'r' }],
+    ...extra,
+  });
+}
+
+test('blue refuses while submissions are open unless --allow-open is set', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-open-'));
+  const row = quietRow(11);
+  const fake = await startFake({ token: TOKEN, submissions: [row], pdfs: new Map([['F-0011', Buffer.from(PDF)]]) });
+  const config = writeConfig(dir, fake.url);
+  const base = ['--config', config];
+  try {
+    const pulled = await run([...base, 'pull', '--only', 'F-0011']);
+    assert.equal(pulled.code, 0, pulled.stderr);
+    const dry = await run([...base, 'blue', '--dry-run']);
+    assert.equal(dry.code, 1, dry.stderr);
+    assert.equal(dry.stderr.includes('allow-open'), true);
+    const refused = await run([...base, 'blue', '--only', 'F-0011']);
+    assert.equal(refused.code, 1, refused.stderr);
+    assert.equal(refused.stderr.includes('booth_config'), true);
+    assert.equal(fake.state.requests.some(request => request.url === '/v1/ai/jobs' || request.url === '/v1/ai/uploads'), false);
+
+    const allowed = await run([...base, 'blue', '--allow-open', '--only', 'F-0011']);
+    assert.equal(allowed.code, 0, allowed.stderr);
+    assert.equal(fake.state.newJobs, 1);
+    assert.equal(containsSentinel(fake.state), '');
+
+    const closed = await run([...base, 'close']);
+    assert.equal(closed.code, 0, closed.stderr);
+    fs.rmSync(path.join(dir, 'data', 'blue', 'F-0011'), { recursive: true, force: true });
+    const postsBefore = fake.state.requests.filter(request => request.method === 'POST' && request.url === '/v1/ai/jobs').length;
+    const afterClose = await run([...base, 'blue', '--dry-run', '--only', 'F-0011']);
+    assert.equal(afterClose.code, 0, afterClose.stderr);
+    assert.equal(afterClose.stdout.includes('F-0011'), true);
+    const started = await run([...base, 'blue', '--only', 'F-0011']);
+    assert.equal(started.code, 0, started.stderr);
+    assert.equal(started.stdout.includes('"replayed": true'), true);
+    const postsAfter = fake.state.requests.filter(request => request.method === 'POST' && request.url === '/v1/ai/jobs').length;
+    assert.equal(postsAfter, postsBefore + 1);
+    assert.equal(fake.state.newJobs, 1);
+  } finally {
+    await fake.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a changed edited PDF gets a new BLUE idempotency key', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-pdf-key-'));
+  const row = quietRow(12);
+  const fake = await startFake({ token: TOKEN, submissions: [row], pdfs: new Map([['F-0012', Buffer.from(PDF)]]) });
+  const config = writeConfig(dir, fake.url);
+  const base = ['--config', config];
+  try {
+    const pulled = await run([...base, 'pull', '--only', 'F-0012']);
+    assert.equal(pulled.code, 0, pulled.stderr);
+    const first = await run([...base, 'blue', '--allow-open', '--only', 'F-0012']);
+    assert.equal(first.code, 0, first.stderr);
+    const keys = () => fake.state.requests
+      .filter(request => request.method === 'POST' && request.url === '/v1/ai/jobs')
+      .map(request => JSON.parse(request.body.toString('utf8')).idempotencyKey);
+    const [before] = keys();
+    assert.equal(before.length, 64);
+    fs.writeFileSync(path.join(dir, 'data', 'submissions', 'F-0012', 'edited.pdf'), Buffer.from('%PDF-1.4\n% second bytes\n%%EOF\n'));
+    const second = await run([...base, 'blue', '--allow-open', '--only', 'F-0012']);
+    assert.equal(second.code, 0, second.stderr);
+    const after = keys();
+    assert.equal(after.length, 2);
+    assert.notEqual(after[0], after[1]);
+    assert.equal(fake.state.newJobs, 2);
+    assert.equal(containsSentinel(fake.state), '');
+  } finally {
+    await fake.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('draw defaults to missed', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-draw-'));
+  const rows = [
+    quietRow(13, { status: 'judged', outcome: 'caught' }),
+    quietRow(14, { status: 'judged', outcome: 'missed' }),
+  ];
+  const fake = await startFake({ token: TOKEN, submissions: rows, pdfs: new Map() });
+  const config = writeConfig(dir, fake.url);
+  try {
+    const drawn = await run(['--config', config, 'draw', '--count', '1']);
+    assert.equal(drawn.code, 0, drawn.stderr);
+    const files = fs.readdirSync(path.join(dir, 'data', 'draws'));
+    assert.equal(files.length, 1);
+    const record = JSON.parse(fs.readFileSync(path.join(dir, 'data', 'draws', files[0]), 'utf8'));
+    assert.deepEqual(record.filter.outcome, ['missed']);
+    assert.equal(record.winners.length, 1);
+    assert.equal(record.winners[0].receipt, 'F-0014');
+  } finally {
+    await fake.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('pull removes local files when a submission is withdrawn', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-withdraw-'));
+  const rows = [quietRow(15), quietRow(16)];
+  const fake = await startFake({
+    token: TOKEN,
+    submissions: rows,
+    pdfs: new Map([['F-0015', Buffer.from(PDF)], ['F-0016', Buffer.from(PDF)]]),
+    pdfWithdrawn: new Set(['F-0016']),
+  });
+  const config = writeConfig(dir, fake.url);
+  const base = ['--config', config];
+  try {
+    fs.mkdirSync(path.join(dir, 'data', 'submissions', 'F-0016'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'data', 'submissions', 'F-0016', 'edited.pdf'), PDF);
+    fs.writeFileSync(path.join(dir, 'data', 'submissions', 'F-0016', 'submission.json'), '{"nickname":"g16"}\n');
+    const pulled = await run([...base, 'pull']);
+    assert.equal(pulled.code, 0, pulled.stderr);
+    assert.equal(fs.existsSync(path.join(dir, 'data', 'submissions', 'F-0015', 'edited.pdf')), true);
+    assert.equal(fs.existsSync(path.join(dir, 'data', 'submissions', 'F-0016')), false);
+    assert.equal(fake.state.pdfGets['F-0016'], 1);
+
+    const blueDir = path.join(dir, 'data', 'blue', 'F-0015');
+    fs.mkdirSync(blueDir, { recursive: true });
+    fs.writeFileSync(path.join(blueDir, 'job.json'), '{"job":"local"}\n');
+    const live = fake.state.submissions.find(row => row.receipt === 'F-0015');
+    live.status = 'withdrawn';
+    const removed = await run([...base, 'pull']);
+    assert.equal(removed.code, 0, removed.stderr);
+    assert.equal(fs.existsSync(path.join(dir, 'data', 'submissions', 'F-0015')), false);
+    assert.equal(fs.existsSync(blueDir), false);
+    assert.equal(fake.state.pdfGets['F-0015'], 1);
+    const log = fs.readFileSync(path.join(dir, 'data', 'withdrawn.log'), 'utf8');
+    assert.equal(log.includes('F-0015'), true);
+    assert.equal(log.includes('F-0016'), true);
+    assert.equal(log.includes('g15'), false);
+    assert.equal(log.includes('g16'), false);
+    assert.equal(log.trim().split('\n').length, 2);
+    const third = await run([...base, 'pull']);
+    assert.equal(third.code, 0, third.stderr);
+    assert.equal(fs.readFileSync(path.join(dir, 'data', 'withdrawn.log'), 'utf8').trim().split('\n').length, 2);
+  } finally {
+    await fake.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('missions warm reports PDF sizes and keeps going after a failure', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-warm-'));
+  const ragas = Buffer.from('%PDF-1.4 ragas\n');
+  const embed = Buffer.from('%PDF-1.4 embed\n');
+  const cold = Buffer.from('%PDF-1.4 cold\n');
+  const fake = await startFake({
+    token: TOKEN,
+    submissions: [],
+    pdfs: new Map(),
+    papers: new Map([
+      ['2309.15217', ragas],
+      ['2407.08275', embed],
+      ['2611.16180', 'denied'],
+      ['2512.16066', cold],
+    ]),
+  });
+  const config = writeConfig(dir, fake.url);
+  const base = ['--config', config];
+  const missionFile = path.join(ROOT, 'tools', 'booth', 'missions.aws-community-day-2026.json');
+  try {
+    const empty = await run([...base, 'missions', 'warm']);
+    assert.equal(empty.code, 0, empty.stderr);
+    assert.deepEqual(JSON.parse(empty.stdout), { missions: [], failures: [] });
+    const set = await run([...base, 'missions', 'set', missionFile]);
+    assert.equal(set.code, 0, set.stderr);
+    assert.deepEqual(fake.state.settings.missions.map(mission => mission.id), [
+      'ragas', 'embedding-similarity', 'serverless-llm-cold-start', 'cold-start-antipatterns',
+    ]);
+    const warm = await run([...base, 'missions', 'warm']);
+    assert.equal(warm.code, 2, warm.stdout);
+    assert.equal(warm.stderr.includes('booth_api'), true);
+    assert.equal(warm.stdout.includes(TOKEN), false);
+    assert.equal(warm.stderr.includes(TOKEN), false);
+    const body = JSON.parse(warm.stdout);
+    assert.deepEqual(body.missions.map(mission => [mission.id, mission.bytes]), [
+      ['ragas', ragas.length],
+      ['embedding-similarity', embed.length],
+      ['cold-start-antipatterns', cold.length],
+    ]);
+    assert.equal(body.failures.length, 1);
+    assert.equal(body.failures[0].id, 'serverless-llm-cold-start');
+    assert.equal(body.failures[0].code, 'paper_not_allowed');
+    for (const id of ['2309.15217', '2407.08275', '2611.16180', '2512.16066']) {
+      assert.equal(fake.state.paperPdfGets[id], 1, id);
+    }
+    const warmed = body.missions.find(mission => mission.id === 'ragas');
+    assert.match(warmed.sha256, /^[0-9a-f]{64}$/);
+    assert.equal(fs.existsSync(path.join(dir, 'data')), false);
   } finally {
     await fake.close();
     fs.rmSync(dir, { recursive: true, force: true });

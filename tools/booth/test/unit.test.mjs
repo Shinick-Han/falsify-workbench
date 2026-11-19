@@ -10,6 +10,7 @@ import { drawWinners } from '../lib/draw.mjs';
 import { renderExport } from '../lib/export.mjs';
 import { mapVerdict } from '../lib/labels.mjs';
 import { matchEdit, suggestOutcome } from '../lib/score.mjs';
+import { csvCell } from '../lib/text.mjs';
 
 const PDF = Buffer.from('%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n');
 
@@ -90,15 +91,20 @@ test('PDF bytes stay out of the BLUE JSON', () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('idempotency key repeats and changes with the prompt', () => {
+test('idempotency key repeats and changes with the prompt or the edited PDF', () => {
   const base = { name: 'quick-blind', prompt: 'Review the PDF only.', model: 'm', effort: 'high', maxCalls: 4, useEvidence: true };
   const hash = configHash(base);
-  const first = idempotencyKey({ receipt: 'F-0001', profileName: 'quick-blind', repeatIndex: 0, configHash: hash });
-  const second = idempotencyKey({ receipt: 'F-0001', profileName: 'quick-blind', repeatIndex: 0, configHash: hash });
-  const other = idempotencyKey({ receipt: 'F-0001', profileName: 'quick-blind', repeatIndex: 0, configHash: configHash({ ...base, prompt: 'Other.' }) });
+  const pdfSha256 = 'ab'.repeat(32);
+  const args = { receipt: 'F-0001', profileName: 'quick-blind', repeatIndex: 0, configHash: hash, pdfSha256 };
+  const first = idempotencyKey(args);
+  const second = idempotencyKey(args);
+  const otherPrompt = idempotencyKey({ ...args, configHash: configHash({ ...base, prompt: 'Other.' }) });
+  const otherPdf = idempotencyKey({ ...args, pdfSha256: 'cd'.repeat(32) });
   assert.equal(first, second);
   assert.equal(first.length, 64);
-  assert.notEqual(first, other);
+  assert.notEqual(first, otherPrompt);
+  assert.notEqual(first, otherPdf);
+  assert.throws(() => idempotencyKey({ ...args, pdfSha256: 'abcd' }), /pdf sha256/);
 });
 
 test('score matches same-page after text, changed numbers, and misses another page', () => {
@@ -132,6 +138,48 @@ test('verdict words follow BLUE on the common sheet and score.py on the score sh
   assert.equal(COMMON_COLUMNS.length, 15);
   assert.equal(SCORE_COLUMNS.length, 12);
   assert.equal(KEY_COLUMNS.length, 11);
+});
+
+test('CSV cells that start with a formula character are prefixed in every CSV format', () => {
+  assert.equal(csvCell('=1+1'), "'=1+1");
+  assert.equal(csvCell('+1'), "'+1");
+  assert.equal(csvCell('-1'), "'-1");
+  assert.equal(csvCell('@sum'), "'@sum");
+  assert.equal(csvCell('\tcmd'), "'\tcmd");
+  assert.equal(csvCell('\r'), '"\'\r"');
+  assert.equal(csvCell('=a,b'), '"\'=a,b"');
+  assert.equal(csvCell('safe'), 'safe');
+  assert.equal(csvCell(' =1'), ' =1');
+  assert.equal(csvCell(''), '');
+  const common = renderExport('common', {
+    common: [{ '정확한 원문 인용': '=HYPERLINK("http://evil")' }],
+    score: [],
+    key: [],
+    jsonl: [],
+  });
+  assert.equal(common.includes(`"'=HYPERLINK(""http://evil"")"`), true);
+  const score = renderExport('score', {
+    common: [],
+    score: [{ evidence: '+danger' }],
+    key: [],
+    jsonl: [],
+  });
+  assert.equal(score.includes("'+danger"), true);
+  const key = renderExport('key', {
+    common: [],
+    score: [],
+    key: [{ before: '-old', why_hard: '@cmd' }],
+    jsonl: [],
+  });
+  assert.equal(key.includes("'-old"), true);
+  assert.equal(key.includes("'@cmd"), true);
+  const jsonl = renderExport('jsonl', {
+    common: [],
+    score: [],
+    key: [],
+    jsonl: [{ evidence: '=cmd' }],
+  });
+  assert.equal(jsonl, '{"evidence":"=cmd"}\n');
 });
 
 test('common CSV is UTF-8 with BOM and quotes embedded commas', () => {

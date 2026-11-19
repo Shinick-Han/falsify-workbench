@@ -30,16 +30,21 @@ function delay(ms) {
   return new Promise(resolve => { setTimeout(resolve, ms); });
 }
 
-export function startFake({ token, submissions, pdfs, queued = false, jobDelayMs = 0 }) {
+export function startFake({
+  token, submissions, pdfs, queued = false, jobDelayMs = 0, papers = null, pdfWithdrawn = null,
+}) {
   const state = {
     submissions: submissions.map(row => ({ ...row, declared: row.declared.map(edit => ({ ...edit })), paper: row.paper ? { ...row.paper } : null })),
     pdfs,
+    papers,
+    pdfWithdrawn: pdfWithdrawn || new Set(),
     requests: [],
     settings: { submissionsOpen: true, missions: [], announcement: null },
     uploads: new Map(),
     jobs: new Map(),
     newJobs: 0,
     pdfGets: {},
+    paperPdfGets: {},
     jobInFlight: 0,
     maxJobInFlight: 0,
     puts: [],
@@ -107,10 +112,30 @@ export function startFake({ token, submissions, pdfs, queued = false, jobDelayMs
       send(res, 200, { submissions: page, nextAfter });
       return;
     }
+    if (req.method === 'GET' && pathname === '/v1/papers/pdf') {
+      const id = url.searchParams.get('id') || '';
+      state.paperPdfGets[id] = (state.paperPdfGets[id] || 0) + 1;
+      const spec = state.papers ? state.papers.get(id) : Buffer.from(`%PDF-1.4\n% ${id}\n`);
+      if (spec == null) {
+        fail(res, 404, 'not_found');
+        return;
+      }
+      if (spec === 'denied') {
+        fail(res, 403, 'paper_not_allowed');
+        return;
+      }
+      send(res, 200, spec);
+      return;
+    }
     const pdf = pathname.match(/^\/v1\/booth\/admin\/submissions\/(F-\d+)\/pdf$/);
     if (req.method === 'GET' && pdf) {
       const receipt = pdf[1];
       state.pdfGets[receipt] = (state.pdfGets[receipt] || 0) + 1;
+      const row = state.submissions.find(item => item.receipt === receipt);
+      if (state.pdfWithdrawn.has(receipt) || row?.status === 'withdrawn') {
+        fail(res, 404, 'withdrawn');
+        return;
+      }
       if (state.pdfs.get(receipt) === 'expired') {
         fail(res, 404, 'artifact_expired');
         return;
