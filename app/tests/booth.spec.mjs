@@ -8,8 +8,14 @@ import {createHash} from 'node:crypto';
 import vm from 'node:vm';
 import {fileURLToPath} from 'node:url';
 
+class BoothTransfer {
+  constructor() {
+    this.files = [];
+    this.items = {add: file => { this.files.push(file); }};
+  }
+}
 const boothSource = await readFile(fileURLToPath(new URL('../dist/booth.js', import.meta.url)), 'utf8');
-const boothContext = vm.createContext({console, URL, URLSearchParams});
+const boothContext = vm.createContext({console, URL, URLSearchParams, Event, File, DataTransfer: BoothTransfer});
 vm.runInContext(boothSource, boothContext, {filename: 'booth.js'});
 const booth = boothContext.FalsifyBooth;
 
@@ -82,16 +88,21 @@ test('submission bodies use only contract keys and reject nickname PII', () => {
   assert.deepEqual(Object.keys(built.body.paper), ['source', 'id', 'title', 'license']);
   assert.equal(JSON.stringify(built.body).includes(RATIONALE), false);
   assert.equal(JSON.stringify(built.body).includes('quick'), true);
+  assert.equal(built.body.consentVersion, '2026-11-22.v1');
   const bare = booth.buildSubmission({
     jobId: JOB_ID, course: 'deep', consent: true,
     rows: [{pageIndex: 0, before: 'a', after: 'b', defectType: 'other', reason: '이유'}],
   });
-  assert.equal(bare.ok, true);
-  assert.deepEqual(Object.keys(bare.body), ['jobId', 'course', 'declared', 'consentVersion']);
-  assert.equal(bare.body.consentVersion, booth.CONSENT_COPY ? '2026-11-22.v1' : '2026-11-22.v1');
+  assert.deepEqual(plain(bare), {ok: false, code: 'paper_not_allowed'});
+  assert.equal(booth.buildSubmission({
+    jobId: JOB_ID, course: 'quick', consent: true,
+    paper: {source: 'upload', id: 'local', title: 'Uploaded', license: 'cc-by'},
+    rows: [{pageIndex: 0, before: 'a', after: 'b', defectType: 'other', reason: '이유'}],
+  }).code, 'paper_not_allowed');
   assert.equal(booth.buildSubmission({jobId: JOB_ID, course: 'quick', consent: false,
+    paper: {source: 'arxiv', id: '2503.10497', license: 'cc-by-4.0'},
     rows: [{pageIndex: 0, before: 'a', after: 'b', defectType: 'other', reason: '이유'}]}).code, 'invalid_request');
-  assert.equal(booth.CONSENT_COPY.includes('확인키로 언제든 제출을 철회할 수 있습니다.'), true);
+  assert.equal(booth.CONSENT_COPY, '제출한 수정본 PDF와 결함 설명(쪽·유형·이유)은 가짜연구소 Falsify 스터디가 저장하고 운영자가 읽습니다. 마감 후 AI 검증에는 수정본 PDF만 모델 제공자(Anthropic 또는 OpenAI)에 보내며, 결함 설명은 AI에 보내지 않습니다. 이름·연락처는 받지 않으니 이유란에도 적지 마세요. 원 논문은 CC BY·CC BY-SA·CC0 공개 논문이며, 수정본을 스터디 밖에 공개할 때는 저자·arXiv 번호·라이선스와 수정 사실을 밝힙니다. 결과와 경품 안내는 접수번호와 확인키로만 확인할 수 있습니다. 확인키로 언제든 철회할 수 있고, 철회하면 설명과 결과는 즉시 삭제되며 수정본 PDF는 운영자 보관본에서 지우고 서버 사본은 7일 안에 자동 삭제됩니다. 보관 자료는 스터디 종료 후 삭제합니다.');
 });
 
 test('search and pdf paths cannot carry a declared reason', () => {
@@ -136,6 +147,7 @@ test('server error codes become the booth messages', () => {
     license_not_allowed: '라이선스',
     payload_too_large: '너무 커서',
     not_found: '확인키',
+    paper_not_allowed: '라이선스',
     invalid_request: '입력 내용',
     forbidden: '할 수 없습니다',
   };
@@ -232,6 +244,9 @@ test('the event panel submits contract fields and keeps claim and search auth ap
     const content = new Node('div');
     content.className = 'content';
     body.append(main);
+    const paperInput = new Node('input');
+    paperInput.id = 'paper-file';
+    content.append(paperInput);
     main.append(content);
     doc.body = body;
     return {doc, content, ids};
@@ -269,7 +284,22 @@ test('the event panel submits contract fields and keeps claim and search auth ap
             ? {receipt: 'F-0042', status: 'withdrawn', course: 'quick', declaredCount: 1, published: false}
             : path.includes('/v1/papers/search')
               ? {source: 'arxiv', page: 1, hasMore: false, results: [{id: '2503.10497', title: 'Synthetic result', authors: ['Ada'], year: 2026, license: 'cc-by-4.0'}]}
-              : {error: {code: 'not_found'}};
+              : path.includes('/v1/papers/pdf')
+                ? null
+                : {error: {code: 'not_found'}};
+    if (payload === null) {
+      const bytes = Buffer.from('%PDF-1.7 synthetic booth paper\n%%EOF\n');
+      return {
+        ok: true, status: 200,
+        headers: {get(name) {
+          if (name === 'X-Falsify-Paper-License') return 'cc-by-4.0';
+          if (name === 'Content-Disposition') return 'attachment; filename="arxiv-2503.10497.pdf"';
+          return null;
+        }},
+        arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+        json: async () => ({}),
+      };
+    }
     const status = path.endsWith('/v1/booth/submissions') ? 201 : payload.error ? 404 : 200;
     return {ok: status >= 200 && status < 300, status, headers: {get() { return null; }}, json: async () => payload};
   };
@@ -281,7 +311,7 @@ test('the event panel submits contract fields and keeps claim and search auth ap
   });
   assert.equal(content.children[0].id, 'booth');
   assert.equal(ids.get('booth-search').hidden, true);
-  assert.match(ids.get('booth-consent-copy').textContent, /철회할 수 있습니다/);
+  assert.match(ids.get('booth-consent-copy').textContent, /철회하면 설명과 결과는 즉시 삭제/);
   await new Promise(resolve => setTimeout(resolve, 0));
   assert.equal(calls[0].auth, '');
   assert.equal(calls[0].url.endsWith('/v1/booth/config'), true);
@@ -309,9 +339,25 @@ test('the event panel submits contract fields and keeps claim and search auth ap
   assert.equal(ids.get('booth-submit-button').disabled, false);
   ids.get('booth-submit').dispatchEvent({type: 'submit', preventDefault() {}});
   await new Promise(resolve => setTimeout(resolve, 0));
+  assert.match(ids.get('booth-submit-status').textContent, /미션이나 검색에서 논문을 골라 시작해 주세요/);
+  assert.equal(calls.some(call => call.url.endsWith('/v1/booth/submissions')), false);
+  walk(ids.get('booth-missions'));
+  const startPaper = controls.find(node => node.tagName === 'button' && /이 논문으로 시작/.test(node.textContent));
+  assert.ok(startPaper);
+  startPaper.dispatchEvent({type: 'click'});
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.match(ids.get('booth-search-status').textContent, /논문을 열었습니다/);
+  ids.get('booth-submit').dispatchEvent({type: 'submit', preventDefault() {}});
+  await new Promise(resolve => setTimeout(resolve, 0));
   const posted = calls.find(call => call.url.endsWith('/v1/booth/submissions'));
   assert.equal(posted.auth, 'Bearer ' + token);
-  assert.deepEqual(Object.keys(posted.body), ['jobId', 'course', 'declared', 'nickname', 'consentVersion']);
+  assert.deepEqual(Object.keys(posted.body), ['jobId', 'course', 'declared', 'paper', 'nickname', 'consentVersion']);
+  assert.deepEqual(posted.body.paper, {source: 'mission', id: '2503.10497', title: 'Synthetic mission', license: 'cc-by-4.0'});
+  doc.dispatchEvent({type: 'falsify:document', detail: {file: {name: 'other.pdf'}}});
+  ids.get('booth-submit').dispatchEvent({type: 'submit', preventDefault() {}});
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.match(ids.get('booth-submit-status').textContent, /미션이나 검색에서 논문을 골라 시작해 주세요/);
+  assert.equal(calls.filter(call => call.url.endsWith('/v1/booth/submissions')).length, 1);
   assert.deepEqual(Object.keys(posted.body.declared[0]), ['pageIndex', 'segmentId', 'before', 'after', 'defectType', 'reason']);
   assert.equal(JSON.stringify(posted.body).includes(RATIONALE), false);
   assert.equal(ids.get('booth-receipt-code').textContent, 'F-0042');
@@ -491,6 +537,7 @@ test('a completed RED apply emits the booth event and keeps BLUE when blueJobs i
   const entry = setup({routes: route});
   await signIn(entry);
   assert.equal(entry.$('hosted-ai-role-blue').hidden, false);
+  assert.equal(entry.$('hosted-ai-run').hidden, false);
   await selectFile(entry);
   const prompt = entry.$('hosted-ai-prompt');
   prompt.value = 'Check the methods section only.';
@@ -543,4 +590,68 @@ test('blueJobs false hides hosted BLUE run and the RED to BLUE handoff', async (
   assert.equal(entry.calls.filter(call => call.path === '/v1/ai/uploads').length, uploads);
   assert.equal(entry.events[0].edits.length, 1);
   assert.deepEqual(Object.keys(entry.events[0].edits[0]), ['pageIndex', 'segmentId', 'before', 'after']);
+});
+
+test('modelJobs false hides the hosted model RED run and leaves apply', async () => {
+  const route = router({...CAPS, modelJobs: false, blueJobs: false});
+  const entry = setup({routes: route});
+  await signIn(entry);
+  assert.equal(entry.$('hosted-ai-run').hidden, true);
+  assert.equal(entry.$('hosted-ai-role-field').hidden, true);
+  assert.equal(entry.$('hosted-ai-advanced').hidden, true);
+  assert.equal(entry.$('hosted-ai-prompt').hidden, true);
+  assert.equal(entry.$('hosted-ai-presets').hidden, true);
+  assert.equal(entry.$('hosted-ai-apply').hidden, false);
+  await selectFile(entry);
+  entry.$('hosted-ai-prompt').value = 'Check the methods section only.';
+  entry.$('hosted-ai-prompt').dispatchEvent(new Event('input'));
+  entry.$('hosted-ai-run').click();
+  await until(() => /모델 검토를 실행하지 않습니다/.test(entry.$('hosted-ai-error').textContent), 'model run refused');
+  assert.equal(route.posts().length, 0);
+});
+
+test('open-access intro does not promise guest BLUE when blueJobs is false', async () => {
+  const source = await readFile(fileURLToPath(new URL('../dist/open-access.js', import.meta.url)), 'utf8');
+  const notes = [];
+  const listeners = new Map();
+  function anchor(id) {
+    return {
+      id, children: [], nextElementSibling: null,
+      after(child) { this.nextElementSibling = child; notes.push(child); },
+      insertBefore(child) { this.children.unshift(child); notes.push(child); },
+      querySelector(selector) {
+        return selector === '[data-open-access-note]' ? this.children.find(item => item.note) : null;
+      },
+    };
+  }
+  const anchors = {'hosted-ai': anchor('hosted-ai'), 'view-blue': anchor('view-blue')};
+  const document = {
+    documentElement: {dataset: {}},
+    getElementById: id => anchors[id] || null,
+    createElement() {
+      return {className: '', textContent: '', note: true, setAttribute() {}, getAttribute(name) {
+        return name === 'data-open-access-note' ? '' : null;
+      }};
+    },
+    querySelectorAll(selector) { return selector === '[data-open-access-note]' ? notes.slice() : []; },
+    addEventListener(type, fn) { listeners.set(type, [...(listeners.get(type) || []), fn]); },
+    dispatchEvent(event) { for (const fn of listeners.get(event.type) || []) fn(event); },
+  };
+  const context = {
+    URL, URLSearchParams, JSON, Date, Math, Number, String, Object, Error, Promise,
+    sessionStorage: memoryStorage(),
+    location: {hash: '', pathname: '/', search: '', href: 'https://event.example/'},
+    history: {replaceState() {}},
+    document, fetch: async () => { throw new Error('offline'); },
+    FalsifyCloudConfig: {apiBase: 'https://event.example', hostedAi: {apiBase: 'https://event.example'}, openAccess: {enabled: true}},
+  };
+  vm.createContext(context);
+  vm.runInContext(source, context, {filename: 'open-access.js'});
+  assert.equal(notes.length, 2);
+  assert.match(notes[0].textContent, /BLUE 검토는 웹 실행 패널에서 로그인 없이 실행합니다/);
+  document.dispatchEvent({type: 'falsify:hosted-capabilities', detail: {blueJobs: false, modelJobs: false}});
+  assert.equal(notes.every(note => note.textContent.includes('BLUE 검토는 이 행사 화면에서 열리지 않습니다')), true);
+  assert.equal(notes.some(note => /BLUE 검토는 웹 실행 패널에서 로그인 없이 실행합니다/.test(note.textContent)), false);
+  document.dispatchEvent({type: 'falsify:hosted-capabilities', detail: {blueJobs: true, modelJobs: true}});
+  assert.match(notes[0].textContent, /BLUE 검토는 웹 실행 패널에서 로그인 없이 실행합니다/);
 });
