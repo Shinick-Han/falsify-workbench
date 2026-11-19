@@ -32,12 +32,14 @@ function delay(ms) {
 
 export function startFake({
   token, submissions, pdfs, queued = false, jobDelayMs = 0, papers = null, pdfWithdrawn = null,
+  pdfHeaders = null,
 }) {
   const state = {
     submissions: submissions.map(row => ({ ...row, declared: row.declared.map(edit => ({ ...edit })), paper: row.paper ? { ...row.paper } : null })),
     pdfs,
     papers,
     pdfWithdrawn: pdfWithdrawn || new Set(),
+    pdfHeaders: pdfHeaders || new Map(),
     requests: [],
     settings: { submissionsOpen: true, missions: [], announcement: null },
     uploads: new Map(),
@@ -145,7 +147,11 @@ export function startFake({
         fail(res, 404, 'not_found');
         return;
       }
-      send(res, 200, bytes, { 'Content-Disposition': `attachment; filename="${receipt}.pdf"` });
+      const hash = state.pdfHeaders.get(receipt) || sha256(bytes);
+      send(res, 200, bytes, {
+        'Content-Disposition': `attachment; filename="${receipt}.pdf"`,
+        'X-Falsify-Pdf-Sha256': hash,
+      });
       return;
     }
     const one = pathname.match(/^\/v1\/booth\/admin\/submissions\/(F-\d+)$/);

@@ -1,18 +1,25 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
+import { configHash, idempotencyKey } from '../lib/blue.mjs';
 import { startFake } from './fake-api.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const BOOTH = path.join(ROOT, 'tools', 'booth', 'booth.mjs');
 const TOKEN = `fso_${'a'.repeat(43)}`;
 const PDF = Buffer.from('%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n');
+const PDF_SHA = createHash('sha256').update(PDF).digest('hex');
 const SENTINELS = ['SENTINEL_AFTER_zz91', 'SENTINEL_REASON_zz91', 'SENTINEL_NICK_zz91', 'SENTINEL_TITLE_zz91'];
+
+function sha256(bytes) {
+  return createHash('sha256').update(bytes).digest('hex');
+}
 
 function run(args, { env, cwd = ROOT } = {}) {
   return new Promise(resolve => {
@@ -48,8 +55,9 @@ function submission(seq, extra = {}) {
       reason: 'SENTINEL_REASON_zz91',
     }],
     paper: { source: 'arxiv', id: '2503.10497', title: 'SENTINEL_TITLE_zz91', license: 'cc-by-4.0' },
-    jobId: `10000000-0000-4000-8000-${String(seq).padStart(12, '0')}`,
-    artifactId: `artifact-${seq}`,
+    pdfSha256: PDF_SHA,
+    pdfBytes: PDF.length,
+    sourceSha256: null,
     outcome: null,
     operatorNote: null,
     publicNote: null,
@@ -112,6 +120,12 @@ test('pull, blind BLUE, resume, score, judge, publish, draw, export, settings', 
     assert.equal(JSON.parse(again.stdout).withdrawn, 1);
     assert.equal(fake.state.pdfGets['F-0001'], 1);
     assert.equal(fs.existsSync(path.join(dir, 'data', 'submissions', 'F-0001', 'edited.pdf')), true);
+    const archived = JSON.parse(fs.readFileSync(path.join(dir, 'data', 'submissions', 'F-0001', 'submission.json'), 'utf8'));
+    assert.equal(archived.pdfSha256, PDF_SHA);
+    assert.equal(archived.pdfBytes, PDF.length);
+    assert.equal(Object.hasOwn(archived, 'jobId'), false);
+    assert.equal(Object.hasOwn(archived, 'artifactId'), false);
+    assert.equal(fs.readFileSync(path.join(dir, 'data', 'submissions', 'F-0001', 'pdf.sha256'), 'utf8').trim(), PDF_SHA);
     assert.equal(fs.existsSync(path.join(dir, 'data', 'submissions', 'F-0003')), false);
     assert.equal(fake.state.pdfGets['F-0003'], undefined);
     const tombstone = fs.readFileSync(path.join(dir, 'data', 'withdrawn.log'), 'utf8').trim().split('\n');
@@ -373,7 +387,7 @@ test('blue refuses while submissions are open unless --allow-open is set', async
   }
 });
 
-test('a changed edited PDF gets a new BLUE idempotency key', async () => {
+test('the BLUE idempotency key uses pdfSha256 and a different local file is refused', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-pdf-key-'));
   const row = quietRow(12);
   const fake = await startFake({ token: TOKEN, submissions: [row], pdfs: new Map([['F-0012', Buffer.from(PDF)]]) });
@@ -388,15 +402,64 @@ test('a changed edited PDF gets a new BLUE idempotency key', async () => {
       .filter(request => request.method === 'POST' && request.url === '/v1/ai/jobs')
       .map(request => JSON.parse(request.body.toString('utf8')).idempotencyKey);
     const [before] = keys();
-    assert.equal(before.length, 64);
+    const prompt = fs.readFileSync(path.join(dir, 'prompt.txt'), 'utf8');
+    const expected = idempotencyKey({
+      receipt: 'F-0012',
+      profileName: 'quick-blind',
+      repeatIndex: 0,
+      configHash: configHash({
+        name: 'quick-blind',
+        model: 'claude-sonnet-5-5',
+        effort: 'high',
+        maxCalls: 4,
+        useEvidence: true,
+        prompt,
+      }),
+      pdfSha256: PDF_SHA,
+    });
+    assert.equal(before, expected);
     fs.writeFileSync(path.join(dir, 'data', 'submissions', 'F-0012', 'edited.pdf'), Buffer.from('%PDF-1.4\n% second bytes\n%%EOF\n'));
     const second = await run([...base, 'blue', '--allow-open', '--only', 'F-0012']);
-    assert.equal(second.code, 0, second.stderr);
-    const after = keys();
-    assert.equal(after.length, 2);
-    assert.notEqual(after[0], after[1]);
-    assert.equal(fake.state.newJobs, 2);
+    assert.equal(second.code, 3, second.stderr);
+    assert.equal(second.stderr.includes('pdf_mismatch'), true);
+    assert.equal(keys().length, 1);
+    assert.equal(fake.state.newJobs, 1);
+    assert.equal(fake.state.uploads.size, 1);
     assert.equal(containsSentinel(fake.state), '');
+  } finally {
+    await fake.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('pull rejects a PDF that does not match pdfSha256, pdfBytes, or the sha header', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-pdf-check-'));
+  const other = Buffer.from('%PDF-1.4\n% other\n%%EOF\n');
+  const rows = [
+    quietRow(20),
+    quietRow(21, { pdfSha256: sha256(other) }),
+    quietRow(22, { pdfBytes: PDF.length + 1 }),
+    quietRow(23),
+  ];
+  const fake = await startFake({
+    token: TOKEN,
+    submissions: rows,
+    pdfs: new Map(rows.map(row => [row.receipt, Buffer.from(PDF)])),
+    pdfHeaders: new Map([['F-0023', sha256(other)]]),
+  });
+  const config = writeConfig(dir, fake.url);
+  const base = ['--config', config];
+  try {
+    const good = await run([...base, 'pull', '--only', 'F-0020']);
+    assert.equal(good.code, 0, good.stderr);
+    assert.equal(fs.readFileSync(path.join(dir, 'data', 'submissions', 'F-0020', 'pdf.sha256'), 'utf8').trim(), PDF_SHA);
+    for (const receipt of ['F-0021', 'F-0022', 'F-0023']) {
+      const failed = await run([...base, 'pull', '--only', receipt]);
+      assert.equal(failed.code, 1, failed.stderr);
+      assert.equal(failed.stderr.includes('pdf_mismatch'), true, receipt);
+      assert.equal(fs.existsSync(path.join(dir, 'data', 'submissions', receipt)), false, receipt);
+    }
+    assert.equal(fake.state.pdfGets['F-0020'], 1);
   } finally {
     await fake.close();
     fs.rmSync(dir, { recursive: true, force: true });
