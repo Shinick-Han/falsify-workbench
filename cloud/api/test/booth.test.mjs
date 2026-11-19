@@ -1,0 +1,959 @@
+// Offline booth submission tests. Synthetic tokens and PDF bytes only.
+// The runtime is the injected fetch stub; nothing leaves this process.
+import { test, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+import { createHash, randomBytes } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { OWNER_ID } from '../src/ai-identity.mjs';
+import { aiSettings } from '../src/ai-gateway.mjs';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const apiRoot = path.resolve(here, '..');
+const repoRoot = path.resolve(apiRoot, '../..');
+
+function cloudRequire() {
+  const local = createRequire(import.meta.url);
+  try {
+    local.resolve('miniflare');
+    local.resolve('esbuild');
+    return local;
+  } catch { /* NODE_PATH below */ }
+  for (const dir of (process.env.NODE_PATH || '').split(path.delimiter).filter(Boolean)) {
+    if (!existsSync(path.join(dir, 'miniflare', 'package.json')) || !existsSync(path.join(dir, 'esbuild', 'package.json'))) continue;
+    const parentPkg = path.join(dir, '..', 'package.json');
+    return createRequire(existsSync(parentPkg) ? parentPkg : path.join(dir, 'miniflare', 'package.json'));
+  }
+  throw new Error('miniflare and esbuild were not found next to this test or on NODE_PATH');
+}
+
+const require = cloudRequire();
+const { Miniflare, convertV4MiniflareOptions } = require('miniflare');
+const { build } = require('esbuild');
+
+const integratedCore = path.join(repoRoot, 'app/dist/cloud-records-core.mjs');
+const corePath = process.env.FALSIFY_CLOUD_CORE || (existsSync(integratedCore) ? integratedCore : path.resolve(repoRoot, '../contract/app/dist/cloud-records-core.mjs'));
+const harnessPath = path.join(repoRoot, 'app/dist/harness-core.js');
+
+const ORIGIN = 'https://shinick-han.github.io';
+const PASSWORD = 'correct horse battery';
+const SERVICE_TOKEN = 'test-service-token-' + 't'.repeat(24);
+const OPERATOR = 'fso_' + randomBytes(32).toString('base64url');
+const WRONG_OPERATOR = 'fso_' + randomBytes(32).toString('base64url');
+const CONSENT = '2026-11-22.v1';
+const KEY_RE = /^[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/;
+const sha256 = text => createHash('sha256').update(text).digest('hex');
+const pdfBytes = text => Buffer.from(`%PDF-1.7 synthetic ${text}`);
+
+let script;
+let statements;
+
+async function stubFetch(url, init, env) {
+  const requestUrl = new URL(String(url));
+  const method = String((init && init.method) || 'GET').toUpperCase();
+  const headers = new Headers((init && init.headers) || {});
+  const mode = String((env && env.AI_STUB_MODE) || '');
+  const db = env && env.DB;
+  const owner = headers.get('X-Falsify-Owner-Id') || '';
+  const reply = (status, body, extra) => new Response(body === null ? null : JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json', ...(extra || {}) },
+  });
+  if (db) {
+    await db.prepare('INSERT INTO ai_stub_calls (host, path, method, owner_id) VALUES (?1, ?2, ?3, ?4)')
+      .bind(requestUrl.hostname, requestUrl.pathname, method, owner).run();
+  }
+  if (requestUrl.hostname !== 'runtime.test') return new Response('not found', { status: 404 });
+  if (requestUrl.pathname === '/internal/v1/uploads' && method === 'POST') {
+    const rawBody = init.body;
+    let bytes;
+    if (rawBody instanceof ArrayBuffer) bytes = new Uint8Array(rawBody);
+    else if (ArrayBuffer.isView(rawBody)) bytes = new Uint8Array(rawBody.buffer, rawBody.byteOffset, rawBody.byteLength);
+    else if (typeof rawBody === 'string') bytes = new TextEncoder().encode(rawBody);
+    else bytes = new Uint8Array(await new Response(rawBody).arrayBuffer());
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    const sha = Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
+    const id = `rt-${sha.slice(0, 32)}`;
+    await db.prepare('INSERT INTO ai_stub_uploads (id, owner_id, sha256, bytes) VALUES (?1, ?2, ?3, ?4) ON CONFLICT (id) DO NOTHING')
+      .bind(id, owner, sha, bytes.byteLength).run();
+    return reply(201, { upload: { id, sha256: sha, bytes: bytes.byteLength, name: 'paper.pdf', mime: 'application/pdf', createdAt: new Date().toISOString() } });
+  }
+  if (requestUrl.pathname === '/internal/v1/jobs' && method === 'POST') {
+    const payload = JSON.parse(init.body);
+    const known = await db.prepare('SELECT 1 AS ok FROM ai_stub_uploads WHERE id = ?1 AND owner_id = ?2').bind(payload.uploadId, owner).first();
+    if (!known) return new Response('unknown upload', { status: 404 });
+    const at = new Date().toISOString();
+    await db.prepare(
+      'INSERT INTO ai_stub_jobs (id, owner_id, state, upload_id, payload) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT (id) DO NOTHING'
+    ).bind(payload.jobId, owner, 'queued', payload.uploadId, JSON.stringify(payload)).run();
+    return reply(202, {
+      id: payload.jobId,
+      role: payload.role,
+      state: 'queued',
+      model: payload.model,
+      effort: payload.effort,
+      artifacts: [],
+      createdAt: at,
+      updatedAt: at,
+    });
+  }
+  const artifact = /^\/internal\/v1\/jobs\/([^/]+)\/artifacts\/([^/]+)$/.exec(requestUrl.pathname);
+  if (artifact && method === 'GET') {
+    const job = await db.prepare('SELECT id FROM ai_stub_jobs WHERE id = ?1 AND owner_id = ?2').bind(artifact[1], owner).first();
+    if (!job || artifact[2] !== 'edited-pdf-1') return new Response('not found', { status: 404 });
+    const bytes = new TextEncoder().encode('%PDF-1.7 synthetic edited output ART-MARK');
+    return new Response(bytes, { status: 200, headers: { 'Content-Type': 'application/pdf' } });
+  }
+  const status = /^\/internal\/v1\/jobs\/([^/]+)$/.exec(requestUrl.pathname);
+  if (status && method === 'GET') {
+    const job = await db.prepare('SELECT id, state FROM ai_stub_jobs WHERE id = ?1 AND owner_id = ?2').bind(status[1], owner).first();
+    if (!job) return new Response('not found', { status: 404 });
+    const at = new Date().toISOString();
+    const artifacts = [{ id: 'artifact-1', name: 'review.json', mime: 'application/json', bytes: 4 }];
+    if (mode !== 'no-edited') {
+      artifacts.push({ id: 'edited-pdf-1', name: 'edited.pdf', mime: 'application/pdf', bytes: 40 });
+    }
+    return reply(200, {
+      id: job.id,
+      role: 'red',
+      state: job.state === 'completed' ? 'completed' : 'running',
+      artifacts,
+      createdAt: at,
+      updatedAt: at,
+    });
+  }
+  return new Response('unmocked', { status: 404 });
+}
+
+const STUB_TABLES = [
+  'CREATE TABLE ai_stub_calls (seq INTEGER PRIMARY KEY AUTOINCREMENT, host TEXT NOT NULL, path TEXT NOT NULL, method TEXT NOT NULL, owner_id TEXT NOT NULL)',
+  'CREATE TABLE ai_stub_uploads (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, sha256 TEXT NOT NULL, bytes INTEGER NOT NULL)',
+  'CREATE TABLE ai_stub_jobs (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, state TEXT NOT NULL, upload_id TEXT NOT NULL, payload TEXT)',
+];
+
+// Comments are removed first. 0006 keeps the contract comment that contains a semicolon,
+// and a blind split would cut that CREATE TABLE in half.
+function stripSqlComments(sql) {
+  let out = '';
+  let quote = '';
+  for (let i = 0; i < sql.length; i++) {
+    const ch = sql[i];
+    if (quote) {
+      out += ch;
+      if (ch === quote) quote = '';
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      out += ch;
+      continue;
+    }
+    if (ch === '-' && sql[i + 1] === '-') {
+      while (i < sql.length && sql[i] !== '\n') i++;
+      if (sql[i] === '\n') out += '\n';
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+function migrationStatements() {
+  const sql = ['0001_shared_records.sql', '0002_invite_membership.sql', '0003_hosted_ai.sql', '0004_owner_usage.sql', '0005_guest_sessions.sql', '0006_booth.sql']
+    .map(name => readFileSync(path.join(apiRoot, 'migrations', name), 'utf8'))
+    .join('\n');
+  return stripSqlComments(sql).split(';').map(part => part.trim()).filter(Boolean);
+}
+
+async function start(bindings = {}) {
+  const instance = new Miniflare(convertV4MiniflareOptions({
+    name: 'falsify-booth',
+    modules: true,
+    script,
+    compatibilityDate: '2026-10-19',
+    compatibilityFlags: ['nodejs_compat'],
+    bindings: {
+      ALLOWED_ORIGINS: ORIGIN,
+      AI_HOSTING_ENABLED: 'true',
+      AI_OPEN_ACCESS: 'true',
+      AI_RUNTIME_URL: 'https://runtime.test',
+      HOSTED_AI_SERVICE_TOKEN: SERVICE_TOKEN,
+      AI_MAX_UPLOAD_BYTES: '4096',
+      AI_RUNTIME_TIMEOUT_MS: '5000',
+      CONFLUENCE_ONLY: 'false',
+      AI_GUESTS_PER_IP_HOUR: '50',
+      AI_GUESTS_PER_HOUR: '100',
+      AI_GUEST_JOBS_PER_OWNER_HOUR: '30',
+      AI_GUEST_JOBS_PER_HOUR: '100',
+      AI_GUEST_ACTIVE_JOBS_PER_OWNER: '6',
+      AI_GUEST_UPLOADS_PER_OWNER_HOUR: '30',
+      AI_JOBS_PER_OWNER_HOUR: '30',
+      AI_ACTIVE_JOBS_PER_OWNER: '6',
+      BOOTH_ENABLED: 'true',
+      BOOTH_CONSENT_VERSION: CONSENT,
+      BOOTH_OPERATOR_TOKEN: OPERATOR,
+      ...bindings,
+    },
+    d1Databases: ['DB'],
+  }));
+  const d1 = await instance.getD1Database('DB');
+  for (const statement of statements) await d1.prepare(statement).run();
+  for (const statement of STUB_TABLES) await d1.prepare(statement).run();
+  return instance;
+}
+
+function client(instance) {
+  return async (method, pathname, { token, body, raw, headers = {} } = {}) => {
+    const h = { Origin: ORIGIN, ...headers };
+    if (token) h.Authorization = `Bearer ${token}`;
+    let payload;
+    if (raw !== undefined) payload = raw;
+    else if (body !== undefined) payload = JSON.stringify(body);
+    if (typeof payload === 'string' && !Object.keys(h).some(key => key.toLowerCase() === 'content-type')) {
+      h['Content-Type'] = 'application/json';
+    }
+    const response = await instance.dispatchFetch(`https://api.test${pathname}`, { method, headers: h, body: payload });
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    const text = new TextDecoder().decode(bytes);
+    let parsed = null;
+    try { parsed = text ? JSON.parse(text) : null; } catch { parsed = null; }
+    return { status: response.status, headers: response.headers, body: parsed, text, bytes };
+  };
+}
+
+async function withApp(bindings, fn) {
+  const instance = await start(bindings);
+  try {
+    return await fn(instance, client(instance));
+  } finally {
+    await instance.dispose();
+  }
+}
+
+async function invite(instance) {
+  const code = 'fsi_' + randomBytes(32).toString('base64url');
+  const d1 = await instance.getD1Database('DB');
+  await d1.prepare('INSERT INTO invitations (code_hash, created_at, expires_at, revoked_at) VALUES (?1, ?2, ?3, NULL)')
+    .bind(sha256(code), new Date().toISOString(), Date.now() + 3600e3).run();
+  return code;
+}
+
+async function register(instance, call, username) {
+  return call('POST', '/v1/auth/register', { body: { username, password: PASSWORD, inviteCode: await invite(instance) } });
+}
+
+const mintGuest = (call, headers = {}) => call('POST', '/v1/ai/guest', { body: {}, headers });
+const fromIp = address => ({ 'CF-Connecting-IP': address });
+
+function upload(call, token, bytes, headers = {}) {
+  return call('POST', '/v1/ai/uploads', {
+    token,
+    raw: bytes,
+    headers: { 'Content-Type': 'application/pdf', 'X-Falsify-File-Name': 'paper.pdf', ...headers },
+  });
+}
+
+function jobBody(uploadId, overrides = {}) {
+  return {
+    role: 'red',
+    prompt: 'Review this synthetic paper and list contradictions.',
+    uploadId,
+    idempotencyKey: 'op-synthetic-0001',
+    model: 'claude-sonnet-5-5',
+    effort: 'high',
+    budget: { maxCalls: 2 },
+    ...overrides,
+  };
+}
+
+function applyOnlyBody(uploadId, key) {
+  return {
+    ...jobBody(uploadId, { idempotencyKey: key, budget: { maxCalls: 0 } }),
+    applyOnly: true,
+    edits: [{ id: 'edit-1', pageIndex: 0, before: '12.4%', after: '14.1%', occurrence: 0 }],
+  };
+}
+
+function submissionBody(jobId, overrides = {}) {
+  return {
+    jobId,
+    course: 'quick',
+    declared: [{
+      pageIndex: 3,
+      segmentId: 'p4-s2',
+      before: 'p < 0.05',
+      after: 'p < 0.5',
+      defectType: 'number',
+      reason: '유의수준을 바꿔 결론이 성립하지 않음',
+    }],
+    paper: { source: 'arxiv', id: '2503.10497', title: 'Synthetic paper', license: 'cc-by-4.0' },
+    nickname: '부스방문자',
+    consentVersion: CONSENT,
+    ...overrides,
+  };
+}
+
+async function stubCalls(instance, pathname, method) {
+  const d1 = await instance.getD1Database('DB');
+  const row = await d1.prepare('SELECT COUNT(*) AS count FROM ai_stub_calls WHERE path = ?1 AND method = ?2')
+    .bind(pathname, method).first();
+  return Number(row.count);
+}
+
+async function markReady(instance, jobId, { applyOnly, state = 'completed', artifacts = 'edited', role = 'red' } = {}) {
+  const d1 = await instance.getD1Database('DB');
+  const row = await d1.prepare('SELECT snapshot, owner_id FROM ai_jobs WHERE id = ?1').bind(jobId).first();
+  const snapshot = JSON.parse(row.snapshot);
+  if (applyOnly !== undefined) snapshot.applyOnly = applyOnly;
+  snapshot.state = state;
+  snapshot.role = role;
+  if (artifacts === 'edited') snapshot.artifacts = [{ id: 'edited-pdf-1', name: 'edited.pdf', mime: 'application/pdf', bytes: 40 }];
+  else if (artifacts === 'other') snapshot.artifacts = [{ id: 'artifact-1', name: 'review.json', mime: 'application/json', bytes: 4 }];
+  else snapshot.artifacts = [];
+  await d1.prepare('UPDATE ai_jobs SET state = ?1, role = ?2, snapshot = ?3 WHERE id = ?4')
+    .bind(state, role, JSON.stringify(snapshot), jobId).run();
+  await d1.prepare('UPDATE ai_stub_jobs SET state = ?1 WHERE id = ?2').bind(state, jobId).run();
+  return row.owner_id;
+}
+
+async function readyJob(instance, call, token, key, options) {
+  const up = await upload(call, token, pdfBytes(key));
+  assert.equal(up.status, 201, `${key} upload`);
+  const created = await call('POST', '/v1/ai/jobs', { token, body: applyOnlyBody(up.body.upload.id, key) });
+  assert.equal(created.status, 202, `${key} job`);
+  const ownerId = await markReady(instance, created.body.job.id, options);
+  return { jobId: created.body.job.id, ownerId };
+}
+
+before(async () => {
+  const entry = [
+    "import worker from './src/index.js';",
+    "import { setAiFetchForTests } from './src/ai-runtime-client.mjs';",
+    `setAiFetchForTests(${stubFetch.toString()});`,
+    'export default worker;',
+  ].join('\n');
+  const result = await build({
+    stdin: { contents: entry, resolveDir: apiRoot, sourcefile: 'booth-test-entry.mjs', loader: 'js' },
+    bundle: true,
+    write: false,
+    format: 'esm',
+    platform: 'browser',
+    external: ['node:*'],
+    logLevel: 'silent',
+    plugins: [{
+      name: 'shared-core',
+      setup(b) {
+        b.onResolve({ filter: /cloud-records-core\.mjs$/ }, () => ({ path: corePath }));
+        b.onResolve({ filter: /harness-core\.js$/ }, () => ({ path: harnessPath }));
+      },
+    }],
+  });
+  script = result.outputFiles[0].text;
+  statements = migrationStatements();
+});
+
+after(async () => { /* each test disposes its own instance */ });
+
+test('operator id, gateway defaults and migration 0006 keep secrets out of the schema', () => {
+  assert.equal(OWNER_ID.test('opr:booth'), true);
+  assert.equal(OWNER_ID.test('opr:other'), false);
+  assert.equal(OWNER_ID.test('gst:11111111-1111-4111-8111-111111111111'), true);
+  const settings = aiSettings({});
+  assert.equal(settings.guestBlue, true);
+  assert.equal(settings.guestApplyJobsSeparated, false);
+  assert.equal(settings.guestApplyJobsPerHour, settings.guestJobsPerHour);
+  assert.equal(settings.operatorJobsPerHour, 600);
+  assert.equal(settings.operatorActiveJobs, 4);
+  assert.equal(settings.operatorUploadsPerHour, 600);
+  assert.equal(settings.operatorMaxCallsPerJob, settings.maxCallsPerJob);
+  assert.equal(settings.operatorTokenBudget, 0);
+  const event = aiSettings({
+    AI_GUEST_BLUE: 'false',
+    AI_GUEST_JOBS_PER_HOUR: '40',
+    AI_GUEST_APPLY_JOBS_PER_HOUR: '600',
+    BOOTH_OPERATOR_MAX_CALLS_PER_JOB: '80',
+  });
+  assert.equal(event.guestBlue, false);
+  assert.equal(event.guestApplyJobsSeparated, true);
+  assert.equal(event.guestApplyJobsPerHour, 600);
+  assert.equal(event.operatorMaxCallsPerJob, 64);
+  const sql = readFileSync(path.join(apiRoot, 'migrations', '0006_booth.sql'), 'utf8');
+  assert.match(sql, /CREATE TABLE booth_submissions/);
+  assert.match(sql, /CREATE TABLE booth_settings/);
+  assert.match(sql, /claim_hash TEXT NOT NULL/);
+  assert.match(sql, /CREATE INDEX booth_submissions_owner/);
+  assert.match(sql, /CREATE INDEX booth_submissions_status/);
+  assert.equal(/\buser_agent\b/i.test(sql), false);
+  assert.equal(/\btoken TEXT\b/.test(sql), false);
+  const wrangler = readFileSync(path.join(apiRoot, 'wrangler.jsonc'), 'utf8');
+  assert.equal(wrangler.split('"BOOTH_ENABLED": "true"').length, 2);
+  assert.equal(wrangler.split('"AI_GUEST_BLUE": "false"').length, 2);
+  assert.equal(wrangler.split('"AI_GUEST_APPLY_JOBS_PER_HOUR": "600"').length, 2);
+  assert.equal(wrangler.split('"PAPER_SEARCH_ENABLED": "true"').length, 2);
+  assert.match(wrangler, /"BOOTH_CONSENT_VERSION": "2026-11-22.v1"/);
+  assert.match(wrangler, /"AI_GUESTS_PER_IP_HOUR": "600"/);
+  assert.equal(/"BOOTH_OPERATOR_TOKEN"\s*:/.test(wrangler), false);
+});
+
+test('booth stays dark until BOOTH_ENABLED is true, including for a valid operator', async () => {
+  await withApp({ BOOTH_ENABLED: 'false' }, async (_mf, call) => {
+    const open = await call('GET', '/v1/booth/config');
+    assert.equal(open.status, 404);
+    assert.equal(open.body.error.code, 'not_found');
+    const authed = await call('GET', '/v1/booth/admin/submissions', { token: OPERATOR });
+    assert.equal(authed.status, 404);
+    assert.equal(authed.body.error.code, 'not_found');
+    const preflight = await call('OPTIONS', '/v1/booth/config');
+    assert.equal(preflight.status, 404);
+  });
+  await withApp({ BOOTH_ENABLED: '' }, async (_mf, call) => {
+    const open = await call('POST', '/v1/booth/submissions', { raw: '{}' });
+    assert.equal(open.status, 404);
+    assert.equal(open.body.error.code, 'not_found');
+  });
+});
+
+test('visitor submit, claim, publish, withdraw and admin pdf', async () => {
+  await withApp({}, async (mf, call) => {
+    const preflight = await call('OPTIONS', '/v1/booth/submissions', {
+      headers: { Origin: ORIGIN, 'Access-Control-Request-Method': 'POST' },
+    });
+    assert.equal(preflight.status, 204);
+    assert.equal(preflight.headers.get('Access-Control-Allow-Methods'), 'GET, POST, PATCH, PUT, DELETE, OPTIONS');
+    assert.equal(preflight.headers.get('Access-Control-Allow-Headers'), 'Authorization, Content-Type');
+    assert.equal(preflight.headers.get('Cache-Control'), 'no-store');
+
+    const config = await call('GET', '/v1/booth/config');
+    assert.equal(config.status, 200);
+    assert.equal(config.body.enabled, true);
+    assert.equal(config.body.submissionsOpen, true);
+    assert.equal(config.body.consentVersion, CONSENT);
+    assert.equal(config.body.limits.maxDeclared, 5);
+    assert.equal(config.body.missions.length, 0);
+    assert.equal(config.body.announcement, null);
+    assert.equal(config.headers.get('Cache-Control'), 'no-store');
+    assert.equal(config.headers.get('X-Content-Type-Options'), 'nosniff');
+
+    const guest = (await mintGuest(call)).body.guest.token;
+    const password = await register(mf, call, 'boothada');
+    assert.equal(password.status, 201);
+    const anon = await call('GET', '/v1/booth/admin/submissions');
+    assert.equal(anon.status, 401);
+    assert.equal(anon.body.error.code, 'unauthorized');
+    const asGuest = await call('GET', '/v1/booth/admin/submissions', { token: guest });
+    assert.equal(asGuest.status, 403);
+    assert.equal(asGuest.body.error.code, 'forbidden');
+    const asPassword = await call('GET', '/v1/booth/admin/settings', { token: password.body.token });
+    assert.equal(asPassword.status, 403);
+    const wrong = await call('GET', '/v1/booth/admin/submissions', { token: WRONG_OPERATOR });
+    assert.equal(wrong.status, 401);
+    assert.equal(wrong.body.error.code, 'unauthorized');
+    const operatorSubmit = await call('POST', '/v1/booth/submissions', {
+      token: OPERATOR,
+      body: submissionBody('11111111-1111-4111-8111-111111111111'),
+    });
+    assert.equal(operatorSubmit.status, 403);
+    assert.equal(operatorSubmit.body.error.code, 'forbidden');
+
+    const ready = await readyJob(mf, call, guest, 'op-booth-happy1');
+    const created = await call('POST', '/v1/booth/submissions', { token: guest, body: submissionBody(ready.jobId) });
+    assert.equal(created.status, 201);
+    assert.equal(created.body.receipt, 'F-0001');
+    assert.match(created.body.claimKey, KEY_RE);
+    assert.equal(created.body.status, 'received');
+    assert.equal(created.body.course, 'quick');
+    assert.equal(created.body.declaredCount, 1);
+    assert.match(created.body.createdAt, /^\d{4}-\d{2}-\d{2}T/);
+    const receipt = created.body.receipt;
+    const claimKey = created.body.claimKey;
+
+    const again = await call('POST', '/v1/booth/submissions', { token: guest, body: submissionBody(ready.jobId) });
+    assert.equal(again.status, 409);
+    assert.equal(again.body.error.code, 'already_submitted');
+    assert.equal(again.body.receipt, 'F-0001');
+
+    const lower = await call('POST', '/v1/booth/claim', { body: { receipt, claimKey: claimKey.toLowerCase() } });
+    assert.equal(lower.status, 200);
+    assert.equal(lower.body.published, false);
+    assert.equal(Object.hasOwn(lower.body, 'prizeMessage'), false);
+    assert.equal(Object.hasOwn(lower.body, 'outcome'), false);
+    const spaced = await call('POST', '/v1/booth/claim', { body: { receipt, claimKey: claimKey.replace('-', ' - ') } });
+    assert.equal(spaced.status, 200);
+    const plain = await call('POST', '/v1/booth/claim', { body: { receipt, claimKey: claimKey.replace('-', '') } });
+    assert.equal(plain.status, 200);
+    assert.equal(plain.body.declaredCount, 1);
+
+    const d1 = await mf.getD1Database('DB');
+    const knownKey = 'A0B1CDEF';
+    const knownReceipt = 'F-0088';
+    await d1.prepare(
+      `INSERT INTO booth_submissions (
+        id, seq, receipt, claim_hash, owner_id, job_id, artifact_id, course, declared, consent_version, status, created_at, updated_at
+      ) VALUES (?1, 88, ?2, ?3, ?4, ?5, 'edited-pdf-1', 'deep', '[]', ?6, 'received', ?7, ?7)`
+    ).bind(
+      '22222222-2222-4222-8222-222222222222',
+      knownReceipt,
+      sha256(`booth-claim:v1:${knownReceipt}:${knownKey}`),
+      ready.ownerId,
+      '33333333-3333-4333-8333-333333333333',
+      CONSENT,
+      new Date().toISOString(),
+    ).run();
+    const confused = await call('POST', '/v1/booth/claim', { body: { receipt: knownReceipt, claimKey: 'ao bi-cdef' } });
+    assert.equal(confused.status, 200, 'O/I and spaces normalize');
+    const ell = await call('POST', '/v1/booth/claim', { body: { receipt: knownReceipt, claimKey: 'a0bL-cdef' } });
+    assert.equal(ell.status, 200, 'L normalizes to 1');
+    const wrongKey = await call('POST', '/v1/booth/claim', { body: { receipt, claimKey: 'AAAAAAAA' } });
+    const unknown = await call('POST', '/v1/booth/claim', { body: { receipt: 'F-9999', claimKey } });
+    assert.equal(wrongKey.status, 404);
+    assert.equal(unknown.status, 404);
+    assert.equal(wrongKey.body.error.code, 'not_found');
+    assert.equal(unknown.body.error.code, 'not_found');
+    assert.equal(wrongKey.body.receipt, undefined);
+    assert.equal(unknown.body.receipt, undefined);
+
+    const hidden = await call('PATCH', `/v1/booth/admin/submissions/${receipt}`, {
+      token: OPERATOR,
+      body: { prizeMessage: 'GIFT-CODE', publicNote: '잘 봤습니다', outcome: 'caught', published: false },
+    });
+    assert.equal(hidden.status, 200);
+    assert.equal(hidden.body.published, false);
+    assert.equal(hidden.body.prizeMessage, 'GIFT-CODE');
+    const before = await call('POST', '/v1/booth/claim', { body: { receipt, claimKey } });
+    assert.equal(before.body.published, false);
+    assert.equal(Object.hasOwn(before.body, 'prizeMessage'), false);
+    assert.equal(JSON.stringify(before.body).includes('GIFT-CODE'), false);
+
+    const published = await call('PATCH', `/v1/booth/admin/submissions/${receipt}`, {
+      token: OPERATOR,
+      body: { published: true, aiSummary: { marker: 'operator-only' } },
+    });
+    assert.equal(published.status, 200);
+    assert.equal(published.body.published, true);
+    assert.match(published.body.publishedAt, /^\d{4}-\d{2}-\d{2}T/);
+    assert.equal(published.body.aiSummary.marker, 'operator-only');
+    assert.equal(JSON.stringify(published.body).includes(ready.ownerId), false);
+    const after = await call('POST', '/v1/booth/claim', { body: { receipt, claimKey } });
+    assert.equal(after.body.published, true);
+    assert.equal(after.body.prizeMessage, 'GIFT-CODE');
+    assert.equal(after.body.outcome, 'caught');
+    assert.equal(after.body.publicNote, '잘 봤습니다');
+    assert.equal(after.body.publishedAt, published.body.publishedAt);
+    assert.equal(JSON.stringify(after.body).includes('operator-only'), false);
+
+    const kept = await call('PATCH', `/v1/booth/admin/submissions/${receipt}`, {
+      token: OPERATOR,
+      body: { published: true },
+    });
+    assert.equal(kept.body.publishedAt, published.body.publishedAt, 'publishing again keeps the first timestamp');
+
+    const pdf = await call('GET', `/v1/booth/admin/submissions/${receipt}/pdf`, { token: OPERATOR });
+    assert.equal(pdf.status, 200);
+    assert.equal(pdf.headers.get('Content-Type'), 'application/pdf');
+    assert.equal(pdf.headers.get('Content-Disposition'), 'attachment; filename="F-0001.pdf"');
+    assert.equal(pdf.headers.get('Cache-Control'), 'no-store');
+    assert.equal(Buffer.from(pdf.bytes).subarray(0, 5).toString(), '%PDF-');
+    assert.equal(pdf.text.includes('ART-MARK'), true);
+    assert.equal(pdf.text.includes(ready.ownerId), false);
+    const proxied = await d1.prepare(
+      `SELECT owner_id FROM ai_stub_calls WHERE path = ?1 AND method = 'GET' ORDER BY seq DESC LIMIT 1`
+    ).bind(`/internal/v1/jobs/${ready.jobId}/artifacts/edited-pdf-1`).first();
+    assert.equal(proxied.owner_id, ready.ownerId);
+    assert.notEqual(proxied.owner_id, 'opr:booth');
+
+    await d1.prepare('UPDATE booth_submissions SET artifact_id = ?1 WHERE receipt = ?2').bind('gone-artifact', receipt).run();
+    const expired = await call('GET', `/v1/booth/admin/submissions/${receipt}/pdf`, { token: OPERATOR });
+    assert.equal(expired.status, 404);
+    assert.equal(expired.body.error.code, 'artifact_expired');
+
+    const withdrawn = await call('POST', '/v1/booth/withdraw', { body: { receipt, claimKey } });
+    assert.equal(withdrawn.status, 200);
+    assert.equal(withdrawn.body.status, 'withdrawn');
+    assert.equal(withdrawn.body.published, false);
+    assert.equal(Object.hasOwn(withdrawn.body, 'prizeMessage'), false);
+    const blocked = await call('PATCH', `/v1/booth/admin/submissions/${receipt}`, {
+      token: OPERATOR,
+      body: { status: 'judged' },
+    });
+    assert.equal(blocked.status, 409);
+    assert.equal(blocked.body.error.code, 'withdrawn');
+    const noted = await call('PATCH', `/v1/booth/admin/submissions/${receipt}`, {
+      token: OPERATOR,
+      body: { operatorNote: '철회됨' },
+    });
+    assert.equal(noted.status, 200);
+    assert.equal(noted.body.operatorNote, '철회됨');
+    assert.equal(noted.body.status, 'withdrawn');
+    assert.equal(noted.body.prizeMessage, null);
+    const detail = await call('GET', `/v1/booth/admin/submissions/${receipt}`, { token: OPERATOR });
+    assert.equal(detail.status, 200);
+    assert.equal(JSON.stringify(detail.body).includes('claim_hash'), false);
+    assert.equal(JSON.stringify(detail.body).includes(ready.ownerId), false);
+  });
+});
+
+test('submit rejects a foreign, unready, duplicate-shaped, closed or private nickname', async () => {
+  await withApp({}, async (mf, call) => {
+    const guestA = (await mintGuest(call, fromIp('203.0.113.10'))).body.guest.token;
+    const guestB = (await mintGuest(call, fromIp('203.0.113.11'))).body.guest.token;
+    const owned = await readyJob(mf, call, guestA, 'op-booth-owned1');
+    const foreign = await call('POST', '/v1/booth/submissions', { token: guestB, body: submissionBody(owned.jobId) });
+    assert.equal(foreign.status, 404);
+    assert.equal(foreign.body.error.code, 'not_found');
+
+    const queued = await readyJob(mf, call, guestA, 'op-booth-queue1', { state: 'queued', artifacts: 'none' });
+    const getsBefore = await stubCalls(mf, `/internal/v1/jobs/${queued.jobId}`, 'GET');
+    const notDone = await call('POST', '/v1/booth/submissions', { token: guestA, body: submissionBody(queued.jobId) });
+    assert.equal(notDone.status, 409);
+    assert.equal(notDone.body.error.code, 'job_not_ready');
+    assert.equal(await stubCalls(mf, `/internal/v1/jobs/${queued.jobId}`, 'GET'), getsBefore);
+
+    const up = await upload(call, guestA, pdfBytes('plain-job'));
+    const plain = await call('POST', '/v1/ai/jobs', {
+      token: guestA,
+      body: jobBody(up.body.upload.id, { idempotencyKey: 'op-booth-plain1' }),
+    });
+    assert.equal(plain.status, 202);
+    await markReady(mf, plain.body.job.id, { applyOnly: false, artifacts: 'edited' });
+    const modelJob = await call('POST', '/v1/booth/submissions', { token: guestA, body: submissionBody(plain.body.job.id) });
+    assert.equal(modelJob.status, 409);
+    assert.equal(modelJob.body.error.code, 'job_not_ready');
+    assert.equal(await stubCalls(mf, `/internal/v1/jobs/${plain.body.job.id}`, 'GET'), 0);
+
+    const other = await readyJob(mf, call, guestA, 'op-booth-other1', { artifacts: 'other' });
+    const noPdf = await call('POST', '/v1/booth/submissions', { token: guestA, body: submissionBody(other.jobId) });
+    assert.equal(noPdf.status, 409);
+    assert.equal(noPdf.body.error.code, 'job_not_ready');
+    assert.equal(await stubCalls(mf, `/internal/v1/jobs/${other.jobId}`, 'GET'), 0);
+
+    const live = await readyJob(mf, call, guestA, 'op-booth-live01', { artifacts: 'none' });
+    const filled = await call('POST', '/v1/booth/submissions', { token: guestA, body: submissionBody(live.jobId, { course: 'deep' }) });
+    assert.equal(filled.status, 201);
+    assert.equal(filled.body.receipt, 'F-0001');
+    assert.equal(filled.body.course, 'deep');
+    assert.equal(await stubCalls(mf, `/internal/v1/jobs/${live.jobId}`, 'GET'), 1, 'an empty artifact list is fetched once');
+
+    const staleConsent = await call('POST', '/v1/booth/submissions', {
+      token: guestA,
+      body: submissionBody('44444444-4444-4444-8444-444444444444', { consentVersion: '1999-01-01.v0' }),
+    });
+    assert.equal(staleConsent.status, 409);
+    assert.equal(staleConsent.body.error.code, 'consent_outdated');
+
+    const email = await call('POST', '/v1/booth/submissions', {
+      token: guestA,
+      body: submissionBody(live.jobId, { nickname: 'a@b' }),
+    });
+    assert.equal(email.status, 400);
+    assert.equal(email.body.error.code, 'pii_not_allowed');
+    const digits = await call('POST', '/v1/booth/submissions', {
+      token: guestA,
+      body: submissionBody(live.jobId, { nickname: '1234567' }),
+    });
+    assert.equal(digits.status, 400);
+    assert.equal(digits.body.error.code, 'pii_not_allowed');
+    const extra = await call('POST', '/v1/booth/submissions', {
+      token: guestA,
+      body: { ...submissionBody(live.jobId), email: 'hidden@example.test' },
+    });
+    assert.equal(extra.status, 400);
+    assert.equal(extra.body.error.code, 'invalid_request');
+    const missing = await call('PUT', '/v1/booth/no-such');
+    assert.equal(missing.status, 404);
+    assert.equal(missing.body.error.code, 'not_found');
+    assert.equal(typeof missing.body.error.requestId, 'string');
+  });
+
+  await withApp({ AI_STUB_MODE: 'no-edited' }, async (mf, call) => {
+    const guest = (await mintGuest(call)).body.guest.token;
+    const live = await readyJob(mf, call, guest, 'op-booth-nopdf1', { artifacts: 'none' });
+    const denied = await call('POST', '/v1/booth/submissions', { token: guest, body: submissionBody(live.jobId) });
+    assert.equal(denied.status, 409);
+    assert.equal(denied.body.error.code, 'job_not_ready');
+    assert.equal(await stubCalls(mf, `/internal/v1/jobs/${live.jobId}`, 'GET'), 1);
+  });
+
+  await withApp({ BOOTH_SUBMISSIONS_OPEN: 'false' }, async (mf, call) => {
+    const guest = (await mintGuest(call)).body.guest.token;
+    const ready = await readyJob(mf, call, guest, 'op-booth-closed');
+    const closed = await call('POST', '/v1/booth/submissions', {
+      token: guest,
+      body: submissionBody(ready.jobId, { consentVersion: 'nope' }),
+    });
+    assert.equal(closed.status, 403);
+    assert.equal(closed.body.error.code, 'booth_closed');
+  });
+});
+
+test('admin list pages by seq and settings show up on the public config', async () => {
+  await withApp({}, async (mf, call) => {
+    const guest = (await mintGuest(call)).body.guest.token;
+    const receipts = [];
+    for (let i = 1; i <= 3; i++) {
+      const ready = await readyJob(mf, call, guest, `op-booth-page0${i}`);
+      const created = await call('POST', '/v1/booth/submissions', { token: guest, body: submissionBody(ready.jobId) });
+      assert.equal(created.status, 201);
+      receipts.push(created.body.receipt);
+    }
+    assert.deepEqual(receipts, ['F-0001', 'F-0002', 'F-0003']);
+    const first = await call('GET', '/v1/booth/admin/submissions?limit=2', { token: OPERATOR });
+    assert.equal(first.status, 200);
+    assert.deepEqual(first.body.submissions.map(row => row.receipt), ['F-0001', 'F-0002']);
+    assert.equal(first.body.nextAfter, first.body.submissions[1].seq);
+    const second = await call('GET', `/v1/booth/admin/submissions?after=${first.body.nextAfter}&limit=2`, { token: OPERATOR });
+    assert.deepEqual(second.body.submissions.map(row => row.receipt), ['F-0003']);
+    assert.equal(second.body.nextAfter, null);
+    const judged = await call('PATCH', '/v1/booth/admin/submissions/F-0002', {
+      token: OPERATOR,
+      body: { status: 'judged', outcome: 'partial' },
+    });
+    assert.equal(judged.status, 200);
+    assert.equal(judged.body.status, 'judged');
+    const filtered = await call('GET', '/v1/booth/admin/submissions?status=judged,invalid', { token: OPERATOR });
+    assert.deepEqual(filtered.body.submissions.map(row => row.receipt), ['F-0002']);
+    const badLimit = await call('GET', '/v1/booth/admin/submissions?limit=201', { token: OPERATOR });
+    assert.equal(badLimit.status, 400);
+    const removed = await call('DELETE', '/v1/booth/admin/submissions/F-0003', { token: OPERATOR });
+    assert.equal(removed.status, 204);
+    assert.equal(removed.body, null);
+    const gone = await call('GET', '/v1/booth/admin/submissions/F-0003', { token: OPERATOR });
+    assert.equal(gone.status, 404);
+
+    const mission = {
+      id: 'lane-a',
+      title: '첫 과제',
+      source: 'arxiv',
+      paperId: '2503.10497',
+      license: 'cc-by-4.0',
+      course: 'any',
+      hint: '숫자만',
+    };
+    const saved = await call('PUT', '/v1/booth/admin/settings', {
+      token: OPERATOR,
+      body: { submissionsOpen: false, missions: [mission], announcement: '곧 마감' },
+    });
+    assert.equal(saved.status, 200);
+    assert.equal(saved.body.submissionsOpen, false);
+    assert.deepEqual(saved.body.missions, [mission]);
+    assert.equal(saved.body.announcement, '곧 마감');
+    const config = await call('GET', '/v1/booth/config');
+    assert.equal(config.body.submissionsOpen, false);
+    assert.deepEqual(config.body.missions, [mission]);
+    assert.equal(config.body.announcement, '곧 마감');
+    const ready = await readyJob(mf, call, guest, 'op-booth-shut01');
+    const closed = await call('POST', '/v1/booth/submissions', { token: guest, body: submissionBody(ready.jobId) });
+    assert.equal(closed.status, 403);
+    assert.equal(closed.body.error.code, 'booth_closed');
+    const cleared = await call('PUT', '/v1/booth/admin/settings', {
+      token: OPERATOR,
+      body: { announcement: null, submissionsOpen: true },
+    });
+    assert.equal(cleared.body.announcement, null);
+    assert.equal(cleared.body.submissionsOpen, true);
+    assert.equal((await call('GET', '/v1/booth/config')).body.announcement, null);
+    const huge = { note: 'x'.repeat(17000) };
+    assert.ok(Buffer.byteLength(JSON.stringify(huge)) > 16 * 1024);
+    const oversized = await call('PATCH', '/v1/booth/admin/submissions/F-0001', {
+      token: OPERATOR,
+      body: { aiSummary: huge },
+    });
+    assert.equal(oversized.status, 400);
+    assert.equal(oversized.body.error.code, 'invalid_request');
+  });
+});
+
+test('per-owner, per-IP and claim buckets stop the next submission', async () => {
+  await withApp({ BOOTH_SUBMISSIONS_PER_OWNER: '5' }, async (mf, call) => {
+    const guest = (await mintGuest(call, fromIp('203.0.113.20'))).body.guest.token;
+    const other = (await mintGuest(call, fromIp('203.0.113.21'))).body.guest.token;
+    for (let i = 1; i <= 5; i++) {
+      const ready = await readyJob(mf, call, guest, `op-booth-cap0${i}`);
+      const created = await call('POST', '/v1/booth/submissions', { token: guest, body: submissionBody(ready.jobId) });
+      assert.equal(created.status, 201, `submission ${i}`);
+    }
+    const extraReady = await readyJob(mf, call, guest, 'op-booth-cap06');
+    const extra = await call('POST', '/v1/booth/submissions', { token: guest, body: submissionBody(extraReady.jobId) });
+    assert.equal(extra.status, 429);
+    assert.equal(extra.body.error.code, 'rate_limited');
+    const second = await readyJob(mf, call, other, 'op-booth-cap07');
+    const allowed = await call('POST', '/v1/booth/submissions', { token: other, body: submissionBody(second.jobId) });
+    assert.equal(allowed.status, 201);
+  });
+
+  await withApp({ BOOTH_SUBMISSIONS_PER_IP_HOUR: '1', BOOTH_SUBMISSIONS_PER_HOUR: '10' }, async (mf, call) => {
+    const guest = (await mintGuest(call, fromIp('203.0.113.30'))).body.guest.token;
+    const first = await readyJob(mf, call, guest, 'op-booth-ip001');
+    assert.equal((await call('POST', '/v1/booth/submissions', {
+      token: guest,
+      headers: fromIp('203.0.113.30'),
+      body: submissionBody(first.jobId),
+    })).status, 201);
+    const second = await readyJob(mf, call, guest, 'op-booth-ip002');
+    const blocked = await call('POST', '/v1/booth/submissions', {
+      token: guest,
+      headers: fromIp('203.0.113.30'),
+      body: submissionBody(second.jobId),
+    });
+    assert.equal(blocked.status, 429);
+    const moved = await call('POST', '/v1/booth/submissions', {
+      token: guest,
+      headers: fromIp('203.0.113.31'),
+      body: submissionBody(second.jobId),
+    });
+    assert.equal(moved.status, 201);
+  });
+
+  await withApp({ BOOTH_CLAIMS_PER_IP_HOUR: '1' }, async (mf, call) => {
+    const guest = (await mintGuest(call)).body.guest.token;
+    const ready = await readyJob(mf, call, guest, 'op-booth-claim1');
+    const created = await call('POST', '/v1/booth/submissions', { token: guest, body: submissionBody(ready.jobId) });
+    const ok = await call('POST', '/v1/booth/claim', {
+      headers: fromIp('203.0.113.40'),
+      body: { receipt: created.body.receipt, claimKey: created.body.claimKey },
+    });
+    assert.equal(ok.status, 200);
+    const limited = await call('POST', '/v1/booth/withdraw', {
+      headers: fromIp('203.0.113.40'),
+      body: { receipt: created.body.receipt, claimKey: created.body.claimKey },
+    });
+    assert.equal(limited.status, 429);
+    assert.equal(limited.body.error.code, 'rate_limited');
+  });
+});
+
+test('guest BLUE is refused before a rate slot when disabled and allowed when unset', async () => {
+  await withApp({
+    AI_GUEST_BLUE: 'false',
+    AI_OPEN_ACCESS: 'true',
+    AI_GUEST_JOBS_PER_HOUR: '1',
+    AI_GUEST_JOBS_PER_OWNER_HOUR: '5',
+    AI_GUEST_ACTIVE_JOBS_PER_OWNER: '4',
+  }, async (mf, call) => {
+    const guest = (await mintGuest(call)).body.guest.token;
+    const up = await upload(call, guest, pdfBytes('blue-off'));
+    assert.equal(up.status, 201);
+    const missing = '55555555-5555-4555-8555-555555555555';
+    const blocked = await call('POST', '/v1/ai/jobs', {
+      token: guest,
+      body: jobBody(missing, { role: 'blue', idempotencyKey: 'op-blue-blocked' }),
+    });
+    assert.equal(blocked.status, 403);
+    assert.equal(blocked.body.error.code, 'guest_blue_disabled');
+    assert.equal(await stubCalls(mf, '/internal/v1/jobs', 'POST'), 0);
+    const red = await call('POST', '/v1/ai/jobs', {
+      token: guest,
+      body: jobBody(up.body.upload.id, { idempotencyKey: 'op-blue-red001' }),
+    });
+    assert.equal(red.status, 202, 'the refused BLUE job did not spend the guest job slot');
+    const unsigned = await call('GET', '/v1/ai/capabilities');
+    const asGuest = await call('GET', '/v1/ai/capabilities', { token: guest });
+    assert.equal(unsigned.body.blueJobs, false);
+    assert.equal(asGuest.body.blueJobs, false);
+    const ada = await register(mf, call, 'blueada');
+    const adaUp = await upload(call, ada.body.token, pdfBytes('blue-ada'));
+    const adaBlue = await call('POST', '/v1/ai/jobs', {
+      token: ada.body.token,
+      body: jobBody(adaUp.body.upload.id, { role: 'blue', idempotencyKey: 'op-blue-ada001' }),
+    });
+    assert.equal(adaBlue.status, 202, 'a password owner can still run BLUE');
+  });
+
+  await withApp({ AI_OPEN_ACCESS: 'true', AI_GUEST_JOBS_PER_OWNER_HOUR: '4', AI_GUEST_ACTIVE_JOBS_PER_OWNER: '2' }, async (mf, call) => {
+    const guest = (await mintGuest(call)).body.guest.token;
+    const up = await upload(call, guest, pdfBytes('blue-on'));
+    const allowed = await call('POST', '/v1/ai/jobs', {
+      token: guest,
+      body: jobBody(up.body.upload.id, { role: 'blue', idempotencyKey: 'op-blue-open001' }),
+    });
+    assert.equal(allowed.status, 202);
+    assert.equal((await call('GET', '/v1/ai/capabilities')).body.blueJobs, true);
+    assert.equal((await call('GET', '/v1/ai/capabilities', { token: guest })).body.blueJobs, true);
+  });
+
+  await withApp({ AI_OPEN_ACCESS: 'false', AI_GUEST_BLUE: 'false' }, async (_mf, call) => {
+    assert.equal((await call('GET', '/v1/ai/capabilities')).body.blueJobs, true);
+  });
+});
+
+test('guest applyOnly jobs use their own bucket only when the env var is set', async () => {
+  const caps = {
+    AI_GUEST_JOBS_PER_HOUR: '1',
+    AI_GUEST_JOBS_PER_OWNER_HOUR: '10',
+    AI_GUEST_ACTIVE_JOBS_PER_OWNER: '10',
+    AI_GUEST_UPLOADS_PER_OWNER_HOUR: '10',
+  };
+  await withApp({ ...caps, AI_GUEST_APPLY_JOBS_PER_HOUR: '2' }, async (mf, call) => {
+    const guest = (await mintGuest(call)).body.guest.token;
+    const up = await upload(call, guest, pdfBytes('apply-split'));
+    const model = await call('POST', '/v1/ai/jobs', {
+      token: guest,
+      body: jobBody(up.body.upload.id, { idempotencyKey: 'op-split-model1' }),
+    });
+    assert.equal(model.status, 202);
+    const modelAgain = await call('POST', '/v1/ai/jobs', {
+      token: guest,
+      body: jobBody(up.body.upload.id, { idempotencyKey: 'op-split-model2' }),
+    });
+    assert.equal(modelAgain.status, 429);
+    const apply1 = await call('POST', '/v1/ai/jobs', { token: guest, body: applyOnlyBody(up.body.upload.id, 'op-split-apply1') });
+    const apply2 = await call('POST', '/v1/ai/jobs', { token: guest, body: applyOnlyBody(up.body.upload.id, 'op-split-apply2') });
+    assert.equal(apply1.status, 202);
+    assert.equal(apply2.status, 202);
+    const apply3 = await call('POST', '/v1/ai/jobs', { token: guest, body: applyOnlyBody(up.body.upload.id, 'op-split-apply3') });
+    assert.equal(apply3.status, 429);
+    const d1 = await mf.getD1Database('DB');
+    const rows = await d1.prepare(
+      `SELECT bucket, count FROM rate_counters WHERE bucket IN ('ai-guest-jobs:all', 'ai-guest-apply-jobs:all')`
+    ).all();
+    const counts = Object.fromEntries(rows.results.map(row => [row.bucket, row.count]));
+    assert.equal(counts['ai-guest-jobs:all'] >= 1, true);
+    assert.equal(counts['ai-guest-apply-jobs:all'] >= 2, true);
+  });
+
+  await withApp(caps, async (mf, call) => {
+    const guest = (await mintGuest(call)).body.guest.token;
+    const up = await upload(call, guest, pdfBytes('apply-shared'));
+    const apply = await call('POST', '/v1/ai/jobs', { token: guest, body: applyOnlyBody(up.body.upload.id, 'op-shared-apply') });
+    assert.equal(apply.status, 202);
+    const model = await call('POST', '/v1/ai/jobs', {
+      token: guest,
+      body: jobBody(up.body.upload.id, { idempotencyKey: 'op-shared-model' }),
+    });
+    assert.equal(model.status, 429, 'unset apply cap keeps one guest job bucket');
+    const d1 = await mf.getD1Database('DB');
+    const separated = await d1.prepare(`SELECT COUNT(*) AS count FROM rate_counters WHERE bucket = 'ai-guest-apply-jobs:all'`).first();
+    assert.equal(Number(separated.count), 0);
+  });
+});
+
+test('operator jobs use operator limits and the opr:booth owner', async () => {
+  await withApp({
+    AI_OPEN_ACCESS: 'false',
+    AI_JOBS_PER_OWNER_HOUR: '20',
+    BOOTH_OPERATOR_ACTIVE_JOBS: '30',
+    AI_ACTIVE_JOBS_PER_OWNER: '3',
+  }, async (mf, call) => {
+    const up = await upload(call, OPERATOR, pdfBytes('operator-batch'));
+    assert.equal(up.status, 201);
+    const d1 = await mf.getD1Database('DB');
+    const owner = await d1.prepare('SELECT owner_id FROM ai_uploads WHERE id = ?1').bind(up.body.upload.id).first();
+    assert.equal(owner.owner_id, 'opr:booth');
+    for (let i = 1; i <= 21; i++) {
+      const created = await call('POST', '/v1/ai/jobs', {
+        token: OPERATOR,
+        body: jobBody(up.body.upload.id, { idempotencyKey: `op-opr-${String(i).padStart(4, '0')}`, role: i === 21 ? 'blue' : 'red' }),
+      });
+      assert.equal(created.status, 202, `operator job ${i}`);
+    }
+    assert.equal(await stubCalls(mf, '/internal/v1/jobs', 'POST'), 21);
+  });
+
+  // An empty secret fails the fso_ pattern, which is the same 401 as an unset binding.
+  await withApp({ BOOTH_OPERATOR_TOKEN: '' }, async (_mf, call) => {
+    const unset = await call('GET', '/v1/booth/admin/submissions', { token: OPERATOR });
+    assert.equal(unset.status, 401);
+    assert.equal(unset.body.error.code, 'unauthorized');
+  });
+});
