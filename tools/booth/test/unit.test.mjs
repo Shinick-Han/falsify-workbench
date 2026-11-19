@@ -7,7 +7,8 @@ import test from 'node:test';
 import { assembleJobBody, buildBlueRequest, configHash, idempotencyKey } from '../lib/blue.mjs';
 import { COMMON_COLUMNS, KEY_COLUMNS, SCORE_COLUMNS } from '../lib/constants.mjs';
 import { drawWinners } from '../lib/draw.mjs';
-import { renderExport } from '../lib/export.mjs';
+import { commonRows, renderExport, scoreRows } from '../lib/export.mjs';
+import { findingPageIndex, findingPageIndexes, findingsFromJob } from '../lib/findings.mjs';
 import { mapVerdict } from '../lib/labels.mjs';
 import { matchEdit, suggestOutcome } from '../lib/score.mjs';
 import { csvCell } from '../lib/text.mjs';
@@ -126,6 +127,43 @@ test('score matches same-page after text, changed numbers, and misses another pa
   assert.equal(suggestOutcome(['caught', 'missed']), 'partial');
   assert.equal(suggestOutcome(['missed', 'missed']), 'missed');
   assert.equal(suggestOutcome(['caught']), 'caught');
+});
+
+const HOSTED_RAGAS = JSON.parse(fs.readFileSync(new URL('./fixtures/hosted-blue-ragas.job.json', import.meta.url), 'utf8'));
+
+test('hosted BLUE findings without pageIndex get pages from segmentId and evidence', () => {
+  const findings = findingsFromJob(HOSTED_RAGAS);
+  assert.equal(findings.length, 2);
+  for (const finding of findings) {
+    assert.equal(finding.pageIndex, undefined);
+    assert.equal(finding.page, undefined);
+    assert.equal(findingPageIndex(finding), 4);
+  }
+  assert.equal(findingPageIndex({ segmentId: 'p12-b3' }), 11);
+  assert.equal(findingPageIndex({ segmentId: 'b3' }), null);
+  assert.equal(findingPageIndex({ pageIndex: 2, segmentId: 'p9-b1' }), 2);
+  assert.deepEqual([...findingPageIndexes({ segmentId: 'p9-b4', evidence: [{ segmentId: 'p5-b16' }, { segmentId: 'p9-b2' }] })].sort(), [4, 8]);
+  const wrapped = findings.map(finding => ({ finding, profile: 'balanced', repeat: 0, model: HOSTED_RAGAS.model, job: HOSTED_RAGAS }));
+  const row = { receipt: 'R1', paper: { id: 'ragas' } };
+  assert.deepEqual(commonRows(row, wrapped).map(item => item['물리 페이지']), ['5', '5']);
+  assert.deepEqual(scoreRows(row, wrapped).map(item => item.location), ['p5', 'p5']);
+});
+
+test('score catches a hosted BLUE finding whose edited number is only in evidence', () => {
+  const findings = findingsFromJob(HOSTED_RAGAS).map(finding => ({ finding, profile: 'balanced', repeat: 0 }));
+  const edit = { pageIndex: 4, before: 'Ragas 0.95 0.78 0.70', after: 'Ragas 0.50 0.78 0.70', defectType: 'number' };
+  // Neither finding quotes the edited row itself; both cite it in evidence[].
+  for (const { finding } of findings) assert.ok(!finding.quote.includes('0.50'));
+  const caught = matchEdit(edit, findings);
+  assert.equal(caught.verdict, 'caught');
+  assert.equal(caught.profile, 'balanced');
+  // The changed number in the rationale alone is a partial.
+  const rationaleOnly = findings.map(({ finding }) => ({ finding: { ...finding, evidence: [] } }));
+  assert.equal(matchEdit(edit, rationaleOnly).verdict, 'partial');
+  // A finding on another page that cites the edited page through evidence still counts.
+  const elsewhere = [{ finding: { ...findings[0].finding, segmentId: 'p9-b2' } }];
+  assert.equal(matchEdit(edit, elsewhere).verdict, 'caught');
+  assert.equal(matchEdit({ ...edit, pageIndex: 3 }, findings).verdict, 'missed');
 });
 
 test('verdict words follow BLUE on the common sheet and score.py on the score sheet', () => {
