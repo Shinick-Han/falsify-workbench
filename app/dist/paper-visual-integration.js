@@ -248,6 +248,25 @@
       const edits=root.FalsifyPaperWorkspace?.getEditSnapshot?.()?.edits;
       return Array.isArray(edits)?edits.filter(e=>e&&e.enabled!==false).length:0;
     }
+    /* Booth with no paper tools keeps 표·그래프·그림 closed. Index still opens it. */
+    function boothVisualClosed(){
+      const cfg=root.FalsifyCloudConfig;
+      if(!(cfg&&cfg.booth&&cfg.booth.enabled===true)) return false;
+      const ai=root.FalsifyHostedAI||root.FalsifyHostedAi;
+      const tools=ai&&ai.paperTools;
+      return !(tools&&tools.enabled===true);
+    }
+    function hideClosedVisual(){
+      if(!boothVisualClosed()) return false;
+      section.hidden=true;
+      syncChainBanner(0,false);
+      return true;
+    }
+    function showVisualSection(){
+      const src=source(),pendingCount=pendingTextEditsCount();
+      section.hidden=!src&&pendingCount===0;
+      syncChainBanner(pendingCount,Boolean(src));
+    }
     function syncChainBanner(pendingCount,hasSource){
       chainBanner.hidden=pendingCount===0;
       host.hidden=pendingCount>0;
@@ -268,8 +287,8 @@
     }
     function refresh(){
       const src=source(),pendingCount=pendingTextEditsCount(),key=src?src.fileHash+':'+src.revision:'pending:'+pendingCount;
-      section.hidden=!src&&pendingCount===0;
-      syncChainBanner(pendingCount,Boolean(src));
+      if(hideClosedVisual()){sync();return;}
+      showVisualSection();
       if(key!==sourceKey){sourceKey=key;prepared=null;recordId=null;recordRevision=0;stagedChanges=[];lastRecordHash=null;fullRecord=null;recordButton.hidden=true;editor.clear?.();enrichment?.clear?.();say('');if(src)void editor.refresh?.();}
       sync();
     }
@@ -280,7 +299,13 @@
       const editsList=doc.getElementById('paper-edits');
       if(editsList)new MutationObserver(refresh).observe(editsList,{childList:true,subtree:true});
     }
-    function resetPrepared(){prepared=null;sync();if(source()&&!editor.snapshot?.()?.paperId)void editor.refresh?.();}
+    function resetPrepared(){
+      prepared=null;
+      if(hideClosedVisual()){sync();return;}
+      showVisualSection();
+      sync();
+      if(source()&&!editor.snapshot?.()?.paperId)void editor.refresh?.();
+    }
     doc.addEventListener('falsify:local-bridge',resetPrepared);
     doc.addEventListener('falsify:hosted-paper',resetPrepared);
     doc.addEventListener('falsify:document-state',event=>{const value=!!event.detail?.busy;if(redBusy!==value){redBusy=value;sync();}});

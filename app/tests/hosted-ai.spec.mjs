@@ -1506,6 +1506,14 @@ test('open mode explains closed access, a bad link, and Retry-After',async()=>{
   await until(()=>/12초 뒤에 다시 시도하세요/.test(limited.text('hosted-ai-error')),'retry after');
   await new Promise(resolve=>setTimeout(resolve,40));
   assert.equal(limited.calls.filter(call=>call.path==='/v1/ai/jobs').length,1);
+
+  const operator=openEntry(makeRouter({
+    jobsPost:()=>({status:403,body:{error:{code:'model_jobs_operator_only',retryable:false}}})
+  }),guestProvider([GUEST_A]));
+  await prepareOpenRun(operator);
+  operator.$('hosted-ai-run').click();
+  await until(()=>/AI 검증을 실행하지 않습니다/.test(operator.text('hosted-ai-error')),'operator only model jobs');
+  assert.equal(operator.text('hosted-ai-error').includes('model_jobs_operator_only'),false);
 });
 
 test('a failed guest session shows the open-access error and no login form',async()=>{

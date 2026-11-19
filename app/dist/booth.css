@@ -1,0 +1,50 @@
+/* Booth submission panel. Airport tokens only: yellow sign, ink type, flat surface.
+   Laid out for one hand at 360–430px. Receipt and claim key stay readable at arm's length. */
+.booth{margin:0 0 20px;padding:16px;background:var(--paper);border:1px solid var(--line);border-top:5px solid var(--ink);border-radius:var(--radius);min-width:0}
+.booth-head{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-start;margin-bottom:8px}
+.booth-head .step-code{display:grid;place-items:center;width:36px;height:36px;flex-shrink:0;background:var(--ink);color:var(--paper);border-radius:4px;font-weight:800}
+.booth h2,.booth h3{margin:0 0 6px;letter-spacing:-.01em}
+.booth p{margin:6px 0}
+.booth .muted{color:var(--muted);font-size:13px;line-height:1.5;overflow-wrap:anywhere}
+.booth-announce{padding:8px 10px;background:var(--yellow);color:var(--ink);border:1px solid var(--ink);border-radius:4px;font-weight:700}
+.booth label{display:block;margin:12px 0 0;font-size:13px;font-weight:700}
+.booth label>input,.booth label>select,.booth label>textarea{display:block;margin-top:6px;font-weight:400}
+.booth input,.booth select,.booth textarea{width:100%;min-height:48px;padding:10px 12px;font-size:16px;background:var(--paper);color:var(--ink);border:1px solid #9aa3aa;border-radius:var(--radius)}
+.booth textarea{min-height:96px;resize:vertical;font-family:var(--font)}
+.booth .button,.booth button{min-height:48px;padding:12px 16px;font-size:16px}
+.booth .button-row{display:flex;flex-direction:column;gap:8px;margin:12px 0}
+.booth .button-row .button,.booth .button-row a.button{width:100%;text-align:center;text-decoration:none}
+.booth-card{margin:10px 0;padding:12px;background:var(--surface);border:1px solid var(--line);border-radius:4px;min-width:0}
+.booth-page{font-weight:800}
+.booth-diff{display:grid;gap:6px;margin:8px 0}
+.booth-diff p{display:grid;gap:4px;margin:0}
+.booth-diff-label{font-size:12px;font-weight:800;color:var(--muted)}
+.booth-diff code{display:block;padding:8px;background:var(--paper);border:1px solid var(--line);border-radius:4px;font-size:14px;line-height:1.45;white-space:pre-wrap;overflow-wrap:anywhere}
+.booth-choice{display:flex;align-items:center;gap:10px;min-height:48px;margin:4px 0;font-weight:600}
+.booth-choice input{width:22px;height:22px;min-height:22px;margin:0}
+.booth .check-row{display:flex;gap:10px;align-items:flex-start;min-height:48px;font-weight:400}
+.booth .check-row input{width:22px;height:22px;min-height:22px;margin-top:2px;flex-shrink:0}
+.booth-receipt{margin-top:16px;padding:14px;background:var(--yellow);color:var(--ink);border:3px solid var(--ink);border-radius:4px}
+.booth-kicker{margin:0;font-size:13px;font-weight:800;letter-spacing:.04em}
+.booth-key{margin:4px 0 12px;padding:8px 10px;background:var(--paper);color:var(--ink);border:2px solid var(--ink);border-radius:4px;font-size:clamp(28px,9vw,44px);font-weight:800;letter-spacing:.06em;line-height:1.15;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.booth-status-line{font-size:18px;font-weight:800}
+.booth fieldset{margin:14px 0;padding:8px 12px 12px;border:1px solid var(--line);border-radius:4px}
+.booth legend{padding:0 6px;font-weight:800}
+@media(min-width:480px){
+.booth{padding:18px 20px}
+.booth .button-row{flex-direction:row;flex-wrap:wrap}
+.booth .button-row .button,.booth .button-row a.button{width:auto}
+.booth-diff p{grid-template-columns:64px minmax(0,1fr);align-items:start}
+}
+/* Event page only. Phone overrides for the audit; index.html does not load this file. */
+@media(max-width:700px){
+.sign-action{min-height:44px}
+.sign-action .icon-square,.icon-square{width:44px;height:44px}
+.button,.paper-direct-controls .button{min-height:44px}
+#reset{width:44px;height:44px;min-width:44px;min-height:44px}
+.hosted-ai-artifact>button,.hosted-ai-candidate-head,.paper-paragraph-list summary,.paper-paragraph-button{min-height:44px}
+#hosted-ai-result-counts,#hosted-ai-file-status,#hosted-ai-edited-note,#hosted-ai-status,#hosted-ai-apply-status,#paper-output-hash,.booth .form-feedback,.form-feedback{overflow-wrap:anywhere;min-width:0}
+.hosted-ai-diff-label,.hosted-ai-candidates h4,.hosted-ai-candidate-head small,.hosted-ai-candidate details summary,.hosted-ai-item-status,.hosted-ai-item.muted,.hosted-ai-item>span.muted,.check-row small,#paper-name,#location-name,.location{font-size:12px}
+.page-foot,.text-link,.status-label,.compact>span,th,td,.connection-plan li strong,.connection-plan li span,.brand-sub,.nav-code{font-size:12px}
+.paper-check-details summary{min-height:44px}
+}
