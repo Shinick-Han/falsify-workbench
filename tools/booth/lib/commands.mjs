@@ -161,13 +161,22 @@ async function archiveSubmission(io, client, dir, row) {
   const meta = path.join(folder, 'submission.json');
   const previous = readJsonOptional(meta);
   const previousHash = fs.existsSync(hashFile) ? fs.readFileSync(hashFile, 'utf8').trim() : '';
-  if (previous && previous.updatedAt === row.updatedAt && previousHash && fs.existsSync(pdf) && fileSha256(pdf) === previousHash) {
+  if (
+    previous
+    && previous.updatedAt === row.updatedAt
+    && previous.pdfSha256 === row.pdfSha256
+    && previous.pdfBytes === row.pdfBytes
+    && previous.sourceSha256 === row.sourceSha256
+    && previousHash === row.pdfSha256
+    && fs.existsSync(pdf)
+    && fileSha256(pdf) === previousHash
+  ) {
     progress(io, `pull ${row.receipt} unchanged`);
     return 'skipped';
   }
-  let bytes;
+  let downloaded;
   try {
-    bytes = await client.bytes(`/v1/booth/admin/submissions/${encodeURIComponent(row.receipt)}/pdf`);
+    downloaded = await client.file(`/v1/booth/admin/submissions/${encodeURIComponent(row.receipt)}/pdf`);
   } catch (error) {
     if (error instanceof BoothError && error.code === 'withdrawn') return forgetWithdrawn(io, dir, row);
     if (error instanceof BoothError && error.code === 'artifact_expired' && fs.existsSync(pdf)) {
@@ -177,12 +186,39 @@ async function archiveSubmission(io, client, dir, row) {
     }
     throw error;
   }
-  const hash = sha256Hex(bytes);
+  const bytes = downloaded.bytes;
+  const hash = verifiedPdf(row, bytes, downloaded.headers);
   writeAtomic(pdf, bytes);
   writeAtomic(hashFile, `${hash}\n`);
   writeJson(meta, row);
   progress(io, `pull ${row.receipt} sha256=${hash} bytes=${bytes.length}`);
   return 'saved';
+}
+
+function verifiedPdf(row, bytes, headers) {
+  if (typeof row.pdfSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(row.pdfSha256)) {
+    throw new BoothError('booth_api', `${row.receipt} pdfSha256 is missing`, { exitCode: 2 });
+  }
+  if (!Number.isSafeInteger(row.pdfBytes) || row.pdfBytes < 0) {
+    throw new BoothError('booth_api', `${row.receipt} pdfBytes is missing`, { exitCode: 2 });
+  }
+  const hash = sha256Hex(bytes);
+  const header = String(headers.get('x-falsify-pdf-sha256') || '').trim().toLowerCase();
+  if (hash !== row.pdfSha256 || header !== row.pdfSha256 || bytes.length !== row.pdfBytes) {
+    throw new BoothError('pdf_mismatch', `${row.receipt} PDF does not match pdfSha256`);
+  }
+  return hash;
+}
+
+function submissionPdfSha256(dir, row) {
+  if (typeof row.pdfSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(row.pdfSha256)) {
+    throw new BoothError('booth_local', `${row.receipt} is missing pdfSha256; pull again`);
+  }
+  const actual = fileSha256(pdfPath(dir, row.receipt));
+  if (actual !== row.pdfSha256) {
+    throw new BoothError('pdf_mismatch', `${row.receipt} local PDF does not match pdfSha256`);
+  }
+  return row.pdfSha256;
 }
 
 export async function blue(ctx) {
@@ -224,13 +260,12 @@ export async function blue(ctx) {
 }
 
 function blueKey(dir, task) {
-  const file = pdfPath(dir, task.row.receipt);
   return idempotencyKey({
     receipt: task.row.receipt,
     profileName: task.profile.name,
     repeatIndex: task.repeat,
     configHash: task.hash,
-    pdfSha256: fileSha256(file),
+    pdfSha256: submissionPdfSha256(dir, task.row),
   });
 }
 

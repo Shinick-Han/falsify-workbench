@@ -123,7 +123,7 @@ export function configHash(profile) {
   return sha256Hex(stableStringify(profileFingerprint(profile)));
 }
 
-// Same receipt, profile, repeat, settings and edited PDF always yield the same server key.
+// Same receipt, profile, repeat, settings and admin pdfSha256 always yield the same server key.
 export function idempotencyKey({ receipt, profileName, repeatIndex, configHash: hash, pdfSha256 }) {
   if (typeof pdfSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(pdfSha256)) {
     throw new BoothError('booth_config', 'pdf sha256 shape');
