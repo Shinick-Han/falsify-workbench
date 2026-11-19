@@ -668,6 +668,23 @@ async function discardAttempt(db, id) {
   ]);
 }
 
+// Test-only. The handler publishes `waiting`, then blocks until the test sets the same key to `go`.
+async function holdTestGate(db, env, flag) {
+  if (env?.[flag] !== '1') return;
+  const at = nowIso();
+  await db.prepare(
+    `INSERT INTO booth_settings (key, value, updated_at) VALUES (?1, 'waiting', ?2)
+     ON CONFLICT (key) DO UPDATE SET value = 'waiting', updated_at = excluded.updated_at`
+  ).bind(flag, at).run();
+  const started = Date.now();
+  while (Date.now() - started < 8000) {
+    const row = await db.prepare('SELECT value FROM booth_settings WHERE key = ?1').bind(flag).first();
+    if (row?.value === 'go') return;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  boothFail(500, 'internal_error');
+}
+
 // A missed WHERE leaves no row and, because each chunk insert requires that row, no file chunks.
 async function explainMiss(db, fields, limits) {
   const owned = await db.prepare(
@@ -716,7 +733,11 @@ async function insertSubmission(db, env, fields, limits) {
     ];
     try {
       const results = await db.batch(statements);
-      if (Number(results?.[0]?.meta?.changes) !== 1) {
+      const allLanded = Array.isArray(results)
+        && results.length === statements.length
+        && results.every(item => Number(item?.meta?.changes) === 1);
+      if (!allLanded) {
+        await discardAttempt(db, fields.id);
         await explainMiss(db, fields, limits);
         continue;
       }
@@ -995,9 +1016,8 @@ async function patchAdmin(ctx) {
   const patch = parsePatch(await readJsonBody(ctx.request));
   const db = ctx.deps.getDb();
   const row = await adminRow(db, ctx.match.params.receipt);
-  if (row.status === 'withdrawn' && Object.keys(patch).some(key => key !== 'operatorNote')) {
-    boothFail(409, 'withdrawn');
-  }
+  const noteOnly = Object.keys(patch).every(key => key === 'operatorNote');
+  if (row.status === 'withdrawn' && !noteOnly) boothFail(409, 'withdrawn');
   const sets = [];
   const binds = [];
   const set = (column, value) => {
@@ -1023,7 +1043,14 @@ async function patchAdmin(ctx) {
     binds.push(nowIso());
     sets.push(`updated_at = ?${binds.length}`);
     binds.push(row.id);
-    await db.prepare(`UPDATE booth_submissions SET ${sets.join(', ')} WHERE id = ?${binds.length}`).bind(...binds).run();
+    if (!noteOnly) await holdTestGate(db, ctx.env, 'BOOTH_TEST_PATCH_GATE');
+    const where = noteOnly
+      ? `id = ?${binds.length}`
+      : `id = ?${binds.length} AND status <> 'withdrawn'`;
+    const updated = await db.prepare(
+      `UPDATE booth_submissions SET ${sets.join(', ')} WHERE ${where}`
+    ).bind(...binds).run();
+    if (!noteOnly && Number(updated?.meta?.changes) !== 1) boothFail(409, 'withdrawn');
   }
   return json(200, adminView(await adminRow(db, row.receipt)));
 }
@@ -1060,25 +1087,31 @@ async function getAdminPdf(ctx) {
   for (let i = 0; i < idxs.length; i++) {
     if (Number(idxs[i].idx) !== i) boothFail(500, 'internal_error');
   }
+  await holdTestGate(db, ctx.env, 'BOOTH_TEST_PDF_GATE');
   // A plain ReadableStream drops Content-Length. FixedLengthStream keeps pdf_bytes on the response
-  // while the body still reads one idx row at a time.
+  // while the body still reads one idx row at a time. Each read is joined to a live submission.
   const fixed = new FixedLengthStream(pdfBytes);
   const writer = fixed.writable.getWriter();
+  const stop = async () => {
+    try { await writer.abort(); } catch { /* the client already stopped reading */ }
+  };
   const pump = (async () => {
     try {
       for (let next = 0; next < expected; next++) {
         const part = await db.prepare(
-          'SELECT data FROM booth_files WHERE submission_id = ?1 AND idx = ?2'
+          `SELECT f.data AS data FROM booth_files AS f
+           JOIN booth_submissions AS s ON s.id = f.submission_id
+           WHERE f.submission_id = ?1 AND f.idx = ?2 AND s.status <> 'withdrawn'`
         ).bind(row.id, next).first();
-        if (!part) throw new Error('missing pdf chunk');
+        if (!part) return stop();
         const bytes = blobBytes(part.data);
         const want = next === expected - 1 ? pdfBytes - next * PDF_CHUNK_BYTES : PDF_CHUNK_BYTES;
-        if (bytes.byteLength !== want) throw new Error('pdf chunk length');
+        if (bytes.byteLength !== want) return stop();
         await writer.write(bytes);
       }
       await writer.close();
-    } catch (error) {
-      try { await writer.abort(error); } catch { /* the client already stopped reading */ }
+    } catch {
+      await stop();
     }
   })();
   pump.catch(() => {});
