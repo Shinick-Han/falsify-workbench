@@ -5,6 +5,8 @@
   const views={workbench:'논문 실험 / RED',blue:'논문 실험 / BLUE',review:'검수',results:'결과 기록',agents:'Harness'};
   const routes={workbench:'red',blue:'blue',review:'review',results:'results',agents:'harness'};
   const fromHash=hash=>Object.keys(routes).find(key=>'#'+routes[key]===hash)||null;
+  /* A handout QR returns to event.html#booth or #booth-result. Those are not app views. */
+  function keepBoothHash(hash){return hash==='#booth'||hash==='#booth-result';}
   let view=fromHash(location.hash)||'workbench',documentProgress=null,blueProgress=null,hostedProgress=null,flapTimer;
   let importEpoch=0,importController=null,importedDocument=null,importedFile=null;
 
@@ -17,7 +19,7 @@
     document.dispatchEvent(new CustomEvent('falsify:view-change',{detail:{view:next}}));
     if(changed){scrollTo(0,0);$('#main').focus({preventScroll:true});}
   }
-  function followLocation(){const next=fromHash(location.hash);if(next&&next!==view)navigate(next,false);}
+  function followLocation(){if(keepBoothHash(location.hash))return;const next=fromHash(location.hash);if(next&&next!==view)navigate(next,false);}
   function hostedBlueSign(){
     const h=hostedProgress;if(!h?.operate||h.role!=='blue')return null;
     const detail=h.fileName||blueProgress?.name||'';
@@ -40,11 +42,18 @@
     if(view==='blue')return blueSignSpec();
     return redSignSpec();
   }
+  /* FalsifyHostedAi.capabilities() is null until the panel announces. Only blueJobs === false leaves BLUE. */
+  function editedPdfSign(detail){
+    const read=globalThis.FalsifyHostedAi&&globalThis.FalsifyHostedAi.capabilities;
+    const caps=typeof read==='function'?read():null;
+    if(caps&&caps.blueJobs===false)return {gate:'R1',title:'수정본 PDF가 준비됐습니다',detail,label:'부스에 제출하기',action:()=>focusTarget($('#booth'))};
+    return {gate:'R1',title:'수정본 PDF가 준비됐습니다',detail,label:'BLUE로 검증하기',action:()=>focusTarget($('#hosted-ai-blue-handoff'))};
+  }
   function hostedRedSign(){
     const h=hostedProgress;if(!h?.operate||h.role==='blue')return null;
     const detail=h.fileName||documentProgress?.name||'';
     if(h.busy)return {gate:'R1',title:h.jobKind==='apply'?'선택한 변경을 PDF에 적용 중입니다':'RED 웹 검토 중입니다',detail,label:'진행 상태 보기',action:()=>focusTarget($('#hosted-ai-progress'))};
-    if(h.hasEditedPdf)return {gate:'R1',title:'수정본 PDF가 준비됐습니다',detail,label:'BLUE로 검증하기',action:()=>focusTarget($('#hosted-ai-blue-handoff'))};
+    if(h.hasEditedPdf)return editedPdfSign(detail);
     if(h.candidateCount>0)return {gate:'R1',title:'후보를 선택하고 PDF에 적용하세요',detail:(detail?detail+' · ':'')+h.candidateCount+'개 후보'+(h.selectedCount?' · '+h.selectedCount+'개 선택':''),label:'후보 선택으로',action:()=>focusTarget($('#hosted-ai-selection input')||$('#hosted-ai-apply'))};
     if(h.hasFile&&!documentProgress?.busy&&!documentProgress?.count&&!documentProgress?.hasResult)return {gate:'R1',title:'원문을 직접 고치거나 웹 AI 검토를 실행하세요',detail,label:'웹 AI 실행으로',action:()=>focusTarget($('#hosted-ai-preset-default')||$('#hosted-ai-prompt'))};
     return null;
@@ -156,6 +165,6 @@
   });
   $('.brand').addEventListener('click',event=>{event.preventDefault();navigate('workbench');});
   $('.skip-link').addEventListener('click',event=>{event.preventDefault();$('#main').focus();});
-  if(!fromHash(location.hash))history.replaceState({view},'','#'+routes[view]);
+  if(!fromHash(location.hash)&&!keepBoothHash(location.hash))history.replaceState({view},'','#'+routes[view]);
   render();
 })();

@@ -17,6 +17,15 @@
     const api=root.FalsifyPaperVisualIntegration;
     return !!(api&&typeof api.paperUsesHosted==='function'&&api.paperUsesHosted());
   }
+  /* Booth with no paper tools must not ask for a PC. Index still uses the PC line. */
+  function boothVisualOff(){
+    const cfg=root.FalsifyCloudConfig;
+    if(!(cfg&&cfg.booth&&cfg.booth.enabled===true)) return false;
+    const ai=root.FalsifyHostedAI||root.FalsifyHostedAi;
+    const tools=ai&&ai.paperTools;
+    return !(tools&&tools.enabled===true);
+  }
+  const BOOTH_VISUAL_NOTE='행사 화면에서는 본문 글자만 고칠 수 있어요. 표 안 숫자는 같은 쪽 문장 속 숫자로 바꿔 보세요.';
   const MAX_PDF=25*1024*1024;
   const MAX_IMAGE=4*1024*1024;
   const MAX_PIXELS=4000000;
@@ -30,7 +39,7 @@
     hash:'원본 파일이 바뀌어 열지 않았습니다.',
     notPdf:'PDF가 아니라 열지 않았습니다.',
     limit:'25 MiB를 넘는 PDF는 열지 않습니다.',
-    get unavailable(){return hostedPaperMode()?HOSTED_OFFLINE:'PC 연결 후 다시 시도하세요.';},
+    get unavailable(){return boothVisualOff()?BOOTH_VISUAL_NOTE:(hostedPaperMode()?HOSTED_OFFLINE:'PC 연결 후 다시 시도하세요.');},
     failed:'불러오지 못했습니다.',
     expired:'준비한 표·그림이 만료되었습니다. 다시 불러오세요.',
     busy:'다른 작업이 끝난 뒤 적용하세요.',
@@ -713,7 +722,7 @@
     }
     function paintConnect(hasPaper){
       const hosted=hostedPaperMode();
-      connect.hidden=!!hasPaper||hosted;
+      connect.hidden=!!hasPaper||hosted||boothVisualOff();
       connect.textContent=hosted?'웹 실행 다시 시도':'내 PC 연결';
     }
     function watchConnect(){
