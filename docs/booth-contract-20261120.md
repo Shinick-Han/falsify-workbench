@@ -264,3 +264,34 @@ Limits via `deps.rateLimit`: `PAPER_SEARCH_PER_OWNER_HOUR` 60, `PAPER_SEARCH_PER
 - OPS: `node --test tools/booth/test/` green against a local fake API (node:http), including the
   "nothing declared reaches BLUE" test.
 - No secrets, real tokens, private papers, PDFs or answer keys committed.
+
+## 10. Round-2 amendments (2026-11-19, from the risk review; binding, supersede earlier text)
+
+**API**
+- R2-1 `AI_GUEST_MODEL_JOBS` (default `true`). `false`: a guest job must be `role:'red'` with `applyOnly:true`; anything else is 403 `guest_model_disabled`, checked at the same point as `guest_blue_disabled` (blue keeps its own code). Capabilities gain `modelJobs` with the same view rule as `blueJobs`.
+- R2-2 Capabilities called with a valid `fso_` bearer report `blueJobs: true` and `modelJobs: true`.
+- R2-3 `paper` becomes **required** in `POST /v1/booth/submissions`: `source` must be `arxiv` or `mission`, and `license` must be one of `cc-by`, `cc-by-<n.n>`, `cc-by-sa`, `cc-by-sa-<n.n>`, `cc0`, `cc0-1.0`, `public-domain`; otherwise 400 `paper_not_allowed`.
+- R2-4 Withdraw is a tombstone: set `declared` to `[]`, and `nickname`, `paper`, `public_note`, `prize_message`, `ai_summary`, `outcome`, `published_at` to NULL; keep id, seq, receipt, course, job/artifact ids, consent version, timestamps, `operator_note`. The admin PDF route answers 404 `withdrawn` for such rows. Withdrawn rows do not count toward `BOOTH_SUBMISSIONS_PER_OWNER`.
+- R2-5 Global claim/withdraw cap `BOOTH_CLAIMS_PER_HOUR` (default 2000) in addition to the per-IP one. Seq allocation retries up to 5 times.
+- R2-6 Event env values (`env.event.vars`) become: `AI_GUESTS_PER_IP_HOUR: "600"`, `AI_GUESTS_PER_HOUR: "800"`, `AI_GUEST_UPLOADS_PER_HOUR: "400"`, `AI_GUEST_JOBS_PER_OWNER_HOUR: "20"`, `AI_GUEST_APPLY_JOBS_PER_HOUR: "600"`, `AI_GUEST_BLUE: "false"`, `AI_GUEST_MODEL_JOBS: "false"`, `BOOTH_ENABLED: "true"`, `BOOTH_CONSENT_VERSION: "2026-11-22.v1"`, `BOOTH_SUBMISSIONS_PER_IP_HOUR: "400"`, `BOOTH_CLAIMS_PER_IP_HOUR: "2000"`, `BOOTH_CLAIMS_PER_HOUR: "5000"`, `BOOTH_OPERATOR_ACTIVE_JOBS: "2"`, `PAPER_SEARCH_ENABLED: "true"`, `PAPER_SEARCH_PER_IP_HOUR: "2000"`, `PAPER_PDF_PER_IP_HOUR: "600"`.
+
+**SEARCH**
+- R2-7 Cache the PDF bytes of an *allowed* arXiv id in the cache for 24 h (key by normalized id; never cache denied ids' bytes); the browser response stays `no-store`. The 413 size rule still applies to cached bytes.
+- R2-8 Send `OPENALEX_API_KEY` as `Authorization: Bearer <key>`, never in the URL.
+
+**FE**
+- R2-9 Hide the hosted model RED run (and any other hosted model control) when `capabilities.modelJobs === false`; apply stays available.
+- R2-10 The booth submit panel always sends `paper` (mission or search pick). If the current document was not opened through the booth picker, the panel says "미션이나 검색에서 논문을 골라 시작해 주세요" and does not submit.
+- R2-11 `app/dist/open-access.js` joins the FE scope: its intro sentence must no longer promise guest BLUE runs when `blueJobs === false`.
+- R2-12 Consent copy (same version `2026-11-22.v1`, nothing has shipped yet):
+  "제출한 수정본 PDF와 결함 설명(쪽·유형·이유)은 가짜연구소 Falsify 스터디가 저장하고 운영자가 읽습니다. 마감 후 AI 검증에는 수정본 PDF만 모델 제공자(Anthropic 또는 OpenAI)에 보내며, 결함 설명은 AI에 보내지 않습니다. 이름·연락처는 받지 않으니 이유란에도 적지 마세요. 원 논문은 CC BY·CC BY-SA·CC0 공개 논문이며, 수정본을 스터디 밖에 공개할 때는 저자·arXiv 번호·라이선스와 수정 사실을 밝힙니다. 결과와 경품 안내는 접수번호와 확인키로만 확인할 수 있습니다. 확인키로 언제든 철회할 수 있고, 철회하면 설명과 결과는 즉시 삭제되며 수정본 PDF는 운영자 보관본에서 지우고 서버 사본은 7일 안에 자동 삭제됩니다. 보관 자료는 스터디 종료 후 삭제합니다."
+
+**OPS**
+- R2-13 CSV formula-injection guard: prefix `'` when a cell starts with `=`, `+`, `-`, `@`, tab or CR (all formats).
+- R2-14 The BLUE idempotency key also covers the edited PDF sha256.
+- R2-15 `draw` defaults to outcome `missed` (prizes go to defects the AI missed).
+- R2-16 `blue` refuses to start while `submissionsOpen` is true unless `--allow-open` is given (visitors and BLUE share runtime threads).
+- R2-17 `pull` deletes local files of withdrawn submissions (keeps a tombstone line in a local log).
+- R2-18 `missions warm`: GET `/v1/papers/pdf?id=...` for every configured mission with the operator token (verifies licence and warms the PDF cache); report sizes and failures.
+
+**Verdict vocabulary (all exports)**: Workbench BLUE `verdictLabel` uses `아님` = the passage is wrong (defect found), `확인필요` = suspicious, needs verification, `맞음` = passage is fine. The common CSV column 판정(아님/확인필요) carries these words as-is.
