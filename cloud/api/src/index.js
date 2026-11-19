@@ -10,6 +10,7 @@ import { hostingEnabled } from './ai-identity.mjs';
 import { aiFetch } from './ai-runtime-client.mjs';
 import { handleAiRequest, matchAi } from './ai-gateway.mjs';
 import { handleBoothRequest, matchBooth } from './booth.mjs';
+import { handlePaperSearchRequest, matchPaperSearch } from './paper-search.mjs';
 
 const SCHEMA = 'falsify.cloud.v1';
 const MAX_BODY_BYTES = 256 * 1024;
@@ -719,19 +720,22 @@ async function dispatchApiRequest(request, env, url, matched, config) {
   return methods[request.method]({ request, env, url, id: matched.id, settings: config });
 }
 
-// Booth, AI, Confluence and legacy records routes stay distinct; none of them fall through.
+// Booth, paper search, AI, Confluence and legacy records routes stay distinct; none of them fall through.
 function matchRequest(pathname) {
+  const none = { booth: null, papers: null, ai: null, confluence: null, matched: null };
   const booth = matchBooth(pathname);
-  if (booth) return { booth, ai: null, confluence: null, matched: null };
+  if (booth) return { ...none, booth };
+  const papers = matchPaperSearch(pathname);
+  if (papers) return { ...none, papers };
   const ai = matchAi(pathname);
-  if (ai) return { booth: null, ai, confluence: null, matched: null };
+  if (ai) return { ...none, ai };
   const confluence = matchConfluence(pathname);
-  if (confluence) return { booth: null, ai: null, confluence, matched: null };
-  return { booth: null, ai: null, confluence: null, matched: route(pathname) };
+  if (confluence) return { ...none, confluence };
+  return { ...none, matched: route(pathname) };
 }
 
-function logRouteFor({ booth, ai, confluence, matched }) {
-  return booth?.template ?? ai?.template ?? confluence?.template ?? matched?.template ?? 'unmatched';
+function logRouteFor({ booth, papers, ai, confluence, matched }) {
+  return booth?.template ?? papers?.template ?? ai?.template ?? confluence?.template ?? matched?.template ?? 'unmatched';
 }
 
 // The OAuth callback is a top-level navigation from Atlassian, not a frontend XHR.
@@ -760,6 +764,18 @@ async function dispatchRequest(request, env, url, matched, config) {
       match: matched.booth,
       fetchImpl,
       deps: { ...aiDependencies(request, env), fetchImpl },
+    });
+  }
+  if (matched.papers) {
+    // Paper search reaches OpenAlex and arXiv on the public internet, never the runtime binding.
+    const fetchImpl = budgetedFetch((target, init) => globalThis.fetch(target, init), 25000);
+    return handlePaperSearchRequest({
+      request,
+      env,
+      url,
+      match: matched.papers,
+      fetchImpl,
+      deps: aiDependencies(request, env),
     });
   }
   if (matched.ai) {

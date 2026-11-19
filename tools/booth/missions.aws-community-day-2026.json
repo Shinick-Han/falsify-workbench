@@ -1,0 +1,38 @@
+[
+  {
+    "id": "ragas",
+    "title": "Ragas: Automated Evaluation of Retrieval Augmented Generation",
+    "source": "arxiv",
+    "paperId": "2309.15217",
+    "license": "cc-by-4.0",
+    "course": "quick",
+    "hint": "8쪽. 표의 점수나 결론 문장 하나를 그럴듯하게 바꿔 보세요."
+  },
+  {
+    "id": "embedding-similarity",
+    "title": "Beyond Benchmarks: Evaluating Embedding Model Similarity for Retrieval Augmented Generation Systems",
+    "source": "arxiv",
+    "paperId": "2407.08275",
+    "license": "cc-by-4.0",
+    "course": "quick",
+    "hint": "9쪽. 유사도 수치나 그래프 해석을 살짝 비틀어 보세요."
+  },
+  {
+    "id": "serverless-llm-cold-start",
+    "title": "Fast Serverless LLM Cold Starts by Sharing and Prewarming Startup Work",
+    "source": "arxiv",
+    "paperId": "2611.16180",
+    "license": "cc-by-4.0",
+    "course": "deep",
+    "hint": "10쪽. 실험 설정·결과 표·본문 주장 사이의 일관성을 깨 보세요."
+  },
+  {
+    "id": "cold-start-antipatterns",
+    "title": "Cold-Start Anti-Patterns and Refactorings in Serverless Systems: An Empirical Study",
+    "source": "arxiv",
+    "paperId": "2512.16066",
+    "license": "cc-by-4.0",
+    "course": "deep",
+    "hint": "12쪽. 표본 수, 비율, 인용을 정밀하게 조작해 보세요."
+  }
+]
