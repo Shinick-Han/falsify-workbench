@@ -510,6 +510,8 @@ test('operator id, gateway defaults and migration 0006 keep secrets out of the s
   assert.equal(wrangler.includes('BOOTH_OPERATOR_TOKEN_BUDGET'), false);
   assert.equal(wrangler.includes('BOOTH_TEST_SEQ_BIAS'), false);
   assert.equal(wrangler.includes('BOOTH_PARSE_TIMING'), false);
+  assert.equal(wrangler.includes('BOOTH_TEST_PATCH_GATE'), false);
+  assert.equal(wrangler.includes('BOOTH_TEST_PDF_GATE'), false);
   assert.equal(/"BOOTH_OPERATOR_TOKEN"\s*:/.test(wrangler), false);
   assert.equal(INTEROP_PDF.length, 109);
   assert.equal(createHash('sha256').update(INTEROP_PDF).digest('hex'), INTEROP_SHA);
@@ -1571,10 +1573,34 @@ test('operator-only model jobs stop before upload lookup and a positive operator
       token: guest,
       body: jobBody(missing, { role: 'blue', idempotencyKey: 'op-order-blue' }),
     });
-    assert.equal(blue.body.error.code, 'guest_blue_disabled');
+    assert.equal(blue.status, 403);
+    assert.equal(blue.body.error.code, 'model_jobs_operator_only');
+    assert.equal(blue.body.error.retryable, false);
     const model = await call('POST', '/v1/ai/jobs', {
       token: guest,
       body: jobBody(missing, { idempotencyKey: 'op-order-red' }),
+    });
+    assert.equal(model.status, 403);
+    assert.equal(model.body.error.code, 'model_jobs_operator_only');
+    assert.equal(model.body.error.retryable, false);
+    assert.equal(await stubCalls(mf, '/internal/v1/jobs', 'POST'), 0);
+  });
+
+  await withApp({
+    AI_MODEL_JOBS_OPERATOR_ONLY: 'false',
+    AI_GUEST_BLUE: 'false',
+    AI_GUEST_MODEL_JOBS: 'false',
+  }, async (mf, call) => {
+    const guest = (await mintGuest(call)).body.guest.token;
+    const missing = '66666666-6666-4666-8666-666666666666';
+    const blue = await call('POST', '/v1/ai/jobs', {
+      token: guest,
+      body: jobBody(missing, { role: 'blue', idempotencyKey: 'op-off-blue' }),
+    });
+    assert.equal(blue.body.error.code, 'guest_blue_disabled');
+    const model = await call('POST', '/v1/ai/jobs', {
+      token: guest,
+      body: jobBody(missing, { idempotencyKey: 'op-off-red' }),
     });
     assert.equal(model.body.error.code, 'guest_model_disabled');
     assert.equal(await stubCalls(mf, '/internal/v1/jobs', 'POST'), 0);
@@ -1616,6 +1642,7 @@ test('a 16 MiB pdf submit records handler time', async () => {
     assert.equal(created.status, 201, created.text);
     const parseMs = Number(created.headers.get('X-Falsify-Parse-Ms'));
     assert.equal(Number.isFinite(parseMs) && parseMs >= 0, true);
+    assert.equal(parseMs < 5000, true);
     assert.equal(created.headers.get('X-Falsify-Parse-Ms') === null, false);
     console.log(`BOOTH_SUBMIT16_MS ${parseMs.toFixed(3)} BOOTH_SUBMIT16_WALL_MS ${wallMs.toFixed(3)}`);
   });
@@ -1652,5 +1679,90 @@ test('config publishes the visitor pdf cap and the owner cap as integers', async
     assert.equal(config.body.limits.maxPdfBytes, 1048576);
     assert.equal(config.body.limits.maxReason, 500);
     assert.equal(config.body.limits.maxNickname, 24);
+  });
+});
+
+async function waitForGate(d1, key) {
+  const started = Date.now();
+  while (Date.now() - started < 8000) {
+    const row = await d1.prepare('SELECT value FROM booth_settings WHERE key = ?1').bind(key).first();
+    if (row?.value === 'waiting') return;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  throw new Error(`gate ${key} did not start waiting`);
+}
+
+async function releaseGate(d1, key) {
+  await d1.prepare(
+    `INSERT INTO booth_settings (key, value, updated_at) VALUES (?1, 'go', ?2)
+     ON CONFLICT (key) DO UPDATE SET value = 'go', updated_at = excluded.updated_at`
+  ).bind(key, new Date().toISOString()).run();
+}
+
+test('a withdraw between the admin read and the patch leaves the row withdrawn', async () => {
+  await withApp({ BOOTH_TEST_PATCH_GATE: '1' }, async (mf, call) => {
+    const guest = (await mintGuest(call)).body.guest.token;
+    const created = await submitPdf(call, guest, pdfBytes('race-patch'));
+    assert.equal(created.status, 201, created.text);
+    const { receipt, claimKey } = created.body;
+    const d1 = await mf.getD1Database('DB');
+    const pending = call('PATCH', `/v1/booth/admin/submissions/${receipt}`, {
+      token: OPERATOR,
+      body: { status: 'judged', publicNote: 'late', prizeMessage: 'PRIZE', published: true },
+    });
+    await waitForGate(d1, 'BOOTH_TEST_PATCH_GATE');
+    const withdrawn = await call('POST', '/v1/booth/withdraw', { body: { receipt, claimKey } });
+    assert.equal(withdrawn.status, 200);
+    assert.equal(withdrawn.body.status, 'withdrawn');
+    await releaseGate(d1, 'BOOTH_TEST_PATCH_GATE');
+    const patched = await pending;
+    assert.equal(patched.status, 409);
+    assert.equal(patched.body.error.code, 'withdrawn');
+    const row = await d1.prepare(
+      'SELECT status, prize_message, public_note, published_at FROM booth_submissions WHERE receipt = ?1'
+    ).bind(receipt).first();
+    assert.equal(row.status, 'withdrawn');
+    assert.equal(row.prize_message, null);
+    assert.equal(row.public_note, null);
+    assert.equal(row.published_at, null);
+    const files = await d1.prepare('SELECT COUNT(*) AS count FROM booth_files').first();
+    assert.equal(Number(files.count), 0);
+  });
+});
+
+test('admin pdf returns json 500 before streaming and aborts when a chunk disappears', async () => {
+  await withApp({}, async (mf, call) => {
+    const guest = (await mintGuest(call)).body.guest.token;
+    const created = await submitPdf(call, guest, pdfBytes('pdf-missing-early'));
+    assert.equal(created.status, 201, created.text);
+    const d1 = await mf.getD1Database('DB');
+    const row = await d1.prepare('SELECT id FROM booth_submissions WHERE receipt = ?1').bind(created.body.receipt).first();
+    await d1.prepare('DELETE FROM booth_files WHERE submission_id = ?1 AND idx = 0').bind(row.id).run();
+    const early = await call('GET', `/v1/booth/admin/submissions/${created.body.receipt}/pdf`, { token: OPERATOR });
+    assert.equal(early.status, 500);
+    assert.equal(early.body.error.code, 'internal_error');
+    assert.match(early.headers.get('Content-Type'), /application\/json/);
+    assert.equal(early.text.startsWith('%PDF'), false);
+  });
+
+  await withApp({ BOOTH_TEST_PDF_GATE: '1' }, async (mf, call) => {
+    const guest = (await mintGuest(call)).body.guest.token;
+    const original = pdfBytes('pdf-gap-mid');
+    const created = await submitPdf(call, guest, original);
+    assert.equal(created.status, 201, created.text);
+    const d1 = await mf.getD1Database('DB');
+    const row = await d1.prepare('SELECT id FROM booth_submissions WHERE receipt = ?1').bind(created.body.receipt).first();
+    const pending = call('GET', `/v1/booth/admin/submissions/${created.body.receipt}/pdf`, { token: OPERATOR })
+      .then(pdf => ({ ok: true, pdf }), error => ({ ok: false, error }));
+    await waitForGate(d1, 'BOOTH_TEST_PDF_GATE');
+    await d1.prepare('DELETE FROM booth_files WHERE submission_id = ?1 AND idx = 0').bind(row.id).run();
+    await releaseGate(d1, 'BOOTH_TEST_PDF_GATE');
+    const result = await pending;
+    if (result.ok) {
+      const received = Buffer.from(result.pdf.bytes);
+      assert.equal(received.length === original.length && Buffer.compare(received, original) === 0, false);
+    } else {
+      assert.equal(result.error instanceof Error, true);
+    }
   });
 });
