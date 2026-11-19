@@ -10,9 +10,9 @@
 //             differ from what this command would write. Does not write.
 //
 // Reads app/dist/index.html and never modifies it. The event HTML changes only the
-// cloud-config script name, the CSP connect-src origin, a title suffix, and a
-// noindex robots meta. Whatever else index.html contains, including open-access.js,
-// is copied through.
+// cloud-config script name, the CSP connect-src origin, a title suffix, a
+// noindex robots meta, and booth.css/booth.js after hosted-ai.js. Whatever else
+// index.html contains, including open-access.js, is copied through.
 import {readFileSync, writeFileSync} from 'node:fs';
 import {dirname, join, resolve} from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
@@ -22,6 +22,7 @@ const INDEX_REL = 'app/dist/index.html';
 const HTML_REL = 'app/dist/event.html';
 const CONFIG_REL = 'app/dist/cloud-config.event.js';
 const SCRIPT = /<script src="cloud-config\.js\?v=([^"]*)" defer><\/script>/;
+const HOSTED = /<script src="hosted-ai\.js\?v=([^"]*)" defer><\/script>/;
 const CSP = /<meta http-equiv="Content-Security-Policy" content="([^"]*)">/;
 const TITLE = /<title>([^<]*)<\/title>/;
 const ORIGIN = /^https:\/\/[a-z0-9.-]+(?::[1-9][0-9]{0,4})?$/;
@@ -127,14 +128,30 @@ export function eventHtmlFromIndex(indexHtml, origin) {
   const cspTag = csp[0].split(csp[1]).join(policy);
   let html = replaceOnce(indexHtml, script[0], scriptTag);
   html = replaceOnce(html, csp[0], cspTag);
-  return withEventTitle(html, title, newline);
+  html = withEventTitle(html, title, newline);
+  return injectBooth(html, newline);
+}
+
+function injectBooth(html, newline){
+  const found = [...html.matchAll(new RegExp(HOSTED.source, 'g'))];
+  if (found.length === 0) return html;
+  if (found.length !== 1) throw fail('index.html must contain exactly one hosted-ai script', 2);
+  const version = found[0][1];
+  if (!version) throw fail('hosted-ai version is missing', 2);
+  const tag = found[0][0];
+  const extra = [
+    tag,
+    `  <link rel="stylesheet" href="booth.css?v=${version}">`,
+    `  <script src="booth.js?v=${version}" defer></script>`,
+  ].join(newline);
+  return replaceOnce(html, tag, extra);
 }
 
 export function eventConfigSource(origin, newline = '\n') {
   return [
     '// Event page only. The default Pages entry keeps cloud-config.js.',
     '// Public gateway only. Secrets, session keys and paper records never belong in this file.',
-    '// provider stays confluence. hostedAi and openAccess are enabled for this page.',
+    '// provider stays confluence. hostedAi, openAccess and booth are enabled for this page.',
     'globalThis.FalsifyCloudConfig = Object.freeze({',
     `  apiBase: '${origin}',`,
     "  provider: 'confluence',",
@@ -142,7 +159,8 @@ export function eventConfigSource(origin, newline = '\n') {
     '    enabled: true,',
     `    apiBase: '${origin}'`,
     '  }),',
-    '  openAccess: Object.freeze({ enabled: true })',
+    '  openAccess: Object.freeze({ enabled: true }),',
+    '  booth: Object.freeze({ enabled: true })',
     '});',
     '',
   ].join(newline);

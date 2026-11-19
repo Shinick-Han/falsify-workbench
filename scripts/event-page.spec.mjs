@@ -24,9 +24,25 @@ function newlineOf(text) {
   return text.includes('\r\n') ? '\r\n' : '\n';
 }
 
+function stripBoothAssets(text, newline) {
+  for (const pattern of [
+    / {2}<link rel="stylesheet" href="booth\.css\?v=[^"]+">/g,
+    / {2}<script src="booth\.js\?v=[^"]+" defer><\/script>/g,
+  ]) {
+    const found = text.match(pattern) || [];
+    assert.ok(found.length <= 1);
+    if (found.length === 1) {
+      const needle = found[0] + newline;
+      assert.equal(count(text, needle), 1);
+      text = text.replace(needle, '');
+    }
+  }
+  return text;
+}
+
 function revertEventHtml(eventHtml, indexHtml, origin) {
   const nl = newlineOf(indexHtml);
-  let text = eventHtml;
+  let text = stripBoothAssets(eventHtml, nl);
   assert.equal(count(text, 'cloud-config.event.js?v='), 1);
   assert.equal(count(text, 'cloud-config.js?v='), 0);
   text = text.replace('cloud-config.event.js?v=', 'cloud-config.js?v=');
@@ -117,10 +133,26 @@ test('committed event page matches index.html except the four event edits', () =
     provider: 'confluence',
     hostedAi: {enabled: true, apiBase: DEFAULT_EVENT_API_BASE},
     openAccess: {enabled: true},
+    booth: {enabled: true},
   });
   assert.equal(Object.isFrozen(cfg), true);
   assert.equal(Object.isFrozen(cfg.openAccess), true);
   assert.equal(Object.isFrozen(cfg.hostedAi), true);
+  assert.equal(Object.isFrozen(cfg.booth), true);
+  assert.equal(index.includes('booth.js'), false);
+  assert.equal(index.includes('booth.css'), false);
+  const hostedAt = event.indexOf('hosted-ai.js?v=');
+  const boothAt = event.indexOf('booth.js?v=');
+  assert.ok(hostedAt >= 0 && boothAt > hostedAt);
+});
+
+test('event HTML injects booth assets after hosted-ai.js only', () => {
+  const index = fixture('<script src="hosted-ai.js?v=0.2.0-alpha.83" defer></script>\n  ');
+  const planned = planEventFiles(index, DEFAULT_EVENT_API_BASE);
+  assert.match(planned.html, /hosted-ai\.js\?v=0\.2\.0-alpha\.83" defer><\/script>\n {2}<link rel="stylesheet" href="booth\.css\?v=0\.2\.0-alpha\.83">\n {2}<script src="booth\.js\?v=0\.2\.0-alpha\.83" defer><\/script>/);
+  assert.equal(count(index, 'booth.js'), 0);
+  assert.equal(revertEventHtml(planned.html, index, DEFAULT_EVENT_API_BASE), index);
+  assert.match(planned.config, /booth: Object\.freeze\(\{ enabled: true \}\)/);
 });
 
 test('check is read-only and the verify job runs it', () => {
