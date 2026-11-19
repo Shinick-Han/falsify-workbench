@@ -1,0 +1,17 @@
+{
+  "apiBase": "https://event.example.invalid",
+  "blue": {
+    "concurrency": 2,
+    "repeat": 1,
+    "profiles": [
+      {
+        "name": "quick-blind",
+        "model": "claude-sonnet-5-5",
+        "effort": "high",
+        "maxCalls": 8,
+        "useEvidence": true,
+        "promptFile": "prompts/blue-example.txt"
+      }
+    ]
+  }
+}
