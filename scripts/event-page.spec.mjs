@@ -147,9 +147,15 @@ test('committed event page matches index.html except the four event edits', () =
 });
 
 test('event HTML injects booth assets after hosted-ai.js only', () => {
-  const index = fixture('<script src="hosted-ai.js?v=0.2.0-alpha.83" defer></script>\n  ');
+  const version = readFileSync(join(root, 'VERSION'), 'utf8').trim();
+  const index = fixture(`<script src="hosted-ai.js?v=${version}" defer></script>\n  `);
   const planned = planEventFiles(index, DEFAULT_EVENT_API_BASE);
-  assert.match(planned.html, /hosted-ai\.js\?v=0\.2\.0-alpha\.83" defer><\/script>\n {2}<link rel="stylesheet" href="booth\.css\?v=0\.2\.0-alpha\.83">\n {2}<script src="booth\.js\?v=0\.2\.0-alpha\.83" defer><\/script>/);
+  const injected = [
+    `<script src="hosted-ai.js?v=${version}" defer></script>`,
+    `  <link rel="stylesheet" href="booth.css?v=${version}">`,
+    `  <script src="booth.js?v=${version}" defer></script>`,
+  ].join('\n');
+  assert.ok(planned.html.includes(injected));
   assert.equal(count(index, 'booth.js'), 0);
   assert.equal(revertEventHtml(planned.html, index, DEFAULT_EVENT_API_BASE), index);
   assert.match(planned.config, /booth: Object\.freeze\(\{ enabled: true \}\)/);
