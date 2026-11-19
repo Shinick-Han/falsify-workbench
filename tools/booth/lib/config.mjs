@@ -44,6 +44,12 @@ function boundedString(value, label, max) {
   return value;
 }
 
+function copyMessages(raw, live) {
+  for (const key of ['prizeMessage', 'finalPrizeMessage', 'finalCaughtMessage']) {
+    if (raw[key] !== undefined) live[key] = boundedString(raw[key], `live.${key}`, 500);
+  }
+}
+
 function normalizeLive(raw) {
   const live = defaultLive();
   if (raw === undefined) return live;
@@ -57,10 +63,7 @@ function normalizeLive(raw) {
   if (raw.intervalSec !== undefined) live.intervalSec = integer(raw.intervalSec, 'live.intervalSec', 1, 3600);
   if (raw.retries !== undefined) live.retries = integer(raw.retries, 'live.retries', 0, 10);
   if (raw.retryBackoffMs !== undefined) live.retryBackoffMs = integer(raw.retryBackoffMs, 'live.retryBackoffMs', 0, 600000);
-  if (raw.prizeMessage !== undefined) live.prizeMessage = boundedString(raw.prizeMessage, 'live.prizeMessage', 500);
-  for (const key of ['finalPrizeMessage', 'finalCaughtMessage']) {
-    if (raw[key] !== undefined) live[key] = boundedString(raw[key], `live.${key}`, 500);
-  }
+  copyMessages(raw, live);
   if (raw.publicNote !== undefined) {
     rejectUnknown(raw.publicNote, NOTE_KEYS, 'live.publicNote');
     for (const key of NOTE_KEYS) {
