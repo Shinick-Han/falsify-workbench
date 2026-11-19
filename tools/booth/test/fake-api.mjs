@@ -1,0 +1,271 @@
+import { createHash, randomUUID } from 'node:crypto';
+import http from 'node:http';
+
+function sha256(bytes) {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+function send(res, status, body, headers = {}) {
+  const payload = Buffer.isBuffer(body) ? body : Buffer.from(JSON.stringify(body));
+  res.writeHead(status, {
+    'Cache-Control': 'no-store',
+    'Content-Type': Buffer.isBuffer(body) ? 'application/pdf' : 'application/json; charset=utf-8',
+    'Content-Length': payload.length,
+    ...headers,
+  });
+  res.end(payload);
+}
+
+function fail(res, status, code) {
+  send(res, status, { error: { code, message: code, requestId: 'fake', retryable: false } });
+}
+
+async function readBody(req) {
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  return Buffer.concat(chunks);
+}
+
+function delay(ms) {
+  return new Promise(resolve => { setTimeout(resolve, ms); });
+}
+
+export function startFake({ token, submissions, pdfs, queued = false, jobDelayMs = 0 }) {
+  const state = {
+    submissions: submissions.map(row => ({ ...row, declared: row.declared.map(edit => ({ ...edit })), paper: row.paper ? { ...row.paper } : null })),
+    pdfs,
+    requests: [],
+    settings: { submissionsOpen: true, missions: [], announcement: null },
+    uploads: new Map(),
+    jobs: new Map(),
+    newJobs: 0,
+    pdfGets: {},
+    jobInFlight: 0,
+    maxJobInFlight: 0,
+    puts: [],
+    patches: [],
+  };
+
+  const server = http.createServer(async (req, res) => {
+    const body = await readBody(req);
+    const url = new URL(req.url, 'http://127.0.0.1');
+    const headers = { ...req.headers };
+    delete headers.authorization;
+    state.requests.push({ method: req.method, url: req.url, headers, body });
+    const bearer = String(req.headers.authorization || '');
+    if (bearer !== `Bearer ${token}`) {
+      fail(res, bearer.startsWith('Bearer ') ? 403 : 401, bearer.startsWith('Bearer ') ? 'forbidden' : 'unauthorized');
+      return;
+    }
+    try {
+      await route(req, res, url, body);
+    } catch {
+      fail(res, 500, 'fake_error');
+    }
+  });
+
+  async function route(req, res, url, body) {
+    const pathname = url.pathname;
+    if (req.method === 'GET' && pathname === '/v1/booth/config') {
+      send(res, 200, {
+        enabled: true,
+        submissionsOpen: state.settings.submissionsOpen,
+        consentVersion: '2026-11-22.v1',
+        courses: [{ id: 'quick', label: '빠른 코스' }, { id: 'deep', label: '정밀 코스' }],
+        defectTypes: [{ id: 'number', label: '수치·통계' }],
+        limits: { maxDeclared: 5, maxReason: 500, maxNickname: 24 },
+        missions: state.settings.missions,
+        announcement: state.settings.announcement,
+      });
+      return;
+    }
+    if (pathname === '/v1/booth/admin/settings' && req.method === 'GET') {
+      send(res, 200, state.settings);
+      return;
+    }
+    if (pathname === '/v1/booth/admin/settings' && req.method === 'PUT') {
+      const patch = JSON.parse(body.toString('utf8'));
+      state.puts.push(patch);
+      if (Object.hasOwn(patch, 'submissionsOpen')) state.settings.submissionsOpen = patch.submissionsOpen;
+      if (Object.hasOwn(patch, 'missions')) state.settings.missions = patch.missions;
+      if (Object.hasOwn(patch, 'announcement')) state.settings.announcement = patch.announcement;
+      send(res, 200, state.settings);
+      return;
+    }
+    if (req.method === 'GET' && pathname === '/v1/booth/admin/submissions') {
+      let rows = state.submissions.slice().sort((a, b) => a.seq - b.seq);
+      const status = url.searchParams.get('status');
+      if (status) {
+        const allowed = new Set(status.split(','));
+        rows = rows.filter(row => allowed.has(row.status));
+      }
+      const after = url.searchParams.get('after');
+      if (after != null) rows = rows.filter(row => row.seq > Number(after));
+      const limit = Number(url.searchParams.get('limit') || 100);
+      const page = rows.slice(0, limit);
+      const nextAfter = rows.length > limit ? page[page.length - 1].seq : null;
+      send(res, 200, { submissions: page, nextAfter });
+      return;
+    }
+    const pdf = pathname.match(/^\/v1\/booth\/admin\/submissions\/(F-\d+)\/pdf$/);
+    if (req.method === 'GET' && pdf) {
+      const receipt = pdf[1];
+      state.pdfGets[receipt] = (state.pdfGets[receipt] || 0) + 1;
+      if (state.pdfs.get(receipt) === 'expired') {
+        fail(res, 404, 'artifact_expired');
+        return;
+      }
+      const bytes = state.pdfs.get(receipt);
+      if (!bytes) {
+        fail(res, 404, 'not_found');
+        return;
+      }
+      send(res, 200, bytes, { 'Content-Disposition': `attachment; filename="${receipt}.pdf"` });
+      return;
+    }
+    const one = pathname.match(/^\/v1\/booth\/admin\/submissions\/(F-\d+)$/);
+    if (one && req.method === 'PATCH') {
+      const receipt = one[1];
+      const patch = JSON.parse(body.toString('utf8'));
+      state.patches.push({ receipt, body: patch });
+      const row = state.submissions.find(item => item.receipt === receipt);
+      if (!row) {
+        fail(res, 404, 'not_found');
+        return;
+      }
+      if (row.status === 'withdrawn' && Object.keys(patch).some(key => key !== 'operatorNote')) {
+        fail(res, 409, 'withdrawn');
+        return;
+      }
+      if (Object.hasOwn(patch, 'status')) row.status = patch.status;
+      if (Object.hasOwn(patch, 'outcome')) row.outcome = patch.outcome;
+      if (Object.hasOwn(patch, 'publicNote')) row.publicNote = patch.publicNote;
+      if (Object.hasOwn(patch, 'prizeMessage')) row.prizeMessage = patch.prizeMessage;
+      if (Object.hasOwn(patch, 'operatorNote')) row.operatorNote = patch.operatorNote;
+      if (Object.hasOwn(patch, 'aiSummary')) row.aiSummary = patch.aiSummary;
+      if (patch.published === true) {
+        row.published = true;
+        row.publishedAt = new Date().toISOString();
+      } else if (patch.published === false) {
+        row.published = false;
+        row.publishedAt = null;
+      }
+      row.updatedAt = new Date().toISOString();
+      send(res, 200, row);
+      return;
+    }
+    if (req.method === 'POST' && pathname === '/v1/ai/uploads') {
+      const digest = sha256(body);
+      const prior = state.uploads.get(digest);
+      if (prior) {
+        send(res, 200, { upload: { ...prior, deduplicated: true } });
+        return;
+      }
+      const upload = {
+        id: randomUUID(),
+        sha256: digest,
+        name: 'edited.pdf',
+        mime: 'application/pdf',
+        bytes: body.length,
+        deduplicated: false,
+      };
+      state.uploads.set(digest, upload);
+      send(res, 201, { upload });
+      return;
+    }
+    if (req.method === 'POST' && pathname === '/v1/ai/jobs') {
+      state.jobInFlight += 1;
+      state.maxJobInFlight = Math.max(state.maxJobInFlight, state.jobInFlight);
+      if (jobDelayMs) await delay(jobDelayMs);
+      state.jobInFlight -= 1;
+      const requestBody = JSON.parse(body.toString('utf8'));
+      const existing = [...state.jobs.values()].find(job => job.idempotencyKey === requestBody.idempotencyKey);
+      if (existing) {
+        send(res, 200, { job: publicJob(existing), replayed: true });
+        return;
+      }
+      state.newJobs += 1;
+      const now = new Date().toISOString();
+      const job = {
+        id: randomUUID(),
+        role: requestBody.role,
+        state: queued ? 'queued' : 'completed',
+        model: requestBody.model || '',
+        effort: requestBody.effort || '',
+        useEvidence: requestBody.useEvidence !== false,
+        idempotencyKey: requestBody.idempotencyKey,
+        requestBody,
+        polls: 0,
+        result: queued ? null : sampleResult(),
+        usage: { inputTokens: 11, outputTokens: 7, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
+        createdAt: now,
+        completedAt: queued ? null : now,
+      };
+      state.jobs.set(job.id, job);
+      send(res, 202, { job: publicJob(job), replayed: false });
+      return;
+    }
+    const jobPath = pathname.match(/^\/v1\/ai\/jobs\/([^/]+)$/);
+    if (req.method === 'GET' && jobPath) {
+      const job = state.jobs.get(decodeURIComponent(jobPath[1]));
+      if (!job) {
+        fail(res, 404, 'not_found');
+        return;
+      }
+      job.polls += 1;
+      if (job.state === 'queued' && job.polls >= 1) {
+        job.state = 'completed';
+        job.result = sampleResult();
+        job.completedAt = new Date().toISOString();
+      }
+      send(res, 200, { job: publicJob(job) });
+      return;
+    }
+    fail(res, 404, 'not_found');
+  }
+
+  function publicJob(job) {
+    return {
+      id: job.id,
+      role: job.role,
+      state: job.state,
+      model: job.model,
+      effort: job.effort,
+      useEvidence: job.useEvidence,
+      result: job.result,
+      usage: job.usage,
+      createdAt: job.createdAt,
+      completedAt: job.completedAt,
+    };
+  }
+
+  return new Promise(resolve => {
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address();
+      resolve({
+        url: `http://127.0.0.1:${port}`,
+        state,
+        close: () => new Promise((done, reject) => {
+          server.close(error => (error ? reject(error) : done()));
+        }),
+      });
+    });
+  });
+}
+
+function sampleResult() {
+  return {
+    schema: 'falsify.document-blue.v1',
+    findings: [{
+      reportNumber: 'B-1',
+      pageIndex: 1,
+      locationLabel: 'Results',
+      findingType: 'D1',
+      verdictLabel: '아님',
+      severity: '불일치',
+      quote: 'p < 0.50',
+      rationale: 'the threshold moved',
+      confidence: '높음',
+    }],
+  };
+}
