@@ -167,7 +167,8 @@
 .booth-hist{display:grid;gap:6px}
 .booth .booth-hist-row{display:flex;justify-content:space-between;align-items:center;gap:10px;width:100%;min-height:44px;padding:7px 12px;border:0;border-radius:6px;background:var(--ev-card);color:var(--ev-ink);font-family:var(--ev-mono);font-size:12px;text-align:left;cursor:pointer}
 .booth-hist-row .l{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.booth-hist-row .r{flex:none;color:var(--ev-muted)}
+.booth-hist-row .r{flex:none;color:var(--ev-muted);font-family:var(--ev-sans)}
+#booth-live-page{font-family:var(--ev-sans);font-size:12.5px;letter-spacing:0}
 .booth-hist-row.pass .r{color:var(--ev-pass)}
 .booth-hist-row.fail .r{color:var(--ev-fail)}
 @keyframes booth-slide{from{left:-34%}to{left:100%}}

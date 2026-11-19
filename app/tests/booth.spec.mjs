@@ -1033,6 +1033,7 @@ test('the diff shows only the changed region with a little context', () => {
   assert.equal(booth.formatClock(-5), '0:00');
   assert.equal(booth.formatDuration(98000), '1분 38초');
   assert.equal(booth.formatDuration(9000), '9초');
+  assert.equal(booth.formatDuration(120000), '2분');
 });
 
 test('a cold reload with a stored receipt resumes polling and lists receipts', async () => {

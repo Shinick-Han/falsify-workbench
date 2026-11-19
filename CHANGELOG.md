@@ -1,3 +1,7 @@
+## 0.2.0-alpha.86 — 2026-11-20
+
+- 행사 페이지(event.html)를 「도전 티켓」 디자인으로 바꿨습니다. `event-theme.css`는 작업대 화면을 CSS로만 숨기고 논문 편집 화면을 폰에 맞게 정리합니다. `booth.js`는 pick·edit·send·ticket 네 단계를 `html[data-booth-step]`로 알립니다. edit 단계에는 「고친 곳 N개 · 다음」 고정 막대가 있고, 「다음」을 누르면 수정본 PDF를 자동으로 만듭니다. send 단계는 동의문을 3줄 요약으로 보여 주고 전문은 펼쳐서 볼 수 있으며, 코스는 quick으로 고정합니다. ticket 단계는 검증 티켓과 통과·적발·무효 도장, 교환권, `publicNote` 쪽·인용·AI 의견 분리를 보여 줍니다. 서버 API와 index.html은 바뀌지 않았습니다.
+
 ## 0.2.0-alpha.85 — 2026-11-19
 
 - 운영자 CLI에 라이브 판정을 추가했습니다. `watch`는 접수가 열린 동안 `received` 접수를 읽어 `reviewing`으로 바꾸고, PDF를 `pdfSha256`·`pdfBytes`로 검증한 뒤 `live` 프로파일(Claude Sonnet 5.5) BLUE를 돌려 채점하고, `judged`·outcome·`publicNote`·`aiSummary`·`published: true`(놓쳤으면 `prizeMessage`도)를 PATCH 한 번으로 게시합니다. 철회(409)와 PDF 없음은 건너뛰고, 재시도까지 실패하면 `reviewing`에 `operatorNote: live: failed <code>`를 남깁니다. 다시 켜면 같은 작업으로 이어 가며 새로 과금하지 않습니다. `final`은 마감 뒤 라이브에서 놓친 접수를 `final` 프로파일(Claude Opus 5.5)로 다시 보고 `final/candidates.json`을 쓰며, 사람이 확인한 뒤 `--apply`로만 게시합니다. final에서 찾아내도 이미 받은 즉석 선물은 유효합니다(`finalCaughtMessage`). 방문자에게 보이는 `publicNote`는 AI finding의 쪽·인용·설명만 쓰고, 쪽은 「AI가 짚은 곳」으로 적습니다.

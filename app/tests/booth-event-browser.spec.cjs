@@ -262,7 +262,7 @@ async function main() {
     assert.equal(await page.locator('#booth-stamp-word').textContent(), '통과');
     assert.equal(await page.locator('#booth-stamp').getAttribute('class'), 'booth-stamp pass');
     assert.equal(await page.locator('#booth-ticket-wait').isHidden(), true);
-    assert.equal(await page.locator('#booth-ticket-duration').textContent(), '2분 0초');
+    assert.equal(await page.locator('#booth-ticket-duration').textContent(), '2분');
     assert.equal(await page.locator('#booth-gift').isVisible(), true);
     assert.equal(await page.locator('#booth-live-prize').textContent(), '부스에서 스티커를 받아 가세요');
     assert.match(await page.locator('#booth-gift').textContent(), /교환권 · 1인 1회/);

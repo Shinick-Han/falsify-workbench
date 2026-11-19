@@ -477,7 +477,7 @@
     if(!Number.isFinite(n)||n<0) return '';
     const total=Math.round(n/1000);
     const minutes=Math.floor(total/60);
-    return minutes?minutes+'분 '+(total%60)+'초':total+'초';
+    return minutes?minutes+'분'+(total%60?' '+(total%60)+'초':''):total+'초';
   }
   function licenseLabel(id){
     const text=typeof id==='string'?id.trim().toLowerCase():'';
@@ -1855,7 +1855,7 @@
     function noteParts(parsed, state){
       const parts=[];
       const structured=!!(parsed.quote||parsed.opinion);
-      if(parsed.text&&!structured) parts.push(el('p',{className:'booth-klab',textContent:state==='missed'?'AI가 의심한 곳':'AI 메모'}));
+      if(parsed.text&&!structured) parts.push(el('p',{className:'booth-klab',textContent:state==='missed'?'AI가 의심한 곳':state==='invalid'?'운영진 안내':'AI 메모'}));
       if(parsed.text) parts.push(el('p',{className:'booth-txt',textContent:parsed.text}));
       if(parsed.quote) parts.push(el('blockquote',{className:'booth-quote',textContent:parsed.quote}));
       if(parsed.opinion) parts.push(el('p',{className:'booth-klab gap',textContent:'AI 의견'}),el('p',{className:'booth-txt',textContent:parsed.opinion}));
