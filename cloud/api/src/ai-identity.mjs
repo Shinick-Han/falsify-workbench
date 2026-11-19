@@ -2,6 +2,8 @@
 // A site cloudId is never an owner by itself: password sessions map to the D1 author row,
 // Confluence sessions map to the hash of (cloudId, Atlassian accountId), and an open guest
 // session maps to gst:<uuid>. Unknown or ambiguous identity is always a 401, never a fallback.
+import { timingSafeEqual } from 'node:crypto';
+import { Buffer } from 'node:buffer';
 import { currentUserIdentity } from './confluence.mjs';
 
 export class AiError extends Error {
@@ -20,9 +22,12 @@ const UUID = new RegExp(`^${UUID_BODY}$`);
 const CLOUD = /^[0-9a-f-]{8,64}$/i;
 // Atlassian accountIds are opaque; classic ones are 24 hex chars and current ones may carry a colon.
 const ACCOUNT_ID = /^[A-Za-z0-9._:-]{1,128}$/;
-// usr: password author, atl: Confluence account, gst: one open guest session.
-export const OWNER_ID = new RegExp(`^(?:usr:${UUID_BODY}|atl:[a-f0-9]{64}|gst:${UUID_BODY})$`);
+// usr: password author, atl: Confluence account, gst: one open guest session, opr: the booth operator.
+export const OWNER_ID = new RegExp(`^(?:usr:${UUID_BODY}|atl:[a-f0-9]{64}|gst:${UUID_BODY}|opr:booth)$`);
 export const GUEST_TOKEN = /^fsg_[A-Za-z0-9_-]{43}$/;
+// 32 random bytes, base64url, prefixed. The Worker secret must match this shape too.
+export const OPERATOR_TOKEN = /^fso_[A-Za-z0-9_-]{43}$/;
+export const OPERATOR_OWNER_ID = 'opr:booth';
 
 export function hostingEnabled(env) {
   return env?.AI_HOSTING_ENABLED === true || env?.AI_HOSTING_ENABLED === 'true';
@@ -52,6 +57,17 @@ export async function resolveGuestOwner(db, token, nowMs) {
 export async function sha256Hex(text) {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
   return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// The secret has to be set and match the bearer pattern. Comparison is the SHA-256 of both
+// strings so the check stays constant-time and never branches on a shared prefix.
+export async function resolveOperatorOwner(env, token) {
+  const secret = typeof env?.BOOTH_OPERATOR_TOKEN === 'string' ? env.BOOTH_OPERATOR_TOKEN : '';
+  if (!OPERATOR_TOKEN.test(token) || !OPERATOR_TOKEN.test(secret)) aiFail(401, 'unauthorized');
+  const [got, expected] = await Promise.all([sha256Hex(token), sha256Hex(secret)]);
+  const same = timingSafeEqual(Buffer.from(got, 'hex'), Buffer.from(expected, 'hex'));
+  if (!same) aiFail(401, 'unauthorized');
+  return { ownerId: OPERATOR_OWNER_ID, kind: 'operator', refreshed: null };
 }
 
 export function userOwner(authorId) {
@@ -86,8 +102,9 @@ export async function resolveAiOwner({ request, env, authenticatePassword, getDb
   const match = /^Bearer (\S+)$/.exec(header);
   if (!match) aiFail(401, 'unauthorized');
   const token = match[1];
-  // Invitation codes are never sessions.
+  // Invitation codes are never sessions. Operator tokens work whether or not open access is on.
   if (token.startsWith('fsi_')) aiFail(401, 'unauthorized');
+  if (token.startsWith('fso_')) return resolveOperatorOwner(env, token);
   if (token.startsWith('fsg_')) {
     if (!openAccessEnabled(env)) aiFail(403, 'open_access_disabled');
     if (typeof getDb !== 'function') aiFail(401, 'unauthorized');
