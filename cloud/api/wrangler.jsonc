@@ -93,7 +93,9 @@
     "event": {
       // Open-access booth page (event.html). Guests only; shares the production runtime.
       // HOSTED_AI_SERVICE_TOKEN and AI_OPEN_ACCESS_KEY are Wrangler secrets, never vars.
+      // A 16 MiB PDF plus its digest needs more CPU than the production 1000 ms cap.
       "name": "falsify-cloud-api-event",
+      "limits": { "cpu_ms": 5000 },
       "vars": {
         "ALLOWED_ORIGINS": "https://shinick-han.github.io",
         "REMOTE_PROVIDER": "confluence",
@@ -140,6 +142,9 @@
         "BOOTH_CLAIMS_PER_IP_HOUR": "2000",
         "BOOTH_CLAIMS_PER_HOUR": "5000",
         "BOOTH_OPERATOR_ACTIVE_JOBS": "2",
+        "BOOTH_MAX_PDF_BYTES": "16777216",
+        "BOOTH_STORED_PDF_BYTES": "3221225472",
+        "AI_MODEL_JOBS_OPERATOR_ONLY": "true",
         "PAPER_SEARCH_ENABLED": "true",
         "PAPER_SEARCH_PER_IP_HOUR": "2000",
         "PAPER_PDF_PER_IP_HOUR": "600"
