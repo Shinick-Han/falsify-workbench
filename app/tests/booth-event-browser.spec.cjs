@@ -1,5 +1,5 @@
 'use strict';
-// Real Chromium walk of event.html. The API is stubbed. The mission PDF is the local Ragas file.
+// Real Chromium walk of event.html. The API is stubbed. FALSIFY_BOOTH_MISSION_PDF names a local copy of arXiv 2309.15217 (CC BY 4.0).
 const {spawn} = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -7,8 +7,9 @@ const assert = require('node:assert/strict');
 const {chromium} = require('playwright');
 
 const dist = path.resolve(__dirname, '../dist');
-const pdfPath = '/home/clouddesk/projects/falsify/data/missions/2309.15217.pdf';
-const chrome = process.env.BROWSER_EXECUTABLE || '/home/clouddesk/.cache/ms-playwright/chromium-1255/chrome-linux64/chrome';
+const pdfPath = process.env.FALSIFY_BOOTH_MISSION_PDF || '';
+if (!pdfPath) throw new Error('Set FALSIFY_BOOTH_MISSION_PDF to a local copy of arXiv 2309.15217 (the Ragas paper)');
+const chrome = process.env.BROWSER_EXECUTABLE || undefined;
 const api = 'https://falsify-cloud-api-event.ai-gongbu.workers.dev';
 const port = Number(process.env.BOOTH_EVENT_PORT || 8877);
 const token = 'fsg_' + 'a'.repeat(43);
