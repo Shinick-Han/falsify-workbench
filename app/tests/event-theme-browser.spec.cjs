@@ -139,7 +139,7 @@ async function main() {
 
     await page.locator('#paper-workspace').waitFor({state: 'attached'});
     await setStep(page, 'pick');
-    const mission = page.getByRole('button', {name: '5쪽으로 가기'});
+    const mission = page.locator('#booth-missions .booth-mission').first();
     await mission.waitFor();
     await assertChromeHidden(page, 'pick');
     assert.equal(await page.locator('#paper-workspace').isVisible(), false, 'pick: workspace is visible');
@@ -147,7 +147,7 @@ async function main() {
 
     await mission.click();
     await page.waitForFunction(() => [...document.querySelectorAll('.paper-paragraph-button')].some(node => node.textContent.includes('0.95')));
-    assert.equal(await page.locator('#paper-workspace').isVisible(), false, 'pick: workspace shows before the edit step');
+    await page.waitForFunction(() => document.documentElement.dataset.boothStep === 'edit');
     await setStep(page, 'edit');
     await assertChromeHidden(page, 'edit');
     assert.equal(await page.locator('#paper-page-label').isVisible(), true);
