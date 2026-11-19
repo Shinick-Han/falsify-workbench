@@ -37,6 +37,6 @@
     "license": "cc-by-4.0",
     "course": "deep",
     "pageHint": 9,
-    "hint": "9쪽 Table IV의 F1 하나를 바꿔 비교 결론과 어긋나게 해 보세요. 예: INITSCOPE 80.0% → 60.0%"
+    "hint": "9쪽 개발자 실험 문장의 숫자 하나를 바꿔 보세요. 예: 탐지 시간 64% → 10%"
   }
 ]
