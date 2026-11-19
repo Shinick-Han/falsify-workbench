@@ -1,0 +1,151 @@
+/* Event page shell. event.html only: index.html never loads this file.
+   Hides every Workbench region a booth visitor should not see, by CSS only. booth.js and
+   the workspace scripts still find (and click) the hidden controls, so no DOM is removed.
+   booth.css (loaded after this file) owns #booth and its tokens; the fallbacks here match. */
+
+/* Page ground, type and the single centered column. */
+html{background:var(--ev-ground,#eef0f1);color-scheme:light}
+body{
+  --tk-inset:clamp(44px,17vw,80px);
+  margin:0;background:var(--ev-ground,#eef0f1);color:var(--ev-ink,#16191e);
+  font-family:var(--ev-sans,"Pretendard",-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Noto Sans KR","Malgun Gothic",sans-serif);
+  -webkit-text-size-adjust:100%;text-size-adjust:100%;overflow-x:hidden
+}
+/* Short screens (a foldable's outer display, landscape): keep the page image under about
+   38% of the height so the paragraph cards show above the dock. */
+@media(max-height:760px){
+  body{
+    --tk-inset:max(clamp(44px,17vw,80px),calc((min(100vw,480px) - 32px - 29vh) / 2));
+    --tk-inset:max(clamp(44px,17vw,80px),calc((min(100vw,480px) - 32px - 29dvh) / 2))
+  }
+}
+.app-shell{margin:0 auto;max-width:480px;min-height:100vh;min-height:100dvh;background:var(--ev-ground,#eef0f1)}
+#main,.content{min-width:0}
+.content{max-width:none;margin:0;padding:16px 16px calc(76px + 28px + env(safe-area-inset-bottom,0px))}
+@media(min-width:521px){
+  html,body{background:var(--ev-desk,#dfe2e5)}
+}
+
+/* Workbench chrome: RED header, 검수 · 결과 기록 · Harness rail, breadcrumb, R1 banner. */
+.skip-link,.rail,.topbar,.wayfinding,#reset-dialog:not([open]){display:none}
+
+/* Only #booth, the RED view (for its paper workspace) and a small license line remain. */
+.content>:not(#booth):not(#view-workbench):not(.page-foot){display:none}
+#view-workbench>:not(.paper-intake),
+.paper-intake>:not(#paper-workspace),
+#paper-workspace>:not(.paper-toolbar):not(.paper-compare):not(#paper-edits){display:none}
+#view-workbench:not([hidden]),.paper-intake{display:block;margin:0;padding:0;border:0;background:transparent;box-shadow:none}
+
+/* AGPL notice stays reachable. Everything else in the footer is hidden. */
+.page-foot{display:block;margin:20px 0 0;text-align:center;font-size:11.5px}
+.page-foot>:not(#source-link){display:none}
+.page-foot #source-link{display:inline-flex;align-items:center;min-height:44px;color:var(--ev-muted,#6b717a);font-size:11.5px}
+
+/* Steps other than "edit": take the workspace out of view but keep its layout box, so
+   page rendering still measures a real column width while booth.js loads a paper.
+   Without any data-booth-step (a booth.js that predates the step contract, or one that
+   failed to start) the workspace stays usable rather than vanishing. */
+html[data-booth-step]:not([data-booth-step="edit"]) #view-workbench{
+  position:fixed!important;top:0;left:0;width:min(calc(100vw - 32px),448px);height:1px;
+  overflow:hidden;visibility:hidden;pointer-events:none;contain:layout paint
+}
+
+/* Paper workspace skin. Shared by every step so the page canvas keeps one width. */
+#paper-workspace:not([hidden]){display:flex;flex-direction:column;margin:12px 0 0;padding:0;border:0;background:transparent}
+#paper-workspace>.paper-toolbar{order:0}
+#paper-workspace>#paper-edits{order:1}
+#paper-workspace>.paper-compare{order:2}
+#paper-workspace .button{border-radius:8px;font-family:inherit}
+
+/* Page navigation: "이전 쪽 · N / M쪽 · 다음 쪽" only. Zoom and jump stay in the DOM. */
+#paper-workspace .paper-toolbar{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:8px;margin:0 0 12px;padding:0}
+#paper-workspace .paper-toolbar>:not(#paper-page-prev):not(#paper-page-label):not(#paper-page-next){display:none}
+#paper-page-prev,#paper-page-next{min-height:44px;min-width:0;padding:0 12px;background:var(--ev-card,#fff);color:var(--ev-ink,#16191e);border:1px solid var(--ev-ink,#16191e);font-size:14px;font-weight:500}
+#paper-page-prev:disabled,#paper-page-next:disabled{border-color:var(--ev-hair,#d6d9dd);color:var(--ev-muted,#6b717a)}
+#paper-page-label{min-width:5em;font-family:var(--ev-mono,ui-monospace,SFMono-Regular,Menlo,Consolas,"Roboto Mono",monospace);font-size:13px;color:var(--ev-ink-2,#3a3f47);text-align:center}
+
+/* One pane: the original page. The generated preview pane and its controls are hidden. */
+#paper-workspace .paper-compare{display:block;margin:0;padding:0;border:0;background:transparent}
+#paper-workspace .paper-compare>[aria-labelledby="paper-after-title"],#paper-before-status{display:none}
+#paper-workspace .paper-pane{margin:0;padding:0;border:0;background:transparent;box-shadow:none}
+#paper-before-title{margin:0 0 8px;font-size:11.5px;font-weight:500;letter-spacing:0;color:var(--ev-muted,#6b717a)}
+
+/* The stage no longer scrolls. Its side borders narrow the rendered page into a reference
+   image (the renderer fits the page to the stage's inner width); the list and the editor
+   use negative margins to span the full column again. */
+#paper-before-stage{
+  display:flex;flex-direction:column;gap:14px;max-height:none;min-height:0;overflow:visible;
+  background:transparent;border:0 solid transparent;border-inline-width:var(--tk-inset);border-radius:0;outline:0
+}
+#paper-before-stage:focus-visible{outline:2px solid var(--ev-ink,#16191e);outline-offset:4px}
+
+/* Page image, smaller and calm. The text layer and marks share the canvas cell. */
+#paper-before-stage>.paper-page{order:-1;display:grid!important;grid-template-columns:100%;height:auto!important;margin:0 auto}
+#paper-before-stage>.paper-page>canvas{grid-area:1/1;border:0;border-radius:3px;box-shadow:0 1px 0 rgba(22,25,30,.04),0 6px 16px rgba(22,25,30,.08)}
+#paper-before-stage>.paper-page>:not(canvas):not(textarea):not(.paper-direct-controls){grid-area:1/1}
+#paper-before-stage .paper-paragraph-marker{border:1.5px solid var(--ev-ink,#16191e);border-radius:2px;background:color-mix(in srgb,var(--ev-mark,#e3e9f1) 60%,transparent)}
+
+/* Paragraph list: tappable text cards. */
+#paper-before-stage>.paper-paragraph-list{margin:0 calc(0px - var(--tk-inset));padding:0;background:transparent;border:0}
+#paper-before-stage>.paper-paragraph-list[open]{max-height:none;overflow:visible}
+.paper-paragraph-list>summary{display:flex;align-items:center;min-height:44px;padding:0 2px;font-size:11.5px;font-weight:500;color:var(--ev-muted,#6b717a);cursor:pointer}
+#paper-before-stage .paper-paragraph-list .paper-paragraph-button{
+  display:block;width:100%;min-height:48px;margin:0 0 8px;padding:12px 14px;
+  background:var(--ev-card,#fff);color:var(--ev-ink,#16191e);border:1px solid var(--ev-hair,#d6d9dd);border-radius:10px;
+  font-family:inherit;font-size:14px;line-height:1.5;text-align:left;white-space:pre-wrap;overflow-wrap:anywhere;
+  box-shadow:0 1px 0 rgba(22,25,30,.04);outline:0;-webkit-tap-highlight-color:transparent
+}
+#paper-before-stage .paper-paragraph-list .paper-paragraph-button:hover{outline:0}
+@media(hover:hover){#paper-before-stage .paper-paragraph-list .paper-paragraph-button:hover{border-color:var(--ev-ink-2,#3a3f47)}}
+#paper-before-stage .paper-paragraph-list .paper-paragraph-button:focus-visible,
+#paper-before-stage .paper-paragraph-list .paper-paragraph-button:is([aria-pressed="true"],[aria-current],[aria-selected="true"]){
+  border-color:var(--ev-ink,#16191e);outline:2px solid var(--ev-ink,#16191e);outline-offset:1px;background:var(--ev-mark,#e3e9f1)
+}
+#paper-before-stage .paper-paragraph-list .paper-paragraph-button:active{border-color:var(--ev-ink,#16191e);background:var(--ev-soft,#f4f5f6)}
+
+/* Inline direct editor as the mockup's bottom sheet, below the page image (never on it). */
+#paper-before-stage>.paper-page:has(>textarea)::after{
+  content:"";grid-row:2/4;grid-column:1;z-index:0;margin:6px calc(0px - var(--tk-inset)) 0;
+  border-radius:14px 14px 10px 10px;
+  background:linear-gradient(var(--ev-hair,#d6d9dd),var(--ev-hair,#d6d9dd)) center 10px/36px 4px no-repeat,var(--ev-card,#fff);
+  box-shadow:0 -8px 24px rgba(22,25,30,.08)
+}
+#paper-before-stage>.paper-page>textarea{
+  grid-row:2;grid-column:1;position:relative!important;z-index:1!important;inset:auto!important;
+  width:auto!important;height:auto!important;min-height:96px!important;margin:28px calc(14px - var(--tk-inset)) 0;
+  box-sizing:border-box!important;padding:10px 12px!important;resize:vertical;
+  background:var(--ev-soft,#f4f5f6)!important;color:var(--ev-ink,#16191e)!important;
+  border:1px solid var(--ev-ink,#16191e);border-radius:6px;
+  font-family:var(--ev-mono,ui-monospace,SFMono-Regular,Menlo,Consolas,"Roboto Mono",monospace)!important;
+  font-size:16px!important;line-height:1.5!important;caret-color:var(--ev-ink,#16191e)
+}
+#paper-before-stage>.paper-page>textarea:focus{outline:0;box-shadow:0 0 0 3px var(--ev-mark,#e3e9f1)}
+#paper-before-stage>.paper-page>.paper-direct-controls{
+  grid-row:3;grid-column:1;position:relative!important;z-index:1!important;inset:auto!important;width:auto!important;
+  display:grid!important;grid-template-columns:1fr 1.5fr;gap:10px 8px!important;align-items:stretch!important;
+  margin:8px calc(14px - var(--tk-inset)) 0;padding:0 0 14px;background:transparent!important
+}
+#paper-before-stage .paper-direct-controls>[data-direct-status]{grid-column:1/-1;order:0;font-size:12.5px;color:var(--ev-muted,#6b717a);overflow-wrap:anywhere}
+#paper-before-stage .paper-direct-controls>span:not([data-direct-status]){display:none}
+#paper-before-stage .paper-direct-controls>.button{min-height:48px;margin:0;padding:0 12px;border-radius:8px;font-size:15px;font-weight:500}
+#paper-before-stage .paper-direct-controls>.button:last-of-type{order:1;background:transparent;color:var(--ev-ink,#16191e);border:1px solid var(--ev-ink,#16191e)}
+#paper-before-stage .paper-direct-controls>.button:first-of-type{order:2;background:var(--ev-ink,#16191e);color:#fff;border:1px solid var(--ev-ink,#16191e)}
+#paper-before-stage .paper-direct-controls>.button:focus-visible{outline:2px solid var(--ev-ink,#16191e);outline-offset:2px}
+
+/* Applied edits, above the page: its diff button reopens the edit; 삭제 removes it.
+   The empty-state line is hidden; booth.js shows the count in its dock. */
+#paper-edits:not([hidden]){display:grid;gap:8px;margin:0;padding:0;list-style:none}
+#paper-edits:has(>li>button){margin:0 0 14px}
+#paper-edits>li:not(:has(>button)){display:none}
+#paper-edits>li{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0;padding:12px 14px;background:var(--ev-card,#fff);border-radius:10px;font-size:12.5px;color:var(--ev-muted,#6b717a)}
+#paper-edits>li .button{min-height:44px;border-radius:8px;font-size:13px}
+#paper-edits>li [data-act="edit"]{flex:1 1 100%;text-align:left;font-family:var(--ev-mono,ui-monospace,SFMono-Regular,Menlo,Consolas,"Roboto Mono",monospace);font-size:13px;white-space:normal;overflow-wrap:anywhere;background:var(--ev-soft,#f4f5f6);border:1px solid var(--ev-hair,#d6d9dd);color:var(--ev-ink,#16191e)}
+#paper-edits>li [data-act="compare"],#paper-edits>li [data-act="toggle"]{display:none}
+#paper-edits>li [data-act="delete"]{background:transparent;border:1px solid var(--ev-ink,#16191e);color:var(--ev-ink,#16191e)}
+
+/* The paper change marks use the event mark colour. */
+#paper-before-stage .paper-change-mark.is-after{background:color-mix(in srgb,var(--ev-mark,#e3e9f1) 80%,transparent);border-bottom-color:var(--ev-ink,#16191e)}
+
+@media(prefers-reduced-motion:reduce){
+  #paper-workspace *{transition:none!important;animation:none!important;scroll-behavior:auto!important}
+}

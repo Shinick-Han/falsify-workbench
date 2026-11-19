@@ -1,5 +1,5 @@
 'use strict';
-// Booth panel pure helpers and the hosted-ai hooks they depend on.
+// Booth step flow (pick, edit, send, ticket), its pure helpers and the hosted-ai hooks they depend on.
 // Synthetic DOM, storage and fetch only. No browser, network, token or private paper.
 import {test, after} from 'node:test';
 import assert from 'node:assert/strict';
@@ -263,6 +263,7 @@ function page() {
       this.checked = false;
       this.className = '';
       this.type = '';
+      this.attrs = {};
       this._text = '';
       this._id = '';
       this.listeners = new Map();
@@ -278,7 +279,8 @@ function page() {
       return this._text + this.children.map(kid => typeof kid === 'string' ? kid : kid.textContent).join('');
     }
     set textContent(value) { this.children = []; this._text = String(value ?? ''); }
-    setAttribute() {}
+    setAttribute(key, value) { this.attrs[key] = String(value); }
+    getAttribute(key) { return Object.hasOwn(this.attrs, key) ? this.attrs[key] : null; }
     append(...kids) {
       for (const kid of kids) {
         if (kid == null || kid === false) continue;
@@ -321,6 +323,7 @@ function page() {
   }
   const doc = {
     listeners: new Map(),
+    documentElement: {dataset: {}},
     createElement: tag => new Node(tag),
     getElementById: id => ids.get(id) || null,
     addEventListener(type, fn) { this.listeners.set(type, [...(this.listeners.get(type) || []), fn]); },
@@ -345,7 +348,157 @@ function page() {
   return {doc, content, ids};
 }
 
-test('the event panel submits contract fields and keeps claim and search auth apart', async () => {
+function nodesOf(node) {
+  const out = [];
+  const visit = item => { out.push(item); for (const kid of item.children) if (kid && typeof kid === 'object') visit(kid); };
+  visit(node);
+  return out;
+}
+const settle = async () => { for (let i = 0; i < 8; i += 1) await new Promise(resolve => setTimeout(resolve, 0)); };
+const SOURCE_BYTES = Buffer.from('%PDF-1.7 synthetic booth paper\n%%EOF\n');
+const SOURCE_SHA = createHash('sha256').update(SOURCE_BYTES).digest('hex');
+const MISSIONS = [
+  {paperId: '2503.10497', title: 'Synthetic mission: a longer subtitle', license: 'cc-by-4.0', course: 'quick', hint: '8쪽 표를 고치세요', pageHint: 8},
+  {paperId: '2503.10498', title: 'Plain mission', pageHint: '8'},
+];
+function pdfReply(bytes = SOURCE_BYTES) {
+  return {
+    ok: true, status: 200,
+    headers: {get(name) {
+      if (name === 'X-Falsify-Paper-License') return 'cc-by-4.0';
+      if (name === 'Content-Disposition') return 'attachment; filename="arxiv-2503.10497.pdf"';
+      return null;
+    }},
+    arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+    json: async () => ({}),
+  };
+}
+/* The workspace hooks the booth reads. edits is the live snapshot; output is getCurrentOutput(). */
+function useWorkspace(edits, extra = {}) {
+  const state = {edits, output: extra.output || null, pages: []};
+  boothContext.FalsifyPaperWorkspace = {
+    getSource: () => ({fileHash: extra.fileHash || SOURCE_SHA, file: new File([SOURCE_BYTES], 'source.pdf', {type: 'application/pdf'})}),
+    getEditSnapshot: () => ({revision: 1, edits: state.edits}),
+    getCurrentOutput: () => state.output,
+    showPage(n) { state.pages.push(n); return true; },
+  };
+  return state;
+}
+const ONE_EDIT = [{enabled: true, pageIndex: 1, segmentId: 'p2', before: BEFORE, after: AFTER}];
+function generated(edits = ONE_EDIT, file = new File([EDITED], 'edited.pdf', {type: 'application/pdf'})) {
+  return {type: 'falsify:paper-generated', detail: {file, sourceFileHash: SOURCE_SHA, revision: 1, edits}};
+}
+/* Mounted booth with a fake clock. claims is a list of claim replies (a body, or {status, headers, body}). */
+function liveBooth(options = {}) {
+  const {doc, ids, content} = page();
+  const storage = options.storage || memoryStorage();
+  const calls = [];
+  const clock = {t: options.now || Date.parse('2026-11-22T01:00:30Z')};
+  const timers = [];
+  const intervals = [];
+  let timerId = 0;
+  const claims = (options.claims || []).slice();
+  const reply = (status, body, headers = {}) => ({
+    ok: status >= 200 && status < 300, status,
+    headers: {get(name) { return Object.prototype.hasOwnProperty.call(headers, name) ? headers[name] : null; }},
+    json: async () => body,
+  });
+  const submitReplies = (options.submits || []).slice();
+  const fetchImpl = async (url, init = {}) => {
+    const path = String(url);
+    const headers = init.headers || {};
+    const form = init.body && typeof init.body.get === 'function' ? init.body : null;
+    calls.push({path, at: clock.t, auth: headers.Authorization || '', contentType: headers['Content-Type'] || '',
+      body: typeof init.body === 'string' ? JSON.parse(init.body) : null, form});
+    if (path.endsWith('/v1/booth/config')) {
+      return reply(200, {enabled: true, submissionsOpen: true, announcement: options.announcement, consentVersion: options.consentVersion || '2026-11-22.v2',
+        limits: {maxDeclared: options.maxDeclared || 5, maxReason: 500, maxNickname: 24, perOwner: options.perOwner || 5, maxPdfBytes: 16777216},
+        missions: options.missions || MISSIONS});
+    }
+    if (path.endsWith('/v1/booth/claim') || path.endsWith('/v1/booth/withdraw')) {
+      const next = path.endsWith('/v1/booth/withdraw') ? options.withdrawn : (claims.length > 1 ? claims.shift() : claims[0]);
+      if (next && next.status && next.body) return reply(next.status, next.body, next.headers);
+      if (!next) return reply(404, {error: {code: 'not_found'}});
+      return reply(200, next);
+    }
+    if (path.endsWith('/v1/booth/submissions')) {
+      const next = submitReplies.length ? submitReplies.shift() : null;
+      if (next) return reply(next.status, next.body);
+      if (options.submitStatus) return reply(options.submitStatus, {error: {code: 'rate_limited'}});
+      return reply(201, {receipt: 'F-0042', claimKey: '7Q3K-M9XD', status: 'received', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:30Z'});
+    }
+    if (path.includes('/v1/papers/pdf')) return pdfReply();
+    if (path.includes('/v1/papers/search')) {
+      return reply(200, {source: 'arxiv', page: 1, hasMore: false, results: [{id: '2503.10497', title: 'Synthetic result', authors: ['Ada'], year: 2026, license: 'cc-by-4.0'}]});
+    }
+    return reply(404, {error: {code: 'not_found'}});
+  };
+  const location = {hash: options.hash || ''};
+  const handle = booth.mount({
+    document: doc, fetch: fetchImpl, storage, location,
+    config: () => ({booth: {enabled: true}, apiBase: 'https://event.example'}),
+    session: () => ({token: async () => options.token === undefined ? 'fsg_' + 'a'.repeat(43) : options.token}),
+    setTimeout: (fn, ms) => { timerId += 1; timers.push({id: timerId, fn, ms}); return timerId; },
+    clearTimeout: id => { const at = timers.findIndex(item => item.id === id); if (at >= 0) timers.splice(at, 1); },
+    setInterval: (fn, ms) => { timerId += 1; intervals.push({id: timerId, fn, ms}); return timerId; },
+    clearInterval: id => { const at = intervals.findIndex(item => item.id === id); if (at >= 0) intervals.splice(at, 1); },
+    now: () => clock.t,
+  });
+  async function tick() {
+    assert.equal(timers.length, 1, 'one poll timer pending');
+    const next = timers.shift();
+    clock.t += next.ms;
+    next.fn();
+    await settle();
+    return next.ms;
+  }
+  const claimCalls = () => calls.filter(call => call.path.endsWith('/v1/booth/claim'));
+  const step = () => doc.documentElement.dataset.boothStep;
+  const text = id => ids.get(id).textContent;
+  return {doc, ids, content, storage, calls, claimCalls, timers, intervals, clock, tick, handle, location, step, text};
+}
+function missionButtons(h) {
+  return nodesOf(h.ids.get('booth-missions')).filter(node => node.tagName === 'button');
+}
+async function pickMission(h, index = 0) {
+  missionButtons(h)[index].click();
+  await settle();
+}
+function chip(h, label, row = 0) {
+  const cards = nodesOf(h.ids.get('booth-rows')).filter(node => node.className === 'booth-panel booth-card');
+  return nodesOf(cards[row]).find(node => node.tagName === 'button' && node.textContent === label);
+}
+function declare(h, label, reason, row = 0) {
+  const cards = nodesOf(h.ids.get('booth-rows')).filter(node => node.className === 'booth-panel booth-card');
+  if (label) chip(h, label, row).click();
+  nodesOf(cards[row]).find(node => node.tagName === 'textarea').value = reason;
+}
+function agree(h) {
+  h.ids.get('booth-consent').checked = true;
+  h.ids.get('booth-consent').dispatchEvent({type: 'change'});
+}
+async function submit(h) {
+  h.ids.get('booth-submit').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+}
+/* pick → edit → 다음 (the workspace announces the PDF) → send. */
+async function reachSend(h, edits = ONE_EDIT) {
+  useWorkspace(edits);
+  await pickMission(h);
+  h.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
+  h.ids.get('booth-next').click();
+  await settle();
+  h.doc.dispatchEvent(generated(edits));
+  await waitFor(() => h.step() === 'send');
+}
+async function submitThroughBooth(h) {
+  await reachSend(h);
+  declare(h, '수치·통계', '평균을 바꿨습니다');
+  agree(h);
+  await submit(h);
+}
+
+test('the booth mounts only when enabled and starts on pick', async () => {
   const skipped = page();
   let created = false;
   booth.mount({
@@ -355,221 +508,619 @@ test('the event panel submits contract fields and keeps claim and search auth ap
   assert.equal(created, false);
   booth.mount({document: skipped.doc, config: () => ({booth: {enabled: false}})});
   assert.equal(skipped.ids.get('booth'), undefined);
+  assert.equal(skipped.doc.documentElement.dataset.boothStep, undefined);
+  const h = liveBooth({announcement: '행사 안내'});
+  assert.equal(h.content.children[0].id, 'booth');
+  assert.equal(h.step(), 'pick');
+  assert.equal(h.ids.get('booth').hidden, true);
+  assert.equal(h.ids.get('booth-search').hidden, true);
+  await settle();
+  assert.equal(h.calls[0].path.endsWith('/v1/booth/config'), true);
+  assert.equal(h.calls[0].auth, '');
+  assert.equal(h.ids.get('booth').hidden, false);
+  assert.equal(h.ids.get('booth-search').hidden, false);
+  assert.equal(h.text('booth-announce'), '행사 안내');
+  assert.equal(h.text('booth-result-link'), '내 기록');
+  assert.equal(h.text('booth-title'), 'AI를 속일 수있을까요?');
+  assert.equal(nodesOf(h.ids.get('booth-title')).find(node => node.tagName === 'b').textContent, '속일 수');
+  assert.match(h.text('booth-step-pick'), /AI REVIEW CHALLENGE/);
+  assert.match(h.text('booth-step-pick'), /공개 논문 한 곳을 몰래 고쳐 보세요\. AI가 2분 안에 찾아내는지 겨룹니다\. AI가 놓치면 부스에서 선물을 드려요\./);
+  assert.match(h.text('booth-step-pick'), /1논문 고르기2몰래 고치기3AI 검증/);
+  assert.equal(h.text('booth-search-box').startsWith('다른 공개 논문 직접 찾기'), true);
+  for (const id of ['booth-step-edit', 'booth-submit', 'booth-receipt']) assert.equal(h.ids.get(id).hidden, true, id);
+  h.handle.destroy();
+  assert.equal(h.content.children.some(node => node.id === 'booth'), false);
+  assert.equal(h.doc.documentElement.dataset.boothStep, undefined);
+});
 
-  const {doc, content, ids} = page();
-  const calls = [];
-  const storage = memoryStorage();
-  const token = 'fsg_' + 'a'.repeat(43);
-  let sessionToken = token;
-  const fetchImpl = async (url, init = {}) => {
-    const headers = init.headers || {};
-    const form = init.body && typeof init.body.get === 'function' ? init.body : null;
-    calls.push({
-      url: String(url), method: init.method || 'GET', auth: headers.Authorization || '',
-      contentType: headers['Content-Type'] || '',
-      body: typeof init.body === 'string' ? JSON.parse(init.body) : null,
-      form,
-    });
-    const path = String(url);
-    if (path.endsWith('/v1/booth/submissions') && sizeReject) {
-      return {ok: false, status: 413, headers: {get() { return null; }}, json: async () => ({error: {code: 'payload_too_large'}})};
-    }
-    const payload = path.endsWith('/v1/booth/config')
-      ? {enabled: true, submissionsOpen: true, announcement: '행사 안내', consentVersion: '2026-11-22.v1',
-        limits: {maxDeclared: 5, maxReason: 500, maxNickname: 24, maxPdfBytes: 16777216},
-        missions: [
-          {paperId: '2503.10497', title: 'Synthetic mission', license: 'cc-by-4.0', course: 'quick', hint: '8쪽 표를 고치세요', pageHint: 8},
-          {paperId: '2503.10498', title: 'Plain mission', pageHint: '8'},
-        ]}
-      : path.endsWith('/v1/booth/submissions')
-        ? {receipt: 'F-0042', claimKey: '7Q3K-M9XD', status: 'received', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:00Z'}
-        : path.endsWith('/v1/booth/claim')
-          ? {receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1, published: false}
-          : path.endsWith('/v1/booth/withdraw')
-            ? {receipt: 'F-0042', status: 'withdrawn', course: 'quick', declaredCount: 1, published: false}
-            : path.includes('/v1/papers/search')
-              ? {source: 'arxiv', page: 1, hasMore: false, results: [{id: '2503.10497', title: 'Synthetic result', authors: ['Ada'], year: 2026, license: 'cc-by-4.0'}]}
-              : path.includes('/v1/papers/pdf')
-                ? null
-                : {error: {code: 'not_found'}};
-    if (payload === null) {
-      const bytes = Buffer.from('%PDF-1.7 synthetic booth paper\n%%EOF\n');
-      return {
-        ok: true, status: 200,
-        headers: {get(name) {
-          if (name === 'X-Falsify-Paper-License') return 'cc-by-4.0';
-          if (name === 'Content-Disposition') return 'attachment; filename="arxiv-2503.10497.pdf"';
-          return null;
-        }},
-        arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
-        json: async () => ({}),
-      };
-    }
-    const status = path.endsWith('/v1/booth/submissions') ? 201 : payload.error ? 404 : 200;
-    return {ok: status >= 200 && status < 300, status, headers: {get() { return null; }}, json: async () => payload};
-  };
-  let sizeReject = false;
-  const location = {hash: ''};
-  const handle = booth.mount({
-    document: doc, fetch: fetchImpl, storage, location,
-    config: () => ({booth: {enabled: true}, apiBase: 'https://event.example', hostedAi: {apiBase: 'https://event.example'}}),
-    session: () => ({token: async () => sessionToken}),
+test('a mission ticket loads the paper, jumps to the hint page and opens edit', async () => {
+  const h = liveBooth();
+  await settle();
+  const tickets = missionButtons(h);
+  assert.equal(tickets.length, 2);
+  assert.equal(tickets[0].className, 'booth-tk booth-tk-h booth-mission');
+  assert.equal(tickets[0].textContent, 'arXiv 2503.10497 · CC BY 4.0Synthetic mission: a longer subtitle8쪽 표를 고치세요8쪽도전 →');
+  assert.equal(tickets[0].getAttribute('aria-label'), 'Synthetic mission: a longer subtitle · 8쪽에서 도전');
+  assert.equal(tickets[1].textContent, 'arXiv 2503.10498Plain mission도전 →');
+  assert.equal(nodesOf(h.ids.get('booth-missions')).some(node => /쪽으로 가기|이 논문으로 시작/.test(node.textContent || '')), false);
+  const ws = useWorkspace([]);
+  h.ids.get('paper-file').addEventListener('change', () => {
+    const file = h.ids.get('paper-file').files && h.ids.get('paper-file').files[0];
+    h.doc.dispatchEvent({type: 'falsify:document-clear'});
+    h.doc.dispatchEvent({type: 'falsify:document', detail: {file, fileHash: 'not-the-opened-pdf'}});
   });
-  assert.equal(content.children[0].id, 'booth');
-  assert.equal(ids.get('booth-search').hidden, true);
-  assert.match(ids.get('booth-consent-copy').textContent, /철회하면 서버의 수정본 PDF·설명·결과를 바로 지우고/);
-  assert.match(ids.get('booth-consent-copy').textContent, /CC BY-SA 논문의 수정본은 같은 라이선스로 공개합니다/);
-  await new Promise(resolve => setTimeout(resolve, 0));
-  assert.equal(calls[0].auth, '');
-  assert.equal(calls[0].url.endsWith('/v1/booth/config'), true);
-  assert.equal(ids.get('booth').hidden, false);
-  assert.equal(ids.get('booth-search').hidden, false);
-  assert.match(ids.get('booth-announce').textContent, /행사 안내/);
-  assert.match(ids.get('booth-missions').textContent, /Synthetic mission/);
-  assert.match(ids.get('booth-missions').textContent, /8쪽 표를 고치세요/);
-  const controls = [];
-  const walk = node => {
-    controls.push(node);
-    for (const kid of node.children) if (kid && typeof kid === 'object') walk(kid);
-  };
-  ids.get('booth-make').click();
-  assert.match(ids.get('booth-submit-status').textContent, /미션이나 검색에서 논문을 골라 시작해 주세요/);
-  assert.equal(calls.some(call => call.url.endsWith('/v1/booth/submissions')), false);
-  walk(ids.get('booth-missions'));
-  const pageButtons = controls.filter(node => node.tagName === 'button' && /쪽으로 가기/.test(node.textContent || ''));
-  assert.equal(pageButtons.length, 1);
-  assert.equal(pageButtons[0].textContent, '8쪽으로 가기');
-  const startPaper = controls.find(node => node.tagName === 'button' && /이 논문으로 시작/.test(node.textContent));
-  assert.ok(startPaper);
-  ids.get('paper-file').addEventListener('change', () => {
-    const file = ids.get('paper-file').files && ids.get('paper-file').files[0];
-    doc.dispatchEvent({type: 'falsify:document-clear'});
-    doc.dispatchEvent({type: 'falsify:document', detail: {file, fileHash: 'not-the-opened-pdf'}});
-  });
-  startPaper.dispatchEvent({type: 'click'});
-  await new Promise(resolve => setTimeout(resolve, 0));
-  assert.match(ids.get('booth-search-status').textContent, /논문을 열었습니다/);
-  assert.equal(ids.get('booth-submit').hidden, false);
-  doc.dispatchEvent({type: 'falsify:document-clear'});
-  assert.equal(ids.get('booth-submit').hidden, true);
-  startPaper.dispatchEvent({type: 'click'});
-  await new Promise(resolve => setTimeout(resolve, 0));
-  assert.equal(ids.get('booth-submit').hidden, false);
-  const sourceBytes = Buffer.from('%PDF-1.7 synthetic booth paper\n%%EOF\n');
-  const sourceHash = createHash('sha256').update(sourceBytes).digest('hex');
-  const edited = new File([EDITED], 'visitor-notes.txt', {type: 'text/plain'});
-  const sourceFile = new File([sourceBytes], 'source.pdf', {type: 'application/pdf'});
-  let workspaceEdits = [{enabled: true, pageIndex: 1, segmentId: 'p2-b1', before: BEFORE, after: AFTER}];
-  const hintedPages = [];
-  boothContext.FalsifyPaperWorkspace = {
-    getSource: () => ({fileHash: 'not-sha256', file: sourceFile}),
-    getEditSnapshot: () => ({revision: 3, edits: workspaceEdits}),
-    getCurrentOutput: () => null,
-    showPage(n) { hintedPages.push(n); return true; },
-  };
-  pageButtons[0].dispatchEvent({type: 'click'});
-  assert.deepEqual(hintedPages, [8]);
+  await pickMission(h);
+  assert.equal(h.step(), 'edit');
+  assert.deepEqual(ws.pages, [8]);
+  assert.equal(h.calls.filter(call => call.path.includes('/v1/papers/pdf')).length, 1);
+  assert.equal(h.calls.find(call => call.path.includes('/v1/papers/pdf')).auth, 'Bearer fsg_' + 'a'.repeat(43));
+  assert.equal(h.ids.get('booth-step-edit').hidden, false);
+  assert.equal(h.ids.get('booth-step-pick').hidden, true);
+  assert.equal(h.text('booth-hint'), '힌트 · 8쪽 표를 고치세요');
+  assert.match(h.text('booth-step-edit'), /← 논문 고르기2 \/ 3 몰래 고치기/);
+  h.ids.get('booth-edit-back').click();
+  assert.equal(h.step(), 'pick');
+  await pickMission(h);
+  assert.equal(h.step(), 'edit');
+  assert.deepEqual(ws.pages, [8, 8]);
+  assert.equal(h.calls.filter(call => call.path.includes('/v1/papers/pdf')).length, 1, 'the open paper is not fetched again');
+  h.doc.dispatchEvent({type: 'falsify:document-clear'});
+  assert.equal(h.step(), 'pick', 'losing the paper returns to pick');
+  await pickMission(h, 1);
+  assert.equal(h.step(), 'edit');
+  assert.equal(h.text('booth-hint'), '힌트 · 숫자, 결론 문장, 표 값 중 한 곳을 골라 티 나지 않게 바꿔 보세요.');
+  h.handle.destroy();
+});
+
+test('a failed paper load stays on pick with the reason', async () => {
+  const h = liveBooth({token: ''});
+  await settle();
+  await pickMission(h);
+  assert.equal(h.step(), 'pick');
+  assert.match(h.text('booth-mission-status'), /게스트 세션/);
+  h.handle.destroy();
+});
+
+test('the dock counts the workspace edits and 다음 is disabled at zero', async () => {
+  const h = liveBooth();
+  await settle();
+  const ws = useWorkspace([]);
+  await pickMission(h);
+  assert.equal(h.text('booth-dock-count'), '고친 곳 0개');
+  assert.match(h.text('booth-dock'), /여러 곳을 고쳐도 돼요/);
+  assert.equal(h.ids.get('booth-next').disabled, true);
+  assert.equal(h.ids.get('booth-next').textContent, '다음');
+  ws.edits = [...ONE_EDIT, {enabled: false, pageIndex: 2, before: 'off', after: 'skip'}, {enabled: true, pageIndex: 3, before: 'b', after: 'c'}];
+  h.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
+  assert.equal(h.text('booth-dock-count'), '고친 곳 2개');
+  assert.equal(h.ids.get('booth-next').disabled, false);
+  ws.edits = [];
+  h.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
+  assert.equal(h.ids.get('booth-next').disabled, true);
+  h.ids.get('booth-next').click();
+  await settle();
+  assert.equal(h.step(), 'edit');
+  assert.equal(h.text('booth-dock-status'), '');
+  h.handle.destroy();
+});
+
+test('다음 builds the submission PDF on the old make path, then opens send', async () => {
+  const h = liveBooth();
+  await settle();
+  const ws = useWorkspace(ONE_EDIT);
+  await pickMission(h);
+  h.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
   let generateClicks = 0;
-  ids.get('paper-generate').addEventListener('click', () => { generateClicks += 1; });
-  ids.get('booth-make').click();
+  h.ids.get('paper-generate').addEventListener('click', () => { generateClicks += 1; });
+  h.ids.get('booth-next').click();
   assert.equal(generateClicks, 1);
-  assert.match(ids.get('booth-submit-status').textContent, /수정본 PDF를 만들고 있습니다/);
-  doc.dispatchEvent({type: 'falsify:paper-generated', detail: {
-    file: edited, revision: 3,
-    edits: [{pageIndex: 1, segmentId: 'p2-b1', before: BEFORE, after: AFTER, rationale: RATIONALE}],
-  }});
-  await waitFor(() => /변경 전/.test(ids.get('booth-rows').textContent));
-  walk(ids.get('booth-rows'));
-  const select = controls.find(node => node.tagName === 'select');
-  const reason = controls.find(node => node.tagName === 'textarea');
-  select.value = 'number';
-  reason.value = '유의수준을 바꿔 결론이 성립하지 않음';
-  ids.get('booth-consent').checked = true;
-  ids.get('booth-consent').dispatchEvent({type: 'change'});
-  ids.get('booth-nickname').value = '부스방문자';
-  assert.equal(ids.get('booth-submit-button').disabled, false);
-  ids.get('booth-submit').dispatchEvent({type: 'submit', preventDefault() {}});
-  await new Promise(resolve => setTimeout(resolve, 0));
-  const posted = calls.find(call => call.url.endsWith('/v1/booth/submissions'));
-  assert.equal(posted.auth, 'Bearer ' + token);
+  assert.equal(h.text('booth-dock-status'), '수정본을 만드는 중…');
+  assert.equal(h.ids.get('booth-dock').getAttribute('data-busy'), 'true');
+  assert.equal(h.ids.get('booth-next').disabled, true);
+  assert.equal(h.step(), 'edit');
+  h.doc.dispatchEvent(generated([{pageIndex: 1, segmentId: 'p2', before: BEFORE, after: AFTER, rationale: RATIONALE}]));
+  await waitFor(() => h.step() === 'send');
+  assert.equal(h.text('booth-dock-status'), '');
+  assert.equal(h.ids.get('booth-dock').getAttribute('data-busy'), 'false');
+  assert.match(h.text('booth-submit'), /← 고치기3 \/ 3 AI에게 제출/);
+  const card = nodesOf(h.ids.get('booth-rows')).find(node => node.className === 'booth-panel booth-card');
+  assert.match(card.textContent, /^내가 숨긴 결함 · 2쪽/);
+  const diff = nodesOf(card).find(node => node.className === 'booth-diff');
+  assert.equal(nodesOf(diff).find(node => node.tagName === 'del').textContent, '4.2');
+  assert.equal(nodesOf(diff).find(node => node.tagName === 'ins').textContent, '5.8');
+  assert.equal(diff.textContent, 'The mean was 4.25.8 (SD 1.1).');
+  assert.match(card.textContent, /이 설명은 AI에게 보내지 않아요\. 판정이 맞는지 운영진만 확인해요\./);
+  assert.equal(h.ids.get('booth-courses'), undefined);
+  assert.equal(h.ids.get('booth-make'), undefined);
+  // Back to edit and 다음 again: the current output is adopted directly and the declaration stays.
+  declare(h, '수치·통계', '평균을 바꿨습니다');
+  h.ids.get('booth-send-back').click();
+  assert.equal(h.step(), 'edit');
+  ws.output = {file: new File([EDITED], 'edited.pdf', {type: 'application/pdf'}), originalSourceSha256: SOURCE_SHA, revision: 2};
+  h.ids.get('booth-next').click();
+  await waitFor(() => h.step() === 'send');
+  assert.equal(generateClicks, 1);
+  assert.equal(chip(h, '수치·통계').className, 'booth-chip on');
+  assert.equal(nodesOf(h.ids.get('booth-rows')).find(node => node.tagName === 'textarea').value, '평균을 바꿨습니다');
+  h.handle.destroy();
+});
+
+test('a failed 다음 stays in edit with a clear message', async () => {
+  const h = liveBooth({maxDeclared: 3});
+  await settle();
+  const ws = useWorkspace(ONE_EDIT);
+  await pickMission(h);
+  h.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
+  h.ids.get('booth-next').click();
+  h.doc.dispatchEvent(generated(ONE_EDIT, new File(['not a pdf'], 'note.txt', {type: 'text/plain'})));
+  await settle();
+  assert.equal(h.step(), 'edit');
+  assert.match(h.text('booth-dock-status'), /PDF 파일을 다시 만들어 주세요/);
+  assert.equal(h.ids.get('booth-next').disabled, false);
+  ws.edits = Array.from({length: 4}, (_, index) => ({enabled: true, pageIndex: index, segmentId: 's' + index, before: 'before ' + index, after: 'after ' + index}));
+  h.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
+  assert.equal(h.text('booth-dock-status'), '');
+  h.ids.get('booth-next').click();
+  h.doc.dispatchEvent(generated(ws.edits));
+  await settle();
+  assert.equal(h.step(), 'edit');
+  assert.equal(h.text('booth-dock-status'), '고친 곳이 4개예요. 제출하려면 3개 이하로 남겨 주세요.');
+  ws.edits = ONE_EDIT;
+  h.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
+  h.ids.get('booth-next').click();
+  h.doc.dispatchEvent({type: 'falsify:paper-generated', detail: {file: new File([SOURCE_BYTES], 'same.pdf', {type: 'application/pdf'}), sourceFileHash: SOURCE_SHA, edits: ONE_EDIT}});
+  await settle();
+  assert.match(h.text('booth-dock-status'), /원본과 같습니다/);
+  h.ids.get('paper-generate').disabled = true;
+  h.ids.get('booth-next').click();
+  await settle();
+  assert.equal(h.step(), 'edit');
+  assert.equal(h.text('booth-dock-status'), '수정본을 만들지 못했어요. 고친 곳을 확인한 뒤 「다음」을 다시 눌러 주세요.');
+  assert.equal(h.calls.some(call => call.path.endsWith('/v1/booth/submissions')), false);
+  h.handle.destroy();
+});
+
+test('send declares chips and reasons and posts only the contract fields', async () => {
+  const h = liveBooth({submits: [{status: 413, body: {error: {code: 'payload_too_large'}}}]});
+  await settle();
+  await reachSend(h);
+  const chips = nodesOf(h.ids.get('booth-rows')).filter(node => node.tagName === 'button' && node.className.startsWith('booth-chip'));
+  assert.deepEqual(chips.map(node => node.textContent), ['수치·통계', '그림·표', '인용·출처', '논리·결론', '방법·실험 설계', '기타']);
+  assert.equal(chips.every(node => node.getAttribute('aria-pressed') === 'false'), true);
+  agree(h);
+  assert.equal(h.ids.get('booth-submit-button').disabled, false);
+  assert.equal(h.text('booth-submit-button'), 'AI에게 제출하기');
+  await submit(h);
+  assert.equal(h.text('booth-submit-status'), '고친 곳마다 결함 유형을 고르고 이유를 적어 주세요.');
+  assert.equal(h.calls.some(call => call.path.endsWith('/v1/booth/submissions')), false);
+  chip(h, '그림·표').click();
+  chip(h, '수치·통계').click();
+  assert.equal(chip(h, '수치·통계').className, 'booth-chip on');
+  assert.equal(chip(h, '수치·통계').getAttribute('aria-pressed'), 'true');
+  assert.equal(chip(h, '그림·표').className, 'booth-chip');
+  declare(h, '', '유의수준을 바꿔 결론이 성립하지 않음');
+  h.ids.get('booth-nickname').value = '부스방문자';
+  await submit(h);
+  assert.equal(h.text('booth-submit-status'), '수정본 PDF는 16MB 이하만 제출할 수 있습니다.');
+  assert.equal(h.step(), 'send');
+  await submit(h);
+  const posts = h.calls.filter(call => call.path.endsWith('/v1/booth/submissions'));
+  assert.equal(posts.length, 2);
+  const posted = posts[1];
+  assert.equal(posted.auth, 'Bearer fsg_' + 'a'.repeat(43));
   assert.equal(posted.contentType, '');
   assert.deepEqual([...posted.form.keys()], ['meta', 'pdf']);
   const meta = JSON.parse(posted.form.get('meta'));
-  assert.equal(Object.hasOwn(meta, 'jobId'), false);
   assert.deepEqual(Object.keys(meta), ['course', 'declared', 'paper', 'nickname', 'consentVersion', 'editedSha256']);
+  assert.equal(meta.course, 'quick');
+  assert.equal(meta.consentVersion, '2026-11-22.v2');
   assert.equal(meta.editedSha256, EDITED_SHA);
-  assert.deepEqual(meta.paper, {
-    source: 'mission', id: '2503.10497', title: 'Synthetic mission', license: 'cc-by-4.0', sourceSha256: sourceHash,
-  });
+  assert.deepEqual(meta.paper, {source: 'mission', id: '2503.10497', title: 'Synthetic mission: a longer subtitle', license: 'cc-by-4.0', sourceSha256: SOURCE_SHA});
+  assert.deepEqual(meta.declared, [{pageIndex: 1, segmentId: 'p2', before: BEFORE, after: AFTER, defectType: 'number', reason: '유의수준을 바꿔 결론이 성립하지 않음'}]);
+  assert.equal(JSON.stringify(meta).includes(RATIONALE), false);
   assert.equal(posted.form.get('pdf').name, 'edited.pdf');
   assert.equal(posted.form.get('pdf').type, 'application/pdf');
   assert.equal(posted.form.get('pdf').size, EDITED.length);
-  sizeReject = true;
-  ids.get('booth-submit-button').disabled = false;
-  ids.get('booth-submit').dispatchEvent({type: 'submit', preventDefault() {}});
-  await waitFor(() => /16MB/.test(ids.get('booth-submit-status').textContent));
-  assert.equal(ids.get('booth-submit-status').textContent, '수정본 PDF는 16MB 이하만 제출할 수 있습니다.');
-  sizeReject = false;
-  workspaceEdits = Array.from({length: 6}, (_, index) => ({
-    enabled: true, pageIndex: index, segmentId: 's' + index, before: 'before ' + index, after: 'after ' + index,
-  }));
-  doc.dispatchEvent({type: 'falsify:paper-generated', detail: {file: edited, sourceFileHash: sourceHash, revision: 4, edits: workspaceEdits}});
-  await waitFor(() => /켠 편집이 6건입니다/.test(ids.get('booth-submit-status').textContent));
-  assert.match(ids.get('booth-submit-status').textContent, /켠 편집이 6건입니다/);
-  assert.match(ids.get('booth-submit-status').textContent, /5건 이하로 남겨 주세요/);
-  assert.equal(ids.get('booth-submit-button').disabled, true);
-  assert.equal(ids.get('booth-rows').textContent, '');
-  ids.get('booth-submit').dispatchEvent({type: 'submit', preventDefault() {}});
-  await new Promise(resolve => setTimeout(resolve, 0));
-  assert.equal(calls.filter(call => call.url.endsWith('/v1/booth/submissions')).length, 2);
-  doc.dispatchEvent({type: 'falsify:paper-generated', detail: {
-    file: new File(['not a pdf'], 'note.txt', {type: 'text/plain'}), sourceFileHash: sourceHash, revision: 5, edits: workspaceEdits.slice(0, 1),
-  }});
-  await waitFor(() => /PDF 파일을 다시 만들어 주세요/.test(ids.get('booth-submit-status').textContent));
-  assert.match(ids.get('booth-submit-status').textContent, /PDF 파일을 다시 만들어 주세요/);
-  doc.dispatchEvent({type: 'falsify:document', detail: {file: {name: 'other.pdf'}}});
-  ids.get('booth-submit').dispatchEvent({type: 'submit', preventDefault() {}});
-  await new Promise(resolve => setTimeout(resolve, 0));
-  assert.match(ids.get('booth-submit-status').textContent, /미션이나 검색에서 논문을 골라 시작해 주세요/);
-  assert.equal(calls.filter(call => call.url.endsWith('/v1/booth/submissions')).length, 2);
-  assert.deepEqual(Object.keys(meta.declared[0]), ['pageIndex', 'segmentId', 'before', 'after', 'defectType', 'reason']);
-  assert.equal(JSON.stringify(meta).includes(RATIONALE), false);
-  assert.equal(ids.get('booth-receipt-code').textContent, 'F-0042');
-  assert.equal(ids.get('booth-claim-code').textContent, '7Q3K-M9XD');
-  assert.equal(booth.readReceipts(storage)[0].receipt, 'F-0042');
-  ids.get('booth-result-link').dispatchEvent({type: 'click', preventDefault() {}});
-  assert.equal(location.hash, '#booth-result');
-  assert.equal(ids.get('booth-result').hidden, false);
-  assert.equal(ids.get('booth-claim-receipt').value, 'F-0042');
-  ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
-  await new Promise(resolve => setTimeout(resolve, 0));
-  const claim = calls.find(call => call.url.endsWith('/v1/booth/claim'));
-  assert.equal(claim.auth, '');
-  assert.deepEqual(claim.body, {receipt: 'F-0042', claimKey: '7Q3K-M9XD'});
-  assert.match(ids.get('booth-result-status').textContent, /검토 중/);
-  ids.get('booth-withdraw').dispatchEvent({type: 'click'});
-  assert.equal(ids.get('booth-withdraw-confirm').hidden, false);
-  ids.get('booth-withdraw-confirm').dispatchEvent({type: 'click'});
-  await new Promise(resolve => setTimeout(resolve, 0));
-  const withdrawn = calls.find(call => call.url.endsWith('/v1/booth/withdraw'));
-  assert.equal(withdrawn.auth, '');
-  assert.match(ids.get('booth-result-status').textContent, /철회됨/);
-  ids.get('booth-search-q').value = '통계';
-  ids.get('booth-search').dispatchEvent({type: 'submit', preventDefault() {}});
-  await new Promise(resolve => setTimeout(resolve, 0));
-  const search = calls.find(call => call.url.includes('/v1/papers/search'));
-  assert.equal(search.auth, 'Bearer ' + token);
-  assert.equal(search.url.includes('reason'), false);
-  assert.match(ids.get('booth-search-results').textContent, /Synthetic result/);
-  sessionToken = '';
-  ids.get('booth-search').dispatchEvent({type: 'submit', preventDefault() {}});
-  await new Promise(resolve => setTimeout(resolve, 0));
-  assert.match(ids.get('booth-search-status').textContent, /게스트 세션/);
-  handle.destroy();
-  assert.equal(content.children.some(node => node.id === 'booth'), false);
+  assert.equal(h.step(), 'ticket');
+  assert.deepEqual(plain(booth.readReceipts(h.storage)[0]), {
+    receipt: 'F-0042', claimKey: '7Q3K-M9XD', createdAt: '2026-11-22T01:00:30Z',
+    title: 'Synthetic mission: a longer subtitle', pages: [2], count: 1,
+  });
+  h.handle.destroy();
+});
 
+test('consent shows a three-line summary, the full versioned text and refuses unknown versions', async () => {
+  const h = liveBooth();
+  await settle();
+  await reachSend(h);
+  const lines = nodesOf(h.ids.get('booth-consent-summary')).filter(node => node.tagName === 'li').map(node => node.textContent);
+  assert.deepEqual(lines, ['수정본 PDF만 AI(Anthropic)에 보내요.', '이름·연락처는 받지 않아요.', '확인키로 언제든 철회할 수 있어요.']);
+  assert.equal(h.ids.get('booth-consent-full').tagName, 'details');
+  assert.match(h.text('booth-consent-full'), /^동의 내용 전체 보기/);
+  assert.equal(h.text('booth-consent-copy'), booth.CONSENT_COPY['2026-11-22.v2']);
+  assert.equal(h.text('booth-consent-version'), '동의 버전 · 2026-11-22.v2');
+  assert.match(h.text('booth-consent-panel'), /동의 내용을 읽었고 동의해요$/);
+  assert.equal(h.ids.get('booth-submit-button').disabled, true);
+  agree(h);
+  assert.equal(h.ids.get('booth-submit-button').disabled, false);
+  h.handle.destroy();
+  const old = liveBooth({consentVersion: '2026-11-22.v1'});
+  await settle();
+  assert.equal(old.text('booth-consent-copy'), booth.CONSENT_COPY['2026-11-22.v1']);
+  assert.match(old.text('booth-consent-summary'), /마감 후 AI\(Anthropic 또는 OpenAI\)/);
+  old.handle.destroy();
+  const unknown = liveBooth({consentVersion: '2026-11-22.v9'});
+  await settle();
+  assert.match(unknown.text('booth-consent-copy'), /새 동의 문구가 없어 제출할 수 없습니다/);
+  assert.match(unknown.text('booth-consent-summary'), /새 동의 문구가 없어/);
+  assert.equal(unknown.text('booth-consent-version'), '');
+  assert.equal(unknown.ids.get('booth-consent').disabled, true);
+  await submitThroughBooth(unknown);
+  assert.equal(unknown.calls.some(call => call.path.endsWith('/v1/booth/submissions')), false);
+  assert.match(unknown.text('booth-submit-status'), /새 동의 문구가 없어/);
+  assert.equal(unknown.ids.get('booth-submit-button').disabled, true);
+  unknown.handle.destroy();
+  assert.deepEqual(plain(booth.consentSummaryFor('2026-11-22.v2')), lines);
+  assert.deepEqual(plain(booth.consentSummaryFor('2026-11-22.v9')), []);
+  assert.deepEqual(plain(booth.consentSummaryFor('toString')), []);
+});
+
+test('the ticket polls the claim view until the AI result is published', async () => {
+  const h = liveBooth({claims: [
+    {receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1, published: false},
+    {status: 429, headers: {'Retry-After': '45'}, body: {error: {code: 'rate_limited'}}},
+    {status: 429, body: {error: {code: 'rate_limited'}}},
+    {receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1, published: false},
+    {receipt: 'F-0042', status: 'judged', course: 'quick', declaredCount: 1, published: true, outcome: 'missed', createdAt: '2026-11-22T01:00:30Z',
+      publicNote: '<b>표</b> 값 변경을 놓쳤어요', prizeMessage: '부스에서 작은 선물을 받아 가세요', publishedAt: '2026-11-22T01:03:00Z'},
+  ]});
+  await settle();
+  await submitThroughBooth(h);
+  assert.equal(h.step(), 'ticket');
+  assert.equal(h.text('booth-receipt-code'), 'F-0042');
+  assert.equal(h.text('booth-claim-code'), '7Q3K-M9XD');
+  assert.equal(h.text('booth-ticket-paper'), 'Synthetic mission');
+  assert.equal(h.text('booth-ticket-pages'), '2쪽 · 1곳');
+  assert.match(h.text('booth-ticket'), /^FALSIFY · AI REVIEW TICKET/);
+  assert.equal(h.ids.get('booth-ticket-wait').hidden, false);
+  assert.equal(h.ids.get('booth-ticket-result').hidden, true);
+  assert.equal(h.ids.get('booth-ticket-duration-cell').hidden, true);
+  assert.equal(h.text('booth-ticket-state'), 'AI 검증 차례를 기다리는 중');
+  assert.equal(h.text('booth-ticket-elapsed'), '0:00');
+  assert.equal(h.intervals.length, 1);
+  h.clock.t += 42000;
+  h.intervals[0].fn();
+  assert.equal(h.text('booth-ticket-elapsed'), '0:42');
+  h.clock.t -= 42000;
+  assert.equal(h.text('booth-ticket-steps'), '수정본 받음AI가 앞뒤 문장과 표를 대조하는 중결과');
+  assert.match(h.text('booth-live-capture'), /^이 티켓을 캡처해 두세요\. 화면을 닫아도 「내 기록」에서/);
+  assert.equal(h.ids.get('booth-live-again').hidden, true);
+  assert.equal(h.text('booth-chances-top'), '기회 4번 남음');
+  assert.equal(h.claimCalls().length, 0);
+  assert.equal(await h.tick(), 15000);
+  assert.deepEqual(h.claimCalls()[0].body, {receipt: 'F-0042', claimKey: '7Q3K-M9XD'});
+  assert.equal(h.text('booth-ticket-state'), 'AI가 논문을 읽는 중');
+  assert.equal(await h.tick(), 15000);
+  assert.equal(await h.tick(), 45000);
+  assert.equal(await h.tick(), 60000);
+  assert.equal(h.ids.get('booth-ticket-wait').hidden, false);
+  assert.equal(await h.tick(), 15000);
+  assert.equal(h.claimCalls().length, 5);
+  assert.equal(h.timers.length, 0);
+  assert.equal(h.intervals.length, 0, 'the clock stops with the result');
+  assert.equal(h.ids.get('booth-ticket-wait').hidden, true);
+  assert.equal(h.ids.get('booth-ticket-steps').hidden, true);
+  assert.equal(h.ids.get('booth-ticket-result').hidden, false);
+  assert.equal(h.text('booth-live-title'), 'AI가 못 찾았어요');
+  assert.equal(nodesOf(h.ids.get('booth-live-title')).find(node => node.tagName === 'b').textContent, '못 찾았어요');
+  assert.equal(h.ids.get('booth-stamp').className, 'booth-stamp pass');
+  assert.equal(h.text('booth-stamp'), '통과PASSED');
+  assert.match(h.text('booth-ticket-result'), /^AI 검증 결과/);
+  assert.equal(h.text('booth-ticket-duration'), '2분 30초');
+  assert.equal(h.ids.get('booth-ticket-duration-cell').hidden, false);
+  assert.equal(h.ids.get('booth-gift').hidden, false);
+  assert.match(h.text('booth-gift'), /^교환권 · 1인 1회부스에서 작은 선물을 받아 가세요/);
+  assert.equal(h.text('booth-live-note'), 'AI가 의심한 곳<b>표</b> 값 변경을 놓쳤어요');
+  assert.equal(h.ids.get('booth-live-again').hidden, false);
+  assert.equal(h.text('booth-live-again'), '다시 도전하기 · 기회 4번 남음');
+  assert.equal(booth.readReceipts(h.storage)[0].outcome, 'missed');
+  const history = nodesOf(h.ids.get('booth-history')).filter(node => node.tagName === 'button');
+  assert.deepEqual(history.map(node => node.children.map(kid => kid.textContent)), [['F-0042 · Synthetic mission', '통과']]);
+  assert.equal(history[0].className, 'booth-hist-row pass');
+  assert.equal(h.ids.get('booth-withdraw-box').hidden, false);
+  h.ids.get('booth-live-again').click();
+  assert.equal(h.step(), 'pick');
+  assert.equal(h.ids.get('booth-receipt').hidden, true);
+  assert.equal(h.ids.get('booth-submit').hidden, true);
+  assert.equal(h.ids.get('booth-consent').checked, false);
+  assert.equal(h.ids.get('booth-rows').textContent, '');
+  assert.equal(h.ids.get('booth-missions').hidden, false);
+  assert.equal(h.ids.get('booth-landing').hidden, false);
+  assert.equal(h.timers.length, 0);
+  h.handle.destroy();
+});
+
+test('polling stops after 15 min with a recheck button and lookups reuse the ticket', async () => {
+  const pending = {receipt: 'F-0042', status: 'received', course: 'quick', declaredCount: 1, published: false};
+  const h = liveBooth({claims: [pending]});
+  await settle();
+  h.ids.get('booth-result-link').dispatchEvent({type: 'click', preventDefault() {}});
+  assert.equal(h.location.hash, '#booth-result');
+  assert.equal(h.ids.get('booth-result').hidden, false);
+  assert.equal(h.ids.get('booth-landing').hidden, true);
+  assert.equal(h.step(), 'pick');
+  h.ids.get('booth-claim-receipt').value = 'f-0042';
+  h.ids.get('booth-claim-key').value = '7q3k m9xd';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(h.claimCalls()[0].auth, '');
+  assert.deepEqual(h.claimCalls()[0].body, {receipt: 'F-0042', claimKey: '7Q3K-M9XD'});
+  assert.equal(h.step(), 'ticket');
+  assert.equal(h.location.hash, '#booth');
+  assert.equal(h.text('booth-claim-code'), '7Q3K-M9XD');
+  assert.equal(h.ids.get('booth-ticket-paper-cell').hidden, true);
+  assert.equal(h.text('booth-ticket-pages'), '1곳');
+  const delays = [];
+  while (h.timers.length) delays.push(await h.tick());
+  assert.equal(delays.length, 12 + 24);
+  assert.equal(delays.reduce((sum, ms) => sum + ms, 0), 900000);
+  assert.equal(h.claimCalls().length, 1 + 36);
+  assert.equal(h.ids.get('booth-live-recheck').hidden, false);
+  assert.equal(h.text('booth-live-recheck'), '결과 다시 보기');
+  h.ids.get('booth-live-recheck').click();
+  await settle();
+  assert.equal(h.claimCalls().length, 38);
+  assert.equal(h.ids.get('booth-live-recheck').hidden, true);
+  assert.equal(h.timers.length, 1);
+  assert.equal(h.timers[0].ms, 15000);
+  h.handle.destroy();
+  assert.equal(h.timers.length, 0);
+  assert.equal(h.intervals.length, 0);
+});
+
+test('a wrong claim stays on 내 기록 with the reason', async () => {
+  const h = liveBooth({claims: []});
+  await settle();
+  h.ids.get('booth-result-link').dispatchEvent({type: 'click', preventDefault() {}});
+  h.ids.get('booth-claim-receipt').value = 'F-0042';
+  h.ids.get('booth-claim-key').value = 'bad';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.match(h.text('booth-result-error'), /접수번호 또는 확인키가 맞지 않습니다/);
+  h.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(h.step(), 'pick');
+  assert.match(h.text('booth-result-error'), /접수번호 또는 확인키가 맞지 않습니다/);
+  h.ids.get('booth-records-back').click();
+  assert.equal(h.ids.get('booth-result').hidden, true);
+  assert.equal(h.ids.get('booth-landing').hidden, false);
+  h.handle.destroy();
+});
+
+test('every final outcome shows its headline, stamp and gift ticket', async () => {
+  const cases = [
+    ['caught', 'AI가 찾아냈어요', '찾아냈어요', 'booth-stamp fail', '적발DETECTED'],
+    ['partial', 'AI가 거의 찾았어요', '거의 찾았어요', 'booth-stamp fail', '적발DETECTED'],
+    ['missed', 'AI가 못 찾았어요', '못 찾았어요', 'booth-stamp pass', '통과PASSED'],
+    ['invalid', '결함으로 인정되지 않았어요', '인정되지 않았어요', 'booth-stamp void', '무효VOID'],
+  ];
+  for (const [outcome, title, strong, stampClass, stampText] of cases) {
+    for (const prize of ['prize ' + outcome, '']) {
+      const h = liveBooth({claims: [{receipt: 'F-0042', status: outcome === 'invalid' ? 'invalid' : 'judged', course: 'quick', declaredCount: 1,
+        published: true, outcome, publicNote: 'note ' + outcome, prizeMessage: prize || undefined}]});
+      await settle();
+      h.ids.get('booth-claim-receipt').value = 'F-0042';
+      h.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+      h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+      await settle();
+      assert.equal(h.step(), 'ticket');
+      assert.equal(h.text('booth-live-title'), title, outcome);
+      assert.equal(nodesOf(h.ids.get('booth-live-title')).find(node => node.tagName === 'b').textContent, strong);
+      assert.equal(h.ids.get('booth-stamp').className, stampClass);
+      assert.equal(h.text('booth-stamp'), stampText);
+      assert.equal(h.ids.get('booth-gift').hidden, !prize, outcome + ' gift');
+      assert.equal(h.text('booth-live-prize'), prize);
+      assert.match(h.text('booth-live-note'), new RegExp('note ' + outcome + '$'));
+      assert.equal(h.ids.get('booth-live-tip').hidden, !(outcome === 'caught' || outcome === 'partial'));
+      assert.equal(h.ids.get('booth-ticket-duration-cell').hidden, true, 'no publishedAt, no duration');
+      assert.equal(h.ids.get('booth-live-again').hidden, false);
+      assert.equal(h.timers.length, 0);
+      h.handle.destroy();
+    }
+  }
+  const w = liveBooth({claims: [{receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1, published: false}],
+    withdrawn: {receipt: 'F-0042', status: 'withdrawn', course: 'quick', declaredCount: 1, published: false}});
+  await settle();
+  w.ids.get('booth-claim-receipt').value = 'F-0042';
+  w.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+  w.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(w.ids.get('booth-withdraw-box').tagName, 'details');
+  assert.equal(w.text('booth-withdraw-box').startsWith('제출 철회'), true);
+  assert.equal(w.ids.get('booth-withdraw-confirm').hidden, true);
+  w.ids.get('booth-withdraw').click();
+  assert.equal(w.ids.get('booth-withdraw-confirm').hidden, false);
+  assert.equal(w.calls.some(call => call.path.endsWith('/v1/booth/withdraw')), false);
+  w.ids.get('booth-withdraw-confirm').click();
+  await settle();
+  const withdrawn = w.calls.find(call => call.path.endsWith('/v1/booth/withdraw'));
+  assert.equal(withdrawn.auth, '');
+  assert.deepEqual(withdrawn.body, {receipt: 'F-0042', claimKey: '7Q3K-M9XD'});
+  assert.equal(w.text('booth-live-title'), '제출을 철회했어요');
+  assert.equal(w.text('booth-stamp'), '철회WITHDRAWN');
+  assert.equal(w.ids.get('booth-withdraw-box').hidden, true);
+  assert.equal(w.ids.get('booth-live-again').hidden, false);
+  assert.equal(w.timers.length, 0);
+  w.handle.destroy();
+});
+
+/* The CLI writes publicNote from tools/booth templates; the ticket reads those lines back. */
+test('publicNote parses the three CLI templates and falls back to plain text', async () => {
+  const config = JSON.parse(await readFile(fileURLToPath(new URL('../../tools/booth/booth.config.example.json', import.meta.url)), 'utf8'));
+  const {buildPublicNote} = await import('../../tools/booth/lib/note.mjs');
+  const templates = config.live.publicNote;
+  const finding = {pageIndex: 8, quote: 'reducing detection and localization time by 10% and 43%', rationale: 'Finding 5 and the results disagree.'};
+  const caught = buildPublicNote({outcome: 'caught', matched: finding, templates});
+  const partial = buildPublicNote({outcome: 'partial', matched: finding, templates});
+  const missed = buildPublicNote({outcome: 'missed', first: finding, templates});
+  const none = buildPublicNote({outcome: 'missed', first: null, templates});
+  assert.deepEqual(plain(booth.parsePublicNote(caught)), {
+    page: '9', quote: 'reducing detection and localization time by 10% and 43%',
+    opinion: 'Finding 5 and the results disagree.', text: 'AI가 심어 둔 결함을 찾았습니다.',
+  });
+  assert.deepEqual(plain(booth.parsePublicNote(partial)), {
+    page: '9', quote: 'reducing detection and localization time by 10% and 43%',
+    opinion: 'Finding 5 and the results disagree.', text: 'AI가 심어 둔 결함에 거의 다가갔습니다. 이번에는 찾은 것으로 봅니다.',
+  });
+  assert.deepEqual(plain(booth.parsePublicNote(missed)), {page: '', quote: '', opinion: '', text: missed});
+  assert.deepEqual(plain(booth.parsePublicNote(none)), {page: '', quote: '', opinion: '', text: none});
+  assert.deepEqual(plain(booth.parsePublicNote('운영진 메모\n두 번째 줄')), {page: '', quote: '', opinion: '', text: '운영진 메모\n두 번째 줄'});
+  assert.deepEqual(plain(booth.parsePublicNote('찾았어요 (AI가 짚은 곳: ?쪽)')), {page: '', quote: '', opinion: '', text: '찾았어요'});
+  assert.equal(booth.parsePublicNote(null).text, '');
+  const h = liveBooth({claims: [{receipt: 'F-0042', status: 'judged', published: true, outcome: 'caught', publicNote: caught,
+    createdAt: '2026-11-22T01:00:00Z', publishedAt: '2026-11-22T01:02:14Z'}]});
+  await settle();
+  h.ids.get('booth-claim-receipt').value = 'F-0042';
+  h.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(h.text('booth-live-page'), 'AI가 짚은 곳 · 9쪽');
+  assert.equal(h.ids.get('booth-live-page').hidden, false);
+  const note = nodesOf(h.ids.get('booth-live-note'));
+  assert.equal(note.find(node => node.tagName === 'blockquote').textContent, 'reducing detection and localization time by 10% and 43%');
+  assert.deepEqual(note.filter(node => node.className.startsWith('booth-klab')).map(node => node.textContent), ['AI 의견']);
+  assert.equal(h.text('booth-live-note'), 'AI가 심어 둔 결함을 찾았습니다.reducing detection and localization time by 10% and 43%AI 의견Finding 5 and the results disagree.');
+  assert.equal(h.text('booth-ticket-duration'), '2분 14초');
+  h.handle.destroy();
+});
+
+test('chances count down from the per-guest cap and never go below zero', async () => {
+  assert.equal(booth.chancesLeft(5, 0), 5);
+  assert.equal(booth.chancesLeft(5, 1), 4);
+  assert.equal(booth.chancesLeft(5, 7), 0);
+  assert.equal(booth.chancesLeft(undefined, 2), 3);
+  const storage = memoryStorage();
+  for (let i = 1; i <= 2; i += 1) booth.rememberReceipt(storage, {receipt: 'F-000' + i, claimKey: '7Q3K-M9XD', createdAt: '2026-11-21T01:00:00Z'});
+  const h = liveBooth({storage, claims: [{receipt: 'F-0002', status: 'judged', published: true, outcome: 'caught'}]});
+  await settle();
+  assert.equal(h.text('booth-chances-top'), '기회 3번 남음');
+  assert.equal(h.text('booth-live-again'), '다시 도전하기 · 기회 3번 남음');
+  h.handle.destroy();
+  for (let i = 3; i <= 7; i += 1) booth.rememberReceipt(storage, {receipt: 'F-000' + i, claimKey: '7Q3K-M9XD', createdAt: '2026-11-21T01:00:00Z'});
+  const full = liveBooth({storage});
+  await settle();
+  assert.equal(full.text('booth-live-again'), '다시 도전하기 · 기회 0번 남음');
+  full.handle.destroy();
+});
+
+test('the diff shows only the changed region with a little context', () => {
+  assert.deepEqual(plain(booth.diffParts('Ragas 0.95 0.78 0.70', 'Ragas 0.50 0.78 0.70')), {lead: 'Ragas ', removed: '0.95', added: '0.50', tail: ' 0.78 0.70'});
+  const long = 'x'.repeat(60) + ' the mean was 4.2 in the treated arm ' + 'y'.repeat(60);
+  const parts = booth.diffParts(long, long.replace('4.2', '5.8'));
+  assert.equal(parts.removed, '4.2');
+  assert.equal(parts.added, '5.8');
+  assert.equal(parts.lead, '…' + long.slice(long.indexOf('4.2') - 24, long.indexOf('4.2')));
+  assert.equal(parts.tail.endsWith('…'), true);
+  assert.equal(parts.lead.length + parts.removed.length + parts.tail.length < 60, true);
+  assert.deepEqual(plain(booth.diffParts('remove this word please', 'remove word please')), {lead: 'remove ', removed: 'this ', added: '', tail: 'word please'});
+  assert.deepEqual(plain(booth.diffParts('a', 'a b')), {lead: 'a', removed: '', added: ' b', tail: ''});
+  assert.equal(booth.licenseLabel('cc-by-sa-4.0'), 'CC BY-SA 4.0');
+  assert.equal(booth.licenseLabel('cc0'), 'CC0');
+  assert.equal(booth.licenseLabel('mit'), '');
+  assert.equal(booth.shortTitle('Ragas: Automated Evaluation'), 'Ragas');
+  assert.equal(booth.formatClock(42000), '0:42');
+  assert.equal(booth.formatClock(-5), '0:00');
+  assert.equal(booth.formatDuration(98000), '1분 38초');
+  assert.equal(booth.formatDuration(9000), '9초');
+  assert.equal(booth.formatDuration(120000), '2분');
+});
+
+test('a cold reload with a stored receipt resumes polling and lists receipts', async () => {
+  const storage = memoryStorage();
+  booth.rememberReceipt(storage, {receipt: 'F-0041', claimKey: 'AAAA-BBBB', createdAt: '2026-11-22T00:10:00Z', title: 'Older paper', pages: [3, 3, 1], outcome: 'caught'});
+  booth.rememberReceipt(storage, {receipt: 'F-0042', claimKey: '7Q3K-M9XD', createdAt: '2026-11-22T01:00:00Z'});
+  assert.deepEqual(plain(booth.readReceipts(storage)[1].pages), [1, 3]);
+  const h = liveBooth({storage, claims: [
+    {receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1, published: false},
+    {receipt: 'F-0042', status: 'judged', course: 'quick', declaredCount: 1, published: true, outcome: 'caught', publicNote: '잡았어요'},
+    {receipt: 'F-0041', status: 'judged', course: 'quick', declaredCount: 1, published: true, outcome: 'caught', publicNote: '잡았어요'},
+  ]});
+  await settle();
+  assert.equal(h.claimCalls().length, 1);
+  assert.deepEqual(h.claimCalls()[0].body, {receipt: 'F-0042', claimKey: '7Q3K-M9XD'});
+  assert.equal(h.step(), 'ticket');
+  assert.equal(h.text('booth-ticket-state'), 'AI가 논문을 읽는 중');
+  const items = nodesOf(h.ids.get('booth-receipts-list')).filter(node => node.tagName === 'button');
+  assert.deepEqual(items.map(node => node.children.map(kid => kid.textContent)), [['F-0042', '결과 보기'], ['F-0041 · Older paper', '적발']]);
+  assert.equal(await h.tick(), 15000);
+  assert.equal(h.text('booth-live-title'), 'AI가 찾아냈어요');
+  assert.equal(booth.readReceipts(storage)[0].outcome, 'caught');
+  nodesOf(h.ids.get('booth-history')).filter(node => node.tagName === 'button')[1].click();
+  await settle();
+  assert.deepEqual(h.claimCalls().at(-1).body, {receipt: 'F-0041', claimKey: 'AAAA-BBBB'});
+  assert.equal(h.text('booth-receipt-code'), 'F-0041');
+  assert.equal(h.text('booth-ticket-paper'), 'Older paper');
+  assert.equal(h.text('booth-ticket-pages'), '1, 3쪽 · 1곳');
+  h.handle.destroy();
+  const stale = liveBooth({storage, now: Date.parse('2026-11-22T03:00:00Z'), claims: [{receipt: 'F-0042', status: 'reviewing', published: false}]});
+  await settle();
+  assert.equal(stale.claimCalls().length, 0);
+  assert.equal(stale.step(), 'pick');
+  assert.equal(stale.ids.get('booth-result').hidden, true);
+  stale.handle.destroy();
+  const hashed = liveBooth({storage, hash: '#booth-result', now: Date.parse('2026-11-22T03:00:00Z'), claims: [{receipt: 'F-0042', status: 'reviewing', published: false}]});
+  assert.equal(hashed.ids.get('booth-result').hidden, false);
+  await settle();
+  assert.equal(hashed.claimCalls().length, 1);
+  assert.equal(hashed.step(), 'ticket');
+  assert.equal(hashed.timers.length, 1);
+  hashed.handle.destroy();
+});
+
+test('the guest cap gets a friendly line and search stays a secondary path', async () => {
+  const storage = memoryStorage();
+  for (let i = 1; i <= 5; i += 1) booth.rememberReceipt(storage, {receipt: 'F-000' + i, claimKey: '7Q3K-M9XD', createdAt: '2026-11-21T01:00:00Z'});
+  const capped = liveBooth({storage, submitStatus: 429});
+  await settle();
+  await submitThroughBooth(capped);
+  assert.equal(capped.calls.filter(call => call.path.endsWith('/v1/booth/submissions')).length, 1);
+  assert.match(capped.text('booth-submit-status'), /한 사람당 5번까지 제출할 수 있어요/);
+  assert.equal(capped.step(), 'send');
+  capped.handle.destroy();
+  const fresh = liveBooth({submitStatus: 429});
+  await settle();
+  await submitThroughBooth(fresh);
+  assert.match(fresh.text('booth-submit-status'), /잠시 막혔어요/);
+  assert.match(fresh.text('booth-submit-status'), /「내 기록」/);
+  fresh.handle.destroy();
+  const h = liveBooth();
+  await settle();
+  h.ids.get('booth-search-q').value = '통계';
+  h.ids.get('booth-search').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  const search = h.calls.find(call => call.path.includes('/v1/papers/search'));
+  assert.equal(search.auth, 'Bearer fsg_' + 'a'.repeat(43));
+  assert.equal(search.path.includes('reason'), false);
+  const result = nodesOf(h.ids.get('booth-search-results')).find(node => node.tagName === 'button');
+  assert.equal(result.textContent, 'arXiv 2503.10497 · CC BY 4.0Synthetic resultAda · 2026도전 →');
+  useWorkspace([]);
+  result.click();
+  await settle();
+  assert.equal(h.step(), 'edit');
+  assert.equal(h.text('booth-hint'), '힌트 · 숫자, 결론 문장, 표 값 중 한 곳을 골라 티 나지 않게 바꿔 보세요.');
+  h.handle.destroy();
+  const guest = liveBooth({token: ''});
+  await settle();
+  guest.ids.get('booth-search-q').value = '통계';
+  guest.ids.get('booth-search').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.match(guest.text('booth-search-status'), /게스트 세션/);
+  guest.handle.destroy();
+});
+
+test('a cold #booth-result load mints the guest session only for paper and submit', async () => {
   const cold = page();
-  const coldStorage = memoryStorage();
   const guestCalls = [];
   const minted = 'fsg_' + 'c'.repeat(43);
   const guestFetch = async (url, init = {}) => {
@@ -586,25 +1137,12 @@ test('the event panel submits contract fields and keeps claim and search auth ap
         missions: [{paperId: '2503.10497', title: 'Synthetic mission', license: 'cc-by-4.0', course: 'quick'}],
       })};
     }
-    if (path.includes('/v1/papers/pdf')) {
-      return {
-        ok: true, status: 200,
-        headers: {get(name) {
-          if (name === 'X-Falsify-Paper-License') return 'cc-by-4.0';
-          if (name === 'Content-Disposition') return 'attachment; filename="arxiv-2503.10497.pdf"';
-          return null;
-        }},
-        arrayBuffer: async () => sourceBytes.buffer.slice(sourceBytes.byteOffset, sourceBytes.byteOffset + sourceBytes.byteLength),
-        json: async () => ({}),
-      };
-    }
+    if (path.includes('/v1/papers/pdf')) return pdfReply();
     const payload = path.endsWith('/v1/booth/claim')
       ? {receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1, published: false}
-      : path.endsWith('/v1/booth/withdraw')
-        ? {receipt: 'F-0042', status: 'withdrawn', course: 'quick', declaredCount: 1, published: false}
-        : path.endsWith('/v1/booth/submissions')
-          ? {receipt: 'F-0042', claimKey: '7Q3K-M9XD', status: 'received', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:00Z'}
-          : {error: {code: 'not_found'}};
+      : path.endsWith('/v1/booth/submissions')
+        ? {receipt: 'F-0042', claimKey: '7Q3K-M9XD', status: 'received', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:00Z'}
+        : {error: {code: 'not_found'}};
     const status = path.endsWith('/v1/booth/submissions') ? 201 : payload.error ? 404 : 200;
     return {ok: status >= 200 && status < 300, status, headers: {get() { return null; }}, json: async () => payload};
   };
@@ -628,80 +1166,99 @@ test('the event panel submits contract fields and keeps claim and search auth ap
   });
   vm.runInContext(openAccessSource, openContext, {filename: 'open-access.js'});
   const coldHandle = booth.mount({
-    document: cold.doc, fetch: guestFetch, storage: coldStorage, location: openContext.location,
+    document: cold.doc, fetch: guestFetch, storage: memoryStorage(), location: openContext.location,
     config: () => openContext.FalsifyCloudConfig,
     session: () => openContext.FalsifyHostedSession,
+    setTimeout: () => 0, clearTimeout() {},
   });
-  await new Promise(resolve => setTimeout(resolve, 0));
+  await settle();
   assert.equal(openContext.location.hash, '#booth-result');
   assert.equal(cold.ids.get('booth-result').hidden, false);
   assert.equal(cold.ids.get('booth-claim-receipt').value, '');
-  assert.equal(cold.ids.get('booth-claim-key').value, '');
   assert.equal(guestCalls.some(call => call.url.endsWith('/v1/ai/guest')), false);
   assert.equal(guestCalls.some(call => String(call.url).includes('/v1/ai/capabilities')), false);
   cold.ids.get('booth-claim-receipt').value = 'F-0042';
   cold.ids.get('booth-claim-key').value = '7Q3K-M9XD';
   cold.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
-  await new Promise(resolve => setTimeout(resolve, 0));
+  await settle();
   assert.equal(guestCalls.find(call => call.url.endsWith('/v1/booth/claim')).auth, '');
-  assert.match(cold.ids.get('booth-result-status').textContent, /검토 중/);
-  cold.ids.get('booth-withdraw').dispatchEvent({type: 'click'});
-  cold.ids.get('booth-withdraw-confirm').dispatchEvent({type: 'click'});
-  await new Promise(resolve => setTimeout(resolve, 0));
-  assert.equal(guestCalls.find(call => call.url.endsWith('/v1/booth/withdraw')).auth, '');
-  assert.match(cold.ids.get('booth-result-status').textContent, /철회됨/);
+  assert.equal(cold.doc.documentElement.dataset.boothStep, 'ticket');
   assert.equal(guestCalls.some(call => call.url.endsWith('/v1/ai/guest')), false);
-  const missionNodes = [];
-  const walkMission = node => {
-    missionNodes.push(node);
-    for (const kid of node.children) if (kid && typeof kid === 'object') walkMission(kid);
-  };
-  walkMission(cold.ids.get('booth-missions'));
-  missionNodes.find(node => node.tagName === 'button' && /이 논문으로 시작/.test(node.textContent)).dispatchEvent({type: 'click'});
-  await waitFor(() => guestCalls.some(call => call.url.endsWith('/v1/ai/guest')));
+  nodesOf(cold.ids.get('booth-receipt')).find(node => node.id === 'booth-live-again').hidden = false;
+  cold.ids.get('booth-live-again').click();
+  assert.equal(cold.doc.documentElement.dataset.boothStep, 'pick');
+  useWorkspace(Array.from({length: 4}, (_, index) => ({enabled: true, pageIndex: index, segmentId: 's' + index, before: 'before ' + index, after: 'after ' + index})));
+  nodesOf(cold.ids.get('booth-missions')).find(node => node.tagName === 'button').click();
   await waitFor(() => guestCalls.some(call => call.url.includes('/v1/papers/pdf')));
   assert.equal(guestCalls.find(call => call.url.includes('/v1/papers/pdf')).auth, 'Bearer ' + minted);
   assert.equal(guestCalls.filter(call => call.url.endsWith('/v1/ai/guest')).length, 1);
-  boothContext.FalsifyPaperWorkspace = {
-    getSource: () => ({fileHash: sourceHash, file: sourceFile}),
-    getEditSnapshot: () => ({revision: 9, edits: Array.from({length: 4}, (_, index) => ({
-      enabled: true, pageIndex: index, segmentId: 's' + index, before: 'before ' + index, after: 'after ' + index,
-    }))}),
-    getCurrentOutput: () => null,
-  };
-  cold.ids.get('booth-make').click();
-  cold.doc.dispatchEvent({type: 'falsify:paper-generated', detail: {file: edited, sourceFileHash: sourceHash, revision: 9, edits: []}});
-  await waitFor(() => /3건 이하로 남겨 주세요/.test(cold.ids.get('booth-submit-status').textContent));
-  assert.equal(guestCalls.some(call => call.url.endsWith('/v1/booth/submissions')), false);
-  boothContext.FalsifyPaperWorkspace = {
-    getSource: () => ({fileHash: sourceHash, file: sourceFile}),
-    getEditSnapshot: () => ({revision: 10, edits: [{enabled: true, pageIndex: 1, segmentId: 'p2', before: BEFORE, after: AFTER}]}),
-    getCurrentOutput: () => null,
-  };
-  cold.ids.get('booth-make').click();
-  cold.doc.dispatchEvent({type: 'falsify:paper-generated', detail: {
-    file: edited, sourceFileHash: sourceHash, revision: 10,
-    edits: [{pageIndex: 1, segmentId: 'p2', before: BEFORE, after: AFTER}],
-  }});
-  await waitFor(() => /변경 전/.test(cold.ids.get('booth-rows').textContent));
-  const coldNodes = [];
-  const walkCold = node => {
-    coldNodes.push(node);
-    for (const kid of node.children) if (kid && typeof kid === 'object') walkCold(kid);
-  };
-  walkCold(cold.ids.get('booth-rows'));
-  const coldSelect = coldNodes.find(node => node.tagName === 'select');
-  const coldReason = coldNodes.find(node => node.tagName === 'textarea');
-  coldSelect.value = 'number';
-  coldReason.value = '유의수준을 바꿔 결론이 성립하지 않음';
+  await waitFor(() => cold.doc.documentElement.dataset.boothStep === 'edit');
+  cold.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
+  cold.ids.get('booth-next').click();
+  cold.doc.dispatchEvent(generated([]));
+  await waitFor(() => /3개 이하로 남겨 주세요/.test(cold.ids.get('booth-dock-status').textContent));
+  assert.equal(cold.doc.documentElement.dataset.boothStep, 'edit');
+  useWorkspace(ONE_EDIT);
+  cold.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
+  cold.ids.get('booth-next').click();
+  cold.doc.dispatchEvent(generated());
+  await waitFor(() => cold.doc.documentElement.dataset.boothStep === 'send');
+  nodesOf(cold.ids.get('booth-rows')).find(node => node.tagName === 'button' && node.textContent === '수치·통계').click();
+  nodesOf(cold.ids.get('booth-rows')).find(node => node.tagName === 'textarea').value = '유의수준을 바꿔 결론이 성립하지 않음';
   cold.ids.get('booth-consent').checked = true;
   cold.ids.get('booth-consent').dispatchEvent({type: 'change'});
   cold.ids.get('booth-submit').dispatchEvent({type: 'submit', preventDefault() {}});
-  await new Promise(resolve => setTimeout(resolve, 0));
+  await settle();
   assert.equal(guestCalls.filter(call => call.url.endsWith('/v1/ai/guest')).length, 1);
   assert.equal(guestCalls.find(call => call.url.endsWith('/v1/booth/submissions')).auth, 'Bearer ' + minted);
   assert.equal(guestCalls.some(call => String(call.url).includes('/v1/ai/capabilities')), false);
+  assert.equal(cold.doc.documentElement.dataset.boothStep, 'ticket');
   coldHandle.destroy();
+});
+
+test('each claim state maps to the visitor ticket copy', () => {
+  const pending = booth.resultView({status: 'reviewing', published: false});
+  assert.equal(pending.state, 'pending');
+  assert.equal(pending.final, false);
+  assert.equal(pending.stamp, null);
+  assert.equal(pending.title, 'AI가 결함을 찾는 중이에요. 보통 1~3분 걸려요. 이 화면을 닫아도 접수번호와 확인키로 나중에 볼 수 있어요.');
+  assert.equal(booth.resultView({status: 'received', published: false}).state, 'pending');
+  assert.equal(booth.resultView({status: 'judged', published: false, outcome: 'missed'}).state, 'pending');
+  const caught = booth.resultView({status: 'judged', published: true, outcome: 'caught', publicNote: '3쪽 표의 값을 짚었어요', prizeMessage: ' 정밀 AI는 찾았지만 선물은 유효해요 '});
+  assert.deepEqual(plain(caught), {
+    state: 'caught', note: '3쪽 표의 값을 짚었어요', prize: '정밀 AI는 찾았지만 선물은 유효해요', final: true,
+    title: 'AI가 찾아냈어요', lead: 'AI가 ', strong: '찾아냈어요', stamp: {kind: 'fail', word: '적발', latin: 'DETECTED'},
+  });
+  const partial = booth.resultView({status: 'judged', published: true, outcome: 'partial', publicNote: '쪽은 맞았어요'});
+  assert.equal(partial.title, 'AI가 거의 찾았어요');
+  assert.equal(partial.stamp.word, '적발');
+  assert.equal(partial.prize, '');
+  const missed = booth.resultView({status: 'judged', published: true, outcome: 'missed', publicNote: 'Opus 라운드로 갑니다', prizeMessage: '부스에서 스티커를 받아 가세요'});
+  assert.equal(missed.title, 'AI가 못 찾았어요');
+  assert.equal(missed.prize, '부스에서 스티커를 받아 가세요');
+  assert.deepEqual(plain(missed.stamp), {kind: 'pass', word: '통과', latin: 'PASSED'});
+  const invalid = booth.resultView({status: 'invalid', published: true, outcome: 'invalid', publicNote: '바뀐 곳이 없어요'});
+  assert.equal(invalid.title, '결함으로 인정되지 않았어요');
+  assert.equal(invalid.stamp.word, '무효');
+  assert.equal(booth.resultView({status: 'invalid', published: true}).title, '결함으로 인정되지 않았어요');
+  const judged = booth.resultView({status: 'judged', published: true, outcome: 'mystery'});
+  assert.equal(judged.title, '결과가 나왔어요');
+  assert.equal(judged.stamp, null);
+  const withdrawn = booth.resultView({status: 'withdrawn', published: false});
+  assert.equal(withdrawn.title, '제출을 철회했어요');
+  assert.equal(withdrawn.final, true);
+  assert.equal(booth.resultView(null).state, 'pending');
+  const markup = booth.resultView({status: 'judged', published: true, outcome: 'missed', publicNote: '<img src=x onerror=alert(1)>', prizeMessage: '<b>prize</b>'});
+  assert.equal(markup.note, '<img src=x onerror=alert(1)>');
+  assert.equal(markup.prize, '<b>prize</b>');
+  assert.equal(boothSource.includes('innerHTML'), false);
+  assert.equal(boothSource.includes('insertAdjacentHTML'), false);
+  const storage = memoryStorage();
+  booth.rememberReceipt(storage, {receipt: 'F-0001', claimKey: '7Q3K-M9XD', createdAt: '2026-11-22T01:00:00Z'});
+  booth.rememberReceipt(storage, {receipt: 'F-0002', claimKey: '7Q3K-M9XD', createdAt: '2026-11-22T01:01:00Z'});
+  assert.equal(booth.noteReceiptOutcome(storage, 'F-0001', 'missed'), true);
+  assert.equal(booth.noteReceiptOutcome(storage, 'F-0001', 'pending'), false);
+  assert.deepEqual(plain(booth.readReceipts(storage).map(item => [item.receipt, item.outcome || ''])), [['F-0002', ''], ['F-0001', 'missed']]);
 });
 
 test('a cold #booth-result load keeps the hash and index routes still resolve', () => {
@@ -787,34 +1344,6 @@ test('the claim poll runs every 15 s for 3 min, every 30 s to 15 min, and honour
   assert.equal(booth.retryAfterMs(null, at), 0);
 });
 
-test('each claim state maps to the visitor card copy', () => {
-  const pending = booth.resultView({status: 'reviewing', published: false});
-  assert.equal(pending.state, 'pending');
-  assert.equal(pending.final, false);
-  assert.equal(pending.title, 'AI가 결함을 찾는 중이에요. 보통 1~3분 걸려요. 이 화면을 닫아도 접수번호와 확인키로 나중에 볼 수 있어요.');
-  assert.equal(booth.resultView({status: 'received', published: false}).state, 'pending');
-  assert.equal(booth.resultView({status: 'judged', published: false, outcome: 'missed'}).state, 'pending');
-  const caught = booth.resultView({status: 'judged', published: true, outcome: 'caught', publicNote: '3쪽 표의 값을 짚었어요', prizeMessage: 'ignored'});
-  assert.deepEqual(plain(caught), {state: 'caught', title: 'AI가 찾아냈어요', note: '3쪽 표의 값을 짚었어요', prize: '', final: true});
-  const partial = booth.resultView({status: 'judged', published: true, outcome: 'partial', publicNote: '쪽은 맞았어요'});
-  assert.equal(partial.title, 'AI가 거의 찾았어요');
-  assert.equal(partial.note, '쪽은 맞았어요');
-  const missed = booth.resultView({status: 'judged', published: true, outcome: 'missed', publicNote: 'Opus 라운드로 갑니다', prizeMessage: '부스에서 스티커를 받아 가세요'});
-  assert.deepEqual(plain(missed), {state: 'missed', title: 'AI가 못 찾았어요!', note: 'Opus 라운드로 갑니다', prize: '부스에서 스티커를 받아 가세요', final: true});
-  const invalid = booth.resultView({status: 'invalid', published: true, outcome: 'invalid', publicNote: '바뀐 곳이 없어요'});
-  assert.equal(invalid.title, '결함으로 인정되지 않았어요');
-  assert.equal(booth.resultView({status: 'invalid', published: true}).title, '결함으로 인정되지 않았어요');
-  const withdrawn = booth.resultView({status: 'withdrawn', published: false});
-  assert.equal(withdrawn.title, '철회됨');
-  assert.equal(withdrawn.final, true);
-  assert.equal(booth.resultView(null).state, 'pending');
-  const markup = booth.resultView({status: 'judged', published: true, outcome: 'missed', publicNote: '<img src=x onerror=alert(1)>', prizeMessage: '<b>prize</b>'});
-  assert.equal(markup.note, '<img src=x onerror=alert(1)>');
-  assert.equal(markup.prize, '<b>prize</b>');
-  assert.equal(boothSource.includes('innerHTML'), false);
-  assert.equal(boothSource.includes('insertAdjacentHTML'), false);
-});
-
 test('consent copy is a map keyed by version and an unknown version has no text', () => {
   assert.deepEqual(Object.keys(booth.CONSENT_COPY), ['2026-11-22.v1', '2026-11-22.v2']);
   assert.equal(booth.consentCopyFor('2026-11-22.v1'), booth.CONSENT_COPY['2026-11-22.v1']);
@@ -837,260 +1366,6 @@ test('the result view lists this browser\'s newest 5 receipts', () => {
   assert.equal(booth.readReceipts(storage).length, 7);
   assert.equal(booth.recentReceipts(null).length, 0);
   assert.match(booth.capMessage(5), /5번까지/);
-});
-
-function nodesOf(node) {
-  const out = [];
-  const visit = item => { out.push(item); for (const kid of item.children) if (kid && typeof kid === 'object') visit(kid); };
-  visit(node);
-  return out;
-}
-const settle = async () => { for (let i = 0; i < 6; i += 1) await new Promise(resolve => setTimeout(resolve, 0)); };
-/* Mounted booth with a fake clock. claims is a list of claim replies (a body, or {status, headers, body}). */
-function liveBooth(options = {}) {
-  const {doc, ids} = page();
-  const storage = options.storage || memoryStorage();
-  const calls = [];
-  const clock = {t: options.now || Date.parse('2026-11-22T01:00:30Z')};
-  const timers = [];
-  let timerId = 0;
-  const claims = (options.claims || []).slice();
-  const reply = (status, body, headers = {}) => ({
-    ok: status >= 200 && status < 300, status,
-    headers: {get(name) { return Object.prototype.hasOwnProperty.call(headers, name) ? headers[name] : null; }},
-    json: async () => body,
-  });
-  const fetchImpl = async (url, init = {}) => {
-    const path = String(url);
-    calls.push({path, at: clock.t, body: typeof init.body === 'string' ? JSON.parse(init.body) : null});
-    if (path.endsWith('/v1/booth/config')) {
-      return reply(200, {enabled: true, submissionsOpen: true, consentVersion: options.consentVersion || '2026-11-22.v2',
-        limits: {maxDeclared: 5, maxReason: 500, maxNickname: 24, perOwner: 5},
-        missions: [{paperId: '2503.10497', title: 'Synthetic mission', license: 'cc-by-4.0', course: 'quick'}]});
-    }
-    if (path.endsWith('/v1/booth/claim')) {
-      const next = claims.length > 1 ? claims.shift() : claims[0];
-      if (next && next.status && next.body) return reply(next.status, next.body, next.headers);
-      return reply(200, next);
-    }
-    if (path.endsWith('/v1/booth/submissions')) {
-      if (options.submitStatus) return reply(options.submitStatus, {error: {code: 'rate_limited'}});
-      return reply(201, {receipt: 'F-0042', claimKey: '7Q3K-M9XD', status: 'received', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:30Z'});
-    }
-    if (path.includes('/v1/papers/pdf')) {
-      const bytes = Buffer.from('%PDF-1.7 synthetic booth paper\n%%EOF\n');
-      return {ok: true, status: 200, headers: {get(name) { return name === 'X-Falsify-Paper-License' ? 'cc-by-4.0' : null; }},
-        arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength), json: async () => ({})};
-    }
-    return reply(404, {error: {code: 'not_found'}});
-  };
-  const location = {hash: options.hash || ''};
-  const handle = booth.mount({
-    document: doc, fetch: fetchImpl, storage, location,
-    config: () => ({booth: {enabled: true}, apiBase: 'https://event.example'}),
-    session: () => ({token: async () => 'fsg_' + 'a'.repeat(43)}),
-    setTimeout: (fn, ms) => { timerId += 1; timers.push({id: timerId, fn, ms}); return timerId; },
-    clearTimeout: id => { const at = timers.findIndex(item => item.id === id); if (at >= 0) timers.splice(at, 1); },
-    now: () => clock.t,
-  });
-  async function tick() {
-    assert.equal(timers.length, 1, 'one poll timer pending');
-    const next = timers.shift();
-    clock.t += next.ms;
-    next.fn();
-    await settle();
-    return next.ms;
-  }
-  const claimCalls = () => calls.filter(call => call.path.endsWith('/v1/booth/claim'));
-  return {doc, ids, storage, calls, claimCalls, timers, clock, tick, handle, location};
-}
-async function submitThroughBooth(h) {
-  const sourceBytes = Buffer.from('%PDF-1.7 synthetic booth paper\n%%EOF\n');
-  const sourceHash = createHash('sha256').update(sourceBytes).digest('hex');
-  boothContext.FalsifyPaperWorkspace = {
-    getSource: () => ({fileHash: sourceHash, file: new File([sourceBytes], 'source.pdf', {type: 'application/pdf'})}),
-    getEditSnapshot: () => ({revision: 1, edits: [{enabled: true, pageIndex: 1, segmentId: 'p2', before: BEFORE, after: AFTER}]}),
-    getCurrentOutput: () => null,
-  };
-  nodesOf(h.ids.get('booth-missions')).find(node => node.tagName === 'button' && /이 논문으로 시작/.test(node.textContent)).dispatchEvent({type: 'click'});
-  await settle();
-  h.doc.dispatchEvent({type: 'falsify:paper-generated', detail: {
-    file: new File([EDITED], 'edited.pdf', {type: 'application/pdf'}), sourceFileHash: sourceHash, revision: 1,
-    edits: [{pageIndex: 1, segmentId: 'p2', before: BEFORE, after: AFTER}],
-  }});
-  await waitFor(() => /변경 전/.test(h.ids.get('booth-rows').textContent));
-  const rowNodes = nodesOf(h.ids.get('booth-rows'));
-  rowNodes.find(node => node.tagName === 'select').value = 'number';
-  rowNodes.find(node => node.tagName === 'textarea').value = '평균을 바꿨습니다';
-  h.ids.get('booth-consent').checked = true;
-  h.ids.get('booth-consent').dispatchEvent({type: 'change'});
-  h.ids.get('booth-submit').dispatchEvent({type: 'submit', preventDefault() {}});
-  await settle();
-}
-
-test('the receipt screen polls the claim view until the AI result is published', async () => {
-  const h = liveBooth({claims: [
-    {receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1, published: false},
-    {status: 429, headers: {'Retry-After': '45'}, body: {error: {code: 'rate_limited'}}},
-    {status: 429, body: {error: {code: 'rate_limited'}}},
-    {receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1, published: false},
-    {receipt: 'F-0042', status: 'judged', course: 'quick', declaredCount: 1, published: true, outcome: 'missed',
-      publicNote: '<b>표</b> 값 변경을 놓쳤어요', prizeMessage: '부스에서 작은 선물을 받아 가세요', publishedAt: '2026-11-22T01:03:00Z'},
-  ]});
-  await settle();
-  assert.match(h.ids.get('booth-consent-copy').textContent, /제출하면 바로 수정본 PDF만 AI 검증을 위해 모델 제공자\(Anthropic\)에 보내고/);
-  await submitThroughBooth(h);
-  assert.equal(h.ids.get('booth-receipt-code').textContent, 'F-0042');
-  const card = h.ids.get('booth-live');
-  assert.equal(card.parentNode, h.ids.get('booth-receipt-live'));
-  assert.equal(card.hidden, false);
-  assert.match(h.ids.get('booth-live-title').textContent, /AI가 결함을 찾는 중이에요/);
-  assert.equal(h.ids.get('booth-live-again').hidden, true);
-  assert.equal(h.claimCalls().length, 0);
-  assert.equal(await h.tick(), 15000);
-  assert.deepEqual(h.claimCalls()[0].body, {receipt: 'F-0042', claimKey: '7Q3K-M9XD'});
-  assert.equal(await h.tick(), 15000);
-  assert.equal(await h.tick(), 45000);
-  assert.equal(await h.tick(), 60000);
-  assert.match(h.ids.get('booth-live-title').textContent, /찾는 중/);
-  assert.equal(await h.tick(), 15000);
-  assert.equal(h.claimCalls().length, 5);
-  assert.equal(h.timers.length, 0);
-  assert.equal(h.ids.get('booth-live-title').textContent, 'AI가 못 찾았어요!');
-  assert.equal(h.ids.get('booth-live-prize').textContent, '부스에서 작은 선물을 받아 가세요');
-  assert.equal(h.ids.get('booth-live-prize').hidden, false);
-  assert.equal(h.ids.get('booth-live-note').textContent, '<b>표</b> 값 변경을 놓쳤어요');
-  assert.equal(h.ids.get('booth-live-again').hidden, false);
-  assert.equal(h.ids.get('booth-live-again').textContent, '다시 도전하기');
-  assert.equal(h.ids.get('booth-receipts').hidden, false);
-  assert.match(h.ids.get('booth-receipts-list').textContent, /F-0042/);
-  h.ids.get('booth-live-again').click();
-  assert.equal(h.ids.get('booth-receipt').hidden, true);
-  assert.equal(h.ids.get('booth-live').hidden, true);
-  assert.equal(h.ids.get('booth-submit').hidden, true);
-  assert.equal(h.ids.get('booth-consent').checked, false);
-  assert.equal(h.ids.get('booth-rows').textContent, '');
-  assert.equal(h.ids.get('booth-missions').hidden, false);
-  assert.equal(h.timers.length, 0);
-  h.handle.destroy();
-});
-
-test('polling stops after 15 min with a recheck button and lookups reuse the card', async () => {
-  const pending = {receipt: 'F-0042', status: 'received', course: 'quick', declaredCount: 1, published: false};
-  const h = liveBooth({claims: [pending]});
-  await settle();
-  h.ids.get('booth-claim-receipt').value = 'f-0042';
-  h.ids.get('booth-claim-key').value = '7q3k m9xd';
-  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
-  await settle();
-  assert.equal(h.ids.get('booth-live').parentNode, h.ids.get('booth-result-live'));
-  assert.match(h.ids.get('booth-live-title').textContent, /찾는 중/);
-  const delays = [];
-  while (h.timers.length) delays.push(await h.tick());
-  assert.equal(delays.length, 12 + 24);
-  assert.equal(delays.reduce((sum, ms) => sum + ms, 0), 900000);
-  assert.equal(h.claimCalls().length, 1 + 36);
-  assert.equal(h.ids.get('booth-live-recheck').hidden, false);
-  assert.equal(h.ids.get('booth-live-recheck').textContent, '결과 다시 보기');
-  h.ids.get('booth-live-recheck').click();
-  await settle();
-  assert.equal(h.claimCalls().length, 38);
-  assert.equal(h.ids.get('booth-live-recheck').hidden, true);
-  assert.equal(h.timers.length, 1);
-  assert.equal(h.timers[0].ms, 15000);
-  h.handle.destroy();
-  assert.equal(h.timers.length, 0);
-});
-
-test('every final outcome shows its copy and the retry button', async () => {
-  const cases = [
-    ['caught', 'AI가 찾아냈어요'], ['partial', 'AI가 거의 찾았어요'],
-    ['missed', 'AI가 못 찾았어요!'], ['invalid', '결함으로 인정되지 않았어요'],
-  ];
-  for (const [outcome, title] of cases) {
-    const h = liveBooth({claims: [{receipt: 'F-0042', status: outcome === 'invalid' ? 'invalid' : 'judged', course: 'quick', declaredCount: 1,
-      published: true, outcome, publicNote: 'note ' + outcome, prizeMessage: 'prize ' + outcome}]});
-    await settle();
-    h.ids.get('booth-claim-receipt').value = 'F-0042';
-    h.ids.get('booth-claim-key').value = '7Q3K-M9XD';
-    h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
-    await settle();
-    assert.equal(h.ids.get('booth-live-title').textContent, title, outcome);
-    assert.equal(h.ids.get('booth-live-note').textContent, 'note ' + outcome);
-    assert.equal(h.ids.get('booth-live-prize').hidden, outcome !== 'missed');
-    assert.equal(h.ids.get('booth-live-again').hidden, false);
-    assert.equal(h.timers.length, 0);
-    h.handle.destroy();
-  }
-  const w = liveBooth({claims: [{receipt: 'F-0042', status: 'withdrawn', course: 'quick', declaredCount: 1, published: false}]});
-  await settle();
-  w.ids.get('booth-claim-receipt').value = 'F-0042';
-  w.ids.get('booth-claim-key').value = '7Q3K-M9XD';
-  w.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
-  await settle();
-  assert.match(w.ids.get('booth-result-status').textContent, /철회됨/);
-  assert.equal(w.ids.get('booth-live-title').textContent, '철회됨');
-  assert.equal(w.ids.get('booth-live-again').hidden, false);
-  w.handle.destroy();
-});
-
-test('a cold reload with a stored receipt resumes polling and lists receipts', async () => {
-  const storage = memoryStorage();
-  booth.rememberReceipt(storage, {receipt: 'F-0041', claimKey: 'AAAA-BBBB', createdAt: '2026-11-22T00:10:00Z'});
-  booth.rememberReceipt(storage, {receipt: 'F-0042', claimKey: '7Q3K-M9XD', createdAt: '2026-11-22T01:00:00Z'});
-  const h = liveBooth({storage, claims: [
-    {receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1, published: false},
-    {receipt: 'F-0042', status: 'judged', course: 'quick', declaredCount: 1, published: true, outcome: 'caught', publicNote: '잡았어요'},
-  ]});
-  await settle();
-  assert.equal(h.claimCalls().length, 1);
-  assert.deepEqual(h.claimCalls()[0].body, {receipt: 'F-0042', claimKey: '7Q3K-M9XD'});
-  assert.equal(h.ids.get('booth-result').hidden, false);
-  assert.match(h.ids.get('booth-live-title').textContent, /찾는 중/);
-  const items = nodesOf(h.ids.get('booth-receipts-list')).filter(node => node.tagName === 'button');
-  assert.deepEqual(items.map(node => node.textContent.split(' · ')[0]), ['F-0042', 'F-0041']);
-  assert.equal(await h.tick(), 15000);
-  assert.equal(h.ids.get('booth-live-title').textContent, 'AI가 찾아냈어요');
-  items[1].click();
-  await settle();
-  assert.deepEqual(h.claimCalls().at(-1).body, {receipt: 'F-0041', claimKey: 'AAAA-BBBB'});
-  h.handle.destroy();
-  const stale = liveBooth({storage, now: Date.parse('2026-11-22T03:00:00Z'), claims: [{receipt: 'F-0042', status: 'reviewing', published: false}]});
-  await settle();
-  assert.equal(stale.claimCalls().length, 0);
-  assert.equal(stale.ids.get('booth-result').hidden, true);
-  stale.handle.destroy();
-  const hashed = liveBooth({storage, hash: '#booth-result', now: Date.parse('2026-11-22T03:00:00Z'), claims: [{receipt: 'F-0042', status: 'reviewing', published: false}]});
-  await settle();
-  assert.equal(hashed.claimCalls().length, 1);
-  assert.equal(hashed.timers.length, 1);
-  hashed.handle.destroy();
-});
-
-test('an unknown consent version blocks submit and the guest cap gets a friendly line', async () => {
-  const h = liveBooth({consentVersion: '2026-11-22.v9'});
-  await settle();
-  assert.match(h.ids.get('booth-consent-copy').textContent, /새 동의 문구가 없어 제출할 수 없습니다/);
-  assert.equal(h.ids.get('booth-consent').disabled, true);
-  await submitThroughBooth(h);
-  assert.equal(h.calls.some(call => call.path.endsWith('/v1/booth/submissions')), false);
-  assert.match(h.ids.get('booth-submit-status').textContent, /새 동의 문구가 없어/);
-  assert.equal(h.ids.get('booth-submit-button').disabled, true);
-  h.handle.destroy();
-  const storage = memoryStorage();
-  for (let i = 1; i <= 5; i += 1) booth.rememberReceipt(storage, {receipt: 'F-000' + i, claimKey: '7Q3K-M9XD', createdAt: '2026-11-21T01:00:00Z'});
-  const capped = liveBooth({storage, submitStatus: 429});
-  await settle();
-  await submitThroughBooth(capped);
-  assert.equal(capped.calls.filter(call => call.path.endsWith('/v1/booth/submissions')).length, 1);
-  assert.match(capped.ids.get('booth-submit-status').textContent, /한 사람당 5번까지 제출할 수 있어요/);
-  assert.equal(capped.ids.get('booth-receipts').hidden, false);
-  capped.handle.destroy();
-  const fresh = liveBooth({submitStatus: 429});
-  await settle();
-  await submitThroughBooth(fresh);
-  assert.match(fresh.ids.get('booth-submit-status').textContent, /잠시 막혔어요/);
-  fresh.handle.destroy();
 });
 
 class El extends EventTarget {

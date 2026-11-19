@@ -11,7 +11,8 @@
 //
 // Reads app/dist/index.html and never modifies it. The event HTML changes only the
 // cloud-config script name, the CSP connect-src origin, a title suffix, a
-// noindex robots meta, and booth.css/booth.js after hosted-ai.js. Whatever else
+// noindex robots meta, and event-theme.css/booth.css/booth.js after hosted-ai.js.
+// event-theme.css comes first so booth.css can override it. Whatever else
 // index.html contains, including open-access.js, is copied through.
 import {readFileSync, writeFileSync} from 'node:fs';
 import {dirname, join, resolve} from 'node:path';
@@ -141,6 +142,7 @@ function injectBooth(html, newline){
   const tag = found[0][0];
   const extra = [
     tag,
+    `  <link rel="stylesheet" href="event-theme.css?v=${version}">`,
     `  <link rel="stylesheet" href="booth.css?v=${version}">`,
     `  <script src="booth.js?v=${version}" defer></script>`,
   ].join(newline);

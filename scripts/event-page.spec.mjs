@@ -26,6 +26,7 @@ function newlineOf(text) {
 
 function stripBoothAssets(text, newline) {
   for (const pattern of [
+    / {2}<link rel="stylesheet" href="event-theme\.css\?v=[^"]+">/g,
     / {2}<link rel="stylesheet" href="booth\.css\?v=[^"]+">/g,
     / {2}<script src="booth\.js\?v=[^"]+" defer><\/script>/g,
   ]) {
@@ -67,7 +68,7 @@ function fixture(extra = '') {
   <meta charset="utf-8">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; connect-src 'self' http://127.0.0.1:* https://falsify-cloud-api.ai-gongbu.workers.dev; object-src 'none'">
   <title>Falsify · Paper Workbench</title>
-  ${extra}<script src="cloud-config.js?v=0.2.0-alpha.85" defer></script>
+  ${extra}<script src="cloud-config.js?v=0.2.0-alpha.86" defer></script>
 </head>
 </html>
 `;
@@ -96,11 +97,11 @@ test('api base must be a canonical https origin', () => {
 });
 
 test('event HTML keeps every other byte, with or without open-access.js', () => {
-  for (const extra of ['', '<script src="open-access.js?v=0.2.0-alpha.85" defer></script>\n  ']) {
+  for (const extra of ['', '<script src="open-access.js?v=0.2.0-alpha.86" defer></script>\n  ']) {
     const index = fixture(extra);
     const planned = planEventFiles(index, DEFAULT_EVENT_API_BASE);
     assert.equal(revertEventHtml(planned.html, index, DEFAULT_EVENT_API_BASE), index);
-    assert.equal(count(planned.html, 'open-access.js?v=0.2.0-alpha.85'), count(index, 'open-access.js?v=0.2.0-alpha.85'));
+    assert.equal(count(planned.html, 'open-access.js?v=0.2.0-alpha.86'), count(index, 'open-access.js?v=0.2.0-alpha.86'));
     assert.match(planned.html, /<title>Falsify · Paper Workbench · Event<\/title>/);
     assert.match(planned.html, /<meta name="robots" content="noindex">/);
   }
@@ -141,22 +142,30 @@ test('committed event page matches index.html except the four event edits', () =
   assert.equal(Object.isFrozen(cfg.booth), true);
   assert.equal(index.includes('booth.js'), false);
   assert.equal(index.includes('booth.css'), false);
+  assert.equal(index.includes('event-theme.css'), false);
   const hostedAt = event.indexOf('hosted-ai.js?v=');
   const boothAt = event.indexOf('booth.js?v=');
   assert.ok(hostedAt >= 0 && boothAt > hostedAt);
+  const themeAt = event.indexOf('event-theme.css?v=');
+  const boothCssAt = event.indexOf('booth.css?v=');
+  assert.ok(themeAt > hostedAt && boothCssAt > themeAt, 'event-theme.css loads before booth.css');
+  assert.equal(count(event, 'event-theme.css'), 1);
 });
 
-test('event HTML injects booth assets after hosted-ai.js only', () => {
+test('event HTML injects the event theme, then booth assets, after hosted-ai.js only', () => {
   const version = readFileSync(join(root, 'VERSION'), 'utf8').trim();
   const index = fixture(`<script src="hosted-ai.js?v=${version}" defer></script>\n  `);
   const planned = planEventFiles(index, DEFAULT_EVENT_API_BASE);
   const injected = [
     `<script src="hosted-ai.js?v=${version}" defer></script>`,
+    `  <link rel="stylesheet" href="event-theme.css?v=${version}">`,
     `  <link rel="stylesheet" href="booth.css?v=${version}">`,
     `  <script src="booth.js?v=${version}" defer></script>`,
   ].join('\n');
   assert.ok(planned.html.includes(injected));
   assert.equal(count(index, 'booth.js'), 0);
+  assert.equal(count(planned.html, 'event-theme.css'), 1);
+  assert.equal(planEventFiles(index, DEFAULT_EVENT_API_BASE).html, planned.html, 'generator is deterministic');
   assert.equal(revertEventHtml(planned.html, index, DEFAULT_EVENT_API_BASE), index);
   assert.match(planned.config, /booth: Object\.freeze\(\{ enabled: true \}\)/);
 });
