@@ -547,6 +547,13 @@ test('visitor submit, claim, publish, withdraw and admin pdf', async () => {
     assert.equal(config.body.submissionsOpen, true);
     assert.equal(config.body.consentVersion, CONSENT);
     assert.equal(config.body.limits.maxDeclared, 5);
+    assert.equal(config.body.limits.maxReason, 500);
+    assert.equal(config.body.limits.maxNickname, 24);
+    assert.equal(config.body.limits.maxPdfBytes, 20 * 1024 * 1024);
+    assert.equal(config.body.limits.perOwner, 5);
+    assert.deepEqual(Object.keys(config.body.limits), [
+      'maxDeclared', 'maxReason', 'maxNickname', 'maxPdfBytes', 'perOwner',
+    ]);
     assert.equal(config.body.missions.length, 0);
     assert.equal(config.body.announcement, null);
     assert.equal(config.headers.get('Cache-Control'), 'no-store');
@@ -1609,5 +1616,39 @@ test('a 16 MiB pdf submit records handler time', async () => {
     assert.equal(Number.isFinite(parseMs) && parseMs >= 0, true);
     assert.equal(created.headers.get('X-Falsify-Parse-Ms') === null, false);
     console.log(`BOOTH_SUBMIT16_MS ${parseMs.toFixed(3)} BOOTH_SUBMIT16_WALL_MS ${wallMs.toFixed(3)}`);
+  });
+});
+
+test('config publishes the visitor pdf cap and the owner cap as integers', async () => {
+  const limitKeys = ['maxDeclared', 'maxReason', 'maxNickname', 'maxPdfBytes', 'perOwner'];
+  const configKeys = [
+    'enabled', 'submissionsOpen', 'consentVersion', 'courses', 'defectTypes', 'limits', 'missions', 'announcement',
+  ];
+  await withApp({ BOOTH_MAX_PDF_BYTES: '16777216', BOOTH_SUBMISSIONS_PER_OWNER: '3' }, async (_mf, call) => {
+    const config = await call('GET', '/v1/booth/config');
+    assert.equal(config.status, 200);
+    assert.deepEqual(Object.keys(config.body), configKeys);
+    assert.deepEqual(Object.keys(config.body.limits), limitKeys);
+    assert.equal(config.body.limits.maxPdfBytes, 16777216);
+    assert.equal(config.body.limits.maxDeclared, 5);
+    assert.equal(config.body.limits.perOwner, 3);
+    for (const value of Object.values(config.body.limits)) assert.equal(Number.isSafeInteger(value), true);
+    assert.equal(config.text.includes(OPERATOR), false);
+    assert.equal(config.text.includes('fso_'), false);
+  });
+  await withApp({
+    BOOTH_MAX_PDF_BYTES: '999999999',
+    AI_GUEST_MAX_UPLOAD_BYTES: '1048576',
+    BOOTH_SUBMISSIONS_PER_OWNER: '0',
+  }, async (_mf, call) => {
+    const config = await call('GET', '/v1/booth/config');
+    assert.equal(config.body.limits.maxPdfBytes, 32 * 1024 * 1024);
+    assert.equal(config.body.limits.perOwner, 5);
+  });
+  await withApp({ AI_GUEST_MAX_UPLOAD_BYTES: '1048576', BOOTH_MAX_PDF_BYTES: 'nope' }, async (_mf, call) => {
+    const config = await call('GET', '/v1/booth/config');
+    assert.equal(config.body.limits.maxPdfBytes, 1048576);
+    assert.equal(config.body.limits.maxReason, 500);
+    assert.equal(config.body.limits.maxNickname, 24);
   });
 });
