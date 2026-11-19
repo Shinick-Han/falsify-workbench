@@ -32,6 +32,9 @@ const MISSION_REQUIRED = ['id', 'title', 'source', 'paperId', 'license', 'course
 const MISSION_KEYS = [...MISSION_REQUIRED, 'pageHint', 'sourceSha256'];
 const MAX_JSON_BYTES = 64 * 1024;
 const SUMMARY_MAX_BYTES = 16 * 1024;
+const MAX_DECLARED = 5;
+const MAX_REASON = 500;
+const MAX_NICKNAME = 24;
 const PDF_CHUNK_BYTES = 512 * 1024;
 const PDF_BODY_SLACK = 64 * 1024;
 const PDF_HARD_CAP = 32 * 1024 * 1024;
@@ -447,7 +450,13 @@ function configView(settings, env) {
     consentVersion: consentVersionOf(env),
     courses: COURSE_VIEW.map(item => ({ ...item })),
     defectTypes: DEFECT_VIEW.map(item => ({ ...item })),
-    limits: { maxDeclared: 5, maxReason: 500, maxNickname: 24 },
+    limits: {
+      maxDeclared: MAX_DECLARED,
+      maxReason: MAX_REASON,
+      maxNickname: MAX_NICKNAME,
+      maxPdfBytes: maxPdfBytes(env),
+      perOwner: boothLimits(env).perOwner,
+    },
     missions: settings.missions,
     announcement: settings.announcement,
   };
@@ -459,7 +468,7 @@ function parseDeclaredItem(item) {
   if (typeof item.before !== 'string' || chars(item.before) < 1 || chars(item.before) > 2000) boothFail(400, 'invalid_request');
   if (typeof item.after !== 'string' || chars(item.after) > 2000) boothFail(400, 'invalid_request');
   if (!DEFECTS.includes(item.defectType)) boothFail(400, 'invalid_request');
-  if (typeof item.reason !== 'string' || chars(item.reason) < 1 || chars(item.reason) > 500) boothFail(400, 'invalid_request');
+  if (typeof item.reason !== 'string' || chars(item.reason) < 1 || chars(item.reason) > MAX_REASON) boothFail(400, 'invalid_request');
   const out = {
     pageIndex: item.pageIndex,
     before: item.before,
@@ -477,7 +486,7 @@ function parseDeclaredItem(item) {
 }
 
 function parseDeclared(value) {
-  if (!Array.isArray(value) || value.length < 1 || value.length > 5) boothFail(400, 'invalid_request');
+  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_DECLARED) boothFail(400, 'invalid_request');
   return value.map(parseDeclaredItem);
 }
 
@@ -501,7 +510,7 @@ function parsePaper(value) {
 
 function parseNickname(value) {
   if (value === undefined) return null;
-  if (typeof value !== 'string' || chars(value) < 1 || chars(value) > 24 || CONTROL.test(value)) {
+  if (typeof value !== 'string' || chars(value) < 1 || chars(value) > MAX_NICKNAME || CONTROL.test(value)) {
     boothFail(400, 'invalid_request');
   }
   if (value.includes('@') || /\d{7,}/.test(value)) boothFail(400, 'pii_not_allowed');
