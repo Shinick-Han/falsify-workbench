@@ -1397,6 +1397,8 @@
       setHidden(nodes.run,true);
       setHidden(nodes.apply,true);
       setHidden(nodes.selectionSection,true);
+      /* The event note replaces the run panel, so "준비됨" is not shown before a guest token. */
+      if(nodes.status&&String(nodes.status.textContent).includes('준비됨')) nodes.status.textContent=BOOTH_NOTE;
     }
     function announceCapabilities(){
       const caps=state.capabilities;

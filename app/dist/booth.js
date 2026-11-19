@@ -80,10 +80,16 @@
     if(n>max) return max;
     return n;
   }
+  /* A missing cap stays 5. A present safe integer from config replaces that 5. */
+  function declaredCap(value){
+    const n=Number(value);
+    if(!Number.isSafeInteger(n)||n<1) return 5;
+    return n;
+  }
   function limitsOf(input){
     const limits=input&&input.limits&&typeof input.limits==='object'?input.limits:{};
     return {
-      maxDeclared:boundedInt(limits.maxDeclared,5,1,5),
+      maxDeclared:declaredCap(limits.maxDeclared),
       maxReason:boundedInt(limits.maxReason,500,1,500),
       maxNickname:boundedInt(limits.maxNickname,24,1,24)
     };
@@ -1004,6 +1010,7 @@
     });
     on(doc,'falsify:document-clear',clearPaper);
     on(root,'hashchange',()=>{showResult(false);});
+    showResult(false);
     void loadConfig();
     return {destroy(){
       closed=true;

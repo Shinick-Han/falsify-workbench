@@ -5,6 +5,8 @@
   const views={workbench:'논문 실험 / RED',blue:'논문 실험 / BLUE',review:'검수',results:'결과 기록',agents:'Harness'};
   const routes={workbench:'red',blue:'blue',review:'review',results:'results',agents:'harness'};
   const fromHash=hash=>Object.keys(routes).find(key=>'#'+routes[key]===hash)||null;
+  /* A handout QR returns to event.html#booth or #booth-result. Those are not app views. */
+  function keepBoothHash(hash){return hash==='#booth'||hash==='#booth-result';}
   let view=fromHash(location.hash)||'workbench',documentProgress=null,blueProgress=null,hostedProgress=null,flapTimer;
   let importEpoch=0,importController=null,importedDocument=null,importedFile=null;
 
@@ -17,7 +19,7 @@
     document.dispatchEvent(new CustomEvent('falsify:view-change',{detail:{view:next}}));
     if(changed){scrollTo(0,0);$('#main').focus({preventScroll:true});}
   }
-  function followLocation(){const next=fromHash(location.hash);if(next&&next!==view)navigate(next,false);}
+  function followLocation(){if(keepBoothHash(location.hash))return;const next=fromHash(location.hash);if(next&&next!==view)navigate(next,false);}
   function hostedBlueSign(){
     const h=hostedProgress;if(!h?.operate||h.role!=='blue')return null;
     const detail=h.fileName||blueProgress?.name||'';
@@ -163,6 +165,6 @@
   });
   $('.brand').addEventListener('click',event=>{event.preventDefault();navigate('workbench');});
   $('.skip-link').addEventListener('click',event=>{event.preventDefault();$('#main').focus();});
-  if(!fromHash(location.hash))history.replaceState({view},'','#'+routes[view]);
+  if(!fromHash(location.hash)&&!keepBoothHash(location.hash))history.replaceState({view},'','#'+routes[view]);
   render();
 })();
