@@ -6,11 +6,70 @@ import { copyHarness } from './blue.mjs';
 import { PROFILE_NAME, TOKEN } from './constants.mjs';
 import { BoothError } from './errors.mjs';
 
-const CONFIG_KEYS = ['apiBase', 'dataDir', 'blue'];
+const CONFIG_KEYS = ['apiBase', 'dataDir', 'blue', 'live'];
+const LIVE_KEYS = [
+  'liveProfile', 'finalProfile', 'concurrency', 'intervalSec', 'retries', 'retryBackoffMs',
+  'prizeMessage', 'finalPrizeMessage', 'publicNote',
+];
+export const NOTE_KEYS = ['caught', 'partial', 'missed', 'missedNone'];
+
+// Visitor-facing Korean. {page} is the finding's 1-based page, {quote} its sentence, {rationale} its reason.
+// Nothing here comes from the visitor's declared edit.
+export const DEFAULT_NOTES = Object.freeze({
+  caught: 'AI가 {page}쪽에서 심어 둔 결함을 찾았습니다.\nAI가 짚은 문장: "{quote}"\nAI 설명: {rationale}',
+  partial: 'AI가 {page}쪽에서 심어 둔 결함에 거의 다가갔습니다. 이번에는 찾은 것으로 봅니다.\nAI가 짚은 문장: "{quote}"\nAI 설명: {rationale}',
+  missed: 'AI는 다른 곳을 짚었습니다. AI가 먼저 본 곳은 {page}쪽이었고, 심어 둔 결함은 AI 눈을 피했습니다.',
+  missedNone: 'AI가 이번 수정본에서 결함을 짚지 못했습니다. 심어 둔 결함은 AI 눈을 피했습니다.',
+});
+
+export function defaultLive() {
+  return {
+    liveProfile: 'live',
+    finalProfile: 'final',
+    concurrency: 12,
+    intervalSec: 10,
+    retries: 2,
+    retryBackoffMs: 5000,
+    prizeMessage: '',
+    finalPrizeMessage: '',
+    publicNote: { ...DEFAULT_NOTES },
+  };
+}
+
+function boundedString(value, label, max) {
+  if (typeof value !== 'string' || value.length > max) {
+    throw new BoothError('booth_config', `${label} must be a string of at most ${max} characters`);
+  }
+  return value;
+}
+
+function normalizeLive(raw) {
+  const live = defaultLive();
+  if (raw === undefined) return live;
+  rejectUnknown(raw, LIVE_KEYS, 'live');
+  for (const key of ['liveProfile', 'finalProfile']) {
+    if (raw[key] === undefined) continue;
+    if (typeof raw[key] !== 'string' || !PROFILE_NAME.test(raw[key])) throw new BoothError('booth_config', `live.${key} shape`);
+    live[key] = raw[key];
+  }
+  if (raw.concurrency !== undefined) live.concurrency = integer(raw.concurrency, 'live.concurrency', 1, 256);
+  if (raw.intervalSec !== undefined) live.intervalSec = integer(raw.intervalSec, 'live.intervalSec', 1, 3600);
+  if (raw.retries !== undefined) live.retries = integer(raw.retries, 'live.retries', 0, 10);
+  if (raw.retryBackoffMs !== undefined) live.retryBackoffMs = integer(raw.retryBackoffMs, 'live.retryBackoffMs', 0, 600000);
+  if (raw.prizeMessage !== undefined) live.prizeMessage = boundedString(raw.prizeMessage, 'live.prizeMessage', 500);
+  if (raw.finalPrizeMessage !== undefined) live.finalPrizeMessage = boundedString(raw.finalPrizeMessage, 'live.finalPrizeMessage', 500);
+  if (raw.publicNote !== undefined) {
+    rejectUnknown(raw.publicNote, NOTE_KEYS, 'live.publicNote');
+    for (const key of NOTE_KEYS) {
+      if (raw.publicNote[key] !== undefined) live.publicNote[key] = boundedString(raw.publicNote[key], `live.publicNote.${key}`, 1000);
+    }
+  }
+  return live;
+}
 const BLUE_KEYS = ['concurrency', 'repeat', 'profiles', 'pollIntervalMs', 'pollTimeoutMs'];
 const PROFILE_FILE_KEYS = ['name', 'model', 'effort', 'maxCalls', 'useEvidence', 'prompt', 'promptFile', 'harness', 'harnessFile'];
 
-function integer(value, label, min, max) {
+export function integer(value, label, min, max) {
   const number = typeof value === 'number' ? value : Number(value);
   if (!Number.isSafeInteger(number) || number < min || number > max) {
     throw new BoothError('booth_config', `${label} must be an integer from ${min} to ${max}`);
@@ -48,7 +107,12 @@ export function loadConfigFile(file) {
     throw new BoothError('booth_config', `cannot read config: ${error.message}`);
   }
   rejectUnknown(raw, CONFIG_KEYS, 'config');
-  const config = { apiBase: '', dataDir: '', blue: { concurrency: 1, repeat: 1, profiles: [], pollIntervalMs: 200, pollTimeoutMs: 900000 } };
+  const config = {
+    apiBase: '',
+    dataDir: '',
+    blue: { concurrency: 1, repeat: 1, profiles: [], pollIntervalMs: 200, pollTimeoutMs: 900000 },
+    live: normalizeLive(raw.live),
+  };
   if (raw.apiBase !== undefined) {
     if (typeof raw.apiBase !== 'string') throw new BoothError('booth_config', 'apiBase must be a string');
     config.apiBase = raw.apiBase;
@@ -100,6 +164,7 @@ export function emptyConfig() {
     dataDir: '',
     configDir: process.cwd(),
     blue: { concurrency: 1, repeat: 1, profiles: [], pollIntervalMs: 200, pollTimeoutMs: 900000 },
+    live: defaultLive(),
   };
 }
 
@@ -134,6 +199,12 @@ function readJsonFile(file) {
 function resolveBlueProfiles(config, flags) {
   const selected = flags.profile && flags.profile !== true ? String(flags.profile) : '';
   let profiles = config.blue.profiles.slice();
+  if (!selected && config.live) {
+    // watch and final own their profiles; a plain `blue` run does not bill them too.
+    const reserved = new Set([config.live.liveProfile, config.live.finalProfile]);
+    const batch = profiles.filter(profile => !reserved.has(profile.name));
+    if (batch.length) profiles = batch;
+  }
   if (selected) {
     const found = profiles.find(profile => profile.name === selected);
     if (!found) {

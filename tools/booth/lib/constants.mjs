@@ -70,6 +70,8 @@ Commands:
   open
   close [--dry-run]
   announce (--text <text> | --file <file> | --clear)
+  watch [--interval <sec>] [--concurrency <n>] [--cycles <n>] [--model <id>] [--effort <id>]
+  final [--only <receipts>] [--profile <name>] [--concurrency <n>] [--out <file>] [--apply] [--allow-open]
 
 BLUE uploads the edited PDF and posts the operator profile only.
 Declared edits, reasons, types, nickname and paper metadata are not part of that request.
@@ -79,5 +81,9 @@ blue refuses a local PDF over --max-bytes (default 16777216) or not starting wit
 draw defaults to outcome missed.
 CSV cells that start with =, +, -, @, tab or CR are prefixed with '.
 score writes score.json and does not publish.
+watch runs the live profile on each received submission while submissions are open, then PATCHes
+judged + outcome + publicNote + published in one request. Ctrl-C stops; unfinished jobs resume on the next start.
+watch writes one JSON line per cycle to stdout (queued, inFlight, done, failed, p50Sec, p95Sec).
+final re-runs live misses with the final profile and writes final/candidates.json; only --apply PATCHes.
 Progress goes to stderr. Command results go to stdout as JSON.
 `;

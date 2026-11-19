@@ -32,8 +32,12 @@ function delay(ms) {
 
 export function startFake({
   token, submissions, pdfs, queued = false, jobDelayMs = 0, papers = null, pdfWithdrawn = null,
-  pdfHeaders = null,
+  pdfHeaders = null, result = null, failJobs = false, pollFailures = 0,
 }) {
+  const makeResult = requestBody => {
+    if (typeof result === 'function') return structuredClone(result(requestBody));
+    return result ? structuredClone(result) : sampleResult();
+  };
   const state = {
     submissions: submissions.map(row => ({ ...row, declared: row.declared.map(edit => ({ ...edit })), paper: row.paper ? { ...row.paper } : null })),
     pdfs,
@@ -51,6 +55,8 @@ export function startFake({
     maxJobInFlight: 0,
     puts: [],
     patches: [],
+    pollFailures,
+    jobPosts: 0,
   };
 
   const server = http.createServer(async (req, res) => {
@@ -205,6 +211,7 @@ export function startFake({
       return;
     }
     if (req.method === 'POST' && pathname === '/v1/ai/jobs') {
+      state.jobPosts += 1;
       state.jobInFlight += 1;
       state.maxJobInFlight = Math.max(state.maxJobInFlight, state.jobInFlight);
       if (jobDelayMs) await delay(jobDelayMs);
@@ -220,17 +227,17 @@ export function startFake({
       const job = {
         id: randomUUID(),
         role: requestBody.role,
-        state: queued ? 'queued' : 'completed',
+        state: failJobs ? 'failed' : (queued ? 'queued' : 'completed'),
         model: requestBody.model || '',
         effort: requestBody.effort || '',
         useEvidence: requestBody.useEvidence !== false,
         idempotencyKey: requestBody.idempotencyKey,
         requestBody,
         polls: 0,
-        result: queued ? null : sampleResult(),
+        result: queued || failJobs ? null : makeResult(requestBody),
         usage: { inputTokens: 11, outputTokens: 7, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
         createdAt: now,
-        completedAt: queued ? null : now,
+        completedAt: queued || failJobs ? null : now,
       };
       state.jobs.set(job.id, job);
       send(res, 202, { job: publicJob(job), replayed: false });
@@ -243,10 +250,15 @@ export function startFake({
         fail(res, 404, 'not_found');
         return;
       }
+      if (state.pollFailures > 0) {
+        state.pollFailures -= 1;
+        fail(res, 503, 'unavailable');
+        return;
+      }
       job.polls += 1;
       if (job.state === 'queued' && job.polls >= 1) {
         job.state = 'completed';
-        job.result = sampleResult();
+        job.result = makeResult(job.requestBody);
         job.completedAt = new Date().toISOString();
       }
       send(res, 200, { job: publicJob(job) });
@@ -287,16 +299,15 @@ export function startFake({
 function sampleResult() {
   return {
     schema: 'falsify.document-blue.v1',
+    status: 'ok',
     findings: [{
-      reportNumber: 'B-1',
-      pageIndex: 1,
-      locationLabel: 'Results',
-      findingType: 'D1',
-      verdictLabel: '아님',
-      severity: '불일치',
+      id: 'f1',
+      occurrence: 0,
+      segmentId: 'p2-b1',
       quote: 'p < 0.50',
+      evidence: [{ quote: 'p < 0.50', relation: 'the threshold moved', segmentId: 'p2-b1' }],
       rationale: 'the threshold moved',
-      confidence: '높음',
+      uncertainty: '',
     }],
   };
 }
