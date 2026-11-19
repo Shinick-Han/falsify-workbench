@@ -3,7 +3,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { createHash, randomBytes } from 'node:crypto';
+import { createCipheriv, createHash, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -43,6 +43,11 @@ const SERVICE_TOKEN = 'test-service-token-' + 't'.repeat(24);
 const OPERATOR = 'fso_' + randomBytes(32).toString('base64url');
 const WRONG_OPERATOR = 'fso_' + randomBytes(32).toString('base64url');
 const CONSENT = '2026-11-22.v1';
+const SOURCE_HASH = '11'.repeat(32);
+const INTEROP_PDF = Buffer.from('%PDF-1.7\n% falsify booth interop fixture\n1 0 obj << /Type /Catalog >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n');
+const INTEROP_SHA = '241e9c74200e288d5bc4b11ef565745b1c5495930790689240bb7168ad111019';
+const SESSION_PURPOSE = 'falsify.confluence.session.v1';
+const SESSION_KEY = Buffer.alloc(32, 7);
 const KEY_RE = /^[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/;
 const sha256 = text => createHash('sha256').update(text).digest('hex');
 const pdfBytes = text => Buffer.from(`%PDF-1.7 synthetic ${text}`);
@@ -64,6 +69,15 @@ async function stubFetch(url, init, env) {
   if (db) {
     await db.prepare('INSERT INTO ai_stub_calls (host, path, method, owner_id) VALUES (?1, ?2, ?3, ?4)')
       .bind(requestUrl.hostname, requestUrl.pathname, method, owner).run();
+  }
+  if (requestUrl.hostname === 'auth.atlassian.com' && requestUrl.pathname === '/oauth/token' && method === 'POST') {
+    return reply(200, { access_token: 'access:acct-booth', expires_in: 3600, refresh_token: 'refresh:next' });
+  }
+  if (requestUrl.hostname === 'api.atlassian.com' && requestUrl.pathname.endsWith('/wiki/rest/api/user/current')) {
+    const token = (headers.get('Authorization') || '').replace(/^Bearer /, '');
+    const accountId = token.startsWith('access:') ? token.slice('access:'.length) : '';
+    if (!accountId) return reply(200, {});
+    return reply(200, { accountId });
   }
   if (requestUrl.hostname !== 'runtime.test') return new Response('not found', { status: 404 });
   if (requestUrl.pathname === '/internal/v1/uploads' && method === 'POST') {
@@ -290,7 +304,9 @@ function submissionMeta(pdf, overrides = {}) {
       defectType: 'number',
       reason: '유의수준을 바꿔 결론이 성립하지 않음',
     }],
-    paper: { source: 'arxiv', id: '2503.10497', title: 'Synthetic paper', license: 'cc-by-4.0' },
+    paper: {
+      source: 'arxiv', id: '2503.10497', title: 'Synthetic paper', license: 'cc-by-4.0', sourceSha256: SOURCE_HASH,
+    },
     nickname: '부스방문자',
     consentVersion: CONSENT,
     editedSha256: createHash('sha256').update(file).digest('hex'),
@@ -322,6 +338,49 @@ function submitPdf(call, token, pdf, overrides = {}, headers = {}) {
       ...headers,
     },
   });
+}
+
+function sealSession(payload) {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', SESSION_KEY, iv);
+  cipher.setAAD(Buffer.from(SESSION_PURPOSE));
+  const body = Buffer.concat([cipher.update(JSON.stringify({ purpose: SESSION_PURPOSE, ...payload }), 'utf8'), cipher.final()]);
+  return Buffer.concat([iv, body, cipher.getAuthTag()]).toString('base64url');
+}
+
+function expiringConfluenceSession() {
+  return sealSession({
+    accessToken: 'access:acct-booth',
+    refreshToken: 'refresh:test',
+    accessExp: Date.now() + 30_000,
+    envelopeExp: Date.now() + 12 * 3600e3,
+    rotations: 0,
+    cloudId: '11111111-1111-4111-8111-111111111111',
+    siteUrl: 'https://falsify.atlassian.net',
+  });
+}
+
+async function submitStream(mf, token, pdf) {
+  const raw = multipartRaw(submissionMeta(pdf), pdf);
+  const response = await mf.dispatchFetch('https://api.test/v1/booth/submissions', {
+    method: 'POST',
+    headers: {
+      Origin: ORIGIN,
+      Authorization: `Bearer ${token}`,
+      'Content-Type': `multipart/form-data; boundary=${MULTIPART_BOUNDARY}`,
+    },
+    body: new ReadableStream({
+      start(controller) {
+        controller.enqueue(raw);
+        controller.close();
+      },
+    }),
+    duplex: 'half',
+  });
+  const text = await response.text();
+  let body = null;
+  try { body = text ? JSON.parse(text) : null; } catch { body = null; }
+  return { status: response.status, body, text, headers: response.headers };
 }
 
 async function stubCalls(instance, pathname, method) {
@@ -374,6 +433,10 @@ test('operator id, gateway defaults and migration 0006 keep secrets out of the s
   assert.equal(settings.operatorUploadsPerHour, 600);
   assert.equal(settings.operatorMaxCallsPerJob, settings.maxCallsPerJob);
   assert.equal(settings.operatorTokenBudget, 0);
+  assert.equal(settings.modelJobsOperatorOnly, false);
+  assert.equal(aiSettings({ AI_MODEL_JOBS_OPERATOR_ONLY: 'true' }).modelJobsOperatorOnly, true);
+  assert.equal(aiSettings({ AI_MODEL_JOBS_OPERATOR_ONLY: 'false' }).modelJobsOperatorOnly, false);
+  assert.equal(aiSettings({ BOOTH_OPERATOR_TOKEN_BUDGET: '25' }).operatorTokenBudget, 25);
   const event = aiSettings({
     AI_GUEST_BLUE: 'false',
     AI_GUEST_MODEL_JOBS: 'false',
@@ -430,7 +493,24 @@ test('operator id, gateway defaults and migration 0006 keep secrets out of the s
   assert.match(boothSource, /const PDF_CHUNK_BYTES = 512 \* 1024/);
   assert.match(boothSource, /const PDF_HARD_CAP = 32 \* 1024 \* 1024/);
   assert.match(boothSource, /const PDF_DEFAULT_BYTES = 20 \* 1024 \* 1024/);
+  assert.match(boothSource, /const STORED_PDF_DEFAULT = 2147483648/);
+  assert.match(boothSource, /request\.formData\(\)/);
+  assert.equal(/parseMultipart/.test(boothSource), false);
+  assert.match(boothSource, /WHERE EXISTS \(SELECT 1 FROM booth_submissions WHERE id = \?1\)/);
+  assert.match(boothSource, /operator_note = NULL/);
+  assert.match(boothSource, /SELECT idx FROM booth_files/);
+  assert.equal(/SELECT idx, data FROM booth_files/.test(boothSource), false);
+  assert.equal(wrangler.split('"cpu_ms": 1000').length, 2);
+  assert.equal(wrangler.split('"cpu_ms": 5000').length, 2);
+  assert.equal(wrangler.split('"BOOTH_MAX_PDF_BYTES": "16777216"').length, 2);
+  assert.equal(wrangler.split('"BOOTH_STORED_PDF_BYTES": "3221225472"').length, 2);
+  assert.equal(wrangler.split('"AI_MODEL_JOBS_OPERATOR_ONLY": "true"').length, 2);
+  assert.equal(wrangler.includes('BOOTH_OPERATOR_TOKEN_BUDGET'), false);
+  assert.equal(wrangler.includes('BOOTH_TEST_SEQ_BIAS'), false);
+  assert.equal(wrangler.includes('BOOTH_PARSE_TIMING'), false);
   assert.equal(/"BOOTH_OPERATOR_TOKEN"\s*:/.test(wrangler), false);
+  assert.equal(INTEROP_PDF.length, 109);
+  assert.equal(createHash('sha256').update(INTEROP_PDF).digest('hex'), INTEROP_SHA);
 });
 
 test('booth stays dark until BOOTH_ENABLED is true, including for a valid operator', async () => {
@@ -606,6 +686,7 @@ test('visitor submit, claim, publish, withdraw and admin pdf', async () => {
     assert.equal(pdf.headers.get('Content-Disposition'), 'attachment; filename="F-0001.pdf"');
     assert.equal(pdf.headers.get('Cache-Control'), 'no-store');
     assert.equal(Buffer.compare(Buffer.from(pdf.bytes), guestPdf), 0);
+    assert.equal(pdf.headers.get('Content-Length'), String(guestPdf.length));
     assert.equal(pdf.headers.get('X-Falsify-Pdf-Sha256'), published.body.pdfSha256);
     assert.equal(pdf.text.includes(stored.owner_id), false);
     assert.equal(await stubCalls(mf, '/internal/v1/jobs', 'POST'), jobsBefore);
@@ -617,6 +698,10 @@ test('visitor submit, claim, publish, withdraw and admin pdf', async () => {
     const withdrawn = await call('POST', '/v1/booth/withdraw', { body: { receipt, claimKey } });
     assert.equal(withdrawn.status, 200);
     assert.equal(withdrawn.body.status, 'withdrawn');
+    const clearedNote = await d1.prepare(
+      'SELECT operator_note FROM booth_submissions WHERE receipt = ?1'
+    ).bind(receipt).first();
+    assert.equal(clearedNote.operator_note, null);
     assert.equal(withdrawn.body.published, false);
     assert.equal(withdrawn.body.declaredCount, 0);
     assert.equal(Object.hasOwn(withdrawn.body, 'prizeMessage'), false);
@@ -703,12 +788,12 @@ test('submit rejects a bad paper, a stale consent or a private nickname', async 
     assert.equal(noPaper.status, 400);
     assert.equal(noPaper.body.error.code, 'paper_not_allowed');
     const uploaded = await submitPdf(call, guestA, pdf, {
-      paper: { source: 'upload', id: 'local-1', title: 'Local', license: 'cc-by' },
+      paper: { source: 'upload', id: 'local-1', title: 'Local', license: 'cc-by', sourceSha256: SOURCE_HASH },
     });
     assert.equal(uploaded.status, 400);
     assert.equal(uploaded.body.error.code, 'paper_not_allowed');
     const noncommercial = await submitPdf(call, guestA, pdf, {
-      paper: { source: 'arxiv', id: '2503.10497', title: 'Synthetic paper', license: 'cc-by-nc-4.0' },
+      paper: { source: 'arxiv', id: '2503.10497', title: 'Synthetic paper', license: 'cc-by-nc-4.0', sourceSha256: SOURCE_HASH },
     });
     assert.equal(noncommercial.status, 400);
     assert.equal(noncommercial.body.error.code, 'paper_not_allowed');
@@ -717,7 +802,7 @@ test('submit rejects a bad paper, a stale consent or a private nickname', async 
     assert.equal(filled.body.receipt, 'F-0001');
     assert.equal(filled.body.course, 'deep');
     const allowedLicense = await submitPdf(call, guestA, pdfBytes('mission-ok'), {
-      paper: { source: 'mission', id: 'mission-1', title: 'Mission paper', license: 'public-domain' },
+      paper: { source: 'mission', id: 'mission-1', title: 'Mission paper', license: 'public-domain', sourceSha256: SOURCE_HASH },
     });
     assert.equal(allowedLicense.status, 201);
     assert.equal(await stubCalls(mf, '/internal/v1/jobs', 'POST'), 0);
@@ -828,6 +913,11 @@ test('per-owner, per-IP and claim buckets stop the next submission', async () =>
     const extra = await submitPdf(call, guest, extraPdf);
     assert.equal(extra.status, 429);
     assert.equal(extra.body.error.code, 'rate_limited');
+    const d1 = await mf.getD1Database('DB');
+    const charged = await d1.prepare(`SELECT count FROM rate_counters WHERE bucket = 'booth-submit:all'`).first();
+    assert.equal(Number(charged.count), 5, 'a rejected owner-cap attempt gives the hourly slot back');
+    const files = await d1.prepare('SELECT COUNT(*) AS count FROM booth_files').first();
+    assert.equal(Number(files.count), 5);
     const dropped = await call('POST', '/v1/booth/withdraw', {
       body: { receipt: first.receipt, claimKey: first.claimKey },
     });
@@ -932,6 +1022,7 @@ test('multipart pdf checks, chunks and a same-hash duplicate', async () => {
     const pdf = await call('GET', `/v1/booth/admin/submissions/${chunked.body.receipt}/pdf`, { token: OPERATOR });
     assert.equal(pdf.status, 200);
     assert.equal(Buffer.compare(Buffer.from(pdf.bytes), big), 0);
+    assert.equal(pdf.headers.get('Content-Length'), String(big.length));
     assert.equal(pdf.headers.get('X-Falsify-Pdf-Sha256'), createHash('sha256').update(big).digest('hex'));
     const d1 = await mf.getD1Database('DB');
     const row = await d1.prepare('SELECT id FROM booth_submissions WHERE receipt = ?1').bind(chunked.body.receipt).first();
@@ -1194,5 +1285,329 @@ test('operator jobs use operator limits and the opr:booth owner', async () => {
     const unset = await call('GET', '/v1/booth/admin/submissions', { token: OPERATOR });
     assert.equal(unset.status, 401);
     assert.equal(unset.body.error.code, 'unauthorized');
+  });
+});
+
+test('round 4 accepts the interop pdf, requires length, and enforces the atomic caps', async () => {
+  await withApp({}, async (mf, call) => {
+    const guest = (await mintGuest(call, fromIp('203.0.113.80'))).body.guest.token;
+    const created = await submitPdf(call, guest, INTEROP_PDF);
+    assert.equal(created.status, 201, created.text);
+    assert.equal(created.body.receipt, 'F-0001');
+    assert.equal(submissionMeta(INTEROP_PDF).editedSha256, INTEROP_SHA);
+    const pdf = await call('GET', '/v1/booth/admin/submissions/F-0001/pdf', { token: OPERATOR });
+    assert.equal(pdf.status, 200);
+    assert.equal(Buffer.compare(Buffer.from(pdf.bytes), INTEROP_PDF), 0);
+    assert.equal(pdf.headers.get('X-Falsify-Pdf-Sha256'), INTEROP_SHA);
+    assert.equal(pdf.headers.get('Content-Length'), '109');
+
+    const bare = submissionMeta(pdfBytes('missing-source'));
+    delete bare.paper.sourceSha256;
+    const missingHash = await call('POST', '/v1/booth/submissions', {
+      token: guest,
+      raw: multipartRaw(bare, pdfBytes('missing-source')),
+      headers: { 'Content-Type': `multipart/form-data; boundary=${MULTIPART_BOUNDARY}` },
+    });
+    assert.equal(missingHash.status, 400);
+    assert.equal(missingHash.body.error.code, 'invalid_request');
+
+    const nameless = Buffer.from(
+      `--${MULTIPART_BOUNDARY}\r\n` +
+      'Content-Disposition: form-data; name="meta"\r\n\r\n' +
+      `${JSON.stringify(submissionMeta(pdfBytes('no-name')))}\r\n` +
+      `--${MULTIPART_BOUNDARY}\r\n` +
+      'Content-Disposition: form-data; name="pdf"\r\n' +
+      'Content-Type: application/pdf\r\n\r\n' +
+      '%PDF-1.7 nameless\r\n' +
+      `--${MULTIPART_BOUNDARY}--\r\n`
+    );
+    const noName = await call('POST', '/v1/booth/submissions', {
+      token: guest,
+      raw: nameless,
+      headers: { 'Content-Type': `multipart/form-data; boundary=${MULTIPART_BOUNDARY}` },
+    });
+    assert.equal(noName.status, 400);
+    assert.equal(noName.body.error.code, 'invalid_request');
+
+    const wrongType = Buffer.from(
+      `--${MULTIPART_BOUNDARY}\r\n` +
+      'Content-Disposition: form-data; name="pdf"; filename="edited.pdf"\r\n' +
+      'Content-Type: text/plain\r\n\r\n' +
+      '%PDF-1.7 text\r\n' +
+      `--${MULTIPART_BOUNDARY}\r\n` +
+      'Content-Disposition: form-data; name="meta"\r\n\r\n' +
+      `${JSON.stringify(submissionMeta(Buffer.from('%PDF-1.7 text\r\n')))}\r\n` +
+      `--${MULTIPART_BOUNDARY}--\r\n`
+    );
+    const typed = await call('POST', '/v1/booth/submissions', {
+      token: guest,
+      raw: wrongType,
+      headers: { 'Content-Type': `multipart/form-data; boundary=${MULTIPART_BOUNDARY}` },
+    });
+    assert.equal(typed.status, 400);
+    assert.equal(typed.body.error.code, 'invalid_request');
+
+    const streamed = await submitStream(mf, guest, pdfBytes('no-length'));
+    assert.equal(streamed.status, 411, streamed.text);
+    assert.equal(streamed.body.error.code, 'length_required');
+    assert.equal(streamed.body.error.retryable, false);
+  });
+
+  await withApp({ BOOTH_SUBMISSIONS_PER_OWNER: '1' }, async (_mf, call) => {
+    const guest = (await mintGuest(call, fromIp('203.0.113.81'))).body.guest.token;
+    const [left, right] = await Promise.all([
+      submitPdf(call, guest, pdfBytes('race-left'), {}, fromIp('203.0.113.81')),
+      submitPdf(call, guest, pdfBytes('race-right'), {}, fromIp('203.0.113.82')),
+    ]);
+    const wins = [left, right].filter(item => item.status === 201);
+    const losses = [left, right].filter(item => item.status === 429);
+    assert.equal(wins.length, 1, JSON.stringify([left.status, right.status, left.body, right.body]));
+    assert.equal(losses.length, 1);
+    assert.equal(losses[0].body.error.code, 'rate_limited');
+  });
+
+  await withApp({ BOOTH_SUBMISSIONS_PER_HOUR: '1', BOOTH_SUBMISSIONS_PER_IP_HOUR: '10' }, async (_mf, call) => {
+    const guest = (await mintGuest(call, fromIp('203.0.113.83'))).body.guest.token;
+    const first = await submitPdf(call, guest, pdfBytes('hour-1'), {}, fromIp('203.0.113.83'));
+    assert.equal(first.status, 201, first.text);
+    const blocked = await submitPdf(call, guest, pdfBytes('hour-2'), {}, fromIp('203.0.113.84'));
+    assert.equal(blocked.status, 429);
+    assert.equal(blocked.body.error.code, 'rate_limited');
+    assert.equal(blocked.body.error.retryable, true);
+  });
+
+  await withApp({ BOOTH_TEST_SEQ_BIAS: '40' }, async (mf, call) => {
+    const guest = (await mintGuest(call)).body.guest.token;
+    const created = await submitPdf(call, guest, pdfBytes('seq-bias'));
+    assert.equal(created.status, 201, created.text);
+    assert.equal(created.body.receipt, 'F-0001');
+    const d1 = await mf.getD1Database('DB');
+    const row = await d1.prepare('SELECT seq FROM booth_submissions WHERE receipt = ?1').bind('F-0001').first();
+    assert.equal(Number(row.seq), 1);
+    const files = await d1.prepare('SELECT COUNT(*) AS count FROM booth_files').first();
+    assert.equal(Number(files.count), 1);
+  });
+
+  await withApp({ BOOTH_STORED_PDF_BYTES: '8' }, async (mf, call) => {
+    const guest = (await mintGuest(call)).body.guest.token;
+    const denied = await submitPdf(call, guest, pdfBytes('stored-over'));
+    assert.equal(denied.status, 503);
+    assert.equal(denied.body.error.code, 'storage_full');
+    assert.equal(denied.body.error.retryable, false);
+    const d1 = await mf.getD1Database('DB');
+    const files = await d1.prepare('SELECT COUNT(*) AS count FROM booth_files').first();
+    const rows = await d1.prepare('SELECT COUNT(*) AS count FROM booth_submissions').first();
+    assert.equal(Number(files.count), 0);
+    assert.equal(Number(rows.count), 0);
+  });
+});
+
+test('a mission source hash and page hint round-trip through config', async () => {
+  await withApp({}, async (_mf, call) => {
+    const guest = (await mintGuest(call)).body.guest.token;
+    const missionHash = 'ab'.repeat(32);
+    const mission = {
+      id: 'lane-a',
+      title: '첫 과제',
+      source: 'arxiv',
+      paperId: '2503.10497',
+      license: 'cc-by-4.0',
+      course: 'any',
+      hint: '숫자만',
+      pageHint: 4,
+      sourceSha256: missionHash,
+    };
+    const saved = await call('PUT', '/v1/booth/admin/settings', {
+      token: OPERATOR,
+      body: { missions: [mission] },
+    });
+    assert.equal(saved.status, 200);
+    assert.deepEqual(saved.body.missions, [mission]);
+    assert.deepEqual((await call('GET', '/v1/booth/config')).body.missions, [mission]);
+    const wrong = await submitPdf(call, guest, pdfBytes('mission-wrong'), {
+      paper: { source: 'mission', id: 'lane-a', title: '첫 과제', license: 'cc-by-4.0', sourceSha256: SOURCE_HASH },
+    });
+    assert.equal(wrong.status, 400);
+    assert.equal(wrong.body.error.code, 'paper_not_allowed');
+    const matched = await submitPdf(call, guest, pdfBytes('mission-match'), {
+      paper: { source: 'mission', id: '2503.10497', title: '첫 과제', license: 'cc-by-4.0', sourceSha256: missionHash },
+    });
+    assert.equal(matched.status, 201, matched.text);
+    const badHint = await call('PUT', '/v1/booth/admin/settings', {
+      token: OPERATOR,
+      body: { missions: [{ ...mission, pageHint: 0 }] },
+    });
+    assert.equal(badHint.status, 400);
+    assert.equal(badHint.body.error.code, 'invalid_request');
+  });
+});
+
+test('booth maps membership and open access the same way as hosted AI', async () => {
+  await withApp({}, async (mf, call) => {
+    const ada = await register(mf, call, 'boothnomem');
+    assert.equal(ada.status, 201);
+    const d1 = await mf.getD1Database('DB');
+    await d1.prepare(
+      `UPDATE team_members SET status = 'revoked' WHERE author_id = (SELECT id FROM authors WHERE username = 'boothnomem')`
+    ).run();
+    const denied = await call('GET', '/v1/booth/admin/submissions', { token: ada.body.token });
+    assert.equal(denied.status, 403);
+    assert.equal(denied.body.error.code, 'membership_required');
+    assert.equal(denied.body.error.message, 'An active team membership is required.');
+    assert.equal(denied.body.error.retryable, false);
+  });
+
+  await withApp({ AI_OPEN_ACCESS: 'false' }, async (_mf, call) => {
+    const denied = await call('POST', '/v1/booth/submissions', {
+      token: 'fsg_' + 'a'.repeat(43),
+      raw: multipartRaw(submissionMeta(pdfBytes('guest-off')), pdfBytes('guest-off')),
+      headers: { 'Content-Type': `multipart/form-data; boundary=${MULTIPART_BOUNDARY}` },
+    });
+    assert.equal(denied.status, 403);
+    assert.equal(denied.body.error.code, 'open_access_disabled');
+    assert.equal(denied.body.error.message, 'Open access is not enabled.');
+    assert.equal(denied.body.error.retryable, false);
+  });
+});
+
+test('a confluence session inside the refresh window is copied onto booth success and error', async () => {
+  const session = expiringConfluenceSession();
+  await withApp({
+    CONFLUENCE_SESSION_KEY: SESSION_KEY.toString('base64'),
+    ATLASSIAN_CLIENT_ID: 'client-id-test-1234',
+    ATLASSIAN_CLIENT_SECRET: 'client-secret-test',
+  }, async (_mf, call) => {
+    const created = await submitPdf(call, session, pdfBytes('refresh-ok'));
+    assert.equal(created.status, 201, created.text);
+    const seal = created.headers.get('X-Falsify-Confluence-Session');
+    assert.equal(typeof seal, 'string');
+    assert.equal(seal.length > 20, true);
+    assert.equal(seal === session, false);
+    assert.equal(created.headers.get('Access-Control-Expose-Headers'), 'X-Falsify-Confluence-Session');
+    const denied = await submitPdf(call, session, Buffer.from('not a pdf'));
+    assert.equal(denied.status, 400);
+    assert.equal(denied.body.error.code, 'invalid_pdf');
+    const again = denied.headers.get('X-Falsify-Confluence-Session');
+    assert.equal(typeof again, 'string');
+    assert.equal(again.length > 20, true);
+    assert.equal(denied.headers.get('Access-Control-Expose-Headers'), 'X-Falsify-Confluence-Session');
+  });
+});
+
+test('operator-only model jobs stop before upload lookup and a positive operator budget gates BLUE', async () => {
+  await withApp({ AI_MODEL_JOBS_OPERATOR_ONLY: 'true' }, async (mf, call) => {
+    const guest = (await mintGuest(call)).body.guest.token;
+    const missing = '77777777-7777-4777-8777-777777777777';
+    const ada = await register(mf, call, 'onlyada');
+    const blue = await call('POST', '/v1/ai/jobs', {
+      token: ada.body.token,
+      body: jobBody(missing, { role: 'blue', idempotencyKey: 'op-only-blue' }),
+    });
+    assert.equal(blue.status, 403);
+    assert.equal(blue.body.error.code, 'model_jobs_operator_only');
+    assert.equal(blue.body.error.retryable, false);
+    const guestBlue = await call('POST', '/v1/ai/jobs', {
+      token: guest,
+      body: jobBody(missing, { role: 'blue', idempotencyKey: 'op-only-gblue' }),
+    });
+    assert.equal(guestBlue.status, 403);
+    assert.equal(guestBlue.body.error.code, 'model_jobs_operator_only');
+    assert.equal(await stubCalls(mf, '/internal/v1/jobs', 'POST'), 0);
+    const adaUp = await upload(call, ada.body.token, pdfBytes('only-ada'));
+    const apply = await call('POST', '/v1/ai/jobs', {
+      token: ada.body.token,
+      body: applyOnlyBody(adaUp.body.upload.id, 'op-only-apply'),
+    });
+    assert.equal(apply.status, 202);
+    const guestUp = await upload(call, guest, pdfBytes('only-guest'));
+    const guestApply = await call('POST', '/v1/ai/jobs', {
+      token: guest,
+      body: applyOnlyBody(guestUp.body.upload.id, 'op-only-gapply'),
+    });
+    assert.equal(guestApply.status, 202);
+    const opUp = await upload(call, OPERATOR, pdfBytes('only-operator'));
+    const opBlue = await call('POST', '/v1/ai/jobs', {
+      token: OPERATOR,
+      body: jobBody(opUp.body.upload.id, { role: 'blue', idempotencyKey: 'op-only-opr' }),
+    });
+    assert.equal(opBlue.status, 202);
+    for (const view of [
+      await call('GET', '/v1/ai/capabilities'),
+      await call('GET', '/v1/ai/capabilities', { token: guest }),
+      await call('GET', '/v1/ai/capabilities', { token: ada.body.token }),
+      await call('GET', '/v1/ai/capabilities', { token: WRONG_OPERATOR }),
+    ]) {
+      assert.equal(view.status, 200);
+      assert.equal(view.body.blueJobs, false);
+      assert.equal(view.body.modelJobs, false);
+      assert.equal(view.body.openAccess.enabled, true);
+    }
+    const asOperator = await call('GET', '/v1/ai/capabilities', { token: OPERATOR });
+    assert.equal(asOperator.body.blueJobs, true);
+    assert.equal(asOperator.body.modelJobs, true);
+    assert.equal(asOperator.body.openAccess.enabled, true);
+    assert.deepEqual(Object.keys(asOperator.body), [
+      'enabled', 'provider', 'execution', 'models', 'efforts', 'limits', 'openAccess', 'modelProviders', 'blueJobs', 'modelJobs',
+    ]);
+  });
+
+  await withApp({
+    AI_MODEL_JOBS_OPERATOR_ONLY: 'true',
+    AI_GUEST_BLUE: 'false',
+    AI_GUEST_MODEL_JOBS: 'false',
+  }, async (mf, call) => {
+    const guest = (await mintGuest(call)).body.guest.token;
+    const missing = '88888888-8888-4888-8888-888888888888';
+    const blue = await call('POST', '/v1/ai/jobs', {
+      token: guest,
+      body: jobBody(missing, { role: 'blue', idempotencyKey: 'op-order-blue' }),
+    });
+    assert.equal(blue.body.error.code, 'guest_blue_disabled');
+    const model = await call('POST', '/v1/ai/jobs', {
+      token: guest,
+      body: jobBody(missing, { idempotencyKey: 'op-order-red' }),
+    });
+    assert.equal(model.body.error.code, 'guest_model_disabled');
+    assert.equal(await stubCalls(mf, '/internal/v1/jobs', 'POST'), 0);
+  });
+
+  await withApp({ BOOTH_OPERATOR_TOKEN_BUDGET: '10', BOOTH_OPERATOR_ACTIVE_JOBS: '4' }, async (mf, call) => {
+    const up = await upload(call, OPERATOR, pdfBytes('budget-op'));
+    assert.equal(up.status, 201);
+    const d1 = await mf.getD1Database('DB');
+    const at = new Date().toISOString();
+    await d1.prepare(
+      `INSERT INTO ai_jobs (id, owner_id, role, idempotency_key, request_hash, upload_id, model, effort, state, snapshot,
+         created_at, updated_at, input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, usage_recorded_at)
+       VALUES (?1, 'opr:booth', 'blue', 'op-budget-seed', ?2, ?3, 'claude-sonnet-5-5', 'high', 'completed', '{}', ?4, ?4, 40, 0, 0, 0, ?4)`
+    ).bind('99999999-9999-4999-8999-999999999999', 'e'.repeat(64), up.body.upload.id, at).run();
+    const blocked = await call('POST', '/v1/ai/jobs', {
+      token: OPERATOR,
+      body: jobBody(up.body.upload.id, { role: 'blue', idempotencyKey: 'op-budget-block' }),
+    });
+    assert.equal(blocked.status, 429);
+    assert.equal(blocked.body.error.code, 'owner_budget_exhausted');
+    const apply = await call('POST', '/v1/ai/jobs', {
+      token: OPERATOR,
+      body: applyOnlyBody(up.body.upload.id, 'op-budget-apply'),
+    });
+    assert.equal(apply.status, 202, apply.text);
+    assert.equal(await stubCalls(mf, '/internal/v1/jobs', 'POST'), 1);
+  });
+});
+
+test('a 16 MiB pdf submit records handler time', async () => {
+  await withApp({ BOOTH_PARSE_TIMING: '1', BOOTH_MAX_PDF_BYTES: '16777216' }, async (_mf, call) => {
+    const guest = (await mintGuest(call)).body.guest.token;
+    const big = Buffer.alloc(16 * 1024 * 1024);
+    big.write('%PDF-1.7\n', 0, 'ascii');
+    const wallStart = performance.now();
+    const created = await submitPdf(call, guest, big);
+    const wallMs = performance.now() - wallStart;
+    assert.equal(created.status, 201, created.text);
+    const parseMs = Number(created.headers.get('X-Falsify-Parse-Ms'));
+    assert.equal(Number.isFinite(parseMs) && parseMs >= 0, true);
+    assert.equal(created.headers.get('X-Falsify-Parse-Ms') === null, false);
+    console.log(`BOOTH_SUBMIT16_MS ${parseMs.toFixed(3)} BOOTH_SUBMIT16_WALL_MS ${wallMs.toFixed(3)}`);
   });
 });
