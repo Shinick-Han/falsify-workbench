@@ -99,7 +99,7 @@ function containsSentinel(state) {
 test('--help prints every command', async () => {
   const result = await run(['--help'], { env: { FALSIFY_BOOTH_TOKEN: '' } });
   assert.equal(result.code, 0);
-  for (const name of ['status', 'list', 'pull', 'blue', 'score', 'judge', 'publish', 'unpublish', 'draw', 'export', 'missions', 'open', 'close', 'announce', '--allow-open', 'missions warm']) {
+  for (const name of ['status', 'list', 'pull', 'blue', 'score', 'judge', 'publish', 'unpublish', 'draw', 'export', 'missions', 'open', 'close', 'announce', '--allow-open', '--max-bytes', 'missions warm']) {
     assert.equal(result.stdout.includes(name), true, name);
   }
 });
@@ -358,6 +358,9 @@ test('blue refuses while submissions are open unless --allow-open is set', async
     const dry = await run([...base, 'blue', '--dry-run']);
     assert.equal(dry.code, 1, dry.stderr);
     assert.equal(dry.stderr.includes('allow-open'), true);
+    assert.equal(dry.stderr.includes('production runtime'), true);
+    assert.equal(dry.stderr.includes('visitor path'), true);
+    assert.equal(dry.stderr.includes('visitors share'), false);
     const refused = await run([...base, 'blue', '--only', 'F-0011']);
     assert.equal(refused.code, 1, refused.stderr);
     assert.equal(refused.stderr.includes('booth_config'), true);
@@ -557,14 +560,17 @@ test('missions warm reports PDF sizes and keeps going after a failure', async ()
   try {
     const empty = await run([...base, 'missions', 'warm']);
     assert.equal(empty.code, 0, empty.stderr);
-    assert.deepEqual(JSON.parse(empty.stdout), { missions: [], failures: [] });
+    assert.deepEqual(JSON.parse(empty.stdout), { missions: [], failures: [], wrote: false });
     const set = await run([...base, 'missions', 'set', missionFile]);
     assert.equal(set.code, 0, set.stderr);
     assert.deepEqual(fake.state.settings.missions.map(mission => mission.id), [
       'ragas', 'embedding-similarity', 'serverless-llm-cold-start', 'cold-start-antipatterns',
     ]);
+    const putsBeforeWarm = fake.state.puts.length;
     const warm = await run([...base, 'missions', 'warm']);
     assert.equal(warm.code, 2, warm.stdout);
+    assert.equal(JSON.parse(warm.stdout).wrote, false);
+    assert.equal(fake.state.puts.length, putsBeforeWarm);
     assert.equal(warm.stderr.includes('booth_api'), true);
     assert.equal(warm.stdout.includes(TOKEN), false);
     assert.equal(warm.stderr.includes(TOKEN), false);
@@ -585,6 +591,105 @@ test('missions warm reports PDF sizes and keeps going after a failure', async ()
     assert.equal(fs.existsSync(path.join(dir, 'data')), false);
   } finally {
     await fake.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('missions warm --write stores sourceSha256 and keeps pageHint', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-warm-write-'));
+  const one = Buffer.from('%PDF-1.4\n% mission one\n');
+  const two = Buffer.from('%PDF-1.4\n% mission two\n');
+  const fake = await startFake({
+    token: TOKEN,
+    submissions: [],
+    pdfs: new Map(),
+    papers: new Map([
+      ['2309.15217', one],
+      ['2407.08275', two],
+    ]),
+  });
+  const config = writeConfig(dir, fake.url);
+  const missionFile = path.join(dir, 'missions.json');
+  fs.writeFileSync(missionFile, JSON.stringify([
+    { id: 'one', title: 'One', source: 'arxiv', paperId: '2309.15217', license: 'cc-by-4.0', course: 'quick', hint: '표', pageHint: 8 },
+    { id: 'two', title: 'Two', source: 'arxiv', paperId: '2407.08275', license: 'cc-by-4.0', course: 'deep', pageHint: 12 },
+  ]));
+  try {
+    const set = await run(['--config', config, 'missions', 'set', missionFile]);
+    assert.equal(set.code, 0, set.stderr);
+    const warm = await run(['--config', config, 'missions', 'warm', '--write']);
+    assert.equal(warm.code, 0, warm.stderr);
+    const body = JSON.parse(warm.stdout);
+    assert.equal(body.wrote, true);
+    assert.equal(body.failures.length, 0);
+    const stored = fake.state.settings.missions;
+    assert.equal(stored[0].pageHint, 8);
+    assert.equal(stored[0].sourceSha256, sha256(one));
+    assert.equal(stored[0].hint, '표');
+    assert.equal(stored[1].pageHint, 12);
+    assert.equal(stored[1].sourceSha256, sha256(two));
+    assert.deepEqual(Object.keys(fake.state.puts.at(-1)), ['missions']);
+    assert.equal(fake.state.paperPdfGets['2309.15217'], 1);
+    assert.equal(fake.state.paperPdfGets['2407.08275'], 1);
+  } finally {
+    await fake.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('missions warm --write does not store hashes when a fetch fails', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-warm-nowrite-'));
+  const fake = await startFake({
+    token: TOKEN,
+    submissions: [],
+    pdfs: new Map(),
+    papers: new Map([['2309.15217', 'denied']]),
+  });
+  const config = writeConfig(dir, fake.url);
+  const missionFile = path.join(dir, 'missions.json');
+  fs.writeFileSync(missionFile, JSON.stringify([
+    { id: 'one', title: 'One', source: 'arxiv', paperId: '2309.15217', license: 'cc-by-4.0', course: 'quick', pageHint: 3 },
+  ]));
+  try {
+    const set = await run(['--config', config, 'missions', 'set', missionFile]);
+    assert.equal(set.code, 0, set.stderr);
+    const puts = fake.state.puts.length;
+    const warm = await run(['--config', config, 'missions', 'warm', '--write']);
+    assert.equal(warm.code, 2, warm.stdout);
+    assert.equal(JSON.parse(warm.stdout).wrote, false);
+    assert.equal(fake.state.puts.length, puts);
+    assert.equal(fake.state.settings.missions[0].pageHint, 3);
+    assert.equal(Object.hasOwn(fake.state.settings.missions[0], 'sourceSha256'), false);
+  } finally {
+    await fake.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('blue refuses a local file that is not a PDF or is over max-bytes', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-pdf-limit-'));
+  const data = path.join(dir, 'data');
+  const folder = path.join(data, 'submissions', 'F-0024');
+  fs.mkdirSync(folder, { recursive: true });
+  const big = Buffer.concat([Buffer.from('%PDF-'), Buffer.alloc(64, 0x20)]);
+  fs.writeFileSync(path.join(folder, 'edited.pdf'), big);
+  fs.writeFileSync(path.join(folder, 'submission.json'), JSON.stringify(quietRow(24, {
+    pdfSha256: sha256(big),
+    pdfBytes: big.length,
+  })));
+  const config = writeConfig(dir, 'http://127.0.0.1:1');
+  try {
+    const over = await run(['--config', config, 'blue', '--dry-run', '--allow-open', '--max-bytes', '32', '--only', 'F-0024']);
+    assert.equal(over.code, 1, over.stderr);
+    assert.equal(over.stderr.includes('limit is 32'), true);
+    assert.equal(over.stderr.includes('booth_local'), true);
+    const ok = await run(['--config', config, 'blue', '--dry-run', '--allow-open', '--only', 'F-0024']);
+    assert.equal(ok.code, 0, ok.stderr);
+    fs.writeFileSync(path.join(folder, 'edited.pdf'), Buffer.from('not a pdf'));
+    const bad = await run(['--config', config, 'blue', '--dry-run', '--allow-open', '--only', 'F-0024']);
+    assert.equal(bad.code, 1, bad.stderr);
+    assert.equal(bad.stderr.includes('not a PDF'), true);
+  } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });

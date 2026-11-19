@@ -126,7 +126,7 @@ export function startFake({
         fail(res, 403, 'paper_not_allowed');
         return;
       }
-      send(res, 200, spec);
+      send(res, 200, spec, { 'X-Falsify-Pdf-Sha256': sha256(spec) });
       return;
     }
     const pdf = pathname.match(/^\/v1\/booth\/admin\/submissions\/(F-\d+)\/pdf$/);
