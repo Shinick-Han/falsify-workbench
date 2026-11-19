@@ -276,9 +276,11 @@ function applyOnlyBody(uploadId, key) {
   };
 }
 
-function submissionBody(jobId, overrides = {}) {
+const MULTIPART_BOUNDARY = '----falsifyboothboundary7x';
+
+function submissionMeta(pdf, overrides = {}) {
+  const file = Buffer.isBuffer(pdf) ? pdf : Buffer.from(pdf);
   return {
-    jobId,
     course: 'quick',
     declared: [{
       pageIndex: 3,
@@ -291,8 +293,35 @@ function submissionBody(jobId, overrides = {}) {
     paper: { source: 'arxiv', id: '2503.10497', title: 'Synthetic paper', license: 'cc-by-4.0' },
     nickname: '부스방문자',
     consentVersion: CONSENT,
+    editedSha256: createHash('sha256').update(file).digest('hex'),
     ...overrides,
   };
+}
+
+function multipartRaw(meta, pdf) {
+  const file = Buffer.isBuffer(pdf) ? pdf : Buffer.from(pdf);
+  const head = Buffer.from(
+    `--${MULTIPART_BOUNDARY}\r\n` +
+    'Content-Disposition: form-data; name="meta"\r\n' +
+    'Content-Type: application/json; charset=utf-8\r\n\r\n' +
+    `${JSON.stringify(meta)}\r\n` +
+    `--${MULTIPART_BOUNDARY}\r\n` +
+    'Content-Disposition: form-data; name="pdf"; filename="edited.pdf"\r\n' +
+    'Content-Type: application/pdf\r\n\r\n'
+  );
+  const tail = Buffer.from(`\r\n--${MULTIPART_BOUNDARY}--\r\n`);
+  return Buffer.concat([head, file, tail]);
+}
+
+function submitPdf(call, token, pdf, overrides = {}, headers = {}) {
+  return call('POST', '/v1/booth/submissions', {
+    token,
+    raw: multipartRaw(submissionMeta(pdf, overrides), pdf),
+    headers: {
+      'Content-Type': `multipart/form-data; boundary=${MULTIPART_BOUNDARY}`,
+      ...headers,
+    },
+  });
 }
 
 async function stubCalls(instance, pathname, method) {
@@ -300,31 +329,6 @@ async function stubCalls(instance, pathname, method) {
   const row = await d1.prepare('SELECT COUNT(*) AS count FROM ai_stub_calls WHERE path = ?1 AND method = ?2')
     .bind(pathname, method).first();
   return Number(row.count);
-}
-
-async function markReady(instance, jobId, { applyOnly, state = 'completed', artifacts = 'edited', role = 'red' } = {}) {
-  const d1 = await instance.getD1Database('DB');
-  const row = await d1.prepare('SELECT snapshot, owner_id FROM ai_jobs WHERE id = ?1').bind(jobId).first();
-  const snapshot = JSON.parse(row.snapshot);
-  if (applyOnly !== undefined) snapshot.applyOnly = applyOnly;
-  snapshot.state = state;
-  snapshot.role = role;
-  if (artifacts === 'edited') snapshot.artifacts = [{ id: 'edited-pdf-1', name: 'edited.pdf', mime: 'application/pdf', bytes: 40 }];
-  else if (artifacts === 'other') snapshot.artifacts = [{ id: 'artifact-1', name: 'review.json', mime: 'application/json', bytes: 4 }];
-  else snapshot.artifacts = [];
-  await d1.prepare('UPDATE ai_jobs SET state = ?1, role = ?2, snapshot = ?3 WHERE id = ?4')
-    .bind(state, role, JSON.stringify(snapshot), jobId).run();
-  await d1.prepare('UPDATE ai_stub_jobs SET state = ?1 WHERE id = ?2').bind(state, jobId).run();
-  return row.owner_id;
-}
-
-async function readyJob(instance, call, token, key, options) {
-  const up = await upload(call, token, pdfBytes(key));
-  assert.equal(up.status, 201, `${key} upload`);
-  const created = await call('POST', '/v1/ai/jobs', { token, body: applyOnlyBody(up.body.upload.id, key) });
-  assert.equal(created.status, 202, `${key} job`);
-  const ownerId = await markReady(instance, created.body.job.id, options);
-  return { jobId: created.body.job.id, ownerId };
 }
 
 before(async () => {
@@ -385,6 +389,14 @@ test('operator id, gateway defaults and migration 0006 keep secrets out of the s
   const sql = readFileSync(path.join(apiRoot, 'migrations', '0006_booth.sql'), 'utf8');
   assert.match(sql, /CREATE TABLE booth_submissions/);
   assert.match(sql, /CREATE TABLE booth_settings/);
+  assert.match(sql, /CREATE TABLE booth_files/);
+  assert.match(sql, /pdf_sha256 TEXT NOT NULL/);
+  assert.match(sql, /pdf_bytes INTEGER NOT NULL/);
+  assert.match(sql, /source_sha256 TEXT/);
+  assert.match(sql, /UNIQUE \(owner_id, pdf_sha256\)/);
+  assert.match(sql, /PRIMARY KEY \(submission_id, idx\)/);
+  assert.equal(/\bjob_id\b/.test(sql), false);
+  assert.equal(/\bartifact_id\b/.test(sql), false);
   assert.match(sql, /claim_hash TEXT NOT NULL/);
   assert.match(sql, /CREATE INDEX booth_submissions_owner/);
   assert.match(sql, /CREATE INDEX booth_submissions_status/);
@@ -415,6 +427,9 @@ test('operator id, gateway defaults and migration 0006 keep secrets out of the s
   const boothSource = readFileSync(path.join(apiRoot, 'src/booth.mjs'), 'utf8');
   assert.match(boothSource, /const SEQ_ATTEMPTS = 5/);
   assert.match(boothSource, /claimsPerHour: positiveInt\(env\?\.BOOTH_CLAIMS_PER_HOUR, 2000\)/);
+  assert.match(boothSource, /const PDF_CHUNK_BYTES = 512 \* 1024/);
+  assert.match(boothSource, /const PDF_HARD_CAP = 32 \* 1024 \* 1024/);
+  assert.match(boothSource, /const PDF_DEFAULT_BYTES = 20 \* 1024 \* 1024/);
   assert.equal(/"BOOTH_OPERATOR_TOKEN"\s*:/.test(wrangler), false);
 });
 
@@ -473,14 +488,21 @@ test('visitor submit, claim, publish, withdraw and admin pdf', async () => {
     assert.equal(wrong.body.error.code, 'unauthorized');
     const operatorSubmit = await call('POST', '/v1/booth/submissions', {
       token: OPERATOR,
-      body: submissionBody('11111111-1111-4111-8111-111111111111'),
+      body: { course: 'quick' },
     });
     assert.equal(operatorSubmit.status, 403);
     assert.equal(operatorSubmit.body.error.code, 'forbidden');
 
-    const ready = await readyJob(mf, call, guest, 'op-booth-happy1');
-    const created = await call('POST', '/v1/booth/submissions', { token: guest, body: submissionBody(ready.jobId) });
-    assert.equal(created.status, 201);
+    const guestPdf = pdfBytes('op-booth-happy1');
+    const sourceSha256 = '11'.repeat(32);
+    const jobsBefore = await stubCalls(mf, '/internal/v1/jobs', 'POST');
+    const created = await submitPdf(call, guest, guestPdf, {
+      paper: {
+        source: 'arxiv', id: '2503.10497', title: 'Synthetic paper', license: 'cc-by-4.0', sourceSha256,
+      },
+    });
+    assert.equal(created.status, 201, created.text);
+    assert.equal(created.headers.get('X-Falsify-Parse-Ms'), null);
     assert.equal(created.body.receipt, 'F-0001');
     assert.match(created.body.claimKey, KEY_RE);
     assert.equal(created.body.status, 'received');
@@ -490,7 +512,7 @@ test('visitor submit, claim, publish, withdraw and admin pdf', async () => {
     const receipt = created.body.receipt;
     const claimKey = created.body.claimKey;
 
-    const again = await call('POST', '/v1/booth/submissions', { token: guest, body: submissionBody(ready.jobId) });
+    const again = await submitPdf(call, guest, guestPdf);
     assert.equal(again.status, 409);
     assert.equal(again.body.error.code, 'already_submitted');
     assert.equal(again.body.receipt, 'F-0001');
@@ -507,18 +529,21 @@ test('visitor submit, claim, publish, withdraw and admin pdf', async () => {
     assert.equal(plain.body.declaredCount, 1);
 
     const d1 = await mf.getD1Database('DB');
+    const stored = await d1.prepare(
+      'SELECT id, owner_id FROM booth_submissions WHERE receipt = ?1'
+    ).bind(receipt).first();
     const knownKey = 'A0B1CDEF';
     const knownReceipt = 'F-0088';
     await d1.prepare(
       `INSERT INTO booth_submissions (
-        id, seq, receipt, claim_hash, owner_id, job_id, artifact_id, course, declared, consent_version, status, created_at, updated_at
-      ) VALUES (?1, 88, ?2, ?3, ?4, ?5, 'edited-pdf-1', 'deep', '[]', ?6, 'received', ?7, ?7)`
+        id, seq, receipt, claim_hash, owner_id, pdf_sha256, pdf_bytes, course, declared, consent_version, status, created_at, updated_at
+      ) VALUES (?1, 88, ?2, ?3, ?4, ?5, 8, 'deep', '[]', ?6, 'received', ?7, ?7)`
     ).bind(
       '22222222-2222-4222-8222-222222222222',
       knownReceipt,
       sha256(`booth-claim:v1:${knownReceipt}:${knownKey}`),
-      ready.ownerId,
-      '33333333-3333-4333-8333-333333333333',
+      stored.owner_id,
+      'cd'.repeat(32),
       CONSENT,
       new Date().toISOString(),
     ).run();
@@ -555,7 +580,12 @@ test('visitor submit, claim, publish, withdraw and admin pdf', async () => {
     assert.equal(published.body.published, true);
     assert.match(published.body.publishedAt, /^\d{4}-\d{2}-\d{2}T/);
     assert.equal(published.body.aiSummary.marker, 'operator-only');
-    assert.equal(JSON.stringify(published.body).includes(ready.ownerId), false);
+    assert.equal(published.body.pdfSha256, createHash('sha256').update(guestPdf).digest('hex'));
+    assert.equal(published.body.pdfBytes, guestPdf.length);
+    assert.equal(published.body.sourceSha256, sourceSha256);
+    assert.equal(published.body.jobId, undefined);
+    assert.equal(published.body.artifactId, undefined);
+    assert.equal(JSON.stringify(published.body).includes(stored.owner_id), false);
     const after = await call('POST', '/v1/booth/claim', { body: { receipt, claimKey } });
     assert.equal(after.body.published, true);
     assert.equal(after.body.prizeMessage, 'GIFT-CODE');
@@ -575,19 +605,14 @@ test('visitor submit, claim, publish, withdraw and admin pdf', async () => {
     assert.equal(pdf.headers.get('Content-Type'), 'application/pdf');
     assert.equal(pdf.headers.get('Content-Disposition'), 'attachment; filename="F-0001.pdf"');
     assert.equal(pdf.headers.get('Cache-Control'), 'no-store');
-    assert.equal(Buffer.from(pdf.bytes).subarray(0, 5).toString(), '%PDF-');
-    assert.equal(pdf.text.includes('ART-MARK'), true);
-    assert.equal(pdf.text.includes(ready.ownerId), false);
-    const proxied = await d1.prepare(
-      `SELECT owner_id FROM ai_stub_calls WHERE path = ?1 AND method = 'GET' ORDER BY seq DESC LIMIT 1`
-    ).bind(`/internal/v1/jobs/${ready.jobId}/artifacts/edited-pdf-1`).first();
-    assert.equal(proxied.owner_id, ready.ownerId);
-    assert.notEqual(proxied.owner_id, 'opr:booth');
-
-    await d1.prepare('UPDATE booth_submissions SET artifact_id = ?1 WHERE receipt = ?2').bind('gone-artifact', receipt).run();
-    const expired = await call('GET', `/v1/booth/admin/submissions/${receipt}/pdf`, { token: OPERATOR });
-    assert.equal(expired.status, 404);
-    assert.equal(expired.body.error.code, 'artifact_expired');
+    assert.equal(Buffer.compare(Buffer.from(pdf.bytes), guestPdf), 0);
+    assert.equal(pdf.headers.get('X-Falsify-Pdf-Sha256'), published.body.pdfSha256);
+    assert.equal(pdf.text.includes(stored.owner_id), false);
+    assert.equal(await stubCalls(mf, '/internal/v1/jobs', 'POST'), jobsBefore);
+    const storedFiles = await d1.prepare(
+      'SELECT COUNT(*) AS count FROM booth_files WHERE submission_id = ?1'
+    ).bind(stored.id).first();
+    assert.equal(Number(storedFiles.count), 1);
 
     const withdrawn = await call('POST', '/v1/booth/withdraw', { body: { receipt, claimKey } });
     assert.equal(withdrawn.status, 200);
@@ -612,7 +637,7 @@ test('visitor submit, claim, publish, withdraw and admin pdf', async () => {
     const detail = await call('GET', `/v1/booth/admin/submissions/${receipt}`, { token: OPERATOR });
     assert.equal(detail.status, 200);
     assert.equal(JSON.stringify(detail.body).includes('claim_hash'), false);
-    assert.equal(JSON.stringify(detail.body).includes(ready.ownerId), false);
+    assert.equal(JSON.stringify(detail.body).includes(stored.owner_id), false);
     assert.deepEqual(detail.body.declared, []);
     assert.equal(detail.body.nickname, null);
     assert.equal(detail.body.paper, null);
@@ -620,10 +645,11 @@ test('visitor submit, claim, publish, withdraw and admin pdf', async () => {
     assert.equal(detail.body.outcome, null);
     assert.equal(detail.body.publicNote, null);
     assert.equal(detail.body.course, 'quick');
-    assert.equal(detail.body.jobId, ready.jobId);
+    assert.equal(detail.body.pdfSha256, published.body.pdfSha256);
+    assert.equal(detail.body.jobId, undefined);
     const tomb = await d1.prepare(
       `SELECT declared, nickname, paper, public_note, prize_message, ai_summary, outcome, published_at,
-              operator_note, course, consent_version, job_id, created_at
+              operator_note, course, consent_version, pdf_sha256, created_at
        FROM booth_submissions WHERE receipt = ?1`
     ).bind(receipt).first();
     assert.equal(tomb.declared, '[]');
@@ -637,129 +663,73 @@ test('visitor submit, claim, publish, withdraw and admin pdf', async () => {
     assert.equal(tomb.operator_note, '철회됨');
     assert.equal(tomb.course, 'quick');
     assert.equal(tomb.consent_version, CONSENT);
-    assert.equal(tomb.job_id, ready.jobId);
+    assert.equal(tomb.pdf_sha256, published.body.pdfSha256);
     assert.equal(tomb.created_at, created.body.createdAt);
-    const pdfGets = await stubCalls(mf, `/internal/v1/jobs/${ready.jobId}/artifacts/gone-artifact`, 'GET');
+    const filesAfter = await d1.prepare(
+      'SELECT COUNT(*) AS count FROM booth_files WHERE submission_id = ?1'
+    ).bind(stored.id).first();
+    assert.equal(Number(filesAfter.count), 0);
     const hiddenPdf = await call('GET', `/v1/booth/admin/submissions/${receipt}/pdf`, { token: OPERATOR });
     assert.equal(hiddenPdf.status, 404);
     assert.equal(hiddenPdf.body.error.code, 'withdrawn');
-    assert.equal(await stubCalls(mf, `/internal/v1/jobs/${ready.jobId}/artifacts/gone-artifact`, 'GET'), pdfGets);
+    assert.equal(await stubCalls(mf, '/internal/v1/jobs', 'POST'), jobsBefore);
   });
 });
 
-test('submit rejects a foreign, unready, duplicate-shaped, closed or private nickname', async () => {
+test('submit rejects a bad paper, a stale consent or a private nickname', async () => {
   await withApp({}, async (mf, call) => {
     const guestA = (await mintGuest(call, fromIp('203.0.113.10'))).body.guest.token;
-    const guestB = (await mintGuest(call, fromIp('203.0.113.11'))).body.guest.token;
-    const owned = await readyJob(mf, call, guestA, 'op-booth-owned1');
-    const foreign = await call('POST', '/v1/booth/submissions', { token: guestB, body: submissionBody(owned.jobId) });
-    assert.equal(foreign.status, 404);
-    assert.equal(foreign.body.error.code, 'not_found');
-
-    const queued = await readyJob(mf, call, guestA, 'op-booth-queue1', { state: 'queued', artifacts: 'none' });
-    const getsBefore = await stubCalls(mf, `/internal/v1/jobs/${queued.jobId}`, 'GET');
-    const notDone = await call('POST', '/v1/booth/submissions', { token: guestA, body: submissionBody(queued.jobId) });
-    assert.equal(notDone.status, 409);
-    assert.equal(notDone.body.error.code, 'job_not_ready');
-    assert.equal(await stubCalls(mf, `/internal/v1/jobs/${queued.jobId}`, 'GET'), getsBefore);
-
-    const up = await upload(call, guestA, pdfBytes('plain-job'));
-    const plain = await call('POST', '/v1/ai/jobs', {
-      token: guestA,
-      body: jobBody(up.body.upload.id, { idempotencyKey: 'op-booth-plain1' }),
-    });
-    assert.equal(plain.status, 202);
-    await markReady(mf, plain.body.job.id, { applyOnly: false, artifacts: 'edited' });
-    const modelJob = await call('POST', '/v1/booth/submissions', { token: guestA, body: submissionBody(plain.body.job.id) });
-    assert.equal(modelJob.status, 409);
-    assert.equal(modelJob.body.error.code, 'job_not_ready');
-    assert.equal(await stubCalls(mf, `/internal/v1/jobs/${plain.body.job.id}`, 'GET'), 0);
-
-    const other = await readyJob(mf, call, guestA, 'op-booth-other1', { artifacts: 'other' });
-    const noPdf = await call('POST', '/v1/booth/submissions', { token: guestA, body: submissionBody(other.jobId) });
-    assert.equal(noPdf.status, 409);
-    assert.equal(noPdf.body.error.code, 'job_not_ready');
-    assert.equal(await stubCalls(mf, `/internal/v1/jobs/${other.jobId}`, 'GET'), 0);
-
-    const live = await readyJob(mf, call, guestA, 'op-booth-live01', { artifacts: 'none' });
-    const filled = await call('POST', '/v1/booth/submissions', { token: guestA, body: submissionBody(live.jobId, { course: 'deep' }) });
-    assert.equal(filled.status, 201);
-    assert.equal(filled.body.receipt, 'F-0001');
-    assert.equal(filled.body.course, 'deep');
-    assert.equal(await stubCalls(mf, `/internal/v1/jobs/${live.jobId}`, 'GET'), 1, 'an empty artifact list is fetched once');
-
-    const staleConsent = await call('POST', '/v1/booth/submissions', {
-      token: guestA,
-      body: submissionBody('44444444-4444-4444-8444-444444444444', { consentVersion: '1999-01-01.v0' }),
-    });
+    const pdf = pdfBytes('shape');
+    const staleConsent = await submitPdf(call, guestA, Buffer.from('not-pdf'), { consentVersion: '1999-01-01.v0' });
     assert.equal(staleConsent.status, 409);
     assert.equal(staleConsent.body.error.code, 'consent_outdated');
 
-    const email = await call('POST', '/v1/booth/submissions', {
-      token: guestA,
-      body: submissionBody(live.jobId, { nickname: 'a@b' }),
-    });
+    const email = await submitPdf(call, guestA, pdf, { nickname: 'a@b' });
     assert.equal(email.status, 400);
     assert.equal(email.body.error.code, 'pii_not_allowed');
-    const digits = await call('POST', '/v1/booth/submissions', {
-      token: guestA,
-      body: submissionBody(live.jobId, { nickname: '1234567' }),
-    });
+    const digits = await submitPdf(call, guestA, pdf, { nickname: '1234567' });
     assert.equal(digits.status, 400);
     assert.equal(digits.body.error.code, 'pii_not_allowed');
-    const extra = await call('POST', '/v1/booth/submissions', {
-      token: guestA,
-      body: { ...submissionBody(live.jobId), email: 'hidden@example.test' },
-    });
+    const extra = await submitPdf(call, guestA, pdf, { email: 'hidden@example.test' });
     assert.equal(extra.status, 400);
     assert.equal(extra.body.error.code, 'invalid_request');
-    const withoutPaper = submissionBody(live.jobId);
-    delete withoutPaper.paper;
-    const noPaper = await call('POST', '/v1/booth/submissions', { token: guestA, body: withoutPaper });
+    const meta = submissionMeta(pdf);
+    delete meta.paper;
+    const noPaper = await call('POST', '/v1/booth/submissions', {
+      token: guestA,
+      raw: multipartRaw(meta, pdf),
+      headers: { 'Content-Type': `multipart/form-data; boundary=${MULTIPART_BOUNDARY}` },
+    });
     assert.equal(noPaper.status, 400);
     assert.equal(noPaper.body.error.code, 'paper_not_allowed');
-    const uploaded = await call('POST', '/v1/booth/submissions', {
-      token: guestA,
-      body: submissionBody(live.jobId, { paper: { source: 'upload', id: 'local-1', title: 'Local', license: 'cc-by' } }),
+    const uploaded = await submitPdf(call, guestA, pdf, {
+      paper: { source: 'upload', id: 'local-1', title: 'Local', license: 'cc-by' },
     });
     assert.equal(uploaded.status, 400);
     assert.equal(uploaded.body.error.code, 'paper_not_allowed');
-    const noncommercial = await call('POST', '/v1/booth/submissions', {
-      token: guestA,
-      body: submissionBody(live.jobId, { paper: { source: 'arxiv', id: '2503.10497', title: 'Synthetic paper', license: 'cc-by-nc-4.0' } }),
+    const noncommercial = await submitPdf(call, guestA, pdf, {
+      paper: { source: 'arxiv', id: '2503.10497', title: 'Synthetic paper', license: 'cc-by-nc-4.0' },
     });
     assert.equal(noncommercial.status, 400);
     assert.equal(noncommercial.body.error.code, 'paper_not_allowed');
-    const mission = await readyJob(mf, call, guestA, 'op-booth-lic001');
-    const allowedLicense = await call('POST', '/v1/booth/submissions', {
-      token: guestA,
-      body: submissionBody(mission.jobId, {
-        paper: { source: 'mission', id: 'mission-1', title: 'Mission paper', license: 'public-domain' },
-      }),
+    const filled = await submitPdf(call, guestA, pdfBytes('deep-course'), { course: 'deep' });
+    assert.equal(filled.status, 201);
+    assert.equal(filled.body.receipt, 'F-0001');
+    assert.equal(filled.body.course, 'deep');
+    const allowedLicense = await submitPdf(call, guestA, pdfBytes('mission-ok'), {
+      paper: { source: 'mission', id: 'mission-1', title: 'Mission paper', license: 'public-domain' },
     });
     assert.equal(allowedLicense.status, 201);
+    assert.equal(await stubCalls(mf, '/internal/v1/jobs', 'POST'), 0);
     const missing = await call('PUT', '/v1/booth/no-such');
     assert.equal(missing.status, 404);
     assert.equal(missing.body.error.code, 'not_found');
     assert.equal(typeof missing.body.error.requestId, 'string');
   });
 
-  await withApp({ AI_STUB_MODE: 'no-edited' }, async (mf, call) => {
+  await withApp({ BOOTH_SUBMISSIONS_OPEN: 'false' }, async (_mf, call) => {
     const guest = (await mintGuest(call)).body.guest.token;
-    const live = await readyJob(mf, call, guest, 'op-booth-nopdf1', { artifacts: 'none' });
-    const denied = await call('POST', '/v1/booth/submissions', { token: guest, body: submissionBody(live.jobId) });
-    assert.equal(denied.status, 409);
-    assert.equal(denied.body.error.code, 'job_not_ready');
-    assert.equal(await stubCalls(mf, `/internal/v1/jobs/${live.jobId}`, 'GET'), 1);
-  });
-
-  await withApp({ BOOTH_SUBMISSIONS_OPEN: 'false' }, async (mf, call) => {
-    const guest = (await mintGuest(call)).body.guest.token;
-    const ready = await readyJob(mf, call, guest, 'op-booth-closed');
-    const closed = await call('POST', '/v1/booth/submissions', {
-      token: guest,
-      body: submissionBody(ready.jobId, { consentVersion: 'nope' }),
-    });
+    const closed = await submitPdf(call, guest, Buffer.from('not-pdf'), { consentVersion: 'nope' });
     assert.equal(closed.status, 403);
     assert.equal(closed.body.error.code, 'booth_closed');
   });
@@ -770,9 +740,8 @@ test('admin list pages by seq and settings show up on the public config', async 
     const guest = (await mintGuest(call)).body.guest.token;
     const receipts = [];
     for (let i = 1; i <= 3; i++) {
-      const ready = await readyJob(mf, call, guest, `op-booth-page0${i}`);
-      const created = await call('POST', '/v1/booth/submissions', { token: guest, body: submissionBody(ready.jobId) });
-      assert.equal(created.status, 201);
+      const created = await submitPdf(call, guest, pdfBytes(`op-booth-page0${i}`));
+      assert.equal(created.status, 201, created.text);
       receipts.push(created.body.receipt);
     }
     assert.deepEqual(receipts, ['F-0001', 'F-0002', 'F-0003']);
@@ -793,9 +762,13 @@ test('admin list pages by seq and settings show up on the public config', async 
     assert.deepEqual(filtered.body.submissions.map(row => row.receipt), ['F-0002']);
     const badLimit = await call('GET', '/v1/booth/admin/submissions?limit=201', { token: OPERATOR });
     assert.equal(badLimit.status, 400);
+    const doomed = second.body.submissions[0].id;
     const removed = await call('DELETE', '/v1/booth/admin/submissions/F-0003', { token: OPERATOR });
     assert.equal(removed.status, 204);
     assert.equal(removed.body, null);
+    const d1 = await mf.getD1Database('DB');
+    const left = await d1.prepare('SELECT COUNT(*) AS count FROM booth_files WHERE submission_id = ?1').bind(doomed).first();
+    assert.equal(Number(left.count), 0);
     const gone = await call('GET', '/v1/booth/admin/submissions/F-0003', { token: OPERATOR });
     assert.equal(gone.status, 404);
 
@@ -820,8 +793,7 @@ test('admin list pages by seq and settings show up on the public config', async 
     assert.equal(config.body.submissionsOpen, false);
     assert.deepEqual(config.body.missions, [mission]);
     assert.equal(config.body.announcement, '곧 마감');
-    const ready = await readyJob(mf, call, guest, 'op-booth-shut01');
-    const closed = await call('POST', '/v1/booth/submissions', { token: guest, body: submissionBody(ready.jobId) });
+    const closed = await submitPdf(call, guest, pdfBytes('op-booth-shut01'));
     assert.equal(closed.status, 403);
     assert.equal(closed.body.error.code, 'booth_closed');
     const cleared = await call('PUT', '/v1/booth/admin/settings', {
@@ -848,53 +820,36 @@ test('per-owner, per-IP and claim buckets stop the next submission', async () =>
     const other = (await mintGuest(call, fromIp('203.0.113.21'))).body.guest.token;
     let first = null;
     for (let i = 1; i <= 5; i++) {
-      const ready = await readyJob(mf, call, guest, `op-booth-cap0${i}`);
-      const created = await call('POST', '/v1/booth/submissions', { token: guest, body: submissionBody(ready.jobId) });
-      assert.equal(created.status, 201, `submission ${i}`);
+      const created = await submitPdf(call, guest, pdfBytes(`op-booth-cap0${i}`));
+      assert.equal(created.status, 201, `submission ${i} ${created.text}`);
       if (!first) first = created.body;
     }
-    const extraReady = await readyJob(mf, call, guest, 'op-booth-cap06');
-    const extra = await call('POST', '/v1/booth/submissions', { token: guest, body: submissionBody(extraReady.jobId) });
+    const extraPdf = pdfBytes('op-booth-cap06');
+    const extra = await submitPdf(call, guest, extraPdf);
     assert.equal(extra.status, 429);
     assert.equal(extra.body.error.code, 'rate_limited');
     const dropped = await call('POST', '/v1/booth/withdraw', {
       body: { receipt: first.receipt, claimKey: first.claimKey },
     });
     assert.equal(dropped.status, 200);
-    const freed = await call('POST', '/v1/booth/submissions', { token: guest, body: submissionBody(extraReady.jobId) });
-    assert.equal(freed.status, 201, 'a withdrawn row does not count toward the owner cap');
-    const second = await readyJob(mf, call, other, 'op-booth-cap07');
-    const allowed = await call('POST', '/v1/booth/submissions', { token: other, body: submissionBody(second.jobId) });
+    const freed = await submitPdf(call, guest, extraPdf);
+    assert.equal(freed.status, 201, `a withdrawn row does not count toward the owner cap ${freed.text}`);
+    const allowed = await submitPdf(call, other, pdfBytes('op-booth-cap07'));
     assert.equal(allowed.status, 201);
   });
 
   await withApp({ BOOTH_SUBMISSIONS_PER_IP_HOUR: '1', BOOTH_SUBMISSIONS_PER_HOUR: '10' }, async (mf, call) => {
     const guest = (await mintGuest(call, fromIp('203.0.113.30'))).body.guest.token;
-    const first = await readyJob(mf, call, guest, 'op-booth-ip001');
-    assert.equal((await call('POST', '/v1/booth/submissions', {
-      token: guest,
-      headers: fromIp('203.0.113.30'),
-      body: submissionBody(first.jobId),
-    })).status, 201);
-    const second = await readyJob(mf, call, guest, 'op-booth-ip002');
-    const blocked = await call('POST', '/v1/booth/submissions', {
-      token: guest,
-      headers: fromIp('203.0.113.30'),
-      body: submissionBody(second.jobId),
-    });
+    assert.equal((await submitPdf(call, guest, pdfBytes('op-booth-ip001'), {}, fromIp('203.0.113.30'))).status, 201);
+    const blocked = await submitPdf(call, guest, pdfBytes('op-booth-ip002'), {}, fromIp('203.0.113.30'));
     assert.equal(blocked.status, 429);
-    const moved = await call('POST', '/v1/booth/submissions', {
-      token: guest,
-      headers: fromIp('203.0.113.31'),
-      body: submissionBody(second.jobId),
-    });
+    const moved = await submitPdf(call, guest, pdfBytes('op-booth-ip002'), {}, fromIp('203.0.113.31'));
     assert.equal(moved.status, 201);
   });
 
   await withApp({ BOOTH_CLAIMS_PER_IP_HOUR: '1' }, async (mf, call) => {
     const guest = (await mintGuest(call)).body.guest.token;
-    const ready = await readyJob(mf, call, guest, 'op-booth-claim1');
-    const created = await call('POST', '/v1/booth/submissions', { token: guest, body: submissionBody(ready.jobId) });
+    const created = await submitPdf(call, guest, pdfBytes('op-booth-claim1'));
     const ok = await call('POST', '/v1/booth/claim', {
       headers: fromIp('203.0.113.40'),
       body: { receipt: created.body.receipt, claimKey: created.body.claimKey },
@@ -910,8 +865,7 @@ test('per-owner, per-IP and claim buckets stop the next submission', async () =>
 
   await withApp({ BOOTH_CLAIMS_PER_HOUR: '1', BOOTH_CLAIMS_PER_IP_HOUR: '10' }, async (mf, call) => {
     const guest = (await mintGuest(call)).body.guest.token;
-    const ready = await readyJob(mf, call, guest, 'op-booth-claimg');
-    const created = await call('POST', '/v1/booth/submissions', { token: guest, body: submissionBody(ready.jobId) });
+    const created = await submitPdf(call, guest, pdfBytes('op-booth-claimg'));
     const ok = await call('POST', '/v1/booth/claim', {
       headers: fromIp('203.0.113.50'),
       body: { receipt: created.body.receipt, claimKey: created.body.claimKey },
@@ -926,6 +880,125 @@ test('per-owner, per-IP and claim buckets stop the next submission', async () =>
     const d1 = await mf.getD1Database('DB');
     const global = await d1.prepare(`SELECT count FROM rate_counters WHERE bucket = 'booth-claim:all'`).first();
     assert.equal(Number(global.count) >= 1, true);
+  });
+});
+
+test('multipart pdf checks, chunks and a same-hash duplicate', async () => {
+  await withApp({}, async (mf, call) => {
+    const guest = (await mintGuest(call, fromIp('203.0.113.60'))).body.guest.token;
+    const other = (await mintGuest(call, fromIp('203.0.113.61'))).body.guest.token;
+    const real = pdfBytes('mismatch-me');
+    const digest = createHash('sha256').update(real).digest('hex');
+
+    const notPdf = await submitPdf(call, guest, Buffer.from('not a pdf at all'));
+    assert.equal(notPdf.status, 400);
+    assert.equal(notPdf.body.error.code, 'invalid_pdf');
+    assert.equal(notPdf.body.error.retryable, false);
+    const empty = await submitPdf(call, guest, Buffer.alloc(0));
+    assert.equal(empty.status, 400);
+    assert.equal(empty.body.error.code, 'invalid_pdf');
+    const mismatch = await submitPdf(call, guest, real, { editedSha256: 'ab'.repeat(32) });
+    assert.equal(mismatch.status, 400);
+    assert.equal(mismatch.body.error.code, 'pdf_mismatch');
+    const unchanged = await submitPdf(call, guest, real, {
+      paper: {
+        source: 'arxiv', id: '2503.10497', title: 'Synthetic paper', license: 'cc-by-4.0', sourceSha256: digest,
+      },
+    });
+    assert.equal(unchanged.status, 400);
+    assert.equal(unchanged.body.error.code, 'pdf_unchanged');
+    const upper = await submitPdf(call, guest, real, { editedSha256: digest.toUpperCase() });
+    assert.equal(upper.status, 400);
+    assert.equal(upper.body.error.code, 'invalid_request');
+    const jsonBody = await call('POST', '/v1/booth/submissions', { token: guest, body: { course: 'quick' } });
+    assert.equal(jsonBody.status, 415);
+    assert.equal(jsonBody.body.error.code, 'unsupported_media_type');
+
+    const created = await submitPdf(call, guest, real);
+    assert.equal(created.status, 201, created.text);
+    const shared = await submitPdf(call, other, real);
+    assert.equal(shared.status, 201, 'another owner may submit the same bytes');
+    const again = await submitPdf(call, guest, real);
+    assert.equal(again.status, 409);
+    assert.equal(again.body.error.code, 'already_submitted');
+    assert.equal(again.body.receipt, created.body.receipt);
+
+    const chunkBytes = 512 * 1024;
+    const big = Buffer.alloc(chunkBytes + 17);
+    big.write('%PDF-1.7\n', 0, 'ascii');
+    for (let i = 9; i < big.length; i++) big[i] = i & 0xff;
+    const chunked = await submitPdf(call, guest, big);
+    assert.equal(chunked.status, 201, chunked.text);
+    const pdf = await call('GET', `/v1/booth/admin/submissions/${chunked.body.receipt}/pdf`, { token: OPERATOR });
+    assert.equal(pdf.status, 200);
+    assert.equal(Buffer.compare(Buffer.from(pdf.bytes), big), 0);
+    assert.equal(pdf.headers.get('X-Falsify-Pdf-Sha256'), createHash('sha256').update(big).digest('hex'));
+    const d1 = await mf.getD1Database('DB');
+    const row = await d1.prepare('SELECT id FROM booth_submissions WHERE receipt = ?1').bind(chunked.body.receipt).first();
+    const blobs = await d1.prepare(
+      'SELECT idx, data FROM booth_files WHERE submission_id = ?1 ORDER BY idx ASC'
+    ).bind(row.id).all();
+    assert.equal(blobs.results.length, 2);
+    assert.equal(Number(blobs.results[0].idx), 0);
+    assert.equal(Number(blobs.results[1].idx), 1);
+    const first = Buffer.from(blobs.results[0].data);
+    const second = Buffer.from(blobs.results[1].data);
+    assert.equal(first.length, chunkBytes);
+    assert.equal(second.length, 17);
+    assert.equal(first[first.length - 1], (chunkBytes - 1) & 0xff);
+    assert.equal(second[second.length - 1], (big.length - 1) & 0xff);
+    assert.equal(Buffer.compare(Buffer.concat([first, second]), big), 0);
+
+    const withdrawn = await call('POST', '/v1/booth/withdraw', {
+      body: { receipt: chunked.body.receipt, claimKey: chunked.body.claimKey },
+    });
+    assert.equal(withdrawn.status, 200);
+    const afterWithdraw = await d1.prepare(
+      'SELECT COUNT(*) AS count FROM booth_files WHERE submission_id = ?1'
+    ).bind(row.id).first();
+    assert.equal(Number(afterWithdraw.count), 0);
+
+    const deleted = await call('DELETE', `/v1/booth/admin/submissions/${shared.body.receipt}`, { token: OPERATOR });
+    assert.equal(deleted.status, 204);
+    const sharedRow = await d1.prepare(
+      'SELECT id FROM booth_submissions WHERE receipt = ?1'
+    ).bind(shared.body.receipt).first();
+    assert.equal(sharedRow, null);
+    const sharedFiles = await d1.prepare('SELECT COUNT(*) AS count FROM booth_files').first();
+    const kept = await d1.prepare(
+      'SELECT COUNT(*) AS count FROM booth_files WHERE submission_id = (SELECT id FROM booth_submissions WHERE receipt = ?1)'
+    ).bind(created.body.receipt).first();
+    assert.equal(Number(kept.count), 1);
+    assert.equal(Number(sharedFiles.count), 1);
+    assert.equal(await stubCalls(mf, '/internal/v1/jobs', 'POST'), 0);
+  });
+
+  await withApp({ BOOTH_MAX_PDF_BYTES: '1024' }, async (_mf, call) => {
+    const guest = (await mintGuest(call)).body.guest.token;
+    const overPdf = Buffer.concat([Buffer.from('%PDF-'), Buffer.alloc(2000, 0x62)]);
+    const tooBig = await submitPdf(call, guest, overPdf);
+    assert.equal(tooBig.status, 413);
+    assert.equal(tooBig.body.error.code, 'payload_too_large');
+    assert.equal(tooBig.body.error.retryable, false);
+    const overBody = Buffer.concat([Buffer.from('%PDF-'), Buffer.alloc(1024 + 64 * 1024, 0x63)]);
+    const tooLong = await submitPdf(call, guest, overBody);
+    assert.equal(tooLong.status, 413);
+    assert.equal(tooLong.body.error.code, 'payload_too_large');
+  });
+});
+
+test('a 20 MiB multipart body is parsed inside the worker', async () => {
+  await withApp({ BOOTH_PARSE_TIMING: '1' }, async (_mf, call) => {
+    const guest = (await mintGuest(call)).body.guest.token;
+    const big = Buffer.alloc(20 * 1024 * 1024, 0x61);
+    const wallStart = performance.now();
+    const denied = await submitPdf(call, guest, big);
+    const wallMs = performance.now() - wallStart;
+    assert.equal(denied.status, 400);
+    assert.equal(denied.body.error.code, 'invalid_pdf');
+    const parseMs = Number(denied.headers.get('X-Falsify-Parse-Ms'));
+    assert.equal(Number.isFinite(parseMs) && parseMs >= 0, true);
+    console.log(`BOOTH_PARSE_MS ${parseMs.toFixed(3)} BOOTH_PARSE_WALL_MS ${wallMs.toFixed(3)}`);
   });
 });
 
