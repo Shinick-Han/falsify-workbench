@@ -119,7 +119,7 @@
         "AI_OWNER_TOKEN_BUDGET": "0",
         "AI_TOKEN_WINDOW_SECONDS": "86400",
         "AI_GUEST_SESSION_SECONDS": "21600",
-        "AI_GUESTS_PER_IP_HOUR": "60",
+        "AI_GUESTS_PER_IP_HOUR": "600",
         "AI_GUESTS_PER_HOUR": "300",
         "AI_GUEST_UPLOADS_PER_OWNER_HOUR": "10",
         "AI_GUEST_UPLOADS_PER_HOUR": "120",
@@ -129,7 +129,13 @@
         "AI_GUEST_MAX_CALLS_PER_JOB": "8",
         "AI_GUEST_JOBS_PER_HOUR": "40",
         // Sum of recorded guest usage per AI_TOKEN_WINDOW_SECONDS; sized well under the operator balance.
-        "AI_GUEST_TOKEN_BUDGET": "4000000"
+        "AI_GUEST_TOKEN_BUDGET": "4000000",
+        // Booth submissions for the event page. BOOTH_OPERATOR_TOKEN stays a Wrangler secret.
+        "BOOTH_ENABLED": "true",
+        "BOOTH_CONSENT_VERSION": "2026-11-22.v1",
+        "AI_GUEST_BLUE": "false",
+        "PAPER_SEARCH_ENABLED": "true",
+        "AI_GUEST_APPLY_JOBS_PER_HOUR": "600"
       },
       "d1_databases": [{ "binding": "DB", "database_name": "falsify-harness-records-event", "database_id": "939f0444-c8d6-4d3f-b9ca-e1def3bdfc4f", "migrations_dir": "migrations" }]
     }
