@@ -569,8 +569,9 @@
         maxUploadBytes:positiveInt(limits.maxUploadBytes)||MAX_UPLOAD_FALLBACK,
         maxPromptChars:positiveInt(limits.maxPromptChars)||MAX_PROMPT_FALLBACK,
         paperTools:paperToolsOf(data),
-        /* Absent or any value other than false keeps today's BLUE controls (index.html). */
-        blueJobs:data.blueJobs!==false
+        /* Absent or any value other than false keeps today's controls (index.html). */
+        blueJobs:data.blueJobs!==false,
+        modelJobs:data.modelJobs!==false
       };
     }
 
@@ -608,6 +609,7 @@
       fillSelect(nodes.effort,caps.efforts,'서버 기본값');
       state.status=readyStatus();
       publishPaperTools(doc, caps.paperTools);
+      announceCapabilities();
     }
     async function probe(){
       state.capabilities=null;
@@ -1217,6 +1219,10 @@
       if(state.busy||state.gate!=='ready'||!state.capabilities) return;
       if(!state.session&&!await openBearer()){showGuestStartError();return;}
       const input=reviewInputs();
+      if(!modelJobsAllowed()){
+        fail('이 행사 화면에서는 모델 검토를 실행하지 않습니다.');
+        return;
+      }
       if(input.role==='blue'&&!blueJobsAllowed()){
         fail('이 행사 화면에서는 BLUE 검토를 실행하지 않습니다.');
         return;
@@ -1337,6 +1343,31 @@
       setHidden(nodes.roleBlue,!allowed);
       if(!allowed&&nodes.role&&nodes.role.value==='blue') nodes.role.value='red';
       return allowed;
+    }
+    /* capabilities.modelJobs === false hides the model RED/BLUE run. Apply stays. */
+    function modelJobsAllowed(){
+      return !(state.capabilities&&state.capabilities.modelJobs===false);
+    }
+    function applyModelPolicy(){
+      const allowed=modelJobsAllowed();
+      setHidden(nodes.roleField,!allowed);
+      setHidden(nodes.advanced,!allowed);
+      setHidden(nodes.presets,!allowed);
+      setHidden(nodes.promptLabel,!allowed);
+      setHidden(nodes.prompt,!allowed);
+      setHidden(nodes.promptCount,!allowed);
+      setHidden(nodes.run,!allowed);
+      return allowed;
+    }
+    function announceCapabilities(){
+      const caps=state.capabilities;
+      if(!caps||typeof doc?.dispatchEvent!=='function'||typeof CustomEvent!=='function') return;
+      try{
+        doc.dispatchEvent(new CustomEvent('falsify:hosted-capabilities',{detail:{
+          blueJobs:caps.blueJobs!==false,
+          modelJobs:caps.modelJobs!==false
+        }}));
+      }catch{}
     }
     function applyBlocker(){
       const review=state.reviewJob;
@@ -1819,7 +1850,7 @@
         el('div',{className:'button-row',id:'hosted-ai-input-actions',hidden:true},
           el('button',{id:'hosted-ai-restore-original',type:'button',className:'text-button',textContent:'원본 입력으로 돌아가기'})),
         el('div',{className:'hosted-ai-grid'},
-          el('label',{for:'hosted-ai-role'},'역할',
+          el('label',{id:'hosted-ai-role-field',for:'hosted-ai-role'},'역할',
             el('select',{id:'hosted-ai-role'},
               el('option',{value:'red',textContent:'RED · 결함 주입'}),
               el('option',{id:'hosted-ai-role-blue',value:'blue',textContent:'BLUE · 결함 검증'})))),
@@ -1899,7 +1930,8 @@
         config:configBox,
         file:find('hosted-ai-file'),fileStatus:find('hosted-ai-file-status'),
         inputActions:find('hosted-ai-input-actions'),restoreOriginal:find('hosted-ai-restore-original'),
-        role:find('hosted-ai-role'),roleBlue:find('hosted-ai-role-blue'),
+        role:find('hosted-ai-role'),roleField:find('hosted-ai-role-field'),roleBlue:find('hosted-ai-role-blue'),
+        advanced:find('hosted-ai-advanced'),
         model:find('hosted-ai-model'),effort:find('hosted-ai-effort'),
         useEvidence:find('hosted-ai-use-evidence'),
         presets:find('hosted-ai-presets'),presetDefault:find('hosted-ai-preset-default'),presetP2:find('hosted-ai-preset-p2'),
@@ -2668,9 +2700,19 @@
     }
     function renderOpenIntro(){
       if(!nodes.intro||!openMode()) return;
-      nodes.intro.textContent=state.capabilities&&state.capabilities.blueJobs===false
-        ?'로그인 없이 PDF를 올리고 RED 검토와 수정 적용을 실행합니다. BLUE 검토는 이 행사 화면에서 열리지 않습니다.'
-        :'로그인 없이 PDF를 올리고 RED 검토, 수정 적용, BLUE 검토를 실행합니다.';
+      const blue=blueJobsAllowed();
+      const model=modelJobsAllowed();
+      if(!model&&!blue){
+        nodes.intro.textContent='로그인 없이 고른 변경을 PDF에 적용합니다. 모델 RED·BLUE 검토는 이 행사 화면에서 열리지 않습니다.';
+        return;
+      }
+      if(!model){
+        nodes.intro.textContent='로그인 없이 고른 변경을 PDF에 적용하고 BLUE 검토를 실행합니다. 모델 RED 검토는 이 행사 화면에서 열리지 않습니다.';
+        return;
+      }
+      nodes.intro.textContent=blue
+        ?'로그인 없이 PDF를 올리고 RED 검토, 수정 적용, BLUE 검토를 실행합니다.'
+        :'로그인 없이 PDF를 올리고 RED 검토와 수정 적용을 실행합니다. BLUE 검토는 이 행사 화면에서 열리지 않습니다.';
     }
     function renderEdited(){
       const edited=editedArtifact();
@@ -2731,6 +2773,7 @@
       renderRestoreAction();
       const availability=runAvailability(ctx,meta);
       renderRunButtons(ctx,availability);
+      applyModelPolicy();
       renderInputDisabled(ctx);
       renderJobSection();
       renderCandidates();
