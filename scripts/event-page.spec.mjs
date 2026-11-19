@@ -67,7 +67,7 @@ function fixture(extra = '') {
   <meta charset="utf-8">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; connect-src 'self' http://127.0.0.1:* https://falsify-cloud-api.ai-gongbu.workers.dev; object-src 'none'">
   <title>Falsify · Paper Workbench</title>
-  ${extra}<script src="cloud-config.js?v=0.2.0-alpha.83" defer></script>
+  ${extra}<script src="cloud-config.js?v=0.2.0-alpha.84" defer></script>
 </head>
 </html>
 `;
@@ -96,11 +96,11 @@ test('api base must be a canonical https origin', () => {
 });
 
 test('event HTML keeps every other byte, with or without open-access.js', () => {
-  for (const extra of ['', '<script src="open-access.js?v=0.2.0-alpha.83" defer></script>\n  ']) {
+  for (const extra of ['', '<script src="open-access.js?v=0.2.0-alpha.84" defer></script>\n  ']) {
     const index = fixture(extra);
     const planned = planEventFiles(index, DEFAULT_EVENT_API_BASE);
     assert.equal(revertEventHtml(planned.html, index, DEFAULT_EVENT_API_BASE), index);
-    assert.equal(count(planned.html, 'open-access.js?v=0.2.0-alpha.83'), count(index, 'open-access.js?v=0.2.0-alpha.83'));
+    assert.equal(count(planned.html, 'open-access.js?v=0.2.0-alpha.84'), count(index, 'open-access.js?v=0.2.0-alpha.84'));
     assert.match(planned.html, /<title>Falsify · Paper Workbench · Event<\/title>/);
     assert.match(planned.html, /<meta name="robots" content="noindex">/);
   }
@@ -147,7 +147,7 @@ test('committed event page matches index.html except the four event edits', () =
 });
 
 test('event HTML injects booth assets after hosted-ai.js only', () => {
-  const index = fixture('<script src="hosted-ai.js?v=0.2.0-alpha.83" defer></script>\n  ');
+  const index = fixture('<script src="hosted-ai.js?v=0.2.0-alpha.84" defer></script>\n  ');
   const planned = planEventFiles(index, DEFAULT_EVENT_API_BASE);
   assert.match(planned.html, /hosted-ai\.js\?v=0\.2\.0-alpha\.83" defer><\/script>\n {2}<link rel="stylesheet" href="booth\.css\?v=0\.2\.0-alpha\.83">\n {2}<script src="booth\.js\?v=0\.2\.0-alpha\.83" defer><\/script>/);
   assert.equal(count(index, 'booth.js'), 0);
