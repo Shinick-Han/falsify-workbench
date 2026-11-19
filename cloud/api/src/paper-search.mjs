@@ -466,43 +466,22 @@ function contentTypeAllowsPdf(response) {
   return type.includes('application/pdf') || type.includes('application/octet-stream');
 }
 
-// Content-Length above the cap is a JSON 413 before the body is read.
-// Otherwise the body is counted up to the cap. Crossing the cap, including when Content-Length
-// understated the size, is a JSON 413 and the partial bytes are discarded. An accepted PDF is
-// returned whole so the caller can cache it. Nothing over the cap is cached.
-async function openPdfBody(response, maxBytes) {
-  if (response.status !== 200) {
-    await cancelBody(response);
-    aiFail(502, 'upstream_invalid');
-  }
-  let declared;
+async function failCancelled(response, status, code) {
+  await cancelBody(response);
+  aiFail(status, code);
+}
+
+async function readPdfPrefix(reader, maxBytes) {
+  const chunks = [];
+  let length = 0;
   try {
-    declared = declaredLength(response);
-  } catch (error) {
-    await cancelBody(response);
-    throw error;
-  }
-  // A declared size over the cap is 413 before content-type or magic, and the body is not read.
-  if (declared !== null && declared > maxBytes) {
-    await cancelBody(response);
-    aiFail(413, 'payload_too_large');
-  }
-  if (!contentTypeAllowsPdf(response)) {
-    await cancelBody(response);
-    aiFail(502, 'upstream_invalid');
-  }
-  if (!response.body) aiFail(502, 'upstream_invalid');
-  const reader = response.body.getReader();
-  const headChunks = [];
-  let headLen = 0;
-  try {
-    while (headLen < 5) {
+    while (length < 5) {
       const { done, value } = await reader.read();
       if (done) break;
       if (!value?.byteLength) continue;
-      headChunks.push(value);
-      headLen += value.byteLength;
-      if (headLen > maxBytes) {
+      chunks.push(value);
+      length += value.byteLength;
+      if (length > maxBytes) {
         await reader.cancel().catch(() => {});
         aiFail(413, 'payload_too_large');
       }
@@ -512,11 +491,10 @@ async function openPdfBody(response, maxBytes) {
     await reader.cancel().catch(() => {});
     aiFail(503, 'upstream_unavailable');
   }
-  const head = concatChunks(headChunks, headLen);
-  if (!looksLikePdf(head)) {
-    await reader.cancel().catch(() => {});
-    aiFail(502, 'upstream_invalid');
-  }
+  return concatChunks(chunks, length);
+}
+
+async function readPdfRemainder(reader, head, maxBytes) {
   const chunks = [head];
   let size = head.byteLength;
   try {
@@ -537,6 +515,32 @@ async function openPdfBody(response, maxBytes) {
     aiFail(503, 'upstream_unavailable');
   }
   return concatChunks(chunks, size);
+}
+
+// Content-Length above the cap is a JSON 413 before the body is read.
+// Otherwise the body is counted up to the cap. Crossing the cap, including when Content-Length
+// understated the size, is a JSON 413 and the partial bytes are discarded. An accepted PDF is
+// returned whole so the caller can cache it. Nothing over the cap is cached.
+async function openPdfBody(response, maxBytes) {
+  if (response.status !== 200) await failCancelled(response, 502, 'upstream_invalid');
+  let declared;
+  try {
+    declared = declaredLength(response);
+  } catch (error) {
+    await cancelBody(response);
+    throw error;
+  }
+  // A declared size over the cap is 413 before content-type or magic, and the body is not read.
+  if (declared !== null && declared > maxBytes) await failCancelled(response, 413, 'payload_too_large');
+  if (!contentTypeAllowsPdf(response)) await failCancelled(response, 502, 'upstream_invalid');
+  if (!response.body) aiFail(502, 'upstream_invalid');
+  const reader = response.body.getReader();
+  const head = await readPdfPrefix(reader, maxBytes);
+  if (!looksLikePdf(head)) {
+    await reader.cancel().catch(() => {});
+    aiFail(502, 'upstream_invalid');
+  }
+  return readPdfRemainder(reader, head, maxBytes);
 }
 
 function idFromPath(pathname) {
@@ -752,31 +756,48 @@ async function searchArxiv(fetchImpl, query, page) {
   return mapped;
 }
 
-function classifyLicense(raw) {
-  const text = String(raw || '').trim().toLowerCase();
-  if (!text) return null;
+function cc0License(text) {
   if (text.includes('creativecommons.org/publicdomain/zero') || text === 'cc0') {
     return { id: 'cc0', url: 'https://creativecommons.org/publicdomain/zero/1.0/' };
   }
-  if (text.includes('nonexclusive')) return null;
-  if (text.includes('licenses/by-nc') || text.includes('licenses/by-nd')) return null;
-  const sa = /licenses\/by-sa\/(\d+\.\d+)/.exec(text);
-  if (sa || text.includes('licenses/by-sa/') || text === 'cc-by-sa') {
-    const version = sa ? sa[1] : '';
-    return {
-      id: version ? `cc-by-sa-${version}` : 'cc-by-sa',
-      url: `https://creativecommons.org/licenses/by-sa/${version || '4.0'}/`,
-    };
-  }
-  const by = /licenses\/by\/(\d+\.\d+)/.exec(text);
-  if (by || text.includes('licenses/by/') || text === 'cc-by') {
-    const version = by ? by[1] : '';
-    return {
-      id: version ? `cc-by-${version}` : 'cc-by',
-      url: `https://creativecommons.org/licenses/by/${version || '4.0'}/`,
-    };
+  return null;
+}
+
+function isBlockedLicense(text) {
+  if (text.includes('nonexclusive')) return true;
+  return text.includes('licenses/by-nc') || text.includes('licenses/by-nd');
+}
+
+function creativeCommonsLicense(kind, version) {
+  return {
+    id: version ? `cc-${kind}-${version}` : `cc-${kind}`,
+    url: `https://creativecommons.org/licenses/${kind}/${version || '4.0'}/`,
+  };
+}
+
+function shareAlikeLicense(text) {
+  const match = /licenses\/by-sa\/(\d+\.\d+)/.exec(text);
+  if (match || text.includes('licenses/by-sa/') || text === 'cc-by-sa') {
+    return creativeCommonsLicense('by-sa', match ? match[1] : '');
   }
   return null;
+}
+
+function attributionLicense(text) {
+  const match = /licenses\/by\/(\d+\.\d+)/.exec(text);
+  if (match || text.includes('licenses/by/') || text === 'cc-by') {
+    return creativeCommonsLicense('by', match ? match[1] : '');
+  }
+  return null;
+}
+
+function classifyLicense(raw) {
+  const text = String(raw || '').trim().toLowerCase();
+  if (!text) return null;
+  const zero = cc0License(text);
+  if (zero) return zero;
+  if (isBlockedLicense(text)) return null;
+  return shareAlikeLicense(text) || attributionLicense(text);
 }
 
 function oaiLicenses(xml) {
