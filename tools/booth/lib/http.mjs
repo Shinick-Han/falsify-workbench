@@ -28,6 +28,7 @@ export function createClient({ apiBase, token, fetchImpl = globalThis.fetch }) {
       throw new BoothError('booth_network', scrub(error.message, token), { exitCode: 2 });
     }
     const buffer = Buffer.from(await response.arrayBuffer());
+    if (expect === 'file' && response.ok) return { bytes: buffer, headers: response.headers };
     if (expect === 'bytes' && response.ok) return buffer;
     const text = buffer.toString('utf8');
     let parsed = null;
@@ -52,5 +53,6 @@ export function createClient({ apiBase, token, fetchImpl = globalThis.fetch }) {
     apiBase: origin.toString().replace(/\/$/, ''),
     json: (pathname, options) => request(pathname, { ...options, expect: 'json' }),
     bytes: (pathname, options) => request(pathname, { ...options, expect: 'bytes' }),
+    file: (pathname, options) => request(pathname, { ...options, expect: 'file' }),
   };
 }

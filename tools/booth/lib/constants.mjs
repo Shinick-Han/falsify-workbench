@@ -3,6 +3,8 @@ export const TOKEN = /^fso_[A-Za-z0-9_-]{43}$/;
 export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const PROFILE_NAME = /^[A-Za-z0-9._:-]{1,64}$/;
 export const IDEMPOTENCY_KEY = /^[A-Za-z0-9._:-]{8,128}$/;
+export const BLUE_MAX_PDF_BYTES = 16777216;
+export const BLUE_MAX_PDF_BYTES_CAP = 33554432;
 
 export const OUTCOMES = Object.freeze(['missed', 'caught', 'partial', 'invalid']);
 export const STATUSES = Object.freeze(['received', 'reviewing', 'judged', 'invalid', 'withdrawn']);
@@ -55,7 +57,7 @@ Commands:
   blue [--profile <name>] [--model <id>] [--effort <id>] [--max-calls <n>]
        [--use-evidence true|false] [--prompt-file <file>] [--harness-file <file>]
        [--concurrency <n>] [--repeat <n>] [--only <receipts>] [--status a,b]
-       [--dry-run] [--allow-open]
+       [--dry-run] [--allow-open] [--max-bytes <n>]
   score [--only <receipts>] [--status a,b]
   judge [--only <receipts>] [--outcome missed|caught|partial|invalid] [--dry-run]
   publish [--only <receipts>] [--status a,b] [--public-note <text>] [--prize <text>] [--dry-run]
@@ -64,7 +66,7 @@ Commands:
   export --format common|score|key|jsonl [--out <file>] [--only <receipts>] [--status a,b]
   missions get [--out <file>]
   missions set <file>
-  missions warm
+  missions warm [--write]
   open
   close [--dry-run]
   announce (--text <text> | --file <file> | --clear)
@@ -72,6 +74,8 @@ Commands:
 BLUE uploads the edited PDF and posts the operator profile only.
 Declared edits, reasons, types, nickname and paper metadata are not part of that request.
 blue refuses to start while submissions are open unless --allow-open is set.
+BLUE shares the production runtime, not the visitor path.
+blue refuses a local PDF over --max-bytes (default 16777216) or not starting with %PDF-.
 draw defaults to outcome missed.
 CSV cells that start with =, +, -, @, tab or CR are prefixed with '.
 score writes score.json and does not publish.

@@ -6,7 +6,8 @@
     "paperId": "2309.15217",
     "license": "cc-by-4.0",
     "course": "quick",
-    "hint": "8쪽. 표의 점수나 결론 문장 하나를 그럴듯하게 바꿔 보세요."
+    "pageHint": 5,
+    "hint": "5쪽 Table 1의 숫자 하나를 바꿔 결론과 어긋나게 해 보세요. 예: Ragas 충실도 0.95 → 0.50"
   },
   {
     "id": "embedding-similarity",
@@ -15,7 +16,8 @@
     "paperId": "2407.08275",
     "license": "cc-by-4.0",
     "course": "quick",
-    "hint": "9쪽. 유사도 수치나 그래프 해석을 살짝 비틀어 보세요."
+    "pageHint": 3,
+    "hint": "3쪽 Table 2의 점수 하나를 바꿔 순위가 뒤집히게 해 보세요. 예: Mistral MTEB 평균 67.56 → 60.00"
   },
   {
     "id": "serverless-llm-cold-start",
@@ -24,7 +26,8 @@
     "paperId": "2611.16180",
     "license": "cc-by-4.0",
     "course": "deep",
-    "hint": "10쪽. 실험 설정·결과 표·본문 주장 사이의 일관성을 깨 보세요."
+    "pageHint": 9,
+    "hint": "9쪽 6.6절 결과 문장의 수치를 바꿔 보세요. 예: 타임아웃 15.6%→2.1% 감소를 15.6%→21%로"
   },
   {
     "id": "cold-start-antipatterns",
@@ -33,6 +36,7 @@
     "paperId": "2512.16066",
     "license": "cc-by-4.0",
     "course": "deep",
-    "hint": "12쪽. 표본 수, 비율, 인용을 정밀하게 조작해 보세요."
+    "pageHint": 9,
+    "hint": "9쪽 개발자 실험 문장의 숫자 하나를 바꿔 보세요. 예: 탐지 시간 64% → 10%"
   }
 ]

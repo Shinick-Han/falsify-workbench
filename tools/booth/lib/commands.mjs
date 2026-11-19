@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { assembleJobBody, buildBlueRequest, configHash, idempotencyKey } from './blue.mjs';
-import { OUTCOMES, STATUSES, TERMINAL_JOB } from './constants.mjs';
+import { BLUE_MAX_PDF_BYTES, BLUE_MAX_PDF_BYTES_CAP, OUTCOMES, STATUSES, TERMINAL_JOB } from './constants.mjs';
 import { resolveApiBase, resolveBluePlan, resolveDataDir } from './config.mjs';
 import { drawWinners } from './draw.mjs';
 import { BoothError } from './errors.mjs';
@@ -161,13 +161,22 @@ async function archiveSubmission(io, client, dir, row) {
   const meta = path.join(folder, 'submission.json');
   const previous = readJsonOptional(meta);
   const previousHash = fs.existsSync(hashFile) ? fs.readFileSync(hashFile, 'utf8').trim() : '';
-  if (previous && previous.updatedAt === row.updatedAt && previousHash && fs.existsSync(pdf) && fileSha256(pdf) === previousHash) {
+  if (
+    previous
+    && previous.updatedAt === row.updatedAt
+    && previous.pdfSha256 === row.pdfSha256
+    && previous.pdfBytes === row.pdfBytes
+    && previous.sourceSha256 === row.sourceSha256
+    && previousHash === row.pdfSha256
+    && fs.existsSync(pdf)
+    && fileSha256(pdf) === previousHash
+  ) {
     progress(io, `pull ${row.receipt} unchanged`);
     return 'skipped';
   }
-  let bytes;
+  let downloaded;
   try {
-    bytes = await client.bytes(`/v1/booth/admin/submissions/${encodeURIComponent(row.receipt)}/pdf`);
+    downloaded = await client.file(`/v1/booth/admin/submissions/${encodeURIComponent(row.receipt)}/pdf`);
   } catch (error) {
     if (error instanceof BoothError && error.code === 'withdrawn') return forgetWithdrawn(io, dir, row);
     if (error instanceof BoothError && error.code === 'artifact_expired' && fs.existsSync(pdf)) {
@@ -177,7 +186,8 @@ async function archiveSubmission(io, client, dir, row) {
     }
     throw error;
   }
-  const hash = sha256Hex(bytes);
+  const bytes = downloaded.bytes;
+  const hash = verifiedPdf(row, bytes, downloaded.headers);
   writeAtomic(pdf, bytes);
   writeAtomic(hashFile, `${hash}\n`);
   writeJson(meta, row);
@@ -185,16 +195,73 @@ async function archiveSubmission(io, client, dir, row) {
   return 'saved';
 }
 
+function verifiedPdf(row, bytes, headers) {
+  if (typeof row.pdfSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(row.pdfSha256)) {
+    throw new BoothError('booth_api', `${row.receipt} pdfSha256 is missing`, { exitCode: 2 });
+  }
+  if (!Number.isSafeInteger(row.pdfBytes) || row.pdfBytes < 0) {
+    throw new BoothError('booth_api', `${row.receipt} pdfBytes is missing`, { exitCode: 2 });
+  }
+  const hash = sha256Hex(bytes);
+  const header = String(headers.get('x-falsify-pdf-sha256') || '').trim().toLowerCase();
+  if (hash !== row.pdfSha256 || header !== row.pdfSha256 || bytes.length !== row.pdfBytes) {
+    throw new BoothError('pdf_mismatch', `${row.receipt} PDF does not match pdfSha256`);
+  }
+  return hash;
+}
+
+function submissionPdfSha256(dir, row) {
+  if (typeof row.pdfSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(row.pdfSha256)) {
+    throw new BoothError('booth_local', `${row.receipt} is missing pdfSha256; pull again`);
+  }
+  const actual = fileSha256(pdfPath(dir, row.receipt));
+  if (actual !== row.pdfSha256) {
+    throw new BoothError('pdf_mismatch', `${row.receipt} local PDF does not match pdfSha256`);
+  }
+  return row.pdfSha256;
+}
+
+function blueMaxBytes(flags) {
+  if (flags.maxBytes === undefined || flags.maxBytes === true) return BLUE_MAX_PDF_BYTES;
+  const value = Number(flags.maxBytes);
+  if (!Number.isSafeInteger(value) || value < 1 || value > BLUE_MAX_PDF_BYTES_CAP) {
+    throw new BoothError('booth_config', `max-bytes must be an integer from 1 to ${BLUE_MAX_PDF_BYTES_CAP}`);
+  }
+  return value;
+}
+
+function assertLocalPdf(file, receipt, maxBytes) {
+  let fd;
+  try {
+    const size = fs.statSync(file).size;
+    if (size > maxBytes) {
+      throw new BoothError('booth_local', `${receipt} PDF is ${size} bytes; limit is ${maxBytes}`);
+    }
+    fd = fs.openSync(file, 'r');
+    const magic = Buffer.alloc(5);
+    const read = fs.readSync(fd, magic, 0, 5, 0);
+    if (read < 5 || magic.toString('utf8', 0, 5) !== '%PDF-') {
+      throw new BoothError('booth_local', `not a PDF: ${file}`);
+    }
+  } catch (error) {
+    if (error instanceof BoothError) throw error;
+    throw new BoothError('booth_local', `cannot read PDF: ${file}`);
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
 export async function blue(ctx) {
   const dir = dataDir(ctx);
   const plan = resolveBluePlan(ctx.config, ctx.flags);
+  const maxBytes = blueMaxBytes(ctx.flags);
   if (ctx.flags.allowOpen !== true) {
     const gate = clientFor(ctx);
     const settings = await gate.json('/v1/booth/admin/settings');
     if (!settings || settings.submissionsOpen !== false) {
       throw new BoothError(
         'booth_config',
-        'submissions are open; pass --allow-open to run BLUE while visitors share the runtime',
+        'submissions are open; BLUE shares the production runtime, not the visitor path. Pass --allow-open to start anyway',
       );
     }
   }
@@ -204,7 +271,7 @@ export async function blue(ctx) {
     for (const profile of plan.profiles) {
       const hash = configHash(profile);
       for (let repeat = 0; repeat < plan.repeat; repeat += 1) {
-        tasks.push({ row, profile, repeat, hash });
+        tasks.push({ row, profile, repeat, hash, maxBytes });
       }
     }
   }
@@ -225,12 +292,13 @@ export async function blue(ctx) {
 
 function blueKey(dir, task) {
   const file = pdfPath(dir, task.row.receipt);
+  assertLocalPdf(file, task.row.receipt, task.maxBytes);
   return idempotencyKey({
     receipt: task.row.receipt,
     profileName: task.profile.name,
     repeatIndex: task.repeat,
     configHash: task.hash,
-    pdfSha256: fileSha256(file),
+    pdfSha256: submissionPdfSha256(dir, task.row),
   });
 }
 
@@ -588,7 +656,23 @@ async function warmMissions(ctx, client) {
       progress(ctx.io, `warm ${id} paper=${paperId} failed ${code}`);
     }
   }
-  print(ctx.io, { missions, failures });
+  let wrote = false;
+  if (ctx.flags.write === true && failures.length === 0 && configured.length > 0) {
+    const hashes = new Map(missions.map(item => [`${item.id}\n${item.paperId}`, item.sha256]));
+    const next = configured.map(mission => {
+      const sourceSha256 = hashes.get(`${mission.id}\n${mission.paperId}`);
+      return sourceSha256 ? { ...mission, sourceSha256 } : mission;
+    });
+    validateMissions(next);
+    await client.json('/v1/booth/admin/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ missions: next }),
+    });
+    wrote = true;
+    progress(ctx.io, `warm wrote sourceSha256 for ${next.length} mission(s)`);
+  }
+  print(ctx.io, { missions, failures, wrote });
   if (failures.length) {
     throw new BoothError('booth_api', `${failures.length} of ${configured.length} mission PDF(s) failed`, { exitCode: 2 });
   }
@@ -598,7 +682,7 @@ function validateMissions(value) {
   if (!Array.isArray(value) || value.length > 20) throw new BoothError('booth_config', 'missions must be an array of at most 20');
   for (const mission of value) {
     if (!mission || typeof mission !== 'object' || Array.isArray(mission)) throw new BoothError('booth_config', 'mission must be an object');
-    const keys = ['id', 'title', 'source', 'paperId', 'license', 'course', 'hint'];
+    const keys = ['id', 'title', 'source', 'paperId', 'license', 'course', 'hint', 'pageHint', 'sourceSha256'];
     const extra = Object.keys(mission).filter(key => !keys.includes(key));
     if (extra.length) throw new BoothError('booth_config', `mission has unknown keys: ${extra.join(', ')}`);
     if (typeof mission.id !== 'string' || !/^[a-z0-9][a-z0-9-]{0,39}$/.test(mission.id)) {
@@ -615,6 +699,12 @@ function validateMissions(value) {
     if (!['quick', 'deep', 'any'].includes(mission.course)) throw new BoothError('booth_config', 'mission course');
     if (mission.hint !== undefined && (typeof mission.hint !== 'string' || mission.hint.length > 300)) {
       throw new BoothError('booth_config', 'mission hint length');
+    }
+    if (mission.pageHint !== undefined && (!Number.isSafeInteger(mission.pageHint) || mission.pageHint < 1 || mission.pageHint > 10000)) {
+      throw new BoothError('booth_config', 'mission pageHint must be a 1-based page number');
+    }
+    if (mission.sourceSha256 !== undefined && (typeof mission.sourceSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(mission.sourceSha256))) {
+      throw new BoothError('booth_config', 'mission sourceSha256 must be lowercase hex');
     }
   }
 }

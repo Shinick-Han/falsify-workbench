@@ -26,7 +26,7 @@ node tools/booth/booth.mjs --config booth.local.json blue \
 
 `promptFile` 과 `harnessFile` 은 설정 파일 위치 기준입니다. `--prompt-file` 과 `--harness-file` 은 현재 디렉터리 기준입니다.
 
-같은 접수·프로파일·반복·설정·수정본 PDF sha256은 항상 같은 idempotency 키(sha256)를 씁니다. PDF 바이트가 바뀌면 키가 바뀌고 새 작업이 됩니다. 끝난 작업은 로컬 기록을 다시 읽고, 기록이 없으면 서버가 같은 키를 재생합니다. 실패한 작업은 다시 과금하지 않습니다. 같은 PDF로 다시 돌리려면 프롬프트나 모델처럼 설정을 바꾸세요.
+같은 접수·프로파일·반복·설정·`pdfSha256` 은 항상 같은 idempotency 키(sha256)를 씁니다. 키에 넣는 해시는 운영자 목록의 `pdfSha256` 이고, 로컬 파일이 그 값과 다르면 올리지 않습니다. 끝난 작업은 로컬 기록을 다시 읽고, 기록이 없으면 서버가 같은 키를 재생합니다. 실패한 작업은 다시 과금하지 않습니다. 같은 PDF로 다시 돌리려면 프롬프트나 모델처럼 설정을 바꾸세요.
 
 `--concurrency` 는 이 프로세스 안의 동시 BLUE 작업 수입니다. 서버의 `BOOTH_OPERATOR_ACTIVE_JOBS` 이하로 두세요.
 
@@ -36,14 +36,14 @@ node tools/booth/booth.mjs --config booth.local.json blue \
 |---|---|
 | `status` | 공개 설정, 운영 설정, 상태별 건수 |
 | `list` | 운영자 목록. `--status`, `--after`, `--limit` |
-| `pull` | 접수마다 `submission.json` 과 `edited.pdf`, sha256. 같은 `updatedAt` 이면 PDF를 다시 받지 않습니다. 철회분은 로컬 파일과 BLUE 기록을 지우고 `withdrawn.log` 에 시각·접수번호·seq만 남깁니다 |
-| `blue` | 수정본 PDF를 올리고 `role: blue` 작업을 만들어 폴링한 뒤 결과를 저장합니다. 접수가 열려 있으면 `--allow-open` 없이 시작하지 않습니다 |
+| `pull` | 접수마다 `submission.json` 과 `edited.pdf`. 목록의 `pdfSha256`, `pdfBytes`, `sourceSha256` 을 저장하고, 받은 PDF의 sha256·길이·`X-Falsify-Pdf-Sha256` 이 `pdfSha256`/`pdfBytes` 와 같아야 저장합니다. 같으면 PDF를 다시 받지 않습니다. 철회분은 로컬 파일과 BLUE 기록을 지우고 `withdrawn.log` 에 시각·접수번호·seq만 남깁니다 |
+| `blue` | 수정본 PDF를 올리고 `role: blue` 작업을 만들어 폴링한 뒤 결과를 저장합니다. 접수가 열려 있으면 `--allow-open` 없이 시작하지 않습니다. BLUE는 방문자 경로가 아니라 프로덕션 런타임을 같이 씁니다. `%PDF-` 로 시작하지 않거나 `--max-bytes`(기본 16777216)를 넘는 파일은 올리지 않습니다 |
 | `score` | 선언한 수정과 BLUE 인용을 맞춰 `score.json` 에 제안만 씁니다. 게시하지 않습니다 |
 | `judge` | 제안을 `status: judged` 와 `outcome` 으로 PATCH. `published` 는 건드리지 않습니다 |
 | `publish` / `unpublish` | 게시 플래그. 기본 대상은 `judged` |
 | `draw` | `crypto.randomInt` 로 당첨을 고릅니다. 기본 outcome 은 `missed` 라서 경품은 AI가 놓친 결함에 갑니다. `--prize` 가 있으면 그 문장을 PATCH |
 | `export` | `common`, `score`, `key`, `jsonl`. 철회한 접수는 빠집니다. CSV 칸이 `=`, `+`, `-`, `@`, 탭, CR로 시작하면 `'` 를 붙입니다 |
-| `missions get\|set\|warm` | 미션 목록. 행사 파일은 `tools/booth/missions.aws-community-day-2026.json` 입니다. `warm` 은 설정된 미션마다 `GET /v1/papers/pdf` 로 라이선스와 캐시를 확인하고 크기와 실패를 보고합니다 |
+| `missions get\|set\|warm` | 미션 목록. 행사 파일은 `tools/booth/missions.aws-community-day-2026.json` 입니다. `warm` 은 설정된 미션마다 `GET /v1/papers/pdf` 로 라이선스와 캐시를 확인하고 크기와 실패를 보고합니다. `warm --write` 는 받은 PDF의 `sourceSha256` 을 미션에 저장하고 `pageHint` 는 그대로 둡니다 |
 | `open` / `close` | 접수 개방. `close --dry-run` 은 요청을 보내지 않습니다 |
 | `announce` | `--text`, `--file`, `--clear` |
 
@@ -53,10 +53,10 @@ node tools/booth/booth.mjs --config booth.local.json blue \
 
 ## 부스 당일
 
-1. 문을 열기 전에 `missions set tools/booth/missions.aws-community-day-2026.json`, `missions warm`, `open`, 필요하면 `announce`.
-2. 30분마다 `pull` (상태 필터 없이). 런타임은 수정본 PDF를 7일만 보관하므로 행사 중에 받아 두세요. 만료되면 `artifact_expired` 이고, 이미 받은 파일은 남겨 둡니다. 철회된 접수는 로컬에서 지워집니다.
+1. 문을 열기 전에 `missions set tools/booth/missions.aws-community-day-2026.json`, `missions warm --write`, `open`, 필요하면 `announce`.
+2. 30분마다 `pull` (상태 필터 없이). 수정본 PDF는 접수와 함께 서버에 있습니다. `pull` 은 `pdfSha256` 과 `pdfBytes` 가 맞는 것만 보관합니다. 받은 PDF는 브라우저에 내장된 PDF 보기에서만 여세요. 데스크톱 PDF 프로그램으로 열지 마세요. 철회되면 서버 PDF가 지워지고, 다음 `pull` 이 로컬 보관본도 지웁니다.
 3. 마감하면 `close`.
-4. `blue`. 먼저 `--dry-run`. 접수가 아직 열려 있으면 거절합니다. 그때도 돌리려면 `--allow-open`.
+4. `blue`. 먼저 `--dry-run`. 접수가 아직 열려 있으면 거절합니다. BLUE는 방문자 제출 경로가 아니라 프로덕션 런타임을 같이 씁니다. 그래도 돌리려면 `--allow-open`.
 5. `score` 로 제안 확인. 사람이 본 뒤에만 `judge`.
 6. `publish --prize '부스에서 이 화면을 보여 주세요'`.
 7. 경품이 추첨이면 `draw --count 3 --prize '…'`. 기본은 AI가 놓친(`missed`) 접수입니다.
@@ -81,6 +81,8 @@ node tools/booth/booth.mjs --config booth.local.json blue \
 ## 개인정보와 보관
 
 접수 화면은 이름, 전화, 이메일을 받지 않습니다. 별명에 메일 모양이나 긴 숫자가 있으면 서버가 거절합니다. 이 CLI는 토큰을 출력하지 않습니다. 결과와 경품 안내는 접수번호와 확인 키로만 확인합니다. 방문자는 확인 키로 제출을 철회할 수 있고, 철회분은 `score` 와 `export` 에서 빠집니다.
+
+부스 PDF는 브라우저에 내장된 PDF 보기에서만 엽니다. 데스크톱 뷰어로 열지 않습니다.
 
 확인:
 
