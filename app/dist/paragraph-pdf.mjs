@@ -12610,33 +12610,90 @@ function documentText(bytes2, mupdf) {
     doc.destroy();
   }
 }
+var LINE_HYPHEN = /(\p{L})[-\u00ad\u2010]\s*\n\s*(?=\p{L})/gu;
+var WORD_HYPHEN = /(\p{L})[-\u00ad\u2010](?=\p{L})/gu;
+var QUOTES = [[/[\u2018\u2019\u02bc\u2032]/g, "'"], [/[\u201c\u201d]/g, '"']];
 function textTokens(text3) {
   if (typeof text3 !== "string") return [];
-  return text3.replace(/\s+/g, " ").trim().split(" ").map(normalizeToken).filter(Boolean);
+  for (const [mark, plain] of QUOTES) text3 = text3.replace(mark, plain);
+  return text3.replace(LINE_HYPHEN, "$1").replace(/\s+/g, " ").trim().split(" ").map(normalizeToken).filter(Boolean);
 }
 function normalizeToken(word) {
-  return word.replace(/^[^\p{L}\p{N}%]+|[^\p{L}\p{N}%]+$/gu, "");
+  return word.replace(/^[^\p{L}\p{N}%]+|[^\p{L}\p{N}%]+$/gu, "").replace(WORD_HYPHEN, "$1").replace(/\u00ad/g, "");
 }
-function sameSpan(words, index, drop) {
-  for (let k = 0; k < drop.length; k++) if (words[index + k] !== drop[k]) return false;
-  return true;
-}
-function withoutPhrase(words, phrase) {
-  const drop = textTokens(phrase);
-  if (!drop.length) return words;
-  for (let i = 0; i + drop.length <= words.length; i++) {
-    if (!sameSpan(words, i, drop)) continue;
-    return words.slice(0, i).concat(words.slice(i + drop.length));
+function indexOfRun(words, run, from = 0) {
+  if (!run.length) return -1;
+  for (let i = from; i + run.length <= words.length; i++) {
+    let same = true;
+    for (let k = 0; k < run.length && same; k++) same = words[i + k] === run[k];
+    if (same) return i;
   }
-  return words;
+  return -1;
+}
+function plainQuotes(text3) {
+  for (const [mark, plain] of QUOTES) text3 = text3.replace(mark, plain);
+  return text3;
+}
+function editParts(find) {
+  const flat = plainQuotes(find).replace(/\s+/g, " ").trim();
+  return flat ? flat.split(" ") : [];
+}
+function partFits(word, part, edge) {
+  const raw = part, bare = normalizeToken(part) || part;
+  for (const want of [raw, bare]) {
+    if (edge === "one" ? word.includes(want) : edge === "first" ? word.endsWith(want) : edge === "last" ? word.startsWith(want) : word === want) return want;
+  }
+  return null;
+}
+function editSpans(words, parts) {
+  const spans = [];
+  if (!parts.length) return spans;
+  for (let i = 0; i + parts.length <= words.length; i++) {
+    const fit = [];
+    for (let k = 0; k < parts.length; k++) {
+      const edge = parts.length === 1 ? "one" : k === 0 ? "first" : k === parts.length - 1 ? "last" : "inner";
+      const want = partFits(words[i + k], parts[k], edge);
+      if (want == null) break;
+      fit.push(want);
+    }
+    if (fit.length === parts.length) spans.push({ at: i, needle: fit.join(" ") });
+  }
+  return spans;
+}
+function withoutEdit(before, after, edit) {
+  const parts = editParts(typeof edit?.before === "string" ? edit.before : "");
+  const put = plainQuotes(typeof edit?.after === "string" ? edit.after : "").replace(/\s+/g, " ").trim();
+  let fallback = null;
+  for (const { at, needle } of editSpans(before, parts)) {
+    const joined = before.slice(at, at + parts.length).join(" ");
+    const spot = joined.indexOf(needle);
+    const changed = spot < 0 ? textTokens(put) : textTokens(joined.slice(0, spot) + put + joined.slice(spot + needle.length));
+    const keep = before.slice(0, at).concat(before.slice(at + parts.length));
+    if (!changed.length) return [keep, after];
+    const hit = indexOfRun(after, changed);
+    if (hit >= 0) return [keep, after.slice(0, hit).concat(after.slice(hit + changed.length))];
+    if (!fallback) fallback = [keep, after];
+  }
+  return fallback || withoutEdgeEdit(before, after, put);
+}
+function withoutEdgeEdit(before, after, put) {
+  const add = normalizeToken(put) || put;
+  if (!add) return [before, after];
+  for (let i = 0; i < after.length; i++) {
+    const word = after[i];
+    const at = word.indexOf(add);
+    if (at < 0) continue;
+    const old = normalizeToken(word.slice(0, at) + word.slice(at + add.length));
+    const j = old ? before.indexOf(old) : -1;
+    if (j < 0 || before.includes(word)) continue;
+    return [before.slice(0, j).concat(before.slice(j + 1)), after.slice(0, i).concat(after.slice(i + 1))];
+  }
+  return [before, after];
 }
 function lostWords(beforeText, afterText, edits) {
   let before = textTokens(beforeText);
   let after = textTokens(afterText);
-  for (const edit of edits || []) {
-    before = withoutPhrase(before, edit?.before);
-    after = withoutPhrase(after, edit?.after);
-  }
+  for (const edit of edits || []) [before, after] = withoutEdit(before, after, edit);
   const counts = /* @__PURE__ */ new Map();
   for (const word of after) counts.set(word, (counts.get(word) || 0) + 1);
   const lost = [];

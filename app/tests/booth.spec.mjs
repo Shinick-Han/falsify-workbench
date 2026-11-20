@@ -680,9 +680,165 @@ test('a failed 다음 stays in edit with a clear message', async () => {
   h.ids.get('paper-generate').disabled = true;
   h.ids.get('booth-next').click();
   await settle();
+  await runMake(h, 240000);
   assert.equal(h.step(), 'edit');
-  assert.equal(h.text('booth-dock-status'), '수정본을 만들지 못했어요. 고친 곳을 확인한 뒤 「다음」을 다시 눌러 주세요.');
+  assert.equal(h.text('booth-dock-status'), '수정본을 만드는 데 너무 오래 걸려요. 「다시 시도」를 눌러 주세요.');
+  assert.deepEqual(fixLabels(h), ['다시 시도']);
   assert.equal(h.calls.some(call => call.path.endsWith('/v1/booth/submissions')), false);
+  h.handle.destroy();
+});
+
+/* Runs the 「다음」 poll timers on the fake clock for up to ms (or until none is left). */
+async function runMake(h, ms) {
+  const until = h.clock.t + ms;
+  while (h.timers.length && h.clock.t < until) {
+    const next = h.timers.shift();
+    h.clock.t += next.ms;
+    next.fn();
+    await settle();
+  }
+}
+function fixLabels(h) {
+  const box = h.ids.get('booth-dock-fix');
+  return box.hidden ? [] : JSON.parse(JSON.stringify(nodesOf(box).filter(node => node.tagName === 'button').map(node => node.textContent)));
+}
+function fixButtonOf(h, label) {
+  return nodesOf(h.ids.get('booth-dock-fix')).find(node => node.tagName === 'button' && node.textContent === label);
+}
+const NAMED_EDIT = [{id: 'e1', enabled: true, pageIndex: 0, segmentId: 'paragraph:0:p1', before: '†', after: '1'}];
+
+test('makeFailureView names the failing edit and offers a fix in place', () => {
+  const edits = [{id: 'e1', pageIndex: 4, before: '0.95', after: '0.50'}, {id: 'e2', pageIndex: 0, before: '†', after: '1'}];
+  const view = (detail, list = edits) => JSON.parse(JSON.stringify(booth.makeFailureView(detail, list)));
+  assert.deepEqual(view({code: 'MATCH_FAILED', failures: [{id: 'e2', pageIndex: 0, code: 'NOT_FOUND'}]}),
+    {text: '1쪽 「† → 1」: 이 자리를 쪽에서 찾지 못했어요. 지우거나 다시 고쳐 주세요.', editId: 'e2', actions: ['reopen', 'delete']});
+  assert.equal(view({code: 'MATCH_FAILED', failures: [{id: 'e1', code: 'AMBIGUOUS_MATCH'}]}).text,
+    '5쪽 「0.95 → 0.50」: 같은 글자가 쪽에 여러 번 있어 자리를 정하지 못했어요. 앞뒤 글자를 조금 더 넣어 다시 고쳐 주세요.');
+  assert.deepEqual(view({code: 'MATCH_FAILED', failures: [{id: 'e1', code: 'OVERLAPPING_EDITS'}]}).actions, ['delete', 'reopen']);
+  assert.match(view({code: 'MATCH_FAILED', failures: [{id: 'e1', code: 'NOT_EDITABLE'}]}).text, /^5쪽 「0\.95 → 0\.50」: 이 자리의 글자 모양을 그대로 살려 바꾸지 못했어요/);
+  // A failure id the booth does not know: the only edit is named, else the list is offered.
+  assert.equal(view({code: 'MATCH_FAILED', failures: [{id: 'x', code: 'NOT_FOUND'}]}, edits.slice(1)).editId, 'e2');
+  assert.deepEqual(view({code: 'MATCH_FAILED', failures: [{id: 'x', code: 'NOT_FOUND'}]}).actions, ['list']);
+  assert.deepEqual(view({code: 'figure-text-corrupt'}, edits.slice(0, 1)),
+    {text: '5쪽 「0.95 → 0.50」: 이대로 바꾸면 쪽의 다른 글자까지 흐트러져서 수정본을 만들지 않았어요. 지우거나 다시 고쳐 주세요.', editId: 'e1', actions: ['reopen', 'delete']});
+  assert.deepEqual(view({code: 'figure-text-corrupt'}).actions, ['list']);
+  assert.match(view({code: 'unsupported', message: 'Font maps multiple Unicode characters to one glyph.'}, edits.slice(1)).text, /^1쪽 「† → 1」: 원래 글꼴에 없는 글자라/);
+  assert.deepEqual(view({message: '편집 위치가 겹칩니다. 기존 편집을 끄고 다시 선택하세요.'}), {text: booth.MAKE_TEXT.overlap, editId: '', actions: ['list']});
+  for (const detail of [{kind: 'engine'}, {code: 'offline'}, {message: 'Failed to fetch dynamically imported module'}, {message: 'WebAssembly.instantiate(): CompileError'}]) {
+    assert.deepEqual(view(detail), {text: booth.MAKE_TEXT.engine, editId: '', actions: ['retry']}, JSON.stringify(detail));
+  }
+  assert.deepEqual(view({kind: 'stall'}), {text: booth.MAKE_TEXT.stall, editId: '', actions: ['retry']});
+  assert.deepEqual(view({kind: 'idle'}), {text: booth.MAKE_FAILED, editId: '', actions: ['retry']});
+  assert.deepEqual(view(null, null), {text: booth.MAKE_FAILED, editId: '', actions: ['retry']});
+  assert.equal(booth.makeEditLabel({pageIndex: 2, before: 'a long sentence that keeps going on', after: 'a long sentence'}), '3쪽 「that keeps goin… → (지움)」');
+  for (const text of Object.values(booth.MAKE_TEXT).concat([booth.MAKE_FAILED, booth.MAKE_SLOW])) {
+    assert.doesNotMatch(text, /다른 기능|문단 전체 고치기|휴대폰에서|표·그래프·그림/, text);
+  }
+});
+
+test('다음 keeps waiting on a slow phone and says so after 15 s', async () => {
+  const h = liveBooth();
+  await settle();
+  useWorkspace(NAMED_EDIT);
+  await pickMission(h);
+  h.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
+  let clicks = 0;
+  const button = h.ids.get('paper-generate');
+  button.addEventListener('click', () => { clicks += 1; button.disabled = true; });
+  h.ids.get('booth-next').click();
+  await settle();
+  assert.equal(clicks, 1);
+  await runMake(h, 14000);
+  assert.equal(h.text('booth-dock-status'), '수정본을 만드는 중…');
+  await runMake(h, 2000);
+  assert.equal(h.text('booth-dock-status'), '수정본을 만드는 중… 느린 폰에서는 1분쯤 걸려요');
+  await runMake(h, 100000);
+  assert.equal(h.step(), 'edit', 'still waiting after the old 90 s limit');
+  assert.equal(h.ids.get('booth-dock').getAttribute('data-busy'), 'true');
+  h.doc.dispatchEvent(generated(NAMED_EDIT));
+  await waitFor(() => h.step() === 'send');
+  assert.equal(h.timers.length, 0, 'no 다음 poll left behind');
+  h.handle.destroy();
+});
+
+test('a generator failure names the edit, offers delete and reopen, and lets the visitor retry', async () => {
+  const h = liveBooth();
+  await settle();
+  const ws = useWorkspace(NAMED_EDIT);
+  await pickMission(h);
+  h.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
+  const button = h.ids.get('paper-generate');
+  let clicks = 0;
+  button.addEventListener('click', () => {
+    clicks += 1;
+    button.disabled = true;
+    if (clicks === 1) {
+      button.disabled = false;
+      h.doc.dispatchEvent({type: 'falsify:paper-generate-failed', detail: {code: 'MATCH_FAILED', message: '', failures: [{id: 'e1', pageIndex: 0, code: 'NOT_FOUND'}]}});
+    }
+  });
+  h.ids.get('booth-next').click();
+  await settle();
+  await runMake(h, 1000);
+  assert.equal(h.step(), 'edit');
+  assert.equal(h.text('booth-dock-status'), '1쪽 「† → 1」: 이 자리를 쪽에서 찾지 못했어요. 지우거나 다시 고쳐 주세요.');
+  assert.deepEqual(fixLabels(h), ['다시 고치기', '이 고친 곳 지우기']);
+  assert.equal(h.ids.get('booth-next').disabled, false);
+  // The visitor fixes the edit: the message and the buttons go away with the old edit.
+  ws.edits = [{...NAMED_EDIT[0], after: '2'}];
+  h.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
+  assert.equal(h.text('booth-dock-status'), '');
+  assert.deepEqual(fixLabels(h), []);
+  h.ids.get('booth-next').click();
+  await settle();
+  assert.equal(clicks, 2);
+  h.doc.dispatchEvent(generated(ws.edits));
+  await waitFor(() => h.step() === 'send');
+  h.handle.destroy();
+});
+
+test('an idle generator gets one more try, then a last-resort message with 다시 시도', async () => {
+  const h = liveBooth();
+  await settle();
+  useWorkspace(NAMED_EDIT);
+  await pickMission(h);
+  h.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
+  let clicks = 0;
+  h.ids.get('paper-generate').addEventListener('click', () => { clicks += 1; });
+  h.ids.get('booth-next').click();
+  await settle();
+  await runMake(h, 4000);
+  assert.equal(clicks, 2, 'pressed once more after 3 s idle');
+  assert.equal(h.ids.get('booth-dock').getAttribute('data-busy'), 'true');
+  await runMake(h, 4000);
+  assert.equal(h.text('booth-dock-status'), booth.MAKE_FAILED);
+  assert.deepEqual(fixLabels(h), ['다시 시도']);
+  fixButtonOf(h, '다시 시도').click();
+  await settle();
+  assert.equal(clicks, 3);
+  assert.equal(h.text('booth-dock-status'), '수정본을 만드는 중…');
+  assert.deepEqual(fixLabels(h), []);
+  h.doc.dispatchEvent(generated(NAMED_EDIT));
+  await waitFor(() => h.step() === 'send');
+  h.handle.destroy();
+});
+
+test('an engine that never loads says so instead of waiting forever', async () => {
+  const h = liveBooth();
+  await settle();
+  useWorkspace(NAMED_EDIT);
+  await pickMission(h);
+  h.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
+  const button = h.ids.get('paper-generate');
+  button.disabled = true;
+  button.dataset = {state: 'no-engine'};
+  h.ids.get('booth-next').click();
+  await settle();
+  await runMake(h, 19000);
+  assert.equal(h.ids.get('booth-dock').getAttribute('data-busy'), 'true');
+  await runMake(h, 2000);
+  assert.equal(h.text('booth-dock-status'), booth.MAKE_TEXT.engine);
+  assert.deepEqual(fixLabels(h), ['다시 시도']);
   h.handle.destroy();
 });
 
