@@ -10,7 +10,9 @@ body{
   --tk-inset:0px;
   margin:0;background:var(--ev-ground,#eef0f1);color:var(--ev-ink,#16191e);
   font-family:var(--ev-sans,"Pretendard",-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Noto Sans KR","Malgun Gothic",sans-serif);
-  -webkit-text-size-adjust:100%;text-size-adjust:100%;overflow-x:hidden
+  -webkit-text-size-adjust:100%;text-size-adjust:100%;overflow-x:hidden;
+  /* Hangul wraps at spaces, not between syllables. */
+  word-break:keep-all;overflow-wrap:break-word
 }
 .app-shell{margin:0 auto;max-width:480px;min-height:100vh;min-height:100dvh;background:var(--ev-ground,#eef0f1)}
 #main,.content{min-width:0}
@@ -65,7 +67,8 @@ html[data-booth-step]:not([data-booth-step="edit"]) #view-workbench{
 #paper-workspace .paper-compare{display:block;margin:0;padding:0;border:0;background:transparent}
 #paper-workspace .paper-compare>[aria-labelledby="paper-after-title"],#paper-before-status{display:none}
 #paper-workspace .paper-pane{margin:0;padding:0;border:0;background:transparent;box-shadow:none}
-#paper-before-title{margin:0 0 8px;font-size:11.5px;font-weight:500;letter-spacing:0;color:var(--ev-muted,#5f656e)}
+/* The pane title stays for assistive tech only; the tip above the page already says what to do. */
+#paper-before-title{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 
 /* The stage does not scroll (booth-pageedit.css turns it into a pannable box while zoomed). The page
    is the editor, so on phones it takes the full column (--tk-inset is 0; the renderer fits the page
@@ -74,6 +77,8 @@ html[data-booth-step]:not([data-booth-step="edit"]) #view-workbench{
   display:flex;flex-direction:column;gap:14px;max-height:none;min-height:0;overflow:visible;
   background:transparent;border:0 solid transparent;border-inline-width:var(--tk-inset);border-radius:0;outline:0
 }
+/* The workspace caps the stage at 40vh while its inline editor is open; here the page grows with the editor sheet instead, so nothing below it is overlapped. */
+html[data-booth-step]:not(.booth-pe-zoomed) .paper-compare:has(.paper-inline.is-open) #paper-before-stage{max-height:none}
 #paper-before-stage:focus-visible{outline:2px solid var(--ev-ink,#16191e);outline-offset:4px}
 
 /* Page image. The text layer, marks and patches share the canvas cell. */
@@ -213,9 +218,6 @@ html[data-booth-step]:not([data-booth-step="edit"]) #view-workbench{
   #paper-page-prev,#paper-page-next{padding:0 16px}
   /* Applied edits show as chips in the booth dock on desktop; phones keep this list. */
   #paper-workspace>#paper-edits{display:none}
-
-  /* The pane title stays for assistive tech only; the toolbar already says which page. */
-  #paper-before-title{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 
   /* The stage's inner width is the page column (the renderer fits the page to it); its right
      border is the gap plus the work column, and the second grid track runs over that border. */

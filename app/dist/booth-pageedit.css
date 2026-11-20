@@ -17,7 +17,7 @@ html[data-booth-step] #paper-before-stage>.paper-page{-webkit-tap-highlight-colo
 .booth-pe-fit:disabled{opacity:.4;cursor:default}
 .booth-pe-desk-tip{display:none;margin:0;font-size:13px;line-height:1.5;color:var(--ev-ink-2,#3a3f47)}
 .booth-pe-desk-tip>p{margin:0}
-.booth-pe-desk-tip>.booth-pe-keys{margin-top:2px;font-family:var(--ev-mono,monospace);font-size:11.5px;color:var(--ev-muted,#6b717a)}
+.booth-pe-desk-tip>.booth-pe-keys{margin-top:2px;font-size:12px;color:var(--ev-muted,#6b717a)}
 
 /* Touch model (any width): while a text field or the edit bar has focus the dock steps aside; the keyboard needs the room. */
 html.booth-pe-typing .booth-dock{display:none}

@@ -8,7 +8,7 @@
   --ev-sans:"Pretendard",-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Noto Sans KR","Malgun Gothic",sans-serif;
   --ev-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Roboto Mono",monospace;
 }
-.booth{box-sizing:border-box;width:100%;max-width:480px;min-width:0;margin:0 auto 20px;padding:0 0 24px;background:var(--ev-ground,#eef0f1);color:var(--ev-ink,#16191e);font-family:var(--ev-sans);font-size:14px;line-height:1.6;letter-spacing:0;text-align:left}
+.booth{box-sizing:border-box;width:100%;max-width:480px;min-width:0;margin:0 auto 20px;padding:0 0 24px;background:var(--ev-ground,#eef0f1);color:var(--ev-ink,#16191e);font-family:var(--ev-sans);font-size:14px;line-height:1.6;letter-spacing:0;text-align:left;word-break:keep-all;text-wrap-style:pretty}
 .booth *,.booth *::before,.booth *::after{box-sizing:border-box}
 .booth[hidden],.booth [hidden]{display:none!important}
 .booth h2,.booth h3,.booth p,.booth dl,.booth dd,.booth ol,.booth ul,.booth blockquote{margin:0}
@@ -21,7 +21,7 @@
 .booth-lab{font-family:var(--ev-mono);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--ev-muted);overflow-wrap:anywhere}
 .booth-klab{font-size:11.5px;font-weight:500;color:var(--ev-muted)}
 .booth-klab.gap{margin-top:4px}
-.booth-headline{font-weight:300;font-size:28px;line-height:1.25;letter-spacing:-.03em;color:var(--ev-ink);overflow-wrap:anywhere}
+.booth-headline{font-weight:300;font-size:28px;line-height:1.25;letter-spacing:-.03em;color:var(--ev-ink);overflow-wrap:anywhere;text-wrap:balance}
 .booth-headline.hero{font-size:31px;line-height:1.24}
 .booth-headline.small{font-size:24px}
 .booth-headline b{font-weight:600}
@@ -114,7 +114,7 @@
 .booth-rows{display:grid;gap:12px}
 .booth-card{gap:8px}
 .booth-card-head{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:6px 10px}
-.booth-ai-chip{padding:2px 7px;border:1px solid var(--ev-line,#848a93);border-radius:4px;font-family:var(--ev-mono);font-size:11px;line-height:1.5;color:var(--ev-ink-2);white-space:nowrap}
+.booth-ai-chip{padding:2px 7px;border:1px solid var(--ev-line,#848a93);border-radius:4px;font-size:11.5px;line-height:1.5;color:var(--ev-ink-2);font-variant-numeric:tabular-nums;white-space:nowrap}
 .booth-diff{font-family:var(--ev-mono);font-size:12.5px;line-height:1.75;color:var(--ev-ink);overflow-wrap:anywhere}
 .booth-diff .ctx{color:var(--ev-ink-2)}
 .booth-diff del{margin-right:6px;color:var(--ev-muted);text-decoration:line-through}
@@ -164,7 +164,7 @@
 .booth-gift-text{margin-top:2px;font-size:15px;font-weight:500;white-space:pre-wrap;overflow-wrap:anywhere}
 .booth .booth-gift-code{font-size:15px}
 .booth-note{gap:8px}
-.booth-quote{padding:2px 0 2px 10px;border-left:2px solid var(--ev-ink);font-family:"Times New Roman",Times,serif;font-size:13.5px;line-height:1.55;color:#2b2d31;overflow-wrap:anywhere}
+.booth-quote{padding:10px 12px;border-radius:6px;background:var(--ev-soft);font-family:"Times New Roman",Times,serif;font-size:13.5px;line-height:1.55;color:#2b2d31;overflow-wrap:anywhere}
 .booth-hist{display:grid;gap:6px}
 .booth .booth-hist-row{display:flex;justify-content:space-between;align-items:center;gap:10px;width:100%;min-height:44px;padding:7px 12px;border:0;border-radius:6px;background:var(--ev-card);color:var(--ev-ink);font-family:var(--ev-mono);font-size:12px;text-align:left;cursor:pointer}
 .booth-hist-row .l{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
