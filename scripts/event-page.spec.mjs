@@ -7,7 +7,7 @@ import {fileURLToPath} from 'node:url';
 import test from 'node:test';
 import vm from 'node:vm';
 import {
-  BOOTH_SCRIPTS, BOOTH_STYLES, DEFAULT_EVENT_API_BASE, EVENT_TITLE_SUFFIX, eventApiOrigin, eventBytesDiffer, eventHtmlFromIndex,
+  AGENT_LINK, BOOTH_SCRIPTS, BOOTH_STYLES, DEFAULT_EVENT_API_BASE, EVENT_TITLE_SUFFIX, eventApiOrigin, eventBytesDiffer, eventHtmlFromIndex,
   parseEventArgs, planEventFiles,
 } from './build-event-page.mjs';
 
@@ -44,6 +44,8 @@ function stripBoothAssets(text, newline) {
 function revertEventHtml(eventHtml, indexHtml, origin) {
   const nl = newlineOf(indexHtml);
   let text = stripBoothAssets(eventHtml, nl);
+  assert.ok(count(text, AGENT_LINK) <= 1);
+  text = text.replace(AGENT_LINK, '');
   assert.equal(count(text, 'cloud-config.event.js?v='), 1);
   assert.equal(count(text, 'cloud-config.js?v='), 0);
   text = text.replace('cloud-config.event.js?v=', 'cloud-config.js?v=');
@@ -153,6 +155,9 @@ test('committed event page matches index.html except the four event edits', () =
   const order = [...BOOTH_STYLES, ...BOOTH_SCRIPTS].map(name => event.indexOf(`"${name}?v=`));
   assert.ok(order.every((at, i) => at > hostedAt && (i === 0 || at > order[i - 1])), 'booth assets keep the contract order');
   for (const name of ['booth-recipe', 'booth-myai']) assert.equal(index.includes(name), false, name + ' stays off index.html');
+  assert.equal(count(event, AGENT_LINK), 1, 'the event footer links the agent guide');
+  assert.equal(index.includes('id="agent-link"'), false, 'index.html keeps its own footer');
+  assert.ok(event.indexOf(AGENT_LINK) < event.indexOf('id="source-link"'));
 });
 
 test('event HTML injects the event theme, then booth assets, after hosted-ai.js only', () => {

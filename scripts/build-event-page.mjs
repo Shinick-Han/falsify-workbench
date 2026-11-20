@@ -108,6 +108,17 @@ export function rewriteConnectSrc(policy, origin) {
   return rewritten;
 }
 
+/* The event footer also points AI agents (and their humans) to the agent guide. */
+const SOURCE_LINK = '<a class="source-link" id="source-link"';
+export const AGENT_LINK = '<a class="source-link" id="agent-link" href="./agent.html" target="_blank" rel="noopener noreferrer">AI agent로 참여하기</a>';
+
+function withAgentLink(html) {
+  const found = html.split(SOURCE_LINK).length - 1;
+  if (found === 0) return html;
+  if (found !== 1) throw fail('index.html must contain exactly one source link', 2);
+  return replaceOnce(html, SOURCE_LINK, AGENT_LINK + SOURCE_LINK);
+}
+
 function replaceOnce(text, needle, replacement) {
   const at = text.indexOf(needle);
   if (at < 0 || text.indexOf(needle, at + needle.length) !== -1) throw fail('expected one unique page edit', 2);
@@ -135,6 +146,7 @@ export function eventHtmlFromIndex(indexHtml, origin) {
   let html = replaceOnce(indexHtml, script[0], scriptTag);
   html = replaceOnce(html, csp[0], cspTag);
   html = withEventTitle(html, title, newline);
+  html = withAgentLink(html);
   return injectBooth(html, newline);
 }
 
