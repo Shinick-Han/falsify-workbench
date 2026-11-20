@@ -142,5 +142,7 @@ test('outsideBoxes: a token touching no paragraph box is not body text', () => {
   assert.equal(pe.outsideBoxes(items, {x: 0.29, y: 0.126, w: 0.013, h: 0.009}), false, 'an author mark inside its paragraph');
   assert.equal(pe.outsideBoxes(items, {x: 0.02, y: 0.3, w: 0.02, h: 0.4}), true, 'a side stamp');
   assert.equal(pe.outsideBoxes(items, {x: 0.805, y: 0.15, w: 0.02, h: 0.01}), false, 'a hyphen just past the box edge');
+  assert.equal(pe.outsideBoxes(items, {x: 0.82, y: 0.15, w: 0.013, h: 0.011}), false, 'a line-end word ~2% past a box that stops short');
+  assert.equal(pe.outsideBoxes(items, {x: 0.13, y: 0.1, w: 0.02, h: 0.4}), true, 'a side stamp on the same rows, ~5% from the box');
   assert.equal(pe.outsideBoxes([], {x: 0, y: 0, w: 0.1, h: 0.1}), true);
 });

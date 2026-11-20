@@ -318,9 +318,11 @@
     }
     return rel+shift;
   }
-  /* True when a token box (page fractions) touches none of the page's paragraph boxes. */
+  /* True when a token box (page fractions) is clear of every paragraph box: none touches it, and none
+     sits on its row within 3% of the page width. A box can stop up to ~2% short of a line-end word or
+     a wide table cell on the mission paper; the arXiv side stamp sits ~5% from the nearest box. */
   function outsideBoxes(items, rect){
-    const pad=0.01;
+    const pad=0.03;
     const vpad=0.005;
     return !(Array.isArray(items)?items:[]).some(item=>item&&item.rect
       &&rect.x<item.rect.x+item.rect.w+pad&&item.rect.x-pad<rect.x+rect.w
