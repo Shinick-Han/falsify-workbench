@@ -135,6 +135,12 @@ async function openMission(browser, wide, tablet = false) {
   await page.waitForFunction(() => document.documentElement.dataset.boothStep === 'edit');
   await page.waitForFunction(() => /^5 \//.test(document.querySelector('#paper-page-label')?.textContent || '')
     && (globalThis.FalsifyPaperWorkspace.getPageParagraphs()?.items || []).some(item => item.text.includes('0.95')));
+  // On a phone the hint zoom fits Table 1 once the paragraph boxes are in, then redraws the page and its list.
+  if (!wide) {
+    await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() > 2
+      && document.querySelector('#paper-before-stage .paper-page > canvas')?.getBoundingClientRect().width > 700
+      && [...document.querySelectorAll('.paper-paragraph-button')].some(node => node.textContent.includes('0.95')));
+  }
   await page.evaluate(() => window.scrollTo(0, 0));
   return {page, errors};
 }
@@ -158,10 +164,22 @@ async function assertLayout(page, wide) {
   assert.equal(await page.locator('#booth-pe-pop').isVisible(), false);
 }
 
-/* Phone: the mission opens zoomed (3.5x) on Table 1; 전체 쪽 zooms out. */
+/* Phone: the mission opens zoomed to fit Table 1; 전체 쪽 zooms out. */
+/* The hint zoom fits the whole of Table 1 across the column (at most 3.5x): the row names ("Ragas")
+   and the last column are both inside the viewport, and the table's top sits just under the toolbar. */
 async function autoZoomed(page) {
-  await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() === 3.5
-    && document.querySelector('#paper-before-stage .paper-page > canvas').getBoundingClientRect().width > 1000);
+  await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() > 2
+    && document.querySelector('#paper-before-stage .paper-page > canvas').getBoundingClientRect().width > 700);
+  await page.waitForTimeout(300);
+  const fit = await page.evaluate(() => {
+    const span = text => [...document.querySelectorAll('#paper-before-stage .paper-text-layer span[data-i]')].find(node => node.textContent.trim() === text).getBoundingClientRect();
+    const stage = document.getElementById('paper-before-stage').getBoundingClientRect();
+    return {zoom: globalThis.FalsifyPaperWorkspace.getZoom(), ragas: span('Ragas'), last: span('0.70'), head: span('Faith.'),
+      stage: {left: stage.left, right: stage.right, top: stage.top}, bar: document.getElementById('booth-pe-bar').getBoundingClientRect().bottom, width: innerWidth};
+  });
+  assert.ok(fit.zoom <= 3.5, 'capped at 3.5x');
+  assert.ok(fit.ragas.left >= Math.max(0, fit.stage.left) && fit.last.right <= Math.min(fit.width, fit.stage.right), 'Table 1 from "Ragas" to the last column is in view ' + JSON.stringify(fit));
+  assert.ok(fit.head.top >= fit.stage.top && fit.head.top - fit.bar < 80, 'the table top sits just under the toolbar ' + JSON.stringify(fit));
   await waitScoreInStage(page);
   assert.equal(await page.locator('#booth-pe-fit').isVisible(), true, '전체 쪽 shows while zoomed');
   await canvasCapped(page);
@@ -341,11 +359,11 @@ async function patchAtFit(page, wide, label = 'fit') {
   await page.locator('#booth-pe-zoom-out').click();
   await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() === 1);
   await page.waitForFunction(value => {
-    const node = [...document.querySelectorAll('#paper-before-stage .paper-page .booth-patch')].find(item => item.dataset.patchId === value);
+    const node = [...document.querySelectorAll('#paper-before-stage .paper-page .booth-patch')].find(item => item.dataset.patchId.split('@')[0] === value);
     return node && node.getBoundingClientRect().width > 0 && node.getBoundingClientRect().height > 0;
   }, id);
   const fit = await page.evaluate(value => {
-    const node = [...document.querySelectorAll('#paper-before-stage .paper-page .booth-patch')].find(item => item.dataset.patchId === value);
+    const node = [...document.querySelectorAll('#paper-before-stage .paper-page .booth-patch')].find(item => item.dataset.patchId.split('@')[0] === value);
     const p = node.getBoundingClientRect();
     const span = [...document.querySelectorAll('#paper-before-stage .paper-text-layer span[data-i]')].find(item => item.textContent.trim() === '0.95');
     const range = document.createRange();
@@ -569,6 +587,271 @@ async function hintZoomYields(browser) {
   await context.close();
 }
 
+/* The exact tapped occurrence (alpha.89): a repeated word never stops an edit. On page 5 "0.52" sits
+   twice in Table 1 and "the" 13 times in one paragraph; "met-" / "rics" is one word over two lines. */
+const STOPPED = /여러 곳에 있어|정하지 못했어요|찾지 못했어요|겹쳐요|바꾸지 못했어요|문단 전체 고치기」로/;
+
+/* Centre of the nth (in reading order) occurrence of token in spans whose text passes keep. */
+async function tokenPoint(page, token, nth, keep) {
+  return page.evaluate(([value, n, filter]) => {
+    const spans = [...document.querySelectorAll('#paper-before-stage .paper-text-layer span[data-i]')]
+      .sort((a, b) => Number(a.dataset.i) - Number(b.dataset.i))
+      .filter(span => !filter || span.textContent.startsWith(filter));
+    const hits = [];
+    for (const span of spans) {
+      const text = span.textContent;
+      for (let at = text.indexOf(value); at >= 0; at = text.indexOf(value, at + 1)) {
+        const edge = i => i < 0 || i >= text.length || /[\s,.;:()]/.test(text[i]);
+        if (edge(at - 1) && edge(at + value.length)) hits.push({span, at});
+      }
+    }
+    const hit = hits[n];
+    if (!hit) return null;
+    hit.span.scrollIntoView({block: 'center', inline: 'center', behavior: 'instant'});
+    const range = document.createRange();
+    range.setStart(hit.span.firstChild, hit.at);
+    range.setEnd(hit.span.firstChild, hit.at + value.length);
+    const stage = document.getElementById('paper-before-stage');
+    const box = stage.getBoundingClientRect();
+    const first = range.getBoundingClientRect();
+    stage.scrollLeft += first.left + first.width / 2 - (box.left + box.width / 2);
+    const r = range.getBoundingClientRect();
+    return {x: r.left + r.width / 2, y: r.top + r.height / 2, left: r.left};
+  }, [token, nth, keep || '']);
+}
+
+async function tapToken(page, wide, token, nth, keep) {
+  if (!wide && await page.evaluate(() => globalThis.FalsifyPaperWorkspace.getZoom() === 1)) {
+    const first = await tokenPoint(page, token, nth, keep);
+    await tapAt(page, wide, first.x, first.y);
+    await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() > 1);
+    await page.waitForTimeout(300);
+  }
+  /* The applied-edit row above the page can still move it: tap once the token holds still. */
+  let point = null;
+  for (let tries = 0; tries < 4; tries += 1) {
+    let last = null;
+    for (let still = 0; still < 20; still += 1) {
+      point = await tokenPoint(page, token, nth, keep);
+      assert.ok(point, 'token on the page: ' + token + ' #' + nth);
+      if (last && Math.abs(last.x - point.x) < 0.5 && Math.abs(last.y - point.y) < 0.5) break;
+      last = point;
+      await page.waitForTimeout(150);
+    }
+    await tapAt(page, wide, point.x, point.y);
+    if (await page.locator('#booth-pe-pop').waitFor({state: 'visible', timeout: 2000}).then(() => true, () => false)) return point;
+  }
+  throw new Error('no popover for ' + token + ' #' + nth);
+}
+
+async function changeTo(page, value) {
+  await page.locator('#booth-pe-input').fill(value);
+  await page.locator('#booth-pe-pop').getByRole('button', {name: '바꾸기', exact: true}).click();
+  await page.waitForFunction(() => document.querySelector('#booth-pe-pop').hidden);
+  assert.equal(await page.locator('.booth-pe-status').textContent(), '', 'nothing stops the edit');
+}
+
+/* The paragraph text with every recorded edit applied, by anchor. */
+async function paragraphOut(page, includes) {
+  return page.evaluate(text => {
+    const ws = globalThis.FalsifyPaperWorkspace;
+    const item = ws.getPageParagraphs().items.find(entry => entry.text.includes(text));
+    const seg = ws.getSource().segments.find(entry => entry.id === item.segmentId);
+    const edits = ws.getEditSnapshot().edits.filter(edit => edit.segmentId === seg.id && edit.enabled !== false)
+      .sort((a, b) => b.anchor.start - a.anchor.start);
+    let out = seg.text;
+    for (const edit of edits) out = out.slice(0, edit.anchor.start) + edit.after + out.slice(edit.anchor.end);
+    return {out, count: edits.length};
+  }, includes);
+}
+
+async function patchTexts(page) {
+  return page.evaluate(() => [...document.querySelectorAll('#paper-before-stage .booth-patch')].map(node => node.textContent));
+}
+
+async function anchorWalk(browser, wide) {
+  const {page, errors} = await openMission(browser, wide);
+  await page.evaluate(pattern => {
+    globalThis.__stopped = [];
+    new MutationObserver(() => {
+      const text = document.body.textContent;
+      if (new RegExp(pattern).test(text)) globalThis.__stopped.push(text.match(new RegExp(pattern))[0]);
+    }).observe(document.body, {subtree: true, childList: true, characterData: true});
+  }, STOPPED.source);
+
+  // The second 0.52 of Table 1 (GPT Ranking, last column); the first (GPT Score) stays.
+  const second = await tapToken(page, wide, '0.52', 1);
+  assert.equal(await page.locator('#booth-pe-input').inputValue(), '0.52');
+  await changeTo(page, '0.11');
+  let table = await paragraphOut(page, '0.95');
+  assert.match(table.out, /GPT Score\s+0\.72\s+0\.52\s+0\.63/, 'the other 0.52 did not change');
+  assert.match(table.out, /GPT Ranking\s+0\.54\s+0\.40\s+0\.11/, 'the tapped 0.52 changed');
+  const patch = await page.evaluate(() => {
+    const node = [...document.querySelectorAll('#paper-before-stage .booth-patch')].find(item => item.textContent === '0.11');
+    return node && node.getBoundingClientRect().left;
+  });
+  const now = await tokenPoint(page, '0.52', 1);
+  assert.ok(patch != null && Math.abs(patch - now.left) <= 3, 'the patch sits on the tapped cell ' + JSON.stringify([patch, now, second]));
+
+  // A second edit in the same paragraph, next to the first (their spans overlap): both stay.
+  await tapToken(page, wide, '0.40', 0);
+  await changeTo(page, '0.44');
+  table = await paragraphOut(page, '0.95');
+  assert.match(table.out, /GPT Ranking\s+0\.54\s+0\.44\s+0\.11/, 'both edits in one paragraph');
+  assert.match(table.out, /GPT Score\s+0\.72\s+0\.52\s+0\.63/);
+  assert.deepEqual((await patchTexts(page)).filter(text => /^0\.(44|11)$/.test(text)).sort(), ['0.11', '0.44']);
+
+  // Re-editing the edited cell: the popover shows the new value; the edit is updated in place.
+  await tapToken(page, wide, '0.52', 1);
+  assert.equal(await page.locator('#booth-pe-input').inputValue(), '0.11');
+  await changeTo(page, '0.12');
+  table = await paragraphOut(page, '0.95');
+  assert.match(table.out, /GPT Ranking\s+0\.54\s+0\.44\s+0\.12/, 're-edited in place');
+  assert.match(table.out, /GPT Score\s+0\.72\s+0\.52\s+0\.63/);
+  const patches = await patchTexts(page);
+  assert.ok(patches.includes('0.12') && !patches.includes('0.11') && patches.includes('0.44'), JSON.stringify(patches));
+  await shoot(page, 'anchor-table', wide);
+
+  // A common word: the second "the" of "Table 1 analyses the agreement between the met-".
+  const body = 'Table 1 analyses';
+  const before = await paragraphOut(page, body);
+  await tapToken(page, wide, 'the', 1, body);
+  assert.equal(await page.locator('#booth-pe-input').inputValue(), 'the');
+  await changeTo(page, 'a');
+  let text = await paragraphOut(page, body);
+  assert.match(text.out, /^Table 1 analyses the agreement between a metrics proposed/, 'only the tapped "the" changed');
+  assert.equal((text.out.match(/\bthe\b/g) || []).length, (before.out.match(/\bthe\b/g) || []).length - 1);
+
+  // A word hyphenated over two lines is one word; it sits next to the edit above and joins it.
+  await tapToken(page, wide, 'met-', 0, body);
+  assert.equal(await page.locator('#booth-pe-input').inputValue(), 'metrics');
+  await changeTo(page, 'models');
+  text = await paragraphOut(page, body);
+  assert.match(text.out, /^Table 1 analyses the agreement between a models proposed in Section 3/);
+  const halves = await patchTexts(page);
+  assert.equal(halves.filter(value => /^mo|els$/.test(value)).join(''), 'mod-els', 'the new word follows the line break ' + JSON.stringify(halves));
+  await shoot(page, 'anchor-body', wide);
+
+  assert.deepEqual(await page.evaluate(() => globalThis.__stopped), [], 'no stop message ever appeared');
+  assert.deepEqual(errors, []);
+  await page.context().close();
+}
+
+/* A tap whose paragraph box does not lead to its paragraph text (here: the box is unbound from it) is searched only
+   on this page and only where its neighbours prove the place; the PDF edit lands on the tapped word. */
+async function hideParagraph(page, startsWith) {
+  await page.evaluate(prefix => {
+    const ws = globalThis.FalsifyPaperWorkspace;
+    const real = ws.getPageParagraphs.bind(ws);
+    // The box stays (the word is body text) but no longer leads to its paragraph text.
+    ws.getPageParagraphs = () => { const out = real(); return out && {...out, items: out.items.map(item => (item.text.startsWith(prefix) ? {...item, segmentId: 'paragraph:unbound:' + item.segmentId.slice(-6)} : item))}; };
+  }, startsWith);
+}
+
+async function segmentOut(page, id) {
+  return page.evaluate(segmentId => {
+    const ws = globalThis.FalsifyPaperWorkspace;
+    const seg = ws.getSource().segments.find(entry => entry.id === segmentId);
+    const edits = ws.getEditSnapshot().edits.filter(edit => edit.segmentId === segmentId && edit.enabled !== false).sort((a, b) => b.anchor.start - a.anchor.start);
+    let out = seg.text;
+    for (const edit of edits) out = out.slice(0, edit.anchor.start) + edit.after + out.slice(edit.anchor.end);
+    return {before: seg.text, out};
+  }, id);
+}
+
+async function searchWalk(browser, wide) {
+  const {page, errors} = await openMission(browser, wide);
+  if (!wide) await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() > 1, null, {timeout: 8000}).catch(() => {});
+  await hideParagraph(page, 'Table 1 analyses');
+  const body = 'Table 1 analyses';
+  await tapToken(page, wide, 'the', 1, body);
+  assert.equal(await page.locator('#booth-pe-input').inputValue(), 'the');
+  await changeTo(page, 'a');
+  const edits = await page.evaluate(() => globalThis.FalsifyPaperWorkspace.getEditSnapshot().edits.map(edit => ({id: edit.segmentId, page: edit.pageIndex})));
+  assert.equal(edits.length, 1);
+  assert.equal(edits[0].page, 4, 'the edit stays on the tapped page');
+  const seg = await segmentOut(page, edits[0].id);
+  const ink = text => text.replace(/\s+/g, '').replace(/-/g, '');
+  assert.ok(ink(seg.out).includes('agreementbetweenametrics'), 'the tapped "the" changed ' + seg.out.slice(0, 200));
+  assert.ok(ink(seg.out).includes('analysestheagreement'), 'the "the" before it did not');
+  assert.equal((seg.out.match(/\bthe\b/g) || []).length, (seg.before.match(/\bthe\b/g) || []).length - 1, 'exactly one "the" changed');
+
+  // The table without its box: the second 0.52 is still the one that changes.
+  await hideParagraph(page, '                       0.95');
+  await tapToken(page, wide, '0.52', 1);
+  await changeTo(page, '0.11');
+  const table = await page.evaluate(() => globalThis.FalsifyPaperWorkspace.getEditSnapshot().edits.find(edit => edit.after.includes('0.11')).segmentId);
+  const row = await segmentOut(page, table);
+  assert.match(row.out, /GPT Ranking\s+0\.54\s+0\.40\s+0\.11/, 'the tapped 0.52');
+  assert.match(row.out, /GPT Score\s+0\.72\s+0\.52\s+0\.63/, 'not the first 0.52');
+  await shoot(page, 'anchor-search', wide);
+  assert.deepEqual(errors, []);
+  await page.context().close();
+}
+
+/* Edits that hold several changes keep all of them: a new change between two earlier ones, and taps that
+   fold into one widened edit; every patch on the page matches a change the PDF edit still has. */
+async function mergeWalk(browser, wide) {
+  const {page, errors} = await openMission(browser, wide);
+  if (!wide) await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() > 1, null, {timeout: 8000}).catch(() => {});
+  // The first 0.52 widens to its neighbours (0.72 … 0.63); 0.72 and 0.63 then join that edit; 0.52 again.
+  await tapToken(page, wide, '0.52', 0);
+  await changeTo(page, '0.11');
+  await tapToken(page, wide, '0.72', 0);
+  await changeTo(page, '0.71');
+  await tapToken(page, wide, '0.63', 0);
+  await changeTo(page, '0.66');
+  await tapToken(page, wide, '0.52', 0);
+  assert.equal(await page.locator('#booth-pe-input').inputValue(), '0.11');
+  await changeTo(page, '0.12');
+  let table = await paragraphOut(page, '0.95');
+  assert.match(table.out, /GPT Score\s+0\.71\s+0\.12\s+0\.66/, 'three changes kept ' + table.out);
+  assert.deepEqual((await patchTexts(page)).sort(), ['0.12', '0.66', '0.71']);
+
+  // An edit with two separate changes (GPT Ranking 0.54 and 0.52), then the 0.40 between them.
+  await page.evaluate(() => {
+    const ws = globalThis.FalsifyPaperWorkspace;
+    const item = ws.getPageParagraphs().items.find(entry => entry.text.includes('0.95'));
+    const seg = ws.getSource().segments.find(entry => entry.id === item.segmentId);
+    const start = seg.text.indexOf('0.54');
+    const end = seg.text.lastIndexOf('0.52') + 4;
+    const before = seg.text.slice(start, end);
+    const after = '0.55' + before.slice(4, -4) + '0.53';
+    ws.acceptProposals([{segmentId: seg.id, pageIndex: 4, before, after, anchor: {start, end}}], {origin: 'external-ai-import', confirmed: true});
+    ws.acceptProposals([], {origin: 'external-ai-import'});
+  });
+  await tapToken(page, wide, '0.40', 0);
+  await changeTo(page, '0.44');
+  table = await paragraphOut(page, '0.95');
+  assert.match(table.out, /GPT Ranking\s+0\.55\s+0\.44\s+0\.53/, 'the change between two earlier ones keeps both ' + table.out);
+  assert.match(table.out, /GPT Score\s+0\.71\s+0\.12\s+0\.66/);
+  const patches = await patchTexts(page);
+  assert.ok(patches.includes('0.44') && !patches.includes('0.40'), JSON.stringify(patches));
+  assert.deepEqual(await page.evaluate(() => globalThis.__stopped || []), []);
+  assert.deepEqual(errors, []);
+  await page.context().close();
+}
+
+/* Not body text: the arXiv stamp on page 1 lies outside every paragraph of the engine's page model, so
+   the field is closed with the in-place line at the tap, before any typing. An author mark (†) inside the
+   author paragraph stays editable. */
+async function notTextWalk(browser, wide) {
+  const {page, errors} = await openMission(browser, wide);
+  await page.evaluate(() => globalThis.FalsifyPaperWorkspace.showPage(1));
+  await page.waitForFunction(() => { const boxes = globalThis.FalsifyPaperWorkspace.getPageParagraphs(); return boxes && boxes.pageIndex === 0 && boxes.items.length > 0; });
+  await tapToken(page, wide, 'arXiv:2309.15217v2', 0);
+  assert.equal(await page.locator('#booth-pe-input').isDisabled(), true, 'the field is closed at the tap');
+  assert.equal(await page.locator('#booth-pe-pop').getByRole('button', {name: '바꾸기', exact: true}).isDisabled(), true);
+  assert.equal(await page.locator('.booth-pe-status').textContent(), '그림이나 머리글 속 글자는 바꿀 수 없어요.');
+  await shoot(page, 'not-text', wide);
+  await page.locator('#booth-pe-pop').getByRole('button', {name: '취소', exact: true}).click();
+  await tapToken(page, wide, '†', 0);
+  assert.equal(await page.locator('#booth-pe-input').isDisabled(), false, 'an author mark stays editable');
+  assert.equal(await page.locator('.booth-pe-status').textContent(), '');
+  assert.deepEqual(errors, []);
+  await page.context().close();
+}
+
 async function main() {
   assert.equal(pdfBytes.subarray(0, 5).toString(), '%PDF-');
   const server = serve();
@@ -580,6 +863,14 @@ async function main() {
     await walk(browser, true);
     await tabletWalk(browser);
     await hintZoomYields(browser);
+    await anchorWalk(browser, true);
+    await anchorWalk(browser, false);
+    await searchWalk(browser, true);
+    await searchWalk(browser, false);
+    await mergeWalk(browser, true);
+    await mergeWalk(browser, false);
+    await notTextWalk(browser, true);
+    await notTextWalk(browser, false);
   } catch (error) {
     error.message += '\npage=' + JSON.stringify(await diagnose());
     throw error;

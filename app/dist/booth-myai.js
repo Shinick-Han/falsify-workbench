@@ -397,7 +397,7 @@
   }
 
   /* ---------- UI ---------- */
-  const UNRESOLVED={not_found:'원문에서 찾지 못했어요',ambiguous:'같은 글자가 여러 곳에 있어 고르지 못했어요',no_paper:'논문이 열리지 않았어요'};
+  const UNRESOLVED={not_found:'논문에서 찾지 못했어요',ambiguous:'같은 글자가 여러 곳에 있어요',no_paper:'논문이 아직 열리지 않았어요'};
   function setProp(node,key,value){
     if(key==='className') node.className=value;
     else if(key==='text') node.textContent=value;
@@ -549,7 +549,7 @@
     for(const u of unresolved){
       box.appendChild(el(doc,'p',{className:'booth-small',text:'"'+short(u?.edit?.find,40)+'" · '+(UNRESOLVED[u?.reason]||'확인이 필요해요')}));
     }
-    const tail=unresolved.length?'남은 곳은 "직접 고치기"에서 고칠 수 있어요.':'바뀐 곳을 확인한 뒤 다음 단계로 가세요.';
+    const tail=unresolved.length?'남은 곳은 바로 아래에서 고칠 수 있어요.':'바뀐 곳을 확인한 뒤 다음 단계로 가세요.';
     if(applied||unresolved.length) box.appendChild(el(doc,'p',{className:'booth-small',text:tail}));
     box.hidden=false;
   }

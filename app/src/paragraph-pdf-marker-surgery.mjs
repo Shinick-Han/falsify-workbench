@@ -47,14 +47,28 @@ function compareMarkerPixels(pixA,pixB,xs,ys) {
     return changed || null;
 }
 
-function verifyResult(original, edited, selected, replacement, mupdf) {
-  const a=pageGlyphs(original, mupdf), b=pageGlyphs(edited, mupdf);
+/* A narrower replacement (a digit for a wide symbol such as ♢) leaves a gap the text extractor reads as a space
+   right after it; that one inferred space is not a changed glyph. */
+const rightOf = q => Math.max(q[2],q[6]), leftOf = q => Math.min(q[0],q[4]);
+/* A wider replacement may not run into the next inked glyph on its line any further than the old glyph did. */
+function collides(a, b, at) {
+  let k=at+1; while (k<a.length && /\s/u.test(a[k].c)) k++;
+  const next=a[k];
+  if (!next || Math.abs(next.pdf[1]-a[at].pdf[1])>a[at].size) return false;
+  const room=Math.max(leftOf(next.quad), rightOf(a[at].quad));
+  return rightOf(b[at].quad)>room+0.05;
+}
+function verifyResult(original, edited, selected, replacement, changedAt, shift, mupdf) {
+  const a=pageGlyphs(original, mupdf);
   const hits=[];
   for (let i=0;i<=a.length-selected.length;i++) if (selected.every((g,j)=>glyphEquals(g,a[i+j]))) hits.push(i);
+  const at=hits[0]+changedAt, b=pageGlyphs(edited, mupdf);
   if (hits.length!==1 || a.length!==b.length) return null;
-  const at=hits[0]+selected.length-1;
-  if (!a.every((g,i)=>i===at ? b[i].c===replacement && near(g.pdf[0],b[i].pdf[0]) && near(g.pdf[1],b[i].pdf[1]) && near(g.size,b[i].size) : glyphEquals(g,b[i]))) return null;
-  const bounds=[...a[at].quad,...b[at].quad], xs=bounds.filter((_,i)=>i%2===0), ys=bounds.filter((_,i)=>i%2===1);
+  if (!a.every((g,i)=>i===at ? b[i].c===replacement && near(g.pdf[0]+shift,b[i].pdf[0]) && near(g.pdf[1],b[i].pdf[1]) && near(g.size,b[i].size) : glyphEquals(g,b[i]))) return null;
+  if (collides(a,b,at)) return null;
+  /* The changed glyph, and the glyphs after it in the same show (redrawn at the same origins), may differ in pixels. */
+  const redrawn=a.slice(at+1,hits[0]+selected.length).flatMap(g=>g.quad);
+  const bounds=[...a[at].quad,...b[at].quad,...redrawn], xs=bounds.filter((_,i)=>i%2===0), ys=bounds.filter((_,i)=>i%2===1);
   const pixA=original.toPixmap([2,0,0,2,0,0],mupdf.ColorSpace.DeviceRGB,false);
   let pixB;
   try {
@@ -82,7 +96,7 @@ async function validatedFace(snapshot, name) {
   return snapshot.fonts.find(f => f.postscriptName === name) || null;
 }
 /** `glyphs`: selected complete source show, each {c,pdf:[x,y],fontName,size}.
- * Exactly the last character may change; scanTextShows is the parser API. */
+ * Exactly one character may change; scanTextShows is the parser API. */
 function markerOriginsMatch(p,source,show,glyphs) {
         // Confirm every byte's origin from the source font's widths and text state.
         let x=glyphs[0].pdf[0], ok=true; const first=source.get('FirstChar').asNumber(), widths=source.get('Widths');
@@ -131,10 +145,14 @@ function validMarkerRequest(bytes,pageIndex,glyphs,after,scanTextShows,mupdf) {
   return true;
 }
 
-function validMarkerChange(before,chars,glyphs,fontSnapshot) {
-  if ([...before].length!==glyphs.length || chars.slice(0,-1).join('')!==before.slice(0,-1) || chars.at(-1)===glyphs.at(-1).c || chars.at(-1).codePointAt(0)>0xffff) return false;
-  if (!Array.isArray(fontSnapshot?.fonts) || fontSnapshot.fonts.some(f=>!(f?.bytes instanceof Uint8Array))) return false;
-  return true;
+/* The one glyph that changes (its index), or -1. */
+function markerChangeAt(before,chars,glyphs,fontSnapshot) {
+  const old=[...before];
+  if (old.length!==glyphs.length || chars.length!==old.length) return -1;
+  const diff=old.map((c,i)=>c!==chars[i]?i:-1).filter(i=>i>=0);
+  if (diff.length!==1 || chars[diff[0]].codePointAt(0)>0xffff || /\s/u.test(old[diff[0]])) return -1;
+  if (!Array.isArray(fontSnapshot?.fonts) || fontSnapshot.fonts.some(f=>!(f?.bytes instanceof Uint8Array))) return -1;
+  return diff[0];
 }
 
 function markerPageSource(page,scanTextShows,glyphs) {
@@ -150,25 +168,45 @@ function markerPageSource(page,scanTextShows,glyphs) {
     return {obj,contents,streams,resources,fontDict,candidate:candidates[0]};
 }
 
-function writeMarkerReplacement(doc,source,face,font,gid,chars) {
+const hexBytes = bytes => [...bytes].map(b=>b.toString(16).padStart(2,'0')).join('');
+const thousandths = n => Math.round(n*1000)/1000;
+/* Old and new advances in thousandths of the font size (as the source Widths are). A narrower glyph sits centred in
+   the old advance (pad before it, its own width set to fill the rest), so nothing after it moves and no gap reads as
+   a space; a wider one keeps its origin and the glyphs after it in the show keep theirs through a TJ offset. */
+function markerFit(source,p,at,font,gid) {
+  const first=source.get('FirstChar').asNumber(), old=source.get('Widths').get(p.bytes[at]-first).asNumber();
+  const advance=font.advanceGlyph(gid,0)*1000, pad=advance<old ? thousandths((old-advance)/2) : 0;
+  return {old,advance,pad,width:pad ? thousandths(old-pad) : thousandths(advance)};
+}
+function markerTail(p,at,fit) {
+  const tail=p.bytes.slice(at+1);
+  if (!tail.length) return '';
+  return ` [${thousandths(fit.pad+fit.width-fit.old)} <${hexBytes(tail)}>] TJ`;
+}
+function writeMarkerReplacement(doc,source,face,font,gid,chars,at) {
+    const fit=markerFit(source.fontDict.get(source.candidate.show.fontName),source.candidate.p,at,font,gid);
     const {obj,contents,streams,resources,fontDict,candidate:{si,raw,show,p}}=source;
     const newResources=copyDict(doc,resources), newFonts=copyDict(doc,fontDict);
     let name='F'+face.sha256.slice(0,12); while (!newFonts.get(name).isNull()) name+='x';
-    const pdfFont=doc.addFont(font), cmap=`/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n/CMapName /Unicode def\n/CMapType 2 def\n1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n1 beginbfchar\n<${hex(gid)}> <${hex(chars.at(-1).codePointAt(0))}>\nendbfchar\nendcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n`;
+    const pdfFont=doc.addFont(font), cmap=`/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n/CMapName /Unicode def\n/CMapType 2 def\n1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n1 beginbfchar\n<${hex(gid)}> <${hex(chars[at].codePointAt(0))}>\nendbfchar\nendcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n`;
+    const widths=doc.newArray(), one=doc.newArray(); one.push(fit.width); widths.push(gid); widths.push(one);
+    pdfFont.get('DescendantFonts').get(0).put('W',widths);
     pdfFont.put('ToUnicode',doc.addStream(enc.encode(cmap),{})); newFonts.put(name,pdfFont); newResources.put('Font',newFonts); obj.put('Resources',newResources);
-    const prefix=[...p.bytes.slice(0,-1)].map(b=>b.toString(16).padStart(2,'0')).join('');
-    const replacement=`<${prefix}> Tj /${name} ${show.fontSize} Tf <${hex(gid)}> Tj /${show.fontName} ${show.fontSize} Tf`;
+    const prefix=hexBytes(p.bytes.slice(0,at));
+    const glyph=fit.pad ? `[${-fit.pad} <${hex(gid)}>] TJ` : `<${hex(gid)}> Tj`;
+    const replacement=`<${prefix}> Tj /${name} ${show.fontSize} Tf ${glyph} /${show.fontName} ${show.fontSize} Tf`+markerTail(p,at,fit);
     const repl=enc.encode(replacement), out=new Uint8Array(show.start+repl.length+raw.length-show.end);
     out.set(raw.slice(0,show.start)); out.set(repl,show.start); out.set(raw.slice(show.end),show.start+repl.length);
     const stream=doc.addStream(out,{});
     if (contents.isArray()) { const a=doc.newArray(); streams.forEach((s,i)=>a.push(i===si?stream:s)); obj.put('Contents',a); } else obj.put('Contents',stream);
+    return fit.pad/1000*show.fontSize*show.hScale/100;
 }
 
 export async function replaceMarkerGlyph({bytes,pageIndex,glyphs,after,fontSnapshot,fontPostscriptName,scanTextShows,mupdf}) {
   if (!validMarkerRequest(bytes,pageIndex,glyphs,after,scanTextShows,mupdf)) return null;
   bytes=bytes.slice(); glyphs=glyphs.map(g=>({...g,pdf:Array.isArray(g?.pdf) ? [...g.pdf] : null}));
   const before=glyphs.map(g=>g.c).join(''), chars=[...after];
-  if (!validMarkerChange(before,chars,glyphs,fontSnapshot)) return null;
+  const at=markerChangeAt(before,chars,glyphs,fontSnapshot); if (at<0) return null;
   const captured={...fontSnapshot,fonts:fontSnapshot.fonts.map(f=>({...f,bytes:f.bytes.slice()}))};
   const face=await validatedFace(captured,fontPostscriptName); if (!face) return null;
   let doc, font, saved, check, page;
@@ -179,12 +217,12 @@ export async function replaceMarkerGlyph({bytes,pageIndex,glyphs,after,fontSnaps
     const source=markerPageSource(page,scanTextShows,glyphs);if(!source)return null;
     const {show}=source.candidate;
     font=new mupdf.Font(face.postscriptName || face.family,face.bytes);
-    const gid=font.encodeCharacter(chars.at(-1).codePointAt(0)); if (!gid || gid>65535) return null;
-    writeMarkerReplacement(doc,source,face,font,gid,chars);
+    const gid=font.encodeCharacter(chars[at].codePointAt(0)); if (!gid || gid>65535) return null;
+    const shift=writeMarkerReplacement(doc,source,face,font,gid,chars,at);
     saved=doc.saveToBuffer(''); const result=saved.asUint8Array().slice();
     check=new mupdf.PDFDocument(result);
     const originalDoc=new mupdf.PDFDocument(bytes);
-    let changed, originalPage, checkPage; try { originalPage=originalDoc.loadPage(pageIndex); checkPage=check.loadPage(pageIndex); changed=verifyResult(originalPage,checkPage,glyphs,chars.at(-1),mupdf); } finally { originalPage?.destroy(); checkPage?.destroy(); originalDoc.destroy(); }
+    let changed, originalPage, checkPage; try { originalPage=originalDoc.loadPage(pageIndex); checkPage=check.loadPage(pageIndex); changed=verifyResult(originalPage,checkPage,glyphs,chars[at],at,shift,mupdf); } finally { originalPage?.destroy(); checkPage?.destroy(); originalDoc.destroy(); }
     if (!changed) return null;
     return {bytes:result,report:{method:'source-stream-marker',pageIndex,sourceFont:show.fontName,font:face.postscriptName,changedPixels:changed}};
   } catch { return null; } finally { check?.destroy(); saved?.destroy(); font?.destroy(); page?.destroy(); doc?.destroy(); }

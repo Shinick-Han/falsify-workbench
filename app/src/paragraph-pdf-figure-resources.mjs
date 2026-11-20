@@ -339,37 +339,113 @@ function documentText(bytes, mupdf) {
   } finally { doc.destroy(); }
 }
 
+// A reflowed paragraph breaks its lines in new places, so "con-\nsidered" can come back as
+// "considered" or "consid-\nered". Join a hyphen at a line end with the next word and drop word-internal
+// hyphens on both sides, so only words that are really gone count as lost.
+const LINE_HYPHEN = /(\p{L})[-\u00ad\u2010]\s*\n\s*(?=\p{L})/gu;
+const WORD_HYPHEN = /(\p{L})[-\u00ad\u2010](?=\p{L})/gu;
+
+// A reflowed line can carry a curly apostrophe or quote back as its straight form.
+const QUOTES = [[/[\u2018\u2019\u02bc\u2032]/g, "'"], [/[\u201c\u201d]/g, '"']];
+
 function textTokens(text) {
   if (typeof text !== 'string') return [];
-  return text.replace(/\s+/g, ' ').trim().split(' ').map(normalizeToken).filter(Boolean);
+  for (const [mark, plain] of QUOTES) text = text.replace(mark, plain);
+  return text.replace(LINE_HYPHEN, '$1').replace(/\s+/g, ' ').trim().split(' ').map(normalizeToken).filter(Boolean);
 }
 
 function normalizeToken(word) {
-  return word.replace(/^[^\p{L}\p{N}%]+|[^\p{L}\p{N}%]+$/gu, '');
+  return word.replace(/^[^\p{L}\p{N}%]+|[^\p{L}\p{N}%]+$/gu, '').replace(WORD_HYPHEN, '$1').replace(/\u00ad/g, '');
 }
 
-function sameSpan(words, index, drop) {
-  for (let k = 0; k < drop.length; k++) if (words[index + k] !== drop[k]) return false;
-  return true;
-}
-
-function withoutPhrase(words, phrase) {
-  const drop = textTokens(phrase);
-  if (!drop.length) return words;
-  for (let i = 0; i + drop.length <= words.length; i++) {
-    if (!sameSpan(words, i, drop)) continue;
-    return words.slice(0, i).concat(words.slice(i + drop.length));
+function indexOfRun(words, run, from = 0) {
+  if (!run.length) return -1;
+  for (let i = from; i + run.length <= words.length; i++) {
+    let same = true;
+    for (let k = 0; k < run.length && same; k++) same = words[i + k] === run[k];
+    if (same) return i;
   }
-  return words;
+  return -1;
 }
 
-function lostWords(beforeText, afterText, edits) {
+// Where an edit sits among the source words: a run whose inner words match exactly and whose first and last
+// words may be cut ("n X" inside "n Xu", "é" inside "Sébastien", "’" inside "you’re").
+function plainQuotes(text) {
+  for (const [mark, plain] of QUOTES) text = text.replace(mark, plain);
+  return text;
+}
+
+// The edit's words as they read inside the source words: the raw end words when they fit, else trimmed.
+function editParts(find) {
+  const flat = plainQuotes(find).replace(/\s+/g, ' ').trim();
+  return flat ? flat.split(' ') : [];
+}
+
+function partFits(word, part, edge) {
+  const raw = part, bare = normalizeToken(part) || part;
+  for (const want of [raw, bare]) {
+    if (edge === 'one' ? word.includes(want) : edge === 'first' ? word.endsWith(want) : edge === 'last' ? word.startsWith(want) : word === want) return want;
+  }
+  return null;
+}
+
+// Where an edit sits among the source words: a run whose inner words match exactly and whose first and last
+// words may be cut ("n X" inside "n Xu", "é" inside "Sébastien", "’" inside "you’re").
+function editSpans(words, parts) {
+  const spans = [];
+  if (!parts.length) return spans;
+  for (let i = 0; i + parts.length <= words.length; i++) {
+    const fit = [];
+    for (let k = 0; k < parts.length; k++) {
+      const edge = parts.length === 1 ? 'one' : k === 0 ? 'first' : k === parts.length - 1 ? 'last' : 'inner';
+      const want = partFits(words[i + k], parts[k], edge);
+      if (want == null) break;
+      fit.push(want);
+    }
+    if (fit.length === parts.length) spans.push({at: i, needle: fit.join(' ')});
+  }
+  return spans;
+}
+
+// Drop one edit from both word lists: its source words from before, the words it became from after.
+function withoutEdit(before, after, edit) {
+  const parts = editParts(typeof edit?.before === 'string' ? edit.before : '');
+  const put = plainQuotes(typeof edit?.after === 'string' ? edit.after : '').replace(/\s+/g, ' ').trim();
+  let fallback = null;
+  for (const {at, needle} of editSpans(before, parts)) {
+    const joined = before.slice(at, at + parts.length).join(' ');
+    const spot = joined.indexOf(needle);
+    const changed = spot < 0 ? textTokens(put) : textTokens(joined.slice(0, spot) + put + joined.slice(spot + needle.length));
+    const keep = before.slice(0, at).concat(before.slice(at + parts.length));
+    if (!changed.length) return [keep, after];
+    const hit = indexOfRun(after, changed);
+    if (hit >= 0) return [keep, after.slice(0, hit).concat(after.slice(hit + changed.length))];
+    if (!fallback) fallback = [keep, after];
+  }
+  return fallback || withoutEdgeEdit(before, after, put);
+}
+
+// A mark the word list trims away ("’" in "’provided"): find the new word that holds the replacement and
+// the old word it came from.
+function withoutEdgeEdit(before, after, put) {
+  const add = normalizeToken(put) || put;
+  if (!add) return [before, after];
+  for (let i = 0; i < after.length; i++) {
+    const word = after[i];
+    const at = word.indexOf(add);
+    if (at < 0) continue;
+    const old = normalizeToken(word.slice(0, at) + word.slice(at + add.length));
+    const j = old ? before.indexOf(old) : -1;
+    if (j < 0 || before.includes(word)) continue;
+    return [before.slice(0, j).concat(before.slice(j + 1)), after.slice(0, i).concat(after.slice(i + 1))];
+  }
+  return [before, after];
+}
+
+export function lostWords(beforeText, afterText, edits) {
   let before = textTokens(beforeText);
   let after = textTokens(afterText);
-  for (const edit of edits || []) {
-    before = withoutPhrase(before, edit?.before);
-    after = withoutPhrase(after, edit?.after);
-  }
+  for (const edit of edits || []) [before, after] = withoutEdit(before, after, edit);
   const counts = new Map();
   for (const word of after) counts.set(word, (counts.get(word) || 0) + 1);
   const lost = [];

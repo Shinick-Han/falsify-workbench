@@ -17,7 +17,7 @@ class BoothTransfer {
 const boothSource = await readFile(fileURLToPath(new URL('../dist/booth.js', import.meta.url)), 'utf8');
 const appSource = await readFile(fileURLToPath(new URL('../dist/app.js', import.meta.url)), 'utf8');
 const openAccessSource = await readFile(fileURLToPath(new URL('../dist/open-access.js', import.meta.url)), 'utf8');
-const boothContext = vm.createContext({console, URL, URLSearchParams, Event, File, FormData, crypto, DataTransfer: BoothTransfer});
+const boothContext = vm.createContext({console, URL, URLSearchParams, Event, File, FormData, crypto, AbortController, DataTransfer: BoothTransfer});
 vm.runInContext(boothSource, boothContext, {filename: 'booth.js'});
 const booth = boothContext.FalsifyBooth;
 
@@ -245,7 +245,11 @@ test('server error codes become the booth messages', () => {
     assert.match(booth.errorMessage(code), new RegExp(fragment), code);
   }
   assert.match(booth.errorMessage('already_submitted', {receipt: 'F-0042'}), /F-0042/);
-  assert.match(booth.errorMessage('session_missing'), /연결이 끊겼어요/);
+  assert.match(booth.errorMessage('session_missing'), /연결이 잠시 끊겼어요/);
+  for (const code of ['session_missing', 'unauthorized', 'length_required', 'forbidden']) {
+    assert.doesNotMatch(booth.errorMessage(code), /새로 고/, code + ' never asks for a reload, which would drop the edits');
+    assert.match(booth.errorMessage(code), /다시 시도/, code + ' names the next step');
+  }
   assert.match(booth.errorMessage('mystery'), /^처리하지 못했어요\. 잠시 뒤 다시 시도해 주세요\.$/);
 });
 
@@ -404,6 +408,7 @@ function liveBooth(options = {}) {
     json: async () => body,
   });
   const submitReplies = (options.submits || []).slice();
+  let invalidated = 0;
   const fetchImpl = async (url, init = {}) => {
     const full = String(url);
     const path = full.split('?')[0];
@@ -413,7 +418,7 @@ function liveBooth(options = {}) {
     const query = full.includes('?') ? new URLSearchParams(full.slice(full.indexOf('?') + 1)) : null;
     const queryBody = query && path.endsWith('/v1/booth/claim') ? {receipt: query.get('receipt'), claimKey: query.get('key')} : null;
     calls.push({path, method: init.method || 'GET', at: clock.t, auth: headers.Authorization || '', contentType: headers['Content-Type'] || '',
-      body: typeof init.body === 'string' ? JSON.parse(init.body) : queryBody, form});
+      body: typeof init.body === 'string' ? JSON.parse(init.body) : queryBody, form, signal: init.signal || null});
     if (path.endsWith('/v1/booth/config')) {
       if (options.configGate) await options.configGate;
       return reply(200, {enabled: true, submissionsOpen: true, announcement: options.announcement, consentVersion: options.consentVersion || '2026-11-22.v2',
@@ -432,7 +437,7 @@ function liveBooth(options = {}) {
       if (options.submitStatus) return reply(options.submitStatus, {error: {code: 'rate_limited'}});
       return reply(201, {receipt: 'F-0042', claimKey: '7Q3K-M9XD', status: 'received', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:30Z'});
     }
-    if (path.includes('/v1/papers/pdf')) return pdfReply();
+    if (path.includes('/v1/papers/pdf')) return options.pdfReply ? options.pdfReply(full) : pdfReply();
     if (path.includes('/v1/papers/search')) {
       return reply(200, {source: 'arxiv', page: 1, hasMore: false, results: [{id: '2503.10497', title: 'Synthetic result', authors: ['Ada'], year: 2026, license: 'cc-by-4.0'}]});
     }
@@ -440,9 +445,9 @@ function liveBooth(options = {}) {
   };
   const location = {hash: options.hash || ''};
   const handle = booth.mount({
-    document: doc, fetch: fetchImpl, storage, location,
+    document: doc, fetch: fetchImpl, storage, location, blindTrust: options.blindTrust,
     config: () => ({booth: {enabled: true}, apiBase: 'https://event.example'}),
-    session: () => ({token: async () => options.token === undefined ? 'fsg_' + 'a'.repeat(43) : options.token}),
+    session: () => ({token: async () => options.token === undefined ? 'fsg_' + 'a'.repeat(43) : options.token, invalidate() { invalidated += 1; }}),
     setTimeout: (fn, ms) => { timerId += 1; timers.push({id: timerId, fn, ms}); return timerId; },
     clearTimeout: id => { const at = timers.findIndex(item => item.id === id); if (at >= 0) timers.splice(at, 1); },
     setInterval: (fn, ms) => { timerId += 1; intervals.push({id: timerId, fn, ms}); return timerId; },
@@ -460,7 +465,7 @@ function liveBooth(options = {}) {
   const claimCalls = () => calls.filter(call => call.path.endsWith('/v1/booth/claim'));
   const step = () => doc.documentElement.dataset.boothStep;
   const text = id => ids.get(id).textContent;
-  return {doc, ids, content, storage, calls, claimCalls, timers, intervals, clock, tick, handle, location, step, text};
+  return {doc, ids, content, storage, calls, claimCalls, timers, intervals, clock, tick, handle, location, step, text, invalidated: () => invalidated};
 }
 function missionButtons(h) {
   return nodesOf(h.ids.get('booth-missions')).filter(node => node.tagName === 'button');
@@ -583,7 +588,7 @@ test('a failed paper load stays on pick with the reason', async () => {
   await settle();
   await pickMission(h);
   assert.equal(h.step(), 'pick');
-  assert.match(h.text('booth-mission-status'), /연결이 끊겼어요/);
+  assert.match(h.text('booth-mission-status'), /연결이 잠시 끊겼어요/);
   h.handle.destroy();
 });
 
@@ -661,16 +666,21 @@ test('a failed 다음 stays in edit with a clear message', async () => {
   h.doc.dispatchEvent(generated(ONE_EDIT, new File(['not a pdf'], 'note.txt', {type: 'text/plain'})));
   await settle();
   assert.equal(h.step(), 'edit');
-  assert.match(h.text('booth-dock-status'), /「← 고치기」에서 「다음」을 다시 눌러 주세요/);
+  assert.equal(h.text('booth-dock-status'), '수정본 PDF를 읽지 못했어요. 「다시 시도」를 눌러 주세요.');
+  assert.deepEqual(fixLabels(h), ['다시 시도']);
   assert.equal(h.ids.get('booth-next').disabled, false);
   ws.edits = Array.from({length: 4}, (_, index) => ({enabled: true, pageIndex: index, segmentId: 's' + index, before: 'before ' + index, after: 'after ' + index}));
   h.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
   assert.equal(h.text('booth-dock-status'), '');
+  let capClicks = 0;
+  h.ids.get('paper-generate').addEventListener('click', () => { capClicks += 1; });
   h.ids.get('booth-next').click();
-  h.doc.dispatchEvent(generated(ws.edits));
   await settle();
+  assert.equal(capClicks, 0, 'the cap is checked before the PDF is built');
+  assert.equal(h.ids.get('booth-dock').getAttribute('data-busy'), 'false');
   assert.equal(h.step(), 'edit');
-  assert.equal(h.text('booth-dock-status'), '고친 곳은 3개까지 제출할 수 있어요. 지금은 4개예요.');
+  assert.equal(h.text('booth-dock-status'), '고친 곳은 3개까지 제출할 수 있어요. 지금은 4개예요. 하나를 지운 뒤 「다음」을 눌러 주세요.');
+  assert.deepEqual(fixLabels(h), ['고친 곳 목록 보기']);
   ws.edits = ONE_EDIT;
   h.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
   h.ids.get('booth-next').click();
@@ -680,10 +690,215 @@ test('a failed 다음 stays in edit with a clear message', async () => {
   h.ids.get('paper-generate').disabled = true;
   h.ids.get('booth-next').click();
   await settle();
+  await runMake(h, 240000);
   assert.equal(h.step(), 'edit');
-  assert.equal(h.text('booth-dock-status'), '수정본을 만들지 못했어요. 고친 곳을 확인한 뒤 「다음」을 다시 눌러 주세요.');
+  assert.equal(h.text('booth-dock-status'), '수정본을 만드는 데 너무 오래 걸려요. 「다시 시도」를 눌러 주세요.');
+  assert.deepEqual(fixLabels(h), ['다시 시도']);
   assert.equal(h.calls.some(call => call.path.endsWith('/v1/booth/submissions')), false);
   h.handle.destroy();
+});
+
+/* Runs the 「다음」 poll timers on the fake clock for up to ms (or until none is left). */
+async function runMake(h, ms) {
+  const until = h.clock.t + ms;
+  while (h.timers.length && h.clock.t < until) {
+    const next = h.timers.shift();
+    h.clock.t += next.ms;
+    next.fn();
+    await settle();
+  }
+}
+function fixLabels(h) {
+  const box = h.ids.get('booth-dock-fix');
+  return box.hidden ? [] : JSON.parse(JSON.stringify(nodesOf(box).filter(node => node.tagName === 'button').map(node => node.textContent)));
+}
+function fixButtonOf(h, label) {
+  return nodesOf(h.ids.get('booth-dock-fix')).find(node => node.tagName === 'button' && node.textContent === label);
+}
+const NAMED_EDIT = [{id: 'e1', enabled: true, pageIndex: 0, segmentId: 'paragraph:0:p1', before: '†', after: '1'}];
+
+test('makeFailureView names the failing edit and offers a fix in place', () => {
+  const edits = [{id: 'e1', pageIndex: 4, before: '0.95', after: '0.50'}, {id: 'e2', pageIndex: 0, before: '†', after: '1'}];
+  const view = (detail, list = edits) => JSON.parse(JSON.stringify(booth.makeFailureView(detail, list)));
+  assert.deepEqual(view({code: 'MATCH_FAILED', failures: [{id: 'e2', pageIndex: 0, code: 'NOT_FOUND'}]}),
+    {text: '1쪽 「† → 1」: 이 자리를 쪽에서 찾지 못했어요. 지우거나 다시 고쳐 주세요.', editId: 'e2', actions: ['reopen', 'delete']});
+  assert.equal(view({code: 'MATCH_FAILED', failures: [{id: 'e1', code: 'AMBIGUOUS_MATCH'}]}).text,
+    '5쪽 「0.95 → 0.50」: 같은 글자가 쪽에 여러 번 있어서 바꿀 자리를 정하지 못했어요. 「이 고친 곳 다시 고치기」로 그 자리를 다시 고쳐 주세요.');
+  assert.deepEqual(view({code: 'MATCH_FAILED', failures: [{id: 'e1', code: 'OVERLAPPING_EDITS'}]}).actions, ['delete', 'reopen']);
+  assert.match(view({code: 'MATCH_FAILED', failures: [{id: 'e1', code: 'NOT_EDITABLE'}]}).text, /^5쪽 「0\.95 → 0\.50」: 이 자리의 글자 모양을 그대로 살려 바꾸지 못했어요/);
+  // A failure id the booth does not know: the only edit is named, else the list is offered.
+  assert.equal(view({code: 'MATCH_FAILED', failures: [{id: 'x', code: 'NOT_FOUND'}]}, edits.slice(1)).editId, 'e2');
+  assert.deepEqual(view({code: 'MATCH_FAILED', failures: [{id: 'x', code: 'NOT_FOUND'}]}).actions, ['list']);
+  assert.deepEqual(view({code: 'figure-text-corrupt'}, edits.slice(0, 1)),
+    {text: '5쪽 「0.95 → 0.50」: 이대로 바꾸면 쪽의 다른 글자까지 흐트러져서 수정본을 만들지 않았어요. 지우거나 다시 고쳐 주세요.', editId: 'e1', actions: ['reopen', 'delete']});
+  assert.deepEqual(view({code: 'figure-text-corrupt'}).actions, ['list']);
+  assert.match(view({code: 'unsupported', message: 'Font maps multiple Unicode characters to one glyph.'}, edits.slice(1)).text, /^1쪽 「† → 1」: 원래 글꼴에 없는 글자라/);
+  assert.deepEqual(view({message: '편집 위치가 겹칩니다. 기존 편집을 끄고 다시 선택하세요.'}), {text: booth.MAKE_TEXT.overlap, editId: '', actions: ['list']});
+  for (const detail of [{kind: 'engine'}, {code: 'offline'}, {message: 'Failed to fetch dynamically imported module'}, {message: 'WebAssembly.instantiate(): CompileError'}]) {
+    assert.deepEqual(view(detail), {text: booth.MAKE_TEXT.engine, editId: '', actions: ['retry']}, JSON.stringify(detail));
+  }
+  assert.deepEqual(view({kind: 'stall'}), {text: booth.MAKE_TEXT.stall, editId: '', actions: ['retry']});
+  assert.deepEqual(view({kind: 'idle'}), {text: booth.MAKE_FAILED, editId: '', actions: ['retry']});
+  assert.deepEqual(view(null, null), {text: booth.MAKE_FAILED, editId: '', actions: ['retry']});
+  assert.equal(booth.makeEditLabel({pageIndex: 2, before: 'a long sentence that keeps going on', after: 'a long sentence'}), '3쪽 「that keeps goin… → (지움)」');
+  for (const text of Object.values(booth.MAKE_TEXT).concat([booth.MAKE_FAILED, booth.MAKE_SLOW])) {
+    assert.doesNotMatch(text, /다른 기능|문단 전체 고치기|휴대폰에서|표·그래프·그림/, text);
+  }
+});
+
+test('다음 keeps waiting on a slow phone and says so after 15 s', async () => {
+  const h = liveBooth();
+  await settle();
+  useWorkspace(NAMED_EDIT);
+  await pickMission(h);
+  h.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
+  let clicks = 0;
+  const button = h.ids.get('paper-generate');
+  button.addEventListener('click', () => { clicks += 1; button.disabled = true; });
+  h.ids.get('booth-next').click();
+  await settle();
+  assert.equal(clicks, 1);
+  await runMake(h, 14000);
+  assert.equal(h.text('booth-dock-status'), '수정본을 만드는 중…');
+  await runMake(h, 2000);
+  assert.equal(h.text('booth-dock-status'), '수정본을 만드는 중… 느린 폰에서는 1분쯤 걸려요');
+  await runMake(h, 100000);
+  assert.equal(h.step(), 'edit', 'still waiting after the old 90 s limit');
+  assert.equal(h.ids.get('booth-dock').getAttribute('data-busy'), 'true');
+  h.doc.dispatchEvent(generated(NAMED_EDIT));
+  await waitFor(() => h.step() === 'send');
+  assert.equal(h.timers.length, 0, 'no 다음 poll left behind');
+  h.handle.destroy();
+});
+
+test('a generator failure names the edit, offers delete and reopen, and lets the visitor retry', async () => {
+  const h = liveBooth();
+  await settle();
+  const ws = useWorkspace(NAMED_EDIT);
+  await pickMission(h);
+  h.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
+  const button = h.ids.get('paper-generate');
+  let clicks = 0;
+  button.addEventListener('click', () => {
+    clicks += 1;
+    button.disabled = true;
+    if (clicks === 1) {
+      button.disabled = false;
+      h.doc.dispatchEvent({type: 'falsify:paper-generate-failed', detail: {code: 'MATCH_FAILED', message: '', failures: [{id: 'e1', pageIndex: 0, code: 'NOT_FOUND'}]}});
+    }
+  });
+  h.ids.get('booth-next').click();
+  await settle();
+  await runMake(h, 1000);
+  assert.equal(h.step(), 'edit');
+  assert.equal(h.text('booth-dock-status'), '1쪽 「† → 1」: 이 자리를 쪽에서 찾지 못했어요. 지우거나 다시 고쳐 주세요.');
+  assert.deepEqual(fixLabels(h), ['이 고친 곳 다시 고치기', '이 고친 곳 지우기']);
+  assert.equal(h.ids.get('booth-next').disabled, false);
+  // The visitor fixes the edit: the message and the buttons go away with the old edit.
+  ws.edits = [{...NAMED_EDIT[0], after: '2'}];
+  h.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
+  assert.equal(h.text('booth-dock-status'), '');
+  assert.deepEqual(fixLabels(h), []);
+  h.ids.get('booth-next').click();
+  await settle();
+  assert.equal(clicks, 2);
+  h.doc.dispatchEvent(generated(ws.edits));
+  await waitFor(() => h.step() === 'send');
+  h.handle.destroy();
+});
+
+test('an idle generator gets one more try, then a last-resort message with 다시 시도', async () => {
+  const h = liveBooth();
+  await settle();
+  useWorkspace(NAMED_EDIT);
+  await pickMission(h);
+  h.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
+  let clicks = 0;
+  h.ids.get('paper-generate').addEventListener('click', () => { clicks += 1; });
+  h.ids.get('booth-next').click();
+  await settle();
+  await runMake(h, 4000);
+  assert.equal(clicks, 2, 'pressed once more after 3 s idle');
+  assert.equal(h.ids.get('booth-dock').getAttribute('data-busy'), 'true');
+  await runMake(h, 4000);
+  assert.equal(h.text('booth-dock-status'), booth.MAKE_FAILED);
+  assert.deepEqual(fixLabels(h), ['다시 시도']);
+  fixButtonOf(h, '다시 시도').click();
+  await settle();
+  assert.equal(clicks, 3);
+  assert.equal(h.text('booth-dock-status'), '수정본을 만드는 중…');
+  assert.deepEqual(fixLabels(h), []);
+  h.doc.dispatchEvent(generated(NAMED_EDIT));
+  await waitFor(() => h.step() === 'send');
+  h.handle.destroy();
+});
+
+test('an engine that never loads says so instead of waiting forever', async () => {
+  const h = liveBooth();
+  await settle();
+  useWorkspace(NAMED_EDIT);
+  await pickMission(h);
+  h.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
+  const button = h.ids.get('paper-generate');
+  button.disabled = true;
+  button.dataset = {state: 'no-engine'};
+  h.ids.get('booth-next').click();
+  await settle();
+  await runMake(h, 19000);
+  assert.equal(h.ids.get('booth-dock').getAttribute('data-busy'), 'true');
+  await runMake(h, 2000);
+  assert.equal(h.text('booth-dock-status'), booth.MAKE_TEXT.engine);
+  assert.deepEqual(fixLabels(h), ['다시 시도']);
+  h.handle.destroy();
+});
+
+test('send offers 수정본 다시 만들기 in place when the edits changed', async () => {
+  const h = liveBooth();
+  await settle();
+  await reachSend(h);
+  assert.equal(h.ids.get('booth-remake').hidden, true);
+  const ws = boothContext.FalsifyPaperWorkspace;
+  const edits = ws.getEditSnapshot().edits.map(edit => ({...edit, after: edit.after + '9'}));
+  ws.getEditSnapshot = () => ({revision: 2, edits});
+  ws.getCurrentOutput = () => null;
+  declare(h, '수치·통계', '값을 바꿨어요');
+  agree(h);
+  await submit(h);
+  assert.equal(h.text('booth-submit-status'), '고친 곳이 바뀌었어요. 「수정본 다시 만들기」를 눌러 주세요.');
+  assert.equal(h.ids.get('booth-remake').hidden, false);
+  assert.equal(h.text('booth-remake'), '수정본 다시 만들기');
+  let clicks = 0;
+  h.ids.get('paper-generate').addEventListener('click', () => { clicks += 1; });
+  h.ids.get('booth-remake').click();
+  await settle();
+  assert.equal(clicks, 1);
+  assert.equal(h.ids.get('booth-remake').hidden, true);
+  h.doc.dispatchEvent(generated(edits));
+  await waitFor(() => h.step() === 'send' && h.text('booth-submit-status') === '');
+  assert.equal(h.calls.some(call => call.path.endsWith('/v1/booth/submissions')), false);
+  h.handle.destroy();
+});
+
+test('a lost or refused session at submit is minted again and retried in place', async () => {
+  const fill = h => { agree(h); chip(h, '수치·통계').click(); declare(h, '', '유의수준을 바꿔 결론이 성립하지 않음'); h.ids.get('booth-nickname').value = '부스방문자'; };
+  const once = liveBooth({submits: [{status: 401, body: {error: {code: 'unauthorized'}}}]});
+  await settle();
+  await reachSend(once);
+  fill(once);
+  await submit(once);
+  const posts = once.calls.filter(call => call.path.endsWith('/v1/booth/submissions'));
+  assert.equal(posts.length, 2, 'retried once by itself');
+  assert.equal(once.invalidated(), 1, 'with a new guest session');
+  assert.notEqual(once.step(), 'send', 'and the submission went through');
+  once.handle.destroy();
+  const twice = liveBooth({submits: [{status: 401, body: {error: {code: 'session_missing'}}}, {status: 411, body: {error: {code: 'length_required'}}}]});
+  await settle();
+  await reachSend(twice);
+  fill(twice);
+  await submit(twice);
+  assert.equal(twice.step(), 'send', 'the edits and the send step stay');
+  assert.doesNotMatch(twice.text('booth-submit-status'), /새로 고/);
+  twice.handle.destroy();
 });
 
 test('send declares chips and reasons and posts only the contract fields', async () => {
@@ -1415,7 +1630,7 @@ test('the guest cap gets a friendly line and search stays a secondary path', asy
   guest.ids.get('booth-search-q').value = '통계';
   guest.ids.get('booth-search').dispatchEvent({type: 'submit', preventDefault() {}});
   await settle();
-  assert.match(guest.text('booth-search-status'), /연결이 끊겼어요/);
+  assert.match(guest.text('booth-search-status'), /연결이 잠시 끊겼어요/);
   guest.handle.destroy();
 });
 
@@ -1717,6 +1932,109 @@ class El extends EventTarget {
     return this.find(node => node.id === selector.slice(1));
   }
 }
+
+/* blind-pdf.js skips its MuPDF marker check only for bytes handed to its trust capability. */
+function trustSpy() {
+  const seen = [];
+  const fn = bytes => { seen.push(Buffer.from(bytes)); return Promise.resolve('x'); };
+  return {seen, fn};
+}
+test('only the bytes GET /v1/papers/pdf returned reach the blind-pdf trust capability', async () => {
+  const spy = trustSpy();
+  const h = liveBooth({blindTrust: spy.fn, hash: '#recipe=eyJwYXBlcklkIjoiMjUwMy4xMDQ5NyJ9'});
+  await settle();
+  assert.equal(spy.seen.length, 0, 'a #recipe= hash trusts nothing on its own');
+  useWorkspace([]);
+  await pickMission(h);
+  assert.equal(h.step(), 'edit');
+  assert.equal(spy.seen.length, 1);
+  assert.deepEqual(spy.seen[0], SOURCE_BYTES, 'the trusted bytes are the API response bytes');
+  // A visitor file in the workspace input: the booth drops the paper and trusts nothing new.
+  const visitor = new File([Buffer.from('%PDF-1.7 visitor file with a training marker\n%%EOF\n')], 'arxiv-2503.10497.pdf', {type: 'application/pdf'});
+  h.doc.dispatchEvent({type: 'falsify:document', detail: {file: visitor, fileHash: 'f'.repeat(64)}});
+  assert.equal(h.step(), 'pick');
+  assert.equal(spy.seen.length, 1);
+  h.handle.destroy();
+  // A recipe paperId still goes through the API: the trust follows the bytes the API sent, not the id.
+  const other = Buffer.from('%PDF-1.7 synthetic search paper\n%%EOF\n');
+  const h2 = liveBooth({blindTrust: spy.fn, pdfReply: () => pdfReply(other)});
+  await settle();
+  useWorkspace([]);
+  assert.equal(await boothContext.FalsifyBoothPaper.open('2503.10499', {title: 'Recipe paper', source: 'mission'}), true);
+  assert.equal(spy.seen.length, 2);
+  assert.deepEqual(spy.seen[1], other);
+  h2.handle.destroy();
+  // A body that is not a PDF is never trusted.
+  const h3 = liveBooth({blindTrust: spy.fn, pdfReply: () => pdfReply(Buffer.from('<html>not a pdf</html>'))});
+  await settle();
+  await pickMission(h3);
+  assert.equal(h3.step(), 'pick');
+  assert.equal(spy.seen.length, 2);
+  h3.handle.destroy();
+});
+
+test('a resumed session from storage trusts no bytes', async () => {
+  const spy = trustSpy();
+  const storage = memoryStorage();
+  storage.setItem('falsify.booth.receipts.v1', JSON.stringify([{receipt: 'F-0042', claimKey: '7Q3K-M9XD', title: 'Synthetic mission',
+    paperId: '2503.10497', createdAt: '2026-11-22T01:00:00Z', sha256: SOURCE_SHA, trusted: true}]));
+  const h = liveBooth({blindTrust: spy.fn, storage, hash: '#booth-result',
+    claims: [{receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1, published: false}]});
+  await settle();
+  assert.ok(h.claimCalls().length >= 1, 'the stored ticket is looked up');
+  assert.equal(spy.seen.length, 0);
+  assert.equal(h.calls.filter(call => call.path.includes('/v1/papers/pdf')).length, 0);
+  h.handle.destroy();
+});
+
+test('pointerdown on a mission starts the PDF request and the click reuses it; a scroll cancels it', async () => {
+  const h = liveBooth();
+  await settle();
+  useWorkspace([]);
+  const [first, second] = missionButtons(h);
+  first.dispatchEvent({type: 'pointerdown'});
+  await settle();
+  const pdfCalls = () => h.calls.filter(call => call.path.includes('/v1/papers/pdf'));
+  assert.equal(pdfCalls().length, 1, 'pointerdown starts the request');
+  first.click();
+  await settle();
+  assert.equal(h.step(), 'edit');
+  assert.equal(pdfCalls().length, 1, 'the click reuses the started request');
+  h.ids.get('booth-edit-back').click();
+  second.dispatchEvent({type: 'pointerdown'});
+  await settle();
+  assert.equal(pdfCalls().length, 2);
+  second.dispatchEvent({type: 'pointercancel'});
+  assert.equal(pdfCalls()[1].signal.aborted, true, 'a touch that became a scroll aborts the request');
+  second.click();
+  await settle();
+  assert.equal(pdfCalls().length, 3, 'the click after a cancel fetches again');
+  assert.equal(pdfCalls()[2].signal, null, 'a plain click request has nothing to abort');
+  assert.equal(h.step(), 'edit');
+  h.handle.destroy();
+});
+
+test('a hidden tab does not poll the claim view, and coming back polls at once', async () => {
+  const pending = {receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1, published: false};
+  const h = liveBooth({claims: [pending]});
+  await settle();
+  await submitThroughBooth(h);
+  assert.equal(h.step(), 'ticket');
+  assert.equal(await h.tick(), 15000);
+  assert.equal(h.claimCalls().length, 1);
+  h.doc.visibilityState = 'hidden';
+  h.doc.dispatchEvent({type: 'visibilitychange'});
+  assert.equal(await h.tick(), 15000);
+  assert.equal(h.claimCalls().length, 1, 'no poll while hidden');
+  assert.equal(h.timers.length, 0, 'and no timer left running');
+  h.clock.t += 120000;
+  h.doc.visibilityState = 'visible';
+  h.doc.dispatchEvent({type: 'visibilitychange'});
+  await settle();
+  assert.equal(h.claimCalls().length, 2, 'visible again polls at once');
+  assert.equal(h.timers.length, 1, 'and polling goes on');
+  h.handle.destroy();
+});
 function makeDocument() {
   const doc = new EventTarget();
   const body = new El('body', doc);

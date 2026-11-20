@@ -11687,14 +11687,26 @@ function compareMarkerPixels(pixA, pixB, xs, ys) {
   }
   return changed || null;
 }
-function verifyResult(original, edited, selected, replacement, mupdf) {
-  const a = pageGlyphs(original, mupdf), b = pageGlyphs(edited, mupdf);
+var rightOf = (q) => Math.max(q[2], q[6]);
+var leftOf = (q) => Math.min(q[0], q[4]);
+function collides(a, b, at) {
+  let k = at + 1;
+  while (k < a.length && /\s/u.test(a[k].c)) k++;
+  const next = a[k];
+  if (!next || Math.abs(next.pdf[1] - a[at].pdf[1]) > a[at].size) return false;
+  const room = Math.max(leftOf(next.quad), rightOf(a[at].quad));
+  return rightOf(b[at].quad) > room + 0.05;
+}
+function verifyResult(original, edited, selected, replacement, changedAt, shift, mupdf) {
+  const a = pageGlyphs(original, mupdf);
   const hits2 = [];
   for (let i = 0; i <= a.length - selected.length; i++) if (selected.every((g, j) => glyphEquals(g, a[i + j]))) hits2.push(i);
+  const at = hits2[0] + changedAt, b = pageGlyphs(edited, mupdf);
   if (hits2.length !== 1 || a.length !== b.length) return null;
-  const at = hits2[0] + selected.length - 1;
-  if (!a.every((g, i) => i === at ? b[i].c === replacement && near5(g.pdf[0], b[i].pdf[0]) && near5(g.pdf[1], b[i].pdf[1]) && near5(g.size, b[i].size) : glyphEquals(g, b[i]))) return null;
-  const bounds = [...a[at].quad, ...b[at].quad], xs = bounds.filter((_, i) => i % 2 === 0), ys = bounds.filter((_, i) => i % 2 === 1);
+  if (!a.every((g, i) => i === at ? b[i].c === replacement && near5(g.pdf[0] + shift, b[i].pdf[0]) && near5(g.pdf[1], b[i].pdf[1]) && near5(g.size, b[i].size) : glyphEquals(g, b[i]))) return null;
+  if (collides(a, b, at)) return null;
+  const redrawn = a.slice(at + 1, hits2[0] + selected.length).flatMap((g) => g.quad);
+  const bounds = [...a[at].quad, ...b[at].quad, ...redrawn], xs = bounds.filter((_, i) => i % 2 === 0), ys = bounds.filter((_, i) => i % 2 === 1);
   const pixA = original.toPixmap([2, 0, 0, 2, 0, 0], mupdf.ColorSpace.DeviceRGB, false);
   let pixB;
   try {
@@ -11777,10 +11789,13 @@ function validMarkerRequest(bytes2, pageIndex, glyphs2, after, scanTextShows2, m
   if (!mupdf || !(bytes2 instanceof Uint8Array) || !Number.isInteger(pageIndex) || !Array.isArray(glyphs2) || !glyphs2.length || typeof after !== "string" || [...after].length !== glyphs2.length || typeof scanTextShows2 !== "function") return false;
   return true;
 }
-function validMarkerChange(before, chars, glyphs2, fontSnapshot) {
-  if ([...before].length !== glyphs2.length || chars.slice(0, -1).join("") !== before.slice(0, -1) || chars.at(-1) === glyphs2.at(-1).c || chars.at(-1).codePointAt(0) > 65535) return false;
-  if (!Array.isArray(fontSnapshot?.fonts) || fontSnapshot.fonts.some((f) => !(f?.bytes instanceof Uint8Array))) return false;
-  return true;
+function markerChangeAt(before, chars, glyphs2, fontSnapshot) {
+  const old = [...before];
+  if (old.length !== glyphs2.length || chars.length !== old.length) return -1;
+  const diff = old.map((c, i) => c !== chars[i] ? i : -1).filter((i) => i >= 0);
+  if (diff.length !== 1 || chars[diff[0]].codePointAt(0) > 65535 || /\s/u.test(old[diff[0]])) return -1;
+  if (!Array.isArray(fontSnapshot?.fonts) || fontSnapshot.fonts.some((f) => !(f?.bytes instanceof Uint8Array))) return -1;
+  return diff[0];
 }
 function markerPageSource(page, scanTextShows2, glyphs2) {
   const obj = page.getObject();
@@ -11794,7 +11809,20 @@ function markerPageSource(page, scanTextShows2, glyphs2) {
   if (candidates.length !== 1) return null;
   return { obj, contents, streams, resources, fontDict, candidate: candidates[0] };
 }
-function writeMarkerReplacement(doc, source2, face, font, gid, chars) {
+var hexBytes = (bytes2) => [...bytes2].map((b) => b.toString(16).padStart(2, "0")).join("");
+var thousandths = (n) => Math.round(n * 1e3) / 1e3;
+function markerFit(source2, p, at, font, gid) {
+  const first = source2.get("FirstChar").asNumber(), old = source2.get("Widths").get(p.bytes[at] - first).asNumber();
+  const advance = font.advanceGlyph(gid, 0) * 1e3, pad = advance < old ? thousandths((old - advance) / 2) : 0;
+  return { old, advance, pad, width: pad ? thousandths(old - pad) : thousandths(advance) };
+}
+function markerTail(p, at, fit) {
+  const tail = p.bytes.slice(at + 1);
+  if (!tail.length) return "";
+  return ` [${thousandths(fit.pad + fit.width - fit.old)} <${hexBytes(tail)}>] TJ`;
+}
+function writeMarkerReplacement(doc, source2, face, font, gid, chars, at) {
+  const fit = markerFit(source2.fontDict.get(source2.candidate.show.fontName), source2.candidate.p, at, font, gid);
   const { obj, contents, streams, resources, fontDict, candidate: { si, raw, show, p } } = source2;
   const newResources = copyDict(doc, resources), newFonts = copyDict(doc, fontDict);
   let name = "F" + face.sha256.slice(0, 12);
@@ -11809,19 +11837,25 @@ begincmap
 <0000> <FFFF>
 endcodespacerange
 1 beginbfchar
-<${hex3(gid)}> <${hex3(chars.at(-1).codePointAt(0))}>
+<${hex3(gid)}> <${hex3(chars[at].codePointAt(0))}>
 endbfchar
 endcmap
 CMapName currentdict /CMap defineresource pop
 end
 end
 `;
+  const widths = doc.newArray(), one = doc.newArray();
+  one.push(fit.width);
+  widths.push(gid);
+  widths.push(one);
+  pdfFont.get("DescendantFonts").get(0).put("W", widths);
   pdfFont.put("ToUnicode", doc.addStream(enc.encode(cmap), {}));
   newFonts.put(name, pdfFont);
   newResources.put("Font", newFonts);
   obj.put("Resources", newResources);
-  const prefix = [...p.bytes.slice(0, -1)].map((b) => b.toString(16).padStart(2, "0")).join("");
-  const replacement = `<${prefix}> Tj /${name} ${show.fontSize} Tf <${hex3(gid)}> Tj /${show.fontName} ${show.fontSize} Tf`;
+  const prefix = hexBytes(p.bytes.slice(0, at));
+  const glyph = fit.pad ? `[${-fit.pad} <${hex3(gid)}>] TJ` : `<${hex3(gid)}> Tj`;
+  const replacement = `<${prefix}> Tj /${name} ${show.fontSize} Tf ${glyph} /${show.fontName} ${show.fontSize} Tf` + markerTail(p, at, fit);
   const repl = enc.encode(replacement), out = new Uint8Array(show.start + repl.length + raw.length - show.end);
   out.set(raw.slice(0, show.start));
   out.set(repl, show.start);
@@ -11832,13 +11866,15 @@ end
     streams.forEach((s, i) => a.push(i === si ? stream2 : s));
     obj.put("Contents", a);
   } else obj.put("Contents", stream2);
+  return fit.pad / 1e3 * show.fontSize * show.hScale / 100;
 }
 async function replaceMarkerGlyph({ bytes: bytes2, pageIndex, glyphs: glyphs2, after, fontSnapshot, fontPostscriptName, scanTextShows: scanTextShows2, mupdf }) {
   if (!validMarkerRequest(bytes2, pageIndex, glyphs2, after, scanTextShows2, mupdf)) return null;
   bytes2 = bytes2.slice();
   glyphs2 = glyphs2.map((g) => ({ ...g, pdf: Array.isArray(g?.pdf) ? [...g.pdf] : null }));
   const before = glyphs2.map((g) => g.c).join(""), chars = [...after];
-  if (!validMarkerChange(before, chars, glyphs2, fontSnapshot)) return null;
+  const at = markerChangeAt(before, chars, glyphs2, fontSnapshot);
+  if (at < 0) return null;
   const captured = { ...fontSnapshot, fonts: fontSnapshot.fonts.map((f) => ({ ...f, bytes: f.bytes.slice() })) };
   const face = await validatedFace(captured, fontPostscriptName);
   if (!face) return null;
@@ -11851,9 +11887,9 @@ async function replaceMarkerGlyph({ bytes: bytes2, pageIndex, glyphs: glyphs2, a
     if (!source2) return null;
     const { show } = source2.candidate;
     font = new mupdf.Font(face.postscriptName || face.family, face.bytes);
-    const gid = font.encodeCharacter(chars.at(-1).codePointAt(0));
+    const gid = font.encodeCharacter(chars[at].codePointAt(0));
     if (!gid || gid > 65535) return null;
-    writeMarkerReplacement(doc, source2, face, font, gid, chars);
+    const shift = writeMarkerReplacement(doc, source2, face, font, gid, chars, at);
     saved = doc.saveToBuffer("");
     const result = saved.asUint8Array().slice();
     check = new mupdf.PDFDocument(result);
@@ -11862,7 +11898,7 @@ async function replaceMarkerGlyph({ bytes: bytes2, pageIndex, glyphs: glyphs2, a
     try {
       originalPage = originalDoc.loadPage(pageIndex);
       checkPage = check.loadPage(pageIndex);
-      changed = verifyResult(originalPage, checkPage, glyphs2, chars.at(-1), mupdf);
+      changed = verifyResult(originalPage, checkPage, glyphs2, chars[at], at, shift, mupdf);
     } finally {
       originalPage?.destroy();
       checkPage?.destroy();
@@ -11920,8 +11956,19 @@ function normalize(gs) {
 function abort(signal) {
   if (signal?.aborted) throw new DOMException("PDF editing cancelled.", "AbortError");
 }
+function tightAfter(before, after) {
+  if (after.length === before.length) return after;
+  const out = [];
+  let i = 0;
+  for (let j = 0; j < after.length; j++) {
+    if (/\s/u.test(after[j]) && !/\s/u.test(before[i] || "") && after.length - j > before.length - i) continue;
+    out.push(after[j]);
+    i++;
+  }
+  return out;
+}
 function singleMarkerChange(edit) {
-  const before = [...edit.before], after = [...edit.after];
+  const before = [...edit.before], after = tightAfter(before, [...edit.after]);
   if (before.length !== after.length) return null;
   const diff = before.map((c, i) => c !== after[i] ? i : -1).filter((i) => i >= 0);
   if (diff.length !== 1 || before[diff[0]].length !== 1 || after[diff[0]].length !== 1) return null;
@@ -11942,15 +11989,41 @@ function planMarkerEdit(edit, count, cache, plans, original, mupdf) {
   if (!target || target[0] !== target[1] || all[target[0]].c !== before[diff[0]]) return null;
   return { edit, pageIndex: edit.pageIndex, a, b, target: target[0], replacement: after[diff[0]] };
 }
-function selectMarkerRun(all, plan, target, fontSnapshot) {
+var fontBase = (name) => String(name || "").replace(/^[A-Z]{6}\+/, "");
+function raisedMarker(all, index) {
+  const g = all[index];
+  let k = index - 1;
+  while (k >= 0 && /\s/u.test(all[k].c)) k--;
+  const prev = all[k];
+  return !!prev && g.size < prev.size * 0.85 && g.pdf[1] > prev.pdf[1] + 0.5;
+}
+function markerFace(all, index, fontSnapshot) {
+  const base = fontBase(all[index].fontName), find = (name) => fontSnapshot.fonts.find((f) => f.postscriptName === name) || null;
+  if (/^(?:CMR7|LMRoman7(?:-Regular)?)$/i.test(base)) return find("LMRoman7-Regular");
+  if (/^CMSY(?:5|6|7|8|9|10)$/i.test(base)) return find("LMRoman7-Regular") || find("LiberationSerif");
+  if (/^NimbusRomNo9L-Regu$|^Times-Roman$|^TimesNewRomanPSMT$/i.test(base) && raisedMarker(all, index)) return find("LiberationSerif");
+  return null;
+}
+var MARKER_TRIES = 6;
+function markerRuns(all, plan, target) {
   let start = plan.target, end = plan.target;
   const same = (g) => g && g.fontName === target.fontName && near6(g.size, target.size) && near6(g.pdf[1], target.pdf[1]);
   while (start > 0 && same(all[start - 1])) start--;
   while (end + 1 < all.length && same(all[end + 1])) end++;
-  if (end !== plan.target) return null;
-  const run = all.slice(start, end + 1), face = fontSnapshot.fonts.find((f) => f.postscriptName === "LMRoman7-Regular");
-  if (!face || !/^(?:[A-Z]{6}\+)?(?:CMR7|LMRoman7(?:-Regular)?)$/i.test(target.fontName)) return null;
-  return { run, face };
+  const runs = [];
+  for (let a = start; a <= plan.target; a++) for (let b = end; b >= plan.target; b--) runs.push([a, b]);
+  return runs.sort((x, y) => y[1] - y[0] - (x[1] - x[0])).slice(0, MARKER_TRIES).map(([a, b]) => ({ glyphs: all.slice(a, b + 1), at: plan.target - a }));
+}
+async function replaceMarkerRun(working, plan, all, target, fontSnapshot, deps) {
+  const face = markerFace(all, plan.target, fontSnapshot);
+  if (!face) return null;
+  for (const run of markerRuns(all, plan, target)) {
+    abort(deps.signal);
+    const after = run.glyphs.map((g, i) => i === run.at ? plan.replacement : g.c).join("");
+    const result = await deps.replaceMarkerGlyph({ bytes: working, pageIndex: plan.pageIndex, glyphs: run.glyphs, after, fontSnapshot, fontPostscriptName: face.postscriptName, scanTextShows: deps.scanTextShows, mupdf: deps.mupdf });
+    if (result) return result;
+  }
+  return null;
 }
 async function trySourceMarkerEdits({ bytes: bytes2, edits, fontSnapshot, signal }, { mupdf, scanTextShows: scanTextShows2 }) {
   abort(signal);
@@ -11979,10 +12052,7 @@ async function trySourceMarkerEdits({ bytes: bytes2, edits, fontSnapshot, signal
       }
       const target = all[plan.target];
       if (!target) return null;
-      const selection = selectMarkerRun(all, plan, target, fontSnapshot);
-      if (!selection) return null;
-      const { run, face } = selection;
-      const result = await replaceMarkerGlyph({ bytes: working, pageIndex: plan.pageIndex, glyphs: run, after: run.slice(0, -1).map((g) => g.c).join("") + plan.replacement, fontSnapshot, fontPostscriptName: face.postscriptName, scanTextShows: scanTextShows2, mupdf });
+      const result = await replaceMarkerRun(working, plan, all, target, fontSnapshot, { replaceMarkerGlyph, scanTextShows: scanTextShows2, mupdf, signal });
       abort(signal);
       if (!result) return null;
       working = result.bytes;
@@ -12610,33 +12680,90 @@ function documentText(bytes2, mupdf) {
     doc.destroy();
   }
 }
+var LINE_HYPHEN = /(\p{L})[-\u00ad\u2010]\s*\n\s*(?=\p{L})/gu;
+var WORD_HYPHEN = /(\p{L})[-\u00ad\u2010](?=\p{L})/gu;
+var QUOTES = [[/[\u2018\u2019\u02bc\u2032]/g, "'"], [/[\u201c\u201d]/g, '"']];
 function textTokens(text3) {
   if (typeof text3 !== "string") return [];
-  return text3.replace(/\s+/g, " ").trim().split(" ").map(normalizeToken).filter(Boolean);
+  for (const [mark, plain] of QUOTES) text3 = text3.replace(mark, plain);
+  return text3.replace(LINE_HYPHEN, "$1").replace(/\s+/g, " ").trim().split(" ").map(normalizeToken).filter(Boolean);
 }
 function normalizeToken(word) {
-  return word.replace(/^[^\p{L}\p{N}%]+|[^\p{L}\p{N}%]+$/gu, "");
+  return word.replace(/^[^\p{L}\p{N}%]+|[^\p{L}\p{N}%]+$/gu, "").replace(WORD_HYPHEN, "$1").replace(/\u00ad/g, "");
 }
-function sameSpan(words, index, drop) {
-  for (let k = 0; k < drop.length; k++) if (words[index + k] !== drop[k]) return false;
-  return true;
-}
-function withoutPhrase(words, phrase) {
-  const drop = textTokens(phrase);
-  if (!drop.length) return words;
-  for (let i = 0; i + drop.length <= words.length; i++) {
-    if (!sameSpan(words, i, drop)) continue;
-    return words.slice(0, i).concat(words.slice(i + drop.length));
+function indexOfRun(words, run, from = 0) {
+  if (!run.length) return -1;
+  for (let i = from; i + run.length <= words.length; i++) {
+    let same = true;
+    for (let k = 0; k < run.length && same; k++) same = words[i + k] === run[k];
+    if (same) return i;
   }
-  return words;
+  return -1;
+}
+function plainQuotes(text3) {
+  for (const [mark, plain] of QUOTES) text3 = text3.replace(mark, plain);
+  return text3;
+}
+function editParts(find) {
+  const flat = plainQuotes(find).replace(/\s+/g, " ").trim();
+  return flat ? flat.split(" ") : [];
+}
+function partFits(word, part, edge) {
+  const raw = part, bare = normalizeToken(part) || part;
+  for (const want of [raw, bare]) {
+    if (edge === "one" ? word.includes(want) : edge === "first" ? word.endsWith(want) : edge === "last" ? word.startsWith(want) : word === want) return want;
+  }
+  return null;
+}
+function editSpans(words, parts) {
+  const spans = [];
+  if (!parts.length) return spans;
+  for (let i = 0; i + parts.length <= words.length; i++) {
+    const fit = [];
+    for (let k = 0; k < parts.length; k++) {
+      const edge = parts.length === 1 ? "one" : k === 0 ? "first" : k === parts.length - 1 ? "last" : "inner";
+      const want = partFits(words[i + k], parts[k], edge);
+      if (want == null) break;
+      fit.push(want);
+    }
+    if (fit.length === parts.length) spans.push({ at: i, needle: fit.join(" ") });
+  }
+  return spans;
+}
+function withoutEdit(before, after, edit) {
+  const parts = editParts(typeof edit?.before === "string" ? edit.before : "");
+  const put = plainQuotes(typeof edit?.after === "string" ? edit.after : "").replace(/\s+/g, " ").trim();
+  let fallback = null;
+  for (const { at, needle } of editSpans(before, parts)) {
+    const joined = before.slice(at, at + parts.length).join(" ");
+    const spot = joined.indexOf(needle);
+    const changed = spot < 0 ? textTokens(put) : textTokens(joined.slice(0, spot) + put + joined.slice(spot + needle.length));
+    const keep = before.slice(0, at).concat(before.slice(at + parts.length));
+    if (!changed.length) return [keep, after];
+    const hit = indexOfRun(after, changed);
+    if (hit >= 0) return [keep, after.slice(0, hit).concat(after.slice(hit + changed.length))];
+    if (!fallback) fallback = [keep, after];
+  }
+  return fallback || withoutEdgeEdit(before, after, put);
+}
+function withoutEdgeEdit(before, after, put) {
+  const add = normalizeToken(put) || put;
+  if (!add) return [before, after];
+  for (let i = 0; i < after.length; i++) {
+    const word = after[i];
+    const at = word.indexOf(add);
+    if (at < 0) continue;
+    const old = normalizeToken(word.slice(0, at) + word.slice(at + add.length));
+    const j = old ? before.indexOf(old) : -1;
+    if (j < 0 || before.includes(word)) continue;
+    return [before.slice(0, j).concat(before.slice(j + 1)), after.slice(0, i).concat(after.slice(i + 1))];
+  }
+  return [before, after];
 }
 function lostWords(beforeText, afterText, edits) {
   let before = textTokens(beforeText);
   let after = textTokens(afterText);
-  for (const edit of edits || []) {
-    before = withoutPhrase(before, edit?.before);
-    after = withoutPhrase(after, edit?.after);
-  }
+  for (const edit of edits || []) [before, after] = withoutEdit(before, after, edit);
   const counts = /* @__PURE__ */ new Map();
   for (const word of after) counts.set(word, (counts.get(word) || 0) + 1);
   const lost = [];

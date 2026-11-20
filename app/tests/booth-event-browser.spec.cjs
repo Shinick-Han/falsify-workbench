@@ -204,6 +204,9 @@ async function walk(browser, viewport, desk, pageErrors) {
   await shot(page, 'pick', viewport);
   await mission.click();
   await stepIs(page, 'edit');
+  // blind-pdf.js trust skip: booth.js holds the one-time capability, so no page script can claim it.
+  assert.equal(await page.evaluate(() => globalThis.FalsifyBlindPdf.claimTrust()), null, 'the trust capability is already claimed');
+  assert.equal(await page.evaluate(() => typeof globalThis.FalsifyBlindPdf.trust), 'undefined');
   await page.waitForFunction(() => [...document.querySelectorAll('.paper-paragraph-button')].some(node => node.textContent.includes('0.95')));
   assert.match(await page.locator('#booth-hint').textContent(), /^힌트 · Table 1의 점수 하나를 바꿔 보세요/);
   assert.equal(await page.locator('#booth-dock-count').textContent(), '고친 곳 0개');
@@ -213,6 +216,8 @@ async function walk(browser, viewport, desk, pageErrors) {
   // editor (booth-pageedit.js); the paragraph list stays for screen readers and keyboards, visually hidden
   // until it holds focus, so this walk opens the paragraph through it. Phones open zoomed: zoom out first.
   assert.equal(await page.locator('#booth-find-list').count(), 0);
+  // The hint zoom fits Table 1 once the paragraph boxes are in, a moment after the list (only once per paper).
+  if (!desk) await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() > 1, null, {timeout: 4000}).catch(() => {});
   if (await page.locator('#booth-pe-fit').isVisible()) {
     await page.locator('#booth-pe-fit').click();
     await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() === 1);

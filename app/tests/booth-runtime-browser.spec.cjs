@@ -155,6 +155,8 @@ async function editParagraph(page) {
   // then zoom out and wait for the redrawn list, as booth-event-browser does: zooming out earlier is
   // undone by the hint zoom, and an index taken from the old list opens another paragraph.
   await page.waitForFunction(() => [...document.querySelectorAll('.paper-paragraph-button')].some(node => node.textContent.includes('0.95')));
+  // The hint zoom fits Table 1 once the paragraph boxes are in, a moment after the list (only once per paper).
+  await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() > 1, null, {timeout: 4000}).catch(() => {});
   if (await page.locator('#booth-pe-fit').isVisible()) {
     await page.locator('#booth-pe-fit').click();
     await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() === 1);

@@ -1069,7 +1069,7 @@ test('booth mode maps generation status and figure refusals without the English 
   const previousConfig=globalThis.FalsifyCloudConfig;
   const restore=()=>{if(previousConfig===undefined)delete globalThis.FalsifyCloudConfig;else globalThis.FalsifyCloudConfig=previousConfig;};
   const refusal='그림 안 글자를 고치면 그림이 깨져서 만들지 않았습니다. 표·그래프·그림 고치기를 쓰세요.';
-  const boothRefusal='이 문장은 휴대폰에서 바로 고칠 수 없어요. 같은 쪽의 다른 문장이나 숫자를 골라 주세요.';
+  const boothRefusal='이대로 바꾸면 쪽의 다른 글자까지 흐트러져서 수정본을 만들지 않았어요. 고친 곳을 지우거나 다시 고쳐 주세요.';
   const bytes=pdfBytes('MARKER-GEN');
   function exporter(mode){
     return {prepare:async()=>{
@@ -1122,6 +1122,73 @@ test('booth mode maps generation status and figure refusals without the English 
     assert.equal(index.get('paper-generate-status').textContent.includes(boothRefusal),false);
     index.ws.dispose();
   }finally{restore();}
+});
+test('generation widens an ambiguous Before with its own neighbours and asks once more; failures reach the booth',async()=>{
+  const bytes=pdfBytes('MARKER-GEN'),requests=[],failed=[];
+  const mode={fail:'ambiguous'};
+  const exporter={prepare:async request=>{
+    requests.push(JSON.parse(JSON.stringify(request.edits.map(e=>({id:e.id,before:e.before,after:e.after,anchor:e.anchor})))));
+    const edit=request.edits[0];
+    if(mode.fail==='ambiguous'&&edit.before==='Alpha')throw Object.assign(new Error('1 edit(s) could not be matched exactly once or planned'),{code:'MATCH_FAILED',details:{failures:[{id:edit.id,pageIndex:0,code:'AMBIGUOUS_MATCH',hits:2}]}});
+    if(mode.fail==='missing')throw Object.assign(new Error('1 edit(s) could not be matched exactly once or planned'),{code:'MATCH_FAILED',details:{failures:[{id:edit.id,pageIndex:0,code:'NOT_FOUND',hits:0}]}});
+    const file=new File([bytes],'checked.pdf',{type:'application/pdf'});
+    return {file,sha256:sha(bytes),verification:{status:'applied',checks:[],warnings:[]},warnings:[]};
+  }};
+  const v=mount({exporter,paragraphPdf:paragraphMock('Alpha leads. Then Alpha ends.',{prepare:exporter.prepare})});
+  v.document.addEventListener('falsify:paper-generate-failed',event=>failed.push(JSON.parse(JSON.stringify(event.detail))));
+  v.file(pdfFile(pdfBytes('MARKER-A')));
+  await until(()=>v.ws.getSource()&&v.edits.last&&v.ws.getSource().segments.some(s=>/Alpha[\s\S]*Alpha/.test(s.text)),'source');
+  const segment=v.ws.getSource().segments.find(s=>s.pageIndex===0&&/Alpha[\s\S]*Alpha/.test(s.text));
+  assert.ok(segment,'a segment holds Alpha twice '+JSON.stringify(v.ws.getSource().segments));
+  const second=segment.text.lastIndexOf('Alpha');
+  v.edits.last.add({pageIndex:0,segmentId:segment.id,before:'Alpha',after:'Beta',anchor:{start:second,end:second+5},origin:'human'});
+  v.get('paper-generate').click();
+  await until(()=>v.ws.getOutput(),'widened output');
+  assert.equal(requests.length,2);
+  assert.equal(requests[0][0].before,'Alpha');
+  const wide=requests[1][0];
+  assert.equal(wide.before,segment.text.slice(wide.anchor.start,second+5));
+  assert.ok(wide.before.length>5&&wide.before.endsWith('Alpha'),JSON.stringify(wide));
+  assert.equal(wide.after,wide.before.slice(0,-5)+'Beta');
+  assert.equal(segment.text.split(wide.before).length,2,'the widened Before is unique');
+  assert.deepEqual(failed,[]);
+  mode.fail='missing';
+  v.edits.last.add({pageIndex:0,segmentId:segment.id,before:'Alpha',after:'Gamma',anchor:{start:0,end:5},origin:'human'});
+  v.get('paper-generate').click();
+  await until(()=>failed.length,'failure event');
+  assert.equal(failed[0].code,'MATCH_FAILED');
+  assert.deepEqual(failed[0].failures.map(f=>f.code),['NOT_FOUND']);
+  assert.equal(typeof failed[0].failures[0].id,'string');
+  v.ws.dispose();
+});
+test('generation: an edit on the page view that the engine cannot find moves onto its paragraph, superscripts in order',async()=>{
+  const bytes=pdfBytes('MARKER-GEN'),requests=[];
+  const prepare=async request=>{
+    requests.push(JSON.parse(JSON.stringify(request.edits.map(e=>({id:e.id,segmentId:e.segmentId,before:e.before,after:e.after,anchor:e.anchor})))));
+    const edit=request.edits[0];
+    if(!String(edit.segmentId).startsWith('paragraph:'))throw Object.assign(new Error('1 edit(s) could not be matched exactly once or planned'),{code:'MATCH_FAILED',details:{failures:[{id:edit.id,pageIndex:0,code:'NOT_FOUND',hits:0}]}});
+    return {file:new File([bytes],'checked.pdf',{type:'application/pdf'}),sha256:sha(bytes),verification:{status:'applied',checks:[],warnings:[]},warnings:[]};
+  };
+  const v=mount({paragraphPdf:paragraphMock('Title Line\nShahul Es†, Jithin James†, Luis Anke',{prepare})});
+  const file=pdfFile(pdfBytes('MARKER-A'));
+  v.file(file);
+  await until(()=>v.ws.getSource()&&v.edits.last,'loaded');
+  v.document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file,result:{segments:[{id:'s0',label:'PDF p. 1',text:'Title Line\n† †\nShahul Es , Jithin James , Luis Anke'}]}}}));
+  await until(()=>v.ws.getSource()&&v.edits.last&&v.ws.getSource().segments.some(s=>s.id.startsWith('paragraph:'))&&v.ws.getSource().segments.some(s=>!s.id.startsWith('paragraph:')&&s.text.includes('† †')),'source');
+  const view=v.ws.getSource().segments.find(s=>!s.id.startsWith('paragraph:')&&s.text.includes('† †'));
+  const second=view.text.indexOf('† †')+2;
+  v.edits.last.add({pageIndex:0,segmentId:view.id,before:'†',after:'7',anchor:{start:second,end:second+1},origin:'human'});
+  v.get('paper-generate').click();
+  await until(()=>v.ws.getOutput(),'projected output');
+  assert.equal(requests.length,2);
+  const moved=requests[1][0];
+  assert.ok(moved.segmentId.startsWith('paragraph:'),JSON.stringify(moved));
+  assert.match(moved.before,/James†/);
+  assert.equal(moved.after,moved.before.replace('James†','James7'));
+  const para=v.ws.getSource().segments.find(s=>s.id===moved.segmentId);
+  assert.equal(para.text.slice(moved.anchor.start,moved.anchor.end),moved.before);
+  assert.equal(para.text.split(moved.before).length,2,'the moved Before is unique');
+  v.ws.dispose();
 });
 test('paragraph: a late inspection is aborted and cannot bind the next source; drag selection remains available',async()=>{
   let resolveA,signalA;
@@ -1293,6 +1360,66 @@ test('page-edit hooks: paragraph boxes as page fractions, open by segment id, fr
   assert.equal(v.ws.setZoom(1),true);assert.equal(v.ws.getZoom(),1);assert.equal(v.get('paper-zoom-label').textContent,'100%');
   await settle();const renders=v.log.renders.length;assert.equal(v.ws.setZoom(1),true);await settle();assert.equal(v.log.renders.length,renders,'same zoom does not redraw');
   assert.equal(v.ws.setZoom(1,true),true);await until(()=>v.log.renders.length>renders,'forced redraw after a resize');
+});
+
+test('paragraph editor: smaller edits inside the paragraph open applied and give way to the whole-paragraph edit',async()=>{
+  const v=mount({edits:require('../dist/paper-edits.js'),paragraphPdf:paragraphMock('Alpha scores 0.95 and Beta scores 0.78.')});
+  v.file(pdfFile(pdfBytes('MARKER-A')));await until(()=>/문단을 클릭/.test(v.get('paper-before-status').textContent),'paragraphs');
+  const id='paragraph:0:p0',original='Alpha scores 0.95 and Beta scores 0.78.';
+  const word=v.ws.acceptProposals([{segmentId:id,pageIndex:0,before:'0.95',after:'0.50',anchor:{start:13,end:17}}],{origin:'external-ai-import',confirmed:true});
+  assert.equal(word.applied,1);
+  assert.equal(v.ws.openParagraph(id),true);
+  let editor=v.document.activeElement;assert.equal(editor.value,'Alpha scores 0.50 and Beta scores 0.78.','the word edit shows in the editor');
+  editor.dispatchEvent(new Event('blur'));
+  assert.equal(v.ws.getEditSnapshot().edits.length,1,'closing without a change keeps the word edit');
+  assert.equal(v.ws.openParagraph(id),true);editor=v.document.activeElement;
+  editor.value='Alpha scores 0.50 and Beta scores 0.70.';editor.dispatchEvent(new Event('input'));editor.dispatchEvent(new Event('blur'));
+  let edits=v.ws.getEditSnapshot().edits;
+  assert.equal(edits.length,1,'one paragraph edit replaces the word edit');
+  assert.deepEqual([edits[0].segmentId,edits[0].before,edits[0].after],[id,original,'Alpha scores 0.50 and Beta scores 0.70.']);
+  assert.equal(v.get('paper-edit-status').classList.contains('error'),false);
+  assert.equal(v.ws.removeEdit('missing'),false);assert.equal(v.ws.removeEdit(edits[0].id),true);
+  assert.equal(v.ws.getEditSnapshot().edits.length,0);
+  v.ws.acceptProposals([{segmentId:id,pageIndex:0,before:'0.78',after:'0.10',anchor:{start:34,end:38}}],{origin:'external-ai-import',confirmed:true});
+  assert.equal(v.ws.openParagraph(id),true);editor=v.document.activeElement;assert.equal(editor.value,'Alpha scores 0.95 and Beta scores 0.10.');
+  editor.value=original;editor.dispatchEvent(new Event('input'));editor.dispatchEvent(new Event('blur'));
+  assert.equal(v.ws.getEditSnapshot().edits.length,0,'typing the paragraph back to the original removes the word edit');
+  v.ws.dispose();
+});
+
+test('booth mode: a paragraph emptied to spaces is recorded as deleted, not refused',async()=>{
+  const previous=globalThis.FalsifyCloudConfig;
+  try{
+    globalThis.FalsifyCloudConfig={booth:{enabled:true}};
+    const v=mount({edits:require('../dist/paper-edits.js'),paragraphPdf:paragraphMock('Delete me.')});
+    v.file(pdfFile(pdfBytes('MARKER-A')));await until(()=>/문단을 클릭/.test(v.get('paper-before-status').textContent),'paragraphs');
+    assert.equal(v.ws.openParagraph('paragraph:0:p0'),true);
+    const editor=v.document.activeElement;editor.value='   ';editor.dispatchEvent(new Event('input'));editor.dispatchEvent(new Event('blur'));
+    const edits=v.ws.getEditSnapshot().edits;
+    assert.equal(edits.length,1);assert.equal(edits[0].after,'');
+    v.ws.dispose();
+  }finally{if(previous===undefined)delete globalThis.FalsifyCloudConfig;else globalThis.FalsifyCloudConfig=previous;}
+});
+
+test('booth mode: a paragraph edit the core refuses keeps the editor open and says the next step in place',async()=>{
+  const previous=globalThis.FalsifyCloudConfig;
+  try{
+    globalThis.FalsifyCloudConfig={booth:{enabled:true}};
+    const real=require('../dist/paper-edits.js');let refuse=true;
+    const edits={...real,create(options){const session=real.create(options);return {...session,add(edit){if(refuse)throw new Error('core refused');return session.add(edit);}};}};
+    const v=mount({edits,paragraphPdf:paragraphMock('Keep me open.')});
+    v.file(pdfFile(pdfBytes('MARKER-A')));await until(()=>/문단을 클릭/.test(v.get('paper-before-status').textContent),'paragraphs');
+    assert.equal(v.ws.openParagraph('paragraph:0:p0'),true);
+    const editor=v.document.activeElement;editor.value='Kept open.';editor.dispatchEvent(new Event('input'));editor.dispatchEvent(new Event('blur'));
+    const bar=v.get('paper-before-stage').children.find(e=>e.className==='paper-page').children.find(e=>e.className==='paper-direct-controls');
+    const line=bar.children.find(e=>e.dataset&&'directStatus' in e.dataset);
+    assert.equal(line.textContent,'이 문단을 아직 기록하지 못했어요. 「완료」를 다시 누르거나 「입력 취소」로 닫아 주세요.');
+    assert.equal(v.ws.getEditSnapshot().edits.length,0);
+    refuse=false;
+    bar.children.find(e=>e.textContent==='완료').click();
+    assert.equal(v.ws.getEditSnapshot().edits.length,1,'the same 완료 records it once the core accepts');
+    v.ws.dispose();
+  }finally{if(previous===undefined)delete globalThis.FalsifyCloudConfig;else globalThis.FalsifyCloudConfig=previous;}
 });
 
 test('a font requiring complete embedding uses the full-font writer',async()=>{
