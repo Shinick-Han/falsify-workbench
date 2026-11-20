@@ -97,3 +97,21 @@ test('nearestIndex, unchangedAt and splitWord', () => {
   assert.deepEqual(plain(pe.splitWord('models', 3, 4)), ['mod-', 'els'], 'proportional halves');
   assert.deepEqual(plain(pe.splitWord('a', 3, 4)), ['a', '']);
 });
+
+test('hintBlock grows a number cluster to its whole table; fitZoom fits it across the column', () => {
+  const items = [
+    {rect: {x: 0.247, y: 0.088, w: 0.229, h: 0.017}},
+    {rect: {x: 0.129, y: 0.111, w: 0.045, h: 0.016}},
+    {rect: {x: 0.129, y: 0.111, w: 0.324, h: 0.048}},
+    {rect: {x: 0.514, y: 0.085, w: 0.367, h: 0.048}},
+    {rect: {x: 0.119, y: 0.174, w: 0.37, h: 0.043}},
+  ];
+  const block = plain(pe.hintBlock(items, {x: 0.254, y: 0.113, w: 0.199, h: 0.045}, 0.013));
+  assert.ok(Math.abs(block.x - 0.129) < 1e-9, 'row names included');
+  assert.ok(Math.abs(block.y - 0.088) < 1e-9, 'header row included');
+  assert.ok(block.x + block.w < 0.5, 'the other column stays out');
+  assert.ok(block.y + block.h < 0.174, 'the caption below stays out');
+  assert.equal(pe.fitZoom(0.377, 0, 3.5), 2.65);
+  assert.equal(pe.fitZoom(0.1, 0, 3.5), 3.5, 'capped');
+  assert.equal(pe.fitZoom(0, 0, 3.5), 1);
+});

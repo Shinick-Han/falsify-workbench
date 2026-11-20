@@ -291,6 +291,38 @@
     const k=Math.min(text.length-1,Math.max(1,Math.round(text.length*firstLen/(firstLen+secondLen))));
     return [text.slice(0,k)+'-',text.slice(k)];
   }
+  function overlaps(a, b){
+    return a.x<b.x+b.w&&b.x<a.x+a.w&&a.y<b.y+b.h&&b.y<a.y+a.h;
+  }
+  function union(a, b){
+    const x=Math.min(a.x,b.x);
+    const y=Math.min(a.y,b.y);
+    return {x,y,w:Math.max(a.x+a.w,b.x+b.w)-x,h:Math.max(a.y+a.h,b.y+b.h)-y};
+  }
+  /* The hint block around a number cluster (page fractions): the paragraph boxes that touch the cluster,
+     then, growing, every box in the same column that shares its rows or sits within one line above it
+     (row names, the header row). Boxes in another column never touch the growing block's x range. */
+  function hintBlock(items, seed, lineH){
+    const boxes=(Array.isArray(items)?items:[]).map(item=>item&&item.rect).filter(r=>r&&r.w>0&&r.h>0);
+    let block={x:seed.x,y:seed.y,w:seed.w,h:seed.h};
+    const reach=Math.max(0,Number(lineH)||0)*1.6;
+    for(let changed=true;changed;){
+      changed=false;
+      for(const r of boxes){
+        const band={x:block.x,y:block.y-reach,w:block.w,h:block.h+reach};
+        const inBlock=r.x>=block.x&&r.y>=block.y&&r.x+r.w<=block.x+block.w&&r.y+r.h<=block.y+block.h;
+        if(inBlock||!overlaps(r,band)||r.h>block.h*3+reach) continue;
+        block=union(block,r);
+        changed=true;
+      }
+    }
+    return block;
+  }
+  /* The zoom that fits a block of width w (page fractions, padded by pad each side) across the column, capped. */
+  function fitZoom(w, pad, cap){
+    if(!(w>0)) return 1;
+    return Math.max(1,Math.min(cap,Math.floor(100/(w+2*pad))/100));
+  }
   /* Height of whatever covers the bottom of the layout viewport (the soft keyboard). */
   function keyboardInset(innerHeight, vv){
     if(!vv||!(vv.height>0)) return 0;
@@ -713,6 +745,12 @@
       st.focus=null;
       if(!focus||!zoomed()) {stage.scrollTo(0,0);return;}
       const box=page.getBoundingClientRect();
+      if(focus.block){
+        stage.scrollLeft=Math.max(0,focus.block.x*box.width);
+        stage.scrollTop=Math.max(0,focus.block.y*box.height);
+        bar.scrollIntoView({block:'start'});
+        return;
+      }
       stage.scrollLeft=Math.max(0,focus.fx*box.width-stage.clientWidth/2);
       stage.scrollTop=Math.max(0,focus.fy*box.height-stage.clientHeight/2);
       bar.scrollIntoView({block:'start'});
@@ -725,9 +763,27 @@
       if(call('getPageIndex')!==(paper.pageHint||1)-1) return;
       st.auto.add(src.fileHash);
       const box=page.getBoundingClientRect();
-      const spot=densest(numberPoints(page),box.width*0.12);
+      const radius=box.width*0.12;
+      const spot=densest(numberPoints(page),radius);
       if(!spot||spot.count<3) return;
-      zoomAt(page,box.left+spot.x,box.top+spot.y);
+      zoomToBlock(page,box,spot,radius);
+    }
+    /* Fit the whole hint block (the table: row names to the last column, header included) across the
+       column, at most TABLE_ZOOM, with its top just under the page toolbar. */
+    async function zoomToBlock(page, box, spot, radius){
+      /* Paragraph boxes arrive a moment after the page draw; the block needs them for the row names. */
+      const ready=()=>{const boxes=call('getPageParagraphs');return !!(boxes&&Array.isArray(boxes.items)&&boxes.items.length);};
+      await waitFor(ready,3000);
+      if(st.autoOff||!editing()||zoomed()||pageEl()!==page||!page.isConnected) return;
+      box=page.getBoundingClientRect();
+      const near=spansOf(page).filter(span=>numericToken(span.textContent.trim())).map(span=>span.getBoundingClientRect())
+        .filter(r=>Math.hypot((r.left+r.right)/2-box.left-spot.x,(r.top+r.bottom)/2-box.top-spot.y)<=radius);
+      const seed=near.map(r=>fraction(r,page)).reduce((a,b)=>union(a,b));
+      const boxes=call('getPageParagraphs');
+      const lineH=near.reduce((h,r)=>Math.max(h,r.height),0)/box.height;
+      const block=padRect(hintBlock(boxes&&boxes.items,seed,lineH),0.015);
+      st.focus={block};
+      if(!setZoom(fitZoom(block.w,0,TABLE_ZOOM))) st.focus=null;
     }
 
     /* The visitor came first: any touch, click or key in the edit step (zoom, page turn, a tab, the find
@@ -1288,7 +1344,7 @@
     onMutate();
   }
 
-  root.FalsifyBoothPageEdit=Object.freeze({tokenAt,contextWindow,placePopover,fitCrop,overlapShare,paragraphAt,padRect,numericToken,tokensIn,densest,keyboardInset,inkChars,alignInk,spotIn,nearestIndex,unchangedAt,splitWord,fallbackPatch,ZOOM,TABLE_ZOOM});
+  root.FalsifyBoothPageEdit=Object.freeze({tokenAt,contextWindow,placePopover,fitCrop,overlapShare,paragraphAt,padRect,numericToken,tokensIn,densest,keyboardInset,inkChars,alignInk,spotIn,nearestIndex,unchangedAt,splitWord,fallbackPatch,ZOOM,TABLE_ZOOM,hintBlock,fitZoom});
   const doc=root.document;
   if(!doc||typeof doc.getElementById!=='function') return;
   const start=()=>mount(doc);
