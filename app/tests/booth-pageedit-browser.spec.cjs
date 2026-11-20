@@ -485,7 +485,7 @@ async function tabletWalk(browser) {
   assert.equal(await pop.evaluate(node => node.classList.contains('is-bar')), true, 'a coarse pointer gets the edit bar at desktop width');
   assert.deepEqual(await pop.locator('button:visible').allTextContents(), ['‹', '›', '바꾸기', '문단 전체 고치기', '취소']);
   const p = await pop.boundingBox();
-  const column = await page.locator('#paper-before-stage').boundingBox();
+  const column = await page.locator('#paper-before-stage .paper-page > canvas').boundingBox();
   assert.ok(Math.abs(p.y + p.height - 800) <= 1, 'bar at the bottom ' + JSON.stringify(p));
   assert.ok(Math.abs(p.x - column.x) <= 1 && Math.abs(p.width - column.width) <= 1, 'bar lines up with the page column ' + JSON.stringify([p, column]));
   assert.equal(await page.locator('#booth-dock').isVisible(), false, 'the dock steps aside while typing');

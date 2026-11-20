@@ -324,7 +324,8 @@
       pop.style.bottom=inset+'px';
       /* Desktop widths with touch: the bar lines up with the page column, as wide as the page. */
       if(desk()){
-        const column=stage.getBoundingClientRect();
+        const canvas=stage.querySelector(':scope>.paper-page>canvas');
+        const column=(canvas||stage).getBoundingClientRect();
         pop.style.left=Math.round(column.left)+'px';
         pop.style.width=Math.round(column.width)+'px';
       }
