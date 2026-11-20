@@ -1413,6 +1413,29 @@
         setStatus(msg+' 원본 다운로드는 사용할 수 있습니다.',true);
       }
     }
+    // Page canvases keep their CSS box at the viewport size (whole CSS px, as before) and get a backing store
+    // of devicePixelRatio (max 3) device pixels per CSS px, like pdf.js's viewer. Huge pages or zoom lower the
+    // ratio so the store stays near 16.7M pixels, never below 1:1, so a 1x screen draws exactly as before.
+    const MAX_CANVAS_PIXELS=16777216;
+    function canvasOutputScale(cssWidth,cssHeight){
+        const view=doc.defaultView||globalThis;
+        const ratio=Number(view&&view.devicePixelRatio);
+        const wanted=Number.isFinite(ratio)&&ratio>1?Math.min(ratio,3):1;
+        const fit=Math.sqrt(MAX_CANVAS_PIXELS/(cssWidth*cssHeight));
+        return Math.max(1,Math.min(wanted,fit));
+    }
+    function sizePageCanvas(canvas,viewport){
+        const cssWidth=Math.max(1,Math.floor(viewport.width)),cssHeight=Math.max(1,Math.floor(viewport.height));
+        const outputScale=canvasOutputScale(cssWidth,cssHeight);
+        canvas.width=Math.max(1,Math.floor(cssWidth*outputScale));canvas.height=Math.max(1,Math.floor(cssHeight*outputScale));
+        canvas.style.boxSizing='content-box';canvas.style.width=cssWidth+'px';canvas.style.height=cssHeight+'px';
+        return outputScale;
+    }
+    function pageRenderParams(ctx,canvas,viewport,outputScale){
+        const params={canvasContext:ctx,canvas,viewport};
+        if(outputScale!==1)params.transform=[outputScale,0,0,outputScale,0,0];
+        return params;
+    }
     function beginBeforeRender(pdfPage,viewport,n,scale,setCanvas){
         const pageEl=doc.createElement('div');pageEl.className='paper-page';
         pageEl.style.width=viewport.width+'px';pageEl.style.height=viewport.height+'px';
@@ -1420,12 +1443,12 @@
         pageEl.style.setProperty('--scale-round-x','1px');pageEl.style.setProperty('--scale-round-y','1px');
         pageEl.style.setProperty('--text-scale-factor','1');
         const canvas=doc.createElement('canvas');setCanvas(canvas);canvas.className='paper-canvas';
-        canvas.width=Math.max(1,Math.floor(viewport.width));canvas.height=Math.max(1,Math.floor(viewport.height));
+        const outputScale=sizePageCanvas(canvas,viewport);
         canvas.setAttribute('role','img');canvas.setAttribute('aria-label','원본 '+n+'쪽');
         const textEl=doc.createElement('div');textEl.className='paper-text-layer textLayer';
         pageEl.append(canvas,textEl);
         const ctx=canvas.getContext('2d');if(!ctx)throw new Error('canvas');
-        const renderTask=pdfPage.render({canvasContext:ctx,canvas,viewport});
+        const renderTask=pdfPage.render(pageRenderParams(ctx,canvas,viewport,outputScale));
         source.render=renderTask;
         return {pageEl,textEl,canvas,renderTask};
     }
@@ -2191,10 +2214,10 @@
     }
     function createAfterCanvas(viewport,outputPage,setCanvas){
         const canvas=doc.createElement('canvas');setCanvas(canvas);canvas.className='paper-canvas';
-        canvas.width=Math.max(1,Math.floor(viewport.width));canvas.height=Math.max(1,Math.floor(viewport.height));
+        const outputScale=sizePageCanvas(canvas,viewport);
         canvas.setAttribute('role','img');canvas.setAttribute('aria-label',(stale()?'마지막 생성본 ':'현재 생성본 ')+outputPage+'쪽');
         const ctx=canvas.getContext('2d');if(!ctx)throw new Error('canvas');
-        return ctx;
+        return {ctx,outputScale};
     }
     function configurePdfWorker(lib){if(lib.GlobalWorkerOptions)lib.GlobalWorkerOptions.workerSrc=new URL('./vendor/pdf.worker.mjs',doc.baseURI).href;}
     function ensureAfterCache(){const cacheApi=deps.generation||globalThis.FalsifyPaperGeneration;if(!afterCache&&cacheApi?.createDocumentCache)afterCache=cacheApi.createDocumentCache({maxEntries:2});}
@@ -2232,8 +2255,8 @@
         const pdfPage=await pdf.getPage(outputPage);
         if(!afterEpochLive(seq,mine))return;
         const {scale,viewport}=afterViewport(pdfPage,preview);
-        const ctx=createAfterCanvas(viewport,outputPage,value=>{canvas=value;});
-        const renderTask=pdfPage.render({canvasContext:ctx,canvas,viewport});
+        const {ctx,outputScale}=createAfterCanvas(viewport,outputPage,value=>{canvas=value;});
+        const renderTask=pdfPage.render(pageRenderParams(ctx,canvas,viewport,outputScale));
         afterRender=renderTask;await renderTask.promise;
         if(!afterRenderLive(seq,mine,current,canvas))return;
         clearStage(ui.afterStage);ui.afterStage.append(canvas);
