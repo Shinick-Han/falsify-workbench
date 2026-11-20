@@ -738,3 +738,316 @@ test('overlapping direct edits (rv90 P2-5): newest edit wins and emits only one 
   assert.equal((await pdfOracle.search(out, 4, 'FIRST_VAL')).length, 0);
   assert.ok((await pdfOracle.search(out, 4, 'SECOND_VAL')).length >= 1);
 });
+
+function makeStreamPdf(streamText) {
+  const doc = new mupdf.PDFDocument();
+  try {
+    const font = doc.addSimpleFont(new mupdf.Font('Helvetica'), 'Latin');
+    const resources = doc.newDictionary();
+    const fontsDict = doc.newDictionary();
+    fontsDict.put('F1', font);
+    resources.put('Font', fontsDict);
+    const pageObj = doc.addPage([0, 0, 612, 792], 0, resources, streamText);
+    doc.insertPage(-1, pageObj);
+    const buf = doc.saveToBuffer('garbage=compact');
+    try {
+      return buf.asUint8Array().slice();
+    } finally {
+      buf.destroy();
+    }
+  } finally {
+    doc.destroy();
+  }
+}
+
+function wordBoxesOnPage(pdfBytes, pageIndex) {
+  const info = inspectPage(pdfBytes, pageIndex);
+  const words = [];
+  for (const line of info.lines) {
+    let i = 0;
+    while (i < line.chars.length) {
+      while (i < line.chars.length && !line.chars[i].c.trim()) i++;
+      if (i >= line.chars.length) break;
+      const start = i;
+      while (i < line.chars.length && line.chars[i].c.trim()) i++;
+      const slice = line.chars.slice(start, i);
+      const text = slice.map(ch => ch.c).join('');
+      const box = [
+        Math.min(...slice.map(ch => ch.box[0])),
+        Math.min(...slice.map(ch => ch.box[1])),
+        Math.max(...slice.map(ch => ch.box[2])),
+        Math.max(...slice.map(ch => ch.box[3])),
+      ];
+      words.push({text, box, frac: info.toFrac(box), lineId: line.id});
+    }
+  }
+  return words;
+}
+
+test('rv90b P0-2: -8000 TJ gap does not teleport wordA when replacing "in" -> "on"', async () => {
+  const src = makeStreamPdf('BT /F1 10 Tf 1 0 0 1 70 700 Tm [(col1)-8000(wordA)-300(in)-300(wordB)]TJ ET\n');
+  const srcWords = wordBoxesOnPage(src, 0);
+  const wIn = srcWords.find(w => w.text === 'in');
+  const wWordA = srcWords.find(w => w.text === 'wordA');
+  const wWordB = srcWords.find(w => w.text === 'wordB');
+  assert.ok(wIn && wWordA && wWordB);
+
+  const out = await rewrite(src, [{
+    id: 'tj-8000',
+    pageIndex: 0,
+    rects: [wIn.frac],
+    originalText: 'in',
+    newText: 'on',
+    source: 'tap',
+  }]);
+
+  const outInfo = inspectPage(out, 0);
+  const outAllChars = outInfo.lines.flatMap(l => l.chars);
+  const findSpanX = (token) => {
+    const text = outAllChars.map(c => c.c).join('');
+    const idx = text.indexOf(token);
+    return idx >= 0 ? outAllChars[idx].box[0] : NaN;
+  };
+  const outWordAX = findSpanX('wordA');
+  const outOnX = findSpanX('on');
+  const outWordBX = findSpanX('wordB');
+  assert.ok(Number.isFinite(outWordAX) && Number.isFinite(outOnX) && Number.isFinite(outWordBX), 'wordA, on, and wordB must survive intact');
+  assert.ok(Math.abs(outWordAX - wWordA.box[0]) < 0.5, `wordA must not teleport (was ${wWordA.box[0]}, now ${outWordAX})`);
+  assert.ok(Math.abs(outOnX - wIn.box[0]) < 0.5, `"on" must sit at "in"'s origin (was ${wIn.box[0]}, now ${outOnX})`);
+  assert.ok(Math.abs(outWordBX - wWordB.box[0]) < 0.5, `wordB must not move (was ${wWordB.box[0]}, now ${outWordBX})`);
+  const flat = (await pdfOracle.extractText(out, 0)).replace(/\s+/g, ' ').trim();
+  assert.equal(flat.includes('onwordA'), false, `wordA must not be placed after "on": ${JSON.stringify(flat)}`);
+  assert.equal(/wordA\s+on\s*wordB/.test(flat), true, `expected "wordA on wordB" order, got ${JSON.stringify(flat)}`);
+});
+
+test('rv90b P0-2: two holes in one TJ ("in" -> "at" and "faithfulness" -> "accuracy") preserve positions and order', async () => {
+  const src = makeStreamPdf('BT /F1 10 Tf 1 0 0 1 70 700 Tm [(first)-300(in)-300(middle)-300(faithfulness)-300(last)]TJ ET\n');
+  const srcWords = wordBoxesOnPage(src, 0);
+  const wIn = srcWords.find(w => w.text === 'in');
+  const wFaith = srcWords.find(w => w.text === 'faithfulness');
+  const wMid = srcWords.find(w => w.text === 'middle');
+  const wLast = srcWords.find(w => w.text === 'last');
+  assert.ok(wIn && wFaith && wMid && wLast);
+
+  const out = await rewrite(src, [
+    {id: 'two-1', pageIndex: 0, rects: [wIn.frac], originalText: 'in', newText: 'at', source: 'tap'},
+    {id: 'two-2', pageIndex: 0, rects: [wFaith.frac], originalText: 'faithfulness', newText: 'accuracy', source: 'tap'},
+  ]);
+
+  const outWords = wordBoxesOnPage(out, 0);
+  const outMid = outWords.find(w => w.text === 'middle');
+  const outLast = outWords.find(w => w.text === 'last');
+  assert.ok(outMid && outLast, 'middle and last must survive intact');
+  assert.ok(Math.abs(outMid.box[0] - wMid.box[0]) < 0.5, `middle must not move (was ${wMid.box[0]}, now ${outMid.box[0]})`);
+  assert.ok(Math.abs(outLast.box[0] - wLast.box[0]) < 0.5, `last must not move (was ${wLast.box[0]}, now ${outLast.box[0]})`);
+  const flat = (await pdfOracle.extractText(out, 0)).replace(/\s+/g, ' ').trim();
+  assert.equal(flat, 'first at middle accuracy last', `expected exact order, got ${JSON.stringify(flat)}`);
+});
+
+test('rv90b P1-2: 5 Ts text rise does not split TJ or shift "gamma" vertically', async () => {
+  const src = makeStreamPdf('BT /F1 10 Tf 5 Ts 1 0 0 1 70 700 Tm [(alpha)-300(beta)-300(gamma)]TJ ET\n');
+  const srcWords = wordBoxesOnPage(src, 0);
+  const wBeta = srcWords.find(w => w.text === 'beta');
+  const wGamma = srcWords.find(w => w.text === 'gamma');
+  assert.ok(wBeta && wGamma);
+
+  const out = await rewrite(src, [{
+    id: 'rise-5',
+    pageIndex: 0,
+    rects: [wBeta.frac],
+    originalText: 'beta',
+    newText: 'BETA',
+    source: 'tap',
+  }]);
+
+  const outWords = wordBoxesOnPage(out, 0);
+  const outGamma = outWords.find(w => w.text === 'gamma');
+  assert.ok(outGamma, 'gamma must survive');
+  assert.ok(Math.abs(outGamma.box[1] - wGamma.box[1]) < 0.5, `gamma y must not shift (was ${wGamma.box[1]}, now ${outGamma.box[1]})`);
+  assert.ok(Math.abs(outGamma.box[0] - wGamma.box[0]) < 0.5, `gamma x must not shift (was ${wGamma.box[0]}, now ${outGamma.box[0]})`);
+  const outText = await pdfOracle.extractText(out, 0);
+  assert.equal(outText.includes('BETA'), true);
+  assert.equal(outText.includes('beta'), false);
+});
+
+test('rv90b P1-1: cross-column "the" in "the following prompt:" does not splice into left-column Table 1 "0.63"', async () => {
+  const p5Info = inspectPage(missionBytes, 4);
+  const promptLine = p5Info.lines.find(l => l.text.trim() === 'the following prompt:');
+  assert.ok(promptLine, 'expected right-column "the following prompt:" on page 5');
+  const theSlice = promptLine.chars.slice(0, 3);
+  const theBox = [
+    Math.min(...theSlice.map(c => c.box[0])),
+    Math.min(...theSlice.map(c => c.box[1])),
+    Math.max(...theSlice.map(c => c.box[2])),
+    Math.max(...theSlice.map(c => c.box[3])),
+  ];
+
+  const out = await rewrite(missionBytes, [{
+    id: 'cross-col-the',
+    pageIndex: 4,
+    rects: [p5Info.toFrac(theBox)],
+    originalText: 'the',
+    newText: 'ZZZ',
+    source: 'tap',
+  }]);
+
+  const flat = (await pdfOracle.extractText(out, 4)).replace(/\s+/g, ' ');
+  assert.equal(flat.includes('ZZZ 0.63'), false, 'must not splice ZZZ next to left-column 0.63');
+  assert.equal(flat.includes('0.63 ZZZ'), false, 'must not splice ZZZ after left-column 0.63');
+  assert.equal(flat.includes('0.72 0.52 0.63'), true, 'Table 1 GPT Score row must stay intact');
+  assert.equal(flat.includes('ZZZ'), true, 'replacement ZZZ must extract');
+});
+
+test('rv90b P0-1: "in" next to "line" with +18 pt drifted rect replaces "in" and keeps "line" intact', async () => {
+  const p5Info = inspectPage(missionBytes, 4);
+  const bw = p5Info.bounds[2] - p5Info.bounds[0];
+  const targetLine = p5Info.lines.find(l => l.text.includes('in line with that'));
+  assert.ok(targetLine, 'expected "in line with that" line on page 5');
+  const at = targetLine.text.indexOf('in line');
+  const inSlice = targetLine.chars.slice(at, at + 2);
+  const inBox = [
+    Math.min(...inSlice.map(c => c.box[0])),
+    Math.min(...inSlice.map(c => c.box[1])),
+    Math.max(...inSlice.map(c => c.box[2])),
+    Math.max(...inSlice.map(c => c.box[3])),
+  ];
+  const drifted = {...p5Info.toFrac(inBox), x: p5Info.toFrac(inBox).x + 18 / bw};
+
+  const out = await rewrite(missionBytes, [{
+    id: 'drift-in-line',
+    pageIndex: 4,
+    rects: [drifted],
+    originalText: 'in',
+    newText: 'ZZZ',
+    source: 'tap',
+  }]);
+
+  const flat = (await pdfOracle.extractText(out, 4)).replace(/\s+/g, ' ');
+  assert.equal(flat.includes('lZZZe'), false, 'must not hijack "in" inside "line"');
+  assert.equal(flat.includes('answer/context in line'), false, 'original "in" must be replaced');
+  const lineAt = flat.indexOf('line with that');
+  assert.equal(/answer\/context ZZZ\s*line with that/.test(flat), true, `expected "answer/context ZZZ line with that", got snippet: ${JSON.stringify(flat.slice(Math.max(0, lineAt - 35), lineAt + 30))}`);
+});
+
+test('rv90b P0-1: right-edge "to" pushed 18 pt into gutter is still aligned and replaced', async () => {
+  const p5Info = inspectPage(missionBytes, 4);
+  const bw = p5Info.bounds[2] - p5Info.bounds[0];
+  const targetLine = p5Info.lines.find(l => l.text.includes('and then asks to'));
+  assert.ok(targetLine, 'expected "and then asks to" line on page 5');
+  const at = targetLine.text.lastIndexOf('to');
+  const toSlice = targetLine.chars.slice(at, at + 2);
+  const toBox = [
+    Math.min(...toSlice.map(c => c.box[0])),
+    Math.min(...toSlice.map(c => c.box[1])),
+    Math.max(...toSlice.map(c => c.box[2])),
+    Math.max(...toSlice.map(c => c.box[3])),
+  ];
+  const drifted = {...p5Info.toFrac(toBox), x: p5Info.toFrac(toBox).x + 18 / bw};
+
+  const out = await rewrite(missionBytes, [{
+    id: 'gutter-to',
+    pageIndex: 4,
+    rects: [drifted],
+    originalText: 'to',
+    newText: 'ZZZ',
+    source: 'tap',
+  }]);
+
+  const flat = (await pdfOracle.extractText(out, 4)).replace(/\s+/g, ' ');
+  assert.equal(flat.includes('then asks ZZZ'), true, `expected "then asks ZZZ", got snippet: ${JSON.stringify(flat.slice(Math.max(0, flat.indexOf('then asks') - 10), flat.indexOf('then asks') + 40))}`);
+  assert.equal(flat.includes('then asks to'), false, 'original "to" must be removed');
+});
+
+test('rv90b P2-1: centerNarrowSingleSlot does not shift into space-separated next word ("in" -> "Q" before "Table")', async () => {
+  const p5Info = inspectPage(missionBytes, 4);
+  const targetLine = p5Info.lines.find(l => l.text.includes('Ragas in Table 1)'));
+  assert.ok(targetLine);
+  const at = targetLine.text.indexOf(' in Table') + 1;
+  const inSlice = targetLine.chars.slice(at, at + 2);
+  const inBox = [
+    Math.min(...inSlice.map(c => c.box[0])),
+    Math.min(...inSlice.map(c => c.box[1])),
+    Math.max(...inSlice.map(c => c.box[2])),
+    Math.max(...inSlice.map(c => c.box[3])),
+  ];
+
+  const out = await rewrite(missionBytes, [{
+    id: 'narrow-space',
+    pageIndex: 4,
+    rects: [p5Info.toFrac(inBox)],
+    originalText: 'in',
+    newText: 'Q',
+    source: 'tap',
+  }]);
+
+  const flat = (await pdfOracle.extractText(out, 4)).replace(/\s+/g, ' ');
+  assert.equal(flat.includes('QTable'), false, 'must not glue Q into Table');
+  assert.equal(flat.includes('Ragas Q Table 1)'), true, `expected "Ragas Q Table 1)", got snippet: ${JSON.stringify(flat.slice(Math.max(0, flat.indexOf('Ragas Q') - 10), flat.indexOf('Ragas Q') + 40))}`);
+});
+
+test('rv90b P2-3: PDF % comment after show does not trick nextOpAllowsSplice', async () => {
+  const src = makeStreamPdf('BT /F1 10 Tf 1 0 0 1 70 700 Tm (hello) Tj % Tm\n ( world) Tj ET\n');
+  const srcWords = wordBoxesOnPage(src, 0);
+  const wWorld = srcWords.find(w => w.text === 'world');
+  assert.ok(wWorld);
+  const out = await rewrite(src, [{
+    id: 'comment-check',
+    pageIndex: 0,
+    rects: [wWorld.frac],
+    originalText: 'world',
+    newText: 'earth',
+    source: 'tap',
+  }]);
+  const outText = await pdfOracle.extractText(out, 0);
+  assert.equal(outText.includes('hello'), true);
+  assert.equal(outText.includes('earth'), true);
+  assert.equal(outText.includes('world'), false);
+});
+
+test('fast mission PDF fuzzer: 8 pages x 15 words keeps every unedited word intact and extracts new word', async () => {
+  let seed = 20261120;
+  const rand = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 0x100000000; };
+  const docPages = sourceOracle.pageCount;
+  assert.equal(docPages, 8);
+  let totalEdits = 0;
+
+  for (let p = 0; p < docPages; p++) {
+    const words = wordBoxesOnPage(missionBytes, p).filter(w => /^[A-Za-z0-9.,%-]{2,}$/.test(w.text));
+    const pool = [...words];
+    for (let i = pool.length - 1; i > 0; i--) {
+      const j = Math.floor(rand() * (i + 1));
+      [pool[i], pool[j]] = [pool[j], pool[i]];
+    }
+    const chosen = pool.slice(0, 15);
+    for (let k = 0; k < chosen.length; k++) {
+      const target = chosen[k];
+      const replacement = k % 2 === 0 ? `FZ${p}X${k}` : `FUZZ${p}W${k}LONG`;
+      const out = await rewrite(missionBytes, [{
+        id: `fz-${p}-${k}`,
+        pageIndex: p,
+        rects: [target.frac],
+        originalText: target.text,
+        newText: replacement,
+        source: 'tap',
+      }]);
+      const outText = await pdfOracle.extractText(out, p);
+      assert.equal(outText.includes(replacement), true, `p${p + 1} edit ${k} (${target.text} -> ${replacement}): new word missing`);
+
+      // Verify every unedited word on the page stayed within 0.5 pt of its original coordinates
+      const outWords = wordBoxesOnPage(out, p);
+      for (const orig of words) {
+        if (orig === target) continue;
+        // Skip words physically overlapped by a longer replacement on the same line
+        if (orig.lineId === target.lineId && orig.box[0] > target.box[0] && orig.box[0] - target.box[0] < replacement.length * 8) continue;
+        const found = outWords.some(ow =>
+          ow.text.includes(orig.text) &&
+          Math.abs(ow.box[0] - orig.box[0]) <= 0.5 &&
+          Math.abs(ow.box[1] - orig.box[1]) <= 0.5
+        );
+        assert.equal(found, true, `p${p + 1} edit ${k} (${target.text} -> ${replacement}): unedited word ${JSON.stringify(orig.text)} moved or lost`);
+      }
+      totalEdits += 1;
+    }
+  }
+  assert.equal(totalEdits, 120);
+});

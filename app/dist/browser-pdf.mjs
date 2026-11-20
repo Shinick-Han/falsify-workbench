@@ -1629,32 +1629,43 @@ function rectCenterOf(displayRects) {
   }
   return [(x0 + x1) / 2, (y0 + y1) / 2];
 }
-function charBandMatchesRect(ch, rect) {
-  const [gx0, gy0, gx1, gy1] = quadBounds(ch.quad);
+var ALIGN_WORD_CHAR_RE = /[\p{L}\p{N}]/u;
+function lineBoxesByLineId(allChars) {
+  const lines = /* @__PURE__ */ new Map();
+  for (const ch of allChars) {
+    if (!ch.c.trim()) continue;
+    const box = quadBounds(ch.quad);
+    let entry = lines.get(ch.lineId);
+    if (!entry) {
+      entry = { box: [...box], dir: ch.lineDir || [1, 0] };
+      lines.set(ch.lineId, entry);
+    } else {
+      if (box[0] < entry.box[0]) entry.box[0] = box[0];
+      if (box[1] < entry.box[1]) entry.box[1] = box[1];
+      if (box[2] > entry.box[2]) entry.box[2] = box[2];
+      if (box[3] > entry.box[3]) entry.box[3] = box[3];
+    }
+  }
+  return lines;
+}
+function lineNearRect(entry, rect) {
+  const [lx0, ly0, lx1, ly1] = entry.box;
   const [rx0, ry0, rx1, ry1] = rect;
-  const dir = ch.lineDir || [1, 0];
-  if (Math.abs(dir[1]) > Math.abs(dir[0])) {
+  const vertical = Math.abs(entry.dir[1]) > Math.abs(entry.dir[0]);
+  if (vertical) {
     const tol2 = Math.min(1.5, Math.max(0.5, (rx1 - rx0) * 0.15));
-    const cx = (gx0 + gx1) / 2;
-    return cx >= rx0 - tol2 && cx <= rx1 + tol2;
+    return lx0 <= rx1 + tol2 && lx1 >= rx0 - tol2 && ly0 <= ry1 + 20 && ly1 >= ry0 - 20;
   }
   const tol = Math.min(1.5, Math.max(0.5, (ry1 - ry0) * 0.15));
-  const cy = (gy0 + gy1) / 2;
-  return cy >= ry0 - tol && cy <= ry1 + tol;
+  return ly0 <= ry1 + tol && ly1 >= ry0 - tol && lx0 <= rx1 + 20 && lx1 >= rx0 - 20;
 }
 function candidateAlignLineIds(allChars, rectSelected, displayRects) {
-  if (rectSelected.length) return new Set(rectSelected.map((ch) => ch.lineId));
-  const hitIds = /* @__PURE__ */ new Set();
-  for (const ch of allChars) {
-    const box = quadBounds(ch.quad);
-    if (displayRects.some((r) => intersects(box, r, 1.5))) hitIds.add(ch.lineId);
+  const ids = new Set(rectSelected.map((ch) => ch.lineId));
+  const lines = lineBoxesByLineId(allChars);
+  for (const [lineId, entry] of lines) {
+    if (displayRects.some((r) => lineNearRect(entry, r))) ids.add(lineId);
   }
-  if (hitIds.size) return hitIds;
-  const bandIds = /* @__PURE__ */ new Set();
-  for (const ch of allChars) {
-    if (displayRects.some((r) => charBandMatchesRect(ch, r))) bandIds.add(ch.lineId);
-  }
-  return bandIds;
+  return ids;
 }
 function buildAlignCorpus(lineChars) {
   let norm = "";
@@ -1672,6 +1683,20 @@ function buildAlignCorpus(lineChars) {
   }
   return { norm, charMap, indexMap };
 }
+function isWordBoundaryAt(lineChars, firstIdx, lastIdx, needLeft, needRight) {
+  if (needLeft && firstIdx > 0) {
+    const prev = lineChars[firstIdx - 1];
+    if (prev.lineId === lineChars[firstIdx].lineId && ALIGN_WORD_CHAR_RE.test(normalizeAlignText(prev.c))) return false;
+  }
+  if (needRight && lastIdx + 1 < lineChars.length) {
+    const next = lineChars[lastIdx + 1];
+    if (next.lineId === lineChars[lastIdx].lineId && ALIGN_WORD_CHAR_RE.test(normalizeAlignText(next.c))) return false;
+  }
+  return true;
+}
+function betterAlignCandidate(cand, best) {
+  return !best || cand.overlap > best.overlap || cand.overlap === best.overlap && cand.dist < best.dist;
+}
 function scoreAlignOccurrence(charMap, at, len, selectedSet, rectCenter) {
   const occSet = /* @__PURE__ */ new Set();
   for (let i = at; i < at + len; i++) occSet.add(charMap[i]);
@@ -1681,29 +1706,38 @@ function scoreAlignOccurrence(charMap, at, len, selectedSet, rectCenter) {
   const dist = Math.hypot((box[0] + box[2]) / 2 - rectCenter[0], (box[1] + box[3]) / 2 - rectCenter[1]);
   return { at, occSet, overlap, dist };
 }
+function pickBestAlignOccurrence(lineChars, corpus, needle, selectedSet, rectCenter) {
+  const chars = [...needle];
+  const needLeft = ALIGN_WORD_CHAR_RE.test(chars[0]);
+  const needRight = ALIGN_WORD_CHAR_RE.test(chars[chars.length - 1]);
+  let bestWhole = null;
+  let bestSub = null;
+  for (let from = 0; from <= corpus.norm.length - needle.length; ) {
+    const at = corpus.norm.indexOf(needle, from);
+    if (at < 0) break;
+    from = at + 1;
+    const cand = scoreAlignOccurrence(corpus.charMap, at, needle.length, selectedSet, rectCenter);
+    const firstIdx = corpus.indexMap[at];
+    const lastIdx = corpus.indexMap[at + needle.length - 1];
+    if (isWordBoundaryAt(lineChars, firstIdx, lastIdx, needLeft, needRight)) {
+      if (betterAlignCandidate(cand, bestWhole)) bestWhole = cand;
+    }
+    if (betterAlignCandidate(cand, bestSub)) bestSub = cand;
+  }
+  return bestWhole || bestSub;
+}
 function alignGlyphsToOriginalText(allChars, rectSelected, displayRects, originalText) {
   const needle = normalizeAlignText(originalText);
   if (!needle) return { chars: rectSelected, aligned: false };
   const lineIds = candidateAlignLineIds(allChars, rectSelected, displayRects);
   if (!lineIds.size) return { chars: rectSelected, aligned: false };
   const lineChars = allChars.filter((ch) => lineIds.has(ch.lineId));
-  const { norm, charMap, indexMap } = buildAlignCorpus(lineChars);
-  if (norm.length < needle.length) return { chars: rectSelected, aligned: false };
-  const selectedSet = new Set(rectSelected);
-  const rectCenter = rectCenterOf(displayRects);
-  let best = null;
-  for (let from = 0; from <= norm.length - needle.length; ) {
-    const at = norm.indexOf(needle, from);
-    if (at < 0) break;
-    from = at + 1;
-    const cand = scoreAlignOccurrence(charMap, at, needle.length, selectedSet, rectCenter);
-    if (!best || cand.overlap > best.overlap || cand.overlap === best.overlap && cand.dist < best.dist) {
-      best = cand;
-    }
-  }
+  const corpus = buildAlignCorpus(lineChars);
+  if (corpus.norm.length < needle.length) return { chars: rectSelected, aligned: false };
+  const best = pickBestAlignOccurrence(lineChars, corpus, needle, new Set(rectSelected), rectCenterOf(displayRects));
   if (!best) return { chars: rectSelected, aligned: false };
-  const firstIdx = indexMap[best.at];
-  const lastIdx = indexMap[best.at + needle.length - 1];
+  const firstIdx = corpus.indexMap[best.at];
+  const lastIdx = corpus.indexMap[best.at + needle.length - 1];
   const aligned = [];
   for (let i = firstIdx; i <= lastIdx; i++) {
     const ch = lineChars[i];
@@ -2360,16 +2394,18 @@ function fitUnbrokenSingleToken(baseSlot, naturalW, baseSize) {
   }
   return null;
 }
-function centerNarrowSingleSlot(baseSlot, naturalW, rightOrigin) {
-  if (!rightOrigin || Math.abs(baseSlot.ux - 1) > 0.01 || Math.abs(baseSlot.uy) > 0.01) return baseSlot;
-  const totalSpan = rightOrigin[0] - baseSlot.ox;
+var ADJACENT_PUNCT_RE = /^[,.;:)\]}!?'"”’»›]$/;
+function centerNarrowSingleSlot(baseSlot, naturalW, rightSibling) {
+  if (!rightSibling || !rightSibling.adjacent || !ADJACENT_PUNCT_RE.test(rightSibling.char)) return baseSlot;
+  if (Math.abs(baseSlot.ux - 1) > 0.01 || Math.abs(baseSlot.uy) > 0.01) return baseSlot;
+  const totalSpan = rightSibling.origin[0] - baseSlot.ox;
   if (!(totalSpan > naturalW && totalSpan <= baseSlot.slotWidth + baseSlot.size * 0.25)) return baseSlot;
   const slack = totalSpan - naturalW;
   if (!(slack > baseSlot.size * 0.2 && slack < baseSlot.size)) return baseSlot;
   const shift = slack / 2;
   return { ...baseSlot, ox: baseSlot.ox + baseSlot.ux * shift, oy: baseSlot.oy + baseSlot.uy * shift };
 }
-function emitSingleSlotRewrite(doc, page, baseSlot, text, baseName, cidState, rightOrigin = null) {
+function emitSingleSlotRewrite(doc, page, baseSlot, text, baseName, cidState, rightSibling = null) {
   const baseSize = baseSlot.size;
   const minSize = Math.max(Math.min(baseSize, 5), baseSize * 0.72);
   const naturalW = measureRewriteLine(text, baseName, baseSize);
@@ -2385,7 +2421,7 @@ function emitSingleSlotRewrite(doc, page, baseSlot, text, baseName, cidState, ri
       fontSize = Math.max(minSize, baseSlot.slotWidth / (naturalW * (REWRITE_MIN_SCALE / 100)) * baseSize);
     }
   } else {
-    targetSlot = centerNarrowSingleSlot(baseSlot, naturalW, rightOrigin);
+    targetSlot = centerNarrowSingleSlot(baseSlot, naturalW, rightSibling);
   }
   const renderedW = measureRewriteLine(text, baseName, fontSize) * (hScale / 100);
   if (!(targetSlot.pageAvailW > 0) || renderedW <= targetSlot.pageAvailW) {
@@ -2530,7 +2566,7 @@ function restoreTextStateOps(show, matrix = show.lineMatrix) {
 var SPLICE_SAFE_NEXT_OPS = /* @__PURE__ */ new Set(["Tm", "Td", "TD", "T*", "ET"]);
 var SPLICE_SKIP_OPS = /* @__PURE__ */ new Set(["g", "G", "rg", "RG", "k", "K", "sc", "SC", "scn", "SCN", "cs", "CS", "Tf", "Tc", "Tw", "Tz", "Ts", "Tr", "TL"]);
 function nextOpAllowsSplice(latin1, offset) {
-  const tail = latin1.slice(offset, offset + 256);
+  const tail = latin1.slice(offset, offset + 256).replace(/%[^\r\n]*/g, " ");
   const tokens = tail.match(/\/[^\s()<>[\]{}/%]+|[+-]?(?:\d+\.?\d*|\.\d+)|[A-Za-z*'"]+|[\[\]()<>]/g) || [];
   for (const tok of tokens) {
     if (tok[0] === "/" || /^[+-]?(?:\d|\.)/.test(tok)) continue;
@@ -2539,29 +2575,91 @@ function nextOpAllowsSplice(latin1, offset) {
   }
   return false;
 }
-function showStartX(show) {
-  let sx = show.textMatrix[4];
+function readMissingWidth(fontObj) {
+  const desc = fontObj.get("FontDescriptor");
+  if (desc.isNull()) return NaN;
+  const missObj = desc.resolve().get("MissingWidth");
+  return !missObj.isNull() && missObj.isNumber() ? missObj.asNumber() : NaN;
+}
+function readSimpleFontWidths(fontObj) {
+  const widthsObj = fontObj.get("Widths");
+  const firstObj = fontObj.get("FirstChar");
+  if (widthsObj.isNull() || !widthsObj.isArray() || firstObj.isNull() || !firstObj.isNumber()) return null;
+  const widths = [];
+  for (let i = 0; i < widthsObj.length; i++) {
+    const item = widthsObj.get(i);
+    widths.push(item.isNumber() ? item.asNumber() : NaN);
+  }
+  return { kind: "widths", firstChar: firstObj.asNumber(), widths, missingWidth: readMissingWidth(fontObj) };
+}
+function loadFontWidthEntry(fontDict, fontName) {
+  const raw = fontDict.get(fontName);
+  if (!raw || raw.isNull()) return null;
+  const fontObj = raw.resolve();
+  const simple = readSimpleFontWidths(fontObj);
+  if (simple) return simple;
+  const baseObj = fontObj.get("BaseFont");
+  const bare = baseObj.isNull() ? "" : String(baseObj.asName() || "").replace(/^[A-Z]{6}\+/, "");
+  return BASE14.includes(bare) ? { kind: "base14", font: metrics(bare) } : null;
+}
+function makePageFontMeasurer(page) {
+  const resources = page.getObject().getInheritable("Resources");
+  const fontDict = !resources.isNull() ? resources.resolve().get("Font") : null;
+  const resolvedDict = fontDict && !fontDict.isNull() ? fontDict.resolve() : null;
+  const cache = /* @__PURE__ */ new Map();
+  return (fontName, bytes, state) => {
+    if (!resolvedDict || !fontName) return NaN;
+    if (!cache.has(fontName)) cache.set(fontName, loadFontWidthEntry(resolvedDict, fontName));
+    const info = cache.get(fontName);
+    if (!info) return NaN;
+    let adv = 0;
+    for (let i = 0; i < bytes.length; i++) {
+      const b = bytes[i];
+      let w;
+      if (info.kind === "widths") {
+        const idx = b - info.firstChar;
+        const rawW = idx >= 0 && idx < info.widths.length ? info.widths[idx] : info.missingWidth;
+        w = rawW / 1e3 * state.fontSize;
+      } else {
+        const gid = info.font.encodeCharacter(b);
+        w = gid ? info.font.advanceGlyph(gid, 0) * state.fontSize : NaN;
+      }
+      if (!Number.isFinite(w)) return NaN;
+      adv += w + state.charSpace + (b === 32 ? state.wordSpace : 0);
+    }
+    return adv;
+  };
+}
+function showXSpan(show, measure2) {
+  let x = show.textMatrix[4];
+  let firstInk = null;
   const scaleX = show.textMatrix[0] * (show.hScale / 100);
   for (const part of show.parts || []) {
-    if (part.type !== "adjustment") break;
-    sx -= part.value / 1e3 * show.fontSize * scaleX;
+    if (part.type === "adjustment") {
+      x -= part.value / 1e3 * show.fontSize * scaleX;
+      continue;
+    }
+    if (firstInk === null) firstInk = x;
+    const w = measure2(show.fontName, part.bytes, show);
+    if (!Number.isFinite(w)) return { startX: firstInk, endX: NaN };
+    x += w * scaleX;
   }
-  return sx;
+  return { startX: firstInk === null ? show.textMatrix[4] : firstInk, endX: x };
 }
-function findInlineSpliceTarget(shows, latin1, slot) {
-  if (Math.abs(slot.ux - 1) > 0.01 || Math.abs(slot.uy) > 0.01) return null;
+function findInlineSpliceTarget(shows, latin1, slot, leftSibling, measure2) {
+  if (!leftSibling || Math.abs(slot.ux - 1) > 0.01 || Math.abs(slot.uy) > 0.01) return null;
+  const leftX = leftSibling.pdfOrigin[0];
+  const leftY = leftSibling.pdfOrigin[1];
   let best = null;
   for (const show of shows) {
     if (!show.fontName || !isIdentityMatrix(show.ctm)) continue;
-    const sx = showStartX(show);
-    const sy = show.textMatrix[5];
-    const dy = Math.abs(sy - slot.oy);
-    const yTol = Math.max(1.5, Math.max(slot.size, show.fontSize) * 0.55);
-    if (dy > yTol || sx > slot.ox - 0.5) continue;
+    const sy = show.textMatrix[5] + show.rise * show.textMatrix[3];
+    if (Math.abs(sy - leftY) > 1.5) continue;
+    const { startX, endX } = showXSpan(show, measure2);
+    if (startX > leftX + 1.5) continue;
+    if (Number.isFinite(endX) && endX < leftX - 1.5) continue;
     if (!nextOpAllowsSplice(latin1, show.end)) continue;
-    if (!best || sx > best.sx + 0.5 || Math.abs(sx - best.sx) <= 0.5 && dy < best.dy) {
-      best = { show, sx, dy };
-    }
+    if (!best || startX >= best.startX) best = { show, startX };
   }
   return best ? best.show : null;
 }
@@ -2594,98 +2692,154 @@ function writeStreamLatin1(streamObj, latin1) {
   for (let i = 0; i < latin1.length; i++) out[i] = latin1.charCodeAt(i) & 255;
   streamObj.writeStream(out);
 }
-function findRightSiblingOrigin(selectedChars, allChars, slot) {
+function horizontalEditDrawn(selectedChars, slot) {
   if (!slot || Math.abs(slot.ux - 1) > 0.01 || Math.abs(slot.uy) > 0.01) return null;
   const drawn = selectedChars.filter((ch) => ch.c.trim());
-  if (!drawn.length) return null;
+  return drawn.length ? drawn : null;
+}
+function survivingCharsOnLine(allChars, lineId, allSelectedSet) {
+  return allChars.filter((ch) => ch.lineId === lineId && !allSelectedSet.has(ch) && ch.c.trim());
+}
+function rightmostBeforeX(chars, maxX) {
+  let best = null;
+  for (const ch of chars) {
+    if (ch.pdfOrigin[0] < maxX && (!best || ch.pdfOrigin[0] > best.pdfOrigin[0])) best = ch;
+  }
+  return best;
+}
+function leftmostAfterX(chars, minX) {
+  let best = null;
+  for (const ch of chars) {
+    if (ch.pdfOrigin[0] > minX && (!best || ch.pdfOrigin[0] < best.pdfOrigin[0])) best = ch;
+  }
+  return best;
+}
+function isAdjacentChars(allChars, firstCh, nextCh) {
+  const firstIdx = allChars.indexOf(firstCh);
+  const nextIdx = allChars.indexOf(nextCh);
+  if (firstIdx < 0 || nextIdx <= firstIdx) return false;
+  for (let i = firstIdx + 1; i < nextIdx; i++) {
+    if (!allChars[i].c.trim()) return false;
+  }
+  return true;
+}
+function findLeftSibling(selectedChars, allChars, allSelectedSet, slot) {
+  const drawn = horizontalEditDrawn(selectedChars, slot);
+  if (!drawn) return null;
+  const lineId = drawn[0].lineId;
+  const sameLine = survivingCharsOnLine(allChars, lineId, allSelectedSet);
+  if (sameLine.length) return rightmostBeforeX(sameLine, slot.ox - 0.5);
+  const prevLine = survivingCharsOnLine(allChars, lineId - 1, allSelectedSet).filter((ch) => Math.abs(ch.pdfOrigin[1] - slot.oy) <= 1.5);
+  return rightmostBeforeX(prevLine, slot.ox - 0.5);
+}
+function findRightSibling(selectedChars, allChars, allSelectedSet, slot) {
+  const drawn = horizontalEditDrawn(selectedChars, slot);
+  if (!drawn) return null;
   const lineId = drawn[0].lineId;
   if (drawn.some((ch) => ch.lineId !== lineId)) return null;
-  const selectedSet = new Set(selectedChars);
-  let maxX = slot.ox;
-  for (const ch of drawn) if (ch.pdfOrigin[0] > maxX) maxX = ch.pdfOrigin[0];
-  let best = null;
-  for (const ch of allChars) {
-    if (ch.lineId !== lineId || selectedSet.has(ch) || !ch.c.trim()) continue;
-    const x = ch.pdfOrigin[0];
-    if (x > maxX + 0.5 && (!best || x < best[0])) best = ch.pdfOrigin;
-  }
-  return best;
+  const lastDrawn = drawn.reduce((a, b) => b.pdfOrigin[0] > a.pdfOrigin[0] ? b : a);
+  const best = leftmostAfterX(survivingCharsOnLine(allChars, lineId, allSelectedSet), lastDrawn.pdfOrigin[0] + 0.5);
+  if (!best) return null;
+  return { origin: best.pdfOrigin, char: best.c, adjacent: isAdjacentChars(allChars, lastDrawn, best) };
 }
-function findTjHolePart(show, slot, rightOrigin) {
-  if (show.kind !== "TJ" || !rightOrigin || !Array.isArray(show.parts) || show.parts.length < 3) return null;
-  const holeW = rightOrigin[0] - slot.ox;
-  if (!(holeW > 0)) return null;
+function tjHoleMatches(part, idx, len, x, nextX, slot, rightOrigin) {
+  if (idx <= 0 || idx >= len - 1 || part.value >= 0) return false;
+  return x <= slot.ox + 2 && nextX >= slot.ox - 2 && Math.abs(nextX - rightOrigin[0]) <= 2.5;
+}
+function findTjHolePart(show, slot, rightOrigin, measure2) {
+  if (show.kind !== "TJ" || !rightOrigin || Math.abs(show.rise) > 0.01) return null;
+  if (!Array.isArray(show.parts) || show.parts.length < 3) return null;
   const scaleX = show.textMatrix[0] * (show.hScale / 100);
-  const minJump = Math.max(4, holeW * 0.65);
-  let best = null;
-  let bestJump = 0;
-  for (let i = 1; i < show.parts.length - 1; i++) {
+  let x = show.textMatrix[4];
+  const matches = [];
+  for (let i = 0; i < show.parts.length; i++) {
     const part = show.parts[i];
-    if (part.type !== "adjustment" || !(part.value < 0)) continue;
-    const jumpW = -part.value / 1e3 * show.fontSize * scaleX;
-    if (jumpW >= minJump && jumpW > bestJump) {
-      best = part;
-      bestJump = jumpW;
+    if (part.type === "string") {
+      const w = measure2(show.fontName, part.bytes, show);
+      if (!Number.isFinite(w)) return null;
+      x += w * scaleX;
+      continue;
     }
+    const nextX = x - part.value / 1e3 * show.fontSize * scaleX;
+    if (tjHoleMatches(part, i, show.parts.length, x, nextX, slot, rightOrigin)) matches.push(part);
+    x = nextX;
   }
-  return best;
+  return matches.length === 1 ? matches[0] : null;
 }
-function buildInlineSplice(entry, show, item) {
-  const holePart = findTjHolePart(show, item.slots[0], item.rightOrigin);
-  if (holePart) {
-    const rightTm = [show.textMatrix[0], show.textMatrix[1], show.textMatrix[2], show.textMatrix[3], item.rightOrigin[0], item.rightOrigin[1]];
-    const leftHalf = entry.latin1.slice(show.start, holePart.start) + "]TJ";
-    const rightHalf = "[" + entry.latin1.slice(holePart.end, show.end);
-    const lm = show.lineMatrix.map(num).join(" ");
-    return {
-      start: show.start,
-      end: show.end,
-      piece: `${leftHalf} ET
-${item.ops}${restoreTextStateOps(show, rightTm)}${rightHalf} ${lm} Tm `
-    };
+function buildShowSplicePiece(latin1, show, holeEdits, postEdits) {
+  const lm = show.lineMatrix.map(num).join(" ");
+  if (!holeEdits.length) {
+    const ops = postEdits.map((it) => it.ops).join("");
+    return { start: show.end, end: show.end, piece: ` ET
+${ops}${restoreTextStateOps(show)}` };
   }
-  return {
-    start: show.end,
-    end: show.end,
-    piece: ` ET
-${item.ops}${restoreTextStateOps(show)}`
-  };
+  holeEdits.sort((a, b) => a.holePart.start - b.holePart.start);
+  let piece = latin1.slice(show.start, holeEdits[0].holePart.start) + "]TJ";
+  for (let i = 0; i < holeEdits.length; i++) {
+    const cur = holeEdits[i];
+    const rightOrigin = cur.item.rightSibling.origin;
+    const rightTm = [show.textMatrix[0], show.textMatrix[1], show.textMatrix[2], show.textMatrix[3], rightOrigin[0], rightOrigin[1]];
+    const nextEnd = i + 1 < holeEdits.length ? holeEdits[i + 1].holePart.start : show.end;
+    const seg = "[" + latin1.slice(cur.holePart.end, nextEnd) + (i + 1 < holeEdits.length ? "]TJ" : "");
+    piece += ` ET
+${cur.item.ops}${restoreTextStateOps(show, rightTm)}${seg}`;
+  }
+  piece += ` ${lm} Tm `;
+  if (postEdits.length) {
+    piece += `ET
+${postEdits.map((it) => it.ops).join("")}${restoreTextStateOps(show)}`;
+  }
+  return { start: show.start, end: show.end, piece };
+}
+function assignItemToShow(scanned, item, measure2) {
+  const firstSlot = item.slots[0];
+  if (!firstSlot || !item.leftSibling) return null;
+  for (const entry of scanned) {
+    if (entry.parsed.diagnostics.length) continue;
+    const show = findInlineSpliceTarget(entry.parsed.shows, entry.latin1, firstSlot, item.leftSibling, measure2);
+    if (show) return { entry, show };
+  }
+  return null;
 }
 function spliceRewriteOpsInline(page, emittedPlans) {
   const streams = pageContentStreams(page);
   if (!streams.length) return emittedPlans.map((p) => p.ops).join("");
+  const measure2 = makePageFontMeasurer(page);
   const scanned = streams.map((streamObj) => {
     const { bytes, latin1 } = readStreamLatin1(streamObj);
-    const parsed = scanTextShows(bytes);
-    return { streamObj, latin1, parsed, splices: [] };
+    const parsed = scanTextShows(bytes, { measure: measure2 });
+    return { streamObj, latin1, parsed, byShow: /* @__PURE__ */ new Map() };
   });
-  const usedShows = /* @__PURE__ */ new Set();
   let fallbackOps = "";
   for (const item of emittedPlans) {
-    const firstSlot = item.slots[0];
-    let matched = null;
-    if (firstSlot) {
-      for (const entry of scanned) {
-        if (entry.parsed.diagnostics.length) continue;
-        const show = findInlineSpliceTarget(entry.parsed.shows, entry.latin1, firstSlot);
-        if (show && !usedShows.has(show)) {
-          matched = { entry, show };
-          break;
-        }
-      }
-    }
-    if (!matched) {
+    const match = assignItemToShow(scanned, item, measure2);
+    if (!match) {
       fallbackOps += item.ops;
       continue;
     }
-    usedShows.add(matched.show);
-    matched.entry.splices.push(buildInlineSplice(matched.entry, matched.show, item));
+    let bucket = match.entry.byShow.get(match.show);
+    if (!bucket) {
+      bucket = { holes: [], usedParts: /* @__PURE__ */ new Set(), post: [] };
+      match.entry.byShow.set(match.show, bucket);
+    }
+    const rightOrigin = item.rightSibling ? item.rightSibling.origin : null;
+    const holePart = findTjHolePart(match.show, item.slots[0], rightOrigin, measure2);
+    if (holePart && !bucket.usedParts.has(holePart)) {
+      bucket.usedParts.add(holePart);
+      bucket.holes.push({ holePart, item });
+    } else {
+      bucket.post.push(item);
+    }
   }
   for (const entry of scanned) {
-    if (!entry.splices.length) continue;
-    entry.splices.sort((a, b) => b.start - a.start);
+    if (!entry.byShow.size) continue;
+    const splices = [];
+    for (const [show, bucket] of entry.byShow) {
+      splices.push(buildShowSplicePiece(entry.latin1, show, bucket.holes, bucket.post));
+    }
+    splices.sort((a, b) => b.start - a.start);
     let next = entry.latin1;
-    for (const sp of entry.splices) {
+    for (const sp of splices) {
       next = next.slice(0, sp.start) + sp.piece + next.slice(sp.end);
     }
     writeStreamLatin1(entry.streamObj, next);
@@ -2729,11 +2883,16 @@ function applyRewritePage(doc, pageIndex, pageEdits, cidState) {
     const pagePlans = dedupeRewritePlans(rawPlans, model);
     if (!pagePlans.length) return;
     redactRewritePage(page, pagePlans, model.chars);
+    const allSelectedSet = /* @__PURE__ */ new Set();
+    for (const plan of pagePlans) {
+      for (const ch of plan.selectedChars) allSelectedSet.add(ch);
+    }
     const emitted = [];
     for (const plan of pagePlans) {
-      const rightOrigin = findRightSiblingOrigin(plan.selectedChars, model.chars, plan.slots[0]);
-      const ops = emitRewriteEdit(doc, page, plan.slots, plan.newText, cidState, rightOrigin);
-      if (ops) emitted.push({ slots: plan.slots, ops, rightOrigin });
+      const leftSibling = findLeftSibling(plan.selectedChars, model.chars, allSelectedSet, plan.slots[0]);
+      const rightSibling = findRightSibling(plan.selectedChars, model.chars, allSelectedSet, plan.slots[0]);
+      const ops = emitRewriteEdit(doc, page, plan.slots, plan.newText, cidState, rightSibling);
+      if (ops) emitted.push({ slots: plan.slots, ops, leftSibling, rightSibling });
     }
     if (!emitted.length) return;
     const fallbackOps = spliceRewriteOpsInline(page, emitted);
