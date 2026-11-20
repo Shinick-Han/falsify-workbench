@@ -1,3 +1,7 @@
+## 0.2.0-alpha.87 — 2026-11-20
+
+- 행사 페이지에 데스크탑(1024px 이상) 화면을 더하고 논문 쪽 그림을 화면 픽셀 밀도로 선명하게 그립니다. 폰 편집은 찾아 바꾸기와 원본·수정본 쪽 비교로 바꿨습니다. 「내 AI에게」 복사·붙여넣기와 agent 결함 레시피 API(`/v1/booth/recipes`, `/mcp`, 미션 본문), agent 안내(`agent.html`)를 더했고, 제출에 출처(`assist`)를 기록합니다. [release notes](docs/releases/0.2.0-alpha.87.md)
+
 ## 0.2.0-alpha.86 — 2026-11-20
 
 - 행사 페이지(event.html)를 「도전 티켓」 디자인으로 바꿨습니다. `event-theme.css`는 작업대 화면을 CSS로만 숨기고 논문 편집 화면을 폰에 맞게 정리합니다. `booth.js`는 pick·edit·send·ticket 네 단계를 `html[data-booth-step]`로 알립니다. edit 단계에는 「고친 곳 N개 · 다음」 고정 막대가 있고, 「다음」을 누르면 수정본 PDF를 자동으로 만듭니다. send 단계는 동의문을 3줄 요약으로 보여 주고 전문은 펼쳐서 볼 수 있으며, 코스는 quick으로 고정합니다. ticket 단계는 검증 티켓과 통과·적발·무효 도장, 교환권, `publicNote` 쪽·인용·AI 의견 분리를 보여 줍니다. 서버 API와 index.html은 바뀌지 않았습니다.

@@ -38,8 +38,8 @@ body{
 
 /* AGPL notice stays reachable. Everything else in the footer is hidden. */
 .page-foot{display:block;margin:20px 0 0;text-align:center;font-size:11.5px}
-.page-foot>:not(#source-link){display:none}
-.page-foot #source-link{display:inline-flex;align-items:center;min-height:44px;color:var(--ev-muted,#6b717a);font-size:11.5px}
+.page-foot>:not(#source-link):not(#agent-link){display:none}
+.page-foot #agent-link,.page-foot #source-link{display:inline-flex;align-items:center;min-height:44px;color:var(--ev-muted,#6b717a);font-size:11.5px}
 
 /* Steps other than "edit": take the workspace out of view but keep its layout box, so
    page rendering still measures a real column width while booth.js loads a paper.
