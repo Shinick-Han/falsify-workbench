@@ -1295,6 +1295,66 @@ test('page-edit hooks: paragraph boxes as page fractions, open by segment id, fr
   assert.equal(v.ws.setZoom(1,true),true);await until(()=>v.log.renders.length>renders,'forced redraw after a resize');
 });
 
+test('paragraph editor: smaller edits inside the paragraph open applied and give way to the whole-paragraph edit',async()=>{
+  const v=mount({edits:require('../dist/paper-edits.js'),paragraphPdf:paragraphMock('Alpha scores 0.95 and Beta scores 0.78.')});
+  v.file(pdfFile(pdfBytes('MARKER-A')));await until(()=>/문단을 클릭/.test(v.get('paper-before-status').textContent),'paragraphs');
+  const id='paragraph:0:p0',original='Alpha scores 0.95 and Beta scores 0.78.';
+  const word=v.ws.acceptProposals([{segmentId:id,pageIndex:0,before:'0.95',after:'0.50',anchor:{start:13,end:17}}],{origin:'external-ai-import',confirmed:true});
+  assert.equal(word.applied,1);
+  assert.equal(v.ws.openParagraph(id),true);
+  let editor=v.document.activeElement;assert.equal(editor.value,'Alpha scores 0.50 and Beta scores 0.78.','the word edit shows in the editor');
+  editor.dispatchEvent(new Event('blur'));
+  assert.equal(v.ws.getEditSnapshot().edits.length,1,'closing without a change keeps the word edit');
+  assert.equal(v.ws.openParagraph(id),true);editor=v.document.activeElement;
+  editor.value='Alpha scores 0.50 and Beta scores 0.70.';editor.dispatchEvent(new Event('input'));editor.dispatchEvent(new Event('blur'));
+  let edits=v.ws.getEditSnapshot().edits;
+  assert.equal(edits.length,1,'one paragraph edit replaces the word edit');
+  assert.deepEqual([edits[0].segmentId,edits[0].before,edits[0].after],[id,original,'Alpha scores 0.50 and Beta scores 0.70.']);
+  assert.equal(v.get('paper-edit-status').classList.contains('error'),false);
+  assert.equal(v.ws.removeEdit('missing'),false);assert.equal(v.ws.removeEdit(edits[0].id),true);
+  assert.equal(v.ws.getEditSnapshot().edits.length,0);
+  v.ws.acceptProposals([{segmentId:id,pageIndex:0,before:'0.78',after:'0.10',anchor:{start:34,end:38}}],{origin:'external-ai-import',confirmed:true});
+  assert.equal(v.ws.openParagraph(id),true);editor=v.document.activeElement;assert.equal(editor.value,'Alpha scores 0.95 and Beta scores 0.10.');
+  editor.value=original;editor.dispatchEvent(new Event('input'));editor.dispatchEvent(new Event('blur'));
+  assert.equal(v.ws.getEditSnapshot().edits.length,0,'typing the paragraph back to the original removes the word edit');
+  v.ws.dispose();
+});
+
+test('booth mode: a paragraph emptied to spaces is recorded as deleted, not refused',async()=>{
+  const previous=globalThis.FalsifyCloudConfig;
+  try{
+    globalThis.FalsifyCloudConfig={booth:{enabled:true}};
+    const v=mount({edits:require('../dist/paper-edits.js'),paragraphPdf:paragraphMock('Delete me.')});
+    v.file(pdfFile(pdfBytes('MARKER-A')));await until(()=>/문단을 클릭/.test(v.get('paper-before-status').textContent),'paragraphs');
+    assert.equal(v.ws.openParagraph('paragraph:0:p0'),true);
+    const editor=v.document.activeElement;editor.value='   ';editor.dispatchEvent(new Event('input'));editor.dispatchEvent(new Event('blur'));
+    const edits=v.ws.getEditSnapshot().edits;
+    assert.equal(edits.length,1);assert.equal(edits[0].after,'');
+    v.ws.dispose();
+  }finally{if(previous===undefined)delete globalThis.FalsifyCloudConfig;else globalThis.FalsifyCloudConfig=previous;}
+});
+
+test('booth mode: a paragraph edit the core refuses keeps the editor open and says the next step in place',async()=>{
+  const previous=globalThis.FalsifyCloudConfig;
+  try{
+    globalThis.FalsifyCloudConfig={booth:{enabled:true}};
+    const real=require('../dist/paper-edits.js');let refuse=true;
+    const edits={...real,create(options){const session=real.create(options);return {...session,add(edit){if(refuse)throw new Error('core refused');return session.add(edit);}};}};
+    const v=mount({edits,paragraphPdf:paragraphMock('Keep me open.')});
+    v.file(pdfFile(pdfBytes('MARKER-A')));await until(()=>/문단을 클릭/.test(v.get('paper-before-status').textContent),'paragraphs');
+    assert.equal(v.ws.openParagraph('paragraph:0:p0'),true);
+    const editor=v.document.activeElement;editor.value='Kept open.';editor.dispatchEvent(new Event('input'));editor.dispatchEvent(new Event('blur'));
+    const bar=v.get('paper-before-stage').children.find(e=>e.className==='paper-page').children.find(e=>e.className==='paper-direct-controls');
+    const line=bar.children.find(e=>e.dataset&&'directStatus' in e.dataset);
+    assert.equal(line.textContent,'이 문단을 아직 기록하지 못했어요. 「완료」를 다시 누르거나 「입력 취소」로 닫아 주세요.');
+    assert.equal(v.ws.getEditSnapshot().edits.length,0);
+    refuse=false;
+    bar.children.find(e=>e.textContent==='완료').click();
+    assert.equal(v.ws.getEditSnapshot().edits.length,1,'the same 완료 records it once the core accepts');
+    v.ws.dispose();
+  }finally{if(previous===undefined)delete globalThis.FalsifyCloudConfig;else globalThis.FalsifyCloudConfig=previous;}
+});
+
 test('a font requiring complete embedding uses the full-font writer',async()=>{
   let paragraphCalls=0;const selected=[],bytes=pdfBytes('FULL-FONT');
   const fonts={revision:0,list:()=>[],resolve:async()=>({revision:0,digest:'full-font',fonts:[{fsType:256,bytes:new Uint8Array([1])}]})};

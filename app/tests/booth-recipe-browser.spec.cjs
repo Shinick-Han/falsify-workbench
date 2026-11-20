@@ -264,7 +264,9 @@ async function recipeFlow(browser, log, errors, wide) {
   assert.equal(await page.locator('#paper-edits .booth-recipe-ai-tag').textContent(), 'AI');
   assert.equal(log.recipes.at(-1), '/v1/booth/recipes/R-ABC123');
   assert.equal(await page.evaluate(() => location.hash), '', 'the recipe hash is consumed');
-  assert.equal(await page.locator('#booth-tab-find').getAttribute('aria-selected'), 'true');
+  // The unresolved edit is fixed where the visitor already is (the Agent 코드 tab the link opened).
+  assert.equal(await page.locator('#booth-tab-agent').getAttribute('aria-selected'), 'true');
+  assert.equal(await page.locator('#booth-pane-agent #booth-recipe-fix').count(), 1);
   const row = page.locator('#booth-recipe-fix .booth-find.row');
   assert.equal(await row.count(), 1);
   assert.match(await row.locator('.booth-find-note').textContent(), /여러 곳/);
@@ -275,8 +277,8 @@ async function recipeFlow(browser, log, errors, wide) {
   await page.locator('#booth-recipe-result').scrollIntoViewIfNeeded();
   await shoot(page, 'result-card', wide);
   await row.locator('.booth-find-hit').first().waitFor();
+  // One tap on the place applies the prefilled change; no second 바꾸기.
   await row.locator('.booth-find-hit').first().click();
-  await row.getByRole('button', {name: '바꾸기'}).click();
   await page.waitForFunction(() => document.querySelector('#booth-dock-count')?.textContent === '고친 곳 2개');
   assert.equal(await page.locator('#booth-recipe-count').textContent(), '2곳 적용했어요');
   assert.equal(await page.locator('#booth-recipe-fix').isHidden(), true);
@@ -339,6 +341,131 @@ async function recipeFlow(browser, log, errors, wide) {
   await page.context().close();
 }
 
+/* Edits that used to end in a blocking message now resolve in place (dead-ends, alpha.89):
+   the only match on the page in view, a second change to the same word, the paragraph editor over a
+   word edit, the dock × with the list re-rendering. The remaining choice (several places) is one tap. */
+async function deadEnds(browser, log, errors, wide) {
+  const page = await openPage(browser, '', log, errors, wide);
+  await page.locator('#booth-missions .booth-mission').first().click();
+  await stepIs(page, 'edit');
+  await page.waitForFunction(() => [...document.querySelectorAll('.paper-paragraph-button')].some(node => node.textContent.includes('0.95')));
+  if (!wide) await page.locator('#booth-find-fold summary').click();
+  const pane = page.locator(wide ? '#booth-pane-find' : '#booth-find-fold');
+  const find = pane.getByLabel('바꿀 글자').first();
+  const repl = pane.getByLabel('새 글자').first();
+  const go = pane.getByRole('button', {name: '바꾸기'}).first();
+  const status = pane.locator('.booth-find > .booth-feedback').first();
+  const dockIs = count => page.waitForFunction(value => document.querySelector('#booth-dock-count')?.textContent === '고친 곳 ' + value + '개', count);
+  const edits = () => page.evaluate(() => globalThis.FalsifyPaperWorkspace.getEditSnapshot().edits.map(edit => ({id: edit.id, segmentId: edit.segmentId, before: edit.before, after: edit.after})));
+  /* Words of the page in view: one with exactly one match here (and more elsewhere), one with none or several here. */
+  const terms = await page.evaluate(() => {
+    const R = globalThis.FalsifyBoothRecipe;
+    const ws = globalThis.FalsifyPaperWorkspace;
+    const segs = ws.getSource().segments;
+    const here = ws.getPageIndex();
+    const out = {single: '', several: ''};
+    const words = new Set(R.pageText(here + 1).split(/\s+/).filter(word => /^[A-Za-z]{6,}$/.test(word)));
+    for (const word of words) {
+      const list = R.searchHits(segs, word, here, 20);
+      const onPage = list.items.filter(item => item.pageIndex === here).length;
+      if (!out.single && list.total > 1 && onPage === 1 && list.items.length === list.total) out.single = word;
+      if (!out.several && list.total > 2 && list.total <= 20 && onPage !== 1) out.several = word;
+    }
+    return out;
+  });
+  assert.ok(terms.single && terms.several, JSON.stringify(terms));
+
+  // (A) Several places, but only one on the page in view: 바꾸기 takes it without asking.
+  await find.fill(terms.single);
+  await repl.fill(terms.single + 's');
+  await go.click();
+  await dockIs(1);
+  await page.waitForFunction(() => /^바꿨어요 · \d+쪽/.test(document.querySelector('#booth-pane-find .booth-find > .booth-feedback, #booth-find-fold .booth-find > .booth-feedback')?.textContent || ''));
+  const single = (await edits())[0];
+  assert.ok(single.after.includes(terms.single + 's'), JSON.stringify(single));
+
+  // (A) The same number changed twice: the second change replaces the first, still one place.
+  for (const value of ['0.87', '0.88']) {
+    await find.fill('0.78');
+    await pane.locator('.booth-find-hit').first().waitFor();
+    await pane.locator('.booth-find-hit').first().click();
+    await repl.fill(value);
+    await go.click();
+    await page.waitForFunction(() => /^바꿨어요/.test(document.querySelector('#booth-pane-find .booth-find > .booth-feedback, #booth-find-fold .booth-find > .booth-feedback')?.textContent || ''));
+  }
+  await dockIs(2);
+  const twice = await edits();
+  assert.equal(twice.filter(edit => edit.after.includes('0.88')).length, 1, JSON.stringify(twice));
+  assert.equal(twice.some(edit => edit.after.includes('0.87')), false, 'the older change gave way');
+
+  // (A) The whole-paragraph editor over a word edit opens with the word already changed and keeps it.
+  await page.evaluate(() => globalThis.FalsifyPaperWorkspace.setZoom(1));
+  assert.ok(single.segmentId.startsWith('paragraph:'), single.segmentId);
+  const shownPage = Number(single.segmentId.split(':')[1]) + 1;
+  await page.evaluate(n => globalThis.FalsifyPaperWorkspace.showPage(n), shownPage);
+  await page.waitForFunction(id => (globalThis.FalsifyPaperWorkspace.getPageParagraphs()?.items || []).some(item => item.segmentId === id), single.segmentId);
+  assert.equal(await page.evaluate(id => globalThis.FalsifyPaperWorkspace.openParagraph(id), single.segmentId), true);
+  const editor = page.locator('#paper-before-stage textarea');
+  const opened = await editor.inputValue();
+  assert.ok(opened.includes(terms.single + 's'), 'the editor starts from the edited paragraph');
+  await editor.fill(opened + ' Added.');
+  await page.locator('#paper-before-stage .paper-direct-controls').getByRole('button', {name: '완료'}).click();
+  await page.waitForFunction(() => !document.querySelector('#paper-before-stage textarea'));
+  const merged = await edits();
+  assert.equal(merged.length, 2, JSON.stringify(merged));
+  const whole = merged.find(edit => edit.segmentId === single.segmentId);
+  assert.ok(whole.after.endsWith(' Added.') && whole.after.includes(terms.single + 's'), JSON.stringify(whole));
+  await dockIs(2);
+
+  // (B) Several places and none alone on this page: one tap on a place applies it.
+  await find.fill(terms.several);
+  await repl.fill(terms.several + 'X');
+  await go.click();
+  const ask = pane.locator('.booth-find-ask').first();
+  await ask.waitFor();
+  assert.match(await ask.textContent(), /^같은 글자가 \d+곳에 있어요\. 바꿀 곳을 눌러 주세요\.$/);
+  assert.equal(await status.textContent(), '');
+  const askBox = await ask.boundingBox();
+  const listBox = await pane.locator('.booth-find-hits').first().boundingBox();
+  assert.ok(askBox.y < listBox.y, 'the question sits above the places it is about');
+  await shoot(page, 'dead-b-pick-place', wide);
+  await pane.locator('.booth-find-hit').nth(1).click();
+  await dockIs(3);
+  assert.equal(await ask.isHidden(), true);
+  await page.waitForFunction(() => /^바꿨어요/.test(document.querySelector('#booth-pane-find .booth-find > .booth-feedback, #booth-find-fold .booth-find > .booth-feedback')?.textContent || ''));
+
+  // (C) Text that is nowhere in the paper: said beside the field the visitor fixes.
+  await find.fill('zzqx nowhere');
+  await repl.fill('x');
+  await go.click();
+  await page.waitForFunction(() => /논문에 적힌 그대로/.test(document.querySelector('#booth-pane-find .booth-find > .booth-feedback, #booth-find-fold .booth-find > .booth-feedback')?.textContent || ''));
+  assert.equal(await status.textContent(), '논문에서 이 글자를 찾지 못했어요. 논문에 적힌 그대로 고쳐 적어 주세요.');
+  await find.scrollIntoViewIfNeeded();
+  await shoot(page, 'dead-c-not-found', wide);
+
+  if (wide) {
+    // (A) The dock × works while #paper-edits is re-rendering; (C) if the workspace cannot remove it, × again.
+    await page.evaluate(() => {
+      document.getElementById('paper-edits').replaceChildren();
+      globalThis.__remove = globalThis.FalsifyPaperWorkspace.removeEdit;
+      globalThis.FalsifyPaperWorkspace.removeEdit = () => false;
+    });
+    await page.locator('#booth-dock-chips .booth-dock-x').first().click();
+    assert.equal(await page.locator('#booth-dock-status').textContent(), '아직 지우지 못했어요. ×를 한 번 더 눌러 주세요.');
+    await page.locator('#booth-dock').scrollIntoViewIfNeeded();
+    await shoot(page, 'dead-c-dock-retry', wide);
+    await page.evaluate(() => {
+      document.getElementById('paper-edits').replaceChildren();
+      globalThis.FalsifyPaperWorkspace.removeEdit = globalThis.__remove;
+    });
+    await page.locator('#booth-dock-chips .booth-dock-x').first().click();
+    await dockIs(2);
+  }
+  const text = await page.evaluate(() => document.querySelector('#booth-step-edit').textContent + document.querySelector('#booth-dock').textContent);
+  assert.doesNotMatch(text, /문단 전체 고치기」로|"직접 고치기"에서|목록에서 먼저 지워/);
+  await page.context().close();
+}
+
 async function main() {
   assert.equal(pdfBytes.subarray(0, 5).toString(), '%PDF-');
   const server = serve();
@@ -350,12 +477,15 @@ async function main() {
     browser = await chromium.launch({executablePath: chrome, headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage']});
     await findAndReplace(browser, log, errors, false);
     await recipeFlow(browser, log, errors, false);
+    await deadEnds(browser, log, errors, false);
+    await deadEnds(browser, log, errors, true);
     if (shots) {
       await findAndReplace(browser, log, errors, true);
       await recipeFlow(browser, log, errors, true);
     }
     assert.equal(errors.join('\n'), '');
   } catch (error) {
+    error.message += '\nstatus=' + JSON.stringify(lastPage && !lastPage.isClosed() ? await lastPage.evaluate(() => [...document.querySelectorAll('.booth-find > .booth-feedback')].map(node => node.textContent)).catch(() => null) : null);
     error.message += '\npage=' + JSON.stringify(await diagnose()) + '\nerrors=' + errors.join(' | ');
     throw error;
   } finally {
