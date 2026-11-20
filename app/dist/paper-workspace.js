@@ -2543,7 +2543,7 @@
       let left=i-1;while(left>=0&&anchors[left]<0)left--;
       let right=i+1;while(right<anchors.length&&anchors[right]<0)right++;
       const lo=left>=0?anchors[left]:-1,hi=right<anchors.length?anchors[right]:size;
-      return {lo,hi,tight:lo>=0&&hi<size&&hi>lo&&hi-lo<=right-left+8};
+      return {lo,hi,tight:lo>=0&&hi<size&&hi>lo&&Math.abs((hi-lo)-(right-left))<=8};
     }
     const MARK=/[†‡∗♢§¶*0-9]/;
     /* A leftover that is not a mark pairs only when exactly one unused same character lies strictly between its two
@@ -2584,12 +2584,34 @@
       if(copies.length!==run.length)return;
       run.forEach((k,n)=>{map[k]=copies[n];used[copies[n]]=true;});
     }
+    /* Runs of anchored view characters that map to consecutive paragraph characters of one segment. */
+    function anchorRuns(map,seg){
+      const runs=[];
+      for(let i=0;i<map.length;i++){
+        if(map[i]<0)continue;
+        const r=runs.at(-1);
+        if(r&&r.e===i-1&&map[i]===map[i-1]+1&&seg[map[i]]===seg[map[i-1]])r.e=i;else runs.push({s:i,e:i});
+      }
+      return runs;
+    }
+    /* A short anchor run (under 16 characters) that agrees with neither neighbouring run (same paragraph, in order)
+       is a chance match elsewhere on the page ("Ragas," in another sentence) and is dropped. */
+    function dropLoneAnchors(map,used,seg){
+      const runs=anchorRuns(map,seg),inOrder=(x,y)=>seg[map[x.e]]===seg[map[y.s]]&&map[x.e]<map[y.s];
+      runs.forEach((r,n)=>{
+        const p=runs[n-1],q=runs[n+1];
+        if(r.e-r.s+1>=16||!p&&!q||p&&inOrder(p,r)||q&&inOrder(r,q))return;
+        for(let k=r.s;k<=r.e;k++){used[map[k]]=false;map[k]=-1;}
+      });
+    }
     function alignToParagraphs(a,b,seg,view){
       const map=new Array(a.length).fill(-1),used=new Array(b.length).fill(false);
       anchorInk(a,b,map,used,seg);
+      dropLoneAnchors(map,used,seg);
       const anchors=map.slice();
       for(const run of markRuns(a,map,view))pairRun(a,b,map,used,run,anchors);
       for(let i=0;i<a.length;i++)if(map[i]<0&&!MARK.test(a[i]))pairOrphan(a,b,map,used,i,anchors);
+      map.anchors=anchors;
       return map;
     }
     function changedSpan(edit){
@@ -2604,12 +2626,34 @@
     function twinAt(para,map,k,j){
       return [-1,1].some(d=>para.chars[j+d]===para.chars[j]&&para.seg[j+d]===para.seg[j]&&map[k+d]!==j+d);
     }
+    /* The view characters just outside the change must sit just outside it in the paragraph too (where the
+       paragraph goes on), so an anchor that ran one letter too far ("stars a|nd" onto "stars a|s") cannot carry the
+       change. A neighbour that is not placed must at least be the same character; a line-break hyphen in the view
+       and a mark the paragraph holds there (Ragas¹,) are stepped over. Marks paired as a run moved line, so their
+       neighbours differ by nature; any other mark (an affiliation † starting its line) needs one side. */
+    function stepHyphens(view,map,k,dir){
+      while(k>=0&&k<map.length&&map[k]<0&&view.chars[k]==='-')k+=dir;
+      return k;
+    }
+    function sideSealed(view,map,para,k,j,dir,own){
+      k=stepHyphens(view,map,k,dir);
+      if(k<0||k>=map.length||para.seg[j]!==own)return true;
+      const next=MARK.test(para.chars[j])&&para.seg[j+dir]===own?j+dir:j;
+      if(map[k]>=0)return map[k]===j||map[k]===next;
+      return view.chars[k]===para.chars[j]||view.chars[k]===para.chars[next];
+    }
+    function sealed(view,map,para,idx,js){
+      const marks=idx.every(k=>MARK.test(view.chars[k]));
+      if(marks&&idx.every(k=>map.anchors[k]<0))return true;
+      const own=para.seg[js[0]],left=sideSealed(view,map,para,idx[0]-1,js[0]-1,-1,own),right=sideSealed(view,map,para,idx.at(-1)+1,js.at(-1)+1,1,own);
+      return marks?left||right:left&&right;
+    }
     function landedSpan(view,map,para,from,to){
       const idx=[];view.at.forEach((p,k)=>{if(p>=from&&p<to)idx.push(k);});
       if(!idx.length||idx.some(k=>map[k]<0))return null;
       const js=idx.map(k=>map[k]);
       if(js.some((j,n)=>n&&j!==js[n-1]+1)||js.some(j=>para.seg[j]!==para.seg[js[0]]))return null;
-      if(idx.some((k,n)=>twinAt(para,map,k,js[n])))return null;
+      if(idx.some((k,n)=>twinAt(para,map,k,js[n]))||!sealed(view,map,para,idx,js))return null;
       return {seg:para.seg[js[0]],start:para.at[js[0]],end:para.end[js[js.length-1]]};
     }
     function projectEdit(edit,taken){
