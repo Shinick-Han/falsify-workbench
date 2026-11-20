@@ -20,6 +20,8 @@ html[data-booth-step] #paper-edits .paper-edit-origin{display:none}
 .booth-find-hit .snip{min-width:0;font-family:var(--ev-mono);font-size:12px;line-height:1.55;color:var(--ev-ink-2);overflow-wrap:anywhere}
 .booth-find-hit mark{padding:0 2px;border-radius:2px;background:var(--ev-mark);color:var(--ev-ink);font-weight:600}
 .booth-find-more{font-size:12px;color:var(--ev-muted)}
+.booth-find-ask{margin:0;font-size:13.5px;font-weight:500;line-height:1.5;color:var(--ev-ink);word-break:keep-all;overflow-wrap:anywhere}
+.booth-find-ask[hidden]{display:none}
 .booth-recipe-fix{display:grid;gap:10px}
 .booth #booth-agent-code{font-family:var(--ev-mono);letter-spacing:.08em;text-transform:uppercase}
 .booth-recipe-card{gap:6px}

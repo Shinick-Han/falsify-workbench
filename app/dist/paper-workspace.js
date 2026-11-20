@@ -768,7 +768,10 @@
     function setStatus(text,error){say(ui.status,text,error);}
     function setBeforeStatus(text,error){say(ui.beforeStatus,text,error);}
     function setAfterStatus(text,error){say(ui.afterStatus,text,error);}
-    function setEditStatus(text,error){say(ui.editStatus,text,error);}
+    /* On the event page #paper-edit-status is not shown, so a paragraph editor that stays open says
+       why in its own status line, with the next step there. */
+    const BOOTH_EDIT_RETRY='이 문단을 아직 기록하지 못했어요. 「완료」를 다시 누르거나 「입력 취소」로 닫아 주세요.';
+    function setEditStatus(text,error){say(ui.editStatus,text,error);if(error&&directStatus&&eventBoothOpen())directStatus.textContent=BOOTH_EDIT_RETRY;}
     function setGenStatus(text,error){say(ui.genStatus,text,error);}
     function setDraftStatus(text,error){say(ui.draftStatus,text,error);}
     function setProposalStatus(text,error){say(ui.proposalStatus,text,error);}
@@ -1667,7 +1670,8 @@
       if(p.editable===false){setEditStatus('이 문단은 흐름 편집을 지원하지 않습니다. 글 선택 편집으로 위치를 확인할 수 있습니다.',true);return;}
       const existing=(snapshot&&snapshot.edits||[]).find(e=>e.segmentId===id&&e.before===p.text);
       const anchor={start:0,end:p.text.length,occurrence:0,bbox:p.bbox.slice(),coordinate:'top-left',rotation:0};
-      inline={before:p.text,after:existing?existing.after:p.text,anchor,pageIndex:pageText.pageIndex,segmentId:id,editId:existing?existing.id:null,
+      const absorb=existing?[]:absorbedEdits({segmentId:id,pageIndex:pageText.pageIndex,anchor});
+      inline={before:p.text,after:existing?existing.after:composeParagraph(p.text,id,absorb),anchor,pageIndex:pageText.pageIndex,segmentId:id,editId:existing?existing.id:null,absorb:absorb.map(e=>e.id),
         clientRect:{left:rect.left+p.bbox[0]*rect.width/pageText.paragraphWidth,bottom:rect.top+p.bbox[3]*rect.height/pageText.paragraphHeight,width:(p.bbox[2]-p.bbox[0])*rect.width/pageText.paragraphWidth}};
       renderInline();openDirectEditor(display,{bbox:p.bbox,width:display.paragraphWidth,height:display.paragraphHeight,source:p});
     }
@@ -2050,8 +2054,8 @@
         }
         return overlappingBoxes(candidate,e);
     }
-    function crossAliasOverlap(candidate,includeExternal=false){
-      const others=(snapshot?.edits||[]).filter(e=>e.enabled!==false).concat(includeExternal?(external?.edits?.()||[]):[]);
+    function crossAliasOverlap(candidate,includeExternal=false,skip){
+      const others=(snapshot?.edits||[]).filter(e=>e.enabled!==false&&!(skip&&skip.includes(e.id))).concat(includeExternal?(external?.edits?.()||[]):[]);
       return others.some(e=>aliasesOverlap(candidate,e));
     }
     function closeInline(){
@@ -2079,24 +2083,61 @@
     function inlineReady(after){
       if(!inline||typeof after!=='string'){setEditStatus('After를 확인하지 못했습니다.',true);return false;}
       if(after!==''&&!after.trim()){setEditStatus('공백만 있는 After는 저장하지 않습니다. 문장을 지우려면 After를 비우세요.',true);return false;}
-      if(after===inline.before&&!inline.editId){closeInline();scheduleGeneration();return false;}
-      if(!inline.editId&&crossAliasOverlap(inline,true)){setEditStatus('같은 위치에 기록한 편집이 있습니다. 기존 편집을 수정하거나 삭제한 뒤 적용하세요.',true);return false;}
+      const absorb=inline.absorb||[];
+      if(after===inline.before&&!inline.editId&&!absorb.length){closeInline();scheduleGeneration();return false;}
+      if(!inline.editId&&crossAliasOverlap(inline,true,absorb)){setEditStatus('같은 위치에 기록한 편집이 있습니다. 기존 편집을 수정하거나 삭제한 뒤 적용하세요.',true);return false;}
       return true;
+    }
+    /* Smaller edits inside a paragraph opened whole: the editor starts from the paragraph with them
+       applied, and the whole-paragraph edit replaces them when it is recorded. */
+    function absorbedEdits(candidate){
+      return (snapshot?.edits||[]).filter(e=>e.enabled!==false&&aliasesOverlap(candidate,e));
+    }
+    function composeParagraph(text,segmentId,edits){
+      const spans=[];
+      for(const e of edits){
+        const before=typeof e.before==='string'?e.before:'';
+        if(!before)continue;
+        let start=-1;
+        if(e.segmentId===segmentId&&Number.isSafeInteger(e.anchor?.start)&&text.slice(e.anchor.start,e.anchor.start+before.length)===before)start=e.anchor.start;
+        else if(e.segmentId!==segmentId&&hitsIn(text,before).length===1)start=text.indexOf(before);
+        const end=start+before.length;
+        if(start<0||spans.some(s=>s.start<end&&start<s.end))continue;
+        spans.push({start,end,after:typeof e.after==='string'?e.after:before});
+      }
+      spans.sort((a,b)=>a.start-b.start);
+      let out='',at=0;
+      for(const s of spans){out+=text.slice(at,s.start)+s.after;at=s.end;}
+      return out+text.slice(at);
+    }
+    function takeAbsorbed(){
+      const ids=new Set(inline.absorb||[]);
+      const taken=(snapshot?.edits||[]).filter(e=>ids.has(e.id)).map(e=>({pageIndex:e.pageIndex,segmentId:e.segmentId,before:e.before,after:e.after,anchor:e.anchor,origin:e.origin}));
+      for(const id of ids)session.remove(id);
+      return taken;
+    }
+    function restoreAbsorbed(taken){
+      for(const e of taken){try{session.add(e);}catch{}}
     }
     function applyInline(){
       if(composingDirect)return;
       const api=editsApi();
       if(!inlineCoreReady(api))return;
-      const after=ui.inlineAfter.value;
+      let after=ui.inlineAfter.value;
+      if(eventBoothOpen()&&after!==''&&!after.trim())after='';
       if(!inlineReady(after))return;
       const inlineBefore=inline.before;
       committingInline=true;
       generatorVersion++;generator?.dispose();generator=null;
       try{
-        if(after===inline.before)session.remove(inline.editId);
+        if(after===inline.before&&inline.editId)session.remove(inline.editId);
+        else if(after===inline.before)takeAbsorbed();
         else if(inline.editId)session.update(inline.editId,{after});
         else{
-          if(!addInlineEdit(after))return;
+          const taken=takeAbsorbed();
+          let added=false;
+          try{added=addInlineEdit(after);}finally{if(!added)restoreAbsorbed(taken);}
+          if(!added)return;
         }
         closeInline();
         setEditStatus(after===inlineBefore?'원문으로 되돌렸습니다.':'직접 편집을 기록했습니다.');
@@ -2965,6 +3006,12 @@
          paragraph's direct editor, and a free zoom factor. index.html never calls them. */
       getPageParagraphs(){return pageParagraphBoxes();},
       openParagraph(segmentId){return openParagraphById(segmentId);},
+      /* Removes one recorded edit, as its delete button does; false when there is no such edit. */
+      removeEdit(id){
+        const raw=session&&typeof session.snapshot==='function'?session.snapshot():snapshot;
+        if(!session||typeof id!=='string'||!(raw?.edits||[]).some(e=>e.id===id))return false;
+        try{session.remove(id);return true;}catch{return false;}
+      },
       getZoom(){return zoom;},
       setZoom(factor,redraw){return setFreeZoom(factor,redraw===true);},
       /* A new after for one recorded edit (back to its before removes it), for re-editing a tapped word. */
