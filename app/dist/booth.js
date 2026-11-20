@@ -13,9 +13,10 @@
   /* Keyed by the consentVersion GET /v1/booth/config returns. A version with no text here cannot be submitted. */
   const CONSENT_COPY=Object.freeze({
     '2026-11-22.v1':'제출한 수정본 PDF와 결함 설명(쪽·유형·이유)은 가짜연구소 Falsify 스터디가 저장하고 운영자가 읽습니다. 마감 후 AI 검증에는 수정본 PDF만 모델 제공자(Anthropic 또는 OpenAI)에 보내며, 결함 설명은 AI에 보내지 않습니다. 이름·연락처는 받지 않으니 이유란에도 적지 마세요. 원 논문은 미션이나 검색에서 고른 공개 논문(CC BY·CC BY-SA·CC0)이며, 수정본을 스터디 밖에 공개할 때는 저자·arXiv 번호·라이선스와 수정 사실을 밝히고, CC BY-SA 논문의 수정본은 같은 라이선스로 공개합니다. 결과와 경품 안내는 접수번호와 확인키로만 확인할 수 있습니다. 확인키로 언제든 철회할 수 있습니다. 철회하면 서버의 수정본 PDF·설명·결과를 바로 지우고, 운영자 보관본은 다음 동기화 때 지웁니다. 이미 AI 검증에 보낸 사본은 모델 제공자에게서 회수할 수 없고, 웹 실행 서버 사본은 7일, 데이터베이스 백업은 최대 30일 뒤에 사라집니다. 보관 자료는 스터디 종료 후 삭제합니다.',
-    '2026-11-22.v2':'제출한 수정본 PDF와 결함 설명(쪽·유형·이유)은 가짜연구소 Falsify 스터디가 저장하고 운영자가 읽습니다. 제출하면 바로 수정본 PDF만 AI 검증을 위해 모델 제공자(Anthropic)에 보내고, 마감 후 한 번 더 보낼 수 있습니다. 결함 설명은 AI에 보내지 않습니다. 이름·연락처는 받지 않으니 이유란에도 적지 마세요. 원 논문은 미션이나 검색에서 고른 공개 논문(CC BY·CC BY-SA·CC0)이며, 수정본을 스터디 밖에 공개할 때는 저자·arXiv 번호·라이선스와 수정 사실을 밝히고, CC BY-SA 논문의 수정본은 같은 라이선스로 공개합니다. AI 결과와 경품 안내는 접수번호와 확인키로만 확인할 수 있습니다. 확인키로 언제든 철회할 수 있습니다. 철회하면 서버의 수정본 PDF·설명·결과를 바로 지우고, 운영자 보관본은 다음 동기화 때 지웁니다. 이미 AI 검증에 보낸 사본은 모델 제공자에게서 회수할 수 없고, 웹 실행 서버 사본은 7일, 데이터베이스 백업은 최대 30일 뒤에 사라집니다. 보관 자료는 스터디 종료 후 삭제합니다.'
+    '2026-11-22.v2':'제출한 수정본 PDF와 결함 설명(쪽·유형·이유)은 가짜연구소 Falsify 스터디가 저장하고 운영자가 읽습니다. 제출하면 바로 수정본 PDF만 AI 검증을 위해 모델 제공자(Anthropic)에 보내고, 마감 후 한 번 더 보낼 수 있습니다. 결함 설명은 AI에 보내지 않습니다. 이름·연락처는 받지 않으니 이유란에도 적지 마세요. 원 논문은 미션이나 검색에서 고른 공개 논문(CC BY·CC BY-SA·CC0)이며, 수정본을 스터디 밖에 공개할 때는 저자·arXiv 번호·라이선스와 수정 사실을 밝히고, CC BY-SA 논문의 수정본은 같은 라이선스로 공개합니다. AI 결과와 경품 안내는 접수번호와 확인키로만 확인할 수 있습니다. 확인키로 언제든 철회할 수 있습니다. 철회하면 서버의 수정본 PDF·설명·결과를 바로 지우고, 운영자 보관본은 다음 동기화 때 지웁니다. 이미 AI 검증에 보낸 사본은 모델 제공자에게서 회수할 수 없고, 웹 실행 서버 사본은 7일, 데이터베이스 백업은 최대 30일 뒤에 사라집니다. 보관 자료는 스터디 종료 후 삭제합니다.',
+    '2026-11-22.v3':'제출한 수정본 PDF와 결함 설명(쪽·유형·이유)은 가짜연구소 Falsify 스터디가 저장하고 운영자가 읽어요. 제출하면 수정본 PDF만 AI 검증을 위해 모델 제공자(Anthropic)에 바로 보내고, 마감 후 한 번 더 보낼 수 있어요. 결함 설명은 AI에 보내지 않아요. 이름과 연락처는 받지 않으니, 이유란에는 결함 설명만 적어 주세요. 원 논문은 미션이나 검색에서 고른 공개 논문(CC BY, CC BY-SA, CC0)이에요. 수정본을 스터디 밖에 공개할 때는 저자, arXiv 번호, 라이선스와 수정 사실을 밝히고, CC BY-SA 논문의 수정본은 같은 라이선스로 공개해요. AI 결과와 경품 안내는 접수번호와 확인키로만 볼 수 있어요. 확인키로 언제든 철회할 수 있어요. 철회하면 서버의 수정본 PDF, 설명, 결과를 바로 지우고, 운영자 보관본은 다음 동기화 때 지워요. 이미 AI 검증에 보낸 사본은 모델 제공자에게서 회수할 수 없어요. 웹 실행 서버 사본은 7일, 데이터베이스 백업은 최대 30일 뒤에 사라져요. 보관 자료는 스터디가 끝나면 삭제해요.'
   });
-  const CONSENT_MISSING='이 화면에 아직 새 동의 문구가 없어 제출할 수 없습니다. 페이지를 새로 고친 뒤 다시 시도해 주세요.';
+  const CONSENT_MISSING='동의 문구가 새로 바뀌었어요. 페이지를 새로 고친 뒤 제출해 주세요.';
   const PICK_PAPER='미션이나 검색에서 논문을 골라 시작해 주세요';
   const CONSENT_VERSION='2026-11-22.v1';
   const RECENT_CAP=5;
@@ -28,7 +29,7 @@
   /* Headline as [plain lead, 600-weight phrase]. partial counts as found. */
   const HEADLINE={
     caught:['AI가 ','찾아냈어요'],partial:['AI가 ','근처를 짚었어요'],missed:['AI가 ','못 찾았어요'],
-    invalid:['결함으로 ','인정되지 않았어요'],judged:['','결과가 나왔어요'],withdrawn:['제출을 ','철회했어요']
+    invalid:['이번 도전은 ','무효로 끝났어요'],judged:['','결과가 나왔어요'],withdrawn:['제출을 ','철회했어요']
   };
   const STAMP={
     missed:{kind:'pass',word:'통과',latin:'PASSED'},
@@ -40,15 +41,16 @@
   /* Three-line consent summary per version. The full text stays CONSENT_COPY[version]. */
   const CONSENT_SUMMARY=Object.freeze({
     '2026-11-22.v1':Object.freeze(['수정본 PDF만 마감 후 AI(Anthropic 또는 OpenAI)에 보내요.','이름·연락처는 받지 않아요.','확인키로 언제든 철회할 수 있어요.']),
-    '2026-11-22.v2':Object.freeze(['수정본 PDF만 AI(Anthropic)에 보내요.','이름·연락처는 받지 않아요.','확인키로 언제든 철회할 수 있어요.'])
+    '2026-11-22.v2':Object.freeze(['수정본 PDF만 AI(Anthropic)에 보내요.','이름·연락처는 받지 않아요.','확인키로 언제든 철회할 수 있어요.']),
+    '2026-11-22.v3':Object.freeze(['수정본 PDF만 AI(Anthropic)에 보내요.','이름·연락처는 받지 않아요.','확인키로 언제든 철회할 수 있어요.'])
   });
   const HERO_COPY='공개 논문 한 곳을 몰래 고쳐 보세요. AI가 보통 1~3분 안에 찾아내는지 겨뤄요. AI가 놓치면 부스에서 선물을 드려요.';
-  const PARTIAL_SUB='결함 근처를 짚어서 적발로 처리돼요.';
+  const PARTIAL_SUB='결함 근처까지 짚으면 적발로 봐요.';
   const WITHDRAW_WARN='철회하면 되돌릴 수 없고, 선물과 추첨 기회도 함께 사라져요.';
   const CAPTURE_COPY='이 티켓을 캡처해 두세요. 화면을 닫아도 「내 기록」에서 접수번호와 확인키로 다시 볼 수 있어요.';
-  const LOCK_COPY='이 설명은 AI에게 보내지 않아요. 판정이 맞는지 운영진만 확인해요.';
+  const LOCK_COPY='이 설명은 AI에게 보내지 않고 운영진만 봐요.';
   const GENERIC_HINT='숫자, 결론 문장, 표 값 중 한 곳을 골라 티 나지 않게 바꿔 보세요.';
-  const SEND_COPY='운영진이 판정이 맞는지 확인할 때만 봐요. AI에게는 수정본 PDF만 보내요.';
+  const SEND_COPY='고친 곳마다 어떤 결함인지 알려 주세요. AI에게는 수정본 PDF만 가요.';
   const FINAL_COPY='마감 후 더 정밀한 AI가 한 번 더 검증해요. 그때도 못 찾으면 최종 추첨 대상이에요.';
   /* Desktop layout (booth.css, min-width 1024px): the top bar's step indicator and the dock's edit chips. */
   const DESK_QUERY='(min-width:1024px)';
@@ -77,26 +79,26 @@
     {id:'logic',label:'논리·결론'},{id:'method',label:'방법·실험 설계'},{id:'other',label:'기타'}
   ];
   const ERROR_TEXT={
-    booth_closed:'지금은 접수를 받지 않습니다. 운영 안내를 확인해 주세요.',
-    consent_outdated:'동의 문구가 갱신되었습니다. 페이지를 새로 고친 뒤 다시 동의해 주세요.',
-    job_not_ready:'수정본이 아직 준비되지 않았습니다. 적용이 끝난 뒤 다시 제출해 주세요.',
-    already_submitted:'이미 제출된 수정본입니다. 이전에 받은 접수번호로 결과를 확인하세요.',
-    pii_not_allowed:'별명에 이메일이나 전화번호처럼 보이는 내용은 넣을 수 없습니다.',
-    rate_limited:'요청이 너무 많습니다. 잠시 뒤 다시 시도해 주세요.',
-    license_not_allowed:'이 논문은 부스가 허용하는 라이선스(CC BY, CC BY-SA, CC0)가 아닙니다.',
-    payload_too_large:'논문 파일이 너무 커서 열 수 없습니다.',
-    length_required:'요청 크기를 확인하지 못했습니다. 파일이 너무 크면 제출할 수 없습니다.',
-    storage_full:'오늘 접수 저장 공간이 가득 찼습니다. 부스 운영자에게 알려 주세요.',
-    model_jobs_operator_only:'이 행사 화면에서는 AI 검증을 실행하지 않습니다. 수정본은 부스 제출로 보내 주세요.',
-    not_found:'접수번호 또는 확인키가 맞지 않습니다.',
-    paper_not_allowed:'이 논문의 라이선스는 부스 제출에 쓸 수 없습니다. CC BY, CC BY-SA, CC0 논문만 제출할 수 있습니다.',
-    invalid_pdf:'수정본 PDF를 확인하지 못했습니다. PDF 파일을 다시 만들어 주세요.',
-    pdf_mismatch:'수정본 PDF와 해시가 일치하지 않습니다. 다시 만들어 제출해 주세요.',
-    pdf_unchanged:'수정본이 원본과 같습니다. 편집을 적용한 PDF를 만들어 주세요.',
-    session_missing:'게스트 세션이 없어 요청을 보내지 못했습니다. 페이지를 새로 고친 뒤 다시 시도해 주세요.',
+    booth_closed:'지금은 접수 시간이 아니에요. 부스에서 운영 시간을 확인해 주세요.',
+    consent_outdated:'동의 문구가 바뀌었어요. 페이지를 새로 고친 뒤 다시 동의해 주세요.',
+    job_not_ready:'수정본을 아직 만드는 중이에요. 끝나면 다시 제출해 주세요.',
+    already_submitted:'이미 제출한 수정본이에요. 「내 기록」에서 결과를 볼 수 있어요.',
+    pii_not_allowed:'별명은 이메일이나 전화번호 말고 닉네임으로 적어 주세요.',
+    rate_limited:'지금 요청이 몰려 있어요. 잠시 뒤 다시 시도해 주세요.',
+    license_not_allowed:'이 논문은 라이선스 때문에 쓸 수 없어요. CC BY, CC BY-SA, CC0 논문을 골라 주세요.',
+    payload_too_large:'논문 파일이 너무 커서 열지 못했어요. 다른 논문을 골라 주세요.',
+    length_required:'파일 크기를 확인하지 못했어요. 페이지를 새로 고친 뒤 다시 제출해 주세요.',
+    storage_full:'오늘 접수 공간이 가득 찼어요. 부스 스태프에게 알려 주세요.',
+    model_jobs_operator_only:'이 화면에서는 AI 검증을 바로 돌리지 않아요. 「AI에게 제출하기」로 보내 주세요.',
+    not_found:'접수번호와 확인키를 다시 확인해 볼까요?',
+    paper_not_allowed:'이 논문은 라이선스 때문에 제출할 수 없어요. CC BY, CC BY-SA, CC0 논문을 골라 주세요.',
+    invalid_pdf:'수정본 PDF를 읽지 못했어요. 「← 고치기」에서 「다음」을 다시 눌러 주세요.',
+    pdf_mismatch:'수정본이 중간에 바뀌었어요. 「← 고치기」에서 「다음」을 다시 눌러 주세요.',
+    pdf_unchanged:'아직 원본과 같아요. 한 곳 이상 고친 뒤 「다음」을 눌러 주세요.',
+    session_missing:'연결이 끊겼어요. 페이지를 새로 고친 뒤 다시 시도해 주세요.',
     invalid_request:'입력 내용을 확인해 주세요.',
-    forbidden:'이 작업은 할 수 없습니다.',
-    network:'서버에 연결하지 못했습니다. 네트워크를 확인한 뒤 다시 시도해 주세요.'
+    forbidden:'지금은 이 작업을 할 수 없어요.',
+    network:'서버에 연결하지 못했어요. 네트워크를 확인한 뒤 다시 시도해 주세요.'
   };
 
   /* 411/413 name the cap only when the booth config exposes it. Otherwise the generic size line stays. */
@@ -111,11 +113,11 @@
   function errorMessage(code, extra){
     const known=typeof code==='string'&&Object.prototype.hasOwnProperty.call(ERROR_TEXT,code)?code:'';
     if(known==='already_submitted'&&extra&&typeof extra.receipt==='string'&&/^F-\d{4,}$/.test(extra.receipt)){
-      return '이미 제출된 수정본입니다. 접수번호 '+extra.receipt+'로 결과를 확인하세요.';
+      return '이미 제출한 수정본이에요. 접수번호 '+extra.receipt+'로 결과를 볼 수 있어요.';
     }
     const mb=sizeMb(known, extra);
-    if(mb) return '수정본 PDF는 '+mb+'MB 이하만 제출할 수 있습니다.';
-    return known?ERROR_TEXT[known]:'요청을 처리하지 못했습니다. 잠시 뒤 다시 시도해 주세요.';
+    if(mb) return '수정본 PDF는 '+mb+'MB까지 제출할 수 있어요.';
+    return known?ERROR_TEXT[known]:'처리하지 못했어요. 잠시 뒤 다시 시도해 주세요.';
   }
   function normalizeClaimKey(value){
     if(typeof value!=='string') return '';
@@ -505,7 +507,7 @@
     return head.length>28?head.slice(0,27).trimEnd()+'…':head;
   }
   function capMessage(cap){
-    return '한 사람당 '+cap+'번까지 제출할 수 있어요. 이번 도전은 여기까지예요! 아래 접수 목록에서 결과를 확인해 주세요.';
+    return '기회 '+cap+'번을 모두 썼어요. 아래 접수 목록에서 결과를 볼 수 있어요.';
   }
   function paperSearchPath(query, page){
     const q=typeof query==='string'?query.trim():'';
@@ -812,10 +814,10 @@
         el('ul',{id:'booth-consent-summary',className:'booth-consent-summary'}),
         el('details',{id:'booth-consent-full',className:'booth-consent-full'},
           el('summary',{textContent:'동의 내용 전체 보기'}),
-          el('p',{id:'booth-consent-copy',className:'booth-consent-copy',textContent:CONSENT_COPY[CONSENT_VERSION]}),
+          el('p',{id:'booth-consent-copy',className:'booth-consent-copy'}),
           el('p',{id:'booth-consent-version',className:'booth-mono-meta'})),
         el('label',{className:'booth-check',for:'booth-consent'},
-          el('input',{id:'booth-consent',type:'checkbox'}),
+          el('input',{id:'booth-consent',type:'checkbox',disabled:true}),
           el('span',{textContent:'동의 내용을 읽었고 동의해요'})));
     }
     function sendFact(label, id){
@@ -833,7 +835,7 @@
           el('div',{id:'booth-rows',className:'booth-rows'}),
           el('details',{className:'booth-more booth-nick'},
             el('summary',{textContent:'별명 남기기 (선택)'}),
-            el('label',{for:'booth-nickname',className:'booth-field'},el('span',{className:'booth-klab',textContent:'별명 · 이름이나 연락처는 적지 마세요'}),
+            el('label',{for:'booth-nickname',className:'booth-field'},el('span',{className:'booth-klab',textContent:'별명 · 닉네임이면 충분해요'}),
               el('input',{id:'booth-nickname',type:'text',maxlength:'24',autocomplete:'off',spellcheck:'false'})))),
         el('div',{id:'booth-send-ticket',className:'booth-send-side'},
           el('div',{className:'booth-sec booth-desk'},
@@ -1244,7 +1246,7 @@
       adoptedSignature=editSignature(edits);
       if(edits.length>limits.maxDeclared){
         rows=[];
-        report('고친 곳이 '+edits.length+'개예요. 제출하려면 '+limits.maxDeclared+'개 이하로 남겨 주세요.');
+        report('고친 곳은 '+limits.maxDeclared+'개까지 제출할 수 있어요. 지금은 '+edits.length+'개예요.');
         renderRows();
         return false;
       }
@@ -1279,7 +1281,7 @@
       try{bytes=new Uint8Array(await file.arrayBuffer());}catch{bytes=null;}
       if(!pdfMagic(bytes)) return rejectGenerated(errorMessage('invalid_pdf'));
       const hash=await digestHex(bytes);
-      if(!hash) return rejectGenerated('수정본 PDF의 해시를 계산하지 못했습니다.');
+      if(!hash) return rejectGenerated('수정본을 확인하지 못했어요. 「다음」을 다시 눌러 주세요.');
       sourceSha=await originalSha(detail);
       if(sourceSha&&sourceSha===hash) return rejectGenerated(errorMessage('pdf_unchanged'));
       generatedFile=file;
@@ -1313,7 +1315,7 @@
         return 'done';
       }
       const button=doc.getElementById('paper-generate');
-      if(!button){report('논문 작업대를 찾지 못했습니다.');return 'error';}
+      if(!button){report('화면을 불러오지 못했어요. 페이지를 새로 고쳐 주세요.');return 'error';}
       if(waiting) return button.disabled?'waiting':'idle';
       if(button.disabled) return 'busy';
       button.click();
@@ -1562,11 +1564,11 @@
       const bytes=payload.bytes;
       if(!pdfMagic(bytes)){say(statusId,errorMessage('invalid_request'));return false;}
       const file=pdfFile(bytes, pdfFileName(headerValue(payload.headers,'Content-Disposition'), nameHint));
-      if(!file){say(statusId,'이 브라우저에서 논문 파일을 만들지 못했습니다.');return false;}
+      if(!file){say(statusId,'논문을 열지 못했어요. 다시 눌러 주세요.');return false;}
       const input=doc.getElementById('paper-file');
-      if(!input){say(statusId,'논문 입력을 찾지 못했습니다.');return false;}
+      if(!input){say(statusId,'논문을 열지 못했어요. 페이지를 새로 고쳐 주세요.');return false;}
       try{assignInputFile(input, file);}
-      catch{say(statusId,'논문 파일을 작업대에 넣지 못했습니다.');return false;}
+      catch{say(statusId,'논문을 열지 못했어요. 다시 눌러 주세요.');return false;}
       loadIntoWorkspace(input,file,payload,next,bytes);
       say(statusId,'');
       return true;
@@ -1693,7 +1695,7 @@
       box.textContent='';
       pages.textContent='';
       const list=payload&&Array.isArray(payload.results)?payload.results:[];
-      if(!list.length){say('booth-search-status','검색 결과가 없습니다.');pages.hidden=true;return;}
+      if(!list.length){say('booth-search-status','검색 결과가 없어요. 다른 단어로 찾아볼까요?');pages.hidden=true;return;}
       say('booth-search-status','');
       for(const item of list){
         if(!item||typeof item.id!=='string') continue;
@@ -1713,6 +1715,7 @@
     }
     function submissionBlock(){
       if(!submissionsOpen()) return 'closed';
+      if(!liveConfig) return 'loading';
       if(!consentCopyFor(liveConsentVersion())) return 'consent';
       if(!paper) return 'pick';
       if(!generatedFile||!SHA256.test(generatedHash)) return 'missing';
@@ -1874,16 +1877,28 @@
     }
     function blockMessage(block){
       if(block==='closed') return errorMessage('booth_closed');
+      if(block==='loading') return '부스 정보를 불러오는 중이에요. 잠시 뒤 다시 눌러 주세요.';
       if(block==='consent') return CONSENT_MISSING;
       if(block==='pick') return PICK_PAPER;
       return '제출할 수정본이 없어요. 「← 고치기」로 돌아가 「다음」을 다시 눌러 주세요.';
     }
+    /* Only the version the server names. Before /v1/booth/config answers there is none, so no
+       older text (CONSENT_VERSION is v1) can show for a moment. */
     function liveConsentVersion(){
       const version=liveConfig&&liveConfig.consentVersion;
-      return typeof version==='string'&&version?version:CONSENT_VERSION;
+      return typeof version==='string'&&version?version:'';
     }
-    /* Summary, full versioned text and the checkbox. An unknown version cannot be agreed to. */
+    /* Summary, full versioned text and the checkbox. An unknown version cannot be agreed to;
+       before the config loads the panel stays empty and the checkbox stays off. */
     function applyConsent(){
+      const box=byId('booth-consent');
+      if(!liveConfig){
+        setText('booth-consent-copy','');
+        setText('booth-consent-version','');
+        kidsOf(byId('booth-consent-summary'));
+        if(box){box.checked=false;box.disabled=true;}
+        return;
+      }
       const version=liveConsentVersion();
       const text=consentCopyFor(version);
       const summary=consentSummaryFor(version);
@@ -1891,7 +1906,6 @@
       setText('booth-consent-version',text?'동의 버전 · '+version:'');
       const lines=summary.length?summary.map(line=>el('li',{textContent:line})):[el('li',{className:'missing',textContent:CONSENT_MISSING})];
       kidsOf(byId('booth-consent-summary'),...lines);
-      const box=byId('booth-consent');
       if(!box) return;
       if(!text) box.checked=false;
       box.disabled=!text;
@@ -1909,7 +1923,7 @@
       renderReceipts();
       const cap=perOwnerCap();
       if(readReceipts(storage).length>=cap) return capMessage(cap);
-      return '제출이 잠시 막혔어요. 한 사람당 '+cap+'번까지 제출할 수 있어요. 이미 '+cap+'번 냈다면 「내 기록」에서 결과를 보고, 아니면 잠시 뒤 다시 시도해 주세요.';
+      return '지금 제출이 몰려 있어요. 잠시 뒤 다시 눌러 주세요. 기회 '+cap+'번을 다 썼다면 「내 기록」에서 결과를 볼 수 있어요.';
     }
     /* Withdraw asks once: the first button gives way to 취소 and 철회하기 under the warning. */
     function withdrawAsk(asking){
@@ -2062,7 +2076,7 @@
       const left=chances();
       setText('booth-chances-top','기회 '+left+'번 남음');
       setText('booth-live-again','다시 도전하기 · 기회 '+left+'번 남음');
-      setText('booth-pick-limit','1인 '+perOwnerCap()+'번 · 보통 1~3분 · 이름·연락처는 받지 않아요');
+      setText('booth-pick-limit','1인 '+perOwnerCap()+'번까지 · 이름·연락처는 받지 않아요');
     }
     function renderLive(data){
       const view=resultView(data);
@@ -2297,7 +2311,7 @@
       }catch{
         if(closed) return;
         host.hidden=false;
-        say('booth-status','부스 접수를 확인하지 못했습니다.');
+        say('booth-status','부스 정보를 불러오지 못했어요. 페이지를 새로 고쳐 주세요.');
       }
     }
     on(byId('booth-search'),'submit',event=>{

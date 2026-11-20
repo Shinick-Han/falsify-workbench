@@ -464,7 +464,7 @@
     return selectFallback(text,area,doc);
   }
   const COPY_MESSAGE={
-    clipboard:'복사됐어요. ChatGPT·Claude·Gemini 앱에 붙여 넣고, 답을 길게 눌러 전부 복사해 오세요.',
+    clipboard:'복사했어요. AI 채팅에 붙여 넣고, 받은 답을 전부 복사해 오세요.',
     exec:'복사했어요. 안 되면 아래 글을 길게 눌러 복사하세요.',
     manual:'자동 복사가 막혔어요. 아래 글이 전체 선택되어 있으니 길게 눌러 "복사"를 고르세요.'
   };

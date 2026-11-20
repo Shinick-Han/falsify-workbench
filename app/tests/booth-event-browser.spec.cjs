@@ -14,7 +14,7 @@ const api = 'https://falsify-cloud-api-event.ai-gongbu.workers.dev';
 const port = Number(process.env.BOOTH_EVENT_PORT || 8877);
 const token = 'fsg_' + 'a'.repeat(43);
 const pdfBytes = fs.readFileSync(pdfPath);
-/* Optional: BOOTH_SHOT_DIR saves pick, ticket-missed and withdraw-confirm screenshots per viewport. */
+/* Optional: BOOTH_SHOT_DIR saves pick, send-consent, ticket-missed and withdraw-confirm screenshots per viewport. */
 const shotDir = process.env.BOOTH_SHOT_DIR || '';
 
 async function shot(page, name, viewport) {
@@ -83,7 +83,7 @@ async function stubApi(route, submissions, claims) {
   }
   if (url.pathname === '/v1/booth/config') {
     return json(route, 200, {
-      enabled: true, submissionsOpen: true, announcement: '행사 안내', consentVersion: '2026-11-22.v2',
+      enabled: true, submissionsOpen: true, announcement: '행사 안내', consentVersion: '2026-11-22.v3',
       limits: {maxDeclared: 5, maxReason: 500, maxNickname: 24, maxPdfBytes: 16777216},
       missions: [{
         paperId: '2309.15217',
@@ -186,7 +186,7 @@ async function walk(browser, viewport, desk, pageErrors) {
   await deskChecks(page, desk, 1);
   // Rules before the first tap (ux-booth P0-1): the line under the hero and the 01/02/03 how-to, on phones too.
   const limit = page.locator('#booth-pick-limit');
-  assert.equal(await limit.textContent(), '1인 5번 · 보통 1~3분 · 이름·연락처는 받지 않아요');
+  assert.equal(await limit.textContent(), '1인 5번까지 · 이름·연락처는 받지 않아요');
   assert.equal(await limit.isVisible(), true, 'the rules line is visible');
   assert.equal(await page.locator('#booth-howto').isVisible(), true, 'the how-to is visible');
   assert.equal(await page.locator('#booth-howto li').count(), 3);
@@ -275,7 +275,7 @@ async function walk(browser, viewport, desk, pageErrors) {
   assert.equal(await card.locator('del').textContent(), '0.95');
   assert.equal(await card.locator('ins').textContent(), '0.50');
   assert.equal((await card.locator('.booth-diff').textContent()).length < 80, true, 'diff shows only the changed region');
-  assert.match(await card.textContent(), /이 설명은 AI에게 보내지 않아요/);
+  assert.match(await card.textContent(), /이 설명은 AI에게 보내지 않고 운영진만 봐요\./);
   await card.getByRole('button', {name: '수치·통계'}).click();
   assert.equal(await card.getByRole('button', {name: '수치·통계'}).getAttribute('aria-pressed'), 'true');
   await card.locator('textarea').fill('표의 점수를 0.95에서 0.50으로 바꿨습니다');
@@ -283,8 +283,10 @@ async function walk(browser, viewport, desk, pageErrors) {
   assert.equal(await page.locator('#booth-consent-summary li').first().textContent(), '수정본 PDF만 AI(Anthropic)에 보내요.');
   assert.equal(await page.locator('#booth-consent-copy').isVisible(), false);
   await page.locator('#booth-consent-full summary').click();
-  assert.match(await page.locator('#booth-consent-copy').textContent(), /제출하면 바로 수정본 PDF만 AI 검증을 위해 모델 제공자\(Anthropic\)에 보내고/);
-  assert.equal(await page.locator('#booth-consent-version').textContent(), '동의 버전 · 2026-11-22.v2');
+  assert.match(await page.locator('#booth-consent-copy').textContent(), /제출하면 수정본 PDF만 AI 검증을 위해 모델 제공자\(Anthropic\)에 바로 보내고/);
+  assert.doesNotMatch(await page.locator('#booth-consent-copy').textContent(), /OpenAI/);
+  assert.equal(await page.locator('#booth-consent-version').textContent(), '동의 버전 · 2026-11-22.v3');
+  await shot(page, 'send-consent', viewport);
   assert.equal(await page.locator('#booth-submit-button').isDisabled(), true);
   await page.locator('#booth-consent').check();
   assert.equal(await page.locator('#booth-submit-button').textContent(), 'AI에게 제출하기');
@@ -323,7 +325,7 @@ async function walk(browser, viewport, desk, pageErrors) {
   assert.equal(posted.includes('edited.pdf'), true);
   assert.equal(posted.includes('0.50'), true);
   assert.equal(posted.includes('0.95'), true);
-  assert.equal(posted.includes('2026-11-22.v2'), true);
+  assert.equal(posted.includes('2026-11-22.v3'), true);
   assert.equal(posted.includes('"course":"quick"'), true);
   assert.equal(posted.includes('"defectType":"number"'), true);
   assert.equal(await page.locator('#booth-ticket-wait').isVisible(), true);

@@ -220,7 +220,7 @@ async function findAndReplace(browser, log, errors, wide) {
   await page.locator('#booth-recipe-confirm').waitFor();
   assert.equal(await page.locator('#booth-recipe-confirm-text').textContent(), '지금 고친 곳 1개는 그대로 두고 레시피를 더해요. 레시피를 불러올까요?');
   await page.locator('#booth-recipe-confirm-yes').click();
-  await page.waitForFunction(() => document.querySelector('#booth-recipe-count')?.textContent === '적용 1곳 · 확인 필요 1곳');
+  await page.waitForFunction(() => document.querySelector('#booth-recipe-count')?.textContent === '1곳 적용 · 1곳은 직접 골라 주세요');
   await page.waitForFunction(() => document.querySelector('#booth-dock-count')?.textContent === '고친 곳 2개');
   assert.equal(log.recipes.length, fetched + 2);
   assert.equal(dialogs, 0, 'no window.confirm');
@@ -238,9 +238,9 @@ async function findAndReplace(browser, log, errors, wide) {
 async function recipeFlow(browser, log, errors, wide) {
   const page = await openPage(browser, '#recipe=r-abc123', log, errors, wide);
   await stepIs(page, 'edit');
-  await page.waitForFunction(() => /적용 \d+곳/.test(document.querySelector('#booth-recipe-count')?.textContent || ''));
+  await page.waitForFunction(() => /^\d+곳 적용/.test(document.querySelector('#booth-recipe-count')?.textContent || ''));
   assert.equal(await page.locator('#booth-recipe-confirm').count(), 0, 'a fresh page needs no confirm');
-  assert.equal(await page.locator('#booth-recipe-count').textContent(), '적용 1곳 · 확인 필요 1곳');
+  assert.equal(await page.locator('#booth-recipe-count').textContent(), '1곳 적용 · 1곳은 직접 골라 주세요');
   assert.match(await page.locator('#booth-recipe-result').textContent(), /Claude Code · claude-opus-5-5 · R-ABC123/);
   assert.equal(log.recipes.at(-1), '/v1/booth/recipes/R-ABC123');
   assert.equal(await page.evaluate(() => location.hash), '', 'the recipe hash is consumed');
@@ -258,7 +258,7 @@ async function recipeFlow(browser, log, errors, wide) {
   await row.locator('.booth-find-hit').first().click();
   await row.getByRole('button', {name: '바꾸기'}).click();
   await page.waitForFunction(() => document.querySelector('#booth-dock-count')?.textContent === '고친 곳 2개');
-  assert.equal(await page.locator('#booth-recipe-count').textContent(), '적용 2곳 · 확인 필요 0곳');
+  assert.equal(await page.locator('#booth-recipe-count').textContent(), '2곳 적용했어요');
   assert.equal(await page.locator('#booth-recipe-fix').isHidden(), true);
 
   // 다음 builds the PDF exactly as for a manual edit; send shows both diffs.
