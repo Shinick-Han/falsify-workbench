@@ -234,6 +234,7 @@ async function tapFlow(page, wide, isTouch) {
   assert.equal(await input.inputValue(), '0.95');
   assert.equal(await input.getAttribute('inputmode'), 'decimal');
   assert.equal(await pop.getByRole('button', {name: '문단 전체 고치기'}).isDisabled(), false, 'paragraph button always enabled');
+  assert.equal(await pop.getByRole('button', {name: '원래대로'}).isVisible(), false, 'revert button hidden for unedited word');
   assert.equal(await pop.evaluate(n => n.classList.contains('is-bar')), isTouch);
   if (isTouch) {
     assert.equal(await page.locator('#booth-dock').isVisible(), false, 'dock hidden while touch bar open');
@@ -325,6 +326,7 @@ async function tapFlow(page, wide, isTouch) {
   // Reverting an edit back to originalText removes it and its overlay
   await tapToken(page, wide, '0.95', 0);
   await pop.waitFor({state: 'visible'});
+  assert.equal(await pop.getByRole('button', {name: '원래대로'}).isVisible(), true, 'revert button visible for edited word');
   await input.fill('0.95');
   await apply.click();
   await page.waitForFunction(() => document.querySelector('#booth-pe-pop').hidden);
@@ -332,6 +334,16 @@ async function tapFlow(page, wide, isTouch) {
   assert.equal(edits.length, 1);
   assert.equal(edits[0].newText, '0.11');
   assert.equal((await overlays(page)).length, 1);
+
+  // P1-1: Tapping the remaining edited word (second 0.52 -> 0.11) and pressing 「원래대로」 removes it from the store
+  await tapToken(page, wide, '0.52', 1);
+  await pop.waitFor({state: 'visible'});
+  const revertBtn = pop.getByRole('button', {name: '원래대로', exact: true});
+  assert.equal(await revertBtn.isVisible(), true, '원래대로 button shown for existing edit');
+  await revertBtn.click();
+  await page.waitForFunction(() => document.querySelector('#booth-pe-pop').hidden);
+  assert.equal((await storeEdits(page)).length, 0, '원래대로 removes edit from store');
+  assert.equal((await overlays(page)).length, 0, '원래대로 removes edit overlay');
 
   // Removing via store clears the overlay immediately (stateless store-driven preview)
   await page.evaluate(() => globalThis.FalsifyBoothEdits.clear());
