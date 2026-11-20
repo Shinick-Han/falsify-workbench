@@ -277,6 +277,38 @@ async function limitPdf(ctx, ownerId) {
   ]);
 }
 
+// Per-isolate copy of recently served PDFs. The Cache API is per data center and its behaviour on a
+// workers.dev hostname is not documented as working, so a warm isolate answers mission PDFs from memory
+// without the OAI license call and the arXiv fetch. Bounded by count and bytes; the oldest entry goes first.
+const MEMO_MAX_ENTRIES = 12;
+const MEMO_MAX_BYTES = 32 * 1024 * 1024;
+const pdfMemo = new Map();
+
+function memoGet(id) {
+  const hit = pdfMemo.get(id);
+  if (!hit) return null;
+  pdfMemo.delete(id);
+  pdfMemo.set(id, hit);
+  return hit;
+}
+
+function memoPut(id, bytes, licenseId) {
+  if (bytes.byteLength > MEMO_MAX_BYTES / 4) return;
+  pdfMemo.delete(id);
+  pdfMemo.set(id, { bytes, licenseId });
+  let total = 0;
+  for (const entry of pdfMemo.values()) total += entry.bytes.byteLength;
+  for (const [key, entry] of pdfMemo) {
+    if (pdfMemo.size <= MEMO_MAX_ENTRIES && total <= MEMO_MAX_BYTES) break;
+    pdfMemo.delete(key);
+    total -= entry.bytes.byteLength;
+  }
+}
+
+export function clearPdfMemoForTests() {
+  pdfMemo.clear();
+}
+
 function resolveCache(ctx) {
   if (ctx && ctx.cache && typeof ctx.cache.match === 'function') return ctx.cache;
   const caches = globalThis.caches;
@@ -885,9 +917,10 @@ async function handlePdf(ctx, ownerId) {
   const cache = resolveCache(ctx);
   // Version stays in the key: 2503.10497 and 2503.10497v2 are different files.
   const request = cacheRequest('/papers/pdf', { id });
-  const cached = await readCachedPdf(cache, request);
+  const cached = memoGet(id) || await readCachedPdf(cache, request);
   if (cached) {
     if (cached.bytes.byteLength > cap) aiFail(413, 'payload_too_large');
+    memoPut(id, cached.bytes, cached.licenseId);
     return pdfResponse(cached.bytes, id, cached.licenseId);
   }
   const verdict = await licenseVerdict(ctx, id);
@@ -896,6 +929,7 @@ async function handlePdf(ctx, ownerId) {
   const response = await upstreamFetch(ctx.fetchImpl, pdfFetchUrl(id), 'application/pdf');
   const body = await openPdfBody(response, cap);
   await writeCachedPdf(cache, request, body, verdict.id);
+  memoPut(id, body, verdict.id);
   return pdfResponse(body, id, verdict.id);
 }
 
