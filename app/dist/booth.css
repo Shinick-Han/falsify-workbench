@@ -111,7 +111,17 @@
 .booth .booth-dock-act{min-height:44px;padding:0 14px;border:1px solid var(--ev-hair);border-radius:8px;background:var(--ev-card);color:var(--ev-ink);font-size:13.5px;font-weight:500;cursor:pointer}
 .booth .booth-dock-act:hover{border-color:var(--ev-ink)}
 .booth-dock-count{display:grid;min-width:0;font-size:13.5px;font-weight:500;line-height:1.4}
+.booth .booth-dock-count-btn{display:inline-flex;align-items:center;gap:4px;justify-self:start;min-height:28px;padding:0;border:0;background:transparent;color:var(--ev-ink);font:inherit;font-weight:500;text-align:left;cursor:default}
+.booth .booth-dock-count-btn[data-openable="true"]{cursor:pointer}
 .booth-dock-count small{font-size:11.5px;font-weight:400;color:var(--ev-muted)}
+.booth-dock-pop del{color:var(--ev-muted);text-decoration:line-through}
+.booth .booth-dock-x{display:inline-grid;flex:none;place-items:center;width:44px;height:44px;padding:0;border:0;border-radius:999px;background:transparent;color:var(--ev-muted);font-family:var(--ev-sans);font-size:18px;line-height:1;cursor:pointer}
+.booth .booth-dock-x:hover{background:var(--ev-hair);color:var(--ev-ink)}
+/* Edit list popover above the dock (phones via count button, desktop via +N or count): text jumps, × deletes. */
+.booth-dock-pop{position:absolute;bottom:calc(100% + 8px);left:12px;right:12px;display:grid;gap:2px;max-height:min(360px,50vh);margin:0;padding:6px;overflow:auto;list-style:none;background:var(--ev-card);border:1px solid var(--ev-hair);border-radius:10px;box-shadow:0 12px 30px rgba(22,25,30,.12)}
+.booth-dock-pop li{display:flex;align-items:center;gap:4px;min-width:0}
+.booth .booth-dock-pop-text{display:flex;flex:1;gap:6px;align-items:baseline;min-width:0;min-height:44px;padding:10px;border:0;border-radius:6px;background:transparent;color:var(--ev-ink);font-family:var(--ev-mono);font-size:12.5px;text-align:left;white-space:nowrap;overflow:hidden;cursor:pointer}
+.booth .booth-dock-pop-text:hover{background:var(--ev-soft)}
 .booth .booth-dock .booth-btn{min-width:96px;min-height:46px;padding:0 22px}
 
 /* Send */
@@ -188,6 +198,9 @@
 .booth-landing-intro,.booth-landing-list,.booth-send-main,.booth-send-side,.booth-send-confirm,.booth-bp-stub,.booth-live-side,.booth-live-main,.booth-live-actions{display:contents}
 @media (max-width:1023px){
 .booth .booth-desk{display:none!important}
+.booth .booth-dock-count-btn[data-openable="true"]{text-decoration:underline;text-underline-offset:3px}
+.booth .booth-dock-count-btn[data-openable="true"]::after{content:" ▾";font-size:11px;color:var(--ev-muted);text-decoration:none}
+.booth .booth-dock-count-btn[aria-expanded="true"]::after{content:" ▴"}
 /* Phones: the rules line sits under the hero copy, then the 01/02/03 how-to as three compact rows. */
 #booth-pick-limit{margin-top:-4px;color:var(--ev-ink-2)}
 .booth .booth-howto{display:grid;margin:0;padding:0;list-style:none;border-top:1px solid var(--ev-hair);border-bottom:1px solid var(--ev-hair)}
@@ -264,14 +277,10 @@
 .booth .booth-dock-chip{display:inline-flex;flex:none;gap:6px;align-items:center;min-height:34px;padding:0 1px 0 11px;border:1px solid var(--ev-hair);border-radius:999px;background:var(--ev-soft);color:var(--ev-ink);font-family:var(--ev-mono);font-size:12px;white-space:nowrap}
 .booth .booth-dock-chip.more{padding:0 12px;cursor:pointer}
 .booth .booth-dock-chip.more[aria-expanded="true"]{border-color:var(--ev-ink)}
-.booth-dock-chip del,.booth-dock-pop del{color:var(--ev-muted);text-decoration:line-through}
-.booth .booth-dock-x{display:inline-grid;flex:none;place-items:center;width:32px;height:32px;margin-left:-2px;padding:0;border:0;border-radius:999px;background:transparent;color:var(--ev-muted);font-family:var(--ev-sans);font-size:17px;line-height:1;cursor:pointer}
-.booth .booth-dock-x:hover{background:var(--ev-hair);color:var(--ev-ink)}
-/* "+N" popover above the dock: every edit, its text reopens the edit, × deletes it. */
-.booth-dock-pop{position:absolute;bottom:calc(100% + 8px);left:max(32px,calc((100% - 1120px) / 2));display:grid;gap:2px;width:min(440px,calc(100% - 64px));max-height:min(360px,50vh);margin:0;padding:6px;overflow:auto;list-style:none;background:var(--ev-card);border:1px solid var(--ev-hair);border-radius:10px;box-shadow:0 12px 30px rgba(22,25,30,.12)}
-.booth-dock-pop li{display:flex;align-items:center;gap:4px}
-.booth .booth-dock-pop-text{display:flex;flex:1;gap:6px;align-items:baseline;min-width:0;min-height:40px;padding:10px;border:0;border-radius:6px;background:transparent;color:var(--ev-ink);font-family:var(--ev-mono);font-size:12.5px;text-align:left;white-space:nowrap;overflow:hidden;cursor:pointer}
-.booth .booth-dock-pop-text:hover{background:var(--ev-soft)}
+.booth-dock-chip del{color:var(--ev-muted);text-decoration:line-through}
+.booth .booth-dock-chip .booth-dock-x{width:32px;height:32px;margin-left:-2px;font-size:17px}
+.booth-dock-pop{left:max(32px,calc((100% - 1120px) / 2));right:auto;width:min(440px,calc(100% - 64px))}
+.booth .booth-dock-pop-text{min-height:40px}
 .booth .booth-dock-back{font-size:14px}
 .booth .booth-dock .booth-btn{min-width:150px;min-height:48px}
 #booth-next::after{content:" \2192";white-space:pre}

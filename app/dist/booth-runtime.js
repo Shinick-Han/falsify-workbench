@@ -3,14 +3,13 @@
      (?kiosk=0 clears it). In kiosk mode booth.js keeps receipts in sessionStorage, pick and ticket get a
      「다음 분께 넘기기」 button, and 3 minutes without a touch, key or scroll (5 while a result is
      pending) open a 20-second 「계속하시겠어요?」 warning (WCAG 2.2.1). Handing over or letting the
-     warning run out clears this visitor's receipts, saved progress, drafts, assist state and guest
-     session, then reloads event.html?kiosk=1, so the next visitor gets a fresh guest and 5 chances.
+     warning run out clears this visitor's receipts, saved progress, drafts, edits, assist state and
+     guest session, then reloads event.html?kiosk=1, so the next visitor gets a fresh guest and 5 chances.
    - Offline: offerRetry puts a 「다시 시도」 button after a status line; the 'online' event presses it.
    - Wake lock: wake(navigator) keeps the screen on while booth.js waits for a result.
-   - Progress: on hidden or pagehide the step, paper, recipe tab and edits go to sessionStorage. The
-     next load of this tab offers 「고친 곳 N개를 이어서 할까요?」 and replays the edits through
-     FalsifyBoothRecipe.apply, the same path a recipe takes. Only text edits whose changed words fit
-     a recipe edit (at most 300 characters, one line) are replayable; others are not counted.
+   - Progress: on hidden or pagehide the step, paper, recipe tab and FalsifyBoothEdits.serialize() go to
+     sessionStorage. The next load of this tab offers 「고친 곳 N개를 이어서 할까요?」 and restores the
+     edits directly through FalsifyBoothEdits.restore().
    DOM text is set with textContent only. */
 (function(root){
   'use strict';
@@ -20,7 +19,6 @@
   const HOSTED_KEYS=['falsify.hosted-ai.session.v1','falsify.hosted-ai.upload.v1','falsify.hosted-ai.runs.v1'];
   const GUEST_PREFIX='falsify.open-access.guest.v1:';
   const DRAFT_PREFIX='falsify.paper-draft';
-  const RECIPE_SCHEMA='falsify.booth.recipe.v1';
   const OFFLINE_TEXT='인터넷 연결이 끊겼어요. 연결되면 다시 눌러 주세요.';
   const IDLE_MS=180000;
   const WAIT_IDLE_MS=300000;
@@ -30,9 +28,10 @@
   const ACTIVITY=['pointerdown','touchstart','keydown','wheel','scroll','input'];
   const PAPER_ID=/^(?:\d{4}\.\d{4,5}(?:v\d+)?|[a-z-]+(?:\.[A-Z]{2})?\/\d{7}(?:v\d+)?)$/;
   const CODE=/^R-[0-9A-HJKMNP-TV-Z]{6}$/;
-  /* The recipe's control set: C0, DEL, C1 and the bidi marks, embeddings, overrides and isolates. */
-  const CONTROL=/[\x00-\x1f\x7f-\x9f\u{200e}\u{200f}\u{202a}-\u{202e}\u{2066}-\u{2069}]/u;
+  const CONTROL=/[\u0000-\u001f\u007f]/;
+  const LICENSE_RE=/^(?:cc-by(?:-\d+\.\d+)?|cc-by-sa(?:-\d+\.\d+)?|cc0(?:-1\.0)?|public-domain)$/;
   const TABS=['find','myai','agent'];
+  let resetting=false;
 
   function bag(name){
     try{return root[name]||null;}catch{return null;}
@@ -56,6 +55,9 @@
       }
     }catch{}
     return out;
+  }
+  function boothEdits(){
+    try{return root.FalsifyBoothEdits||null;}catch{return null;}
   }
 
   /* ---------- kiosk flag and storage ---------- */
@@ -224,6 +226,12 @@
       try{recipe.setAssist('manual');}catch{}
     }
   }
+  function clearEdits(){
+    const store=boothEdits();
+    if(store&&typeof store.clear==='function'){
+      try{store.clear();}catch{}
+    }
+  }
   /* Blurring the focused field closes a tablet's soft keyboard. */
   function blurInput(doc){
     const active=doc&&doc.activeElement;
@@ -231,8 +239,8 @@
       try{active.blur();}catch{}
     }
   }
-  /* Receipts, saved progress, workspace drafts, the hosted-AI session, recipe assist and the guest token.
-     The kiosk flag and the open-access key stay. */
+  /* Receipts, saved progress, workspace drafts, booth edits, the hosted-AI session, recipe assist
+     and the guest token. The kiosk flag and the open-access key stay. */
   function clearVisitor(){
     const session=bag('sessionStorage');
     const local=bag('localStorage');
@@ -241,15 +249,19 @@
       for(const key of keysOf(store)) if(key.startsWith(DRAFT_PREFIX)) removeItem(store,key);
     }
     dropGuest(session);
+    clearEdits();
     resetAssist();
+    const html=root.document&&root.document.documentElement;
+    if(html&&html.dataset) delete html.dataset.boothStep;
     blurInput(root.document);
   }
   function kioskUrl(loc){
     const path=loc&&typeof loc.pathname==='string'&&loc.pathname?loc.pathname:'event.html';
     return path+'?kiosk=1';
   }
-  /* The reload drops the open paper, the workspace edits and every in-memory booth state. */
+  /* The reload drops the open paper, the booth edits and every in-memory booth state. */
   function handoff(){
+    resetting=true;
     clearVisitor();
     const loc=root.location;
     try{loc.replace(kioskUrl(loc));}catch{}
@@ -357,62 +369,28 @@
     return idle;
   }
 
-  /* ---------- saved progress ---------- */
-  function commonPrefix(a, b){
-    let i=0;
-    while(i<a.length&&i<b.length&&a[i]===b[i]) i+=1;
-    return i;
+  /* ---------- saved progress (FalsifyBoothEdits.serialize / restore) ---------- */
+  function validRect(r){
+    return !!r&&typeof r==='object'&&Number.isFinite(r.x)&&Number.isFinite(r.y)&&Number.isFinite(r.w)&&Number.isFinite(r.h)&&r.w>0&&r.h>0;
   }
-  function commonSuffix(a, b, prefix){
-    let k=0;
-    while(k<a.length-prefix&&k<b.length-prefix&&a[a.length-1-k]===b[b.length-1-k]) k+=1;
-    return k;
+  function validEdit(edit){
+    if(!edit||typeof edit!=='object') return false;
+    if(!Number.isInteger(edit.pageIndex)||edit.pageIndex<0||edit.pageIndex>=500) return false;
+    if(!Array.isArray(edit.rects)||!edit.rects.length||!edit.rects.every(validRect)) return false;
+    if(typeof edit.originalText!=='string'||typeof edit.newText!=='string') return false;
+    return edit.originalText!==edit.newText;
   }
-  function space(ch){
-    return /\s/.test(ch);
+  function parseSerializedEdits(raw){
+    if(typeof raw!=='string') return [];
+    let list=null;
+    try{list=JSON.parse(raw);}catch{return [];}
+    return Array.isArray(list)?list.filter(validEdit).slice(0,MAX_EDITS):[];
   }
-  /* The changed span of before, grown to whole words, and the same span of after. */
-  function changedSpan(a, b){
-    let from=commonPrefix(a,b);
-    let tail=commonSuffix(a,b,from);
-    while(from>0&&!space(a[from-1])) from-=1;
-    while(tail>0&&!space(a[a.length-tail])) tail-=1;
-    return {from,tail,find:a.slice(from,a.length-tail),replace:b.slice(from,b.length-tail)};
-  }
-  function editUsable(edit){
-    if(!edit||typeof edit!=='object'||edit.enabled===false) return false;
-    if(typeof edit.before!=='string'||typeof edit.after!=='string'||edit.before===edit.after) return false;
-    return Number.isSafeInteger(edit.pageIndex)&&edit.pageIndex>=0&&edit.pageIndex<500;
-  }
-  function spanOk(find, replace){
-    if(typeof find!=='string'||typeof replace!=='string'||!find.trim()||find===replace) return false;
-    if(find.length>300||replace.length>300) return false;
-    return !CONTROL.test(find)&&!CONTROL.test(replace);
-  }
-  function contextOk(context){
-    return typeof context==='string'&&context.length<=600&&!CONTROL.test(context);
-  }
-  /* One workspace edit as a falsify.booth.recipe.v1 edit, or null when a recipe cannot carry it. */
-  function recipeEdit(edit){
-    if(!editUsable(edit)) return null;
-    const a=edit.before;
-    const span=changedSpan(a,edit.after);
-    if(!spanOk(span.find,span.replace)) return null;
-    const out={page:edit.pageIndex+1,find:span.find,replace:span.replace};
-    const context=a.slice(Math.max(0,span.from-200),Math.min(a.length,a.length-span.tail+200)).replace(/\s+/g,' ').trim();
-    if(context!==span.find&&contextOk(context)) out.context=context;
-    return out;
-  }
-  function recipeEdits(list){
-    return (Array.isArray(list)?list:[]).map(recipeEdit).filter(Boolean).slice(0,MAX_EDITS);
-  }
-  /* A saved recipe edit read back, checked again. */
-  function storedEdit(edit){
-    if(!edit||typeof edit!=='object'||!Number.isInteger(edit.page)||edit.page<1||edit.page>500) return null;
-    if(!spanOk(edit.find,edit.replace)) return null;
-    const out={page:edit.page,find:edit.find,replace:edit.replace};
-    if(contextOk(edit.context)) out.context=edit.context;
-    return out;
+  function serializedEdits(){
+    const store=boothEdits();
+    if(!store||typeof store.serialize!=='function') return '[]';
+    try{return JSON.stringify(parseSerializedEdits(store.serialize()));}
+    catch{return '[]';}
   }
   function stepOf(doc){
     const html=doc.documentElement;
@@ -421,13 +399,6 @@
   function currentPaper(){
     const api=root.FalsifyBoothPaper;
     try{return api&&typeof api.current==='function'?api.current():null;}catch{return null;}
-  }
-  function snapshotEdits(){
-    const ws=root.FalsifyPaperWorkspace;
-    try{
-      const snap=ws&&typeof ws.getEditSnapshot==='function'?ws.getEditSnapshot():null;
-      return snap&&Array.isArray(snap.edits)?snap.edits:[];
-    }catch{return [];}
   }
   function assistNow(){
     const recipe=root.FalsifyBoothRecipe;
@@ -442,15 +413,31 @@
     const match=on&&/^booth-tab-(find|myai|agent)$/.exec(on.id||'');
     return match?match[1]:'find';
   }
+  function cleanTitle(value){
+    if(typeof value!=='string') return '';
+    const text=value.trim();
+    return text&&text.length<=300&&!CONTROL.test(text)?text:'';
+  }
+  function cleanLicense(value){
+    if(typeof value!=='string') return '';
+    const text=value.trim().toLowerCase();
+    return LICENSE_RE.test(text)?text:'';
+  }
   /* What a reload of this tab can pick up: only edit and send with an open paper. */
   function progressNow(doc, now){
     const step=stepOf(doc);
     const paper=currentPaper();
     if((step!=='edit'&&step!=='send')||!paper||!PAPER_ID.test(paper.id||'')) return null;
     const assist=assistNow();
-    return {v:1,at:now,step,paperId:paper.id,tab:tabNow(doc),assist:assist.kind,code:assist.code,edits:recipeEdits(snapshotEdits())};
+    return {
+      v:2,at:now,step,paperId:paper.id,
+      title:cleanTitle(paper.title),
+      license:cleanLicense(paper.license),
+      tab:tabNow(doc),assist:assist.kind,code:assist.code,edits:serializedEdits()
+    };
   }
   function saveProgress(doc){
+    if(resetting) return null;
     const store=bag('sessionStorage');
     const record=progressNow(doc,Date.now());
     if(!record){removeItem(store,PROGRESS_KEY);return null;}
@@ -458,40 +445,47 @@
     return record;
   }
   function progressShape(data){
-    if(!data||typeof data!=='object'||data.v!==1) return false;
+    if(!data||typeof data!=='object'||data.v!==2) return false;
     if(typeof data.paperId!=='string'||!PAPER_ID.test(data.paperId)) return false;
     if(!Number.isFinite(data.at)) return false;
-    return (data.step==='edit'||data.step==='send')&&Array.isArray(data.edits);
+    return (data.step==='edit'||data.step==='send')&&typeof data.edits==='string';
   }
   function readProgress(raw, now){
     let data=null;
     try{data=JSON.parse(raw||'');}catch{return null;}
     if(!progressShape(data)||now-data.at>PROGRESS_TTL||data.at-now>60000) return null;
+    const valid=parseSerializedEdits(data.edits);
     return {
       step:data.step,paperId:data.paperId,
+      title:cleanTitle(data.title),
+      license:cleanLicense(data.license),
       tab:TABS.includes(data.tab)?data.tab:'find',
       assist:data.assist==='my-ai'||data.assist==='agent'?data.assist:'manual',
       code:typeof data.code==='string'&&CODE.test(data.code)?data.code:'',
-      edits:data.edits.map(storedEdit).filter(Boolean).slice(0,MAX_EDITS)
+      edits:JSON.stringify(valid),
+      count:valid.length
     };
   }
   function resumeQuestion(count){
     return count?'고친 곳 '+count+'개를 이어서 할까요?':'보던 논문을 이어서 볼까요?';
   }
-  function recipeFor(record){
-    const out={schema:RECIPE_SCHEMA,paperId:record.paperId,source:record.assist,edits:record.edits};
-    if(record.assist==='agent'&&record.code) out.code=record.code;
-    return out;
+  function reopenMeta(record){
+    const meta={};
+    if(record.title) meta.title=record.title;
+    if(record.license) meta.license=record.license;
+    return meta;
   }
   async function reopen(record){
-    const recipe=root.FalsifyBoothRecipe;
-    if(record.edits.length&&recipe&&typeof recipe.apply==='function'){
-      const outcome=await recipe.apply(recipeFor(record));
-      return !!(outcome&&outcome.applied&&outcome.applied.length);
-    }
     const paper=root.FalsifyBoothPaper;
-    const pending=paper&&typeof paper.open==='function'?paper.open(record.paperId,{}):null;
-    return !!(pending&&await pending);
+    const pending=paper&&typeof paper.open==='function'?paper.open(record.paperId,reopenMeta(record)):null;
+    if(!pending||!(await pending)) return false;
+    const store=boothEdits();
+    if(store&&typeof store.restore==='function') store.restore(record.edits);
+    const recipe=root.FalsifyBoothRecipe;
+    if(recipe&&typeof recipe.setAssist==='function'&&record.assist&&record.assist!=='manual'){
+      try{recipe.setAssist(record.assist,record.code);}catch{}
+    }
+    return true;
   }
   function showTab(doc, tab){
     if(tab==='find') return;
@@ -512,7 +506,7 @@
     go.id='booth-resume-go';
     fresh.id='booth-resume-fresh';
     row.append(go,fresh);
-    panel.append(textNode(doc,'p','booth-resume-text','booth-resume-text',resumeQuestion(record.edits.length)),row,status);
+    panel.append(textNode(doc,'p','booth-resume-text','booth-resume-text',resumeQuestion(record.count)),row,status);
     return panel;
   }
   function boothReady(doc){
@@ -573,7 +567,7 @@
 
   root.FalsifyBoothRuntime=Object.freeze({
     kiosk,kioskFlag,storage,offline,offerRetry,wake,idleTimer,clearVisitor,handoff,kioskUrl,
-    recipeEdit,recipeEdits,readProgress,progressNow,saveProgress,resumeQuestion,
+    readProgress,progressNow,saveProgress,resumeQuestion,reopen,
     OFFLINE_TEXT,KIOSK_KEY,PROGRESS_KEY,RECEIPT_KEY,IDLE_MS,WAIT_IDLE_MS,WARN_MS
   });
   boot();

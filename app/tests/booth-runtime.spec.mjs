@@ -1,11 +1,12 @@
 // booth-runtime.js: kiosk flag and storage, offline detection, wake lock, idle timer, visitor reset,
-// and the saved-progress records that replay edits as a booth recipe. Plus booth.js's offline code.
+// and saved progress using FalsifyBoothEdits.serialize / restore. Plus booth.js's offline code.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
 import vm from 'node:vm';
 
+const editsSource = await readFile(fileURLToPath(new URL('../dist/booth-edits.js', import.meta.url)), 'utf8');
 const source = await readFile(fileURLToPath(new URL('../dist/booth-runtime.js', import.meta.url)), 'utf8');
 const boothSource = await readFile(fileURLToPath(new URL('../dist/booth.js', import.meta.url)), 'utf8');
 
@@ -23,9 +24,19 @@ function memoryStore(seed = {}) {
 
 function load(extra = {}) {
   const context = vm.createContext({console, URL, URLSearchParams, setTimeout, clearTimeout, Promise, ...extra});
+  vm.runInContext(editsSource, context, {filename: 'booth-edits.js'});
   vm.runInContext(source, context, {filename: 'booth-runtime.js'});
   return context;
 }
+
+const SAMPLE_EDIT = {
+  id: 'e-1',
+  pageIndex: 4,
+  rects: [{x: 0.25, y: 0.15, w: 0.08, h: 0.02}],
+  originalText: '0.95',
+  newText: '0.50',
+  source: 'find',
+};
 
 test('kioskFlag: ?kiosk=1 sets the tab flag, ?kiosk=0 clears it, otherwise the flag decides', () => {
   const R = load().FalsifyBoothRuntime;
@@ -147,7 +158,7 @@ test('idleTimer: nothing before activity, warning at limit-20 s, reset 20 s late
   assert.equal(clock.size, 0);
 });
 
-test('clearVisitor and handoff: receipts, progress, drafts, hosted session and guest go; the kiosk flag and access key stay', () => {
+test('clearVisitor and handoff: receipts, progress, drafts, edits, hosted session and guest go; the kiosk flag and access key stay', () => {
   const session = memoryStore({
     'falsify.booth.kiosk.v1': '1', 'falsify.open-access.key.v1': 'k', 'falsify.booth.receipts.v1': '[]',
     'falsify.booth.progress.v1': '{}', 'falsify.hosted-ai.session.v1': '{}', 'falsify.paper-draft.v1.abc': '{}',
@@ -162,7 +173,10 @@ test('clearVisitor and handoff: receipts, progress, drafts, hosted session and g
     FalsifyBoothRecipe: {setAssist(kind) { assist = kind; }},
     document: {body: {}, activeElement: {blur() { blurred += 1; }}},
   });
+  context.FalsifyBoothEdits.add(SAMPLE_EDIT);
+  assert.equal(context.FalsifyBoothEdits.list().length, 1);
   context.FalsifyBoothRuntime.handoff();
+  assert.equal(context.FalsifyBoothEdits.list().length, 0, 'handoff clears BoothEdits');
   assert.deepEqual([...session.map.keys()].sort(), ['falsify.booth.kiosk.v1', 'falsify.open-access.key.v1']);
   assert.deepEqual([...local.map.keys()].sort(), ['falsify.booth.receipts.v1', 'other'], 'normal-mode receipts are not touched');
   assert.equal(invalidated, 1, 'the guest session resets through FalsifyHostedSession.invalidate');
@@ -177,37 +191,27 @@ test('clearVisitor without the open-access hook drops the guest storage key itse
   assert.deepEqual([...session.map.keys()], ['falsify.booth.kiosk.v1']);
 });
 
-test('recipeEdit: the changed words of a workspace edit, with paragraph context', () => {
-  const R = load().FalsifyBoothRuntime;
-  const before = 'Faithfulness reached 0.95 on WikiEval while relevance stayed at 0.78 overall.';
-  const edit = R.recipeEdit({pageIndex: 4, before, after: before.replace('0.95', '0.50'), enabled: true});
-  assert.equal(edit.page, 5);
-  assert.equal(edit.find, '0.95');
-  assert.equal(edit.replace, '0.50');
-  assert.equal(edit.context, before);
-  const word = R.recipeEdit({pageIndex: 0, before: 'the model improves results', after: 'the model worsens results'});
-  assert.deepEqual([word.find, word.replace], ['improves', 'worsens'], 'grown to whole words');
-  const insert = R.recipeEdit({pageIndex: 0, before: 'scores are high', after: 'scores are not high'});
-  assert.equal(insert.find.trim().length > 0, true);
-  assert.notEqual(insert.find, insert.replace);
-  assert.equal(R.recipeEdit({pageIndex: 0, before: 'a', after: 'a'}), null);
-  assert.equal(R.recipeEdit({pageIndex: 0, before: 'x 1', after: 'x 2', enabled: false}), null);
-  assert.equal(R.recipeEdit({pageIndex: -1, before: 'x 1', after: 'x 2'}), null);
-  assert.equal(R.recipeEdit({pageIndex: 0, before: 'a'.repeat(400), after: 'b'.repeat(400)}), null, 'over 300 characters');
-  assert.equal(R.recipeEdit({pageIndex: 0, before: 'line one\nline two', after: 'line one\nline 2'}).find, 'two');
-  assert.equal(R.recipeEdit({pageIndex: 0, before: 'one\ntwo', after: 'uno\ndos'}), null, 'a newline inside the span');
-  const many = Array.from({length: 7}, (_, i) => ({pageIndex: i, before: 'v ' + i, after: 'v x' + i}));
-  assert.equal(R.recipeEdits(many).length, 5);
-});
-
-test('readProgress: checks shape, age and every edit again', () => {
+test('readProgress checks shape, age and validates serialized BoothEdits', () => {
   const R = load().FalsifyBoothRuntime;
   const now = 1_800_000_000_000;
-  const good = {v: 1, at: now - 1000, step: 'edit', paperId: '2309.15217', tab: 'myai', assist: 'my-ai', code: '',
-    edits: [{page: 5, find: '0.95', replace: '0.50', context: 'reached 0.95 on'}, {page: 0, find: 'x', replace: 'y'}, {page: 2, find: 'a\x01', replace: 'b'}]};
+  const badEdit = {pageIndex: -1, rects: [], originalText: 'a', newText: 'b'};
+  const sameEdit = {pageIndex: 0, rects: [{x: 0.1, y: 0.1, w: 0.1, h: 0.02}], originalText: 'a', newText: 'a'};
+  const good = {
+    v: 2, at: now - 1000, step: 'edit', paperId: '2309.15217', title: 'Ragas: Automated Evaluation', license: 'cc-by-4.0',
+    tab: 'myai', assist: 'my-ai', code: '',
+    edits: JSON.stringify([SAMPLE_EDIT, badEdit, sameEdit]),
+  };
   const read = R.readProgress(JSON.stringify(good), now);
-  assert.deepEqual(JSON.parse(JSON.stringify(read)), {step: 'edit', paperId: '2309.15217', tab: 'myai', assist: 'my-ai', code: '',
-    edits: [{page: 5, find: '0.95', replace: '0.50', context: 'reached 0.95 on'}]});
+  assert.equal(read.step, 'edit');
+  assert.equal(read.paperId, '2309.15217');
+  assert.equal(read.title, 'Ragas: Automated Evaluation');
+  assert.equal(read.license, 'cc-by-4.0');
+  assert.equal(read.tab, 'myai');
+  assert.equal(read.assist, 'my-ai');
+  assert.equal(read.code, '');
+  assert.equal(read.count, 1);
+  assert.deepEqual(JSON.parse(read.edits), [SAMPLE_EDIT]);
+  assert.equal(R.readProgress(JSON.stringify({...good, v: 1}), now), null, 'legacy v1 shape is ignored');
   assert.equal(R.readProgress(JSON.stringify({...good, at: now - 7 * 3600000}), now), null, 'older than 6 h');
   assert.equal(R.readProgress(JSON.stringify({...good, step: 'ticket'}), now), null);
   assert.equal(R.readProgress(JSON.stringify({...good, paperId: '../x'}), now), null);
@@ -219,21 +223,72 @@ test('readProgress: checks shape, age and every edit again', () => {
   assert.equal(R.resumeQuestion(0), '보던 논문을 이어서 볼까요?');
 });
 
-test('progressNow: edit or send with an open paper only; edits from the workspace snapshot', () => {
+test('progressNow and reopen round-trip through FalsifyBoothEdits.serialize / restore', async () => {
   const html = {dataset: {boothStep: 'edit'}};
   const tab = {id: 'booth-tab-myai'};
   const doc = {documentElement: html, querySelector: sel => sel.includes('aria-selected') ? tab : null};
+  const opened = [];
+  const assists = [];
   const context = load({
-    FalsifyBoothPaper: {current: () => ({source: 'mission', id: '2309.15217'})},
-    FalsifyPaperWorkspace: {getEditSnapshot: () => ({edits: [{pageIndex: 4, before: 'at 0.95 here', after: 'at 0.50 here', enabled: true}]})},
-    FalsifyBoothRecipe: {assist: () => ({assist: 'agent', recipeCode: 'R-7K3QXM'})},
+    FalsifyBoothPaper: {
+      current: () => ({source: 'arxiv', id: '2309.15217', title: 'Ragas: Automated Evaluation', license: 'cc-by-4.0'}),
+      open: (id, meta) => { opened.push([id, JSON.parse(JSON.stringify(meta))]); return Promise.resolve(true); },
+    },
+    FalsifyBoothRecipe: {
+      assist: () => ({assist: 'agent', recipeCode: 'R-7K3QXM'}),
+      setAssist: (kind, code) => assists.push([kind, code]),
+    },
   });
+  context.FalsifyBoothEdits.add(SAMPLE_EDIT);
   const R = context.FalsifyBoothRuntime;
   const record = R.progressNow(doc, 5);
-  assert.deepEqual(JSON.parse(JSON.stringify(record)), {v: 1, at: 5, step: 'edit', paperId: '2309.15217', tab: 'myai', assist: 'agent', code: 'R-7K3QXM',
-    edits: [{page: 5, find: '0.95', replace: '0.50', context: 'at 0.95 here'}]});
+  assert.equal(record.v, 2);
+  assert.equal(record.paperId, '2309.15217');
+  assert.equal(record.title, 'Ragas: Automated Evaluation');
+  assert.equal(record.license, 'cc-by-4.0');
+  assert.equal(record.tab, 'myai');
+  assert.equal(record.assist, 'agent');
+  assert.equal(record.code, 'R-7K3QXM');
+  assert.deepEqual(JSON.parse(record.edits), [SAMPLE_EDIT]);
+
+  context.FalsifyBoothEdits.clear();
+  assert.equal(context.FalsifyBoothEdits.list().length, 0);
+  const parsed = R.readProgress(JSON.stringify(record), 10);
+  const ok = await R.reopen(parsed);
+  assert.equal(ok, true);
+  assert.deepEqual(opened, [['2309.15217', {title: 'Ragas: Automated Evaluation', license: 'cc-by-4.0'}]]);
+  assert.deepEqual(assists, [['agent', 'R-7K3QXM']]);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.FalsifyBoothEdits.list())), [SAMPLE_EDIT]);
+
   html.dataset.boothStep = 'ticket';
   assert.equal(R.progressNow(doc, 5), null);
+});
+
+test('handoff clears boothStep and blocks pagehide saveProgress from re-writing progress (P1-3)', () => {
+  const session = memoryStore({'falsify.booth.kiosk.v1': '1'});
+  const html = {dataset: {boothStep: 'edit'}};
+  const doc = {documentElement: html, body: {}, querySelector: () => null};
+  let replaced = '';
+  const context = load({
+    sessionStorage: session,
+    localStorage: memoryStore(),
+    document: doc,
+    location: {search: '?kiosk=1', pathname: '/event.html', replace(url) { replaced = url; }},
+    FalsifyBoothPaper: {
+      current: () => ({source: 'mission', id: '2309.15217', title: 'Ragas', license: 'cc-by-4.0'}),
+    },
+  });
+  const R = context.FalsifyBoothRuntime;
+  assert.ok(R.saveProgress(doc));
+  assert.ok(session.getItem(R.PROGRESS_KEY));
+  R.handoff();
+  assert.equal(replaced, '/event.html?kiosk=1');
+  assert.equal(html.dataset.boothStep, undefined, 'clearVisitor clears dataset.boothStep');
+  assert.equal(session.getItem(R.PROGRESS_KEY), null);
+  // Even if something restored boothStep before pagehide fires, resetting prevents re-saving.
+  html.dataset.boothStep = 'edit';
+  assert.equal(R.saveProgress(doc), null, 'pagehide saveProgress is suppressed during handoff');
+  assert.equal(session.getItem(R.PROGRESS_KEY), null);
 });
 
 test('booth.js: the offline error line, and receipts stay on localStorage without the runtime', () => {

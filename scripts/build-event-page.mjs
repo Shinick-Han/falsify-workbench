@@ -13,12 +13,12 @@
 // cloud-config script name, the CSP connect-src origin, a title suffix, a
 // noindex robots meta, a color-scheme "only light" meta (forced dark modes leave the
 // booth's selected states alone), and the booth assets after hosted-ai.js: event-theme.css,
-// booth.css, booth-recipe.css, booth-myai.css, booth-runtime.css, booth-patch.css,
-// booth-pageedit.css, then booth-runtime.js, booth.js, booth-recipe.js, booth-myai.js,
-// booth-patch.js and booth-pageedit.js (all defer). event-theme.css comes first so booth.css can
+// booth.css, booth-recipe.css, booth-myai.css, booth-runtime.css, booth-pageedit.css,
+// then booth-edits.js, booth-runtime.js, booth.js, booth-recipe.js, booth-myai.js and
+// booth-pageedit.js (all defer). event-theme.css comes first so booth.css can
 // override it; booth-runtime.js (kiosk storage, offline retry) runs before booth.js reads it;
-// booth.js runs before the recipe, my-AI and in-page editing scripts that extend it, and
-// booth-patch.js before its caller. Whatever else
+// booth.js runs before the recipe, my-AI and in-page editing scripts that extend it; booth-edits.js
+// (the shared edit store) runs first. Whatever else
 // index.html contains, including open-access.js, is copied through.
 import {readFileSync, writeFileSync} from 'node:fs';
 import {dirname, join, resolve} from 'node:path';
@@ -37,9 +37,9 @@ const ORIGIN = /^https:\/\/[a-z0-9.-]+(?::[1-9][0-9]{0,4})?$/;
 export const DEFAULT_EVENT_API_BASE = 'https://falsify-cloud-api-event.ai-gongbu.workers.dev';
 export const EVENT_TITLE_SUFFIX = ' · Event';
 /* Contract order: event-theme.css, booth.css, booth-recipe.css, booth-myai.css, booth-runtime.css,
-   then the in-page editing files (booth-patch before booth-pageedit), then the scripts. */
-export const BOOTH_STYLES = Object.freeze(['event-theme.css', 'booth.css', 'booth-recipe.css', 'booth-myai.css', 'booth-runtime.css', 'booth-patch.css', 'booth-pageedit.css']);
-export const BOOTH_SCRIPTS = Object.freeze(['booth-runtime.js', 'booth.js', 'booth-recipe.js', 'booth-myai.js', 'booth-patch.js', 'booth-pageedit.js']);
+   booth-pageedit.css, then the scripts (the edit store first). */
+export const BOOTH_STYLES = Object.freeze(['event-theme.css', 'booth.css', 'booth-recipe.css', 'booth-myai.css', 'booth-runtime.css', 'booth-pageedit.css']);
+export const BOOTH_SCRIPTS = Object.freeze(['booth-edits.js', 'booth-runtime.js', 'booth.js', 'booth-recipe.js', 'booth-myai.js', 'booth-pageedit.js']);
 /* Workbench assets the booth flow (pick, edit, 다음, send, ticket) never calls. Dropping them from
    event.html keeps index.html whole. latex-workbench.mjs statically imports MuPDF, whose top-level
    await downloads and compiles the 10 MB mupdf-wasm.wasm on every page load. Every global these
@@ -51,6 +51,9 @@ export const EVENT_OMIT = Object.freeze([
   // RED's /URI scan imports MuPDF on the main thread when a paper opens (4.6 MB wasm, 0.4-0.6 s task).
   'red-baseline-uri.css', 'red-baseline-uri.js',
   'coevolution-arena.css', 'coevolution-arena.js', 'blue-defect-sensor.css', 'blue-defect-sensor-ui.js',
+  // Workbench PDF engines (PDFium editcore.wasm, table/pipeline/recompose/font/change-marks/generation) unused on event.html.
+  'paper-recompose-entry.mjs', 'table-pdf.js', 'paragraph-pdf.js', 'pdf-edit-pipeline.js',
+  'paper-font-service.js', 'paper-change-marks.js', 'paper-generation.js',
 ]);
 
 function fail(message, exitCode) {

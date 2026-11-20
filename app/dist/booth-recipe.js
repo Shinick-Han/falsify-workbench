@@ -1,15 +1,11 @@
-/* Event-page defect recipes (falsify.booth.recipe.v1) and find-and-replace editing.
-   globalThis.FalsifyBoothRecipe: validate, apply, fromCode, pageText, paperInfo, setAssist, assist.
-   Every edit goes through FalsifyPaperWorkspace.acceptProposals with a confirmed import: the same
-   session.add a manual paragraph edit ends in, so #paper-edits, the booth dock and 「다음」 (the
-   paragraph-flow PDF build) treat it exactly like a hand edit. Matching folds whitespace runs,
-   line-end hyphenation and (when the exact text is nowhere) look-alike quotes, dashes, case and
-   spacing, but keeps the original offsets. The page comes first, then the whole paper; context
-   breaks ties, and only an edit with no usable context stays unresolved (ambiguous), shown with its
-   places for a one-tap pick. A change that touches an earlier edit merges with it. The edit step gets three tabs
-   (직접 고치기 | 내 AI에게 | Agent 코드); #recipe=CODE in the URL loads, opens and applies a recipe.
-   The send step gets a per-edit 「수정본 쪽 보기」 toggle with the original and generated page images.
-   DOM text is set with textContent only. */
+/* Event-page defect recipes (falsify.booth.recipe.v1) and find-and-replace editing on BoothEdit.
+   globalThis.FalsifyBoothRecipe: validate, apply, fromCode, pageText, paperInfo, currentPage,
+   setAssist, assist, normalizeCode, normalizeText, indexPage, locate, searchHits, codeFromText,
+   expiryText, SCHEMA.
+   Builds one per-page text index from pdf.js getTextContent (or the rendered text layer) with
+   page-fraction rects for every hit, using light normalisation (NFKC, whitespace, hyphens and
+   look-alikes). Find-and-replace, recipes and 내 AI all add BoothEdit records directly to
+   FalsifyBoothEdits with exact rects. DOM text is set with textContent only. */
 (function(root){
   'use strict';
   const SCHEMA='falsify.booth.recipe.v1';
@@ -25,15 +21,11 @@
   const CONTROL_NL=/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
   const EDIT_KEYS=new Set(['page','find','replace','context']);
   const SOFT_HYPHEN='\u00ad';
-  /* Zero-width marks never change what the text says. */
   const ZERO_WIDTH=/[\u200b-\u200d\u2060]/;
-  /* Typographic look-alikes a visitor or an AI types as plain ASCII: curly quotes, primes, dashes and
-     the minus sign. Used only when the exact text is nowhere in the paper. */
+  /* Typographic look-alikes typed as plain ASCII: curly quotes, primes, dashes and minus. */
   const FOLD={'\u2018':"'",'\u2019':"'",'\u201a':"'",'\u201b':"'",'\u2032':"'",'\u00b4':"'",'`':"'",
     '\u201c':'"','\u201d':'"','\u201e':'"','\u201f':'"','\u2033':'"',
     '\u2010':'-','\u2011':'-','\u2012':'-','\u2013':'-','\u2014':'-','\u2015':'-','\u2212':'-','\ufe63':'-','\uff0d':'-'};
-  /* Matching tiers, tried in order until one finds the text: [keepHyphen, mode]. Mode 0 is exact (after
-     whitespace, hyphenation and NFKC folding), 1 also folds look-alikes and case, 2 also ignores spaces. */
   const TIERS=[[false,0],[true,0],[false,1],[true,1],[false,2],[true,2]];
   const TIGHT_MIN=4;
   const WS=/\s/;
@@ -42,28 +34,20 @@
   const HIT_LIMIT=20;
   const SNIP=28;
   const WINDOW=40;
-  /* Mapping a listed place to its paragraph: how far each side is read, how many characters one
-     side needs to agree (unless the text ends first) and how many both sides need together. */
-  const SPOT_REACH=60;
-  /* A context picks one of several places only when it matches this many characters right beside
-     it (or all of the context it has there). */
   const SIDE_MIN=8;
-  const SPOT_SIDE=16;
-  const SPOT_MIN=8;
   const ERROR_TEXT={
     invalid_code:'코드 형식을 확인해 주세요. 예: R-7K3QXM',
     not_found:'이 코드로 찾은 레시피가 없어요. 코드를 다시 확인해 볼까요? 레시피는 6시간 동안 쓸 수 있어요.',
-    invalid_recipe:'레시피를 읽지 못했어요. agent에게 다시 만들어 달라고 해 주세요.',
+    invalid_recipe:'레시피 형식이 맞지 않아요. 코드를 다시 확인해 볼까요?',
     rate_limited:'지금 요청이 몰려 있어요. 잠시 뒤 다시 눌러 주세요.',
     network:'서버에 연결하지 못했어요. 네트워크를 확인해 주세요.',
     no_paper:'레시피의 논문을 열지 못했어요. 「불러오기」를 다시 눌러 주세요.'
   };
-  /* Shown beside the form it is about, where the visitor fixes it in one step. */
   const REASON_TEXT={
-    not_found:'논문에서 이 글자를 찾지 못했어요. 논문에 적힌 그대로 고쳐 적어 주세요.',
+    not_found:'찾는 글자가 이 논문에 없어요.',
     ambiguous:'같은 글자가 여러 곳에 있어요. 바꿀 곳을 눌러 주세요.',
     no_paper:'논문이 아직 열리지 않았어요. 잠시 뒤 「바꾸기」를 다시 눌러 주세요.',
-    rejected:'바꾸지 못했어요. 「바꾸기」를 한 번 더 눌러 주세요.'
+    unchanged:'새 글자가 원문과 같아요.'
   };
 
   /* ---------- validation (contract §1) ---------- */
@@ -76,11 +60,9 @@
   function jsonSize(obj){
     try{return utf8Length(JSON.stringify(obj));}catch{return Infinity;}
   }
-  /* Lengths count Unicode code points, as the server does. */
   function codePoints(text){
     return [...text].length;
   }
-  /* rule: {max, min, trim, newline, optional} */
   function checkText(errors, field, value, rule){
     if(value===undefined&&rule.optional) return;
     if(typeof value!=='string'){errors.push({field,code:'type'});return;}
@@ -128,7 +110,6 @@
     if(obj.defectType!==undefined&&!DEFECT_IDS.includes(obj.defectType)) errors.push({field:'defectType',code:'defect_type'});
     checkText(errors,'reason',obj.reason,{max:500,newline:true,optional:true});
   }
-  /* {ok, errors:[{field, code}]}. The same rules as contract §1. */
   function validate(obj){
     const errors=[];
     if(!isPlain(obj)) return {ok:false,errors:[{field:'',code:'type'}]};
@@ -151,8 +132,207 @@
     const normal='R-'+body.replace(/O/g,'0').replace(/[IL]/g,'1');
     return CODE.test(normal)?normal:'';
   }
+  function codeFromText(text){
+    const match=/#recipe=([A-Za-z0-9-]{6,12})(?![A-Za-z0-9-])/.exec(String(text||''));
+    return match?match[1]:'';
+  }
+  function expiryText(iso, now){
+    const at=new Date(typeof iso==='string'?iso:NaN);
+    if(Number.isNaN(at.getTime())) return '';
+    const today=now&&typeof now.getFullYear==='function'?now:new Date();
+    const pad=n=>String(n).padStart(2,'0');
+    const time=pad(at.getHours())+':'+pad(at.getMinutes());
+    const same=at.getFullYear()===today.getFullYear()&&at.getMonth()===today.getMonth()&&at.getDate()===today.getDate();
+    return (same?'오늘 ':(at.getMonth()+1)+'월 '+at.getDate()+'일 ')+time+'까지 유효';
+  }
 
-  /* ---------- matching ---------- */
+  /* ---------- per-page text index with page-fraction rects ---------- */
+  function clamp01(v){
+    const n=Number(v);
+    if(!Number.isFinite(n)) return 0;
+    return n<0?0:(n>1?1:n);
+  }
+  function plainRect(r){
+    if(!r||typeof r!=='object') return null;
+    const x=clamp01(r.x);
+    const y=clamp01(r.y);
+    const w=Math.min(1-x,Math.max(0,Number(r.w)||0));
+    const h=Math.min(1-y,Math.max(0,Number(r.h)||0));
+    return w>0&&h>0?{x,y,w,h}:null;
+  }
+  function mulMat(m1, m2){
+    return [
+      m1[0]*m2[0]+m1[2]*m2[1],
+      m1[1]*m2[0]+m1[3]*m2[1],
+      m1[0]*m2[2]+m1[2]*m2[3],
+      m1[1]*m2[2]+m1[3]*m2[3],
+      m1[0]*m2[4]+m1[2]*m2[5]+m1[4],
+      m1[1]*m2[4]+m1[3]*m2[5]+m1[5]
+    ];
+  }
+  function viewportDims(viewport){
+    const W=Number(viewport&&viewport.width)||0;
+    const H=Number(viewport&&viewport.height)||0;
+    if(!(W>0&&H>0)) return null;
+    const vt=Array.isArray(viewport.transform)&&viewport.transform.length>=6?viewport.transform:[1,0,0,-1,0,H];
+    return {W,H,vt};
+  }
+  function itemBounds(tx, item){
+    const hLen=Math.hypot(tx[0],tx[1])||1;
+    const vLen=Math.hypot(tx[2],tx[3])||hLen;
+    const fontH=(Number(item.height)>0?Number(item.height):vLen)||10;
+    const rawW=Number(item.width);
+    const itemW=rawW>0?rawW:Math.max(fontH*0.5*String(item.str||'').length,1);
+    const ux=tx[0]/hLen;
+    const uy=tx[1]/hLen;
+    const vx=tx[2]/vLen;
+    const vy=tx[3]/vLen;
+    const ox=tx[4];
+    const oy=tx[5];
+    const bx=ox+ux*itemW;
+    const by=oy+uy*itemW;
+    const asc=0.85*fontH;
+    const desc=0.20*fontH;
+    return {
+      xs:[ox-desc*vx,bx-desc*vx,ox+asc*vx,bx+asc*vx],
+      ys:[oy-desc*vy,by-desc*vy,oy+asc*vy,by+asc*vy]
+    };
+  }
+  function isRotatedTransform(tx){
+    const hLen=Math.hypot(tx[0],tx[1]);
+    if(!(hLen>0)) return false;
+    return tx[0]/hLen<0.99||Math.abs(tx[1]/hLen)>0.05;
+  }
+  function itemRotated(item, viewport){
+    if(item&&typeof item.rotated==='boolean') return item.rotated;
+    const dims=viewportDims(viewport);
+    const t=item&&Array.isArray(item.transform)&&item.transform.length>=6?item.transform:null;
+    return !!(dims&&t&&isRotatedTransform(mulMat(dims.vt,t)));
+  }
+  /* pdf.js getTextContent item -> page-fraction rect on the displayed viewport (top-left origin). */
+  function itemRect(item, viewport){
+    if(item&&item.rect) return plainRect(item.rect);
+    const dims=viewportDims(viewport);
+    const t=item&&Array.isArray(item.transform)&&item.transform.length>=6?item.transform:null;
+    if(!dims||!t) return null;
+    const {xs,ys}=itemBounds(mulMat(dims.vt,t),item);
+    const x0=clamp01(Math.min(...xs)/dims.W);
+    const x1=clamp01(Math.max(...xs)/dims.W);
+    const y0=clamp01(Math.min(...ys)/dims.H);
+    const y1=clamp01(Math.max(...ys)/dims.H);
+    return x1>x0&&y1>y0?{x:x0,y:y0,w:x1-x0,h:y1-y0}:null;
+  }
+  function sameLine(a, b){
+    const cyA=a.y+a.h/2;
+    const cyB=b.y+b.h/2;
+    return Math.abs(cyA-cyB)<0.55*Math.min(a.h,b.h);
+  }
+  function unionRect(a, b){
+    const x=Math.min(a.x,b.x);
+    const y=Math.min(a.y,b.y);
+    const x2=Math.max(a.x+a.w,b.x+b.w);
+    const y2=Math.max(a.y+a.h,b.y+b.h);
+    return {x,y,w:x2-x,h:y2-y};
+  }
+  function mergeLineRects(list){
+    const merged=[];
+    for(const raw of list){
+      const r=plainRect(raw);
+      if(!r) continue;
+      const prev=merged[merged.length-1];
+      if(prev&&sameLine(prev,r)&&r.x>=prev.x-0.01&&r.x<=prev.x+prev.w+0.04){
+        merged[merged.length-1]=unionRect(prev,r);
+      }else{
+        merged.push(r);
+      }
+    }
+    return merged;
+  }
+  function itemSeparator(text, str, prevEol, prevRect, rect){
+    if(!text||WS.test(text[text.length-1])||WS.test(str[0])) return '';
+    if(prevEol) return '\n';
+    if(!prevRect||!rect) return ' ';
+    if(!sameLine(prevRect,rect)) return '\n';
+    return rect.x-(prevRect.x+prevRect.w)>0.18*(rect.h/1.05)?' ':'';
+  }
+  function appendTextItem(state, item, viewport){
+    if(!item||typeof item.str!=='string') return;
+    if(!item.str){
+      if(item.hasEOL&&state.text&&!state.text.endsWith('\n')) state.text+='\n';
+      state.prevEol=!!item.hasEOL;
+      return;
+    }
+    const rect=itemRect(item,viewport);
+    state.text+=itemSeparator(state.text,item.str,state.prevEol,state.prevRect,rect);
+    const start=state.text.length;
+    state.text+=item.str;
+    if(rect){
+      const span={start,end:state.text.length,rect};
+      if(itemRotated(item,viewport)) span.rotated=true;
+      state.spans.push(span);
+    }
+    if(item.hasEOL&&!state.text.endsWith('\n')) state.text+='\n';
+    state.prevRect=rect||state.prevRect;
+    state.prevEol=!!item.hasEOL;
+  }
+  /* Build one indexed page from pdf.js items (or synthetic items with .rect). */
+  function indexItems(pageIndex, items, viewport){
+    const state={text:'',spans:[],prevRect:null,prevEol:false};
+    for(const item of Array.isArray(items)?items:[]) appendTextItem(state,item,viewport);
+    return {pageIndex,text:state.text,spans:state.spans};
+  }
+  /* Fallback synthetic line rects when a caller passes plain text without item rects. */
+  function indexPlainText(pageIndex, text){
+    const src=typeof text==='string'?text:'';
+    const lines=src.split('\n');
+    const spans=[];
+    const step=Math.min(0.04,0.8/Math.max(lines.length,1));
+    let at=0;
+    for(let i=0;i<lines.length;i+=1){
+      const line=lines[i];
+      if(line.length){
+        spans.push({start:at,end:at+line.length,rect:{x:0.05,y:Math.min(0.95,0.05+i*step),w:0.9,h:Math.max(0.012,step*0.8)}});
+      }
+      at+=line.length+1;
+    }
+    return {pageIndex,text:src,spans};
+  }
+  function indexPage(raw){
+    if(!raw||typeof raw!=='object'||!Number.isSafeInteger(raw.pageIndex)||raw.pageIndex<0) return null;
+    if(typeof raw.text==='string'&&Array.isArray(raw.spans)){
+      const spans=raw.spans.filter(s=>s&&Number.isSafeInteger(s.start)&&Number.isSafeInteger(s.end)&&s.end>s.start&&plainRect(s.rect))
+        .map(s=>s.rotated?{start:s.start,end:s.end,rect:plainRect(s.rect),rotated:true}:{start:s.start,end:s.end,rect:plainRect(s.rect)});
+      return {pageIndex:raw.pageIndex,text:raw.text,spans};
+    }
+    if(Array.isArray(raw.items)) return indexItems(raw.pageIndex,raw.items,raw.viewport);
+    if(typeof raw.text==='string') return indexPlainText(raw.pageIndex,raw.text);
+    return null;
+  }
+  function normalizePages(list){
+    return (Array.isArray(list)?list:[]).map(indexPage).filter(Boolean);
+  }
+  function spanSliceRect(span, start, end){
+    const r=span.rect;
+    if(span.rotated) return {x:r.x,y:r.y,w:r.w,h:r.h};
+    const len=Math.max(1,span.end-span.start);
+    const s0=Math.max(0,start-span.start);
+    const s1=Math.min(len,end-span.start);
+    const f0=s0/len;
+    const f1=s1/len;
+    return {x:r.x+r.w*f0,y:r.y,w:Math.max(0.002,r.w*(f1-f0)),h:r.h};
+  }
+  function rectsForSpan(page, start, end){
+    const parts=[];
+    for(const span of page.spans||[]){
+      if(span.end<=start||span.start>=end) continue;
+      parts.push(spanSliceRect(span,start,end));
+    }
+    const merged=mergeLineRects(parts);
+    if(merged.length) return merged;
+    return [{x:0.05,y:0.05,w:0.2,h:0.02}];
+  }
+
+  /* ---------- light normalisation and matching ---------- */
   function hyphenBreak(text, i){
     if(i===0||!LETTER.test(text[i-1])) return -1;
     let j=i+1;
@@ -193,8 +373,7 @@
     pushChars(out,mode>0?folded(chunk):chunk,i,i+len);
     return i+len;
   }
-  /* Whitespace runs become one space and line-end hyphenation is joined (or kept as "-");
-     start[k]/end[k] give the original span of normalised char k. mode: see TIERS. */
+  /* NFKC, whitespace runs, line-end hyphenation and (mode 1+) look-alikes/case, keeping original offsets. */
   function normalizeText(text, keepHyphen, mode){
     const source=typeof text==='string'?text:'';
     const level=mode===1||mode===2?mode:0;
@@ -214,41 +393,25 @@
     normCache.set(key,hit);
     return hit;
   }
-  function segKind(seg){
-    const id=String(seg&&seg.id||'');
-    if(id.startsWith('paragraph:')) return 'paragraph';
-    if(id.startsWith('layout:')) return 'layout';
-    return id.includes(':')?'other':'page';
-  }
-  function validSegments(list){
-    return (Array.isArray(list)?list:[]).filter(seg=>seg&&typeof seg.id==='string'&&typeof seg.text==='string'&&Number.isSafeInteger(seg.pageIndex));
-  }
-  /* Layout columns cover each page; the page segment stands in where a page has none. */
-  function coverage(segs){
-    const layoutPages=new Set(segs.filter(seg=>segKind(seg)==='layout').map(seg=>seg.pageIndex));
-    return segs.filter(seg=>segKind(seg)==='layout'||(segKind(seg)==='page'&&!layoutPages.has(seg.pageIndex)));
-  }
-  function paragraphs(segs){
-    return segs.filter(seg=>segKind(seg)==='paragraph');
-  }
-  function hitsIn(seg, needle, keepHyphen, mode){
-    const norm=normalized(seg.text,keepHyphen,mode);
+  function hitsIn(page, needle, keepHyphen, mode){
+    const norm=normalized(page.text,keepHyphen,mode);
     const hits=[];
     let at=norm.text.indexOf(needle);
     while(at>=0&&hits.length<1000){
-      hits.push({seg,norm,needle,mode:mode||0,at,len:needle.length,start:norm.start[at],end:norm.end[at+needle.length-1]});
+      const start=norm.start[at];
+      const end=norm.end[at+needle.length-1];
+      hits.push({page,norm,needle,mode:mode||0,at,len:needle.length,start,end});
       at=norm.text.indexOf(needle,at+1);
     }
     return hits;
   }
-  /* The first tier that finds the text wins, so a loose tier never adds doubt to an exact match. */
-  function scan(segs, find){
+  function scan(pages, find){
     if(!normalizeText(find,false,0).text) return [];
     for(const [keep,mode] of TIERS){
       const needle=normalizeText(find,keep,mode).text;
       if(!needle||(mode===2&&needle.length<TIGHT_MIN)) continue;
       const hits=[];
-      for(const seg of segs) hits.push(...hitsIn(seg,needle,keep,mode));
+      for(const page of pages) hits.push(...hitsIn(page,needle,keep,mode));
       if(hits.length) return hits;
     }
     return [];
@@ -263,19 +426,16 @@
     while(c0+fwd<ctx.length&&t0+fwd<text.length&&ctx[c0+fwd]===text[t0+fwd]) fwd+=1;
     return back+fwd;
   }
-  /* Up to n normalised characters either side of the hit, as the segment's own text. */
   function windowOf(hit, n){
     const norm=hit.norm;
     const from=Math.max(0,hit.at-n);
     const to=Math.min(norm.text.length,hit.at+hit.len+n);
-    return to>from?hit.seg.text.slice(norm.start[from],norm.end[to-1]):'';
+    return to>from?hit.page.text.slice(norm.start[from],norm.end[to-1]):'';
   }
   function wordScore(ctx, hit){
     const around=windowOf(hit,ctx.length);
     return ctx.split(' ').filter(word=>word.length>1&&around.includes(word)).length;
   }
-  /* Matched characters around the hit, x1000. When the context holds the needle more than once,
-     the occurrence nearest the middle of the context wins the tie. */
   function contextScore(context, hit){
     const ctx=normalizeText(context||'',false,hit.mode).text;
     const out={score:0,matched:0,words:0,room:Math.max(0,ctx.length-hit.needle.length)};
@@ -291,14 +451,8 @@
     out.words=wordScore(ctx,hit);
     return out;
   }
-  /* An exact hint (from a tapped match) wins; one hit wins outright; several need one best score:
-     the characters the context matches right beside the hit, then (still tied) the context's words
-     found near it. A tie after both is ambiguous, so the visitor picks the place; the first in
-     reading order is never taken silently. */
-  function pickHit(hits, context, hint){
+  function pickHit(hits, context){
     if(!hits.length) return {status:'none'};
-    const hinted=hint?hits.find(hit=>hit.seg.id===hint.segmentId&&hit.at===hint.at):null;
-    if(hinted) return {status:'hit',hit:hinted,hinted:true};
     if(hits.length===1) return {status:'hit',hit:hits[0]};
     const scored=hits.map(hit=>Object.assign({hit},contextScore(context,hit)));
     const best=(list,key)=>list.slice().sort((a,b)=>b[key]-a[key]);
@@ -308,73 +462,6 @@
     const byWords=best(scored,'words');
     if(byWords[0].words>=2&&byWords[0].words>byWords[1].words) return {status:'hit',hit:byWords[0].hit};
     return {status:'ambiguous',count:hits.length};
-  }
-  /* The text either side of a hit with look-alikes, case and spaces folded, up to SPOT_REACH
-     characters of the segment's own text. */
-  function sidesOf(hit){
-    const text=hit.seg.text;
-    return {
-      lead:normalizeText(text.slice(Math.max(0,hit.start-SPOT_REACH),hit.start),false,2).text,
-      tail:normalizeText(text.slice(hit.end,hit.end+SPOT_REACH),false,2).text
-    };
-  }
-  function leadAgree(a, b){
-    let n=0;
-    while(n<a.length&&n<b.length&&a[a.length-1-n]===b[b.length-1-n]) n+=1;
-    return n;
-  }
-  function tailAgree(a, b){
-    let n=0;
-    while(n<a.length&&n<b.length&&a[n]===b[n]) n+=1;
-    return n;
-  }
-  /* One side agrees when SPOT_SIDE characters match, or when the text runs out on either side first
-     (a paragraph or column starts or ends there) after every character there matched. */
-  function sideAgrees(n, a, b){
-    return n>=SPOT_SIDE||n===a.length||n===b.length;
-  }
-  /* A coverage hit (the place listed or picked) maps to the paragraph hit on its page whose text
-     agrees on both sides. Exactly one must agree; otherwise there is no mapping and the coverage
-     hit itself is edited. List order is never used. */
-  function sameSpot(paraHits, hit){
-    const own=sidesOf(hit);
-    const agree=paraHits.filter(item=>{
-      if(item.seg.pageIndex!==hit.seg.pageIndex) return false;
-      const other=sidesOf(item);
-      return sideAgrees(leadAgree(own.lead,other.lead),own.lead,other.lead)&&sideAgrees(tailAgree(own.tail,other.tail),own.tail,other.tail)
-        &&leadAgree(own.lead,other.lead)+tailAgree(own.tail,other.tail)>=SPOT_MIN;
-    });
-    return agree.length===1?agree[0]:null;
-  }
-  function resolved(hit, kind){
-    return {
-      status:'resolved',kind,segmentId:hit.seg.id,pageIndex:hit.seg.pageIndex,
-      start:hit.start,end:hit.end,before:hit.seg.text.slice(hit.start,hit.end),window:windowOf(hit,WINDOW)
-    };
-  }
-  /* Coverage text decides ambiguity; a paragraph segment is preferred for the edit itself. */
-  function locateIn(segs, edit){
-    const covHits=scan(coverage(segs),edit.find);
-    const paraHits=scan(paragraphs(segs),edit.find);
-    if(!covHits.length){
-      const para=pickHit(paraHits,edit.context,edit.hint);
-      if(para.status==='hit') return resolved(para.hit,'paragraph');
-      return para.status==='ambiguous'?{status:'ambiguous',count:para.count}:{status:'not_found'};
-    }
-    const cov=pickHit(covHits,edit.context,edit.hint);
-    if(cov.status!=='hit') return {status:'ambiguous',count:cov.count};
-    const spot=sameSpot(paraHits,cov.hit);
-    return spot?resolved(spot,'paragraph'):resolved(cov.hit,segKind(cov.hit.seg));
-  }
-  /* Page first (1-based edit.page), then the whole paper. */
-  function locate(edit, segments){
-    const segs=validSegments(segments);
-    if(!edit||typeof edit.find!=='string') return {status:'not_found'};
-    if(Number.isInteger(edit.page)){
-      const onPage=locateIn(segs.filter(seg=>seg.pageIndex===edit.page-1),edit);
-      if(onPage.status!=='not_found') return onPage;
-    }
-    return locateIn(segs,edit);
   }
   function snippetOf(hit){
     const text=hit.norm.text;
@@ -386,55 +473,58 @@
       tail:text.slice(hit.at+hit.len,to)+(to<text.length?'…':'')
     };
   }
-  /* Live list for 바꿀 글자: the current page first, then page order; at most limit items. */
-  function searchHits(segments, find, currentPage, limit){
-    const segs=validSegments(segments);
-    let hits=scan(coverage(segs),find||'');
-    if(!hits.length) hits=scan(paragraphs(segs),find||'');
-    const rank=hit=>(hit.seg.pageIndex===currentPage?-1:hit.seg.pageIndex);
-    hits.sort((a,b)=>rank(a)-rank(b)||segs.indexOf(a.seg)-segs.indexOf(b.seg)||a.at-b.at);
-    const max=limit||HIT_LIMIT;
+  function hitRecord(hit){
     return {
-      total:hits.length,more:Math.max(0,hits.length-max),
-      items:hits.slice(0,max).map(hit=>({
-        pageIndex:hit.seg.pageIndex,context:windowOf(hit,WINDOW),hint:{segmentId:hit.seg.id,at:hit.at},snippet:snippetOf(hit)
-      }))
+      pageIndex:hit.page.pageIndex,
+      start:hit.start,
+      end:hit.end,
+      originalText:hit.page.text.slice(hit.start,hit.end),
+      rects:rectsForSpan(hit.page,hit.start,hit.end),
+      context:windowOf(hit,WINDOW),
+      snippet:snippetOf(hit)
     };
   }
-  function pageTextOf(segments, pageIndex){
-    const segs=validSegments(segments).filter(seg=>seg.pageIndex===pageIndex);
-    const cover=coverage(segs);
-    return (cover.length?cover:paragraphs(segs)).map(seg=>seg.text.trim()).filter(Boolean).join('\n\n');
+  function locateIn(pages, edit){
+    const hits=scan(pages,edit.find);
+    const picked=pickHit(hits,edit.context);
+    if(picked.status==='hit'){
+      const rec=hitRecord(picked.hit);
+      return {status:'resolved',pageIndex:rec.pageIndex,rects:rec.rects,originalText:rec.originalText,start:rec.start,end:rec.end,window:rec.context};
+    }
+    return picked.status==='ambiguous'?{status:'ambiguous',count:picked.count}:{status:'not_found'};
   }
-  function pageCount(segments){
-    let max=-1;
-    for(const seg of validSegments(segments)) max=Math.max(max,seg.pageIndex);
-    return max+1;
+  /* Page first (1-based edit.page), then the whole paper. */
+  function locate(edit, pageList){
+    const pages=normalizePages(pageList);
+    if(!edit||typeof edit.find!=='string') return {status:'not_found'};
+    if(Number.isInteger(edit.page)){
+      const onPage=locateIn(pages.filter(p=>p.pageIndex===edit.page-1),edit);
+      if(onPage.status!=='not_found') return onPage;
+    }
+    return locateIn(pages,edit);
+  }
+  /* Live hit list: current page first, then page order; every item carries its exact rects. */
+  function searchHits(pageList, find, currentPage, limit){
+    const pages=normalizePages(pageList);
+    const hits=scan(pages,find||'');
+    const rank=hit=>(hit.page.pageIndex===currentPage?-1:hit.page.pageIndex);
+    hits.sort((a,b)=>rank(a)-rank(b)||a.page.pageIndex-b.page.pageIndex||a.at-b.at);
+    const max=limit||HIT_LIMIT;
+    return {
+      total:hits.length,
+      more:Math.max(0,hits.length-max),
+      items:hits.slice(0,max).map(hitRecord)
+    };
   }
 
-  /* ---------- runtime ---------- */
+  /* ---------- runtime state & PDF page indexing ---------- */
   let assistKind='manual';
   let assistCode='';
   let appliedIds=null;
   let lastRecipe=null;
-  /* expiresAt per loaded code, shown on the result card; the recipe itself never keeps server keys. */
   const expiryByCode=new Map();
-  /* A code typed or pasted, also inside a link with #recipe=CODE. */
-  function codeFromText(text){
-    const match=/#recipe=([A-Za-z0-9-]{6,12})(?![A-Za-z0-9-])/.exec(String(text||''));
-    return match?match[1]:'';
-  }
-  /* 「오늘 HH:MM까지 유효」 in local time ('M월 D일 HH:MM까지 유효' on another day); '' when unknown. */
-  function expiryText(iso, now){
-    const at=new Date(typeof iso==='string'?iso:NaN);
-    if(Number.isNaN(at.getTime())) return '';
-    const today=now&&typeof now.getFullYear==='function'?now:new Date();
-    const pad=n=>String(n).padStart(2,'0');
-    const time=pad(at.getHours())+':'+pad(at.getMinutes());
-    const same=at.getFullYear()===today.getFullYear()&&at.getMonth()===today.getMonth()&&at.getDate()===today.getDate();
-    return (same?'오늘 ':(at.getMonth()+1)+'월 '+at.getDate()+'일 ')+time+'까지 유효';
-  }
   const listeners=new Set();
+  let indexCache={key:null,pages:[],promise:null};
 
   function workspace(){
     try{return root.FalsifyPaperWorkspace||null;}catch{return null;}
@@ -442,22 +532,32 @@
   function boothPaper(){
     try{return root.FalsifyBoothPaper||null;}catch{return null;}
   }
+  function boothEdits(){
+    try{return root.FalsifyBoothEdits||null;}catch{return null;}
+  }
+  function liveEdits(){
+    const store=boothEdits();
+    try{return store&&typeof store.list==='function'?store.list():[];}catch{return [];}
+  }
   function source(){
     const ws=workspace();
     try{return ws&&typeof ws.getSource==='function'?ws.getSource():null;}catch{return null;}
   }
-  function segments(){
-    const src=source();
-    return src&&Array.isArray(src.segments)?src.segments:[];
-  }
-  function snapshotEdits(){
+  function pdfDocOf(){
     const ws=workspace();
-    let snap=null;
-    try{snap=ws&&typeof ws.getEditSnapshot==='function'?ws.getEditSnapshot():null;}catch{snap=null;}
-    return snap&&Array.isArray(snap.edits)?snap.edits:null;
+    try{return ws&&typeof ws.getPdfDoc==='function'?ws.getPdfDoc():null;}catch{return null;}
   }
-  function enabledEdits(){
-    return (snapshotEdits()||[]).filter(edit=>edit&&edit.enabled!==false);
+  function currentPageIndex(){
+    const ws=workspace();
+    try{return ws&&typeof ws.getPageIndex==='function'?ws.getPageIndex():null;}catch{return null;}
+  }
+  function currentPage(){
+    const idx=currentPageIndex();
+    return Number.isInteger(idx)&&idx>=0?idx+1:0;
+  }
+  function boothCurrent(){
+    const hook=boothPaper();
+    try{return hook&&typeof hook.current==='function'?hook.current():null;}catch{return null;}
   }
   function sleep(ms){
     return new Promise(resolve=>{root.setTimeout(resolve,ms);});
@@ -468,25 +568,153 @@
       const value=check();
       if(value) return value;
       if(Date.now()>=until) return null;
-      await sleep(step||150);
+      await sleep(step||100);
     }
   }
+  function emit(kind, detail){
+    for(const fn of listeners){try{fn(kind,detail);}catch{}}
+  }
+  function dispatchIndexReady(){
+    const doc=root.document;
+    if(doc&&typeof doc.dispatchEvent==='function'&&typeof root.CustomEvent==='function'){
+      try{doc.dispatchEvent(new root.CustomEvent('falsify:booth-index-ready'));}catch{}
+    }
+  }
+  function textLayerBox(doc){
+    const stage=doc.getElementById('paper-before-stage');
+    const pageEl=stage&&stage.querySelector&&stage.querySelector('.paper-page');
+    const layer=pageEl&&pageEl.querySelector('.paper-text-layer');
+    if(!pageEl||!layer) return null;
+    const box=pageEl.getBoundingClientRect();
+    return box.width>0&&box.height>0?{layer,box}:null;
+  }
+  function textLayerItems(layer, box){
+    const items=[];
+    for(const span of layer.querySelectorAll('span')){
+      const str=span.textContent||'';
+      if(!str) continue;
+      const r=span.getBoundingClientRect();
+      if(!(r.width>0&&r.height>0)) continue;
+      items.push({str,rect:{x:(r.left-box.left)/box.width,y:(r.top-box.top)/box.height,w:r.width/box.width,h:r.height/box.height}});
+    }
+    return items;
+  }
+  /* Rendered DOM text layer fallback when no pdf.js document is exposed yet. */
+  function indexFromTextLayer(){
+    const doc=root.document;
+    const idx=currentPageIndex();
+    if(!doc||idx==null) return [];
+    const found=textLayerBox(doc);
+    if(!found) return [];
+    const items=textLayerItems(found.layer,found.box);
+    return items.length?[indexItems(idx,items,null)]:[];
+  }
+  /* Fallback for unit-test stubs that supply source.pages or source.segments without pdf.js. */
+  function fallbackPagesFromSource(src){
+    if(!src) return [];
+    if(Array.isArray(src.pages)&&src.pages.length) return normalizePages(src.pages);
+    if(Array.isArray(src.segments)&&src.segments.length){
+      const byPage=new Map();
+      for(const seg of src.segments){
+        if(!seg||typeof seg.text!=='string'||!Number.isSafeInteger(seg.pageIndex)||seg.pageIndex<0) continue;
+        const id=String(seg.id||'');
+        if(id.startsWith('paragraph:')) continue;
+        const list=byPage.get(seg.pageIndex)||[];
+        list.push(seg.text.trim());
+        byPage.set(seg.pageIndex,list);
+      }
+      const out=[];
+      for(const [pageIndex,parts] of [...byPage.entries()].sort((a,b)=>a[0]-b[0])){
+        out.push(indexPlainText(pageIndex,parts.filter(Boolean).join('\n\n')));
+      }
+      return out;
+    }
+    return [];
+  }
+  async function indexPdfDoc(pdf){
+    const total=Number(pdf&&pdf.numPages)||0;
+    const pages=[];
+    for(let p=1;p<=total;p+=1){
+      const page=await pdf.getPage(p);
+      try{
+        const viewport=page.getViewport({scale:1});
+        const content=await page.getTextContent();
+        pages.push(indexItems(p-1,content&&content.items||[],viewport));
+      }finally{
+        if(typeof page.cleanup==='function') page.cleanup();
+      }
+    }
+    return pages;
+  }
+  function clearIndex(){
+    indexCache={key:null,pages:[],promise:null};
+  }
+  function indexedPages(){
+    const pdf=pdfDocOf();
+    const src=source();
+    const key=pdf||(src&&(src.fileHash||src.file))||null;
+    if(key&&indexCache.key===key&&indexCache.pages.length) return indexCache.pages;
+    if(!pdf){
+      const fb=fallbackPagesFromSource(src);
+      if(fb.length) return fb;
+      return indexFromTextLayer();
+    }
+    return indexCache.pages;
+  }
+  function canPreviewFile(src){
+    return !!(src&&src.file&&typeof src.file.arrayBuffer==='function'&&root.FalsifyPreview&&typeof root.FalsifyPreview.defaultImport==='function');
+  }
+  async function indexSourceFile(src){
+    const preview=root.FalsifyPreview;
+    const lib=await preview.defaultImport();
+    if(lib.GlobalWorkerOptions&&!lib.GlobalWorkerOptions.workerSrc&&root.document){
+      lib.GlobalWorkerOptions.workerSrc=new URL('./vendor/pdf.worker.mjs',root.document.baseURI).href;
+    }
+    const bytes=new Uint8Array(await src.file.arrayBuffer());
+    const doc=await lib.getDocument(preview.pdfParams(bytes,root.document?root.document.baseURI:'')).promise;
+    try{return await indexPdfDoc(doc);}finally{doc.destroy&&doc.destroy();}
+  }
+  async function runIndexTask(key, task){
+    indexCache={key,pages:[],promise:task};
+    try{
+      const pages=await task;
+      if(indexCache.key===key) indexCache={key,pages,promise:null};
+      dispatchIndexReady();
+      return pages;
+    }catch{
+      if(indexCache.key===key) indexCache={key:null,pages:[],promise:null};
+      return indexFromTextLayer();
+    }
+  }
+  function indexKeyOf(pdf, src){
+    return pdf||(src&&(src.fileHash||src.file))||null;
+  }
+  async function ensureIndex(){
+    const pdf=pdfDocOf();
+    const src=source();
+    const key=indexKeyOf(pdf,src);
+    if(!key) return [];
+    if(indexCache.key===key&&indexCache.pages.length) return indexCache.pages;
+    if(indexCache.key===key&&indexCache.promise) return indexCache.promise;
+    if(pdf) return runIndexTask(key,indexPdfDoc(pdf));
+    const fb=fallbackPagesFromSource(src);
+    if(fb.length){indexCache={key,pages:fb,promise:null};return fb;}
+    if(canPreviewFile(src)) return runIndexTask(key,indexSourceFile(src));
+    return indexFromTextLayer();
+  }
+
   function setAssist(kind, recipeCode){
     assistKind=SOURCES.includes(kind)?kind:'manual';
     const code=normalizeCode(recipeCode||'');
     assistCode=assistKind==='agent'&&code?code:'';
     appliedIds=null;
   }
-  /* After apply, the assist kind holds only while one of its edits is still enabled. */
   function assist(){
-    const live=snapshotEdits();
-    if(appliedIds&&live&&!live.some(edit=>edit&&edit.enabled!==false&&appliedIds.has(edit.id))) return {assist:'manual'};
+    const live=liveEdits();
+    if(appliedIds&&!live.some(edit=>edit&&appliedIds.has(edit.id))) return {assist:'manual'};
     const out={assist:assistKind};
     if(assistKind==='agent'&&assistCode) out.recipeCode=assistCode;
     return out;
-  }
-  function emit(kind, detail){
-    for(const fn of listeners){try{fn(kind,detail);}catch{}}
   }
   function baseOf(value){
     if(typeof value!=='string'||!value) return '';
@@ -527,7 +755,6 @@
     error.errors=errors;
     return error;
   }
-  /* GET /v1/booth/recipes/:code. The stored recipe plus code; createdAt/expiresAt are dropped. */
   async function fromCode(code){
     const normal=normalizeCode(code);
     if(!normal) throw coded('invalid_code');
@@ -545,7 +772,6 @@
       return typeof token==='string'?token:'';
     }catch{return '';}
   }
-  /* Title and license of a non-mission paper, from the search the booth uses. Best effort. */
   async function searchMeta(paperId){
     const token=await bearer();
     if(!token) return {};
@@ -557,7 +783,6 @@
       return {title:typeof item.title==='string'?item.title:'',license};
     }catch{return {};}
   }
-  /* Exact id match against the mission tickets' "arXiv <id>" labels. */
   function isMission(paperId){
     const doc=root.document;
     const box=doc&&doc.getElementById('booth-missions');
@@ -567,279 +792,62 @@
       return !!match&&match[1]===paperId;
     });
   }
-  function boothCurrent(){
-    const hook=boothPaper();
-    try{return hook&&typeof hook.current==='function'?hook.current():null;}catch{return null;}
-  }
-  function sourceReady(previousHash){
+  function paperIndexReady(previousHash, previousPdf){
+    const pdf=pdfDocOf();
+    if(pdf&&pdf!==previousPdf) return true;
     const src=source();
     if(!src||src.fileHash===previousHash) return false;
-    return validSegments(src.segments).some(seg=>segKind(seg)==='layout'||segKind(seg)==='page');
+    return !!(Array.isArray(src.pages)&&src.pages.length||Array.isArray(src.segments)&&src.segments.length);
   }
-  /* The booth's own mission/search load path, then the workspace's text segments. */
+  function sameOpenPaper(paperId){
+    const current=boothCurrent();
+    return !!(current&&current.id===paperId&&(pdfDocOf()||source()));
+  }
+  function hasLoadedPages(){
+    return !!(pdfDocOf()||fallbackPagesFromSource(source()).length);
+  }
+  async function paperMetaFor(paperId, same){
+    return same||isMission(paperId)?{}:await searchMeta(paperId);
+  }
   async function ensurePaper(paperId){
     const hook=boothPaper();
     if(!hook||typeof hook.open!=='function') return false;
-    const current=boothCurrent();
-    const same=!!(current&&current.id===paperId&&source());
-    const previous=same?null:(source()||{}).fileHash;
-    const meta=same||isMission(paperId)?{}:await searchMeta(paperId);
+    const same=sameOpenPaper(paperId);
+    const previousHash=same?null:(source()||{}).fileHash;
+    const previousPdf=same?null:pdfDocOf();
+    const meta=await paperMetaFor(paperId,same);
     const pending=await waitFor(()=>hook.open(paperId,meta),15000,200);
     if(!pending||!(await pending)) return false;
-    return !!(await waitFor(()=>sourceReady(previous),60000,200));
+    if(same&&hasLoadedPages()) return true;
+    return !!(await waitFor(()=>paperIndexReady(previousHash,previousPdf),60000,150));
   }
-  function paragraphsReady(pageIndex){
-    return segments().some(seg=>seg.pageIndex===pageIndex&&segKind(seg)==='paragraph');
-  }
-  /* Paragraph segments exist once the workspace has drawn the page. */
-  async function ensureParagraphs(pageIndex){
-    if(paragraphsReady(pageIndex)) return true;
-    const ws=workspace();
-    const shown=await waitFor(()=>{try{return ws.showPage(pageIndex+1)===true;}catch{return false;}},8000,200);
-    if(!shown) return false;
-    return !!(await waitFor(()=>paragraphsReady(pageIndex),8000,150));
-  }
-  function occursOnce(text, part){
-    const at=text.indexOf(part);
-    return at>=0&&text.indexOf(part,at+1)<0;
-  }
-  /* The PDF build matches Before exactly once in its segment, so a repeated Before grows by whole
-     words on both sides until it is unique, as a hand edit of the paragraph would read. */
-  function uniqueSpan(text, start, end){
-    let from=start;
-    let to=end;
-    while(!occursOnce(text,text.slice(from,to))&&(from>0||to<text.length)){
-      from=Math.max(0,from-1);
-      while(from>0&&!WS.test(text[from-1])) from-=1;
-      to=Math.min(text.length,to+1);
-      while(to<text.length&&!WS.test(text[to])) to+=1;
-    }
-    return {from,to};
-  }
-  function proposalFor(found, replace, text){
-    const span=uniqueSpan(text,found.start,found.end);
+  function addBoothEdit(hit, replace, editSource, assistMeta){
+    const store=boothEdits();
+    if(!store||typeof store.add!=='function') return {ok:false,reason:'no_paper'};
+    if(hit.originalText===replace) return {ok:false,reason:'unchanged'};
+    const added=store.add({
+      pageIndex:hit.pageIndex,
+      rects:hit.rects,
+      originalText:hit.originalText,
+      newText:replace,
+      source:editSource||'find',
+      ...(assistMeta?{assist:assistMeta}:{})
+    });
+    if(!added) return {ok:false,reason:'unchanged'};
     return {
-      segmentId:found.segmentId,pageIndex:found.pageIndex,
-      before:text.slice(span.from,span.to),
-      after:text.slice(span.from,found.start)+replace+text.slice(found.end,span.to),
-      anchor:{start:span.from,end:span.to}
+      ok:true,
+      id:added.id,
+      pageIndex:hit.pageIndex,
+      before:hit.originalText,
+      after:replace,
+      rects:hit.rects
     };
-  }
-  function segmentText(segmentId){
-    const seg=segments().find(item=>item&&item.id===segmentId);
-    return seg&&typeof seg.text==='string'?seg.text:'';
-  }
-  const HUNK_CELLS=250000;
-  /* Pairs of equal characters in a and b (a longest common subsequence), as [i,j] in order. */
-  function commonPairs(a, b){
-    const n=a.length;
-    const m=b.length;
-    const dp=new Int32Array((n+1)*(m+1));
-    for(let i=n-1;i>=0;i-=1){
-      for(let j=m-1;j>=0;j-=1){
-        dp[i*(m+1)+j]=a[i]===b[j]?dp[(i+1)*(m+1)+j+1]+1:Math.max(dp[(i+1)*(m+1)+j],dp[i*(m+1)+j+1]);
-      }
-    }
-    const pairs=[];
-    let i=0;
-    let j=0;
-    while(i<n&&j<m){
-      if(a[i]===b[j]){pairs.push([i,j]);i+=1;j+=1;}
-      else if(dp[(i+1)*(m+1)+j]>=dp[i*(m+1)+j+1]) i+=1;
-      else j+=1;
-    }
-    return pairs;
-  }
-  /* The common start and end of Before and After, as lengths. */
-  function commonEnds(before, after){
-    const max=Math.min(before.length,after.length);
-    let lead=0;
-    while(lead<max&&before[lead]===after[lead]) lead+=1;
-    let tail=0;
-    while(tail<max-lead&&before[before.length-1-tail]===after[after.length-1-tail]) tail+=1;
-    return {lead,tail};
-  }
-  /* Runs between equal characters of a and b, as offsets in a (shifted by lead) and text of b. */
-  function diffRuns(a, b, lead){
-    const runs=[];
-    let i=0;
-    let j=0;
-    for(const [pi,pj] of commonPairs(a,b).concat([[a.length,b.length]])){
-      if(pi>i||pj>j) runs.push({start:lead+i,end:lead+pi,text:b.slice(j,pj)});
-      i=pi+1;
-      j=pj+1;
-    }
-    return runs;
-  }
-  /* Runs with no space between them belong to one word and become one change. */
-  function joinWords(before, runs){
-    const joined=[];
-    for(const run of runs){
-      const last=joined[joined.length-1];
-      const gap=last?before.slice(last.end,run.start):'';
-      if(last&&!/\s/.test(gap)) Object.assign(last,{end:run.end,text:last.text+gap+run.text});
-      else joined.push(Object.assign({},run));
-    }
-    return joined;
-  }
-  /* An edit's real changes, as Before offsets and the text that replaces them: a character diff of
-     Before and After. Changes inside one word count as one change, so two changes far apart in one
-     edit stay two. */
-  function changesOf(before, after){
-    const ends=commonEnds(before,after);
-    const a=before.slice(ends.lead,before.length-ends.tail);
-    const b=after.slice(ends.lead,after.length-ends.tail);
-    if(!a&&!b) return [];
-    if(!a||!b||(a.length+1)*(b.length+1)>HUNK_CELLS) return [{start:ends.lead,end:ends.lead+a.length,text:b}];
-    return joinWords(before,diffRuns(a,b,ends.lead));
-  }
-  /* Where an existing edit sits in this segment's text: its own anchor in the same segment, else
-     (another view of the same page) its Before when it is unique both in its own segment and here,
-     the same test the workspace uses to call two edits overlapping. */
-  function spanIn(edit, segmentId, text){
-    if(!edit||typeof edit.before!=='string'||!edit.before) return null;
-    const a=edit.anchor;
-    if(edit.segmentId===segmentId){
-      const start=a&&Number.isSafeInteger(a.start)?a.start:-1;
-      return start>=0&&text.slice(start,start+edit.before.length)===edit.before?{start,end:start+edit.before.length}:null;
-    }
-    if(!occursOnce(segmentText(edit.segmentId),edit.before)||!occursOnce(text,edit.before)) return null;
-    const start=text.indexOf(edit.before);
-    return {start,end:start+edit.before.length};
-  }
-  function clashesWith(found, anchor, text){
-    return enabledEdits()
-      .filter(edit=>edit.pageIndex===found.pageIndex)
-      .map(edit=>({edit,span:spanIn(edit,found.segmentId,text)}))
-      .filter(item=>item.span&&item.span.start<anchor.end&&anchor.start<item.span.end);
-  }
-  function crosses(piece, start, end){
-    if(piece.start===piece.end) return start<piece.start&&piece.start<end;
-    return piece.start<end&&start<piece.end;
-  }
-  /* One proposal for the new change plus the edits it touches. Each older change (every separate
-     change inside an older edit, see changesOf) that sits apart from the new one is kept; one the
-     new change runs into gives way to it (the newest wins). */
-  function mergedProposal(found, replace, text, clashes){
-    const pieces=[{start:found.start,end:found.end,text:replace}];
-    let from=found.start;
-    let to=found.end;
-    for(const item of clashes){
-      const edit=item.edit;
-      from=Math.min(from,item.span.start);
-      to=Math.max(to,item.span.end);
-      for(const change of changesOf(edit.before,typeof edit.after==='string'?edit.after:edit.before)){
-        const piece={start:item.span.start+change.start,end:item.span.start+change.end,text:change.text};
-        if(!crosses(piece,found.start,found.end)&&!(found.start===found.end&&crosses(pieces[0],piece.start,piece.end))) pieces.push(piece);
-      }
-    }
-    pieces.sort((a,b)=>a.start-b.start||(a.end-a.start)-(b.end-b.start));
-    const span=uniqueSpan(text,from,to);
-    let after='';
-    let at=span.from;
-    for(const piece of pieces){after+=text.slice(at,piece.start)+piece.text;at=piece.end;}
-    after+=text.slice(at,span.to);
-    return {segmentId:found.segmentId,pageIndex:found.pageIndex,before:text.slice(span.from,span.to),after,anchor:{start:span.from,end:span.to}};
-  }
-  function editProposal(edit){
-    const a=edit.anchor||{};
-    return {segmentId:edit.segmentId,pageIndex:edit.pageIndex,before:edit.before,after:edit.after,anchor:{start:a.start,end:a.end}};
-  }
-  /* The workspace's removeEdit hook, else the edit's own delete control in #paper-edits. */
-  function removeEdit(id){
-    const ws=workspace();
-    try{if(ws&&typeof ws.removeEdit==='function') return ws.removeEdit(id)===true;}catch{return false;}
-    const doc=root.document;
-    const list=doc&&doc.getElementById&&doc.getElementById('paper-edits');
-    const node=list&&[...list.querySelectorAll('[data-act="delete"]')].find(item=>item.dataset.edit===id);
-    if(!node||node.disabled) return false;
-    node.click();
-    return true;
-  }
-  function accept(ws, proposals){
-    let result=null;
-    try{result=ws.acceptProposals(proposals,{origin:'external-ai-import',confirmed:true});}
-    catch{result=null;}
-    try{ws.acceptProposals([],{origin:'external-ai-import'});}catch{}
-    return !!result&&result.applied===proposals.length;
-  }
-  /* acceptProposals(confirmed) ends in session.add, like a manual paragraph edit. The empty call
-     afterwards clears the workspace's proposal queue so no stale card is left. A change that
-     touches edits already made replaces them with one merged edit; if the workspace still refuses,
-     the old edits come back as they were. */
-  function commit(found, replace){
-    const ws=workspace();
-    const before=new Set((snapshotEdits()||[]).map(edit=>edit.id));
-    const text=segmentText(found.segmentId);
-    if(text.slice(found.start,found.end)!==found.before) return {ok:false,reason:'not_found'};
-    let proposal=proposalFor(found,replace,text);
-    const clashes=clashesWith(found,proposal.anchor,text);
-    const removed=[];
-    if(clashes.length){
-      proposal=mergedProposal(found,replace,text,clashes);
-      for(const item of clashes){
-        if(!removeEdit(item.edit.id)) break;
-        removed.push(item.edit);
-      }
-      if(removed.length!==clashes.length){
-        if(removed.length) accept(ws,removed.map(editProposal));
-        return {ok:false,reason:'rejected'};
-      }
-      if(proposal.before===proposal.after){
-        return {ok:true,id:null,pageIndex:found.pageIndex,segmentId:found.segmentId,before:proposal.before,after:proposal.after,merged:removed.map(edit=>edit.id)};
-      }
-    }
-    const ok=accept(ws,[proposal]);
-    const added=(snapshotEdits()||[]).find(edit=>!before.has(edit.id)&&edit.segmentId===proposal.segmentId&&edit.before===proposal.before);
-    if(!ok||!added){
-      if(removed.length) accept(ws,removed.map(editProposal));
-      return {ok:false,reason:'rejected'};
-    }
-    const out={ok:true,id:added.id,pageIndex:found.pageIndex,segmentId:found.segmentId,before:proposal.before,after:proposal.after};
-    if(removed.length) out.merged=removed.map(edit=>edit.id);
-    return out;
-  }
-  async function locateLoaded(edit){
-    if(Number.isInteger(edit.page)) await ensureParagraphs(edit.page-1);
-    const found=locate(edit,segments());
-    if(found.status!=='resolved'||found.kind==='paragraph'||paragraphsReady(found.pageIndex)) return found;
-    if(!(await ensureParagraphs(found.pageIndex))) return found;
-    const again=locate({page:found.pageIndex+1,find:edit.find,replace:edit.replace,context:edit.context||found.window,hint:edit.hint},segments());
-    return again.status==='resolved'?again:found;
-  }
-  /* A located spot (locate() status 'resolved') as one workspace edit. The page-edit word tap uses
-     this, so word taps, find-and-replace and recipes all widen and commit exactly the same way. */
-  function applyFound(found, replace){
-    const ws=workspace();
-    if(!ws||typeof ws.acceptProposals!=='function'||!source()) return {ok:false,reason:'no_paper'};
-    if(!found||found.status!=='resolved'||typeof replace!=='string') return {ok:false,reason:'not_found'};
-    return commit(found,replace);
-  }
-  /* One edit: {ok:true, id, ...} or {ok:false, reason: not_found | ambiguous | no_paper}. */
-  async function applyEdit(edit){
-    const ws=workspace();
-    if(!ws||typeof ws.acceptProposals!=='function'||!source()) return {ok:false,reason:'no_paper'};
-    const found=await locateLoaded(edit);
-    if(found.status!=='resolved') return {ok:false,reason:found.status==='ambiguous'?'ambiguous':'not_found'};
-    return commit(found,edit.replace);
   }
   function recordAssist(recipe, code, ids){
     assistKind=recipe.source;
     const normal=normalizeCode(code||'');
     assistCode=recipe.source==='agent'&&normal?normal:'';
-    appliedIds=new Set(ids);
-  }
-  async function applyAll(clean, progress){
-    const applied=[];
-    const unresolved=[];
-    for(let i=0;i<clean.edits.length;i+=1){
-      const edit=clean.edits[i];
-      progress({phase:'edit',index:i,total:clean.edits.length});
-      const result=await applyEdit(edit);
-      if(result.ok) applied.push(Object.assign({edit},result));
-      else unresolved.push({edit,reason:result.reason});
-    }
-    return {applied,unresolved};
+    appliedIds=new Set(ids.filter(Boolean));
   }
   function progressFn(options){
     const onProgress=options&&typeof options.onProgress==='function'?options.onProgress:null;
@@ -848,15 +856,44 @@
       emit('progress',info);
     };
   }
+  function recipeSourceMeta(clean, normalCode){
+    const editSource=clean.source==='my-ai'?'myai':(clean.source==='agent'?'recipe':'find');
+    const assistMeta=clean.source==='agent'&&normalCode
+      ?{kind:'agent',code:normalCode}
+      :(clean.source==='my-ai'?{kind:'my-ai'}:undefined);
+    return {editSource,assistMeta};
+  }
+  function applyRecipeEdits(clean, pages, normalCode, progress){
+    const applied=[];
+    const unresolved=[];
+    const {editSource,assistMeta}=recipeSourceMeta(clean,normalCode);
+    for(let i=0;i<clean.edits.length;i+=1){
+      const edit=clean.edits[i];
+      progress({phase:'edit',index:i,total:clean.edits.length});
+      const found=locate(edit,pages);
+      if(found.status==='resolved'){
+        const result=addBoothEdit(found,edit.replace,editSource,assistMeta);
+        if(result.ok) applied.push(Object.assign({edit},result));
+        else unresolved.push({edit,reason:result.reason});
+      }else{
+        unresolved.push({edit,reason:found.status==='ambiguous'?'ambiguous':'not_found'});
+      }
+    }
+    return {applied,unresolved};
+  }
   async function apply(recipe, options){
     const clean=isPlain(recipe)?withoutServerKeys(recipe):recipe;
     const checked=validate(clean);
     if(!checked.ok) throw invalidRecipe(checked.errors);
     const progress=progressFn(options);
     const code=typeof recipe.code==='string'?recipe.code:'';
+    const normalCode=normalizeCode(code);
     progress({phase:'paper',paperId:clean.paperId});
     const opened=await ensurePaper(clean.paperId);
-    const outcome=opened?await applyAll(clean,progress):{applied:[],unresolved:clean.edits.map(edit=>({edit,reason:'no_paper'}))};
+    const pages=opened?await ensureIndex():[];
+    const outcome=opened&&pages.length
+      ?applyRecipeEdits(clean,pages,normalCode,progress)
+      :{applied:[],unresolved:clean.edits.map(edit=>({edit,reason:'no_paper'}))};
     recordAssist(clean,code,outcome.applied.map(item=>item.id));
     lastRecipe={recipe:clean,code:assistCode,fileHash:(source()||{}).fileHash||'',outcome};
     progress({phase:'done'});
@@ -864,13 +901,19 @@
     return outcome;
   }
   function pageText(page){
-    return Number.isInteger(page)&&page>=1?pageTextOf(segments(),page-1):'';
+    if(!Number.isInteger(page)||page<1) return '';
+    const hit=indexedPages().find(p=>p.pageIndex===page-1);
+    return hit?hit.text:'';
   }
   function paperInfo(){
     const paper=boothCurrent();
+    const ws=workspace();
+    const pages=indexedPages().length||(ws&&typeof ws.getPageCount==='function'?ws.getPageCount():0);
     return {
-      paperId:paper&&paper.id||'',title:paper&&paper.title||'',license:paper&&paper.license||'',
-      pages:pageCount(segments())
+      paperId:paper&&paper.id||'',
+      title:paper&&paper.title||'',
+      license:paper&&paper.license||'',
+      pages
     };
   }
 
@@ -899,18 +942,8 @@
     function field(input, label){
       return el('label',{className:'booth-field',for:input.id},el('span',{className:'booth-klab',textContent:label}),input);
     }
-    function currentPage(){
-      const ws=workspace();
-      try{return ws&&typeof ws.getPageIndex==='function'?ws.getPageIndex():null;}catch{return null;}
-    }
-    function keepScroll(task){
-      const y=root.scrollY||0;
-      return task().finally(()=>{try{root.scrollTo(0,y);}catch{}});
-    }
-
-    /* One 바꿀 글자 / 새 글자 / 바꾸기 form. opts.row marks an unresolved recipe edit. */
     function hitButton(item, chosen, pick){
-      const selected=!!chosen&&chosen.pageIndex===item.pageIndex&&chosen.context===item.context;
+      const selected=!!chosen&&chosen.pageIndex===item.pageIndex&&chosen.start===item.start&&chosen.end===item.end;
       const button=el('button',{type:'button',className:'booth-find-hit'+(selected?' on':''),role:'option','aria-selected':String(selected)},
         el('span',{className:'pg',textContent:(item.pageIndex+1)+'쪽'}),
         el('span',{className:'snip'},item.snippet.lead,el('mark',{textContent:item.snippet.hit}),item.snippet.tail));
@@ -921,11 +954,10 @@
       const o=opts||{};
       ui.seq+=1;
       const id='booth-find-'+ui.seq;
-      const state={chosen:null,timer:0,list:{total:0,more:0,items:[]}};
+      const state={chosen:null,armed:false,busy:false,timer:0,list:{total:0,more:0,items:[]}};
       const find=el('input',{id:id+'-q',type:'text',maxlength:'300',autocomplete:'off',spellcheck:'false',value:o.find||''});
       const repl=el('input',{id:id+'-r',type:'text',maxlength:'300',autocomplete:'off',spellcheck:'false',value:o.replace||''});
       const hits=el('div',{className:'booth-find-hits',role:'listbox','aria-label':'찾은 곳'});
-      /* "Several places: tap one" sits right above the list it is about. */
       const ask=el('p',{className:'booth-find-ask',role:'status','aria-live':'polite',hidden:true});
       const more=el('p',{className:'booth-find-more',hidden:true});
       const go=el('button',{type:'submit',className:'booth-btn ink',textContent:'바꾸기'});
@@ -946,82 +978,67 @@
         more.hidden=!state.list.more;
         say(more,state.list.more?state.list.more+'곳 더 있어요. 더 길게 적으면 줄어들어요.':'');
       }
-      /* typed: the visitor changed 바꿀 글자, so the line under the form follows the new text. Other
-         refreshes (a page drawn, a tab opened) keep what the last 바꾸기 said. */
       function render(typed){
         const query=find.value;
-        state.list=query.trim()?searchHits(segments(),query,currentPage(),HIT_LIMIT):{total:0,more:0,items:[]};
-        if(typed===true) say(status,query.trim()&&!state.list.total?'이 논문에서 찾지 못했어요.':'');
-        /* Paragraph text that arrives after typing (a superscript such as Ragas¹) can turn up the place: drop the stale note. */
-        else if(state.list.total&&status.textContent==='이 논문에서 찾지 못했어요.') say(status,'');
+        state.list=query.trim()?searchHits(indexedPages(),query,currentPageIndex(),HIT_LIMIT):{total:0,more:0,items:[]};
+        if(typed===true) say(status,query.trim()&&!state.list.total?REASON_TEXT.not_found:'');
+        else if(state.list.total&&status.textContent===REASON_TEXT.not_found) say(status,'');
         paint();
       }
-      /* After 「바꾸기」 met several places, or on a recipe row, the tap that picks a place applies it. */
+      function applyChosen(item){
+        const editSource=o.source||'find';
+        const result=addBoothEdit(item,repl.value,editSource,o.assist);
+        if(!result.ok){tell(REASON_TEXT[result.reason]||REASON_TEXT.no_paper);return;}
+        const ws=workspace();
+        if(ws&&typeof ws.showPage==='function'){try{ws.showPage(result.pageIndex+1,{scroll:false});}catch{}}
+        if(typeof o.onDone==='function'){o.onDone(result);return;}
+        find.value='';
+        repl.value='';
+        state.chosen=null;
+        state.armed=false;
+        tell('');
+        render();
+        say(status,'바꿨어요 · '+(result.pageIndex+1)+'쪽');
+      }
       function pick(item){
         state.chosen=item;
         paint();
-        if(state.armed||o.row) void submit();
+        if(state.armed||o.row){
+          if(repl.value===find.value){tell('새 글자가 바꿀 글자와 같아요.');return;}
+          applyChosen(item);
+        }
       }
       find.addEventListener('input',()=>{
         state.chosen=null;
         state.armed=false;
         tell('');
         root.clearTimeout(state.timer);
-        state.timer=root.setTimeout(()=>render(true),120);
+        state.timer=root.setTimeout(()=>{void ensureIndex().then(()=>render(true));},120);
       });
-      function editFor(){
-        const edit={find:find.value,replace:repl.value};
-        if(state.chosen) return Object.assign(edit,{page:state.chosen.pageIndex+1,context:state.chosen.context,hint:state.chosen.hint});
-        if(o.context||o.page) return Object.assign(edit,{page:o.page,context:o.context});
-        return edit;
-      }
-      /* Several places: the one on the page in view is meant when it is the only one there. */
-      function onlyOnPage(){
-        const page=currentPage();
-        const here=state.list.items.filter(item=>item.pageIndex===page);
-        const whole=state.list.items.length>here.length||state.list.items.length===state.list.total;
-        return here.length===1&&whole?here[0]:null;
-      }
-      function blocked(){
-        if(!find.value.trim()) return '바꿀 글자를 적어 주세요.';
-        if(repl.value===find.value) return '새 글자가 바꿀 글자와 같아요.';
-        if(!source()) return REASON_TEXT.no_paper;
-        if(!state.chosen&&!o.context&&state.list.total>1){
-          const here=onlyOnPage();
-          if(here){state.chosen=here;paint();return '';}
-          state.armed=true;
-          return '같은 글자가 '+state.list.total+'곳에 있어요. 바꿀 곳을 눌러 주세요.';
-        }
-        return '';
-      }
-      function failText(result){
-        if(result.reason==='ambiguous') state.armed=true;
-        return REASON_TEXT[result.reason]||REASON_TEXT.rejected;
-      }
       async function submit(){
         if(state.busy) return;
         root.clearTimeout(state.timer);
-        render();
-        state.armed=false;
-        const problem=blocked();
-        if(problem){tell(problem);return;}
-        tell('');
+        if(!find.value.trim()){tell('바꿀 글자를 적어 주세요.');return;}
+        if(repl.value===find.value){tell('새 글자가 바꿀 글자와 같아요.');return;}
         state.busy=true;
         go.disabled=true;
-        say(status,'바꾸는 중…');
-        const result=await keepScroll(()=>applyEdit(editFor()));
-        state.busy=false;
-        go.disabled=false;
-        if(!result.ok){tell(failText(result));return;}
-        if(typeof o.onDone==='function'){o.onDone(result);return;}
-        find.value='';
-        repl.value='';
-        state.chosen=null;
-        render();
-        say(status,'바꿨어요 · '+(result.pageIndex+1)+'쪽. 아래 「다음」을 누르면 수정본을 만들어요.');
+        try{
+          const pages=await ensureIndex();
+          if(!pages.length){tell(REASON_TEXT.no_paper);return;}
+          render();
+          state.armed=false;
+          if(state.chosen){applyChosen(state.chosen);return;}
+          if(state.list.total===0){tell(REASON_TEXT.not_found);return;}
+          if(state.list.total===1){applyChosen(state.list.items[0]);return;}
+          state.armed=true;
+          tell('같은 글자가 '+state.list.total+'곳에 있어요. 바꿀 곳을 눌러 주세요.');
+        }finally{
+          state.busy=false;
+          go.disabled=false;
+        }
       }
       form.addEventListener('submit',event=>{event.preventDefault();void submit();});
-      if(find.value) root.setTimeout(render,0);
+      if(find.value) root.setTimeout(()=>{void ensureIndex().then(()=>render());},0);
       return {form,render};
     }
 
@@ -1030,7 +1047,6 @@
     const myaiBox=el('div',{id:'booth-myai'});
     const myaiWait=el('p',{className:'booth-small booth-myai-wait',hidden:true,textContent:'준비 중'});
     const codeInput=el('input',{id:'booth-agent-code',type:'text',maxlength:'300',autocomplete:'off',spellcheck:'false',autocapitalize:'characters',placeholder:'예: R-7K3QXM'});
-    /* A pasted link with #recipe=CODE leaves just the code. */
     codeInput.addEventListener('input',()=>{
       const code=codeFromText(codeInput.value);
       if(code&&code!==codeInput.value) codeInput.value=code;
@@ -1040,7 +1056,7 @@
       field(codeInput,'Agent 코드'),
       el('button',{type:'submit',className:'booth-btn ink',textContent:'불러오기'}),
       agentStatus,
-      el('p',{className:'booth-small',textContent:'AI agent가 만든 레시피 코드를 넣으면 고친 곳을 이 논문에 그대로 적용해요. 확인과 제출은 직접 해요.'}));
+      el('p',{className:'booth-small',textContent:'AI agent가 만든 레시피 코드를 넣으면 고친 곳을 이 논문에 바로 적용해요. 확인과 제출은 직접 해요.'}));
     const card=el('section',{id:'booth-recipe-result',className:'booth-panel booth-recipe-card',hidden:true,'aria-live':'polite'});
     const tabs=[['find','직접 고치기'],['myai','내 AI에게'],['agent','Agent 코드']];
     const tabButtons={};
@@ -1074,14 +1090,12 @@
       }
       myaiWait.hidden=false;
     }
-    /* Phones (<1024px): the page comes right after the hint and the tabs, so the find-and-replace form
-       moves below the page as a closed 「찾아 바꾸기」 disclosure. Desktop keeps it in its tab panel. */
     const findMore=el('details',{id:'booth-find-fold',className:'booth booth-find-fold'},el('summary',{textContent:'찾아 바꾸기'}));
     function placeFind(){
       const wide=!!(root.matchMedia&&root.matchMedia('(min-width:1024px)').matches);
-      const workspace=doc.getElementById('paper-workspace');
-      if(!wide&&workspace){
-        if(findMore.parentElement!==workspace) workspace.append(findMore);
+      const wsEl=doc.getElementById('paper-workspace');
+      if(!wide&&wsEl){
+        if(findMore.parentElement!==wsEl) wsEl.append(findMore);
         if(main.form.parentElement!==findMore) findMore.append(main.form);
       }else{
         if(main.form.parentElement!==panes.find) panes.find.append(main.form);
@@ -1089,7 +1103,6 @@
       }
       findMore.hidden=ui.tab!=='find';
     }
-    /* Unresolved recipe edits are fixed where the visitor already is: the open tab's pane. */
     function placeFix(key){
       const pane=panes[key]||panes.find;
       if(pane===panes.find&&main.form.parentElement===pane) pane.insertBefore(fix,main.form);
@@ -1103,11 +1116,11 @@
         panes[name].hidden=name!==key;
       }
       findMore.hidden=key!=='find';
-      if(key==='myai') mountMyAi();
-      if(key==='find') main.render();
+      if(key==='myai'){mountMyAi();void ensureIndex();}
+      if(key==='find') void ensureIndex().then(()=>main.render());
     }
 
-    /* Result card: 적용 N곳 · 확인 필요 M곳, then one prefilled form per unresolved edit. */
+    /* Result card and one-tap fix rows for ties/misses. */
     function byLine(entry){
       const agent=entry.recipe.agent||{};
       const who=[agent.name,agent.model].filter(Boolean).join(' · ');
@@ -1121,10 +1134,12 @@
       const count=doc.getElementById('booth-recipe-count');
       if(count) count.textContent=s.unresolved?s.applied+'곳 적용 · '+s.unresolved+'곳은 직접 골라 주세요':s.applied+'곳 적용했어요';
     }
-    function fixRow(item){
+    function fixRow(item, entry){
       const holder={};
+      const editSource=entry.recipe.source==='my-ai'?'myai':'recipe';
+      const assistMeta=entry.recipe.source==='agent'&&entry.code?{kind:'agent',code:entry.code}:(entry.recipe.source==='my-ai'?{kind:'my-ai'}:undefined);
       holder.view=findForm({
-        row:true,find:item.edit.find,replace:item.edit.replace,page:item.edit.page,context:item.edit.context,
+        row:true,find:item.edit.find,replace:item.edit.replace,source:editSource,assist:assistMeta,
         note:REASON_TEXT[item.reason]||REASON_TEXT.not_found,
         onDone(result){
           holder.view.form.remove();
@@ -1148,8 +1163,8 @@
       paintCount();
       card.hidden=false;
       fix.textContent='';
-      if(out.unresolved.length) fix.append(el('p',{className:'booth-klab',textContent:'확인 필요 · 바꿀 곳을 다시 골라 주세요'}));
-      for(const item of out.unresolved) fix.append(fixRow(item));
+      if(out.unresolved.length) fix.append(el('p',{className:'booth-klab',textContent:'확인 필요 · 바꿀 곳을 골라 주세요'}));
+      for(const item of out.unresolved) fix.append(fixRow(item,entry));
       fix.hidden=!out.unresolved.length;
       placeFix(ui.tab);
     }
@@ -1169,8 +1184,6 @@
       say(pickStatus,text);
       say(agentStatus,text);
     }
-    /* A recipe that would replace the open paper or join edits already made asks first, inline. */
-    /* The question and two buttons named by their outcome. */
     function confirmText(count, differentPaper){
       if(differentPaper&&count) return {text:'지금 고친 곳 '+count+'개가 사라져요. 레시피를 불러올까요?',yes:'지금 것 지우고 불러오기',no:'지금 것 유지'};
       if(differentPaper) return {text:'지금 연 논문이 레시피의 논문으로 바뀌어요. 레시피를 불러올까요?',yes:'논문 바꿔서 불러오기',no:'그대로 두기'};
@@ -1183,12 +1196,11 @@
       else pickStatus.after(box);
     }
     function askConfirm(ask){
-      const text=ask.text;
       return new Promise(resolve=>{
         const yes=el('button',{id:'booth-recipe-confirm-yes',type:'button',className:'booth-btn ink',textContent:ask.yes});
         const no=el('button',{id:'booth-recipe-confirm-no',type:'button',className:'booth-btn line',textContent:ask.no});
         const box=el('div',{id:'booth-recipe-confirm',className:'booth-panel booth-recipe-confirm',role:'alertdialog','aria-labelledby':'booth-recipe-confirm-text'},
-          el('p',{id:'booth-recipe-confirm-text',className:'booth-recipe-confirm-text',textContent:text}),
+          el('p',{id:'booth-recipe-confirm-text',className:'booth-recipe-confirm-text',textContent:ask.text}),
           el('div',{className:'booth-row'},yes,no));
         const done=value=>{box.remove();resolve(value);};
         yes.addEventListener('click',()=>done(true));
@@ -1199,9 +1211,9 @@
       });
     }
     function confirmLoad(recipe){
-      const count=enabledEdits().length;
+      const count=liveEdits().length;
       const current=boothCurrent();
-      const differentPaper=!!source()&&!(current&&current.id===recipe.paperId);
+      const differentPaper=!!(pdfDocOf()||source())&&!(current&&current.id===recipe.paperId);
       if(!count&&!differentPaper) return Promise.resolve(true);
       return askConfirm(confirmText(count,differentPaper));
     }
@@ -1241,12 +1253,7 @@
       void loadCode(code);
     }
 
-    /* Send step: reason/type prefill for recipe edits and the 수정본 쪽 보기 toggle per card. */
-    function outputPage(pageMap, pageIndex){
-      if(!Array.isArray(pageMap)) return pageIndex;
-      const row=pageMap.find(item=>item&&item.sourcePageIndex===pageIndex);
-      return row&&Number.isSafeInteger(row.outputPageIndex)?row.outputPageIndex:pageIndex;
-    }
+    /* Send step: prefill recipe reason/chip and side-by-side page comparison using edit.rects. */
     const pdfCache=new Map();
     function pdfFor(lib, preview, file){
       if(pdfCache.has(file)) return pdfCache.get(file);
@@ -1267,7 +1274,6 @@
       if(lib.GlobalWorkerOptions&&!lib.GlobalWorkerOptions.workerSrc) lib.GlobalWorkerOptions.workerSrc=new URL('./vendor/pdf.worker.mjs',doc.baseURI).href;
       return {preview,lib};
     }
-    /* {canvas, page, lib}; the caller cleans the page up once it has painted any marks. */
     async function renderPage(file, pageNumber, cssWidth, label){
       const {preview,lib}=await pdfLib();
       const pdf=await pdfFor(lib,preview,file);
@@ -1277,52 +1283,16 @@
       canvas.width=Math.max(1,Math.floor(viewport.width));
       canvas.height=Math.max(1,Math.floor(viewport.height));
       await page.render({canvasContext:canvas.getContext('2d'),canvas,viewport}).promise;
-      return {canvas,page,lib};
+      page.cleanup();
+      return canvas;
     }
-    function percentBox(left, top, width, height, surface){
-      const w=surface.clientWidth||1;
-      const h=surface.clientHeight||1;
-      return {left:left/w*100,top:top/h*100,right:(left+width)/w*100,bottom:(top+height)/h*100};
+    function rectsPercentBox(rects){
+      const list=Array.isArray(rects)?rects.map(plainRect).filter(Boolean):[];
+      if(!list.length) return null;
+      let box=list[0];
+      for(let i=1;i<list.length;i+=1) box=unionRect(box,list[i]);
+      return {left:box.x*100,top:box.y*100,right:(box.x+box.w)*100,bottom:(box.y+box.h)*100};
     }
-    function unionBox(a, b){
-      if(!a) return b;
-      return {left:Math.min(a.left,b.left),top:Math.min(a.top,b.top),right:Math.max(a.right,b.right),bottom:Math.max(a.bottom,b.bottom)};
-    }
-    /* Workspace change marks (paper-change-marks.js) on the generated page, kept in % so they follow resizes. */
-    function marksToPercent(layer, surface){
-      let box=null;
-      for(const mark of [...layer.children]){
-        const part=percentBox(parseFloat(mark.style.left)||0,parseFloat(mark.style.top)||0,parseFloat(mark.style.width)||0,parseFloat(mark.style.height)||0,surface);
-        Object.assign(mark.style,{left:part.left+'%',top:part.top+'%',width:(part.right-part.left)+'%',height:(part.bottom-part.top)+'%'});
-        box=unionBox(box,part);
-      }
-      return box;
-    }
-    async function paintMarks(surface, page, lib, edit){
-      const marks=root.FalsifyChangeMarks;
-      const base=page.getViewport({scale:1});
-      const scale=(surface.clientWidth||0)/base.width;
-      if(!marks||typeof marks.paintPage!=='function'||typeof lib.TextLayer!=='function'||!(scale>0)) return null;
-      const viewport=page.getViewport({scale});
-      const content=await page.getTextContent();
-      const text=el('div',{className:'paper-text-layer textLayer'});
-      for(const [name,value] of [['--total-scale-factor',String(scale)],['--scale-round-x','1px'],['--scale-round-y','1px'],['--text-scale-factor','1']]) surface.style.setProperty(name,value);
-      surface.append(text);
-      const layer=new lib.TextLayer({textContentSource:content,container:text,viewport});
-      await layer.render();
-      const result=marks.paintPage({document:doc,container:surface,items:content.items,divs:layer.textDivs,edits:[{id:edit.id,before:edit.before,after:edit.after}],side:'after'});
-      text.remove();
-      if(!result.count){result.layer.remove();return null;}
-      return marksToPercent(result.layer,surface);
-    }
-    /* Fallback: the edited segment's rectangle (anchor.bbox, page units at scale 1). */
-    function anchorBox(page, edit){
-      const box=edit.anchor&&edit.anchor.bbox;
-      if(!Array.isArray(box)||box.length!==4||!box.every(Number.isFinite)) return null;
-      const base=page.getViewport({scale:1});
-      return {left:box[0]/base.width*100,top:box[1]/base.height*100,right:box[2]/base.width*100,bottom:box[3]/base.height*100};
-    }
-    /* At least 8% x 4% of the page and padded, so a one-word change stays easy to spot on a phone. */
     function grow(from, to, pad, min){
       const extra=Math.max(pad,(min-(to-from))/2);
       return [Math.max(0,from-extra),Math.min(100,to+extra)];
@@ -1334,43 +1304,14 @@
       Object.assign(outline.style,{left:left+'%',top:top+'%',width:(right-left)+'%',height:(bottom-top)+'%'});
       surface.append(outline);
     }
-    async function markChange(surface, rendered, edit){
-      let box=null;
-      let how='';
-      try{box=await paintMarks(surface,rendered.page,rendered.lib,edit);how=box?'marks':'';}catch{box=null;}
-      if(!box){box=anchorBox(rendered.page,edit);how=box?'bbox':'none';}
-      if(box) drawOutline(surface,box);
-      surface.dataset.mark=how;
-    }
-    function currentOutput(){
-      const ws=workspace();
-      try{
-        if(ws&&typeof ws.getCurrentOutput==='function'&&ws.getCurrentOutput()) return ws.getCurrentOutput();
-        return ws&&typeof ws.getOutput==='function'?ws.getOutput():null;
-      }catch{return null;}
-    }
     function shotFigure(caption, canvas){
       const surface=el('div',{className:'booth-recipe-shot'},canvas);
       return {surface,figure:el('figure',{},el('figcaption',{textContent:caption}),surface)};
     }
-    /* No output yet: 「수정본 다시 만들기」 right here starts the same make as the send step's button,
-       and the comparison fills in once the new output is ready. */
-    function offerRemake(view, status, edit){
-      say(status,'수정본이 아직 없어요.');
-      const remake=doc.getElementById('booth-remake');
-      if(!remake||typeof remake.click!=='function') return;
-      const button=el('button',{type:'button',className:'booth-btn slim',textContent:'수정본 다시 만들기'});
-      button.addEventListener('click',()=>{
-        button.disabled=true;
-        say(status,'수정본을 만드는 중…');
-        /* One pair of listeners per make: whichever outcome comes first removes both, so tapping again never
-           piles up stale ones. */
-        const done=new AbortController();
-        doc.addEventListener('falsify:paper-generated',()=>{done.abort();if(view.isConnected) void fillCompare(view,edit);},{signal:done.signal});
-        doc.addEventListener('falsify:paper-generate-failed',()=>{done.abort();if(view.isConnected){button.disabled=false;say(status,'수정본을 만들지 못했어요. 한 번 더 눌러 주세요.');}},{signal:done.signal});
-        remake.click();
-      });
-      view.append(button);
+    function currentOutput(){
+      const hook=boothPaper();
+      try{if(hook&&typeof hook.output==='function') return hook.output();}catch{}
+      return null;
     }
     async function fillCompare(view, edit){
       const status=el('p',{className:'booth-small',textContent:'쪽 그림을 그리는 중…'});
@@ -1378,27 +1319,23 @@
       view.append(status);
       const src=source();
       const out=currentOutput();
-      if(!src||!out||!out.file){offerRemake(view,status,edit);return;}
+      if(!src||!src.file||!out||!out.file){say(status,'쪽 미리보기를 불러오지 못했어요. 수정본 PDF는 그대로 제출할 수 있어요.');return;}
       const pageIndex=edit.pageIndex;
-      const outIndex=outputPage(out.pageMap,pageIndex);
       const width=Math.max(120,Math.floor((view.clientWidth||300)/2)-6);
       try{
-        const [before,after]=await Promise.all([
+        const [beforeCanvas,afterCanvas]=await Promise.all([
           renderPage(src.file,pageIndex+1,width,'원본 '+(pageIndex+1)+'쪽'),
-          renderPage(out.file,outIndex+1,width,'수정본 '+(outIndex+1)+'쪽')
+          renderPage(out.file,pageIndex+1,width,'수정본 '+(pageIndex+1)+'쪽')
         ]);
-        const left=shotFigure('원본',before.canvas);
-        const right=shotFigure('수정본 · '+(outIndex+1)+'쪽',after.canvas);
+        const left=shotFigure('원본',beforeCanvas);
+        const right=shotFigure('수정본 · '+(pageIndex+1)+'쪽',afterCanvas);
         view.textContent='';
         view.append(left.figure,right.figure);
-        before.page.cleanup();
-        await markChange(right.surface,after,edit);
-        after.page.cleanup();
+        const box=rectsPercentBox(edit.rects);
+        if(box){drawOutline(right.surface,box);right.surface.dataset.mark='rects';}
       }catch{say(status,'쪽 그림을 그리지 못했어요. 수정본 PDF는 그대로 제출할 수 있어요.');}
     }
-    /* Recipe-made labels: 「AI가 채운 초안 · 내 말로 고쳐도 돼요」 over a reason the recipe filled (「내가 고침」
-       once the visitor types), 「AI 선택」 beside the chip it chose until the visitor picks another. Kept per
-       edit id, since booth.js may rebuild the cards. */
+
     const aiMarks=new Map();
     function marksFor(id){
       if(!aiMarks.has(id)) aiMarks.set(id,{reason:'',chip:true});
@@ -1420,37 +1357,6 @@
       chip.parentElement.addEventListener('click',event=>{
         if(event.isTrusted&&event.target!==chip&&event.target!==tag){marks.chip=false;tag.remove();}
       });
-    }
-    /* #paper-edits rows in booth form (the workspace re-renders them): 「5쪽 0.95 → 0.50」 with the old and
-       new text as del/ins (mono only when it is a number), and a small 「AI」 tag on rows a recipe made. */
-    const NUMBER=/^[-−+]?\d[\d.,]*%?$/;
-    function clip(text){
-      const value=String(text||'');
-      return value.length>40?value.slice(0,40)+'…':value;
-    }
-    function editPart(tag, text){
-      const node=el(tag,{className:'booth-edit-text',textContent:clip(text)});
-      if(NUMBER.test(String(text||'').trim())) node.classList.add('is-number');
-      return node;
-    }
-    function dressRow(button, edit){
-      if(button.dataset.boothDressed==='1'||!edit) return;
-      button.dataset.boothDressed='1';
-      button.textContent='';
-      button.append(el('span',{className:'booth-edit-page',textContent:(Number(edit.pageIndex)+1)+'쪽'}),' ',
-        editPart('del',edit.before),' ',el('span',{className:'booth-edit-arrow',textContent:'→'}),' ',editPart('ins',edit.after));
-    }
-    function tagRows(){
-      const list=doc.getElementById('paper-edits');
-      if(!list) return;
-      const edits=snapshotEdits()||[];
-      for(const button of list.querySelectorAll('button[data-act="edit"]')){
-        const row=button.parentElement;
-        if(!row) continue;
-        dressRow(button,edits.find(item=>item.id===button.dataset.edit));
-        if(!appliedIds||!appliedIds.has(button.dataset.edit)||row.querySelector('.booth-recipe-ai-tag')) continue;
-        row.prepend(el('span',{className:'booth-recipe-ai-tag',textContent:'AI'}));
-      }
     }
     function prefillCard(node, edit){
       const entry=lastRecipe;
@@ -1493,13 +1399,13 @@
     function decorateRows(){
       const box=doc.getElementById('booth-rows');
       if(!box) return;
-      const edits=enabledEdits();
+      const edits=liveEdits();
       [...box.querySelectorAll('.booth-card')].forEach((node,i)=>decorateCard(node,edits[i]));
     }
     function onStep(){
       const step=html.dataset.boothStep;
       if(step==='edit'&&lastRecipe&&lastRecipe.fileHash!==((source()||{}).fileHash||'')) resetResult();
-      if(step==='edit'&&ui.tab==='find') main.render();
+      if(step==='edit'&&ui.tab==='find') void ensureIndex().then(()=>main.render());
       if(step==='send') decorateRows();
     }
     const Observer=root.MutationObserver;
@@ -1507,14 +1413,16 @@
       new Observer(onStep).observe(html,{attributes:true,attributeFilter:['data-booth-step']});
       const rows=doc.getElementById('booth-rows');
       if(rows) new Observer(decorateRows).observe(rows,{childList:true});
-      const editList=doc.getElementById('paper-edits');
-      if(editList) new Observer(tagRows).observe(editList,{childList:true,subtree:true});
+    }
+    function clearPdfCache(){
+      for(const task of pdfCache.values()) task.then(pdf=>pdf&&typeof pdf.destroy==='function'&&pdf.destroy()).catch(()=>{});
+      pdfCache.clear();
+      aiMarks.clear();
     }
     listeners.add((kind,entry)=>{if(kind==='applied') renderResult(entry);});
-    doc.addEventListener('falsify:document-clear',resetResult);
-    doc.addEventListener('falsify:paper-workspace-source',()=>{if(ui.tab==='find') main.render();});
-    /* A page's paragraph text can find what its layout text cannot (Ragas¹ typed as "Ragas 1"). */
-    doc.addEventListener('falsify:paper-workspace-paragraphs',()=>{if(ui.tab==='find') main.render();});
+    doc.addEventListener('falsify:document-clear',()=>{clearIndex();clearPdfCache();resetResult();});
+    doc.addEventListener('falsify:paper-workspace-source',()=>{void ensureIndex().then(()=>{if(ui.tab==='find') main.render();});});
+    doc.addEventListener('falsify:paper-workspace-pdf',()=>{void ensureIndex().then(()=>{if(ui.tab==='find') main.render();});});
     root.addEventListener('hashchange',fromHash);
     root.addEventListener('resize',placeFind);
     placeFind();
@@ -1523,8 +1431,8 @@
   }
 
   root.FalsifyBoothRecipe=Object.freeze({
-    validate,apply,fromCode,pageText,paperInfo,setAssist,assist,
-    normalizeCode,normalizeText,locate,searchHits,applyFound,changesOf,codeFromText,expiryText,
+    validate,apply,fromCode,pageText,paperInfo,currentPage,setAssist,assist,
+    normalizeCode,normalizeText,indexPage,locate,searchHits,codeFromText,expiryText,
     SCHEMA
   });
   if(root.document&&typeof root.document.getElementById==='function') mountUi(root.document);

@@ -5,6 +5,7 @@
  */
 import * as mupdf from 'mupdf';
 import {parseFont, familyKey} from './browser-fonts.mjs';
+import {scanTextShows} from './paragraph-pdf-content-operators.mjs';
 
 export const ENGINE = Object.freeze({
   name: 'mupdf.js',
@@ -1105,4 +1106,1545 @@ async function sha256(bytes) {
   return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
 }
 
-globalThis.FalsifyBrowserPdf = {prepare, ENGINE, LIMITS, COORDINATE_SPACE, COORDINATES, BrowserPdfError};
+export async function warm() {
+  return true;
+}
+
+function unavailableError(cause) {
+  const error = new BrowserPdfError(
+    'engine_unavailable',
+    'PDF 엔진을 불러오지 못했습니다.',
+    cause ? {reason: String(cause.message || cause.name || cause)} : {},
+  );
+  return error;
+}
+
+const SYMBOL_FALLBACK = {
+  0x00a0: ' ',
+  0x2009: ' ',
+  0x200a: ' ',
+  0x202f: ' ',
+  0x2010: '-',
+  0x2011: '-',
+  0x2012: '-',
+  0x2215: '/',
+  0x2217: '*',
+  0x2662: '<>',
+  0x2192: '->',
+  0x2190: '<-',
+  0x2194: '<->',
+  0x21d2: '=>',
+  0x2208: 'in',
+  0x2209: 'not in',
+  0x226a: '<<',
+  0x226b: '>>',
+};
+
+const CJK_RANGES = [
+  [0x1100, 0x11ff],
+  [0x2e80, 0x9fff],
+  [0xa960, 0xa97f],
+  [0xac00, 0xd7af],
+  [0xd7b0, 0xd7ff],
+  [0xf900, 0xfaff],
+  [0xfe30, 0xfe4f],
+  [0xff00, 0xffef],
+  [0x20000, 0x2fa1f],
+];
+
+function isCjkCodePoint(cp) {
+  for (const [lo, hi] of CJK_RANGES) {
+    if (cp >= lo && cp <= hi) return true;
+  }
+  return false;
+}
+
+function winAnsiByte(cp) {
+  if (cp <= 0x7f) return cp;
+  if (cp >= 0xa0 && cp <= 0xff) return cp;
+  if (WINANSI_EXTRA[cp] !== undefined) return WINANSI_EXTRA[cp];
+  return null;
+}
+
+function base14FromStyle(style) {
+  const bare = String(style?.fontName || '').replace(/^[A-Z]{6}\+/, '');
+  if (BASE14.includes(bare)) return bare;
+  if (FACE_ALIAS[bare]) return FACE_ALIAS[bare];
+  const bold = !!style?.isBold;
+  const italic = !!style?.isItalic;
+  const family = style?.isMono ? 'Courier' : style?.isSerif !== false ? 'Times' : 'Helvetica';
+  return base14Style(family, bold, italic);
+}
+
+function readRewritePage(page) {
+  const transform = page.getTransform();
+  const toPdf = mupdf.Matrix.invert(transform);
+  const bounds = page.getBounds();
+  const chars = [];
+  const st = page.toStructuredText('preserve-whitespace');
+  let lineId = -1;
+  let lineDir = [1, 0];
+  try {
+    st.walk({
+      beginLine(_bbox, _wmode, dir) {
+        lineId += 1;
+        lineDir = [Number(dir?.[0]) || 0, Number(dir?.[1]) || 0];
+        if (!lineDir[0] && !lineDir[1]) lineDir = [1, 0];
+      },
+      onChar(c, origin, font, size, quad, color) {
+        try {
+          const pdfOrigin = apply(toPdf, origin[0], origin[1]);
+          chars.push({
+            c,
+            origin: [origin[0], origin[1]],
+            pdfOrigin,
+            lineId,
+            lineDir,
+            fontName: font.getName(),
+            isBold: font.isBold(),
+            isItalic: font.isItalic(),
+            isSerif: font.isSerif(),
+            isMono: font.isMono(),
+            size: Number(size) > 0 ? Number(size) : 10,
+            quad: [...quad],
+            color: rgb(color) || [0, 0, 0],
+          });
+        } finally {
+          try { font.destroy(); } catch { /* ignore */ }
+        }
+      },
+    });
+  } finally {
+    try { st.destroy(); } catch { /* ignore */ }
+  }
+  return {chars, bounds, transform, toPdf};
+}
+
+function rectsToDisplay(rects, bounds) {
+  const bx0 = bounds[0];
+  const by0 = bounds[1];
+  const bw = bounds[2] - bx0;
+  const bh = bounds[3] - by0;
+  const out = [];
+  for (const r of Array.isArray(rects) ? rects : []) {
+    if (!r || typeof r !== 'object') continue;
+    const x = Number(r.x);
+    const y = Number(r.y);
+    const w = Number(r.w);
+    const h = Number(r.h);
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(w) || !Number.isFinite(h)) continue;
+    if (!(w > 0) || !(h > 0)) continue;
+    out.push([
+      bx0 + x * bw,
+      by0 + y * bh,
+      bx0 + (x + w) * bw,
+      by0 + (y + h) * bh,
+    ]);
+  }
+  return out;
+}
+
+function selectGlyphsByRects(chars, displayRects) {
+  const selected = [];
+  for (const ch of chars) {
+    const [gx0, gy0, gx1, gy1] = quadBounds(ch.quad);
+    const cx = (gx0 + gx1) / 2;
+    const cy = (gy0 + gy1) / 2;
+    for (const [rx0, ry0, rx1, ry1] of displayRects) {
+      const rw = rx1 - rx0;
+      const rh = ry1 - ry0;
+      const tolX = rw < rh && rw < 8 ? Math.min(0.5, rw * 0.08) : 0.5;
+      const tolY = Math.min(1.5, Math.max(0.5, rh * 0.15));
+      if (cx >= rx0 - tolX && cx <= rx1 + tolX && cy >= ry0 - tolY && cy <= ry1 + tolY) {
+        selected.push(ch);
+        break;
+      }
+    }
+  }
+  return selected;
+}
+
+const ALIGN_HYPHEN_RE = /[\u00ad\u2010-\u2015\u2212\ufe58\ufe63\uff0d]/g;
+
+function normalizeAlignText(text) {
+  return String(text == null ? '' : text)
+    .normalize('NFKC')
+    .replace(ALIGN_HYPHEN_RE, '-')
+    .replace(/\s+/g, '');
+}
+
+function rectCenterOf(displayRects) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const [rx0, ry0, rx1, ry1] of displayRects) {
+    if (rx0 < x0) x0 = rx0;
+    if (ry0 < y0) y0 = ry0;
+    if (rx1 > x1) x1 = rx1;
+    if (ry1 > y1) y1 = ry1;
+  }
+  return [(x0 + x1) / 2, (y0 + y1) / 2];
+}
+
+const ALIGN_WORD_CHAR_RE = /[\p{L}\p{N}]/u;
+
+function lineBoxesByLineId(allChars) {
+  const lines = new Map();
+  for (const ch of allChars) {
+    if (!ch.c.trim()) continue;
+    const box = quadBounds(ch.quad);
+    let entry = lines.get(ch.lineId);
+    if (!entry) {
+      entry = {box: [...box], dir: ch.lineDir || [1, 0]};
+      lines.set(ch.lineId, entry);
+    } else {
+      if (box[0] < entry.box[0]) entry.box[0] = box[0];
+      if (box[1] < entry.box[1]) entry.box[1] = box[1];
+      if (box[2] > entry.box[2]) entry.box[2] = box[2];
+      if (box[3] > entry.box[3]) entry.box[3] = box[3];
+    }
+  }
+  return lines;
+}
+
+function lineNearRect(entry, rect) {
+  const [lx0, ly0, lx1, ly1] = entry.box;
+  const [rx0, ry0, rx1, ry1] = rect;
+  const vertical = Math.abs(entry.dir[1]) > Math.abs(entry.dir[0]);
+  if (vertical) {
+    const tol = Math.min(1.5, Math.max(0.5, (rx1 - rx0) * 0.15));
+    return lx0 <= rx1 + tol && lx1 >= rx0 - tol && ly0 <= ry1 + 20 && ly1 >= ry0 - 20;
+  }
+  const tol = Math.min(1.5, Math.max(0.5, (ry1 - ry0) * 0.15));
+  return ly0 <= ry1 + tol && ly1 >= ry0 - tol && lx0 <= rx1 + 20 && lx1 >= rx0 - 20;
+}
+
+function candidateAlignLineIds(allChars, rectSelected, displayRects) {
+  const ids = new Set(rectSelected.map(ch => ch.lineId));
+  const lines = lineBoxesByLineId(allChars);
+  for (const [lineId, entry] of lines) {
+    if (displayRects.some(r => lineNearRect(entry, r))) ids.add(lineId);
+  }
+  return ids;
+}
+
+function buildAlignCorpus(lineChars) {
+  let norm = '';
+  const charMap = [];
+  const indexMap = [];
+  for (let idx = 0; idx < lineChars.length; idx++) {
+    const ch = lineChars[idx];
+    if (!ch.c.trim()) continue;
+    const piece = normalizeAlignText(ch.c);
+    for (let i = 0; i < piece.length; i++) {
+      norm += piece[i];
+      charMap.push(ch);
+      indexMap.push(idx);
+    }
+  }
+  return {norm, charMap, indexMap};
+}
+
+function isWordBoundaryAt(lineChars, firstIdx, lastIdx, needLeft, needRight) {
+  if (needLeft && firstIdx > 0) {
+    const prev = lineChars[firstIdx - 1];
+    if (prev.lineId === lineChars[firstIdx].lineId && ALIGN_WORD_CHAR_RE.test(normalizeAlignText(prev.c))) return false;
+  }
+  if (needRight && lastIdx + 1 < lineChars.length) {
+    const next = lineChars[lastIdx + 1];
+    if (next.lineId === lineChars[lastIdx].lineId && ALIGN_WORD_CHAR_RE.test(normalizeAlignText(next.c))) return false;
+  }
+  return true;
+}
+
+function betterAlignCandidate(cand, best) {
+  return !best || cand.overlap > best.overlap || (cand.overlap === best.overlap && cand.dist < best.dist);
+}
+
+function scoreAlignOccurrence(charMap, at, len, selectedSet, rectCenter) {
+  const occSet = new Set();
+  for (let i = at; i < at + len; i++) occSet.add(charMap[i]);
+  let overlap = 0;
+  for (const ch of occSet) if (selectedSet.has(ch)) overlap += 1;
+  const box = union([...occSet]);
+  const dist = Math.hypot((box[0] + box[2]) / 2 - rectCenter[0], (box[1] + box[3]) / 2 - rectCenter[1]);
+  return {at, occSet, overlap, dist};
+}
+
+function pickBestAlignOccurrence(lineChars, corpus, needle, selectedSet, rectCenter) {
+  const chars = [...needle];
+  const needLeft = ALIGN_WORD_CHAR_RE.test(chars[0]);
+  const needRight = ALIGN_WORD_CHAR_RE.test(chars[chars.length - 1]);
+  let bestWhole = null;
+  let bestSub = null;
+  for (let from = 0; from <= corpus.norm.length - needle.length;) {
+    const at = corpus.norm.indexOf(needle, from);
+    if (at < 0) break;
+    from = at + 1;
+    const cand = scoreAlignOccurrence(corpus.charMap, at, needle.length, selectedSet, rectCenter);
+    const firstIdx = corpus.indexMap[at];
+    const lastIdx = corpus.indexMap[at + needle.length - 1];
+    if (isWordBoundaryAt(lineChars, firstIdx, lastIdx, needLeft, needRight)) {
+      if (betterAlignCandidate(cand, bestWhole)) bestWhole = cand;
+    }
+    if (betterAlignCandidate(cand, bestSub)) bestSub = cand;
+  }
+  return bestWhole || bestSub;
+}
+
+function alignGlyphsToOriginalText(allChars, rectSelected, displayRects, originalText) {
+  const needle = normalizeAlignText(originalText);
+  if (!needle) return {chars: rectSelected, aligned: false};
+  const lineIds = candidateAlignLineIds(allChars, rectSelected, displayRects);
+  if (!lineIds.size) return {chars: rectSelected, aligned: false};
+  const lineChars = allChars.filter(ch => lineIds.has(ch.lineId));
+  const corpus = buildAlignCorpus(lineChars);
+  if (corpus.norm.length < needle.length) return {chars: rectSelected, aligned: false};
+
+  const best = pickBestAlignOccurrence(lineChars, corpus, needle, new Set(rectSelected), rectCenterOf(displayRects));
+  if (!best) return {chars: rectSelected, aligned: false};
+
+  const firstIdx = corpus.indexMap[best.at];
+  const lastIdx = corpus.indexMap[best.at + needle.length - 1];
+  const aligned = [];
+  for (let i = firstIdx; i <= lastIdx; i++) {
+    const ch = lineChars[i];
+    if (best.occSet.has(ch) || !ch.c.trim()) aligned.push(ch);
+  }
+  return {chars: aligned, aligned: aligned.length > 0};
+}
+
+function trimUnchangedSymbolEdges(selectedChars, newText) {
+  const raw = String(newText == null ? '' : newText);
+  if (!raw) return {chars: selectedChars, text: raw};
+  const drawn = selectedChars.filter(ch => ch.c.trim());
+  const next = [...raw];
+  let start = 0;
+  let end = drawn.length;
+  let nStart = 0;
+  let nEnd = next.length;
+  const isSymbol = c => winAnsiByte(c.codePointAt(0)) === null && !isCjkCodePoint(c.codePointAt(0));
+  while (end - start > 1 && nEnd - nStart > 1 && isSymbol(drawn[start].c) && drawn[start].c === next[nStart]) {
+    start += 1;
+    nStart += 1;
+  }
+  while (end - start > 1 && nEnd - nStart > 1 && isSymbol(drawn[end - 1].c) && drawn[end - 1].c === next[nEnd - 1]) {
+    end -= 1;
+    nEnd -= 1;
+  }
+  if (start === 0 && end === drawn.length) return {chars: selectedChars, text: raw};
+  const firstIdx = selectedChars.indexOf(drawn[start]);
+  const lastIdx = selectedChars.lastIndexOf(drawn[end - 1]);
+  return {chars: selectedChars.slice(firstIdx, lastIdx + 1), text: next.slice(nStart, nEnd).join('')};
+}
+function alignedDisplayRects(selectedChars) {
+  const byLine = new Map();
+  for (const ch of selectedChars) {
+    if (!ch.c.trim()) continue;
+    let arr = byLine.get(ch.lineId);
+    if (!arr) { arr = []; byLine.set(ch.lineId, arr); }
+    arr.push(ch);
+  }
+  return [...byLine.values()].map(arr => union(arr));
+}
+
+function fallbackRedactionRect(ch, protectedBoxes) {
+  const box = removalBox(ch) || quadBounds(ch.quad);
+  const [x0, y0, x1, y1] = box;
+  const w = x1 - x0;
+  const h = y1 - y0;
+  const fracs = [0.5, 0.25, 0.75, 0.15, 0.85];
+  if (w > 0.1 && h > 0.1) {
+    for (const fy of fracs) {
+      for (const fx of fracs) {
+        const px = x0 + w * fx;
+        const py = y0 + h * fy;
+        const cand = [px - 0.05, py - 0.05, px + 0.05, py + 0.05];
+        if (!protectedBoxes.some(obs => intersects(cand, obs, 0))) return cand;
+      }
+    }
+  }
+  const cx = (x0 + x1) / 2;
+  const cy = (y0 + y1) / 2;
+  return [cx - 0.1, cy - 0.1, cx + 0.1, cy + 0.1];
+}
+
+function redactRewritePage(page, pagePlans, allChars) {
+  const selectedSet = new Set();
+  for (const plan of pagePlans) {
+    for (const ch of plan.selectedChars) selectedSet.add(ch);
+  }
+  if (!selectedSet.size) return;
+
+  const protectedBoxes = [];
+  for (const ch of allChars) {
+    if (selectedSet.has(ch) || !ch.c.trim()) continue;
+    const box = removalBox(ch);
+    if (box) protectedBoxes.push(box);
+  }
+
+  const quads = [];
+  for (const ch of selectedSet) {
+    if (!ch.c.trim()) continue;
+    const rect = safeRedactionRect(ch, protectedBoxes) || fallbackRedactionRect(ch, protectedBoxes);
+    const [x0, y0, x1, y1] = rect;
+    quads.push([x0, y1, x1, y1, x0, y0, x1, y0]);
+  }
+  if (!quads.length) return;
+
+  const annot = page.createAnnotation('Redact');
+  try {
+    annot.setRect(quadBounds(quads.flat()));
+    annot.setQuadPoints(quads);
+    annot.update();
+    page.applyRedactions(
+      false,
+      mupdf.PDFPage.REDACT_IMAGE_NONE,
+      mupdf.PDFPage.REDACT_LINE_ART_NONE,
+      mupdf.PDFPage.REDACT_TEXT_REMOVE,
+    );
+  } finally {
+    try { annot.destroy(); } catch { /* ignore */ }
+  }
+}
+
+function pdfDirection(toPdf, dx, dy) {
+  const p0 = apply(toPdf, 0, 0);
+  const p1 = apply(toPdf, dx, dy);
+  let ux = p1[0] - p0[0];
+  let uy = p1[1] - p0[1];
+  const len = Math.hypot(ux, uy) || 1;
+  return [ux / len, uy / len];
+}
+
+const REWRITE_PAGE_MARGIN = 2;
+const REWRITE_MIN_SCALE = 65;
+
+function maxDistanceInBounds(ox, oy, dxPdf, dyPdf, transform, bounds, margin = REWRITE_PAGE_MARGIN) {
+  const [sx, sy] = apply(transform, ox, oy);
+  const [ex, ey] = apply(transform, ox + dxPdf, oy + dyPdf);
+  const vx = ex - sx;
+  const vy = ey - sy;
+  const minX = bounds[0] + margin;
+  const minY = bounds[1] + margin;
+  const maxX = bounds[2] - margin;
+  const maxY = bounds[3] - margin;
+  let tMax = Infinity;
+  if (vx > 1e-6) tMax = Math.min(tMax, (maxX - sx) / vx);
+  else if (vx < -1e-6) tMax = Math.min(tMax, (minX - sx) / vx);
+  if (vy > 1e-6) tMax = Math.min(tMax, (maxY - sy) / vy);
+  else if (vy < -1e-6) tMax = Math.min(tMax, (minY - sy) / vy);
+  return Math.max(0, Number.isFinite(tMax) ? tMax : 0);
+}
+
+function unitDisplayDir(dir) {
+  const dx = Number(dir?.[0]) || 0;
+  const dy = Number(dir?.[1]) || 0;
+  const len = Math.hypot(dx, dy);
+  return len > 1e-6 ? [dx / len, dy / len] : [1, 0];
+}
+
+function rectNormalThickness(rect, dir) {
+  const [dx, dy] = unitDisplayDir(dir);
+  return Math.abs(-dy) * (rect[2] - rect[0]) + Math.abs(dx) * (rect[3] - rect[1]);
+}
+
+function rectsMergeOnBand(line, r, vertical) {
+  if (vertical) {
+    const minW = Math.min(line[2] - line[0], r[2] - r[0]);
+    const overlapX = Math.min(line[2], r[2]) - Math.max(line[0], r[0]);
+    const gapY = Math.max(0, r[1] - line[3], line[1] - r[3]);
+    return minW > 0 && overlapX >= minW * 0.5 && gapY <= minW * 2.5;
+  }
+  const minH = Math.min(line[3] - line[1], r[3] - r[1]);
+  const overlapY = Math.min(line[3], r[3]) - Math.max(line[1], r[1]);
+  const gapX = Math.max(0, r[0] - line[2], line[0] - r[2]);
+  return minH > 0 && overlapY >= minH * 0.5 && gapX <= minH * 2.5;
+}
+
+function mergeDisplayLineRects(displayRects, dir = [1, 0]) {
+  const [dx, dy] = unitDisplayDir(dir);
+  const vertical = Math.abs(dy) > Math.abs(dx);
+  const sorted = [...displayRects].sort((a, b) => (vertical ? (a[0] - b[0] || a[1] - b[1]) : (a[1] - b[1] || a[0] - b[0])));
+  const lines = [];
+  for (const r of sorted) {
+    let merged = false;
+    for (const line of lines) {
+      if (rectsMergeOnBand(line, r, vertical)) {
+        line[0] = Math.min(line[0], r[0]);
+        line[1] = Math.min(line[1], r[1]);
+        line[2] = Math.max(line[2], r[2]);
+        line[3] = Math.max(line[3], r[3]);
+        merged = true;
+        break;
+      }
+    }
+    if (!merged) lines.push([...r]);
+  }
+  const nxD = -dy;
+  const nyD = dx;
+  lines.sort((a, b) => {
+    const na = ((a[0] + a[2]) / 2) * nxD + ((a[1] + a[3]) / 2) * nyD;
+    const nb = ((b[0] + b[2]) / 2) * nxD + ((b[1] + b[3]) / 2) * nyD;
+    if (Math.abs(na - nb) > 1) return na - nb;
+    const ua = ((a[0] + a[2]) / 2) * dx + ((a[1] + a[3]) / 2) * dy;
+    const ub = ((b[0] + b[2]) / 2) * dx + ((b[1] + b[3]) / 2) * dy;
+    return ua - ub;
+  });
+  return lines;
+}
+
+function rightClearWidth(lineRect, sx, pageAvailW, lineDir, model, selectedSet) {
+  if (Math.abs(lineDir[0] - 1) > 0.01 || Math.abs(lineDir[1]) > 0.01) return pageAvailW;
+  const [, ry0, rx1, ry1] = lineRect;
+  let maxRightX = model.bounds[2] - REWRITE_PAGE_MARGIN;
+  for (const ch of model.chars) {
+    if (selectedSet.has(ch) || !ch.c.trim()) continue;
+    const [gx0, gy0, , gy1] = quadBounds(ch.quad);
+    if (gy0 < ry1 && gy1 > ry0 && gx0 >= rx1 - 1) {
+      maxRightX = Math.min(maxRightX, gx0 - 1);
+    }
+  }
+  return Math.min(pageAvailW, Math.max(0, maxRightX - sx));
+}
+
+function splitCharsIntoLineBands(lineChars, dir = [1, 0]) {
+  const [dx, dy] = unitDisplayDir(dir);
+  const nxD = -dy;
+  const nyD = dx;
+  const items = lineChars.map(ch => {
+    const box = quadBounds(ch.quad);
+    const cx = (box[0] + box[2]) / 2;
+    const cy = (box[1] + box[3]) / 2;
+    const thick = Math.max(1, Math.abs(nxD) * (box[2] - box[0]) + Math.abs(nyD) * (box[3] - box[1]));
+    return {ch, box, nPos: cx * nxD + cy * nyD, uPos: cx * dx + cy * dy, thick};
+  });
+  items.sort((a, b) => a.nPos - b.nPos || a.uPos - b.uPos);
+  const bands = [];
+  for (const item of items) {
+    let target = null;
+    for (const band of bands) {
+      const minT = Math.min(band.thick, item.thick);
+      if (Math.abs(item.nPos - band.nPos) <= minT * 0.6) { target = band; break; }
+    }
+    if (!target) {
+      bands.push({nPos: item.nPos, uPos: item.uPos, thick: item.thick, box: [...item.box], chars: [item.ch]});
+    } else {
+      target.chars.push(item.ch);
+      target.box[0] = Math.min(target.box[0], item.box[0]);
+      target.box[1] = Math.min(target.box[1], item.box[1]);
+      target.box[2] = Math.max(target.box[2], item.box[2]);
+      target.box[3] = Math.max(target.box[3], item.box[3]);
+      const cx = (target.box[0] + target.box[2]) / 2;
+      const cy = (target.box[1] + target.box[3]) / 2;
+      target.nPos = cx * nxD + cy * nyD;
+      target.thick = Math.max(target.thick, item.thick);
+    }
+  }
+  bands.sort((a, b) => a.nPos - b.nPos || a.uPos - b.uPos);
+  return bands;
+}
+
+function summarizeDrawnStyle(drawn) {
+  const defaultStyle = {fontName: 'Times-Roman', isBold: false, isItalic: false, isSerif: true, isMono: false};
+  if (!drawn.length) return {medianSize: 10, style: defaultStyle, color: [0, 0, 0]};
+  const sizes = drawn.map(c => c.size).filter(s => s > 0).sort((a, b) => a - b);
+  const medianSize = sizes.length ? sizes[Math.floor(sizes.length / 2)] : 10;
+  const styleCounts = new Map();
+  let style = drawn[0];
+  let bestCount = 0;
+  for (const ch of drawn) {
+    const key = `${ch.fontName}|${ch.isBold}|${ch.isItalic}|${ch.isSerif}|${ch.isMono}`;
+    const next = (styleCounts.get(key) || 0) + 1;
+    styleCounts.set(key, next);
+    if (next > bestCount) { bestCount = next; style = ch; }
+  }
+  return {medianSize, style, color: style.color || [0, 0, 0]};
+}
+
+function charsInDisplayRect(drawn, lineRect) {
+  const [rx0, ry0, rx1, ry1] = lineRect;
+  const tolX = 0.5;
+  const tolY = Math.min(1.5, Math.max(0.5, (ry1 - ry0) * 0.15));
+  const out = [];
+  for (const ch of drawn) {
+    const [gx0, gy0, gx1, gy1] = quadBounds(ch.quad);
+    const cx = (gx0 + gx1) / 2;
+    const cy = (gy0 + gy1) / 2;
+    if (cx >= rx0 - tolX && cx <= rx1 + tolX && cy >= ry0 - tolY && cy <= ry1 + tolY) out.push(ch);
+  }
+  return out;
+}
+
+function maxSpanProjection(points, ox, oy, ux, uy, toPdf) {
+  let maxProj = 0;
+  for (const [px, py] of points) {
+    const pt = apply(toPdf, px, py);
+    const proj = (pt[0] - ox) * ux + (pt[1] - oy) * uy;
+    if (proj > maxProj) maxProj = proj;
+  }
+  return maxProj;
+}
+
+function buildGlyphBandSlot(band, refRect, summary, model, selectedSet) {
+  const arr = band.chars;
+  const dir = arr[0].lineDir || [1, 0];
+  const [ux, uy] = pdfDirection(model.toPdf, dir[0], dir[1]);
+  const [nx, ny] = pdfDirection(model.toPdf, -dir[1], dir[0]);
+  arr.sort((a, b) => (a.pdfOrigin[0] * ux + a.pdfOrigin[1] * uy) - (b.pdfOrigin[0] * ux + b.pdfOrigin[1] * uy));
+  const [ox, oy] = arr[0].pdfOrigin;
+
+  const glyphPts = [];
+  for (const ch of arr) {
+    for (let i = 0; i < 8; i += 2) glyphPts.push([ch.quad[i], ch.quad[i + 1]]);
+  }
+  const maxGlyphProj = maxSpanProjection(glyphPts, ox, oy, ux, uy, model.toPdf);
+  const rectPts = [[refRect[0], refRect[1]], [refRect[2], refRect[1]], [refRect[0], refRect[3]], [refRect[2], refRect[3]]];
+  const maxRectProj = maxSpanProjection(rectPts, ox, oy, ux, uy, model.toPdf);
+
+  const pageAvailW = maxDistanceInBounds(ox, oy, ux, uy, model.transform, model.bounds);
+  const pageAvailH = maxDistanceInBounds(ox, oy, nx, ny, model.transform, model.bounds);
+  const [sx] = apply(model.transform, ox, oy);
+  const rightClearW = rightClearWidth(refRect, sx, pageAvailW, dir, model, selectedSet);
+  const rawW = Math.max(summary.medianSize, maxGlyphProj, maxRectProj);
+  const slotWidth = pageAvailW > 0 ? Math.min(pageAvailW, rawW) : rawW;
+
+  return {
+    ox, oy, ux, uy, nx, ny,
+    size: summary.medianSize,
+    slotWidth, pageAvailW, pageAvailH, rightClearW,
+    color: summary.color,
+    style: summary.style,
+  };
+}
+
+function buildEmptyRectSlot(lineRect, hasDrawn, summary, model, selectedSet) {
+  const [rx0, ry0, rx1, ry1] = lineRect;
+  const [ux, uy] = pdfDirection(model.toPdf, 1, 0);
+  const [nx, ny] = pdfDirection(model.toPdf, 0, 1);
+  const rh = Math.max(4, ry1 - ry0);
+  const size = hasDrawn ? summary.medianSize : Math.max(6, Math.min(24, rh * 0.8));
+  const baseY = ry0 + rh * 0.8;
+  const [ox, oy] = apply(model.toPdf, rx0, baseY);
+  const [ex, ey] = apply(model.toPdf, rx1, baseY);
+  const pageAvailW = maxDistanceInBounds(ox, oy, ux, uy, model.transform, model.bounds);
+  const pageAvailH = maxDistanceInBounds(ox, oy, nx, ny, model.transform, model.bounds);
+  const rightClearW = rightClearWidth(lineRect, rx0, pageAvailW, [1, 0], model, selectedSet);
+  const rawW = Math.max(size, Math.hypot(ex - ox, ey - oy));
+  const slotWidth = pageAvailW > 0 ? Math.min(pageAvailW, rawW) : rawW;
+
+  return {
+    ox, oy, ux, uy, nx, ny,
+    size, slotWidth, pageAvailW, pageAvailH, rightClearW,
+    color: summary.color,
+    style: summary.style,
+  };
+}
+
+function sortSlotsAlongNormal(slots, dir, transform) {
+  if (slots.length < 2) return slots;
+  const [dx, dy] = unitDisplayDir(dir);
+  const nxD = -dy;
+  const nyD = dx;
+  const tol = Math.max(1, slots[0].size * 0.4);
+  return slots.sort((a, b) => {
+    const [ax, ay] = apply(transform, a.ox, a.oy);
+    const [bx, by] = apply(transform, b.ox, b.oy);
+    const na = ax * nxD + ay * nyD;
+    const nb = bx * nxD + by * nyD;
+    if (Math.abs(na - nb) > tol) return na - nb;
+    return (ax * dx + ay * dy) - (bx * dx + by * dy);
+  });
+}
+
+function buildRewriteSlots(selectedChars, displayRects, model) {
+  const drawn = selectedChars.filter(ch => ch.c.trim());
+  const selectedSet = new Set(selectedChars);
+  const summary = summarizeDrawnStyle(drawn);
+  const domDir = drawn.length ? unitDisplayDir(drawn[0].lineDir) : [1, 0];
+  const lineRects = mergeDisplayLineRects(displayRects, domDir);
+  const slots = [];
+
+  for (const lineRect of lineRects) {
+    const lineChars = charsInDisplayRect(drawn, lineRect);
+    if (!lineChars.length) {
+      slots.push(buildEmptyRectSlot(lineRect, drawn.length > 0, summary, model, selectedSet));
+      continue;
+    }
+    const lineDir = unitDisplayDir(lineChars[0].lineDir);
+    const thick = rectNormalThickness(lineRect, lineDir);
+    const bands = thick > summary.medianSize * 1.8 ? splitCharsIntoLineBands(lineChars, lineDir) : [{box: lineRect, chars: lineChars}];
+    const vertical = Math.abs(lineDir[1]) > Math.abs(lineDir[0]);
+    for (const band of bands) {
+      const refRect = bands.length === 1
+        ? lineRect
+        : vertical
+          ? [band.box[0], lineRect[1], band.box[2], lineRect[3]]
+          : [lineRect[0], band.box[1], lineRect[2], band.box[3]];
+      slots.push(buildGlyphBandSlot(band, refRect, summary, model, selectedSet));
+    }
+  }
+  return sortSlotsAlongNormal(slots, domDir, model.transform);
+}
+
+function sanitizeRewriteText(raw) {
+  let text = String(raw == null ? '' : raw);
+  text = text.replace(/\r\n?/g, '\n').replace(/\t/g, ' ');
+  text = text.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
+  text = text.normalize('NFC');
+  let out = '';
+  for (const ch of text) {
+    const cp = ch.codePointAt(0);
+    if (SYMBOL_FALLBACK[cp] !== undefined && cp !== 0x2217 && cp !== 0x2662 && cp !== 0x2192 && cp !== 0x2190 && cp !== 0x2194 && cp !== 0x21d2 && cp !== 0x2208 && cp !== 0x2209 && cp !== 0x226a && cp !== 0x226b) {
+      out += SYMBOL_FALLBACK[cp];
+    } else {
+      out += ch;
+    }
+  }
+  return out;
+}
+
+function normalizeCharForFont(ch, nimbusFont) {
+  const cp = ch.codePointAt(0);
+  if (isCjkCodePoint(cp)) return {kind: 'cjk', text: ch};
+  if (winAnsiByte(cp) !== null && nimbusFont.encodeCharacter(cp)) return {kind: 'winansi', text: ch};
+  if (nimbusFont.encodeCharacter(cp)) return {kind: 'cid', text: ch};
+  if (SYMBOL_FALLBACK[cp] !== undefined) return {kind: 'winansi', text: SYMBOL_FALLBACK[cp]};
+  const folded = ch.normalize('NFKD');
+  let kept = '';
+  for (const part of folded) {
+    const pcp = part.codePointAt(0);
+    if (pcp >= 0x0300 && pcp <= 0x036f) continue; // strip combining marks
+    if (nimbusFont.encodeCharacter(pcp)) kept += part;
+  }
+  if (kept) {
+    const allWin = [...kept].every(c => winAnsiByte(c.codePointAt(0)) !== null);
+    return {kind: allWin ? 'winansi' : 'cid', text: kept};
+  }
+  return {kind: 'winansi', text: '?'};
+}
+
+function splitRewriteRuns(lineText, baseName) {
+  const nimbusFont = metrics(baseName);
+  const koFont = cjkFont();
+  const pieces = [];
+  let needsCid = false;
+  for (const ch of lineText) {
+    const item = normalizeCharForFont(ch, nimbusFont);
+    if (item.kind === 'cid') needsCid = true;
+    pieces.push(item);
+  }
+  // If any non-CJK char on the line needs Tier 2 Nimbus CID, promote all non-CJK chars
+  // on this line to Nimbus CID to avoid mid-token Type1/Type0 switches.
+  const runs = [];
+  for (const item of pieces) {
+    const kind = item.kind === 'cjk' ? 'cjk' : (needsCid ? 'cid' : 'winansi');
+    const prev = runs[runs.length - 1];
+    if (prev && prev.kind === kind) prev.text += item.text;
+    else runs.push({kind, text: item.text, font: kind === 'cjk' ? koFont : nimbusFont, baseName});
+  }
+  return runs;
+}
+
+function measureRewriteRun(run, size) {
+  let w = 0;
+  for (const ch of run.text) {
+    const cp = ch.codePointAt(0);
+    const gid = run.font.encodeCharacter(cp);
+    const adv = gid ? run.font.advanceGlyph(gid, 0) : (run.kind === 'cjk' ? 1.0 : 0.5);
+    w += (adv > 0 ? adv : (run.kind === 'cjk' ? 1.0 : 0.5)) * size;
+  }
+  return w;
+}
+
+function measureRewriteLine(lineText, baseName, size) {
+  if (!lineText) return 0;
+  const runs = splitRewriteRuns(lineText, baseName);
+  let total = 0;
+  for (const run of runs) total += measureRewriteRun(run, size);
+  return total;
+}
+
+function wrapRewriteText(text, baseName, size, slotWidths, scaleFactor = 1, overflowWidth = null) {
+  const effWidth = (idx) => {
+    const raw = idx < slotWidths.length
+      ? slotWidths[idx]
+      : (overflowWidth || slotWidths[slotWidths.length - 1] || size * 10);
+    return Math.max(size * 0.5, raw / scaleFactor);
+  };
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return [];
+  const lines = [];
+  let current = '';
+  for (const word of words) {
+    const limit = effWidth(lines.length);
+    const trial = current ? `${current} ${word}` : word;
+    if (measureRewriteLine(trial, baseName, size) <= limit) {
+      current = trial;
+      continue;
+    }
+    if (current) {
+      lines.push(current);
+      current = '';
+    }
+    const nextLimit = effWidth(lines.length);
+    if (measureRewriteLine(word, baseName, size) <= nextLimit) {
+      current = word;
+      continue;
+    }
+    // Break long word/CJK run by Unicode code point without ever dropping a char
+    let buf = '';
+    for (const ch of word) {
+      const next = buf + ch;
+      if (buf && measureRewriteLine(next, baseName, size) > effWidth(lines.length)) {
+        lines.push(buf);
+        buf = ch;
+      } else {
+        buf = next;
+      }
+    }
+    current = buf;
+  }
+  if (current) lines.push(current);
+  return lines;
+}
+
+function ensureNimbusCidFont(doc, page, baseName, cidState) {
+  let entry = cidState.get(baseName);
+  if (!entry) {
+    const font = metrics(baseName);
+    const pdfFont = doc.addFont(font);
+    entry = {font, pdfFont, mappings: new Map()};
+    cidState.set(baseName, entry);
+  }
+  const resources = ownResources(doc, page);
+  let fontsDict = resources.get('Font');
+  if (fontsDict.isNull()) { fontsDict = doc.newDictionary(); resources.put('Font', fontsDict); }
+  else fontsDict = fontsDict.resolve();
+
+  const resKey = 'FwCid' + baseName.replace(/[^A-Za-z0-9]/g, '');
+  let existing = null;
+  fontsDict.forEach((value, key) => {
+    if (existing) return;
+    if (String(key).startsWith(resKey) && value.asIndirect() === entry.pdfFont.asIndirect()) existing = String(key);
+  });
+  if (existing) return {resName: existing, entry};
+
+  let name = resKey;
+  const taken = new Set();
+  fontsDict.forEach((_value, key) => taken.add(String(key)));
+  while (taken.has(name)) name += 'x';
+  fontsDict.put(name, entry.pdfFont);
+  return {resName: name, entry};
+}
+
+function finalizeCidFonts(doc, cidState) {
+  for (const entry of cidState.values()) {
+    if (!entry.mappings.size) continue;
+    const entries = [...entry.mappings].map(([gid, ch]) => `<${gid.toString(16).padStart(4, '0')}> ${utf16hex(ch)}`);
+    let cmap = '/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n/CMapName /FwUnicode def\n/CMapType 2 def\n1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n';
+    for (let i = 0; i < entries.length; i += 100) {
+      const chunk = entries.slice(i, i + 100);
+      cmap += `${chunk.length} beginbfchar\n${chunk.join('\n')}\nendbfchar\n`;
+    }
+    cmap += 'endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n';
+    entry.pdfFont.put('ToUnicode', doc.addStream(new TextEncoder().encode(cmap), {}));
+  }
+}
+
+function emitRewriteLinesOps(doc, page, items, baseName, cidState) {
+  const nonEmpty = items.filter(item => item && item.lineText);
+  if (!nonEmpty.length) return '';
+  let out = 'q BT\n';
+  for (const item of nonEmpty) {
+    const runs = splitRewriteRuns(item.lineText, baseName);
+    const [r, g, b] = item.color || [0, 0, 0];
+    let lineFontSize = item.fontSize;
+    let lineScale = item.hScale;
+    const rawW = measureRewriteLine(item.lineText, baseName, lineFontSize);
+    const maxW = item.pageAvailW;
+    if (maxW > 0 && rawW * (lineScale / 100) > maxW) {
+      const neededScale = Math.floor((maxW / rawW) * 1000) / 10;
+      if (neededScale >= 30) {
+        lineScale = Math.min(lineScale, neededScale);
+      } else {
+        lineScale = Math.min(lineScale, 30);
+        lineFontSize = Math.max(1, (maxW / (rawW * (lineScale / 100))) * lineFontSize);
+      }
+    }
+    out += `${num(r)} ${num(g)} ${num(b)} rg ${num(lineScale)} Tz `;
+    out += `${num(item.ux)} ${num(item.uy)} ${num(-item.uy)} ${num(item.ux)} ${num(item.ox)} ${num(item.oy)} Tm `;
+    for (const run of runs) {
+      if (run.kind === 'winansi') {
+        const resName = ensureFont(doc, page, baseName);
+        const lit = winAnsi(run.text) || winAnsi('?');
+        out += `/${resName} ${num(lineFontSize)} Tf ${lit} Tj `;
+      } else if (run.kind === 'cjk') {
+        const resName = ensureCjkFont(doc, page);
+        out += `/${resName} ${num(lineFontSize)} Tf ${utf16hex(run.text)} Tj `;
+      } else {
+        const {resName, entry} = ensureNimbusCidFont(doc, page, baseName, cidState);
+        let hex = '';
+        for (const ch of run.text) {
+          const gid = entry.font.encodeCharacter(ch.codePointAt(0)) || entry.font.encodeCharacter(0x3f);
+          if (!entry.mappings.has(gid)) entry.mappings.set(gid, ch);
+          hex += gid.toString(16).padStart(4, '0');
+        }
+        out += `/${resName} ${num(lineFontSize)} Tf <${hex}> Tj `;
+      }
+    }
+    out += '\n';
+  }
+  return out + 'ET Q\n';
+}
+
+function buildOverflowItems(lastSlot, extraLines, baseName, fontSize, hScale, leading, overflowWidth) {
+  if (!extraLines.length) return [];
+  const availH = lastSlot.pageAvailH;
+  if (availH > 0 && extraLines.length * leading <= availH) {
+    return extraLines.map((lineText, idx) => {
+      const step = leading * (idx + 1);
+      const ox = lastSlot.ox + lastSlot.nx * step;
+      const oy = lastSlot.oy + lastSlot.ny * step;
+      let lineScale = hScale;
+      const rawW = measureRewriteLine(lineText, baseName, fontSize);
+      if (rawW * (lineScale / 100) > overflowWidth && overflowWidth > 0) {
+        const needed = (overflowWidth / rawW) * 100;
+        lineScale = Math.max(REWRITE_MIN_SCALE, Math.min(lineScale, Math.round(needed * 10) / 10));
+      }
+      return {
+        ox, oy,
+        ux: lastSlot.ux, uy: lastSlot.uy,
+        color: lastSlot.color,
+        pageAvailW: lastSlot.pageAvailW,
+        lineText,
+        fontSize,
+        hScale: lineScale,
+      };
+    });
+  }
+
+  // Normal leading would cross the bottom page edge (where MuPDF clips glyphs).
+  // Re-wrap the overflow text at progressively tighter fontSize/leading inside pageAvailH.
+  const safeAvailH = Math.max(0, availH);
+  const restText = extraLines.join(' ');
+  const restW = Math.max(overflowWidth, lastSlot.pageAvailW);
+  let restFontSize = fontSize;
+  let restScale = Math.min(hScale, REWRITE_MIN_SCALE);
+  let restLeading = Math.min(leading, restFontSize * 1.15);
+  let restLines = wrapRewriteText(restText, baseName, restFontSize, [restW], restScale / 100, restW);
+
+  while (restLines.length * restLeading > safeAvailH && restFontSize > 1.5) {
+    restFontSize = Math.max(1.5, Math.round(restFontSize * 0.85 * 100) / 100);
+    restLeading = Math.min(leading, restFontSize * 1.15);
+    restLines = wrapRewriteText(restText, baseName, restFontSize, [restW], restScale / 100, restW);
+  }
+  if (restLines.length * restLeading > safeAvailH && restLines.length > 0) {
+    restLeading = safeAvailH / restLines.length;
+    restFontSize = Math.min(restFontSize, Math.max(1, restLeading > 0 ? restLeading * 0.9 : 1.5));
+  }
+
+  return restLines.map((lineText, idx) => {
+    const step = restLeading * (idx + 1);
+    return {
+      ox: lastSlot.ox + lastSlot.nx * step,
+      oy: lastSlot.oy + lastSlot.ny * step,
+      ux: lastSlot.ux, uy: lastSlot.uy,
+      color: lastSlot.color,
+      pageAvailW: lastSlot.pageAvailW,
+      lineText,
+      fontSize: restFontSize,
+      hScale: restScale,
+    };
+  });
+}
+
+function singleLineItem(slot, lineText, fontSize, hScale) {
+  return {
+    ox: slot.ox, oy: slot.oy,
+    ux: slot.ux, uy: slot.uy,
+    color: slot.color,
+    pageAvailW: slot.pageAvailW,
+    lineText,
+    fontSize,
+    hScale,
+  };
+}
+
+function fitUnbrokenSingleToken(baseSlot, naturalW, baseSize) {
+  for (const scale of [65, 50]) {
+    const needed = (baseSlot.pageAvailW / (naturalW * (scale / 100))) * baseSize;
+    if (needed >= 4) return {fontSize: needed, hScale: scale};
+  }
+  return null;
+}
+
+const ADJACENT_PUNCT_RE = /^[,.;:)\]}!?'"”’»›]$/;
+
+function centerNarrowSingleSlot(baseSlot, naturalW, rightSibling) {
+  if (!rightSibling || !rightSibling.adjacent || !ADJACENT_PUNCT_RE.test(rightSibling.char)) return baseSlot;
+  if (Math.abs(baseSlot.ux - 1) > 0.01 || Math.abs(baseSlot.uy) > 0.01) return baseSlot;
+  const totalSpan = rightSibling.origin[0] - baseSlot.ox;
+  if (!(totalSpan > naturalW && totalSpan <= baseSlot.slotWidth + baseSlot.size * 0.25)) return baseSlot;
+  const slack = totalSpan - naturalW;
+  if (!(slack > baseSlot.size * 0.2 && slack < baseSlot.size)) return baseSlot;
+  const shift = slack / 2;
+  return {...baseSlot, ox: baseSlot.ox + baseSlot.ux * shift, oy: baseSlot.oy + baseSlot.uy * shift};
+}
+
+function emitSingleSlotRewrite(doc, page, baseSlot, text, baseName, cidState, rightSibling = null) {
+  const baseSize = baseSlot.size;
+  const minSize = Math.max(Math.min(baseSize, 5), baseSize * 0.72);
+  const naturalW = measureRewriteLine(text, baseName, baseSize);
+  let fontSize = baseSize;
+  let hScale = 100;
+  let targetSlot = baseSlot;
+  if (naturalW > baseSlot.slotWidth && baseSlot.slotWidth > 0) {
+    const ratio = baseSlot.slotWidth / naturalW;
+    if (ratio >= REWRITE_MIN_SCALE / 100) {
+      hScale = Math.round(ratio * 1000) / 10;
+    } else {
+      hScale = REWRITE_MIN_SCALE;
+      fontSize = Math.max(minSize, (baseSlot.slotWidth / (naturalW * (REWRITE_MIN_SCALE / 100))) * baseSize);
+    }
+  } else {
+    targetSlot = centerNarrowSingleSlot(baseSlot, naturalW, rightSibling);
+  }
+  const renderedW = measureRewriteLine(text, baseName, fontSize) * (hScale / 100);
+  if (!(targetSlot.pageAvailW > 0) || renderedW <= targetSlot.pageAvailW) {
+    return emitRewriteLinesOps(doc, page, [singleLineItem(targetSlot, text, fontSize, hScale)], baseName, cidState);
+  }
+  if (!/\s/.test(text.trim())) {
+    const fitted = fitUnbrokenSingleToken(baseSlot, naturalW, baseSize);
+    if (fitted) {
+      return emitRewriteLinesOps(doc, page, [singleLineItem(baseSlot, text, fitted.fontSize, fitted.hScale)], baseName, cidState);
+    }
+  }
+  const wrapW = Math.max(minSize * 2, baseSlot.pageAvailW);
+  const wrapped = wrapRewriteText(text, baseName, minSize, [wrapW], REWRITE_MIN_SCALE / 100, wrapW);
+  const items = [singleLineItem(baseSlot, wrapped[0], minSize, REWRITE_MIN_SCALE)];
+  if (wrapped.length > 1) {
+    items.push(...buildOverflowItems(baseSlot, wrapped.slice(1), baseName, minSize, REWRITE_MIN_SCALE, baseSize * 1.2, wrapW));
+  }
+  return emitRewriteLinesOps(doc, page, items, baseName, cidState);
+}
+
+function chooseMultiSlotWrap(text, baseName, baseSize, minSize, slotCount, wrapWidths, overflowWidth) {
+  let fontSize = baseSize;
+  let hScale = 100;
+  let wrapped = wrapRewriteText(text, baseName, fontSize, wrapWidths, 1, overflowWidth);
+  if (wrapped.length <= slotCount) return {fontSize, hScale, wrapped};
+  const candidates = [
+    {size: baseSize, scale: 85},
+    {size: baseSize, scale: 75},
+    {size: baseSize, scale: REWRITE_MIN_SCALE},
+    {size: Math.max(Math.min(baseSize, 5), baseSize * 0.85), scale: REWRITE_MIN_SCALE},
+    {size: minSize, scale: REWRITE_MIN_SCALE},
+  ];
+  for (const cand of candidates) {
+    const trial = wrapRewriteText(text, baseName, cand.size, wrapWidths, cand.scale / 100, overflowWidth);
+    if (trial.length < wrapped.length) {
+      fontSize = cand.size;
+      hScale = cand.scale;
+      wrapped = trial;
+    }
+    if (wrapped.length <= slotCount) break;
+  }
+  return {fontSize, hScale, wrapped};
+}
+
+function measureSlotLeading(slots, baseSize) {
+  const baseSlot = slots[0];
+  const steps = [];
+  for (let i = 1; i < slots.length; i++) {
+    const step = (slots[i].ox - slots[i - 1].ox) * baseSlot.nx + (slots[i].oy - slots[i - 1].oy) * baseSlot.ny;
+    if (step > baseSize * 0.5) steps.push(step);
+  }
+  if (!steps.length) return baseSize * 1.2;
+  steps.sort((a, b) => a - b);
+  return steps[Math.floor(steps.length / 2)];
+}
+
+function buildInSlotItems(slots, wrapped, wrapWidths, baseName, fontSize, hScale) {
+  const items = [];
+  const count = Math.min(wrapped.length, slots.length);
+  for (let i = 0; i < count; i++) {
+    const lineText = wrapped[i];
+    if (!lineText) continue;
+    const targetW = wrapWidths[i];
+    let lineScale = hScale;
+    const rawW = measureRewriteLine(lineText, baseName, fontSize);
+    if (rawW * (lineScale / 100) > targetW && targetW > 0) {
+      const needed = (targetW / rawW) * 100;
+      lineScale = Math.max(REWRITE_MIN_SCALE, Math.min(lineScale, Math.round(needed * 10) / 10));
+    }
+    items.push(singleLineItem(slots[i], lineText, fontSize, lineScale));
+  }
+  return items;
+}
+
+function emitMultiSlotRewrite(doc, page, slots, text, baseName, cidState) {
+  const baseSize = slots[0].size;
+  const minSize = Math.max(Math.min(baseSize, 5), baseSize * 0.72);
+  const baseWidths = slots.map(s => Math.max(baseSize, s.slotWidth));
+  const lastSlot = slots[slots.length - 1];
+  const blockW = Math.max(...baseWidths);
+  const overflowWidth = Math.max(baseSize, lastSlot.pageAvailW > 0 ? Math.min(lastSlot.pageAvailW, blockW) : blockW);
+  const wrapWidths = [...baseWidths];
+  if (lastSlot.rightClearW > wrapWidths[wrapWidths.length - 1]) {
+    wrapWidths[wrapWidths.length - 1] = Math.min(lastSlot.rightClearW, overflowWidth);
+  }
+  const {fontSize, hScale, wrapped} = chooseMultiSlotWrap(text, baseName, baseSize, minSize, slots.length, wrapWidths, overflowWidth);
+  const leading = measureSlotLeading(slots, baseSize);
+  const items = buildInSlotItems(slots, wrapped, wrapWidths, baseName, fontSize, hScale);
+  if (wrapped.length > slots.length) {
+    items.push(...buildOverflowItems(lastSlot, wrapped.slice(slots.length), baseName, fontSize, hScale, leading, overflowWidth));
+  }
+  return emitRewriteLinesOps(doc, page, items, baseName, cidState);
+}
+
+function emitRewriteEdit(doc, page, slots, rawNewText, cidState, rightOrigin = null) {
+  const sanitized = sanitizeRewriteText(rawNewText);
+  // '\n' in newText is a soft break: normalize newlines to single spaces so words reflow across slots
+  const text = sanitized.replace(/^\n+|\n+$/g, '').replace(/[ ]*\n+[ ]*/g, ' ');
+  if (!text.trim() || !slots.length) return '';
+  const baseName = base14FromStyle(slots[0].style);
+  if (slots.length === 1) return emitSingleSlotRewrite(doc, page, slots[0], text, baseName, cidState, rightOrigin);
+  return emitMultiSlotRewrite(doc, page, slots, text, baseName, cidState);
+}
+
+function toUint8Array(input) {
+  if (input instanceof Uint8Array) return input;
+  if (input instanceof ArrayBuffer) return new Uint8Array(input);
+  if (ArrayBuffer.isView(input)) return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+  if (input?.bytes instanceof Uint8Array) return input.bytes;
+  throw unavailableError(new TypeError('sourceBytes must be a Uint8Array'));
+}
+
+function openRewriteDoc(bytes) {
+  const head = String.fromCharCode(...bytes.slice(0, Math.min(1024, bytes.byteLength)));
+  if (bytes.byteLength < 5 || !head.includes('%PDF-')) throw unavailableError(new Error('not a PDF'));
+  const doc = mupdf.Document.openDocument(bytes, 'application/pdf').asPDF();
+  if (!doc) throw unavailableError(new Error('not a PDF'));
+  if (doc.needsPassword()) {
+    try { doc.authenticatePassword(''); } catch { /* best effort */ }
+  }
+  return doc;
+}
+
+function groupRewriteEditsByPage(edits, pageCount) {
+  const byPage = new Map();
+  for (const edit of Array.isArray(edits) ? edits : []) {
+    if (!edit || typeof edit !== 'object') continue;
+    const pageIndex = edit.pageIndex;
+    if (!Number.isInteger(pageIndex) || pageIndex < 0 || pageIndex >= pageCount) continue;
+    if (!Array.isArray(edit.rects) || !edit.rects.length) continue;
+    let group = byPage.get(pageIndex);
+    if (!group) { group = []; byPage.set(pageIndex, group); }
+    group.push(edit);
+  }
+  return byPage;
+}
+
+function isIdentityMatrix(m) {
+  const id = [1, 0, 0, 1, 0, 0];
+  return Array.isArray(m) && m.length === 6 && m.every((v, i) => Math.abs(v - id[i]) < 1e-3);
+}
+
+function restoreTextStateOps(show, matrix = show.lineMatrix) {
+  const tm = matrix.map(num).join(' ');
+  return `BT /${show.fontName} ${num(show.fontSize)} Tf ${num(show.hScale)} Tz ${num(show.charSpace)} Tc ${num(show.wordSpace)} Tw ${num(show.rise)} Ts ${show.renderMode} Tr ${num(show.leading)} TL ${tm} Tm `;
+}
+
+const SPLICE_SAFE_NEXT_OPS = new Set(['Tm', 'Td', 'TD', 'T*', 'ET']);
+const SPLICE_SKIP_OPS = new Set(['g', 'G', 'rg', 'RG', 'k', 'K', 'sc', 'SC', 'scn', 'SCN', 'cs', 'CS', 'Tf', 'Tc', 'Tw', 'Tz', 'Ts', 'Tr', 'TL']);
+
+function nextOpAllowsSplice(latin1, offset) {
+  const tail = latin1.slice(offset, offset + 256).replace(/%[^\r\n]*/g, ' ');
+  const tokens = tail.match(/\/[^\s()<>[\]{}/%]+|[+-]?(?:\d+\.?\d*|\.\d+)|[A-Za-z*'"]+|[\[\]()<>]/g) || [];
+  for (const tok of tokens) {
+    if (tok[0] === '/' || /^[+-]?(?:\d|\.)/.test(tok)) continue;
+    if (SPLICE_SKIP_OPS.has(tok)) continue;
+    return SPLICE_SAFE_NEXT_OPS.has(tok);
+  }
+  return false;
+}
+
+function readMissingWidth(fontObj) {
+  const desc = fontObj.get('FontDescriptor');
+  if (desc.isNull()) return NaN;
+  const missObj = desc.resolve().get('MissingWidth');
+  return !missObj.isNull() && missObj.isNumber() ? missObj.asNumber() : NaN;
+}
+
+function readSimpleFontWidths(fontObj) {
+  const widthsObj = fontObj.get('Widths');
+  const firstObj = fontObj.get('FirstChar');
+  if (widthsObj.isNull() || !widthsObj.isArray() || firstObj.isNull() || !firstObj.isNumber()) return null;
+  const widths = [];
+  for (let i = 0; i < widthsObj.length; i++) {
+    const item = widthsObj.get(i);
+    widths.push(item.isNumber() ? item.asNumber() : NaN);
+  }
+  return {kind: 'widths', firstChar: firstObj.asNumber(), widths, missingWidth: readMissingWidth(fontObj)};
+}
+
+function loadFontWidthEntry(fontDict, fontName) {
+  const raw = fontDict.get(fontName);
+  if (!raw || raw.isNull()) return null;
+  const fontObj = raw.resolve();
+  const simple = readSimpleFontWidths(fontObj);
+  if (simple) return simple;
+  const baseObj = fontObj.get('BaseFont');
+  const bare = baseObj.isNull() ? '' : String(baseObj.asName() || '').replace(/^[A-Z]{6}\+/, '');
+  return BASE14.includes(bare) ? {kind: 'base14', font: metrics(bare)} : null;
+}
+
+function makePageFontMeasurer(page) {
+  const resources = page.getObject().getInheritable('Resources');
+  const fontDict = !resources.isNull() ? resources.resolve().get('Font') : null;
+  const resolvedDict = fontDict && !fontDict.isNull() ? fontDict.resolve() : null;
+  const cache = new Map();
+  return (fontName, bytes, state) => {
+    if (!resolvedDict || !fontName) return NaN;
+    if (!cache.has(fontName)) cache.set(fontName, loadFontWidthEntry(resolvedDict, fontName));
+    const info = cache.get(fontName);
+    if (!info) return NaN;
+    let adv = 0;
+    for (let i = 0; i < bytes.length; i++) {
+      const b = bytes[i];
+      let w;
+      if (info.kind === 'widths') {
+        const idx = b - info.firstChar;
+        const rawW = idx >= 0 && idx < info.widths.length ? info.widths[idx] : info.missingWidth;
+        w = (rawW / 1000) * state.fontSize;
+      } else {
+        const gid = info.font.encodeCharacter(b);
+        w = gid ? info.font.advanceGlyph(gid, 0) * state.fontSize : NaN;
+      }
+      if (!Number.isFinite(w)) return NaN;
+      adv += w + state.charSpace + (b === 32 ? state.wordSpace : 0);
+    }
+    return adv;
+  };
+}
+
+function showXSpan(show, measure) {
+  let x = show.textMatrix[4];
+  let firstInk = null;
+  const scaleX = show.textMatrix[0] * (show.hScale / 100);
+  for (const part of show.parts || []) {
+    if (part.type === 'adjustment') {
+      x -= (part.value / 1000) * show.fontSize * scaleX;
+      continue;
+    }
+    if (firstInk === null) firstInk = x;
+    const w = measure(show.fontName, part.bytes, show);
+    if (!Number.isFinite(w)) return {startX: firstInk, endX: NaN};
+    x += w * scaleX;
+  }
+  return {startX: firstInk === null ? show.textMatrix[4] : firstInk, endX: x};
+}
+
+function findInlineSpliceTarget(shows, latin1, slot, leftSibling, measure) {
+  if (!leftSibling || Math.abs(slot.ux - 1) > 0.01 || Math.abs(slot.uy) > 0.01) return null;
+  const leftX = leftSibling.pdfOrigin[0];
+  const leftY = leftSibling.pdfOrigin[1];
+  let best = null;
+  for (const show of shows) {
+    if (!show.fontName || !isIdentityMatrix(show.ctm)) continue;
+    const sy = show.textMatrix[5] + show.rise * show.textMatrix[3];
+    if (Math.abs(sy - leftY) > 1.5) continue;
+    const {startX, endX} = showXSpan(show, measure);
+    if (startX > leftX + 1.5) continue;
+    if (Number.isFinite(endX) && endX < leftX - 1.5) continue;
+    if (!nextOpAllowsSplice(latin1, show.end)) continue;
+    if (!best || startX >= best.startX) best = {show, startX};
+  }
+  return best ? best.show : null;
+}
+
+function pageContentStreams(page) {
+  const contents = page.getObject().get('Contents');
+  if (contents.isNull()) return [];
+  const out = [];
+  const count = contents.isArray() ? contents.length : 1;
+  for (let i = 0; i < count; i++) {
+    const ref = contents.isArray() ? contents.get(i) : contents;
+    if (ref.isStream()) out.push(ref);
+  }
+  return out;
+}
+
+function readStreamLatin1(streamObj) {
+  const buf = streamObj.readStream();
+  try {
+    const u8 = buf.asUint8Array();
+    let out = '';
+    for (let i = 0; i < u8.length; i += 8192) {
+      out += String.fromCharCode(...u8.subarray(i, i + 8192));
+    }
+    return {bytes: u8.slice(), latin1: out};
+  } finally {
+    buf.destroy();
+  }
+}
+
+function writeStreamLatin1(streamObj, latin1) {
+  const out = new Uint8Array(latin1.length);
+  for (let i = 0; i < latin1.length; i++) out[i] = latin1.charCodeAt(i) & 0xff;
+  streamObj.writeStream(out);
+}
+
+function horizontalEditDrawn(selectedChars, slot) {
+  if (!slot || Math.abs(slot.ux - 1) > 0.01 || Math.abs(slot.uy) > 0.01) return null;
+  const drawn = selectedChars.filter(ch => ch.c.trim());
+  return drawn.length ? drawn : null;
+}
+
+function survivingCharsOnLine(allChars, lineId, allSelectedSet) {
+  return allChars.filter(ch => ch.lineId === lineId && !allSelectedSet.has(ch) && ch.c.trim());
+}
+
+function rightmostBeforeX(chars, maxX) {
+  let best = null;
+  for (const ch of chars) {
+    if (ch.pdfOrigin[0] < maxX && (!best || ch.pdfOrigin[0] > best.pdfOrigin[0])) best = ch;
+  }
+  return best;
+}
+
+function leftmostAfterX(chars, minX) {
+  let best = null;
+  for (const ch of chars) {
+    if (ch.pdfOrigin[0] > minX && (!best || ch.pdfOrigin[0] < best.pdfOrigin[0])) best = ch;
+  }
+  return best;
+}
+
+function isAdjacentChars(allChars, firstCh, nextCh) {
+  const firstIdx = allChars.indexOf(firstCh);
+  const nextIdx = allChars.indexOf(nextCh);
+  if (firstIdx < 0 || nextIdx <= firstIdx) return false;
+  for (let i = firstIdx + 1; i < nextIdx; i++) {
+    if (!allChars[i].c.trim()) return false;
+  }
+  return true;
+}
+
+function findLeftSibling(selectedChars, allChars, allSelectedSet, slot) {
+  const drawn = horizontalEditDrawn(selectedChars, slot);
+  if (!drawn) return null;
+  const lineId = drawn[0].lineId;
+  const sameLine = survivingCharsOnLine(allChars, lineId, allSelectedSet);
+  if (sameLine.length) return rightmostBeforeX(sameLine, slot.ox - 0.5);
+  const prevLine = survivingCharsOnLine(allChars, lineId - 1, allSelectedSet)
+    .filter(ch => Math.abs(ch.pdfOrigin[1] - slot.oy) <= 1.5);
+  return rightmostBeforeX(prevLine, slot.ox - 0.5);
+}
+
+function findRightSibling(selectedChars, allChars, allSelectedSet, slot) {
+  const drawn = horizontalEditDrawn(selectedChars, slot);
+  if (!drawn) return null;
+  const lineId = drawn[0].lineId;
+  if (drawn.some(ch => ch.lineId !== lineId)) return null;
+  const lastDrawn = drawn.reduce((a, b) => (b.pdfOrigin[0] > a.pdfOrigin[0] ? b : a));
+  const best = leftmostAfterX(survivingCharsOnLine(allChars, lineId, allSelectedSet), lastDrawn.pdfOrigin[0] + 0.5);
+  if (!best) return null;
+  return {origin: best.pdfOrigin, char: best.c, adjacent: isAdjacentChars(allChars, lastDrawn, best)};
+}
+
+function tjHoleMatches(part, idx, len, x, nextX, slot, rightOrigin) {
+  if (idx <= 0 || idx >= len - 1 || part.value >= 0) return false;
+  return x <= slot.ox + 2 && nextX >= slot.ox - 2 && Math.abs(nextX - rightOrigin[0]) <= 2.5;
+}
+
+function findTjHolePart(show, slot, rightOrigin, measure) {
+  if (show.kind !== 'TJ' || !rightOrigin || Math.abs(show.rise) > 0.01) return null;
+  if (!Array.isArray(show.parts) || show.parts.length < 3) return null;
+  const scaleX = show.textMatrix[0] * (show.hScale / 100);
+  let x = show.textMatrix[4];
+  const matches = [];
+  for (let i = 0; i < show.parts.length; i++) {
+    const part = show.parts[i];
+    if (part.type === 'string') {
+      const w = measure(show.fontName, part.bytes, show);
+      if (!Number.isFinite(w)) return null;
+      x += w * scaleX;
+      continue;
+    }
+    const nextX = x - (part.value / 1000) * show.fontSize * scaleX;
+    if (tjHoleMatches(part, i, show.parts.length, x, nextX, slot, rightOrigin)) matches.push(part);
+    x = nextX;
+  }
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function buildShowSplicePiece(latin1, show, holeEdits, postEdits) {
+  const lm = show.lineMatrix.map(num).join(' ');
+  if (!holeEdits.length) {
+    const ops = postEdits.map(it => it.ops).join('');
+    return {start: show.end, end: show.end, piece: ` ET\n${ops}${restoreTextStateOps(show)}`};
+  }
+  holeEdits.sort((a, b) => a.holePart.start - b.holePart.start);
+  let piece = latin1.slice(show.start, holeEdits[0].holePart.start) + ']TJ';
+  for (let i = 0; i < holeEdits.length; i++) {
+    const cur = holeEdits[i];
+    const rightOrigin = cur.item.rightSibling.origin;
+    const rightTm = [show.textMatrix[0], show.textMatrix[1], show.textMatrix[2], show.textMatrix[3], rightOrigin[0], rightOrigin[1]];
+    const nextEnd = i + 1 < holeEdits.length ? holeEdits[i + 1].holePart.start : show.end;
+    const seg = '[' + latin1.slice(cur.holePart.end, nextEnd) + (i + 1 < holeEdits.length ? ']TJ' : '');
+    piece += ` ET\n${cur.item.ops}${restoreTextStateOps(show, rightTm)}${seg}`;
+  }
+  piece += ` ${lm} Tm `;
+  if (postEdits.length) {
+    piece += `ET\n${postEdits.map(it => it.ops).join('')}${restoreTextStateOps(show)}`;
+  }
+  return {start: show.start, end: show.end, piece};
+}
+
+function assignItemToShow(scanned, item, measure) {
+  const firstSlot = item.slots[0];
+  if (!firstSlot || !item.leftSibling) return null;
+  for (const entry of scanned) {
+    if (entry.parsed.diagnostics.length) continue;
+    const show = findInlineSpliceTarget(entry.parsed.shows, entry.latin1, firstSlot, item.leftSibling, measure);
+    if (show) return {entry, show};
+  }
+  return null;
+}
+
+function spliceRewriteOpsInline(page, emittedPlans) {
+  const streams = pageContentStreams(page);
+  if (!streams.length) return emittedPlans.map(p => p.ops).join('');
+  const measure = makePageFontMeasurer(page);
+  const scanned = streams.map(streamObj => {
+    const {bytes, latin1} = readStreamLatin1(streamObj);
+    const parsed = scanTextShows(bytes, {measure});
+    return {streamObj, latin1, parsed, byShow: new Map()};
+  });
+
+  let fallbackOps = '';
+  for (const item of emittedPlans) {
+    const match = assignItemToShow(scanned, item, measure);
+    if (!match) { fallbackOps += item.ops; continue; }
+    let bucket = match.entry.byShow.get(match.show);
+    if (!bucket) { bucket = {holes: [], usedParts: new Set(), post: []}; match.entry.byShow.set(match.show, bucket); }
+    const rightOrigin = item.rightSibling ? item.rightSibling.origin : null;
+    const holePart = findTjHolePart(match.show, item.slots[0], rightOrigin, measure);
+    if (holePart && !bucket.usedParts.has(holePart)) {
+      bucket.usedParts.add(holePart);
+      bucket.holes.push({holePart, item});
+    } else {
+      bucket.post.push(item);
+    }
+  }
+
+  for (const entry of scanned) {
+    if (!entry.byShow.size) continue;
+    const splices = [];
+    for (const [show, bucket] of entry.byShow) {
+      splices.push(buildShowSplicePiece(entry.latin1, show, bucket.holes, bucket.post));
+    }
+    splices.sort((a, b) => b.start - a.start);
+    let next = entry.latin1;
+    for (const sp of splices) {
+      next = next.slice(0, sp.start) + sp.piece + next.slice(sp.end);
+    }
+    writeStreamLatin1(entry.streamObj, next);
+  }
+  return fallbackOps;
+}
+
+function dedupeRewritePlans(pagePlans, model) {
+  const claimed = new Set();
+  const kept = [];
+  for (let i = pagePlans.length - 1; i >= 0; i--) {
+    const plan = pagePlans[i];
+    const hadDrawn = plan.selectedChars.some(ch => ch.c.trim());
+    const remaining = plan.selectedChars.filter(ch => !claimed.has(ch));
+    const hasDrawn = remaining.some(ch => ch.c.trim());
+    if (hadDrawn && !hasDrawn) continue;
+    for (const ch of remaining) claimed.add(ch);
+    if (remaining.length !== plan.selectedChars.length) {
+      const slotRects = plan.aligned ? alignedDisplayRects(remaining) : plan.displayRects;
+      plan.selectedChars = remaining;
+      plan.slots = buildRewriteSlots(remaining, slotRects.length ? slotRects : plan.displayRects, model);
+    }
+    kept.push(plan);
+  }
+  return kept.reverse();
+}
+
+function applyRewritePage(doc, pageIndex, pageEdits, cidState) {
+  const page = doc.loadPage(pageIndex);
+  try {
+    const model = readRewritePage(page);
+    const rawPlans = [];
+    for (const edit of pageEdits) {
+      const displayRects = rectsToDisplay(edit.rects, model.bounds);
+      if (!displayRects.length) continue;
+      const rectSelected = selectGlyphsByRects(model.chars, displayRects);
+      const alignedRes = alignGlyphsToOriginalText(model.chars, rectSelected, displayRects, edit.originalText);
+      const trimmed = alignedRes.aligned
+        ? trimUnchangedSymbolEdges(alignedRes.chars, edit.newText)
+        : {chars: alignedRes.chars, text: edit.newText};
+      const slotRects = alignedRes.aligned ? alignedDisplayRects(trimmed.chars) : displayRects;
+      const slots = buildRewriteSlots(trimmed.chars, slotRects.length ? slotRects : displayRects, model);
+      rawPlans.push({edit, displayRects, selectedChars: trimmed.chars, newText: trimmed.text, slots, aligned: alignedRes.aligned});
+    }
+    const pagePlans = dedupeRewritePlans(rawPlans, model);
+    if (!pagePlans.length) return;
+    redactRewritePage(page, pagePlans, model.chars);
+    const allSelectedSet = new Set();
+    for (const plan of pagePlans) {
+      for (const ch of plan.selectedChars) allSelectedSet.add(ch);
+    }
+    const emitted = [];
+    for (const plan of pagePlans) {
+      const leftSibling = findLeftSibling(plan.selectedChars, model.chars, allSelectedSet, plan.slots[0]);
+      const rightSibling = findRightSibling(plan.selectedChars, model.chars, allSelectedSet, plan.slots[0]);
+      const ops = emitRewriteEdit(doc, page, plan.slots, plan.newText, cidState, rightSibling);
+      if (ops) emitted.push({slots: plan.slots, ops, leftSibling, rightSibling});
+    }
+    if (!emitted.length) return;
+    const fallbackOps = spliceRewriteOpsInline(page, emitted);
+    if (fallbackOps) appendStream(doc, page, fallbackOps);
+  } finally {
+    try { page.destroy(); } catch { /* ignore */ }
+  }
+}
+
+function saveRewriteDoc(doc) {
+  const saved = doc.saveToBuffer('garbage=compact');
+  try {
+    return saved.asUint8Array().slice();
+  } finally {
+    try { saved.destroy(); } catch { /* ignore */ }
+  }
+}
+
+async function rewriteExclusive(sourceBytes, edits) {
+  let doc = null;
+  try {
+    const bytes = toUint8Array(sourceBytes);
+    doc = openRewriteDoc(bytes);
+    const byPage = groupRewriteEditsByPage(edits, doc.countPages());
+    if (!byPage.size) return bytes.slice();
+    const cidState = new Map();
+    for (const [pageIndex, pageEdits] of byPage) {
+      applyRewritePage(doc, pageIndex, pageEdits, cidState);
+    }
+    finalizeCidFonts(doc, cidState);
+    return saveRewriteDoc(doc);
+  } catch (error) {
+    if (error instanceof BrowserPdfError && error.code === 'engine_unavailable') throw error;
+    throw unavailableError(error);
+  } finally {
+    try { doc?.destroy(); } catch { /* ignore */ }
+  }
+}
+
+export async function rewrite(sourceBytes, edits) {
+  return exclusive(() => rewriteExclusive(sourceBytes, edits));
+}
+
+globalThis.FalsifyBrowserPdf = {prepare, rewrite, warm, ENGINE, LIMITS, COORDINATE_SPACE, COORDINATES, BrowserPdfError};
