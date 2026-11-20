@@ -457,6 +457,9 @@
   function isWholeRegionEdit(hits, needle, newVal, firstLineText){
     return hits.length>1||needle.includes('\n')||newVal.includes('\n')||needle===firstLineText;
   }
+  function isFullBlockDelete(allLines, newVal, needle, origText){
+    return allLines&&newVal===''&&(!needle||needle===origText);
+  }
   function locateEditInBlock(edit, hits, blockLines, origLines, origText, offsets){
     const firstLine=hits[0];
     const lastLine=hits[hits.length-1];
@@ -465,7 +468,9 @@
     const needle=String(edit.originalText||'');
     const newVal=String(edit.newText==null?'':edit.newText);
     const allLines=firstLine===0&&lastLine===blockLines.length-1;
-    if(allLines&&newVal==='') return {edit,origStart:0,origEnd:origText.length,origSlice:origText,newSlice:''};
+    if(isFullBlockDelete(allLines,newVal,needle,origText)){
+      return {edit,origStart:0,origEnd:origText.length,origSlice:origText,newSlice:''};
+    }
     let span=findNeedleSpan(edit,firstLine,regionStart,regionEnd,blockLines,origLines,origText,needle);
     if(!span){
       if(!isWholeRegionEdit(hits,needle,newVal,origLines[firstLine])) return null;
@@ -545,12 +550,12 @@
     snapStartLeft(orig,range);
     snapEndRight(orig,range);
     if(range.origStart!==prevStart||range.origEnd!==prevEnd) return;
-    if(/\S/.test(orig.slice(range.origEnd))){
-      while(range.origEnd<orig.length&&SPACE.test(orig[range.origEnd])){range.origEnd+=1;range.nextEnd+=1;}
-      snapEndRight(orig,range);
-    }else if(/\S/.test(orig.slice(0,range.origStart))){
+    if(/\S/.test(orig.slice(0,range.origStart))){
       while(range.origStart>0&&SPACE.test(orig[range.origStart-1])){range.origStart-=1;range.nextStart-=1;}
       snapStartLeft(orig,range);
+    }else if(/\S/.test(orig.slice(range.origEnd))){
+      while(range.origEnd<orig.length&&SPACE.test(orig[range.origEnd])){range.origEnd+=1;range.nextEnd+=1;}
+      snapEndRight(orig,range);
     }
   }
   function trimDeletedSpaces(orig, range){
@@ -714,6 +719,43 @@
       }
     }
   }
+  function mapPrefillRangeToOrig(range, subs){
+    if(range.pStart===range.pEnd){
+      const zeroSub=subs.find(s=>s.prefillStart===range.pStart&&s.prefillEnd===range.pEnd);
+      if(zeroSub) return {oStart:zeroSub.origStart,oEnd:zeroSub.origEnd};
+    }
+    return {
+      oStart:prefillPosToOrig(range.pStart,subs,false),
+      oEnd:prefillPosToOrig(range.pEnd,subs,true)
+    };
+  }
+  function widenPrefillRangeToAdjacentWord(prefill, range){
+    if(/\S/.test(prefill.slice(0,range.pStart))){
+      while(range.pStart>0&&SPACE.test(prefill[range.pStart-1])){range.pStart-=1;range.nStart-=1;}
+      while(range.pStart>0&&!SPACE.test(prefill[range.pStart-1])){range.pStart-=1;range.nStart-=1;}
+      return true;
+    }
+    if(/\S/.test(prefill.slice(range.pEnd))){
+      while(range.pEnd<prefill.length&&SPACE.test(prefill[range.pEnd])){range.pEnd+=1;range.nEnd+=1;}
+      while(range.pEnd<prefill.length&&!SPACE.test(prefill[range.pEnd])){range.pEnd+=1;range.nEnd+=1;}
+      return true;
+    }
+    return false;
+  }
+  function resolveNonEmptyOrigRange(origText, prefill, raw, range, subs){
+    expandRangeOverSubs(range,subs);
+    let mapped=mapPrefillRangeToOrig(range,subs);
+    if(/\S/.test(origText.slice(mapped.oStart,mapped.oEnd))) return mapped;
+    if(!/\S/.test(origText)) return mapped;
+    if(widenPrefillRangeToAdjacentWord(prefill,range)){
+      expandRangeOverSubs(range,subs);
+      mapped=mapPrefillRangeToOrig(range,subs);
+      if(/\S/.test(origText.slice(mapped.oStart,mapped.oEnd))) return mapped;
+    }
+    range.nStart=0;
+    range.nEnd=raw.length;
+    return {oStart:0,oEnd:origText.length};
+  }
   /* Computes the commit action for a paragraph sheet: removes any earlier edits inside the block that
      were reverted to original, leaves untouched earlier edits outside the changed range intact, and
      emits ONE changed-range BoothEdit (or full-block delete) covering only the touched characters. */
@@ -729,9 +771,7 @@
     const diff=diffChangedRange(stripped.prefill,raw);
     if(!diff) return {removeIds:stripped.removeIds,edit:null};
     const range={pStart:diff.start,pEnd:diff.end,nStart:diff.nextStart,nEnd:diff.nextEnd};
-    expandRangeOverSubs(range,stripped.subs);
-    const oStart=prefillPosToOrig(range.pStart,stripped.subs,false);
-    const oEnd=prefillPosToOrig(range.pEnd,stripped.subs,true);
+    const {oStart,oEnd}=resolveNonEmptyOrigRange(origText,stripped.prefill,raw,range,stripped.subs);
     const originalSub=origText.slice(oStart,oEnd);
     const newSub=raw.slice(range.nStart,range.nEnd);
     if(originalSub===newSub) return {removeIds:stripped.removeIds,edit:null};
@@ -850,10 +890,12 @@
     for(const [key,value] of [['aria-label','새 글자'],['enterkeyhint','done'],['autocapitalize','off'],['autocorrect','off']]) input.setAttribute(key,value);
     const apply=button('booth-pe-apply','바꾸기');
     const whole=button('booth-pe-whole','문단 전체 고치기');
+    const revert=button('booth-pe-revert','원래대로');
+    revert.hidden=true;
     const cancel=button('booth-pe-cancel','취소');
     const prev=button('booth-pe-step booth-pe-prev','‹','앞 단어');
     const next=button('booth-pe-step booth-pe-next','›','다음 단어');
-    pop.append(label,prev,input,next,apply,whole,cancel);
+    pop.append(label,prev,input,next,apply,whole,revert,cancel);
     doc.body.append(pop);
     const hover=el('div','booth-pe-hover');
     hover.setAttribute('aria-hidden','true');
@@ -1164,6 +1206,8 @@
       input.value=existing?existing.newText:word.text;
       input.setAttribute('inputmode',numericToken(input.value)?'decimal':'text');
       whole.disabled=false;
+      revert.hidden=!existing;
+      pop.classList.toggle('has-existing',!!existing);
       pop.hidden=false;
       pop.classList.toggle('is-bar',barMode());
       if(!barMode()) makeRoom(st.sel.box);
@@ -1198,6 +1242,13 @@
       const box=page.getBoundingClientRect();
       const x=word.rect.x*box.width;
       if(x<stage.scrollLeft+8||x+word.rect.w*box.width>stage.scrollLeft+stage.clientWidth-8) stage.scrollLeft=Math.max(0,x-stage.clientWidth/3);
+    }
+    function revertPop(){
+      const sel=st.sel;
+      const api=store();
+      if(!sel||!sel.existing||!api) return;
+      api.remove(sel.existing.id);
+      closePop(true);
     }
     function commitPop(){
       const sel=st.sel;
@@ -1500,6 +1551,7 @@
     }
 
     apply.addEventListener('click',commitPop);
+    revert.addEventListener('click',revertPop);
     whole.addEventListener('click',()=>{
       const sel=st.sel;
       if(!sel) return;
@@ -1508,7 +1560,7 @@
     cancel.addEventListener('click',()=>closePop(true));
     prev.addEventListener('click',()=>step(-1));
     next.addEventListener('click',()=>step(1));
-    for(const node of [prev,next,apply]) node.addEventListener('pointerdown',event=>event.preventDefault());
+    for(const node of [prev,next,apply,revert]) node.addEventListener('pointerdown',event=>event.preventDefault());
     input.addEventListener('keydown',onKey);
     input.addEventListener('compositionstart',()=>{st.composing=true;});
     input.addEventListener('compositionend',()=>{st.composing=false;});

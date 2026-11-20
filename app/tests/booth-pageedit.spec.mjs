@@ -305,6 +305,56 @@ test('commitParagraphChange preserves untouched earlier edits, replaces covered 
   assert.deepEqual(plain(pe.commitParagraphChange(block, earlier, prefill)), {removeIds: [], edit: null});
 });
 
+test('1-line single-word delete keeps rest of line in prefill and pure insertions never emit empty originalText', () => {
+  // P0-3 case 1: 1-line block with a single-word delete -> prefill shows the line minus that word
+  const oneLine = plain(pe.groupLines([
+    {text: 'Table 1: Agreement with human annotators.', rect: R(0.118, 0.177, 0.366, 0.011)},
+  ]));
+  const delWord = [{
+    id: 'e-del', pageIndex: 4,
+    rects: [R(0.32, 0.177, 0.055, 0.011)],
+    originalText: 'human', newText: '', source: 'tap',
+  }];
+  const prefill = pe.applyEditsToBlock(oneLine, delWord);
+  assert.equal(prefill, 'Table 1: Agreement with  annotators.');
+
+  // Editing another word on that 1-line block emits non-empty originalText and preserves the single-word delete
+  const editOther = plain(pe.commitParagraphChange(oneLine, delWord, prefill.replace('Agreement', 'Consensus')));
+  assert.deepEqual(editOther.removeIds, []);
+  assert.equal(editOther.edit.originalText, 'Agreement');
+  assert.equal(editOther.edit.newText, 'Consensus');
+
+  // Typing a replacement right where the word was deleted also gives non-empty originalText
+  const insertBack = plain(pe.commitParagraphChange(oneLine, delWord, 'Table 1: Agreement with expert annotators.'));
+  assert.ok(insertBack.edit && insertBack.edit.originalText.length > 0, 'originalText must never be empty: ' + JSON.stringify(insertBack));
+  assert.ok(insertBack.edit.newText.includes('expert'));
+
+  // Re-editing a previously full-deleted block never emits originalText ''
+  const fullDel = [{
+    id: 'e-all', pageIndex: 4,
+    rects: [oneLine[0].rect],
+    originalText: oneLine[0].text, newText: '', source: 'paragraph',
+  }];
+  assert.equal(pe.applyEditsToBlock(oneLine, fullDel), '');
+  const retype = plain(pe.commitParagraphChange(oneLine, fullDel, 'Brand new heading'));
+  assert.equal(retype.edit.originalText, oneLine[0].text);
+  assert.equal(retype.edit.newText, 'Brand new heading');
+
+  // P0-3 case 2: pure insertion "a b" -> "a X b" (plus start/end insertions) gives non-empty originalText
+  const ab = plain(pe.groupLines([{text: 'a b', rect: R(0.12, 0.20, 0.10, 0.012)}]));
+  const midIns = plain(pe.commitParagraphChange(ab, [], 'a X b'));
+  assert.ok(midIns.edit && midIns.edit.originalText.length > 0, 'middle pure insertion has non-empty originalText: ' + JSON.stringify(midIns));
+  assert.ok(midIns.edit.newText.includes('X'), 'middle pure insertion includes inserted token');
+
+  const startIns = plain(pe.commitParagraphChange(ab, [], 'X a b'));
+  assert.equal(startIns.edit.originalText, 'a');
+  assert.equal(startIns.edit.newText, 'X a');
+
+  const endIns = plain(pe.commitParagraphChange(ab, [], 'a b X'));
+  assert.equal(endIns.edit.originalText, 'b');
+  assert.equal(endIns.edit.newText, 'b X');
+});
+
 test('tokenAt, tokensIn, numericToken, placePopover, keyboardInset and hintBlock work as expected', () => {
   const text = 'Ragas 0.95, (43%) "WikiEval".';
   const word = at => { const t = pe.tokenAt(text, at); return text.slice(t.start, t.end); };
