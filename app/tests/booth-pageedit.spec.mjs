@@ -150,62 +150,159 @@ test('applyEditsToBlock substitutes existing tap, repeated-word, deletion and mu
   );
 });
 
-test('trimBlockLines trims unchanged leading and trailing lines and handles deletion, insertion and no-op', () => {
-  const block = [
-    {text: 'Line 1', rect: R(0.1, 0.10, 0.4, 0.012)},
-    {text: 'Line 2', rect: R(0.1, 0.12, 0.4, 0.012)},
-    {text: 'Line 3', rect: R(0.1, 0.14, 0.4, 0.012)},
-    {text: 'Line 4', rect: R(0.1, 0.16, 0.4, 0.012)},
+test('clusterBlock stays inside one column with overshooting spans and stops at >1.3x pitch or font-size change', () => {
+  // Real page-5-like two-column layout where left-column spans slightly overshoot past x=0.5143
+  // into the right column, plus an inset GPT Score prompt box above "Ties, where...".
+  const items = [
+    // Prompt box in left column (y=0.784..0.8323, pitch=0.0161)
+    {text: 'Given an answer and context, assign a', rect: R(0.155, 0.7840, 0.306, 0.013), fontSize: 10.91},
+    {text: 'score for faithfulness in the range 0-10.', rect: R(0.1557, 0.8001, 0.3053, 0.013), fontSize: 10.91},
+    {text: 'context: [context]', rect: R(0.1557, 0.8162, 0.1462, 0.0133), fontSize: 10.91},
+    {text: 'answer: [answer]', rect: R(0.1557, 0.8323, 0.1375, 0.0132), fontSize: 10.91},
+    // Target paragraph below prompt box (step = 0.0246 = 1.53x pitch)
+    {text: 'Ties, where the same score is assigned by the LLM', rect: R(0.1185, 0.8569, 0.3807, 0.013), fontSize: 10.91},
+    // Overshoots to x2 = 0.5163 > right column x = 0.5143!
+    {text: 'to both answer candidates, were broken randomly.', rect: R(0.1190, 0.8730, 0.3973, 0.013), fontSize: 10.91},
+    {text: 'The second baseline, shown as GPT Ranking, in-', rect: R(0.1185, 0.8891, 0.3726, 0.013), fontSize: 10.91},
+    {text: 'stead asks ChatGPT to select the preferred answer/-', rect: R(0.1190, 0.9052, 0.3856, 0.013), fontSize: 10.91},
+    // Right column on exact same baselines (x = 0.5143)
+    {text: 'of any ground truth. Our evaluation on WikiEval', rect: R(0.5143, 0.8408, 0.3921, 0.013), fontSize: 10.91},
+    {text: 'has shown that the predictions from Ragas are', rect: R(0.5143, 0.8569, 0.3889, 0.013), fontSize: 10.91},
+    {text: 'closely aligned with human predictions, especially', rect: R(0.5143, 0.8730, 0.3952, 0.013), fontSize: 10.91},
+    {text: 'for faithfulness and answer relevance.', rect: R(0.5143, 0.8891, 0.2934, 0.013), fontSize: 10.91},
   ];
-  // Unchanged returns null
-  assert.equal(pe.trimBlockLines(block, 'Line 1\nLine 2\nLine 3\nLine 4'), null);
-  assert.equal(pe.trimBlockLines(block, 'Line 1\r\nLine 2\r\nLine 3\r\nLine 4'), null);
+  const para = plain(pe.clusterBlock(items, 5));
+  assert.deepEqual(para.map(l => l.text), [
+    'Ties, where the same score is assigned by the LLM',
+    'to both answer candidates, were broken randomly.',
+    'The second baseline, shown as GPT Ranking, in-',
+    'stead asks ChatGPT to select the preferred answer/-',
+  ]);
+  for (const line of para) {
+    assert.ok(line.rect.x < 0.2 && line.rect.x + line.rect.w < 0.53, 'line stays in left column: ' + JSON.stringify(line.rect));
+  }
 
-  // Single middle line edited: only its rect is kept
-  const mid = plain(pe.trimBlockLines(block, 'Line 1\nLine 2 edited\nLine 3\nLine 4'));
-  assert.deepEqual(mid, {rects: [block[1].rect], originalText: 'Line 2', newText: 'Line 2 edited'});
+  // Font-size change stops clustering even when vertical pitch matches
+  const mixedFont = [
+    {text: 'Heading line', rect: R(0.12, 0.200, 0.20, 0.013), fontSize: 13},
+    {text: 'Body line one', rect: R(0.12, 0.216, 0.35, 0.013), fontSize: 10.9},
+    {text: 'Body line two', rect: R(0.12, 0.232, 0.35, 0.013), fontSize: 10.9},
+  ];
+  assert.deepEqual(plain(pe.clusterBlock(mixedFont, 1)).map(l => l.text), ['Body line one', 'Body line two']);
 
-  // Middle two lines edited
-  const span = plain(pe.trimBlockLines(block, 'Line 1\nTwo\nThree\nLine 4'));
-  assert.deepEqual(span, {rects: [block[1].rect, block[2].rect], originalText: 'Line 2\nLine 3', newText: 'Two\nThree'});
+  // Vertical gap > 1.3x line pitch stops clustering even with identical font size and line height
+  const gapped = [
+    {text: 'Para 1 line 1', rect: R(0.12, 0.200, 0.35, 0.013), fontSize: 10.9},
+    {text: 'Para 1 line 2', rect: R(0.12, 0.216, 0.35, 0.013), fontSize: 10.9},
+    // Step = 0.024 = 1.5x pitch (0.016)
+    {text: 'Para 2 line 1', rect: R(0.12, 0.240, 0.35, 0.013), fontSize: 10.9},
+    {text: 'Para 2 line 2', rect: R(0.12, 0.256, 0.35, 0.013), fontSize: 10.9},
+  ];
+  assert.deepEqual(plain(pe.clusterBlock(gapped, 2)).map(l => l.text), ['Para 2 line 1', 'Para 2 line 2']);
+});
 
-  // Deleting one middle line produces newText '' over that line's rect only
-  const delOne = plain(pe.trimBlockLines(block, 'Line 1\nLine 3\nLine 4'));
-  assert.deepEqual(delOne, {rects: [block[1].rect], originalText: 'Line 2', newText: ''});
+test('diffChangedRange and changedBlockEdit map changed substrings to character rects', () => {
+  const block = plain(pe.groupLines([
+    {text: 'Ties, where the same score is assigned by the LLM', rect: R(0.118, 0.857, 0.381, 0.013)},
+    {text: 'to both answer candidates, were broken randomly.', rect: R(0.119, 0.873, 0.370, 0.013)},
+    {text: 'The second baseline asks ChatGPT to pick one.', rect: R(0.118, 0.889, 0.360, 0.013)},
+  ]));
+  const orig = block.map(l => l.text).join('\n');
 
-  // Deleting first line
-  const delFirst = plain(pe.trimBlockLines(block, 'Line 2\nLine 3\nLine 4'));
-  assert.deepEqual(delFirst, {rects: [block[0].rect], originalText: 'Line 1', newText: ''});
+  // 1. No change -> null
+  assert.equal(pe.diffChangedRange(orig, orig), null);
+  assert.equal(pe.changedBlockEdit(block, orig.replace(/\n/g, '\r\n')), null);
 
-  // Deleting last line
-  const delLast = plain(pe.trimBlockLines(block, 'Line 1\nLine 2\nLine 3'));
-  assert.deepEqual(delLast, {rects: [block[3].rect], originalText: 'Line 4', newText: ''});
+  // 2. Middle change: "broken randomly." -> "broken deterministically." snaps outward to word boundaries
+  const mid = plain(pe.changedBlockEdit(block, orig.replace('broken randomly', 'broken deterministically')));
+  assert.equal(mid.originalText, 'randomly.');
+  assert.equal(mid.newText, 'deterministically.');
+  assert.equal(mid.rects.length, 1, 'middle change covers only the 1 touched line');
+  assert.ok(mid.rects[0].y === block[1].rect.y, 'rect is on line 1');
+  assert.ok(mid.rects[0].x > block[1].rect.x + 0.25 && mid.rects[0].w < block[1].rect.w * 0.3,
+    'rect covers only the changed word, not the full line: ' + JSON.stringify(mid.rects[0]));
 
-  // Deleting everything produces all rects and newText ''
-  const delAll = plain(pe.trimBlockLines(block, ''));
-  assert.deepEqual(delAll, {
-    rects: block.map(l => l.rect),
-    originalText: 'Line 1\nLine 2\nLine 3\nLine 4',
-    newText: '',
-  });
-  const delBlank = plain(pe.trimBlockLines(block, '   \n  '));
+  // 3. Change at the start
+  const atStart = plain(pe.changedBlockEdit(block, orig.replace('Ties,', 'Draws,')));
+  assert.equal(atStart.originalText, 'Ties,');
+  assert.equal(atStart.newText, 'Draws,');
+  assert.equal(atStart.rects.length, 1);
+  assert.ok(Math.abs(atStart.rects[0].x - block[0].rect.x) < 1e-6, 'start rect begins at line 0 start');
+  assert.ok(atStart.rects[0].w < block[0].rect.w * 0.2, 'start rect covers only first word');
+
+  // 4. Change at the end
+  const atEnd = plain(pe.changedBlockEdit(block, orig.replace('one.', 'two.')));
+  assert.equal(atEnd.originalText, 'one.');
+  assert.equal(atEnd.newText, 'two.');
+  assert.equal(atEnd.rects.length, 1);
+  assert.ok(atEnd.rects[0].y === block[2].rect.y, 'end rect is on last line');
+  assert.ok(Math.abs((atEnd.rects[0].x + atEnd.rects[0].w) - (block[2].rect.x + block[2].rect.w)) < 1e-6, 'end rect ends at line 2 end');
+  assert.ok(atEnd.rects[0].w < block[2].rect.w * 0.2, 'end rect covers only last word');
+
+  // 5. Two separate changes in one sheet -> ONE range spanning both
+  const twoChanges = plain(pe.changedBlockEdit(
+    block,
+    orig.replace('same', 'exact').replace('broken', 'settled')
+  ));
+  assert.equal(twoChanges.originalText, 'same score is assigned by the LLM\nto both answer candidates, were broken');
+  assert.equal(twoChanges.newText, 'exact score is assigned by the LLM\nto both answer candidates, were settled');
+  assert.equal(twoChanges.rects.length, 2, 'spans lines 0 and 1 only, not line 2');
+  assert.equal(twoChanges.rects[0].y, block[0].rect.y);
+  assert.equal(twoChanges.rects[1].y, block[1].rect.y);
+  assert.ok(twoChanges.rects[0].x > block[0].rect.x + 0.08, 'line 0 rect starts at "same"');
+  assert.ok(twoChanges.rects[1].x + twoChanges.rects[1].w < block[1].rect.x + block[1].rect.w - 0.05, 'line 1 rect stops at "broken"');
+
+  // 6. Full deletion -> whole block with newText ''
+  const delAll = plain(pe.changedBlockEdit(block, ''));
+  assert.deepEqual(delAll.rects, block.map(l => l.rect));
+  assert.equal(delAll.originalText, orig);
+  assert.equal(delAll.newText, '');
+  const delBlank = plain(pe.changedBlockEdit(block, '  \n\t '));
   assert.equal(delBlank.newText, '');
-  assert.equal(delBlank.rects.length, 4);
+  assert.equal(delBlank.rects.length, 3);
+});
 
-  // Inserting a new line between unchanged lines keeps at least one rect so BoothEdit stays valid
-  const ins = plain(pe.trimBlockLines(block, 'Line 1\nLine 2\nInserted\nLine 3\nLine 4'));
-  assert.equal(ins.rects.length, 1);
-  assert.deepEqual(ins.rects[0], block[2].rect);
-  assert.equal(ins.originalText, 'Line 3');
-  assert.equal(ins.newText, 'Inserted\nLine 3');
+test('commitParagraphChange preserves untouched earlier edits, replaces covered ones, and removes reverted ones', () => {
+  const block = plain(pe.groupLines([
+    {text: 'Table 1: Agreement with human annotators in pairwise', rect: R(0.118, 0.177, 0.366, 0.010)},
+    {text: 'comparisons of faithfulness, answer relevance and con-', rect: R(0.118, 0.191, 0.368, 0.010)},
+    {text: 'text relevance, using the WikEval dataset (accuracy).', rect: R(0.118, 0.205, 0.370, 0.010)},
+  ]));
+  const earlier = [{
+    id: 'e-1', pageIndex: 4,
+    rects: [R(0.28, 0.205, 0.055, 0.010)],
+    originalText: 'WikEval', newText: 'MyBench', source: 'tap',
+  }];
+  const prefill = pe.applyEditsToBlock(block, earlier);
+  assert.ok(prefill.includes('MyBench'));
 
-  // Splitting one line into two keeps only that line's rect
-  const split = plain(pe.trimBlockLines(block, 'Line 1\nLine 2a\nLine 2b\nLine 3\nLine 4'));
-  assert.deepEqual(split, {rects: [block[1].rect], originalText: 'Line 2', newText: 'Line 2a\nLine 2b'});
+  // Untouched earlier edit on line 2 survives when only line 1 changes
+  const keepEarlier = plain(pe.commitParagraphChange(block, earlier, prefill.replace('faithfulness', 'accuracy')));
+  assert.deepEqual(keepEarlier.removeIds, []);
+  assert.equal(keepEarlier.edit.originalText, 'faithfulness,');
+  assert.equal(keepEarlier.edit.newText, 'accuracy,');
+  assert.equal(keepEarlier.edit.rects.length, 1);
+  assert.equal(keepEarlier.edit.rects[0].y, block[1].rect.y, 'new edit sits on line 1 only so line 2 edit survives');
 
-  // Merging two lines into one covers both rects
-  const merged = plain(pe.trimBlockLines(block, 'Line 1\nLine 2 + 3\nLine 4'));
-  assert.deepEqual(merged, {rects: [block[1].rect, block[2].rect], originalText: 'Line 2\nLine 3', newText: 'Line 2 + 3'});
+  // Earlier edit reverted while line 1 changes -> earlier edit id is removed, only line 1 edit emitted
+  const revertEarlier = plain(pe.commitParagraphChange(
+    block, earlier, prefill.replace('faithfulness', 'accuracy').replace('MyBench', 'WikEval')
+  ));
+  assert.deepEqual(revertEarlier.removeIds, ['e-1']);
+  assert.equal(revertEarlier.edit.originalText, 'faithfulness,');
+  assert.equal(revertEarlier.edit.newText, 'accuracy,');
+  assert.equal(revertEarlier.edit.rects.length, 1);
+
+  // Earlier edit modified in place -> new edit covers original "WikEval" rect so overlap rule replaces e-1
+  const modifyEarlier = plain(pe.commitParagraphChange(block, earlier, prefill.replace('MyBench', 'YourBench')));
+  assert.deepEqual(modifyEarlier.removeIds, []);
+  assert.equal(modifyEarlier.edit.originalText, 'WikEval');
+  assert.equal(modifyEarlier.edit.newText, 'YourBench');
+  assert.equal(modifyEarlier.edit.rects.length, 1);
+  assert.equal(modifyEarlier.edit.rects[0].y, block[2].rect.y);
+
+  // No change from prefill -> no-op
+  assert.deepEqual(plain(pe.commitParagraphChange(block, earlier, prefill)), {removeIds: [], edit: null});
 });
 
 test('tokenAt, tokensIn, numericToken, placePopover, keyboardInset and hintBlock work as expected', () => {
