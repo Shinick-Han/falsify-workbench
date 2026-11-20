@@ -9,7 +9,9 @@ import { handleConfluence, matchConfluence, confluenceOnly, LEGACY_WRITES, budge
 import { hostingEnabled } from './ai-identity.mjs';
 import { aiFetch } from './ai-runtime-client.mjs';
 import { handleAiRequest, matchAi } from './ai-gateway.mjs';
-import { handleBoothRequest, matchBooth } from './booth.mjs';
+import { boothEnabled, handleBoothRequest, matchBooth } from './booth.mjs';
+import { createRecipe, handleBoothRecipeRequest, matchBoothRecipes, missionText, missionsList } from './booth-recipes.mjs';
+import { handleAgentMcp } from './agent-mcp.mjs';
 import { handlePaperSearchRequest, matchPaperSearch } from './paper-search.mjs';
 
 const SCHEMA = 'falsify.cloud.v1';
@@ -722,7 +724,10 @@ async function dispatchApiRequest(request, env, url, matched, config) {
 
 // Booth, paper search, AI, Confluence and legacy records routes stay distinct; none of them fall through.
 function matchRequest(pathname) {
-  const none = { booth: null, papers: null, ai: null, confluence: null, matched: null };
+  const none = { recipes: null, mcp: null, booth: null, papers: null, ai: null, confluence: null, matched: null };
+  const recipes = matchBoothRecipes(pathname);
+  if (recipes) return { ...none, recipes };
+  if (pathname === '/mcp') return { ...none, mcp: { template: '/mcp' } };
   const booth = matchBooth(pathname);
   if (booth) return { ...none, booth };
   const papers = matchPaperSearch(pathname);
@@ -734,13 +739,15 @@ function matchRequest(pathname) {
   return { ...none, matched: route(pathname) };
 }
 
-function logRouteFor({ booth, papers, ai, confluence, matched }) {
-  return booth?.template ?? papers?.template ?? ai?.template ?? confluence?.template ?? matched?.template ?? 'unmatched';
+function logRouteFor({ recipes, mcp, booth, papers, ai, confluence, matched }) {
+  return recipes?.template ?? mcp?.template ?? booth?.template ?? papers?.template ?? ai?.template ?? confluence?.template ?? matched?.template ?? 'unmatched';
 }
 
 // The OAuth callback is a top-level navigation from Atlassian, not a frontend XHR.
-function originGateOpen(confluence, origin, allowed) {
-  if (confluence?.template === '/v1/confluence/auth/callback') return true;
+// Recipe and mission-text routes are public CORS "*" routes without credentials.
+function originGateOpen(matched, origin, allowed) {
+  if (matched.recipes) return true;
+  if (matched.confluence?.template === '/v1/confluence/auth/callback') return true;
   return origin === null || allowed;
 }
 
@@ -754,7 +761,18 @@ function aiDependencies(request, env) {
   };
 }
 
+// POST /mcp goes to the agent MCP module; GET and DELETE (no SSE stream, no session) are 405. Off unless booth is.
+function dispatchMcp(request, env) {
+  if (!boothEnabled(env)) throw fail(404, 'not_found');
+  if (request.method !== 'POST') throw fail(405, 'method_not_allowed', { Allow: 'POST' });
+  return handleAgentMcp(request, env, { createRecipe, missionsList, missionText: paperId => missionText(paperId, env) });
+}
+
 async function dispatchRequest(request, env, url, matched, config) {
+  if (matched.recipes) {
+    return handleBoothRecipeRequest({ request, env, url, match: matched.recipes, clientIp: clientIp(request) });
+  }
+  if (matched.mcp) return dispatchMcp(request, env);
   if (matched.booth) {
     const fetchImpl = budgetedFetch(aiFetch(env), 15000);
     return handleBoothRequest({
@@ -813,13 +831,14 @@ export default {
     const logRoute = logRouteFor(matched);
     let response;
     try {
-      if (!originGateOpen(matched.confluence, origin, allowed)) throw fail(403, 'origin_not_allowed');
+      if (!originGateOpen(matched, origin, allowed)) throw fail(403, 'origin_not_allowed');
       response = await dispatchRequest(request, env, url, matched, config);
     } catch (error) {
       response = errorResponse(normalizeError(error, logRoute));
     }
     // Logs carry the route template, method, status and timing only: no URL, ids, query, body, token or IP.
     console.log(JSON.stringify({ event: 'request', method: request.method, route: logRoute, status: response.status, ms: Date.now() - started }));
-    return withCors(response, origin, allowed);
+    // Recipe routes already carry Access-Control-Allow-Origin "*".
+    return matched.recipes ? response : withCors(response, origin, allowed);
   },
 };

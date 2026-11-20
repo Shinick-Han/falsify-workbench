@@ -71,7 +71,7 @@ function stripSqlComments(sql) {
 }
 
 function migrationStatements() {
-  const sql = ['0001_shared_records.sql', '0002_invite_membership.sql', '0003_hosted_ai.sql', '0004_owner_usage.sql', '0005_guest_sessions.sql', '0006_booth.sql']
+  const sql = ['0001_shared_records.sql', '0002_invite_membership.sql', '0003_hosted_ai.sql', '0004_owner_usage.sql', '0005_guest_sessions.sql', '0006_booth.sql', '0007_booth_recipes.sql']
     .map(name => readFileSync(path.join(apiRoot, 'migrations', name), 'utf8'))
     .join('\n');
   return stripSqlComments(sql).split(';').map(part => part.trim()).filter(Boolean);

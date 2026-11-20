@@ -1,0 +1,33 @@
+{
+  "schema": "falsify.booth.mission-text.v1",
+  "papers": {
+    "2309.15217": {
+      "paperId": "2309.15217",
+      "title": "Synthetic mission fixture",
+      "license": "cc-by-4.0",
+      "url": "https://arxiv.org/abs/2309.15217",
+      "pages": [
+        {
+          "page": 1,
+          "text": "Synthetic page one."
+        },
+        {
+          "page": 5,
+          "text": "Ragas 0.95 0.78 0.70"
+        }
+      ]
+    },
+    "hep-th/9901001": {
+      "paperId": "hep-th/9901001",
+      "title": "Old style fixture",
+      "license": "cc-by-4.0",
+      "url": "https://arxiv.org/abs/hep-th/9901001",
+      "pages": [
+        {
+          "page": 1,
+          "text": "Old style page."
+        }
+      ]
+    }
+  }
+}

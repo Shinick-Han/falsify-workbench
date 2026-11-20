@@ -106,7 +106,7 @@ test('--help prints every command', async () => {
 
 test('pull, blind BLUE, resume, score, judge, publish, draw, export, settings', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-cli-'));
-  const rows = [submission(1), submission(2), submission(3, { status: 'withdrawn', outcome: null })];
+  const rows = [submission(1), submission(2, { assist: 'agent', recipeCode: 'R-7K3QXM' }), submission(3, { status: 'withdrawn', outcome: null })];
   const pdfs = new Map(rows.map(row => [row.receipt, Buffer.from(PDF)]));
   const fake = await startFake({ token: TOKEN, submissions: rows, pdfs });
   const config = writeConfig(dir, fake.url);
@@ -211,6 +211,27 @@ test('pull, blind BLUE, resume, score, judge, publish, draw, export, settings', 
     assert.equal(keyText.includes('paper_id,team,defect_type'), true);
     assert.equal(keyText.includes('F-0003'), false);
     assert.equal(keyText.includes('SENTINEL_AFTER_zz91'), true);
+
+    // assist: list and the submissions export show it; a row without the field reads as manual.
+    const assistList = await run([...base, 'list']);
+    assert.equal(assistList.code, 0, assistList.stderr);
+    assert.deepEqual(JSON.parse(assistList.stdout).submissions.map(row => [row.receipt, row.assist, row.recipeCode]),
+      [['F-0001', 'manual', null], ['F-0002', 'agent', 'R-7K3QXM'], ['F-0003', 'manual', null]]);
+    const subs = await run([...base, 'export', '--format', 'submissions']);
+    assert.equal(subs.code, 0, subs.stderr);
+    assert.equal(JSON.parse(subs.stdout).rows, 2);
+    const subsText = fs.readFileSync(path.join(dir, 'data', 'exports', 'submissions.csv'), 'utf8');
+    assert.equal(subsText.includes('receipt,seq,status,outcome,course,assist,recipe_code,paper_id,declared'), true);
+    assert.match(subsText, /F-0001,1,[a-z]+,[a-z]*,quick,manual,,2503.10497,1/);
+    assert.match(subsText, /F-0002,2,[a-z]+,[a-z]*,quick,agent,R-7K3QXM,2503.10497,1/);
+    assert.equal(subsText.includes('F-0003'), false);
+    assert.equal(subsText.includes('SENTINEL'), false);
+    const jsonl = await run([...base, 'export', '--format', 'jsonl']);
+    assert.equal(jsonl.code, 0, jsonl.stderr);
+    const records = fs.readFileSync(path.join(dir, 'data', 'exports', 'jsonl.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
+    for (const record of records) {
+      assert.deepEqual([record.assist, record.recipe_code], record.receipt === 'F-0002' ? ['agent', 'R-7K3QXM'] : ['manual', '']);
+    }
 
     const closed = await run([...base, 'close', '--dry-run']);
     assert.equal(closed.code, 0, closed.stderr);
