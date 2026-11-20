@@ -730,7 +730,7 @@
       whole.disabled=!sel.paragraph;
       /* Neither a place in the text nor a paragraph to open: this glyph is not editable text (a figure
          label, a running head). Said in place; the field stays closed. */
-      const closed=!sel.spot&&!sel.paragraph&&!patch;
+      const closed=!sel.spot&&!sel.paragraph&&!patch&&!sel.word.text.trim();
       input.disabled=closed;
       apply.disabled=closed;
       status.textContent=closed?FAIL_TEXT.outside:'';
@@ -914,7 +914,7 @@
         }
         return {segmentId:seg.id,pageIndex,start:spot.start,end:spot.end,before:spot.before,half,halfSide:spot.join?spot.join.side:''};
       }
-      return searchSpot(page,word,pageIndex);
+      return pageViewSpot(page,word,pageIndex)||searchSpot(page,word,pageIndex);
     }
     /* The tapped word's neighbours on the drawn page, as text before and after the token. */
     function layerSides(page, word){
@@ -924,6 +924,29 @@
       const before=spans.slice(Math.max(0,at-4),at).map(node=>node.textContent).join(' ')+' '+text.slice(0,word.token.start);
       const after=text.slice(word.token.end)+' '+spans.slice(at+1,at+5).map(node=>node.textContent).join(' ');
       return {before:before.slice(-60),after:after.slice(0,60)};
+    }
+    /* No paragraph place for the tap (a superscript mark, boxes not drawn yet): the page's own text
+       segments (the page view first, then layout columns) lined up with every text-layer span of the
+       page, the same positional mapping as for paragraphs. A place counts only when the tapped token
+       maps into the segment and its neighbours there agree with the drawn neighbours. Generation moves
+       such an edit onto its paragraph when it needs to (paper-workspace). */
+    function pageViewSpot(page, word, pageIndex){
+      const spans=ordered(page);
+      const index=spans.indexOf(word.span);
+      if(index<0) return null;
+      const texts=spans.map(node=>node.textContent);
+      const sides=layerSides(page,word);
+      const kind=seg=>String(seg.id).startsWith('layout:')?1:0;
+      const segs=segmentsNow().filter(seg=>seg&&seg.pageIndex===pageIndex&&typeof seg.text==='string'
+        &&!String(seg.id).startsWith('paragraph:')).sort((a,b)=>kind(a)-kind(b));
+      for(const seg of segs){
+        const spot=spotIn(texts,index,word.token.start,word.token.end,seg.text);
+        if(!spot||spot.join) continue;
+        const agree=sideAgree(sides.before,sides.after,seg.text.slice(Math.max(0,spot.start-200),spot.start),seg.text.slice(spot.end,spot.end+200));
+        if(agree.left+agree.right<12&&!agree.whole) continue;
+        return {segmentId:seg.id,pageIndex,start:spot.start,end:spot.end,before:spot.before,half:null,halfSide:''};
+      }
+      return null;
     }
     /* No paragraph place for the tap: a text search is used only when it provably finds the tapped
        occurrence: on this page, and the one place whose neighbours agree with the tapped word's
@@ -1101,6 +1124,11 @@
     function replaceWord(){
       const sel=st.sel;
       if(!sel) return;
+      /* Paragraph boxes can arrive after the tap: place the word again before anything else. */
+      if(!sel.spot){
+        sel.paragraph=sel.paragraph||paragraphFor(sel.word);
+        sel.spot=spotOf(sel.page,sel.word,sel.paragraph,sel.pageIndex);
+      }
       /* The paragraph is there but the tapped place could not be pinned: its editor opens there instead of guessing. */
       if(!sel.spot&&sel.paragraph){wholeParagraph();return;}
       if(!sel.spot){status.textContent=recipe()?FAIL_TEXT.outside:FAIL_TEXT.no_paper;return;}
