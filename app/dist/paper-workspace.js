@@ -2967,6 +2967,12 @@
       openParagraph(segmentId){return openParagraphById(segmentId);},
       getZoom(){return zoom;},
       setZoom(factor,redraw){return setFreeZoom(factor,redraw===true);},
+      /* A new after for one recorded edit (back to its before removes it), for re-editing a tapped word. */
+      updateEdit(id,after){
+        const edit=session&&typeof id==='string'&&typeof after==='string'?(snapshot&&snapshot.edits||[]).find(e=>e.id===id):null;
+        if(!edit) return false;
+        try{if(after===edit.before)session.remove(id);else session.update(id,{after});return true;}catch{return false;}
+      },
       showPage(n){
         if(!Number.isInteger(n)||n<1||!source||!source.doc||n>pages) return false;
         if(!canLeaveInline()) return false;

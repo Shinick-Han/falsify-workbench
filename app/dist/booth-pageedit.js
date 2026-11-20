@@ -1,7 +1,9 @@
 /* Event-page in-place editing (alpha.88): the paper page itself is the editor. event.html only.
    A tap on a word of the drawn page (phones: first a 2.5x zoom around the tap, in a pannable box)
    selects that whole token from the PDF text layer, outlines it and opens a small popover with the
-   word, 바꾸기, 문단 전체 고치기 and 취소. 바꾸기 locates that exact occurrence in its paragraph and
+   word, 바꾸기, 문단 전체 고치기 and 취소. The tapped token is mapped by position into its paragraph text
+   (spotIn: text layer and paragraph text lined up character by character), so a repeated word is never
+   ambiguous; a word re-edited or next to an earlier edit updates that edit. 바꾸기 then
    commits it through FalsifyBoothRecipe.applyFound, the same confirmed acceptProposals path as
    find-and-replace and recipes, so #paper-edits, the dock and 다음 treat it like any other edit.
    The new text is painted over the old glyphs with FalsifyBoothPatch (booth-patch.js; a plain
@@ -19,12 +21,16 @@
   const SPACE=/\s/;
   const CTX=40;
   const SERIF='"Times New Roman","Nimbus Roman","Liberation Serif","Noto Serif",serif';
+  /* What is left when nothing automatic can be done; each comes with its one-tap action in place. */
   const FAIL_TEXT={
-    overlap:'이미 고친 곳과 겹쳐요. 고친 곳 목록에서 먼저 지워 주세요.',
-    ambiguous:'같은 글자가 여러 곳에 있어 한 곳으로 정하지 못했어요. 「문단 전체 고치기」로 고쳐 주세요.',
-    not_found:'원문에서 이 글자를 찾지 못했어요. 「문단 전체 고치기」로 고쳐 주세요.',
-    no_paper:'논문이 아직 열리지 않았어요.'
+    clash:'앞서 고친 곳과 겹쳐요.',
+    clashAct:'앞서 고친 것 지우고 바꾸기',
+    outside:'이 글자는 고칠 수 있는 본문 밖에 있어요. 다른 글자를 눌러 주세요.',
+    no_paper:'논문이 아직 열리지 않았어요.',
+    reopen:'문단 편집이 열리지 않았어요.',
+    reopenAct:'다시 열기'
   };
+  const HYPHENS=new Set(['-',String.fromCharCode(0x2010),String.fromCharCode(0x2011),String.fromCharCode(0xad)]);
 
   /* ---------- pure helpers ---------- */
   function nearestInk(text, index){
@@ -161,6 +167,128 @@
       if(!best||count>best.count) best={x:p.x,y:p.y,count};
     }
     return best;
+  }
+  /* ---------- the tapped occurrence in its paragraph text ---------- */
+  /* The ink of a text, compared after NFKC (ligatures: fi, fl; superscript digits) and without
+     whitespace; at/end give each compared character's span in the original string. */
+  function inkChars(text){
+    const value=typeof text==='string'?text:'';
+    const chars=[];
+    const at=[];
+    const end=[];
+    for(let i=0;i<value.length;){
+      const ch=String.fromCodePoint(value.codePointAt(i));
+      for(const c of ch.normalize('NFKC')){
+        if(SPACE.test(c)) continue;
+        chars.push(c);at.push(i);end.push(i+ch.length);
+      }
+      i+=ch.length;
+    }
+    return {chars,at,end};
+  }
+  function resync(a, b, i, j){
+    for(let d=1;d<=80;d+=1){
+      for(let di=0;di<=d;di+=1){
+        const i2=i+di;
+        const j2=j+d-di;
+        const k=Math.min(4,a.length-i2);
+        if(k<=0||j2+k>b.length) continue;
+        let same=true;
+        for(let n=0;n<k&&same;n+=1) same=a[i2+n]===b[j2+n];
+        if(same) return {i:i2,j:j2};
+      }
+    }
+    return null;
+  }
+  /* Lines two ink sequences up: map[i] is the index in b of a[i], or -1. Line-end hyphens the
+     paragraph text joined away and stray characters on either side are skipped. */
+  function alignInk(a, b){
+    const map=new Array(a.length).fill(-1);
+    let i=0;
+    let j=0;
+    while(i<a.length&&j<b.length){
+      if(a[i]===b[j]){map[i]=j;i+=1;j+=1;continue;}
+      if(HYPHENS.has(a[i])){i+=1;continue;}
+      if(HYPHENS.has(b[j])){j+=1;continue;}
+      const next=resync(a,b,i,j);
+      if(!next) break;
+      i=next.i;
+      j=next.j;
+    }
+    return map;
+  }
+  /* The tapped token [start, end) of parts[index] (the text-layer spans of one paragraph, in order)
+     as an offset range in the paragraph's text. A word hyphenated across lines grows to the whole
+     word; join names the other half ({part, char}). null when the token is not in the text. */
+  function layerInk(parts){
+    const layer={chars:[],part:[],char:[]};
+    (Array.isArray(parts)?parts:[]).forEach((part,p)=>{
+      const ink=inkChars(part);
+      ink.chars.forEach((c,n)=>{layer.chars.push(c);layer.part.push(p);layer.char.push(ink.at[n]);});
+    });
+    return layer;
+  }
+  /* A token that ends in (or starts after) a line-end hyphen the paragraph text dropped grows to the whole word. */
+  function hyphenJoin(layer, map, mine, index, value, range){
+    const dropped=n=>n>=0&&n<map.length&&map[n]<0&&HYPHENS.has(layer.chars[n]);
+    const first=mine[0];
+    const last=mine[mine.length-1];
+    if(dropped(last)&&last+1<layer.chars.length&&layer.part[last+1]!==index){
+      while(range.to<value.length&&!SPACE.test(value[range.to])) range.to+=1;
+      return {side:'right',part:layer.part[last+1],char:layer.char[last+1]};
+    }
+    if(dropped(first-1)&&layer.part[first-1]!==index){
+      while(range.from>0&&!SPACE.test(value[range.from-1])) range.from-=1;
+      return {side:'left',part:layer.part[first-1],char:layer.char[first-1]};
+    }
+    return null;
+  }
+  function spotIn(parts, index, start, end, text){
+    const layer=layerInk(parts);
+    const value=typeof text==='string'?text:'';
+    const para=inkChars(value);
+    const map=alignInk(layer.chars,para.chars);
+    const mine=[];
+    layer.chars.forEach((c,n)=>{if(layer.part[n]===index&&layer.char[n]>=start&&layer.char[n]<end) mine.push(n);});
+    const hit=mine.filter(n=>map[n]>=0);
+    if(!hit.length) return null;
+    const range={from:para.at[map[hit[0]]],to:para.end[map[hit[hit.length-1]]]};
+    const join=hyphenJoin(layer,map,mine,index,value,range);
+    if(join){
+      const word=value.slice(range.from,range.to);
+      const lead=(LEAD.exec(word)||[''])[0].length;
+      const tail=(TAIL.exec(word.slice(lead))||[''])[0].length;
+      if(lead+tail<word.length){range.from+=lead;range.to-=tail;}
+    }
+    return {start:range.from,end:range.to,before:value.slice(range.from,range.to),join};
+  }
+  /* The occurrence of word in text nearest to index near; -1 when absent. */
+  function nearestIndex(text, word, near){
+    let best=-1;
+    if(!word) return best;
+    for(let at=text.indexOf(word);at>=0;at=text.indexOf(word,at+1)){
+      if(best<0||Math.abs(at-near)<Math.abs(best-near)) best=at;
+    }
+    return best;
+  }
+  /* Where the unchanged text of an edit maps a before offset rel (length len) into after; -1 when
+     [rel, rel+len) touches the changed part. */
+  function unchangedAt(before, after, rel, len){
+    let pre=0;
+    while(pre<before.length&&pre<after.length&&before[pre]===after[pre]) pre+=1;
+    let suf=0;
+    const room=Math.min(before.length,after.length)-pre;
+    while(suf<room&&before[before.length-1-suf]===after[after.length-1-suf]) suf+=1;
+    if(rel+len<=pre) return rel;
+    if(rel>=before.length-suf) return rel-before.length+after.length;
+    return -1;
+  }
+  /* A new word split over two line halves in proportion to the old halves; the first keeps a hyphen. */
+  function splitWord(value, firstLen, secondLen){
+    const text=String(value||'');
+    if(text.length<2||!(firstLen>0)||!(secondLen>0)) return [text,''];
+    const k=Math.min(text.length-1,Math.max(1,Math.round(text.length*firstLen/(firstLen+secondLen))));
+    return [text.slice(0,k)+'-',text.slice(k)];
   }
   /* Height of whatever covers the bottom of the layout viewport (the soft keyboard). */
   function keyboardInset(innerHeight, vv){
@@ -303,6 +431,7 @@
     }
     function closePop(refocus){
       if(st.sel&&st.sel.box) st.sel.box.remove();
+      if(st.sel&&st.sel.halfBox) st.sel.halfBox.remove();
       st.sel=null;
       pop.hidden=true;
       status.textContent='';
@@ -507,7 +636,7 @@
     }
     function fillPop(sel, patch){
       label.textContent=(sel.pageIndex+1)+'쪽 · '+(patch?'고친 글자 · 원문 '+patch.original:'이 글자 고치기');
-      input.value=patch?patch.text:sel.word.text;
+      input.value=patch?patch.value:(sel.spot?sel.spot.before:sel.word.text);
       input.setAttribute('inputmode',numericToken(input.value)?'decimal':'text');
       whole.disabled=!sel.paragraph;
     }
@@ -517,7 +646,9 @@
       if(!word||!Number.isInteger(pageIndex)) return;
       const patchId=patchAt(pageIndex,word.rect);
       const patch=patchId?st.patches.get(patchId):null;
-      st.sel={pageIndex,page,word,patchId,paragraph:paragraphFor(word),box:outline(page,word.rect)};
+      const paragraph=paragraphFor(word);
+      const spot=spotOf(page,word,paragraph,pageIndex);
+      st.sel={pageIndex,page,word,patchId,paragraph,spot,box:outline(page,word.rect),halfBox:spot&&spot.half?outline(page,spot.half.rect):null};
       fillPop(st.sel,patch);
       pop.hidden=false;
       pop.classList.toggle('is-bar',barMode());
@@ -627,74 +758,220 @@
       const src=call('getSource');
       return src&&Array.isArray(src.segments)?src.segments:[];
     }
-    function locate(sel){
+    /* The paragraph's text-layer spans, in reading order; null when the tapped span is not among them. */
+    function paragraphSpans(page, rect, span){
+      const pad=0.004;
+      const list=ordered(page).filter(node=>{
+        const r=fraction(node.getBoundingClientRect(),page);
+        const cx=r.x+r.w/2;
+        const cy=r.y+r.h/2;
+        return cx>=rect.x-pad&&cx<=rect.x+rect.w+pad&&cy>=rect.y-pad&&cy<=rect.y+rect.h+pad;
+      });
+      return list.includes(span)?list:null;
+    }
+    /* The tapped token as an offset range in its paragraph's text. The text layer and the paragraph
+       text are lined up character by character, so the exact occurrence is known however often the
+       word repeats. Falls back to a text search, nearest on this page first; null when not in any text. */
+    function spotOf(page, word, paragraph, pageIndex){
+      const segs=segmentsNow();
+      const boxes=call('getPageParagraphs');
+      const items=(boxes&&Array.isArray(boxes.items)?boxes.items:[]).filter(item=>item&&item.rect&&item.editable!==false);
+      /* Paragraph boxes can stop short of a line-end hyphen: the word only has to touch the box. */
+      const pad=0.01;
+      const inside=item=>word.rect.x<item.rect.x+item.rect.w+pad&&item.rect.x-pad<word.rect.x+word.rect.w&&word.rect.y<item.rect.y+item.rect.h+pad&&item.rect.y-pad<word.rect.y+word.rect.h;
+      const order=[paragraph].concat(items.filter(item=>item!==paragraph&&inside(item))).filter(Boolean);
+      for(const item of order){
+        const seg=segs.find(s=>s&&s.id===item.segmentId);
+        const spans=seg&&typeof seg.text==='string'?paragraphSpans(page,item.rect,word.span):null;
+        if(!spans) continue;
+        const spot=spotIn(spans.map(node=>node.textContent),spans.indexOf(word.span),word.token.start,word.token.end,seg.text);
+        if(!spot) continue;
+        let half=null;
+        if(spot.join){
+          const span=spans[spot.join.part];
+          const token=tokenAt(span.textContent,spot.join.char);
+          half=token?makeWord(page,span,token,spans):null;
+        }
+        return {segmentId:seg.id,pageIndex,start:spot.start,end:spot.end,before:spot.before,half,halfSide:spot.join?spot.join.side:''};
+      }
+      return searchSpot(word,pageIndex);
+    }
+    function searchSpot(word, pageIndex){
       const R=recipe();
       const segs=segmentsNow();
-      const edit={find:sel.word.text,context:sel.word.context};
-      const seg=sel.paragraph&&segs.find(item=>item.id===sel.paragraph.segmentId);
-      if(seg){
-        const found=R.locate(edit,[seg]);
-        if(found.status==='resolved') return found;
-      }
-      return R.locate(Object.assign({page:sel.pageIndex+1},edit),segs);
+      if(!R||typeof R.searchHits!=='function') return null;
+      const first=R.searchHits(segs,word.text,pageIndex,1).items[0];
+      if(!first) return null;
+      const found=R.locate({page:first.pageIndex+1,find:word.text,context:first.context,hint:first.hint},segs);
+      if(found.status!=='resolved') return null;
+      return {segmentId:found.segmentId,pageIndex:found.pageIndex,start:found.start,end:found.end,before:found.before,half:null,halfSide:''};
     }
-    function deleteEdit(id){
-      const list=doc.getElementById('paper-edits');
-      const node=list&&[...list.querySelectorAll('[data-act="delete"]')].find(item=>item.dataset.edit===id);
-      if(!node||node.disabled) return false;
-      node.click();
-      return true;
+    function editsNow(){
+      const snap=call('getEditSnapshot');
+      return snap&&Array.isArray(snap.edits)?snap.edits.filter(edit=>edit&&edit.enabled!==false):[];
     }
-    function failText(result){
-      if(result.detail==='overlap') return FAIL_TEXT.overlap;
-      return FAIL_TEXT[result.reason]||FAIL_TEXT.not_found;
+    function editById(id){
+      return editsNow().find(edit=>edit.id===id)||null;
+    }
+    /* One exact occurrence by offset: the workspace keeps the anchor, so a repeated word is fine. */
+    function addExact(spot, value){
+      const known=new Set(editsNow().map(edit=>edit.id));
+      const proposal={segmentId:spot.segmentId,pageIndex:spot.pageIndex,before:spot.before,after:value,anchor:{start:spot.start,end:spot.end}};
+      const result=call('acceptProposals',[proposal],{origin:'external-ai-import',confirmed:true});
+      call('acceptProposals',[],{origin:'external-ai-import'});
+      const added=editsNow().find(edit=>!known.has(edit.id));
+      return result&&result.applied===1&&added?{ok:true,id:added.id,after:added.after}:{ok:false};
+    }
+    /* The token sits in the unchanged text of an edit already made in this paragraph: that edit takes the change too. */
+    function mergeInto(spot, value){
+      const hits=editsNow().filter(edit=>edit.segmentId===spot.segmentId&&edit.anchor&&edit.anchor.start<spot.end&&spot.start<edit.anchor.end);
+      const edit=hits.length===1?hits[0]:null;
+      if(!edit||spot.start<edit.anchor.start||spot.end>edit.anchor.end) return {ok:false};
+      const at=unchangedAt(edit.before,edit.after,spot.start-edit.anchor.start,spot.end-spot.start);
+      if(at<0) return {ok:false};
+      const after=edit.after.slice(0,at)+value+edit.after.slice(at+spot.end-spot.start);
+      if(!updateAfter(edit.id,after)) return {ok:false};
+      return {ok:true,id:edit.id,after};
+    }
+    /* Widened by whole words until unique (the same commit as find-and-replace and recipes), else
+       that one occurrence by offset, else merged into the edit it sits in. */
+    function commitSpot(spot, value){
+      const R=recipe();
+      let result=R&&typeof R.applyFound==='function'?R.applyFound(Object.assign({status:'resolved',kind:'paragraph'},spot),value):{ok:false};
+      if(!result.ok) result=addExact(spot,value);
+      if(!result.ok) result=mergeInto(spot,value);
+      return result;
     }
     function fontOf(span){
       try{const m=patcher().measure(span);if(m&&m.fontPx>0) return m;}catch{}
       return {fontPx:span.getBoundingClientRect().height,baselineFrac:0.8,family:'serif'};
     }
-    function paint(id, patch){
+    function paint(key, patch){
       const page=pageEl();
       if(!page||call('getPageIndex')!==patch.pageIndex) return;
-      try{patcher().paint(page,{id,pageIndex:patch.pageIndex,rect:patch.rect,text:patch.text,font:patch.font});}catch{}
+      try{patcher().paint(page,{id:key,pageIndex:patch.pageIndex,rect:patch.rect,text:patch.text,font:patch.font});}catch{}
       coverMarks(page);
     }
-    function commitWord(sel, value){
-      const R=recipe();
-      const found=locate(sel);
-      const result=found.status==='resolved'?R.applyFound(found,value):{ok:false,reason:found.status==='ambiguous'?'ambiguous':'not_found'};
-      if(!result.ok){status.textContent=failText(result);placePop();return;}
-      const font=fontOf(sel.word.span);
+    function patchRect(word){
+      const font=fontOf(word.span);
       /* x and width from the token's own Range, y and height from measure().rect (baselineFrac refers to it). */
-      const line=font.rect&&font.rect.h>0?font.rect:sel.word.rect;
-      const rect={x:sel.word.rect.x,w:sel.word.rect.w,y:line.y,h:line.h};
-      const patch={pageIndex:sel.pageIndex,rect,text:value,original:sel.word.text,after:result.after,
-        font:{fontPx:font.fontPx,baselineFrac:font.baselineFrac,family:font.family}};
-      st.patches.set(result.id,patch);
+      const line=font.rect&&font.rect.h>0?font.rect:word.rect;
+      return {rect:{x:word.rect.x,w:word.rect.w,y:line.y,h:line.h},font:{fontPx:font.fontPx,baselineFrac:font.baselineFrac,family:font.family}};
+    }
+    const keyOf=(id,start,half)=>id+'@'+start+(half?'~2':'');
+    /* The patches of one tapped word: one, or two for a word hyphenated across lines (in line order). */
+    function wordPatches(spotKey){
+      return [...st.patches].filter(([,patch])=>patch.word===spotKey);
+    }
+    function paintWord(info){
+      const halves=info.half?(info.halfSide==='left'?[info.half,info.word]:[info.word,info.half]):[info.word];
+      const texts=halves.length===2?splitWord(info.value,halves[0].text.replace(/-$/,'').length,halves[1].text.length):[info.value];
+      const wordKey=keyOf(info.edit,info.start);
+      for(const [key] of wordPatches(wordKey)){st.patches.delete(key);try{patcher().remove(key);}catch{}}
+      halves.forEach((word,n)=>{
+        const look=patchRect(word);
+        const key=keyOf(info.edit,info.start,n>0);
+        const patch={word:wordKey,edit:info.edit,start:info.start,at:info.at,pageIndex:info.pageIndex,rect:look.rect,font:look.font,
+          text:texts[n],value:info.value,original:info.original,after:info.after,halves:info};
+        st.patches.set(key,patch);
+        paint(key,patch);
+      });
+    }
+    /* A new after for an edit with patches: they keep their words (syncPatches leaves them alone meanwhile). */
+    function updateAfter(id, after){
+      st.updating=id;
+      let ok=false;
+      try{ok=call('updateEdit',id,after)===true;}finally{st.updating=null;}
+      if(ok) retag(id,after);
+      return ok;
+    }
+    /* Every patch of an edit follows its new after. */
+    function retag(id, after){
+      for(const patch of st.patches.values()) if(patch.edit===id){patch.after=after;patch.halves.after=after;}
+    }
+    function commitWord(sel, value){
+      const spot=sel.spot;
+      const result=commitSpot(spot,value);
+      if(!result.ok){showClash(sel,value);return;}
+      const edit=editById(result.id);
+      const anchor=edit&&edit.anchor&&Number.isInteger(edit.anchor.start)?edit.anchor.start:spot.start;
+      const at=nearestIndex(result.after,value,spot.start-anchor);
+      retag(result.id,result.after);
       closePop(true);
-      paint(result.id,patch);
+      paintWord({edit:result.id,start:spot.start,at,pageIndex:sel.pageIndex,word:sel.word,half:spot.half,halfSide:spot.halfSide,
+        value,original:spot.before,after:result.after});
+    }
+    /* A word changed before: its edit gets the new word in place (back to the original drops it). */
+    function reEdit(old, value){
+      const edit=editById(old.edit);
+      if(!edit) return false;
+      const at=nearestIndex(edit.after,old.value,old.at);
+      if(at<0) return false;
+      const after=edit.after.slice(0,at)+value+edit.after.slice(at+old.value.length);
+      if(!updateAfter(edit.id,after)) return false;
+      const info=Object.assign({},old.halves,{value,at,after});
+      if(after===edit.before||value===old.original){
+        for(const [key] of wordPatches(old.word)){st.patches.delete(key);try{patcher().remove(key);}catch{}}
+        coverMarks(pageEl());
+        return true;
+      }
+      paintWord(info);
+      return true;
+    }
+    /* Nothing automatic is left: the visitor removes the earlier edit here, in one tap. */
+    function showClash(sel, value){
+      status.textContent=FAIL_TEXT.clash+' ';
+      const act=button('booth-pe-status-act',FAIL_TEXT.clashAct);
+      act.addEventListener('click',()=>{
+        const spot=sel.spot;
+        const page=sel.page;
+        const box=page.getBoundingClientRect();
+        const marks=[...page.querySelectorAll('.paper-change-mark')].filter(mark=>{
+          const r=fraction(mark.getBoundingClientRect(),page);
+          return box.width>0&&overlapShare(r,sel.word.rect)>0;
+        }).map(mark=>mark.dataset.edit);
+        const same=editsNow().filter(edit=>edit.segmentId===spot.segmentId&&edit.anchor&&edit.anchor.start<spot.end&&spot.start<edit.anchor.end).map(edit=>edit.id);
+        for(const id of new Set(same.concat(marks))) call('updateEdit',id,(editById(id)||{}).before);
+        if(st.sel===sel) commitWord(sel,value);
+      });
+      status.append(act);
+      placePop();
     }
     function replaceWord(){
       const sel=st.sel;
-      const R=recipe();
       if(!sel) return;
-      if(!R||typeof R.applyFound!=='function'){status.textContent=FAIL_TEXT.no_paper;return;}
+      if(!sel.spot&&sel.paragraph){wholeParagraph();return;}
+      if(!sel.spot){status.textContent=recipe()?FAIL_TEXT.outside:FAIL_TEXT.no_paper;return;}
       const value=input.value;
       const old=sel.patchId?st.patches.get(sel.patchId):null;
-      if(value===(old?old.text:sel.word.text)){status.textContent='바뀐 글자가 없어요.';return;}
-      if(old&&!deleteEdit(sel.patchId)){status.textContent='이전에 고친 곳을 바꾸지 못했어요. 고친 곳 목록에서 지운 뒤 다시 고쳐 주세요.';return;}
-      if(old&&value===old.original){closePop(true);return;}
+      if(value===(old?old.value:sel.spot.before)){closePop(true);return;}
+      if(old&&reEdit(old,value)){closePop(true);return;}
       commitWord(sel,value);
     }
     async function wholeParagraph(){
       const sel=st.sel;
       if(!sel||!sel.paragraph) return;
       const id=sel.paragraph.segmentId;
+      const rect=sel.paragraph.rect;
       closePop(false);
-      st.pending={segmentId:id,rect:sel.paragraph.rect};
-      if(zoomed()&&!setZoom(1)) return;
-      const ready=await waitFor(()=>hasParagraph(id),6000);
-      if(!ready||call('openParagraph',id)!==true){st.pending=null;tip.textContent='이 문단을 열지 못했어요. 다시 눌러 주세요.';}
+      /* A page redraw can race the editor opening: one quiet retry first. */
+      for(let tries=0;tries<2;tries+=1){
+        st.pending={segmentId:id,rect};
+        if(zoomed()&&!setZoom(1)){st.pending=null;return;}
+        const ready=await waitFor(()=>hasParagraph(id),6000);
+        if(ready&&call('openParagraph',id)===true) return;
+        st.pending=null;
+      }
+      const page=pageEl();
+      const box=page&&page.getBoundingClientRect();
+      const word=box&&box.width>0?wordAt(page,box.left+(sel.word.rect.x+sel.word.rect.w/2)*box.width,box.top+(sel.word.rect.y+sel.word.rect.h/2)*box.height):null;
+      if(!word){tip.textContent=FAIL_TEXT.reopen;return;}
+      selectWord(page,word);
+      status.textContent=FAIL_TEXT.reopen+' ';
+      const act=button('booth-pe-status-act',FAIL_TEXT.reopenAct);
+      act.addEventListener('click',()=>{wholeParagraph();});
+      status.append(act);
+      placePop();
     }
     function hasParagraph(id){
       const page=pageEl();
@@ -718,11 +995,11 @@
     function syncPatches(){
       const snap=call('getEditSnapshot');
       const edits=snap&&Array.isArray(snap.edits)?snap.edits:[];
-      for(const [id,patch] of [...st.patches]){
-        const edit=edits.find(item=>item&&item.id===id);
-        if(edit&&edit.enabled!==false&&edit.after===patch.after) continue;
-        st.patches.delete(id);
-        try{patcher().remove(id);}catch{}
+      for(const [key,patch] of [...st.patches]){
+        const edit=edits.find(item=>item&&item.id===patch.edit);
+        if(edit&&edit.enabled!==false&&(edit.after===patch.after||patch.edit===st.updating)) continue;
+        st.patches.delete(key);
+        try{patcher().remove(key);}catch{}
       }
     }
     /* Every one-token edit gets a patch, however it was made (word tap, find-and-replace, a recipe):
@@ -742,12 +1019,13 @@
       if(!box||!(box.width>0||box.height>0)) return;
       const word=wordAt(page,box.left+box.width/2,box.top+box.height/2);
       if(!word||word.text!==change.from) return false;
-      const font=fontOf(word.span);
-      const line=font.rect&&font.rect.h>0?font.rect:word.rect;
-      const patch={pageIndex,rect:{x:word.rect.x,w:word.rect.w,y:line.y,h:line.h},text:change.to,original:change.from,after:edit.after,
-        font:{fontPx:font.fontPx,baselineFrac:font.baselineFrac,family:font.family}};
-      st.patches.set(edit.id,patch);
-      paint(edit.id,patch);
+      /* Where the new word sits in after: the first difference, back to its word start. */
+      let at=0;
+      while(at<edit.before.length&&at<edit.after.length&&edit.before[at]===edit.after[at]) at+=1;
+      while(at>0&&!SPACE.test(edit.after[at-1])) at-=1;
+      at=nearestIndex(edit.after,change.to,at);
+      const start=(edit.anchor&&Number.isInteger(edit.anchor.start)?edit.anchor.start:0)+Math.max(0,at);
+      paintWord({edit:edit.id,start,at,pageIndex,word,half:null,halfSide:'',value:change.to,original:change.from,after:edit.after});
       return true;
     }
     /* Edits whose mark did not lead to their token on this page element are not retried on it. */
@@ -757,7 +1035,7 @@
       if(!page||!Number.isInteger(pageIndex)||page.querySelector(':scope>textarea')) return;
       const snap=call('getEditSnapshot');
       for(const edit of snap&&Array.isArray(snap.edits)?snap.edits:[]){
-        if(!edit||edit.enabled===false||edit.pageIndex!==pageIndex||st.patches.has(edit.id)) continue;
+        if(!edit||edit.enabled===false||edit.pageIndex!==pageIndex||hasPatch(edit.id)) continue;
         const key=edit.id+'|'+edit.after;
         if(!missed.has(page)) missed.set(page,new Set());
         if(missed.get(page).has(key)) continue;
@@ -765,10 +1043,14 @@
       }
     }
     /* The workspace's change marks for a patched word would sit on top of the patch: hide those. */
+    function hasPatch(id){
+      for(const patch of st.patches.values()) if(patch.edit===id) return true;
+      return false;
+    }
     function coverMarks(page){
       if(!page) return;
       for(const mark of page.querySelectorAll('.paper-change-mark')){
-        const covered=st.patches.has(mark.dataset.edit||'');
+        const covered=hasPatch(mark.dataset.edit||'');
         if(mark.classList.contains('booth-pe-covered')!==covered) mark.classList.toggle('booth-pe-covered',covered);
       }
     }
@@ -980,7 +1262,7 @@
     onMutate();
   }
 
-  root.FalsifyBoothPageEdit=Object.freeze({tokenAt,contextWindow,placePopover,fitCrop,overlapShare,paragraphAt,padRect,numericToken,tokensIn,densest,keyboardInset,fallbackPatch,ZOOM,TABLE_ZOOM});
+  root.FalsifyBoothPageEdit=Object.freeze({tokenAt,contextWindow,placePopover,fitCrop,overlapShare,paragraphAt,padRect,numericToken,tokensIn,densest,keyboardInset,inkChars,alignInk,spotIn,nearestIndex,unchangedAt,splitWord,fallbackPatch,ZOOM,TABLE_ZOOM});
   const doc=root.document;
   if(!doc||typeof doc.getElementById!=='function') return;
   const start=()=>mount(doc);

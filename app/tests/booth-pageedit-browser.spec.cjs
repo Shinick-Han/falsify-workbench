@@ -341,11 +341,11 @@ async function patchAtFit(page, wide, label = 'fit') {
   await page.locator('#booth-pe-zoom-out').click();
   await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() === 1);
   await page.waitForFunction(value => {
-    const node = [...document.querySelectorAll('#paper-before-stage .paper-page .booth-patch')].find(item => item.dataset.patchId === value);
+    const node = [...document.querySelectorAll('#paper-before-stage .paper-page .booth-patch')].find(item => item.dataset.patchId.split('@')[0] === value);
     return node && node.getBoundingClientRect().width > 0 && node.getBoundingClientRect().height > 0;
   }, id);
   const fit = await page.evaluate(value => {
-    const node = [...document.querySelectorAll('#paper-before-stage .paper-page .booth-patch')].find(item => item.dataset.patchId === value);
+    const node = [...document.querySelectorAll('#paper-before-stage .paper-page .booth-patch')].find(item => item.dataset.patchId.split('@')[0] === value);
     const p = node.getBoundingClientRect();
     const span = [...document.querySelectorAll('#paper-before-stage .paper-text-layer span[data-i]')].find(item => item.textContent.trim() === '0.95');
     const range = document.createRange();
@@ -569,6 +569,156 @@ async function hintZoomYields(browser) {
   await context.close();
 }
 
+/* The exact tapped occurrence (alpha.89): a repeated word never stops an edit. On page 5 "0.52" sits
+   twice in Table 1 and "the" 13 times in one paragraph; "met-" / "rics" is one word over two lines. */
+const STOPPED = /여러 곳에 있어|정하지 못했어요|찾지 못했어요|겹쳐요|바꾸지 못했어요|문단 전체 고치기」로/;
+
+/* Centre of the nth (in reading order) occurrence of token in spans whose text passes keep. */
+async function tokenPoint(page, token, nth, keep) {
+  return page.evaluate(([value, n, filter]) => {
+    const spans = [...document.querySelectorAll('#paper-before-stage .paper-text-layer span[data-i]')]
+      .sort((a, b) => Number(a.dataset.i) - Number(b.dataset.i))
+      .filter(span => !filter || span.textContent.startsWith(filter));
+    const hits = [];
+    for (const span of spans) {
+      const text = span.textContent;
+      for (let at = text.indexOf(value); at >= 0; at = text.indexOf(value, at + 1)) {
+        const edge = i => i < 0 || i >= text.length || /[\s,.;:()]/.test(text[i]);
+        if (edge(at - 1) && edge(at + value.length)) hits.push({span, at});
+      }
+    }
+    const hit = hits[n];
+    if (!hit) return null;
+    hit.span.scrollIntoView({block: 'center', inline: 'center', behavior: 'instant'});
+    const range = document.createRange();
+    range.setStart(hit.span.firstChild, hit.at);
+    range.setEnd(hit.span.firstChild, hit.at + value.length);
+    const stage = document.getElementById('paper-before-stage');
+    const box = stage.getBoundingClientRect();
+    const first = range.getBoundingClientRect();
+    stage.scrollLeft += first.left + first.width / 2 - (box.left + box.width / 2);
+    const r = range.getBoundingClientRect();
+    return {x: r.left + r.width / 2, y: r.top + r.height / 2, left: r.left};
+  }, [token, nth, keep || '']);
+}
+
+async function tapToken(page, wide, token, nth, keep) {
+  if (!wide && await page.evaluate(() => globalThis.FalsifyPaperWorkspace.getZoom() === 1)) {
+    const first = await tokenPoint(page, token, nth, keep);
+    await tapAt(page, wide, first.x, first.y);
+    await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() > 1);
+    await page.waitForTimeout(300);
+  }
+  /* The applied-edit row above the page can still move it: tap once the token holds still. */
+  let point = null;
+  for (let tries = 0; tries < 4; tries += 1) {
+    let last = null;
+    for (let still = 0; still < 20; still += 1) {
+      point = await tokenPoint(page, token, nth, keep);
+      assert.ok(point, 'token on the page: ' + token + ' #' + nth);
+      if (last && Math.abs(last.x - point.x) < 0.5 && Math.abs(last.y - point.y) < 0.5) break;
+      last = point;
+      await page.waitForTimeout(150);
+    }
+    await tapAt(page, wide, point.x, point.y);
+    if (await page.locator('#booth-pe-pop').waitFor({state: 'visible', timeout: 2000}).then(() => true, () => false)) return point;
+  }
+  throw new Error('no popover for ' + token + ' #' + nth);
+}
+
+async function changeTo(page, value) {
+  await page.locator('#booth-pe-input').fill(value);
+  await page.locator('#booth-pe-pop').getByRole('button', {name: '바꾸기', exact: true}).click();
+  await page.waitForFunction(() => document.querySelector('#booth-pe-pop').hidden);
+  assert.equal(await page.locator('.booth-pe-status').textContent(), '', 'nothing stops the edit');
+}
+
+/* The paragraph text with every recorded edit applied, by anchor. */
+async function paragraphOut(page, includes) {
+  return page.evaluate(text => {
+    const ws = globalThis.FalsifyPaperWorkspace;
+    const item = ws.getPageParagraphs().items.find(entry => entry.text.includes(text));
+    const seg = ws.getSource().segments.find(entry => entry.id === item.segmentId);
+    const edits = ws.getEditSnapshot().edits.filter(edit => edit.segmentId === seg.id && edit.enabled !== false)
+      .sort((a, b) => b.anchor.start - a.anchor.start);
+    let out = seg.text;
+    for (const edit of edits) out = out.slice(0, edit.anchor.start) + edit.after + out.slice(edit.anchor.end);
+    return {out, count: edits.length};
+  }, includes);
+}
+
+async function patchTexts(page) {
+  return page.evaluate(() => [...document.querySelectorAll('#paper-before-stage .booth-patch')].map(node => node.textContent));
+}
+
+async function anchorWalk(browser, wide) {
+  const {page, errors} = await openMission(browser, wide);
+  await page.evaluate(pattern => {
+    globalThis.__stopped = [];
+    new MutationObserver(() => {
+      const text = document.body.textContent;
+      if (new RegExp(pattern).test(text)) globalThis.__stopped.push(text.match(new RegExp(pattern))[0]);
+    }).observe(document.body, {subtree: true, childList: true, characterData: true});
+  }, STOPPED.source);
+
+  // The second 0.52 of Table 1 (GPT Ranking, last column); the first (GPT Score) stays.
+  const second = await tapToken(page, wide, '0.52', 1);
+  assert.equal(await page.locator('#booth-pe-input').inputValue(), '0.52');
+  await changeTo(page, '0.11');
+  let table = await paragraphOut(page, '0.95');
+  assert.match(table.out, /GPT Score\s+0\.72\s+0\.52\s+0\.63/, 'the other 0.52 did not change');
+  assert.match(table.out, /GPT Ranking\s+0\.54\s+0\.40\s+0\.11/, 'the tapped 0.52 changed');
+  const patch = await page.evaluate(() => {
+    const node = [...document.querySelectorAll('#paper-before-stage .booth-patch')].find(item => item.textContent === '0.11');
+    return node && node.getBoundingClientRect().left;
+  });
+  const now = await tokenPoint(page, '0.52', 1);
+  assert.ok(patch != null && Math.abs(patch - now.left) <= 3, 'the patch sits on the tapped cell ' + JSON.stringify([patch, now, second]));
+
+  // A second edit in the same paragraph, next to the first (their spans overlap): both stay.
+  await tapToken(page, wide, '0.40', 0);
+  await changeTo(page, '0.44');
+  table = await paragraphOut(page, '0.95');
+  assert.match(table.out, /GPT Ranking\s+0\.54\s+0\.44\s+0\.11/, 'both edits in one paragraph');
+  assert.match(table.out, /GPT Score\s+0\.72\s+0\.52\s+0\.63/);
+  assert.deepEqual((await patchTexts(page)).filter(text => /^0\.(44|11)$/.test(text)).sort(), ['0.11', '0.44']);
+
+  // Re-editing the edited cell: the popover shows the new value; the edit is updated in place.
+  await tapToken(page, wide, '0.52', 1);
+  assert.equal(await page.locator('#booth-pe-input').inputValue(), '0.11');
+  await changeTo(page, '0.12');
+  table = await paragraphOut(page, '0.95');
+  assert.match(table.out, /GPT Ranking\s+0\.54\s+0\.44\s+0\.12/, 're-edited in place');
+  assert.match(table.out, /GPT Score\s+0\.72\s+0\.52\s+0\.63/);
+  const patches = await patchTexts(page);
+  assert.ok(patches.includes('0.12') && !patches.includes('0.11') && patches.includes('0.44'), JSON.stringify(patches));
+  await shoot(page, 'anchor-table', wide);
+
+  // A common word: the second "the" of "Table 1 analyses the agreement between the met-".
+  const body = 'Table 1 analyses';
+  const before = await paragraphOut(page, body);
+  await tapToken(page, wide, 'the', 1, body);
+  assert.equal(await page.locator('#booth-pe-input').inputValue(), 'the');
+  await changeTo(page, 'a');
+  let text = await paragraphOut(page, body);
+  assert.match(text.out, /^Table 1 analyses the agreement between a metrics proposed/, 'only the tapped "the" changed');
+  assert.equal((text.out.match(/\bthe\b/g) || []).length, (before.out.match(/\bthe\b/g) || []).length - 1);
+
+  // A word hyphenated over two lines is one word; it sits next to the edit above and joins it.
+  await tapToken(page, wide, 'met-', 0, body);
+  assert.equal(await page.locator('#booth-pe-input').inputValue(), 'metrics');
+  await changeTo(page, 'models');
+  text = await paragraphOut(page, body);
+  assert.match(text.out, /^Table 1 analyses the agreement between a models proposed in Section 3/);
+  const halves = await patchTexts(page);
+  assert.equal(halves.filter(value => /^mo|els$/.test(value)).join(''), 'mod-els', 'the new word follows the line break ' + JSON.stringify(halves));
+  await shoot(page, 'anchor-body', wide);
+
+  assert.deepEqual(await page.evaluate(() => globalThis.__stopped), [], 'no stop message ever appeared');
+  assert.deepEqual(errors, []);
+  await page.context().close();
+}
+
 async function main() {
   assert.equal(pdfBytes.subarray(0, 5).toString(), '%PDF-');
   const server = serve();
@@ -580,6 +730,8 @@ async function main() {
     await walk(browser, true);
     await tabletWalk(browser);
     await hintZoomYields(browser);
+    await anchorWalk(browser, true);
+    await anchorWalk(browser, false);
   } catch (error) {
     error.message += '\npage=' + JSON.stringify(await diagnose());
     throw error;

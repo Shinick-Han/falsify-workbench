@@ -69,6 +69,7 @@ html.booth-pe-typing .booth-dock{display:none}
 .booth-pe-pop>button:focus-visible{outline:2px solid var(--ev-ink,#16191e);outline-offset:2px}
 .booth-pe-status{grid-area:status;margin:0;font-size:12.5px;line-height:1.45;color:var(--ev-fail,#8a3030);overflow-wrap:anywhere}
 .booth-pe-status:empty{display:none}
+.booth-pe-status-act{display:inline;margin:0;padding:0 2px;min-height:0;border:0;background:transparent;color:inherit;font:inherit;font-weight:600;text-decoration:underline;text-underline-offset:3px;cursor:pointer}
 
 /* Phones: the editor is a bar pinned just above the soft keyboard (bottom set from visualViewport). */
 .booth-pe-pop.is-bar{
