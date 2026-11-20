@@ -217,3 +217,22 @@ test('local contract rules', () => {
   assert.equal(M.validateLocal({...good, reason: 'r'.repeat(501)}).ok, false);
   assert.equal(M.validateLocal({...good, reason: 'x'.repeat(500), edits: Array.from({length: 5}, () => ({find: 'f'.repeat(300), replace: '한'.repeat(300), context: 'c'.repeat(600)}))}).ok, false, 'over 8 KB');
 });
+
+test('pathological unbalanced pastes stay fast and explain themselves', () => {
+  const cases = ['{'.repeat(200000), '['.repeat(200000), '{"a":'.repeat(40000), 'x{'.repeat(100000),
+    'Before: Ragas 0.95\nAfter: Ragas 0.59\n' + '{'.repeat(199000)];
+  for (const raw of cases) {
+    const started = performance.now();
+    const out = M.parseAnswer(raw.slice(0, 200000), ctx);
+    const ms = performance.now() - started;
+    assert.ok(ms < 1000, 'took ' + Math.round(ms) + ' ms');
+    assert.equal(out.recipe, null);
+    assert.equal(out.diagnostics[0].code, 'json_unclosed');
+    assert.match(out.diagnostics[0].message, /답이 너무 길거나 JSON이 닫히지 않았어요/);
+  }
+});
+
+test('a valid recipe after a run of closed brackets is still found', () => {
+  assert.deepEqual(M.parseAnswer('{}'.repeat(30) + ' ' + JSON.stringify(good), ctx).recipe, good);
+  assert.deepEqual(M.parseAnswer('{} [] ' + JSON.stringify(good), ctx).recipe, good);
+});

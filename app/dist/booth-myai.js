@@ -11,6 +11,10 @@
   const PROMPT_CAP=12000;
   const INPUT_CAP=200000;
   const MAX_CANDIDATES=60;
+  const MAX_STARTS=2000;
+  const SCAN_BUDGET=2000000;
+  const MAX_EXCHANGE_BRACKETS=400;
+  const BEFORE_MARK=/(?:^|\n)[ \t>*#_-]*(?:before|이전|원문)[*_ \t]*:/i;
   const DEFECT_TYPES=['number','figure','citation','logic','method','other'];
   const TOP_KEYS=['schema','paperId','edits','defectType','reason','source','agent'];
   const NEW_ID=/^\d{4}\.\d{4,5}(v\d+)?$/;
@@ -190,10 +194,12 @@
   }
 
   /* ---------- finding JSON inside prose ---------- */
-  function closeIndex(text,start){
+  /* scan.left caps the characters read over all starts, so unbalanced pastes stay linear-ish. */
+  function closeIndex(text,start,scan){
     const stack=[];
     let inString=false;
     for(let i=start;i<text.length;i++){
+      if(--scan.left<0){scan.exhausted=true;return -1;}
       const ch=text[i];
       if(inString){
         if(ch==='\\') i+=1;
@@ -206,12 +212,14 @@
     }
     return -1;
   }
-  function candidates(text){
+  function candidates(text,scan){
     const out=[];
-    for(let i=0;i<text.length&&out.length<MAX_CANDIDATES;i++){
+    let starts=0;
+    for(let i=0;i<text.length&&out.length<MAX_CANDIDATES&&!scan.exhausted;i++){
       const ch=text[i];
       if(ch!=='{'&&ch!=='[') continue;
-      const end=closeIndex(text,i);
+      if(++starts>MAX_STARTS){scan.exhausted=true;break;}
+      const end=closeIndex(text,i,scan);
       if(end>i) out.push({start:i,end,text:text.slice(i,end+1)});
     }
     return out;
@@ -240,7 +248,7 @@
   }
   function recipeFromJson(text,ctx,state){
     const cleaned=stripFences(text).replace(/[\u201c\u201d\u201e\u201f]/g,'"');
-    for(const cand of candidates(cleaned)){
+    for(const cand of candidates(cleaned,state.scan)){
       if(cand.start<=state.skipTo) continue;
       const found=tryCandidate(cand,ctx,state);
       if(found) return found;
@@ -264,10 +272,17 @@
       return (batch&&Array.isArray(batch.items)?batch.items:[]).filter(it=>typeof it.before==='string'&&typeof it.after==='string');
     }catch{return [];}
   }
+  /* The Before/After parser is slow on bracket-heavy text, so it only sees answers that look like pairs. */
+  function exchangeWorthy(text,state){
+    if(state.scan.exhausted||!BEFORE_MARK.test(text)) return false;
+    let brackets=0;
+    for(let i=0;i<text.length&&brackets<=MAX_EXCHANGE_BRACKETS;i++){const ch=text[i];if(ch==='{'||ch==='[') brackets+=1;}
+    return brackets<=MAX_EXCHANGE_BRACKETS;
+  }
   function recipeFromExchange(text,ctx,state){
     const X=exchangeApi(ctx);
     const segments=Array.isArray(ctx.segments)?ctx.segments:[];
-    if(!X||!segments.length) return null;
+    if(!X||!segments.length||!exchangeWorthy(text,state)) return null;
     const items=exchangeItems(X,text,ctx,segments);
     if(!items.length) return null;
     const notes=items.length>5?[diag('warn','edits_trimmed','수정이 '+items.length+'개라 앞의 5개만 썼어요.')]:[];
@@ -289,6 +304,8 @@
     if(state.errors.length){
       out.push(diag('error','invalid','AI 답을 읽었지만 규칙에 맞지 않아요. 아래를 고쳐 달라고 AI에게 부탁하거나 직접 고쳐 보세요.'));
       [...new Set(state.errors)].slice(0,5).forEach(msg=>out.push(diag('error','rule',msg)));
+    }else if(!state.parsed&&state.scan.exhausted){
+      out.push(diag('error','json_unclosed','답이 너무 길거나 JSON이 닫히지 않았어요. AI 답에서 { 로 시작해 } 로 끝나는 부분만 붙여 넣거나, AI에게 "JSON만 다시 보내 줘"라고 말해 보세요.'));
     }else if(!state.parsed&&(state.syntax||/\{\s*"/.test(text))){
       out.push(diag('error','json_syntax','JSON 모양이 깨져 있어요. 따옴표나 쉼표, 괄호가 빠졌을 수 있어요. AI에게 "올바른 JSON으로만 다시 보내 줘"라고 부탁해 보세요.'));
     }else{
@@ -302,7 +319,7 @@
     if(!text.trim()) return {recipe:null,diagnostics:[diag('error','empty','AI 답이 비어 있어요. AI가 준 답을 통째로 붙여 넣어 주세요.')]};
     if(text.length>INPUT_CAP) return {recipe:null,diagnostics:[diag('error','too_long','붙여 넣은 글이 너무 길어요. AI 답만 붙여 넣어 주세요.')]};
     const options=isObj(ctx)?ctx:{};
-    const state={parsed:0,syntax:0,errors:[],skipTo:-1};
+    const state={parsed:0,syntax:0,errors:[],skipTo:-1,scan:{left:SCAN_BUDGET,exhausted:false}};
     const found=recipeFromJson(text,options,state)||recipeFromExchange(text,options,state);
     if(!found) return {recipe:null,diagnostics:failure(text,state)};
     return {recipe:found.recipe,diagnostics:[...found.notes,...missingFinds(found.recipe,options.segments)]};
