@@ -17,14 +17,14 @@ async function runtimeStub(url, init, env){
   return new Response('nf',{status:404});
 }
 setAiFetchForTests(runtimeStub);
-const realFetch = globalThis.fetch;
 let ENV = {};
 globalThis.fetch = async (input, init) => {
   const u = new URL(typeof input==='string'?input:input.url);
   if (u.hostname==='oaipmh.arxiv.org'){ await sleep(Number(ENV.UP_OAI_MS||0)); return new Response('<OAI-PMH><GetRecord><record><metadata><arXiv><license>http://creativecommons.org/licenses/by/4.0/</license></arXiv></metadata></record></GetRecord></OAI-PMH>',{status:200,headers:{'Content-Type':'text/xml'}}); }
   if (u.hostname==='arxiv.org'){ await sleep(Number(ENV.UP_PDF_MS||0)); const b=ENV.MISSION_PDF_B64?Uint8Array.from(atob(ENV.MISSION_PDF_B64),c=>c.charCodeAt(0)):pdfOf(Number(ENV.PDF_BYTES||232000)); return new Response(b,{status:200,headers:{'Content-Type':'application/pdf','Content-Length':String(b.byteLength)}}); }
   if (u.hostname==='api.openalex.org'){ await sleep(Number(ENV.UP_OAI_MS||0)); return new Response(JSON.stringify({meta:{count:1},results:[]}),{status:200,headers:{'Content-Type':'application/json'}}); }
-  return realFetch(input, init);
+  // Local only: any other host is refused, so a bench run can never reach a live endpoint.
+  throw new TypeError('booth-bench: refusing to fetch ' + u.origin);
 };
 function wrapStmt(st, stats, lat){
   return new Proxy(st, { get(t, k){

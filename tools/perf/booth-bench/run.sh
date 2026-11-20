@@ -3,7 +3,9 @@
 # Needs cloud/api/node_modules (miniflare, esbuild) and app/node_modules (playwright) plus BROWSER_EXECUTABLE for the browser bench.
 # scenario: route latency and D1 calls per route (D1_LAT_MS, CACHE, N, ACTIVE). hol: submission size vs concurrent claims.
 # ba: PDF repeat and claim poll cost. browser-bench: event.html steps under CDP CPU/network throttling (PROFILES, RUNS, OUT,
-# MISSION_PDF = a local copy of arXiv 2309.15217).
+# MISSION_PDF = a local copy of arXiv 2309.15217; BENCH_PAGE_PORT / BENCH_API_PORT, default 8951 / 8952).
+# Everything runs locally: the Worker's upstream fetches are stubbed and refused otherwise, and the browser aborts
+# any request that is not the local page server or the local Worker.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../../.." && pwd)"

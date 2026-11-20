@@ -10,7 +10,7 @@ const appRoot = process.env.APP_ROOT;
 const dist = process.env.DIST || path.join(appRoot, 'dist');
 const reqApp = createRequire(path.join(appRoot, 'package.json'));
 const { chromium } = reqApp('playwright');
-const SPORT = 8951, APORT = 8952;
+const SPORT = Number(process.env.BENCH_PAGE_PORT || 8951), APORT = Number(process.env.BENCH_API_PORT || 8952);
 const PAGE_ORIGIN = 'http://127.0.0.1:' + SPORT;
 const API = 'http://127.0.0.1:' + APORT;
 const RUNS = Number(process.env.RUNS || 3);
@@ -58,6 +58,12 @@ const INIT = () => {
 async function oneRun(profileName, runIndex) {
   const P = PRESET[profileName];
   const ctx = await browser.newContext({ viewport: P.viewport, deviceScaleFactor: P.dpr, isMobile: P.mobile, hasTouch: P.mobile, locale: 'ko-KR' });
+  // Local only: anything that is not the page server or the local Worker is aborted, never fetched.
+  await ctx.route('**/*', route => {
+    const url = route.request().url();
+    if (url.startsWith(PAGE_ORIGIN + '/') || url.startsWith(API + '/') || url.startsWith('data:') || url.startsWith('blob:')) return route.continue();
+    return route.abort('blockedbyclient');
+  });
   const page = await ctx.newPage();
   page.setDefaultTimeout(240000);
   page.on('dialog', d => { void d.accept(); });
@@ -140,6 +146,6 @@ for (const prof of PROFILES) for (let i = 0; i < RUNS; i++) {
   catch (e) { console.error('FAIL ' + prof + ' ' + i + ' ' + e.message.slice(0, 4000)); results.push({ profile: prof, run: i, error: e.message.slice(0, 4000), marks: e.marks || null }); }
 }
 const subs = await opCall('GET', '/v1/booth/admin/submissions?limit=200');
-fs.writeFileSync(process.env.OUT, JSON.stringify({ static: globalThis.__static, results, submissions: (subs.submissions || []).map(s => ({ receipt: s.receipt, pdfBytes: s.pdfBytes })), staticBytes }, null, 1));
+fs.writeFileSync(process.env.OUT || 'booth-bench-browser.json', JSON.stringify({ static: globalThis.__static, results, submissions: (subs.submissions || []).map(s => ({ receipt: s.receipt, pdfBytes: s.pdfBytes })), staticBytes }, null, 1));
 await browser.close(); await mf.dispose(); server.close();
 console.error('DONE');

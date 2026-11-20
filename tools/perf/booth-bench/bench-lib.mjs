@@ -12,7 +12,9 @@ const repoRoot = path.resolve(apiRoot, '../..');
 const ORIGIN = 'https://shinick-han.github.io';
 const OPERATOR = 'fso_' + randomBytes(32).toString('base64url');
 const SVC = 'svc-token-' + 'x'.repeat(30);
-const CONSENT = '2026-11-22.v2';
+// The consent version the event Worker expects comes from the same wrangler vars the bench runs with.
+const WRANGLER_EVENT = JSON.parse(process.env.EVENT_VARS);
+const CONSENT = WRANGLER_EVENT.BOOTH_CONSENT_VERSION;
 const sha = b => createHash('sha256').update(b).digest('hex');
 const median = a => { const s=[...a].sort((x,y)=>x-y); return s.length? s[Math.floor((s.length-1)/2)] : null; };
 
@@ -23,7 +25,6 @@ const statements = ['0001_shared_records.sql','0002_invite_membership.sql','0003
 const built = await build({ entryPoints:[entryFile], bundle:true, write:false, format:'esm', platform:'browser', external:['node:*'], logLevel:'silent' });
 const script = built.outputFiles[0].text;
 
-const WRANGLER_EVENT = JSON.parse(process.env.EVENT_VARS);
 export async function start(extra = {}, { cache = true, port, origin } = {}) {
   const mf = new Miniflare(convertV4MiniflareOptions({ ...(port ? { port, host: '127.0.0.1' } : {}),
     modules: true, script, compatibilityDate: '2026-10-19', compatibilityFlags: ['nodejs_compat'],
