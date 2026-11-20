@@ -18,8 +18,7 @@ const exemptions = new Map(Object.entries({
   'paper-hidpi-browser.spec.cjs': 'manual browser harness',
   'booth-runtime-browser.spec.cjs': 'manual browser harness',
   'booth-pageedit-browser.spec.cjs': 'manual browser harness',
-  'booth-make-browser.spec.cjs': 'manual browser harness',
-  'booth-relocate-browser.spec.cjs': 'manual browser harness',
+  'booth-r1r2-browser.spec.cjs': 'manual browser harness',
   'browser-fonts.spec.mjs': 'Pages font contracts',
   'browser-pdf-fonts.spec.mjs': 'Pages font contracts',
   'bundled-fonts.spec.mjs': 'Pages font contracts',
@@ -54,7 +53,7 @@ const latex = spawnSync(process.execPath, ['--test','tests/latex-source-project.
 if(latex.error || latex.status!==0)process.exit(latex.status||1);
 const runtime = spawnSync(process.execPath, ['--test','tests/latex-runtime-catalog.spec.mjs'], {stdio:'inherit'});
 if(runtime.error || runtime.status!==0)process.exit(runtime.status||1);
-const hostedAi = spawnSync(process.execPath, ['--test','tests/hosted-ai.spec.mjs','tests/open-access.spec.mjs','tests/hosted-paper-session.spec.mjs','tests/hosted-paper-panels.spec.mjs','tests/ux-phase1.spec.mjs','tests/ux-phase2.spec.mjs','tests/booth.spec.mjs','tests/booth-edits.spec.mjs','tests/booth-myai.spec.mjs','tests/booth-recipe.spec.mjs','tests/booth-runtime.spec.mjs','tests/booth-pageedit.spec.mjs'], {stdio:'inherit'});
+const hostedAi = spawnSync(process.execPath, ['--test','tests/hosted-ai.spec.mjs','tests/open-access.spec.mjs','tests/hosted-paper-session.spec.mjs','tests/hosted-paper-panels.spec.mjs','tests/ux-phase1.spec.mjs','tests/ux-phase2.spec.mjs','tests/booth.spec.mjs','tests/booth-edits.spec.mjs','tests/booth-myai.spec.mjs','tests/booth-recipe.spec.mjs','tests/booth-runtime.spec.mjs','tests/booth-pageedit.spec.mjs','tests/pdf-oracle.spec.cjs'], {stdio:'inherit'});
 if(hostedAi.error || hostedAi.status!==0)process.exit(hostedAi.status||1);
 const layoutAudit = spawnSync(process.execPath, ['--test','tests/latex-layout-audit.spec.mjs'], {stdio:'inherit'});
 if(layoutAudit.error || layoutAudit.status!==0)process.exit(layoutAudit.status||1);
