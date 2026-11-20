@@ -236,3 +236,21 @@ test('a valid recipe after a run of closed brackets is still found', () => {
   assert.deepEqual(M.parseAnswer('{}'.repeat(30) + ' ' + JSON.stringify(good), ctx).recipe, good);
   assert.deepEqual(M.parseAnswer('{} [] ' + JSON.stringify(good), ctx).recipe, good);
 });
+
+test('result line: zero state and the rest to pick by hand', () => {
+  assert.equal(M.resultLine({applied: [1], unresolved: []}).line, '1곳 적용했어요');
+  assert.equal(M.resultLine({applied: [1, 2], unresolved: [{}]}).line, '2곳 적용 · 1곳은 직접 골라 주세요');
+  assert.equal(M.resultLine({applied: [], unresolved: [{}, {}]}).line, '0곳 적용 · 2곳은 직접 골라 주세요');
+  assert.equal(M.resultLine({applied: [], unresolved: []}).line, '바뀐 곳이 없어요');
+  assert.equal(M.resultLine(null).line, '바뀐 곳이 없어요');
+});
+
+test('after a successful apply only interpretation notes stay in the grey box', () => {
+  const answer = JSON.stringify({paperId: '2401.00001', edits: [{find: '0.95', replace: '0.50'}, {find: '9.99 nowhere', replace: '1.11'}], extra: 1});
+  const {recipe, diagnostics} = M.parseAnswer(answer, ctx);
+  assert.ok(recipe);
+  assert.ok(diagnostics.some(d => d.code === 'find_missing'));
+  const kept = M.keptAfterApply(diagnostics).map(d => d.code).sort();
+  assert.deepEqual(kept, ['keys_dropped', 'paper_forced']);
+  assert.deepEqual(M.keptAfterApply(undefined), []);
+});
