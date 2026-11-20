@@ -2,9 +2,9 @@
    Every edit is stored in FalsifyBoothEdits ({pageIndex, rects, originalText, newText, source}).
    A tap on a text-layer token captures Range.getClientRects() as page fractions and opens a small
    popover (mouse) or bottom edit bar (touch). Tapping an existing edit edits it in place.
-   "문단 전체 고치기" is always enabled: it clusters text-layer lines around the tap into a block,
-   substitutes existing edits inside that block, opens a simple textarea sheet, and trims unchanged
-   leading/trailing lines on commit (deleting everything stores newText '').
+   "문단 전체 고치기" is always enabled: it clusters single-column paragraph lines around the tap,
+   substitutes existing edits inside that block, opens a simple textarea sheet, and on commit emits
+   one changed-range edit covering only the characters that changed (or the whole block on full delete).
    Overlays (.booth-patch) are stateless and store-driven: white rect over each original rect plus
    newText, repainted on store changes, page draws and resizes. DOM text uses textContent only. */
 (function(root){
@@ -133,29 +133,113 @@
     return Math.max(1,Math.min(cap,Math.floor(100/(w+2*pad))/100));
   }
 
-  /* ---------- line grouping, block clustering and line trim ---------- */
+  /* ---------- line grouping, block clustering and changed-range edits ---------- */
   function midY(r){return r.y+r.h/2;}
-  function joinLineSpans(spans){
-    let text='';
+  function joinLineSpansWithMap(spans){
+    let raw='';
+    const rawParts=[];
     for(let i=0;i<spans.length;i+=1){
       const cur=spans[i];
       if(i>0){
         const prev=spans[i-1];
         const gap=cur.rect.x-(prev.rect.x+prev.rect.w);
         const minH=Math.min(prev.rect.h,cur.rect.h);
-        if(!/\s$/.test(prev.text)&&!/^\s/.test(cur.text)&&gap>0.15*minH) text+=' ';
+        if(!/\s$/.test(prev.text)&&!/^\s/.test(cur.text)&&gap>0.15*minH) raw+=' ';
       }
-      text+=cur.text;
+      const rawStart=raw.length;
+      raw+=cur.text;
+      rawParts.push({cur,rawStart,rawEnd:raw.length});
     }
-    return text.trim();
+    const lead=(/^\s*/.exec(raw)||[''])[0].length;
+    const text=raw.trim();
+    const trimmedEnd=lead+text.length;
+    const parts=[];
+    for(const p of rawParts){
+      const s=Math.max(lead,p.rawStart);
+      const e=Math.min(trimmedEnd,p.rawEnd);
+      if(e<=s) continue;
+      parts.push({
+        span:p.cur.span||null,
+        rect:p.cur.rect,
+        index:p.cur.index,
+        textLen:p.cur.text.length,
+        lineStart:s-lead,
+        lineEnd:e-lead,
+        spanStart:s-p.rawStart,
+        spanEnd:e-p.rawStart
+      });
+    }
+    return {text,parts};
   }
-  /* Groups span items [{text, rect}] (page fractions) into horizontal line segments [{text, rect, spans}].
-     Splits across wide horizontal gutters so two-column baselines never merge into one line. */
-  function groupLines(items){
-    const valid=(Array.isArray(items)?items:[])
+  function lineFontSize(spans){
+    let bestSize=0;
+    let bestWeight=0;
+    const weights=new Map();
+    for(const s of spans){
+      const fs=Number(s.fontSize)||0;
+      if(!(fs>0)) continue;
+      const key=Math.round(fs*10)/10;
+      const w=(weights.get(key)||0)+Math.max(1,s.text.trim().length);
+      weights.set(key,w);
+      if(w>bestWeight){bestWeight=w;bestSize=key;}
+    }
+    return bestSize;
+  }
+  function normalizeSpanItems(items){
+    return (Array.isArray(items)?items:[])
       .map((item,idx)=>item&&item.rect&&typeof item.text==='string'&&item.text.trim()&&item.rect.w>0&&item.rect.h>0
-        ?{text:item.text,rect:clampRect(item.rect),index:idx}:null)
+        ?{text:item.text,rect:clampRect(item.rect),index:idx,span:item.span||null,fontSize:Number(item.fontSize)||0}:null)
       .filter(Boolean);
+  }
+  function clusterColumnStarts(xs){
+    const clusters=[];
+    for(const x of xs){
+      const last=clusters[clusters.length-1];
+      if(last&&x-last.min<=0.008){
+        last.sum+=x;
+        last.count+=1;
+        last.max=x;
+      }else{
+        clusters.push({min:x,max:x,sum:x,count:1});
+      }
+    }
+    return clusters;
+  }
+  function isValidColumnSplit(valid, colX){
+    const rightYs=new Set();
+    const leftYs=new Set();
+    let deepCross=0;
+    for(const it of valid){
+      const rowKey=Math.round(midY(it.rect)*100);
+      const x=it.rect.x;
+      const x2=x+it.rect.w;
+      if(x>=colX-0.008&&x<=colX+0.008) rightYs.add(rowKey);
+      else if(x<colX-0.12&&x2<=colX+0.03) leftYs.add(rowKey);
+      if(x<colX-0.05&&x2>colX+0.05) deepCross+=1;
+    }
+    return rightYs.size>=3&&leftYs.size>=3&&deepCross<Math.max(2,rightYs.size*0.25);
+  }
+  /* Detects strong vertical column boundaries (e.g. two-column papers where right-column lines
+     align near x ≈ 0.51) so line grouping and block clustering never merge across columns even
+     when text-layer spans slightly overshoot the gutter. */
+  function detectColumnSplits(valid){
+    if(!Array.isArray(valid)||valid.length<6) return [];
+    const xs=valid.map(it=>it.rect.x).filter(x=>x>=0.32&&x<=0.72).sort((a,b)=>a-b);
+    if(xs.length<3) return [];
+    const splits=[];
+    for(const c of clusterColumnStarts(xs)){
+      if(c.count<3) continue;
+      const colX=c.sum/c.count;
+      if(isValidColumnSplit(valid,colX)&&!splits.some(s=>Math.abs(s-colX)<0.05)) splits.push(colX);
+    }
+    return splits.sort((a,b)=>a-b);
+  }
+  /* Groups span items [{text, rect, span?, fontSize?}] (page fractions) into horizontal line segments
+     [{text, rect, spans, parts, fontSize}]. Splits across horizontal gutters and detected column splits
+     so two-column baselines never merge into one line. */
+  function groupLines(items){
+    const valid=normalizeSpanItems(items);
+    const colSplits=detectColumnSplits(valid);
     valid.sort((a,b)=>midY(a.rect)-midY(b.rect)||a.rect.x-b.rect.x);
     const rows=[];
     for(const item of valid){
@@ -175,6 +259,10 @@
         row.h=Math.min(row.h,item.rect.h);
       }
     }
+    const buildLine=seg=>{
+      const joined=joinLineSpansWithMap(seg);
+      return {text:joined.text,rect:rectUnion(seg.map(s=>s.rect)),spans:seg,parts:joined.parts,fontSize:lineFontSize(seg)};
+    };
     const lines=[];
     for(const row of rows){
       row.items.sort((a,b)=>a.rect.x-b.rect.x);
@@ -185,82 +273,144 @@
         const prev=row.items[i-1];
         const cur=row.items[i];
         const gap=cur.rect.x-(prev.rect.x+prev.rect.w);
-        if(gap>gutter){
-          lines.push({text:joinLineSpans(seg),rect:rectUnion(seg.map(s=>s.rect)),spans:seg});
+        const crossesCol=colSplits.some(sx=>seg[0].rect.x<sx-0.05&&prev.rect.x+prev.rect.w<=sx+0.03&&cur.rect.x>=sx-0.008);
+        if(gap>gutter||crossesCol){
+          lines.push(buildLine(seg));
           seg=[cur];
         }else{
           seg.push(cur);
         }
       }
-      lines.push({text:joinLineSpans(seg),rect:rectUnion(seg.map(s=>s.rect)),spans:seg});
+      lines.push(buildLine(seg));
     }
     lines.sort((a,b)=>a.rect.y-b.rect.y||a.rect.x-b.rect.x);
     return lines;
   }
-  /* Clusters text-layer lines around target (item index or fraction rect) into one contiguous block:
-     expands up and down across adjacent lines within <=1.6*lineHeight (mid-to-mid) whose x-range
-     overlaps the block's column x-range. */
+  function medianOf(values){
+    if(!values.length) return 0;
+    const sorted=values.slice().sort((a,b)=>a-b);
+    return sorted[Math.floor(sorted.length/2)];
+  }
+  function nearestLineIndex(lines, target, requireOverlap){
+    let best=-1;
+    let bestDist=Infinity;
+    const cx=target.x+(target.w||0)/2;
+    const cy=target.y+(target.h||0)/2;
+    for(let i=0;i<lines.length;i+=1){
+      const line=lines[i];
+      if(requireOverlap&&!overlaps(line.rect,target)) continue;
+      const d=Math.hypot(line.rect.x+line.rect.w/2-cx,midY(line.rect)-cy);
+      if(d<bestDist){best=i;bestDist=d;}
+    }
+    return best;
+  }
+  function findSeedLineIndex(lines, target){
+    if(typeof target==='number') return lines.findIndex(line=>line.spans.some(s=>s.index===target));
+    if(!target||typeof target!=='object') return -1;
+    const hit=nearestLineIndex(lines,target,true);
+    return hit>=0?hit:nearestLineIndex(lines,target,false);
+  }
+  function columnBoundsFor(seed, colSplits){
+    let left=0;
+    let right=1;
+    for(const sx of colSplits){
+      const spansAcross=seed.rect.x<sx-0.05&&seed.rect.x+seed.rect.w>sx+0.05;
+      if(spansAcross) continue;
+      if(seed.rect.x>=sx-0.008) left=Math.max(left,sx);
+      else right=Math.min(right,sx);
+    }
+    return {left,right};
+  }
+  function matchesColumnAndStyle(cand, seed, bounds, colLeft, colRight){
+    if(bounds.left>0&&cand.rect.x<bounds.left-0.008) return false;
+    if(bounds.right<1&&(cand.rect.x>=bounds.right-0.008||cand.rect.x+cand.rect.w>bounds.right+0.05)) return false;
+    const xOv=Math.min(cand.rect.x+cand.rect.w,colRight)-Math.max(cand.rect.x,colLeft);
+    const minW=Math.min(cand.rect.w,colRight-colLeft);
+    if(!(xOv>0&&(xOv>=minW*0.25||(minW<=0.04&&xOv>=minW*0.1)))) return false;
+    if(Math.max(cand.rect.h,seed.rect.h)/Math.min(cand.rect.h,seed.rect.h)>1.08) return false;
+    const seedFs=seed.fontSize||0;
+    if(seedFs>0&&cand.fontSize>0&&Math.max(cand.fontSize,seedFs)/Math.min(cand.fontSize,seedFs)>1.06) return false;
+    return true;
+  }
+  function stepAllowed(step, gap, refH, pitch){
+    if(step>1.65*refH||gap>0.75*refH) return false;
+    return !(pitch>0&&step>1.32*pitch);
+  }
+  function checkBlockAbove(cand, state, pitch){
+    const refH=Math.max(cand.rect.h,state.topLine.rect.h);
+    const step=midY(state.topLine.rect)-midY(cand.rect);
+    const gap=state.topLine.rect.y-(cand.rect.y+cand.rect.h);
+    return stepAllowed(step,gap,refH,pitch)?step:-1;
+  }
+  function checkBlockBelow(cand, state, pitch, indentThresh){
+    if(cand.rect.x-state.colLeft>indentThresh&&state.botLine.rect.x-state.colLeft<=indentThresh) return -1;
+    const refH=Math.max(cand.rect.h,state.botLine.rect.h);
+    const step=midY(cand.rect)-midY(state.botLine.rect);
+    const gap=cand.rect.y-(state.botLine.rect.y+state.botLine.rect.h);
+    return stepAllowed(step,gap,refH,pitch)?step:-1;
+  }
+  function findBlockNeighbors(lines, state, seed, bounds, indentThresh){
+    const pitch=medianOf(state.steps);
+    const topIndented=state.picked.size>1&&state.topLine.rect.x-state.colLeft>indentThresh;
+    let bestAbove=-1;
+    let aboveStep=Infinity;
+    let bestBelow=-1;
+    let belowStep=Infinity;
+    for(let i=0;i<lines.length;i+=1){
+      if(state.picked.has(i)) continue;
+      const cand=lines[i];
+      if(!matchesColumnAndStyle(cand,seed,bounds,state.colLeft,state.colRight)) continue;
+      if(!topIndented&&cand.rect.y<state.topLine.rect.y){
+        const step=checkBlockAbove(cand,state,pitch);
+        if(step>=0&&(bestAbove<0||cand.rect.y>lines[bestAbove].rect.y)){bestAbove=i;aboveStep=step;}
+      }else if(cand.rect.y>state.botLine.rect.y){
+        const step=checkBlockBelow(cand,state,pitch,indentThresh);
+        if(step>=0&&(bestBelow<0||cand.rect.y<lines[bestBelow].rect.y)){bestBelow=i;belowStep=step;}
+      }
+    }
+    return {bestAbove,aboveStep,bestBelow,belowStep};
+  }
+  function acceptBlockLine(lines, state, idx, step){
+    state.picked.add(idx);
+    if(step>0) state.steps.push(step);
+    const r=lines[idx].rect;
+    state.colLeft=Math.min(state.colLeft,r.x);
+    state.colRight=Math.max(state.colRight,r.x+r.w);
+    if(r.y<state.topLine.rect.y) state.topLine=lines[idx];
+    if(r.y>state.botLine.rect.y) state.botLine=lines[idx];
+  }
+  /* Clusters text-layer lines around target (item index or fraction rect) into one single-column
+     paragraph: stays inside the tapped line's column, stops at a vertical step larger than ~1.3x the
+     line pitch, at a font size or line height change, or at a first-line paragraph indent boundary. */
   function clusterBlock(items, target){
-    const lines=groupLines(items);
-    if(!lines.length) return [];
-    let seedIdx=-1;
-    if(typeof target==='number'){
-      seedIdx=lines.findIndex(line=>line.spans.some(s=>s.index===target));
-    }else if(target&&typeof target==='object'){
-      let bestDist=Infinity;
-      const cx=target.x+(target.w||0)/2;
-      const cy=target.y+(target.h||0)/2;
-      lines.forEach((line,i)=>{
-        if(overlaps(line.rect,target)){
-          const d=Math.hypot(line.rect.x+line.rect.w/2-cx,midY(line.rect)-cy);
-          if(seedIdx<0||d<bestDist){seedIdx=i;bestDist=d;}
-        }
-      });
-      if(seedIdx<0){
-        lines.forEach((line,i)=>{
-          const d=Math.hypot(line.rect.x+line.rect.w/2-cx,midY(line.rect)-cy);
-          if(d<bestDist){seedIdx=i;bestDist=d;}
-        });
-      }
-    }
+    const valid=normalizeSpanItems(items);
+    const colSplits=detectColumnSplits(valid);
+    const lines=groupLines(valid);
+    const seedIdx=findSeedLineIndex(lines,target);
     if(seedIdx<0) return [];
-    const picked=new Set([seedIdx]);
-    let colLeft=lines[seedIdx].rect.x;
-    let colRight=lines[seedIdx].rect.x+lines[seedIdx].rect.w;
-    let topLine=lines[seedIdx];
-    let botLine=lines[seedIdx];
-    for(let changed=true;changed;){
-      changed=false;
-      let bestAbove=-1;
-      let bestBelow=-1;
-      for(let i=0;i<lines.length;i+=1){
-        if(picked.has(i)) continue;
-        const cand=lines[i];
-        if(!(cand.rect.x<colRight&&colLeft<cand.rect.x+cand.rect.w)) continue;
-        if(cand.rect.y<topLine.rect.y){
-          const lineH=Math.max(cand.rect.h,topLine.rect.h);
-          const step=midY(topLine.rect)-midY(cand.rect);
-          const gap=topLine.rect.y-(cand.rect.y+cand.rect.h);
-          if(step<=1.65*lineH&&gap<=0.8*lineH&&(bestAbove<0||cand.rect.y>lines[bestAbove].rect.y)) bestAbove=i;
-        }else if(cand.rect.y>botLine.rect.y){
-          const lineH=Math.max(cand.rect.h,botLine.rect.h);
-          const step=midY(cand.rect)-midY(botLine.rect);
-          const gap=cand.rect.y-(botLine.rect.y+botLine.rect.h);
-          if(step<=1.65*lineH&&gap<=0.8*lineH&&(bestBelow<0||cand.rect.y<lines[bestBelow].rect.y)) bestBelow=i;
-        }
+    const seed=lines[seedIdx];
+    const bounds=columnBoundsFor(seed,colSplits);
+    const indentThresh=Math.max(0.010,0.9*seed.rect.h);
+    const state={
+      picked:new Set([seedIdx]),
+      colLeft:seed.rect.x,
+      colRight:seed.rect.x+seed.rect.w,
+      topLine:seed,
+      botLine:seed,
+      steps:[]
+    };
+    for(;;){
+      const {bestAbove,aboveStep,bestBelow,belowStep}=findBlockNeighbors(lines,state,seed,bounds,indentThresh);
+      if(bestAbove<0&&bestBelow<0) break;
+      if(!state.steps.length&&bestAbove>=0&&bestBelow>=0){
+        if(belowStep<=aboveStep) acceptBlockLine(lines,state,bestBelow,belowStep);
+        else acceptBlockLine(lines,state,bestAbove,aboveStep);
+        continue;
       }
-      for(const idx of [bestAbove,bestBelow]){
-        if(idx<0) continue;
-        picked.add(idx);
-        const r=lines[idx].rect;
-        colLeft=Math.min(colLeft,r.x);
-        colRight=Math.max(colRight,r.x+r.w);
-        if(r.y<topLine.rect.y) topLine=lines[idx];
-        if(r.y>botLine.rect.y) botLine=lines[idx];
-        changed=true;
-      }
+      if(bestAbove>=0) acceptBlockLine(lines,state,bestAbove,aboveStep);
+      if(bestBelow>=0) acceptBlockLine(lines,state,bestBelow,belowStep);
     }
-    return [...picked].map(i=>lines[i]).sort((a,b)=>a.rect.y-b.rect.y||a.rect.x-b.rect.x);
+    return [...state.picked].map(i=>lines[i]).sort((a,b)=>a.rect.y-b.rect.y||a.rect.x-b.rect.x);
   }
   /* Vertical overlap strictly greater than 40% of the shorter box: avoids grazing adjacent lines. */
   function sameLineBand(a, b){
@@ -268,76 +418,327 @@
     const vh=Math.min(a.y+a.h,b.y+b.h)-Math.max(a.y,b.y);
     return vh>0.4*Math.min(a.h,b.h);
   }
-  /* Substitutes the newText of existing BoothEdits that overlap blockLines into the prefilled block text. */
-  function applyEditsToBlock(blockLines, edits){
-    if(!Array.isArray(blockLines)||!blockLines.length) return '';
-    const out=blockLines.map(l=>l.text);
-    const inline=blockLines.map(()=>[]);
-    for(const edit of Array.isArray(edits)?edits:[]){
-      if(!edit||!Array.isArray(edit.rects)||!edit.rects.length) continue;
-      const hits=[];
-      for(let i=0;i<blockLines.length;i+=1){
-        if(edit.rects.some(r=>sameLineBand(r,blockLines[i].rect))) hits.push(i);
-      }
-      if(!hits.length) continue;
-      const whole=hits.length>1||String(edit.originalText||'').includes('\n')||String(edit.newText||'').includes('\n')
-        ||edit.originalText===blockLines[hits[0]].text;
-      if(whole){
-        out[hits[0]]=edit.newText===''?null:String(edit.newText);
-        for(let k=hits[0]+1;k<=hits[hits.length-1];k+=1) out[k]=null;
-      }else{
-        inline[hits[0]].push(edit);
-      }
-    }
+  function blockLineOffsets(blockLines){
+    const offsets=[];
+    let at=0;
     for(let i=0;i<blockLines.length;i+=1){
-      if(out[i]==null||!inline[i].length) continue;
-      const sorted=inline[i].slice().sort((a,b)=>b.rects[0].x-a.rects[0].x);
-      let text=out[i];
-      let limit=text.length;
-      const lineR=blockLines[i].rect;
-      const origLen=blockLines[i].text.length;
-      for(const edit of sorted){
-        const needle=String(edit.originalText||'');
-        if(!needle) continue;
-        const approx=lineR.w>0?Math.round(((edit.rects[0].x-lineR.x)/lineR.w)*origLen):0;
-        let best=-1;
-        for(let at=text.indexOf(needle);at>=0&&at+needle.length<=limit;at=text.indexOf(needle,at+1)){
-          if(best<0||Math.abs(at-approx)<Math.abs(best-approx)) best=at;
+      offsets.push(at);
+      at+=blockLines[i].text.length+1;
+    }
+    return offsets;
+  }
+  function findLineHits(blockLines, edit){
+    if(!edit||!Array.isArray(edit.rects)||!edit.rects.length) return [];
+    const hits=[];
+    for(let i=0;i<blockLines.length;i+=1){
+      if(edit.rects.some(r=>sameLineBand(r,blockLines[i].rect))) hits.push(i);
+    }
+    return hits;
+  }
+  function findNearestNeedle(region, needle, approx){
+    let best=-1;
+    for(let at=region.indexOf(needle);at>=0;at=region.indexOf(needle,at+1)){
+      if(best<0||Math.abs(at-approx)<Math.abs(best-approx)) best=at;
+    }
+    return best;
+  }
+  function expandWholeLineDelete(origText, start, end){
+    if(end<origText.length&&origText[end]==='\n') return {origStart:start,origEnd:end+1};
+    if(start>0&&origText[start-1]==='\n') return {origStart:start-1,origEnd:end};
+    return {origStart:start,origEnd:end};
+  }
+  function findNeedleSpan(edit, firstLine, regionStart, regionEnd, blockLines, origLines, origText, needle){
+    if(!needle) return null;
+    const lineR=blockLines[firstLine].rect;
+    const approx=lineR.w>0?Math.round(((edit.rects[0].x-lineR.x)/lineR.w)*origLines[firstLine].length):0;
+    const best=findNearestNeedle(origText.slice(regionStart,regionEnd),needle,approx);
+    return best>=0?{origStart:regionStart+best,origEnd:regionStart+best+needle.length}:null;
+  }
+  function isWholeRegionEdit(hits, needle, newVal, firstLineText){
+    return hits.length>1||needle.includes('\n')||newVal.includes('\n')||needle===firstLineText;
+  }
+  function locateEditInBlock(edit, hits, blockLines, origLines, origText, offsets){
+    const firstLine=hits[0];
+    const lastLine=hits[hits.length-1];
+    const regionStart=offsets[firstLine];
+    const regionEnd=offsets[lastLine]+origLines[lastLine].length;
+    const needle=String(edit.originalText||'');
+    const newVal=String(edit.newText==null?'':edit.newText);
+    const allLines=firstLine===0&&lastLine===blockLines.length-1;
+    if(allLines&&newVal==='') return {edit,origStart:0,origEnd:origText.length,origSlice:origText,newSlice:''};
+    let span=findNeedleSpan(edit,firstLine,regionStart,regionEnd,blockLines,origLines,origText,needle);
+    if(!span){
+      if(!isWholeRegionEdit(hits,needle,newVal,origLines[firstLine])) return null;
+      span={origStart:regionStart,origEnd:regionEnd};
+    }
+    if(newVal===''&&span.origStart===regionStart&&span.origEnd===regionEnd&&!allLines){
+      span=expandWholeLineDelete(origText,span.origStart,span.origEnd);
+    }
+    return {edit,origStart:span.origStart,origEnd:span.origEnd,origSlice:origText.slice(span.origStart,span.origEnd),newSlice:newVal};
+  }
+  function selectNonOverlappingReps(reps){
+    reps.sort((a,b)=>a.origStart-b.origStart||b.origEnd-a.origEnd);
+    const chosen=[];
+    let cursor=0;
+    for(const r of reps){
+      if(r.origStart<cursor) continue;
+      chosen.push(r);
+      cursor=r.origEnd;
+    }
+    return chosen;
+  }
+  /* Substitutes existing BoothEdits that overlap blockLines into prefill text and records exact
+     original <-> prefill spans so unchanged earlier edits survive and reverted ones clean up. */
+  function applyEditsToBlockWithMap(blockLines, edits){
+    if(!Array.isArray(blockLines)||!blockLines.length) return {origText:'',prefill:'',subs:[]};
+    const origLines=blockLines.map(l=>l.text);
+    const origText=origLines.join('\n');
+    const offsets=blockLineOffsets(blockLines);
+    const reps=[];
+    for(const edit of Array.isArray(edits)?edits:[]){
+      const hits=findLineHits(blockLines,edit);
+      if(!hits.length) continue;
+      const rep=locateEditInBlock(edit,hits,blockLines,origLines,origText,offsets);
+      if(rep) reps.push(rep);
+    }
+    let prefill='';
+    let last=0;
+    const subs=[];
+    for(const r of selectNonOverlappingReps(reps)){
+      prefill+=origText.slice(last,r.origStart);
+      const prefillStart=prefill.length;
+      prefill+=r.newSlice;
+      subs.push({...r,prefillStart,prefillEnd:prefill.length});
+      last=r.origEnd;
+    }
+    prefill+=origText.slice(last);
+    return {origText,prefill,subs};
+  }
+  function applyEditsToBlock(blockLines, edits){
+    return applyEditsToBlockWithMap(blockLines,edits).prefill;
+  }
+  function commonPrefixLength(a, b){
+    let p=0;
+    while(p<a.length&&p<b.length&&a[p]===b[p]) p+=1;
+    return p;
+  }
+  function commonSuffixLength(a, b, prefix){
+    let s=0;
+    while(a.length-1-s>=prefix&&b.length-1-s>=prefix&&a[a.length-1-s]===b[b.length-1-s]) s+=1;
+    return s;
+  }
+  function snapStartLeft(orig, range){
+    while(range.origStart>0&&!SPACE.test(orig[range.origStart-1])){
+      range.origStart-=1;
+      range.nextStart-=1;
+    }
+  }
+  function snapEndRight(orig, range){
+    while(range.origEnd<orig.length&&!SPACE.test(orig[range.origEnd])){
+      range.origEnd+=1;
+      range.nextEnd+=1;
+    }
+  }
+  function expandEmptyOrigRange(orig, range){
+    const prevStart=range.origStart;
+    const prevEnd=range.origEnd;
+    snapStartLeft(orig,range);
+    snapEndRight(orig,range);
+    if(range.origStart!==prevStart||range.origEnd!==prevEnd) return;
+    if(/\S/.test(orig.slice(range.origEnd))){
+      while(range.origEnd<orig.length&&SPACE.test(orig[range.origEnd])){range.origEnd+=1;range.nextEnd+=1;}
+      snapEndRight(orig,range);
+    }else if(/\S/.test(orig.slice(0,range.origStart))){
+      while(range.origStart>0&&SPACE.test(orig[range.origStart-1])){range.origStart-=1;range.nextStart-=1;}
+      snapStartLeft(orig,range);
+    }
+  }
+  function trimDeletedSpaces(orig, range){
+    while(range.origStart<range.origEnd&&SPACE.test(orig[range.origStart])) range.origStart+=1;
+    while(range.origEnd>range.origStart&&SPACE.test(orig[range.origEnd-1])) range.origEnd-=1;
+  }
+  /* Computes the changed character range between originalText and newText using common prefix/suffix,
+     snapped outward to word boundaries (whitespace). Returns null if unchanged; returns the whole
+     range with newText '' on full deletion. */
+  function diffChangedRange(originalText, newText){
+    const orig=String(originalText==null?'':originalText).replace(/\r\n?/g,'\n');
+    const next=String(newText==null?'':newText).replace(/\r\n?/g,'\n');
+    if(next===orig) return null;
+    if(next===''||!next.trim()){
+      return {start:0,end:orig.length,nextStart:0,nextEnd:0,originalText:orig,newText:'',fullDelete:true};
+    }
+    const prefix=commonPrefixLength(orig,next);
+    const suffix=commonSuffixLength(orig,next,prefix);
+    const range={origStart:prefix,origEnd:orig.length-suffix,nextStart:prefix,nextEnd:next.length-suffix};
+    const origHasInk=/\S/.test(orig.slice(range.origStart,range.origEnd));
+    const nextIsEmpty=range.nextStart===range.nextEnd;
+    if(!(origHasInk&&nextIsEmpty&&SPACE.test(orig[range.origStart]))) snapStartLeft(orig,range);
+    if(!(origHasInk&&nextIsEmpty&&SPACE.test(orig[range.origEnd-1]))) snapEndRight(orig,range);
+    if(!/\S/.test(orig.slice(range.origStart,range.origEnd))) expandEmptyOrigRange(orig,range);
+    if(range.nextStart===range.nextEnd) trimDeletedSpaces(orig,range);
+    return {
+      start:range.origStart,
+      end:range.origEnd,
+      nextStart:range.nextStart,
+      nextEnd:range.nextEnd,
+      originalText:orig.slice(range.origStart,range.origEnd),
+      newText:next.slice(range.nextStart,range.nextEnd),
+      fullDelete:false
+    };
+  }
+  function trimmedLineRange(lineText, lineOff, start, end){
+    let s=Math.max(start,lineOff)-lineOff;
+    let e=Math.min(end,lineOff+lineText.length)-lineOff;
+    while(s<e&&SPACE.test(lineText[s])) s+=1;
+    while(e>s&&SPACE.test(lineText[e-1])) e-=1;
+    return e>s?{s,e}:null;
+  }
+  function measurePartRects(part, charStart, charEnd, measureSpanRange){
+    const measured=typeof measureSpanRange==='function'?measureSpanRange(part,charStart,charEnd):null;
+    if(Array.isArray(measured)&&measured.length) return measured.filter(r=>r&&r.w>0&&r.h>0);
+    if(!(part.rect&&part.textLen>0)) return [];
+    const x=part.rect.x+part.rect.w*(charStart/part.textLen);
+    const w=part.rect.w*((charEnd-charStart)/part.textLen);
+    return w>0&&part.rect.h>0?[clampRect({x,y:part.rect.y,w,h:part.rect.h})]:[];
+  }
+  function mapLinePartsToRect(line, s, e, measureSpanRange){
+    const lineRects=[];
+    if(Array.isArray(line.parts)&&line.parts.length){
+      for(const part of line.parts){
+        const pS=Math.max(s,part.lineStart);
+        const pE=Math.min(e,part.lineEnd);
+        if(pE<=pS) continue;
+        const charStart=part.spanStart+(pS-part.lineStart);
+        const charEnd=part.spanStart+(pE-part.lineStart);
+        lineRects.push(...measurePartRects(part,charStart,charEnd,measureSpanRange));
+      }
+    }else if(line.rect&&line.text.length>0){
+      const x=line.rect.x+line.rect.w*(s/line.text.length);
+      const w=line.rect.w*((e-s)/line.text.length);
+      if(w>0&&line.rect.h>0) lineRects.push(clampRect({x,y:line.rect.y,w,h:line.rect.h}));
+    }
+    return lineRects.length?rectUnion(lineRects):null;
+  }
+  /* Maps character range [start, end] in blockLines' joined text back to per-line merged rects.
+     Uses measureSpanRange(part, charStart, charEnd) when provided (DOM Range.getClientRects),
+     falling back to proportional sub-rects for pure tests. */
+  function mapRangeToBlockLines(blockLines, start, end, measureSpanRange){
+    if(!Array.isArray(blockLines)||!blockLines.length||!(end>start)) return [];
+    const offsets=blockLineOffsets(blockLines);
+    const rects=[];
+    for(let i=0;i<blockLines.length;i+=1){
+      const span=trimmedLineRange(blockLines[i].text,offsets[i],start,end);
+      if(!span) continue;
+      const rect=mapLinePartsToRect(blockLines[i],span.s,span.e,measureSpanRange);
+      if(rect) rects.push(rect);
+    }
+    return rects;
+  }
+  function changedBlockEdit(blockLines, newText, measureSpanRange){
+    if(!Array.isArray(blockLines)||!blockLines.length) return null;
+    const origText=blockLines.map(l=>l.text).join('\n');
+    const diff=diffChangedRange(origText,newText);
+    if(!diff) return null;
+    if(diff.fullDelete){
+      return {rects:blockLines.map(l=>l.rect),originalText:diff.originalText,newText:'',start:0,end:origText.length};
+    }
+    const rects=mapRangeToBlockLines(blockLines,diff.start,diff.end,measureSpanRange);
+    return {
+      rects:rects.length?rects:blockLines.map(l=>l.rect),
+      originalText:diff.originalText,
+      newText:diff.newText,
+      start:diff.start,
+      end:diff.end
+    };
+  }
+  function rawDiffSpan(a, b){
+    const p=commonPrefixLength(a,b);
+    const s=commonSuffixLength(a,b,p);
+    return {start:p,end:a.length-s};
+  }
+  function prefillPosToOrig(pos, subs, isEnd){
+    let shift=0;
+    for(const sub of subs){
+      const before=isEnd?(sub.prefillEnd<=pos&&sub.prefillStart<pos):(sub.prefillEnd<=pos);
+      if(before) shift+=(sub.origEnd-sub.origStart)-(sub.prefillEnd-sub.prefillStart);
+    }
+    return pos+shift;
+  }
+  function tryRevertOneSub(curPrefill, curSubs, raw){
+    const span=rawDiffSpan(curPrefill,raw);
+    for(let i=0;i<curSubs.length;i+=1){
+      const sub=curSubs[i];
+      const touches=sub.prefillStart===sub.prefillEnd
+        ?(sub.prefillStart>=span.start&&sub.prefillStart<=span.end)
+        :(sub.prefillStart<span.end&&sub.prefillEnd>span.start);
+      if(!touches) continue;
+      const cand=curPrefill.slice(0,sub.prefillStart)+sub.origSlice+curPrefill.slice(sub.prefillEnd);
+      const cSpan=rawDiffSpan(cand,raw);
+      const cleanRevert=cand===raw||sub.prefillStart+sub.origSlice.length<=cSpan.start||sub.prefillStart>=cSpan.end;
+      if(!cleanRevert) continue;
+      const delta=sub.origSlice.length-(sub.prefillEnd-sub.prefillStart);
+      const nextSubs=curSubs.slice();
+      nextSubs.splice(i,1);
+      for(let j=i;j<nextSubs.length;j+=1){
+        nextSubs[j]={...nextSubs[j],prefillStart:nextSubs[j].prefillStart+delta,prefillEnd:nextSubs[j].prefillEnd+delta};
+      }
+      return {prefill:cand,subs:nextSubs,removedId:sub.edit&&sub.edit.id||null};
+    }
+    return null;
+  }
+  function stripRevertedSubs(prefill, subs, raw){
+    let curPrefill=prefill;
+    let curSubs=subs.map(s=>({...s}));
+    const removeIds=[];
+    while(curPrefill!==raw){
+      const step=tryRevertOneSub(curPrefill,curSubs,raw);
+      if(!step) break;
+      if(step.removedId) removeIds.push(step.removedId);
+      curPrefill=step.prefill;
+      curSubs=step.subs;
+    }
+    return {prefill:curPrefill,subs:curSubs,removeIds};
+  }
+  function expandRangeOverSubs(range, curSubs){
+    for(let expanded=true;expanded;){
+      expanded=false;
+      for(const sub of curSubs){
+        if(sub.prefillStart<range.pStart&&sub.prefillEnd>range.pStart){
+          const d=range.pStart-sub.prefillStart;
+          range.pStart-=d;range.nStart-=d;expanded=true;
         }
-        if(best>=0){
-          text=text.slice(0,best)+String(edit.newText==null?'':edit.newText)+text.slice(best+needle.length);
-          limit=best;
+        if(sub.prefillStart<range.pEnd&&sub.prefillEnd>range.pEnd){
+          const d=sub.prefillEnd-range.pEnd;
+          range.pEnd+=d;range.nEnd+=d;expanded=true;
         }
       }
-      out[i]=text;
     }
-    return out.filter(line=>line!==null).join('\n');
   }
-  /* Trims unchanged leading and trailing lines; returns {rects, originalText, newText} or null if unchanged.
-     Deleting everything returns all block rects with newText ''. */
-  function trimBlockLines(blockLines, newText){
-    if(!Array.isArray(blockLines)||!blockLines.length) return null;
-    const normalized=String(newText==null?'':newText).replace(/\r\n?/g,'\n');
-    const orig=blockLines.map(l=>l.text);
-    if(normalized===''||!normalized.trim()){
-      return {rects:blockLines.map(l=>l.rect),originalText:orig.join('\n'),newText:''};
+  /* Computes the commit action for a paragraph sheet: removes any earlier edits inside the block that
+     were reverted to original, leaves untouched earlier edits outside the changed range intact, and
+     emits ONE changed-range BoothEdit (or full-block delete) covering only the touched characters. */
+  function commitParagraphChange(blockLines, pageEdits, newText, measureSpanRange){
+    if(!Array.isArray(blockLines)||!blockLines.length) return {removeIds:[],edit:null};
+    const {origText,prefill,subs}=applyEditsToBlockWithMap(blockLines,pageEdits);
+    const raw=String(newText==null?'':newText).replace(/\r\n?/g,'\n');
+    if(raw===prefill) return {removeIds:[],edit:null};
+    if(raw===''||!raw.trim()){
+      return {removeIds:[],edit:{rects:blockLines.map(l=>l.rect),originalText:origText,newText:''}};
     }
-    const next=normalized.split('\n');
-    let lead=0;
-    while(lead<orig.length&&lead<next.length&&orig[lead]===next[lead]) lead+=1;
-    let tail=0;
-    while(orig.length-1-tail>=lead&&next.length-1-tail>=lead&&orig[orig.length-1-tail]===next[next.length-1-tail]) tail+=1;
-    let origEnd=orig.length-tail;
-    let nextEnd=next.length-tail;
-    if(origEnd===lead&&nextEnd===lead) return null;
-    if(origEnd===lead){
-      if(tail>0){origEnd+=1;nextEnd+=1;}
-      else if(lead>0){lead-=1;}
-    }
+    const stripped=stripRevertedSubs(prefill,subs,raw);
+    const diff=diffChangedRange(stripped.prefill,raw);
+    if(!diff) return {removeIds:stripped.removeIds,edit:null};
+    const range={pStart:diff.start,pEnd:diff.end,nStart:diff.nextStart,nEnd:diff.nextEnd};
+    expandRangeOverSubs(range,stripped.subs);
+    const oStart=prefillPosToOrig(range.pStart,stripped.subs,false);
+    const oEnd=prefillPosToOrig(range.pEnd,stripped.subs,true);
+    const originalSub=origText.slice(oStart,oEnd);
+    const newSub=raw.slice(range.nStart,range.nEnd);
+    if(originalSub===newSub) return {removeIds:stripped.removeIds,edit:null};
+    const rects=mapRangeToBlockLines(blockLines,oStart,oEnd,measureSpanRange);
     return {
-      rects:blockLines.slice(lead,origEnd).map(l=>l.rect),
-      originalText:orig.slice(lead,origEnd).join('\n'),
-      newText:next.slice(lead,nextEnd).join('\n')
+      removeIds:stripped.removeIds,
+      edit:{rects:rects.length?rects:blockLines.map(l=>l.rect),originalText:originalSub,newText:newSub}
     };
   }
 
@@ -346,7 +747,7 @@
     const stage=doc.getElementById('paper-before-stage');
     if(!stage||!doc.getElementById('booth-step-edit')||doc.getElementById('booth-pe-bar')) return;
     const html=doc.documentElement;
-    const st={sel:null,sheet:null,focus:null,fileHash:'',pageEl:null,auto:new Set(),autoOff:false,composing:false,hoverFrame:0};
+    const st={sel:null,sheet:null,focus:null,pendingClick:null,fileHash:'',pageEl:null,auto:new Set(),autoOff:false,composing:false,hoverFrame:0};
     const ws=()=>root.FalsifyPaperWorkspace||null;
     const store=()=>root.FalsifyBoothEdits||null;
     function el(tag, className, text){
@@ -397,9 +798,9 @@
       pane.prepend(deskTip);
     }
     const zoomLevels=()=>desk()?[1,1.25,1.5,2]:[1,1.5,ZOOM,TABLE_ZOOM];
-    function syncBar(){
+    function syncBar(keepZoomedClass){
       const on=zoomed();
-      html.classList.toggle('booth-pe-zoomed',on);
+      if(on||!keepZoomedClass) html.classList.toggle('booth-pe-zoomed',on);
       fit.hidden=!on;
       const z=Number(call('getZoom'))||1;
       const levels=zoomLevels();
@@ -409,7 +810,7 @@
     }
     function setZoom(factor){
       const ok=call('setZoom',factor)===true;
-      syncBar();
+      syncBar(ok&&factor<=1.01);
       return ok;
     }
     fit.addEventListener('click',()=>{closePop(false);setZoom(1);});
@@ -424,7 +825,8 @@
       const cx=(Math.max(view.left,box.left)+Math.min(view.right,box.right))/2;
       const cy=(Math.max(view.top,box.top)+Math.min(view.bottom,box.bottom,root.innerHeight||view.bottom))/2;
       closePop(false);
-      st.focus={fx:(cx-box.left)/box.width,fy:(cy-box.top)/box.height};
+      st.pendingClick=null;
+      st.focus={fx:(cx-box.left)/box.width,fy:(cy-box.top)/box.height,fromButton:true};
       if(!setZoom(next)) st.focus=null;
     }
     function placeTools(){
@@ -674,8 +1076,13 @@
       return out;
     }
     function spanItems(page){
-      return ordered(page).map(span=>({span,text:span.textContent,rect:fraction(span.getBoundingClientRect(),page)}))
-        .filter(item=>item.rect.w>0&&item.rect.h>0);
+      const cs=typeof root.getComputedStyle==='function'?root.getComputedStyle.bind(root):null;
+      return ordered(page).map(span=>({
+        span,
+        text:span.textContent,
+        rect:fraction(span.getBoundingClientRect(),page),
+        fontSize:cs?parseFloat(cs(span).fontSize)||0:0
+      })).filter(item=>item.rect.w>0&&item.rect.h>0);
     }
 
     /* ---------- stateless, store-driven overlay preview ---------- */
@@ -831,7 +1238,7 @@
       const prefill=applyEditsToBlock(blockLines,pageEdits);
       const origText=blockLines.map(l=>l.text).join('\n');
       const boxes=blockLines.map(l=>outline(page,l.rect));
-      st.sheet={pageIndex,page,blockLines,origText,prefill,boxes};
+      st.sheet={pageIndex,page,blockLines,pageEdits,origText,prefill,boxes};
       sheetLabel.textContent=(pageIndex+1)+'쪽 · 문단 전체 고치기';
       sheetArea.value=prefill;
       sheet.hidden=false;
@@ -839,47 +1246,53 @@
       syncTyping();
       try{sheetArea.focus({preventScroll:true});}catch{}
     }
+    function measureSpanRange(page, part, charStart, charEnd){
+      const span=part&&part.span;
+      if(!span||!span.isConnected) return null;
+      const range=rangeFor(span,charStart,charEnd);
+      if(!range) return null;
+      const line=span.getBoundingClientRect();
+      const raw=[...range.getClientRects()].filter(r=>r.width>0&&r.height>0);
+      const list=raw.length?raw:[range.getBoundingClientRect()].filter(r=>r.width>0&&r.height>0);
+      const rects=list.map(r=>fraction({
+        left:r.left,right:r.right,
+        top:line.height>0?line.top:r.top,
+        bottom:line.height>0?line.bottom:r.bottom
+      },page)).filter(r=>r.w>0&&r.h>0);
+      return rects.length?rects:null;
+    }
     function commitSheet(){
       const cur=st.sheet;
       const api=store();
       if(!cur||!api) return;
       const raw=sheetArea.value.replace(/\r\n?/g,'\n');
       if(raw===cur.prefill){closeSheet(true);return;}
-      const trimmed=trimBlockLines(cur.blockLines,raw);
-      if(!trimmed){
-        /* Reverted back to original block text: remove any existing edits inside this block. */
-        api.add({pageIndex:cur.pageIndex,rects:cur.blockLines.map(l=>l.rect),originalText:cur.origText,newText:cur.origText,source:'paragraph'});
-        closeSheet(true);
-        return;
+      const plan=commitParagraphChange(cur.blockLines,cur.pageEdits,raw,(part,s,e)=>measureSpanRange(cur.page,part,s,e));
+      for(const id of plan.removeIds) api.remove(id);
+      if(plan.edit){
+        api.add({
+          pageIndex:cur.pageIndex,
+          rects:plan.edit.rects,
+          originalText:plan.edit.originalText,
+          newText:plan.edit.newText,
+          source:'paragraph'
+        });
       }
-      /* If a trimmed line reverted an earlier edit back to original text, remove that earlier edit too. */
-      const kept=new Set(trimmed.rects);
-      const trimmedRects=cur.blockLines.map(l=>l.rect).filter(r=>!kept.has(r));
-      if(trimmedRects.length){
-        for(const existing of api.forPage(cur.pageIndex)){
-          if(existing.rects.some(r=>trimmedRects.some(t=>sameLineBand(r,t)))) api.remove(existing.id);
-        }
-      }
-      api.add({pageIndex:cur.pageIndex,rects:trimmed.rects,originalText:trimmed.originalText,newText:trimmed.newText,source:'paragraph'});
       closeSheet(true);
     }
 
-    function onPageClick(event){
-      const page=pageEl();
-      const target=event.target;
-      if(!editing()||!page||!(target instanceof root.Node)||!page.contains(target)) return;
-      if(target.closest&&target.closest('textarea,.booth-pe-sheet,button,input')) return;
-      event.stopPropagation();
-      if(st.focus) return;
-      if(!desk()&&!zoomed()){zoomAt(page,event.clientX,event.clientY);return;}
-      const pageIndex=call('getPageIndex');
-      if(!Number.isInteger(pageIndex)) return;
+    function isPageClickTarget(page, target){
+      if(!editing()||!page||!(target instanceof root.Node)||!page.contains(target)) return false;
+      return !(target.closest&&target.closest('textarea,.booth-pe-sheet,button,input'));
+    }
+    function handlePagePoint(page, pageIndex, clientX, clientY){
+      if(!desk()&&!zoomed()){zoomAt(page,clientX,clientY);return;}
       const box=page.getBoundingClientRect();
-      const px=box.width>0?(event.clientX-box.left)/box.width:-1;
-      const py=box.height>0?(event.clientY-box.top)/box.height:-1;
+      const px=box.width>0?(clientX-box.left)/box.width:-1;
+      const py=box.height>0?(clientY-box.top)/box.height:-1;
       const api=store();
       const hitEdit=api?api.at(pageIndex,px,py):null;
-      const word=wordAt(page,event.clientX,event.clientY);
+      const word=wordAt(page,clientX,clientY);
       const existing=hitEdit||(word&&api?api.at(pageIndex,word.rect.x+word.rect.w/2,word.rect.y+word.rect.h/2):null);
       if(existing){
         if(isBlockEdit(existing)) openParagraphSheet(page,pageIndex,word,existing);
@@ -887,6 +1300,33 @@
         return;
       }
       if(word) openPop(page,pageIndex,word,null);
+    }
+    function replayPendingClick(page){
+      const pending=st.pendingClick;
+      if(!pending||!editing()||!spansOf(page).length) return;
+      st.pendingClick=null;
+      const pageIndex=call('getPageIndex');
+      if(pageIndex!==pending.pageIndex) return;
+      const box=page.getBoundingClientRect();
+      if(!(box.width>0&&box.height>0)) return;
+      handlePagePoint(page,pageIndex,box.left+pending.fx*box.width,box.top+pending.fy*box.height);
+    }
+    function onPageClick(event){
+      const page=pageEl();
+      if(!isPageClickTarget(page,event.target)) return;
+      event.stopPropagation();
+      const pageIndex=call('getPageIndex');
+      if(!Number.isInteger(pageIndex)) return;
+      if(st.focus){
+        if(st.focus.fromButton){
+          const box=page.getBoundingClientRect();
+          if(box.width>0&&box.height>0){
+            st.pendingClick={pageIndex,fx:(event.clientX-box.left)/box.width,fy:(event.clientY-box.top)/box.height};
+          }
+        }
+        return;
+      }
+      handlePagePoint(page,pageIndex,event.clientX,event.clientY);
     }
 
     /* ---------- phone tap-zoom and mission hint zoom ---------- */
@@ -924,27 +1364,38 @@
       stage.scrollTop=Math.max(0,focus.fy*box.height-stage.clientHeight/2);
       bar.scrollIntoView({block:'start'});
     }
+    function missionHintPaper(){
+      const paper=root.FalsifyBoothPaper&&typeof root.FalsifyBoothPaper.current==='function'?root.FalsifyBoothPaper.current():null;
+      return paper&&paper.source==='mission'?paper:null;
+    }
+    function autoZoomTarget(page){
+      if(desk()||!editing()||st.autoOff||zoomed()) return null;
+      const src=call('getSource');
+      const paper=missionHintPaper();
+      if(!src||st.auto.has(src.fileHash)||!paper) return null;
+      if(call('getPageIndex')!==(paper.pageHint||1)-1) return null;
+      const spans=spansOf(page);
+      const box=page.getBoundingClientRect();
+      return spans.length&&box.width>0&&box.height>0?{src,spans,box}:null;
+    }
+    function nearNumberRects(spans, box, spot, radius){
+      return spans.filter(span=>numericToken(span.textContent.trim()))
+        .map(span=>span.getBoundingClientRect())
+        .filter(r=>Math.hypot((r.left+r.right)/2-box.left-spot.x,(r.top+r.bottom)/2-box.top-spot.y)<=radius);
+    }
     /* A mission opens zoomed on its hint page's number table, once per paper, using text-layer spans only. */
     function autoZoom(page){
-      const src=call('getSource');
-      const paper=root.FalsifyBoothPaper&&typeof root.FalsifyBoothPaper.current==='function'?root.FalsifyBoothPaper.current():null;
-      if(desk()||!editing()||st.autoOff||zoomed()||!src||st.auto.has(src.fileHash)||!paper||paper.source!=='mission') return;
-      if(call('getPageIndex')!==(paper.pageHint||1)-1) return;
-      const spans=spansOf(page);
-      if(!spans.length) return;
-      const box=page.getBoundingClientRect();
-      if(!(box.width>0&&box.height>0)) return;
-      const radius=box.width*0.12;
+      const ctx=autoZoomTarget(page);
+      if(!ctx) return;
+      const radius=ctx.box.width*0.12;
       const spot=densest(numberPoints(page),radius);
-      st.auto.add(src.fileHash);
+      st.auto.add(ctx.src.fileHash);
       if(!spot||spot.count<3) return;
-      const near=spans.filter(span=>numericToken(span.textContent.trim())).map(span=>span.getBoundingClientRect())
-        .filter(r=>Math.hypot((r.left+r.right)/2-box.left-spot.x,(r.top+r.bottom)/2-box.top-spot.y)<=radius);
+      const near=nearNumberRects(ctx.spans,ctx.box,spot,radius);
       if(!near.length) return;
       const seed=near.map(r=>fraction(r,page)).reduce((a,b)=>union(a,b));
-      const items=spanItems(page);
-      const lineH=near.reduce((h,r)=>Math.max(h,r.height),0)/box.height;
-      const block=padRect(hintBlock(items,seed,lineH),0.015);
+      const lineH=near.reduce((h,r)=>Math.max(h,r.height),0)/ctx.box.height;
+      const block=padRect(hintBlock(spanItems(page),seed,lineH),0.015);
       st.focus={block};
       if(!setZoom(fitZoom(block.w,0,TABLE_ZOOM))) st.focus=null;
     }
@@ -990,11 +1441,13 @@
       const hash=event&&event.detail&&event.detail.fileHash||'';
       if(hash===st.fileHash) return;
       st.fileHash=hash;
+      st.pendingClick=null;
       closePop(false);
       closeSheet(false);
       repaintCurrent();
     }
     function onClear(){
+      st.pendingClick=null;
       closePop(false);
       closeSheet(false);
       repaintCurrent();
@@ -1009,17 +1462,20 @@
       if(Number.isInteger(pageIndex)) renderOverlays(page,pageIndex);
       applyFocus(page);
       autoZoom(page);
+      replayPendingClick(page);
     }
     function onMutate(){
       const page=pageEl();
       if(page&&page!==st.pageEl) onPage(page);
-      else if(page){
-        if(spansOf(page).length) autoZoom(page);
+      else if(page&&spansOf(page).length){
+        autoZoom(page);
+        replayPendingClick(page);
       }
     }
     function onStep(){
       if(editing()){const page=pageEl();if(page) autoZoom(page);return;}
       st.autoOff=false;
+      st.pendingClick=null;
       closePop(false);
       closeSheet(false);
       if(zoomed()) setZoom(1);
@@ -1092,7 +1548,9 @@
 
   root.FalsifyBoothPageEdit=Object.freeze({
     tokenAt,tokensIn,numericToken,placePopover,keyboardInset,padRect,overlaps,union,
-    densest,hintBlock,fitZoom,groupLines,clusterBlock,applyEditsToBlock,trimBlockLines,
+    densest,hintBlock,fitZoom,detectColumnSplits,groupLines,clusterBlock,
+    applyEditsToBlock,applyEditsToBlockWithMap,diffChangedRange,mapRangeToBlockLines,
+    changedBlockEdit,commitParagraphChange,
     ZOOM,TABLE_ZOOM
   });
   const doc=root.document;

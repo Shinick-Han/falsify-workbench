@@ -36,7 +36,7 @@ html.booth-pe-typing .booth-dock{display:none}
 
 /* Zoom mode: the stage becomes a pannable box over the page drawn at 2.5-3.5x (phones) or +/- zoom (desktop). */
 @media (min-width:1024px){
-  html.booth-pe-zoomed[data-booth-step="edit"] #paper-before-stage{overflow:auto;max-height:calc(100vh - 180px);max-height:calc(100dvh - 180px)}
+  html.booth-pe-zoomed[data-booth-step="edit"] #paper-before-stage{display:block;overflow:auto;max-height:calc(100vh - 180px);max-height:calc(100dvh - 180px)}
 }
 @media (max-width:1023.98px){
   html[data-booth-step] #paper-workspace .paper-compare{overflow-x:clip}

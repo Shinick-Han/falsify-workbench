@@ -208,7 +208,8 @@ async function checkZoomAndHint(page, wide) {
     assert.ok(fit.ragas.left >= Math.max(0, fit.stage.left) && fit.last.right <= Math.min(fit.width, fit.stage.right), 'Table 1 in view: ' + JSON.stringify(fit));
     assert.equal(await page.locator('#booth-pe-fit').isVisible(), true, '전체 쪽 shown while zoomed');
     await page.locator('#booth-pe-fit').click();
-    await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() === 1);
+    await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() === 1
+      && !document.documentElement.classList.contains('booth-pe-zoomed'));
     assert.equal(await page.locator('#booth-pe-fit').isVisible(), false);
   }
   const firstStep = wide ? 1.25 : 1.5;
@@ -216,7 +217,8 @@ async function checkZoomAndHint(page, wide) {
   await page.waitForFunction(v => globalThis.FalsifyPaperWorkspace.getZoom() === v, firstStep);
   assert.equal(await page.locator('#booth-pe-fit').isVisible(), true);
   await page.locator('#booth-pe-zoom-out').click();
-  await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() === 1);
+  await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() === 1
+    && !document.documentElement.classList.contains('booth-pe-zoomed'));
   assert.equal(await page.locator('#booth-pe-zoom-out').isDisabled(), true);
 }
 
@@ -398,6 +400,31 @@ async function paragraphFlow(page, wide) {
   const patches = await overlays(page);
   assert.equal(patches.length, 3, 'all 3 caption rects covered by white overlays');
   assert.deepEqual(patches.map(p => p.text), ['', '', '']);
+
+  // Page 5 left-column body paragraph ("randomly"): stays in left column, no right-column or prompt-box bleed,
+  // and changed-range edit covers at most 2 lines inside the left column.
+  await page.evaluate(() => globalThis.FalsifyBoothEdits.clear());
+  await tapToken(page, wide, 'randomly', 0);
+  await pop.waitFor({state: 'visible'});
+  await pop.getByRole('button', {name: '문단 전체 고치기'}).click();
+  await sheet.waitFor({state: 'visible'});
+  const bodyPrefill = await area.inputValue();
+  assert.ok(bodyPrefill.includes('Ties, where') && bodyPrefill.includes('broken randomly.'), 'sheet holds tapped left-column paragraph: ' + JSON.stringify(bodyPrefill));
+  assert.ok(!bodyPrefill.includes('has shown') && !bodyPrefill.includes('closely aligned'), 'right column must not leak into paragraph sheet');
+  assert.ok(!bodyPrefill.includes('Faithfulness measures') && !bodyPrefill.includes('answer: [answer]'), 'prompt box must not leak into paragraph sheet');
+  await area.fill(bodyPrefill.replace('broken randomly', 'broken deterministically'));
+  await sheetApply.click();
+  await page.waitForFunction(() => document.querySelector('#booth-pe-sheet').hidden);
+
+  edits = await storeEdits(page);
+  assert.equal(edits.length, 1, 'changed-range paragraph edit emits one BoothEdit');
+  assert.equal(edits[0].source, 'paragraph');
+  assert.equal(edits[0].originalText, 'randomly.');
+  assert.equal(edits[0].newText, 'deterministically.');
+  assert.ok(edits[0].rects.length >= 1 && edits[0].rects.length <= 2, 'paragraph edit covers at most 2 lines: ' + JSON.stringify(edits[0].rects));
+  for (const r of edits[0].rects) {
+    assert.ok(r.x >= 0.1 && r.x < 0.5 && r.x + r.w <= 0.53, 'paragraph edit rect lies inside the left column: ' + JSON.stringify(r));
+  }
 }
 
 /* Previously refused areas (arXiv side stamp on page 1) are now freely editable with zero blocking messages. */
