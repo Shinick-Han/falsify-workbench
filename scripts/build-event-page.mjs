@@ -11,8 +11,10 @@
 //
 // Reads app/dist/index.html and never modifies it. The event HTML changes only the
 // cloud-config script name, the CSP connect-src origin, a title suffix, a
-// noindex robots meta, and event-theme.css/booth.css/booth.js after hosted-ai.js.
-// event-theme.css comes first so booth.css can override it. Whatever else
+// noindex robots meta, and the booth assets after hosted-ai.js: event-theme.css,
+// booth.css, booth-recipe.css, booth-myai.css, then booth.js, booth-recipe.js and
+// booth-myai.js (all defer). event-theme.css comes first so booth.css can override it;
+// booth.js runs before the recipe and my-AI scripts that extend it. Whatever else
 // index.html contains, including open-access.js, is copied through.
 import {readFileSync, writeFileSync} from 'node:fs';
 import {dirname, join, resolve} from 'node:path';
@@ -30,6 +32,9 @@ const ORIGIN = /^https:\/\/[a-z0-9.-]+(?::[1-9][0-9]{0,4})?$/;
 
 export const DEFAULT_EVENT_API_BASE = 'https://falsify-cloud-api-event.ai-gongbu.workers.dev';
 export const EVENT_TITLE_SUFFIX = ' · Event';
+/* Contract order: event-theme.css, booth.css, booth-recipe.css, booth-myai.css, then the scripts. */
+export const BOOTH_STYLES = Object.freeze(['event-theme.css', 'booth.css', 'booth-recipe.css', 'booth-myai.css']);
+export const BOOTH_SCRIPTS = Object.freeze(['booth.js', 'booth-recipe.js', 'booth-myai.js']);
 
 function fail(message, exitCode) {
   const error = new Error(message);
@@ -142,9 +147,8 @@ function injectBooth(html, newline){
   const tag = found[0][0];
   const extra = [
     tag,
-    `  <link rel="stylesheet" href="event-theme.css?v=${version}">`,
-    `  <link rel="stylesheet" href="booth.css?v=${version}">`,
-    `  <script src="booth.js?v=${version}" defer></script>`,
+    ...BOOTH_STYLES.map(name => `  <link rel="stylesheet" href="${name}?v=${version}">`),
+    ...BOOTH_SCRIPTS.map(name => `  <script src="${name}?v=${version}" defer></script>`),
   ].join(newline);
   return replaceOnce(html, tag, extra);
 }

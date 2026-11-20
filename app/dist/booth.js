@@ -1453,8 +1453,8 @@
     function chooseMission(mission){
       hint=typeof mission.hint==='string'?mission.hint.trim():'';
       const n=missionPage(mission);
-      if(paper&&paper.source==='mission'&&paper.id===mission.paperId){enterEdit(n);return;}
-      void startPaper(missionPaper(mission),mission.paperId,'booth-mission-status',n);
+      if(paper&&paper.source==='mission'&&paper.id===mission.paperId){enterEdit(n);return Promise.resolve(true);}
+      return startPaper(missionPaper(mission),mission.paperId,'booth-mission-status',n);
     }
     function ticketStub(n){
       const parts=n?[el('span',{className:'n',textContent:String(n)}),el('span',{className:'u',textContent:'쪽'})]:[];
@@ -1619,6 +1619,8 @@
       if(sourceSha) paperPayload.sourceSha256=sourceSha;
       const built=buildSubmission(submissionInput(paperPayload));
       if(!built.ok){say('booth-submit-status',errorMessage(built.code));return null;}
+      const recipe=root.FalsifyBoothRecipe;
+      if(recipe&&typeof recipe.assist==='function') Object.assign(built.body,recipe.assist());
       const form=submissionForm(built.body,generatedFile);
       if(!form) say('booth-submit-status',errorMessage('invalid_request'));
       return form;
@@ -2114,12 +2116,23 @@
     on(doc,'falsify:document-clear',onBoothClear);
     on(root,'hashchange',()=>{showResult(false);});
     on(root,'resize',()=>{if(step==='ticket') drawBarcode();});
+    /* Recipe hook for booth-recipe.js: the mission or search load path by arXiv id. null until config loads. */
+    function openPaperById(id, meta){
+      if(!liveConfig) return null;
+      const mission=(Array.isArray(liveConfig.missions)?liveConfig.missions:[]).find(item=>item&&item.paperId===id);
+      if(mission) return chooseMission(mission);
+      hint='';
+      if(paper&&paper.id===id){enterEdit(0);return Promise.resolve(true);}
+      return startPaper(Object.assign({title:'',license:''},meta,{source:'arxiv',id}),id,'booth-mission-status',0);
+    }
+    root.FalsifyBoothPaper={open:openPaperById,current:()=>paper&&Object.assign({},paper)};
     watchEdits();
     setStep('pick');
     showResult(false);
     void loadConfig();
     return {destroy(){
       closed=true;
+      delete root.FalsifyBoothPaper;
       stopPolling();
       stopClock();
       cancelMake();
