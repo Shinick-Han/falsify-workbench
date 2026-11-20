@@ -1385,29 +1385,88 @@
     function makeLive(token){
       return !closed&&!!making&&making.token===token;
     }
-    /* 「다음」 builds the revised PDF directly: source blind-pdf check (skipped when trusted), then
-       FalsifyBrowserPdf.rewrite(sourceBytes, FalsifyBoothEdits.list()), hash and go to send. */
-    async function beginMake(){
-      if(making||closed) return;
-      const edits=liveEdits();
-      if(!edits.length){renderDock();return;}
-      if(!paper){say('booth-dock-status',PICK_PAPER);return;}
+    function engineError(){
+      const err=new Error('engine_unavailable');
+      err.code='engine_unavailable';
+      return err;
+    }
+    function checkMakeReady(edits){
+      if(!edits.length){renderDock();return null;}
+      if(!paper){say('booth-dock-status',PICK_PAPER);return null;}
       const cap=limitsOf(liveConfig).maxDeclared;
       if(edits.length>cap){
         say('booth-dock-status','한 번에 '+cap+'곳까지 제출할 수 있어요. 지금은 '+edits.length+'곳이에요.');
         renderDock();
-        return;
+        return null;
       }
       const sig=editSignature(edits);
       if(sig===adoptedSignature&&generatedFile&&SHA256.test(generatedHash)){
         setStep('send');
-        return;
+        return null;
       }
       const file=sourceFile();
       if(!file||typeof file.arrayBuffer!=='function'){
         say('booth-dock-status',PICK_PAPER);
+        return null;
+      }
+      return {edits,sig,file};
+    }
+    async function prepareSourceBytes(file, rawBytes, token){
+      const blind=blindPdfApi();
+      if(!blind||typeof blind.prepare!=='function') return rawBytes;
+      const clean=await blind.prepare({file});
+      if(!makeLive(token)) return null;
+      const cleanFile=clean&&clean.changed?clean.file:null;
+      if(!cleanFile||typeof cleanFile.arrayBuffer!=='function') return rawBytes;
+      return new Uint8Array(await cleanFile.arrayBuffer());
+    }
+    async function rewriteBytes(sourceBytes, edits){
+      const pdfApi=browserPdfApi();
+      if(!pdfApi||typeof pdfApi.rewrite!=='function') throw engineError();
+      const rewritten=await pdfApi.rewrite(sourceBytes,edits);
+      const outBytes=rewritten instanceof Uint8Array?rewritten:new Uint8Array(rewritten||[]);
+      if(!pdfMagic(outBytes)) throw engineError();
+      return outBytes;
+    }
+    function adoptGenerated(outBytes, hash, originalSha, edits, sig){
+      if(originalSha&&originalSha===hash){
+        clearGenerated();
+        say('booth-dock-status',errorMessage('pdf_unchanged'));
+        settleMake(false);
         return;
       }
+      const outFile=pdfFile(outBytes,'edited.pdf');
+      if(!outFile) throw engineError();
+      const nextRows=edits.map(editToRow);
+      sourceSha=originalSha;
+      generatedFile=outFile;
+      generatedHash=hash;
+      adoptedSignature=sig;
+      rows=rows.length?keepDeclared(nextRows,rows):nextRows;
+      say('booth-submit-status','');
+      renderRows();
+      settleMake(true);
+    }
+    async function runMake(ready, token){
+      const rawBytes=new Uint8Array(await ready.file.arrayBuffer());
+      if(!makeLive(token)) return;
+      const originalSha=await digestHex(rawBytes);
+      if(!makeLive(token)) return;
+      const sourceBytes=await prepareSourceBytes(ready.file,rawBytes,token);
+      if(!sourceBytes||!makeLive(token)) return;
+      const outBytes=await rewriteBytes(sourceBytes,ready.edits);
+      if(!makeLive(token)) return;
+      const hash=await digestHex(outBytes);
+      if(!makeLive(token)) return;
+      if(!hash) throw engineError();
+      adoptGenerated(outBytes,hash,originalSha,ready.edits,ready.sig);
+    }
+    /* 「다음」 builds the revised PDF directly: source blind-pdf check (skipped when trusted), then
+       FalsifyBrowserPdf.rewrite(sourceBytes, FalsifyBoothEdits.list()), hash and go to send. */
+    async function beginMake(){
+      if(making||closed) return;
+      const ready=checkMakeReady(liveEdits());
+      if(!ready) return;
       makeSeq+=1;
       const token=makeSeq;
       making={token};
@@ -1416,62 +1475,7 @@
       setAttr('booth-dock','data-busy','true');
       renderDock();
       try{
-        const rawBytes=new Uint8Array(await file.arrayBuffer());
-        if(!makeLive(token)) return;
-        const originalSha=await digestHex(rawBytes);
-        if(!makeLive(token)) return;
-        let sourceBytes=rawBytes;
-        const blind=blindPdfApi();
-        if(blind&&typeof blind.prepare==='function'){
-          const clean=await blind.prepare({file});
-          if(!makeLive(token)) return;
-          if(clean&&clean.changed&&clean.file&&typeof clean.file.arrayBuffer==='function'){
-            sourceBytes=new Uint8Array(await clean.file.arrayBuffer());
-            if(!makeLive(token)) return;
-          }
-        }
-        const pdfApi=browserPdfApi();
-        if(!pdfApi||typeof pdfApi.rewrite!=='function'){
-          const err=new Error('engine_unavailable');
-          err.code='engine_unavailable';
-          throw err;
-        }
-        const rewritten=await pdfApi.rewrite(sourceBytes,edits);
-        if(!makeLive(token)) return;
-        const outBytes=rewritten instanceof Uint8Array?rewritten:new Uint8Array(rewritten||[]);
-        if(!pdfMagic(outBytes)){
-          const err=new Error('engine_unavailable');
-          err.code='engine_unavailable';
-          throw err;
-        }
-        const hash=await digestHex(outBytes);
-        if(!makeLive(token)) return;
-        if(!hash){
-          const err=new Error('engine_unavailable');
-          err.code='engine_unavailable';
-          throw err;
-        }
-        if(originalSha&&originalSha===hash){
-          clearGenerated();
-          say('booth-dock-status',errorMessage('pdf_unchanged'));
-          settleMake(false);
-          return;
-        }
-        const outFile=pdfFile(outBytes,'edited.pdf');
-        if(!outFile){
-          const err=new Error('engine_unavailable');
-          err.code='engine_unavailable';
-          throw err;
-        }
-        const nextRows=edits.map(editToRow);
-        sourceSha=originalSha;
-        generatedFile=outFile;
-        generatedHash=hash;
-        adoptedSignature=sig;
-        rows=rows.length?keepDeclared(nextRows,rows):nextRows;
-        say('booth-submit-status','');
-        renderRows();
-        settleMake(true);
+        await runMake(ready,token);
       }catch(_error){
         if(!makeLive(token)) return;
         say('booth-dock-status',ENGINE_UNAVAILABLE);

@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const {chromium} = require('playwright');
+const oracle = require('./helpers/pdf-oracle.cjs');
 
 const dist = path.resolve(__dirname, '../dist');
 const pdfPath = process.env.FALSIFY_BOOTH_MISSION_PDF || '';
@@ -102,7 +103,7 @@ async function stubApi(route, submissions, claims) {
   if (request.method() === 'POST' && url.pathname === '/v1/booth/submissions') {
     let body = Buffer.alloc(0);
     try { body = request.postDataBuffer() || Buffer.alloc(0); } catch { body = Buffer.alloc(0); }
-    submissions.push(body);
+    submissions.push({body, contentType: request.headers()['content-type'] || ''});
     return json(route, 201, {
       receipt: 'F-0042', claimKey: '7Q3K-M9XD', status: 'received',
       course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:00.000Z',
@@ -158,6 +159,14 @@ async function deskChecks(page, desk, current) {
   assert.equal(await page.locator('.booth-stepbar-row b:visible, .booth-prog:visible, .booth-top:visible').count(), 0, 'phone step bars are hidden');
 }
 
+async function findAndReplace(page, desk, find, replace) {
+  const pane = page.locator(desk ? '#booth-pane-find' : '#booth-find-fold');
+  if (!desk && !(await pane.evaluate(node => node.open))) await pane.locator('summary').click();
+  await pane.getByLabel('바꿀 글자').first().fill(find);
+  await pane.getByLabel('새 글자').first().fill(replace);
+  await pane.getByRole('button', {name: '바꾸기'}).first().click();
+}
+
 /* One full pass: pick, edit, send, ticket. desk is the >=1024px layout in booth.css. */
 async function walk(browser, viewport, desk, pageErrors) {
   const submissions = [];
@@ -207,56 +216,31 @@ async function walk(browser, viewport, desk, pageErrors) {
   // blind-pdf.js trust skip: booth.js holds the one-time capability, so no page script can claim it.
   assert.equal(await page.evaluate(() => globalThis.FalsifyBlindPdf.claimTrust()), null, 'the trust capability is already claimed');
   assert.equal(await page.evaluate(() => typeof globalThis.FalsifyBlindPdf.trust), 'undefined');
-  await page.waitForFunction(() => [...document.querySelectorAll('.paper-paragraph-button')].some(node => node.textContent.includes('0.95')));
+  await page.waitForFunction(() => !!globalThis.FalsifyPaperWorkspace?.getPdfDoc?.()
+    && /^5 \//.test(document.querySelector('#paper-page-label')?.textContent || '')
+    && [...document.querySelectorAll('#paper-before-stage .paper-text-layer span[data-i]')].some(node => node.textContent.includes('0.95')));
   assert.match(await page.locator('#booth-hint').textContent(), /^힌트 · Table 1의 점수 하나를 바꿔 보세요/);
   assert.equal(await page.locator('#booth-dock-count').textContent(), '고친 곳 0개');
   assert.equal(await page.locator('#booth-next').isDisabled(), true);
 
-  // edit: change one paragraph; the dock counts it and enables 다음. On event.html the page itself is the
-  // editor (booth-pageedit.js); the paragraph list stays for screen readers and keyboards, visually hidden
-  // until it holds focus, so this walk opens the paragraph through it. Phones open zoomed: zoom out first.
+  // edit: find-and-replace adds to FalsifyBoothEdits; the dock counts it and enables 다음.
   assert.equal(await page.locator('#booth-find-list').count(), 0);
-  // The hint zoom fits Table 1 once the paragraph boxes are in, a moment after the list (only once per paper).
-  if (!desk) await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() > 1, null, {timeout: 4000}).catch(() => {});
-  if (await page.locator('#booth-pe-fit').isVisible()) {
-    await page.locator('#booth-pe-fit').click();
-    await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() === 1);
-  }
-  await page.waitForFunction(() => [...document.querySelectorAll('.paper-paragraph-button')].some(node => node.textContent.includes('0.95') && node.textContent.includes('0.78')));
-  const paragraphIndex = await page.evaluate(() => {
-    const hits = [...document.querySelectorAll('.paper-paragraph-button')].map((node, index) => ({
-      index, length: node.textContent.length, text: node.textContent,
-    })).filter(item => item.text.includes('0.95') && item.text.includes('0.78') && item.length <= 400);
-    hits.sort((a, b) => a.length - b.length);
-    return hits.length ? hits[0].index : -1;
-  });
-  assert.equal(paragraphIndex >= 0, true);
-  const paragraph = page.locator('.paper-paragraph-button').nth(paragraphIndex);
-  await paragraph.focus();
-  await page.keyboard.press('Enter');
-  const editor = page.locator('textarea[aria-label$="직접 편집"]');
-  await editor.waitFor();
-  const original = await editor.inputValue();
-  assert.equal(original.includes('0.95'), true);
-  await editor.fill(original.replace('0.95', '0.50'));
-  await page.locator('.paper-direct-controls').getByRole('button', {name: '완료', exact: true}).click();
+  await findAndReplace(page, desk, '0.95', '0.50');
   await page.waitForFunction(() => document.querySelector('#booth-dock-count')?.textContent === '고친 곳 1개');
+  const stored = await page.evaluate(() => globalThis.FalsifyBoothEdits.list());
+  assert.equal(stored.length, 1);
+  assert.equal(stored[0].pageIndex, 4);
+  assert.equal(stored[0].originalText, '0.95');
+  assert.equal(stored[0].newText, '0.50');
+  assert.equal(stored[0].rects.length >= 1, true);
   assert.equal(await page.locator('#booth-next').isEnabled(), true);
   const dock = await page.locator('#booth-dock').boundingBox();
   assert.equal(Math.round(dock.y + dock.height), viewport.height, 'dock is fixed to the bottom');
   await deskChecks(page, desk, 2);
   if (desk) {
     assert.equal(Math.round(dock.width), viewport.width, 'the desktop dock spans the viewport');
-    // A second edit, then delete it from the dock: the workspace's own 삭제 runs and the count drops.
-    const otherIndex = await page.evaluate(() => [...document.querySelectorAll('.paper-paragraph-button')]
-      .findIndex(node => !node.textContent.includes('0.95') && node.textContent.trim().length >= 20 && node.textContent.length <= 400));
-    assert.equal(otherIndex >= 0, true);
-    const other = page.locator('.paper-paragraph-button').nth(otherIndex);
-    await other.focus();
-    await page.keyboard.press('Enter');
-    await editor.waitFor();
-    await editor.fill((await editor.inputValue()) + ' extra');
-    await page.locator('.paper-direct-controls').getByRole('button', {name: '완료', exact: true}).click();
+    // A second edit, then delete it from the dock: FalsifyBoothEdits.remove runs and the count drops.
+    await findAndReplace(page, desk, '0.78', '0.88');
     await page.waitForFunction(() => document.querySelector('#booth-dock-count')?.textContent === '고친 곳 2개');
     const chipList = page.locator('#booth-dock-chips .booth-dock-chip');
     assert.equal(await chipList.count(), 2);
@@ -274,9 +258,19 @@ async function walk(browser, viewport, desk, pageErrors) {
     assert.equal(await page.locator('#booth-hint').isVisible(), true);
   }
 
-  // 다음 builds the submission PDF itself, then opens send.
+  // 다음 calls FalsifyBrowserPdf.rewrite directly, then opens send.
+  await page.evaluate(() => {
+    const api = globalThis.FalsifyBrowserPdf;
+    const orig = api.rewrite;
+    globalThis.__rewriteCalls = 0;
+    api.rewrite = (...args) => {
+      globalThis.__rewriteCalls += 1;
+      return orig.apply(api, args);
+    };
+  });
   await page.locator('#booth-next').click();
   await stepIs(page, 'send');
+  assert.equal(await page.evaluate(() => globalThis.__rewriteCalls), 1, '다음 calls FalsifyBrowserPdf.rewrite');
   assert.equal(await page.locator('#booth-make').count(), 0);
   assert.equal(await page.locator('#booth-courses').count(), 0);
   const card = page.locator('#booth-rows .booth-card').first();
@@ -330,13 +324,23 @@ async function walk(browser, viewport, desk, pageErrors) {
   assert.match(await page.locator('#booth-ticket-pages').textContent(), /^\d+쪽 · 1곳$/);
   assert.equal(await page.locator('.rail [data-view="blue"]').isHidden(), true);
   assert.equal(submissions.length, 1);
-  const posted = submissions[0].toString('utf8');
-  assert.equal(posted.includes('edited.pdf'), true);
-  assert.equal(posted.includes('0.50'), true);
-  assert.equal(posted.includes('0.95'), true);
-  assert.equal(posted.includes('2026-11-22.v3'), true);
-  assert.equal(posted.includes('"course":"quick"'), true);
-  assert.equal(posted.includes('"defectType":"number"'), true);
+  const parsed = oracle.parseMultipart(submissions[0].body, submissions[0].contentType);
+  assert.equal(parsed.pdfFilename, 'edited.pdf');
+  assert.equal(parsed.pdfContentType, 'application/pdf');
+  assert.ok(parsed.pdfBytes && parsed.pdfBytes.subarray(0, 5).toString('ascii') === '%PDF-');
+  assert.equal(parsed.meta.consentVersion, '2026-11-22.v3');
+  assert.equal(parsed.meta.course, 'quick');
+  assert.equal(parsed.meta.declared.length, 1);
+  assert.equal(parsed.meta.declared[0].pageIndex, 4);
+  assert.equal(parsed.meta.declared[0].before, '0.95');
+  assert.equal(parsed.meta.declared[0].after, '0.50');
+  assert.equal(parsed.meta.declared[0].defectType, 'number');
+  assert.equal(parsed.meta.editedSha256, oracle.sha256(parsed.pdfBytes));
+  assert.equal(parsed.meta.paper.sourceSha256, oracle.sha256(pdfBytes));
+  assert.notEqual(parsed.meta.editedSha256, parsed.meta.paper.sourceSha256);
+  const page5Text = await oracle.extractText(parsed.pdfBytes, 4);
+  assert.equal(page5Text.includes('0.50'), true, 'new text 0.50 extracts from submitted PDF');
+  assert.equal(page5Text.includes('0.95'), false, 'original text 0.95 is removed from submitted PDF');
   assert.equal(await page.locator('#booth-ticket-wait').isVisible(), true);
   assert.equal(await page.locator('#booth-ticket-steps').textContent(), '수정본 받음AI가 앞뒤 문장과 표를 대조하는 중결과');
   assert.match(await page.locator('#booth-live-capture').textContent(), /^이 티켓을 캡처해 두세요/);
@@ -471,11 +475,10 @@ async function main() {
     const note = open ? await open.evaluate(() => ({
       step: document.documentElement.dataset.boothStep,
       dock: document.querySelector('#booth-dock-status')?.textContent || '',
+      dockCount: document.querySelector('#booth-dock-count')?.textContent || '',
       status: document.querySelector('#booth-submit-status')?.textContent || '',
       mission: document.querySelector('#booth-mission-status')?.textContent || '',
-      gen: document.querySelector('#paper-generate-status')?.textContent || '',
-      edit: document.querySelector('#paper-edit-status')?.textContent || '',
-      before: document.querySelector('#paper-before-status')?.textContent || '',
+      edits: globalThis.FalsifyBoothEdits?.list?.()?.length ?? null,
     })).catch(() => null) : null;
     error.message += '\npage=' + JSON.stringify(note) + '\nerrors=' + pageErrors.join(' | ');
     throw error;

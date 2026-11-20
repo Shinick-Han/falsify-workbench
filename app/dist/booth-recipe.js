@@ -38,13 +38,13 @@
   const ERROR_TEXT={
     invalid_code:'코드 형식을 확인해 주세요. 예: R-7K3QXM',
     not_found:'이 코드로 찾은 레시피가 없어요. 코드를 다시 확인해 볼까요? 레시피는 6시간 동안 쓸 수 있어요.',
-    invalid_recipe:'레시피를 읽지 못했어요. agent에게 다시 만들어 달라고 해 주세요.',
+    invalid_recipe:'레시피 형식이 맞지 않아요. 코드를 다시 확인해 볼까요?',
     rate_limited:'지금 요청이 몰려 있어요. 잠시 뒤 다시 눌러 주세요.',
     network:'서버에 연결하지 못했어요. 네트워크를 확인해 주세요.',
     no_paper:'레시피의 논문을 열지 못했어요. 「불러오기」를 다시 눌러 주세요.'
   };
   const REASON_TEXT={
-    not_found:'논문에서 이 글자를 찾지 못했어요. 논문에 적힌 글자를 확인해 볼까요?',
+    not_found:'찾는 글자가 이 논문에 없어요.',
     ambiguous:'같은 글자가 여러 곳에 있어요. 바꿀 곳을 눌러 주세요.',
     no_paper:'논문이 아직 열리지 않았어요. 잠시 뒤 「바꾸기」를 다시 눌러 주세요.'
   };
@@ -169,37 +169,45 @@
       m1[1]*m2[4]+m1[3]*m2[5]+m1[5]
     ];
   }
-  /* pdf.js getTextContent item -> page-fraction rect on the displayed viewport (top-left origin). */
-  function itemRect(item, viewport){
-    if(item&&item.rect) return plainRect(item.rect);
+  function viewportDims(viewport){
     const W=Number(viewport&&viewport.width)||0;
     const H=Number(viewport&&viewport.height)||0;
-    const t=item&&Array.isArray(item.transform)&&item.transform.length>=6?item.transform:null;
-    if(!(W>0&&H>0)||!t) return null;
+    if(!(W>0&&H>0)) return null;
     const vt=Array.isArray(viewport.transform)&&viewport.transform.length>=6?viewport.transform:[1,0,0,-1,0,H];
-    const tx=mulMat(vt,t);
-    const ox=tx[4];
-    const oy=tx[5];
+    return {W,H,vt};
+  }
+  function itemBounds(tx, item){
     const hLen=Math.hypot(tx[0],tx[1])||1;
+    const vLen=Math.hypot(tx[2],tx[3])||hLen;
+    const fontH=(Number(item.height)>0?Number(item.height):vLen)||10;
+    const rawW=Number(item.width);
+    const itemW=rawW>0?rawW:Math.max(fontH*0.5*String(item.str||'').length,1);
     const ux=tx[0]/hLen;
     const uy=tx[1]/hLen;
-    const vLen=Math.hypot(tx[2],tx[3])||hLen;
     const vx=tx[2]/vLen;
     const vy=tx[3]/vLen;
-    const fontH=(Number(item.height)>0?Number(item.height):vLen)||10;
-    const itemW=Number(item.width)>0?Number(item.width):Math.max(fontH*0.5*String(item.str||'').length,1);
-    const ax=ox;
-    const ay=oy;
+    const ox=tx[4];
+    const oy=tx[5];
     const bx=ox+ux*itemW;
     const by=oy+uy*itemW;
     const asc=0.85*fontH;
     const desc=0.20*fontH;
-    const xs=[ax-desc*vx,bx-desc*vx,ax+asc*vx,bx+asc*vx];
-    const ys=[ay-desc*vy,by-desc*vy,ay+asc*vy,by+asc*vy];
-    const x0=clamp01(Math.min(...xs)/W);
-    const x1=clamp01(Math.max(...xs)/W);
-    const y0=clamp01(Math.min(...ys)/H);
-    const y1=clamp01(Math.max(...ys)/H);
+    return {
+      xs:[ox-desc*vx,bx-desc*vx,ox+asc*vx,bx+asc*vx],
+      ys:[oy-desc*vy,by-desc*vy,oy+asc*vy,by+asc*vy]
+    };
+  }
+  /* pdf.js getTextContent item -> page-fraction rect on the displayed viewport (top-left origin). */
+  function itemRect(item, viewport){
+    if(item&&item.rect) return plainRect(item.rect);
+    const dims=viewportDims(viewport);
+    const t=item&&Array.isArray(item.transform)&&item.transform.length>=6?item.transform:null;
+    if(!dims||!t) return null;
+    const {xs,ys}=itemBounds(mulMat(dims.vt,t),item);
+    const x0=clamp01(Math.min(...xs)/dims.W);
+    const x1=clamp01(Math.max(...xs)/dims.W);
+    const y0=clamp01(Math.min(...ys)/dims.H);
+    const y1=clamp01(Math.max(...ys)/dims.H);
     return x1>x0&&y1>y0?{x:x0,y:y0,w:x1-x0,h:y1-y0}:null;
   }
   function sameLine(a, b){
@@ -228,38 +236,34 @@
     }
     return merged;
   }
+  function itemSeparator(text, str, prevEol, prevRect, rect){
+    if(!text||WS.test(text[text.length-1])||WS.test(str[0])) return '';
+    if(prevEol) return '\n';
+    if(!prevRect||!rect) return ' ';
+    if(!sameLine(prevRect,rect)) return '\n';
+    return rect.x-(prevRect.x+prevRect.w)>0.18*(rect.h/1.05)?' ':'';
+  }
+  function appendTextItem(state, item, viewport){
+    if(!item||typeof item.str!=='string') return;
+    if(!item.str){
+      if(item.hasEOL&&state.text&&!state.text.endsWith('\n')) state.text+='\n';
+      state.prevEol=!!item.hasEOL;
+      return;
+    }
+    const rect=itemRect(item,viewport);
+    state.text+=itemSeparator(state.text,item.str,state.prevEol,state.prevRect,rect);
+    const start=state.text.length;
+    state.text+=item.str;
+    if(rect) state.spans.push({start,end:state.text.length,rect});
+    if(item.hasEOL&&!state.text.endsWith('\n')) state.text+='\n';
+    state.prevRect=rect||state.prevRect;
+    state.prevEol=!!item.hasEOL;
+  }
   /* Build one indexed page from pdf.js items (or synthetic items with .rect). */
   function indexItems(pageIndex, items, viewport){
-    let text='';
-    const spans=[];
-    let prevRect=null;
-    let prevEol=false;
-    for(const item of Array.isArray(items)?items:[]){
-      if(!item||typeof item.str!=='string') continue;
-      if(!item.str){
-        if(item.hasEOL&&text&&!text.endsWith('\n')) text+='\n';
-        prevEol=!!item.hasEOL;
-        continue;
-      }
-      const rect=itemRect(item,viewport);
-      if(text&&!WS.test(text[text.length-1])&&!WS.test(item.str[0])){
-        if(prevEol){
-          text+='\n';
-        }else if(prevRect&&rect){
-          if(!sameLine(prevRect,rect)) text+='\n';
-          else if(rect.x-(prevRect.x+prevRect.w)>0.18*(rect.h/1.05)) text+=' ';
-        }else{
-          text+=' ';
-        }
-      }
-      const start=text.length;
-      text+=item.str;
-      if(rect) spans.push({start,end:text.length,rect});
-      if(item.hasEOL&&!text.endsWith('\n')) text+='\n';
-      prevRect=rect||prevRect;
-      prevEol=!!item.hasEOL;
-    }
-    return {pageIndex,text,spans};
+    const state={text:'',spans:[],prevRect:null,prevEol:false};
+    for(const item of Array.isArray(items)?items:[]) appendTextItem(state,item,viewport);
+    return {pageIndex,text:state.text,spans:state.spans};
   }
   /* Fallback synthetic line rects when a caller passes plain text without item rects. */
   function indexPlainText(pageIndex, text){
@@ -556,17 +560,15 @@
       try{doc.dispatchEvent(new root.CustomEvent('falsify:booth-index-ready'));}catch{}
     }
   }
-  /* Rendered DOM text layer fallback when no pdf.js document is exposed yet. */
-  function indexFromTextLayer(){
-    const doc=root.document;
-    const idx=currentPageIndex();
-    if(!doc||idx==null) return [];
+  function textLayerBox(doc){
     const stage=doc.getElementById('paper-before-stage');
     const pageEl=stage&&stage.querySelector&&stage.querySelector('.paper-page');
     const layer=pageEl&&pageEl.querySelector('.paper-text-layer');
-    if(!pageEl||!layer) return [];
+    if(!pageEl||!layer) return null;
     const box=pageEl.getBoundingClientRect();
-    if(!(box.width>0&&box.height>0)) return [];
+    return box.width>0&&box.height>0?{layer,box}:null;
+  }
+  function textLayerItems(layer, box){
     const items=[];
     for(const span of layer.querySelectorAll('span')){
       const str=span.textContent||'';
@@ -575,6 +577,16 @@
       if(!(r.width>0&&r.height>0)) continue;
       items.push({str,rect:{x:(r.left-box.left)/box.width,y:(r.top-box.top)/box.height,w:r.width/box.width,h:r.height/box.height}});
     }
+    return items;
+  }
+  /* Rendered DOM text layer fallback when no pdf.js document is exposed yet. */
+  function indexFromTextLayer(){
+    const doc=root.document;
+    const idx=currentPageIndex();
+    if(!doc||idx==null) return [];
+    const found=textLayerBox(doc);
+    if(!found) return [];
+    const items=textLayerItems(found.layer,found.box);
     return items.length?[indexItems(idx,items,null)]:[];
   }
   /* Fallback for unit-test stubs that supply source.pages or source.segments without pdf.js. */
@@ -629,41 +641,20 @@
     }
     return indexCache.pages;
   }
-  async function ensureIndex(){
-    const pdf=pdfDocOf();
-    const src=source();
-    const key=pdf||(src&&(src.fileHash||src.file))||null;
-    if(!key) return [];
-    if(indexCache.key===key&&indexCache.pages.length) return indexCache.pages;
-    if(indexCache.key===key&&indexCache.promise) return indexCache.promise;
-    if(!pdf){
-      const fb=fallbackPagesFromSource(src);
-      if(fb.length){indexCache={key,pages:fb,promise:null};return fb;}
-      if(src&&src.file&&typeof src.file.arrayBuffer==='function'&&root.FalsifyPreview&&typeof root.FalsifyPreview.defaultImport==='function'){
-        const task=(async()=>{
-          const preview=root.FalsifyPreview;
-          const lib=await preview.defaultImport();
-          if(lib.GlobalWorkerOptions&&!lib.GlobalWorkerOptions.workerSrc&&root.document){
-            lib.GlobalWorkerOptions.workerSrc=new URL('./vendor/pdf.worker.mjs',root.document.baseURI).href;
-          }
-          const bytes=new Uint8Array(await src.file.arrayBuffer());
-          const doc=await lib.getDocument(preview.pdfParams(bytes,root.document?root.document.baseURI:'')).promise;
-          try{return await indexPdfDoc(doc);}finally{doc.destroy&&doc.destroy();}
-        })();
-        indexCache={key,pages:[],promise:task};
-        try{
-          const pages=await task;
-          if(indexCache.key===key) indexCache={key,pages,promise:null};
-          dispatchIndexReady();
-          return pages;
-        }catch{
-          if(indexCache.key===key) indexCache={key:null,pages:[],promise:null};
-          return indexFromTextLayer();
-        }
-      }
-      return indexFromTextLayer();
+  function canPreviewFile(src){
+    return !!(src&&src.file&&typeof src.file.arrayBuffer==='function'&&root.FalsifyPreview&&typeof root.FalsifyPreview.defaultImport==='function');
+  }
+  async function indexSourceFile(src){
+    const preview=root.FalsifyPreview;
+    const lib=await preview.defaultImport();
+    if(lib.GlobalWorkerOptions&&!lib.GlobalWorkerOptions.workerSrc&&root.document){
+      lib.GlobalWorkerOptions.workerSrc=new URL('./vendor/pdf.worker.mjs',root.document.baseURI).href;
     }
-    const task=indexPdfDoc(pdf);
+    const bytes=new Uint8Array(await src.file.arrayBuffer());
+    const doc=await lib.getDocument(preview.pdfParams(bytes,root.document?root.document.baseURI:'')).promise;
+    try{return await indexPdfDoc(doc);}finally{doc.destroy&&doc.destroy();}
+  }
+  async function runIndexTask(key, task){
     indexCache={key,pages:[],promise:task};
     try{
       const pages=await task;
@@ -674,6 +665,22 @@
       if(indexCache.key===key) indexCache={key:null,pages:[],promise:null};
       return indexFromTextLayer();
     }
+  }
+  function indexKeyOf(pdf, src){
+    return pdf||(src&&(src.fileHash||src.file))||null;
+  }
+  async function ensureIndex(){
+    const pdf=pdfDocOf();
+    const src=source();
+    const key=indexKeyOf(pdf,src);
+    if(!key) return [];
+    if(indexCache.key===key&&indexCache.pages.length) return indexCache.pages;
+    if(indexCache.key===key&&indexCache.promise) return indexCache.promise;
+    if(pdf) return runIndexTask(key,indexPdfDoc(pdf));
+    const fb=fallbackPagesFromSource(src);
+    if(fb.length){indexCache={key,pages:fb,promise:null};return fb;}
+    if(canPreviewFile(src)) return runIndexTask(key,indexSourceFile(src));
+    return indexFromTextLayer();
   }
 
   function setAssist(kind, recipeCode){
@@ -772,17 +779,26 @@
     if(!src||src.fileHash===previousHash) return false;
     return !!(Array.isArray(src.pages)&&src.pages.length||Array.isArray(src.segments)&&src.segments.length);
   }
+  function sameOpenPaper(paperId){
+    const current=boothCurrent();
+    return !!(current&&current.id===paperId&&(pdfDocOf()||source()));
+  }
+  function hasLoadedPages(){
+    return !!(pdfDocOf()||fallbackPagesFromSource(source()).length);
+  }
+  async function paperMetaFor(paperId, same){
+    return same||isMission(paperId)?{}:await searchMeta(paperId);
+  }
   async function ensurePaper(paperId){
     const hook=boothPaper();
     if(!hook||typeof hook.open!=='function') return false;
-    const current=boothCurrent();
-    const same=!!(current&&current.id===paperId&&(pdfDocOf()||source()));
+    const same=sameOpenPaper(paperId);
     const previousHash=same?null:(source()||{}).fileHash;
     const previousPdf=same?null:pdfDocOf();
-    const meta=same||isMission(paperId)?{}:await searchMeta(paperId);
+    const meta=await paperMetaFor(paperId,same);
     const pending=await waitFor(()=>hook.open(paperId,meta),15000,200);
     if(!pending||!(await pending)) return false;
-    if(same&&(pdfDocOf()||fallbackPagesFromSource(source()).length)) return true;
+    if(same&&hasLoadedPages()) return true;
     return !!(await waitFor(()=>paperIndexReady(previousHash,previousPdf),60000,150));
   }
   function addBoothEdit(hit, replace, editSource, assistMeta){
@@ -818,6 +834,31 @@
       emit('progress',info);
     };
   }
+  function recipeSourceMeta(clean, normalCode){
+    const editSource=clean.source==='my-ai'?'myai':(clean.source==='agent'?'recipe':'find');
+    const assistMeta=clean.source==='agent'&&normalCode
+      ?{kind:'agent',code:normalCode}
+      :(clean.source==='my-ai'?{kind:'my-ai'}:undefined);
+    return {editSource,assistMeta};
+  }
+  function applyRecipeEdits(clean, pages, normalCode, progress){
+    const applied=[];
+    const unresolved=[];
+    const {editSource,assistMeta}=recipeSourceMeta(clean,normalCode);
+    for(let i=0;i<clean.edits.length;i+=1){
+      const edit=clean.edits[i];
+      progress({phase:'edit',index:i,total:clean.edits.length});
+      const found=locate(edit,pages);
+      if(found.status==='resolved'){
+        const result=addBoothEdit(found,edit.replace,editSource,assistMeta);
+        if(result.ok) applied.push(Object.assign({edit},result));
+        else unresolved.push({edit,reason:result.reason});
+      }else{
+        unresolved.push({edit,reason:found.status==='ambiguous'?'ambiguous':'not_found'});
+      }
+    }
+    return {applied,unresolved};
+  }
   async function apply(recipe, options){
     const clean=isPlain(recipe)?withoutServerKeys(recipe):recipe;
     const checked=validate(clean);
@@ -828,28 +869,10 @@
     progress({phase:'paper',paperId:clean.paperId});
     const opened=await ensurePaper(clean.paperId);
     const pages=opened?await ensureIndex():[];
-    const applied=[];
-    const unresolved=[];
-    if(!opened||!pages.length){
-      for(const edit of clean.edits) unresolved.push({edit,reason:'no_paper'});
-    }else{
-      const editSource=clean.source==='my-ai'?'myai':(clean.source==='agent'?'recipe':'find');
-      const assistMeta=clean.source==='agent'&&normalCode?{kind:'agent',code:normalCode}:(clean.source==='my-ai'?{kind:'my-ai'}:undefined);
-      for(let i=0;i<clean.edits.length;i+=1){
-        const edit=clean.edits[i];
-        progress({phase:'edit',index:i,total:clean.edits.length});
-        const found=locate(edit,pages);
-        if(found.status==='resolved'){
-          const result=addBoothEdit(found,edit.replace,editSource,assistMeta);
-          if(result.ok) applied.push(Object.assign({edit},result));
-          else unresolved.push({edit,reason:result.reason});
-        }else{
-          unresolved.push({edit,reason:found.status==='ambiguous'?'ambiguous':'not_found'});
-        }
-      }
-    }
-    const outcome={applied,unresolved};
-    recordAssist(clean,code,applied.map(item=>item.id));
+    const outcome=opened&&pages.length
+      ?applyRecipeEdits(clean,pages,normalCode,progress)
+      :{applied:[],unresolved:clean.edits.map(edit=>({edit,reason:'no_paper'}))};
+    recordAssist(clean,code,outcome.applied.map(item=>item.id));
     lastRecipe={recipe:clean,code:assistCode,fileHash:(source()||{}).fileHash||'',outcome};
     progress({phase:'done'});
     emit('applied',lastRecipe);
@@ -936,8 +959,8 @@
       function render(typed){
         const query=find.value;
         state.list=query.trim()?searchHits(indexedPages(),query,currentPageIndex(),HIT_LIMIT):{total:0,more:0,items:[]};
-        if(typed===true) say(status,query.trim()&&!state.list.total?'이 논문에서 찾지 못했어요.':'');
-        else if(state.list.total&&status.textContent==='이 논문에서 찾지 못했어요.') say(status,'');
+        if(typed===true) say(status,query.trim()&&!state.list.total?REASON_TEXT.not_found:'');
+        else if(state.list.total&&status.textContent===REASON_TEXT.not_found) say(status,'');
         paint();
       }
       function applyChosen(item){
@@ -1274,7 +1297,7 @@
       view.append(status);
       const src=source();
       const out=currentOutput();
-      if(!src||!src.file||!out||!out.file){say(status,'수정본 그림을 불러오지 못했어요.');return;}
+      if(!src||!src.file||!out||!out.file){say(status,'쪽 미리보기를 불러오지 못했어요. 수정본 PDF는 그대로 제출할 수 있어요.');return;}
       const pageIndex=edit.pageIndex;
       const width=Math.max(120,Math.floor((view.clientWidth||300)/2)-6);
       try{
