@@ -71,9 +71,28 @@
   const TIMED=['caught','partial','missed'];
   const CHIP_TEXT=14;
   const CAUGHT_TIP='숫자 하나만 바꾸면 AI가 앞뒤 문장과 대조해서 찾아내요. 결론 문장이나 실험 설계를 노려 보세요.';
-  const MAKE_FAILED='수정본을 만들지 못했어요. 고친 곳을 확인한 뒤 「다음」을 다시 눌러 주세요.';
-  const MAKE_WAIT_MS=90000;
+  /* 「다음」 waits for the workspace generator. It keeps waiting while the engine downloads or works and names
+     the failing edit when the workspace says why. MAKE_FAILED is the last resort. */
+  const MAKE_FAILED='수정본을 만들지 못했어요. 「다시 시도」를 눌러 주세요.';
+  const MAKE_SLOW='수정본을 만드는 중… 느린 폰에서는 1분쯤 걸려요';
+  const PDF_UNREADABLE='수정본 PDF를 읽지 못했어요. 「다시 시도」를 눌러 주세요.';
+  const MAKE_SLOW_MS=15000;
+  const MAKE_STALL_MS=240000;
+  const MAKE_IDLE_MS=3000;
+  const MAKE_ENGINE_MS=20000;
   const MAKE_RETRY_MS=500;
+  const MAKE_TEXT=Object.freeze({
+    NOT_FOUND:'이 자리를 쪽에서 찾지 못했어요. 지우거나 다시 고쳐 주세요.',
+    AMBIGUOUS_MATCH:'같은 글자가 쪽에 여러 번 있어 자리를 정하지 못했어요. 앞뒤 글자를 조금 더 넣어 다시 고쳐 주세요.',
+    OVERLAPPING_EDITS:'다른 고친 곳과 겹쳐요. 둘 중 하나를 지워 주세요.',
+    font:'원래 글꼴에 없는 글자라 바꾸지 못했어요. 비슷한 글자로 다시 고쳐 주세요.',
+    layout:'이 자리의 글자 모양을 그대로 살려 바꾸지 못했어요. 지우거나 다시 고쳐 주세요.',
+    figure:'이대로 바꾸면 쪽의 다른 글자까지 흐트러져서 수정본을 만들지 않았어요. 지우거나 다시 고쳐 주세요.',
+    figureMany:'고친 곳 하나 때문에 쪽의 다른 글자까지 흐트러져서 수정본을 만들지 않았어요. 아래 목록에서 하나씩 지우거나 다시 고쳐 주세요.',
+    overlap:'고친 곳 두 개가 겹쳐요. 아래 목록에서 하나를 지워 주세요.',
+    engine:'수정본을 만드는 도구를 받지 못했어요. 인터넷 연결을 확인하고 「다시 시도」를 눌러 주세요.',
+    stall:'수정본을 만드는 데 너무 오래 걸려요. 「다시 시도」를 눌러 주세요.'
+  });
   const DIFF_CONTEXT=24;
   const TOKEN_GROW=40;
   const NOTE_PAGE=/\(AI가 짚은 곳:\s*(\d{1,5}|\?)쪽\)/;
@@ -102,8 +121,8 @@
     model_jobs_operator_only:'이 화면에서는 AI 검증을 바로 돌리지 않아요. 「AI에게 제출하기」로 보내 주세요.',
     not_found:'접수번호와 확인키를 다시 확인해 볼까요?',
     paper_not_allowed:'이 논문은 라이선스 때문에 제출할 수 없어요. CC BY, CC BY-SA, CC0 논문을 골라 주세요.',
-    invalid_pdf:'수정본 PDF를 읽지 못했어요. 「← 고치기」에서 「다음」을 다시 눌러 주세요.',
-    pdf_mismatch:'수정본이 중간에 바뀌었어요. 「← 고치기」에서 「다음」을 다시 눌러 주세요.',
+    invalid_pdf:'수정본 PDF를 읽지 못했어요. 「수정본 다시 만들기」를 눌러 주세요.',
+    pdf_mismatch:'수정본이 중간에 바뀌었어요. 「수정본 다시 만들기」를 눌러 주세요.',
     pdf_unchanged:'아직 원본과 같아요. 한 곳 이상 고친 뒤 「다음」을 눌러 주세요.',
     session_missing:'연결이 끊겼어요. 페이지를 새로 고친 뒤 다시 시도해 주세요.',
     invalid_request:'입력 내용을 확인해 주세요.',
@@ -487,6 +506,54 @@
       tail:a.slice(a.length-suffix,end)+(end<a.length?'…':'')
     };
   }
+  /* 「5쪽 「0.95 → 0.50」」: the edit as the dock chip shows it, for a message that names it. */
+  function makeEditLabel(edit){
+    if(!edit||typeof edit!=='object') return '';
+    const parts=diffParts(edit.before,edit.after,0);
+    const cut=text=>{const value=String(text||'').replace(/\s+/g,' ').trim();return value.length>16?value.slice(0,15).trimEnd()+'…':value;};
+    const page=Number.isSafeInteger(edit.pageIndex)&&edit.pageIndex>=0?(edit.pageIndex+1)+'쪽 ':'';
+    return page+'「'+cut(parts.removed)+' → '+(parts.added.trim()?cut(parts.added):'(지움)')+'」';
+  }
+  /* What 「다음」 says when the workspace did not make the PDF: {text, editId, actions}. actions are
+     reopen (open that edit again), delete (remove it), list (show every edit) or retry (press 다음 again).
+     detail is the workspace's falsify:paper-generate-failed detail, or {kind:'stall'|'engine'|'idle'}. */
+  const ENGINE_FAILURE=/failed to fetch|networkerror|load failed|failed to load|dynamically imported|webassembly|compileerror|importscripts/i;
+  function engineFailure(d, code, message, failures){
+    if(d.kind==='engine'||code==='engine'||code==='offline'||d.online===false) return true;
+    return !failures.length&&ENGINE_FAILURE.test(message);
+  }
+  function aboutEdit(edit, text, actions, fallback){
+    if(!edit) return {text:fallback||text,editId:'',actions:['list']};
+    return {text:makeEditLabel(edit)+': '+text,editId:typeof edit.id==='string'?edit.id:'',actions};
+  }
+  /* The engine's per-edit failure codes (NOT_FOUND, AMBIGUOUS_MATCH, ...) for the edit they name. */
+  function failureCodeView(failures, named, only){
+    const failure=failures.find(f=>named(f.id))||failures[0];
+    const key=Object.prototype.hasOwnProperty.call(MAKE_TEXT,failure.code)?failure.code:'layout';
+    return aboutEdit(named(failure.id)||only,MAKE_TEXT[key],key==='OVERLAPPING_EDITS'?['delete','reopen']:['reopen','delete']);
+  }
+  function errorCodeView(code, message, only){
+    if(code==='figure-text-corrupt') return aboutEdit(only,MAKE_TEXT.figure,['reopen','delete'],MAKE_TEXT.figureMany);
+    if(/glyph|font|글꼴/i.test(code+' '+message)) return aboutEdit(only,MAKE_TEXT.font,['reopen','delete'],'고친 곳 하나가 '+MAKE_TEXT.font);
+    if(/겹/.test(message)) return {text:MAKE_TEXT.overlap,editId:'',actions:['list']};
+    return {text:MAKE_FAILED,editId:'',actions:['retry']};
+  }
+  /* What 「다음」 says when the workspace did not make the PDF: {text, editId, actions}. actions are
+     reopen (open that edit again), delete (remove it), list (show every edit) or retry (press 다음 again).
+     detail is the workspace's falsify:paper-generate-failed detail, or {kind:'stall'|'engine'|'idle'}. */
+  function makeFailureView(detail, edits){
+    const d=detail&&typeof detail==='object'?detail:{};
+    const list=(Array.isArray(edits)?edits:[]).filter(edit=>edit&&typeof edit==='object');
+    const code=typeof d.code==='string'?d.code:'';
+    const message=typeof d.message==='string'?d.message:'';
+    const failures=Array.isArray(d.failures)?d.failures.filter(f=>f&&typeof f==='object'):[];
+    const named=id=>(typeof id==='string'&&id?list.find(edit=>edit.id===id):null)||null;
+    const only=list.length===1?list[0]:null;
+    if(d.kind==='stall') return {text:MAKE_TEXT.stall,editId:'',actions:['retry']};
+    if(engineFailure(d,code,message,failures)) return {text:MAKE_TEXT.engine,editId:'',actions:['retry']};
+    if(failures.length) return failureCodeView(failures,named,only);
+    return errorCodeView(code,message,only);
+  }
   /* Chances left on this browser: the per-guest cap minus stored receipts, never below 0. */
   function chancesLeft(cap, used){
     const total=Number.isSafeInteger(cap)&&cap>0?cap:5;
@@ -693,6 +760,8 @@
     let searchPage=1;
     let searchQuery='';
     let making=null;
+    let makeFix=null;
+    let unreadablePdf=false;
     let makeSeq=0;
     let ticket=null;
     let clock=null;
@@ -837,6 +906,7 @@
         el('p',{id:'booth-hint',className:'booth-hint'}),
         el('div',{id:'booth-dock',className:'booth-dock'},
           el('p',{id:'booth-dock-status',className:'booth-dock-status',role:'status','aria-live':'polite'}),
+          el('div',{id:'booth-dock-fix',className:'booth-dock-fix',hidden:true}),
           el('div',{className:'booth-dock-count'},
             el('span',{id:'booth-dock-count',textContent:'고친 곳 0개'}),
             el('small',{textContent:'여러 곳을 고쳐도 돼요'})),
@@ -882,7 +952,8 @@
           el('div',{className:'booth-sec booth-send-confirm'},
             buildConsent(),
             el('button',{id:'booth-submit-button',type:'submit',className:'booth-btn ink wide',textContent:'AI에게 제출하기',disabled:true}),
-            el('p',{id:'booth-submit-status',className:'booth-feedback',role:'alert','aria-live':'polite'}))));
+            el('p',{id:'booth-submit-status',className:'booth-feedback',role:'alert','aria-live':'polite'}),
+            el('button',{id:'booth-remake',type:'button',className:'booth-btn slim',textContent:'수정본 다시 만들기',hidden:true}))));
     }
     function cell(label, id, className){
       return el('div',{id:id+'-cell',className:'booth-cell'},
@@ -1312,10 +1383,10 @@
     }
     async function adoptFile(detail){
       const file=detail&&detail.file;
-      if(!file||typeof file.arrayBuffer!=='function'){report(errorMessage('invalid_pdf'));return false;}
+      if(!file||typeof file.arrayBuffer!=='function'){unreadablePdf=true;report(PDF_UNREADABLE);return false;}
       let bytes=null;
       try{bytes=new Uint8Array(await file.arrayBuffer());}catch{bytes=null;}
-      if(!pdfMagic(bytes)) return rejectGenerated(errorMessage('invalid_pdf'));
+      if(!pdfMagic(bytes)){unreadablePdf=true;return rejectGenerated(PDF_UNREADABLE);}
       const hash=await digestHex(bytes);
       if(!hash) return rejectGenerated('수정본을 확인하지 못했어요. 「다음」을 다시 눌러 주세요.');
       sourceSha=await originalSha(detail);
@@ -1325,8 +1396,11 @@
       return adoptRows(editsFor(detail));
     }
     async function adoptGenerated(detail){
+      unreadablePdf=false;
+      const wasMaking=!!making;
       const ok=await adoptFile(detail);
       settleMake(ok);
+      if(!ok&&wasMaking&&unreadablePdf) showFix({text:'',editId:'',actions:['retry']},editsFor(null));
       return ok;
     }
     function currentOutput(){
@@ -1437,6 +1511,7 @@
     }
     function renderDock(){
       const edits=editsFor(null);
+      if(makeFix&&makeFix.sig!==editSignature(edits)) clearMakeFix(true);
       const count=edits.length;
       setText('booth-dock-count','고친 곳 '+count+'개');
       renderDockChips(edits);
@@ -1444,9 +1519,10 @@
       if(next) next.disabled=count===0||!!making;
     }
     function makeTimer(){
-      return typeof root.setTimeout==='function'?root.setTimeout.bind(root):null;
+      return typeof later==='function'?later:null;
     }
     function cancelMake(){
+      if(making&&making.timer!=null&&typeof cancel==='function') cancel(making.timer);
       making=null;
       setAttr('booth-dock','data-busy','false');
     }
@@ -1464,12 +1540,82 @@
       report(text);
       settleMake(false);
     }
+    /* The fix offered in place after a failed 「다음」: buttons for the named edit, the list or another try.
+       It goes away once the edits change or 「다음」 runs again. */
+    function clearMakeFix(withText){
+      if(!makeFix) return;
+      makeFix=null;
+      const box=byId('booth-dock-fix');
+      if(box){kidsOf(box);box.hidden=true;}
+      if(withText){say('booth-dock-status','');say('booth-submit-status','');}
+    }
+    function fixButton(label, run){
+      const button=el('button',{type:'button',className:'booth-dock-act',textContent:label});
+      button.addEventListener('click',run);
+      return button;
+    }
+    function showEditList(){
+      dockPopOpen=true;
+      renderDock();
+      const list=byId('paper-edits');
+      if(list&&typeof list.scrollIntoView==='function') list.scrollIntoView({block:'nearest'});
+    }
+    function fixActions(view, edits){
+      const edit=view.editId?edits.find(item=>item.id===view.editId):null;
+      return view.actions.map(act=>{
+        if(act==='reopen'&&edit) return fixButton('다시 고치기',()=>{clearMakeFix(true);useEditControl(edit,'edit');});
+        if(act==='delete'&&edit) return fixButton('이 고친 곳 지우기',()=>{clearMakeFix(true);useEditControl(edit,'delete');});
+        if(act==='list') return fixButton('고친 곳 목록 보기',showEditList);
+        if(act==='retry') return fixButton('다시 시도',()=>{clearMakeFix(true);beginMake();});
+        return null;
+      });
+    }
+    function showFix(view, edits){
+      makeFix={view,sig:editSignature(edits)};
+      const box=byId('booth-dock-fix');
+      if(!box) return;
+      kidsOf(box,...fixActions(view,edits));
+      box.hidden=false;
+    }
+    /* A failure while rebuilding from send goes back to edit, where the fix buttons are. */
+    function failMakeWith(detail){
+      const edits=editsFor(null);
+      const view=makeFailureView(detail,edits);
+      failMake(view.text);
+      showFix(view,edits);
+      if(step==='send') setStep('edit');
+    }
+    /* Send-step problems with the PDF itself: one in-place button builds it again. */
+    function offerRemake(text){
+      say('booth-submit-status',text);
+      setHidden('booth-remake',false);
+    }
+    function remake(){
+      setHidden('booth-remake',true);
+      say('booth-submit-status','수정본을 만드는 중…');
+      beginMake();
+    }
+    function onGenerateFailed(event){
+      if(!making) return;
+      const detail=event&&event.detail;
+      making.failure=detail&&typeof detail==='object'?detail:{};
+    }
     /* 「다음」 builds the submission PDF, then opens send. Failure stays in edit with a message. */
     function beginMake(){
       if(making||closed) return;
       if(!liveEditCount()){renderDock();return;}
+      setHidden('booth-remake',true);
+      const cap=limitsOf(liveConfig).maxDeclared;
+      if(liveEditCount()>cap){
+        say('booth-dock-status','고친 곳은 '+cap+'개까지 제출할 수 있어요. 지금은 '+liveEditCount()+'개예요. 하나를 지운 뒤 「다음」을 눌러 주세요.');
+        say('booth-submit-status','');
+        showFix({text:'',editId:'',actions:['list']},editsFor(null));
+        if(step==='send') setStep('edit');
+        return;
+      }
       makeSeq+=1;
-      making={token:makeSeq,startedAt:now(),waiting:false,idleSince:0};
+      clearMakeFix(false);
+      making={token:makeSeq,startedAt:now(),waiting:false,idleSince:0,failure:null,retried:false,slow:false,engineSince:0};
       say('booth-dock-status','수정본을 만드는 중…');
       setAttr('booth-dock','data-busy','true');
       renderDock();
@@ -1482,21 +1628,41 @@
     function makeStalled(outcome){
       if(outcome!=='idle'){making.idleSince=0;return false;}
       if(!making.idleSince) making.idleSince=now();
-      return now()-making.idleSince>=3000;
+      return now()-making.idleSince>=MAKE_IDLE_MS;
     }
+    /* The workspace marks why its button waits (data-state): no-engine means the PDF engine never loaded. */
+    function engineMissing(){
+      const button=doc.getElementById('paper-generate');
+      const missing=!!button&&button.disabled&&button.dataset&&button.dataset.state==='no-engine';
+      if(!missing){making.engineSince=0;return false;}
+      if(!making.engineSince) making.engineSince=now();
+      return now()-making.engineSince>=MAKE_ENGINE_MS;
+    }
+    /* Keep waiting while the engine downloads or works; say so after MAKE_SLOW_MS. Fail with the workspace's
+       own reason, on an engine that never loads, or on a real stall (idle with no output after one more try). */
     async function makeStep(token){
       if(!makeLive(token)) return;
       const outcome=await makeSubmissionPdf(making.waiting);
       if(!makeLive(token)||outcome==='done') return;
       if(outcome==='error'){settleMake(false);return;}
       if(outcome==='waiting') making.waiting=true;
+      if(making.failure){failMakeWith(making.failure);return;}
       const timer=makeTimer();
       if(!timer){
-        if(outcome==='busy') failMake(MAKE_FAILED);
+        if(outcome==='busy') failMakeWith({kind:'idle'});
         return;
       }
-      if(makeStalled(outcome)||now()-making.startedAt>=MAKE_WAIT_MS){failMake(MAKE_FAILED);return;}
-      timer(()=>{void makeStep(token);},MAKE_RETRY_MS);
+      const elapsed=now()-making.startedAt;
+      if(!making.slow&&elapsed>=MAKE_SLOW_MS){making.slow=true;say('booth-dock-status',MAKE_SLOW);}
+      if(engineMissing()){failMakeWith({kind:'engine'});return;}
+      if(makeStalled(outcome)){
+        if(making.retried){failMakeWith({kind:'idle'});return;}
+        making.retried=true;
+        making.waiting=false;
+        making.idleSince=0;
+      }
+      if(elapsed>=MAKE_STALL_MS){failMakeWith({kind:'stall'});return;}
+      making.timer=timer(()=>{if(making) making.timer=null;void makeStep(token);},MAKE_RETRY_MS);
     }
     function licenseId(paperLike){
       if(!paperLike||paperLike.license==null) return '';
@@ -1851,6 +2017,7 @@
     }
     function preflight(){
       const block=submissionBlock();
+      if(block==='missing'){offerRemake(blockMessage(block));return false;}
       if(block){
         say('booth-submit-status',blockMessage(block));
         if(block!=='closed') refreshSubmitButton();
@@ -1858,7 +2025,7 @@
       }
       const live=editsFor(null);
       if(submissionStale(live)){
-        say('booth-submit-status','고친 곳이 바뀌었어요. 「← 고치기」에서 「다음」을 다시 눌러 주세요.');
+        offerRemake('고친 곳이 바뀌었어요. 「수정본 다시 만들기」를 눌러 주세요.');
         return false;
       }
       if(live.length>limitsOf(liveConfig).maxDeclared){adoptRows(live);return false;}
@@ -1894,7 +2061,8 @@
         say('booth-submit-status','');
         followSubmission(data,meta);
       }catch(error){
-        say('booth-submit-status',submitFailureText(error));
+        if(error.code==='invalid_pdf'||error.code==='pdf_mismatch') offerRemake(submitFailureText(error));
+        else say('booth-submit-status',submitFailureText(error));
         offerRetry('booth-submit-status',error,()=>submitBooth());
         showKnownReceipt(error);
         refreshSubmitButton();
@@ -1968,7 +2136,7 @@
       if(block==='loading') return '부스 정보를 불러오는 중이에요. 잠시 뒤 다시 눌러 주세요.';
       if(block==='consent') return CONSENT_MISSING;
       if(block==='pick') return PICK_PAPER;
-      return '제출할 수정본이 없어요. 「← 고치기」로 돌아가 「다음」을 다시 눌러 주세요.';
+      return '제출할 수정본이 없어요. 「수정본 다시 만들기」를 눌러 주세요.';
     }
     /* Only the version the server names. Before /v1/booth/config answers there is none, so no
        older text (CONSENT_VERSION is v1) can show for a moment. */
@@ -2458,6 +2626,8 @@
     on(byId('booth-live-recheck'),'click',recheck);
     on(byId('booth-result-link'),'click',openResult);
     on(doc,'falsify:paper-generated',event=>{void adoptGenerated(event&&event.detail);});
+    on(doc,'falsify:paper-generate-failed',onGenerateFailed);
+    on(byId('booth-remake'),'click',remake);
     on(doc,'falsify:paper-workspace-edits',onEditsChanged);
     on(doc,'falsify:document',onBoothDocument);
     on(doc,'falsify:document-clear',onBoothClear);
@@ -2502,7 +2672,7 @@
     normalizeClaimKey,normalizeReceipt,buildSubmission,submissionForm,errorMessage,
     readReceipts,rememberReceipt,recentReceipts,paperSearchPath,paperPdfPath,
     consentCopyFor,consentSummaryFor,nextPollDelay,retryAfterMs,resultView,capMessage,
-    parsePublicNote,diffParts,chancesLeft,formatClock,formatDuration,noteReceiptOutcome,licenseLabel,shortTitle,
+    parsePublicNote,diffParts,makeEditLabel,makeFailureView,MAKE_TEXT,MAKE_FAILED,MAKE_SLOW,chancesLeft,formatClock,formatDuration,noteReceiptOutcome,licenseLabel,shortTitle,
     CONSENT_COPY,CONSENT_SUMMARY,CONSENT_VERSION,RECEIPT_KEY,RECEIPT_CAP,RECENT_CAP,mount
   };
 })(typeof window==='object'?window:globalThis);

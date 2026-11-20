@@ -82,3 +82,19 @@ test('figure label edit keeps the figure, and the unpromoted path is refused', {
     assert.equal(workspace.includes(refusal), true);
   } finally { globalThis.fetch = previous; }
 });
+
+test('lost-word check ignores reflowed hyphenation and edits inside a word, and still finds real losses', async () => {
+  const {lostWords} = await import(pathToFileURL(resolve(app, 'src/paragraph-pdf-figure-resources.mjs')).href);
+  // Mission 2309.15217 p4: "95%" -> "950" reflows the paragraph, so line-end hyphens move.
+  assert.deepEqual(lostWords('two annotators con-\nsidered anno-\ntators exter-\nnal in around 95% of cases',
+    'two annotators considered annotators ex-\nternal in around 950 of cases', [{before: '95%', after: '950'}]), []);
+  assert.deepEqual(lostWords('retrieval-\naugmented', 'retrieval-augmented', []), []);
+  assert.deepEqual(lostWords('Sébastien Bubeck', 'Sebastien Bubeck', [{before: 'é', after: 'e'}]), []);
+  assert.deepEqual(lostWords('paper’s idea and you’re here', "paper's idea and you1re here", [{before: 'you’', after: 'you1'}]), []);
+  assert.deepEqual(lostWords('that ’provided con-\ntext’', 'that 1provided context’', [{before: '’', after: '1'}]), []);
+  assert.deepEqual(lostWords('Can Xu said n X i', 'Can 2u said n X i', [{before: 'n X', after: 'n 2'}]), []);
+  assert.deepEqual(lostWords('around 95% of cases', 'around of cases', [{before: '95%', after: ''}]), []);
+  // A figure label that disappears is still reported.
+  assert.deepEqual(lostWords('A B C AcuteUTI 73%', 'A Z C', [{before: 'B', after: 'Z'}]), ['AcuteUTI', '73%']);
+  assert.deepEqual(lostWords('label con-\nsidered AcuteUTI', 'label considered', []), ['AcuteUTI']);
+});

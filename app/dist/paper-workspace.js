@@ -480,7 +480,7 @@
     if(!n)return '수정본을 만들었습니다.';
     return '수정본을 만들었습니다. 인용 링크 '+n+'곳은 확인하지 못했지만 제출에는 문제없습니다.';
   }
-  const BOOTH_FIGURE_REFUSAL='이 문장은 휴대폰에서 바로 고칠 수 없어요. 같은 쪽의 다른 문장이나 숫자를 골라 주세요.';
+  const BOOTH_FIGURE_REFUSAL='이대로 바꾸면 쪽의 다른 글자까지 흐트러져서 수정본을 만들지 않았어요. 고친 곳을 지우거나 다시 고쳐 주세요.';
   function boothFigureRefusal(error){
     if(!eventBoothOpen()||!error)return '';
     const code=typeof error.code==='string'?error.code:'';
@@ -998,6 +998,8 @@
     }
     function renderGenerateControl(pdf){
       ui.generate.disabled=generating||fontBusy||!exporterApi()||!pdf||(!enabledEdits().length&&!(directEditor&&inline&&directEditor.value!==inline.after));
+      /* Why the button waits, for the booth's 「다음」: running, fonts, no-engine, no-pdf, no-edits or ready. */
+      if(ui.generate.dataset)ui.generate.dataset.state=generating?'running':fontBusy?'fonts':!exporterApi()?'no-engine':!pdf?'no-pdf':ui.generate.disabled?'no-edits':'ready';
       if(ui.generateCancel)ui.generateCancel.hidden=!generating;
     }
     function renderEditingChrome(pdf,ready){
@@ -2383,6 +2385,14 @@
       const edits=published(Array.isArray(candidate.edits)?candidate.edits:[])||[];
       try{doc.dispatchEvent(new CustomEvent('falsify:paper-generated',{cancelable:false,detail:{file:candidate.file,sourceFileHash,revision:candidate.revision,edits}}));}catch{}
     }
+    /* A failed generation tells the booth why, so it can name the edit and offer a fix in place. Plain data only. */
+    function announceFailure(e){
+      if(!e||e.name==='AbortError'||typeof doc?.dispatchEvent!=='function'||typeof CustomEvent!=='function')return;
+      const rows=Array.isArray(e.details?.failures)?e.details.failures:[];
+      const failures=rows.filter(f=>f&&typeof f==='object').slice(0,20).map(f=>({id:typeof f.id==='string'?f.id:'',pageIndex:Number.isSafeInteger(f.pageIndex)?f.pageIndex:null,code:typeof f.code==='string'?f.code:''}));
+      const detail={code:typeof e.code==='string'?e.code:'',message:safeMessage(e),failures,name:typeof e.name==='string'?e.name:''};
+      try{doc.dispatchEvent(new CustomEvent('falsify:paper-generate-failed',{cancelable:false,detail}));}catch{}
+    }
     async function exportRedBatch({fileHash,revision,patches,isCurrent}){
       requireRedBatchSource(fileHash);
       const file=source.file, epochAt=epoch, workspaceRevision=snapshot.revision;
@@ -2428,7 +2438,7 @@
     function ensureGenerator(){
       const g=generationApi();if(!g?.create)return null;if(generator)return generator;
       const version=++generatorVersion;
-      generator=g.create({generate:generateCaptured,onResult:(candidate,meta)=>{if(version!==generatorVersion||!source||source.fileHash!==meta.spec.fileHash)return;let current;try{current=g.key(captureSpec());}catch{return;}if(current!==meta.key)return;output=candidate;outputAt=now();generationFailed=false;output.key=meta.key;afterPart=0;afterSourcePage=page;setGenStatus(output.edits.length?generationLead(output.verification,false,output.warnings):'선택한 편집이 없어 원본 PDF를 사용합니다.');emit('falsify:paper-workspace-output',published({sha256:output.sha256,revision:output.revision,verification:scrub(output.verification,0)}));announceGenerated(output);renderEdits();void drawAfter();},onState:state=>{if(version!==generatorVersion||!source)return;let current;try{current=g.key(captureSpec());}catch{return;}if(current!==state.key)return;generating=state.phase==='running';if(state.phase==='error'){generationFailed=true;setGenStatus(generationStatus(state.error,'생성하지 못했습니다. '+generationError(state.error)),true);}else if(state.phase==='running')generationFailed=false;renderChrome();}});return generator;
+      generator=g.create({generate:generateCaptured,onResult:(candidate,meta)=>{if(version!==generatorVersion||!source||source.fileHash!==meta.spec.fileHash)return;let current;try{current=g.key(captureSpec());}catch{return;}if(current!==meta.key)return;output=candidate;outputAt=now();generationFailed=false;output.key=meta.key;afterPart=0;afterSourcePage=page;setGenStatus(output.edits.length?generationLead(output.verification,false,output.warnings):'선택한 편집이 없어 원본 PDF를 사용합니다.');emit('falsify:paper-workspace-output',published({sha256:output.sha256,revision:output.revision,verification:scrub(output.verification,0)}));announceGenerated(output);renderEdits();void drawAfter();},onState:state=>{if(version!==generatorVersion||!source)return;let current;try{current=g.key(captureSpec());}catch{return;}if(current!==state.key)return;generating=state.phase==='running';if(state.phase==='error'){generationFailed=true;setGenStatus(generationStatus(state.error,'생성하지 못했습니다. '+generationError(state.error)),true);announceFailure(state.error);}else if(state.phase==='running')generationFailed=false;renderChrome();}});return generator;
     }
     function scheduleGeneration(){if(committingInline||!generationApi()||!source?.pdf||!snapshot)return;try{ensureGenerator().schedule(captureSpec());}catch(e){setGenStatus('현재 편집을 확인하세요. '+safeMessage(e),true);}}
     function planCapturedExport(spec){
@@ -2439,6 +2449,76 @@
       if(!recompose&&!mixed)for(const edit of edits)if(tableEdit(edit)&&edit.anchor)delete edit.anchor.occurrence;
       if(fontRevision!==spec.fontRevision)throw Error('요청한 글꼴이 바뀌어 다시 생성해야 합니다.');
       return {edits,tables,body,mixed,recompose,api};
+    }
+    /* The PDF engines match an edit's Before text exactly once per page. A short Before such as "Ragas" or "="
+       can sit on the page several times, and the engine then refuses with AMBIGUOUS_MATCH. The edit still knows
+       its own spot (segment and anchor), so grow Before and After with the same neighbouring words until the
+       text is unique on the page, and ask once more. The match stays exact; nothing is relocated. */
+    function segmentKind(id){return String(id||'').split(':')[0].replace(/\d+$/,'');}
+    function pageNeedleCount(pageIndex,needle,kind){
+      const flat=s=>String(s||'').replace(/\s+/g,' ');
+      const want=flat(needle);if(!want.trim())return 0;
+      let count=0;
+      for(const seg of coreSegments(source?.segments)){
+        if(seg.pageIndex!==pageIndex||segmentKind(seg.id)!==kind)continue;
+        const text=flat(seg.text);
+        for(let at=text.indexOf(want);at>=0;at=text.indexOf(want,at+1))count++;
+      }
+      return count;
+    }
+    /* One step outwards: even steps take the word before, odd steps the word after (or the other side at an end). */
+    function widerRange(text,a,b,step){
+      const left=a>0?text.slice(0,a).search(/\S+\s*$/):-1;
+      const right=b<text.length?b+text.slice(b).match(/^\s*\S+/)[0].length:-1;
+      if(left<0&&right<0)return null;
+      if(step%2===0&&left>=0||right<0)return [left,b];
+      return [a,right];
+    }
+    function editRange(edit){
+      const seg=coreSegments(source?.segments).find(s=>s.id===edit.segmentId),text=seg&&typeof seg.text==='string'?seg.text:'';
+      const start=edit.anchor?.start,end=edit.anchor?.end;
+      if(!text||!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||text.slice(start,end)!==edit.before)return null;
+      return {text,start,end};
+    }
+    function widenEdit(edit,taken){
+      const range=editRange(edit);if(!range)return null;
+      const {text,start,end}=range,kind=segmentKind(edit.segmentId);
+      let a=start,b=end;
+      for(let step=0;step<16;step++){
+        const next=widerRange(text,a,b,step);
+        if(!next||taken.some(r=>r.segmentId===edit.segmentId&&r.start<next[1]&&next[0]<r.end))return null;
+        [a,b]=next;
+        const before=text.slice(a,b);
+        if(pageNeedleCount(edit.pageIndex,before,kind)===1)return {before,after:text.slice(a,start)+edit.after+text.slice(end,b),start:a,end:b};
+      }
+      return null;
+    }
+    function widenAmbiguous(edits,error){
+      const failures=error?.details?.failures;
+      if(!Array.isArray(edits)||error?.code!=='MATCH_FAILED'||!Array.isArray(failures)||!failures.length||!failures.every(f=>f?.code==='AMBIGUOUS_MATCH'))return null;
+      const ids=new Set(failures.map(f=>f.id));
+      const taken=edits.filter(e=>!ids.has(e.id)&&e.anchor).map(e=>({segmentId:e.segmentId,start:e.anchor.start,end:e.anchor.end}));
+      const out=[];
+      for(const edit of edits){
+        if(!ids.has(edit.id)){out.push(edit);continue;}
+        const wide=widenEdit(edit,taken);
+        if(!wide)return null;
+        taken.push({segmentId:edit.segmentId,start:wide.start,end:wide.end});
+        out.push({...edit,before:wide.before,after:wide.after,anchor:{...edit.anchor,start:wide.start,end:wide.end}});
+      }
+      return out;
+    }
+    function widening(api){
+      if(!api?.prepare)return api;
+      return {...api,prepare:async(request,options)=>{
+        try{return await api.prepare(request,options);}
+        catch(e){
+          if(request?.signal?.aborted)throw e;
+          const edits=widenAmbiguous(Array.isArray(request?.edits)?request.edits:null,e);
+          if(!edits)throw e;
+          return api.prepare({...request,edits},options);
+        }
+      }};
     }
     function capturedFontExporter(api,recompose,mixed,fontSnapshot,edits){if(!recompose&&!mixed&&fullFontEmbedding(fontSnapshot)&&!edits.some(e=>String(e.segmentId||'').startsWith('layout:'))&&legacyExporterApi()?.prepare)api=legacyExporterApi();return api;}
     function canFlowMixed(fontSnapshot,bodyApi,rows,e,failures){return !fullFontEmbedding(fontSnapshot)&&bodyApi===legacyExporterApi()&&paragraphApi()&&Array.isArray(rows)&&!rows.some(tableEdit)&&e.code==='unsupported'&&Array.isArray(failures)&&failures.length&&failures.every(f=>f.code==='long-after-no-room');}
@@ -2474,9 +2554,9 @@
       try{if(mixed&&!recompose){
         const bodyApi=selectMixedBodyApi(fontSnapshot,edits,body);
         const adapter=capturedBodyAdapter(bodyApi,fontSnapshot,signal);
-        result=await api.prepare(prepared.request,{selectionPdf:legacyExporterApi(),paragraphPdf:adapter});
-      }else result=await api.prepare(prepared.request);}
-      catch(e){const failures=e?.details?.edits;if(canFlowCaptured(recompose,mixed,fontSnapshot,tables,api,e,failures,signal))result=await paragraphApi().prepare({...prepared.request,edits});else throw e;}
+        result=await widening(api).prepare(prepared.request,{selectionPdf:legacyExporterApi(),paragraphPdf:adapter});
+      }else result=await widening(api).prepare(prepared.request);}
+      catch(e){const failures=e?.details?.edits;if(canFlowCaptured(recompose,mixed,fontSnapshot,tables,api,e,failures,signal))result=await widening(paragraphApi()).prepare({...prepared.request,edits});else throw e;}
       result=checkCapturedResult(result,prepared,spec,file,signal,recompose);const bytes=new Uint8Array(await result.file.arrayBuffer());validateCapturedBytes(await sha256Hex(bytes),result,bytes);ensureCapturedLive(signal,file);
       const candidate=capturedCandidate(result,spec,recompose,key);
       if(tables.length&&!recompose){const mapping=tableOutputPages(result),cells=tables.map(e=>({id:e.id,pageIndex:mapping?.get(e.pageIndex),after:e.after,bbox:spec.tableBoxes.find(x=>x.id===e.id)?.bbox}));
@@ -2488,7 +2568,7 @@
     async function currentAction(action){
       const actionEpoch=epoch;
       try{const spec=captureSpec(),result=await ensureGenerator().flush(spec);if(actionEpoch!==epoch)return;if(action==='download')download(result.file,true);else if(action==='blue'){const ev=new CustomEvent('falsify:blue-file',{cancelable:true,detail:{file:new File([result.file],'paper.pdf',{type:'application/pdf'})}});if(!doc.dispatchEvent(ev)){setGenStatus('BLUE가 인계를 받지 않았습니다.',true);return;}const nav=[...doc.querySelectorAll('[data-view="blue"]')].find(b=>b.getClientRects&&b.getClientRects().length)||doc.querySelector('[data-view="blue"]');nav?.click();}}
-      catch(e){if(actionEpoch===epoch)setGenStatus(generationFailureText(e),true);}
+      catch(e){if(actionEpoch===epoch){setGenStatus(generationFailureText(e),true);announceFailure(e);}}
     }
     function prepareGeneration(){
       if(!canLeaveInline())return null;
@@ -2570,6 +2650,7 @@
         if(!generationSourceLive(mine,epochAt,hash))return;
         if(ctl.signal&&ctl.signal.aborted){setGenStatus('생성을 중단했습니다. 마지막 생성본은 그대로입니다.');return;}
         setGenStatus(generationStatus(e,'생성하지 못했습니다. 마지막 생성본은 그대로입니다. '+generationError(e)),true);
+        announceFailure(e);
     }
     function finishGeneration(ctl,mine,epochAt){if(genCtl===ctl)genCtl=null;if(mine===genId&&epoch===epochAt){generating=false;renderChrome();}}
     function planGeneratedTableFit(candidate,result,edits,recompose){
@@ -2605,7 +2686,7 @@
           const canFlow=canFlowWhole(recompose,request,edits,api,e,failures);
           if(invalidGenerationFallback(canFlow,ctl,mine,epochAt,hash,revision))throw e;
           setGenStatus('선택 편집이 원래 공간에 들어가지 않아 전체 편집을 문단 흐름으로 생성하는 중입니다.');
-          return paragraphApi().prepare({...request,edits:JSON.parse(JSON.stringify(edits))});
+          return widening(paragraphApi()).prepare({...request,edits:JSON.parse(JSON.stringify(edits))});
     }
     async function generate(){
       const setup=prepareGeneration();if(!setup)return;
@@ -2621,7 +2702,7 @@
         if(!generationRequestLive(mine,epochAt,ctl))return;
         let result;
         try{
-          result=await requestGeneration(api,request,recompose,mixed,fontSnapshot,edits,ctl,mine,epochAt,hash,revision);
+          result=await requestGeneration(widening(api),request,recompose,mixed,fontSnapshot,edits,ctl,mine,epochAt,hash,revision);
         }
         catch(e){
           result=await fallbackGeneration(e,recompose,request,edits,api,ctl,mine,epochAt,hash,revision);

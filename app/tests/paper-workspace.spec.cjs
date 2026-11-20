@@ -1069,7 +1069,7 @@ test('booth mode maps generation status and figure refusals without the English 
   const previousConfig=globalThis.FalsifyCloudConfig;
   const restore=()=>{if(previousConfig===undefined)delete globalThis.FalsifyCloudConfig;else globalThis.FalsifyCloudConfig=previousConfig;};
   const refusal='그림 안 글자를 고치면 그림이 깨져서 만들지 않았습니다. 표·그래프·그림 고치기를 쓰세요.';
-  const boothRefusal='이 문장은 휴대폰에서 바로 고칠 수 없어요. 같은 쪽의 다른 문장이나 숫자를 골라 주세요.';
+  const boothRefusal='이대로 바꾸면 쪽의 다른 글자까지 흐트러져서 수정본을 만들지 않았어요. 고친 곳을 지우거나 다시 고쳐 주세요.';
   const bytes=pdfBytes('MARKER-GEN');
   function exporter(mode){
     return {prepare:async()=>{
@@ -1122,6 +1122,44 @@ test('booth mode maps generation status and figure refusals without the English 
     assert.equal(index.get('paper-generate-status').textContent.includes(boothRefusal),false);
     index.ws.dispose();
   }finally{restore();}
+});
+test('generation widens an ambiguous Before with its own neighbours and asks once more; failures reach the booth',async()=>{
+  const bytes=pdfBytes('MARKER-GEN'),requests=[],failed=[];
+  const mode={fail:'ambiguous'};
+  const exporter={prepare:async request=>{
+    requests.push(JSON.parse(JSON.stringify(request.edits.map(e=>({id:e.id,before:e.before,after:e.after,anchor:e.anchor})))));
+    const edit=request.edits[0];
+    if(mode.fail==='ambiguous'&&edit.before==='Alpha')throw Object.assign(new Error('1 edit(s) could not be matched exactly once or planned'),{code:'MATCH_FAILED',details:{failures:[{id:edit.id,pageIndex:0,code:'AMBIGUOUS_MATCH',hits:2}]}});
+    if(mode.fail==='missing')throw Object.assign(new Error('1 edit(s) could not be matched exactly once or planned'),{code:'MATCH_FAILED',details:{failures:[{id:edit.id,pageIndex:0,code:'NOT_FOUND',hits:0}]}});
+    const file=new File([bytes],'checked.pdf',{type:'application/pdf'});
+    return {file,sha256:sha(bytes),verification:{status:'applied',checks:[],warnings:[]},warnings:[]};
+  }};
+  const v=mount({exporter,paragraphPdf:paragraphMock('Alpha leads. Then Alpha ends.',{prepare:exporter.prepare})});
+  v.document.addEventListener('falsify:paper-generate-failed',event=>failed.push(JSON.parse(JSON.stringify(event.detail))));
+  v.file(pdfFile(pdfBytes('MARKER-A')));
+  await until(()=>v.ws.getSource()&&v.edits.last&&v.ws.getSource().segments.some(s=>/Alpha[\s\S]*Alpha/.test(s.text)),'source');
+  const segment=v.ws.getSource().segments.find(s=>s.pageIndex===0&&/Alpha[\s\S]*Alpha/.test(s.text));
+  assert.ok(segment,'a segment holds Alpha twice '+JSON.stringify(v.ws.getSource().segments));
+  const second=segment.text.lastIndexOf('Alpha');
+  v.edits.last.add({pageIndex:0,segmentId:segment.id,before:'Alpha',after:'Beta',anchor:{start:second,end:second+5},origin:'human'});
+  v.get('paper-generate').click();
+  await until(()=>v.ws.getOutput(),'widened output');
+  assert.equal(requests.length,2);
+  assert.equal(requests[0][0].before,'Alpha');
+  const wide=requests[1][0];
+  assert.equal(wide.before,segment.text.slice(wide.anchor.start,second+5));
+  assert.ok(wide.before.length>5&&wide.before.endsWith('Alpha'),JSON.stringify(wide));
+  assert.equal(wide.after,wide.before.slice(0,-5)+'Beta');
+  assert.equal(segment.text.split(wide.before).length,2,'the widened Before is unique');
+  assert.deepEqual(failed,[]);
+  mode.fail='missing';
+  v.edits.last.add({pageIndex:0,segmentId:segment.id,before:'Alpha',after:'Gamma',anchor:{start:0,end:5},origin:'human'});
+  v.get('paper-generate').click();
+  await until(()=>failed.length,'failure event');
+  assert.equal(failed[0].code,'MATCH_FAILED');
+  assert.deepEqual(failed[0].failures.map(f=>f.code),['NOT_FOUND']);
+  assert.equal(typeof failed[0].failures[0].id,'string');
+  v.ws.dispose();
 });
 test('paragraph: a late inspection is aborted and cannot bind the next source; drag selection remains available',async()=>{
   let resolveA,signalA;
