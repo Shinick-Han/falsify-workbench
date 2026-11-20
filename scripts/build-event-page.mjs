@@ -39,7 +39,7 @@ export const EVENT_TITLE_SUFFIX = ' · Event';
 /* Contract order: event-theme.css, booth.css, booth-recipe.css, booth-myai.css, booth-runtime.css,
    then the in-page editing files (booth-patch before booth-pageedit), then the scripts. */
 export const BOOTH_STYLES = Object.freeze(['event-theme.css', 'booth.css', 'booth-recipe.css', 'booth-myai.css', 'booth-runtime.css', 'booth-patch.css', 'booth-pageedit.css']);
-export const BOOTH_SCRIPTS = Object.freeze(['booth-runtime.js', 'booth.js', 'booth-recipe.js', 'booth-myai.js', 'booth-patch.js', 'booth-pageedit.js']);
+export const BOOTH_SCRIPTS = Object.freeze(['booth-edits.js', 'booth-runtime.js', 'booth.js', 'booth-recipe.js', 'booth-myai.js', 'booth-patch.js', 'booth-pageedit.js']);
 /* Workbench assets the booth flow (pick, edit, 다음, send, ticket) never calls. Dropping them from
    event.html keeps index.html whole. latex-workbench.mjs statically imports MuPDF, whose top-level
    await downloads and compiles the 10 MB mupdf-wasm.wasm on every page load. Every global these
