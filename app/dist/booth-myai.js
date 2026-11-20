@@ -397,7 +397,7 @@
   }
 
   /* ---------- UI ---------- */
-  const UNRESOLVED={not_found:'찾는 글자가 이 논문에 없어요',ambiguous:'같은 글자가 여러 곳에 있어요',no_paper:'논문이 아직 열리지 않았어요'};
+  const UNRESOLVED={not_found:'찾는 글자가 이 논문에 없어요',ambiguous:'같은 글자가 여러 곳에 있어요',no_paper:'논문이 아직 열리지 않았어요',unchanged:'새 글자가 원문과 같아요'};
   function setProp(node,key,value){
     if(key==='className') node.className=value;
     else if(key==='text') node.textContent=value;

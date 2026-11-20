@@ -28,7 +28,10 @@
   const ACTIVITY=['pointerdown','touchstart','keydown','wheel','scroll','input'];
   const PAPER_ID=/^(?:\d{4}\.\d{4,5}(?:v\d+)?|[a-z-]+(?:\.[A-Z]{2})?\/\d{7}(?:v\d+)?)$/;
   const CODE=/^R-[0-9A-HJKMNP-TV-Z]{6}$/;
+  const CONTROL=/[\u0000-\u001f\u007f]/;
+  const LICENSE_RE=/^(?:cc-by(?:-\d+\.\d+)?|cc-by-sa(?:-\d+\.\d+)?|cc0(?:-1\.0)?|public-domain)$/;
   const TABS=['find','myai','agent'];
+  let resetting=false;
 
   function bag(name){
     try{return root[name]||null;}catch{return null;}
@@ -248,6 +251,8 @@
     dropGuest(session);
     clearEdits();
     resetAssist();
+    const html=root.document&&root.document.documentElement;
+    if(html&&html.dataset) delete html.dataset.boothStep;
     blurInput(root.document);
   }
   function kioskUrl(loc){
@@ -256,6 +261,7 @@
   }
   /* The reload drops the open paper, the booth edits and every in-memory booth state. */
   function handoff(){
+    resetting=true;
     clearVisitor();
     const loc=root.location;
     try{loc.replace(kioskUrl(loc));}catch{}
@@ -407,15 +413,31 @@
     const match=on&&/^booth-tab-(find|myai|agent)$/.exec(on.id||'');
     return match?match[1]:'find';
   }
+  function cleanTitle(value){
+    if(typeof value!=='string') return '';
+    const text=value.trim();
+    return text&&text.length<=300&&!CONTROL.test(text)?text:'';
+  }
+  function cleanLicense(value){
+    if(typeof value!=='string') return '';
+    const text=value.trim().toLowerCase();
+    return LICENSE_RE.test(text)?text:'';
+  }
   /* What a reload of this tab can pick up: only edit and send with an open paper. */
   function progressNow(doc, now){
     const step=stepOf(doc);
     const paper=currentPaper();
     if((step!=='edit'&&step!=='send')||!paper||!PAPER_ID.test(paper.id||'')) return null;
     const assist=assistNow();
-    return {v:2,at:now,step,paperId:paper.id,tab:tabNow(doc),assist:assist.kind,code:assist.code,edits:serializedEdits()};
+    return {
+      v:2,at:now,step,paperId:paper.id,
+      title:cleanTitle(paper.title),
+      license:cleanLicense(paper.license),
+      tab:tabNow(doc),assist:assist.kind,code:assist.code,edits:serializedEdits()
+    };
   }
   function saveProgress(doc){
+    if(resetting) return null;
     const store=bag('sessionStorage');
     const record=progressNow(doc,Date.now());
     if(!record){removeItem(store,PROGRESS_KEY);return null;}
@@ -435,6 +457,8 @@
     const valid=parseSerializedEdits(data.edits);
     return {
       step:data.step,paperId:data.paperId,
+      title:cleanTitle(data.title),
+      license:cleanLicense(data.license),
       tab:TABS.includes(data.tab)?data.tab:'find',
       assist:data.assist==='my-ai'||data.assist==='agent'?data.assist:'manual',
       code:typeof data.code==='string'&&CODE.test(data.code)?data.code:'',
@@ -445,9 +469,15 @@
   function resumeQuestion(count){
     return count?'고친 곳 '+count+'개를 이어서 할까요?':'보던 논문을 이어서 볼까요?';
   }
+  function reopenMeta(record){
+    const meta={};
+    if(record.title) meta.title=record.title;
+    if(record.license) meta.license=record.license;
+    return meta;
+  }
   async function reopen(record){
     const paper=root.FalsifyBoothPaper;
-    const pending=paper&&typeof paper.open==='function'?paper.open(record.paperId,{}):null;
+    const pending=paper&&typeof paper.open==='function'?paper.open(record.paperId,reopenMeta(record)):null;
     if(!pending||!(await pending)) return false;
     const store=boothEdits();
     if(store&&typeof store.restore==='function') store.restore(record.edits);

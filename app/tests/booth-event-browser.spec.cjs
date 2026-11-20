@@ -167,15 +167,22 @@ async function findAndReplace(page, desk, find, replace) {
   await pane.getByRole('button', {name: '바꾸기'}).first().click();
 }
 
+const OMITTED_WORKBENCH_RE = /editcore\.wasm|paragraph-pdf-worker|paragraph-pdf\.js|table-pdf\.js|pdf-edit-pipeline\.js|paper-font-service\.js|paper-change-marks\.js|paper-generation\.js|paper-recompose/i;
+
 /* One full pass: pick, edit, send, ticket. desk is the >=1024px layout in booth.css. */
 async function walk(browser, viewport, desk, pageErrors) {
   const submissions = [];
   const claims = [];
+  const forbiddenRequests = [];
   const page = await browser.newPage({
     viewport, deviceScaleFactor: 1, hasTouch: !desk, locale: 'ko-KR',
   });
   page.setDefaultTimeout(90000);
   page.on('pageerror', error => pageErrors.push(error.message));
+  page.on('request', req => {
+    const url = req.url();
+    if (OMITTED_WORKBENCH_RE.test(url)) forbiddenRequests.push(url);
+  });
   page.on('dialog', dialog => { void dialog.accept(); });
   await page.clock.install({time: new Date('2026-11-22T00:59:30.000Z')});
   const base = 'http://127.0.0.1:' + port + '/';
@@ -448,6 +455,66 @@ async function walk(browser, viewport, desk, pageErrors) {
   assert.equal(resultAudit.seen >= 2, true);
   assert.equal(resultAudit.overflow <= 0, true, 'result overflow ' + resultAudit.overflow);
   await deskChecks(page, desk, 1);
+  assert.deepEqual(forbiddenRequests, [], 'event.html must never request editcore.wasm, paragraph-pdf-worker, or omitted workbench engines');
+  await page.close();
+}
+
+/* Phone (<1024px) P1-1: exceeding the 5-edit cap disables 다음; tapping #booth-dock-count opens #booth-dock-pop with × buttons to remove edits. */
+async function phoneDockCapPass(browser, pageErrors) {
+  const submissions = [];
+  const claims = [];
+  const forbiddenRequests = [];
+  const page = await browser.newPage({
+    viewport: {width: 390, height: 844}, deviceScaleFactor: 1, hasTouch: true, locale: 'ko-KR',
+  });
+  page.setDefaultTimeout(90000);
+  page.on('pageerror', error => pageErrors.push(error.message));
+  page.on('request', req => {
+    const url = req.url();
+    if (OMITTED_WORKBENCH_RE.test(url)) forbiddenRequests.push(url);
+  });
+  const base = 'http://127.0.0.1:' + port + '/';
+  await page.route('**/*', route => {
+    const url = route.request().url();
+    if (url.startsWith(base)) return route.continue();
+    return stubApi(route, submissions, claims);
+  });
+  await page.goto(base + 'event.html');
+  await page.locator('#booth-missions .booth-mission').first().click();
+  await stepIs(page, 'edit');
+  await page.waitForFunction(() => !!globalThis.FalsifyPaperWorkspace?.getPdfDoc?.()
+    && /^5 \//.test(document.querySelector('#paper-page-label')?.textContent || ''));
+  await page.evaluate(() => {
+    for (let i = 0; i < 6; i += 1) {
+      globalThis.FalsifyBoothEdits.add({
+        pageIndex: 4,
+        rects: [{x: 0.1 + i * 0.12, y: 0.2, w: 0.08, h: 0.02}],
+        originalText: '0.9' + i,
+        newText: '0.1' + i,
+        source: 'find',
+      });
+    }
+  });
+  await page.waitForFunction(() => document.querySelector('#booth-dock-count')?.textContent === '고친 곳 6개');
+  assert.equal(await page.locator('#booth-next').isDisabled(), true, '다음 disabled over 5-edit cap');
+  assert.equal(await page.locator('#booth-dock-pop').isHidden(), true);
+  await page.locator('#booth-dock-count').click();
+  await page.locator('#booth-dock-pop').waitFor({state: 'visible'});
+  assert.equal(await page.locator('#booth-dock-count').getAttribute('aria-expanded'), 'true');
+  const items = page.locator('#booth-dock-pop li');
+  assert.equal(await items.count(), 6);
+  const firstX = items.first().locator('.booth-dock-x');
+  const xBox = await firstX.boundingBox();
+  assert.equal(xBox.width >= 44 && xBox.height >= 44, true, 'phone dock popover × is a 44px target');
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+  assert.equal(overflow <= 0, true, 'phone dock popover has no horizontal overflow: ' + overflow);
+  await firstX.click();
+  await page.waitForFunction(() => document.querySelector('#booth-dock-count')?.textContent === '고친 곳 5개');
+  assert.equal(await items.count(), 5);
+  assert.equal(await page.locator('#booth-next').isEnabled(), true, '다음 re-enables once back at cap');
+  await page.locator('#booth-dock-count').click();
+  assert.equal(await page.locator('#booth-dock-pop').isHidden(), true);
+  assert.deepEqual(forbiddenRequests, []);
   await page.close();
 }
 
@@ -464,6 +531,7 @@ async function main() {
   });
   try {
     await walk(browser, {width: 390, height: 844}, false, pageErrors);
+    await phoneDockCapPass(browser, pageErrors);
     await walk(browser, {width: 1280, height: 800}, true, pageErrors);
     assert.equal(pageErrors.join('\n'), '');
   } catch (error) {

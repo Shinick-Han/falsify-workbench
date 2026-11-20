@@ -197,12 +197,15 @@ test('readProgress checks shape, age and validates serialized BoothEdits', () =>
   const badEdit = {pageIndex: -1, rects: [], originalText: 'a', newText: 'b'};
   const sameEdit = {pageIndex: 0, rects: [{x: 0.1, y: 0.1, w: 0.1, h: 0.02}], originalText: 'a', newText: 'a'};
   const good = {
-    v: 2, at: now - 1000, step: 'edit', paperId: '2309.15217', tab: 'myai', assist: 'my-ai', code: '',
+    v: 2, at: now - 1000, step: 'edit', paperId: '2309.15217', title: 'Ragas: Automated Evaluation', license: 'cc-by-4.0',
+    tab: 'myai', assist: 'my-ai', code: '',
     edits: JSON.stringify([SAMPLE_EDIT, badEdit, sameEdit]),
   };
   const read = R.readProgress(JSON.stringify(good), now);
   assert.equal(read.step, 'edit');
   assert.equal(read.paperId, '2309.15217');
+  assert.equal(read.title, 'Ragas: Automated Evaluation');
+  assert.equal(read.license, 'cc-by-4.0');
   assert.equal(read.tab, 'myai');
   assert.equal(read.assist, 'my-ai');
   assert.equal(read.code, '');
@@ -228,8 +231,8 @@ test('progressNow and reopen round-trip through FalsifyBoothEdits.serialize / re
   const assists = [];
   const context = load({
     FalsifyBoothPaper: {
-      current: () => ({source: 'mission', id: '2309.15217'}),
-      open: id => { opened.push(id); return Promise.resolve(true); },
+      current: () => ({source: 'arxiv', id: '2309.15217', title: 'Ragas: Automated Evaluation', license: 'cc-by-4.0'}),
+      open: (id, meta) => { opened.push([id, JSON.parse(JSON.stringify(meta))]); return Promise.resolve(true); },
     },
     FalsifyBoothRecipe: {
       assist: () => ({assist: 'agent', recipeCode: 'R-7K3QXM'}),
@@ -241,6 +244,8 @@ test('progressNow and reopen round-trip through FalsifyBoothEdits.serialize / re
   const record = R.progressNow(doc, 5);
   assert.equal(record.v, 2);
   assert.equal(record.paperId, '2309.15217');
+  assert.equal(record.title, 'Ragas: Automated Evaluation');
+  assert.equal(record.license, 'cc-by-4.0');
   assert.equal(record.tab, 'myai');
   assert.equal(record.assist, 'agent');
   assert.equal(record.code, 'R-7K3QXM');
@@ -251,12 +256,39 @@ test('progressNow and reopen round-trip through FalsifyBoothEdits.serialize / re
   const parsed = R.readProgress(JSON.stringify(record), 10);
   const ok = await R.reopen(parsed);
   assert.equal(ok, true);
-  assert.deepEqual(opened, ['2309.15217']);
+  assert.deepEqual(opened, [['2309.15217', {title: 'Ragas: Automated Evaluation', license: 'cc-by-4.0'}]]);
   assert.deepEqual(assists, [['agent', 'R-7K3QXM']]);
   assert.deepEqual(JSON.parse(JSON.stringify(context.FalsifyBoothEdits.list())), [SAMPLE_EDIT]);
 
   html.dataset.boothStep = 'ticket';
   assert.equal(R.progressNow(doc, 5), null);
+});
+
+test('handoff clears boothStep and blocks pagehide saveProgress from re-writing progress (P1-3)', () => {
+  const session = memoryStore({'falsify.booth.kiosk.v1': '1'});
+  const html = {dataset: {boothStep: 'edit'}};
+  const doc = {documentElement: html, body: {}, querySelector: () => null};
+  let replaced = '';
+  const context = load({
+    sessionStorage: session,
+    localStorage: memoryStore(),
+    document: doc,
+    location: {search: '?kiosk=1', pathname: '/event.html', replace(url) { replaced = url; }},
+    FalsifyBoothPaper: {
+      current: () => ({source: 'mission', id: '2309.15217', title: 'Ragas', license: 'cc-by-4.0'}),
+    },
+  });
+  const R = context.FalsifyBoothRuntime;
+  assert.ok(R.saveProgress(doc));
+  assert.ok(session.getItem(R.PROGRESS_KEY));
+  R.handoff();
+  assert.equal(replaced, '/event.html?kiosk=1');
+  assert.equal(html.dataset.boothStep, undefined, 'clearVisitor clears dataset.boothStep');
+  assert.equal(session.getItem(R.PROGRESS_KEY), null);
+  // Even if something restored boothStep before pagehide fires, resetting prevents re-saving.
+  html.dataset.boothStep = 'edit';
+  assert.equal(R.saveProgress(doc), null, 'pagehide saveProgress is suppressed during handoff');
+  assert.equal(session.getItem(R.PROGRESS_KEY), null);
 });
 
 test('booth.js: the offline error line, and receipts stay on localStorage without the runtime', () => {

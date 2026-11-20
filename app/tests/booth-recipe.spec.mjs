@@ -427,3 +427,41 @@ test('codeFromText takes the code out of a pasted #recipe= link; expiryText read
   assert.equal(recipe.expiryText('nope'), '');
   assert.equal(recipe.expiryText(undefined), '');
 });
+
+test('rotated items return the whole item box in rectsForSpan instead of slicing along x (P1-4)', () => {
+  const {recipe} = load();
+  const cases = [
+    ['Rotate 90', {width: 800, height: 600, transform: [0, 1, 1, 0, 0, 0]}, {str: 'Hello World 0.95 End', transform: [10, 0, 0, 10, 100, 300], width: 120, height: 10}],
+    ['Rotate 180', {width: 600, height: 800, transform: [-1, 0, 0, 1, 600, 0]}, {str: 'Hello World 0.95 End', transform: [10, 0, 0, 10, 100, 300], width: 120, height: 10}],
+    ['Rotate 270', {width: 800, height: 600, transform: [0, -1, -1, 0, 800, 600]}, {str: 'Hello World 0.95 End', transform: [10, 0, 0, 10, 100, 300], width: 120, height: 10}],
+    ['Rotated item on Rotate 0', {width: 600, height: 800, transform: [1, 0, 0, -1, 0, 800]}, {str: 'Hello World 0.95 End', transform: [0, 10, -10, 0, 100, 300], width: 120, height: 10}],
+  ];
+  for (const [label, viewport, item] of cases) {
+    const page = plain(recipe.indexPage({pageIndex: 0, viewport, items: [item]}));
+    assert.equal(page.spans.length, 1, label);
+    assert.equal(page.spans[0].rotated, true, label + ' marked rotated');
+    const found = plain(recipe.locate({find: '0.95', replace: '0.50'}, [page]));
+    assert.equal(found.status, 'resolved', label);
+    assert.deepEqual(found.rects, [page.spans[0].rect], label + ' returns whole item box');
+  }
+  const normal = plain(recipe.indexPage({
+    pageIndex: 0,
+    viewport: {width: 600, height: 800, transform: [1, 0, 0, -1, 0, 800]},
+    items: [{str: 'Hello World 0.95 End', transform: [10, 0, 0, 10, 100, 300], width: 120, height: 10}],
+  }));
+  assert.equal(normal.spans[0].rotated, undefined, 'horizontal item is not rotated');
+  const sliced = plain(recipe.locate({find: '0.95', replace: '0.50'}, [normal]));
+  assert.ok(sliced.rects[0].w < normal.spans[0].rect.w * 0.5, 'horizontal item still slices along x');
+});
+
+test('case-folded no-op where replace equals originalText is unresolved as unchanged (P2-2)', async () => {
+  const ws = stubWorkspace(PAGES);
+  const hook = {open: () => Promise.resolve(true), current: () => ({id: '2309.15217', title: 'Ragas', license: 'cc-by-4.0'})};
+  const {recipe, edits} = load({FalsifyPaperWorkspace: ws, FalsifyBoothPaper: hook});
+  const result = await recipe.apply(good({
+    edits: [{page: 3, find: 'ragas', replace: 'Ragas'}],
+  }));
+  assert.equal(result.applied.length, 0);
+  assert.deepEqual(plain(result.unresolved.map(item => item.reason)), ['unchanged']);
+  assert.equal(edits.list().length, 0);
+});

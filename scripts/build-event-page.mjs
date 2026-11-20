@@ -51,6 +51,9 @@ export const EVENT_OMIT = Object.freeze([
   // RED's /URI scan imports MuPDF on the main thread when a paper opens (4.6 MB wasm, 0.4-0.6 s task).
   'red-baseline-uri.css', 'red-baseline-uri.js',
   'coevolution-arena.css', 'coevolution-arena.js', 'blue-defect-sensor.css', 'blue-defect-sensor-ui.js',
+  // Workbench PDF engines (PDFium editcore.wasm, table/pipeline/recompose/font/change-marks/generation) unused on event.html.
+  'paper-recompose-entry.mjs', 'table-pdf.js', 'paragraph-pdf.js', 'pdf-edit-pipeline.js',
+  'paper-font-service.js', 'paper-change-marks.js', 'paper-generation.js',
 ]);
 
 function fail(message, exitCode) {

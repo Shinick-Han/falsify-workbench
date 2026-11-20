@@ -775,6 +775,53 @@ test('editing BoothEdits while on send rebuilds automatically before submit', as
   h.handle.destroy();
 });
 
+test('declared payload strips C0 control chars and trims to 2000 code points while rewrite keeps full text (P2-1)', async () => {
+  const h = liveBooth();
+  await settle();
+  const rawBefore = 'A\u0000B\u0007C\tD\n' + 'x'.repeat(2100);
+  const rawAfter = 'Y\u0001Z\u001f' + 'y'.repeat(2100);
+  const ws = await reachSend(h, [makeBoothEdit({id: 'e-long', pageIndex: 2, originalText: rawBefore, newText: rawAfter})]);
+  assert.equal(ws.rewrites[0].edits[0].originalText, rawBefore, 'rewrite keeps full originalText');
+  assert.equal(ws.rewrites[0].edits[0].newText, rawAfter, 'rewrite keeps full newText');
+  declare(h, '수치·통계', '긴 문단을 바꿨어요');
+  agree(h);
+  await submit(h);
+  assert.equal(h.step(), 'ticket');
+  const posted = h.calls.find(call => call.path.endsWith('/v1/booth/submissions'));
+  const meta = JSON.parse(posted.form.get('meta'));
+  assert.equal(meta.declared[0].before.length, 2000);
+  assert.equal(meta.declared[0].after.length, 2000);
+  assert.equal(meta.declared[0].before.startsWith('ABC\tD\n'), true, 'C0 controls stripped, tab/newline kept');
+  assert.equal(meta.declared[0].after.startsWith('YZ'), true, 'C0 controls stripped from after');
+  assert.equal(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(meta.declared[0].before + meta.declared[0].after), false);
+  h.handle.destroy();
+});
+
+test('dock count button opens #booth-dock-pop with delete buttons even at 6 edits (P1-1)', async () => {
+  const h = liveBooth();
+  await settle();
+  useWorkspace([]);
+  await pickMission(h);
+  for (let i = 0; i < 6; i += 1) {
+    boothEdits.add(makeBoothEdit({id: 'p-' + i, pageIndex: i % 5, rects: [{x: 0.1 + i * 0.1, y: 0.2, w: 0.05, h: 0.02}], originalText: 'a' + i, newText: 'b' + i}));
+  }
+  assert.equal(h.text('booth-dock-count'), '고친 곳 6개');
+  assert.equal(h.ids.get('booth-next').disabled, true);
+  assert.equal(h.ids.get('booth-dock-pop').hidden, true);
+  h.ids.get('booth-dock-count').click();
+  assert.equal(h.ids.get('booth-dock-pop').hidden, false);
+  assert.equal(h.ids.get('booth-dock-count').getAttribute('aria-expanded'), 'true');
+  assert.equal(h.ids.get('booth-dock-pop').children.length, 6);
+  const delBtn = h.ids.get('booth-dock-pop').children[0].children[1];
+  delBtn.click();
+  assert.equal(h.text('booth-dock-count'), '고친 곳 5개');
+  assert.equal(h.ids.get('booth-next').disabled, false);
+  assert.equal(h.ids.get('booth-dock-pop').hidden, false, 'popover stays open for further removals');
+  h.ids.get('booth-dock-count').click();
+  assert.equal(h.ids.get('booth-dock-pop').hidden, true);
+  h.handle.destroy();
+});
+
 test('a lost or refused session at submit is minted again and retried in place', async () => {
   const fill = h => { agree(h); chip(h, '수치·통계').click(); declare(h, '', '유의수준을 바꿔 결론이 성립하지 않음'); h.ids.get('booth-nickname').value = '부스방문자'; };
   const once = liveBooth({submits: [{status: 401, body: {error: {code: 'unauthorized'}}}]});

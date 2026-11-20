@@ -352,6 +352,18 @@ async function findFlows(browser, log, errors, wide) {
   await dockIs(2);
   assert.equal(await ask.isHidden(), true);
 
+  // Case-folded no-op: newText equals originalText -> calm notice, 0 edits added (P2-2).
+  await find.fill('gpt ranking');
+  await repl.fill('GPT Ranking');
+  await go.click();
+  const askNoop = pane.locator('.booth-find-ask').first();
+  if (await askNoop.isVisible()) await pane.locator('.booth-find-hit').first().click();
+  await page.waitForFunction(() => /새 글자가 원문과 같아요/.test(
+    (document.querySelector('#booth-pane-find .booth-find > .booth-feedback, #booth-find-fold .booth-find > .booth-feedback')?.textContent || '')
+    + (document.querySelector('#booth-pane-find .booth-find-ask, #booth-find-fold .booth-find-ask')?.textContent || '')
+  ));
+  assert.equal(await page.locator('#booth-dock-count').textContent(), '고친 곳 2개');
+
   // Missing text: calm feedback beside the form.
   await find.fill('zzqx nowhere');
   await repl.fill('x');
