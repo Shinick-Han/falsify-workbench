@@ -14,6 +14,14 @@ const api = 'https://falsify-cloud-api-event.ai-gongbu.workers.dev';
 const port = Number(process.env.BOOTH_EVENT_PORT || 8877);
 const token = 'fsg_' + 'a'.repeat(43);
 const pdfBytes = fs.readFileSync(pdfPath);
+/* Optional: BOOTH_SHOT_DIR saves pick, ticket-missed and withdraw-confirm screenshots per viewport. */
+const shotDir = process.env.BOOTH_SHOT_DIR || '';
+
+async function shot(page, name, viewport) {
+  if (!shotDir) return;
+  fs.mkdirSync(shotDir, {recursive: true});
+  await page.screenshot({path: path.join(shotDir, name + '-' + viewport.width + 'x' + viewport.height + '.png'), fullPage: true});
+}
 
 function serve() {
   const child = spawn('python3', ['-m', 'http.server', String(port), '--bind', '127.0.0.1'], {
@@ -51,7 +59,7 @@ const cors = {
 const PENDING = {receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:00.000Z', published: false};
 const MISSED = {
   receipt: 'F-0042', status: 'judged', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:00.000Z',
-  published: true, outcome: 'missed', publicNote: 'AI는 다른 곳을 짚었습니다. AI가 먼저 본 곳은 7쪽이었고, 심어 둔 결함은 AI 눈을 피했습니다.',
+  published: true, outcome: 'missed', publicNote: 'AI는 다른 곳을 짚었어요. AI가 먼저 본 곳은 7쪽이었고, 심어 둔 결함은 AI 눈을 피했어요.',
   prizeMessage: '부스에서 스티커를 받아 가세요', publishedAt: '2026-11-22T01:02:00.000Z',
 };
 
@@ -176,6 +184,21 @@ async function walk(browser, viewport, desk, pageErrors) {
   assert.match(await mission.textContent(), /5쪽도전 →/);
   assert.equal(await page.locator('#booth-search').isVisible(), desk, 'search is a closed disclosure on phones, one open row on desktop');
   await deskChecks(page, desk, 1);
+  // Rules before the first tap (ux-booth P0-1): the line under the hero and the 01/02/03 how-to, on phones too.
+  const limit = page.locator('#booth-pick-limit');
+  assert.equal(await limit.textContent(), '1인 5번 · 보통 1~3분 · 이름·연락처는 받지 않아요');
+  assert.equal(await limit.isVisible(), true, 'the rules line is visible');
+  assert.equal(await page.locator('#booth-howto').isVisible(), true, 'the how-to is visible');
+  assert.equal(await page.locator('#booth-howto li').count(), 3);
+  assert.doesNotMatch(await page.locator('#booth-step-pick').textContent(), /2분 안에/);
+  if (!desk) {
+    const hero = await page.locator('.booth-hero').boundingBox();
+    const line = await limit.boundingBox();
+    const howto = await page.locator('#booth-howto').boundingBox();
+    assert.equal(line.y >= hero.y + hero.height && howto.y >= line.y + line.height, true, 'hero, then the rules line, then the how-to');
+    assert.equal(line.y + line.height <= viewport.height, true, 'the rules line is above the fold');
+  }
+  await shot(page, 'pick', viewport);
   await mission.click();
   await stepIs(page, 'edit');
   await page.waitForFunction(() => [...document.querySelectorAll('.paper-paragraph-button')].some(node => node.textContent.includes('0.95')));
@@ -339,7 +362,16 @@ async function walk(browser, viewport, desk, pageErrors) {
   assert.equal(await again.textContent(), '다시 도전하기 · 기회 4번 남음');
   assert.match(await page.locator('#booth-history').textContent(), /F-0042 · Ragas통과/);
   await deskChecks(page, desk, 3);
-  assert.equal(await page.locator('#booth-final').isVisible(), desk, '최종 추첨 is a desktop panel');
+  // 최종 추첨 (ux-booth P0-2): on a 통과 result phones see it too, under the gift ticket.
+  assert.equal(await page.locator('#booth-final').isVisible(), true, '최종 추첨 is visible');
+  assert.match(await page.locator('#booth-final').textContent(), /^최종 추첨/);
+  if (!desk) {
+    const giftBox = await page.locator('#booth-gift').boundingBox();
+    const finalBox = await page.locator('#booth-final').boundingBox();
+    assert.equal(finalBox.y >= giftBox.y + giftBox.height, true, 'the draw card follows the gift ticket');
+    assert.equal(finalBox.x >= 0 && finalBox.x + finalBox.width <= viewport.width, true, 'the draw card fits the phone column');
+  }
+  await shot(page, 'ticket-missed', viewport);
   if (desk) {
     const ticketBox = await page.locator('#booth-ticket').boundingBox();
     const result = await page.locator('#booth-ticket-result').boundingBox();
@@ -358,6 +390,28 @@ async function walk(browser, viewport, desk, pageErrors) {
     assert.equal(audit.seen >= 3, true);
     assert.equal(audit.overflow <= 0, true, 'horizontal overflow ' + audit.overflow);
   }
+  // Withdraw asks once (ux-booth P0-6): 취소 and a fail-outline 철회하기 replace the first button, under the warning.
+  await page.setViewportSize(viewport);
+  await page.locator('#booth-withdraw-box > summary').click();
+  await page.locator('#booth-withdraw').click();
+  const ask = page.locator('#booth-withdraw-ask');
+  assert.equal(await ask.isVisible(), true);
+  assert.equal(await page.locator('#booth-withdraw').isHidden(), true, 'the first button gives way');
+  assert.match(await ask.textContent(), /^철회하면 되돌릴 수 없고, 선물과 추첨 기회도 함께 사라져요\./);
+  const confirmLook = await page.locator('#booth-withdraw-confirm').evaluate(node => {
+    const style = getComputedStyle(node);
+    return {color: style.color, border: style.borderTopColor, background: style.backgroundColor};
+  });
+  assert.deepEqual(confirmLook, {color: 'rgb(138, 48, 48)', border: 'rgb(138, 48, 48)', background: 'rgba(0, 0, 0, 0)'});
+  const cancelBox = await page.locator('#booth-withdraw-cancel').boundingBox();
+  const confirmBox = await page.locator('#booth-withdraw-confirm').boundingBox();
+  assert.equal(cancelBox.height >= 44 && confirmBox.height >= 44, true, '44px targets');
+  await ask.scrollIntoViewIfNeeded();
+  await shot(page, 'withdraw-confirm', viewport);
+  await page.locator('#booth-withdraw-cancel').click();
+  assert.equal(await ask.isHidden(), true);
+  assert.equal(await page.locator('#booth-withdraw').isVisible(), true);
+  await page.locator('#booth-withdraw-box > summary').click();
   await page.clock.fastForward(60000);
   await new Promise(resolve => setTimeout(resolve, 300));
   assert.equal(claims.length, 3);

@@ -159,7 +159,7 @@ test('public note uses only the AI finding, page, quote and rationale', () => {
   assert.equal(note.length <= 1000, true);
   assert.equal(note.includes('AI가 짚은 곳: 7쪽'), true);
   const partial = buildPublicNote({ outcome: 'partial', matched: long, first: long, templates: DEFAULT_NOTES });
-  assert.match(partial, /거의 다가갔습니다\. 이번에는 찾은 것으로 봅니다\. \(AI가 짚은 곳: 7쪽\)/);
+  assert.match(partial, /근처를 AI가 짚었어요\. 적발로 처리돼요\. \(AI가 짚은 곳: 7쪽\)/);
   const quote = /"([^"]*)"/.exec(note)[1];
   assert.equal(quote.length <= 200, true);
   const missed = buildPublicNote({ outcome: 'missed', matched: null, first: HOSTED.findings[0], templates: DEFAULT_NOTES });
@@ -277,10 +277,10 @@ test('final --apply keeps the instant prize valid with the default finalCaughtMe
     assert.equal(applied.code, 0, applied.stderr);
     const item = find(fake, 'F-0002');
     assert.equal(item.outcome, 'caught');
-    assert.equal(item.prizeMessage, '빠른 AI는 이겼어요! 정밀 AI는 찾아냈지만, 받은 즉석 선물은 그대로 유효합니다.');
+    assert.equal(item.prizeMessage, '빠른 AI는 이겼어요! 정밀 AI는 찾아냈지만, 받은 즉석 선물은 그대로 유효해요.');
     assert.match(item.publicNote, /주석자 수가/);
     const last = fake.state.patches.filter(patch => patch.receipt === 'F-0002').at(-1).body;
-    assert.equal(last.prizeMessage, '빠른 AI는 이겼어요! 정밀 AI는 찾아냈지만, 받은 즉석 선물은 그대로 유효합니다.');
+    assert.equal(last.prizeMessage, '빠른 AI는 이겼어요! 정밀 AI는 찾아냈지만, 받은 즉석 선물은 그대로 유효해요.');
     assert.equal(last.outcome, 'caught');
   });
 });
@@ -363,7 +363,7 @@ test('final: Opus round on live misses; dry by default, --apply PATCHes', async 
     assert.equal(caught.outcome, 'caught');
     assert.equal(caught.prizeMessage, 'FINAL_CAUGHT');
     assert.match(caught.publicNote, /AI가 짚은 곳: 2쪽/);
-    assert.match(caught.publicNote, /^AI가 심어 둔 결함을 찾았습니다/);
+    assert.match(caught.publicNote, /^내가 심어 둔 결함을 AI가 찾았어요/);
     assert.match(caught.publicNote, /주석자 수가/);
     assert.equal(caught.aiSummary.round, 'final');
     assert.equal(caught.aiSummary.liveOutcome, 'missed');

@@ -524,8 +524,9 @@ test('the booth mounts only when enabled and starts on pick', async () => {
   assert.equal(h.text('booth-title'), 'AI를 속일 수있을까요?');
   assert.equal(nodesOf(h.ids.get('booth-title')).find(node => node.tagName === 'b').textContent, '속일 수');
   assert.match(h.text('booth-step-pick'), /AI REVIEW CHALLENGE/);
-  assert.match(h.text('booth-step-pick'), /공개 논문 한 곳을 몰래 고쳐 보세요\. AI가 2분 안에 찾아내는지 겨룹니다\. AI가 놓치면 부스에서 선물을 드려요\./);
-  assert.match(h.text('booth-step-pick'), /1논문 고르기2몰래 고치기3AI 검증/);
+  assert.match(h.text('booth-step-pick'), /공개 논문 한 곳을 몰래 고쳐 보세요\. AI가 보통 1~3분 안에 찾아내는지 겨뤄요\. AI가 놓치면 부스에서 선물을 드려요\./);
+  assert.doesNotMatch(h.text('booth-step-pick'), /2분 안에/);
+  assert.match(h.text('booth-step-pick'), /01논문 고르기.*02몰래 고치기.*03AI 검증/);
   assert.equal(h.text('booth-search-box').startsWith('다른 공개 논문 직접 찾기'), true);
   for (const id of ['booth-step-edit', 'booth-submit', 'booth-receipt']) assert.equal(h.ids.get(id).hidden, true, id);
   h.handle.destroy();
@@ -901,7 +902,7 @@ test('a wrong claim stays on 내 기록 with the reason', async () => {
 test('every final outcome shows its headline, stamp and gift ticket', async () => {
   const cases = [
     ['caught', 'AI가 찾아냈어요', '찾아냈어요', 'booth-stamp fail', '적발DETECTED'],
-    ['partial', 'AI가 거의 찾았어요', '거의 찾았어요', 'booth-stamp fail', '적발DETECTED'],
+    ['partial', 'AI가 근처를 짚었어요', '근처를 짚었어요', 'booth-stamp fail', '적발DETECTED'],
     ['missed', 'AI가 못 찾았어요', '못 찾았어요', 'booth-stamp pass', '통과PASSED'],
     ['invalid', '결함으로 인정되지 않았어요', '인정되지 않았어요', 'booth-stamp void', '무효VOID'],
   ];
@@ -923,6 +924,8 @@ test('every final outcome shows its headline, stamp and gift ticket', async () =
       assert.equal(h.text('booth-live-prize'), prize);
       assert.match(h.text('booth-live-note'), new RegExp('note ' + outcome + '$'));
       assert.equal(h.ids.get('booth-live-tip').hidden, !(outcome === 'caught' || outcome === 'partial'));
+      assert.equal(h.ids.get('booth-live-sub').hidden, outcome !== 'partial', outcome + ' sub-copy');
+      assert.equal(h.text('booth-live-sub'), outcome === 'partial' ? '결함 근처를 짚어서 적발로 처리돼요.' : '');
       assert.equal(h.ids.get('booth-ticket-duration-cell').hidden, true, 'no publishedAt, no duration');
       assert.equal(h.ids.get('booth-live-again').hidden, false);
       assert.equal(h.timers.length, 0);
@@ -938,9 +941,20 @@ test('every final outcome shows its headline, stamp and gift ticket', async () =
   await settle();
   assert.equal(w.ids.get('booth-withdraw-box').tagName, 'details');
   assert.equal(w.text('booth-withdraw-box').startsWith('제출 철회'), true);
-  assert.equal(w.ids.get('booth-withdraw-confirm').hidden, true);
+  // The confirm stage replaces the first button: 취소 (outline) and 철회하기 (fail outline) under the warning.
+  assert.equal(w.ids.get('booth-withdraw-ask').hidden, true);
+  assert.equal(w.ids.get('booth-withdraw').hidden, false);
   w.ids.get('booth-withdraw').click();
-  assert.equal(w.ids.get('booth-withdraw-confirm').hidden, false);
+  assert.equal(w.ids.get('booth-withdraw-ask').hidden, false);
+  assert.equal(w.ids.get('booth-withdraw').hidden, true, 'the first button gives way');
+  assert.equal(w.text('booth-withdraw-ask'), '철회하면 되돌릴 수 없고, 선물과 추첨 기회도 함께 사라져요.취소철회하기');
+  assert.equal(w.ids.get('booth-withdraw-cancel').className, 'booth-btn line');
+  assert.equal(w.ids.get('booth-withdraw-confirm').className, 'booth-btn line danger');
+  w.ids.get('booth-withdraw-cancel').click();
+  assert.equal(w.ids.get('booth-withdraw-ask').hidden, true);
+  assert.equal(w.ids.get('booth-withdraw').hidden, false);
+  assert.equal(w.calls.some(call => call.path.endsWith('/v1/booth/withdraw')), false);
+  w.ids.get('booth-withdraw').click();
   assert.equal(w.calls.some(call => call.path.endsWith('/v1/booth/withdraw')), false);
   w.ids.get('booth-withdraw-confirm').click();
   await settle();
@@ -953,6 +967,47 @@ test('every final outcome shows its headline, stamp and gift ticket', async () =
   assert.equal(w.ids.get('booth-live-again').hidden, false);
   assert.equal(w.timers.length, 0);
   w.handle.destroy();
+});
+
+/* ux-ai-assist P0-2: AI-made edits keep their source on the send card. */
+test('the send card names an AI-assisted edit and its recipe code', async () => {
+  const cases = [
+    [{assist: 'agent', recipeCode: 'R-7K3QXM'}, 'AI와 숨긴 결함 · 2쪽', 'AI 제안 · R-7K3QXM'],
+    [{assist: 'my-ai'}, 'AI와 숨긴 결함 · 2쪽', 'AI 제안'],
+    [{assist: 'manual'}, '내가 숨긴 결함 · 2쪽', null],
+    [null, '내가 숨긴 결함 · 2쪽', null],
+  ];
+  try {
+    for (const [info, title, chipText] of cases) {
+      boothContext.FalsifyBoothRecipe = info ? {assist: () => info} : {};
+      const h = liveBooth();
+      await settle();
+      await reachSend(h);
+      const card = nodesOf(h.ids.get('booth-rows')).find(node => node.className === 'booth-panel booth-card');
+      assert.equal(nodesOf(card).find(node => node.className === 'booth-klab').textContent, title);
+      const aiChip = nodesOf(card).find(node => node.className === 'booth-ai-chip');
+      assert.equal(aiChip ? aiChip.textContent : null, chipText);
+      h.handle.destroy();
+    }
+  } finally {
+    delete boothContext.FalsifyBoothRecipe;
+  }
+});
+
+/* ux-booth P0-3: only AI verdicts show a 검증 시간; an operator's invalid call is not an AI wait. */
+test('the ticket shows 검증 시간 for AI verdicts only', async () => {
+  for (const [outcome, shown] of [['missed', true], ['partial', true], ['invalid', false]]) {
+    const h = liveBooth({claims: [{receipt: 'F-0042', status: outcome === 'invalid' ? 'invalid' : 'judged', course: 'quick', declaredCount: 1,
+      published: true, outcome, publicNote: 'note', createdAt: '2026-11-22T01:00:00Z', publishedAt: '2026-11-22T01:05:00Z'}]});
+    await settle();
+    h.ids.get('booth-claim-receipt').value = 'F-0042';
+    h.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+    h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+    await settle();
+    assert.equal(h.ids.get('booth-ticket-duration-cell').hidden, !shown, outcome);
+    assert.equal(h.text('booth-ticket-duration'), shown ? '5분' : '', outcome);
+    h.handle.destroy();
+  }
 });
 
 /* Desktop layout nodes (booth.css shows them at >=1024px only). */
@@ -990,7 +1045,11 @@ test('the desktop pick step adds the how-to list, the cap line and the mission c
   const h = liveBooth({perOwner: 3});
   await settle();
   assert.equal(h.text('booth-howto'), '01논문 고르기미션 논문이나 공개 논문 하나02몰래 고치기숫자, 문장, 결론 어디든 한 곳 이상03AI 검증보통 1~3분, 접수번호로 결과 확인');
-  assert.equal(h.text('booth-pick-limit'), '1인 3번까지 · 이름·연락처는 받지 않아요');
+  assert.equal(h.text('booth-pick-limit'), '1인 3번 · 보통 1~3분 · 이름·연락처는 받지 않아요');
+  // Phones see the rules line and the how-to too: neither is a desktop-only node, and the line follows the hero.
+  for (const id of ['booth-howto', 'booth-pick-limit']) assert.equal(h.ids.get(id).className.split(' ').includes('booth-desk'), false, id);
+  const intro = h.ids.get('booth-pick-limit').parentNode.children;
+  assert.equal(intro.indexOf(h.ids.get('booth-pick-limit')), intro.indexOf(h.ids.get('booth-howto')) - 1, 'the rules line sits above the how-to');
   assert.equal(h.ids.get('booth-mission-head').hidden, false);
   assert.equal(h.text('booth-mission-count'), '오늘의 미션 · 2');
   assert.match(h.text('booth-mission-head'), /티켓을 누르면 힌트 쪽이 열려요$/);
@@ -1138,6 +1197,7 @@ test('the 최종 추첨 panel shows only when the AI missed, and the stub carrie
     await settle();
     assert.equal(h.step(), 'ticket');
     assert.equal(h.ids.get('booth-final').hidden, outcome !== 'missed', outcome);
+    assert.equal(h.ids.get('booth-final').className, 'booth-panel booth-final', 'phones see the draw card too');
     assert.equal(h.text('booth-final'), '최종 추첨마감 후 더 정밀한 AI가 한 번 더 검증해요. 그때도 못 찾으면 최종 추첨 대상이에요.');
     assert.equal(h.ids.get('booth-live-records').hidden, false);
     assert.equal(h.text('booth-stub-receipt'), 'F-0042');
@@ -1174,11 +1234,11 @@ test('publicNote parses the three CLI templates and falls back to plain text', a
   const none = buildPublicNote({outcome: 'missed', first: null, templates});
   assert.deepEqual(plain(booth.parsePublicNote(caught)), {
     page: '9', quote: 'reducing detection and localization time by 10% and 43%',
-    opinion: 'Finding 5 and the results disagree.', text: 'AI가 심어 둔 결함을 찾았습니다.',
+    opinion: 'Finding 5 and the results disagree.', text: '내가 심어 둔 결함을 AI가 찾았어요.',
   });
   assert.deepEqual(plain(booth.parsePublicNote(partial)), {
     page: '9', quote: 'reducing detection and localization time by 10% and 43%',
-    opinion: 'Finding 5 and the results disagree.', text: 'AI가 심어 둔 결함에 거의 다가갔습니다. 이번에는 찾은 것으로 봅니다.',
+    opinion: 'Finding 5 and the results disagree.', text: '내가 심어 둔 결함 근처를 AI가 짚었어요. 적발로 처리돼요.',
   });
   assert.deepEqual(plain(booth.parsePublicNote(missed)), {page: '', quote: '', opinion: '', text: missed});
   assert.deepEqual(plain(booth.parsePublicNote(none)), {page: '', quote: '', opinion: '', text: none});
@@ -1197,7 +1257,7 @@ test('publicNote parses the three CLI templates and falls back to plain text', a
   const note = nodesOf(h.ids.get('booth-live-note'));
   assert.equal(note.find(node => node.tagName === 'blockquote').textContent, 'reducing detection and localization time by 10% and 43%');
   assert.deepEqual(note.filter(node => node.className.startsWith('booth-klab')).map(node => node.textContent), ['AI 의견']);
-  assert.equal(h.text('booth-live-note'), 'AI가 심어 둔 결함을 찾았습니다.reducing detection and localization time by 10% and 43%AI 의견Finding 5 and the results disagree.');
+  assert.equal(h.text('booth-live-note'), '내가 심어 둔 결함을 AI가 찾았어요.reducing detection and localization time by 10% and 43%AI 의견Finding 5 and the results disagree.');
   assert.equal(h.text('booth-ticket-duration'), '2분 14초');
   h.handle.destroy();
 });
@@ -1437,7 +1497,7 @@ test('each claim state maps to the visitor ticket copy', () => {
     title: 'AI가 찾아냈어요', lead: 'AI가 ', strong: '찾아냈어요', stamp: {kind: 'fail', word: '적발', latin: 'DETECTED'},
   });
   const partial = booth.resultView({status: 'judged', published: true, outcome: 'partial', publicNote: '쪽은 맞았어요'});
-  assert.equal(partial.title, 'AI가 거의 찾았어요');
+  assert.equal(partial.title, 'AI가 근처를 짚었어요');
   assert.equal(partial.stamp.word, '적발');
   assert.equal(partial.prize, '');
   const missed = booth.resultView({status: 'judged', published: true, outcome: 'missed', publicNote: 'Opus 라운드로 갑니다', prizeMessage: '부스에서 스티커를 받아 가세요'});

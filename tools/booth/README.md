@@ -43,7 +43,7 @@ node tools/booth/booth.mjs --config booth.local.json blue \
 | `retryBackoffMs` | `5000` | 첫 재시도 전 대기(ms) |
 | `prizeMessage` | 없음 | 라이브에서 `missed` 인 접수에만 붙는 경품 안내(500자 이하) |
 | `finalPrizeMessage` | `prizeMessage` | `final --apply` 뒤에도 `missed` 인 접수의 안내 |
-| `finalCaughtMessage` | "빠른 AI는 이겼어요! 정밀 AI는 찾아냈지만, 받은 즉석 선물은 그대로 유효합니다." | 라이브에서 놓쳤지만 `final` 에서 `caught`·`partial` 이 된 접수의 안내. 이미 받은 즉석 선물은 유효합니다 |
+| `finalCaughtMessage` | "빠른 AI는 이겼어요! 정밀 AI는 찾아냈지만, 받은 즉석 선물은 그대로 유효해요." | 라이브에서 놓쳤지만 `final` 에서 `caught`·`partial` 이 된 접수의 안내. 이미 받은 즉석 선물은 유효합니다 |
 | `publicNote.caught` / `partial` / `missed` / `missedNone` | 아래 | 방문자에게 보이는 결과 문장(1000자 이하) |
 
 `publicNote` 틀에는 `{page}` (AI finding 의 1부터 세는 쪽), `{quote}` (AI가 짚은 문장, 약 200자에서 자름), `{rationale}` (AI 설명, 약 300자에서 자름)만 들어갑니다. 방문자가 적은 이유·유형·수정 문장은 넣지 않습니다. `caught`·`partial` 은 가장 잘 맞은 finding, `missed` 는 AI가 처음 짚은 finding 의 쪽을 씁니다. 이 쪽은 AI가 짚은 곳의 쪽이라 심어 둔 쪽과 다를 수 있습니다(예: 수정은 3쪽, AI 인용은 4쪽). 그래서 틀은 "AI가 짚은 곳: {page}쪽" 처럼 AI 쪽으로 적습니다. finding 이 없으면 `missedNone` 입니다. 전체는 1000자에서 자릅니다.

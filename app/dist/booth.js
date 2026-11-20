@@ -27,7 +27,7 @@
   const PENDING_COPY='AI가 결함을 찾는 중이에요. 보통 1~3분 걸려요. 이 화면을 닫아도 접수번호와 확인키로 나중에 볼 수 있어요.';
   /* Headline as [plain lead, 600-weight phrase]. partial counts as found. */
   const HEADLINE={
-    caught:['AI가 ','찾아냈어요'],partial:['AI가 ','거의 찾았어요'],missed:['AI가 ','못 찾았어요'],
+    caught:['AI가 ','찾아냈어요'],partial:['AI가 ','근처를 짚었어요'],missed:['AI가 ','못 찾았어요'],
     invalid:['결함으로 ','인정되지 않았어요'],judged:['','결과가 나왔어요'],withdrawn:['제출을 ','철회했어요']
   };
   const STAMP={
@@ -42,7 +42,9 @@
     '2026-11-22.v1':Object.freeze(['수정본 PDF만 마감 후 AI(Anthropic 또는 OpenAI)에 보내요.','이름·연락처는 받지 않아요.','확인키로 언제든 철회할 수 있어요.']),
     '2026-11-22.v2':Object.freeze(['수정본 PDF만 AI(Anthropic)에 보내요.','이름·연락처는 받지 않아요.','확인키로 언제든 철회할 수 있어요.'])
   });
-  const HERO_COPY='공개 논문 한 곳을 몰래 고쳐 보세요. AI가 2분 안에 찾아내는지 겨룹니다. AI가 놓치면 부스에서 선물을 드려요.';
+  const HERO_COPY='공개 논문 한 곳을 몰래 고쳐 보세요. AI가 보통 1~3분 안에 찾아내는지 겨뤄요. AI가 놓치면 부스에서 선물을 드려요.';
+  const PARTIAL_SUB='결함 근처를 짚어서 적발로 처리돼요.';
+  const WITHDRAW_WARN='철회하면 되돌릴 수 없고, 선물과 추첨 기회도 함께 사라져요.';
   const CAPTURE_COPY='이 티켓을 캡처해 두세요. 화면을 닫아도 「내 기록」에서 접수번호와 확인키로 다시 볼 수 있어요.';
   const LOCK_COPY='이 설명은 AI에게 보내지 않아요. 판정이 맞는지 운영진만 확인해요.';
   const GENERIC_HINT='숫자, 결론 문장, 표 값 중 한 곳을 골라 티 나지 않게 바꿔 보세요.';
@@ -54,6 +56,7 @@
   const DESK_STEPS=['논문 고르기','몰래 고치기','AI 검증'];
   const HOWTO=[['01','논문 고르기','미션 논문이나 공개 논문 하나'],['02','몰래 고치기','숫자, 문장, 결론 어디든 한 곳 이상'],['03','AI 검증','보통 1~3분, 접수번호로 결과 확인']];
   const DOCK_CHIPS=3;
+  const TIMED=['caught','partial','missed'];
   const CHIP_TEXT=14;
   const CAUGHT_TIP='숫자 하나만 바꾸면 AI가 앞뒤 문장과 대조해서 찾아내요. 결론 문장이나 실험 설계를 노려 보세요.';
   const MAKE_FAILED='수정본을 만들지 못했어요. 고친 곳을 확인한 뒤 「다음」을 다시 눌러 주세요.';
@@ -723,9 +726,6 @@
           el('b',{textContent:label})),
         prog);
     }
-    function stripItem(n, text){
-      return el('li',{},el('span',{textContent:n}),text);
-    }
     function field(id, label, props){
       return el('label',{for:id,className:'booth-field'},el('span',{className:'booth-klab',textContent:label}),
         el('input',Object.assign({id,type:'text',autocomplete:'off',spellcheck:'false'},props||{})));
@@ -780,9 +780,8 @@
             el('p',{className:'booth-lab'},el('span',{className:'booth-phone',textContent:'AI REVIEW CHALLENGE'}),el('span',{className:'booth-desk',textContent:'AWS Community Day · Booth'})),
             el('h2',{id:'booth-title',className:'booth-headline hero'},'AI를 ',el('b',{textContent:'속일 수'}),el('br'),'있을까요?'),
             el('p',{className:'booth-copy',textContent:HERO_COPY})),
-          el('ol',{className:'booth-strip','aria-label':'도전 순서'},stripItem('1','논문 고르기'),stripItem('2','몰래 고치기'),stripItem('3','AI 검증')),
-          el('ol',{id:'booth-howto',className:'booth-howto booth-desk','aria-label':'도전 순서'},...HOWTO.map(howtoItem)),
-          el('p',{id:'booth-pick-limit',className:'booth-small booth-desk'})),
+          el('p',{id:'booth-pick-limit',className:'booth-small'}),
+          el('ol',{id:'booth-howto',className:'booth-howto','aria-label':'도전 순서'},...HOWTO.map(howtoItem))),
         el('div',{className:'booth-landing-list'},
           el('p',{id:'booth-announce',className:'booth-announce',hidden:true}),
           el('p',{id:'booth-status',className:'booth-feedback',role:'status','aria-live':'polite'}),
@@ -900,7 +899,7 @@
           el('span',{className:'booth-code booth-gift-code','aria-hidden':'true',textContent:'GIFT'})));
     }
     function buildFinal(){
-      return el('section',{id:'booth-final',className:'booth-panel booth-final booth-desk',hidden:true,'aria-label':'최종 추첨'},
+      return el('section',{id:'booth-final',className:'booth-panel booth-final',hidden:true,'aria-label':'최종 추첨'},
         el('p',{className:'booth-klab',textContent:'최종 추첨'}),
         el('p',{className:'booth-txt',textContent:FINAL_COPY}));
     }
@@ -910,7 +909,11 @@
         el('div',{className:'booth-withdraw-body'},
           el('p',{className:'booth-small',textContent:'철회하면 서버의 수정본 PDF·설명·결과를 바로 지워요. 이미 AI 검증에 보낸 사본은 모델 제공자에게서 회수할 수 없어요.'}),
           el('button',{id:'booth-withdraw',type:'button',className:'booth-btn line',textContent:'이 제출 철회하기'}),
-          el('button',{id:'booth-withdraw-confirm',type:'button',className:'booth-btn ink',hidden:true,textContent:'철회를 확인합니다'})));
+          el('div',{id:'booth-withdraw-ask',className:'booth-withdraw-ask',hidden:true},
+            el('p',{className:'booth-withdraw-warn',textContent:WITHDRAW_WARN}),
+            el('div',{className:'booth-row'},
+              el('button',{id:'booth-withdraw-cancel',type:'button',className:'booth-btn line',textContent:'취소'}),
+              el('button',{id:'booth-withdraw-confirm',type:'button',className:'booth-btn line danger',textContent:'철회하기'})))));
     }
     function buildTicket(){
       return el('section',{id:'booth-receipt',className:'booth-step booth-ticket-step',hidden:true,'aria-label':'도전 티켓'},
@@ -923,6 +926,7 @@
           el('p',{id:'booth-live-capture',className:'booth-small',textContent:CAPTURE_COPY}),
           el('div',{id:'booth-verdict',className:'booth-verdict',hidden:true},
             el('h2',{id:'booth-live-title',className:'booth-headline',role:'status','aria-live':'polite'}),
+            el('p',{id:'booth-live-sub',className:'booth-copy',hidden:true}),
             el('p',{id:'booth-live-page',className:'booth-mono-meta',hidden:true})),
           el('div',{className:'booth-live-side'},buildGift(),buildFinal()),
           el('div',{className:'booth-live-main'},
@@ -1105,13 +1109,28 @@
       paint();
       return box;
     }
+    /* AI-made edits keep their source on the send card (my-ai or agent, plus the recipe code). */
+    function assistInfo(){
+      const recipe=root.FalsifyBoothRecipe;
+      const out=recipe&&typeof recipe.assist==='function'?recipe.assist():null;
+      return out&&typeof out==='object'?out:{};
+    }
+    function rowTitle(row){
+      const page=(row.pageIndex+1)+'쪽';
+      const info=assistInfo();
+      if(info.assist!=='my-ai'&&info.assist!=='agent') return el('p',{className:'booth-klab',textContent:'내가 숨긴 결함 · '+page});
+      const code=typeof info.recipeCode==='string'&&info.recipeCode?' · '+info.recipeCode:'';
+      return el('div',{className:'booth-card-head'},
+        el('p',{className:'booth-klab',textContent:'AI와 숨긴 결함 · '+page}),
+        el('span',{className:'booth-ai-chip',textContent:'AI 제안'+code}));
+    }
     function rowPanel(row, types){
       const reason=el('textarea',{rows:'3',maxlength:String(limitsOf(liveConfig).maxReason),placeholder:'어디를 어떻게 바꿨고, 왜 결함인지 적어 주세요'});
       reason.value=row.reason||'';
       reason.addEventListener('input',()=>{row.reason=reason.value;});
       row.reasonInput=reason;
       return el('article',{className:'booth-panel booth-card'},
-        el('p',{className:'booth-klab',textContent:'내가 숨긴 결함 · '+(row.pageIndex+1)+'쪽'}),
+        rowTitle(row),
         diffNode(row),
         el('p',{className:'booth-klab gap',textContent:'어떤 결함인가요'}),
         chipRow(row,types),
@@ -1846,7 +1865,7 @@
       stopPolling();
       try{
         const data=await request('/v1/booth/withdraw',{method:'POST',auth:false,body});
-        setHidden('booth-withdraw-confirm',true);
+        withdrawAsk(false);
         applyClaim(data);
       }catch(error){
         liveError(errorMessage(error.code,error));
@@ -1892,13 +1911,18 @@
       if(readReceipts(storage).length>=cap) return capMessage(cap);
       return '제출이 잠시 막혔어요. 한 사람당 '+cap+'번까지 제출할 수 있어요. 이미 '+cap+'번 냈다면 「내 기록」에서 결과를 보고, 아니면 잠시 뒤 다시 시도해 주세요.';
     }
+    /* Withdraw asks once: the first button gives way to 취소 and 철회하기 under the warning. */
+    function withdrawAsk(asking){
+      setHidden('booth-withdraw',asking);
+      setHidden('booth-withdraw-ask',!asking);
+    }
     function liveError(text){
       setText('booth-live-error',text);
       setHidden('booth-live-error',!text);
     }
     function openTicket(meta){
       ticket=meta;
-      setHidden('booth-withdraw-confirm',true);
+      withdrawAsk(false);
       const box=byId('booth-withdraw-box');
       if(box) box.open=false;
       say('booth-copy-status','');
@@ -1995,10 +2019,11 @@
       setText('booth-stamp-word',stamp.word);
       setText('booth-stamp-latin',stamp.latin);
     }
-    function renderDuration(data){
+    function renderDuration(data, state){
       const published=Date.parse(typeof data.publishedAt==='string'?data.publishedAt:'');
       const created=Date.parse(createdAtOf(data));
-      const known=Number.isFinite(published)&&Number.isFinite(created)&&published>=created;
+      /* Only AI verdicts show a wait; invalid and withdrawn rows were decided by the operators. */
+      const known=TIMED.includes(state)&&Number.isFinite(published)&&Number.isFinite(created)&&published>=created;
       setText('booth-ticket-duration',known?formatDuration(published-created):'');
       setHidden('booth-ticket-duration-cell',!known);
       setText('booth-ticket-date',Number.isFinite(published)?dateLabel(published):'');
@@ -2006,8 +2031,10 @@
     function renderVerdict(view, data){
       stopClock();
       kidsOf(byId('booth-live-title'),view.lead||null,el('b',{textContent:view.strong}));
+      setText('booth-live-sub',view.state==='partial'?PARTIAL_SUB:'');
+      setHidden('booth-live-sub',view.state!=='partial');
       renderStamp(view.stamp);
-      renderDuration(data);
+      renderDuration(data,view.state);
       setHidden('booth-live-tip',!(view.state==='caught'||view.state==='partial'));
     }
     function noteParts(parsed, state){
@@ -2035,7 +2062,7 @@
       const left=chances();
       setText('booth-chances-top','기회 '+left+'번 남음');
       setText('booth-live-again','다시 도전하기 · 기회 '+left+'번 남음');
-      setText('booth-pick-limit','1인 '+perOwnerCap()+'번까지 · 이름·연락처는 받지 않아요');
+      setText('booth-pick-limit','1인 '+perOwnerCap()+'번 · 보통 1~3분 · 이름·연락처는 받지 않아요');
     }
     function renderLive(data){
       const view=resultView(data);
@@ -2293,7 +2320,8 @@
     on(byId('booth-copy'),'click',()=>{void copyReceipt();});
     on(byId('booth-claim-form'),'submit',event=>{void lookup(event);});
     on(byId('booth-records-back'),'click',closeRecords);
-    on(byId('booth-withdraw'),'click',()=>{setHidden('booth-withdraw-confirm',false);});
+    on(byId('booth-withdraw'),'click',()=>{withdrawAsk(true);});
+    on(byId('booth-withdraw-cancel'),'click',()=>{withdrawAsk(false);});
     on(byId('booth-withdraw-confirm'),'click',()=>{void withdraw();});
     on(byId('booth-live-again'),'click',startAgain);
     on(byId('booth-live-recheck'),'click',recheck);
