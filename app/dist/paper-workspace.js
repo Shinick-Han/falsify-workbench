@@ -1545,6 +1545,7 @@
         }
         source.segments=coreSegments(source.segments).filter(s=>!clean.some(p=>p.id===s.id)).concat(clean);
         renderParagraphs(display);
+        emit('falsify:paper-workspace-paragraphs',{pageIndex:display.pageIndex});
         setBeforeStatus((display.pageIndex+1)+' / '+pages+'쪽 · 원본 바이트 · 문단을 클릭해 편집');
     }
     function paragraphInspectionReady(api,display){
@@ -2446,7 +2447,7 @@
       const tables=edits.filter(tableEdit),body=edits.filter(e=>!tableEdit(e)),mixed=!!tables.length&&!!body.length,recompose=spec.exportSettings.recompose;
       let api=recompose?recompositionApi():mixed?pipelineApi():tables.length?legacyExporterApi():bodyExporter(body);
       if(!api?.prepare)throw Error('PDF 편집 모듈이 없습니다.');
-      if(!recompose&&!mixed)for(const edit of edits)if(tableEdit(edit)&&edit.anchor)delete edit.anchor.occurrence;
+      if(!recompose&&!mixed)for(const edit of edits)if(edit.anchor)delete edit.anchor.occurrence;
       if(fontRevision!==spec.fontRevision)throw Error('요청한 글꼴이 바뀌어 다시 생성해야 합니다.');
       return {edits,tables,body,mixed,recompose,api};
     }
@@ -2466,13 +2467,15 @@
       }
       return count;
     }
-    /* One step outwards: even steps take the word before, odd steps the word after (or the other side at an end). */
+    /* One step outwards: even steps take the word before, odd steps the word after (or the other side at an end).
+       A side across a line break comes last: the PDF text often has no space there ("Gradients\n∗CardiffNLP"). */
     function widerRange(text,a,b,step){
       const left=a>0?text.slice(0,a).search(/\S+\s*$/):-1;
       const right=b<text.length?b+text.slice(b).match(/^\s*\S+/)[0].length:-1;
       if(left<0&&right<0)return null;
-      if(step%2===0&&left>=0||right<0)return [left,b];
-      return [a,right];
+      const leftOk=left>=0&&!/\n/.test(text.slice(left,a)),rightOk=right>=0&&!/\n/.test(text.slice(b,right));
+      const takeLeft=leftOk&&(step%2===0||!rightOk)||!rightOk&&left>=0&&(step%2===0||right<0);
+      return takeLeft?[left,b]:[a,right];
     }
     function editRange(edit){
       const seg=coreSegments(source?.segments).find(s=>s.id===edit.segmentId),text=seg&&typeof seg.text==='string'?seg.text:'';
@@ -2493,18 +2496,103 @@
       }
       return null;
     }
-    function widenAmbiguous(edits,error){
+    /* An edit made on a layout or page view carries that view's text, which can order superscripts and line breaks
+       differently from the PDF's reading order ("Generation\n† †\nShahul Es ," for "Shahul Es†,"), so the engine
+       cannot find it. Line that view's ink (characters other than spaces) up with the page's paragraph text: runs of
+       six or more characters that occur once in the paragraphs anchor it, and a character left over (a superscript
+       moved out of its line) pairs with the nearest unused same character where its neighbours put it. The edit
+       moves only when every changed character lands, in order, inside one paragraph. */
+    function inkOf(text){
+      const chars=[],at=[],end=[];
+      for(let i=0;i<text.length;){const ch=String.fromCodePoint(text.codePointAt(i));for(const c of ch.normalize('NFKC'))if(!/\s/u.test(c)){chars.push(c);at.push(i);end.push(i+ch.length);}i+=ch.length;}
+      return {chars,at,end};
+    }
+    function pageInk(pageIndex){
+      const ink={chars:[],at:[],end:[],seg:[]};
+      for(const seg of coreSegments(source?.segments)){
+        if(seg.pageIndex!==pageIndex||segmentKind(seg.id)!=='paragraph'||typeof seg.text!=='string')continue;
+        const part=inkOf(seg.text);
+        part.chars.forEach((c,k)=>{ink.chars.push(c);ink.at.push(part.at[k]);ink.end.push(part.end[k]);ink.seg.push(seg);});
+      }
+      return ink;
+    }
+    const GRAM=6;
+    function gramIndex(b){
+      const seen=new Map();
+      for(let j=0;j+GRAM<=b.length;j++){const g=b.slice(j,j+GRAM).join('');seen.set(g,seen.has(g)?-1:j);}
+      return seen;
+    }
+    function anchorInk(a,b,map,used){
+      const grams=gramIndex(b);
+      for(let i=0;i+GRAM<=a.length;i++){
+        if(map[i]>=0)continue;
+        let j=grams.get(a.slice(i,i+GRAM).join(''));
+        if(!(j>=0)||used[j])continue;
+        for(let k=i;k<a.length&&j<b.length&&map[k]<0&&!used[j]&&a[k]===b[j];k++,j++){map[k]=j;used[j]=true;}
+      }
+    }
+    function expectedAt(map,i){
+      for(let d=1;d<=GRAM*4;d++){if(i-d>=0&&map[i-d]>=0)return map[i-d]+d;if(i+d<map.length&&map[i+d]>=0)return map[i+d]-d;}
+      return -1;
+    }
+    function pairOrphan(a,b,map,used,i){
+      const want=expectedAt(map,i);if(want<0)return;
+      let best=-1;
+      for(let j=Math.max(0,want-48);j<=Math.min(b.length-1,want+48);j++)if(!used[j]&&b[j]===a[i]&&(best<0||Math.abs(j-want)<Math.abs(best-want)))best=j;
+      if(best>=0){map[i]=best;used[best]=true;}
+    }
+    function alignToParagraphs(a,b){
+      const map=new Array(a.length).fill(-1),used=new Array(b.length).fill(false);
+      anchorInk(a,b,map,used);
+      for(let i=0;i<a.length;i++)if(map[i]<0)pairOrphan(a,b,map,used,i);
+      return map;
+    }
+    function changedSpan(edit){
+      const before=edit.before,after=String(edit.after??''),max=Math.min(before.length,after.length);
+      let lead=0;while(lead<max&&before[lead]===after[lead])lead++;
+      let tail=0;while(tail<max-lead&&before[before.length-1-tail]===after[after.length-1-tail])tail++;
+      if(lead+tail===before.length&&lead>0)lead--;
+      return {lead,tail,after:after.slice(lead,after.length-tail)};
+    }
+    function landedSpan(view,map,para,from,to){
+      const idx=[];view.at.forEach((p,k)=>{if(p>=from&&p<to)idx.push(k);});
+      if(!idx.length||idx.some(k=>map[k]<0))return null;
+      const js=idx.map(k=>map[k]);
+      if(js.some((j,n)=>n&&j!==js[n-1]+1)||js.some(j=>para.seg[j]!==para.seg[js[0]]))return null;
+      return {seg:para.seg[js[0]],start:para.at[js[0]],end:para.end[js[js.length-1]]};
+    }
+    function projectEdit(edit,taken){
+      const range=editRange(edit);if(!range||segmentKind(edit.segmentId)==='paragraph')return null;
+      const change=changedSpan(edit),from=range.start+change.lead,to=range.end-change.tail;
+      const view=inkOf(range.text),para=pageInk(edit.pageIndex);
+      const spot=landedSpan(view,alignToParagraphs(view.chars,para.chars),para,from,to);
+      if(!spot||taken.some(r=>r.segmentId===spot.seg.id&&r.start<spot.end&&spot.start<r.end))return null;
+      const moved={...edit,segmentId:spot.seg.id,before:spot.seg.text.slice(spot.start,spot.end),after:change.after,anchor:{...edit.anchor,start:spot.start,end:spot.end}};
+      if(pageNeedleCount(edit.pageIndex,moved.before,'paragraph')===1)return moved;
+      const wide=widenEdit(moved,taken);
+      return wide?{...moved,before:wide.before,after:wide.after,anchor:{...moved.anchor,start:wide.start,end:wide.end}}:null;
+    }
+    /* One failed edit, made matchable: moved from a layout view onto its paragraph, or widened in place. */
+    function repairEdit(edit,code,taken){
+      if(segmentKind(edit.segmentId)!=='paragraph'&&(code==='NOT_FOUND'||code==='AMBIGUOUS_MATCH'))return projectEdit(edit,taken)||(code==='AMBIGUOUS_MATCH'?widenAsEdit(edit,taken):null);
+      return code==='AMBIGUOUS_MATCH'?widenAsEdit(edit,taken):null;
+    }
+    function widenAsEdit(edit,taken){
+      const wide=widenEdit(edit,taken);
+      return wide?{...edit,before:wide.before,after:wide.after,anchor:{...edit.anchor,start:wide.start,end:wide.end}}:null;
+    }
+    function repairFailed(edits,error){
       const failures=error?.details?.failures;
-      if(!Array.isArray(edits)||error?.code!=='MATCH_FAILED'||!Array.isArray(failures)||!failures.length||!failures.every(f=>f?.code==='AMBIGUOUS_MATCH'))return null;
-      const ids=new Set(failures.map(f=>f.id));
-      const taken=edits.filter(e=>!ids.has(e.id)&&e.anchor).map(e=>({segmentId:e.segmentId,start:e.anchor.start,end:e.anchor.end}));
+      if(!Array.isArray(edits)||error?.code!=='MATCH_FAILED'||!Array.isArray(failures)||!failures.length)return null;
+      const codes=new Map(failures.map(f=>[f?.id,f?.code]));
+      const taken=edits.filter(e=>!codes.has(e.id)&&e.anchor).map(e=>({segmentId:e.segmentId,start:e.anchor.start,end:e.anchor.end}));
       const out=[];
       for(const edit of edits){
-        if(!ids.has(edit.id)){out.push(edit);continue;}
-        const wide=widenEdit(edit,taken);
-        if(!wide)return null;
-        taken.push({segmentId:edit.segmentId,start:wide.start,end:wide.end});
-        out.push({...edit,before:wide.before,after:wide.after,anchor:{...edit.anchor,start:wide.start,end:wide.end}});
+        if(!codes.has(edit.id)){out.push(edit);continue;}
+        const fixed=repairEdit(edit,codes.get(edit.id),taken);
+        if(!fixed)return null;
+        taken.push({segmentId:fixed.segmentId,start:fixed.anchor.start,end:fixed.anchor.end});
+        out.push(fixed);
       }
       return out;
     }
@@ -2514,7 +2602,7 @@
         try{return await api.prepare(request,options);}
         catch(e){
           if(request?.signal?.aborted)throw e;
-          const edits=widenAmbiguous(Array.isArray(request?.edits)?request.edits:null,e);
+          const edits=repairFailed(Array.isArray(request?.edits)?request.edits:null,e);
           if(!edits)throw e;
           return api.prepare({...request,edits},options);
         }
@@ -2584,7 +2672,7 @@
         for(const edit of exportEdits)delete edit.sourceRefs;
         const recompose=useRecomposition()&&api===recompositionApi();
         const mixed=exportEdits.some(tableEdit)&&exportEdits.some(e=>!tableEdit(e));
-        if(!recompose&&!mixed)for(const edit of exportEdits)if(tableEdit(edit)&&edit.anchor)delete edit.anchor.occurrence;
+        if(!recompose&&!mixed)for(const edit of exportEdits)if(edit.anchor)delete edit.anchor.occurrence;
       return {exportEdits,recompose,mixed};
     }
     function invalidGenerationFallback(canFlow,ctl,mine,epochAt,hash,revision){return !canFlow||ctl.signal?.aborted||mine!==genId||epoch!==epochAt||!source||source.fileHash!==hash||snapshot?.revision!==revision;}

@@ -718,7 +718,7 @@ test('makeFailureView names the failing edit and offers a fix in place', () => {
   assert.deepEqual(view({code: 'MATCH_FAILED', failures: [{id: 'e2', pageIndex: 0, code: 'NOT_FOUND'}]}),
     {text: '1쪽 「† → 1」: 이 자리를 쪽에서 찾지 못했어요. 지우거나 다시 고쳐 주세요.', editId: 'e2', actions: ['reopen', 'delete']});
   assert.equal(view({code: 'MATCH_FAILED', failures: [{id: 'e1', code: 'AMBIGUOUS_MATCH'}]}).text,
-    '5쪽 「0.95 → 0.50」: 같은 글자가 쪽에 여러 번 있어 자리를 정하지 못했어요. 앞뒤 글자를 조금 더 넣어 다시 고쳐 주세요.');
+    '5쪽 「0.95 → 0.50」: 같은 글자가 쪽에 여러 번 있어서 바꿀 자리를 정하지 못했어요. 「이 고친 곳 다시 고치기」로 그 자리를 다시 고쳐 주세요.');
   assert.deepEqual(view({code: 'MATCH_FAILED', failures: [{id: 'e1', code: 'OVERLAPPING_EDITS'}]}).actions, ['delete', 'reopen']);
   assert.match(view({code: 'MATCH_FAILED', failures: [{id: 'e1', code: 'NOT_EDITABLE'}]}).text, /^5쪽 「0\.95 → 0\.50」: 이 자리의 글자 모양을 그대로 살려 바꾸지 못했어요/);
   // A failure id the booth does not know: the only edit is named, else the list is offered.
@@ -787,7 +787,7 @@ test('a generator failure names the edit, offers delete and reopen, and lets the
   await runMake(h, 1000);
   assert.equal(h.step(), 'edit');
   assert.equal(h.text('booth-dock-status'), '1쪽 「† → 1」: 이 자리를 쪽에서 찾지 못했어요. 지우거나 다시 고쳐 주세요.');
-  assert.deepEqual(fixLabels(h), ['다시 고치기', '이 고친 곳 지우기']);
+  assert.deepEqual(fixLabels(h), ['이 고친 곳 다시 고치기', '이 고친 곳 지우기']);
   assert.equal(h.ids.get('booth-next').disabled, false);
   // The visitor fixes the edit: the message and the buttons go away with the old edit.
   ws.edits = [{...NAMED_EDIT[0], after: '2'}];

@@ -83,7 +83,7 @@
   const MAKE_RETRY_MS=500;
   const MAKE_TEXT=Object.freeze({
     NOT_FOUND:'이 자리를 쪽에서 찾지 못했어요. 지우거나 다시 고쳐 주세요.',
-    AMBIGUOUS_MATCH:'같은 글자가 쪽에 여러 번 있어 자리를 정하지 못했어요. 앞뒤 글자를 조금 더 넣어 다시 고쳐 주세요.',
+    AMBIGUOUS_MATCH:'같은 글자가 쪽에 여러 번 있어서 바꿀 자리를 정하지 못했어요. 「이 고친 곳 다시 고치기」로 그 자리를 다시 고쳐 주세요.',
     OVERLAPPING_EDITS:'다른 고친 곳과 겹쳐요. 둘 중 하나를 지워 주세요.',
     font:'원래 글꼴에 없는 글자라 바꾸지 못했어요. 비슷한 글자로 다시 고쳐 주세요.',
     layout:'이 자리의 글자 모양을 그대로 살려 바꾸지 못했어요. 지우거나 다시 고쳐 주세요.',
@@ -1388,7 +1388,7 @@
       try{bytes=new Uint8Array(await file.arrayBuffer());}catch{bytes=null;}
       if(!pdfMagic(bytes)){unreadablePdf=true;return rejectGenerated(PDF_UNREADABLE);}
       const hash=await digestHex(bytes);
-      if(!hash) return rejectGenerated('수정본을 확인하지 못했어요. 「다음」을 다시 눌러 주세요.');
+      if(!hash){unreadablePdf=true;return rejectGenerated('수정본을 확인하지 못했어요. 「다시 시도」를 눌러 주세요.');}
       sourceSha=await originalSha(detail);
       if(sourceSha&&sourceSha===hash) return rejectGenerated(errorMessage('pdf_unchanged'));
       generatedFile=file;
@@ -1563,7 +1563,7 @@
     function fixActions(view, edits){
       const edit=view.editId?edits.find(item=>item.id===view.editId):null;
       return view.actions.map(act=>{
-        if(act==='reopen'&&edit) return fixButton('다시 고치기',()=>{clearMakeFix(true);useEditControl(edit,'edit');});
+        if(act==='reopen'&&edit) return fixButton('이 고친 곳 다시 고치기',()=>{clearMakeFix(true);useEditControl(edit,'edit');});
         if(act==='delete'&&edit) return fixButton('이 고친 곳 지우기',()=>{clearMakeFix(true);useEditControl(edit,'delete');});
         if(act==='list') return fixButton('고친 곳 목록 보기',showEditList);
         if(act==='retry') return fixButton('다시 시도',()=>{clearMakeFix(true);beginMake();});

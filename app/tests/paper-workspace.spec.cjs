@@ -1161,6 +1161,35 @@ test('generation widens an ambiguous Before with its own neighbours and asks onc
   assert.equal(typeof failed[0].failures[0].id,'string');
   v.ws.dispose();
 });
+test('generation: an edit on the page view that the engine cannot find moves onto its paragraph, superscripts in order',async()=>{
+  const bytes=pdfBytes('MARKER-GEN'),requests=[];
+  const prepare=async request=>{
+    requests.push(JSON.parse(JSON.stringify(request.edits.map(e=>({id:e.id,segmentId:e.segmentId,before:e.before,after:e.after,anchor:e.anchor})))));
+    const edit=request.edits[0];
+    if(!String(edit.segmentId).startsWith('paragraph:'))throw Object.assign(new Error('1 edit(s) could not be matched exactly once or planned'),{code:'MATCH_FAILED',details:{failures:[{id:edit.id,pageIndex:0,code:'NOT_FOUND',hits:0}]}});
+    return {file:new File([bytes],'checked.pdf',{type:'application/pdf'}),sha256:sha(bytes),verification:{status:'applied',checks:[],warnings:[]},warnings:[]};
+  };
+  const v=mount({paragraphPdf:paragraphMock('Title Line\nShahul Es†, Jithin James†, Luis Anke',{prepare})});
+  const file=pdfFile(pdfBytes('MARKER-A'));
+  v.file(file);
+  await until(()=>v.ws.getSource()&&v.edits.last,'loaded');
+  v.document.dispatchEvent(new CustomEvent('falsify:document',{detail:{file,result:{segments:[{id:'s0',label:'PDF p. 1',text:'Title Line\n† †\nShahul Es , Jithin James , Luis Anke'}]}}}));
+  await until(()=>v.ws.getSource()&&v.edits.last&&v.ws.getSource().segments.some(s=>s.id.startsWith('paragraph:'))&&v.ws.getSource().segments.some(s=>!s.id.startsWith('paragraph:')&&s.text.includes('† †')),'source');
+  const view=v.ws.getSource().segments.find(s=>!s.id.startsWith('paragraph:')&&s.text.includes('† †'));
+  const second=view.text.indexOf('† †')+2;
+  v.edits.last.add({pageIndex:0,segmentId:view.id,before:'†',after:'7',anchor:{start:second,end:second+1},origin:'human'});
+  v.get('paper-generate').click();
+  await until(()=>v.ws.getOutput(),'projected output');
+  assert.equal(requests.length,2);
+  const moved=requests[1][0];
+  assert.ok(moved.segmentId.startsWith('paragraph:'),JSON.stringify(moved));
+  assert.match(moved.before,/James†/);
+  assert.equal(moved.after,moved.before.replace('James†','James7'));
+  const para=v.ws.getSource().segments.find(s=>s.id===moved.segmentId);
+  assert.equal(para.text.slice(moved.anchor.start,moved.anchor.end),moved.before);
+  assert.equal(para.text.split(moved.before).length,2,'the moved Before is unique');
+  v.ws.dispose();
+});
 test('paragraph: a late inspection is aborted and cannot bind the next source; drag selection remains available',async()=>{
   let resolveA,signalA;
   const adapter=paragraphMock('New paragraph.',{inspectPage:async({file,pageIndex,signal})=>{

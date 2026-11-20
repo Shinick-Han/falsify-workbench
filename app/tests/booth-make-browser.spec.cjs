@@ -1,6 +1,7 @@
 'use strict';
 // Real Chromium walk of 「다음」 on event.html with the Ragas mission (arXiv 2309.15217, CC BY 4.0):
-// a percent sign replaced with a digit reaches send on a phone (찾아 바꾸기) and on desktop (the word bar),
+// a percent sign replaced with a digit reaches send on a phone (찾아 바꾸기) and on desktop (the word bar), the 1쪽
+// affiliation mark † tapped in the word bar becomes a digit and reaches send at both sizes,
 // and a forced generator failure names the edit, offers a fix in place and lets the visitor retry.
 // The API is stubbed. FALSIFY_BOOTH_MISSION_PDF names a local copy of the paper.
 // BOOTH_MAKE_SHOTS, when set, is a directory for screenshots of each state.
@@ -189,6 +190,76 @@ async function desktopWordBar(browser) {
   await page.context().close();
 }
 
+/* The nth occurrence of sym in the drawn page's text layer, centred in the stage; null when it is not there. */
+function symbolPoint(page, sym, nth) {
+  return page.evaluate(([value, n]) => {
+    const spans = [...document.querySelectorAll('#paper-before-stage .paper-text-layer span[data-i]')].sort((a, b) => Number(a.dataset.i) - Number(b.dataset.i));
+    const hits = [];
+    for (const span of spans) {
+      const node = span.firstChild;
+      const text = node && node.nodeType === 3 ? node.data : '';
+      for (let at = text.indexOf(value); at >= 0; at = text.indexOf(value, at + 1)) hits.push({node, at, span});
+    }
+    const hit = hits[n];
+    if (!hit) return null;
+    hit.span.scrollIntoView({block: 'center', inline: 'center', behavior: 'instant'});
+    const range = document.createRange();
+    range.setStart(hit.node, hit.at);
+    range.setEnd(hit.node, hit.at + value.length);
+    const stage = document.getElementById('paper-before-stage');
+    const box = stage.getBoundingClientRect();
+    const first = range.getBoundingClientRect();
+    stage.scrollLeft += first.left + first.width / 2 - (box.left + box.width / 2);
+    const r = range.getBoundingClientRect();
+    return {x: r.left + r.width / 2, y: r.top + r.height / 2};
+  }, [sym, nth]);
+}
+
+async function tapSymbol(page, wide, sym) {
+  const tap = (x, y) => (wide ? page.mouse.click(x, y) : page.touchscreen.tap(x, y));
+  if (!wide && await page.evaluate(() => globalThis.FalsifyPaperWorkspace.getZoom() === 1)) {
+    const first = await symbolPoint(page, sym, 0);
+    await tap(first.x, first.y);
+    await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() > 1);
+    await page.waitForTimeout(300);
+  }
+  for (let tries = 0; tries < 4; tries += 1) {
+    let point = null;
+    let last = null;
+    for (let still = 0; still < 20; still += 1) {
+      point = await symbolPoint(page, sym, 0);
+      assert.ok(point, sym + ' on the page');
+      if (last && Math.abs(last.x - point.x) < 0.5 && Math.abs(last.y - point.y) < 0.5) break;
+      last = point;
+      await page.waitForTimeout(150);
+    }
+    await tap(point.x, point.y);
+    if (await page.locator('#booth-pe-pop').waitFor({state: 'visible', timeout: 2000}).then(() => true, () => false)) return;
+  }
+  throw new Error('no word bar for ' + sym);
+}
+
+/* 1쪽 affiliation mark: tapping the first † in "Shahul Es†" and making it a digit reaches send. The page view holds
+   the superscripts on their own line, so generation moves the edit onto the author paragraph and draws the digit
+   in place of the mark. */
+async function daggerWordBar(browser, wide) {
+  const {page, errors} = await openMission(browser, wide);
+  await page.evaluate(() => globalThis.FalsifyPaperWorkspace.showPage(1));
+  await page.waitForFunction(() => /^1 \//.test(document.querySelector('#paper-page-label')?.textContent || ''));
+  await page.waitForFunction(() => [...document.querySelectorAll('#paper-before-stage .paper-text-layer span[data-i]')].some(node => node.textContent.includes('†')));
+  await tapSymbol(page, wide, '†');
+  const input = page.locator('#booth-pe-input');
+  const word = await input.inputValue();
+  assert.ok(word.includes('†'), 'the word bar holds the mark: ' + word);
+  await input.fill(word.replace('†', '1'));
+  await page.locator('#booth-pe-pop').getByRole('button', {name: '바꾸기', exact: true}).click();
+  await editCount(page, 1);
+  await nextReachesSend(page, wide, 'dagger-send');
+  assert.match(await page.locator('#booth-rows').textContent(), /1쪽/);
+  assert.equal(errors.join('\n'), '');
+  await page.context().close();
+}
+
 /* A generator that fails with the engine's NOT_FOUND: the dock names the edit, offers 다시 고치기 and
    지우기, and after the visitor removes and redoes the edit, 「다음」 reaches send. */
 async function forcedFailure(browser, wide) {
@@ -211,7 +282,7 @@ async function forcedFailure(browser, wide) {
   await page.locator('#booth-dock-fix').waitFor({state: 'visible', timeout: MADE_MS});
   assert.equal(await page.evaluate(() => document.documentElement.dataset.boothStep), 'edit');
   assert.equal(await page.locator('#booth-dock-status').textContent(), '5쪽 「0.95 → 0.50」: 이 자리를 쪽에서 찾지 못했어요. 지우거나 다시 고쳐 주세요.');
-  assert.deepEqual(await page.locator('#booth-dock-fix button').allTextContents(), ['다시 고치기', '이 고친 곳 지우기']);
+  assert.deepEqual(await page.locator('#booth-dock-fix button').allTextContents(), ['이 고친 곳 다시 고치기', '이 고친 곳 지우기']);
   for (const box of await page.locator('#booth-dock-fix button').evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().toJSON()))) {
     assert.ok(box.height >= 44, 'fix buttons are 44px tap targets ' + JSON.stringify(box));
   }
@@ -238,6 +309,8 @@ async function main() {
     browser = await chromium.launch({executablePath: chrome, headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage']});
     await phoneSymbol(browser);
     await desktopWordBar(browser);
+    await daggerWordBar(browser, false);
+    await daggerWordBar(browser, true);
     await forcedFailure(browser, false);
     await forcedFailure(browser, true);
   } catch (error) {
