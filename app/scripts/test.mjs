@@ -13,6 +13,7 @@ const exemptions = new Map(Object.entries({
   'paper-navigation.spec.cjs': 'manual browser harness',
   'booth-event-browser.spec.cjs': 'manual browser harness',
   'event-theme-browser.spec.cjs': 'manual browser harness',
+  'paper-hidpi-browser.spec.cjs': 'manual browser harness',
   'browser-fonts.spec.mjs': 'Pages font contracts',
   'browser-pdf-fonts.spec.mjs': 'Pages font contracts',
   'bundled-fonts.spec.mjs': 'Pages font contracts',
