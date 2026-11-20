@@ -853,7 +853,22 @@ async function chargeClaimSlots(ctx) {
   }
 }
 
-function claimView(row) {
+// Rough wait for an unpublished row: rows received before this one share BOOTH_OPERATOR_ACTIVE_JOBS slots,
+// each about BOOTH_ETA_JOB_SECONDS. Uncertain waits feel longer than known ones, so the page can show it.
+function queueView(row, env) {
+  if (row.published_at != null || (row.status !== 'received' && row.status !== 'reviewing')) return null;
+  const slots = positiveInt(env?.BOOTH_OPERATOR_ACTIVE_JOBS, 4);
+  const jobSeconds = positiveInt(env?.BOOTH_ETA_JOB_SECONDS, 120);
+  const ahead = Math.max(0, Number(row.queue_ahead) || 0);
+  if (row.status === 'reviewing') {
+    const since = (Date.now() - Date.parse(row.updated_at)) / 1000;
+    const left = Number.isFinite(since) ? jobSeconds - since : jobSeconds;
+    return { ahead: 0, slots, etaSec: Math.max(15, Math.round(left)) };
+  }
+  return { ahead, slots, etaSec: (Math.floor(ahead / slots) + 1) * jobSeconds };
+}
+
+function claimView(row, env) {
   const declared = parseJsonValue(row.declared);
   const published = row.published_at != null;
   const view = {
@@ -870,10 +885,14 @@ function claimView(row) {
     view.prizeMessage = row.prize_message ?? null;
     view.publishedAt = row.published_at;
   }
+  const queue = queueView(row, env);
+  if (queue) view.queue = queue;
   return view;
 }
 
-const CLAIM_SELECT = `id, receipt, status, course, declared, created_at, published_at, outcome, public_note, prize_message`;
+// queue_ahead is one indexed count on booth_submissions_status (status, seq), in the same round trip.
+const CLAIM_SELECT = `id, receipt, status, course, declared, created_at, updated_at, published_at, outcome, public_note, prize_message,
+  (SELECT COUNT(*) FROM booth_submissions q WHERE q.status = 'received' AND q.seq < booth_submissions.seq) AS queue_ahead`;
 
 async function loadClaim(db, receipt, claimKey) {
   if (!RECEIPT.test(receipt)) boothFail(404, 'not_found');
@@ -1038,13 +1057,13 @@ async function getClaim(ctx) {
   const key = params.get('key');
   if (receipt.length > 16 || key.length > 32) boothFail(400, 'invalid_request');
   const row = await loadClaim(ctx.deps.getDb(), receipt, key);
-  return json(200, claimView(row));
+  return json(200, claimView(row, ctx.env));
 }
 
 async function postClaim(ctx) {
   const body = await readClaimBody(ctx);
   const row = await loadClaim(ctx.deps.getDb(), body.receipt, body.claimKey);
-  return json(200, claimView(row));
+  return json(200, claimView(row, ctx.env));
 }
 
 async function postWithdraw(ctx) {
@@ -1063,7 +1082,7 @@ async function postWithdraw(ctx) {
     db.prepare('DELETE FROM booth_files WHERE submission_id = ?1').bind(row.id),
   ]);
   const fresh = await db.prepare(`SELECT ${CLAIM_SELECT} FROM booth_submissions WHERE id = ?1`).bind(row.id).first();
-  return json(200, claimView(fresh));
+  return json(200, claimView(fresh, ctx.env));
 }
 
 async function listAdmin(ctx) {

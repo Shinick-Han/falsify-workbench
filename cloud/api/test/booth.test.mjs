@@ -1002,7 +1002,8 @@ test('GET claim polls without a rate slot, so one venue IP never runs dry', asyn
       const polled = await call('GET', q(receipt, claimKey), { headers: venue });
       assert.equal(polled.status, 200, polled.text);
       if (i === 0) {
-        assert.deepEqual(Object.keys(polled.body).sort(), ['course', 'createdAt', 'declaredCount', 'published', 'receipt', 'status']);
+        assert.deepEqual(Object.keys(polled.body).sort(), ['course', 'createdAt', 'declaredCount', 'published', 'queue', 'receipt', 'status']);
+        assert.deepEqual(polled.body.queue, { ahead: 0, slots: 4, etaSec: 120 });
         assert.equal(polled.headers.get('Cache-Control'), 'no-store');
       }
     }
@@ -1033,6 +1034,31 @@ test('GET claim polls without a rate slot, so one venue IP never runs dry', asyn
     assert.equal(done.status, 200);
     assert.equal(done.body.outcome, 'missed');
     assert.equal(done.body.published, true);
+    assert.equal(done.body.queue, undefined, 'a published row has no wait estimate');
+  });
+});
+
+test('the claim view estimates the wait from rows received earlier and the operator slots', async () => {
+  await withApp({ BOOTH_OPERATOR_ACTIVE_JOBS: '2', BOOTH_ETA_JOB_SECONDS: '90' }, async (mf, call) => {
+    const made = [];
+    for (let i = 0; i < 5; i++) {
+      const ip = fromIp('198.51.100.' + (60 + i));
+      const guest = (await mintGuest(call, ip)).body.guest.token;
+      const created = await submitPdf(call, guest, pdfBytes('op-booth-queue' + i), {}, ip);
+      assert.equal(created.status, 201, created.text);
+      made.push(created.body);
+    }
+    const view = async item => (await call('GET', '/v1/booth/claim?receipt=' + item.receipt + '&key=' + item.claimKey)).body;
+    assert.deepEqual((await view(made[0])).queue, { ahead: 0, slots: 2, etaSec: 90 });
+    assert.deepEqual((await view(made[4])).queue, { ahead: 4, slots: 2, etaSec: 270 });
+    const reviewing = await call('PATCH', '/v1/booth/admin/submissions/' + made[0].receipt, { token: OPERATOR, body: { status: 'reviewing' } });
+    assert.equal(reviewing.status, 200, reviewing.text);
+    const first = (await view(made[0])).queue;
+    assert.equal(first.ahead, 0);
+    assert.ok(first.etaSec >= 15 && first.etaSec <= 90, 'reviewing counts down ' + first.etaSec);
+    assert.deepEqual((await view(made[4])).queue, { ahead: 3, slots: 2, etaSec: 180 });
+    const posted = await call('POST', '/v1/booth/claim', { body: { receipt: made[4].receipt, claimKey: made[4].claimKey } });
+    assert.deepEqual(posted.body.queue, { ahead: 3, slots: 2, etaSec: 180 });
   });
 });
 
