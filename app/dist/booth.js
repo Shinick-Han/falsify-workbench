@@ -93,7 +93,8 @@
     session_missing:'게스트 세션이 없어 요청을 보내지 못했습니다. 페이지를 새로 고친 뒤 다시 시도해 주세요.',
     invalid_request:'입력 내용을 확인해 주세요.',
     forbidden:'이 작업은 할 수 없습니다.',
-    network:'서버에 연결하지 못했습니다. 네트워크를 확인한 뒤 다시 시도해 주세요.'
+    network:'서버에 연결하지 못했습니다. 네트워크를 확인한 뒤 다시 시도해 주세요.',
+    offline:'인터넷 연결이 끊겼어요. 연결되면 다시 눌러 주세요.'
   };
 
   /* 411/413 name the cap only when the booth config exposes it. Otherwise the generic size line stays. */
@@ -561,12 +562,24 @@
     return {
       fetchImpl:opts.fetch||(typeof root.fetch==='function'?root.fetch.bind(root):null),
       cryptoApi:opts.crypto||root.crypto||null,
-      storage:opts.storage||root.localStorage,
+      storage:opts.storage||boothStorage(),
       sessionFn:opts.session||(()=>root.FalsifyHostedSession),
       location:opts.location||root.location||{hash:''},
       matchMedia:typeof opts.matchMedia==='function'?opts.matchMedia:(typeof root.matchMedia==='function'?root.matchMedia.bind(root):null),
       ...timerServices(opts)
     };
+  }
+  /* booth-runtime.js: the kiosk keeps receipts in sessionStorage. Without it, localStorage as before. */
+  function runtime(){
+    try{return root.FalsifyBoothRuntime||null;}catch{return null;}
+  }
+  function boothStorage(){
+    const rt=runtime();
+    return rt&&typeof rt.storage==='function'?rt.storage():root.localStorage;
+  }
+  /* A failed request while the browser reports no connection is 'offline', not network or session_missing. */
+  function offlineCode(fallback){
+    try{return root.navigator&&root.navigator.onLine===false?'offline':fallback;}catch{return fallback;}
   }
   function rootTimer(opts, name){
     if(typeof opts[name]==='function') return opts[name];
@@ -638,7 +651,10 @@
     let dockPopOpen=false;
     const listeners=[];
     const course='quick';
-    let poll={token:0,timer:null,startedAt:0,receipt:'',claimKey:''};
+    let poll={token:0,timer:null,startedAt:0,receipt:'',claimKey:'',stopped:false};
+    let waiting=false;
+    const rt=runtime();
+    const wake=rt&&typeof rt.wake==='function'?rt.wake(root.navigator):null;
     let closed=false;
     let liveConfig=null;
     let step='pick';
@@ -650,6 +666,7 @@
     let openedHash='';
     let ownOpen=false;
     let opening=false;
+    let openFailure=null;
     let generatedFile=null;
     let generatedHash='';
     let sourceSha='';
@@ -688,7 +705,13 @@
       return node;
     }
     function byId(id){return doc.getElementById(id);}
-    function setText(id,text){const node=byId(id);if(node) node.textContent=text||'';}
+    function setText(id,text){const node=byId(id);if(node) node.textContent=text||'';hideRetry(id);}
+    function hideRetry(id){const retry=byId(id+'-retry');if(retry) retry.hidden=true;}
+    /* booth-runtime.js adds 「다시 시도」 after the status line; the 'online' event presses it. */
+    function offerRetry(id, error, run){
+      if(!error||error.code!=='offline'||!rt||typeof rt.offerRetry!=='function') return;
+      rt.offerRetry(doc,byId(id),run);
+    }
     function setHidden(id,hidden){const node=byId(id);if(node) node.hidden=!!hidden;}
     function setAttr(id,key,value){const node=byId(id);if(node&&typeof node.setAttribute==='function') node.setAttribute(key,value);}
     function say(id,text){setText(id,text||'');}
@@ -978,7 +1001,7 @@
     async function requestAuth(spec, headers){
       if(!spec.auth) return;
       const token=await bearer();
-      if(!token) throw coded('session_missing');
+      if(!token) throw coded(offlineCode('session_missing'));
       headers.Authorization='Bearer '+token;
     }
     function pdfFallback(status){
@@ -1020,7 +1043,7 @@
           body:payload,
           credentials:'omit',cache:'no-store',redirect:'error'
         });
-      }catch{throw coded('network');}
+      }catch{throw coded(offlineCode('network'));}
       if(spec.pdf) return pdfResult(res);
       return jsonResult(res);
     }
@@ -1539,7 +1562,7 @@
       say(statusId,'논문을 불러오는 중…');
       let payload=null;
       try{payload=await request(path,{method:'GET',auth:true,pdf:true});}
-      catch(error){say(statusId,errorMessage(error.code,error));return false;}
+      catch(error){say(statusId,errorMessage(error.code,error));openFailure=error;return false;}
       const bytes=payload.bytes;
       if(!pdfMagic(bytes)){say(statusId,errorMessage('invalid_request'));return false;}
       const file=pdfFile(bytes, pdfFileName(headerValue(payload.headers,'Content-Disposition'), nameHint));
@@ -1563,9 +1586,11 @@
     async function startPaper(next, id, statusId, pageHint){
       if(opening) return false;
       opening=true;
+      openFailure=null;
       let ok=false;
       try{ok=await openPdf(id,next,'arxiv-'+String(id).replace(/[^\w.-]+/g,'_')+'.pdf',statusId);}
       finally{opening=false;}
+      if(!ok) offerRetry(statusId,openFailure,()=>startPaper(next,id,statusId,pageHint));
       if(!ok||closed) return false;
       enterEdit(pageHint);
       return true;
@@ -1687,7 +1712,7 @@
       if(!path){say('booth-search-status',errorMessage('invalid_request'));return;}
       say('booth-search-status','검색 중…');
       try{renderSearch(await request(path,{method:'GET',auth:true}));}
-      catch(error){say('booth-search-status',errorMessage(error.code,error));}
+      catch(error){say('booth-search-status',errorMessage(error.code,error));offerRetry('booth-search-status',error,runSearch);}
     }
     function stopEvent(event){
       if(event&&typeof event.preventDefault==='function') event.preventDefault();
@@ -1794,6 +1819,7 @@
         followSubmission(data,meta);
       }catch(error){
         say('booth-submit-status',submitFailureText(error));
+        offerRetry('booth-submit-status',error,()=>submitBooth());
         showKnownReceipt(error);
         refreshSubmitButton();
       }
@@ -2058,6 +2084,8 @@
     }
     function applyClaim(data){
       const view=renderLive(data&&typeof data==='object'?data:{});
+      waiting=!view.final;
+      syncWake();
       if(view.final){
         stopPolling();
         if(ticket) noteReceiptOutcome(storage,ticket.receipt,view.state);
@@ -2076,12 +2104,14 @@
       poll.startedAt=now();
       poll.receipt=receipt;
       poll.claimKey=claimKey;
+      poll.stopped=false;
       setHidden('booth-live-recheck',true);
       if(immediate) void pollOnce(poll.token);
       else schedulePoll(poll.token,0);
     }
     function pollStopped(){
       poll.timer=null;
+      poll.stopped=true;
       setHidden('booth-live-recheck',false);
     }
     function schedulePoll(token, retryMs){
@@ -2092,6 +2122,7 @@
     }
     function pollFailed(token, error){
       if(error.code==='not_found'){liveError(errorMessage('not_found'));pollStopped();return;}
+      if(error.code==='offline'){liveError(errorMessage('offline'));offerRetry('booth-live-error',error,recheck);}
       schedulePoll(token,error.status===429?(error.retryAfter||POLL_429_MS):0);
     }
     async function pollOnce(token){
@@ -2109,6 +2140,21 @@
     function recheck(){
       if(!poll.receipt||!poll.claimKey) return;
       beginPolling(poll.receipt,poll.claimKey,true);
+    }
+    /* Back on the tab (visibilitychange or pageshow): a pending result is asked for at once, and polling
+       that stopped after 15 min starts again. The screen stays on while the result is pending. */
+    function visibleNow(){
+      return !doc.visibilityState||doc.visibilityState==='visible';
+    }
+    function syncWake(){
+      if(wake) wake.want(!closed&&step==='ticket'&&waiting&&visibleNow());
+    }
+    function onReturn(){
+      syncWake();
+      if(closed||!visibleNow()||step!=='ticket'||!waiting||!poll.receipt||!poll.claimKey) return;
+      if(poll.stopped){beginPolling(poll.receipt,poll.claimKey,true);return;}
+      stopPolling();
+      void pollOnce(poll.token);
     }
     function followSubmission(data, meta){
       renderReceipts();
@@ -2159,6 +2205,7 @@
       stopClock();
       cancelMake();
       ticket=null;
+      waiting=false;
       const consent=byId('booth-consent');
       if(consent) consent.checked=false;
       leaveResultHash();
@@ -2194,6 +2241,7 @@
       if(html&&html.dataset) html.dataset.boothStep=next;
       renderDeskSteps(next);
       if(next!=='ticket') stopClock();
+      syncWake();
       if(next==='edit'){renderHint();renderDock();}
       if(next==='send'){renderRows();applyConsent();}
       scrollTop();
@@ -2267,9 +2315,14 @@
         if(closed) return;
         if(!data||data.enabled!==true){setRailBlue(doc,false);clearStep();host.remove();return;}
         applyConfig(data);
-      }catch{
+      }catch(error){
         if(closed) return;
         host.hidden=false;
+        if(error&&error.code==='offline'){
+          say('booth-status',errorMessage('offline'));
+          offerRetry('booth-status',error,()=>{say('booth-status','');return loadConfig();});
+          return;
+        }
         say('booth-status','부스 접수를 확인하지 못했습니다.');
       }
     }
@@ -2304,6 +2357,8 @@
     on(doc,'falsify:document-clear',onBoothClear);
     on(root,'hashchange',()=>{showResult(false);});
     on(root,'resize',()=>{if(step==='ticket') drawBarcode();});
+    on(doc,'visibilitychange',onReturn);
+    on(root,'pageshow',onReturn);
     /* Recipe hook for booth-recipe.js: the mission or search load path by arXiv id. null until config loads. */
     function openPaperById(id, meta){
       if(!liveConfig) return null;
@@ -2321,6 +2376,7 @@
     void loadConfig();
     return {destroy(){
       closed=true;
+      if(wake) wake.want(false);
       delete root.FalsifyBoothPaper;
       stopPolling();
       stopClock();
