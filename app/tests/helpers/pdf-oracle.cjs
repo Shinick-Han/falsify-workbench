@@ -254,6 +254,7 @@ async function assertSubmittedPdf(opts) {
     label = 'submitted PDF',
   } = opts || {};
 
+  if (process.env.R1R2_DUMP && pdfBytes) require('node:fs').writeFileSync(require('node:path').join(process.env.R1R2_DUMP, label.replace(/[^a-z0-9-]+/gi, '_') + '.pdf'), Buffer.from(pdfBytes));
   assert.ok(meta && typeof meta === 'object', `${label}: meta JSON must be present`);
   assert.ok(pdfBytes && pdfBytes.byteLength > 0, `${label}: pdf bytes must be non-empty`);
   const buf = toBuffer(pdfBytes);
