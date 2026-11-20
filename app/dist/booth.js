@@ -1484,6 +1484,13 @@
       if(typeof paperLike.license==='string') return paperLike.license;
       return typeof paperLike.license.id==='string'?paperLike.license.id:'';
     }
+    /* 다음 runs the MuPDF training-marker check (blind-pdf.js) on the source first. Booth papers come
+       from arXiv through the Falsify API, so the check is skipped for them: no 4.6 MB wasm on a phone. */
+    function trustSource(file){
+      const blind=root.FalsifyBlindPdf;
+      if(!blind||!paper||typeof blind.trust!=='function') return;
+      void blind.trust(file).catch(()=>{});
+    }
     function bindPaper(next, file){
       const previous=boothFile;
       paper=next&&(next.source==='arxiv'||next.source==='mission')?{
@@ -1495,6 +1502,7 @@
       }:null;
       boothFile=file||null;
       if(previous!==boothFile) clearGenerated();
+      if(boothFile&&previous!==boothFile) trustSource(boothFile);
       renderRows();
     }
     /* Losing the paper in edit or send returns to pick. */
@@ -1630,18 +1638,19 @@
       if(typeof jump.dispatchEvent==='function') jump.dispatchEvent(new Event('change',{bubbles:true}));
       return true;
     }
-    /* The workspace reads the PDF after the change event, so the hint page retries for up to 8 s. */
+    /* The workspace reads the PDF after the change event, so the hint page retries until the PDF opens.
+       A slow phone on Slow 4G opens it after 15-20 s, so the retry runs for up to 60 s (240 x 250 ms). */
     function followPageHint(n){
       if(showMissionPage(n)) return;
       const timer=makeTimer();
       if(!timer) return;
-      let left=80;
+      let left=240;
       const tick=()=>{
         if(closed||step!=='edit'||showMissionPage(n)) return;
         left-=1;
-        if(left>0) timer(tick,100);
+        if(left>0) timer(tick,250);
       };
-      timer(tick,100);
+      timer(tick,250);
     }
     function missionPaper(mission){
       return {source:'mission',id:mission.paperId,title:typeof mission.title==='string'?mission.title:'',
