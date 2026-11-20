@@ -43,6 +43,9 @@ export const EVENT_OMIT = Object.freeze([
   'latex-workbench.css', 'latex-workbench.mjs',
   'paper-chart-redraw.js', 'chart-shape-core.js', 'chart-shape-editor.css', 'chart-shape-editor.js',
   'chart-mark-editor.css', 'chart-mark-editor.js',
+  // RED's /URI scan imports MuPDF on the main thread when a paper opens (4.6 MB wasm, 0.4-0.6 s task).
+  'red-baseline-uri.css', 'red-baseline-uri.js',
+  'coevolution-arena.css', 'coevolution-arena.js', 'blue-defect-sensor.css', 'blue-defect-sensor-ui.js',
 ]);
 
 function fail(message, exitCode) {
