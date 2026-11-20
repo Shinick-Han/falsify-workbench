@@ -181,6 +181,22 @@
     if(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)||value.length>2000) return null;
     return value;
   }
+  function trimCodePoints(text, max){
+    const chars=[...text];
+    if(chars.length<=max&&text.length<=max) return text;
+    let out='';
+    let count=0;
+    for(const ch of chars){
+      if(count>=max||out.length+ch.length>max) break;
+      out+=ch;
+      count+=1;
+    }
+    return out;
+  }
+  function sanitizeDeclaredText(value){
+    const clean=String(value==null?'':value).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g,'');
+    return trimCodePoints(clean,2000);
+  }
   function paperIdOf(paper){
     return cleanText(typeof paper.id==='string'?paper.id.trim():'',64);
   }
@@ -861,10 +877,10 @@
           el('p',{id:'booth-dock-status',className:'booth-dock-status',role:'status','aria-live':'polite'}),
           el('div',{id:'booth-dock-fix',className:'booth-dock-fix',hidden:true}),
           el('div',{className:'booth-dock-count'},
-            el('span',{id:'booth-dock-count',textContent:'고친 곳 0개'}),
+            el('button',{id:'booth-dock-count',type:'button',className:'booth-dock-count-btn',textContent:'고친 곳 0개','aria-expanded':'false','aria-controls':'booth-dock-pop'}),
             el('small',{id:'booth-dock-sub',textContent:'여러 곳을 고쳐도 돼요'})),
           el('div',{id:'booth-dock-chips',className:'booth-dock-chips booth-desk','aria-label':'고친 곳 목록'}),
-          el('ul',{id:'booth-dock-pop',className:'booth-dock-pop booth-desk',hidden:true,'aria-label':'고친 곳 전체'}),
+          el('ul',{id:'booth-dock-pop',className:'booth-dock-pop',hidden:true,'aria-label':'고친 곳 전체'}),
           el('button',{id:'booth-dock-back',type:'button',className:'booth-back booth-dock-back booth-desk',textContent:'← 논문 고르기'}),
           el('button',{id:'booth-next',type:'button',className:'booth-btn ink',textContent:'다음',disabled:true})));
     }
@@ -1328,14 +1344,22 @@
       button.addEventListener('click',()=>{dockPopOpen=!dockPopOpen;renderDock();});
       return button;
     }
+    function toggleDockPop(){
+      if(!liveEdits().length){dockPopOpen=false;renderDock();return;}
+      dockPopOpen=!dockPopOpen;
+      renderDock();
+    }
     function renderDockChips(edits){
       const box=byId('booth-dock-chips');
-      if(!box) return;
       const extra=edits.length>DOCK_CHIPS;
-      if(!extra) dockPopOpen=false;
-      const chips=edits.slice(0,DOCK_CHIPS).map(dockChip);
-      if(extra) chips.push(moreButton(edits.length-DOCK_CHIPS));
-      kidsOf(box,...chips);
+      if(!edits.length) dockPopOpen=false;
+      if(box){
+        const chips=edits.slice(0,DOCK_CHIPS).map(dockChip);
+        if(extra) chips.push(moreButton(edits.length-DOCK_CHIPS));
+        kidsOf(box,...chips);
+      }
+      setAttr('booth-dock-count','aria-expanded',String(dockPopOpen));
+      setAttr('booth-dock-count','data-openable',String(edits.length>0));
       const pop=byId('booth-dock-pop');
       if(!pop) return;
       kidsOf(pop,...(dockPopOpen?edits.map(popRow):[]));
@@ -1797,7 +1821,7 @@
     }
     function rowPayload(row){
       return {
-        pageIndex:row.pageIndex,before:row.before,after:row.after,
+        pageIndex:row.pageIndex,before:sanitizeDeclaredText(row.before),after:sanitizeDeclaredText(row.after),
         defectType:row.defectType,reason:rowReason(row)
       };
     }
@@ -1868,14 +1892,19 @@
       if(!form) say('booth-submit-status',errorMessage('invalid_request'));
       return form;
     }
+    async function ensureSubmissionPdf(){
+      const live=liveEdits();
+      if(!live.length) return true;
+      if(generatedFile&&SHA256.test(generatedHash)&&editSignature(live)===adoptedSignature) return true;
+      adoptedSignature='';
+      await beginMake();
+      if(step==='send'&&generatedFile&&SHA256.test(generatedHash)) return true;
+      if(step==='send') say('booth-submit-status',ENGINE_UNAVAILABLE);
+      return false;
+    }
     async function submitBooth(event){
       stopEvent(event);
-      const live=liveEdits();
-      if(live.length&&editSignature(live)!==adoptedSignature){
-        adoptedSignature='';
-        await beginMake();
-        if(step!=='send'||!generatedFile) return;
-      }
+      if(!(await ensureSubmissionPdf())) return;
       if(!preflight()) return;
       const form=submissionFormFor();
       if(!form) return;
@@ -1963,7 +1992,7 @@
       if(block==='loading') return '부스 정보를 불러오는 중이에요. 잠시 뒤 다시 눌러 주세요.';
       if(block==='consent') return CONSENT_MISSING;
       if(block==='pick') return PICK_PAPER;
-      return '수정본을 아직 만들지 않았어요. 「고치기」로 돌아가 「다음」을 눌러 주세요.';
+      return ENGINE_UNAVAILABLE;
     }
     /* Only the version the server names. Before /v1/booth/config answers there is none, so no
        older text (CONSENT_VERSION is v1) can show for a moment. */
@@ -2336,6 +2365,7 @@
     /* The one place the step changes. event-theme.css reads html[data-booth-step]. */
     function setStep(next){
       step=next;
+      if(next!=='edit') dockPopOpen=false;
       for(const [name,id] of Object.entries(STEP_NODES)) setHidden(id,name!==next);
       const html=doc.documentElement;
       if(html&&html.dataset) html.dataset.boothStep=next;
@@ -2343,7 +2373,7 @@
       if(next!=='ticket') stopClock();
       syncWake();
       if(next==='edit'){renderHint();renderDock();}
-      if(next==='send'){renderRows();applyConsent();}
+      if(next==='send'){renderRows();applyConsent();if(!generatedFile&&liveEdits().length) void beginMake();}
       scrollTop();
     }
     /* Current step bold (aria-current), earlier steps done. */
@@ -2432,6 +2462,7 @@
       void runSearch();
     });
     on(byId('booth-next'),'click',()=>{void beginMake();});
+    on(byId('booth-dock-count'),'click',toggleDockPop);
     on(byId('booth-edit-back'),'click',backToPick);
     on(byId('booth-dock-back'),'click',backToPick);
     on(byId('booth-dock'),'keydown',event=>{if(event&&event.key==='Escape'&&dockPopOpen){dockPopOpen=false;renderDock();}});

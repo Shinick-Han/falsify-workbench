@@ -46,7 +46,8 @@
   const REASON_TEXT={
     not_found:'찾는 글자가 이 논문에 없어요.',
     ambiguous:'같은 글자가 여러 곳에 있어요. 바꿀 곳을 눌러 주세요.',
-    no_paper:'논문이 아직 열리지 않았어요. 잠시 뒤 「바꾸기」를 다시 눌러 주세요.'
+    no_paper:'논문이 아직 열리지 않았어요. 잠시 뒤 「바꾸기」를 다시 눌러 주세요.',
+    unchanged:'새 글자가 원문과 같아요.'
   };
 
   /* ---------- validation (contract §1) ---------- */
@@ -197,6 +198,17 @@
       ys:[oy-desc*vy,by-desc*vy,oy+asc*vy,by+asc*vy]
     };
   }
+  function isRotatedTransform(tx){
+    const hLen=Math.hypot(tx[0],tx[1]);
+    if(!(hLen>0)) return false;
+    return tx[0]/hLen<0.99||Math.abs(tx[1]/hLen)>0.05;
+  }
+  function itemRotated(item, viewport){
+    if(item&&typeof item.rotated==='boolean') return item.rotated;
+    const dims=viewportDims(viewport);
+    const t=item&&Array.isArray(item.transform)&&item.transform.length>=6?item.transform:null;
+    return !!(dims&&t&&isRotatedTransform(mulMat(dims.vt,t)));
+  }
   /* pdf.js getTextContent item -> page-fraction rect on the displayed viewport (top-left origin). */
   function itemRect(item, viewport){
     if(item&&item.rect) return plainRect(item.rect);
@@ -254,7 +266,11 @@
     state.text+=itemSeparator(state.text,item.str,state.prevEol,state.prevRect,rect);
     const start=state.text.length;
     state.text+=item.str;
-    if(rect) state.spans.push({start,end:state.text.length,rect});
+    if(rect){
+      const span={start,end:state.text.length,rect};
+      if(itemRotated(item,viewport)) span.rotated=true;
+      state.spans.push(span);
+    }
     if(item.hasEOL&&!state.text.endsWith('\n')) state.text+='\n';
     state.prevRect=rect||state.prevRect;
     state.prevEol=!!item.hasEOL;
@@ -285,7 +301,7 @@
     if(!raw||typeof raw!=='object'||!Number.isSafeInteger(raw.pageIndex)||raw.pageIndex<0) return null;
     if(typeof raw.text==='string'&&Array.isArray(raw.spans)){
       const spans=raw.spans.filter(s=>s&&Number.isSafeInteger(s.start)&&Number.isSafeInteger(s.end)&&s.end>s.start&&plainRect(s.rect))
-        .map(s=>({start:s.start,end:s.end,rect:plainRect(s.rect)}));
+        .map(s=>s.rotated?{start:s.start,end:s.end,rect:plainRect(s.rect),rotated:true}:{start:s.start,end:s.end,rect:plainRect(s.rect)});
       return {pageIndex:raw.pageIndex,text:raw.text,spans};
     }
     if(Array.isArray(raw.items)) return indexItems(raw.pageIndex,raw.items,raw.viewport);
@@ -295,17 +311,21 @@
   function normalizePages(list){
     return (Array.isArray(list)?list:[]).map(indexPage).filter(Boolean);
   }
+  function spanSliceRect(span, start, end){
+    const r=span.rect;
+    if(span.rotated) return {x:r.x,y:r.y,w:r.w,h:r.h};
+    const len=Math.max(1,span.end-span.start);
+    const s0=Math.max(0,start-span.start);
+    const s1=Math.min(len,end-span.start);
+    const f0=s0/len;
+    const f1=s1/len;
+    return {x:r.x+r.w*f0,y:r.y,w:Math.max(0.002,r.w*(f1-f0)),h:r.h};
+  }
   function rectsForSpan(page, start, end){
     const parts=[];
     for(const span of page.spans||[]){
       if(span.end<=start||span.start>=end) continue;
-      const len=Math.max(1,span.end-span.start);
-      const s0=Math.max(0,start-span.start);
-      const s1=Math.min(len,end-span.start);
-      const f0=s0/len;
-      const f1=s1/len;
-      const r=span.rect;
-      parts.push({x:r.x+r.w*f0,y:r.y,w:Math.max(0.002,r.w*(f1-f0)),h:r.h});
+      parts.push(spanSliceRect(span,start,end));
     }
     const merged=mergeLineRects(parts);
     if(merged.length) return merged;
@@ -804,6 +824,7 @@
   function addBoothEdit(hit, replace, editSource, assistMeta){
     const store=boothEdits();
     if(!store||typeof store.add!=='function') return {ok:false,reason:'no_paper'};
+    if(hit.originalText===replace) return {ok:false,reason:'unchanged'};
     const added=store.add({
       pageIndex:hit.pageIndex,
       rects:hit.rects,
@@ -812,9 +833,10 @@
       source:editSource||'find',
       ...(assistMeta?{assist:assistMeta}:{})
     });
+    if(!added) return {ok:false,reason:'unchanged'};
     return {
       ok:true,
-      id:added?added.id:null,
+      id:added.id,
       pageIndex:hit.pageIndex,
       before:hit.originalText,
       after:replace,
@@ -1392,8 +1414,13 @@
       const rows=doc.getElementById('booth-rows');
       if(rows) new Observer(decorateRows).observe(rows,{childList:true});
     }
+    function clearPdfCache(){
+      for(const task of pdfCache.values()) task.then(pdf=>pdf&&typeof pdf.destroy==='function'&&pdf.destroy()).catch(()=>{});
+      pdfCache.clear();
+      aiMarks.clear();
+    }
     listeners.add((kind,entry)=>{if(kind==='applied') renderResult(entry);});
-    doc.addEventListener('falsify:document-clear',()=>{clearIndex();resetResult();});
+    doc.addEventListener('falsify:document-clear',()=>{clearIndex();clearPdfCache();resetResult();});
     doc.addEventListener('falsify:paper-workspace-source',()=>{void ensureIndex().then(()=>{if(ui.tab==='find') main.render();});});
     doc.addEventListener('falsify:paper-workspace-pdf',()=>{void ensureIndex().then(()=>{if(ui.tab==='find') main.render();});});
     root.addEventListener('hashchange',fromHash);

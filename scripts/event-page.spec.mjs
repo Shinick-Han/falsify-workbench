@@ -123,7 +123,12 @@ test('malformed index or CSP fails closed', () => {
 test('the event page drops the Workbench-only assets and index.html keeps them', () => {
   const index = readFileSync(indexPath, 'utf8');
   const event = readFileSync(eventPath, 'utf8');
-  assert.ok(EVENT_OMIT.includes('latex-workbench.mjs'));
+  for (const required of [
+    'latex-workbench.mjs', 'paper-recompose-entry.mjs', 'table-pdf.js', 'paragraph-pdf.js',
+    'pdf-edit-pipeline.js', 'paper-font-service.js', 'paper-change-marks.js', 'paper-generation.js',
+  ]) {
+    assert.ok(EVENT_OMIT.includes(required), required + ' must be in EVENT_OMIT');
+  }
   for (const name of EVENT_OMIT) {
     assert.equal(count(index, '"' + name + '?'), 1, name + ' in index.html');
     assert.equal(count(event, '"' + name + '?'), 0, name + ' in event.html');
