@@ -46,6 +46,9 @@ const PDF_MAGIC = [0x25, 0x50, 0x44, 0x46, 0x2d]; // %PDF-
 const CLAIM_PREFIX = 'booth-claim:v1:';
 // Claim and withdraw share one bucket so the two key checks cannot double the guess rate.
 const CLAIM_BUCKET_PREFIX = 'booth-claim:ip:';
+// A fixed hourly window would otherwise tell a NAT'd poller to wait until the top of the hour, and the page
+// stops polling when that wait passes its 15 minute horizon. A short hint keeps polling alive.
+const CLAIM_RETRY_MAX_SECONDS = 60;
 const CLAIM_GLOBAL_BUCKET = 'booth-claim:all';
 const SUBMIT_BUCKET_PREFIX = 'booth-submit:ip:';
 const SUBMIT_GLOBAL_BUCKET = 'booth-submit:all';
@@ -122,9 +125,10 @@ function consentVersionOf(env) {
 function boothLimits(env) {
   return {
     perOwner: positiveInt(env?.BOOTH_SUBMISSIONS_PER_OWNER, 5),
-    perIpHour: positiveInt(env?.BOOTH_SUBMISSIONS_PER_IP_HOUR, 60),
+    // Venue Wi-Fi puts every phone behind one IP; the per-owner cap is the per-person limit.
+    perIpHour: positiveInt(env?.BOOTH_SUBMISSIONS_PER_IP_HOUR, 400),
     perHour: positiveInt(env?.BOOTH_SUBMISSIONS_PER_HOUR, 600),
-    claimsPerIpHour: positiveInt(env?.BOOTH_CLAIMS_PER_IP_HOUR, 120),
+    claimsPerIpHour: positiveInt(env?.BOOTH_CLAIMS_PER_IP_HOUR, 8000),
     claimsPerHour: positiveInt(env?.BOOTH_CLAIMS_PER_HOUR, 2000),
     storedBytes: positiveInt(env?.BOOTH_STORED_PDF_BYTES, STORED_PDF_DEFAULT),
   };
@@ -821,7 +825,22 @@ async function releaseSubmission(ctx, charged) {
   await ctx.deps.releaseSlot(db, SUBMIT_GLOBAL_BUCKET, charged.globalSlot);
 }
 
+function shortClaimRetry(error) {
+  if (error?.code !== 'rate_limited') return error;
+  const raw = Number(error.headers?.['Retry-After']);
+  const seconds = Number.isFinite(raw) && raw > 0 ? Math.min(Math.ceil(raw), CLAIM_RETRY_MAX_SECONDS) : CLAIM_RETRY_MAX_SECONDS;
+  return new AiError(429, 'rate_limited', { ...(error.headers || {}), 'Retry-After': String(seconds) });
+}
+
 async function chargeClaim(ctx) {
+  try {
+    await chargeClaimSlots(ctx);
+  } catch (error) {
+    throw shortClaimRetry(error);
+  }
+}
+
+async function chargeClaimSlots(ctx) {
   const db = ctx.deps.getDb();
   const limits = boothLimits(ctx.env);
   const bucket = await bucketKey(CLAIM_BUCKET_PREFIX, clientIp(ctx));
@@ -1006,6 +1025,20 @@ async function postSubmission(ctx) {
     }
     throw error;
   }
+}
+
+// Result polling: GET with the key in the query is a CORS simple request (no preflight) and only reads one
+// row, so it spends no rate-limit write. The 40-bit claim key, not a counter, protects the outcome; the
+// Worker redacts query strings from its logs. POST /v1/booth/claim stays for lookups and withdraw.
+async function getClaim(ctx) {
+  const params = ctx.url.searchParams;
+  const keys = [...params.keys()];
+  if (keys.length !== 2 || !params.has('receipt') || !params.has('key')) boothFail(400, 'invalid_request');
+  const receipt = params.get('receipt');
+  const key = params.get('key');
+  if (receipt.length > 16 || key.length > 32) boothFail(400, 'invalid_request');
+  const row = await loadClaim(ctx.deps.getDb(), receipt, key);
+  return json(200, claimView(row));
 }
 
 async function postClaim(ctx) {
@@ -1212,7 +1245,7 @@ async function putSettings(ctx) {
 const ROUTES = {
   '/v1/booth/config': { GET: getConfig },
   '/v1/booth/submissions': { POST: postSubmission },
-  '/v1/booth/claim': { POST: postClaim },
+  '/v1/booth/claim': { GET: getClaim, POST: postClaim },
   '/v1/booth/withdraw': { POST: postWithdraw },
   '/v1/booth/admin/submissions': { GET: listAdmin },
   '/v1/booth/admin/submissions/:receipt': { GET: getAdmin, PATCH: patchAdmin, DELETE: deleteAdmin },

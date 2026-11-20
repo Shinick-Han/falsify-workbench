@@ -980,11 +980,66 @@ test('per-owner, per-IP and claim buckets stop the next submission', async () =>
     assert.equal(blocked.body.error.code, 'rate_limited');
     // The claim route has no session, yet the browser must still read the wait for its poll schedule.
     assert.ok(Number(blocked.headers.get('Retry-After')) > 0);
+    // Capped so the page keeps polling instead of waiting for the top of the hour.
+    assert.ok(Number(blocked.headers.get('Retry-After')) <= 60);
     assert.equal(blocked.headers.get('Access-Control-Expose-Headers'), 'X-Falsify-Confluence-Session, Retry-After');
     const d1 = await mf.getD1Database('DB');
     const global = await d1.prepare(`SELECT count FROM rate_counters WHERE bucket = 'booth-claim:all'`).first();
     assert.equal(Number(global.count) >= 1, true);
   });
+});
+
+test('GET claim polls without a rate slot, so one venue IP never runs dry', async () => {
+  await withApp({ BOOTH_CLAIMS_PER_IP_HOUR: '2', BOOTH_CLAIMS_PER_HOUR: '2' }, async (mf, call) => {
+    const venue = fromIp('198.51.100.9');
+    const guest = (await mintGuest(call, venue)).body.guest.token;
+    const created = await submitPdf(call, guest, pdfBytes('op-booth-getclaim'), {}, venue);
+    assert.equal(created.status, 201, created.text);
+    const { receipt, claimKey } = created.body;
+    const q = (r, k) => '/v1/booth/claim?receipt=' + encodeURIComponent(r) + '&key=' + encodeURIComponent(k);
+    // 40 visitors behind one NAT polling 4 times a minute for 3 minutes: far beyond both caps above.
+    for (let i = 0; i < 480; i++) {
+      const polled = await call('GET', q(receipt, claimKey), { headers: venue });
+      assert.equal(polled.status, 200, polled.text);
+      if (i === 0) {
+        assert.deepEqual(Object.keys(polled.body).sort(), ['course', 'createdAt', 'declaredCount', 'published', 'receipt', 'status']);
+        assert.equal(polled.headers.get('Cache-Control'), 'no-store');
+      }
+    }
+    const d1 = await mf.getD1Database('DB');
+    const counted = await d1.prepare("SELECT COUNT(*) AS n FROM rate_counters WHERE bucket LIKE 'booth-claim%'").first();
+    assert.equal(Number(counted.n), 0, 'GET claim writes no rate counter');
+    const wrong = await call('GET', q(receipt, 'AAAA-AAAA'), { headers: venue });
+    assert.equal(wrong.status, 404);
+    assert.equal(wrong.body.error.code, 'not_found');
+    assert.equal((await call('GET', q('F-9999', claimKey), { headers: venue })).status, 404);
+    assert.equal((await call('GET', '/v1/booth/claim?receipt=' + receipt, { headers: venue })).status, 400);
+    assert.equal((await call('GET', q(receipt, claimKey) + '&x=1', { headers: venue })).status, 400);
+    assert.equal((await call('GET', q(receipt, 'K'.repeat(40)), { headers: venue })).status, 400);
+    // POST lookups keep their buckets; a 429 there says at most 60 s.
+    assert.equal((await call('POST', '/v1/booth/claim', { headers: venue, body: { receipt, claimKey } })).status, 200);
+    assert.equal((await call('POST', '/v1/booth/claim', { headers: venue, body: { receipt, claimKey } })).status, 200);
+    const limited = await call('POST', '/v1/booth/claim', { headers: venue, body: { receipt, claimKey } });
+    assert.equal(limited.status, 429);
+    const wait = Number(limited.headers.get('Retry-After'));
+    assert.ok(wait > 0 && wait <= 60, 'Retry-After ' + wait);
+    assert.equal(limited.body.error.retryable, true);
+    // The published result is what a poll returns once the operator publishes.
+    const patched = await call('PATCH', '/v1/booth/admin/submissions/' + receipt, {
+      token: OPERATOR, body: { status: 'judged', outcome: 'missed', publicNote: 'n', published: true },
+    });
+    assert.equal(patched.status, 200, patched.text);
+    const done = await call('GET', q(receipt, claimKey.toLowerCase()), { headers: venue });
+    assert.equal(done.status, 200);
+    assert.equal(done.body.outcome, 'missed');
+    assert.equal(done.body.published, true);
+  });
+});
+
+test('booth per-IP defaults fit a venue NAT when the event vars are missing', () => {
+  const source = readFileSync(path.join(apiRoot, 'src/booth.mjs'), 'utf8');
+  assert.match(source, /perIpHour: positiveInt\(env\?\.BOOTH_SUBMISSIONS_PER_IP_HOUR, 400\)/);
+  assert.match(source, /claimsPerIpHour: positiveInt\(env\?\.BOOTH_CLAIMS_PER_IP_HOUR, 8000\)/);
 });
 
 test('multipart pdf checks, chunks and a same-hash duplicate', async () => {

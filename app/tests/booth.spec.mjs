@@ -405,11 +405,15 @@ function liveBooth(options = {}) {
   });
   const submitReplies = (options.submits || []).slice();
   const fetchImpl = async (url, init = {}) => {
-    const path = String(url);
+    const full = String(url);
+    const path = full.split('?')[0];
     const headers = init.headers || {};
     const form = init.body && typeof init.body.get === 'function' ? init.body : null;
-    calls.push({path, at: clock.t, auth: headers.Authorization || '', contentType: headers['Content-Type'] || '',
-      body: typeof init.body === 'string' ? JSON.parse(init.body) : null, form});
+    // GET /v1/booth/claim carries receipt and key in the query; record them as the body a POST would send.
+    const query = full.includes('?') ? new URLSearchParams(full.slice(full.indexOf('?') + 1)) : null;
+    const queryBody = query && path.endsWith('/v1/booth/claim') ? {receipt: query.get('receipt'), claimKey: query.get('key')} : null;
+    calls.push({path, method: init.method || 'GET', at: clock.t, auth: headers.Authorization || '', contentType: headers['Content-Type'] || '',
+      body: typeof init.body === 'string' ? JSON.parse(init.body) : queryBody, form});
     if (path.endsWith('/v1/booth/config')) {
       return reply(200, {enabled: true, submissionsOpen: true, announcement: options.announcement, consentVersion: options.consentVersion || '2026-11-22.v2',
         limits: {maxDeclared: options.maxDeclared || 5, maxReason: 500, maxNickname: 24, perOwner: options.perOwner || 5, maxPdfBytes: 16777216},
@@ -1243,6 +1247,34 @@ test('the diff shows only the changed region with a little context', () => {
   assert.equal(booth.formatDuration(120000), '2분');
 });
 
+test('result polls use GET, and a Worker without that route falls back to POST once', async () => {
+  const pending = {receipt: 'F-0042', status: 'received', course: 'quick', declaredCount: 1, published: false};
+  const h = liveBooth({claims: [{status: 405, body: {error: {code: 'method_not_allowed'}}}, pending]});
+  await settle();
+  h.ids.get('booth-result-link').dispatchEvent({type: 'click', preventDefault() {}});
+  h.ids.get('booth-claim-receipt').value = 'F-0042';
+  h.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.deepEqual(h.claimCalls().map(call => call.method), ['GET', 'POST']);
+  assert.equal(h.claimCalls()[0].contentType, '', 'a GET poll sends no Content-Type, so no preflight');
+  assert.equal(h.step(), 'ticket');
+  await h.tick();
+  assert.equal(h.claimCalls().at(-1).method, 'POST', 'the fallback sticks');
+  h.handle.destroy();
+  const fresh = liveBooth({claims: [pending]});
+  await settle();
+  fresh.ids.get('booth-result-link').dispatchEvent({type: 'click', preventDefault() {}});
+  fresh.ids.get('booth-claim-receipt').value = 'F-0042';
+  fresh.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+  fresh.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  await fresh.tick();
+  assert.deepEqual(fresh.claimCalls().map(call => call.method), ['GET', 'GET']);
+  assert.deepEqual(fresh.claimCalls()[1].body, {receipt: 'F-0042', claimKey: '7Q3K-M9XD'});
+  fresh.handle.destroy();
+});
+
 test('a cold reload with a stored receipt resumes polling and lists receipts', async () => {
   const storage = memoryStorage();
   booth.rememberReceipt(storage, {receipt: 'F-0041', claimKey: 'AAAA-BBBB', createdAt: '2026-11-22T00:10:00Z', title: 'Older paper', pages: [3, 3, 1], outcome: 'caught'});
@@ -1345,7 +1377,7 @@ test('a cold #booth-result load mints the guest session only for paper and submi
       })};
     }
     if (path.includes('/v1/papers/pdf')) return pdfReply();
-    const payload = path.endsWith('/v1/booth/claim')
+    const payload = path.split('?')[0].endsWith('/v1/booth/claim')
       ? {receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1, published: false}
       : path.endsWith('/v1/booth/submissions')
         ? {receipt: 'F-0042', claimKey: '7Q3K-M9XD', status: 'received', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:00Z'}
@@ -1388,7 +1420,7 @@ test('a cold #booth-result load mints the guest session only for paper and submi
   cold.ids.get('booth-claim-key').value = '7Q3K-M9XD';
   cold.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
   await settle();
-  assert.equal(guestCalls.find(call => call.url.endsWith('/v1/booth/claim')).auth, '');
+  assert.equal(guestCalls.find(call => call.url.split('?')[0].endsWith('/v1/booth/claim')).auth, '');
   assert.equal(cold.doc.documentElement.dataset.boothStep, 'ticket');
   assert.equal(guestCalls.some(call => call.url.endsWith('/v1/ai/guest')), false);
   nodesOf(cold.ids.get('booth-receipt')).find(node => node.id === 'booth-live-again').hidden = false;

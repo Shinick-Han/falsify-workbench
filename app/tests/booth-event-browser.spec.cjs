@@ -100,8 +100,11 @@ async function stubApi(route, submissions, claims) {
       course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:00.000Z',
     });
   }
-  if (request.method() === 'POST' && url.pathname === '/v1/booth/claim') {
-    claims.push(JSON.parse(request.postData() || '{}'));
+  if (url.pathname === '/v1/booth/claim' && (request.method() === 'GET' || request.method() === 'POST')) {
+    // Result polls are a GET with the receipt and key in the query (no preflight); POST is the fallback.
+    claims.push(request.method() === 'GET'
+      ? {receipt: url.searchParams.get('receipt'), claimKey: url.searchParams.get('key')}
+      : JSON.parse(request.postData() || '{}'));
     return json(route, 200, claims.length <= 2 ? PENDING : MISSED);
   }
   return json(route, 404, {error: {code: 'not_found'}});
