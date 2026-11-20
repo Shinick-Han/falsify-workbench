@@ -7,6 +7,9 @@
   /* MuPDF opens, extracts and rasterises every page here, so it runs in a module worker. Results are
      kept per source SHA-256: warm() starts the job while the visitor edits, prepare() reuses it. */
   const results = new Map();
+  /* SHA-256 of PDFs the booth fetched itself from arXiv through the Falsify API. They are original
+     author files and cannot carry the RED training marker, so prepare() skips MuPDF for them. */
+  const trusted = new Set();
   let worker = null, nextId = 1;
   const jobs = new Map();
   function aborted() { return new DOMException('Aborted', 'AbortError'); }
@@ -58,6 +61,7 @@
     if (signal && signal.aborted) throw aborted();
     const bytes = await readBytes(file);
     const key = await hashOf(bytes);
+    if (trusted.has(key)) return {file, sha256: key, changed: false, removed: [], verification: {status: 'passed', unchangedBytes: true, source: 'arxiv'}};
     let task = results.get(key);
     if (!task) {
       task = run(file, bytes);
@@ -73,5 +77,9 @@
     if (!file || results.size > 4) return;
     prepare({file}).catch(function () { /* prepare() reports errors later */ });
   }
-  root.FalsifyBlindPdf = {prepare, warm};
+  async function trust(file) {
+    if (!file) return;
+    trusted.add(await hashOf(await readBytes(file)));
+  }
+  root.FalsifyBlindPdf = {prepare, warm, trust};
 })(globalThis);

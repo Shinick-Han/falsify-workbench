@@ -1440,12 +1440,12 @@
       if(typeof paperLike.license==='string') return paperLike.license;
       return typeof paperLike.license.id==='string'?paperLike.license.id:'';
     }
-    /* 다음 runs the MuPDF source check (blind-pdf.js) first; start it a few seconds after the paper opens,
-       in a worker, so 다음 only waits for the edit itself. */
-    function warmBlind(file){
+    /* 다음 runs the MuPDF training-marker check (blind-pdf.js) on the source first. Booth papers come
+       from arXiv through the Falsify API, so the check is skipped for them: no 4.6 MB wasm on a phone. */
+    function trustSource(file){
       const blind=root.FalsifyBlindPdf;
-      if(!blind||typeof blind.warm!=='function'||typeof root.setTimeout!=='function') return;
-      root.setTimeout(()=>{if(boothFile===file) blind.warm(file);},4000);
+      if(!blind||!paper||typeof blind.trust!=='function') return;
+      void blind.trust(file).catch(()=>{});
     }
     function bindPaper(next, file){
       const previous=boothFile;
@@ -1457,7 +1457,7 @@
       }:null;
       boothFile=file||null;
       if(previous!==boothFile) clearGenerated();
-      if(boothFile&&previous!==boothFile) warmBlind(boothFile);
+      if(boothFile&&previous!==boothFile) trustSource(boothFile);
       renderRows();
     }
     /* Losing the paper in edit or send returns to pick. */
