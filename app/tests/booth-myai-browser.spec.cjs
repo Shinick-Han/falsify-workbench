@@ -117,7 +117,7 @@ async function checkCopy(page) {
   assert.ok(copied.includes('Ragas 0.95 0.78 0.70'), 'page 5 text');
   assert.match(copied, /"source": "my-ai"/);
   assert.equal(await page.locator('#booth-myai-copy-status').textContent(),
-    '복사됐어요. ChatGPT·Claude·Gemini 앱에 붙여 넣고, 답을 길게 눌러 전부 복사해 오세요.');
+    '복사했어요. AI 채팅에 붙여 넣고, 받은 답을 전부 복사해 오세요.');
   assert.equal(await page.locator('#booth-myai-copy').textContent(), '복사됨 ✓');
   assert.equal(await page.locator('#booth-myai-full').isVisible(), false);
   await page.waitForFunction(() => document.querySelector('#booth-myai-copy').textContent === '다시 복사', null, {timeout: 4000});
@@ -180,11 +180,11 @@ async function checkShare(page, tag, expected) {
   await page.waitForFunction(n => window.__clip.length === n + 1, clips);
   await page.waitForFunction(() => /^보냈어요\./.test(document.querySelector('#booth-myai-copy-status').textContent));
   await page.locator('#booth-myai-copy').click();
-  await page.waitForFunction(() => /^복사됐어요/.test(document.querySelector('#booth-myai-copy-status').textContent));
+  await page.waitForFunction(() => /^복사했어요/.test(document.querySelector('#booth-myai-copy-status').textContent));
   await page.evaluate(() => { window.__shareMode = 'abort'; });
   await button.click();
   await page.waitForFunction(() => window.__shared.length === 2);
-  assert.match(await page.locator('#booth-myai-copy-status').textContent(), /^복사됐어요/, 'cancelling the share sheet keeps the status');
+  assert.match(await page.locator('#booth-myai-copy-status').textContent(), /^복사했어요/, 'cancelling the share sheet keeps the status');
 }
 
 async function checkErrors(page) {

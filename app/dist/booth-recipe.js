@@ -31,11 +31,11 @@
   const WINDOW=40;
   const ERROR_TEXT={
     invalid_code:'코드 형식을 확인해 주세요. 예: R-7K3QXM',
-    not_found:'이 코드의 레시피가 없어요. 코드는 6시간 뒤 사라져요.',
-    invalid_recipe:'레시피 형식이 맞지 않아요.',
-    rate_limited:'요청이 많아요. 잠시 뒤 다시 눌러 주세요.',
+    not_found:'이 코드로 찾은 레시피가 없어요. 코드를 다시 확인해 볼까요? 레시피는 6시간 동안 쓸 수 있어요.',
+    invalid_recipe:'레시피를 읽지 못했어요. agent에게 다시 만들어 달라고 해 주세요.',
+    rate_limited:'지금 요청이 몰려 있어요. 잠시 뒤 다시 눌러 주세요.',
     network:'서버에 연결하지 못했어요. 네트워크를 확인해 주세요.',
-    no_paper:'레시피의 논문을 열지 못했어요.'
+    no_paper:'레시피의 논문을 열지 못했어요. 「불러오기」를 다시 눌러 주세요.'
   };
   const REASON_TEXT={
     not_found:'원문에서 이 글자를 찾지 못했어요. 원문 그대로 다시 적어 주세요.',
@@ -727,7 +727,7 @@
         return '';
       }
       function failText(result){
-        return result.detail==='overlap'?'이미 고친 곳과 겹쳐요. 편집 목록에서 먼저 지워 주세요.':REASON_TEXT[result.reason]||REASON_TEXT.not_found;
+        return result.detail==='overlap'?'이미 고친 곳과 겹쳐요. 고친 곳 목록에서 먼저 지워 주세요.':REASON_TEXT[result.reason]||REASON_TEXT.not_found;
       }
       async function submit(){
         render();

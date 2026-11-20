@@ -485,7 +485,7 @@ test('operator id, gateway defaults and migration 0006 keep secrets out of the s
   ]) {
     assert.equal(wrangler.split(literal).length, 2, literal);
   }
-  assert.match(wrangler, /"BOOTH_CONSENT_VERSION": "2026-11-22.v2"/);
+  assert.match(wrangler, /"BOOTH_CONSENT_VERSION": "2026-11-22.v3"/);
   assert.match(wrangler, /"AI_GUESTS_PER_IP_HOUR": "600"/);
   const boothSource = readFileSync(path.join(apiRoot, 'src/booth.mjs'), 'utf8');
   assert.match(boothSource, /const SEQ_ATTEMPTS = 5/);
