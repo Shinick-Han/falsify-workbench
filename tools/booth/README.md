@@ -28,7 +28,7 @@ node tools/booth/booth.mjs --config booth.local.json blue \
 
 같은 접수·프로파일·반복·설정·`pdfSha256` 은 항상 같은 idempotency 키(sha256)를 씁니다. 키에 넣는 해시는 운영자 목록의 `pdfSha256` 이고, 로컬 파일이 그 값과 다르면 올리지 않습니다. 끝난 작업은 로컬 기록을 다시 읽고, 기록이 없으면 서버가 같은 키를 재생합니다. 실패한 작업은 다시 과금하지 않습니다. 같은 PDF로 다시 돌리려면 프롬프트나 모델처럼 설정을 바꾸세요.
 
-`--concurrency` 는 이 프로세스 안의 동시 BLUE 작업 수입니다. 서버의 `BOOTH_OPERATOR_ACTIVE_JOBS` 이하로 두세요.
+`--concurrency` 는 이 프로세스 안의 동시 BLUE 작업 수입니다. 서버의 `BOOTH_OPERATOR_ACTIVE_JOBS` 와 같게 두세요. 서버 상한이 차서 작업 생성이 `429 rate_limited` 이면 실패로 세지 않고, 같은 업로드와 idempotency 키로 `pollIntervalMs` (기본 2000ms) 간격마다 빈자리를 기다립니다(`pollTimeoutMs` 까지).
 
 ### 라이브 판정 (`live` 절)
 

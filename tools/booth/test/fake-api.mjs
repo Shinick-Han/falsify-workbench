@@ -32,7 +32,7 @@ function delay(ms) {
 
 export function startFake({
   token, submissions, pdfs, queued = false, jobDelayMs = 0, papers = null, pdfWithdrawn = null,
-  pdfHeaders = null, result = null, failJobs = false, pollFailures = 0,
+  pdfHeaders = null, result = null, failJobs = false, pollFailures = 0, activeCap = 0,
 }) {
   const makeResult = requestBody => {
     if (typeof result === 'function') return structuredClone(result(requestBody));
@@ -57,6 +57,8 @@ export function startFake({
     patches: [],
     pollFailures,
     jobPosts: 0,
+    busy429: 0,
+    maxActive: 0,
   };
 
   const server = http.createServer(async (req, res) => {
@@ -222,6 +224,13 @@ export function startFake({
         send(res, 200, { job: publicJob(existing), replayed: true });
         return;
       }
+      // Like BOOTH_OPERATOR_ACTIVE_JOBS: a new job past the active cap is 429 rate_limited.
+      const active = [...state.jobs.values()].filter(job => job.state === 'queued' || job.state === 'running').length;
+      if (activeCap && active >= activeCap) {
+        state.busy429 += 1;
+        fail(res, 429, 'rate_limited');
+        return;
+      }
       state.newJobs += 1;
       const now = new Date().toISOString();
       const job = {
@@ -240,6 +249,7 @@ export function startFake({
         completedAt: queued || failJobs ? null : now,
       };
       state.jobs.set(job.id, job);
+      state.maxActive = Math.max(state.maxActive, [...state.jobs.values()].filter(item => item.state === 'queued' || item.state === 'running').length);
       send(res, 202, { job: publicJob(job), replayed: false });
       return;
     }
