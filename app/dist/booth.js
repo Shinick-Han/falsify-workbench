@@ -46,6 +46,15 @@
   const CAPTURE_COPY='이 티켓을 캡처해 두세요. 화면을 닫아도 「내 기록」에서 접수번호와 확인키로 다시 볼 수 있어요.';
   const LOCK_COPY='이 설명은 AI에게 보내지 않아요. 판정이 맞는지 운영진만 확인해요.';
   const GENERIC_HINT='숫자, 결론 문장, 표 값 중 한 곳을 골라 티 나지 않게 바꿔 보세요.';
+  const SEND_COPY='운영진이 판정이 맞는지 확인할 때만 봐요. AI에게는 수정본 PDF만 보내요.';
+  const FINAL_COPY='마감 후 더 정밀한 AI가 한 번 더 검증해요. 그때도 못 찾으면 최종 추첨 대상이에요.';
+  /* Desktop layout (booth.css, min-width 1024px): the top bar's step indicator and the dock's edit chips. */
+  const DESK_QUERY='(min-width:1024px)';
+  const DESK_STEP={pick:1,edit:2,send:3,ticket:3};
+  const DESK_STEPS=['논문 고르기','몰래 고치기','AI 검증'];
+  const HOWTO=[['01','논문 고르기','미션 논문이나 공개 논문 하나'],['02','몰래 고치기','숫자, 문장, 결론 어디든 한 곳 이상'],['03','AI 검증','보통 1~3분, 접수번호로 결과 확인']];
+  const DOCK_CHIPS=3;
+  const CHIP_TEXT=14;
   const CAUGHT_TIP='숫자 하나만 바꾸면 AI가 앞뒤 문장과 대조해서 찾아내요. 결론 문장이나 실험 설계를 노려 보세요.';
   const MAKE_FAILED='수정본을 만들지 못했어요. 고친 곳을 확인한 뒤 「다음」을 다시 눌러 주세요.';
   const MAKE_WAIT_MS=90000;
@@ -555,6 +564,7 @@
       storage:opts.storage||root.localStorage,
       sessionFn:opts.session||(()=>root.FalsifyHostedSession),
       location:opts.location||root.location||{hash:''},
+      matchMedia:typeof opts.matchMedia==='function'?opts.matchMedia:(typeof root.matchMedia==='function'?root.matchMedia.bind(root):null),
       ...timerServices(opts)
     };
   }
@@ -571,6 +581,10 @@
       every:rootTimer(opts,'setInterval'),
       stopEvery:rootTimer(opts,'clearInterval')
     };
+  }
+  function deskMedia(matchMedia){
+    if(typeof matchMedia!=='function') return null;
+    try{return matchMedia(DESK_QUERY)||null;}catch{return null;}
   }
   function mountContext(options){
     const opts=options&&typeof options==='object'?options:{};
@@ -619,6 +633,9 @@
     const now=ctx.now;
     const every=ctx.every;
     const stopEvery=ctx.stopEvery;
+    const deskQuery=deskMedia(ctx.matchMedia);
+    let searchOpenedForDesk=false;
+    let dockPopOpen=false;
     const listeners=[];
     const course='quick';
     let poll={token:0,timer:null,startedAt:0,receipt:'',claimKey:''};
@@ -738,21 +755,43 @@
           el('div',{id:'booth-search-results',className:'booth-search-results'}),
           el('div',{id:'booth-search-pages',className:'booth-row',hidden:true})));
     }
+    /* Desktop top bar: mark, name, the three-step indicator and 내 기록. Phones keep the per-step bars. */
+    function buildDeskBar(){
+      const steps=el('ol',{id:'booth-desk-steps',className:'booth-desk-steps','aria-label':'도전 단계'});
+      DESK_STEPS.forEach((text,index)=>{
+        steps.append(el('li',{id:'booth-desk-step-'+(index+1)},el('em',{textContent:String(index+1)}),text));
+      });
+      return el('header',{id:'booth-deskbar',className:'booth-deskbar booth-desk'},mark(),
+        el('span',{className:'booth-nm'},'Falsify',el('small',{textContent:'AI REVIEW CHALLENGE'})),
+        steps,
+        el('a',{id:'booth-desk-records',href:'#booth-result',className:'booth-desk-rec',textContent:'내 기록'}));
+    }
+    function howtoItem(item){
+      return el('li',{},el('em',{textContent:item[0]}),el('span',{},el('b',{textContent:item[1]}),el('span',{textContent:item[2]})));
+    }
+    /* Two wrappers (display:contents on phones) give the desktop its 440px intro and the mission column. */
     function buildPick(){
       const top=el('header',{className:'booth-top'},mark(),
         el('span',{className:'booth-nm',textContent:'Falsify'}),
         el('a',{id:'booth-result-link',href:'#booth-result',className:'booth-toplink',textContent:'내 기록'}));
       const landing=el('div',{id:'booth-landing',className:'booth-landing'},
-        el('div',{className:'booth-hero'},
-          el('p',{className:'booth-lab',textContent:'AI REVIEW CHALLENGE'}),
-          el('h2',{id:'booth-title',className:'booth-headline hero'},'AI를 ',el('b',{textContent:'속일 수'}),el('br'),'있을까요?'),
-          el('p',{className:'booth-copy',textContent:HERO_COPY})),
-        el('ol',{className:'booth-strip','aria-label':'도전 순서'},stripItem('1','논문 고르기'),stripItem('2','몰래 고치기'),stripItem('3','AI 검증')),
-        el('p',{id:'booth-announce',className:'booth-announce',hidden:true}),
-        el('p',{id:'booth-status',className:'booth-feedback',role:'status','aria-live':'polite'}),
-        el('section',{id:'booth-missions',className:'booth-missions','aria-label':'미션 논문'}),
-        el('p',{id:'booth-mission-status',className:'booth-feedback',role:'status','aria-live':'polite'}),
-        buildSearch());
+        el('div',{className:'booth-landing-intro'},
+          el('div',{className:'booth-hero'},
+            el('p',{className:'booth-lab'},el('span',{className:'booth-phone',textContent:'AI REVIEW CHALLENGE'}),el('span',{className:'booth-desk',textContent:'AWS Community Day · Booth'})),
+            el('h2',{id:'booth-title',className:'booth-headline hero'},'AI를 ',el('b',{textContent:'속일 수'}),el('br'),'있을까요?'),
+            el('p',{className:'booth-copy',textContent:HERO_COPY})),
+          el('ol',{className:'booth-strip','aria-label':'도전 순서'},stripItem('1','논문 고르기'),stripItem('2','몰래 고치기'),stripItem('3','AI 검증')),
+          el('ol',{id:'booth-howto',className:'booth-howto booth-desk','aria-label':'도전 순서'},...HOWTO.map(howtoItem)),
+          el('p',{id:'booth-pick-limit',className:'booth-small booth-desk'})),
+        el('div',{className:'booth-landing-list'},
+          el('p',{id:'booth-announce',className:'booth-announce',hidden:true}),
+          el('p',{id:'booth-status',className:'booth-feedback',role:'status','aria-live':'polite'}),
+          el('div',{id:'booth-mission-head',className:'booth-mhead booth-desk',hidden:true},
+            el('span',{id:'booth-mission-count',className:'booth-klab'}),
+            el('span',{className:'booth-small',textContent:'티켓을 누르면 힌트 쪽이 열려요'})),
+          el('section',{id:'booth-missions',className:'booth-missions','aria-label':'미션 논문'}),
+          el('p',{id:'booth-mission-status',className:'booth-feedback',role:'status','aria-live':'polite'}),
+          buildSearch()));
       return el('div',{id:'booth-step-pick',className:'booth-step'},top,landing,buildRecords());
     }
     function buildEdit(){
@@ -764,6 +803,9 @@
           el('div',{className:'booth-dock-count'},
             el('span',{id:'booth-dock-count',textContent:'고친 곳 0개'}),
             el('small',{textContent:'여러 곳을 고쳐도 돼요'})),
+          el('div',{id:'booth-dock-chips',className:'booth-dock-chips booth-desk','aria-label':'고친 곳 목록'}),
+          el('ul',{id:'booth-dock-pop',className:'booth-dock-pop booth-desk',hidden:true,'aria-label':'고친 곳 전체'}),
+          el('button',{id:'booth-dock-back',type:'button',className:'booth-back booth-dock-back booth-desk',textContent:'← 논문 고르기'}),
           el('button',{id:'booth-next',type:'button',className:'booth-btn ink',textContent:'다음',disabled:true})));
     }
     function buildConsent(){
@@ -777,17 +819,33 @@
           el('input',{id:'booth-consent',type:'checkbox'}),
           el('span',{textContent:'동의 내용을 읽었고 동의해요'})));
     }
+    function sendFact(label, id){
+      return el('div',{},el('p',{className:'booth-klab',textContent:label}),el('p',{id,className:'booth-val'}));
+    }
+    /* Phones read one column. On desktop the left column declares and the right one is a sticky
+       SUBMISSION ticket that holds the consent and submit nodes themselves (ids stay unique). */
     function buildSend(){
-      return el('form',{id:'booth-submit',className:'booth-step',hidden:true,novalidate:'novalidate'},
-        stepBar('booth-send-back','← 고치기','3 / 3 AI에게 제출',3),
-        el('div',{id:'booth-rows',className:'booth-rows'}),
-        el('details',{className:'booth-more booth-nick'},
-          el('summary',{textContent:'별명 남기기 (선택)'}),
-          el('label',{for:'booth-nickname',className:'booth-field'},el('span',{className:'booth-klab',textContent:'별명 · 이름이나 연락처는 적지 마세요'}),
-            el('input',{id:'booth-nickname',type:'text',maxlength:'24',autocomplete:'off',spellcheck:'false'}))),
-        buildConsent(),
-        el('button',{id:'booth-submit-button',type:'submit',className:'booth-btn ink wide',textContent:'AI에게 제출하기',disabled:true}),
-        el('p',{id:'booth-submit-status',className:'booth-feedback',role:'alert','aria-live':'polite'}));
+      return el('form',{id:'booth-submit',className:'booth-step booth-send',hidden:true,novalidate:'novalidate'},
+        el('div',{className:'booth-send-main'},
+          stepBar('booth-send-back','← 고치기','3 / 3 AI에게 제출',3),
+          el('div',{className:'booth-send-head booth-desk'},
+            el('h2',{className:'booth-headline'},'숨긴 결함을 ',el('b',{textContent:'알려 주세요'})),
+            el('p',{className:'booth-copy',textContent:SEND_COPY})),
+          el('div',{id:'booth-rows',className:'booth-rows'}),
+          el('details',{className:'booth-more booth-nick'},
+            el('summary',{textContent:'별명 남기기 (선택)'}),
+            el('label',{for:'booth-nickname',className:'booth-field'},el('span',{className:'booth-klab',textContent:'별명 · 이름이나 연락처는 적지 마세요'}),
+              el('input',{id:'booth-nickname',type:'text',maxlength:'24',autocomplete:'off',spellcheck:'false'})))),
+        el('div',{id:'booth-send-ticket',className:'booth-send-side'},
+          el('div',{className:'booth-sec booth-desk'},
+            el('p',{className:'booth-lab',textContent:'Submission'}),
+            sendFact('논문','booth-send-paper'),
+            el('div',{className:'booth-send-facts'},sendFact('고친 곳','booth-send-count'),sendFact('남은 기회','booth-send-chances'))),
+          el('div',{className:'booth-cut booth-desk','aria-hidden':'true'}),
+          el('div',{className:'booth-sec booth-send-confirm'},
+            buildConsent(),
+            el('button',{id:'booth-submit-button',type:'submit',className:'booth-btn ink wide',textContent:'AI에게 제출하기',disabled:true}),
+            el('p',{id:'booth-submit-status',className:'booth-feedback',role:'alert','aria-live':'polite'}))));
     }
     function cell(label, id, className){
       return el('div',{id:id+'-cell',className:'booth-cell'},
@@ -812,7 +870,12 @@
             el('b',{id:'booth-ticket-state',textContent:'AI가 논문을 읽는 중'}),
             el('span',{id:'booth-ticket-elapsed',className:'booth-elapsed',textContent:'0:00'})),
           el('div',{className:'booth-track','aria-hidden':'true'},el('i')),
-          el('canvas',{id:'booth-barcode',className:'booth-barcode','aria-hidden':'true',height:'34'})),
+          el('div',{id:'booth-ticket-stub',className:'booth-bp-stub'},
+            el('div',{className:'booth-desk'},
+              el('p',{className:'booth-klab',textContent:'AWS Community Day'}),
+              el('p',{id:'booth-stub-date',className:'booth-val'})),
+            el('canvas',{id:'booth-barcode',className:'booth-barcode','aria-hidden':'true',height:'34'}),
+            el('p',{id:'booth-stub-receipt',className:'booth-code booth-desk'}))),
         el('div',{id:'booth-ticket-result',className:'booth-sec booth-res',hidden:true},
           el('div',{},
             el('p',{className:'booth-klab',textContent:'AI 검증 결과'}),
@@ -836,6 +899,11 @@
             el('p',{className:'booth-small',textContent:'부스에서 이 화면을 보여 주세요.'})),
           el('span',{className:'booth-code booth-gift-code','aria-hidden':'true',textContent:'GIFT'})));
     }
+    function buildFinal(){
+      return el('section',{id:'booth-final',className:'booth-panel booth-final booth-desk',hidden:true,'aria-label':'최종 추첨'},
+        el('p',{className:'booth-klab',textContent:'최종 추첨'}),
+        el('p',{className:'booth-txt',textContent:FINAL_COPY}));
+    }
     function buildWithdraw(){
       return el('details',{id:'booth-withdraw-box',className:'booth-more booth-quiet'},
         el('summary',{textContent:'제출 철회'}),
@@ -856,18 +924,21 @@
           el('div',{id:'booth-verdict',className:'booth-verdict',hidden:true},
             el('h2',{id:'booth-live-title',className:'booth-headline',role:'status','aria-live':'polite'}),
             el('p',{id:'booth-live-page',className:'booth-mono-meta',hidden:true})),
-          buildGift(),
-          el('div',{id:'booth-live-note',className:'booth-panel booth-note',hidden:true}),
-          el('p',{id:'booth-live-tip',className:'booth-small',hidden:true,textContent:CAUGHT_TIP}),
-          el('p',{id:'booth-live-error',className:'booth-feedback',role:'alert',hidden:true}),
-          el('button',{id:'booth-live-recheck',type:'button',className:'booth-btn line wide',hidden:true,textContent:'결과 다시 보기'}),
-          el('button',{id:'booth-live-again',type:'button',className:'booth-btn ink wide',hidden:true,textContent:'다시 도전하기'}),
-          el('div',{id:'booth-history',className:'booth-hist',hidden:true,'aria-label':'이 브라우저의 도전 기록'}),
-          buildWithdraw()));
+          el('div',{className:'booth-live-side'},buildGift(),buildFinal()),
+          el('div',{className:'booth-live-main'},
+            el('div',{id:'booth-live-note',className:'booth-panel booth-note',hidden:true}),
+            el('p',{id:'booth-live-tip',className:'booth-small',hidden:true,textContent:CAUGHT_TIP}),
+            el('p',{id:'booth-live-error',className:'booth-feedback',role:'alert',hidden:true}),
+            el('button',{id:'booth-live-recheck',type:'button',className:'booth-btn line wide',hidden:true,textContent:'결과 다시 보기'}),
+            el('div',{className:'booth-live-actions'},
+              el('button',{id:'booth-live-again',type:'button',className:'booth-btn ink wide',hidden:true,textContent:'다시 도전하기'}),
+              el('button',{id:'booth-live-records',type:'button',className:'booth-btn line booth-desk',hidden:true,textContent:'내 기록'})),
+            el('div',{id:'booth-history',className:'booth-hist',hidden:true,'aria-label':'이 브라우저의 도전 기록'}),
+            buildWithdraw())));
     }
 
     const host=el('section',{id:'booth',className:'booth',hidden:true,'aria-label':'부스 도전'});
-    host.append(...[inkFilter(),buildPick(),buildEdit(),buildSend(),buildTicket()].filter(Boolean));
+    host.append(...[inkFilter(),buildDeskBar(),buildPick(),buildEdit(),buildSend(),buildTicket()].filter(Boolean));
     placeBooth(doc, host);
     setRailBlue(doc, true);
 
@@ -1053,7 +1124,15 @@
       box.textContent='';
       const types=typesOf(liveConfig);
       for(const row of rows) box.append(rowPanel(row,types));
+      renderSendTicket();
       refreshSubmitButton();
+    }
+    /* The desktop SUBMISSION ticket: paper, changed places and pages, chances left. */
+    function renderSendTicket(){
+      setText('booth-send-paper',paper?(paper.title||paper.id):'');
+      const pages=receiptPages(rows.map(row=>row.pageIndex+1));
+      setText('booth-send-count',rows.length?[rows.length+'곳',pages.length?pages.join(', ')+'쪽':''].filter(Boolean).join(' · '):'');
+      setText('booth-send-chances',liveConfig?chances()+'번':'');
     }
     function pdfMagic(bytes){
       return !!bytes&&bytes.length>=5&&bytes[0]===0x25&&bytes[1]===0x50&&bytes[2]===0x44&&bytes[3]===0x46&&bytes[4]===0x2d;
@@ -1077,6 +1156,7 @@
         if(!edit||typeof edit!=='object'||edit.enabled===false) continue;
         if(!Number.isSafeInteger(edit.pageIndex)||typeof edit.before!=='string'||typeof edit.after!=='string') continue;
         edits.push({
+          id:typeof edit.id==='string'?edit.id:'',
           pageIndex:edit.pageIndex,
           segmentId:typeof edit.segmentId==='string'?edit.segmentId:'',
           before:edit.before,after:edit.after,defectType:'',reason:''
@@ -1223,9 +1303,80 @@
     function liveEditCount(){
       return editsFor(null).length;
     }
+    function clip(text){
+      const value=flat(text).trim();
+      return value.length>CHIP_TEXT?value.slice(0,CHIP_TEXT-1).trimEnd()+'…':value;
+    }
+    /* The workspace's own control for an edit in #paper-edits (data-edit id, data-act edit|delete). */
+    function editControl(id, act){
+      const visit=node=>{
+        if(!node||typeof node!=='object') return null;
+        const data=node.dataset;
+        if(data&&data.edit===id&&data.act===act) return node;
+        for(const kid of Array.from(node.children||[])){
+          const hit=visit(kid);
+          if(hit) return hit;
+        }
+        return null;
+      };
+      return id?visit(byId('paper-edits')):null;
+    }
+    /* Deleting or reopening stays on the workspace path: the dock clicks the existing control. */
+    function useEditControl(edit, act){
+      const control=editControl(edit.id,act);
+      if(!control||control.disabled||typeof control.click!=='function'){
+        say('booth-dock-status',act==='delete'?'이 고친 곳을 지우지 못했어요. 페이지를 새로 고친 뒤 다시 시도해 주세요.':'이 고친 곳을 열지 못했어요.');
+        return;
+      }
+      if(act==='edit') dockPopOpen=false;
+      control.click();
+      renderDock();
+    }
+    function chipParts(edit){
+      const parts=diffParts(edit.before,edit.after,0);
+      return [
+        el('span',{className:'pg',textContent:(edit.pageIndex+1)+'쪽'}),
+        parts.removed?el('del',{textContent:clip(parts.removed)}):null,
+        el('span',{textContent:'→'+(parts.added?clip(parts.added):'(지움)')})];
+    }
+    function deleteButton(edit){
+      const button=el('button',{type:'button',className:'booth-dock-x',textContent:'×','aria-label':(edit.pageIndex+1)+'쪽 고친 곳 지우기'});
+      button.addEventListener('click',()=>{useEditControl(edit,'delete');});
+      return button;
+    }
+    /* "5쪽 0.95→0.50 ×": the page, the removed text struck through, the new text, then delete. */
+    function dockChip(edit){
+      return el('span',{className:'booth-dock-chip'},...chipParts(edit),deleteButton(edit));
+    }
+    function popRow(edit){
+      const open=el('button',{type:'button',className:'booth-dock-pop-text','aria-label':(edit.pageIndex+1)+'쪽 고친 곳 다시 열기'},...chipParts(edit));
+      open.addEventListener('click',()=>{useEditControl(edit,'edit');});
+      return el('li',{},open,deleteButton(edit));
+    }
+    function moreButton(hidden){
+      const button=el('button',{type:'button',className:'booth-dock-chip more',textContent:'+'+hidden,
+        'aria-expanded':String(dockPopOpen),'aria-controls':'booth-dock-pop','aria-label':'고친 곳 '+hidden+'개 더 보기'});
+      button.addEventListener('click',()=>{dockPopOpen=!dockPopOpen;renderDock();});
+      return button;
+    }
+    function renderDockChips(edits){
+      const box=byId('booth-dock-chips');
+      if(!box) return;
+      const extra=edits.length>DOCK_CHIPS;
+      if(!extra) dockPopOpen=false;
+      const chips=edits.slice(0,DOCK_CHIPS).map(dockChip);
+      if(extra) chips.push(moreButton(edits.length-DOCK_CHIPS));
+      kidsOf(box,...chips);
+      const pop=byId('booth-dock-pop');
+      if(!pop) return;
+      kidsOf(pop,...(dockPopOpen?edits.map(popRow):[]));
+      pop.hidden=!dockPopOpen;
+    }
     function renderDock(){
-      const count=liveEditCount();
+      const edits=editsFor(null);
+      const count=edits.length;
       setText('booth-dock-count','고친 곳 '+count+'개');
+      renderDockChips(edits);
       const next=byId('booth-next');
       if(next) next.disabled=count===0||!!making;
     }
@@ -1484,6 +1635,8 @@
       const missions=Array.isArray(liveConfig.missions)?liveConfig.missions:[];
       const valid=missions.filter(mission=>mission&&typeof mission==='object'&&typeof mission.paperId==='string');
       box.hidden=!valid.length;
+      setHidden('booth-mission-head',!valid.length);
+      setText('booth-mission-count','오늘의 미션 · '+valid.length);
       for(const mission of valid) box.append(missionTicket(mission));
     }
     function searchMeta(item){
@@ -1765,6 +1918,7 @@
     function renderTicketTop(data){
       const meta=ticket||{};
       setText('booth-receipt-code',meta.receipt||(typeof data.receipt==='string'?data.receipt:''));
+      setText('booth-stub-receipt',meta.receipt||(typeof data.receipt==='string'?data.receipt:''));
       setText('booth-claim-code',meta.claimKey||'');
       setHidden('booth-claim-code-cell',!meta.claimKey);
       setText('booth-ticket-paper',shortTitle(meta.title));
@@ -1805,7 +1959,7 @@
       const canvas=byId('booth-barcode');
       if(!canvas||typeof canvas.getContext!=='function'||!ticket) return;
       const width=Math.max(1,Math.round(canvas.clientWidth||300));
-      const height=34;
+      const height=Math.max(1,Math.round(canvas.clientHeight||34));
       const ratio=Math.min(3,Number(root.devicePixelRatio)||1);
       canvas.width=Math.round(width*ratio);
       canvas.height=Math.round(height*ratio);
@@ -1821,6 +1975,8 @@
       setText('booth-live-title','');
       setHidden('booth-ticket-duration-cell',true);
       setHidden('booth-live-tip',true);
+      const created=Date.parse(createdAtOf(data));
+      setText('booth-stub-date',Number.isFinite(created)?dateLabel(created):'');
       startClock(createdAtOf(data));
       drawBarcode();
     }
@@ -1877,6 +2033,7 @@
       const left=chances();
       setText('booth-chances-top','기회 '+left+'번 남음');
       setText('booth-live-again','다시 도전하기 · 기회 '+left+'번 남음');
+      setText('booth-pick-limit','1인 '+perOwnerCap()+'번까지 · 이름·연락처는 받지 않아요');
     }
     function renderLive(data){
       const view=resultView(data);
@@ -1890,6 +2047,8 @@
       renderGift(view.prize);
       renderNote(view);
       setHidden('booth-live-again',!view.final);
+      setHidden('booth-live-records',!view.final);
+      setHidden('booth-final',view.state!=='missed');
       setHidden('booth-withdraw-box',view.state==='withdrawn');
       setHidden('booth-live-recheck',true);
       liveError('');
@@ -2031,10 +2190,34 @@
       for(const [name,id] of Object.entries(STEP_NODES)) setHidden(id,name!==next);
       const html=doc.documentElement;
       if(html&&html.dataset) html.dataset.boothStep=next;
+      renderDeskSteps(next);
       if(next!=='ticket') stopClock();
       if(next==='edit'){renderHint();renderDock();}
       if(next==='send'){renderRows();applyConsent();}
       scrollTop();
+    }
+    /* Current step bold (aria-current), earlier steps done. */
+    function renderDeskSteps(next){
+      const current=DESK_STEP[next]||1;
+      for(let n=1;n<=DESK_STEPS.length;n+=1){
+        const item=byId('booth-desk-step-'+n);
+        if(!item) continue;
+        item.className=n===current?'on':(n<current?'done':'');
+        item.setAttribute('aria-current',n===current?'step':'false');
+      }
+    }
+    /* On desktop the paper search is always open as one row; phones keep the disclosure. */
+    function applyDesk(){
+      const desk=!!(deskQuery&&deskQuery.matches);
+      const box=byId('booth-search-box');
+      if(box&&desk&&!box.open){box.open=true;searchOpenedForDesk=true;}
+      else if(box&&!desk&&searchOpenedForDesk){box.open=false;searchOpenedForDesk=false;}
+      setText('booth-search-go',desk?'찾기':'검색');
+      setAttr('booth-search-q','placeholder',desk?'다른 공개 논문 찾기 · 제목 또는 주제':'제목 또는 주제');
+    }
+    function backToPick(){
+      cancelMake();
+      setStep('pick');
     }
     function clearStep(){
       const html=doc.documentElement;
@@ -2096,7 +2279,12 @@
       void runSearch();
     });
     on(byId('booth-next'),'click',beginMake);
-    on(byId('booth-edit-back'),'click',()=>{cancelMake();setStep('pick');});
+    on(byId('booth-edit-back'),'click',backToPick);
+    on(byId('booth-dock-back'),'click',backToPick);
+    on(byId('booth-dock'),'keydown',event=>{if(event&&event.key==='Escape'&&dockPopOpen){dockPopOpen=false;renderDock();}});
+    on(byId('booth-desk-records'),'click',openResult);
+    on(byId('booth-live-records'),'click',openResult);
+    on(deskQuery,'change',applyDesk);
     on(byId('booth-send-back'),'click',()=>{setStep('edit');});
     on(byId('booth-submit'),'submit',event=>{void submitBooth(event);});
     on(byId('booth-consent'),'change',refreshSubmitButton);
@@ -2115,6 +2303,7 @@
     on(root,'hashchange',()=>{showResult(false);});
     on(root,'resize',()=>{if(step==='ticket') drawBarcode();});
     watchEdits();
+    applyDesk();
     setStep('pick');
     showResult(false);
     void loadConfig();

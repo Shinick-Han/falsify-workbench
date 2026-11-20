@@ -125,13 +125,261 @@ function stepIs(page, name) {
   return page.waitForFunction(value => document.documentElement.dataset.boothStep === value, name);
 }
 
+/* Desktop (>=1024px): the top bar shows the step, the phone bars are hidden, nothing scrolls sideways.
+   Phones: no desktop node is visible, so the phone pass keeps its alpha.86 layout. */
+async function deskChecks(page, desk, current) {
+  const seen = await page.evaluate(() => ({
+    bar: !!document.querySelector('#booth-deskbar')?.offsetParent,
+    steps: [1, 2, 3].map(n => document.querySelector('#booth-desk-step-' + n)?.className || ''),
+    current: document.querySelector('#booth-desk-steps [aria-current="step"]')?.id || '',
+    desktopNodes: [...document.querySelectorAll('#booth .booth-desk')].filter(node => node.offsetParent !== null).length,
+    overflow: document.documentElement.scrollWidth - window.innerWidth,
+  }));
+  assert.equal(seen.overflow <= 0, true, 'horizontal overflow ' + seen.overflow);
+  if (!desk) {
+    assert.equal(seen.bar, false, 'no desktop top bar on phones');
+    assert.equal(seen.desktopNodes, 0, 'no desktop-only node on phones');
+    return;
+  }
+  assert.equal(seen.bar, true, 'desktop top bar');
+  assert.deepEqual(seen.steps, [1, 2, 3].map(n => n === current ? 'on' : n < current ? 'done' : ''));
+  assert.equal(seen.current, 'booth-desk-step-' + current);
+  assert.equal(await page.locator('.booth-stepbar-row b:visible, .booth-prog:visible, .booth-top:visible').count(), 0, 'phone step bars are hidden');
+}
+
+/* One full pass: pick, edit, send, ticket. desk is the >=1024px layout in booth.css. */
+async function walk(browser, viewport, desk, pageErrors) {
+  const submissions = [];
+  const claims = [];
+  const page = await browser.newPage({
+    viewport, deviceScaleFactor: 1, hasTouch: !desk, locale: 'ko-KR',
+  });
+  page.setDefaultTimeout(90000);
+  page.on('pageerror', error => pageErrors.push(error.message));
+  page.on('dialog', dialog => { void dialog.accept(); });
+  await page.clock.install({time: new Date('2026-11-22T00:59:30.000Z')});
+  const base = 'http://127.0.0.1:' + port + '/';
+  await page.route('**/*', route => {
+    const url = route.request().url();
+    if (url.startsWith(base)) return route.continue();
+    return stubApi(route, submissions, claims);
+  });
+  await page.goto(base + 'event.html');
+
+  // pick: one mission ticket loads the paper, jumps to the hint page and opens edit.
+  const mission = page.locator('#booth-missions .booth-mission').first();
+  await mission.waitFor();
+  assert.equal(await page.evaluate(() => document.documentElement.dataset.boothStep), 'pick');
+  assert.equal(await page.locator('.rail [data-view="blue"]').isHidden(), true);
+  assert.match(await page.locator('#booth-title').textContent(), /AI를 속일 수\s*있을까요\?/);
+  assert.match(await mission.textContent(), /arXiv 2309\.15217 · CC BY 4\.0/);
+  assert.match(await mission.textContent(), /5쪽도전 →/);
+  assert.equal(await page.locator('#booth-search').isVisible(), desk, 'search is a closed disclosure on phones, one open row on desktop');
+  await deskChecks(page, desk, 1);
+  await mission.click();
+  await stepIs(page, 'edit');
+  await page.waitForFunction(() => [...document.querySelectorAll('.paper-paragraph-button')].some(node => node.textContent.includes('0.95')));
+  assert.match(await page.locator('#booth-hint').textContent(), /^힌트 · Table 1의 점수 하나를 바꿔 보세요/);
+  assert.equal(await page.locator('#booth-dock-count').textContent(), '고친 곳 0개');
+  assert.equal(await page.locator('#booth-next').isDisabled(), true);
+
+  // edit: change one paragraph; the dock counts it and enables 다음.
+  const paragraphIndex = await page.evaluate(() => {
+    const hits = [...document.querySelectorAll('.paper-paragraph-button')].map((node, index) => ({
+      index, length: node.textContent.length, text: node.textContent,
+    })).filter(item => item.text.includes('0.95') && item.text.includes('0.78') && item.length <= 400);
+    hits.sort((a, b) => a.length - b.length);
+    return hits.length ? hits[0].index : -1;
+  });
+  assert.equal(paragraphIndex >= 0, true);
+  const paragraph = page.locator('.paper-paragraph-button').nth(paragraphIndex);
+  await paragraph.scrollIntoViewIfNeeded();
+  await paragraph.click();
+  const editor = page.locator('textarea[aria-label$="직접 편집"]');
+  await editor.waitFor();
+  const original = await editor.inputValue();
+  assert.equal(original.includes('0.95'), true);
+  await editor.fill(original.replace('0.95', '0.50'));
+  await page.locator('.paper-direct-controls').getByRole('button', {name: '완료', exact: true}).click();
+  await page.waitForFunction(() => document.querySelector('#booth-dock-count')?.textContent === '고친 곳 1개');
+  assert.equal(await page.locator('#booth-next').isEnabled(), true);
+  const dock = await page.locator('#booth-dock').boundingBox();
+  assert.equal(Math.round(dock.y + dock.height), viewport.height, 'dock is fixed to the bottom');
+  await deskChecks(page, desk, 2);
+  if (desk) {
+    assert.equal(Math.round(dock.width), viewport.width, 'the desktop dock spans the viewport');
+    // A second edit, then delete it from the dock: the workspace's own 삭제 runs and the count drops.
+    const otherIndex = await page.evaluate(() => [...document.querySelectorAll('.paper-paragraph-button')]
+      .findIndex(node => !node.textContent.includes('0.95') && node.textContent.trim().length >= 20 && node.textContent.length <= 400));
+    assert.equal(otherIndex >= 0, true);
+    const other = page.locator('.paper-paragraph-button').nth(otherIndex);
+    await other.scrollIntoViewIfNeeded();
+    await other.click();
+    await editor.waitFor();
+    await editor.fill((await editor.inputValue()) + ' extra');
+    await page.locator('.paper-direct-controls').getByRole('button', {name: '완료', exact: true}).click();
+    await page.waitForFunction(() => document.querySelector('#booth-dock-count')?.textContent === '고친 곳 2개');
+    const chipList = page.locator('#booth-dock-chips .booth-dock-chip');
+    assert.equal(await chipList.count(), 2);
+    const extra = chipList.filter({hasNotText: '0.95'}).locator('.booth-dock-x');
+    assert.match(await extra.getAttribute('aria-label'), /^\d+쪽 고친 곳 지우기$/);
+    const xBox = await extra.boundingBox();
+    assert.equal(xBox.width >= 32 && xBox.height >= 32, true, 'the × hit area is at least 32px');
+    await extra.click();
+    await page.waitForFunction(() => document.querySelector('#booth-dock-count')?.textContent === '고친 곳 1개');
+    assert.equal(await chipList.count(), 1);
+    assert.match(await page.locator('#booth-dock-chips').textContent(), /^\d+쪽0\.95→0\.50×$/);
+    assert.equal(await page.locator('#booth-dock-chips del').textContent(), '0.95');
+    assert.equal(await page.locator('#booth-dock-back').isVisible(), true);
+    assert.equal(await page.locator('#booth-edit-back').isVisible(), false);
+    assert.equal(await page.locator('#booth-hint').isVisible(), true);
+  }
+
+  // 다음 builds the submission PDF itself, then opens send.
+  await page.locator('#booth-next').click();
+  await stepIs(page, 'send');
+  assert.equal(await page.locator('#booth-make').count(), 0);
+  assert.equal(await page.locator('#booth-courses').count(), 0);
+  const card = page.locator('#booth-rows .booth-card').first();
+  assert.match(await card.locator('.booth-klab').first().textContent(), /^내가 숨긴 결함 · \d+쪽$/);
+  assert.equal(await card.locator('del').textContent(), '0.95');
+  assert.equal(await card.locator('ins').textContent(), '0.50');
+  assert.equal((await card.locator('.booth-diff').textContent()).length < 80, true, 'diff shows only the changed region');
+  assert.match(await card.textContent(), /이 설명은 AI에게 보내지 않아요/);
+  await card.getByRole('button', {name: '수치·통계'}).click();
+  assert.equal(await card.getByRole('button', {name: '수치·통계'}).getAttribute('aria-pressed'), 'true');
+  await card.locator('textarea').fill('표의 점수를 0.95에서 0.50으로 바꿨습니다');
+  assert.equal(await page.locator('#booth-consent-summary li').count(), 3);
+  assert.equal(await page.locator('#booth-consent-summary li').first().textContent(), '수정본 PDF만 AI(Anthropic)에 보내요.');
+  assert.equal(await page.locator('#booth-consent-copy').isVisible(), false);
+  await page.locator('#booth-consent-full summary').click();
+  assert.match(await page.locator('#booth-consent-copy').textContent(), /제출하면 바로 수정본 PDF만 AI 검증을 위해 모델 제공자\(Anthropic\)에 보내고/);
+  assert.equal(await page.locator('#booth-consent-version').textContent(), '동의 버전 · 2026-11-22.v2');
+  assert.equal(await page.locator('#booth-submit-button').isDisabled(), true);
+  await page.locator('#booth-consent').check();
+  assert.equal(await page.locator('#booth-submit-button').textContent(), 'AI에게 제출하기');
+  await deskChecks(page, desk, 3);
+  if (desk) {
+    const rows = await page.locator('#booth-rows').boundingBox();
+    const side = await page.locator('#booth-send-ticket').boundingBox();
+    const submitBox = await page.locator('#booth-submit-button').boundingBox();
+    assert.equal(side.x >= rows.x + rows.width, true, 'the SUBMISSION ticket sits right of the declarations');
+    assert.equal(submitBox.x >= side.x && submitBox.x + submitBox.width <= side.x + side.width + 0.5, true, 'submit lives in the ticket');
+    assert.equal(await page.locator('#booth-send-paper').textContent(), 'Ragas: Automated Evaluation of Retrieval Augmented Generation');
+  } else {
+    await page.setViewportSize({width: 360, height: 780});
+    const sendAudit = await phoneAudit(page, '#booth');
+    assert.deepEqual(sendAudit.small, []);
+    assert.equal(sendAudit.overflow <= 0, true, 'send overflow ' + sendAudit.overflow);
+    await page.setViewportSize(viewport);
+  }
+  await page.locator('#booth-submit-button').click();
+
+  // ticket: waiting, then the stub publishes missed with a prize message.
+  const submitted = await page.waitForFunction(() => {
+    if (document.documentElement.dataset.boothStep === 'ticket') return 'ok';
+    const status = document.querySelector('#booth-submit-status')?.textContent || '';
+    if (status && status !== '제출하는 중…') return status;
+    return null;
+  }, null, {timeout: 20000}).then(handle => handle.jsonValue());
+  assert.equal(submitted, 'ok');
+  assert.equal(await page.locator('#booth-receipt-code').textContent(), 'F-0042');
+  assert.equal(await page.locator('#booth-claim-code').textContent(), '7Q3K-M9XD');
+  assert.equal(await page.locator('#booth-ticket-paper').textContent(), 'Ragas');
+  assert.match(await page.locator('#booth-ticket-pages').textContent(), /^\d+쪽 · 1곳$/);
+  assert.equal(await page.locator('.rail [data-view="blue"]').isHidden(), true);
+  assert.equal(submissions.length, 1);
+  const posted = submissions[0].toString('utf8');
+  assert.equal(posted.includes('edited.pdf'), true);
+  assert.equal(posted.includes('0.50'), true);
+  assert.equal(posted.includes('0.95'), true);
+  assert.equal(posted.includes('2026-11-22.v2'), true);
+  assert.equal(posted.includes('"course":"quick"'), true);
+  assert.equal(posted.includes('"defectType":"number"'), true);
+  assert.equal(await page.locator('#booth-ticket-wait').isVisible(), true);
+  assert.equal(await page.locator('#booth-ticket-steps').textContent(), '수정본 받음AI가 앞뒤 문장과 표를 대조하는 중결과');
+  assert.match(await page.locator('#booth-live-capture').textContent(), /^이 티켓을 캡처해 두세요/);
+  assert.match(await page.locator('#booth-ticket-elapsed').textContent(), /^\d+:\d\d$/);
+  assert.equal(await page.locator('#booth-barcode').isVisible(), true);
+  assert.equal(await page.locator('#booth-live-again').isHidden(), true);
+  await deskChecks(page, desk, 3);
+  if (desk) {
+    const stub = await page.locator('#booth-ticket-stub').boundingBox();
+    const bars = await page.locator('#booth-barcode').boundingBox();
+    assert.equal(bars.x >= stub.x && bars.y >= stub.y && bars.y + bars.height <= stub.y + stub.height, true, 'the barcode sits in the stub');
+    assert.equal(await page.locator('#booth-stub-receipt').textContent(), 'F-0042');
+    assert.equal(await page.locator('#booth-copy').isVisible(), true);
+  }
+  for (let round = 1; round <= 3; round += 1) {
+    await page.clock.fastForward(15000);
+    const started = Date.now();
+    while (claims.length < round && Date.now() - started < 10000) await new Promise(resolve => setTimeout(resolve, 50));
+    assert.equal(claims.length, round);
+  }
+  assert.deepEqual(claims[0], {receipt: 'F-0042', claimKey: '7Q3K-M9XD'});
+  await page.waitForFunction(() => document.querySelector('#booth-live-title')?.textContent === 'AI가 못 찾았어요');
+  assert.equal(await page.locator('#booth-live-title b').textContent(), '못 찾았어요');
+  assert.equal(await page.locator('#booth-stamp-word').textContent(), '통과');
+  assert.equal(await page.locator('#booth-stamp').getAttribute('class'), 'booth-stamp pass');
+  assert.equal(await page.locator('#booth-ticket-wait').isHidden(), true);
+  assert.equal(await page.locator('#booth-ticket-duration').textContent(), '2분');
+  assert.equal(await page.locator('#booth-gift').isVisible(), true);
+  assert.equal(await page.locator('#booth-live-prize').textContent(), '부스에서 스티커를 받아 가세요');
+  assert.match(await page.locator('#booth-gift').textContent(), /교환권 · 1인 1회/);
+  assert.match(await page.locator('#booth-live-note').textContent(), /AI가 먼저 본 곳은 7쪽이었고/);
+  const again = page.locator('#booth-live-again');
+  assert.equal(await again.isVisible(), true);
+  assert.equal(await again.textContent(), '다시 도전하기 · 기회 4번 남음');
+  assert.match(await page.locator('#booth-history').textContent(), /F-0042 · Ragas통과/);
+  await deskChecks(page, desk, 3);
+  assert.equal(await page.locator('#booth-final').isVisible(), desk, '최종 추첨 is a desktop panel');
+  if (desk) {
+    const ticketBox = await page.locator('#booth-ticket').boundingBox();
+    const result = await page.locator('#booth-ticket-result').boundingBox();
+    const stamp = await page.locator('#booth-stamp').boundingBox();
+    assert.equal(Math.round(ticketBox.width), 960, 'the boarding pass is 960px wide');
+    assert.equal(result.x >= ticketBox.x + ticketBox.width - 251, true, 'the result stub is the 250px right part');
+    assert.equal(stamp.x >= result.x && stamp.x + stamp.width <= result.x + result.width, true, 'the stamp sits in the stub');
+    const gift = await page.locator('#booth-gift').boundingBox();
+    const title = await page.locator('#booth-live-title').boundingBox();
+    assert.equal(gift.x > title.x + title.width, true, 'the gift ticket is the right column');
+    assert.equal(await page.locator('#booth-live-records').isVisible(), true);
+  } else {
+    await page.setViewportSize({width: 360, height: 780});
+    const audit = await phoneAudit(page, '#booth');
+    assert.deepEqual(audit.small, []);
+    assert.equal(audit.seen >= 3, true);
+    assert.equal(audit.overflow <= 0, true, 'horizontal overflow ' + audit.overflow);
+  }
+  await page.clock.fastForward(60000);
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(claims.length, 3);
+
+  // 다시 도전하기 resets the paper the way the old retry did and returns to pick.
+  await again.click();
+  await stepIs(page, 'pick');
+  assert.equal(await page.locator('#booth-receipt').isHidden(), true);
+  assert.equal(await page.locator('#booth-submit').isHidden(), true);
+  assert.equal(await page.locator('#booth-missions').isVisible(), true);
+  assert.equal(await page.locator('#booth-consent').isChecked(), false);
+  assert.equal(await page.locator('#paper-file').inputValue(), '');
+  await page.locator(desk ? '#booth-desk-records' : '#booth-result-link').click();
+  await page.locator('#booth-receipts-list').getByRole('button', {name: /F-0042/}).waitFor();
+  assert.equal(await page.evaluate(() => document.documentElement.dataset.boothStep), 'pick');
+  assert.equal(await page.locator('#booth-landing').isHidden(), true);
+  const resultAudit = await phoneAudit(page, '#booth-result');
+  assert.deepEqual(resultAudit.small, []);
+  assert.equal(resultAudit.seen >= 2, true);
+  assert.equal(resultAudit.overflow <= 0, true, 'result overflow ' + resultAudit.overflow);
+  await deskChecks(page, desk, 1);
+  await page.close();
+}
+
 async function main() {
   assert.equal(pdfBytes.subarray(0, 5).toString(), '%PDF-');
   const server = serve();
   let browser = null;
   const pageErrors = [];
-  const submissions = [];
-  const claims = [];
   try {
   await server.ready;
   browser = await chromium.launch({
@@ -139,167 +387,14 @@ async function main() {
     args: ['--no-sandbox', '--disable-dev-shm-usage'],
   });
   try {
-    const page = await browser.newPage({
-      viewport: {width: 390, height: 844}, deviceScaleFactor: 1, hasTouch: true, locale: 'ko-KR',
-    });
-    page.setDefaultTimeout(90000);
-    page.on('pageerror', error => pageErrors.push(error.message));
-    page.on('dialog', dialog => { void dialog.accept(); });
-    await page.clock.install({time: new Date('2026-11-22T00:59:30.000Z')});
-    const base = 'http://127.0.0.1:' + port + '/';
-    await page.route('**/*', route => {
-      const url = route.request().url();
-      if (url.startsWith(base)) return route.continue();
-      return stubApi(route, submissions, claims);
-    });
-    await page.goto(base + 'event.html');
-
-    // pick: one mission ticket loads the paper, jumps to the hint page and opens edit.
-    const mission = page.locator('#booth-missions .booth-mission').first();
-    await mission.waitFor();
-    assert.equal(await page.evaluate(() => document.documentElement.dataset.boothStep), 'pick');
-    assert.equal(await page.locator('.rail [data-view="blue"]').isHidden(), true);
-    assert.match(await page.locator('#booth-title').textContent(), /AI를 속일 수\s*있을까요\?/);
-    assert.match(await mission.textContent(), /arXiv 2309\.15217 · CC BY 4\.0/);
-    assert.match(await mission.textContent(), /5쪽도전 →/);
-    assert.equal(await page.locator('#booth-search').isVisible(), false);
-    await mission.click();
-    await stepIs(page, 'edit');
-    await page.waitForFunction(() => [...document.querySelectorAll('.paper-paragraph-button')].some(node => node.textContent.includes('0.95')));
-    assert.match(await page.locator('#booth-hint').textContent(), /^힌트 · Table 1의 점수 하나를 바꿔 보세요/);
-    assert.equal(await page.locator('#booth-dock-count').textContent(), '고친 곳 0개');
-    assert.equal(await page.locator('#booth-next').isDisabled(), true);
-
-    // edit: change one paragraph; the dock counts it and enables 다음.
-    const paragraphIndex = await page.evaluate(() => {
-      const hits = [...document.querySelectorAll('.paper-paragraph-button')].map((node, index) => ({
-        index, length: node.textContent.length, text: node.textContent,
-      })).filter(item => item.text.includes('0.95') && item.text.includes('0.78') && item.length <= 400);
-      hits.sort((a, b) => a.length - b.length);
-      return hits.length ? hits[0].index : -1;
-    });
-    assert.equal(paragraphIndex >= 0, true);
-    const paragraph = page.locator('.paper-paragraph-button').nth(paragraphIndex);
-    await paragraph.scrollIntoViewIfNeeded();
-    await paragraph.click();
-    const editor = page.locator('textarea[aria-label$="직접 편집"]');
-    await editor.waitFor();
-    const original = await editor.inputValue();
-    assert.equal(original.includes('0.95'), true);
-    await editor.fill(original.replace('0.95', '0.50'));
-    await page.locator('.paper-direct-controls').getByRole('button', {name: '완료', exact: true}).click();
-    await page.waitForFunction(() => document.querySelector('#booth-dock-count')?.textContent === '고친 곳 1개');
-    assert.equal(await page.locator('#booth-next').isEnabled(), true);
-    const dock = await page.locator('#booth-dock').boundingBox();
-    assert.equal(Math.round(dock.y + dock.height), 844, 'dock is fixed to the bottom');
-
-    // 다음 builds the submission PDF itself, then opens send.
-    await page.locator('#booth-next').click();
-    await stepIs(page, 'send');
-    assert.equal(await page.locator('#booth-make').count(), 0);
-    assert.equal(await page.locator('#booth-courses').count(), 0);
-    const card = page.locator('#booth-rows .booth-card').first();
-    assert.match(await card.locator('.booth-klab').first().textContent(), /^내가 숨긴 결함 · \d+쪽$/);
-    assert.equal(await card.locator('del').textContent(), '0.95');
-    assert.equal(await card.locator('ins').textContent(), '0.50');
-    assert.equal((await card.locator('.booth-diff').textContent()).length < 80, true, 'diff shows only the changed region');
-    assert.match(await card.textContent(), /이 설명은 AI에게 보내지 않아요/);
-    await card.getByRole('button', {name: '수치·통계'}).click();
-    assert.equal(await card.getByRole('button', {name: '수치·통계'}).getAttribute('aria-pressed'), 'true');
-    await card.locator('textarea').fill('표의 점수를 0.95에서 0.50으로 바꿨습니다');
-    assert.equal(await page.locator('#booth-consent-summary li').count(), 3);
-    assert.equal(await page.locator('#booth-consent-summary li').first().textContent(), '수정본 PDF만 AI(Anthropic)에 보내요.');
-    assert.equal(await page.locator('#booth-consent-copy').isVisible(), false);
-    await page.locator('#booth-consent-full summary').click();
-    assert.match(await page.locator('#booth-consent-copy').textContent(), /제출하면 바로 수정본 PDF만 AI 검증을 위해 모델 제공자\(Anthropic\)에 보내고/);
-    assert.equal(await page.locator('#booth-consent-version').textContent(), '동의 버전 · 2026-11-22.v2');
-    assert.equal(await page.locator('#booth-submit-button').isDisabled(), true);
-    await page.locator('#booth-consent').check();
-    assert.equal(await page.locator('#booth-submit-button').textContent(), 'AI에게 제출하기');
-    await page.setViewportSize({width: 360, height: 780});
-    const sendAudit = await phoneAudit(page, '#booth');
-    assert.deepEqual(sendAudit.small, []);
-    assert.equal(sendAudit.overflow <= 0, true, 'send overflow ' + sendAudit.overflow);
-    await page.setViewportSize({width: 390, height: 844});
-    await page.locator('#booth-submit-button').click();
-
-    // ticket: waiting, then the stub publishes missed with a prize message.
-    const submitted = await page.waitForFunction(() => {
-      if (document.documentElement.dataset.boothStep === 'ticket') return 'ok';
-      const status = document.querySelector('#booth-submit-status')?.textContent || '';
-      if (status && status !== '제출하는 중…') return status;
-      return null;
-    }, null, {timeout: 20000}).then(handle => handle.jsonValue());
-    assert.equal(submitted, 'ok');
-    assert.equal(await page.locator('#booth-receipt-code').textContent(), 'F-0042');
-    assert.equal(await page.locator('#booth-claim-code').textContent(), '7Q3K-M9XD');
-    assert.equal(await page.locator('#booth-ticket-paper').textContent(), 'Ragas');
-    assert.match(await page.locator('#booth-ticket-pages').textContent(), /^\d+쪽 · 1곳$/);
-    assert.equal(await page.locator('.rail [data-view="blue"]').isHidden(), true);
-    assert.equal(submissions.length, 1);
-    const posted = submissions[0].toString('utf8');
-    assert.equal(posted.includes('edited.pdf'), true);
-    assert.equal(posted.includes('0.50'), true);
-    assert.equal(posted.includes('0.95'), true);
-    assert.equal(posted.includes('2026-11-22.v2'), true);
-    assert.equal(posted.includes('"course":"quick"'), true);
-    assert.equal(posted.includes('"defectType":"number"'), true);
-    assert.equal(await page.locator('#booth-ticket-wait').isVisible(), true);
-    assert.equal(await page.locator('#booth-ticket-steps').textContent(), '수정본 받음AI가 앞뒤 문장과 표를 대조하는 중결과');
-    assert.match(await page.locator('#booth-live-capture').textContent(), /^이 티켓을 캡처해 두세요/);
-    assert.match(await page.locator('#booth-ticket-elapsed').textContent(), /^\d+:\d\d$/);
-    assert.equal(await page.locator('#booth-barcode').isVisible(), true);
-    assert.equal(await page.locator('#booth-live-again').isHidden(), true);
-    for (let round = 1; round <= 3; round += 1) {
-      await page.clock.fastForward(15000);
-      const started = Date.now();
-      while (claims.length < round && Date.now() - started < 10000) await new Promise(resolve => setTimeout(resolve, 50));
-      assert.equal(claims.length, round);
-    }
-    assert.deepEqual(claims[0], {receipt: 'F-0042', claimKey: '7Q3K-M9XD'});
-    await page.waitForFunction(() => document.querySelector('#booth-live-title')?.textContent === 'AI가 못 찾았어요');
-    assert.equal(await page.locator('#booth-live-title b').textContent(), '못 찾았어요');
-    assert.equal(await page.locator('#booth-stamp-word').textContent(), '통과');
-    assert.equal(await page.locator('#booth-stamp').getAttribute('class'), 'booth-stamp pass');
-    assert.equal(await page.locator('#booth-ticket-wait').isHidden(), true);
-    assert.equal(await page.locator('#booth-ticket-duration').textContent(), '2분');
-    assert.equal(await page.locator('#booth-gift').isVisible(), true);
-    assert.equal(await page.locator('#booth-live-prize').textContent(), '부스에서 스티커를 받아 가세요');
-    assert.match(await page.locator('#booth-gift').textContent(), /교환권 · 1인 1회/);
-    assert.match(await page.locator('#booth-live-note').textContent(), /AI가 먼저 본 곳은 7쪽이었고/);
-    const again = page.locator('#booth-live-again');
-    assert.equal(await again.isVisible(), true);
-    assert.equal(await again.textContent(), '다시 도전하기 · 기회 4번 남음');
-    assert.match(await page.locator('#booth-history').textContent(), /F-0042 · Ragas통과/);
-    await page.setViewportSize({width: 360, height: 780});
-    const audit = await phoneAudit(page, '#booth');
-    assert.deepEqual(audit.small, []);
-    assert.equal(audit.seen >= 3, true);
-    assert.equal(audit.overflow <= 0, true, 'horizontal overflow ' + audit.overflow);
-    await page.clock.fastForward(60000);
-    await new Promise(resolve => setTimeout(resolve, 300));
-    assert.equal(claims.length, 3);
-
-    // 다시 도전하기 resets the paper the way the old retry did and returns to pick.
-    await again.click();
-    await stepIs(page, 'pick');
-    assert.equal(await page.locator('#booth-receipt').isHidden(), true);
-    assert.equal(await page.locator('#booth-submit').isHidden(), true);
-    assert.equal(await page.locator('#booth-missions').isVisible(), true);
-    assert.equal(await page.locator('#booth-consent').isChecked(), false);
-    assert.equal(await page.locator('#paper-file').inputValue(), '');
-    await page.locator('#booth-result-link').click();
-    await page.locator('#booth-receipts-list').getByRole('button', {name: /F-0042/}).waitFor();
-    assert.equal(await page.evaluate(() => document.documentElement.dataset.boothStep), 'pick');
-    assert.equal(await page.locator('#booth-landing').isHidden(), true);
-    const resultAudit = await phoneAudit(page, '#booth-result');
-    assert.deepEqual(resultAudit.small, []);
-    assert.equal(resultAudit.seen >= 2, true);
-    assert.equal(resultAudit.overflow <= 0, true, 'result overflow ' + resultAudit.overflow);
+    await walk(browser, {width: 390, height: 844}, false, pageErrors);
+    await walk(browser, {width: 1280, height: 800}, true, pageErrors);
     assert.equal(pageErrors.join('\n'), '');
   } catch (error) {
     const shot = '/tmp/booth-event-browser.png';
-    const open = browser.contexts()[0] && browser.contexts()[0].pages()[0];
+    const contexts = browser.contexts();
+    const last = contexts[contexts.length - 1];
+    const open = last && last.pages()[0];
     if (open) await open.screenshot({path: shot, fullPage: true}).catch(() => {});
     const note = open ? await open.evaluate(() => ({
       step: document.documentElement.dataset.boothStep,
