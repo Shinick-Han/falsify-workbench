@@ -149,12 +149,15 @@ async function visibility(page, state) {
 }
 /* One paragraph edit: 0.95 → 0.50 in the Table 1 paragraph, as booth-event-browser does it. */
 async function editParagraph(page) {
-  // Phones open the mission zoomed on the hint; zoom out first, as booth-event-browser does.
+  // Phones open the mission zoomed on the hint page once its paragraphs are drawn. Wait for that first,
+  // then zoom out and wait for the redrawn list, as booth-event-browser does: zooming out earlier is
+  // undone by the hint zoom, and an index taken from the old list opens another paragraph.
+  await page.waitForFunction(() => [...document.querySelectorAll('.paper-paragraph-button')].some(node => node.textContent.includes('0.95')));
   if (await page.locator('#booth-pe-fit').isVisible()) {
     await page.locator('#booth-pe-fit').click();
     await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() === 1);
   }
-  await page.waitForFunction(() => [...document.querySelectorAll('.paper-paragraph-button')].some(node => node.textContent.includes('0.95')));
+  await page.waitForFunction(() => [...document.querySelectorAll('.paper-paragraph-button')].some(node => node.textContent.includes('0.95') && node.textContent.includes('0.78')));
   const listToggle = page.locator('#booth-find-list');
   if (await listToggle.count() && await listToggle.isVisible()) await listToggle.click();
   const index = await page.evaluate(() => {
@@ -171,7 +174,9 @@ async function editParagraph(page) {
   await page.keyboard.press('Enter');
   const editor = page.locator('textarea[aria-label$="직접 편집"]');
   await editor.waitFor();
-  await editor.fill((await editor.inputValue()).replace('0.95', '0.50'));
+  const original = await editor.inputValue();
+  assert.equal(original.includes('0.95'), true, 'the editor opened the Table 1 paragraph');
+  await editor.fill(original.replace('0.95', '0.50'));
   await page.locator('.paper-direct-controls').getByRole('button', {name: '완료', exact: true}).click();
   await page.waitForFunction(() => document.querySelector('#booth-dock-count')?.textContent === '고친 곳 1개');
 }
