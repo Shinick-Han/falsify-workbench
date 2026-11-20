@@ -955,6 +955,153 @@ test('every final outcome shows its headline, stamp and gift ticket', async () =
   w.handle.destroy();
 });
 
+/* Desktop layout nodes (booth.css shows them at >=1024px only). */
+function deskSteps(h) {
+  return [1, 2, 3].map(n => {
+    const item = h.ids.get('booth-desk-step-' + n);
+    return (item.className || '-') + ':' + item.getAttribute('aria-current');
+  }).join(' ');
+}
+test('the desktop top bar marks the current step bold and earlier steps done', async () => {
+  const h = liveBooth();
+  await settle();
+  const bar = h.ids.get('booth-deskbar');
+  assert.equal(bar.className, 'booth-deskbar booth-desk');
+  const kids = h.ids.get('booth').children;
+  assert.equal(kids.indexOf(bar) < kids.indexOf(h.ids.get('booth-step-pick')), true, 'the bar leads #booth, before every step');
+  assert.equal(h.text('booth-deskbar'), 'FFalsifyAI REVIEW CHALLENGE1논문 고르기2몰래 고치기3AI 검증내 기록');
+  assert.equal(h.ids.get('booth-desk-records').getAttribute('href'), '#booth-result');
+  assert.equal(deskSteps(h), 'on:step -:false -:false');
+  await reachSend(h);
+  assert.equal(deskSteps(h), 'done:false done:false on:step');
+  h.ids.get('booth-send-back').click();
+  assert.equal(h.step(), 'edit');
+  assert.equal(deskSteps(h), 'done:false on:step -:false');
+  h.ids.get('booth-dock-back').click();
+  assert.equal(h.step(), 'pick', 'the dock has its own way back to pick');
+  assert.equal(deskSteps(h), 'on:step -:false -:false');
+  h.ids.get('booth-desk-records').dispatchEvent({type: 'click', preventDefault() {}});
+  assert.equal(h.location.hash, '#booth-result');
+  assert.equal(h.ids.get('booth-result').hidden, false);
+  h.handle.destroy();
+});
+
+test('the desktop pick step adds the how-to list, the cap line and the mission count', async () => {
+  const h = liveBooth({perOwner: 3});
+  await settle();
+  assert.equal(h.text('booth-howto'), '01논문 고르기미션 논문이나 공개 논문 하나02몰래 고치기숫자, 문장, 결론 어디든 한 곳 이상03AI 검증보통 1~3분, 접수번호로 결과 확인');
+  assert.equal(h.text('booth-pick-limit'), '1인 3번까지 · 이름·연락처는 받지 않아요');
+  assert.equal(h.ids.get('booth-mission-head').hidden, false);
+  assert.equal(h.text('booth-mission-count'), '오늘의 미션 · 2');
+  assert.match(h.text('booth-mission-head'), /티켓을 누르면 힌트 쪽이 열려요$/);
+  h.handle.destroy();
+  const none = liveBooth({missions: []});
+  await settle();
+  assert.equal(none.ids.get('booth-mission-head').hidden, true);
+  none.handle.destroy();
+});
+
+test('on desktop the paper search is one open row; phones keep the closed disclosure', async () => {
+  const media = {matches: true, listeners: [], addEventListener(type, fn) { this.listeners.push(fn); }, removeEventListener() {}};
+  const queries = [];
+  const {doc, ids} = page();
+  const handle = booth.mount({
+    document: doc, storage: memoryStorage(), location: {hash: ''}, fetch: async () => ({ok: false, status: 500, json: async () => ({})}),
+    config: () => ({booth: {enabled: true}, apiBase: 'https://event.example'}),
+    matchMedia: query => { queries.push(query); return media; },
+  });
+  assert.deepEqual(queries, ['(min-width:1024px)']);
+  assert.equal(ids.get('booth-search-box').open, true);
+  assert.equal(ids.get('booth-search-go').textContent, '찾기');
+  assert.equal(ids.get('booth-search-q').getAttribute('placeholder'), '다른 공개 논문 찾기 · 제목 또는 주제');
+  media.matches = false;
+  for (const fn of media.listeners) fn();
+  assert.equal(ids.get('booth-search-box').open, false);
+  assert.equal(ids.get('booth-search-go').textContent, '검색');
+  assert.equal(ids.get('booth-search-q').getAttribute('placeholder'), '제목 또는 주제');
+  handle.destroy();
+});
+
+test('the desktop dock lists each edit as a chip with the removed text struck through', async () => {
+  const h = liveBooth();
+  await settle();
+  const ws = useWorkspace([]);
+  await pickMission(h);
+  assert.equal(h.ids.get('booth-dock-chips').children.length, 0);
+  ws.edits = ONE_EDIT;
+  h.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
+  const chips = () => h.ids.get('booth-dock-chips').children;
+  assert.equal(chips().length, 1);
+  assert.equal(chips()[0].className, 'booth-dock-chip');
+  assert.equal(chips()[0].textContent, '2쪽4.2→5.8');
+  assert.equal(nodesOf(chips()[0]).find(node => node.tagName === 'del').textContent, '4.2');
+  ws.edits = [
+    ...ONE_EDIT,
+    {enabled: true, pageIndex: 4, before: 'abc VeryLongDeletedToken xyz', after: 'abc  xyz'},
+    {enabled: true, pageIndex: 6, before: BEFORE_2, after: AFTER_2},
+    {enabled: true, pageIndex: 7, before: 'a', after: 'b'},
+  ];
+  h.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
+  assert.deepEqual(chips().map(chip => chip.textContent), ['2쪽4.2→5.8', '5쪽VeryLongDelet…→(지움)', '7쪽120→210', '+1']);
+  assert.equal(chips()[3].className, 'booth-dock-chip more');
+  assert.equal(h.text('booth-dock-count'), '고친 곳 4개');
+  ws.edits = [];
+  h.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
+  assert.equal(chips().length, 0);
+  h.handle.destroy();
+});
+
+test('the desktop send ticket holds the consent and submit nodes and sums up the paper', async () => {
+  const h = liveBooth();
+  await settle();
+  await reachSend(h, [...ONE_EDIT, {enabled: true, pageIndex: 3, segmentId: 'p4', before: BEFORE_2, after: AFTER_2}]);
+  const side = h.ids.get('booth-send-ticket');
+  const inside = new Set(nodesOf(side));
+  for (const id of ['booth-consent-panel', 'booth-consent', 'booth-submit-button', 'booth-submit-status']) assert.equal(inside.has(h.ids.get(id)), true, id);
+  assert.equal(nodesOf(h.ids.get('booth-submit')).filter(node => node.id === 'booth-submit-button').length, 1);
+  assert.match(h.text('booth-send-ticket'), /^Submission논문/);
+  assert.equal(h.text('booth-send-paper'), 'Synthetic mission: a longer subtitle');
+  assert.equal(h.text('booth-send-count'), '2곳 · 2, 4쪽');
+  assert.equal(h.text('booth-send-chances'), '5번');
+  assert.match(h.text('booth-submit'), /숨긴 결함을 알려 주세요/);
+  h.handle.destroy();
+});
+
+test('the 최종 추첨 panel shows only when the AI missed, and the stub carries the receipt', async () => {
+  for (const outcome of ['missed', 'caught', 'partial', 'invalid']) {
+    const h = liveBooth({claims: [{receipt: 'F-0042', status: outcome === 'invalid' ? 'invalid' : 'judged', course: 'quick', declaredCount: 1,
+      published: true, outcome, publicNote: 'note', prizeMessage: outcome === 'missed' ? 'prize' : undefined}]});
+    await settle();
+    h.ids.get('booth-claim-receipt').value = 'F-0042';
+    h.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+    h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+    await settle();
+    assert.equal(h.step(), 'ticket');
+    assert.equal(h.ids.get('booth-final').hidden, outcome !== 'missed', outcome);
+    assert.equal(h.text('booth-final'), '최종 추첨마감 후 더 정밀한 AI가 한 번 더 검증해요. 그때도 못 찾으면 최종 추첨 대상이에요.');
+    assert.equal(h.ids.get('booth-live-records').hidden, false);
+    assert.equal(h.text('booth-stub-receipt'), 'F-0042');
+    assert.equal(deskSteps(h), 'done:false done:false on:step');
+    h.ids.get('booth-live-records').dispatchEvent({type: 'click', preventDefault() {}});
+    assert.equal(h.step(), 'pick');
+    assert.equal(h.ids.get('booth-result').hidden, false);
+    h.handle.destroy();
+  }
+  const w = liveBooth({claims: [{receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1, published: false, createdAt: '2026-11-22T01:00:00Z'}]});
+  await settle();
+  w.ids.get('booth-claim-receipt').value = 'F-0042';
+  w.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+  w.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(w.ids.get('booth-final').hidden, true, 'pending');
+  assert.equal(w.ids.get('booth-live-records').hidden, true);
+  assert.equal(w.text('booth-stub-date'), '2026.11.22');
+  assert.equal(w.text('booth-stub-receipt'), 'F-0042');
+  const stub = w.ids.get('booth-ticket-stub');
+  assert.equal(stub.children.includes(w.ids.get('booth-barcode')), true, 'the one barcode canvas sits in the stub');
+  w.handle.destroy();
+});
+
 /* The CLI writes publicNote from tools/booth templates; the ticket reads those lines back. */
 test('publicNote parses the three CLI templates and falls back to plain text', async () => {
   const config = JSON.parse(await readFile(fileURLToPath(new URL('../../tools/booth/booth.config.example.json', import.meta.url)), 'utf8'));
