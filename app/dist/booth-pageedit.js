@@ -25,7 +25,7 @@
   const FAIL_TEXT={
     clash:'앞서 고친 곳과 겹쳐요.',
     clashAct:'앞서 고친 것 지우고 바꾸기',
-    outside:'이 글자는 고칠 수 있는 본문 밖에 있어요. 다른 글자를 눌러 주세요.',
+    outside:'그림이나 머리글 속 글자는 바꿀 수 없어요.',
     no_paper:'논문이 아직 열리지 않았어요.',
     rejected:'바꾸지 못했어요. 「바꾸기」를 한 번 더 눌러 주세요.',
     reopen:'문단 편집이 열리지 않았어요.',
@@ -272,17 +272,64 @@
     }
     return best;
   }
-  /* Where the unchanged text of an edit maps a before offset rel (length len) into after; -1 when
-     [rel, rel+len) touches the changed part. */
-  function unchangedAt(before, after, rel, len){
+  /* The real changes of an edit: before and after split into words and spaces, lined up by their
+     longest common subsequence; each hunk is a changed run {bStart, bEnd, aStart, aEnd}. Two separate
+     changes stay two hunks (prefix/suffix trimming would join them and everything in between). */
+  /* One hunk from the common prefix and suffix, for edits too long for the word table. */
+  function trimHunk(before, after){
+    if(before===after) return [];
     let pre=0;
     while(pre<before.length&&pre<after.length&&before[pre]===after[pre]) pre+=1;
     let suf=0;
     const room=Math.min(before.length,after.length)-pre;
     while(suf<room&&before[before.length-1-suf]===after[after.length-1-suf]) suf+=1;
-    if(rel+len<=pre) return rel;
-    if(rel>=before.length-suf) return rel-before.length+after.length;
-    return -1;
+    return [{bStart:pre,bEnd:before.length-suf,aStart:pre,aEnd:after.length-suf}];
+  }
+  function lcsTable(a, b){
+    const lcs=Array.from({length:a.length+1},()=>new Array(b.length+1).fill(0));
+    for(let i=a.length-1;i>=0;i-=1) for(let j=b.length-1;j>=0;j-=1) lcs[i][j]=a[i]===b[j]?lcs[i+1][j+1]+1:Math.max(lcs[i+1][j],lcs[i][j+1]);
+    return lcs;
+  }
+  function hunksOf(before, after){
+    const a=String(before||'').split(/(\s+)/).filter(Boolean);
+    const b=String(after||'').split(/(\s+)/).filter(Boolean);
+    if(a.length*b.length>250000) return trimHunk(String(before||''),String(after||''));
+    const lcs=lcsTable(a,b);
+    const out=[];
+    let i=0;let j=0;let x=0;let y=0;let open=null;
+    const close=()=>{if(open){open.bEnd=x;open.aEnd=y;out.push(open);open=null;}};
+    while(i<a.length||j<b.length){
+      if(i<a.length&&j<b.length&&a[i]===b[j]){close();x+=a[i].length;y+=b[j].length;i+=1;j+=1;continue;}
+      if(!open) open={bStart:x,aStart:y};
+      if(j<b.length&&(i>=a.length||lcs[i][j+1]>=lcs[i+1][j])){y+=b[j].length;j+=1;}
+      else{x+=a[i].length;i+=1;}
+    }
+    close();
+    return out;
+  }
+  /* Where an unchanged range [rel, rel+len) of an edit's before sits in its after; -1 when it touches
+     any of the edit's changes. */
+  function unchangedAt(before, after, rel, len){
+    let shift=0;
+    for(const h of hunksOf(before,after)){
+      if(h.bStart<rel+len&&rel<h.bEnd) return -1;
+      if(len===0&&h.bStart===rel&&h.bEnd>rel) return -1;
+      if(h.bEnd<=rel) shift+=(h.aEnd-h.aStart)-(h.bEnd-h.bStart);
+    }
+    return rel+shift;
+  }
+  /* How many ink characters agree right before (left) and right after (right) a spot, comparing the
+     tapped word's text-layer neighbours with a candidate place in a segment text. */
+  function sideAgree(layerBefore, layerAfter, textBefore, textAfter){
+    const a=inkChars(layerBefore).chars;
+    const b=inkChars(textBefore).chars;
+    const c=inkChars(layerAfter).chars;
+    const d=inkChars(textAfter).chars;
+    let left=0;
+    while(left<a.length&&left<b.length&&a[a.length-1-left]===b[b.length-1-left]) left+=1;
+    let right=0;
+    while(right<c.length&&right<d.length&&c[right]===d[right]) right+=1;
+    return {left,right,score:left+right,whole:left===a.length&&right===c.length};
   }
   /* A new word split over two line halves in proportion to the old halves; the first keeps a hyphen. */
   function splitWord(value, firstLen, secondLen){
@@ -665,13 +712,28 @@
       const boxes=call('getPageParagraphs');
       const items=boxes&&Array.isArray(boxes.items)?boxes.items:[];
       const hit=paragraphAt(items,word.rect.x+word.rect.w/2,word.rect.y+word.rect.h/2);
-      return hit&&hit.editable?hit:null;
+      if(hit&&hit.editable) return hit;
+      /* A box can stop short of the word (a line-end hyphen, a wide cell): the nearest editable box it touches. */
+      const pad=0.01;
+      const cx=word.rect.x+word.rect.w/2;
+      const cy=word.rect.y+word.rect.h/2;
+      const touching=items.filter(item=>item&&item.editable&&item.rect
+        &&word.rect.x<item.rect.x+item.rect.w+pad&&item.rect.x-pad<word.rect.x+word.rect.w
+        &&word.rect.y+word.rect.h/2>item.rect.y&&word.rect.y+word.rect.h/2<item.rect.y+item.rect.h);
+      const gap=item=>Math.hypot(item.rect.x+item.rect.w/2-cx,item.rect.y+item.rect.h/2-cy);
+      return touching.sort((a,b)=>gap(a)-gap(b))[0]||null;
     }
     function fillPop(sel, patch){
       label.textContent=(sel.pageIndex+1)+'쪽 · '+(patch?'고친 글자 · 원문 '+patch.original:'이 글자 고치기');
       input.value=patch?patch.value:(sel.spot?sel.spot.before:sel.word.text);
       input.setAttribute('inputmode',numericToken(input.value)?'decimal':'text');
       whole.disabled=!sel.paragraph;
+      /* Neither a place in the text nor a paragraph to open: this glyph is not editable text (a figure
+         label, a running head). Said in place; the field stays closed. */
+      const closed=!sel.spot&&!sel.paragraph&&!patch;
+      input.disabled=closed;
+      apply.disabled=closed;
+      status.textContent=closed?FAIL_TEXT.outside:'';
     }
     function selectWord(page, word){
       closePop(false);
@@ -778,6 +840,7 @@
       box=page.getBoundingClientRect();
       const near=spansOf(page).filter(span=>numericToken(span.textContent.trim())).map(span=>span.getBoundingClientRect())
         .filter(r=>Math.hypot((r.left+r.right)/2-box.left-spot.x,(r.top+r.bottom)/2-box.top-spot.y)<=radius);
+      if(!near.length) return;
       const seed=near.map(r=>fraction(r,page)).reduce((a,b)=>union(a,b));
       const boxes=call('getPageParagraphs');
       const lineH=near.reduce((h,r)=>Math.max(h,r.height),0)/box.height;
@@ -851,17 +914,40 @@
         }
         return {segmentId:seg.id,pageIndex,start:spot.start,end:spot.end,before:spot.before,half,halfSide:spot.join?spot.join.side:''};
       }
-      return searchSpot(word,pageIndex);
+      return searchSpot(page,word,pageIndex);
     }
-    function searchSpot(word, pageIndex){
+    /* The tapped word's neighbours on the drawn page, as text before and after the token. */
+    function layerSides(page, word){
+      const spans=ordered(page);
+      const at=spans.indexOf(word.span);
+      const text=word.span.textContent;
+      const before=spans.slice(Math.max(0,at-4),at).map(node=>node.textContent).join(' ')+' '+text.slice(0,word.token.start);
+      const after=text.slice(word.token.end)+' '+spans.slice(at+1,at+5).map(node=>node.textContent).join(' ');
+      return {before:before.slice(-60),after:after.slice(0,60)};
+    }
+    /* No paragraph place for the tap: a text search is used only when it provably finds the tapped
+       occurrence: on this page, and the one place whose neighbours agree with the tapped word's
+       neighbours clearly better than every other place (at least 12 characters, or all of them). */
+    function searchSpot(page, word, pageIndex){
       const R=recipe();
       const segs=segmentsNow();
-      if(!R||typeof R.searchHits!=='function') return null;
-      const first=R.searchHits(segs,word.text,pageIndex,1).items[0];
-      if(!first) return null;
-      const found=R.locate({page:first.pageIndex+1,find:word.text,context:first.context,hint:first.hint},segs);
-      if(found.status!=='resolved') return null;
-      return {segmentId:found.segmentId,pageIndex:found.pageIndex,start:found.start,end:found.end,before:found.before,half:null,halfSide:''};
+      if(!R||typeof R.searchHits!=='function'||typeof R.locate!=='function') return null;
+      const sides=layerSides(page,word);
+      const places=[];
+      for(const item of R.searchHits(segs,word.text,pageIndex,200).items){
+        if(item.pageIndex!==pageIndex) continue;
+        const found=R.locate({page:pageIndex+1,find:word.text,hint:item.hint},segs);
+        const seg=found.status==='resolved'?segs.find(s=>s&&s.id===found.segmentId):null;
+        if(!seg||found.pageIndex!==pageIndex) continue;
+        const agree=sideAgree(sides.before,sides.after,seg.text.slice(Math.max(0,found.start-200),found.start),seg.text.slice(found.end,found.end+200));
+        places.push({found,agree});
+      }
+      places.sort((a,b)=>b.agree.score-a.agree.score);
+      const best=places[0];
+      if(!best||(places[1]&&places[1].agree.score>=best.agree.score)) return null;
+      if(best.agree.score<12&&!best.agree.whole) return null;
+      const found=best.found;
+      return {segmentId:found.segmentId,pageIndex,start:found.start,end:found.end,before:found.before,half:null,halfSide:''};
     }
     function editsNow(){
       const snap=call('getEditSnapshot');
@@ -903,20 +989,13 @@
       st.holding=true;
       try{result=R&&typeof R.applyFound==='function'?R.applyFound(Object.assign({status:'resolved',kind:'paragraph'},spot),value):{ok:false};}
       finally{st.holding=false;}
-      if(result.ok) adoptMerged(result);
+      if(result.ok) adoptMerged();
       if(!result.ok) result=addExact(spot,value);
       return result;
     }
-    /* applyFound folds overlapping edits into one: their patches move to the new edit. */
-    function adoptMerged(result){
-      const gone=new Set(Array.isArray(result.merged)?result.merged:[]);
-      for(const patch of st.patches.values()){
-        if(!gone.has(patch.edit)) continue;
-        if(!result.id){patch.edit='';continue;}
-        patch.at=nearestIndex(result.after,patch.value,patch.at);
-        patch.edit=result.id;
-      }
-      if(result.id) retag(result.id,result.after);
+    /* applyFound folds overlapping edits into one: syncPatches finds each patch's change in the new edit
+       (or drops the patch when that change is gone). */
+    function adoptMerged(){
       syncPatches();
     }
     function fontOf(span){
@@ -948,7 +1027,7 @@
       halves.forEach((word,n)=>{
         const look=patchRect(word);
         const key=keyOf(info.edit,info.start,n>0);
-        const patch={word:wordKey,edit:info.edit,start:info.start,at:info.at,pageIndex:info.pageIndex,rect:look.rect,font:look.font,
+        const patch={word:wordKey,edit:info.edit,segmentId:info.segmentId,start:info.start,at:info.at,pageIndex:info.pageIndex,rect:look.rect,font:look.font,
           text:texts[n],value:info.value,original:info.original,after:info.after,halves:info};
         st.patches.set(key,patch);
         paint(key,patch);
@@ -980,8 +1059,8 @@
       const at=nearestIndex(result.after,value,spot.start-anchor);
       retag(result.id,result.after);
       closePop(true);
-      paintWord({edit:result.id,start:spot.start,at,pageIndex:sel.pageIndex,word:sel.word,half:spot.half,halfSide:spot.halfSide,
-        value,original:spot.before,after:result.after});
+      paintWord({edit:result.id,segmentId:edit?edit.segmentId:spot.segmentId,start:spot.start,at,pageIndex:sel.pageIndex,word:sel.word,
+        half:spot.half,halfSide:spot.halfSide,value,original:spot.before,after:result.after});
     }
     /* A word changed before: its edit gets the new word in place (back to the original drops it). */
     function reEdit(old, value){
@@ -1022,6 +1101,7 @@
     function replaceWord(){
       const sel=st.sel;
       if(!sel) return;
+      /* The paragraph is there but the tapped place could not be pinned: its editor opens there instead of guessing. */
       if(!sel.spot&&sel.paragraph){wholeParagraph();return;}
       if(!sel.spot){status.textContent=recipe()?FAIL_TEXT.outside:FAIL_TEXT.no_paper;return;}
       const value=input.value;
@@ -1074,14 +1154,51 @@
     }
 
     /* ---------- patches follow the edits ---------- */
+    /* Where a patch's change sits in an edit's after: the patch's original word must be one of the edit's
+       real changes (hunksOf) and its new word must be in that change; -1 otherwise (reverted, replaced). */
+    function placeIn(edit, patch){
+      if(!edit.anchor||!Number.isInteger(edit.anchor.start)) return edit.after===patch.after?patch.at:-1;
+      const rel=patch.start-edit.anchor.start;
+      const len=String(patch.original||'').length;
+      if(rel<0||rel+len>edit.before.length||edit.before.slice(rel,rel+len)!==patch.original) return -1;
+      const hunk=hunksOf(edit.before,edit.after).find(h=>h.bStart<rel+len&&rel<h.bEnd);
+      if(!hunk) return -1;
+      const at=nearestIndex(edit.after.slice(hunk.aStart,hunk.aEnd),patch.value,rel-hunk.bStart);
+      return at<0?-1:hunk.aStart+at;
+    }
+    /* Every patch follows the edit that now holds its change, even when a merge gave it a new id. */
     function syncPatches(){
-      const snap=call('getEditSnapshot');
-      const edits=snap&&Array.isArray(snap.edits)?snap.edits:[];
+      if(st.holding) return;
+      const edits=editsNow();
       for(const [key,patch] of [...st.patches]){
-        const edit=edits.find(item=>item&&item.id===patch.edit);
-        if(st.holding||edit&&edit.enabled!==false&&(edit.after===patch.after||patch.edit===st.updating)) continue;
+        if(!st.patches.has(key)) continue;
+        const holds=edit=>edit.segmentId===patch.segmentId&&edit.anchor&&edit.anchor.start<=patch.start
+          &&patch.start+String(patch.original||'').length<=edit.anchor.end;
+        const own=edits.find(edit=>edit.id===patch.edit);
+        const edit=own&&placeIn(own,patch)>=0?own:edits.find(item=>item!==own&&holds(item)&&placeIn(item,patch)>=0);
+        if(!edit){
+          if(patch.edit===st.updating) continue;
+          st.patches.delete(key);
+          try{patcher().remove(key);}catch{}
+          continue;
+        }
+        const at=placeIn(edit,patch);
+        Object.assign(patch,{at,after:edit.after});
+        Object.assign(patch.halves,{at,after:edit.after});
+        if(edit.id===patch.edit) continue;
+        moveWord(patch.word,edit.id);
+      }
+    }
+    /* A word's patches (one, or two halves) under a new edit id: new keys, repainted. */
+    function moveWord(wordKey, id){
+      for(const [key,patch] of wordPatches(wordKey)){
         st.patches.delete(key);
         try{patcher().remove(key);}catch{}
+        const next=keyOf(id,patch.start,key.endsWith('~2'));
+        Object.assign(patch,{edit:id,word:keyOf(id,patch.start)});
+        patch.halves.edit=id;
+        st.patches.set(next,patch);
+        paint(next,patch);
       }
     }
     /* Every one-token edit gets a patch, however it was made (word tap, find-and-replace, a recipe):
@@ -1101,13 +1218,12 @@
       if(!box||!(box.width>0||box.height>0)) return;
       const word=wordAt(page,box.left+box.width/2,box.top+box.height/2);
       if(!word||word.text!==change.from) return false;
-      /* Where the new word sits in after: the first difference, back to its word start. */
-      let at=0;
-      while(at<edit.before.length&&at<edit.after.length&&edit.before[at]===edit.after[at]) at+=1;
-      while(at>0&&!SPACE.test(edit.after[at-1])) at-=1;
-      at=nearestIndex(edit.after,change.to,at);
-      const start=(edit.anchor&&Number.isInteger(edit.anchor.start)?edit.anchor.start:0)+Math.max(0,at);
-      paintWord({edit:edit.id,start,at,pageIndex,word,half:null,halfSide:'',value:change.to,original:change.from,after:edit.after});
+      /* The one real change of the edit gives both the old word's offset and the new word's. */
+      const hunk=hunksOf(edit.before,edit.after).find(h=>edit.before.slice(h.bStart,h.bEnd).trim()===change.from);
+      if(!hunk||!edit.anchor||!Number.isInteger(edit.anchor.start)) return false;
+      const start=edit.anchor.start+edit.before.indexOf(change.from,hunk.bStart);
+      const at=edit.after.indexOf(change.to,hunk.aStart);
+      paintWord({edit:edit.id,segmentId:edit.segmentId,start,at,pageIndex,word,half:null,halfSide:'',value:change.to,original:change.from,after:edit.after});
       return true;
     }
     /* Edits whose mark did not lead to their token on this page element are not retried on it. */
@@ -1344,7 +1460,7 @@
     onMutate();
   }
 
-  root.FalsifyBoothPageEdit=Object.freeze({tokenAt,contextWindow,placePopover,fitCrop,overlapShare,paragraphAt,padRect,numericToken,tokensIn,densest,keyboardInset,inkChars,alignInk,spotIn,nearestIndex,unchangedAt,splitWord,fallbackPatch,ZOOM,TABLE_ZOOM,hintBlock,fitZoom});
+  root.FalsifyBoothPageEdit=Object.freeze({tokenAt,contextWindow,placePopover,fitCrop,overlapShare,paragraphAt,padRect,numericToken,tokensIn,densest,keyboardInset,inkChars,alignInk,spotIn,nearestIndex,unchangedAt,hunksOf,sideAgree,splitWord,fallbackPatch,ZOOM,TABLE_ZOOM,hintBlock,fitZoom});
   const doc=root.document;
   if(!doc||typeof doc.getElementById!=='function') return;
   const start=()=>mount(doc);

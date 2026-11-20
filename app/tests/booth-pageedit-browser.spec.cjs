@@ -737,6 +737,100 @@ async function anchorWalk(browser, wide) {
   await page.context().close();
 }
 
+/* A tap the paragraph boxes do not cover (here: the box is hidden from the page edit) is searched only
+   on this page and only where its neighbours prove the place; the PDF edit lands on the tapped word. */
+async function hideParagraph(page, startsWith) {
+  await page.evaluate(prefix => {
+    const ws = globalThis.FalsifyPaperWorkspace;
+    const real = ws.getPageParagraphs.bind(ws);
+    ws.getPageParagraphs = () => { const out = real(); return out && {...out, items: out.items.filter(item => !item.text.startsWith(prefix))}; };
+  }, startsWith);
+}
+
+async function segmentOut(page, id) {
+  return page.evaluate(segmentId => {
+    const ws = globalThis.FalsifyPaperWorkspace;
+    const seg = ws.getSource().segments.find(entry => entry.id === segmentId);
+    const edits = ws.getEditSnapshot().edits.filter(edit => edit.segmentId === segmentId && edit.enabled !== false).sort((a, b) => b.anchor.start - a.anchor.start);
+    let out = seg.text;
+    for (const edit of edits) out = out.slice(0, edit.anchor.start) + edit.after + out.slice(edit.anchor.end);
+    return {before: seg.text, out};
+  }, id);
+}
+
+async function searchWalk(browser, wide) {
+  const {page, errors} = await openMission(browser, wide);
+  if (!wide) await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() > 1, null, {timeout: 8000}).catch(() => {});
+  await hideParagraph(page, 'Table 1 analyses');
+  const body = 'Table 1 analyses';
+  await tapToken(page, wide, 'the', 1, body);
+  assert.equal(await page.locator('#booth-pe-input').inputValue(), 'the');
+  await changeTo(page, 'a');
+  const edits = await page.evaluate(() => globalThis.FalsifyPaperWorkspace.getEditSnapshot().edits.map(edit => ({id: edit.segmentId, page: edit.pageIndex})));
+  assert.equal(edits.length, 1);
+  assert.equal(edits[0].page, 4, 'the edit stays on the tapped page');
+  const seg = await segmentOut(page, edits[0].id);
+  const ink = text => text.replace(/\s+/g, '').replace(/-/g, '');
+  assert.ok(ink(seg.out).includes('agreementbetweenametrics'), 'the tapped "the" changed ' + seg.out.slice(0, 200));
+  assert.ok(ink(seg.out).includes('analysestheagreement'), 'the "the" before it did not');
+  assert.equal((seg.out.match(/\bthe\b/g) || []).length, (seg.before.match(/\bthe\b/g) || []).length - 1, 'exactly one "the" changed');
+
+  // The table without its box: the second 0.52 is still the one that changes.
+  await hideParagraph(page, '                       0.95');
+  await tapToken(page, wide, '0.52', 1);
+  await changeTo(page, '0.11');
+  const table = await page.evaluate(() => globalThis.FalsifyPaperWorkspace.getEditSnapshot().edits.find(edit => edit.after.includes('0.11')).segmentId);
+  const row = await segmentOut(page, table);
+  assert.match(row.out, /GPT Ranking\s+0\.54\s+0\.40\s+0\.11/, 'the tapped 0.52');
+  assert.match(row.out, /GPT Score\s+0\.72\s+0\.52\s+0\.63/, 'not the first 0.52');
+  await shoot(page, 'anchor-search', wide);
+  assert.deepEqual(errors, []);
+  await page.context().close();
+}
+
+/* Edits that hold several changes keep all of them: a new change between two earlier ones, and taps that
+   fold into one widened edit; every patch on the page matches a change the PDF edit still has. */
+async function mergeWalk(browser, wide) {
+  const {page, errors} = await openMission(browser, wide);
+  if (!wide) await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() > 1, null, {timeout: 8000}).catch(() => {});
+  // The first 0.52 widens to its neighbours (0.72 … 0.63); 0.72 and 0.63 then join that edit; 0.52 again.
+  await tapToken(page, wide, '0.52', 0);
+  await changeTo(page, '0.11');
+  await tapToken(page, wide, '0.72', 0);
+  await changeTo(page, '0.71');
+  await tapToken(page, wide, '0.63', 0);
+  await changeTo(page, '0.66');
+  await tapToken(page, wide, '0.52', 0);
+  assert.equal(await page.locator('#booth-pe-input').inputValue(), '0.11');
+  await changeTo(page, '0.12');
+  let table = await paragraphOut(page, '0.95');
+  assert.match(table.out, /GPT Score\s+0\.71\s+0\.12\s+0\.66/, 'three changes kept ' + table.out);
+  assert.deepEqual((await patchTexts(page)).sort(), ['0.12', '0.66', '0.71']);
+
+  // An edit with two separate changes (GPT Ranking 0.54 and 0.52), then the 0.40 between them.
+  await page.evaluate(() => {
+    const ws = globalThis.FalsifyPaperWorkspace;
+    const item = ws.getPageParagraphs().items.find(entry => entry.text.includes('0.95'));
+    const seg = ws.getSource().segments.find(entry => entry.id === item.segmentId);
+    const start = seg.text.indexOf('0.54');
+    const end = seg.text.lastIndexOf('0.52') + 4;
+    const before = seg.text.slice(start, end);
+    const after = '0.55' + before.slice(4, -4) + '0.53';
+    ws.acceptProposals([{segmentId: seg.id, pageIndex: 4, before, after, anchor: {start, end}}], {origin: 'external-ai-import', confirmed: true});
+    ws.acceptProposals([], {origin: 'external-ai-import'});
+  });
+  await tapToken(page, wide, '0.40', 0);
+  await changeTo(page, '0.44');
+  table = await paragraphOut(page, '0.95');
+  assert.match(table.out, /GPT Ranking\s+0\.55\s+0\.44\s+0\.53/, 'the change between two earlier ones keeps both ' + table.out);
+  assert.match(table.out, /GPT Score\s+0\.71\s+0\.12\s+0\.66/);
+  const patches = await patchTexts(page);
+  assert.ok(patches.includes('0.44') && !patches.includes('0.40'), JSON.stringify(patches));
+  assert.deepEqual(await page.evaluate(() => globalThis.__stopped || []), []);
+  assert.deepEqual(errors, []);
+  await page.context().close();
+}
+
 async function main() {
   assert.equal(pdfBytes.subarray(0, 5).toString(), '%PDF-');
   const server = serve();
@@ -750,6 +844,10 @@ async function main() {
     await hintZoomYields(browser);
     await anchorWalk(browser, true);
     await anchorWalk(browser, false);
+    await searchWalk(browser, true);
+    await searchWalk(browser, false);
+    await mergeWalk(browser, true);
+    await mergeWalk(browser, false);
   } catch (error) {
     error.message += '\npage=' + JSON.stringify(await diagnose());
     throw error;
