@@ -393,14 +393,9 @@ async function submitAndCapture(page, submissions, expectedCount, label) {
 
   const cards = page.locator('#booth-rows .booth-card');
   assert.equal(await cards.count(), expectedCount, `${label}: send step card count`);
-  for (let i = 0; i < expectedCount; i += 1) {
-    const card = cards.nth(i);
-    const anyPressed = await card.locator('button[aria-pressed="true"]').count();
-    if (!anyPressed) await card.getByRole('button', {name: '수치·통계'}).click();
-    const reason = card.locator('textarea');
-    if (!(await reason.inputValue()).trim()) await reason.fill(`${label} defect ${i + 1}`);
-  }
-  await page.locator('#booth-consent').check();
+  // Type and reason are optional: every case submits without them.
+  assert.equal(await page.locator('#booth-consent, #booth-nickname').count(), 0, `${label}: no consent box or nickname field`);
+  await page.locator('#booth-submit-button:not([disabled])').waitFor();
   await page.locator('#booth-submit-button').click();
   await stepIs(page, 'ticket', 30000);
   await assertNoRefusalMessages(page, label + ':ticket');

@@ -295,7 +295,6 @@ async function declareAndSubmit(page, context, state) {
   const card = page.locator('#booth-rows .booth-card').first();
   await card.getByRole('button', {name: '수치·통계'}).click();
   await card.locator('textarea').fill('표의 점수를 0.95에서 0.50으로 바꿨어요');
-  await page.locator('#booth-consent').check();
   await setOffline(context, state, true);
   await page.locator('#booth-submit-button').click();
   await page.waitForFunction(text => document.querySelector('#booth-submit-status')?.textContent === text, OFFLINE);

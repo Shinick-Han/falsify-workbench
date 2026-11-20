@@ -303,7 +303,6 @@ async function recipeFlow(browser, log, errors, wide) {
     if (await card.getByRole('button', {name: '수치·통계'}).getAttribute('aria-pressed') !== 'true') await card.getByRole('button', {name: '수치·통계'}).click();
     if (!(await card.locator('textarea').inputValue())) await card.locator('textarea').fill('데이터셋 이름을 바꿨습니다');
   }
-  await page.locator('#booth-consent').check();
   await page.locator('#booth-submit-button').click();
   await stepIs(page, 'ticket');
   const posted = log.submissions.at(-1).toString('utf8');

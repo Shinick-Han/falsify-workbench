@@ -78,12 +78,9 @@ test('claim keys normalize Crockford input and receipts keep the F- form', () =>
   assert.equal(booth.normalizeReceipt('F-42'), '');
 });
 
-test('submission bodies use only contract keys and reject nickname PII', () => {
-  assert.deepEqual(plain(booth.buildSubmission({nickname: 'visitor@example.com'})), {ok: false, code: 'pii_not_allowed'});
-  assert.deepEqual(plain(booth.buildSubmission({nickname: '01012345678'})), {ok: false, code: 'pii_not_allowed'});
-  assert.equal(booth.buildSubmission({nickname: 'line\nname'}).code, 'invalid_request');
+test('submission bodies use only contract keys and never carry a nickname', () => {
   const built = booth.buildSubmission({
-    jobId: JOB_ID, course: 'quick', consent: true, consentVersion: '2026-11-22.v1',
+    jobId: JOB_ID, course: 'quick', consentVersion: '2026-11-22.v1',
     nickname: '부스방문자', editedSha256: EDITED_SHA,
     paper: {source: 'arxiv', id: '2503.10497', title: 'Synthetic title', license: 'cc-by-4.0', course: 'quick', sourceSha256: SHA},
     rows: [{
@@ -93,7 +90,7 @@ test('submission bodies use only contract keys and reject nickname PII', () => {
   });
   assert.equal(built.ok, true);
   assert.equal(Object.hasOwn(built.body, 'jobId'), false);
-  assert.deepEqual(Object.keys(built.body), ['course', 'declared', 'paper', 'nickname', 'consentVersion', 'editedSha256']);
+  assert.deepEqual(Object.keys(built.body), ['course', 'declared', 'paper', 'consentVersion', 'editedSha256']);
   assert.deepEqual(Object.keys(built.body.declared[0]), ['pageIndex', 'segmentId', 'before', 'after', 'defectType', 'reason']);
   assert.deepEqual(Object.keys(built.body.paper), ['source', 'id', 'title', 'license', 'sourceSha256']);
   assert.equal(built.body.editedSha256, EDITED_SHA);
@@ -102,14 +99,14 @@ test('submission bodies use only contract keys and reject nickname PII', () => {
   assert.equal(JSON.stringify(built.body).includes('quick'), true);
   assert.equal(built.body.consentVersion, '2026-11-22.v1');
   const tabbed = booth.buildSubmission({
-    course: 'quick', consent: true, editedSha256: EDITED_SHA,
+    course: 'quick', consentVersion: 'v', editedSha256: EDITED_SHA,
     paper: {source: 'arxiv', id: '2309.15217', title: 'Synthetic title', license: 'cc-by-4.0'},
     rows: [{pageIndex: 4, segmentId: 'paragraph:4:p4', before: '0.95\t0.78', after: '0.50\t0.78', defectType: 'number', reason: '표의 점수'}],
   });
   assert.equal(tabbed.ok, true);
   assert.equal(tabbed.body.declared[0].before, '0.95\t0.78');
   assert.equal(booth.buildSubmission({
-    course: 'quick', consent: true, editedSha256: EDITED_SHA,
+    course: 'quick', consentVersion: 'v', editedSha256: EDITED_SHA,
     paper: {source: 'arxiv', id: '2309.15217', license: 'cc-by-4.0'},
     rows: [{pageIndex: 4, before: '0.95\u0000', after: '0.50', defectType: 'number', reason: '표의 점수'}],
   }).code, 'invalid_request');
@@ -120,29 +117,34 @@ test('submission bodies use only contract keys and reject nickname PII', () => {
   assert.equal(form.get('pdf').name, 'edited.pdf');
   assert.equal(form.get('pdf').size, EDITED.length);
   const bare = booth.buildSubmission({
-    course: 'deep', consent: true, editedSha256: EDITED_SHA,
+    course: 'deep', consentVersion: 'v', editedSha256: EDITED_SHA,
     rows: [{pageIndex: 0, before: 'a', after: 'b', defectType: 'other', reason: '이유'}],
   });
   assert.deepEqual(plain(bare), {ok: false, code: 'paper_not_allowed'});
   assert.equal(booth.buildSubmission({
-    course: 'quick', consent: true, editedSha256: EDITED_SHA,
+    course: 'quick', consentVersion: 'v', editedSha256: EDITED_SHA,
     paper: {source: 'upload', id: 'local', title: 'Uploaded', license: 'cc-by'},
     rows: [{pageIndex: 0, before: 'a', after: 'b', defectType: 'other', reason: '이유'}],
   }).code, 'paper_not_allowed');
-  assert.equal(booth.buildSubmission({course: 'quick', consent: false, editedSha256: EDITED_SHA,
+  assert.equal(booth.buildSubmission({course: 'quick', editedSha256: EDITED_SHA,
     paper: {source: 'arxiv', id: '2503.10497', license: 'cc-by-4.0'},
-    rows: [{pageIndex: 0, before: 'a', after: 'b', defectType: 'other', reason: '이유'}]}).code, 'invalid_request');
+    rows: [{pageIndex: 0, before: 'a', after: 'b', defectType: 'other', reason: '이유'}]}).code, 'invalid_request', 'no consentVersion');
+  const optional = booth.buildSubmission({course: 'quick', consentVersion: 'v', editedSha256: EDITED_SHA,
+    paper: {source: 'arxiv', id: '2503.10497', license: 'cc-by-4.0'},
+    rows: [{pageIndex: 0, before: 'a', after: 'b', defectType: '', reason: '  '}, {pageIndex: 1, before: 'c', after: 'd'}]});
+  assert.equal(optional.ok, true, 'type and reason are optional');
+  assert.deepEqual(plain(optional.body.declared.map(item => [item.defectType, item.reason])), [['other', booth.NO_REASON], ['other', booth.NO_REASON]]);
   assert.equal(booth.buildSubmission({course: 'quick', consent: true,
     paper: {source: 'arxiv', id: '2503.10497', license: 'cc-by-4.0', sourceSha256: SHA},
     rows: [{pageIndex: 0, before: 'a', after: 'b', defectType: 'other', reason: '이유'}]}).code, 'invalid_request');
-  assert.equal(booth.buildSubmission({course: 'quick', consent: true, editedSha256: SHA,
+  assert.equal(booth.buildSubmission({course: 'quick', consentVersion: 'v', editedSha256: SHA,
     paper: {source: 'arxiv', id: '2503.10497', license: 'cc-by-4.0', sourceSha256: SHA},
     rows: [{pageIndex: 0, before: 'a', after: 'b', defectType: 'other', reason: '이유'}]}).code, 'pdf_unchanged');
   const six = Array.from({length: 6}, (_, index) => ({
     pageIndex: index, before: 'before ' + index, after: 'after', defectType: 'other', reason: '이유',
   }));
   assert.equal(booth.buildSubmission({
-    course: 'quick', consent: true, editedSha256: EDITED_SHA,
+    course: 'quick', consentVersion: 'v', editedSha256: EDITED_SHA,
     paper: {source: 'arxiv', id: '2503.10497', license: 'cc-by-4.0'},
     rows: six,
   }).code, 'invalid_request');
@@ -150,19 +152,17 @@ test('submission bodies use only contract keys and reject nickname PII', () => {
     pageIndex: index, before: 'before ' + index, after: 'after', defectType: 'other', reason: '이유',
   }));
   assert.equal(booth.buildSubmission({
-    course: 'quick', consent: true, editedSha256: EDITED_SHA,
+    course: 'quick', consentVersion: 'v', editedSha256: EDITED_SHA,
     paper: {source: 'arxiv', id: '2503.10497', license: 'cc-by-4.0'},
     limits: {maxDeclared: 8, maxPdfBytes: 16777216, perOwner: 2},
     rows: eight,
   }).ok, true);
   assert.equal(booth.buildSubmission({
-    course: 'quick', consent: true, editedSha256: EDITED_SHA,
+    course: 'quick', consentVersion: 'v', editedSha256: EDITED_SHA,
     paper: {source: 'arxiv', id: '2503.10497', license: 'cc-by-4.0'},
     limits: {maxDeclared: 8},
     rows: eight.concat([{pageIndex: 8, before: 'before 8', after: 'after', defectType: 'other', reason: '이유'}]),
   }).code, 'invalid_request');
-  assert.equal(booth.CONSENT_COPY['2026-11-22.v1'], '제출한 수정본 PDF와 결함 설명(쪽·유형·이유)은 가짜연구소 Falsify 스터디가 저장하고 운영자가 읽습니다. 마감 후 AI 검증에는 수정본 PDF만 모델 제공자(Anthropic 또는 OpenAI)에 보내며, 결함 설명은 AI에 보내지 않습니다. 이름·연락처는 받지 않으니 이유란에도 적지 마세요. 원 논문은 미션이나 검색에서 고른 공개 논문(CC BY·CC BY-SA·CC0)이며, 수정본을 스터디 밖에 공개할 때는 저자·arXiv 번호·라이선스와 수정 사실을 밝히고, CC BY-SA 논문의 수정본은 같은 라이선스로 공개합니다. 결과와 경품 안내는 접수번호와 확인키로만 확인할 수 있습니다. 확인키로 언제든 철회할 수 있습니다. 철회하면 서버의 수정본 PDF·설명·결과를 바로 지우고, 운영자 보관본은 다음 동기화 때 지웁니다. 이미 AI 검증에 보낸 사본은 모델 제공자에게서 회수할 수 없고, 웹 실행 서버 사본은 7일, 데이터베이스 백업은 최대 30일 뒤에 사라집니다. 보관 자료는 스터디 종료 후 삭제합니다.');
-  assert.equal(booth.CONSENT_COPY['2026-11-22.v1'].includes('2026-11-22.v1'), false);
 });
 
 test('the R4-2 interop vector is the edited.pdf part', async () => {
@@ -171,7 +171,7 @@ test('the R4-2 interop vector is the edited.pdf part', async () => {
   assert.equal(interop.length, 109);
   assert.equal(createHash('sha256').update(interop).digest('hex'), interopSha);
   const built = booth.buildSubmission({
-    course: 'quick', consent: true, editedSha256: interopSha,
+    course: 'quick', consentVersion: 'v', editedSha256: interopSha,
     paper: {source: 'arxiv', id: '2503.10497', title: 'Synthetic title', license: 'cc-by-4.0', sourceSha256: SHA},
     rows: [{pageIndex: 0, before: 'a', after: 'b', defectType: 'other', reason: '이유'}],
   });
@@ -226,10 +226,9 @@ test('this device keeps at most 10 receipts', () => {
 test('server error codes become the booth messages', () => {
   const expected = {
     booth_closed: '접수 시간이 아니에요',
-    consent_outdated: '동의 문구가 바뀌었어요',
+    consent_outdated: '부스 설정이 바뀌었어요',
     job_not_ready: '아직 만드는 중',
     already_submitted: '이미 제출한',
-    pii_not_allowed: '닉네임으로 적어',
     rate_limited: '요청이 몰려',
     license_not_allowed: '라이선스',
     payload_too_large: '너무 커서',
@@ -505,10 +504,6 @@ function declare(h, label, reason, row = 0) {
   if (label) chip(h, label, row).click();
   nodesOf(cards[row]).find(node => node.tagName === 'textarea').value = reason;
 }
-function agree(h) {
-  h.ids.get('booth-consent').checked = true;
-  h.ids.get('booth-consent').dispatchEvent({type: 'change'});
-}
 async function submit(h) {
   h.ids.get('booth-submit').dispatchEvent({type: 'submit', preventDefault() {}});
   await settle();
@@ -525,7 +520,7 @@ async function reachSend(h, edits = ONE_EDIT) {
 async function submitThroughBooth(h) {
   await reachSend(h);
   declare(h, '수치·통계', '평균을 바꿨습니다');
-  agree(h);
+  
   await submit(h);
 }
 
@@ -668,7 +663,10 @@ test('다음 runs blind-pdf then FalsifyBrowserPdf.rewrite directly, hashes the 
   assert.equal(nodesOf(diff).find(node => node.tagName === 'del').textContent, '4.2');
   assert.equal(nodesOf(diff).find(node => node.tagName === 'ins').textContent, '5.8');
   assert.equal(diff.textContent, 'The mean was 4.25.8 (SD 1.1).');
-  assert.match(card.textContent, /이 설명은 AI에게 보내지 않고 운영진만 봐요\./);
+  assert.doesNotMatch(card.textContent, /운영진만/);
+  assert.match(card.textContent, /어떤 결함인가요 \(선택\)/);
+  assert.equal(h.ids.get('booth-consent'), undefined);
+  assert.equal(h.ids.get('booth-nickname'), undefined);
   assert.equal(h.ids.get('booth-courses'), undefined);
   assert.equal(h.ids.get('booth-make'), undefined);
   assert.equal(h.ids.get('booth-remake'), undefined, 'no #booth-remake button');
@@ -754,7 +752,7 @@ test('blind-pdf strips an untrusted source before rewrite while preserving origi
   await waitFor(() => h.step() === 'send');
   assert.deepEqual(ws.rewrites[0].bytes, cleaned, 'rewrite receives cleaned bytes');
   declare(h, '수치·통계', '값을 바꿨습니다');
-  agree(h);
+  
   await submit(h);
   const posted = h.calls.find(call => call.path.endsWith('/v1/booth/submissions'));
   const meta = JSON.parse(posted.form.get('meta'));
@@ -767,7 +765,7 @@ test('editing BoothEdits while on send rebuilds automatically before submit', as
   await settle();
   const ws = await reachSend(h);
   declare(h, '수치·통계', '값을 바꿨어요');
-  agree(h);
+  
   boothEdits.update('e-1', AFTER + '9');
   await submit(h);
   assert.equal(ws.rewrites.length, 2, 'rebuilt automatically for updated edit');
@@ -784,7 +782,7 @@ test('declared payload strips C0 control chars and trims to 2000 code points whi
   assert.equal(ws.rewrites[0].edits[0].originalText, rawBefore, 'rewrite keeps full originalText');
   assert.equal(ws.rewrites[0].edits[0].newText, rawAfter, 'rewrite keeps full newText');
   declare(h, '수치·통계', '긴 문단을 바꿨어요');
-  agree(h);
+  
   await submit(h);
   assert.equal(h.step(), 'ticket');
   const posted = h.calls.find(call => call.path.endsWith('/v1/booth/submissions'));
@@ -823,7 +821,7 @@ test('dock count button opens #booth-dock-pop with delete buttons even at 6 edit
 });
 
 test('a lost or refused session at submit is minted again and retried in place', async () => {
-  const fill = h => { agree(h); chip(h, '수치·통계').click(); declare(h, '', '유의수준을 바꿔 결론이 성립하지 않음'); h.ids.get('booth-nickname').value = '부스방문자'; };
+  const fill = h => { chip(h, '수치·통계').click(); declare(h, '', '유의수준을 바꿔 결론이 성립하지 않음'); };
   const once = liveBooth({submits: [{status: 401, body: {error: {code: 'unauthorized'}}}]});
   await settle();
   await reachSend(once);
@@ -851,19 +849,18 @@ test('send declares chips and reasons and posts only the contract fields', async
   const chips = nodesOf(h.ids.get('booth-rows')).filter(node => node.tagName === 'button' && node.className.startsWith('booth-chip'));
   assert.deepEqual(chips.map(node => node.textContent), ['수치·통계', '그림·표', '인용·출처', '논리·결론', '방법·실험 설계', '기타']);
   assert.equal(chips.every(node => node.getAttribute('aria-pressed') === 'false'), true);
-  agree(h);
+  
   assert.equal(h.ids.get('booth-submit-button').disabled, false);
   assert.equal(h.text('booth-submit-button'), 'AI에게 제출하기');
-  await submit(h);
-  assert.equal(h.text('booth-submit-status'), '고친 곳마다 결함 유형을 고르고 이유를 적어 주세요.');
-  assert.equal(h.calls.some(call => call.path.endsWith('/v1/booth/submissions')), false);
+  chip(h, '그림·표').click();
+  chip(h, '그림·표').click();
+  assert.equal(chip(h, '그림·표').getAttribute('aria-pressed'), 'false', 'a second tap clears the type');
   chip(h, '그림·표').click();
   chip(h, '수치·통계').click();
   assert.equal(chip(h, '수치·통계').className, 'booth-chip on');
   assert.equal(chip(h, '수치·통계').getAttribute('aria-pressed'), 'true');
   assert.equal(chip(h, '그림·표').className, 'booth-chip');
   declare(h, '', '유의수준을 바꿔 결론이 성립하지 않음');
-  h.ids.get('booth-nickname').value = '부스방문자';
   await submit(h);
   assert.equal(h.text('booth-submit-status'), '수정본 PDF는 16MB까지 제출할 수 있어요.');
   assert.equal(h.step(), 'send');
@@ -875,7 +872,7 @@ test('send declares chips and reasons and posts only the contract fields', async
   assert.equal(posted.contentType, '');
   assert.deepEqual([...posted.form.keys()], ['meta', 'pdf']);
   const meta = JSON.parse(posted.form.get('meta'));
-  assert.deepEqual(Object.keys(meta), ['course', 'declared', 'paper', 'nickname', 'consentVersion', 'editedSha256']);
+  assert.deepEqual(Object.keys(meta), ['course', 'declared', 'paper', 'consentVersion', 'editedSha256']);
   assert.equal(meta.course, 'quick');
   assert.equal(meta.consentVersion, '2026-11-22.v2');
   assert.equal(meta.editedSha256, EDITED_SHA);
@@ -893,40 +890,23 @@ test('send declares chips and reasons and posts only the contract fields', async
   h.handle.destroy();
 });
 
-test('consent shows a three-line summary, the full versioned text and refuses unknown versions', async () => {
+test('send has no consent box or nickname; empty type and reason still submit', async () => {
   const h = liveBooth();
   await settle();
   await reachSend(h);
-  const lines = nodesOf(h.ids.get('booth-consent-summary')).filter(node => node.tagName === 'li').map(node => node.textContent);
-  assert.deepEqual(lines, ['수정본 PDF만 AI(Anthropic)에 보내요.', '이름·연락처는 받지 않아요.', '확인키로 언제든 철회할 수 있어요.']);
-  assert.equal(h.ids.get('booth-consent-full').tagName, 'details');
-  assert.match(h.text('booth-consent-full'), /^동의 내용 전체 보기/);
-  assert.equal(h.text('booth-consent-copy'), booth.CONSENT_COPY['2026-11-22.v2']);
-  assert.equal(h.text('booth-consent-version'), '동의 버전 · 2026-11-22.v2');
-  assert.match(h.text('booth-consent-panel'), /동의 내용을 읽었고 동의해요$/);
-  assert.equal(h.ids.get('booth-submit-button').disabled, true);
-  agree(h);
+  assert.equal(h.ids.get('booth-consent'), undefined);
+  assert.equal(h.ids.get('booth-consent-panel'), undefined);
+  assert.equal(h.ids.get('booth-nickname'), undefined);
+  assert.doesNotMatch(h.text('booth-submit'), /동의|별명|운영진만/);
   assert.equal(h.ids.get('booth-submit-button').disabled, false);
+  await submit(h);
+  const posts = h.calls.filter(call => call.path.endsWith('/v1/booth/submissions'));
+  assert.equal(posts.length, 1);
+  const meta = JSON.parse(posts[0].form.get('meta'));
+  assert.equal(meta.consentVersion, '2026-11-22.v2');
+  assert.deepEqual(plain(meta.declared.map(item => [item.defectType, item.reason])), [['other', booth.NO_REASON]]);
+  assert.equal(h.step(), 'ticket');
   h.handle.destroy();
-  const old = liveBooth({consentVersion: '2026-11-22.v1'});
-  await settle();
-  assert.equal(old.text('booth-consent-copy'), booth.CONSENT_COPY['2026-11-22.v1']);
-  assert.match(old.text('booth-consent-summary'), /마감 후 AI\(Anthropic 또는 OpenAI\)/);
-  old.handle.destroy();
-  const unknown = liveBooth({consentVersion: '2026-11-22.v9'});
-  await settle();
-  assert.equal(unknown.text('booth-consent-copy'), '동의 문구가 새로 바뀌었어요. 페이지를 새로 고친 뒤 제출해 주세요.');
-  assert.match(unknown.text('booth-consent-summary'), /동의 문구가 새로 바뀌었어요/);
-  assert.equal(unknown.text('booth-consent-version'), '');
-  assert.equal(unknown.ids.get('booth-consent').disabled, true);
-  await submitThroughBooth(unknown);
-  assert.equal(unknown.calls.some(call => call.path.endsWith('/v1/booth/submissions')), false);
-  assert.match(unknown.text('booth-submit-status'), /동의 문구가 새로 바뀌었어요/);
-  assert.equal(unknown.ids.get('booth-submit-button').disabled, true);
-  unknown.handle.destroy();
-  assert.deepEqual(plain(booth.consentSummaryFor('2026-11-22.v2')), lines);
-  assert.deepEqual(plain(booth.consentSummaryFor('2026-11-22.v9')), []);
-  assert.deepEqual(plain(booth.consentSummaryFor('toString')), []);
 });
 
 test('the ticket polls the claim view until the AI result is published', async () => {
@@ -996,7 +976,6 @@ test('the ticket polls the claim view until the AI result is published', async (
   assert.equal(h.step(), 'pick');
   assert.equal(h.ids.get('booth-receipt').hidden, true);
   assert.equal(h.ids.get('booth-submit').hidden, true);
-  assert.equal(h.ids.get('booth-consent').checked, false);
   assert.equal(h.ids.get('booth-rows').textContent, '');
   assert.equal(h.ids.get('booth-missions').hidden, false);
   assert.equal(h.ids.get('booth-landing').hidden, false);
@@ -1299,19 +1278,19 @@ test('the desktop dock lists each BoothEdit as a chip, deletes via FalsifyBoothE
   h.handle.destroy();
 });
 
-test('the desktop send ticket holds the consent and submit nodes and sums up the paper', async () => {
+test('the desktop send ticket holds the submit nodes and sums up the paper', async () => {
   const h = liveBooth();
   await settle();
   await reachSend(h, [ONE_EDIT[0], makeBoothEdit({id: 'e-2', pageIndex: 3, originalText: BEFORE_2, newText: AFTER_2})]);
   const side = h.ids.get('booth-send-ticket');
   const inside = new Set(nodesOf(side));
-  for (const id of ['booth-consent-panel', 'booth-consent', 'booth-submit-button', 'booth-submit-status']) assert.equal(inside.has(h.ids.get(id)), true, id);
+  for (const id of ['booth-submit-button', 'booth-submit-status']) assert.equal(inside.has(h.ids.get(id)), true, id);
   assert.equal(nodesOf(h.ids.get('booth-submit')).filter(node => node.id === 'booth-submit-button').length, 1);
   assert.match(h.text('booth-send-ticket'), /^Submission논문/);
   assert.equal(h.text('booth-send-paper'), 'Synthetic mission: a longer subtitle');
   assert.equal(h.text('booth-send-count'), '2곳 · 2, 4쪽');
   assert.equal(h.text('booth-send-chances'), '5번');
-  assert.match(h.text('booth-submit'), /숨긴 결함을 알려 주세요/);
+  assert.match(h.text('booth-submit'), /숨긴 결함을 확인해요/);
   h.handle.destroy();
 });
 
@@ -1627,8 +1606,6 @@ test('a cold #booth-result load mints the guest session only for paper and submi
   await waitFor(() => cold.doc.documentElement.dataset.boothStep === 'send');
   nodesOf(cold.ids.get('booth-rows')).find(node => node.tagName === 'button' && node.textContent === '수치·통계').click();
   nodesOf(cold.ids.get('booth-rows')).find(node => node.tagName === 'textarea').value = '유의수준을 바꿔 결론이 성립하지 않음';
-  cold.ids.get('booth-consent').checked = true;
-  cold.ids.get('booth-consent').dispatchEvent({type: 'change'});
   cold.ids.get('booth-submit').dispatchEvent({type: 'submit', preventDefault() {}});
   await settle();
   assert.equal(guestCalls.filter(call => call.url.endsWith('/v1/ai/guest')).length, 1);
@@ -1764,40 +1741,6 @@ test('the claim poll runs every 15 s for 3 min, every 30 s to 15 min, and honour
   assert.equal(booth.retryAfterMs('Sun, 22 Nov 2026 00:59:00 GMT', at), 0);
   assert.equal(booth.retryAfterMs('soon', at), 0);
   assert.equal(booth.retryAfterMs(null, at), 0);
-});
-
-test('consent shows no text until the server names its version, so no older copy flashes', async () => {
-  let open;
-  const configGate = new Promise(resolve => { open = resolve; });
-  const h = liveBooth({consentVersion: '2026-11-22.v3', configGate});
-  await settle();
-  assert.equal(h.text('booth-consent-copy'), '');
-  assert.equal(h.text('booth-consent-version'), '');
-  assert.equal(h.text('booth-consent-summary'), '');
-  assert.equal(h.text('booth-consent-panel').includes('OpenAI'), false);
-  assert.equal(h.ids.get('booth-consent').disabled, true);
-  assert.equal(h.ids.get('booth-consent').checked, false);
-  open();
-  await settle();
-  assert.equal(h.text('booth-consent-copy'), booth.CONSENT_COPY['2026-11-22.v3']);
-  assert.equal(h.text('booth-consent-version'), '동의 버전 · 2026-11-22.v3');
-  assert.match(h.text('booth-consent-summary'), /^수정본 PDF만 AI\(Anthropic\)에 보내요\./);
-  assert.equal(h.ids.get('booth-consent').disabled, false);
-  h.handle.destroy();
-});
-
-test('consent copy is a map keyed by version and an unknown version has no text', () => {
-  assert.deepEqual(Object.keys(booth.CONSENT_COPY), ['2026-11-22.v1', '2026-11-22.v2', '2026-11-22.v3']);
-  assert.equal(booth.consentCopyFor('2026-11-22.v1'), booth.CONSENT_COPY['2026-11-22.v1']);
-  assert.equal(booth.consentCopyFor('2026-11-22.v2'), '제출한 수정본 PDF와 결함 설명(쪽·유형·이유)은 가짜연구소 Falsify 스터디가 저장하고 운영자가 읽습니다. 제출하면 바로 수정본 PDF만 AI 검증을 위해 모델 제공자(Anthropic)에 보내고, 마감 후 한 번 더 보낼 수 있습니다. 결함 설명은 AI에 보내지 않습니다. 이름·연락처는 받지 않으니 이유란에도 적지 마세요. 원 논문은 미션이나 검색에서 고른 공개 논문(CC BY·CC BY-SA·CC0)이며, 수정본을 스터디 밖에 공개할 때는 저자·arXiv 번호·라이선스와 수정 사실을 밝히고, CC BY-SA 논문의 수정본은 같은 라이선스로 공개합니다. AI 결과와 경품 안내는 접수번호와 확인키로만 확인할 수 있습니다. 확인키로 언제든 철회할 수 있습니다. 철회하면 서버의 수정본 PDF·설명·결과를 바로 지우고, 운영자 보관본은 다음 동기화 때 지웁니다. 이미 AI 검증에 보낸 사본은 모델 제공자에게서 회수할 수 없고, 웹 실행 서버 사본은 7일, 데이터베이스 백업은 최대 30일 뒤에 사라집니다. 보관 자료는 스터디 종료 후 삭제합니다.');
-  assert.equal(booth.consentCopyFor('2026-11-22.v3'), '제출한 수정본 PDF와 결함 설명(쪽·유형·이유)은 가짜연구소 Falsify 스터디가 저장하고 운영자가 읽어요. 제출하면 수정본 PDF만 AI 검증을 위해 모델 제공자(Anthropic)에 바로 보내고, 마감 후 한 번 더 보낼 수 있어요. 결함 설명은 AI에 보내지 않아요. 이름과 연락처는 받지 않으니, 이유란에는 결함 설명만 적어 주세요. 원 논문은 미션이나 검색에서 고른 공개 논문(CC BY, CC BY-SA, CC0)이에요. 수정본을 스터디 밖에 공개할 때는 저자, arXiv 번호, 라이선스와 수정 사실을 밝히고, CC BY-SA 논문의 수정본은 같은 라이선스로 공개해요. AI 결과와 경품 안내는 접수번호와 확인키로만 볼 수 있어요. 확인키로 언제든 철회할 수 있어요. 철회하면 서버의 수정본 PDF, 설명, 결과를 바로 지우고, 운영자 보관본은 다음 동기화 때 지워요. 이미 AI 검증에 보낸 사본은 모델 제공자에게서 회수할 수 없어요. 웹 실행 서버 사본은 7일, 데이터베이스 백업은 최대 30일 뒤에 사라져요. 보관 자료는 스터디가 끝나면 삭제해요.');
-  assert.equal(booth.consentCopyFor('2026-11-22.v3').includes('OpenAI'), false);
-  assert.deepEqual(Object.keys(booth.CONSENT_SUMMARY), ['2026-11-22.v1', '2026-11-22.v2', '2026-11-22.v3']);
-  assert.deepEqual(plain(booth.consentSummaryFor('2026-11-22.v3')), plain(booth.consentSummaryFor('2026-11-22.v2')));
-  assert.equal(booth.consentCopyFor('2026-11-22.v4'), '');
-  assert.equal(booth.consentCopyFor('toString'), '');
-  assert.equal(booth.consentCopyFor(undefined), '');
-  assert.equal(booth.CONSENT_VERSION, '2026-11-22.v1');
 });
 
 test('the result view lists this browser\'s newest 5 receipts', () => {

@@ -15,7 +15,7 @@ const api = 'https://falsify-cloud-api-event.ai-gongbu.workers.dev';
 const port = Number(process.env.BOOTH_EVENT_PORT || 8877);
 const token = 'fsg_' + 'a'.repeat(43);
 const pdfBytes = fs.readFileSync(pdfPath);
-/* Optional: BOOTH_SHOT_DIR saves pick, send-consent, ticket-missed and withdraw-confirm screenshots per viewport. */
+/* Optional: BOOTH_SHOT_DIR saves pick, send, ticket-missed and withdraw-confirm screenshots per viewport. */
 const shotDir = process.env.BOOTH_SHOT_DIR || '';
 
 async function shot(page, name, viewport) {
@@ -285,20 +285,15 @@ async function walk(browser, viewport, desk, pageErrors) {
   assert.equal(await card.locator('del').textContent(), '0.95');
   assert.equal(await card.locator('ins').textContent(), '0.50');
   assert.equal((await card.locator('.booth-diff').textContent()).length < 80, true, 'diff shows only the changed region');
-  assert.match(await card.textContent(), /이 설명은 AI에게 보내지 않고 운영진만 봐요\./);
+  assert.doesNotMatch(await card.textContent(), /운영진만/);
+  assert.match(await card.textContent(), /어떤 결함인가요 \(선택\)/);
+  assert.match(await card.textContent(), /왜 결함인가요 \(선택\)/);
   await card.getByRole('button', {name: '수치·통계'}).click();
   assert.equal(await card.getByRole('button', {name: '수치·통계'}).getAttribute('aria-pressed'), 'true');
   await card.locator('textarea').fill('표의 점수를 0.95에서 0.50으로 바꿨습니다');
-  assert.equal(await page.locator('#booth-consent-summary li').count(), 3);
-  assert.equal(await page.locator('#booth-consent-summary li').first().textContent(), '수정본 PDF만 AI(Anthropic)에 보내요.');
-  assert.equal(await page.locator('#booth-consent-copy').isVisible(), false);
-  await page.locator('#booth-consent-full summary').click();
-  assert.match(await page.locator('#booth-consent-copy').textContent(), /제출하면 수정본 PDF만 AI 검증을 위해 모델 제공자\(Anthropic\)에 바로 보내고/);
-  assert.doesNotMatch(await page.locator('#booth-consent-copy').textContent(), /OpenAI/);
-  assert.equal(await page.locator('#booth-consent-version').textContent(), '동의 버전 · 2026-11-22.v3');
-  await shot(page, 'send-consent', viewport);
-  assert.equal(await page.locator('#booth-submit-button').isDisabled(), true);
-  await page.locator('#booth-consent').check();
+  assert.equal(await page.locator('#booth-consent, #booth-consent-panel, #booth-nickname').count(), 0, 'send has no consent box or nickname field');
+  await shot(page, 'send', viewport);
+  assert.equal(await page.locator('#booth-submit-button').isDisabled(), false);
   assert.equal(await page.locator('#booth-submit-button').textContent(), 'AI에게 제출하기');
   await deskChecks(page, desk, 3);
   if (desk) {
@@ -444,7 +439,6 @@ async function walk(browser, viewport, desk, pageErrors) {
   assert.equal(await page.locator('#booth-receipt').isHidden(), true);
   assert.equal(await page.locator('#booth-submit').isHidden(), true);
   assert.equal(await page.locator('#booth-missions').isVisible(), true);
-  assert.equal(await page.locator('#booth-consent').isChecked(), false);
   assert.equal(await page.locator('#paper-file').inputValue(), '');
   await page.locator(desk ? '#booth-desk-records' : '#booth-result-link').click();
   await page.locator('#booth-receipts-list').getByRole('button', {name: /F-0042/}).waitFor();
