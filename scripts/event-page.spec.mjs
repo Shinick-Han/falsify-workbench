@@ -7,7 +7,7 @@ import {fileURLToPath} from 'node:url';
 import test from 'node:test';
 import vm from 'node:vm';
 import {
-  DEFAULT_EVENT_API_BASE, EVENT_TITLE_SUFFIX, eventApiOrigin, eventBytesDiffer, eventHtmlFromIndex,
+  BOOTH_SCRIPTS, BOOTH_STYLES, DEFAULT_EVENT_API_BASE, EVENT_TITLE_SUFFIX, eventApiOrigin, eventBytesDiffer, eventHtmlFromIndex,
   parseEventArgs, planEventFiles,
 } from './build-event-page.mjs';
 
@@ -25,10 +25,10 @@ function newlineOf(text) {
 }
 
 function stripBoothAssets(text, newline) {
+  const escape = name => name.replace(/[.]/g, '\\.');
   for (const pattern of [
-    / {2}<link rel="stylesheet" href="event-theme\.css\?v=[^"]+">/g,
-    / {2}<link rel="stylesheet" href="booth\.css\?v=[^"]+">/g,
-    / {2}<script src="booth\.js\?v=[^"]+" defer><\/script>/g,
+    ...BOOTH_STYLES.map(name => new RegExp(` {2}<link rel="stylesheet" href="${escape(name)}\\?v=[^"]+">`, 'g')),
+    ...BOOTH_SCRIPTS.map(name => new RegExp(` {2}<script src="${escape(name)}\\?v=[^"]+" defer><\\/script>`, 'g')),
   ]) {
     const found = text.match(pattern) || [];
     assert.ok(found.length <= 1);
@@ -150,6 +150,9 @@ test('committed event page matches index.html except the four event edits', () =
   const boothCssAt = event.indexOf('booth.css?v=');
   assert.ok(themeAt > hostedAt && boothCssAt > themeAt, 'event-theme.css loads before booth.css');
   assert.equal(count(event, 'event-theme.css'), 1);
+  const order = [...BOOTH_STYLES, ...BOOTH_SCRIPTS].map(name => event.indexOf(`"${name}?v=`));
+  assert.ok(order.every((at, i) => at > hostedAt && (i === 0 || at > order[i - 1])), 'booth assets keep the contract order');
+  for (const name of ['booth-recipe', 'booth-myai']) assert.equal(index.includes(name), false, name + ' stays off index.html');
 });
 
 test('event HTML injects the event theme, then booth assets, after hosted-ai.js only', () => {
@@ -160,7 +163,11 @@ test('event HTML injects the event theme, then booth assets, after hosted-ai.js 
     `<script src="hosted-ai.js?v=${version}" defer></script>`,
     `  <link rel="stylesheet" href="event-theme.css?v=${version}">`,
     `  <link rel="stylesheet" href="booth.css?v=${version}">`,
+    `  <link rel="stylesheet" href="booth-recipe.css?v=${version}">`,
+    `  <link rel="stylesheet" href="booth-myai.css?v=${version}">`,
     `  <script src="booth.js?v=${version}" defer></script>`,
+    `  <script src="booth-recipe.js?v=${version}" defer></script>`,
+    `  <script src="booth-myai.js?v=${version}" defer></script>`,
   ].join('\n');
   assert.ok(planned.html.includes(injected));
   assert.equal(count(index, 'booth.js'), 0);

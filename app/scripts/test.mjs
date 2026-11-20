@@ -12,6 +12,7 @@ const exemptions = new Map(Object.entries({
   'ledger-import.spec.cjs': 'manual browser harness',
   'paper-navigation.spec.cjs': 'manual browser harness',
   'booth-event-browser.spec.cjs': 'manual browser harness',
+  'booth-recipe-browser.spec.cjs': 'manual browser harness',
   'event-theme-browser.spec.cjs': 'manual browser harness',
   'booth-myai-browser.spec.cjs': 'manual browser harness',
   'paper-hidpi-browser.spec.cjs': 'manual browser harness',
@@ -49,7 +50,7 @@ const latex = spawnSync(process.execPath, ['--test','tests/latex-source-project.
 if(latex.error || latex.status!==0)process.exit(latex.status||1);
 const runtime = spawnSync(process.execPath, ['--test','tests/latex-runtime-catalog.spec.mjs'], {stdio:'inherit'});
 if(runtime.error || runtime.status!==0)process.exit(runtime.status||1);
-const hostedAi = spawnSync(process.execPath, ['--test','tests/hosted-ai.spec.mjs','tests/open-access.spec.mjs','tests/hosted-paper-session.spec.mjs','tests/hosted-paper-panels.spec.mjs','tests/ux-phase1.spec.mjs','tests/ux-phase2.spec.mjs','tests/booth.spec.mjs','tests/booth-myai.spec.mjs'], {stdio:'inherit'});
+const hostedAi = spawnSync(process.execPath, ['--test','tests/hosted-ai.spec.mjs','tests/open-access.spec.mjs','tests/hosted-paper-session.spec.mjs','tests/hosted-paper-panels.spec.mjs','tests/ux-phase1.spec.mjs','tests/ux-phase2.spec.mjs','tests/booth.spec.mjs','tests/booth-myai.spec.mjs','tests/booth-recipe.spec.mjs'], {stdio:'inherit'});
 if(hostedAi.error || hostedAi.status!==0)process.exit(hostedAi.status||1);
 const layoutAudit = spawnSync(process.execPath, ['--test','tests/latex-layout-audit.spec.mjs'], {stdio:'inherit'});
 if(layoutAudit.error || layoutAudit.status!==0)process.exit(layoutAudit.status||1);

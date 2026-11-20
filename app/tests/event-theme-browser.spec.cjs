@@ -168,6 +168,8 @@ async function main() {
       return hits.length ? hits[0].index : -1;
     });
     assert.ok(paragraphIndex >= 0);
+    // booth-recipe.js keeps the paragraph list collapsed under 「문단 목록에서 고르기」.
+    if (await page.locator('#booth-find-list').count()) await page.locator('#booth-find-list').click();
     const paragraph = page.locator('.paper-paragraph-button').nth(paragraphIndex);
     const card = await paragraph.boundingBox();
     assert.ok(card && card.height >= 44, 'paragraph card is shorter than 44px');
