@@ -56,15 +56,24 @@ function serve(route) {
   return route.fulfill({status: 200, contentType: file.endsWith('.css') ? 'text/css' : 'text/javascript', body: fs.readFileSync(file)});
 }
 
-async function open(browser, viewport, clipboard) {
+async function open(browser, viewport, clipboard, share = false) {
   const context = await browser.newContext({viewport, deviceScaleFactor: 2, hasTouch: viewport.width < 600, isMobile: viewport.width < 600});
   await context.route('**/*', serve);
-  await context.addInitScript(mode => {
+  await context.addInitScript(([mode, share]) => {
     window.__clip = [];
+    window.__shared = [];
+    window.__shareMode = 'ok';
+    if (share) {
+      Object.defineProperty(navigator, 'share', {configurable: true, value: data => {
+        window.__shared.push(data);
+        return window.__shareMode === 'abort' ? Promise.reject(new DOMException('cancel', 'AbortError')) : Promise.resolve();
+      }});
+      Object.defineProperty(navigator, 'canShare', {configurable: true, value: data => !!data && typeof data.text === 'string'});
+    }
     const writeText = mode === 'deny' ? () => Promise.reject(new DOMException('denied', 'NotAllowedError')) : text => { window.__clip.push(text); return Promise.resolve(); };
     Object.defineProperty(navigator, 'clipboard', {configurable: true, value: {writeText}});
     if (mode === 'deny') document.execCommand = () => false;
-  }, clipboard);
+  }, [clipboard, share]);
   const page = await context.newPage();
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -107,8 +116,11 @@ async function checkCopy(page) {
   assert.match(copied, /Table 1의 점수 하나를 바꿔 보세요/, 'hint from #booth-hint');
   assert.ok(copied.includes('Ragas 0.95 0.78 0.70'), 'page 5 text');
   assert.match(copied, /"source": "my-ai"/);
-  assert.match(await page.locator('#booth-myai-copy-status').textContent(), /복사했어요/);
+  assert.equal(await page.locator('#booth-myai-copy-status').textContent(),
+    '복사됐어요. ChatGPT·Claude·Gemini 앱에 붙여 넣고, 답을 길게 눌러 전부 복사해 오세요.');
+  assert.equal(await page.locator('#booth-myai-copy').textContent(), '복사됨 ✓');
   assert.equal(await page.locator('#booth-myai-full').isVisible(), false);
+  await page.waitForFunction(() => document.querySelector('#booth-myai-copy').textContent === '다시 복사', null, {timeout: 4000});
   await page.getByRole('button', {name: 'English'}).click();
   await page.locator('#booth-myai-copy').click();
   await page.waitForFunction(() => window.__clip.length === 2);
@@ -117,10 +129,13 @@ async function checkCopy(page) {
 }
 
 async function checkApply(page) {
+  assert.equal(await page.locator('#booth-myai-answer').getAttribute('placeholder'),
+    'AI 답 전체를 붙여 넣으세요. { "edits": … }가 들어 있으면 돼요. 앞뒤 설명은 괜찮아요.');
   await page.locator('#booth-myai-answer').fill(ANSWER);
   await page.locator('#booth-myai-apply').click();
   await page.locator('.booth-myai-count').waitFor();
-  assert.equal(await page.locator('.booth-myai-count').textContent(), '적용 1곳 · 확인 필요 1곳');
+  await page.waitForFunction(() => !document.querySelector('#booth-myai-apply').disabled);
+  assert.equal(await page.locator('.booth-myai-count').textContent(), '1곳 적용 · 1곳은 직접 골라 주세요');
   assert.match(await page.locator('#booth-myai-result').textContent(), /"0\.99 1\.00" · 원문에서 찾지 못했어요/);
   const calls = await page.evaluate(() => window.__calls);
   assert.equal(calls.assist.length, 1);
@@ -130,7 +145,46 @@ async function checkApply(page) {
   assert.equal(recipe.source, 'my-ai');
   assert.equal(recipe.paperId, '2309.15217');
   assert.deepEqual(recipe.edits[0], {page: 5, find: '0.95', replace: '0.50'});
-  assert.match(await page.locator('#booth-myai-diags').textContent(), /"0\.99 1\.00"를 그대로 찾지 못했어요/);
+  // P0-6: the find_missing warning is folded into the result card; the grey box is gone.
+  assert.equal(await page.locator('#booth-myai-diags').textContent(), '');
+  assert.equal(await page.locator('#booth-myai-diags').isVisible(), false);
+}
+
+async function checkZeroAndInterpretation(page) {
+  const one = JSON.stringify({edits: [{page: 5, find: '0.95', replace: '0.50'}], paperId: '2401.00001'});
+  await page.locator('#booth-myai-answer').fill(one);
+  await page.locator('#booth-myai-apply').click();
+  await page.waitForFunction(() => document.querySelector('.booth-myai-count')?.textContent === '1곳 적용했어요');
+  await page.waitForFunction(() => !document.querySelector('#booth-myai-apply').disabled);
+  // An interpretation fix (paperId corrected) keeps its one grey line.
+  const notes = await page.locator('#booth-myai-diags li').allTextContents();
+  assert.equal(notes.length, 1);
+  assert.match(notes[0], /다른 논문 번호\(2401\.00001\)/);
+  assert.equal(await page.locator('#booth-myai-diags').isVisible(), true);
+}
+
+async function checkShare(page, tag, expected) {
+  const button = page.locator('#booth-myai-share');
+  if (!expected) return assert.equal(await button.count(), 0, tag + ': share button only on phones with navigator.share');
+  assert.equal(await button.textContent(), 'AI 앱으로 보내기');
+  assert.equal(await page.locator('#booth-myai-copy').evaluate(n => n.className), 'booth-btn ink wide', 'copy stays primary');
+  assert.equal(await button.evaluate(n => n.className.includes('ink')), false, 'share is secondary');
+  const order = await page.evaluate(() => { const a = document.querySelector('#booth-myai-copy'); const b = document.querySelector('#booth-myai-share'); return !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING); });
+  assert.ok(order, 'share comes after copy');
+  const clips = await page.evaluate(() => window.__clip.length);
+  await button.click();
+  await page.waitForFunction(() => window.__shared.length === 1);
+  const shared = await page.evaluate(() => window.__shared[0]);
+  assert.deepEqual(Object.keys(shared), ['text']);
+  assert.ok(shared.text.includes('Ragas 0.95 0.78 0.70'));
+  await page.waitForFunction(n => window.__clip.length === n + 1, clips);
+  await page.waitForFunction(() => /^보냈어요\./.test(document.querySelector('#booth-myai-copy-status').textContent));
+  await page.locator('#booth-myai-copy').click();
+  await page.waitForFunction(() => /^복사됐어요/.test(document.querySelector('#booth-myai-copy-status').textContent));
+  await page.evaluate(() => { window.__shareMode = 'abort'; });
+  await button.click();
+  await page.waitForFunction(() => window.__shared.length === 2);
+  assert.match(await page.locator('#booth-myai-copy-status').textContent(), /^복사됐어요/, 'cancelling the share sheet keeps the status');
 }
 
 async function checkErrors(page) {
@@ -179,17 +233,21 @@ async function checkFallback(browser, viewport, tag) {
 }
 
 async function run(browser, viewport, tag) {
-  const {context, page, errors} = await open(browser, viewport, 'record');
+  const {context, page, errors} = await open(browser, viewport, 'record', true);
   try {
     await checkStepOne(page);
     assert.deepEqual(await targets(page), [], tag + ': tap targets under 44px');
     assert.ok(await overflow(page) <= 0, tag + ': horizontal overflow');
     await shot(page, 'step1-' + tag);
     await checkCopy(page);
+    await shot(page, 'step1-copied-' + tag);
+    await checkShare(page, tag, viewport.width < 600);
     await checkApply(page);
     assert.ok(await overflow(page) <= 0, tag + ': overflow after apply');
     await page.locator('#booth-myai-answer').scrollIntoViewIfNeeded();
     await shot(page, 'step2-applied-' + tag);
+    await checkZeroAndInterpretation(page);
+    await shot(page, 'step2-applied-zero-' + tag);
     await checkErrors(page);
     await page.locator('#booth-myai-answer').fill('{"edits": [{"find": "0.95" "replace": "0.50"}]}');
     await page.locator('#booth-myai-apply').click();
