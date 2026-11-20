@@ -857,6 +857,8 @@
         const query=find.value;
         state.list=query.trim()?searchHits(segments(),query,currentPage(),HIT_LIMIT):{total:0,more:0,items:[]};
         if(typed===true) say(status,query.trim()&&!state.list.total?'이 논문에서 찾지 못했어요.':'');
+        /* Paragraph text that arrives after typing (a superscript such as Ragas¹) can turn up the place: drop the stale note. */
+        else if(state.list.total&&status.textContent==='이 논문에서 찾지 못했어요.') say(status,'');
         paint();
       }
       /* After 「바꾸기」 met several places, or on a recipe row, the tap that picks a place applies it. */
@@ -1397,6 +1399,8 @@
     listeners.add((kind,entry)=>{if(kind==='applied') renderResult(entry);});
     doc.addEventListener('falsify:document-clear',resetResult);
     doc.addEventListener('falsify:paper-workspace-source',()=>{if(ui.tab==='find') main.render();});
+    /* A page's paragraph text can find what its layout text cannot (Ragas¹ typed as "Ragas 1"). */
+    doc.addEventListener('falsify:paper-workspace-paragraphs',()=>{if(ui.tab==='find') main.render();});
     root.addEventListener('hashchange',fromHash);
     root.addEventListener('resize',placeFind);
     placeFind();
