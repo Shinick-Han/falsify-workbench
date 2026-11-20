@@ -171,7 +171,7 @@ test('public note uses only the AI finding, page, quote and rationale', () => {
 
 test('watch: a full operator job cap (429) waits for a slot instead of failing the row', async () => {
   await withFake({ submissions: [caughtRow(1), missedRow(2), hiddenRow(3)], result: HOSTED, queued: true, activeCap: 1 }, async (fake, dir) => {
-    // Local concurrency 4 against a server cap of 1, like watch concurrency 12 against BOOTH_OPERATOR_ACTIVE_JOBS=2.
+    // Local concurrency 4 against a server cap of 1, like the old watch default 12 against BOOTH_OPERATOR_ACTIVE_JOBS=2.
     const config = writeConfig(dir, fake.url, { live: { retries: 0 } });
     const result = await run(['--config', config, 'watch', '--cycles', '1']);
     assert.equal(result.code, 0, result.stderr);
@@ -187,6 +187,47 @@ test('watch: a full operator job cap (429) waits for a slot instead of failing t
     assert.equal(end.done, 3);
     assert.equal(end.failed, 0);
     assert.match(result.stderr, /waiting for a free job slot/);
+  });
+});
+
+test('watch: an hourly job cap (Retry-After over 60 s) fails the row at once instead of waiting', async () => {
+  await withFake({ submissions: [caughtRow(1)], result: HOSTED, alwaysBusy: '1800' }, async (fake, dir) => {
+    const config = writeConfig(dir, fake.url, { live: { retries: 0 } });
+    const result = await run(['--config', config, 'watch', '--cycles', '1']);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(fake.state.busy429, 1, 'no second try against an hourly cap');
+    assert.doesNotMatch(result.stderr, /waiting for a free job slot/);
+    const end = jsonLines(result.stdout).at(-1);
+    assert.equal(end.failed, 1);
+  });
+});
+
+test('watch: no free job slot within pollTimeoutMs hands the row to the next cycle, not to failed', async () => {
+  await withFake({ submissions: [caughtRow(1)], result: HOSTED, alwaysBusy: '60' }, async (fake, dir) => {
+    const config = writeConfig(dir, fake.url, { blue: { pollTimeoutMs: 2600 }, live: { retries: 2 } });
+    const result = await run(['--config', config, 'watch', '--cycles', '1']);
+    assert.equal(result.code, 0, result.stderr);
+    assert.ok(fake.state.busy429 >= 2, 'waited for a slot ' + fake.state.busy429);
+    assert.equal(fake.state.newJobs, 0);
+    assert.match(result.stderr, /still waiting for a job slot; next cycle retries/);
+    assert.doesNotMatch(result.stderr, /attempt \d failed/, 'the retry budget is not spent on a full queue');
+    const end = jsonLines(result.stdout).at(-1);
+    assert.equal(end.failed, 0);
+    const item = find(fake, 'F-0001');
+    assert.equal(item.status, 'reviewing');
+    assert.ok(!fake.state.patches.some(patch => /live: failed/.test(JSON.stringify(patch))), 'no failed note');
+  });
+});
+
+test('watch: a job past pollTimeoutMs is cancelled so it stops holding a server slot', async () => {
+  await withFake({ submissions: [caughtRow(1)], result: HOSTED, queued: true, stuckJobs: true }, async (fake, dir) => {
+    const config = writeConfig(dir, fake.url, { blue: { pollTimeoutMs: 300 }, live: { retries: 0 } });
+    const result = await run(['--config', config, 'watch', '--cycles', '1']);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(fake.state.cancels, 1);
+    assert.match(result.stderr, /cancel requested/);
+    assert.equal([...fake.state.jobs.values()][0].state, 'cancelled');
+    assert.equal(jsonLines(result.stdout).at(-1).failed, 1);
   });
 });
 

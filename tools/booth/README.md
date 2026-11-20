@@ -28,7 +28,7 @@ node tools/booth/booth.mjs --config booth.local.json blue \
 
 같은 접수·프로파일·반복·설정·`pdfSha256` 은 항상 같은 idempotency 키(sha256)를 씁니다. 키에 넣는 해시는 운영자 목록의 `pdfSha256` 이고, 로컬 파일이 그 값과 다르면 올리지 않습니다. 끝난 작업은 로컬 기록을 다시 읽고, 기록이 없으면 서버가 같은 키를 재생합니다. 실패한 작업은 다시 과금하지 않습니다. 같은 PDF로 다시 돌리려면 프롬프트나 모델처럼 설정을 바꾸세요.
 
-`--concurrency` 는 이 프로세스 안의 동시 BLUE 작업 수입니다. 서버의 `BOOTH_OPERATOR_ACTIVE_JOBS` 와 같게 두세요. 서버 상한이 차서 작업 생성이 `429 rate_limited` 이면 실패로 세지 않고, 같은 업로드와 idempotency 키로 `pollIntervalMs` (기본 2000ms) 간격마다 빈자리를 기다립니다(`pollTimeoutMs` 까지).
+`--concurrency` 는 이 프로세스 안의 동시 BLUE 작업 수입니다. 서버의 `BOOTH_OPERATOR_ACTIVE_JOBS` 와 같게 두세요. 서버 상한이 차서 작업 생성이 `429 rate_limited` (Retry-After 60초 이하)이면 실패로 세지 않고, 같은 업로드와 idempotency 키로 `pollIntervalMs` (기본 2000ms, 최소 1000ms) 간격마다 빈자리를 기다립니다. `pollTimeoutMs` 안에 자리가 나지 않으면 `watch` 는 그 접수를 실패로 남기지 않고 다음 주기에 다시 잡습니다. 시간 단위 상한(Retry-After 60초 초과)은 기다리지 않고 바로 실패합니다. `pollTimeoutMs` 를 넘긴 작업은 취소를 요청해 서버 자리를 비우고, 다음 시도는 새 작업으로 돌립니다.
 
 ### 라이브 판정 (`live` 절)
 
@@ -37,7 +37,7 @@ node tools/booth/booth.mjs --config booth.local.json blue \
 | 키 | 기본값 | 뜻 |
 |---|---|---|
 | `liveProfile` / `finalProfile` | `live` / `final` | `watch` 와 `final` 이 쓸 프로파일 이름 |
-| `concurrency` | `12` | 동시 BLUE 작업 수. `--concurrency` 가 덮어씁니다 |
+| `concurrency` | `4` | 동시 BLUE 작업 수. 서버 `BOOTH_OPERATOR_ACTIVE_JOBS` (event 2, 코드 기본 4)와 같게 둡니다. 더 크면 남는 작업은 `reviewing` 상태로 자리만 기다립니다. `--concurrency` 가 덮어씁니다 |
 | `intervalSec` | `10` | 목록을 다시 읽는 간격(초). `--interval` 이 덮어씁니다 |
 | `retries` | `2` | BLUE·폴링 실패 때 추가 시도 횟수. 대기는 `retryBackoffMs` 에서 두 배씩 늘어납니다 |
 | `retryBackoffMs` | `5000` | 첫 재시도 전 대기(ms) |

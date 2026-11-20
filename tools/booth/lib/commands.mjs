@@ -386,9 +386,18 @@ export async function runBlue(io, client, dir, plan, task) {
   }
 }
 
-// The server caps active operator jobs (BOOTH_OPERATOR_ACTIVE_JOBS) and answers 429 rate_limited when they are
-// all busy. That is a full queue, not a failed job: wait for a slot and try again with the same upload and the
-// same idempotency key, so a rush never burns the retry budget or leaves a row stuck in reviewing.
+// The server caps active operator jobs (BOOTH_OPERATOR_ACTIVE_JOBS) and answers 429 rate_limited with
+// Retry-After 60 when they are all busy. That is a full queue, not a failed job: wait for a slot and try again
+// with the same upload and the same idempotency key. An hourly cap says the seconds to the top of the hour
+// (more than 60) and fails at once. A wait longer than pollTimeoutMs ends in slot_busy, which watch hands back
+// to the next cycle instead of failing the row.
+const SLOT_QUEUE_RETRY_MAX = 60;
+
+function slotBusy(error) {
+  return error instanceof BoothError && error.status === 429 && error.code === 'rate_limited'
+    && (!error.retryAfter || error.retryAfter <= SLOT_QUEUE_RETRY_MAX);
+}
+
 async function createJobWhenSlotFree(io, client, body, label, plan) {
   const deadline = Date.now() + plan.pollTimeoutMs;
   for (let waits = 0; ; waits += 1) {
@@ -399,11 +408,28 @@ async function createJobWhenSlotFree(io, client, body, label, plan) {
         body: JSON.stringify(body),
       });
     } catch (error) {
-      const busy = error instanceof BoothError && error.status === 429 && error.code === 'rate_limited';
-      if (!busy || Date.now() + plan.slotWaitMs > deadline) throw error;
+      if (!slotBusy(error)) throw error;
+      // Jitter so waiting rows do not retry in lockstep against the same freed slot.
+      const pause = plan.slotWaitMs + Math.floor(Math.random() * (plan.slotWaitMs / 2));
+      if (Date.now() + pause > deadline) {
+        throw new BoothError('slot_busy', `${label} found no free job slot within ${Math.round(plan.pollTimeoutMs / 1000)} s`);
+      }
       if (waits === 0) progress(io, `blue ${label} waiting for a free job slot`);
-      await delay(plan.slotWaitMs);
+      await delay(pause);
     }
+  }
+}
+
+// A job past pollTimeoutMs is stuck: ask the server to cancel it so it stops holding an operator slot. The
+// next attempt replays the same key, sees the cancel and starts a fresh job under the next repeat index.
+async function cancelStuckJob(io, client, job, label) {
+  try {
+    const data = await client.json(`/v1/ai/jobs/${encodeURIComponent(job.id)}/cancel`, { method: 'POST' });
+    progress(io, `blue ${label} cancel requested for ${job.id}`);
+    return data && data.job && typeof data.job === 'object' ? data.job : job;
+  } catch (error) {
+    progress(io, `blue ${label} cancel failed for ${job.id} ${error instanceof BoothError ? error.code : 'error'}`);
+    return job;
   }
 }
 
@@ -411,7 +437,11 @@ async function pollJob(io, client, job, plan, recordFile, key, task) {
   const deadline = Date.now() + plan.pollTimeoutMs;
   let current = job;
   while (!TERMINAL_JOB.has(current.state)) {
-    if (Date.now() > deadline) throw new BoothError('poll_timeout', `poll timed out for ${current.id}`);
+    if (Date.now() > deadline) {
+      const cancelled = await cancelStuckJob(io, client, current, `${task.row.receipt} ${task.profile.name} #${task.repeat}`);
+      writeJson(recordFile, { ...(readJsonOptional(recordFile) || {}), job: cancelled });
+      throw new BoothError('poll_timeout', `poll timed out for ${current.id}`);
+    }
     await delay(plan.pollIntervalMs);
     const data = await client.json(`/v1/ai/jobs/${encodeURIComponent(current.id)}`);
     if (!data.job || typeof data.job !== 'object') throw new BoothError('booth_api', 'job poll returned no job');

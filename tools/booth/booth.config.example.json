@@ -33,7 +33,7 @@
   "live": {
     "liveProfile": "live",
     "finalProfile": "final",
-    "concurrency": 12,
+    "concurrency": 2,
     "intervalSec": 10,
     "retries": 2,
     "retryBackoffMs": 5000,
