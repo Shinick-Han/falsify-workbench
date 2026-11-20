@@ -10,14 +10,13 @@ import {rewrite, warm} from '../dist/browser-pdf.mjs';
 const require = createRequire(import.meta.url);
 const pdfOracle = require('./helpers/pdf-oracle.cjs');
 
+// The mission paper is a private local copy (not in the repo or CI). Tests that read it skip without it.
 const MISSION_PDF_PATH = [
   process.env.FALSIFY_BOOTH_MISSION_PDF,
   fileURLToPath(new URL('../../data/missions/2309.15217.pdf', import.meta.url)),
-  fileURLToPath(new URL('../../../../data/missions/2309.15217.pdf', import.meta.url)),
 ].find(p => p && existsSync(p));
-
-assert.ok(MISSION_PDF_PATH, 'FALSIFY_BOOTH_MISSION_PDF must exist for rewrite tests');
-const missionBytes = new Uint8Array(readFileSync(MISSION_PDF_PATH));
+const NO_MISSION = MISSION_PDF_PATH ? false : 'FALSIFY_BOOTH_MISSION_PDF is not set';
+const missionBytes = MISSION_PDF_PATH ? new Uint8Array(readFileSync(MISSION_PDF_PATH)) : new Uint8Array();
 
 /**
  * Extract structured-text characters & line boxes from a page via MuPDF,
@@ -184,9 +183,9 @@ function streamsEqual(a, b) {
   return true;
 }
 
-const sourceOracle = readOracle(missionBytes);
+const sourceOracle = MISSION_PDF_PATH ? readOracle(missionBytes) : null;
 
-test('page 5: 0.95 -> 0.50 and only the second 0.52 -> 0.11 by rect geometry, untouched pages byte-identical', async () => {
+test('page 5: 0.95 -> 0.50 and only the second 0.52 -> 0.11 by rect geometry, untouched pages byte-identical', {skip: NO_MISSION}, async () => {
   const hits095 = findStructuredRects(missionBytes, 4, '0.95');
   const hits052 = findStructuredRects(missionBytes, 4, '0.52');
   assert.equal(hits095.length, 1);
@@ -213,7 +212,7 @@ test('page 5: 0.95 -> 0.50 and only the second 0.52 -> 0.11 by rect geometry, un
   }
 });
 
-test('page 5: deleting the whole Table 1 caption removes all caption text and preserves surrounding table/body', async () => {
+test('page 5: deleting the whole Table 1 caption removes all caption text and preserves surrounding table/body', {skip: NO_MISSION}, async () => {
   const p5Info = inspectPage(missionBytes, 4);
   const captionLines = p5Info.lines.filter(l =>
     l.text.includes('Table 1: Agreement') ||
@@ -252,7 +251,7 @@ test('page 5: deleting the whole Table 1 caption removes all caption text and pr
   }
 });
 
-test('page 1: dagger † -> 1 by rect keeps neighboring letters and other daggers intact', async () => {
+test('page 1: dagger † -> 1 by rect keeps neighboring letters and other daggers intact', {skip: NO_MISSION}, async () => {
   const daggers = findStructuredRects(missionBytes, 0, '†');
   assert.equal(daggers.length, 3);
 
@@ -271,7 +270,7 @@ test('page 1: dagger † -> 1 by rect keeps neighboring letters and other dagger
   }
 });
 
-test('page 4: 95% -> 950 by rect', async () => {
+test('page 4: 95% -> 950 by rect', {skip: NO_MISSION}, async () => {
   const hits = findStructuredRects(missionBytes, 3, '95%');
   assert.equal(hits.length, 1);
 
@@ -291,7 +290,7 @@ test('page 4: 95% -> 950 by rect', async () => {
   }
 });
 
-test('long replacement text (single-rect overflow + multi-rect wrap) never refuses and extracts cleanly', async () => {
+test('long replacement text (single-rect overflow + multi-rect wrap) never refuses and extracts cleanly', {skip: NO_MISSION}, async () => {
   const hits095 = findStructuredRects(missionBytes, 4, '0.95');
   const p5Info = inspectPage(missionBytes, 4);
   const captionLines = p5Info.lines.filter(l =>
@@ -316,7 +315,7 @@ test('long replacement text (single-rect overflow + multi-rect wrap) never refus
   assert.ok(flat.includes('longer than the original three-line caption on page five.'));
 });
 
-test('Hangul replacement extracts exact Unicode via MuPDF', async () => {
+test('Hangul replacement extracts exact Unicode via MuPDF', {skip: NO_MISSION}, async () => {
   const hits095 = findStructuredRects(missionBytes, 4, '0.95');
   const hangul = '수정된 정확도 0.50';
 
@@ -333,7 +332,7 @@ test('Hangul replacement extracts exact Unicode via MuPDF', async () => {
   assert.ok(p5.search('0.50') >= 1);
 });
 
-test('math symbols ± × ≤ extract exact Unicode via MuPDF', async () => {
+test('math symbols ± × ≤ extract exact Unicode via MuPDF', {skip: NO_MISSION}, async () => {
   const hits095 = findStructuredRects(missionBytes, 4, '0.95');
   const expr = '0.50 ± 0.02 × 10 ≤ 6';
 
@@ -350,7 +349,7 @@ test('math symbols ± × ≤ extract exact Unicode via MuPDF', async () => {
   assert.ok(p5.text.includes('0.50') && p5.text.includes('0.02'));
 });
 
-test('never refuses empty-glyph rects or overlapping edits; rejects invalid PDF only with engine_unavailable', async () => {
+test('never refuses empty-glyph rects or overlapping edits; rejects invalid PDF only with engine_unavailable', {skip: NO_MISSION}, async () => {
   // Empty margin rect (no underlying glyphs) still inserts text
   const outEmpty = await rewrite(missionBytes, [
     {id: 'blank', pageIndex: 0, rects: [{x: 0.02, y: 0.02, w: 0.2, h: 0.02}], originalText: '', newText: 'MARGIN_NOTE', source: 'tap'},
@@ -437,7 +436,7 @@ test('classic loader warm() pre-spawns worker and rewrite() resolves Uint8Array 
   }
 });
 
-test('page 5 (a): 2-line Ties paragraph randomly -> deterministically extracts contiguously and keeps other text byte-equal', async () => {
+test('page 5 (a): 2-line Ties paragraph randomly -> deterministically extracts contiguously and keeps other text byte-equal', {skip: NO_MISSION}, async () => {
   const p5Info = inspectPage(missionBytes, 4);
   const tiesLines = p5Info.lines.filter(l =>
     l.text.includes('Ties, where the same score') ||
@@ -482,7 +481,7 @@ test('page 5 (a): 2-line Ties paragraph randomly -> deterministically extracts c
   }
 });
 
-test('page 5 (b): 10 line rects with newText twice as long extracts every word contiguously (mid-column and bottom-of-page)', async () => {
+test('page 5 (b): 10 line rects with newText twice as long extracts every word contiguously (mid-column and bottom-of-page)', {skip: NO_MISSION}, async () => {
   const p5Info = inspectPage(missionBytes, 4);
   const midStart = p5Info.lines.findIndex(l => l.text.includes('Table 1 analyses the agreement'));
   assert.ok(midStart >= 0, 'expected Experiments body paragraph on page 5');
@@ -517,7 +516,7 @@ test('page 5 (b): 10 line rects with newText twice as long extracts every word c
   }
 });
 
-test('page 5 (c): one-word rect with 60-character newText extracts every character (mid-line and right-edge)', async () => {
+test('page 5 (c): one-word rect with 60-character newText extracts every character (mid-line and right-edge)', {skip: NO_MISSION}, async () => {
   const hits095 = findStructuredRects(missionBytes, 4, '0.95');
   const hitsEspecially = findStructuredRects(missionBytes, 4, 'especially');
   assert.equal(hits095.length, 1);
@@ -551,7 +550,7 @@ test('page 5 (c): one-word rect with 60-character newText extracts every charact
   }
 });
 
-test('page 5 (regression): 25+ unsorted multi-column rects with long newText never drop words and keep contiguous extraction', async () => {
+test('page 5 (regression): 25+ unsorted multi-column rects with long newText never drop words and keep contiguous extraction', {skip: NO_MISSION}, async () => {
   const p5Info = inspectPage(missionBytes, 4);
   const start = p5Info.lines.findIndex(l => l.text.includes('To put the results in context'));
   assert.ok(start >= 0);
@@ -587,7 +586,7 @@ test('page 5 (regression): 25+ unsorted multi-column rects with long newText nev
   assert.equal((await pdfOracle.search(out, 4, 'broken randomly')).length, 0, 'many-rects: original text must be removed');
 });
 
-test('page 5 (d): rect for "randomly." shifted right by +0.022 aligns to full word and produces "broken deterministically."', async () => {
+test('page 5 (d): rect for "randomly." shifted right by +0.022 aligns to full word and produces "broken deterministically."', {skip: NO_MISSION}, async () => {
   const hits = findStructuredRects(missionBytes, 4, 'randomly.');
   assert.equal(hits.length, 1);
   const shifted = {...hits[0].rect, x: hits[0].rect.x + 0.022};
@@ -609,7 +608,7 @@ test('page 5 (d): rect for "randomly." shifted right by +0.022 aligns to full wo
   assert.ok((await pdfOracle.search(out, 4, 'broken deterministically.')).length >= 1);
 });
 
-test('page 5 (e): rect for "randomly." shifted left by -0.02 aligns to full word and preserves "broken"', async () => {
+test('page 5 (e): rect for "randomly." shifted left by -0.02 aligns to full word and preserves "broken"', {skip: NO_MISSION}, async () => {
   const hits = findStructuredRects(missionBytes, 4, 'randomly.');
   assert.equal(hits.length, 1);
   const shifted = {...hits[0].rect, x: hits[0].rect.x - 0.02};
@@ -631,7 +630,7 @@ test('page 5 (e): rect for "randomly." shifted left by -0.02 aligns to full word
   assert.ok((await pdfOracle.search(out, 4, 'broken deterministically.')).length >= 1);
 });
 
-test('page 5 (f): originalText not occurring on candidate lines falls back to rect selection and still extracts newText', async () => {
+test('page 5 (f): originalText not occurring on candidate lines falls back to rect selection and still extracts newText', {skip: NO_MISSION}, async () => {
   const hits = findStructuredRects(missionBytes, 4, '0.95');
   assert.equal(hits.length, 1);
 
@@ -650,7 +649,7 @@ test('page 5 (f): originalText not occurring on candidate lines falls back to re
   assert.ok((await pdfOracle.search(out, 4, '0.42')).length >= 1);
 });
 
-test('page 1 (rv90 P1-5): dagger † -> 1 in "Shahul Es†, Jithin" preserves comma and extracts "Es1,"', async () => {
+test('page 1 (rv90 P1-5): dagger † -> 1 in "Shahul Es†, Jithin" preserves comma and extracts "Es1,"', {skip: NO_MISSION}, async () => {
   const daggers = findStructuredRects(missionBytes, 0, '†');
   assert.equal(daggers.length, 3);
   // Widen rect slightly to simulate pdf.js span box bordering the adjacent comma
@@ -722,7 +721,7 @@ test('rotated pages (rv90 P1-4): "0.95" -> "0.50" on /Rotate 90, 180, and 270', 
   }
 });
 
-test('overlapping direct edits (rv90 P2-5): newest edit wins and emits only one inserted text', async () => {
+test('overlapping direct edits (rv90 P2-5): newest edit wins and emits only one inserted text', {skip: NO_MISSION}, async () => {
   const hits095 = findStructuredRects(missionBytes, 4, '0.95');
   assert.equal(hits095.length, 1);
 
@@ -870,7 +869,7 @@ test('rv90b P1-2: 5 Ts text rise does not split TJ or shift "gamma" vertically',
   assert.equal(outText.includes('beta'), false);
 });
 
-test('rv90b P1-1: cross-column "the" in "the following prompt:" does not splice into left-column Table 1 "0.63"', async () => {
+test('rv90b P1-1: cross-column "the" in "the following prompt:" does not splice into left-column Table 1 "0.63"', {skip: NO_MISSION}, async () => {
   const p5Info = inspectPage(missionBytes, 4);
   const promptLine = p5Info.lines.find(l => l.text.trim() === 'the following prompt:');
   assert.ok(promptLine, 'expected right-column "the following prompt:" on page 5');
@@ -898,7 +897,7 @@ test('rv90b P1-1: cross-column "the" in "the following prompt:" does not splice 
   assert.equal(flat.includes('ZZZ'), true, 'replacement ZZZ must extract');
 });
 
-test('rv90b P0-1: "in" next to "line" with +18 pt drifted rect replaces "in" and keeps "line" intact', async () => {
+test('rv90b P0-1: "in" next to "line" with +18 pt drifted rect replaces "in" and keeps "line" intact', {skip: NO_MISSION}, async () => {
   const p5Info = inspectPage(missionBytes, 4);
   const bw = p5Info.bounds[2] - p5Info.bounds[0];
   const targetLine = p5Info.lines.find(l => l.text.includes('in line with that'));
@@ -929,7 +928,7 @@ test('rv90b P0-1: "in" next to "line" with +18 pt drifted rect replaces "in" and
   assert.equal(/answer\/context ZZZ\s*line with that/.test(flat), true, `expected "answer/context ZZZ line with that", got snippet: ${JSON.stringify(flat.slice(Math.max(0, lineAt - 35), lineAt + 30))}`);
 });
 
-test('rv90b P0-1: right-edge "to" pushed 18 pt into gutter is still aligned and replaced', async () => {
+test('rv90b P0-1: right-edge "to" pushed 18 pt into gutter is still aligned and replaced', {skip: NO_MISSION}, async () => {
   const p5Info = inspectPage(missionBytes, 4);
   const bw = p5Info.bounds[2] - p5Info.bounds[0];
   const targetLine = p5Info.lines.find(l => l.text.includes('and then asks to'));
@@ -958,7 +957,7 @@ test('rv90b P0-1: right-edge "to" pushed 18 pt into gutter is still aligned and 
   assert.equal(flat.includes('then asks to'), false, 'original "to" must be removed');
 });
 
-test('rv90b P2-1: centerNarrowSingleSlot does not shift into space-separated next word ("in" -> "Q" before "Table")', async () => {
+test('rv90b P2-1: centerNarrowSingleSlot does not shift into space-separated next word ("in" -> "Q" before "Table")', {skip: NO_MISSION}, async () => {
   const p5Info = inspectPage(missionBytes, 4);
   const targetLine = p5Info.lines.find(l => l.text.includes('Ragas in Table 1)'));
   assert.ok(targetLine);
@@ -1004,7 +1003,7 @@ test('rv90b P2-3: PDF % comment after show does not trick nextOpAllowsSplice', a
   assert.equal(outText.includes('world'), false);
 });
 
-test('fast mission PDF fuzzer: 8 pages x 15 words keeps every unedited word intact and extracts new word', async () => {
+test('fast mission PDF fuzzer: 8 pages x 15 words keeps every unedited word intact and extracts new word', {skip: NO_MISSION}, async () => {
   let seed = 20261120;
   const rand = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 0x100000000; };
   const docPages = sourceOracle.pageCount;
