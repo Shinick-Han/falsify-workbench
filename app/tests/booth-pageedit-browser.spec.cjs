@@ -158,10 +158,22 @@ async function assertLayout(page, wide) {
   assert.equal(await page.locator('#booth-pe-pop').isVisible(), false);
 }
 
-/* Phone: the mission opens zoomed (3.5x) on Table 1; 전체 쪽 zooms out. */
+/* Phone: the mission opens zoomed to fit Table 1; 전체 쪽 zooms out. */
+/* The hint zoom fits the whole of Table 1 across the column (at most 3.5x): the row names ("Ragas")
+   and the last column are both inside the viewport, and the table's top sits just under the toolbar. */
 async function autoZoomed(page) {
-  await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() === 3.5
-    && document.querySelector('#paper-before-stage .paper-page > canvas').getBoundingClientRect().width > 1000);
+  await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() > 2
+    && document.querySelector('#paper-before-stage .paper-page > canvas').getBoundingClientRect().width > 700);
+  await page.waitForTimeout(300);
+  const fit = await page.evaluate(() => {
+    const span = text => [...document.querySelectorAll('#paper-before-stage .paper-text-layer span[data-i]')].find(node => node.textContent.trim() === text).getBoundingClientRect();
+    const stage = document.getElementById('paper-before-stage').getBoundingClientRect();
+    return {zoom: globalThis.FalsifyPaperWorkspace.getZoom(), ragas: span('Ragas'), last: span('0.70'), head: span('Faith.'),
+      stage: {left: stage.left, right: stage.right, top: stage.top}, bar: document.getElementById('booth-pe-bar').getBoundingClientRect().bottom, width: innerWidth};
+  });
+  assert.ok(fit.zoom <= 3.5, 'capped at 3.5x');
+  assert.ok(fit.ragas.left >= Math.max(0, fit.stage.left) && fit.last.right <= Math.min(fit.width, fit.stage.right), 'Table 1 from "Ragas" to the last column is in view ' + JSON.stringify(fit));
+  assert.ok(fit.head.top >= fit.stage.top && fit.head.top - fit.bar < 80, 'the table top sits just under the toolbar ' + JSON.stringify(fit));
   await waitScoreInStage(page);
   assert.equal(await page.locator('#booth-pe-fit').isVisible(), true, '전체 쪽 shows while zoomed');
   await canvasCapped(page);
