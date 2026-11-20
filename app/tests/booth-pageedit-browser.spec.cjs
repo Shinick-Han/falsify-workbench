@@ -135,6 +135,12 @@ async function openMission(browser, wide, tablet = false) {
   await page.waitForFunction(() => document.documentElement.dataset.boothStep === 'edit');
   await page.waitForFunction(() => /^5 \//.test(document.querySelector('#paper-page-label')?.textContent || '')
     && (globalThis.FalsifyPaperWorkspace.getPageParagraphs()?.items || []).some(item => item.text.includes('0.95')));
+  // On a phone the hint zoom fits Table 1 once the paragraph boxes are in, then redraws the page and its list.
+  if (!wide) {
+    await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() > 2
+      && document.querySelector('#paper-before-stage .paper-page > canvas')?.getBoundingClientRect().width > 700
+      && [...document.querySelectorAll('.paper-paragraph-button')].some(node => node.textContent.includes('0.95')));
+  }
   await page.evaluate(() => window.scrollTo(0, 0));
   return {page, errors};
 }
