@@ -49,7 +49,7 @@ function revertEventHtml(eventHtml, indexHtml, origin) {
   assert.equal(count(text, 'cloud-config.event.js?v='), 1);
   assert.equal(count(text, 'cloud-config.js?v='), 0);
   text = text.replace('cloud-config.event.js?v=', 'cloud-config.js?v=');
-  const robots = `  <meta name="robots" content="noindex">${nl}`;
+  const robots = `  <meta name="robots" content="noindex">${nl}  <meta name="color-scheme" content="only light">${nl}`;
   assert.equal(count(text, robots), 1);
   text = text.replace(robots, '');
   const suffix = `${EVENT_TITLE_SUFFIX}</title>`;
@@ -106,6 +106,7 @@ test('event HTML keeps every other byte, with or without open-access.js', () => 
     assert.equal(count(planned.html, 'open-access.js?v=0.2.0-alpha.86'), count(index, 'open-access.js?v=0.2.0-alpha.86'));
     assert.match(planned.html, /<title>Falsify · Paper Workbench · Event<\/title>/);
     assert.match(planned.html, /<meta name="robots" content="noindex">/);
+    assert.match(planned.html, /<meta name="color-scheme" content="only light">/);
   }
 });
 
@@ -154,7 +155,7 @@ test('committed event page matches index.html except the four event edits', () =
   assert.equal(count(event, 'event-theme.css'), 1);
   const order = [...BOOTH_STYLES, ...BOOTH_SCRIPTS].map(name => event.indexOf(`"${name}?v=`));
   assert.ok(order.every((at, i) => at > hostedAt && (i === 0 || at > order[i - 1])), 'booth assets keep the contract order');
-  for (const name of ['booth-recipe', 'booth-myai']) assert.equal(index.includes(name), false, name + ' stays off index.html');
+  for (const name of ['booth-recipe', 'booth-myai', 'booth-patch', 'booth-pageedit']) assert.equal(index.includes(name), false, name + ' stays off index.html');
   assert.equal(count(event, AGENT_LINK), 1, 'the event footer links the agent guide');
   assert.equal(index.includes('id="agent-link"'), false, 'index.html keeps its own footer');
   assert.ok(event.indexOf(AGENT_LINK) < event.indexOf('id="source-link"'));
@@ -170,9 +171,13 @@ test('event HTML injects the event theme, then booth assets, after hosted-ai.js 
     `  <link rel="stylesheet" href="booth.css?v=${version}">`,
     `  <link rel="stylesheet" href="booth-recipe.css?v=${version}">`,
     `  <link rel="stylesheet" href="booth-myai.css?v=${version}">`,
+    `  <link rel="stylesheet" href="booth-patch.css?v=${version}">`,
+    `  <link rel="stylesheet" href="booth-pageedit.css?v=${version}">`,
     `  <script src="booth.js?v=${version}" defer></script>`,
     `  <script src="booth-recipe.js?v=${version}" defer></script>`,
     `  <script src="booth-myai.js?v=${version}" defer></script>`,
+    `  <script src="booth-patch.js?v=${version}" defer></script>`,
+    `  <script src="booth-pageedit.js?v=${version}" defer></script>`,
   ].join('\n');
   assert.ok(planned.html.includes(injected));
   assert.equal(count(index, 'booth.js'), 0);

@@ -1415,13 +1415,14 @@
     }
     // Page canvases keep their CSS box at the viewport size (whole CSS px, as before) and get a backing store
     // of devicePixelRatio (max 3) device pixels per CSS px, like pdf.js's viewer. Huge pages or zoom lower the
-    // ratio so the store stays near 16.7M pixels, never below 1:1, so a 1x screen draws exactly as before.
-    const MAX_CANVAS_PIXELS=16777216;
+    // ratio so the store stays near 16.7M pixels and 4096 px a side (iOS Safari draws a blank canvas past
+    // either), never below 1:1, so a 1x screen draws exactly as before.
+    const MAX_CANVAS_PIXELS=16777216,MAX_CANVAS_SIDE=4096;
     function canvasOutputScale(cssWidth,cssHeight){
         const view=doc.defaultView||globalThis;
         const ratio=Number(view&&view.devicePixelRatio);
         const wanted=Number.isFinite(ratio)&&ratio>1?Math.min(ratio,3):1;
-        const fit=Math.sqrt(MAX_CANVAS_PIXELS/(cssWidth*cssHeight));
+        const fit=Math.min(Math.sqrt(MAX_CANVAS_PIXELS/(cssWidth*cssHeight)),MAX_CANVAS_SIDE/cssWidth,MAX_CANVAS_SIDE/cssHeight);
         return Math.max(1,Math.min(wanted,fit));
     }
     function sizePageCanvas(canvas,viewport){
@@ -2932,6 +2933,24 @@
     renderChrome();renderInline();renderEdits();remindDraft();
     try{const blobs=blobApi();if(blobs?.purgeExpired)void blobs.purgeExpired(now()).catch(()=>{});}catch{}
     if(ui.file.files&&ui.file.files[0])void openFile(ui.file.files[0]);
+    function pageParagraphBoxes(){
+      const shown=pageText,w=shown?.paragraphWidth,h=shown?.paragraphHeight;
+      if(!shown||!Array.isArray(shown.paragraphs)||!(w>0&&h>0))return null;
+      const items=shown.paragraphs.map(p=>({segmentId:'paragraph:'+shown.pageIndex+':'+p.id,text:p.text,editable:p.editable!==false,
+        rect:{x:p.bbox[0]/w,y:p.bbox[1]/h,w:(p.bbox[2]-p.bbox[0])/w,h:(p.bbox[3]-p.bbox[1])/h}}));
+      return published({pageIndex:shown.pageIndex,items});
+    }
+    function openParagraphById(segmentId){
+      const shown=pageText,p=shown?.paragraphs?.find(item=>'paragraph:'+shown.pageIndex+':'+item.id===segmentId);
+      if(!p||p.editable===false)return false;
+      openParagraphBinding(shown,p);
+      return !!directEditor&&inline?.segmentId===segmentId;
+    }
+    function setFreeZoom(factor,redraw){
+      if(!Number.isFinite(factor)||factor<0.5||factor>4||!source||!source.doc||!canLeaveInline())return false;
+      if(factor!==zoom||redraw){zoom=factor;syncNav();void drawBefore(page);}
+      return true;
+    }
     function publicOutput(){if(!output||output.blocked)return null;return Object.freeze({file:output.file,sha256:output.sha256,originalSourceSha256:output.originalSourceSha256,verification:published(output.verification),revision:output.revision,pageMap:published(output.pageMap),generationKey:output.key||null});}
     const api={
       dispose(){if(disposed)return;disposed=true;clearSource();for(const remove of listeners.splice(0))remove();blobStore?.dispose();lastDownload.remove();diagnosticPanel.remove();afterNav.remove();if(globalThis.FalsifyPaperWorkspace===api)delete globalThis.FalsifyPaperWorkspace;},
@@ -2942,6 +2961,12 @@
       getOutput:publicOutput,
       getPageIndex(){return source?.pdf&&pages>0&&Number.isSafeInteger(page)&&page>=1&&page<=pages?page-1:null;},
       getCurrentOutput(){const g=generationApi();if(!output||output.blocked||!output.key||!g?.key)return null;try{if(g.key(captureSpec())!==output.key)return null;}catch{return null;}return publicOutput();},
+      /* Page-edit hooks (event page): the drawn page's paragraph boxes as page fractions, opening one
+         paragraph's direct editor, and a free zoom factor. index.html never calls them. */
+      getPageParagraphs(){return pageParagraphBoxes();},
+      openParagraph(segmentId){return openParagraphById(segmentId);},
+      getZoom(){return zoom;},
+      setZoom(factor,redraw){return setFreeZoom(factor,redraw===true);},
       showPage(n){
         if(!Number.isInteger(n)||n<1||!source||!source.doc||n>pages) return false;
         if(!canLeaveInline()) return false;
