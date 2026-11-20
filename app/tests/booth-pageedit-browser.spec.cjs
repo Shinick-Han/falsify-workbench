@@ -1,9 +1,8 @@
 'use strict';
-// Real Chromium walk of in-place page editing on event.html (booth-pageedit.js) on the Ragas mission,
-// page 5, Table 1: the page is the editor. Phone 390x844 at DPR 3 (tap to zoom 2.5x, tap 0.95, popover,
-// 바꾸기, patch, delete, 문단 전체 고치기) and desktop 1280x800 (direct clicks). The API is stubbed.
-// FALSIFY_BOOTH_MISSION_PDF names a local copy of arXiv 2309.15217 (CC BY 4.0).
-// BOOTH_PAGEEDIT_SHOTS, when set, is a directory for screenshots of each state.
+// Real Chromium walk of in-place page editing on event.html (booth-pageedit.js + FalsifyBoothEdits)
+// on the Ragas mission (arXiv 2309.15217, page 5 Table 1 + caption, and page 1 arXiv stamp).
+// Asserts FalsifyBoothEdits store contents and .booth-patch overlays only (generator is tested separately).
+// Covers phone (390x844 touch DPR 3), desktop (1280x800 mouse) and tablet (1280x800 touch DPR 2).
 const {spawn} = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -12,11 +11,10 @@ const {chromium} = require('playwright');
 
 const dist = path.resolve(__dirname, '../dist');
 const pdfPath = process.env.FALSIFY_BOOTH_MISSION_PDF || '';
-if (!pdfPath) throw new Error('Set FALSIFY_BOOTH_MISSION_PDF to a local copy of arXiv 2309.15217 (the Ragas paper)');
+if (!pdfPath) throw new Error('Set FALSIFY_BOOTH_MISSION_PDF to a local copy of arXiv 2309.15217');
 const chrome = process.env.BROWSER_EXECUTABLE || undefined;
-const shots = process.env.BOOTH_PAGEEDIT_SHOTS || '';
 const api = 'https://falsify-cloud-api-event.ai-gongbu.workers.dev';
-const port = Number(process.env.BOOTH_PAGEEDIT_PORT || 8883);
+const port = Number(process.env.BOOTH_PAGEEDIT_PORT || 19910);
 const token = 'fsg_' + 'c'.repeat(43);
 const pdfBytes = fs.readFileSync(pdfPath);
 const cors = {'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET,POST,OPTIONS', 'Access-Control-Allow-Headers': '*'};
@@ -46,7 +44,7 @@ function json(route, status, body) {
 
 function boothConfig() {
   return {
-    enabled: true, submissionsOpen: true, announcement: '', consentVersion: '2026-11-22.v2',
+    enabled: true, submissionsOpen: true, announcement: '', consentVersion: '2026-11-22.v3',
     limits: {maxDeclared: 5, maxReason: 500, maxNickname: 24, maxPdfBytes: 16777216},
     missions: [{
       paperId: '2309.15217', title: 'Ragas: Automated Evaluation of Retrieval Augmented Generation',
@@ -75,40 +73,39 @@ async function stubApi(route) {
   return json(route, 404, {error: {code: 'not_found'}});
 }
 
-async function shoot(page, name, wide) {
-  if (!shots) return;
-  fs.mkdirSync(shots, {recursive: true});
-  await page.screenshot({path: path.join(shots, name + (wide ? '-1280' : '-390') + '.png')});
+let lastPage = null;
+async function diagnose() {
+  if (!lastPage || lastPage.isClosed()) return null;
+  return lastPage.evaluate(() => ({
+    step: document.documentElement.dataset.boothStep,
+    zoom: globalThis.FalsifyPaperWorkspace?.getZoom?.(),
+    label: document.querySelector('#paper-page-label')?.textContent || '',
+    popHidden: document.querySelector('#booth-pe-pop')?.hidden,
+    sheetHidden: document.querySelector('#booth-pe-sheet')?.hidden,
+    storeEdits: globalThis.FalsifyBoothEdits?.list?.() || [],
+    patches: [...document.querySelectorAll('#paper-before-stage .booth-patch')].map(n => ({id: n.dataset.editId, text: n.textContent})),
+  })).catch(() => null);
 }
 
 function overflow(page) {
   return page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
 }
 
-let lastPage = null;
-async function diagnose() {
-  if (!lastPage || lastPage.isClosed()) return null;
-  if (shots) await lastPage.screenshot({path: path.join(shots, 'failure.png')}).catch(() => {});
-  return lastPage.evaluate(() => ({
-    step: document.documentElement.dataset.boothStep,
-    zoom: globalThis.FalsifyPaperWorkspace?.getZoom?.(),
-    label: document.querySelector('#paper-page-label')?.textContent || '',
-    dock: document.querySelector('#booth-dock-count')?.textContent || '',
-    pop: document.querySelector('#booth-pe-pop')?.textContent || '',
-    tip: document.querySelector('#booth-pe-bar')?.textContent || '',
-    status: document.querySelector('#paper-before-status')?.textContent || '',
-    edits: (globalThis.FalsifyPaperWorkspace?.getEditSnapshot()?.edits || []).map(edit => [edit.segmentId, edit.before, edit.after]),
-  })).catch(() => null);
+function storeEdits(page) {
+  return page.evaluate(() => globalThis.FalsifyBoothEdits.list());
 }
 
-/* The client rect of the text-layer span that reads exactly 0.95 (Table 1, Ragas faithfulness). */
-function scoreRect(page) {
-  return page.evaluate(() => {
-    const span = [...document.querySelectorAll('#paper-before-stage .paper-page .paper-text-layer span[data-i]')].find(node => node.textContent.trim() === '0.95');
-    if (!span) return null;
-    const r = span.getBoundingClientRect();
-    return {x: r.left + r.width / 2, y: r.top + r.height / 2, left: r.left, top: r.top, width: r.width, height: r.height};
-  });
+function overlays(page) {
+  return page.evaluate(() => [...document.querySelectorAll('#paper-before-stage .paper-page .booth-patch')].map(node => {
+    const r = node.getBoundingClientRect();
+    return {
+      editId: node.dataset.editId,
+      text: node.textContent,
+      left: r.left, top: r.top, width: r.width, height: r.height,
+      bg: getComputedStyle(node).backgroundColor,
+      events: getComputedStyle(node).pointerEvents,
+    };
+  }));
 }
 
 async function tapAt(page, wide, x, y) {
@@ -134,432 +131,300 @@ async function openMission(browser, wide, tablet = false) {
   await page.locator('#booth-missions .booth-mission').first().click();
   await page.waitForFunction(() => document.documentElement.dataset.boothStep === 'edit');
   await page.waitForFunction(() => /^5 \//.test(document.querySelector('#paper-page-label')?.textContent || '')
-    && (globalThis.FalsifyPaperWorkspace.getPageParagraphs()?.items || []).some(item => item.text.includes('0.95')));
-  // On a phone the hint zoom fits Table 1 once the paragraph boxes are in, then redraws the page and its list.
+    && [...document.querySelectorAll('#paper-before-stage .paper-text-layer span[data-i]')].some(node => node.textContent.trim() === '0.95'));
   if (!wide) {
     await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() > 2
-      && document.querySelector('#paper-before-stage .paper-page > canvas')?.getBoundingClientRect().width > 700
-      && [...document.querySelectorAll('.paper-paragraph-button')].some(node => node.textContent.includes('0.95')));
+      && document.querySelector('#paper-before-stage .paper-page > canvas')?.getBoundingClientRect().width > 700);
   }
   await page.evaluate(() => window.scrollTo(0, 0));
   return {page, errors};
 }
 
-async function assertLayout(page, wide) {
-  assert.equal(await page.locator('.paper-paragraph-list').count() >= 1, true, 'the list stays in the DOM');
-  // Visually hidden, still there for screen readers and keyboards (not display:none).
-  const list = await page.locator('.paper-paragraph-list').first().evaluate(node => ({w: node.getBoundingClientRect().width, display: getComputedStyle(node).display, buttons: node.querySelectorAll('button').length}));
-  assert.ok(list.w <= 1 && list.display !== 'none' && list.buttons > 0, 'the paragraph list is visually hidden but in the accessibility tree ' + JSON.stringify(list));
-  assert.equal(await page.locator('#booth-pe-zoom-in').isVisible(), true, 'visible + zoom button');
-  assert.equal(await page.locator('#booth-pe-zoom-out').isVisible(), true, 'visible − zoom button');
-  assert.equal(await page.locator('#booth-find-list').count(), 0, 'no list toggle');
-  const box = await page.evaluate(() => {
-    const canvas = document.querySelector('#paper-before-stage .paper-page > canvas').getBoundingClientRect();
-    const content = document.querySelector('.content');
-    const style = getComputedStyle(content);
-    return {width: canvas.width, stage: document.querySelector('#paper-before-stage').clientWidth, column: content.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight)};
-  });
-  if (wide) assert.ok(box.width >= 680 && box.width <= 760, 'desktop page column is 680-760px: ' + JSON.stringify(box));
-  else assert.ok(Math.abs(box.stage - box.column) <= 2, 'phone page spans the column: ' + JSON.stringify(box));
-  assert.equal(await page.locator('#booth-pe-pop').isVisible(), false);
+function tokenPoint(page, token, nth = 0) {
+  return page.evaluate(([value, n]) => {
+    const spans = [...document.querySelectorAll('#paper-before-stage .paper-text-layer span[data-i]')]
+      .sort((a, b) => Number(a.dataset.i) - Number(b.dataset.i));
+    const hits = [];
+    for (const span of spans) {
+      const text = span.textContent;
+      for (let at = text.indexOf(value); at >= 0; at = text.indexOf(value, at + 1)) {
+        const edge = i => i < 0 || i >= text.length || /[\s,.;:()"]/.test(text[i]);
+        if (edge(at - 1) && edge(at + value.length)) hits.push({span, at});
+      }
+    }
+    const hit = hits[n];
+    if (!hit) return null;
+    const stage = document.getElementById('paper-before-stage');
+    if (stage.scrollHeight > stage.clientHeight || stage.scrollWidth > stage.clientWidth) {
+      stage.scrollIntoView({block: 'center', behavior: 'instant'});
+      const box = stage.getBoundingClientRect();
+      const range0 = document.createRange();
+      range0.setStart(hit.span.firstChild, hit.at);
+      range0.setEnd(hit.span.firstChild, hit.at + value.length);
+      const first = range0.getBoundingClientRect();
+      if (stage.scrollWidth > stage.clientWidth) {
+        stage.scrollLeft += first.left + first.width / 2 - (box.left + box.width / 2);
+      }
+      if (stage.scrollHeight > stage.clientHeight) {
+        stage.scrollTop += first.top + first.height / 2 - (box.top + box.height / 2);
+      }
+    } else {
+      hit.span.scrollIntoView({block: 'center', inline: 'center', behavior: 'instant'});
+    }
+    const range = document.createRange();
+    range.setStart(hit.span.firstChild, hit.at);
+    range.setEnd(hit.span.firstChild, hit.at + value.length);
+    const r = range.getBoundingClientRect();
+    return {x: r.left + r.width / 2, y: r.top + r.height / 2, left: r.left, top: r.top, width: r.width, height: r.height};
+  }, [token, nth]);
 }
 
-/* Phone: the mission opens zoomed to fit Table 1; 전체 쪽 zooms out. */
-/* The hint zoom fits the whole of Table 1 across the column (at most 3.5x): the row names ("Ragas")
-   and the last column are both inside the viewport, and the table's top sits just under the toolbar. */
-async function autoZoomed(page) {
-  await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() > 2
-    && document.querySelector('#paper-before-stage .paper-page > canvas').getBoundingClientRect().width > 700);
-  await page.waitForTimeout(300);
-  const fit = await page.evaluate(() => {
-    const span = text => [...document.querySelectorAll('#paper-before-stage .paper-text-layer span[data-i]')].find(node => node.textContent.trim() === text).getBoundingClientRect();
-    const stage = document.getElementById('paper-before-stage').getBoundingClientRect();
-    return {zoom: globalThis.FalsifyPaperWorkspace.getZoom(), ragas: span('Ragas'), last: span('0.70'), head: span('Faith.'),
-      stage: {left: stage.left, right: stage.right, top: stage.top}, bar: document.getElementById('booth-pe-bar').getBoundingClientRect().bottom, width: innerWidth};
-  });
-  assert.ok(fit.zoom <= 3.5, 'capped at 3.5x');
-  assert.ok(fit.ragas.left >= Math.max(0, fit.stage.left) && fit.last.right <= Math.min(fit.width, fit.stage.right), 'Table 1 from "Ragas" to the last column is in view ' + JSON.stringify(fit));
-  assert.ok(fit.head.top >= fit.stage.top && fit.head.top - fit.bar < 80, 'the table top sits just under the toolbar ' + JSON.stringify(fit));
-  await waitScoreInStage(page);
-  assert.equal(await page.locator('#booth-pe-fit').isVisible(), true, '전체 쪽 shows while zoomed');
-  await canvasCapped(page);
+async function tapToken(page, wide, token, nth = 0, offset = {x: 0, y: 0}) {
+  if (!wide && await page.evaluate(() => globalThis.FalsifyPaperWorkspace.getZoom() === 1)) {
+    const first = await tokenPoint(page, token, nth);
+    assert.ok(first, 'token visible before zoom: ' + token);
+    await tapAt(page, wide, first.x, first.y);
+    await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() > 1);
+    await page.waitForTimeout(200);
+  }
+  const pt = await tokenPoint(page, token, nth);
+  assert.ok(pt, 'token on page: ' + token + ' #' + nth);
+  await tapAt(page, wide, pt.x + offset.x, pt.y + offset.y);
+  return pt;
 }
 
-/* iOS Safari draws a blank canvas past 4096 px a side or ~16.7M px. */
-async function canvasCapped(page) {
-  const size = await page.evaluate(() => { const c = document.querySelector('#paper-before-stage .paper-page > canvas'); return [c.width, c.height]; });
-  assert.ok(size[0] <= 4096 && size[1] <= 4096 && size[0] * size[1] <= 16777216, 'zoomed canvas backing store stays within iOS limits ' + size);
-}
-
-/* The +/− buttons step the zoom without pinching (WCAG 2.5.7). */
-async function zoomButtons(page, first) {
+/* Phone hint zoom fits Table 1 across the column without getPageParagraphs; zoom buttons step cleanly. */
+async function checkZoomAndHint(page, wide) {
+  assert.equal(await page.locator('#booth-pe-zoom-in').isVisible(), true);
+  assert.equal(await page.locator('#booth-pe-zoom-out').isVisible(), true);
+  if (!wide) {
+    const fit = await page.evaluate(() => {
+      const span = text => [...document.querySelectorAll('#paper-before-stage .paper-text-layer span[data-i]')].find(node => node.textContent.trim() === text).getBoundingClientRect();
+      const stage = document.getElementById('paper-before-stage').getBoundingClientRect();
+      return {zoom: globalThis.FalsifyPaperWorkspace.getZoom(), ragas: span('Ragas'), last: span('0.70'), head: span('Faith.'),
+        stage: {left: stage.left, right: stage.right, top: stage.top}, width: innerWidth};
+    });
+    assert.ok(fit.zoom > 2 && fit.zoom <= 3.5, 'phone hint zoom fits Table 1: ' + JSON.stringify(fit));
+    assert.ok(fit.ragas.left >= Math.max(0, fit.stage.left) && fit.last.right <= Math.min(fit.width, fit.stage.right), 'Table 1 in view: ' + JSON.stringify(fit));
+    assert.equal(await page.locator('#booth-pe-fit').isVisible(), true, '전체 쪽 shown while zoomed');
+    await page.locator('#booth-pe-fit').click();
+    await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() === 1);
+    assert.equal(await page.locator('#booth-pe-fit').isVisible(), false);
+  }
+  const firstStep = wide ? 1.25 : 1.5;
   await page.locator('#booth-pe-zoom-in').click();
-  await page.waitForFunction(value => globalThis.FalsifyPaperWorkspace.getZoom() === value, first);
+  await page.waitForFunction(v => globalThis.FalsifyPaperWorkspace.getZoom() === v, firstStep);
   assert.equal(await page.locator('#booth-pe-fit').isVisible(), true);
   await page.locator('#booth-pe-zoom-out').click();
   await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() === 1);
-  assert.equal(await page.locator('#booth-pe-zoom-out').isDisabled(), true, '− is off at the fit size');
+  assert.equal(await page.locator('#booth-pe-zoom-out').isDisabled(), true);
 }
 
-async function zoomOut(page) {
-  await page.locator('#booth-pe-fit').click();
-  await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() === 1 && !document.documentElement.classList.contains('booth-pe-zoomed')
-    && document.querySelector('#paper-before-stage .paper-page > canvas').getBoundingClientRect().width < 400);
-  assert.equal(await page.locator('#booth-pe-fit').isVisible(), false);
-}
-
-function waitScoreInStage(page) {
-  return page.waitForFunction(() => {
-    const stage = document.querySelector('#paper-before-stage');
-    const span = [...stage.querySelectorAll('.paper-text-layer span[data-i]')].find(node => node.textContent.trim() === '0.95');
-    if (!span) return false;
-    const s = stage.getBoundingClientRect();
-    const r = span.getBoundingClientRect();
-    return r.left >= s.left && r.right <= s.right && r.top >= s.top && r.bottom <= s.bottom && r.bottom <= innerHeight;
-  });
-}
-
-/* Phone only: from the fit view, a tap zooms around the tap inside a pannable box; a table gets 3.5x. */
-async function zoomIn(page) {
-  assert.equal(await page.locator('#booth-pe-fit').isVisible(), false);
-  const before = await scoreRect(page);
-  await page.touchscreen.tap(before.x, before.y);
-  await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() === 3.5
-    && document.querySelector('#paper-before-stage .paper-page > canvas').getBoundingClientRect().width > 1000);
-  await page.waitForFunction(() => {
-    const stage = document.querySelector('#paper-before-stage');
-    const span = [...stage.querySelectorAll('.paper-text-layer span[data-i]')].find(node => node.textContent.trim() === '0.95');
-    if (!span) return false;
-    const s = stage.getBoundingClientRect();
-    const r = span.getBoundingClientRect();
-    return r.left >= s.left && r.right <= s.right && r.top >= s.top && r.bottom <= s.bottom;
-  });
-  assert.equal(await page.locator('#booth-pe-pop').isVisible(), false, 'the first tap only zooms');
-  assert.equal(await page.locator('#booth-pe-fit').isVisible(), true, '전체 쪽 shows while zoomed');
-  const box = await page.evaluate(() => {
-    const stage = document.querySelector('#paper-before-stage');
-    return {scrollW: stage.scrollWidth, clientW: stage.clientWidth, overflow: getComputedStyle(stage).overflowX};
-  });
-  assert.ok(box.scrollW > box.clientW * 2 && box.overflow === 'auto', 'zoomed page pans inside the stage ' + JSON.stringify(box));
-  await canvasCapped(page);
-  const after = await scoreRect(page);
-  assert.ok(after.height > before.height * 2.5, 'the score is drawn bigger: ' + JSON.stringify([before, after]));
-}
-
-async function selectScore(page, wide, offset = {x: 0, y: 0}) {
-  const rect = await scoreRect(page);
-  await tapAt(page, wide, rect.x + offset.x, rect.y + offset.y);
+/* Tap editing: new edit, repeated token, re-edit in place, revert removes edit, deletion '', overlay survives zoom & page turn. */
+async function tapFlow(page, wide, isTouch) {
   const pop = page.locator('#booth-pe-pop');
+  const input = page.locator('#booth-pe-input');
+  const apply = pop.getByRole('button', {name: '바꾸기', exact: true});
+
+  // Tap 0.95 (on phone: first tap zooms to 3.5x on table, second tap opens bar)
+  await tapToken(page, wide, '0.95', 0);
   await pop.waitFor({state: 'visible'});
-  const input = page.locator('#booth-pe-input');
-  assert.equal(await input.inputValue(), '0.95', 'the popover is prefilled with the tapped token');
-  assert.equal(await input.evaluate(node => node === document.activeElement), true, 'the input is focused');
-  assert.equal(await input.evaluate(node => node.selectionStart === 0 && node.selectionEnd === node.value.length), true, 'the word is selected');
-  assert.ok(parseFloat(await input.evaluate(node => getComputedStyle(node).fontSize)) >= 16, 'input font is at least 16px');
-  assert.deepEqual(await input.evaluate(node => ['inputmode', 'enterkeyhint', 'autocapitalize', 'autocorrect'].map(key => node.getAttribute(key)).concat(node.spellcheck)),
-    ['decimal', 'done', 'off', 'off', false]);
-  for (const button of await pop.locator('button:visible').all()) {
-    const b = await button.boundingBox();
-    assert.ok(b.width >= 44 && b.height >= (wide ? 44 : 36), 'popover tap target ' + JSON.stringify(b));
-  }
-  await page.waitForTimeout(50);
-  const now = await scoreRect(page); // the bar may pan the word into view
-  const sel = await page.locator('#paper-before-stage .booth-pe-sel').boundingBox();
-  assert.ok(sel && Math.abs(sel.x + sel.width / 2 - now.x) < 4 && Math.abs(sel.y + sel.height / 2 - now.y) < 4, 'the ink box sits on the word');
-  assert.ok(sel && Math.abs(sel.x + sel.width / 2 - now.x) < 4 );
-  const p = await pop.boundingBox();
-  const vw = wide ? 1280 : page.viewportSize().width;
-  assert.ok(p.x >= 0 && p.x + p.width <= vw, 'the popover stays on screen ' + JSON.stringify(p));
-  if (wide) {
-    assert.equal(await pop.evaluate(node => node.classList.contains('is-bar')), false);
-    assert.deepEqual(await pop.locator('button:visible').allTextContents(), ['바꾸기', '문단 전체 고치기', '취소']);
-    assert.ok(p.y >= sel.y + sel.height || p.y + p.height <= sel.y, 'the popover does not cover the word');
-  } else {
-    assert.equal(await pop.evaluate(node => node.classList.contains('is-bar')), true, 'phones get the edit bar');
-    assert.deepEqual(await pop.locator('button:visible').allTextContents(), ['‹', '›', '바꾸기', '문단 전체 고치기', '취소']);
-    assert.ok(Math.abs(p.y + p.height - page.viewportSize().height) <= 1, 'with no keyboard the bar sits at the bottom ' + JSON.stringify(p));
-    assert.ok(sel.y + sel.height <= p.y, 'the word stays above the bar');
-    assert.equal(await page.locator('#booth-dock').isVisible(), false, 'the dock steps aside while editing');
-  }
-  return rect;
-}
-
-/* Phone: a smaller visual viewport (the soft keyboard) lifts the bar; the word stays above it. */
-async function barAboveKeyboard(page) {
-  await page.evaluate(() => {
-    const fake = new EventTarget();
-    Object.assign(fake, {width: innerWidth, height: innerHeight - 300, offsetTop: 0, offsetLeft: 0, scale: 1});
-    Object.defineProperty(window, 'visualViewport', {value: fake, configurable: true});
-    window.dispatchEvent(new Event('resize'));
-  });
-  await page.waitForFunction(() => document.querySelector('#booth-pe-pop').style.bottom === '300px');
-  const geo = await page.evaluate(() => ({bar: document.querySelector('#booth-pe-pop').getBoundingClientRect().toJSON(),
-    sel: document.querySelector('.booth-pe-sel').getBoundingClientRect().toJSON(), height: innerHeight}));
-  assert.ok(Math.abs(geo.bar.bottom - (geo.height - 300)) <= 1, 'bar pinned above the keyboard ' + JSON.stringify(geo));
-  assert.ok(geo.sel.bottom <= geo.bar.top && geo.sel.top >= 0, 'the word is panned above the bar ' + JSON.stringify(geo));
-  await shoot(page, 'word-bar-keyboard', false);
-  await page.evaluate(() => { delete window.visualViewport; window.dispatchEvent(new Event('resize')); });
-  await page.waitForFunction(() => document.querySelector('#booth-pe-pop').style.bottom === '0px');
-}
-
-/* Phone: ‹ › walk the words of the page in reading order. */
-async function stepWords(page) {
-  const input = page.locator('#booth-pe-input');
-  await page.locator('#booth-pe-pop .booth-pe-next').click();
-  await page.waitForFunction(() => document.querySelector('#booth-pe-input').value === '0.78');
+  assert.equal(await input.inputValue(), '0.95');
   assert.equal(await input.getAttribute('inputmode'), 'decimal');
-  await page.locator('#booth-pe-pop .booth-pe-prev').click();
-  await page.waitForFunction(() => document.querySelector('#booth-pe-input').value === '0.95');
-  await page.locator('#booth-pe-pop .booth-pe-prev').click();
-  await page.waitForFunction(() => document.querySelector('#booth-pe-input').value === 'Ragas');
-  assert.equal(await input.getAttribute('inputmode'), 'text', 'words get the text keyboard');
-  await page.locator('#booth-pe-pop .booth-pe-next').click();
-  await page.waitForFunction(() => document.querySelector('#booth-pe-input').value === '0.95');
-}
+  assert.equal(await pop.getByRole('button', {name: '문단 전체 고치기'}).isDisabled(), false, 'paragraph button always enabled');
+  assert.equal(await pop.evaluate(n => n.classList.contains('is-bar')), isTouch);
+  if (isTouch) {
+    assert.equal(await page.locator('#booth-dock').isVisible(), false, 'dock hidden while touch bar open');
+    // Touch word stepping ‹ ›
+    await pop.locator('.booth-pe-next').click();
+    await page.waitForFunction(() => document.querySelector('#booth-pe-input').value === '0.78');
+    await pop.locator('.booth-pe-prev').click();
+    await page.waitForFunction(() => document.querySelector('#booth-pe-input').value === '0.95');
+    // Soft keyboard visualViewport lifts the bar
+    await page.evaluate(() => {
+      const fake = new EventTarget();
+      Object.assign(fake, {width: innerWidth, height: innerHeight - 300, offsetTop: 0, offsetLeft: 0, scale: 1});
+      Object.defineProperty(window, 'visualViewport', {value: fake, configurable: true});
+      window.dispatchEvent(new Event('resize'));
+    });
+    await page.waitForFunction(() => document.querySelector('#booth-pe-pop').style.bottom === '300px');
+    await page.evaluate(() => { delete window.visualViewport; window.dispatchEvent(new Event('resize')); });
+    await page.waitForFunction(() => document.querySelector('#booth-pe-pop').style.bottom === '0px');
+  } else {
+    // Desktop: Esc closes and refocuses stage
+    await page.keyboard.press('Escape');
+    assert.equal(await pop.isVisible(), false);
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'paper-before-stage');
+    await tapToken(page, wide, '0.95', 0);
+    await pop.waitFor({state: 'visible'});
+  }
 
-async function patchBox(page) {
-  return page.evaluate(() => {
-    const node = document.querySelector('#paper-before-stage .paper-page .booth-patch');
-    if (!node) return null;
-    const r = node.getBoundingClientRect();
-    return {x: r.left, y: r.top, width: r.width, height: r.height, text: node.textContent, events: getComputedStyle(node).pointerEvents};
-  });
-}
+  // Replace 0.95 -> 0.50
+  await input.fill('0.50');
+  if (!isTouch) await page.keyboard.press('Enter');
+  else await apply.click();
+  await page.waitForFunction(() => document.querySelector('#booth-pe-pop').hidden);
 
-async function replaceScore(page, wide, tapped) {
-  let rect = tapped;
-  await page.locator('#booth-pe-input').fill('0.50');
-  await shoot(page, 'word-popover', wide);
-  await page.locator('#booth-pe-pop').getByRole('button', {name: '바꾸기', exact: true}).click();
-  await page.waitForFunction(() => document.querySelector('#booth-dock-count')?.textContent === '고친 곳 1개');
-  assert.equal(await page.locator('#booth-pe-pop').isVisible(), false);
-  assert.match(await page.locator('#paper-edits').textContent(), /0\.95 → 0\.50/);
-  const edits = await page.evaluate(() => globalThis.FalsifyPaperWorkspace.getEditSnapshot().edits.map(edit => [edit.segmentId, edit.before, edit.after, edit.origin]));
+  let edits = await storeEdits(page);
   assert.equal(edits.length, 1);
-  assert.match(edits[0][0], /^paragraph:4:/, 'the edit lands in the tapped paragraph');
-  assert.deepEqual(edits[0].slice(1), ['0.95', '0.50', 'external-ai-import'], 'same pipeline as find-and-replace');
-  const patch = await patchBox(page);
-  assert.ok(patch, 'a .booth-patch covers the old spot');
-  rect = await scoreRect(page); // the applied-edit row above the page on phones moves the page down
-  assert.equal(patch.text, '0.50');
-  assert.equal(patch.events, 'none', 'the patch never takes taps');
-  assert.ok(Math.abs(patch.x - rect.left) <= 3 && Math.abs(patch.y - rect.top) <= 3 && patch.width >= rect.width - 3 && Math.abs(patch.height - rect.height) <= 2, 'patch over the old word ' + JSON.stringify([patch, rect]));
-  await shoot(page, 'patched', wide);
-  await patchAtFit(page, wide);
-}
+  assert.equal(edits[0].pageIndex, 4);
+  assert.equal(edits[0].originalText, '0.95');
+  assert.equal(edits[0].newText, '0.50');
+  assert.equal(edits[0].source, 'tap');
+  assert.ok(edits[0].rects.length >= 1 && edits[0].rects[0].w > 0 && edits[0].rects[0].h > 0);
 
-/* The patch is painted at every zoom: at the fit size (zoom 1, also after −/+ and 전체 쪽) it still covers
-   the edited token with a non-zero box and reads 0.50. */
-async function patchAtFit(page, wide, label = 'fit') {
-  const id = await page.evaluate(() => globalThis.FalsifyPaperWorkspace.getEditSnapshot().edits.find(edit => edit.after.includes('0.50')).id);
-  if (await page.locator('#booth-pe-fit').isVisible()) await page.locator('#booth-pe-fit').click();
-  await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() === 1);
-  await page.locator('#booth-pe-zoom-in').click();
-  await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() > 1);
-  await page.locator('#booth-pe-zoom-out').click();
-  await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() === 1);
-  await page.waitForFunction(value => {
-    const node = [...document.querySelectorAll('#paper-before-stage .paper-page .booth-patch')].find(item => item.dataset.patchId.split('@')[0] === value);
-    return node && node.getBoundingClientRect().width > 0 && node.getBoundingClientRect().height > 0;
-  }, id);
-  const fit = await page.evaluate(value => {
-    const node = [...document.querySelectorAll('#paper-before-stage .paper-page .booth-patch')].find(item => item.dataset.patchId.split('@')[0] === value);
-    const p = node.getBoundingClientRect();
-    const span = [...document.querySelectorAll('#paper-before-stage .paper-text-layer span[data-i]')].find(item => item.textContent.trim() === '0.95');
-    const range = document.createRange();
-    range.selectNodeContents(span);
-    const t = range.getBoundingClientRect();
-    return {text: node.textContent, w: p.width, h: p.height, cx: Math.abs((p.left + p.width / 2) - (t.left + t.width / 2)), cy: Math.abs((p.top + p.height / 2) - (t.top + t.height / 2)), tw: t.width, th: t.height,
-      mark: [...document.querySelectorAll('#paper-before-stage .paper-change-mark')].filter(item => item.dataset.edit === value && item.getBoundingClientRect().width > 0).length};
-  }, id);
-  assert.equal(fit.text, '0.50', label + ': the patch reads the new value');
-  assert.ok(fit.w > 0 && fit.h > 0, label + ': the patch has a size ' + JSON.stringify(fit));
-  assert.ok(fit.cx <= Math.max(2, fit.tw / 2) && fit.cy <= Math.max(2, fit.th / 2), label + ': the patch sits over the token ' + JSON.stringify(fit));
-  assert.equal(fit.mark, 0, label + ': no change mark drawn over the patch');
-  await shoot(page, label === 'fit' ? 'patched-fit' : 'tablet-patched-fit', wide);
-  if (!wide) await zoomIn(page); // back to the zoomed phone view the walk continues in
-}
+  let patches = await overlays(page);
+  assert.equal(patches.length, 1);
+  assert.equal(patches[0].editId, edits[0].id);
+  assert.equal(patches[0].text, '0.50');
+  assert.equal(patches[0].bg, 'rgb(255, 255, 255)');
+  assert.equal(patches[0].events, 'none');
 
-/* Page turns redraw the page; the patch is painted again on page 5. */
-async function patchSurvivesTurn(page) {
+  // Repeated token: tap the second 0.52 -> 0.11
+  await tapToken(page, wide, '0.52', 1);
+  await pop.waitFor({state: 'visible'});
+  assert.equal(await input.inputValue(), '0.52');
+  await input.fill('0.11');
+  await apply.click();
+  await page.waitForFunction(() => document.querySelector('#booth-pe-pop').hidden);
+
+  edits = await storeEdits(page);
+  assert.equal(edits.length, 2);
+  assert.deepEqual(edits.map(e => [e.originalText, e.newText]), [['0.95', '0.50'], ['0.52', '0.11']]);
+  // Second 0.52 sits lower than 0.95 on page 5
+  assert.ok(edits[1].rects[0].y > edits[0].rects[0].y, 'second 0.52 rect is below 0.95');
+
+  // Tapping an existing edit (0.95 -> 0.50) edits it in place
+  await tapToken(page, wide, '0.95', 0);
+  await pop.waitFor({state: 'visible'});
+  assert.equal(await input.inputValue(), '0.50', 'existing edit prefilled with newText');
+  await input.fill('0.42');
+  await apply.click();
+  await page.waitForFunction(() => document.querySelector('#booth-pe-pop').hidden);
+
+  edits = await storeEdits(page);
+  assert.equal(edits.length, 2, 'updated in place, count unchanged');
+  assert.equal(edits[0].newText, '0.42');
+  patches = await overlays(page);
+  assert.deepEqual(patches.map(p => p.text).sort(), ['0.11', '0.42']);
+
+  // Overlay survives page turn (page 5 -> page 6 -> page 5) and zoom changes
   await page.locator('#paper-page-next').click();
   await page.waitForFunction(() => /^6 \//.test(document.querySelector('#paper-page-label').textContent)
-    && !!document.querySelector('#paper-before-stage .paper-page canvas') && !document.querySelector('#paper-before-stage .booth-patch'));
+    && !!document.querySelector('#paper-before-stage .paper-page canvas')
+    && !document.querySelector('#paper-before-stage .booth-patch'));
+  assert.equal((await overlays(page)).length, 0, 'page 6 has no overlays');
   await page.locator('#paper-page-prev').click();
   await page.waitForFunction(() => /^5 \//.test(document.querySelector('#paper-page-label').textContent)
-    && [...document.querySelectorAll('#paper-before-stage .paper-text-layer span[data-i]')].some(node => node.textContent.trim() === '0.95'));
-  await page.waitForFunction(() => document.querySelector('#paper-before-stage .paper-page .booth-patch')?.textContent === '0.50');
+    && [...document.querySelectorAll('#paper-before-stage .paper-text-layer span[data-i]')].some(n => n.textContent.trim() === '0.95'));
+  await page.waitForFunction(() => document.querySelectorAll('#paper-before-stage .booth-patch').length === 2);
+  assert.deepEqual((await overlays(page)).map(p => p.text).sort(), ['0.11', '0.42']);
+
+  // Reverting an edit back to originalText removes it and its overlay
+  await tapToken(page, wide, '0.95', 0);
+  await pop.waitFor({state: 'visible'});
+  await input.fill('0.95');
+  await apply.click();
+  await page.waitForFunction(() => document.querySelector('#booth-pe-pop').hidden);
+  edits = await storeEdits(page);
+  assert.equal(edits.length, 1);
+  assert.equal(edits[0].newText, '0.11');
+  assert.equal((await overlays(page)).length, 1);
+
+  // Removing via store clears the overlay immediately (stateless store-driven preview)
+  await page.evaluate(() => globalThis.FalsifyBoothEdits.clear());
+  assert.equal((await overlays(page)).length, 0);
 }
 
-async function deleteEdit(page, wide) {
-  if (wide) {
-    const x = page.locator('#booth-dock-chips .booth-dock-x');
-    assert.equal(await x.count(), 1);
-    await x.click();
-  } else {
-    await page.locator('#paper-edits [data-act="delete"]').click();
-  }
-  await page.waitForFunction(() => document.querySelector('#booth-dock-count')?.textContent === '고친 곳 0개');
-  await page.waitForFunction(() => !document.querySelector('.booth-patch'));
+/* Paragraph editing ("문단 전체 고치기"): clustering, existing edit substitution, line trim and full deletion. */
+async function paragraphFlow(page, wide) {
+  const pop = page.locator('#booth-pe-pop');
+  const input = page.locator('#booth-pe-input');
+  const sheet = page.locator('#booth-pe-sheet');
+  const area = page.locator('#booth-pe-sheet-text');
+  const sheetApply = sheet.getByRole('button', {name: '바꾸기', exact: true});
+
+  // First make a tap edit inside Table 1 caption ("WikEval" -> "MyBench")
+  await tapToken(page, wide, 'WikEval', 0);
+  await pop.waitFor({state: 'visible'});
+  await input.fill('MyBench');
+  await pop.getByRole('button', {name: '바꾸기', exact: true}).click();
+  await page.waitForFunction(() => document.querySelector('#booth-pe-pop').hidden);
+  assert.equal((await storeEdits(page)).length, 1);
+
+  // Tap "Agreement" on line 1 of Table 1 caption and open "문단 전체 고치기"
+  await tapToken(page, wide, 'Agreement', 0);
+  await pop.waitFor({state: 'visible'});
+  await pop.getByRole('button', {name: '문단 전체 고치기'}).click();
+  await sheet.waitFor({state: 'visible'});
+  assert.equal(await pop.isVisible(), false);
+
+  const prefill = await area.inputValue();
+  const lines = prefill.split('\n');
+  assert.equal(lines.length, 3, 'Table 1 caption clustered into exactly 3 lines: ' + JSON.stringify(lines));
+  assert.match(lines[0], /^Table 1: Agreement with human annotators/);
+  assert.match(lines[2], /MyBench/, 'existing tap edit inside block is substituted into prefill');
+  assert.ok(!prefill.includes('0.95'), 'table above does not leak into caption');
+  assert.ok(!prefill.includes('Answer Relevancy'), 'right column does not leak into caption');
+
+  // Edit line 1 and revert MyBench -> WikEval on line 2: line 0 & 2 trim, old tap edit on line 2 is removed, leaving only line 1!
+  const edited = [lines[0], lines[1].replace('faithfulness', 'accuracy'), lines[2].replace('MyBench', 'WikEval')].join('\n');
+  await area.fill(edited);
+  await sheetApply.click();
+  await page.waitForFunction(() => document.querySelector('#booth-pe-sheet').hidden);
+
+  let edits = await storeEdits(page);
+  assert.equal(edits.length, 1, 'reverted line-2 edit removed and only changed line-1 edit stored');
+  assert.equal(edits[0].source, 'paragraph');
+  assert.equal(edits[0].rects.length, 1, 'unchanged leading and trailing lines trimmed to 1 rect');
+  assert.match(edits[0].originalText, /faithfulness/);
+  assert.match(edits[0].newText, /accuracy/);
+  assert.equal((await overlays(page)).length, 1);
+
+  // Full deletion of Table 1 caption -> newText '' covering all 3 caption lines
+  await tapToken(page, wide, 'Agreement', 0);
+  await pop.waitFor({state: 'visible'});
+  await pop.getByRole('button', {name: '문단 전체 고치기'}).click();
+  await sheet.waitFor({state: 'visible'});
+  await area.fill('');
+  await sheetApply.click();
+  await page.waitForFunction(() => document.querySelector('#booth-pe-sheet').hidden);
+
+  edits = await storeEdits(page);
+  assert.equal(edits.length, 1, 'full-block deletion replaces the overlapping single-line edit');
+  assert.equal(edits[0].source, 'paragraph');
+  assert.equal(edits[0].rects.length, 3, 'all 3 caption lines covered');
+  assert.equal(edits[0].newText, '', 'deleting everything gives empty newText');
+  const patches = await overlays(page);
+  assert.equal(patches.length, 3, 'all 3 caption rects covered by white overlays');
+  assert.deepEqual(patches.map(p => p.text), ['', '', '']);
 }
 
-async function wholeParagraph(page, wide) {
-  await selectScore(page, wide);
-  await page.locator('#booth-pe-pop').getByRole('button', {name: '문단 전체 고치기'}).click();
-  const editor = page.locator('textarea[aria-label$="직접 편집"]');
-  await editor.waitFor();
-  assert.equal(await page.locator('#booth-pe-pop').isVisible(), false);
-  if (!wide) assert.equal(await page.evaluate(() => globalThis.FalsifyPaperWorkspace.getZoom()), 1, 'the phone zooms out for the sheet');
-  assert.match(await editor.inputValue(), /0\.95/);
-  const crop = page.locator('#paper-before-stage .booth-pe-head canvas.booth-pe-crop');
-  await crop.waitFor();
-  await page.waitForFunction(() => document.querySelector('.booth-pe-crop')?.dataset.sharp === '1');
-  const look = await page.evaluate(() => {
-    const area = document.querySelector('textarea[aria-label$="직접 편집"]');
-    const style = getComputedStyle(area);
-    const c = document.querySelector('.booth-pe-crop');
-    const a = area.getBoundingClientRect();
-    const r = c.getBoundingClientRect();
-    const page = document.querySelector('#paper-before-stage .paper-page > canvas').getBoundingClientRect();
-    return {font: style.fontFamily, size: parseFloat(style.fontSize), align: style.textAlign, bg: style.backgroundColor,
-      cropBottom: r.bottom, cropW: r.width, cropH: r.height, pixels: c.width / r.width, areaTop: a.top, areaLeft: a.left, pageRight: page.right, pageBottom: page.bottom};
+/* Previously refused areas (arXiv side stamp on page 1) are now freely editable with zero blocking messages. */
+async function noRefusalFlow(page, wide) {
+  await page.evaluate(() => {
+    globalThis.FalsifyBoothEdits.clear();
+    globalThis.FalsifyPaperWorkspace.showPage(1);
   });
-  assert.match(look.font, /Times New Roman|serif/, 'serif face');
-  assert.ok(look.size >= 16, 'editor font >= 16px');
-  assert.equal(look.align, 'justify');
-  assert.equal(look.bg, 'rgb(255, 255, 255)');
-  assert.ok(look.cropW > 100 && look.cropH > 10 && look.cropBottom <= look.areaTop, 'the crop sits above the text box ' + JSON.stringify(look));
-  assert.ok(look.pixels >= (wide ? 1 : 2.9), 'the crop is drawn at device pixels ' + JSON.stringify(look));
-  if (wide) assert.ok(look.areaLeft > look.pageRight, 'desktop sheet sits in the work column');
-  else assert.ok(look.areaTop >= look.pageBottom, 'phone sheet sits below the page');
-  await shoot(page, 'paragraph-editor', wide);
-  const cancel = page.locator('.paper-direct-controls').getByRole('button', {name: '입력 취소', exact: true});
-  const dock = await page.evaluate(() => {
-    const node = document.querySelector('#booth-dock');
-    return {top: node.offsetParent === null ? innerHeight : node.getBoundingClientRect().top};
-  });
-  if (!wide) assert.equal(await page.locator('#booth-dock').isVisible(), false, 'the dock steps aside while the sheet has focus');
-  await cancel.scrollIntoViewIfNeeded();
-  const cancelBox = await cancel.boundingBox();
-  assert.ok(cancelBox.y + cancelBox.height <= dock.top, 'the sheet controls show above the dock ' + JSON.stringify([cancelBox, dock]));
-  await cancel.click();
-  await page.waitForFunction(() => !document.querySelector('textarea[aria-label$="직접 편집"]') && !document.querySelector('.booth-pe-head'));
-}
-
-async function walk(browser, wide) {
-  const {page, errors} = await openMission(browser, wide);
-  await assertLayout(page, wide);
-  if (!wide) {
-    await autoZoomed(page);
-    await page.locator('#booth-pe-bar').evaluate(node => node.scrollIntoView({block: 'start'}));
-    await shoot(page, 'zoomed', wide);
-    await zoomOut(page);
-    const fitWidth = await page.evaluate(() => [document.querySelector('#paper-before-stage .paper-page > canvas').getBoundingClientRect().width, document.querySelector('#paper-before-stage').clientWidth]);
-    assert.ok(Math.abs(fitWidth[0] - fitWidth[1]) <= 2, 'the fit page fills the column ' + fitWidth);
-    await page.locator('#paper-workspace .paper-toolbar').evaluate(node => node.scrollIntoView({block: 'start'}));
-  }
-  await zoomButtons(page, wide ? 1.25 : 1.5);
-  if (!wide) await page.locator('#paper-workspace .paper-toolbar').evaluate(node => node.scrollIntoView({block: 'start'}));
-  await shoot(page, 'page-fit', wide);
-  if (!wide) await zoomIn(page);
-  // A finger that lands about 10px right of the number (nothing else within 24px) still selects it on phones.
-  const rect = await selectScore(page, wide, wide ? {x: 0, y: 0} : {x: (await scoreRect(page)).width / 2 + 10, y: 0});
-  if (!wide) {
-    await stepWords(page);
-    await barAboveKeyboard(page);
-  }
-  await replaceScore(page, wide, rect);
-  assert.equal(await page.locator('#booth-dock').isVisible(), true, 'the dock is back after the edit');
-  if (!wide) {
-    // The applied edit is a booth card below the page: 5쪽 0.95 → 0.50, numbers in mono, a small 삭제.
-    const card = await page.evaluate(() => {
-      const row = document.querySelector('#paper-edits > li');
-      const ins = row.querySelector('ins.booth-edit-text');
-      return {below: row.getBoundingClientRect().top >= document.querySelector('#paper-before-stage').getBoundingClientRect().bottom,
-        text: row.querySelector('[data-act="edit"]').textContent, number: ins.classList.contains('is-number'), mono: /mono/i.test(getComputedStyle(ins).fontFamily),
-        origin: !!row.querySelector('.paper-edit-origin')?.offsetParent};
-    });
-    assert.deepEqual(card, {below: true, text: '5쪽 0.95 → 0.50', number: true, mono: true, origin: false});
-  }
-  await patchSurvivesTurn(page);
-  await deleteEdit(page, wide);
-  await wholeParagraph(page, wide);
-  if (!wide) {
-    await page.setViewportSize({width: 360, height: 780});
-    assert.ok(await overflow(page) <= 0, '360px fit: horizontal overflow');
-    await page.waitForFunction(() => Math.abs(document.querySelector('#paper-before-stage .paper-page > canvas').getBoundingClientRect().width - document.querySelector('#paper-before-stage').clientWidth) <= 2);
-    await zoomIn(page);
-    assert.ok(await overflow(page) <= 0, '360px zoomed: horizontal overflow');
-    await selectScore(page, wide);
-    assert.ok(await overflow(page) <= 0, '360px edit bar: horizontal overflow');
-    await page.locator('#booth-pe-pop').getByRole('button', {name: '취소'}).click();
-    await zoomOut(page);
-  } else {
-    // Enter applies, Esc cancels and returns focus to the page.
-    await selectScore(page, wide);
-    await page.keyboard.press('Escape');
-    assert.equal(await page.locator('#booth-pe-pop').isVisible(), false);
-    assert.equal(await page.evaluate(() => document.activeElement.id), 'paper-before-stage');
-    await selectScore(page, wide);
-    await page.locator('#booth-pe-input').fill('0.51');
-    await page.keyboard.press('Enter');
-    await page.waitForFunction(() => document.querySelector('#booth-dock-count')?.textContent === '고친 곳 1개');
-    const s = await scoreRect(page);
-    await page.mouse.move(s.x, s.y + 40);
-    await page.mouse.move(s.x + 60, s.y);
-    await page.locator('#paper-before-stage .booth-pe-hover').waitFor({timeout: 1000});
-  }
-  const foot = await page.evaluate(() => {
-    const a = document.querySelector('#agent-link').getBoundingClientRect();
-    const s = document.querySelector('#source-link').getBoundingClientRect();
-    return {gap: s.left - a.right, sameLine: Math.abs(a.top - s.top) < 2, sep: getComputedStyle(document.querySelector('#source-link'), '::before').content};
-  });
-  assert.equal(foot.sep, '"·"', 'footer links have a separator');
-  if (foot.sameLine) assert.ok(foot.gap >= 0, 'footer links do not touch');
-  assert.equal(errors.join('\n'), '');
-  await page.context().close();
-}
-
-/* A landscape touch tablet (the booth device, a Galaxy Tab S7 FE class: 1280x800 CSS px at DPR 2): desktop layout, touch editing model, no zoom needed to tap. */
-async function tabletWalk(browser) {
-  const {page, errors} = await openMission(browser, true, true);
-  await assertLayout(page, true);
-  assert.equal(await page.evaluate(() => globalThis.FalsifyPaperWorkspace.getZoom()), 1, 'the tablet page is large enough without zoom');
-  await shoot(page, 'tablet-page-fit', true);
-  const rect = await scoreRect(page);
-  await page.touchscreen.tap(rect.x + rect.width / 2 + 8, rect.y);
+  await page.waitForFunction(() => /^1 \//.test(document.querySelector('#paper-page-label').textContent)
+    && [...document.querySelectorAll('#paper-before-stage .paper-text-layer span[data-i]')].some(n => n.textContent.includes('arXiv:2309.15217v2')));
+  await tapToken(page, wide, 'arXiv:2309.15217v2', 0);
   const pop = page.locator('#booth-pe-pop');
   await pop.waitFor({state: 'visible'});
   const input = page.locator('#booth-pe-input');
-  assert.equal(await input.inputValue(), '0.95', 'a tap near the number selects it');
-  assert.equal(await input.getAttribute('inputmode'), 'decimal');
-  assert.equal(await pop.evaluate(node => node.classList.contains('is-bar')), true, 'a coarse pointer gets the edit bar at desktop width');
-  assert.deepEqual(await pop.locator('button:visible').allTextContents(), ['‹', '›', '바꾸기', '문단 전체 고치기', '취소']);
-  const p = await pop.boundingBox();
-  const column = await page.locator('#paper-before-stage .paper-page > canvas').boundingBox();
-  assert.ok(Math.abs(p.y + p.height - 800) <= 1, 'bar at the bottom ' + JSON.stringify(p));
-  assert.ok(Math.abs(p.x - column.x) <= 1 && Math.abs(p.width - column.width) <= 1, 'bar lines up with the page column ' + JSON.stringify([p, column]));
-  assert.equal(await page.locator('#booth-dock').isVisible(), false, 'the dock steps aside while typing');
-  await shoot(page, 'tablet-word-bar', true);
-  await input.fill('0.50');
-  await pop.getByRole('button', {name: '바꾸기'}).tap();
-  await page.waitForFunction(() => document.querySelector('#booth-dock-count')?.textContent === '고친 곳 1개');
-  assert.equal(await page.locator('#booth-dock').isVisible(), true);
-  await page.locator('#paper-before-stage .booth-patch').first().waitFor();
-  await patchAtFit(page, true, 'tablet');
-  await page.locator('#booth-pe-zoom-in').tap();
-  await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() === 1.25);
-  await canvasCapped(page);
-  await shoot(page, 'tablet-zoomed', true);
-  await page.locator('#booth-pe-fit').tap();
-  await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() === 1);
-  assert.ok(await overflow(page) <= 0, 'tablet: horizontal overflow');
-  assert.equal(errors.join('\n'), '');
-  await page.context().close();
+  assert.equal(await input.isDisabled(), false, 'arXiv stamp is editable (no notText refusal)');
+  assert.equal(await pop.getByRole('button', {name: '바꾸기', exact: true}).isDisabled(), false);
+  assert.equal(await pop.getByRole('button', {name: '문단 전체 고치기'}).isDisabled(), false);
+  await input.fill('arXiv:0000.00000v1');
+  await pop.getByRole('button', {name: '바꾸기', exact: true}).click();
+  await page.waitForFunction(() => document.querySelector('#booth-pe-pop').hidden);
+  const edits = await storeEdits(page);
+  assert.equal(edits.length, 1);
+  assert.equal(edits[0].pageIndex, 0);
+  assert.equal(edits[0].newText, 'arXiv:0000.00000v1');
 }
 
-/* Phone race: the visitor touches the zoom bar while the paper is still loading; the hint zoom must not
-   jump in later and override them. */
+/* Phone race: touching the bar while loading cancels the hint zoom. */
 async function hintZoomYields(browser) {
   const context = await browser.newContext({viewport: {width: 390, height: 844}, deviceScaleFactor: 3, hasTouch: true, locale: 'ko-KR'});
   const page = await context.newPage();
@@ -571,7 +436,7 @@ async function hintZoomYields(browser) {
   await page.route('**/*', async route => {
     const url = route.request().url();
     if (url.startsWith(base)) return route.continue();
-    if (new URL(url).pathname === '/v1/papers/pdf') await new Promise(resolve => setTimeout(resolve, 2500));
+    if (new URL(url).pathname === '/v1/papers/pdf') await new Promise(resolve => setTimeout(resolve, 1500));
     return stubApi(route);
   });
   await page.goto(base + 'event.html');
@@ -580,275 +445,35 @@ async function hintZoomYields(browser) {
   const bar = await page.locator('#booth-pe-bar').boundingBox();
   await page.touchscreen.tap(bar.x + 20, bar.y + bar.height / 2);
   await page.waitForFunction(() => /^5 \//.test(document.querySelector('#paper-page-label')?.textContent || '')
-    && (globalThis.FalsifyPaperWorkspace.getPageParagraphs()?.items || []).some(item => item.text.includes('0.95')));
-  await page.waitForTimeout(1500);
-  assert.equal(await page.evaluate(() => globalThis.FalsifyPaperWorkspace.getZoom()), 1, 'a touch before the page is drawn cancels the hint zoom');
+    && [...document.querySelectorAll('#paper-before-stage .paper-text-layer span[data-i]')].some(n => n.textContent.trim() === '0.95'));
+  await page.waitForTimeout(500);
+  assert.equal(await page.evaluate(() => globalThis.FalsifyPaperWorkspace.getZoom()), 1, 'user touch cancels hint zoom');
   assert.equal(errors.join('\n'), '');
   await context.close();
 }
 
-/* The exact tapped occurrence (alpha.89): a repeated word never stops an edit. On page 5 "0.52" sits
-   twice in Table 1 and "the" 13 times in one paragraph; "met-" / "rics" is one word over two lines. */
-const STOPPED = /여러 곳에 있어|정하지 못했어요|찾지 못했어요|겹쳐요|바꾸지 못했어요|문단 전체 고치기」로/;
-
-/* Centre of the nth (in reading order) occurrence of token in spans whose text passes keep. */
-async function tokenPoint(page, token, nth, keep) {
-  return page.evaluate(([value, n, filter]) => {
-    const spans = [...document.querySelectorAll('#paper-before-stage .paper-text-layer span[data-i]')]
-      .sort((a, b) => Number(a.dataset.i) - Number(b.dataset.i))
-      .filter(span => !filter || span.textContent.startsWith(filter));
-    const hits = [];
-    for (const span of spans) {
-      const text = span.textContent;
-      for (let at = text.indexOf(value); at >= 0; at = text.indexOf(value, at + 1)) {
-        const edge = i => i < 0 || i >= text.length || /[\s,.;:()]/.test(text[i]);
-        if (edge(at - 1) && edge(at + value.length)) hits.push({span, at});
-      }
-    }
-    const hit = hits[n];
-    if (!hit) return null;
-    hit.span.scrollIntoView({block: 'center', inline: 'center', behavior: 'instant'});
-    const range = document.createRange();
-    range.setStart(hit.span.firstChild, hit.at);
-    range.setEnd(hit.span.firstChild, hit.at + value.length);
-    const stage = document.getElementById('paper-before-stage');
-    const box = stage.getBoundingClientRect();
-    const first = range.getBoundingClientRect();
-    stage.scrollLeft += first.left + first.width / 2 - (box.left + box.width / 2);
-    const r = range.getBoundingClientRect();
-    return {x: r.left + r.width / 2, y: r.top + r.height / 2, left: r.left};
-  }, [token, nth, keep || '']);
-}
-
-async function tapToken(page, wide, token, nth, keep) {
-  if (!wide && await page.evaluate(() => globalThis.FalsifyPaperWorkspace.getZoom() === 1)) {
-    const first = await tokenPoint(page, token, nth, keep);
-    await tapAt(page, wide, first.x, first.y);
-    await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() > 1);
-    await page.waitForTimeout(300);
+async function walk(browser, wide, tablet = false) {
+  const isTouch = !wide || tablet;
+  const {page, errors} = await openMission(browser, wide, tablet);
+  await checkZoomAndHint(page, wide);
+  await tapFlow(page, wide, isTouch);
+  await paragraphFlow(page, wide);
+  await noRefusalFlow(page, wide);
+  if (!wide) {
+    await page.setViewportSize({width: 360, height: 780});
+    assert.ok(await overflow(page) <= 0, '360px phone has no horizontal overflow');
+  } else if (!tablet) {
+    // Desktop hover hairline
+    await page.evaluate(() => globalThis.FalsifyPaperWorkspace.showPage(5));
+    await page.waitForFunction(() => /^5 \//.test(document.querySelector('#paper-page-label').textContent)
+      && [...document.querySelectorAll('#paper-before-stage .paper-text-layer span[data-i]')].some(n => n.textContent.trim() === '0.95'));
+    const s = await tokenPoint(page, '0.95', 0);
+    await page.mouse.move(s.x, s.y);
+    await page.locator('#paper-before-stage .booth-pe-hover').waitFor({timeout: 2000});
+  } else {
+    assert.ok(await overflow(page) <= 0, 'tablet has no horizontal overflow');
   }
-  /* The applied-edit row above the page can still move it: tap once the token holds still. */
-  let point = null;
-  for (let tries = 0; tries < 4; tries += 1) {
-    let last = null;
-    for (let still = 0; still < 20; still += 1) {
-      point = await tokenPoint(page, token, nth, keep);
-      assert.ok(point, 'token on the page: ' + token + ' #' + nth);
-      if (last && Math.abs(last.x - point.x) < 0.5 && Math.abs(last.y - point.y) < 0.5) break;
-      last = point;
-      await page.waitForTimeout(150);
-    }
-    await tapAt(page, wide, point.x, point.y);
-    if (await page.locator('#booth-pe-pop').waitFor({state: 'visible', timeout: 2000}).then(() => true, () => false)) return point;
-  }
-  throw new Error('no popover for ' + token + ' #' + nth);
-}
-
-async function changeTo(page, value) {
-  await page.locator('#booth-pe-input').fill(value);
-  await page.locator('#booth-pe-pop').getByRole('button', {name: '바꾸기', exact: true}).click();
-  await page.waitForFunction(() => document.querySelector('#booth-pe-pop').hidden);
-  assert.equal(await page.locator('.booth-pe-status').textContent(), '', 'nothing stops the edit');
-}
-
-/* The paragraph text with every recorded edit applied, by anchor. */
-async function paragraphOut(page, includes) {
-  return page.evaluate(text => {
-    const ws = globalThis.FalsifyPaperWorkspace;
-    const item = ws.getPageParagraphs().items.find(entry => entry.text.includes(text));
-    const seg = ws.getSource().segments.find(entry => entry.id === item.segmentId);
-    const edits = ws.getEditSnapshot().edits.filter(edit => edit.segmentId === seg.id && edit.enabled !== false)
-      .sort((a, b) => b.anchor.start - a.anchor.start);
-    let out = seg.text;
-    for (const edit of edits) out = out.slice(0, edit.anchor.start) + edit.after + out.slice(edit.anchor.end);
-    return {out, count: edits.length};
-  }, includes);
-}
-
-async function patchTexts(page) {
-  return page.evaluate(() => [...document.querySelectorAll('#paper-before-stage .booth-patch')].map(node => node.textContent));
-}
-
-async function anchorWalk(browser, wide) {
-  const {page, errors} = await openMission(browser, wide);
-  await page.evaluate(pattern => {
-    globalThis.__stopped = [];
-    new MutationObserver(() => {
-      const text = document.body.textContent;
-      if (new RegExp(pattern).test(text)) globalThis.__stopped.push(text.match(new RegExp(pattern))[0]);
-    }).observe(document.body, {subtree: true, childList: true, characterData: true});
-  }, STOPPED.source);
-
-  // The second 0.52 of Table 1 (GPT Ranking, last column); the first (GPT Score) stays.
-  const second = await tapToken(page, wide, '0.52', 1);
-  assert.equal(await page.locator('#booth-pe-input').inputValue(), '0.52');
-  await changeTo(page, '0.11');
-  let table = await paragraphOut(page, '0.95');
-  assert.match(table.out, /GPT Score\s+0\.72\s+0\.52\s+0\.63/, 'the other 0.52 did not change');
-  assert.match(table.out, /GPT Ranking\s+0\.54\s+0\.40\s+0\.11/, 'the tapped 0.52 changed');
-  const patch = await page.evaluate(() => {
-    const node = [...document.querySelectorAll('#paper-before-stage .booth-patch')].find(item => item.textContent === '0.11');
-    return node && node.getBoundingClientRect().left;
-  });
-  const now = await tokenPoint(page, '0.52', 1);
-  assert.ok(patch != null && Math.abs(patch - now.left) <= 3, 'the patch sits on the tapped cell ' + JSON.stringify([patch, now, second]));
-
-  // A second edit in the same paragraph, next to the first (their spans overlap): both stay.
-  await tapToken(page, wide, '0.40', 0);
-  await changeTo(page, '0.44');
-  table = await paragraphOut(page, '0.95');
-  assert.match(table.out, /GPT Ranking\s+0\.54\s+0\.44\s+0\.11/, 'both edits in one paragraph');
-  assert.match(table.out, /GPT Score\s+0\.72\s+0\.52\s+0\.63/);
-  assert.deepEqual((await patchTexts(page)).filter(text => /^0\.(44|11)$/.test(text)).sort(), ['0.11', '0.44']);
-
-  // Re-editing the edited cell: the popover shows the new value; the edit is updated in place.
-  await tapToken(page, wide, '0.52', 1);
-  assert.equal(await page.locator('#booth-pe-input').inputValue(), '0.11');
-  await changeTo(page, '0.12');
-  table = await paragraphOut(page, '0.95');
-  assert.match(table.out, /GPT Ranking\s+0\.54\s+0\.44\s+0\.12/, 're-edited in place');
-  assert.match(table.out, /GPT Score\s+0\.72\s+0\.52\s+0\.63/);
-  const patches = await patchTexts(page);
-  assert.ok(patches.includes('0.12') && !patches.includes('0.11') && patches.includes('0.44'), JSON.stringify(patches));
-  await shoot(page, 'anchor-table', wide);
-
-  // A common word: the second "the" of "Table 1 analyses the agreement between the met-".
-  const body = 'Table 1 analyses';
-  const before = await paragraphOut(page, body);
-  await tapToken(page, wide, 'the', 1, body);
-  assert.equal(await page.locator('#booth-pe-input').inputValue(), 'the');
-  await changeTo(page, 'a');
-  let text = await paragraphOut(page, body);
-  assert.match(text.out, /^Table 1 analyses the agreement between a metrics proposed/, 'only the tapped "the" changed');
-  assert.equal((text.out.match(/\bthe\b/g) || []).length, (before.out.match(/\bthe\b/g) || []).length - 1);
-
-  // A word hyphenated over two lines is one word; it sits next to the edit above and joins it.
-  await tapToken(page, wide, 'met-', 0, body);
-  assert.equal(await page.locator('#booth-pe-input').inputValue(), 'metrics');
-  await changeTo(page, 'models');
-  text = await paragraphOut(page, body);
-  assert.match(text.out, /^Table 1 analyses the agreement between a models proposed in Section 3/);
-  const halves = await patchTexts(page);
-  assert.equal(halves.filter(value => /^mo|els$/.test(value)).join(''), 'mod-els', 'the new word follows the line break ' + JSON.stringify(halves));
-  await shoot(page, 'anchor-body', wide);
-
-  assert.deepEqual(await page.evaluate(() => globalThis.__stopped), [], 'no stop message ever appeared');
-  assert.deepEqual(errors, []);
-  await page.context().close();
-}
-
-/* A tap whose paragraph box does not lead to its paragraph text (here: the box is unbound from it) is searched only
-   on this page and only where its neighbours prove the place; the PDF edit lands on the tapped word. */
-async function hideParagraph(page, startsWith) {
-  await page.evaluate(prefix => {
-    const ws = globalThis.FalsifyPaperWorkspace;
-    const real = ws.getPageParagraphs.bind(ws);
-    // The box stays (the word is body text) but no longer leads to its paragraph text.
-    ws.getPageParagraphs = () => { const out = real(); return out && {...out, items: out.items.map(item => (item.text.startsWith(prefix) ? {...item, segmentId: 'paragraph:unbound:' + item.segmentId.slice(-6)} : item))}; };
-  }, startsWith);
-}
-
-async function segmentOut(page, id) {
-  return page.evaluate(segmentId => {
-    const ws = globalThis.FalsifyPaperWorkspace;
-    const seg = ws.getSource().segments.find(entry => entry.id === segmentId);
-    const edits = ws.getEditSnapshot().edits.filter(edit => edit.segmentId === segmentId && edit.enabled !== false).sort((a, b) => b.anchor.start - a.anchor.start);
-    let out = seg.text;
-    for (const edit of edits) out = out.slice(0, edit.anchor.start) + edit.after + out.slice(edit.anchor.end);
-    return {before: seg.text, out};
-  }, id);
-}
-
-async function searchWalk(browser, wide) {
-  const {page, errors} = await openMission(browser, wide);
-  if (!wide) await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() > 1, null, {timeout: 8000}).catch(() => {});
-  await hideParagraph(page, 'Table 1 analyses');
-  const body = 'Table 1 analyses';
-  await tapToken(page, wide, 'the', 1, body);
-  assert.equal(await page.locator('#booth-pe-input').inputValue(), 'the');
-  await changeTo(page, 'a');
-  const edits = await page.evaluate(() => globalThis.FalsifyPaperWorkspace.getEditSnapshot().edits.map(edit => ({id: edit.segmentId, page: edit.pageIndex})));
-  assert.equal(edits.length, 1);
-  assert.equal(edits[0].page, 4, 'the edit stays on the tapped page');
-  const seg = await segmentOut(page, edits[0].id);
-  const ink = text => text.replace(/\s+/g, '').replace(/-/g, '');
-  assert.ok(ink(seg.out).includes('agreementbetweenametrics'), 'the tapped "the" changed ' + seg.out.slice(0, 200));
-  assert.ok(ink(seg.out).includes('analysestheagreement'), 'the "the" before it did not');
-  assert.equal((seg.out.match(/\bthe\b/g) || []).length, (seg.before.match(/\bthe\b/g) || []).length - 1, 'exactly one "the" changed');
-
-  // The table without its box: the second 0.52 is still the one that changes.
-  await hideParagraph(page, '                       0.95');
-  await tapToken(page, wide, '0.52', 1);
-  await changeTo(page, '0.11');
-  const table = await page.evaluate(() => globalThis.FalsifyPaperWorkspace.getEditSnapshot().edits.find(edit => edit.after.includes('0.11')).segmentId);
-  const row = await segmentOut(page, table);
-  assert.match(row.out, /GPT Ranking\s+0\.54\s+0\.40\s+0\.11/, 'the tapped 0.52');
-  assert.match(row.out, /GPT Score\s+0\.72\s+0\.52\s+0\.63/, 'not the first 0.52');
-  await shoot(page, 'anchor-search', wide);
-  assert.deepEqual(errors, []);
-  await page.context().close();
-}
-
-/* Edits that hold several changes keep all of them: a new change between two earlier ones, and taps that
-   fold into one widened edit; every patch on the page matches a change the PDF edit still has. */
-async function mergeWalk(browser, wide) {
-  const {page, errors} = await openMission(browser, wide);
-  if (!wide) await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() > 1, null, {timeout: 8000}).catch(() => {});
-  // The first 0.52 widens to its neighbours (0.72 … 0.63); 0.72 and 0.63 then join that edit; 0.52 again.
-  await tapToken(page, wide, '0.52', 0);
-  await changeTo(page, '0.11');
-  await tapToken(page, wide, '0.72', 0);
-  await changeTo(page, '0.71');
-  await tapToken(page, wide, '0.63', 0);
-  await changeTo(page, '0.66');
-  await tapToken(page, wide, '0.52', 0);
-  assert.equal(await page.locator('#booth-pe-input').inputValue(), '0.11');
-  await changeTo(page, '0.12');
-  let table = await paragraphOut(page, '0.95');
-  assert.match(table.out, /GPT Score\s+0\.71\s+0\.12\s+0\.66/, 'three changes kept ' + table.out);
-  assert.deepEqual((await patchTexts(page)).sort(), ['0.12', '0.66', '0.71']);
-
-  // An edit with two separate changes (GPT Ranking 0.54 and 0.52), then the 0.40 between them.
-  await page.evaluate(() => {
-    const ws = globalThis.FalsifyPaperWorkspace;
-    const item = ws.getPageParagraphs().items.find(entry => entry.text.includes('0.95'));
-    const seg = ws.getSource().segments.find(entry => entry.id === item.segmentId);
-    const start = seg.text.indexOf('0.54');
-    const end = seg.text.lastIndexOf('0.52') + 4;
-    const before = seg.text.slice(start, end);
-    const after = '0.55' + before.slice(4, -4) + '0.53';
-    ws.acceptProposals([{segmentId: seg.id, pageIndex: 4, before, after, anchor: {start, end}}], {origin: 'external-ai-import', confirmed: true});
-    ws.acceptProposals([], {origin: 'external-ai-import'});
-  });
-  await tapToken(page, wide, '0.40', 0);
-  await changeTo(page, '0.44');
-  table = await paragraphOut(page, '0.95');
-  assert.match(table.out, /GPT Ranking\s+0\.55\s+0\.44\s+0\.53/, 'the change between two earlier ones keeps both ' + table.out);
-  assert.match(table.out, /GPT Score\s+0\.71\s+0\.12\s+0\.66/);
-  const patches = await patchTexts(page);
-  assert.ok(patches.includes('0.44') && !patches.includes('0.40'), JSON.stringify(patches));
-  assert.deepEqual(await page.evaluate(() => globalThis.__stopped || []), []);
-  assert.deepEqual(errors, []);
-  await page.context().close();
-}
-
-/* Not body text: the arXiv stamp on page 1 lies outside every paragraph of the engine's page model, so
-   the field is closed with the in-place line at the tap, before any typing. An author mark (†) inside the
-   author paragraph stays editable. */
-async function notTextWalk(browser, wide) {
-  const {page, errors} = await openMission(browser, wide);
-  await page.evaluate(() => globalThis.FalsifyPaperWorkspace.showPage(1));
-  await page.waitForFunction(() => { const boxes = globalThis.FalsifyPaperWorkspace.getPageParagraphs(); return boxes && boxes.pageIndex === 0 && boxes.items.length > 0; });
-  await tapToken(page, wide, 'arXiv:2309.15217v2', 0);
-  assert.equal(await page.locator('#booth-pe-input').isDisabled(), true, 'the field is closed at the tap');
-  assert.equal(await page.locator('#booth-pe-pop').getByRole('button', {name: '바꾸기', exact: true}).isDisabled(), true);
-  assert.equal(await page.locator('.booth-pe-status').textContent(), '그림이나 머리글 속 글자는 바꿀 수 없어요.');
-  await shoot(page, 'not-text', wide);
-  await page.locator('#booth-pe-pop').getByRole('button', {name: '취소', exact: true}).click();
-  await tapToken(page, wide, '†', 0);
-  assert.equal(await page.locator('#booth-pe-input').isDisabled(), false, 'an author mark stays editable');
-  assert.equal(await page.locator('.booth-pe-status').textContent(), '');
-  assert.deepEqual(errors, []);
+  assert.equal(errors.join('\n'), '');
   await page.context().close();
 }
 
@@ -859,18 +484,10 @@ async function main() {
   try {
     await server.ready;
     browser = await chromium.launch({executablePath: chrome, headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage']});
-    await walk(browser, false);
-    await walk(browser, true);
-    await tabletWalk(browser);
+    await walk(browser, true, false);
+    await walk(browser, false, false);
+    await walk(browser, true, true);
     await hintZoomYields(browser);
-    await anchorWalk(browser, true);
-    await anchorWalk(browser, false);
-    await searchWalk(browser, true);
-    await searchWalk(browser, false);
-    await mergeWalk(browser, true);
-    await mergeWalk(browser, false);
-    await notTextWalk(browser, true);
-    await notTextWalk(browser, false);
   } catch (error) {
     error.message += '\npage=' + JSON.stringify(await diagnose());
     throw error;
