@@ -230,6 +230,25 @@ async function main() {
     await desk.waitForFunction(() => document.documentElement.dataset.boothStep === 'edit');
     await setStep(desk, 'edit');
     await assertChromeHidden(desk, 'desktop edit');
+    // The recipe panel (tabs, find-and-replace) sits right of the page, and the page image
+    // starts above the fold next to it.
+    if (await desk.locator('#booth-recipe').count()) {
+      const recipe = await desk.evaluate(() => {
+        const rect = selector => { const node = document.querySelector(selector); if (!node) return null; const box = node.getBoundingClientRect(); return {left: box.left, right: box.right, top: box.top, bottom: box.bottom}; };
+        return {recipe: rect('#booth-recipe'), canvas: rect('.paper-page > canvas'), hint: rect('#booth-hint'), height: window.innerHeight};
+      });
+      assert.ok(recipe.recipe.left > recipe.canvas.right, 'desktop edit: recipe panel is not right of the page ' + JSON.stringify(recipe));
+      assert.ok(recipe.recipe.top >= recipe.hint.bottom, 'desktop edit: recipe panel is not under the hint ' + JSON.stringify(recipe));
+      assert.ok(recipe.canvas.top < recipe.height - 76 - 200, 'desktop edit: page image starts below the fold ' + JSON.stringify(recipe));
+      assert.ok(recipe.recipe.top < recipe.canvas.bottom, 'desktop edit: recipe panel is not beside the page ' + JSON.stringify(recipe));
+      if (await desk.locator('#booth-find-list').count()) await desk.locator('#booth-find-list').click();
+      const open = await desk.evaluate(() => ({
+        list: document.querySelector('.paper-paragraph-list').getBoundingClientRect().top,
+        recipe: document.querySelector('#booth-recipe').getBoundingClientRect().bottom,
+      }));
+      assert.ok(open.list >= open.recipe, 'desktop edit: paragraph list overlaps the recipe panel ' + JSON.stringify(open));
+      await desk.evaluate(() => window.scrollTo(0, 0));
+    }
     const panes = await desk.evaluate(() => {
       const box = selector => { const node = document.querySelector(selector); if (!node) return null; const rect = node.getBoundingClientRect(); return {left: rect.left, right: rect.right, top: rect.top, width: rect.width}; };
       return {canvas: box('.paper-page > canvas'), list: box('.paper-paragraph-list'), hint: box('#booth-hint'), toolbar: box('#paper-workspace .paper-toolbar'),
