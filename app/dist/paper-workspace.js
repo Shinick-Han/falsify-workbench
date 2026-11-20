@@ -1408,6 +1408,7 @@
         if(epoch!==mine||settled)return;
         settled=true;timers.clearTimeout(timer);if(loadTimer===timer)loadTimer=null;
         source.doc=pdf;pages=pdf.numPages;renderChrome();
+        emit('falsify:paper-workspace-pdf',{fileHash:source.fileHash,pages});
         setStatus('');
         await drawBefore(1,mine);
       }catch(e){
@@ -3262,6 +3263,8 @@
       acceptProposals,acceptExternalResponse,exportRedBatch,
       getExternalResponses(){return external?external.snapshot():null;},
       getSource(){if(!source||!source.file||!source.fileHash)return null;return Object.freeze({file:source.file,fileHash:source.fileHash,segments:published(source.segments)||[],externalSegments:published(externalSegments(source.segments))||[]});},
+      getPdfDoc(){return source&&source.doc||null;},
+      getPageCount(){return source&&source.doc?pages:0;},
       getEditSnapshot(){const raw=session&&typeof session.snapshot==='function'?session.snapshot():snapshot;return raw?published(raw):null;},
       getOutput:publicOutput,
       getPageIndex(){return source?.pdf&&pages>0&&Number.isSafeInteger(page)&&page>=1&&page<=pages?page-1:null;},

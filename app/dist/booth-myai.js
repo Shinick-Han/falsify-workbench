@@ -625,7 +625,9 @@
     v.page.addEventListener('change',()=>{s.pageTouched=true;refresh();});
     v.langKo.addEventListener('click',()=>setLang('ko'));
     v.langEn.addEventListener('click',()=>setLang('en'));
-    return {refresh,setLang};
+    const onIndex=()=>refresh();
+    if(typeof doc.addEventListener==='function') doc.addEventListener('falsify:booth-index-ready',onIndex);
+    return {refresh,setLang,dispose(){if(typeof doc.removeEventListener==='function') doc.removeEventListener('falsify:booth-index-ready',onIndex);}};
   }
   const mounted=new WeakMap();
   function mount(container){
@@ -637,7 +639,7 @@
     clear(container);
     container.appendChild(view.root);
     const ctl=createController(doc,view);
-    const handle={refresh:ctl.refresh,setLang:ctl.setLang,destroy(){mounted.delete(container);clear(container);}};
+    const handle={refresh:ctl.refresh,setLang:ctl.setLang,destroy(){ctl.dispose();mounted.delete(container);clear(container);}};
     mounted.set(container,handle);
     ctl.refresh();
     return handle;
