@@ -351,11 +351,7 @@ export async function runBlue(io, client, dir, plan, task) {
       });
       const uploadId = uploaded.upload && uploaded.upload.id;
       const body = assembleJobBody(settings, { uploadId, idempotencyKey: key });
-      const created = await client.json('/v1/ai/jobs', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
+      const created = await createJobWhenSlotFree(io, client, body, label, plan);
       job = created.job;
       replayed = created.replayed === true;
       writeJson(recordFile, {
@@ -387,6 +383,27 @@ export async function runBlue(io, client, dir, plan, task) {
     const code = error instanceof BoothError ? error.code : 'booth_internal';
     progress(io, `blue ${label} failed ${message}`);
     return { ok: false, receipt, profile: task.profile.name, repeat: task.repeat, error: message, code };
+  }
+}
+
+// The server caps active operator jobs (BOOTH_OPERATOR_ACTIVE_JOBS) and answers 429 rate_limited when they are
+// all busy. That is a full queue, not a failed job: wait for a slot and try again with the same upload and the
+// same idempotency key, so a rush never burns the retry budget or leaves a row stuck in reviewing.
+async function createJobWhenSlotFree(io, client, body, label, plan) {
+  const deadline = Date.now() + plan.pollTimeoutMs;
+  for (let waits = 0; ; waits += 1) {
+    try {
+      return await client.json('/v1/ai/jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } catch (error) {
+      const busy = error instanceof BoothError && error.status === 429 && error.code === 'rate_limited';
+      if (!busy || Date.now() + plan.slotWaitMs > deadline) throw error;
+      if (waits === 0) progress(io, `blue ${label} waiting for a free job slot`);
+      await delay(plan.slotWaitMs);
+    }
   }
 }
 

@@ -169,6 +169,27 @@ test('public note uses only the AI finding, page, quote and rationale', () => {
   assert.equal(none, DEFAULT_NOTES.missedNone);
 });
 
+test('watch: a full operator job cap (429) waits for a slot instead of failing the row', async () => {
+  await withFake({ submissions: [caughtRow(1), missedRow(2), hiddenRow(3)], result: HOSTED, queued: true, activeCap: 1 }, async (fake, dir) => {
+    // Local concurrency 4 against a server cap of 1, like watch concurrency 12 against BOOTH_OPERATOR_ACTIVE_JOBS=2.
+    const config = writeConfig(dir, fake.url, { live: { retries: 0 } });
+    const result = await run(['--config', config, 'watch', '--cycles', '1']);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(fake.state.busy429 > 0, true, 'the cap was hit');
+    assert.equal(fake.state.maxActive, 1);
+    for (const receipt of ['F-0001', 'F-0002', 'F-0003']) {
+      const item = find(fake, receipt);
+      assert.equal(item.status, 'judged', receipt);
+      assert.equal(item.published, true, receipt);
+    }
+    assert.equal(fake.state.newJobs, 3, 'one paid job per row, no duplicate after waiting');
+    const end = jsonLines(result.stdout).at(-1);
+    assert.equal(end.done, 3);
+    assert.equal(end.failed, 0);
+    assert.match(result.stderr, /waiting for a free job slot/);
+  });
+});
+
 test('watch: received -> reviewing -> judged + published; missed gets the prize', async () => {
   await withFake({ submissions: [caughtRow(1), missedRow(2)], result: HOSTED }, async (fake, dir) => {
     const config = writeConfig(dir, fake.url);

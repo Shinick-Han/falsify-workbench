@@ -116,7 +116,7 @@ export function loadConfigFile(file) {
   const config = {
     apiBase: '',
     dataDir: '',
-    blue: { concurrency: 1, repeat: 1, profiles: [], pollIntervalMs: 200, pollTimeoutMs: 900000 },
+    blue: { concurrency: 1, repeat: 1, profiles: [], pollIntervalMs: 2000, pollTimeoutMs: 900000 },
     live: normalizeLive(raw.live),
   };
   if (raw.apiBase !== undefined) {
@@ -169,7 +169,7 @@ export function emptyConfig() {
     apiBase: '',
     dataDir: '',
     configDir: process.cwd(),
-    blue: { concurrency: 1, repeat: 1, profiles: [], pollIntervalMs: 200, pollTimeoutMs: 900000 },
+    blue: { concurrency: 1, repeat: 1, profiles: [], pollIntervalMs: 2000, pollTimeoutMs: 900000 },
     live: defaultLive(),
   };
 }
@@ -263,6 +263,8 @@ export function resolveBluePlan(config, flags) {
     concurrency,
     pollIntervalMs: config.blue.pollIntervalMs,
     pollTimeoutMs: config.blue.pollTimeoutMs,
+    // A full operator job cap (429) is retried at the poll pace with the same upload and key.
+    slotWaitMs: config.blue.pollIntervalMs,
   };
 }
 
