@@ -1,0 +1,26 @@
+/* "내 AI에게" tab body (booth-myai.js). Event page only; reuses the ticket tokens from booth.css. */
+.booth-myai{display:grid;gap:14px;min-width:0;color:var(--ev-ink,#16191e);font-family:var(--ev-sans,sans-serif)}
+.booth-myai *,.booth-myai *::before,.booth-myai *::after{box-sizing:border-box}
+.booth-myai [hidden]{display:none!important}
+.booth-myai-step{display:grid;gap:10px;min-width:0;padding:14px;background:var(--ev-card,#fff);border-radius:10px;box-shadow:0 1px 0 rgba(22,25,30,.04)}
+.booth-myai-title{margin:0;font-size:17px;font-weight:600;line-height:1.35;letter-spacing:-.01em}
+.booth-myai-opts{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px}
+.booth-myai-pagefield{display:inline-flex;align-items:center;gap:6px;margin:0;font-size:13.5px;color:var(--ev-ink-2,#3a3f47)}
+.booth-myai input.booth-myai-page{width:76px;min-height:44px;padding:8px 10px;border:1px solid var(--ev-hair,#d6d9dd);border-radius:6px;background:var(--ev-soft,#f4f5f6);color:var(--ev-ink,#16191e);font:inherit;font-size:16px}
+.booth-myai .booth-chips{display:flex;flex-wrap:wrap;gap:6px}
+.booth-myai .booth-chip{min-height:44px;padding:0 14px;border:1px solid var(--ev-hair,#d6d9dd);border-radius:999px;background:var(--ev-card,#fff);color:var(--ev-ink,#16191e);font:inherit;font-size:13px;cursor:pointer}
+.booth-myai .booth-chip.on{border-color:var(--ev-ink,#16191e);background:var(--ev-ink,#16191e);color:#fff}
+.booth-myai-preview{margin:0;padding:10px 12px;border-left:2px solid var(--ev-ink,#16191e);background:var(--ev-soft,#f4f5f6);font-size:13px;line-height:1.55;color:var(--ev-ink-2,#3a3f47);overflow-wrap:anywhere}
+.booth-myai .booth-btn{min-height:48px}
+.booth-myai textarea{display:block;width:100%;min-width:0;margin:0;padding:10px 12px;border:1px solid var(--ev-hair,#d6d9dd);border-radius:6px;background:var(--ev-soft,#f4f5f6);color:var(--ev-ink,#16191e);font-family:var(--ev-mono,monospace);font-size:16px;line-height:1.5;resize:vertical}
+.booth-myai textarea::placeholder{font-family:var(--ev-sans,sans-serif);color:var(--ev-muted,#6b717a)}
+.booth-myai textarea:focus{border-color:var(--ev-ink,#16191e);outline:2px solid var(--ev-ink,#16191e);outline-offset:1px}
+.booth-myai-full{min-height:160px}
+.booth-myai-answer{min-height:140px}
+.booth-myai-diags{display:grid;gap:6px;margin:0;padding:0;list-style:none}
+.booth-myai-diags:empty{display:none}
+.booth-myai-diag{padding:8px 10px;border-radius:6px;background:var(--ev-soft,#f4f5f6);font-size:13px;line-height:1.5;color:var(--ev-ink-2,#3a3f47);overflow-wrap:anywhere}
+.booth-myai-diag.error{border-left:3px solid var(--ev-fail,#8a3030);color:var(--ev-fail,#8a3030)}
+.booth-myai-diag.warn{border-left:3px solid var(--ev-muted,#6b717a)}
+.booth-myai-result{display:grid;gap:6px;padding:10px 12px;border:1px solid var(--ev-hair,#d6d9dd);border-radius:8px;font-size:13.5px;overflow-wrap:anywhere}
+.booth-myai-count{margin:0;font-size:15px;font-weight:600}

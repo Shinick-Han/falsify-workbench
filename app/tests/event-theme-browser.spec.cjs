@@ -2,6 +2,7 @@
 // Real Chromium check of app/dist/event-theme.css on event.html. The API is stubbed.
 // FALSIFY_BOOTH_MISSION_PDF names a local copy of arXiv 2309.15217 (CC BY 4.0).
 // The booth step is set by hand on <html data-booth-step>, so this runs without booth.js changes.
+// A phone pass (360x780) and a desktop pass (1280x800: two panes in the edit step).
 const {spawn} = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -167,6 +168,8 @@ async function main() {
       return hits.length ? hits[0].index : -1;
     });
     assert.ok(paragraphIndex >= 0);
+    // booth-recipe.js keeps the paragraph list collapsed under 「문단 목록에서 고르기」.
+    if (await page.locator('#booth-find-list').count()) await page.locator('#booth-find-list').click();
     const paragraph = page.locator('.paper-paragraph-button').nth(paragraphIndex);
     const card = await paragraph.boundingBox();
     assert.ok(card && card.height >= 44, 'paragraph card is shorter than 44px');
@@ -208,6 +211,108 @@ async function main() {
       assert.equal(await page.locator('#paper-workspace').isVisible(), false, step + ': workspace is visible');
       assert.ok(await overflow(page) <= 0, step + ': horizontal overflow');
     }
+    // Desktop (>= 1024px): two panes in edit. The page column sits left of the work column.
+    const desk = await browser.newPage({viewport: {width: 1280, height: 800}, deviceScaleFactor: 1, locale: 'ko-KR'});
+    desk.setDefaultTimeout(90000);
+    desk.on('pageerror', error => pageErrors.push(error.message));
+    desk.on('dialog', dialog => { void dialog.accept(); });
+    await desk.route('**/*', route => route.request().url().startsWith(base) ? route.continue() : stubApi(route));
+    await desk.goto(base + 'event.html');
+    await desk.locator('#paper-workspace').waitFor({state: 'attached'});
+    await setStep(desk, 'pick');
+    const deskMission = desk.locator('#booth-missions .booth-mission').first();
+    await deskMission.waitFor();
+    await assertChromeHidden(desk, 'desktop pick');
+    assert.equal(await desk.locator('#paper-workspace').isVisible(), false, 'desktop pick: workspace is visible');
+    assert.ok(await overflow(desk) <= 0, 'desktop pick: horizontal overflow');
+    await deskMission.click();
+    await desk.waitForFunction(() => [...document.querySelectorAll('.paper-paragraph-button')].some(node => node.textContent.includes('0.95')));
+    await desk.waitForFunction(() => document.documentElement.dataset.boothStep === 'edit');
+    await setStep(desk, 'edit');
+    await assertChromeHidden(desk, 'desktop edit');
+    // The recipe panel (tabs, find-and-replace) sits right of the page, and the page image
+    // starts above the fold next to it.
+    if (await desk.locator('#booth-recipe').count()) {
+      const recipe = await desk.evaluate(() => {
+        const rect = selector => { const node = document.querySelector(selector); if (!node) return null; const box = node.getBoundingClientRect(); return {left: box.left, right: box.right, top: box.top, bottom: box.bottom}; };
+        return {recipe: rect('#booth-recipe'), canvas: rect('.paper-page > canvas'), hint: rect('#booth-hint'), height: window.innerHeight};
+      });
+      assert.ok(recipe.recipe.left > recipe.canvas.right, 'desktop edit: recipe panel is not right of the page ' + JSON.stringify(recipe));
+      assert.ok(recipe.recipe.top >= recipe.hint.bottom, 'desktop edit: recipe panel is not under the hint ' + JSON.stringify(recipe));
+      assert.ok(recipe.canvas.top < recipe.height - 76 - 200, 'desktop edit: page image starts below the fold ' + JSON.stringify(recipe));
+      assert.ok(recipe.recipe.top < recipe.canvas.bottom, 'desktop edit: recipe panel is not beside the page ' + JSON.stringify(recipe));
+      if (await desk.locator('#booth-find-list').count()) await desk.locator('#booth-find-list').click();
+      const open = await desk.evaluate(() => ({
+        list: document.querySelector('.paper-paragraph-list').getBoundingClientRect().top,
+        recipe: document.querySelector('#booth-recipe').getBoundingClientRect().bottom,
+      }));
+      assert.ok(open.list >= open.recipe, 'desktop edit: paragraph list overlaps the recipe panel ' + JSON.stringify(open));
+      await desk.evaluate(() => window.scrollTo(0, 0));
+    }
+    const panes = await desk.evaluate(() => {
+      const box = selector => { const node = document.querySelector(selector); if (!node) return null; const rect = node.getBoundingClientRect(); return {left: rect.left, right: rect.right, top: rect.top, width: rect.width}; };
+      return {canvas: box('.paper-page > canvas'), list: box('.paper-paragraph-list'), hint: box('#booth-hint'), toolbar: box('#paper-workspace .paper-toolbar'),
+        foot: box('#source-link'), stageWidth: document.querySelector('#paper-before-stage').clientWidth};
+    });
+    assert.ok(panes.canvas && panes.list, 'desktop edit: page or list missing ' + JSON.stringify(panes));
+    assert.ok(panes.canvas.right < panes.list.left, 'desktop edit: page and list are not side by side ' + JSON.stringify(panes));
+    assert.ok(panes.stageWidth >= 320 && Math.abs(panes.canvas.width - panes.stageWidth) <= 2, 'desktop edit: page image is narrowed ' + JSON.stringify(panes));
+    assert.ok(panes.foot && panes.foot.top > panes.list.top + 100, 'desktop edit: license link is not below the paragraph list ' + JSON.stringify(panes));
+    assert.ok(panes.hint && panes.hint.left >= panes.list.left - 1, 'desktop edit: hint is not in the work column ' + JSON.stringify(panes));
+    assert.ok(Math.abs(panes.hint.top - panes.toolbar.top) < 2, 'desktop edit: hint and page navigation do not share the top row ' + JSON.stringify(panes));
+    assert.ok(await overflow(desk) <= 0, 'desktop edit: horizontal overflow');
+    // The page column is sticky and fits between the top and the dock while the list scrolls.
+    await desk.evaluate(() => window.scrollTo(0, 900));
+    await desk.waitForTimeout(100);
+    const stuck = await desk.evaluate(() => {
+      const canvas = document.querySelector('.paper-page > canvas').getBoundingClientRect();
+      const nav = document.querySelector('#paper-workspace .paper-toolbar').getBoundingClientRect();
+      return {scrollY: window.scrollY, navTop: nav.top, navBottom: nav.bottom, canvasTop: canvas.top, canvasBottom: canvas.bottom, height: window.innerHeight};
+    });
+    assert.ok(stuck.scrollY > 0, 'desktop edit: page does not scroll ' + JSON.stringify(stuck));
+    assert.ok(stuck.navTop >= 0 && stuck.canvasTop >= stuck.navBottom, 'desktop edit: page column is not sticky ' + JSON.stringify(stuck));
+    assert.ok(stuck.canvasBottom <= stuck.height - 76, 'desktop edit: page image runs under the dock ' + JSON.stringify(stuck));
+    await desk.evaluate(() => window.scrollTo(0, 0));
+    const deskIndex = await desk.evaluate(() => {
+      const hits = [...document.querySelectorAll('.paper-paragraph-button')].map((node, index) => ({index, text: node.textContent}))
+        .filter(item => item.text.includes('0.95') && item.text.includes('0.78') && item.text.length <= 400);
+      hits.sort((a, b) => a.text.length - b.text.length);
+      return hits.length ? hits[0].index : -1;
+    });
+    assert.ok(deskIndex >= 0);
+    const deskParagraph = desk.locator('.paper-paragraph-button').nth(deskIndex);
+    await deskParagraph.scrollIntoViewIfNeeded();
+    await deskParagraph.click();
+    const deskEditor = desk.locator('textarea[aria-label$="직접 편집"]');
+    await deskEditor.waitFor();
+    const deskDone = desk.locator('.paper-direct-controls').getByRole('button', {name: '완료', exact: true});
+    assert.equal(await deskDone.isVisible(), true, 'desktop edit: 완료 is not visible');
+    const doneBox = await deskDone.boundingBox();
+    assert.ok(doneBox && doneBox.height >= 44 && doneBox.width >= 44, 'desktop 완료 tap target ' + JSON.stringify(doneBox));
+    const sheet = await desk.evaluate(() => {
+      const area = document.querySelector('textarea[aria-label$="직접 편집"]').getBoundingClientRect();
+      const bar = document.querySelector('.paper-direct-controls').getBoundingClientRect();
+      const canvas = document.querySelector('.paper-page > canvas').getBoundingClientRect();
+      const list = document.querySelector('.paper-paragraph-list').getBoundingClientRect();
+      return {areaLeft: area.left, areaBottom: area.bottom, barTop: bar.top, barBottom: bar.bottom, canvasRight: canvas.right, listTop: list.top};
+    });
+    assert.ok(sheet.areaLeft > sheet.canvasRight, 'desktop editor overlaps the page image ' + JSON.stringify(sheet));
+    assert.ok(sheet.barTop >= sheet.areaBottom && sheet.listTop >= sheet.barBottom, 'desktop editor overlaps its controls or the list ' + JSON.stringify(sheet));
+    assert.ok(await overflow(desk) <= 0, 'desktop editor: horizontal overflow');
+    const deskOriginal = await deskEditor.inputValue();
+    await deskEditor.fill(deskOriginal.replace('0.95', '0.50'));
+    await deskDone.click();
+    await desk.waitForFunction(() => (document.querySelector('#paper-edits') || {}).textContent?.includes('0.50'));
+    assert.equal(await desk.locator('#paper-edits').isVisible(), false, 'desktop: applied edits list is visible (the dock shows them)');
+    assert.equal(await deskEditor.count(), 0, 'desktop: 완료 did not close the editor');
+    assert.ok(await overflow(desk) <= 0, 'desktop applied: horizontal overflow');
+    for (const step of ['send', 'ticket']) {
+      await setStep(desk, step);
+      await assertChromeHidden(desk, 'desktop ' + step);
+      assert.equal(await desk.locator('#paper-workspace').isVisible(), false, 'desktop ' + step + ': workspace is visible');
+      assert.ok(await overflow(desk) <= 0, 'desktop ' + step + ': horizontal overflow');
+    }
+    await desk.close();
     assert.equal(pageErrors.join('\n'), '');
   } finally {
     if (browser) await browser.close();

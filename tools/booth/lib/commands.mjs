@@ -6,7 +6,7 @@ import { BLUE_MAX_PDF_BYTES, BLUE_MAX_PDF_BYTES_CAP, OUTCOMES, STATUSES, TERMINA
 import { resolveApiBase, resolveBluePlan, resolveDataDir } from './config.mjs';
 import { drawWinners } from './draw.mjs';
 import { BoothError } from './errors.mjs';
-import { jsonlRows, keyRows, commonRows, renderExport, scoreRows } from './export.mjs';
+import { jsonlRows, keyRows, commonRows, renderExport, scoreRows, submissionRows, withAssist } from './export.mjs';
 import { runsForReceipt } from './findings.mjs';
 import { createClient } from './http.mjs';
 import { mapPool } from './pool.mjs';
@@ -120,7 +120,7 @@ export async function status(ctx) {
 export async function list(ctx) {
   const client = clientFor(ctx);
   const page = await listPages(client, ctx.flags);
-  print(ctx.io, page);
+  print(ctx.io, { ...page, submissions: page.submissions.map(withAssist) });
 }
 
 export async function pull(ctx) {
@@ -572,17 +572,18 @@ export async function draw(ctx) {
 
 export async function exportCommand(ctx) {
   const format = ctx.flags.format;
-  if (!['common', 'score', 'key', 'jsonl'].includes(format)) {
-    throw new BoothError('booth_config', 'export --format is common, score, key or jsonl');
+  if (!['common', 'score', 'key', 'jsonl', 'submissions'].includes(format)) {
+    throw new BoothError('booth_config', 'export --format is common, score, key, jsonl or submissions');
   }
   const dir = dataDir(ctx);
-  const tables = { common: [], score: [], key: [], jsonl: [] };
+  const tables = { common: [], score: [], key: [], jsonl: [], submissions: [] };
   for (const row of activeRows(localRows(dir, ctx.flags))) {
     const runs = runsForReceipt(loadBlueRecords(dir, row.receipt));
     tables.common.push(...commonRows(row, runs));
     tables.score.push(...scoreRows(row, runs));
     tables.key.push(...keyRows(row));
     tables.jsonl.push(...jsonlRows(row, runs));
+    tables.submissions.push(...submissionRows(row));
   }
   const body = renderExport(format, tables);
   const ext = format === 'jsonl' ? 'jsonl' : 'csv';
@@ -590,10 +591,7 @@ export async function exportCommand(ctx) {
     ? path.resolve(String(ctx.flags.out))
     : path.join(dir, 'exports', `${format}.${ext}`);
   writeAtomic(file, body);
-  const rows = format === 'common' ? tables.common.length
-    : format === 'score' ? tables.score.length
-      : format === 'key' ? tables.key.length
-        : tables.jsonl.length;
+  const rows = tables[format].length;
   progress(ctx.io, `export ${format} rows=${rows} file=${file}`);
   print(ctx.io, { file, format, rows });
 }

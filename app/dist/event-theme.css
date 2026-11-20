@@ -38,8 +38,8 @@ body{
 
 /* AGPL notice stays reachable. Everything else in the footer is hidden. */
 .page-foot{display:block;margin:20px 0 0;text-align:center;font-size:11.5px}
-.page-foot>:not(#source-link){display:none}
-.page-foot #source-link{display:inline-flex;align-items:center;min-height:44px;color:var(--ev-muted,#6b717a);font-size:11.5px}
+.page-foot>:not(#source-link):not(#agent-link){display:none}
+.page-foot #agent-link,.page-foot #source-link{display:inline-flex;align-items:center;min-height:44px;color:var(--ev-muted,#6b717a);font-size:11.5px}
 
 /* Steps other than "edit": take the workspace out of view but keep its layout box, so
    page rendering still measures a real column width while booth.js loads a paper.
@@ -145,6 +145,109 @@ html[data-booth-step]:not([data-booth-step="edit"]) #view-workbench{
 
 /* The paper change marks use the event mark colour. */
 #paper-before-stage .paper-change-mark.is-after{background:color-mix(in srgb,var(--ev-mark,#e3e9f1) 80%,transparent);border-bottom-color:var(--ev-ink,#16191e)}
+
+/* Desktop (1024px and wider). Below 1024px everything above applies unchanged.
+   The 480px column becomes a centred 1120px container on the ground colour. In the edit
+   step the workspace is two panes: the page column (up to 500px, sticky: prev/next, N / M쪽,
+   page image) and the work column (hint, the direct editor as a raised panel, the recipe
+   panel, the paragraph list). booth.js and paper-workspace.js keep their DOM; this is grid and order. */
+@media(min-width:1024px){
+  /* Page column width. The page image (A4 or narrower) plus its navigation must fit between
+     the sticky top (16px) and the 76px dock with 16px to spare, so the column narrows on short
+     windows. The renderer reads the stage's inner width, so canvas and text layer stay in sync. */
+  :root{
+    --dk-page:clamp(320px,calc((100vh - 164px) / 1.414),500px);
+    --dk-page:clamp(320px,calc((100dvh - 164px) / 1.414),500px);
+    /* The container width and the work column, from the viewport. The edit grid and the
+       stage's second track both use these, so they always agree. (A container query unit would
+       be exact, but container-type applies layout containment, and a contained element cannot
+       be the row subgrid the edit step needs.) Under a classic scrollbar on windows narrower
+       than about 1200px the work column runs up to the scrollbar's width into the 32px side
+       padding; it never overflows the page. */
+    --dk-wide:min(1120px,calc(100vw - 64px));
+    --dk-work:calc(var(--dk-wide) - var(--dk-page) - 48px)
+  }
+  html,body{background:var(--ev-ground,#eef0f1)}
+  .app-shell{max-width:none}
+  .content{box-sizing:content-box;max-width:1120px;margin:0 auto;padding:24px 32px calc(76px + 40px + env(safe-area-inset-bottom,0px))}
+
+  /* Edit step: #booth, the step wrapper around #booth-hint and the workspace wrappers step
+     aside (display:contents) so the booth parts and the workspace share one grid:
+       row 1  booth rows (desk bar)            full width
+       row 2  page navigation  | hint
+       row 3  page (rows 3-6)  | editor panel space (only while the editor is open)
+       row 4                   | recipe panel (tabs, panes, result, fix rows, list toggle)
+       row 5                   | paragraph list (when opened)
+       row 6  rest of the page
+       row 7  license footer                   full width
+     The compare pane and the stage are row subgrids, so the page beside the recipe panel and
+     the list under it size one set of rows. Unknown booth rows are placed after these. */
+  html[data-booth-step="edit"] .content{
+    display:grid;grid-template-columns:var(--dk-page) var(--dk-work);grid-template-rows:auto auto auto auto auto 1fr auto;
+    column-gap:48px;row-gap:0;grid-auto-flow:row dense;align-items:start
+  }
+  html[data-booth-step="edit"] :is(#booth,#booth :has(#booth-hint)){display:contents}
+  html[data-booth-step="edit"] :is(#booth,#booth :has(#booth-hint))>*{grid-column:1/-1}
+  html[data-booth-step="edit"] :is(#booth,#booth :has(#booth-hint))>#booth-hint{grid-column:2;grid-row:2;margin:16px 0}
+  /* The recipe panel overlaps the stage's transparent right border, so it is lifted above it
+     to keep its controls clickable. */
+  html[data-booth-step="edit"] :is(#booth,#booth :has(#booth-hint))>#booth-recipe{grid-column:2;grid-row:4;position:relative;z-index:2;margin:0 0 16px}
+  html[data-booth-step="edit"] :is(#view-workbench,.paper-intake,#paper-workspace):not([hidden]){display:contents}
+  html[data-booth-step="edit"] #paper-workspace>.paper-toolbar{grid-column:1;grid-row:2;margin:16px 0 0;position:sticky;top:16px;z-index:3}
+  html[data-booth-step="edit"] #paper-workspace>.paper-compare{grid-column:1/-1;grid-row:3/7;display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:subgrid;row-gap:0}
+  html[data-booth-step="edit"] .paper-compare>.paper-pane:has(>#paper-before-stage){display:contents}
+  html[data-booth-step="edit"] #paper-before-stage{grid-row:1/-1;grid-template-rows:subgrid}
+  html[data-booth-step="edit"] .content>.page-foot{grid-column:1/-1;grid-row:7}
+
+  /* Other steps keep the workspace measured off screen at the desktop width, so a paper
+     loaded on "pick" is drawn at the page column width before "edit" shows it. */
+  html[data-booth-step]:not([data-booth-step="edit"]) #view-workbench{width:min(1120px,calc(100vw - 64px))}
+
+  #paper-workspace .paper-toolbar{grid-template-columns:auto 1fr auto;gap:12px}
+  #paper-page-prev,#paper-page-next{padding:0 16px}
+  /* Applied edits show as chips in the booth dock on desktop; phones keep this list. */
+  #paper-workspace>#paper-edits{display:none}
+
+  /* The pane title stays for assistive tech only; the toolbar already says which page. */
+  #paper-before-title{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+
+  /* The stage's inner width is the page column (the renderer fits the page to it); its right
+     border is the gap plus the work column, and the second grid track runs over that border. */
+  #paper-before-stage{
+    display:grid;grid-template-columns:var(--dk-page) var(--dk-work);grid-template-rows:auto auto auto 1fr;
+    column-gap:48px;row-gap:0;align-items:start;
+    border-inline-width:0 calc(var(--dk-wide) - var(--dk-page))
+  }
+  #paper-before-stage>.paper-page{grid-column:1;grid-row:1/-1;margin:0;grid-template-columns:100% var(--dk-work);column-gap:48px}
+  /* The page stays in view under the sticky navigation while the work column scrolls. With the
+     editor open it scrolls normally, so the editor panel (a child of the page) never floats
+     over the paragraph list. */
+  #paper-before-stage>.paper-page:not(:has(>textarea)){position:sticky;top:72px}
+  #paper-before-stage>.paper-paragraph-list{grid-column:2;grid-row:3;margin:0}
+  #paper-before-stage>:not(.paper-page):not(.paper-paragraph-list){grid-column:1/-1}
+
+  /* Direct editor: a raised panel at the top of the work column, under the hint and above the
+     recipe panel. It stays a child of the page (the workspace owns it) and sits in the page
+     grid's second track, level with the page top; the stage's first row reserves its height. */
+  #paper-before-stage{--dk-sheet:236px}
+  #paper-before-stage:has(>.paper-page>textarea)::before{content:"";grid-column:2;grid-row:1;height:calc(var(--dk-sheet) + 14px)}
+  #paper-before-stage>.paper-page:has(>textarea)::after{
+    content:"이 문단 고치기";position:absolute;z-index:0;grid-column:2/3;grid-row:1/2;inset:0 0 auto 0;height:var(--dk-sheet);margin:0;
+    box-sizing:border-box;padding:14px 18px;border:1px solid var(--ev-hair,#d6d9dd);border-radius:12px;
+    background:var(--ev-card,#fff);box-shadow:0 12px 30px rgba(22,25,30,.12);
+    font-size:12px;font-weight:500;line-height:18px;color:var(--ev-muted,#6b717a)
+  }
+  #paper-before-stage>.paper-page>textarea{
+    position:absolute!important;grid-column:2/3;grid-row:1/2;inset:44px 18px auto 18px!important;
+    width:calc(100% - 36px)!important;height:116px!important;min-height:0!important;margin:0;resize:none!important;overflow:auto
+  }
+  #paper-before-stage>.paper-page>.paper-direct-controls{
+    position:absolute!important;grid-column:2/3;grid-row:1/2;inset:172px 18px auto 18px!important;
+    grid-template-columns:minmax(0,1fr) auto auto;align-items:center!important;gap:8px!important;margin:0;padding:0
+  }
+  #paper-before-stage .paper-direct-controls>[data-direct-status]{grid-column:1;line-height:1.4}
+  #paper-before-stage .paper-direct-controls>.button{min-height:44px;padding:0 18px;font-size:14px}
+}
 
 @media(prefers-reduced-motion:reduce){
   #paper-workspace *{transition:none!important;animation:none!important;scroll-behavior:auto!important}

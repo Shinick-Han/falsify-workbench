@@ -1,4 +1,4 @@
-import { COMMON_COLUMNS, KEY_COLUMNS, SCORE_COLUMNS } from './constants.mjs';
+import { COMMON_COLUMNS, KEY_COLUMNS, SCORE_COLUMNS, SUBMISSION_COLUMNS } from './constants.mjs';
 import { findingPageIndex, physicalPage } from './findings.mjs';
 import { mapVerdict, verdictRaw } from './labels.mjs';
 import { toCsv } from './text.mjs';
@@ -6,6 +6,35 @@ import { toCsv } from './text.mjs';
 function paperId(row) {
   const id = row.paper && typeof row.paper.id === 'string' ? row.paper.id : '';
   return id || row.receipt;
+}
+
+const ASSIST_KINDS = ['manual', 'my-ai', 'agent'];
+
+// Rows from a server before migration 0007 carry no assist; they were all manual.
+export function assistOf(row) {
+  return ASSIST_KINDS.includes(row?.assist) ? row.assist : 'manual';
+}
+
+export function recipeCodeOf(row) {
+  return assistOf(row) === 'agent' && typeof row?.recipeCode === 'string' ? row.recipeCode : null;
+}
+
+export function withAssist(row) {
+  return { ...row, assist: assistOf(row), recipeCode: recipeCodeOf(row) };
+}
+
+export function submissionRows(row) {
+  return [{
+    receipt: row.receipt,
+    seq: String(row.seq ?? ''),
+    status: row.status || '',
+    outcome: row.outcome || '',
+    course: row.course || '',
+    assist: assistOf(row),
+    recipe_code: recipeCodeOf(row) || '',
+    paper_id: paperId(row),
+    declared: String(Array.isArray(row.declared) ? row.declared.length : 0),
+  }];
 }
 
 function pageLocation(pageIndex) {
@@ -77,7 +106,9 @@ export function keyRows(row) {
 }
 
 export function jsonlRows(row, wrappedFindings) {
-  return scoreRows(row, wrappedFindings).map(record => ({ ...record, receipt: row.receipt }));
+  const assist = assistOf(row);
+  const recipeCode = recipeCodeOf(row) || '';
+  return scoreRows(row, wrappedFindings).map(record => ({ ...record, receipt: row.receipt, assist, recipe_code: recipeCode }));
 }
 
 function durationSec(job) {
@@ -105,8 +136,9 @@ export function renderExport(format, tables) {
   if (format === 'common') return toCsv(COMMON_COLUMNS, tables.common);
   if (format === 'score') return toCsv(SCORE_COLUMNS, tables.score);
   if (format === 'key') return toCsv(KEY_COLUMNS, tables.key);
+  if (format === 'submissions') return toCsv(SUBMISSION_COLUMNS, tables.submissions);
   if (format === 'jsonl') return tables.jsonl.map(row => `${JSON.stringify(row)}\n`).join('');
   return '';
 }
 
-export { COMMON_COLUMNS, KEY_COLUMNS, SCORE_COLUMNS };
+export { COMMON_COLUMNS, KEY_COLUMNS, SCORE_COLUMNS, SUBMISSION_COLUMNS };

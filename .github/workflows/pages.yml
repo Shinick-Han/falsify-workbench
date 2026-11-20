@@ -59,6 +59,7 @@ jobs:
           node --test scripts/packaging.spec.mjs
           node --test scripts/event-page.spec.mjs
           node scripts/build-event-page.mjs --check
+          node --test scripts/build-booth-mission-text.spec.mjs
       - name: LaTeX source project browser regression (synthetic only)
         timeout-minutes: 15
         run: node app/tests/latex-source.browser.cjs

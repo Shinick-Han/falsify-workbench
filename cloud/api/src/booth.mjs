@@ -19,7 +19,9 @@ const PATCH_STATUSES = ['received', 'reviewing', 'judged', 'invalid'];
 const OUTCOMES = ['missed', 'caught', 'partial', 'invalid'];
 const MISSION_COURSES = ['quick', 'deep', 'any'];
 const SLUG = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
-const SUBMIT_KEYS = ['course', 'declared', 'paper', 'nickname', 'consentVersion', 'editedSha256'];
+const SUBMIT_KEYS = ['course', 'declared', 'paper', 'nickname', 'consentVersion', 'editedSha256', 'assist', 'recipeCode'];
+const ASSIST_KINDS = ['manual', 'my-ai', 'agent'];
+const RECIPE_CODE = /^R-[0-9A-HJKMNP-TV-Z]{6}$/;
 const SUBMIT_REQUIRED = ['course', 'declared', 'consentVersion', 'editedSha256'];
 const PAPER_KEYS = ['source', 'id', 'title', 'license', 'sourceSha256'];
 const PAPER_REQUIRED = ['source', 'id', 'title', 'license', 'sourceSha256'];
@@ -90,7 +92,7 @@ const MESSAGES = {
 const RETRYABLE = new Set(['rate_limited', 'ai_unavailable', 'internal_error']);
 
 const ADMIN_SELECT = `id, seq, receipt, status, course, nickname, declared, paper, pdf_sha256, pdf_bytes, source_sha256,
-  outcome, operator_note, public_note, prize_message, ai_summary, published_at, created_at, updated_at`;
+  outcome, operator_note, public_note, prize_message, ai_summary, published_at, created_at, updated_at, assist, recipe_code`;
 
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const chars = value => [...value].length;
@@ -102,7 +104,7 @@ function positiveInt(value, fallback) {
   return Number.isSafeInteger(n) && n > 0 ? n : fallback;
 }
 
-function boothEnabled(env) {
+export function boothEnabled(env) {
   return env?.BOOTH_ENABLED === true || env?.BOOTH_ENABLED === 'true';
 }
 
@@ -431,6 +433,11 @@ function missionsFrom(map) {
   return Array.isArray(parsed) ? parsed : [];
 }
 
+// Missions as GET /v1/booth/config shows them. The recipe and MCP modules read this.
+export async function publicMissions(db) {
+  return missionsFrom(await settingsMap(db));
+}
+
 function announcementFrom(map) {
   if (!map.has('announcement')) return null;
   const value = map.get('announcement');
@@ -530,6 +537,17 @@ function parseNickname(value) {
   return value;
 }
 
+// assist defaults to manual. recipeCode is only for agent recipes; the recipe itself may have expired.
+function parseAssist(body) {
+  const assist = Object.hasOwn(body, 'assist') ? body.assist : 'manual';
+  if (!ASSIST_KINDS.includes(assist)) boothFail(400, 'invalid_request');
+  if (!Object.hasOwn(body, 'recipeCode')) return { assist, recipeCode: null };
+  if (assist !== 'agent' || typeof body.recipeCode !== 'string') boothFail(400, 'invalid_request');
+  const recipeCode = body.recipeCode.toUpperCase();
+  if (!RECIPE_CODE.test(recipeCode)) boothFail(400, 'invalid_request');
+  return { assist, recipeCode };
+}
+
 function parseSubmission(body) {
   if (!keysOk(body, SUBMIT_KEYS, SUBMIT_REQUIRED)) boothFail(400, 'invalid_request');
   if (typeof body.editedSha256 !== 'string' || !HEX64.test(body.editedSha256)) boothFail(400, 'invalid_request');
@@ -544,6 +562,7 @@ function parseSubmission(body) {
     nickname: parseNickname(body.nickname),
     consentVersion: body.consentVersion,
     editedSha256: body.editedSha256,
+    ...parseAssist(body),
   };
 }
 
@@ -655,8 +674,8 @@ function isUniqueError(error) {
 
 const INSERT_SQL = `INSERT INTO booth_submissions (
   id, seq, receipt, claim_hash, owner_id, pdf_sha256, pdf_bytes, source_sha256, course, nickname,
-  declared, paper, consent_version, status, created_at, updated_at
-) SELECT ?1, next.seq, next.receipt, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'received', ?12, ?12
+  declared, paper, consent_version, status, created_at, updated_at, assist, recipe_code
+) SELECT ?1, next.seq, next.receipt, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'received', ?12, ?12, ?16, ?17
 FROM (
   SELECT COALESCE(MAX(seq), 0) + 1 AS seq,
          'F-' || printf('%04d', COALESCE(MAX(seq), 0) + 1) AS receipt
@@ -751,6 +770,8 @@ async function insertSubmission(db, env, fields, limits) {
         expected,
         limits.perOwner,
         limits.storedBytes,
+        fields.assist,
+        fields.recipeCode,
       ),
       ...chunks.map((data, idx) => db.prepare(FILE_SQL).bind(fields.id, idx, data)),
     ];
@@ -882,6 +903,8 @@ function adminView(row) {
     publishedAt: row.published_at ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    assist: row.assist ?? 'manual',
+    recipeCode: row.recipe_code ?? null,
   };
 }
 
@@ -963,6 +986,8 @@ async function postSubmission(ctx) {
       declared: submission.declared,
       paper: submission.paper,
       consentVersion: submission.consentVersion,
+      assist: submission.assist,
+      recipeCode: submission.recipeCode,
       normalizedKey: normalizeClaimKey(displayKey),
       createdAt,
     }, limits);

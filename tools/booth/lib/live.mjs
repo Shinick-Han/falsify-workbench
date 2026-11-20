@@ -8,6 +8,7 @@ import {
 } from './commands.mjs';
 import { integer, resolveBluePlan } from './config.mjs';
 import { TERMINAL_JOB } from './constants.mjs';
+import { assistOf, recipeCodeOf } from './export.mjs';
 import { BoothError } from './errors.mjs';
 import { runsForReceipt } from './findings.mjs';
 import { buildPublicNote, clip, notePage } from './note.mjs';
@@ -385,16 +386,18 @@ export function liveOutcomeOf(dir, row) {
   return parseSummary(row.aiSummary)?.liveOutcome || readMarker(dir, row.receipt)?.outcome || row.outcome || null;
 }
 
+// Candidates carry assist so the operator sees AI-planted (my-ai, agent) entries; all are equally eligible.
 async function finalOne(env, row) {
   const liveVerdict = liveOutcomeOf(env.dir, row);
+  const who = { receipt: row.receipt, assist: assistOf(row), recipeCode: recipeCodeOf(row) };
   const blue = await blueWithRetry(env, row);
   if (blue.skip || blue.failed) {
-    return { receipt: row.receipt, liveVerdict, finalVerdict: null, error: blue.skip || blue.failed };
+    return { ...who, liveVerdict, finalVerdict: null, error: blue.skip || blue.failed };
   }
   const verdict = verdictFor(row, blue.record);
   progress(env.io, `final ${row.receipt} live=${liveVerdict} final=${verdict.outcome}`);
   const bestQuote = verdict.quote || clip(verdict.first?.quote || '', 240);
-  return { receipt: row.receipt, liveVerdict, finalVerdict: verdict.outcome, bestQuote, verdict };
+  return { ...who, liveVerdict, finalVerdict: verdict.outcome, bestQuote, verdict };
 }
 
 async function applyFinal(env, item) {
