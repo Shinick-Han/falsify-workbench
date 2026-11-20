@@ -110,6 +110,146 @@ async function assertChromeHidden(page, step) {
   assert.equal(await page.locator('#source-link').isVisible(), true, step + ': license link is hidden');
 }
 
+async function waitPageText(page, needle) {
+  await page.waitForFunction(
+    text => /^5 \//.test(document.querySelector('#paper-page-label')?.textContent || '')
+      && [...document.querySelectorAll('#paper-before-stage .paper-text-layer span[data-i]')].some(node => node.textContent.includes(text)),
+    needle,
+  );
+}
+
+function tokenPoint(page, needle) {
+  return page.evaluate(value => {
+    const spans = [...document.querySelectorAll('#paper-before-stage .paper-text-layer span[data-i]')]
+      .sort((a, b) => Number(a.dataset.i) - Number(b.dataset.i));
+    for (const span of spans) {
+      const text = span.textContent || '';
+      const at = text.indexOf(value);
+      if (at < 0) continue;
+      span.scrollIntoView({block: 'center', inline: 'center', behavior: 'instant'});
+      const walker = document.createTreeWalker(span, NodeFilter.SHOW_TEXT);
+      let offset = 0;
+      let startNode = null, startOff = 0, endNode = null, endOff = 0;
+      const endAt = at + value.length;
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        const len = node.nodeValue.length;
+        if (!startNode && at <= offset + len) { startNode = node; startOff = at - offset; }
+        if (startNode && endAt <= offset + len) { endNode = node; endOff = endAt - offset; break; }
+        offset += len;
+      }
+      if (!startNode || !endNode) continue;
+      const range = document.createRange();
+      range.setStart(startNode, startOff);
+      range.setEnd(endNode, endOff);
+      const stage = document.getElementById('paper-before-stage');
+      const stageBox = stage.getBoundingClientRect();
+      const first = range.getBoundingClientRect();
+      if (stage.scrollWidth > stage.clientWidth) {
+        stage.scrollLeft += (first.left + first.width / 2) - (stageBox.left + stageBox.width / 2);
+      }
+      if (stage.scrollHeight > stage.clientHeight) {
+        stage.scrollTop += (first.top + first.height / 2) - (stageBox.top + stageBox.height / 2);
+      }
+      const r = range.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) return {x: r.left + r.width / 2, y: r.top + r.height / 2};
+    }
+    return null;
+  }, needle);
+}
+
+async function openWordBar(page, wide, needle) {
+  const tap = (x, y) => (wide ? page.mouse.click(x, y) : page.touchscreen.tap(x, y));
+  if (!wide && await page.evaluate(() => (globalThis.FalsifyPaperWorkspace?.getZoom?.() || 1) === 1)) {
+    const first = await tokenPoint(page, needle);
+    assert.ok(first, 'could not locate ' + needle + ' at zoom 1');
+    await tap(first.x, first.y);
+    if (await page.locator('#booth-pe-pop').waitFor({state: 'visible', timeout: 500}).then(() => true, () => false)) {
+      return;
+    }
+    await page.waitForFunction(() => (globalThis.FalsifyPaperWorkspace?.getZoom?.() || 1) > 1, null, {timeout: 5000}).catch(() => {});
+    await page.waitForTimeout(250);
+  }
+  for (let tries = 0; tries < 5; tries += 1) {
+    let pt = null;
+    let prev = null;
+    for (let still = 0; still < 15; still += 1) {
+      pt = await tokenPoint(page, needle);
+      assert.ok(pt, 'could not locate ' + needle + ' on page');
+      if (prev && Math.abs(prev.x - pt.x) < 0.5 && Math.abs(prev.y - pt.y) < 0.5) break;
+      prev = pt;
+      await page.waitForTimeout(100);
+    }
+    await tap(pt.x, pt.y);
+    if (await page.locator('#booth-pe-pop').waitFor({state: 'visible', timeout: 2000}).then(() => true, () => false)) {
+      return;
+    }
+  }
+  throw new Error('word bar did not open for ' + needle);
+}
+
+async function checkWordAndSheetEdit(page, wide, tag) {
+  await openWordBar(page, wide, '0.95');
+  const pop = page.locator('#booth-pe-pop');
+  assert.equal(await pop.isVisible(), true, tag + ': #booth-pe-pop is hidden');
+  const smallPopButtons = await page.evaluate(() => [...document.querySelectorAll('#booth-pe-pop button')]
+    .filter(node => node.offsetParent !== null)
+    .map(node => ({text: node.textContent.trim(), className: node.className, rect: node.getBoundingClientRect().toJSON()}))
+    .filter(item => item.rect.width < 44 || item.rect.height < 44));
+  assert.deepEqual(smallPopButtons, [], tag + ': #booth-pe-pop button(s) under 44px: ' + JSON.stringify(smallPopButtons));
+  assert.ok(await overflow(page) <= 0, tag + ' word bar: horizontal overflow');
+
+  const whole = pop.getByRole('button', {name: '문단 전체 고치기'});
+  if (wide) await whole.click();
+  else await whole.tap();
+  const sheet = page.locator('#booth-pe-sheet');
+  const area = page.locator('#booth-pe-sheet-text');
+  await area.waitFor({state: 'visible'});
+  const apply = sheet.getByRole('button', {name: '바꾸기', exact: true});
+  const cancel = sheet.getByRole('button', {name: '취소', exact: true});
+  assert.equal(await apply.isVisible(), true, tag + ': 바꾸기 is not visible');
+  assert.equal(await cancel.isVisible(), true, tag + ': 취소 is not visible');
+  for (const [name, button] of [['바꾸기', apply], ['취소', cancel]]) {
+    const box = await button.boundingBox();
+    assert.ok(box && box.width >= 44 && box.height >= 44, tag + ' ' + name + ' tap target ' + JSON.stringify(box));
+  }
+  const layout = await page.evaluate(() => {
+    const card = document.querySelector('#booth-pe-sheet .booth-pe-sheet-card').getBoundingClientRect();
+    const textarea = document.querySelector('#booth-pe-sheet-text');
+    const ta = textarea.getBoundingClientRect();
+    const actions = document.querySelector('#booth-pe-sheet .booth-pe-sheet-actions').getBoundingClientRect();
+    const buttons = [...document.querySelectorAll('#booth-pe-sheet .booth-pe-sheet-actions button')]
+      .filter(node => node.offsetParent !== null)
+      .map(node => node.getBoundingClientRect());
+    const buttonOverlap = buttons.length >= 2
+      && !(buttons[0].right <= buttons[1].left + 0.5 || buttons[1].right <= buttons[0].left + 0.5
+        || buttons[0].bottom <= buttons[1].top + 0.5 || buttons[1].bottom <= buttons[0].top + 0.5);
+    return {
+      cardLeft: card.left, cardRight: card.right, viewportWidth: window.innerWidth,
+      areaBottom: ta.bottom, actionsTop: actions.top,
+      buttonOverlap,
+      font: parseFloat(getComputedStyle(textarea).fontSize),
+    };
+  });
+  assert.ok(layout.font >= 16, tag + ': sheet textarea font under 16px zooms iOS ' + JSON.stringify(layout));
+  assert.ok(layout.actionsTop >= layout.areaBottom - 0.5, tag + ': sheet actions overlap textarea ' + JSON.stringify(layout));
+  assert.equal(layout.buttonOverlap, false, tag + ': sheet buttons overlap each other ' + JSON.stringify(layout));
+  assert.ok(layout.cardLeft >= -0.5 && layout.cardRight <= layout.viewportWidth + 0.5, tag + ': sheet card overflows horizontally ' + JSON.stringify(layout));
+  assert.ok(await overflow(page) <= 0, tag + ' sheet: horizontal overflow');
+
+  const original = await area.inputValue();
+  assert.equal(original.includes('0.95'), true, tag + ': sheet text missing 0.95: ' + JSON.stringify(original));
+  await area.fill(original.replace('0.95', '0.50'));
+  if (wide) await apply.click();
+  else await apply.tap();
+  await area.waitFor({state: 'hidden'});
+  const edits = await page.evaluate(() => globalThis.FalsifyBoothEdits.list());
+  assert.equal(edits.length, 1, tag + ': expected 1 edit in FalsifyBoothEdits');
+  assert.equal(edits[0].originalText.includes('0.95'), true, tag + ': originalText missing 0.95: ' + JSON.stringify(edits[0]));
+  assert.equal(edits[0].newText.includes('0.50'), true, tag + ': newText missing 0.50: ' + JSON.stringify(edits[0]));
+  assert.ok(await overflow(page) <= 0, tag + ' applied: horizontal overflow');
+}
+
 async function main() {
   assert.equal(pdfBytes.subarray(0, 5).toString(), '%PDF-');
   const server = serve();
@@ -147,8 +287,8 @@ async function main() {
     assert.ok(await overflow(page) <= 0, 'pick: horizontal overflow');
 
     await mission.click();
-    await page.waitForFunction(() => [...document.querySelectorAll('.paper-paragraph-button')].some(node => node.textContent.includes('0.95')));
     await page.waitForFunction(() => document.documentElement.dataset.boothStep === 'edit');
+    await waitPageText(page, '0.95');
     await setStep(page, 'edit');
     await assertChromeHidden(page, 'edit');
     assert.equal(await page.locator('#paper-page-label').isVisible(), true);
@@ -161,53 +301,7 @@ async function main() {
     assert.equal(await page.locator('.paper-canvas').first().isVisible(), true, 'edit: page image is hidden');
     assert.ok(await overflow(page) <= 0, 'edit: horizontal overflow');
 
-    const paragraphIndex = await page.evaluate(() => {
-      const hits = [...document.querySelectorAll('.paper-paragraph-button')].map((node, index) => ({index, text: node.textContent}))
-        .filter(item => item.text.includes('0.95') && item.text.includes('0.78') && item.text.length <= 400);
-      hits.sort((a, b) => a.text.length - b.text.length);
-      return hits.length ? hits[0].index : -1;
-    });
-    assert.ok(paragraphIndex >= 0);
-    // The page is the editor on event.html (booth-pageedit.js); the paragraph list stays for screen
-    // readers and keyboards, visually hidden until it holds focus. A mission opens zoomed on phones.
-    if (await page.locator('#booth-pe-fit').isVisible()) {
-      await page.locator('#booth-pe-fit').tap();
-      await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() === 1);
-    }
-    const paragraph = page.locator('.paper-paragraph-button').nth(paragraphIndex);
-    await paragraph.focus();
-    const card = await paragraph.boundingBox();
-    assert.ok(card && card.height >= 44, 'paragraph card is shorter than 44px');
-    await page.keyboard.press('Enter');
-    const editor = page.locator('textarea[aria-label$="직접 편집"]');
-    await editor.waitFor();
-    const done = page.locator('.paper-direct-controls').getByRole('button', {name: '완료', exact: true});
-    const cancel = page.locator('.paper-direct-controls').getByRole('button', {name: '입력 취소', exact: true});
-    assert.equal(await done.isVisible(), true, 'edit: 완료 is not visible');
-    assert.equal(await cancel.isVisible(), true, 'edit: 입력 취소 is not visible');
-    for (const [name, button] of [['완료', done], ['입력 취소', cancel]]) {
-      const box = await button.boundingBox();
-      assert.ok(box && box.width >= 44 && box.height >= 44, name + ' tap target ' + JSON.stringify(box));
-    }
-    const layout = await page.evaluate(() => {
-      const area = document.querySelector('textarea[aria-label$="직접 편집"]').getBoundingClientRect();
-      const canvas = document.querySelector('.paper-page > canvas').getBoundingClientRect();
-      const bar = document.querySelector('.paper-direct-controls').getBoundingClientRect();
-      return {areaTop: area.top, canvasBottom: canvas.bottom, barTop: bar.top, areaBottom: area.bottom, font: parseFloat(getComputedStyle(document.querySelector('textarea[aria-label$="직접 편집"]')).fontSize)};
-    });
-    assert.ok(layout.areaTop >= layout.canvasBottom, 'editor overlaps the page image ' + JSON.stringify(layout));
-    assert.ok(layout.barTop >= layout.areaBottom, 'controls overlap the editor ' + JSON.stringify(layout));
-    assert.ok(layout.font >= 16, 'editor font under 16px zooms iOS');
-    assert.ok(await overflow(page) <= 0, 'editor: horizontal overflow');
-    const original = await editor.inputValue();
-    await editor.fill(original.replace('0.95', '0.50'));
-    await done.tap();
-    await page.waitForFunction(() => {
-      const edits = document.querySelector('#paper-edits');
-      return !!(edits && edits.textContent.includes('0.50') && edits.textContent.includes('0.95'));
-    });
-    assert.equal(await editor.count(), 0, '완료 did not close the editor');
-    assert.ok(await overflow(page) <= 0, 'applied: horizontal overflow');
+    await checkWordAndSheetEdit(page, false, 'phone');
 
     for (const step of ['send', 'ticket']) {
       await setStep(page, step);
@@ -230,8 +324,8 @@ async function main() {
     assert.equal(await desk.locator('#paper-workspace').isVisible(), false, 'desktop pick: workspace is visible');
     assert.ok(await overflow(desk) <= 0, 'desktop pick: horizontal overflow');
     await deskMission.click();
-    await desk.waitForFunction(() => [...document.querySelectorAll('.paper-paragraph-button')].some(node => node.textContent.includes('0.95')));
     await desk.waitForFunction(() => document.documentElement.dataset.boothStep === 'edit');
+    await waitPageText(desk, '0.95');
     await setStep(desk, 'edit');
     await assertChromeHidden(desk, 'desktop edit');
     // The recipe panel (tabs, find-and-replace) sits right of the page, and the page image
@@ -249,10 +343,10 @@ async function main() {
     }
     const panes = await desk.evaluate(() => {
       const box = selector => { const node = document.querySelector(selector); if (!node) return null; const rect = node.getBoundingClientRect(); return {left: rect.left, right: rect.right, top: rect.top, width: rect.width}; };
-      return {canvas: box('.paper-page > canvas'), list: box('.paper-paragraph-list'), recipe: box('#booth-recipe'), hint: box('#booth-hint'), toolbar: box('#paper-workspace .paper-toolbar'),
+      return {canvas: box('.paper-page > canvas'), recipe: box('#booth-recipe'), hint: box('#booth-hint'), toolbar: box('#paper-workspace .paper-toolbar'),
         foot: box('#source-link'), stageWidth: document.querySelector('#paper-before-stage').clientWidth};
     });
-    assert.ok(panes.canvas && panes.list && panes.list.width <= 1, 'desktop edit: page missing or paragraph list not visually hidden ' + JSON.stringify(panes));
+    assert.ok(panes.canvas, 'desktop edit: page missing ' + JSON.stringify(panes));
     assert.ok(panes.canvas.width >= 680 && panes.canvas.width <= 760, 'desktop edit: page column is 680-760px ' + JSON.stringify(panes));
     assert.ok(panes.stageWidth >= 320 && Math.abs(panes.canvas.width - panes.stageWidth) <= 2, 'desktop edit: page image is narrowed ' + JSON.stringify(panes));
     assert.ok(panes.foot && panes.foot.top > panes.canvas.top + 100, 'desktop edit: license link is not below the page ' + JSON.stringify(panes));
@@ -265,38 +359,8 @@ async function main() {
     const stuck = await desk.evaluate(() => ({scrollY: window.scrollY, navTop: document.querySelector('#paper-workspace .paper-toolbar').getBoundingClientRect().top}));
     assert.ok(stuck.scrollY > 0 && stuck.navTop >= 0, 'desktop edit: page navigation is not sticky ' + JSON.stringify(stuck));
     await desk.evaluate(() => window.scrollTo(0, 0));
-    const deskIndex = await desk.evaluate(() => {
-      const hits = [...document.querySelectorAll('.paper-paragraph-button')].map((node, index) => ({index, text: node.textContent}))
-        .filter(item => item.text.includes('0.95') && item.text.includes('0.78') && item.text.length <= 400);
-      hits.sort((a, b) => a.text.length - b.text.length);
-      return hits.length ? hits[0].index : -1;
-    });
-    assert.ok(deskIndex >= 0);
-    const deskParagraph = desk.locator('.paper-paragraph-button').nth(deskIndex);
-    await deskParagraph.focus();
-    await desk.keyboard.press('Enter');
-    const deskEditor = desk.locator('textarea[aria-label$="직접 편집"]');
-    await deskEditor.waitFor();
-    const deskDone = desk.locator('.paper-direct-controls').getByRole('button', {name: '완료', exact: true});
-    assert.equal(await deskDone.isVisible(), true, 'desktop edit: 완료 is not visible');
-    const doneBox = await deskDone.boundingBox();
-    assert.ok(doneBox && doneBox.height >= 44 && doneBox.width >= 44, 'desktop 완료 tap target ' + JSON.stringify(doneBox));
-    const sheet = await desk.evaluate(() => {
-      const area = document.querySelector('textarea[aria-label$="직접 편집"]').getBoundingClientRect();
-      const bar = document.querySelector('.paper-direct-controls').getBoundingClientRect();
-      const canvas = document.querySelector('.paper-page > canvas').getBoundingClientRect();
-      return {areaLeft: area.left, areaBottom: area.bottom, barTop: bar.top, barBottom: bar.bottom, canvasRight: canvas.right};
-    });
-    assert.ok(sheet.areaLeft > sheet.canvasRight, 'desktop editor overlaps the page image ' + JSON.stringify(sheet));
-    assert.ok(sheet.barTop >= sheet.areaBottom, 'desktop editor overlaps its controls ' + JSON.stringify(sheet));
-    assert.ok(await overflow(desk) <= 0, 'desktop editor: horizontal overflow');
-    const deskOriginal = await deskEditor.inputValue();
-    await deskEditor.fill(deskOriginal.replace('0.95', '0.50'));
-    await deskDone.click();
-    await desk.waitForFunction(() => (document.querySelector('#paper-edits') || {}).textContent?.includes('0.50'));
+    await checkWordAndSheetEdit(desk, true, 'desktop');
     assert.equal(await desk.locator('#paper-edits').isVisible(), false, 'desktop: applied edits list is visible (the dock shows them)');
-    assert.equal(await deskEditor.count(), 0, 'desktop: 완료 did not close the editor');
-    assert.ok(await overflow(desk) <= 0, 'desktop applied: horizontal overflow');
     for (const step of ['send', 'ticket']) {
       await setStep(desk, step);
       await assertChromeHidden(desk, 'desktop ' + step);
