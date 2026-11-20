@@ -18,8 +18,10 @@
   const DEFECT_LABELS={number:'수치·통계',figure:'그림·표',citation:'인용·출처',logic:'논리·결론',method:'방법·실험 설계',other:'기타'};
   const PAPER_ID=/^(?:\d{4}\.\d{4,5}(?:v\d+)?|[a-z-]+(?:\.[A-Z]{2})?\/\d{7}(?:v\d+)?)$/;
   const CODE=/^R-[0-9A-HJKMNP-TV-Z]{6}$/;
-  const CONTROL=/[\u0000-\u001f\u007f]/;
-  const CONTROL_NL=/[\u0000-\u0009\u000b-\u001f\u007f]/;
+  /* C0, DEL, C1 and the bidi marks, embeddings, overrides and isolates (same set as the server). */
+  const CONTROL=/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
+  const CONTROL_NL=/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
+  const EDIT_KEYS=new Set(['page','find','replace','context']);
   const SOFT_HYPHEN='\u00ad';
   const WS=/\s/;
   const LETTER=/\p{L}/u;
@@ -51,11 +53,15 @@
   function jsonSize(obj){
     try{return utf8Length(JSON.stringify(obj));}catch{return Infinity;}
   }
+  /* Lengths count Unicode code points, as the server does. */
+  function codePoints(text){
+    return [...text].length;
+  }
   /* rule: {max, min, trim, newline, optional} */
   function checkText(errors, field, value, rule){
     if(value===undefined&&rule.optional) return;
     if(typeof value!=='string'){errors.push({field,code:'type'});return;}
-    if(value.length>rule.max){errors.push({field,code:'too_long'});return;}
+    if(codePoints(value)>rule.max){errors.push({field,code:'too_long'});return;}
     if((rule.newline?CONTROL_NL:CONTROL).test(value)){errors.push({field,code:'control'});return;}
     const body=rule.trim?value.trim():value;
     if(body.length<(rule.min||0)) errors.push({field,code:'empty'});
@@ -67,6 +73,9 @@
   function checkEdit(errors, edit, i){
     const at='edits['+i+']';
     if(!isPlain(edit)){errors.push({field:at,code:'type'});return;}
+    for(const key of Object.keys(edit)){
+      if(!EDIT_KEYS.has(key)) errors.push({field:at+'.'+key,code:'unknown'});
+    }
     checkPage(errors,at+'.page',edit.page);
     checkText(errors,at+'.find',edit.find,{max:300,min:1,trim:true});
     checkText(errors,at+'.replace',edit.replace,{max:300});
@@ -445,10 +454,15 @@
       return {title:typeof item.title==='string'?item.title:'',license};
     }catch{return {};}
   }
+  /* Exact id match against the mission tickets' "arXiv <id>" labels. */
   function isMission(paperId){
     const doc=root.document;
     const box=doc&&doc.getElementById('booth-missions');
-    return !!box&&String(box.textContent||'').includes('arXiv '+paperId);
+    if(!box||typeof box.querySelectorAll!=='function') return false;
+    return [...box.querySelectorAll('.booth-mission .booth-lab')].some(node=>{
+      const match=/^arXiv (\S+)/.exec(String(node.textContent||''));
+      return !!match&&match[1]===paperId;
+    });
   }
   function boothCurrent(){
     const hook=boothPaper();
@@ -842,6 +856,40 @@
       say(pickStatus,text);
       say(agentStatus,text);
     }
+    /* A recipe that would replace the open paper or join edits already made asks first, inline. */
+    function confirmText(count, differentPaper){
+      if(differentPaper&&count) return '지금 고친 곳 '+count+'개가 사라져요. 레시피를 불러올까요?';
+      if(differentPaper) return '지금 연 논문이 레시피의 논문으로 바뀌어요. 레시피를 불러올까요?';
+      return '지금 고친 곳 '+count+'개는 그대로 두고 레시피를 더해요. 레시피를 불러올까요?';
+    }
+    function placeConfirm(box){
+      const old=doc.getElementById('booth-recipe-confirm');
+      if(old) old.remove();
+      if(html.dataset.boothStep==='edit') card.before(box);
+      else pickStatus.after(box);
+    }
+    function askConfirm(text){
+      return new Promise(resolve=>{
+        const yes=el('button',{id:'booth-recipe-confirm-yes',type:'button',className:'booth-btn ink',textContent:'불러오기'});
+        const no=el('button',{id:'booth-recipe-confirm-no',type:'button',className:'booth-btn line',textContent:'취소'});
+        const box=el('div',{id:'booth-recipe-confirm',className:'booth-panel booth-recipe-confirm',role:'alertdialog','aria-labelledby':'booth-recipe-confirm-text'},
+          el('p',{id:'booth-recipe-confirm-text',className:'booth-recipe-confirm-text',textContent:text}),
+          el('div',{className:'booth-row'},yes,no));
+        const done=value=>{box.remove();resolve(value);};
+        yes.addEventListener('click',()=>done(true));
+        no.addEventListener('click',()=>done(false));
+        placeConfirm(box);
+        if(typeof box.scrollIntoView==='function') box.scrollIntoView({block:'center'});
+        try{yes.focus({preventScroll:true});}catch{}
+      });
+    }
+    function confirmLoad(recipe){
+      const count=enabledEdits().length;
+      const current=boothCurrent();
+      const differentPaper=!!source()&&!(current&&current.id===recipe.paperId);
+      if(!count&&!differentPaper) return Promise.resolve(true);
+      return askConfirm(confirmText(count,differentPaper));
+    }
     async function loadCode(raw){
       if(ui.busy) return;
       const code=normalizeCode(raw);
@@ -850,6 +898,8 @@
       sayAll('레시피를 불러오는 중…');
       try{
         const recipe=await fromCode(code);
+        sayAll('');
+        if(!(await confirmLoad(recipe))){sayAll('레시피를 불러오지 않았어요.');return;}
         setAssist('agent',code);
         await apply(recipe,{onProgress:info=>sayAll(progressText(info))});
         sayAll('');
@@ -895,11 +945,16 @@
       task.catch(()=>pdfCache.delete(file));
       return task;
     }
-    async function pageImage(file, pageNumber, cssWidth, label){
+    async function pdfLib(){
       const preview=root.FalsifyPreview;
       if(!preview||typeof preview.defaultImport!=='function') throw new Error('preview');
       const lib=await preview.defaultImport();
       if(lib.GlobalWorkerOptions&&!lib.GlobalWorkerOptions.workerSrc) lib.GlobalWorkerOptions.workerSrc=new URL('./vendor/pdf.worker.mjs',doc.baseURI).href;
+      return {preview,lib};
+    }
+    /* {canvas, page, lib}; the caller cleans the page up once it has painted any marks. */
+    async function renderPage(file, pageNumber, cssWidth, label){
+      const {preview,lib}=await pdfLib();
       const pdf=await pdfFor(lib,preview,file);
       const page=await pdf.getPage(Math.min(Math.max(1,pageNumber),pdf.numPages));
       const viewport=page.getViewport({scale:preview.fitScale(page.getViewport({scale:1}),cssWidth,root.devicePixelRatio||1)});
@@ -907,8 +962,70 @@
       canvas.width=Math.max(1,Math.floor(viewport.width));
       canvas.height=Math.max(1,Math.floor(viewport.height));
       await page.render({canvasContext:canvas.getContext('2d'),canvas,viewport}).promise;
-      page.cleanup();
-      return canvas;
+      return {canvas,page,lib};
+    }
+    function percentBox(left, top, width, height, surface){
+      const w=surface.clientWidth||1;
+      const h=surface.clientHeight||1;
+      return {left:left/w*100,top:top/h*100,right:(left+width)/w*100,bottom:(top+height)/h*100};
+    }
+    function unionBox(a, b){
+      if(!a) return b;
+      return {left:Math.min(a.left,b.left),top:Math.min(a.top,b.top),right:Math.max(a.right,b.right),bottom:Math.max(a.bottom,b.bottom)};
+    }
+    /* Workspace change marks (paper-change-marks.js) on the generated page, kept in % so they follow resizes. */
+    function marksToPercent(layer, surface){
+      let box=null;
+      for(const mark of [...layer.children]){
+        const part=percentBox(parseFloat(mark.style.left)||0,parseFloat(mark.style.top)||0,parseFloat(mark.style.width)||0,parseFloat(mark.style.height)||0,surface);
+        Object.assign(mark.style,{left:part.left+'%',top:part.top+'%',width:(part.right-part.left)+'%',height:(part.bottom-part.top)+'%'});
+        box=unionBox(box,part);
+      }
+      return box;
+    }
+    async function paintMarks(surface, page, lib, edit){
+      const marks=root.FalsifyChangeMarks;
+      const base=page.getViewport({scale:1});
+      const scale=(surface.clientWidth||0)/base.width;
+      if(!marks||typeof marks.paintPage!=='function'||typeof lib.TextLayer!=='function'||!(scale>0)) return null;
+      const viewport=page.getViewport({scale});
+      const content=await page.getTextContent();
+      const text=el('div',{className:'paper-text-layer textLayer'});
+      for(const [name,value] of [['--total-scale-factor',String(scale)],['--scale-round-x','1px'],['--scale-round-y','1px'],['--text-scale-factor','1']]) surface.style.setProperty(name,value);
+      surface.append(text);
+      const layer=new lib.TextLayer({textContentSource:content,container:text,viewport});
+      await layer.render();
+      const result=marks.paintPage({document:doc,container:surface,items:content.items,divs:layer.textDivs,edits:[{id:edit.id,before:edit.before,after:edit.after}],side:'after'});
+      text.remove();
+      if(!result.count){result.layer.remove();return null;}
+      return marksToPercent(result.layer,surface);
+    }
+    /* Fallback: the edited segment's rectangle (anchor.bbox, page units at scale 1). */
+    function anchorBox(page, edit){
+      const box=edit.anchor&&edit.anchor.bbox;
+      if(!Array.isArray(box)||box.length!==4||!box.every(Number.isFinite)) return null;
+      const base=page.getViewport({scale:1});
+      return {left:box[0]/base.width*100,top:box[1]/base.height*100,right:box[2]/base.width*100,bottom:box[3]/base.height*100};
+    }
+    /* At least 8% x 4% of the page and padded, so a one-word change stays easy to spot on a phone. */
+    function grow(from, to, pad, min){
+      const extra=Math.max(pad,(min-(to-from))/2);
+      return [Math.max(0,from-extra),Math.min(100,to+extra)];
+    }
+    function drawOutline(surface, box){
+      const [left,right]=grow(box.left,box.right,1.5,8);
+      const [top,bottom]=grow(box.top,box.bottom,1,4);
+      const outline=el('span',{className:'booth-recipe-outline','aria-hidden':'true'});
+      Object.assign(outline.style,{left:left+'%',top:top+'%',width:(right-left)+'%',height:(bottom-top)+'%'});
+      surface.append(outline);
+    }
+    async function markChange(surface, rendered, edit){
+      let box=null;
+      let how='';
+      try{box=await paintMarks(surface,rendered.page,rendered.lib,edit);how=box?'marks':'';}catch{box=null;}
+      if(!box){box=anchorBox(rendered.page,edit);how=box?'bbox':'none';}
+      if(box) drawOutline(surface,box);
+      surface.dataset.mark=how;
     }
     function currentOutput(){
       const ws=workspace();
@@ -917,24 +1034,32 @@
         return ws&&typeof ws.getOutput==='function'?ws.getOutput():null;
       }catch{return null;}
     }
-    async function fillCompare(view, pageIndex){
+    function shotFigure(caption, canvas){
+      const surface=el('div',{className:'booth-recipe-shot'},canvas);
+      return {surface,figure:el('figure',{},el('figcaption',{textContent:caption}),surface)};
+    }
+    async function fillCompare(view, edit){
       const status=el('p',{className:'booth-small',textContent:'쪽 그림을 그리는 중…'});
       view.textContent='';
       view.append(status);
       const src=source();
       const out=currentOutput();
       if(!src||!out||!out.file){say(status,'수정본이 아직 없어요. 「← 고치기」에서 「다음」을 다시 눌러 주세요.');return;}
+      const pageIndex=edit.pageIndex;
       const outIndex=outputPage(out.pageMap,pageIndex);
       const width=Math.max(120,Math.floor((view.clientWidth||300)/2)-6);
       try{
-        const images=await Promise.all([
-          pageImage(src.file,pageIndex+1,width,'원본 '+(pageIndex+1)+'쪽'),
-          pageImage(out.file,outIndex+1,width,'수정본 '+(outIndex+1)+'쪽')
+        const [before,after]=await Promise.all([
+          renderPage(src.file,pageIndex+1,width,'원본 '+(pageIndex+1)+'쪽'),
+          renderPage(out.file,outIndex+1,width,'수정본 '+(outIndex+1)+'쪽')
         ]);
+        const left=shotFigure('원본',before.canvas);
+        const right=shotFigure('수정본 · '+(outIndex+1)+'쪽',after.canvas);
         view.textContent='';
-        view.append(
-          el('figure',{},images[0],el('figcaption',{textContent:'원본 '+(pageIndex+1)+'쪽'})),
-          el('figure',{},images[1],el('figcaption',{textContent:'수정본 '+(outIndex+1)+'쪽'})));
+        view.append(left.figure,right.figure);
+        before.page.cleanup();
+        await markChange(right.surface,after,edit);
+        after.page.cleanup();
       }catch{say(status,'쪽 그림을 그리지 못했어요. 수정본 PDF는 그대로 제출할 수 있어요.');}
     }
     function prefillCard(node, edit){
@@ -958,7 +1083,7 @@
         view.hidden=!open;
         button.setAttribute('aria-expanded',String(open));
         say(button,open?'수정본 쪽 닫기':'수정본 쪽 보기');
-        if(open) void fillCompare(view,edit.pageIndex);
+        if(open) void fillCompare(view,edit);
       });
       return [button,view];
     }
