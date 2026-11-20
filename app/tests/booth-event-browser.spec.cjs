@@ -184,10 +184,11 @@ async function walk(browser, viewport, desk, pageErrors) {
   assert.equal(await page.locator('#booth-next').isDisabled(), true);
 
   // edit: change one paragraph; the dock counts it and enables 다음. The paragraph list sits
-  // collapsed under the find-and-replace form (booth-recipe.js) until 「문단 목록에서 고르기」.
+  // collapsed under the find-and-replace form (booth-recipe.js) on phones until 「문단 목록에서 고르기」;
+  // the desktop layout keeps it beside the page.
   const listToggle = page.locator('#booth-find-list');
   if (await listToggle.count() && await listToggle.isVisible()) {
-    assert.equal(await page.locator('.paper-paragraph-list').first().isVisible(), false);
+    assert.equal(await page.locator('.paper-paragraph-list').first().isVisible(), desk);
     await listToggle.click();
   }
   const paragraphIndex = await page.evaluate(() => {

@@ -87,6 +87,51 @@ test('validate rejects every rule break with a field and code', () => {
   assert.deepEqual(codes(recipe.validate([])), [':type']);
 });
 
+test('lengths count code points and C1/bidi controls and unknown edit keys are rejected', () => {
+  const {recipe} = load();
+  const astral = '\u{1D400}';
+  assert.equal(recipe.validate(good({edits: [{find: astral.repeat(300), replace: '\u{1D401}'.repeat(300)}]})).ok, true, '300 astral code points fit');
+  assert.ok(codes(recipe.validate(good({edits: [{find: astral.repeat(301), replace: 'x'}]}))).includes('edits[0].find:too_long'));
+  assert.equal(recipe.validate(good({reason: astral.repeat(500), agent: {name: astral.repeat(60), model: 'm'}})).ok, true);
+  assert.ok(codes(recipe.validate(good({edits: [{find: 'a', replace: 'b', context: astral.repeat(601)}]}))).includes('edits[0].context:too_long'));
+  const bad = ['\u0085', '\u009f', '\u200e', '\u200f', '\u202a', '\u202e', '\u2066', '\u2069'];
+  for (const ch of bad) {
+    const label = 'U+' + ch.codePointAt(0).toString(16);
+    assert.ok(codes(recipe.validate(good({agent: {name: 'Claude' + ch, model: 'm'}}))).includes('agent.name:control'), label);
+    assert.ok(codes(recipe.validate(good({edits: [{find: 'a' + ch, replace: 'b'}]}))).includes('edits[0].find:control'), label);
+    assert.ok(codes(recipe.validate(good({reason: 'line\nmore' + ch}))).includes('reason:control'), label);
+    assert.ok(codes(recipe.validate(good({edits: [{find: 'a', replace: 'b', context: 'x\n' + ch}]}))).includes('edits[0].context:control'), label);
+  }
+  assert.equal(recipe.validate(good({reason: 'a\nb', edits: [{find: 'a', replace: 'b', context: 'c\nd'}]})).ok, true, 'newline stays allowed in reason/context');
+  assert.equal(recipe.validate(good({edits: [{find: 'a', replace: 'b\u200b'}]})).ok, true, 'zero-width space is not a control');
+  assert.deepEqual(codes(recipe.validate(good({edits: [{find: 'a', replace: 'b', hint: {segmentId: 's0', at: 0}, note: 'x'}]}))), ['edits[0].hint:unknown', 'edits[0].note:unknown']);
+});
+
+test('the mission check is an exact id match, so a prefix id still gets search metadata', async () => {
+  const label = {textContent: 'arXiv 2309.15217 · CC BY 4.0'};
+  const missions = {querySelectorAll: selector => (selector === '.booth-mission .booth-lab' ? [label] : []), textContent: label.textContent};
+  const document = {getElementById: id => (id === 'booth-missions' ? missions : null)};
+  const searches = [];
+  const fetch = async url => { searches.push(url); return {ok: true, status: 200, json: async () => ({results: [{id: '2309.1521', title: 'Other', license: 'cc-by-4.0'}]})}; };
+  for (const [paperId, expected] of [['2309.15217', 0], ['2309.1521', 1]]) {
+    searches.length = 0;
+    const metas = [];
+    const ws = stubWorkspace(SEGMENTS);
+    let opened = false;
+    const getSource = ws.getSource;
+    ws.getSource = () => (opened ? getSource() : null);
+    const {recipe} = load({
+      document, fetch, FalsifyPaperWorkspace: ws,
+      FalsifyCloudConfig: {apiBase: 'https://api.example'},
+      FalsifyHostedSession: {token: async () => 'fsg_' + 'c'.repeat(43)},
+      FalsifyBoothPaper: {open: (id, meta) => { metas.push(plain(meta)); opened = true; return Promise.resolve(true); }, current: () => null},
+    });
+    await recipe.apply(good({paperId, edits: [{page: 3, find: '0.95', replace: '0.50', context: 'Ragas 0.95 0.78 0.70'}]}));
+    assert.equal(searches.length, expected, paperId);
+    assert.deepEqual(metas[0], expected ? {title: 'Other', license: 'cc-by-4.0'} : {}, paperId);
+  }
+});
+
 test('codes normalise to R- plus 6 Crockford characters', () => {
   const {recipe} = load();
   assert.equal(recipe.normalizeCode('r-abc123'), 'R-ABC123');
