@@ -230,14 +230,28 @@ async function main() {
     await assertChromeHidden(desk, 'desktop edit');
     const panes = await desk.evaluate(() => {
       const box = selector => { const node = document.querySelector(selector); if (!node) return null; const rect = node.getBoundingClientRect(); return {left: rect.left, right: rect.right, top: rect.top, width: rect.width}; };
-      return {canvas: box('.paper-page > canvas'), list: box('.paper-paragraph-list'), hint: box('#booth-hint'), toolbar: box('#paper-workspace .paper-toolbar')};
+      return {canvas: box('.paper-page > canvas'), list: box('.paper-paragraph-list'), hint: box('#booth-hint'), toolbar: box('#paper-workspace .paper-toolbar'),
+        foot: box('#source-link'), stageWidth: document.querySelector('#paper-before-stage').clientWidth};
     });
     assert.ok(panes.canvas && panes.list, 'desktop edit: page or list missing ' + JSON.stringify(panes));
     assert.ok(panes.canvas.right < panes.list.left, 'desktop edit: page and list are not side by side ' + JSON.stringify(panes));
-    assert.ok(panes.canvas.width >= 480, 'desktop edit: page image is narrowed ' + JSON.stringify(panes));
+    assert.ok(panes.stageWidth >= 320 && Math.abs(panes.canvas.width - panes.stageWidth) <= 2, 'desktop edit: page image is narrowed ' + JSON.stringify(panes));
+    assert.ok(panes.foot && panes.foot.top > panes.list.top + 100, 'desktop edit: license link is not below the paragraph list ' + JSON.stringify(panes));
     assert.ok(panes.hint && panes.hint.left >= panes.list.left - 1, 'desktop edit: hint is not in the work column ' + JSON.stringify(panes));
     assert.ok(Math.abs(panes.hint.top - panes.toolbar.top) < 2, 'desktop edit: hint and page navigation do not share the top row ' + JSON.stringify(panes));
     assert.ok(await overflow(desk) <= 0, 'desktop edit: horizontal overflow');
+    // The page column is sticky and fits between the top and the dock while the list scrolls.
+    await desk.evaluate(() => window.scrollTo(0, 900));
+    await desk.waitForTimeout(100);
+    const stuck = await desk.evaluate(() => {
+      const canvas = document.querySelector('.paper-page > canvas').getBoundingClientRect();
+      const nav = document.querySelector('#paper-workspace .paper-toolbar').getBoundingClientRect();
+      return {scrollY: window.scrollY, navTop: nav.top, navBottom: nav.bottom, canvasTop: canvas.top, canvasBottom: canvas.bottom, height: window.innerHeight};
+    });
+    assert.ok(stuck.scrollY > 0, 'desktop edit: page does not scroll ' + JSON.stringify(stuck));
+    assert.ok(stuck.navTop >= 0 && stuck.canvasTop >= stuck.navBottom, 'desktop edit: page column is not sticky ' + JSON.stringify(stuck));
+    assert.ok(stuck.canvasBottom <= stuck.height - 76, 'desktop edit: page image runs under the dock ' + JSON.stringify(stuck));
+    await desk.evaluate(() => window.scrollTo(0, 0));
     const deskIndex = await desk.evaluate(() => {
       const hits = [...document.querySelectorAll('.paper-paragraph-button')].map((node, index) => ({index, text: node.textContent}))
         .filter(item => item.text.includes('0.95') && item.text.includes('0.78') && item.text.length <= 400);
@@ -268,6 +282,7 @@ async function main() {
     await deskEditor.fill(deskOriginal.replace('0.95', '0.50'));
     await deskDone.click();
     await desk.waitForFunction(() => (document.querySelector('#paper-edits') || {}).textContent?.includes('0.50'));
+    assert.equal(await desk.locator('#paper-edits').isVisible(), false, 'desktop: applied edits list is visible (the dock shows them)');
     assert.equal(await deskEditor.count(), 0, 'desktop: 완료 did not close the editor');
     assert.ok(await overflow(desk) <= 0, 'desktop applied: horizontal overflow');
     for (const step of ['send', 'ticket']) {

@@ -148,10 +148,17 @@ html[data-booth-step]:not([data-booth-step="edit"]) #view-workbench{
 
 /* Desktop (1024px and wider). Below 1024px everything above applies unchanged.
    The 480px column becomes a centred 1120px container on the ground colour. In the edit
-   step the workspace is two panes: the page column (500px: prev/next, N / M쪽, page image)
-   and the work column (hint, applied edits, the direct editor as a raised panel, the
+   step the workspace is two panes: the page column (up to 500px, sticky: prev/next, N / M쪽,
+   page image) and the work column (hint, the direct editor as a raised panel, the
    paragraph list). booth.js and paper-workspace.js keep their DOM; this is grid and order. */
 @media(min-width:1024px){
+  /* Page column width. The page image (A4 or narrower) plus its navigation must fit between
+     the sticky top (16px) and the 76px dock with 16px to spare, so the column narrows on short
+     windows. The renderer reads the stage's inner width, so canvas and text layer stay in sync. */
+  :root{
+    --dk-page:clamp(320px,calc((100vh - 164px) / 1.414),500px);
+    --dk-page:clamp(320px,calc((100dvh - 164px) / 1.414),500px)
+  }
   html,body{background:var(--ev-ground,#eef0f1)}
   .app-shell{max-width:none}
   .content{box-sizing:content-box;max-width:1120px;margin:0 auto;padding:24px 32px calc(76px + 40px + env(safe-area-inset-bottom,0px))}
@@ -160,26 +167,26 @@ html[data-booth-step]:not([data-booth-step="edit"]) #view-workbench{
      aside (display:contents) so the hint, the page navigation, the applied edits and the
      compare pane share one grid. Booth rows (bars, step links) keep the full width. */
   html[data-booth-step="edit"] .content{
-    display:grid;grid-template-columns:500px minmax(0,1fr);column-gap:48px;row-gap:16px;
+    display:grid;grid-template-columns:var(--dk-page) minmax(0,1fr);column-gap:48px;row-gap:16px;
     grid-auto-flow:row dense;align-items:start
   }
   html[data-booth-step="edit"] :is(#booth,#booth :has(#booth-hint)){display:contents}
   html[data-booth-step="edit"] :is(#booth,#booth :has(#booth-hint))>*{grid-column:1/-1}
   html[data-booth-step="edit"] :is(#booth,#booth :has(#booth-hint))>#booth-hint{grid-column:2;margin:0}
   html[data-booth-step="edit"] :is(#view-workbench,.paper-intake,#paper-workspace):not([hidden]){display:contents}
-  html[data-booth-step="edit"] #paper-workspace>.paper-toolbar{grid-column:1;margin:0}
-  html[data-booth-step="edit"] #paper-workspace>#paper-edits{grid-column:2;margin:0}
-  html[data-booth-step="edit"] #paper-workspace>.paper-compare{grid-column:1/-1}
+  html[data-booth-step="edit"] #paper-workspace>.paper-toolbar{grid-column:1;margin:0;position:sticky;top:16px;z-index:3}
+    html[data-booth-step="edit"] #paper-workspace>.paper-compare{grid-column:1/-1}
+  /* The flex workspace ordered its parts with order 1 and 2; the footer must follow them. */
   html[data-booth-step="edit"] .content>.page-foot{grid-column:1/-1;order:3}
 
   /* Other steps keep the workspace measured off screen at the desktop width, so a paper
-     loaded on "pick" is drawn at the 500px page width before "edit" shows it. */
+     loaded on "pick" is drawn at the page column width before "edit" shows it. */
   html[data-booth-step]:not([data-booth-step="edit"]) #view-workbench{width:min(1120px,calc(100vw - 64px))}
 
   #paper-workspace .paper-toolbar{grid-template-columns:auto 1fr auto;gap:12px}
   #paper-page-prev,#paper-page-next{padding:0 16px}
-  #paper-edits:not(:has(>li>button)){display:none}
-  #paper-edits>li [data-act="edit"]{flex:1 1 0;min-width:0;justify-content:flex-start}
+  /* Applied edits show as chips in the booth dock on desktop; phones keep this list. */
+  #paper-workspace>#paper-edits{display:none}
 
   /* The pane title stays for assistive tech only; the toolbar already says which page. */
   #paper-before-title{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
@@ -189,11 +196,15 @@ html[data-booth-step]:not([data-booth-step="edit"]) #view-workbench{
      100cqw is the compare pane: the full container width. */
   #paper-workspace .paper-compare{container-type:inline-size}
   #paper-before-stage{
-    display:grid;grid-template-columns:500px calc(100cqw - 548px);grid-template-rows:auto auto 1fr;
+    display:grid;grid-template-columns:var(--dk-page) calc(100cqw - var(--dk-page) - 48px);grid-template-rows:auto auto 1fr;
     column-gap:48px;row-gap:0;align-items:start;
-    border-inline-width:0 calc(100cqw - 500px)
+    border-inline-width:0 calc(100cqw - var(--dk-page))
   }
-  #paper-before-stage>.paper-page{grid-column:1;grid-row:1/-1;margin:0;grid-template-columns:100% calc(100cqw - 548px);column-gap:48px}
+  #paper-before-stage>.paper-page{grid-column:1;grid-row:1/-1;margin:0;grid-template-columns:100% calc(100cqw - var(--dk-page) - 48px);column-gap:48px}
+  /* The page stays in view under the sticky navigation while the work column scrolls. With the
+     editor open it scrolls normally, so the editor panel (a child of the page) never floats
+     over the paragraph list. */
+  #paper-before-stage>.paper-page:not(:has(>textarea)){position:sticky;top:72px}
   #paper-before-stage>.paper-paragraph-list{grid-column:2;grid-row:2;margin:0}
   #paper-before-stage>:not(.paper-page):not(.paper-paragraph-list){grid-column:1/-1}
 
