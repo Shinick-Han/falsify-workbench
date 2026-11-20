@@ -34,6 +34,9 @@ test('superscript symbols and a raised Times footnote number change in place',{s
   assert.ok(result,JSON.stringify(edit));
   assert.equal(result.reports[0].font,'LiberationSerif');
   assert.ok(result.reports[0].changedPixels>0);
+  /* No gap reads as a space: the extracted line holds the edit as typed ("Anke∗3,", not "Anke∗3 ,"). */
+  const doc=new mupdf.PDFDocument(result.bytes),page=doc.loadPage(0);
+  try{const words=page.toStructuredText('preserve-whitespace').asText().replace(/\s+/g,' ');if(edit.before==='Anke∗♢,'||edit.before==='Shahul Es†')assert.ok(words.includes(edit.after),edit.after);}finally{page.destroy();doc.destroy();}
  }
  assert.equal(await one({before:'With Ragas, we',after:'With Rbgas, we'}),null,'body text is not a marker');
 });

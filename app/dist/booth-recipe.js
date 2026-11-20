@@ -1363,8 +1363,11 @@
       button.addEventListener('click',()=>{
         button.disabled=true;
         say(status,'수정본을 만드는 중…');
-        doc.addEventListener('falsify:paper-generated',()=>{if(view.isConnected) void fillCompare(view,edit);},{once:true});
-        doc.addEventListener('falsify:paper-generate-failed',()=>{if(view.isConnected){button.disabled=false;say(status,'수정본을 만들지 못했어요. 한 번 더 눌러 주세요.');}},{once:true});
+        /* One pair of listeners per make: whichever outcome comes first removes both, so tapping again never
+           piles up stale ones. */
+        const done=new AbortController();
+        doc.addEventListener('falsify:paper-generated',()=>{done.abort();if(view.isConnected) void fillCompare(view,edit);},{signal:done.signal});
+        doc.addEventListener('falsify:paper-generate-failed',()=>{done.abort();if(view.isConnected){button.disabled=false;say(status,'수정본을 만들지 못했어요. 한 번 더 눌러 주세요.');}},{signal:done.signal});
         remake.click();
       });
       view.append(button);

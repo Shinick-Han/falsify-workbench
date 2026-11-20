@@ -20,6 +20,7 @@ const exemptions = new Map(Object.entries({
   'booth-pageedit-browser.spec.cjs': 'manual browser harness',
   'booth-patch-browser.spec.cjs': 'manual browser harness',
   'booth-make-browser.spec.cjs': 'manual browser harness',
+  'booth-relocate-browser.spec.cjs': 'manual browser harness',
   'browser-fonts.spec.mjs': 'Pages font contracts',
   'browser-pdf-fonts.spec.mjs': 'Pages font contracts',
   'bundled-fonts.spec.mjs': 'Pages font contracts',

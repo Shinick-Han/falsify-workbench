@@ -44,10 +44,11 @@ function markerFace(all,index,fontSnapshot){const base=fontBase(all[index].fontN
 }
 /* Spans of same-font glyphs on the marker's baseline that hold the changed one, longest first: a show may hold the
    whole run ("∗♢") or only part of it. */
+const MARKER_TRIES=6;
 function markerRuns(all,plan,target){let start=plan.target,end=plan.target;
    const same=g=>g&&g.fontName===target.fontName&&near(g.size,target.size)&&near(g.pdf[1],target.pdf[1]);while(start>0&&same(all[start-1]))start--;while(end+1<all.length&&same(all[end+1]))end++;
    const runs=[];for(let a=start;a<=plan.target;a++)for(let b=end;b>=plan.target;b--)runs.push([a,b]);
-   return runs.sort((x,y)=>(y[1]-y[0])-(x[1]-x[0])).map(([a,b])=>({glyphs:all.slice(a,b+1),at:plan.target-a}));
+   return runs.sort((x,y)=>(y[1]-y[0])-(x[1]-x[0])).slice(0,MARKER_TRIES).map(([a,b])=>({glyphs:all.slice(a,b+1),at:plan.target-a}));
 }
 async function replaceMarkerRun(working,plan,all,target,fontSnapshot,deps){const face=markerFace(all,plan.target,fontSnapshot);if(!face)return null;
    for(const run of markerRuns(all,plan,target)){abort(deps.signal);

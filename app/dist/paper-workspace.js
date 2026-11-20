@@ -2499,9 +2499,10 @@
     /* An edit made on a layout or page view carries that view's text, which can order superscripts and line breaks
        differently from the PDF's reading order ("Generation\n† †\nShahul Es ," for "Shahul Es†,"), so the engine
        cannot find it. Line that view's ink (characters other than spaces) up with the page's paragraph text: runs of
-       six or more characters that occur once in the paragraphs anchor it, and a character left over (a superscript
-       moved out of its line) pairs with the nearest unused same character where its neighbours put it. The edit
-       moves only when every changed character lands, in order, inside one paragraph. */
+       six or more characters that occur once in one paragraph anchor it, and a character left over (a superscript
+       moved out of its line) pairs only when exactly one unused same character fits (see pairOrphan). The edit
+       moves only when every changed character lands, in order, inside one paragraph; otherwise it fails with its
+       own named message. */
     function inkOf(text){
       const chars=[],at=[],end=[];
       for(let i=0;i<text.length;){const ch=String.fromCodePoint(text.codePointAt(i));for(const c of ch.normalize('NFKC'))if(!/\s/u.test(c)){chars.push(c);at.push(i);end.push(i+ch.length);}i+=ch.length;}
@@ -2517,34 +2518,78 @@
       return ink;
     }
     const GRAM=6;
-    function gramIndex(b){
+    /* Six-character runs that occur once in the page's paragraph text, each inside one paragraph. */
+    function gramIndex(b,seg){
       const seen=new Map();
-      for(let j=0;j+GRAM<=b.length;j++){const g=b.slice(j,j+GRAM).join('');seen.set(g,seen.has(g)?-1:j);}
+      for(let j=0;j+GRAM<=b.length;j++){if(seg[j]!==seg[j+GRAM-1])continue;const g=b.slice(j,j+GRAM).join('');seen.set(g,seen.has(g)?-1:j);}
       return seen;
     }
-    function anchorInk(a,b,map,used){
-      const grams=gramIndex(b);
+    function anchorInk(a,b,map,used,seg){
+      const grams=gramIndex(b,seg);
       for(let i=0;i+GRAM<=a.length;i++){
         if(map[i]>=0)continue;
         let j=grams.get(a.slice(i,i+GRAM).join(''));
         if(!(j>=0)||used[j])continue;
-        for(let k=i;k<a.length&&j<b.length&&map[k]<0&&!used[j]&&a[k]===b[j];k++,j++){map[k]=j;used[j]=true;}
+        const own=seg[j];
+        for(let k=i;k<a.length&&j<b.length&&map[k]<0&&!used[j]&&a[k]===b[j]&&seg[j]===own;k++,j++){map[k]=j;used[j]=true;}
       }
     }
-    function expectedAt(map,i){
-      for(let d=1;d<=GRAM*4;d++){if(i-d>=0&&map[i-d]>=0)return map[i-d]+d;if(i+d<map.length&&map[i+d]>=0)return map[i+d]-d;}
+    /* Where the anchors on either side put a leftover character; paired leftovers never count as anchors. */
+    function expectedAt(anchors,i){
+      for(let d=1;d<=GRAM*4;d++){if(i-d>=0&&anchors[i-d]>=0)return anchors[i-d]+d;if(i+d<anchors.length&&anchors[i+d]>=0)return anchors[i+d]-d;}
       return -1;
     }
-    function pairOrphan(a,b,map,used,i){
-      const want=expectedAt(map,i);if(want<0)return;
-      let best=-1;
-      for(let j=Math.max(0,want-48);j<=Math.min(b.length-1,want+48);j++)if(!used[j]&&b[j]===a[i]&&(best<0||Math.abs(j-want)<Math.abs(best-want)))best=j;
-      if(best>=0){map[i]=best;used[best]=true;}
+    function anchoredSides(anchors,i,size){
+      let left=i-1;while(left>=0&&anchors[left]<0)left--;
+      let right=i+1;while(right<anchors.length&&anchors[right]<0)right++;
+      const lo=left>=0?anchors[left]:-1,hi=right<anchors.length?anchors[right]:size;
+      return {lo,hi,tight:lo>=0&&hi<size&&hi>lo&&hi-lo<=right-left+8};
     }
-    function alignToParagraphs(a,b){
+    const MARK=/[†‡∗♢§¶*0-9]/;
+    /* A leftover that is not a mark pairs only when exactly one unused same character lies strictly between its two
+       anchored neighbours, and their gap in the paragraph is close to the gap in the view. */
+    function pairOrphan(a,b,map,used,i,anchors){
+      const side=anchoredSides(anchors,i,b.length);if(!side.tight)return;
+      const fits=[];
+      for(let j=side.lo+1;j<side.hi;j++)if(!used[j]&&b[j]===a[i])fits.push(j);
+      if(fits.length!==1)return;
+      map[i]=fits[0];used[fits[0]]=true;
+    }
+    /* Leftover footnote or affiliation marks, in runs: marks printed together ("∗♢"), or the same mark repeated on
+       its own line ("† †" for Es† and James†). */
+    function markRuns(a,map,view){
+      const runs=[];let run=null;
+      for(let i=0;i<a.length;i++){
+        if(map[i]>=0||!MARK.test(a[i])){run=null;continue;}
+        const last=run&&run.at(-1),joined=last!=null&&last===i-1&&(view.end[last]===view.at[i]||a[last]===a[i]&&run.every(k=>a[k]===a[i]));
+        if(joined)run.push(i);else{run=[i];runs.push(run);}
+      }
+      return runs;
+    }
+    /* Starts in [from,to] where the run's marks sit together, all unused. */
+    function togetherAt(a,b,used,run,from,to){
+      const out=[];
+      for(let j=from;j<=to;j++)if(run.every((k,n)=>j+n<b.length&&!used[j+n]&&b[j+n]===a[k]))out.push(j);
+      return out;
+    }
+    /* A run pairs only when its anchors leave exactly one way to read it: one place where the marks sit together,
+       or, for one mark repeated, exactly as many unused copies near the spot as the view has. */
+    function pairRun(a,b,map,used,run,anchors){
+      const want=expectedAt(anchors,run[0]);if(want<0)return;
+      const from=Math.max(0,want-48),to=Math.min(b.length-1,want+48);
+      const together=togetherAt(a,b,used,run,from,to);
+      if(together.length===1){run.forEach((k,n)=>{map[k]=together[0]+n;used[together[0]+n]=true;});return;}
+      if(run.length<2||run.some(k=>a[k]!==a[run[0]]))return;
+      const copies=[];for(let j=from;j<=to;j++)if(!used[j]&&b[j]===a[run[0]])copies.push(j);
+      if(copies.length!==run.length)return;
+      run.forEach((k,n)=>{map[k]=copies[n];used[copies[n]]=true;});
+    }
+    function alignToParagraphs(a,b,seg,view){
       const map=new Array(a.length).fill(-1),used=new Array(b.length).fill(false);
-      anchorInk(a,b,map,used);
-      for(let i=0;i<a.length;i++)if(map[i]<0)pairOrphan(a,b,map,used,i);
+      anchorInk(a,b,map,used,seg);
+      const anchors=map.slice();
+      for(const run of markRuns(a,map,view))pairRun(a,b,map,used,run,anchors);
+      for(let i=0;i<a.length;i++)if(map[i]<0&&!MARK.test(a[i]))pairOrphan(a,b,map,used,i,anchors);
       return map;
     }
     function changedSpan(edit){
@@ -2554,18 +2599,24 @@
       if(lead+tail===before.length&&lead>0)lead--;
       return {lead,tail,after:after.slice(lead,after.length-tail)};
     }
+    /* A landing beside the same character ("||V S||" for a fraction's bars) is taken only when the view's own
+       neighbour lands there too; otherwise which copy is meant cannot be told. */
+    function twinAt(para,map,k,j){
+      return [-1,1].some(d=>para.chars[j+d]===para.chars[j]&&para.seg[j+d]===para.seg[j]&&map[k+d]!==j+d);
+    }
     function landedSpan(view,map,para,from,to){
       const idx=[];view.at.forEach((p,k)=>{if(p>=from&&p<to)idx.push(k);});
       if(!idx.length||idx.some(k=>map[k]<0))return null;
       const js=idx.map(k=>map[k]);
       if(js.some((j,n)=>n&&j!==js[n-1]+1)||js.some(j=>para.seg[j]!==para.seg[js[0]]))return null;
+      if(idx.some((k,n)=>twinAt(para,map,k,js[n])))return null;
       return {seg:para.seg[js[0]],start:para.at[js[0]],end:para.end[js[js.length-1]]};
     }
     function projectEdit(edit,taken){
       const range=editRange(edit);if(!range||segmentKind(edit.segmentId)==='paragraph')return null;
       const change=changedSpan(edit),from=range.start+change.lead,to=range.end-change.tail;
       const view=inkOf(range.text),para=pageInk(edit.pageIndex);
-      const spot=landedSpan(view,alignToParagraphs(view.chars,para.chars),para,from,to);
+      const spot=landedSpan(view,alignToParagraphs(view.chars,para.chars,para.seg,view),para,from,to);
       if(!spot||taken.some(r=>r.segmentId===spot.seg.id&&r.start<spot.end&&spot.start<r.end))return null;
       const moved={...edit,segmentId:spot.seg.id,before:spot.seg.text.slice(spot.start,spot.end),after:change.after,anchor:{...edit.anchor,start:spot.start,end:spot.end}};
       if(pageNeedleCount(edit.pageIndex,moved.before,'paragraph')===1)return moved;
