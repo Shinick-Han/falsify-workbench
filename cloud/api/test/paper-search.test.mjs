@@ -2,7 +2,7 @@
 // and fetchImpl never leaves the process.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { matchPaperSearch, handlePaperSearchRequest, clearPdfMemoForTests } from '../src/paper-search.mjs';
+import { matchPaperSearch, handlePaperSearchRequest, clearPdfMemoForTests, agePdfMemoForTests } from '../src/paper-search.mjs';
 
 const USER_AGENT = 'falsify-workbench-booth/1.0 (+https://github.com/Shinick-Han/falsify-workbench)';
 const AUTHOR = '11111111-1111-4111-8111-111111111111';
@@ -953,6 +953,22 @@ test('a warm isolate serves a repeated PDF from memory when no Cache API is avai
   const before = fetches;
   assert.equal((await get('2503.00081')).status, 200);
   assert.equal(fetches, before + 2, 'the evicted id is fetched again');
+  // An hour later the memo entry is gone, so the license is checked upstream again.
+  agePdfMemoForTests(60 * 60 * 1000);
+  const aged = fetches;
+  assert.equal((await get('2503.00081')).status, 200);
+  assert.equal(fetches, aged + 2, 'an expired entry re-checks the license and refetches');
+  // A denied license is never memoised.
+  clearPdfMemoForTests();
+  let deniedFetches = 0;
+  const denied = routes({
+    'oaipmh.arxiv.org': () => { deniedFetches += 1; return new Response(oaiXml('http://arxiv.org/licenses/nonexclusive-distrib/1.0/'), { status: 200, headers: { 'Content-Type': 'text/xml' } }); },
+    'arxiv.org': () => { deniedFetches += 1; return new Response(pdfBytes(80), { status: 200, headers: { 'Content-Type': 'application/pdf' } }); },
+  });
+  const getDenied = () => send({ pathname: '/v1/papers/pdf', query: 'id=2503.00099', token: SESSION, deps, cache: null, fetchImpl: denied.fetchImpl });
+  assert.equal((await getDenied()).status, 403);
+  assert.equal((await getDenied()).status, 403);
+  assert.equal(deniedFetches, 2, 'each denied open asks OAI again and never fetches the PDF');
   clearPdfMemoForTests();
 });
 
