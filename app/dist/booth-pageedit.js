@@ -27,6 +27,7 @@
     clashAct:'앞서 고친 것 지우고 바꾸기',
     outside:'이 글자는 고칠 수 있는 본문 밖에 있어요. 다른 글자를 눌러 주세요.',
     no_paper:'논문이 아직 열리지 않았어요.',
+    rejected:'바꾸지 못했어요. 「바꾸기」를 한 번 더 눌러 주세요.',
     reopen:'문단 편집이 열리지 않았어요.',
     reopenAct:'다시 열기'
   };
@@ -823,8 +824,11 @@
       return result&&result.applied===1&&added?{ok:true,id:added.id,after:added.after}:{ok:false};
     }
     /* The token sits in the unchanged text of an edit already made in this paragraph: that edit takes the change too. */
+    function overlapping(spot){
+      return editsNow().filter(edit=>edit.segmentId===spot.segmentId&&edit.anchor&&edit.anchor.start<spot.end&&spot.start<edit.anchor.end);
+    }
     function mergeInto(spot, value){
-      const hits=editsNow().filter(edit=>edit.segmentId===spot.segmentId&&edit.anchor&&edit.anchor.start<spot.end&&spot.start<edit.anchor.end);
+      const hits=overlapping(spot);
       const edit=hits.length===1?hits[0]:null;
       if(!edit||spot.start<edit.anchor.start||spot.end>edit.anchor.end) return {ok:false};
       const at=unchangedAt(edit.before,edit.after,spot.start-edit.anchor.start,spot.end-spot.start);
@@ -837,10 +841,27 @@
        that one occurrence by offset, else merged into the edit it sits in. */
     function commitSpot(spot, value){
       const R=recipe();
-      let result=R&&typeof R.applyFound==='function'?R.applyFound(Object.assign({status:'resolved',kind:'paragraph'},spot),value):{ok:false};
+      /* Next to an earlier edit: that edit takes the change and keeps its id (and its patches). */
+      let result=mergeInto(spot,value);
+      if(result.ok) return result;
+      st.holding=true;
+      try{result=R&&typeof R.applyFound==='function'?R.applyFound(Object.assign({status:'resolved',kind:'paragraph'},spot),value):{ok:false};}
+      finally{st.holding=false;}
+      if(result.ok) adoptMerged(result);
       if(!result.ok) result=addExact(spot,value);
-      if(!result.ok) result=mergeInto(spot,value);
       return result;
+    }
+    /* applyFound folds overlapping edits into one: their patches move to the new edit. */
+    function adoptMerged(result){
+      const gone=new Set(Array.isArray(result.merged)?result.merged:[]);
+      for(const patch of st.patches.values()){
+        if(!gone.has(patch.edit)) continue;
+        if(!result.id){patch.edit='';continue;}
+        patch.at=nearestIndex(result.after,patch.value,patch.at);
+        patch.edit=result.id;
+      }
+      if(result.id) retag(result.id,result.after);
+      syncPatches();
     }
     function fontOf(span){
       try{const m=patcher().measure(span);if(m&&m.fontPx>0) return m;}catch{}
@@ -892,7 +913,12 @@
     function commitWord(sel, value){
       const spot=sel.spot;
       const result=commitSpot(spot,value);
-      if(!result.ok){showClash(sel,value);return;}
+      if(!result.ok){
+        if(overlapping(spot).length) showClash(sel,value);
+        else{status.textContent=FAIL_TEXT.rejected;placePop();}
+        return;
+      }
+      if(!result.id){closePop(true);return;}
       const edit=editById(result.id);
       const anchor=edit&&edit.anchor&&Number.isInteger(edit.anchor.start)?edit.anchor.start:spot.start;
       const at=nearestIndex(result.after,value,spot.start-anchor);
@@ -930,8 +956,8 @@
           const r=fraction(mark.getBoundingClientRect(),page);
           return box.width>0&&overlapShare(r,sel.word.rect)>0;
         }).map(mark=>mark.dataset.edit);
-        const same=editsNow().filter(edit=>edit.segmentId===spot.segmentId&&edit.anchor&&edit.anchor.start<spot.end&&spot.start<edit.anchor.end).map(edit=>edit.id);
-        for(const id of new Set(same.concat(marks))) call('updateEdit',id,(editById(id)||{}).before);
+        const same=overlapping(spot).map(edit=>edit.id);
+        for(const id of new Set(same.concat(marks))) call('removeEdit',id);
         if(st.sel===sel) commitWord(sel,value);
       });
       status.append(act);
@@ -997,7 +1023,7 @@
       const edits=snap&&Array.isArray(snap.edits)?snap.edits:[];
       for(const [key,patch] of [...st.patches]){
         const edit=edits.find(item=>item&&item.id===patch.edit);
-        if(edit&&edit.enabled!==false&&(edit.after===patch.after||patch.edit===st.updating)) continue;
+        if(st.holding||edit&&edit.enabled!==false&&(edit.after===patch.after||patch.edit===st.updating)) continue;
         st.patches.delete(key);
         try{patcher().remove(key);}catch{}
       }
