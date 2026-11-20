@@ -206,14 +206,15 @@ async function walk(browser, viewport, desk, pageErrors) {
   assert.equal(await page.locator('#booth-dock-count').textContent(), '고친 곳 0개');
   assert.equal(await page.locator('#booth-next').isDisabled(), true);
 
-  // edit: change one paragraph; the dock counts it and enables 다음. The paragraph list sits
-  // collapsed under the find-and-replace form (booth-recipe.js) on phones until 「문단 목록에서 고르기」;
-  // the desktop layout keeps it beside the page.
-  const listToggle = page.locator('#booth-find-list');
-  if (await listToggle.count() && await listToggle.isVisible()) {
-    assert.equal(await page.locator('.paper-paragraph-list').first().isVisible(), desk);
-    await listToggle.click();
+  // edit: change one paragraph; the dock counts it and enables 다음. On event.html the page itself is the
+  // editor (booth-pageedit.js); the paragraph list stays for screen readers and keyboards, visually hidden
+  // until it holds focus, so this walk opens the paragraph through it. Phones open zoomed: zoom out first.
+  assert.equal(await page.locator('#booth-find-list').count(), 0);
+  if (await page.locator('#booth-pe-fit').isVisible()) {
+    await page.locator('#booth-pe-fit').click();
+    await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() === 1);
   }
+  await page.waitForFunction(() => [...document.querySelectorAll('.paper-paragraph-button')].some(node => node.textContent.includes('0.95') && node.textContent.includes('0.78')));
   const paragraphIndex = await page.evaluate(() => {
     const hits = [...document.querySelectorAll('.paper-paragraph-button')].map((node, index) => ({
       index, length: node.textContent.length, text: node.textContent,
@@ -223,8 +224,8 @@ async function walk(browser, viewport, desk, pageErrors) {
   });
   assert.equal(paragraphIndex >= 0, true);
   const paragraph = page.locator('.paper-paragraph-button').nth(paragraphIndex);
-  await paragraph.scrollIntoViewIfNeeded();
-  await paragraph.click();
+  await paragraph.focus();
+  await page.keyboard.press('Enter');
   const editor = page.locator('textarea[aria-label$="직접 편집"]');
   await editor.waitFor();
   const original = await editor.inputValue();
@@ -243,8 +244,8 @@ async function walk(browser, viewport, desk, pageErrors) {
       .findIndex(node => !node.textContent.includes('0.95') && node.textContent.trim().length >= 20 && node.textContent.length <= 400));
     assert.equal(otherIndex >= 0, true);
     const other = page.locator('.paper-paragraph-button').nth(otherIndex);
-    await other.scrollIntoViewIfNeeded();
-    await other.click();
+    await other.focus();
+    await page.keyboard.press('Enter');
     await editor.waitFor();
     await editor.fill((await editor.inputValue()) + ' extra');
     await page.locator('.paper-direct-controls').getByRole('button', {name: '완료', exact: true}).click();

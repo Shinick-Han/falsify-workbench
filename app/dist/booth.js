@@ -1488,7 +1488,8 @@
         source:next.source,
         id:typeof next.id==='string'?next.id:'',
         title:typeof next.title==='string'?next.title:'',
-        license:typeof next.license==='string'?next.license:''
+        license:typeof next.license==='string'?next.license:'',
+        pageHint:Number.isInteger(next.pageHint)?next.pageHint:0
       }:null;
       boothFile=file||null;
       if(previous!==boothFile) clearGenerated();
@@ -1642,7 +1643,7 @@
     }
     function missionPaper(mission){
       return {source:'mission',id:mission.paperId,title:typeof mission.title==='string'?mission.title:'',
-        license:typeof mission.license==='string'?mission.license:''};
+        license:typeof mission.license==='string'?mission.license:'',pageHint:missionPage(mission)};
     }
     /* One tap: load the paper (unless it is already open), jump to the hint page, then edit. */
     function chooseMission(mission){

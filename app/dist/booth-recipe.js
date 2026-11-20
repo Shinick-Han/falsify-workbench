@@ -332,6 +332,23 @@
   let assistCode='';
   let appliedIds=null;
   let lastRecipe=null;
+  /* expiresAt per loaded code, shown on the result card; the recipe itself never keeps server keys. */
+  const expiryByCode=new Map();
+  /* A code typed or pasted, also inside a link with #recipe=CODE. */
+  function codeFromText(text){
+    const match=/#recipe=([A-Za-z0-9-]{6,12})(?![A-Za-z0-9-])/.exec(String(text||''));
+    return match?match[1]:'';
+  }
+  /* 「오늘 HH:MM까지 유효」 in local time ('M월 D일 HH:MM까지 유효' on another day); '' when unknown. */
+  function expiryText(iso, now){
+    const at=new Date(typeof iso==='string'?iso:NaN);
+    if(Number.isNaN(at.getTime())) return '';
+    const today=now&&typeof now.getFullYear==='function'?now:new Date();
+    const pad=n=>String(n).padStart(2,'0');
+    const time=pad(at.getHours())+':'+pad(at.getMinutes());
+    const same=at.getFullYear()===today.getFullYear()&&at.getMonth()===today.getMonth()&&at.getDate()===today.getDate();
+    return (same?'오늘 ':(at.getMonth()+1)+'월 '+at.getDate()+'일 ')+time+'까지 유효';
+  }
   const listeners=new Set();
 
   function workspace(){
@@ -433,6 +450,7 @@
     const clean=isPlain(data)?withoutServerKeys(data):null;
     const checked=validate(clean);
     if(!checked.ok) throw invalidRecipe(checked.errors);
+    if(typeof data.expiresAt==='string') expiryByCode.set(normal,data.expiresAt);
     return Object.assign(clean,{code:normal});
   }
   async function bearer(){
@@ -550,6 +568,14 @@
     const again=locate({page:found.pageIndex+1,find:edit.find,replace:edit.replace,context:edit.context||found.window,hint:edit.hint},segments());
     return again.status==='resolved'?again:found;
   }
+  /* A located spot (locate() status 'resolved') as one workspace edit. The page-edit word tap uses
+     this, so word taps, find-and-replace and recipes all widen and commit exactly the same way. */
+  function applyFound(found, replace){
+    const ws=workspace();
+    if(!ws||typeof ws.acceptProposals!=='function'||!source()) return {ok:false,reason:'no_paper'};
+    if(!found||found.status!=='resolved'||typeof replace!=='string') return {ok:false,reason:'not_found'};
+    return commit(found,replace);
+  }
   /* One edit: {ok:true, id, ...} or {ok:false, reason: not_found | ambiguous | no_paper}. */
   async function applyEdit(edit){
     const ws=workspace();
@@ -615,7 +641,7 @@
     const editStep=doc.getElementById('booth-step-edit');
     if(!editStep||doc.getElementById('booth-recipe')) return;
     const html=doc.documentElement;
-    const ui={tab:'find',listOpen:false,myai:false,busy:false,seq:0,summary:null};
+    const ui={tab:'find',myai:false,busy:false,seq:0,summary:null};
     function el(tag, props, ...kids){
       const node=doc.createElement(tag);
       for(const [key,value] of Object.entries(props||{})){
@@ -726,10 +752,14 @@
 
     const main=findForm({});
     const fix=el('div',{id:'booth-recipe-fix',className:'booth-recipe-fix',hidden:true});
-    const listToggle=el('button',{id:'booth-find-list',type:'button',className:'booth-btn line slim','aria-expanded':'false',textContent:'문단 목록에서 고르기'});
     const myaiBox=el('div',{id:'booth-myai'});
     const myaiWait=el('p',{className:'booth-small booth-myai-wait',hidden:true,textContent:'준비 중'});
-    const codeInput=el('input',{id:'booth-agent-code',type:'text',maxlength:'12',autocomplete:'off',spellcheck:'false',autocapitalize:'characters',placeholder:'R-7K3QXM'});
+    const codeInput=el('input',{id:'booth-agent-code',type:'text',maxlength:'300',autocomplete:'off',spellcheck:'false',autocapitalize:'characters',placeholder:'예: R-7K3QXM'});
+    /* A pasted link with #recipe=CODE leaves just the code. */
+    codeInput.addEventListener('input',()=>{
+      const code=codeFromText(codeInput.value);
+      if(code&&code!==codeInput.value) codeInput.value=code;
+    });
     const agentStatus=el('p',{id:'booth-agent-status',className:'booth-feedback',role:'status','aria-live':'polite'});
     const agentForm=el('form',{id:'booth-agent-form',className:'booth-find booth-agent',novalidate:'novalidate'},
       field(codeInput,'Agent 코드'),
@@ -740,7 +770,7 @@
     const tabs=[['find','직접 고치기'],['myai','내 AI에게'],['agent','Agent 코드']];
     const tabButtons={};
     const panes={
-      find:el('div',{id:'booth-pane-find',className:'booth-pane',role:'tabpanel','aria-labelledby':'booth-tab-find'},fix,main.form,listToggle),
+      find:el('div',{id:'booth-pane-find',className:'booth-pane',role:'tabpanel','aria-labelledby':'booth-tab-find'},fix,main.form),
       myai:el('div',{id:'booth-pane-myai',className:'booth-pane',role:'tabpanel','aria-labelledby':'booth-tab-myai',hidden:true},myaiBox,myaiWait),
       agent:el('div',{id:'booth-pane-agent',className:'booth-pane',role:'tabpanel','aria-labelledby':'booth-tab-agent',hidden:true},agentForm)
     };
@@ -758,10 +788,6 @@
     const missionStatus=doc.getElementById('booth-mission-status');
     if(missionStatus) missionStatus.after(pickStatus);
 
-    function syncMode(){
-      const on=html.dataset.boothStep==='edit'&&ui.tab==='find'&&!ui.listOpen;
-      html.classList.toggle('booth-find-mode',on);
-    }
     function mountMyAi(){
       if(ui.myai) return;
       const myai=root.FalsifyBoothMyAI;
@@ -781,32 +807,21 @@
       }
       if(key==='myai') mountMyAi();
       if(key==='find') main.render();
-      syncMode();
     }
-    function openList(){
-      ui.listOpen=!ui.listOpen;
-      listToggle.setAttribute('aria-expanded',String(ui.listOpen));
-      say(listToggle,ui.listOpen?'문단 목록 접기':'문단 목록에서 고르기');
-      syncMode();
-      const list=ui.listOpen?doc.querySelector('#paper-before-stage .paper-paragraph-list'):null;
-      if(!list) return;
-      list.open=true;
-      if(typeof list.scrollIntoView==='function') list.scrollIntoView({block:'start'});
-    }
-    listToggle.addEventListener('click',openList);
 
     /* Result card: 적용 N곳 · 확인 필요 M곳, then one prefilled form per unresolved edit. */
     function byLine(entry){
       const agent=entry.recipe.agent||{};
       const who=[agent.name,agent.model].filter(Boolean).join(' · ');
       const kind={agent:'AI agent 레시피','my-ai':'내 AI 레시피',manual:'레시피'}[entry.recipe.source];
-      return [kind,who,entry.code].filter(Boolean).join(' · ');
+      const until=expiryText(entry.code&&expiryByCode.get(entry.code));
+      return [kind,who,entry.code].filter(Boolean).join(' · ')+(until?' · '+until:'');
     }
     function paintCount(){
       const s=ui.summary;
       if(!s) return;
       const count=doc.getElementById('booth-recipe-count');
-      if(count) count.textContent='적용 '+s.applied+'곳 · 확인 필요 '+s.unresolved+'곳';
+      if(count) count.textContent=s.unresolved?s.applied+'곳 적용 · '+s.unresolved+'곳은 직접 골라 주세요':s.applied+'곳 적용했어요';
     }
     function fixRow(item){
       const holder={};
@@ -857,10 +872,11 @@
       say(agentStatus,text);
     }
     /* A recipe that would replace the open paper or join edits already made asks first, inline. */
+    /* The question and two buttons named by their outcome. */
     function confirmText(count, differentPaper){
-      if(differentPaper&&count) return '지금 고친 곳 '+count+'개가 사라져요. 레시피를 불러올까요?';
-      if(differentPaper) return '지금 연 논문이 레시피의 논문으로 바뀌어요. 레시피를 불러올까요?';
-      return '지금 고친 곳 '+count+'개는 그대로 두고 레시피를 더해요. 레시피를 불러올까요?';
+      if(differentPaper&&count) return {text:'지금 고친 곳 '+count+'개가 사라져요. 레시피를 불러올까요?',yes:'지금 것 지우고 불러오기',no:'지금 것 유지'};
+      if(differentPaper) return {text:'지금 연 논문이 레시피의 논문으로 바뀌어요. 레시피를 불러올까요?',yes:'논문 바꿔서 불러오기',no:'그대로 두기'};
+      return {text:'지금 고친 곳 '+count+'개는 그대로 두고 레시피를 더해요. 레시피를 불러올까요?',yes:'더해서 불러오기',no:'그대로 두기'};
     }
     function placeConfirm(box){
       const old=doc.getElementById('booth-recipe-confirm');
@@ -868,10 +884,11 @@
       if(html.dataset.boothStep==='edit') card.before(box);
       else pickStatus.after(box);
     }
-    function askConfirm(text){
+    function askConfirm(ask){
+      const text=ask.text;
       return new Promise(resolve=>{
-        const yes=el('button',{id:'booth-recipe-confirm-yes',type:'button',className:'booth-btn ink',textContent:'불러오기'});
-        const no=el('button',{id:'booth-recipe-confirm-no',type:'button',className:'booth-btn line',textContent:'취소'});
+        const yes=el('button',{id:'booth-recipe-confirm-yes',type:'button',className:'booth-btn ink',textContent:ask.yes});
+        const no=el('button',{id:'booth-recipe-confirm-no',type:'button',className:'booth-btn line',textContent:ask.no});
         const box=el('div',{id:'booth-recipe-confirm',className:'booth-panel booth-recipe-confirm',role:'alertdialog','aria-labelledby':'booth-recipe-confirm-text'},
           el('p',{id:'booth-recipe-confirm-text',className:'booth-recipe-confirm-text',textContent:text}),
           el('div',{className:'booth-row'},yes,no));
@@ -892,7 +909,7 @@
     }
     async function loadCode(raw){
       if(ui.busy) return;
-      const code=normalizeCode(raw);
+      const code=normalizeCode(codeFromText(raw)||raw);
       if(!code){sayAll(ERROR_TEXT.invalid_code);return;}
       ui.busy=true;
       sayAll('레시피를 불러오는 중…');
@@ -1062,18 +1079,59 @@
         after.page.cleanup();
       }catch{say(status,'쪽 그림을 그리지 못했어요. 수정본 PDF는 그대로 제출할 수 있어요.');}
     }
+    /* Recipe-made labels: 「AI가 채운 초안 · 내 말로 고쳐도 돼요」 over a reason the recipe filled (「내가 고침」
+       once the visitor types), 「AI 선택」 beside the chip it chose until the visitor picks another. Kept per
+       edit id, since booth.js may rebuild the cards. */
+    const aiMarks=new Map();
+    function marksFor(id){
+      if(!aiMarks.has(id)) aiMarks.set(id,{reason:'',chip:true});
+      return aiMarks.get(id);
+    }
+    function draftLabel(reason, marks){
+      if(!marks.reason||reason.previousElementSibling&&reason.previousElementSibling.classList.contains('booth-recipe-draft')) return;
+      const note=el('p',{className:'booth-recipe-draft'});
+      const paint=()=>{note.textContent=marks.reason==='mine'?'내가 고침':'AI가 채운 초안 · 내 말로 고쳐도 돼요';};
+      paint();
+      reason.before(note);
+      reason.addEventListener('input',event=>{if(event.isTrusted){marks.reason='mine';paint();}});
+    }
+    function chipTag(node, label, marks){
+      const chip=[...node.querySelectorAll('.booth-chip')].find(item=>item.textContent===label);
+      if(!chip||!marks.chip||!chip.classList.contains('on')||node.querySelector('.booth-recipe-ai-pick')) return;
+      const tag=el('span',{className:'booth-recipe-ai-pick',textContent:'AI 선택'});
+      chip.after(tag);
+      chip.parentElement.addEventListener('click',event=>{
+        if(event.isTrusted&&event.target!==chip&&event.target!==tag){marks.chip=false;tag.remove();}
+      });
+    }
+    /* A small 「AI」 tag on #paper-edits rows a recipe made (the workspace re-renders the rows). */
+    function tagRows(){
+      const list=doc.getElementById('paper-edits');
+      if(!list||!appliedIds) return;
+      for(const button of list.querySelectorAll('button[data-act="edit"]')){
+        const row=button.parentElement;
+        if(!row||!appliedIds.has(button.dataset.edit)||row.querySelector('.booth-recipe-ai-tag')) continue;
+        row.prepend(el('span',{className:'booth-recipe-ai-tag',textContent:'AI'}));
+      }
+    }
     function prefillCard(node, edit){
       const entry=lastRecipe;
       if(!entry||!appliedIds||!appliedIds.has(edit.id)) return;
+      const marks=marksFor(edit.id);
       const reason=node.querySelector('textarea');
-      if(reason&&!reason.value&&entry.recipe.reason){
+      if(reason&&!reason.value&&marks.reason!=='mine'&&entry.recipe.reason){
         reason.value=entry.recipe.reason;
         reason.dispatchEvent(new Event('input',{bubbles:true}));
+        marks.reason='ai';
       }
+      if(reason) draftLabel(reason,marks);
       const label=DEFECT_LABELS[entry.recipe.defectType];
-      if(!label||node.querySelector('.booth-chip.on')) return;
-      const chip=[...node.querySelectorAll('.booth-chip')].find(item=>item.textContent===label);
-      if(chip) chip.click();
+      if(!label) return;
+      if(!node.querySelector('.booth-chip.on')){
+        const chip=[...node.querySelectorAll('.booth-chip')].find(item=>item.textContent===label);
+        if(chip) chip.click();
+      }
+      chipTag(node,label,marks);
     }
     function compareToggle(edit){
       const button=el('button',{type:'button',className:'booth-btn line slim booth-recipe-compare-toggle','aria-expanded':'false',textContent:'수정본 쪽 보기'});
@@ -1105,13 +1163,14 @@
       if(step==='edit'&&lastRecipe&&lastRecipe.fileHash!==((source()||{}).fileHash||'')) resetResult();
       if(step==='edit'&&ui.tab==='find') main.render();
       if(step==='send') decorateRows();
-      syncMode();
     }
     const Observer=root.MutationObserver;
     if(typeof Observer==='function'){
       new Observer(onStep).observe(html,{attributes:true,attributeFilter:['data-booth-step']});
       const rows=doc.getElementById('booth-rows');
       if(rows) new Observer(decorateRows).observe(rows,{childList:true});
+      const editList=doc.getElementById('paper-edits');
+      if(editList) new Observer(tagRows).observe(editList,{childList:true,subtree:true});
     }
     listeners.add((kind,entry)=>{if(kind==='applied') renderResult(entry);});
     doc.addEventListener('falsify:document-clear',resetResult);
@@ -1123,7 +1182,7 @@
 
   root.FalsifyBoothRecipe=Object.freeze({
     validate,apply,fromCode,pageText,paperInfo,setAssist,assist,
-    normalizeCode,normalizeText,locate,searchHits,
+    normalizeCode,normalizeText,locate,searchHits,applyFound,codeFromText,expiryText,
     SCHEMA
   });
   if(root.document&&typeof root.document.getElementById==='function') mountUi(root.document);
