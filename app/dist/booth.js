@@ -1444,8 +1444,29 @@
        from arXiv through the Falsify API, so the check is skipped for them: no 4.6 MB wasm on a phone. */
     function trustSource(file){
       const blind=root.FalsifyBlindPdf;
+      prefetchMakeEngine(file);
       if(!blind||!paper||typeof blind.trust!=='function') return;
       void blind.trust(file).catch(()=>{});
+    }
+    /* 다음 runs the paragraph exporter, which verifies its output with MuPDF (4.7 MB gzip wasm). Fetch
+       those files into the HTTP cache once the paragraph list is on screen, while the visitor edits, so
+       the download never competes with opening the paper and 다음 does not wait for it. */
+    const MAKE_ENGINE=['browser-pdf-vendor/mupdf.js','browser-pdf-vendor/mupdf-wasm.js','browser-pdf-vendor/mupdf-wasm.wasm'];
+    let enginePrefetched=false;
+    function prefetchMakeEngine(file){
+      const timer=makeTimer();
+      if(enginePrefetched||!timer||typeof root.fetch!=='function') return;
+      let left=120;
+      const tick=()=>{
+        if(enginePrefetched||boothFile!==file) return;
+        const listed=typeof doc.querySelector==='function'&&doc.querySelector('.paper-paragraph-button');
+        if(!listed&&--left>0){timer(tick,1000);return;}
+        enginePrefetched=true;
+        for(const name of MAKE_ENGINE){
+          try{void root.fetch(new URL(name,doc.baseURI).href,{priority:'low'}).then(res=>res.arrayBuffer()).catch(()=>{});}catch{/* best effort */}
+        }
+      };
+      timer(tick,1000);
     }
     function bindPaper(next, file){
       const previous=boothFile;
