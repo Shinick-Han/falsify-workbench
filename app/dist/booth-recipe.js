@@ -2,9 +2,11 @@
    globalThis.FalsifyBoothRecipe: validate, apply, fromCode, pageText, paperInfo, setAssist, assist.
    Every edit goes through FalsifyPaperWorkspace.acceptProposals with a confirmed import: the same
    session.add a manual paragraph edit ends in, so #paper-edits, the booth dock and 「다음」 (the
-   paragraph-flow PDF build) treat it exactly like a hand edit. Matching folds whitespace runs and
-   line-end hyphenation but keeps the original offsets. The page comes first, then the whole paper;
-   context breaks ties, otherwise the edit stays unresolved (ambiguous). The edit step gets three tabs
+   paragraph-flow PDF build) treat it exactly like a hand edit. Matching folds whitespace runs,
+   line-end hyphenation and (when the exact text is nowhere) look-alike quotes, dashes, case and
+   spacing, but keeps the original offsets. The page comes first, then the whole paper; context
+   breaks ties, and only an edit with no usable context stays unresolved (ambiguous), shown with its
+   places for a one-tap pick. A change that touches an earlier edit merges with it. The edit step gets three tabs
    (직접 고치기 | 내 AI에게 | Agent 코드); #recipe=CODE in the URL loads, opens and applies a recipe.
    The send step gets a per-edit 「수정본 쪽 보기」 toggle with the original and generated page images.
    DOM text is set with textContent only. */
@@ -23,6 +25,17 @@
   const CONTROL_NL=/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
   const EDIT_KEYS=new Set(['page','find','replace','context']);
   const SOFT_HYPHEN='\u00ad';
+  /* Zero-width marks never change what the text says. */
+  const ZERO_WIDTH=/[\u200b-\u200d\u2060]/;
+  /* Typographic look-alikes a visitor or an AI types as plain ASCII: curly quotes, primes, dashes and
+     the minus sign. Used only when the exact text is nowhere in the paper. */
+  const FOLD={'\u2018':"'",'\u2019':"'",'\u201a':"'",'\u201b':"'",'\u2032':"'",'\u00b4':"'",'`':"'",
+    '\u201c':'"','\u201d':'"','\u201e':'"','\u201f':'"','\u2033':'"',
+    '\u2010':'-','\u2011':'-','\u2012':'-','\u2013':'-','\u2014':'-','\u2015':'-','\u2212':'-','\ufe63':'-','\uff0d':'-'};
+  /* Matching tiers, tried in order until one finds the text: [keepHyphen, mode]. Mode 0 is exact (after
+     whitespace, hyphenation and NFKC folding), 1 also folds look-alikes and case, 2 also ignores spaces. */
+  const TIERS=[[false,0],[true,0],[false,1],[true,1],[false,2],[true,2]];
+  const TIGHT_MIN=4;
   const WS=/\s/;
   const LETTER=/\p{L}/u;
   const MAX_BYTES=8192;
@@ -37,10 +50,12 @@
     network:'서버에 연결하지 못했어요. 네트워크를 확인해 주세요.',
     no_paper:'레시피의 논문을 열지 못했어요. 「불러오기」를 다시 눌러 주세요.'
   };
+  /* Shown beside the form it is about, where the visitor fixes it in one step. */
   const REASON_TEXT={
-    not_found:'원문에서 이 글자를 찾지 못했어요. 원문 그대로 다시 적어 주세요.',
-    ambiguous:'같은 글자가 여러 곳에 있어요. 목록에서 한 곳을 골라 주세요.',
-    no_paper:'논문을 열지 못해 적용하지 못했어요.'
+    not_found:'논문에서 이 글자를 찾지 못했어요. 논문에 적힌 그대로 고쳐 적어 주세요.',
+    ambiguous:'같은 글자가 여러 곳에 있어요. 바꿀 곳을 눌러 주세요.',
+    no_paper:'논문이 아직 열리지 않았어요. 잠시 뒤 「바꾸기」를 다시 눌러 주세요.',
+    rejected:'바꾸지 못했어요. 「바꾸기」를 한 번 더 눌러 주세요.'
   };
 
   /* ---------- validation (contract §1) ---------- */
@@ -148,38 +163,45 @@
     while(j<text.length&&WS.test(text[j])) j+=1;
     return j;
   }
-  function stepNormal(out, text, i, keepHyphen){
+  function folded(chunk){
+    let out='';
+    for(const c of chunk) out+=FOLD[c]||c;
+    return out.toLowerCase();
+  }
+  function stepNormal(out, text, i, keepHyphen, mode){
     const ch=text[i];
-    if(ch===SOFT_HYPHEN) return i+1;
-    if(ch==='-'){
+    if(ch===SOFT_HYPHEN||ZERO_WIDTH.test(ch)) return i+1;
+    if(ch==='-'||(mode>0&&FOLD[ch]==='-')){
       const j=hyphenBreak(text,i);
       if(j>0){if(keepHyphen) pushChars(out,'-',i,i+1);return j;}
     }
     if(WS.test(ch)){
       const j=spaceRun(text,i);
-      if(out.chars.length) pushChars(out,' ',i,j);
+      if(out.chars.length&&mode<2) pushChars(out,' ',i,j);
       return j;
     }
     const len=text.codePointAt(i)>0xffff?2:1;
-    pushChars(out,text.slice(i,i+len).normalize('NFKC'),i,i+len);
+    const chunk=text.slice(i,i+len).normalize('NFKC');
+    pushChars(out,mode>0?folded(chunk):chunk,i,i+len);
     return i+len;
   }
   /* Whitespace runs become one space and line-end hyphenation is joined (or kept as "-");
-     start[k]/end[k] give the original span of normalised char k. */
-  function normalizeText(text, keepHyphen){
+     start[k]/end[k] give the original span of normalised char k. mode: see TIERS. */
+  function normalizeText(text, keepHyphen, mode){
     const source=typeof text==='string'?text:'';
+    const level=mode===1||mode===2?mode:0;
     const out={chars:[],start:[],end:[]};
     let i=0;
-    while(i<source.length) i=stepNormal(out,source,i,!!keepHyphen);
+    while(i<source.length) i=stepNormal(out,source,i,!!keepHyphen,level);
     while(out.chars.length&&out.chars[out.chars.length-1]===' '){out.chars.pop();out.start.pop();out.end.pop();}
     return {text:out.chars.join(''),start:out.start,end:out.end};
   }
   const normCache=new Map();
-  function normalized(text, keepHyphen){
-    const key=(keepHyphen?'1':'0')+text;
+  function normalized(text, keepHyphen, mode){
+    const key=(keepHyphen?'1':'0')+(mode||0)+text;
     let hit=normCache.get(key);
     if(hit) return hit;
-    hit=normalizeText(text,keepHyphen);
+    hit=normalizeText(text,keepHyphen,mode);
     if(normCache.size>300) normCache.clear();
     normCache.set(key,hit);
     return hit;
@@ -201,22 +223,24 @@
   function paragraphs(segs){
     return segs.filter(seg=>segKind(seg)==='paragraph');
   }
-  function hitsIn(seg, needle, keepHyphen){
-    const norm=normalized(seg.text,keepHyphen);
+  function hitsIn(seg, needle, keepHyphen, mode){
+    const norm=normalized(seg.text,keepHyphen,mode);
     const hits=[];
     let at=norm.text.indexOf(needle);
     while(at>=0&&hits.length<1000){
-      hits.push({seg,norm,needle,at,len:needle.length,start:norm.start[at],end:norm.end[at+needle.length-1]});
+      hits.push({seg,norm,needle,mode:mode||0,at,len:needle.length,start:norm.start[at],end:norm.end[at+needle.length-1]});
       at=norm.text.indexOf(needle,at+1);
     }
     return hits;
   }
+  /* The first tier that finds the text wins, so a loose tier never adds doubt to an exact match. */
   function scan(segs, find){
-    for(const keep of [false,true]){
-      const needle=normalizeText(find,keep).text;
-      if(!needle) return [];
+    if(!normalizeText(find,false,0).text) return [];
+    for(const [keep,mode] of TIERS){
+      const needle=normalizeText(find,keep,mode).text;
+      if(!needle||(mode===2&&needle.length<TIGHT_MIN)) continue;
       const hits=[];
-      for(const seg of segs) hits.push(...hitsIn(seg,needle,keep));
+      for(const seg of segs) hits.push(...hitsIn(seg,needle,keep,mode));
       if(hits.length) return hits;
     }
     return [];
@@ -231,9 +255,12 @@
     while(c0+fwd<ctx.length&&t0+fwd<text.length&&ctx[c0+fwd]===text[t0+fwd]) fwd+=1;
     return back+fwd;
   }
+  /* Up to n normalised characters either side of the hit, as the segment's own text. */
   function windowOf(hit, n){
-    const text=hit.norm.text;
-    return text.slice(Math.max(0,hit.at-n),Math.min(text.length,hit.at+hit.len+n));
+    const norm=hit.norm;
+    const from=Math.max(0,hit.at-n);
+    const to=Math.min(norm.text.length,hit.at+hit.len+n);
+    return to>from?hit.seg.text.slice(norm.start[from],norm.end[to-1]):'';
   }
   function wordScore(ctx, hit){
     const around=windowOf(hit,ctx.length);
@@ -242,7 +269,7 @@
   /* Matched characters around the hit, x1000. When the context holds the needle more than once,
      the occurrence nearest the middle of the context wins the tie. */
   function contextScore(context, hit){
-    const ctx=normalizeText(context||'',false).text;
+    const ctx=normalizeText(context||'',false,hit.mode).text;
     if(!ctx) return 0;
     const middle=(ctx.length-hit.needle.length)/2;
     let best=0;
@@ -254,16 +281,30 @@
     }
     return best>0?best:wordScore(ctx,hit);
   }
-  /* An exact hint (from a tapped match) wins; one hit wins outright; several need a unique best
-     context score above zero. */
+  /* An exact hint (from a tapped match) wins; one hit wins outright; several need a best context
+     score above zero. When the context's own characters run up to several hits alike (the same
+     sentence printed twice), the text there is the same, so the first of them in reading order is
+     taken. Only a context that matches no characters next to any hit leaves it ambiguous. */
   function pickHit(hits, context, hint){
     if(!hits.length) return {status:'none'};
     const hinted=hint?hits.find(hit=>hit.seg.id===hint.segmentId&&hit.at===hint.at):null;
-    if(hinted) return {status:'hit',hit:hinted};
+    if(hinted) return {status:'hit',hit:hinted,hinted:true};
     if(hits.length===1) return {status:'hit',hit:hits[0]};
     const scored=hits.map(hit=>({hit,score:contextScore(context,hit)})).sort((a,b)=>b.score-a.score);
-    if(scored[0].score>0&&scored[0].score>scored[1].score) return {status:'hit',hit:scored[0].hit};
+    const top=scored[0].score;
+    if(top>0&&top>scored[1].score) return {status:'hit',hit:scored[0].hit};
+    if(top>=1000) return {status:'hit',hit:scored[0].hit};
     return {status:'ambiguous',count:hits.length};
+  }
+  /* A picked coverage hit maps to the paragraph hit at the same place in reading order on its page,
+     when both lists count the same hits there and the text right beside it agrees. */
+  function sameSpot(covHits, paraHits, hit){
+    const onPage=list=>list.filter(item=>item.seg.pageIndex===hit.seg.pageIndex);
+    const cov=onPage(covHits);
+    const para=onPage(paraHits);
+    const index=cov.indexOf(hit);
+    if(index<0||cov.length!==para.length) return null;
+    return contextScore(windowOf(hit,WINDOW),para[index])>=1000?para[index]:null;
   }
   function resolved(hit, kind){
     return {
@@ -273,10 +314,16 @@
   }
   /* Coverage text decides ambiguity; a paragraph segment is preferred for the edit itself. */
   function locateIn(segs, edit){
-    const cov=pickHit(scan(coverage(segs),edit.find),edit.context,edit.hint);
+    const covHits=scan(coverage(segs),edit.find);
+    const cov=pickHit(covHits,edit.context,edit.hint);
     if(cov.status==='ambiguous') return {status:'ambiguous',count:cov.count};
+    const paraHits=scan(paragraphs(segs),edit.find);
+    if(cov.hinted){
+      const spot=sameSpot(covHits,paraHits,cov.hit);
+      return spot?resolved(spot,'paragraph'):resolved(cov.hit,segKind(cov.hit.seg));
+    }
     const ctx=edit.context||(cov.hit?windowOf(cov.hit,WINDOW):'');
-    const para=pickHit(scan(paragraphs(segs),edit.find),ctx);
+    const para=pickHit(paraHits,ctx);
     if(para.status==='hit') return resolved(para.hit,'paragraph');
     if(cov.status==='hit') return resolved(cov.hit,segKind(cov.hit.seg));
     return {status:para.status==='ambiguous'?'ambiguous':'not_found'};
@@ -544,21 +591,118 @@
     const seg=segments().find(item=>item&&item.id===segmentId);
     return seg&&typeof seg.text==='string'?seg.text:'';
   }
+  /* An edit's own change inside its Before: the common start and end are trimmed off. */
+  function changeOf(before, after){
+    const max=Math.min(before.length,after.length);
+    let lead=0;
+    while(lead<max&&before[lead]===after[lead]) lead+=1;
+    let tail=0;
+    while(tail<max-lead&&before[before.length-1-tail]===after[after.length-1-tail]) tail+=1;
+    return {lead,tail,text:after.slice(lead,after.length-tail)};
+  }
+  /* Where an existing edit sits in this segment's text: its own anchor in the same segment, else
+     (another view of the same page) its Before when it is unique both in its own segment and here,
+     the same test the workspace uses to call two edits overlapping. */
+  function spanIn(edit, segmentId, text){
+    if(!edit||typeof edit.before!=='string'||!edit.before) return null;
+    const a=edit.anchor;
+    if(edit.segmentId===segmentId){
+      const start=a&&Number.isSafeInteger(a.start)?a.start:-1;
+      return start>=0&&text.slice(start,start+edit.before.length)===edit.before?{start,end:start+edit.before.length}:null;
+    }
+    if(!occursOnce(segmentText(edit.segmentId),edit.before)||!occursOnce(text,edit.before)) return null;
+    const start=text.indexOf(edit.before);
+    return {start,end:start+edit.before.length};
+  }
+  function clashesWith(found, anchor, text){
+    return enabledEdits()
+      .filter(edit=>edit.pageIndex===found.pageIndex)
+      .map(edit=>({edit,span:spanIn(edit,found.segmentId,text)}))
+      .filter(item=>item.span&&item.span.start<anchor.end&&anchor.start<item.span.end);
+  }
+  function crosses(piece, start, end){
+    if(piece.start===piece.end) return start<piece.start&&piece.start<end;
+    return piece.start<end&&start<piece.end;
+  }
+  /* One proposal for the new change plus the edits it touches. Each older change that sits apart
+     from the new one is kept; one the new change runs into gives way to it (the newest wins). */
+  function mergedProposal(found, replace, text, clashes){
+    const pieces=[{start:found.start,end:found.end,text:replace}];
+    let from=found.start;
+    let to=found.end;
+    for(const item of clashes){
+      const edit=item.edit;
+      const change=changeOf(edit.before,typeof edit.after==='string'?edit.after:edit.before);
+      const piece={start:item.span.start+change.lead,end:item.span.end-change.tail,text:change.text};
+      from=Math.min(from,item.span.start);
+      to=Math.max(to,item.span.end);
+      if(!crosses(piece,found.start,found.end)&&!(found.start===found.end&&crosses(pieces[0],piece.start,piece.end))) pieces.push(piece);
+    }
+    pieces.sort((a,b)=>a.start-b.start||(a.end-a.start)-(b.end-b.start));
+    const span=uniqueSpan(text,from,to);
+    let after='';
+    let at=span.from;
+    for(const piece of pieces){after+=text.slice(at,piece.start)+piece.text;at=piece.end;}
+    after+=text.slice(at,span.to);
+    return {segmentId:found.segmentId,pageIndex:found.pageIndex,before:text.slice(span.from,span.to),after,anchor:{start:span.from,end:span.to}};
+  }
+  function editProposal(edit){
+    const a=edit.anchor||{};
+    return {segmentId:edit.segmentId,pageIndex:edit.pageIndex,before:edit.before,after:edit.after,anchor:{start:a.start,end:a.end}};
+  }
+  /* The workspace's removeEdit hook, else the edit's own delete control in #paper-edits. */
+  function removeEdit(id){
+    const ws=workspace();
+    try{if(ws&&typeof ws.removeEdit==='function') return ws.removeEdit(id)===true;}catch{return false;}
+    const doc=root.document;
+    const list=doc&&doc.getElementById&&doc.getElementById('paper-edits');
+    const node=list&&[...list.querySelectorAll('[data-act="delete"]')].find(item=>item.dataset.edit===id);
+    if(!node||node.disabled) return false;
+    node.click();
+    return true;
+  }
+  function accept(ws, proposals){
+    let result=null;
+    try{result=ws.acceptProposals(proposals,{origin:'external-ai-import',confirmed:true});}
+    catch{result=null;}
+    try{ws.acceptProposals([],{origin:'external-ai-import'});}catch{}
+    return !!result&&result.applied===proposals.length;
+  }
   /* acceptProposals(confirmed) ends in session.add, like a manual paragraph edit. The empty call
-     afterwards clears the workspace's proposal queue so no stale card is left. */
+     afterwards clears the workspace's proposal queue so no stale card is left. A change that
+     touches edits already made replaces them with one merged edit; if the workspace still refuses,
+     the old edits come back as they were. */
   function commit(found, replace){
     const ws=workspace();
     const before=new Set((snapshotEdits()||[]).map(edit=>edit.id));
     const text=segmentText(found.segmentId);
     if(text.slice(found.start,found.end)!==found.before) return {ok:false,reason:'not_found'};
-    const proposal=proposalFor(found,replace,text);
-    let result=null;
-    try{result=ws.acceptProposals([proposal],{origin:'external-ai-import',confirmed:true});}
-    catch{result=null;}
-    try{ws.acceptProposals([],{origin:'external-ai-import'});}catch{}
-    const added=(snapshotEdits()||[]).find(edit=>!before.has(edit.id));
-    if(!result||result.applied!==1||!added) return {ok:false,reason:'not_found',detail:'overlap'};
-    return {ok:true,id:added.id,pageIndex:found.pageIndex,segmentId:found.segmentId,before:proposal.before,after:proposal.after};
+    let proposal=proposalFor(found,replace,text);
+    const clashes=clashesWith(found,proposal.anchor,text);
+    const removed=[];
+    if(clashes.length){
+      proposal=mergedProposal(found,replace,text,clashes);
+      for(const item of clashes){
+        if(!removeEdit(item.edit.id)) break;
+        removed.push(item.edit);
+      }
+      if(removed.length!==clashes.length){
+        if(removed.length) accept(ws,removed.map(editProposal));
+        return {ok:false,reason:'rejected'};
+      }
+      if(proposal.before===proposal.after){
+        return {ok:true,id:null,pageIndex:found.pageIndex,segmentId:found.segmentId,before:proposal.before,after:proposal.after,merged:removed.map(edit=>edit.id)};
+      }
+    }
+    const ok=accept(ws,[proposal]);
+    const added=(snapshotEdits()||[]).find(edit=>!before.has(edit.id)&&edit.segmentId===proposal.segmentId&&edit.before===proposal.before);
+    if(!ok||!added){
+      if(removed.length) accept(ws,removed.map(editProposal));
+      return {ok:false,reason:'rejected'};
+    }
+    const out={ok:true,id:added.id,pageIndex:found.pageIndex,segmentId:found.segmentId,before:proposal.before,after:proposal.after};
+    if(removed.length) out.merged=removed.map(edit=>edit.id);
+    return out;
   }
   async function locateLoaded(edit){
     if(Number.isInteger(edit.page)) await ensureParagraphs(edit.page-1);
@@ -686,32 +830,47 @@
       const find=el('input',{id:id+'-q',type:'text',maxlength:'300',autocomplete:'off',spellcheck:'false',value:o.find||''});
       const repl=el('input',{id:id+'-r',type:'text',maxlength:'300',autocomplete:'off',spellcheck:'false',value:o.replace||''});
       const hits=el('div',{className:'booth-find-hits',role:'listbox','aria-label':'찾은 곳'});
+      /* "Several places: tap one" sits right above the list it is about. */
+      const ask=el('p',{className:'booth-find-ask',role:'status','aria-live':'polite',hidden:true});
       const more=el('p',{className:'booth-find-more',hidden:true});
       const go=el('button',{type:'submit',className:'booth-btn ink',textContent:'바꾸기'});
       const status=el('p',{className:'booth-feedback',role:'status','aria-live':'polite'});
       const note=o.note?el('p',{className:'booth-find-note',textContent:o.note}):null;
       const form=el('form',{className:'booth-find'+(o.row?' row':''),novalidate:'novalidate'},
-        note,field(find,'바꿀 글자'),hits,more,field(repl,'새 글자'),go,status);
+        note,field(find,'바꿀 글자'),ask,hits,more,field(repl,'새 글자'),go,status);
+      function tell(text){
+        const asking=!!state.armed&&!!text;
+        say(ask,asking?text:'');
+        ask.hidden=!asking;
+        say(status,asking?'':text);
+        if(asking&&typeof ask.scrollIntoView==='function') ask.scrollIntoView({block:'nearest'});
+      }
       function paint(){
         hits.textContent='';
         for(const item of state.list.items) hits.append(hitButton(item,state.chosen,pick));
         more.hidden=!state.list.more;
         say(more,state.list.more?state.list.more+'곳 더 있어요. 더 길게 적으면 줄어들어요.':'');
       }
-      function render(){
+      /* typed: the visitor changed 바꿀 글자, so the line under the form follows the new text. Other
+         refreshes (a page drawn, a tab opened) keep what the last 바꾸기 said. */
+      function render(typed){
         const query=find.value;
         state.list=query.trim()?searchHits(segments(),query,currentPage(),HIT_LIMIT):{total:0,more:0,items:[]};
-        say(status,query.trim()&&!state.list.total?'이 논문에서 찾지 못했어요.':'');
+        if(typed===true) say(status,query.trim()&&!state.list.total?'이 논문에서 찾지 못했어요.':'');
         paint();
       }
+      /* After 「바꾸기」 met several places, or on a recipe row, the tap that picks a place applies it. */
       function pick(item){
         state.chosen=item;
         paint();
+        if(state.armed||o.row) void submit();
       }
       find.addEventListener('input',()=>{
         state.chosen=null;
+        state.armed=false;
+        tell('');
         root.clearTimeout(state.timer);
-        state.timer=root.setTimeout(render,120);
+        state.timer=root.setTimeout(()=>render(true),120);
       });
       function editFor(){
         const edit={find:find.value,replace:repl.value};
@@ -719,25 +878,44 @@
         if(o.context||o.page) return Object.assign(edit,{page:o.page,context:o.context});
         return edit;
       }
+      /* Several places: the one on the page in view is meant when it is the only one there. */
+      function onlyOnPage(){
+        const page=currentPage();
+        const here=state.list.items.filter(item=>item.pageIndex===page);
+        const whole=state.list.items.length>here.length||state.list.items.length===state.list.total;
+        return here.length===1&&whole?here[0]:null;
+      }
       function blocked(){
         if(!find.value.trim()) return '바꿀 글자를 적어 주세요.';
         if(repl.value===find.value) return '새 글자가 바꿀 글자와 같아요.';
-        if(!source()) return '논문이 아직 열리지 않았어요.';
-        if(!state.chosen&&!o.context&&state.list.total>1) return '같은 글자가 '+state.list.total+'곳에 있어요. 목록에서 한 곳을 골라 주세요.';
+        if(!source()) return REASON_TEXT.no_paper;
+        if(!state.chosen&&!o.context&&state.list.total>1){
+          const here=onlyOnPage();
+          if(here){state.chosen=here;paint();return '';}
+          state.armed=true;
+          return '같은 글자가 '+state.list.total+'곳에 있어요. 바꿀 곳을 눌러 주세요.';
+        }
         return '';
       }
       function failText(result){
-        return result.detail==='overlap'?'이미 고친 곳과 겹쳐요. 고친 곳 목록에서 먼저 지워 주세요.':REASON_TEXT[result.reason]||REASON_TEXT.not_found;
+        if(result.reason==='ambiguous') state.armed=true;
+        return REASON_TEXT[result.reason]||REASON_TEXT.rejected;
       }
       async function submit(){
+        if(state.busy) return;
+        root.clearTimeout(state.timer);
         render();
+        state.armed=false;
         const problem=blocked();
-        if(problem){say(status,problem);return;}
+        if(problem){tell(problem);return;}
+        tell('');
+        state.busy=true;
         go.disabled=true;
         say(status,'바꾸는 중…');
         const result=await keepScroll(()=>applyEdit(editFor()));
+        state.busy=false;
         go.disabled=false;
-        if(!result.ok){say(status,failText(result));return;}
+        if(!result.ok){tell(failText(result));return;}
         if(typeof o.onDone==='function'){o.onDone(result);return;}
         find.value='';
         repl.value='';
@@ -814,8 +992,15 @@
       }
       findMore.hidden=ui.tab!=='find';
     }
+    /* Unresolved recipe edits are fixed where the visitor already is: the open tab's pane. */
+    function placeFix(key){
+      const pane=panes[key]||panes.find;
+      if(pane===panes.find&&main.form.parentElement===pane) pane.insertBefore(fix,main.form);
+      else if(fix.parentElement!==pane||pane.lastChild!==fix) pane.append(fix);
+    }
     function selectTab(key){
       ui.tab=key;
+      placeFix(key);
       for(const [name] of tabs){
         tabButtons[name].setAttribute('aria-selected',String(name===key));
         panes[name].hidden=name!==key;
@@ -869,7 +1054,7 @@
       if(out.unresolved.length) fix.append(el('p',{className:'booth-klab',textContent:'확인 필요 · 바꿀 곳을 다시 골라 주세요'}));
       for(const item of out.unresolved) fix.append(fixRow(item));
       fix.hidden=!out.unresolved.length;
-      if(out.unresolved.length) selectTab('find');
+      placeFix(ui.tab);
     }
     function resetResult(){
       card.hidden=true;

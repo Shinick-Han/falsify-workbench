@@ -136,7 +136,9 @@ async function checkApply(page) {
   await page.locator('.booth-myai-count').waitFor();
   await page.waitForFunction(() => !document.querySelector('#booth-myai-apply').disabled);
   assert.equal(await page.locator('.booth-myai-count').textContent(), '1곳 적용 · 1곳은 직접 골라 주세요');
-  assert.match(await page.locator('#booth-myai-result').textContent(), /"0\.99 1\.00" · 원문에서 찾지 못했어요/);
+  assert.match(await page.locator('#booth-myai-result').textContent(), /"0\.99 1\.00" · 논문에서 찾지 못했어요/);
+  assert.match(await page.locator('#booth-myai-result').textContent(), /남은 곳은 바로 아래에서 고칠 수 있어요\.$/);
+  assert.doesNotMatch(await page.locator('#booth-myai-result').textContent(), /직접 고치기/, 'no other route');
   const calls = await page.evaluate(() => window.__calls);
   assert.equal(calls.assist.length, 1);
   assert.equal(calls.assist[0][0], 'my-ai');

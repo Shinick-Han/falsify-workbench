@@ -1365,15 +1365,21 @@
       };
       return id?visit(byId('paper-edits')):null;
     }
+    /* Without a control in #paper-edits (still re-rendering), the workspace hooks do the same:
+       removeEdit deletes, showPage turns to the edit's page. */
+    function editFallback(edit, act){
+      const ws=workspace();
+      try{
+        if(act==='delete') return !!ws&&typeof ws.removeEdit==='function'&&ws.removeEdit(edit.id)===true;
+        return !!ws&&typeof ws.showPage==='function'&&ws.showPage(Number(edit.pageIndex)+1)===true;
+      }catch{return false;}
+    }
     /* Deleting or reopening stays on the workspace path: the dock clicks the existing control. */
     function useEditControl(edit, act){
       const control=editControl(edit.id,act);
-      if(!control||control.disabled||typeof control.click!=='function'){
-        say('booth-dock-status',act==='delete'?'이 고친 곳을 지우지 못했어요. 페이지를 새로 고친 뒤 다시 시도해 주세요.':'이 고친 곳을 열지 못했어요.');
-        return;
-      }
       if(act==='edit') dockPopOpen=false;
-      control.click();
+      if(control&&!control.disabled&&typeof control.click==='function') control.click();
+      else if(!editFallback(edit,act)) say('booth-dock-status',act==='delete'?'아직 지우지 못했어요. ×를 한 번 더 눌러 주세요.':'아직 열지 못했어요. 한 번 더 눌러 주세요.');
       renderDock();
     }
     function chipParts(edit){

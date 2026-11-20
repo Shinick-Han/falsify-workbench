@@ -232,6 +232,12 @@ function stubWorkspace(segments) {
     getSource: () => ({file: {}, fileHash: 'a'.repeat(64), segments}),
     getEditSnapshot: () => ({edits: edits.map(edit => ({...edit}))}),
     showPage: () => true,
+    removeEdit(id) {
+      const at = edits.findIndex(edit => edit.id === id);
+      if (at < 0) return false;
+      edits.splice(at, 1);
+      return true;
+    },
     acceptProposals(proposals, options) {
       calls.push({proposals: plain(proposals), options: plain(options || {})});
       if (!options || options.confirmed !== true) return undefined;
@@ -310,9 +316,102 @@ test('applyFound: a word tap located in one paragraph commits the same widened e
   const second = load({FalsifyPaperWorkspace: byRecipe, FalsifyBoothPaper: hook}).recipe;
   await second.apply(good({source: 'manual', edits: [{find: 'WikiEval', replace: 'WikiQA', context: 'Each WikiEval instance'}]}));
   assert.deepEqual(plain(tapped.calls[0].proposals), plain(byRecipe.calls[0].proposals), 'word tap and recipe produce identical proposals');
-  assert.deepEqual(plain(recipe.applyFound(found, 'Other')), {ok: false, reason: 'not_found', detail: 'overlap'});
+  const again = plain(recipe.applyFound(found, 'Other'));
+  assert.equal(again.ok, true, 'a second change to the same word replaces the first one');
+  assert.deepEqual([again.before, again.after, again.merged], ['Each WikiEval instance', 'Each Other instance', ['e1']]);
+  assert.deepEqual(plain(tapped.edits.map(edit => edit.after)), ['Each Other instance']);
   assert.deepEqual(plain(recipe.applyFound({status: 'ambiguous'}, 'x')), {ok: false, reason: 'not_found'});
   assert.deepEqual(plain(load().recipe.applyFound(found, 'x')), {ok: false, reason: 'no_paper'});
+});
+
+test('locate: look-alike quotes, dashes, minus, NBSP, zero-width marks, case and spacing still find the text', () => {
+  const {recipe} = load();
+  const segs = [{id: 'paragraph:0:q', label: 'PDF p. 1', pageIndex: 0, text: 'The \u201cbest\u201d score fell by \u22120.4 in 2019\u20132020 for\u00a0GPT\u200b-4 (Table 2).'}];
+  const cases = [
+    ['"best"', '\u201cbest\u201d'],
+    ['-0.4', '\u22120.4'],
+    ['2019-2020', '2019\u20132020'],
+    ['for GPT-4', 'for\u00a0GPT\u200b-4'],
+    ['THE "BEST" SCORE', 'The \u201cbest\u201d score'],
+    ['Table2', 'Table 2'],
+  ];
+  for (const [find, before] of cases) {
+    const found = plain(recipe.locate({find, replace: 'x'}, segs));
+    assert.equal(found.status, 'resolved', find);
+    assert.equal(found.before, before, find);
+  }
+  assert.equal(recipe.locate({find: 'ab', replace: 'x'}, [{id: 'p', pageIndex: 0, text: 'a b c'}]).status, 'not_found', 'short text never matches with spaces ignored');
+  const exact = plain(recipe.locate({find: 'Fell', replace: 'x'}, [{id: 'p', pageIndex: 0, text: 'Fell and fell'}]));
+  assert.equal(exact.start, 0, 'an exact-case hit wins before the case-folded tier is tried');
+});
+
+test('locate: a context that matches several places alike takes the first; a picked match maps by position', () => {
+  const {recipe} = load();
+  const text = 'Faithfulness is 0.95 here. Faithfulness is 0.95 here. Recall is 0.95.';
+  const segs = [{id: 'paragraph:0:r', label: 'PDF p. 1', pageIndex: 0, text}];
+  const tie = plain(recipe.locate({find: '0.95', replace: '0.50', context: 'Faithfulness is 0.95 here.'}, segs));
+  assert.equal(tie.status, 'resolved', 'the AI context matches two places alike');
+  assert.equal(tie.start, text.indexOf('0.95'));
+  const recall = plain(recipe.locate({find: '0.95', replace: '0.50', context: 'Recall is 0.95.'}, segs));
+  assert.equal(recall.start, text.lastIndexOf('0.95'));
+  assert.equal(recipe.locate({find: '0.95', replace: '0.50'}, segs).status, 'ambiguous', 'no context at all still asks');
+  const layout = {id: 'layout:p1:column1', label: 'PDF p. 1', pageIndex: 0, text: text.replace(/\. /g, '.\n')};
+  const both = [layout, segs[0]];
+  const list = plain(recipe.searchHits(both, '0.95', 0, 20));
+  assert.equal(list.total, 3);
+  for (const [i, item] of list.items.entries()) {
+    const found = plain(recipe.locate({find: '0.95', replace: '0.50', page: 1, context: item.context, hint: item.hint}, both));
+    assert.equal(found.status, 'resolved');
+    assert.equal(found.segmentId, 'paragraph:0:r', 'the picked match lands in the paragraph segment');
+    assert.equal(found.start, [...text.matchAll(/0\.95/g)][i].index, 'match ' + i + ' keeps its own place');
+  }
+});
+
+test('commit: a change touching an existing edit merges with it; a refused merge puts the old edit back', async () => {
+  const segments = [{id: 'paragraph:0:m', label: 'PDF p. 1', pageIndex: 0, text: 'Ragas 0.95 0.78 0.70 and GPT 0.72 0.60.'}];
+  const ws = stubWorkspace(segments);
+  const {recipe} = load({FalsifyPaperWorkspace: ws});
+  assert.equal(recipe.applyFound(recipe.locate({find: '0.95', replace: 'x', context: 'Ragas 0.95 0.78'}, segments), '0.50').ok, true);
+  assert.equal(recipe.applyFound(recipe.locate({find: '0.78', replace: 'x', context: '0.95 0.78 0.70'}, segments), '0.87').ok, true);
+  assert.deepEqual(plain(ws.edits.map(edit => [edit.before, edit.after])), [['0.95', '0.50'], ['0.78', '0.87']], 'two separate words stay two edits');
+  const again = plain(recipe.applyFound(recipe.locate({find: '0.95', replace: 'x', context: 'Ragas 0.95 0.78'}, segments), '0.40'));
+  assert.equal(again.ok, true, 'changing the same word again replaces the first change');
+  assert.deepEqual(again.merged, ['e1']);
+  assert.deepEqual(plain(ws.edits.map(edit => edit.after)).sort(), ['0.40', '0.87']);
+  const wide = plain(recipe.applyFound(recipe.locate({find: '0.95 0.78 0.70', replace: 'x'}, segments), '0.11 0.22 0.33'));
+  assert.equal(wide.ok, true, 'a longer change over two edits replaces both');
+  assert.deepEqual(plain(ws.edits.map(edit => [edit.before, edit.after])), [['0.95 0.78 0.70', '0.11 0.22 0.33']]);
+  ws.edits.length = 0;
+  ws.edits.push({id: 'w1', enabled: true, segmentId: 'paragraph:0:m', pageIndex: 0, before: 'GPT 0.72 0.60', after: 'GPT 0.72 0.65', anchor: {start: 25, end: 38}, origin: 'external-ai-import'});
+  const apart = plain(recipe.applyFound(recipe.locate({find: '0.72', replace: 'x'}, segments), '0.27'));
+  assert.equal(apart.ok, true, 'a wide anchor whose change sits elsewhere keeps that change');
+  assert.deepEqual(plain(ws.edits.map(edit => [edit.before, edit.after])), [['GPT 0.72 0.60', 'GPT 0.27 0.65']]);
+  const refusing = stubWorkspace(segments);
+  refusing.edits.push({id: 'old', enabled: true, segmentId: 'paragraph:0:m', pageIndex: 0, before: '0.70', after: '0.07', anchor: {start: 16, end: 20}, origin: 'external-ai-import'});
+  const accept = refusing.acceptProposals;
+  refusing.acceptProposals = (proposals, options) => (options && options.confirmed && proposals.some(p => p.after.includes('0.17')) ? {applied: 0} : accept(proposals, options));
+  const blocked = load({FalsifyPaperWorkspace: refusing}).recipe;
+  assert.deepEqual(plain(blocked.applyFound(blocked.locate({find: '0.70', replace: 'x'}, segments), '0.17')), {ok: false, reason: 'rejected'});
+  assert.deepEqual(plain(refusing.edits.map(edit => [edit.before, edit.after])), [['0.70', '0.07']], 'the old edit is back');
+});
+
+test('no visitor message on the edit step sends the visitor to another feature', async () => {
+  const files = ['booth.js', 'booth-recipe.js', 'booth-myai.js'];
+  const referral = [
+    /문단 전체 고치기」(?:로|으로|를)/,
+    /["「]직접 고치기["」](?:에서|로)/,
+    /목록에서 (?:먼저 )?지워/,
+    /고친 곳[^']*페이지를 새로 고친/,
+    /다른 기능/,
+  ];
+  for (const name of files) {
+    const text = await readFile(fileURLToPath(new URL('../dist/' + name, import.meta.url)), 'utf8');
+    const messages = [...text.matchAll(/'(?:[^'\\\n]|\\.)*'/g)].map(match => match[0]).filter(literal => /[가-힣]/.test(literal));
+    assert.ok(messages.length > 10, name + ' has visitor strings');
+    for (const message of messages) {
+      for (const pattern of referral) assert.doesNotMatch(message, pattern, name + ': ' + message);
+    }
+  }
 });
 
 test('apply: no booth hook means every edit is no_paper; invalid recipes throw', async () => {
