@@ -115,3 +115,24 @@ test('hintBlock grows a number cluster to its whole table; fitZoom fits it acros
   assert.equal(pe.fitZoom(0.1, 0, 3.5), 3.5, 'capped');
   assert.equal(pe.fitZoom(0, 0, 3.5), 1);
 });
+
+test('hunksOf keeps separate changes apart; unchangedAt maps a range between them', () => {
+  const before = 'Ragas agrees well with';
+  const after = 'Ragos agrees well wiTh';
+  assert.deepEqual(plain(pe.hunksOf(before, after)).map(h => [before.slice(h.bStart, h.bEnd), after.slice(h.aStart, h.aEnd)]), [['Ragas', 'Ragos'], ['with', 'wiTh']]);
+  assert.equal(pe.unchangedAt(before, after, before.indexOf('well'), 4), after.indexOf('well'), 'the middle word maps');
+  assert.equal(pe.unchangedAt(before, after, 0, 5), -1, 'a changed word does not');
+  const three = pe.hunksOf('0.54 0.40 0.52', '0.55 0.40 0.53');
+  assert.equal(three.length, 2);
+  assert.equal(pe.unchangedAt('0.54 0.40 0.52', '0.55 0.40 0.53', 5, 4), 5);
+  assert.equal(pe.unchangedAt('a bb c', 'a bbbb c', 5, 1), 7, 'a longer change shifts what follows');
+  assert.deepEqual(plain(pe.hunksOf('same', 'same')), []);
+});
+
+test('sideAgree counts agreeing ink on both sides of a candidate place', () => {
+  const tapped = pe.sideAgree('analyses the agreement between ', ' met-', 'Table 1 analyses the agreement between ', ' metrics proposed');
+  assert.ok(tapped.left >= 20 && tapped.right >= 3, JSON.stringify(tapped));
+  const other = pe.sideAgree('analyses the agreement between ', ' met-', 'Table 1 analyses ', ' agreement between');
+  assert.ok(other.score < tapped.score);
+  assert.equal(pe.sideAgree('', '', 'x', 'y').whole, true);
+});
