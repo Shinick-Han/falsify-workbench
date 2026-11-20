@@ -661,16 +661,21 @@ test('a failed 다음 stays in edit with a clear message', async () => {
   h.doc.dispatchEvent(generated(ONE_EDIT, new File(['not a pdf'], 'note.txt', {type: 'text/plain'})));
   await settle();
   assert.equal(h.step(), 'edit');
-  assert.match(h.text('booth-dock-status'), /「← 고치기」에서 「다음」을 다시 눌러 주세요/);
+  assert.equal(h.text('booth-dock-status'), '수정본 PDF를 읽지 못했어요. 「다시 시도」를 눌러 주세요.');
+  assert.deepEqual(fixLabels(h), ['다시 시도']);
   assert.equal(h.ids.get('booth-next').disabled, false);
   ws.edits = Array.from({length: 4}, (_, index) => ({enabled: true, pageIndex: index, segmentId: 's' + index, before: 'before ' + index, after: 'after ' + index}));
   h.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
   assert.equal(h.text('booth-dock-status'), '');
+  let capClicks = 0;
+  h.ids.get('paper-generate').addEventListener('click', () => { capClicks += 1; });
   h.ids.get('booth-next').click();
-  h.doc.dispatchEvent(generated(ws.edits));
   await settle();
+  assert.equal(capClicks, 0, 'the cap is checked before the PDF is built');
+  assert.equal(h.ids.get('booth-dock').getAttribute('data-busy'), 'false');
   assert.equal(h.step(), 'edit');
-  assert.equal(h.text('booth-dock-status'), '고친 곳은 3개까지 제출할 수 있어요. 지금은 4개예요.');
+  assert.equal(h.text('booth-dock-status'), '고친 곳은 3개까지 제출할 수 있어요. 지금은 4개예요. 하나를 지운 뒤 「다음」을 눌러 주세요.');
+  assert.deepEqual(fixLabels(h), ['고친 곳 목록 보기']);
   ws.edits = ONE_EDIT;
   h.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
   h.ids.get('booth-next').click();
@@ -839,6 +844,33 @@ test('an engine that never loads says so instead of waiting forever', async () =
   await runMake(h, 2000);
   assert.equal(h.text('booth-dock-status'), booth.MAKE_TEXT.engine);
   assert.deepEqual(fixLabels(h), ['다시 시도']);
+  h.handle.destroy();
+});
+
+test('send offers 수정본 다시 만들기 in place when the edits changed', async () => {
+  const h = liveBooth();
+  await settle();
+  await reachSend(h);
+  assert.equal(h.ids.get('booth-remake').hidden, true);
+  const ws = boothContext.FalsifyPaperWorkspace;
+  const edits = ws.getEditSnapshot().edits.map(edit => ({...edit, after: edit.after + '9'}));
+  ws.getEditSnapshot = () => ({revision: 2, edits});
+  ws.getCurrentOutput = () => null;
+  declare(h, '수치·통계', '값을 바꿨어요');
+  agree(h);
+  await submit(h);
+  assert.equal(h.text('booth-submit-status'), '고친 곳이 바뀌었어요. 「수정본 다시 만들기」를 눌러 주세요.');
+  assert.equal(h.ids.get('booth-remake').hidden, false);
+  assert.equal(h.text('booth-remake'), '수정본 다시 만들기');
+  let clicks = 0;
+  h.ids.get('paper-generate').addEventListener('click', () => { clicks += 1; });
+  h.ids.get('booth-remake').click();
+  await settle();
+  assert.equal(clicks, 1);
+  assert.equal(h.ids.get('booth-remake').hidden, true);
+  h.doc.dispatchEvent(generated(edits));
+  await waitFor(() => h.step() === 'send' && h.text('booth-submit-status') === '');
+  assert.equal(h.calls.some(call => call.path.endsWith('/v1/booth/submissions')), false);
   h.handle.destroy();
 });
 

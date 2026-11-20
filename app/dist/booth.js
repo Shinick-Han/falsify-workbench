@@ -75,6 +75,7 @@
      the failing edit when the workspace says why. MAKE_FAILED is the last resort. */
   const MAKE_FAILED='수정본을 만들지 못했어요. 「다시 시도」를 눌러 주세요.';
   const MAKE_SLOW='수정본을 만드는 중… 느린 폰에서는 1분쯤 걸려요';
+  const PDF_UNREADABLE='수정본 PDF를 읽지 못했어요. 「다시 시도」를 눌러 주세요.';
   const MAKE_SLOW_MS=15000;
   const MAKE_STALL_MS=240000;
   const MAKE_IDLE_MS=3000;
@@ -120,8 +121,8 @@
     model_jobs_operator_only:'이 화면에서는 AI 검증을 바로 돌리지 않아요. 「AI에게 제출하기」로 보내 주세요.',
     not_found:'접수번호와 확인키를 다시 확인해 볼까요?',
     paper_not_allowed:'이 논문은 라이선스 때문에 제출할 수 없어요. CC BY, CC BY-SA, CC0 논문을 골라 주세요.',
-    invalid_pdf:'수정본 PDF를 읽지 못했어요. 「← 고치기」에서 「다음」을 다시 눌러 주세요.',
-    pdf_mismatch:'수정본이 중간에 바뀌었어요. 「← 고치기」에서 「다음」을 다시 눌러 주세요.',
+    invalid_pdf:'수정본 PDF를 읽지 못했어요. 「수정본 다시 만들기」를 눌러 주세요.',
+    pdf_mismatch:'수정본이 중간에 바뀌었어요. 「수정본 다시 만들기」를 눌러 주세요.',
     pdf_unchanged:'아직 원본과 같아요. 한 곳 이상 고친 뒤 「다음」을 눌러 주세요.',
     session_missing:'연결이 끊겼어요. 페이지를 새로 고친 뒤 다시 시도해 주세요.',
     invalid_request:'입력 내용을 확인해 주세요.',
@@ -760,6 +761,7 @@
     let searchQuery='';
     let making=null;
     let makeFix=null;
+    let unreadablePdf=false;
     let makeSeq=0;
     let ticket=null;
     let clock=null;
@@ -950,7 +952,8 @@
           el('div',{className:'booth-sec booth-send-confirm'},
             buildConsent(),
             el('button',{id:'booth-submit-button',type:'submit',className:'booth-btn ink wide',textContent:'AI에게 제출하기',disabled:true}),
-            el('p',{id:'booth-submit-status',className:'booth-feedback',role:'alert','aria-live':'polite'}))));
+            el('p',{id:'booth-submit-status',className:'booth-feedback',role:'alert','aria-live':'polite'}),
+            el('button',{id:'booth-remake',type:'button',className:'booth-btn slim',textContent:'수정본 다시 만들기',hidden:true}))));
     }
     function cell(label, id, className){
       return el('div',{id:id+'-cell',className:'booth-cell'},
@@ -1380,10 +1383,10 @@
     }
     async function adoptFile(detail){
       const file=detail&&detail.file;
-      if(!file||typeof file.arrayBuffer!=='function'){report(errorMessage('invalid_pdf'));return false;}
+      if(!file||typeof file.arrayBuffer!=='function'){unreadablePdf=true;report(PDF_UNREADABLE);return false;}
       let bytes=null;
       try{bytes=new Uint8Array(await file.arrayBuffer());}catch{bytes=null;}
-      if(!pdfMagic(bytes)) return rejectGenerated(errorMessage('invalid_pdf'));
+      if(!pdfMagic(bytes)){unreadablePdf=true;return rejectGenerated(PDF_UNREADABLE);}
       const hash=await digestHex(bytes);
       if(!hash) return rejectGenerated('수정본을 확인하지 못했어요. 「다음」을 다시 눌러 주세요.');
       sourceSha=await originalSha(detail);
@@ -1393,8 +1396,11 @@
       return adoptRows(editsFor(detail));
     }
     async function adoptGenerated(detail){
+      unreadablePdf=false;
+      const wasMaking=!!making;
       const ok=await adoptFile(detail);
       settleMake(ok);
+      if(!ok&&wasMaking&&unreadablePdf) showFix({text:'',editId:'',actions:['retry']},editsFor(null));
       return ok;
     }
     function currentOutput(){
@@ -1564,15 +1570,30 @@
         return null;
       });
     }
-    function failMakeWith(detail){
-      const edits=editsFor(null);
-      const view=makeFailureView(detail,edits);
-      failMake(view.text);
+    function showFix(view, edits){
       makeFix={view,sig:editSignature(edits)};
       const box=byId('booth-dock-fix');
       if(!box) return;
       kidsOf(box,...fixActions(view,edits));
       box.hidden=false;
+    }
+    /* A failure while rebuilding from send goes back to edit, where the fix buttons are. */
+    function failMakeWith(detail){
+      const edits=editsFor(null);
+      const view=makeFailureView(detail,edits);
+      failMake(view.text);
+      showFix(view,edits);
+      if(step==='send') setStep('edit');
+    }
+    /* Send-step problems with the PDF itself: one in-place button builds it again. */
+    function offerRemake(text){
+      say('booth-submit-status',text);
+      setHidden('booth-remake',false);
+    }
+    function remake(){
+      setHidden('booth-remake',true);
+      say('booth-submit-status','수정본을 만드는 중…');
+      beginMake();
     }
     function onGenerateFailed(event){
       if(!making) return;
@@ -1583,6 +1604,15 @@
     function beginMake(){
       if(making||closed) return;
       if(!liveEditCount()){renderDock();return;}
+      setHidden('booth-remake',true);
+      const cap=limitsOf(liveConfig).maxDeclared;
+      if(liveEditCount()>cap){
+        say('booth-dock-status','고친 곳은 '+cap+'개까지 제출할 수 있어요. 지금은 '+liveEditCount()+'개예요. 하나를 지운 뒤 「다음」을 눌러 주세요.');
+        say('booth-submit-status','');
+        showFix({text:'',editId:'',actions:['list']},editsFor(null));
+        if(step==='send') setStep('edit');
+        return;
+      }
       makeSeq+=1;
       clearMakeFix(false);
       making={token:makeSeq,startedAt:now(),waiting:false,idleSince:0,failure:null,retried:false,slow:false,engineSince:0};
@@ -1987,6 +2017,7 @@
     }
     function preflight(){
       const block=submissionBlock();
+      if(block==='missing'){offerRemake(blockMessage(block));return false;}
       if(block){
         say('booth-submit-status',blockMessage(block));
         if(block!=='closed') refreshSubmitButton();
@@ -1994,7 +2025,7 @@
       }
       const live=editsFor(null);
       if(submissionStale(live)){
-        say('booth-submit-status','고친 곳이 바뀌었어요. 「← 고치기」에서 「다음」을 다시 눌러 주세요.');
+        offerRemake('고친 곳이 바뀌었어요. 「수정본 다시 만들기」를 눌러 주세요.');
         return false;
       }
       if(live.length>limitsOf(liveConfig).maxDeclared){adoptRows(live);return false;}
@@ -2030,7 +2061,8 @@
         say('booth-submit-status','');
         followSubmission(data,meta);
       }catch(error){
-        say('booth-submit-status',submitFailureText(error));
+        if(error.code==='invalid_pdf'||error.code==='pdf_mismatch') offerRemake(submitFailureText(error));
+        else say('booth-submit-status',submitFailureText(error));
         offerRetry('booth-submit-status',error,()=>submitBooth());
         showKnownReceipt(error);
         refreshSubmitButton();
@@ -2104,7 +2136,7 @@
       if(block==='loading') return '부스 정보를 불러오는 중이에요. 잠시 뒤 다시 눌러 주세요.';
       if(block==='consent') return CONSENT_MISSING;
       if(block==='pick') return PICK_PAPER;
-      return '제출할 수정본이 없어요. 「← 고치기」로 돌아가 「다음」을 다시 눌러 주세요.';
+      return '제출할 수정본이 없어요. 「수정본 다시 만들기」를 눌러 주세요.';
     }
     /* Only the version the server names. Before /v1/booth/config answers there is none, so no
        older text (CONSENT_VERSION is v1) can show for a moment. */
@@ -2595,6 +2627,7 @@
     on(byId('booth-result-link'),'click',openResult);
     on(doc,'falsify:paper-generated',event=>{void adoptGenerated(event&&event.detail);});
     on(doc,'falsify:paper-generate-failed',onGenerateFailed);
+    on(byId('booth-remake'),'click',remake);
     on(doc,'falsify:paper-workspace-edits',onEditsChanged);
     on(doc,'falsify:document',onBoothDocument);
     on(doc,'falsify:document-clear',onBoothClear);
