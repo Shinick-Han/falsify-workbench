@@ -746,7 +746,7 @@ function logRouteFor({ recipes, mcp, booth, papers, ai, confluence, matched }) {
 // The OAuth callback is a top-level navigation from Atlassian, not a frontend XHR.
 // Recipe and mission-text routes are public CORS "*" routes without credentials.
 function originGateOpen(matched, origin, allowed) {
-  if (matched.recipes) return true;
+  if (matched.recipes || matched.mcp) return true;
   if (matched.confluence?.template === '/v1/confluence/auth/callback') return true;
   return origin === null || allowed;
 }
@@ -761,11 +761,32 @@ function aiDependencies(request, env) {
   };
 }
 
-// POST /mcp goes to the agent MCP module; GET and DELETE (no SSE stream, no session) are 405. Off unless booth is.
+// /mcp is open to any Origin (no credentials; recipe creation has its own rate limits). OPTIONS is answered
+// here so the preflight works whatever the MCP module does. GET and DELETE (no SSE, no session) are 405.
+const MCP_PREFLIGHT = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Accept, Mcp-Protocol-Version, Mcp-Session-Id, Authorization',
+  'Access-Control-Max-Age': '600',
+  'Cache-Control': 'no-store',
+};
+
 function dispatchMcp(request, env) {
   if (!boothEnabled(env)) throw fail(404, 'not_found');
-  if (request.method !== 'POST') throw fail(405, 'method_not_allowed', { Allow: 'POST' });
+  if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: MCP_PREFLIGHT });
+  if (request.method !== 'POST') throw fail(405, 'method_not_allowed', { Allow: 'POST, OPTIONS' });
   return handleAgentMcp(request, env, { createRecipe, missionsList, missionText: paperId => missionText(paperId, env) });
+}
+
+// Recipe routes already carry Access-Control-Allow-Origin "*". /mcp answers "*" on every response,
+// including the Worker's own 404 and 405. Everything else echoes an allowed Origin only.
+function finishCors(response, matched, origin, allowed) {
+  if (matched.recipes) return response;
+  if (!matched.mcp) return withCors(response, origin, allowed);
+  const headers = new Headers(response.headers);
+  headers.set('Access-Control-Allow-Origin', '*');
+  headers.delete('Access-Control-Allow-Credentials');
+  return new Response(response.body, { status: response.status, headers });
 }
 
 async function dispatchRequest(request, env, url, matched, config) {
@@ -838,7 +859,6 @@ export default {
     }
     // Logs carry the route template, method, status and timing only: no URL, ids, query, body, token or IP.
     console.log(JSON.stringify({ event: 'request', method: request.method, route: logRoute, status: response.status, ms: Date.now() - started }));
-    // Recipe routes already carry Access-Control-Allow-Origin "*".
-    return matched.recipes ? response : withCors(response, origin, allowed);
+    return finishCors(response, matched, origin, allowed);
   },
 };

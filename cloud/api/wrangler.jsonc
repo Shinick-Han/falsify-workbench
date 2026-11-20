@@ -153,6 +153,8 @@
         // Agent recipe drafts (POST /v1/booth/recipes). No auth, CORS "*"; the human submits on EVENT_PAGE_URL.
         "BOOTH_RECIPES_PER_IP_HOUR": "120",
         "BOOTH_RECIPES_PER_HOUR": "5000",
+        // GET /v1/booth/recipes/:code per IP (IPv6 per /64) per hour, so codes cannot be enumerated cheaply.
+        "BOOTH_RECIPE_READS_PER_IP_HOUR": "600",
         "EVENT_PAGE_URL": "https://shinick-han.github.io/falsify-workbench/event.html"
       },
       "d1_databases": [{ "binding": "DB", "database_name": "falsify-harness-records-event", "database_id": "939f0444-c8d6-4d3f-b9ca-e1def3bdfc4f", "migrations_dir": "migrations" }]

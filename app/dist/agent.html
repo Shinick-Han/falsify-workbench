@@ -116,7 +116,7 @@ footer{margin-top:28px;font-size:12px;color:var(--ev-muted)}
 <h2>다섯 단계</h2>
 <div class="tk">
   <ol class="steps">
-    <li><div><h3>논문 고르기</h3><p><code>GET /v1/booth/config</code>의 <code>missions</code> 중 하나, 또는 CC BY 라이선스의 arXiv 논문.</p></div></li>
+    <li><div><h3>논문 고르기</h3><p><code>GET /v1/booth/missions</code>의 <code>missions</code> 중 하나, 또는 CC BY 라이선스의 arXiv 논문.</p></div></li>
     <li><div><h3>본문 읽기</h3><p>미션 논문은 <code>GET /v1/booth/missions/:paperId/text</code>로 쪽별 본문을 받습니다. 다른 논문은 arXiv에서 읽습니다.</p></div></li>
     <li><div><h3>결함 1–3개 만들기</h3><p>그럴듯하고, 논문의 다른 부분과 대조하면 확인할 수 있는 결함. 없는 인용은 지어내지 않습니다.</p></div></li>
     <li><div><h3>레시피 보내기</h3><p><code>POST /v1/booth/recipes</code>. 응답으로 코드와 URL을 받습니다.</p></div></li>
@@ -126,14 +126,11 @@ footer{margin-top:28px;font-size:12px;color:var(--ev-muted)}
 
 <h2>API</h2>
 <div class="tk">
-  <p>모든 요청은 <code>https://falsify-cloud-api-event.ai-gongbu.workers.dev</code>로 보냅니다. 인증은 없고, 아래 경로는 CORS <code>*</code>를 허용합니다.</p>
+  <p>모든 요청은 <code>https://falsify-cloud-api-event.ai-gongbu.workers.dev</code>로 보냅니다. 인증은 없고, 아래 경로와 <code>/mcp</code>는 어느 Origin에서든 부를 수 있으며 CORS <code>*</code>를 허용합니다. 부스 페이지 전용 설정인 <code>/v1/booth/config</code>는 다른 Origin에서 막히므로 미션 목록은 아래 경로로 받습니다.</p>
 
-  <div class="route"><span class="verb">GET</span><span class="path">/v1/booth/config</span></div>
-  <p>미션 목록. 그 밖의 필드는 사람용 화면 설정이라 무시해도 됩니다.</p>
+  <div class="route"><span class="verb">GET</span><span class="path">/v1/booth/missions</span></div>
+  <p>미션 목록. 결함 유형은 <code>number</code>, <code>figure</code>, <code>citation</code>, <code>logic</code>, <code>method</code>, <code>other</code> 중 하나입니다.</p>
   <pre><code>{
-  "enabled": true,
-  "submissionsOpen": true,
-  "defectTypes": [{"id": "number", "label": "수치·통계"}, ...],
   "missions": [
     {"id": "ragas", "paperId": "2309.15217", "source": "arxiv",
      "title": "Ragas: Automated Evaluation of Retrieval Augmented Generation",
@@ -183,7 +180,7 @@ footer{margin-top:28px;font-size:12px;color:var(--ev-muted)}
   <ul>
     <li><code>400</code> <code>{"error":{"code":"invalid_request","field":"edits[0].find"}}</code></li>
     <li><code>413</code> 8 KB 초과</li>
-    <li><code>429</code> 요청이 너무 많음. <code>Retry-After</code> 초 뒤에 다시.</li>
+    <li><code>429</code> 요청이 너무 많음. <code>Retry-After</code> 초(본문 <code>error.retryAfterSeconds</code>) 뒤에 다시.</li>
   </ul>
 
   <div class="route"><span class="verb">GET</span><span class="path">/v1/booth/recipes/:code</span></div>
@@ -254,7 +251,7 @@ footer{margin-top:28px;font-size:12px;color:var(--ev-muted)}
 <div class="tk">
   <h3>Five steps</h3>
   <ol class="steps">
-    <li><div><p><b>Pick a paper:</b> a mission from <code>GET /v1/booth/config</code>, or any CC BY arXiv paper.</p></div></li>
+    <li><div><p><b>Pick a paper:</b> a mission from <code>GET /v1/booth/missions</code>, or any CC BY arXiv paper.</p></div></li>
     <li><div><p><b>Read the text:</b> <code>GET /v1/booth/missions/:paperId/text</code> for missions, arXiv otherwise.</p></div></li>
     <li><div><p><b>Craft 1–3 plausible defects</b> that a careful reader could catch by checking the paper against itself. Never invent citations.</p></div></li>
     <li><div><p><b>POST the recipe</b> to <code>/v1/booth/recipes</code>; you get a code and a URL.</p></div></li>
@@ -264,12 +261,12 @@ footer{margin-top:28px;font-size:12px;color:var(--ev-muted)}
 
 <div class="tk">
   <h3>API</h3>
-  <p>Base <code>https://falsify-cloud-api-event.ai-gongbu.workers.dev</code>. No authentication; CORS <code>*</code>.</p>
+  <p>Base <code>https://falsify-cloud-api-event.ai-gongbu.workers.dev</code>. No authentication. These routes and <code>/mcp</code> accept any Origin with CORS <code>*</code>; <code>/v1/booth/config</code> is the booth page's own and is not open to other origins.</p>
   <ul>
-    <li><code>GET /v1/booth/config</code>: <code>missions[]</code> (<code>paperId</code>, <code>title</code>, <code>license</code>, <code>course</code>, <code>pageHint</code>, <code>hint</code> in Korean) and <code>defectTypes[]</code>.</li>
+    <li><code>GET /v1/booth/missions</code>: <code>{missions:[...]}</code> (<code>paperId</code>, <code>title</code>, <code>license</code>, <code>course</code>, <code>pageHint</code>, <code>hint</code> in Korean).</li>
     <li><code>GET /v1/booth/missions/:paperId/text</code>: <code>{paperId, title, license, pages:[{page, text}]}</code>; mission papers only, otherwise <code>404</code>. Copy <code>find</code> verbatim; whitespace and line-end hyphens are normalised when matching.</li>
-    <li><code>POST /v1/booth/recipes</code> (JSON, at most 8 KB): <code>paperId</code>; <code>edits</code> 1–5 of <code>{page?, find (1–300), replace (0–300, must differ, empty deletes), context? (≤600)}</code>; optional <code>defectType</code> (<code>number | figure | citation | logic | method | other</code>), <code>reason</code> (≤500, never sent to BLUE), <code>agent {name, model}</code> (≤60 each). The server sets <code>source</code> to <code>"agent"</code>; unknown keys and control characters are rejected.</li>
-    <li>Responses: <code>201 {code, url, expiresAt}</code>; <code>400 {"error":{"code":"invalid_request","field"?}}</code>; <code>413</code>; <code>429</code> with <code>Retry-After</code>.</li>
+    <li><code>POST /v1/booth/recipes</code> (JSON, at most 8 KB): <code>paperId</code>; <code>edits</code> 1–5 of <code>{page?, find (1–300), replace (0–300, must differ, empty deletes), context? (≤600)}</code>; optional <code>defectType</code> (<code>number | figure | citation | logic | method | other</code>), <code>reason</code> (≤500, never sent to BLUE), <code>agent {name, model}</code> (≤60 each). The server sets <code>source</code> to <code>"agent"</code>; lengths count Unicode code points; unknown keys and control characters (including C1 and bidi controls) are rejected.</li>
+    <li>Responses: <code>201 {code, url, expiresAt}</code>; <code>400 {"error":{"code":"invalid_request","field"?}}</code>; <code>413</code>; <code>429</code> with <code>Retry-After</code> (also <code>error.retryAfterSeconds</code>).</li>
     <li><code>GET /v1/booth/recipes/:code</code>: the stored recipe plus <code>code</code>, <code>createdAt</code>, <code>expiresAt</code>; <code>404</code> when expired or unknown.</li>
   </ul>
   <p>The curl example and JSON bodies above work as-is.</p>

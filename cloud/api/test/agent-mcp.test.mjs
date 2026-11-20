@@ -91,7 +91,7 @@ test('get_mission_text returns one page or the whole paper, and isError for unkn
 
 test('create_recipe forces source agent, passes the client IP and tells the agent to hand the url over', async () => {
   const deps = fakeDeps();
-  const args = {paperId: '2309.15217', edits: [{page: 5, find: '0.95', replace: '0.50'}], defectType: 'number', reason: 'r', agent: {name: 'Claude Code', model: 'm'}, source: 'manual', extra: 1};
+  const args = {paperId: '2309.15217', edits: [{page: 5, find: '0.95', replace: '0.50'}], defectType: 'number', reason: 'r', agent: {name: 'Claude Code', model: 'm'}, source: 'manual'};
   const {body} = await rpc(call('create_recipe', args), deps, {'CF-Connecting-IP': '203.0.113.9'});
   assert.equal(deps.calls.length, 1);
   assert.deepEqual(deps.calls[0].recipe, {schema: 'falsify.booth.recipe.v1', paperId: '2309.15217', edits: args.edits, defectType: 'number', reason: 'r', agent: args.agent, source: 'agent'});
@@ -100,6 +100,20 @@ test('create_recipe forces source agent, passes the client IP and tells the agen
   assert.equal(body.result.structuredContent.url, 'https://example.test/event.html#recipe=R-7K3QXM');
   assert.match(body.result.content[0].text, /Give this link to your human: https:\/\/example\.test/);
   assert.match(body.result.content[0].text, /cannot submit/);
+});
+
+test('create_recipe rejects unknown argument keys with isError instead of dropping them', async () => {
+  const deps = fakeDeps();
+  const args = {paperId: '2309.15217', edits: [{find: '0.95', replace: '0.50'}], extra: 1, email: 'x'};
+  const {status, body} = await rpc(call('create_recipe', args), deps);
+  assert.equal(status, 200);
+  assert.equal(body.result.isError, true);
+  assert.match(body.result.content[0].text, /Unknown arguments: extra, email. create_recipe accepts only paperId, edits, defectType, reason, agent/);
+  assert.equal(body.result.structuredContent.error.field, 'extra');
+  assert.equal(deps.calls.length, 0);
+  const tolerated = await rpc(call('create_recipe', {schema: 'falsify.booth.recipe.v1', source: 'agent', paperId: '2309.15217', edits: [{find: 'a', replace: 'b'}]}), deps);
+  assert.notEqual(tolerated.body.result.isError, true);
+  assert.equal(deps.calls.length, 1);
 });
 
 test('create_recipe server failures become isError tool results', async () => {
