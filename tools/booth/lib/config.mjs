@@ -16,23 +16,24 @@ export const NOTE_KEYS = ['caught', 'partial', 'missed', 'missedNone'];
 // Visitor-facing Korean. {page} is the finding's 1-based page, {quote} its sentence, {rationale} its reason.
 // Nothing here comes from the visitor's declared edit.
 export const DEFAULT_NOTES = Object.freeze({
-  caught: 'AI가 심어 둔 결함을 찾았습니다. (AI가 짚은 곳: {page}쪽)\nAI가 짚은 문장: "{quote}"\nAI 설명: {rationale}',
-  partial: 'AI가 심어 둔 결함에 거의 다가갔습니다. 이번에는 찾은 것으로 봅니다. (AI가 짚은 곳: {page}쪽)\nAI가 짚은 문장: "{quote}"\nAI 설명: {rationale}',
-  missed: 'AI는 다른 곳을 짚었습니다. AI가 먼저 본 곳은 {page}쪽이었고, 심어 둔 결함은 AI 눈을 피했습니다.',
-  missedNone: 'AI가 이번 수정본에서 결함을 짚지 못했습니다. 심어 둔 결함은 AI 눈을 피했습니다.',
+  caught: '내가 심어 둔 결함을 AI가 찾았어요. (AI가 짚은 곳: {page}쪽)\nAI가 짚은 문장: "{quote}"\nAI 설명: {rationale}',
+  partial: '내가 심어 둔 결함 근처를 AI가 짚었어요. (AI가 짚은 곳: {page}쪽)\nAI가 짚은 문장: "{quote}"\nAI 설명: {rationale}',
+  missed: 'AI는 다른 곳을 짚었어요. AI가 먼저 본 곳은 {page}쪽이었고, 심어 둔 결함은 AI 눈을 피했어요.',
+  missedNone: 'AI가 이번 수정본에서 결함을 짚지 못했어요. 심어 둔 결함은 AI 눈을 피했어요.',
 });
 
 export function defaultLive() {
   return {
     liveProfile: 'live',
     finalProfile: 'final',
-    concurrency: 12,
+    // Same as the Worker's BOOTH_OPERATOR_ACTIVE_JOBS default. More workers than server slots only wait.
+    concurrency: 4,
     intervalSec: 10,
     retries: 2,
     retryBackoffMs: 5000,
     prizeMessage: '',
     finalPrizeMessage: '',
-    finalCaughtMessage: '빠른 AI는 이겼어요! 정밀 AI는 찾아냈지만, 받은 즉석 선물은 그대로 유효합니다.',
+    finalCaughtMessage: '빠른 AI를 이겼어요. 정밀 AI는 찾아냈지만, 받은 선물은 그대로 가져가세요.',
     publicNote: { ...DEFAULT_NOTES },
   };
 }
@@ -116,7 +117,7 @@ export function loadConfigFile(file) {
   const config = {
     apiBase: '',
     dataDir: '',
-    blue: { concurrency: 1, repeat: 1, profiles: [], pollIntervalMs: 200, pollTimeoutMs: 900000 },
+    blue: { concurrency: 1, repeat: 1, profiles: [], pollIntervalMs: 2000, pollTimeoutMs: 900000 },
     live: normalizeLive(raw.live),
   };
   if (raw.apiBase !== undefined) {
@@ -169,7 +170,7 @@ export function emptyConfig() {
     apiBase: '',
     dataDir: '',
     configDir: process.cwd(),
-    blue: { concurrency: 1, repeat: 1, profiles: [], pollIntervalMs: 200, pollTimeoutMs: 900000 },
+    blue: { concurrency: 1, repeat: 1, profiles: [], pollIntervalMs: 2000, pollTimeoutMs: 900000 },
     live: defaultLive(),
   };
 }
@@ -263,6 +264,9 @@ export function resolveBluePlan(config, flags) {
     concurrency,
     pollIntervalMs: config.blue.pollIntervalMs,
     pollTimeoutMs: config.blue.pollTimeoutMs,
+    // A full operator job cap (429) is retried at the poll pace, at least 1 s apart, with the same upload and
+    // key. Each retry costs the Worker a reservation, a rollback and a runtime reconcile.
+    slotWaitMs: Math.max(config.blue.pollIntervalMs, 1000),
   };
 }
 

@@ -297,7 +297,7 @@
     if(!Array.isArray(segments)||!segments.length) return [];
     const all=segments.map(s=>squash(s.text)).join(' ');
     return recipe.edits.filter(edit=>!all.includes(squash(edit.find)))
-      .map(edit=>diag('warn','find_missing','원문에서 "'+short(edit.find,40)+'"를 그대로 찾지 못했어요. 적용 뒤 확인 필요로 표시될 수 있어요.'));
+      .map(edit=>diag('warn','find_missing','원문에서 "'+short(edit.find,40)+'"를 그대로 찾지 못했어요. 적용 결과에서 다시 알려 드릴게요.'));
   }
   function failure(text,state){
     const out=[];
@@ -464,10 +464,30 @@
     return selectFallback(text,area,doc);
   }
   const COPY_MESSAGE={
-    clipboard:'복사했어요. 내 AI 채팅창에 붙여 넣고 보내세요.',
+    clipboard:'복사했어요. AI 채팅에 붙여 넣고, 받은 답을 전부 복사해 오세요.',
     exec:'복사했어요. 안 되면 아래 글을 길게 눌러 복사하세요.',
     manual:'자동 복사가 막혔어요. 아래 글이 전체 선택되어 있으니 길게 눌러 "복사"를 고르세요.'
   };
+  const COPY_LABEL={idle:'복사',done:'복사됨 ✓',again:'다시 복사'};
+  const COPY_DONE_MS=2000;
+  const SHARE_MESSAGE={
+    shared:'보냈어요. AI 답이 오면 길게 눌러 전부 복사해 오세요.',
+    failed:'공유 창을 열지 못했어요. 「복사」를 눌러 주세요.'
+  };
+  /* Phones only: desktop Chrome on Windows/ChromeOS also has navigator.share, but copy is the better path there. */
+  function canSharePrompt(){
+    const nav=root&&root.navigator;
+    if(!nav||typeof nav.share!=='function') return false;
+    if(typeof nav.canShare==='function'&&!callSafe(()=>nav.canShare({text:'falsify'}),false)) return false;
+    const coarse=typeof root.matchMedia==='function'&&callSafe(()=>root.matchMedia('(pointer: coarse)').matches,false);
+    return !!coarse;
+  }
+  async function sharePrompt(text){
+    const nav=root.navigator;
+    void writeClipboard(text); // the share sheet takes focus, so the copy starts first and is best-effort
+    try{await nav.share({text});return 'shared';}
+    catch(error){return error&&error.name==='AbortError'?'aborted':'failed';}
+  }
 
   function stepOne(doc,v){
     return el(doc,'section',{className:'booth-myai-step','aria-labelledby':'booth-myai-h1'},[
@@ -477,7 +497,7 @@
       el(doc,'div',{className:'booth-myai-opts'},[
         el(doc,'label',{className:'booth-myai-pagefield'},[v.page,'쪽']),
         el(doc,'div',{className:'booth-chips',role:'group','aria-label':'부탁 글 언어'},[v.langKo,v.langEn])]),
-      v.preview,v.size,v.copy,v.copyStatus,v.full]);
+      v.preview,v.size,v.copy,v.share,v.copyStatus,v.full]);
   }
   function stepTwo(doc,v){
     return el(doc,'section',{className:'booth-myai-step','aria-labelledby':'booth-myai-h2'},[
@@ -492,10 +512,11 @@
       langEn:el(doc,'button',{type:'button',className:'booth-chip',text:'English','aria-pressed':'false'}),
       preview:el(doc,'p',{id:'booth-myai-preview',className:'booth-myai-preview'}),
       size:el(doc,'p',{className:'booth-small booth-myai-size'}),
-      copy:el(doc,'button',{id:'booth-myai-copy',type:'button',className:'booth-btn ink wide',text:'복사'}),
+      copy:el(doc,'button',{id:'booth-myai-copy',type:'button',className:'booth-btn ink wide',text:COPY_LABEL.idle}),
+      share:canSharePrompt()?el(doc,'button',{id:'booth-myai-share',type:'button',className:'booth-btn wide',text:'AI 앱으로 보내기'}):null,
       copyStatus:el(doc,'p',{id:'booth-myai-copy-status',className:'booth-feedback',role:'status'}),
       full:el(doc,'textarea',{id:'booth-myai-full',className:'booth-myai-full',readOnly:true,hidden:true,'aria-label':'부탁 글 전체'}),
-      answer:el(doc,'textarea',{id:'booth-myai-answer',className:'booth-myai-answer',placeholder:'AI가 준 답을 그대로 붙여 넣으세요. 앞뒤 설명이 섞여 있어도 괜찮아요.','aria-label':'AI 답'}),
+      answer:el(doc,'textarea',{id:'booth-myai-answer',className:'booth-myai-answer',placeholder:'AI 답 전체를 붙여 넣으세요. { "edits": … }가 들어 있으면 돼요. 앞뒤 설명은 괜찮아요.','aria-label':'AI 답'}),
       apply:el(doc,'button',{id:'booth-myai-apply',type:'button',className:'booth-btn ink wide',text:'적용'}),
       diags:el(doc,'ul',{id:'booth-myai-diags',className:'booth-myai-diags','aria-live':'polite'}),
       result:el(doc,'div',{id:'booth-myai-result',className:'booth-myai-result',hidden:true,role:'status'})
@@ -507,10 +528,19 @@
     clear(list);
     for(const d of diagnostics) list.appendChild(el(doc,'li',{className:'booth-myai-diag '+d.level,text:d.message}));
   }
+  /* Notes that say how the answer was read (not a problem with the page) stay after a successful apply. */
+  const INTERPRETATION=new Set(['paper_forced','page_dropped','keys_dropped','type_dropped','before_after','edits_trimmed']);
+  function keptAfterApply(diagnostics){
+    return (Array.isArray(diagnostics)?diagnostics:[]).filter(d=>INTERPRETATION.has(d?.code));
+  }
+  function countLine(applied,left){
+    if(!left) return applied?applied+'곳 적용했어요':'바뀐 곳이 없어요';
+    return applied+'곳 적용 · '+left+'곳은 직접 골라 주세요';
+  }
   function resultLine(res){
     const applied=Array.isArray(res?.applied)?res.applied.length:0;
     const unresolved=Array.isArray(res?.unresolved)?res.unresolved:[];
-    return {applied,unresolved,line:'적용 '+applied+'곳 · 확인 필요 '+unresolved.length+'곳'};
+    return {applied,unresolved,line:countLine(applied,unresolved.length)};
   }
   function renderResult(doc,box,res){
     const {applied,unresolved,line}=resultLine(res);
@@ -519,13 +549,13 @@
     for(const u of unresolved){
       box.appendChild(el(doc,'p',{className:'booth-small',text:'"'+short(u?.edit?.find,40)+'" · '+(UNRESOLVED[u?.reason]||'확인이 필요해요')}));
     }
-    const tail=unresolved.length?'확인 필요한 곳은 "직접 고치기"에서 고칠 수 있어요.':'바뀐 곳을 확인한 뒤 다음 단계로 가세요.';
+    const tail=unresolved.length?'남은 곳은 "직접 고치기"에서 고칠 수 있어요.':'바뀐 곳을 확인한 뒤 다음 단계로 가세요.';
     if(applied||unresolved.length) box.appendChild(el(doc,'p',{className:'booth-small',text:tail}));
     box.hidden=false;
   }
 
   function createController(doc,v){
-    const s={lang:'ko',pageTouched:false,prompt:''};
+    const s={lang:'ko',pageTouched:false,prompt:'',copyTimer:0};
     function current(){
       const R=recipeApi();
       const meta=paperInfo(R);
@@ -548,15 +578,27 @@
       for(const [button,on] of [[v.langKo,s.lang==='ko'],[v.langEn,s.lang==='en']]){button.classList.toggle('on',on);button.setAttribute('aria-pressed',String(on));}
       refresh();
     }
+    function markCopied(how){
+      if(s.copyTimer) root.clearTimeout(s.copyTimer);
+      s.copyTimer=0;
+      if(how==='manual'){v.copy.textContent=COPY_LABEL.idle;return;}
+      v.copy.textContent=COPY_LABEL.done;
+      s.copyTimer=root.setTimeout(()=>{s.copyTimer=0;v.copy.textContent=COPY_LABEL.again;},COPY_DONE_MS);
+    }
     async function onCopy(){
       const how=await copyText(refresh(),v.full,doc);
       v.copyStatus.textContent=COPY_MESSAGE[how];
+      markCopied(how);
+    }
+    async function onShare(){
+      const how=await sharePrompt(refresh());
+      if(how!=='aborted') v.copyStatus.textContent=SHARE_MESSAGE[how];
     }
     function fail(message){
       renderDiagnostics(doc,v.diags,[diag('error','apply',message)]);
       v.result.hidden=true;
     }
-    async function runApply(R,recipe){
+    async function runApply(R,recipe,diags){
       v.apply.disabled=true;
       v.result.hidden=false;
       v.result.textContent='적용하는 중…';
@@ -564,6 +606,7 @@
         if(typeof R.setAssist==='function') R.setAssist('my-ai');
         const res=await R.apply(recipe,{onProgress:p=>{if(typeof p?.message==='string') v.result.textContent=p.message;}});
         renderResult(doc,v.result,res);
+        renderDiagnostics(doc,v.diags,keptAfterApply(diags));
       }catch(error){fail('적용하지 못했어요. '+(str(error?.message)||'잠시 후 다시 눌러 주세요.'));}
       finally{v.apply.disabled=false;}
     }
@@ -574,9 +617,10 @@
       const parsed=parseAnswer(v.answer.value,{segments:segmentsFor(R,meta),fileHash:meta.fileHash,paperId:meta.paperId});
       renderDiagnostics(doc,v.diags,parsed.diagnostics);
       if(!parsed.recipe){v.result.hidden=true;v.answer.focus();return;}
-      await runApply(R,parsed.recipe);
+      await runApply(R,parsed.recipe,parsed.diagnostics);
     }
     v.copy.addEventListener('click',()=>{void onCopy();});
+    if(v.share) v.share.addEventListener('click',()=>{void onShare();});
     v.apply.addEventListener('click',()=>{void onApply();});
     v.page.addEventListener('change',()=>{s.pageTouched=true;refresh();});
     v.langKo.addEventListener('click',()=>setLang('ko'));
@@ -599,5 +643,5 @@
     return handle;
   }
 
-  return {mount,buildPrompt,parseAnswer,validateLocal,normalize,SCHEMA,PROMPT_CAP};
+  return {mount,buildPrompt,parseAnswer,validateLocal,normalize,resultLine,keptAfterApply,SCHEMA,PROMPT_CAP};
 });

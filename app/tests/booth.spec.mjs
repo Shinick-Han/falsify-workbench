@@ -180,12 +180,12 @@ test('the R4-2 interop vector is the edited.pdf part', async () => {
   assert.equal(pdf.type, 'application/pdf');
   assert.equal(pdf.size, 109);
   assert.equal(new TextDecoder().decode(new Uint8Array(await pdf.arrayBuffer())), interop.toString('utf8'));
-  assert.equal(booth.errorMessage('storage_full'), '오늘 접수 저장 공간이 가득 찼습니다. 부스 운영자에게 알려 주세요.');
-  assert.match(booth.errorMessage('length_required'), /너무 크/);
+  assert.equal(booth.errorMessage('storage_full'), '오늘 접수 공간이 가득 찼어요. 부스 스태프에게 알려 주세요.');
+  assert.match(booth.errorMessage('length_required'), /파일 크기를 확인하지 못했어요/);
   assert.match(booth.errorMessage('payload_too_large'), /너무 커서/);
-  assert.equal(booth.errorMessage('payload_too_large', {maxPdfBytes: 16777216}), '수정본 PDF는 16MB 이하만 제출할 수 있습니다.');
-  assert.equal(booth.errorMessage('length_required', {maxPdfBytes: 16777216}), '수정본 PDF는 16MB 이하만 제출할 수 있습니다.');
-  assert.match(booth.errorMessage('model_jobs_operator_only'), /AI 검증을 실행하지 않습니다/);
+  assert.equal(booth.errorMessage('payload_too_large', {maxPdfBytes: 16777216}), '수정본 PDF는 16MB까지 제출할 수 있어요.');
+  assert.equal(booth.errorMessage('length_required', {maxPdfBytes: 16777216}), '수정본 PDF는 16MB까지 제출할 수 있어요.');
+  assert.match(booth.errorMessage('model_jobs_operator_only'), /AI 검증을 바로 돌리지 않아요/);
   assert.equal(booth.errorMessage('payload_too_large', {maxPdfBytes: 12}), booth.errorMessage('payload_too_large'));
 });
 
@@ -222,31 +222,31 @@ test('this device keeps at most 10 receipts', () => {
 
 test('server error codes become the booth messages', () => {
   const expected = {
-    booth_closed: '접수를 받지 않습니다',
-    consent_outdated: '동의 문구',
-    job_not_ready: '수정본이 아직',
-    already_submitted: '이미 제출된',
-    pii_not_allowed: '별명',
-    rate_limited: '너무 많습니다',
+    booth_closed: '접수 시간이 아니에요',
+    consent_outdated: '동의 문구가 바뀌었어요',
+    job_not_ready: '아직 만드는 중',
+    already_submitted: '이미 제출한',
+    pii_not_allowed: '닉네임으로 적어',
+    rate_limited: '요청이 몰려',
     license_not_allowed: '라이선스',
     payload_too_large: '너무 커서',
-    length_required: '너무 크',
-    storage_full: '저장 공간이 가득',
+    length_required: '파일 크기를 확인하지',
+    storage_full: '접수 공간이 가득',
     model_jobs_operator_only: 'AI 검증',
     not_found: '확인키',
     paper_not_allowed: '라이선스',
-    invalid_pdf: 'PDF 파일을 다시',
-    pdf_mismatch: '해시가 일치하지',
-    pdf_unchanged: '원본과 같습니다',
+    invalid_pdf: '수정본 PDF를 읽지 못했어요',
+    pdf_mismatch: '중간에 바뀌었어요',
+    pdf_unchanged: '아직 원본과 같아요',
     invalid_request: '입력 내용',
-    forbidden: '할 수 없습니다',
+    forbidden: '이 작업을 할 수 없어요',
   };
   for (const [code, fragment] of Object.entries(expected)) {
     assert.match(booth.errorMessage(code), new RegExp(fragment), code);
   }
   assert.match(booth.errorMessage('already_submitted', {receipt: 'F-0042'}), /F-0042/);
-  assert.match(booth.errorMessage('session_missing'), /게스트 세션/);
-  assert.match(booth.errorMessage('mystery'), /처리하지 못했습니다/);
+  assert.match(booth.errorMessage('session_missing'), /연결이 끊겼어요/);
+  assert.match(booth.errorMessage('mystery'), /^처리하지 못했어요\. 잠시 뒤 다시 시도해 주세요\.$/);
 });
 
 /* Synthetic DOM the booth mount builds into. ids maps element ids to nodes. */
@@ -405,12 +405,17 @@ function liveBooth(options = {}) {
   });
   const submitReplies = (options.submits || []).slice();
   const fetchImpl = async (url, init = {}) => {
-    const path = String(url);
+    const full = String(url);
+    const path = full.split('?')[0];
     const headers = init.headers || {};
     const form = init.body && typeof init.body.get === 'function' ? init.body : null;
-    calls.push({path, at: clock.t, auth: headers.Authorization || '', contentType: headers['Content-Type'] || '',
-      body: typeof init.body === 'string' ? JSON.parse(init.body) : null, form});
+    // GET /v1/booth/claim carries receipt and key in the query; record them as the body a POST would send.
+    const query = full.includes('?') ? new URLSearchParams(full.slice(full.indexOf('?') + 1)) : null;
+    const queryBody = query && path.endsWith('/v1/booth/claim') ? {receipt: query.get('receipt'), claimKey: query.get('key')} : null;
+    calls.push({path, method: init.method || 'GET', at: clock.t, auth: headers.Authorization || '', contentType: headers['Content-Type'] || '',
+      body: typeof init.body === 'string' ? JSON.parse(init.body) : queryBody, form});
     if (path.endsWith('/v1/booth/config')) {
+      if (options.configGate) await options.configGate;
       return reply(200, {enabled: true, submissionsOpen: true, announcement: options.announcement, consentVersion: options.consentVersion || '2026-11-22.v2',
         limits: {maxDeclared: options.maxDeclared || 5, maxReason: 500, maxNickname: 24, perOwner: options.perOwner || 5, maxPdfBytes: 16777216},
         missions: options.missions || MISSIONS});
@@ -524,8 +529,9 @@ test('the booth mounts only when enabled and starts on pick', async () => {
   assert.equal(h.text('booth-title'), 'AI를 속일 수있을까요?');
   assert.equal(nodesOf(h.ids.get('booth-title')).find(node => node.tagName === 'b').textContent, '속일 수');
   assert.match(h.text('booth-step-pick'), /AI REVIEW CHALLENGE/);
-  assert.match(h.text('booth-step-pick'), /공개 논문 한 곳을 몰래 고쳐 보세요\. AI가 2분 안에 찾아내는지 겨룹니다\. AI가 놓치면 부스에서 선물을 드려요\./);
-  assert.match(h.text('booth-step-pick'), /1논문 고르기2몰래 고치기3AI 검증/);
+  assert.match(h.text('booth-step-pick'), /공개 논문 한 곳을 몰래 고쳐 보세요\. AI가 보통 1~3분 안에 찾아내는지 겨뤄요\. AI가 놓치면 부스에서 선물을 드려요\./);
+  assert.doesNotMatch(h.text('booth-step-pick'), /2분 안에/);
+  assert.match(h.text('booth-step-pick'), /01논문 고르기.*02몰래 고치기.*03AI 검증/);
   assert.equal(h.text('booth-search-box').startsWith('다른 공개 논문 직접 찾기'), true);
   for (const id of ['booth-step-edit', 'booth-submit', 'booth-receipt']) assert.equal(h.ids.get(id).hidden, true, id);
   h.handle.destroy();
@@ -577,7 +583,7 @@ test('a failed paper load stays on pick with the reason', async () => {
   await settle();
   await pickMission(h);
   assert.equal(h.step(), 'pick');
-  assert.match(h.text('booth-mission-status'), /게스트 세션/);
+  assert.match(h.text('booth-mission-status'), /연결이 끊겼어요/);
   h.handle.destroy();
 });
 
@@ -629,7 +635,7 @@ test('다음 builds the submission PDF on the old make path, then opens send', a
   assert.equal(nodesOf(diff).find(node => node.tagName === 'del').textContent, '4.2');
   assert.equal(nodesOf(diff).find(node => node.tagName === 'ins').textContent, '5.8');
   assert.equal(diff.textContent, 'The mean was 4.25.8 (SD 1.1).');
-  assert.match(card.textContent, /이 설명은 AI에게 보내지 않아요\. 판정이 맞는지 운영진만 확인해요\./);
+  assert.match(card.textContent, /이 설명은 AI에게 보내지 않고 운영진만 봐요\./);
   assert.equal(h.ids.get('booth-courses'), undefined);
   assert.equal(h.ids.get('booth-make'), undefined);
   // Back to edit and 다음 again: the current output is adopted directly and the declaration stays.
@@ -655,7 +661,7 @@ test('a failed 다음 stays in edit with a clear message', async () => {
   h.doc.dispatchEvent(generated(ONE_EDIT, new File(['not a pdf'], 'note.txt', {type: 'text/plain'})));
   await settle();
   assert.equal(h.step(), 'edit');
-  assert.match(h.text('booth-dock-status'), /PDF 파일을 다시 만들어 주세요/);
+  assert.match(h.text('booth-dock-status'), /「← 고치기」에서 「다음」을 다시 눌러 주세요/);
   assert.equal(h.ids.get('booth-next').disabled, false);
   ws.edits = Array.from({length: 4}, (_, index) => ({enabled: true, pageIndex: index, segmentId: 's' + index, before: 'before ' + index, after: 'after ' + index}));
   h.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
@@ -664,13 +670,13 @@ test('a failed 다음 stays in edit with a clear message', async () => {
   h.doc.dispatchEvent(generated(ws.edits));
   await settle();
   assert.equal(h.step(), 'edit');
-  assert.equal(h.text('booth-dock-status'), '고친 곳이 4개예요. 제출하려면 3개 이하로 남겨 주세요.');
+  assert.equal(h.text('booth-dock-status'), '고친 곳은 3개까지 제출할 수 있어요. 지금은 4개예요.');
   ws.edits = ONE_EDIT;
   h.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
   h.ids.get('booth-next').click();
   h.doc.dispatchEvent({type: 'falsify:paper-generated', detail: {file: new File([SOURCE_BYTES], 'same.pdf', {type: 'application/pdf'}), sourceFileHash: SOURCE_SHA, edits: ONE_EDIT}});
   await settle();
-  assert.match(h.text('booth-dock-status'), /원본과 같습니다/);
+  assert.match(h.text('booth-dock-status'), /아직 원본과 같아요/);
   h.ids.get('paper-generate').disabled = true;
   h.ids.get('booth-next').click();
   await settle();
@@ -701,7 +707,7 @@ test('send declares chips and reasons and posts only the contract fields', async
   declare(h, '', '유의수준을 바꿔 결론이 성립하지 않음');
   h.ids.get('booth-nickname').value = '부스방문자';
   await submit(h);
-  assert.equal(h.text('booth-submit-status'), '수정본 PDF는 16MB 이하만 제출할 수 있습니다.');
+  assert.equal(h.text('booth-submit-status'), '수정본 PDF는 16MB까지 제출할 수 있어요.');
   assert.equal(h.step(), 'send');
   await submit(h);
   const posts = h.calls.filter(call => call.path.endsWith('/v1/booth/submissions'));
@@ -751,13 +757,13 @@ test('consent shows a three-line summary, the full versioned text and refuses un
   old.handle.destroy();
   const unknown = liveBooth({consentVersion: '2026-11-22.v9'});
   await settle();
-  assert.match(unknown.text('booth-consent-copy'), /새 동의 문구가 없어 제출할 수 없습니다/);
-  assert.match(unknown.text('booth-consent-summary'), /새 동의 문구가 없어/);
+  assert.equal(unknown.text('booth-consent-copy'), '동의 문구가 새로 바뀌었어요. 페이지를 새로 고친 뒤 제출해 주세요.');
+  assert.match(unknown.text('booth-consent-summary'), /동의 문구가 새로 바뀌었어요/);
   assert.equal(unknown.text('booth-consent-version'), '');
   assert.equal(unknown.ids.get('booth-consent').disabled, true);
   await submitThroughBooth(unknown);
   assert.equal(unknown.calls.some(call => call.path.endsWith('/v1/booth/submissions')), false);
-  assert.match(unknown.text('booth-submit-status'), /새 동의 문구가 없어/);
+  assert.match(unknown.text('booth-submit-status'), /동의 문구가 새로 바뀌었어요/);
   assert.equal(unknown.ids.get('booth-submit-button').disabled, true);
   unknown.handle.destroy();
   assert.deepEqual(plain(booth.consentSummaryFor('2026-11-22.v2')), lines);
@@ -886,12 +892,12 @@ test('a wrong claim stays on 내 기록 with the reason', async () => {
   h.ids.get('booth-claim-key').value = 'bad';
   h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
   await settle();
-  assert.match(h.text('booth-result-error'), /접수번호 또는 확인키가 맞지 않습니다/);
+  assert.match(h.text('booth-result-error'), /접수번호와 확인키를 다시 확인해 볼까요\?/);
   h.ids.get('booth-claim-key').value = '7Q3K-M9XD';
   h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
   await settle();
   assert.equal(h.step(), 'pick');
-  assert.match(h.text('booth-result-error'), /접수번호 또는 확인키가 맞지 않습니다/);
+  assert.match(h.text('booth-result-error'), /접수번호와 확인키를 다시 확인해 볼까요\?/);
   h.ids.get('booth-records-back').click();
   assert.equal(h.ids.get('booth-result').hidden, true);
   assert.equal(h.ids.get('booth-landing').hidden, false);
@@ -901,9 +907,9 @@ test('a wrong claim stays on 내 기록 with the reason', async () => {
 test('every final outcome shows its headline, stamp and gift ticket', async () => {
   const cases = [
     ['caught', 'AI가 찾아냈어요', '찾아냈어요', 'booth-stamp fail', '적발DETECTED'],
-    ['partial', 'AI가 거의 찾았어요', '거의 찾았어요', 'booth-stamp fail', '적발DETECTED'],
+    ['partial', 'AI가 근처를 짚었어요', '근처를 짚었어요', 'booth-stamp fail', '적발DETECTED'],
     ['missed', 'AI가 못 찾았어요', '못 찾았어요', 'booth-stamp pass', '통과PASSED'],
-    ['invalid', '결함으로 인정되지 않았어요', '인정되지 않았어요', 'booth-stamp void', '무효VOID'],
+    ['invalid', '이번 도전은 무효로 끝났어요', '무효로 끝났어요', 'booth-stamp void', '무효VOID'],
   ];
   for (const [outcome, title, strong, stampClass, stampText] of cases) {
     for (const prize of ['prize ' + outcome, '']) {
@@ -923,6 +929,8 @@ test('every final outcome shows its headline, stamp and gift ticket', async () =
       assert.equal(h.text('booth-live-prize'), prize);
       assert.match(h.text('booth-live-note'), new RegExp('note ' + outcome + '$'));
       assert.equal(h.ids.get('booth-live-tip').hidden, !(outcome === 'caught' || outcome === 'partial'));
+      assert.equal(h.ids.get('booth-live-sub').hidden, outcome !== 'partial', outcome + ' sub-copy');
+      assert.equal(h.text('booth-live-sub'), outcome === 'partial' ? '결함 근처까지 짚으면 적발로 봐요.' : '');
       assert.equal(h.ids.get('booth-ticket-duration-cell').hidden, true, 'no publishedAt, no duration');
       assert.equal(h.ids.get('booth-live-again').hidden, false);
       assert.equal(h.timers.length, 0);
@@ -938,9 +946,20 @@ test('every final outcome shows its headline, stamp and gift ticket', async () =
   await settle();
   assert.equal(w.ids.get('booth-withdraw-box').tagName, 'details');
   assert.equal(w.text('booth-withdraw-box').startsWith('제출 철회'), true);
-  assert.equal(w.ids.get('booth-withdraw-confirm').hidden, true);
+  // The confirm stage replaces the first button: 취소 (outline) and 철회하기 (fail outline) under the warning.
+  assert.equal(w.ids.get('booth-withdraw-ask').hidden, true);
+  assert.equal(w.ids.get('booth-withdraw').hidden, false);
   w.ids.get('booth-withdraw').click();
-  assert.equal(w.ids.get('booth-withdraw-confirm').hidden, false);
+  assert.equal(w.ids.get('booth-withdraw-ask').hidden, false);
+  assert.equal(w.ids.get('booth-withdraw').hidden, true, 'the first button gives way');
+  assert.equal(w.text('booth-withdraw-ask'), '철회하면 되돌릴 수 없고, 선물과 추첨 기회도 함께 사라져요.취소철회하기');
+  assert.equal(w.ids.get('booth-withdraw-cancel').className, 'booth-btn line');
+  assert.equal(w.ids.get('booth-withdraw-confirm').className, 'booth-btn line danger');
+  w.ids.get('booth-withdraw-cancel').click();
+  assert.equal(w.ids.get('booth-withdraw-ask').hidden, true);
+  assert.equal(w.ids.get('booth-withdraw').hidden, false);
+  assert.equal(w.calls.some(call => call.path.endsWith('/v1/booth/withdraw')), false);
+  w.ids.get('booth-withdraw').click();
   assert.equal(w.calls.some(call => call.path.endsWith('/v1/booth/withdraw')), false);
   w.ids.get('booth-withdraw-confirm').click();
   await settle();
@@ -953,6 +972,47 @@ test('every final outcome shows its headline, stamp and gift ticket', async () =
   assert.equal(w.ids.get('booth-live-again').hidden, false);
   assert.equal(w.timers.length, 0);
   w.handle.destroy();
+});
+
+/* ux-ai-assist P0-2: AI-made edits keep their source on the send card. */
+test('the send card names an AI-assisted edit and its recipe code', async () => {
+  const cases = [
+    [{assist: 'agent', recipeCode: 'R-7K3QXM'}, 'AI와 숨긴 결함 · 2쪽', 'AI 제안 · R-7K3QXM'],
+    [{assist: 'my-ai'}, 'AI와 숨긴 결함 · 2쪽', 'AI 제안'],
+    [{assist: 'manual'}, '내가 숨긴 결함 · 2쪽', null],
+    [null, '내가 숨긴 결함 · 2쪽', null],
+  ];
+  try {
+    for (const [info, title, chipText] of cases) {
+      boothContext.FalsifyBoothRecipe = info ? {assist: () => info} : {};
+      const h = liveBooth();
+      await settle();
+      await reachSend(h);
+      const card = nodesOf(h.ids.get('booth-rows')).find(node => node.className === 'booth-panel booth-card');
+      assert.equal(nodesOf(card).find(node => node.className === 'booth-klab').textContent, title);
+      const aiChip = nodesOf(card).find(node => node.className === 'booth-ai-chip');
+      assert.equal(aiChip ? aiChip.textContent : null, chipText);
+      h.handle.destroy();
+    }
+  } finally {
+    delete boothContext.FalsifyBoothRecipe;
+  }
+});
+
+/* ux-booth P0-3: only AI verdicts show a 검증 시간; an operator's invalid call is not an AI wait. */
+test('the ticket shows 검증 시간 for AI verdicts only', async () => {
+  for (const [outcome, shown] of [['missed', true], ['partial', true], ['invalid', false]]) {
+    const h = liveBooth({claims: [{receipt: 'F-0042', status: outcome === 'invalid' ? 'invalid' : 'judged', course: 'quick', declaredCount: 1,
+      published: true, outcome, publicNote: 'note', createdAt: '2026-11-22T01:00:00Z', publishedAt: '2026-11-22T01:05:00Z'}]});
+    await settle();
+    h.ids.get('booth-claim-receipt').value = 'F-0042';
+    h.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+    h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+    await settle();
+    assert.equal(h.ids.get('booth-ticket-duration-cell').hidden, !shown, outcome);
+    assert.equal(h.text('booth-ticket-duration'), shown ? '5분' : '', outcome);
+    h.handle.destroy();
+  }
 });
 
 /* Desktop layout nodes (booth.css shows them at >=1024px only). */
@@ -991,6 +1051,10 @@ test('the desktop pick step adds the how-to list, the cap line and the mission c
   await settle();
   assert.equal(h.text('booth-howto'), '01논문 고르기미션 논문이나 공개 논문 하나02몰래 고치기숫자, 문장, 결론 어디든 한 곳 이상03AI 검증보통 1~3분, 접수번호로 결과 확인');
   assert.equal(h.text('booth-pick-limit'), '1인 3번까지 · 이름·연락처는 받지 않아요');
+  // Phones see the rules line and the how-to too: neither is a desktop-only node, and the line follows the hero.
+  for (const id of ['booth-howto', 'booth-pick-limit']) assert.equal(h.ids.get(id).className.split(' ').includes('booth-desk'), false, id);
+  const intro = h.ids.get('booth-pick-limit').parentNode.children;
+  assert.equal(intro.indexOf(h.ids.get('booth-pick-limit')), intro.indexOf(h.ids.get('booth-howto')) - 1, 'the rules line sits above the how-to');
   assert.equal(h.ids.get('booth-mission-head').hidden, false);
   assert.equal(h.text('booth-mission-count'), '오늘의 미션 · 2');
   assert.match(h.text('booth-mission-head'), /티켓을 누르면 힌트 쪽이 열려요$/);
@@ -1138,6 +1202,7 @@ test('the 최종 추첨 panel shows only when the AI missed, and the stub carrie
     await settle();
     assert.equal(h.step(), 'ticket');
     assert.equal(h.ids.get('booth-final').hidden, outcome !== 'missed', outcome);
+    assert.equal(h.ids.get('booth-final').className, 'booth-panel booth-final', 'phones see the draw card too');
     assert.equal(h.text('booth-final'), '최종 추첨마감 후 더 정밀한 AI가 한 번 더 검증해요. 그때도 못 찾으면 최종 추첨 대상이에요.');
     assert.equal(h.ids.get('booth-live-records').hidden, false);
     assert.equal(h.text('booth-stub-receipt'), 'F-0042');
@@ -1174,11 +1239,11 @@ test('publicNote parses the three CLI templates and falls back to plain text', a
   const none = buildPublicNote({outcome: 'missed', first: null, templates});
   assert.deepEqual(plain(booth.parsePublicNote(caught)), {
     page: '9', quote: 'reducing detection and localization time by 10% and 43%',
-    opinion: 'Finding 5 and the results disagree.', text: 'AI가 심어 둔 결함을 찾았습니다.',
+    opinion: 'Finding 5 and the results disagree.', text: '내가 심어 둔 결함을 AI가 찾았어요.',
   });
   assert.deepEqual(plain(booth.parsePublicNote(partial)), {
     page: '9', quote: 'reducing detection and localization time by 10% and 43%',
-    opinion: 'Finding 5 and the results disagree.', text: 'AI가 심어 둔 결함에 거의 다가갔습니다. 이번에는 찾은 것으로 봅니다.',
+    opinion: 'Finding 5 and the results disagree.', text: '내가 심어 둔 결함 근처를 AI가 짚었어요.',
   });
   assert.deepEqual(plain(booth.parsePublicNote(missed)), {page: '', quote: '', opinion: '', text: missed});
   assert.deepEqual(plain(booth.parsePublicNote(none)), {page: '', quote: '', opinion: '', text: none});
@@ -1197,7 +1262,7 @@ test('publicNote parses the three CLI templates and falls back to plain text', a
   const note = nodesOf(h.ids.get('booth-live-note'));
   assert.equal(note.find(node => node.tagName === 'blockquote').textContent, 'reducing detection and localization time by 10% and 43%');
   assert.deepEqual(note.filter(node => node.className.startsWith('booth-klab')).map(node => node.textContent), ['AI 의견']);
-  assert.equal(h.text('booth-live-note'), 'AI가 심어 둔 결함을 찾았습니다.reducing detection and localization time by 10% and 43%AI 의견Finding 5 and the results disagree.');
+  assert.equal(h.text('booth-live-note'), '내가 심어 둔 결함을 AI가 찾았어요.reducing detection and localization time by 10% and 43%AI 의견Finding 5 and the results disagree.');
   assert.equal(h.text('booth-ticket-duration'), '2분 14초');
   h.handle.destroy();
 });
@@ -1241,6 +1306,34 @@ test('the diff shows only the changed region with a little context', () => {
   assert.equal(booth.formatDuration(98000), '1분 38초');
   assert.equal(booth.formatDuration(9000), '9초');
   assert.equal(booth.formatDuration(120000), '2분');
+});
+
+test('result polls use GET, and a Worker without that route falls back to POST once', async () => {
+  const pending = {receipt: 'F-0042', status: 'received', course: 'quick', declaredCount: 1, published: false};
+  const h = liveBooth({claims: [{status: 405, body: {error: {code: 'method_not_allowed'}}}, pending]});
+  await settle();
+  h.ids.get('booth-result-link').dispatchEvent({type: 'click', preventDefault() {}});
+  h.ids.get('booth-claim-receipt').value = 'F-0042';
+  h.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.deepEqual(h.claimCalls().map(call => call.method), ['GET', 'POST']);
+  assert.equal(h.claimCalls()[0].contentType, '', 'a GET poll sends no Content-Type, so no preflight');
+  assert.equal(h.step(), 'ticket');
+  await h.tick();
+  assert.equal(h.claimCalls().at(-1).method, 'POST', 'the fallback sticks');
+  h.handle.destroy();
+  const fresh = liveBooth({claims: [pending]});
+  await settle();
+  fresh.ids.get('booth-result-link').dispatchEvent({type: 'click', preventDefault() {}});
+  fresh.ids.get('booth-claim-receipt').value = 'F-0042';
+  fresh.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+  fresh.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  await fresh.tick();
+  assert.deepEqual(fresh.claimCalls().map(call => call.method), ['GET', 'GET']);
+  assert.deepEqual(fresh.claimCalls()[1].body, {receipt: 'F-0042', claimKey: '7Q3K-M9XD'});
+  fresh.handle.destroy();
 });
 
 test('a cold reload with a stored receipt resumes polling and lists receipts', async () => {
@@ -1292,13 +1385,13 @@ test('the guest cap gets a friendly line and search stays a secondary path', asy
   await settle();
   await submitThroughBooth(capped);
   assert.equal(capped.calls.filter(call => call.path.endsWith('/v1/booth/submissions')).length, 1);
-  assert.match(capped.text('booth-submit-status'), /한 사람당 5번까지 제출할 수 있어요/);
+  assert.match(capped.text('booth-submit-status'), /기회 5번을 모두 썼어요/);
   assert.equal(capped.step(), 'send');
   capped.handle.destroy();
   const fresh = liveBooth({submitStatus: 429});
   await settle();
   await submitThroughBooth(fresh);
-  assert.match(fresh.text('booth-submit-status'), /잠시 막혔어요/);
+  assert.match(fresh.text('booth-submit-status'), /지금 제출이 몰려 있어요\. 잠시 뒤 다시 눌러 주세요\./);
   assert.match(fresh.text('booth-submit-status'), /「내 기록」/);
   fresh.handle.destroy();
   const h = liveBooth();
@@ -1322,7 +1415,7 @@ test('the guest cap gets a friendly line and search stays a secondary path', asy
   guest.ids.get('booth-search-q').value = '통계';
   guest.ids.get('booth-search').dispatchEvent({type: 'submit', preventDefault() {}});
   await settle();
-  assert.match(guest.text('booth-search-status'), /게스트 세션/);
+  assert.match(guest.text('booth-search-status'), /연결이 끊겼어요/);
   guest.handle.destroy();
 });
 
@@ -1345,7 +1438,7 @@ test('a cold #booth-result load mints the guest session only for paper and submi
       })};
     }
     if (path.includes('/v1/papers/pdf')) return pdfReply();
-    const payload = path.endsWith('/v1/booth/claim')
+    const payload = path.split('?')[0].endsWith('/v1/booth/claim')
       ? {receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1, published: false}
       : path.endsWith('/v1/booth/submissions')
         ? {receipt: 'F-0042', claimKey: '7Q3K-M9XD', status: 'received', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:00Z'}
@@ -1388,7 +1481,7 @@ test('a cold #booth-result load mints the guest session only for paper and submi
   cold.ids.get('booth-claim-key').value = '7Q3K-M9XD';
   cold.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
   await settle();
-  assert.equal(guestCalls.find(call => call.url.endsWith('/v1/booth/claim')).auth, '');
+  assert.equal(guestCalls.find(call => call.url.split('?')[0].endsWith('/v1/booth/claim')).auth, '');
   assert.equal(cold.doc.documentElement.dataset.boothStep, 'ticket');
   assert.equal(guestCalls.some(call => call.url.endsWith('/v1/ai/guest')), false);
   nodesOf(cold.ids.get('booth-receipt')).find(node => node.id === 'booth-live-again').hidden = false;
@@ -1403,7 +1496,7 @@ test('a cold #booth-result load mints the guest session only for paper and submi
   cold.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
   cold.ids.get('booth-next').click();
   cold.doc.dispatchEvent(generated([]));
-  await waitFor(() => /3개 이하로 남겨 주세요/.test(cold.ids.get('booth-dock-status').textContent));
+  await waitFor(() => /고친 곳은 3개까지 제출할 수 있어요/.test(cold.ids.get('booth-dock-status').textContent));
   assert.equal(cold.doc.documentElement.dataset.boothStep, 'edit');
   useWorkspace(ONE_EDIT);
   cold.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
@@ -1437,7 +1530,7 @@ test('each claim state maps to the visitor ticket copy', () => {
     title: 'AI가 찾아냈어요', lead: 'AI가 ', strong: '찾아냈어요', stamp: {kind: 'fail', word: '적발', latin: 'DETECTED'},
   });
   const partial = booth.resultView({status: 'judged', published: true, outcome: 'partial', publicNote: '쪽은 맞았어요'});
-  assert.equal(partial.title, 'AI가 거의 찾았어요');
+  assert.equal(partial.title, 'AI가 근처를 짚었어요');
   assert.equal(partial.stamp.word, '적발');
   assert.equal(partial.prize, '');
   const missed = booth.resultView({status: 'judged', published: true, outcome: 'missed', publicNote: 'Opus 라운드로 갑니다', prizeMessage: '부스에서 스티커를 받아 가세요'});
@@ -1445,9 +1538,9 @@ test('each claim state maps to the visitor ticket copy', () => {
   assert.equal(missed.prize, '부스에서 스티커를 받아 가세요');
   assert.deepEqual(plain(missed.stamp), {kind: 'pass', word: '통과', latin: 'PASSED'});
   const invalid = booth.resultView({status: 'invalid', published: true, outcome: 'invalid', publicNote: '바뀐 곳이 없어요'});
-  assert.equal(invalid.title, '결함으로 인정되지 않았어요');
+  assert.equal(invalid.title, '이번 도전은 무효로 끝났어요');
   assert.equal(invalid.stamp.word, '무효');
-  assert.equal(booth.resultView({status: 'invalid', published: true}).title, '결함으로 인정되지 않았어요');
+  assert.equal(booth.resultView({status: 'invalid', published: true}).title, '이번 도전은 무효로 끝났어요');
   const judged = booth.resultView({status: 'judged', published: true, outcome: 'mystery'});
   assert.equal(judged.title, '결과가 나왔어요');
   assert.equal(judged.stamp, null);
@@ -1551,11 +1644,35 @@ test('the claim poll runs every 15 s for 3 min, every 30 s to 15 min, and honour
   assert.equal(booth.retryAfterMs(null, at), 0);
 });
 
+test('consent shows no text until the server names its version, so no older copy flashes', async () => {
+  let open;
+  const configGate = new Promise(resolve => { open = resolve; });
+  const h = liveBooth({consentVersion: '2026-11-22.v3', configGate});
+  await settle();
+  assert.equal(h.text('booth-consent-copy'), '');
+  assert.equal(h.text('booth-consent-version'), '');
+  assert.equal(h.text('booth-consent-summary'), '');
+  assert.equal(h.text('booth-consent-panel').includes('OpenAI'), false);
+  assert.equal(h.ids.get('booth-consent').disabled, true);
+  assert.equal(h.ids.get('booth-consent').checked, false);
+  open();
+  await settle();
+  assert.equal(h.text('booth-consent-copy'), booth.CONSENT_COPY['2026-11-22.v3']);
+  assert.equal(h.text('booth-consent-version'), '동의 버전 · 2026-11-22.v3');
+  assert.match(h.text('booth-consent-summary'), /^수정본 PDF만 AI\(Anthropic\)에 보내요\./);
+  assert.equal(h.ids.get('booth-consent').disabled, false);
+  h.handle.destroy();
+});
+
 test('consent copy is a map keyed by version and an unknown version has no text', () => {
-  assert.deepEqual(Object.keys(booth.CONSENT_COPY), ['2026-11-22.v1', '2026-11-22.v2']);
+  assert.deepEqual(Object.keys(booth.CONSENT_COPY), ['2026-11-22.v1', '2026-11-22.v2', '2026-11-22.v3']);
   assert.equal(booth.consentCopyFor('2026-11-22.v1'), booth.CONSENT_COPY['2026-11-22.v1']);
   assert.equal(booth.consentCopyFor('2026-11-22.v2'), '제출한 수정본 PDF와 결함 설명(쪽·유형·이유)은 가짜연구소 Falsify 스터디가 저장하고 운영자가 읽습니다. 제출하면 바로 수정본 PDF만 AI 검증을 위해 모델 제공자(Anthropic)에 보내고, 마감 후 한 번 더 보낼 수 있습니다. 결함 설명은 AI에 보내지 않습니다. 이름·연락처는 받지 않으니 이유란에도 적지 마세요. 원 논문은 미션이나 검색에서 고른 공개 논문(CC BY·CC BY-SA·CC0)이며, 수정본을 스터디 밖에 공개할 때는 저자·arXiv 번호·라이선스와 수정 사실을 밝히고, CC BY-SA 논문의 수정본은 같은 라이선스로 공개합니다. AI 결과와 경품 안내는 접수번호와 확인키로만 확인할 수 있습니다. 확인키로 언제든 철회할 수 있습니다. 철회하면 서버의 수정본 PDF·설명·결과를 바로 지우고, 운영자 보관본은 다음 동기화 때 지웁니다. 이미 AI 검증에 보낸 사본은 모델 제공자에게서 회수할 수 없고, 웹 실행 서버 사본은 7일, 데이터베이스 백업은 최대 30일 뒤에 사라집니다. 보관 자료는 스터디 종료 후 삭제합니다.');
-  assert.equal(booth.consentCopyFor('2026-11-22.v3'), '');
+  assert.equal(booth.consentCopyFor('2026-11-22.v3'), '제출한 수정본 PDF와 결함 설명(쪽·유형·이유)은 가짜연구소 Falsify 스터디가 저장하고 운영자가 읽어요. 제출하면 수정본 PDF만 AI 검증을 위해 모델 제공자(Anthropic)에 바로 보내고, 마감 후 한 번 더 보낼 수 있어요. 결함 설명은 AI에 보내지 않아요. 이름과 연락처는 받지 않으니, 이유란에는 결함 설명만 적어 주세요. 원 논문은 미션이나 검색에서 고른 공개 논문(CC BY, CC BY-SA, CC0)이에요. 수정본을 스터디 밖에 공개할 때는 저자, arXiv 번호, 라이선스와 수정 사실을 밝히고, CC BY-SA 논문의 수정본은 같은 라이선스로 공개해요. AI 결과와 경품 안내는 접수번호와 확인키로만 볼 수 있어요. 확인키로 언제든 철회할 수 있어요. 철회하면 서버의 수정본 PDF, 설명, 결과를 바로 지우고, 운영자 보관본은 다음 동기화 때 지워요. 이미 AI 검증에 보낸 사본은 모델 제공자에게서 회수할 수 없어요. 웹 실행 서버 사본은 7일, 데이터베이스 백업은 최대 30일 뒤에 사라져요. 보관 자료는 스터디가 끝나면 삭제해요.');
+  assert.equal(booth.consentCopyFor('2026-11-22.v3').includes('OpenAI'), false);
+  assert.deepEqual(Object.keys(booth.CONSENT_SUMMARY), ['2026-11-22.v1', '2026-11-22.v2', '2026-11-22.v3']);
+  assert.deepEqual(plain(booth.consentSummaryFor('2026-11-22.v3')), plain(booth.consentSummaryFor('2026-11-22.v2')));
+  assert.equal(booth.consentCopyFor('2026-11-22.v4'), '');
   assert.equal(booth.consentCopyFor('toString'), '');
   assert.equal(booth.consentCopyFor(undefined), '');
   assert.equal(booth.CONSENT_VERSION, '2026-11-22.v1');
@@ -1572,7 +1689,7 @@ test('the result view lists this browser\'s newest 5 receipts', () => {
   assert.equal(recent[0].claimKey, '7Q3K-M9XD');
   assert.equal(booth.readReceipts(storage).length, 7);
   assert.equal(booth.recentReceipts(null).length, 0);
-  assert.match(booth.capMessage(5), /5번까지/);
+  assert.match(booth.capMessage(5), /^기회 5번을 모두 썼어요\. /);
 });
 
 class El extends EventTarget {

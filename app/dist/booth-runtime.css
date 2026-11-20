@@ -1,0 +1,19 @@
+/* booth-runtime.js: 다시 시도, saved-progress question, kiosk hand-off and idle warning.
+   Kiosk controls are touch-first (tablet): 48px or larger targets, no hover-only state. */
+.booth .booth-retry{margin-top:6px}
+.booth .booth-retry[hidden]{display:none}
+.booth-resume{margin:0 0 14px}
+.booth-resume-text{margin:0;font-size:16px;font-weight:600;color:var(--ev-ink)}
+.booth-resume-actions{display:flex;flex-wrap:wrap;gap:10px}
+.booth .booth-handoff{display:inline-flex;align-items:center;justify-content:center;min-height:48px;min-width:48px;margin-left:auto;padding:0 18px;border:1px solid var(--ev-ink);border-radius:8px;background:var(--ev-card);color:var(--ev-ink);font:inherit;font-size:15px;font-weight:600;white-space:nowrap;cursor:pointer;touch-action:manipulation}
+.booth .booth-handoff:focus-visible{outline:3px solid var(--ev-ink);outline-offset:2px}
+.booth-deskbar .booth-handoff{margin-left:20px}
+html[data-booth-step="edit"] .booth-handoff,html[data-booth-step="send"] .booth-handoff{display:none}
+.booth-kiosk-dialog{word-break:keep-all;width:min(560px,calc(100vw - 32px));padding:32px;border:0;border-radius:12px;background:#fff;color:#16191e;box-shadow:0 24px 64px rgba(22,25,30,.28);font-family:"Pretendard",-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Noto Sans KR","Malgun Gothic",sans-serif}
+.booth-kiosk-dialog::backdrop{background:rgba(22,25,30,.55)}
+.booth-kiosk-title{margin:0 0 12px;font-size:32px;line-height:1.25;font-weight:600;letter-spacing:-.02em;text-wrap:balance}
+.booth-kiosk-text{margin:0 0 24px;font-size:20px;line-height:1.5;color:#3a3f47}
+.booth-kiosk-actions{display:flex;flex-wrap:wrap;gap:12px}
+.booth-kiosk-btn{flex:1 1 160px;min-height:56px;padding:0 20px;border:1px solid #16191e;border-radius:8px;background:#fff;color:#16191e;font:inherit;font-size:19px;font-weight:600;cursor:pointer;touch-action:manipulation}
+.booth-kiosk-btn.ink{background:#16191e;color:#fff}
+.booth-kiosk-btn:focus-visible{outline:3px solid #16191e;outline-offset:3px}

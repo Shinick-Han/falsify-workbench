@@ -1,0 +1,112 @@
+/* In-place page editing (booth-pageedit.js). event.html only, loaded after booth-patch.css.
+   Ticket tokens (--ev-*) come from booth.css. Calm: hairlines, one ink box, a small white popover.
+   Tap targets are at least 44px; inputs are 16px or more so iOS does not zoom. */
+
+/* Words on the page are the targets: no native text selection or callout while tapping. */
+html[data-booth-step] #paper-before-stage .paper-text-layer{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+html[data-booth-step] #paper-before-stage .paper-text-layer :is(span,br){cursor:pointer}
+html[data-booth-step] #paper-before-stage>.paper-page{-webkit-tap-highlight-color:transparent}
+
+/* The bar above the page (phones): a one-line tip and 전체 쪽 while zoomed. */
+.booth-pe-bar{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:44px;margin:0 0 6px}
+.booth-pe-tip{flex:1 1 auto;min-width:0;margin:0;font-size:12.5px;line-height:1.45;color:var(--ev-muted,#6b717a)}
+.booth-pe-fit{flex:none;min-height:44px;min-width:44px;padding:0 14px;border:1px solid var(--ev-ink,#16191e);border-radius:8px;background:var(--ev-card,#fff);color:var(--ev-ink,#16191e);font:500 13.5px/1 var(--ev-sans,sans-serif);cursor:pointer}
+.booth-pe-fit[hidden]{display:none}
+.booth-pe-tools{flex:none;display:flex;gap:6px}
+.booth-pe-zoom{padding:0;width:44px;font-size:18px}
+.booth-pe-fit:disabled{opacity:.4;cursor:default}
+.booth-pe-desk-tip{display:none;margin:0;font-size:13px;line-height:1.5;color:var(--ev-ink-2,#3a3f47)}
+.booth-pe-desk-tip>p{margin:0}
+.booth-pe-desk-tip>.booth-pe-keys{margin-top:2px;font-size:12px;color:var(--ev-muted,#6b717a)}
+
+/* Touch model (any width): while a text field or the edit bar has focus the dock steps aside; the keyboard needs the room. */
+html.booth-pe-typing .booth-dock{display:none}
+
+/* Zoom mode: the stage becomes a pannable box over the page drawn at 2.5-3.5x (phones) or the
+   workspace's +/- zoom (desktop). */
+@media (min-width:1024px){
+  html.booth-pe-zoomed[data-booth-step="edit"] #paper-before-stage{overflow:auto;max-height:calc(100vh - 180px);max-height:calc(100dvh - 180px)}
+}
+@media (max-width:1023.98px){
+  /* A page drawn for a wider column never widens the document while it is redrawn for the new one. */
+  html[data-booth-step] #paper-workspace .paper-compare{overflow-x:clip}
+  html.booth-pe-zoomed[data-booth-step="edit"] #paper-before-stage{
+    display:block;overflow:auto;max-height:min(66vh,600px);max-height:min(66dvh,600px);
+    overscroll-behavior:contain;-webkit-overflow-scrolling:touch;touch-action:pan-x pan-y;
+    border-radius:4px;background:var(--ev-card,#fff);box-shadow:inset 0 0 0 1px var(--ev-hair,#d6d9dd)
+  }
+  html.booth-pe-zoomed[data-booth-step="edit"] #paper-before-stage>.paper-page{margin:0;flex:none}
+  html.booth-pe-zoomed[data-booth-step="edit"] #paper-before-stage>.paper-page>canvas{border-radius:0;box-shadow:none}
+}
+
+/* The selected word: a thin ink box just outside the glyphs. */
+.booth-pe-sel{position:absolute;z-index:2;box-sizing:content-box;margin:-2px 0 0 -2px;padding:1px;border:1.5px solid var(--ev-ink,#16191e);border-radius:2px;background:color-mix(in srgb,var(--ev-mark,#e3e9f1) 35%,transparent);pointer-events:none}
+
+/* The popover, anchored to the selected word (fixed; booth-pageedit.js places it). */
+.booth-pe-pop{
+  position:fixed;z-index:45;box-sizing:border-box;width:min(320px,calc(100vw - 16px));margin:0;padding:12px;
+  display:grid;gap:8px;grid-template-columns:auto minmax(0,1fr) auto;
+  grid-template-areas:"label label label" "input input input" "apply whole cancel" "status status status";background:var(--ev-card,#fff);color:var(--ev-ink,#16191e);
+  border:1px solid var(--ev-hair,#d6d9dd);border-radius:10px;box-shadow:0 10px 28px rgba(22,25,30,.16);
+  font-family:var(--ev-sans,sans-serif)
+}
+.booth-pe-pop[hidden]{display:none}
+.booth-pe-pop-label{grid-area:label;margin:0;font-size:11.5px;font-weight:500;line-height:1.4;color:var(--ev-muted,#6b717a);overflow-wrap:anywhere}
+.booth-pe-input{
+  grid-area:input;min-width:0;box-sizing:border-box;width:100%;min-height:44px;margin:0;padding:8px 10px;
+  border:1px solid var(--ev-ink,#16191e);border-radius:6px;background:#fff;color:#111;
+  font-family:"Times New Roman","Nimbus Roman","Liberation Serif","Noto Serif",serif;font-size:18px;line-height:1.3
+}
+.booth-pe-input:focus{outline:0;box-shadow:0 0 0 3px var(--ev-mark,#e3e9f1)}
+.booth-pe-pop>button{min-width:44px;min-height:44px;margin:0;padding:0 12px;border-radius:8px;font:500 14px/1.2 var(--ev-sans,sans-serif);white-space:nowrap;cursor:pointer}
+.booth-pe-apply{grid-area:apply;border:1px solid var(--ev-ink,#16191e);background:var(--ev-ink,#16191e);color:#fff}
+.booth-pe-whole{grid-area:whole;border:1px solid var(--ev-ink,#16191e);background:transparent;color:var(--ev-ink,#16191e);overflow:hidden;text-overflow:ellipsis}
+.booth-pe-whole:disabled{opacity:.36;cursor:not-allowed}
+.booth-pe-cancel{grid-area:cancel;border:0;background:transparent;color:var(--ev-ink-2,#3a3f47)}
+.booth-pe-step{display:none;border:1px solid var(--ev-hair,#d6d9dd);background:var(--ev-card,#fff);color:var(--ev-ink,#16191e);font-size:20px!important;padding:0!important}
+.booth-pe-prev{grid-area:prev}
+.booth-pe-next{grid-area:next}
+.booth-pe-pop>button:focus-visible{outline:2px solid var(--ev-ink,#16191e);outline-offset:2px}
+.booth-pe-status{grid-area:status;margin:0;font-size:12.5px;line-height:1.45;color:var(--ev-fail,#8a3030);overflow-wrap:anywhere}
+.booth-pe-status:empty{display:none}
+
+/* Phones: the editor is a bar pinned just above the soft keyboard (bottom set from visualViewport). */
+.booth-pe-pop.is-bar{
+  left:0;right:0;top:auto;width:auto;border-radius:12px 12px 0 0;border-width:1px 0 0;
+  padding:10px 12px calc(10px + env(safe-area-inset-bottom,0px));box-shadow:0 -8px 24px rgba(22,25,30,.12);
+  grid-template-columns:44px minmax(0,1fr) 44px auto;
+  grid-template-areas:"label label label cancel" "prev input next apply" "whole whole whole whole" "status status status status"
+}
+.booth-pe-pop.is-bar .booth-pe-step{display:block}
+.booth-pe-pop.is-bar .booth-pe-pop-label{align-self:center;font-size:12.5px;color:var(--ev-ink-2,#3a3f47)}
+.booth-pe-pop.is-bar .booth-pe-cancel{min-height:36px;padding:0 4px}
+.booth-pe-pop.is-bar .booth-pe-whole{justify-self:start;min-height:40px;padding:0 2px;border:0;background:transparent;color:var(--ev-ink-2,#3a3f47);font-size:13px;text-decoration:underline;text-underline-offset:3px}
+
+/* Desktop: the word under a fine pointer gets a hairline at once. */
+.booth-pe-hover{position:absolute;z-index:2;margin:0 0 0 -1px;padding:0 1px;border-bottom:1.5px solid var(--ev-ink,#16191e);background:color-mix(in srgb,var(--ev-mark,#e3e9f1) 30%,transparent);pointer-events:none}
+
+/* A patched word shows only the patch, not the workspace's change mark over it. */
+#paper-before-stage .paper-change-mark.booth-pe-covered{display:none}
+
+/* The paragraph editor as a paper sheet: label and a sharp crop of the paragraph above the text. */
+#paper-before-stage>.paper-page>.booth-pe-head{
+  grid-row:2;grid-column:1;position:relative;z-index:1;display:grid;gap:8px;align-content:start;
+  margin:24px calc(14px - var(--tk-inset,0px)) 0;min-width:0
+}
+.booth-pe-head-label{margin:0;font-size:12px;font-weight:500;line-height:18px;color:var(--ev-muted,#6b717a)}
+.booth-pe-crop{display:block;justify-self:center;max-width:100%;background:#fff;border:1px solid var(--ev-hair,#d6d9dd);border-radius:2px}
+#paper-before-stage>.paper-page.booth-pe-editing>textarea{margin-top:12px}
+
+@media (min-width:1024px){
+  .booth-pe-bar{display:none}
+  #paper-workspace .paper-toolbar:has(>.booth-pe-tools){grid-template-columns:auto 1fr auto auto}
+  .booth-pe-desk-tip{display:block}
+  #paper-before-stage>.paper-page>.booth-pe-head{
+    position:absolute;grid-column:2/3;grid-row:1/2;inset:14px 18px auto 18px;margin:0;height:var(--dk-head,26px)
+  }
+}
+
+/* A touch tablet at desktop width: the edit bar sits over the page column (left and width set from the stage), above the keyboard. */
+@media (min-width:1024px){
+  .booth-pe-pop.is-bar{right:auto;max-width:100vw;border-width:1px 1px 0}
+}

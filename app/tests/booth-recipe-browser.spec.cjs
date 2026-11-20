@@ -94,7 +94,7 @@ async function stubApi(route, log) {
     log.submissions.push(body);
     return json(route, 201, {receipt: 'F-0043', claimKey: '7Q3K-M9XD', status: 'received', course: 'quick', declaredCount: 2, createdAt: '2026-11-22T01:00:00.000Z'});
   }
-  if (request.method() === 'POST' && url.pathname === '/v1/booth/claim') {
+  if (url.pathname === '/v1/booth/claim' && (request.method() === 'GET' || request.method() === 'POST')) {
     return json(route, 200, {receipt: 'F-0043', status: 'reviewing', course: 'quick', declaredCount: 2, createdAt: '2026-11-22T01:00:00.000Z', published: false});
   }
   return json(route, 404, {error: {code: 'not_found'}});
@@ -161,9 +161,23 @@ async function findAndReplace(browser, log, errors, wide) {
   await stepIs(page, 'edit');
   await page.waitForFunction(() => [...document.querySelectorAll('.paper-paragraph-button')].some(node => node.textContent.includes('0.95')));
   assert.deepEqual(await page.locator('.booth-tabs [role=tab]').allTextContents(), ['직접 고치기', '내 AI에게', 'Agent 코드']);
-  assert.equal(await page.evaluate(() => document.documentElement.classList.contains('booth-find-mode')), true);
-  assert.equal(await page.locator('.paper-paragraph-list').first().isVisible(), wide, 'paragraph list collapsed in find mode on phones, beside the page on desktop');
-  const pane = page.locator('#booth-pane-find');
+  // The page is the editor on event.html; the paragraph list is visually hidden (still read by screen readers).
+  assert.equal(await page.locator('#booth-find-list').count(), 0, 'no paragraph list toggle');
+  assert.ok((await page.locator('.paper-paragraph-list').first().evaluate(node => node.getBoundingClientRect().width)) <= 1, 'paragraph list visually hidden');
+  // Phones: the page comes right after the tabs; find-and-replace is a closed 「찾아 바꾸기」 below it.
+  const pane = page.locator(wide ? '#booth-pane-find' : '#booth-find-fold');
+  if (!wide) {
+    const more = page.locator('#booth-find-fold');
+    assert.equal(await more.evaluate(node => node.open), false, '찾아 바꾸기 starts closed');
+    assert.equal(await more.locator('summary').textContent(), '찾아 바꾸기');
+    const order = await page.evaluate(() => {
+      const top = selector => document.querySelector(selector).getBoundingClientRect().top;
+      return {tabs: top('.booth-tabs'), toolbar: top('#paper-workspace .paper-toolbar'), page: top('#paper-before-stage'), more: top('#booth-find-fold')};
+    });
+    assert.ok(order.tabs < order.toolbar && order.toolbar < order.page && order.page < order.more, 'phone order: tabs, page toolbar, page, 찾아 바꾸기 ' + JSON.stringify(order));
+    assert.equal(await page.locator('#booth-pane-find').getByLabel('바꿀 글자').count(), 0, 'no find form above the page');
+    await more.locator('summary').click();
+  }
   await pane.getByLabel('바꿀 글자').first().fill('0.78');
   await pane.locator('.booth-find-hit').first().waitFor();
   const hits = await pane.locator('.booth-find-hit').allTextContents();
@@ -177,15 +191,13 @@ async function findAndReplace(browser, log, errors, wide) {
   await pane.getByRole('button', {name: '바꾸기'}).first().click();
   await page.waitForFunction(() => document.querySelector('#booth-dock-count')?.textContent === '고친 곳 1개');
   assert.match(await page.locator('#paper-edits').textContent(), /0\.78 → 0\.87/);
+  // A find-and-replace edit is painted on the page like a word tap: a .booth-patch reading 0.87.
+  await page.waitForFunction(() => [...document.querySelectorAll('#paper-before-stage .booth-patch')].some(node => node.textContent === '0.87' && node.getBoundingClientRect().width > 0));
   assert.equal(await page.locator('#booth-next').isEnabled(), true);
   await pane.getByLabel('바꿀 글자').first().fill('the');
   await pane.locator('.booth-find-more').waitFor({state: 'visible'});
   assert.equal(await pane.locator('.booth-find-hit').count(), 20);
   assert.match(await pane.locator('.booth-find-more').textContent(), /^\d+곳 더 있어요/);
-  await page.locator('#booth-find-list').click();
-  assert.equal(await page.evaluate(() => document.documentElement.classList.contains('booth-find-mode')), false);
-  assert.equal(await page.locator('.paper-paragraph-list').first().isVisible(), true);
-  await page.locator('#booth-find-list').click();
   await page.locator('#booth-tab-myai').click();
   assert.equal(await page.locator('#booth-myai').count(), 1);
   const myaiReady = await page.evaluate(() => typeof globalThis.FalsifyBoothMyAI?.mount === 'function');
@@ -193,6 +205,11 @@ async function findAndReplace(browser, log, errors, wide) {
   await shoot(page, 'tab-myai', wide);
   await page.locator('#booth-tab-agent').click();
   assert.equal(await page.locator('#booth-agent-code').isVisible(), true);
+  assert.equal(await page.locator('#booth-agent-code').getAttribute('placeholder'), '예: R-7K3QXM');
+  assert.deepEqual(await page.locator('#booth-agent-code').evaluate(node => [node.getAttribute('autocapitalize'), node.getAttribute('autocomplete')]), ['characters', 'off']);
+  await page.locator('#booth-agent-code').fill('https://example.test/event.html#recipe=R-XYZ789');
+  assert.equal(await page.locator('#booth-agent-code').inputValue(), 'R-XYZ789', 'a pasted link leaves just the code');
+  await page.locator('#booth-agent-code').fill('');
   await shoot(page, 'tab-agent', wide);
 
   // A recipe over existing work asks first, inline (never window.confirm).
@@ -206,7 +223,7 @@ async function findAndReplace(browser, log, errors, wide) {
   });
   await page.locator('#booth-recipe-confirm').waitFor();
   assert.equal(await page.locator('#booth-recipe-confirm-text').textContent(), '지금 고친 곳 1개가 사라져요. 레시피를 불러올까요?');
-  assert.deepEqual(await page.locator('#booth-recipe-confirm button').allTextContents(), ['불러오기', '취소']);
+  assert.deepEqual(await page.locator('#booth-recipe-confirm button').allTextContents(), ['지금 것 지우고 불러오기', '지금 것 유지']);
   await shoot(page, 'recipe-confirm', wide);
   await page.locator('#booth-recipe-confirm-no').click();
   await page.waitForFunction(() => !document.querySelector('#booth-recipe-confirm'));
@@ -219,8 +236,9 @@ async function findAndReplace(browser, log, errors, wide) {
   });
   await page.locator('#booth-recipe-confirm').waitFor();
   assert.equal(await page.locator('#booth-recipe-confirm-text').textContent(), '지금 고친 곳 1개는 그대로 두고 레시피를 더해요. 레시피를 불러올까요?');
+  assert.deepEqual(await page.locator('#booth-recipe-confirm button').allTextContents(), ['더해서 불러오기', '그대로 두기']);
   await page.locator('#booth-recipe-confirm-yes').click();
-  await page.waitForFunction(() => document.querySelector('#booth-recipe-count')?.textContent === '적용 1곳 · 확인 필요 1곳');
+  await page.waitForFunction(() => document.querySelector('#booth-recipe-count')?.textContent === '1곳 적용 · 1곳은 직접 골라 주세요');
   await page.waitForFunction(() => document.querySelector('#booth-dock-count')?.textContent === '고친 곳 2개');
   assert.equal(log.recipes.length, fetched + 2);
   assert.equal(dialogs, 0, 'no window.confirm');
@@ -238,10 +256,12 @@ async function findAndReplace(browser, log, errors, wide) {
 async function recipeFlow(browser, log, errors, wide) {
   const page = await openPage(browser, '#recipe=r-abc123', log, errors, wide);
   await stepIs(page, 'edit');
-  await page.waitForFunction(() => /적용 \d+곳/.test(document.querySelector('#booth-recipe-count')?.textContent || ''));
+  await page.waitForFunction(() => /\d+곳 적용/.test(document.querySelector('#booth-recipe-count')?.textContent || ''));
   assert.equal(await page.locator('#booth-recipe-confirm').count(), 0, 'a fresh page needs no confirm');
-  assert.equal(await page.locator('#booth-recipe-count').textContent(), '적용 1곳 · 확인 필요 1곳');
-  assert.match(await page.locator('#booth-recipe-result').textContent(), /Claude Code · claude-opus-5-5 · R-ABC123/);
+  assert.equal(await page.locator('#booth-recipe-count').textContent(), '1곳 적용 · 1곳은 직접 골라 주세요');
+  assert.match(await page.locator('#booth-recipe-result').textContent(), /Claude Code · claude-opus-5-5 · R-ABC123 · (오늘|\d+월 \d+일) \d\d:\d\d까지 유효/);
+  await page.waitForFunction(() => document.querySelectorAll('#paper-edits .booth-recipe-ai-tag').length === 1);
+  assert.equal(await page.locator('#paper-edits .booth-recipe-ai-tag').textContent(), 'AI');
   assert.equal(log.recipes.at(-1), '/v1/booth/recipes/R-ABC123');
   assert.equal(await page.evaluate(() => location.hash), '', 'the recipe hash is consumed');
   assert.equal(await page.locator('#booth-tab-find').getAttribute('aria-selected'), 'true');
@@ -258,7 +278,7 @@ async function recipeFlow(browser, log, errors, wide) {
   await row.locator('.booth-find-hit').first().click();
   await row.getByRole('button', {name: '바꾸기'}).click();
   await page.waitForFunction(() => document.querySelector('#booth-dock-count')?.textContent === '고친 곳 2개');
-  assert.equal(await page.locator('#booth-recipe-count').textContent(), '적용 2곳 · 확인 필요 0곳');
+  assert.equal(await page.locator('#booth-recipe-count').textContent(), '2곳 적용했어요');
   assert.equal(await page.locator('#booth-recipe-fix').isHidden(), true);
 
   // 다음 builds the PDF exactly as for a manual edit; send shows both diffs.
@@ -272,6 +292,11 @@ async function recipeFlow(browser, log, errors, wide) {
   const first = cards.first();
   assert.equal(await first.locator('textarea').inputValue(), RECIPE.reason, 'recipe reason prefilled');
   assert.equal(await first.getByRole('button', {name: '수치·통계'}).getAttribute('aria-pressed'), 'true');
+  assert.equal(await first.locator('.booth-recipe-ai-pick').textContent(), 'AI 선택');
+  assert.equal(await first.locator('.booth-recipe-draft').textContent(), 'AI가 채운 초안 · 내 말로 고쳐도 돼요');
+  await first.locator('textarea').press('End');
+  await first.locator('textarea').pressSequentially(' 직접');
+  assert.equal(await first.locator('.booth-recipe-draft').textContent(), '내가 고침');
   const toggle = first.getByRole('button', {name: '수정본 쪽 보기'});
   await toggle.click();
   assert.equal(await first.locator('.booth-recipe-compare-toggle').getAttribute('aria-expanded'), 'true');

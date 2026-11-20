@@ -14,6 +14,14 @@ const api = 'https://falsify-cloud-api-event.ai-gongbu.workers.dev';
 const port = Number(process.env.BOOTH_EVENT_PORT || 8877);
 const token = 'fsg_' + 'a'.repeat(43);
 const pdfBytes = fs.readFileSync(pdfPath);
+/* Optional: BOOTH_SHOT_DIR saves pick, send-consent, ticket-missed and withdraw-confirm screenshots per viewport. */
+const shotDir = process.env.BOOTH_SHOT_DIR || '';
+
+async function shot(page, name, viewport) {
+  if (!shotDir) return;
+  fs.mkdirSync(shotDir, {recursive: true});
+  await page.screenshot({path: path.join(shotDir, name + '-' + viewport.width + 'x' + viewport.height + '.png'), fullPage: true});
+}
 
 function serve() {
   const child = spawn('python3', ['-m', 'http.server', String(port), '--bind', '127.0.0.1'], {
@@ -51,7 +59,7 @@ const cors = {
 const PENDING = {receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:00.000Z', published: false};
 const MISSED = {
   receipt: 'F-0042', status: 'judged', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:00.000Z',
-  published: true, outcome: 'missed', publicNote: 'AI는 다른 곳을 짚었습니다. AI가 먼저 본 곳은 7쪽이었고, 심어 둔 결함은 AI 눈을 피했습니다.',
+  published: true, outcome: 'missed', publicNote: 'AI는 다른 곳을 짚었어요. AI가 먼저 본 곳은 7쪽이었고, 심어 둔 결함은 AI 눈을 피했어요.',
   prizeMessage: '부스에서 스티커를 받아 가세요', publishedAt: '2026-11-22T01:02:00.000Z',
 };
 
@@ -75,7 +83,7 @@ async function stubApi(route, submissions, claims) {
   }
   if (url.pathname === '/v1/booth/config') {
     return json(route, 200, {
-      enabled: true, submissionsOpen: true, announcement: '행사 안내', consentVersion: '2026-11-22.v2',
+      enabled: true, submissionsOpen: true, announcement: '행사 안내', consentVersion: '2026-11-22.v3',
       limits: {maxDeclared: 5, maxReason: 500, maxNickname: 24, maxPdfBytes: 16777216},
       missions: [{
         paperId: '2309.15217',
@@ -100,8 +108,11 @@ async function stubApi(route, submissions, claims) {
       course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:00.000Z',
     });
   }
-  if (request.method() === 'POST' && url.pathname === '/v1/booth/claim') {
-    claims.push(JSON.parse(request.postData() || '{}'));
+  if (url.pathname === '/v1/booth/claim' && (request.method() === 'GET' || request.method() === 'POST')) {
+    // Result polls are a GET with the receipt and key in the query (no preflight); POST is the fallback.
+    claims.push(request.method() === 'GET'
+      ? {receipt: url.searchParams.get('receipt'), claimKey: url.searchParams.get('key')}
+      : JSON.parse(request.postData() || '{}'));
     return json(route, 200, claims.length <= 2 ? PENDING : MISSED);
   }
   return json(route, 404, {error: {code: 'not_found'}});
@@ -176,6 +187,21 @@ async function walk(browser, viewport, desk, pageErrors) {
   assert.match(await mission.textContent(), /5쪽도전 →/);
   assert.equal(await page.locator('#booth-search').isVisible(), desk, 'search is a closed disclosure on phones, one open row on desktop');
   await deskChecks(page, desk, 1);
+  // Rules before the first tap (ux-booth P0-1): the line under the hero and the 01/02/03 how-to, on phones too.
+  const limit = page.locator('#booth-pick-limit');
+  assert.equal(await limit.textContent(), '1인 5번까지 · 이름·연락처는 받지 않아요');
+  assert.equal(await limit.isVisible(), true, 'the rules line is visible');
+  assert.equal(await page.locator('#booth-howto').isVisible(), true, 'the how-to is visible');
+  assert.equal(await page.locator('#booth-howto li').count(), 3);
+  assert.doesNotMatch(await page.locator('#booth-step-pick').textContent(), /2분 안에/);
+  if (!desk) {
+    const hero = await page.locator('.booth-hero').boundingBox();
+    const line = await limit.boundingBox();
+    const howto = await page.locator('#booth-howto').boundingBox();
+    assert.equal(line.y >= hero.y + hero.height && howto.y >= line.y + line.height, true, 'hero, then the rules line, then the how-to');
+    assert.equal(line.y + line.height <= viewport.height, true, 'the rules line is above the fold');
+  }
+  await shot(page, 'pick', viewport);
   await mission.click();
   await stepIs(page, 'edit');
   await page.waitForFunction(() => [...document.querySelectorAll('.paper-paragraph-button')].some(node => node.textContent.includes('0.95')));
@@ -183,14 +209,15 @@ async function walk(browser, viewport, desk, pageErrors) {
   assert.equal(await page.locator('#booth-dock-count').textContent(), '고친 곳 0개');
   assert.equal(await page.locator('#booth-next').isDisabled(), true);
 
-  // edit: change one paragraph; the dock counts it and enables 다음. The paragraph list sits
-  // collapsed under the find-and-replace form (booth-recipe.js) on phones until 「문단 목록에서 고르기」;
-  // the desktop layout keeps it beside the page.
-  const listToggle = page.locator('#booth-find-list');
-  if (await listToggle.count() && await listToggle.isVisible()) {
-    assert.equal(await page.locator('.paper-paragraph-list').first().isVisible(), desk);
-    await listToggle.click();
+  // edit: change one paragraph; the dock counts it and enables 다음. On event.html the page itself is the
+  // editor (booth-pageedit.js); the paragraph list stays for screen readers and keyboards, visually hidden
+  // until it holds focus, so this walk opens the paragraph through it. Phones open zoomed: zoom out first.
+  assert.equal(await page.locator('#booth-find-list').count(), 0);
+  if (await page.locator('#booth-pe-fit').isVisible()) {
+    await page.locator('#booth-pe-fit').click();
+    await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() === 1);
   }
+  await page.waitForFunction(() => [...document.querySelectorAll('.paper-paragraph-button')].some(node => node.textContent.includes('0.95') && node.textContent.includes('0.78')));
   const paragraphIndex = await page.evaluate(() => {
     const hits = [...document.querySelectorAll('.paper-paragraph-button')].map((node, index) => ({
       index, length: node.textContent.length, text: node.textContent,
@@ -200,8 +227,8 @@ async function walk(browser, viewport, desk, pageErrors) {
   });
   assert.equal(paragraphIndex >= 0, true);
   const paragraph = page.locator('.paper-paragraph-button').nth(paragraphIndex);
-  await paragraph.scrollIntoViewIfNeeded();
-  await paragraph.click();
+  await paragraph.focus();
+  await page.keyboard.press('Enter');
   const editor = page.locator('textarea[aria-label$="직접 편집"]');
   await editor.waitFor();
   const original = await editor.inputValue();
@@ -220,8 +247,8 @@ async function walk(browser, viewport, desk, pageErrors) {
       .findIndex(node => !node.textContent.includes('0.95') && node.textContent.trim().length >= 20 && node.textContent.length <= 400));
     assert.equal(otherIndex >= 0, true);
     const other = page.locator('.paper-paragraph-button').nth(otherIndex);
-    await other.scrollIntoViewIfNeeded();
-    await other.click();
+    await other.focus();
+    await page.keyboard.press('Enter');
     await editor.waitFor();
     await editor.fill((await editor.inputValue()) + ' extra');
     await page.locator('.paper-direct-controls').getByRole('button', {name: '완료', exact: true}).click();
@@ -252,7 +279,7 @@ async function walk(browser, viewport, desk, pageErrors) {
   assert.equal(await card.locator('del').textContent(), '0.95');
   assert.equal(await card.locator('ins').textContent(), '0.50');
   assert.equal((await card.locator('.booth-diff').textContent()).length < 80, true, 'diff shows only the changed region');
-  assert.match(await card.textContent(), /이 설명은 AI에게 보내지 않아요/);
+  assert.match(await card.textContent(), /이 설명은 AI에게 보내지 않고 운영진만 봐요\./);
   await card.getByRole('button', {name: '수치·통계'}).click();
   assert.equal(await card.getByRole('button', {name: '수치·통계'}).getAttribute('aria-pressed'), 'true');
   await card.locator('textarea').fill('표의 점수를 0.95에서 0.50으로 바꿨습니다');
@@ -260,8 +287,10 @@ async function walk(browser, viewport, desk, pageErrors) {
   assert.equal(await page.locator('#booth-consent-summary li').first().textContent(), '수정본 PDF만 AI(Anthropic)에 보내요.');
   assert.equal(await page.locator('#booth-consent-copy').isVisible(), false);
   await page.locator('#booth-consent-full summary').click();
-  assert.match(await page.locator('#booth-consent-copy').textContent(), /제출하면 바로 수정본 PDF만 AI 검증을 위해 모델 제공자\(Anthropic\)에 보내고/);
-  assert.equal(await page.locator('#booth-consent-version').textContent(), '동의 버전 · 2026-11-22.v2');
+  assert.match(await page.locator('#booth-consent-copy').textContent(), /제출하면 수정본 PDF만 AI 검증을 위해 모델 제공자\(Anthropic\)에 바로 보내고/);
+  assert.doesNotMatch(await page.locator('#booth-consent-copy').textContent(), /OpenAI/);
+  assert.equal(await page.locator('#booth-consent-version').textContent(), '동의 버전 · 2026-11-22.v3');
+  await shot(page, 'send-consent', viewport);
   assert.equal(await page.locator('#booth-submit-button').isDisabled(), true);
   await page.locator('#booth-consent').check();
   assert.equal(await page.locator('#booth-submit-button').textContent(), 'AI에게 제출하기');
@@ -300,7 +329,7 @@ async function walk(browser, viewport, desk, pageErrors) {
   assert.equal(posted.includes('edited.pdf'), true);
   assert.equal(posted.includes('0.50'), true);
   assert.equal(posted.includes('0.95'), true);
-  assert.equal(posted.includes('2026-11-22.v2'), true);
+  assert.equal(posted.includes('2026-11-22.v3'), true);
   assert.equal(posted.includes('"course":"quick"'), true);
   assert.equal(posted.includes('"defectType":"number"'), true);
   assert.equal(await page.locator('#booth-ticket-wait').isVisible(), true);
@@ -339,7 +368,16 @@ async function walk(browser, viewport, desk, pageErrors) {
   assert.equal(await again.textContent(), '다시 도전하기 · 기회 4번 남음');
   assert.match(await page.locator('#booth-history').textContent(), /F-0042 · Ragas통과/);
   await deskChecks(page, desk, 3);
-  assert.equal(await page.locator('#booth-final').isVisible(), desk, '최종 추첨 is a desktop panel');
+  // 최종 추첨 (ux-booth P0-2): on a 통과 result phones see it too, under the gift ticket.
+  assert.equal(await page.locator('#booth-final').isVisible(), true, '최종 추첨 is visible');
+  assert.match(await page.locator('#booth-final').textContent(), /^최종 추첨/);
+  if (!desk) {
+    const giftBox = await page.locator('#booth-gift').boundingBox();
+    const finalBox = await page.locator('#booth-final').boundingBox();
+    assert.equal(finalBox.y >= giftBox.y + giftBox.height, true, 'the draw card follows the gift ticket');
+    assert.equal(finalBox.x >= 0 && finalBox.x + finalBox.width <= viewport.width, true, 'the draw card fits the phone column');
+  }
+  await shot(page, 'ticket-missed', viewport);
   if (desk) {
     const ticketBox = await page.locator('#booth-ticket').boundingBox();
     const result = await page.locator('#booth-ticket-result').boundingBox();
@@ -358,6 +396,28 @@ async function walk(browser, viewport, desk, pageErrors) {
     assert.equal(audit.seen >= 3, true);
     assert.equal(audit.overflow <= 0, true, 'horizontal overflow ' + audit.overflow);
   }
+  // Withdraw asks once (ux-booth P0-6): 취소 and a fail-outline 철회하기 replace the first button, under the warning.
+  await page.setViewportSize(viewport);
+  await page.locator('#booth-withdraw-box > summary').click();
+  await page.locator('#booth-withdraw').click();
+  const ask = page.locator('#booth-withdraw-ask');
+  assert.equal(await ask.isVisible(), true);
+  assert.equal(await page.locator('#booth-withdraw').isHidden(), true, 'the first button gives way');
+  assert.match(await ask.textContent(), /^철회하면 되돌릴 수 없고, 선물과 추첨 기회도 함께 사라져요\./);
+  const confirmLook = await page.locator('#booth-withdraw-confirm').evaluate(node => {
+    const style = getComputedStyle(node);
+    return {color: style.color, border: style.borderTopColor, background: style.backgroundColor};
+  });
+  assert.deepEqual(confirmLook, {color: 'rgb(138, 48, 48)', border: 'rgb(138, 48, 48)', background: 'rgba(0, 0, 0, 0)'});
+  const cancelBox = await page.locator('#booth-withdraw-cancel').boundingBox();
+  const confirmBox = await page.locator('#booth-withdraw-confirm').boundingBox();
+  assert.equal(cancelBox.height >= 44 && confirmBox.height >= 44, true, '44px targets');
+  await ask.scrollIntoViewIfNeeded();
+  await shot(page, 'withdraw-confirm', viewport);
+  await page.locator('#booth-withdraw-cancel').click();
+  assert.equal(await ask.isHidden(), true);
+  assert.equal(await page.locator('#booth-withdraw').isVisible(), true);
+  await page.locator('#booth-withdraw-box > summary').click();
   await page.clock.fastForward(60000);
   await new Promise(resolve => setTimeout(resolve, 300));
   assert.equal(claims.length, 3);

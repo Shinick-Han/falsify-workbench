@@ -425,9 +425,14 @@ Sources: RISK round 2 (`wt/reports/risk.md` "## Round 2") and the SEARCH cross-r
   Code defaults (120 and 2000), `AI_RUNTIME_URL` and `BOOTH_OPERATOR_ACTIVE_JOBS` are unchanged.
 
 **Consent v2**
-- L-7 Event `BOOTH_CONSENT_VERSION` is `2026-11-22.v2`. The v2 copy says the edited PDF alone is sent to Anthropic right
+- L-7 Event `BOOTH_CONSENT_VERSION` was `2026-11-22.v2` (now v3, see L-9). The v2 copy says the edited PDF alone is sent to Anthropic right
   after submitting, and may be sent once more after closing; the declared edits are never sent. The code default stays
   `2026-11-22.v1`. A submit with any other version is still 409 `consent_outdated`.
-- L-8 The FE keys the consent copy by version (`CONSENT_COPY` in `app/dist/booth.js`, holding v1 and v2) and shows the text
+- L-8 The FE keys the consent copy by version (`CONSENT_COPY` in `app/dist/booth.js`, holding v1, v2 and v3) and shows the text
   for the `consentVersion` that `GET /v1/booth/config` returns. A version with no copy on the page cannot be submitted, and
-  the page asks the visitor to reload. Changing the copy means a new version on both sides.
+  the page asks the visitor to reload. Changing the copy means a new version on both sides. Until the config
+  answers, the page shows no consent text and the checkbox stays off, so no older version can flash.
+
+**Consent v3 (2026-11-20)**
+- L-9 Event `BOOTH_CONSENT_VERSION` is `2026-11-22.v3`. v3 is v2 in 해요체 with the same facts; its three-line summary
+  equals v2's. v1 and v2 stay in `CONSENT_COPY` because stored submissions reference them.

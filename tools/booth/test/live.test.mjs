@@ -159,7 +159,7 @@ test('public note uses only the AI finding, page, quote and rationale', () => {
   assert.equal(note.length <= 1000, true);
   assert.equal(note.includes('AI가 짚은 곳: 7쪽'), true);
   const partial = buildPublicNote({ outcome: 'partial', matched: long, first: long, templates: DEFAULT_NOTES });
-  assert.match(partial, /거의 다가갔습니다\. 이번에는 찾은 것으로 봅니다\. \(AI가 짚은 곳: 7쪽\)/);
+  assert.match(partial, /근처를 AI가 짚었어요\. \(AI가 짚은 곳: 7쪽\)/);
   const quote = /"([^"]*)"/.exec(note)[1];
   assert.equal(quote.length <= 200, true);
   const missed = buildPublicNote({ outcome: 'missed', matched: null, first: HOSTED.findings[0], templates: DEFAULT_NOTES });
@@ -167,6 +167,68 @@ test('public note uses only the AI finding, page, quote and rationale', () => {
   assert.equal(missed.includes('다른 곳'), true);
   const none = buildPublicNote({ outcome: 'missed', matched: null, first: null, templates: DEFAULT_NOTES });
   assert.equal(none, DEFAULT_NOTES.missedNone);
+});
+
+test('watch: a full operator job cap (429) waits for a slot instead of failing the row', async () => {
+  await withFake({ submissions: [caughtRow(1), missedRow(2), hiddenRow(3)], result: HOSTED, queued: true, activeCap: 1 }, async (fake, dir) => {
+    // Local concurrency 4 against a server cap of 1, like the old watch default 12 against BOOTH_OPERATOR_ACTIVE_JOBS=2.
+    const config = writeConfig(dir, fake.url, { live: { retries: 0 } });
+    const result = await run(['--config', config, 'watch', '--cycles', '1']);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(fake.state.busy429 > 0, true, 'the cap was hit');
+    assert.equal(fake.state.maxActive, 1);
+    for (const receipt of ['F-0001', 'F-0002', 'F-0003']) {
+      const item = find(fake, receipt);
+      assert.equal(item.status, 'judged', receipt);
+      assert.equal(item.published, true, receipt);
+    }
+    assert.equal(fake.state.newJobs, 3, 'one paid job per row, no duplicate after waiting');
+    const end = jsonLines(result.stdout).at(-1);
+    assert.equal(end.done, 3);
+    assert.equal(end.failed, 0);
+    assert.match(result.stderr, /waiting for a free job slot/);
+  });
+});
+
+test('watch: an hourly job cap (Retry-After over 60 s) fails the row at once instead of waiting', async () => {
+  await withFake({ submissions: [caughtRow(1)], result: HOSTED, alwaysBusy: '1800' }, async (fake, dir) => {
+    const config = writeConfig(dir, fake.url, { live: { retries: 0 } });
+    const result = await run(['--config', config, 'watch', '--cycles', '1']);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(fake.state.busy429, 1, 'no second try against an hourly cap');
+    assert.doesNotMatch(result.stderr, /waiting for a free job slot/);
+    const end = jsonLines(result.stdout).at(-1);
+    assert.equal(end.failed, 1);
+  });
+});
+
+test('watch: no free job slot within pollTimeoutMs hands the row to the next cycle, not to failed', async () => {
+  await withFake({ submissions: [caughtRow(1)], result: HOSTED, alwaysBusy: '60' }, async (fake, dir) => {
+    const config = writeConfig(dir, fake.url, { blue: { pollTimeoutMs: 2600 }, live: { retries: 2 } });
+    const result = await run(['--config', config, 'watch', '--cycles', '1']);
+    assert.equal(result.code, 0, result.stderr);
+    assert.ok(fake.state.busy429 >= 2, 'waited for a slot ' + fake.state.busy429);
+    assert.equal(fake.state.newJobs, 0);
+    assert.match(result.stderr, /still waiting for a job slot; next cycle retries/);
+    assert.doesNotMatch(result.stderr, /attempt \d failed/, 'the retry budget is not spent on a full queue');
+    const end = jsonLines(result.stdout).at(-1);
+    assert.equal(end.failed, 0);
+    const item = find(fake, 'F-0001');
+    assert.equal(item.status, 'reviewing');
+    assert.ok(!fake.state.patches.some(patch => /live: failed/.test(JSON.stringify(patch))), 'no failed note');
+  });
+});
+
+test('watch: a job past pollTimeoutMs is cancelled so it stops holding a server slot', async () => {
+  await withFake({ submissions: [caughtRow(1)], result: HOSTED, queued: true, stuckJobs: true }, async (fake, dir) => {
+    const config = writeConfig(dir, fake.url, { blue: { pollTimeoutMs: 300 }, live: { retries: 0 } });
+    const result = await run(['--config', config, 'watch', '--cycles', '1']);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(fake.state.cancels, 1);
+    assert.match(result.stderr, /cancel requested/);
+    assert.equal([...fake.state.jobs.values()][0].state, 'cancelled');
+    assert.equal(jsonLines(result.stdout).at(-1).failed, 1);
+  });
 });
 
 test('watch: received -> reviewing -> judged + published; missed gets the prize', async () => {
@@ -277,10 +339,10 @@ test('final --apply keeps the instant prize valid with the default finalCaughtMe
     assert.equal(applied.code, 0, applied.stderr);
     const item = find(fake, 'F-0002');
     assert.equal(item.outcome, 'caught');
-    assert.equal(item.prizeMessage, '빠른 AI는 이겼어요! 정밀 AI는 찾아냈지만, 받은 즉석 선물은 그대로 유효합니다.');
+    assert.equal(item.prizeMessage, '빠른 AI를 이겼어요. 정밀 AI는 찾아냈지만, 받은 선물은 그대로 가져가세요.');
     assert.match(item.publicNote, /주석자 수가/);
     const last = fake.state.patches.filter(patch => patch.receipt === 'F-0002').at(-1).body;
-    assert.equal(last.prizeMessage, '빠른 AI는 이겼어요! 정밀 AI는 찾아냈지만, 받은 즉석 선물은 그대로 유효합니다.');
+    assert.equal(last.prizeMessage, '빠른 AI를 이겼어요. 정밀 AI는 찾아냈지만, 받은 선물은 그대로 가져가세요.');
     assert.equal(last.outcome, 'caught');
   });
 });
@@ -363,7 +425,7 @@ test('final: Opus round on live misses; dry by default, --apply PATCHes', async 
     assert.equal(caught.outcome, 'caught');
     assert.equal(caught.prizeMessage, 'FINAL_CAUGHT');
     assert.match(caught.publicNote, /AI가 짚은 곳: 2쪽/);
-    assert.match(caught.publicNote, /^AI가 심어 둔 결함을 찾았습니다/);
+    assert.match(caught.publicNote, /^내가 심어 둔 결함을 AI가 찾았어요/);
     assert.match(caught.publicNote, /주석자 수가/);
     assert.equal(caught.aiSummary.round, 'final');
     assert.equal(caught.aiSummary.liveOutcome, 'missed');

@@ -3,12 +3,12 @@
    Tokens live on :root; event-theme.css uses the same names with the same fallbacks.
    System fonts only. One column of at most 480px, laid out for one hand at 360-430px. */
 :root{
-  --ev-desk:#dfe2e5;--ev-ground:#eef0f1;--ev-card:#ffffff;--ev-ink:#16191e;--ev-ink-2:#3a3f47;--ev-muted:#6b717a;
-  --ev-hair:#d6d9dd;--ev-soft:#f4f5f6;--ev-mark:#e3e9f1;--ev-pass:#2f5b4f;--ev-fail:#8a3030;
+  --ev-desk:#dfe2e5;--ev-ground:#eef0f1;--ev-card:#ffffff;--ev-ink:#16191e;--ev-ink-2:#3a3f47;--ev-muted:#5f656e;
+  --ev-hair:#d6d9dd;--ev-line:#848a93;--ev-soft:#f4f5f6;--ev-mark:#e3e9f1;--ev-pass:#2f5b4f;--ev-fail:#8a3030;
   --ev-sans:"Pretendard",-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Noto Sans KR","Malgun Gothic",sans-serif;
   --ev-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Roboto Mono",monospace;
 }
-.booth{box-sizing:border-box;width:100%;max-width:480px;min-width:0;margin:0 auto 20px;padding:0 0 24px;background:var(--ev-ground,#eef0f1);color:var(--ev-ink,#16191e);font-family:var(--ev-sans);font-size:14px;line-height:1.6;letter-spacing:0;text-align:left}
+.booth{box-sizing:border-box;width:100%;max-width:480px;min-width:0;margin:0 auto 20px;padding:0 0 24px;background:var(--ev-ground,#eef0f1);color:var(--ev-ink,#16191e);font-family:var(--ev-sans);font-size:14px;line-height:1.6;letter-spacing:0;text-align:left;word-break:keep-all;text-wrap-style:pretty}
 .booth *,.booth *::before,.booth *::after{box-sizing:border-box}
 .booth[hidden],.booth [hidden]{display:none!important}
 .booth h2,.booth h3,.booth p,.booth dl,.booth dd,.booth ol,.booth ul,.booth blockquote{margin:0}
@@ -21,7 +21,7 @@
 .booth-lab{font-family:var(--ev-mono);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--ev-muted);overflow-wrap:anywhere}
 .booth-klab{font-size:11.5px;font-weight:500;color:var(--ev-muted)}
 .booth-klab.gap{margin-top:4px}
-.booth-headline{font-weight:300;font-size:28px;line-height:1.25;letter-spacing:-.03em;color:var(--ev-ink);overflow-wrap:anywhere}
+.booth-headline{font-weight:300;font-size:28px;line-height:1.25;letter-spacing:-.03em;color:var(--ev-ink);overflow-wrap:anywhere;text-wrap:balance}
 .booth-headline.hero{font-size:31px;line-height:1.24}
 .booth-headline.small{font-size:24px}
 .booth-headline b{font-weight:600}
@@ -50,10 +50,6 @@
 .booth-toplabel{margin-left:auto;font-size:12.5px;color:var(--ev-ink-2)}
 .booth-landing{display:grid;gap:14px}
 .booth-hero{display:grid;gap:12px;padding:10px 0 0}
-.booth-strip{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));list-style:none;padding:0;border-top:1px solid var(--ev-hair);border-bottom:1px solid var(--ev-hair)}
-.booth-strip li{display:flex;gap:7px;align-items:baseline;min-width:0;padding:9px 0;font-size:12.5px;white-space:nowrap}
-.booth-strip li+li{padding-left:10px;border-left:1px solid var(--ev-hair)}
-.booth-strip span{font-family:var(--ev-mono);font-size:11px;color:var(--ev-muted)}
 
 /* Tickets: white card, soft shadow, 12px radius, dashed perforation with notches */
 .booth-tk{position:relative;background:var(--ev-card);border-radius:12px;box-shadow:0 1px 0 rgba(22,25,30,.05),0 10px 24px rgba(22,25,30,.07)}
@@ -84,6 +80,9 @@
 .booth-quiet>summary,.booth-nick>summary{justify-content:flex-start;min-height:44px;padding:0;border:0;color:var(--ev-muted);font-size:13px;font-weight:400;text-decoration:underline;text-underline-offset:3px}
 .booth-quiet[open]>summary,.booth-nick[open]>summary{margin-bottom:6px}
 .booth-withdraw-body{display:grid;gap:10px;justify-items:start;padding-bottom:4px}
+.booth-withdraw-ask{display:grid;gap:10px;justify-items:start}
+.booth-withdraw-warn{font-size:13.5px;font-weight:500;color:var(--ev-ink)}
+.booth .booth-btn.danger{border-color:var(--ev-fail);color:var(--ev-fail)}
 .booth-search{display:grid;gap:10px}
 .booth-row{display:flex;flex-wrap:wrap;gap:8px}
 
@@ -91,7 +90,7 @@
 .booth-records{display:grid;gap:12px}
 .booth-panel{display:grid;gap:10px;padding:14px;background:var(--ev-card);border-radius:10px;box-shadow:0 1px 0 rgba(22,25,30,.04);min-width:0}
 .booth-field{display:grid;gap:6px;margin:0;font-weight:400}
-.booth input[type=text],.booth input[type=search],.booth textarea{display:block;width:100%;min-height:48px;margin:0;padding:10px 12px;border:1px solid var(--ev-hair);border-radius:6px;background:var(--ev-soft);color:var(--ev-ink);font:inherit;font-size:16px}
+.booth input[type=text],.booth input[type=search],.booth textarea{display:block;width:100%;min-height:48px;margin:0;padding:10px 12px;border:1px solid var(--ev-line,#848a93);border-radius:6px;background:var(--ev-soft);color:var(--ev-ink);font:inherit;font-size:16px}
 .booth textarea{min-height:88px;line-height:1.5;resize:vertical}
 .booth input[type=text]:focus,.booth input[type=search]:focus,.booth textarea:focus{border-color:var(--ev-ink)}
 .booth-receipts{display:grid;gap:8px}
@@ -114,6 +113,8 @@
 /* Send */
 .booth-rows{display:grid;gap:12px}
 .booth-card{gap:8px}
+.booth-card-head{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:6px 10px}
+.booth-ai-chip{padding:2px 7px;border:1px solid var(--ev-line,#848a93);border-radius:4px;font-size:11.5px;line-height:1.5;color:var(--ev-ink-2);font-variant-numeric:tabular-nums;white-space:nowrap}
 .booth-diff{font-family:var(--ev-mono);font-size:12.5px;line-height:1.75;color:var(--ev-ink);overflow-wrap:anywhere}
 .booth-diff .ctx{color:var(--ev-ink-2)}
 .booth-diff del{margin-right:6px;color:var(--ev-muted);text-decoration:line-through}
@@ -163,7 +164,7 @@
 .booth-gift-text{margin-top:2px;font-size:15px;font-weight:500;white-space:pre-wrap;overflow-wrap:anywhere}
 .booth .booth-gift-code{font-size:15px}
 .booth-note{gap:8px}
-.booth-quote{padding:2px 0 2px 10px;border-left:2px solid var(--ev-ink);font-family:"Times New Roman",Times,serif;font-size:13.5px;line-height:1.55;color:#2b2d31;overflow-wrap:anywhere}
+.booth-quote{padding:10px 12px;border-radius:6px;background:var(--ev-soft);font-family:"Times New Roman",Times,serif;font-size:13.5px;line-height:1.55;color:#2b2d31;overflow-wrap:anywhere}
 .booth-hist{display:grid;gap:6px}
 .booth .booth-hist-row{display:flex;justify-content:space-between;align-items:center;gap:10px;width:100%;min-height:44px;padding:7px 12px;border:0;border-radius:6px;background:var(--ev-card);color:var(--ev-ink);font-family:var(--ev-mono);font-size:12px;text-align:left;cursor:pointer}
 .booth-hist-row .l{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -183,12 +184,20 @@
 .booth-landing-intro,.booth-landing-list,.booth-send-main,.booth-send-side,.booth-send-confirm,.booth-bp-stub,.booth-live-side,.booth-live-main,.booth-live-actions{display:contents}
 @media (max-width:1023px){
 .booth .booth-desk{display:none!important}
+/* Phones: the rules line sits under the hero copy, then the 01/02/03 how-to as three compact rows. */
+#booth-pick-limit{margin-top:-4px;color:var(--ev-ink-2)}
+.booth .booth-howto{display:grid;margin:0;padding:0;list-style:none;border-top:1px solid var(--ev-hair);border-bottom:1px solid var(--ev-hair)}
+.booth-howto li{display:grid;grid-template-columns:26px minmax(0,1fr);align-items:baseline;padding:8px 0;font-size:12.5px;line-height:1.5}
+.booth-howto li+li{border-top:1px solid var(--ev-hair)}
+.booth-howto em{font-family:var(--ev-mono);font-size:11px;font-style:normal;color:var(--ev-muted)}
+.booth-howto b{margin-right:6px;font-weight:500}
+.booth-howto span span{color:var(--ev-muted)}
 }
 
 /* Desktop (>=1024px): a 1120px container, the top bar, two-column steps and a boarding-pass ticket.
    event-theme.css owns the page ground and the paper workspace; this block only lays out #booth. */
 @media (min-width:1024px){
-.booth .booth-phone,.booth-top,.booth-strip,#booth-step-edit>.booth-stepbar,#booth-submit .booth-stepbar-row>b,#booth-submit .booth-prog{display:none!important}
+.booth .booth-phone,.booth-top,#booth-step-edit>.booth-stepbar,#booth-submit .booth-stepbar-row>b,#booth-submit .booth-prog{display:none!important}
 .booth{width:min(1120px,calc(100vw - 64px));max-width:none;margin:0 0 20px calc(50% - min(560px,50vw - 32px));padding:0 0 32px}
 
 /* Top bar: 68px, hairline across the whole viewport (ink overflow only, never a scroll). */
@@ -218,7 +227,7 @@
 .booth-howto em{padding-top:2px;font-family:var(--ev-mono);font-size:12px;font-style:normal;color:var(--ev-muted)}
 .booth-howto b{display:block;font-size:14.5px;font-weight:500}
 .booth-howto span span{font-size:13px;color:var(--ev-muted)}
-#booth-pick-limit{font-size:13px}
+#booth-pick-limit{order:1;font-size:13px}
 .booth-mhead{display:flex;justify-content:space-between;align-items:baseline;gap:12px}
 .booth-mhead .booth-klab{font-size:12px}
 .booth-mhead .booth-small{font-size:13px}

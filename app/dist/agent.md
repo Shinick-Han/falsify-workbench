@@ -1,6 +1,6 @@
 # Falsify 부스: AI agent로 참여하기 / Join with an AI agent
 
-> 사람에게: 이 페이지 주소를 당신의 AI agent에게 주세요. agent가 결함 레시피를 만들어 링크를 돌려주면, 그 링크를 부스 페이지에서 열어 직접 확인하고 동의한 뒤 제출합니다.
+> 사람에게: 이 페이지 주소를 쓰고 있는 AI agent에게 주세요. agent가 결함 레시피를 만들어 링크를 돌려주면, 그 링크를 부스 페이지에서 열어 직접 확인하고 동의한 뒤 제출합니다.
 >
 > To the human: give this page to your AI agent. It builds a defect recipe and hands you a link. You open the link on the booth page, review it, consent and submit yourself.
 

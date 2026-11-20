@@ -277,6 +277,49 @@ async function limitPdf(ctx, ownerId) {
   ]);
 }
 
+// Per-isolate copy of recently served PDFs. The Cache API is per data center and its behaviour on a
+// workers.dev hostname is not documented as working, so a warm isolate answers mission PDFs from memory
+// without the OAI license call and the arXiv fetch. Only bytes that passed the license allow-list (a fresh
+// verdict, or a Cache API entry written after one) go in, keyed by the exact id like the Cache API key.
+// Bounded by count and bytes (an isolate has 128 MB and the event Worker also buffers 16 MiB submissions),
+// and each entry expires an hour after it was stored, so a changed upstream license or a new unversioned
+// arXiv version is seen within the license cache TTL plus an hour. The oldest entry goes first.
+const MEMO_MAX_ENTRIES = 12;
+const MEMO_MAX_BYTES = 24 * 1024 * 1024;
+const MEMO_MAX_ENTRY_BYTES = 8 * 1024 * 1024;
+const MEMO_TTL_MS = 60 * 60 * 1000;
+const pdfMemo = new Map();
+
+function memoGet(id, now = Date.now()) {
+  const hit = pdfMemo.get(id);
+  if (!hit) return null;
+  pdfMemo.delete(id);
+  if (now - hit.storedAt >= MEMO_TTL_MS || now < hit.storedAt) return null;
+  pdfMemo.set(id, hit);
+  return hit;
+}
+
+function memoPut(id, bytes, licenseId, now = Date.now()) {
+  if (bytes.byteLength > MEMO_MAX_ENTRY_BYTES) return;
+  pdfMemo.delete(id);
+  pdfMemo.set(id, { bytes, licenseId, storedAt: now });
+  let total = 0;
+  for (const entry of pdfMemo.values()) total += entry.bytes.byteLength;
+  for (const [key, entry] of pdfMemo) {
+    if (pdfMemo.size <= MEMO_MAX_ENTRIES && total <= MEMO_MAX_BYTES) break;
+    pdfMemo.delete(key);
+    total -= entry.bytes.byteLength;
+  }
+}
+
+export function clearPdfMemoForTests() {
+  pdfMemo.clear();
+}
+
+export function agePdfMemoForTests(ms) {
+  for (const entry of pdfMemo.values()) entry.storedAt -= ms;
+}
+
 function resolveCache(ctx) {
   if (ctx && ctx.cache && typeof ctx.cache.match === 'function') return ctx.cache;
   const caches = globalThis.caches;
@@ -885,9 +928,15 @@ async function handlePdf(ctx, ownerId) {
   const cache = resolveCache(ctx);
   // Version stays in the key: 2503.10497 and 2503.10497v2 are different files.
   const request = cacheRequest('/papers/pdf', { id });
+  const memo = memoGet(id);
+  if (memo) {
+    if (memo.bytes.byteLength > cap) aiFail(413, 'payload_too_large');
+    return pdfResponse(memo.bytes, id, memo.licenseId);
+  }
   const cached = await readCachedPdf(cache, request);
   if (cached) {
     if (cached.bytes.byteLength > cap) aiFail(413, 'payload_too_large');
+    memoPut(id, cached.bytes, cached.licenseId);
     return pdfResponse(cached.bytes, id, cached.licenseId);
   }
   const verdict = await licenseVerdict(ctx, id);
@@ -896,6 +945,7 @@ async function handlePdf(ctx, ownerId) {
   const response = await upstreamFetch(ctx.fetchImpl, pdfFetchUrl(id), 'application/pdf');
   const body = await openPdfBody(response, cap);
   await writeCachedPdf(cache, request, body, verdict.id);
+  memoPut(id, body, verdict.id);
   return pdfResponse(body, id, verdict.id);
 }
 

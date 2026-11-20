@@ -1,0 +1,5 @@
+/* In-place patches on the event page (booth-patch.js). Above the page canvas, below the text layer;
+   never takes pointer events, so taps still reach the text layer and the page editor. */
+.booth-patch{position:absolute;z-index:0;box-sizing:border-box;margin:0;padding:0;overflow:visible;pointer-events:none;user-select:none;contain:layout style}
+.booth-patch-cover{position:absolute;top:0;bottom:0;display:block;pointer-events:none}
+.booth-patch-text{position:absolute;left:0;display:block;margin:0;padding:0;color:#000;white-space:pre;font-style:normal;font-weight:400;letter-spacing:0;word-spacing:0;text-align:left;text-rendering:geometricPrecision;-webkit-font-smoothing:antialiased;transform-origin:0 0;pointer-events:none;font-kerning:normal;font-synthesis:none}

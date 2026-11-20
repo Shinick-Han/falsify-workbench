@@ -291,6 +291,30 @@ test('apply: a repeated Before grows to a unique span, as a paragraph hand edit 
   assert.deepEqual(plain(recipe.assist()), {assist: 'my-ai'});
 });
 
+test('applyFound: a word tap located in one paragraph commits the same widened edit as apply', async () => {
+  const segments = [
+    {id: 's0', label: 'PDF p. 1', pageIndex: 0, text: 'the proposed WikiEval dataset. Each WikiEval instance'},
+    {id: 'paragraph:0:w', label: 'PDF p. 1', pageIndex: 0, text: 'the proposed WikiEval dataset. Each WikiEval instance'},
+  ];
+  const tapped = stubWorkspace(segments);
+  const {recipe} = load({FalsifyPaperWorkspace: tapped});
+  const found = recipe.locate({find: 'WikiEval', context: 'dataset. Each WikiEval instance'}, [segments[1]]);
+  assert.equal(found.status, 'resolved');
+  assert.equal(found.kind, 'paragraph');
+  const result = plain(recipe.applyFound(found, 'WikiQA'));
+  assert.equal(result.ok, true);
+  assert.deepEqual([result.before, result.after], ['Each WikiEval instance', 'Each WikiQA instance']);
+  assert.deepEqual(plain(tapped.calls[0].options), {origin: 'external-ai-import', confirmed: true});
+  const byRecipe = stubWorkspace(segments);
+  const hook = {open: () => Promise.resolve(true), current: () => ({id: '2309.15217'})};
+  const second = load({FalsifyPaperWorkspace: byRecipe, FalsifyBoothPaper: hook}).recipe;
+  await second.apply(good({source: 'manual', edits: [{find: 'WikiEval', replace: 'WikiQA', context: 'Each WikiEval instance'}]}));
+  assert.deepEqual(plain(tapped.calls[0].proposals), plain(byRecipe.calls[0].proposals), 'word tap and recipe produce identical proposals');
+  assert.deepEqual(plain(recipe.applyFound(found, 'Other')), {ok: false, reason: 'not_found', detail: 'overlap'});
+  assert.deepEqual(plain(recipe.applyFound({status: 'ambiguous'}, 'x')), {ok: false, reason: 'not_found'});
+  assert.deepEqual(plain(load().recipe.applyFound(found, 'x')), {ok: false, reason: 'no_paper'});
+});
+
 test('apply: no booth hook means every edit is no_paper; invalid recipes throw', async () => {
   const {recipe} = load({FalsifyPaperWorkspace: stubWorkspace(SEGMENTS)});
   const result = await recipe.apply(good());
@@ -316,4 +340,16 @@ test('fromCode fetches GET /v1/booth/recipes/:code without credentials and strip
   await assert.rejects(recipe.fromCode('R-ZZZZZZ'), error => error.code === 'not_found');
   await assert.rejects(recipe.fromCode('nope'), error => error.code === 'invalid_code');
   assert.equal(requests.length, 2);
+});
+
+test('codeFromText takes the code out of a pasted #recipe= link; expiryText reads local time', () => {
+  const {recipe} = load();
+  assert.equal(recipe.codeFromText('https://x.test/event.html#recipe=R-7K3QXM'), 'R-7K3QXM');
+  assert.equal(recipe.codeFromText('R-7K3QXM'), '');
+  assert.equal(recipe.codeFromText('#recipe=R-7K3QXM-TOO-LONG'), '');
+  const at = new Date(2026, 10, 22, 9, 5);
+  assert.equal(recipe.expiryText(at.toISOString(), new Date(2026, 10, 22, 1, 0)), '오늘 09:05까지 유효');
+  assert.equal(recipe.expiryText(at.toISOString(), new Date(2026, 10, 21, 1, 0)), '11월 22일 09:05까지 유효');
+  assert.equal(recipe.expiryText('nope'), '');
+  assert.equal(recipe.expiryText(undefined), '');
 });

@@ -1277,6 +1277,24 @@ test('paragraph preparation is reused for the same original page and reset for a
   assert.equal(v.ws.getEditSnapshot().edits.length,0);
 });
 
+test('page-edit hooks: paragraph boxes as page fractions, open by segment id, free zoom',async()=>{
+  const v=mount({paragraphPdf:paragraphMock('Hook paragraph.')});
+  assert.equal(v.ws.getPageParagraphs(),null);assert.equal(v.ws.setZoom(2.5),false,'no source yet');assert.equal(v.ws.openParagraph('paragraph:0:p0'),false);
+  v.file(pdfFile(pdfBytes('MARKER-A')));await until(()=>/문단을 클릭/.test(v.get('paper-before-status').textContent),'paragraphs');
+  const boxes=v.ws.getPageParagraphs();assert.equal(boxes.pageIndex,0);assert.equal(boxes.items.length,1);
+  const [p]=boxes.items;assert.equal(p.segmentId,'paragraph:0:p0');assert.equal(p.text,'Hook paragraph.');assert.equal(p.editable,true);
+  assert.deepEqual([p.rect.x,p.rect.y,p.rect.w,p.rect.h].map(n=>Math.round(n*1e4)/1e4),[0.1176,0.101,0.7647,0.0758]);assert.ok(Object.isFrozen(p.rect));
+  assert.equal(v.ws.openParagraph('paragraph:0:missing'),false);assert.equal(v.ws.openParagraph('paragraph:0:p0'),true);
+  assert.equal(v.document.activeElement.tagName,'textarea');assert.equal(v.document.activeElement.value,'Hook paragraph.');
+  v.document.activeElement.dispatchEvent(new Event('blur'));
+  const draws=v.log.renders.length,width=v.canvas()[0].width;assert.equal(v.ws.getZoom(),1);
+  for(const bad of [0.2,4.5,NaN,'2'])assert.equal(v.ws.setZoom(bad),false,String(bad));
+  assert.equal(v.ws.setZoom(2.5),true);assert.equal(v.ws.getZoom(),2.5);await until(()=>v.log.renders.length>draws&&v.canvas()[0]?.width>width,'redrawn at 2.5x');
+  assert.equal(v.ws.setZoom(1),true);assert.equal(v.ws.getZoom(),1);assert.equal(v.get('paper-zoom-label').textContent,'100%');
+  await settle();const renders=v.log.renders.length;assert.equal(v.ws.setZoom(1),true);await settle();assert.equal(v.log.renders.length,renders,'same zoom does not redraw');
+  assert.equal(v.ws.setZoom(1,true),true);await until(()=>v.log.renders.length>renders,'forced redraw after a resize');
+});
+
 test('a font requiring complete embedding uses the full-font writer',async()=>{
   let paragraphCalls=0;const selected=[],bytes=pdfBytes('FULL-FONT');
   const fonts={revision:0,list:()=>[],resolve:async()=>({revision:0,digest:'full-font',fonts:[{fsType:256,bytes:new Uint8Array([1])}]})};

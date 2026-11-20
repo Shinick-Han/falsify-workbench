@@ -4,20 +4,15 @@
    booth.css (loaded after this file) owns #booth and its tokens; the fallbacks here match. */
 
 /* Page ground, type and the single centered column. */
-html{background:var(--ev-ground,#eef0f1);color-scheme:light}
+/* The fixed dock (76px) must never hide a focused control (WCAG 2.4.11). */
+html{background:var(--ev-ground,#eef0f1);color-scheme:light;scroll-padding-bottom:96px}
 body{
-  --tk-inset:clamp(44px,17vw,80px);
+  --tk-inset:0px;
   margin:0;background:var(--ev-ground,#eef0f1);color:var(--ev-ink,#16191e);
   font-family:var(--ev-sans,"Pretendard",-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Noto Sans KR","Malgun Gothic",sans-serif);
-  -webkit-text-size-adjust:100%;text-size-adjust:100%;overflow-x:hidden
-}
-/* Short screens (a foldable's outer display, landscape): keep the page image under about
-   38% of the height so the paragraph cards show above the dock. */
-@media(max-height:760px){
-  body{
-    --tk-inset:max(clamp(44px,17vw,80px),calc((min(100vw,480px) - 32px - 29vh) / 2));
-    --tk-inset:max(clamp(44px,17vw,80px),calc((min(100vw,480px) - 32px - 29dvh) / 2))
-  }
+  -webkit-text-size-adjust:100%;text-size-adjust:100%;overflow-x:hidden;
+  /* Hangul wraps at spaces, not between syllables. */
+  word-break:keep-all;overflow-wrap:break-word
 }
 .app-shell{margin:0 auto;max-width:480px;min-height:100vh;min-height:100dvh;background:var(--ev-ground,#eef0f1)}
 #main,.content{min-width:0}
@@ -33,13 +28,16 @@ body{
 .content>:not(#booth):not(#view-workbench):not(.page-foot){display:none}
 #view-workbench>:not(.paper-intake),
 .paper-intake>:not(#paper-workspace),
-#paper-workspace>:not(.paper-toolbar):not(.paper-compare):not(#paper-edits){display:none}
+#paper-workspace>:not(.paper-toolbar):not(.paper-compare):not(#paper-edits):not(#booth-find-fold){display:none}
 #view-workbench:not([hidden]),.paper-intake{display:block;margin:0;padding:0;border:0;background:transparent;box-shadow:none}
 
 /* AGPL notice stays reachable. Everything else in the footer is hidden. */
 .page-foot{display:block;margin:20px 0 0;text-align:center;font-size:11.5px}
 .page-foot>:not(#source-link):not(#agent-link){display:none}
-.page-foot #agent-link,.page-foot #source-link{display:inline-flex;align-items:center;min-height:44px;color:var(--ev-muted,#6b717a);font-size:11.5px}
+.page-foot #agent-link,.page-foot #source-link{display:inline-flex;align-items:center;min-height:44px;color:var(--ev-muted,#5f656e);font-size:11.5px}
+/* The separator sits outside the link box, so the link's underline never runs under it. */
+.page-foot #agent-link+#source-link{position:relative;margin-left:22px}
+.page-foot #agent-link+#source-link::before{content:"·";position:absolute;left:-14px;top:50%;transform:translateY(-50%);text-decoration:none;color:var(--ev-muted,#5f656e);pointer-events:none}
 
 /* Steps other than "edit": take the workspace out of view but keep its layout box, so
    page rendering still measures a real column width while booth.js loads a paper.
@@ -53,42 +51,48 @@ html[data-booth-step]:not([data-booth-step="edit"]) #view-workbench{
 /* Paper workspace skin. Shared by every step so the page canvas keeps one width. */
 #paper-workspace:not([hidden]){display:flex;flex-direction:column;margin:12px 0 0;padding:0;border:0;background:transparent}
 #paper-workspace>.paper-toolbar{order:0}
-#paper-workspace>#paper-edits{order:1}
+#paper-workspace>#paper-edits{order:3}
+#paper-workspace>#booth-find-fold{order:4}
 #paper-workspace>.paper-compare{order:2}
 #paper-workspace .button{border-radius:8px;font-family:inherit}
 
 /* Page navigation: "이전 쪽 · N / M쪽 · 다음 쪽" only. Zoom and jump stay in the DOM. */
 #paper-workspace .paper-toolbar{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:8px;margin:0 0 12px;padding:0}
-#paper-workspace .paper-toolbar>:not(#paper-page-prev):not(#paper-page-label):not(#paper-page-next){display:none}
+#paper-workspace .paper-toolbar>:not(#paper-page-prev):not(#paper-page-label):not(#paper-page-next):not(.booth-pe-tools){display:none}
 #paper-page-prev,#paper-page-next{min-height:44px;min-width:0;padding:0 12px;background:var(--ev-card,#fff);color:var(--ev-ink,#16191e);border:1px solid var(--ev-ink,#16191e);font-size:14px;font-weight:500}
-#paper-page-prev:disabled,#paper-page-next:disabled{border-color:var(--ev-hair,#d6d9dd);color:var(--ev-muted,#6b717a)}
+#paper-page-prev:disabled,#paper-page-next:disabled{border-color:var(--ev-hair,#d6d9dd);color:var(--ev-muted,#5f656e)}
 #paper-page-label{min-width:5em;font-family:var(--ev-mono,ui-monospace,SFMono-Regular,Menlo,Consolas,"Roboto Mono",monospace);font-size:13px;color:var(--ev-ink-2,#3a3f47);text-align:center}
 
 /* One pane: the original page. The generated preview pane and its controls are hidden. */
 #paper-workspace .paper-compare{display:block;margin:0;padding:0;border:0;background:transparent}
 #paper-workspace .paper-compare>[aria-labelledby="paper-after-title"],#paper-before-status{display:none}
 #paper-workspace .paper-pane{margin:0;padding:0;border:0;background:transparent;box-shadow:none}
-#paper-before-title{margin:0 0 8px;font-size:11.5px;font-weight:500;letter-spacing:0;color:var(--ev-muted,#6b717a)}
+/* The pane title stays for assistive tech only; the tip above the page already says what to do. */
+#paper-before-title{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 
-/* The stage no longer scrolls. Its side borders narrow the rendered page into a reference
-   image (the renderer fits the page to the stage's inner width); the list and the editor
-   use negative margins to span the full column again. */
+/* The stage does not scroll (booth-pageedit.css turns it into a pannable box while zoomed). The page
+   is the editor, so on phones it takes the full column (--tk-inset is 0; the renderer fits the page
+   to the stage's inner width). */
 #paper-before-stage{
   display:flex;flex-direction:column;gap:14px;max-height:none;min-height:0;overflow:visible;
   background:transparent;border:0 solid transparent;border-inline-width:var(--tk-inset);border-radius:0;outline:0
 }
+/* The workspace caps the stage at 40vh while its inline editor is open; here the page grows with the editor sheet instead, so nothing below it is overlapped. */
+html[data-booth-step]:not(.booth-pe-zoomed) .paper-compare:has(.paper-inline.is-open) #paper-before-stage{max-height:none}
 #paper-before-stage:focus-visible{outline:2px solid var(--ev-ink,#16191e);outline-offset:4px}
 
-/* Page image, smaller and calm. The text layer and marks share the canvas cell. */
+/* Page image. The text layer, marks and patches share the canvas cell. */
 #paper-before-stage>.paper-page{order:-1;display:grid!important;grid-template-columns:100%;height:auto!important;margin:0 auto}
 #paper-before-stage>.paper-page>canvas{grid-area:1/1;border:0;border-radius:3px;box-shadow:0 1px 0 rgba(22,25,30,.04),0 6px 16px rgba(22,25,30,.08)}
-#paper-before-stage>.paper-page>:not(canvas):not(textarea):not(.paper-direct-controls){grid-area:1/1}
+#paper-before-stage>.paper-page>:not(canvas):not(textarea):not(.paper-direct-controls):not(.booth-pe-head){grid-area:1/1}
 #paper-before-stage .paper-paragraph-marker{border:1.5px solid var(--ev-ink,#16191e);border-radius:2px;background:color-mix(in srgb,var(--ev-mark,#e3e9f1) 60%,transparent)}
 
+/* The page is the editor here; the paragraph list stays for screen readers and keyboards (visually hidden until focused). */
+#paper-before-stage>.paper-paragraph-list:not(:focus-within){position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0 0 0 0)!important;clip-path:inset(50%)!important;white-space:nowrap!important;border:0!important}
 /* Paragraph list: tappable text cards. */
 #paper-before-stage>.paper-paragraph-list{margin:0 calc(0px - var(--tk-inset));padding:0;background:transparent;border:0}
 #paper-before-stage>.paper-paragraph-list[open]{max-height:none;overflow:visible}
-.paper-paragraph-list>summary{display:flex;align-items:center;min-height:44px;padding:0 2px;font-size:11.5px;font-weight:500;color:var(--ev-muted,#6b717a);cursor:pointer}
+.paper-paragraph-list>summary{display:flex;align-items:center;min-height:44px;padding:0 2px;font-size:11.5px;font-weight:500;color:var(--ev-muted,#5f656e);cursor:pointer}
 #paper-before-stage .paper-paragraph-list .paper-paragraph-button{
   display:block;width:100%;min-height:48px;margin:0 0 8px;padding:12px 14px;
   background:var(--ev-card,#fff);color:var(--ev-ink,#16191e);border:1px solid var(--ev-hair,#d6d9dd);border-radius:10px;
@@ -103,29 +107,30 @@ html[data-booth-step]:not([data-booth-step="edit"]) #view-workbench{
 }
 #paper-before-stage .paper-paragraph-list .paper-paragraph-button:active{border-color:var(--ev-ink,#16191e);background:var(--ev-soft,#f4f5f6)}
 
-/* Inline direct editor as the mockup's bottom sheet, below the page image (never on it). */
+/* Inline direct editor as a paper sheet below the page image (never on it): booth-pageedit.js adds
+   a head (label and a crop of the paragraph) in row 2, the text box is row 3, the controls row 4. */
 #paper-before-stage>.paper-page:has(>textarea)::after{
-  content:"";grid-row:2/4;grid-column:1;z-index:0;margin:6px calc(0px - var(--tk-inset)) 0;
+  content:"";grid-row:2/5;grid-column:1;z-index:0;margin:6px calc(0px - var(--tk-inset)) 0;
   border-radius:14px 14px 10px 10px;
   background:linear-gradient(var(--ev-hair,#d6d9dd),var(--ev-hair,#d6d9dd)) center 10px/36px 4px no-repeat,var(--ev-card,#fff);
   box-shadow:0 -8px 24px rgba(22,25,30,.08)
 }
 #paper-before-stage>.paper-page>textarea{
-  grid-row:2;grid-column:1;position:relative!important;z-index:1!important;inset:auto!important;
-  width:auto!important;height:auto!important;min-height:96px!important;margin:28px calc(14px - var(--tk-inset)) 0;
-  box-sizing:border-box!important;padding:10px 12px!important;resize:vertical;
-  background:var(--ev-soft,#f4f5f6)!important;color:var(--ev-ink,#16191e)!important;
-  border:1px solid var(--ev-ink,#16191e);border-radius:6px;
-  font-family:var(--ev-mono,ui-monospace,SFMono-Regular,Menlo,Consolas,"Roboto Mono",monospace)!important;
-  font-size:16px!important;line-height:1.5!important;caret-color:var(--ev-ink,#16191e)
+  grid-row:3;grid-column:1;position:relative!important;z-index:1!important;inset:auto!important;
+  width:auto!important;height:auto!important;min-height:132px!important;margin:28px calc(14px - var(--tk-inset)) 0;
+  box-sizing:border-box!important;padding:12px 14px!important;resize:vertical;
+  background:#fff!important;color:#111!important;
+  border:1px solid var(--ev-hair,#d6d9dd);border-radius:4px;box-shadow:0 1px 2px rgba(22,25,30,.06);
+  font-family:"Times New Roman","Nimbus Roman","Liberation Serif","Noto Serif",serif!important;
+  font-size:17px!important;line-height:1.45!important;text-align:justify;hyphens:auto;caret-color:var(--ev-ink,#16191e)
 }
 #paper-before-stage>.paper-page>textarea:focus{outline:0;box-shadow:0 0 0 3px var(--ev-mark,#e3e9f1)}
 #paper-before-stage>.paper-page>.paper-direct-controls{
-  grid-row:3;grid-column:1;position:relative!important;z-index:1!important;inset:auto!important;width:auto!important;
+  grid-row:4;grid-column:1;position:relative!important;z-index:1!important;inset:auto!important;width:auto!important;
   display:grid!important;grid-template-columns:1fr 1.5fr;gap:10px 8px!important;align-items:stretch!important;
   margin:8px calc(14px - var(--tk-inset)) 0;padding:0 0 14px;background:transparent!important
 }
-#paper-before-stage .paper-direct-controls>[data-direct-status]{grid-column:1/-1;order:0;font-size:12.5px;color:var(--ev-muted,#6b717a);overflow-wrap:anywhere}
+#paper-before-stage .paper-direct-controls>[data-direct-status]{grid-column:1/-1;order:0;font-size:12.5px;color:var(--ev-muted,#5f656e);overflow-wrap:anywhere}
 #paper-before-stage .paper-direct-controls>span:not([data-direct-status]){display:none}
 #paper-before-stage .paper-direct-controls>.button{min-height:48px;margin:0;padding:0 12px;border-radius:8px;font-size:15px;font-weight:500}
 #paper-before-stage .paper-direct-controls>.button:last-of-type{order:1;background:transparent;color:var(--ev-ink,#16191e);border:1px solid var(--ev-ink,#16191e)}
@@ -135,53 +140,59 @@ html[data-booth-step]:not([data-booth-step="edit"]) #view-workbench{
 /* Applied edits, above the page: its diff button reopens the edit; 삭제 removes it.
    The empty-state line is hidden; booth.js shows the count in its dock. */
 #paper-edits:not([hidden]){display:grid;gap:8px;margin:0;padding:0;list-style:none}
-#paper-edits:has(>li>button){margin:0 0 14px}
+#paper-edits:has(>li>button){margin:14px 0 0}
 #paper-edits>li:not(:has(>button)){display:none}
-#paper-edits>li{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0;padding:12px 14px;background:var(--ev-card,#fff);border-radius:10px;font-size:12.5px;color:var(--ev-muted,#6b717a)}
-#paper-edits>li .button{min-height:44px;border-radius:8px;font-size:13px}
-#paper-edits>li [data-act="edit"]{flex:1 1 100%;text-align:left;font-family:var(--ev-mono,ui-monospace,SFMono-Regular,Menlo,Consolas,"Roboto Mono",monospace);font-size:13px;white-space:normal;overflow-wrap:anywhere;background:var(--ev-soft,#f4f5f6);border:1px solid var(--ev-hair,#d6d9dd);color:var(--ev-ink,#16191e)}
+/* Applied edits (phones; desktop shows them in the dock): booth cards, page and old → new text in ink. */
+#paper-edits>li{display:flex;align-items:center;gap:10px;margin:0;padding:6px 6px 6px 14px;background:var(--ev-card,#fff);border-radius:10px;font-size:13px;color:var(--ev-ink,#16191e)}
+#paper-edits>li>.paper-edit-origin,#paper-edits>li>:not(button):not(.booth-recipe-ai-tag){display:none}
+#paper-edits>li .button{min-height:44px;border-radius:8px;font-size:13px;box-shadow:none}
+#paper-edits>li [data-act="edit"]{flex:1 1 auto;min-width:0;display:flex;flex-wrap:wrap;justify-content:flex-start;align-items:baseline;gap:4px 8px;padding:8px 0;text-align:left;white-space:normal;overflow-wrap:anywhere;background:transparent;border:0;color:var(--ev-ink,#16191e);font:400 14px/1.4 var(--ev-sans,sans-serif)}
+#paper-edits .booth-edit-page{font-size:12px;color:var(--ev-muted,#5f656e)}
+#paper-edits .booth-edit-text{text-decoration:none}
+#paper-edits del.booth-edit-text{color:var(--ev-muted,#5f656e);text-decoration:line-through}
+#paper-edits .booth-edit-text.is-number{font-family:var(--ev-mono,ui-monospace,SFMono-Regular,Menlo,Consolas,"Roboto Mono",monospace);font-size:13px}
+#paper-edits .booth-edit-arrow{color:var(--ev-muted,#5f656e)}
 #paper-edits>li [data-act="compare"],#paper-edits>li [data-act="toggle"]{display:none}
-#paper-edits>li [data-act="delete"]{background:transparent;border:1px solid var(--ev-ink,#16191e);color:var(--ev-ink,#16191e)}
+#paper-edits>li [data-act="delete"]{flex:none;min-width:56px;min-height:40px;padding:0 12px;background:transparent;border:1px solid var(--ev-hair-strong,#b9bec5);color:var(--ev-ink,#16191e);font-size:12.5px;font-weight:400}
 
 /* The paper change marks use the event mark colour. */
 #paper-before-stage .paper-change-mark.is-after{background:color-mix(in srgb,var(--ev-mark,#e3e9f1) 80%,transparent);border-bottom-color:var(--ev-ink,#16191e)}
 
 /* Desktop (1024px and wider). Below 1024px everything above applies unchanged.
-   The 480px column becomes a centred 1120px container on the ground colour. In the edit
-   step the workspace is two panes: the page column (up to 500px, sticky: prev/next, N / M쪽,
-   page image) and the work column (hint, the direct editor as a raised panel, the recipe
-   panel, the paragraph list). booth.js and paper-workspace.js keep their DOM; this is grid and order. */
+   The 480px column becomes a centred 1240px container on the ground colour. In the edit
+   step the workspace is two panes: the page column (up to 680px: prev/next, N / M쪽, the page,
+   which is the editor) and the work column (hint, the direct editor as a raised panel, the recipe
+   panel). booth.js and paper-workspace.js keep their DOM; this is grid and order. */
 @media(min-width:1024px){
-  /* Page column width. The page image (A4 or narrower) plus its navigation must fit between
-     the sticky top (16px) and the 76px dock with 16px to spare, so the column narrows on short
-     windows. The renderer reads the stage's inner width, so canvas and text layer stay in sync. */
-  :root{
-    --dk-page:clamp(320px,calc((100vh - 164px) / 1.414),500px);
-    --dk-page:clamp(320px,calc((100dvh - 164px) / 1.414),500px);
+  /* Page column width: the page is the editor now, so it is big (about 640-700px) and the work
+     column keeps at least 380px. The renderer reads the stage's inner width, so canvas and text
+     layer stay in sync. */
+  :root{color-scheme:only light;
     /* The container width and the work column, from the viewport. The edit grid and the
        stage's second track both use these, so they always agree. (A container query unit would
        be exact, but container-type applies layout containment, and a contained element cannot
        be the row subgrid the edit step needs.) Under a classic scrollbar on windows narrower
        than about 1200px the work column runs up to the scrollbar's width into the 32px side
        padding; it never overflows the page. */
-    --dk-wide:min(1120px,calc(100vw - 64px));
+    --dk-wide:min(1240px,calc(100vw - 64px));
+    --dk-page:clamp(480px,calc(var(--dk-wide) - 428px),760px);
     --dk-work:calc(var(--dk-wide) - var(--dk-page) - 48px)
   }
   html,body{background:var(--ev-ground,#eef0f1)}
   .app-shell{max-width:none}
-  .content{box-sizing:content-box;max-width:1120px;margin:0 auto;padding:24px 32px calc(76px + 40px + env(safe-area-inset-bottom,0px))}
+  .content{box-sizing:content-box;max-width:1240px;margin:0 auto;padding:24px 32px calc(76px + 40px + env(safe-area-inset-bottom,0px))}
 
   /* Edit step: #booth, the step wrapper around #booth-hint and the workspace wrappers step
      aside (display:contents) so the booth parts and the workspace share one grid:
        row 1  booth rows (desk bar)            full width
        row 2  page navigation  | hint
        row 3  page (rows 3-6)  | editor panel space (only while the editor is open)
-       row 4                   | recipe panel (tabs, panes, result, fix rows, list toggle)
-       row 5                   | paragraph list (when opened)
+       row 4                   | recipe panel (tabs, panes, result, fix rows)
+       row 5                   | (the hidden paragraph list's old row; empty)
        row 6  rest of the page
        row 7  license footer                   full width
-     The compare pane and the stage are row subgrids, so the page beside the recipe panel and
-     the list under it size one set of rows. Unknown booth rows are placed after these. */
+     The compare pane and the stage are row subgrids, so the page and the panels beside it size
+     one set of rows. Unknown booth rows are placed after these. */
   html[data-booth-step="edit"] .content{
     display:grid;grid-template-columns:var(--dk-page) var(--dk-work);grid-template-rows:auto auto auto auto auto 1fr auto;
     column-gap:48px;row-gap:0;grid-auto-flow:row dense;align-items:start
@@ -201,15 +212,12 @@ html[data-booth-step]:not([data-booth-step="edit"]) #view-workbench{
 
   /* Other steps keep the workspace measured off screen at the desktop width, so a paper
      loaded on "pick" is drawn at the page column width before "edit" shows it. */
-  html[data-booth-step]:not([data-booth-step="edit"]) #view-workbench{width:min(1120px,calc(100vw - 64px))}
+  html[data-booth-step]:not([data-booth-step="edit"]) #view-workbench{width:min(1240px,calc(100vw - 64px))}
 
   #paper-workspace .paper-toolbar{grid-template-columns:auto 1fr auto;gap:12px}
   #paper-page-prev,#paper-page-next{padding:0 16px}
   /* Applied edits show as chips in the booth dock on desktop; phones keep this list. */
   #paper-workspace>#paper-edits{display:none}
-
-  /* The pane title stays for assistive tech only; the toolbar already says which page. */
-  #paper-before-title{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 
   /* The stage's inner width is the page column (the renderer fits the page to it); its right
      border is the gap plus the work column, and the second grid track runs over that border. */
@@ -219,30 +227,27 @@ html[data-booth-step]:not([data-booth-step="edit"]) #view-workbench{
     border-inline-width:0 calc(var(--dk-wide) - var(--dk-page))
   }
   #paper-before-stage>.paper-page{grid-column:1;grid-row:1/-1;margin:0;grid-template-columns:100% var(--dk-work);column-gap:48px}
-  /* The page stays in view under the sticky navigation while the work column scrolls. With the
-     editor open it scrolls normally, so the editor panel (a child of the page) never floats
-     over the paragraph list. */
-  #paper-before-stage>.paper-page:not(:has(>textarea)){position:sticky;top:72px}
-  #paper-before-stage>.paper-paragraph-list{grid-column:2;grid-row:3;margin:0}
-  #paper-before-stage>:not(.paper-page):not(.paper-paragraph-list){grid-column:1/-1}
+  /* The page is taller than most windows, so it scrolls with the document (no sticky page). */
+  #paper-before-stage>:not(.paper-page){grid-column:1/-1}
 
-  /* Direct editor: a raised panel at the top of the work column, under the hint and above the
-     recipe panel. It stays a child of the page (the workspace owns it) and sits in the page
-     grid's second track, level with the page top; the stage's first row reserves its height. */
-  #paper-before-stage{--dk-sheet:236px}
+  /* Direct editor: a raised paper sheet at the top of the work column, under the hint and above
+     the recipe panel. It stays a child of the page (the workspace owns it) and sits in the page
+     grid's second track, level with the page top; the stage's first row reserves its height.
+     booth-pageedit.js adds a head (label and the paragraph crop, --pe-crop-h tall) at its top. */
+  #paper-before-stage{--dk-head:calc(28px + var(--pe-crop-h,0px));--dk-area:calc(14px + var(--dk-head) + 10px);--dk-sheet:calc(var(--dk-area) + 116px + 12px + 48px + 14px)}
   #paper-before-stage:has(>.paper-page>textarea)::before{content:"";grid-column:2;grid-row:1;height:calc(var(--dk-sheet) + 14px)}
   #paper-before-stage>.paper-page:has(>textarea)::after{
-    content:"이 문단 고치기";position:absolute;z-index:0;grid-column:2/3;grid-row:1/2;inset:0 0 auto 0;height:var(--dk-sheet);margin:0;
+    content:"";position:absolute;z-index:0;grid-column:2/3;grid-row:1/2;inset:0 0 auto 0;height:var(--dk-sheet);margin:0;
     box-sizing:border-box;padding:14px 18px;border:1px solid var(--ev-hair,#d6d9dd);border-radius:12px;
     background:var(--ev-card,#fff);box-shadow:0 12px 30px rgba(22,25,30,.12);
-    font-size:12px;font-weight:500;line-height:18px;color:var(--ev-muted,#6b717a)
+    font-size:12px;font-weight:500;line-height:18px;color:var(--ev-muted,#5f656e)
   }
   #paper-before-stage>.paper-page>textarea{
-    position:absolute!important;grid-column:2/3;grid-row:1/2;inset:44px 18px auto 18px!important;
+    position:absolute!important;grid-column:2/3;grid-row:1/2;inset:var(--dk-area) 18px auto 18px!important;
     width:calc(100% - 36px)!important;height:116px!important;min-height:0!important;margin:0;resize:none!important;overflow:auto
   }
   #paper-before-stage>.paper-page>.paper-direct-controls{
-    position:absolute!important;grid-column:2/3;grid-row:1/2;inset:172px 18px auto 18px!important;
+    position:absolute!important;grid-column:2/3;grid-row:1/2;inset:calc(var(--dk-area) + 128px) 18px auto 18px!important;
     grid-template-columns:minmax(0,1fr) auto auto;align-items:center!important;gap:8px!important;margin:0;padding:0
   }
   #paper-before-stage .paper-direct-controls>[data-direct-status]{grid-column:1;line-height:1.4}

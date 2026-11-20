@@ -11,10 +11,14 @@
 //
 // Reads app/dist/index.html and never modifies it. The event HTML changes only the
 // cloud-config script name, the CSP connect-src origin, a title suffix, a
-// noindex robots meta, and the booth assets after hosted-ai.js: event-theme.css,
-// booth.css, booth-recipe.css, booth-myai.css, then booth.js, booth-recipe.js and
-// booth-myai.js (all defer). event-theme.css comes first so booth.css can override it;
-// booth.js runs before the recipe and my-AI scripts that extend it. Whatever else
+// noindex robots meta, a color-scheme "only light" meta (forced dark modes leave the
+// booth's selected states alone), and the booth assets after hosted-ai.js: event-theme.css,
+// booth.css, booth-recipe.css, booth-myai.css, booth-runtime.css, booth-patch.css,
+// booth-pageedit.css, then booth-runtime.js, booth.js, booth-recipe.js, booth-myai.js,
+// booth-patch.js and booth-pageedit.js (all defer). event-theme.css comes first so booth.css can
+// override it; booth-runtime.js (kiosk storage, offline retry) runs before booth.js reads it;
+// booth.js runs before the recipe, my-AI and in-page editing scripts that extend it, and
+// booth-patch.js before its caller. Whatever else
 // index.html contains, including open-access.js, is copied through.
 import {readFileSync, writeFileSync} from 'node:fs';
 import {dirname, join, resolve} from 'node:path';
@@ -32,9 +36,10 @@ const ORIGIN = /^https:\/\/[a-z0-9.-]+(?::[1-9][0-9]{0,4})?$/;
 
 export const DEFAULT_EVENT_API_BASE = 'https://falsify-cloud-api-event.ai-gongbu.workers.dev';
 export const EVENT_TITLE_SUFFIX = ' · Event';
-/* Contract order: event-theme.css, booth.css, booth-recipe.css, booth-myai.css, then the scripts. */
-export const BOOTH_STYLES = Object.freeze(['event-theme.css', 'booth.css', 'booth-recipe.css', 'booth-myai.css']);
-export const BOOTH_SCRIPTS = Object.freeze(['booth.js', 'booth-recipe.js', 'booth-myai.js']);
+/* Contract order: event-theme.css, booth.css, booth-recipe.css, booth-myai.css, booth-runtime.css,
+   then the in-page editing files (booth-patch before booth-pageedit), then the scripts. */
+export const BOOTH_STYLES = Object.freeze(['event-theme.css', 'booth.css', 'booth-recipe.css', 'booth-myai.css', 'booth-runtime.css', 'booth-patch.css', 'booth-pageedit.css']);
+export const BOOTH_SCRIPTS = Object.freeze(['booth-runtime.js', 'booth.js', 'booth-recipe.js', 'booth-myai.js', 'booth-patch.js', 'booth-pageedit.js']);
 
 function fail(message, exitCode) {
   const error = new Error(message);
@@ -129,7 +134,7 @@ function withEventTitle(html, title, newline) {
   const line = `  ${title[0]}`;
   if (html.split(line).length !== 2) throw fail('index.html title must be one indented tag', 2);
   const next = `  <title>${title[1]}${EVENT_TITLE_SUFFIX}</title>`;
-  const robots = `  <meta name="robots" content="noindex">${newline}`;
+  const robots = `  <meta name="robots" content="noindex">${newline}  <meta name="color-scheme" content="only light">${newline}`;
   return replaceOnce(html, line, `${robots}${next}`);
 }
 

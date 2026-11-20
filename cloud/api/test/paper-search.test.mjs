@@ -2,7 +2,7 @@
 // and fetchImpl never leaves the process.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { matchPaperSearch, handlePaperSearchRequest } from '../src/paper-search.mjs';
+import { matchPaperSearch, handlePaperSearchRequest, clearPdfMemoForTests, agePdfMemoForTests } from '../src/paper-search.mjs';
 
 const USER_AGENT = 'falsify-workbench-booth/1.0 (+https://github.com/Shinick-Han/falsify-workbench)';
 const AUTHOR = '11111111-1111-4111-8111-111111111111';
@@ -840,6 +840,7 @@ test('a guest uses guestMaxUploadBytes and a password owner keeps maxUploadBytes
 });
 
 test('an allowed PDF cache hit serves bytes with no upstream call, and a denied id stores none', async () => {
+  clearPdfMemoForTests();
   const pdf = pdfBytes(80);
   let fetches = 0;
   const routed = routes({
@@ -927,6 +928,48 @@ test('an allowed PDF cache hit serves bytes with no upstream call, and a denied 
   assert.equal(denied.calls.length, 1);
   const pdfEntries = deniedCache.entries().filter(([url, hit]) => url.includes('/papers/pdf') || String(hit.headers['content-type'] || '').includes('pdf'));
   assert.equal(pdfEntries.length, 0);
+});
+
+test('a warm isolate serves a repeated PDF from memory when no Cache API is available', async () => {
+  clearPdfMemoForTests();
+  let fetches = 0;
+  const routed = routes({
+    'oaipmh.arxiv.org': () => { fetches += 1; return new Response(oaiXml(CC_BY), { status: 200, headers: { 'Content-Type': 'text/xml' } }); },
+    'arxiv.org': target => { fetches += 1; return new Response(pdfBytes(64 + target.pathname.length), { status: 200, headers: { 'Content-Type': 'application/pdf' } }); },
+  });
+  const deps = testDeps().deps;
+  const get = id => send({ pathname: '/v1/papers/pdf', query: 'id=' + id, token: SESSION, deps, cache: null, fetchImpl: routed.fetchImpl });
+  const first = await get('2503.00081');
+  assert.equal(first.status, 200);
+  const firstBytes = new Uint8Array(await first.arrayBuffer());
+  assert.equal(fetches, 2);
+  const second = await get('2503.00081');
+  assert.equal(second.status, 200);
+  assert.deepEqual(new Uint8Array(await second.arrayBuffer()), firstBytes);
+  assert.equal(second.headers.get('x-falsify-paper-license'), 'cc-by-4.0');
+  assert.equal(fetches, 2, 'no OAI or arXiv call for a warm repeat');
+  // Twelve entries at most: thirteen more ids push the first one out.
+  for (let i = 0; i < 13; i++) assert.equal((await get('2503.001' + String(i).padStart(2, '0'))).status, 200);
+  const before = fetches;
+  assert.equal((await get('2503.00081')).status, 200);
+  assert.equal(fetches, before + 2, 'the evicted id is fetched again');
+  // An hour later the memo entry is gone, so the license is checked upstream again.
+  agePdfMemoForTests(60 * 60 * 1000);
+  const aged = fetches;
+  assert.equal((await get('2503.00081')).status, 200);
+  assert.equal(fetches, aged + 2, 'an expired entry re-checks the license and refetches');
+  // A denied license is never memoised.
+  clearPdfMemoForTests();
+  let deniedFetches = 0;
+  const denied = routes({
+    'oaipmh.arxiv.org': () => { deniedFetches += 1; return new Response(oaiXml('http://arxiv.org/licenses/nonexclusive-distrib/1.0/'), { status: 200, headers: { 'Content-Type': 'text/xml' } }); },
+    'arxiv.org': () => { deniedFetches += 1; return new Response(pdfBytes(80), { status: 200, headers: { 'Content-Type': 'application/pdf' } }); },
+  });
+  const getDenied = () => send({ pathname: '/v1/papers/pdf', query: 'id=2503.00099', token: SESSION, deps, cache: null, fetchImpl: denied.fetchImpl });
+  assert.equal((await getDenied()).status, 403);
+  assert.equal((await getDenied()).status, 403);
+  assert.equal(deniedFetches, 2, 'each denied open asks OAI again and never fetches the PDF');
+  clearPdfMemoForTests();
 });
 
 test('both upstreams failing is 503 and is not cached', async () => {
