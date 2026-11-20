@@ -1139,18 +1139,23 @@ const SYMBOL_FALLBACK = {
   0x226b: '>>',
 };
 
+const CJK_RANGES = [
+  [0x1100, 0x11ff],
+  [0x2e80, 0x9fff],
+  [0xa960, 0xa97f],
+  [0xac00, 0xd7af],
+  [0xd7b0, 0xd7ff],
+  [0xf900, 0xfaff],
+  [0xfe30, 0xfe4f],
+  [0xff00, 0xffef],
+  [0x20000, 0x2fa1f],
+];
+
 function isCjkCodePoint(cp) {
-  return (
-    (cp >= 0x1100 && cp <= 0x11ff) ||
-    (cp >= 0x2e80 && cp <= 0x9fff) ||
-    (cp >= 0xa960 && cp <= 0xa97f) ||
-    (cp >= 0xac00 && cp <= 0xd7af) ||
-    (cp >= 0xd7b0 && cp <= 0xd7ff) ||
-    (cp >= 0xf900 && cp <= 0xfaff) ||
-    (cp >= 0xfe30 && cp <= 0xfe4f) ||
-    (cp >= 0xff00 && cp <= 0xffef) ||
-    (cp >= 0x20000 && cp <= 0x2fa1f)
-  );
+  for (const [lo, hi] of CJK_RANGES) {
+    if (cp >= lo && cp <= hi) return true;
+  }
+  return false;
 }
 
 function winAnsiByte(cp) {
@@ -1306,6 +1311,26 @@ function pdfDirection(toPdf, dx, dy) {
   return [ux / len, uy / len];
 }
 
+const REWRITE_PAGE_MARGIN = 2;
+const REWRITE_MIN_SCALE = 65;
+
+function maxDistanceInBounds(ox, oy, dxPdf, dyPdf, transform, bounds, margin = REWRITE_PAGE_MARGIN) {
+  const [sx, sy] = apply(transform, ox, oy);
+  const [ex, ey] = apply(transform, ox + dxPdf, oy + dyPdf);
+  const vx = ex - sx;
+  const vy = ey - sy;
+  const minX = bounds[0] + margin;
+  const minY = bounds[1] + margin;
+  const maxX = bounds[2] - margin;
+  const maxY = bounds[3] - margin;
+  let tMax = Infinity;
+  if (vx > 1e-6) tMax = Math.min(tMax, (maxX - sx) / vx);
+  else if (vx < -1e-6) tMax = Math.min(tMax, (minX - sx) / vx);
+  if (vy > 1e-6) tMax = Math.min(tMax, (maxY - sy) / vy);
+  else if (vy < -1e-6) tMax = Math.min(tMax, (minY - sy) / vy);
+  return Math.max(0, Number.isFinite(tMax) ? tMax : 0);
+}
+
 function mergeDisplayLineRects(displayRects) {
   const sorted = [...displayRects].sort((a, b) => a[1] - b[1] || a[0] - b[0]);
   const lines = [];
@@ -1326,102 +1351,170 @@ function mergeDisplayLineRects(displayRects) {
     }
     if (!merged) lines.push([...r]);
   }
+  lines.sort((a, b) => a[1] - b[1] || a[0] - b[0]);
   return lines;
+}
+
+function rightClearWidth(lineRect, sx, pageAvailW, lineDir, model, selectedSet) {
+  if (Math.abs(lineDir[0] - 1) > 0.01 || Math.abs(lineDir[1]) > 0.01) return pageAvailW;
+  const [, ry0, rx1, ry1] = lineRect;
+  let maxRightX = model.bounds[2] - REWRITE_PAGE_MARGIN;
+  for (const ch of model.chars) {
+    if (selectedSet.has(ch) || !ch.c.trim()) continue;
+    const [gx0, gy0, , gy1] = quadBounds(ch.quad);
+    if (gy0 < ry1 && gy1 > ry0 && gx0 >= rx1 - 1) {
+      maxRightX = Math.min(maxRightX, gx0 - 1);
+    }
+  }
+  return Math.min(pageAvailW, Math.max(0, maxRightX - sx));
+}
+
+function splitCharsIntoLineBands(lineChars) {
+  const items = lineChars.map(ch => {
+    const box = quadBounds(ch.quad);
+    return {ch, box, cy: (box[1] + box[3]) / 2, h: Math.max(1, box[3] - box[1])};
+  });
+  items.sort((a, b) => a.cy - b.cy || a.box[0] - b.box[0]);
+  const bands = [];
+  for (const item of items) {
+    let target = null;
+    for (const band of bands) {
+      const minH = Math.min(band.h, item.h);
+      if (Math.abs(item.cy - band.cy) <= minH * 0.6) { target = band; break; }
+    }
+    if (!target) {
+      bands.push({cy: item.cy, h: item.h, box: [...item.box], chars: [item.ch]});
+    } else {
+      target.chars.push(item.ch);
+      target.box[0] = Math.min(target.box[0], item.box[0]);
+      target.box[1] = Math.min(target.box[1], item.box[1]);
+      target.box[2] = Math.max(target.box[2], item.box[2]);
+      target.box[3] = Math.max(target.box[3], item.box[3]);
+      target.cy = (target.box[1] + target.box[3]) / 2;
+      target.h = Math.max(target.h, item.h);
+    }
+  }
+  bands.sort((a, b) => a.box[1] - b.box[1] || a.box[0] - b.box[0]);
+  return bands;
+}
+
+function summarizeDrawnStyle(drawn) {
+  const defaultStyle = {fontName: 'Times-Roman', isBold: false, isItalic: false, isSerif: true, isMono: false};
+  if (!drawn.length) return {medianSize: 10, style: defaultStyle, color: [0, 0, 0]};
+  const sizes = drawn.map(c => c.size).filter(s => s > 0).sort((a, b) => a - b);
+  const medianSize = sizes.length ? sizes[Math.floor(sizes.length / 2)] : 10;
+  const styleCounts = new Map();
+  let style = drawn[0];
+  let bestCount = 0;
+  for (const ch of drawn) {
+    const key = `${ch.fontName}|${ch.isBold}|${ch.isItalic}|${ch.isSerif}|${ch.isMono}`;
+    const next = (styleCounts.get(key) || 0) + 1;
+    styleCounts.set(key, next);
+    if (next > bestCount) { bestCount = next; style = ch; }
+  }
+  return {medianSize, style, color: style.color || [0, 0, 0]};
+}
+
+function charsInDisplayRect(drawn, lineRect) {
+  const [rx0, ry0, rx1, ry1] = lineRect;
+  const tolX = 0.5;
+  const tolY = Math.min(1.5, Math.max(0.5, (ry1 - ry0) * 0.15));
+  const out = [];
+  for (const ch of drawn) {
+    const [gx0, gy0, gx1, gy1] = quadBounds(ch.quad);
+    const cx = (gx0 + gx1) / 2;
+    const cy = (gy0 + gy1) / 2;
+    if (cx >= rx0 - tolX && cx <= rx1 + tolX && cy >= ry0 - tolY && cy <= ry1 + tolY) out.push(ch);
+  }
+  return out;
+}
+
+function maxSpanProjection(points, ox, oy, ux, uy, toPdf) {
+  let maxProj = 0;
+  for (const [px, py] of points) {
+    const pt = apply(toPdf, px, py);
+    const proj = (pt[0] - ox) * ux + (pt[1] - oy) * uy;
+    if (proj > maxProj) maxProj = proj;
+  }
+  return maxProj;
+}
+
+function buildGlyphBandSlot(band, refRect, summary, model, selectedSet) {
+  const arr = band.chars;
+  const dir = arr[0].lineDir || [1, 0];
+  const [ux, uy] = pdfDirection(model.toPdf, dir[0], dir[1]);
+  const [nx, ny] = pdfDirection(model.toPdf, -dir[1], dir[0]);
+  arr.sort((a, b) => (a.pdfOrigin[0] * ux + a.pdfOrigin[1] * uy) - (b.pdfOrigin[0] * ux + b.pdfOrigin[1] * uy));
+  const [ox, oy] = arr[0].pdfOrigin;
+
+  const glyphPts = [];
+  for (const ch of arr) {
+    for (let i = 0; i < 8; i += 2) glyphPts.push([ch.quad[i], ch.quad[i + 1]]);
+  }
+  const maxGlyphProj = maxSpanProjection(glyphPts, ox, oy, ux, uy, model.toPdf);
+  const rectPts = [[refRect[0], refRect[1]], [refRect[2], refRect[1]], [refRect[0], refRect[3]], [refRect[2], refRect[3]]];
+  const maxRectProj = maxSpanProjection(rectPts, ox, oy, ux, uy, model.toPdf);
+
+  const pageAvailW = maxDistanceInBounds(ox, oy, ux, uy, model.transform, model.bounds);
+  const pageAvailH = maxDistanceInBounds(ox, oy, nx, ny, model.transform, model.bounds);
+  const [sx] = apply(model.transform, ox, oy);
+  const rightClearW = rightClearWidth(refRect, sx, pageAvailW, dir, model, selectedSet);
+  const rawW = Math.max(summary.medianSize, maxGlyphProj, maxRectProj);
+  const slotWidth = pageAvailW > 0 ? Math.min(pageAvailW, rawW) : rawW;
+
+  return {
+    ox, oy, ux, uy, nx, ny,
+    size: summary.medianSize,
+    slotWidth, pageAvailW, pageAvailH, rightClearW,
+    color: summary.color,
+    style: summary.style,
+  };
+}
+
+function buildEmptyRectSlot(lineRect, hasDrawn, summary, model, selectedSet) {
+  const [rx0, ry0, rx1, ry1] = lineRect;
+  const [ux, uy] = pdfDirection(model.toPdf, 1, 0);
+  const [nx, ny] = pdfDirection(model.toPdf, 0, 1);
+  const rh = Math.max(4, ry1 - ry0);
+  const size = hasDrawn ? summary.medianSize : Math.max(6, Math.min(24, rh * 0.8));
+  const baseY = ry0 + rh * 0.8;
+  const [ox, oy] = apply(model.toPdf, rx0, baseY);
+  const [ex, ey] = apply(model.toPdf, rx1, baseY);
+  const pageAvailW = maxDistanceInBounds(ox, oy, ux, uy, model.transform, model.bounds);
+  const pageAvailH = maxDistanceInBounds(ox, oy, nx, ny, model.transform, model.bounds);
+  const rightClearW = rightClearWidth(lineRect, rx0, pageAvailW, [1, 0], model, selectedSet);
+  const rawW = Math.max(size, Math.hypot(ex - ox, ey - oy));
+  const slotWidth = pageAvailW > 0 ? Math.min(pageAvailW, rawW) : rawW;
+
+  return {
+    ox, oy, ux, uy, nx, ny,
+    size, slotWidth, pageAvailW, pageAvailH, rightClearW,
+    color: summary.color,
+    style: summary.style,
+  };
 }
 
 function buildRewriteSlots(selectedChars, displayRects, model) {
   const drawn = selectedChars.filter(ch => ch.c.trim());
-  const defaultStyle = {fontName: 'Times-Roman', isBold: false, isItalic: false, isSerif: true, isMono: false};
-
-  if (drawn.length) {
-    const sizes = drawn.map(c => c.size).filter(s => s > 0).sort((a, b) => a - b);
-    const medianSize = sizes.length ? sizes[Math.floor(sizes.length / 2)] : 10;
-
-    // Pick modal style among drawn glyphs (avoids bold prefix biasing a whole caption, or picks bold if all bold)
-    const styleCounts = new Map();
-    let bestStyle = drawn[0];
-    let bestCount = 0;
-    for (const ch of drawn) {
-      const key = `${ch.fontName}|${ch.isBold}|${ch.isItalic}|${ch.isSerif}|${ch.isMono}`;
-      const next = (styleCounts.get(key) || 0) + 1;
-      styleCounts.set(key, next);
-      if (next > bestCount) { bestCount = next; bestStyle = ch; }
-    }
-
-    const byLine = new Map();
-    for (const ch of drawn) {
-      let arr = byLine.get(ch.lineId);
-      if (!arr) { arr = []; byLine.set(ch.lineId, arr); }
-      arr.push(ch);
-    }
-
-    const groups = [...byLine.values()].map(arr => {
-      const box = union(arr);
-      return {arr, box, cy: (box[1] + box[3]) / 2, cx: (box[0] + box[2]) / 2};
-    });
-    groups.sort((a, b) => a.cy - b.cy || a.cx - b.cx);
-
-    const slots = groups.map(({arr, box}) => {
-      const first = arr[0];
-      const [ox, oy] = first.pdfOrigin;
-      const [ux, uy] = pdfDirection(model.toPdf, first.lineDir[0], first.lineDir[1]);
-      const [nx, ny] = pdfDirection(model.toPdf, -first.lineDir[1], first.lineDir[0]);
-
-      const glyphProjs = [];
-      for (const ch of arr) {
-        for (let i = 0; i < 8; i += 2) {
-          const pt = apply(model.toPdf, ch.quad[i], ch.quad[i + 1]);
-          glyphProjs.push((pt[0] - ox) * ux + (pt[1] - oy) * uy);
-        }
-      }
-      const glyphSpanW = glyphProjs.length ? Math.max(...glyphProjs) - Math.min(...glyphProjs) : 0;
-
-      // Also measure intersecting edit rect(s) along the line direction
-      let rectSpanW = 0;
-      const hittingRects = displayRects.filter(r => intersects(box, r, 1.5));
-      if (hittingRects.length) {
-        const rectProjs = [];
-        for (const [rx0, ry0, rx1, ry1] of hittingRects) {
-          for (const [px, py] of [[rx0, ry0], [rx1, ry0], [rx0, ry1], [rx1, ry1]]) {
-            const pt = apply(model.toPdf, px, py);
-            rectProjs.push((pt[0] - ox) * ux + (pt[1] - oy) * uy);
-          }
-        }
-        rectSpanW = Math.max(...rectProjs) - Math.min(...rectProjs);
-      }
-
-      const lineSizes = arr.map(c => c.size).filter(s => s > 0).sort((a, b) => a - b);
-      const lineSize = lineSizes.length ? lineSizes[Math.floor(lineSizes.length / 2)] : medianSize;
-      return {
-        ox, oy, ux, uy, nx, ny,
-        size: medianSize || lineSize,
-        slotWidth: Math.max(medianSize, glyphSpanW, rectSpanW),
-        color: bestStyle.color || [0, 0, 0],
-        style: bestStyle,
-      };
-    });
-    return slots;
-  }
-
-  // Fallback: no MuPDF glyphs inside edit rects — derive slots purely from displayRects
+  const selectedSet = new Set(selectedChars);
+  const summary = summarizeDrawnStyle(drawn);
   const lineRects = mergeDisplayLineRects(displayRects);
-  const [ux, uy] = pdfDirection(model.toPdf, 1, 0);
-  const [nx, ny] = pdfDirection(model.toPdf, 0, 1);
-  return lineRects.map(([x0, y0, x1, y1]) => {
-    const rh = Math.max(4, y1 - y0);
-    const size = Math.max(6, Math.min(24, rh * 0.8));
-    const baseY = y0 + rh * 0.8;
-    const [ox, oy] = apply(model.toPdf, x0, baseY);
-    const [ex, ey] = apply(model.toPdf, x1, baseY);
-    const slotWidth = Math.max(size, Math.hypot(ex - ox, ey - oy));
-    return {
-      ox, oy, ux, uy, nx, ny,
-      size,
-      slotWidth,
-      color: [0, 0, 0],
-      style: defaultStyle,
-    };
-  });
+  const slots = [];
+
+  for (const lineRect of lineRects) {
+    const lineChars = charsInDisplayRect(drawn, lineRect);
+    if (!lineChars.length) {
+      slots.push(buildEmptyRectSlot(lineRect, drawn.length > 0, summary, model, selectedSet));
+      continue;
+    }
+    const [rx0, ry0, rx1, ry1] = lineRect;
+    const bands = (ry1 - ry0) > summary.medianSize * 1.8 ? splitCharsIntoLineBands(lineChars) : [{box: lineRect, chars: lineChars}];
+    for (const band of bands) {
+      const refRect = bands.length === 1 ? lineRect : [rx0, band.box[1], rx1, band.box[3]];
+      slots.push(buildGlyphBandSlot(band, refRect, summary, model, selectedSet));
+    }
+  }
+  return slots;
 }
 
 function sanitizeRewriteText(raw) {
@@ -1502,50 +1595,47 @@ function measureRewriteLine(lineText, baseName, size) {
   return total;
 }
 
-function wrapRewriteText(text, baseName, size, slotWidths, scaleFactor = 1) {
+function wrapRewriteText(text, baseName, size, slotWidths, scaleFactor = 1, overflowWidth = null) {
   const effWidth = (idx) => {
-    const raw = slotWidths[Math.min(idx, slotWidths.length - 1)] || size * 10;
-    return Math.max(size, raw / scaleFactor);
+    const raw = idx < slotWidths.length
+      ? slotWidths[idx]
+      : (overflowWidth || slotWidths[slotWidths.length - 1] || size * 10);
+    return Math.max(size * 0.5, raw / scaleFactor);
   };
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return [];
   const lines = [];
-  const paragraphs = text.split('\n');
-  for (const para of paragraphs) {
-    if (!para) { lines.push(''); continue; }
-    let current = '';
-    const flush = () => { lines.push(current.trimEnd()); current = ''; };
-    for (const part of para.split(/(\s+)/)) {
-      if (!part) continue;
-      const limit = effWidth(lines.length);
-      if (/^\s+$/.test(part)) {
-        if (current && measureRewriteLine(current + ' ', baseName, size) <= limit) current += ' ';
-        continue;
-      }
-      const trial = current ? current + part : part;
-      if (measureRewriteLine(trial, baseName, size) <= limit) {
-        current = trial;
-        continue;
-      }
-      if (current) flush();
-      const nextLimit = effWidth(lines.length);
-      if (measureRewriteLine(part, baseName, size) <= nextLimit) {
-        current = part;
-        continue;
-      }
-      // Break long word/CJK run by character without ever returning null
-      let buf = '';
-      for (const ch of part) {
-        const next = buf + ch;
-        if (buf && measureRewriteLine(next, baseName, size) > effWidth(lines.length)) {
-          lines.push(buf);
-          buf = ch;
-        } else {
-          buf = next;
-        }
-      }
-      current = buf;
+  let current = '';
+  for (const word of words) {
+    const limit = effWidth(lines.length);
+    const trial = current ? `${current} ${word}` : word;
+    if (measureRewriteLine(trial, baseName, size) <= limit) {
+      current = trial;
+      continue;
     }
-    if (current || !paragraphs.length) flush();
+    if (current) {
+      lines.push(current);
+      current = '';
+    }
+    const nextLimit = effWidth(lines.length);
+    if (measureRewriteLine(word, baseName, size) <= nextLimit) {
+      current = word;
+      continue;
+    }
+    // Break long word/CJK run by Unicode code point without ever dropping a char
+    let buf = '';
+    for (const ch of word) {
+      const next = buf + ch;
+      if (buf && measureRewriteLine(next, baseName, size) > effWidth(lines.length)) {
+        lines.push(buf);
+        buf = ch;
+      } else {
+        buf = next;
+      }
+    }
+    current = buf;
   }
+  if (current) lines.push(current);
   return lines;
 }
 
@@ -1594,117 +1684,249 @@ function finalizeCidFonts(doc, cidState) {
   }
 }
 
-function emitRewriteLineOps(doc, page, slot, lineText, baseName, fontSize, hScale, cidState) {
-  if (!lineText) return '';
-  const runs = splitRewriteRuns(lineText, baseName);
-  const [r, g, b] = slot.color || [0, 0, 0];
-  const {ux, uy, ox, oy} = slot;
-  let out = `q BT ${num(r)} ${num(g)} ${num(b)} rg ${num(hScale)} Tz `;
-  out += `${num(ux)} ${num(uy)} ${num(-uy)} ${num(ux)} ${num(ox)} ${num(oy)} Tm `;
-  for (const run of runs) {
-    if (run.kind === 'winansi') {
-      const resName = ensureFont(doc, page, baseName);
-      const lit = winAnsi(run.text) || winAnsi('?');
-      out += `/${resName} ${num(fontSize)} Tf ${lit} Tj `;
-    } else if (run.kind === 'cjk') {
-      const resName = ensureCjkFont(doc, page);
-      out += `/${resName} ${num(fontSize)} Tf ${utf16hex(run.text)} Tj `;
-    } else {
-      const {resName, entry} = ensureNimbusCidFont(doc, page, baseName, cidState);
-      let hex = '';
-      for (const ch of run.text) {
-        const gid = entry.font.encodeCharacter(ch.codePointAt(0)) || entry.font.encodeCharacter(0x3f);
-        if (!entry.mappings.has(gid)) entry.mappings.set(gid, ch);
-        hex += gid.toString(16).padStart(4, '0');
+function emitRewriteLinesOps(doc, page, items, baseName, cidState) {
+  const nonEmpty = items.filter(item => item && item.lineText);
+  if (!nonEmpty.length) return '';
+  let out = 'q BT\n';
+  for (const item of nonEmpty) {
+    const runs = splitRewriteRuns(item.lineText, baseName);
+    const [r, g, b] = item.color || [0, 0, 0];
+    let lineFontSize = item.fontSize;
+    let lineScale = item.hScale;
+    const rawW = measureRewriteLine(item.lineText, baseName, lineFontSize);
+    const maxW = item.pageAvailW;
+    if (maxW > 0 && rawW * (lineScale / 100) > maxW) {
+      const neededScale = Math.floor((maxW / rawW) * 1000) / 10;
+      if (neededScale >= 30) {
+        lineScale = Math.min(lineScale, neededScale);
+      } else {
+        lineScale = Math.min(lineScale, 30);
+        lineFontSize = Math.max(1, (maxW / (rawW * (lineScale / 100))) * lineFontSize);
       }
-      out += `/${resName} ${num(fontSize)} Tf <${hex}> Tj `;
     }
+    out += `${num(r)} ${num(g)} ${num(b)} rg ${num(lineScale)} Tz `;
+    out += `${num(item.ux)} ${num(item.uy)} ${num(-item.uy)} ${num(item.ux)} ${num(item.ox)} ${num(item.oy)} Tm `;
+    for (const run of runs) {
+      if (run.kind === 'winansi') {
+        const resName = ensureFont(doc, page, baseName);
+        const lit = winAnsi(run.text) || winAnsi('?');
+        out += `/${resName} ${num(lineFontSize)} Tf ${lit} Tj `;
+      } else if (run.kind === 'cjk') {
+        const resName = ensureCjkFont(doc, page);
+        out += `/${resName} ${num(lineFontSize)} Tf ${utf16hex(run.text)} Tj `;
+      } else {
+        const {resName, entry} = ensureNimbusCidFont(doc, page, baseName, cidState);
+        let hex = '';
+        for (const ch of run.text) {
+          const gid = entry.font.encodeCharacter(ch.codePointAt(0)) || entry.font.encodeCharacter(0x3f);
+          if (!entry.mappings.has(gid)) entry.mappings.set(gid, ch);
+          hex += gid.toString(16).padStart(4, '0');
+        }
+        out += `/${resName} ${num(lineFontSize)} Tf <${hex}> Tj `;
+      }
+    }
+    out += '\n';
   }
   return out + 'ET Q\n';
 }
 
-function emitRewriteEdit(doc, page, slots, rawNewText, cidState) {
-  const text = sanitizeRewriteText(rawNewText);
-  if (!text || !slots.length) return '';
-
-  const baseSlot = slots[0];
-  const baseName = base14FromStyle(baseSlot.style);
-  const baseSize = baseSlot.size;
-
-  // Single-line path: compress with Tz down to 65%, then shrink fontSize down to 72%, then allow overflow
-  if (slots.length === 1 && !text.includes('\n')) {
-    const naturalW = measureRewriteLine(text, baseName, baseSize);
-    let fontSize = baseSize;
-    let hScale = 100;
-    if (naturalW > baseSlot.slotWidth && baseSlot.slotWidth > 0) {
-      const ratio = baseSlot.slotWidth / naturalW;
-      if (ratio >= 0.65) {
-        hScale = Math.round(ratio * 1000) / 10;
-      } else {
-        hScale = 65;
-        fontSize = Math.max(Math.min(baseSize, 5), Math.max(baseSize * 0.72, (baseSlot.slotWidth / (naturalW * 0.65)) * baseSize));
+function buildOverflowItems(lastSlot, extraLines, baseName, fontSize, hScale, leading, overflowWidth) {
+  if (!extraLines.length) return [];
+  const availH = lastSlot.pageAvailH;
+  if (availH > 0 && extraLines.length * leading <= availH) {
+    return extraLines.map((lineText, idx) => {
+      const step = leading * (idx + 1);
+      const ox = lastSlot.ox + lastSlot.nx * step;
+      const oy = lastSlot.oy + lastSlot.ny * step;
+      let lineScale = hScale;
+      const rawW = measureRewriteLine(lineText, baseName, fontSize);
+      if (rawW * (lineScale / 100) > overflowWidth && overflowWidth > 0) {
+        const needed = (overflowWidth / rawW) * 100;
+        lineScale = Math.max(REWRITE_MIN_SCALE, Math.min(lineScale, Math.round(needed * 10) / 10));
       }
-    }
-    return emitRewriteLineOps(doc, page, baseSlot, text, baseName, fontSize, hScale, cidState);
+      return {
+        ox, oy,
+        ux: lastSlot.ux, uy: lastSlot.uy,
+        color: lastSlot.color,
+        pageAvailW: lastSlot.pageAvailW,
+        lineText,
+        fontSize,
+        hScale: lineScale,
+      };
+    });
   }
 
-  // Multi-line path: wrap across slots; shrink if needed; overflow extra lines stepping by leading
-  const slotWidths = slots.map(s => s.slotWidth);
+  // Normal leading would cross the bottom page edge (where MuPDF clips glyphs).
+  // Re-wrap the overflow text at progressively tighter fontSize/leading inside pageAvailH.
+  const safeAvailH = Math.max(0, availH);
+  const restText = extraLines.join(' ');
+  const restW = Math.max(overflowWidth, lastSlot.pageAvailW);
+  let restFontSize = fontSize;
+  let restScale = Math.min(hScale, REWRITE_MIN_SCALE);
+  let restLeading = Math.min(leading, restFontSize * 1.15);
+  let restLines = wrapRewriteText(restText, baseName, restFontSize, [restW], restScale / 100, restW);
+
+  while (restLines.length * restLeading > safeAvailH && restFontSize > 1.5) {
+    restFontSize = Math.max(1.5, Math.round(restFontSize * 0.85 * 100) / 100);
+    restLeading = Math.min(leading, restFontSize * 1.15);
+    restLines = wrapRewriteText(restText, baseName, restFontSize, [restW], restScale / 100, restW);
+  }
+  if (restLines.length * restLeading > safeAvailH && restLines.length > 0) {
+    restLeading = safeAvailH / restLines.length;
+    restFontSize = Math.min(restFontSize, Math.max(1, restLeading > 0 ? restLeading * 0.9 : 1.5));
+  }
+
+  return restLines.map((lineText, idx) => {
+    const step = restLeading * (idx + 1);
+    return {
+      ox: lastSlot.ox + lastSlot.nx * step,
+      oy: lastSlot.oy + lastSlot.ny * step,
+      ux: lastSlot.ux, uy: lastSlot.uy,
+      color: lastSlot.color,
+      pageAvailW: lastSlot.pageAvailW,
+      lineText,
+      fontSize: restFontSize,
+      hScale: restScale,
+    };
+  });
+}
+
+function singleLineItem(slot, lineText, fontSize, hScale) {
+  return {
+    ox: slot.ox, oy: slot.oy,
+    ux: slot.ux, uy: slot.uy,
+    color: slot.color,
+    pageAvailW: slot.pageAvailW,
+    lineText,
+    fontSize,
+    hScale,
+  };
+}
+
+function fitUnbrokenSingleToken(baseSlot, naturalW, baseSize) {
+  for (const scale of [65, 50]) {
+    const needed = (baseSlot.pageAvailW / (naturalW * (scale / 100))) * baseSize;
+    if (needed >= 4) return {fontSize: needed, hScale: scale};
+  }
+  return null;
+}
+
+function emitSingleSlotRewrite(doc, page, baseSlot, text, baseName, cidState) {
+  const baseSize = baseSlot.size;
+  const minSize = Math.max(Math.min(baseSize, 5), baseSize * 0.72);
+  const naturalW = measureRewriteLine(text, baseName, baseSize);
   let fontSize = baseSize;
   let hScale = 100;
-  let wrapped = wrapRewriteText(text, baseName, fontSize, slotWidths, 1);
+  if (naturalW > baseSlot.slotWidth && baseSlot.slotWidth > 0) {
+    const ratio = baseSlot.slotWidth / naturalW;
+    if (ratio >= REWRITE_MIN_SCALE / 100) {
+      hScale = Math.round(ratio * 1000) / 10;
+    } else {
+      hScale = REWRITE_MIN_SCALE;
+      fontSize = Math.max(minSize, (baseSlot.slotWidth / (naturalW * (REWRITE_MIN_SCALE / 100))) * baseSize);
+    }
+  }
+  const renderedW = measureRewriteLine(text, baseName, fontSize) * (hScale / 100);
+  if (!(baseSlot.pageAvailW > 0) || renderedW <= baseSlot.pageAvailW) {
+    return emitRewriteLinesOps(doc, page, [singleLineItem(baseSlot, text, fontSize, hScale)], baseName, cidState);
+  }
+  if (!/\s/.test(text.trim())) {
+    const fitted = fitUnbrokenSingleToken(baseSlot, naturalW, baseSize);
+    if (fitted) {
+      return emitRewriteLinesOps(doc, page, [singleLineItem(baseSlot, text, fitted.fontSize, fitted.hScale)], baseName, cidState);
+    }
+  }
+  const wrapW = Math.max(minSize * 2, baseSlot.pageAvailW);
+  const wrapped = wrapRewriteText(text, baseName, minSize, [wrapW], REWRITE_MIN_SCALE / 100, wrapW);
+  const items = [singleLineItem(baseSlot, wrapped[0], minSize, REWRITE_MIN_SCALE)];
+  if (wrapped.length > 1) {
+    items.push(...buildOverflowItems(baseSlot, wrapped.slice(1), baseName, minSize, REWRITE_MIN_SCALE, baseSize * 1.2, wrapW));
+  }
+  return emitRewriteLinesOps(doc, page, items, baseName, cidState);
+}
 
-  if (wrapped.length > slots.length) {
-    const shrunkSize = Math.max(Math.min(baseSize, 5), baseSize * 0.78);
-    const shrunkScale = 75;
-    const trial = wrapRewriteText(text, baseName, shrunkSize, slotWidths, shrunkScale / 100);
-    if (trial.length <= slots.length || trial.length < wrapped.length) {
-      fontSize = shrunkSize;
-      hScale = shrunkScale;
+function chooseMultiSlotWrap(text, baseName, baseSize, minSize, slotCount, wrapWidths, overflowWidth) {
+  let fontSize = baseSize;
+  let hScale = 100;
+  let wrapped = wrapRewriteText(text, baseName, fontSize, wrapWidths, 1, overflowWidth);
+  if (wrapped.length <= slotCount) return {fontSize, hScale, wrapped};
+  const candidates = [
+    {size: baseSize, scale: 85},
+    {size: baseSize, scale: 75},
+    {size: baseSize, scale: REWRITE_MIN_SCALE},
+    {size: Math.max(Math.min(baseSize, 5), baseSize * 0.85), scale: REWRITE_MIN_SCALE},
+    {size: minSize, scale: REWRITE_MIN_SCALE},
+  ];
+  for (const cand of candidates) {
+    const trial = wrapRewriteText(text, baseName, cand.size, wrapWidths, cand.scale / 100, overflowWidth);
+    if (trial.length < wrapped.length) {
+      fontSize = cand.size;
+      hScale = cand.scale;
       wrapped = trial;
     }
+    if (wrapped.length <= slotCount) break;
   }
+  return {fontSize, hScale, wrapped};
+}
 
-  // Measure leading between consecutive slots along the line-advance normal (nx, ny)
-  let leading = baseSize * 1.2;
-  if (slots.length >= 2) {
-    const steps = [];
-    for (let i = 1; i < slots.length; i++) {
-      const step = (slots[i].ox - slots[i - 1].ox) * baseSlot.nx + (slots[i].oy - slots[i - 1].oy) * baseSlot.ny;
-      if (step > baseSize * 0.5) steps.push(step);
-    }
-    if (steps.length) {
-      steps.sort((a, b) => a - b);
-      leading = steps[Math.floor(steps.length / 2)];
-    }
+function measureSlotLeading(slots, baseSize) {
+  const baseSlot = slots[0];
+  const steps = [];
+  for (let i = 1; i < slots.length; i++) {
+    const step = (slots[i].ox - slots[i - 1].ox) * baseSlot.nx + (slots[i].oy - slots[i - 1].oy) * baseSlot.ny;
+    if (step > baseSize * 0.5) steps.push(step);
   }
+  if (!steps.length) return baseSize * 1.2;
+  steps.sort((a, b) => a - b);
+  return steps[Math.floor(steps.length / 2)];
+}
 
-  let ops = '';
-  const lastSlot = slots[slots.length - 1];
-  for (let i = 0; i < wrapped.length; i++) {
+function buildInSlotItems(slots, wrapped, wrapWidths, baseName, fontSize, hScale) {
+  const items = [];
+  const count = Math.min(wrapped.length, slots.length);
+  for (let i = 0; i < count; i++) {
     const lineText = wrapped[i];
     if (!lineText) continue;
-    let slot;
-    if (i < slots.length) {
-      slot = slots[i];
-    } else {
-      const extra = i - (slots.length - 1);
-      slot = {
-        ...lastSlot,
-        ox: lastSlot.ox + lastSlot.nx * leading * extra,
-        oy: lastSlot.oy + lastSlot.ny * leading * extra,
-      };
-    }
-    // If an unbreakable single-word line still exceeds slotWidth, apply gentle Tz compression
+    const targetW = wrapWidths[i];
     let lineScale = hScale;
-    const lineW = measureRewriteLine(lineText, baseName, fontSize) * (lineScale / 100);
-    if (lineW > slot.slotWidth && slot.slotWidth > 0) {
-      const needed = (slot.slotWidth / measureRewriteLine(lineText, baseName, fontSize)) * 100;
-      lineScale = Math.max(65, Math.min(lineScale, Math.round(needed * 10) / 10));
+    const rawW = measureRewriteLine(lineText, baseName, fontSize);
+    if (rawW * (lineScale / 100) > targetW && targetW > 0) {
+      const needed = (targetW / rawW) * 100;
+      lineScale = Math.max(REWRITE_MIN_SCALE, Math.min(lineScale, Math.round(needed * 10) / 10));
     }
-    ops += emitRewriteLineOps(doc, page, slot, lineText, baseName, fontSize, lineScale, cidState);
+    items.push(singleLineItem(slots[i], lineText, fontSize, lineScale));
   }
-  return ops;
+  return items;
+}
+
+function emitMultiSlotRewrite(doc, page, slots, text, baseName, cidState) {
+  const baseSize = slots[0].size;
+  const minSize = Math.max(Math.min(baseSize, 5), baseSize * 0.72);
+  const baseWidths = slots.map(s => Math.max(baseSize, s.slotWidth));
+  const lastSlot = slots[slots.length - 1];
+  const blockW = Math.max(...baseWidths);
+  const overflowWidth = Math.max(baseSize, lastSlot.pageAvailW > 0 ? Math.min(lastSlot.pageAvailW, blockW) : blockW);
+  const wrapWidths = [...baseWidths];
+  if (lastSlot.rightClearW > wrapWidths[wrapWidths.length - 1]) {
+    wrapWidths[wrapWidths.length - 1] = Math.min(lastSlot.rightClearW, overflowWidth);
+  }
+  const {fontSize, hScale, wrapped} = chooseMultiSlotWrap(text, baseName, baseSize, minSize, slots.length, wrapWidths, overflowWidth);
+  const leading = measureSlotLeading(slots, baseSize);
+  const items = buildInSlotItems(slots, wrapped, wrapWidths, baseName, fontSize, hScale);
+  if (wrapped.length > slots.length) {
+    items.push(...buildOverflowItems(lastSlot, wrapped.slice(slots.length), baseName, fontSize, hScale, leading, overflowWidth));
+  }
+  return emitRewriteLinesOps(doc, page, items, baseName, cidState);
+}
+
+function emitRewriteEdit(doc, page, slots, rawNewText, cidState) {
+  const sanitized = sanitizeRewriteText(rawNewText);
+  // '\n' in newText is a soft break: normalize newlines to single spaces so words reflow across slots
+  const text = sanitized.replace(/^\n+|\n+$/g, '').replace(/[ ]*\n+[ ]*/g, ' ');
+  if (!text.trim() || !slots.length) return '';
+  const baseName = base14FromStyle(slots[0].style);
+  if (slots.length === 1) return emitSingleSlotRewrite(doc, page, slots[0], text, baseName, cidState);
+  return emitMultiSlotRewrite(doc, page, slots, text, baseName, cidState);
 }
 
 function toUint8Array(input) {
@@ -1715,76 +1937,87 @@ function toUint8Array(input) {
   throw unavailableError(new TypeError('sourceBytes must be a Uint8Array'));
 }
 
-export async function rewrite(sourceBytes, edits) {
-  return exclusive(async () => {
-    let doc = null;
-    try {
-      const bytes = toUint8Array(sourceBytes);
-      const list = Array.isArray(edits) ? edits : [];
-      const head = String.fromCharCode(...bytes.slice(0, Math.min(1024, bytes.byteLength)));
-      if (bytes.byteLength < 5 || !head.includes('%PDF-')) {
-        throw unavailableError(new Error('not a PDF'));
-      }
-      doc = mupdf.Document.openDocument(bytes, 'application/pdf').asPDF();
-      if (!doc) throw unavailableError(new Error('not a PDF'));
-      if (doc.needsPassword()) {
-        try { doc.authenticatePassword(''); } catch { /* best effort */ }
-      }
-      const pageCount = doc.countPages();
-      const byPage = new Map();
-      for (const edit of list) {
-        if (!edit || typeof edit !== 'object') continue;
-        const pageIndex = edit.pageIndex;
-        if (!Number.isInteger(pageIndex) || pageIndex < 0 || pageIndex >= pageCount) continue;
-        if (!Array.isArray(edit.rects) || !edit.rects.length) continue;
-        let group = byPage.get(pageIndex);
-        if (!group) { group = []; byPage.set(pageIndex, group); }
-        group.push(edit);
-      }
+function openRewriteDoc(bytes) {
+  const head = String.fromCharCode(...bytes.slice(0, Math.min(1024, bytes.byteLength)));
+  if (bytes.byteLength < 5 || !head.includes('%PDF-')) throw unavailableError(new Error('not a PDF'));
+  const doc = mupdf.Document.openDocument(bytes, 'application/pdf').asPDF();
+  if (!doc) throw unavailableError(new Error('not a PDF'));
+  if (doc.needsPassword()) {
+    try { doc.authenticatePassword(''); } catch { /* best effort */ }
+  }
+  return doc;
+}
 
-      if (!byPage.size) return bytes.slice();
+function groupRewriteEditsByPage(edits, pageCount) {
+  const byPage = new Map();
+  for (const edit of Array.isArray(edits) ? edits : []) {
+    if (!edit || typeof edit !== 'object') continue;
+    const pageIndex = edit.pageIndex;
+    if (!Number.isInteger(pageIndex) || pageIndex < 0 || pageIndex >= pageCount) continue;
+    if (!Array.isArray(edit.rects) || !edit.rects.length) continue;
+    let group = byPage.get(pageIndex);
+    if (!group) { group = []; byPage.set(pageIndex, group); }
+    group.push(edit);
+  }
+  return byPage;
+}
 
-      const cidState = new Map();
-      for (const [pageIndex, pageEdits] of byPage) {
-        const page = doc.loadPage(pageIndex);
-        try {
-          const model = readRewritePage(page);
-          const pagePlans = [];
-          for (const edit of pageEdits) {
-            const displayRects = rectsToDisplay(edit.rects, model.bounds);
-            if (!displayRects.length) continue;
-            const selectedChars = selectGlyphsByRects(model.chars, displayRects);
-            const slots = buildRewriteSlots(selectedChars, displayRects, model);
-            pagePlans.push({edit, displayRects, selectedChars, slots});
-          }
-          if (!pagePlans.length) continue;
-          redactRewritePage(page, pagePlans, model.chars);
-          let streamOps = '';
-          for (const plan of pagePlans) {
-            streamOps += emitRewriteEdit(doc, page, plan.slots, plan.edit.newText, cidState);
-          }
-          if (streamOps) appendStream(doc, page, streamOps);
-        } finally {
-          try { page.destroy(); } catch { /* ignore */ }
-        }
-      }
-
-      finalizeCidFonts(doc, cidState);
-      const saved = doc.saveToBuffer('garbage=compact');
-      let out;
-      try {
-        out = saved.asUint8Array().slice();
-      } finally {
-        try { saved.destroy(); } catch { /* ignore */ }
-      }
-      return out;
-    } catch (error) {
-      if (error instanceof BrowserPdfError && error.code === 'engine_unavailable') throw error;
-      throw unavailableError(error);
-    } finally {
-      try { doc?.destroy(); } catch { /* ignore */ }
+function applyRewritePage(doc, pageIndex, pageEdits, cidState) {
+  const page = doc.loadPage(pageIndex);
+  try {
+    const model = readRewritePage(page);
+    const pagePlans = [];
+    for (const edit of pageEdits) {
+      const displayRects = rectsToDisplay(edit.rects, model.bounds);
+      if (!displayRects.length) continue;
+      const selectedChars = selectGlyphsByRects(model.chars, displayRects);
+      const slots = buildRewriteSlots(selectedChars, displayRects, model);
+      pagePlans.push({edit, displayRects, selectedChars, slots});
     }
-  });
+    if (!pagePlans.length) return;
+    redactRewritePage(page, pagePlans, model.chars);
+    let streamOps = '';
+    for (const plan of pagePlans) {
+      streamOps += emitRewriteEdit(doc, page, plan.slots, plan.edit.newText, cidState);
+    }
+    if (streamOps) appendStream(doc, page, streamOps);
+  } finally {
+    try { page.destroy(); } catch { /* ignore */ }
+  }
+}
+
+function saveRewriteDoc(doc) {
+  const saved = doc.saveToBuffer('garbage=compact');
+  try {
+    return saved.asUint8Array().slice();
+  } finally {
+    try { saved.destroy(); } catch { /* ignore */ }
+  }
+}
+
+async function rewriteExclusive(sourceBytes, edits) {
+  let doc = null;
+  try {
+    const bytes = toUint8Array(sourceBytes);
+    doc = openRewriteDoc(bytes);
+    const byPage = groupRewriteEditsByPage(edits, doc.countPages());
+    if (!byPage.size) return bytes.slice();
+    const cidState = new Map();
+    for (const [pageIndex, pageEdits] of byPage) {
+      applyRewritePage(doc, pageIndex, pageEdits, cidState);
+    }
+    finalizeCidFonts(doc, cidState);
+    return saveRewriteDoc(doc);
+  } catch (error) {
+    if (error instanceof BrowserPdfError && error.code === 'engine_unavailable') throw error;
+    throw unavailableError(error);
+  } finally {
+    try { doc?.destroy(); } catch { /* ignore */ }
+  }
+}
+
+export async function rewrite(sourceBytes, edits) {
+  return exclusive(() => rewriteExclusive(sourceBytes, edits));
 }
 
 globalThis.FalsifyBrowserPdf = {prepare, rewrite, warm, ENGINE, LIMITS, COORDINATE_SPACE, COORDINATES, BrowserPdfError};

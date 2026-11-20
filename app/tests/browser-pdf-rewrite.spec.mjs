@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
 import {existsSync, readFileSync} from 'node:fs';
+import {createRequire} from 'node:module';
 import {test} from 'node:test';
 import {fileURLToPath} from 'node:url';
 import vm from 'node:vm';
 import * as mupdf from '../dist/browser-pdf-vendor/mupdf.js';
 import {rewrite, warm} from '../dist/browser-pdf.mjs';
+
+const require = createRequire(import.meta.url);
+const pdfOracle = require('./helpers/pdf-oracle.cjs');
 
 const MISSION_PDF_PATH = [
   process.env.FALSIFY_BOOTH_MISSION_PDF,
@@ -431,4 +435,154 @@ test('classic loader warm() pre-spawns worker and rewrite() resolves Uint8Array 
     globalThis.document = prev.document;
     globalThis.Worker = prev.Worker;
   }
+});
+
+test('page 5 (a): 2-line Ties paragraph randomly -> deterministically extracts contiguously and keeps other text byte-equal', async () => {
+  const p5Info = inspectPage(missionBytes, 4);
+  const tiesLines = p5Info.lines.filter(l =>
+    l.text.includes('Ties, where the same score') ||
+    l.text.includes('broken randomly.')
+  );
+  assert.equal(tiesLines.length, 2, 'expected 2 lines for the Ties paragraph on page 5');
+  const origPara = tiesLines.map(l => l.text).join('\n');
+  const newPara = origPara.replace('randomly', 'deterministically');
+  assert.notEqual(newPara, origPara);
+
+  const out = await rewrite(missionBytes, [{
+    id: 'ties-para',
+    pageIndex: 4,
+    rects: tiesLines.map(l => l.frac),
+    originalText: origPara,
+    newText: newPara,
+    source: 'paragraph',
+  }]);
+
+  const origText = await pdfOracle.extractText(missionBytes, 4);
+  const outText = await pdfOracle.extractText(out, 4);
+  const expectedContiguous = newPara.replace(/\s+/g, ' ').trim();
+  const flatOut = outText.replace(/\s+/g, ' ');
+
+  for (const word of expectedContiguous.split(' ')) {
+    assert.equal(outText.includes(word), true, `missing word ${JSON.stringify(word)} from Ties paragraph`);
+  }
+  assert.equal(flatOut.includes(expectedContiguous), true, 'inserted paragraph must extract as one contiguous readable string');
+  assert.ok((await pdfOracle.search(out, 4, 'deterministically')).length >= 1, 'search(pdf, 4, "deterministically") must hit');
+  assert.ok((await pdfOracle.search(out, 4, 'broken deterministically.')).length >= 1, 'phrase search must hit');
+  assert.equal((await pdfOracle.search(out, 4, 'randomly')).length, 0, 'original "randomly" must be removed');
+
+  // Other text on page 5 outside the replaced paragraph must stay byte-equal in extraction
+  const stripOrig = origText.replace(/Ties,[\s\S]*?broken randomly\.\s*/g, '');
+  const stripOut = outText.replace(/Ties,[\s\S]*?broken deterministically\.\s*/g, '');
+  assert.equal(stripOut, stripOrig, 'other text on page 5 must stay byte-equal outside the replaced paragraph');
+
+  const oracle = readOracle(out);
+  for (let i = 0; i < oracle.pageCount; i++) {
+    if (i === 4) continue;
+    assert.equal(streamsEqual(sourceOracle.pages[i].streams, oracle.pages[i].streams), true, `untouched page ${i + 1} content stream must stay byte-identical`);
+  }
+});
+
+test('page 5 (b): 10 line rects with newText twice as long extracts every word contiguously (mid-column and bottom-of-page)', async () => {
+  const p5Info = inspectPage(missionBytes, 4);
+  const midStart = p5Info.lines.findIndex(l => l.text.includes('Table 1 analyses the agreement'));
+  assert.ok(midStart >= 0, 'expected Experiments body paragraph on page 5');
+  const midTen = p5Info.lines.slice(midStart, midStart + 10);
+  const botTen = p5Info.lines.slice(p5Info.lines.length - 10);
+  assert.equal(midTen.length, 10);
+  assert.equal(botTen.length, 10);
+
+  for (const [label, slice] of [['mid-10', midTen], ['bottom-10', botTen]]) {
+    const orig = slice.map(l => l.text).join('\n');
+    const doubled = `${orig}\n${orig.replace(/WikiEval/g, 'DoubledEval').replace(/Ragas/g, 'DoubledRagas')} FINAL_TAIL_MARKER`;
+    assert.ok(doubled.length > orig.length * 2, `${label}: newText must be at least 2x original length`);
+
+    const out = await rewrite(missionBytes, [{
+      id: label,
+      pageIndex: 4,
+      rects: slice.map(l => l.frac),
+      originalText: orig,
+      newText: doubled,
+      source: 'paragraph',
+    }]);
+
+    const outText = await pdfOracle.extractText(out, 4);
+    const flatOut = outText.replace(/\s+/g, ' ');
+    const expectedFlat = doubled.replace(/\s+/g, ' ').trim();
+    const words = expectedFlat.split(' ');
+    for (const word of words) {
+      assert.equal(flatOut.includes(word), true, `${label}: missing word ${JSON.stringify(word)}`);
+    }
+    assert.equal(flatOut.includes(expectedFlat), true, `${label}: full 2x replacement must extract contiguously`);
+    assert.ok((await pdfOracle.search(out, 4, 'FINAL_TAIL_MARKER')).length >= 1, `${label}: overflow tail marker must be searchable`);
+  }
+});
+
+test('page 5 (c): one-word rect with 60-character newText extracts every character (mid-line and right-edge)', async () => {
+  const hits095 = findStructuredRects(missionBytes, 4, '0.95');
+  const hitsEspecially = findStructuredRects(missionBytes, 4, 'especially');
+  assert.equal(hits095.length, 1);
+  assert.ok(hitsEspecially.length >= 1);
+
+  const spaced60 = 'sixty character replacement text replacing one single word!!';
+  const unbroken60 = 'supercalifragilistic_replacement_word_spanning_sixty_chars00';
+  assert.equal(spaced60.length, 60);
+  assert.equal(unbroken60.length, 60);
+
+  for (const [label, targetRect, origWord, nextText] of [
+    ['mid-spaced-60', hits095[0].rect, '0.95', spaced60],
+    ['right-spaced-60', hitsEspecially[hitsEspecially.length - 1].rect, 'especially', spaced60],
+    ['right-unbroken-60', hitsEspecially[hitsEspecially.length - 1].rect, 'especially', unbroken60],
+  ]) {
+    const out = await rewrite(missionBytes, [{
+      id: label,
+      pageIndex: 4,
+      rects: [targetRect],
+      originalText: origWord,
+      newText: nextText,
+      source: 'tap',
+    }]);
+    const outText = await pdfOracle.extractText(out, 4);
+    const flatOut = outText.replace(/\s+/g, ' ');
+    assert.equal(flatOut.includes(nextText), true, `${label}: all 60 characters must extract contiguously`);
+    const firstToken = nextText.split(' ')[0];
+    const lastToken = nextText.split(' ').at(-1);
+    assert.ok((await pdfOracle.search(out, 4, firstToken)).length >= 1, `${label}: search for start token must hit`);
+    assert.ok((await pdfOracle.search(out, 4, lastToken)).length >= 1, `${label}: search for end token must hit`);
+  }
+});
+
+test('page 5 (regression): 25+ unsorted multi-column rects with long newText never drop words and keep contiguous extraction', async () => {
+  const p5Info = inspectPage(missionBytes, 4);
+  const start = p5Info.lines.findIndex(l => l.text.includes('To put the results in context'));
+  assert.ok(start >= 0);
+  // Take 25 lines spanning left column through Ties and right column Conclusions
+  const picked = [
+    ...p5Info.lines.slice(start, start + 23),
+    ...p5Info.lines.slice(p5Info.lines.length - 5),
+  ];
+  assert.ok(picked.length >= 25);
+  // Reverse rect order to confirm reading-order sorting (y, then x)
+  const reversedRects = [...picked].reverse().map(l => l.frac);
+  const orig = picked.map(l => l.text).join('\n');
+  const next = orig.replace('broken randomly', 'broken deterministically') + '\nREGRESSION_END_OK';
+
+  const out = await rewrite(missionBytes, [{
+    id: 'many-rects',
+    pageIndex: 4,
+    rects: reversedRects,
+    originalText: orig,
+    newText: next,
+    source: 'paragraph',
+  }]);
+
+  const outText = await pdfOracle.extractText(out, 4);
+  const flatOut = outText.replace(/\s+/g, ' ');
+  const expectedFlat = next.replace(/\s+/g, ' ').trim();
+  for (const word of expectedFlat.split(' ')) {
+    assert.equal(flatOut.includes(word), true, `many-rects: missing word ${JSON.stringify(word)}`);
+  }
+  assert.equal(flatOut.includes(expectedFlat), true, 'many-rects: inserted text must extract contiguously');
+  assert.ok((await pdfOracle.search(out, 4, 'deterministically')).length >= 1, 'many-rects: search("deterministically") must hit');
+  assert.ok((await pdfOracle.search(out, 4, 'REGRESSION_END_OK')).length >= 1, 'many-rects: final overflow token must hit');
+  assert.equal((await pdfOracle.search(out, 4, 'broken randomly')).length, 0, 'many-rects: original text must be removed');
 });
