@@ -327,6 +327,39 @@ async function replaceScore(page, wide, tapped) {
   assert.equal(patch.events, 'none', 'the patch never takes taps');
   assert.ok(Math.abs(patch.x - rect.left) <= 3 && Math.abs(patch.y - rect.top) <= 3 && patch.width >= rect.width - 3 && Math.abs(patch.height - rect.height) <= 2, 'patch over the old word ' + JSON.stringify([patch, rect]));
   await shoot(page, 'patched', wide);
+  await patchAtFit(page, wide);
+}
+
+/* The patch is painted at every zoom: at the fit size (zoom 1, also after −/+ and 전체 쪽) it still covers
+   the edited token with a non-zero box and reads 0.50. */
+async function patchAtFit(page, wide, label = 'fit') {
+  const id = await page.evaluate(() => globalThis.FalsifyPaperWorkspace.getEditSnapshot().edits.find(edit => edit.after.includes('0.50')).id);
+  if (await page.locator('#booth-pe-fit').isVisible()) await page.locator('#booth-pe-fit').click();
+  await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() === 1);
+  await page.locator('#booth-pe-zoom-in').click();
+  await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() > 1);
+  await page.locator('#booth-pe-zoom-out').click();
+  await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() === 1);
+  await page.waitForFunction(value => {
+    const node = [...document.querySelectorAll('#paper-before-stage .paper-page .booth-patch')].find(item => item.dataset.patchId === value);
+    return node && node.getBoundingClientRect().width > 0 && node.getBoundingClientRect().height > 0;
+  }, id);
+  const fit = await page.evaluate(value => {
+    const node = [...document.querySelectorAll('#paper-before-stage .paper-page .booth-patch')].find(item => item.dataset.patchId === value);
+    const p = node.getBoundingClientRect();
+    const span = [...document.querySelectorAll('#paper-before-stage .paper-text-layer span[data-i]')].find(item => item.textContent.trim() === '0.95');
+    const range = document.createRange();
+    range.selectNodeContents(span);
+    const t = range.getBoundingClientRect();
+    return {text: node.textContent, w: p.width, h: p.height, cx: Math.abs((p.left + p.width / 2) - (t.left + t.width / 2)), cy: Math.abs((p.top + p.height / 2) - (t.top + t.height / 2)), tw: t.width, th: t.height,
+      mark: [...document.querySelectorAll('#paper-before-stage .paper-change-mark')].filter(item => item.dataset.edit === value && item.getBoundingClientRect().width > 0).length};
+  }, id);
+  assert.equal(fit.text, '0.50', label + ': the patch reads the new value');
+  assert.ok(fit.w > 0 && fit.h > 0, label + ': the patch has a size ' + JSON.stringify(fit));
+  assert.ok(fit.cx <= Math.max(2, fit.tw / 2) && fit.cy <= Math.max(2, fit.th / 2), label + ': the patch sits over the token ' + JSON.stringify(fit));
+  assert.equal(fit.mark, 0, label + ': no change mark drawn over the patch');
+  await shoot(page, label === 'fit' ? 'patched-fit' : 'tablet-patched-fit', wide);
+  if (!wide) await zoomIn(page); // back to the zoomed phone view the walk continues in
 }
 
 /* Page turns redraw the page; the patch is painted again on page 5. */
@@ -495,6 +528,7 @@ async function tabletWalk(browser) {
   await page.waitForFunction(() => document.querySelector('#booth-dock-count')?.textContent === '고친 곳 1개');
   assert.equal(await page.locator('#booth-dock').isVisible(), true);
   await page.locator('#paper-before-stage .booth-patch').first().waitFor();
+  await patchAtFit(page, true, 'tablet');
   await page.locator('#booth-pe-zoom-in').tap();
   await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() === 1.25);
   await canvasCapped(page);

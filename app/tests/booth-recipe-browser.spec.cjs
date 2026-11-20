@@ -191,6 +191,8 @@ async function findAndReplace(browser, log, errors, wide) {
   await pane.getByRole('button', {name: '바꾸기'}).first().click();
   await page.waitForFunction(() => document.querySelector('#booth-dock-count')?.textContent === '고친 곳 1개');
   assert.match(await page.locator('#paper-edits').textContent(), /0\.78 → 0\.87/);
+  // A find-and-replace edit is painted on the page like a word tap: a .booth-patch reading 0.87.
+  await page.waitForFunction(() => [...document.querySelectorAll('#paper-before-stage .booth-patch')].some(node => node.textContent === '0.87' && node.getBoundingClientRect().width > 0));
   assert.equal(await page.locator('#booth-next').isEnabled(), true);
   await pane.getByLabel('바꿀 글자').first().fill('the');
   await pane.locator('.booth-find-more').waitFor({state: 'visible'});

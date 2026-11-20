@@ -725,6 +725,45 @@
         try{patcher().remove(id);}catch{}
       }
     }
+    /* Every one-token edit gets a patch, however it was made (word tap, find-and-replace, a recipe):
+       the workspace's change mark shows where it is on the drawn page, the text layer gives the token. */
+    function tokenEdit(edit){
+      const before=String(edit.before||'').trim().split(/\s+/);
+      const after=String(edit.after||'').trim().split(/\s+/);
+      while(before.length>1&&after.length>1&&before[0]===after[0]){before.shift();after.shift();}
+      while(before.length>1&&after.length>1&&before[before.length-1]===after[after.length-1]){before.pop();after.pop();}
+      if(before.length!==1||after.length!==1||!before[0]||!after[0]||before[0]===after[0]) return null;
+      return {from:before[0],to:after[0]};
+    }
+    function adoptEdit(page, pageIndex, edit){
+      const change=tokenEdit(edit);
+      const mark=change&&[...page.querySelectorAll('.paper-change-mark')].find(node=>node.dataset.edit===edit.id);
+      const box=mark&&mark.getBoundingClientRect();
+      if(!box||!(box.width>0||box.height>0)) return;
+      const word=wordAt(page,box.left+box.width/2,box.top+box.height/2);
+      if(!word||word.text!==change.from) return false;
+      const font=fontOf(word.span);
+      const line=font.rect&&font.rect.h>0?font.rect:word.rect;
+      const patch={pageIndex,rect:{x:word.rect.x,w:word.rect.w,y:line.y,h:line.h},text:change.to,original:change.from,after:edit.after,
+        font:{fontPx:font.fontPx,baselineFrac:font.baselineFrac,family:font.family}};
+      st.patches.set(edit.id,patch);
+      paint(edit.id,patch);
+      return true;
+    }
+    /* Edits whose mark did not lead to their token on this page element are not retried on it. */
+    const missed=new WeakMap();
+    function adoptEdits(page){
+      const pageIndex=call('getPageIndex');
+      if(!page||!Number.isInteger(pageIndex)||page.querySelector(':scope>textarea')) return;
+      const snap=call('getEditSnapshot');
+      for(const edit of snap&&Array.isArray(snap.edits)?snap.edits:[]){
+        if(!edit||edit.enabled===false||edit.pageIndex!==pageIndex||st.patches.has(edit.id)) continue;
+        const key=edit.id+'|'+edit.after;
+        if(!missed.has(page)) missed.set(page,new Set());
+        if(missed.get(page).has(key)) continue;
+        if(adoptEdit(page,pageIndex,edit)===false) missed.get(page).add(key);
+      }
+    }
     /* The workspace's change marks for a patched word would sit on top of the patch: hide those. */
     function coverMarks(page){
       if(!page) return;
@@ -880,6 +919,7 @@
       const page=pageEl();
       if(page&&page!==st.pageEl) onPage(page);
       syncEditor(page);
+      adoptEdits(page);
       coverMarks(page);
     }
     function onStep(){
