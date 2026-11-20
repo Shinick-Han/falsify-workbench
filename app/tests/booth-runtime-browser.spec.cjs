@@ -149,6 +149,11 @@ async function visibility(page, state) {
 }
 /* One paragraph edit: 0.95 → 0.50 in the Table 1 paragraph, as booth-event-browser does it. */
 async function editParagraph(page) {
+  // Phones open the mission zoomed on the hint; zoom out first, as booth-event-browser does.
+  if (await page.locator('#booth-pe-fit').isVisible()) {
+    await page.locator('#booth-pe-fit').click();
+    await page.waitForFunction(() => globalThis.FalsifyPaperWorkspace.getZoom() === 1);
+  }
   await page.waitForFunction(() => [...document.querySelectorAll('.paper-paragraph-button')].some(node => node.textContent.includes('0.95')));
   const listToggle = page.locator('#booth-find-list');
   if (await listToggle.count() && await listToggle.isVisible()) await listToggle.click();
@@ -160,8 +165,10 @@ async function editParagraph(page) {
   });
   assert.equal(index >= 0, true);
   const paragraph = page.locator('.paper-paragraph-button').nth(index);
-  await paragraph.scrollIntoViewIfNeeded();
-  await paragraph.click();
+  // On event.html the page itself is the editor (booth-pageedit.js); the paragraph list stays for
+  // screen readers and keyboards, visually hidden until focused, so open it the keyboard way.
+  await paragraph.focus();
+  await page.keyboard.press('Enter');
   const editor = page.locator('textarea[aria-label$="직접 편집"]');
   await editor.waitFor();
   await editor.fill((await editor.inputValue()).replace('0.95', '0.50'));
