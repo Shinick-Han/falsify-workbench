@@ -737,13 +737,14 @@ async function anchorWalk(browser, wide) {
   await page.context().close();
 }
 
-/* A tap the paragraph boxes do not cover (here: the box is hidden from the page edit) is searched only
+/* A tap whose paragraph box does not lead to its paragraph text (here: the box is unbound from it) is searched only
    on this page and only where its neighbours prove the place; the PDF edit lands on the tapped word. */
 async function hideParagraph(page, startsWith) {
   await page.evaluate(prefix => {
     const ws = globalThis.FalsifyPaperWorkspace;
     const real = ws.getPageParagraphs.bind(ws);
-    ws.getPageParagraphs = () => { const out = real(); return out && {...out, items: out.items.filter(item => !item.text.startsWith(prefix))}; };
+    // The box stays (the word is body text) but no longer leads to its paragraph text.
+    ws.getPageParagraphs = () => { const out = real(); return out && {...out, items: out.items.map(item => (item.text.startsWith(prefix) ? {...item, segmentId: 'paragraph:unbound:' + item.segmentId.slice(-6)} : item))}; };
   }, startsWith);
 }
 
@@ -831,6 +832,26 @@ async function mergeWalk(browser, wide) {
   await page.context().close();
 }
 
+/* Not body text: the arXiv stamp on page 1 lies outside every paragraph of the engine's page model, so
+   the field is closed with the in-place line at the tap, before any typing. An author mark (†) inside the
+   author paragraph stays editable. */
+async function notTextWalk(browser, wide) {
+  const {page, errors} = await openMission(browser, wide);
+  await page.evaluate(() => globalThis.FalsifyPaperWorkspace.showPage(1));
+  await page.waitForFunction(() => { const boxes = globalThis.FalsifyPaperWorkspace.getPageParagraphs(); return boxes && boxes.pageIndex === 0 && boxes.items.length > 0; });
+  await tapToken(page, wide, 'arXiv:2309.15217v2', 0);
+  assert.equal(await page.locator('#booth-pe-input').isDisabled(), true, 'the field is closed at the tap');
+  assert.equal(await page.locator('#booth-pe-pop').getByRole('button', {name: '바꾸기', exact: true}).isDisabled(), true);
+  assert.equal(await page.locator('.booth-pe-status').textContent(), '그림이나 머리글 속 글자는 바꿀 수 없어요.');
+  await shoot(page, 'not-text', wide);
+  await page.locator('#booth-pe-pop').getByRole('button', {name: '취소', exact: true}).click();
+  await tapToken(page, wide, '†', 0);
+  assert.equal(await page.locator('#booth-pe-input').isDisabled(), false, 'an author mark stays editable');
+  assert.equal(await page.locator('.booth-pe-status').textContent(), '');
+  assert.deepEqual(errors, []);
+  await page.context().close();
+}
+
 async function main() {
   assert.equal(pdfBytes.subarray(0, 5).toString(), '%PDF-');
   const server = serve();
@@ -848,6 +869,8 @@ async function main() {
     await searchWalk(browser, false);
     await mergeWalk(browser, true);
     await mergeWalk(browser, false);
+    await notTextWalk(browser, true);
+    await notTextWalk(browser, false);
   } catch (error) {
     error.message += '\npage=' + JSON.stringify(await diagnose());
     throw error;

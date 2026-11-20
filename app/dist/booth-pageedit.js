@@ -318,6 +318,14 @@
     }
     return rel+shift;
   }
+  /* True when a token box (page fractions) touches none of the page's paragraph boxes. */
+  function outsideBoxes(items, rect){
+    const pad=0.01;
+    const vpad=0.005;
+    return !(Array.isArray(items)?items:[]).some(item=>item&&item.rect
+      &&rect.x<item.rect.x+item.rect.w+pad&&item.rect.x-pad<rect.x+rect.w
+      &&rect.y<item.rect.y+item.rect.h+vpad&&item.rect.y-vpad<rect.y+rect.h);
+  }
   /* How many ink characters agree right before (left) and right after (right) a spot, comparing the
      tapped word's text-layer neighbours with a candidate place in a segment text. */
   function sideAgree(layerBefore, layerAfter, textBefore, textAfter){
@@ -728,12 +736,41 @@
       input.value=patch?patch.value:(sel.spot?sel.spot.before:sel.word.text);
       input.setAttribute('inputmode',numericToken(input.value)?'decimal':'text');
       whole.disabled=!sel.paragraph;
-      /* Neither a place in the text nor a paragraph to open: this glyph is not editable text (a figure
-         label, a running head). Said in place; the field stays closed. */
-      const closed=!sel.spot&&!sel.paragraph&&!patch&&!sel.word.text.trim();
+      showClosed(sel,patch);
+    }
+    function boxesReady(pageIndex){
+      const boxes=call('getPageParagraphs');
+      return !!(boxes&&Array.isArray(boxes.items)&&boxes.pageIndex===pageIndex);
+    }
+    /* Not body text, decided at the tap: the engine's paragraph model for this page is in and the
+       token touches none of its paragraphs (editable or not): a figure label, the arXiv stamp, a
+       running head. Author marks and footnote marks sit inside their paragraph's box. */
+    function notText(sel, patch){
+      if(patch) return false;
+      if(!sel.word.text.trim()) return true;
+      if(!boxesReady(sel.pageIndex)) return false;
+      const boxes=call('getPageParagraphs');
+      return outsideBoxes(boxes.items,sel.word.rect);
+    }
+    /* Said in place, before any typing; the field stays closed. */
+    function showClosed(sel, patch){
+      const closed=notText(sel,patch);
       input.disabled=closed;
       apply.disabled=closed;
       status.textContent=closed?FAIL_TEXT.outside:'';
+      return closed;
+    }
+    /* Paragraph boxes can arrive a moment after the tap: place the word again then, and close the
+       field straight away if it is not body text. */
+    async function placeLater(sel, patch){
+      const shown=input.value;
+      await waitFor(()=>st.sel!==sel||boxesReady(sel.pageIndex),3000);
+      if(st.sel!==sel||!boxesReady(sel.pageIndex)) return;
+      sel.paragraph=sel.paragraph||paragraphFor(sel.word);
+      sel.spot=sel.spot||spotOf(sel.page,sel.word,sel.paragraph,sel.pageIndex);
+      whole.disabled=!sel.paragraph;
+      if(sel.spot&&input.value===shown) input.value=sel.spot.before;
+      if(showClosed(sel,patch)) placePop();
     }
     function selectWord(page, word){
       closePop(false);
@@ -745,6 +782,7 @@
       const spot=spotOf(page,word,paragraph,pageIndex);
       st.sel={pageIndex,page,word,patchId,paragraph,spot,box:outline(page,word.rect),halfBox:spot&&spot.half?outline(page,spot.half.rect):null};
       fillPop(st.sel,patch);
+      if(!boxesReady(pageIndex)) placeLater(st.sel,patch);
       pop.hidden=false;
       pop.classList.toggle('is-bar',barMode());
       if(!barMode()) makeRoom(st.sel.box);
@@ -1124,6 +1162,7 @@
     function replaceWord(){
       const sel=st.sel;
       if(!sel) return;
+      if(showClosed(sel,sel.patchId?st.patches.get(sel.patchId):null)){placePop();return;}
       /* Paragraph boxes can arrive after the tap: place the word again before anything else. */
       if(!sel.spot){
         sel.paragraph=sel.paragraph||paragraphFor(sel.word);
@@ -1488,7 +1527,7 @@
     onMutate();
   }
 
-  root.FalsifyBoothPageEdit=Object.freeze({tokenAt,contextWindow,placePopover,fitCrop,overlapShare,paragraphAt,padRect,numericToken,tokensIn,densest,keyboardInset,inkChars,alignInk,spotIn,nearestIndex,unchangedAt,hunksOf,sideAgree,splitWord,fallbackPatch,ZOOM,TABLE_ZOOM,hintBlock,fitZoom});
+  root.FalsifyBoothPageEdit=Object.freeze({tokenAt,contextWindow,placePopover,fitCrop,overlapShare,paragraphAt,padRect,numericToken,tokensIn,densest,keyboardInset,inkChars,alignInk,spotIn,nearestIndex,unchangedAt,hunksOf,sideAgree,outsideBoxes,splitWord,fallbackPatch,ZOOM,TABLE_ZOOM,hintBlock,fitZoom});
   const doc=root.document;
   if(!doc||typeof doc.getElementById!=='function') return;
   const start=()=>mount(doc);

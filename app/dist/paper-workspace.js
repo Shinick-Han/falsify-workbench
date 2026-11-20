@@ -3240,11 +3240,13 @@
         if(!edit) return false;
         try{if(after===edit.before)session.remove(id);else session.update(id,{after});return true;}catch{return false;}
       },
-      showPage(n){
+      /* options.scroll false: turn the page without moving the window (a page opened on its own,
+         e.g. a mission's hint page once the PDF is in, must never jump a page the visitor is reading). */
+      showPage(n,options){
         if(!Number.isInteger(n)||n<1||!source||!source.doc||n>pages) return false;
         if(!canLeaveInline()) return false;
         if(n!==page) void drawBefore(n);
-        if(typeof ui.beforeStage.scrollIntoView==='function') ui.beforeStage.scrollIntoView({block:'center'});
+        if(options?.scroll!==false&&typeof ui.beforeStage.scrollIntoView==='function') ui.beforeStage.scrollIntoView({block:'center'});
         return true;
       }
     };

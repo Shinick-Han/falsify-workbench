@@ -136,3 +136,11 @@ test('sideAgree counts agreeing ink on both sides of a candidate place', () => {
   assert.ok(other.score < tapped.score);
   assert.equal(pe.sideAgree('', '', 'x', 'y').whole, true);
 });
+
+test('outsideBoxes: a token touching no paragraph box is not body text', () => {
+  const items = [{rect: {x: 0.2, y: 0.12, w: 0.6, h: 0.1}}];
+  assert.equal(pe.outsideBoxes(items, {x: 0.29, y: 0.126, w: 0.013, h: 0.009}), false, 'an author mark inside its paragraph');
+  assert.equal(pe.outsideBoxes(items, {x: 0.02, y: 0.3, w: 0.02, h: 0.4}), true, 'a side stamp');
+  assert.equal(pe.outsideBoxes(items, {x: 0.805, y: 0.15, w: 0.02, h: 0.01}), false, 'a hyphen just past the box edge');
+  assert.equal(pe.outsideBoxes([], {x: 0, y: 0, w: 0.1, h: 0.1}), true);
+});

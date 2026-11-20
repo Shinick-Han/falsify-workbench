@@ -1837,7 +1837,9 @@
     }
     function showMissionPage(n){
       const ws=workspace();
-      if(ws&&typeof ws.showPage==='function'&&ws.showPage(n)===true) return true;
+      /* No window scroll: the PDF can open well after the edit step showed (scrolled to the top), and a
+         late jump would move the page under a visitor already reading or scrolling. */
+      if(ws&&typeof ws.showPage==='function'&&ws.showPage(n,{scroll:false})===true) return true;
       const jump=byId('paper-page-jump');
       if(!jump||jump.disabled) return false;
       jump.value=String(n);
