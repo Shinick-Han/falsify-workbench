@@ -2604,6 +2604,9 @@
         }
         if(!generationRevisionLive(mine,epochAt,file,hash,ctl,revision))return;
         installGeneratedOutput(candidate,recompose,tableNote);
+        // The PDF is final once installed. Clear the busy flag before drawing the preview (display only, guarded by
+        // afterSeq), so RED batch export and the next generation are not refused while the page is still painting.
+        finishGeneration(ctl,mine,epochAt);
         await drawAfter();
       }catch(e){
         reportGenerationFailure(e,mine,epochAt,hash,ctl);
