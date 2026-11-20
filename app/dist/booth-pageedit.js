@@ -173,7 +173,7 @@
     const stage=doc.getElementById('paper-before-stage');
     if(!stage||!doc.getElementById('booth-step-edit')||doc.getElementById('booth-pe-bar')) return;
     const html=doc.documentElement;
-    const st={sel:null,focus:null,pending:null,patches:new Map(),fileHash:'',pdf:null,pageEl:null,editing:null,auto:new Set(),composing:false,hoverFrame:0};
+    const st={sel:null,focus:null,pending:null,patches:new Map(),fileHash:'',pdf:null,pageEl:null,editing:null,auto:new Set(),autoOff:false,composing:false,hoverFrame:0};
     let stub=null;
     const ws=()=>root.FalsifyPaperWorkspace||null;
     const recipe=()=>root.FalsifyBoothRecipe||null;
@@ -320,7 +320,14 @@
       const inset=keyboardInset(root.innerHeight||0,root.visualViewport);
       pop.style.left='';
       pop.style.top='';
+      pop.style.width='';
       pop.style.bottom=inset+'px';
+      /* Desktop widths with touch: the bar lines up with the page column, as wide as the page. */
+      if(desk()){
+        const column=stage.getBoundingClientRect();
+        pop.style.left=Math.round(column.left)+'px';
+        pop.style.width=Math.round(column.width)+'px';
+      }
       keepWordVisible();
     }
     function keepWordVisible(){
@@ -581,7 +588,7 @@
     function autoZoom(page){
       const src=call('getSource');
       const paper=root.FalsifyBoothPaper&&typeof root.FalsifyBoothPaper.current==='function'?root.FalsifyBoothPaper.current():null;
-      if(desk()||!editing()||!src||st.auto.has(src.fileHash)||!paper||paper.source!=='mission') return;
+      if(desk()||!editing()||st.autoOff||!src||st.auto.has(src.fileHash)||!paper||paper.source!=='mission') return;
       if(call('getPageIndex')!==(paper.pageHint||1)-1) return;
       st.auto.add(src.fileHash);
       const box=page.getBoundingClientRect();
@@ -590,6 +597,14 @@
       zoomAt(page,box.left+spot.x,box.top+spot.y);
     }
 
+    /* The visitor came first: any touch, click or key in the edit step (zoom, page turn, a tab, the find
+       form, the page) cancels a hint zoom still waiting for its page, so it never overrides them. */
+    function cancelAutoZoom(event){
+      if(!event.isTrusted||!editing()||st.autoOff) return;
+      st.autoOff=true;
+      const src=call('getSource');
+      if(src&&src.fileHash) st.auto.add(src.fileHash);
+    }
     /* ---------- desktop hover: the word under the pointer gets a hairline ---------- */
     function onMove(event){
       if(!desk()||!media('(pointer:fine)')||st.hoverFrame) return;
@@ -868,6 +883,7 @@
     }
     function onStep(){
       if(editing()){const page=pageEl();if(page) autoZoom(page);return;}
+      st.autoOff=false;
       closePop(false);
       if(zoomed()) setZoom(1);
     }
@@ -899,6 +915,7 @@
     input.addEventListener('input',()=>{status.textContent='';});
     doc.addEventListener('click',onPageClick,true);
     doc.addEventListener('pointerdown',onDown,true);
+    for(const kind of ['pointerdown','keydown','wheel']) doc.addEventListener(kind,cancelAutoZoom,{capture:true,passive:true});
     doc.addEventListener('mousemove',onMove,{passive:true});
     doc.addEventListener('focusin',syncTyping);
     doc.addEventListener('focusout',()=>root.setTimeout(syncTyping,0));

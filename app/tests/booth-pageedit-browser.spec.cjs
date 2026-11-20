@@ -419,6 +419,17 @@ async function walk(browser, wide) {
   }
   await replaceScore(page, wide, rect);
   assert.equal(await page.locator('#booth-dock').isVisible(), true, 'the dock is back after the edit');
+  if (!wide) {
+    // The applied edit is a booth card below the page: 5쪽 0.95 → 0.50, numbers in mono, a small 삭제.
+    const card = await page.evaluate(() => {
+      const row = document.querySelector('#paper-edits > li');
+      const ins = row.querySelector('ins.booth-edit-text');
+      return {below: row.getBoundingClientRect().top >= document.querySelector('#paper-before-stage').getBoundingClientRect().bottom,
+        text: row.querySelector('[data-act="edit"]').textContent, number: ins.classList.contains('is-number'), mono: /mono/i.test(getComputedStyle(ins).fontFamily),
+        origin: !!row.querySelector('.paper-edit-origin')?.offsetParent};
+    });
+    assert.deepEqual(card, {below: true, text: '5쪽 0.95 → 0.50', number: true, mono: true, origin: false});
+  }
   await patchSurvivesTurn(page);
   await deleteEdit(page, wide);
   await wholeParagraph(page, wide);
@@ -474,7 +485,9 @@ async function tabletWalk(browser) {
   assert.equal(await pop.evaluate(node => node.classList.contains('is-bar')), true, 'a coarse pointer gets the edit bar at desktop width');
   assert.deepEqual(await pop.locator('button:visible').allTextContents(), ['‹', '›', '바꾸기', '문단 전체 고치기', '취소']);
   const p = await pop.boundingBox();
-  assert.ok(Math.abs(p.y + p.height - 800) <= 1 && p.width <= 721, 'bar at the bottom, a readable width ' + JSON.stringify(p));
+  const column = await page.locator('#paper-before-stage').boundingBox();
+  assert.ok(Math.abs(p.y + p.height - 800) <= 1, 'bar at the bottom ' + JSON.stringify(p));
+  assert.ok(Math.abs(p.x - column.x) <= 1 && Math.abs(p.width - column.width) <= 1, 'bar lines up with the page column ' + JSON.stringify([p, column]));
   assert.equal(await page.locator('#booth-dock').isVisible(), false, 'the dock steps aside while typing');
   await shoot(page, 'tablet-word-bar', true);
   await input.fill('0.50');
@@ -493,6 +506,35 @@ async function tabletWalk(browser) {
   await page.context().close();
 }
 
+/* Phone race: the visitor touches the zoom bar while the paper is still loading; the hint zoom must not
+   jump in later and override them. */
+async function hintZoomYields(browser) {
+  const context = await browser.newContext({viewport: {width: 390, height: 844}, deviceScaleFactor: 3, hasTouch: true, locale: 'ko-KR'});
+  const page = await context.newPage();
+  page.setDefaultTimeout(90000);
+  lastPage = page;
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  const base = 'http://127.0.0.1:' + port + '/';
+  await page.route('**/*', async route => {
+    const url = route.request().url();
+    if (url.startsWith(base)) return route.continue();
+    if (new URL(url).pathname === '/v1/papers/pdf') await new Promise(resolve => setTimeout(resolve, 2500));
+    return stubApi(route);
+  });
+  await page.goto(base + 'event.html');
+  await page.locator('#booth-missions .booth-mission').first().click();
+  await page.waitForFunction(() => document.documentElement.dataset.boothStep === 'edit');
+  const bar = await page.locator('#booth-pe-bar').boundingBox();
+  await page.touchscreen.tap(bar.x + 20, bar.y + bar.height / 2);
+  await page.waitForFunction(() => /^5 \//.test(document.querySelector('#paper-page-label')?.textContent || '')
+    && (globalThis.FalsifyPaperWorkspace.getPageParagraphs()?.items || []).some(item => item.text.includes('0.95')));
+  await page.waitForTimeout(1500);
+  assert.equal(await page.evaluate(() => globalThis.FalsifyPaperWorkspace.getZoom()), 1, 'a touch before the page is drawn cancels the hint zoom');
+  assert.equal(errors.join('\n'), '');
+  await context.close();
+}
+
 async function main() {
   assert.equal(pdfBytes.subarray(0, 5).toString(), '%PDF-');
   const server = serve();
@@ -503,6 +545,7 @@ async function main() {
     await walk(browser, false);
     await walk(browser, true);
     await tabletWalk(browser);
+    await hintZoomYields(browser);
   } catch (error) {
     error.message += '\npage=' + JSON.stringify(await diagnose());
     throw error;

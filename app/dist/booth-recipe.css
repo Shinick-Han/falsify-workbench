@@ -45,3 +45,16 @@ html[data-booth-step] #paper-edits .paper-edit-origin{display:none}
 .booth-recipe-draft{margin:0 0 6px;font-size:12px;line-height:1.4;color:var(--ev-muted,#6b717a)}
 .booth-recipe-ai-pick{display:inline-flex;align-items:center;margin:0 0 0 6px;padding:2px 6px;border-radius:4px;background:var(--ev-soft,#f1f2f4);font:500 11px/1.3 var(--ev-mono,monospace);color:var(--ev-ink-2,#3a3f47);vertical-align:middle}
 .booth-recipe-ai-tag{display:inline-block;margin:0 6px 0 0;padding:1px 5px;border:1px solid var(--ev-hair,#d6d9dd);border-radius:4px;font:500 10.5px/1.4 var(--ev-mono,monospace);color:var(--ev-ink-2,#3a3f47);vertical-align:middle}
+
+/* Phones: 「찾아 바꾸기」 below the page, closed until opened. It carries .booth for the form styles. */
+.booth.booth-find-fold{max-width:none;margin:16px 0 0;padding:0;border-radius:10px;background:var(--ev-card,#fff)}
+.booth-find-fold>summary{display:flex;align-items:center;min-height:48px;padding:0 16px;font-size:14px;font-weight:500;color:var(--ev-ink,#16191e);cursor:pointer;list-style:none}
+.booth-find-fold>summary::-webkit-details-marker{display:none}
+.booth-find-fold>summary::after{content:"";margin-left:auto;width:8px;height:8px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(45deg) translateY(-2px)}
+.booth-find-fold[open]>summary::after{transform:rotate(-135deg) translateY(-2px)}
+.booth-find-fold>.booth-find{margin:0;padding:0 16px 16px;box-shadow:none}
+.booth-find-fold[hidden]{display:none}
+@media (max-width:1023.98px){
+  /* The 직접 고치기 panel is empty on phones (the page is the editor) unless a recipe left rows to fix. */
+  #booth-pane-find:not(:has(>.booth-recipe-fix:not([hidden]))){display:none}
+}

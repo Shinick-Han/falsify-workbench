@@ -799,12 +799,28 @@
       }
       myaiWait.hidden=false;
     }
+    /* Phones (<1024px): the page comes right after the hint and the tabs, so the find-and-replace form
+       moves below the page as a closed 「찾아 바꾸기」 disclosure. Desktop keeps it in its tab panel. */
+    const findMore=el('details',{id:'booth-find-fold',className:'booth booth-find-fold'},el('summary',{textContent:'찾아 바꾸기'}));
+    function placeFind(){
+      const wide=!!(root.matchMedia&&root.matchMedia('(min-width:1024px)').matches);
+      const workspace=doc.getElementById('paper-workspace');
+      if(!wide&&workspace){
+        if(findMore.parentElement!==workspace) workspace.append(findMore);
+        if(main.form.parentElement!==findMore) findMore.append(main.form);
+      }else{
+        if(main.form.parentElement!==panes.find) panes.find.append(main.form);
+        findMore.remove();
+      }
+      findMore.hidden=ui.tab!=='find';
+    }
     function selectTab(key){
       ui.tab=key;
       for(const [name] of tabs){
         tabButtons[name].setAttribute('aria-selected',String(name===key));
         panes[name].hidden=name!==key;
       }
+      findMore.hidden=key!=='find';
       if(key==='myai') mountMyAi();
       if(key==='find') main.render();
     }
@@ -1104,13 +1120,34 @@
         if(event.isTrusted&&event.target!==chip&&event.target!==tag){marks.chip=false;tag.remove();}
       });
     }
-    /* A small 「AI」 tag on #paper-edits rows a recipe made (the workspace re-renders the rows). */
+    /* #paper-edits rows in booth form (the workspace re-renders them): 「5쪽 0.95 → 0.50」 with the old and
+       new text as del/ins (mono only when it is a number), and a small 「AI」 tag on rows a recipe made. */
+    const NUMBER=/^[-−+]?\d[\d.,]*%?$/;
+    function clip(text){
+      const value=String(text||'');
+      return value.length>40?value.slice(0,40)+'…':value;
+    }
+    function editPart(tag, text){
+      const node=el(tag,{className:'booth-edit-text',textContent:clip(text)});
+      if(NUMBER.test(String(text||'').trim())) node.classList.add('is-number');
+      return node;
+    }
+    function dressRow(button, edit){
+      if(button.dataset.boothDressed==='1'||!edit) return;
+      button.dataset.boothDressed='1';
+      button.textContent='';
+      button.append(el('span',{className:'booth-edit-page',textContent:(Number(edit.pageIndex)+1)+'쪽'}),' ',
+        editPart('del',edit.before),' ',el('span',{className:'booth-edit-arrow',textContent:'→'}),' ',editPart('ins',edit.after));
+    }
     function tagRows(){
       const list=doc.getElementById('paper-edits');
-      if(!list||!appliedIds) return;
+      if(!list) return;
+      const edits=snapshotEdits()||[];
       for(const button of list.querySelectorAll('button[data-act="edit"]')){
         const row=button.parentElement;
-        if(!row||!appliedIds.has(button.dataset.edit)||row.querySelector('.booth-recipe-ai-tag')) continue;
+        if(!row) continue;
+        dressRow(button,edits.find(item=>item.id===button.dataset.edit));
+        if(!appliedIds||!appliedIds.has(button.dataset.edit)||row.querySelector('.booth-recipe-ai-tag')) continue;
         row.prepend(el('span',{className:'booth-recipe-ai-tag',textContent:'AI'}));
       }
     }
@@ -1176,6 +1213,8 @@
     doc.addEventListener('falsify:document-clear',resetResult);
     doc.addEventListener('falsify:paper-workspace-source',()=>{if(ui.tab==='find') main.render();});
     root.addEventListener('hashchange',fromHash);
+    root.addEventListener('resize',placeFind);
+    placeFind();
     onStep();
     fromHash();
   }

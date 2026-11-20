@@ -164,7 +164,20 @@ async function findAndReplace(browser, log, errors, wide) {
   // The page is the editor on event.html; the paragraph list is visually hidden (still read by screen readers).
   assert.equal(await page.locator('#booth-find-list').count(), 0, 'no paragraph list toggle');
   assert.ok((await page.locator('.paper-paragraph-list').first().evaluate(node => node.getBoundingClientRect().width)) <= 1, 'paragraph list visually hidden');
-  const pane = page.locator('#booth-pane-find');
+  // Phones: the page comes right after the tabs; find-and-replace is a closed 「찾아 바꾸기」 below it.
+  const pane = page.locator(wide ? '#booth-pane-find' : '#booth-find-fold');
+  if (!wide) {
+    const more = page.locator('#booth-find-fold');
+    assert.equal(await more.evaluate(node => node.open), false, '찾아 바꾸기 starts closed');
+    assert.equal(await more.locator('summary').textContent(), '찾아 바꾸기');
+    const order = await page.evaluate(() => {
+      const top = selector => document.querySelector(selector).getBoundingClientRect().top;
+      return {tabs: top('.booth-tabs'), toolbar: top('#paper-workspace .paper-toolbar'), page: top('#paper-before-stage'), more: top('#booth-find-fold')};
+    });
+    assert.ok(order.tabs < order.toolbar && order.toolbar < order.page && order.page < order.more, 'phone order: tabs, page toolbar, page, 찾아 바꾸기 ' + JSON.stringify(order));
+    assert.equal(await page.locator('#booth-pane-find').getByLabel('바꿀 글자').count(), 0, 'no find form above the page');
+    await more.locator('summary').click();
+  }
   await pane.getByLabel('바꿀 글자').first().fill('0.78');
   await pane.locator('.booth-find-hit').first().waitFor();
   const hits = await pane.locator('.booth-find-hit').allTextContents();
