@@ -425,12 +425,23 @@ test('booth disabled: recipe, mission text and /mcp routes are 404', async () =>
   assert.equal((await createRecipe({ BOOTH_ENABLED: 'false' }, recipe(), 'x')).status, 404);
 });
 
-test('/mcp: POST reaches the stub, GET and DELETE are 405', async () => {
+test('/mcp: the real MCP server creates a recipe the REST route returns; GET and DELETE are 405', async () => {
   await withApp({}, async (_mf, call) => {
-    const rpc = await call('POST', '/mcp', { body: { jsonrpc: '2.0', id: 1, method: 'initialize' } });
-    assert.equal(rpc.status, 200);
+    const rpc = await call('POST', '/mcp', { body: { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } } } });
+    assert.equal(rpc.status, 200, rpc.text);
     assert.equal(rpc.body.jsonrpc, '2.0');
-    assert.equal(rpc.body.error.message, 'not implemented');
+    assert.equal(rpc.body.result.serverInfo.name, 'falsify-booth');
+    const listed = await call('POST', '/mcp', { body: { jsonrpc: '2.0', id: 2, method: 'tools/list' } });
+    assert.deepEqual(listed.body.result.tools.map(tool => tool.name).sort(), ['create_recipe', 'get_mission_text', 'list_missions']);
+    const created = await call('POST', '/mcp', { body: { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'create_recipe', arguments: { paperId: '2309.15217', edits: [{ page: 5, find: '0.95', replace: '0.50' }], defectType: 'number' } } } });
+    assert.equal(created.status, 200, created.text);
+    assert.notEqual(created.body.result.isError, true, created.text);
+    const code = created.body.result.structuredContent.code;
+    assert.match(code, /^R-[0-9A-HJKMNP-TV-Z]{6}$/);
+    const fetched = await call('GET', '/v1/booth/recipes/' + code.toLowerCase());
+    assert.equal(fetched.status, 200, fetched.text);
+    assert.equal(fetched.body.source, 'agent');
+    assert.equal(fetched.body.edits[0].replace, '0.50');
     for (const method of ['GET', 'DELETE']) {
       const res = await call(method, '/mcp');
       assert.equal(res.status, 405);
