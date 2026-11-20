@@ -322,7 +322,8 @@ test('watch: Ctrl-C stops; the next start resumes the same job', async () => {
 
 test('final: Opus round on live misses; dry by default, --apply PATCHes', async () => {
   const result = body => (body.model === 'claude-opus-5-5' ? { ...HOSTED, findings: [...HOSTED.findings, OPUS_EXTRA] } : HOSTED);
-  await withFake({ submissions: [caughtRow(1), missedRow(2), hiddenRow(3)], result }, async (fake, dir) => {
+  const agentRow = { ...missedRow(2), assist: 'agent', recipeCode: 'R-7K3QXM' };
+  await withFake({ submissions: [caughtRow(1), agentRow, hiddenRow(3)], result }, async (fake, dir) => {
     const config = writeConfig(dir, fake.url);
     const live = await run(['--config', config, 'watch', '--cycles', '1']);
     assert.equal(live.code, 0, live.stderr);
@@ -347,6 +348,9 @@ test('final: Opus round on live misses; dry by default, --apply PATCHes', async 
     assert.deepEqual([two.liveVerdict, two.finalVerdict, two.bestQuote, two.page], ['missed', 'caught', 'we used 30 annotators', 2]);
     const three = file.candidates.find(item => item.receipt === 'F-0003');
     assert.deepEqual([three.liveVerdict, three.finalVerdict], ['missed', 'missed']);
+    // Operators see how each candidate was planted. A row without assist (older server) reads as manual.
+    assert.deepEqual([two.assist, two.recipeCode], ['agent', 'R-7K3QXM']);
+    assert.deepEqual([three.assist, three.recipeCode], ['manual', null]);
     const opus = [...fake.state.jobs.values()].filter(job => job.model === 'claude-opus-5-5');
     assert.equal(opus.length, 2);
     assert.equal(leaked(fake.state), '');

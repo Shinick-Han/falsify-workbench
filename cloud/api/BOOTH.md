@@ -80,6 +80,27 @@ A valid `fso_` bearer on `GET /v1/ai/capabilities` reports `blueJobs: true` and 
 
 `BOOTH_PARSE_TIMING=1`, `BOOTH_TEST_SEQ_BIAS`, `BOOTH_TEST_PATCH_GATE`, and `BOOTH_TEST_PDF_GATE` are test-only. None of them is an operator var, and none is set in `wrangler.jsonc`. The timing header is `X-Falsify-Parse-Ms`. The seq bias makes the first insert attempt expect a later receipt number so the retry lands the real one. The two gates pause after the admin read, or after the PDF index check, until the test sets that `booth_settings` key to `go`. A 16 MiB submit measured in Miniflare on this worker took 2272.000 ms in the handler (`X-Falsify-Parse-Ms`, after auth through formData, the digest, and the insert) and 2335.084 ms of `dispatchFetch` wall time. The handler span stays under the event `cpu_ms` of 5000. Miniflare did not expose a tail `cpuTime`.
 
+## Recipes and agents
+
+Visitors may let an AI plant the defect. An agent never submits: it posts a recipe draft, and a human opens the returned link on the event page, reviews the before/after, consents and submits. Contract: recipe contract v1 (`falsify.booth.recipe.v1`). Code: `src/booth-recipes.mjs`; migration `0007_booth_recipes.sql` (apply it with the same operator command as 0006).
+
+| Method | Path | Auth | Success |
+|---|---|---|---|
+| POST | `/v1/booth/recipes` | none | 201 `{code, url, expiresAt}` |
+| GET | `/v1/booth/recipes/:code` | none | 200 recipe plus `code`, `createdAt`, `expiresAt` |
+| GET | `/v1/booth/missions/:paperId/text` | none | 200 `{paperId, title, license, url, pages:[{page, text}]}` |
+| POST | `/mcp` | none | the agent MCP module (`src/agent-mcp.mjs`) |
+
+- All four are `404 not_found` unless `BOOTH_ENABLED` is true. The three `/v1/booth/*` routes skip the exact-origin gate and answer `Access-Control-Allow-Origin: *` with no credentials header, including errors and the `OPTIONS` preflight (`Content-Type` only). Every other booth route keeps the exact-origin gate.
+- POST body: JSON, at most 8 KB (`413 payload_too_large`), `application/json` (`415`). Validation follows contract section 1: `paperId` is a new- or old-style arXiv id; 1 to 5 `edits` with `find` (1..300, not blank), `replace` (0..300, different from `find`), optional `page` (1..500) and `context` (<=600); optional `defectType`, `reason` (<=500), `agent.name`/`agent.model` (<=60). Unknown keys and control characters are rejected (newline only in `reason` and `context`). A failure is `400 invalid_request` with `error.field` naming the first bad field. `source` is stored as `agent` whatever the body said. The server has no page text for arbitrary papers, so whether `find` occurs in the page is checked by the event page when it applies the recipe.
+- The code is `R-` plus 6 Crockford base32 characters from `crypto.getRandomValues`; a collision retries up to 5 times. Lookups are case-insensitive, tolerate a missing dash and map O to 0 and I/L to 1. The url is `EVENT_PAGE_URL#recipe=<code>`.
+- Recipes live 6 hours in `booth_recipes`. Each write first deletes expired rows. An expired or unknown code is `404 not_found`. No IP, user agent or token is stored.
+- Rate limits: `BOOTH_RECIPES_PER_IP_HOUR` (default 120) and `BOOTH_RECIPES_PER_HOUR` (default 5000) on POST and on MCP recipe creation, in `rate_counters` with hashed bucket names. Over either is `429 rate_limited` with `Retry-After`, and the same seconds in `error.retryAfterSeconds` (also `error.retryAfter`) because MCP callers only see the body; a global rejection gives the per-IP slot back. `EVENT_PAGE_URL` defaults to the GitHub Pages event page. All three are event vars.
+- Mission text is the static `src/booth-mission-text.json` (`falsify.booth.mission-text.v1`), bundled at build time. A paper is served only when it is in that file AND in the current mission list from booth settings (the list `GET /v1/booth/config` shows, compared without the arXiv version suffix); otherwise `404`. `missionText` in the MCP deps applies the same rule. Old-style ids may be sent raw or with `%2F`.
+- `/mcp`: POST calls `handleAgentMcp(request, env, {createRecipe, missionsList, missionText})`. GET and DELETE are `405` with `Allow: POST`. `/mcp` keeps the exact-origin gate (server-side MCP clients send no Origin). The MCP server name is `falsify-booth`.
+
+Submissions accept two optional `meta` keys: `assist` (`manual`, `my-ai` or `agent`; default `manual`) and `recipeCode` (only with `agent`, the `R-XXXXXX` format, case-insensitive; the recipe need not still exist). Anything else is `400 invalid_request`. Both are stored (`assist`, `recipe_code`) and returned by the operator list and detail views as `assist` and `recipeCode`; rows from before 0007 read as `manual` and `null`. Claim views do not include them. AI-planted and manual entries are equally eligible for prizes. The operator CLI shows `assist` in `list`, `export --format submissions|jsonl` and `final` candidates.
+
 ## Error codes
 
 | Code | Status | When |

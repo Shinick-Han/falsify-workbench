@@ -31,6 +31,11 @@ export const SCORE_COLUMNS = Object.freeze([
   'defect_type', 'label', 'evidence', 'time_sec', 'tokens', 'is_holdout',
 ]);
 
+// One row per submission: how the defect was planted (manual, my-ai, agent) next to the outcome.
+export const SUBMISSION_COLUMNS = Object.freeze([
+  'receipt', 'seq', 'status', 'outcome', 'course', 'assist', 'recipe_code', 'paper_id', 'declared',
+]);
+
 export const KEY_COLUMNS = Object.freeze([
   'paper_id', 'team', 'defect_type', 'location', 'before', 'after',
   'iterations', 'self_check_model', 'patch_v1', 'patch_final', 'why_hard',
@@ -63,7 +68,7 @@ Commands:
   publish [--only <receipts>] [--status a,b] [--public-note <text>] [--prize <text>] [--dry-run]
   unpublish [--only <receipts>] [--dry-run]
   draw [--count <n>] [--status a,b] [--outcome a,b] [--only <receipts>] [--prize <text>] [--dry-run]
-  export --format common|score|key|jsonl [--out <file>] [--only <receipts>] [--status a,b]
+  export --format common|score|key|jsonl|submissions [--out <file>] [--only <receipts>] [--status a,b]
   missions get [--out <file>]
   missions set <file>
   missions warm [--write]
