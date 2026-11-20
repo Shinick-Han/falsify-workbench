@@ -14,7 +14,7 @@ export const MCP_MAX_BODY = 16 * 1024;
 const CORS = Object.freeze({
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Accept, Authorization, Mcp-Protocol-Version, Mcp-Session-Id, Last-Event-ID',
+  'Access-Control-Allow-Headers': 'Content-Type, Accept, Mcp-Protocol-Version, Mcp-Session-Id, Authorization',
   'Access-Control-Max-Age': '600',
 });
 
@@ -250,7 +250,20 @@ function recipeFailure(status, body) {
   return toolFailure(`Recipe rejected: ${error.code ?? 'error'}${field}.${hint}`, {status, error});
 }
 
+// The contract rejects unknown keys. Say which ones instead of silently dropping them. schema and
+// source are recipe keys an agent may copy from the docs; source is forced to agent anyway.
+const TOLERATED_KEYS = ['schema', 'source'];
+
+function unknownRecipeKeys(args) {
+  return Object.keys(args).filter(key => !RECIPE_KEYS.includes(key) && !TOLERATED_KEYS.includes(key));
+}
+
 async function createRecipe(request, env, deps, args) {
+  const unknown = unknownRecipeKeys(args);
+  if (unknown.length) {
+    return toolFailure(`Unknown argument${unknown.length > 1 ? 's' : ''}: ${unknown.join(', ')}. create_recipe accepts only ${RECIPE_KEYS.join(', ')}. Remove the others and call it again.`,
+      {status: 400, error: {code: 'invalid_request', field: unknown[0]}});
+  }
   const {status, body} = await deps.createRecipe(env, recipeFrom(args), clientIp(request));
   if (status !== 200 && status !== 201) return recipeFailure(status, body);
   const {code, url, expiresAt} = body;

@@ -7,7 +7,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  createRecipe, getRecipe, missionTextFrom, missionsList, normalizeRecipeCode, parseRecipe, RECIPE_TTL_MS,
+  createRecipe, getRecipe, ipRateKey, missionTextFrom, missionsList, normalizeRecipeCode, parseRecipe, RECIPE_TTL_MS,
 } from '../src/booth-recipes.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -445,9 +445,112 @@ test('/mcp: the real MCP server creates a recipe the REST route returns; GET and
     for (const method of ['GET', 'DELETE']) {
       const res = await call(method, '/mcp');
       assert.equal(res.status, 405);
-      assert.equal(res.headers.get('allow'), 'POST');
+      assert.equal(res.headers.get('allow'), 'POST, OPTIONS');
+      assertStarCors(res);
     }
   });
+});
+
+test('/mcp and GET /v1/booth/missions accept any Origin; admin and config keep the origin gate', async () => {
+  await withApp({}, async (_mf, call) => {
+    const foreign = { Origin: 'https://claude.ai' };
+    const rpc = await call('POST', '/mcp', { headers: foreign, body: { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'web', version: '1' } } } });
+    assert.equal(rpc.status, 200, rpc.text);
+    assertStarCors(rpc);
+    assert.equal(rpc.headers.get('vary'), null);
+    for (const headers of [{ ...foreign, 'Access-Control-Request-Method': 'POST', 'Access-Control-Request-Headers': 'content-type,mcp-protocol-version' }, {}]) {
+      const pre = await call('OPTIONS', '/mcp', { headers });
+      assert.equal(pre.status, 204);
+      assertStarCors(pre);
+      assert.equal(pre.headers.get('access-control-allow-methods'), 'POST, OPTIONS');
+      assert.equal(pre.headers.get('access-control-allow-headers'), 'Content-Type, Accept, Mcp-Protocol-Version, Mcp-Session-Id, Authorization');
+    }
+    const mission = missionFor('ragas', '2309.15217');
+    assert.equal((await setMissions(call, [mission])).status, 200);
+    const missions = await call('GET', '/v1/booth/missions', { headers: foreign });
+    assert.equal(missions.status, 200, missions.text);
+    assertStarCors(missions);
+    assert.deepEqual(missions.body, { missions: [mission] });
+    assert.equal((await call('POST', '/v1/booth/missions', { headers: foreign, body: {} })).status, 405);
+    const admin = await call('GET', '/v1/booth/admin/submissions', { token: OPERATOR, headers: foreign });
+    assert.equal(admin.status, 403);
+    assert.equal(admin.body.error.code, 'origin_not_allowed');
+    const settings = await call('PUT', '/v1/booth/admin/settings', { token: OPERATOR, headers: foreign, body: { missions: [] } });
+    assert.equal(settings.status, 403);
+    assert.equal((await call('GET', '/v1/booth/config', { headers: foreign })).status, 403);
+  });
+  await withApp({ BOOTH_ENABLED: 'false' }, async (_mf, call) => {
+    const off = await call('GET', '/v1/booth/missions', { headers: { Origin: 'https://claude.ai' } });
+    assert.equal(off.status, 404);
+    const pre = await call('OPTIONS', '/mcp', { headers: { Origin: 'https://claude.ai' } });
+    assert.equal(pre.status, 404);
+    assertStarCors(pre);
+  });
+});
+
+test('ipRateKey keeps IPv4 and keys IPv6 on its /64', () => {
+  assert.equal(ipRateKey('203.0.113.9'), '203.0.113.9');
+  assert.equal(ipRateKey('2001:db8:1:2:3:4:5:6'), '2001:0db8:0001:0002::/64');
+  assert.equal(ipRateKey('2001:DB8:1:2::9'), '2001:0db8:0001:0002::/64');
+  assert.equal(ipRateKey('2001:db8:1:3::9'), '2001:0db8:0001:0003::/64');
+  assert.equal(ipRateKey('::ffff:198.51.100.7'), '198.51.100.7');
+  assert.equal(ipRateKey('fe80::1%eth0'), 'fe80:0000:0000:0000::/64');
+  assert.equal(ipRateKey(''), 'unknown');
+  assert.equal(ipRateKey(undefined), 'unknown');
+});
+
+test('per-IP recipe writes share one bucket per IPv6 /64', async () => {
+  await withApp({ BOOTH_RECIPES_PER_IP_HOUR: '2' }, async (_mf, call) => {
+    const from = address => ({ 'CF-Connecting-IP': address });
+    assert.equal((await call('POST', '/v1/booth/recipes', { body: recipe(), headers: from('2001:db8:1:2::1') })).status, 201);
+    assert.equal((await call('POST', '/v1/booth/recipes', { body: recipe(), headers: from('2001:db8:1:2:ffff:0:0:9') })).status, 201);
+    const third = await call('POST', '/v1/booth/recipes', { body: recipe(), headers: from('2001:DB8:1:2::abcd') });
+    assert.equal(third.status, 429);
+    assert.ok(third.body.error.retryAfterSeconds > 0);
+    assert.equal((await call('POST', '/v1/booth/recipes', { body: recipe(), headers: from('2001:db8:1:3::1') })).status, 201);
+    assert.equal((await call('POST', '/v1/booth/recipes', { body: recipe(), headers: from('203.0.113.1') })).status, 201);
+  });
+});
+
+test('GET /v1/booth/recipes/:code is metered per IP (/64 for IPv6)', async () => {
+  await withApp({ BOOTH_RECIPE_READS_PER_IP_HOUR: '3' }, async (_mf, call) => {
+    const from = address => ({ 'CF-Connecting-IP': address });
+    const created = await call('POST', '/v1/booth/recipes', { body: recipe() });
+    const path = '/v1/booth/recipes/' + created.body.code;
+    assert.equal((await call('GET', path, { headers: from('2001:db8:9:9::1') })).status, 200);
+    assert.equal((await call('GET', '/v1/booth/recipes/R-ZZZZZZ', { headers: from('2001:db8:9:9::2') })).status, 404);
+    assert.equal((await call('GET', path, { headers: from('2001:db8:9:9::3') })).status, 200);
+    const limited = await call('GET', path, { headers: from('2001:db8:9:9:1:2:3:4') });
+    assert.equal(limited.status, 429);
+    assert.equal(limited.body.error.code, 'rate_limited');
+    const wait = Number(limited.headers.get('retry-after'));
+    assert.ok(Number.isInteger(wait) && wait > 0 && wait <= 3600);
+    assert.equal(limited.body.error.retryAfterSeconds, wait);
+    assertStarCors(limited);
+    assert.equal((await call('GET', path, { headers: from('2001:db8:9:a::1') })).status, 200);
+    assert.equal((await call('GET', path, { headers: from('198.51.100.20') })).status, 200);
+  });
+});
+
+test('C1 and bidi controls are rejected in every recipe string; lengths count code points', () => {
+  const cp = n => String.fromCodePoint(n);
+  for (const bad of [0x80, 0x85, 0x9f, 0x200e, 0x200f, 0x202a, 0x202e, 0x2066, 0x2069]) {
+    const ch = cp(bad);
+    assert.equal(fieldOf(() => parseRecipe(recipe({ agent: { name: 'Claude' + ch } }))), 'agent.name', bad.toString(16));
+    assert.equal(fieldOf(() => parseRecipe(recipe({ agent: { model: ch + 'm' } }))), 'agent.model');
+    assert.equal(fieldOf(() => parseRecipe(recipe({ edits: [{ find: 'a' + ch, replace: 'b' }] }))), 'edits[0].find');
+    assert.equal(fieldOf(() => parseRecipe(recipe({ edits: [{ find: 'a', replace: ch }] }))), 'edits[0].replace');
+    assert.equal(fieldOf(() => parseRecipe(recipe({ edits: [{ find: 'a', replace: 'b', context: 'x' + ch }] }))), 'edits[0].context');
+    assert.equal(fieldOf(() => parseRecipe(recipe({ reason: 'r' + ch }))), 'reason');
+  }
+  // Newline stays allowed in reason and context; other non-ASCII text (Korean, ZWJ emoji) is fine.
+  assert.equal(parseRecipe(recipe({ reason: '첫 줄\n둘째 줄' })).reason, '첫 줄\n둘째 줄');
+  assert.equal(parseRecipe(recipe({ edits: [{ find: 'a', replace: 'b', context: '가\n나' }] })).edits[0].context, '가\n나');
+  const astral = cp(0x1d400);
+  assert.equal(parseRecipe(recipe({ edits: [{ find: astral.repeat(300), replace: 'b' }] })).edits[0].find.length, 600);
+  assert.equal(fieldOf(() => parseRecipe(recipe({ edits: [{ find: astral.repeat(301), replace: 'b' }] }))), 'edits[0].find');
+  assert.equal(parseRecipe(recipe({ agent: { name: astral.repeat(60) } })).agent.name.length, 120);
+  assert.equal(fieldOf(() => parseRecipe(recipe({ agent: { name: astral.repeat(61) } }))), 'agent.name');
 });
 
 test('/mcp passes createRecipe, missionsList and missionText to handleAgentMcp', async () => {
@@ -540,5 +643,6 @@ test('migration 0007 and the event vars', () => {
   const wrangler = readFileSync(path.join(apiRoot, 'wrangler.jsonc'), 'utf8');
   assert.match(wrangler, /"BOOTH_RECIPES_PER_IP_HOUR": "120"/);
   assert.match(wrangler, /"BOOTH_RECIPES_PER_HOUR": "5000"/);
+  assert.match(wrangler, /"BOOTH_RECIPE_READS_PER_IP_HOUR": "600"/);
   assert.match(wrangler, /"EVENT_PAGE_URL": "https:\/\/shinick-han\.github\.io\/falsify-workbench\/event\.html"/);
 });

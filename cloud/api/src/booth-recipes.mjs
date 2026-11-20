@@ -17,8 +17,10 @@ const DEFECTS = ['number', 'figure', 'citation', 'logic', 'method', 'other'];
 const RECIPE_KEYS = ['schema', 'paperId', 'edits', 'defectType', 'reason', 'source', 'agent'];
 const EDIT_KEYS = ['page', 'find', 'replace', 'context'];
 const AGENT_KEYS = ['name', 'model'];
-const CONTROL = /[\x00-\x1f\x7f]/;
-const CONTROL_EXCEPT_NEWLINE = /[\x00-\x09\x0b-\x1f\x7f]/;
+// C0, DEL, C1 and the bidi marks, embeddings, overrides and isolates (U+200E, U+200F, U+202A-U+202E,
+// U+2066-U+2069). Newline is allowed only in reason and context.
+const CONTROL = /[\x00-\x1f\x7f-\x9f\u{200e}\u{200f}\u{202a}-\u{202e}\u{2066}-\u{2069}]/u;
+const CONTROL_EXCEPT_NEWLINE = /[\x00-\x09\x0b-\x1f\x7f-\x9f\u{200e}\u{200f}\u{202a}-\u{202e}\u{2066}-\u{2069}]/u;
 const DIGITS = /^[0-9]{1,12}$/;
 export const MAX_RECIPE_BYTES = 8 * 1024;
 const MAX_EDITS = 5;
@@ -27,6 +29,7 @@ export const RECIPE_TTL_MS = 6 * 3600 * 1000;
 const CODE_ATTEMPTS = 5;
 const HOUR = 3600;
 const IP_BUCKET_PREFIX = 'booth-recipe:ip:';
+const READ_BUCKET_PREFIX = 'booth-recipe-read:ip:';
 const GLOBAL_BUCKET = 'booth-recipe:all';
 const DEFAULT_EVENT_PAGE = 'https://shinick-han.github.io/falsify-workbench/event.html';
 
@@ -73,6 +76,7 @@ export function recipeLimits(env) {
   return {
     perIpHour: positiveInt(env?.BOOTH_RECIPES_PER_IP_HOUR, 120),
     perHour: positiveInt(env?.BOOTH_RECIPES_PER_HOUR, 5000),
+    readsPerIpHour: positiveInt(env?.BOOTH_RECIPE_READS_PER_IP_HOUR, 600),
   };
 }
 
@@ -97,7 +101,7 @@ function failure(error) {
   if (Object.keys(error.headers).length) result.headers = { ...error.headers };
   // MCP callers only see {status, body}, so the wait is in the body as well as in Retry-After.
   const wait = Number(error.headers['Retry-After']);
-  if (Number.isSafeInteger(wait)) {
+  if (Number.isSafeInteger(wait) && wait >= 0) {
     result.body.error.retryAfterSeconds = wait;
     result.body.error.retryAfter = wait;
   }
@@ -196,6 +200,30 @@ export function randomRecipeCode() {
   return 'R-' + raw;
 }
 
+function expandIpv6(address) {
+  const halves = address.split('::');
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(':') : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  const missing = 8 - head.length - tail.length;
+  if (halves.length === 2 ? missing < 1 : missing !== 0) return null;
+  const groups = [...head, ...Array(Math.max(missing, 0)).fill('0'), ...tail];
+  return groups.every(group => /^[0-9a-f]{1,4}$/.test(group)) ? groups : null;
+}
+
+// Rate-limit key for a client address. IPv4 is unchanged. IPv6 is cut to its /64, because one
+// client usually holds a whole /64. An IPv4-mapped IPv6 address counts as its IPv4 address.
+export function ipRateKey(ip) {
+  if (typeof ip !== 'string' || !ip.trim()) return 'unknown';
+  const value = ip.trim().toLowerCase().replace(/%.*$/, '');
+  if (!value.includes(':')) return value;
+  const mapped = /^[0:]*:ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(value);
+  if (mapped) return mapped[1];
+  const groups = expandIpv6(value);
+  if (!groups) return value;
+  return groups.slice(0, 4).map(group => group.padStart(4, '0')).join(':') + '::/64';
+}
+
 async function bucketKey(prefix, value) {
   return prefix + (await sha256Hex('falsify-rate:' + prefix + value)).slice(0, 24);
 }
@@ -220,7 +248,7 @@ async function releaseSlot(db, bucket, start) {
 // A global rejection gives the per-IP slot back, as the claim buckets do.
 async function chargeRecipe(db, env, ip, nowMs) {
   const limits = recipeLimits(env);
-  const ipBucket = await bucketKey(IP_BUCKET_PREFIX, typeof ip === 'string' && ip ? ip : 'unknown');
+  const ipBucket = await bucketKey(IP_BUCKET_PREFIX, ipRateKey(ip));
   const ipSlot = await takeSlot(db, ipBucket, limits.perIpHour, nowMs);
   try {
     await takeSlot(db, GLOBAL_BUCKET, limits.perHour, nowMs);
@@ -387,6 +415,23 @@ async function readRecipeBody(request) {
   }
 }
 
+// GET by code is metered per IP (/64 for IPv6) so codes cannot be enumerated cheaply.
+async function readRecipe(ctx) {
+  try {
+    if (!boothEnabled(ctx.env)) throw new RecipeError(404, 'not_found');
+    const nowMs = clockOf(ctx.options);
+    const bucket = await bucketKey(READ_BUCKET_PREFIX, ipRateKey(ctx.clientIp));
+    await takeSlot(database(ctx.env), bucket, recipeLimits(ctx.env).readsPerIpHour, nowMs);
+  } catch (error) {
+    return failure(error);
+  }
+  return getRecipe(ctx.env, ctx.match.params.code, ctx.options);
+}
+
+async function listMissions(ctx) {
+  return { status: 200, body: { missions: await missionsList(ctx.env) } };
+}
+
 async function postRecipe(ctx) {
   let body;
   try {
@@ -406,7 +451,8 @@ async function getMissionText(ctx) {
 
 const ROUTES = {
   '/v1/booth/recipes': { POST: postRecipe },
-  '/v1/booth/recipes/:code': { GET: ctx => getRecipe(ctx.env, ctx.match.params.code, ctx.options) },
+  '/v1/booth/recipes/:code': { GET: readRecipe },
+  '/v1/booth/missions': { GET: listMissions },
   '/v1/booth/missions/:paperId/text': { GET: getMissionText },
 };
 
@@ -416,6 +462,7 @@ function pathSegment(value) {
 
 export function matchBoothRecipes(pathname) {
   if (pathname === '/v1/booth/recipes') return { template: '/v1/booth/recipes', params: {} };
+  if (pathname === '/v1/booth/missions') return { template: '/v1/booth/missions', params: {} };
   const one = /^\/v1\/booth\/recipes\/([^/]+)$/.exec(pathname);
   if (one) return { template: '/v1/booth/recipes/:code', params: { code: pathSegment(one[1]) } };
   // Old-style arXiv ids contain a slash, sent raw or as %2F.

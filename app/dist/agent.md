@@ -21,7 +21,7 @@ agent가 만드는 것은 **레시피**(어디를 무엇으로 바꿀지 적은 
 
 ### 다섯 단계
 
-1. **논문 고르기.** `GET /v1/booth/config`의 `missions` 중 하나를 고르세요. 또는 CC BY 라이선스의 arXiv 논문이면 무엇이든 됩니다.
+1. **논문 고르기.** `GET /v1/booth/missions`의 `missions` 중 하나를 고르세요. 또는 CC BY 라이선스의 arXiv 논문이면 무엇이든 됩니다.
 2. **본문 읽기.** 미션 논문은 `GET /v1/booth/missions/:paperId/text`로 쪽별 본문을 받습니다. 다른 논문은 arXiv에서 읽으세요.
 3. **결함 1–3개 만들기.** 그럴듯하고, 본문의 다른 부분과 대조하면 확인할 수 있는 결함이어야 합니다. 없는 인용을 지어내지 마세요.
 4. **레시피 보내기.** `POST /v1/booth/recipes`. 응답으로 코드와 URL을 받습니다.
@@ -29,22 +29,19 @@ agent가 만드는 것은 **레시피**(어디를 무엇으로 바꿀지 적은 
 
 ### API
 
-모든 요청은 `https://falsify-cloud-api-event.ai-gongbu.workers.dev`로 보냅니다. 인증은 없습니다. 아래 경로는 CORS `*`를 허용합니다.
+모든 요청은 `https://falsify-cloud-api-event.ai-gongbu.workers.dev`로 보냅니다. 인증은 없습니다. 아래 경로와 `/mcp`는 어느 Origin에서든 부를 수 있고 CORS `*`를 허용합니다. 사람용 화면 설정인 `/v1/booth/config`는 부스 페이지 전용이라 다른 Origin에서는 막힙니다. 미션 목록은 아래 경로로 받으세요.
 
-**1. 미션 목록**: `GET /v1/booth/config`
+**1. 미션 목록**: `GET /v1/booth/missions`
 
 ```json
 {
-  "enabled": true,
-  "submissionsOpen": true,
-  "defectTypes": [{"id": "number", "label": "수치·통계"}, {"id": "figure", "label": "그림·표"}, {"id": "citation", "label": "인용·출처"}, {"id": "logic", "label": "논리·결론"}, {"id": "method", "label": "방법·실험 설계"}, {"id": "other", "label": "기타"}],
   "missions": [
     {"id": "ragas", "title": "Ragas: Automated Evaluation of Retrieval Augmented Generation", "source": "arxiv", "paperId": "2309.15217", "license": "cc-by-4.0", "course": "quick", "pageHint": 5, "hint": "5쪽 Table 1의 숫자 하나를 바꿔 결론과 어긋나게 해 보세요."}
   ]
 }
 ```
 
-(그 밖의 필드는 사람용 화면 설정입니다. 무시해도 됩니다.)
+결함 유형(`defectType`)은 `number`(수치·통계), `figure`(그림·표), `citation`(인용·출처), `logic`(논리·결론), `method`(방법·실험 설계), `other`(기타) 중 하나입니다.
 
 **2. 미션 본문**: `GET /v1/booth/missions/:paperId/text`
 
@@ -89,7 +86,7 @@ agent가 만드는 것은 **레시피**(어디를 무엇으로 바꿀지 적은 
 - `201`: `{"code": "R-7K3QXM", "url": "https://shinick-han.github.io/falsify-workbench/event.html#recipe=R-7K3QXM", "expiresAt": "2026-11-22T12:00:00.000Z"}`
 - `400`: `{"error": {"code": "invalid_request", "field": "edits[0].find"}}` (field가 없을 수도 있습니다)
 - `413`: 8 KB 초과
-- `429`: 요청이 너무 많습니다. `Retry-After` 초 뒤에 다시 시도하세요.
+- `429`: 요청이 너무 많습니다. `Retry-After` 초(본문의 `error.retryAfterSeconds`와 같음) 뒤에 다시 시도하세요.
 
 **4. 레시피 확인**(선택): `GET /v1/booth/recipes/:code`는 저장된 레시피와 `code`, `createdAt`, `expiresAt`을 돌려줍니다. 만료되었거나 없는 코드는 `404`입니다.
 
@@ -156,7 +153,7 @@ You only build a **recipe**: JSON that says what to replace with what. A human a
 
 ### Five steps
 
-1. **Pick a paper.** One of the `missions` from `GET /v1/booth/config`, or any CC BY arXiv paper.
+1. **Pick a paper.** One of the `missions` from `GET /v1/booth/missions`, or any CC BY arXiv paper.
 2. **Read the text.** For a mission paper, `GET /v1/booth/missions/:paperId/text` returns the text page by page. For other papers, read arXiv.
 3. **Craft 1–3 plausible defects** that a careful reader could catch by checking the paper against itself. Never invent citations.
 4. **POST the recipe** to `/v1/booth/recipes`. You get a code and a URL.
@@ -164,9 +161,9 @@ You only build a **recipe**: JSON that says what to replace with what. A human a
 
 ### API
 
-Base: `https://falsify-cloud-api-event.ai-gongbu.workers.dev`. No authentication. These routes allow CORS `*`.
+Base: `https://falsify-cloud-api-event.ai-gongbu.workers.dev`. No authentication. The routes below and `/mcp` accept any Origin and allow CORS `*`. `/v1/booth/config` is the booth page's own settings and is not open to other origins; use `GET /v1/booth/missions` instead.
 
-- `GET /v1/booth/config`: `missions[]` with `paperId`, `title`, `license`, `course`, `pageHint` and `hint` (hints are in Korean), plus `defectTypes[]`. Ignore the other fields.
+- `GET /v1/booth/missions`: `{missions: [...]}`, each with `paperId`, `title`, `license`, `course`, `pageHint` and `hint` (hints are in Korean).
 - `GET /v1/booth/missions/:paperId/text`: `{paperId, title, license, pages: [{page, text}]}`. Mission papers only; other ids are `404`. Text is extracted from the PDF and keeps line-end hyphenation; matching normalises whitespace and line-end hyphens, so copy `find` verbatim.
 - `POST /v1/booth/recipes` with `Content-Type: application/json`, at most 8 KB. Body as in the Korean section above and the curl example below. Rules:
   - `paperId`: an arXiv id; a mission paper or a CC BY arXiv paper.
@@ -175,7 +172,7 @@ Base: `https://falsify-cloud-api-event.ai-gongbu.workers.dev`. No authentication
   - `reason` (optional, ≤500 chars): pre-fills the human's reason box; never sent to BLUE.
   - `agent` (optional): `{name, model}`, each ≤60 chars.
   - The server sets `source` to `"agent"`. Unknown top-level keys and control characters are rejected.
-- Responses: `201 {"code":"R-7K3QXM","url":"https://shinick-han.github.io/falsify-workbench/event.html#recipe=R-7K3QXM","expiresAt":"..."}`; `400 {"error":{"code":"invalid_request","field":"..."}}`; `413` (over 8 KB); `429` (wait `Retry-After` seconds).
+- Responses: `201 {"code":"R-7K3QXM","url":"https://shinick-han.github.io/falsify-workbench/event.html#recipe=R-7K3QXM","expiresAt":"..."}`; `400 {"error":{"code":"invalid_request","field":"..."}}`; `413` (over 8 KB); `429` (wait `Retry-After` seconds, also in `error.retryAfterSeconds`). Lengths count Unicode code points; control characters, including C1 and bidi controls, are rejected.
 - `GET /v1/booth/recipes/:code` (optional): the stored recipe plus `code`, `createdAt`, `expiresAt`; `404` when expired or unknown.
 
 ### curl example
