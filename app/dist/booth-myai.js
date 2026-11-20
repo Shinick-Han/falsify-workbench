@@ -297,7 +297,7 @@
     if(!Array.isArray(segments)||!segments.length) return [];
     const all=segments.map(s=>squash(s.text)).join(' ');
     return recipe.edits.filter(edit=>!all.includes(squash(edit.find)))
-      .map(edit=>diag('warn','find_missing','원문에서 "'+short(edit.find,40)+'"를 그대로 찾지 못했어요. 적용 결과에서 다시 알려 드릴게요.'));
+      .map(edit=>diag('warn','find_missing','찾는 글자 "'+short(edit.find,40)+'"가 이 논문에 그대로 없어요. 적용 결과에서 바로 고를 수 있어요.'));
   }
   function failure(text,state){
     const out=[];
@@ -397,7 +397,7 @@
   }
 
   /* ---------- UI ---------- */
-  const UNRESOLVED={not_found:'논문에서 찾지 못했어요',ambiguous:'같은 글자가 여러 곳에 있어요',no_paper:'논문이 아직 열리지 않았어요'};
+  const UNRESOLVED={not_found:'찾는 글자가 이 논문에 없어요',ambiguous:'같은 글자가 여러 곳에 있어요',no_paper:'논문이 아직 열리지 않았어요'};
   function setProp(node,key,value){
     if(key==='className') node.className=value;
     else if(key==='text') node.textContent=value;
@@ -569,7 +569,7 @@
       if(max) v.page.max=String(max);
       s.prompt=buildPrompt({paperId:now.meta.paperId,title:now.meta.title,license:now.meta.license,hint:readHint(doc),page:now.page,pageText:now.text},{lang:s.lang});
       v.preview.textContent=short(s.prompt,180);
-      v.size.textContent=now.text?('전체 '+s.prompt.length.toLocaleString('en-US')+'자 · '+now.page+'쪽 원문 포함'):'이 쪽의 글자를 아직 읽지 못했어요. 논문이 열린 뒤 다시 눌러 주세요.';
+      v.size.textContent=now.text?('전체 '+s.prompt.length.toLocaleString('en-US')+'자 · '+now.page+'쪽 원문 포함'):'이 쪽의 글자를 불러오는 중이에요. 논문이 열린 뒤 다시 눌러 주세요.';
       if(!v.full.hidden) v.full.value=s.prompt;
       return s.prompt;
     }

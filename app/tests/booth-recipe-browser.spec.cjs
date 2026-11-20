@@ -356,8 +356,8 @@ async function findFlows(browser, log, errors, wide) {
   await find.fill('zzqx nowhere');
   await repl.fill('x');
   await go.click();
-  await page.waitForFunction(() => /찾지 못했어요/.test(document.querySelector('#booth-pane-find .booth-find > .booth-feedback, #booth-find-fold .booth-find > .booth-feedback')?.textContent || ''));
-  assert.match(await status.textContent(), /찾지 못했어요/);
+  await page.waitForFunction(() => /찾는 글자가 이 논문에 없어요/.test(document.querySelector('#booth-pane-find .booth-find > .booth-feedback, #booth-find-fold .booth-find > .booth-feedback')?.textContent || ''));
+  assert.match(await status.textContent(), /찾는 글자가 이 논문에 없어요/);
 
   if (wide) {
     await page.locator('#booth-dock-chips .booth-dock-x').first().click();
