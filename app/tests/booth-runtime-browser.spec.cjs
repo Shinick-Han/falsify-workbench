@@ -68,7 +68,7 @@ const CONFIG = {
 };
 const tokenFor = n => 'fsg_' + String.fromCharCode(96 + n).repeat(43);
 
-/* state: {guests, auth:[], claims, submissions, hooks:{config}} */
+/* state: {guests, auth:[], claims, claimMethods:[], submissions, hooks:{config}} */
 async function stubApi(route, state) {
   const request = route.request();
   const url = new URL(request.url());
@@ -99,14 +99,16 @@ async function stubApi(route, state) {
     return json(route, 201, {receipt: 'F-004' + n, claimKey: '7Q3K-M9X' + n, status: 'received', course: 'quick', declaredCount: 1,
       createdAt: new Date().toISOString()});
   }
-  if (request.method() === 'POST' && url.pathname === '/v1/booth/claim') {
+  // Result polls are a GET with the key in the query (CORS simple, no preflight); POST is the old-Worker fallback.
+  if ((request.method() === 'GET' || request.method() === 'POST') && url.pathname === '/v1/booth/claim') {
     state.claims += 1;
+    state.claimMethods.push(request.method());
     return json(route, 200, PENDING);
   }
   return json(route, 404, {error: {code: 'not_found'}});
 }
 
-function newState() { return {guests: 0, auth: [], claims: 0, submissions: 0, hooks: {}, offline: false}; }
+function newState() { return {guests: 0, auth: [], claims: 0, claimMethods: [], submissions: 0, hooks: {}, offline: false}; }
 /* Routed requests are fulfilled even in an offline context, so the stub fails them itself. */
 async function setOffline(context, state, value) {
   state.offline = value;
@@ -199,6 +201,7 @@ async function returnPass(browser, pageErrors) {
   await page.goto(base + 'event.html');
   await stepIs(page, 'ticket');
   assert.equal(await until(async () => state.claims === 1), true, 'the reload picked the ticket up');
+  assert.deepEqual(state.claimMethods, ['GET'], 'the claim is read with a GET');
   assert.equal(await page.evaluate(() => document.documentElement.dataset.kiosk), undefined, 'normal mode is not a kiosk');
   assert.equal(await page.locator('.booth-handoff').count(), 0);
   assert.equal(await until(() => page.evaluate(() => window.__wake.requests === 1)), true, 'the screen stays on while waiting');
