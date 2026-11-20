@@ -1105,4 +1105,686 @@ async function sha256(bytes) {
   return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
 }
 
-globalThis.FalsifyBrowserPdf = {prepare, ENGINE, LIMITS, COORDINATE_SPACE, COORDINATES, BrowserPdfError};
+export async function warm() {
+  return true;
+}
+
+function unavailableError(cause) {
+  const error = new BrowserPdfError(
+    'engine_unavailable',
+    'PDF 엔진을 불러오지 못했습니다.',
+    cause ? {reason: String(cause.message || cause.name || cause)} : {},
+  );
+  return error;
+}
+
+const SYMBOL_FALLBACK = {
+  0x00a0: ' ',
+  0x2009: ' ',
+  0x200a: ' ',
+  0x202f: ' ',
+  0x2010: '-',
+  0x2011: '-',
+  0x2012: '-',
+  0x2215: '/',
+  0x2217: '*',
+  0x2662: '<>',
+  0x2192: '->',
+  0x2190: '<-',
+  0x2194: '<->',
+  0x21d2: '=>',
+  0x2208: 'in',
+  0x2209: 'not in',
+  0x226a: '<<',
+  0x226b: '>>',
+};
+
+function isCjkCodePoint(cp) {
+  return (
+    (cp >= 0x1100 && cp <= 0x11ff) ||
+    (cp >= 0x2e80 && cp <= 0x9fff) ||
+    (cp >= 0xa960 && cp <= 0xa97f) ||
+    (cp >= 0xac00 && cp <= 0xd7af) ||
+    (cp >= 0xd7b0 && cp <= 0xd7ff) ||
+    (cp >= 0xf900 && cp <= 0xfaff) ||
+    (cp >= 0xfe30 && cp <= 0xfe4f) ||
+    (cp >= 0xff00 && cp <= 0xffef) ||
+    (cp >= 0x20000 && cp <= 0x2fa1f)
+  );
+}
+
+function winAnsiByte(cp) {
+  if (cp <= 0x7f) return cp;
+  if (cp >= 0xa0 && cp <= 0xff) return cp;
+  if (WINANSI_EXTRA[cp] !== undefined) return WINANSI_EXTRA[cp];
+  return null;
+}
+
+function base14FromStyle(style) {
+  const bare = String(style?.fontName || '').replace(/^[A-Z]{6}\+/, '');
+  if (BASE14.includes(bare)) return bare;
+  if (FACE_ALIAS[bare]) return FACE_ALIAS[bare];
+  const bold = !!style?.isBold;
+  const italic = !!style?.isItalic;
+  const family = style?.isMono ? 'Courier' : style?.isSerif !== false ? 'Times' : 'Helvetica';
+  return base14Style(family, bold, italic);
+}
+
+function readRewritePage(page) {
+  const transform = page.getTransform();
+  const toPdf = mupdf.Matrix.invert(transform);
+  const bounds = page.getBounds();
+  const chars = [];
+  const st = page.toStructuredText('preserve-whitespace');
+  let lineId = -1;
+  let lineDir = [1, 0];
+  try {
+    st.walk({
+      beginLine(_bbox, _wmode, dir) {
+        lineId += 1;
+        lineDir = [Number(dir?.[0]) || 0, Number(dir?.[1]) || 0];
+        if (!lineDir[0] && !lineDir[1]) lineDir = [1, 0];
+      },
+      onChar(c, origin, font, size, quad, color) {
+        try {
+          const pdfOrigin = apply(toPdf, origin[0], origin[1]);
+          chars.push({
+            c,
+            origin: [origin[0], origin[1]],
+            pdfOrigin,
+            lineId,
+            lineDir,
+            fontName: font.getName(),
+            isBold: font.isBold(),
+            isItalic: font.isItalic(),
+            isSerif: font.isSerif(),
+            isMono: font.isMono(),
+            size: Number(size) > 0 ? Number(size) : 10,
+            quad: [...quad],
+            color: rgb(color) || [0, 0, 0],
+          });
+        } finally {
+          try { font.destroy(); } catch { /* ignore */ }
+        }
+      },
+    });
+  } finally {
+    try { st.destroy(); } catch { /* ignore */ }
+  }
+  return {chars, bounds, transform, toPdf};
+}
+
+function rectsToDisplay(rects, bounds) {
+  const bx0 = bounds[0];
+  const by0 = bounds[1];
+  const bw = bounds[2] - bx0;
+  const bh = bounds[3] - by0;
+  const out = [];
+  for (const r of Array.isArray(rects) ? rects : []) {
+    if (!r || typeof r !== 'object') continue;
+    const x = Number(r.x);
+    const y = Number(r.y);
+    const w = Number(r.w);
+    const h = Number(r.h);
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(w) || !Number.isFinite(h)) continue;
+    if (!(w > 0) || !(h > 0)) continue;
+    out.push([
+      bx0 + x * bw,
+      by0 + y * bh,
+      bx0 + (x + w) * bw,
+      by0 + (y + h) * bh,
+    ]);
+  }
+  return out;
+}
+
+function selectGlyphsByRects(chars, displayRects) {
+  const selected = [];
+  for (const ch of chars) {
+    const [gx0, gy0, gx1, gy1] = quadBounds(ch.quad);
+    const cx = (gx0 + gx1) / 2;
+    const cy = (gy0 + gy1) / 2;
+    for (const [rx0, ry0, rx1, ry1] of displayRects) {
+      const tolX = 0.5;
+      const tolY = Math.min(1.5, Math.max(0.5, (ry1 - ry0) * 0.15));
+      if (cx >= rx0 - tolX && cx <= rx1 + tolX && cy >= ry0 - tolY && cy <= ry1 + tolY) {
+        selected.push(ch);
+        break;
+      }
+    }
+  }
+  return selected;
+}
+
+function redactRewritePage(page, pagePlans, allChars) {
+  const selectedSet = new Set();
+  for (const plan of pagePlans) {
+    for (const ch of plan.selectedChars) selectedSet.add(ch);
+  }
+  if (!selectedSet.size) return;
+
+  const protectedBoxes = [];
+  for (const ch of allChars) {
+    if (selectedSet.has(ch) || !ch.c.trim()) continue;
+    const box = removalBox(ch);
+    if (box) protectedBoxes.push(box);
+  }
+
+  const quads = [];
+  for (const ch of selectedSet) {
+    if (!ch.c.trim()) continue;
+    let rect = safeRedactionRect(ch, protectedBoxes);
+    if (!rect) {
+      const [x0, y0, x1, y1] = quadBounds(ch.quad);
+      const cx = (x0 + x1) / 2;
+      const cy = (y0 + y1) / 2;
+      rect = [cx - 0.1, cy - 0.1, cx + 0.1, cy + 0.1];
+    }
+    const [x0, y0, x1, y1] = rect;
+    quads.push([x0, y1, x1, y1, x0, y0, x1, y0]);
+  }
+  if (!quads.length) return;
+
+  const annot = page.createAnnotation('Redact');
+  annot.setRect(quadBounds(quads.flat()));
+  annot.setQuadPoints(quads);
+  annot.update();
+  page.applyRedactions(
+    false,
+    mupdf.PDFPage.REDACT_IMAGE_NONE,
+    mupdf.PDFPage.REDACT_LINE_ART_NONE,
+    mupdf.PDFPage.REDACT_TEXT_REMOVE,
+  );
+}
+
+function pdfDirection(toPdf, dx, dy) {
+  const p0 = apply(toPdf, 0, 0);
+  const p1 = apply(toPdf, dx, dy);
+  let ux = p1[0] - p0[0];
+  let uy = p1[1] - p0[1];
+  const len = Math.hypot(ux, uy) || 1;
+  return [ux / len, uy / len];
+}
+
+function mergeDisplayLineRects(displayRects) {
+  const sorted = [...displayRects].sort((a, b) => a[1] - b[1] || a[0] - b[0]);
+  const lines = [];
+  for (const r of sorted) {
+    const rh = r[3] - r[1];
+    let merged = false;
+    for (const line of lines) {
+      const overlapY = Math.min(line[3], r[3]) - Math.max(line[1], r[1]);
+      const minH = Math.min(line[3] - line[1], rh);
+      if (minH > 0 && overlapY >= minH * 0.5) {
+        line[0] = Math.min(line[0], r[0]);
+        line[1] = Math.min(line[1], r[1]);
+        line[2] = Math.max(line[2], r[2]);
+        line[3] = Math.max(line[3], r[3]);
+        merged = true;
+        break;
+      }
+    }
+    if (!merged) lines.push([...r]);
+  }
+  return lines;
+}
+
+function buildRewriteSlots(selectedChars, displayRects, model) {
+  const drawn = selectedChars.filter(ch => ch.c.trim());
+  const defaultStyle = {fontName: 'Times-Roman', isBold: false, isItalic: false, isSerif: true, isMono: false};
+
+  if (drawn.length) {
+    const sizes = drawn.map(c => c.size).filter(s => s > 0).sort((a, b) => a - b);
+    const medianSize = sizes.length ? sizes[Math.floor(sizes.length / 2)] : 10;
+
+    // Pick modal style among drawn glyphs (avoids bold prefix biasing a whole caption, or picks bold if all bold)
+    const styleCounts = new Map();
+    let bestStyle = drawn[0];
+    let bestCount = 0;
+    for (const ch of drawn) {
+      const key = `${ch.fontName}|${ch.isBold}|${ch.isItalic}|${ch.isSerif}|${ch.isMono}`;
+      const next = (styleCounts.get(key) || 0) + 1;
+      styleCounts.set(key, next);
+      if (next > bestCount) { bestCount = next; bestStyle = ch; }
+    }
+
+    const byLine = new Map();
+    for (const ch of drawn) {
+      let arr = byLine.get(ch.lineId);
+      if (!arr) { arr = []; byLine.set(ch.lineId, arr); }
+      arr.push(ch);
+    }
+
+    const groups = [...byLine.values()].map(arr => {
+      const box = union(arr);
+      return {arr, box, cy: (box[1] + box[3]) / 2, cx: (box[0] + box[2]) / 2};
+    });
+    groups.sort((a, b) => a.cy - b.cy || a.cx - b.cx);
+
+    const slots = groups.map(({arr, box}) => {
+      const first = arr[0];
+      const [ox, oy] = first.pdfOrigin;
+      const [ux, uy] = pdfDirection(model.toPdf, first.lineDir[0], first.lineDir[1]);
+      const [nx, ny] = pdfDirection(model.toPdf, -first.lineDir[1], first.lineDir[0]);
+
+      const glyphProjs = [];
+      for (const ch of arr) {
+        for (let i = 0; i < 8; i += 2) {
+          const pt = apply(model.toPdf, ch.quad[i], ch.quad[i + 1]);
+          glyphProjs.push((pt[0] - ox) * ux + (pt[1] - oy) * uy);
+        }
+      }
+      const glyphSpanW = glyphProjs.length ? Math.max(...glyphProjs) - Math.min(...glyphProjs) : 0;
+
+      // Also measure intersecting edit rect(s) along the line direction
+      let rectSpanW = 0;
+      const hittingRects = displayRects.filter(r => intersects(box, r, 1.5));
+      if (hittingRects.length) {
+        const rectProjs = [];
+        for (const [rx0, ry0, rx1, ry1] of hittingRects) {
+          for (const [px, py] of [[rx0, ry0], [rx1, ry0], [rx0, ry1], [rx1, ry1]]) {
+            const pt = apply(model.toPdf, px, py);
+            rectProjs.push((pt[0] - ox) * ux + (pt[1] - oy) * uy);
+          }
+        }
+        rectSpanW = Math.max(...rectProjs) - Math.min(...rectProjs);
+      }
+
+      const lineSizes = arr.map(c => c.size).filter(s => s > 0).sort((a, b) => a - b);
+      const lineSize = lineSizes.length ? lineSizes[Math.floor(lineSizes.length / 2)] : medianSize;
+      return {
+        ox, oy, ux, uy, nx, ny,
+        size: medianSize || lineSize,
+        slotWidth: Math.max(medianSize, glyphSpanW, rectSpanW),
+        color: bestStyle.color || [0, 0, 0],
+        style: bestStyle,
+      };
+    });
+    return slots;
+  }
+
+  // Fallback: no MuPDF glyphs inside edit rects — derive slots purely from displayRects
+  const lineRects = mergeDisplayLineRects(displayRects);
+  const [ux, uy] = pdfDirection(model.toPdf, 1, 0);
+  const [nx, ny] = pdfDirection(model.toPdf, 0, 1);
+  return lineRects.map(([x0, y0, x1, y1]) => {
+    const rh = Math.max(4, y1 - y0);
+    const size = Math.max(6, Math.min(24, rh * 0.8));
+    const baseY = y0 + rh * 0.8;
+    const [ox, oy] = apply(model.toPdf, x0, baseY);
+    const [ex, ey] = apply(model.toPdf, x1, baseY);
+    const slotWidth = Math.max(size, Math.hypot(ex - ox, ey - oy));
+    return {
+      ox, oy, ux, uy, nx, ny,
+      size,
+      slotWidth,
+      color: [0, 0, 0],
+      style: defaultStyle,
+    };
+  });
+}
+
+function sanitizeRewriteText(raw) {
+  let text = String(raw == null ? '' : raw);
+  text = text.replace(/\r\n?/g, '\n').replace(/\t/g, ' ');
+  text = text.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
+  text = text.normalize('NFC');
+  let out = '';
+  for (const ch of text) {
+    const cp = ch.codePointAt(0);
+    if (SYMBOL_FALLBACK[cp] !== undefined && cp !== 0x2217 && cp !== 0x2662 && cp !== 0x2192 && cp !== 0x2190 && cp !== 0x2194 && cp !== 0x21d2 && cp !== 0x2208 && cp !== 0x2209 && cp !== 0x226a && cp !== 0x226b) {
+      out += SYMBOL_FALLBACK[cp];
+    } else {
+      out += ch;
+    }
+  }
+  return out;
+}
+
+function normalizeCharForFont(ch, nimbusFont) {
+  const cp = ch.codePointAt(0);
+  if (isCjkCodePoint(cp)) return {kind: 'cjk', text: ch};
+  if (winAnsiByte(cp) !== null && nimbusFont.encodeCharacter(cp)) return {kind: 'winansi', text: ch};
+  if (nimbusFont.encodeCharacter(cp)) return {kind: 'cid', text: ch};
+  if (SYMBOL_FALLBACK[cp] !== undefined) return {kind: 'winansi', text: SYMBOL_FALLBACK[cp]};
+  const folded = ch.normalize('NFKD');
+  let kept = '';
+  for (const part of folded) {
+    const pcp = part.codePointAt(0);
+    if (pcp >= 0x0300 && pcp <= 0x036f) continue; // strip combining marks
+    if (nimbusFont.encodeCharacter(pcp)) kept += part;
+  }
+  if (kept) {
+    const allWin = [...kept].every(c => winAnsiByte(c.codePointAt(0)) !== null);
+    return {kind: allWin ? 'winansi' : 'cid', text: kept};
+  }
+  return {kind: 'winansi', text: '?'};
+}
+
+function splitRewriteRuns(lineText, baseName) {
+  const nimbusFont = metrics(baseName);
+  const koFont = cjkFont();
+  const pieces = [];
+  let needsCid = false;
+  for (const ch of lineText) {
+    const item = normalizeCharForFont(ch, nimbusFont);
+    if (item.kind === 'cid') needsCid = true;
+    pieces.push(item);
+  }
+  // If any non-CJK char on the line needs Tier 2 Nimbus CID, promote all non-CJK chars
+  // on this line to Nimbus CID to avoid mid-token Type1/Type0 switches.
+  const runs = [];
+  for (const item of pieces) {
+    const kind = item.kind === 'cjk' ? 'cjk' : (needsCid ? 'cid' : 'winansi');
+    const prev = runs[runs.length - 1];
+    if (prev && prev.kind === kind) prev.text += item.text;
+    else runs.push({kind, text: item.text, font: kind === 'cjk' ? koFont : nimbusFont, baseName});
+  }
+  return runs;
+}
+
+function measureRewriteRun(run, size) {
+  let w = 0;
+  for (const ch of run.text) {
+    const cp = ch.codePointAt(0);
+    const gid = run.font.encodeCharacter(cp);
+    const adv = gid ? run.font.advanceGlyph(gid, 0) : (run.kind === 'cjk' ? 1.0 : 0.5);
+    w += (adv > 0 ? adv : (run.kind === 'cjk' ? 1.0 : 0.5)) * size;
+  }
+  return w;
+}
+
+function measureRewriteLine(lineText, baseName, size) {
+  if (!lineText) return 0;
+  const runs = splitRewriteRuns(lineText, baseName);
+  let total = 0;
+  for (const run of runs) total += measureRewriteRun(run, size);
+  return total;
+}
+
+function wrapRewriteText(text, baseName, size, slotWidths, scaleFactor = 1) {
+  const effWidth = (idx) => {
+    const raw = slotWidths[Math.min(idx, slotWidths.length - 1)] || size * 10;
+    return Math.max(size, raw / scaleFactor);
+  };
+  const lines = [];
+  const paragraphs = text.split('\n');
+  for (const para of paragraphs) {
+    if (!para) { lines.push(''); continue; }
+    let current = '';
+    const flush = () => { lines.push(current.trimEnd()); current = ''; };
+    for (const part of para.split(/(\s+)/)) {
+      if (!part) continue;
+      const limit = effWidth(lines.length);
+      if (/^\s+$/.test(part)) {
+        if (current && measureRewriteLine(current + ' ', baseName, size) <= limit) current += ' ';
+        continue;
+      }
+      const trial = current ? current + part : part;
+      if (measureRewriteLine(trial, baseName, size) <= limit) {
+        current = trial;
+        continue;
+      }
+      if (current) flush();
+      const nextLimit = effWidth(lines.length);
+      if (measureRewriteLine(part, baseName, size) <= nextLimit) {
+        current = part;
+        continue;
+      }
+      // Break long word/CJK run by character without ever returning null
+      let buf = '';
+      for (const ch of part) {
+        const next = buf + ch;
+        if (buf && measureRewriteLine(next, baseName, size) > effWidth(lines.length)) {
+          lines.push(buf);
+          buf = ch;
+        } else {
+          buf = next;
+        }
+      }
+      current = buf;
+    }
+    if (current || !paragraphs.length) flush();
+  }
+  return lines;
+}
+
+function ensureNimbusCidFont(doc, page, baseName, cidState) {
+  let entry = cidState.get(baseName);
+  if (!entry) {
+    const font = metrics(baseName);
+    const pdfFont = doc.addFont(font);
+    entry = {font, pdfFont, mappings: new Map(), pageNames: new WeakMap()};
+    cidState.set(baseName, entry);
+  }
+  const resources = ownResources(doc, page);
+  let fontsDict = resources.get('Font');
+  if (fontsDict.isNull()) { fontsDict = doc.newDictionary(); resources.put('Font', fontsDict); }
+  else fontsDict = fontsDict.resolve();
+
+  const pageObj = page.getObject();
+  const resKey = 'FwCid' + baseName.replace(/[^A-Za-z0-9]/g, '');
+  let existing = null;
+  fontsDict.forEach((value, key) => {
+    if (existing) return;
+    if (String(key).startsWith(resKey) && value.asIndirect() === entry.pdfFont.asIndirect()) existing = String(key);
+  });
+  if (existing) return {resName: existing, entry};
+
+  let name = resKey;
+  const taken = new Set();
+  fontsDict.forEach((_value, key) => taken.add(String(key)));
+  while (taken.has(name)) name += 'x';
+  fontsDict.put(name, entry.pdfFont);
+  entry.pageNames.set(pageObj, name);
+  return {resName: name, entry};
+}
+
+function finalizeCidFonts(doc, cidState) {
+  for (const entry of cidState.values()) {
+    if (!entry.mappings.size) continue;
+    const entries = [...entry.mappings].map(([gid, ch]) => `<${gid.toString(16).padStart(4, '0')}> ${utf16hex(ch)}`);
+    let cmap = '/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n/CMapName /FwUnicode def\n/CMapType 2 def\n1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n';
+    for (let i = 0; i < entries.length; i += 100) {
+      const chunk = entries.slice(i, i + 100);
+      cmap += `${chunk.length} beginbfchar\n${chunk.join('\n')}\nendbfchar\n`;
+    }
+    cmap += 'endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n';
+    entry.pdfFont.put('ToUnicode', doc.addStream(new TextEncoder().encode(cmap), {}));
+  }
+}
+
+function emitRewriteLineOps(doc, page, slot, lineText, baseName, fontSize, hScale, cidState) {
+  if (!lineText) return '';
+  const runs = splitRewriteRuns(lineText, baseName);
+  const [r, g, b] = slot.color || [0, 0, 0];
+  const {ux, uy, ox, oy} = slot;
+  let out = `q BT ${num(r)} ${num(g)} ${num(b)} rg ${num(hScale)} Tz `;
+  out += `${num(ux)} ${num(uy)} ${num(-uy)} ${num(ux)} ${num(ox)} ${num(oy)} Tm `;
+  for (const run of runs) {
+    if (run.kind === 'winansi') {
+      const resName = ensureFont(doc, page, baseName);
+      const lit = winAnsi(run.text) || winAnsi('?');
+      out += `/${resName} ${num(fontSize)} Tf ${lit} Tj `;
+    } else if (run.kind === 'cjk') {
+      const resName = ensureCjkFont(doc, page);
+      out += `/${resName} ${num(fontSize)} Tf ${utf16hex(run.text)} Tj `;
+    } else {
+      const {resName, entry} = ensureNimbusCidFont(doc, page, baseName, cidState);
+      let hex = '';
+      for (const ch of run.text) {
+        const gid = entry.font.encodeCharacter(ch.codePointAt(0)) || entry.font.encodeCharacter(0x3f);
+        if (!entry.mappings.has(gid)) entry.mappings.set(gid, ch);
+        hex += gid.toString(16).padStart(4, '0');
+      }
+      out += `/${resName} ${num(fontSize)} Tf <${hex}> Tj `;
+    }
+  }
+  return out + 'ET Q\n';
+}
+
+function emitRewriteEdit(doc, page, slots, rawNewText, cidState) {
+  const text = sanitizeRewriteText(rawNewText);
+  if (!text || !slots.length) return '';
+
+  const baseSlot = slots[0];
+  const baseName = base14FromStyle(baseSlot.style);
+  const baseSize = baseSlot.size;
+
+  // Single-line path: compress with Tz down to 65%, then shrink fontSize down to 72%, then allow overflow
+  if (slots.length === 1 && !text.includes('\n')) {
+    const naturalW = measureRewriteLine(text, baseName, baseSize);
+    let fontSize = baseSize;
+    let hScale = 100;
+    if (naturalW > baseSlot.slotWidth && baseSlot.slotWidth > 0) {
+      const ratio = baseSlot.slotWidth / naturalW;
+      if (ratio >= 0.65) {
+        hScale = Math.round(ratio * 1000) / 10;
+      } else {
+        hScale = 65;
+        fontSize = Math.max(Math.min(baseSize, 5), Math.max(baseSize * 0.72, (baseSlot.slotWidth / (naturalW * 0.65)) * baseSize));
+      }
+    }
+    return emitRewriteLineOps(doc, page, baseSlot, text, baseName, fontSize, hScale, cidState);
+  }
+
+  // Multi-line path: wrap across slots; shrink if needed; overflow extra lines stepping by leading
+  const slotWidths = slots.map(s => s.slotWidth);
+  let fontSize = baseSize;
+  let hScale = 100;
+  let wrapped = wrapRewriteText(text, baseName, fontSize, slotWidths, 1);
+
+  if (wrapped.length > slots.length) {
+    const shrunkSize = Math.max(Math.min(baseSize, 5), baseSize * 0.78);
+    const shrunkScale = 75;
+    const trial = wrapRewriteText(text, baseName, shrunkSize, slotWidths, shrunkScale / 100);
+    if (trial.length <= slots.length || trial.length < wrapped.length) {
+      fontSize = shrunkSize;
+      hScale = shrunkScale;
+      wrapped = trial;
+    }
+  }
+
+  // Measure leading between consecutive slots along the line-advance normal (nx, ny)
+  let leading = baseSize * 1.2;
+  if (slots.length >= 2) {
+    const steps = [];
+    for (let i = 1; i < slots.length; i++) {
+      const step = (slots[i].ox - slots[i - 1].ox) * baseSlot.nx + (slots[i].oy - slots[i - 1].oy) * baseSlot.ny;
+      if (step > baseSize * 0.5) steps.push(step);
+    }
+    if (steps.length) {
+      steps.sort((a, b) => a - b);
+      leading = steps[Math.floor(steps.length / 2)];
+    }
+  }
+
+  let ops = '';
+  const lastSlot = slots[slots.length - 1];
+  for (let i = 0; i < wrapped.length; i++) {
+    const lineText = wrapped[i];
+    if (!lineText) continue;
+    let slot;
+    if (i < slots.length) {
+      slot = slots[i];
+    } else {
+      const extra = i - (slots.length - 1);
+      slot = {
+        ...lastSlot,
+        ox: lastSlot.ox + lastSlot.nx * leading * extra,
+        oy: lastSlot.oy + lastSlot.ny * leading * extra,
+      };
+    }
+    // If an unbreakable single-word line still exceeds slotWidth, apply gentle Tz compression
+    let lineScale = hScale;
+    const lineW = measureRewriteLine(lineText, baseName, fontSize) * (lineScale / 100);
+    if (lineW > slot.slotWidth && slot.slotWidth > 0) {
+      const needed = (slot.slotWidth / measureRewriteLine(lineText, baseName, fontSize)) * 100;
+      lineScale = Math.max(65, Math.min(lineScale, Math.round(needed * 10) / 10));
+    }
+    ops += emitRewriteLineOps(doc, page, slot, lineText, baseName, fontSize, lineScale, cidState);
+  }
+  return ops;
+}
+
+function toUint8Array(input) {
+  if (input instanceof Uint8Array) return input;
+  if (input instanceof ArrayBuffer) return new Uint8Array(input);
+  if (ArrayBuffer.isView(input)) return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+  if (input?.bytes instanceof Uint8Array) return input.bytes;
+  throw unavailableError(new TypeError('sourceBytes must be a Uint8Array'));
+}
+
+export async function rewrite(sourceBytes, edits) {
+  return exclusive(async () => {
+    let doc = null;
+    try {
+      const bytes = toUint8Array(sourceBytes);
+      const list = Array.isArray(edits) ? edits : [];
+      const head = String.fromCharCode(...bytes.slice(0, Math.min(1024, bytes.byteLength)));
+      if (bytes.byteLength < 5 || !head.includes('%PDF-')) {
+        throw unavailableError(new Error('not a PDF'));
+      }
+      doc = mupdf.Document.openDocument(bytes, 'application/pdf').asPDF();
+      if (!doc) throw unavailableError(new Error('not a PDF'));
+      if (doc.needsPassword()) {
+        try { doc.authenticatePassword(''); } catch { /* best effort */ }
+      }
+      const pageCount = doc.countPages();
+      const byPage = new Map();
+      for (const edit of list) {
+        if (!edit || typeof edit !== 'object') continue;
+        const pageIndex = edit.pageIndex;
+        if (!Number.isInteger(pageIndex) || pageIndex < 0 || pageIndex >= pageCount) continue;
+        if (!Array.isArray(edit.rects) || !edit.rects.length) continue;
+        let group = byPage.get(pageIndex);
+        if (!group) { group = []; byPage.set(pageIndex, group); }
+        group.push(edit);
+      }
+
+      if (!byPage.size) return bytes.slice();
+
+      const cidState = new Map();
+      for (const [pageIndex, pageEdits] of byPage) {
+        const page = doc.loadPage(pageIndex);
+        try {
+          const model = readRewritePage(page);
+          const pagePlans = [];
+          for (const edit of pageEdits) {
+            const displayRects = rectsToDisplay(edit.rects, model.bounds);
+            if (!displayRects.length) continue;
+            const selectedChars = selectGlyphsByRects(model.chars, displayRects);
+            const slots = buildRewriteSlots(selectedChars, displayRects, model);
+            pagePlans.push({edit, displayRects, selectedChars, slots});
+          }
+          if (!pagePlans.length) continue;
+          redactRewritePage(page, pagePlans, model.chars);
+          let streamOps = '';
+          for (const plan of pagePlans) {
+            streamOps += emitRewriteEdit(doc, page, plan.slots, plan.edit.newText, cidState);
+          }
+          if (streamOps) appendStream(doc, page, streamOps);
+        } finally {
+          try { page.destroy(); } catch { /* ignore */ }
+        }
+      }
+
+      finalizeCidFonts(doc, cidState);
+      const saved = doc.saveToBuffer('garbage=compact');
+      let out;
+      try {
+        out = saved.asUint8Array().slice();
+      } finally {
+        try { saved.destroy(); } catch { /* ignore */ }
+      }
+      return out;
+    } catch (error) {
+      if (error instanceof BrowserPdfError && error.code === 'engine_unavailable') throw error;
+      throw unavailableError(error);
+    } finally {
+      try { doc?.destroy(); } catch { /* ignore */ }
+    }
+  });
+}
+
+globalThis.FalsifyBrowserPdf = {prepare, rewrite, warm, ENGINE, LIMITS, COORDINATE_SPACE, COORDINATES, BrowserPdfError};

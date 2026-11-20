@@ -1,0 +1,434 @@
+import assert from 'node:assert/strict';
+import {existsSync, readFileSync} from 'node:fs';
+import {test} from 'node:test';
+import {fileURLToPath} from 'node:url';
+import vm from 'node:vm';
+import * as mupdf from '../dist/browser-pdf-vendor/mupdf.js';
+import {rewrite, warm} from '../dist/browser-pdf.mjs';
+
+const MISSION_PDF_PATH = [
+  process.env.FALSIFY_BOOTH_MISSION_PDF,
+  fileURLToPath(new URL('../../data/missions/2309.15217.pdf', import.meta.url)),
+  fileURLToPath(new URL('../../../../data/missions/2309.15217.pdf', import.meta.url)),
+].find(p => p && existsSync(p));
+
+assert.ok(MISSION_PDF_PATH, 'FALSIFY_BOOTH_MISSION_PDF must exist for rewrite tests');
+const missionBytes = new Uint8Array(readFileSync(MISSION_PDF_PATH));
+
+/**
+ * Extract structured-text characters & line boxes from a page via MuPDF,
+ * returning both raw chars and a helper converting display boxes to page fractions.
+ */
+function inspectPage(pdfBytes, pageIndex) {
+  const doc = mupdf.Document.openDocument(pdfBytes, 'application/pdf').asPDF();
+  try {
+    const page = doc.loadPage(pageIndex);
+    try {
+      const bounds = page.getBounds();
+      const bx0 = bounds[0], by0 = bounds[1];
+      const bw = bounds[2] - bx0, bh = bounds[3] - by0;
+      const st = page.toStructuredText('preserve-whitespace');
+      const lines = new Map();
+      const chars = [];
+      let lineId = -1;
+      try {
+        st.walk({
+          beginLine() { lineId += 1; },
+          onChar(c, _origin, font, size, quad) {
+            try {
+              const x0 = Math.min(quad[0], quad[2], quad[4], quad[6]);
+              const y0 = Math.min(quad[1], quad[3], quad[5], quad[7]);
+              const x1 = Math.max(quad[0], quad[2], quad[4], quad[6]);
+              const y1 = Math.max(quad[1], quad[3], quad[5], quad[7]);
+              const entry = {c, lineId, size, box: [x0, y0, x1, y1]};
+              chars.push(entry);
+              let arr = lines.get(lineId);
+              if (!arr) { arr = []; lines.set(lineId, arr); }
+              arr.push(entry);
+            } finally {
+              font.destroy();
+            }
+          },
+        });
+        const text = st.asText();
+        const toFrac = ([x0, y0, x1, y1]) => ({
+          x: (x0 - bx0) / bw,
+          y: (y0 - by0) / bh,
+          w: (x1 - x0) / bw,
+          h: (y1 - y0) / bh,
+        });
+        const lineList = [...lines.entries()].map(([id, arr]) => {
+          const drawn = arr.filter(ch => ch.c.trim());
+          const src = drawn.length ? drawn : arr;
+          const box = [
+            Math.min(...src.map(ch => ch.box[0])),
+            Math.min(...src.map(ch => ch.box[1])),
+            Math.max(...src.map(ch => ch.box[2])),
+            Math.max(...src.map(ch => ch.box[3])),
+          ];
+          return {id, text: arr.map(ch => ch.c).join(''), chars: arr, box, frac: toFrac(box)};
+        });
+        return {bounds, text, chars, lines: lineList, toFrac};
+      } finally {
+        st.destroy();
+      }
+    } finally {
+      page.destroy();
+    }
+  } finally {
+    doc.destroy();
+  }
+}
+
+/**
+ * Find every occurrence of `needle` inside MuPDF structured-text lines and return its page-fraction rect.
+ */
+function findStructuredRects(pdfBytes, pageIndex, needle) {
+  const info = inspectPage(pdfBytes, pageIndex);
+  const results = [];
+  for (const line of info.lines) {
+    let from = 0;
+    while (from <= line.text.length) {
+      const at = line.text.indexOf(needle, from);
+      if (at < 0) break;
+      from = at + needle.length;
+      const slice = line.chars.slice(at, at + needle.length).filter(ch => ch.c.trim());
+      if (!slice.length) continue;
+      const box = [
+        Math.min(...slice.map(ch => ch.box[0])),
+        Math.min(...slice.map(ch => ch.box[1])),
+        Math.max(...slice.map(ch => ch.box[2])),
+        Math.max(...slice.map(ch => ch.box[3])),
+      ];
+      results.push({rect: info.toFrac(box), box, lineText: line.text});
+    }
+  }
+  return results;
+}
+
+/**
+ * R2 oracle: open output PDF with MuPDF, verify valid %PDF-, no NUL bytes, page count,
+ * extract text and search, and read raw /Contents stream bytes per page.
+ */
+function readOracle(pdfBytes) {
+  assert.ok(pdfBytes instanceof Uint8Array, 'output must be Uint8Array');
+  assert.equal(String.fromCharCode(...pdfBytes.slice(0, 5)), '%PDF-');
+  const doc = mupdf.Document.openDocument(pdfBytes, 'application/pdf').asPDF();
+  try {
+    const pageCount = doc.countPages();
+    const pages = [];
+    for (let i = 0; i < pageCount; i++) {
+      const page = doc.loadPage(i);
+      try {
+        const st = page.toStructuredText('preserve-whitespace');
+        let text;
+        try {
+          text = st.asText();
+        } finally {
+          st.destroy();
+        }
+        assert.equal(text.includes('\0'), false, `page ${i + 1} extracted text must not contain NUL bytes`);
+        const contentsObj = page.getObject().get('Contents');
+        const streams = [];
+        const decodedStreams = [];
+        const pushStream = (obj) => {
+          const resolved = obj.resolve();
+          if (resolved.isStream()) {
+            const raw = resolved.readRawStream();
+            try { streams.push(raw.asUint8Array().slice()); } finally { raw.destroy(); }
+            const dec = resolved.readStream();
+            try { decodedStreams.push(Buffer.from(dec.asUint8Array()).toString('latin1')); } finally { dec.destroy(); }
+          }
+        };
+        if (contentsObj.isArray()) {
+          for (let j = 0; j < contentsObj.length; j++) pushStream(contentsObj.get(j));
+        } else if (!contentsObj.isNull()) {
+          pushStream(contentsObj);
+        }
+        pages.push({
+          text,
+          streams,
+          decodedText: decodedStreams.join('\n'),
+          search(needle) {
+            const d2 = mupdf.Document.openDocument(pdfBytes, 'application/pdf').asPDF();
+            try {
+              const p2 = d2.loadPage(i);
+              try { return p2.search(needle).length; } finally { p2.destroy(); }
+            } finally {
+              d2.destroy();
+            }
+          },
+        });
+      } finally {
+        page.destroy();
+      }
+    }
+    return {pageCount, pages};
+  } finally {
+    doc.destroy();
+  }
+}
+
+function streamsEqual(a, b) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].length !== b[i].length) return false;
+    for (let j = 0; j < a[i].length; j++) {
+      if (a[i][j] !== b[i][j]) return false;
+    }
+  }
+  return true;
+}
+
+const sourceOracle = readOracle(missionBytes);
+
+test('page 5: 0.95 -> 0.50 and only the second 0.52 -> 0.11 by rect geometry, untouched pages byte-identical', async () => {
+  const hits095 = findStructuredRects(missionBytes, 4, '0.95');
+  const hits052 = findStructuredRects(missionBytes, 4, '0.52');
+  assert.equal(hits095.length, 1);
+  assert.equal(hits052.length, 2);
+
+  const out = await rewrite(missionBytes, [
+    {id: 'e1', pageIndex: 4, rects: [hits095[0].rect], originalText: '0.95', newText: '0.50', source: 'tap'},
+    {id: 'e2', pageIndex: 4, rects: [hits052[1].rect], originalText: '0.52', newText: '0.11', source: 'tap'},
+  ]);
+
+  const oracle = readOracle(out);
+  assert.equal(oracle.pageCount, sourceOracle.pageCount);
+  const p5 = oracle.pages[4];
+  assert.equal(p5.search('0.95'), 0, 'original 0.95 must be removed');
+  assert.equal(p5.text.includes('0.95'), false, 'original 0.95 must not extract');
+  assert.equal(p5.decodedText.includes('0.95'), false, 'original 0.95 must be gone from page content stream');
+  assert.ok(p5.search('0.50') >= 1 && p5.text.includes('0.50'), 'replacement 0.50 must be extractable and searchable');
+  assert.ok(p5.search('0.11') >= 1 && p5.text.includes('0.11'), 'replacement 0.11 must be extractable and searchable');
+  assert.equal(p5.search('0.52'), 1, 'only the second 0.52 must be replaced; first 0.52 stays');
+
+  for (let i = 0; i < oracle.pageCount; i++) {
+    if (i === 4) continue;
+    assert.equal(streamsEqual(sourceOracle.pages[i].streams, oracle.pages[i].streams), true, `untouched page ${i + 1} content stream must stay byte-identical`);
+  }
+});
+
+test('page 5: deleting the whole Table 1 caption removes all caption text and preserves surrounding table/body', async () => {
+  const p5Info = inspectPage(missionBytes, 4);
+  const captionLines = p5Info.lines.filter(l =>
+    l.text.includes('Table 1: Agreement') ||
+    l.text.includes('comparisons of faithfulness') ||
+    l.text.includes('using the WikEval dataset')
+  );
+  assert.equal(captionLines.length, 3, 'expected 3 caption lines on page 5');
+
+  const out = await rewrite(missionBytes, [
+    {
+      id: 'del-caption',
+      pageIndex: 4,
+      rects: captionLines.map(l => l.frac),
+      originalText: captionLines.map(l => l.text).join(' '),
+      newText: '',
+      source: 'paragraph',
+    },
+  ]);
+
+  const oracle = readOracle(out);
+  const p5 = oracle.pages[4];
+  assert.equal(p5.search('Agreement with human annotators'), 0);
+  assert.equal(p5.search('Table 1:'), 0);
+  assert.equal(p5.text.includes('Agreement with human annotators'), false);
+  assert.equal(p5.text.includes('comparisons of faithfulness'), false);
+  assert.equal(p5.decodedText.includes('Agreement'), false, 'redacted caption must be gone from content stream');
+  assert.equal(p5.decodedText.includes('WikEval'), false, 'redacted WikEval must be gone from content stream');
+  // Table values and body prose stay intact
+  assert.ok(p5.search('0.95') >= 1);
+  assert.ok(p5.search('0.78') >= 1);
+  assert.ok(p5.search('5 Experiments') >= 1);
+
+  for (let i = 0; i < oracle.pageCount; i++) {
+    if (i === 4) continue;
+    assert.equal(streamsEqual(sourceOracle.pages[i].streams, oracle.pages[i].streams), true, `untouched page ${i + 1} content stream must stay byte-identical`);
+  }
+});
+
+test('page 1: dagger † -> 1 by rect keeps neighboring letters and other daggers intact', async () => {
+  const daggers = findStructuredRects(missionBytes, 0, '†');
+  assert.equal(daggers.length, 3);
+
+  const out = await rewrite(missionBytes, [
+    {id: 'dagger', pageIndex: 0, rects: [daggers[0].rect], originalText: '†', newText: '1', source: 'tap'},
+  ]);
+
+  const oracle = readOracle(out);
+  const p1 = oracle.pages[0];
+  assert.equal(p1.search('†'), 2, 'only the targeted dagger must be replaced');
+  assert.ok(p1.text.includes('Shahul Es'), 'neighboring author name stays intact');
+  assert.ok(p1.search('1') >= 1 && p1.text.includes('1'), 'replacement 1 must be extractable');
+
+  for (let i = 1; i < oracle.pageCount; i++) {
+    assert.equal(streamsEqual(sourceOracle.pages[i].streams, oracle.pages[i].streams), true, `untouched page ${i + 1} content stream must stay byte-identical`);
+  }
+});
+
+test('page 4: 95% -> 950 by rect', async () => {
+  const hits = findStructuredRects(missionBytes, 3, '95%');
+  assert.equal(hits.length, 1);
+
+  const out = await rewrite(missionBytes, [
+    {id: 'pct', pageIndex: 3, rects: [hits[0].rect], originalText: '95%', newText: '950', source: 'tap'},
+  ]);
+
+  const oracle = readOracle(out);
+  const p4 = oracle.pages[3];
+  assert.equal(p4.search('95%'), 0);
+  assert.equal(p4.text.includes('95%'), false);
+  assert.ok(p4.search('950') >= 1 && p4.text.includes('950'));
+
+  for (let i = 0; i < oracle.pageCount; i++) {
+    if (i === 3) continue;
+    assert.equal(streamsEqual(sourceOracle.pages[i].streams, oracle.pages[i].streams), true);
+  }
+});
+
+test('long replacement text (single-rect overflow + multi-rect wrap) never refuses and extracts cleanly', async () => {
+  const hits095 = findStructuredRects(missionBytes, 4, '0.95');
+  const p5Info = inspectPage(missionBytes, 4);
+  const captionLines = p5Info.lines.filter(l =>
+    l.text.includes('Table 1: Agreement') ||
+    l.text.includes('comparisons of faithfulness') ||
+    l.text.includes('using the WikEval dataset')
+  );
+  const longSingle = '0.9512345 (extended synthetic confidence interval note)';
+  const longMulti = 'Table 1: Greatly expanded multi-line replacement caption verifying that automatic word wrapping flows across all selected line rects and continues cleanly even when the new text is much longer than the original three-line caption on page five.';
+
+  const out = await rewrite(missionBytes, [
+    {id: 'long-single', pageIndex: 4, rects: [hits095[0].rect], originalText: '0.95', newText: longSingle, source: 'tap'},
+    {id: 'long-multi', pageIndex: 4, rects: captionLines.map(l => l.frac), originalText: 'Table 1', newText: longMulti, source: 'paragraph'},
+  ]);
+
+  const oracle = readOracle(out);
+  const p5 = oracle.pages[4];
+  const flat = p5.text.replace(/\s+/g, ' ');
+  assert.equal(p5.search('0.9512345') >= 1, true);
+  assert.ok(flat.includes('extended synthetic confidence interval note'));
+  assert.ok(flat.includes('Greatly expanded multi-line replacement caption'));
+  assert.ok(flat.includes('longer than the original three-line caption on page five.'));
+});
+
+test('Hangul replacement extracts exact Unicode via MuPDF', async () => {
+  const hits095 = findStructuredRects(missionBytes, 4, '0.95');
+  const hangul = '수정된 정확도 0.50';
+
+  const out = await rewrite(missionBytes, [
+    {id: 'ko', pageIndex: 4, rects: [hits095[0].rect], originalText: '0.95', newText: hangul, source: 'tap'},
+  ]);
+
+  const oracle = readOracle(out);
+  const p5 = oracle.pages[4];
+  assert.equal(p5.search('0.95'), 0);
+  assert.ok(p5.text.includes('수정된'), 'Hangul word 1 must extract');
+  assert.ok(p5.text.includes('정확도'), 'Hangul word 2 must extract');
+  assert.ok(p5.search('수정된') >= 1);
+  assert.ok(p5.search('0.50') >= 1);
+});
+
+test('math symbols ± × ≤ extract exact Unicode via MuPDF', async () => {
+  const hits095 = findStructuredRects(missionBytes, 4, '0.95');
+  const expr = '0.50 ± 0.02 × 10 ≤ 6';
+
+  const out = await rewrite(missionBytes, [
+    {id: 'sym', pageIndex: 4, rects: [hits095[0].rect], originalText: '0.95', newText: expr, source: 'tap'},
+  ]);
+
+  const oracle = readOracle(out);
+  const p5 = oracle.pages[4];
+  assert.equal(p5.search('0.95'), 0);
+  assert.ok(p5.text.includes('±') && p5.search('±') >= 1, '± must extract and be searchable');
+  assert.ok(p5.text.includes('×') && p5.search('×') >= 1, '× must extract and be searchable');
+  assert.ok(p5.text.includes('≤') && p5.search('≤') >= 1, '≤ must extract and be searchable');
+  assert.ok(p5.text.includes('0.50') && p5.text.includes('0.02'));
+});
+
+test('never refuses empty-glyph rects or overlapping edits; rejects invalid PDF only with engine_unavailable', async () => {
+  // Empty margin rect (no underlying glyphs) still inserts text
+  const outEmpty = await rewrite(missionBytes, [
+    {id: 'blank', pageIndex: 0, rects: [{x: 0.02, y: 0.02, w: 0.2, h: 0.02}], originalText: '', newText: 'MARGIN_NOTE', source: 'tap'},
+  ]);
+  const oracleEmpty = readOracle(outEmpty);
+  assert.ok(oracleEmpty.pages[0].text.includes('MARGIN_NOTE'));
+
+  // Overlapping edits on the same rect never throw
+  const hits095 = findStructuredRects(missionBytes, 4, '0.95');
+  const outOverlap = await rewrite(missionBytes, [
+    {id: 'ov1', pageIndex: 4, rects: [hits095[0].rect], originalText: '0.95', newText: '0.40', source: 'tap'},
+    {id: 'ov2', pageIndex: 4, rects: [hits095[0].rect], originalText: '0.95', newText: '0.60', source: 'tap'},
+  ]);
+  const oracleOverlap = readOracle(outOverlap);
+  assert.equal(oracleOverlap.pages[4].search('0.95'), 0);
+  assert.ok(oracleOverlap.pages[4].text.includes('0.60'));
+
+  // Invalid bytes -> rejects ONLY with code 'engine_unavailable'
+  await assert.rejects(rewrite(new Uint8Array([1, 2, 3]), []), err => {
+    assert.equal(err.code, 'engine_unavailable');
+    return true;
+  });
+
+  // warm() resolves cleanly
+  assert.equal(await warm(), true);
+});
+
+test('classic loader warm() pre-spawns worker and rewrite() resolves Uint8Array or rejects engine_unavailable', async () => {
+  const loaderSource = readFileSync(new URL('../dist/browser-pdf.js', import.meta.url), 'utf8');
+  const workers = [];
+  let failStartup = false;
+  class StubWorker {
+    constructor(url, options) {
+      this.url = String(url);
+      this.options = options;
+      this.terminated = false;
+      this.messages = [];
+      workers.push(this);
+      queueMicrotask(() => {
+        if (this.terminated) return;
+        if (failStartup) { this.onerror?.(); return; }
+        this.onmessage?.({data: {ready: true}});
+      });
+    }
+    postMessage(data, transfer) {
+      this.messages.push({data, transfer});
+      const reply = Uint8Array.from([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31]).buffer;
+      queueMicrotask(() => {
+        if (!this.terminated) this.onmessage?.({data: {id: data.id, ok: true, op: 'rewrite', bytes: reply}});
+      });
+    }
+    terminate() { this.terminated = true; }
+  }
+
+  const prev = {document: globalThis.document, Worker: globalThis.Worker};
+  globalThis.document = {currentScript: {src: 'http://127.0.0.1:19900/dist/browser-pdf.js'}};
+  globalThis.Worker = StubWorker;
+  try {
+    vm.runInThisContext(loaderSource, {filename: 'dist/browser-pdf.js'});
+    const api = globalThis.FalsifyBrowserPdf;
+    assert.equal(workers.length, 0, 'evaluating loader does not spawn worker');
+    assert.equal(await api.warm(), true);
+    assert.equal(workers.length, 1, 'warm() pre-spawns the persistent worker');
+
+    const src = Uint8Array.from([0x25, 0x50, 0x44, 0x46, 0x2d]);
+    const out = await api.rewrite(src, [{pageIndex: 0, rects: [{x: 0.1, y: 0.1, w: 0.1, h: 0.02}], originalText: 'a', newText: 'b'}]);
+    assert.equal(workers.length, 1, 'rewrite() reuses the warmed worker');
+    assert.ok(out instanceof Uint8Array);
+    assert.equal(out.byteLength, 6);
+    assert.equal(src.byteLength, 5, 'caller sourceBytes buffer is not neutered');
+    assert.equal(workers[0].messages[0].data.op, 'rewrite');
+
+    // Simulate worker offline failure -> warm() resolves false, rewrite() rejects with code 'engine_unavailable'
+    workers[0].onerror();
+    failStartup = true;
+    assert.equal(await api.warm(), false);
+    await assert.rejects(api.rewrite(src, []), err => {
+      assert.equal(err.code, 'engine_unavailable');
+      return true;
+    });
+  } finally {
+    globalThis.document = prev.document;
+    globalThis.Worker = prev.Worker;
+  }
+});
