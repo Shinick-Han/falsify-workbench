@@ -572,7 +572,7 @@ async function caseParagraphBodyEdit(browser, wide) {
       consentVersion: CONSENT_VERSION,
       expectations: [{
         pageIndex: 4,
-        mustContain: ['deterministically'],
+        mustContain: ['deterministically', 'broken deterministically'],
         mustNotContain: ['broken randomly'],
         untouched: ['0.95', 'GPT Ranking', 'Conclusions'],
       }],

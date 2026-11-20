@@ -586,3 +586,66 @@ test('page 5 (regression): 25+ unsorted multi-column rects with long newText nev
   assert.ok((await pdfOracle.search(out, 4, 'REGRESSION_END_OK')).length >= 1, 'many-rects: final overflow token must hit');
   assert.equal((await pdfOracle.search(out, 4, 'broken randomly')).length, 0, 'many-rects: original text must be removed');
 });
+
+test('page 5 (d): rect for "randomly." shifted right by +0.022 aligns to full word and produces "broken deterministically."', async () => {
+  const hits = findStructuredRects(missionBytes, 4, 'randomly.');
+  assert.equal(hits.length, 1);
+  const shifted = {...hits[0].rect, x: hits[0].rect.x + 0.022};
+
+  const out = await rewrite(missionBytes, [{
+    id: 'shift-right',
+    pageIndex: 4,
+    rects: [shifted],
+    originalText: 'randomly.',
+    newText: 'deterministically.',
+    source: 'paragraph',
+  }]);
+
+  const outText = await pdfOracle.extractText(out, 4);
+  assert.equal(outText.includes('broken deterministically.'), true, `expected "broken deterministically." in page 5 text, got snippet: ${JSON.stringify(outText.slice(Math.max(0, outText.indexOf('broken') - 20), outText.indexOf('broken') + 60))}`);
+  assert.equal(outText.includes('broken ran'), false, 'must not leave "ran" fragment before deterministically.');
+  assert.equal(outText.includes('randomly'), false, '"randomly" must not occur');
+  assert.equal((await pdfOracle.search(out, 4, 'randomly')).length, 0);
+  assert.ok((await pdfOracle.search(out, 4, 'broken deterministically.')).length >= 1);
+});
+
+test('page 5 (e): rect for "randomly." shifted left by -0.02 aligns to full word and preserves "broken"', async () => {
+  const hits = findStructuredRects(missionBytes, 4, 'randomly.');
+  assert.equal(hits.length, 1);
+  const shifted = {...hits[0].rect, x: hits[0].rect.x - 0.02};
+
+  const out = await rewrite(missionBytes, [{
+    id: 'shift-left',
+    pageIndex: 4,
+    rects: [shifted],
+    originalText: 'randomly.',
+    newText: 'deterministically.',
+    source: 'paragraph',
+  }]);
+
+  const outText = await pdfOracle.extractText(out, 4);
+  assert.equal(outText.includes('broken deterministically.'), true, `expected "broken deterministically." in page 5 text, got snippet: ${JSON.stringify(outText.slice(Math.max(0, outText.indexOf('broken') - 20), outText.indexOf('broken') + 60))}`);
+  assert.equal(outText.includes('broken ran'), false, 'must not leave "ran" fragment before deterministically.');
+  assert.equal(outText.includes('randomly'), false, '"randomly" must not occur');
+  assert.equal((await pdfOracle.search(out, 4, 'randomly')).length, 0);
+  assert.ok((await pdfOracle.search(out, 4, 'broken deterministically.')).length >= 1);
+});
+
+test('page 5 (f): originalText not occurring on candidate lines falls back to rect selection and still extracts newText', async () => {
+  const hits = findStructuredRects(missionBytes, 4, '0.95');
+  assert.equal(hits.length, 1);
+
+  const out = await rewrite(missionBytes, [{
+    id: 'miss-orig',
+    pageIndex: 4,
+    rects: [hits[0].rect],
+    originalText: 'NONEXISTENT_PDFJS_STRING',
+    newText: '0.42',
+    source: 'tap',
+  }]);
+
+  const outText = await pdfOracle.extractText(out, 4);
+  assert.equal(outText.includes('0.95'), false, 'rect selection must still redact 0.95');
+  assert.equal(outText.includes('0.42'), true, 'newText must still extract');
+  assert.ok((await pdfOracle.search(out, 4, '0.42')).length >= 1);
+});

@@ -5,6 +5,7 @@
  */
 import * as mupdf from 'mupdf';
 import {parseFont, familyKey} from './browser-fonts.mjs';
+import {scanTextShows} from './paragraph-pdf-content-operators.mjs';
 
 export const ENGINE = Object.freeze({
   name: 'mupdf.js',
@@ -1261,6 +1262,111 @@ function selectGlyphsByRects(chars, displayRects) {
   return selected;
 }
 
+const ALIGN_HYPHEN_RE = /[\u00ad\u2010-\u2015\u2212\ufe58\ufe63\uff0d]/g;
+
+function normalizeAlignText(text) {
+  return String(text == null ? '' : text)
+    .normalize('NFKC')
+    .replace(ALIGN_HYPHEN_RE, '-')
+    .replace(/\s+/g, '');
+}
+
+function rectCenterOf(displayRects) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const [rx0, ry0, rx1, ry1] of displayRects) {
+    if (rx0 < x0) x0 = rx0;
+    if (ry0 < y0) y0 = ry0;
+    if (rx1 > x1) x1 = rx1;
+    if (ry1 > y1) y1 = ry1;
+  }
+  return [(x0 + x1) / 2, (y0 + y1) / 2];
+}
+
+function candidateAlignLineIds(allChars, rectSelected, displayRects) {
+  if (rectSelected.length) return new Set(rectSelected.map(ch => ch.lineId));
+  const ids = new Set();
+  for (const ch of allChars) {
+    const [, gy0, , gy1] = quadBounds(ch.quad);
+    const cy = (gy0 + gy1) / 2;
+    for (const [, ry0, , ry1] of displayRects) {
+      const tolY = Math.min(1.5, Math.max(0.5, (ry1 - ry0) * 0.15));
+      if (cy >= ry0 - tolY && cy <= ry1 + tolY) { ids.add(ch.lineId); break; }
+    }
+  }
+  return ids;
+}
+
+function buildAlignCorpus(lineChars) {
+  let norm = '';
+  const charMap = [];
+  const indexMap = [];
+  for (let idx = 0; idx < lineChars.length; idx++) {
+    const ch = lineChars[idx];
+    if (!ch.c.trim()) continue;
+    const piece = normalizeAlignText(ch.c);
+    for (let i = 0; i < piece.length; i++) {
+      norm += piece[i];
+      charMap.push(ch);
+      indexMap.push(idx);
+    }
+  }
+  return {norm, charMap, indexMap};
+}
+
+function scoreAlignOccurrence(charMap, at, len, selectedSet, rectCenter) {
+  const occSet = new Set();
+  for (let i = at; i < at + len; i++) occSet.add(charMap[i]);
+  let overlap = 0;
+  for (const ch of occSet) if (selectedSet.has(ch)) overlap += 1;
+  const box = union([...occSet]);
+  const dist = Math.hypot((box[0] + box[2]) / 2 - rectCenter[0], (box[1] + box[3]) / 2 - rectCenter[1]);
+  return {at, occSet, overlap, dist};
+}
+
+function alignGlyphsToOriginalText(allChars, rectSelected, displayRects, originalText) {
+  const needle = normalizeAlignText(originalText);
+  if (!needle) return {chars: rectSelected, aligned: false};
+  const lineIds = candidateAlignLineIds(allChars, rectSelected, displayRects);
+  if (!lineIds.size) return {chars: rectSelected, aligned: false};
+  const lineChars = allChars.filter(ch => lineIds.has(ch.lineId));
+  const {norm, charMap, indexMap} = buildAlignCorpus(lineChars);
+  if (norm.length < needle.length) return {chars: rectSelected, aligned: false};
+
+  const selectedSet = new Set(rectSelected);
+  const rectCenter = rectCenterOf(displayRects);
+  let best = null;
+  for (let from = 0; from <= norm.length - needle.length;) {
+    const at = norm.indexOf(needle, from);
+    if (at < 0) break;
+    from = at + 1;
+    const cand = scoreAlignOccurrence(charMap, at, needle.length, selectedSet, rectCenter);
+    if (!best || cand.overlap > best.overlap || (cand.overlap === best.overlap && cand.dist < best.dist)) {
+      best = cand;
+    }
+  }
+  if (!best) return {chars: rectSelected, aligned: false};
+
+  const firstIdx = indexMap[best.at];
+  const lastIdx = indexMap[best.at + needle.length - 1];
+  const aligned = [];
+  for (let i = firstIdx; i <= lastIdx; i++) {
+    const ch = lineChars[i];
+    if (best.occSet.has(ch) || !ch.c.trim()) aligned.push(ch);
+  }
+  return {chars: aligned, aligned: aligned.length > 0};
+}
+
+function alignedDisplayRects(selectedChars) {
+  const byLine = new Map();
+  for (const ch of selectedChars) {
+    if (!ch.c.trim()) continue;
+    let arr = byLine.get(ch.lineId);
+    if (!arr) { arr = []; byLine.set(ch.lineId, arr); }
+    arr.push(ch);
+  }
+  return [...byLine.values()].map(arr => union(arr));
+}
+
 function redactRewritePage(page, pagePlans, allChars) {
   const selectedSet = new Set();
   for (const plan of pagePlans) {
@@ -1962,6 +2068,115 @@ function groupRewriteEditsByPage(edits, pageCount) {
   return byPage;
 }
 
+function isIdentityMatrix(m) {
+  const id = [1, 0, 0, 1, 0, 0];
+  return Array.isArray(m) && m.length === 6 && m.every((v, i) => Math.abs(v - id[i]) < 1e-3);
+}
+
+function restoreTextStateOps(show) {
+  const lm = show.lineMatrix.map(num).join(' ');
+  return `BT /${show.fontName} ${num(show.fontSize)} Tf ${num(show.hScale)} Tz ${num(show.charSpace)} Tc ${num(show.wordSpace)} Tw ${num(show.rise)} Ts ${show.renderMode} Tr ${num(show.leading)} TL ${lm} Tm `;
+}
+
+const SPLICE_SAFE_NEXT_OPS = new Set(['Tm', 'Td', 'TD', 'T*', 'ET']);
+const SPLICE_SKIP_OPS = new Set(['g', 'G', 'rg', 'RG', 'k', 'K', 'sc', 'SC', 'scn', 'SCN', 'cs', 'CS', 'Tf', 'Tc', 'Tw', 'Tz', 'Ts', 'Tr', 'TL']);
+
+function nextOpAllowsSplice(latin1, offset) {
+  const tail = latin1.slice(offset, offset + 256);
+  const tokens = tail.match(/\/[^\s()<>[\]{}/%]+|[+-]?(?:\d+\.?\d*|\.\d+)|[A-Za-z*'"]+|[\[\]()<>]/g) || [];
+  for (const tok of tokens) {
+    if (tok[0] === '/' || /^[+-]?(?:\d|\.)/.test(tok)) continue;
+    if (SPLICE_SKIP_OPS.has(tok)) continue;
+    return SPLICE_SAFE_NEXT_OPS.has(tok);
+  }
+  return false;
+}
+
+function findInlineSpliceTarget(shows, latin1, slot) {
+  let best = null;
+  for (const show of shows) {
+    if (!show.fontName || !isIdentityMatrix(show.ctm)) continue;
+    const sx = show.textMatrix[4];
+    const sy = show.textMatrix[5];
+    if (Math.abs(sy - slot.oy) > 1.5 || sx > slot.ox + 1) continue;
+    if (!nextOpAllowsSplice(latin1, show.end)) continue;
+    if (!best || sx >= best.sx) best = {show, sx};
+  }
+  return best ? best.show : null;
+}
+
+function pageContentStreams(page) {
+  const contents = page.getObject().get('Contents');
+  if (contents.isNull()) return [];
+  const out = [];
+  const count = contents.isArray() ? contents.length : 1;
+  for (let i = 0; i < count; i++) {
+    const ref = contents.isArray() ? contents.get(i) : contents;
+    if (ref.isStream()) out.push(ref);
+  }
+  return out;
+}
+
+function readStreamLatin1(streamObj) {
+  const buf = streamObj.readStream();
+  try {
+    const u8 = buf.asUint8Array();
+    let out = '';
+    for (let i = 0; i < u8.length; i += 8192) {
+      out += String.fromCharCode(...u8.subarray(i, i + 8192));
+    }
+    return {bytes: u8.slice(), latin1: out};
+  } finally {
+    buf.destroy();
+  }
+}
+
+function writeStreamLatin1(streamObj, latin1) {
+  const out = new Uint8Array(latin1.length);
+  for (let i = 0; i < latin1.length; i++) out[i] = latin1.charCodeAt(i) & 0xff;
+  streamObj.writeStream(out);
+}
+
+function spliceRewriteOpsInline(page, emittedPlans) {
+  const streams = pageContentStreams(page);
+  if (!streams.length) return emittedPlans.map(p => p.ops).join('');
+  const scanned = streams.map(streamObj => {
+    const {bytes, latin1} = readStreamLatin1(streamObj);
+    const parsed = scanTextShows(bytes);
+    return {streamObj, latin1, parsed, splices: []};
+  });
+
+  let fallbackOps = '';
+  for (const item of emittedPlans) {
+    const firstSlot = item.slots[0];
+    let matched = null;
+    if (firstSlot) {
+      for (const entry of scanned) {
+        if (entry.parsed.diagnostics.length) continue;
+        const show = findInlineSpliceTarget(entry.parsed.shows, entry.latin1, firstSlot);
+        if (show) { matched = {entry, show}; break; }
+      }
+    }
+    if (!matched) {
+      fallbackOps += item.ops;
+      continue;
+    }
+    const piece = ` ET\n${item.ops}${restoreTextStateOps(matched.show)}`;
+    matched.entry.splices.push({offset: matched.show.end, piece});
+  }
+
+  for (const entry of scanned) {
+    if (!entry.splices.length) continue;
+    entry.splices.sort((a, b) => b.offset - a.offset);
+    let next = entry.latin1;
+    for (const sp of entry.splices) {
+      next = next.slice(0, sp.offset) + sp.piece + next.slice(sp.offset);
+    }
+    writeStreamLatin1(entry.streamObj, next);
+  }
+  return fallbackOps;
+}
+
 function applyRewritePage(doc, pageIndex, pageEdits, cidState) {
   const page = doc.loadPage(pageIndex);
   try {
@@ -1970,17 +2185,22 @@ function applyRewritePage(doc, pageIndex, pageEdits, cidState) {
     for (const edit of pageEdits) {
       const displayRects = rectsToDisplay(edit.rects, model.bounds);
       if (!displayRects.length) continue;
-      const selectedChars = selectGlyphsByRects(model.chars, displayRects);
-      const slots = buildRewriteSlots(selectedChars, displayRects, model);
+      const rectSelected = selectGlyphsByRects(model.chars, displayRects);
+      const {chars: selectedChars, aligned} = alignGlyphsToOriginalText(model.chars, rectSelected, displayRects, edit.originalText);
+      const slotRects = aligned ? alignedDisplayRects(selectedChars) : displayRects;
+      const slots = buildRewriteSlots(selectedChars, slotRects.length ? slotRects : displayRects, model);
       pagePlans.push({edit, displayRects, selectedChars, slots});
     }
     if (!pagePlans.length) return;
     redactRewritePage(page, pagePlans, model.chars);
-    let streamOps = '';
+    const emitted = [];
     for (const plan of pagePlans) {
-      streamOps += emitRewriteEdit(doc, page, plan.slots, plan.edit.newText, cidState);
+      const ops = emitRewriteEdit(doc, page, plan.slots, plan.edit.newText, cidState);
+      if (ops) emitted.push({slots: plan.slots, ops});
     }
-    if (streamOps) appendStream(doc, page, streamOps);
+    if (!emitted.length) return;
+    const fallbackOps = spliceRewriteOpsInline(page, emitted);
+    if (fallbackOps) appendStream(doc, page, fallbackOps);
   } finally {
     try { page.destroy(); } catch { /* ignore */ }
   }

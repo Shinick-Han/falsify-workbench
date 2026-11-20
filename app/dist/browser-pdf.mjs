@@ -89,6 +89,272 @@ function familyKey(value) {
   return { timesnewromanpsmt: "timesnewroman", arialmt: "arial" }[normalized2] || normalized2;
 }
 
+// app/src/paragraph-pdf-content-operators.mjs
+var ws = (c) => c === 0 || c === 9 || c === 10 || c === 12 || c === 13 || c === 32;
+var delim = (c) => ws(c) || c === void 0 || "()<>[]{}/%".includes(String.fromCharCode(c));
+var identity = () => [1, 0, 0, 1, 0, 0];
+var mul = (a, b) => [a[0] * b[0] + a[1] * b[2], a[0] * b[1] + a[1] * b[3], a[2] * b[0] + a[3] * b[2], a[2] * b[1] + a[3] * b[3], a[4] * b[0] + a[5] * b[2] + b[4], a[4] * b[1] + a[5] * b[3] + b[5]];
+var translate = (m, x, y) => mul([1, 0, 0, 1, x, y], m);
+function lexer(data, diagnostics) {
+  let i = 0;
+  const fail = (message, start) => {
+    diagnostics.push({ message, offset: start });
+    i = data.length;
+    return null;
+  };
+  const skip = () => {
+    while (i < data.length) {
+      if (ws(data[i])) i++;
+      else if (data[i] === 37) {
+        while (i < data.length && data[i] !== 10 && data[i] !== 13) i++;
+      } else break;
+    }
+  };
+  function literalEscape(start, out) {
+    if (i >= data.length) {
+      fail("Unterminated literal string", start);
+      return false;
+    }
+    let x = data[i++];
+    if (x === 13 || x === 10) {
+      if (x === 13 && data[i] === 10) i++;
+      return true;
+    }
+    if (x >= 48 && x <= 55) {
+      let n = x - 48, count2 = 1;
+      while (count2 < 3 && data[i] >= 48 && data[i] <= 55) {
+        n = n * 8 + data[i++] - 48;
+        count2++;
+      }
+      out.push(n & 255);
+      return true;
+    }
+    out.push({ 110: 10, 114: 13, 116: 9, 98: 8, 102: 12 }[x] ?? x);
+    return true;
+  }
+  function literalString(start) {
+    let depth = 1, out = [];
+    while (i < data.length && depth) {
+      let x = data[i++];
+      if (x === 92) {
+        if (!literalEscape(start, out)) return null;
+        continue;
+      }
+      if (x === 40) depth++;
+      else if (x === 41 && --depth === 0) break;
+      if (x === 13) {
+        if (data[i] === 10) i++;
+        x = 10;
+      }
+      out.push(x);
+    }
+    if (depth) return fail("Unterminated literal string", start);
+    return { type: "string", bytes: Uint8Array.from(out), start, end: i };
+  }
+  function hexString(start) {
+    let hex = "";
+    while (i < data.length && data[i] !== 62) {
+      const x = data[i++];
+      if (ws(x)) continue;
+      const ch = String.fromCharCode(x);
+      if (!/[0-9a-f]/i.test(ch)) return fail("Invalid hex string", start);
+      hex += ch;
+    }
+    if (i >= data.length) return fail("Unterminated hex string", start);
+    i++;
+    if (hex.length % 2) hex += "0";
+    return { type: "string", bytes: Uint8Array.from(hex.match(/../g) ?? [], (x) => parseInt(x, 16)), start, end: i };
+  }
+  function composite(start, c) {
+    const dictionary = c === 60;
+    if (dictionary) i++;
+    const items = [];
+    while (true) {
+      skip();
+      if (i >= data.length) return fail("Unterminated composite object", start);
+      if (!dictionary && data[i] === 93 || dictionary && data[i] === 62 && data[i + 1] === 62) {
+        i += dictionary ? 2 : 1;
+        break;
+      }
+      const t = next();
+      if (!t) return null;
+      items.push(t);
+    }
+    return { type: dictionary ? "dict" : "array", items, start, end: i };
+  }
+  function nameToken(start) {
+    let name = "";
+    while (!delim(data[i])) {
+      if (data[i] === 35 && /^[0-9a-f]{2}$/i.test(String.fromCharCode(data[i + 1] ?? 0, data[i + 2] ?? 0))) {
+        name += String.fromCharCode(parseInt(String.fromCharCode(data[i + 1], data[i + 2]), 16));
+        i += 3;
+      } else name += String.fromCharCode(data[i++]);
+    }
+    return { type: "name", value: name, start, end: i };
+  }
+  function next() {
+    skip();
+    if (i >= data.length) return null;
+    const start = i, c = data[i++];
+    if (c === 40) return literalString(start);
+    if (c === 60 && data[i] !== 60) return hexString(start);
+    if (c === 91 || c === 60 && data[i] === 60) return composite(start, c);
+    if (c === 47) return nameToken(start);
+    if (delim(c)) return fail("Unexpected delimiter", start);
+    while (!delim(data[i])) i++;
+    let value = "";
+    for (let k = start; k < i; k++) value += String.fromCharCode(data[k]);
+    if (/^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(value)) return { type: "number", value: Number(value), start, end: i };
+    if (["true", "false", "null"].includes(value)) return { type: "value", value, start, end: i };
+    return { type: "operator", value, start, end: i };
+  }
+  return next;
+}
+function scanTextShows(input, { measure: measure2 } = {}) {
+  const diagnostics = [], shows = [];
+  let data;
+  if (input instanceof Uint8Array) data = input;
+  else if (typeof input === "string") {
+    data = new Uint8Array(input.length);
+    for (let i = 0; i < input.length; i++) {
+      if (input.charCodeAt(i) > 255) {
+        diagnostics.push({ message: "Input is not Latin-1", offset: i });
+        return { shows, diagnostics };
+      }
+      data[i] = input.charCodeAt(i);
+    }
+  } else return { shows, diagnostics: [{ message: "Input must be Uint8Array or Latin-1 string", offset: 0 }] };
+  const next = lexer(data, diagnostics);
+  let s = { fontName: null, fontSize: 0, textMatrix: identity(), lineMatrix: identity(), ctm: identity(), charSpace: 0, wordSpace: 0, hScale: 100, rise: 0, renderMode: 0, leading: 0 };
+  let uncertain = false, lineUncertain = false, stateUncertain = false, inText = false, stack = [], args = [];
+  const nums = (n) => args.length === n && args.every((t) => t.type === "number" && Number.isFinite(t.value));
+  const bad = (t) => {
+    diagnostics.push({ message: `Invalid operands for ${t.value}`, offset: t.start });
+    uncertain = lineUncertain = stateUncertain = true;
+  };
+  const snapshot = () => ({ ...s, textMatrix: [...s.textMatrix], lineMatrix: [...s.lineMatrix], ctm: [...s.ctm] });
+  const move = (x, y) => {
+    s.lineMatrix = translate(s.lineMatrix, x, y);
+    s.textMatrix = [...s.lineMatrix];
+    uncertain = lineUncertain;
+  };
+  const harmless = /* @__PURE__ */ new Set(["w", "J", "j", "M", "d", "ri", "i", "m", "l", "c", "v", "y", "h", "re", "S", "s", "f", "F", "f*", "B", "B*", "b", "b*", "n", "W", "W*", "CS", "cs", "SC", "SCN", "sc", "scn", "G", "g", "RG", "rg", "K", "k", "sh", "Do", "MP", "DP", "BMC", "BDC", "EMC", "BX", "EX", "d0", "d1"]);
+  function handleStateOperator(op, t, v) {
+    if (op === "BT") {
+      if (args.length) bad(t);
+      s.textMatrix = identity();
+      s.lineMatrix = identity();
+      uncertain = lineUncertain = false;
+      inText = true;
+    } else if (op === "ET") {
+      if (args.length) bad(t);
+      inText = false;
+    } else if (op === "q") {
+      stack.push({ s: snapshot(), stateUncertain });
+    } else if (op === "Q") {
+      if (!stack.length) bad(t);
+      else {
+        const saved = stack.pop();
+        const tm = s.textMatrix, lm = s.lineMatrix, u = uncertain, lu = lineUncertain;
+        s = saved.s;
+        stateUncertain = saved.stateUncertain;
+        s.textMatrix = tm;
+        s.lineMatrix = lm;
+        uncertain = u;
+        lineUncertain = lu;
+      }
+    } else if (op === "cm") {
+      if (nums(6)) s.ctm = mul(v, s.ctm);
+      else bad(t);
+    } else return handleTextState(op, t, v);
+    return true;
+  }
+  function handleTextState(op, t, v) {
+    if (op === "Tm") {
+      if (nums(6)) {
+        s.textMatrix = [...v];
+        s.lineMatrix = [...v];
+        uncertain = lineUncertain = false;
+      } else bad(t);
+    } else if (op === "Td" || op === "TD") {
+      if (nums(2)) {
+        if (op === "TD") s.leading = -v[1];
+        move(...v);
+      } else bad(t);
+    } else if (op === "T*") {
+      if (!args.length) move(0, -s.leading);
+      else bad(t);
+    } else if (op === "Tf") {
+      if (args.length === 2 && args[0].type === "name" && args[1].type === "number") {
+        s.fontName = v[0];
+        s.fontSize = v[1];
+      } else bad(t);
+    } else if (["TL", "Tc", "Tw", "Tz", "Ts", "Tr"].includes(op)) {
+      if (nums(1)) s[{ TL: "leading", Tc: "charSpace", Tw: "wordSpace", Tz: "hScale", Ts: "rise", Tr: "renderMode" }[op]] = v[0];
+      else bad(t);
+    } else return false;
+    return true;
+  }
+  function validTextShow(op, args2) {
+    return op === "TJ" ? args2.length === 1 && args2[0].type === "array" && args2[0].items.every((x) => x.type === "string" || x.type === "number") : op === '"' ? args2.length === 3 && args2[0].type === "number" && args2[1].type === "number" && args2[2].type === "string" : args2.length === 1 && args2[0].type === "string";
+  }
+  function advanceText(parts) {
+    let advance = 0, known = true;
+    for (const p of parts) {
+      if (p.type === "adjustment") advance -= p.value / 1e3 * s.fontSize;
+      else {
+        let n;
+        try {
+          n = measure2?.(s.fontName, p.bytes, snapshot());
+        } catch {
+          n = NaN;
+        }
+        if (!Number.isFinite(n)) known = false;
+        else advance += n;
+      }
+    }
+    if (known) s.textMatrix = translate(s.textMatrix, advance * s.hScale / 100, 0);
+    else uncertain = true;
+  }
+  function handleTextShow(op, t, v) {
+    const valid = validTextShow(op, args);
+    if (!valid || !inText) {
+      bad(t);
+      return;
+    }
+    if (op === '"') {
+      s.wordSpace = v[0];
+      s.charSpace = v[1];
+    }
+    if (op === "'" || op === '"') move(0, -s.leading);
+    const src = op === "TJ" ? args[0].items : [args[args.length - 1]];
+    const parts = src.map((x) => x.type === "string" ? { type: "string", bytes: x.bytes, start: x.start, end: x.end } : { type: "adjustment", value: x.value, start: x.start, end: x.end });
+    shows.push({ start: args[0].start, end: t.end, operatorStart: t.start, operatorEnd: t.end, kind: op, parts, ...snapshot(), uncertain: uncertain || stateUncertain });
+    advanceText(parts);
+  }
+  for (let t; t = next(); ) {
+    if (t.type !== "operator") {
+      args.push(t);
+      continue;
+    }
+    const op = t.value, v = args.map((a) => a.value);
+    if (op === "BI") {
+      diagnostics.push({ message: "Inline image boundary cannot be proven; scanning stopped", offset: t.start });
+      break;
+    }
+    if (handleStateOperator(op, t, v)) {
+    } else if (["Tj", "TJ", "'", '"'].includes(op)) {
+      handleTextShow(op, t, v);
+    } else if (!harmless.has(op)) {
+      diagnostics.push({ message: `Unknown operator ${op}`, offset: t.start });
+      uncertain = lineUncertain = stateUncertain = true;
+    }
+    args = [];
+  }
+  if (args.length) diagnostics.push({ message: "Trailing operands without operator", offset: args[0].start });
+  return { shows, diagnostics };
+}
+
 // app/src/browser-pdf.mjs
 var ENGINE = Object.freeze({
   name: "mupdf.js",
@@ -1347,6 +1613,104 @@ function selectGlyphsByRects(chars, displayRects) {
   }
   return selected;
 }
+var ALIGN_HYPHEN_RE = /[\u00ad\u2010-\u2015\u2212\ufe58\ufe63\uff0d]/g;
+function normalizeAlignText(text) {
+  return String(text == null ? "" : text).normalize("NFKC").replace(ALIGN_HYPHEN_RE, "-").replace(/\s+/g, "");
+}
+function rectCenterOf(displayRects) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const [rx0, ry0, rx1, ry1] of displayRects) {
+    if (rx0 < x0) x0 = rx0;
+    if (ry0 < y0) y0 = ry0;
+    if (rx1 > x1) x1 = rx1;
+    if (ry1 > y1) y1 = ry1;
+  }
+  return [(x0 + x1) / 2, (y0 + y1) / 2];
+}
+function candidateAlignLineIds(allChars, rectSelected, displayRects) {
+  if (rectSelected.length) return new Set(rectSelected.map((ch) => ch.lineId));
+  const ids = /* @__PURE__ */ new Set();
+  for (const ch of allChars) {
+    const [, gy0, , gy1] = quadBounds(ch.quad);
+    const cy = (gy0 + gy1) / 2;
+    for (const [, ry0, , ry1] of displayRects) {
+      const tolY = Math.min(1.5, Math.max(0.5, (ry1 - ry0) * 0.15));
+      if (cy >= ry0 - tolY && cy <= ry1 + tolY) {
+        ids.add(ch.lineId);
+        break;
+      }
+    }
+  }
+  return ids;
+}
+function buildAlignCorpus(lineChars) {
+  let norm = "";
+  const charMap = [];
+  const indexMap = [];
+  for (let idx = 0; idx < lineChars.length; idx++) {
+    const ch = lineChars[idx];
+    if (!ch.c.trim()) continue;
+    const piece = normalizeAlignText(ch.c);
+    for (let i = 0; i < piece.length; i++) {
+      norm += piece[i];
+      charMap.push(ch);
+      indexMap.push(idx);
+    }
+  }
+  return { norm, charMap, indexMap };
+}
+function scoreAlignOccurrence(charMap, at, len, selectedSet, rectCenter) {
+  const occSet = /* @__PURE__ */ new Set();
+  for (let i = at; i < at + len; i++) occSet.add(charMap[i]);
+  let overlap = 0;
+  for (const ch of occSet) if (selectedSet.has(ch)) overlap += 1;
+  const box = union([...occSet]);
+  const dist = Math.hypot((box[0] + box[2]) / 2 - rectCenter[0], (box[1] + box[3]) / 2 - rectCenter[1]);
+  return { at, occSet, overlap, dist };
+}
+function alignGlyphsToOriginalText(allChars, rectSelected, displayRects, originalText) {
+  const needle = normalizeAlignText(originalText);
+  if (!needle) return { chars: rectSelected, aligned: false };
+  const lineIds = candidateAlignLineIds(allChars, rectSelected, displayRects);
+  if (!lineIds.size) return { chars: rectSelected, aligned: false };
+  const lineChars = allChars.filter((ch) => lineIds.has(ch.lineId));
+  const { norm, charMap, indexMap } = buildAlignCorpus(lineChars);
+  if (norm.length < needle.length) return { chars: rectSelected, aligned: false };
+  const selectedSet = new Set(rectSelected);
+  const rectCenter = rectCenterOf(displayRects);
+  let best = null;
+  for (let from = 0; from <= norm.length - needle.length; ) {
+    const at = norm.indexOf(needle, from);
+    if (at < 0) break;
+    from = at + 1;
+    const cand = scoreAlignOccurrence(charMap, at, needle.length, selectedSet, rectCenter);
+    if (!best || cand.overlap > best.overlap || cand.overlap === best.overlap && cand.dist < best.dist) {
+      best = cand;
+    }
+  }
+  if (!best) return { chars: rectSelected, aligned: false };
+  const firstIdx = indexMap[best.at];
+  const lastIdx = indexMap[best.at + needle.length - 1];
+  const aligned = [];
+  for (let i = firstIdx; i <= lastIdx; i++) {
+    const ch = lineChars[i];
+    if (best.occSet.has(ch) || !ch.c.trim()) aligned.push(ch);
+  }
+  return { chars: aligned, aligned: aligned.length > 0 };
+}
+function alignedDisplayRects(selectedChars) {
+  const byLine = /* @__PURE__ */ new Map();
+  for (const ch of selectedChars) {
+    if (!ch.c.trim()) continue;
+    let arr = byLine.get(ch.lineId);
+    if (!arr) {
+      arr = [];
+      byLine.set(ch.lineId, arr);
+    }
+    arr.push(ch);
+  }
+  return [...byLine.values()].map((arr) => union(arr));
+}
 function redactRewritePage(page, pagePlans, allChars) {
   const selectedSet = /* @__PURE__ */ new Set();
   for (const plan of pagePlans) {
@@ -2032,6 +2396,108 @@ function groupRewriteEditsByPage(edits, pageCount) {
   }
   return byPage;
 }
+function isIdentityMatrix(m) {
+  const id = [1, 0, 0, 1, 0, 0];
+  return Array.isArray(m) && m.length === 6 && m.every((v, i) => Math.abs(v - id[i]) < 1e-3);
+}
+function restoreTextStateOps(show) {
+  const lm = show.lineMatrix.map(num).join(" ");
+  return `BT /${show.fontName} ${num(show.fontSize)} Tf ${num(show.hScale)} Tz ${num(show.charSpace)} Tc ${num(show.wordSpace)} Tw ${num(show.rise)} Ts ${show.renderMode} Tr ${num(show.leading)} TL ${lm} Tm `;
+}
+var SPLICE_SAFE_NEXT_OPS = /* @__PURE__ */ new Set(["Tm", "Td", "TD", "T*", "ET"]);
+var SPLICE_SKIP_OPS = /* @__PURE__ */ new Set(["g", "G", "rg", "RG", "k", "K", "sc", "SC", "scn", "SCN", "cs", "CS", "Tf", "Tc", "Tw", "Tz", "Ts", "Tr", "TL"]);
+function nextOpAllowsSplice(latin1, offset) {
+  const tail = latin1.slice(offset, offset + 256);
+  const tokens = tail.match(/\/[^\s()<>[\]{}/%]+|[+-]?(?:\d+\.?\d*|\.\d+)|[A-Za-z*'"]+|[\[\]()<>]/g) || [];
+  for (const tok of tokens) {
+    if (tok[0] === "/" || /^[+-]?(?:\d|\.)/.test(tok)) continue;
+    if (SPLICE_SKIP_OPS.has(tok)) continue;
+    return SPLICE_SAFE_NEXT_OPS.has(tok);
+  }
+  return false;
+}
+function findInlineSpliceTarget(shows, latin1, slot) {
+  let best = null;
+  for (const show of shows) {
+    if (!show.fontName || !isIdentityMatrix(show.ctm)) continue;
+    const sx = show.textMatrix[4];
+    const sy = show.textMatrix[5];
+    if (Math.abs(sy - slot.oy) > 1.5 || sx > slot.ox + 1) continue;
+    if (!nextOpAllowsSplice(latin1, show.end)) continue;
+    if (!best || sx >= best.sx) best = { show, sx };
+  }
+  return best ? best.show : null;
+}
+function pageContentStreams(page) {
+  const contents = page.getObject().get("Contents");
+  if (contents.isNull()) return [];
+  const out = [];
+  const count2 = contents.isArray() ? contents.length : 1;
+  for (let i = 0; i < count2; i++) {
+    const ref = contents.isArray() ? contents.get(i) : contents;
+    if (ref.isStream()) out.push(ref);
+  }
+  return out;
+}
+function readStreamLatin1(streamObj) {
+  const buf = streamObj.readStream();
+  try {
+    const u8 = buf.asUint8Array();
+    let out = "";
+    for (let i = 0; i < u8.length; i += 8192) {
+      out += String.fromCharCode(...u8.subarray(i, i + 8192));
+    }
+    return { bytes: u8.slice(), latin1: out };
+  } finally {
+    buf.destroy();
+  }
+}
+function writeStreamLatin1(streamObj, latin1) {
+  const out = new Uint8Array(latin1.length);
+  for (let i = 0; i < latin1.length; i++) out[i] = latin1.charCodeAt(i) & 255;
+  streamObj.writeStream(out);
+}
+function spliceRewriteOpsInline(page, emittedPlans) {
+  const streams = pageContentStreams(page);
+  if (!streams.length) return emittedPlans.map((p) => p.ops).join("");
+  const scanned = streams.map((streamObj) => {
+    const { bytes, latin1 } = readStreamLatin1(streamObj);
+    const parsed = scanTextShows(bytes);
+    return { streamObj, latin1, parsed, splices: [] };
+  });
+  let fallbackOps = "";
+  for (const item of emittedPlans) {
+    const firstSlot = item.slots[0];
+    let matched = null;
+    if (firstSlot) {
+      for (const entry of scanned) {
+        if (entry.parsed.diagnostics.length) continue;
+        const show = findInlineSpliceTarget(entry.parsed.shows, entry.latin1, firstSlot);
+        if (show) {
+          matched = { entry, show };
+          break;
+        }
+      }
+    }
+    if (!matched) {
+      fallbackOps += item.ops;
+      continue;
+    }
+    const piece = ` ET
+${item.ops}${restoreTextStateOps(matched.show)}`;
+    matched.entry.splices.push({ offset: matched.show.end, piece });
+  }
+  for (const entry of scanned) {
+    if (!entry.splices.length) continue;
+    entry.splices.sort((a, b) => b.offset - a.offset);
+    let next = entry.latin1;
+    for (const sp of entry.splices) {
+      next = next.slice(0, sp.offset) + sp.piece + next.slice(sp.offset);
+    }
+    writeStreamLatin1(entry.streamObj, next);
+  }
+  return fallbackOps;
+}
 function applyRewritePage(doc, pageIndex, pageEdits, cidState) {
   const page = doc.loadPage(pageIndex);
   try {
@@ -2040,17 +2506,22 @@ function applyRewritePage(doc, pageIndex, pageEdits, cidState) {
     for (const edit of pageEdits) {
       const displayRects = rectsToDisplay(edit.rects, model.bounds);
       if (!displayRects.length) continue;
-      const selectedChars = selectGlyphsByRects(model.chars, displayRects);
-      const slots = buildRewriteSlots(selectedChars, displayRects, model);
+      const rectSelected = selectGlyphsByRects(model.chars, displayRects);
+      const { chars: selectedChars, aligned } = alignGlyphsToOriginalText(model.chars, rectSelected, displayRects, edit.originalText);
+      const slotRects = aligned ? alignedDisplayRects(selectedChars) : displayRects;
+      const slots = buildRewriteSlots(selectedChars, slotRects.length ? slotRects : displayRects, model);
       pagePlans.push({ edit, displayRects, selectedChars, slots });
     }
     if (!pagePlans.length) return;
     redactRewritePage(page, pagePlans, model.chars);
-    let streamOps = "";
+    const emitted = [];
     for (const plan of pagePlans) {
-      streamOps += emitRewriteEdit(doc, page, plan.slots, plan.edit.newText, cidState);
+      const ops = emitRewriteEdit(doc, page, plan.slots, plan.edit.newText, cidState);
+      if (ops) emitted.push({ slots: plan.slots, ops });
     }
-    if (streamOps) appendStream(doc, page, streamOps);
+    if (!emitted.length) return;
+    const fallbackOps = spliceRewriteOpsInline(page, emitted);
+    if (fallbackOps) appendStream(doc, page, fallbackOps);
   } finally {
     try {
       page.destroy();
