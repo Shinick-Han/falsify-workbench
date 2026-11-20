@@ -35,6 +35,15 @@ export const EVENT_TITLE_SUFFIX = ' · Event';
 /* Contract order: event-theme.css, booth.css, booth-recipe.css, booth-myai.css, then the scripts. */
 export const BOOTH_STYLES = Object.freeze(['event-theme.css', 'booth.css', 'booth-recipe.css', 'booth-myai.css']);
 export const BOOTH_SCRIPTS = Object.freeze(['booth.js', 'booth-recipe.js', 'booth-myai.js']);
+/* Workbench assets the booth flow (pick, edit, 다음, send, ticket) never calls. Dropping them from
+   event.html keeps index.html whole. latex-workbench.mjs statically imports MuPDF, whose top-level
+   await downloads and compiles the 10 MB mupdf-wasm.wasm on every page load. Every global these
+   files define is read behind a null check by the scripts that stay. */
+export const EVENT_OMIT = Object.freeze([
+  'latex-workbench.css', 'latex-workbench.mjs',
+  'paper-chart-redraw.js', 'chart-shape-core.js', 'chart-shape-editor.css', 'chart-shape-editor.js',
+  'chart-mark-editor.css', 'chart-mark-editor.js',
+]);
 
 function fail(message, exitCode) {
   const error = new Error(message);
@@ -147,7 +156,23 @@ export function eventHtmlFromIndex(indexHtml, origin) {
   html = replaceOnce(html, csp[0], cspTag);
   html = withEventTitle(html, title, newline);
   html = withAgentLink(html);
-  return injectBooth(html, newline);
+  return injectBooth(omitWorkbench(html, newline), newline);
+}
+
+function omitLine(name) {
+  const escaped = name.replace(/[.]/g, '\\.');
+  return new RegExp(` {2}<(?:script|link)[^>\\n]* (?:src|href)="${escaped}\\?[^"]*"[^>\\n]*>(?:</script>)?\\r?\\n`, 'g');
+}
+
+/* Removes each EVENT_OMIT tag that index.html has (at most one each). */
+export function omitWorkbench(html, newline = '\n') {
+  let text = html;
+  for (const name of EVENT_OMIT) {
+    const found = text.match(omitLine(name)) || [];
+    if (found.length > 1) throw fail(`index.html must contain at most one ${name}`, 2);
+    if (found.length === 1) text = replaceOnce(text, found[0], '');
+  }
+  return text;
 }
 
 function injectBooth(html, newline){
