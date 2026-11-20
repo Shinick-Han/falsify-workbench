@@ -345,13 +345,12 @@ test('locate: look-alike quotes, dashes, minus, NBSP, zero-width marks, case and
   assert.equal(exact.start, 0, 'an exact-case hit wins before the case-folded tier is tried');
 });
 
-test('locate: a context that matches several places alike takes the first; a picked match maps by position', () => {
+test('locate: a context that matches several places alike asks; a picked match keeps its own place', () => {
   const {recipe} = load();
   const text = 'Faithfulness is 0.95 here. Faithfulness is 0.95 here. Recall is 0.95.';
   const segs = [{id: 'paragraph:0:r', label: 'PDF p. 1', pageIndex: 0, text}];
   const tie = plain(recipe.locate({find: '0.95', replace: '0.50', context: 'Faithfulness is 0.95 here.'}, segs));
-  assert.equal(tie.status, 'resolved', 'the AI context matches two places alike');
-  assert.equal(tie.start, text.indexOf('0.95'));
+  assert.equal(tie.status, 'ambiguous', 'the AI context matches two places alike, so the visitor picks');
   const recall = plain(recipe.locate({find: '0.95', replace: '0.50', context: 'Recall is 0.95.'}, segs));
   assert.equal(recall.start, text.lastIndexOf('0.95'));
   assert.equal(recipe.locate({find: '0.95', replace: '0.50'}, segs).status, 'ambiguous', 'no context at all still asks');
@@ -365,6 +364,55 @@ test('locate: a context that matches several places alike takes the first; a pic
     assert.equal(found.segmentId, 'paragraph:0:r', 'the picked match lands in the paragraph segment');
     assert.equal(found.start, [...text.matchAll(/0\.95/g)][i].index, 'match ' + i + ' keeps its own place');
   }
+});
+
+test('locate: a context that ties only on a space or a few characters asks instead of taking the first', () => {
+  const {recipe} = load();
+  const text = 'Ragas 0.52 0.70. GPT Score 0.52 0.61.';
+  const segs = [{id: 'paragraph:0:t', label: 'PDF p. 1', pageIndex: 0, text}];
+  assert.equal(recipe.locate({find: '0.52', replace: '0.9', context: 'Faithfulness 0.52'}, segs).status, 'ambiguous');
+  assert.equal(recipe.locate({find: '0.52', replace: '0.9', context: 'GPT Ranking 0.52 0.66'}, segs).status, 'ambiguous');
+  const strong = plain(recipe.locate({find: '0.52', replace: '0.9', context: 'GPT Score 0.52 0.61.'}, segs));
+  assert.equal(strong.start, text.lastIndexOf('0.52'), 'a context that matches its own place picks it');
+});
+
+test('locate: a picked match maps to its paragraph by the text on both sides, never by list order', () => {
+  const {recipe} = load();
+  const segs = [
+    {id: 'layout:p1:column1', label: 'PDF p. 1', pageIndex: 0, text: 'Ragas reaches 0.52 on WikiEval.'},
+    {id: 'layout:p1:column2', label: 'PDF p. 1', pageIndex: 0, text: 'GPT Score reaches 0.52 on SummEval.'},
+    {id: 'paragraph:0:b', label: 'PDF p. 1', pageIndex: 0, text: 'GPT Score reaches 0.52 on SummEval.'},
+    {id: 'paragraph:0:a', label: 'PDF p. 1', pageIndex: 0, text: 'Ragas reaches 0.52 on WikiEval.'},
+    {id: 'layout:p2:column1', label: 'PDF p. 2', pageIndex: 1, text: 'Table 2, 3 and 4. 0.52 0.52'},
+    {id: 'paragraph:1:x', label: 'PDF p. 2', pageIndex: 1, text: '0.52'},
+    {id: 'paragraph:1:y', label: 'PDF p. 2', pageIndex: 1, text: '0.52'},
+  ];
+  const list = plain(recipe.searchHits(segs, '0.52', 0, 20));
+  const want = ['paragraph:0:a', 'paragraph:0:b'];
+  for (const [i, item] of list.items.filter(it => it.pageIndex === 0).entries()) {
+    const found = plain(recipe.locate({find: '0.52', replace: '0.9', page: 1, context: item.context, hint: item.hint}, segs));
+    assert.equal(found.segmentId, want[i], 'pick ' + i + ' lands in the paragraph with the same text around it');
+  }
+  for (const item of list.items.filter(it => it.pageIndex === 1)) {
+    const found = plain(recipe.locate({find: '0.52', replace: '0.9', page: 2, context: item.context, hint: item.hint}, segs));
+    assert.equal(found.segmentId, item.hint.segmentId, 'two paragraphs that cannot be told apart leave the picked place itself');
+    assert.equal(found.start, segs[4].text.indexOf('0.52', item.hint.at));
+  }
+});
+
+test('commit: a new change between two earlier changes of one edit keeps all three', async () => {
+  const text = 'We find that Ragas agrees well with humans in most cases.';
+  const segments = [{id: 'paragraph:0:a', label: 'PDF p. 1', pageIndex: 0, text}];
+  const ws = stubWorkspace(segments);
+  const {recipe} = load({FalsifyPaperWorkspace: ws});
+  const start = text.indexOf('Ragas');
+  ws.edits.push({id: 'e0', enabled: true, segmentId: 'paragraph:0:a', pageIndex: 0, before: 'Ragas agrees well with', after: 'Ragos agrees well wiTh', anchor: {start, end: start + 22}, origin: 'external-ai-import'});
+  const found = recipe.locate({find: 'well', replace: 'x'}, segments);
+  const result = plain(recipe.applyFound(found, 'badly'));
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.merged, ['e0']);
+  assert.deepEqual(plain(ws.edits.map(edit => [edit.before, edit.after])), [['Ragas agrees well with', 'Ragos agrees badly wiTh']]);
+  assert.deepEqual(plain(recipe.changesOf('GPT 0.72 0.60', 'GPT 0.27 0.65')), [{start: 6, end: 8, text: '27'}, {start: 12, end: 13, text: '5'}], 'changes in two words stay two changes');
 });
 
 test('commit: a change touching an existing edit merges with it; a refused merge puts the old edit back', async () => {

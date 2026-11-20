@@ -42,6 +42,14 @@
   const HIT_LIMIT=20;
   const SNIP=28;
   const WINDOW=40;
+  /* Mapping a listed place to its paragraph: how far each side is read, how many characters one
+     side needs to agree (unless the text ends first) and how many both sides need together. */
+  const SPOT_REACH=60;
+  /* A context picks one of several places only when it matches this many characters right beside
+     it (or all of the context it has there). */
+  const SIDE_MIN=8;
+  const SPOT_SIDE=16;
+  const SPOT_MIN=8;
   const ERROR_TEXT={
     invalid_code:'코드 형식을 확인해 주세요. 예: R-7K3QXM',
     not_found:'이 코드로 찾은 레시피가 없어요. 코드를 다시 확인해 볼까요? 레시피는 6시간 동안 쓸 수 있어요.',
@@ -270,41 +278,73 @@
      the occurrence nearest the middle of the context wins the tie. */
   function contextScore(context, hit){
     const ctx=normalizeText(context||'',false,hit.mode).text;
-    if(!ctx) return 0;
+    const out={score:0,matched:0,words:0,room:Math.max(0,ctx.length-hit.needle.length)};
+    if(!ctx) return out;
     const middle=(ctx.length-hit.needle.length)/2;
-    let best=0;
     let k=ctx.indexOf(hit.needle);
     while(k>=0){
       const matched=sideMatch(ctx,k,hit);
-      if(matched>0) best=Math.max(best,matched*1000-Math.abs(k-middle));
+      const score=matched*1000-Math.abs(k-middle);
+      if(matched>0&&score>out.score) Object.assign(out,{score,matched});
       k=ctx.indexOf(hit.needle,k+1);
     }
-    return best>0?best:wordScore(ctx,hit);
+    out.words=wordScore(ctx,hit);
+    return out;
   }
-  /* An exact hint (from a tapped match) wins; one hit wins outright; several need a best context
-     score above zero. When the context's own characters run up to several hits alike (the same
-     sentence printed twice), the text there is the same, so the first of them in reading order is
-     taken. Only a context that matches no characters next to any hit leaves it ambiguous. */
+  /* An exact hint (from a tapped match) wins; one hit wins outright; several need one best score:
+     the characters the context matches right beside the hit, then (still tied) the context's words
+     found near it. A tie after both is ambiguous, so the visitor picks the place; the first in
+     reading order is never taken silently. */
   function pickHit(hits, context, hint){
     if(!hits.length) return {status:'none'};
     const hinted=hint?hits.find(hit=>hit.seg.id===hint.segmentId&&hit.at===hint.at):null;
     if(hinted) return {status:'hit',hit:hinted,hinted:true};
     if(hits.length===1) return {status:'hit',hit:hits[0]};
-    const scored=hits.map(hit=>({hit,score:contextScore(context,hit)})).sort((a,b)=>b.score-a.score);
-    const top=scored[0].score;
-    if(top>0&&top>scored[1].score) return {status:'hit',hit:scored[0].hit};
-    if(top>=1000) return {status:'hit',hit:scored[0].hit};
+    const scored=hits.map(hit=>Object.assign({hit},contextScore(context,hit)));
+    const best=(list,key)=>list.slice().sort((a,b)=>b[key]-a[key]);
+    const bySide=best(scored,'score');
+    const top=bySide[0];
+    if(top.matched>=Math.min(SIDE_MIN,top.room)&&top.matched>0&&top.score>bySide[1].score) return {status:'hit',hit:top.hit};
+    const byWords=best(scored,'words');
+    if(byWords[0].words>=2&&byWords[0].words>byWords[1].words) return {status:'hit',hit:byWords[0].hit};
     return {status:'ambiguous',count:hits.length};
   }
-  /* A picked coverage hit maps to the paragraph hit at the same place in reading order on its page,
-     when both lists count the same hits there and the text right beside it agrees. */
-  function sameSpot(covHits, paraHits, hit){
-    const onPage=list=>list.filter(item=>item.seg.pageIndex===hit.seg.pageIndex);
-    const cov=onPage(covHits);
-    const para=onPage(paraHits);
-    const index=cov.indexOf(hit);
-    if(index<0||cov.length!==para.length) return null;
-    return contextScore(windowOf(hit,WINDOW),para[index])>=1000?para[index]:null;
+  /* The text either side of a hit with look-alikes, case and spaces folded, up to SPOT_REACH
+     characters of the segment's own text. */
+  function sidesOf(hit){
+    const text=hit.seg.text;
+    return {
+      lead:normalizeText(text.slice(Math.max(0,hit.start-SPOT_REACH),hit.start),false,2).text,
+      tail:normalizeText(text.slice(hit.end,hit.end+SPOT_REACH),false,2).text
+    };
+  }
+  function leadAgree(a, b){
+    let n=0;
+    while(n<a.length&&n<b.length&&a[a.length-1-n]===b[b.length-1-n]) n+=1;
+    return n;
+  }
+  function tailAgree(a, b){
+    let n=0;
+    while(n<a.length&&n<b.length&&a[n]===b[n]) n+=1;
+    return n;
+  }
+  /* One side agrees when SPOT_SIDE characters match, or when the text runs out on either side first
+     (a paragraph or column starts or ends there) after every character there matched. */
+  function sideAgrees(n, a, b){
+    return n>=SPOT_SIDE||n===a.length||n===b.length;
+  }
+  /* A coverage hit (the place listed or picked) maps to the paragraph hit on its page whose text
+     agrees on both sides. Exactly one must agree; otherwise there is no mapping and the coverage
+     hit itself is edited. List order is never used. */
+  function sameSpot(paraHits, hit){
+    const own=sidesOf(hit);
+    const agree=paraHits.filter(item=>{
+      if(item.seg.pageIndex!==hit.seg.pageIndex) return false;
+      const other=sidesOf(item);
+      return sideAgrees(leadAgree(own.lead,other.lead),own.lead,other.lead)&&sideAgrees(tailAgree(own.tail,other.tail),own.tail,other.tail)
+        &&leadAgree(own.lead,other.lead)+tailAgree(own.tail,other.tail)>=SPOT_MIN;
+    });
+    return agree.length===1?agree[0]:null;
   }
   function resolved(hit, kind){
     return {
@@ -315,18 +355,16 @@
   /* Coverage text decides ambiguity; a paragraph segment is preferred for the edit itself. */
   function locateIn(segs, edit){
     const covHits=scan(coverage(segs),edit.find);
-    const cov=pickHit(covHits,edit.context,edit.hint);
-    if(cov.status==='ambiguous') return {status:'ambiguous',count:cov.count};
     const paraHits=scan(paragraphs(segs),edit.find);
-    if(cov.hinted){
-      const spot=sameSpot(covHits,paraHits,cov.hit);
-      return spot?resolved(spot,'paragraph'):resolved(cov.hit,segKind(cov.hit.seg));
+    if(!covHits.length){
+      const para=pickHit(paraHits,edit.context,edit.hint);
+      if(para.status==='hit') return resolved(para.hit,'paragraph');
+      return para.status==='ambiguous'?{status:'ambiguous',count:para.count}:{status:'not_found'};
     }
-    const ctx=edit.context||(cov.hit?windowOf(cov.hit,WINDOW):'');
-    const para=pickHit(paraHits,ctx);
-    if(para.status==='hit') return resolved(para.hit,'paragraph');
-    if(cov.status==='hit') return resolved(cov.hit,segKind(cov.hit.seg));
-    return {status:para.status==='ambiguous'?'ambiguous':'not_found'};
+    const cov=pickHit(covHits,edit.context,edit.hint);
+    if(cov.status!=='hit') return {status:'ambiguous',count:cov.count};
+    const spot=sameSpot(paraHits,cov.hit);
+    return spot?resolved(spot,'paragraph'):resolved(cov.hit,segKind(cov.hit.seg));
   }
   /* Page first (1-based edit.page), then the whole paper. */
   function locate(edit, segments){
@@ -591,14 +629,69 @@
     const seg=segments().find(item=>item&&item.id===segmentId);
     return seg&&typeof seg.text==='string'?seg.text:'';
   }
-  /* An edit's own change inside its Before: the common start and end are trimmed off. */
-  function changeOf(before, after){
+  const HUNK_CELLS=250000;
+  /* Pairs of equal characters in a and b (a longest common subsequence), as [i,j] in order. */
+  function commonPairs(a, b){
+    const n=a.length;
+    const m=b.length;
+    const dp=new Int32Array((n+1)*(m+1));
+    for(let i=n-1;i>=0;i-=1){
+      for(let j=m-1;j>=0;j-=1){
+        dp[i*(m+1)+j]=a[i]===b[j]?dp[(i+1)*(m+1)+j+1]+1:Math.max(dp[(i+1)*(m+1)+j],dp[i*(m+1)+j+1]);
+      }
+    }
+    const pairs=[];
+    let i=0;
+    let j=0;
+    while(i<n&&j<m){
+      if(a[i]===b[j]){pairs.push([i,j]);i+=1;j+=1;}
+      else if(dp[(i+1)*(m+1)+j]>=dp[i*(m+1)+j+1]) i+=1;
+      else j+=1;
+    }
+    return pairs;
+  }
+  /* The common start and end of Before and After, as lengths. */
+  function commonEnds(before, after){
     const max=Math.min(before.length,after.length);
     let lead=0;
     while(lead<max&&before[lead]===after[lead]) lead+=1;
     let tail=0;
     while(tail<max-lead&&before[before.length-1-tail]===after[after.length-1-tail]) tail+=1;
-    return {lead,tail,text:after.slice(lead,after.length-tail)};
+    return {lead,tail};
+  }
+  /* Runs between equal characters of a and b, as offsets in a (shifted by lead) and text of b. */
+  function diffRuns(a, b, lead){
+    const runs=[];
+    let i=0;
+    let j=0;
+    for(const [pi,pj] of commonPairs(a,b).concat([[a.length,b.length]])){
+      if(pi>i||pj>j) runs.push({start:lead+i,end:lead+pi,text:b.slice(j,pj)});
+      i=pi+1;
+      j=pj+1;
+    }
+    return runs;
+  }
+  /* Runs with no space between them belong to one word and become one change. */
+  function joinWords(before, runs){
+    const joined=[];
+    for(const run of runs){
+      const last=joined[joined.length-1];
+      const gap=last?before.slice(last.end,run.start):'';
+      if(last&&!/\s/.test(gap)) Object.assign(last,{end:run.end,text:last.text+gap+run.text});
+      else joined.push(Object.assign({},run));
+    }
+    return joined;
+  }
+  /* An edit's real changes, as Before offsets and the text that replaces them: a character diff of
+     Before and After. Changes inside one word count as one change, so two changes far apart in one
+     edit stay two. */
+  function changesOf(before, after){
+    const ends=commonEnds(before,after);
+    const a=before.slice(ends.lead,before.length-ends.tail);
+    const b=after.slice(ends.lead,after.length-ends.tail);
+    if(!a&&!b) return [];
+    if(!a||!b||(a.length+1)*(b.length+1)>HUNK_CELLS) return [{start:ends.lead,end:ends.lead+a.length,text:b}];
+    return joinWords(before,diffRuns(a,b,ends.lead));
   }
   /* Where an existing edit sits in this segment's text: its own anchor in the same segment, else
      (another view of the same page) its Before when it is unique both in its own segment and here,
@@ -624,19 +717,21 @@
     if(piece.start===piece.end) return start<piece.start&&piece.start<end;
     return piece.start<end&&start<piece.end;
   }
-  /* One proposal for the new change plus the edits it touches. Each older change that sits apart
-     from the new one is kept; one the new change runs into gives way to it (the newest wins). */
+  /* One proposal for the new change plus the edits it touches. Each older change (every separate
+     change inside an older edit, see changesOf) that sits apart from the new one is kept; one the
+     new change runs into gives way to it (the newest wins). */
   function mergedProposal(found, replace, text, clashes){
     const pieces=[{start:found.start,end:found.end,text:replace}];
     let from=found.start;
     let to=found.end;
     for(const item of clashes){
       const edit=item.edit;
-      const change=changeOf(edit.before,typeof edit.after==='string'?edit.after:edit.before);
-      const piece={start:item.span.start+change.lead,end:item.span.end-change.tail,text:change.text};
       from=Math.min(from,item.span.start);
       to=Math.max(to,item.span.end);
-      if(!crosses(piece,found.start,found.end)&&!(found.start===found.end&&crosses(pieces[0],piece.start,piece.end))) pieces.push(piece);
+      for(const change of changesOf(edit.before,typeof edit.after==='string'?edit.after:edit.before)){
+        const piece={start:item.span.start+change.start,end:item.span.start+change.end,text:change.text};
+        if(!crosses(piece,found.start,found.end)&&!(found.start===found.end&&crosses(pieces[0],piece.start,piece.end))) pieces.push(piece);
+      }
     }
     pieces.sort((a,b)=>a.start-b.start||(a.end-a.start)-(b.end-b.start));
     const span=uniqueSpan(text,from,to);
@@ -1256,13 +1351,29 @@
       const surface=el('div',{className:'booth-recipe-shot'},canvas);
       return {surface,figure:el('figure',{},el('figcaption',{textContent:caption}),surface)};
     }
+    /* No output yet: 「수정본 다시 만들기」 right here starts the same make as the send step's button,
+       and the comparison fills in once the new output is ready. */
+    function offerRemake(view, status, edit){
+      say(status,'수정본이 아직 없어요.');
+      const remake=doc.getElementById('booth-remake');
+      if(!remake||typeof remake.click!=='function') return;
+      const button=el('button',{type:'button',className:'booth-btn slim',textContent:'수정본 다시 만들기'});
+      button.addEventListener('click',()=>{
+        button.disabled=true;
+        say(status,'수정본을 만드는 중…');
+        doc.addEventListener('falsify:paper-generated',()=>{if(view.isConnected) void fillCompare(view,edit);},{once:true});
+        doc.addEventListener('falsify:paper-generate-failed',()=>{if(view.isConnected){button.disabled=false;say(status,'수정본을 만들지 못했어요. 한 번 더 눌러 주세요.');}},{once:true});
+        remake.click();
+      });
+      view.append(button);
+    }
     async function fillCompare(view, edit){
       const status=el('p',{className:'booth-small',textContent:'쪽 그림을 그리는 중…'});
       view.textContent='';
       view.append(status);
       const src=source();
       const out=currentOutput();
-      if(!src||!out||!out.file){say(status,'수정본이 아직 없어요. 「← 고치기」에서 「다음」을 다시 눌러 주세요.');return;}
+      if(!src||!out||!out.file){offerRemake(view,status,edit);return;}
       const pageIndex=edit.pageIndex;
       const outIndex=outputPage(out.pageMap,pageIndex);
       const width=Math.max(120,Math.floor((view.clientWidth||300)/2)-6);
@@ -1406,7 +1517,7 @@
 
   root.FalsifyBoothRecipe=Object.freeze({
     validate,apply,fromCode,pageText,paperInfo,setAssist,assist,
-    normalizeCode,normalizeText,locate,searchHits,applyFound,codeFromText,expiryText,
+    normalizeCode,normalizeText,locate,searchHits,applyFound,changesOf,codeFromText,expiryText,
     SCHEMA
   });
   if(root.document&&typeof root.document.getElementById==='function') mountUi(root.document);

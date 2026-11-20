@@ -107,6 +107,8 @@
     {id:'number',label:'수치·통계'},{id:'figure',label:'그림·표'},{id:'citation',label:'인용·출처'},
     {id:'logic',label:'논리·결론'},{id:'method',label:'방법·실험 설계'},{id:'other',label:'기타'}
   ];
+  /* Session errors a new guest session can fix: retried once, then offered as 「다시 시도」. */
+  const SESSION_CODES=new Set(['session_missing','unauthorized','length_required','forbidden']);
   const ERROR_TEXT={
     booth_closed:'지금은 접수 시간이 아니에요. 부스에서 운영 시간을 확인해 주세요.',
     consent_outdated:'동의 문구가 바뀌었어요. 페이지를 새로 고친 뒤 다시 동의해 주세요.',
@@ -116,7 +118,7 @@
     rate_limited:'지금 요청이 몰려 있어요. 잠시 뒤 다시 시도해 주세요.',
     license_not_allowed:'이 논문은 라이선스 때문에 쓸 수 없어요. CC BY, CC BY-SA, CC0 논문을 골라 주세요.',
     payload_too_large:'논문 파일이 너무 커서 열지 못했어요. 다른 논문을 골라 주세요.',
-    length_required:'파일 크기를 확인하지 못했어요. 페이지를 새로 고친 뒤 다시 제출해 주세요.',
+    length_required:'파일 크기를 확인하지 못했어요. 「다시 시도」를 눌러 주세요.',
     storage_full:'오늘 접수 공간이 가득 찼어요. 부스 스태프에게 알려 주세요.',
     model_jobs_operator_only:'이 화면에서는 AI 검증을 바로 돌리지 않아요. 「AI에게 제출하기」로 보내 주세요.',
     not_found:'접수번호와 확인키를 다시 확인해 볼까요?',
@@ -124,9 +126,10 @@
     invalid_pdf:'수정본 PDF를 읽지 못했어요. 「수정본 다시 만들기」를 눌러 주세요.',
     pdf_mismatch:'수정본이 중간에 바뀌었어요. 「수정본 다시 만들기」를 눌러 주세요.',
     pdf_unchanged:'아직 원본과 같아요. 한 곳 이상 고친 뒤 「다음」을 눌러 주세요.',
-    session_missing:'연결이 끊겼어요. 페이지를 새로 고친 뒤 다시 시도해 주세요.',
+    session_missing:'연결이 잠시 끊겼어요. 「다시 시도」를 누르면 새로 연결해요.',
+    unauthorized:'연결이 잠시 끊겼어요. 「다시 시도」를 누르면 새로 연결해요.',
     invalid_request:'입력 내용을 확인해 주세요.',
-    forbidden:'지금은 이 작업을 할 수 없어요.',
+    forbidden:'지금 연결로는 이 작업을 할 수 없어요. 「다시 시도」를 누르면 새로 연결해요.',
     network:'서버에 연결하지 못했어요. 네트워크를 확인한 뒤 다시 시도해 주세요.',
     offline:'인터넷 연결이 끊겼어요. 연결되면 다시 눌러 주세요.'
   };
@@ -796,8 +799,25 @@
     function hideRetry(id){const retry=byId(id+'-retry');if(retry) retry.hidden=true;}
     /* booth-runtime.js adds 「다시 시도」 after the status line; the 'online' event presses it. */
     function offerRetry(id, error, run){
-      if(!error||error.code!=='offline'||!rt||typeof rt.offerRetry!=='function') return;
-      rt.offerRetry(doc,byId(id),run);
+      if(!error||!rt||typeof rt.offerRetry!=='function') return;
+      if(error.code==='offline') rt.offerRetry(doc,byId(id),run);
+      else if(SESSION_CODES.has(error.code)) rt.offerRetry(doc,byId(id),()=>{dropSession();return run();});
+    }
+    /* A lost or refused guest session is minted again; the edits on the page stay as they are. */
+    function dropSession(){
+      try{
+        const session=typeof sessionFn==='function'?sessionFn():sessionFn;
+        if(session&&typeof session.invalidate==='function') session.invalidate();
+      }catch{}
+    }
+    /* Submitting retries once by itself with a new session before it shows anything. */
+    async function requestFresh(path, spec){
+      try{return await request(path,spec);}
+      catch(error){
+        if(!error||!SESSION_CODES.has(error.code)) throw error;
+        dropSession();
+        return request(path,spec);
+      }
     }
     function setHidden(id,hidden){const node=byId(id);if(node) node.hidden=!!hidden;}
     function setAttr(id,key,value){const node=byId(id);if(node&&typeof node.setAttribute==='function') node.setAttribute(key,value);}
@@ -2055,7 +2075,7 @@
       if(button) button.disabled=true;
       say('booth-submit-status','제출하는 중…');
       try{
-        const data=await request('/v1/booth/submissions',{method:'POST',auth:true,form});
+        const data=await requestFresh('/v1/booth/submissions',{method:'POST',auth:true,form});
         const meta=ticketMeta(data,typeof data.claimKey==='string'?data.claimKey:'');
         rememberClaim(meta);
         say('booth-submit-status','');

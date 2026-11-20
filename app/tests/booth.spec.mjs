@@ -245,7 +245,11 @@ test('server error codes become the booth messages', () => {
     assert.match(booth.errorMessage(code), new RegExp(fragment), code);
   }
   assert.match(booth.errorMessage('already_submitted', {receipt: 'F-0042'}), /F-0042/);
-  assert.match(booth.errorMessage('session_missing'), /연결이 끊겼어요/);
+  assert.match(booth.errorMessage('session_missing'), /연결이 잠시 끊겼어요/);
+  for (const code of ['session_missing', 'unauthorized', 'length_required', 'forbidden']) {
+    assert.doesNotMatch(booth.errorMessage(code), /새로 고/, code + ' never asks for a reload, which would drop the edits');
+    assert.match(booth.errorMessage(code), /다시 시도/, code + ' names the next step');
+  }
   assert.match(booth.errorMessage('mystery'), /^처리하지 못했어요\. 잠시 뒤 다시 시도해 주세요\.$/);
 });
 
@@ -404,6 +408,7 @@ function liveBooth(options = {}) {
     json: async () => body,
   });
   const submitReplies = (options.submits || []).slice();
+  let invalidated = 0;
   const fetchImpl = async (url, init = {}) => {
     const full = String(url);
     const path = full.split('?')[0];
@@ -442,7 +447,7 @@ function liveBooth(options = {}) {
   const handle = booth.mount({
     document: doc, fetch: fetchImpl, storage, location, blindTrust: options.blindTrust,
     config: () => ({booth: {enabled: true}, apiBase: 'https://event.example'}),
-    session: () => ({token: async () => options.token === undefined ? 'fsg_' + 'a'.repeat(43) : options.token}),
+    session: () => ({token: async () => options.token === undefined ? 'fsg_' + 'a'.repeat(43) : options.token, invalidate() { invalidated += 1; }}),
     setTimeout: (fn, ms) => { timerId += 1; timers.push({id: timerId, fn, ms}); return timerId; },
     clearTimeout: id => { const at = timers.findIndex(item => item.id === id); if (at >= 0) timers.splice(at, 1); },
     setInterval: (fn, ms) => { timerId += 1; intervals.push({id: timerId, fn, ms}); return timerId; },
@@ -460,7 +465,7 @@ function liveBooth(options = {}) {
   const claimCalls = () => calls.filter(call => call.path.endsWith('/v1/booth/claim'));
   const step = () => doc.documentElement.dataset.boothStep;
   const text = id => ids.get(id).textContent;
-  return {doc, ids, content, storage, calls, claimCalls, timers, intervals, clock, tick, handle, location, step, text};
+  return {doc, ids, content, storage, calls, claimCalls, timers, intervals, clock, tick, handle, location, step, text, invalidated: () => invalidated};
 }
 function missionButtons(h) {
   return nodesOf(h.ids.get('booth-missions')).filter(node => node.tagName === 'button');
@@ -583,7 +588,7 @@ test('a failed paper load stays on pick with the reason', async () => {
   await settle();
   await pickMission(h);
   assert.equal(h.step(), 'pick');
-  assert.match(h.text('booth-mission-status'), /연결이 끊겼어요/);
+  assert.match(h.text('booth-mission-status'), /연결이 잠시 끊겼어요/);
   h.handle.destroy();
 });
 
@@ -872,6 +877,28 @@ test('send offers 수정본 다시 만들기 in place when the edits changed', a
   await waitFor(() => h.step() === 'send' && h.text('booth-submit-status') === '');
   assert.equal(h.calls.some(call => call.path.endsWith('/v1/booth/submissions')), false);
   h.handle.destroy();
+});
+
+test('a lost or refused session at submit is minted again and retried in place', async () => {
+  const fill = h => { agree(h); chip(h, '수치·통계').click(); declare(h, '', '유의수준을 바꿔 결론이 성립하지 않음'); h.ids.get('booth-nickname').value = '부스방문자'; };
+  const once = liveBooth({submits: [{status: 401, body: {error: {code: 'unauthorized'}}}]});
+  await settle();
+  await reachSend(once);
+  fill(once);
+  await submit(once);
+  const posts = once.calls.filter(call => call.path.endsWith('/v1/booth/submissions'));
+  assert.equal(posts.length, 2, 'retried once by itself');
+  assert.equal(once.invalidated(), 1, 'with a new guest session');
+  assert.notEqual(once.step(), 'send', 'and the submission went through');
+  once.handle.destroy();
+  const twice = liveBooth({submits: [{status: 401, body: {error: {code: 'session_missing'}}}, {status: 411, body: {error: {code: 'length_required'}}}]});
+  await settle();
+  await reachSend(twice);
+  fill(twice);
+  await submit(twice);
+  assert.equal(twice.step(), 'send', 'the edits and the send step stay');
+  assert.doesNotMatch(twice.text('booth-submit-status'), /새로 고/);
+  twice.handle.destroy();
 });
 
 test('send declares chips and reasons and posts only the contract fields', async () => {
@@ -1603,7 +1630,7 @@ test('the guest cap gets a friendly line and search stays a secondary path', asy
   guest.ids.get('booth-search-q').value = '통계';
   guest.ids.get('booth-search').dispatchEvent({type: 'submit', preventDefault() {}});
   await settle();
-  assert.match(guest.text('booth-search-status'), /연결이 끊겼어요/);
+  assert.match(guest.text('booth-search-status'), /연결이 잠시 끊겼어요/);
   guest.handle.destroy();
 });
 
