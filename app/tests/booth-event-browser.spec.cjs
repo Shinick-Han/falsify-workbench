@@ -208,7 +208,27 @@ async function walk(browser, viewport, desk, pageErrors) {
   await deskChecks(page, desk, 2);
   if (desk) {
     assert.equal(Math.round(dock.width), viewport.width, 'the desktop dock spans the viewport');
-    assert.match(await page.locator('#booth-dock-chips').textContent(), /^\d+쪽0\.95→0\.50$/);
+    // A second edit, then delete it from the dock: the workspace's own 삭제 runs and the count drops.
+    const otherIndex = await page.evaluate(() => [...document.querySelectorAll('.paper-paragraph-button')]
+      .findIndex(node => !node.textContent.includes('0.95') && node.textContent.trim().length >= 20 && node.textContent.length <= 400));
+    assert.equal(otherIndex >= 0, true);
+    const other = page.locator('.paper-paragraph-button').nth(otherIndex);
+    await other.scrollIntoViewIfNeeded();
+    await other.click();
+    await editor.waitFor();
+    await editor.fill((await editor.inputValue()) + ' extra');
+    await page.locator('.paper-direct-controls').getByRole('button', {name: '완료', exact: true}).click();
+    await page.waitForFunction(() => document.querySelector('#booth-dock-count')?.textContent === '고친 곳 2개');
+    const chipList = page.locator('#booth-dock-chips .booth-dock-chip');
+    assert.equal(await chipList.count(), 2);
+    const extra = chipList.filter({hasNotText: '0.95'}).locator('.booth-dock-x');
+    assert.match(await extra.getAttribute('aria-label'), /^\d+쪽 고친 곳 지우기$/);
+    const xBox = await extra.boundingBox();
+    assert.equal(xBox.width >= 32 && xBox.height >= 32, true, 'the × hit area is at least 32px');
+    await extra.click();
+    await page.waitForFunction(() => document.querySelector('#booth-dock-count')?.textContent === '고친 곳 1개');
+    assert.equal(await chipList.count(), 1);
+    assert.match(await page.locator('#booth-dock-chips').textContent(), /^\d+쪽0\.95→0\.50×$/);
     assert.equal(await page.locator('#booth-dock-chips del').textContent(), '0.95');
     assert.equal(await page.locator('#booth-dock-back').isVisible(), true);
     assert.equal(await page.locator('#booth-edit-back').isVisible(), false);

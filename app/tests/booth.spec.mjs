@@ -1022,29 +1022,89 @@ test('on desktop the paper search is one open row; phones keep the closed disclo
   handle.destroy();
 });
 
-test('the desktop dock lists each edit as a chip with the removed text struck through', async () => {
+/* #paper-edits rows as the workspace renders them: data-edit id, data-act edit and delete. */
+function editRows(h, ids, clicks) {
+  let list = h.ids.get('paper-edits');
+  if (!list) {
+    list = h.doc.createElement('ul');
+    list.id = 'paper-edits';
+    h.content.append(list);
+  }
+  list.textContent = '';
+  for (const id of ids) {
+    const li = h.doc.createElement('li');
+    for (const act of ['edit', 'compare', 'toggle', 'delete']) {
+      const button = h.doc.createElement('button');
+      button.dataset = {edit: id, act};
+      button.addEventListener('click', () => clicks.push(act + ':' + id));
+      li.append(button);
+    }
+    list.append(li);
+  }
+}
+test('the desktop dock lists each edit as a chip and deletes through the workspace control', async () => {
   const h = liveBooth();
   await settle();
   const ws = useWorkspace([]);
   await pickMission(h);
   assert.equal(h.ids.get('booth-dock-chips').children.length, 0);
-  ws.edits = ONE_EDIT;
-  h.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
+  const clicks = [];
   const chips = () => h.ids.get('booth-dock-chips').children;
+  const label = node => nodesOf(node).filter(kid => kid.tagName !== 'button').map(kid => kid._text).join('');
+  const xOf = node => nodesOf(node).find(kid => kid.className === 'booth-dock-x');
+  ws.edits = [{...ONE_EDIT[0], id: 'e1'}];
+  editRows(h, ['e1'], clicks);
+  h.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
   assert.equal(chips().length, 1);
   assert.equal(chips()[0].className, 'booth-dock-chip');
-  assert.equal(chips()[0].textContent, '2쪽4.2→5.8');
+  assert.equal(label(chips()[0]), '2쪽4.2→5.8');
   assert.equal(nodesOf(chips()[0]).find(node => node.tagName === 'del').textContent, '4.2');
+  assert.equal(xOf(chips()[0]).textContent, '×');
+  assert.equal(xOf(chips()[0]).getAttribute('aria-label'), '2쪽 고친 곳 지우기');
   ws.edits = [
-    ...ONE_EDIT,
-    {enabled: true, pageIndex: 4, before: 'abc VeryLongDeletedToken xyz', after: 'abc  xyz'},
-    {enabled: true, pageIndex: 6, before: BEFORE_2, after: AFTER_2},
-    {enabled: true, pageIndex: 7, before: 'a', after: 'b'},
+    {...ONE_EDIT[0], id: 'e1'},
+    {enabled: true, id: 'e2', pageIndex: 4, before: 'abc VeryLongDeletedToken xyz', after: 'abc  xyz'},
+    {enabled: true, id: 'e3', pageIndex: 6, before: BEFORE_2, after: AFTER_2},
+    {enabled: true, id: 'e4', pageIndex: 7, before: 'a', after: 'b'},
   ];
+  editRows(h, ['e1', 'e2', 'e3', 'e4'], clicks);
   h.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
-  assert.deepEqual(chips().map(chip => chip.textContent), ['2쪽4.2→5.8', '5쪽VeryLongDelet…→(지움)', '7쪽120→210', '+1']);
-  assert.equal(chips()[3].className, 'booth-dock-chip more');
+  assert.deepEqual(chips().slice(0, 3).map(label), ['2쪽4.2→5.8', '5쪽VeryLongDelet…→(지움)', '7쪽120→210']);
   assert.equal(h.text('booth-dock-count'), '고친 곳 4개');
+  // ×: the workspace's own 삭제 runs, then the dock refreshes from the snapshot.
+  ws.edits = ws.edits.slice(0, 3);
+  xOf(chips()[2]).click();
+  assert.deepEqual(clicks, ['delete:e3']);
+  assert.equal(h.text('booth-dock-count'), '고친 곳 3개');
+  ws.edits = [...ws.edits, {enabled: true, id: 'e4', pageIndex: 7, before: 'a', after: 'b'}];
+  h.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
+  // +N opens a popover with every edit; its text reopens the edit, its × deletes.
+  const more = chips()[3];
+  assert.equal(more.tagName, 'button');
+  assert.equal(more.className, 'booth-dock-chip more');
+  assert.equal(more.textContent, '+1');
+  assert.equal(more.getAttribute('aria-expanded'), 'false');
+  assert.equal(h.ids.get('booth-dock-pop').hidden, true);
+  more.click();
+  const pop = h.ids.get('booth-dock-pop');
+  assert.equal(pop.hidden, false);
+  assert.equal(chips()[3].getAttribute('aria-expanded'), 'true');
+  assert.equal(pop.children.length, 4, 'every edit is listed');
+  assert.equal(label(pop.children[3]), '8쪽a→b');
+  const reopen = pop.children[3].children[0];
+  assert.equal(reopen.getAttribute('aria-label'), '8쪽 고친 곳 다시 열기');
+  reopen.click();
+  assert.deepEqual(clicks, ['delete:e3', 'edit:e4']);
+  assert.equal(pop.hidden, true, 'reopening an edit closes the popover');
+  chips()[3].click();
+  xOf(h.ids.get('booth-dock-pop').children[0]).click();
+  assert.deepEqual(clicks, ['delete:e3', 'edit:e4', 'delete:e1']);
+  h.ids.get('booth-dock').dispatchEvent({type: 'keydown', key: 'Escape'});
+  assert.equal(h.ids.get('booth-dock-pop').hidden, true);
+  // A missing control says so instead of failing silently.
+  editRows(h, [], clicks);
+  xOf(chips()[0]).click();
+  assert.match(h.text('booth-dock-status'), /지우지 못했어요/);
   ws.edits = [];
   h.doc.dispatchEvent({type: 'falsify:paper-workspace-edits'});
   assert.equal(chips().length, 0);

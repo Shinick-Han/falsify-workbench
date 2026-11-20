@@ -248,8 +248,17 @@
 .booth-dock-count{font-size:15px}
 .booth-dock-count small{font-size:12px}
 .booth-dock-chips{display:flex;gap:8px;min-width:0;overflow:hidden}
-.booth-dock-chip{display:inline-flex;flex:none;gap:6px;align-items:baseline;padding:4px 11px;border:1px solid var(--ev-hair);border-radius:999px;background:var(--ev-soft);font-family:var(--ev-mono);font-size:12px;white-space:nowrap}
-.booth-dock-chip del{color:var(--ev-muted);text-decoration:line-through}
+.booth .booth-dock-chip{display:inline-flex;flex:none;gap:6px;align-items:center;min-height:34px;padding:0 1px 0 11px;border:1px solid var(--ev-hair);border-radius:999px;background:var(--ev-soft);color:var(--ev-ink);font-family:var(--ev-mono);font-size:12px;white-space:nowrap}
+.booth .booth-dock-chip.more{padding:0 12px;cursor:pointer}
+.booth .booth-dock-chip.more[aria-expanded="true"]{border-color:var(--ev-ink)}
+.booth-dock-chip del,.booth-dock-pop del{color:var(--ev-muted);text-decoration:line-through}
+.booth .booth-dock-x{display:inline-grid;flex:none;place-items:center;width:32px;height:32px;margin-left:-2px;padding:0;border:0;border-radius:999px;background:transparent;color:var(--ev-muted);font-family:var(--ev-sans);font-size:17px;line-height:1;cursor:pointer}
+.booth .booth-dock-x:hover{background:var(--ev-hair);color:var(--ev-ink)}
+/* "+N" popover above the dock: every edit, its text reopens the edit, × deletes it. */
+.booth-dock-pop{position:absolute;bottom:calc(100% + 8px);left:max(32px,calc((100% - 1120px) / 2));display:grid;gap:2px;width:min(440px,calc(100% - 64px));max-height:min(360px,50vh);margin:0;padding:6px;overflow:auto;list-style:none;background:var(--ev-card);border:1px solid var(--ev-hair);border-radius:10px;box-shadow:0 12px 30px rgba(22,25,30,.12)}
+.booth-dock-pop li{display:flex;align-items:center;gap:4px}
+.booth .booth-dock-pop-text{display:flex;flex:1;gap:6px;align-items:baseline;min-width:0;min-height:40px;padding:10px;border:0;border-radius:6px;background:transparent;color:var(--ev-ink);font-family:var(--ev-mono);font-size:12.5px;text-align:left;white-space:nowrap;overflow:hidden;cursor:pointer}
+.booth .booth-dock-pop-text:hover{background:var(--ev-soft)}
 .booth .booth-dock-back{font-size:14px}
 .booth .booth-dock .booth-btn{min-width:150px;min-height:48px}
 #booth-next::after{content:" \2192";white-space:pre}

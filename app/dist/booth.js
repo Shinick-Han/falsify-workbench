@@ -635,6 +635,7 @@
     const stopEvery=ctx.stopEvery;
     const deskQuery=deskMedia(ctx.matchMedia);
     let searchOpenedForDesk=false;
+    let dockPopOpen=false;
     const listeners=[];
     const course='quick';
     let poll={token:0,timer:null,startedAt:0,receipt:'',claimKey:''};
@@ -803,6 +804,7 @@
             el('span',{id:'booth-dock-count',textContent:'고친 곳 0개'}),
             el('small',{textContent:'여러 곳을 고쳐도 돼요'})),
           el('div',{id:'booth-dock-chips',className:'booth-dock-chips booth-desk','aria-label':'고친 곳 목록'}),
+          el('ul',{id:'booth-dock-pop',className:'booth-dock-pop booth-desk',hidden:true,'aria-label':'고친 곳 전체'}),
           el('button',{id:'booth-dock-back',type:'button',className:'booth-back booth-dock-back booth-desk',textContent:'← 논문 고르기'}),
           el('button',{id:'booth-next',type:'button',className:'booth-btn ink',textContent:'다음',disabled:true})));
     }
@@ -1154,6 +1156,7 @@
         if(!edit||typeof edit!=='object'||edit.enabled===false) continue;
         if(!Number.isSafeInteger(edit.pageIndex)||typeof edit.before!=='string'||typeof edit.after!=='string') continue;
         edits.push({
+          id:typeof edit.id==='string'?edit.id:'',
           pageIndex:edit.pageIndex,
           segmentId:typeof edit.segmentId==='string'?edit.segmentId:'',
           before:edit.before,after:edit.after,defectType:'',reason:''
@@ -1304,20 +1307,70 @@
       const value=flat(text).trim();
       return value.length>CHIP_TEXT?value.slice(0,CHIP_TEXT-1).trimEnd()+'…':value;
     }
-    /* "5쪽 0.95→0.50": the page, the removed text struck through, then the new text. */
-    function dockChip(edit){
+    /* The workspace's own control for an edit in #paper-edits (data-edit id, data-act edit|delete). */
+    function editControl(id, act){
+      const visit=node=>{
+        if(!node||typeof node!=='object') return null;
+        const data=node.dataset;
+        if(data&&data.edit===id&&data.act===act) return node;
+        for(const kid of Array.from(node.children||[])){
+          const hit=visit(kid);
+          if(hit) return hit;
+        }
+        return null;
+      };
+      return id?visit(byId('paper-edits')):null;
+    }
+    /* Deleting or reopening stays on the workspace path: the dock clicks the existing control. */
+    function useEditControl(edit, act){
+      const control=editControl(edit.id,act);
+      if(!control||control.disabled||typeof control.click!=='function'){
+        say('booth-dock-status',act==='delete'?'이 고친 곳을 지우지 못했어요. 페이지를 새로 고친 뒤 다시 시도해 주세요.':'이 고친 곳을 열지 못했어요.');
+        return;
+      }
+      if(act==='edit') dockPopOpen=false;
+      control.click();
+      renderDock();
+    }
+    function chipParts(edit){
       const parts=diffParts(edit.before,edit.after,0);
-      return el('span',{className:'booth-dock-chip'},
+      return [
         el('span',{className:'pg',textContent:(edit.pageIndex+1)+'쪽'}),
         parts.removed?el('del',{textContent:clip(parts.removed)}):null,
-        el('span',{textContent:'→'+(parts.added?clip(parts.added):'(지움)')}));
+        el('span',{textContent:'→'+(parts.added?clip(parts.added):'(지움)')})];
+    }
+    function deleteButton(edit){
+      const button=el('button',{type:'button',className:'booth-dock-x',textContent:'×','aria-label':(edit.pageIndex+1)+'쪽 고친 곳 지우기'});
+      button.addEventListener('click',()=>{useEditControl(edit,'delete');});
+      return button;
+    }
+    /* "5쪽 0.95→0.50 ×": the page, the removed text struck through, the new text, then delete. */
+    function dockChip(edit){
+      return el('span',{className:'booth-dock-chip'},...chipParts(edit),deleteButton(edit));
+    }
+    function popRow(edit){
+      const open=el('button',{type:'button',className:'booth-dock-pop-text','aria-label':(edit.pageIndex+1)+'쪽 고친 곳 다시 열기'},...chipParts(edit));
+      open.addEventListener('click',()=>{useEditControl(edit,'edit');});
+      return el('li',{},open,deleteButton(edit));
+    }
+    function moreButton(hidden){
+      const button=el('button',{type:'button',className:'booth-dock-chip more',textContent:'+'+hidden,
+        'aria-expanded':String(dockPopOpen),'aria-controls':'booth-dock-pop','aria-label':'고친 곳 '+hidden+'개 더 보기'});
+      button.addEventListener('click',()=>{dockPopOpen=!dockPopOpen;renderDock();});
+      return button;
     }
     function renderDockChips(edits){
       const box=byId('booth-dock-chips');
       if(!box) return;
+      const extra=edits.length>DOCK_CHIPS;
+      if(!extra) dockPopOpen=false;
       const chips=edits.slice(0,DOCK_CHIPS).map(dockChip);
-      if(edits.length>DOCK_CHIPS) chips.push(el('span',{className:'booth-dock-chip more',textContent:'+'+(edits.length-DOCK_CHIPS)}));
+      if(extra) chips.push(moreButton(edits.length-DOCK_CHIPS));
       kidsOf(box,...chips);
+      const pop=byId('booth-dock-pop');
+      if(!pop) return;
+      kidsOf(pop,...(dockPopOpen?edits.map(popRow):[]));
+      pop.hidden=!dockPopOpen;
     }
     function renderDock(){
       const edits=editsFor(null);
@@ -2228,6 +2281,7 @@
     on(byId('booth-next'),'click',beginMake);
     on(byId('booth-edit-back'),'click',backToPick);
     on(byId('booth-dock-back'),'click',backToPick);
+    on(byId('booth-dock'),'keydown',event=>{if(event&&event.key==='Escape'&&dockPopOpen){dockPopOpen=false;renderDock();}});
     on(byId('booth-desk-records'),'click',openResult);
     on(byId('booth-live-records'),'click',openResult);
     on(deskQuery,'change',applyDesk);
