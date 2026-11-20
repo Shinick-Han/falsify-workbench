@@ -204,6 +204,9 @@ async function walk(browser, viewport, desk, pageErrors) {
   await shot(page, 'pick', viewport);
   await mission.click();
   await stepIs(page, 'edit');
+  // blind-pdf.js trust skip: booth.js holds the one-time capability, so no page script can claim it.
+  assert.equal(await page.evaluate(() => globalThis.FalsifyBlindPdf.claimTrust()), null, 'the trust capability is already claimed');
+  assert.equal(await page.evaluate(() => typeof globalThis.FalsifyBlindPdf.trust), 'undefined');
   await page.waitForFunction(() => [...document.querySelectorAll('.paper-paragraph-button')].some(node => node.textContent.includes('0.95')));
   assert.match(await page.locator('#booth-hint').textContent(), /^힌트 · Table 1의 점수 하나를 바꿔 보세요/);
   assert.equal(await page.locator('#booth-dock-count').textContent(), '고친 곳 0개');

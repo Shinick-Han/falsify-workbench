@@ -8,6 +8,16 @@
    the newest 5. After submit the claim view is polled until the operator publishes. */
 (function(root){
   'use strict';
+  /* blind-pdf.js hands its one-time trust capability to the first caller. booth.js loads after it and
+     claims it here, so no later page script can mark bytes as trusted. */
+  const blindTrust=claimBlindTrust();
+  function claimBlindTrust(){
+    try{
+      const blind=root.FalsifyBlindPdf;
+      const claimed=blind&&typeof blind.claimTrust==='function'?blind.claimTrust():null;
+      return typeof claimed==='function'?claimed:null;
+    }catch{return null;}
+  }
   const RECEIPT_KEY='falsify.booth.receipts.v1';
   const RECEIPT_CAP=10;
   /* Keyed by the consentVersion GET /v1/booth/config returns. A version with no text here cannot be submitted. */
@@ -637,6 +647,7 @@
       sessionFn:opts.session||(()=>root.FalsifyHostedSession),
       location:opts.location||root.location||{hash:''},
       matchMedia:typeof opts.matchMedia==='function'?opts.matchMedia:(typeof root.matchMedia==='function'?root.matchMedia.bind(root):null),
+      trustFetched:typeof opts.blindTrust==='function'?opts.blindTrust:blindTrust,
       ...timerServices(opts)
     };
   }
@@ -717,6 +728,7 @@
     const now=ctx.now;
     const every=ctx.every;
     const stopEvery=ctx.stopEvery;
+    const trustFetched=ctx.trustFetched;
     const deskQuery=deskMedia(ctx.matchMedia);
     let searchOpenedForDesk=false;
     let dockPopOpen=false;
@@ -738,6 +750,7 @@
     let ownOpen=false;
     let opening=false;
     let openFailure=null;
+    let prefetched=null;
     let generatedFile=null;
     let generatedHash='';
     let sourceSha='';
@@ -1114,7 +1127,7 @@
       try{
         res=await fetchImpl(base+path,{
           method:spec.method||'GET',headers,
-          body:payload,
+          body:payload,signal:spec.signal,
           credentials:'omit',cache:'no-store',redirect:'error'
         });
       }catch{throw coded(offlineCode('network'));}
@@ -1433,15 +1446,21 @@
       };
       return id?visit(byId('paper-edits')):null;
     }
+    /* Without a control in #paper-edits (still re-rendering), the workspace hooks do the same:
+       removeEdit deletes, showPage turns to the edit's page. */
+    function editFallback(edit, act){
+      const ws=workspace();
+      try{
+        if(act==='delete') return !!ws&&typeof ws.removeEdit==='function'&&ws.removeEdit(edit.id)===true;
+        return !!ws&&typeof ws.showPage==='function'&&ws.showPage(Number(edit.pageIndex)+1)===true;
+      }catch{return false;}
+    }
     /* Deleting or reopening stays on the workspace path: the dock clicks the existing control. */
     function useEditControl(edit, act){
       const control=editControl(edit.id,act);
-      if(!control||control.disabled||typeof control.click!=='function'){
-        say('booth-dock-status',act==='delete'?'이 고친 곳을 지우지 못했어요. 페이지를 새로 고친 뒤 다시 시도해 주세요.':'이 고친 곳을 열지 못했어요.');
-        return;
-      }
       if(act==='edit') dockPopOpen=false;
-      control.click();
+      if(control&&!control.disabled&&typeof control.click==='function') control.click();
+      else if(!editFallback(edit,act)) say('booth-dock-status',act==='delete'?'아직 지우지 못했어요. ×를 한 번 더 눌러 주세요.':'아직 열지 못했어요. 한 번 더 눌러 주세요.');
       renderDock();
     }
     function chipParts(edit){
@@ -1620,6 +1639,14 @@
       if(typeof paperLike.license==='string') return paperLike.license;
       return typeof paperLike.license.id==='string'?paperLike.license.id:'';
     }
+    /* 다음 runs the MuPDF training-marker check (blind-pdf.js) on the source first. A paper the booth
+       fetched from arXiv through GET /v1/papers/pdf skips it: blind-pdf.js keeps the SHA-256 of exactly
+       these response bytes and skips MuPDF only when the PDF handed to generation has that hash. Recipe
+       ids, URL hashes, resumed sessions and visitor files never reach this call. */
+    function trustFetchedBytes(bytes){
+      if(typeof trustFetched!=='function') return;
+      try{void Promise.resolve(trustFetched(bytes)).catch(()=>{});}catch{/* the check then runs */}
+    }
     function bindPaper(next, file){
       const previous=boothFile;
       paper=next&&(next.source==='arxiv'||next.source==='mission')?{
@@ -1719,10 +1746,11 @@
       if(!path){say(statusId,errorMessage('invalid_request'));return false;}
       say(statusId,'논문을 불러오는 중…');
       let payload=null;
-      try{payload=await request(path,{method:'GET',auth:true,pdf:true});}
+      try{payload=await (takePrefetched(id)||request(path,{method:'GET',auth:true,pdf:true}));}
       catch(error){say(statusId,errorMessage(error.code,error));openFailure=error;return false;}
       const bytes=payload.bytes;
       if(!pdfMagic(bytes)){say(statusId,errorMessage('invalid_request'));return false;}
+      trustFetchedBytes(bytes);
       const file=pdfFile(bytes, pdfFileName(headerValue(payload.headers,'Content-Disposition'), nameHint));
       if(!file){say(statusId,'논문을 열지 못했어요. 다시 눌러 주세요.');return false;}
       const input=doc.getElementById('paper-file');
@@ -1766,18 +1794,19 @@
       if(typeof jump.dispatchEvent==='function') jump.dispatchEvent(new Event('change',{bubbles:true}));
       return true;
     }
-    /* The workspace reads the PDF after the change event, so the hint page retries for up to 8 s. */
+    /* The workspace reads the PDF after the change event, so the hint page retries until the PDF opens.
+       A slow phone on Slow 4G opens it after 15-20 s, so the retry runs for up to 60 s (240 x 250 ms). */
     function followPageHint(n){
       if(showMissionPage(n)) return;
       const timer=makeTimer();
       if(!timer) return;
-      let left=80;
+      let left=240;
       const tick=()=>{
         if(closed||step!=='edit'||showMissionPage(n)) return;
         left-=1;
-        if(left>0) timer(tick,100);
+        if(left>0) timer(tick,250);
       };
-      timer(tick,100);
+      timer(tick,250);
     }
     function missionPaper(mission){
       return {source:'mission',id:mission.paperId,title:typeof mission.title==='string'?mission.title:'',
@@ -1809,7 +1838,31 @@
       const button=paperTicket(label,title,typeof mission.hint==='string'?mission.hint:'',n);
       button.setAttribute('aria-label',title+(n?' · '+n+'쪽에서 도전':' · 도전'));
       button.addEventListener('click',()=>{chooseMission(mission);});
+      button.addEventListener('pointerdown',()=>{prefetchPaper(mission.paperId);});
+      button.addEventListener('pointercancel',()=>{dropPrefetch(mission.paperId);});
       return button;
+    }
+    /* A mission tap starts the PDF request on pointerdown; the click that follows picks it up in openPdf.
+       A touch that turns into a scroll fires pointercancel, which aborts the request. One slot only. */
+    function prefetchPaper(id){
+      if(closed||opening||(paper&&paper.id===id)||(prefetched&&prefetched.id===id)) return;
+      const path=paperPdfPath(id);
+      if(!path||typeof AbortController!=='function') return;
+      dropPrefetch('');
+      const abort=new AbortController();
+      const task=request(path,{method:'GET',auth:true,pdf:true,signal:abort.signal});
+      task.catch(()=>{});
+      prefetched={id,task,abort};
+    }
+    function dropPrefetch(id){
+      if(!prefetched||(id&&prefetched.id!==id)) return;
+      prefetched.abort.abort();
+      prefetched=null;
+    }
+    function takePrefetched(id){
+      const hit=prefetched&&prefetched.id===id?prefetched.task:null;
+      prefetched=null;
+      return hit;
     }
     function renderMissions(){
       const box=byId('booth-missions');
@@ -2311,9 +2364,11 @@
       if(error.code==='offline'){liveError(errorMessage('offline'));offerRetry('booth-live-error',error,recheck);}
       schedulePoll(token,error.status===429?(error.retryAfter||POLL_429_MS):0);
     }
+    /* A hidden tab does not poll. onReturn asks again as soon as the tab is visible. */
     async function pollOnce(token){
       if(closed||token!==poll.token) return;
       poll.timer=null;
+      if(!visibleNow()) return;
       let data=null;
       try{data=await claimRequest(poll.receipt,poll.claimKey);}
       catch(error){

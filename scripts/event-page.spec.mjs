@@ -7,8 +7,8 @@ import {fileURLToPath} from 'node:url';
 import test from 'node:test';
 import vm from 'node:vm';
 import {
-  AGENT_LINK, BOOTH_SCRIPTS, BOOTH_STYLES, DEFAULT_EVENT_API_BASE, EVENT_TITLE_SUFFIX, eventApiOrigin, eventBytesDiffer, eventHtmlFromIndex,
-  parseEventArgs, planEventFiles,
+  AGENT_LINK, BOOTH_SCRIPTS, BOOTH_STYLES, DEFAULT_EVENT_API_BASE, EVENT_OMIT, EVENT_TITLE_SUFFIX, eventApiOrigin, eventBytesDiffer, eventHtmlFromIndex,
+  omitWorkbench, parseEventArgs, planEventFiles,
 } from './build-event-page.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -120,6 +120,20 @@ test('malformed index or CSP fails closed', () => {
   assert.throws(() => planEventFiles(index.replace('<title>', '<title>').replace('</title>', '</title>\n  <meta name="robots" content="noindex">'), DEFAULT_EVENT_API_BASE), /default page/);
 });
 
+test('the event page drops the Workbench-only assets and index.html keeps them', () => {
+  const index = readFileSync(indexPath, 'utf8');
+  const event = readFileSync(eventPath, 'utf8');
+  assert.ok(EVENT_OMIT.includes('latex-workbench.mjs'));
+  for (const name of EVENT_OMIT) {
+    assert.equal(count(index, '"' + name + '?'), 1, name + ' in index.html');
+    assert.equal(count(event, '"' + name + '?'), 0, name + ' in event.html');
+  }
+  assert.equal(omitWorkbench(fixture()), fixture());
+  const extra = '<script type="module" src="latex-workbench.mjs?v=1&amp;build=x"></script>\n  ';
+  assert.equal(omitWorkbench(fixture(extra)), fixture());
+  assert.throws(() => omitWorkbench(fixture(extra + extra)), /at most one/);
+});
+
 test('committed event page matches index.html except the four event edits', () => {
   const index = readFileSync(indexPath, 'utf8');
   const planned = planEventFiles(index, DEFAULT_EVENT_API_BASE);
@@ -127,7 +141,7 @@ test('committed event page matches index.html except the four event edits', () =
   const config = readFileSync(configPath, 'utf8');
   assert.equal(event, planned.html);
   assert.equal(config, planned.config);
-  assert.equal(revertEventHtml(event, index, DEFAULT_EVENT_API_BASE), index);
+  assert.equal(revertEventHtml(event, index, DEFAULT_EVENT_API_BASE), omitWorkbench(index, newlineOf(index)));
   assert.equal(eventBytesDiffer(Buffer.from(event), planned.html), false);
   const sandbox = {};
   vm.runInNewContext(config, sandbox);

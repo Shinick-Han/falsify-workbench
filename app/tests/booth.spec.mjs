@@ -17,7 +17,7 @@ class BoothTransfer {
 const boothSource = await readFile(fileURLToPath(new URL('../dist/booth.js', import.meta.url)), 'utf8');
 const appSource = await readFile(fileURLToPath(new URL('../dist/app.js', import.meta.url)), 'utf8');
 const openAccessSource = await readFile(fileURLToPath(new URL('../dist/open-access.js', import.meta.url)), 'utf8');
-const boothContext = vm.createContext({console, URL, URLSearchParams, Event, File, FormData, crypto, DataTransfer: BoothTransfer});
+const boothContext = vm.createContext({console, URL, URLSearchParams, Event, File, FormData, crypto, AbortController, DataTransfer: BoothTransfer});
 vm.runInContext(boothSource, boothContext, {filename: 'booth.js'});
 const booth = boothContext.FalsifyBooth;
 
@@ -413,7 +413,7 @@ function liveBooth(options = {}) {
     const query = full.includes('?') ? new URLSearchParams(full.slice(full.indexOf('?') + 1)) : null;
     const queryBody = query && path.endsWith('/v1/booth/claim') ? {receipt: query.get('receipt'), claimKey: query.get('key')} : null;
     calls.push({path, method: init.method || 'GET', at: clock.t, auth: headers.Authorization || '', contentType: headers['Content-Type'] || '',
-      body: typeof init.body === 'string' ? JSON.parse(init.body) : queryBody, form});
+      body: typeof init.body === 'string' ? JSON.parse(init.body) : queryBody, form, signal: init.signal || null});
     if (path.endsWith('/v1/booth/config')) {
       if (options.configGate) await options.configGate;
       return reply(200, {enabled: true, submissionsOpen: true, announcement: options.announcement, consentVersion: options.consentVersion || '2026-11-22.v2',
@@ -432,7 +432,7 @@ function liveBooth(options = {}) {
       if (options.submitStatus) return reply(options.submitStatus, {error: {code: 'rate_limited'}});
       return reply(201, {receipt: 'F-0042', claimKey: '7Q3K-M9XD', status: 'received', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:30Z'});
     }
-    if (path.includes('/v1/papers/pdf')) return pdfReply();
+    if (path.includes('/v1/papers/pdf')) return options.pdfReply ? options.pdfReply(full) : pdfReply();
     if (path.includes('/v1/papers/search')) {
       return reply(200, {source: 'arxiv', page: 1, hasMore: false, results: [{id: '2503.10497', title: 'Synthetic result', authors: ['Ada'], year: 2026, license: 'cc-by-4.0'}]});
     }
@@ -440,7 +440,7 @@ function liveBooth(options = {}) {
   };
   const location = {hash: options.hash || ''};
   const handle = booth.mount({
-    document: doc, fetch: fetchImpl, storage, location,
+    document: doc, fetch: fetchImpl, storage, location, blindTrust: options.blindTrust,
     config: () => ({booth: {enabled: true}, apiBase: 'https://event.example'}),
     session: () => ({token: async () => options.token === undefined ? 'fsg_' + 'a'.repeat(43) : options.token}),
     setTimeout: (fn, ms) => { timerId += 1; timers.push({id: timerId, fn, ms}); return timerId; },
@@ -1873,6 +1873,109 @@ class El extends EventTarget {
     return this.find(node => node.id === selector.slice(1));
   }
 }
+
+/* blind-pdf.js skips its MuPDF marker check only for bytes handed to its trust capability. */
+function trustSpy() {
+  const seen = [];
+  const fn = bytes => { seen.push(Buffer.from(bytes)); return Promise.resolve('x'); };
+  return {seen, fn};
+}
+test('only the bytes GET /v1/papers/pdf returned reach the blind-pdf trust capability', async () => {
+  const spy = trustSpy();
+  const h = liveBooth({blindTrust: spy.fn, hash: '#recipe=eyJwYXBlcklkIjoiMjUwMy4xMDQ5NyJ9'});
+  await settle();
+  assert.equal(spy.seen.length, 0, 'a #recipe= hash trusts nothing on its own');
+  useWorkspace([]);
+  await pickMission(h);
+  assert.equal(h.step(), 'edit');
+  assert.equal(spy.seen.length, 1);
+  assert.deepEqual(spy.seen[0], SOURCE_BYTES, 'the trusted bytes are the API response bytes');
+  // A visitor file in the workspace input: the booth drops the paper and trusts nothing new.
+  const visitor = new File([Buffer.from('%PDF-1.7 visitor file with a training marker\n%%EOF\n')], 'arxiv-2503.10497.pdf', {type: 'application/pdf'});
+  h.doc.dispatchEvent({type: 'falsify:document', detail: {file: visitor, fileHash: 'f'.repeat(64)}});
+  assert.equal(h.step(), 'pick');
+  assert.equal(spy.seen.length, 1);
+  h.handle.destroy();
+  // A recipe paperId still goes through the API: the trust follows the bytes the API sent, not the id.
+  const other = Buffer.from('%PDF-1.7 synthetic search paper\n%%EOF\n');
+  const h2 = liveBooth({blindTrust: spy.fn, pdfReply: () => pdfReply(other)});
+  await settle();
+  useWorkspace([]);
+  assert.equal(await boothContext.FalsifyBoothPaper.open('2503.10499', {title: 'Recipe paper', source: 'mission'}), true);
+  assert.equal(spy.seen.length, 2);
+  assert.deepEqual(spy.seen[1], other);
+  h2.handle.destroy();
+  // A body that is not a PDF is never trusted.
+  const h3 = liveBooth({blindTrust: spy.fn, pdfReply: () => pdfReply(Buffer.from('<html>not a pdf</html>'))});
+  await settle();
+  await pickMission(h3);
+  assert.equal(h3.step(), 'pick');
+  assert.equal(spy.seen.length, 2);
+  h3.handle.destroy();
+});
+
+test('a resumed session from storage trusts no bytes', async () => {
+  const spy = trustSpy();
+  const storage = memoryStorage();
+  storage.setItem('falsify.booth.receipts.v1', JSON.stringify([{receipt: 'F-0042', claimKey: '7Q3K-M9XD', title: 'Synthetic mission',
+    paperId: '2503.10497', createdAt: '2026-11-22T01:00:00Z', sha256: SOURCE_SHA, trusted: true}]));
+  const h = liveBooth({blindTrust: spy.fn, storage, hash: '#booth-result',
+    claims: [{receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1, published: false}]});
+  await settle();
+  assert.ok(h.claimCalls().length >= 1, 'the stored ticket is looked up');
+  assert.equal(spy.seen.length, 0);
+  assert.equal(h.calls.filter(call => call.path.includes('/v1/papers/pdf')).length, 0);
+  h.handle.destroy();
+});
+
+test('pointerdown on a mission starts the PDF request and the click reuses it; a scroll cancels it', async () => {
+  const h = liveBooth();
+  await settle();
+  useWorkspace([]);
+  const [first, second] = missionButtons(h);
+  first.dispatchEvent({type: 'pointerdown'});
+  await settle();
+  const pdfCalls = () => h.calls.filter(call => call.path.includes('/v1/papers/pdf'));
+  assert.equal(pdfCalls().length, 1, 'pointerdown starts the request');
+  first.click();
+  await settle();
+  assert.equal(h.step(), 'edit');
+  assert.equal(pdfCalls().length, 1, 'the click reuses the started request');
+  h.ids.get('booth-edit-back').click();
+  second.dispatchEvent({type: 'pointerdown'});
+  await settle();
+  assert.equal(pdfCalls().length, 2);
+  second.dispatchEvent({type: 'pointercancel'});
+  assert.equal(pdfCalls()[1].signal.aborted, true, 'a touch that became a scroll aborts the request');
+  second.click();
+  await settle();
+  assert.equal(pdfCalls().length, 3, 'the click after a cancel fetches again');
+  assert.equal(pdfCalls()[2].signal, null, 'a plain click request has nothing to abort');
+  assert.equal(h.step(), 'edit');
+  h.handle.destroy();
+});
+
+test('a hidden tab does not poll the claim view, and coming back polls at once', async () => {
+  const pending = {receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1, published: false};
+  const h = liveBooth({claims: [pending]});
+  await settle();
+  await submitThroughBooth(h);
+  assert.equal(h.step(), 'ticket');
+  assert.equal(await h.tick(), 15000);
+  assert.equal(h.claimCalls().length, 1);
+  h.doc.visibilityState = 'hidden';
+  h.doc.dispatchEvent({type: 'visibilitychange'});
+  assert.equal(await h.tick(), 15000);
+  assert.equal(h.claimCalls().length, 1, 'no poll while hidden');
+  assert.equal(h.timers.length, 0, 'and no timer left running');
+  h.clock.t += 120000;
+  h.doc.visibilityState = 'visible';
+  h.doc.dispatchEvent({type: 'visibilitychange'});
+  await settle();
+  assert.equal(h.claimCalls().length, 2, 'visible again polls at once');
+  assert.equal(h.timers.length, 1, 'and polling goes on');
+  h.handle.destroy();
+});
 function makeDocument() {
   const doc = new EventTarget();
   const body = new El('body', doc);
