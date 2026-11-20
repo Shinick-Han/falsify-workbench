@@ -1858,7 +1858,15 @@
       if(receipt) receipt.value=item.receipt;
       if(key) key.value=item.claimKey;
     }
-    function claimRequest(receipt, claimKey){
+    /* GET with the key in the query is a CORS simple request: no preflight and no rate-limit write on the
+       Worker, so a venue NAT full of pollers cannot run the per-IP claim bucket dry. A Worker without the
+       GET route answers 405 once; the page then keeps the older POST. */
+    let claimByGet=true;
+    async function claimRequest(receipt, claimKey){
+      if(claimByGet){
+        try{return await request('/v1/booth/claim?receipt='+encodeURIComponent(receipt)+'&key='+encodeURIComponent(claimKey),{method:'GET',auth:false});}
+        catch(error){if(error.status!==405) throw error;claimByGet=false;}
+      }
       return request('/v1/booth/claim',{method:'POST',auth:false,body:{receipt,claimKey}});
     }
     async function lookup(event){

@@ -980,11 +980,129 @@ test('per-owner, per-IP and claim buckets stop the next submission', async () =>
     assert.equal(blocked.body.error.code, 'rate_limited');
     // The claim route has no session, yet the browser must still read the wait for its poll schedule.
     assert.ok(Number(blocked.headers.get('Retry-After')) > 0);
+    // Capped so the page keeps polling instead of waiting for the top of the hour.
+    assert.ok(Number(blocked.headers.get('Retry-After')) <= 60);
     assert.equal(blocked.headers.get('Access-Control-Expose-Headers'), 'X-Falsify-Confluence-Session, Retry-After');
     const d1 = await mf.getD1Database('DB');
     const global = await d1.prepare(`SELECT count FROM rate_counters WHERE bucket = 'booth-claim:all'`).first();
     assert.equal(Number(global.count) >= 1, true);
   });
+});
+
+test('GET claim polls without a rate slot, so one venue IP never runs dry', async () => {
+  await withApp({ BOOTH_CLAIMS_PER_IP_HOUR: '2', BOOTH_CLAIMS_PER_HOUR: '2' }, async (mf, call) => {
+    const venue = fromIp('198.51.100.9');
+    const guest = (await mintGuest(call, venue)).body.guest.token;
+    const created = await submitPdf(call, guest, pdfBytes('op-booth-getclaim'), {}, venue);
+    assert.equal(created.status, 201, created.text);
+    const { receipt, claimKey } = created.body;
+    const q = (r, k) => '/v1/booth/claim?receipt=' + encodeURIComponent(r) + '&key=' + encodeURIComponent(k);
+    // 40 visitors behind one NAT polling 4 times a minute for 3 minutes: far beyond both caps above.
+    for (let i = 0; i < 480; i++) {
+      const polled = await call('GET', q(receipt, claimKey), { headers: venue });
+      assert.equal(polled.status, 200, polled.text);
+      if (i === 0) {
+        assert.deepEqual(Object.keys(polled.body).sort(), ['course', 'createdAt', 'declaredCount', 'published', 'queue', 'receipt', 'status']);
+        assert.deepEqual(polled.body.queue, { ahead: 0, slots: 4, etaSec: 120 });
+        assert.equal(polled.headers.get('Cache-Control'), 'no-store');
+      }
+    }
+    const d1 = await mf.getD1Database('DB');
+    const counted = await d1.prepare("SELECT COUNT(*) AS n FROM rate_counters WHERE bucket LIKE 'booth-claim%'").first();
+    assert.equal(Number(counted.n), 0, 'GET claim writes no rate counter');
+    const wrong = await call('GET', q(receipt, 'AAAA-AAAA'), { headers: venue });
+    assert.equal(wrong.status, 404);
+    assert.equal(wrong.body.error.code, 'not_found');
+    assert.equal((await call('GET', q('F-9999', claimKey), { headers: venue })).status, 404);
+    assert.equal((await call('GET', '/v1/booth/claim?receipt=' + receipt, { headers: venue })).status, 400);
+    assert.equal((await call('GET', q(receipt, claimKey) + '&x=1', { headers: venue })).status, 400);
+    assert.equal((await call('GET', q(receipt, 'K'.repeat(40)), { headers: venue })).status, 400);
+    // POST lookups keep their buckets; a 429 there says at most 60 s.
+    assert.equal((await call('POST', '/v1/booth/claim', { headers: venue, body: { receipt, claimKey } })).status, 200);
+    assert.equal((await call('POST', '/v1/booth/claim', { headers: venue, body: { receipt, claimKey } })).status, 200);
+    const limited = await call('POST', '/v1/booth/claim', { headers: venue, body: { receipt, claimKey } });
+    assert.equal(limited.status, 429);
+    const wait = Number(limited.headers.get('Retry-After'));
+    assert.ok(wait > 0 && wait <= 60, 'Retry-After ' + wait);
+    assert.equal(limited.body.error.retryable, true);
+    // The published result is what a poll returns once the operator publishes.
+    const patched = await call('PATCH', '/v1/booth/admin/submissions/' + receipt, {
+      token: OPERATOR, body: { status: 'judged', outcome: 'missed', publicNote: 'n', published: true },
+    });
+    assert.equal(patched.status, 200, patched.text);
+    const done = await call('GET', q(receipt, claimKey.toLowerCase()), { headers: venue });
+    assert.equal(done.status, 200);
+    assert.equal(done.body.outcome, 'missed');
+    assert.equal(done.body.published, true);
+    assert.equal(done.body.queue, undefined, 'a published row has no wait estimate');
+  });
+});
+
+test('the claim view estimates the wait from rows received earlier and the operator slots', async () => {
+  await withApp({ BOOTH_OPERATOR_ACTIVE_JOBS: '2', BOOTH_ETA_JOB_SECONDS: '90' }, async (mf, call) => {
+    const made = [];
+    for (let i = 0; i < 5; i++) {
+      const ip = fromIp('198.51.100.' + (60 + i));
+      const guest = (await mintGuest(call, ip)).body.guest.token;
+      const created = await submitPdf(call, guest, pdfBytes('op-booth-queue' + i), {}, ip);
+      assert.equal(created.status, 201, created.text);
+      made.push(created.body);
+    }
+    const view = async item => (await call('GET', '/v1/booth/claim?receipt=' + item.receipt + '&key=' + item.claimKey)).body;
+    assert.deepEqual((await view(made[0])).queue, { ahead: 0, slots: 2, etaSec: 90 });
+    assert.deepEqual((await view(made[4])).queue, { ahead: 4, slots: 2, etaSec: 270 });
+    const reviewing = await call('PATCH', '/v1/booth/admin/submissions/' + made[0].receipt, { token: OPERATOR, body: { status: 'reviewing' } });
+    assert.equal(reviewing.status, 200, reviewing.text);
+    const first = (await view(made[0])).queue;
+    assert.equal(first.ahead, 0);
+    assert.ok(first.etaSec >= 15 && first.etaSec <= 90, 'reviewing counts down ' + first.etaSec);
+    assert.deepEqual((await view(made[4])).queue, { ahead: 3, slots: 2, etaSec: 180 });
+    const posted = await call('POST', '/v1/booth/claim', { body: { receipt: made[4].receipt, claimKey: made[4].claimKey } });
+    assert.deepEqual(posted.body.queue, { ahead: 3, slots: 2, etaSec: 180 });
+  });
+});
+
+test('GET claim meters failed key checks: a guesser falls back to the D1 claim buckets, right keys stay free', async () => {
+  await withApp({ BOOTH_CLAIMS_PER_IP_HOUR: '3', BOOTH_CLAIMS_PER_HOUR: '1000' }, async (mf, call) => {
+    const owner = fromIp('198.51.100.40');
+    const guest = (await mintGuest(call, owner)).body.guest.token;
+    const created = await submitPdf(call, guest, pdfBytes('op-booth-guess'), {}, owner);
+    assert.equal(created.status, 201, created.text);
+    const { receipt, claimKey } = created.body;
+    const q = k => '/v1/booth/claim?receipt=' + encodeURIComponent(receipt) + '&key=' + encodeURIComponent(k);
+    const d1 = await mf.getD1Database('DB');
+    const counters = async () => Number((await d1.prepare("SELECT COUNT(*) AS n FROM rate_counters WHERE bucket LIKE 'booth-claim%'").first()).n);
+    // The same /64 counts as one guesser.
+    const guesser = n => fromIp('2001:db8:1:2::' + (n % 7 + 1).toString(16));
+    for (let i = 0; i < 20; i++) {
+      const wrong = await call('GET', q('AAAA-AA' + String(i).padStart(2, '0').replace(/[01]/g, 'A')), { headers: guesser(i) });
+      assert.equal(wrong.status, 404, 'miss ' + i);
+    }
+    assert.equal(await counters(), 0, 'the first failed checks write nothing');
+    // Bucket empty: the next checks are charged to the D1 claim buckets (3 per IP here), then 429 with a short wait.
+    const statuses = [];
+    let limited = null;
+    for (let i = 0; i < 4; i++) {
+      const res = await call('GET', q('BBBB-BBB' + 'CDEF'[i]), { headers: guesser(i) });
+      statuses.push(res.status);
+      if (res.status === 429) limited = res;
+    }
+    assert.deepEqual(statuses, [404, 404, 404, 429]);
+    const wait = Number(limited.headers.get('Retry-After'));
+    assert.ok(wait > 0 && wait <= 60, 'Retry-After ' + wait);
+    // Even the right key from the guessing /64 is refused now, so the bucket gives no oracle.
+    assert.equal((await call('GET', q(claimKey), { headers: guesser(0) })).status, 429);
+    // Another venue IP polling with the right key keeps the free path.
+    const before = await counters();
+    for (let i = 0; i < 30; i++) assert.equal((await call('GET', q(claimKey), { headers: owner })).status, 200);
+    assert.equal(await counters(), before, 'right-key polls write no counter');
+  });
+});
+
+test('booth per-IP defaults fit a venue NAT when the event vars are missing', () => {
+  const source = readFileSync(path.join(apiRoot, 'src/booth.mjs'), 'utf8');
+  assert.match(source, /perIpHour: positiveInt\(env\?\.BOOTH_SUBMISSIONS_PER_IP_HOUR, 400\)/);
+  assert.match(source, /claimsPerIpHour: positiveInt\(env\?\.BOOTH_CLAIMS_PER_IP_HOUR, 8000\)/);
 });
 
 test('multipart pdf checks, chunks and a same-hash duplicate', async () => {

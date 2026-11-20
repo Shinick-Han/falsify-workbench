@@ -112,6 +112,8 @@ async function blueWithRetry(env, row) {
       outcome = { error: codeOf(error) };
     }
     if (!outcome.error) return outcome;
+    // No free server slot for pollTimeoutMs is a full queue, not a failed row: no retry budget is spent here.
+    if (outcome.error === 'slot_busy') return { busy: true };
     last = outcome.error;
     progress(env.io, `live ${row.receipt} attempt ${attempt + 1} failed ${last}`);
   }
@@ -214,6 +216,11 @@ async function liveJob(env, row) {
   const blue = await blueWithRetry(env, { ...row, status: 'reviewing' });
   if (blue.skip === 'withdrawn') return skipWithdrawn(env, row);
   if (blue.skip) return skipMissing(env, row);
+  if (blue.busy) {
+    // The running marker stays, so the next list cycle picks the row up again (reviewing + running).
+    progress(env.io, `live ${row.receipt} still waiting for a job slot; next cycle retries`);
+    return { state: 'error', receipt: row.receipt, code: 'slot_busy' };
+  }
   if (blue.failed) return failRow(env, row, blue.failed);
   const verdict = verdictFor(row, blue.record);
   const body = judgedBody(env, verdict, { round: 'live', liveOutcome: verdict.outcome, prize: env.live.prizeMessage });
@@ -391,8 +398,8 @@ async function finalOne(env, row) {
   const liveVerdict = liveOutcomeOf(env.dir, row);
   const who = { receipt: row.receipt, assist: assistOf(row), recipeCode: recipeCodeOf(row) };
   const blue = await blueWithRetry(env, row);
-  if (blue.skip || blue.failed) {
-    return { ...who, liveVerdict, finalVerdict: null, error: blue.skip || blue.failed };
+  if (blue.skip || blue.failed || blue.busy) {
+    return { ...who, liveVerdict, finalVerdict: null, error: blue.skip || blue.failed || 'slot_busy' };
   }
   const verdict = verdictFor(row, blue.record);
   progress(env.io, `final ${row.receipt} live=${liveVerdict} final=${verdict.outcome}`);

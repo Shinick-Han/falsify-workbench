@@ -39,6 +39,7 @@ Preflight answers `OPTIONS` with methods `GET, POST, PATCH, PUT, DELETE, OPTIONS
 | GET | `/v1/booth/config` | none | 200 config |
 | POST | `/v1/booth/submissions` | guest, password, or Confluence owner | 201 receipt and claim key. `multipart/form-data` with `meta` and `pdf`. `paper` is required |
 | POST | `/v1/booth/claim` | none | 200 claim view |
+| GET | `/v1/booth/claim?receipt=&key=` | none | 200 claim view. Result polling: a CORS simple request (no preflight) that reads one row and spends no rate-limit slot while the key is right; the 40-bit claim key protects it. Failed key checks draw from small per-isolate buckets (20 per IP or IPv6 /64, refill 1 per 6 s; 200 per isolate); when one is empty the GET is charged to the POST claim buckets before the key is checked, so a 429 there says Retry-After ≤ 60. Query strings are redacted from Workers logs and traces (`observability.redact_query_string`). Exactly these two query keys |
 | POST | `/v1/booth/withdraw` | none (same body as claim) | 200 claim view, status `withdrawn` |
 | GET | `/v1/booth/admin/submissions` | operator | 200 page |
 | GET | `/v1/booth/admin/submissions/:receipt` | operator | 200 admin view |
@@ -79,6 +80,8 @@ A valid `fso_` bearer on `GET /v1/ai/capabilities` reports `blueJobs: true` and 
 `membership_required` and `open_access_disabled` are `403` with those codes, the same messages as `/v1/ai/*`, and they are not retryable. A Confluence session that refreshes inside the 60 second skew is copied onto booth success and error responses as `X-Falsify-Confluence-Session`. Every booth response sets `Access-Control-Expose-Headers` to `X-Falsify-Confluence-Session, Retry-After`, so the event page can read the wait on a `429` from the claim route, which has no session. `/v1/ai/*` and `/v1/papers/*` set the same value.
 
 `BOOTH_PARSE_TIMING=1`, `BOOTH_TEST_SEQ_BIAS`, `BOOTH_TEST_PATCH_GATE`, and `BOOTH_TEST_PDF_GATE` are test-only. None of them is an operator var, and none is set in `wrangler.jsonc`. The timing header is `X-Falsify-Parse-Ms`. The seq bias makes the first insert attempt expect a later receipt number so the retry lands the real one. The two gates pause after the admin read, or after the PDF index check, until the test sets that `booth_settings` key to `go`. A 16 MiB submit measured in Miniflare on this worker took 2272.000 ms in the handler (`X-Falsify-Parse-Ms`, after auth through formData, the digest, and the insert) and 2335.084 ms of `dispatchFetch` wall time. The handler span stays under the event `cpu_ms` of 5000. Miniflare did not expose a tail `cpuTime`.
+
+Claim views of unpublished `received` or `reviewing` rows carry `queue: {ahead, slots, etaSec}`: `ahead` is the number of `received` rows with a lower seq, `slots` is `BOOTH_OPERATOR_ACTIVE_JOBS` (default 4), and `etaSec` is `(floor(ahead/slots)+1) * BOOTH_ETA_JOB_SECONDS` (default 120), or for a `reviewing` row the job time left since it entered review (at least 15). It is an estimate for the visitor, computed in the same query. A `429` on POST claim or withdraw says `Retry-After` of at most 60 seconds.
 
 ## Recipes and agents
 

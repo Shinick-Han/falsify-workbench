@@ -37,9 +37,11 @@ export function createClient({ apiBase, token, fetchImpl = globalThis.fetch }) {
     }
     if (!response.ok) {
       const code = errorCode(parsed, response.status);
+      const retryAfter = Number(response.headers.get('Retry-After'));
       throw new BoothError(code, `${method} ${url.pathname} -> ${response.status} ${code}`, {
         exitCode: 2,
         status: response.status,
+        retryAfter: Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : 0,
       });
     }
     if (expect === 'bytes') return buffer;

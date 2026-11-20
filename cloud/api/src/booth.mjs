@@ -6,6 +6,8 @@ import { timingSafeEqual } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import { SESSION_HEADER } from './confluence.mjs';
 import { AiError, resolveAiOwner, sha256Hex } from './ai-identity.mjs';
+// Hoisted function; the circular import with booth-recipes.mjs is safe because it is only called per request.
+import { ipRateKey } from './booth-recipes.mjs';
 
 const RECEIPT = /^F-\d{4,}$/;
 const HEX64 = /^[0-9a-f]{64}$/;
@@ -46,7 +48,20 @@ const PDF_MAGIC = [0x25, 0x50, 0x44, 0x46, 0x2d]; // %PDF-
 const CLAIM_PREFIX = 'booth-claim:v1:';
 // Claim and withdraw share one bucket so the two key checks cannot double the guess rate.
 const CLAIM_BUCKET_PREFIX = 'booth-claim:ip:';
+// A fixed hourly window would otherwise tell a NAT'd poller to wait until the top of the hour, and the page
+// stops polling when that wait passes its 15 minute horizon. A short hint keeps polling alive.
+const CLAIM_RETRY_MAX_SECONDS = 60;
 const CLAIM_GLOBAL_BUCKET = 'booth-claim:all';
+// GET claim spends no D1 write while key checks succeed. Failed key checks draw from small per-isolate token
+// buckets (per IP, IPv6 per /64, and one for the whole isolate). When either is empty, the GET is charged to
+// the same D1 claim buckets as POST before the key is checked, so guessing is never cheaper than it was with
+// POST, and right-key pollers behind a venue NAT keep the free path unless someone on that IP keeps failing.
+const CLAIM_MISS_IP_BURST = 20;
+const CLAIM_MISS_IP_REFILL_MS = 6000;
+const CLAIM_MISS_ALL_BURST = 200;
+const CLAIM_MISS_ALL_REFILL_MS = 250;
+const CLAIM_MISS_MAX_KEYS = 4096;
+const claimMisses = new Map();
 const SUBMIT_BUCKET_PREFIX = 'booth-submit:ip:';
 const SUBMIT_GLOBAL_BUCKET = 'booth-submit:all';
 const SEQ_ATTEMPTS = 5;
@@ -122,9 +137,10 @@ function consentVersionOf(env) {
 function boothLimits(env) {
   return {
     perOwner: positiveInt(env?.BOOTH_SUBMISSIONS_PER_OWNER, 5),
-    perIpHour: positiveInt(env?.BOOTH_SUBMISSIONS_PER_IP_HOUR, 60),
+    // Venue Wi-Fi puts every phone behind one IP; the per-owner cap is the per-person limit.
+    perIpHour: positiveInt(env?.BOOTH_SUBMISSIONS_PER_IP_HOUR, 400),
     perHour: positiveInt(env?.BOOTH_SUBMISSIONS_PER_HOUR, 600),
-    claimsPerIpHour: positiveInt(env?.BOOTH_CLAIMS_PER_IP_HOUR, 120),
+    claimsPerIpHour: positiveInt(env?.BOOTH_CLAIMS_PER_IP_HOUR, 8000),
     claimsPerHour: positiveInt(env?.BOOTH_CLAIMS_PER_HOUR, 2000),
     storedBytes: positiveInt(env?.BOOTH_STORED_PDF_BYTES, STORED_PDF_DEFAULT),
   };
@@ -821,10 +837,26 @@ async function releaseSubmission(ctx, charged) {
   await ctx.deps.releaseSlot(db, SUBMIT_GLOBAL_BUCKET, charged.globalSlot);
 }
 
+function shortClaimRetry(error) {
+  if (error?.code !== 'rate_limited') return error;
+  const raw = Number(error.headers?.['Retry-After']);
+  const seconds = Number.isFinite(raw) && raw > 0 ? Math.min(Math.ceil(raw), CLAIM_RETRY_MAX_SECONDS) : CLAIM_RETRY_MAX_SECONDS;
+  return new AiError(429, 'rate_limited', { ...(error.headers || {}), 'Retry-After': String(seconds) });
+}
+
 async function chargeClaim(ctx) {
+  try {
+    await chargeClaimSlots(ctx);
+  } catch (error) {
+    throw shortClaimRetry(error);
+  }
+}
+
+async function chargeClaimSlots(ctx) {
   const db = ctx.deps.getDb();
   const limits = boothLimits(ctx.env);
-  const bucket = await bucketKey(CLAIM_BUCKET_PREFIX, clientIp(ctx));
+  // IPv6 per /64, as in the recipe routes: one host owns the whole prefix and could rotate addresses in it.
+  const bucket = await bucketKey(CLAIM_BUCKET_PREFIX, ipRateKey(clientIp(ctx)));
   const ipSlot = await ctx.deps.rateLimit(db, bucket, limits.claimsPerIpHour);
   try {
     await ctx.deps.rateLimit(db, CLAIM_GLOBAL_BUCKET, limits.claimsPerHour);
@@ -834,7 +866,22 @@ async function chargeClaim(ctx) {
   }
 }
 
-function claimView(row) {
+// Rough wait for an unpublished row: rows received before this one share BOOTH_OPERATOR_ACTIVE_JOBS slots,
+// each about BOOTH_ETA_JOB_SECONDS. Uncertain waits feel longer than known ones, so the page can show it.
+function queueView(row, env) {
+  if (row.published_at != null || (row.status !== 'received' && row.status !== 'reviewing')) return null;
+  const slots = positiveInt(env?.BOOTH_OPERATOR_ACTIVE_JOBS, 4);
+  const jobSeconds = positiveInt(env?.BOOTH_ETA_JOB_SECONDS, 120);
+  const ahead = Math.max(0, Number(row.queue_ahead) || 0);
+  if (row.status === 'reviewing') {
+    const since = (Date.now() - Date.parse(row.updated_at)) / 1000;
+    const left = Number.isFinite(since) ? jobSeconds - since : jobSeconds;
+    return { ahead: 0, slots, etaSec: Math.max(15, Math.round(left)) };
+  }
+  return { ahead, slots, etaSec: (Math.floor(ahead / slots) + 1) * jobSeconds };
+}
+
+function claimView(row, env) {
   const declared = parseJsonValue(row.declared);
   const published = row.published_at != null;
   const view = {
@@ -851,10 +898,14 @@ function claimView(row) {
     view.prizeMessage = row.prize_message ?? null;
     view.publishedAt = row.published_at;
   }
+  const queue = queueView(row, env);
+  if (queue) view.queue = queue;
   return view;
 }
 
-const CLAIM_SELECT = `id, receipt, status, course, declared, created_at, published_at, outcome, public_note, prize_message`;
+// queue_ahead is one indexed count on booth_submissions_status (status, seq), in the same round trip.
+const CLAIM_SELECT = `id, receipt, status, course, declared, created_at, updated_at, published_at, outcome, public_note, prize_message,
+  (SELECT COUNT(*) FROM booth_submissions q WHERE q.status = 'received' AND q.seq < booth_submissions.seq) AS queue_ahead`;
 
 async function loadClaim(db, receipt, claimKey) {
   if (!RECEIPT.test(receipt)) boothFail(404, 'not_found');
@@ -1008,10 +1059,61 @@ async function postSubmission(ctx) {
   }
 }
 
+function missTokens(name, burst, refillMs, now) {
+  const entry = claimMisses.get(name);
+  if (!entry) return burst;
+  return Math.min(burst, entry.tokens + Math.max(0, now - entry.at) / refillMs);
+}
+
+function spendMiss(name, burst, refillMs, now) {
+  const tokens = missTokens(name, burst, refillMs, now) - 1;
+  claimMisses.delete(name);
+  claimMisses.set(name, { tokens, at: now });
+  while (claimMisses.size > CLAIM_MISS_MAX_KEYS) claimMisses.delete(claimMisses.keys().next().value);
+}
+
+function claimMissNames(ctx) {
+  return { ip: 'ip:' + ipRateKey(clientIp(ctx)), all: 'all' };
+}
+
+function claimMissesLeft(names, now) {
+  return missTokens(names.ip, CLAIM_MISS_IP_BURST, CLAIM_MISS_IP_REFILL_MS, now) >= 1
+    && missTokens(names.all, CLAIM_MISS_ALL_BURST, CLAIM_MISS_ALL_REFILL_MS, now) >= 1;
+}
+
+function recordClaimMiss(names, now) {
+  spendMiss(names.ip, CLAIM_MISS_IP_BURST, CLAIM_MISS_IP_REFILL_MS, now);
+  spendMiss(names.all, CLAIM_MISS_ALL_BURST, CLAIM_MISS_ALL_REFILL_MS, now);
+}
+
+// Result polling: GET with the key in the query is a CORS simple request (no preflight) and only reads one
+// row, so a right key spends no rate-limit write. The 40-bit claim key protects the outcome, and failed key
+// checks are metered (see CLAIM_MISS_*). Our request log records the route template only, and
+// observability.redact_query_string keeps the key out of Workers logs and traces. POST stays for withdraw.
+async function getClaim(ctx) {
+  const params = ctx.url.searchParams;
+  const keys = [...params.keys()];
+  if (keys.length !== 2 || !params.has('receipt') || !params.has('key')) boothFail(400, 'invalid_request');
+  const receipt = params.get('receipt');
+  const key = params.get('key');
+  if (receipt.length > 16 || key.length > 32) boothFail(400, 'invalid_request');
+  const names = claimMissNames(ctx);
+  const free = claimMissesLeft(names, Date.now());
+  if (!free) await chargeClaim(ctx);
+  let row;
+  try {
+    row = await loadClaim(ctx.deps.getDb(), receipt, key);
+  } catch (error) {
+    if (free && error?.code === 'not_found') recordClaimMiss(names, Date.now());
+    throw error;
+  }
+  return json(200, claimView(row, ctx.env));
+}
+
 async function postClaim(ctx) {
   const body = await readClaimBody(ctx);
   const row = await loadClaim(ctx.deps.getDb(), body.receipt, body.claimKey);
-  return json(200, claimView(row));
+  return json(200, claimView(row, ctx.env));
 }
 
 async function postWithdraw(ctx) {
@@ -1030,7 +1132,7 @@ async function postWithdraw(ctx) {
     db.prepare('DELETE FROM booth_files WHERE submission_id = ?1').bind(row.id),
   ]);
   const fresh = await db.prepare(`SELECT ${CLAIM_SELECT} FROM booth_submissions WHERE id = ?1`).bind(row.id).first();
-  return json(200, claimView(fresh));
+  return json(200, claimView(fresh, ctx.env));
 }
 
 async function listAdmin(ctx) {
@@ -1212,7 +1314,7 @@ async function putSettings(ctx) {
 const ROUTES = {
   '/v1/booth/config': { GET: getConfig },
   '/v1/booth/submissions': { POST: postSubmission },
-  '/v1/booth/claim': { POST: postClaim },
+  '/v1/booth/claim': { GET: getClaim, POST: postClaim },
   '/v1/booth/withdraw': { POST: postWithdraw },
   '/v1/booth/admin/submissions': { GET: listAdmin },
   '/v1/booth/admin/submissions/:receipt': { GET: getAdmin, PATCH: patchAdmin, DELETE: deleteAdmin },

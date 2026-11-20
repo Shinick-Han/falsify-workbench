@@ -16,8 +16,8 @@ function send(res, status, body, headers = {}) {
   res.end(payload);
 }
 
-function fail(res, status, code) {
-  send(res, status, { error: { code, message: code, requestId: 'fake', retryable: false } });
+function fail(res, status, code, headers = {}) {
+  send(res, status, { error: { code, message: code, requestId: 'fake', retryable: false } }, headers);
 }
 
 async function readBody(req) {
@@ -32,7 +32,8 @@ function delay(ms) {
 
 export function startFake({
   token, submissions, pdfs, queued = false, jobDelayMs = 0, papers = null, pdfWithdrawn = null,
-  pdfHeaders = null, result = null, failJobs = false, pollFailures = 0,
+  pdfHeaders = null, result = null, failJobs = false, pollFailures = 0, activeCap = 0,
+  alwaysBusy = null, stuckJobs = false,
 }) {
   const makeResult = requestBody => {
     if (typeof result === 'function') return structuredClone(result(requestBody));
@@ -57,6 +58,9 @@ export function startFake({
     patches: [],
     pollFailures,
     jobPosts: 0,
+    busy429: 0,
+    cancels: 0,
+    maxActive: 0,
   };
 
   const server = http.createServer(async (req, res) => {
@@ -222,6 +226,14 @@ export function startFake({
         send(res, 200, { job: publicJob(existing), replayed: true });
         return;
       }
+      // Like BOOTH_OPERATOR_ACTIVE_JOBS: a new job past the active cap is 429 rate_limited.
+      const active = [...state.jobs.values()].filter(job => job.state === 'queued' || job.state === 'running').length;
+      if ((activeCap && active >= activeCap) || alwaysBusy !== null) {
+        state.busy429 += 1;
+        // alwaysBusy: '' is a 429 with no Retry-After, a number string is that header.
+        fail(res, 429, 'rate_limited', alwaysBusy ? { 'Retry-After': alwaysBusy } : {});
+        return;
+      }
       state.newJobs += 1;
       const now = new Date().toISOString();
       const job = {
@@ -240,6 +252,7 @@ export function startFake({
         completedAt: queued || failJobs ? null : now,
       };
       state.jobs.set(job.id, job);
+      state.maxActive = Math.max(state.maxActive, [...state.jobs.values()].filter(item => item.state === 'queued' || item.state === 'running').length);
       send(res, 202, { job: publicJob(job), replayed: false });
       return;
     }
@@ -256,11 +269,25 @@ export function startFake({
         return;
       }
       job.polls += 1;
+      if (stuckJobs && job.state === 'queued') job.state = 'running';
       if (job.state === 'queued' && job.polls >= 1) {
         job.state = 'completed';
         job.result = makeResult(job.requestBody);
         job.completedAt = new Date().toISOString();
       }
+      send(res, 200, { job: publicJob(job) });
+      return;
+    }
+    const cancelPath = pathname.match(/^\/v1\/ai\/jobs\/([^/]+)\/cancel$/);
+    if (req.method === 'POST' && cancelPath) {
+      const job = state.jobs.get(decodeURIComponent(cancelPath[1]));
+      if (!job) {
+        fail(res, 404, 'not_found');
+        return;
+      }
+      state.cancels += 1;
+      job.state = 'cancelled';
+      job.completedAt = new Date().toISOString();
       send(res, 200, { job: publicJob(job) });
       return;
     }

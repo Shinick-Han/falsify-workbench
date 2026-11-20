@@ -94,7 +94,7 @@ async function stubApi(route, log) {
     log.submissions.push(body);
     return json(route, 201, {receipt: 'F-0043', claimKey: '7Q3K-M9XD', status: 'received', course: 'quick', declaredCount: 2, createdAt: '2026-11-22T01:00:00.000Z'});
   }
-  if (request.method() === 'POST' && url.pathname === '/v1/booth/claim') {
+  if (url.pathname === '/v1/booth/claim' && (request.method() === 'GET' || request.method() === 'POST')) {
     return json(route, 200, {receipt: 'F-0043', status: 'reviewing', course: 'quick', declaredCount: 2, createdAt: '2026-11-22T01:00:00.000Z', published: false});
   }
   return json(route, 404, {error: {code: 'not_found'}});

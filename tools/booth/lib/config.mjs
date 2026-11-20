@@ -26,7 +26,8 @@ export function defaultLive() {
   return {
     liveProfile: 'live',
     finalProfile: 'final',
-    concurrency: 12,
+    // Same as the Worker's BOOTH_OPERATOR_ACTIVE_JOBS default. More workers than server slots only wait.
+    concurrency: 4,
     intervalSec: 10,
     retries: 2,
     retryBackoffMs: 5000,
@@ -116,7 +117,7 @@ export function loadConfigFile(file) {
   const config = {
     apiBase: '',
     dataDir: '',
-    blue: { concurrency: 1, repeat: 1, profiles: [], pollIntervalMs: 200, pollTimeoutMs: 900000 },
+    blue: { concurrency: 1, repeat: 1, profiles: [], pollIntervalMs: 2000, pollTimeoutMs: 900000 },
     live: normalizeLive(raw.live),
   };
   if (raw.apiBase !== undefined) {
@@ -169,7 +170,7 @@ export function emptyConfig() {
     apiBase: '',
     dataDir: '',
     configDir: process.cwd(),
-    blue: { concurrency: 1, repeat: 1, profiles: [], pollIntervalMs: 200, pollTimeoutMs: 900000 },
+    blue: { concurrency: 1, repeat: 1, profiles: [], pollIntervalMs: 2000, pollTimeoutMs: 900000 },
     live: defaultLive(),
   };
 }
@@ -263,6 +264,9 @@ export function resolveBluePlan(config, flags) {
     concurrency,
     pollIntervalMs: config.blue.pollIntervalMs,
     pollTimeoutMs: config.blue.pollTimeoutMs,
+    // A full operator job cap (429) is retried at the poll pace, at least 1 s apart, with the same upload and
+    // key. Each retry costs the Worker a reservation, a rollback and a runtime reconcile.
+    slotWaitMs: Math.max(config.blue.pollIntervalMs, 1000),
   };
 }
 
