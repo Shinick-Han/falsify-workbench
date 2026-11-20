@@ -649,3 +649,92 @@ test('page 5 (f): originalText not occurring on candidate lines falls back to re
   assert.equal(outText.includes('0.42'), true, 'newText must still extract');
   assert.ok((await pdfOracle.search(out, 4, '0.42')).length >= 1);
 });
+
+test('page 1 (rv90 P1-5): dagger † -> 1 in "Shahul Es†, Jithin" preserves comma and extracts "Es1,"', async () => {
+  const daggers = findStructuredRects(missionBytes, 0, '†');
+  assert.equal(daggers.length, 3);
+  // Widen rect slightly to simulate pdf.js span box bordering the adjacent comma
+  const widened = {...daggers[0].rect, w: daggers[0].rect.w + 0.004};
+
+  const out = await rewrite(missionBytes, [{
+    id: 'dagger-comma',
+    pageIndex: 0,
+    rects: [widened],
+    originalText: '†',
+    newText: '1',
+    source: 'tap',
+  }]);
+
+  const outText = await pdfOracle.extractText(out, 0);
+  const flat = outText.replace(/\s+/g, ' ');
+  assert.equal(flat.includes('Es1,'), true, `expected "Es1," in page 1 text, got: ${JSON.stringify(flat.slice(0, 200))}`);
+  assert.equal(flat.includes('Shahul Es1, Jithin'), true, `expected "Shahul Es1, Jithin" in page 1 text, got: ${JSON.stringify(flat.slice(0, 200))}`);
+  assert.equal((await pdfOracle.search(out, 0, '†')).length, 2, 'only the first dagger must be replaced');
+});
+
+function makeRotatedPdf(rotateDeg, lines = ['Hello World 0.95 End']) {
+  const doc = new mupdf.PDFDocument();
+  try {
+    const font = doc.addSimpleFont(new mupdf.Font('Helvetica'), 'Latin');
+    const resources = doc.newDictionary();
+    const fontsDict = doc.newDictionary();
+    fontsDict.put('F1', font);
+    resources.put('Font', fontsDict);
+    let stream = 'BT /F1 12 Tf ';
+    lines.forEach((line, idx) => {
+      stream += `1 0 0 1 72 ${700 - idx * 18} Tm (${line}) Tj `;
+    });
+    stream += 'ET\n';
+    const pageObj = doc.addPage([0, 0, 612, 792], rotateDeg, resources, stream);
+    doc.insertPage(-1, pageObj);
+    const buf = doc.saveToBuffer('garbage=compact');
+    try {
+      return buf.asUint8Array().slice();
+    } finally {
+      buf.destroy();
+    }
+  } finally {
+    doc.destroy();
+  }
+}
+
+test('rotated pages (rv90 P1-4): "0.95" -> "0.50" on /Rotate 90, 180, and 270', async () => {
+  for (const deg of [90, 180, 270]) {
+    const src = makeRotatedPdf(deg, ['Hello World 0.95 End', 'Second line value 1.23']);
+    const hits = findStructuredRects(src, 0, '0.95');
+    assert.equal(hits.length, 1, `expected 0.95 on /Rotate ${deg}`);
+
+    const out = await rewrite(src, [{
+      id: `rot-${deg}`,
+      pageIndex: 0,
+      rects: [hits[0].rect],
+      originalText: '0.95',
+      newText: '0.50',
+      source: 'tap',
+    }]);
+
+    const outText = await pdfOracle.extractText(out, 0);
+    assert.equal((await pdfOracle.search(out, 0, '0.50')).length >= 1, true, `/Rotate ${deg}: search("0.50") must hit (text=${JSON.stringify(outText)})`);
+    assert.equal((await pdfOracle.search(out, 0, '0.95')).length, 0, `/Rotate ${deg}: "0.95" must be gone`);
+    assert.equal(outText.includes('0.95'), false, `/Rotate ${deg}: "0.95" must not extract`);
+    assert.equal(outText.includes('0.50'), true, `/Rotate ${deg}: "0.50" must extract`);
+    assert.equal(outText.includes('Second line value 1.23'), true, `/Rotate ${deg}: second line must stay intact`);
+  }
+});
+
+test('overlapping direct edits (rv90 P2-5): newest edit wins and emits only one inserted text', async () => {
+  const hits095 = findStructuredRects(missionBytes, 4, '0.95');
+  assert.equal(hits095.length, 1);
+
+  const out = await rewrite(missionBytes, [
+    {id: 'old-edit', pageIndex: 4, rects: [hits095[0].rect], originalText: '0.95', newText: 'FIRST_VAL', source: 'tap'},
+    {id: 'new-edit', pageIndex: 4, rects: [hits095[0].rect], originalText: '0.95', newText: 'SECOND_VAL', source: 'tap'},
+  ]);
+
+  const outText = await pdfOracle.extractText(out, 4);
+  assert.equal(outText.includes('0.95'), false, 'original 0.95 must be removed');
+  assert.equal(outText.includes('SECOND_VAL'), true, 'newest overlapping edit must extract');
+  assert.equal(outText.includes('FIRST_VAL'), false, 'superseded older edit must not be emitted');
+  assert.equal((await pdfOracle.search(out, 4, 'FIRST_VAL')).length, 0);
+  assert.ok((await pdfOracle.search(out, 4, 'SECOND_VAL')).length >= 1);
+});

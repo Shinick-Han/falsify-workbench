@@ -1251,8 +1251,10 @@ function selectGlyphsByRects(chars, displayRects) {
     const cx = (gx0 + gx1) / 2;
     const cy = (gy0 + gy1) / 2;
     for (const [rx0, ry0, rx1, ry1] of displayRects) {
-      const tolX = 0.5;
-      const tolY = Math.min(1.5, Math.max(0.5, (ry1 - ry0) * 0.15));
+      const rw = rx1 - rx0;
+      const rh = ry1 - ry0;
+      const tolX = rw < rh && rw < 8 ? Math.min(0.5, rw * 0.08) : 0.5;
+      const tolY = Math.min(1.5, Math.max(0.5, rh * 0.15));
       if (cx >= rx0 - tolX && cx <= rx1 + tolX && cy >= ry0 - tolY && cy <= ry1 + tolY) {
         selected.push(ch);
         break;
@@ -1282,18 +1284,33 @@ function rectCenterOf(displayRects) {
   return [(x0 + x1) / 2, (y0 + y1) / 2];
 }
 
+function charBandMatchesRect(ch, rect) {
+  const [gx0, gy0, gx1, gy1] = quadBounds(ch.quad);
+  const [rx0, ry0, rx1, ry1] = rect;
+  const dir = ch.lineDir || [1, 0];
+  if (Math.abs(dir[1]) > Math.abs(dir[0])) {
+    const tol = Math.min(1.5, Math.max(0.5, (rx1 - rx0) * 0.15));
+    const cx = (gx0 + gx1) / 2;
+    return cx >= rx0 - tol && cx <= rx1 + tol;
+  }
+  const tol = Math.min(1.5, Math.max(0.5, (ry1 - ry0) * 0.15));
+  const cy = (gy0 + gy1) / 2;
+  return cy >= ry0 - tol && cy <= ry1 + tol;
+}
+
 function candidateAlignLineIds(allChars, rectSelected, displayRects) {
   if (rectSelected.length) return new Set(rectSelected.map(ch => ch.lineId));
-  const ids = new Set();
+  const hitIds = new Set();
   for (const ch of allChars) {
-    const [, gy0, , gy1] = quadBounds(ch.quad);
-    const cy = (gy0 + gy1) / 2;
-    for (const [, ry0, , ry1] of displayRects) {
-      const tolY = Math.min(1.5, Math.max(0.5, (ry1 - ry0) * 0.15));
-      if (cy >= ry0 - tolY && cy <= ry1 + tolY) { ids.add(ch.lineId); break; }
-    }
+    const box = quadBounds(ch.quad);
+    if (displayRects.some(r => intersects(box, r, 1.5))) hitIds.add(ch.lineId);
   }
-  return ids;
+  if (hitIds.size) return hitIds;
+  const bandIds = new Set();
+  for (const ch of allChars) {
+    if (displayRects.some(r => charBandMatchesRect(ch, r))) bandIds.add(ch.lineId);
+  }
+  return bandIds;
 }
 
 function buildAlignCorpus(lineChars) {
@@ -1356,6 +1373,29 @@ function alignGlyphsToOriginalText(allChars, rectSelected, displayRects, origina
   return {chars: aligned, aligned: aligned.length > 0};
 }
 
+function trimUnchangedSymbolEdges(selectedChars, newText) {
+  const raw = String(newText == null ? '' : newText);
+  if (!raw) return {chars: selectedChars, text: raw};
+  const drawn = selectedChars.filter(ch => ch.c.trim());
+  const next = [...raw];
+  let start = 0;
+  let end = drawn.length;
+  let nStart = 0;
+  let nEnd = next.length;
+  const isSymbol = c => winAnsiByte(c.codePointAt(0)) === null && !isCjkCodePoint(c.codePointAt(0));
+  while (end - start > 1 && nEnd - nStart > 1 && isSymbol(drawn[start].c) && drawn[start].c === next[nStart]) {
+    start += 1;
+    nStart += 1;
+  }
+  while (end - start > 1 && nEnd - nStart > 1 && isSymbol(drawn[end - 1].c) && drawn[end - 1].c === next[nEnd - 1]) {
+    end -= 1;
+    nEnd -= 1;
+  }
+  if (start === 0 && end === drawn.length) return {chars: selectedChars, text: raw};
+  const firstIdx = selectedChars.indexOf(drawn[start]);
+  const lastIdx = selectedChars.lastIndexOf(drawn[end - 1]);
+  return {chars: selectedChars.slice(firstIdx, lastIdx + 1), text: next.slice(nStart, nEnd).join('')};
+}
 function alignedDisplayRects(selectedChars) {
   const byLine = new Map();
   for (const ch of selectedChars) {
@@ -1365,6 +1405,27 @@ function alignedDisplayRects(selectedChars) {
     arr.push(ch);
   }
   return [...byLine.values()].map(arr => union(arr));
+}
+
+function fallbackRedactionRect(ch, protectedBoxes) {
+  const box = removalBox(ch) || quadBounds(ch.quad);
+  const [x0, y0, x1, y1] = box;
+  const w = x1 - x0;
+  const h = y1 - y0;
+  const fracs = [0.5, 0.25, 0.75, 0.15, 0.85];
+  if (w > 0.1 && h > 0.1) {
+    for (const fy of fracs) {
+      for (const fx of fracs) {
+        const px = x0 + w * fx;
+        const py = y0 + h * fy;
+        const cand = [px - 0.05, py - 0.05, px + 0.05, py + 0.05];
+        if (!protectedBoxes.some(obs => intersects(cand, obs, 0))) return cand;
+      }
+    }
+  }
+  const cx = (x0 + x1) / 2;
+  const cy = (y0 + y1) / 2;
+  return [cx - 0.1, cy - 0.1, cx + 0.1, cy + 0.1];
 }
 
 function redactRewritePage(page, pagePlans, allChars) {
@@ -1384,28 +1445,26 @@ function redactRewritePage(page, pagePlans, allChars) {
   const quads = [];
   for (const ch of selectedSet) {
     if (!ch.c.trim()) continue;
-    let rect = safeRedactionRect(ch, protectedBoxes);
-    if (!rect) {
-      const [x0, y0, x1, y1] = quadBounds(ch.quad);
-      const cx = (x0 + x1) / 2;
-      const cy = (y0 + y1) / 2;
-      rect = [cx - 0.1, cy - 0.1, cx + 0.1, cy + 0.1];
-    }
+    const rect = safeRedactionRect(ch, protectedBoxes) || fallbackRedactionRect(ch, protectedBoxes);
     const [x0, y0, x1, y1] = rect;
     quads.push([x0, y1, x1, y1, x0, y0, x1, y0]);
   }
   if (!quads.length) return;
 
   const annot = page.createAnnotation('Redact');
-  annot.setRect(quadBounds(quads.flat()));
-  annot.setQuadPoints(quads);
-  annot.update();
-  page.applyRedactions(
-    false,
-    mupdf.PDFPage.REDACT_IMAGE_NONE,
-    mupdf.PDFPage.REDACT_LINE_ART_NONE,
-    mupdf.PDFPage.REDACT_TEXT_REMOVE,
-  );
+  try {
+    annot.setRect(quadBounds(quads.flat()));
+    annot.setQuadPoints(quads);
+    annot.update();
+    page.applyRedactions(
+      false,
+      mupdf.PDFPage.REDACT_IMAGE_NONE,
+      mupdf.PDFPage.REDACT_LINE_ART_NONE,
+      mupdf.PDFPage.REDACT_TEXT_REMOVE,
+    );
+  } finally {
+    try { annot.destroy(); } catch { /* ignore */ }
+  }
 }
 
 function pdfDirection(toPdf, dx, dy) {
@@ -1437,16 +1496,40 @@ function maxDistanceInBounds(ox, oy, dxPdf, dyPdf, transform, bounds, margin = R
   return Math.max(0, Number.isFinite(tMax) ? tMax : 0);
 }
 
-function mergeDisplayLineRects(displayRects) {
-  const sorted = [...displayRects].sort((a, b) => a[1] - b[1] || a[0] - b[0]);
+function unitDisplayDir(dir) {
+  const dx = Number(dir?.[0]) || 0;
+  const dy = Number(dir?.[1]) || 0;
+  const len = Math.hypot(dx, dy);
+  return len > 1e-6 ? [dx / len, dy / len] : [1, 0];
+}
+
+function rectNormalThickness(rect, dir) {
+  const [dx, dy] = unitDisplayDir(dir);
+  return Math.abs(-dy) * (rect[2] - rect[0]) + Math.abs(dx) * (rect[3] - rect[1]);
+}
+
+function rectsMergeOnBand(line, r, vertical) {
+  if (vertical) {
+    const minW = Math.min(line[2] - line[0], r[2] - r[0]);
+    const overlapX = Math.min(line[2], r[2]) - Math.max(line[0], r[0]);
+    const gapY = Math.max(0, r[1] - line[3], line[1] - r[3]);
+    return minW > 0 && overlapX >= minW * 0.5 && gapY <= minW * 2.5;
+  }
+  const minH = Math.min(line[3] - line[1], r[3] - r[1]);
+  const overlapY = Math.min(line[3], r[3]) - Math.max(line[1], r[1]);
+  const gapX = Math.max(0, r[0] - line[2], line[0] - r[2]);
+  return minH > 0 && overlapY >= minH * 0.5 && gapX <= minH * 2.5;
+}
+
+function mergeDisplayLineRects(displayRects, dir = [1, 0]) {
+  const [dx, dy] = unitDisplayDir(dir);
+  const vertical = Math.abs(dy) > Math.abs(dx);
+  const sorted = [...displayRects].sort((a, b) => (vertical ? (a[0] - b[0] || a[1] - b[1]) : (a[1] - b[1] || a[0] - b[0])));
   const lines = [];
   for (const r of sorted) {
-    const rh = r[3] - r[1];
     let merged = false;
     for (const line of lines) {
-      const overlapY = Math.min(line[3], r[3]) - Math.max(line[1], r[1]);
-      const minH = Math.min(line[3] - line[1], rh);
-      if (minH > 0 && overlapY >= minH * 0.5) {
+      if (rectsMergeOnBand(line, r, vertical)) {
         line[0] = Math.min(line[0], r[0]);
         line[1] = Math.min(line[1], r[1]);
         line[2] = Math.max(line[2], r[2]);
@@ -1457,7 +1540,16 @@ function mergeDisplayLineRects(displayRects) {
     }
     if (!merged) lines.push([...r]);
   }
-  lines.sort((a, b) => a[1] - b[1] || a[0] - b[0]);
+  const nxD = -dy;
+  const nyD = dx;
+  lines.sort((a, b) => {
+    const na = ((a[0] + a[2]) / 2) * nxD + ((a[1] + a[3]) / 2) * nyD;
+    const nb = ((b[0] + b[2]) / 2) * nxD + ((b[1] + b[3]) / 2) * nyD;
+    if (Math.abs(na - nb) > 1) return na - nb;
+    const ua = ((a[0] + a[2]) / 2) * dx + ((a[1] + a[3]) / 2) * dy;
+    const ub = ((b[0] + b[2]) / 2) * dx + ((b[1] + b[3]) / 2) * dy;
+    return ua - ub;
+  });
   return lines;
 }
 
@@ -1475,32 +1567,40 @@ function rightClearWidth(lineRect, sx, pageAvailW, lineDir, model, selectedSet) 
   return Math.min(pageAvailW, Math.max(0, maxRightX - sx));
 }
 
-function splitCharsIntoLineBands(lineChars) {
+function splitCharsIntoLineBands(lineChars, dir = [1, 0]) {
+  const [dx, dy] = unitDisplayDir(dir);
+  const nxD = -dy;
+  const nyD = dx;
   const items = lineChars.map(ch => {
     const box = quadBounds(ch.quad);
-    return {ch, box, cy: (box[1] + box[3]) / 2, h: Math.max(1, box[3] - box[1])};
+    const cx = (box[0] + box[2]) / 2;
+    const cy = (box[1] + box[3]) / 2;
+    const thick = Math.max(1, Math.abs(nxD) * (box[2] - box[0]) + Math.abs(nyD) * (box[3] - box[1]));
+    return {ch, box, nPos: cx * nxD + cy * nyD, uPos: cx * dx + cy * dy, thick};
   });
-  items.sort((a, b) => a.cy - b.cy || a.box[0] - b.box[0]);
+  items.sort((a, b) => a.nPos - b.nPos || a.uPos - b.uPos);
   const bands = [];
   for (const item of items) {
     let target = null;
     for (const band of bands) {
-      const minH = Math.min(band.h, item.h);
-      if (Math.abs(item.cy - band.cy) <= minH * 0.6) { target = band; break; }
+      const minT = Math.min(band.thick, item.thick);
+      if (Math.abs(item.nPos - band.nPos) <= minT * 0.6) { target = band; break; }
     }
     if (!target) {
-      bands.push({cy: item.cy, h: item.h, box: [...item.box], chars: [item.ch]});
+      bands.push({nPos: item.nPos, uPos: item.uPos, thick: item.thick, box: [...item.box], chars: [item.ch]});
     } else {
       target.chars.push(item.ch);
       target.box[0] = Math.min(target.box[0], item.box[0]);
       target.box[1] = Math.min(target.box[1], item.box[1]);
       target.box[2] = Math.max(target.box[2], item.box[2]);
       target.box[3] = Math.max(target.box[3], item.box[3]);
-      target.cy = (target.box[1] + target.box[3]) / 2;
-      target.h = Math.max(target.h, item.h);
+      const cx = (target.box[0] + target.box[2]) / 2;
+      const cy = (target.box[1] + target.box[3]) / 2;
+      target.nPos = cx * nxD + cy * nyD;
+      target.thick = Math.max(target.thick, item.thick);
     }
   }
-  bands.sort((a, b) => a.box[1] - b.box[1] || a.box[0] - b.box[0]);
+  bands.sort((a, b) => a.nPos - b.nPos || a.uPos - b.uPos);
   return bands;
 }
 
@@ -1600,11 +1700,28 @@ function buildEmptyRectSlot(lineRect, hasDrawn, summary, model, selectedSet) {
   };
 }
 
+function sortSlotsAlongNormal(slots, dir, transform) {
+  if (slots.length < 2) return slots;
+  const [dx, dy] = unitDisplayDir(dir);
+  const nxD = -dy;
+  const nyD = dx;
+  const tol = Math.max(1, slots[0].size * 0.4);
+  return slots.sort((a, b) => {
+    const [ax, ay] = apply(transform, a.ox, a.oy);
+    const [bx, by] = apply(transform, b.ox, b.oy);
+    const na = ax * nxD + ay * nyD;
+    const nb = bx * nxD + by * nyD;
+    if (Math.abs(na - nb) > tol) return na - nb;
+    return (ax * dx + ay * dy) - (bx * dx + by * dy);
+  });
+}
+
 function buildRewriteSlots(selectedChars, displayRects, model) {
   const drawn = selectedChars.filter(ch => ch.c.trim());
   const selectedSet = new Set(selectedChars);
   const summary = summarizeDrawnStyle(drawn);
-  const lineRects = mergeDisplayLineRects(displayRects);
+  const domDir = drawn.length ? unitDisplayDir(drawn[0].lineDir) : [1, 0];
+  const lineRects = mergeDisplayLineRects(displayRects, domDir);
   const slots = [];
 
   for (const lineRect of lineRects) {
@@ -1613,14 +1730,20 @@ function buildRewriteSlots(selectedChars, displayRects, model) {
       slots.push(buildEmptyRectSlot(lineRect, drawn.length > 0, summary, model, selectedSet));
       continue;
     }
-    const [rx0, ry0, rx1, ry1] = lineRect;
-    const bands = (ry1 - ry0) > summary.medianSize * 1.8 ? splitCharsIntoLineBands(lineChars) : [{box: lineRect, chars: lineChars}];
+    const lineDir = unitDisplayDir(lineChars[0].lineDir);
+    const thick = rectNormalThickness(lineRect, lineDir);
+    const bands = thick > summary.medianSize * 1.8 ? splitCharsIntoLineBands(lineChars, lineDir) : [{box: lineRect, chars: lineChars}];
+    const vertical = Math.abs(lineDir[1]) > Math.abs(lineDir[0]);
     for (const band of bands) {
-      const refRect = bands.length === 1 ? lineRect : [rx0, band.box[1], rx1, band.box[3]];
+      const refRect = bands.length === 1
+        ? lineRect
+        : vertical
+          ? [band.box[0], lineRect[1], band.box[2], lineRect[3]]
+          : [lineRect[0], band.box[1], lineRect[2], band.box[3]];
       slots.push(buildGlyphBandSlot(band, refRect, summary, model, selectedSet));
     }
   }
-  return slots;
+  return sortSlotsAlongNormal(slots, domDir, model.transform);
 }
 
 function sanitizeRewriteText(raw) {
@@ -1750,7 +1873,7 @@ function ensureNimbusCidFont(doc, page, baseName, cidState) {
   if (!entry) {
     const font = metrics(baseName);
     const pdfFont = doc.addFont(font);
-    entry = {font, pdfFont, mappings: new Map(), pageNames: new WeakMap()};
+    entry = {font, pdfFont, mappings: new Map()};
     cidState.set(baseName, entry);
   }
   const resources = ownResources(doc, page);
@@ -1758,7 +1881,6 @@ function ensureNimbusCidFont(doc, page, baseName, cidState) {
   if (fontsDict.isNull()) { fontsDict = doc.newDictionary(); resources.put('Font', fontsDict); }
   else fontsDict = fontsDict.resolve();
 
-  const pageObj = page.getObject();
   const resKey = 'FwCid' + baseName.replace(/[^A-Za-z0-9]/g, '');
   let existing = null;
   fontsDict.forEach((value, key) => {
@@ -1772,7 +1894,6 @@ function ensureNimbusCidFont(doc, page, baseName, cidState) {
   fontsDict.forEach((_value, key) => taken.add(String(key)));
   while (taken.has(name)) name += 'x';
   fontsDict.put(name, entry.pdfFont);
-  entry.pageNames.set(pageObj, name);
   return {resName: name, entry};
 }
 
@@ -1917,12 +2038,23 @@ function fitUnbrokenSingleToken(baseSlot, naturalW, baseSize) {
   return null;
 }
 
-function emitSingleSlotRewrite(doc, page, baseSlot, text, baseName, cidState) {
+function centerNarrowSingleSlot(baseSlot, naturalW, rightOrigin) {
+  if (!rightOrigin || Math.abs(baseSlot.ux - 1) > 0.01 || Math.abs(baseSlot.uy) > 0.01) return baseSlot;
+  const totalSpan = rightOrigin[0] - baseSlot.ox;
+  if (!(totalSpan > naturalW && totalSpan <= baseSlot.slotWidth + baseSlot.size * 0.25)) return baseSlot;
+  const slack = totalSpan - naturalW;
+  if (!(slack > baseSlot.size * 0.2 && slack < baseSlot.size)) return baseSlot;
+  const shift = slack / 2;
+  return {...baseSlot, ox: baseSlot.ox + baseSlot.ux * shift, oy: baseSlot.oy + baseSlot.uy * shift};
+}
+
+function emitSingleSlotRewrite(doc, page, baseSlot, text, baseName, cidState, rightOrigin = null) {
   const baseSize = baseSlot.size;
   const minSize = Math.max(Math.min(baseSize, 5), baseSize * 0.72);
   const naturalW = measureRewriteLine(text, baseName, baseSize);
   let fontSize = baseSize;
   let hScale = 100;
+  let targetSlot = baseSlot;
   if (naturalW > baseSlot.slotWidth && baseSlot.slotWidth > 0) {
     const ratio = baseSlot.slotWidth / naturalW;
     if (ratio >= REWRITE_MIN_SCALE / 100) {
@@ -1931,10 +2063,12 @@ function emitSingleSlotRewrite(doc, page, baseSlot, text, baseName, cidState) {
       hScale = REWRITE_MIN_SCALE;
       fontSize = Math.max(minSize, (baseSlot.slotWidth / (naturalW * (REWRITE_MIN_SCALE / 100))) * baseSize);
     }
+  } else {
+    targetSlot = centerNarrowSingleSlot(baseSlot, naturalW, rightOrigin);
   }
   const renderedW = measureRewriteLine(text, baseName, fontSize) * (hScale / 100);
-  if (!(baseSlot.pageAvailW > 0) || renderedW <= baseSlot.pageAvailW) {
-    return emitRewriteLinesOps(doc, page, [singleLineItem(baseSlot, text, fontSize, hScale)], baseName, cidState);
+  if (!(targetSlot.pageAvailW > 0) || renderedW <= targetSlot.pageAvailW) {
+    return emitRewriteLinesOps(doc, page, [singleLineItem(targetSlot, text, fontSize, hScale)], baseName, cidState);
   }
   if (!/\s/.test(text.trim())) {
     const fitted = fitUnbrokenSingleToken(baseSlot, naturalW, baseSize);
@@ -2025,13 +2159,13 @@ function emitMultiSlotRewrite(doc, page, slots, text, baseName, cidState) {
   return emitRewriteLinesOps(doc, page, items, baseName, cidState);
 }
 
-function emitRewriteEdit(doc, page, slots, rawNewText, cidState) {
+function emitRewriteEdit(doc, page, slots, rawNewText, cidState, rightOrigin = null) {
   const sanitized = sanitizeRewriteText(rawNewText);
   // '\n' in newText is a soft break: normalize newlines to single spaces so words reflow across slots
   const text = sanitized.replace(/^\n+|\n+$/g, '').replace(/[ ]*\n+[ ]*/g, ' ');
   if (!text.trim() || !slots.length) return '';
   const baseName = base14FromStyle(slots[0].style);
-  if (slots.length === 1) return emitSingleSlotRewrite(doc, page, slots[0], text, baseName, cidState);
+  if (slots.length === 1) return emitSingleSlotRewrite(doc, page, slots[0], text, baseName, cidState, rightOrigin);
   return emitMultiSlotRewrite(doc, page, slots, text, baseName, cidState);
 }
 
@@ -2073,9 +2207,9 @@ function isIdentityMatrix(m) {
   return Array.isArray(m) && m.length === 6 && m.every((v, i) => Math.abs(v - id[i]) < 1e-3);
 }
 
-function restoreTextStateOps(show) {
-  const lm = show.lineMatrix.map(num).join(' ');
-  return `BT /${show.fontName} ${num(show.fontSize)} Tf ${num(show.hScale)} Tz ${num(show.charSpace)} Tc ${num(show.wordSpace)} Tw ${num(show.rise)} Ts ${show.renderMode} Tr ${num(show.leading)} TL ${lm} Tm `;
+function restoreTextStateOps(show, matrix = show.lineMatrix) {
+  const tm = matrix.map(num).join(' ');
+  return `BT /${show.fontName} ${num(show.fontSize)} Tf ${num(show.hScale)} Tz ${num(show.charSpace)} Tc ${num(show.wordSpace)} Tw ${num(show.rise)} Ts ${show.renderMode} Tr ${num(show.leading)} TL ${tm} Tm `;
 }
 
 const SPLICE_SAFE_NEXT_OPS = new Set(['Tm', 'Td', 'TD', 'T*', 'ET']);
@@ -2092,15 +2226,30 @@ function nextOpAllowsSplice(latin1, offset) {
   return false;
 }
 
+function showStartX(show) {
+  let sx = show.textMatrix[4];
+  const scaleX = show.textMatrix[0] * (show.hScale / 100);
+  for (const part of show.parts || []) {
+    if (part.type !== 'adjustment') break;
+    sx -= (part.value / 1000) * show.fontSize * scaleX;
+  }
+  return sx;
+}
+
 function findInlineSpliceTarget(shows, latin1, slot) {
+  if (Math.abs(slot.ux - 1) > 0.01 || Math.abs(slot.uy) > 0.01) return null;
   let best = null;
   for (const show of shows) {
     if (!show.fontName || !isIdentityMatrix(show.ctm)) continue;
-    const sx = show.textMatrix[4];
+    const sx = showStartX(show);
     const sy = show.textMatrix[5];
-    if (Math.abs(sy - slot.oy) > 1.5 || sx > slot.ox + 1) continue;
+    const dy = Math.abs(sy - slot.oy);
+    const yTol = Math.max(1.5, Math.max(slot.size, show.fontSize) * 0.55);
+    if (dy > yTol || sx > slot.ox - 0.5) continue;
     if (!nextOpAllowsSplice(latin1, show.end)) continue;
-    if (!best || sx >= best.sx) best = {show, sx};
+    if (!best || sx > best.sx + 0.5 || (Math.abs(sx - best.sx) <= 0.5 && dy < best.dy)) {
+      best = {show, sx, dy};
+    }
   }
   return best ? best.show : null;
 }
@@ -2137,6 +2286,61 @@ function writeStreamLatin1(streamObj, latin1) {
   streamObj.writeStream(out);
 }
 
+function findRightSiblingOrigin(selectedChars, allChars, slot) {
+  if (!slot || Math.abs(slot.ux - 1) > 0.01 || Math.abs(slot.uy) > 0.01) return null;
+  const drawn = selectedChars.filter(ch => ch.c.trim());
+  if (!drawn.length) return null;
+  const lineId = drawn[0].lineId;
+  if (drawn.some(ch => ch.lineId !== lineId)) return null;
+  const selectedSet = new Set(selectedChars);
+  let maxX = slot.ox;
+  for (const ch of drawn) if (ch.pdfOrigin[0] > maxX) maxX = ch.pdfOrigin[0];
+  let best = null;
+  for (const ch of allChars) {
+    if (ch.lineId !== lineId || selectedSet.has(ch) || !ch.c.trim()) continue;
+    const x = ch.pdfOrigin[0];
+    if (x > maxX + 0.5 && (!best || x < best[0])) best = ch.pdfOrigin;
+  }
+  return best;
+}
+
+function findTjHolePart(show, slot, rightOrigin) {
+  if (show.kind !== 'TJ' || !rightOrigin || !Array.isArray(show.parts) || show.parts.length < 3) return null;
+  const holeW = rightOrigin[0] - slot.ox;
+  if (!(holeW > 0)) return null;
+  const scaleX = show.textMatrix[0] * (show.hScale / 100);
+  const minJump = Math.max(4, holeW * 0.65);
+  let best = null;
+  let bestJump = 0;
+  for (let i = 1; i < show.parts.length - 1; i++) {
+    const part = show.parts[i];
+    if (part.type !== 'adjustment' || !(part.value < 0)) continue;
+    const jumpW = (-part.value / 1000) * show.fontSize * scaleX;
+    if (jumpW >= minJump && jumpW > bestJump) { best = part; bestJump = jumpW; }
+  }
+  return best;
+}
+
+function buildInlineSplice(entry, show, item) {
+  const holePart = findTjHolePart(show, item.slots[0], item.rightOrigin);
+  if (holePart) {
+    const rightTm = [show.textMatrix[0], show.textMatrix[1], show.textMatrix[2], show.textMatrix[3], item.rightOrigin[0], item.rightOrigin[1]];
+    const leftHalf = entry.latin1.slice(show.start, holePart.start) + ']TJ';
+    const rightHalf = '[' + entry.latin1.slice(holePart.end, show.end);
+    const lm = show.lineMatrix.map(num).join(' ');
+    return {
+      start: show.start,
+      end: show.end,
+      piece: `${leftHalf} ET\n${item.ops}${restoreTextStateOps(show, rightTm)}${rightHalf} ${lm} Tm `,
+    };
+  }
+  return {
+    start: show.end,
+    end: show.end,
+    piece: ` ET\n${item.ops}${restoreTextStateOps(show)}`,
+  };
+}
+
 function spliceRewriteOpsInline(page, emittedPlans) {
   const streams = pageContentStreams(page);
   if (!streams.length) return emittedPlans.map(p => p.ops).join('');
@@ -2146,6 +2350,7 @@ function spliceRewriteOpsInline(page, emittedPlans) {
     return {streamObj, latin1, parsed, splices: []};
   });
 
+  const usedShows = new Set();
   let fallbackOps = '';
   for (const item of emittedPlans) {
     const firstSlot = item.slots[0];
@@ -2154,49 +2359,74 @@ function spliceRewriteOpsInline(page, emittedPlans) {
       for (const entry of scanned) {
         if (entry.parsed.diagnostics.length) continue;
         const show = findInlineSpliceTarget(entry.parsed.shows, entry.latin1, firstSlot);
-        if (show) { matched = {entry, show}; break; }
+        if (show && !usedShows.has(show)) { matched = {entry, show}; break; }
       }
     }
     if (!matched) {
       fallbackOps += item.ops;
       continue;
     }
-    const piece = ` ET\n${item.ops}${restoreTextStateOps(matched.show)}`;
-    matched.entry.splices.push({offset: matched.show.end, piece});
+    usedShows.add(matched.show);
+    matched.entry.splices.push(buildInlineSplice(matched.entry, matched.show, item));
   }
 
   for (const entry of scanned) {
     if (!entry.splices.length) continue;
-    entry.splices.sort((a, b) => b.offset - a.offset);
+    entry.splices.sort((a, b) => b.start - a.start);
     let next = entry.latin1;
     for (const sp of entry.splices) {
-      next = next.slice(0, sp.offset) + sp.piece + next.slice(sp.offset);
+      next = next.slice(0, sp.start) + sp.piece + next.slice(sp.end);
     }
     writeStreamLatin1(entry.streamObj, next);
   }
   return fallbackOps;
 }
 
+function dedupeRewritePlans(pagePlans, model) {
+  const claimed = new Set();
+  const kept = [];
+  for (let i = pagePlans.length - 1; i >= 0; i--) {
+    const plan = pagePlans[i];
+    const hadDrawn = plan.selectedChars.some(ch => ch.c.trim());
+    const remaining = plan.selectedChars.filter(ch => !claimed.has(ch));
+    const hasDrawn = remaining.some(ch => ch.c.trim());
+    if (hadDrawn && !hasDrawn) continue;
+    for (const ch of remaining) claimed.add(ch);
+    if (remaining.length !== plan.selectedChars.length) {
+      const slotRects = plan.aligned ? alignedDisplayRects(remaining) : plan.displayRects;
+      plan.selectedChars = remaining;
+      plan.slots = buildRewriteSlots(remaining, slotRects.length ? slotRects : plan.displayRects, model);
+    }
+    kept.push(plan);
+  }
+  return kept.reverse();
+}
+
 function applyRewritePage(doc, pageIndex, pageEdits, cidState) {
   const page = doc.loadPage(pageIndex);
   try {
     const model = readRewritePage(page);
-    const pagePlans = [];
+    const rawPlans = [];
     for (const edit of pageEdits) {
       const displayRects = rectsToDisplay(edit.rects, model.bounds);
       if (!displayRects.length) continue;
       const rectSelected = selectGlyphsByRects(model.chars, displayRects);
-      const {chars: selectedChars, aligned} = alignGlyphsToOriginalText(model.chars, rectSelected, displayRects, edit.originalText);
-      const slotRects = aligned ? alignedDisplayRects(selectedChars) : displayRects;
-      const slots = buildRewriteSlots(selectedChars, slotRects.length ? slotRects : displayRects, model);
-      pagePlans.push({edit, displayRects, selectedChars, slots});
+      const alignedRes = alignGlyphsToOriginalText(model.chars, rectSelected, displayRects, edit.originalText);
+      const trimmed = alignedRes.aligned
+        ? trimUnchangedSymbolEdges(alignedRes.chars, edit.newText)
+        : {chars: alignedRes.chars, text: edit.newText};
+      const slotRects = alignedRes.aligned ? alignedDisplayRects(trimmed.chars) : displayRects;
+      const slots = buildRewriteSlots(trimmed.chars, slotRects.length ? slotRects : displayRects, model);
+      rawPlans.push({edit, displayRects, selectedChars: trimmed.chars, newText: trimmed.text, slots, aligned: alignedRes.aligned});
     }
+    const pagePlans = dedupeRewritePlans(rawPlans, model);
     if (!pagePlans.length) return;
     redactRewritePage(page, pagePlans, model.chars);
     const emitted = [];
     for (const plan of pagePlans) {
-      const ops = emitRewriteEdit(doc, page, plan.slots, plan.edit.newText, cidState);
-      if (ops) emitted.push({slots: plan.slots, ops});
+      const rightOrigin = findRightSiblingOrigin(plan.selectedChars, model.chars, plan.slots[0]);
+      const ops = emitRewriteEdit(doc, page, plan.slots, plan.newText, cidState, rightOrigin);
+      if (ops) emitted.push({slots: plan.slots, ops, rightOrigin});
     }
     if (!emitted.length) return;
     const fallbackOps = spliceRewriteOpsInline(page, emitted);

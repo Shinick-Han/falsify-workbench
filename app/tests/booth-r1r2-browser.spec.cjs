@@ -428,6 +428,35 @@ async function runSession(openFn, bodyFn) {
   }
 }
 
+function escapeRegex(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function contextWindowPattern(raw) {
+  return String(raw)
+    .split(/[ \t]*\r?\n+[ \t]*/)
+    .map(part => escapeRegex(part.replace(/[ \t]+/g, ' ')))
+    .join(' ?');
+}
+
+async function assertEditContext(outputPdfBytes, pageIndex, origSpan, newText, occurrence, label) {
+  const srcRaw = await oracle.extractText(sourcePdfBytes, pageIndex);
+  let at = -1;
+  let from = 0;
+  for (let k = 0; k <= occurrence; k += 1) {
+    at = srcRaw.indexOf(origSpan, from);
+    assert.ok(at >= 0, `${label}: source page ${pageIndex + 1} missing ${JSON.stringify(origSpan)}[${occurrence}]`);
+    from = at + origSpan.length;
+  }
+  const beforeRaw = srcRaw.slice(Math.max(0, at - 12), at);
+  const afterRaw = srcRaw.slice(at + origSpan.length, at + origSpan.length + 12);
+  const pattern = new RegExp(
+    contextWindowPattern(beforeRaw) + escapeRegex(newText.replace(/\s+/g, ' ')) + contextWindowPattern(afterRaw)
+  );
+  const outFlat = (await oracle.extractText(outputPdfBytes, pageIndex)).replace(/\s+/g, ' ');
+  assert.match(outFlat, pattern, `${label}: page ${pageIndex + 1} missing R1 context around ${JSON.stringify(newText)}`);
+}
+
 /* Case 1: Delete the whole Table 1 caption on page 5 (exact regression case). */
 async function caseCaptionDelete(browser, wide) {
   const label = `caption-delete(${wide ? '1280' : '390'})`;
@@ -488,6 +517,8 @@ async function caseTapScores(browser, wide, sourceRefs) {
     assert.equal(oracle.hasHitNear(remaining052, sourceRefs.first052, 15), true, `${label}: first 0.52 must remain in place`);
     assert.equal(oracle.hasHitNear(remaining052, sourceRefs.second052, 15), false, `${label}: second 0.52 must be gone`);
     assert.equal(oracle.hasHitNear(placed011, sourceRefs.second052, 20), true, `${label}: 0.11 must appear where second 0.52 was`);
+    await assertEditContext(parsed.pdfBytes, 4, '0.95', '0.50', 0, label + ':0.95');
+    await assertEditContext(parsed.pdfBytes, 4, '0.52', '0.11', 1, label + ':0.52');
     assert.equal(errors.join('\n'), '', `${label}: uncaught page errors`);
   });
 }
@@ -514,6 +545,7 @@ async function caseFindReplace95Pct(browser, wide) {
         untouched: ['90%', 'The WikiEval Dataset', 'Faithfulness'],
       }],
     });
+    await assertEditContext(parsed.pdfBytes, 3, '95%', '950', 0, label);
     assert.equal(errors.join('\n'), '', `${label}: uncaught page errors`);
   });
 }
@@ -547,6 +579,7 @@ async function caseTapDagger(browser, wide, sourceRefs) {
     const ones = await oracle.search(parsed.pdfBytes, 0, '1');
     assert.equal(oracle.hasHitNear(daggers, sourceRefs.firstDagger, 12), false, `${label}: first † must be removed`);
     assert.equal(oracle.hasHitNear(ones, sourceRefs.firstDagger, 20), true, `${label}: digit 1 must appear at first † position`);
+    await assertEditContext(parsed.pdfBytes, 0, '†', '1', 0, label);
     assert.equal(errors.join('\n'), '', `${label}: uncaught page errors`);
   });
 }
@@ -577,6 +610,7 @@ async function caseParagraphBodyEdit(browser, wide) {
         untouched: ['0.95', 'GPT Ranking', 'Conclusions'],
       }],
     });
+    await assertEditContext(parsed.pdfBytes, 4, 'randomly.', 'deterministically.', 0, label);
     assert.equal(errors.join('\n'), '', `${label}: uncaught page errors`);
   });
 }
@@ -610,6 +644,7 @@ async function caseSymbolToDigit(browser, wide, sourceRefs) {
     const threes = await oracle.search(parsed.pdfBytes, 0, '3');
     assert.equal(oracle.hasHitNear(diamonds, sourceRefs.firstDiamond, 12), false, `${label}: first ♢ must be removed`);
     assert.equal(oracle.hasHitNear(threes, sourceRefs.firstDiamond, 20), true, `${label}: digit 3 must appear at first ♢ position`);
+    await assertEditContext(parsed.pdfBytes, 0, '♢', '3', 0, label);
     assert.equal(errors.join('\n'), '', `${label}: uncaught page errors`);
   });
 }
@@ -637,6 +672,7 @@ async function caseAgentRecipe(browser, wide) {
         untouched: ['0.78', '0.70'],
       }],
     });
+    await assertEditContext(parsed.pdfBytes, 4, '0.95', '0.50', 0, label);
     assert.equal(errors.join('\n'), '', `${label}: uncaught page errors`);
   });
 }
