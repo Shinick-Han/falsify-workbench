@@ -1505,6 +1505,8 @@
     }
     function onPage(page){
       st.pageEl=page;
+      const layer=page.querySelector('.paper-text-layer');
+      if(layer&&!layer.hasAttribute('lang')) layer.setAttribute('lang','');
       closePop(false);
       closeSheet(false);
       syncBar();

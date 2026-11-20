@@ -6,6 +6,16 @@
 html[data-booth-step] #paper-before-stage .paper-text-layer{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
 html[data-booth-step] #paper-before-stage .paper-text-layer :is(span,br){cursor:pointer}
 html[data-booth-step] #paper-before-stage>.paper-page{-webkit-tap-highlight-color:transparent}
+/* Follow pdf.js's TextLayer contract on event.html so --scale-x (measured at viewport scale) matches
+   the rendered span width without scaling a 1x font up via CSS transform. */
+html[data-booth-step] .paper-text-layer{
+  --min-font-size-inv:calc(1 / var(--min-font-size,1));
+  --text-scale-factor:calc(var(--total-scale-factor,1) * var(--min-font-size,1))
+}
+html[data-booth-step] .paper-text-layer span[data-i]{
+  font-size:calc(var(--text-scale-factor) * var(--font-height));
+  transform:rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv))
+}
 
 /* Store-driven overlay preview: above the page canvas, below the text layer; never takes taps. */
 .booth-patch{
@@ -91,9 +101,9 @@ html.booth-pe-typing .booth-dock{display:none}
 .booth-pe-pop.is-bar.has-existing{grid-template-areas:"label label label cancel" "prev input next apply" "whole whole revert revert"}
 .booth-pe-pop.is-bar .booth-pe-step{display:block}
 .booth-pe-pop.is-bar .booth-pe-pop-label{align-self:center;font-size:12.5px;color:var(--ev-ink-2,#3a3f47)}
-.booth-pe-pop.is-bar .booth-pe-cancel{min-height:36px;padding:0 4px}
-.booth-pe-pop.is-bar .booth-pe-whole{justify-self:start;min-height:40px;padding:0 2px;border:0;background:transparent;color:var(--ev-ink-2,#3a3f47);font-size:13px;text-decoration:underline;text-underline-offset:3px}
-.booth-pe-pop.is-bar .booth-pe-revert{justify-self:end;min-height:40px;padding:0 10px;border:1px solid var(--ev-hair,#d6d9dd);border-radius:8px;background:var(--ev-card,#fff);color:var(--ev-ink,#16191e);font-size:13px}
+.booth-pe-pop.is-bar .booth-pe-cancel{min-height:44px;padding:0 8px}
+.booth-pe-pop.is-bar .booth-pe-whole{justify-self:start;min-height:44px;padding:0 4px;border:0;background:transparent;color:var(--ev-ink-2,#3a3f47);font-size:13px;text-decoration:underline;text-underline-offset:3px}
+.booth-pe-pop.is-bar .booth-pe-revert{justify-self:end;min-height:44px;padding:0 12px;border:1px solid var(--ev-hair,#d6d9dd);border-radius:8px;background:var(--ev-card,#fff);color:var(--ev-ink,#16191e);font-size:13px}
 
 /* Paragraph textarea sheet ("문단 전체 고치기"). */
 .booth-pe-sheet{
