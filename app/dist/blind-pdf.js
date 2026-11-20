@@ -7,9 +7,14 @@
   /* MuPDF opens, extracts and rasterises every page here, so it runs in a module worker. Results are
      kept per source SHA-256: warm() starts the job while the visitor edits, prepare() reuses it. */
   const results = new Map();
-  /* SHA-256 of PDFs the booth fetched itself from arXiv through the Falsify API. They are original
-     author files and cannot carry the RED training marker, so prepare() skips MuPDF for them. */
+  /* SHA-256 of PDFs the booth fetched itself from arXiv through the Falsify API (mission or search).
+     They are original author files without the RED training marker, so prepare() skips MuPDF for
+     exactly those bytes. Only the holder of the one-time claimTrust() capability can add a hash, and
+     it hands over the fetched bytes, not a name, id or flag: the hash is taken here, from a copy. */
+  const TRUST_CAP = 8;
   const trusted = new Set();
+  const pendingTrust = new Set();
+  let trustClaimed = false;
   let worker = null, nextId = 1;
   const jobs = new Map();
   function aborted() { return new DOMException('Aborted', 'AbortError'); }
@@ -61,7 +66,7 @@
     if (signal && signal.aborted) throw aborted();
     const bytes = await readBytes(file);
     const key = await hashOf(bytes);
-    if (trusted.has(key)) return {file, sha256: key, changed: false, removed: [], verification: {status: 'passed', unchangedBytes: true, source: 'arxiv'}};
+    if (await isTrusted(key)) return {file, sha256: key, changed: false, removed: [], verification: {status: 'passed', unchangedBytes: true, source: 'arxiv'}};
     let task = results.get(key);
     if (!task) {
       task = run(file, bytes);
@@ -77,9 +82,32 @@
     if (!file || results.size > 4) return;
     prepare({file}).catch(function () { /* prepare() reports errors later */ });
   }
-  async function trust(file) {
-    if (!file) return;
-    trusted.add(await hashOf(await readBytes(file)));
+  function pdfBytes(bytes) {
+    return bytes instanceof Uint8Array && bytes.length > 4 && bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46 && bytes[4] === 0x2d;
   }
-  root.FalsifyBlindPdf = {prepare, warm, trust};
+  function addTrusted(key) {
+    trusted.delete(key);
+    trusted.add(key);
+    while (trusted.size > TRUST_CAP) trusted.delete(trusted.values().next().value);
+  }
+  function register(bytes) {
+    if (!pdfBytes(bytes)) return Promise.resolve('');
+    const job = hashOf(bytes.slice()).then(function (key) { addTrusted(key); return key; }, function () { return ''; });
+    pendingTrust.add(job);
+    job.finally(function () { pendingTrust.delete(job); });
+    return job;
+  }
+  async function isTrusted(key) {
+    if (pendingTrust.size) await Promise.all(Array.from(pendingTrust));
+    return trusted.has(key);
+  }
+  /* The first caller gets register(bytes); booth.js claims it while it loads, so later callers get null. */
+  function claimTrust() {
+    if (trustClaimed) return null;
+    trustClaimed = true;
+    return register;
+  }
+  const api = Object.freeze({prepare, warm, claimTrust});
+  try { Object.defineProperty(root, 'FalsifyBlindPdf', {value: api, writable: false, configurable: false, enumerable: true}); }
+  catch { root.FalsifyBlindPdf = api; }
 })(globalThis);
