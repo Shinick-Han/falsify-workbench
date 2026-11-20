@@ -1062,6 +1062,43 @@ test('the claim view estimates the wait from rows received earlier and the opera
   });
 });
 
+test('GET claim meters failed key checks: a guesser falls back to the D1 claim buckets, right keys stay free', async () => {
+  await withApp({ BOOTH_CLAIMS_PER_IP_HOUR: '3', BOOTH_CLAIMS_PER_HOUR: '1000' }, async (mf, call) => {
+    const owner = fromIp('198.51.100.40');
+    const guest = (await mintGuest(call, owner)).body.guest.token;
+    const created = await submitPdf(call, guest, pdfBytes('op-booth-guess'), {}, owner);
+    assert.equal(created.status, 201, created.text);
+    const { receipt, claimKey } = created.body;
+    const q = k => '/v1/booth/claim?receipt=' + encodeURIComponent(receipt) + '&key=' + encodeURIComponent(k);
+    const d1 = await mf.getD1Database('DB');
+    const counters = async () => Number((await d1.prepare("SELECT COUNT(*) AS n FROM rate_counters WHERE bucket LIKE 'booth-claim%'").first()).n);
+    // The same /64 counts as one guesser.
+    const guesser = n => fromIp('2001:db8:1:2::' + (n % 7 + 1).toString(16));
+    for (let i = 0; i < 20; i++) {
+      const wrong = await call('GET', q('AAAA-AA' + String(i).padStart(2, '0').replace(/[01]/g, 'A')), { headers: guesser(i) });
+      assert.equal(wrong.status, 404, 'miss ' + i);
+    }
+    assert.equal(await counters(), 0, 'the first failed checks write nothing');
+    // Bucket empty: the next checks are charged to the D1 claim buckets (3 per IP here), then 429 with a short wait.
+    const statuses = [];
+    let limited = null;
+    for (let i = 0; i < 4; i++) {
+      const res = await call('GET', q('BBBB-BBB' + 'CDEF'[i]), { headers: guesser(i) });
+      statuses.push(res.status);
+      if (res.status === 429) limited = res;
+    }
+    assert.deepEqual(statuses, [404, 404, 404, 429]);
+    const wait = Number(limited.headers.get('Retry-After'));
+    assert.ok(wait > 0 && wait <= 60, 'Retry-After ' + wait);
+    // Even the right key from the guessing /64 is refused now, so the bucket gives no oracle.
+    assert.equal((await call('GET', q(claimKey), { headers: guesser(0) })).status, 429);
+    // Another venue IP polling with the right key keeps the free path.
+    const before = await counters();
+    for (let i = 0; i < 30; i++) assert.equal((await call('GET', q(claimKey), { headers: owner })).status, 200);
+    assert.equal(await counters(), before, 'right-key polls write no counter');
+  });
+});
+
 test('booth per-IP defaults fit a venue NAT when the event vars are missing', () => {
   const source = readFileSync(path.join(apiRoot, 'src/booth.mjs'), 'utf8');
   assert.match(source, /perIpHour: positiveInt\(env\?\.BOOTH_SUBMISSIONS_PER_IP_HOUR, 400\)/);

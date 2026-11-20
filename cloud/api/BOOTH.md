@@ -39,7 +39,7 @@ Preflight answers `OPTIONS` with methods `GET, POST, PATCH, PUT, DELETE, OPTIONS
 | GET | `/v1/booth/config` | none | 200 config |
 | POST | `/v1/booth/submissions` | guest, password, or Confluence owner | 201 receipt and claim key. `multipart/form-data` with `meta` and `pdf`. `paper` is required |
 | POST | `/v1/booth/claim` | none | 200 claim view |
-| GET | `/v1/booth/claim?receipt=&key=` | none | 200 claim view. Result polling: a CORS simple request (no preflight) that reads one row and spends no rate-limit slot; the 40-bit claim key protects it. Exactly these two query keys |
+| GET | `/v1/booth/claim?receipt=&key=` | none | 200 claim view. Result polling: a CORS simple request (no preflight) that reads one row and spends no rate-limit slot while the key is right; the 40-bit claim key protects it. Failed key checks draw from small per-isolate buckets (20 per IP or IPv6 /64, refill 1 per 6 s; 200 per isolate); when one is empty the GET is charged to the POST claim buckets before the key is checked, so a 429 there says Retry-After ≤ 60. Query strings are redacted from Workers logs and traces (`observability.redact_query_string`). Exactly these two query keys |
 | POST | `/v1/booth/withdraw` | none (same body as claim) | 200 claim view, status `withdrawn` |
 | GET | `/v1/booth/admin/submissions` | operator | 200 page |
 | GET | `/v1/booth/admin/submissions/:receipt` | operator | 200 admin view |

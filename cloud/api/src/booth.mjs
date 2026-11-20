@@ -6,6 +6,8 @@ import { timingSafeEqual } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import { SESSION_HEADER } from './confluence.mjs';
 import { AiError, resolveAiOwner, sha256Hex } from './ai-identity.mjs';
+// Hoisted function; the circular import with booth-recipes.mjs is safe because it is only called per request.
+import { ipRateKey } from './booth-recipes.mjs';
 
 const RECEIPT = /^F-\d{4,}$/;
 const HEX64 = /^[0-9a-f]{64}$/;
@@ -50,6 +52,16 @@ const CLAIM_BUCKET_PREFIX = 'booth-claim:ip:';
 // stops polling when that wait passes its 15 minute horizon. A short hint keeps polling alive.
 const CLAIM_RETRY_MAX_SECONDS = 60;
 const CLAIM_GLOBAL_BUCKET = 'booth-claim:all';
+// GET claim spends no D1 write while key checks succeed. Failed key checks draw from small per-isolate token
+// buckets (per IP, IPv6 per /64, and one for the whole isolate). When either is empty, the GET is charged to
+// the same D1 claim buckets as POST before the key is checked, so guessing is never cheaper than it was with
+// POST, and right-key pollers behind a venue NAT keep the free path unless someone on that IP keeps failing.
+const CLAIM_MISS_IP_BURST = 20;
+const CLAIM_MISS_IP_REFILL_MS = 6000;
+const CLAIM_MISS_ALL_BURST = 200;
+const CLAIM_MISS_ALL_REFILL_MS = 250;
+const CLAIM_MISS_MAX_KEYS = 4096;
+const claimMisses = new Map();
 const SUBMIT_BUCKET_PREFIX = 'booth-submit:ip:';
 const SUBMIT_GLOBAL_BUCKET = 'booth-submit:all';
 const SEQ_ATTEMPTS = 5;
@@ -843,7 +855,8 @@ async function chargeClaim(ctx) {
 async function chargeClaimSlots(ctx) {
   const db = ctx.deps.getDb();
   const limits = boothLimits(ctx.env);
-  const bucket = await bucketKey(CLAIM_BUCKET_PREFIX, clientIp(ctx));
+  // IPv6 per /64, as in the recipe routes: one host owns the whole prefix and could rotate addresses in it.
+  const bucket = await bucketKey(CLAIM_BUCKET_PREFIX, ipRateKey(clientIp(ctx)));
   const ipSlot = await ctx.deps.rateLimit(db, bucket, limits.claimsPerIpHour);
   try {
     await ctx.deps.rateLimit(db, CLAIM_GLOBAL_BUCKET, limits.claimsPerHour);
@@ -1046,9 +1059,37 @@ async function postSubmission(ctx) {
   }
 }
 
+function missTokens(name, burst, refillMs, now) {
+  const entry = claimMisses.get(name);
+  if (!entry) return burst;
+  return Math.min(burst, entry.tokens + Math.max(0, now - entry.at) / refillMs);
+}
+
+function spendMiss(name, burst, refillMs, now) {
+  const tokens = missTokens(name, burst, refillMs, now) - 1;
+  claimMisses.delete(name);
+  claimMisses.set(name, { tokens, at: now });
+  while (claimMisses.size > CLAIM_MISS_MAX_KEYS) claimMisses.delete(claimMisses.keys().next().value);
+}
+
+function claimMissNames(ctx) {
+  return { ip: 'ip:' + ipRateKey(clientIp(ctx)), all: 'all' };
+}
+
+function claimMissesLeft(names, now) {
+  return missTokens(names.ip, CLAIM_MISS_IP_BURST, CLAIM_MISS_IP_REFILL_MS, now) >= 1
+    && missTokens(names.all, CLAIM_MISS_ALL_BURST, CLAIM_MISS_ALL_REFILL_MS, now) >= 1;
+}
+
+function recordClaimMiss(names, now) {
+  spendMiss(names.ip, CLAIM_MISS_IP_BURST, CLAIM_MISS_IP_REFILL_MS, now);
+  spendMiss(names.all, CLAIM_MISS_ALL_BURST, CLAIM_MISS_ALL_REFILL_MS, now);
+}
+
 // Result polling: GET with the key in the query is a CORS simple request (no preflight) and only reads one
-// row, so it spends no rate-limit write. The 40-bit claim key, not a counter, protects the outcome; the
-// Worker redacts query strings from its logs. POST /v1/booth/claim stays for lookups and withdraw.
+// row, so a right key spends no rate-limit write. The 40-bit claim key protects the outcome, and failed key
+// checks are metered (see CLAIM_MISS_*). Our request log records the route template only, and
+// observability.redact_query_string keeps the key out of Workers logs and traces. POST stays for withdraw.
 async function getClaim(ctx) {
   const params = ctx.url.searchParams;
   const keys = [...params.keys()];
@@ -1056,7 +1097,16 @@ async function getClaim(ctx) {
   const receipt = params.get('receipt');
   const key = params.get('key');
   if (receipt.length > 16 || key.length > 32) boothFail(400, 'invalid_request');
-  const row = await loadClaim(ctx.deps.getDb(), receipt, key);
+  const names = claimMissNames(ctx);
+  const free = claimMissesLeft(names, Date.now());
+  if (!free) await chargeClaim(ctx);
+  let row;
+  try {
+    row = await loadClaim(ctx.deps.getDb(), receipt, key);
+  } catch (error) {
+    if (free && error?.code === 'not_found') recordClaimMiss(names, Date.now());
+    throw error;
+  }
   return json(200, claimView(row, ctx.env));
 }
 
