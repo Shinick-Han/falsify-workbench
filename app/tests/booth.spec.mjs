@@ -2919,6 +2919,9 @@ test('plan97s-4: missed notes without a page use AI 메모 heading, with a page 
   h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
   await settle();
   assert.equal(h.text('booth-live-note').startsWith('운영진 안내'), true);
+  h.handle.destroy();
+});
+
 /* plan97s-9 */
 test('plan97s-9: a tap while a paper loads keeps the first paper and its hint', async () => {
   let release; const gate = new Promise(resolve => { release = resolve; });

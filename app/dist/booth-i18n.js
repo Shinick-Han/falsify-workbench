@@ -321,9 +321,9 @@
     '내 기록 보기':'View my tickets',
     /* plan97s-4 */
     '자동 확인을 멈췄어요. 「결과 다시 보기」를 눌러 주세요.':'Auto-check stopped. Tap Check result again.',
-    '차례가 오면 AI가 앞뒤 문장과 표를 대조해요':'When your turn comes, AI cross-checks text and tables'
+    '차례가 오면 AI가 앞뒤 문장과 표를 대조해요':'When your turn comes, AI cross-checks text and tables',
     /* plan97s-6 */
-    '접수번호와 확인키가 보이게 휴대폰으로 이 티켓을 찍어 두세요. 내 휴대폰의 「내 기록」에서 두 코드로 결과를 볼 수 있어요.':'Take a photo of this ticket with your phone, with the ticket no. and claim key in view. On your phone, open My tickets and enter the two codes to see your result.'
+    '접수번호와 확인키가 보이게 휴대폰으로 이 티켓을 찍어 두세요. 내 휴대폰의 「내 기록」에서 두 코드로 결과를 볼 수 있어요.':'Take a photo of this ticket with your phone, with the ticket no. and claim key in view. On your phone, open My tickets and enter the two codes to see your result.',
     /* plan97s-9 */
     '검색 결과가 없어요. 영어로 찾아볼까요? 예: medical imaging':'No papers found. Try English words, e.g. medical imaging.',
     '영어 제목 또는 주제':'Title or topic in English',

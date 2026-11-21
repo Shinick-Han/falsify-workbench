@@ -353,10 +353,9 @@ async function kioskPass(browser, pageErrors) {
   const mission = page.locator('#booth-missions .booth-mission').first();
   await mission.waitFor();
   /* plan97s-6 */
-  for (const sel of ['#project-link', '#source-link']) {
-    assert.equal(await page.locator(sel).isVisible(), true, sel + ' text stays');
-    assert.equal(await page.locator(sel).evaluate(a => getComputedStyle(a).pointerEvents), 'none');
-  }
+  assert.equal(await page.locator('#project-link').isVisible(), true, '#project-link text stays');
+  assert.equal(await page.locator('#project-link').evaluate(a => getComputedStyle(a).pointerEvents), 'none');
+  assert.notEqual(await page.locator('#source-link').evaluate(a => getComputedStyle(a).pointerEvents), 'none', 'the AGPL source link stays a link');
   const box = await page.locator('#project-link').boundingBox();
   const popup = page.waitForEvent('popup', {timeout: 1500}).catch(() => null);
   await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
@@ -524,6 +523,9 @@ async function finishedDraftPass(browser, pageErrors) {
   assert.equal(await until(async () => state.claims === 3), true, 'reloading from the ticket screen reopens the finished ticket');
   assert.equal(await page.locator('#booth-resume').count(), 0);
   assert.equal(await page.evaluate(() => sessionStorage.getItem('falsify.booth.progress.v1')), null);
+  await context.close();
+}
+
 /* plan97s-5 */
 async function kioskWaitPass(browser, pageErrors) {
   const state = newState();
@@ -548,8 +550,8 @@ async function kioskWaitPass(browser, pageErrors) {
   assert.ok(page.url().includes('kiosk=1'), 'kiosk query stays');
   assert.equal(await page.evaluate(() => window.__kioskWaitNoReload), true, 'no reload occurred');
 
-  // 2. Still no warning at 860 s (20 s margin under the 880 s warn point).
-  await page.clock.fastForward(860000 - 170000);
+  // 2. Still no warning at 920 s: polling stopped at 900 s and the warning opens at 940 s.
+  await page.clock.fastForward(920000 - 170000);
   assert.equal(await warning.isVisible(), false, 'no warning before 15 min wait');
 
   // 3. Fast-forward in 5 s steps (bounded to 60 s) until warning opens; 계속 keeps receipts.

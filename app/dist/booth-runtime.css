@@ -17,8 +17,8 @@ html[data-booth-step="edit"] .booth-handoff,html[data-booth-step="send"] .booth-
 .booth-kiosk-btn{flex:1 1 160px;min-height:56px;padding:0 20px;border:1px solid #16191e;border-radius:8px;background:#fff;color:#16191e;font:inherit;font-size:19px;font-weight:600;cursor:pointer;touch-action:manipulation}
 .booth-kiosk-btn.ink{background:#16191e;color:#fff}
 .booth-kiosk-btn:focus-visible{outline:3px solid #16191e;outline-offset:3px}
-/* plan97s-6: kiosk. No clipboard copy on a shared tablet (E-06); external links do not open new tabs (E-05). */
+/* plan97s-6: kiosk. No clipboard copy on a shared tablet (E-06); external links do not open new tabs (E-05), except the AGPL source link. */
 html[data-kiosk="1"] #booth-ticket :is(#booth-copy,#booth-copy-status){display:none}
-html[data-kiosk="1"] .page-foot :is(#project-link,#source-link),
+html[data-kiosk="1"] .page-foot #project-link,
 html[data-kiosk="1"] :is(#booth-paper-credit,.booth-search-source) a{pointer-events:none;color:inherit;text-decoration:none}
 html[data-kiosk="1"] #booth-myai-pdf{display:none}

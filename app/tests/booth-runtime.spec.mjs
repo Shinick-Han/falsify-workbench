@@ -187,12 +187,13 @@ test('idleTimer.refresh re-arms only a running timer with the current limit', ()
   idle.stop();
 });
 
-test('WAIT_IDLE_MS matches booth.js POLL_STOP_AT', () => {
+test('WAIT_IDLE_MS is one minute past booth.js POLL_STOP_AT', () => {
   const R = load().FalsifyBoothRuntime;
   const match = /const POLL_STOP_AT=(\d+);/.exec(boothSource);
   assert.ok(match);
-  assert.equal(R.WAIT_IDLE_MS, Number(match[1]));
-  assert.equal(R.WAIT_IDLE_MS, 900000);
+  assert.equal(R.WAIT_IDLE_MS, Number(match[1]) + 60000);
+  assert.equal(R.WAIT_IDLE_MS - R.WARN_MS > Number(match[1]), true, 'the warning opens after polling stops');
+  assert.equal(R.WAIT_IDLE_MS, 960000);
 });
 
 test('clearVisitor and handoff: receipts, progress, drafts, edits, hosted session and guest go; the kiosk flag and access key stay', () => {

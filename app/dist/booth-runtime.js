@@ -1,8 +1,8 @@
 /* Event-page booth runtime (event.html only; loads before booth.js, which reads it when present).
    - Kiosk mode for the booth tablet: event.html?kiosk=1 sets a per-tab flag in sessionStorage
      (?kiosk=0 clears it). In kiosk mode booth.js keeps receipts in sessionStorage, pick and ticket get a
-     「다음 분께 넘기기」 button, and 3 minutes without a touch, key or scroll (15, booth.js POLL_STOP_AT,
-     while a result is pending; a step change or the result arriving restarts the count) open a
+     「다음 분께 넘기기」 button, and 3 minutes without a touch, key or scroll (16 minutes while a result is
+     pending, one minute past booth.js POLL_STOP_AT; a step change or the result arriving restarts the count) open a
      20-second 「계속하시겠어요?」 warning (WCAG 2.2.1). Handing over or letting the
      warning run out clears this visitor's receipts, saved progress, drafts, edits, assist state and
      guest session, then reloads event.html?kiosk=1, so the next visitor gets a fresh guest and 5 chances.
@@ -23,7 +23,8 @@
   const DRAFT_PREFIX='falsify.paper-draft';
   const OFFLINE_TEXT='인터넷 연결이 끊겼어요. 연결되면 다시 눌러 주세요.';
   const IDLE_MS=180000;
-  const WAIT_IDLE_MS=900000;
+  /* One minute past booth.js POLL_STOP_AT, so a late result never lands during the warning. */
+  const WAIT_IDLE_MS=960000;
   const WARN_MS=20000;
   const PROGRESS_TTL=6*3600000;
   const MAX_EDITS=5;
