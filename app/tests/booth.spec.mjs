@@ -2311,3 +2311,69 @@ test('receipt edits keep a change near the end of a long paragraph', () => {
   assert.equal(rec.edits[0].before.endsWith('0.95 end'), true);
   assert.equal(rec.edits[0].after.endsWith('0.50 end'), true);
 });
+
+test('waiting project row shows while pending, hides when final or withdrawn, and swaps to QR on kiosk', async () => {
+  const h = liveBooth({
+    perOwner: 3,
+    claims: [
+      {receipt: 'F-0042', status: 'received', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:00Z', published: false},
+      {receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:00Z', published: false},
+      {receipt: 'F-0042', status: 'judged', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:00Z', published: true, outcome: 'missed', publicNote: 'note'},
+      {receipt: 'F-0042', status: 'withdrawn', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:00Z', published: false},
+    ],
+  });
+  await settle();
+  assert.equal(h.text('booth-pick-limit'), '1인 3번까지 · 이름·연락처는 받지 않아요');
+  h.ids.get('booth-claim-receipt').value = 'F-0042';
+  h.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  const row = h.ids.get('booth-project-wait');
+  assert.equal(row.hidden, false, 'visible while queued');
+  assert.equal(h.text('booth-project-copy'), '기다리는 동안 가짜연구소 Falsify 프로젝트를 둘러보세요. 마음에 들면 GitHub에서 ★를 눌러 주세요.');
+  const link = h.ids.get('booth-project-link');
+  assert.ok(link && link.tagName === 'a');
+  assert.equal(link.textContent, 'GitHub에서 보기 ★');
+  assert.equal(link.getAttribute('href'), 'https://github.com/Pseudo-Lab/Falsify');
+  assert.equal(link.getAttribute('target'), '_blank');
+  assert.equal(link.getAttribute('rel'), 'noopener noreferrer');
+  assert.equal(link.className.split(' ').includes('ink'), false, 'secondary button, not dark primary');
+  assert.equal(h.ids.get('booth-project-qr'), undefined, 'non-kiosk omits QR');
+  await h.tick();
+  assert.equal(row.hidden, false, 'still visible while reviewing');
+  await h.tick();
+  assert.equal(row.hidden, true, 'hidden once final');
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(row.hidden, true, 'hidden on withdrawn');
+  h.handle.destroy();
+
+  // Kiosk mode: QR image + caption, no link.
+  const prevRt = boothContext.FalsifyBoothRuntime;
+  boothContext.FalsifyBoothRuntime = {kiosk: () => true};
+  try {
+    const k = liveBooth({
+      perOwner: 3,
+      claims: [{receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:00Z', published: false}],
+    });
+    await settle();
+    k.ids.get('booth-claim-receipt').value = 'F-0042';
+    k.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+    k.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+    await settle();
+    const kRow = k.ids.get('booth-project-wait');
+    assert.equal(kRow.hidden, false, 'kiosk shows waiting row');
+    assert.equal(nodesOf(kRow).some(node => node.tagName === 'a'), false, 'kiosk has no link');
+    const qr = k.ids.get('booth-project-qr');
+    assert.ok(qr && qr.tagName === 'img');
+    assert.equal(qr.getAttribute('src'), 'falsify-project-qr.svg');
+    assert.equal(qr.getAttribute('width'), '120');
+    assert.equal(qr.getAttribute('height'), '120');
+    assert.ok((qr.getAttribute('alt') || '').length > 0, 'QR has alt text');
+    assert.equal(k.text('booth-project-qr-caption'), '휴대폰 카메라로 찍으면 Falsify 프로젝트가 열려요.');
+    k.handle.destroy();
+  } finally {
+    if (prevRt === undefined) delete boothContext.FalsifyBoothRuntime;
+    else boothContext.FalsifyBoothRuntime = prevRt;
+  }
+});

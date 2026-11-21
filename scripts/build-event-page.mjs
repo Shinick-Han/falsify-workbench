@@ -32,10 +32,14 @@ const SCRIPT = /<script src="cloud-config\.js\?v=([^"]*)" defer><\/script>/;
 const HOSTED = /<script src="hosted-ai\.js\?v=([^"]*)" defer><\/script>/;
 const CSP = /<meta http-equiv="Content-Security-Policy" content="([^"]*)">/;
 const TITLE = /<title>([^<]*)<\/title>/;
+const SOURCE_LINK = /<a class="source-link" id="source-link" href="https:\/\/github\.com\/Shinick-Han\/falsify-workbench" target="_blank" rel="noopener noreferrer">[^<]*<\/a>/;
 const ORIGIN = /^https:\/\/[a-z0-9.-]+(?::[1-9][0-9]{0,4})?$/;
 
 export const DEFAULT_EVENT_API_BASE = 'https://falsify-cloud-api-event.ai-gongbu.workers.dev';
 export const EVENT_TITLE_SUFFIX = ' · Event';
+export const EVENT_PROJECT_URL = 'https://github.com/Pseudo-Lab/Falsify';
+export const EVENT_SOURCE_URL = 'https://github.com/Shinick-Han/falsify-workbench';
+export const EVENT_FOOTER_LINKS = `<a class="source-link event-project-link" id="project-link" href="${EVENT_PROJECT_URL}" target="_blank" rel="noopener noreferrer">가짜연구소 Falsify 프로젝트 · GitHub</a><a class="source-link event-source-link" id="source-link" href="${EVENT_SOURCE_URL}" target="_blank" rel="noopener noreferrer">이 페이지 소스 · AGPL-3.0</a>`;
 /* Contract order: event-theme.css, booth.css, booth-recipe.css, booth-myai.css, booth-runtime.css,
    booth-pageedit.css, then the scripts (the edit store first). */
 export const BOOTH_STYLES = Object.freeze(['event-theme.css', 'booth.css', 'booth-recipe.css', 'booth-myai.css', 'booth-runtime.css', 'booth-pageedit.css']);
@@ -155,7 +159,14 @@ export function eventHtmlFromIndex(indexHtml, origin) {
   let html = replaceOnce(indexHtml, script[0], scriptTag);
   html = replaceOnce(html, csp[0], cspTag);
   html = withEventTitle(html, title, newline);
-  return injectBooth(omitWorkbench(html, newline), newline);
+  return rewriteEventFooter(injectBooth(omitWorkbench(html, newline), newline));
+}
+
+function rewriteEventFooter(html) {
+  const found = [...html.matchAll(new RegExp(SOURCE_LINK.source, 'g'))];
+  if (found.length === 0) return html;
+  if (found.length !== 1) throw fail('index.html must contain at most one source-link', 2);
+  return replaceOnce(html, found[0][0], EVENT_FOOTER_LINKS);
 }
 
 function omitLine(name) {

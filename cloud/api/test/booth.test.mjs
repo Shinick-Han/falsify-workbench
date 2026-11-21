@@ -476,6 +476,7 @@ test('operator id, gateway defaults and migration 0006 keep secrets out of the s
     '"AI_GUEST_JOBS_PER_OWNER_HOUR": "20"',
     '"AI_GUEST_APPLY_JOBS_PER_HOUR": "600"',
     '"AI_GUEST_MODEL_JOBS": "false"',
+    '"BOOTH_SUBMISSIONS_PER_OWNER": "3"',
     '"BOOTH_SUBMISSIONS_PER_IP_HOUR": "400"',
     '"BOOTH_CLAIMS_PER_IP_HOUR": "8000"',
     '"BOOTH_CLAIMS_PER_HOUR": "15000"',

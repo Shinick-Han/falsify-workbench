@@ -102,7 +102,7 @@ async function stubApi(route, submissions, claims) {
   if (url.pathname === '/v1/booth/config') {
     return json(route, 200, {
       enabled: true, submissionsOpen: true, announcement: '행사 안내', consentVersion: '2026-11-22.v3',
-      limits: {maxDeclared: 5, maxReason: 500, maxNickname: 24, maxPdfBytes: 16777216},
+      limits: {maxDeclared: 5, maxReason: 500, maxNickname: 24, maxPdfBytes: 16777216, perOwner: 3},
       missions: [{
         paperId: '2309.15217',
         title: 'Ragas: Automated Evaluation of Retrieval Augmented Generation',
@@ -261,8 +261,19 @@ async function walk(browser, viewport, desk, pageErrors) {
   await deskChecks(page, desk, 1);
   // Rules before the first tap (ux-booth P0-1): the line under the hero and the 01/02/03 how-to, on phones too.
   const limit = page.locator('#booth-pick-limit');
-  assert.equal(await limit.textContent(), '1인 5번까지 · 이름·연락처는 받지 않아요');
+  assert.equal(await limit.textContent(), '1인 3번까지 · 이름·연락처는 받지 않아요');
   assert.equal(await limit.isVisible(), true, 'the rules line is visible');
+  // Event footer: primary Falsify project link before smaller muted AGPL source link.
+  const footerLinks = await page.locator('.page-foot a:visible').evaluateAll(list => list.map(a => ({
+    id: a.id, text: a.textContent, href: a.getAttribute('href'), target: a.getAttribute('target'), rel: a.getAttribute('rel'),
+    fontSize: parseFloat(getComputedStyle(a).fontSize),
+  })));
+  assert.equal(footerLinks.length, 2, 'event footer shows primary project link and secondary source link');
+  assert.deepEqual(footerLinks.map(({fontSize, ...rest}) => rest), [
+    {id: 'project-link', text: '가짜연구소 Falsify 프로젝트 · GitHub', href: 'https://github.com/Pseudo-Lab/Falsify', target: '_blank', rel: 'noopener noreferrer'},
+    {id: 'source-link', text: '이 페이지 소스 · AGPL-3.0', href: 'https://github.com/Shinick-Han/falsify-workbench', target: '_blank', rel: 'noopener noreferrer'},
+  ]);
+  assert.ok(footerLinks[0].fontSize > footerLinks[1].fontSize, 'project link is larger than muted source link');
   assert.equal(await page.locator('#booth-howto').isVisible(), true, 'the how-to is visible');
   assert.equal(await page.locator('#booth-howto li').count(), 3);
   assert.doesNotMatch(await page.locator('#booth-step-pick').textContent(), /2분 안에/);
@@ -377,6 +388,7 @@ async function walk(browser, viewport, desk, pageErrors) {
     assert.equal(side.x >= rows.x + rows.width, true, 'the SUBMISSION ticket sits right of the declarations');
     assert.equal(submitBox.x >= side.x && submitBox.x + submitBox.width <= side.x + side.width + 0.5, true, 'submit lives in the ticket');
     assert.equal(await page.locator('#booth-send-paper').textContent(), 'Ragas: Automated Evaluation of Retrieval Augmented Generation');
+    assert.equal(await page.locator('#booth-send-chances').textContent(), '3번');
   } else {
     await page.setViewportSize({width: 360, height: 780});
     const sendAudit = await phoneAudit(page, '#booth');
@@ -424,6 +436,26 @@ async function walk(browser, viewport, desk, pageErrors) {
   assert.equal(await page.locator('#booth-barcode').isVisible(), true);
   assert.equal(await page.locator('#booth-live-again').isHidden(), true);
   assert.equal(await page.locator('#booth-live-declared').isHidden(), true, 'pending hides 내가 고친 곳');
+  // Quiet star request row while pending: exact copy + secondary outline GitHub link, no animation.
+  const projectWait = page.locator('#booth-project-wait');
+  assert.equal(await projectWait.isVisible(), true, 'waiting row is visible while pending');
+  assert.equal(await page.locator('#booth-project-copy').textContent(), '기다리는 동안 가짜연구소 Falsify 프로젝트를 둘러보세요. 마음에 들면 GitHub에서 ★를 눌러 주세요.');
+  const projectLink = page.locator('#booth-project-link');
+  assert.equal(await projectLink.isVisible(), true);
+  assert.equal(await projectLink.textContent(), 'GitHub에서 보기 ★');
+  assert.equal(await projectLink.getAttribute('href'), 'https://github.com/Pseudo-Lab/Falsify');
+  assert.equal(await projectLink.getAttribute('target'), '_blank');
+  assert.equal(await projectLink.getAttribute('rel'), 'noopener noreferrer');
+  const linkStyle = await projectLink.evaluate(node => ({
+    bg: getComputedStyle(node).backgroundColor,
+    anim: getComputedStyle(node).animationName,
+    height: node.getBoundingClientRect().height,
+  }));
+  assert.equal(linkStyle.bg, 'rgba(0, 0, 0, 0)', 'GitHub link is a secondary button, not dark primary');
+  assert.equal(linkStyle.anim, 'none', 'quiet row has no animation');
+  assert.ok(linkStyle.height >= 44, 'GitHub link meets 44px tap target');
+  assert.equal(await page.locator('#booth-project-qr').count(), 0, 'non-kiosk does not render QR');
+  await shot(page, 'ticket-waiting', viewport);
   await deskChecks(page, desk, 3);
   if (desk) {
     const stub = await page.locator('#booth-ticket-stub').boundingBox();
@@ -444,6 +476,7 @@ async function walk(browser, viewport, desk, pageErrors) {
   assert.equal(await page.locator('#booth-stamp-word').textContent(), '통과');
   assert.equal(await page.locator('#booth-stamp').getAttribute('class'), 'booth-stamp pass');
   assert.equal(await page.locator('#booth-ticket-wait').isHidden(), true);
+  assert.equal(await page.locator('#booth-project-wait').isHidden(), true, 'waiting row hides once final');
   assert.equal(await page.locator('#booth-ticket-duration').textContent(), '2분');
   assert.equal(await page.locator('#booth-gift').isVisible(), true);
   assert.equal(await page.locator('#booth-live-prize').textContent(), '부스에서 스티커를 받아 가세요');
@@ -459,7 +492,8 @@ async function walk(browser, viewport, desk, pageErrors) {
   assert.equal(decBox.y >= noteBox.y + noteBox.height - 1, true, '내가 고친 곳 sits right after #booth-live-note');
   const again = page.locator('#booth-live-again');
   assert.equal(await again.isVisible(), true);
-  assert.equal(await again.textContent(), '다시 도전하기 · 기회 4번 남음');
+  assert.equal(await again.textContent(), '다시 도전하기 · 기회 2번 남음');
+  assert.equal(await page.locator('#booth-chances-top').textContent(), '기회 2번 남음');
   assert.match(await page.locator('#booth-history').textContent(), /F-0042 · Ragas통과/);
   await deskChecks(page, desk, 3);
   // 최종 추첨 (ux-booth P0-2): on a 통과 result phones see it too, under the gift ticket.
@@ -603,6 +637,7 @@ async function resultStatesAndSearchPass(browser, pageErrors) {
   await page.locator('#booth-claim-form button[type="submit"]').click();
   await stepIs(page, 'ticket');
   await page.waitForFunction(() => document.querySelector('#booth-live-title')?.textContent === 'AI가 찾아냈어요');
+  assert.equal(await page.locator('#booth-project-wait').isHidden(), true, 'caught hides waiting row');
   assert.equal(await page.locator('#booth-live-declared').isVisible(), true, 'caught shows 내가 고친 곳 from local receipt');
   assert.equal(await page.locator('#booth-live-declared .booth-diff del').textContent(), '0.95');
   assert.equal(await page.locator('#booth-live-declared .booth-diff ins').textContent(), '0.50');
@@ -614,6 +649,7 @@ async function resultStatesAndSearchPass(browser, pageErrors) {
   await page.locator('#booth-claim-form button[type="submit"]').click();
   await stepIs(page, 'ticket');
   await page.waitForFunction(() => document.querySelector('#booth-live-title')?.textContent === '제출을 철회했어요');
+  assert.equal(await page.locator('#booth-project-wait').isHidden(), true, 'withdrawn hides waiting row');
   assert.equal(await page.locator('#booth-live-declared').isHidden(), true, 'withdrawn hides 내가 고친 곳 even with local edits');
   await page.close();
 }

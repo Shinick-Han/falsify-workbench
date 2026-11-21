@@ -47,6 +47,12 @@
   const PARTIAL_SUB='결함 근처까지 짚으면 적발로 봐요.';
   const WITHDRAW_WARN='철회하면 되돌릴 수 없고, 선물과 추첨 기회도 함께 사라져요.';
   const CAPTURE_COPY='이 티켓을 캡처해 두세요. 화면을 닫아도 「내 기록」에서 접수번호와 확인키로 다시 볼 수 있어요.';
+  const PROJECT_URL='https://github.com/Pseudo-Lab/Falsify';
+  const PROJECT_QR_SRC='falsify-project-qr.svg';
+  const PROJECT_WAIT_COPY='기다리는 동안 가짜연구소 Falsify 프로젝트를 둘러보세요. 마음에 들면 GitHub에서 ★를 눌러 주세요.';
+  const PROJECT_LINK_LABEL='GitHub에서 보기 ★';
+  const PROJECT_QR_CAPTION='휴대폰 카메라로 찍으면 Falsify 프로젝트가 열려요.';
+  const PROJECT_QR_ALT='가짜연구소 Falsify 프로젝트 GitHub QR 코드';
   const GENERIC_HINT='숫자, 결론 문장, 표 값 중 한 곳을 골라 티 나지 않게 바꿔 보세요.';
   const FINAL_COPY='마감 후 더 정밀한 AI가 한 번 더 검증해요. 그때도 못 찾으면 최종 추첨 대상이에요.';
   /* Desktop layout (booth.css, min-width 1024px): the top bar's step indicator and the dock's edit chips. */
@@ -949,6 +955,23 @@
         el('li',{className:'now'},el('i'),'AI가 앞뒤 문장과 표를 대조하는 중'),
         el('li',{className:'wait'},el('i'),'결과'));
     }
+    function isKiosk(){
+      try{if(rt&&typeof rt.kiosk==='function'&&rt.kiosk()) return true;}catch{}
+      return !!(doc.documentElement&&doc.documentElement.dataset&&doc.documentElement.dataset.kiosk==='1');
+    }
+    function buildProjectWait(){
+      const copy=el('p',{id:'booth-project-copy',className:'booth-small',textContent:PROJECT_WAIT_COPY});
+      if(isKiosk()){
+        return el('aside',{id:'booth-project-wait',className:'booth-panel booth-project-wait is-kiosk','aria-label':'Falsify 프로젝트'},
+          el('div',{className:'booth-project-text'},
+            copy,
+            el('p',{id:'booth-project-qr-caption',className:'booth-small',textContent:PROJECT_QR_CAPTION})),
+          el('img',{id:'booth-project-qr',className:'booth-project-qr',src:PROJECT_QR_SRC,width:'120',height:'120',alt:PROJECT_QR_ALT}));
+      }
+      return el('aside',{id:'booth-project-wait',className:'booth-panel booth-project-wait','aria-label':'Falsify 프로젝트'},
+        copy,
+        el('a',{id:'booth-project-link',className:'booth-btn line slim booth-project-link',href:PROJECT_URL,target:'_blank',rel:'noopener noreferrer',textContent:PROJECT_LINK_LABEL}));
+    }
     function buildGift(){
       return el('article',{id:'booth-gift',className:'booth-tk booth-tk-v booth-gift',hidden:true,'aria-label':'교환권'},
         el('div',{className:'booth-sec booth-gift-sec'},
@@ -984,6 +1007,7 @@
         el('div',{id:'booth-live',className:'booth-live','data-state':'pending'},
           buildProgress(),
           el('p',{id:'booth-live-capture',className:'booth-small',textContent:CAPTURE_COPY}),
+          buildProjectWait(),
           el('div',{id:'booth-verdict',className:'booth-verdict',hidden:true},
             el('h2',{id:'booth-live-title',className:'booth-headline',role:'status','aria-live':'polite'}),
             el('p',{id:'booth-live-sub',className:'booth-copy',hidden:true}),
@@ -2219,7 +2243,7 @@
       setAttr('booth-live','data-state',view.state);
       setAttr('booth-ticket','data-state',view.state);
       renderTicketTop(data);
-      for(const id of ['booth-ticket-wait','booth-ticket-steps','booth-live-capture']) setHidden(id,view.final);
+      for(const id of ['booth-ticket-wait','booth-ticket-steps','booth-live-capture','booth-project-wait']) setHidden(id,view.final);
       for(const id of ['booth-ticket-result','booth-verdict']) setHidden(id,!view.final);
       if(view.final) renderVerdict(view,data);
       else renderPending(data);
