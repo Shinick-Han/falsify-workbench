@@ -107,6 +107,7 @@ async function assertChromeHidden(page, step) {
     assert.equal(await node.isVisible(), false, step + ': ' + name + ' is visible');
   }
   assert.equal(await page.locator('#booth').isVisible(), true, step + ': #booth is hidden');
+  assert.equal(await page.locator('#project-link').isVisible(), true, step + ': project link is hidden');
   assert.equal(await page.locator('#source-link').isVisible(), true, step + ': license link is hidden');
 }
 
@@ -264,6 +265,7 @@ async function main() {
     await index.route('**/*', route => route.request().url().startsWith(base) ? route.continue() : route.abort());
     await index.goto(base + 'index.html');
     assert.equal(await index.locator('link[href^="event-theme.css"]').count(), 0, 'index.html must not load the event theme');
+    assert.equal(await index.locator('#project-link').count(), 0, 'index.html must not have event project link');
     assert.equal(await index.locator('.topbar').isVisible(), true, 'index.html keeps its header');
     await index.close();
 

@@ -139,6 +139,7 @@
         // Booth submissions for the event page. BOOTH_OPERATOR_TOKEN stays a Wrangler secret.
         "BOOTH_ENABLED": "true",
         "BOOTH_CONSENT_VERSION": "2026-11-22.v3",
+        "BOOTH_SUBMISSIONS_PER_OWNER": "3",
         "BOOTH_SUBMISSIONS_PER_IP_HOUR": "400",
         // Visitors poll the claim route for the live result from behind one venue NAT.
         "BOOTH_CLAIMS_PER_IP_HOUR": "8000",
