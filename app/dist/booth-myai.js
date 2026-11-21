@@ -251,7 +251,7 @@
   }
   function hasEditsList(value){
     const raw=pick(value,EDIT_LIST_KEYS);
-    return Array.isArray(raw)?raw.length>0:isObj(raw);
+    return Array.isArray(raw)?raw.length>0:isObj(raw)||looksLikeEdit(value);
   }
   function tryCandidate(cand,ctx,state){
     const parsed=parseJson(cand.text);
@@ -661,11 +661,16 @@
     const onLang=event=>{setLang(event&&event.detail&&event.detail.lang==='en'?'en':'ko');};
     if(typeof doc.addEventListener==='function'){
       doc.addEventListener('falsify:booth-index-ready',onIndex);
+      /* A paper switch changes the PDF link and the prompt at once, before the new paper is indexed. */
+      doc.addEventListener('falsify:document-clear',onIndex);
+      doc.addEventListener('falsify:paper-workspace-source',onIndex);
       doc.addEventListener('falsify:booth-lang-change',onLang);
     }
     return {refresh,setLang,dispose(){
       if(typeof doc.removeEventListener==='function'){
         doc.removeEventListener('falsify:booth-index-ready',onIndex);
+        doc.removeEventListener('falsify:document-clear',onIndex);
+        doc.removeEventListener('falsify:paper-workspace-source',onIndex);
         doc.removeEventListener('falsify:booth-lang-change',onLang);
       }
     }};

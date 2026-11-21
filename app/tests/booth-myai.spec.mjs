@@ -289,3 +289,9 @@ test('after a successful apply only interpretation notes stay in the grey box', 
   assert.deepEqual(kept, ['keys_dropped', 'paper_forced']);
   assert.deepEqual(M.keptAfterApply(undefined), []);
 });
+
+test('a bare single edit next to cannot_read_paper is still applied', () => {
+  const out = M.parseAnswer('{"error":"cannot_read_paper","page":5,"find":"0.95","replace":"0.50"}', {paperId: '2309.15217'});
+  assert.ok(out.recipe);
+  assert.equal(out.recipe.edits[0].find, '0.95');
+});
