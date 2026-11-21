@@ -294,6 +294,26 @@ def _validated_target(t, source, visible, catalog, delivered_spans, omitted_cata
     return key, {'segmentId': t['segmentId'], 'offset': offset, 'anchor': anchor}
 
 
+def _partition_targets(selection, source, visible, catalog=None, delivered_spans=(), omitted_catalog=None,
+                       max_targets=MAX_TARGETS):
+    """Hosted multi-chunk target selection: keep every valid target instead of aborting on one bad anchor."""
+    catalog = catalog or {}
+    if selection['status'] != 'ok':
+        return []
+    raw_targets = selection.get('targets') if isinstance(selection.get('targets'), list) else []
+    targets, seen, state = [], set(), {'evitem_count': 0}
+    for t in raw_targets[:max_targets]:
+        if not isinstance(t, dict):
+            continue
+        try:
+            key, validated = _validated_target(t, source, visible, catalog, delivered_spans, omitted_catalog, state)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if key not in seen:
+            seen.add(key); targets.append(validated)
+    return targets
+
+
 def validate_targets(selection, source, visible, catalog=None, delivered_spans=(), omitted_catalog=None,
                      max_targets=MAX_TARGETS):
     """visible: segmentId -> texts the selection pass actually received (index previews, validated note
@@ -568,16 +588,29 @@ def _invoke_blue_call(engine, prompt, schema, call_images, call_refs, cancelled,
     return response
 
 
-def _scan_chunks(first, source, invoke):
+def _scan_chunks(first, source, invoke, hosted=False):
     notes = []
     for i, prompt in enumerate(first):
         note = invoke(prompt, SCAN, 'reviewing')
         if note['status'] != 'ok':
             return None, note['status'], i + 1
-        if len(note['summary']) > 2500:
-            raise ValueError('BLUE 요약 제한 초과')
-        evidence_check(note['evidence'], source, 600)
-        notes.append(note)
+        if hosted:
+            summary = note['summary']
+            if len(summary) > 2500:
+                summary = summary[:2499].rstrip() + '…'
+            valid_evidence = []
+            for item in note.get('evidence') or []:
+                try:
+                    evidence_check([item], source, 600)
+                except (KeyError, TypeError, ValueError):
+                    continue
+                valid_evidence.append(item)
+            notes.append({**note, 'summary': summary, 'evidence': valid_evidence})
+        else:
+            if len(note['summary']) > 2500:
+                raise ValueError('BLUE 요약 제한 초과')
+            evidence_check(note['evidence'], source, 600)
+            notes.append(note)
     return notes, 'ok', len(first)
 
 
@@ -595,30 +628,40 @@ def _run_single_chunk(data, structured, images, initial_refs, first, invoke, fin
         accepted, rejected, unresolved = response['findings'], [], []
     if call_images:
         visual_observations.extend(response.get('visualObservations') or [])
-    status = response['status']
+    model_status = response['status']
+    status = model_status
     if status == 'ok' and not accepted and (rejected or unresolved):
         status = 'abstain'
     return finish(status, accepted, 1, reread_record('not-needed'), rejected=rejected, unresolved=unresolved,
-                  selected_items=[] if structured else None, auto_crops=auto_crops, used_visual=bool(call_images))
+                  selected_items=[] if structured else None, auto_crops=auto_crops, used_visual=bool(call_images),
+                  model_status=model_status)
 
 
 def _run_multi_chunk(data, structured, images, initial_refs, first, chunks, policy, final, source, invoke, finish,
                      progress, visual_observations, calls, required, limits, schema):
     allow_occ = data.get('allowOccurrenceTargeting') is True
-    notes, scan_status, done_chunks = _scan_chunks(first, source, invoke)
+    notes, scan_status, done_chunks = _scan_chunks(first, source, invoke, hosted=limits['hosted'])
     if notes is None:
-        return finish(scan_status, [], done_chunks, reread_record('incomplete'), complete=False)
+        return finish(scan_status, [], done_chunks, reread_record('incomplete'), complete=False,
+                      model_status=scan_status)
     selection_schema = _selection_schema(limits)
     prompt, index, quotes, payload, spans = _selection_prompt(policy, notes, data, structured, limits)
     selection = invoke(prompt, selection_schema, 'selecting')
     visible = _selection_visible(index, quotes)
     omitted_map = {r['refId']: r for r in payload.get('omittedEvidenceRefs', [])}
-    targets = validate_targets(selection, source, visible, {r['id']: r for r in payload['evidenceRefs']}, spans,
-                               omitted_map, limits['blue_max_targets'])
+    ref_map = {r['id']: r for r in payload['evidenceRefs']}
+    if limits['hosted']:
+        targets = _partition_targets(selection, source, visible, ref_map, spans, omitted_map,
+                                     limits['blue_max_targets'])
+    else:
+        targets = validate_targets(selection, source, visible, ref_map, spans, omitted_map,
+                                   limits['blue_max_targets'])
     if selection['status'] != 'ok':
-        return finish(selection['status'], [], len(chunks), reread_record('incomplete'))
+        return finish(selection['status'], [], len(chunks), reread_record('incomplete'), complete=False,
+                      model_status=selection['status'])
     if not targets:  # never a summary-only final judgment
-        return finish('abstain', [], len(chunks), reread_record('incomplete'))
+        return finish('abstain', [], len(chunks), reread_record('incomplete'), complete=False,
+                      model_status='abstain')
     progress({'completedCalls': calls(), 'requiredCalls': required, 'phase': 'reread'})
     selected_items = _selected_item_ids(targets)
     reread_items = format_reread_items(data['paperEvidence']['paperId'], data['fileHash'], selected_items) if selected_items else []
@@ -649,14 +692,16 @@ def _multi_finish(data, response, windows, notes, targets, truncated, limits, al
         accepted, rejected, unresolved = response['findings'], [], []
     if call_images:
         visual_observations.extend(response.get('visualObservations') or [])
-    status = response['status']
+    model_status = response['status']
+    status = model_status
     if status == 'ok' and not accepted and (rejected or unresolved):
         status = 'abstain'
     return finish(status, accepted, len(chunks),
                   reread_record('incomplete' if truncated else 'completed', targets, windows, truncated),
                   rejected=rejected, unresolved=unresolved, windows=windows,
                   selected_items=selected_items if structured else None,
-                  auto_crops=auto_crops, used_visual=bool(call_images))
+                  auto_crops=auto_crops, used_visual=bool(call_images),
+                  model_status=model_status)
 
 
 def image_batches(images, per_batch):
@@ -711,17 +756,53 @@ def _add_unique_observations(observations, visual_observations, seen_observation
             visual_observations.append(observation)
 
 
+def _hosted_batch_outcome(statuses, accepted, rejected, unresolved, all_pairs_attempted):
+    has_refusal = 'refusal' in statuses
+    has_abstain = 'abstain' in statuses
+    any_incomplete = has_refusal or has_abstain
+    complete = all_pairs_attempted and not any_incomplete
+    if statuses and not any_incomplete:
+        model_status = 'ok'
+    else:
+        model_status = 'refusal' if has_refusal else 'abstain'
+    if accepted:
+        status = 'ok'
+    elif has_refusal:
+        status = 'refusal'
+    elif has_abstain or not statuses or rejected or unresolved:
+        status = 'abstain'
+    else:
+        status = 'ok'
+    return status, model_status, complete
+
+
+def _hosted_batch_meaning(complete, all_pairs_attempted):
+    if complete:
+        lead = 'Every supplied text batch (and image batch) was reviewed and valid findings were accumulated. '
+    elif not all_pairs_attempted:
+        lead = ('The job call budget ended before every batch; remaining text batches are listed '
+                'and are not claimed as reviewed. ')
+    else:
+        lead = 'One or more batches returned abstain or refusal and are not claimed as reviewed. '
+    return lead + 'This is batch coverage, not proof that the paper has no other defects.'
+
+
+def _hosted_remaining_batches(text_batches, image_groups, completed):
+    completed_text = min(len(text_batches), (completed + len(image_groups) - 1) // len(image_groups))
+    return [{'textBatch': index + 1,
+             'segmentIds': list(dict.fromkeys(s['id'] for s in text_batches[index])),
+             'chars': sum(len(s['text']) for s in text_batches[index]),
+             'imageBatches': len(image_groups)}
+            for index in range(completed_text, len(text_batches))]
+
+
 def _hosted_blue_result(data, text_batches, image_groups, completed, accepted, rejected, unresolved,
                         statuses, limits, harness, harness_hash, usage_totals, provider_state, images,
                         visual_observations):
-    status = 'ok' if accepted else (statuses[-1] if statuses and statuses[-1] != 'ok' else 'abstain')
-    complete = completed == len(text_batches) * len(image_groups)
-    completed_text = min(len(text_batches), (completed + len(image_groups) - 1) // len(image_groups))
-    remaining = [{'textBatch': index + 1,
-                  'segmentIds': list(dict.fromkeys(s['id'] for s in text_batches[index])),
-                  'chars': sum(len(s['text']) for s in text_batches[index]),
-                  'imageBatches': len(image_groups)}
-                 for index in range(completed_text, len(text_batches))]
+    all_pairs_attempted = completed == len(text_batches) * len(image_groups)
+    status, model_status, complete = _hosted_batch_outcome(
+        statuses, accepted, rejected, unresolved, all_pairs_attempted)
+    remaining = _hosted_remaining_batches(text_batches, image_groups, completed)
     provider = {'id': 'anthropic-api', 'models': sorted(provider_state['models']),
                 'requestId': provider_state['request_id']}
     result = {'schema': VERSION, 'revision': data['revision'], 'sourceHash': data['sourceHash'],
@@ -729,15 +810,13 @@ def _hosted_blue_result(data, text_batches, image_groups, completed, accepted, r
               'harness': harness, 'harnessHash': harness_hash, 'model': model_label(harness), **record(harness),
               'coverage': {'complete': complete, 'calls': completed, 'textBatches': len(text_batches),
                            'imageBatches': len(image_groups), 'completedPairs': completed,
+                           'batchStatuses': list(statuses),
                            'remainingBatches': remaining,
                            'resultCoverage': {'accepted': len(accepted), 'rejected': len(rejected),
-                                              'unresolved': len(unresolved), 'rejectedItems': rejected,
+                                              'unresolved': len(unresolved), 'modelStatus': model_status,
+                                              'rejectedItems': rejected,
                                               'unresolvedItems': unresolved},
-                           'meaning': ('Every supplied text batch (and image batch) was reviewed and valid findings were '
-                                       'accumulated. ' if complete else
-                                       'The job call budget ended before every batch; remaining text batches are listed '
-                                       'and are not claimed as reviewed. ')
-                                      + 'This is batch coverage, not proof that the paper has no other defects.'},
+                           'meaning': _hosted_batch_meaning(complete, all_pairs_attempted)},
               'isolation': ISOLATION}
     if images:
         result['visualObservations'] = visual_observations
@@ -819,10 +898,11 @@ def run_review(data, progress, cancelled, backend_factory=CodexBackend, claude_f
         return response
     visual_observations = []
     def finish(status, findings, completed, reread, complete=True, windows=(), selected_items=None, auto_crops=0,
-               used_visual=False, rejected=(), unresolved=()):
+               used_visual=False, rejected=(), unresolved=(), model_status=None):
         coverage = {'complete': complete, 'calls': calls, 'chunks': len(chunks), 'completedChunks': completed, 'reread': reread,
                     'rereadWindows': [{'segmentId': w['segmentId'], 'start': w['start'], 'end': w['end']} for w in windows],
                     'resultCoverage': {'accepted': len(findings), 'rejected': len(rejected), 'unresolved': len(unresolved),
+                                       'modelStatus': model_status or status,
                                        'rejectedItems': list(rejected), 'unresolvedItems': list(unresolved)}}
         if complete: coverage['meaning'] = MEANING
         if structured: coverage['paperEvidence'] = _paper_evidence_coverage(structured, data, selected_items, auto_crops)
