@@ -722,7 +722,9 @@
     v.langKo.addEventListener('click',()=>setLang('ko'));
     v.langEn.addEventListener('click',()=>setLang('en'));
     const onIndex=()=>refresh();
-    const onClear=()=>{resetSteps();refresh();};
+    /* An apply that opens its own paper again (a search-opened mission) clears the document mid-apply:
+       keep the panel then. A real switch to another paper is still caught by trackPaper in refresh(). */
+    const onClear=()=>{if(!v.apply.disabled) resetSteps();refresh();};
     const onLang=event=>{setLang(event&&event.detail&&event.detail.lang==='en'?'en':'ko');};
     if(typeof doc.addEventListener==='function'){
       doc.addEventListener('falsify:booth-index-ready',onIndex);

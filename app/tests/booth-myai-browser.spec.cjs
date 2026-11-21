@@ -360,10 +360,19 @@ async function checkReset(browser, viewport, tag) {
     // copy timer cancelled: label must not flip to 다시 복사 later
     await page.waitForTimeout(2300);
     assert.equal((await state(page)).copy, '복사', tag + ': timer cancelled');
-    // an in-flight apply cannot paint into Step 2 after a reset
+    // an apply that re-opens its own paper (same id) keeps the answer and shows its result
     await page.evaluate(() => { window.__recipe.mode = 'slow'; });
     await page.locator('#booth-myai-answer').fill(ANSWER);
     await page.locator('#booth-myai-apply').click();
+    await fire(page, 'falsify:document-clear');
+    await page.waitForFunction(() => !document.querySelector('#booth-myai-apply').disabled);
+    await page.waitForTimeout(100);
+    const selfOpen = await state(page);
+    assert.equal(selfOpen.answer, ANSWER, tag + ': same-paper clear during apply keeps the answer');
+    assert.equal(selfOpen.resultHidden, false, tag + ': same-paper clear during apply shows the result');
+    // an in-flight apply cannot paint into Step 2 after a switch to another paper
+    await page.locator('#booth-myai-apply').click();
+    await page.evaluate(() => { window.__paperId = '2309.15217'; });
     await fire(page, 'falsify:document-clear');
     await page.waitForFunction(() => !document.querySelector('#booth-myai-apply').disabled);
     await page.waitForTimeout(100);
