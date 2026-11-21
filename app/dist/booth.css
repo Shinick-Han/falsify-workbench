@@ -28,6 +28,11 @@
 .booth-copy{font-size:14px;color:var(--ev-ink-2)}
 .booth-small{font-size:12.5px;line-height:1.55;color:var(--ev-muted);overflow-wrap:anywhere}
 .booth-small:empty{display:none}
+.booth-credit{font-size:12px;line-height:1.5;color:var(--ev-muted);overflow-wrap:anywhere}
+.booth-credit a{color:inherit;text-decoration:underline;text-underline-offset:2px}
+.booth-credit a:hover{color:var(--ev-ink)}
+.booth-search-item{display:grid;gap:6px;min-width:0}
+.booth-search-source{padding:0 4px}
 .booth-txt{font-size:13.5px;color:var(--ev-ink-2);white-space:pre-wrap;overflow-wrap:anywhere}
 .booth-mono-meta{font-family:var(--ev-mono);font-size:11.5px;color:var(--ev-muted);overflow-wrap:anywhere}
 .booth-feedback{font-size:13px;color:var(--ev-ink-2);overflow-wrap:anywhere;min-width:0}
@@ -169,6 +174,9 @@
 .booth-gift-text{margin-top:2px;font-size:15px;font-weight:500;white-space:pre-wrap;overflow-wrap:anywhere}
 .booth .booth-gift-code{font-size:15px}
 .booth-note{gap:8px}
+.booth-declared{gap:10px}
+.booth-declared-item{display:grid;gap:4px;min-width:0}
+.booth-declared-item+.booth-declared-item{padding-top:10px;border-top:1px solid var(--ev-hair)}
 .booth-quote{padding:10px 12px;border-radius:6px;background:var(--ev-soft);font-family:"Times New Roman",Times,serif;font-size:13.5px;line-height:1.55;color:#2b2d31;overflow-wrap:anywhere}
 .booth-hist{display:grid;gap:6px}
 .booth .booth-hist-row{display:flex;justify-content:space-between;align-items:center;gap:10px;width:100%;min-height:44px;padding:7px 12px;border:0;border-radius:6px;background:var(--ev-card);color:var(--ev-ink);font-family:var(--ev-mono);font-size:12px;text-align:left;cursor:pointer}
@@ -261,6 +269,7 @@
 /* edit (D2): the hint card sits in the work column (placed by event-theme.css); the dock spans the viewport. */
 .booth-hint{padding:14px 18px;background:var(--ev-card);border-radius:10px;font-size:14px;color:var(--ev-ink-2)}
 .booth-hint .booth-klab{font-size:12px}
+html[data-booth-step="edit"] :is(#booth,#booth :has(#booth-hint))>#booth-paper-credit{grid-column:2;grid-row:5;position:relative;z-index:2;margin:0 0 16px}
 .booth-dock{grid-template-columns:auto minmax(0,1fr) auto auto;gap:6px 18px;max-width:none;min-height:76px;padding:12px max(32px,calc((100% - 1120px) / 2)) calc(12px + env(safe-area-inset-bottom,0px));box-shadow:none}
 .booth-dock-count{font-size:15px}
 .booth-dock-count small{font-size:12px}

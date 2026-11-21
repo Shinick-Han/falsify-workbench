@@ -57,12 +57,35 @@ const cors = {
   'Access-Control-Allow-Headers': '*',
 };
 
-const PENDING = {receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:00.000Z', published: false};
+const STUB_DECLARED = [{
+  pageIndex: 4,
+  before: 'Ragas 0.95 0.78 0.70',
+  after: 'Ragas 0.50 0.78 0.70',
+  defectType: 'number',
+  reason: '표의 점수를 0.95에서 0.50으로 바꿨습니다',
+}];
+const PENDING = {
+  receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1,
+  declared: STUB_DECLARED, createdAt: '2026-11-22T01:00:00.000Z', published: false,
+};
 const MISSED = {
-  receipt: 'F-0042', status: 'judged', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:00.000Z',
-  published: true, outcome: 'missed', publicNote: 'AI는 다른 곳을 짚었어요. AI가 먼저 본 곳은 7쪽이었고, 심어 둔 결함은 AI 눈을 피했어요.',
+  receipt: 'F-0042', status: 'judged', course: 'quick', declaredCount: 1,
+  declared: STUB_DECLARED, createdAt: '2026-11-22T01:00:00.000Z',
+  published: true, outcome: 'missed', publicNote: 'AI는 다른 곳을 짚었어요. 심어 둔 결함은 AI 눈을 피했어요.',
   prizeMessage: '부스에서 스티커를 받아 가세요', publishedAt: '2026-11-22T01:02:00.000Z',
 };
+const CAUGHT = {
+  receipt: 'F-0043', status: 'judged', course: 'quick', declaredCount: 1,
+  declared: STUB_DECLARED, createdAt: '2026-11-22T01:00:00.000Z',
+  published: true, outcome: 'caught',
+  publicNote: '내가 심어 둔 결함을 AI가 찾았어요. (AI가 짚은 곳: 5쪽)\nAI가 짚은 문장: "Ragas 0.50 0.78 0.70"\nAI 설명: 표 값이 본문과 맞지 않아요.',
+  publishedAt: '2026-11-22T01:01:30.000Z',
+};
+const WITHDRAWN = {
+  receipt: 'F-0044', status: 'withdrawn', course: 'quick', declaredCount: 1,
+  declared: STUB_DECLARED, createdAt: '2026-11-22T01:00:00.000Z', published: false,
+};
+const MISSION_CREDIT = '미션 논문은 모두 arXiv에 CC BY 4.0으로 공개된 논문이에요. 부스에서 보는 결함은 방문자가 게임을 위해 심은 거예요.';
 
 async function stubApi(route, submissions, claims) {
   const request = route.request();
@@ -93,6 +116,18 @@ async function stubApi(route, submissions, claims) {
       }],
     });
   }
+  if (url.pathname === '/v1/papers/search') {
+    return json(route, 200, {
+      results: [{
+        id: '2309.15217',
+        title: 'Ragas: Automated Evaluation of Retrieval Augmented Generation',
+        authors: ['Shahul Es', 'Jithin James'],
+        year: 2023,
+        license: 'cc-by-4.0',
+      }],
+      hasMore: false,
+    });
+  }
   if (url.pathname === '/v1/papers/pdf') {
     return route.fulfill({
       status: 200, contentType: 'application/pdf',
@@ -111,9 +146,12 @@ async function stubApi(route, submissions, claims) {
   }
   if (url.pathname === '/v1/booth/claim' && (request.method() === 'GET' || request.method() === 'POST')) {
     // Result polls are a GET with the receipt and key in the query (no preflight); POST is the fallback.
-    claims.push(request.method() === 'GET'
+    const body = request.method() === 'GET'
       ? {receipt: url.searchParams.get('receipt'), claimKey: url.searchParams.get('key')}
-      : JSON.parse(request.postData() || '{}'));
+      : JSON.parse(request.postData() || '{}');
+    claims.push(body);
+    if (body.receipt === 'F-0043') return json(route, 200, CAUGHT);
+    if (body.receipt === 'F-0044') return json(route, 200, WITHDRAWN);
     return json(route, 200, claims.length <= 2 ? PENDING : MISSED);
   }
   return json(route, 404, {error: {code: 'not_found'}});
@@ -157,6 +195,30 @@ async function deskChecks(page, desk, current) {
   assert.deepEqual(seen.steps, [1, 2, 3].map(n => n === current ? 'on' : n < current ? 'done' : ''));
   assert.equal(seen.current, 'booth-desk-step-' + current);
   assert.equal(await page.locator('.booth-stepbar-row b:visible, .booth-prog:visible, .booth-top:visible').count(), 0, 'phone step bars are hidden');
+}
+
+/* Regression guard: no input[type=file] or its label may be visible on event.html. */
+async function assertNoVisibleFileInput(page, label) {
+  const visible = await page.evaluate(() => {
+    const isVisible = node => {
+      if (!node || node.hidden) return false;
+      const style = getComputedStyle(node);
+      if (style.display === 'none' || style.visibility === 'hidden') return false;
+      const rect = node.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0 && (node.offsetParent !== null || style.position === 'fixed');
+    };
+    const bad = [];
+    for (const input of document.querySelectorAll('input[type="file"]')) {
+      if (isVisible(input)) bad.push('input#' + (input.id || '?'));
+      for (const lab of input.labels || []) {
+        if (isVisible(lab)) bad.push('label[for=' + (input.id || '?') + ']');
+      }
+      const wrap = input.closest('label');
+      if (wrap && isVisible(wrap)) bad.push('wrap-label#' + (input.id || '?'));
+    }
+    return bad;
+  });
+  assert.deepEqual(visible, [], label + ': visible file input or label: ' + JSON.stringify(visible));
 }
 
 async function findAndReplace(page, desk, find, replace) {
@@ -210,6 +272,11 @@ async function walk(browser, viewport, desk, pageErrors) {
   assert.equal(await page.locator('#booth-howto').isVisible(), true, 'the how-to is visible');
   assert.equal(await page.locator('#booth-howto li').count(), 3);
   assert.doesNotMatch(await page.locator('#booth-step-pick').textContent(), /2분 안에/);
+  const missionCredit = page.locator('#booth-mission-credit');
+  assert.equal(await missionCredit.isVisible(), true, 'pick-step credit sentence is visible');
+  assert.equal(await missionCredit.textContent(), MISSION_CREDIT);
+  assert.equal(await page.locator('#booth-missions button a').count(), 0, 'no nested link inside mission card button');
+  await assertNoVisibleFileInput(page, (desk ? 'desktop' : 'phone') + ' pick');
   if (!desk) {
     const hero = await page.locator('.booth-hero').boundingBox();
     const line = await limit.boundingBox();
@@ -227,6 +294,18 @@ async function walk(browser, viewport, desk, pageErrors) {
     && /^5 \//.test(document.querySelector('#paper-page-label')?.textContent || '')
     && [...document.querySelectorAll('#paper-before-stage .paper-text-layer span[data-i]')].some(node => node.textContent.includes('0.95')));
   assert.match(await page.locator('#booth-hint').textContent(), /^힌트 · Table 1의 점수 하나를 바꿔 보세요/);
+  const credit = page.locator('#booth-paper-credit');
+  assert.equal(await credit.isVisible(), true, 'edit-step credit line is visible');
+  assert.equal(await credit.textContent(), '원문 arXiv 2309.15217 · CC BY 4.0 · 게임용으로 고친 사본');
+  const creditLinks = await credit.locator('a').evaluateAll(list => list.map(a => ({
+    text: a.textContent, href: a.getAttribute('href'), target: a.getAttribute('target'), rel: a.getAttribute('rel'),
+  })));
+  assert.deepEqual(creditLinks, [
+    {text: 'arXiv 2309.15217', href: 'https://arxiv.org/abs/2309.15217', target: '_blank', rel: 'noopener noreferrer'},
+    {text: 'CC BY 4.0', href: 'https://creativecommons.org/licenses/by/4.0/', target: '_blank', rel: 'noopener noreferrer'},
+  ]);
+  await assertNoVisibleFileInput(page, (desk ? 'desktop' : 'phone') + ' edit');
+  await shot(page, 'edit', viewport);
   assert.equal(await page.locator('#booth-dock-count').textContent(), '고친 곳 0개');
   assert.equal(await page.locator('#booth-next').isDisabled(), true);
 
@@ -292,6 +371,7 @@ async function walk(browser, viewport, desk, pageErrors) {
   assert.equal(await card.getByRole('button', {name: '수치·통계'}).getAttribute('aria-pressed'), 'true');
   await card.locator('textarea').fill('표의 점수를 0.95에서 0.50으로 바꿨습니다');
   assert.equal(await page.locator('#booth-consent, #booth-consent-panel, #booth-nickname').count(), 0, 'send has no consent box or nickname field');
+  await assertNoVisibleFileInput(page, (desk ? 'desktop' : 'phone') + ' send');
   await shot(page, 'send', viewport);
   assert.equal(await page.locator('#booth-submit-button').isDisabled(), false);
   assert.equal(await page.locator('#booth-submit-button').textContent(), 'AI에게 제출하기');
@@ -349,6 +429,7 @@ async function walk(browser, viewport, desk, pageErrors) {
   assert.match(await page.locator('#booth-ticket-elapsed').textContent(), /^\d+:\d\d$/);
   assert.equal(await page.locator('#booth-barcode').isVisible(), true);
   assert.equal(await page.locator('#booth-live-again').isHidden(), true);
+  assert.equal(await page.locator('#booth-live-declared').isHidden(), true, 'pending hides 내가 고친 곳');
   await deskChecks(page, desk, 3);
   if (desk) {
     const stub = await page.locator('#booth-ticket-stub').boundingBox();
@@ -373,7 +454,15 @@ async function walk(browser, viewport, desk, pageErrors) {
   assert.equal(await page.locator('#booth-gift').isVisible(), true);
   assert.equal(await page.locator('#booth-live-prize').textContent(), '부스에서 스티커를 받아 가세요');
   assert.match(await page.locator('#booth-gift').textContent(), /교환권 · 1인 1회/);
-  assert.match(await page.locator('#booth-live-note').textContent(), /AI가 먼저 본 곳은 7쪽이었고/);
+  assert.match(await page.locator('#booth-live-note').textContent(), /AI는 다른 곳을 짚었어요\. 심어 둔 결함은 AI 눈을 피했어요\./);
+  const declared = page.locator('#booth-live-declared');
+  assert.equal(await declared.isVisible(), true, 'missed shows 내가 고친 곳');
+  assert.match(await declared.textContent(), /^내가 고친 곳5쪽/);
+  assert.equal(await declared.locator('.booth-diff del').textContent(), '0.95');
+  assert.equal(await declared.locator('.booth-diff ins').textContent(), '0.50');
+  const noteBox = await page.locator('#booth-live-note').boundingBox();
+  const decBox = await declared.boundingBox();
+  assert.equal(decBox.y >= noteBox.y + noteBox.height - 1, true, '내가 고친 곳 sits right after #booth-live-note');
   const again = page.locator('#booth-live-again');
   assert.equal(await again.isVisible(), true);
   assert.equal(await again.textContent(), '다시 도전하기 · 기회 4번 남음');
@@ -441,7 +530,8 @@ async function walk(browser, viewport, desk, pageErrors) {
   assert.equal(await page.locator('#booth-missions').isVisible(), true);
   assert.equal(await page.locator('#paper-file').inputValue(), '');
   await page.locator(desk ? '#booth-desk-records' : '#booth-result-link').click();
-  await page.locator('#booth-receipts-list').getByRole('button', {name: /F-0042/}).waitFor();
+  const recordBtn = page.locator('#booth-receipts-list').getByRole('button', {name: /F-0042/});
+  await recordBtn.waitFor();
   assert.equal(await page.evaluate(() => document.documentElement.dataset.boothStep), 'pick');
   assert.equal(await page.locator('#booth-landing').isHidden(), true);
   const resultAudit = await phoneAudit(page, '#booth-result');
@@ -449,7 +539,67 @@ async function walk(browser, viewport, desk, pageErrors) {
   assert.equal(resultAudit.seen >= 2, true);
   assert.equal(resultAudit.overflow <= 0, true, 'result overflow ' + resultAudit.overflow);
   await deskChecks(page, desk, 1);
+  // Re-opening from 내 기록 still shows 내가 고친 곳.
+  await recordBtn.click();
+  await stepIs(page, 'ticket');
+  assert.equal(await page.locator('#booth-live-declared').isVisible(), true, 're-opened result shows 내가 고친 곳');
+  assert.equal(await page.locator('#booth-live-declared .booth-diff del').textContent(), '0.95');
+  assert.equal(await page.locator('#booth-live-declared .booth-diff ins').textContent(), '0.50');
   assert.deepEqual(forbiddenRequests, [], 'event.html must never request editcore.wasm, paragraph-pdf-worker, or omitted workbench engines');
+  await page.close();
+}
+
+/* Browser checks for caught/withdrawn declared visibility and search result arXiv link + credit line. */
+async function resultStatesAndSearchPass(browser, pageErrors) {
+  const submissions = [];
+  const claims = [];
+  const page = await browser.newPage({viewport: {width: 390, height: 844}, deviceScaleFactor: 1, hasTouch: true, locale: 'ko-KR'});
+  page.setDefaultTimeout(90000);
+  page.on('pageerror', error => pageErrors.push(error.message));
+  const base = 'http://127.0.0.1:' + port + '/';
+  await page.route('**/*', route => {
+    const url = route.request().url();
+    if (url.startsWith(base)) return route.continue();
+    return stubApi(route, submissions, claims);
+  });
+  await page.goto(base + 'event.html');
+  await page.locator('#booth-missions .booth-mission').first().waitFor();
+  // Search results: licence label + arXiv link not nested inside the card button; opening shows edit credit.
+  await page.locator('#booth-search-box > summary').click();
+  await page.locator('#booth-search-q').fill('Ragas');
+  await page.locator('#booth-search-go').click();
+  const searchCard = page.locator('#booth-search-results .booth-search-item').first();
+  await searchCard.waitFor();
+  assert.equal(await searchCard.locator('button a').count(), 0, 'no nested link inside search result button');
+  assert.match(await searchCard.locator('button').textContent(), /CC BY 4\.0/);
+  const arxivLink = searchCard.locator('a[href="https://arxiv.org/abs/2309.15217"]');
+  assert.equal(await arxivLink.isVisible(), true);
+  assert.equal(await arxivLink.getAttribute('target'), '_blank');
+  assert.equal(await arxivLink.getAttribute('rel'), 'noopener noreferrer');
+  await searchCard.locator('button').click();
+  await stepIs(page, 'edit');
+  assert.equal(await page.locator('#booth-paper-credit').textContent(), '원문 arXiv 2309.15217 · CC BY 4.0 · 게임용으로 고친 사본');
+  await page.locator('#booth-edit-back').click();
+  await stepIs(page, 'pick');
+  // Caught shows 내가 고친 곳; withdrawn hides it.
+  await page.locator('#booth-result-link').click();
+  await page.locator('#booth-claim-receipt').fill('F-0043');
+  await page.locator('#booth-claim-key').fill('7Q3K-M9XD');
+  await page.locator('#booth-claim-form button[type="submit"]').click();
+  await stepIs(page, 'ticket');
+  await page.waitForFunction(() => document.querySelector('#booth-live-title')?.textContent === 'AI가 찾아냈어요');
+  assert.equal(await page.locator('#booth-live-declared').isVisible(), true, 'caught shows 내가 고친 곳');
+  assert.equal(await page.locator('#booth-live-declared .booth-diff del').textContent(), '0.95');
+  assert.equal(await page.locator('#booth-live-declared .booth-diff ins').textContent(), '0.50');
+  await page.locator('#booth-live-again').click();
+  await stepIs(page, 'pick');
+  await page.locator('#booth-result-link').click();
+  await page.locator('#booth-claim-receipt').fill('F-0044');
+  await page.locator('#booth-claim-key').fill('7Q3K-M9XD');
+  await page.locator('#booth-claim-form button[type="submit"]').click();
+  await stepIs(page, 'ticket');
+  await page.waitForFunction(() => document.querySelector('#booth-live-title')?.textContent === '제출을 철회했어요');
+  assert.equal(await page.locator('#booth-live-declared').isHidden(), true, 'withdrawn hides 내가 고친 곳');
   await page.close();
 }
 
@@ -526,6 +676,7 @@ async function main() {
   try {
     await walk(browser, {width: 390, height: 844}, false, pageErrors);
     await phoneDockCapPass(browser, pageErrors);
+    await resultStatesAndSearchPass(browser, pageErrors);
     await walk(browser, {width: 1280, height: 800}, true, pageErrors);
     assert.equal(pageErrors.join('\n'), '');
   } catch (error) {
