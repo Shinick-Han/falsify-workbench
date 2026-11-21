@@ -227,6 +227,17 @@ test('dictionary and pattern translation, vars interpolation, and whitespace pre
     i18n.t('휴대폰 카메라로 찍으면 Falsify 프로젝트가 열려요.'),
     'Scan with your phone camera to open the Falsify project.',
   );
+  // Ask my AI (sx95) strings
+  assert.equal(i18n.t('원문 PDF 받기'), 'Get the PDF');
+  assert.equal(
+    i18n.t('AI에 이 PDF를 첨부하고 프롬프트를 붙여 넣으세요. 링크를 읽을 수 있는 AI라면 프롬프트만 붙여 넣어도 돼요.'),
+    'Attach this PDF to your AI and paste the prompt. If your AI can open links, the prompt alone is enough.',
+  );
+  assert.equal(
+    i18n.t('AI가 논문을 열지 못했어요. 원문 PDF를 받아 AI에 첨부한 뒤 다시 물어봐 주세요.'),
+    'Your AI could not open the paper. Get the PDF, attach it to your AI and ask again.',
+  );
+  assert.equal(i18n.t('전체 1,085자'), '1,085 chars total');
 });
 
 test('DOM walk translates text and attributes, skips translate="no" and input values, and restores cleanly', () => {
@@ -379,6 +390,10 @@ test('booth-myai.js builds English prompt when page is in English mode', () => {
     hint: 'Change one number in Table 1 on p. 5.', page: 5, pageText: 'Ragas 0.95',
   }, {lang: 'en'});
   assert.match(prompt, /You are setting a puzzle/);
+  assert.match(prompt, /1 to 5 defects/);
+  assert.ok(prompt.includes('PDF: https://arxiv.org/pdf/2309.15217'));
+  assert.ok(prompt.includes('{"error":"cannot_read_paper"}'));
   assert.match(prompt, /Answer with the JSON object only/);
+  assert.doesNotMatch(prompt, /0\.95|Change one number|Good defects/);
   assert.doesNotMatch(prompt, /[\uac00-\ud7a3]/);
 });

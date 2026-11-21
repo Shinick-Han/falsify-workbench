@@ -352,17 +352,48 @@ async function walkViewport(browser, viewport, desk, pageErrors) {
     assert.equal(await page.evaluate(() => document.documentElement.lang), 'en');
     assert.equal(await page.locator('#booth-dock-count').textContent(), '1 edit');
 
-    // 3. Edit: Ask my AI tab (prompt copy is English, invalid JSON error is English)
+    // 3. Edit: Ask my AI tab (Step 1 PDF link, no page input, EN prompt copy, cannot_read_paper, wrong-page apply, invalid JSON)
     await page.locator('#booth-tab-myai').click();
     await page.locator('#booth-myai-copy').waitFor();
+    assert.equal(await page.locator('#booth-myai-page').count(), 0, 'no page input');
+    assert.equal(await page.locator('#booth-myai-pdf').getAttribute('href'), 'https://arxiv.org/pdf/2309.15217');
+    assert.equal(await page.locator('#booth-myai-pdf').getAttribute('target'), '_blank');
+    assert.equal(await page.locator('#booth-myai-pdf').getAttribute('rel'), 'noopener noreferrer');
+    assert.equal(await page.locator('#booth-myai-pdf').getAttribute('download'), null);
+    await page.waitForFunction(() => document.querySelector('#booth-myai-pdf')?.textContent === 'Get the PDF');
     await page.locator('#booth-myai-copy').click();
     await page.waitForFunction(() => window.__clip.length >= 1);
     const copiedPrompt = await page.evaluate(() => window.__clip[window.__clip.length - 1]);
     assert.match(copiedPrompt, /You are setting a puzzle/);
+    assert.match(copiedPrompt, /Plant 1 to 5 defects/);
+    assert.ok(copiedPrompt.includes('PDF: https://arxiv.org/pdf/2309.15217'));
+    assert.ok(copiedPrompt.includes('{"error":"cannot_read_paper"}'));
     assert.match(copiedPrompt, /Answer with the JSON object only/);
+    assert.doesNotMatch(copiedPrompt, /Good defects|0\.95|0\.50/);
     assert.doesNotMatch(copiedPrompt, /[\uac00-\ud7a3]/, 'copied Ask my AI prompt must be English in EN mode');
     await assertNoVisibleHangul(page, tag + ' edit-myai');
     await shot(page, 'edit-myai', tag);
+
+    // cannot_read_paper error on Ask my AI (changes no edits, zero Hangul)
+    const editsBefore = await page.evaluate(() => globalThis.FalsifyBoothEdits.list().length);
+    await page.locator('#booth-myai-answer').fill('```json\n{"error": "cannot_read_paper"}\n```');
+    await page.locator('#booth-myai-apply').click();
+    await page.waitForFunction(() => /Your AI could not open the paper\. Get the PDF, attach it to your AI and ask again\./.test(document.querySelector('#booth-myai-diags')?.textContent || ''));
+    assert.equal(await page.evaluate(() => globalThis.FalsifyBoothEdits.list().length), editsBefore, 'cannot_read_paper changes no edits');
+    await assertNoVisibleHangul(page, tag + ' edit-myai-cannot-read');
+
+    // Wrong page number still applies edit on the right page (p. 5 -> pageIndex 4)
+    await page.locator('#booth-myai-answer').fill(JSON.stringify({
+      schema: 'falsify.booth.recipe.v1', paperId: '2309.15217', source: 'my-ai',
+      edits: [{page: 1, find: '0.78', replace: '0.71', context: 'Ragas 0.95 0.78 0.70'}],
+      defectType: 'number', reason: 'Lowered answer relevance.',
+    }));
+    await page.locator('#booth-myai-apply').click();
+    await page.waitForFunction(() => document.querySelector('.booth-myai-count')?.textContent === 'Applied 1 edit');
+    const editsAfterWrongPage = await page.evaluate(() => globalThis.FalsifyBoothEdits.list());
+    assert.equal(editsAfterWrongPage.length, editsBefore + 1, 'wrong-page edit applied');
+    assert.equal(editsAfterWrongPage[editsAfterWrongPage.length - 1].pageIndex, 4, 'located on page 5 (pageIndex 4)');
+    await assertNoVisibleHangul(page, tag + ' edit-myai-applied');
 
     // Invalid JSON error on Ask my AI
     await page.locator('#booth-myai-answer').fill('{"edits": [{"find": "0.95" "replace": "0.50"}]}');

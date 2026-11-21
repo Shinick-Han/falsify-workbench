@@ -25,24 +25,34 @@ const STUB_PAGE = '<!doctype html><html lang="ko"><head><meta charset="utf-8">' 
   '<style>body{margin:0;background:#eef0f1}.booth{padding:0 16px 24px}</style></head><body>' +
   '<main class="booth"><p id="booth-hint" class="booth-hint"><span class="booth-klab">힌트</span> · Table 1의 점수 하나를 바꿔 보세요</p>' +
   '<input id="paper-page-jump" type="number" value="5" hidden><div id="booth-myai"></div></main>' +
-  '<script src="stub-recipe.js"></script><script src="external-red.js"></script>' +
+  '<script src="booth-recipe.js"></script><script src="stub-recipe.js"></script><script src="external-red.js"></script>' +
   '<script src="external-exchange.js"></script><script src="booth-myai.js"></script>' +
   '<script>window.__mount = FalsifyBoothMyAI.mount(document.getElementById("booth-myai"));</script></body></html>';
 
-/* Stub of S1's FalsifyBoothRecipe (contract §3). window.__recipe controls apply. */
-const STUB_RECIPE = 'window.__calls = {assist: [], apply: []};\n' +
+/* Stub of FalsifyBoothRecipe wrapping the real locate() across pages 1..6. window.__recipe controls apply. */
+const STUB_RECIPE = 'const __realLocate = window.FalsifyBoothRecipe.locate;\n' +
+  'const __pages = [1, 2, 3, 4, 5, 6].map(n => ({pageIndex: n - 1, text: n === 5 ? ' + JSON.stringify(PAGE5) + ' : "Page " + n + " text about WikiEval with 50 questions."}));\n' +
+  'window.__calls = {assist: [], apply: [], located: []};\n' +
   'window.__recipe = {mode: "ok"};\n' +
   'window.FalsifyBoothRecipe = {\n' +
   '  paperInfo() { return {paperId: "2309.15217", title: "Ragas: Automated Evaluation of Retrieval Augmented Generation", license: "cc-by-4.0", pages: 6}; },\n' +
-  '  pageText(n) { return n === 5 ? ' + JSON.stringify(PAGE5) + ' : "Page " + n + " text about WikiEval with 50 questions."; },\n' +
+  '  pageText(n) { return __pages[n - 1] ? __pages[n - 1].text : ""; },\n' +
   '  setAssist(kind, code) { window.__calls.assist.push([kind, code]); },\n' +
   '  assist() { return {assist: "manual"}; },\n' +
   '  async apply(recipe, options) {\n' +
   '    window.__calls.apply.push(JSON.parse(JSON.stringify(recipe)));\n' +
   '    if (options && options.onProgress) options.onProgress({message: "논문에 적용하는 중"});\n' +
   '    if (window.__recipe.mode === "throw") throw new Error("PDF를 만들지 못했어요");\n' +
-  '    const [first, ...rest] = recipe.edits;\n' +
-  '    return {applied: [first], unresolved: rest.map(edit => ({edit, reason: "not_found"}))};\n' +
+  '    const applied = [], unresolved = [];\n' +
+  '    for (const edit of recipe.edits) {\n' +
+  '      const hit = __realLocate(edit, __pages);\n' +
+  '      if (hit.status === "resolved") {\n' +
+  '        const rec = {edit, pageIndex: hit.pageIndex};\n' +
+  '        applied.push(rec);\n' +
+  '        window.__calls.located.push(rec);\n' +
+  '      } else unresolved.push({edit, reason: hit.status});\n' +
+  '    }\n' +
+  '    return {applied, unresolved};\n' +
   '  },\n' +
   '};\n';
 
@@ -87,7 +97,7 @@ async function overflow(page) {
 }
 
 async function targets(page) {
-  return page.evaluate(() => [...document.querySelectorAll('#booth-myai button, #booth-myai input, #booth-myai textarea')]
+  return page.evaluate(() => [...document.querySelectorAll('#booth-myai button, #booth-myai a, #booth-myai input, #booth-myai textarea')]
     .filter(node => node.offsetParent !== null)
     .map(node => ({id: node.id || node.textContent, ...node.getBoundingClientRect().toJSON()}))
     .filter(box => box.height < 44 || box.width < 44));
@@ -104,17 +114,32 @@ async function checkStepOne(page) {
   assert.match(text, /부탁 글 복사/);
   assert.match(text, /어떤 AI든 괜찮아요 \(ChatGPT, Claude, Gemini…\)/);
   assert.match(text, /AI 답 붙여넣기/);
-  assert.equal(await page.locator('#booth-myai-page').inputValue(), '5', 'page comes from #paper-page-jump');
+  assert.equal(await page.locator('#booth-myai-page').count(), 0, 'no page input');
+  assert.equal(await page.locator('#booth-myai input[type="number"]').count(), 0, 'no numeric page input');
   assert.match(await page.locator('#booth-myai-preview').textContent(), /논문 검증 게임/);
-  assert.match(await page.locator('.booth-myai-size').textContent(), /5쪽 원문 포함/);
+  assert.match(await page.locator('.booth-myai-size').textContent(), /^전체 [\d,]+자$/);
+  assert.doesNotMatch(await page.locator('.booth-myai-size').textContent(), /원문 포함/);
+  assert.equal(await page.locator('#booth-myai-guide').textContent(),
+    'AI에 이 PDF를 첨부하고 프롬프트를 붙여 넣으세요. 링크를 읽을 수 있는 AI라면 프롬프트만 붙여 넣어도 돼요.');
+  const pdf = page.locator('#booth-myai-pdf');
+  assert.equal(await pdf.textContent(), '원문 PDF 받기');
+  assert.equal(await pdf.getAttribute('href'), 'https://arxiv.org/pdf/2309.15217');
+  assert.equal(await pdf.getAttribute('target'), '_blank');
+  assert.equal(await pdf.getAttribute('rel'), 'noopener noreferrer');
+  assert.equal(await pdf.getAttribute('download'), null, 'no download attribute');
+  assert.equal(await pdf.evaluate(n => n.className.includes('ink')), false, 'PDF link is secondary button');
 }
 
 async function checkCopy(page) {
   await page.locator('#booth-myai-copy').click();
   await page.waitForFunction(() => window.__clip.length === 1);
   const copied = await page.evaluate(() => window.__clip[0]);
-  assert.match(copied, /Table 1의 점수 하나를 바꿔 보세요/, 'hint from #booth-hint');
-  assert.ok(copied.includes('Ragas 0.95 0.78 0.70'), 'page 5 text');
+  assert.ok(copied.includes('PDF: https://arxiv.org/pdf/2309.15217'), 'exact arXiv PDF URL');
+  assert.ok(copied.includes('{"error":"cannot_read_paper"}'), 'cannot_read clause');
+  assert.ok(!copied.includes('Table 1의 점수 하나를 바꿔 보세요'), 'no mission hint in prompt');
+  assert.ok(!copied.includes('Ragas 0.95 0.78 0.70'), 'no page text in prompt');
+  assert.doesNotMatch(copied, /좋은 결함|0\.95|0\.50/);
+  assert.match(copied, /1~5개/);
   assert.match(copied, /"source": "my-ai"/);
   assert.equal(await page.locator('#booth-myai-copy-status').textContent(),
     '복사했어요. AI 채팅에 붙여 넣고, 받은 답을 전부 복사해 오세요.');
@@ -124,7 +149,11 @@ async function checkCopy(page) {
   await page.getByRole('button', {name: 'English'}).click();
   await page.locator('#booth-myai-copy').click();
   await page.waitForFunction(() => window.__clip.length === 2);
-  assert.match(await page.evaluate(() => window.__clip[1]), /Answer with the JSON object only/);
+  const copiedEn = await page.evaluate(() => window.__clip[1]);
+  assert.match(copiedEn, /Plant 1 to 5 defects/);
+  assert.ok(copiedEn.includes('PDF: https://arxiv.org/pdf/2309.15217'));
+  assert.match(copiedEn, /Answer with the JSON object only/);
+  assert.doesNotMatch(copiedEn, /[\uac00-\ud7a3]/);
   await page.getByRole('button', {name: '한국어'}).click();
 }
 
@@ -153,11 +182,13 @@ async function checkApply(page) {
 }
 
 async function checkZeroAndInterpretation(page) {
-  const one = JSON.stringify({edits: [{page: 5, find: '0.95', replace: '0.50'}], paperId: '2401.00001'});
-  await page.locator('#booth-myai-answer').fill(one);
+  const wrongPage = JSON.stringify({edits: [{page: 1, find: '0.95', replace: '0.50'}], paperId: '2401.00001'});
+  await page.locator('#booth-myai-answer').fill(wrongPage);
   await page.locator('#booth-myai-apply').click();
   await page.waitForFunction(() => document.querySelector('.booth-myai-count')?.textContent === '1곳 적용했어요');
   await page.waitForFunction(() => !document.querySelector('#booth-myai-apply').disabled);
+  const lastLocated = await page.evaluate(() => window.__calls.located[window.__calls.located.length - 1]);
+  assert.equal(lastLocated.pageIndex, 4, 'wrong page number (1) still locates edit on page 5 (pageIndex 4)');
   // An interpretation fix (paperId corrected) keeps its one grey line.
   const notes = await page.locator('#booth-myai-diags li').allTextContents();
   assert.equal(notes.length, 1);
@@ -178,7 +209,8 @@ async function checkShare(page, tag, expected) {
   await page.waitForFunction(() => window.__shared.length === 1);
   const shared = await page.evaluate(() => window.__shared[0]);
   assert.deepEqual(Object.keys(shared), ['text']);
-  assert.ok(shared.text.includes('Ragas 0.95 0.78 0.70'));
+  assert.ok(shared.text.includes('PDF: https://arxiv.org/pdf/2309.15217'));
+  assert.ok(!shared.text.includes('Ragas 0.95 0.78 0.70'));
   await page.waitForFunction(n => window.__clip.length === n + 1, clips);
   await page.waitForFunction(() => /^보냈어요\./.test(document.querySelector('#booth-myai-copy-status').textContent));
   await page.locator('#booth-myai-copy').click();
@@ -191,10 +223,18 @@ async function checkShare(page, tag, expected) {
 
 async function checkErrors(page) {
   const before = await page.evaluate(() => window.__calls.apply.length);
-  await page.locator('#booth-myai-answer').fill('{"edits": [{"find": "0.95" "replace": "0.50"}]}');
+  await page.locator('#booth-myai-answer').fill(FENCE + 'json\n{"error": "cannot_read_paper"}\n' + FENCE);
   await page.locator('#booth-myai-apply').click();
   await page.locator('.booth-myai-diag.error').first().waitFor();
-  assert.match(await page.locator('#booth-myai-diags').textContent(), /JSON 모양이 깨져 있어요/);
+  assert.deepEqual(await page.locator('#booth-myai-diags li').allTextContents(), [
+    'AI가 논문을 열지 못했어요. 원문 PDF를 받아 AI에 첨부한 뒤 다시 물어봐 주세요.',
+  ]);
+  assert.equal(await page.locator('#booth-myai-result').isVisible(), false);
+  assert.equal(await page.evaluate(() => window.__calls.apply.length), before, 'cannot_read_paper must not call apply');
+
+  await page.locator('#booth-myai-answer').fill('{"edits": [{"find": "0.95" "replace": "0.50"}]}');
+  await page.locator('#booth-myai-apply').click();
+  await page.waitForFunction(() => /JSON 모양이 깨져 있어요/.test(document.querySelector('#booth-myai-diags').textContent));
   assert.equal(await page.locator('#booth-myai-result').isVisible(), false);
   assert.equal(await page.evaluate(() => window.__calls.apply.length), before, 'invalid answer must not call apply');
 
@@ -225,7 +265,8 @@ async function checkFallback(browser, viewport, tag) {
     assert.equal(sel.start, 0);
     assert.equal(sel.end, sel.len);
     assert.ok(sel.focused, 'fallback textarea is focused');
-    assert.ok(sel.value.includes('Ragas 0.95 0.78 0.70'));
+    assert.ok(sel.value.includes('PDF: https://arxiv.org/pdf/2309.15217'));
+    assert.ok(sel.value.includes('{"error":"cannot_read_paper"}'));
     assert.ok(await overflow(page) <= 0, tag + ': overflow with fallback');
     await shot(page, 'step1-copy-fallback-' + tag);
     assert.equal(errors.join('\n'), '');
