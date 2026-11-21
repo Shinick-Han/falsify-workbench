@@ -641,8 +641,8 @@ test('migration 0007 and the event vars', () => {
   assert.match(sql, /ALTER TABLE booth_submissions ADD COLUMN assist TEXT/);
   assert.match(sql, /ALTER TABLE booth_submissions ADD COLUMN recipe_code TEXT;/);
   const wrangler = readFileSync(path.join(apiRoot, 'wrangler.jsonc'), 'utf8');
-  assert.match(wrangler, /"BOOTH_RECIPES_PER_IP_HOUR": "120"/);
+  assert.match(wrangler, /"BOOTH_RECIPES_PER_IP_HOUR": "600"/);
   assert.match(wrangler, /"BOOTH_RECIPES_PER_HOUR": "5000"/);
-  assert.match(wrangler, /"BOOTH_RECIPE_READS_PER_IP_HOUR": "600"/);
+  assert.match(wrangler, /"BOOTH_RECIPE_READS_PER_IP_HOUR": "3000"/);
   assert.match(wrangler, /"EVENT_PAGE_URL": "https:\/\/shinick-han\.github\.io\/falsify-workbench\/event\.html"/);
 });
