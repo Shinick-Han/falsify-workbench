@@ -14,10 +14,11 @@ const LIVE_KEYS = [
 export const NOTE_KEYS = ['caught', 'partial', 'missed', 'missedNone'];
 
 // Visitor-facing Korean. {page} is the finding's 1-based page, {quote} its sentence, {rationale} its reason.
+// {rationaleEn} is the English part of the reason; its whole line is dropped when BLUE gave none.
 // Nothing here comes from the visitor's declared edit.
 export const DEFAULT_NOTES = Object.freeze({
-  caught: '내가 심어 둔 결함을 AI가 찾았어요. (AI가 짚은 곳: {page}쪽)\nAI가 짚은 문장: "{quote}"\nAI 설명: {rationale}',
-  partial: '내가 심어 둔 결함 근처를 AI가 짚었어요. (AI가 짚은 곳: {page}쪽)\nAI가 짚은 문장: "{quote}"\nAI 설명: {rationale}',
+  caught: '내가 심어 둔 결함을 AI가 찾았어요. (AI가 짚은 곳: {page}쪽)\nAI가 짚은 문장: "{quote}"\nAI 설명: {rationale}\nAI note: {rationaleEn}',
+  partial: '내가 심어 둔 결함 근처를 AI가 짚었어요. (AI가 짚은 곳: {page}쪽)\nAI가 짚은 문장: "{quote}"\nAI 설명: {rationale}\nAI note: {rationaleEn}',
   missed: 'AI는 다른 곳을 짚었어요. 심어 둔 결함은 AI 눈을 피했어요.',
   missedNone: 'AI가 이번 수정본에서 결함을 짚지 못했어요. 심어 둔 결함은 AI 눈을 피했어요.',
 });

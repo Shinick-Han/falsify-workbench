@@ -56,9 +56,14 @@ function json(route, status, body) {
   return route.fulfill({status, contentType: 'application/json', headers: cors, body: JSON.stringify(body)});
 }
 const PENDING = {receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:00.000Z', published: false};
+const FINAL_MISSED = {
+  receipt: 'F-0042', status: 'judged', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:00.000Z',
+  published: true, outcome: 'missed', publicNote: 'AI는 다른 곳을 짚었어요. 심어 둔 결함은 AI 눈을 피했어요.',
+  prizeMessage: '부스에서 스티커를 받아 가세요', publishedAt: '2026-11-22T01:02:00.000Z',
+};
 const CONFIG = {
   enabled: true, submissionsOpen: true, announcement: '', consentVersion: '2026-11-22.v3',
-  limits: {maxDeclared: 5, maxReason: 500, maxNickname: 24, maxPdfBytes: 16777216, perOwner: 5},
+  limits: {maxDeclared: 5, maxReason: 500, maxNickname: 24, maxPdfBytes: 16777216, perOwner: 3},
   missions: [{
     paperId: '2309.15217', title: 'Ragas: Automated Evaluation of Retrieval Augmented Generation',
     license: 'cc-by-4.0', course: 'quick', hint: 'Table 1의 점수 하나를 바꿔 보세요', pageHint: 5,
@@ -99,6 +104,7 @@ async function stubApi(route, state) {
   if ((request.method() === 'GET' || request.method() === 'POST') && url.pathname === '/v1/booth/claim') {
     state.claims += 1;
     state.claimMethods.push(request.method());
+    if (state.hooks.claim) return state.hooks.claim(route);
     return json(route, 200, PENDING);
   }
   return json(route, 404, {error: {code: 'not_found'}});
@@ -225,6 +231,13 @@ async function returnPass(browser, pageErrors) {
   assert.equal(await until(async () => state.claims === offlineAt + 1, 5000), true, 'online retries the claim at once');
   await page.waitForFunction(() => document.querySelector('#booth-live-error')?.hidden === true);
   assert.equal(await page.locator('#booth-live-error-retry').isHidden(), true);
+  // Coming back from another tab (e.g. after tapping the GitHub link) still lands the final result and hides the star row.
+  assert.equal(await page.locator('#booth-project-wait').isVisible(), true, 'star row visible while still pending');
+  state.hooks.claim = route => json(route, 200, FINAL_MISSED);
+  await visibility(page, 'hidden');
+  await visibility(page, 'visible');
+  await page.waitForFunction(() => document.querySelector('#booth-live-title')?.textContent === 'AI가 못 찾았어요');
+  assert.equal(await page.locator('#booth-project-wait').isHidden(), true, 'star row hides once final arrives after tab return');
   await context.close();
 }
 
@@ -340,6 +353,24 @@ async function kioskPass(browser, pageErrors) {
   assert.equal(await page.locator('#booth-handoff-desk').isHidden(), true, 'not while editing');
   await addOneEdit(page, true);
   await declareAndSubmit(page, context, state);
+  // Kiosk waiting state: shows QR code (~120px) + caption, never the outbound GitHub link.
+  assert.equal(await page.locator('#booth-project-wait').isVisible(), true, 'kiosk shows waiting project row');
+  assert.equal(await page.locator('#booth-project-wait a').count(), 0, 'kiosk shows QR, never the link');
+  assert.equal(await page.locator('#booth-project-qr-caption').textContent(), '휴대폰 카메라로 찍으면 Falsify 프로젝트가 열려요.');
+  const qrImg = page.locator('#booth-project-qr');
+  await qrImg.waitFor({state: 'visible'});
+  const qrInfo = await qrImg.evaluate(img => ({
+    src: img.getAttribute('src'),
+    alt: img.getAttribute('alt'),
+    complete: img.complete,
+    naturalWidth: img.naturalWidth,
+    rect: img.getBoundingClientRect().toJSON(),
+  }));
+  assert.equal(qrInfo.src, 'falsify-project-qr.svg');
+  assert.ok(qrInfo.alt && qrInfo.alt.length > 0, 'QR image has alt text');
+  assert.equal(qrInfo.complete && qrInfo.naturalWidth > 0, true, 'QR SVG loaded');
+  assert.ok(qrInfo.rect.width >= 115 && qrInfo.rect.width <= 125 && qrInfo.rect.height >= 115 && qrInfo.rect.height <= 125, 'QR is ~120px: ' + JSON.stringify(qrInfo.rect));
+  await shot(page, 'kiosk-waiting');
   const first = await page.evaluate(() => ({
     session: JSON.parse(sessionStorage.getItem('falsify.booth.receipts.v1') || '[]').map(item => item.receipt),
     local: localStorage.getItem('falsify.booth.receipts.v1'),

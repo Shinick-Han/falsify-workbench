@@ -47,6 +47,12 @@
   const PARTIAL_SUB='결함 근처까지 짚으면 적발로 봐요.';
   const WITHDRAW_WARN='철회하면 되돌릴 수 없고, 선물과 추첨 기회도 함께 사라져요.';
   const CAPTURE_COPY='이 티켓을 캡처해 두세요. 화면을 닫아도 「내 기록」에서 접수번호와 확인키로 다시 볼 수 있어요.';
+  const PROJECT_URL='https://github.com/Pseudo-Lab/Falsify';
+  const PROJECT_QR_SRC='falsify-project-qr.svg';
+  const PROJECT_WAIT_COPY='기다리는 동안 가짜연구소 Falsify 프로젝트를 둘러보세요. 마음에 들면 GitHub에서 ★를 눌러 주세요.';
+  const PROJECT_LINK_LABEL='GitHub에서 보기 ★';
+  const PROJECT_QR_CAPTION='휴대폰 카메라로 찍으면 Falsify 프로젝트가 열려요.';
+  const PROJECT_QR_ALT='가짜연구소 Falsify 프로젝트 GitHub QR 코드';
   const GENERIC_HINT='숫자, 결론 문장, 표 값 중 한 곳을 골라 티 나지 않게 바꿔 보세요.';
   const FINAL_COPY='마감 후 더 정밀한 AI가 한 번 더 검증해요. 그때도 못 찾으면 최종 추첨 대상이에요.';
   /* Desktop layout (booth.css, min-width 1024px): the top bar's step indicator and the dock's edit chips. */
@@ -65,6 +71,7 @@
   const NOTE_PAGE=/\(AI가 짚은 곳:\s*(\d{1,5}|\?)쪽\)/;
   const NOTE_QUOTE=/^AI가 짚은 문장:\s*"(.*)"$/;
   const NOTE_OPINION=/^AI 설명:\s*(.*)$/;
+  const NOTE_OPINION_EN=/^AI note:\s*(.*)$/;
   const CROCKFORD='0123456789ABCDEFGHJKMNPQRSTVWXYZ';
   const CONTROL=/[\u0000-\u001f\u007f]/;
   const SHA256=/^[0-9a-f]{64}$/;
@@ -424,6 +431,8 @@
     if(quote){if(!out.quote) out.quote=quote[1].trim();return;}
     const opinion=NOTE_OPINION.exec(line);
     if(opinion){if(!out.opinion) out.opinion=opinion[1].trim();return;}
+    const opinionEn=NOTE_OPINION_EN.exec(line);
+    if(opinionEn){const text=opinionEn[1].trim();if(text&&!out.opinionEn) out.opinionEn=text;return;}
     const page=NOTE_PAGE.exec(line);
     if(page){
       if(!out.page&&page[1]!=='?') out.page=page[1];
@@ -906,18 +915,19 @@
             el('button',{id:'booth-submit-button',type:'submit',className:'booth-btn ink wide',textContent:'AI에게 제출하기',disabled:true}),
             el('p',{id:'booth-submit-status',className:'booth-feedback',role:'alert','aria-live':'polite'}))));
     }
-    function cell(label, id, className){
+    function cell(label, id, className, noTranslate){
+      const ddProps=noTranslate?{id,className,translate:'no'}:{id,className};
       return el('div',{id:id+'-cell',className:'booth-cell'},
         el('dt',{className:'booth-klab',textContent:label}),
-        el('dd',{id,className}));
+        el('dd',ddProps));
     }
     function buildReviewTicket(){
       return el('article',{id:'booth-ticket',className:'booth-tk booth-tk-v','data-state':'pending','aria-label':'AI 검증 티켓'},
         el('div',{className:'booth-sec'},
           el('p',{className:'booth-lab',textContent:'FALSIFY · AI REVIEW TICKET'}),
           el('dl',{className:'booth-grid2'},
-            cell('접수번호','booth-receipt-code','booth-code'),
-            cell('확인키','booth-claim-code','booth-code'),
+            cell('접수번호','booth-receipt-code','booth-code',true),
+            cell('확인키','booth-claim-code','booth-code',true),
             cell('논문','booth-ticket-paper','booth-val'),
             cell('고친 곳','booth-ticket-pages','booth-val'),
             cell('검증 시간','booth-ticket-duration','booth-val')),
@@ -933,8 +943,8 @@
             el('div',{className:'booth-desk'},
               el('p',{className:'booth-klab',textContent:'AWS Community Day'}),
               el('p',{id:'booth-stub-date',className:'booth-val'})),
-            el('canvas',{id:'booth-barcode',className:'booth-barcode','aria-hidden':'true',height:'34'}),
-            el('p',{id:'booth-stub-receipt',className:'booth-code booth-desk'}))),
+            el('canvas',{id:'booth-barcode',className:'booth-barcode','aria-hidden':'true',translate:'no',height:'34'}),
+            el('p',{id:'booth-stub-receipt',className:'booth-code booth-desk',translate:'no'}))),
         el('div',{id:'booth-ticket-result',className:'booth-sec booth-res',hidden:true},
           el('div',{},
             el('p',{className:'booth-klab',textContent:'AI 검증 결과'}),
@@ -949,6 +959,23 @@
         el('li',{className:'now'},el('i'),'AI가 앞뒤 문장과 표를 대조하는 중'),
         el('li',{className:'wait'},el('i'),'결과'));
     }
+    function isKiosk(){
+      try{if(rt&&typeof rt.kiosk==='function'&&rt.kiosk()) return true;}catch{}
+      return !!(doc.documentElement&&doc.documentElement.dataset&&doc.documentElement.dataset.kiosk==='1');
+    }
+    function buildProjectWait(){
+      const copy=el('p',{id:'booth-project-copy',className:'booth-small',textContent:PROJECT_WAIT_COPY});
+      if(isKiosk()){
+        return el('aside',{id:'booth-project-wait',className:'booth-panel booth-project-wait is-kiosk','aria-label':'Falsify 프로젝트'},
+          el('div',{className:'booth-project-text'},
+            copy,
+            el('p',{id:'booth-project-qr-caption',className:'booth-small',textContent:PROJECT_QR_CAPTION})),
+          el('img',{id:'booth-project-qr',className:'booth-project-qr',src:PROJECT_QR_SRC,width:'120',height:'120',alt:PROJECT_QR_ALT}));
+      }
+      return el('aside',{id:'booth-project-wait',className:'booth-panel booth-project-wait','aria-label':'Falsify 프로젝트'},
+        copy,
+        el('a',{id:'booth-project-link',className:'booth-btn line slim booth-project-link',href:PROJECT_URL,target:'_blank',rel:'noopener noreferrer',textContent:PROJECT_LINK_LABEL}));
+    }
     function buildGift(){
       return el('article',{id:'booth-gift',className:'booth-tk booth-tk-v booth-gift',hidden:true,'aria-label':'교환권'},
         el('div',{className:'booth-sec booth-gift-sec'},
@@ -956,7 +983,7 @@
             el('p',{className:'booth-klab',textContent:'교환권 · 1인 1회'}),
             el('p',{id:'booth-live-prize',className:'booth-gift-text'}),
             el('p',{className:'booth-small',textContent:'부스에서 이 화면을 보여 주세요.'})),
-          el('span',{className:'booth-code booth-gift-code','aria-hidden':'true',textContent:'GIFT'})));
+          el('span',{className:'booth-code booth-gift-code','aria-hidden':'true',translate:'no',textContent:'GIFT'})));
     }
     function buildFinal(){
       return el('section',{id:'booth-final',className:'booth-panel booth-final',hidden:true,'aria-label':'최종 추첨'},
@@ -984,6 +1011,7 @@
         el('div',{id:'booth-live',className:'booth-live','data-state':'pending'},
           buildProgress(),
           el('p',{id:'booth-live-capture',className:'booth-small',textContent:CAPTURE_COPY}),
+          buildProjectWait(),
           el('div',{id:'booth-verdict',className:'booth-verdict',hidden:true},
             el('h2',{id:'booth-live-title',className:'booth-headline',role:'status','aria-live':'polite'}),
             el('p',{id:'booth-live-sub',className:'booth-copy',hidden:true}),
@@ -1144,10 +1172,10 @@
     function diffNode(row){
       const parts=diffParts(row.before,row.after);
       return el('p',{className:'booth-diff'},
-        parts.lead?el('span',{className:'ctx',textContent:flat(parts.lead)}):null,
-        parts.removed?el('del',{className:'del',textContent:flat(parts.removed)}):null,
-        el('ins',{className:parts.added?'ins':'ins gone',textContent:parts.added?flat(parts.added):'(지움)'}),
-        parts.tail?el('span',{className:'ctx',textContent:flat(parts.tail)}):null);
+        parts.lead?el('span',{className:'ctx',translate:'no',textContent:flat(parts.lead)}):null,
+        parts.removed?el('del',{className:'del',translate:'no',textContent:flat(parts.removed)}):null,
+        parts.added?el('ins',{className:'ins',translate:'no',textContent:flat(parts.added)}):el('ins',{className:'ins gone',textContent:'(지움)'}),
+        parts.tail?el('span',{className:'ctx',translate:'no',textContent:flat(parts.tail)}):null);
     }
     function chipRow(row, types){
       const box=el('div',{className:'booth-chips',role:'group','aria-label':'결함 유형'});
@@ -1161,7 +1189,7 @@
       }
       if(!types.some(type=>type.id===row.defectType)) row.defectType='';
       for(const type of types){
-        const chip=el('button',{type:'button',className:'booth-chip',textContent:type.label,'aria-pressed':'false'});
+        const chip=el('button',{type:'button',className:'booth-chip',textContent:type.label,'data-defect-type':type.id,'aria-pressed':'false'});
         chip.addEventListener('click',()=>{row.defectType=row.defectType===type.id?'':type.id;paint();});
         chips.push([type.id,chip]);
         box.append(chip);
@@ -1302,8 +1330,8 @@
       const parts=diffParts(edit.originalText,edit.newText,0);
       return [
         el('span',{className:'pg',textContent:(edit.pageIndex+1)+'쪽'}),
-        parts.removed?el('del',{textContent:clip(parts.removed)}):null,
-        el('span',{textContent:'→'+(parts.added?clip(parts.added):'(지움)')})];
+        parts.removed?el('del',{translate:'no',textContent:clip(parts.removed)}):null,
+        parts.added?el('span',{translate:'no',textContent:'→'+clip(parts.added)}):el('span',{textContent:'→(지움)'})];
     }
     function deleteButton(edit){
       const button=el('button',{type:'button',className:'booth-dock-x',textContent:'×','aria-label':(edit.pageIndex+1)+'쪽 고친 곳 지우기'});
@@ -2168,13 +2196,21 @@
       renderDuration(data,view.state);
       setHidden('booth-live-tip',!(view.state==='caught'||view.state==='partial'));
     }
+    function opinionParts(parsed){
+      if(!parsed.opinion&&!parsed.opinionEn) return [];
+      const both=!!(parsed.opinion&&parsed.opinionEn);
+      const out=[el('p',{className:'booth-klab gap',textContent:'AI 의견'})];
+      if(parsed.opinion) out.push(el('p',{className:both?'booth-txt booth-opinion-ko':'booth-txt',translate:'no',textContent:parsed.opinion}));
+      if(parsed.opinionEn) out.push(el('p',{className:both?'booth-txt booth-opinion-en':'booth-txt',translate:'no',textContent:parsed.opinionEn}));
+      return out;
+    }
     function noteParts(parsed, state){
       const parts=[];
-      const structured=!!(parsed.quote||parsed.opinion);
+      const structured=!!(parsed.quote||parsed.opinion||parsed.opinionEn);
       if(parsed.text&&!structured) parts.push(el('p',{className:'booth-klab',textContent:state==='missed'?'AI가 의심한 곳':state==='invalid'?'운영진 안내':'AI 메모'}));
       if(parsed.text) parts.push(el('p',{className:'booth-txt',textContent:parsed.text}));
-      if(parsed.quote) parts.push(el('blockquote',{className:'booth-quote',textContent:parsed.quote}));
-      if(parsed.opinion) parts.push(el('p',{className:'booth-klab gap',textContent:'AI 의견'}),el('p',{className:'booth-txt',textContent:parsed.opinion}));
+      if(parsed.quote) parts.push(el('blockquote',{className:'booth-quote',translate:'no',textContent:parsed.quote}));
+      parts.push(...opinionParts(parsed));
       return parts;
     }
     function renderNote(view){
@@ -2219,7 +2255,7 @@
       setAttr('booth-live','data-state',view.state);
       setAttr('booth-ticket','data-state',view.state);
       renderTicketTop(data);
-      for(const id of ['booth-ticket-wait','booth-ticket-steps','booth-live-capture']) setHidden(id,view.final);
+      for(const id of ['booth-ticket-wait','booth-ticket-steps','booth-live-capture','booth-project-wait']) setHidden(id,view.final);
       for(const id of ['booth-ticket-result','booth-verdict']) setHidden(id,!view.final);
       if(view.final) renderVerdict(view,data);
       else renderPending(data);
@@ -2323,7 +2359,7 @@
       const stamp=stampFor(item.outcome);
       const left=[item.receipt,shortTitle(item.title)].filter(Boolean).join(' · ');
       const button=el('button',{type:'button',className:'booth-hist-row'+(stamp?' '+stamp.kind:'')},
-        el('span',{className:'l',textContent:left}),
+        el('span',{className:'l',translate:'no',textContent:left}),
         el('span',{className:'r',textContent:stamp?stamp.word:'결과 보기'}));
       button.addEventListener('click',()=>{fillClaim(item);void lookupRecord(item.receipt,item.claimKey);});
       return button;

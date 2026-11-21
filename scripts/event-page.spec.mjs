@@ -7,8 +7,8 @@ import {fileURLToPath} from 'node:url';
 import test from 'node:test';
 import vm from 'node:vm';
 import {
-  BOOTH_SCRIPTS, BOOTH_STYLES, DEFAULT_EVENT_API_BASE, EVENT_OMIT, EVENT_TITLE_SUFFIX, eventApiOrigin, eventBytesDiffer, eventHtmlFromIndex,
-  omitWorkbench, parseEventArgs, planEventFiles,
+  BOOTH_SCRIPTS, BOOTH_STYLES, DEFAULT_EVENT_API_BASE, EVENT_FOOTER_LINKS, EVENT_OMIT, EVENT_PROJECT_URL, EVENT_SOURCE_URL,
+  EVENT_TITLE_SUFFIX, eventApiOrigin, eventBytesDiffer, eventHtmlFromIndex, omitWorkbench, parseEventArgs, planEventFiles,
 } from './build-event-page.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -58,6 +58,11 @@ function revertEventHtml(eventHtml, indexHtml, origin) {
   assert.equal(eventConnect, `connect-src 'self' ${origin}`);
   assert.equal(eventConnect.includes('http://127.0.0.1'), false);
   text = text.replace(eventConnect, indexConnect);
+  const indexSource = indexHtml.match(/<a class="source-link" id="source-link" href="https:\/\/github\.com\/Shinick-Han\/falsify-workbench" target="_blank" rel="noopener noreferrer">[^<]*<\/a>/);
+  if (indexSource) {
+    assert.equal(count(text, EVENT_FOOTER_LINKS), 1);
+    text = text.replace(EVENT_FOOTER_LINKS, indexSource[0]);
+  }
   return text;
 }
 
@@ -172,10 +177,18 @@ test('committed event page matches index.html except the four event edits', () =
   assert.equal(count(event, 'event-theme.css'), 1);
   const order = [...BOOTH_STYLES, ...BOOTH_SCRIPTS].map(name => event.indexOf(`"${name}?v=`));
   assert.ok(order.every((at, i) => at > hostedAt && (i === 0 || at > order[i - 1])), 'booth assets keep the contract order');
-  for (const name of ['booth-recipe', 'booth-myai', 'booth-runtime', 'booth-edits', 'booth-pageedit']) assert.equal(index.includes(name), false, name + ' stays off index.html');
+  for (const name of ['booth-i18n', 'booth-recipe', 'booth-myai', 'booth-runtime', 'booth-edits', 'booth-pageedit']) assert.equal(index.includes(name), false, name + ' stays off index.html');
   const footOf = doc => (doc.match(/<footer class="page-foot">[\s\S]*?<\/footer>/) || [''])[0];
-  assert.equal(footOf(event), footOf(index), 'event footer matches index footer with no extra agent link');
+  assert.equal(footOf(index).includes('id="project-link"'), false, 'index.html footer stays unchanged');
+  assert.equal(footOf(index).includes('소스 코드 · AGPL-3.0-only'), true, 'index.html keeps its AGPL link');
+  const eventFoot = footOf(event);
+  const projectAt = eventFoot.indexOf('id="project-link"');
+  const sourceAt = eventFoot.indexOf('id="source-link"');
+  assert.ok(projectAt >= 0 && sourceAt > projectAt, 'event footer places primary project link before secondary source link');
+  assert.equal(count(event, 'id="project-link"'), 1);
   assert.equal(count(event, 'id="source-link"'), 1, 'event footer keeps source link');
+  assert.ok(eventFoot.includes(`href="${EVENT_PROJECT_URL}" target="_blank" rel="noopener noreferrer">가짜연구소 Falsify 프로젝트 · GitHub</a>`));
+  assert.ok(eventFoot.includes(`href="${EVENT_SOURCE_URL}" target="_blank" rel="noopener noreferrer">이 페이지 소스 · AGPL-3.0</a>`));
 });
 
 test('event HTML injects the event theme, then booth assets, after hosted-ai.js only', () => {
@@ -191,6 +204,7 @@ test('event HTML injects the event theme, then booth assets, after hosted-ai.js 
     `  <link rel="stylesheet" href="booth-runtime.css?v=${version}">`,
     `  <link rel="stylesheet" href="booth-pageedit.css?v=${version}">`,
     `  <script src="booth-edits.js?v=${version}" defer></script>`,
+    `  <script src="booth-i18n.js?v=${version}" defer></script>`,
     `  <script src="booth-runtime.js?v=${version}" defer></script>`,
     `  <script src="booth.js?v=${version}" defer></script>`,
     `  <script src="booth-recipe.js?v=${version}" defer></script>`,

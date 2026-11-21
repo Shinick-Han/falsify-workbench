@@ -22,8 +22,19 @@ export function notePage(finding) {
   return pages.length ? pages[0] + 1 : '';
 }
 
+// BLUE writes "<Korean> || EN: <English>" in its one rationale field (the runtime schema has no second field).
+const EN_MARK = /\s*\|\|\s*EN:\s*/i;
+
+export function splitRationale(value) {
+  const text = squash(value);
+  const at = text.search(EN_MARK);
+  if (at < 0) return { ko: text, en: '' };
+  return { ko: text.slice(0, at), en: text.slice(at).replace(EN_MARK, '') };
+}
+
 function fill(template, values) {
-  return template.replace(/\{(page|quote|rationale)\}/g, (_, key) => String(values[key] ?? ''));
+  const lines = values.rationaleEn ? template : template.split('\n').filter(line => !line.includes('{rationaleEn}')).join('\n');
+  return lines.replace(/\{(page|quote|rationaleEn|rationale)\}/g, (_, key) => String(values[key] ?? ''));
 }
 
 // Built only from the AI finding: page, quote and rationale. The visitor's declared text is not an input.
@@ -31,10 +42,12 @@ export function buildPublicNote({ outcome, matched, first, templates }) {
   const finding = outcome === 'missed' ? first : matched;
   if (!finding || (outcome === 'missed' && notePage(finding) === '')) return templates.missedNone.slice(0, NOTE_MAX);
   const template = templates[outcome] || templates.missed;
+  const reason = splitRationale(finding.rationale || '');
   const values = {
     page: notePage(finding) || '?',
     quote: clip(finding.quote || finding.sourceQuote || '', QUOTE_MAX),
-    rationale: clip(finding.rationale || '', RATIONALE_MAX),
+    rationale: clip(reason.ko || reason.en, RATIONALE_MAX),
+    rationaleEn: reason.ko ? clip(reason.en, RATIONALE_MAX) : '',
   };
   return fill(template, values).slice(0, NOTE_MAX);
 }

@@ -894,7 +894,7 @@
       const selected=!!chosen&&chosen.pageIndex===item.pageIndex&&chosen.start===item.start&&chosen.end===item.end;
       const button=el('button',{type:'button',className:'booth-find-hit'+(selected?' on':''),role:'option','aria-selected':String(selected)},
         el('span',{className:'pg',textContent:(item.pageIndex+1)+'쪽'}),
-        el('span',{className:'snip'},item.snippet.lead,el('mark',{textContent:item.snippet.hit}),item.snippet.tail));
+        el('span',{className:'snip',translate:'no'},item.snippet.lead,el('mark',{textContent:item.snippet.hit}),item.snippet.tail));
       button.addEventListener('click',()=>pick(item));
       return button;
     }
@@ -902,7 +902,7 @@
       const o=opts||{};
       ui.seq+=1;
       const id='booth-find-'+ui.seq;
-      const state={chosen:null,armed:false,busy:false,timer:0,list:{total:0,more:0,items:[]}};
+      const state={chosen:null,armed:false,busy:false,notFound:false,timer:0,list:{total:0,more:0,items:[]}};
       const find=el('input',{id:id+'-q',type:'text',maxlength:'300',autocomplete:'off',spellcheck:'false',value:o.find||''});
       const repl=el('input',{id:id+'-r',type:'text',maxlength:'300',autocomplete:'off',spellcheck:'false',value:o.replace||''});
       const hits=el('div',{className:'booth-find-hits',role:'listbox','aria-label':'찾은 곳'});
@@ -929,8 +929,13 @@
       function render(typed){
         const query=find.value;
         state.list=query.trim()?searchHits(indexedPages(),query,currentPageIndex(),HIT_LIMIT):{total:0,more:0,items:[]};
-        if(typed===true) say(status,query.trim()&&!state.list.total?REASON_TEXT.not_found:'');
-        else if(state.list.total&&status.textContent===REASON_TEXT.not_found) say(status,'');
+        if(typed===true){
+          state.notFound=!!(query.trim()&&!state.list.total);
+          say(status,state.notFound?REASON_TEXT.not_found:'');
+        }else if(state.list.total&&state.notFound){
+          state.notFound=false;
+          say(status,'');
+        }
         paint();
       }
       function applyChosen(item){
@@ -1187,8 +1192,12 @@
       Object.assign(outline.style,{left:left+'%',top:top+'%',width:(right-left)+'%',height:(bottom-top)+'%'});
       surface.append(outline);
     }
+    function i18n(text){
+      const api=root.FalsifyBoothI18n;
+      try{return api&&typeof api.t==='function'?api.t(text):text;}catch{return text;}
+    }
     function shotFigure(caption, ratio){
-      const surface=el('div',{className:'booth-recipe-shot'});
+      const surface=el('div',{className:'booth-recipe-shot',translate:'no'});
       if(ratio>0) surface.style.aspectRatio=String(ratio);
       return {surface,figure:el('figure',{},el('figcaption',{textContent:caption}),surface)};
     }
@@ -1220,8 +1229,8 @@
       };
       try{
         const [beforeCanvas,afterCanvas]=await Promise.all([
-          renderCrop(src.file,pageNo,crop,cssWidth,'원본 '+pageNo+'쪽, 고친 곳 주변',setRatio),
-          renderCrop(out.file,pageNo,crop,cssWidth,'수정본 '+pageNo+'쪽, 고친 곳 주변')
+          renderCrop(src.file,pageNo,crop,cssWidth,i18n('원본 '+pageNo+'쪽, 고친 곳 주변'),setRatio),
+          renderCrop(out.file,pageNo,crop,cssWidth,i18n('수정본 '+pageNo+'쪽, 고친 곳 주변'))
         ]);
         left.surface.style.aspectRatio='';
         right.surface.style.aspectRatio='';
@@ -1245,8 +1254,11 @@
       reason.before(note);
       reason.addEventListener('input',event=>{if(event.isTrusted){marks.reason='mine';paint();}});
     }
-    function chipTag(node, label, marks){
-      const chip=[...node.querySelectorAll('.booth-chip')].find(item=>item.textContent===label);
+    function findDefectChip(node, typeId, label){
+      return [...node.querySelectorAll('.booth-chip')].find(item=>(item.dataset&&item.dataset.defectType===typeId)||item.textContent===label);
+    }
+    function chipTag(node, typeId, label, marks){
+      const chip=findDefectChip(node,typeId,label);
       if(!chip||!marks.chip||!chip.classList.contains('on')||node.querySelector('.booth-recipe-ai-pick')) return;
       const tag=el('span',{className:'booth-recipe-ai-pick',textContent:'AI 선택'});
       chip.after(tag);
@@ -1265,13 +1277,14 @@
         marks.reason='ai';
       }
       if(reason) draftLabel(reason,marks);
-      const label=DEFECT_LABELS[entry.recipe.defectType];
+      const typeId=entry.recipe.defectType;
+      const label=DEFECT_LABELS[typeId];
       if(!label) return;
       if(!node.querySelector('.booth-chip.on')){
-        const chip=[...node.querySelectorAll('.booth-chip')].find(item=>item.textContent===label);
+        const chip=findDefectChip(node,typeId,label);
         if(chip) chip.click();
       }
-      chipTag(node,label,marks);
+      chipTag(node,typeId,label,marks);
     }
     function decorateCard(node, edit){
       if(!edit||node.querySelector('.booth-recipe-compare')) return;
