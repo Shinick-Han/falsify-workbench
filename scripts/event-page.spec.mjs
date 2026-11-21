@@ -172,7 +172,7 @@ test('committed event page matches index.html except the four event edits', () =
   assert.equal(count(event, 'event-theme.css'), 1);
   const order = [...BOOTH_STYLES, ...BOOTH_SCRIPTS].map(name => event.indexOf(`"${name}?v=`));
   assert.ok(order.every((at, i) => at > hostedAt && (i === 0 || at > order[i - 1])), 'booth assets keep the contract order');
-  for (const name of ['booth-recipe', 'booth-myai', 'booth-runtime', 'booth-edits', 'booth-pageedit']) assert.equal(index.includes(name), false, name + ' stays off index.html');
+  for (const name of ['booth-i18n', 'booth-recipe', 'booth-myai', 'booth-runtime', 'booth-edits', 'booth-pageedit']) assert.equal(index.includes(name), false, name + ' stays off index.html');
   const footOf = doc => (doc.match(/<footer class="page-foot">[\s\S]*?<\/footer>/) || [''])[0];
   assert.equal(footOf(event), footOf(index), 'event footer matches index footer with no extra agent link');
   assert.equal(count(event, 'id="source-link"'), 1, 'event footer keeps source link');
@@ -191,6 +191,7 @@ test('event HTML injects the event theme, then booth assets, after hosted-ai.js 
     `  <link rel="stylesheet" href="booth-runtime.css?v=${version}">`,
     `  <link rel="stylesheet" href="booth-pageedit.css?v=${version}">`,
     `  <script src="booth-edits.js?v=${version}" defer></script>`,
+    `  <script src="booth-i18n.js?v=${version}" defer></script>`,
     `  <script src="booth-runtime.js?v=${version}" defer></script>`,
     `  <script src="booth.js?v=${version}" defer></script>`,
     `  <script src="booth-recipe.js?v=${version}" defer></script>`,

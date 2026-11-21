@@ -1136,6 +1136,7 @@
         node.dataset.editId=edit.id;
         node.dataset.pageIndex=String(edit.pageIndex);
         node.setAttribute('aria-hidden','true');
+        node.setAttribute('translate','no');
         Object.assign(node.style,{
           left:r.x*100+'%',top:r.y*100+'%',width:r.w*100+'%',height:r.h*100+'%'
         });
@@ -1506,7 +1507,10 @@
     function onPage(page){
       st.pageEl=page;
       const layer=page.querySelector('.paper-text-layer');
-      if(layer&&!layer.hasAttribute('lang')) layer.setAttribute('lang','');
+      if(layer){
+        if(!layer.hasAttribute('lang')) layer.setAttribute('lang','');
+        layer.setAttribute('translate','no');
+      }
       closePop(false);
       closeSheet(false);
       syncBar();

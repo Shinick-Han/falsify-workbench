@@ -16,6 +16,7 @@
   const KIOSK_KEY='falsify.booth.kiosk.v1';
   const PROGRESS_KEY='falsify.booth.progress.v1';
   const RECEIPT_KEY='falsify.booth.receipts.v1';
+  const LANG_KEY='falsify.booth.lang.v1';
   const HOSTED_KEYS=['falsify.hosted-ai.session.v1','falsify.hosted-ai.upload.v1','falsify.hosted-ai.runs.v1'];
   const GUEST_PREFIX='falsify.open-access.guest.v1:';
   const DRAFT_PREFIX='falsify.paper-draft';
@@ -243,7 +244,7 @@
   function clearVisitor(){
     const session=bag('sessionStorage');
     const local=bag('localStorage');
-    for(const key of [RECEIPT_KEY,PROGRESS_KEY,...HOSTED_KEYS]) removeItem(session,key);
+    for(const key of [RECEIPT_KEY,PROGRESS_KEY,LANG_KEY,...HOSTED_KEYS]) removeItem(session,key);
     for(const store of [session,local]){
       for(const key of keysOf(store)) if(key.startsWith(DRAFT_PREFIX)) removeItem(store,key);
     }
@@ -563,7 +564,7 @@
   root.FalsifyBoothRuntime=Object.freeze({
     kiosk,kioskFlag,storage,offline,offerRetry,wake,idleTimer,clearVisitor,handoff,kioskUrl,
     readProgress,progressNow,saveProgress,resumeQuestion,reopen,
-    OFFLINE_TEXT,KIOSK_KEY,PROGRESS_KEY,RECEIPT_KEY,IDLE_MS,WAIT_IDLE_MS,WARN_MS
+    OFFLINE_TEXT,KIOSK_KEY,PROGRESS_KEY,RECEIPT_KEY,LANG_KEY,IDLE_MS,WAIT_IDLE_MS,WARN_MS
   });
   boot();
 })(typeof window==='object'?window:globalThis);

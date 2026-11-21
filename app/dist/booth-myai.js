@@ -411,9 +411,13 @@
     return node;
   }
   function clear(node){while(node.firstChild) node.removeChild(node.firstChild);}
+  function pageLang(){
+    const api=root&&root.FalsifyBoothI18n;
+    try{return api&&typeof api.lang==='function'&&api.lang()==='en'?'en':'ko';}catch{return 'ko';}
+  }
   function readHint(doc){
     const node=doc.getElementById('booth-hint');
-    return node?squash(node.textContent).replace(/^힌트\s*·\s*/,''):'';
+    return node?squash(node.textContent).replace(/^(?:힌트|Hint)\s*·\s*/,''):'';
   }
   function callSafe(fn,fallback){
     try{const v=fn();return v===undefined||v===null?fallback:v;}catch{return fallback;}
@@ -555,7 +559,11 @@
   }
 
   function createController(doc,v){
-    const s={lang:'ko',pageTouched:false,prompt:'',copyTimer:0};
+    const s={lang:pageLang(),pageTouched:false,prompt:'',copyTimer:0};
+    function syncLangChips(){
+      for(const [button,on] of [[v.langKo,s.lang==='ko'],[v.langEn,s.lang==='en']]){button.classList.toggle('on',on);button.setAttribute('aria-pressed',String(on));}
+    }
+    syncLangChips();
     function current(){
       const R=recipeApi();
       const meta=paperInfo(R);
@@ -575,7 +583,7 @@
     }
     function setLang(lang){
       s.lang=lang==='en'?'en':'ko';
-      for(const [button,on] of [[v.langKo,s.lang==='ko'],[v.langEn,s.lang==='en']]){button.classList.toggle('on',on);button.setAttribute('aria-pressed',String(on));}
+      syncLangChips();
       refresh();
     }
     function markCopied(how){
@@ -626,8 +634,17 @@
     v.langKo.addEventListener('click',()=>setLang('ko'));
     v.langEn.addEventListener('click',()=>setLang('en'));
     const onIndex=()=>refresh();
-    if(typeof doc.addEventListener==='function') doc.addEventListener('falsify:booth-index-ready',onIndex);
-    return {refresh,setLang,dispose(){if(typeof doc.removeEventListener==='function') doc.removeEventListener('falsify:booth-index-ready',onIndex);}};
+    const onLang=event=>{setLang(event&&event.detail&&event.detail.lang==='en'?'en':'ko');};
+    if(typeof doc.addEventListener==='function'){
+      doc.addEventListener('falsify:booth-index-ready',onIndex);
+      doc.addEventListener('falsify:booth-lang-change',onLang);
+    }
+    return {refresh,setLang,dispose(){
+      if(typeof doc.removeEventListener==='function'){
+        doc.removeEventListener('falsify:booth-index-ready',onIndex);
+        doc.removeEventListener('falsify:booth-lang-change',onLang);
+      }
+    }};
   }
   const mounted=new WeakMap();
   function mount(container){
