@@ -1935,6 +1935,8 @@ test('claim view exposes sanitized editResults only when published and preserves
     const published = await call('PATCH', `/v1/booth/admin/submissions/${receipt}`, {
       token: OPERATOR,
       body: {
+        status: 'judged',
+        outcome: 'missed',
         published: true,
         aiSummary: {
           suggestedOutcome: 'missed',
@@ -1966,6 +1968,16 @@ test('claim view exposes sanitized editResults only when published and preserves
       ]);
       assert.equal(JSON.stringify(claim.body).includes('never-show'), false);
     }
+
+    // An operator's invalid outcome keeps ai_summary but shows no per-edit results.
+    await call('PATCH', `/v1/booth/admin/submissions/${receipt}`, {
+      token: OPERATOR,
+      body: { outcome: 'invalid' },
+    });
+    const invalidClaim = await call('GET', `/v1/booth/claim?receipt=${receipt}&key=${claimKey}`);
+    assert.equal(invalidClaim.status, 200);
+    assert.equal(invalidClaim.body.outcome, 'invalid');
+    assert.equal(Object.hasOwn(invalidClaim.body, 'editResults'), false);
 
     // Missing or malformed ai_summary omits editResults cleanly.
     const noSummary = await submitPdf(call, guest, pdfBytes('edit-results-missing'));

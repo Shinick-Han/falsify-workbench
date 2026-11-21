@@ -2542,3 +2542,21 @@ test('per-defect resultView headlines, status labels, rule line and fallback whe
   assert.equal(h.ids.get('booth-live-declared').hidden, true);
   h.handle.destroy();
 });
+
+test('per-defect results drive nothing on an invalid outcome, a short list or duplicate indices', () => {
+  const four = [
+    {index: 0, pageIndex: 4, verdict: 'caught'},
+    {index: 1, pageIndex: 1, verdict: 'missed'},
+    {index: 2, pageIndex: 2, verdict: 'caught'},
+    {index: 3, pageIndex: 5, verdict: 'caught'},
+  ];
+  const invalid = booth.resultView({status: 'invalid', published: true, outcome: 'invalid', declaredCount: 4, editResults: four});
+  assert.equal(invalid.editResults, undefined);
+  const short = booth.resultView({status: 'judged', published: true, outcome: 'caught', declaredCount: 4, editResults: four.slice(0, 2)});
+  assert.equal(short.editResults, undefined);
+  assert.equal(short.title, booth.resultView({status: 'judged', published: true, outcome: 'caught'}).title);
+  const dup = booth.resultView({status: 'judged', published: true, outcome: 'caught', editResults: [four[0], four[0]]});
+  assert.equal(dup.editResults.length, 1);
+  const whole = booth.resultView({status: 'judged', published: true, outcome: 'missed', declaredCount: 4, editResults: four});
+  assert.equal(whole.title, '4개 중 1개가 AI 눈을 피했어요');
+});

@@ -925,7 +925,9 @@ function claimView(row, env) {
     view.publicNote = row.public_note ?? null;
     view.prizeMessage = row.prize_message ?? null;
     view.publishedAt = row.published_at;
-    const editResults = editResultsFrom(row.ai_summary, declaredCount);
+    // Per-edit results belong to an AI verdict only; an operator's invalid outcome shows none.
+    const aiOutcome = ['caught', 'partial', 'missed'].includes(row.outcome);
+    const editResults = aiOutcome ? editResultsFrom(row.ai_summary, declaredCount) : null;
     if (editResults) view.editResults = editResults;
   }
   const queue = queueView(row, env);

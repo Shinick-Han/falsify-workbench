@@ -429,9 +429,12 @@
     const pageIndex=Number.isSafeInteger(item.pageIndex)&&item.pageIndex>=0?item.pageIndex:null;
     return {index:item.index,pageIndex,verdict};
   }
-  function cleanEditResults(value){
+  /* One result per declared edit, or none: a short or duplicated list must not drive the count headline. */
+  function cleanEditResults(value, declaredCount){
     if(!Array.isArray(value)) return [];
-    return value.map(cleanEditResult).filter(Boolean);
+    const seen=new Set();
+    const out=value.map(cleanEditResult).filter(item=>item&&!seen.has(item.index)&&seen.add(item.index));
+    return Number.isSafeInteger(declaredCount)&&declaredCount>0&&out.length!==declaredCount?[]:out;
   }
   function headlineParts(lead, strong, state){
     return {title:lead+strong,lead,strong,stamp:stampFor(state)};
@@ -457,7 +460,7 @@
     if(data.published!==true) return {state:'pending',title:PENDING_COPY,lead:'',strong:'',stamp:null,note:'',prize:'',final:false};
     const state=publishedState(data);
     const prize=typeof data.prizeMessage==='string'?data.prizeMessage.trim().slice(0,500):'';
-    const editResults=cleanEditResults(data.editResults);
+    const editResults=TIMED.includes(state)?cleanEditResults(data.editResults,data.declaredCount):[];
     const view=Object.assign({state,note:plainNote(data.publicNote),prize,final:true},headlineFor(state,editResults));
     if(editResults.length) view.editResults=editResults;
     return view;
