@@ -1,8 +1,6 @@
 'use strict';
-// Real Chromium walk of the booth recipe & find-and-replace UI on event.html (BoothEdit model):
-// find-and-replace (1-hit direct add, multi-hit tap-to-pick, overlap replacement), #recipe=CODE,
-// result card, prefilled one-tap fix row, send-step page comparison (edit.rects), and submit.
-// FalsifyBrowserPdf.rewrite is stubbed to append a PDF comment marker until sx-gen merges.
+// Real Chromium walk of the booth recipe, find-and-replace, two-tab UI and automatic cropped
+// send-step change preview on event.html (BoothEdit model) at 390x844 touch and 1280x800.
 const {spawn} = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -20,15 +18,14 @@ const token = 'fsg_' + 'b'.repeat(43);
 const pdfBytes = fs.readFileSync(pdfPath);
 const cors = {'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET,POST,OPTIONS', 'Access-Control-Allow-Headers': '*'};
 
-const RECIPE = {
+const MYAI_RECIPE = {
   schema: 'falsify.booth.recipe.v1', paperId: '2309.15217',
   edits: [
     {page: 5, find: '0.95', replace: '0.50', context: 'Ragas 0.95 0.78 0.70'},
     {find: 'WikiEval', replace: 'WikiQA'},
   ],
   defectType: 'number', reason: 'Ragas faithfulness lowered to 0.50 while the text says Ragas agrees best with humans.',
-  source: 'agent', agent: {name: 'Claude Code', model: 'claude-opus-5-5'},
-  code: 'R-ABC123', createdAt: '2026-11-22T00:58:00.000Z', expiresAt: '2026-11-22T06:58:00.000Z',
+  source: 'my-ai', agent: {name: 'My AI', model: 'test-model'},
 };
 
 function serve() {
@@ -84,7 +81,6 @@ async function stubApi(route, log) {
   }
   if (request.method() === 'GET' && url.pathname.startsWith('/v1/booth/recipes/')) {
     log.recipes.push(url.pathname);
-    if (url.pathname === '/v1/booth/recipes/R-ABC123') return json(route, 200, RECIPE);
     return json(route, 404, {error: {code: 'not_found'}});
   }
   if (request.method() === 'POST' && url.pathname === '/v1/booth/submissions') {
@@ -130,7 +126,6 @@ async function diagnose() {
     dockStatus: document.querySelector('#booth-dock-status')?.textContent || '',
     recipe: document.querySelector('#booth-recipe-result')?.textContent || '',
     find: [...document.querySelectorAll('#booth-pane-find .booth-feedback')].map(node => node.textContent),
-    agent: document.querySelector('#booth-agent-status')?.textContent || '',
     edits: (globalThis.FalsifyBoothEdits?.list() || []).map(edit => [edit.pageIndex, edit.originalText, edit.newText, edit.source, edit.rects.length]),
   })).catch(() => null);
 }
@@ -164,13 +159,41 @@ async function openPage(browser, hash, log, errors, wide) {
   return page;
 }
 
-/* 직접 고치기: live matches from pdf.js text index, pick one, 바꾸기 -> BoothEdit added. */
-async function findAndReplace(browser, log, errors, wide) {
+/* Acceptance B: two tabs at half width, no agent nodes, phone edit-step gap <= 16px, find & myai tabs work. */
+async function findAndTabsCheck(browser, log, errors, wide) {
   const page = await openPage(browser, '', log, errors, wide);
   await page.locator('#booth-missions .booth-mission').first().click();
   await stepIs(page, 'edit');
   await page.waitForFunction(() => !!globalThis.FalsifyPaperWorkspace?.getPdfDoc?.() && !!document.querySelector('#paper-before-stage canvas'));
-  assert.deepEqual(await page.locator('.booth-tabs [role=tab]').allTextContents(), ['직접 고치기', '내 AI에게', 'Agent 코드']);
+  assert.deepEqual(await page.locator('.booth-tabs [role=tab]').allTextContents(), ['직접 고치기', '내 AI에게']);
+  const domB = await page.evaluate(() => {
+    const tabNodes = [...document.querySelectorAll('.booth-tabs [role=tab]')];
+    const tabs = tabNodes.map(n => n.getBoundingClientRect());
+    const tabBar = document.querySelector('.booth-tabs').getBoundingClientRect();
+    const toolbar = document.querySelector('#paper-workspace .paper-toolbar').getBoundingClientRect();
+    return {
+      tabIds: tabNodes.map(n => n.id),
+      paneIds: [...document.querySelectorAll('#booth-recipe .booth-pane')].map(n => n.id),
+      widths: tabs.map(r => Math.round(r.width * 10) / 10),
+      barWidth: Math.round(tabBar.width * 10) / 10,
+      phoneGap: Math.round((toolbar.top - tabBar.bottom) * 10) / 10,
+      agentIds: [...document.querySelectorAll('#booth [id*="agent"], .page-foot [id*="agent"]')].map(n => n.id),
+      sourceLink: !!document.querySelector('#source-link'),
+    };
+  });
+  assert.deepEqual(domB.tabIds, ['booth-tab-find', 'booth-tab-myai'], 'only two tabs');
+  assert.deepEqual(domB.paneIds, ['booth-pane-find', 'booth-pane-myai'], 'only two panes');
+  assert.deepEqual(domB.agentIds, [], 'no agent DOM nodes');
+  assert.equal(domB.sourceLink, true, 'source link stays');
+  assert.ok(Math.abs(domB.widths[0] - domB.widths[1]) <= 2, 'two tabs equal half width: ' + JSON.stringify(domB.widths));
+  assert.ok(domB.widths[0] > domB.barWidth * 0.44 && domB.widths[0] < domB.barWidth * 0.52, 'tab width ~half bar: ' + JSON.stringify(domB));
+  if (!wide) {
+    assert.ok(domB.phoneGap >= 0 && domB.phoneGap <= 16, 'phone edit-step gap <= 16px, got ' + domB.phoneGap);
+    console.log('MEASURED_PHONE_GAP=' + domB.phoneGap);
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await shoot(page, 'edit-top', wide);
+  }
+
   const pane = page.locator(wide ? '#booth-pane-find' : '#booth-find-fold');
   if (!wide) {
     const more = page.locator('#booth-find-fold');
@@ -187,7 +210,6 @@ async function findAndReplace(browser, log, errors, wide) {
   await pane.locator('.booth-find-hit').first().click();
   assert.equal(await pane.locator('.booth-find-hit').first().getAttribute('aria-selected'), 'true');
   await pane.getByLabel('새 글자').first().fill('0.87');
-  await shoot(page, 'tab-find', wide);
   await pane.getByRole('button', {name: '바꾸기'}).first().click();
   await page.waitForFunction(() => document.querySelector('#booth-dock-count')?.textContent === '고친 곳 1개');
   const stored = await page.evaluate(() => globalThis.FalsifyBoothEdits.list());
@@ -207,41 +229,7 @@ async function findAndReplace(browser, log, errors, wide) {
   await page.locator('#booth-tab-myai').click();
   assert.equal(await page.locator('#booth-myai').count(), 1);
   await page.waitForFunction(() => /원문 포함/.test(document.querySelector('#booth-myai .booth-myai-size')?.textContent || ''));
-  await shoot(page, 'tab-myai', wide);
 
-  await page.locator('#booth-tab-agent').click();
-  assert.equal(await page.locator('#booth-agent-code').isVisible(), true);
-  assert.equal(await page.locator('#booth-agent-code').getAttribute('placeholder'), '예: R-7K3QXM');
-  await page.locator('#booth-agent-code').fill('https://example.test/event.html#recipe=R-XYZ789');
-  assert.equal(await page.locator('#booth-agent-code').inputValue(), 'R-XYZ789', 'a pasted link leaves just the code');
-  await page.locator('#booth-agent-code').fill('');
-  await shoot(page, 'tab-agent', wide);
-
-  // A recipe over existing work asks first, inline (never window.confirm).
-  let dialogs = 0;
-  page.on('dialog', () => { dialogs += 1; });
-  const fetched = log.recipes.length;
-  await page.evaluate(() => {
-    globalThis.__realCurrent = globalThis.FalsifyBoothPaper.current;
-    globalThis.FalsifyBoothPaper.current = () => ({id: '2401.00001', title: 'Other', license: 'cc-by-4.0'});
-    location.hash = '#recipe=R-ABC123';
-  });
-  await page.locator('#booth-recipe-confirm').waitFor();
-  assert.equal(await page.locator('#booth-recipe-confirm-text').textContent(), '지금 고친 곳 1개가 사라져요. 레시피를 불러올까요?');
-  await page.locator('#booth-recipe-confirm-no').click();
-  await page.waitForFunction(() => !document.querySelector('#booth-recipe-confirm'));
-  assert.equal(await page.locator('#booth-dock-count').textContent(), '고친 곳 1개');
-  await page.evaluate(() => {
-    globalThis.FalsifyBoothPaper.current = globalThis.__realCurrent;
-    location.hash = '#recipe=R-ABC123';
-  });
-  await page.locator('#booth-recipe-confirm').waitFor();
-  assert.equal(await page.locator('#booth-recipe-confirm-text').textContent(), '지금 고친 곳 1개는 그대로 두고 레시피를 더해요. 레시피를 불러올까요?');
-  await page.locator('#booth-recipe-confirm-yes').click();
-  await page.waitForFunction(() => document.querySelector('#booth-recipe-count')?.textContent === '1곳 적용 · 1곳은 직접 골라 주세요');
-  await page.waitForFunction(() => document.querySelector('#booth-dock-count')?.textContent === '고친 곳 2개');
-  assert.equal(log.recipes.length, fetched + 2);
-  assert.equal(dialogs, 0, 'no window.confirm');
   if (!wide) {
     await page.setViewportSize({width: 360, height: 780});
     await page.locator('#booth-tab-find').click();
@@ -252,63 +240,167 @@ async function findAndReplace(browser, log, errors, wide) {
   await page.context().close();
 }
 
-/* #recipe=R-ABC123 opens the mission, applies 1 edit with rects, leaves 1 as a one-tap fix row. */
-async function recipeFlow(browser, log, errors, wide) {
-  const page = await openPage(browser, '#recipe=r-abc123', log, errors, wide);
+/* Acceptance B: event.html#recipe=R-ABC123 opens normally on pick with no error and no recipe applied. */
+async function hashIgnoredCheck(browser, log, errors) {
+  const before = log.recipes.length;
+  const page = await openPage(browser, '#recipe=R-ABC123', log, errors, false);
+  await page.locator('#booth-missions .booth-mission').first().waitFor();
+  assert.equal(await page.evaluate(() => document.documentElement.dataset.boothStep), 'pick');
+  assert.equal(await page.evaluate(() => globalThis.FalsifyBoothEdits.list().length), 0);
+  assert.equal(log.recipes.length, before, 'no recipe fetch on #recipe= hash');
+  assert.equal(await page.locator('#booth [id*="agent"], .page-foot [id*="agent"]').count(), 0);
+  await page.context().close();
+}
+
+/* Acceptance A: automatic cropped compare on send step at 390x844 and 1280x800, plus multi-line height cap. */
+async function compareFlow(browser, log, errors, wide) {
+  const page = await openPage(browser, '', log, errors, wide);
+  await page.locator('#booth-missions .booth-mission').first().click();
   await stepIs(page, 'edit');
-  await page.waitForFunction(() => /\d+곳 적용/.test(document.querySelector('#booth-recipe-count')?.textContent || ''));
-  assert.equal(await page.locator('#booth-recipe-confirm').count(), 0, 'a fresh page needs no confirm');
-  assert.equal(await page.locator('#booth-recipe-count').textContent(), '1곳 적용 · 1곳은 직접 골라 주세요');
-  assert.match(await page.locator('#booth-recipe-result').textContent(), /Claude Code · claude-opus-5-5 · R-ABC123 · (오늘|\d+월 \d+일) \d\d:\d\d까지 유효/);
-  assert.equal(log.recipes.at(-1), '/v1/booth/recipes/R-ABC123');
-  assert.equal(await page.evaluate(() => location.hash), '', 'the recipe hash is consumed');
-  assert.equal(await page.locator('#booth-tab-agent').getAttribute('aria-selected'), 'true');
-  assert.equal(await page.locator('#booth-pane-agent #booth-recipe-fix').count(), 1);
+  await page.waitForFunction(() => !!globalThis.FalsifyPaperWorkspace?.getPdfDoc?.() && !!document.querySelector('#paper-before-stage canvas'));
+  await page.evaluate(recipe => globalThis.FalsifyBoothRecipe.apply(recipe), MYAI_RECIPE);
+  await page.waitForFunction(() => document.querySelector('#booth-recipe-count')?.textContent === '1곳 적용 · 1곳은 직접 골라 주세요');
+  assert.match(await page.locator('#booth-recipe-result').textContent(), /바뀐 곳은 「다음」에서 원문과 함께 확인해요\. 제출은 직접 해요\./);
   const row = page.locator('#booth-recipe-fix .booth-find.row');
   assert.equal(await row.count(), 1);
   assert.match(await row.locator('.booth-find-note').textContent(), /여러 곳/);
   await page.waitForFunction(() => document.querySelector('#booth-dock-count')?.textContent === '고친 곳 1개');
-  assert.deepEqual(await page.evaluate(() => globalThis.FalsifyBoothRecipe.assist()), {assist: 'agent', recipeCode: 'R-ABC123'});
+  assert.deepEqual(await page.evaluate(() => globalThis.FalsifyBoothRecipe.assist()), {assist: 'my-ai'});
   await row.locator('.booth-find-hit').first().waitFor();
-  // One tap on a place adds its rects directly to FalsifyBoothEdits.
   await row.locator('.booth-find-hit').first().click();
   await page.waitForFunction(() => document.querySelector('#booth-dock-count')?.textContent === '고친 곳 2개');
   assert.equal(await page.locator('#booth-recipe-count').textContent(), '2곳 적용했어요');
   assert.equal(await page.locator('#booth-recipe-fix').isHidden(), true);
 
-  // 다음 runs FalsifyBrowserPdf.rewrite directly and opens send.
+  // Add a 3rd multi-line edit spanning 3+ lines (padded > 1/3 so padding trims to the 1/3 page height cap).
+  const pageHeightPt = await page.evaluate(async () => {
+    const pdf = globalThis.FalsifyPaperWorkspace.getPdfDoc();
+    const p = await pdf.getPage(5);
+    const vp = p.getViewport({scale: 1});
+    globalThis.FalsifyBoothEdits.add({
+      pageIndex: 4,
+      rects: [
+        {x: 0.08, y: 0.48, w: 0.40, h: 0.015},
+        {x: 0.08, y: 0.50, w: 0.40, h: 0.015},
+        {x: 0.08, y: 0.52, w: 0.40, h: 0.015},
+        {x: 0.08, y: 0.745, w: 0.40, h: 0.015},
+      ],
+      originalText: 'multi-line original block',
+      newText: 'multi-line edited block',
+      source: 'paragraph',
+    });
+    return vp.height;
+  });
+  await page.waitForFunction(() => document.querySelector('#booth-dock-count')?.textContent === '고친 곳 3개');
+
+  // 다음 builds the revised PDF and opens send; crops render automatically with no click.
   await page.locator('#booth-next').click();
   await stepIs(page, 'send');
+  assert.equal(await page.locator('.booth-recipe-compare-toggle').count(), 0, 'no compare toggle button anywhere');
   const cards = page.locator('#booth-rows .booth-card');
-  assert.equal(await cards.count(), 2);
-  const diffs = await page.locator('#booth-rows .booth-diff').allTextContents();
-  assert.equal(diffs.some(text => text.includes('0.95') && text.includes('0.50')), true, diffs.join(' | '));
-  assert.equal(diffs.some(text => text.includes('WikiEval') && text.includes('WikiQA')), true, diffs.join(' | '));
+  assert.equal(await cards.count(), 3);
   const first = cards.first();
-  assert.equal(await first.locator('textarea').inputValue(), RECIPE.reason, 'recipe reason prefilled');
+  assert.equal(await first.locator('textarea').inputValue(), MYAI_RECIPE.reason, 'recipe reason prefilled');
   assert.equal(await first.getByRole('button', {name: '수치·통계'}).getAttribute('aria-pressed'), 'true');
   assert.equal(await first.locator('.booth-recipe-ai-pick').textContent(), 'AI 선택');
   assert.equal(await first.locator('.booth-recipe-draft').textContent(), 'AI가 채운 초안 · 내 말로 고쳐도 돼요');
   await first.locator('textarea').press('End');
   await first.locator('textarea').pressSequentially(' 직접');
   assert.equal(await first.locator('.booth-recipe-draft').textContent(), '내가 고침');
-  const toggle = first.getByRole('button', {name: '수정본 쪽 보기'});
-  await toggle.click();
-  await first.locator('.booth-recipe-compare canvas').nth(1).waitFor();
-  assert.deepEqual(await first.locator('.booth-recipe-compare figcaption').allTextContents(), ['원본', '수정본 · 5쪽']);
+
+  // Wait for all 3 cards to render both crop canvases automatically.
+  await page.waitForFunction(() => {
+    const list = [...document.querySelectorAll('#booth-rows .booth-card')];
+    return list.length === 3 && list.every(c => c.querySelectorAll('.booth-recipe-compare canvas').length === 2);
+  });
   await first.locator('.booth-recipe-compare figure').nth(1).locator('.booth-recipe-outline').waitFor();
-  assert.equal(await first.locator('.booth-recipe-shot').nth(1).getAttribute('data-mark'), 'rects');
-  for (let i = 0; i < 2; i += 1) {
+  await shoot(page, 'send', wide);
+
+  const metrics = await page.evaluate(() => {
+    return [...document.querySelectorAll('#booth-rows .booth-card')].map(card => {
+      const compare = card.querySelector('.booth-recipe-compare');
+      const cs = getComputedStyle(compare);
+      const compareContentW = compare.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+      const captions = [...compare.querySelectorAll('figcaption')].map(n => n.textContent);
+      const canvases = [...compare.querySelectorAll('canvas')].map(c => {
+        const r = c.getBoundingClientRect();
+        return {
+          label: c.getAttribute('aria-label'),
+          scale: parseFloat(c.dataset.scale),
+          rawScale: c.dataset.scale,
+          width: r.width,
+          height: r.height,
+          top: r.top,
+          bottom: r.bottom,
+          backingW: c.width,
+          backingH: c.height,
+        };
+      });
+      const revSurface = compare.querySelectorAll('.booth-recipe-shot')[1];
+      const outline = revSurface?.querySelector('.booth-recipe-outline');
+      const sr = revSurface?.getBoundingClientRect();
+      const or = outline?.getBoundingClientRect();
+      return {
+        compareContentW,
+        captions,
+        canvases,
+        mark: revSurface?.getAttribute('data-mark') || '',
+        outlineInside: !!(sr && or && or.left >= sr.left - 1 && or.top >= sr.top - 1 && or.right <= sr.right + 1 && or.bottom <= sr.bottom + 1),
+      };
+    });
+  });
+
+  console.log('MEASURED_COMPARE_' + (wide ? '1280' : '390') + '=' + JSON.stringify(metrics[0]));
+  for (const m of metrics) {
+    assert.deepEqual(m.captions, ['원본', '수정본']);
+    assert.equal(m.canvases.length, 2);
+    assert.equal(m.mark, 'rects');
+    assert.equal(m.outlineInside, true, 'outline lies inside revised surface: ' + JSON.stringify(m));
+    assert.ok(m.canvases[0].backingW <= 4096 && m.canvases[0].backingH <= 4096);
+    assert.ok(m.canvases[1].backingW <= 4096 && m.canvases[1].backingH <= 4096);
+    if (!wide) {
+      assert.ok(m.canvases[1].top >= m.canvases[0].bottom - 0.5, 'stacked on 390: ' + JSON.stringify(m.canvases));
+      for (const c of m.canvases) {
+        assert.ok(Math.abs(c.width - m.compareContentW) <= 2, `canvas width ${c.width} vs compare ${m.compareContentW}`);
+      }
+    } else {
+      assert.ok(Math.abs(m.canvases[1].top - m.canvases[0].top) <= 2, 'side-by-side on 1280: ' + JSON.stringify(m.canvases));
+    }
+  }
+  // Card 0 is page 5 Table 1 "0.95" -> "0.50": aria-labels and data-scale >= 1.2 on both canvases.
+  assert.equal(metrics[0].canvases[0].label, '원본 5쪽, 고친 곳 주변');
+  assert.equal(metrics[0].canvases[1].label, '수정본 5쪽, 고친 곳 주변');
+  assert.ok(metrics[0].canvases[0].scale >= 1.2, 'before data-scale >= 1.2: ' + metrics[0].canvases[0].rawScale);
+  assert.ok(metrics[0].canvases[1].scale >= 1.2, 'after data-scale >= 1.2: ' + metrics[0].canvases[1].rawScale);
+
+  // Card 2 is the multi-line paragraph edit: height <= (pageHeightPt / 3) * data-scale + 2.
+  const tall = metrics[2];
+  for (const c of tall.canvases) {
+    const cap = (pageHeightPt / 3) * c.scale + 2;
+    assert.ok(c.height <= cap, `multi-line canvas height ${c.height} <= ${cap} (pageH=${pageHeightPt}, scale=${c.scale})`);
+  }
+
+  // Narrow 320x800 viewport check (P2-1): no horizontal page overflow on the send step.
+  if (!wide) {
+    await page.setViewportSize({width: 320, height: 800});
+    const narrow = await page.evaluate(() => ({
+      scrollWidth: document.documentElement.scrollWidth,
+      innerWidth: window.innerWidth,
+    }));
+    assert.ok(narrow.scrollWidth <= narrow.innerWidth, '320x800 send step overflow: ' + JSON.stringify(narrow));
+    await page.setViewportSize({width: 390, height: 844});
+  }
+
+  for (let i = 0; i < 3; i += 1) {
     const card = cards.nth(i);
     if (await card.getByRole('button', {name: '수치·통계'}).getAttribute('aria-pressed') !== 'true') await card.getByRole('button', {name: '수치·통계'}).click();
-    if (!(await card.locator('textarea').inputValue())) await card.locator('textarea').fill('데이터셋 이름을 바꿨습니다');
+    if (!(await card.locator('textarea').inputValue())) await card.locator('textarea').fill('설명을 적었습니다');
   }
   await page.locator('#booth-submit-button').click();
   await stepIs(page, 'ticket');
   const posted = log.submissions.at(-1).toString('utf8');
-  assert.match(posted, /"assist":"agent"/);
-  assert.match(posted, /"recipeCode":"R-ABC123"/);
-  assert.equal(posted.includes('WikiQA'), true);
+  assert.match(posted, /"assist":"my-ai"/);
+  assert.equal(posted.includes('recipeCode'), false);
   await page.context().close();
 }
 
@@ -386,8 +478,11 @@ async function main() {
   try {
     await server.ready;
     browser = await chromium.launch({executablePath: chrome, headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage']});
-    await findAndReplace(browser, log, errors, false);
-    await recipeFlow(browser, log, errors, false);
+    await findAndTabsCheck(browser, log, errors, false);
+    await findAndTabsCheck(browser, log, errors, true);
+    await hashIgnoredCheck(browser, log, errors);
+    await compareFlow(browser, log, errors, false);
+    await compareFlow(browser, log, errors, true);
     await findFlows(browser, log, errors, false);
     await findFlows(browser, log, errors, true);
     assert.equal(errors.join('\n'), '');

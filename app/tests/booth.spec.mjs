@@ -1112,9 +1112,8 @@ test('every final outcome shows its headline, stamp and gift ticket', async () =
 });
 
 /* ux-ai-assist P0-2: AI-made edits keep their source on the send card. */
-test('the send card names an AI-assisted edit and its recipe code', async () => {
+test('the send card names an AI-assisted edit', async () => {
   const cases = [
-    [{assist: 'agent', recipeCode: 'R-7K3QXM'}, 'AI와 숨긴 결함 · 2쪽', 'AI 제안 · R-7K3QXM'],
     [{assist: 'my-ai'}, 'AI와 숨긴 결함 · 2쪽', 'AI 제안'],
     [{assist: 'manual'}, '내가 숨긴 결함 · 2쪽', null],
     [null, '내가 숨긴 결함 · 2쪽', null],

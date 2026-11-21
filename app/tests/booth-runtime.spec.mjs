@@ -198,7 +198,7 @@ test('readProgress checks shape, age and validates serialized BoothEdits', () =>
   const sameEdit = {pageIndex: 0, rects: [{x: 0.1, y: 0.1, w: 0.1, h: 0.02}], originalText: 'a', newText: 'a'};
   const good = {
     v: 2, at: now - 1000, step: 'edit', paperId: '2309.15217', title: 'Ragas: Automated Evaluation', license: 'cc-by-4.0',
-    tab: 'myai', assist: 'my-ai', code: '',
+    tab: 'myai', assist: 'my-ai',
     edits: JSON.stringify([SAMPLE_EDIT, badEdit, sameEdit]),
   };
   const read = R.readProgress(JSON.stringify(good), now);
@@ -208,7 +208,6 @@ test('readProgress checks shape, age and validates serialized BoothEdits', () =>
   assert.equal(read.license, 'cc-by-4.0');
   assert.equal(read.tab, 'myai');
   assert.equal(read.assist, 'my-ai');
-  assert.equal(read.code, '');
   assert.equal(read.count, 1);
   assert.deepEqual(JSON.parse(read.edits), [SAMPLE_EDIT]);
   assert.equal(R.readProgress(JSON.stringify({...good, v: 1}), now), null, 'legacy v1 shape is ignored');
@@ -216,9 +215,10 @@ test('readProgress checks shape, age and validates serialized BoothEdits', () =>
   assert.equal(R.readProgress(JSON.stringify({...good, step: 'ticket'}), now), null);
   assert.equal(R.readProgress(JSON.stringify({...good, paperId: '../x'}), now), null);
   assert.equal(R.readProgress('nope', now), null);
-  const odd = R.readProgress(JSON.stringify({...good, tab: 'evil', assist: 'robot', code: 'R-IIIIII'}), now);
-  assert.deepEqual([odd.tab, odd.assist, odd.code], ['find', 'manual', '']);
-  assert.equal(R.readProgress(JSON.stringify({...good, assist: 'agent', code: 'R-7K3QXM'}), now).code, 'R-7K3QXM');
+  const odd = R.readProgress(JSON.stringify({...good, tab: 'evil', assist: 'robot'}), now);
+  assert.deepEqual([odd.tab, odd.assist], ['find', 'manual']);
+  const legacyAgent = R.readProgress(JSON.stringify({...good, tab: 'agent', assist: 'agent', code: 'R-7K3QXM'}), now);
+  assert.deepEqual([legacyAgent.tab, legacyAgent.assist], ['find', 'manual'], 'saved tab/assist agent restores to find/manual');
   assert.equal(R.resumeQuestion(2), '고친 곳 2개를 이어서 할까요?');
   assert.equal(R.resumeQuestion(0), '보던 논문을 이어서 볼까요?');
 });
@@ -235,8 +235,8 @@ test('progressNow and reopen round-trip through FalsifyBoothEdits.serialize / re
       open: (id, meta) => { opened.push([id, JSON.parse(JSON.stringify(meta))]); return Promise.resolve(true); },
     },
     FalsifyBoothRecipe: {
-      assist: () => ({assist: 'agent', recipeCode: 'R-7K3QXM'}),
-      setAssist: (kind, code) => assists.push([kind, code]),
+      assist: () => ({assist: 'my-ai'}),
+      setAssist: kind => assists.push(kind),
     },
   });
   context.FalsifyBoothEdits.add(SAMPLE_EDIT);
@@ -247,8 +247,7 @@ test('progressNow and reopen round-trip through FalsifyBoothEdits.serialize / re
   assert.equal(record.title, 'Ragas: Automated Evaluation');
   assert.equal(record.license, 'cc-by-4.0');
   assert.equal(record.tab, 'myai');
-  assert.equal(record.assist, 'agent');
-  assert.equal(record.code, 'R-7K3QXM');
+  assert.equal(record.assist, 'my-ai');
   assert.deepEqual(JSON.parse(record.edits), [SAMPLE_EDIT]);
 
   context.FalsifyBoothEdits.clear();
@@ -257,7 +256,7 @@ test('progressNow and reopen round-trip through FalsifyBoothEdits.serialize / re
   const ok = await R.reopen(parsed);
   assert.equal(ok, true);
   assert.deepEqual(opened, [['2309.15217', {title: 'Ragas: Automated Evaluation', license: 'cc-by-4.0'}]]);
-  assert.deepEqual(assists, [['agent', 'R-7K3QXM']]);
+  assert.deepEqual(assists, ['my-ai']);
   assert.deepEqual(JSON.parse(JSON.stringify(context.FalsifyBoothEdits.list())), [SAMPLE_EDIT]);
 
   html.dataset.boothStep = 'ticket';

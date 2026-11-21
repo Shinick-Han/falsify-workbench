@@ -45,7 +45,6 @@ const MESSAGE_SELECTORS = [
   '#booth-dock-status',
   '#booth-submit-status',
   '#booth-status',
-  '#booth-agent-status',
   '#paper-before-status',
   '#paper-edit-status',
   '#paper-generate-status',
@@ -55,19 +54,6 @@ const cors = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
   'Access-Control-Allow-Headers': '*',
-};
-
-const AGENT_RECIPE = {
-  schema: 'falsify.booth.recipe.v1',
-  paperId: '2309.15217',
-  edits: [{page: 5, find: '0.95', replace: '0.50', context: 'Ragas 0.95 0.78 0.70'}],
-  defectType: 'number',
-  reason: 'Table 1 Ragas faithfulness lowered from 0.95 to 0.50.',
-  source: 'agent',
-  agent: {name: 'Claude Code', model: 'claude-opus-5-5'},
-  code: 'R-ABC123',
-  createdAt: '2026-11-22T00:58:00.000Z',
-  expiresAt: '2026-11-22T06:58:00.000Z',
 };
 
 function serve() {
@@ -137,9 +123,6 @@ async function stubApi(route, submissions) {
       headers: {...cors, 'X-Falsify-Paper-License': 'cc-by-4.0', 'Content-Disposition': 'attachment; filename="2309.15217.pdf"'},
       body: sourcePdfBytes,
     });
-  }
-  if (request.method() === 'GET' && url.pathname === '/v1/booth/recipes/R-ABC123') {
-    return json(route, 200, AGENT_RECIPE);
   }
   if (request.method() === 'POST' && url.pathname === '/v1/booth/submissions') {
     let body = Buffer.alloc(0);
@@ -644,35 +627,7 @@ async function caseSymbolToDigit(browser, wide, sourceRefs) {
   });
 }
 
-/* Case 7 (§3.3 #4): Agent recipe deep-link (#recipe=R-ABC123) end-to-end. */
-async function caseAgentRecipe(browser, wide) {
-  const label = `agent-recipe(${wide ? '1280' : '390'})`;
-  await runSession(() => openContext(browser, wide, {hash: '#recipe=R-ABC123'}), async ({page, submissions, errors}) => {
-    await stepIs(page, 'edit');
-    await editCountIs(page, 1);
-    const parsed = await submitAndCapture(page, submissions, 1, label);
-    assert.equal(parsed.meta.assist, 'agent', `${label}: meta.assist`);
-    assert.equal(parsed.meta.recipeCode, 'R-ABC123', `${label}: meta.recipeCode`);
-    await oracle.assertSubmittedPdf({
-      label,
-      meta: parsed.meta,
-      pdfBytes: parsed.pdfBytes,
-      sourcePdfBytes,
-      expectedPages: 8,
-      consentVersion: CONSENT_VERSION,
-      expectations: [{
-        pageIndex: 4,
-        mustContain: ['0.50'],
-        mustNotContain: ['0.95'],
-        untouched: ['0.78', '0.70'],
-      }],
-    });
-    await assertEditContext(parsed.pdfBytes, 4, '0.95', '0.50', 0, label);
-    assert.equal(errors.join('\n'), '', `${label}: uncaught page errors`);
-  });
-}
-
-/* Case 8 (§3.3 #5): Offline PDF engine error path — the sole permitted failure under R1, with 「다시 시도」. */
+/* Case 7 (§3.3 #5): Offline PDF engine error path — the sole permitted failure under R1, with 「다시 시도」. */
 async function caseEngineOffline(browser, wide) {
   const label = `engine-offline(${wide ? '1280' : '390'})`;
   await runSession(() => openMission(browser, wide, {abortMuPdf: true}), async ({page, errors}) => {
@@ -722,7 +677,6 @@ async function main() {
       await caseTapDagger(browser, wide, sourceRefs);
       await caseParagraphBodyEdit(browser, wide);
       await caseSymbolToDigit(browser, wide, sourceRefs);
-      await caseAgentRecipe(browser, wide);
       await caseEngineOffline(browser, wide);
     }
   } catch (error) {

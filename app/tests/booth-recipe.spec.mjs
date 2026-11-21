@@ -181,13 +181,62 @@ test('the mission check is an exact id match, so a prefix id still gets search m
   }
 });
 
-test('codes normalise to R- plus 6 Crockford characters', () => {
+test('cropBox widens narrow boxes, shifts inside edges, caps height at 1/3 keeping top, and pads wide boxes', () => {
   const {recipe} = load();
-  assert.equal(recipe.normalizeCode('r-abc123'), 'R-ABC123');
-  assert.equal(recipe.normalizeCode(' abc123 '), 'R-ABC123');
-  assert.equal(recipe.normalizeCode('R-7K3QXO'), 'R-7K3QX0');
-  assert.equal(recipe.normalizeCode('R-ILABCD'), 'R-11ABCD');
-  for (const bad of ['', 'R-ABC12', 'R-ABC1234', 'R-ABCU12', 'R_ABC123', 42]) assert.equal(recipe.normalizeCode(bad), '', String(bad));
+  const near = (a, b, msg) => assert.ok(Math.abs(a - b) < 1e-9, `${msg}: ${a} vs ${b}`);
+  assert.equal(recipe.cropBox([]), null);
+  assert.equal(recipe.cropBox(null), null);
+
+  // 1. Narrow box widened to 0.40 and centred.
+  const narrow = plain(recipe.cropBox([{x: 0.45, y: 0.30, w: 0.10, h: 0.02}]));
+  near(narrow.x, 0.30, 'narrow.x');
+  near(narrow.w, 0.40, 'narrow.w');
+  near(narrow.y, 0.27, 'narrow.y');
+  near(narrow.h, 0.10, 'narrow.h');
+
+  // 2. Box near the right edge shifted inside [0, 1].
+  const rightEdge = plain(recipe.cropBox([{x: 0.90, y: 0.20, w: 0.06, h: 0.02}]));
+  near(rightEdge.x, 0.60, 'rightEdge.x');
+  near(rightEdge.w, 0.40, 'rightEdge.w');
+  near(rightEdge.x + rightEdge.w, 1.0, 'rightEdge right bound');
+
+  // Left edge shifted inside [0, 1].
+  const leftEdge = plain(recipe.cropBox([{x: 0.02, y: 0.01, w: 0.05, h: 0.02}]));
+  near(leftEdge.x, 0.0, 'leftEdge.x');
+  near(leftEdge.w, 0.40, 'leftEdge.w');
+  near(leftEdge.y, 0.0, 'leftEdge.y');
+  near(leftEdge.h, 0.10, 'leftEdge.h');
+
+  // 3. Moderately tall box (padded > 1/3, union + 0.02 <= 1/3) trims padding to 0.01 and caps height at 1/3.
+  const trimmed = plain(recipe.cropBox([
+    {x: 0.10, y: 0.20, w: 0.50, h: 0.02},
+    {x: 0.10, y: 0.46, w: 0.50, h: 0.02},
+  ]));
+  near(trimmed.y, 0.19, 'trimmed.y keeps union.top - 0.01');
+  near(trimmed.h, 1 / 3, 'trimmed.h capped at 1/3 without cutting union');
+  assert.ok(trimmed.y <= 0.20 && trimmed.y + trimmed.h >= 0.48, 'trimmed crop contains whole union');
+
+  // 4. Reviewer rot90 shape (narrow box with h = 0.482 > 1/3): crop never cuts the union.
+  const rot90 = plain(recipe.cropBox([{x: 0.20, y: 0.15, w: 0.02, h: 0.482}]));
+  near(rot90.x, 0.01, 'rot90.x widened and centred');
+  near(rot90.w, 0.40, 'rot90.w');
+  near(rot90.y, 0.14, 'rot90.y = union.top - 0.01');
+  near(rot90.h, 0.502, 'rot90.h = union.h + 0.02');
+  assert.ok(rot90.y <= 0.15 && rot90.y + rot90.h >= 0.15 + 0.482, 'rot90 crop contains whole union');
+
+  // 5. Wide box padded by 0.02 on each side.
+  const wide = plain(recipe.cropBox([{x: 0.10, y: 0.40, w: 0.50, h: 0.04}]));
+  near(wide.x, 0.08, 'wide.x');
+  near(wide.w, 0.54, 'wide.w');
+  near(wide.y, 0.37, 'wide.y');
+  near(wide.h, 0.12, 'wide.h');
+
+  // Full-width box clamps to [0, 1].
+  const full = plain(recipe.cropBox([{x: 0.01, y: 0.94, w: 0.98, h: 0.04}]));
+  near(full.x, 0.0, 'full.x');
+  near(full.w, 1.0, 'full.w');
+  near(full.y + full.h, 1.0, 'full bottom shifted inside');
+  near(full.h, 0.12, 'full.h');
 });
 
 test('normalise folds NFKC, whitespace and line-end hyphenation and keeps original offsets', () => {
@@ -310,15 +359,13 @@ test('searchHits lists the current page first, caps the list, and attaches rects
   assert.ok(list.items[0].rects[0].x < list.items[1].rects[0].x);
 });
 
-test('assist defaults to manual; setAssist keeps a recipe code only for agent', () => {
+test('assist defaults to manual; setAssist accepts my-ai and treats other kinds as manual', () => {
   const {recipe} = load();
   assert.deepEqual(plain(recipe.assist()), {assist: 'manual'});
-  recipe.setAssist('agent', 'r-abc123');
-  assert.deepEqual(plain(recipe.assist()), {assist: 'agent', recipeCode: 'R-ABC123'});
-  recipe.setAssist('my-ai', 'R-ABC123');
+  recipe.setAssist('my-ai');
   assert.deepEqual(plain(recipe.assist()), {assist: 'my-ai'});
-  recipe.setAssist('agent', 'bad');
-  assert.deepEqual(plain(recipe.assist()), {assist: 'agent'});
+  recipe.setAssist('agent');
+  assert.deepEqual(plain(recipe.assist()), {assist: 'manual'});
   recipe.setAssist('robot');
   assert.deepEqual(plain(recipe.assist()), {assist: 'manual'});
 });
@@ -330,7 +377,7 @@ test('apply opens the paper, indexes pdf.js pages, and adds BoothEdits directly'
   const {recipe, edits} = load({FalsifyPaperWorkspace: ws, FalsifyBoothPaper: hook});
   const progress = [];
   const result = await recipe.apply(good({
-    code: 'R-ABC123', createdAt: 'x', expiresAt: 'y',
+    source: 'my-ai',
     edits: [
       {page: 3, find: '0.95', replace: '0.50', context: 'Ragas 0.95 0.78 0.70'},
       {find: 'agrees best', replace: 'agrees least'},
@@ -346,10 +393,10 @@ test('apply opens the paper, indexes pdf.js pages, and adds BoothEdits directly'
   assert.equal(stored[0].pageIndex, 2);
   assert.equal(stored[0].originalText, '0.95');
   assert.equal(stored[0].newText, '0.50');
-  assert.equal(stored[0].source, 'recipe');
+  assert.equal(stored[0].source, 'myai');
   assert.deepEqual(stored[0].rects, [{x: 0.25, y: 0.15, w: 0.08, h: 0.02}]);
   assert.deepEqual(progress, ['paper', 'edit', 'edit', 'edit', 'done']);
-  assert.deepEqual(plain(recipe.assist()), {assist: 'agent', recipeCode: 'R-ABC123'});
+  assert.deepEqual(plain(recipe.assist()), {assist: 'my-ai'});
   edits.remove(stored[0].id);
   assert.deepEqual(plain(recipe.assist()), {assist: 'manual'}, 'removing the recipe edit resets assist to manual');
   assert.deepEqual(plain(recipe.paperInfo()), {paperId: '2309.15217', title: 'Ragas', license: 'cc-by-4.0', pages: 3});
@@ -358,9 +405,9 @@ test('apply opens the paper, indexes pdf.js pages, and adds BoothEdits directly'
   assert.equal(recipe.currentPage(), 3);
 });
 
-test('over-engineered helpers (sameSpot, uniqueSpan, mergedProposal, changesOf, acceptProposals) are deleted', async () => {
+test('over-engineered and agent-code helpers are deleted', async () => {
   const {recipe} = load();
-  for (const removed of ['sameSpot', 'uniqueSpan', 'mergedProposal', 'changesOf', 'applyFound']) {
+  for (const removed of ['sameSpot', 'uniqueSpan', 'mergedProposal', 'changesOf', 'applyFound', 'fromCode', 'codeFromText', 'normalizeCode', 'expiryText']) {
     assert.equal(removed in recipe, false, removed + ' is deleted');
   }
   assert.equal(source.includes('acceptProposals'), false, 'no workspace acceptProposals use');
@@ -368,6 +415,7 @@ test('over-engineered helpers (sameSpot, uniqueSpan, mergedProposal, changesOf, 
   assert.equal(source.includes('uniqueSpan'), false);
   assert.equal(source.includes('mergedProposal'), false);
   assert.equal(source.includes('changesOf'), false);
+  assert.equal(source.includes('compareToggle'), false);
 });
 
 test('no visitor message on the edit step sends the visitor to another feature', async () => {
@@ -394,38 +442,6 @@ test('apply: no booth hook means every edit is no_paper; invalid recipes throw',
   const result = await recipe.apply(good());
   assert.deepEqual(plain(result.unresolved.map(item => item.reason)), ['no_paper']);
   await assert.rejects(recipe.apply(good({source: 'robot'})), error => error.code === 'invalid_recipe' && error.errors.length === 1);
-});
-
-test('fromCode fetches GET /v1/booth/recipes/:code without credentials and strips server keys', async () => {
-  const requests = [];
-  const fetch = async (url, init) => {
-    requests.push({url, init});
-    if (url.endsWith('/R-ABC123')) return {ok: true, status: 200, json: async () => ({...good(), code: 'R-ABC123', createdAt: 'c', expiresAt: 'e'})};
-    return {ok: false, status: 404, json: async () => ({error: {code: 'not_found'}})};
-  };
-  const config = {apiBase: 'https://api.example', hostedAi: {apiBase: 'https://hosted.example/'}};
-  const {recipe} = load({fetch, FalsifyCloudConfig: config});
-  const got = plain(await recipe.fromCode('r-abc123'));
-  assert.equal(got.code, 'R-ABC123');
-  assert.equal('createdAt' in got || 'expiresAt' in got, false);
-  assert.equal(requests[0].url, 'https://hosted.example/v1/booth/recipes/R-ABC123');
-  assert.equal(requests[0].init.credentials, 'omit');
-  assert.equal(requests[0].init.method, 'GET');
-  await assert.rejects(recipe.fromCode('R-ZZZZZZ'), error => error.code === 'not_found');
-  await assert.rejects(recipe.fromCode('nope'), error => error.code === 'invalid_code');
-  assert.equal(requests.length, 2);
-});
-
-test('codeFromText takes the code out of a pasted #recipe= link; expiryText reads local time', () => {
-  const {recipe} = load();
-  assert.equal(recipe.codeFromText('https://x.test/event.html#recipe=R-7K3QXM'), 'R-7K3QXM');
-  assert.equal(recipe.codeFromText('R-7K3QXM'), '');
-  assert.equal(recipe.codeFromText('#recipe=R-7K3QXM-TOO-LONG'), '');
-  const at = new Date(2026, 10, 22, 9, 5);
-  assert.equal(recipe.expiryText(at.toISOString(), new Date(2026, 10, 22, 1, 0)), '오늘 09:05까지 유효');
-  assert.equal(recipe.expiryText(at.toISOString(), new Date(2026, 10, 21, 1, 0)), '11월 22일 09:05까지 유효');
-  assert.equal(recipe.expiryText('nope'), '');
-  assert.equal(recipe.expiryText(undefined), '');
 });
 
 test('rotated items return the whole item box in rectsForSpan instead of slicing along x (P1-4)', () => {

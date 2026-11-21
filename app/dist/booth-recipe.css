@@ -4,7 +4,7 @@
 /* Find-and-replace edits enter the workspace as confirmed imports; the booth hides the origin note. */
 html[data-booth-step] #paper-edits .paper-edit-origin{display:none}
 .booth-recipe{display:grid;gap:12px;min-width:0}
-.booth-tabs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;padding:4px;border:1px solid var(--ev-hair);border-radius:10px;background:var(--ev-card)}
+.booth-tabs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px;padding:4px;border:1px solid var(--ev-hair);border-radius:10px;background:var(--ev-card)}
 .booth .booth-tab{min-width:0;min-height:44px;padding:0 4px;border:0;border-radius:7px;background:transparent;color:var(--ev-ink-2);font-family:var(--ev-sans);font-size:13.5px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
 .booth .booth-tab[aria-selected="true"]{background:var(--ev-ink);color:#fff}
 .booth-pane{display:grid;gap:12px;min-width:0}
@@ -23,30 +23,24 @@ html[data-booth-step] #paper-edits .paper-edit-origin{display:none}
 .booth-find-ask{margin:0;font-size:13.5px;font-weight:500;line-height:1.5;color:var(--ev-ink);word-break:keep-all;overflow-wrap:anywhere}
 .booth-find-ask[hidden]{display:none}
 .booth-recipe-fix{display:grid;gap:10px}
-.booth #booth-agent-code{font-family:var(--ev-mono);letter-spacing:.08em;text-transform:uppercase}
 .booth-recipe-card{gap:6px}
-.booth-recipe-confirm{gap:12px;box-shadow:inset 0 0 0 1px var(--ev-ink)}
-.booth-recipe-confirm-text{font-size:14px;font-weight:500;color:var(--ev-ink);overflow-wrap:anywhere}
-.booth-recipe-confirm .booth-row .booth-btn{flex:1 1 auto;padding:0 16px;white-space:nowrap}
 .booth-recipe-count{font-size:21px;font-weight:300;line-height:1.3;letter-spacing:-.02em;color:var(--ev-ink)}
 .booth-recipe-by{font-size:12px;font-variant-numeric:tabular-nums}
 .booth-myai-wait{padding:14px;background:var(--ev-card);border-radius:10px;text-align:center}
-.booth-recipe-compare{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;min-width:0}
+.booth-recipe-compare{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,296px),1fr));gap:8px;min-width:0}
 .booth-recipe-compare>.booth-small{grid-column:1/-1}
 .booth-recipe-compare figure{display:grid;gap:4px;min-width:0;margin:0}
 .booth-recipe-compare figcaption{font-size:12px;font-weight:500;color:var(--ev-ink-2)}
-.booth-recipe-page{display:block;width:100%;height:auto;border:1px solid var(--ev-hair);border-radius:4px;background:#fff}
-.booth-recipe-shot{position:relative;min-width:0}
-.booth-recipe-shot .paper-change-mark.is-after{background:color-mix(in srgb,var(--ev-mark) 75%,transparent);border-bottom:2px solid var(--ev-ink)}
+.booth-recipe-page{display:block;width:100%;height:auto}
+.booth-recipe-shot{position:relative;min-width:0;overflow:hidden;border-radius:4px;background:#fff;box-shadow:0 0 0 1px var(--ev-hair)}
 .booth-recipe-outline{position:absolute;z-index:3;box-sizing:border-box;border:1.5px solid var(--ev-ink);border-radius:3px;box-shadow:0 0 0 2px rgba(255,255,255,.85);pointer-events:none}
 @media (min-width:900px){
   .booth-find-hits{max-height:420px}
 }
 
-/* Recipe-made content is labelled as AI's: a draft note over the reason, the chip it chose, a tag on #paper-edits rows. */
+/* Recipe-made content is labelled as AI's: a draft note over the reason and the chip it chose. */
 .booth-recipe-draft{margin:0 0 6px;font-size:12px;line-height:1.4;color:var(--ev-muted,#6b717a)}
 .booth-recipe-ai-pick{display:inline-flex;align-items:center;margin:0 4px 0 2px;padding:0;font:500 12px/1.3 var(--ev-sans,sans-serif);color:var(--ev-muted,#5f656e);vertical-align:middle}
-.booth-recipe-ai-tag{display:inline-block;margin:0 6px 0 0;padding:1px 5px;border:1px solid var(--ev-hair,#d6d9dd);border-radius:4px;font:500 10.5px/1.4 var(--ev-mono,monospace);color:var(--ev-ink-2,#3a3f47);vertical-align:middle}
 
 /* Phones: 「찾아 바꾸기」 below the page, closed until opened. It carries .booth for the form styles. */
 .booth.booth-find-fold{max-width:none;margin:16px 0 0;padding:0;border-radius:10px;background:var(--ev-card,#fff)}
@@ -59,4 +53,5 @@ html[data-booth-step] #paper-edits .paper-edit-origin{display:none}
 @media (max-width:1023.98px){
   /* The 직접 고치기 panel is empty on phones (the page is the editor) unless a recipe left rows to fix. */
   #booth-pane-find:not(:has(>.booth-recipe-fix:not([hidden]))){display:none}
+  html[data-booth-step="edit"] #booth{margin-bottom:0;padding-bottom:0}
 }

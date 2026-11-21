@@ -27,10 +27,9 @@
   const MAX_EDITS=5;
   const ACTIVITY=['pointerdown','touchstart','keydown','wheel','scroll','input'];
   const PAPER_ID=/^(?:\d{4}\.\d{4,5}(?:v\d+)?|[a-z-]+(?:\.[A-Z]{2})?\/\d{7}(?:v\d+)?)$/;
-  const CODE=/^R-[0-9A-HJKMNP-TV-Z]{6}$/;
   const CONTROL=/[\u0000-\u001f\u007f]/;
   const LICENSE_RE=/^(?:cc-by(?:-\d+\.\d+)?|cc-by-sa(?:-\d+\.\d+)?|cc0(?:-1\.0)?|public-domain)$/;
-  const TABS=['find','myai','agent'];
+  const TABS=['find','myai'];
   let resetting=false;
 
   function bag(name){
@@ -404,13 +403,11 @@
     const recipe=root.FalsifyBoothRecipe;
     let value=null;
     try{value=recipe&&typeof recipe.assist==='function'?recipe.assist():null;}catch{value=null;}
-    const kind=value&&(value.assist==='my-ai'||value.assist==='agent')?value.assist:'manual';
-    const code=value&&typeof value.recipeCode==='string'&&CODE.test(value.recipeCode)?value.recipeCode:'';
-    return {kind,code};
+    return value&&value.assist==='my-ai'?'my-ai':'manual';
   }
   function tabNow(doc){
     const on=doc.querySelector('.booth-tab[aria-selected="true"]');
-    const match=on&&/^booth-tab-(find|myai|agent)$/.exec(on.id||'');
+    const match=on&&/^booth-tab-(find|myai)$/.exec(on.id||'');
     return match?match[1]:'find';
   }
   function cleanTitle(value){
@@ -428,12 +425,11 @@
     const step=stepOf(doc);
     const paper=currentPaper();
     if((step!=='edit'&&step!=='send')||!paper||!PAPER_ID.test(paper.id||'')) return null;
-    const assist=assistNow();
     return {
       v:2,at:now,step,paperId:paper.id,
       title:cleanTitle(paper.title),
       license:cleanLicense(paper.license),
-      tab:tabNow(doc),assist:assist.kind,code:assist.code,edits:serializedEdits()
+      tab:tabNow(doc),assist:assistNow(),edits:serializedEdits()
     };
   }
   function saveProgress(doc){
@@ -460,8 +456,7 @@
       title:cleanTitle(data.title),
       license:cleanLicense(data.license),
       tab:TABS.includes(data.tab)?data.tab:'find',
-      assist:data.assist==='my-ai'||data.assist==='agent'?data.assist:'manual',
-      code:typeof data.code==='string'&&CODE.test(data.code)?data.code:'',
+      assist:data.assist==='my-ai'?'my-ai':'manual',
       edits:JSON.stringify(valid),
       count:valid.length
     };
@@ -483,7 +478,7 @@
     if(store&&typeof store.restore==='function') store.restore(record.edits);
     const recipe=root.FalsifyBoothRecipe;
     if(recipe&&typeof recipe.setAssist==='function'&&record.assist&&record.assist!=='manual'){
-      try{recipe.setAssist(record.assist,record.code);}catch{}
+      try{recipe.setAssist(record.assist);}catch{}
     }
     return true;
   }
@@ -515,7 +510,7 @@
   }
   function skipResume(loc){
     const hash=loc&&typeof loc.hash==='string'?loc.hash:'';
-    return hash.startsWith('#recipe=')||hash==='#booth-result';
+    return hash==='#booth-result';
   }
   function resumeAction(doc, record, store){
     return async(yes, panel, status, buttons)=>{

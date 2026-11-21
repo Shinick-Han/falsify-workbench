@@ -1,7 +1,6 @@
 /* Event-page defect recipes (falsify.booth.recipe.v1) and find-and-replace editing on BoothEdit.
-   globalThis.FalsifyBoothRecipe: validate, apply, fromCode, pageText, paperInfo, currentPage,
-   setAssist, assist, normalizeCode, normalizeText, indexPage, locate, searchHits, codeFromText,
-   expiryText, SCHEMA.
+   globalThis.FalsifyBoothRecipe: validate, apply, pageText, paperInfo, currentPage,
+   setAssist, assist, normalizeText, indexPage, locate, searchHits, cropBox, SCHEMA.
    Builds one per-page text index from pdf.js getTextContent (or the rendered text layer) with
    page-fraction rects for every hit, using light normalisation (NFKC, whitespace, hyphens and
    look-alikes). Find-and-replace, recipes and 내 AI all add BoothEdit records directly to
@@ -10,12 +9,10 @@
   'use strict';
   const SCHEMA='falsify.booth.recipe.v1';
   const TOP_KEYS=new Set(['schema','paperId','edits','defectType','reason','source','agent']);
-  const SERVER_KEYS=['code','createdAt','expiresAt'];
   const SOURCES=['manual','my-ai','agent'];
   const DEFECT_IDS=['number','figure','citation','logic','method','other'];
   const DEFECT_LABELS={number:'수치·통계',figure:'그림·표',citation:'인용·출처',logic:'논리·결론',method:'방법·실험 설계',other:'기타'};
   const PAPER_ID=/^(?:\d{4}\.\d{4,5}(?:v\d+)?|[a-z-]+(?:\.[A-Z]{2})?\/\d{7}(?:v\d+)?)$/;
-  const CODE=/^R-[0-9A-HJKMNP-TV-Z]{6}$/;
   /* C0, DEL, C1 and the bidi marks, embeddings, overrides and isolates (same set as the server). */
   const CONTROL=/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
   const CONTROL_NL=/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
@@ -35,14 +32,6 @@
   const SNIP=28;
   const WINDOW=40;
   const SIDE_MIN=8;
-  const ERROR_TEXT={
-    invalid_code:'코드 형식을 확인해 주세요. 예: R-7K3QXM',
-    not_found:'이 코드로 찾은 레시피가 없어요. 코드를 다시 확인해 볼까요? 레시피는 6시간 동안 쓸 수 있어요.',
-    invalid_recipe:'레시피 형식이 맞지 않아요. 코드를 다시 확인해 볼까요?',
-    rate_limited:'지금 요청이 몰려 있어요. 잠시 뒤 다시 눌러 주세요.',
-    network:'서버에 연결하지 못했어요. 네트워크를 확인해 주세요.',
-    no_paper:'레시피의 논문을 열지 못했어요. 「불러오기」를 다시 눌러 주세요.'
-  };
   const REASON_TEXT={
     not_found:'찾는 글자가 이 논문에 없어요.',
     ambiguous:'같은 글자가 여러 곳에 있어요. 바꿀 곳을 눌러 주세요.',
@@ -118,32 +107,6 @@
     checkEdits(errors,obj.edits);
     checkAgent(errors,obj.agent);
     return {ok:errors.length===0,errors};
-  }
-  function withoutServerKeys(recipe){
-    const copy=Object.assign({},recipe);
-    for(const key of SERVER_KEYS) delete copy[key];
-    return copy;
-  }
-  /* Crockford: case-insensitive, O reads as 0 and I/L as 1, the R- prefix optional. */
-  function normalizeCode(value){
-    if(typeof value!=='string') return '';
-    const text=value.trim().toUpperCase().replace(/\s+/g,'');
-    const body=text.startsWith('R-')?text.slice(2):text;
-    const normal='R-'+body.replace(/O/g,'0').replace(/[IL]/g,'1');
-    return CODE.test(normal)?normal:'';
-  }
-  function codeFromText(text){
-    const match=/#recipe=([A-Za-z0-9-]{6,12})(?![A-Za-z0-9-])/.exec(String(text||''));
-    return match?match[1]:'';
-  }
-  function expiryText(iso, now){
-    const at=new Date(typeof iso==='string'?iso:NaN);
-    if(Number.isNaN(at.getTime())) return '';
-    const today=now&&typeof now.getFullYear==='function'?now:new Date();
-    const pad=n=>String(n).padStart(2,'0');
-    const time=pad(at.getHours())+':'+pad(at.getMinutes());
-    const same=at.getFullYear()===today.getFullYear()&&at.getMonth()===today.getMonth()&&at.getDate()===today.getDate();
-    return (same?'오늘 ':(at.getMonth()+1)+'월 '+at.getDate()+'일 ')+time+'까지 유효';
   }
 
   /* ---------- per-page text index with page-fraction rects ---------- */
@@ -233,6 +196,26 @@
     const x2=Math.max(a.x+a.w,b.x+b.w);
     const y2=Math.max(a.y+a.h,b.y+b.h);
     return {x,y,w:x2-x,h:y2-y};
+  }
+  function rectsUnion(rects){
+    const list=Array.isArray(rects)?rects.map(plainRect).filter(Boolean):[];
+    if(!list.length) return null;
+    let box=list[0];
+    for(let i=1;i<list.length;i+=1) box=unionRect(box,list[i]);
+    return box;
+  }
+  function fitRange(start, len){
+    if(len>=1) return [0,1];
+    return [Math.min(Math.max(start,0),1-len),len];
+  }
+  /* Crop box around edit.rects in page fractions (0..1): >=0.40 wide; +0.03 top/+0.05 bottom
+     when <=1/3 tall, otherwise trim padding to 0.01 and keep at least 1/3 without cutting the union. */
+  function cropBox(rects){
+    const u=rectsUnion(rects);
+    if(!u) return null;
+    const [x,w]=u.w<0.40?fitRange(u.x+u.w/2-0.20,0.40):fitRange(u.x-0.02,u.w+0.04);
+    const [y,h]=u.h+0.08<=1/3?fitRange(u.y-0.03,u.h+0.08):fitRange(u.y-0.01,Math.max(1/3,u.h+0.02));
+    return {x,y,w,h};
   }
   function mergeLineRects(list){
     const merged=[];
@@ -519,10 +502,8 @@
 
   /* ---------- runtime state & PDF page indexing ---------- */
   let assistKind='manual';
-  let assistCode='';
   let appliedIds=null;
   let lastRecipe=null;
-  const expiryByCode=new Map();
   const listeners=new Set();
   let indexCache={key:null,pages:[],promise:null};
 
@@ -703,18 +684,14 @@
     return indexFromTextLayer();
   }
 
-  function setAssist(kind, recipeCode){
-    assistKind=SOURCES.includes(kind)?kind:'manual';
-    const code=normalizeCode(recipeCode||'');
-    assistCode=assistKind==='agent'&&code?code:'';
+  function setAssist(kind){
+    assistKind=kind==='my-ai'?'my-ai':'manual';
     appliedIds=null;
   }
   function assist(){
     const live=liveEdits();
     if(appliedIds&&!live.some(edit=>edit&&appliedIds.has(edit.id))) return {assist:'manual'};
-    const out={assist:assistKind};
-    if(assistKind==='agent'&&assistCode) out.recipeCode=assistCode;
-    return out;
+    return {assist:assistKind};
   }
   function baseOf(value){
     if(typeof value!=='string'||!value) return '';
@@ -730,40 +707,18 @@
     const hosted=cfg.hostedAi&&typeof cfg.hostedAi==='object'?cfg.hostedAi.apiBase:'';
     return baseOf(hosted)||baseOf(cfg.apiBase);
   }
-  function coded(code){
-    const error=new Error(ERROR_TEXT[code]||code);
-    error.code=code;
-    return error;
-  }
-  function fetchStatusCode(status){
-    if(status===404) return 'not_found';
-    if(status===429) return 'rate_limited';
-    return status===400?'invalid_code':'network';
-  }
   async function fetchJson(path, headers){
     const base=apiBase();
-    if(!base||typeof root.fetch!=='function') throw coded('network');
-    let res=null;
-    try{
-      res=await root.fetch(base+path,{method:'GET',headers:Object.assign({Accept:'application/json'},headers||{}),credentials:'omit',cache:'no-store',redirect:'error'});
-    }catch{throw coded('network');}
-    if(!res||!res.ok) throw coded(fetchStatusCode(res&&res.status));
-    try{return await res.json();}catch{throw coded('invalid_recipe');}
+    if(!base||typeof root.fetch!=='function') throw new Error('network');
+    const res=await root.fetch(base+path,{method:'GET',headers:Object.assign({Accept:'application/json'},headers||{}),credentials:'omit',cache:'no-store',redirect:'error'});
+    if(!res||!res.ok) throw new Error('http');
+    return res.json();
   }
   function invalidRecipe(errors){
-    const error=coded('invalid_recipe');
+    const error=new Error('레시피 형식이 맞지 않아요.');
+    error.code='invalid_recipe';
     error.errors=errors;
     return error;
-  }
-  async function fromCode(code){
-    const normal=normalizeCode(code);
-    if(!normal) throw coded('invalid_code');
-    const data=await fetchJson('/v1/booth/recipes/'+encodeURIComponent(normal));
-    const clean=isPlain(data)?withoutServerKeys(data):null;
-    const checked=validate(clean);
-    if(!checked.ok) throw invalidRecipe(checked.errors);
-    if(typeof data.expiresAt==='string') expiryByCode.set(normal,data.expiresAt);
-    return Object.assign(clean,{code:normal});
   }
   async function bearer(){
     const session=root.FalsifyHostedSession;
@@ -843,10 +798,8 @@
       rects:hit.rects
     };
   }
-  function recordAssist(recipe, code, ids){
-    assistKind=recipe.source;
-    const normal=normalizeCode(code||'');
-    assistCode=recipe.source==='agent'&&normal?normal:'';
+  function recordAssist(recipe, ids){
+    assistKind=recipe.source==='my-ai'?'my-ai':'manual';
     appliedIds=new Set(ids.filter(Boolean));
   }
   function progressFn(options){
@@ -856,17 +809,15 @@
       emit('progress',info);
     };
   }
-  function recipeSourceMeta(clean, normalCode){
-    const editSource=clean.source==='my-ai'?'myai':(clean.source==='agent'?'recipe':'find');
-    const assistMeta=clean.source==='agent'&&normalCode
-      ?{kind:'agent',code:normalCode}
-      :(clean.source==='my-ai'?{kind:'my-ai'}:undefined);
+  function recipeSourceMeta(clean){
+    const editSource=clean.source==='my-ai'?'myai':'find';
+    const assistMeta=clean.source==='my-ai'?{kind:'my-ai'}:undefined;
     return {editSource,assistMeta};
   }
-  function applyRecipeEdits(clean, pages, normalCode, progress){
+  function applyRecipeEdits(clean, pages, progress){
     const applied=[];
     const unresolved=[];
-    const {editSource,assistMeta}=recipeSourceMeta(clean,normalCode);
+    const {editSource,assistMeta}=recipeSourceMeta(clean);
     for(let i=0;i<clean.edits.length;i+=1){
       const edit=clean.edits[i];
       progress({phase:'edit',index:i,total:clean.edits.length});
@@ -882,20 +833,17 @@
     return {applied,unresolved};
   }
   async function apply(recipe, options){
-    const clean=isPlain(recipe)?withoutServerKeys(recipe):recipe;
-    const checked=validate(clean);
+    const checked=validate(recipe);
     if(!checked.ok) throw invalidRecipe(checked.errors);
     const progress=progressFn(options);
-    const code=typeof recipe.code==='string'?recipe.code:'';
-    const normalCode=normalizeCode(code);
-    progress({phase:'paper',paperId:clean.paperId});
-    const opened=await ensurePaper(clean.paperId);
+    progress({phase:'paper',paperId:recipe.paperId});
+    const opened=await ensurePaper(recipe.paperId);
     const pages=opened?await ensureIndex():[];
     const outcome=opened&&pages.length
-      ?applyRecipeEdits(clean,pages,normalCode,progress)
-      :{applied:[],unresolved:clean.edits.map(edit=>({edit,reason:'no_paper'}))};
-    recordAssist(clean,code,outcome.applied.map(item=>item.id));
-    lastRecipe={recipe:clean,code:assistCode,fileHash:(source()||{}).fileHash||'',outcome};
+      ?applyRecipeEdits(recipe,pages,progress)
+      :{applied:[],unresolved:recipe.edits.map(edit=>({edit,reason:'no_paper'}))};
+    recordAssist(recipe,outcome.applied.map(item=>item.id));
+    lastRecipe={recipe,fileHash:(source()||{}).fileHash||'',outcome};
     progress({phase:'done'});
     emit('applied',lastRecipe);
     return outcome;
@@ -923,7 +871,7 @@
     const editStep=doc.getElementById('booth-step-edit');
     if(!editStep||doc.getElementById('booth-recipe')) return;
     const html=doc.documentElement;
-    const ui={tab:'find',myai:false,busy:false,seq:0,summary:null};
+    const ui={tab:'find',myai:false,seq:0,summary:null};
     function el(tag, props, ...kids){
       const node=doc.createElement(tag);
       for(const [key,value] of Object.entries(props||{})){
@@ -1046,24 +994,12 @@
     const fix=el('div',{id:'booth-recipe-fix',className:'booth-recipe-fix',hidden:true});
     const myaiBox=el('div',{id:'booth-myai'});
     const myaiWait=el('p',{className:'booth-small booth-myai-wait',hidden:true,textContent:'준비 중'});
-    const codeInput=el('input',{id:'booth-agent-code',type:'text',maxlength:'300',autocomplete:'off',spellcheck:'false',autocapitalize:'characters',placeholder:'예: R-7K3QXM'});
-    codeInput.addEventListener('input',()=>{
-      const code=codeFromText(codeInput.value);
-      if(code&&code!==codeInput.value) codeInput.value=code;
-    });
-    const agentStatus=el('p',{id:'booth-agent-status',className:'booth-feedback',role:'status','aria-live':'polite'});
-    const agentForm=el('form',{id:'booth-agent-form',className:'booth-find booth-agent',novalidate:'novalidate'},
-      field(codeInput,'Agent 코드'),
-      el('button',{type:'submit',className:'booth-btn ink',textContent:'불러오기'}),
-      agentStatus,
-      el('p',{className:'booth-small',textContent:'AI agent가 만든 레시피 코드를 넣으면 고친 곳을 이 논문에 바로 적용해요. 확인과 제출은 직접 해요.'}));
     const card=el('section',{id:'booth-recipe-result',className:'booth-panel booth-recipe-card',hidden:true,'aria-live':'polite'});
-    const tabs=[['find','직접 고치기'],['myai','내 AI에게'],['agent','Agent 코드']];
+    const tabs=[['find','직접 고치기'],['myai','내 AI에게']];
     const tabButtons={};
     const panes={
       find:el('div',{id:'booth-pane-find',className:'booth-pane',role:'tabpanel','aria-labelledby':'booth-tab-find'},fix,main.form),
-      myai:el('div',{id:'booth-pane-myai',className:'booth-pane',role:'tabpanel','aria-labelledby':'booth-tab-myai',hidden:true},myaiBox,myaiWait),
-      agent:el('div',{id:'booth-pane-agent',className:'booth-pane',role:'tabpanel','aria-labelledby':'booth-tab-agent',hidden:true},agentForm)
+      myai:el('div',{id:'booth-pane-myai',className:'booth-pane',role:'tabpanel','aria-labelledby':'booth-tab-myai',hidden:true},myaiBox,myaiWait)
     };
     const bar=el('div',{className:'booth-tabs',role:'tablist','aria-label':'고치는 방법'});
     for(const [key,label] of tabs){
@@ -1072,12 +1008,9 @@
       tabButtons[key]=button;
       bar.append(button);
     }
-    const section=el('section',{id:'booth-recipe',className:'booth-recipe','aria-label':'고치는 방법'},card,bar,panes.find,panes.myai,panes.agent);
+    const section=el('section',{id:'booth-recipe',className:'booth-recipe','aria-label':'고치는 방법'},card,bar,panes.find,panes.myai);
     const hint=doc.getElementById('booth-hint');
     if(hint) hint.after(section); else editStep.append(section);
-    const pickStatus=el('p',{id:'booth-recipe-pick-status',className:'booth-feedback',role:'status','aria-live':'polite'});
-    const missionStatus=doc.getElementById('booth-mission-status');
-    if(missionStatus) missionStatus.after(pickStatus);
 
     function mountMyAi(){
       if(ui.myai) return;
@@ -1124,9 +1057,8 @@
     function byLine(entry){
       const agent=entry.recipe.agent||{};
       const who=[agent.name,agent.model].filter(Boolean).join(' · ');
-      const kind={agent:'AI agent 레시피','my-ai':'내 AI 레시피',manual:'레시피'}[entry.recipe.source];
-      const until=expiryText(entry.code&&expiryByCode.get(entry.code));
-      return [kind,who,entry.code].filter(Boolean).join(' · ')+(until?' · '+until:'');
+      const kind=entry.recipe.source==='my-ai'?'내 AI 레시피':'레시피';
+      return [kind,who].filter(Boolean).join(' · ');
     }
     function paintCount(){
       const s=ui.summary;
@@ -1136,8 +1068,8 @@
     }
     function fixRow(item, entry){
       const holder={};
-      const editSource=entry.recipe.source==='my-ai'?'myai':'recipe';
-      const assistMeta=entry.recipe.source==='agent'&&entry.code?{kind:'agent',code:entry.code}:(entry.recipe.source==='my-ai'?{kind:'my-ai'}:undefined);
+      const editSource=entry.recipe.source==='my-ai'?'myai':'find';
+      const assistMeta=entry.recipe.source==='my-ai'?{kind:'my-ai'}:undefined;
       holder.view=findForm({
         row:true,find:item.edit.find,replace:item.edit.replace,source:editSource,assist:assistMeta,
         note:REASON_TEXT[item.reason]||REASON_TEXT.not_found,
@@ -1159,7 +1091,7 @@
         el('p',{className:'booth-lab',textContent:'RECIPE'}),
         el('h3',{id:'booth-recipe-count',className:'booth-recipe-count'}),
         el('p',{className:'booth-small booth-recipe-by',textContent:byLine(entry)}),
-        el('p',{className:'booth-small',textContent:'바뀐 곳은 「다음」에서 원문과 나란히 확인해요. 제출은 직접 해요.'}));
+        el('p',{className:'booth-small',textContent:'바뀐 곳은 「다음」에서 원문과 함께 확인해요. 제출은 직접 해요.'}));
       paintCount();
       card.hidden=false;
       fix.textContent='';
@@ -1175,85 +1107,9 @@
       fix.hidden=true;
       ui.summary=null;
     }
-    function progressText(info){
-      if(info.phase==='paper') return '논문을 여는 중…';
-      if(info.phase==='edit') return '고친 곳 적용 중 · '+(info.index+1)+' / '+info.total;
-      return '';
-    }
-    function sayAll(text){
-      say(pickStatus,text);
-      say(agentStatus,text);
-    }
-    function confirmText(count, differentPaper){
-      if(differentPaper&&count) return {text:'지금 고친 곳 '+count+'개가 사라져요. 레시피를 불러올까요?',yes:'지금 것 지우고 불러오기',no:'지금 것 유지'};
-      if(differentPaper) return {text:'지금 연 논문이 레시피의 논문으로 바뀌어요. 레시피를 불러올까요?',yes:'논문 바꿔서 불러오기',no:'그대로 두기'};
-      return {text:'지금 고친 곳 '+count+'개는 그대로 두고 레시피를 더해요. 레시피를 불러올까요?',yes:'더해서 불러오기',no:'그대로 두기'};
-    }
-    function placeConfirm(box){
-      const old=doc.getElementById('booth-recipe-confirm');
-      if(old) old.remove();
-      if(html.dataset.boothStep==='edit') card.before(box);
-      else pickStatus.after(box);
-    }
-    function askConfirm(ask){
-      return new Promise(resolve=>{
-        const yes=el('button',{id:'booth-recipe-confirm-yes',type:'button',className:'booth-btn ink',textContent:ask.yes});
-        const no=el('button',{id:'booth-recipe-confirm-no',type:'button',className:'booth-btn line',textContent:ask.no});
-        const box=el('div',{id:'booth-recipe-confirm',className:'booth-panel booth-recipe-confirm',role:'alertdialog','aria-labelledby':'booth-recipe-confirm-text'},
-          el('p',{id:'booth-recipe-confirm-text',className:'booth-recipe-confirm-text',textContent:ask.text}),
-          el('div',{className:'booth-row'},yes,no));
-        const done=value=>{box.remove();resolve(value);};
-        yes.addEventListener('click',()=>done(true));
-        no.addEventListener('click',()=>done(false));
-        placeConfirm(box);
-        if(typeof box.scrollIntoView==='function') box.scrollIntoView({block:'center'});
-        try{yes.focus({preventScroll:true});}catch{}
-      });
-    }
-    function confirmLoad(recipe){
-      const count=liveEdits().length;
-      const current=boothCurrent();
-      const differentPaper=!!(pdfDocOf()||source())&&!(current&&current.id===recipe.paperId);
-      if(!count&&!differentPaper) return Promise.resolve(true);
-      return askConfirm(confirmText(count,differentPaper));
-    }
-    async function loadCode(raw){
-      if(ui.busy) return;
-      const code=normalizeCode(codeFromText(raw)||raw);
-      if(!code){sayAll(ERROR_TEXT.invalid_code);return;}
-      ui.busy=true;
-      sayAll('레시피를 불러오는 중…');
-      try{
-        const recipe=await fromCode(code);
-        sayAll('');
-        if(!(await confirmLoad(recipe))){sayAll('레시피를 불러오지 않았어요.');return;}
-        setAssist('agent',code);
-        await apply(recipe,{onProgress:info=>sayAll(progressText(info))});
-        sayAll('');
-        if(typeof card.scrollIntoView==='function') card.scrollIntoView({block:'start'});
-      }catch(error){
-        sayAll(ERROR_TEXT[error&&error.code]||ERROR_TEXT.network);
-      }finally{ui.busy=false;}
-    }
-    agentForm.addEventListener('submit',event=>{event.preventDefault();void loadCode(codeInput.value);});
 
-    function hashCode(){
-      const match=/^#recipe=([A-Za-z0-9-]{6,12})$/.exec(String(root.location&&root.location.hash||''));
-      return match?match[1]:'';
-    }
-    function clearHash(){
-      try{root.history.replaceState(null,'',root.location.pathname+root.location.search);}catch{}
-    }
-    function fromHash(){
-      const code=hashCode();
-      if(!code) return;
-      clearHash();
-      codeInput.value=normalizeCode(code)||code;
-      selectTab('agent');
-      void loadCode(code);
-    }
-
-    /* Send step: prefill recipe reason/chip and side-by-side page comparison using edit.rects. */
+    /* Send step: prefill recipe reason/chip and cropped original/revised comparison using edit.rects. */
+    const MAX_CANVAS=4096;
     const pdfCache=new Map();
     function pdfFor(lib, preview, file){
       if(pdfCache.has(file)) return pdfCache.get(file);
@@ -1274,24 +1130,51 @@
       if(lib.GlobalWorkerOptions&&!lib.GlobalWorkerOptions.workerSrc) lib.GlobalWorkerOptions.workerSrc=new URL('./vendor/pdf.worker.mjs',doc.baseURI).href;
       return {preview,lib};
     }
-    async function renderPage(file, pageNumber, cssWidth, label){
+    function cropMetrics(pageW, pageH, crop, cssWidth, dpr){
+      const cropW=pageW*crop.w;
+      const cropH=pageH*crop.h;
+      const cssScale=cssWidth/cropW;
+      const maxScale=Math.min(MAX_CANVAS/cropW,MAX_CANVAS/cropH);
+      const renderScale=Math.min(cssScale*Math.max(1,dpr||1),maxScale);
+      return {
+        cssScale,
+        renderScale,
+        width:Math.max(1,Math.min(MAX_CANVAS,Math.round(cropW*renderScale))),
+        height:Math.max(1,Math.min(MAX_CANVAS,Math.round(cropH*renderScale))),
+        offsetX:-(crop.x*pageW*renderScale),
+        offsetY:-(crop.y*pageH*renderScale),
+        ratio:cropW/cropH
+      };
+    }
+    async function renderCrop(file, pageNumber, crop, cssWidth, label, onRatio){
       const {preview,lib}=await pdfLib();
       const pdf=await pdfFor(lib,preview,file);
       const page=await pdf.getPage(Math.min(Math.max(1,pageNumber),pdf.numPages));
-      const viewport=page.getViewport({scale:preview.fitScale(page.getViewport({scale:1}),cssWidth,root.devicePixelRatio||1)});
-      const canvas=el('canvas',{className:'booth-recipe-page',role:'img','aria-label':label});
-      canvas.width=Math.max(1,Math.floor(viewport.width));
-      canvas.height=Math.max(1,Math.floor(viewport.height));
-      await page.render({canvasContext:canvas.getContext('2d'),canvas,viewport}).promise;
-      page.cleanup();
-      return canvas;
+      try{
+        const base=page.getViewport({scale:1});
+        const m=cropMetrics(base.width,base.height,crop,cssWidth,root.devicePixelRatio);
+        if(onRatio) onRatio(m.ratio);
+        const viewport=page.getViewport({scale:m.renderScale,offsetX:m.offsetX,offsetY:m.offsetY});
+        const canvas=el('canvas',{className:'booth-recipe-page',role:'img','aria-label':label});
+        canvas.width=m.width;
+        canvas.height=m.height;
+        canvas.dataset.scale=m.cssScale.toFixed(2);
+        await page.render({canvasContext:canvas.getContext('2d'),canvas,viewport}).promise;
+        return canvas;
+      }finally{
+        if(typeof page.cleanup==='function') page.cleanup();
+      }
     }
-    function rectsPercentBox(rects){
-      const list=Array.isArray(rects)?rects.map(plainRect).filter(Boolean):[];
-      if(!list.length) return null;
-      let box=list[0];
-      for(let i=1;i<list.length;i+=1) box=unionRect(box,list[i]);
-      return {left:box.x*100,top:box.y*100,right:(box.x+box.w)*100,bottom:(box.y+box.h)*100};
+    function cropOutlineBox(rects, crop){
+      const u=rectsUnion(rects);
+      if(!u||!crop||!(crop.w>0&&crop.h>0)) return null;
+      const pct=(v,o,s)=>Math.min(100,Math.max(0,((v-o)/s)*100));
+      return {
+        left:pct(u.x,crop.x,crop.w),
+        top:pct(u.y,crop.y,crop.h),
+        right:pct(u.x+u.w,crop.x,crop.w),
+        bottom:pct(u.y+u.h,crop.y,crop.h)
+      };
     }
     function grow(from, to, pad, min){
       const extra=Math.max(pad,(min-(to-from))/2);
@@ -1304,8 +1187,9 @@
       Object.assign(outline.style,{left:left+'%',top:top+'%',width:(right-left)+'%',height:(bottom-top)+'%'});
       surface.append(outline);
     }
-    function shotFigure(caption, canvas){
-      const surface=el('div',{className:'booth-recipe-shot'},canvas);
+    function shotFigure(caption, ratio){
+      const surface=el('div',{className:'booth-recipe-shot'});
+      if(ratio>0) surface.style.aspectRatio=String(ratio);
       return {surface,figure:el('figure',{},el('figcaption',{textContent:caption}),surface)};
     }
     function currentOutput(){
@@ -1314,26 +1198,38 @@
       return null;
     }
     async function fillCompare(view, edit){
-      const status=el('p',{className:'booth-small',textContent:'쪽 그림을 그리는 중…'});
-      view.textContent='';
-      view.append(status);
+      const fail=()=>{
+        view.textContent='';
+        view.append(el('p',{className:'booth-small',textContent:'쪽 그림을 그리지 못했어요. 수정본 PDF는 그대로 제출할 수 있어요.'}));
+      };
       const src=source();
       const out=currentOutput();
-      if(!src||!src.file||!out||!out.file){say(status,'쪽 미리보기를 불러오지 못했어요. 수정본 PDF는 그대로 제출할 수 있어요.');return;}
-      const pageIndex=edit.pageIndex;
-      const width=Math.max(120,Math.floor((view.clientWidth||300)/2)-6);
+      if(!src||!src.file||!out||!out.file){fail();return;}
+      const crop=cropBox(edit.rects)||{x:0,y:0,w:1,h:1/3};
+      const pageNo=edit.pageIndex+1;
+      const estRatio=(crop.w*0.77)/crop.h;
+      const left=shotFigure('원본',estRatio);
+      const right=shotFigure('수정본',estRatio);
+      view.textContent='';
+      view.append(left.figure,right.figure);
+      const cssWidth=left.surface.clientWidth||view.clientWidth||300;
+      const setRatio=r=>{
+        const v=String(r);
+        left.surface.style.aspectRatio=v;
+        right.surface.style.aspectRatio=v;
+      };
       try{
         const [beforeCanvas,afterCanvas]=await Promise.all([
-          renderPage(src.file,pageIndex+1,width,'원본 '+(pageIndex+1)+'쪽'),
-          renderPage(out.file,pageIndex+1,width,'수정본 '+(pageIndex+1)+'쪽')
+          renderCrop(src.file,pageNo,crop,cssWidth,'원본 '+pageNo+'쪽, 고친 곳 주변',setRatio),
+          renderCrop(out.file,pageNo,crop,cssWidth,'수정본 '+pageNo+'쪽, 고친 곳 주변')
         ]);
-        const left=shotFigure('원본',beforeCanvas);
-        const right=shotFigure('수정본 · '+(pageIndex+1)+'쪽',afterCanvas);
-        view.textContent='';
-        view.append(left.figure,right.figure);
-        const box=rectsPercentBox(edit.rects);
+        left.surface.style.aspectRatio='';
+        right.surface.style.aspectRatio='';
+        left.surface.append(beforeCanvas);
+        right.surface.append(afterCanvas);
+        const box=cropOutlineBox(edit.rects,crop);
         if(box){drawOutline(right.surface,box);right.surface.dataset.mark='rects';}
-      }catch{say(status,'쪽 그림을 그리지 못했어요. 수정본 PDF는 그대로 제출할 수 있어요.');}
+      }catch{fail();}
     }
 
     const aiMarks=new Map();
@@ -1377,26 +1273,16 @@
       }
       chipTag(node,label,marks);
     }
-    function compareToggle(edit){
-      const button=el('button',{type:'button',className:'booth-btn line slim booth-recipe-compare-toggle','aria-expanded':'false',textContent:'수정본 쪽 보기'});
-      const view=el('div',{className:'booth-recipe-compare',hidden:true});
-      button.addEventListener('click',()=>{
-        const open=view.hidden;
-        view.hidden=!open;
-        button.setAttribute('aria-expanded',String(open));
-        say(button,open?'수정본 쪽 닫기':'수정본 쪽 보기');
-        if(open) void fillCompare(view,edit);
-      });
-      return [button,view];
-    }
     function decorateCard(node, edit){
-      if(!edit||node.querySelector('.booth-recipe-compare-toggle')) return;
+      if(!edit||node.querySelector('.booth-recipe-compare')) return;
       prefillCard(node,edit);
+      const view=el('div',{className:'booth-recipe-compare'});
       const anchor=node.querySelector('.booth-diff');
-      const parts=compareToggle(edit);
-      if(anchor) anchor.after(...parts); else node.append(...parts);
+      if(anchor) anchor.after(view); else node.append(view);
+      void fillCompare(view,edit);
     }
     function decorateRows(){
+      if(html.dataset.boothStep!=='send') return;
       const box=doc.getElementById('booth-rows');
       if(!box) return;
       const edits=liveEdits();
@@ -1423,16 +1309,14 @@
     doc.addEventListener('falsify:document-clear',()=>{clearIndex();clearPdfCache();resetResult();});
     doc.addEventListener('falsify:paper-workspace-source',()=>{void ensureIndex().then(()=>{if(ui.tab==='find') main.render();});});
     doc.addEventListener('falsify:paper-workspace-pdf',()=>{void ensureIndex().then(()=>{if(ui.tab==='find') main.render();});});
-    root.addEventListener('hashchange',fromHash);
     root.addEventListener('resize',placeFind);
     placeFind();
     onStep();
-    fromHash();
   }
 
   root.FalsifyBoothRecipe=Object.freeze({
-    validate,apply,fromCode,pageText,paperInfo,currentPage,setAssist,assist,
-    normalizeCode,normalizeText,indexPage,locate,searchHits,codeFromText,expiryText,
+    validate,apply,pageText,paperInfo,currentPage,setAssist,assist,
+    normalizeText,indexPage,locate,searchHits,cropBox,
     SCHEMA
   });
   if(root.document&&typeof root.document.getElementById==='function') mountUi(root.document);
