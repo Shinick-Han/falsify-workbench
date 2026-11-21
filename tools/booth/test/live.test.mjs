@@ -148,6 +148,22 @@ async function withFake(options, fn) {
   }
 }
 
+test('public note shows the English reason on its own line and drops the line without one', () => {
+  const both = { segmentId: 'p5-b1', quote: 'highly accurate', rationale: '표 1의 0.50과 맞지 않습니다. || EN: It contradicts 0.50 in Table 1.' };
+  const note = buildPublicNote({ outcome: 'caught', matched: both, first: both, templates: DEFAULT_NOTES });
+  assert.match(note, /\nAI 설명: 표 1의 0\.50과 맞지 않습니다\.\nAI note: It contradicts 0\.50 in Table 1\.$/);
+  const koOnly = { ...both, rationale: '표 1의 0.50과 맞지 않습니다.' };
+  const plain = buildPublicNote({ outcome: 'partial', matched: koOnly, first: koOnly, templates: DEFAULT_NOTES });
+  assert.equal(plain.includes('AI note'), false);
+  assert.match(plain, /AI 설명: 표 1의 0\.50과 맞지 않습니다\.$/);
+  const enOnly = { ...both, rationale: 'It contradicts Table 1.' };
+  assert.match(buildPublicNote({ outcome: 'caught', matched: enOnly, first: enOnly, templates: DEFAULT_NOTES }), /AI 설명: It contradicts Table 1\.$/);
+  const long = { ...both, quote: 'q '.repeat(300), rationale: '가 '.repeat(400) + '|| EN: ' + 'a '.repeat(400) };
+  const big = buildPublicNote({ outcome: 'caught', matched: long, first: long, templates: DEFAULT_NOTES });
+  assert.equal(big.length <= 1000, true);
+  assert.equal(big.includes('\nAI note: a a'), true);
+});
+
 test('--help lists watch and final', async () => {
   const result = await run(['--help']);
   for (const name of ['watch', 'final', '--apply', '--cycles']) assert.equal(result.stdout.includes(name), true, name);
