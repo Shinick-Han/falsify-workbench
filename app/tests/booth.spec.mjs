@@ -886,6 +886,7 @@ test('send declares chips and reasons and posts only the contract fields', async
   assert.deepEqual(plain(booth.readReceipts(h.storage)[0]), {
     receipt: 'F-0042', claimKey: '7Q3K-M9XD', createdAt: '2026-11-22T01:00:30Z',
     title: 'Synthetic mission: a longer subtitle', pages: [2], count: 1,
+    edits: [{page: 2, before: BEFORE, after: AFTER}],
   });
   h.handle.destroy();
 });
@@ -1399,9 +1400,31 @@ test('the diff shows only the changed region with a little context', () => {
   assert.equal(parts.lead.length + parts.removed.length + parts.tail.length < 60, true);
   assert.deepEqual(plain(booth.diffParts('remove this word please', 'remove word please')), {lead: 'remove ', removed: 'this ', added: '', tail: 'word please'});
   assert.deepEqual(plain(booth.diffParts('a', 'a b')), {lead: 'a', removed: '', added: ' b', tail: ''});
+  assert.equal(booth.licenseLabel('cc-by-4.0'), 'CC BY 4.0');
+  assert.equal(booth.licenseLabel('cc-by-3.0'), 'CC BY 3.0');
+  assert.equal(booth.licenseLabel('cc-by'), 'CC BY');
   assert.equal(booth.licenseLabel('cc-by-sa-4.0'), 'CC BY-SA 4.0');
+  assert.equal(booth.licenseLabel('cc-by-sa'), 'CC BY-SA');
   assert.equal(booth.licenseLabel('cc0'), 'CC0');
+  assert.equal(booth.licenseLabel('cc0-1.0'), 'CC0');
+  assert.equal(booth.licenseLabel('public-domain'), 'Public domain');
   assert.equal(booth.licenseLabel('mit'), '');
+  assert.equal(booth.licenseLabel('cc0-2.0'), '');
+  assert.equal(booth.licenseLabel('public-domain-1.0'), '');
+  assert.equal(booth.licenseUrl('cc-by-4.0'), 'https://creativecommons.org/licenses/by/4.0/');
+  assert.equal(booth.licenseUrl('cc-by-3.0'), 'https://creativecommons.org/licenses/by/3.0/');
+  assert.equal(booth.licenseUrl('cc-by'), 'https://creativecommons.org/licenses/by/4.0/');
+  assert.equal(booth.licenseUrl('cc-by-sa-4.0'), 'https://creativecommons.org/licenses/by-sa/4.0/');
+  assert.equal(booth.licenseUrl('cc-by-sa-3.0'), 'https://creativecommons.org/licenses/by-sa/3.0/');
+  assert.equal(booth.licenseUrl('cc-by-sa'), 'https://creativecommons.org/licenses/by-sa/4.0/');
+  assert.equal(booth.licenseUrl('cc0'), 'https://creativecommons.org/publicdomain/zero/1.0/');
+  assert.equal(booth.licenseUrl('cc0-1.0'), 'https://creativecommons.org/publicdomain/zero/1.0/');
+  assert.equal(booth.licenseUrl('public-domain'), 'https://creativecommons.org/publicdomain/zero/1.0/');
+  assert.equal(booth.licenseUrl('mit'), '');
+  assert.equal(booth.licenseUrl(''), '');
+  assert.equal(booth.arxivUrl('2309.15217'), 'https://arxiv.org/abs/2309.15217');
+  assert.equal(booth.arxivUrl('cs.CL/0102034'), 'https://arxiv.org/abs/cs.CL/0102034');
+  assert.equal(booth.arxivUrl('not-an-id'), '');
   assert.equal(booth.shortTitle('Ragas: Automated Evaluation'), 'Ragas');
   assert.equal(booth.formatClock(42000), '0:42');
   assert.equal(booth.formatClock(-5), '0:00');
@@ -2150,4 +2173,141 @@ test('open-access intro does not promise guest BLUE when blueJobs is false', asy
   assert.equal(notes.some(note => /BLUE 검토는 웹 실행 패널에서 로그인 없이 실행합니다/.test(note.textContent)), false);
   document.dispatchEvent({type: 'falsify:hosted-capabilities', detail: {blueJobs: true, modelJobs: true}});
   assert.match(notes[0].textContent, /BLUE 검토는 웹 실행 패널에서 로그인 없이 실행합니다/);
+});
+
+test('receiptRecord validates edits, drops invalid entries, caps at 5, and cuts at 2000', () => {
+  const base = {receipt: 'F-0042', claimKey: '7Q3K-M9XD', createdAt: '2026-11-22T01:00:00Z'};
+  // Old records without edits stay valid with no edits field.
+  assert.deepEqual(plain(booth.receiptRecord(base)), base);
+  const longBefore = 'a'.repeat(2100);
+  const longAfter = 'b'.repeat(2100);
+  const rec = booth.receiptRecord({
+    ...base,
+    edits: [
+      null,
+      'bad',
+      {page: 0, before: 'x', after: 'y'},
+      {page: 2001, before: 'x', after: 'y'},
+      {page: 1.5, before: 'x', after: 'y'},
+      {page: '1', before: 'x', after: 'y'},
+      {page: 1, before: 123, after: 'y'},
+      {page: 1, before: 'x', after: null},
+      {page: 1, before: longBefore, after: longAfter},
+      {page: 2, before: 'b2', after: 'a2'},
+      {page: 3, before: 'b3', after: 'a3'},
+      {page: 4, before: 'b4', after: 'a4'},
+      {page: 2000, before: 'b5', after: 'a5'},
+      {page: 6, before: 'b6', after: 'a6'},
+    ],
+  });
+  assert.equal(rec.edits.length, 5);
+  assert.equal(rec.edits[0].page, 1);
+  assert.equal(rec.edits[0].before.length, 2000);
+  assert.equal(rec.edits[0].after.length, 2000);
+  assert.equal(rec.edits[0].before, 'a'.repeat(2000));
+  assert.equal(rec.edits[0].after, 'b'.repeat(2000));
+  assert.deepEqual(plain(rec.edits.slice(1)), [
+    {page: 2, before: 'b2', after: 'a2'},
+    {page: 3, before: 'b3', after: 'a3'},
+    {page: 4, before: 'b4', after: 'a4'},
+    {page: 2000, before: 'b5', after: 'a5'},
+  ]);
+  const allBad = booth.receiptRecord({...base, edits: [{page: 0, before: 'x', after: 'y'}]});
+  assert.equal(Object.hasOwn(allBad, 'edits'), false);
+});
+
+test('pick sentence, edit credit line, search arXiv link and result declared block from local receipt', async () => {
+  const storage = memoryStorage();
+  booth.rememberReceipt(storage, {
+    receipt: 'F-0042', claimKey: '7Q3K-M9XD', createdAt: '2026-11-21T01:00:00Z',
+    title: 'Synthetic result', pages: [5], count: 1,
+    edits: [{page: 5, before: 'Ragas 0.95 0.78 0.70', after: 'Ragas 0.50 0.78 0.70'}],
+  });
+  booth.rememberReceipt(storage, {
+    receipt: 'F-0045', claimKey: '7Q3K-M9XD', createdAt: '2026-11-21T01:00:00Z',
+  });
+  const h = liveBooth({
+    storage,
+    claims: [
+      {receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1, published: false},
+      {receipt: 'F-0042', status: 'judged', course: 'quick', declaredCount: 1, published: true, outcome: 'missed', publicNote: 'note'},
+      {receipt: 'F-0042', status: 'judged', course: 'quick', declaredCount: 1, published: true, outcome: 'caught', publicNote: 'note'},
+      {receipt: 'F-0045', status: 'judged', course: 'quick', declaredCount: 1, published: true, outcome: 'invalid', publicNote: 'note'},
+      {receipt: 'F-0042', status: 'withdrawn', course: 'quick', declaredCount: 1, published: false},
+      // No local record: block stays hidden even if payload contains a declared field.
+      {receipt: 'F-0099', status: 'judged', course: 'quick', declaredCount: 1, published: true, outcome: 'missed', publicNote: 'note',
+        declared: [{pageIndex: 4, before: '0.95', after: '0.50'}]},
+    ],
+  });
+  await settle();
+  assert.equal(
+    h.text('booth-mission-credit'),
+    '미션 논문은 모두 arXiv에 CC BY 4.0으로 공개된 논문이에요. 부스에서 보는 결함은 방문자가 게임을 위해 심은 거예요.',
+  );
+  // Mission card is a button with no nested links.
+  const missionLinks = nodesOf(h.ids.get('booth-missions')).filter(node => node.tagName === 'a');
+  assert.equal(missionLinks.length, 0);
+  // Search results show licence label and an arXiv link outside the card button.
+  h.ids.get('booth-search-q').value = '통계';
+  h.ids.get('booth-search').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  const searchNodes = nodesOf(h.ids.get('booth-search-results'));
+  const searchBtn = searchNodes.find(node => node.tagName === 'button');
+  assert.equal(nodesOf(searchBtn).some(node => node.tagName === 'a'), false, 'no link nested inside search card button');
+  const searchLinks = searchNodes.filter(node => node.tagName === 'a');
+  assert.equal(searchLinks[0].getAttribute('href'), 'https://arxiv.org/abs/2503.10497');
+  assert.equal(searchLinks[0].getAttribute('target'), '_blank');
+  assert.equal(searchLinks[0].getAttribute('rel'), 'noopener noreferrer');
+  // Opening from search renders the edit-step credit line with both links.
+  useWorkspace([]);
+  searchBtn.click();
+  await settle();
+  assert.equal(h.step(), 'edit');
+  assert.equal(h.ids.get('booth-paper-credit').hidden, false);
+  assert.equal(h.text('booth-paper-credit'), '원문 arXiv 2503.10497 · CC BY 4.0 · 게임용으로 고친 사본');
+  const creditLinks = nodesOf(h.ids.get('booth-paper-credit')).filter(node => node.tagName === 'a');
+  assert.deepEqual(creditLinks.map(a => [a.textContent, a.getAttribute('href'), a.getAttribute('target'), a.getAttribute('rel')]), [
+    ['arXiv 2503.10497', 'https://arxiv.org/abs/2503.10497', '_blank', 'noopener noreferrer'],
+    ['CC BY 4.0', 'https://creativecommons.org/licenses/by/4.0/', '_blank', 'noopener noreferrer'],
+  ]);
+  // Claim states: pending hides declared, missed & caught show stored edits, record without edits hides it, withdrawn hides it, unknown receipt hides it.
+  h.ids.get('booth-claim-receipt').value = 'F-0042';
+  h.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(h.ids.get('booth-live-declared').hidden, true, 'pending hides declared');
+  await h.tick();
+  assert.equal(h.ids.get('booth-live-declared').hidden, false, 'missed shows stored edits');
+  assert.equal(h.text('booth-live-declared'), '내가 고친 곳5쪽Ragas 0.950.50 0.78 0.70');
+  const decNodes = nodesOf(h.ids.get('booth-live-declared'));
+  assert.equal(decNodes.find(node => node.tagName === 'del').textContent, '0.95');
+  assert.equal(decNodes.find(node => node.tagName === 'ins').textContent, '0.50');
+  // Caught shows stored edits.
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(h.ids.get('booth-live-declared').hidden, false, 'caught shows stored edits');
+  // Stored record without edits hides block.
+  h.ids.get('booth-claim-receipt').value = 'F-0045';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(h.ids.get('booth-live-declared').hidden, true, 'record without edits hides block');
+  // Withdrawn hides block even when stored record has edits.
+  h.ids.get('booth-claim-receipt').value = 'F-0042';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(h.ids.get('booth-live-declared').hidden, true, 'withdrawn hides declared');
+  // No local record hides block even if server payload had declared (single source only).
+  h.ids.get('booth-claim-receipt').value = 'F-0099';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(h.ids.get('booth-live-declared').hidden, true, 'no local record hides block');
+  h.handle.destroy();
+});
+
+test('receipt edits keep a change near the end of a long paragraph', () => {
+  const base = {receipt: 'F-0043', claimKey: '7Q3K-M9XE', createdAt: '2026-11-22T01:00:00Z'};
+  const head = 'x'.repeat(630);
+  const rec = booth.receiptRecord({...base, edits: [{page: 5, before: head + ' 0.95 end', after: head + ' 0.50 end'}]});
+  assert.equal(rec.edits[0].before.endsWith('0.95 end'), true);
+  assert.equal(rec.edits[0].after.endsWith('0.50 end'), true);
 });

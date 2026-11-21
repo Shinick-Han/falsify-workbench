@@ -163,8 +163,7 @@ test('public note uses only the AI finding, page, quote and rationale', () => {
   const quote = /"([^"]*)"/.exec(note)[1];
   assert.equal(quote.length <= 200, true);
   const missed = buildPublicNote({ outcome: 'missed', matched: null, first: HOSTED.findings[0], templates: DEFAULT_NOTES });
-  assert.equal(missed.includes('5쪽'), true);
-  assert.equal(missed.includes('다른 곳'), true);
+  assert.equal(missed, 'AI는 다른 곳을 짚었어요. 심어 둔 결함은 AI 눈을 피했어요.');
   const none = buildPublicNote({ outcome: 'missed', matched: null, first: null, templates: DEFAULT_NOTES });
   assert.equal(none, DEFAULT_NOTES.missedNone);
 });
@@ -254,8 +253,7 @@ test('watch: received -> reviewing -> judged + published; missed gets the prize'
     assert.equal(missed.outcome, 'missed');
     assert.equal(missed.published, true);
     assert.equal(missed.prizeMessage, 'PRIZE_LIVE');
-    assert.match(missed.publicNote, /다른 곳/);
-    assert.match(missed.publicNote, /5쪽/);
+    assert.equal(missed.publicNote, 'AI는 다른 곳을 짚었어요. 심어 둔 결함은 AI 눈을 피했어요.');
     for (const item of [caught, missed]) {
       for (const needle of SENTINELS) assert.equal(item.publicNote.includes(needle), false, needle);
     }

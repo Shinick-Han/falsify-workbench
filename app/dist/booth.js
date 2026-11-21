@@ -43,6 +43,7 @@
     withdrawn:{kind:'void',word:'철회',latin:'WITHDRAWN'}
   };
   const HERO_COPY='공개 논문 한 곳을 몰래 고쳐 보세요. AI가 보통 1~3분 안에 찾아내는지 겨뤄요. AI가 놓치면 부스에서 선물을 드려요.';
+  const MISSION_CREDIT='미션 논문은 모두 arXiv에 CC BY 4.0으로 공개된 논문이에요. 부스에서 보는 결함은 방문자가 게임을 위해 심은 거예요.';
   const PARTIAL_SUB='결함 근처까지 짚으면 적발로 봐요.';
   const WITHDRAW_WARN='철회하면 되돌릴 수 없고, 선물과 추첨 기회도 함께 사라져요.';
   const CAPTURE_COPY='이 티켓을 캡처해 두세요. 화면을 닫아도 「내 기록」에서 접수번호와 확인키로 다시 볼 수 있어요.';
@@ -315,13 +316,25 @@
       &&normalizeClaimKey(item.claimKey)===item.claimKey
       &&typeof item.createdAt==='string'&&item.createdAt.length<=40;
   }
+  const RECEIPT_EDITS_CAP=5;
+  const RECEIPT_EDIT_MAX=2000;
   /* 1-based changed pages, unique and sorted, at most 20. */
   function receiptPages(value){
     if(!Array.isArray(value)) return [];
     const pages=value.filter(n=>Number.isSafeInteger(n)&&n>=1&&n<=10000);
     return [...new Set(pages)].sort((a,b)=>a-b).slice(0,20);
   }
-  /* Required receipt, claimKey and createdAt. Paper title, pages, count and last outcome are optional. */
+  function receiptEdit(item){
+    if(!item||typeof item!=='object') return null;
+    if(!Number.isSafeInteger(item.page)||item.page<1||item.page>2000) return null;
+    if(typeof item.before!=='string'||typeof item.after!=='string') return null;
+    return {page:item.page,before:trimCodePoints(item.before,RECEIPT_EDIT_MAX),after:trimCodePoints(item.after,RECEIPT_EDIT_MAX)};
+  }
+  function receiptEdits(value){
+    if(!Array.isArray(value)) return [];
+    return value.map(receiptEdit).filter(Boolean).slice(0,RECEIPT_EDITS_CAP);
+  }
+  /* Required receipt, claimKey and createdAt. Paper title, pages, count, edits and last outcome are optional. */
   function receiptRecord(item){
     const out={receipt:item.receipt,claimKey:item.claimKey,createdAt:item.createdAt};
     const title=cleanText(typeof item.title==='string'?item.title.trim():'',300);
@@ -329,6 +342,8 @@
     const pages=receiptPages(item.pages);
     if(pages.length) out.pages=pages;
     if(Number.isSafeInteger(item.count)&&item.count>=1&&item.count<=100) out.count=item.count;
+    const edits=receiptEdits(item.edits);
+    if(edits.length) out.edits=edits;
     if(typeof item.outcome==='string'&&Object.prototype.hasOwnProperty.call(STAMP,item.outcome)) out.outcome=item.outcome;
     return out;
   }
@@ -488,12 +503,34 @@
     const minutes=Math.floor(total/60);
     return minutes?minutes+'분'+(total%60?' '+(total%60)+'초':''):total+'초';
   }
+  const LICENSE_NAMES={'cc-by-sa':'CC BY-SA','cc-by':'CC BY','cc0':'CC0','public-domain':'Public domain'};
+  const LICENSE_PARSE=/^(cc-by-sa|cc-by|cc0|public-domain)(?:-(\d+\.\d+))?$/;
+  function parseLicense(id){
+    const raw=id&&typeof id==='object'?id.id:id;
+    const text=typeof raw==='string'?raw.trim().toLowerCase():'';
+    const match=LICENSE_PARSE.exec(text);
+    if(!match) return null;
+    if(match[1]==='public-domain'&&match[2]) return null;
+    if(match[1]==='cc0'&&match[2]&&match[2]!=='1.0') return null;
+    return {kind:match[1],version:match[2]||''};
+  }
   function licenseLabel(id){
-    const text=typeof id==='string'?id.trim().toLowerCase():'';
-    const match=/^(cc-by-sa|cc-by|cc0|public-domain)(?:-(\d+\.\d+))?$/.exec(text);
-    if(!match) return '';
-    const name={'cc-by-sa':'CC BY-SA','cc-by':'CC BY','cc0':'CC0','public-domain':'Public domain'}[match[1]];
-    return match[2]?name+' '+match[2]:name;
+    const parsed=parseLicense(id);
+    if(!parsed) return '';
+    if(parsed.kind==='cc0') return 'CC0';
+    const name=LICENSE_NAMES[parsed.kind];
+    return parsed.version?name+' '+parsed.version:name;
+  }
+  function licenseUrl(id){
+    const parsed=parseLicense(id);
+    if(!parsed) return '';
+    if(parsed.kind==='cc-by') return 'https://creativecommons.org/licenses/by/'+(parsed.version||'4.0')+'/';
+    if(parsed.kind==='cc-by-sa') return 'https://creativecommons.org/licenses/by-sa/'+(parsed.version||'4.0')+'/';
+    return 'https://creativecommons.org/publicdomain/zero/1.0/';
+  }
+  function arxivUrl(id){
+    const text=typeof id==='string'?id.trim():'';
+    return ARXIV_ID.test(text)?'https://arxiv.org/abs/'+text:'';
   }
   /* "Ragas: Automated…" reads as "Ragas" on the ticket. */
   function shortTitle(title){
@@ -827,12 +864,14 @@
             el('span',{className:'booth-small',textContent:'티켓을 누르면 힌트 쪽이 열려요'})),
           el('section',{id:'booth-missions',className:'booth-missions','aria-label':'미션 논문'}),
           el('p',{id:'booth-mission-status',className:'booth-feedback',role:'status','aria-live':'polite'}),
+          el('p',{id:'booth-mission-credit',className:'booth-small',textContent:MISSION_CREDIT}),
           buildSearch()));
       return el('div',{id:'booth-step-pick',className:'booth-step'},top,landing,buildRecords());
     }
     function buildEdit(){
       return el('div',{id:'booth-step-edit',className:'booth-step',hidden:true},
         stepBar('booth-edit-back','← 논문 고르기','2 / 3 몰래 고치기',2),
+        el('p',{id:'booth-paper-credit',className:'booth-credit',hidden:true}),
         el('p',{id:'booth-hint',className:'booth-hint'}),
         el('div',{id:'booth-dock',className:'booth-dock'},
           el('p',{id:'booth-dock-status',className:'booth-dock-status',role:'status','aria-live':'polite'}),
@@ -952,6 +991,7 @@
           el('div',{className:'booth-live-side'},buildGift(),buildFinal()),
           el('div',{className:'booth-live-main'},
             el('div',{id:'booth-live-note',className:'booth-panel booth-note',hidden:true}),
+            el('section',{id:'booth-live-declared',className:'booth-panel booth-declared',hidden:true,'aria-label':'내가 고친 곳'}),
             el('p',{id:'booth-live-tip',className:'booth-small',hidden:true,textContent:CAUGHT_TIP}),
             el('p',{id:'booth-live-error',className:'booth-feedback',role:'alert',hidden:true}),
             el('button',{id:'booth-live-recheck',type:'button',className:'booth-btn line wide',hidden:true,textContent:'결과 다시 보기'}),
@@ -1476,6 +1516,7 @@
         const store=boothEdits();
         if(previous&&store&&typeof store.clear==='function') store.clear();
       }
+      renderCredit();
       renderRows();
     }
     /* Losing the paper in edit or send returns to pick. */
@@ -1485,6 +1526,7 @@
       clearGenerated();
       const store=boothEdits();
       if(store&&typeof store.clear==='function') store.clear();
+      renderCredit();
       renderRows();
       if(step!=='edit'&&step!=='send') return;
       cancelMake();
@@ -1580,6 +1622,28 @@
       loadIntoWorkspace(input,file,payload,next,bytes);
       say(statusId,'');
       return true;
+    }
+    function extLink(href, text){
+      return el('a',{href,target:'_blank',rel:'noopener noreferrer',textContent:text});
+    }
+    function creditParts(current){
+      const id=current&&typeof current.id==='string'?current.id.trim():'';
+      const url=arxivUrl(id);
+      if(!url) return [];
+      const lic=licenseId(current);
+      const label=licenseLabel(lic);
+      const lUrl=licenseUrl(lic);
+      const parts=['원문 ',extLink(url,'arXiv '+id)];
+      if(label) parts.push(' · ',lUrl?extLink(lUrl,label):label);
+      parts.push(' · 게임용으로 고친 사본');
+      return parts;
+    }
+    function renderCredit(){
+      const node=byId('booth-paper-credit');
+      if(!node) return;
+      const parts=creditParts(paper);
+      kidsOf(node,...parts);
+      node.hidden=!parts.length;
     }
     function renderHint(){
       const node=byId('booth-hint');
@@ -1693,12 +1757,24 @@
       const valid=missions.filter(mission=>mission&&typeof mission==='object'&&typeof mission.paperId==='string');
       box.hidden=!valid.length;
       setHidden('booth-mission-head',!valid.length);
+      setHidden('booth-mission-credit',!valid.length);
       setText('booth-mission-count','오늘의 미션 · '+valid.length);
       for(const mission of valid) box.append(missionTicket(mission));
     }
     function searchMeta(item){
       const authors=Array.isArray(item.authors)?item.authors.slice(0,3).join(', '):'';
       return [authors,item.year].filter(value=>value!=null&&value!=='').join(' · ');
+    }
+    function searchSourceLink(item){
+      const id=typeof item.id==='string'?item.id.trim():'';
+      const url=arxivUrl(id);
+      if(!url) return null;
+      const lic=licenseId(item);
+      const label=licenseLabel(lic);
+      const lUrl=licenseUrl(lic);
+      const parts=['원문 ',extLink(url,'arXiv '+id)];
+      if(label&&lUrl) parts.push(' · ',extLink(lUrl,label));
+      return el('p',{className:'booth-credit booth-search-source'},...parts);
     }
     function searchResultCard(item){
       const title=typeof item.title==='string'&&item.title?item.title:item.id;
@@ -1709,7 +1785,8 @@
         hint='';
         void startPaper({source:'arxiv',id:item.id,title:typeof item.title==='string'?item.title:'',license:licenseId(item)},item.id,'booth-search-status',0);
       });
-      return button;
+      const source=searchSourceLink(item);
+      return source?el('div',{className:'booth-search-item'},button,source):button;
     }
     function searchPager(pages, payload){
       pages.hidden=searchPage<=1&&!(payload&&payload.hasMore);
@@ -1778,14 +1855,23 @@
         defectTypes:typesOf(liveConfig).map(item=>item.id)
       };
     }
-    /* Title and changed pages are kept with the receipt on this device only. */
-    function ticketMeta(data, claimKey){
+    function declaredToReceiptEdits(list){
+      if(!Array.isArray(list)) return [];
+      return list.slice(0,RECEIPT_EDITS_CAP).map(item=>({
+        page:item.pageIndex+1,
+        before:trimCodePoints(item.before,RECEIPT_EDIT_MAX),
+        after:trimCodePoints(item.after,RECEIPT_EDIT_MAX)
+      }));
+    }
+    /* Title, changed pages and submitted edits are kept with the receipt on this device only. */
+    function ticketMeta(data, claimKey, declared){
       return {
         receipt:typeof data.receipt==='string'?data.receipt:'',claimKey,
         createdAt:typeof data.createdAt==='string'?data.createdAt:new Date(now()).toISOString(),
         title:paper&&paper.title?paper.title:'',
         pages:receiptPages(rows.map(row=>row.pageIndex+1)),
-        count:rows.length
+        count:rows.length,
+        edits:declaredToReceiptEdits(declared)
       };
     }
     function rememberClaim(meta){
@@ -1820,8 +1906,8 @@
       const recipe=root.FalsifyBoothRecipe;
       if(recipe&&typeof recipe.assist==='function') Object.assign(built.body,recipe.assist());
       const form=submissionForm(built.body,generatedFile);
-      if(!form) say('booth-submit-status',errorMessage('invalid_request'));
-      return form;
+      if(!form){say('booth-submit-status',errorMessage('invalid_request'));return null;}
+      return {form,declared:built.body.declared};
     }
     async function ensureSubmissionPdf(){
       const live=liveEdits();
@@ -1848,14 +1934,14 @@
       stopEvent(event);
       if(!(await ensureSubmissionPdf())) return;
       if(!preflight()) return;
-      const form=submissionFormFor();
-      if(!form) return;
+      const payload=submissionFormFor();
+      if(!payload) return;
       const button=byId('booth-submit-button');
       if(button) button.disabled=true;
       say('booth-submit-status','제출하는 중…');
       try{
-        const data=await requestFresh('/v1/booth/submissions',{method:'POST',auth:true,form});
-        const meta=ticketMeta(data,typeof data.claimKey==='string'?data.claimKey:'');
+        const data=await requestFresh('/v1/booth/submissions',{method:'POST',auth:true,form:payload.form});
+        const meta=ticketMeta(data,typeof data.claimKey==='string'?data.claimKey:'',payload.declared);
         rememberClaim(meta);
         say('booth-submit-status','');
         followSubmission(data,meta);
@@ -2099,6 +2185,25 @@
       kidsOf(byId('booth-live-note'),...parts);
       setHidden('booth-live-note',!parts.length);
     }
+    function storedEditsFor(receipt){
+      const code=normalizeReceipt(receipt);
+      if(!code) return [];
+      const hit=readReceipts(storage).find(item=>item.receipt===code);
+      return hit&&Array.isArray(hit.edits)?hit.edits:[];
+    }
+    function declaredRow(item){
+      return el('div',{className:'booth-declared-item'},
+        el('p',{className:'booth-klab',textContent:item.page+'쪽'}),
+        diffNode(item));
+    }
+    function renderDeclared(view, data){
+      const box=byId('booth-live-declared');
+      if(!box) return;
+      const items=view.final&&view.state!=='withdrawn'?storedEditsFor(data.receipt):[];
+      if(!items.length){kidsOf(box);box.hidden=true;return;}
+      kidsOf(box,el('p',{className:'booth-klab',textContent:'내가 고친 곳'}),...items.map(declaredRow));
+      box.hidden=false;
+    }
     function renderGift(prize){
       setText('booth-live-prize',prize);
       setHidden('booth-gift',!prize);
@@ -2120,6 +2225,7 @@
       else renderPending(data);
       renderGift(view.prize);
       renderNote(view);
+      renderDeclared(view,data);
       setHidden('booth-live-again',!view.final);
       setHidden('booth-live-records',!view.final);
       setHidden('booth-final',view.state!=='missed');
@@ -2289,7 +2395,7 @@
       renderDeskSteps(next);
       if(next!=='ticket') stopClock();
       syncWake();
-      if(next==='edit'){renderHint();renderDock();}
+      if(next==='edit'){renderHint();renderCredit();renderDock();}
       if(next==='send'){renderRows();if(!generatedFile&&liveEdits().length) void beginMake();}
       scrollTop();
     }
@@ -2441,9 +2547,9 @@
   if(boothConfigured(readConfig())) mount();
   root.FalsifyBooth={
     normalizeClaimKey,normalizeReceipt,buildSubmission,submissionForm,errorMessage,
-    readReceipts,rememberReceipt,recentReceipts,paperSearchPath,paperPdfPath,
+    readReceipts,rememberReceipt,recentReceipts,receiptRecord,paperSearchPath,paperPdfPath,
     nextPollDelay,retryAfterMs,resultView,capMessage,
-    parsePublicNote,diffParts,ENGINE_UNAVAILABLE,chancesLeft,formatClock,formatDuration,noteReceiptOutcome,licenseLabel,shortTitle,
+    parsePublicNote,diffParts,ENGINE_UNAVAILABLE,chancesLeft,formatClock,formatDuration,noteReceiptOutcome,licenseLabel,licenseUrl,arxivUrl,shortTitle,
     NO_REASON,RECEIPT_KEY,RECEIPT_CAP,RECENT_CAP,mount
   };
 })(typeof window==='object'?window:globalThis);
