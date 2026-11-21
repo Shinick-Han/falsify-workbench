@@ -881,14 +881,42 @@ function queueView(row, env) {
   return { ahead, slots, etaSec: (Math.floor(ahead / slots) + 1) * jobSeconds };
 }
 
+const EDIT_VERDICTS = new Set(['caught', 'partial', 'missed']);
+
+function normalizeEditResult(item, declaredCount) {
+  if (!isObject(item)) return null;
+  if (!Number.isSafeInteger(item.index) || item.index < 0 || item.index >= declaredCount) return null;
+  if (!Number.isSafeInteger(item.pageIndex) || item.pageIndex < 0 || item.pageIndex > 9999) return null;
+  const verdict = item.verdict === '' ? 'missed' : item.verdict;
+  if (typeof verdict !== 'string' || !EDIT_VERDICTS.has(verdict)) return null;
+  return { index: item.index, pageIndex: item.pageIndex, verdict };
+}
+
+function editResultsFrom(rawSummary, declaredCount) {
+  if (declaredCount < 1) return null;
+  const summary = parseJsonValue(rawSummary);
+  if (!isObject(summary) || !Array.isArray(summary.edits)) return null;
+  const results = [];
+  const seen = new Set();
+  for (const item of summary.edits) {
+    const clean = normalizeEditResult(item, declaredCount);
+    if (!clean || seen.has(clean.index)) continue;
+    seen.add(clean.index);
+    results.push(clean);
+    if (results.length >= declaredCount) break;
+  }
+  return results.length ? results : null;
+}
+
 function claimView(row, env) {
   const declared = parseJsonValue(row.declared);
+  const declaredCount = Array.isArray(declared) ? declared.length : 0;
   const published = row.published_at != null;
   const view = {
     receipt: row.receipt,
     status: row.status,
     course: row.course,
-    declaredCount: Array.isArray(declared) ? declared.length : 0,
+    declaredCount,
     createdAt: row.created_at,
     published,
   };
@@ -897,6 +925,8 @@ function claimView(row, env) {
     view.publicNote = row.public_note ?? null;
     view.prizeMessage = row.prize_message ?? null;
     view.publishedAt = row.published_at;
+    const editResults = editResultsFrom(row.ai_summary, declaredCount);
+    if (editResults) view.editResults = editResults;
   }
   const queue = queueView(row, env);
   if (queue) view.queue = queue;
@@ -904,7 +934,7 @@ function claimView(row, env) {
 }
 
 // queue_ahead is one indexed count on booth_submissions_status (status, seq), in the same round trip.
-const CLAIM_SELECT = `id, receipt, status, course, declared, created_at, updated_at, published_at, outcome, public_note, prize_message,
+const CLAIM_SELECT = `id, receipt, status, course, declared, created_at, updated_at, published_at, outcome, public_note, prize_message, ai_summary,
   (SELECT COUNT(*) FROM booth_submissions q WHERE q.status = 'received' AND q.seq < booth_submissions.seq) AS queue_ahead`;
 
 async function loadClaim(db, receipt, claimKey) {

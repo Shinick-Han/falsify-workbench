@@ -238,6 +238,29 @@ test('dictionary and pattern translation, vars interpolation, and whitespace pre
     'Your AI could not open the paper. Get the PDF, attach it to your AI and ask again.',
   );
   assert.equal(i18n.t('전체 1,085자'), '1,085 chars total');
+  // Per-defect fair results (sx96) strings and count patterns
+  assert.equal(
+    i18n.t('공개 논문을 몰래 고쳐 보세요. AI가 보통 1~3분 안에 찾아내는지 겨뤄요. 심은 결함 중 하나라도 AI가 놓치면 부스에서 선물을 드려요.'),
+    'Sneak defects into an open paper and see if AI catches them (usually 1–3 min). If the AI misses even one, win a prize at the booth.',
+  );
+  assert.equal(
+    i18n.t('심은 결함 중 하나라도 AI가 놓치면 성공이에요.'),
+    'If the AI misses even one of your defects, you win.',
+  );
+  assert.equal(
+    i18n.t('심어 둔 결함 중 일부는 AI가 찾았어요.'),
+    'AI found some of the defects you planted.',
+  );
+  assert.equal(i18n.t('AI가 찾음'), 'Found by AI');
+  assert.equal(i18n.t('근처를 짚음'), 'AI got close');
+  assert.equal(i18n.t('AI가 놓침'), 'Missed by AI');
+  assert.equal(i18n.t('4개를 모두 찾아냈어요'), 'found all 4');
+  assert.equal(i18n.t('AI가 4개를 모두 찾아냈어요'), 'AI found all 4');
+  assert.equal(i18n.t('4개 모두 놓쳤어요'), 'missed all 4');
+  assert.equal(i18n.t('AI가 4개 모두 놓쳤어요'), 'AI missed all 4');
+  assert.equal(i18n.t('4개 중 1개가 '), '1 of 4 ');
+  assert.equal(i18n.t('AI 눈을 피했어요'), 'slipped past the AI');
+  assert.equal(i18n.t('4개 중 1개가 AI 눈을 피했어요'), '1 of 4 slipped past the AI');
 });
 
 test('DOM walk translates text and attributes, skips translate="no" and input values, and restores cleanly', () => {

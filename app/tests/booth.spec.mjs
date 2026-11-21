@@ -550,7 +550,7 @@ test('the booth mounts only when enabled and starts on pick', async () => {
   assert.equal(h.text('booth-title'), 'AI를 속일 수있을까요?');
   assert.equal(nodesOf(h.ids.get('booth-title')).find(node => node.tagName === 'b').textContent, '속일 수');
   assert.match(h.text('booth-step-pick'), /AI REVIEW CHALLENGE/);
-  assert.match(h.text('booth-step-pick'), /공개 논문 한 곳을 몰래 고쳐 보세요\. AI가 보통 1~3분 안에 찾아내는지 겨뤄요\. AI가 놓치면 부스에서 선물을 드려요\./);
+  assert.match(h.text('booth-step-pick'), /공개 논문을 몰래 고쳐 보세요\. AI가 보통 1~3분 안에 찾아내는지 겨뤄요\. 심은 결함 중 하나라도 AI가 놓치면 부스에서 선물을 드려요\./);
   assert.doesNotMatch(h.text('booth-step-pick'), /2분 안에/);
   assert.match(h.text('booth-step-pick'), /01논문 고르기.*02몰래 고치기.*03AI 검증/);
   assert.equal(h.text('booth-search-box').startsWith('다른 공개 논문 직접 찾기'), true);
@@ -1338,6 +1338,7 @@ test('publicNote parses the three CLI templates and falls back to plain text', a
   const finding = {pageIndex: 8, quote: 'reducing detection and localization time by 10% and 43%', rationale: 'Finding 5 and the results disagree.'};
   const caught = buildPublicNote({outcome: 'caught', matched: finding, templates});
   const partial = buildPublicNote({outcome: 'partial', matched: finding, templates});
+  const escaped = buildPublicNote({outcome: 'missed', matched: finding, first: finding, templates});
   const missed = buildPublicNote({outcome: 'missed', first: finding, templates});
   const none = buildPublicNote({outcome: 'missed', first: null, templates});
   assert.deepEqual(plain(booth.parsePublicNote(caught)), {
@@ -1347,6 +1348,10 @@ test('publicNote parses the three CLI templates and falls back to plain text', a
   assert.deepEqual(plain(booth.parsePublicNote(partial)), {
     page: '9', quote: 'reducing detection and localization time by 10% and 43%',
     opinion: 'Finding 5 and the results disagree.', text: '내가 심어 둔 결함 근처를 AI가 짚었어요.',
+  });
+  assert.deepEqual(plain(booth.parsePublicNote(escaped)), {
+    page: '9', quote: 'reducing detection and localization time by 10% and 43%',
+    opinion: 'Finding 5 and the results disagree.', text: '심어 둔 결함 중 일부는 AI가 찾았어요.',
   });
   assert.deepEqual(plain(booth.parsePublicNote(missed)), {page: '', quote: '', opinion: '', text: missed});
   assert.deepEqual(plain(booth.parsePublicNote(none)), {page: '', quote: '', opinion: '', text: none});
@@ -2376,4 +2381,164 @@ test('waiting project row shows while pending, hides when final or withdrawn, an
     if (prevRt === undefined) delete boothContext.FalsifyBoothRuntime;
     else boothContext.FalsifyBoothRuntime = prevRt;
   }
+});
+
+test('per-defect resultView headlines, status labels, rule line and fallback when local receipt is missing or mismatched', async () => {
+  const fourAllCaught = booth.resultView({
+    status: 'judged', published: true, outcome: 'caught',
+    editResults: [
+      {index: 0, pageIndex: 4, verdict: 'caught'},
+      {index: 1, pageIndex: 1, verdict: 'caught'},
+      {index: 2, pageIndex: 2, verdict: 'caught'},
+      {index: 3, pageIndex: 5, verdict: 'caught'},
+    ],
+  });
+  assert.equal(fourAllCaught.title, 'AI가 4개를 모두 찾아냈어요');
+  assert.equal(fourAllCaught.lead, 'AI가 ');
+  assert.equal(fourAllCaught.strong, '4개를 모두 찾아냈어요');
+  assert.equal(fourAllCaught.stamp.kind, 'fail');
+
+  const oneOfFourEscaped = booth.resultView({
+    status: 'judged', published: true, outcome: 'missed',
+    editResults: [
+      {index: 0, pageIndex: 4, verdict: 'caught'},
+      {index: 1, pageIndex: 1, verdict: 'partial'},
+      {index: 2, pageIndex: 2, verdict: ''},
+      {index: 3, pageIndex: 5, verdict: 'caught'},
+    ],
+  });
+  assert.equal(oneOfFourEscaped.title, '4개 중 1개가 AI 눈을 피했어요');
+  assert.equal(oneOfFourEscaped.lead, '4개 중 1개가 ');
+  assert.equal(oneOfFourEscaped.strong, 'AI 눈을 피했어요');
+  assert.equal(oneOfFourEscaped.stamp.kind, 'pass');
+  assert.equal(oneOfFourEscaped.editResults[2].verdict, 'missed');
+
+  const fourAllMissed = booth.resultView({
+    status: 'judged', published: true, outcome: 'missed',
+    editResults: [
+      {index: 0, pageIndex: 0, verdict: 'missed'},
+      {index: 1, pageIndex: 1, verdict: 'missed'},
+      {index: 2, pageIndex: 2, verdict: 'missed'},
+      {index: 3, pageIndex: 3, verdict: 'missed'},
+    ],
+  });
+  assert.equal(fourAllMissed.title, 'AI가 4개 모두 놓쳤어요');
+  assert.equal(fourAllMissed.stamp.kind, 'pass');
+
+  const singleCaught = booth.resultView({
+    status: 'judged', published: true, outcome: 'caught',
+    editResults: [{index: 0, pageIndex: 4, verdict: 'caught'}],
+  });
+  assert.equal(singleCaught.title, 'AI가 찾아냈어요');
+
+  const singleMissed = booth.resultView({
+    status: 'judged', published: true, outcome: 'missed',
+    editResults: [{index: 0, pageIndex: 4, verdict: 'missed'}],
+  });
+  assert.equal(singleMissed.title, 'AI가 못 찾았어요');
+
+  const partialTwo = booth.resultView({
+    status: 'judged', published: true, outcome: 'partial',
+    editResults: [
+      {index: 0, pageIndex: 4, verdict: 'caught'},
+      {index: 1, pageIndex: 1, verdict: 'partial'},
+    ],
+  });
+  assert.equal(partialTwo.title, 'AI가 근처를 짚었어요');
+
+  const fourEdits = [
+    {page: 5, before: '0.95', after: '0.50'},
+    {page: 2, before: '12', after: '30'},
+    {page: 3, before: '50', after: '99'},
+    {page: 6, before: 'high', after: 'low'},
+  ];
+  const storage = memoryStorage();
+  booth.rememberReceipt(storage, {receipt: 'F-0101', claimKey: '7Q3K-M9XD', createdAt: '2026-11-20T01:00:00Z', title: 'Ragas', pages: [2, 3, 5, 6], count: 4, edits: fourEdits});
+  booth.rememberReceipt(storage, {receipt: 'F-0102', claimKey: '7Q3K-M9XD', createdAt: '2026-11-20T01:00:00Z', title: 'Ragas', pages: [5], count: 1, edits: [fourEdits[0]]});
+  booth.rememberReceipt(storage, {receipt: 'F-0103', claimKey: '7Q3K-M9XD', createdAt: '2026-11-20T01:00:00Z', title: 'Ragas', pages: [5], count: 2, edits: fourEdits.slice(0, 2)});
+
+  const h = liveBooth({
+    storage,
+    claims: [
+      {
+        receipt: 'F-0101', status: 'judged', course: 'quick', declaredCount: 4, createdAt: '2026-11-22T01:00:00Z',
+        published: true, outcome: 'missed', prizeMessage: 'PRIZE',
+        editResults: [
+          {index: 0, pageIndex: 4, verdict: 'caught'},
+          {index: 1, pageIndex: 1, verdict: 'partial'},
+          {index: 2, pageIndex: 2, verdict: 'missed'},
+          {index: 3, pageIndex: 5, verdict: 'caught'},
+        ],
+      },
+      {
+        receipt: 'F-0102', status: 'judged', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:00Z',
+        published: true, outcome: 'caught',
+        editResults: [{index: 0, pageIndex: 4, verdict: 'caught'}],
+      },
+      {
+        receipt: 'F-0103', status: 'judged', course: 'quick', declaredCount: 4, createdAt: '2026-11-22T01:00:00Z',
+        published: true, outcome: 'caught',
+        editResults: [
+          {index: 0, pageIndex: 4, verdict: 'caught'},
+          {index: 1, pageIndex: 1, verdict: 'caught'},
+          {index: 2, pageIndex: 2, verdict: 'caught'},
+          {index: 3, pageIndex: 5, verdict: 'caught'},
+        ],
+      },
+      {
+        receipt: 'F-0199', status: 'judged', course: 'quick', declaredCount: 4, createdAt: '2026-11-22T01:00:00Z',
+        published: true, outcome: 'caught',
+        editResults: [
+          {index: 0, pageIndex: 4, verdict: 'caught'},
+          {index: 1, pageIndex: 1, verdict: 'caught'},
+          {index: 2, pageIndex: 2, verdict: 'caught'},
+          {index: 3, pageIndex: 5, verdict: 'caught'},
+        ],
+      },
+    ],
+  });
+  await settle();
+  // Send screen has the rule line near the submit button.
+  assert.equal(h.text('booth-send-rule'), '심은 결함 중 하나라도 AI가 놓치면 성공이에요.');
+
+  // 4 edits, 1 missed -> count headline, rule line, and 4 matched status labels with aria-label.
+  h.ids.get('booth-claim-receipt').value = 'F-0101';
+  h.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(h.text('booth-live-title'), '4개 중 1개가 AI 눈을 피했어요');
+  assert.equal(h.ids.get('booth-live-rule').hidden, false);
+  assert.equal(h.text('booth-live-rule'), '심은 결함 중 하나라도 AI가 놓치면 성공이에요.');
+  const badges = nodesOf(h.ids.get('booth-live-declared')).filter(node => String(node.className || '').startsWith('booth-edit-verdict'));
+  assert.deepEqual(badges.map(node => [node.textContent, node.getAttribute('aria-label'), node.className]), [
+    ['AI가 찾음', 'AI가 찾음', 'booth-edit-verdict caught'],
+    ['근처를 짚음', '근처를 짚음', 'booth-edit-verdict partial'],
+    ['AI가 놓침', 'AI가 놓침', 'booth-edit-verdict missed'],
+    ['AI가 찾음', 'AI가 찾음', 'booth-edit-verdict caught'],
+  ]);
+
+  // 1 edit caught -> keeps single-defect wording, shows 1 status label.
+  h.ids.get('booth-claim-receipt').value = 'F-0102';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(h.text('booth-live-title'), 'AI가 찾아냈어요');
+  const singleBadges = nodesOf(h.ids.get('booth-live-declared')).filter(node => String(node.className || '').startsWith('booth-edit-verdict'));
+  assert.deepEqual(singleBadges.map(node => node.textContent), ['AI가 찾음']);
+
+  // Mismatched count (2 local edits vs 4 editResults) -> keeps count headline, shows no status labels.
+  h.ids.get('booth-claim-receipt').value = 'F-0103';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(h.text('booth-live-title'), 'AI가 4개를 모두 찾아냈어요');
+  assert.equal(h.ids.get('booth-live-declared').hidden, false);
+  const mismatchBadges = nodesOf(h.ids.get('booth-live-declared')).filter(node => String(node.className || '').startsWith('booth-edit-verdict'));
+  assert.equal(mismatchBadges.length, 0);
+
+  // Missing local receipt -> keeps count headline, hides declared list.
+  h.ids.get('booth-claim-receipt').value = 'F-0199';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(h.text('booth-live-title'), 'AI가 4개를 모두 찾아냈어요');
+  assert.equal(h.ids.get('booth-live-declared').hidden, true);
+  h.handle.destroy();
 });

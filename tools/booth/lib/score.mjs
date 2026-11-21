@@ -81,8 +81,8 @@ export function bestMatchedFinding(row, wrappedFindings) {
 
 export function suggestOutcome(verdicts) {
   if (!verdicts.length) return 'missed';
+  if (verdicts.some(verdict => verdict === 'missed' || verdict === '')) return 'missed';
   if (verdicts.every(verdict => verdict === 'caught')) return 'caught';
-  if (verdicts.every(verdict => verdict === 'missed')) return 'missed';
   return 'partial';
 }
 

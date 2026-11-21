@@ -42,7 +42,13 @@
     invalid:{kind:'void',word:'무효',latin:'VOID'},
     withdrawn:{kind:'void',word:'철회',latin:'WITHDRAWN'}
   };
-  const HERO_COPY='공개 논문 한 곳을 몰래 고쳐 보세요. AI가 보통 1~3분 안에 찾아내는지 겨뤄요. AI가 놓치면 부스에서 선물을 드려요.';
+  const HERO_COPY='공개 논문을 몰래 고쳐 보세요. AI가 보통 1~3분 안에 찾아내는지 겨뤄요. 심은 결함 중 하나라도 AI가 놓치면 부스에서 선물을 드려요.';
+  const RULE_COPY='심은 결함 중 하나라도 AI가 놓치면 성공이에요.';
+  const EDIT_VERDICTS={
+    caught:{text:'AI가 찾음',kind:'caught'},
+    partial:{text:'근처를 짚음',kind:'partial'},
+    missed:{text:'AI가 놓침',kind:'missed'}
+  };
   const MISSION_CREDIT='미션 논문은 모두 arXiv에 CC BY 4.0으로 공개된 논문이에요. 부스에서 보는 결함은 방문자가 게임을 위해 심은 거예요.';
   const PARTIAL_SUB='결함 근처까지 짚으면 적발로 봐요.';
   const WITHDRAW_WARN='철회하면 되돌릴 수 없고, 선물과 추첨 기회도 함께 사라져요.';
@@ -415,6 +421,34 @@
     const parts=HEADLINE[state];
     return {title:parts[0]+parts[1],lead:parts[0],strong:parts[1],stamp:stampFor(state)};
   }
+  function cleanEditResult(item){
+    if(!item||typeof item!=='object') return null;
+    if(!Number.isSafeInteger(item.index)||item.index<0) return null;
+    const verdict=item.verdict===''?'missed':item.verdict;
+    if(typeof verdict!=='string'||!Object.prototype.hasOwnProperty.call(EDIT_VERDICTS,verdict)) return null;
+    const pageIndex=Number.isSafeInteger(item.pageIndex)&&item.pageIndex>=0?item.pageIndex:null;
+    return {index:item.index,pageIndex,verdict};
+  }
+  function cleanEditResults(value){
+    if(!Array.isArray(value)) return [];
+    return value.map(cleanEditResult).filter(Boolean);
+  }
+  function headlineParts(lead, strong, state){
+    return {title:lead+strong,lead,strong,stamp:stampFor(state)};
+  }
+  function headlineFor(state, results){
+    const n=results.length;
+    if(n<=1) return headlineView(state);
+    if(state==='caught'&&results.every(item=>item.verdict==='caught')){
+      return headlineParts('AI가 ',n+'개를 모두 찾아냈어요',state);
+    }
+    if(state==='missed'){
+      const missed=results.filter(item=>item.verdict==='missed').length;
+      if(missed===n) return headlineParts('AI가 ',n+'개 모두 놓쳤어요',state);
+      if(missed>0) return headlineParts(n+'개 중 '+missed+'개가 ','AI 눈을 피했어요',state);
+    }
+    return headlineView(state);
+  }
   /* Visitor ticket for a claim view. Unpublished rows stay pending, so polling goes on.
      Any published prizeMessage becomes the gift ticket. */
   function resultView(input){
@@ -423,7 +457,10 @@
     if(data.published!==true) return {state:'pending',title:PENDING_COPY,lead:'',strong:'',stamp:null,note:'',prize:'',final:false};
     const state=publishedState(data);
     const prize=typeof data.prizeMessage==='string'?data.prizeMessage.trim().slice(0,500):'';
-    return Object.assign({state,note:plainNote(data.publicNote),prize,final:true},headlineView(state));
+    const editResults=cleanEditResults(data.editResults);
+    const view=Object.assign({state,note:plainNote(data.publicNote),prize,final:true},headlineFor(state,editResults));
+    if(editResults.length) view.editResults=editResults;
+    return view;
   }
   function noteLine(raw, out, rest){
     const line=raw.trim();
@@ -912,6 +949,7 @@
             el('div',{className:'booth-send-facts'},sendFact('고친 곳','booth-send-count'),sendFact('남은 기회','booth-send-chances'))),
           el('div',{className:'booth-cut booth-desk','aria-hidden':'true'}),
           el('div',{className:'booth-sec booth-send-confirm'},
+            el('p',{id:'booth-send-rule',className:'booth-small booth-rule',textContent:RULE_COPY}),
             el('button',{id:'booth-submit-button',type:'submit',className:'booth-btn ink wide',textContent:'AI에게 제출하기',disabled:true}),
             el('p',{id:'booth-submit-status',className:'booth-feedback',role:'alert','aria-live':'polite'}))));
     }
@@ -1015,6 +1053,7 @@
           el('div',{id:'booth-verdict',className:'booth-verdict',hidden:true},
             el('h2',{id:'booth-live-title',className:'booth-headline',role:'status','aria-live':'polite'}),
             el('p',{id:'booth-live-sub',className:'booth-copy',hidden:true}),
+            el('p',{id:'booth-live-rule',className:'booth-small booth-rule',hidden:true,textContent:RULE_COPY}),
             el('p',{id:'booth-live-page',className:'booth-mono-meta',hidden:true})),
           el('div',{className:'booth-live-side'},buildGift(),buildFinal()),
           el('div',{className:'booth-live-main'},
@@ -2192,6 +2231,7 @@
       kidsOf(byId('booth-live-title'),view.lead||null,el('b',{textContent:view.strong}));
       setText('booth-live-sub',view.state==='partial'?PARTIAL_SUB:'');
       setHidden('booth-live-sub',view.state!=='partial');
+      setHidden('booth-live-rule',!TIMED.includes(view.state));
       renderStamp(view.stamp);
       renderDuration(data,view.state);
       setHidden('booth-live-tip',!(view.state==='caught'||view.state==='partial'));
@@ -2227,17 +2267,34 @@
       const hit=readReceipts(storage).find(item=>item.receipt===code);
       return hit&&Array.isArray(hit.edits)?hit.edits:[];
     }
-    function declaredRow(item){
-      return el('div',{className:'booth-declared-item'},
-        el('p',{className:'booth-klab',textContent:item.page+'쪽'}),
-        diffNode(item));
+    function verdictBadge(verdict){
+      const info=verdict&&Object.prototype.hasOwnProperty.call(EDIT_VERDICTS,verdict)?EDIT_VERDICTS[verdict]:null;
+      if(!info) return null;
+      return el('span',{className:'booth-edit-verdict '+info.kind,'aria-label':info.text,textContent:info.text});
+    }
+    function verdictMapFor(items, editResults){
+      if(!Array.isArray(editResults)||editResults.length!==items.length) return null;
+      const map=new Map();
+      for(const item of editResults){
+        if(item.index<0||item.index>=items.length||map.has(item.index)) return null;
+        map.set(item.index,item.verdict);
+      }
+      return map.size===items.length?map:null;
+    }
+    function declaredRow(item, verdict){
+      const badge=verdictBadge(verdict);
+      const head=badge
+        ? el('div',{className:'booth-declared-head'},el('p',{className:'booth-klab',textContent:item.page+'쪽'}),badge)
+        : el('p',{className:'booth-klab',textContent:item.page+'쪽'});
+      return el('div',{className:'booth-declared-item'},head,diffNode(item));
     }
     function renderDeclared(view, data){
       const box=byId('booth-live-declared');
       if(!box) return;
       const items=view.final&&view.state!=='withdrawn'?storedEditsFor(data.receipt):[];
       if(!items.length){kidsOf(box);box.hidden=true;return;}
-      kidsOf(box,el('p',{className:'booth-klab',textContent:'내가 고친 곳'}),...items.map(declaredRow));
+      const verdicts=verdictMapFor(items,view.editResults);
+      kidsOf(box,el('p',{className:'booth-klab',textContent:'내가 고친 곳'}),...items.map((item,index)=>declaredRow(item,verdicts?verdicts.get(index):'')));
       box.hidden=false;
     }
     function renderGift(prize){
