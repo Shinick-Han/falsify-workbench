@@ -124,9 +124,19 @@ test('score matches same-page after text, changed numbers, and misses another pa
     [{ finding: { pageIndex: 4, quote: 'p < 0.50' }, profile: 'quick-blind', repeat: 0 }],
   );
   assert.equal(missed.verdict, 'missed');
-  assert.equal(suggestOutcome(['caught', 'missed']), 'partial');
-  assert.equal(suggestOutcome(['missed', 'missed']), 'missed');
+  assert.equal(suggestOutcome([]), 'missed');
   assert.equal(suggestOutcome(['caught']), 'caught');
+  assert.equal(suggestOutcome(['partial']), 'partial');
+  assert.equal(suggestOutcome(['missed']), 'missed');
+  assert.equal(suggestOutcome(['']), 'missed');
+  assert.equal(suggestOutcome(['caught', 'caught']), 'caught');
+  assert.equal(suggestOutcome(['caught', 'partial']), 'partial');
+  assert.equal(suggestOutcome(['partial', 'partial']), 'partial');
+  assert.equal(suggestOutcome(['caught', 'missed']), 'missed');
+  assert.equal(suggestOutcome(['partial', 'missed']), 'missed');
+  assert.equal(suggestOutcome(['caught', 'partial', 'missed']), 'missed');
+  assert.equal(suggestOutcome(['caught', '']), 'missed');
+  assert.equal(suggestOutcome(['missed', 'missed']), 'missed');
 });
 
 const HOSTED_RAGAS = JSON.parse(fs.readFileSync(new URL('./fixtures/hosted-blue-ragas.job.json', import.meta.url), 'utf8'));

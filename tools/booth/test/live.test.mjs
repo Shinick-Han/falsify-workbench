@@ -7,7 +7,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { DEFAULT_NOTES } from '../lib/config.mjs';
+import { DEFAULT_NOTES, loadConfigFile } from '../lib/config.mjs';
 import { buildPublicNote } from '../lib/note.mjs';
 import { startFake } from './fake-api.mjs';
 
@@ -182,6 +182,96 @@ test('public note uses only the AI finding, page, quote and rationale', () => {
   assert.equal(missed, 'AI는 다른 곳을 짚었어요. 심어 둔 결함은 AI 눈을 피했어요.');
   const none = buildPublicNote({ outcome: 'missed', matched: null, first: null, templates: DEFAULT_NOTES });
   assert.equal(none, DEFAULT_NOTES.missedNone);
+  const escaped = buildPublicNote({
+    outcome: 'missed',
+    matched: { segmentId: 'p5-b1', quote: 'highly accurate', rationale: '표 1과 다릅니다. || EN: Contradicts Table 1.' },
+    first: HOSTED.findings[0],
+    templates: DEFAULT_NOTES,
+  });
+  assert.match(escaped, /^심어 둔 결함 중 일부는 AI가 찾았어요\. \(AI가 짚은 곳: 5쪽\)\nAI가 짚은 문장: "highly accurate"\nAI 설명: 표 1과 다릅니다\.\nAI note: Contradicts Table 1\.$/);
+  // Operator config lacking `escaped` falls back to DEFAULT_NOTES.escaped both via loadConfigFile and buildPublicNote.
+  const legacyTemplates = {
+    caught: DEFAULT_NOTES.caught,
+    partial: DEFAULT_NOTES.partial,
+    missed: DEFAULT_NOTES.missed,
+    missedNone: DEFAULT_NOTES.missedNone,
+  };
+  const fallbackEscaped = buildPublicNote({
+    outcome: 'missed',
+    matched: { segmentId: 'p5-b1', quote: 'highly accurate', rationale: '표 1과 다릅니다.' },
+    first: HOSTED.findings[0],
+    templates: legacyTemplates,
+  });
+  assert.match(fallbackEscaped, /^심어 둔 결함 중 일부는 AI가 찾았어요\. \(AI가 짚은 곳: 5쪽\)/);
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-cfg-'));
+  try {
+    const cfgPath = path.join(tmpDir, 'legacy.json');
+    fs.writeFileSync(cfgPath, JSON.stringify({
+      apiBase: 'https://example.invalid',
+      live: { publicNote: legacyTemplates },
+    }));
+    const loaded = loadConfigFile(cfgPath);
+    assert.equal(loaded.live.publicNote.escaped, DEFAULT_NOTES.escaped);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('watch and final: any missed edit wins for the visitor and uses the escaped note when another edit was found', async () => {
+  const mixed = row(10, {}, {
+    declared: [
+      {
+        pageIndex: 4,
+        segmentId: 'p5-b11',
+        defectType: 'logic',
+        reason: 'SENTINEL_REASON_zz92',
+        before: 'For faithfulness, the Ragas prediction are in general weakly accurate.',
+        after: 'For faithfulness, the Ragas prediction are in general highly accurate.',
+      },
+      {
+        pageIndex: 1,
+        segmentId: 'p2-b4',
+        defectType: 'number',
+        reason: 'SENTINEL_REASON_zz92',
+        before: 'we used 12 annotators',
+        after: 'we used 30 annotators',
+      },
+    ],
+  });
+  const result = body => (body.model === 'claude-opus-5-5' ? { ...HOSTED, findings: [...HOSTED.findings, OPUS_EXTRA] } : HOSTED);
+  await withFake({ submissions: [mixed], result }, async (fake, dir) => {
+    // Also verify a local config whose publicNote lacks `escaped` still produces the escaped note in live watch.
+    const config = writeConfig(dir, fake.url, {
+      live: {
+        publicNote: {
+          caught: DEFAULT_NOTES.caught,
+          partial: DEFAULT_NOTES.partial,
+          missed: DEFAULT_NOTES.missed,
+          missedNone: DEFAULT_NOTES.missedNone,
+        },
+      },
+    });
+    const live = await run(['--config', config, 'watch', '--cycles', '1']);
+    assert.equal(live.code, 0, live.stderr);
+    const item = find(fake, 'F-0010');
+    assert.equal(item.outcome, 'missed', 'one missed edit means visitor wins');
+    assert.equal(item.prizeMessage, 'PRIZE_LIVE');
+    assert.match(item.publicNote, /^심어 둔 결함 중 일부는 AI가 찾았어요\. \(AI가 짚은 곳: 5쪽\)/);
+    assert.deepEqual(item.aiSummary.edits, [
+      { index: 0, pageIndex: 4, verdict: 'caught' },
+      { index: 1, pageIndex: 1, verdict: 'missed' },
+    ]);
+    // Final round catches the second edit too -> now every edit is caught, outcome becomes caught with finalCaughtMessage.
+    const finalRes = await run(['--config', config, 'final', '--apply', '--allow-open']);
+    assert.equal(finalRes.code, 0, finalRes.stderr);
+    const afterFinal = find(fake, 'F-0010');
+    assert.equal(afterFinal.outcome, 'caught');
+    assert.equal(afterFinal.prizeMessage, 'FINAL_CAUGHT');
+    assert.deepEqual(afterFinal.aiSummary.edits, [
+      { index: 0, pageIndex: 4, verdict: 'caught' },
+      { index: 1, pageIndex: 1, verdict: 'caught' },
+    ]);
+  });
 });
 
 test('watch: a full operator job cap (429) waits for a slot instead of failing the row', async () => {

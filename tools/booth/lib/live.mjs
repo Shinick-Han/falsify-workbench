@@ -455,7 +455,7 @@ export async function finalCommand(ctx) {
 }
 
 function verdictPage(verdict) {
-  const finding = verdict.outcome === 'missed' ? verdict.first : verdict.matched;
+  const finding = verdict.outcome === 'missed' ? (verdict.matched || verdict.first) : verdict.matched;
   const page = finding ? notePage(finding) : '';
   return page === '' ? null : page;
 }

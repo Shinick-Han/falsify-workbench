@@ -1890,3 +1890,113 @@ test('admin pdf returns json 500 before streaming and aborts when a chunk disapp
     }
   });
 });
+
+test('claim view exposes sanitized editResults only when published and preserves declared order', async () => {
+  await withApp({}, async (_mf, call) => {
+    const guest = (await mintGuest(call)).body.guest.token;
+    const declared = [
+      { pageIndex: 4, before: '0.95', after: '0.50', defectType: 'number', reason: 'first declared on p5' },
+      { pageIndex: 1, before: '12', after: '30', defectType: 'number', reason: 'second declared on p2' },
+      { pageIndex: 3, before: 'true', after: 'false', defectType: 'logic', reason: 'third declared on p4' },
+    ];
+    const created = await submitPdf(call, guest, pdfBytes('edit-results-order'), { declared });
+    assert.equal(created.status, 201, created.text);
+    const { receipt, claimKey } = created.body;
+    assert.equal(created.body.declaredCount, 3);
+
+    // Admin detail preserves declared submission order (not sorted by pageIndex).
+    const detail = await call('GET', `/v1/booth/admin/submissions/${receipt}`, { token: OPERATOR });
+    assert.equal(detail.status, 200);
+    assert.deepEqual(detail.body.declared.map(item => item.pageIndex), [4, 1, 3]);
+
+    // Unpublished row with aiSummary.edits does NOT expose editResults.
+    const unpublished = await call('PATCH', `/v1/booth/admin/submissions/${receipt}`, {
+      token: OPERATOR,
+      body: {
+        status: 'judged',
+        outcome: 'missed',
+        published: false,
+        aiSummary: {
+          suggestedOutcome: 'missed',
+          edits: [
+            { index: 0, pageIndex: 4, verdict: 'caught' },
+            { index: 1, pageIndex: 1, verdict: '' },
+            { index: 2, pageIndex: 3, verdict: 'partial' },
+          ],
+        },
+      },
+    });
+    assert.equal(unpublished.status, 200);
+    const beforeClaim = await call('GET', `/v1/booth/claim?receipt=${receipt}&key=${claimKey}`);
+    assert.equal(beforeClaim.status, 200);
+    assert.equal(Object.hasOwn(beforeClaim.body, 'editResults'), false);
+
+    // Published row exposes editResults with '' mapped to 'missed', malformed items dropped, and capped at declaredCount.
+    const published = await call('PATCH', `/v1/booth/admin/submissions/${receipt}`, {
+      token: OPERATOR,
+      body: {
+        status: 'judged',
+        outcome: 'missed',
+        published: true,
+        aiSummary: {
+          suggestedOutcome: 'missed',
+          operatorSecret: 'never-show',
+          edits: [
+            { index: 0, pageIndex: 4, verdict: 'caught', extra: 'dropped' },
+            { index: -1, pageIndex: 1, verdict: 'caught' },
+            { index: 1, pageIndex: -2, verdict: 'missed' },
+            { index: 1, pageIndex: 1, verdict: 'bogus' },
+            'not-an-object',
+            { index: 1, pageIndex: 1, verdict: '' },
+            { index: 1, pageIndex: 1, verdict: 'caught' }, // duplicate index dropped
+            { index: 2, pageIndex: 3, verdict: 'partial' },
+            { index: 3, pageIndex: 5, verdict: 'missed' }, // beyond declaredCount dropped
+          ],
+        },
+      },
+    });
+    assert.equal(published.status, 200);
+    for (const claim of [
+      await call('GET', `/v1/booth/claim?receipt=${receipt}&key=${claimKey}`),
+      await call('POST', '/v1/booth/claim', { body: { receipt, claimKey } }),
+    ]) {
+      assert.equal(claim.status, 200);
+      assert.deepEqual(claim.body.editResults, [
+        { index: 0, pageIndex: 4, verdict: 'caught' },
+        { index: 1, pageIndex: 1, verdict: 'missed' },
+        { index: 2, pageIndex: 3, verdict: 'partial' },
+      ]);
+      assert.equal(JSON.stringify(claim.body).includes('never-show'), false);
+    }
+
+    // An operator's invalid outcome keeps ai_summary but shows no per-edit results.
+    await call('PATCH', `/v1/booth/admin/submissions/${receipt}`, {
+      token: OPERATOR,
+      body: { outcome: 'invalid' },
+    });
+    const invalidClaim = await call('GET', `/v1/booth/claim?receipt=${receipt}&key=${claimKey}`);
+    assert.equal(invalidClaim.status, 200);
+    assert.equal(invalidClaim.body.outcome, 'invalid');
+    assert.equal(Object.hasOwn(invalidClaim.body, 'editResults'), false);
+
+    // Missing or malformed ai_summary omits editResults cleanly.
+    const noSummary = await submitPdf(call, guest, pdfBytes('edit-results-missing'));
+    assert.equal(noSummary.status, 201, noSummary.text);
+    await call('PATCH', `/v1/booth/admin/submissions/${noSummary.body.receipt}`, {
+      token: OPERATOR,
+      body: { status: 'judged', outcome: 'caught', published: true },
+    });
+    const missingClaim = await call('GET', `/v1/booth/claim?receipt=${noSummary.body.receipt}&key=${noSummary.body.claimKey}`);
+    assert.equal(missingClaim.status, 200);
+    assert.equal(Object.hasOwn(missingClaim.body, 'editResults'), false);
+
+    // All-malformed edits array omits editResults cleanly.
+    await call('PATCH', `/v1/booth/admin/submissions/${noSummary.body.receipt}`, {
+      token: OPERATOR,
+      body: { aiSummary: { edits: [{ index: 99, pageIndex: 0, verdict: 'caught' }, null] } },
+    });
+    const badEditsClaim = await call('GET', `/v1/booth/claim?receipt=${noSummary.body.receipt}&key=${noSummary.body.claimKey}`);
+    assert.equal(badEditsClaim.status, 200);
+    assert.equal(Object.hasOwn(badEditsClaim.body, 'editResults'), false);
+  });
+});

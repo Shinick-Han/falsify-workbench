@@ -1,3 +1,4 @@
+import { DEFAULT_NOTES } from './config.mjs';
 import { findingPageIndexes, physicalPage } from './findings.mjs';
 
 export const NOTE_MAX = 1000;
@@ -39,9 +40,14 @@ function fill(template, values) {
 
 // Built only from the AI finding: page, quote and rationale. The visitor's declared text is not an input.
 export function buildPublicNote({ outcome, matched, first, templates }) {
-  const finding = outcome === 'missed' ? first : matched;
-  if (!finding || (outcome === 'missed' && notePage(finding) === '')) return templates.missedNone.slice(0, NOTE_MAX);
-  const template = templates[outcome] || templates.missed;
+  const escaped = outcome === 'missed' && Boolean(matched);
+  const finding = escaped ? matched : (outcome === 'missed' ? first : matched);
+  if (!finding || (outcome === 'missed' && !escaped && notePage(finding) === '')) {
+    return (templates?.missedNone ?? DEFAULT_NOTES.missedNone).slice(0, NOTE_MAX);
+  }
+  const template = escaped
+    ? (templates?.escaped ?? DEFAULT_NOTES.escaped)
+    : (templates?.[outcome] || templates?.missed || DEFAULT_NOTES.missed);
   const reason = splitRationale(finding.rationale || '');
   const values = {
     page: notePage(finding) || '?',
