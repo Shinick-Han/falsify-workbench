@@ -1,6 +1,13 @@
 // Fixed codes. Callers map them to a process exit code and never attach tokens.
 export class BoothError extends Error {
-  constructor(code, message, { exitCode = 1, status = 0, retryAfter = 0 } = {}) {
+  constructor(code, message, {
+    exitCode = 1,
+    status = 0,
+    retryAfter = 0,
+    retryable = null,
+    failure = null,
+    replayed = false,
+  } = {}) {
     super(message);
     this.name = 'BoothError';
     this.code = code;
@@ -8,6 +15,9 @@ export class BoothError extends Error {
     this.status = status;
     // Seconds from a Retry-After header, 0 when absent or not a number of seconds.
     this.retryAfter = retryAfter;
+    this.retryable = typeof retryable === 'boolean' ? retryable : null;
+    this.failure = failure && typeof failure === 'object' ? failure : null;
+    this.replayed = replayed === true;
   }
 }
 

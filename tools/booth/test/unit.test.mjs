@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { assembleJobBody, buildBlueRequest, configHash, idempotencyKey } from '../lib/blue.mjs';
+import { jobFailure, recordFailure } from '../lib/commands.mjs';
 import { COMMON_COLUMNS, KEY_COLUMNS, SCORE_COLUMNS } from '../lib/constants.mjs';
 import { drawWinners } from '../lib/draw.mjs';
 import { commonRows, renderExport, scoreRows } from '../lib/export.mjs';
@@ -266,4 +267,43 @@ test('draw uses the injected integer generator without replacement', () => {
   });
   assert.deepEqual(winners, ['F-0001', 'F-0002']);
   assert.deepEqual(seen, [[0, 3], [0, 2]]);
+});
+
+test('jobFailure and recordFailure preserve failure code, retryable, message and jobId', () => {
+  const corrupt = jobFailure({
+    id: '03ffb375-0138-4eb0-817c-6e0660b924c1',
+    state: 'failed',
+    failure: { code: 'pdf_corrupt', retryable: false, message: 'The PDF could not be read.' },
+  });
+  assert.deepEqual(corrupt, {
+    code: 'pdf_corrupt',
+    retryable: false,
+    message: 'The PDF could not be read.',
+    jobState: 'failed',
+    jobId: '03ffb375-0138-4eb0-817c-6e0660b924c1',
+  });
+
+  const transient = jobFailure({
+    id: '11111111-1111-4111-8111-111111111111',
+    state: 'failed',
+    failure: { code: 'provider_unavailable', retryable: true, message: 'Temporary outage', requestId: 'req-9' },
+  });
+  assert.equal(transient.code, 'provider_unavailable');
+  assert.equal(transient.retryable, true);
+  assert.equal(transient.requestId, 'req-9');
+
+  const missing = jobFailure({ id: '22222222-2222-4222-8222-222222222222', state: 'failed' });
+  assert.equal(missing.code, 'booth_job');
+  assert.equal(missing.retryable, false);
+
+  const interrupted = jobFailure({ id: '33333333-3333-4333-8333-333333333333', state: 'interrupted' });
+  assert.equal(interrupted.code, 'job_interrupted');
+  assert.equal(interrupted.retryable, false);
+
+  const timedOut = recordFailure({
+    job: { id: '44444444-4444-4444-8444-444444444444', state: 'cancelled' },
+    failure: { code: 'poll_timeout', retryable: true, message: 'poll timed out', jobId: '44444444-4444-4444-8444-444444444444', jobState: 'cancelled' },
+  });
+  assert.equal(timedOut.code, 'poll_timeout');
+  assert.equal(timedOut.retryable, true);
 });

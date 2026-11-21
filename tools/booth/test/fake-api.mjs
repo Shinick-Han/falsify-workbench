@@ -16,8 +16,11 @@ function send(res, status, body, headers = {}) {
   res.end(payload);
 }
 
-function fail(res, status, code, headers = {}) {
-  send(res, status, { error: { code, message: code, requestId: 'fake', retryable: false } }, headers);
+function fail(res, status, code, headers = {}, retryable = null) {
+  const isRetryable = typeof retryable === 'boolean'
+    ? retryable
+    : (status === 429 || (status >= 500 && code !== 'storage_full'));
+  send(res, status, { error: { code, message: code, requestId: 'fake', retryable: isRetryable } }, headers);
 }
 
 async function readBody(req) {
@@ -32,12 +35,17 @@ function delay(ms) {
 
 export function startFake({
   token, submissions, pdfs, queued = false, jobDelayMs = 0, papers = null, pdfWithdrawn = null,
-  pdfHeaders = null, result = null, failJobs = false, pollFailures = 0, activeCap = 0,
-  alwaysBusy = null, stuckJobs = false,
+  pdfHeaders = null, result = null, failJobs = false, failSpec = null, pollFailures = 0, activeCap = 0,
+  alwaysBusy = null, stuckJobs = false, seedJobs = [], pollMismatchId = null,
 }) {
   const makeResult = requestBody => {
     if (typeof result === 'function') return structuredClone(result(requestBody));
     return result ? structuredClone(result) : sampleResult();
+  };
+  const resolveFailure = requestBody => {
+    if (typeof failSpec === 'function') return failSpec(requestBody);
+    if (failSpec && typeof failSpec === 'object') return structuredClone(failSpec);
+    return null;
   };
   const state = {
     submissions: submissions.map(row => ({ ...row, declared: row.declared.map(edit => ({ ...edit })), paper: row.paper ? { ...row.paper } : null })),
@@ -48,7 +56,7 @@ export function startFake({
     requests: [],
     settings: { submissionsOpen: true, missions: [], announcement: null },
     uploads: new Map(),
-    jobs: new Map(),
+    jobs: new Map(seedJobs.map(job => [job.id, structuredClone(job)])),
     newJobs: 0,
     pdfGets: {},
     paperPdfGets: {},
@@ -58,6 +66,8 @@ export function startFake({
     patches: [],
     pollFailures,
     jobPosts: 0,
+    jobGets: 0,
+    submissionGets: 0,
     busy429: 0,
     cancels: 0,
     maxActive: 0,
@@ -165,6 +175,17 @@ export function startFake({
       return;
     }
     const one = pathname.match(/^\/v1\/booth\/admin\/submissions\/(F-\d+)$/);
+    if (one && req.method === 'GET') {
+      state.submissionGets += 1;
+      const receipt = one[1];
+      const row = state.submissions.find(item => item.receipt === receipt);
+      if (!row) {
+        fail(res, 404, 'not_found');
+        return;
+      }
+      send(res, 200, row);
+      return;
+    }
     if (one && req.method === 'PATCH') {
       const receipt = one[1];
       const patch = JSON.parse(body.toString('utf8'));
@@ -236,20 +257,23 @@ export function startFake({
       }
       state.newJobs += 1;
       const now = new Date().toISOString();
+      const failure = resolveFailure(requestBody);
+      const shouldFail = Boolean(failJobs || failure);
       const job = {
         id: randomUUID(),
         role: requestBody.role,
-        state: failJobs ? 'failed' : (queued ? 'queued' : 'completed'),
+        state: shouldFail ? (failure?.state || 'failed') : (queued ? 'queued' : 'completed'),
         model: requestBody.model || '',
         effort: requestBody.effort || '',
         useEvidence: requestBody.useEvidence !== false,
         idempotencyKey: requestBody.idempotencyKey,
         requestBody,
         polls: 0,
-        result: queued || failJobs ? null : makeResult(requestBody),
+        result: queued || shouldFail ? null : makeResult(requestBody),
+        ...(failure ? { failure: { code: failure.code, retryable: failure.retryable === true, ...(failure.message ? { message: failure.message } : {}) } } : {}),
         usage: { inputTokens: 11, outputTokens: 7, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
         createdAt: now,
-        completedAt: queued || failJobs ? null : now,
+        completedAt: queued && !shouldFail ? null : now,
       };
       state.jobs.set(job.id, job);
       state.maxActive = Math.max(state.maxActive, [...state.jobs.values()].filter(item => item.state === 'queued' || item.state === 'running').length);
@@ -258,6 +282,7 @@ export function startFake({
     }
     const jobPath = pathname.match(/^\/v1\/ai\/jobs\/([^/]+)$/);
     if (req.method === 'GET' && jobPath) {
+      state.jobGets += 1;
       const job = state.jobs.get(decodeURIComponent(jobPath[1]));
       if (!job) {
         fail(res, 404, 'not_found');
@@ -265,7 +290,7 @@ export function startFake({
       }
       if (state.pollFailures > 0) {
         state.pollFailures -= 1;
-        fail(res, 503, 'unavailable');
+        fail(res, 503, 'unavailable', {}, true);
         return;
       }
       job.polls += 1;
@@ -275,7 +300,9 @@ export function startFake({
         job.result = makeResult(job.requestBody);
         job.completedAt = new Date().toISOString();
       }
-      send(res, 200, { job: publicJob(job) });
+      const view = publicJob(job);
+      if (pollMismatchId) view.id = pollMismatchId;
+      send(res, 200, { job: view });
       return;
     }
     const cancelPath = pathname.match(/^\/v1\/ai\/jobs\/([^/]+)\/cancel$/);
@@ -303,6 +330,7 @@ export function startFake({
       effort: job.effort,
       useEvidence: job.useEvidence,
       result: job.result,
+      ...(job.failure ? { failure: job.failure } : {}),
       usage: job.usage,
       createdAt: job.createdAt,
       completedAt: job.completedAt,

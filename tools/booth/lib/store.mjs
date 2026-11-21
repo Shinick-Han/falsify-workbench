@@ -68,8 +68,43 @@ export function pdfPath(dataDir, receipt) {
 export function blueRecordPath(dataDir, receipt, profileName, repeatIndex, hash) {
   assertReceipt(receipt);
   if (!/^[A-Za-z0-9._:-]{1,64}$/.test(profileName)) throw new BoothError('booth_config', 'profile name shape');
+  if (!Number.isSafeInteger(repeatIndex) || repeatIndex < 0) throw new BoothError('booth_config', 'repeat index shape');
   if (!/^[0-9a-f]{64}$/.test(hash)) throw new BoothError('booth_config', 'config hash shape');
   return path.join(dataDir, 'blue', receipt, profileName, String(repeatIndex), `${hash}.json`);
+}
+
+export function listBlueRecordsForHash(dataDir, receipt, profileName, hash) {
+  assertReceipt(receipt);
+  if (!/^[A-Za-z0-9._:-]{1,64}$/.test(profileName)) throw new BoothError('booth_config', 'profile name shape');
+  if (!/^[0-9a-f]{64}$/.test(hash)) throw new BoothError('booth_config', 'config hash shape');
+  const dir = path.join(dataDir, 'blue', receipt, profileName);
+  if (!fs.existsSync(dir)) return [];
+  const repeats = fs.readdirSync(dir, { withFileTypes: true })
+    .filter(entry => entry.isDirectory() && /^(0|[1-9]\d*)$/.test(entry.name))
+    .map(entry => Number(entry.name))
+    .sort((a, b) => a - b);
+  const found = [];
+  for (const repeat of repeats) {
+    const file = path.join(dir, String(repeat), `${hash}.json`);
+    const record = readJsonOptional(file);
+    if (record) found.push({ repeat, file, record });
+  }
+  return found;
+}
+
+export function listLiveMarkers(dataDir) {
+  const dir = path.join(dataDir, 'live');
+  if (!fs.existsSync(dir)) return [];
+  const receipts = fs.readdirSync(dir)
+    .filter(name => name.endsWith('.json') && RECEIPT.test(name.slice(0, -5)))
+    .map(name => name.slice(0, -5))
+    .sort((a, b) => Number(a.slice(2)) - Number(b.slice(2)));
+  const markers = [];
+  for (const receipt of receipts) {
+    const marker = readJsonOptional(path.join(dir, `${receipt}.json`));
+    if (marker) markers.push({ receipt, ...marker });
+  }
+  return markers;
 }
 
 export function listReceipts(dataDir) {
