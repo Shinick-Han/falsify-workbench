@@ -516,7 +516,10 @@ export async function judge(ctx) {
 export function compactSummary(item, outcome) {
   const summary = {
     suggestedOutcome: outcome,
-    edits: (item.edits || []).map(edit => ({ index: edit.index, pageIndex: edit.pageIndex, verdict: edit.verdict })),
+    edits: (item.edits || []).map(edit => ({
+      index: edit.index, pageIndex: edit.pageIndex, verdict: edit.verdict,
+      ...(edit.evidence ? { evidence: edit.evidence } : {}),
+    })),
   };
   const bytes = Buffer.byteLength(JSON.stringify(summary));
   if (bytes > 16000) throw new BoothError('booth_local', 'aiSummary exceeds 16 KiB');

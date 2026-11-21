@@ -1,4 +1,5 @@
-import { findingPageIndexes } from './findings.mjs';
+import { clip, splitRationale } from './note.mjs';
+import { findingPageIndex, findingPageIndexes } from './findings.mjs';
 import { changedNumbers, fold, jaccard, numberAppears } from './text.mjs';
 
 // The finding's own quote, its source quote, and every evidence quote it cites.
@@ -86,10 +87,39 @@ export function suggestOutcome(verdicts) {
   return 'partial';
 }
 
+// Show the quote at the edit, including a cited table cell when the primary finding is on another page.
+function editEvidence(edit, finding) {
+  const candidates = [];
+  if (findingPageIndex(finding) === edit.pageIndex) candidates.push(finding.quote, finding.sourceQuote);
+  for (const item of finding.evidence || []) {
+    if (findingPageIndex(item) === edit.pageIndex) candidates.push(item.quote);
+  }
+  const after = fold(edit.after || '');
+  const numbers = changedNumbers(edit.before || '', edit.after || '');
+  let quote = '';
+  let best = -1;
+  for (const text of candidates) {
+    if (typeof text !== 'string' || !text) continue;
+    const contains = after.length > 0 && fold(text).includes(after);
+    const numHit = numbers.some(number => numberAppears(text, number));
+    const strength = (contains ? 4 : 0) + (numHit ? 2 : 0) + jaccard(edit.after || '', text);
+    if (strength > best) {
+      best = strength;
+      quote = text;
+    }
+  }
+  const reason = splitRationale(finding.rationale);
+  const evidence = {};
+  for (const [key, value, limit] of [['quote', quote, 240], ['rationale', reason.ko, 300], ['rationaleEn', reason.en, 300]]) {
+    if (value) evidence[key] = clip(value.replace(/[\u0000-\u001f]/g, ' '), limit);
+  }
+  return evidence;
+}
+
 export function scoreSubmission(row, wrappedFindings) {
   const declared = Array.isArray(row.declared) ? row.declared : [];
   const edits = declared.map((edit, index) => {
-    const match = matchEdit(edit, wrappedFindings);
+    const { match, finding } = matchEditDetailed(edit, wrappedFindings);
     return {
       index,
       pageIndex: edit.pageIndex,
@@ -100,6 +130,7 @@ export function scoreSubmission(row, wrappedFindings) {
       profile: match.profile,
       repeat: match.repeat,
       quote: match.quote,
+      ...(finding ? { evidence: editEvidence(edit, finding) } : {}),
     };
   });
   return {

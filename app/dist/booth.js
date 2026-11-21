@@ -437,21 +437,49 @@
     const parts=HEADLINE[state];
     return {title:parts[0]+parts[1],lead:parts[0],strong:parts[1],stamp:stampFor(state)};
   }
+  function cleanEvidenceText(value, max){
+    if(typeof value!=='string') return '';
+    return value.trim().slice(0,max);
+  }
+  /* Missed edits never carry evidence; caught/partial keep quote and KO/EN rationale when non-empty. */
+  function cleanEvidence(value, verdict){
+    if((verdict!=='caught'&&verdict!=='partial')||!value||typeof value!=='object') return null;
+    const quote=cleanEvidenceText(value.quote,500);
+    const rationale=cleanEvidenceText(value.rationale,1000);
+    const rationaleEn=cleanEvidenceText(value.rationaleEn,1000);
+    if(!quote&&!rationale&&!rationaleEn) return null;
+    const out={quote,rationale};
+    if(rationaleEn) out.rationaleEn=rationaleEn;
+    return out;
+  }
   function cleanEditResult(item){
     if(!item||typeof item!=='object') return null;
     if(!Number.isSafeInteger(item.index)||item.index<0) return null;
     const verdict=item.verdict===''?'missed':item.verdict;
     if(typeof verdict!=='string'||!Object.prototype.hasOwnProperty.call(EDIT_VERDICTS,verdict)) return null;
-    const pageIndex=Number.isSafeInteger(item.pageIndex)&&item.pageIndex>=0?item.pageIndex:null;
-    return {index:item.index,pageIndex,verdict};
+    const pageIndex=Number.isSafeInteger(item.pageIndex)&&item.pageIndex>=0&&item.pageIndex<=9999?item.pageIndex:null;
+    const out={index:item.index,pageIndex,verdict};
+    const evidence=cleanEvidence(item.evidence,verdict);
+    if(evidence) out.evidence=evidence;
+    return out;
   }
   /* One result per declared edit, or none: a short or duplicated list must not drive the count headline. */
   function cleanEditResults(value, declaredCount){
     if(!Array.isArray(value)) return [];
     const seen=new Set();
-    const out=value.map(cleanEditResult).filter(item=>item&&!seen.has(item.index)&&seen.add(item.index));
-    return Number.isSafeInteger(declaredCount)&&declaredCount>0&&out.length!==declaredCount?[]:out;
+    const limit=Number.isSafeInteger(declaredCount)&&declaredCount>0?declaredCount:0;
+    const out=value.map(cleanEditResult).filter(item=>item&&(!limit||item.index<limit)&&!seen.has(item.index)&&seen.add(item.index));
+    if(limit&&out.length!==limit) return [];
+    out.sort((a,b)=>a.index-b.index);
+    return out;
   }
+  function hasEditEvidence(results){
+    return Array.isArray(results)&&results.some(item=>item&&(item.verdict==='caught'||item.verdict==='partial')&&!!item.evidence);
+  }
+  const REDUNDANT_NOTES=new Set([
+    '내가 심어 둔 결함을 AI가 찾았어요.',
+    '내가 심어 둔 결함 근처를 AI가 짚었어요.'
+  ]);
   function headlineParts(lead, strong, state){
     return {title:lead+strong,lead,strong,stamp:stampFor(state)};
   }
@@ -1078,6 +1106,7 @@
           el('div',{className:'booth-live-side'},buildGift(),buildFinal()),
           el('div',{className:'booth-live-main'},
             el('div',{id:'booth-live-note',className:'booth-panel booth-note',hidden:true}),
+            el('section',{id:'booth-live-findings',className:'booth-panel booth-findings',hidden:true,'aria-label':'항목별 AI 검증 결과'}),
             el('section',{id:'booth-live-declared',className:'booth-panel booth-declared',hidden:true,'aria-label':'내가 고친 곳'}),
             el('p',{id:'booth-live-tip',className:'booth-small',hidden:true,textContent:CAUGHT_TIP}),
             el('p',{id:'booth-live-error',className:'booth-feedback',role:'alert',hidden:true}),
@@ -2296,16 +2325,32 @@
       renderDuration(data,view.state);
       setHidden('booth-live-tip',!(view.state==='caught'||view.state==='partial'));
     }
-    function opinionParts(parsed){
-      if(!parsed.opinion&&!parsed.opinionEn) return [];
-      const both=!!(parsed.opinion&&parsed.opinionEn);
-      const out=[el('p',{className:'booth-klab gap',textContent:'AI 의견'})];
-      if(parsed.opinion) out.push(el('p',{className:both?'booth-txt booth-opinion-ko':'booth-txt',translate:'no',textContent:parsed.opinion}));
-      if(parsed.opinionEn) out.push(el('p',{className:both?'booth-txt booth-opinion-en':'booth-txt',translate:'no',textContent:parsed.opinionEn}));
+    function opinionNodes(opinion, opinionEn, gap){
+      if(!opinion&&!opinionEn) return [];
+      const both=!!(opinion&&opinionEn);
+      const out=[el('p',{className:gap?'booth-klab gap':'booth-klab',textContent:'AI 의견'})];
+      if(opinion) out.push(el('p',{className:both?'booth-txt booth-opinion-ko':'booth-txt',translate:'no',textContent:opinion}));
+      if(opinionEn) out.push(el('p',{className:both?'booth-txt booth-opinion-en':'booth-txt',translate:'no',textContent:opinionEn}));
       return out;
     }
-    function noteParts(parsed, state){
+    function opinionParts(parsed){
+      return opinionNodes(parsed.opinion,parsed.opinionEn,true);
+    }
+    function remainingNoteText(text, state){
+      if(!text) return '';
+      const lines=text.split('\n').map(line=>line.trim()).filter(Boolean);
+      const kept=state==='caught'||state==='partial'?lines.filter(line=>!REDUNDANT_NOTES.has(line)):lines;
+      return kept.join('\n');
+    }
+    function noteParts(parsed, state, perEditEvidence){
       const parts=[];
+      if(perEditEvidence){
+        const text=remainingNoteText(parsed.text,state);
+        if(!text) return parts;
+        parts.push(el('p',{className:'booth-klab',textContent:state==='invalid'?'운영진 안내':'AI 메모'}));
+        parts.push(el('p',{className:'booth-txt',textContent:text}));
+        return parts;
+      }
       const structured=!!(parsed.quote||parsed.opinion||parsed.opinionEn);
       if(parsed.text&&!structured) parts.push(el('p',{className:'booth-klab',textContent:state==='missed'&&(parsed.page||parsed.quote)?'AI가 의심한 곳':state==='invalid'?'운영진 안내':'AI 메모'}));
       if(parsed.text) parts.push(el('p',{className:'booth-txt',textContent:parsed.text}));
@@ -2315,9 +2360,11 @@
     }
     function renderNote(view){
       const parsed=parsePublicNote(view.note);
-      setText('booth-live-page',parsed.page?'AI가 짚은 곳 · '+parsed.page+'쪽':'');
-      setHidden('booth-live-page',!parsed.page);
-      const parts=noteParts(parsed,view.state);
+      const perEditEvidence=hasEditEvidence(view.editResults);
+      const page=!perEditEvidence?parsed.page:'';
+      setText('booth-live-page',page?'AI가 짚은 곳 · '+page+'쪽':'');
+      setHidden('booth-live-page',!page);
+      const parts=noteParts(parsed,view.state,perEditEvidence);
       kidsOf(byId('booth-live-note'),...parts);
       setHidden('booth-live-note',!parts.length);
     }
@@ -2332,29 +2379,69 @@
       if(!info) return null;
       return el('span',{className:'booth-edit-verdict '+info.kind,'aria-label':info.text,textContent:info.text});
     }
-    function verdictMapFor(items, editResults){
+    function editLabel(index, page, total){
+      const pageText=Number.isSafeInteger(page)&&page>=1?page+'쪽':'';
+      if(total>1) return pageText?'결함 '+(index+1)+' · '+pageText:'결함 '+(index+1);
+      return pageText||'결함 '+(index+1);
+    }
+    function evidenceBlock(result){
+      if(!result||(result.verdict!=='caught'&&result.verdict!=='partial')||!result.evidence) return null;
+      const ev=result.evidence;
+      const parts=[];
+      if(ev.quote){
+        parts.push(el('p',{className:'booth-klab',textContent:'AI가 짚은 문장'}));
+        parts.push(el('blockquote',{className:'booth-quote',translate:'no',textContent:ev.quote}));
+      }
+      parts.push(...opinionNodes(ev.rationale,ev.rationaleEn,!!ev.quote));
+      if(!parts.length) return null;
+      return el('div',{className:'booth-edit-evidence'},...parts);
+    }
+    function resultMapFor(items, editResults){
       if(!Array.isArray(editResults)||editResults.length!==items.length) return null;
       const map=new Map();
       for(const item of editResults){
         if(item.index<0||item.index>=items.length||map.has(item.index)) return null;
-        map.set(item.index,item.verdict);
+        map.set(item.index,item);
       }
       return map.size===items.length?map:null;
     }
-    function declaredRow(item, verdict){
-      const badge=verdictBadge(verdict);
+    function declaredRow(item, index, total, result){
+      const label=editLabel(index,item.page,total);
+      const badge=verdictBadge(result?result.verdict:'');
       const head=badge
-        ? el('div',{className:'booth-declared-head'},el('p',{className:'booth-klab',textContent:item.page+'쪽'}),badge)
-        : el('p',{className:'booth-klab',textContent:item.page+'쪽'});
-      return el('div',{className:'booth-declared-item'},head,diffNode(item));
+        ? el('div',{className:'booth-declared-head'},el('p',{className:'booth-klab',textContent:label}),badge)
+        : el('p',{className:'booth-klab',textContent:label});
+      return el('div',{className:'booth-declared-item','data-edit-index':String(index)},head,diffNode(item),evidenceBlock(result));
+    }
+    function findingRow(result, total){
+      const page=Number.isSafeInteger(result.pageIndex)?result.pageIndex+1:null;
+      const label=editLabel(result.index,page,total);
+      const badge=verdictBadge(result.verdict);
+      const head=badge
+        ? el('div',{className:'booth-declared-head'},el('p',{className:'booth-klab',textContent:label}),badge)
+        : el('p',{className:'booth-klab',textContent:label});
+      return el('div',{className:'booth-declared-item','data-edit-index':String(result.index)},head,evidenceBlock(result));
     }
     function renderDeclared(view, data){
       const box=byId('booth-live-declared');
-      if(!box) return;
+      if(!box) return false;
       const items=view.final&&view.state!=='withdrawn'?storedEditsFor(data.receipt):[];
-      if(!items.length){kidsOf(box);box.hidden=true;return;}
-      const verdicts=verdictMapFor(items,view.editResults);
-      kidsOf(box,el('p',{className:'booth-klab',textContent:'내가 고친 곳'}),...items.map((item,index)=>declaredRow(item,verdicts?verdicts.get(index):'')));
+      if(!items.length){kidsOf(box);box.hidden=true;return false;}
+      const results=resultMapFor(items,view.editResults);
+      kidsOf(box,el('p',{className:'booth-klab',textContent:'내가 고친 곳'}),...items.map((item,index)=>declaredRow(item,index,items.length,results?results.get(index):null)));
+      box.hidden=false;
+      return !!results;
+    }
+    function renderFindings(view, attached){
+      const box=byId('booth-live-findings');
+      if(!box) return;
+      const results=view.final&&view.state!=='withdrawn'&&Array.isArray(view.editResults)?view.editResults:[];
+      if(!results.length||attached||(results.length<=1&&!hasEditEvidence(results))){
+        kidsOf(box);
+        box.hidden=true;
+        return;
+      }
+      kidsOf(box,el('p',{className:'booth-klab',textContent:'항목별 AI 검증 결과'}),...results.map(result=>findingRow(result,results.length)));
       box.hidden=false;
     }
     function renderGift(prize){
@@ -2379,7 +2466,8 @@
       else renderPending(data);
       renderGift(view.prize);
       renderNote(view);
-      renderDeclared(view,data);
+      const attached=renderDeclared(view,data);
+      renderFindings(view,attached);
       setHidden('booth-live-again',!view.final);
       setHidden('booth-live-records',!view.final);
       setHidden('booth-final',view.state!=='missed');

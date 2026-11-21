@@ -255,6 +255,8 @@
     '운영진 안내':'Staff note',
     'AI 메모':'AI note',
     'AI 의견':'AI explanation',
+    'AI가 짚은 문장':'Flagged quote',
+    '항목별 AI 검증 결과':'Per-defect AI results',
 
     // Prize messages (configured on the live booth)
     'AI가 놓쳤어요! 부스 스태프에게 이 화면을 보여 주면 작은 선물을 드려요.':'AI missed it! Show this screen to booth staff for a small prize.',
@@ -429,7 +431,10 @@
     /* plan97s-2 */
     [/^기회 (\d+)번을 모두 썼어요\. 「내 기록」에서 결과를 볼 수 있어요\.$/,m=>'You used all '+plural(m[1],'try','tries')+'. Check My tickets for your results.'],
     /* plan97s-4 */
-    [/^AI 검증 차례를 기다리는 중 · 앞에 (\d+)건$/,m=>'Waiting in the AI check queue · '+m[1]+' ahead']
+    [/^AI 검증 차례를 기다리는 중 · 앞에 (\d+)건$/,m=>'Waiting in the AI check queue · '+m[1]+' ahead'],
+    /* Per-defect evidence headings */
+    [/^결함 (\d+) · (\d+)쪽$/,m=>'Defect '+m[1]+' · p. '+m[2]],
+    [/^결함 (\d+)$/,m=>'Defect '+m[1]]
   ];
 
   function bag(name){

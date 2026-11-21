@@ -1949,7 +1949,7 @@ test('claim view exposes sanitized editResults only when published and preserves
           suggestedOutcome: 'missed',
           operatorSecret: 'never-show',
           edits: [
-            { index: 0, pageIndex: 4, verdict: 'caught', extra: 'dropped' },
+            { index: 0, pageIndex: 4, verdict: 'caught', extra: 'dropped', evidence: { quote: 'finding one', rationale: 'reason one', private: 'never-show' } },
             { index: -1, pageIndex: 1, verdict: 'caught' },
             { index: 1, pageIndex: -2, verdict: 'missed' },
             { index: 1, pageIndex: 1, verdict: 'bogus' },
@@ -1969,7 +1969,7 @@ test('claim view exposes sanitized editResults only when published and preserves
     ]) {
       assert.equal(claim.status, 200);
       assert.deepEqual(claim.body.editResults, [
-        { index: 0, pageIndex: 4, verdict: 'caught' },
+        { index: 0, pageIndex: 4, verdict: 'caught', evidence: { quote: 'finding one', rationale: 'reason one' } },
         { index: 1, pageIndex: 1, verdict: 'missed' },
         { index: 2, pageIndex: 3, verdict: 'partial' },
       ]);
