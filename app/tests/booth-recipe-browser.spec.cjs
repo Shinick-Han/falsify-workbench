@@ -228,7 +228,9 @@ async function findAndTabsCheck(browser, log, errors, wide) {
 
   await page.locator('#booth-tab-myai').click();
   assert.equal(await page.locator('#booth-myai').count(), 1);
-  await page.waitForFunction(() => /원문 포함/.test(document.querySelector('#booth-myai .booth-myai-size')?.textContent || ''));
+  await page.waitForFunction(() => /^전체 [\d,]+자$/.test(document.querySelector('#booth-myai .booth-myai-size')?.textContent || ''));
+  assert.equal(await page.locator('#booth-myai-page').count(), 0);
+  assert.equal(await page.locator('#booth-myai-pdf').getAttribute('href'), 'https://arxiv.org/pdf/2309.15217');
 
   if (!wide) {
     await page.setViewportSize({width: 360, height: 780});

@@ -29,58 +29,93 @@ const good = {schema: 'falsify.booth.recipe.v1', paperId: '2309.15217',
   defectType: 'number', reason: 'Lowered Ragas faithfulness.', source: 'my-ai'};
 const FENCE = String.fromCharCode(96).repeat(3);
 
-test('Korean prompt carries the goal, rules, hint, page text, format and closing line', () => {
+test('Korean prompt carries the contract, exact PDF link, cannot_read clause and no tips or page text', () => {
   const p = M.buildPrompt(info);
-  assert.match(p, /1~3개/);
-  assert.match(p, /확인 가능한 결함/);
-  assert.match(p, /find는 아래 원문에서 글자 그대로 복사/);
-  assert.match(p, /지어내지 마세요/);
+  assert.match(p, /당신은 논문 검증 게임의 출제자입니다\. 아래 논문에 결함을 1~5개 심어 주세요\. 다른 AI가 이 수정본에서 결함을 찾을 수 있는지 겨룹니다\./);
+  assert.ok(p.includes('PDF: https://arxiv.org/pdf/2309.15217'));
+  assert.ok(p.includes('{"error":"cannot_read_paper"}'));
+  assert.match(p, /이 대화에 PDF가 첨부돼 있으면/);
+  assert.match(p, /find는 논문 원문에서 글자 그대로 복사/);
+  assert.match(p, /실제 인물이나 저자 이름을 지어내지 마세요/);
   assert.match(p, /CC BY/);
-  assert.match(p, /Table 1의 점수 하나를 바꿔 보세요/);
-  assert.match(p, /대상 쪽: 5/);
-  assert.ok(p.includes(PAGE), 'page text is included verbatim');
+  assert.match(p, /edits: 1~5개/);
   assert.match(p, /"schema": "falsify\.booth\.recipe\.v1"/);
   assert.match(p, /"source": "my-ai"/);
   assert.match(p, /paperId는 "2309\.15217"/);
   assert.match(p, /number, figure, citation, logic, method, other/);
   assert.match(p.trim().split('\n').at(-1), /JSON 하나만 답하세요/);
+  assert.ok(!p.includes(PAGE), 'no page text in prompt');
+  assert.ok(!p.includes('Table 1: Agreement'), 'no page snippet in prompt');
+  assert.ok(!p.includes('Table 1의 점수 하나를 바꿔 보세요'), 'no mission hint in prompt');
+  assert.doesNotMatch(p, /좋은 결함/);
+  assert.doesNotMatch(p, /티 나지 않지만|꼼꼼한 검토자라면/);
+  assert.doesNotMatch(p, /대상 쪽/);
+  assert.doesNotMatch(p, /0\.95|0\.50/);
+  assert.doesNotMatch(p, /1~3/);
   assert.doesNotMatch(p, /"source": "agent"/);
 });
 
-test('the example in the prompt is a valid my-ai recipe', () => {
-  const p = M.buildPrompt(info);
-  const start = p.indexOf('{\n  "schema"');
-  const example = JSON.parse(p.slice(start, p.indexOf('\n}', start) + 2));
-  assert.equal(example.source, 'my-ai');
-  assert.equal(M.validateLocal(example).ok, true);
+test('the neutral format example in both languages is a valid my-ai recipe with no real values', () => {
+  for (const lang of ['ko', 'en']) {
+    const p = M.buildPrompt(info, {lang});
+    const start = p.indexOf('{\n  "schema"');
+    const example = JSON.parse(p.slice(start, p.indexOf('\n}', start) + 2));
+    assert.equal(example.source, 'my-ai');
+    assert.equal(example.paperId, '2309.15217');
+    assert.equal(example.defectType, 'other');
+    assert.equal(M.validateLocal(example).ok, true, lang + ' example validates');
+    assert.doesNotMatch(JSON.stringify(example), /0\.95|0\.50/);
+  }
 });
 
 test('English variant on request; Korean by default', () => {
   const en = M.buildPrompt(info, {lang: 'en'});
-  assert.match(en, /Plant 1-3 subtle but checkable defects/);
+  assert.match(en, /You are setting a puzzle for a paper-checking game\. Plant 1 to 5 defects in the paper below\. Another AI will try to find them in the edited copy\./);
+  assert.ok(en.includes('PDF: https://arxiv.org/pdf/2309.15217'));
+  assert.ok(en.includes('{"error":"cannot_read_paper"}'));
+  assert.match(en, /edits: 1 to 5 items/);
   assert.match(en, /Answer with the JSON object only/);
-  assert.ok(en.includes(PAGE));
-  assert.doesNotMatch(en, /답 형식/);
+  assert.ok(!en.includes(PAGE), 'no page text in EN prompt');
+  assert.ok(!en.includes('Table 1의 점수 하나를 바꿔 보세요'), 'no mission hint in EN prompt');
+  assert.doesNotMatch(en, /Good defects/i);
+  assert.doesNotMatch(en, /subtle|careful reviewer/i);
+  assert.doesNotMatch(en, /0\.95|0\.50/);
+  assert.doesNotMatch(en, /1-3/);
+  assert.doesNotMatch(en, /[\uac00-\ud7a3]/, 'no Hangul in EN prompt');
   assert.match(M.buildPrompt(info), /답 형식/);
 });
 
-test('long page text is trimmed with a note and the prompt stays near 12k characters', () => {
-  const long = Array.from({length: 4000}, (_, i) => 'word' + i).join(' ');
-  for (const lang of ['ko', 'en']) {
-    const p = M.buildPrompt({...info, pageText: long}, {lang});
-    assert.ok(p.length <= M.PROMPT_CAP, lang + ' length ' + p.length);
-    assert.ok(p.length > M.PROMPT_CAP - 400, lang + ' wastes budget: ' + p.length);
-    assert.match(p, lang === 'ko' ? /원문이 길어 뒷부분 \d+자를 생략/ : /characters were left out/);
-    assert.ok(p.includes('word0 word1'));
-    assert.ok(!p.includes('word3999'));
-    assert.match(p.trim().split('\n').at(-1), /JSON/);
+test('pdfUrl builds safe arXiv PDF links and rejects invalid IDs', () => {
+  assert.equal(M.pdfUrl('2309.15217'), 'https://arxiv.org/pdf/2309.15217');
+  assert.equal(M.pdfUrl('2309.15217v2'), 'https://arxiv.org/pdf/2309.15217v2');
+  assert.equal(M.pdfUrl('hep-th/9901001'), 'https://arxiv.org/pdf/hep-th/9901001');
+  assert.equal(M.pdfUrl('math.GT/0309136'), 'https://arxiv.org/pdf/math.GT/0309136');
+  for (const bad of ['', null, undefined, '../etc/passwd', '2309.15217?x=1', 'javascript:alert(1)', '2309.15217#a']) {
+    assert.equal(M.pdfUrl(bad), '', 'rejects ' + String(bad));
   }
-  assert.doesNotMatch(M.buildPrompt(info), /생략했습니다/);
+  assert.doesNotMatch(M.buildPrompt({paperId: 'javascript:alert(1)'}), /PDF: /);
+  assert.equal(typeof M.buildPrompt(null), 'string');
 });
 
-test('missing page text and odd input do not throw', () => {
-  assert.match(M.buildPrompt({paperId: '2309.15217'}), /읽지 못했습니다/);
-  assert.equal(typeof M.buildPrompt(null), 'string');
+test('cannot_read_paper is recognised alone, with whitespace/case, in prose or a code fence, unless edits exist', () => {
+  const msg = 'AI가 논문을 열지 못했어요. 원문 PDF를 받아 AI에 첨부한 뒤 다시 물어봐 주세요.';
+  const cases = [
+    '{"error":"cannot_read_paper"}',
+    '  {  "ERROR" : "Cannot_Read_Paper"  }  ',
+    FENCE + 'json\n{\n  "error": "cannot_read_paper"\n}\n' + FENCE,
+    '외부 링크를 열 수 없어요.\n\n{"error": "cannot_read_paper"}\n\nPDF를 첨부해 주세요.',
+    '{"error": "cannot_read_paper", "edits": []}',
+  ];
+  for (const raw of cases) {
+    const out = M.parseAnswer(raw, ctx);
+    assert.equal(out.recipe, null, raw);
+    assert.equal(out.diagnostics.length, 1, raw);
+    assert.equal(out.diagnostics[0].level, 'error');
+    assert.equal(out.diagnostics[0].code, 'cannot_read_paper');
+    assert.equal(out.diagnostics[0].message, msg);
+  }
+  const withEdits = 'Note: would return {"error":"cannot_read_paper"} if unread, but I read it:\n' + JSON.stringify(good);
+  assert.deepEqual(M.parseAnswer(withEdits, ctx).recipe, good);
 });
 
 test('bare JSON answer', () => {
