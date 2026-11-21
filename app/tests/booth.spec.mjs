@@ -3132,3 +3132,256 @@ test('rv97-A F-03: coming back after 15+ minutes hidden starts a fresh 15 minute
   assert.equal(h.claimCalls().length, calls + 1, 'and asks again on schedule');
   h.handle.destroy();
 });
+
+test('per-edit evidence keeps caught/partial quote and KO/EN rationale, strips missed evidence, and sorts by index', () => {
+  const view = booth.resultView({
+    status: 'judged', published: true, outcome: 'missed', declaredCount: 5,
+    editResults: [
+      {index: 4, pageIndex: 8, verdict: 'caught', evidence: {quote: 'Q5', rationale: '설명 5', rationaleEn: 'Reason 5'}},
+      {index: 1, pageIndex: 4, verdict: 'partial', evidence: {quote: '  Q2  ', rationale: '설명 2'}},
+      {index: 2, pageIndex: 1, verdict: 'missed', evidence: {quote: 'FAKE', rationale: 'FABRICATED', rationaleEn: 'FAKE EN'}},
+      {index: 3, pageIndex: 2, verdict: '', evidence: {quote: 'FAKE2', rationale: 'FABRICATED2'}},
+      {index: 0, pageIndex: 4, verdict: 'caught', evidence: {quote: 'Q1', rationale: '설명 1', rationaleEn: 'Reason 1'}},
+    ],
+  });
+  assert.equal(view.title, '5개 중 2개가 AI 눈을 피했어요');
+  assert.deepEqual(plain(view.editResults), [
+    {index: 0, pageIndex: 4, verdict: 'caught', evidence: {quote: 'Q1', rationale: '설명 1', rationaleEn: 'Reason 1'}},
+    {index: 1, pageIndex: 4, verdict: 'partial', evidence: {quote: 'Q2', rationale: '설명 2'}},
+    {index: 2, pageIndex: 1, verdict: 'missed'},
+    {index: 3, pageIndex: 2, verdict: 'missed'},
+    {index: 4, pageIndex: 8, verdict: 'caught', evidence: {quote: 'Q5', rationale: '설명 5', rationaleEn: 'Reason 5'}},
+  ]);
+  const emptyEv = booth.resultView({
+    status: 'judged', published: true, outcome: 'caught', declaredCount: 1,
+    editResults: [{index: 0, pageIndex: 4, verdict: 'caught', evidence: {quote: '   ', rationale: ''}}],
+  });
+  assert.equal(emptyEv.editResults[0].evidence, undefined, 'whitespace-only evidence is dropped');
+  const outOfRange = booth.resultView({
+    status: 'judged', published: true, outcome: 'caught', declaredCount: 2,
+    editResults: [
+      {index: 0, pageIndex: 4, verdict: 'caught', evidence: {quote: 'Q1', rationale: 'R1'}},
+      {index: 5, pageIndex: 4, verdict: 'caught', evidence: {quote: 'Q2', rationale: 'R2'}},
+    ],
+  });
+  assert.equal(outOfRange.editResults, undefined, 'out-of-range edit index drops malformed editResults');
+});
+
+test('same-device 5 findings (including multiple on the same page) expand all quotes and KO/EN explanations and drop duplicate representative note', async () => {
+  const fiveEdits = [
+    {page: 5, before: 'Ragas 0.95 0.78 0.70', after: 'Ragas 0.50 0.78 0.70'},
+    {page: 5, before: 'context recall 0.88', after: 'context recall 0.41'},
+    {page: 2, before: 'we used 12 annotators', after: 'we used 30 annotators'},
+    {page: 5, before: 'human agreement 0.91', after: 'human agreement 0.35'},
+    {page: 9, before: 'detection time 64%', after: 'detection time 10%'},
+  ];
+  const fiveResults = [
+    {index: 0, pageIndex: 4, verdict: 'caught', evidence: {quote: 'Ragas 0.50 0.78 0.70', rationale: '표 1 충실도 0.50이 본문과 어긋나요.', rationaleEn: 'Table 1 faithfulness 0.50 disagrees with the text.'}},
+    {index: 1, pageIndex: 4, verdict: 'caught', evidence: {quote: 'context recall 0.41', rationale: '5쪽 두 번째 수치 0.41이 요약과 모순돼요.', rationaleEn: 'Second p. 5 metric 0.41 contradicts the summary.'}},
+    {index: 2, pageIndex: 1, verdict: 'caught', evidence: {quote: 'we used 30 annotators', rationale: '2쪽 평가자 수가 실험 절과 달라요.', rationaleEn: 'Annotator count on p. 2 conflicts with the setup.'}},
+    {index: 3, pageIndex: 4, verdict: 'caught', evidence: {quote: 'human agreement 0.35', rationale: '5쪽 세 번째 일치도 값이 결론과 어긋나요.', rationaleEn: 'Third p. 5 agreement score contradicts the conclusion.'}},
+    {index: 4, pageIndex: 8, verdict: 'caught', evidence: {quote: 'detection time 10%', rationale: '9쪽 탐지 시간 수치가 표와 달라요.', rationaleEn: 'Detection time on p. 9 disagrees with the table.'}},
+  ];
+  const storage = memoryStorage();
+  booth.rememberReceipt(storage, {receipt: 'F-0501', claimKey: '7Q3K-M9XD', createdAt: '2026-11-20T01:00:00Z', title: 'Ragas', pages: [2, 5, 9], count: 5, edits: fiveEdits});
+  const h = liveBooth({
+    storage,
+    claims: [{
+      receipt: 'F-0501', status: 'judged', course: 'quick', declaredCount: 5, createdAt: '2026-11-22T01:00:00Z',
+      published: true, outcome: 'caught',
+      publicNote: '내가 심어 둔 결함을 AI가 찾았어요. (AI가 짚은 곳: 5쪽)\nAI가 짚은 문장: "Ragas 0.50 0.78 0.70"\nAI 설명: 표 1 충실도 0.50이 본문과 어긋나요.\nAI note: Table 1 faithfulness 0.50 disagrees with the text.',
+      editResults: fiveResults,
+    }],
+  });
+  await settle();
+  h.ids.get('booth-claim-receipt').value = 'F-0501';
+  h.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(h.text('booth-live-title'), 'AI가 5개를 모두 찾아냈어요');
+  assert.equal(h.ids.get('booth-live-page').hidden, true, 'single representative page is hidden');
+  assert.equal(h.ids.get('booth-live-note').hidden, true, 'duplicate representative caught publicNote is hidden');
+  assert.equal(h.ids.get('booth-live-findings').hidden, true, 'same-device matched edits do not duplicate into findings panel');
+  const declared = h.ids.get('booth-live-declared');
+  assert.equal(declared.hidden, false);
+  const items = nodesOf(declared).filter(node => node.className === 'booth-declared-item');
+  assert.equal(items.length, 5);
+  assert.deepEqual(items.map(item => item.getAttribute('data-edit-index')), ['0', '1', '2', '3', '4']);
+  assert.deepEqual(items.map(item => nodesOf(item).find(n => n.className === 'booth-klab').textContent), [
+    '결함 1 · 5쪽', '결함 2 · 5쪽', '결함 3 · 2쪽', '결함 4 · 5쪽', '결함 5 · 9쪽',
+  ]);
+  assert.deepEqual(items.map(item => nodesOf(item).find(n => n.tagName === 'blockquote').textContent), fiveResults.map(r => r.evidence.quote));
+  assert.deepEqual(items.map(item => nodesOf(item).find(n => n.className === 'booth-txt booth-opinion-ko').textContent), fiveResults.map(r => r.evidence.rationale));
+  assert.deepEqual(items.map(item => nodesOf(item).find(n => n.className === 'booth-txt booth-opinion-en').textContent), fiveResults.map(r => r.evidence.rationaleEn));
+  assert.deepEqual(items.map(item => nodesOf(item).find(n => n.tagName === 'ins').textContent), ['0.50', '0.41', '30', '0.35', '10%']);
+  assert.equal(nodesOf(declared).some(node => node.tagName === 'details'), false, 'all 5 evidence blocks are expanded, not collapsed');
+  h.handle.destroy();
+});
+
+test('mixed 5-edit ticket keeps mixed summary, prize, and staff notes while omitting evidence on missed items', async () => {
+  const fiveEdits = [
+    {page: 5, before: 'Ragas 0.95', after: 'Ragas 0.50'},
+    {page: 5, before: 'recall 0.88', after: 'recall 0.41'},
+    {page: 2, before: '12 annotators', after: '30 annotators'},
+    {page: 3, before: '50 rows', after: '99 rows'},
+    {page: 9, before: '64% faster', after: '10% faster'},
+  ];
+  const storage = memoryStorage();
+  booth.rememberReceipt(storage, {receipt: 'F-0502', claimKey: '7Q3K-M9XD', createdAt: '2026-11-20T01:00:00Z', title: 'Ragas', pages: [2, 3, 5, 9], count: 5, edits: fiveEdits});
+  booth.rememberReceipt(storage, {receipt: 'F-0503', claimKey: '7Q3K-M9XD', createdAt: '2026-11-20T01:00:00Z', title: 'Ragas', pages: [5], count: 1, edits: [fiveEdits[0]]});
+  const h = liveBooth({
+    storage,
+    claims: [
+      {
+        receipt: 'F-0502', status: 'judged', course: 'quick', declaredCount: 5, createdAt: '2026-11-22T01:00:00Z',
+        published: true, outcome: 'missed',
+        prizeMessage: 'AI가 놓쳤어요! 부스 스태프에게 이 화면을 보여 주면 작은 선물을 드려요.',
+        publicNote: '심어 둔 결함 중 일부는 AI가 찾았어요. (AI가 짚은 곳: 5쪽)\nAI가 짚은 문장: "Ragas 0.50"\nAI 설명: 표 1 값이 어긋나요.\nAI note: Table 1 value disagrees.',
+        editResults: [
+          {index: 0, pageIndex: 4, verdict: 'caught', evidence: {quote: 'Ragas 0.50', rationale: '표 1 값이 어긋나요.', rationaleEn: 'Table 1 value disagrees.'}},
+          {index: 1, pageIndex: 4, verdict: 'partial', evidence: {quote: 'recall 0.41', rationale: '근처 수치를 짚었어요.', rationaleEn: 'Flagged a nearby score.'}},
+          {index: 2, pageIndex: 1, verdict: 'missed', evidence: {quote: 'MUST NOT SHOW', rationale: 'NO FABRICATED EVIDENCE'}},
+          {index: 3, pageIndex: 2, verdict: 'caught', evidence: {quote: '99 rows', rationale: '표본 수가 달라요.', rationaleEn: 'Sample size differs.'}},
+          {index: 4, pageIndex: 8, verdict: 'caught', evidence: {quote: '10% faster', rationale: '9쪽 수치가 모순돼요.', rationaleEn: 'p. 9 figure conflicts.'}},
+        ],
+      },
+      {
+        receipt: 'F-0503', status: 'judged', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:00Z',
+        published: true, outcome: 'caught',
+        publicNote: '내가 심어 둔 결함을 AI가 찾았어요. (AI가 짚은 곳: 5쪽)\n운영진 메모: 부스에서 수동 재확인했어요.\nAI가 짚은 문장: "Ragas 0.50"\nAI 설명: 표 1 값이 어긋나요.',
+        editResults: [
+          {index: 0, pageIndex: 4, verdict: 'caught', evidence: {quote: 'Ragas 0.50', rationale: '표 1 값이 어긋나요.', rationaleEn: 'Table 1 value disagrees.'}},
+        ],
+      },
+    ],
+  });
+  await settle();
+  h.ids.get('booth-claim-receipt').value = 'F-0502';
+  h.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(h.text('booth-live-title'), '5개 중 1개가 AI 눈을 피했어요');
+  assert.equal(h.ids.get('booth-gift').hidden, false, 'prize voucher kept');
+  assert.equal(h.text('booth-live-prize'), 'AI가 놓쳤어요! 부스 스태프에게 이 화면을 보여 주면 작은 선물을 드려요.');
+  assert.equal(h.ids.get('booth-final').hidden, false, 'final raffle kept');
+  assert.equal(h.ids.get('booth-live-page').hidden, true);
+  assert.equal(h.ids.get('booth-live-note').hidden, false, 'mixed-result summary stays visible');
+  assert.equal(h.text('booth-live-note'), 'AI 메모심어 둔 결함 중 일부는 AI가 찾았어요.');
+  assert.equal(nodesOf(h.ids.get('booth-live-note')).some(n => n.tagName === 'blockquote'), false, 'representative quote not duplicated in note');
+  const items = nodesOf(h.ids.get('booth-live-declared')).filter(node => node.className === 'booth-declared-item');
+  assert.equal(items.length, 5);
+  assert.equal(nodesOf(items[2]).some(n => n.className === 'booth-edit-evidence' || n.tagName === 'blockquote'), false, 'missed edit has no evidence');
+  assert.equal(items[2].textContent.includes('MUST NOT SHOW'), false);
+  assert.equal(items.filter(item => nodesOf(item).some(n => n.className === 'booth-edit-evidence')).length, 4, 'all 4 caught/partial items show evidence');
+
+  // Operator memo appended alongside representative caught template survives without duplicate quote/opinion.
+  h.ids.get('booth-claim-receipt').value = 'F-0503';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(h.ids.get('booth-live-note').hidden, false);
+  assert.equal(h.text('booth-live-note'), 'AI 메모운영진 메모: 부스에서 수동 재확인했어요.');
+  assert.equal(nodesOf(h.ids.get('booth-live-note')).some(n => n.tagName === 'blockquote'), false);
+  h.handle.destroy();
+});
+
+test('other device (claim only, no local edits) renders all per-edit findings, keeps legacy 1-summary tickets compatible, and uses textContent safely', async () => {
+  const h = liveBooth({
+    claims: [
+      {
+        receipt: 'F-0601', status: 'judged', course: 'quick', declaredCount: 5, createdAt: '2026-11-22T01:00:00Z',
+        published: true, outcome: 'caught',
+        publicNote: '내가 심어 둔 결함을 AI가 찾았어요. (AI가 짚은 곳: 5쪽)\nAI가 짚은 문장: "Q1"\nAI 설명: 설명 1\nAI note: Reason 1',
+        editResults: [
+          {index: 0, pageIndex: 4, verdict: 'caught', evidence: {quote: 'Q1', rationale: '설명 1', rationaleEn: 'Reason 1'}},
+          {index: 1, pageIndex: 4, verdict: 'partial', evidence: {quote: 'Q2', rationale: '설명 2', rationaleEn: 'Reason 2'}},
+          {index: 2, pageIndex: 1, verdict: 'caught', evidence: {quote: 'Q3', rationale: '설명 3', rationaleEn: 'Reason 3'}},
+          {index: 3, pageIndex: 2, verdict: 'caught', evidence: {quote: 'Q4', rationale: '설명 4', rationaleEn: 'Reason 4'}},
+          {index: 4, pageIndex: 8, verdict: 'caught', evidence: {quote: 'Q5', rationale: '설명 5', rationaleEn: 'Reason 5'}},
+        ],
+      },
+      {
+        receipt: 'F-0602', status: 'judged', course: 'quick', declaredCount: 5, createdAt: '2026-11-22T01:00:00Z',
+        published: true, outcome: 'missed',
+        prizeMessage: '부스에서 스티커를 받아 가세요',
+        publicNote: '심어 둔 결함 중 일부는 AI가 찾았어요. (AI가 짚은 곳: 5쪽)\nAI가 짚은 문장: "Q1"\nAI 설명: 설명 1',
+        editResults: [
+          {index: 0, pageIndex: 4, verdict: 'caught', evidence: {quote: 'Q1', rationale: '설명 1', rationaleEn: 'Reason 1'}},
+          {index: 1, pageIndex: 4, verdict: 'missed'},
+          {index: 2, pageIndex: 1, verdict: 'partial', evidence: {quote: 'Q3', rationale: '설명 3', rationaleEn: 'Reason 3'}},
+          {index: 3, pageIndex: 2, verdict: 'missed'},
+          {index: 4, pageIndex: 8, verdict: 'caught', evidence: {quote: 'Q5', rationale: '설명 5', rationaleEn: 'Reason 5'}},
+        ],
+      },
+      {
+        receipt: 'F-0603', status: 'judged', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:00Z',
+        published: true, outcome: 'caught',
+        publicNote: '<b>운영 메모</b>',
+        editResults: [
+          {index: 0, pageIndex: 4, verdict: 'caught', evidence: {quote: '<img src=x onerror=alert(1)>', rationale: '<script>alert(1)</script>', rationaleEn: '<em>literal</em>'}},
+        ],
+      },
+      {
+        receipt: 'F-0604', status: 'judged', course: 'quick', declaredCount: 2, createdAt: '2026-11-22T01:00:00Z',
+        published: true, outcome: 'caught',
+        publicNote: '내가 심어 둔 결함을 AI가 찾았어요. (AI가 짚은 곳: 5쪽)\nAI가 짚은 문장: "Legacy quote"\nAI 설명: 예전 설명\nAI note: Legacy reason',
+        editResults: [
+          {index: 0, pageIndex: 4, verdict: 'caught'},
+          {index: 1, pageIndex: 1, verdict: 'caught'},
+        ],
+      },
+    ],
+  });
+  await settle();
+  // 1. Other device, 5 findings including 2 on page 5.
+  h.ids.get('booth-claim-receipt').value = 'F-0601';
+  h.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(h.ids.get('booth-live-declared').hidden, true, 'no local edits keeps declared hidden');
+  assert.equal(h.ids.get('booth-live-note').hidden, true, 'duplicate caught publicNote hidden');
+  const findings1 = h.ids.get('booth-live-findings');
+  assert.equal(findings1.hidden, false);
+  const rows1 = nodesOf(findings1).filter(n => n.className === 'booth-declared-item');
+  assert.equal(rows1.length, 5);
+  assert.deepEqual(rows1.map(r => nodesOf(r).find(n => n.className === 'booth-klab').textContent), [
+    '결함 1 · 5쪽', '결함 2 · 5쪽', '결함 3 · 2쪽', '결함 4 · 3쪽', '결함 5 · 9쪽',
+  ]);
+  assert.deepEqual(rows1.map(r => nodesOf(r).find(n => n.tagName === 'blockquote').textContent), ['Q1', 'Q2', 'Q3', 'Q4', 'Q5']);
+
+  // 2. Other device, mixed 5 edits -> 3 with evidence, 2 missed without evidence, mixed summary & prize preserved.
+  h.ids.get('booth-claim-receipt').value = 'F-0602';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(h.text('booth-live-title'), '5개 중 2개가 AI 눈을 피했어요');
+  assert.equal(h.ids.get('booth-gift').hidden, false);
+  assert.equal(h.text('booth-live-note'), 'AI 메모심어 둔 결함 중 일부는 AI가 찾았어요.');
+  const rows2 = nodesOf(h.ids.get('booth-live-findings')).filter(n => n.className === 'booth-declared-item');
+  assert.equal(rows2.length, 5);
+  assert.equal(rows2.filter(r => nodesOf(r).some(n => n.className === 'booth-edit-evidence')).length, 3);
+  assert.equal(nodesOf(rows2[1]).some(n => n.className === 'booth-edit-evidence'), false);
+  assert.equal(nodesOf(rows2[3]).some(n => n.className === 'booth-edit-evidence'), false);
+
+  // 3. XSS payload rendered strictly via textContent; staff note kept.
+  h.ids.get('booth-claim-receipt').value = 'F-0603';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(h.text('booth-live-note'), 'AI 메모<b>운영 메모</b>');
+  const findings3 = h.ids.get('booth-live-findings');
+  assert.equal(findings3.hidden, false);
+  assert.equal(nodesOf(findings3).find(n => n.tagName === 'blockquote').textContent, '<img src=x onerror=alert(1)>');
+  assert.equal(nodesOf(findings3).find(n => n.className === 'booth-txt booth-opinion-ko').textContent, '<script>alert(1)</script>');
+  assert.equal(nodesOf(findings3).find(n => n.className === 'booth-txt booth-opinion-en').textContent, '<em>literal</em>');
+  assert.equal(nodesOf(findings3).some(n => ['img', 'script', 'em', 'b'].includes(n.tagName)), false);
+
+  // 4. Legacy alpha.96 ticket (editResults without evidence + 1-summary publicNote) keeps legacy note & page.
+  h.ids.get('booth-claim-receipt').value = 'F-0604';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(h.ids.get('booth-live-page').hidden, false);
+  assert.equal(h.text('booth-live-page'), 'AI가 짚은 곳 · 5쪽');
+  assert.equal(h.ids.get('booth-live-note').hidden, false);
+  assert.equal(nodesOf(h.ids.get('booth-live-note')).find(n => n.tagName === 'blockquote').textContent, 'Legacy quote');
+  assert.equal(nodesOf(h.ids.get('booth-live-note')).find(n => n.className === 'booth-txt booth-opinion-ko').textContent, '예전 설명');
+  assert.equal(nodesOf(h.ids.get('booth-live-note')).find(n => n.className === 'booth-txt booth-opinion-en').textContent, 'Legacy reason');
+  h.handle.destroy();
+});

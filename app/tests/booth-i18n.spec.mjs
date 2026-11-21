@@ -281,6 +281,12 @@ test('dictionary and pattern translation, vars interpolation, and whitespace pre
     i18n.t('접수번호와 확인키가 보이게 휴대폰으로 이 티켓을 찍어 두세요. 내 휴대폰의 「내 기록」에서 두 코드로 결과를 볼 수 있어요.'),
     'Take a photo of this ticket with your phone, with the ticket no. and claim key in view. On your phone, open My tickets and enter the two codes to see your result.',
   );
+  // Per-defect evidence headings and labels
+  assert.equal(i18n.t('AI가 짚은 문장'), 'Flagged quote');
+  assert.equal(i18n.t('항목별 AI 검증 결과'), 'Per-defect AI results');
+  assert.equal(i18n.t('결함 1 · 5쪽'), 'Defect 1 · p. 5');
+  assert.equal(i18n.t('결함 5 · 9쪽'), 'Defect 5 · p. 9');
+  assert.equal(i18n.t('결함 3'), 'Defect 3');
 });
 
 test('DOM walk translates text and attributes, skips translate="no" and input values, and restores cleanly', () => {

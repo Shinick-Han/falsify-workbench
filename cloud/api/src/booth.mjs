@@ -883,6 +883,16 @@ function queueView(row, env) {
 
 const EDIT_VERDICTS = new Set(['caught', 'partial', 'missed']);
 
+function publicEditEvidence(raw) {
+  if (!isObject(raw)) return null;
+  const evidence = {};
+  for (const [key, limit] of [['quote', 240], ['rationale', 300], ['rationaleEn', 300]]) {
+    const value = raw[key];
+    if (typeof value === 'string' && value.trim()) evidence[key] = value.trim().slice(0, limit);
+  }
+  return Object.keys(evidence).length ? evidence : null;
+}
+
 function normalizeEditResult(item, declaredCount) {
   if (!isObject(item)) return null;
   if (!Number.isSafeInteger(item.index) || item.index < 0 || item.index >= declaredCount) return null;
@@ -890,14 +900,8 @@ function normalizeEditResult(item, declaredCount) {
   const verdict = item.verdict === '' ? 'missed' : item.verdict;
   if (typeof verdict !== 'string' || !EDIT_VERDICTS.has(verdict)) return null;
   const result = { index: item.index, pageIndex: item.pageIndex, verdict };
-  if (verdict !== 'missed' && isObject(item.evidence)) {
-    const evidence = {};
-    for (const [key, limit] of [['quote', 240], ['rationale', 300], ['rationaleEn', 300]]) {
-      const value = item.evidence[key];
-      if (typeof value === 'string' && value.trim()) evidence[key] = value.trim().slice(0, limit);
-    }
-    if (Object.keys(evidence).length) result.evidence = evidence;
-  }
+  const evidence = verdict === 'missed' ? null : publicEditEvidence(item.evidence);
+  if (evidence) result.evidence = evidence;
   return result;
 }
 
