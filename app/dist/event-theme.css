@@ -33,11 +33,8 @@ body{
 
 /* AGPL notice stays reachable. Everything else in the footer is hidden. */
 .page-foot{display:block;margin:20px 0 0;text-align:center;font-size:11.5px}
-.page-foot>:not(#source-link):not(#agent-link){display:none}
-.page-foot #agent-link,.page-foot #source-link{display:inline-flex;align-items:center;min-height:44px;color:var(--ev-muted,#5f656e);font-size:11.5px}
-/* The separator sits outside the link box, so the link's underline never runs under it. */
-.page-foot #agent-link+#source-link{position:relative;margin-left:22px}
-.page-foot #agent-link+#source-link::before{content:"·";position:absolute;left:-14px;top:50%;transform:translateY(-50%);text-decoration:none;color:var(--ev-muted,#5f656e);pointer-events:none}
+.page-foot>:not(#source-link){display:none}
+.page-foot #source-link{display:inline-flex;align-items:center;min-height:44px;color:var(--ev-muted,#5f656e);font-size:11.5px}
 
 /* Steps other than "edit": take the workspace out of view but keep its layout box, so
    page rendering still measures a real column width while booth.js loads a paper.

@@ -1129,7 +1129,7 @@
       paint();
       return box;
     }
-    /* AI-made edits keep their source on the send card (my-ai or agent, plus the recipe code). */
+    /* AI-made edits keep their source on the send card. */
     function assistInfo(){
       const recipe=root.FalsifyBoothRecipe;
       const out=recipe&&typeof recipe.assist==='function'?recipe.assist():null;
@@ -1138,11 +1138,10 @@
     function rowTitle(row){
       const page=(row.pageIndex+1)+'쪽';
       const info=assistInfo();
-      if(info.assist!=='my-ai'&&info.assist!=='agent') return el('p',{className:'booth-klab',textContent:'내가 숨긴 결함 · '+page});
-      const code=typeof info.recipeCode==='string'&&info.recipeCode?' · '+info.recipeCode:'';
+      if(info.assist!=='my-ai') return el('p',{className:'booth-klab',textContent:'내가 숨긴 결함 · '+page});
       return el('div',{className:'booth-card-head'},
         el('p',{className:'booth-klab',textContent:'AI와 숨긴 결함 · '+page}),
-        el('span',{className:'booth-ai-chip',textContent:'AI 제안'+code}));
+        el('span',{className:'booth-ai-chip',textContent:'AI 제안'}));
     }
     function rowPanel(row, types){
       const reason=el('textarea',{rows:'3',maxlength:String(limitsOf(liveConfig).maxReason)});

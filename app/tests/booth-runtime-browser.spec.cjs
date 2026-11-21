@@ -253,11 +253,13 @@ async function offlineAndProgressPass(browser, pageErrors) {
   assert.equal(state.guests, 1);
 
   await addOneEdit(page, false);
+  await page.locator('#booth-tab-myai').click();
   await visibility(page, 'hidden');
   const saved = JSON.parse(await page.evaluate(() => sessionStorage.getItem('falsify.booth.progress.v1')));
   assert.equal(saved.v, 2);
   assert.equal(saved.step, 'edit');
   assert.equal(saved.paperId, '2309.15217');
+  assert.equal(saved.tab, 'myai');
   const savedEdits = JSON.parse(saved.edits);
   assert.equal(savedEdits.length, 1);
   assert.equal(savedEdits[0].originalText, '0.95');
@@ -271,6 +273,7 @@ async function offlineAndProgressPass(browser, pageErrors) {
   await page.locator('#booth-resume-go').click();
   await stepIs(page, 'edit');
   await page.waitForFunction(() => document.querySelector('#booth-dock-count')?.textContent === '고친 곳 1개', null, {timeout: 30000});
+  assert.equal(await page.locator('#booth-tab-myai').getAttribute('aria-selected'), 'true', 'resume restores 내 AI에게 tab');
   assert.equal(await page.locator('#booth-resume').count(), 0);
   assert.equal(await page.evaluate(() => sessionStorage.getItem('falsify.booth.progress.v1')), null);
   const restored = await page.evaluate(() => window.FalsifyBoothEdits.list());
@@ -278,6 +281,19 @@ async function offlineAndProgressPass(browser, pageErrors) {
   assert.equal(restored[0].originalText, '0.95');
   assert.equal(restored[0].newText, '0.50');
   assert.deepEqual(restored[0].rects, savedEdits[0].rects);
+
+  // Saved legacy tab 'agent' restores to 'find'.
+  await page.addInitScript(rec => {
+    if (sessionStorage.getItem('__seed_legacy_agent')) return;
+    sessionStorage.setItem('__seed_legacy_agent', '1');
+    sessionStorage.setItem('falsify.booth.progress.v1', JSON.stringify(rec));
+  }, {...saved, at: Date.now(), tab: 'agent', assist: 'agent'});
+  await page.reload();
+  await page.locator('#booth-resume').waitFor();
+  await page.locator('#booth-resume-go').click();
+  await stepIs(page, 'edit');
+  await page.waitForFunction(() => document.querySelector('#booth-dock-count')?.textContent === '고친 곳 1개', null, {timeout: 30000});
+  assert.equal(await page.locator('#booth-tab-find').getAttribute('aria-selected'), 'true', 'legacy agent tab restores to find');
 
   await visibility(page, 'hidden');
   await page.reload();
