@@ -20,15 +20,9 @@
   }
   const RECEIPT_KEY='falsify.booth.receipts.v1';
   const RECEIPT_CAP=10;
-  /* Keyed by the consentVersion GET /v1/booth/config returns. A version with no text here cannot be submitted. */
-  const CONSENT_COPY=Object.freeze({
-    '2026-11-22.v1':'제출한 수정본 PDF와 결함 설명(쪽·유형·이유)은 가짜연구소 Falsify 스터디가 저장하고 운영자가 읽습니다. 마감 후 AI 검증에는 수정본 PDF만 모델 제공자(Anthropic 또는 OpenAI)에 보내며, 결함 설명은 AI에 보내지 않습니다. 이름·연락처는 받지 않으니 이유란에도 적지 마세요. 원 논문은 미션이나 검색에서 고른 공개 논문(CC BY·CC BY-SA·CC0)이며, 수정본을 스터디 밖에 공개할 때는 저자·arXiv 번호·라이선스와 수정 사실을 밝히고, CC BY-SA 논문의 수정본은 같은 라이선스로 공개합니다. 결과와 경품 안내는 접수번호와 확인키로만 확인할 수 있습니다. 확인키로 언제든 철회할 수 있습니다. 철회하면 서버의 수정본 PDF·설명·결과를 바로 지우고, 운영자 보관본은 다음 동기화 때 지웁니다. 이미 AI 검증에 보낸 사본은 모델 제공자에게서 회수할 수 없고, 웹 실행 서버 사본은 7일, 데이터베이스 백업은 최대 30일 뒤에 사라집니다. 보관 자료는 스터디 종료 후 삭제합니다.',
-    '2026-11-22.v2':'제출한 수정본 PDF와 결함 설명(쪽·유형·이유)은 가짜연구소 Falsify 스터디가 저장하고 운영자가 읽습니다. 제출하면 바로 수정본 PDF만 AI 검증을 위해 모델 제공자(Anthropic)에 보내고, 마감 후 한 번 더 보낼 수 있습니다. 결함 설명은 AI에 보내지 않습니다. 이름·연락처는 받지 않으니 이유란에도 적지 마세요. 원 논문은 미션이나 검색에서 고른 공개 논문(CC BY·CC BY-SA·CC0)이며, 수정본을 스터디 밖에 공개할 때는 저자·arXiv 번호·라이선스와 수정 사실을 밝히고, CC BY-SA 논문의 수정본은 같은 라이선스로 공개합니다. AI 결과와 경품 안내는 접수번호와 확인키로만 확인할 수 있습니다. 확인키로 언제든 철회할 수 있습니다. 철회하면 서버의 수정본 PDF·설명·결과를 바로 지우고, 운영자 보관본은 다음 동기화 때 지웁니다. 이미 AI 검증에 보낸 사본은 모델 제공자에게서 회수할 수 없고, 웹 실행 서버 사본은 7일, 데이터베이스 백업은 최대 30일 뒤에 사라집니다. 보관 자료는 스터디 종료 후 삭제합니다.',
-    '2026-11-22.v3':'제출한 수정본 PDF와 결함 설명(쪽·유형·이유)은 가짜연구소 Falsify 스터디가 저장하고 운영자가 읽어요. 제출하면 수정본 PDF만 AI 검증을 위해 모델 제공자(Anthropic)에 바로 보내고, 마감 후 한 번 더 보낼 수 있어요. 결함 설명은 AI에 보내지 않아요. 이름과 연락처는 받지 않으니, 이유란에는 결함 설명만 적어 주세요. 원 논문은 미션이나 검색에서 고른 공개 논문(CC BY, CC BY-SA, CC0)이에요. 수정본을 스터디 밖에 공개할 때는 저자, arXiv 번호, 라이선스와 수정 사실을 밝히고, CC BY-SA 논문의 수정본은 같은 라이선스로 공개해요. AI 결과와 경품 안내는 접수번호와 확인키로만 볼 수 있어요. 확인키로 언제든 철회할 수 있어요. 철회하면 서버의 수정본 PDF, 설명, 결과를 바로 지우고, 운영자 보관본은 다음 동기화 때 지워요. 이미 AI 검증에 보낸 사본은 모델 제공자에게서 회수할 수 없어요. 웹 실행 서버 사본은 7일, 데이터베이스 백업은 최대 30일 뒤에 사라져요. 보관 자료는 스터디가 끝나면 삭제해요.'
-  });
-  const CONSENT_MISSING='동의 문구가 새로 바뀌었어요. 페이지를 새로 고친 뒤 제출해 주세요.';
   const PICK_PAPER='미션이나 검색에서 논문을 골라 시작해 주세요';
-  const CONSENT_VERSION='2026-11-22.v1';
+  /* Sent when the visitor leaves 「왜 결함인가요」 empty; the server needs a non-empty reason. */
+  const NO_REASON='설명 없음';
   const RECENT_CAP=5;
   const POLL_FAST_MS=15000;
   const POLL_SLOW_MS=30000;
@@ -48,19 +42,11 @@
     invalid:{kind:'void',word:'무효',latin:'VOID'},
     withdrawn:{kind:'void',word:'철회',latin:'WITHDRAWN'}
   };
-  /* Three-line consent summary per version. The full text stays CONSENT_COPY[version]. */
-  const CONSENT_SUMMARY=Object.freeze({
-    '2026-11-22.v1':Object.freeze(['수정본 PDF만 마감 후 AI(Anthropic 또는 OpenAI)에 보내요.','이름·연락처는 받지 않아요.','확인키로 언제든 철회할 수 있어요.']),
-    '2026-11-22.v2':Object.freeze(['수정본 PDF만 AI(Anthropic)에 보내요.','이름·연락처는 받지 않아요.','확인키로 언제든 철회할 수 있어요.']),
-    '2026-11-22.v3':Object.freeze(['수정본 PDF만 AI(Anthropic)에 보내요.','이름·연락처는 받지 않아요.','확인키로 언제든 철회할 수 있어요.'])
-  });
   const HERO_COPY='공개 논문 한 곳을 몰래 고쳐 보세요. AI가 보통 1~3분 안에 찾아내는지 겨뤄요. AI가 놓치면 부스에서 선물을 드려요.';
   const PARTIAL_SUB='결함 근처까지 짚으면 적발로 봐요.';
   const WITHDRAW_WARN='철회하면 되돌릴 수 없고, 선물과 추첨 기회도 함께 사라져요.';
   const CAPTURE_COPY='이 티켓을 캡처해 두세요. 화면을 닫아도 「내 기록」에서 접수번호와 확인키로 다시 볼 수 있어요.';
-  const LOCK_COPY='이 설명은 AI에게 보내지 않고 운영진만 봐요.';
   const GENERIC_HINT='숫자, 결론 문장, 표 값 중 한 곳을 골라 티 나지 않게 바꿔 보세요.';
-  const SEND_COPY='고친 곳마다 어떤 결함인지 알려 주세요. AI에게는 수정본 PDF만 가요.';
   const FINAL_COPY='마감 후 더 정밀한 AI가 한 번 더 검증해요. 그때도 못 찾으면 최종 추첨 대상이에요.';
   /* Desktop layout (booth.css, min-width 1024px): the top bar's step indicator and the dock's edit chips. */
   const DESK_QUERY='(min-width:1024px)';
@@ -91,10 +77,9 @@
   const SESSION_CODES=new Set(['session_missing','unauthorized','length_required','forbidden']);
   const ERROR_TEXT={
     booth_closed:'지금은 접수 시간이 아니에요. 부스에서 운영 시간을 확인해 주세요.',
-    consent_outdated:'동의 문구가 바뀌었어요. 페이지를 새로 고친 뒤 다시 동의해 주세요.',
+    consent_outdated:'부스 설정이 바뀌었어요. 「제출하기」를 다시 눌러 주세요.',
     job_not_ready:'수정본을 아직 만드는 중이에요. 끝나면 다시 제출해 주세요.',
     already_submitted:'이미 제출한 수정본이에요. 「내 기록」에서 결과를 볼 수 있어요.',
-    pii_not_allowed:'별명은 이메일이나 전화번호 말고 닉네임으로 적어 주세요.',
     rate_limited:'지금 요청이 몰려 있어요. 잠시 뒤 다시 시도해 주세요.',
     license_not_allowed:'이 논문은 라이선스 때문에 쓸 수 없어요. CC BY, CC BY-SA, CC0 논문을 골라 주세요.',
     payload_too_large:'논문 파일이 너무 커서 열지 못했어요. 다른 논문을 골라 주세요.',
@@ -164,12 +149,6 @@
       maxNickname:boundedInt(limits.maxNickname,24,1,24)
     };
   }
-  function nicknameProblem(nickname, max){
-    if(nickname==='') return '';
-    if(CONTROL.test(nickname)||nickname.length>max) return 'invalid_request';
-    if(nickname.includes('@')||/\d{7,}/.test(nickname)) return 'pii_not_allowed';
-    return '';
-  }
   function cleanText(value, max){
     if(typeof value!=='string') return null;
     if(CONTROL.test(value)||value.length>max) return null;
@@ -234,8 +213,8 @@
   function declaredTexts(row, limits){
     const before=paperText(row.before);
     const after=paperText(row.after);
-    const reason=cleanText(typeof row.reason==='string'?row.reason.trim():'',limits.maxReason);
-    if(before===null||after===null||reason===null||!before||!reason) return null;
+    const reason=cleanText(typeof row.reason==='string'&&row.reason.trim()?row.reason.trim():NO_REASON,limits.maxReason);
+    if(before===null||after===null||reason===null||!before) return null;
     return {before,after,reason};
   }
   function declaredSegment(row){
@@ -258,12 +237,13 @@
     if(!pageIndexOk(row.pageIndex)) return null;
     const texts=declaredTexts(row, limits);
     if(!texts) return null;
-    if(typeof row.defectType!=='string'||!types.includes(row.defectType)) return null;
+    const defectType=types.includes(row.defectType)?row.defectType:(types.includes('other')?'other':types[0]);
+    if(typeof defectType!=='string') return null;
     const segmentId=declaredSegment(row);
     if(segmentId===null) return null;
     return orderDeclared({
       pageIndex:row.pageIndex,before:texts.before,after:texts.after,
-      defectType:row.defectType,reason:texts.reason,segmentId:segmentId||undefined
+      defectType,reason:texts.reason,segmentId:segmentId||undefined
     });
   }
   function submissionSource(input){
@@ -273,8 +253,8 @@
     return {ok:false,code};
   }
   function consentVersionOf(source){
-    const consentVersion=typeof source.consentVersion==='string'&&source.consentVersion?source.consentVersion:CONSENT_VERSION;
-    if(consentVersion.length>80||CONTROL.test(consentVersion)) return '';
+    const consentVersion=typeof source.consentVersion==='string'?source.consentVersion:'';
+    if(!consentVersion||consentVersion.length>80||CONTROL.test(consentVersion)) return '';
     return consentVersion;
   }
   function defectTypeIds(source){
@@ -299,10 +279,6 @@
   function buildSubmission(input){
     const source=submissionSource(input);
     const limits=limitsOf(source);
-    const nickname=typeof source.nickname==='string'?source.nickname.trim():'';
-    const nick=nicknameProblem(nickname,limits.maxNickname);
-    if(nick) return rejectSubmission(nick);
-    if(source.consent!==true) return rejectSubmission('invalid_request');
     if(source.course!=='quick'&&source.course!=='deep') return rejectSubmission('invalid_request');
     const consentVersion=consentVersionOf(source);
     if(!consentVersion) return rejectSubmission('invalid_request');
@@ -314,7 +290,6 @@
     if(!editedSha256) return rejectSubmission('invalid_request');
     if(paper.sourceSha256&&paper.sourceSha256===editedSha256) return rejectSubmission('pdf_unchanged');
     const body={course:source.course,declared,paper};
-    if(nickname) body.nickname=nickname;
     body.consentVersion=consentVersion;
     body.editedSha256=editedSha256;
     return {ok:true,body};
@@ -387,15 +362,6 @@
   }
   function recentReceipts(storage){
     return readReceipts(storage).slice(0,RECENT_CAP);
-  }
-  function consentCopyFor(version){
-    if(typeof version!=='string'||!Object.prototype.hasOwnProperty.call(CONSENT_COPY,version)) return '';
-    return CONSENT_COPY[version];
-  }
-  /* No summary for a version without full text, so it cannot be agreed to. */
-  function consentSummaryFor(version){
-    if(!consentCopyFor(version)||!Object.prototype.hasOwnProperty.call(CONSENT_SUMMARY,version)) return [];
-    return CONSENT_SUMMARY[version].slice();
   }
   /* 15 s for the first 3 min, then 30 s up to 15 min. A Retry-After wait only lengthens a step. -1 stops. */
   function nextPollDelay(elapsedMs, retryMs){
@@ -785,11 +751,6 @@
           svg('feColorMatrix',{in:'n',type:'matrix',values:'0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 -1.4 1.3',result:'m'}),
           svg('feComposite',{in:'SourceGraphic',in2:'m',operator:'in'})));
     }
-    function lockIcon(){
-      return svg('svg',{width:'11',height:'13',viewBox:'0 0 12 14','aria-hidden':'true',focusable:'false',class:'booth-lock-icon'},
-        svg('rect',{x:'1',y:'6',width:'10',height:'7.5',rx:'1.5',fill:'currentColor'}),
-        svg('path',{d:'M3.5 6V4.2a2.5 2.5 0 0 1 5 0V6',fill:'none',stroke:'currentColor','stroke-width':'1.6'}));
-    }
     function mark(){
       return el('span',{className:'booth-mk','aria-hidden':'true',textContent:'F'});
     }
@@ -884,34 +845,18 @@
           el('button',{id:'booth-dock-back',type:'button',className:'booth-back booth-dock-back booth-desk',textContent:'← 논문 고르기'}),
           el('button',{id:'booth-next',type:'button',className:'booth-btn ink',textContent:'다음',disabled:true})));
     }
-    function buildConsent(){
-      return el('div',{id:'booth-consent-panel',className:'booth-panel booth-consent'},
-        el('ul',{id:'booth-consent-summary',className:'booth-consent-summary'}),
-        el('details',{id:'booth-consent-full',className:'booth-consent-full'},
-          el('summary',{textContent:'동의 내용 전체 보기'}),
-          el('p',{id:'booth-consent-copy',className:'booth-consent-copy'}),
-          el('p',{id:'booth-consent-version',className:'booth-mono-meta'})),
-        el('label',{className:'booth-check',for:'booth-consent'},
-          el('input',{id:'booth-consent',type:'checkbox',disabled:true}),
-          el('span',{textContent:'동의 내용을 읽었고 동의해요'})));
-    }
     function sendFact(label, id){
       return el('div',{},el('p',{className:'booth-klab',textContent:label}),el('p',{id,className:'booth-val'}));
     }
     /* Phones read one column. On desktop the left column declares and the right one is a sticky
-       SUBMISSION ticket that holds the consent and submit nodes themselves (ids stay unique). */
+       SUBMISSION ticket that holds the submit button itself (ids stay unique). */
     function buildSend(){
       return el('form',{id:'booth-submit',className:'booth-step booth-send',hidden:true,novalidate:'novalidate'},
         el('div',{className:'booth-send-main'},
           stepBar('booth-send-back','← 고치기','3 / 3 AI에게 제출',3),
           el('div',{className:'booth-send-head booth-desk'},
-            el('h2',{className:'booth-headline'},'숨긴 결함을 ',el('b',{textContent:'알려 주세요'})),
-            el('p',{className:'booth-copy',textContent:SEND_COPY})),
-          el('div',{id:'booth-rows',className:'booth-rows'}),
-          el('details',{className:'booth-more booth-nick'},
-            el('summary',{textContent:'별명 남기기 (선택)'}),
-            el('label',{for:'booth-nickname',className:'booth-field'},el('span',{className:'booth-klab',textContent:'별명 · 닉네임이면 충분해요'}),
-              el('input',{id:'booth-nickname',type:'text',maxlength:'24',autocomplete:'off',spellcheck:'false'})))),
+            el('h2',{className:'booth-headline'},'숨긴 결함을 ',el('b',{textContent:'확인해요'}))),
+          el('div',{id:'booth-rows',className:'booth-rows'})),
         el('div',{id:'booth-send-ticket',className:'booth-send-side'},
           el('div',{className:'booth-sec booth-desk'},
             el('p',{className:'booth-lab',textContent:'Submission'}),
@@ -919,7 +864,6 @@
             el('div',{className:'booth-send-facts'},sendFact('고친 곳','booth-send-count'),sendFact('남은 기회','booth-send-chances'))),
           el('div',{className:'booth-cut booth-desk','aria-hidden':'true'}),
           el('div',{className:'booth-sec booth-send-confirm'},
-            buildConsent(),
             el('button',{id:'booth-submit-button',type:'submit',className:'booth-btn ink wide',textContent:'AI에게 제출하기',disabled:true}),
             el('p',{id:'booth-submit-status',className:'booth-feedback',role:'alert','aria-live':'polite'}))));
     }
@@ -1150,8 +1094,7 @@
     function refreshSubmitButton(){
       const button=byId('booth-submit-button');
       if(!button) return;
-      const consent=byId('booth-consent');
-      const ready=submissionsOpen()&&!!consentCopyFor(liveConsentVersion())&&consent&&consent.checked&&rows.length>0&&!!generatedFile&&SHA256.test(generatedHash);
+      const ready=submissionsOpen()&&!!liveConsentVersion()&&rows.length>0&&!!generatedFile&&SHA256.test(generatedHash);
       button.disabled=!ready;
     }
     function flat(text){
@@ -1179,7 +1122,7 @@
       if(!types.some(type=>type.id===row.defectType)) row.defectType='';
       for(const type of types){
         const chip=el('button',{type:'button',className:'booth-chip',textContent:type.label,'aria-pressed':'false'});
-        chip.addEventListener('click',()=>{row.defectType=type.id;paint();});
+        chip.addEventListener('click',()=>{row.defectType=row.defectType===type.id?'':type.id;paint();});
         chips.push([type.id,chip]);
         box.append(chip);
       }
@@ -1202,17 +1145,16 @@
         el('span',{className:'booth-ai-chip',textContent:'AI 제안'+code}));
     }
     function rowPanel(row, types){
-      const reason=el('textarea',{rows:'3',maxlength:String(limitsOf(liveConfig).maxReason),placeholder:'어디를 어떻게 바꿨고, 왜 결함인지 적어 주세요'});
+      const reason=el('textarea',{rows:'3',maxlength:String(limitsOf(liveConfig).maxReason)});
       reason.value=row.reason||'';
       reason.addEventListener('input',()=>{row.reason=reason.value;});
       row.reasonInput=reason;
       return el('article',{className:'booth-panel booth-card'},
         rowTitle(row),
         diffNode(row),
-        el('p',{className:'booth-klab gap',textContent:'어떤 결함인가요'}),
+        el('p',{className:'booth-klab gap',textContent:'어떤 결함인가요 (선택)'}),
         chipRow(row,types),
-        el('label',{className:'booth-field'},el('span',{className:'booth-klab',textContent:'왜 결함인가요'}),reason),
-        el('p',{className:'booth-lock'},lockIcon(),el('span',{textContent:LOCK_COPY})));
+        el('label',{className:'booth-field'},el('span',{className:'booth-klab',textContent:'왜 결함인가요 (선택)'}),reason));
     }
     function renderRows(){
       for(const row of rows) if(row&&row.reasonInput) row.reason=row.reasonInput.value;
@@ -1811,7 +1753,7 @@
     function submissionBlock(){
       if(!submissionsOpen()) return 'closed';
       if(!liveConfig) return 'loading';
-      if(!consentCopyFor(liveConsentVersion())) return 'consent';
+      if(!liveConsentVersion()) return 'loading';
       if(!paper) return 'pick';
       if(!generatedFile||!SHA256.test(generatedHash)) return 'missing';
       return '';
@@ -1825,19 +1767,13 @@
         defectType:row.defectType,reason:rowReason(row)
       };
     }
-    function rowsIncomplete(){
-      return rows.some(row=>!row.defectType||!String(rowReason(row)||'').trim());
-    }
     /* The course choice is hidden at the booth: every submission is the quick course. */
     function submissionInput(paperPayload){
-      const consent=byId('booth-consent');
-      const nickname=byId('booth-nickname');
       return {
-        course,consent:!!(consent&&consent.checked),
+        course,
         consentVersion:liveConsentVersion(),
         rows:rows.map(rowPayload),
         paper:paperPayload,
-        nickname:nickname?nickname.value:'',
         editedSha256:generatedHash,
         limits:liveConfig&&liveConfig.limits,
         defectTypes:typesOf(liveConfig).map(item=>item.id)
@@ -1875,10 +1811,6 @@
         say('booth-submit-status','한 번에 '+cap+'곳까지 제출할 수 있어요. 지금은 '+live.length+'곳이에요.');
         return false;
       }
-      if(rowsIncomplete()){
-        say('booth-submit-status','고친 곳마다 결함 유형을 고르고 이유를 적어 주세요.');
-        return false;
-      }
       return true;
     }
     function submissionFormFor(){
@@ -1902,7 +1834,18 @@
       if(step==='send') say('booth-submit-status',ENGINE_UNAVAILABLE);
       return false;
     }
-    async function submitBooth(event){
+    /* The server names the current consentVersion; a 409 consent_outdated takes it and sends once more. */
+    async function refreshConsentVersion(){
+      try{
+        const data=await request('/v1/booth/config',{method:'GET',auth:false});
+        if(liveConfig&&data&&typeof data.consentVersion==='string'&&data.consentVersion&&data.consentVersion!==liveConfig.consentVersion){
+          liveConfig.consentVersion=data.consentVersion;
+          return true;
+        }
+      }catch{/* keep the first error */}
+      return false;
+    }
+    async function submitBooth(event, again){
       stopEvent(event);
       if(!(await ensureSubmissionPdf())) return;
       if(!preflight()) return;
@@ -1918,6 +1861,7 @@
         say('booth-submit-status','');
         followSubmission(data,meta);
       }catch(error){
+        if(error.code==='consent_outdated'&&!again&&await refreshConsentVersion()){submitBooth(null,true);return;}
         say('booth-submit-status',submitFailureText(error));
         offerRetry('booth-submit-status',error,()=>submitBooth());
         showKnownReceipt(error);
@@ -1990,37 +1934,13 @@
     function blockMessage(block){
       if(block==='closed') return errorMessage('booth_closed');
       if(block==='loading') return '부스 정보를 불러오는 중이에요. 잠시 뒤 다시 눌러 주세요.';
-      if(block==='consent') return CONSENT_MISSING;
       if(block==='pick') return PICK_PAPER;
       return ENGINE_UNAVAILABLE;
     }
-    /* Only the version the server names. Before /v1/booth/config answers there is none, so no
-       older text (CONSENT_VERSION is v1) can show for a moment. */
+    /* Only the version the server names. Before /v1/booth/config answers there is none. */
     function liveConsentVersion(){
       const version=liveConfig&&liveConfig.consentVersion;
       return typeof version==='string'&&version?version:'';
-    }
-    /* Summary, full versioned text and the checkbox. An unknown version cannot be agreed to;
-       before the config loads the panel stays empty and the checkbox stays off. */
-    function applyConsent(){
-      const box=byId('booth-consent');
-      if(!liveConfig){
-        setText('booth-consent-copy','');
-        setText('booth-consent-version','');
-        kidsOf(byId('booth-consent-summary'));
-        if(box){box.checked=false;box.disabled=true;}
-        return;
-      }
-      const version=liveConsentVersion();
-      const text=consentCopyFor(version);
-      const summary=consentSummaryFor(version);
-      setText('booth-consent-copy',text||CONSENT_MISSING);
-      setText('booth-consent-version',text?'동의 버전 · '+version:'');
-      const lines=summary.length?summary.map(line=>el('li',{textContent:line})):[el('li',{className:'missing',textContent:CONSENT_MISSING})];
-      kidsOf(byId('booth-consent-summary'),...lines);
-      if(!box) return;
-      if(!text) box.checked=false;
-      box.disabled=!text;
     }
     function perOwnerCap(){
       return declaredCap(liveConfig&&liveConfig.limits&&liveConfig.limits.perOwner);
@@ -2328,15 +2248,13 @@
       if(clear&&typeof clear.click==='function'){clear.click();return;}
       if(typeof Event==='function'&&typeof doc.dispatchEvent==='function') doc.dispatchEvent(new Event('falsify:document-clear'));
     }
-    /* Back to pick with no paper, no rows and an unticked consent, as the old retry did. */
+    /* Back to pick with no paper and no rows, as the old retry did. */
     function startAgain(){
       stopPolling();
       stopClock();
       cancelMake();
       ticket=null;
       waiting=false;
-      const consent=byId('booth-consent');
-      if(consent) consent.checked=false;
       leaveResultHash();
       showRecords(false);
       resetWorkspace();
@@ -2373,7 +2291,7 @@
       if(next!=='ticket') stopClock();
       syncWake();
       if(next==='edit'){renderHint();renderDock();}
-      if(next==='send'){renderRows();applyConsent();if(!generatedFile&&liveEdits().length) void beginMake();}
+      if(next==='send'){renderRows();if(!generatedFile&&liveEdits().length) void beginMake();}
       scrollTop();
     }
     /* Current step bold (aria-current), earlier steps done. */
@@ -2429,7 +2347,6 @@
       setHidden('booth-announce',!announcement);
       if(!submissionsOpen()) say('booth-status',errorMessage('booth_closed'));
       renderMissions();
-      applyConsent();
       refreshSubmitButton();
       prefillClaim();
       renderReceipts();
@@ -2471,7 +2388,6 @@
     on(deskQuery,'change',applyDesk);
     on(byId('booth-send-back'),'click',()=>{setStep('edit');});
     on(byId('booth-submit'),'submit',event=>{void submitBooth(event);});
-    on(byId('booth-consent'),'change',refreshSubmitButton);
     on(byId('booth-copy'),'click',()=>{void copyReceipt();});
     on(byId('booth-claim-form'),'submit',event=>{void lookup(event);});
     on(byId('booth-records-back'),'click',closeRecords);
@@ -2527,8 +2443,8 @@
   root.FalsifyBooth={
     normalizeClaimKey,normalizeReceipt,buildSubmission,submissionForm,errorMessage,
     readReceipts,rememberReceipt,recentReceipts,paperSearchPath,paperPdfPath,
-    consentCopyFor,consentSummaryFor,nextPollDelay,retryAfterMs,resultView,capMessage,
+    nextPollDelay,retryAfterMs,resultView,capMessage,
     parsePublicNote,diffParts,ENGINE_UNAVAILABLE,chancesLeft,formatClock,formatDuration,noteReceiptOutcome,licenseLabel,shortTitle,
-    CONSENT_COPY,CONSENT_SUMMARY,CONSENT_VERSION,RECEIPT_KEY,RECEIPT_CAP,RECENT_CAP,mount
+    NO_REASON,RECEIPT_KEY,RECEIPT_CAP,RECENT_CAP,mount
   };
 })(typeof window==='object'?window:globalThis);
