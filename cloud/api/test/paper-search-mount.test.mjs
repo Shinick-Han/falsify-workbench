@@ -108,6 +108,16 @@ function oaiByNc() {
 </OAI-PMH>`;
 }
 
+function oaiCcBy() {
+  return `<?xml version="1.0"?>
+<OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/">
+  <GetRecord><record>
+    <header><identifier>oai:arXiv.org:${SEARCH_ID}</identifier></header>
+    <metadata><arXiv><id>${SEARCH_ID}</id><license>http://creativecommons.org/licenses/by/4.0/</license></arXiv></metadata>
+  </record></GetRecord>
+</OAI-PMH>`;
+}
+
 function outbound(request, calls) {
   const url = new URL(request.url);
   calls.push({
@@ -125,7 +135,11 @@ function outbound(request, calls) {
     return new Response(openAlexBody(), { status: 200, headers: { 'Content-Type': 'application/json' } });
   }
   if (url.hostname === 'oaipmh.arxiv.org') {
-    return new Response(oaiByNc(), { status: 200, headers: { 'Content-Type': 'text/xml' } });
+    const allowed = url.searchParams.get('identifier') === `oai:arXiv.org:${SEARCH_ID}`;
+    return new Response(allowed ? oaiCcBy() : oaiByNc(), { status: 200, headers: { 'Content-Type': 'text/xml' } });
+  }
+  if (url.hostname === 'arxiv.org' && url.pathname === `/pdf/${SEARCH_ID}`) {
+    return new Response('%PDF-1.7 synthetic mount pdf\n%%EOF\n', { status: 200, headers: { 'Content-Type': 'application/pdf' } });
   }
   // A PDF byte fetch or an Atom fallback must fail closed inside the test.
   if (url.hostname === 'arxiv.org' || url.hostname === 'export.arxiv.org') {
@@ -272,6 +286,7 @@ describe('mounted paper search', { concurrency: false }, () => {
       assert.equal(found.headers.get('content-type'), 'application/json; charset=utf-8');
       assert.equal(found.headers.get('cache-control'), 'public, max-age=3600');
       assert.equal(found.headers.get('access-control-allow-origin'), ORIGIN);
+      assert.equal(found.headers.get('access-control-expose-headers'), 'X-Falsify-Confluence-Session, Retry-After, X-Falsify-Paper-License');
       assert.equal(found.body.source, 'arxiv');
       assert.equal(found.body.page, 1);
       assert.equal(found.body.hasMore, true);
@@ -311,6 +326,7 @@ describe('mounted paper search', { concurrency: false }, () => {
       const token = await mintGuest(call);
       const denied = await call('GET', `/v1/papers/pdf?id=${PDF_ID}`, { token });
       assert.equal(denied.status, 403, denied.text);
+      assert.equal(denied.headers.get('access-control-expose-headers'), 'X-Falsify-Confluence-Session, Retry-After, X-Falsify-Paper-License');
       assert.equal(denied.body.error.code, 'license_not_allowed');
       assert.equal(denied.body.error.retryable, false);
       assert.match(denied.body.error.requestId, /^req_[0-9a-f]{32}$/);
@@ -320,6 +336,20 @@ describe('mounted paper search', { concurrency: false }, () => {
       assert.equal(calls.some(item => item.host === 'arxiv.org'), false);
       assert.equal(calls.some(item => item.host === 'export.arxiv.org'), false);
       assert.equal(calls.some(item => item.host === 'api.openalex.org'), false);
+    });
+  });
+
+  test('an allowed PDF exposes X-Falsify-Paper-License without exposing Content-Disposition', async () => {
+    await withApp({ PAPER_SEARCH_ENABLED: 'true' }, async ({ call }) => {
+      const token = await mintGuest(call);
+      const opened = await call('GET', `/v1/papers/pdf?id=${SEARCH_ID}`, { token });
+      assert.equal(opened.status, 200, opened.text);
+      assert.equal(opened.headers.get('access-control-allow-origin'), ORIGIN);
+      assert.equal(opened.headers.get('x-falsify-paper-license'), 'cc-by-4.0');
+      const exposed = opened.headers.get('access-control-expose-headers').split(',').map(name => name.trim().toLowerCase());
+      assert.equal(exposed.includes('x-falsify-paper-license'), true);
+      assert.equal(exposed.includes('retry-after'), true);
+      assert.equal(exposed.includes('content-disposition'), false);
     });
   });
 

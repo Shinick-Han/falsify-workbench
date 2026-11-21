@@ -888,7 +888,7 @@
         el('summary',{textContent:'다른 공개 논문 직접 찾기'}),
         el('form',{id:'booth-search',className:'booth-search',hidden:true},
           el('label',{for:'booth-search-q',className:'booth-field'},el('span',{className:'booth-klab',textContent:'논문 검색 · CC BY, CC BY-SA, CC0만'}),
-            el('input',{id:'booth-search-q',type:'search',maxlength:'200',placeholder:'제목 또는 주제',autocomplete:'off'})),
+            el('input',{id:'booth-search-q',type:'search',maxlength:'200',placeholder:'영어 제목 또는 주제',autocomplete:'off'})),
           el('button',{id:'booth-search-go',type:'submit',className:'booth-btn line',textContent:'검색'}),
           el('p',{id:'booth-search-status',className:'booth-feedback',role:'status','aria-live':'polite'}),
           el('div',{id:'booth-search-results',className:'booth-search-results'}),
@@ -1742,15 +1742,16 @@
       setStep('edit');
       if(pageHint) followPageHint(pageHint);
     }
-    async function startPaper(next, id, statusId, pageHint){
+    async function startPaper(next, id, statusId, pageHint, nextHint){
       if(opening) return false;
       opening=true;
       openFailure=null;
       let ok=false;
       try{ok=await openPdf(id,next,'arxiv-'+String(id).replace(/[^\w.-]+/g,'_')+'.pdf',statusId);}
       finally{opening=false;}
-      if(!ok) offerRetry(statusId,openFailure,()=>startPaper(next,id,statusId,pageHint));
+      if(!ok) offerRetry(statusId,openFailure,()=>startPaper(next,id,statusId,pageHint,nextHint));
       if(!ok||closed) return false;
+      hint=nextHint||'';
       enterEdit(pageHint);
       return true;
     }
@@ -1788,10 +1789,11 @@
     }
     /* One tap: load the paper (unless it is already open), jump to the hint page, then edit. */
     function chooseMission(mission){
-      hint=typeof mission.hint==='string'?mission.hint.trim():'';
+      if(opening) return Promise.resolve(false);
+      const missionHint=typeof mission.hint==='string'?mission.hint.trim():'';
       const n=missionPage(mission);
-      if(paper&&paper.source==='mission'&&paper.id===mission.paperId){enterEdit(n);return Promise.resolve(true);}
-      return startPaper(missionPaper(mission),mission.paperId,'booth-mission-status',n);
+      if(paper&&paper.source==='mission'&&paper.id===mission.paperId){hint=missionHint;enterEdit(n);return Promise.resolve(true);}
+      return startPaper(missionPaper(mission),mission.paperId,'booth-mission-status',n,missionHint);
     }
     function ticketStub(n){
       const parts=n?[el('span',{className:'n',textContent:String(n)}),el('span',{className:'u',textContent:'쪽'})]:[];
@@ -1865,15 +1867,18 @@
       if(label&&lUrl) parts.push(' · ',extLink(lUrl,label));
       return el('p',{className:'booth-credit booth-search-source'},...parts);
     }
+    /* A tap on the paper that is already open goes back to edit with its edits, as missions do. */
+    function chooseSearchResult(item){
+      if(opening) return Promise.resolve(false);
+      if(paper&&paper.id===item.id){enterEdit(0);return Promise.resolve(true);}
+      return startPaper({source:'arxiv',id:item.id,title:typeof item.title==='string'?item.title:'',license:licenseId(item)},item.id,'booth-search-status',0,'');
+    }
     function searchResultCard(item){
       const title=typeof item.title==='string'&&item.title?item.title:item.id;
       const label=['arXiv '+item.id,licenseLabel(licenseId(item))].filter(Boolean).join(' · ');
       const button=paperTicket(label,title,String(searchMeta(item)),0);
       button.setAttribute('aria-label',title+' · 이 논문으로 도전');
-      button.addEventListener('click',()=>{
-        hint='';
-        void startPaper({source:'arxiv',id:item.id,title:typeof item.title==='string'?item.title:'',license:licenseId(item)},item.id,'booth-search-status',0);
-      });
+      button.addEventListener('click',()=>{void chooseSearchResult(item);});
       const source=searchSourceLink(item);
       return source?el('div',{className:'booth-search-item'},button,source):button;
     }
@@ -1890,6 +1895,12 @@
         pages.append(next);
       }
     }
+    /* OpenAlex and arXiv index English text, so a Hangul query that finds nothing points to English. */
+    function emptySearchLine(){
+      return /[\u1100-\u11FF\u3130-\u318F\uAC00-\uD7AF]/.test(searchQuery)
+        ?'검색 결과가 없어요. 영어로 찾아볼까요? 예: medical imaging'
+        :'검색 결과가 없어요. 다른 단어로 찾아볼까요?';
+    }
     function renderSearch(payload){
       const box=byId('booth-search-results');
       const pages=byId('booth-search-pages');
@@ -1897,7 +1908,7 @@
       box.textContent='';
       pages.textContent='';
       const list=payload&&Array.isArray(payload.results)?payload.results:[];
-      if(!list.length){say('booth-search-status','검색 결과가 없어요. 다른 단어로 찾아볼까요?');pages.hidden=true;return;}
+      if(!list.length){say('booth-search-status',emptySearchLine());pages.hidden=true;return;}
       say('booth-search-status','');
       for(const item of list){
         if(!item||typeof item.id!=='string') continue;
@@ -2564,7 +2575,7 @@
       if(box&&desk&&!box.open){box.open=true;searchOpenedForDesk=true;}
       else if(box&&!desk&&searchOpenedForDesk){box.open=false;searchOpenedForDesk=false;}
       setText('booth-search-go',desk?'찾기':'검색');
-      setAttr('booth-search-q','placeholder',desk?'다른 공개 논문 찾기 · 제목 또는 주제':'제목 또는 주제');
+      setAttr('booth-search-q','placeholder',desk?'다른 공개 논문 찾기 · 영어 제목 또는 주제':'영어 제목 또는 주제');
     }
     function backToPick(){
       cancelMake();
@@ -2660,11 +2671,11 @@
     /* Recipe hook for booth-recipe.js: the mission or search load path by arXiv id. null until config loads. */
     function openPaperById(id, meta){
       if(!liveConfig) return null;
+      if(opening) return Promise.resolve(false);
       const mission=(Array.isArray(liveConfig.missions)?liveConfig.missions:[]).find(item=>item&&item.paperId===id);
       if(mission) return chooseMission(mission);
-      hint='';
-      if(paper&&paper.id===id){enterEdit(0);return Promise.resolve(true);}
-      return startPaper(Object.assign({title:'',license:''},meta,{source:'arxiv',id}),id,'booth-mission-status',0);
+      if(paper&&paper.id===id){hint='';enterEdit(0);return Promise.resolve(true);}
+      return startPaper(Object.assign({title:'',license:''},meta,{source:'arxiv',id}),id,'booth-mission-status',0,'');
     }
     root.FalsifyBoothPaper={
       open:openPaperById,

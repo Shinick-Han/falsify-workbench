@@ -460,6 +460,7 @@ function liveBooth(options = {}) {
     }
     if (path.includes('/v1/papers/pdf')) return options.pdfReply ? options.pdfReply(full) : pdfReply();
     if (path.includes('/v1/papers/search')) {
+      if (options.searchReply) return reply(200, options.searchReply(full));
       return reply(200, {source: 'arxiv', page: 1, hasMore: false, results: [{id: '2503.10497', title: 'Synthetic result', authors: ['Ada'], year: 2026, license: 'cc-by-4.0'}]});
     }
     return reply(404, {error: {code: 'not_found'}});
@@ -1249,12 +1250,12 @@ test('on desktop the paper search is one open row; phones keep the closed disclo
   assert.deepEqual(queries, ['(min-width:1024px)']);
   assert.equal(ids.get('booth-search-box').open, true);
   assert.equal(ids.get('booth-search-go').textContent, '찾기');
-  assert.equal(ids.get('booth-search-q').getAttribute('placeholder'), '다른 공개 논문 찾기 · 제목 또는 주제');
+  assert.equal(ids.get('booth-search-q').getAttribute('placeholder'), '다른 공개 논문 찾기 · 영어 제목 또는 주제');
   media.matches = false;
   for (const fn of media.listeners) fn();
   assert.equal(ids.get('booth-search-box').open, false);
   assert.equal(ids.get('booth-search-go').textContent, '검색');
-  assert.equal(ids.get('booth-search-q').getAttribute('placeholder'), '제목 또는 주제');
+  assert.equal(ids.get('booth-search-q').getAttribute('placeholder'), '영어 제목 또는 주제');
   handle.destroy();
 });
 
@@ -2918,5 +2919,157 @@ test('plan97s-4: missed notes without a page use AI 메모 heading, with a page 
   h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
   await settle();
   assert.equal(h.text('booth-live-note').startsWith('운영진 안내'), true);
+/* plan97s-9 */
+test('plan97s-9: a tap while a paper loads keeps the first paper and its hint', async () => {
+  let release; const gate = new Promise(resolve => { release = resolve; });
+  const h = liveBooth({pdfReply: async () => { await gate; return pdfReply(); }});
+  await settle();
+  useWorkspace([]);
+  missionButtons(h)[0].click();                 // mission A, hint '8쪽 표를 고치세요'
+  await settle();
+  missionButtons(h)[1].dispatchEvent({type: 'pointerdown'});
+  missionButtons(h)[1].click();                 // mission B while A loads
+  h.ids.get('booth-search-q').value = 'Synthetic';
+  h.ids.get('booth-search').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  nodesOf(h.ids.get('booth-search-results')).find(node => node.tagName === 'button').click(); // search card while A loads
+  await settle();
+  release();
+  await settle();
+  assert.equal(h.step(), 'edit');
+  assert.equal(h.text('booth-hint'), '힌트 · 8쪽 표를 고치세요');
+  const pdfCalls = h.calls.filter(call => call.path.includes('/v1/papers/pdf'));
+  assert.equal(pdfCalls.length, 1, 'the busy taps start no second PDF request, prefetch included');
+  h.handle.destroy();
+});
+
+test('plan97s-9: tapping the open search paper again keeps the edits and fetches once', async () => {
+  const h = liveBooth({missions: []});
+  await settle();
+  useWorkspace([]);
+  h.ids.get('booth-search-q').value = 'Synthetic';
+  h.ids.get('booth-search').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  const card = () => nodesOf(h.ids.get('booth-search-results')).find(node => node.tagName === 'button');
+  card().click(); await settle();
+  assert.equal(h.step(), 'edit');
+  boothEdits.add(makeBoothEdit());
+  h.ids.get('booth-edit-back').click();
+  assert.equal(h.step(), 'pick');
+  card().click(); await settle();
+  assert.equal(h.step(), 'edit');
+  assert.equal(boothEdits.list().length, 1, 'the edit survives the re-tap');
+  assert.equal(h.calls.filter(call => call.path.includes('/v1/papers/pdf')).length, 1);
+  assert.equal(h.text('booth-hint'), '힌트 · 숫자, 결론 문장, 표 값 중 한 곳을 골라 티 나지 않게 바꿔 보세요.');
+  h.handle.destroy();
+});
+
+test('plan97s-9: a search card for the open mission paper goes back to edit', async () => {
+  const h = liveBooth();            // MISSIONS[0] and the search stub are both 2503.10497
+  await settle();
+  useWorkspace([]);
+  await pickMission(h);
+  boothEdits.add(makeBoothEdit());
+  h.ids.get('booth-edit-back').click();
+  h.ids.get('booth-search-q').value = 'Synthetic';
+  h.ids.get('booth-search').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  nodesOf(h.ids.get('booth-search-results')).find(node => node.tagName === 'button').click();
+  await settle();
+  assert.equal(h.step(), 'edit');
+  assert.equal(boothEdits.list().length, 1);
+  assert.equal(h.text('booth-hint'), '힌트 · 8쪽 표를 고치세요');
+  assert.equal(h.calls.filter(call => call.path.includes('/v1/papers/pdf')).length, 1);
+  h.handle.destroy();
+});
+
+test('plan97s-9: a Korean query with no results points to English', async () => {
+  const h = liveBooth({searchReply: () => ({source: 'arxiv', page: 1, hasMore: false, results: []})});
+  await settle();
+  const search = q => { h.ids.get('booth-search-q').value = q; h.ids.get('booth-search').dispatchEvent({type: 'submit', preventDefault() {}}); return settle(); };
+  await search('의료 영상');
+  assert.equal(h.text('booth-search-status'), '검색 결과가 없어요. 영어로 찾아볼까요? 예: medical imaging');
+  assert.equal(h.ids.get('booth-search-pages').hidden, true);
+  await search('zzqx');
+  assert.equal(h.text('booth-search-status'), '검색 결과가 없어요. 다른 단어로 찾아볼까요?');
+  h.handle.destroy();
+});
+
+test('plan97s-9: a failed open keeps the hint of the open paper and retry restores the requested hint', async () => {
+  let failSecond = true;
+  const retries = [];
+  const prevRuntime = boothContext.FalsifyBoothRuntime;
+  boothContext.FalsifyBoothRuntime = {offerRetry(_doc, _node, run) { retries.push(run); }};
+  const missions = [
+    MISSIONS[0],
+    {paperId: '2503.10498', title: 'Second mission', license: 'cc-by-4.0', course: 'quick', hint: 'B힌트', pageHint: 2},
+  ];
+  const h = liveBooth({
+    missions,
+    pdfReply: async url => {
+      if (url.includes('2503.10498') && failSecond) {
+        return {ok: false, status: 401, headers: {get() { return null; }}, json: async () => ({error: {code: 'unauthorized'}})};
+      }
+      return pdfReply();
+    },
+  });
+  try {
+    await settle();
+    useWorkspace([]);
+    await pickMission(h);
+    assert.equal(h.text('booth-hint'), '힌트 · 8쪽 표를 고치세요');
+    h.ids.get('booth-edit-back').click();
+    missionButtons(h)[1].click();
+    await settle();
+    assert.equal(h.step(), 'pick');
+    assert.equal(retries.length, 1, 'failed open offers retry');
+    // Re-opening A via search card does not rewrite hint, proving the failed open of B never touched A's hint.
+    h.ids.get('booth-search-q').value = 'Synthetic';
+    h.ids.get('booth-search').dispatchEvent({type: 'submit', preventDefault() {}});
+    await settle();
+    nodesOf(h.ids.get('booth-search-results')).find(node => node.tagName === 'button').click();
+    await settle();
+    assert.equal(h.step(), 'edit');
+    assert.equal(h.text('booth-hint'), '힌트 · 8쪽 표를 고치세요');
+    h.ids.get('booth-edit-back').click();
+    failSecond = false;
+    await retries[0]();
+    await settle();
+    assert.equal(h.step(), 'edit');
+    assert.equal(h.text('booth-hint'), '힌트 · B힌트');
+  } finally {
+    h.handle.destroy();
+    if (prevRuntime === undefined) delete boothContext.FalsifyBoothRuntime;
+    else boothContext.FalsifyBoothRuntime = prevRuntime;
+  }
+});
+
+test('plan97s-9: tapping the open mission while another paper loads does not enter edit', async () => {
+  let release; const gate = new Promise(resolve => { release = resolve; });
+  const h = liveBooth({
+    searchReply: () => ({source: 'arxiv', page: 1, hasMore: false, results: [{id: '2503.10499', title: 'Other paper', authors: ['Bo'], year: 2026, license: 'cc-by-4.0'}]}),
+    pdfReply: async url => {
+      if (url.includes('2503.10499')) await gate;
+      return pdfReply();
+    },
+  });
+  await settle();
+  useWorkspace([]);
+  await pickMission(h);
+  boothEdits.add(makeBoothEdit());
+  h.ids.get('booth-edit-back').click();
+  h.ids.get('booth-search-q').value = 'Other';
+  h.ids.get('booth-search').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  nodesOf(h.ids.get('booth-search-results')).find(node => node.tagName === 'button').click();
+  await settle();
+  assert.equal(h.step(), 'pick');
+  missionButtons(h)[0].click();
+  await settle();
+  assert.equal(h.step(), 'pick', 'tapping the already-open mission while another paper loads does not jump into edit');
+  release();
+  await settle();
+  assert.equal(h.step(), 'edit');
+  assert.equal(h.text('booth-hint'), '힌트 · 숫자, 결론 문장, 표 값 중 한 곳을 골라 티 나지 않게 바꿔 보세요.');
   h.handle.destroy();
 });

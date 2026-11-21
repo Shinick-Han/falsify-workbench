@@ -121,7 +121,8 @@ function errorResponse(error, requestId) {
 }
 
 // Retry-After is exposed on every response so a browser can read a 429 wait even without a refreshed session.
-const EXPOSE_HEADERS = `${SESSION_HEADER}, Retry-After`;
+// X-Falsify-Paper-License is exposed so the event page can bind the OAI-verified licence of a PDF it opened.
+const EXPOSE_HEADERS = `${SESSION_HEADER}, Retry-After, X-Falsify-Paper-License`;
 
 function withRefreshed(response, refreshed) {
   const headers = new Headers(response.headers);

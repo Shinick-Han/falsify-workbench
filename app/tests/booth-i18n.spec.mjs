@@ -176,6 +176,12 @@ test('dictionary and pattern translation, vars interpolation, and whitespace pre
   assert.equal(i18n.t('  내 기록  '), '  My tickets  ');
   assert.equal(i18n.t(' · 5쪽 Table 1의 숫자 하나를 바꿔 결론과 어긋나게 해 보세요. 예: Ragas 충실도 0.95 → 0.50'),
     ' · Change one number in Table 1 on p. 5 so it disagrees with the conclusion. e.g. Ragas faithfulness 0.95 → 0.50');
+  /* plan97s-9 */
+  assert.equal(i18n.t('검색 결과가 없어요. 영어로 찾아볼까요? 예: medical imaging'),
+    'No papers found. Try English words, e.g. medical imaging.');
+  assert.equal(i18n.t('영어 제목 또는 주제'), 'Title or topic in English');
+  assert.equal(i18n.t('다른 공개 논문 찾기 · 영어 제목 또는 주제'),
+    'Search open papers · Title or topic in English');
 
   // Patterns
   assert.equal(i18n.t('기회 3번 남음'), '3 tries left');
