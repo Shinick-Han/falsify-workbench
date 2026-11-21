@@ -334,3 +334,21 @@ test('booth.js: the offline error line, and receipts stay on localStorage withou
   assert.equal(context.FalsifyBooth.errorMessage('offline'), '인터넷 연결이 끊겼어요. 연결되면 다시 눌러 주세요.');
   assert.match(boothSource, /return rt&&typeof rt\.storage==='function'\?rt\.storage\(\):root\.localStorage;/);
 });
+
+test('saved progress truncates >300-char titles instead of dropping them and keeps edits past page 500', () => {
+  const R = load().FalsifyBoothRuntime;
+  const now = 1_800_000_000_000;
+  const longTitle = 'Long\nTitle\t' + 'A'.repeat(350);
+  const deepPageEdit = {...SAMPLE_EDIT, pageIndex: 520};
+  const saved = {
+    v: 2, at: now - 1000, step: 'edit', paperId: '2309.15217',
+    title: longTitle, license: 'cc-by-4.0', tab: 'find', assist: 'manual',
+    edits: JSON.stringify([deepPageEdit]),
+  };
+  const read = R.readProgress(JSON.stringify(saved), now);
+  assert.ok(read);
+  assert.equal(read.title.length, 300);
+  assert.equal(read.title.startsWith('Long Title AAAA'), true);
+  assert.equal(read.count, 1);
+  assert.equal(JSON.parse(read.edits)[0].pageIndex, 520);
+});

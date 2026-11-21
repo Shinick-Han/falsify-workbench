@@ -34,3 +34,57 @@ test('BLUE sign reflects busy, result and ready states',()=>{
     assert.equal(s.node('#sign-title').textContent,title);
   }
 });
+test('event booth mode skips shared FalsifyImport 200p extraction while Workbench keeps it',async()=>{
+  function mountApp(boothMode){
+    const nodes=new Map(), docEvents=[];
+    function node(selector){
+      if(!nodes.has(selector)){
+        const listeners=new Map();
+        nodes.set(selector,{
+          value:'',hidden:false,textContent:'',dataset:{},files:[],
+          classList:{remove(){},add(){}},
+          replaceChildren(){},
+          addEventListener(type,fn){if(!listeners.has(type))listeners.set(type,[]);listeners.get(type).push(fn);},
+          fire(type,ev){return Promise.all((listeners.get(type)||[]).map(fn=>fn(ev)));},
+          querySelectorAll(){return [];},focus(){},scrollIntoView(){},closest(){return this;}
+        });
+      }
+      return nodes.get(selector);
+    }
+    let extractCalls=0;
+    const document={
+      querySelector:node,
+      querySelectorAll(){return [];},
+      getElementById:id=>(boothMode&&id==='booth'?{id:'booth'}:null),
+      addEventListener(){},
+      dispatchEvent(ev){docEvents.push(ev.type);}
+    };
+    const context={
+      document,Event,CustomEvent,AbortController,
+      location:{hash:'#workbench'},history:{replaceState(){},pushState(){}},
+      matchMedia:()=>({matches:true}),clearTimeout(){},addEventListener(){},scrollTo(){},
+      FalsifyImport:{extract:async()=>{extractCalls+=1;throw new Error('200쪽을 넘는 PDF는 지원하지 않습니다.');}}
+    };
+    if(boothMode) context.FalsifyCloudConfig={booth:{enabled:true}};
+    context.globalThis=context;
+    vm.runInNewContext(source,context);
+    return {node,docEvents,extractCalls:()=>extractCalls};
+  }
+  const fakeFile={name:'205-pages.pdf',type:'application/pdf'};
+  const boothApp=mountApp(true);
+  const boothInput=boothApp.node('#paper-file');
+  boothInput.value='C:\\fakepath\\205-pages.pdf';
+  await boothInput.fire('change',{target:{files:[fakeFile]}});
+  assert.equal(boothApp.extractCalls(),0,'booth event page skips shared 200p import');
+  assert.equal(boothInput.value,'C:\\fakepath\\205-pages.pdf','#paper-file is not cleared by shared import');
+  assert.ok(boothApp.docEvents.includes('falsify:document-clear'));
+  await boothApp.node('#import-clear').fire('click',{});
+  assert.equal(boothInput.value,'','#import-clear still clears #paper-file on reset');
+
+  const workbenchApp=mountApp(false);
+  const wbInput=workbenchApp.node('#paper-file');
+  wbInput.value='C:\\fakepath\\205-pages.pdf';
+  await wbInput.fire('change',{target:{files:[fakeFile]}});
+  assert.equal(workbenchApp.extractCalls(),1,'Workbench still runs FalsifyImport.extract');
+  assert.equal(wbInput.value,'','Workbench still clears #paper-file when import fails');
+});

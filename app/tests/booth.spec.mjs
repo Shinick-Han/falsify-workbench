@@ -3385,3 +3385,225 @@ test('other device (claim only, no local edits) renders all per-edit findings, k
   assert.equal(nodesOf(h.ids.get('booth-live-note')).find(n => n.className === 'booth-txt booth-opinion-en').textContent, 'Legacy reason');
   h.handle.destroy();
 });
+
+test('search selection truncates >300-char titles cleanly and keeps the paper accessible through submit and receipt', async () => {
+  const longTitle = 'A '.repeat(180) + 'Title\nWith\tControls ' + '\u{1D400}'.repeat(25);
+  const h = liveBooth({
+    searchReply: () => ({
+      source: 'arxiv', page: 1, hasMore: false,
+      results: [{id: '2503.10499', title: longTitle, authors: ['Ada'], year: 2026, licenseVerified: true, license: 'cc-by-4.0'}],
+    }),
+  });
+  await settle();
+  useWorkspace([]);
+  h.ids.get('booth-search-q').value = 'long title';
+  h.ids.get('booth-search').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  const cardBtn = nodesOf(h.ids.get('booth-search-results')).find(node => node.tagName === 'button');
+  assert.ok(cardBtn, 'searchable >300-char result renders');
+  const titleNode = nodesOf(cardBtn).find(node => node.className === 'title');
+  assert.ok(titleNode.textContent.length > 0 && titleNode.textContent.length <= 300);
+  assert.ok([...titleNode.textContent].length <= 300);
+  assert.equal(/[\u0000-\u001f\u007f]/.test(titleNode.textContent), false);
+  cardBtn.click();
+  await settle();
+  assert.equal(h.step(), 'edit');
+  const openedTitle = boothContext.FalsifyBoothPaper.current().title;
+  assert.equal(openedTitle, titleNode.textContent);
+  boothEdits.add(ONE_EDIT[0]);
+  h.ids.get('booth-next').click();
+  await waitFor(() => h.step() === 'send');
+  declare(h, '수치·통계', '평균을 바꿨습니다');
+  await submit(h);
+  assert.equal(h.step(), 'ticket');
+  const posted = h.calls.find(call => call.path.endsWith('/v1/booth/submissions'));
+  assert.ok(posted, 'submission succeeded without paper_not_allowed');
+  const meta = JSON.parse(posted.form.get('meta'));
+  assert.equal(meta.paper.title, openedTitle);
+  assert.ok(meta.paper.title.length <= 300 && [...meta.paper.title].length <= 300);
+  const stored = booth.readReceipts(h.storage);
+  assert.equal(stored[0].title, openedTitle, 'receipt preserves truncated title');
+  // Pure helpers also sanitize >300-char titles instead of rejecting or dropping.
+  const direct = booth.buildSubmission({
+    course: 'quick', consentVersion: '2026-11-22.v2', editedSha256: EDITED_SHA,
+    paper: {source: 'arxiv', id: '2503.10499', title: 'X'.repeat(420), license: 'cc-by-4.0'},
+    rows: [{pageIndex: 0, before: 'a', after: 'b', defectType: 'other', reason: 'r'}],
+  });
+  assert.equal(direct.ok, true);
+  assert.equal(direct.body.paper.title.length, 300);
+  assert.equal(booth.receiptRecord({receipt: 'F-0042', claimKey: '7Q3K-M9XD', createdAt: '2026-11-22T01:00:30Z', title: 'Y'.repeat(420)}).title.length, 300);
+  h.handle.destroy();
+});
+
+test('workspace PDF parse, password, timeout and scanned 0-text failures stay on pick with query intact and consume no submission', async () => {
+  const results = [
+    {id: '2401.00011', title: 'Encrypted paper', authors: ['A'], year: 2024, licenseVerified: true, license: 'cc-by-4.0'},
+    {id: '2401.00012', title: 'Corrupt paper', authors: ['B'], year: 2024, licenseVerified: true, license: 'cc-by-4.0'},
+    {id: '2401.00013', title: 'Timeout paper', authors: ['C'], year: 2024, licenseVerified: true, license: 'cc-by-4.0'},
+    {id: '2401.00014', title: 'Scanned blank paper', authors: ['D'], year: 2024, licenseVerified: true, license: 'cc-by-4.0'},
+    {id: '2401.00015', title: 'Scanned arXiv stamp only paper', authors: ['E'], year: 2024, licenseVerified: true, license: 'cc-by-4.0'},
+    {id: '2401.00016', title: 'Valid paper', authors: ['F'], year: 2024, licenseVerified: true, license: 'cc-by-4.0'},
+  ];
+  const h = liveBooth({
+    searchReply: () => ({source: 'arxiv', page: 1, hasMore: false, results}),
+  });
+  await settle();
+  let mode = 'encrypted';
+  let currentPdfDoc = null;
+  useWorkspace([]);
+  boothContext.FalsifyPaperWorkspace.getPdfDoc = () => currentPdfDoc;
+  h.ids.get('paper-file').addEventListener('change', () => {
+    const file = h.ids.get('paper-file').files && h.ids.get('paper-file').files[0];
+    currentPdfDoc = null;
+    h.doc.dispatchEvent({type: 'falsify:paper-workspace-loading', detail: {file}});
+    setTimeout(() => {
+      if (mode === 'encrypted') {
+        h.doc.dispatchEvent({type: 'falsify:paper-workspace-pdf-error', detail: {file, code: 'pdf_encrypted', name: 'PasswordException'}});
+      } else if (mode === 'corrupt') {
+        h.doc.dispatchEvent({type: 'falsify:paper-workspace-pdf-error', detail: {file, code: 'pdf_corrupt', name: 'InvalidPDFException'}});
+      } else if (mode === 'timeout') {
+        h.doc.dispatchEvent({type: 'falsify:paper-workspace-pdf-error', detail: {file, code: 'pdf_timeout', name: 'TimeoutError'}});
+      } else if (mode === 'blank' || mode === 'stamp' || mode === 'valid') {
+        const items = mode === 'blank'
+          ? []
+          : (mode === 'stamp' ? [{str: 'arXiv:2401.00015v1  [cs.CV]  10 Jan 2024'}] : [{str: 'Editable body text 0.95'}]);
+        currentPdfDoc = {
+          numPages: 2,
+          async getPage() { return {async getTextContent() { return {items}; }, cleanup() {}}; },
+        };
+        h.doc.dispatchEvent({type: 'falsify:paper-workspace-pdf', detail: {file, fileHash: SOURCE_SHA, pages: 2}});
+      }
+    }, 0);
+  });
+
+  h.ids.get('booth-search-q').value = 'medical imaging';
+  h.ids.get('booth-search').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  const buttons = () => nodesOf(h.ids.get('booth-search-results')).filter(node => node.tagName === 'button');
+  assert.equal(buttons().length, 6);
+
+  const expected = [
+    ['encrypted', 0, /암호가 걸린 PDF/],
+    ['corrupt', 1, /PDF를 읽지 못했어요/],
+    ['timeout', 2, /같은 논문을 눌러 다시 열어/],
+    ['blank', 3, /편집할 텍스트가 없는 스캔 PDF/],
+    ['stamp', 4, /편집할 텍스트가 없는 스캔 PDF/],
+  ];
+  for (const [nextMode, idx, pattern] of expected) {
+    mode = nextMode;
+    buttons()[idx].click();
+    await waitFor(() => pattern.test(h.text('booth-search-status')));
+    assert.equal(h.step(), 'pick', nextMode + ' stays on pick');
+    assert.equal(h.ids.get('booth-search-q').value, 'medical imaging', nextMode + ' keeps query');
+    assert.equal(buttons().length, 6, nextMode + ' keeps search results');
+    assert.equal(boothContext.FalsifyBoothPaper.current(), null, nextMode + ' clears failed paper');
+    assert.equal(h.calls.filter(c => c.path.endsWith('/v1/booth/submissions')).length, 0, nextMode + ' consumes no submission');
+  }
+
+  mode = 'valid';
+  buttons()[5].click();
+  await waitFor(() => h.step() === 'edit');
+  assert.equal(h.text('booth-search-status'), '');
+  assert.equal(boothContext.FalsifyBoothPaper.current().id, '2401.00016');
+  h.handle.destroy();
+});
+
+test('11+ page PDFs with empty front matter permit editing when later pages have text, and reject only after scanning all pages empty', async () => {
+  const results = [
+    {id: '2401.00111', title: 'Late text after 10 image pages', authors: ['G'], year: 2024, licenseVerified: true, license: 'cc-by-4.0'},
+    {id: '2401.00112', title: 'Fully scanned 12-page PDF', authors: ['H'], year: 2024, licenseVerified: true, license: 'cc-by-4.0'},
+  ];
+  const h = liveBooth({
+    searchReply: () => ({source: 'arxiv', page: 1, hasMore: false, results}),
+  });
+  await settle();
+  let mode = 'late';
+  let currentPdfDoc = null;
+  let inspectedPages = [];
+  useWorkspace([]);
+  boothContext.FalsifyPaperWorkspace.getPdfDoc = () => currentPdfDoc;
+  boothContext.FalsifyPaperWorkspace.getPageIndex = () => 0;
+  h.ids.get('paper-file').addEventListener('change', () => {
+    const file = h.ids.get('paper-file').files && h.ids.get('paper-file').files[0];
+    inspectedPages = [];
+    currentPdfDoc = {
+      numPages: 12,
+      async getPage(p) {
+        inspectedPages.push(p);
+        const items = mode === 'late' && p === 11 ? [{str: 'Selectable body text 0.95 on page 11'}] : [];
+        return {async getTextContent() { return {items}; }, cleanup() {}};
+      },
+    };
+    h.doc.dispatchEvent({type: 'falsify:paper-workspace-loading', detail: {file}});
+    setTimeout(() => {
+      h.doc.dispatchEvent({type: 'falsify:paper-workspace-pdf', detail: {file, fileHash: SOURCE_SHA, pages: 12}});
+    }, 0);
+  });
+
+  h.ids.get('booth-search-q').value = 'atlas';
+  h.ids.get('booth-search').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  const buttons = () => nodesOf(h.ids.get('booth-search-results')).filter(node => node.tagName === 'button');
+  assert.equal(buttons().length, 2);
+
+  // 1. 12-page PDF with empty pages 1..10 and text on page 11 enters edit immediately and stays editable.
+  mode = 'late';
+  buttons()[0].click();
+  await waitFor(() => h.step() === 'edit');
+  await settle();
+  assert.equal(h.step(), 'edit', 'inconclusive 10-page prefix permits editing when page 11 has text');
+  assert.equal(boothContext.FalsifyBoothPaper.current().id, '2401.00111');
+  assert.ok(inspectedPages.includes(11), 'background tail scan checked page 11 and stopped on text');
+  assert.equal(inspectedPages.includes(12), false, 'tail scan stopped as soon as page 11 had text');
+  boothEdits.add(makeBoothEdit({pageIndex: 10, originalText: '0.95', newText: '0.50'}));
+  h.ids.get('booth-next').click();
+  await waitFor(() => h.step() === 'send');
+  declare(h, '수치·통계', '11쪽 숫자 수정');
+  await submit(h);
+  assert.equal(h.step(), 'ticket');
+  assert.equal(h.calls.filter(c => c.path.endsWith('/v1/booth/submissions')).length, 1);
+
+  // Return to pick and select a 12-page fully scanned empty PDF: rejected only after all 12 pages scanned.
+  h.ids.get('booth-live-again').click();
+  await settle();
+  h.ids.get('booth-search-q').value = 'atlas';
+  h.ids.get('booth-search').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  mode = 'all-empty';
+  buttons()[1].click();
+  await waitFor(() => /편집할 텍스트가 없는 스캔 PDF/.test(h.text('booth-search-status')));
+  assert.equal(h.step(), 'pick');
+  assert.equal(h.ids.get('booth-search-q').value, 'atlas');
+  assert.equal(buttons().length, 2);
+  assert.equal(inspectedPages.length, 12, 'rejected only after scanning all 12 pages');
+  assert.equal(boothContext.FalsifyBoothPaper.current(), null);
+  assert.equal(h.calls.filter(c => c.path.endsWith('/v1/booth/submissions')).length, 1, 'no extra submission consumed');
+  h.handle.destroy();
+});
+
+test('optional AI or recipe errors never block manual editing and submission', async () => {
+  const broken = [
+    {assist() { throw new Error('recipe crashed'); }},
+    {assist() { return {assist: 'unexpected', extra: 'bad'}; }},
+    undefined,
+  ];
+  try {
+    for (const candidate of broken) {
+      if (candidate === undefined) delete boothContext.FalsifyBoothRecipe;
+      else boothContext.FalsifyBoothRecipe = candidate;
+      const h = liveBooth();
+      await settle();
+      await reachSend(h, [makeBoothEdit({source: 'tap'})]);
+      declare(h, '수치·통계', '직접 고친 값');
+      await submit(h);
+      assert.equal(h.step(), 'ticket', 'manual submit completes despite broken optional recipe');
+      const posted = h.calls.find(call => call.path.endsWith('/v1/booth/submissions'));
+      assert.ok(posted);
+      const meta = JSON.parse(posted.form.get('meta'));
+      assert.equal('assist' in meta, false, 'invalid/throwing optional assist omitted cleanly');
+      h.handle.destroy();
+    }
+  } finally {
+    delete boothContext.FalsifyBoothRecipe;
+  }
+});

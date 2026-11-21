@@ -612,18 +612,29 @@
     }
     return [];
   }
-  async function indexPdfDoc(pdf){
+  function cleanupInactivePage(page, pageIndex){
+    if(!page||typeof page.cleanup!=='function'||pageIndex===currentPageIndex()) return;
+    try{page.cleanup();}catch{}
+  }
+  async function indexOnePage(pdf, p, key){
+    let page=null;
+    try{
+      page=await pdf.getPage(p);
+      if(key&&indexCache.key!==key) return null;
+      const viewport=page.getViewport({scale:1});
+      const content=await page.getTextContent();
+      return indexItems(p-1,content&&content.items||[],viewport);
+    }catch{return null;}
+    finally{cleanupInactivePage(page,p-1);}
+  }
+  async function indexPdfDoc(pdf, key){
     const total=Number(pdf&&pdf.numPages)||0;
     const pages=[];
     for(let p=1;p<=total;p+=1){
-      const page=await pdf.getPage(p);
-      try{
-        const viewport=page.getViewport({scale:1});
-        const content=await page.getTextContent();
-        pages.push(indexItems(p-1,content&&content.items||[],viewport));
-      }finally{
-        if(typeof page.cleanup==='function') page.cleanup();
-      }
+      if(key&&indexCache.key!==key) return pages;
+      const indexed=await indexOnePage(pdf,p,key);
+      if(indexed) pages.push(indexed);
+      if(p%10===0) await sleep(0);
     }
     return pages;
   }
@@ -642,10 +653,14 @@
     }
     return indexCache.pages;
   }
-  function canPreviewFile(src){
-    return !!(src&&src.file&&typeof src.file.arrayBuffer==='function'&&root.FalsifyPreview&&typeof root.FalsifyPreview.defaultImport==='function');
+  function workspaceOwnsPdf(){
+    const ws=workspace();
+    return !!(ws&&typeof ws.getPdfDoc==='function');
   }
-  async function indexSourceFile(src){
+  function canPreviewFile(src){
+    return !workspaceOwnsPdf()&&!!(src&&src.file&&typeof src.file.arrayBuffer==='function'&&root.FalsifyPreview&&typeof root.FalsifyPreview.defaultImport==='function');
+  }
+  async function indexSourceFile(src, key){
     const preview=root.FalsifyPreview;
     const lib=await preview.defaultImport();
     if(lib.GlobalWorkerOptions&&!lib.GlobalWorkerOptions.workerSrc&&root.document){
@@ -653,9 +668,10 @@
     }
     const bytes=new Uint8Array(await src.file.arrayBuffer());
     const doc=await lib.getDocument(preview.pdfParams(bytes,root.document?root.document.baseURI:'')).promise;
-    try{return await indexPdfDoc(doc);}finally{doc.destroy&&doc.destroy();}
+    try{return await indexPdfDoc(doc,key);}finally{doc.destroy&&doc.destroy();}
   }
-  async function runIndexTask(key, task){
+  async function runIndexTask(key, makeTask){
+    const task=Promise.resolve().then(()=>makeTask(key));
     indexCache={key,pages:[],promise:task};
     try{
       const pages=await task;
@@ -677,10 +693,10 @@
     if(!key) return [];
     if(indexCache.key===key&&indexCache.pages.length) return indexCache.pages;
     if(indexCache.key===key&&indexCache.promise) return indexCache.promise;
-    if(pdf) return runIndexTask(key,indexPdfDoc(pdf));
+    if(pdf) return runIndexTask(key,k=>indexPdfDoc(pdf,k));
     const fb=fallbackPagesFromSource(src);
     if(fb.length){indexCache={key,pages:fb,promise:null};return fb;}
-    if(canPreviewFile(src)) return runIndexTask(key,indexSourceFile(src));
+    if(canPreviewFile(src)) return runIndexTask(key,k=>indexSourceFile(src,k));
     return indexFromTextLayer();
   }
 
@@ -727,6 +743,21 @@
       return typeof token==='string'?token:'';
     }catch{return '';}
   }
+  function sanitizeTitle(value){
+    if(typeof value!=='string') return '';
+    const clean=value.replace(/[\u0000-\u001f\u007f]+/g,' ').replace(/\s+/g,' ').trim();
+    if(!clean) return '';
+    const chars=[...clean];
+    if(chars.length<=300&&clean.length<=300) return clean;
+    let out='';
+    let count=0;
+    for(const ch of chars){
+      if(count>=300||out.length+ch.length>300) break;
+      out+=ch;
+      count+=1;
+    }
+    return out.trim();
+  }
   async function searchMeta(paperId){
     const token=await bearer();
     if(!token) return {};
@@ -735,7 +766,7 @@
       const item=(data&&Array.isArray(data.results)?data.results:[]).find(row=>row&&row.id===paperId);
       if(!item) return {};
       const license=typeof item.license==='string'?item.license:(item.license&&item.license.id)||'';
-      return {title:typeof item.title==='string'?item.title:'',license};
+      return {title:sanitizeTitle(item.title),license};
     }catch{return {};}
   }
   function isMission(paperId){
@@ -992,7 +1023,7 @@
       }
       form.addEventListener('submit',event=>{event.preventDefault();void submit();});
       if(find.value) root.setTimeout(()=>{void ensureIndex().then(()=>render());},0);
-      return {form,render};
+      return {form,render,hasQuery:()=>!!find.value.trim()};
     }
 
     const main=findForm({});
@@ -1055,7 +1086,7 @@
       }
       findMore.hidden=key!=='find';
       if(key==='myai'){mountMyAi();void ensureIndex();}
-      if(key==='find') void ensureIndex().then(()=>main.render());
+      if(key==='find'&&main.hasQuery()) void ensureIndex().then(()=>main.render());
     }
 
     /* Result card and one-tap fix rows for ties/misses. */
@@ -1299,12 +1330,19 @@
       const box=doc.getElementById('booth-rows');
       if(!box) return;
       const edits=liveEdits();
-      [...box.querySelectorAll('.booth-card')].forEach((node,i)=>decorateCard(node,edits[i]));
+      [...box.querySelectorAll('.booth-card')].forEach((node,i)=>{try{decorateCard(node,edits[i]);}catch{}});
+    }
+    function needsIndex(){
+      return html.dataset.boothStep==='edit'&&(ui.tab==='myai'||(ui.tab==='find'&&main.hasQuery()));
+    }
+    function syncIndex(){
+      if(!needsIndex()) return;
+      void ensureIndex().then(()=>{if(ui.tab==='find') main.render();});
     }
     function onStep(){
       const step=html.dataset.boothStep;
       if(step==='edit'&&lastRecipe&&lastRecipe.fileHash!==((source()||{}).fileHash||'')) resetResult();
-      if(step==='edit'&&ui.tab==='find') void ensureIndex().then(()=>main.render());
+      if(step==='edit') syncIndex();
       if(step==='send') decorateRows();
     }
     const Observer=root.MutationObserver;
@@ -1320,8 +1358,8 @@
     }
     listeners.add((kind,entry)=>{if(kind==='applied') renderResult(entry);});
     doc.addEventListener('falsify:document-clear',()=>{clearIndex();clearPdfCache();resetResult();});
-    doc.addEventListener('falsify:paper-workspace-source',()=>{void ensureIndex().then(()=>{if(ui.tab==='find') main.render();});});
-    doc.addEventListener('falsify:paper-workspace-pdf',()=>{void ensureIndex().then(()=>{if(ui.tab==='find') main.render();});});
+    doc.addEventListener('falsify:paper-workspace-source',()=>{if(fallbackPagesFromSource(source()).length) syncIndex();});
+    doc.addEventListener('falsify:paper-workspace-pdf',syncIndex);
     root.addEventListener('resize',placeFind);
     placeFind();
     onStep();

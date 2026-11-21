@@ -1598,6 +1598,48 @@ test('dispose and remount detach input listeners and reject stale source',async(
   v.file(pdfFile(pdfBytes('MARKER-B')));await until(()=>v.log.tasks.length>=2,'new load');v.log.tasks.at(-1).open();await until(()=>next.getSource()?.fileHash===sha(pdfBytes('MARKER-B')),'new source');assert.equal(v.ws.getSource(),null);assert.equal(v.log.tasks.length,2);next.dispose();
 });
 
+test('PDF open emits synchronous loading, pdf file detail on success, and typed error events on PasswordException/InvalidPDFException',async()=>{
+  const w=dom(),events=[];
+  let mode='ok';
+  const fakeLib={
+    GlobalWorkerOptions:{},
+    TextLayer:class{constructor(){this.textDivs=[];} render(){return Promise.resolve();} cancel(){}},
+    getDocument(){
+      const task={destroyed:false,destroy:async()=>{task.destroyed=true;}};
+      if(mode==='password') task.promise=Promise.reject(Object.assign(new Error('No password given'),{name:'PasswordException'}));
+      else if(mode==='invalid') task.promise=Promise.reject(Object.assign(new Error('Invalid PDF structure'),{name:'InvalidPDFException'}));
+      else task.promise=Promise.resolve({numPages:1,getPage:async()=>({getViewport:({scale})=>({width:612*scale,height:792*scale,viewBox:[0,0,612,792],rotation:0}),getTextContent:async()=>({items:ITEMS}),cleanup(){},render(){return {promise:Promise.resolve(),cancel(){}};}})});
+      return task;
+    }
+  };
+  for(const type of ['falsify:paper-workspace-loading','falsify:paper-workspace-pdf','falsify:paper-workspace-pdf-error']){
+    w.document.addEventListener(type,ev=>events.push({type,detail:ev.detail}));
+  }
+  const ws=api.create({document:w.document,edits:editCore(),storage:memory(),sourceBlobs:blobMemory(),subtle:crypto.subtle,timers:{setTimeout,clearTimeout},urls:URL,preview:{pdfParams:Preview.pdfParams,fitScale:Preview.fitScale,defaultImport:async()=>fakeLib}});
+  const open=f=>{w.get('paper-file').files=[f];w.get('paper-file').dispatchEvent(new Event('change'));};
+
+  mode='password';
+  const f1=pdfFile(pdfBytes('ENC'),'enc.pdf');
+  open(f1);
+  assert.equal(events.at(-1).type,'falsify:paper-workspace-loading','loading fires synchronously on change');
+  assert.equal(events.at(-1).detail.file,f1);
+  await until(()=>events.some(e=>e.type==='falsify:paper-workspace-pdf-error'&&e.detail.file===f1),'password error');
+  assert.equal(events.find(e=>e.type==='falsify:paper-workspace-pdf-error'&&e.detail.file===f1).detail.code,'pdf_encrypted');
+
+  mode='invalid';
+  const f2=pdfFile(pdfBytes('BAD'),'bad.pdf');
+  open(f2);
+  await until(()=>events.some(e=>e.type==='falsify:paper-workspace-pdf-error'&&e.detail.file===f2),'invalid error');
+  assert.equal(events.find(e=>e.type==='falsify:paper-workspace-pdf-error'&&e.detail.file===f2).detail.code,'pdf_corrupt');
+
+  mode='ok';
+  const f3=pdfFile(pdfBytes('OK'),'ok.pdf');
+  open(f3);
+  await until(()=>events.some(e=>e.type==='falsify:paper-workspace-pdf'&&e.detail.file===f3),'ok pdf');
+  assert.equal(events.find(e=>e.type==='falsify:paper-workspace-pdf'&&e.detail.file===f3).detail.pages,1);
+  ws.dispose();
+});
+
 (async()=>{let passed=0;for(const [name,fn] of tests){try{await fn();passed++;console.log('PASS '+name);}catch(e){console.error('FAIL '+name+'\n'+(e.stack||e));process.exitCode=1;}}
   console.log(JSON.stringify({file:'paper-workspace.spec.cjs',passed,failed:tests.length-passed,total:tests.length}));})();
 
