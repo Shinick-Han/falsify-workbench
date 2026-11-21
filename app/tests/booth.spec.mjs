@@ -2560,3 +2560,150 @@ test('per-defect results drive nothing on an invalid outcome, a short list or du
   const whole = booth.resultView({status: 'judged', published: true, outcome: 'missed', declaredCount: 4, editResults: four});
   assert.equal(whole.title, '4개 중 1개가 AI 눈을 피했어요');
 });
+
+/* plan97s-1 */
+test('plan97s-1 F-01: line breaks and controls in the reason become one space and never block', () => {
+  const base = {course: 'quick', consentVersion: 'v1', paper: {source: 'mission', id: '2503.10497', license: 'cc-by-4.0'}, editedSha256: 'a'.repeat(64)};
+  const row = reason => ({pageIndex: 0, before: 'a', after: 'b', defectType: 'number', reason});
+  const reasons = built => plain(built.body.declared.map(item => item.reason));
+  const built = booth.buildSubmission({...base, rows: [row('첫 줄\n둘째 줄'), row('a\r\n\r\nb'), row('tab\there'), row('x\u0000y'), row(' \n \n ')]});
+  assert.equal(built.ok, true);
+  assert.deepEqual(reasons(built), ['첫 줄 둘째 줄', 'a b', 'tab here', 'x y', booth.NO_REASON]);
+  const long = booth.buildSubmission({...base, rows: [row('가'.repeat(600)), row('😀'.repeat(300))]});
+  assert.equal(long.ok, true, 'an over-long programmatic reason is clipped, not rejected');
+  assert.deepEqual(plain(long.body.declared.map(item => [...item.reason].length)), [500, 250]);
+  assert.equal(long.body.declared.every(item => item.reason.length <= 500), true);
+});
+
+test('plan97s-1 F-01: a reason typed over two lines submits as one line', async () => {
+  const h = liveBooth();
+  await settle();
+  await reachSend(h);
+  declare(h, '수치·통계', 'Table 1 숫자를 바꿨어요.\n결론과 모순돼요.');
+  await submit(h);
+  const posts = h.calls.filter(call => call.path.endsWith('/v1/booth/submissions'));
+  assert.equal(posts.length, 1);
+  const meta = JSON.parse(posts[0].form.get('meta'));
+  assert.deepEqual(plain(meta.declared.map(item => [item.defectType, item.reason])), [['number', 'Table 1 숫자를 바꿨어요. 결론과 모순돼요.']]);
+  assert.equal(h.step(), 'ticket');
+  h.handle.destroy();
+});
+
+async function backAndRemake(h, change) {
+  h.ids.get('booth-send-back').click();
+  await settle();
+  assert.equal(h.step(), 'edit');
+  change();
+  h.ids.get('booth-next').click();
+  await waitFor(() => h.step() === 'send');
+}
+function card(h, row) {
+  return nodesOf(h.ids.get('booth-rows')).filter(node => node.className === 'booth-panel booth-card')[row];
+}
+function cardReason(h, row) {
+  return nodesOf(card(h, row)).find(node => node.tagName === 'textarea').value;
+}
+function pressed(h, row) {
+  return nodesOf(card(h, row)).filter(node => node.tagName === 'button' && node.getAttribute('aria-pressed') === 'true').map(node => node.textContent);
+}
+
+test('plan97s-1 A-05: a deleted edit does not lend its type and reason to a new edit', async () => {
+  const h = liveBooth();
+  await settle();
+  await reachSend(h);
+  declare(h, '수치·통계', 'Changed 4.2 to 5.8');
+  await backAndRemake(h, () => {
+    boothEdits.remove('e-1');
+    boothEdits.add(makeBoothEdit({id: 'e-9', pageIndex: 6, rects: [{x: 0.5, y: 0.6, w: 0.2, h: 0.02}], originalText: BEFORE_2, newText: AFTER_2}));
+  });
+  assert.equal(cardReason(h, 0), '');
+  assert.deepEqual(pressed(h, 0), []);
+  await submit(h);
+  const meta = JSON.parse(h.calls.filter(call => call.path.endsWith('/v1/booth/submissions'))[0].form.get('meta'));
+  assert.deepEqual(plain(meta.declared.map(item => [item.pageIndex, item.defectType, item.reason])), [[6, 'other', booth.NO_REASON]]);
+  h.handle.destroy();
+});
+
+test('plan97s-1 A-05: with two edits, deleting the first keeps the second and leaves a new one blank', async () => {
+  const h = liveBooth({maxDeclared: 5});
+  await settle();
+  await reachSend(h, [makeBoothEdit({id: 'e-1'}), makeBoothEdit({id: 'e-2', pageIndex: 6, rects: [{x: 0.5, y: 0.6, w: 0.2, h: 0.02}], originalText: BEFORE_2, newText: AFTER_2})]);
+  declare(h, '수치·통계', 'first', 0);
+  declare(h, '방법·실험 설계', 'second', 1);
+  await backAndRemake(h, () => {
+    boothEdits.remove('e-1');
+    boothEdits.add(makeBoothEdit({id: 'e-3', pageIndex: 3, rects: [{x: 0.1, y: 0.8, w: 0.2, h: 0.02}], originalText: 'alpha', newText: 'beta'}));
+  });
+  assert.deepEqual([cardReason(h, 0), pressed(h, 0)], ['second', ['방법·실험 설계']], 'e-2 keeps its own by id');
+  assert.deepEqual([cardReason(h, 1), pressed(h, 1)], ['', []], 'e-3 starts blank');
+  h.handle.destroy();
+});
+
+test('plan97s-1 A-05: an edit redone in the same place keeps its type and reason', async () => {
+  const h = liveBooth();
+  await settle();
+  await reachSend(h);
+  declare(h, '수치·통계', 'kept');
+  await backAndRemake(h, () => {
+    boothEdits.remove('e-1');
+    boothEdits.add(makeBoothEdit({id: 'e-2', newText: 'The mean was 6.1 (SD 1.1).', source: 'paragraph'}));
+  });
+  assert.equal(cardReason(h, 0), 'kept');
+  assert.deepEqual(pressed(h, 0), ['수치·통계']);
+  // Replacing with different original text on the same page does not inherit; re-editing the same original text keeps it.
+  await backAndRemake(h, () => {
+    boothEdits.remove('e-2');
+    boothEdits.add(makeBoothEdit({id: 'e-9', originalText: BEFORE_2, newText: AFTER_2}));
+  });
+  assert.equal(cardReason(h, 0), '');
+  assert.deepEqual(pressed(h, 0), []);
+  declare(h, '방법·실험 설계', '환자 수를 바꿨어요');
+  await backAndRemake(h, () => {
+    boothEdits.remove('e-9');
+    boothEdits.add(makeBoothEdit({id: 'e-10', originalText: BEFORE_2, newText: 'We included 99 patients.'}));
+  });
+  assert.equal(cardReason(h, 0), '환자 수를 바꿨어요');
+  assert.deepEqual(pressed(h, 0), ['방법·실험 설계']);
+  h.handle.destroy();
+});
+
+/* plan97s-3 */
+test('saved progress wins over a finished newest receipt; pending and #booth-result still resume', async () => {
+  const draft = {raw: null};
+  boothContext.sessionStorage = {getItem(key) { return key === 'falsify.booth.progress.v1' ? draft.raw : null; }};
+  boothContext.FalsifyBoothRuntime = {PROGRESS_KEY: 'falsify.booth.progress.v1', readProgress: raw => (raw ? {count: 1} : null)};
+  try {
+    const finished = memoryStorage();
+    booth.rememberReceipt(finished, {receipt: 'F-0041', claimKey: 'AAAA-BBBB', createdAt: '2026-11-22T00:55:00Z', outcome: 'caught'});
+    const claim = {receipt: 'F-0041', status: 'judged', course: 'quick', declaredCount: 1, published: true, outcome: 'caught', publicNote: 'n'};
+    draft.raw = '{"v":2}';
+    const kept = liveBooth({storage: finished, claims: [claim]});
+    await settle();
+    assert.equal(kept.claimCalls().length, 0, 'a finished receipt is not reopened while a draft waits');
+    assert.equal(kept.step(), 'pick');
+    assert.equal(kept.ids.get('booth-claim-receipt').value, 'F-0041', '내 기록 is still prefilled');
+    kept.handle.destroy();
+    const hashed = liveBooth({storage: finished, hash: '#booth-result', claims: [claim]});
+    await settle();
+    assert.equal(hashed.claimCalls().length, 1, '#booth-result still opens the newest receipt');
+    assert.equal(hashed.step(), 'ticket');
+    hashed.handle.destroy();
+    draft.raw = null;
+    const noDraft = liveBooth({storage: finished, claims: [claim]});
+    await settle();
+    assert.equal(noDraft.claimCalls().length, 1, 'without a draft the finished ticket reopens as before');
+    assert.equal(noDraft.step(), 'ticket');
+    noDraft.handle.destroy();
+    draft.raw = '{"v":2}';
+    const pending = memoryStorage();
+    booth.rememberReceipt(pending, {receipt: 'F-0042', claimKey: '7Q3K-M9XD', createdAt: '2026-11-22T00:55:00Z'});
+    const live = liveBooth({storage: pending, claims: [{receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1, published: false}]});
+    await settle();
+    assert.equal(live.claimCalls().length, 1, 'a pending receipt still auto-resumes over a draft');
+    assert.equal(live.step(), 'ticket');
+    live.handle.destroy();
+  } finally {
+    delete boothContext.sessionStorage;
+    delete boothContext.FalsifyBoothRuntime;
+  }
+});

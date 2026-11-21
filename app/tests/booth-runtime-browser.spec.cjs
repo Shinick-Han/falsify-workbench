@@ -426,6 +426,80 @@ async function kioskPass(browser, pageErrors) {
   await context.close();
 }
 
+/* plan97s-3 */
+async function finishedDraftPass(browser, pageErrors) {
+  const state = newState();
+  const {context, page} = await openContext(browser, PHONE, state, pageErrors);
+  await page.addInitScript(() => {
+    if (sessionStorage.getItem('__seeded')) return;
+    sessionStorage.setItem('__seeded', '1');
+    const createdAt = new Date(Date.now() - 5 * 60000).toISOString();
+    localStorage.setItem('falsify.booth.receipts.v1', JSON.stringify([{
+      receipt: 'F-0041', claimKey: '7Q3K-M9XD', createdAt, title: 'Ragas', pages: [5], outcome: 'caught',
+    }]));
+    sessionStorage.setItem('falsify.booth.progress.v1', JSON.stringify({
+      v: 2, at: Date.now(), step: 'edit', paperId: '2309.15217', title: 'Ragas', license: 'cc-by-4.0',
+      tab: 'myai', assist: 'manual',
+      edits: JSON.stringify([{pageIndex: 4, rects: [{x: 0.2, y: 0.3, w: 0.05, h: 0.01}], originalText: '0.95', newText: '0.50'}]),
+    }));
+  });
+  await page.goto(base + 'event.html');
+  const panel = page.locator('#booth-resume');
+  await panel.waitFor();
+  assert.equal(await page.evaluate(() => document.documentElement.dataset.boothStep), 'pick');
+  assert.equal(state.claims, 0, 'a finished receipt does not open over a saved draft');
+  assert.equal(await page.locator('#booth-resume-text').textContent(), '고친 곳 1개를 이어서 할까요?');
+  await page.locator('#booth-resume-go').click();
+  await stepIs(page, 'edit');
+  await page.waitForFunction(() => document.querySelector('#booth-dock-count')?.textContent === '고친 곳 1개', null, {timeout: 30000});
+  assert.equal(await page.locator('#booth-tab-myai').getAttribute('aria-selected'), 'true');
+  assert.equal(await page.evaluate(() => sessionStorage.getItem('falsify.booth.progress.v1')), null);
+
+  // Same context, pending receipt + draft while on edit: pending ticket still auto-resumes.
+  await page.evaluate(() => {
+    const createdAt = new Date(Date.now() - 5 * 60000).toISOString();
+    localStorage.setItem('falsify.booth.receipts.v1', JSON.stringify([{
+      receipt: 'F-0042', claimKey: '7Q3K-M9XD', createdAt, title: 'Ragas', pages: [5],
+    }]));
+    sessionStorage.setItem('falsify.booth.progress.v1', JSON.stringify({
+      v: 2, at: Date.now(), step: 'edit', paperId: '2309.15217', title: 'Ragas', license: 'cc-by-4.0',
+      tab: 'myai', assist: 'manual',
+      edits: JSON.stringify([{pageIndex: 4, rects: [{x: 0.2, y: 0.3, w: 0.05, h: 0.01}], originalText: '0.95', newText: '0.50'}]),
+    }));
+  });
+  await page.reload();
+  await stepIs(page, 'ticket');
+  assert.equal(await until(async () => state.claims === 1), true, 'a pending receipt still opens over a draft');
+  assert.equal(await page.locator('#booth-resume').isVisible(), false);
+
+  // Same context, reload made from a finished ticket screen itself: still reopens the finished ticket.
+  state.hooks.claim = route => json(route, 200, {...FINAL_MISSED, receipt: 'F-0041'});
+  await page.evaluate(() => {
+    const createdAt = new Date(Date.now() - 5 * 60000).toISOString();
+    localStorage.setItem('falsify.booth.receipts.v1', JSON.stringify([{
+      receipt: 'F-0041', claimKey: '7Q3K-M9XD', createdAt, title: 'Ragas', pages: [5], outcome: 'missed',
+    }]));
+  });
+  await page.goto(base + 'event.html?r=1#booth-result');
+  await stepIs(page, 'ticket');
+  await page.waitForFunction(() => !document.querySelector('#booth-live-again')?.hidden);
+  assert.equal(await until(async () => state.claims === 2), true, '#booth-result opens the finished ticket');
+  await page.evaluate(() => {
+    history.replaceState(null, '', 'event.html');
+    sessionStorage.setItem('falsify.booth.progress.v1', JSON.stringify({
+      v: 2, at: Date.now(), step: 'edit', paperId: '2309.15217', title: 'Ragas', license: 'cc-by-4.0',
+      tab: 'find', assist: 'manual',
+      edits: JSON.stringify([{pageIndex: 4, rects: [{x: 0.2, y: 0.3, w: 0.05, h: 0.01}], originalText: '0.95', newText: '0.50'}]),
+    }));
+  });
+  await page.reload();
+  await stepIs(page, 'ticket');
+  assert.equal(await until(async () => state.claims === 3), true, 'reloading from the ticket screen reopens the finished ticket');
+  assert.equal(await page.locator('#booth-resume').count(), 0);
+  assert.equal(await page.evaluate(() => sessionStorage.getItem('falsify.booth.progress.v1')), null);
+  await context.close();
+}
+
 async function main() {
   assert.equal(pdfBytes.subarray(0, 5).toString(), '%PDF-');
   const server = serve();
@@ -438,6 +512,7 @@ async function main() {
     if (!only || only === 'return') await returnPass(browser, pageErrors);
     if (!only || only === 'progress') await offlineAndProgressPass(browser, pageErrors);
     if (!only || only === 'kiosk') await kioskPass(browser, pageErrors);
+    if (!only || only === 'finished-draft') await finishedDraftPass(browser, pageErrors);
     assert.equal(pageErrors.join('\n'), '');
   } catch (error) {
     const open = browser && browser.contexts().flatMap(context => context.pages()).at(-1);

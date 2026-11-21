@@ -224,11 +224,17 @@
   function pageIndexOk(pageIndex){
     return Number.isSafeInteger(pageIndex)&&pageIndex>=0&&pageIndex<=9999;
   }
+  /* The reason box is a textarea: Enter, tabs and other control characters become one space, so a typed
+     line break or a multi-line 「내 AI에게」 reason never blocks submit. Empty means NO_REASON. */
+  function declaredReason(value, max){
+    const text=typeof value==='string'?value.replace(/[\u0000-\u001f\u007f]+/g,' ').replace(/\s+/g,' ').trim():'';
+    return trimCodePoints(text||NO_REASON,max);
+  }
   function declaredTexts(row, limits){
     const before=paperText(row.before);
     const after=paperText(row.after);
-    const reason=cleanText(typeof row.reason==='string'&&row.reason.trim()?row.reason.trim():NO_REASON,limits.maxReason);
-    if(before===null||after===null||reason===null||!before) return null;
+    const reason=declaredReason(row.reason,limits.maxReason);
+    if(before===null||after===null||!before) return null;
     return {before,after,reason};
   }
   function declaredSegment(row){
@@ -1337,10 +1343,17 @@
     function editSignature(edits){
       return edits.map(edit=>[edit.pageIndex,edit.originalText!=null?edit.originalText:edit.before,edit.newText!=null?edit.newText:edit.after,JSON.stringify(edit.rects||[])].join('\u0000')).join('\u0001');
     }
-    /* Same edits as last time keep their chips and reasons. */
+    /* Same edits as last time keep their chips and reasons: by id, else once by the same page and original text.
+       A deleted edit's chip and reason never move to a different edit. */
+    function takeSamePlace(spare, row){
+      const at=spare.findIndex(item=>item.pageIndex===row.pageIndex&&item.before===row.before);
+      return at<0?null:spare.splice(at,1)[0];
+    }
     function keepDeclared(nextRows, previous){
-      return nextRows.map((row,index)=>{
-        const old=(row.id&&previous.find(item=>item&&item.id===row.id))||previous[index];
+      const ids=new Set(nextRows.map(row=>row.id).filter(Boolean));
+      const spare=previous.filter(item=>item&&!ids.has(item.id));
+      return nextRows.map(row=>{
+        const old=(row.id&&previous.find(item=>item&&item.id===row.id))||takeSamePlace(spare,row);
         if(!old) return row;
         const reason=old.reasonInput?old.reasonInput.value:old.reason;
         return Object.assign(row,{defectType:old.defectType||'',reason:reason||''});
@@ -2434,13 +2447,22 @@
         setHidden(sectionId,!list.length);
       }
     }
-    /* A reload within 15 min of the newest receipt, or a #booth-result visit, picks the ticket up again. */
+    /* booth-runtime.js saved progress from this tab (try #2's edits) that the reload can offer to resume. */
+    function draftWaiting(){
+      if(!rt||typeof rt.readProgress!=='function') return false;
+      let raw=null;
+      try{raw=root.sessionStorage?root.sessionStorage.getItem(rt.PROGRESS_KEY):null;}catch{return false;}
+      return !!rt.readProgress(raw,now());
+    }
+    /* A reload within 15 min of the newest receipt, or a #booth-result visit, picks the ticket up again.
+       A receipt that already has its result gives way to saved progress, so 「이어서」 can show on pick. */
     function resumeLatest(){
       const latest=readReceipts(storage)[0];
       if(!latest) return;
       const created=Date.parse(latest.createdAt);
       const fresh=Number.isFinite(created)&&now()-created<POLL_STOP_AT;
       if(location.hash!=='#booth-result'&&!fresh) return;
+      if(location.hash!=='#booth-result'&&latest.outcome&&draftWaiting()) return;
       fillClaim(latest);
       void lookupRecord(latest.receipt,latest.claimKey);
     }

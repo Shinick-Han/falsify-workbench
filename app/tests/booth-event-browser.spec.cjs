@@ -374,7 +374,11 @@ async function walk(browser, viewport, desk, pageErrors) {
   assert.match(await card.textContent(), /왜 결함인가요 \(선택\)/);
   await card.getByRole('button', {name: '수치·통계'}).click();
   assert.equal(await card.getByRole('button', {name: '수치·통계'}).getAttribute('aria-pressed'), 'true');
-  await card.locator('textarea').fill('표의 점수를 0.95에서 0.50으로 바꿨습니다');
+  await card.locator('textarea').fill('표의 점수를 0.95에서 0.50으로 바꿨어요.');
+  await card.locator('textarea').press('End');
+  await card.locator('textarea').press('Enter');
+  await card.locator('textarea').pressSequentially('결론과 모순돼요.');
+  assert.equal(await card.locator('textarea').inputValue(), '표의 점수를 0.95에서 0.50으로 바꿨어요.\n결론과 모순돼요.');
   assert.equal(await page.locator('#booth-consent, #booth-consent-panel, #booth-nickname').count(), 0, 'send has no consent box or nickname field');
   await assertNoVisibleFileInput(page, (desk ? 'desktop' : 'phone') + ' send');
   await shot(page, 'send', viewport);
@@ -423,6 +427,7 @@ async function walk(browser, viewport, desk, pageErrors) {
   assert.equal(parsed.meta.declared[0].before, '0.95');
   assert.equal(parsed.meta.declared[0].after, '0.50');
   assert.equal(parsed.meta.declared[0].defectType, 'number');
+  assert.equal(parsed.meta.declared[0].reason, '표의 점수를 0.95에서 0.50으로 바꿨어요. 결론과 모순돼요.');
   assert.equal(parsed.meta.editedSha256, oracle.sha256(parsed.pdfBytes));
   assert.equal(parsed.meta.paper.sourceSha256, oracle.sha256(pdfBytes));
   assert.notEqual(parsed.meta.editedSha256, parsed.meta.paper.sourceSha256);
