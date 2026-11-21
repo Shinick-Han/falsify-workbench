@@ -889,7 +889,16 @@ function normalizeEditResult(item, declaredCount) {
   if (!Number.isSafeInteger(item.pageIndex) || item.pageIndex < 0 || item.pageIndex > 9999) return null;
   const verdict = item.verdict === '' ? 'missed' : item.verdict;
   if (typeof verdict !== 'string' || !EDIT_VERDICTS.has(verdict)) return null;
-  return { index: item.index, pageIndex: item.pageIndex, verdict };
+  const result = { index: item.index, pageIndex: item.pageIndex, verdict };
+  if (verdict !== 'missed' && isObject(item.evidence)) {
+    const evidence = {};
+    for (const [key, limit] of [['quote', 240], ['rationale', 300], ['rationaleEn', 300]]) {
+      const value = item.evidence[key];
+      if (typeof value === 'string' && value.trim()) evidence[key] = value.trim().slice(0, limit);
+    }
+    if (Object.keys(evidence).length) result.evidence = evidence;
+  }
+  return result;
 }
 
 function editResultsFrom(rawSummary, declaredCount) {

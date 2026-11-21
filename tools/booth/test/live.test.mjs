@@ -257,7 +257,10 @@ test('watch and final: any missed edit wins for the visitor and uses the escaped
     assert.equal(item.outcome, 'missed', 'one missed edit means visitor wins');
     assert.equal(item.prizeMessage, 'PRIZE_LIVE');
     assert.match(item.publicNote, /^심어 둔 결함 중 일부는 AI가 찾았어요\. \(AI가 짚은 곳: 5쪽\)/);
-    assert.deepEqual(item.aiSummary.edits, [
+    assert.ok(item.aiSummary.edits[0].evidence.quote);
+    assert.ok(item.aiSummary.edits[0].evidence.rationale);
+    assert.equal(item.aiSummary.edits[1].evidence, undefined);
+    assert.deepEqual(item.aiSummary.edits.map(({ evidence, ...edit }) => edit), [
       { index: 0, pageIndex: 4, verdict: 'caught' },
       { index: 1, pageIndex: 1, verdict: 'missed' },
     ]);
@@ -267,7 +270,8 @@ test('watch and final: any missed edit wins for the visitor and uses the escaped
     const afterFinal = find(fake, 'F-0010');
     assert.equal(afterFinal.outcome, 'caught');
     assert.equal(afterFinal.prizeMessage, 'FINAL_CAUGHT');
-    assert.deepEqual(afterFinal.aiSummary.edits, [
+    assert.equal(afterFinal.aiSummary.edits[1].evidence.quote, OPUS_EXTRA.quote);
+    assert.deepEqual(afterFinal.aiSummary.edits.map(({ evidence, ...edit }) => edit), [
       { index: 0, pageIndex: 4, verdict: 'caught' },
       { index: 1, pageIndex: 1, verdict: 'caught' },
     ]);
