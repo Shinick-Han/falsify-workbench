@@ -472,6 +472,16 @@ class PdfIntakeTests(BaseRuntimeTest):
         self.assertEqual(extraction['pageCount'], 2)
         self.assertEqual(extraction['blockCount'], 3)
 
+    def test_unmapped_glyph_preserves_offsets_and_segment_hash(self):
+        blocks = [(0, 0, 1, 1, text, i, 0) for i, text in enumerate(['x\0y', '\0', 'tail'])]
+        with patch.object(pymupdf.Page, 'get_text', return_value=blocks):
+            result = extract_pdf(synthetic_pdf([['placeholder']]))
+        self.assertEqual([(s['id'], s['text']) for s in result['segments']],
+                         [('p1-b1', 'x\ufffdy'), ('p1-b2', '\ufffd'), ('p1-b3', 'tail')])
+        expected = 'x\ufffdy\n\n\ufffd\n\ntail'
+        self.assertEqual(result['sourceHash'], hashlib.sha256(expected.encode()).hexdigest())
+        self.assertEqual(result['characters'], len(expected))
+
     def test_empty_pdf_is_rejected(self):
         document = pymupdf.open()
         document.new_page()

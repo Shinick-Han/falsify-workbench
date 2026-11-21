@@ -205,6 +205,8 @@
     '접수번호와 확인키 복사':'Copy ticket no. & claim key',
     '접수번호와 확인키를 복사했어요.':'Copied ticket no. and claim key.',
     '복사하지 못했어요. 접수번호와 확인키를 직접 적어 두세요.':'Could not copy. Please write down your ticket no. and claim key.',
+    '검증이 지연되고 있어요':'Review is delayed',
+    '저장된 수정본으로 검증을 이어가요':'Review will continue with your saved PDF',
     'AI가 논문을 읽는 중':'AI is reading the paper',
     'AI 검증 차례를 기다리는 중':'Waiting in the AI check queue',
     '수정본 받음':'Edited PDF received',

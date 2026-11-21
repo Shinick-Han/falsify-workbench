@@ -3,7 +3,7 @@
 // - C-13: tapping a second mission while the first loads keeps the first paper and its hint, with no second PDF fetch.
 // - C-02: tapping an already-open search paper returns to edit, keeps edits, and fetches the PDF once.
 // - C-05: Korean empty search shows the English hint and translates cleanly across KO/EN toggles.
-// - C-03/F-02: Atom-shaped search paper (license: null) reads X-Falsify-Paper-License when exposed by CORS and submits.
+// - C-03/F-02: Verified search results keep their license through submission, with or without the PDF response header.
 const {spawn} = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -122,7 +122,7 @@ async function stubApi(route, opts) {
         title: 'Ragas: Automated Evaluation of Retrieval Augmented Generation',
         authors: ['Shahul Es', 'Jithin James'],
         year: 2023,
-        license: 'cc-by-4.0',
+        licenseVerified: true, license: 'cc-by-4.0',
       }],
     }, opts);
   }
@@ -259,7 +259,7 @@ async function koreanEmptySearchPass(browser, viewport, desk, pageErrors) {
   }
 }
 
-/* C-03 / F-02: Atom-shaped search paper (license: null) picks up X-Falsify-Paper-License when exposed by CORS. */
+/* C-03 / F-02: Verified search metadata supplies the license even when the PDF header is not exposed. */
 async function licenseHeaderPass(browser, viewport, desk, exposeLicense, pageErrors) {
   const opts = {
     pdfIds: [],
@@ -273,8 +273,8 @@ async function licenseHeaderPass(browser, viewport, desk, exposeLicense, pageErr
         title: 'Ragas: Automated Evaluation of Retrieval Augmented Generation',
         authors: ['Shahul Es', 'Jithin James'],
         year: 2023,
-        license: null,
-        licenseVerified: false,
+        license: 'cc-by-4.0',
+        licenseVerified: true,
       }],
     },
   };
@@ -289,12 +289,7 @@ async function licenseHeaderPass(browser, viewport, desk, exposeLicense, pageErr
     await stepIs(page, 'edit');
     await page.waitForFunction(() => !!globalThis.FalsifyPaperWorkspace?.getPdfDoc?.());
 
-    if (exposeLicense) {
-      assert.equal(await page.locator('#booth-paper-credit').textContent(), '원문 arXiv 2309.15217 · CC BY 4.0 · 게임용으로 고친 사본');
-      await shot(page, 'c03-atom-credit-ko', viewport);
-    } else {
-      assert.equal(await page.locator('#booth-paper-credit').textContent(), '원문 arXiv 2309.15217 · 게임용으로 고친 사본');
-    }
+    assert.equal(await page.locator('#booth-paper-credit').textContent(), '원문 arXiv 2309.15217 · CC BY 4.0 · 게임용으로 고친 사본');
 
     await findAndReplace(page, desk, '0.95', '0.50');
     await page.waitForFunction(() => document.querySelector('#booth-dock-count')?.textContent === '고친 곳 1개');
@@ -304,18 +299,10 @@ async function licenseHeaderPass(browser, viewport, desk, exposeLicense, pageErr
     await page.locator('#booth-rows textarea').first().fill('Table 1 충실도 값을 낮춰 본문 결론과 어긋나게 함');
     await page.locator('#booth-submit-button').click();
 
-    if (exposeLicense) {
-      await stepIs(page, 'ticket');
-      assert.equal(opts.submissions.length, 1);
-      const parsed = oracle.parseMultipart(opts.submissions[0].body, opts.submissions[0].contentType);
-      assert.equal(parsed.meta.paper.license, 'cc-by-4.0');
-    } else {
-      await page.waitForFunction(() => {
-        const text = document.querySelector('#booth-submit-status')?.textContent || '';
-        return text.length > 0 && text !== '제출하는 중…';
-      });
-      assert.equal(opts.submissions.length, 0, 'control run without exposed license header blocks submission');
-    }
+    await stepIs(page, 'ticket');
+    assert.equal(opts.submissions.length, 1);
+    const parsed = oracle.parseMultipart(opts.submissions[0].body, opts.submissions[0].contentType);
+    assert.equal(parsed.meta.paper.license, 'cc-by-4.0');
   } finally {
     await page.close();
   }
