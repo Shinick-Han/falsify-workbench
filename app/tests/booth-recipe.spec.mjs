@@ -207,15 +207,24 @@ test('cropBox widens narrow boxes, shifts inside edges, caps height at 1/3 keepi
   near(leftEdge.y, 0.0, 'leftEdge.y');
   near(leftEdge.h, 0.10, 'leftEdge.h');
 
-  // 3. Tall box capped at 1/3 with its top kept (union.top - 0.03 down by 1/3).
-  const tall = plain(recipe.cropBox([
+  // 3. Moderately tall box (padded > 1/3, union + 0.02 <= 1/3) trims padding to 0.01 and caps height at 1/3.
+  const trimmed = plain(recipe.cropBox([
     {x: 0.10, y: 0.20, w: 0.50, h: 0.02},
-    {x: 0.10, y: 0.60, w: 0.50, h: 0.02},
+    {x: 0.10, y: 0.46, w: 0.50, h: 0.02},
   ]));
-  near(tall.y, 0.17, 'tall.y keeps union.top - 0.03');
-  near(tall.h, 1 / 3, 'tall.h capped at 1/3');
+  near(trimmed.y, 0.19, 'trimmed.y keeps union.top - 0.01');
+  near(trimmed.h, 1 / 3, 'trimmed.h capped at 1/3 without cutting union');
+  assert.ok(trimmed.y <= 0.20 && trimmed.y + trimmed.h >= 0.48, 'trimmed crop contains whole union');
 
-  // 4. Wide box padded by 0.02 on each side.
+  // 4. Reviewer rot90 shape (narrow box with h = 0.482 > 1/3): crop never cuts the union.
+  const rot90 = plain(recipe.cropBox([{x: 0.20, y: 0.15, w: 0.02, h: 0.482}]));
+  near(rot90.x, 0.01, 'rot90.x widened and centred');
+  near(rot90.w, 0.40, 'rot90.w');
+  near(rot90.y, 0.14, 'rot90.y = union.top - 0.01');
+  near(rot90.h, 0.502, 'rot90.h = union.h + 0.02');
+  assert.ok(rot90.y <= 0.15 && rot90.y + rot90.h >= 0.15 + 0.482, 'rot90 crop contains whole union');
+
+  // 5. Wide box padded by 0.02 on each side.
   const wide = plain(recipe.cropBox([{x: 0.10, y: 0.40, w: 0.50, h: 0.04}]));
   near(wide.x, 0.08, 'wide.x');
   near(wide.w, 0.54, 'wide.w');

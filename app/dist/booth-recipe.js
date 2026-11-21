@@ -9,7 +9,6 @@
   'use strict';
   const SCHEMA='falsify.booth.recipe.v1';
   const TOP_KEYS=new Set(['schema','paperId','edits','defectType','reason','source','agent']);
-  const SERVER_KEYS=['code','createdAt','expiresAt'];
   const SOURCES=['manual','my-ai','agent'];
   const DEFECT_IDS=['number','figure','citation','logic','method','other'];
   const DEFECT_LABELS={number:'수치·통계',figure:'그림·표',citation:'인용·출처',logic:'논리·결론',method:'방법·실험 설계',other:'기타'};
@@ -33,12 +32,6 @@
   const SNIP=28;
   const WINDOW=40;
   const SIDE_MIN=8;
-  const ERROR_TEXT={
-    invalid_recipe:'레시피 형식이 맞지 않아요.',
-    rate_limited:'지금 요청이 몰려 있어요. 잠시 뒤 다시 눌러 주세요.',
-    network:'서버에 연결하지 못했어요. 네트워크를 확인해 주세요.',
-    no_paper:'레시피의 논문을 열지 못했어요. 다시 시도해 주세요.'
-  };
   const REASON_TEXT={
     not_found:'찾는 글자가 이 논문에 없어요.',
     ambiguous:'같은 글자가 여러 곳에 있어요. 바꿀 곳을 눌러 주세요.',
@@ -114,11 +107,6 @@
     checkEdits(errors,obj.edits);
     checkAgent(errors,obj.agent);
     return {ok:errors.length===0,errors};
-  }
-  function withoutServerKeys(recipe){
-    const copy=Object.assign({},recipe);
-    for(const key of SERVER_KEYS) delete copy[key];
-    return copy;
   }
 
   /* ---------- per-page text index with page-fraction rects ---------- */
@@ -220,12 +208,13 @@
     if(len>=1) return [0,1];
     return [Math.min(Math.max(start,0),1-len),len];
   }
-  /* Crop box around edit.rects in page fractions (0..1): >=0.40 wide, +0.03 top, +0.05 bottom, height <= 1/3. */
+  /* Crop box around edit.rects in page fractions (0..1): >=0.40 wide; +0.03 top/+0.05 bottom
+     when <=1/3 tall, otherwise trim padding to 0.01 and keep at least 1/3 without cutting the union. */
   function cropBox(rects){
     const u=rectsUnion(rects);
     if(!u) return null;
     const [x,w]=u.w<0.40?fitRange(u.x+u.w/2-0.20,0.40):fitRange(u.x-0.02,u.w+0.04);
-    const [y,h]=fitRange(u.y-0.03,Math.min(u.h+0.08,1/3));
+    const [y,h]=u.h+0.08<=1/3?fitRange(u.y-0.03,u.h+0.08):fitRange(u.y-0.01,Math.max(1/3,u.h+0.02));
     return {x,y,w,h};
   }
   function mergeLineRects(list){
@@ -718,28 +707,16 @@
     const hosted=cfg.hostedAi&&typeof cfg.hostedAi==='object'?cfg.hostedAi.apiBase:'';
     return baseOf(hosted)||baseOf(cfg.apiBase);
   }
-  function coded(code){
-    const error=new Error(ERROR_TEXT[code]||code);
-    error.code=code;
-    return error;
-  }
-  function fetchStatusCode(status){
-    if(status===404) return 'not_found';
-    if(status===429) return 'rate_limited';
-    return status===400?'invalid_code':'network';
-  }
   async function fetchJson(path, headers){
     const base=apiBase();
-    if(!base||typeof root.fetch!=='function') throw coded('network');
-    let res=null;
-    try{
-      res=await root.fetch(base+path,{method:'GET',headers:Object.assign({Accept:'application/json'},headers||{}),credentials:'omit',cache:'no-store',redirect:'error'});
-    }catch{throw coded('network');}
-    if(!res||!res.ok) throw coded(fetchStatusCode(res&&res.status));
-    try{return await res.json();}catch{throw coded('invalid_recipe');}
+    if(!base||typeof root.fetch!=='function') throw new Error('network');
+    const res=await root.fetch(base+path,{method:'GET',headers:Object.assign({Accept:'application/json'},headers||{}),credentials:'omit',cache:'no-store',redirect:'error'});
+    if(!res||!res.ok) throw new Error('http');
+    return res.json();
   }
   function invalidRecipe(errors){
-    const error=coded('invalid_recipe');
+    const error=new Error('레시피 형식이 맞지 않아요.');
+    error.code='invalid_recipe';
     error.errors=errors;
     return error;
   }
@@ -856,18 +833,17 @@
     return {applied,unresolved};
   }
   async function apply(recipe, options){
-    const clean=isPlain(recipe)?withoutServerKeys(recipe):recipe;
-    const checked=validate(clean);
+    const checked=validate(recipe);
     if(!checked.ok) throw invalidRecipe(checked.errors);
     const progress=progressFn(options);
-    progress({phase:'paper',paperId:clean.paperId});
-    const opened=await ensurePaper(clean.paperId);
+    progress({phase:'paper',paperId:recipe.paperId});
+    const opened=await ensurePaper(recipe.paperId);
     const pages=opened?await ensureIndex():[];
     const outcome=opened&&pages.length
-      ?applyRecipeEdits(clean,pages,progress)
-      :{applied:[],unresolved:clean.edits.map(edit=>({edit,reason:'no_paper'}))};
-    recordAssist(clean,outcome.applied.map(item=>item.id));
-    lastRecipe={recipe:clean,fileHash:(source()||{}).fileHash||'',outcome};
+      ?applyRecipeEdits(recipe,pages,progress)
+      :{applied:[],unresolved:recipe.edits.map(edit=>({edit,reason:'no_paper'}))};
+    recordAssist(recipe,outcome.applied.map(item=>item.id));
+    lastRecipe={recipe,fileHash:(source()||{}).fileHash||'',outcome};
     progress({phase:'done'});
     emit('applied',lastRecipe);
     return outcome;
@@ -895,7 +871,7 @@
     const editStep=doc.getElementById('booth-step-edit');
     if(!editStep||doc.getElementById('booth-recipe')) return;
     const html=doc.documentElement;
-    const ui={tab:'find',myai:false,busy:false,seq:0,summary:null};
+    const ui={tab:'find',myai:false,seq:0,summary:null};
     function el(tag, props, ...kids){
       const node=doc.createElement(tag);
       for(const [key,value] of Object.entries(props||{})){

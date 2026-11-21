@@ -272,7 +272,7 @@ async function compareFlow(browser, log, errors, wide) {
   assert.equal(await page.locator('#booth-recipe-count').textContent(), '2곳 적용했어요');
   assert.equal(await page.locator('#booth-recipe-fix').isHidden(), true);
 
-  // Add a 3rd multi-line edit spanning 3+ lines (tall enough to test the 1/3 page height cap).
+  // Add a 3rd multi-line edit spanning 3+ lines (padded > 1/3 so padding trims to the 1/3 page height cap).
   const pageHeightPt = await page.evaluate(async () => {
     const pdf = globalThis.FalsifyPaperWorkspace.getPdfDoc();
     const p = await pdf.getPage(5);
@@ -283,7 +283,7 @@ async function compareFlow(browser, log, errors, wide) {
         {x: 0.08, y: 0.48, w: 0.40, h: 0.015},
         {x: 0.08, y: 0.50, w: 0.40, h: 0.015},
         {x: 0.08, y: 0.52, w: 0.40, h: 0.015},
-        {x: 0.08, y: 0.80, w: 0.40, h: 0.015},
+        {x: 0.08, y: 0.745, w: 0.40, h: 0.015},
       ],
       originalText: 'multi-line original block',
       newText: 'multi-line edited block',
@@ -378,6 +378,17 @@ async function compareFlow(browser, log, errors, wide) {
   for (const c of tall.canvases) {
     const cap = (pageHeightPt / 3) * c.scale + 2;
     assert.ok(c.height <= cap, `multi-line canvas height ${c.height} <= ${cap} (pageH=${pageHeightPt}, scale=${c.scale})`);
+  }
+
+  // Narrow 320x800 viewport check (P2-1): no horizontal page overflow on the send step.
+  if (!wide) {
+    await page.setViewportSize({width: 320, height: 800});
+    const narrow = await page.evaluate(() => ({
+      scrollWidth: document.documentElement.scrollWidth,
+      innerWidth: window.innerWidth,
+    }));
+    assert.ok(narrow.scrollWidth <= narrow.innerWidth, '320x800 send step overflow: ' + JSON.stringify(narrow));
+    await page.setViewportSize({width: 390, height: 844});
   }
 
   for (let i = 0; i < 3; i += 1) {

@@ -141,7 +141,7 @@ html[data-booth-step]:not(.booth-pe-zoomed) .paper-compare:has(.paper-inline.is-
 #paper-edits>li:not(:has(>button)){display:none}
 /* Applied edits (phones; desktop shows them in the dock): booth cards, page and old → new text in ink. */
 #paper-edits>li{display:flex;align-items:center;gap:10px;margin:0;padding:6px 6px 6px 14px;background:var(--ev-card,#fff);border-radius:10px;font-size:13px;color:var(--ev-ink,#16191e)}
-#paper-edits>li>.paper-edit-origin,#paper-edits>li>:not(button):not(.booth-recipe-ai-tag){display:none}
+#paper-edits>li>.paper-edit-origin,#paper-edits>li>:not(button){display:none}
 #paper-edits>li .button{min-height:44px;border-radius:8px;font-size:13px;box-shadow:none}
 #paper-edits>li [data-act="edit"]{flex:1 1 auto;min-width:0;display:flex;flex-wrap:wrap;justify-content:flex-start;align-items:baseline;gap:4px 8px;padding:8px 0;text-align:left;white-space:normal;overflow-wrap:anywhere;background:transparent;border:0;color:var(--ev-ink,#16191e);font:400 14px/1.4 var(--ev-sans,sans-serif)}
 #paper-edits .booth-edit-page{font-size:12px;color:var(--ev-muted,#5f656e)}
