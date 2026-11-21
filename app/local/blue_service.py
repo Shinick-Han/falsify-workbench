@@ -1034,8 +1034,9 @@ def run_review(data, progress, cancelled, backend_factory=CodexBackend, claude_f
         coverage = {'complete': complete, 'calls': calls, 'chunks': len(chunks), 'completedChunks': completed, 'reread': reread,
                     'rereadWindows': [{'segmentId': w['segmentId'], 'start': w['start'], 'end': w['end']} for w in windows],
                     'resultCoverage': {'accepted': len(findings), 'rejected': len(rejected), 'unresolved': len(unresolved),
-                                       'modelStatus': model_status or status,
                                        'rejectedItems': list(rejected), 'unresolvedItems': list(unresolved)}}
+        if limits['hosted']:
+            coverage['resultCoverage']['modelStatus'] = model_status or status
         if complete: coverage['meaning'] = MEANING
         if structured: coverage['paperEvidence'] = _paper_evidence_coverage(structured, data, selected_items, auto_crops)
         if external:
