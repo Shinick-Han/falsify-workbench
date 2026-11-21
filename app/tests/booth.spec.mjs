@@ -937,7 +937,7 @@ test('the ticket polls the claim view until the AI result is published', async (
   h.intervals[0].fn();
   assert.equal(h.text('booth-ticket-elapsed'), '0:42');
   h.clock.t -= 42000;
-  assert.equal(h.text('booth-ticket-steps'), '수정본 받음AI가 앞뒤 문장과 표를 대조하는 중결과');
+  assert.equal(h.text('booth-ticket-steps'), '수정본 받음차례가 오면 AI가 앞뒤 문장과 표를 대조해요결과');
   assert.match(h.text('booth-live-capture'), /^이 티켓을 캡처해 두세요\. 화면을 닫아도 「내 기록」에서/);
   assert.equal(h.ids.get('booth-live-again').hidden, true);
   assert.equal(h.text('booth-chances-top'), '기회 4번 남음');
@@ -945,6 +945,7 @@ test('the ticket polls the claim view until the AI result is published', async (
   assert.equal(await h.tick(), 15000);
   assert.deepEqual(h.claimCalls()[0].body, {receipt: 'F-0042', claimKey: '7Q3K-M9XD'});
   assert.equal(h.text('booth-ticket-state'), 'AI가 논문을 읽는 중');
+  assert.equal(h.text('booth-ticket-steps'), '수정본 받음AI가 앞뒤 문장과 표를 대조하는 중결과');
   assert.equal(await h.tick(), 15000);
   assert.equal(await h.tick(), 45000);
   assert.equal(await h.tick(), 60000);
@@ -965,7 +966,7 @@ test('the ticket polls the claim view until the AI result is published', async (
   assert.equal(h.ids.get('booth-ticket-duration-cell').hidden, false);
   assert.equal(h.ids.get('booth-gift').hidden, false);
   assert.match(h.text('booth-gift'), /^교환권 · 1인 1회부스에서 작은 선물을 받아 가세요/);
-  assert.equal(h.text('booth-live-note'), 'AI가 의심한 곳<b>표</b> 값 변경을 놓쳤어요');
+  assert.equal(h.text('booth-live-note'), 'AI 메모<b>표</b> 값 변경을 놓쳤어요');
   assert.equal(h.ids.get('booth-live-again').hidden, false);
   assert.equal(h.text('booth-live-again'), '다시 도전하기 · 기회 4번 남음');
   assert.equal(booth.readReceipts(h.storage)[0].outcome, 'missed');
@@ -985,7 +986,7 @@ test('the ticket polls the claim view until the AI result is published', async (
 });
 
 test('polling stops after 15 min with a recheck button and lookups reuse the ticket', async () => {
-  const pending = {receipt: 'F-0042', status: 'received', course: 'quick', declaredCount: 1, published: false};
+  const pending = {receipt: 'F-0042', status: 'received', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:00Z', published: false};
   const h = liveBooth({claims: [pending]});
   await settle();
   h.ids.get('booth-result-link').dispatchEvent({type: 'click', preventDefault() {}});
@@ -1011,10 +1012,16 @@ test('polling stops after 15 min with a recheck button and lookups reuse the tic
   assert.equal(h.claimCalls().length, 1 + 36);
   assert.equal(h.ids.get('booth-live-recheck').hidden, false);
   assert.equal(h.text('booth-live-recheck'), '결과 다시 보기');
+  assert.equal(h.text('booth-ticket-state'), '자동 확인을 멈췄어요. 「결과 다시 보기」를 눌러 주세요.');
+  assert.equal(h.intervals.length, 0, 'the clock stops with polling');
+  assert.equal(h.ids.get('booth-ticket-wait').getAttribute('data-poll'), 'stopped');
   h.ids.get('booth-live-recheck').click();
   await settle();
   assert.equal(h.claimCalls().length, 38);
   assert.equal(h.ids.get('booth-live-recheck').hidden, true);
+  assert.equal(h.text('booth-ticket-state'), 'AI 검증 차례를 기다리는 중');
+  assert.equal(h.intervals.length, 1);
+  assert.equal(h.ids.get('booth-ticket-wait').getAttribute('data-poll'), 'live');
   assert.equal(h.timers.length, 1);
   assert.equal(h.timers[0].ms, 15000);
   h.handle.destroy();
@@ -1390,7 +1397,8 @@ test('chances count down from the per-guest cap and never go below zero', async 
   for (let i = 3; i <= 7; i += 1) booth.rememberReceipt(storage, {receipt: 'F-000' + i, claimKey: '7Q3K-M9XD', createdAt: '2026-11-21T01:00:00Z'});
   const full = liveBooth({storage});
   await settle();
-  assert.equal(full.text('booth-live-again'), '다시 도전하기 · 기회 0번 남음');
+  assert.equal(full.text('booth-live-again'), '내 기록 보기');
+  assert.equal(full.text('booth-chances-top'), '기회 0번 남음');
   full.handle.destroy();
 });
 
@@ -1515,14 +1523,20 @@ test('the guest cap gets a friendly line and search stays a secondary path', asy
   await settle();
   await submitThroughBooth(capped);
   assert.equal(capped.calls.filter(call => call.path.endsWith('/v1/booth/submissions')).length, 1);
-  assert.match(capped.text('booth-submit-status'), /기회 5번을 모두 썼어요/);
+  assert.equal(capped.text('booth-submit-status'), '기회 5번을 모두 썼어요. 「내 기록」에서 결과를 볼 수 있어요.');
   assert.equal(capped.step(), 'send');
+  assert.equal(capped.ids.get('booth-submit-records').hidden, false);
+  assert.equal(capped.text('booth-submit-records'), '내 기록 보기');
+  capped.ids.get('booth-submit-records').dispatchEvent({type: 'click', preventDefault() {}});
+  assert.equal(capped.step(), 'pick');
+  assert.equal(capped.ids.get('booth-result').hidden, false);
   capped.handle.destroy();
   const fresh = liveBooth({submitStatus: 429});
   await settle();
   await submitThroughBooth(fresh);
   assert.match(fresh.text('booth-submit-status'), /지금 제출이 몰려 있어요\. 잠시 뒤 다시 눌러 주세요\./);
   assert.match(fresh.text('booth-submit-status'), /「내 기록」/);
+  assert.equal(fresh.ids.get('booth-submit-records').hidden, false);
   fresh.handle.destroy();
   const h = liveBooth();
   await settle();
@@ -2706,4 +2720,171 @@ test('saved progress wins over a finished newest receipt; pending and #booth-res
     delete boothContext.sessionStorage;
     delete boothContext.FalsifyBoothRuntime;
   }
+});
+/* plan97s-2 */
+test('plan97s-2: withdrawn tries are free again and 0 tries turns the ticket button into 내 기록 보기', async () => {
+  const storage = memoryStorage();
+  for (let i = 1; i <= 3; i += 1) booth.rememberReceipt(storage, {receipt: 'F-000' + i, claimKey: '7Q3K-M9XD', createdAt: '2026-11-21T01:00:00Z'});
+  const out = liveBooth({storage, perOwner: 3, claims: [{receipt: 'F-0003', status: 'judged', published: true, outcome: 'caught'}]});
+  await settle();
+  out.ids.get('booth-claim-receipt').value = 'F-0003';
+  out.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+  out.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(out.step(), 'ticket');
+  assert.equal(out.text('booth-chances-top'), '기회 0번 남음');
+  assert.equal(out.ids.get('booth-live-again').hidden, false);
+  assert.equal(out.text('booth-live-again'), '내 기록 보기');
+  assert.equal(out.ids.get('booth-live-records').hidden, true, 'no second 내 기록 button at 0 tries');
+  out.ids.get('booth-live-again').dispatchEvent({type: 'click', preventDefault() {}});
+  assert.equal(out.step(), 'pick');
+  assert.equal(out.ids.get('booth-result').hidden, false, '내 기록 opens');
+  assert.equal(out.location.hash, '#booth-result');
+  assert.equal(out.ids.get('booth-rows').textContent, '', 'reset ran before opening 내 기록');
+  out.handle.destroy();
+  booth.noteReceiptOutcome(storage, 'F-0002', 'withdrawn');
+  const back = liveBooth({storage, perOwner: 3, claims: [{receipt: 'F-0003', status: 'judged', published: true, outcome: 'caught'}]});
+  await settle();
+  back.ids.get('booth-claim-receipt').value = 'F-0003';
+  back.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+  back.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(back.text('booth-chances-top'), '기회 1번 남음');
+  assert.equal(back.text('booth-live-again'), '다시 도전하기 · 기회 1번 남음');
+  assert.equal(back.ids.get('booth-live-records').hidden, false);
+  back.ids.get('booth-live-again').click();
+  assert.equal(back.step(), 'pick');
+  assert.equal(back.ids.get('booth-result').hidden, true, 'startAgain, not 내 기록');
+  back.handle.destroy();
+});
+
+test('plan97s-2: withdrawing at 0 tries gives the try back on the same ticket', async () => {
+  const storage = memoryStorage();
+  for (const n of ['40', '41', '42']) booth.rememberReceipt(storage, {receipt: 'F-00' + n, claimKey: '7Q3K-M9XD', createdAt: '2026-11-21T01:00:00Z'});
+  const w = liveBooth({storage, perOwner: 3, claims: [{receipt: 'F-0042', status: 'judged', published: true, outcome: 'missed', course: 'quick', declaredCount: 1}],
+    withdrawn: {receipt: 'F-0042', status: 'withdrawn', course: 'quick', declaredCount: 1, published: false}});
+  await settle();
+  w.ids.get('booth-claim-receipt').value = 'F-0042';
+  w.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+  w.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(w.text('booth-chances-top'), '기회 0번 남음');
+  assert.equal(w.text('booth-live-again'), '내 기록 보기');
+  w.ids.get('booth-withdraw').click();
+  w.ids.get('booth-withdraw-confirm').click();
+  await settle();
+  assert.equal(w.text('booth-live-title'), '제출을 철회했어요');
+  assert.equal(booth.readReceipts(storage).find(item => item.receipt === 'F-0042').outcome, 'withdrawn');
+  assert.equal(w.text('booth-chances-top'), '기회 1번 남음');
+  assert.equal(w.text('booth-live-again'), '다시 도전하기 · 기회 1번 남음');
+  assert.equal(w.ids.get('booth-live-records').hidden, false);
+  w.handle.destroy();
+});
+
+test('plan97s-2: non-cap submit errors keep booth-submit-records hidden', async () => {
+  const fail500 = liveBooth({submits: [{status: 500, body: {error: {code: 'server_error'}}}]});
+  await settle();
+  await submitThroughBooth(fail500);
+  assert.equal(fail500.step(), 'send');
+  assert.equal(fail500.ids.get('booth-submit-records').hidden, true);
+  fail500.handle.destroy();
+  const tooLarge = liveBooth({submits: [{status: 413, body: {error: {code: 'payload_too_large'}}}]});
+  await settle();
+  await submitThroughBooth(tooLarge);
+  assert.equal(tooLarge.step(), 'send');
+  assert.equal(tooLarge.ids.get('booth-submit-records').hidden, true);
+  tooLarge.handle.destroy();
+});
+
+/* plan97s-4 */
+test('plan97s-4: queueLabel formats ahead count without ETA, falling back to empty string', () => {
+  assert.equal(booth.queueLabel({ahead: 3, slots: 2, etaSec: 240}), 'AI 검증 차례를 기다리는 중 · 앞에 3건');
+  assert.equal(booth.queueLabel({ahead: 2, etaSec: 61}), 'AI 검증 차례를 기다리는 중 · 앞에 2건');
+  assert.equal(booth.queueLabel({ahead: 1, etaSec: 0}), 'AI 검증 차례를 기다리는 중 · 앞에 1건');
+  assert.equal(booth.queueLabel(null), '');
+  assert.equal(booth.queueLabel({}), '');
+  assert.equal(booth.queueLabel({ahead: 0, etaSec: 120}), '');
+  assert.equal(booth.queueLabel({ahead: -1}), '');
+  assert.equal(booth.queueLabel({ahead: '3'}), '');
+  assert.equal(booth.queueLabel({ahead: 2.5}), '');
+  assert.equal(booth.queueLabel({ahead: 10000}), '');
+});
+
+test('plan97s-4: waiting ticket shows queue position on received and falls back when ahead is 0 or reviewing', async () => {
+  const h = liveBooth({claims: [
+    {receipt: 'F-0042', status: 'received', published: false, queue: {ahead: 3, slots: 2, etaSec: 240}},
+    {receipt: 'F-0042', status: 'received', published: false, queue: {ahead: 0, slots: 2, etaSec: 120}},
+    {receipt: 'F-0042', status: 'reviewing', published: false, queue: {ahead: 0, slots: 2, etaSec: 90}},
+  ]});
+  await settle();
+  await submitThroughBooth(h);
+  assert.equal(await h.tick(), 15000);
+  assert.equal(h.text('booth-ticket-state'), 'AI 검증 차례를 기다리는 중 · 앞에 3건');
+  assert.equal(await h.tick(), 15000);
+  assert.equal(h.text('booth-ticket-state'), 'AI 검증 차례를 기다리는 중');
+  assert.equal(await h.tick(), 15000);
+  assert.equal(h.text('booth-ticket-state'), 'AI가 논문을 읽는 중');
+  h.handle.destroy();
+});
+
+test('plan97s-4: recheck after 15-min stop restores waiting label even if claim returns 500', async () => {
+  const pending = {receipt: 'F-0042', status: 'received', course: 'quick', declaredCount: 1, published: false};
+  const claims = Array.from({length: 37}, () => pending).concat([{status: 500, body: {error: {code: 'server_error'}}}]);
+  const h = liveBooth({claims});
+  await settle();
+  h.ids.get('booth-result-link').dispatchEvent({type: 'click', preventDefault() {}});
+  h.ids.get('booth-claim-receipt').value = 'F-0042';
+  h.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  while (h.timers.length) await h.tick();
+  assert.equal(h.text('booth-ticket-state'), '자동 확인을 멈췄어요. 「결과 다시 보기」를 눌러 주세요.');
+  h.ids.get('booth-live-recheck').click();
+  await settle();
+  assert.equal(h.text('booth-ticket-state'), 'AI 검증 차례를 기다리는 중');
+  assert.equal(h.ids.get('booth-live-recheck').hidden, true);
+  assert.equal(h.timers.length, 1);
+  h.handle.destroy();
+});
+
+test('plan97s-4: not_found during polling stops the clock without the 15-minute copy', async () => {
+  const pending = {receipt: 'F-0042', status: 'received', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:00Z', published: false};
+  const h = liveBooth({claims: [pending, {status: 404, body: {error: {code: 'not_found'}}}]});
+  await settle();
+  h.ids.get('booth-result-link').dispatchEvent({type: 'click', preventDefault() {}});
+  h.ids.get('booth-claim-receipt').value = 'F-0042';
+  h.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(h.intervals.length, 1);
+  assert.equal(await h.tick(), 15000);
+  assert.equal(h.intervals.length, 0);
+  assert.notEqual(h.text('booth-ticket-state'), '자동 확인을 멈췄어요. 「결과 다시 보기」를 눌러 주세요.');
+  assert.equal(h.ids.get('booth-live-error').hidden, false);
+  h.handle.destroy();
+});
+
+test('plan97s-4: missed notes without a page use AI 메모 heading, with a page use AI가 의심한 곳, invalid uses 운영진 안내', async () => {
+  const h = liveBooth({claims: [
+    {receipt: 'F-0042', status: 'judged', published: true, outcome: 'missed', publicNote: 'AI가 이번 수정본에서 결함을 짚지 못했어요. 심어 둔 결함은 AI 눈을 피했어요.'},
+    {receipt: 'F-0043', status: 'judged', published: true, outcome: 'missed', publicNote: 'AI는 다른 곳을 짚었어요. (AI가 짚은 곳: 7쪽)'},
+    {receipt: 'F-0044', status: 'invalid', published: true, outcome: 'invalid', publicNote: '수정 내용을 확인할 수 없어요.'},
+  ]});
+  await settle();
+  h.ids.get('booth-claim-receipt').value = 'F-0042';
+  h.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(h.text('booth-live-note'), 'AI 메모AI가 이번 수정본에서 결함을 짚지 못했어요. 심어 둔 결함은 AI 눈을 피했어요.');
+  assert.equal(h.ids.get('booth-live-page').hidden, true);
+  h.ids.get('booth-claim-receipt').value = 'F-0043';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(h.text('booth-live-note').startsWith('AI가 의심한 곳'), true);
+  assert.equal(h.text('booth-live-page'), 'AI가 짚은 곳 · 7쪽');
+  h.ids.get('booth-claim-receipt').value = 'F-0044';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(h.text('booth-live-note').startsWith('운영진 안내'), true);
+  h.handle.destroy();
 });

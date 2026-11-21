@@ -316,7 +316,12 @@
     '가짜연구소 Falsify 프로젝트 GitHub QR 코드':'Falsify by Pseudo Lab GitHub QR code',
     '잠시 후 다시 눌러 주세요.':'Please try again in a moment.',
     '논문 실험 RED':'Paper editor',
-    '행사 안내':'Event notice'
+    '행사 안내':'Event notice',
+    /* plan97s-2 */
+    '내 기록 보기':'View my tickets',
+    /* plan97s-4 */
+    '자동 확인을 멈췄어요. 「결과 다시 보기」를 눌러 주세요.':'Auto-check stopped. Tap Check result again.',
+    '차례가 오면 AI가 앞뒤 문장과 표를 대조해요':'When your turn comes, AI cross-checks text and tables'
   });
 
   function plural(n, one, many){
@@ -412,7 +417,11 @@
     [/^(\d+)번째 수정은 바꾸기 전과 후가 같아요\.$/,m=>'Edit #'+m[1]+' has identical find and replace text.'],
     [/^(\d+)번째 수정의 context가 너무 길거나 올바르지 않아요\.$/,m=>'Edit #'+m[1]+' context is too long or invalid.'],
     [/^defectType은 (.+) 중 하나여야 해요\.$/,m=>'defectType must be one of '+m[1]+'.'],
-    [/^적용하지 못했어요\. (.+)$/,m=>'Could not apply. '+translateCore(m[1])]
+    [/^적용하지 못했어요\. (.+)$/,m=>'Could not apply. '+translateCore(m[1])],
+    /* plan97s-2 */
+    [/^기회 (\d+)번을 모두 썼어요\. 「내 기록」에서 결과를 볼 수 있어요\.$/,m=>'You used all '+plural(m[1],'try','tries')+'. Check My tickets for your results.'],
+    /* plan97s-4 */
+    [/^AI 검증 차례를 기다리는 중 · 앞에 (\d+)건$/,m=>'Waiting in the AI check queue · '+m[1]+' ahead']
   ];
 
   function bag(name){

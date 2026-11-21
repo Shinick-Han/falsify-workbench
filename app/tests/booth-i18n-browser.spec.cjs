@@ -427,6 +427,8 @@ async function walkViewport(browser, viewport, desk, pageErrors) {
     await page.locator('#booth-submit-button').click();
     await page.waitForFunction(() => /Submissions are busy|Too many requests/.test(document.querySelector('#booth-submit-status')?.textContent || ''));
     await assertNoVisibleHangul(page, tag + ' send-rate-limited');
+    assert.equal(await page.locator('#booth-submit-records').isVisible(), true, 'a 내 기록 action sits under the 429 line');
+    assert.equal(await page.locator('#booth-submit-records').textContent(), 'View my tickets');
     state.submitError = null;
 
     // 5. Submit -> Receipt & pending
@@ -501,6 +503,7 @@ async function walkViewport(browser, viewport, desk, pageErrors) {
     await lookupTicket(page, desk, 'F-0046');
     await page.waitForFunction(() => /found no defect/.test(document.querySelector('#booth-live-note')?.textContent || ''));
     await assertNoVisibleHangul(page, tag + ' result-missedNone');
+    assert.equal(await page.locator('#booth-live-note .booth-klab').first().textContent(), 'AI note');
 
     // Withdrawn
     await lookupTicket(page, desk, 'F-0047');

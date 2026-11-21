@@ -194,6 +194,15 @@ test('dictionary and pattern translation, vars interpolation, and whitespace pre
   assert.equal(i18n.t('2분 14초'), '2m 14s');
   assert.equal(i18n.t('앞에 3건 대기 중 · 약 2분'), '3 ahead in queue · ~2 min');
   assert.equal(i18n.t('예상 대기 시간 약 3분'), 'Estimated wait: ~3 min');
+  /* plan97s-2 */
+  assert.equal(i18n.t('내 기록 보기'), 'View my tickets');
+  assert.equal(i18n.t('기회 3번을 모두 썼어요. 「내 기록」에서 결과를 볼 수 있어요.'), 'You used all 3 tries. Check My tickets for your results.');
+  assert.equal(i18n.t('기회 1번을 모두 썼어요. 「내 기록」에서 결과를 볼 수 있어요.'), 'You used all 1 try. Check My tickets for your results.');
+  /* plan97s-4 */
+  assert.equal(i18n.t('AI 검증 차례를 기다리는 중 · 앞에 3건'), 'Waiting in the AI check queue · 3 ahead');
+  assert.equal(i18n.t('AI 검증 차례를 기다리는 중 · 앞에 1건'), 'Waiting in the AI check queue · 1 ahead');
+  assert.equal(i18n.t('자동 확인을 멈췄어요. 「결과 다시 보기」를 눌러 주세요.'), 'Auto-check stopped. Tap Check result again.');
+  assert.equal(i18n.t('차례가 오면 AI가 앞뒤 문장과 표를 대조해요'), 'When your turn comes, AI cross-checks text and tables');
 
   // External mission hints, DEFAULT_NOTES, prize messages, sx94b strings
   assert.equal(

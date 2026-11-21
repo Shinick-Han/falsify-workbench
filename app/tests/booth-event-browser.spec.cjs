@@ -435,7 +435,7 @@ async function walk(browser, viewport, desk, pageErrors) {
   assert.equal(page5Text.includes('0.50'), true, 'new text 0.50 extracts from submitted PDF');
   assert.equal(page5Text.includes('0.95'), false, 'original text 0.95 is removed from submitted PDF');
   assert.equal(await page.locator('#booth-ticket-wait').isVisible(), true);
-  assert.equal(await page.locator('#booth-ticket-steps').textContent(), '수정본 받음AI가 앞뒤 문장과 표를 대조하는 중결과');
+  assert.equal(await page.locator('#booth-ticket-steps').textContent(), '수정본 받음차례가 오면 AI가 앞뒤 문장과 표를 대조해요결과');
   assert.match(await page.locator('#booth-live-capture').textContent(), /^이 티켓을 캡처해 두세요/);
   assert.match(await page.locator('#booth-ticket-elapsed').textContent(), /^\d+:\d\d$/);
   assert.equal(await page.locator('#booth-barcode').isVisible(), true);
