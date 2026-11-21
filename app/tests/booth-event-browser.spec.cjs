@@ -57,33 +57,27 @@ const cors = {
   'Access-Control-Allow-Headers': '*',
 };
 
-const STUB_DECLARED = [{
-  pageIndex: 4,
-  before: 'Ragas 0.95 0.78 0.70',
-  after: 'Ragas 0.50 0.78 0.70',
-  defectType: 'number',
-  reason: '표의 점수를 0.95에서 0.50으로 바꿨습니다',
-}];
+/* Real claimView responses carry declaredCount only, never declared. */
 const PENDING = {
   receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1,
-  declared: STUB_DECLARED, createdAt: '2026-11-22T01:00:00.000Z', published: false,
+  createdAt: '2026-11-22T01:00:00.000Z', published: false,
 };
 const MISSED = {
   receipt: 'F-0042', status: 'judged', course: 'quick', declaredCount: 1,
-  declared: STUB_DECLARED, createdAt: '2026-11-22T01:00:00.000Z',
+  createdAt: '2026-11-22T01:00:00.000Z',
   published: true, outcome: 'missed', publicNote: 'AI는 다른 곳을 짚었어요. 심어 둔 결함은 AI 눈을 피했어요.',
   prizeMessage: '부스에서 스티커를 받아 가세요', publishedAt: '2026-11-22T01:02:00.000Z',
 };
 const CAUGHT = {
   receipt: 'F-0043', status: 'judged', course: 'quick', declaredCount: 1,
-  declared: STUB_DECLARED, createdAt: '2026-11-22T01:00:00.000Z',
+  createdAt: '2026-11-22T01:00:00.000Z',
   published: true, outcome: 'caught',
   publicNote: '내가 심어 둔 결함을 AI가 찾았어요. (AI가 짚은 곳: 5쪽)\nAI가 짚은 문장: "Ragas 0.50 0.78 0.70"\nAI 설명: 표 값이 본문과 맞지 않아요.',
   publishedAt: '2026-11-22T01:01:30.000Z',
 };
 const WITHDRAWN = {
   receipt: 'F-0044', status: 'withdrawn', course: 'quick', declaredCount: 1,
-  declared: STUB_DECLARED, createdAt: '2026-11-22T01:00:00.000Z', published: false,
+  createdAt: '2026-11-22T01:00:00.000Z', published: false,
 };
 const MISSION_CREDIT = '미션 논문은 모두 arXiv에 CC BY 4.0으로 공개된 논문이에요. 부스에서 보는 결함은 방문자가 게임을 위해 심은 거예요.';
 
@@ -549,7 +543,7 @@ async function walk(browser, viewport, desk, pageErrors) {
   await page.close();
 }
 
-/* Browser checks for caught/withdrawn declared visibility and search result arXiv link + credit line. */
+/* Browser checks for caught/withdrawn/no-local-record declared visibility and search result arXiv link + credit line. */
 async function resultStatesAndSearchPass(browser, pageErrors) {
   const submissions = [];
   const claims = [];
@@ -581,14 +575,35 @@ async function resultStatesAndSearchPass(browser, pageErrors) {
   assert.equal(await page.locator('#booth-paper-credit').textContent(), '원문 arXiv 2309.15217 · CC BY 4.0 · 게임용으로 고친 사본');
   await page.locator('#booth-edit-back').click();
   await stepIs(page, 'pick');
-  // Caught shows 내가 고친 곳; withdrawn hides it.
+  // Fresh context with no local receipt record: looking up with receipt + key hides 내가 고친 곳.
   await page.locator('#booth-result-link').click();
   await page.locator('#booth-claim-receipt').fill('F-0043');
   await page.locator('#booth-claim-key').fill('7Q3K-M9XD');
   await page.locator('#booth-claim-form button[type="submit"]').click();
   await stepIs(page, 'ticket');
   await page.waitForFunction(() => document.querySelector('#booth-live-title')?.textContent === 'AI가 찾아냈어요');
-  assert.equal(await page.locator('#booth-live-declared').isVisible(), true, 'caught shows 내가 고친 곳');
+  assert.equal(await page.locator('#booth-live-declared').isHidden(), true, 'fresh context without local record hides 내가 고친 곳');
+  // Store local receipt edits for F-0043 (caught) and F-0044 (withdrawn): caught shows it, withdrawn hides it.
+  await page.evaluate(() => {
+    const edits = [{page: 5, before: 'Ragas 0.95 0.78 0.70', after: 'Ragas 0.50 0.78 0.70'}];
+    globalThis.FalsifyBooth.rememberReceipt(localStorage, {
+      receipt: 'F-0043', claimKey: '7Q3K-M9XD', createdAt: '2026-11-22T01:00:00.000Z',
+      title: 'Ragas', pages: [5], count: 1, edits,
+    });
+    globalThis.FalsifyBooth.rememberReceipt(localStorage, {
+      receipt: 'F-0044', claimKey: '7Q3K-M9XD', createdAt: '2026-11-22T01:00:00.000Z',
+      title: 'Ragas', pages: [5], count: 1, edits,
+    });
+  });
+  await page.locator('#booth-live-again').click();
+  await stepIs(page, 'pick');
+  await page.locator('#booth-result-link').click();
+  await page.locator('#booth-claim-receipt').fill('F-0043');
+  await page.locator('#booth-claim-key').fill('7Q3K-M9XD');
+  await page.locator('#booth-claim-form button[type="submit"]').click();
+  await stepIs(page, 'ticket');
+  await page.waitForFunction(() => document.querySelector('#booth-live-title')?.textContent === 'AI가 찾아냈어요');
+  assert.equal(await page.locator('#booth-live-declared').isVisible(), true, 'caught shows 내가 고친 곳 from local receipt');
   assert.equal(await page.locator('#booth-live-declared .booth-diff del').textContent(), '0.95');
   assert.equal(await page.locator('#booth-live-declared .booth-diff ins').textContent(), '0.50');
   await page.locator('#booth-live-again').click();
@@ -599,7 +614,7 @@ async function resultStatesAndSearchPass(browser, pageErrors) {
   await page.locator('#booth-claim-form button[type="submit"]').click();
   await stepIs(page, 'ticket');
   await page.waitForFunction(() => document.querySelector('#booth-live-title')?.textContent === '제출을 철회했어요');
-  assert.equal(await page.locator('#booth-live-declared').isHidden(), true, 'withdrawn hides 내가 고친 곳');
+  assert.equal(await page.locator('#booth-live-declared').isHidden(), true, 'withdrawn hides 내가 고친 곳 even with local edits');
   await page.close();
 }
 

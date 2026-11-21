@@ -316,13 +316,25 @@
       &&normalizeClaimKey(item.claimKey)===item.claimKey
       &&typeof item.createdAt==='string'&&item.createdAt.length<=40;
   }
+  const RECEIPT_EDITS_CAP=5;
+  const RECEIPT_EDIT_MAX=500;
   /* 1-based changed pages, unique and sorted, at most 20. */
   function receiptPages(value){
     if(!Array.isArray(value)) return [];
     const pages=value.filter(n=>Number.isSafeInteger(n)&&n>=1&&n<=10000);
     return [...new Set(pages)].sort((a,b)=>a-b).slice(0,20);
   }
-  /* Required receipt, claimKey and createdAt. Paper title, pages, count and last outcome are optional. */
+  function receiptEdit(item){
+    if(!item||typeof item!=='object') return null;
+    if(!Number.isSafeInteger(item.page)||item.page<1||item.page>2000) return null;
+    if(typeof item.before!=='string'||typeof item.after!=='string') return null;
+    return {page:item.page,before:trimCodePoints(item.before,RECEIPT_EDIT_MAX),after:trimCodePoints(item.after,RECEIPT_EDIT_MAX)};
+  }
+  function receiptEdits(value){
+    if(!Array.isArray(value)) return [];
+    return value.map(receiptEdit).filter(Boolean).slice(0,RECEIPT_EDITS_CAP);
+  }
+  /* Required receipt, claimKey and createdAt. Paper title, pages, count, edits and last outcome are optional. */
   function receiptRecord(item){
     const out={receipt:item.receipt,claimKey:item.claimKey,createdAt:item.createdAt};
     const title=cleanText(typeof item.title==='string'?item.title.trim():'',300);
@@ -330,6 +342,8 @@
     const pages=receiptPages(item.pages);
     if(pages.length) out.pages=pages;
     if(Number.isSafeInteger(item.count)&&item.count>=1&&item.count<=100) out.count=item.count;
+    const edits=receiptEdits(item.edits);
+    if(edits.length) out.edits=edits;
     if(typeof item.outcome==='string'&&Object.prototype.hasOwnProperty.call(STAMP,item.outcome)) out.outcome=item.outcome;
     return out;
   }
@@ -1840,14 +1854,23 @@
         defectTypes:typesOf(liveConfig).map(item=>item.id)
       };
     }
-    /* Title and changed pages are kept with the receipt on this device only. */
-    function ticketMeta(data, claimKey){
+    function declaredToReceiptEdits(list){
+      if(!Array.isArray(list)) return [];
+      return list.slice(0,RECEIPT_EDITS_CAP).map(item=>({
+        page:item.pageIndex+1,
+        before:trimCodePoints(item.before,RECEIPT_EDIT_MAX),
+        after:trimCodePoints(item.after,RECEIPT_EDIT_MAX)
+      }));
+    }
+    /* Title, changed pages and submitted edits are kept with the receipt on this device only. */
+    function ticketMeta(data, claimKey, declared){
       return {
         receipt:typeof data.receipt==='string'?data.receipt:'',claimKey,
         createdAt:typeof data.createdAt==='string'?data.createdAt:new Date(now()).toISOString(),
         title:paper&&paper.title?paper.title:'',
         pages:receiptPages(rows.map(row=>row.pageIndex+1)),
-        count:rows.length
+        count:rows.length,
+        edits:declaredToReceiptEdits(declared)
       };
     }
     function rememberClaim(meta){
@@ -1882,8 +1905,8 @@
       const recipe=root.FalsifyBoothRecipe;
       if(recipe&&typeof recipe.assist==='function') Object.assign(built.body,recipe.assist());
       const form=submissionForm(built.body,generatedFile);
-      if(!form) say('booth-submit-status',errorMessage('invalid_request'));
-      return form;
+      if(!form){say('booth-submit-status',errorMessage('invalid_request'));return null;}
+      return {form,declared:built.body.declared};
     }
     async function ensureSubmissionPdf(){
       const live=liveEdits();
@@ -1910,14 +1933,14 @@
       stopEvent(event);
       if(!(await ensureSubmissionPdf())) return;
       if(!preflight()) return;
-      const form=submissionFormFor();
-      if(!form) return;
+      const payload=submissionFormFor();
+      if(!payload) return;
       const button=byId('booth-submit-button');
       if(button) button.disabled=true;
       say('booth-submit-status','제출하는 중…');
       try{
-        const data=await requestFresh('/v1/booth/submissions',{method:'POST',auth:true,form});
-        const meta=ticketMeta(data,typeof data.claimKey==='string'?data.claimKey:'');
+        const data=await requestFresh('/v1/booth/submissions',{method:'POST',auth:true,form:payload.form});
+        const meta=ticketMeta(data,typeof data.claimKey==='string'?data.claimKey:'',payload.declared);
         rememberClaim(meta);
         say('booth-submit-status','');
         followSubmission(data,meta);
@@ -2161,19 +2184,21 @@
       kidsOf(byId('booth-live-note'),...parts);
       setHidden('booth-live-note',!parts.length);
     }
-    function validDeclared(list){
-      if(!Array.isArray(list)) return [];
-      return list.filter(item=>item&&typeof item==='object'&&pageIndexOk(item.pageIndex)&&typeof item.before==='string'&&typeof item.after==='string');
+    function storedEditsFor(receipt){
+      const code=normalizeReceipt(receipt);
+      if(!code) return [];
+      const hit=readReceipts(storage).find(item=>item.receipt===code);
+      return hit&&Array.isArray(hit.edits)?hit.edits:[];
     }
     function declaredRow(item){
       return el('div',{className:'booth-declared-item'},
-        el('p',{className:'booth-klab',textContent:(item.pageIndex+1)+'쪽'}),
+        el('p',{className:'booth-klab',textContent:item.page+'쪽'}),
         diffNode(item));
     }
     function renderDeclared(view, data){
       const box=byId('booth-live-declared');
       if(!box) return;
-      const items=view.final&&view.state!=='withdrawn'?validDeclared(data.declared):[];
+      const items=view.final&&view.state!=='withdrawn'?storedEditsFor(data.receipt):[];
       if(!items.length){kidsOf(box);box.hidden=true;return;}
       kidsOf(box,el('p',{className:'booth-klab',textContent:'내가 고친 곳'}),...items.map(declaredRow));
       box.hidden=false;
@@ -2521,7 +2546,7 @@
   if(boothConfigured(readConfig())) mount();
   root.FalsifyBooth={
     normalizeClaimKey,normalizeReceipt,buildSubmission,submissionForm,errorMessage,
-    readReceipts,rememberReceipt,recentReceipts,paperSearchPath,paperPdfPath,
+    readReceipts,rememberReceipt,recentReceipts,receiptRecord,paperSearchPath,paperPdfPath,
     nextPollDelay,retryAfterMs,resultView,capMessage,
     parsePublicNote,diffParts,ENGINE_UNAVAILABLE,chancesLeft,formatClock,formatDuration,noteReceiptOutcome,licenseLabel,licenseUrl,arxivUrl,shortTitle,
     NO_REASON,RECEIPT_KEY,RECEIPT_CAP,RECENT_CAP,mount

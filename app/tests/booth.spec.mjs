@@ -886,6 +886,7 @@ test('send declares chips and reasons and posts only the contract fields', async
   assert.deepEqual(plain(booth.readReceipts(h.storage)[0]), {
     receipt: 'F-0042', claimKey: '7Q3K-M9XD', createdAt: '2026-11-22T01:00:30Z',
     title: 'Synthetic mission: a longer subtitle', pages: [2], count: 1,
+    edits: [{page: 2, before: BEFORE, after: AFTER}],
   });
   h.handle.destroy();
 });
@@ -2174,15 +2175,68 @@ test('open-access intro does not promise guest BLUE when blueJobs is false', asy
   assert.match(notes[0].textContent, /BLUE 검토는 웹 실행 패널에서 로그인 없이 실행합니다/);
 });
 
-test('pick sentence, edit credit line, search arXiv link and result declared block', async () => {
-  const declared = [{pageIndex: 4, before: 'Ragas 0.95 0.78 0.70', after: 'Ragas 0.50 0.78 0.70'}];
+test('receiptRecord validates edits, drops invalid entries, caps at 5, and cuts at 500', () => {
+  const base = {receipt: 'F-0042', claimKey: '7Q3K-M9XD', createdAt: '2026-11-22T01:00:00Z'};
+  // Old records without edits stay valid with no edits field.
+  assert.deepEqual(plain(booth.receiptRecord(base)), base);
+  const longBefore = 'a'.repeat(600);
+  const longAfter = 'b'.repeat(600);
+  const rec = booth.receiptRecord({
+    ...base,
+    edits: [
+      null,
+      'bad',
+      {page: 0, before: 'x', after: 'y'},
+      {page: 2001, before: 'x', after: 'y'},
+      {page: 1.5, before: 'x', after: 'y'},
+      {page: '1', before: 'x', after: 'y'},
+      {page: 1, before: 123, after: 'y'},
+      {page: 1, before: 'x', after: null},
+      {page: 1, before: longBefore, after: longAfter},
+      {page: 2, before: 'b2', after: 'a2'},
+      {page: 3, before: 'b3', after: 'a3'},
+      {page: 4, before: 'b4', after: 'a4'},
+      {page: 2000, before: 'b5', after: 'a5'},
+      {page: 6, before: 'b6', after: 'a6'},
+    ],
+  });
+  assert.equal(rec.edits.length, 5);
+  assert.equal(rec.edits[0].page, 1);
+  assert.equal(rec.edits[0].before.length, 500);
+  assert.equal(rec.edits[0].after.length, 500);
+  assert.equal(rec.edits[0].before, 'a'.repeat(500));
+  assert.equal(rec.edits[0].after, 'b'.repeat(500));
+  assert.deepEqual(plain(rec.edits.slice(1)), [
+    {page: 2, before: 'b2', after: 'a2'},
+    {page: 3, before: 'b3', after: 'a3'},
+    {page: 4, before: 'b4', after: 'a4'},
+    {page: 2000, before: 'b5', after: 'a5'},
+  ]);
+  const allBad = booth.receiptRecord({...base, edits: [{page: 0, before: 'x', after: 'y'}]});
+  assert.equal(Object.hasOwn(allBad, 'edits'), false);
+});
+
+test('pick sentence, edit credit line, search arXiv link and result declared block from local receipt', async () => {
+  const storage = memoryStorage();
+  booth.rememberReceipt(storage, {
+    receipt: 'F-0042', claimKey: '7Q3K-M9XD', createdAt: '2026-11-21T01:00:00Z',
+    title: 'Synthetic result', pages: [5], count: 1,
+    edits: [{page: 5, before: 'Ragas 0.95 0.78 0.70', after: 'Ragas 0.50 0.78 0.70'}],
+  });
+  booth.rememberReceipt(storage, {
+    receipt: 'F-0045', claimKey: '7Q3K-M9XD', createdAt: '2026-11-21T01:00:00Z',
+  });
   const h = liveBooth({
+    storage,
     claims: [
-      {receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1, published: false, declared},
-      {receipt: 'F-0042', status: 'judged', course: 'quick', declaredCount: 1, published: true, outcome: 'missed', publicNote: 'note', declared},
-      {receipt: 'F-0042', status: 'judged', course: 'quick', declaredCount: 1, published: true, outcome: 'caught', publicNote: 'note', declared},
-      {receipt: 'F-0042', status: 'judged', course: 'quick', declaredCount: 0, published: true, outcome: 'invalid', publicNote: 'note', declared: []},
-      {receipt: 'F-0042', status: 'withdrawn', course: 'quick', declaredCount: 1, published: false, declared},
+      {receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1, published: false},
+      {receipt: 'F-0042', status: 'judged', course: 'quick', declaredCount: 1, published: true, outcome: 'missed', publicNote: 'note'},
+      {receipt: 'F-0042', status: 'judged', course: 'quick', declaredCount: 1, published: true, outcome: 'caught', publicNote: 'note'},
+      {receipt: 'F-0045', status: 'judged', course: 'quick', declaredCount: 1, published: true, outcome: 'invalid', publicNote: 'note'},
+      {receipt: 'F-0042', status: 'withdrawn', course: 'quick', declaredCount: 1, published: false},
+      // No local record: block stays hidden even if payload contains a declared field.
+      {receipt: 'F-0099', status: 'judged', course: 'quick', declaredCount: 1, published: true, outcome: 'missed', publicNote: 'note',
+        declared: [{pageIndex: 4, before: '0.95', after: '0.50'}]},
     ],
   });
   await settle();
@@ -2216,27 +2270,36 @@ test('pick sentence, edit credit line, search arXiv link and result declared blo
     ['arXiv 2503.10497', 'https://arxiv.org/abs/2503.10497', '_blank', 'noopener noreferrer'],
     ['CC BY 4.0', 'https://creativecommons.org/licenses/by/4.0/', '_blank', 'noopener noreferrer'],
   ]);
-  // Claim states: pending hides declared, missed & caught show it, empty hides it, withdrawn hides it.
+  // Claim states: pending hides declared, missed & caught show stored edits, record without edits hides it, withdrawn hides it, unknown receipt hides it.
   h.ids.get('booth-claim-receipt').value = 'F-0042';
   h.ids.get('booth-claim-key').value = '7Q3K-M9XD';
   h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
   await settle();
   assert.equal(h.ids.get('booth-live-declared').hidden, true, 'pending hides declared');
   await h.tick();
-  assert.equal(h.ids.get('booth-live-declared').hidden, false, 'missed shows declared');
+  assert.equal(h.ids.get('booth-live-declared').hidden, false, 'missed shows stored edits');
   assert.equal(h.text('booth-live-declared'), '내가 고친 곳5쪽Ragas 0.950.50 0.78 0.70');
   const decNodes = nodesOf(h.ids.get('booth-live-declared'));
   assert.equal(decNodes.find(node => node.tagName === 'del').textContent, '0.95');
   assert.equal(decNodes.find(node => node.tagName === 'ins').textContent, '0.50');
-  // Re-open caught, then empty invalid, then withdrawn via claim lookup.
+  // Caught shows stored edits.
   h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
   await settle();
-  assert.equal(h.ids.get('booth-live-declared').hidden, false, 'caught shows declared');
+  assert.equal(h.ids.get('booth-live-declared').hidden, false, 'caught shows stored edits');
+  // Stored record without edits hides block.
+  h.ids.get('booth-claim-receipt').value = 'F-0045';
   h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
   await settle();
-  assert.equal(h.ids.get('booth-live-declared').hidden, true, 'empty declared hides block');
+  assert.equal(h.ids.get('booth-live-declared').hidden, true, 'record without edits hides block');
+  // Withdrawn hides block even when stored record has edits.
+  h.ids.get('booth-claim-receipt').value = 'F-0042';
   h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
   await settle();
   assert.equal(h.ids.get('booth-live-declared').hidden, true, 'withdrawn hides declared');
+  // No local record hides block even if server payload had declared (single source only).
+  h.ids.get('booth-claim-receipt').value = 'F-0099';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(h.ids.get('booth-live-declared').hidden, true, 'no local record hides block');
   h.handle.destroy();
 });
