@@ -15,11 +15,19 @@ import { runsForReceipt } from './findings.mjs';
 import { buildPublicNote, clip, notePage } from './note.mjs';
 import { mapPool } from './pool.mjs';
 import { bestMatchedFinding, scoreSubmission } from './score.mjs';
-import { blueRecordPath, listBlueRecordsForHash, listLiveMarkers, readJsonOptional, writeJson } from './store.mjs';
+import { blueRecordPath, listBlueRecordsForHash, listLiveMarkers, pdfPath, readJsonOptional, writeJson } from './store.mjs';
 
 const MISSING_PDF = new Set(['not_found', 'artifact_expired']);
 const HEX64 = /^[0-9a-f]{64}$/;
 const MAX_REPLAY_SKIPS = 20;
+const MAX_RETRY_BACKOFF_MS = 60_000;
+
+function retryDelayMs(baseMs, retryNumber, retryAfterSec = 0) {
+  const base = Math.max(0, Number(baseMs) || 0);
+  const exp = Math.min(MAX_RETRY_BACKOFF_MS, base * (2 ** Math.max(0, retryNumber - 1)));
+  const serverMs = retryAfterSec > 0 ? Math.min(MAX_RETRY_BACKOFF_MS, retryAfterSec * 1000) : 0;
+  return Math.max(exp, serverMs);
+}
 
 function line(io, value) {
   io.stdout.write(`${JSON.stringify(value)}\n`);
@@ -145,14 +153,23 @@ function savedMarkerTicket(env, row) {
   return { marker, file, record, repeat: marker.repeat };
 }
 
+function isValidCompletedRecord(record) {
+  return record?.job?.state === 'completed' && !reviewResultIssue(record);
+}
+
+function terminalRecordFailure(record) {
+  if (record?.job?.state === 'completed') return reviewResultFailure(record);
+  return recordFailure(record);
+}
+
 // Inspects saved local records for this receipt without mutating disk or calling the server.
-// Completed and unfinished job tickets always win over starting a new job.
+// Only valid completed records and unfinished job tickets win over starting a new job.
 export function inspectReceiptPlan(env, row) {
   const marker = readMarker(env.dir, row.receipt);
   const ticket = savedMarkerTicket(env, row);
   if (ticket) {
     const state = ticket.record.job.state;
-    if (state === 'completed' && (ticket.record.configHash === env.run.hash || marker?.state === 'running' || marker?.state === 'recovering')) {
+    if (isValidCompletedRecord(ticket.record) && (ticket.record.configHash === env.run.hash || marker?.state === 'running' || marker?.state === 'recovering')) {
       return { kind: 'completed', repeat: ticket.repeat, record: ticket.record, recordFile: ticket.file, fromMarker: true };
     }
     if (!TERMINAL_JOB.has(state)) {
@@ -164,7 +181,7 @@ export function inspectReceiptPlan(env, row) {
     const key = expectedKey(env, row, entry.repeat);
     return !key || entry.record.idempotencyKey === key;
   });
-  const completed = matching.find(entry => entry.record?.job?.state === 'completed');
+  const completed = matching.find(entry => isValidCompletedRecord(entry.record));
   if (completed) {
     return { kind: 'completed', repeat: completed.repeat, record: completed.record, recordFile: completed.file, fromMarker: false };
   }
@@ -174,9 +191,12 @@ export function inspectReceiptPlan(env, row) {
   }
   const terminal = matching.filter(entry => entry.record?.job && TERMINAL_JOB.has(entry.record.job.state));
   const last = terminal.at(-1) || null;
+  const ticketFailure = ticket && TERMINAL_JOB.has(ticket.record.job.state)
+    ? terminalRecordFailure(ticket.record)
+    : null;
   const lastFailure = last
-    ? recordFailure(last.record)
-    : (marker?.failure || (marker?.code ? { code: marker.code, retryable: marker.retryable === true, message: marker.message || marker.code } : null));
+    ? terminalRecordFailure(last.record)
+    : (ticketFailure || marker?.failure || (marker?.code ? { code: marker.code, retryable: marker.retryable === true, message: marker.message || marker.code } : null));
   const nextRepeat = terminal.length ? terminal.at(-1).repeat + 1 : 0;
   return {
     kind: 'terminal_only',
@@ -222,23 +242,22 @@ async function ensurePdfArchived(env, row, maxRetries) {
         return { failed: failure, repeat: null };
       }
       failures += 1;
-      await delay(env.live.retryBackoffMs * (2 ** (failures - 1)));
+      await delay(retryDelayMs(env.live.retryBackoffMs, failures, retryAfter));
     }
   }
 }
 
-// Up to maxRetries additional tries with doubling backoff for retryable failures only.
-// Non-retryable failures stop immediately without creating duplicate jobs.
-// Unfinished and completed job tickets are always resumed by their saved job id.
+// Up to maxRetries additional tries with capped doubling backoff for retryable failures only.
+// Non-retryable failures and unusable completions stop automatically without creating duplicate paid jobs.
+// Unfinished and valid completed job tickets are always resumed by their saved job id; long transient
+// polling failures on a saved running job return `delayed` so watch/recover can resume without new jobs.
 async function blueWithRetry(env, row, {
   allowNewAfterExhausted = false,
   maxRetries = env.live.retries,
   onJob = null,
 } = {}) {
-  const archived = await ensurePdfArchived(env, row, maxRetries);
-  if (!archived.ok) return archived;
-
   const { plan, profile, hash, maxBytes } = env.run;
+  let pdfArchived = false;
   let retryFailures = 0;
   let replaySkips = 0;
 
@@ -263,7 +282,9 @@ async function blueWithRetry(env, row, {
     if (inspected.kind === 'resume_job') {
       activeRepeat = inspected.repeat;
       activeFile = inspected.recordFile;
-      if (inspected.fromMarker && inspected.record.configHash !== hash) {
+      const useDirectResume = (inspected.fromMarker && inspected.record.configHash !== hash)
+        || !fs.existsSync(pdfPath(env.dir, row.receipt));
+      if (useDirectResume) {
         result = await resumeJobRecord(env.io, env.client, plan, {
           receipt: row.receipt,
           recordFile: inspected.recordFile,
@@ -291,6 +312,11 @@ async function blueWithRetry(env, row, {
           };
         }
       }
+      if (!pdfArchived) {
+        const archived = await ensurePdfArchived(env, row, maxRetries);
+        if (!archived.ok) return archived;
+        pdfArchived = true;
+      }
       activeRepeat = inspected.nextRepeat;
       activeFile = recordFile(env, row.receipt, activeRepeat);
       result = await runBlue(env.io, env.client, env.dir, plan, {
@@ -304,8 +330,15 @@ async function blueWithRetry(env, row, {
     }
 
     if (result.ok) {
+      const record = readJsonOptional(result.recordFile || activeFile);
+      const reviewFailure = reviewResultFailure(record);
+      if (reviewFailure && allowNewAfterExhausted && result.replayed === true && replaySkips < MAX_REPLAY_SKIPS) {
+        replaySkips += 1;
+        progress(env.io, `live ${row.receipt} skipped replayed unusable completed repeat #${activeRepeat} (${reviewFailure.code})`);
+        continue;
+      }
       return {
-        record: readJsonOptional(result.recordFile || activeFile),
+        record,
         repeat: result.repeat,
         jobId: result.jobId,
         resumed: result.resumed === true,
@@ -324,12 +357,42 @@ async function blueWithRetry(env, row, {
     }
 
     const failure = result.failure || { code: result.code || 'booth_job', retryable: result.retryable === true, message: result.error || result.code || 'booth_job' };
+    const savedRecord = activeFile ? readJsonOptional(activeFile) : null;
+    const savedRunningJob = savedRecord?.job?.id && !TERMINAL_JOB.has(savedRecord.job.state) ? savedRecord.job : null;
+    const transientPoll = Boolean(
+      savedRunningJob
+      && failure.code !== 'poll_timeout'
+      && canRetryFailure(failure, result.retryAfter),
+    );
     progress(env.io, `live ${row.receipt} attempt ${step + 1} failed ${failure.code} retryable=${failure.retryable}`);
+    if (transientPoll) {
+      if (retryFailures < maxRetries) {
+        retryFailures += 1;
+        await delay(retryDelayMs(env.live.retryBackoffMs, retryFailures, result.retryAfter || failure.retryAfter || 0));
+        continue;
+      }
+      return {
+        delayed: {
+          ...failure,
+          retryable: true,
+          jobId: savedRunningJob.id,
+          jobState: savedRunningJob.state,
+        },
+        repeat: activeRepeat,
+        jobId: savedRunningJob.id,
+      };
+    }
     if (!canRetryFailure(failure, result.retryAfter) || retryFailures >= maxRetries) {
       return { failed: failure, repeat: activeRepeat };
     }
+    if (!allowNewAfterExhausted) {
+      const after = inspectReceiptPlan(env, row);
+      if (after.kind === 'terminal_only' && after.attempts > maxRetries) {
+        return { failed: failure, repeat: activeRepeat };
+      }
+    }
     retryFailures += 1;
-    await delay(env.live.retryBackoffMs * (2 ** (retryFailures - 1)));
+    await delay(retryDelayMs(env.live.retryBackoffMs, retryFailures, result.retryAfter || failure.retryAfter || 0));
   }
 }
 
@@ -451,6 +514,10 @@ function protectedRow(env, row, { receipt, dryRun = false } = {}) {
           retryable: null,
           message: null,
           failure: null,
+          delayed: false,
+          delayedSince: null,
+          delayCount: 0,
+          lastTransientError: null,
         });
       }
     }
@@ -488,11 +555,13 @@ async function skipMissing(env, row) {
 }
 
 async function failRow(env, row, failure, repeat = null) {
+  const prior = readMarker(env.dir, row.receipt);
   const code = failure?.code || 'booth_job';
   const retryable = failure?.retryable === true;
   const message = failure?.message || null;
-  const jobId = failure?.jobId || null;
+  const jobId = failure?.jobId || prior?.jobId || null;
   const jobState = failure?.jobState || null;
+  const resolvedRepeat = repeat ?? prior?.repeat ?? null;
   writeMarker(env.dir, row.receipt, {
     state: 'failed',
     code,
@@ -500,12 +569,48 @@ async function failRow(env, row, failure, repeat = null) {
     message,
     jobId,
     jobState,
-    repeat,
+    repeat: resolvedRepeat,
+    delayed: false,
+    delayedSince: null,
+    delayCount: 0,
+    lastTransientError: null,
     failure: { code, retryable, ...(message ? { message } : {}), ...(jobId ? { jobId } : {}), ...(jobState ? { jobState } : {}) },
   });
   await noteOnRow(env, row.receipt, `live: failed ${code} (retryable=${retryable})`);
   progress(env.io, `live ${row.receipt} FAILED ${code} retryable=${retryable}; left reviewing`);
   return { state: 'failed', receipt: row.receipt, code, retryable, message, jobId };
+}
+
+async function delayRow(env, row, failure, repeat = null, markerState = 'running') {
+  const prior = readMarker(env.dir, row.receipt);
+  const now = new Date().toISOString();
+  const code = failure?.code || 'booth_network';
+  const message = failure?.message || null;
+  const jobId = failure?.jobId || prior?.jobId || null;
+  const jobState = failure?.jobState || null;
+  const resolvedRepeat = repeat ?? prior?.repeat ?? null;
+  const delayCount = (Number.isSafeInteger(prior?.delayCount) ? prior.delayCount : 0) + 1;
+  writeMarker(env.dir, row.receipt, {
+    state: markerState,
+    delayed: true,
+    delayedSince: prior?.delayedSince || now,
+    delayCount,
+    jobId,
+    repeat: resolvedRepeat,
+    lastTransientError: {
+      code,
+      retryable: true,
+      ...(message ? { message } : {}),
+      ...(jobId ? { jobId } : {}),
+      ...(jobState ? { jobState } : {}),
+      at: now,
+    },
+  });
+  // Prefix matches booth.mjs CLAIM_SELECT (`operator_note LIKE 'live: failed %'`) so visitor tickets show reviewDelayed.
+  const note = `live: failed transient ${code} (delayed; resuming${jobId ? ` job=${jobId}` : ''})`;
+  if (row.operatorNote !== note) await noteOnRow(env, row.receipt, note);
+  progress(env.io, `live ${row.receipt} delayed ${code} resuming${jobId ? ` job=${jobId}` : ''}; next cycle retries`);
+  return { state: 'delayed', receipt: row.receipt, code, retryable: true, message, jobId, repeat: resolvedRepeat };
 }
 
 async function startReview(env, row, markerState = 'running') {
@@ -551,6 +656,7 @@ async function liveJob(env, row) {
     progress(env.io, `live ${current.receipt} still waiting for a job slot; next cycle retries`);
     return { state: 'error', receipt: current.receipt, code: 'slot_busy' };
   }
+  if (blue.delayed) return delayRow(env, current, blue.delayed, blue.repeat, 'running');
   if (blue.failed) return failRow(env, current, blue.failed, blue.repeat);
 
   // Re-check server status right before PATCH so an already judged or withdrawn row is never overwritten.
@@ -579,6 +685,10 @@ async function liveJob(env, row) {
     retryable: null,
     message: null,
     failure: null,
+    delayed: false,
+    delayedSince: null,
+    delayCount: 0,
+    lastTransientError: null,
   });
   progress(env.io, `live ${current.receipt} judged outcome=${verdict.outcome} published`);
   return { state: 'done', receipt: current.receipt, outcome: verdict.outcome, latencySec: latencySec(current, view) };
@@ -602,7 +712,7 @@ function createScheduler(limit, runJob, onResult) {
       const row = queue.shift();
       const job = runJob(row).then(result => {
         active.delete(row.receipt);
-        if (result.state === 'error') seen.delete(row.receipt);
+        if (result.state === 'error' || result.state === 'delayed') seen.delete(row.receipt);
         onResult(result);
         pump();
       });
@@ -669,8 +779,10 @@ function cycleLine(type, cycle, scheduler, stats) {
     inFlight: scheduler.inFlight,
     done: stats.done,
     failed: stats.failed.length,
+    delayed: stats.delayed.size,
     skipped: stats.skipped,
     failedReceipts: stats.failed.slice(),
+    delayedReceipts: [...stats.delayed.values()],
     p50Sec: percentile(sorted, 50),
     p95Sec: percentile(sorted, 95),
   };
@@ -678,9 +790,20 @@ function cycleLine(type, cycle, scheduler, stats) {
 
 function recordResult(stats, result) {
   if (result.state === 'done') {
+    stats.delayed.delete(result.receipt);
     stats.done += 1;
     if (result.latencySec != null) stats.latencies.push(result.latencySec);
+  } else if (result.state === 'delayed') {
+    stats.delayed.set(result.receipt, {
+      receipt: result.receipt,
+      code: result.code,
+      retryable: true,
+      message: result.message || null,
+      jobId: result.jobId || null,
+      repeat: result.repeat ?? null,
+    });
   } else if (result.state === 'failed') {
+    stats.delayed.delete(result.receipt);
     stats.failed.push({
       receipt: result.receipt,
       code: result.code,
@@ -689,6 +812,7 @@ function recordResult(stats, result) {
       jobId: result.jobId || null,
     });
   } else if (result.state === 'skipped') {
+    stats.delayed.delete(result.receipt);
     stats.skipped += 1;
   }
 }
@@ -733,7 +857,7 @@ export async function watch(ctx) {
   const intervalMs = flagInt(ctx.flags, 'interval', 'interval', 1, 3600, env.live.intervalSec) * 1000;
   const concurrency = flagInt(ctx.flags, 'concurrency', 'concurrency', 1, 256, env.live.concurrency);
   const cycles = flagInt(ctx.flags, 'cycles', 'cycles', 1, Number.MAX_SAFE_INTEGER, Infinity);
-  const stats = { done: 0, failed: [], skipped: 0, latencies: [] };
+  const stats = { done: 0, failed: [], delayed: new Map(), skipped: 0, latencies: [] };
   const scheduler = createScheduler(concurrency, row => safeLiveJob(env, row), result => recordResult(stats, result));
   const stop = installStop();
   progress(env.io, `watch profile=${env.run.profile.name} concurrency=${concurrency} interval=${intervalMs / 1000}s`);
@@ -785,6 +909,12 @@ function dryRecoverSummary(env, receipt, row) {
       receipt,
       serverStatus: row.status,
       markerState: marker?.state || null,
+      ...(marker?.delayed === true ? {
+        delayed: true,
+        delayedSince: marker.delayedSince || null,
+        delayCount: marker.delayCount || 0,
+        lastTransientError: marker.lastTransientError || null,
+      } : {}),
       action: 'resume_job',
       repeat: inspected.repeat,
       jobId: inspected.record.job.id,
@@ -838,6 +968,19 @@ async function recoverOne(env, receipt, { dryRun, maxRetries }) {
   if (blue.busy) {
     progress(env.io, `recover ${receipt} waiting for a job slot; rerun recover later`);
     return { receipt, serverStatus: 'reviewing', action: 'busy', code: 'slot_busy', retryable: true };
+  }
+  if (blue.delayed) {
+    const delayed = await delayRow(env, row, blue.delayed, blue.repeat, 'recovering');
+    return {
+      receipt,
+      serverStatus: 'reviewing',
+      action: 'delayed',
+      code: delayed.code,
+      retryable: true,
+      message: delayed.message,
+      jobId: delayed.jobId,
+      repeat: delayed.repeat,
+    };
   }
   if (blue.failed) {
     const failed = await failRow(env, row, blue.failed, blue.repeat);
@@ -902,6 +1045,10 @@ async function recoverOne(env, receipt, { dryRun, maxRetries }) {
     retryable: null,
     message: null,
     failure: null,
+    delayed: false,
+    delayedSince: null,
+    delayCount: 0,
+    lastTransientError: null,
   });
   progress(env.io, `recover ${receipt} judged outcome=${verdict.outcome} repeat=${blue.repeat} job=${blue.jobId || verdict.jobId} published`);
   return {
@@ -929,7 +1076,7 @@ function recoverTargets(dir, flags) {
 }
 
 // Explicit operator recovery for failed or interrupted receipts.
-// Looks up each receipt by exact id, protects judged/withdrawn rows, resumes saved unfinished/completed
+// Looks up each receipt by exact id, protects judged/withdrawn rows, resumes saved unfinished/valid-completed
 // job tickets by id, and otherwise allocates a fresh repeat index (new idempotency key).
 export async function recoverCommand(ctx) {
   const profileName = ctx.flags.profile && ctx.flags.profile !== true ? String(ctx.flags.profile) : ctx.config.live.liveProfile;
@@ -939,7 +1086,7 @@ export async function recoverCommand(ctx) {
   const maxRetries = flagInt(ctx.flags, 'retries', 'retries', 0, 10, env.live.retries);
   const dryRun = ctx.flags.dryRun === true;
   const results = await mapPool(targets, concurrency, receipt => recoverOne(env, receipt, { dryRun, maxRetries }));
-  const failed = results.filter(item => item.action === 'failed' || item.action === 'busy');
+  const failed = results.filter(item => item.action === 'failed' || item.action === 'busy' || item.action === 'delayed');
   env.io.stdout.write(`${JSON.stringify({
     dryRun,
     profile: env.run.profile.name,
@@ -969,14 +1116,15 @@ async function finalOne(env, row) {
   const liveVerdict = liveOutcomeOf(env.dir, row);
   const who = { receipt: row.receipt, assist: assistOf(row), recipeCode: recipeCodeOf(row) };
   const blue = await blueWithRetry(env, row);
-  if (blue.skip || blue.failed || blue.busy) {
-    const error = blue.skip || blue.failed?.code || 'slot_busy';
+  if (blue.skip || blue.failed || blue.busy || blue.delayed) {
+    const failure = blue.failed || blue.delayed || null;
+    const error = blue.skip || failure?.code || 'slot_busy';
     return {
       ...who,
       liveVerdict,
       finalVerdict: null,
       error,
-      ...(blue.failed ? { retryable: blue.failed.retryable === true, failure: blue.failed } : {}),
+      ...(failure ? { retryable: failure.retryable === true, failure } : {}),
     };
   }
   const reviewFailure = reviewResultFailure(blue.record);
