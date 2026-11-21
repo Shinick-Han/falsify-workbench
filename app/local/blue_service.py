@@ -126,20 +126,33 @@ def _blue_envelope(data, limits):
     if not isinstance(data, dict) or not KEYS <= set(data) or set(data) - KEYS - _BLUE_EXTRA_KEYS or data.get('schema') != VERSION:
         raise ValueError('BLUE는 허용된 문서 텍스트 필드만 받습니다. RED 계획·정답·파일명은 보내지 마세요.')
     _validate_blue_segments(data)
-    harness, _ = resolve(data, 'blue')
+    harness, harness_hash = resolve(data, 'blue')
     call_limit = min(limits['max_calls'], harness['maxCalls'] if limits['hosted'] else 32)
     if type(data.get('maxCalls')) is not int or not 1 <= data['maxCalls'] <= call_limit:
         raise ValueError(f'호출 예산(1–{call_limit})을 확인하세요.')
     if 'allowOccurrenceTargeting' in data and type(data['allowOccurrenceTargeting']) is not bool:
         raise ValueError('allowOccurrenceTargeting 값이 올바르지 않습니다.')
     _validate_auto_visual(data)
-    paper_context(data)
+    structured = paper_context(data)
     images = visual_inputs(data, limits)
     if (images or data.get('autoVisualReread') is True) and not _visual_adapter_supported(harness):
         raise ValueError('visual_provider_unsupported')
     if not builtin(harness) and data.get('executionConsent') is not True:
         raise ValueError('사용자 harness 실행/전송 동의가 필요합니다.')
-    return harness, images
+    return harness, harness_hash, images, structured
+
+
+def _blue_final_instruction(limits):
+    return (f'Return up to {limits["blue_max_findings"]} findings, each at an exact source quote (<=4000 chars; '
+            'set occurrence when the quote appears more than once), with rationale <=3000 chars, exact evidence. '
+            'Uncertainty is optional; use null when absent (otherwise <=1500 chars). ')
+
+
+def _hosted_batch_prompt(policy, final, text_index, total_batches, batch, limits):
+    return (policy + final + f'This is text batch {text_index + 1} of {total_batches} of the supplied '
+            'document. Read every fragment in this batch; other batches are reviewed separately. '
+            f'Propose up to {limits["blue_findings_per_batch"]} findings. '
+            + json.dumps({'batch': text_index + 1, 'segments': batch}, ensure_ascii=False))
 
 
 def _hosted_segments(data, limits):
@@ -160,24 +173,134 @@ def _hosted_blue_plan(data, limits, images):
     return batches, len(batches) * image_groups
 
 
-def _legacy_blue_plan(data, limits, harness):
+def _fit_prefix_fragment(segment, pos, max_end, max_item_json):
+    text = segment['text']
+    lo, hi, best = 1, max_end - pos, None
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        cand = {'id': segment['id'], 'label': segment['label'], 'text': text[pos:pos + mid]}
+        clen = len(json.dumps(cand, ensure_ascii=False))
+        if clen <= max_item_json:
+            best = (cand, clen, mid)
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    if best is None:
+        raise ValueError('BLUE 호출 프롬프트가 상한을 넘습니다. 모델을 호출하지 않습니다.')
+    return best
+
+
+def _split_segment_json(segment, max_item_json, max_text_chars):
+    text = segment['text']
+    if len(text) <= max_text_chars:
+        encoded = len(json.dumps(segment, ensure_ascii=False))
+        if encoded <= max_item_json:
+            return [(segment, encoded)]
+    out, pos, total = [], 0, len(text)
+    while pos < total:
+        end = min(total, pos + max_text_chars)
+        frag = {'id': segment['id'], 'label': segment['label'], 'text': text[pos:end]}
+        encoded = len(json.dumps(frag, ensure_ascii=False))
+        if encoded > max_item_json:
+            frag, encoded, step = _fit_prefix_fragment(segment, pos, end, max_item_json)
+            pos += step
+        else:
+            pos = end
+        out.append((frag, encoded))
+    return out
+
+
+def _pack_json_batches(items, max_body_json):
+    batches, current, used = [], [], 2
+    for frag, flen in items:
+        extra = flen if not current else flen + 2
+        if current and used + extra > max_body_json:
+            batches.append(current)
+            current, used = [], 2
+            extra = flen
+        current.append(frag)
+        used += extra
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _balance_json_batches(items, text_budget, max_body_json):
+    packed = _pack_json_batches(items, max_body_json)
+    if len(packed) > text_budget:
+        return None, len(packed)
+    lo = max(2 + flen for _, flen in items)
+    hi = max_body_json
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if len(_pack_json_batches(items, mid)) <= text_budget:
+            hi = mid
+        else:
+            lo = mid + 1
+    return _pack_json_batches(items, lo), len(packed)
+
+
+def _hosted_batch_body_limit(policy, final, ref_groups, text_budget, limits):
+    visual_reserve = max((len(_visual_prompt_suffix(rg)) for rg in ref_groups if rg), default=0)
+    shell = len(_hosted_batch_prompt(policy, final, text_budget - 1, text_budget, [], limits))
+    return limits['blue_max_prompt'] - shell - visual_reserve + 2
+
+
+def _hosted_evidence_budget_plan(data, limits, harness, images, structured):
+    """Pack every segment into <= budget prompt-bounded batches so long hosted papers keep full coverage."""
+    segments = _hosted_segments(data, limits)
+    budget = min(int(data['maxCalls']), int(harness['maxCalls']))
+    image_groups = image_batches(images, limits['images_per_batch'])
+    ref_groups = image_batches(_initial_visual_refs(data), limits['images_per_batch'])
+    text_budget = budget // len(image_groups)
+    if text_budget < 1:
+        raise ValueError(f'전체 추출 텍스트 검토에는 최소 {len(image_groups)}회 호출이 필요합니다. 현재 예산에서는 시작하지 않습니다.')
+    policy, _ = _blue_policy(harness, structured)
+    final = _blue_final_instruction(limits)
+    max_body_json = _hosted_batch_body_limit(policy, final, ref_groups, text_budget, limits)
+    if max_body_json < 64:
+        raise ValueError(f'BLUE 호출 프롬프트가 {limits["blue_max_prompt"]}자 상한을 넘습니다. 모델을 호출하지 않습니다.')
+    default_batches = _batch_segments(segments, limits['blue_batch_chars'])
+    if len(default_batches) <= text_budget and all(
+            len(json.dumps(batch, ensure_ascii=False)) <= max_body_json for batch in default_batches):
+        return default_batches, len(default_batches) * len(image_groups)
+    items = [pair for seg in segments for pair in _split_segment_json(seg, max_body_json - 2, limits['blue_batch_chars'])]
+    batches, min_text = _balance_json_batches(items, text_budget, max_body_json)
+    if batches is None:
+        min_calls = min_text * len(image_groups)
+        raise ValueError(f'전체 추출 텍스트 검토에는 최소 {min_calls}회 호출이 필요합니다. 현재 예산에서는 시작하지 않습니다.')
+    return batches, len(batches) * len(image_groups)
+
+
+def _legacy_blue_chunks(data, limits, harness):
     doc_data = {k: v for k, v in data.items() if k not in _DOC_STRIP_KEYS}
     chunks, required = validate_document({**doc_data, 'schema': 'falsify.document-red.v1', 'level': 1,
                                           'maxCalls': limits['max_calls'],
                                           'harness': {**harness, 'role': 'red', 'maxCalls': limits['max_calls']}})
     if len(chunks) > 1:
         required = len(chunks) + 2
-    if required > min(data['maxCalls'], harness['maxCalls']):
-        raise ValueError(f'전체 추출 텍스트 검토와 근거 재독에는 {required}회 호출이 필요합니다. 현재 예산에서는 시작하지 않습니다.')
     return chunks, required
 
 
-def validate_request(data):
+def _plan_review(data):
     limits = review_limits.for_data(data)
-    harness, images = _blue_envelope(data, limits)
-    if limits['hosted'] and 'paperEvidence' not in data and data.get('autoVisualReread') is not True:
-        return _hosted_blue_plan(data, limits, images)
-    return _legacy_blue_plan(data, limits, harness)
+    harness, harness_hash, images, structured = _blue_envelope(data, limits)
+    hosted_direct = limits['hosted'] and data.get('autoVisualReread') is not True
+    if hosted_direct and structured is None:
+        batches, required = _hosted_blue_plan(data, limits, images)
+        return 'hosted-batches', batches, required, structured, harness, harness_hash, images, limits
+    chunks, required = _legacy_blue_chunks(data, limits, harness)
+    if required <= min(data['maxCalls'], harness['maxCalls']):
+        return 'legacy', chunks, required, structured, harness, harness_hash, images, limits
+    if hosted_direct:
+        batches, required = _hosted_evidence_budget_plan(data, limits, harness, images, structured)
+        return 'hosted-batches', batches, required, structured, harness, harness_hash, images, limits
+    raise ValueError(f'전체 추출 텍스트 검토와 근거 재독에는 {required}회 호출이 필요합니다. 현재 예산에서는 시작하지 않습니다.')
+
+
+def validate_request(data):
+    _, chunks, required, *_ = _plan_review(data)
+    return chunks, required
 
 
 def _validate_delivered_finding(f, delivered):
@@ -292,6 +415,26 @@ def _validated_target(t, source, visible, catalog, delivered_spans, omitted_cata
     offset, anchor = _target_anchor(t, source[t['segmentId']], visible, catalog, delivered_spans)
     key = (t['segmentId'], offset, len(anchor))
     return key, {'segmentId': t['segmentId'], 'offset': offset, 'anchor': anchor}
+
+
+def _partition_targets(selection, source, visible, catalog=None, delivered_spans=(), omitted_catalog=None,
+                       max_targets=MAX_TARGETS):
+    """Hosted multi-chunk target selection: keep every valid target instead of aborting on one bad anchor."""
+    catalog = catalog or {}
+    if selection['status'] != 'ok':
+        return []
+    raw_targets = selection.get('targets') if isinstance(selection.get('targets'), list) else []
+    targets, seen, state = [], set(), {'evitem_count': 0}
+    for t in raw_targets[:max_targets]:
+        if not isinstance(t, dict):
+            continue
+        try:
+            key, validated = _validated_target(t, source, visible, catalog, delivered_spans, omitted_catalog, state)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if key not in seen:
+            seen.add(key); targets.append(validated)
+    return targets
 
 
 def validate_targets(selection, source, visible, catalog=None, delivered_spans=(), omitted_catalog=None,
@@ -568,16 +711,29 @@ def _invoke_blue_call(engine, prompt, schema, call_images, call_refs, cancelled,
     return response
 
 
-def _scan_chunks(first, source, invoke):
+def _scan_chunks(first, source, invoke, hosted=False):
     notes = []
     for i, prompt in enumerate(first):
         note = invoke(prompt, SCAN, 'reviewing')
         if note['status'] != 'ok':
             return None, note['status'], i + 1
-        if len(note['summary']) > 2500:
-            raise ValueError('BLUE 요약 제한 초과')
-        evidence_check(note['evidence'], source, 600)
-        notes.append(note)
+        if hosted:
+            summary = note['summary']
+            if len(summary) > 2500:
+                summary = summary[:2499].rstrip() + '…'
+            valid_evidence = []
+            for item in note.get('evidence') or []:
+                try:
+                    evidence_check([item], source, 600)
+                except (KeyError, TypeError, ValueError):
+                    continue
+                valid_evidence.append(item)
+            notes.append({**note, 'summary': summary, 'evidence': valid_evidence})
+        else:
+            if len(note['summary']) > 2500:
+                raise ValueError('BLUE 요약 제한 초과')
+            evidence_check(note['evidence'], source, 600)
+            notes.append(note)
     return notes, 'ok', len(first)
 
 
@@ -595,30 +751,40 @@ def _run_single_chunk(data, structured, images, initial_refs, first, invoke, fin
         accepted, rejected, unresolved = response['findings'], [], []
     if call_images:
         visual_observations.extend(response.get('visualObservations') or [])
-    status = response['status']
+    model_status = response['status']
+    status = model_status
     if status == 'ok' and not accepted and (rejected or unresolved):
         status = 'abstain'
     return finish(status, accepted, 1, reread_record('not-needed'), rejected=rejected, unresolved=unresolved,
-                  selected_items=[] if structured else None, auto_crops=auto_crops, used_visual=bool(call_images))
+                  selected_items=[] if structured else None, auto_crops=auto_crops, used_visual=bool(call_images),
+                  model_status=model_status)
 
 
 def _run_multi_chunk(data, structured, images, initial_refs, first, chunks, policy, final, source, invoke, finish,
                      progress, visual_observations, calls, required, limits, schema):
     allow_occ = data.get('allowOccurrenceTargeting') is True
-    notes, scan_status, done_chunks = _scan_chunks(first, source, invoke)
+    notes, scan_status, done_chunks = _scan_chunks(first, source, invoke, hosted=limits['hosted'])
     if notes is None:
-        return finish(scan_status, [], done_chunks, reread_record('incomplete'), complete=False)
+        return finish(scan_status, [], done_chunks, reread_record('incomplete'), complete=False,
+                      model_status=scan_status)
     selection_schema = _selection_schema(limits)
     prompt, index, quotes, payload, spans = _selection_prompt(policy, notes, data, structured, limits)
     selection = invoke(prompt, selection_schema, 'selecting')
     visible = _selection_visible(index, quotes)
     omitted_map = {r['refId']: r for r in payload.get('omittedEvidenceRefs', [])}
-    targets = validate_targets(selection, source, visible, {r['id']: r for r in payload['evidenceRefs']}, spans,
-                               omitted_map, limits['blue_max_targets'])
+    ref_map = {r['id']: r for r in payload['evidenceRefs']}
+    if limits['hosted']:
+        targets = _partition_targets(selection, source, visible, ref_map, spans, omitted_map,
+                                     limits['blue_max_targets'])
+    else:
+        targets = validate_targets(selection, source, visible, ref_map, spans, omitted_map,
+                                   limits['blue_max_targets'])
     if selection['status'] != 'ok':
-        return finish(selection['status'], [], len(chunks), reread_record('incomplete'))
+        return finish(selection['status'], [], len(chunks), reread_record('incomplete'), complete=False,
+                      model_status=selection['status'])
     if not targets:  # never a summary-only final judgment
-        return finish('abstain', [], len(chunks), reread_record('incomplete'))
+        return finish('abstain', [], len(chunks), reread_record('incomplete'), complete=False,
+                      model_status='abstain')
     progress({'completedCalls': calls(), 'requiredCalls': required, 'phase': 'reread'})
     selected_items = _selected_item_ids(targets)
     reread_items = format_reread_items(data['paperEvidence']['paperId'], data['fileHash'], selected_items) if selected_items else []
@@ -649,14 +815,16 @@ def _multi_finish(data, response, windows, notes, targets, truncated, limits, al
         accepted, rejected, unresolved = response['findings'], [], []
     if call_images:
         visual_observations.extend(response.get('visualObservations') or [])
-    status = response['status']
+    model_status = response['status']
+    status = model_status
     if status == 'ok' and not accepted and (rejected or unresolved):
         status = 'abstain'
     return finish(status, accepted, len(chunks),
                   reread_record('incomplete' if truncated else 'completed', targets, windows, truncated),
                   rejected=rejected, unresolved=unresolved, windows=windows,
                   selected_items=selected_items if structured else None,
-                  auto_crops=auto_crops, used_visual=bool(call_images))
+                  auto_crops=auto_crops, used_visual=bool(call_images),
+                  model_status=model_status)
 
 
 def image_batches(images, per_batch):
@@ -670,10 +838,7 @@ def _hosted_blue_pair(data, text_index, batch, image_index, group, refs, policy,
     delivered = {}
     for segment in batch:
         delivered.setdefault(segment['id'], []).append(segment['text'])
-    prompt = (policy + final + f'This is text batch {text_index + 1} of {len(data["_text_batches"])} of the supplied '
-              'document. Read every fragment in this batch; other batches are reviewed separately. '
-              f'Propose up to {limits["blue_findings_per_batch"]} findings. '
-              + json.dumps({'batch': text_index + 1, 'segments': batch}, ensure_ascii=False))
+    prompt = _hosted_batch_prompt(policy, final, text_index, len(data['_text_batches']), batch, limits)
     response = invoke(prompt, schema, 'reviewing', group, refs)
     if response.get('status') != 'ok':
         rejected.append({'textBatch': text_index + 1, 'imageBatch': image_index + 1,
@@ -711,33 +876,70 @@ def _add_unique_observations(observations, visual_observations, seen_observation
             visual_observations.append(observation)
 
 
+def _hosted_batch_outcome(statuses, accepted, rejected, unresolved, all_pairs_attempted):
+    has_refusal = 'refusal' in statuses
+    has_abstain = 'abstain' in statuses
+    any_incomplete = has_refusal or has_abstain
+    complete = all_pairs_attempted and not any_incomplete
+    if statuses and not any_incomplete:
+        model_status = 'ok'
+    else:
+        model_status = 'refusal' if has_refusal else 'abstain'
+    if accepted:
+        status = 'ok'
+    elif has_refusal:
+        status = 'refusal'
+    elif has_abstain or not statuses or rejected or unresolved:
+        status = 'abstain'
+    else:
+        status = 'ok'
+    return status, model_status, complete
+
+
+def _hosted_batch_meaning(complete, all_pairs_attempted):
+    if complete:
+        lead = 'Every supplied text batch (and image batch) was reviewed and valid findings were accumulated. '
+    elif not all_pairs_attempted:
+        lead = ('The job call budget ended before every batch; remaining text batches are listed '
+                'and are not claimed as reviewed. ')
+    else:
+        lead = 'One or more batches returned abstain or refusal and are not claimed as reviewed. '
+    return lead + 'This is batch coverage, not proof that the paper has no other defects.'
+
+
+def _hosted_remaining_batches(text_batches, image_groups, completed):
+    completed_text = min(len(text_batches), (completed + len(image_groups) - 1) // len(image_groups))
+    return [{'textBatch': index + 1,
+             'segmentIds': list(dict.fromkeys(s['id'] for s in text_batches[index])),
+             'chars': sum(len(s['text']) for s in text_batches[index]),
+             'imageBatches': len(image_groups)}
+            for index in range(completed_text, len(text_batches))]
+
+
 def _hosted_blue_result(data, text_batches, image_groups, completed, accepted, rejected, unresolved,
                         statuses, limits, harness, harness_hash, usage_totals, provider_state, images,
-                        visual_observations):
-    status = 'ok' if accepted else (statuses[-1] if statuses and statuses[-1] != 'ok' else 'abstain')
-    complete = completed == len(text_batches) * len(image_groups)
-    completed_text = min(len(text_batches), (completed + len(image_groups) - 1) // len(image_groups))
-    remaining = [{'textBatch': index + 1,
-                  'segmentIds': list(dict.fromkeys(s['id'] for s in text_batches[index])),
-                  'chars': sum(len(s['text']) for s in text_batches[index]),
-                  'imageBatches': len(image_groups)}
-                 for index in range(completed_text, len(text_batches))]
+                        visual_observations, structured=None):
+    all_pairs_attempted = completed == len(text_batches) * len(image_groups)
+    status, model_status, complete = _hosted_batch_outcome(
+        statuses, accepted, rejected, unresolved, all_pairs_attempted)
+    remaining = _hosted_remaining_batches(text_batches, image_groups, completed)
     provider = {'id': 'anthropic-api', 'models': sorted(provider_state['models']),
                 'requestId': provider_state['request_id']}
+    coverage = {'complete': complete, 'calls': completed, 'textBatches': len(text_batches),
+                'imageBatches': len(image_groups), 'completedPairs': completed,
+                'batchStatuses': list(statuses),
+                'remainingBatches': remaining,
+                'resultCoverage': {'accepted': len(accepted), 'rejected': len(rejected),
+                                   'unresolved': len(unresolved), 'modelStatus': model_status,
+                                   'rejectedItems': rejected,
+                                   'unresolvedItems': unresolved},
+                'meaning': _hosted_batch_meaning(complete, all_pairs_attempted)}
+    if structured:
+        coverage['paperEvidence'] = _paper_evidence_coverage(structured, data, [], 0)
     result = {'schema': VERSION, 'revision': data['revision'], 'sourceHash': data['sourceHash'],
               'status': status, 'findings': accepted, 'usage': usage_totals, 'provider': provider,
               'harness': harness, 'harnessHash': harness_hash, 'model': model_label(harness), **record(harness),
-              'coverage': {'complete': complete, 'calls': completed, 'textBatches': len(text_batches),
-                           'imageBatches': len(image_groups), 'completedPairs': completed,
-                           'remainingBatches': remaining,
-                           'resultCoverage': {'accepted': len(accepted), 'rejected': len(rejected),
-                                              'unresolved': len(unresolved), 'rejectedItems': rejected,
-                                              'unresolvedItems': unresolved},
-                           'meaning': ('Every supplied text batch (and image batch) was reviewed and valid findings were '
-                                       'accumulated. ' if complete else
-                                       'The job call budget ended before every batch; remaining text batches are listed '
-                                       'and are not claimed as reviewed. ')
-                                      + 'This is batch coverage, not proof that the paper has no other defects.'},
+              'coverage': coverage,
               'isolation': ISOLATION}
     if images:
         result['visualObservations'] = visual_observations
@@ -746,8 +948,18 @@ def _hosted_blue_result(data, text_batches, image_groups, completed, accepted, r
     return result
 
 
+def _validate_hosted_batch_prompts(policy, final, batches, initial_refs, limits):
+    ref_groups = image_batches(initial_refs, limits['images_per_batch'])
+    visual_reserve = max((len(_visual_prompt_suffix(rg)) for rg in ref_groups if rg), default=0)
+    total = len(batches)
+    for index, batch in enumerate(batches):
+        prompt = _hosted_batch_prompt(policy, final, index, total, batch, limits)
+        if len(prompt) + visual_reserve > limits['blue_max_prompt']:
+            raise ValueError(f'BLUE 호출 프롬프트가 {limits["blue_max_prompt"]}자 상한을 넘습니다. 모델을 호출하지 않습니다.')
+
+
 def _run_hosted_blue(data, text_batches, images, initial_refs, policy, final, invoke, cancelled, limits,
-                     harness, harness_hash, usage_totals, provider_state, visual_observations):
+                     harness, harness_hash, usage_totals, provider_state, visual_observations, structured=None):
     """Full-text provider-sized batches; partial coverage is explicit."""
     allow_occ = data.get('allowOccurrenceTargeting') is True
     schema = result_schema(limits, allow_occ)
@@ -772,16 +984,13 @@ def _run_hosted_blue(data, text_batches, images, initial_refs, policy, final, in
     data.pop('_text_batches', None)
     return _hosted_blue_result(data, text_batches, image_groups, completed, accepted, rejected, unresolved,
                                statuses, limits, harness, harness_hash, usage_totals, provider_state, images,
-                               visual_observations)
+                               visual_observations, structured=structured)
 
 def run_review(data, progress, cancelled, backend_factory=CodexBackend, claude_factory=ClaudeBackend, hosted_factory=None):
-    chunks, required = validate_request(data)
-    limits = review_limits.for_data(data)
+    mode, chunks, required, structured, harness, harness_hash, images, limits = _plan_review(data)
     allow_occ = data.get('allowOccurrenceTargeting') is True
     schema = RESULT if not limits['hosted'] and not allow_occ else result_schema(limits, allow_occ)
-    images, initial_refs = visual_inputs(data, limits), _initial_visual_refs(data)
-    structured = paper_context(data)
-    harness, harness_hash = resolve(data, 'blue')
+    initial_refs = _initial_visual_refs(data)
     source = {s['id']: s['text'] for s in data['segments']}
     calls = 0
     usage_totals = {}
@@ -795,10 +1004,12 @@ def run_review(data, progress, cancelled, backend_factory=CodexBackend, claude_f
         if isinstance(result.get('provider_model'), str):
             provider_state['models'].add(result['provider_model'])
     policy, external = _blue_policy(harness, structured)
-    final = (f'Return up to {limits["blue_max_findings"]} findings, each at an exact source quote (<=4000 chars; '
-             'set occurrence when the quote appears more than once), with rationale <=3000 chars, exact evidence. '
-             'Uncertainty is optional; use null when absent (otherwise <=1500 chars). ')
-    first = _first_review_prompts(policy, final, chunks, limits)
+    final = _blue_final_instruction(limits)
+    if mode == 'hosted-batches':
+        _validate_hosted_batch_prompts(policy, final, chunks, initial_refs, limits)
+        first = None
+    else:
+        first = _first_review_prompts(policy, final, chunks, limits)
     # A new backend and ephemeral CLI session; no shared RED conversation or notes.
     backend_limits = {'max_prompt_chars': limits['blue_max_prompt'], 'timeout_seconds': limits['timeout_seconds']}
     if limits['hosted']:
@@ -819,10 +1030,11 @@ def run_review(data, progress, cancelled, backend_factory=CodexBackend, claude_f
         return response
     visual_observations = []
     def finish(status, findings, completed, reread, complete=True, windows=(), selected_items=None, auto_crops=0,
-               used_visual=False, rejected=(), unresolved=()):
+               used_visual=False, rejected=(), unresolved=(), model_status=None):
         coverage = {'complete': complete, 'calls': calls, 'chunks': len(chunks), 'completedChunks': completed, 'reread': reread,
                     'rereadWindows': [{'segmentId': w['segmentId'], 'start': w['start'], 'end': w['end']} for w in windows],
                     'resultCoverage': {'accepted': len(findings), 'rejected': len(rejected), 'unresolved': len(unresolved),
+                                       'modelStatus': model_status or status,
                                        'rejectedItems': list(rejected), 'unresolvedItems': list(unresolved)}}
         if complete: coverage['meaning'] = MEANING
         if structured: coverage['paperEvidence'] = _paper_evidence_coverage(structured, data, selected_items, auto_crops)
@@ -838,9 +1050,10 @@ def run_review(data, progress, cancelled, backend_factory=CodexBackend, claude_f
             'usage': usage_totals, 'provider': provider,
             'harness': harness, 'harnessHash': harness_hash, 'model': model_label(harness), **record(harness),
             'coverage': coverage, 'isolation': ISOLATION}
-    if limits['hosted'] and structured is None and data.get('autoVisualReread') is not True:
+    if mode == 'hosted-batches':
         return _run_hosted_blue(data, chunks, images, initial_refs, policy, final, invoke, cancelled, limits,
-                                harness, harness_hash, usage_totals, provider_state, visual_observations)
+                                harness, harness_hash, usage_totals, provider_state, visual_observations,
+                                structured=structured)
     if len(chunks) == 1:
         return _run_single_chunk(data, structured, images, initial_refs, first, invoke, finish, visual_observations,
                                  limits, schema)

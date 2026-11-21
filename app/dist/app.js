@@ -132,10 +132,13 @@
     result.segments.forEach((s,i)=>select.add(new Option(s.label+' · '+s.text.slice(0,60),String(i))));
     select.value=result.format==='PDF'?'0':'all';showSegment();
   }
+  function boothActive(){
+    return !!(globalThis.FalsifyCloudConfig&&globalThis.FalsifyCloudConfig.booth&&globalThis.FalsifyCloudConfig.booth.enabled===true&&typeof document.getElementById==='function'&&document.getElementById('booth'));
+  }
   $('#paper-file').addEventListener('change',async event=>{
     const file=event.target.files[0];if(!file){if(importedFile)restoreChooser();return;}
     if(!confirmDocumentChange('replace')){restoreChooser();return;}
-    clearImport(true);importedFile=file;const epoch=importEpoch;importController=new AbortController();$('#import-cancel').hidden=false;$('#import-status').classList.remove('error');
+    clearImport(true);importedFile=file;if(boothActive())return;const epoch=importEpoch;importController=new AbortController();$('#import-cancel').hidden=false;$('#import-status').classList.remove('error');
     try{
       const result=await FalsifyImport.extract(file,{signal:importController.signal,onProgress:message=>{if(epoch===importEpoch)$('#import-status').textContent=message;}});
       if(epoch!==importEpoch)return;showImport(result);

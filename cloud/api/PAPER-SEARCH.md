@@ -64,16 +64,20 @@ JSON errors use the `/v1/ai/*` envelope and the `no-store` / `nosniff` headers:
     "authors": ["Ada Example"],
     "year": 2024,
     "abstract": "Synthetic example.",
-    "license": { "id": "cc-by", "url": "https://creativecommons.org/licenses/by/4.0/" },
+    "license": { "id": "cc-by-4.0", "url": "https://creativecommons.org/licenses/by/4.0/" },
     "licenseVerified": true,
     "landingUrl": "https://arxiv.org/abs/2503.10497"
   }]
 }
 ```
 
-Ten results per page. `authors` is at most six names. `abstract` is at most 700 code points. `hasMore` is true only when another page in `1..5` exists upstream. Page 5 is the last page this route will serve, so `hasMore` is false there even if the upstream has more rows. `year` is `null` when the upstream year is missing or outside 1900..2100.
+Up to ten verified results per page. `authors` is at most six names. `abstract` is at most 700 code points. `hasMore` is true only when another page in `1..5` has upstream candidates. Page 5 is the last page this route serves, so `hasMore` is false there. `year` is `null` when the upstream year is missing or outside 1900..2100.
 
-The success body is `Cache-Control: public, max-age=3600`. Errors stay `no-store`. The cache key is the normalized query plus the page. It does not include the owner, the IP, or the API key. A successful arXiv fallback is cached the same way, so OpenAlex is not retried until that hour is over. A `503` is not cached.
+Every returned result uses the canonical versionless arXiv id and landing URL so the OAI-PMH licence and opened PDF resolve the latest version. Licences are verified against arXiv OAI-PMH (`GetRecord`, `metadataPrefix=arXiv`) using strict canonical `creativecommons.org` URI matching for CC BY (`1.0`/`2.0`/`2.5`/`3.0`/`4.0`), CC BY-SA (`1.0`/`2.0`/`2.5`/`3.0`/`4.0`), and CC0 `1.0`. Disallowed, missing, conflicting, or transiently unverified licences are excluded.
+
+On event deployments (`BOOTH_ENABLED=true`), each OAI-allowed candidate runs a `GET Range: bytes=0-4` probe on `https://arxiv.org/pdf/<id>` against `min(maxPdfBytes(env), caller uploadCap)` (shared with `booth.mjs`). Confirmed oversized, 404/410, or invalid PDFs are excluded and cached for 24 hours. When `%PDF-` magic is verified but total size is indeterminate, a safe `HEAD` check attempts to confirm `Content-Length`; if size still cannot be confirmed, or on any transient/unreadable-header probe failure, the paper is excluded and the response is marked `no-store`.
+
+Complete verified responses return `Cache-Control: public, max-age=3600` and are stored under a versioned key derived from the normalized query, page, and effective PDF cap (`none` outside event deployments, never owner, IP, or API key). A verified Atom fallback is cached the same way. If one or more candidates hit a transient failure while at least one verified paper remains, those verified papers return with `Cache-Control: no-store` and skip the search cache. If zero verified papers remain after a transient failure, the route returns `503 upstream_unavailable` and stores nothing.
 
 ### `GET /v1/papers/pdf?id=<arXiv id>`
 
@@ -145,9 +149,9 @@ Hosts that may be requested directly:
 - `https://oaipmh.arxiv.org` for `GetRecord`
 - `https://arxiv.org` for the PDF
 
-The OpenAlex filter is `best_oa_location.source.id:S4306400194` (arXiv) and `best_oa_location.license:cc-by|cc-by-sa|public-domain`. Those three licence tokens are returned with `licenseVerified: true`. A work that does not yield an arXiv id, or whose licence token is not one of those three, is dropped. OpenAlex abstracts are rebuilt from `abstract_inverted_index`.
+The OpenAlex filter `best_oa_location.source.id:S4306400194` (arXiv) and `best_oa_location.license:cc-by|cc-by-sa|public-domain` pre-filters ten candidates per page. A work without an arXiv id or matching pre-filter token is dropped. OpenAlex abstracts are rebuilt from `abstract_inverted_index`. Every remaining candidate is verified against arXiv OAI-PMH (`GetRecord`), sharing the 24-hour `/papers/license` cache with `/v1/papers/pdf`, and on event deployments (`BOOTH_ENABLED=true`) against a `Range: bytes=0-4` PDF probe sharing the 24-hour `/papers/pdf-probe` cache.
 
-If OpenAlex cannot be used (non-200, invalid JSON, network error, or a redirect this module will not follow), the handler falls back to `export.arxiv.org/api/query` with `search_query=all:<normalized q>`. Fallback rows have `license: null` and `licenseVerified: false`. The Atom API does not carry a licence. If that fallback also fails, the response is `503 upstream_unavailable`. An empty OpenAlex result set is a successful empty page, not a fallback.
+If OpenAlex fails (non-200, timeout, invalid JSON, network error, or refused redirect), the handler falls back to `export.arxiv.org/api/query` with `search_query=all:<normalized q>`, `start=(page-1)*10`, and `max_results=10`. Candidates are canonicalized to versionless arXiv ids and verified in bounded concurrent waves (at most five in flight) within a global deadline. An empty OpenAlex result set is a verified empty page, not a fallback. If both OpenAlex and Atom fail, or if transient OAI-PMH/probe failures leave zero verified papers, the response is `503 upstream_unavailable`.
 
 Every upstream request sets:
 
@@ -155,8 +159,8 @@ Every upstream request sets:
 User-Agent: falsify-workbench-booth/1.0 (+https://github.com/Shinick-Han/falsify-workbench)
 ```
 
-There is no `mailto` parameter and no email address. `OPENALEX_API_KEY` is `Authorization: Bearer <key>` on that one OpenAlex request and is not a query parameter. Fetch uses `redirect: 'manual'`. A redirect is followed only for `https://arxiv.org/` and `https://export.arxiv.org/`, at most three hops, with no userinfo and no port other than 443. Any other hop, including `http://` and a look-alike host, is `502 redirect_refused` and is not requested. An OpenAlex redirect that fails this rule is treated as an OpenAlex failure and falls back to arXiv instead of following it. A PDF redirect that fails it fails the request.
+There is no `mailto` parameter and no email address. `OPENALEX_API_KEY` is `Authorization: Bearer <key>` on that one OpenAlex request and is not a query parameter. Fetch uses `redirect: 'manual'`. A redirect is followed only for `https://arxiv.org/` and `https://export.arxiv.org/`, at most three hops, with no userinfo and no port other than 443. Any other hop, including `http://` and a look-alike host, is `502 redirect_refused` and is not requested. An OpenAlex redirect that fails this rule falls back to arXiv instead of following it. A PDF redirect that fails it fails the request.
 
 ## Licence rule
 
-Booth intake allows CC BY (any version), CC BY-SA, and CC0 / public domain. The PDF route decides from the OAI `<license>` URL. Search rows from OpenAlex use the upstream token (`cc-by`, `cc-by-sa`, `public-domain`) and are already restricted to that set. Search rows from the Atom fallback are not a licence decision; the PDF route checks again before any byte is returned to the browser.
+Booth intake allows canonical `creativecommons.org` CC BY (`1.0`/`2.0`/`2.5`/`3.0`/`4.0`), CC BY-SA (`1.0`/`2.0`/`2.5`/`3.0`/`4.0`), and CC0 `1.0` URIs. Both `/v1/papers/search` (OpenAlex primary and Atom fallback) and `/v1/papers/pdf` decide from the arXiv OAI-PMH `<license>` URL and share the 24-hour versionless verdict cache. Search results always carry the OAI-verified `license` (`id` and `url`) with `licenseVerified: true`; disallowed, missing, conflicting, and unverified papers are omitted.

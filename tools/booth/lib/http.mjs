@@ -25,7 +25,12 @@ export function createClient({ apiBase, token, fetchImpl = globalThis.fetch }) {
     try {
       response = await fetchImpl(url, { method, headers: sent, body });
     } catch (error) {
-      throw new BoothError('booth_network', scrub(error.message, token), { exitCode: 2 });
+      const message = scrub(error.message, token);
+      throw new BoothError('booth_network', message, {
+        exitCode: 2,
+        retryable: true,
+        failure: { code: 'booth_network', retryable: true, message },
+      });
     }
     const buffer = Buffer.from(await response.arrayBuffer());
     if (expect === 'file' && response.ok) return { bytes: buffer, headers: response.headers };
@@ -38,15 +43,36 @@ export function createClient({ apiBase, token, fetchImpl = globalThis.fetch }) {
     if (!response.ok) {
       const code = errorCode(parsed, response.status);
       const retryAfter = Number(response.headers.get('Retry-After'));
-      throw new BoothError(code, `${method} ${url.pathname} -> ${response.status} ${code}`, {
+      const seconds = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : 0;
+      const retryable = typeof parsed?.error?.retryable === 'boolean'
+        ? parsed.error.retryable
+        : (response.status === 408 || response.status === 429 || response.status >= 500);
+      const detail = typeof parsed?.error?.message === 'string' && parsed.error.message ? parsed.error.message : '';
+      const message = `${method} ${url.pathname} -> ${response.status} ${code}`;
+      const failure = {
+        code,
+        retryable,
+        message: detail || message,
+        status: response.status,
+      };
+      if (typeof parsed?.error?.requestId === 'string' && parsed.error.requestId) {
+        failure.requestId = parsed.error.requestId;
+      }
+      if (seconds > 0) failure.retryAfter = seconds;
+      throw new BoothError(code, message, {
         exitCode: 2,
         status: response.status,
-        retryAfter: Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : 0,
+        retryAfter: seconds,
+        retryable,
+        failure,
       });
     }
     if (expect === 'bytes') return buffer;
     if (!parsed || typeof parsed !== 'object') {
-      throw new BoothError('booth_api', `${method} ${url.pathname} returned a non-JSON body`, { exitCode: 2 });
+      throw new BoothError('booth_api', `${method} ${url.pathname} returned a non-JSON body`, {
+        exitCode: 2,
+        retryable: false,
+      });
     }
     return parsed;
   }

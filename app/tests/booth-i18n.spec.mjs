@@ -514,3 +514,16 @@ test('booth-myai.js rule error sentences translate cleanly to English with no Ha
     assert.notEqual(en, rawFallback, `Raw code leaked: ${en}`);
   }
 });
+
+test('booth.js PDF open error sentences translate cleanly to English with no Hangul', () => {
+  const {i18n} = loadI18n();
+  const boothCtx = vm.createContext({console, URL, URLSearchParams});
+  vm.runInContext(boothSource, boothCtx, {filename: 'booth.js'});
+  i18n.setLang('en');
+  for (const code of ['pdf_encrypted', 'pdf_corrupt', 'pdf_empty_text', 'pdf_timeout', 'pdf_unreadable']) {
+    const ko = boothCtx.FalsifyBooth.errorMessage(code);
+    const en = i18n.t(ko);
+    assert.notEqual(en, ko, `missing EN translation for ${code}: ${ko}`);
+    assert.doesNotMatch(en, /[가-힣]/, `Hangul leaked for ${code}: ${en}`);
+  }
+});

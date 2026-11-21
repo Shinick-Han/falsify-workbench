@@ -481,3 +481,59 @@ test('case-folded no-op where replace equals originalText is unresolved as uncha
   assert.deepEqual(plain(result.unresolved.map(item => item.reason)), ['unchanged']);
   assert.equal(edits.list().length, 0);
 });
+
+test('recipe indexing skips active-page cleanup, survives per-page failures, avoids duplicate pdf.js parse, and trims >300-char titles', async () => {
+  const cleanedPages = [];
+  const pdf = {
+    numPages: 3,
+    async getPage(n) {
+      if (n === 2) throw new Error('corrupt page 2');
+      return {
+        getViewport: () => ({width: 600, height: 800, transform: [1, 0, 0, -1, 0, 800]}),
+        getTextContent: async () => ({
+          items: n === 1
+            ? [{str: 'Active page 1 text', rect: {x: 0.1, y: 0.1, w: 0.4, h: 0.02}, hasEOL: true}]
+            : [{str: 'Target 0.95 on page 3', rect: {x: 0.1, y: 0.2, w: 0.4, h: 0.02}, hasEOL: true}],
+        }),
+        cleanup() { cleanedPages.push(n); },
+      };
+    },
+  };
+  let duplicatePreviewCalls = 0;
+  const ws = {
+    getSource: () => ({file: {arrayBuffer: async () => new ArrayBuffer(8)}, fileHash: 'b'.repeat(64)}),
+    getPdfDoc: () => pdf,
+    getPageCount: () => 3,
+    getPageIndex: () => 0,
+    showPage: () => true,
+  };
+  const openedMeta = [];
+  const longTitle = 'A '.repeat(200) + 'End';
+  const fetch = async () => ({
+    ok: true, status: 200,
+    json: async () => ({results: [{id: '2401.12345', title: longTitle, license: 'cc-by-4.0'}]}),
+  });
+  let opened = false;
+  const wsOpen = {
+    ...ws,
+    getPdfDoc: () => (opened ? pdf : null),
+  };
+  const {recipe} = load({
+    fetch,
+    FalsifyPreview: {defaultImport: async () => { duplicatePreviewCalls += 1; throw new Error('must not duplicate'); }},
+    FalsifyPaperWorkspace: wsOpen,
+    FalsifyCloudConfig: {apiBase: 'https://api.example'},
+    FalsifyHostedSession: {token: async () => 'fsg_' + 'd'.repeat(43)},
+    FalsifyBoothPaper: {
+      open: (_id, meta) => { openedMeta.push(plain(meta)); opened = true; return Promise.resolve(true); },
+      current: () => (opened ? {id: '2401.12345', title: openedMeta[0].title, license: 'cc-by-4.0'} : null),
+    },
+  });
+  const res = await recipe.apply(good({paperId: '2401.12345', edits: [{page: 3, find: '0.95', replace: '0.50'}]}));
+  assert.equal(res.applied.length, 1, 'page 3 indexed despite page 2 error');
+  assert.equal(duplicatePreviewCalls, 0, 'never spins up duplicate pdf.js document when workspace owns getPdfDoc');
+  assert.equal(cleanedPages.includes(1), false, 'never calls cleanup() on active page 1');
+  assert.equal(cleanedPages.includes(3), true, 'cleans up inactive pages');
+  assert.ok(openedMeta[0].title.length > 0 && openedMeta[0].title.length <= 300, '>300-char title truncated at searchMeta boundary');
+  assert.equal(openedMeta[0].title, openedMeta[0].title.trim(), 'truncated title has no trailing whitespace');
+});

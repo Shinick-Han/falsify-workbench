@@ -6,7 +6,7 @@ import {
 import { USAGE } from './constants.mjs';
 import { loadConfig, readToken } from './config.mjs';
 import { BoothError } from './errors.mjs';
-import { finalCommand, watch } from './live.mjs';
+import { finalCommand, recoverCommand, watch } from './live.mjs';
 
 const COMMANDS = {
   status,
@@ -24,6 +24,7 @@ const COMMANDS = {
   close: closeBooth,
   announce,
   watch,
+  recover: recoverCommand,
   final: finalCommand,
 };
 

@@ -187,12 +187,20 @@ Limits via `deps.rateLimit`: `PAPER_SEARCH_PER_OWNER_HOUR` 60, `PAPER_SEARCH_PER
 `PAPER_PDF_PER_OWNER_HOUR` 20, `PAPER_PDF_PER_IP_HOUR` 120, global `PAPER_SEARCH_PER_HOUR` 3000.
 
 - `GET /v1/papers/search?q=<1..200 chars>&page=<1..5>` ->
-  `{ source: "arxiv", page, hasMore, results: Paper[] }` (10 per page).
-  Paper = `{ source: "arxiv", id, title, authors: string[] (<= 6), year, abstract (<= 700 chars), license: { id, url } | null, licenseVerified: boolean, landingUrl }`.
-  Primary: OpenAlex works search restricted to arXiv (`best_oa_location.source.id:S4306400194`) and
+  `{ source: "arxiv", page, hasMore, results: Paper[] }` (up to 10 verified per page).
+  Paper = `{ source: "arxiv", id, title, authors: string[] (<= 6), year, abstract (<= 700 chars), license: { id, url }, licenseVerified: true, landingUrl }`.
+  Primary: OpenAlex works search pre-filtered to arXiv (`best_oa_location.source.id:S4306400194`) and
   licenses `cc-by`, `cc-by-sa`, `public-domain` (optional secret `OPENALEX_API_KEY`). On OpenAlex
-  failure fall back to the arXiv Atom API with `licenseVerified: false`. Cache responses in
-  `caches.default` for 1 h (key = normalized query + page only).
+  failure fall back to the arXiv Atom API (`start=(page-1)*10`, `max_results=10`). Both paths
+  canonicalize search `id`/`landingUrl` to the versionless arXiv id so OAI-PMH (`GetRecord`, strict
+  canonical `creativecommons.org` CC BY / CC BY-SA / CC0 URIs, 24 h cache shared with `/v1/papers/pdf`)
+  and the PDF resolve the latest version. On event deployments (`BOOTH_ENABLED=true`), OAI-allowed
+  candidates run a `Range: bytes=0-4` PDF magic/size probe (falling back to safe `HEAD` when size is
+  indeterminate) against `min(maxPdfBytes(env), owner uploadCap)` (24 h probe cache); confirmed
+  oversized, 404/410, invalid, and unresolved/transient PDFs are excluded. Complete verified pages
+  cache in `caches.default` for 1 h (versioned key = normalized query + page + effective cap);
+  degraded responses with transient failures return `no-store` without caching, and 0 verified papers
+  with a transient failure return `503 upstream_unavailable`.
 - `GET /v1/papers/pdf?id=<arXiv id>` -> license check via arXiv OAI-PMH `GetRecord`
   (`metadataPrefix=arXiv`): allow CC BY (any version), CC BY-SA, CC0 / public domain; otherwise 403
   `license_not_allowed` (cache the verdict 24 h). Then fetch `https://arxiv.org/pdf/<id>`. Require HTTP

@@ -400,7 +400,7 @@
   }
   function validEdit(edit){
     if(!edit||typeof edit!=='object') return false;
-    if(!Number.isInteger(edit.pageIndex)||edit.pageIndex<0||edit.pageIndex>=500) return false;
+    if(!Number.isInteger(edit.pageIndex)||edit.pageIndex<0||edit.pageIndex>9999) return false;
     if(!Array.isArray(edit.rects)||!edit.rects.length||!edit.rects.every(validRect)) return false;
     if(typeof edit.originalText!=='string'||typeof edit.newText!=='string') return false;
     return edit.originalText!==edit.newText;
@@ -436,10 +436,22 @@
     const match=on&&/^booth-tab-(find|myai)$/.exec(on.id||'');
     return match?match[1]:'find';
   }
+  function trimCodePoints(text, max){
+    const chars=[...text];
+    if(chars.length<=max&&text.length<=max) return text;
+    let out='';
+    let count=0;
+    for(const ch of chars){
+      if(count>=max||out.length+ch.length>max) break;
+      out+=ch;
+      count+=1;
+    }
+    return out;
+  }
   function cleanTitle(value){
     if(typeof value!=='string') return '';
-    const text=value.trim();
-    return text&&text.length<=300&&!CONTROL.test(text)?text:'';
+    const text=value.replace(/[\u0000-\u001f\u007f]+/g,' ').replace(/\s+/g,' ').trim();
+    return text?trimCodePoints(text,300).trim():'';
   }
   function cleanLicense(value){
     if(typeof value!=='string') return '';

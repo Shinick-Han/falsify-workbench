@@ -321,6 +321,82 @@ function dryBlueAction(dir, task) {
   };
 }
 
+export function jobFailure(job) {
+  const state = typeof job?.state === 'string' && job.state ? job.state : 'failed';
+  const raw = job?.failure && typeof job.failure === 'object' ? job.failure : null;
+  const fallbackCode = state === 'interrupted'
+    ? 'job_interrupted'
+    : (state === 'cancelled' ? 'job_cancelled' : 'booth_job');
+  const code = typeof raw?.code === 'string' && raw.code ? raw.code : fallbackCode;
+  const retryable = typeof raw?.retryable === 'boolean' ? raw.retryable : false;
+  const message = typeof raw?.message === 'string' && raw.message ? raw.message : `job ended ${state}`;
+  const failure = { code, retryable, message, jobState: state };
+  if (typeof raw?.requestId === 'string' && raw.requestId) failure.requestId = raw.requestId;
+  if (typeof job?.id === 'string' && job.id) failure.jobId = job.id;
+  return failure;
+}
+
+export function recordFailure(record) {
+  if (record?.job?.failure && typeof record.job.failure === 'object') return jobFailure(record.job);
+  if (record?.failure && typeof record.failure === 'object' && typeof record.failure.code === 'string') {
+    const failure = {
+      code: record.failure.code,
+      retryable: record.failure.retryable === true,
+      message: typeof record.failure.message === 'string' && record.failure.message
+        ? record.failure.message
+        : record.failure.code,
+      jobState: record.failure.jobState || record?.job?.state || 'failed',
+    };
+    if (typeof record.failure.requestId === 'string' && record.failure.requestId) {
+      failure.requestId = record.failure.requestId;
+    }
+    const jobId = record.failure.jobId || record?.job?.id;
+    if (typeof jobId === 'string' && jobId) failure.jobId = jobId;
+    return failure;
+  }
+  return jobFailure(record?.job);
+}
+
+function errorResult(receipt, profile, repeat, error) {
+  const code = error instanceof BoothError ? error.code : 'booth_internal';
+  const retryable = error instanceof BoothError && typeof error.retryable === 'boolean' ? error.retryable : false;
+  const message = error instanceof BoothError ? `${error.code}: ${error.message}` : String(error?.message || error);
+  const failure = error instanceof BoothError && error.failure
+    ? { ...error.failure, code: error.failure.code || code, retryable: typeof error.failure.retryable === 'boolean' ? error.failure.retryable : retryable }
+    : { code, retryable, message: error instanceof Error ? error.message : String(error) };
+  return {
+    ok: false,
+    receipt,
+    profile,
+    repeat,
+    error: message,
+    code,
+    retryable,
+    failure,
+    jobId: failure.jobId || null,
+    retryAfter: error instanceof BoothError ? error.retryAfter : 0,
+    replayed: Boolean(error instanceof BoothError && error.replayed),
+  };
+}
+
+function saveJobRecord(recordFile, { key, profile, repeat, hash, uploadId, request, replayed, job }) {
+  const previous = readJsonOptional(recordFile) || {};
+  const next = {
+    ...previous,
+    idempotencyKey: key,
+    profile,
+    repeat,
+    configHash: hash,
+    replayed,
+    job,
+  };
+  if (uploadId !== undefined) next.uploadId = uploadId;
+  if (request !== undefined) next.request = request;
+  if (job?.state === 'completed') delete next.failure;
+  writeJson(recordFile, next);
+  return next;
+}
+
 export async function runBlue(io, client, dir, plan, task) {
   const receipt = task.row.receipt;
   const label = `${receipt} ${task.profile.name} #${task.repeat}`;
@@ -330,15 +406,32 @@ export async function runBlue(io, client, dir, plan, task) {
     const existing = readJsonOptional(recordFile);
     if (existing?.job && existing.idempotencyKey === key && TERMINAL_JOB.has(existing.job.state)) {
       if (existing.job.state === 'completed') {
+        task.onJob?.({ job: existing.job, repeat: task.repeat, idempotencyKey: key, profile: task.profile.name, configHash: task.hash, recordFile });
         progress(io, `blue ${label} resume local completed`);
-        return { ok: true, receipt, profile: task.profile.name, repeat: task.repeat, state: 'completed', resumed: true, jobId: existing.job.id };
+        return {
+          ok: true,
+          receipt,
+          profile: task.profile.name,
+          repeat: task.repeat,
+          state: 'completed',
+          resumed: true,
+          replayed: existing.replayed === true,
+          jobId: existing.job.id,
+          recordFile,
+        };
       }
-      throw new BoothError('booth_job', `${label} already ${existing.job.state}; change the profile to start a new job`);
+      const failure = recordFailure(existing);
+      throw new BoothError(failure.code, `${label} already ${existing.job.state} (${failure.code}): ${failure.message}`, {
+        retryable: failure.retryable,
+        failure,
+        replayed: true,
+      });
     }
     const file = pdfPath(dir, receipt);
     const settings = buildBlueRequest({ pdfPath: file, profile: task.profile });
-    let job = existing?.job && existing.idempotencyKey === key ? existing.job : null;
-    let replayed = false;
+    const resuming = Boolean(existing?.job?.id && existing.idempotencyKey === key);
+    let job = resuming ? existing.job : null;
+    let replayed = resuming ? existing.replayed === true : false;
     if (!job) {
       const bytes = fs.readFileSync(file);
       const uploaded = await client.json('/v1/ai/uploads', {
@@ -354,35 +447,134 @@ export async function runBlue(io, client, dir, plan, task) {
       const created = await createJobWhenSlotFree(io, client, body, label, plan);
       job = created.job;
       replayed = created.replayed === true;
-      writeJson(recordFile, {
-        idempotencyKey: key,
+      saveJobRecord(recordFile, {
+        key,
         profile: task.profile.name,
         repeat: task.repeat,
-        configHash: task.hash,
+        hash: task.hash,
         uploadId,
         request: body,
         replayed,
         job,
       });
+    } else {
+      progress(io, `blue ${label} resume job=${job.id} state=${job.state}`);
     }
-    if (!TERMINAL_JOB.has(job.state)) job = await pollJob(io, client, job, plan, recordFile, key, task);
-    writeJson(recordFile, {
-      ...(readJsonOptional(recordFile) || {}),
-      idempotencyKey: key,
+    task.onJob?.({ job, repeat: task.repeat, idempotencyKey: key, profile: task.profile.name, configHash: task.hash, recordFile });
+    if (!TERMINAL_JOB.has(job.state)) {
+      job = await pollJob(io, client, job, plan, recordFile, key, task, { immediate: resuming });
+    }
+    saveJobRecord(recordFile, {
+      key,
       profile: task.profile.name,
       repeat: task.repeat,
-      configHash: task.hash,
+      hash: task.hash,
       replayed,
       job,
     });
-    if (job.state !== 'completed') throw new BoothError('booth_job', `${label} ended ${job.state}`);
+    task.onJob?.({ job, repeat: task.repeat, idempotencyKey: key, profile: task.profile.name, configHash: task.hash, recordFile });
+    if (job.state !== 'completed') {
+      const failure = jobFailure(job);
+      throw new BoothError(failure.code, `${label} ended ${job.state} (${failure.code}): ${failure.message}`, {
+        retryable: failure.retryable,
+        failure,
+        replayed,
+      });
+    }
     progress(io, `blue ${label} ${job.state} job=${job.id}${replayed ? ' replayed' : ''}`);
-    return { ok: true, receipt, profile: task.profile.name, repeat: task.repeat, state: job.state, jobId: job.id, replayed, resumed: false };
+    return {
+      ok: true,
+      receipt,
+      profile: task.profile.name,
+      repeat: task.repeat,
+      state: job.state,
+      jobId: job.id,
+      replayed,
+      resumed: resuming,
+      recordFile,
+    };
   } catch (error) {
-    const message = error instanceof BoothError ? `${error.code}: ${error.message}` : error.message;
-    const code = error instanceof BoothError ? error.code : 'booth_internal';
-    progress(io, `blue ${label} failed ${message}`);
-    return { ok: false, receipt, profile: task.profile.name, repeat: task.repeat, error: message, code };
+    const failed = errorResult(receipt, task.profile.name, task.repeat, error);
+    progress(io, `blue ${label} failed ${failed.error} retryable=${failed.retryable}`);
+    return failed;
+  }
+}
+
+// Polls an existing saved BLUE record by its exact job id, even if the current profile config changed.
+export async function resumeJobRecord(io, client, plan, { receipt, recordFile, onJob }) {
+  const existing = readJsonOptional(recordFile);
+  const profileName = existing?.profile || 'live';
+  const repeat = Number.isSafeInteger(existing?.repeat) ? existing.repeat : 0;
+  const hash = existing?.configHash || '';
+  const key = existing?.idempotencyKey || '';
+  const label = `${receipt} ${profileName} #${repeat}`;
+  try {
+    if (!existing?.job?.id) {
+      throw new BoothError('booth_local', `${label} saved job record is missing job.id`, { retryable: false });
+    }
+    if (existing.job.state === 'completed') {
+      onJob?.({ job: existing.job, repeat, idempotencyKey: key, profile: profileName, configHash: hash, recordFile });
+      progress(io, `blue ${label} resume local completed job=${existing.job.id}`);
+      return {
+        ok: true,
+        receipt,
+        profile: profileName,
+        repeat,
+        state: 'completed',
+        resumed: true,
+        replayed: existing.replayed === true,
+        jobId: existing.job.id,
+        recordFile,
+      };
+    }
+    if (TERMINAL_JOB.has(existing.job.state)) {
+      const failure = recordFailure(existing);
+      throw new BoothError(failure.code, `${label} already ${existing.job.state} (${failure.code}): ${failure.message}`, {
+        retryable: failure.retryable,
+        failure,
+        replayed: true,
+      });
+    }
+    let job = existing.job;
+    const replayed = existing.replayed === true;
+    progress(io, `blue ${label} resume job=${job.id} state=${job.state}`);
+    onJob?.({ job, repeat, idempotencyKey: key, profile: profileName, configHash: hash, recordFile });
+    job = await pollJob(
+      io,
+      client,
+      job,
+      plan,
+      recordFile,
+      key,
+      { row: { receipt }, profile: { name: profileName }, repeat, hash },
+      { immediate: true },
+    );
+    saveJobRecord(recordFile, { key, profile: profileName, repeat, hash, replayed, job });
+    onJob?.({ job, repeat, idempotencyKey: key, profile: profileName, configHash: hash, recordFile });
+    if (job.state !== 'completed') {
+      const failure = jobFailure(job);
+      throw new BoothError(failure.code, `${label} ended ${job.state} (${failure.code}): ${failure.message}`, {
+        retryable: failure.retryable,
+        failure,
+        replayed,
+      });
+    }
+    progress(io, `blue ${label} ${job.state} job=${job.id}`);
+    return {
+      ok: true,
+      receipt,
+      profile: profileName,
+      repeat,
+      state: job.state,
+      jobId: job.id,
+      replayed,
+      resumed: true,
+      recordFile,
+    };
+  } catch (error) {
+    const failed = errorResult(receipt, profileName, repeat, error);
+    progress(io, `blue ${label} failed ${failed.error} retryable=${failed.retryable}`);
+    return failed;
   }
 }
 
@@ -391,7 +583,7 @@ export async function runBlue(io, client, dir, plan, task) {
 // with the same upload and the same idempotency key. An hourly cap says the seconds to the top of the hour
 // (more than 60) and fails at once. A wait longer than pollTimeoutMs ends in slot_busy, which watch hands back
 // to the next cycle instead of failing the row.
-const SLOT_QUEUE_RETRY_MAX = 60;
+export const SLOT_QUEUE_RETRY_MAX = 60;
 
 function slotBusy(error) {
   return error instanceof BoothError && error.status === 429 && error.code === 'rate_limited'
@@ -412,7 +604,9 @@ async function createJobWhenSlotFree(io, client, body, label, plan) {
       // Jitter so waiting rows do not retry in lockstep against the same freed slot.
       const pause = plan.slotWaitMs + Math.floor(Math.random() * (plan.slotWaitMs / 2));
       if (Date.now() + pause > deadline) {
-        throw new BoothError('slot_busy', `${label} found no free job slot within ${Math.round(plan.pollTimeoutMs / 1000)} s`);
+        throw new BoothError('slot_busy', `${label} found no free job slot within ${Math.round(plan.pollTimeoutMs / 1000)} s`, {
+          retryable: true,
+        });
       }
       if (waits === 0) progress(io, `blue ${label} waiting for a free job slot`);
       await delay(pause);
@@ -433,26 +627,42 @@ async function cancelStuckJob(io, client, job, label) {
   }
 }
 
-async function pollJob(io, client, job, plan, recordFile, key, task) {
+async function pollJob(io, client, job, plan, recordFile, key, task, { immediate = false } = {}) {
   const deadline = Date.now() + plan.pollTimeoutMs;
   let current = job;
+  let first = true;
   while (!TERMINAL_JOB.has(current.state)) {
     if (Date.now() > deadline) {
       const cancelled = await cancelStuckJob(io, client, current, `${task.row.receipt} ${task.profile.name} #${task.repeat}`);
-      writeJson(recordFile, { ...(readJsonOptional(recordFile) || {}), job: cancelled });
-      throw new BoothError('poll_timeout', `poll timed out for ${current.id}`);
+      const timeoutFailure = {
+        code: 'poll_timeout',
+        retryable: true,
+        message: `poll timed out for ${current.id}`,
+        jobId: current.id,
+        jobState: cancelled.state,
+      };
+      writeJson(recordFile, { ...(readJsonOptional(recordFile) || {}), job: cancelled, failure: timeoutFailure });
+      throw new BoothError('poll_timeout', timeoutFailure.message, { retryable: true, failure: timeoutFailure });
     }
-    await delay(plan.pollIntervalMs);
+    if (!first || !immediate) await delay(plan.pollIntervalMs);
+    first = false;
     const data = await client.json(`/v1/ai/jobs/${encodeURIComponent(current.id)}`);
-    if (!data.job || typeof data.job !== 'object') throw new BoothError('booth_api', 'job poll returned no job');
+    if (!data.job || typeof data.job !== 'object') {
+      throw new BoothError('booth_api', 'job poll returned no job', { exitCode: 2, retryable: false });
+    }
+    if (data.job.id && data.job.id !== current.id) {
+      throw new BoothError('booth_api', `job poll returned mismatched id ${data.job.id} for ${current.id}`, {
+        exitCode: 2,
+        retryable: false,
+      });
+    }
     current = data.job;
-    const previous = readJsonOptional(recordFile) || {};
-    writeJson(recordFile, {
-      ...previous,
-      idempotencyKey: key,
+    saveJobRecord(recordFile, {
+      key,
       profile: task.profile.name,
       repeat: task.repeat,
-      configHash: task.hash,
+      hash: task.hash,
+      replayed: (readJsonOptional(recordFile) || {}).replayed === true,
       job: current,
     });
     progress(io, `blue ${task.row.receipt} ${task.profile.name} #${task.repeat} state=${current.state}`);

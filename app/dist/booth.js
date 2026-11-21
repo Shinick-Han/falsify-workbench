@@ -107,6 +107,11 @@
     not_found:'접수번호와 확인키를 다시 확인해 볼까요?',
     paper_not_allowed:'이 논문은 라이선스 때문에 제출할 수 없어요. CC BY, CC BY-SA, CC0 논문을 골라 주세요.',
     invalid_pdf:'수정본 PDF를 읽지 못했어요. 「다시 시도」를 눌러 주세요.',
+    pdf_encrypted:'암호가 걸린 PDF라 열지 못했어요. 다른 논문을 골라 주세요.',
+    pdf_corrupt:'PDF를 읽지 못했어요. 다른 논문을 골라 주세요.',
+    pdf_empty_text:'편집할 텍스트가 없는 스캔 PDF예요. 다른 논문을 골라 주세요.',
+    pdf_timeout:'논문을 여는 시간이 길어졌어요. 같은 논문을 눌러 다시 열어 보세요.',
+    pdf_unreadable:'PDF를 열지 못했어요. 같은 논문을 눌러 다시 열어 보세요.',
     pdf_mismatch:'수정본이 중간에 바뀌었어요. 「다시 시도」를 눌러 주세요.',
     pdf_unchanged:'아직 원본과 같아요. 한 곳 이상 고친 뒤 「다음」을 눌러 주세요.',
     session_missing:'연결이 잠시 끊겼어요. 「다시 시도」를 누르면 새로 연결해요.',
@@ -190,6 +195,12 @@
     }
     return out;
   }
+  const PAPER_TITLE_MAX=300;
+  function sanitizePaperTitle(value){
+    if(typeof value!=='string') return '';
+    const clean=value.replace(/[\u0000-\u001f\u007f]+/g,' ').replace(/\s+/g,' ').trim();
+    return clean?trimCodePoints(clean,PAPER_TITLE_MAX).trim():'';
+  }
   function sanitizeDeclaredText(value){
     const clean=String(value==null?'':value).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g,'');
     return trimCodePoints(clean,2000);
@@ -203,7 +214,8 @@
   }
   function paperTitleOf(paper){
     if(paper.title==null||paper.title==='') return '';
-    return cleanText(paper.title,300);
+    if(typeof paper.title!=='string') return null;
+    return sanitizePaperTitle(paper.title);
   }
   function paperShaOf(paper){
     return typeof paper.sourceSha256==='string'&&SHA256.test(paper.sourceSha256)?paper.sourceSha256:'';
@@ -360,7 +372,7 @@
   /* Required receipt, claimKey and createdAt. Paper title, pages, count, edits and last outcome are optional. */
   function receiptRecord(item){
     const out={receipt:item.receipt,claimKey:item.claimKey,createdAt:item.createdAt};
-    const title=cleanText(typeof item.title==='string'?item.title.trim():'',300);
+    const title=sanitizePaperTitle(item.title);
     if(title) out.title=title;
     const pages=receiptPages(item.pages);
     if(pages.length) out.pages=pages;
@@ -1633,7 +1645,7 @@
       paper=next&&(next.source==='arxiv'||next.source==='mission')?{
         source:next.source,
         id:typeof next.id==='string'?next.id:'',
-        title:typeof next.title==='string'?next.title:'',
+        title:sanitizePaperTitle(next.title),
         license:typeof next.license==='string'?next.license:'',
         pageHint:Number.isInteger(next.pageHint)?next.pageHint:0
       }:null;
@@ -1719,18 +1731,148 @@
       transfer.items.add(file);
       input.files=transfer.files;
     }
-    function loadIntoWorkspace(input, file, payload, next, bytes){
+    const EMPTY_TEXT_SCAN_PAGES=10;
+    const ARXIV_STAMP_RE=/arXiv:\s*(?:\d{4}\.\d{4,5}|[a-z-]+(?:\.[A-Z]{2})?\/\d{7})(?:v\d+)?(?:\s+\[[^\]]+\])?(?:\s+\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4})?/gi;
+    let cancelPendingOpen=null;
+    let pendingTailCheck=null;
+    let lastOpenStatusId='booth-mission-status';
+    function pageHasEditableText(items){
+      if(!Array.isArray(items)||!items.length) return false;
+      let text='';
+      for(const item of items){
+        if(item&&typeof item.str==='string') text+=' '+item.str;
+      }
+      return text.replace(ARXIV_STAMP_RE,' ').replace(/\s+/g,'').length>0;
+    }
+    function activeWorkspacePageIndex(){
+      const ws=workspace();
+      try{return ws&&typeof ws.getPageIndex==='function'?ws.getPageIndex():-1;}
+      catch{return -1;}
+    }
+    function cleanupProbePage(page, p){
+      if(p<=1||!page||typeof page.cleanup!=='function'||p-1===activeWorkspacePageIndex()) return;
+      try{page.cleanup();}catch{}
+    }
+    async function inspectPageForText(pdf, p){
+      let page=null;
+      try{
+        page=await pdf.getPage(p);
+        if(!page||typeof page.getTextContent!=='function') return 'unknown';
+        const content=await page.getTextContent();
+        return pageHasEditableText(content&&content.items)?'text':'empty';
+      }catch{return 'unknown';}
+      finally{cleanupProbePage(page,p);}
+    }
+    async function scanEditableRange(pdf, start, end, stillLive){
+      for(let p=start;p<=end;p+=1){
+        if(stillLive&&!stillLive()) return 'cancelled';
+        const state=await inspectPageForText(pdf,p);
+        if(state!=='empty') return state;
+      }
+      return 'empty';
+    }
+    async function checkPrefixEditableText(pdf){
+      if(!pdf||typeof pdf.getPage!=='function') return {status:'text'};
+      const total=Number(pdf.numPages)||0;
+      if(total<1) return {status:'empty'};
+      const limit=Math.min(total,EMPTY_TEXT_SCAN_PAGES);
+      const state=await scanEditableRange(pdf,1,limit,null);
+      if(state!=='empty') return {status:'text'};
+      if(limit<total) return {status:'inconclusive',nextPage:limit+1,total};
+      return {status:'empty'};
+    }
+    function startBackgroundTextCheck(pdf, file, statusId, nextPage, total){
+      const live=()=>!closed&&boothFile===file&&!liveEdits().length;
+      void scanEditableRange(pdf,nextPage,total,live).then(state=>{
+        if(state!=='empty'||!live()) return;
+        discardFailedOpen();
+        setStep('pick');
+        say(statusId,errorMessage('pdf_empty_text'));
+      });
+    }
+    function matchesOpenFile(event, file){
+      const detail=event&&event.detail;
+      if(!detail||!file) return false;
+      if(detail.file) return detail.file===file;
+      if(openedHash&&typeof detail.fileHash==='string'&&detail.fileHash===openedHash) return true;
+      return openedFile===file;
+    }
+    function discardFailedOpen(){
+      openedFile=null;
+      openedHash='';
+      openedPaper=null;
+      ownOpen=true;
+      try{resetWorkspace();}
+      finally{ownOpen=false;}
+      clearPaper();
+    }
+    function onLatePdfError(event){
+      if(opening||!boothFile||!matchesOpenFile(event,boothFile)) return;
+      const detail=event&&event.detail;
+      const code=detail&&typeof detail.code==='string'?detail.code:'pdf_unreadable';
+      discardFailedOpen();
+      setStep('pick');
+      say(lastOpenStatusId,errorMessage(code));
+    }
+    function dispatchWorkspaceOpen(input, file){
+      let started=false;
+      let done=null;
+      const outcome=new Promise(resolve=>{done=resolve;});
+      const finish=value=>{
+        if(!done) return;
+        const resolve=done;
+        done=null;
+        if(cancelPendingOpen===abortPending) cancelPendingOpen=null;
+        if(typeof doc.removeEventListener==='function'){
+          doc.removeEventListener('falsify:paper-workspace-loading',onLoad);
+          doc.removeEventListener('falsify:paper-workspace-pdf',onPdf);
+          doc.removeEventListener('falsify:paper-workspace-pdf-error',onErr);
+          doc.removeEventListener('falsify:document-clear',onClear);
+        }
+        resolve(value);
+      };
+      const abortPending=()=>{finish({ok:false,code:'cancelled'});};
+      const onLoad=event=>{if(matchesOpenFile(event,file)) started=true;};
+      const onPdf=event=>{if(matchesOpenFile(event,file)) finish({ok:true});};
+      const onErr=event=>{
+        if(!matchesOpenFile(event,file)) return;
+        const detail=event&&event.detail;
+        finish({ok:false,code:detail&&typeof detail.code==='string'?detail.code:'pdf_unreadable'});
+      };
+      const onClear=()=>{if(!ownOpen) abortPending();};
+      if(typeof doc.addEventListener==='function'){
+        doc.addEventListener('falsify:paper-workspace-loading',onLoad);
+        doc.addEventListener('falsify:paper-workspace-pdf',onPdf);
+        doc.addEventListener('falsify:paper-workspace-pdf-error',onErr);
+        doc.addEventListener('falsify:document-clear',onClear);
+      }
+      cancelPendingOpen=abortPending;
+      ownOpen=true;
+      try{input.dispatchEvent(new Event('change',{bubbles:true}));}
+      finally{ownOpen=false;}
+      if(!started){finish({ok:true});return Promise.resolve({ok:true});}
+      return outcome;
+    }
+    async function loadIntoWorkspace(input, file, payload, next, bytes){
       const headerLicense=headerValue(payload.headers,'X-Falsify-Paper-License');
       const picked=next&&typeof next==='object'?Object.assign({},next):null;
       if(picked&&headerLicense) picked.license=headerLicense;
       bindPaper(picked,file);
       rememberOpened(file);
-      ownOpen=true;
-      try{input.dispatchEvent(new Event('change',{bubbles:true}));}
-      finally{ownOpen=false;}
       void digestHex(bytes).then(hash=>{if(openedFile===file&&SHA256.test(hash)) openedHash=hash;});
+      const loaded=await dispatchWorkspaceOpen(input,file);
+      if(!loaded.ok) return loaded;
+      const ws=workspace();
+      const pdf=ws&&typeof ws.getPdfDoc==='function'?ws.getPdfDoc():null;
+      const probe=pdf?await checkPrefixEditableText(pdf):{status:'text'};
+      if(closed||openedFile!==file) return {ok:false,code:'cancelled'};
+      if(probe.status==='empty') return {ok:false,code:'pdf_empty_text'};
+      if(probe.status==='inconclusive') return {ok:true,tail:{pdf,file,nextPage:probe.nextPage,total:probe.total}};
+      return {ok:true};
     }
     async function openPdf(id, next, nameHint, statusId){
+      lastOpenStatusId=statusId;
+      pendingTailCheck=null;
       const path=paperPdfPath(id);
       if(!path){say(statusId,errorMessage('invalid_request'));return false;}
       say(statusId,'논문을 불러오는 중…');
@@ -1742,7 +1884,7 @@
         return false;
       }
       const bytes=payload.bytes;
-      if(!pdfMagic(bytes)){say(statusId,errorMessage('invalid_request'));return false;}
+      if(!pdfMagic(bytes)){say(statusId,errorMessage('pdf_corrupt'));return false;}
       trustFetchedBytes(bytes);
       const file=pdfFile(bytes, pdfFileName(headerValue(payload.headers,'Content-Disposition'), nameHint));
       if(!file){say(statusId,'논문을 열지 못했어요. 다시 눌러 주세요.');return false;}
@@ -1750,7 +1892,15 @@
       if(!input){say(statusId,'논문을 열지 못했어요. 페이지를 새로 고쳐 주세요.');return false;}
       try{assignInputFile(input, file);}
       catch{say(statusId,'논문을 열지 못했어요. 다시 눌러 주세요.');return false;}
-      loadIntoWorkspace(input,file,payload,next,bytes);
+      const loaded=await loadIntoWorkspace(input,file,payload,next,bytes);
+      if(closed) return false;
+      if(!loaded.ok){
+        if(loaded.code==='cancelled') return false;
+        discardFailedOpen();
+        say(statusId,errorMessage(loaded.code));
+        return false;
+      }
+      pendingTailCheck=loaded.tail?Object.assign({statusId},loaded.tail):null;
       say(statusId,'');
       return true;
     }
@@ -1794,7 +1944,10 @@
       if(!ok) offerRetry(statusId,openFailure,()=>startPaper(next,id,statusId,pageHint,nextHint));
       if(!ok||closed) return false;
       hint=nextHint||'';
+      const tail=pendingTailCheck;
+      pendingTailCheck=null;
       enterEdit(pageHint);
+      if(tail) startBackgroundTextCheck(tail.pdf,tail.file,tail.statusId,tail.nextPage,tail.total);
       return true;
     }
     function missionPage(mission){
@@ -1826,7 +1979,7 @@
       later(tick,250);
     }
     function missionPaper(mission){
-      return {source:'mission',id:mission.paperId,title:typeof mission.title==='string'?mission.title:'',
+      return {source:'mission',id:mission.paperId,title:sanitizePaperTitle(mission.title),
         license:typeof mission.license==='string'?mission.license:'',pageHint:missionPage(mission)};
     }
     /* One tap: load the paper (unless it is already open), jump to the hint page, then edit. */
@@ -1913,10 +2066,10 @@
     function chooseSearchResult(item){
       if(opening) return Promise.resolve(false);
       if(paper&&paper.id===item.id){enterEdit(0);return Promise.resolve(true);}
-      return startPaper({source:'arxiv',id:item.id,title:typeof item.title==='string'?item.title:'',license:licenseId(item)},item.id,'booth-search-status',0,'');
+      return startPaper({source:'arxiv',id:item.id,title:sanitizePaperTitle(item.title),license:licenseId(item)},item.id,'booth-search-status',0,'');
     }
     function searchResultCard(item){
-      const title=typeof item.title==='string'&&item.title?item.title:item.id;
+      const title=sanitizePaperTitle(item.title)||item.id;
       const label=['arXiv '+item.id,licenseLabel(licenseId(item))].filter(Boolean).join(' · ');
       const button=paperTicket(label,title,String(searchMeta(item)),0);
       button.setAttribute('aria-label',title+' · 이 논문으로 도전');
@@ -2037,13 +2190,21 @@
       }
       return true;
     }
+    function optionalAssist(){
+      const recipe=root.FalsifyBoothRecipe;
+      if(!recipe||typeof recipe.assist!=='function') return null;
+      let extra=null;
+      try{extra=recipe.assist();}catch{return null;}
+      if(!extra||typeof extra!=='object') return null;
+      return extra.assist==='manual'||extra.assist==='my-ai'?{assist:extra.assist}:null;
+    }
     function submissionFormFor(){
       const paperPayload=Object.assign({},paper);
       if(sourceSha) paperPayload.sourceSha256=sourceSha;
       const built=buildSubmission(submissionInput(paperPayload));
       if(!built.ok){say('booth-submit-status',errorMessage(built.code));return null;}
-      const recipe=root.FalsifyBoothRecipe;
-      if(recipe&&typeof recipe.assist==='function') Object.assign(built.body,recipe.assist());
+      const extra=optionalAssist();
+      if(extra) Object.assign(built.body,extra);
       const form=submissionForm(built.body,generatedFile);
       if(!form){say('booth-submit-status',errorMessage('invalid_request'));return null;}
       return {form,declared:built.body.declared};
@@ -2767,6 +2928,7 @@
     on(byId('booth-result-link'),'click',openResult);
     on(doc,'falsify:document',onBoothDocument);
     on(doc,'falsify:document-clear',onBoothClear);
+    on(doc,'falsify:paper-workspace-pdf-error',onLatePdfError);
     on(root,'hashchange',()=>{showResult(false);});
     on(root,'resize',()=>{if(step==='ticket') drawBarcode();});
     on(doc,'visibilitychange',onReturn);
@@ -2792,6 +2954,7 @@
     void loadConfig();
     return {destroy(){
       closed=true;
+      if(cancelPendingOpen) cancelPendingOpen();
       if(wake) wake.want(false);
       delete root.FalsifyBoothPaper;
       stopPolling();

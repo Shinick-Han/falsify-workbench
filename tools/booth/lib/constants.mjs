@@ -76,6 +76,8 @@ Commands:
   close [--dry-run]
   announce (--text <text> | --file <file> | --clear)
   watch [--interval <sec>] [--concurrency <n>] [--cycles <n>] [--model <id>] [--effort <id>]
+  recover (--only <receipts> | --all-failed) [--profile <name>] [--model <id>] [--effort <id>]
+          [--retries <n>] [--concurrency <n>] [--dry-run]
   final [--only <receipts>] [--profile <name>] [--concurrency <n>] [--out <file>] [--apply] [--allow-open]
 
 BLUE uploads the edited PDF and posts the operator profile only.
@@ -87,8 +89,12 @@ draw defaults to outcome missed.
 CSV cells that start with =, +, -, @, tab or CR are prefixed with '.
 score writes score.json and does not publish.
 watch runs the live profile on each received submission while submissions are open, then PATCHes
-judged + outcome + publicNote + published in one request. Ctrl-C stops; unfinished jobs resume on the next start.
+judged + outcome + publicNote + published in one request. Ctrl-C stops; unfinished jobs resume by
+their saved job id on the next start. Non-retryable failures stop after one attempt and keep their
+failure code and retryable flag.
 watch writes one JSON line per cycle to stdout (queued, inFlight, done, failed, p50Sec, p95Sec).
+recover looks up saved receipts by id, resumes any unfinished or completed job, or allocates a new
+idempotency key after a root-cause fix while skipping judged and withdrawn submissions.
 final re-runs live misses with the final profile and writes final/candidates.json; only --apply PATCHes.
 Progress goes to stderr. Command results go to stdout as JSON.
 `;

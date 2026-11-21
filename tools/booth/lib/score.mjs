@@ -2,10 +2,22 @@ import { clip, splitRationale } from './note.mjs';
 import { findingPageIndex, findingPageIndexes } from './findings.mjs';
 import { changedNumbers, fold, jaccard, numberAppears } from './text.mjs';
 
+const ALNUM = /[\p{L}\p{N}]/u;
+
 // The finding's own quote, its source quote, and every evidence quote it cites.
 function quoteTexts(finding) {
   const evidence = Array.isArray(finding.evidence) ? finding.evidence : [];
   const parts = [finding.quote, finding.sourceQuote, ...evidence.map(item => item?.quote)];
+  return parts.filter(part => typeof part === 'string' && part);
+}
+
+// Only quotes that belong to the edit's actual page.
+function pageQuotes(finding, pageIndex) {
+  const parts = [];
+  if (findingPageIndex(finding) === pageIndex) parts.push(finding.quote, finding.sourceQuote);
+  for (const item of finding.evidence || []) {
+    if (findingPageIndex(item) === pageIndex) parts.push(item.quote);
+  }
   return parts.filter(part => typeof part === 'string' && part);
 }
 
@@ -15,8 +27,70 @@ function bestQuote(finding) {
   return '';
 }
 
+function isWordBoundary(text, start, end) {
+  const left = start === 0 || !ALNUM.test(text[start - 1]) || !ALNUM.test(text[start]);
+  const right = end === text.length || !ALNUM.test(text[end - 1]) || !ALNUM.test(text[end]);
+  return left && right;
+}
+
+function findWhole(haystack, needle, from = 0) {
+  if (!haystack || !needle) return -1;
+  let pos = from;
+  while (pos <= haystack.length - needle.length) {
+    const at = haystack.indexOf(needle, pos);
+    if (at < 0) return -1;
+    if (isWordBoundary(haystack, at, at + needle.length)) return at;
+    pos = at + 1;
+  }
+  return -1;
+}
+
+// Common prefix/suffix diff in folded after, plus a small word-bounded window around the change.
+function changedRegion(before, after) {
+  const b = fold(before || '');
+  const a = fold(after || '');
+  if (!b || !a || b === a) return null;
+  let start = 0;
+  while (start < b.length && start < a.length && b[start] === a[start]) start += 1;
+  let suffix = 0;
+  while (suffix < b.length - start && suffix < a.length - start
+    && b[b.length - 1 - suffix] === a[a.length - 1 - suffix]) suffix += 1;
+  const end = a.length - suffix;
+  let winStart = Math.max(0, start - 6);
+  while (winStart > 0 && ALNUM.test(a[winStart - 1])) winStart -= 1;
+  while (winStart < start && /\s/.test(a[winStart])) winStart += 1;
+  let winEnd = Math.min(a.length, end + 6);
+  while (winEnd < a.length && ALNUM.test(a[winEnd])) winEnd += 1;
+  while (winEnd > end && /\s/.test(a[winEnd - 1])) winEnd -= 1;
+  const win = a.slice(winStart, winEnd);
+  const windowOk = win.length >= 12
+    && findWhole(b, win) < 0
+    && (start < end || (start - winStart >= 4 && winEnd - start >= 4));
+  return { before: b, after: a, start, end, window: windowOk ? win : '' };
+}
+
+function quoteHitsChange(region, text) {
+  if (!region) return false;
+  const q = fold(text);
+  if (q.length < 12 || findWhole(region.before, q) >= 0) return false;
+  if (region.window && findWhole(q, region.window) >= 0) return true;
+  let at = findWhole(region.after, q);
+  if (at < 0) return false;
+  let hits = false;
+  while (at >= 0) {
+    const stop = at + q.length;
+    const spans = region.start === region.end
+      ? (at < region.start && stop > region.start && region.start - at >= 4 && stop - region.start >= 4)
+      : (at <= region.start && stop >= region.end && (q.length - (region.end - region.start) >= 4 || region.end - region.start >= 12));
+    if (!spans) return false;
+    hits = true;
+    at = findWhole(region.after, q, at + 1);
+  }
+  return hits;
+}
+
 // Same page is required: the finding's own page or any page its evidence cites.
-// Caught is containment or high token overlap with a quote or evidence quote.
+// Caught is containment, a same-page quote spanning the changed region, or high token overlap.
 // Partial is weaker overlap, or a number that changed between before and after
 // appearing in a quote, an evidence quote, or the rationale.
 function judge(edit, finding) {
@@ -24,12 +98,18 @@ function judge(edit, finding) {
   const foldedAfter = fold(after);
   const texts = quoteTexts(finding);
   const contained = foldedAfter.length >= 4 && texts.some(text => fold(text).includes(foldedAfter));
-  const ratio = Math.max(0, ...texts.map(text => jaccard(after, text)));
+  const region = changedRegion(edit.before || '', after);
+  const spanHit = Boolean(region && pageQuotes(finding, edit.pageIndex).some(text => quoteHitsChange(region, text)));
+  const ratio = Math.max(0, ...texts.map(text => {
+    const q = fold(text);
+    if (region && q && findWhole(region.before, q) >= 0 && !q.includes(foldedAfter)) return 0;
+    return jaccard(after, text);
+  }));
   const numberText = [...texts, finding.rationale].filter(part => typeof part === 'string').join('\n');
   const numbers = changedNumbers(edit.before || '', after);
   const numHit = numbers.some(number => numberAppears(numberText, number));
   let verdict = '';
-  if (contained || ratio >= 0.6) verdict = 'caught';
+  if (contained || spanHit || ratio >= 0.6) verdict = 'caught';
   else if (ratio >= 0.3 || numHit) verdict = 'partial';
   return { verdict, ratio, numHit };
 }
@@ -89,20 +169,17 @@ export function suggestOutcome(verdicts) {
 
 // Show the quote at the edit, including a cited table cell when the primary finding is on another page.
 function editEvidence(edit, finding) {
-  const candidates = [];
-  if (findingPageIndex(finding) === edit.pageIndex) candidates.push(finding.quote, finding.sourceQuote);
-  for (const item of finding.evidence || []) {
-    if (findingPageIndex(item) === edit.pageIndex) candidates.push(item.quote);
-  }
+  const candidates = pageQuotes(finding, edit.pageIndex);
   const after = fold(edit.after || '');
+  const region = changedRegion(edit.before || '', edit.after || '');
   const numbers = changedNumbers(edit.before || '', edit.after || '');
   let quote = '';
   let best = -1;
   for (const text of candidates) {
-    if (typeof text !== 'string' || !text) continue;
     const contains = after.length > 0 && fold(text).includes(after);
+    const spanHit = Boolean(region && quoteHitsChange(region, text));
     const numHit = numbers.some(number => numberAppears(text, number));
-    const strength = (contains ? 4 : 0) + (numHit ? 2 : 0) + jaccard(edit.after || '', text);
+    const strength = (contains || spanHit ? 4 : 0) + (numHit ? 2 : 0) + jaccard(edit.after || '', text);
     if (strength > best) {
       best = strength;
       quote = text;

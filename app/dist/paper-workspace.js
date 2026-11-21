@@ -1362,6 +1362,7 @@
       unsub=null;session=null;snapshot=null;output=null;outputAt=null;generationFailed=false;inline=null;pageText=null;external=null;externalRevision=0;selectionHistory=new Map();combineIds=new Set();proposalQueue=null;accepted=new Set();draftRaw=null;pendingResume=null;beforeMarks=afterMarks=null;candidatePreview=null;candidateMarks=null;compareFocus=null;updateChangeStatus();
       pages=0;page=1;zoom=1;
       source={file,fileHash:null,name:sessionName(file.name),segments:[],pdf:isPdf(file),doc:null,lib:null,render:null,paragraphPages:new Map()};
+      if(source.pdf)emit('falsify:paper-workspace-loading',{file});
       clearStage(ui.beforeStage);clearStage(ui.afterStage);renderInline();renderEdits();paintProposals();renderChrome();
       setGenStatus('');setEditStatus('');setProposalStatus('');say(ui.tableStatus,'');setBeforeStatus('');setAfterStatus('');
       setStatus('원본 파일을 확인하는 중입니다.');
@@ -1375,16 +1376,38 @@
         emit('falsify:paper-workspace-source',{fileHash:hash,name:source.name});
         if(source.pdf)await openPdf(bytes,mine);
         else{setStatus('이 형식은 쪽 뷰어가 없습니다. 원본 다운로드는 사용할 수 있습니다.');renderChrome();}
-      }catch(e){if(epoch===mine)setStatus('원본을 열지 못했습니다. 다운로드는 그대로 사용할 수 있습니다.',true);}
+      }catch(e){
+        if(epoch===mine){
+          setStatus('원본을 열지 못했습니다. 다운로드는 그대로 사용할 수 있습니다.',true);
+          if(source&&source.pdf)emitPdfError('pdf_unreadable',e&&e.name||'');
+        }
+      }
+    }
+    function emitPdfError(code,name){
+      emit('falsify:paper-workspace-pdf-error',{fileHash:source&&source.fileHash||'',file:source&&source.file||null,code:code||'pdf_unreadable',name:name||''});
     }
     function canOpenPdf(preview,bytes){
       if(!preview||typeof preview.defaultImport!=='function'||typeof preview.pdfParams!=='function'||typeof preview.fitScale!=='function'){
-        setStatus('PDF.js 도우미가 없어 쪽을 그리지 못했습니다. 원본 다운로드는 사용할 수 있습니다.',true);return false;
+        setStatus('PDF.js 도우미가 없어 쪽을 그리지 못했습니다. 원본 다운로드는 사용할 수 있습니다.',true);
+        emitPdfError('pdf_unreadable','PreviewUnavailable');
+        return false;
       }
       if(new TextDecoder().decode(bytes.subarray(0,1024)).indexOf('%PDF-')<0){
-        setStatus('PDF 서명이 없어 쪽을 그리지 않았습니다. 원본 다운로드는 사용할 수 있습니다.',true);return false;
+        setStatus('PDF 서명이 없어 쪽을 그리지 않았습니다. 원본 다운로드는 사용할 수 있습니다.',true);
+        emitPdfError('pdf_corrupt','InvalidPDFException');
+        return false;
       }
       return true;
+    }
+    function pdfOpenError(e){
+      const name=e&&e.name||'';
+      if(name==='PasswordException') return {code:'pdf_encrypted',name,msg:'암호가 걸린 PDF라 쪽을 그리지 못했습니다.'};
+      if(name==='InvalidPDFException'||name==='FormatError') return {code:'pdf_corrupt',name,msg:'PDF 구조를 읽지 못해 쪽을 그리지 못했습니다.'};
+      return {code:'pdf_unreadable',name,msg:'이 브라우저에서 쪽을 그리지 못했습니다.'};
+    }
+    function clearPdfTimer(timer){
+      timers.clearTimeout(timer);
+      if(loadTimer===timer)loadTimer=null;
     }
     async function openPdf(bytes,mine){
       const preview=previewApi();
@@ -1395,6 +1418,7 @@
         if(loadTimer===timer)loadTimer=null;
         if(epoch!==mine||settled)return;settled=true;stopPdf();
         setStatus('60초 안에 PDF를 열지 못해 쪽 보기를 멈췄습니다. 원본 다운로드는 사용할 수 있습니다.',true);
+        emitPdfError('pdf_timeout','TimeoutError');
       },60000);
       loadTimer=timer;
       try{
@@ -1406,17 +1430,22 @@
         loadTask=task;
         const pdf=await task.promise;
         if(epoch!==mine||settled)return;
-        settled=true;timers.clearTimeout(timer);if(loadTimer===timer)loadTimer=null;
+        settled=true;clearPdfTimer(timer);
+        if(!pdf||!(pdf.numPages>0)){
+          setStatus('PDF 구조를 읽지 못해 쪽을 그리지 못했습니다. 원본 다운로드는 사용할 수 있습니다.',true);
+          emitPdfError('pdf_corrupt','InvalidPDFException');
+          return;
+        }
         source.doc=pdf;pages=pdf.numPages;renderChrome();
-        emit('falsify:paper-workspace-pdf',{fileHash:source.fileHash,pages});
+        emit('falsify:paper-workspace-pdf',{fileHash:source.fileHash,file:source.file,pages});
         setStatus('');
         await drawBefore(1,mine);
       }catch(e){
         if(epoch!==mine||settled)return;
-        settled=true;timers.clearTimeout(timer);if(loadTimer===timer)loadTimer=null;
-        const name=e&&e.name;
-        const msg=name==='PasswordException'?'암호가 걸린 PDF라 쪽을 그리지 못했습니다.':name==='InvalidPDFException'?'PDF 구조를 읽지 못해 쪽을 그리지 못했습니다.':'이 브라우저에서 쪽을 그리지 못했습니다.';
-        setStatus(msg+' 원본 다운로드는 사용할 수 있습니다.',true);
+        settled=true;clearPdfTimer(timer);
+        const err=pdfOpenError(e);
+        setStatus(err.msg+' 원본 다운로드는 사용할 수 있습니다.',true);
+        emitPdfError(err.code,err.name);
       }
     }
     // Page canvases keep their CSS box at the viewport size (whole CSS px, as before) and get a backing store
