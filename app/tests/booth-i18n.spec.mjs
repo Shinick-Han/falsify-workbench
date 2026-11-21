@@ -434,3 +434,71 @@ test('booth-myai.js builds English prompt when page is in English mode', () => {
   assert.doesNotMatch(prompt, /0\.95|Change one number|Good defects/);
   assert.doesNotMatch(prompt, /[\uac00-\ud7a3]/);
 });
+
+/* plan97s-8: every booth-myai.js RULE_TEXT / ruleText output translates cleanly in EN with no Hangul */
+test('booth-myai.js rule error sentences translate cleanly to English with no Hangul', async () => {
+  const recipeSource = await readFile(fileURLToPath(new URL('../dist/booth-recipe.js', import.meta.url)), 'utf8');
+  const {i18n} = loadI18n();
+  i18n.setLang('en');
+  const ctx = vm.createContext({console, URL, URLSearchParams, CustomEvent});
+  vm.runInContext(recipeSource, ctx, {filename: 'booth-recipe.js'});
+  vm.runInContext(myaiSource, ctx, {filename: 'booth-myai.js'});
+  const M = ctx.FalsifyBoothMyAI;
+  const parseCtx = {paperId: '2309.15217', segments: []};
+  // Inputs that exercise the real booth-recipe.js validator codes via parseAnswer
+  const inputs = [
+    JSON.stringify({edits: Array.from({length: 6}, (_, i) => ({find: 'a' + i, replace: 'b'}))}),
+    JSON.stringify({edits: [], reason: 'r'}),
+    JSON.stringify({edits: [{find: '0.95', replace: '0.95'}]}),
+    JSON.stringify({edits: [{find: '0.95\n0.78', replace: '0.5'}]}),
+    JSON.stringify({edits: [{find: '0.95\u202e', replace: '0.5'}]}),
+    JSON.stringify({edits: [{find: 'x'.repeat(301), replace: 'y'}]}),
+    JSON.stringify({edits: [{find: '  ', replace: 'y'}]}),
+    JSON.stringify({edits: [{find: '0.95', replace: '0.5'}, {find: 'a', replace: 'b'}, {find: 'c', replace: 'x'.repeat(301)}]}),
+    JSON.stringify({reason: 'x'.repeat(500), edits: Array.from({length: 5}, () => ({find: 'f'.repeat(300), replace: '한'.repeat(300), context: 'c'.repeat(600)}))}),
+  ];
+  for (const raw of inputs) {
+    const out = M.parseAnswer(raw, parseCtx);
+    const rules = out.diagnostics.filter(d => d.code === 'rule');
+    assert.ok(rules.length >= 1, `expected rule error for ${raw.slice(0, 60)}`);
+    for (const d of rules) {
+      const en = i18n.t(d.message);
+      assert.doesNotMatch(en, /[가-힣]/, `Hangul leaked in EN: ${d.message} -> ${en}`);
+      assert.doesNotMatch(en, /^(count|unchanged|control|too_long|too_large|empty|type|page|unknown|defect_type)\b/, `Raw code leaked: ${en}`);
+    }
+  }
+  // Exercise every remaining RULE_TEXT / ruleText branch through a stub validator returning {field, code} only
+  const directCases = [
+    [{code: 'type', field: ''}],
+    [{code: 'type', field: 'edits[0]'}],
+    [{code: 'type', field: 'edits[0].find'}],
+    [{code: 'type', field: 'edits[2].replace'}],
+    [{code: 'empty', field: 'edits[0].find'}],
+    [{code: 'too_long', field: 'edits[0].find'}],
+    [{code: 'too_long', field: 'edits[2].replace'}],
+    [{code: 'control', field: 'edits[0].find'}],
+    [{code: 'unchanged', field: 'edits[0].replace'}],
+    [{code: 'page', field: 'edits[0].page'}],
+    [{code: 'unknown', field: 'extra'}],
+    [{code: 'count', field: 'edits'}],
+    [{code: 'schema', field: 'schema'}],
+    [{code: 'paper', field: 'paperId'}],
+    [{code: 'source', field: 'source'}],
+    [{code: 'defect_type', field: 'defectType'}],
+    [{code: 'too_large', field: ''}],
+    [{code: 'too_long', field: 'agent.name'}],
+    [{code: 'too_long', field: 'reason'}],
+    [{code: 'too_long', field: 'edits[0].context'}],
+  ];
+  for (const errors of directCases) {
+    ctx.FalsifyBoothRecipe = {validate: () => ({ok: false, errors})};
+    const out = M.parseAnswer(JSON.stringify({edits: [{find: '0.95', replace: '0.50'}]}), parseCtx);
+    const rules = out.diagnostics.filter(d => d.code === 'rule');
+    assert.equal(rules.length, 1, JSON.stringify(errors));
+    const rawFallback = [errors[0].code, errors[0].field].filter(Boolean).join(' ');
+    assert.notEqual(rules[0].message, rawFallback, `fell back to raw code: ${rawFallback}`);
+    const en = i18n.t(rules[0].message);
+    assert.doesNotMatch(en, /[가-힣]/, `Hangul leaked for ${JSON.stringify(errors)}: ${rules[0].message} -> ${en}`);
+    assert.notEqual(en, rawFallback, `Raw code leaked: ${en}`);
+  }
+});

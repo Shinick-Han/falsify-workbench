@@ -1119,25 +1119,53 @@ test('every final outcome shows its headline, stamp and gift ticket', async () =
   w.handle.destroy();
 });
 
-/* ux-ai-assist P0-2: AI-made edits keep their source on the send card. */
-test('the send card names an AI-assisted edit', async () => {
+/* ux-ai-assist P0-2 + plan97s-7 B-12: each send card names its own edit's source. */
+test('the send card names an AI-assisted edit by its own source', async () => {
   const cases = [
-    [{assist: 'my-ai'}, 'AI와 숨긴 결함 · 2쪽', 'AI 제안'],
-    [{assist: 'manual'}, '내가 숨긴 결함 · 2쪽', null],
-    [null, '내가 숨긴 결함 · 2쪽', null],
+    [{assist: 'my-ai'}, 'myai', 'AI와 숨긴 결함 · 2쪽', 'AI 제안'],
+    [{assist: 'my-ai'}, 'tap', '내가 숨긴 결함 · 2쪽', null],
+    [{assist: 'manual'}, 'find', '내가 숨긴 결함 · 2쪽', null],
+    [null, 'paragraph', '내가 숨긴 결함 · 2쪽', null],
   ];
   try {
-    for (const [info, title, chipText] of cases) {
+    for (const [info, source, title, chipText] of cases) {
       boothContext.FalsifyBoothRecipe = info ? {assist: () => info} : {};
       const h = liveBooth();
       await settle();
-      await reachSend(h);
+      await reachSend(h, [makeBoothEdit({source})]);
       const card = nodesOf(h.ids.get('booth-rows')).find(node => node.className === 'booth-panel booth-card');
-      assert.equal(nodesOf(card).find(node => node.className === 'booth-klab').textContent, title);
+      assert.equal(nodesOf(card).find(node => node.className === 'booth-klab').textContent, title, source);
       const aiChip = nodesOf(card).find(node => node.className === 'booth-ai-chip');
-      assert.equal(aiChip ? aiChip.textContent : null, chipText);
+      assert.equal(aiChip ? aiChip.textContent : null, chipText, source);
       h.handle.destroy();
     }
+  } finally {
+    delete boothContext.FalsifyBoothRecipe;
+  }
+});
+
+test('a manual edit next to a 내 AI edit keeps its own send card title', async () => {
+  boothContext.FalsifyBoothRecipe = {assist: () => ({assist: 'my-ai'})};
+  try {
+    const h = liveBooth();
+    await settle();
+    await reachSend(h, [
+      makeBoothEdit({id: 'e-ai', pageIndex: 4, source: 'myai'}),
+      makeBoothEdit({id: 'e-me', pageIndex: 4, rects: [{x: 0.5, y: 0.6, w: 0.1, h: 0.02}], originalText: '0.78', newText: '0.58', source: 'tap'}),
+    ]);
+    const cards = nodesOf(h.ids.get('booth-rows')).filter(node => node.className === 'booth-panel booth-card');
+    assert.equal(cards.length, 2);
+    const titles = cards.map(card => nodesOf(card).find(node => node.className === 'booth-klab').textContent);
+    const chips = cards.map(card => nodesOf(card).filter(node => node.className === 'booth-ai-chip').length);
+    assert.deepEqual(titles, ['AI와 숨긴 결함 · 5쪽', '내가 숨긴 결함 · 5쪽']);
+    assert.deepEqual(chips, [1, 0]);
+    declare(h, '수치·통계', '값을 바꿨어요');
+    await submit(h);
+    const posted = h.calls.find(call => call.path.endsWith('/v1/booth/submissions'));
+    const meta = JSON.parse(posted.form.get('meta'));
+    assert.equal(meta.assist, 'my-ai', 'the Worker still gets the paper-wide assist value');
+    assert.ok(meta.declared.every(item => !('source' in item)), 'row source never reaches the Worker');
+    h.handle.destroy();
   } finally {
     delete boothContext.FalsifyBoothRecipe;
   }

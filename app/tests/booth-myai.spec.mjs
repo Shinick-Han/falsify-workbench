@@ -254,7 +254,7 @@ test('local contract rules', () => {
 });
 
 test('pathological unbalanced pastes stay fast and explain themselves', () => {
-  const cases = ['{'.repeat(200000), '['.repeat(200000), '{"a":'.repeat(40000), 'x{'.repeat(100000),
+  const cases = [('\u201c{').repeat(60000), '{'.repeat(200000), '['.repeat(200000), '{"a":'.repeat(40000), 'x{'.repeat(100000),
     'Before: Ragas 0.95\nAfter: Ragas 0.59\n' + '{'.repeat(199000)];
   for (const raw of cases) {
     const started = performance.now();
@@ -295,3 +295,68 @@ test('a bare single edit next to cannot_read_paper is still applied', () => {
   assert.ok(out.recipe);
   assert.equal(out.recipe.edits[0].find, '0.95');
 });
+
+/* plan97s-8: booth-recipe.js rule error sentences (B-02) and curly-quote two-reading parse (B-01) */
+// The real event-page validator (booth-recipe.js) gives {field, code} only.
+// Load once, then remove the global so the older tests keep using validateLocal.
+const RecipeAPI = (() => { require('../dist/booth-recipe.js'); const api = globalThis.FalsifyBoothRecipe; delete globalThis.FalsifyBoothRecipe; return api; })();
+function withRecipe(fn) { globalThis.FalsifyBoothRecipe = RecipeAPI; try { return fn(); } finally { delete globalThis.FalsifyBoothRecipe; } }
+
+test('booth-recipe.js rule errors are shown as the plain Korean sentences, never raw codes', () => withRecipe(() => {
+  const msgs = raw => M.parseAnswer(raw, ctx).diagnostics.filter(d => d.code === 'rule').map(d => d.message);
+  assert.deepEqual(msgs(JSON.stringify({edits: Array.from({length: 6}, (_, i) => ({find: 'a' + i, replace: 'b'}))})), ['수정은 5개까지만 받을 수 있어요.']);
+  assert.deepEqual(msgs(JSON.stringify({edits: [], reason: 'r'})), ['수정(edits)이 하나도 없어요.']);
+  assert.deepEqual(msgs(JSON.stringify({edits: [{find: '0.95', replace: '0.95'}]})), ['1번째 수정은 바꾸기 전과 후가 같아요.']);
+  assert.deepEqual(msgs(JSON.stringify({edits: [{find: '0.95\n0.78', replace: '0.5'}]})), ['edits[0].find에 쓸 수 없는 제어 문자가 있어요.']);
+  assert.deepEqual(msgs(JSON.stringify({edits: [{find: 'x'.repeat(301), replace: 'y'}]})), ['edits[0].find가 300자를 넘어요. 더 짧게 잘라 주세요.']);
+  assert.deepEqual(msgs(JSON.stringify({edits: [{find: '  ', replace: 'y'}]})), ['edits[0].find가 비어 있어요.']);
+  assert.deepEqual(msgs(JSON.stringify({reason: 'x'.repeat(500), edits: Array.from({length: 5}, () => ({find: 'f'.repeat(300), replace: '한'.repeat(300), context: 'c'.repeat(600)}))})), ['답이 8KB를 넘어요. 수정을 줄여 주세요.']);
+  const all = msgs(JSON.stringify({edits: [{find: '0.95', replace: '0.95'}, {find: 'a\u0001', replace: 'b'}]}));
+  for (const m of all) assert.doesNotMatch(m, /^(count|unchanged|control|too_long|too_large|empty|type)\b/);
+}));
+
+const L = '\u201c', R = '\u201d';
+test('curly quotes inside straight-quoted values keep every edit, reason and type (B-01)', () => {
+  const c = {...ctx, segments: [...ctx.segments, {id: 'page-11', pageIndex: 10, text: L + 'Marissa Mayer at Web 2.0,' + R + ' she said.'}]};
+  const raw = JSON.stringify({...good, edits: [{page: 5, find: '0.95', replace: '0.50'},
+    {page: 11, find: L + 'Marissa Mayer at Web 2.0,' + R, replace: L + 'Marissa Mayer at Web 3.0,' + R},
+    {find: '50 questions', replace: '500 questions'}], reason: '표의 ' + L + '0.95' + R + '를 바꿈'});
+  const {recipe, diagnostics} = M.parseAnswer(raw, c);
+  assert.equal(recipe.edits.length, 3);
+  assert.equal(recipe.edits[1].find, L + 'Marissa Mayer at Web 2.0,' + R);
+  assert.equal(recipe.reason, '표의 ' + L + '0.95' + R + '를 바꿈');
+  assert.equal(recipe.defectType, 'number');
+  assert.equal(diagnostics.filter(d => d.level === 'error').length, 0);
+  assert.equal(M.parseAnswer(JSON.stringify({edits: [{find: '0.95', replace: '0.50'}, {find: L + 'Mayer', replace: L + 'Meyer'}]}), ctx).recipe.edits.length, 2);
+  const trailing = raw.replace(/\]\,"defectType"/, ',],"defectType"');
+  assert.ok(trailing.includes(',]'));
+  assert.equal(M.parseAnswer(trailing, c).recipe.edits.length, 3, 'trailing comma with curly text inside');
+});
+
+test('a broken recipe never applies one of its inner edits', () => {
+  const broken = '{"edits": [{"find": "0.95", "replace": "0.50"}, {"find": "50 questions" "replace": "500 questions"}]}';
+  const out = M.parseAnswer(broken, ctx);
+  assert.equal(out.recipe, null);
+  assert.equal(out.diagnostics[0].code, 'json_syntax');
+  const curlyBroken = broken.replace(/"/g, L);
+  assert.equal(M.parseAnswer(curlyBroken, ctx).recipe, null);
+  assert.equal(M.parseAnswer(curlyBroken, ctx).diagnostics[0].code, 'json_syntax');
+  const withCite = M.parseAnswer('See [1].\n' + broken, ctx);   // something else parsed; still json_syntax
+  assert.equal(withCite.diagnostics[0].code, 'json_syntax');
+  const fixed = broken + '\nSorry, corrected:\n' + JSON.stringify({edits: [{find: '0.95', replace: '0.50'}, {find: '50 questions', replace: '500 questions'}]});
+  assert.equal(M.parseAnswer(fixed, ctx).recipe.edits.length, 2);
+});
+
+test('curly-quote delimiters with a bracket inside a value still read every edit', () => {
+  const q = s => L + s + R;
+  const raw = '{' + q('edits') + ': [{' + q('find') + ': ' + q('0.95') + ', ' + q('replace') + ': ' + q('0.50') + '}, {' + q('find') + ': ' + q('range (0, 1]') + ', ' + q('replace') + ': ' + q('range (0, 2]') + '}]}';
+  assert.equal(M.parseAnswer(raw, ctx).recipe.edits.length, 2);
+});
+
+test('B-01 tests under the real validator', () => withRecipe(() => {
+  const broken = M.parseAnswer('{"edits": [{"find": "0.95", "replace": "0.50"}, {"find": "50 questions" "replace": "x"}]}', ctx);
+  assert.equal(broken.recipe, null);
+  assert.equal(broken.diagnostics[0].code, 'json_syntax');
+  const curly = M.parseAnswer(JSON.stringify({...good, edits: [{find: '0.95', replace: '0.50'}, {find: L + 'Mayer' + R, replace: L + 'Meyer' + R}]}), ctx);
+  assert.equal(curly.recipe.edits.length, 2);
+}));

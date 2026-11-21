@@ -1256,16 +1256,10 @@
       paint();
       return box;
     }
-    /* AI-made edits keep their source on the send card. */
-    function assistInfo(){
-      const recipe=root.FalsifyBoothRecipe;
-      const out=recipe&&typeof recipe.assist==='function'?recipe.assist():null;
-      return out&&typeof out==='object'?out:{};
-    }
+    /* Each send card names its own edit's source: only a 내 AI edit gets the AI title and chip. */
     function rowTitle(row){
       const page=(row.pageIndex+1)+'쪽';
-      const info=assistInfo();
-      if(info.assist!=='my-ai') return el('p',{className:'booth-klab',textContent:'내가 숨긴 결함 · '+page});
+      if(row.source!=='myai') return el('p',{className:'booth-klab',textContent:'내가 숨긴 결함 · '+page});
       return el('div',{className:'booth-card-head'},
         el('p',{className:'booth-klab',textContent:'AI와 숨긴 결함 · '+page}),
         el('span',{className:'booth-ai-chip',textContent:'AI 제안'}));
@@ -1340,6 +1334,7 @@
         before:edit.originalText,
         after:edit.newText,
         rects:Array.isArray(edit.rects)?edit.rects:[],
+        source:typeof edit.source==='string'?edit.source:'',
         defectType:'',
         reason:''
       };

@@ -35,13 +35,14 @@ const STUB_RECIPE = 'const __realLocate = window.FalsifyBoothRecipe.locate;\n' +
   'window.__calls = {assist: [], apply: [], located: []};\n' +
   'window.__recipe = {mode: "ok"};\n' +
   'window.FalsifyBoothRecipe = {\n' +
-  '  paperInfo() { return {paperId: "2309.15217", title: "Ragas: Automated Evaluation of Retrieval Augmented Generation", license: "cc-by-4.0", pages: 6}; },\n' +
+  '  paperInfo() { return {paperId: window.__paperId || "2309.15217", title: "Ragas: Automated Evaluation of Retrieval Augmented Generation", license: "cc-by-4.0", pages: 6}; },\n' +
   '  pageText(n) { return __pages[n - 1] ? __pages[n - 1].text : ""; },\n' +
   '  setAssist(kind, code) { window.__calls.assist.push([kind, code]); },\n' +
   '  assist() { return {assist: "manual"}; },\n' +
   '  async apply(recipe, options) {\n' +
   '    window.__calls.apply.push(JSON.parse(JSON.stringify(recipe)));\n' +
   '    if (options && options.onProgress) options.onProgress({message: "논문에 적용하는 중"});\n' +
+  '    if (window.__recipe.mode === "slow") await new Promise(r => setTimeout(r, 600));\n' +
   '    if (window.__recipe.mode === "throw") throw new Error("PDF를 만들지 못했어요");\n' +
   '    const applied = [], unresolved = [];\n' +
   '    for (const edit of recipe.edits) {\n' +
@@ -303,11 +304,85 @@ async function run(browser, viewport, tag) {
   }
 }
 
+/* plan97s-7: Ask my AI resets on paper change or document-clear, keeps state on same paper */
+async function state(page) {
+  return page.evaluate(() => ({
+    answer: document.querySelector('#booth-myai-answer').value,
+    resultHidden: document.querySelector('#booth-myai-result').hidden,
+    result: document.querySelector('#booth-myai-result').textContent,
+    diags: document.querySelector('#booth-myai-diags').children.length,
+    copy: document.querySelector('#booth-myai-copy').textContent,
+    copyStatus: document.querySelector('#booth-myai-copy-status').textContent,
+    full: document.querySelector('#booth-myai-full').hidden,
+    pdf: document.querySelector('#booth-myai-pdf').getAttribute('href'),
+  }));
+}
+const fire = (page, name, detail) => page.evaluate(([n, d]) => document.dispatchEvent(d ? new CustomEvent(n, {detail: d}) : new Event(n)), [name, detail]);
+async function applyOnce(page) {
+  await page.locator('#booth-myai-copy').click();
+  await page.waitForFunction(() => document.querySelector('#booth-myai-copy').textContent === '복사됨 ✓');
+  await page.locator('#booth-myai-answer').fill(ANSWER);
+  await page.locator('#booth-myai-apply').click();
+  await page.waitForFunction(() => /곳 적용/.test(document.querySelector('#booth-myai-result').textContent));
+}
+async function checkReset(browser, viewport, tag) {
+  const {context, page, errors} = await open(browser, viewport, 'record');
+  try {
+    await applyOnce(page);
+    const kept = await state(page);
+    assert.equal(kept.resultHidden, false);
+    // same paper: lang toggle, re-index, same-hash source event, re-mount (tab switch)
+    await fire(page, 'falsify:booth-lang-change', {lang: 'en'});
+    await fire(page, 'falsify:booth-lang-change', {lang: 'ko'});
+    await fire(page, 'falsify:booth-index-ready');
+    await fire(page, 'falsify:paper-workspace-source', {fileHash: 'a'.repeat(64), name: 'x.pdf'});
+    await fire(page, 'falsify:paper-workspace-source', {fileHash: 'a'.repeat(64), name: 'x.pdf'});
+    await page.evaluate(() => { window.__mount2 = FalsifyBoothMyAI.mount(document.getElementById('booth-myai')); });
+    const same = await state(page);
+    assert.equal(same.answer, ANSWER, tag + ': answer kept on same paper');
+    assert.equal(same.resultHidden, false, tag + ': result kept');
+    assert.equal(same.result, kept.result);
+    assert.equal(same.diags, kept.diags);
+    assert.notEqual(same.copy, '복사', tag + ': copy label kept');
+    assert.equal(same.copyStatus, kept.copyStatus);
+    // paper switch signalled only by the source event
+    await page.evaluate(() => { window.__paperId = '2611.16180'; });
+    await fire(page, 'falsify:paper-workspace-source', {fileHash: 'b'.repeat(64), name: 'y.pdf'});
+    const switched = await state(page);
+    assert.deepEqual([switched.answer, switched.resultHidden, switched.result, switched.diags, switched.copy, switched.copyStatus, switched.full],
+      ['', true, '', 0, '복사', '', true], tag + ': reset on paper switch');
+    assert.equal(switched.pdf, 'https://arxiv.org/pdf/2611.16180');
+    // retry on the same paper: document-clear alone
+    await applyOnce(page);
+    await fire(page, 'falsify:document-clear');
+    const cleared = await state(page);
+    assert.deepEqual([cleared.answer, cleared.resultHidden, cleared.diags, cleared.copy, cleared.copyStatus], ['', true, 0, '복사', ''], tag + ': reset on document-clear');
+    // copy timer cancelled: label must not flip to 다시 복사 later
+    await page.waitForTimeout(2300);
+    assert.equal((await state(page)).copy, '복사', tag + ': timer cancelled');
+    // an in-flight apply cannot paint into Step 2 after a reset
+    await page.evaluate(() => { window.__recipe.mode = 'slow'; });
+    await page.locator('#booth-myai-answer').fill(ANSWER);
+    await page.locator('#booth-myai-apply').click();
+    await fire(page, 'falsify:document-clear');
+    await page.waitForFunction(() => !document.querySelector('#booth-myai-apply').disabled);
+    await page.waitForTimeout(100);
+    const afterSlow = await state(page);
+    assert.equal(afterSlow.answer, '', tag + ': in-flight apply stays cleared');
+    assert.equal(afterSlow.resultHidden, true, tag + ': in-flight apply does not paint late result');
+    assert.equal(afterSlow.result, '', tag + ': in-flight apply leaves result empty');
+    assert.equal(errors.join('\n'), '');
+  } finally {
+    await context.close();
+  }
+}
+
 async function main() {
   const browser = await chromium.launch({executablePath: process.env.BROWSER_EXECUTABLE || undefined});
   try {
     for (const [tag, viewport] of [['360', {width: 360, height: 740}], ['390', {width: 390, height: 844}], ['1280', {width: 1280, height: 800}]]) {
       await run(browser, viewport, tag);
+      await checkReset(browser, viewport, tag);
       await checkFallback(browser, viewport, tag);
     }
   } finally {
