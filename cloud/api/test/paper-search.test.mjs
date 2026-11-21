@@ -13,10 +13,15 @@ const SESSION_KEY = Buffer.alloc(32, 7).toString('base64');
 const IP = '203.0.113.10';
 
 const CC_BY = 'http://creativecommons.org/licenses/by/4.0/';
+const CC_BY_3 = 'http://creativecommons.org/licenses/by/3.0/';
 const CC_BY_SA = 'http://creativecommons.org/licenses/by-sa/4.0/';
 const CC0 = 'http://creativecommons.org/publicdomain/zero/1.0/';
 const CC_BY_NC = 'http://creativecommons.org/licenses/by-nc/4.0/';
+const CC_BY_NC_SA = 'http://creativecommons.org/licenses/by-nc-sa/4.0/';
+const CC_BY_NC_ND = 'http://creativecommons.org/licenses/by-nc-nd/4.0/';
+const CC_BY_ND = 'http://creativecommons.org/licenses/by-nd/4.0/';
 const ARXIV_NONEXCLUSIVE = 'http://arxiv.org/licenses/nonexclusive-distrib/1.0/';
+const BOOTH_CAP = 16 * 1024 * 1024;
 
 function baseEnv(extra = {}) {
   return { CONFLUENCE_SESSION_KEY: SESSION_KEY, PAPER_SEARCH_ENABLED: 'true', ...extra };
@@ -106,19 +111,37 @@ function oaiMissing() {
   return `<?xml version="1.0"?><OAI-PMH><error code="idDoesNotExist">gone</error></OAI-PMH>`;
 }
 
-function atomFeed({ id = '2503.10497v1', title = 'Cats &amp; dogs', summary = 'Synthetic booth summary.', total = 12, authors = ['Ada Example'] } = {}) {
-  const authorXml = authors.map(name => `<author><name>${name}</name></author>`).join('');
+function atomEntriesFeed(entries, total = entries.length) {
+  const body = entries.map(entry => {
+    const authors = (entry.authors || ['Ada Example']).map(name => `<author><name>${name}</name></author>`).join('');
+    return `<entry>
+    <id>http://arxiv.org/abs/${entry.id}</id>
+    <title>${entry.title || `Synthetic ${entry.id}`}</title>
+    <summary>${entry.summary || 'Synthetic booth summary.'}</summary>
+    <published>${entry.published || '2024-01-02T00:00:00Z'}</published>
+    ${authors}
+  </entry>`;
+  }).join('\n');
   return `<?xml version="1.0"?>
 <feed xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/" xmlns="http://www.w3.org/2005/Atom">
   <opensearch:totalResults>${total}</opensearch:totalResults>
-  <entry>
-    <id>http://arxiv.org/abs/${id}</id>
-    <title>${title}</title>
-    <summary>${summary}</summary>
-    <published>2024-01-02T00:00:00Z</published>
-    ${authorXml}
-  </entry>
+  ${body}
 </feed>`;
+}
+
+function atomFeed({ id = '2503.10497v1', title = 'Cats &amp; dogs', summary = 'Synthetic booth summary.', total = 25, authors = ['Ada Example'] } = {}) {
+  return atomEntriesFeed([{ id, title, summary, authors }], total);
+}
+
+function oaiId(target) {
+  return (target.searchParams.get('identifier') || '').replace(/^oai:arXiv\.org:/, '');
+}
+
+function rangeOk(size = 730780) {
+  return new Response(new TextEncoder().encode('%PDF-'), {
+    status: 206,
+    headers: { 'Content-Type': 'application/pdf', 'Content-Range': `bytes 0-4/${size}` },
+  });
 }
 
 function openAlexWork(extra = {}) {
@@ -307,10 +330,11 @@ test('POST is 401 without a bearer and 405 after auth', async () => {
   assert.equal(tracked.rateCalls.length, 0);
 });
 
-test('OpenAlex happy path maps a synthetic work and keeps the fixed upstream policy', async () => {
+test('OpenAlex happy path verifies the actual arXiv OAI license and keeps the fixed upstream policy', async () => {
   const names = ['Ada Example', 'Bo Example', 'Cy Example', 'Di Example', 'Ed Example', 'Fa Example', 'Gu Example', 'Ho Example'];
   const routed = routes({
     'api.openalex.org': () => jsonResponse(200, openAlexBody({ authors: names, license: 'cc-by' })),
+    'oaipmh.arxiv.org': () => new Response(oaiXml(CC_BY), { status: 200, headers: { 'Content-Type': 'text/xml' } }),
   });
   const response = await send({
     pathname: '/v1/papers/search',
@@ -335,11 +359,11 @@ test('OpenAlex happy path maps a synthetic work and keeps the fixed upstream pol
     authors: names.slice(0, 6),
     year: 2024,
     abstract: 'Synthetic booth abstract',
-    license: { id: 'cc-by', url: 'https://creativecommons.org/licenses/by/4.0/' },
+    license: { id: 'cc-by-4.0', url: 'https://creativecommons.org/licenses/by/4.0/' },
     licenseVerified: true,
     landingUrl: 'https://arxiv.org/abs/2503.10497',
   });
-  assert.equal(routed.calls.length, 1);
+  assert.deepEqual(routed.calls.map(call => call.host), ['api.openalex.org', 'oaipmh.arxiv.org']);
   const upstream = new URL(routed.calls[0].href);
   assert.equal(upstream.searchParams.get('filter'), 'best_oa_location.source.id:S4306400194,best_oa_location.license:cc-by|cc-by-sa|public-domain');
   assert.equal(upstream.searchParams.get('per_page'), '10');
@@ -348,18 +372,21 @@ test('OpenAlex happy path maps a synthetic work and keeps the fixed upstream pol
   assert.equal(upstream.searchParams.has('mailto'), false);
   assert.equal(routed.calls[0].href.includes('booth-example-key'), false);
   assert.equal(new Headers(routed.calls[0].init.headers).get('authorization'), 'Bearer booth-example-key');
+  assert.equal(routed.calls[1].href.includes('booth-example-key'), false);
+  assert.equal(new Headers(routed.calls[1].init.headers).get('authorization'), null);
   assert.equal(JSON.stringify(body).includes('booth-example-key'), false);
   assertUpstreamIdentity(routed.calls);
 });
 
-test('OpenAlex failure falls back to the arXiv Atom API with licenseVerified false', async () => {
+test('OpenAlex failure falls back to the arXiv Atom API and returns only OAI-verified allowed papers', async () => {
   const summary = `${'A'.repeat(701)}`;
   const routed = routes({
     'api.openalex.org': () => new Response('down', { status: 503 }),
-    'export.arxiv.org': () => new Response(atomFeed({ summary, total: 12 }), {
+    'export.arxiv.org': () => new Response(atomFeed({ summary, total: 25 }), {
       status: 200,
       headers: { 'Content-Type': 'application/atom+xml' },
     }),
+    'oaipmh.arxiv.org': () => new Response(oaiXml(CC_BY), { status: 200, headers: { 'Content-Type': 'text/xml' } }),
   });
   const response = await send({
     pathname: '/v1/papers/search',
@@ -373,18 +400,21 @@ test('OpenAlex failure falls back to the arXiv Atom API with licenseVerified fal
   const body = await response.json();
   assert.equal(body.results.length, 1);
   assert.equal(body.results[0].title, 'Cats & dogs');
-  assert.equal(body.results[0].license, null);
-  assert.equal(body.results[0].licenseVerified, false);
-  assert.equal(body.results[0].id, '2503.10497v1');
+  assert.deepEqual(body.results[0].license, { id: 'cc-by-4.0', url: 'https://creativecommons.org/licenses/by/4.0/' });
+  assert.equal(body.results[0].licenseVerified, true);
+  assert.equal(body.results[0].id, '2503.10497');
+  assert.equal(body.results[0].landingUrl, 'https://arxiv.org/abs/2503.10497');
   assert.equal(body.results[0].year, 2024);
   assert.equal(Array.from(body.results[0].abstract).length, 700);
   assert.equal(body.hasMore, true);
-  assert.deepEqual(routed.calls.map(call => call.host), ['api.openalex.org', 'export.arxiv.org']);
+  assert.deepEqual(routed.calls.map(call => call.host), ['api.openalex.org', 'export.arxiv.org', 'oaipmh.arxiv.org']);
   assert.equal(routed.calls[0].href.includes('booth-example-key'), false);
   assert.equal(new Headers(routed.calls[0].init.headers).get('authorization'), 'Bearer booth-example-key');
   assert.equal(routed.calls[1].href.includes('booth-example-key'), false);
   assert.equal(routed.calls[1].href.includes('api_key'), false);
   assert.equal(new Headers(routed.calls[1].init.headers).get('authorization'), null);
+  assert.equal(routed.calls[2].href.includes('booth-example-key'), false);
+  assert.equal(new Headers(routed.calls[2].init.headers).get('authorization'), null);
   assertUpstreamIdentity(routed.calls);
 });
 
@@ -405,6 +435,7 @@ test('query length and page bounds are 400 before upstream', async () => {
   }
   const routed = routes({
     'api.openalex.org': () => jsonResponse(200, openAlexBody({ count: 1000 })),
+    'oaipmh.arxiv.org': () => new Response(oaiXml(CC_BY), { status: 200, headers: { 'Content-Type': 'text/xml' } }),
   });
   const page = await send({
     pathname: '/v1/papers/search',
@@ -422,17 +453,25 @@ test('query length and page bounds are 400 before upstream', async () => {
     query: `q=${encodeURIComponent('😀'.repeat(200))}`,
     token: SESSION,
     deps: testDeps().deps,
-    fetchImpl: routes({ 'api.openalex.org': () => jsonResponse(200, openAlexBody({ count: 1 })) }).fetchImpl,
+    fetchImpl: routes({
+      'api.openalex.org': () => jsonResponse(200, openAlexBody({ count: 1 })),
+      'oaipmh.arxiv.org': () => new Response(oaiXml(CC_BY), { status: 200, headers: { 'Content-Type': 'text/xml' } }),
+    }).fetchImpl,
   });
   assert.equal(wide.status, 200);
 });
 
-test('a search cache hit does not call upstream again', async () => {
-  let fetched = 0;
+test('a search cache hit does not call upstream again and shares the license cache across pages', async () => {
+  let openAlexCalls = 0;
+  let oaiCalls = 0;
   const routed = routes({
     'api.openalex.org': () => {
-      fetched += 1;
+      openAlexCalls += 1;
       return jsonResponse(200, openAlexBody());
+    },
+    'oaipmh.arxiv.org': () => {
+      oaiCalls += 1;
+      return new Response(oaiXml(CC_BY), { status: 200, headers: { 'Content-Type': 'text/xml' } });
     },
   });
   const cache = memoryCache();
@@ -456,7 +495,8 @@ test('a search cache hit does not call upstream again', async () => {
   });
   assert.equal(second.status, 200);
   assert.deepEqual(await second.json(), await first.json());
-  assert.equal(fetched, 1);
+  assert.equal(openAlexCalls, 1);
+  assert.equal(oaiCalls, 1);
   const otherPage = await send({
     pathname: '/v1/papers/search',
     query: 'q=Hello%20World&page=2',
@@ -466,7 +506,8 @@ test('a search cache hit does not call upstream again', async () => {
     fetchImpl: routed.fetchImpl,
   });
   assert.equal(otherPage.status, 200);
-  assert.equal(fetched, 2);
+  assert.equal(openAlexCalls, 2);
+  assert.equal(oaiCalls, 1, 'same paper on another page reuses the cached OAI verdict');
 });
 
 test('license allow, deny, missing id, and a cached deny', async () => {
@@ -737,6 +778,7 @@ test('search and pdf rate limits return 429 and roll back the earlier slot', asy
   const tracked = testDeps();
   const routed = routes({
     'api.openalex.org': () => jsonResponse(200, openAlexBody({ count: 1 })),
+    'oaipmh.arxiv.org': () => new Response(oaiXml(CC_BY), { status: 200, headers: { 'Content-Type': 'text/xml' } }),
   });
   const first = await send({
     pathname: '/v1/papers/search',
@@ -761,7 +803,7 @@ test('search and pdf rate limits return 429 and roll back the earlier slot', asy
   assert.equal(error.retryable, true);
   assert.equal(second.headers.get('retry-after'), '30');
   assert.equal(second.headers.get('access-control-expose-headers'), 'X-Falsify-Confluence-Session, Retry-After, X-Falsify-Paper-License');
-  assert.equal(routed.calls.length, 1);
+  assert.equal(routed.calls.filter(call => call.host === 'api.openalex.org').length, 1);
   assert.equal(tracked.rateCalls[0].bucket.startsWith('paper-search:owner:'), true);
   assert.equal(tracked.rateCalls[0].bucket.includes(AUTHOR), false);
   assert.equal(tracked.rateCalls[0].bucket.includes(IP), false);
@@ -771,6 +813,7 @@ test('search and pdf rate limits return 429 and roll back the earlier slot', asy
   const global = testDeps();
   const globalRoutes = routes({
     'api.openalex.org': () => jsonResponse(200, openAlexBody({ count: 1 })),
+    'oaipmh.arxiv.org': () => new Response(oaiXml(CC_BY), { status: 200, headers: { 'Content-Type': 'text/xml' } }),
   });
   await send({
     pathname: '/v1/papers/search',
@@ -1005,4 +1048,605 @@ test('both upstreams failing is 503 and is not cached', async () => {
   assert.equal(second.status, 503);
   assert.equal(calls, 2);
   assert.equal(cache.size, 0);
+});
+
+test('strict canonical CC URI parsing rejects spoofed hosts, bad versions, bare tokens, and conflicting tags', async () => {
+  const rejectedUris = [
+    'https://evil.example/creativecommons.org/publicdomain/zero/1.0/',
+    'https://creativecommons.org.evil.example/licenses/by/4.0/',
+    'http://not-cc.example/licenses/by/4.0/',
+    'http://creativecommons.org/licenses/by/',
+    'http://creativecommons.org/licenses/by/9.9/',
+    'http://creativecommons.org/publicdomain/zero/2.0/',
+    'http://creativecommons.org/licenses/by/4.0/deed.en',
+    'http://creativecommons.org/licenses/by/4.0/?extra=1',
+    'http://creativecommons.org/licenses/by/4.0/#frag',
+    'http://creativecommons.org/publicdomain/mark/1.0/',
+    'cc-by',
+    'cc0',
+  ];
+  for (let i = 0; i < rejectedUris.length; i += 1) {
+    const id = `2503.70${String(i).padStart(3, '0')}`;
+    const routed = routes({
+      'oaipmh.arxiv.org': () => new Response(oaiXml(rejectedUris[i]), { status: 200, headers: { 'Content-Type': 'text/xml' } }),
+      'arxiv.org': () => { throw new Error(`must not fetch PDF for ${rejectedUris[i]}`); },
+    });
+    const res = await send({ pathname: '/v1/papers/pdf', query: `id=${id}`, token: SESSION, deps: testDeps().deps, fetchImpl: routed.fetchImpl });
+    assert.equal(res.status, 403, rejectedUris[i]);
+  }
+
+  // Conflicting multiple <license> tags (version mismatch or mixed allow+deny) must fail closed.
+  for (const xml of [
+    `<?xml version="1.0"?><OAI-PMH><GetRecord><record><metadata><arXiv><license>${CC_BY_3}</license><license>${CC_BY}</license></arXiv></metadata></record></GetRecord></OAI-PMH>`,
+    `<?xml version="1.0"?><OAI-PMH><GetRecord><record><metadata><arXiv><license>${CC_BY}</license><license>${CC_BY_NC}</license></arXiv></metadata></record></GetRecord></OAI-PMH>`,
+  ]) {
+    const routed = routes({
+      'oaipmh.arxiv.org': () => new Response(xml, { status: 200, headers: { 'Content-Type': 'text/xml' } }),
+      'arxiv.org': () => { throw new Error('must not fetch PDF on conflicting licenses'); },
+    });
+    const res = await send({ pathname: '/v1/papers/pdf', query: 'id=2503.70999', token: SESSION, deps: testDeps().deps, fetchImpl: routed.fetchImpl });
+    assert.equal(res.status, 403);
+  }
+
+  // A cached license entry whose id and url versions disagree is ignored and re-fetched.
+  const cache = memoryCache();
+  await cache.put(
+    new Request('https://cache.falsify.local/papers/license?id=2503.70888', { method: 'GET' }),
+    new Response(JSON.stringify({ kind: 'allow', id: 'cc-by-4.0', url: 'https://creativecommons.org/licenses/by/3.0/' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }),
+  );
+  let oaiCalls = 0;
+  const routed = routes({
+    'api.openalex.org': () => jsonResponse(200, openAlexBody({
+      count: 1,
+      results: [openAlexWork({ title: 'Version Protected', license: 'cc-by', pdf: 'https://arxiv.org/pdf/2503.70888' })],
+    })),
+    'oaipmh.arxiv.org': () => {
+      oaiCalls += 1;
+      return new Response(oaiXml(CC_BY_3), { status: 200, headers: { 'Content-Type': 'text/xml' } });
+    },
+  });
+  const res = await send({ pathname: '/v1/papers/search', query: 'q=version-mismatch-cache', token: SESSION, deps: testDeps().deps, cache, fetchImpl: routed.fetchImpl });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(oaiCalls, 1);
+  assert.deepEqual(body.results[0].license, { id: 'cc-by-3.0', url: 'https://creativecommons.org/licenses/by/3.0/' });
+});
+
+test('OpenAlex mismatches against arXiv OAI-PMH are excluded and actual OAI versions are returned', async () => {
+  const works = [
+    openAlexWork({ title: 'Actual CC BY 3.0', license: 'cc-by', pdf: 'https://arxiv.org/pdf/2503.10001' }),
+    openAlexWork({ title: 'Duplicate version', license: 'cc-by', pdf: 'https://arxiv.org/pdf/2503.10001v2' }),
+    openAlexWork({ title: 'False public-domain', license: 'public-domain', pdf: 'https://arxiv.org/pdf/2503.10002' }),
+    openAlexWork({ title: 'False cc-by actually nc-sa', license: 'cc-by', pdf: 'https://arxiv.org/pdf/2503.10003' }),
+    openAlexWork({ title: 'False cc-by-sa actually nonexclusive', license: 'cc-by-sa', pdf: 'https://arxiv.org/pdf/2503.10004' }),
+    openAlexWork({ title: 'Actual CC0', license: 'public-domain', pdf: 'https://arxiv.org/pdf/2503.10005' }),
+    openAlexWork({ title: 'Actual CC BY-SA 4.0', license: 'cc-by-sa', pdf: 'https://arxiv.org/pdf/2503.10006' }),
+    openAlexWork({ title: 'Missing on OAI', license: 'cc-by', pdf: 'https://arxiv.org/pdf/2503.10007' }),
+    openAlexWork({ title: 'No license tag on OAI', license: 'cc-by', pdf: 'https://arxiv.org/pdf/2503.10008' }),
+  ];
+  const oaiByPaper = {
+    '2503.10001': oaiXml(CC_BY_3),
+    '2503.10002': oaiXml(ARXIV_NONEXCLUSIVE),
+    '2503.10003': oaiXml(CC_BY_NC_SA),
+    '2503.10004': oaiXml(ARXIV_NONEXCLUSIVE),
+    '2503.10005': oaiXml(CC0),
+    '2503.10006': oaiXml(CC_BY_SA),
+    '2503.10007': oaiMissing(),
+    '2503.10008': oaiXml(''),
+  };
+  const checked = [];
+  const routed = routes({
+    'api.openalex.org': () => jsonResponse(200, openAlexBody({ count: works.length, results: works })),
+    'oaipmh.arxiv.org': target => {
+      const id = oaiId(target);
+      checked.push(id);
+      return new Response(oaiByPaper[id], { status: 200, headers: { 'Content-Type': 'text/xml' } });
+    },
+  });
+  const response = await send({
+    pathname: '/v1/papers/search',
+    query: 'q=mismatch-check',
+    token: SESSION,
+    deps: testDeps().deps,
+    fetchImpl: routed.fetchImpl,
+  });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('cache-control'), 'public, max-age=3600');
+  const body = await response.json();
+  assert.equal(body.hasMore, false);
+  assert.deepEqual(
+    body.results.map(item => ({ id: item.id, license: item.license, licenseVerified: item.licenseVerified })),
+    [
+      { id: '2503.10001', license: { id: 'cc-by-3.0', url: 'https://creativecommons.org/licenses/by/3.0/' }, licenseVerified: true },
+      { id: '2503.10005', license: { id: 'cc0', url: 'https://creativecommons.org/publicdomain/zero/1.0/' }, licenseVerified: true },
+      { id: '2503.10006', license: { id: 'cc-by-sa-4.0', url: 'https://creativecommons.org/licenses/by-sa/4.0/' }, licenseVerified: true },
+    ],
+  );
+  assert.equal(checked.filter(id => id === '2503.10001').length, 1, 'duplicate versioned id is checked once');
+  assertUpstreamIdentity(routed.calls);
+});
+
+test('event search pre-probes PDFs via Range against min(booth maxPdfBytes, ownerCap), confirms indeterminate size via HEAD, canonicalizes old versions, and hides unresolved PDFs no-store', async () => {
+  const works = [
+    openAlexWork({ title: 'Within Cap', license: 'cc-by', pdf: 'https://arxiv.org/pdf/2503.80001v1' }),
+    openAlexWork({ title: 'Oversized 17 MiB', license: 'cc-by', pdf: 'https://arxiv.org/pdf/2503.80002' }),
+    openAlexWork({ title: 'Missing 404', license: 'cc-by', pdf: 'https://arxiv.org/pdf/2503.80003' }),
+    openAlexWork({ title: 'HTML not PDF', license: 'cc-by', pdf: 'https://arxiv.org/pdf/2503.80004' }),
+    openAlexWork({ title: 'Chunked Confirmed by HEAD', license: 'cc-by', pdf: 'https://arxiv.org/pdf/2503.80005' }),
+    openAlexWork({ title: 'Chunked Oversized by HEAD', license: 'cc-by', pdf: 'https://arxiv.org/pdf/2503.80008' }),
+    openAlexWork({ title: 'Denied OAI', license: 'public-domain', pdf: 'https://arxiv.org/pdf/2503.80006' }),
+    openAlexWork({ title: 'Redirected to export', license: 'cc-by', pdf: 'https://arxiv.org/pdf/2503.80007' }),
+  ];
+  const probedCalls = [];
+  const routed = routes({
+    'api.openalex.org': () => jsonResponse(200, openAlexBody({ count: works.length, results: works })),
+    'oaipmh.arxiv.org': target => new Response(oaiXml(oaiId(target) === '2503.80006' ? ARXIV_NONEXCLUSIVE : CC_BY), {
+      status: 200,
+      headers: { 'Content-Type': 'text/xml' },
+    }),
+    'arxiv.org': (target, init) => {
+      const method = init.method || 'GET';
+      probedCalls.push({ method, path: target.pathname });
+      if (method === 'HEAD') {
+        assert.equal(new Headers(init.headers).get('range'), null);
+        if (target.pathname === '/pdf/2503.80005') {
+          return new Response(null, { status: 200, headers: { 'Content-Type': 'application/pdf', 'Content-Length': String(3 * 1024 * 1024) } });
+        }
+        if (target.pathname === '/pdf/2503.80008') {
+          return new Response(null, { status: 200, headers: { 'Content-Type': 'application/pdf', 'Content-Length': String(18 * 1024 * 1024) } });
+        }
+        return new Response(null, { status: 405 });
+      }
+      assert.equal(new Headers(init.headers).get('range'), 'bytes=0-4');
+      if (target.pathname === '/pdf/2503.80001') return rangeOk(10 * 1024 * 1024);
+      if (target.pathname === '/pdf/2503.80002') return rangeOk(17 * 1024 * 1024);
+      if (target.pathname === '/pdf/2503.80003') return new Response('gone', { status: 404, headers: { 'Content-Type': 'text/html' } });
+      if (target.pathname === '/pdf/2503.80004') return new Response('<html>', { status: 200, headers: { 'Content-Type': 'text/html' } });
+      if (target.pathname === '/pdf/2503.80005') return chunked(['%PDF-1.7\n'], { 'Content-Type': 'application/pdf' });
+      if (target.pathname === '/pdf/2503.80008') return chunked(['%PDF-1.7\n'], { 'Content-Type': 'application/pdf' });
+      if (target.pathname === '/pdf/2503.80007') return new Response(null, { status: 302, headers: { Location: 'https://export.arxiv.org/pdf/2503.80007' } });
+      throw new Error(`unexpected arxiv.org probe ${target.pathname}`);
+    },
+    'export.arxiv.org': (target, init) => {
+      assert.equal(new Headers(init.headers).get('range'), 'bytes=0-4');
+      return rangeOk(2 * 1024 * 1024);
+    },
+  });
+  const cache = memoryCache();
+  const res = await send({
+    pathname: '/v1/papers/search',
+    query: 'q=event-probe',
+    token: SESSION,
+    env: { BOOTH_ENABLED: 'true', BOOTH_MAX_PDF_BYTES: String(BOOTH_CAP) },
+    deps: testDeps().deps,
+    cache,
+    fetchImpl: routed.fetchImpl,
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('cache-control'), 'public, max-age=3600');
+  const body = await res.json();
+  assert.deepEqual(body.results.map(item => item.id), ['2503.80001', '2503.80005', '2503.80007']);
+  assert.equal(body.results[0].landingUrl, 'https://arxiv.org/abs/2503.80001', 'obsolete v1 is canonicalized before probing and in output');
+  assert.equal(probedCalls.some(c => c.path === '/pdf/2503.80001v1'), false, 'never probes obsolete v1 in search');
+  assert.equal(probedCalls.some(c => c.path === '/pdf/2503.80006'), false, 'OAI-disallowed paper is never range-probed');
+  assert.equal(probedCalls.some(c => c.method === 'HEAD' && c.path === '/pdf/2503.80005'), true);
+  assert.equal(probedCalls.some(c => c.method === 'HEAD' && c.path === '/pdf/2503.80008'), true);
+  assertUpstreamIdentity(routed.calls);
+
+  // Guest with tighter 8 MiB upload cap uses min(16 MiB booth, 8 MiB guest) = 8 MiB, gets its own
+  // search cache key, and reuses all cached PDF sizes (including HEAD-confirmed 2503.80005 & 2503.80008) with 0 probes.
+  const guestDeps = testDeps({
+    db: { prepare() { return { bind() { return this; }, async first() { return { guest_id: GUEST_ID }; } }; } },
+  });
+  probedCalls.length = 0;
+  const guestRes = await send({
+    pathname: '/v1/papers/search',
+    query: 'q=event-probe',
+    token: GUEST,
+    env: { BOOTH_ENABLED: 'true', BOOTH_MAX_PDF_BYTES: String(BOOTH_CAP), AI_OPEN_ACCESS: 'true', AI_GUEST_MAX_UPLOAD_BYTES: String(8 * 1024 * 1024) },
+    deps: guestDeps.deps,
+    cache,
+    fetchImpl: routed.fetchImpl,
+  });
+  assert.equal(guestRes.status, 200);
+  const guestBody = await guestRes.json();
+  assert.deepEqual(guestBody.results.map(item => item.id), ['2503.80005', '2503.80007']);
+  assert.equal(probedCalls.length, 0, 'all definitive Range and HEAD sizes are reused from cache');
+
+  // Non-event deployment (BOOTH_ENABLED unset) skips PDF range probing and has its own cap=none search cache key.
+  probedCalls.length = 0;
+  const nonEvent = await send({
+    pathname: '/v1/papers/search',
+    query: 'q=event-probe',
+    token: SESSION,
+    env: { BOOTH_ENABLED: 'false' },
+    deps: testDeps().deps,
+    cache,
+    fetchImpl: routed.fetchImpl,
+  });
+  assert.equal(nonEvent.status, 200);
+  assert.equal(probedCalls.length, 0);
+  assert.equal((await nonEvent.json()).results.length, 7);
+
+  // Unresolved size (chunked 200 + HEAD without Content-Length), 503, and gzip are hidden with no-store (uncached).
+  const transientCache = memoryCache();
+  let transientCalls = 0;
+  const transientRoutes = routes({
+    'api.openalex.org': () => {
+      transientCalls += 1;
+      return jsonResponse(200, openAlexBody({
+        count: 4,
+        results: [
+          openAlexWork({ title: 'Good', license: 'cc-by', pdf: 'https://arxiv.org/pdf/2503.81001' }),
+          openAlexWork({ title: 'Probe 503', license: 'cc-by', pdf: 'https://arxiv.org/pdf/2503.81002' }),
+          openAlexWork({ title: 'Probe Gzip', license: 'cc-by', pdf: 'https://arxiv.org/pdf/2503.81003' }),
+          openAlexWork({ title: 'Unresolved Size After HEAD', license: 'cc-by', pdf: 'https://arxiv.org/pdf/2503.81004' }),
+        ],
+      }));
+    },
+    'oaipmh.arxiv.org': () => new Response(oaiXml(CC_BY), { status: 200, headers: { 'Content-Type': 'text/xml' } }),
+    'arxiv.org': (target, init) => {
+      if ((init.method || 'GET') === 'HEAD') {
+        return new Response(null, { status: 200, headers: { 'Content-Type': 'application/pdf' } });
+      }
+      if (target.pathname === '/pdf/2503.81001') return rangeOk(10000);
+      if (target.pathname === '/pdf/2503.81002') return new Response('busy', { status: 503 });
+      if (target.pathname === '/pdf/2503.81004') return chunked(['%PDF-1.7\n'], { 'Content-Type': 'application/pdf' });
+      return new Response(new Uint8Array([0x1f, 0x8b, 0x08, 0x00, 0x00]), {
+        status: 206,
+        headers: { 'Content-Type': 'application/pdf', 'Content-Encoding': 'gzip', 'Content-Range': 'bytes 0-4/9000' },
+      });
+    },
+  });
+  const degraded = await send({
+    pathname: '/v1/papers/search',
+    query: 'q=transient-pdf',
+    token: SESSION,
+    env: { BOOTH_ENABLED: 'true', BOOTH_MAX_PDF_BYTES: String(BOOTH_CAP) },
+    deps: testDeps().deps,
+    cache: transientCache,
+    fetchImpl: transientRoutes.fetchImpl,
+  });
+  assert.equal(degraded.status, 200);
+  assert.equal(degraded.headers.get('cache-control'), 'no-store');
+  assert.deepEqual((await degraded.json()).results.map(item => item.id), ['2503.81001']);
+  assert.equal(transientCache.entries().some(([url]) => url.includes('/papers/search')), false);
+  assert.equal(transientCalls, 1);
+
+  // Obsolete v1 in Atom metadata canonicalizes to latest unversioned id for search/probe, while direct PDF open keeps exact v1.
+  const versionPaths = [];
+  const versionRoutes = routes({
+    'api.openalex.org': () => new Response('down', { status: 503 }),
+    'export.arxiv.org': () => new Response(atomEntriesFeed([{ id: '2503.82001v1', title: 'Old Version In Feed' }], 1), {
+      status: 200,
+      headers: { 'Content-Type': 'application/atom+xml' },
+    }),
+    'oaipmh.arxiv.org': () => new Response(oaiXml(CC_BY), { status: 200, headers: { 'Content-Type': 'text/xml' } }),
+    'arxiv.org': (target, init) => {
+      versionPaths.push({ path: target.pathname, range: new Headers(init.headers).get('range') });
+      if (new Headers(init.headers).get('range') === 'bytes=0-4') {
+        return target.pathname === '/pdf/2503.82001' ? rangeOk(100000) : rangeOk(BOOTH_CAP + 1);
+      }
+      return new Response(pdfBytes(40), { status: 200, headers: { 'Content-Type': 'application/pdf' } });
+    },
+  });
+  const searched = await send({
+    pathname: '/v1/papers/search',
+    query: 'q=old-version',
+    token: SESSION,
+    env: { BOOTH_ENABLED: 'true', BOOTH_MAX_PDF_BYTES: String(BOOTH_CAP) },
+    deps: testDeps().deps,
+    fetchImpl: versionRoutes.fetchImpl,
+  });
+  const searchedBody = await searched.json();
+  assert.deepEqual(searchedBody.results.map(item => ({ id: item.id, landingUrl: item.landingUrl })), [
+    { id: '2503.82001', landingUrl: 'https://arxiv.org/abs/2503.82001' },
+  ]);
+  const directV1 = await send({
+    pathname: '/v1/papers/pdf',
+    query: 'id=2503.82001v1',
+    token: SESSION,
+    env: { BOOTH_ENABLED: 'true', BOOTH_MAX_PDF_BYTES: String(BOOTH_CAP) },
+    deps: testDeps().deps,
+    fetchImpl: versionRoutes.fetchImpl,
+  });
+  assert.equal(directV1.status, 200);
+  assert.deepEqual(versionPaths, [
+    { path: '/pdf/2503.82001', range: 'bytes=0-4' },
+    { path: '/pdf/2503.82001v1', range: null },
+  ]);
+});
+
+test('Atom fallback uses fixed 10-per-page direct offsets, bounded concurrency, and keeps hasMore on empty filtered pages', async () => {
+  const page1Entries = Array.from({ length: 10 }, (_, i) => ({
+    id: `2503.20${String(i).padStart(3, '0')}v1`,
+    title: `Paper ${i}`,
+  }));
+  const oaiByPaper = {
+    '2503.20000': oaiXml(ARXIV_NONEXCLUSIVE),
+    '2503.20001': oaiXml(CC_BY_SA),
+    '2503.20002': oaiXml(CC0),
+    '2503.20003': oaiXml(CC_BY_NC_ND),
+    '2503.20004': oaiXml(CC_BY_ND),
+  };
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const atomParams = [];
+  const routed = routes({
+    'api.openalex.org': () => new Response('down', { status: 503 }),
+    'export.arxiv.org': target => {
+      const start = Number(target.searchParams.get('start'));
+      const max = Number(target.searchParams.get('max_results'));
+      atomParams.push({ start, max });
+      if (start === 0) {
+        return new Response(atomEntriesFeed(page1Entries, 25), { status: 200, headers: { 'Content-Type': 'application/atom+xml' } });
+      }
+      if (start === 10) {
+        return new Response(atomEntriesFeed([{ id: '2503.29001v2', title: 'Denied Page 2' }], 25), {
+          status: 200,
+          headers: { 'Content-Type': 'application/atom+xml' },
+        });
+      }
+      return new Response(atomEntriesFeed([{ id: '2503.29002v1', title: 'Page 3 Paper' }], 25), {
+        status: 200,
+        headers: { 'Content-Type': 'application/atom+xml' },
+      });
+    },
+    'oaipmh.arxiv.org': async target => {
+      const id = oaiId(target);
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise(resolve => setTimeout(resolve, 4));
+      inFlight -= 1;
+      if (id === '2503.29001') return new Response(oaiXml(ARXIV_NONEXCLUSIVE), { status: 200, headers: { 'Content-Type': 'text/xml' } });
+      return new Response(oaiByPaper[id] || oaiXml(CC_BY), { status: 200, headers: { 'Content-Type': 'text/xml' } });
+    },
+  });
+
+  const first = await send({ pathname: '/v1/papers/search', query: 'q=atom-fixed&page=1', token: SESSION, deps: testDeps().deps, fetchImpl: routed.fetchImpl });
+  assert.equal(first.status, 200);
+  const firstBody = await first.json();
+  assert.equal(firstBody.page, 1);
+  assert.equal(firstBody.hasMore, true);
+  assert.deepEqual(firstBody.results.map(item => item.id), ['2503.20001', '2503.20002', '2503.20005', '2503.20006', '2503.20007', '2503.20008', '2503.20009']);
+  assert.equal(firstBody.results[0].license.id, 'cc-by-sa-4.0');
+  assert.equal(firstBody.results[1].license.id, 'cc0');
+  assert.equal(maxInFlight <= 5, true, `bounded concurrency, saw ${maxInFlight}`);
+  assert.deepEqual(atomParams[0], { start: 0, max: 10 });
+
+  // Direct page 2 offset (start=10, max=10): all entries filtered out, empty results with hasMore=true.
+  const second = await send({ pathname: '/v1/papers/search', query: 'q=atom-fixed&page=2', token: SESSION, deps: testDeps().deps, fetchImpl: routed.fetchImpl });
+  assert.equal(second.status, 200);
+  const secondBody = await second.json();
+  assert.deepEqual(secondBody, { source: 'arxiv', page: 2, hasMore: true, results: [] });
+  assert.deepEqual(atomParams[1], { start: 10, max: 10 });
+
+  // Direct page 3 offset (start=20, max=10): last page, hasMore=false.
+  const third = await send({ pathname: '/v1/papers/search', query: 'q=atom-fixed&page=3', token: SESSION, deps: testDeps().deps, fetchImpl: routed.fetchImpl });
+  assert.equal(third.status, 200);
+  const thirdBody = await third.json();
+  assert.equal(thirdBody.hasMore, false);
+  assert.deepEqual(thirdBody.results.map(item => item.id), ['2503.29002']);
+  assert.deepEqual(atomParams[2], { start: 20, max: 10 });
+});
+
+test('search populates the shared license cache for PDF opens and ignores stale unverified search cache entries', async () => {
+  clearPdfMemoForTests();
+  const pdf = pdfBytes(40);
+  const oaiHits = [];
+  const routed = routes({
+    'api.openalex.org': () => jsonResponse(200, openAlexBody({
+      count: 2,
+      results: [
+        openAlexWork({ title: 'Allowed Paper', license: 'cc-by', pdf: 'https://arxiv.org/pdf/2503.30001' }),
+        openAlexWork({ title: 'Denied Paper', license: 'public-domain', pdf: 'https://arxiv.org/pdf/2503.30002' }),
+      ],
+    })),
+    'oaipmh.arxiv.org': target => {
+      const id = oaiId(target);
+      oaiHits.push(id);
+      return new Response(id === '2503.30001' ? oaiXml(CC_BY) : oaiXml(ARXIV_NONEXCLUSIVE), {
+        status: 200,
+        headers: { 'Content-Type': 'text/xml' },
+      });
+    },
+    'arxiv.org': () => new Response(pdf, { status: 200, headers: { 'Content-Type': 'application/pdf' } }),
+  });
+  const cache = memoryCache();
+  const deps = testDeps().deps;
+  await cache.put(
+    new Request('https://cache.falsify.local/papers/search?v=4&q=shared-cache&page=1&cap=none', { method: 'GET' }),
+    new Response(JSON.stringify({
+      source: 'arxiv',
+      page: 1,
+      hasMore: false,
+      results: [{ source: 'arxiv', id: '2503.30002', title: 'Stale', authors: [], year: 2024, abstract: '', license: null, licenseVerified: false, landingUrl: 'https://arxiv.org/abs/2503.30002' }],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+  );
+  const searched = await send({
+    pathname: '/v1/papers/search',
+    query: 'q=shared-cache',
+    token: SESSION,
+    deps,
+    cache,
+    fetchImpl: routed.fetchImpl,
+  });
+  assert.equal(searched.status, 200);
+  const searchBody = await searched.json();
+  assert.deepEqual(searchBody.results.map(item => item.id), ['2503.30001']);
+  assert.deepEqual(oaiHits, ['2503.30001', '2503.30002']);
+
+  const opened = await send({
+    pathname: '/v1/papers/pdf',
+    query: 'id=2503.30001',
+    token: SESSION,
+    deps,
+    cache,
+    fetchImpl: routed.fetchImpl,
+  });
+  assert.equal(opened.status, 200);
+  assert.equal(opened.headers.get('x-falsify-paper-license'), 'cc-by-4.0');
+  assert.equal(oaiHits.length, 2, 'PDF open reuses the search OAI allow verdict');
+
+  const denied = await send({
+    pathname: '/v1/papers/pdf',
+    query: 'id=2503.30002',
+    token: SESSION,
+    deps,
+    cache,
+    fetchImpl: routed.fetchImpl,
+  });
+  assert.equal(denied.status, 403);
+  assert.equal(oaiHits.length, 2, 'PDF open reuses the search OAI deny verdict');
+  clearPdfMemoForTests();
+});
+
+test('empty verified search results are cached without falling back to Atom', async () => {
+  let atomCalls = 0;
+  let openAlexCalls = 0;
+  const cache = memoryCache();
+  const routed = routes({
+    'api.openalex.org': target => {
+      openAlexCalls += 1;
+      const q = target.searchParams.get('search');
+      if (q === 'zero-hits') return jsonResponse(200, openAlexBody({ count: 0, results: [] }));
+      return jsonResponse(200, openAlexBody({
+        count: 1,
+        results: [openAlexWork({ title: 'Denied Only', license: 'public-domain', pdf: 'https://arxiv.org/pdf/2503.40001' })],
+      }));
+    },
+    'export.arxiv.org': () => { atomCalls += 1; return new Response(atomFeed(), { status: 200 }); },
+    'oaipmh.arxiv.org': () => new Response(oaiXml(ARXIV_NONEXCLUSIVE), { status: 200, headers: { 'Content-Type': 'text/xml' } }),
+  });
+  const deps = testDeps().deps;
+  const zero = await send({ pathname: '/v1/papers/search', query: 'q=zero-hits', token: SESSION, deps, cache, fetchImpl: routed.fetchImpl });
+  assert.equal(zero.status, 200);
+  assert.equal(zero.headers.get('cache-control'), 'public, max-age=3600');
+  assert.deepEqual(await zero.json(), { source: 'arxiv', page: 1, hasMore: false, results: [] });
+  assert.equal(atomCalls, 0);
+
+  const zeroAgain = await send({ pathname: '/v1/papers/search', query: 'q=zero-hits', token: SESSION, deps, cache, fetchImpl: routed.fetchImpl });
+  assert.equal(zeroAgain.status, 200);
+  assert.equal(openAlexCalls, 1);
+
+  const allDenied = await send({ pathname: '/v1/papers/search', query: 'q=all-denied', token: SESSION, deps, cache, fetchImpl: routed.fetchImpl });
+  assert.equal(allDenied.status, 200);
+  assert.equal(allDenied.headers.get('cache-control'), 'public, max-age=3600');
+  assert.deepEqual(await allDenied.json(), { source: 'arxiv', page: 1, hasMore: false, results: [] });
+  assert.equal(atomCalls, 0);
+});
+
+test('transient OAI failures exclude unverified papers, skip search cache, fail closed with 503 when none verify, and circuit-break failing waves', async () => {
+  const partialCache = memoryCache();
+  let partialOpenAlexCalls = 0;
+  let flakyCalls = 0;
+  const partialRoutes = routes({
+    'api.openalex.org': () => {
+      partialOpenAlexCalls += 1;
+      return jsonResponse(200, openAlexBody({
+        count: 2,
+        results: [
+          openAlexWork({ title: 'Good Paper', license: 'cc-by', pdf: 'https://arxiv.org/pdf/2503.50001' }),
+          openAlexWork({ title: 'Flaky Paper', license: 'cc-by', pdf: 'https://arxiv.org/pdf/2503.50002' }),
+        ],
+      }));
+    },
+    'oaipmh.arxiv.org': target => {
+      const id = oaiId(target);
+      if (id === '2503.50001') return new Response(oaiXml(CC_BY), { status: 200, headers: { 'Content-Type': 'text/xml' } });
+      flakyCalls += 1;
+      return flakyCalls === 1
+        ? new Response('busy', { status: 503 })
+        : new Response(oaiXml(CC_BY_SA), { status: 200, headers: { 'Content-Type': 'text/xml' } });
+    },
+  });
+  const deps = testDeps().deps;
+  const degraded = await send({
+    pathname: '/v1/papers/search',
+    query: 'q=partial-oai',
+    token: SESSION,
+    deps,
+    cache: partialCache,
+    fetchImpl: partialRoutes.fetchImpl,
+  });
+  assert.equal(degraded.status, 200);
+  assert.equal(degraded.headers.get('cache-control'), 'no-store');
+  assert.deepEqual((await degraded.json()).results.map(item => item.id), ['2503.50001']);
+
+  const recovered = await send({
+    pathname: '/v1/papers/search',
+    query: 'q=partial-oai',
+    token: SESSION,
+    deps,
+    cache: partialCache,
+    fetchImpl: partialRoutes.fetchImpl,
+  });
+  assert.equal(recovered.status, 200);
+  assert.equal(recovered.headers.get('cache-control'), 'public, max-age=3600');
+  assert.deepEqual((await recovered.json()).results.map(item => item.id), ['2503.50001', '2503.50002']);
+  assert.equal(partialOpenAlexCalls, 2, 'degraded page was not cached');
+
+  const downCache = memoryCache();
+  let atomCalled = 0;
+  const downRoutes = routes({
+    'api.openalex.org': () => jsonResponse(200, openAlexBody({
+      count: 2,
+      results: [
+        openAlexWork({ title: 'Denied', license: 'public-domain', pdf: 'https://arxiv.org/pdf/2503.50011' }),
+        openAlexWork({ title: 'Transient', license: 'cc-by', pdf: 'https://arxiv.org/pdf/2503.50012' }),
+      ],
+    })),
+    'export.arxiv.org': () => { atomCalled += 1; return new Response(atomFeed(), { status: 200 }); },
+    'oaipmh.arxiv.org': target => (oaiId(target) === '2503.50011'
+      ? new Response(oaiXml(ARXIV_NONEXCLUSIVE), { status: 200, headers: { 'Content-Type': 'text/xml' } })
+      : new Response('oai down', { status: 503 })),
+  });
+  const unavailable = await send({
+    pathname: '/v1/papers/search',
+    query: 'q=oai-down',
+    token: SESSION,
+    deps: testDeps().deps,
+    cache: downCache,
+    fetchImpl: downRoutes.fetchImpl,
+  });
+  assert.equal(unavailable.status, 503);
+  const err = await errorOf(unavailable);
+  assert.equal(err.code, 'upstream_unavailable');
+  assert.equal(err.retryable, true);
+  assert.equal(atomCalled, 0);
+  assert.equal(downCache.entries().some(([url]) => url.includes('/papers/search')), false);
+
+  const entries = Array.from({ length: 15 }, (_, i) => ({ id: `2503.60${String(i).padStart(3, '0')}v1` }));
+  let waveOaiCalls = 0;
+  const breakerRoutes = routes({
+    'api.openalex.org': () => new Response('down', { status: 503 }),
+    'export.arxiv.org': () => new Response(atomEntriesFeed(entries, 50), { status: 200, headers: { 'Content-Type': 'application/atom+xml' } }),
+    'oaipmh.arxiv.org': () => {
+      waveOaiCalls += 1;
+      return new Response('oai overloaded', { status: 503 });
+    },
+  });
+  const broken = await send({
+    pathname: '/v1/papers/search',
+    query: 'q=oai-breaker',
+    token: SESSION,
+    deps: testDeps().deps,
+    fetchImpl: breakerRoutes.fetchImpl,
+  });
+  assert.equal(broken.status, 503);
+  assert.equal((await errorOf(broken)).code, 'upstream_unavailable');
+  assert.equal(waveOaiCalls, 5, 'stops after the first completely failing OAI wave');
+  const warm = memoryCache();
+  await warm.put(new Request('https://cache.falsify.local/papers/license?id=2503.60008'),
+    Response.json({ kind: 'allow', id: 'cc-by-4.0', url: 'https://creativecommons.org/licenses/by/4.0/' }));
+  const cachedPaper = await send({
+    pathname: '/v1/papers/search', query: 'q=oai-breaker', token: SESSION,
+    deps: testDeps().deps, cache: warm, fetchImpl: breakerRoutes.fetchImpl,
+  });
+  assert.equal(cachedPaper.status, 200);
+  assert.deepEqual((await cachedPaper.json()).results.map(paper => paper.id), ['2503.60008']);
+  assert.equal(waveOaiCalls, 10, 'later cached papers need no additional network request');
 });

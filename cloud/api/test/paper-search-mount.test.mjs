@@ -37,7 +37,11 @@ const harnessPath = path.join(repoRoot, 'app/dist/harness-core.js');
 const ORIGIN = 'https://shinick-han.github.io';
 const USER_AGENT = 'falsify-workbench-booth/1.0 (+https://github.com/Shinick-Han/falsify-workbench)';
 const QUERY = 'synthetic-mount-query';
+const EVENT_QUERY = 'synthetic-event-query';
 const SEARCH_ID = '2503.10497';
+const MISMATCH_ID = '2503.10498';
+const OVERSIZED_ID = '2503.10499';
+const MISSING_PDF_ID = '2503.10500';
 const PDF_ID = '2503.00072';
 const CC_BY_NC = 'http://creativecommons.org/licenses/by-nc/4.0/';
 
@@ -77,43 +81,58 @@ function migrationStatements() {
   return stripSqlComments(sql).split(';').map(part => part.trim()).filter(Boolean);
 }
 
-function openAlexBody() {
+function openAlexWork(id, title, license = 'cc-by') {
+  return {
+    display_name: title,
+    publication_year: 2024,
+    authorships: [
+      { author: { display_name: 'Ada Example' } },
+      { author: { display_name: 'Bo Example' } },
+    ],
+    abstract_inverted_index: { Synthetic: [0], mount: [1], abstract: [2] },
+    best_oa_location: {
+      license,
+      pdf_url: `https://arxiv.org/pdf/${id}`,
+      landing_page_url: `https://arxiv.org/abs/${id}`,
+    },
+    ids: { doi: null },
+  };
+}
+
+function openAlexBody(search) {
+  if (search === EVENT_QUERY) {
+    return JSON.stringify({
+      meta: { count: 4, page: 1, per_page: 10 },
+      results: [
+        openAlexWork(SEARCH_ID, 'Synthetic Mount Paper', 'cc-by'),
+        openAlexWork(MISMATCH_ID, 'Mismatched License Paper', 'public-domain'),
+        openAlexWork(OVERSIZED_ID, 'Oversized PDF Paper', 'cc-by'),
+        openAlexWork(MISSING_PDF_ID, 'Missing PDF Paper', 'cc-by'),
+      ],
+    });
+  }
   return JSON.stringify({
     meta: { count: 25, page: 1, per_page: 10 },
-    results: [{
-      display_name: 'Synthetic Mount Paper',
-      publication_year: 2024,
-      authorships: [
-        { author: { display_name: 'Ada Example' } },
-        { author: { display_name: 'Bo Example' } },
-      ],
-      abstract_inverted_index: { Synthetic: [0], mount: [1], abstract: [2] },
-      best_oa_location: {
-        license: 'cc-by',
-        pdf_url: `https://arxiv.org/pdf/${SEARCH_ID}`,
-        landing_page_url: `https://arxiv.org/abs/${SEARCH_ID}`,
-      },
-      ids: { doi: null },
-    }],
+    results: [openAlexWork(SEARCH_ID, 'Synthetic Mount Paper', 'cc-by')],
   });
 }
 
-function oaiByNc() {
+function oaiByNc(id = PDF_ID) {
   return `<?xml version="1.0"?>
 <OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/">
   <GetRecord><record>
-    <header><identifier>oai:arXiv.org:${PDF_ID}</identifier></header>
-    <metadata><arXiv><id>${PDF_ID}</id><license>${CC_BY_NC}</license></arXiv></metadata>
+    <header><identifier>oai:arXiv.org:${id}</identifier></header>
+    <metadata><arXiv><id>${id}</id><license>${CC_BY_NC}</license></arXiv></metadata>
   </record></GetRecord>
 </OAI-PMH>`;
 }
 
-function oaiCcBy() {
+function oaiCcBy(id = SEARCH_ID) {
   return `<?xml version="1.0"?>
 <OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/">
   <GetRecord><record>
-    <header><identifier>oai:arXiv.org:${SEARCH_ID}</identifier></header>
-    <metadata><arXiv><id>${SEARCH_ID}</id><license>http://creativecommons.org/licenses/by/4.0/</license></arXiv></metadata>
+    <header><identifier>oai:arXiv.org:${id}</identifier></header>
+    <metadata><arXiv><id>${id}</id><license>http://creativecommons.org/licenses/by/4.0/</license></arXiv></metadata>
   </record></GetRecord>
 </OAI-PMH>`;
 }
@@ -126,20 +145,37 @@ function outbound(request, calls) {
     path: url.pathname,
     method: request.method,
     authorization: request.headers.get('authorization'),
+    range: request.headers.get('range'),
     ua: request.headers.get('user-agent'),
     filter: url.searchParams.get('filter'),
     search: url.searchParams.get('search'),
     apiKey: url.searchParams.get('api_key'),
   });
   if (url.hostname === 'api.openalex.org') {
-    return new Response(openAlexBody(), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    return new Response(openAlexBody(url.searchParams.get('search')), { status: 200, headers: { 'Content-Type': 'application/json' } });
   }
   if (url.hostname === 'oaipmh.arxiv.org') {
-    const allowed = url.searchParams.get('identifier') === `oai:arXiv.org:${SEARCH_ID}`;
-    return new Response(allowed ? oaiCcBy() : oaiByNc(), { status: 200, headers: { 'Content-Type': 'text/xml' } });
+    const id = (url.searchParams.get('identifier') || '').replace(/^oai:arXiv\.org:/, '');
+    const allowed = id === SEARCH_ID || id === OVERSIZED_ID || id === MISSING_PDF_ID;
+    return new Response(allowed ? oaiCcBy(id) : oaiByNc(id), { status: 200, headers: { 'Content-Type': 'text/xml' } });
   }
   if (url.hostname === 'arxiv.org' && url.pathname === `/pdf/${SEARCH_ID}`) {
+    if (request.headers.get('range') === 'bytes=0-4') {
+      return new Response('%PDF-', {
+        status: 206,
+        headers: { 'Content-Type': 'application/pdf', 'Content-Range': 'bytes 0-4/730780' },
+      });
+    }
     return new Response('%PDF-1.7 synthetic mount pdf\n%%EOF\n', { status: 200, headers: { 'Content-Type': 'application/pdf' } });
+  }
+  if (url.hostname === 'arxiv.org' && url.pathname === `/pdf/${OVERSIZED_ID}` && request.headers.get('range') === 'bytes=0-4') {
+    return new Response('%PDF-', {
+      status: 206,
+      headers: { 'Content-Type': 'application/pdf', 'Content-Range': 'bytes 0-4/40842586' },
+    });
+  }
+  if (url.hostname === 'arxiv.org' && url.pathname === `/pdf/${MISSING_PDF_ID}` && request.headers.get('range') === 'bytes=0-4') {
+    return new Response('<html>not found</html>', { status: 404, headers: { 'Content-Type': 'text/html' } });
   }
   // A PDF byte fetch or an Atom fallback must fail closed inside the test.
   if (url.hostname === 'arxiv.org' || url.hostname === 'export.arxiv.org') {
@@ -297,7 +333,7 @@ describe('mounted paper search', { concurrency: false }, () => {
         authors: ['Ada Example', 'Bo Example'],
         year: 2024,
         abstract: 'Synthetic mount abstract',
-        license: { id: 'cc-by', url: 'https://creativecommons.org/licenses/by/4.0/' },
+        license: { id: 'cc-by-4.0', url: 'https://creativecommons.org/licenses/by/4.0/' },
         licenseVerified: true,
         landingUrl: `https://arxiv.org/abs/${SEARCH_ID}`,
       }]);
@@ -316,8 +352,46 @@ describe('mounted paper search', { concurrency: false }, () => {
       assert.equal(openAlex[0].authorization, null);
       assert.equal(openAlex[0].ua, USER_AGENT);
       assert.equal(openAlex[0].ua.includes('@'), false);
+      assert.equal(calls.some(item => item.host === 'oaipmh.arxiv.org'), true);
       assert.equal(calls.some(item => item.host === 'export.arxiv.org'), false);
       assert.equal(calls.some(item => item.host === 'arxiv.org'), false);
+    });
+  });
+
+  test('event search filters mismatched OAI license, oversized PDF, and 404 PDF before listing', async () => {
+    await withApp({
+      PAPER_SEARCH_ENABLED: 'true',
+      BOOTH_ENABLED: 'true',
+      BOOTH_MAX_PDF_BYTES: '16777216',
+    }, async ({ call, calls }) => {
+      const token = await mintGuest(call);
+      const found = await call('GET', `/v1/papers/search?q=${EVENT_QUERY}&page=1`, { token });
+      assert.equal(found.status, 200, found.text);
+      assert.equal(found.headers.get('cache-control'), 'public, max-age=3600');
+      assert.equal(found.headers.get('access-control-allow-origin'), ORIGIN);
+      assert.equal(found.body.hasMore, false);
+      assert.deepEqual(found.body.results, [{
+        source: 'arxiv',
+        id: SEARCH_ID,
+        title: 'Synthetic Mount Paper',
+        authors: ['Ada Example', 'Bo Example'],
+        year: 2024,
+        abstract: 'Synthetic mount abstract',
+        license: { id: 'cc-by-4.0', url: 'https://creativecommons.org/licenses/by/4.0/' },
+        licenseVerified: true,
+        landingUrl: `https://arxiv.org/abs/${SEARCH_ID}`,
+      }]);
+      const pdfProbes = calls.filter(item => item.host === 'arxiv.org');
+      assert.deepEqual(
+        pdfProbes.map(item => item.path).sort(),
+        [`/pdf/${SEARCH_ID}`, `/pdf/${OVERSIZED_ID}`, `/pdf/${MISSING_PDF_ID}`].sort(),
+        'mismatched license paper never hits arxiv.org; oversized and 404 papers are range-probed and excluded',
+      );
+      for (const probe of pdfProbes) {
+        assert.equal(probe.range, 'bytes=0-4');
+        assert.equal(probe.authorization, null);
+        assert.equal(probe.ua, USER_AGENT);
+      }
     });
   });
 

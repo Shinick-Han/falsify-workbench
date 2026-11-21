@@ -147,7 +147,7 @@ function boothLimits(env) {
 }
 
 // Unset uses the guest upload default (20 MiB). A larger setting still stops at 32 MiB.
-function maxPdfBytes(env) {
+export function maxPdfBytes(env) {
   const guestDefault = positiveInt(env?.AI_GUEST_MAX_UPLOAD_BYTES, PDF_DEFAULT_BYTES);
   const resolved = positiveInt(env?.BOOTH_MAX_PDF_BYTES, guestDefault);
   return Math.min(resolved, PDF_HARD_CAP);

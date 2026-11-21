@@ -1,9 +1,12 @@
 // Booth paper search and PDF proxy (contract docs/booth-contract-20261120.md section 6).
-// Search metadata is public and cached by normalized query + page only. The PDF route checks the
-// arXiv OAI-PMH license before streaming bytes, and never sends an email, owner id or bearer upstream.
+// Search metadata is public and cached by normalized query, page and effective PDF cap. Both search
+// and PDF routes verify the arXiv OAI-PMH license before returning a paper or bytes, and never send
+// an email, owner id or bearer upstream.
 import { AiError, aiFail, resolveAiOwner, sha256Hex } from './ai-identity.mjs';
 import { aiSettings } from './ai-gateway.mjs';
+import { boothEnabled, maxPdfBytes } from './booth.mjs';
 import { SESSION_HEADER } from './confluence.mjs';
+import { probePaperPdf } from './paper-pdf-probe.mjs';
 
 const USER_AGENT = 'falsify-workbench-booth/1.0 (+https://github.com/Shinick-Han/falsify-workbench)';
 const PAGE_SIZE = 10;
@@ -12,7 +15,14 @@ const MAX_AUTHORS = 6;
 const MAX_ABSTRACT = 700;
 const MAX_TITLE = 500;
 const SEARCH_CACHE_SECONDS = 3600;
+const SEARCH_CACHE_VERSION = '4';
 const LICENSE_CACHE_SECONDS = 86400;
+const VERIFY_CONCURRENCY = 5;
+const OPENALEX_TIMEOUT_MS = 4500;
+const ATOM_TIMEOUT_MS = 6000;
+const OAI_SEARCH_TIMEOUT_MS = 3500;
+const PDF_PROBE_TIMEOUT_MS = 3500;
+const SEARCH_VERIFY_BUDGET_MS = 8500;
 const MAX_REDIRECTS = 3;
 const MAX_METADATA_BYTES = 2 * 1024 * 1024;
 const MAX_OAI_BYTES = 1024 * 1024;
@@ -22,11 +32,9 @@ const NEW_ID = /^\d{4}\.\d{4,5}(v\d{1,3})?$/;
 const OLD_ID = /^[a-z-]+(\.[A-Z]{2})?\/\d{7}(v\d{1,3})?$/;
 const OPENALEX_FILTER = 'best_oa_location.source.id:S4306400194,best_oa_location.license:cc-by|cc-by-sa|public-domain';
 const OPENALEX_SELECT = 'id,display_name,publication_year,authorships,abstract_inverted_index,best_oa_location,ids';
-const OPENALEX_LICENSES = {
-  'cc-by': { id: 'cc-by', url: 'https://creativecommons.org/licenses/by/4.0/' },
-  'cc-by-sa': { id: 'cc-by-sa', url: 'https://creativecommons.org/licenses/by-sa/4.0/' },
-  'public-domain': { id: 'public-domain', url: 'https://creativecommons.org/publicdomain/zero/1.0/' },
-};
+const OPENALEX_PREFILTER_LICENSES = new Set(['cc-by', 'cc-by-sa', 'public-domain']);
+const CC_HOST = 'creativecommons.org';
+const CC_VERSIONS = new Set(['1.0', '2.0', '2.5', '3.0', '4.0']);
 
 const MESSAGES = {
   invalid_request: 'The request is not valid for this endpoint.',
@@ -79,6 +87,13 @@ function uploadCap(env, ownerId) {
   return typeof ownerId === 'string' && ownerId.startsWith('gst:')
     ? settings.guestMaxUploadBytes
     : settings.maxUploadBytes;
+}
+
+// Event deployments pre-filter PDFs against the smaller of the booth submission cap (from booth.mjs)
+// and the caller's upload cap. Non-event deployments skip pre-listing PDF range probes.
+function searchPdfCap(env, ownerId) {
+  if (!boothEnabled(env)) return null;
+  return Math.min(maxPdfBytes(env), uploadCap(env, ownerId));
 }
 
 function json(status, body, headers = {}) {
@@ -421,23 +436,27 @@ function redirectTarget(response, current) {
   return next;
 }
 
+function upstreamHeaders(current, hop, accept, extraHeaders, hopHeaders) {
+  const headers = { 'User-Agent': USER_AGENT, Accept: accept };
+  if (hopHeaders) Object.assign(headers, hopHeaders);
+  if (hop === 0 && current.hostname === 'api.openalex.org' && extraHeaders) Object.assign(headers, extraHeaders);
+  return headers;
+}
+
 // redirect:manual. A hop is followed only to https://arxiv.org/ or https://export.arxiv.org/.
 // extraHeaders (the OpenAlex bearer) are attached only to the first request, and only when that
-// host is api.openalex.org, so a redirect cannot carry the key.
-async function upstreamFetch(fetchImpl, target, accept, extraHeaders = null) {
+// host is api.openalex.org, so a redirect cannot carry the key. hopHeaders (such as Range) are
+// preserved across allowed arXiv redirect hops.
+async function upstreamFetch(fetchImpl, target, accept, extraHeaders = null, signal = undefined, hopHeaders = null, method = 'GET') {
   if (typeof fetchImpl !== 'function') aiFail(503, 'upstream_unavailable');
   let current = new URL(target);
   assertHttps(current, INITIAL_HOSTS);
   for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
-    const headers = { 'User-Agent': USER_AGENT, Accept: accept };
-    if (hop === 0 && current.hostname === 'api.openalex.org' && extraHeaders) Object.assign(headers, extraHeaders);
+    const init = { method, redirect: 'manual', headers: upstreamHeaders(current, hop, accept, extraHeaders, hopHeaders) };
+    if (signal) init.signal = signal;
     let response;
     try {
-      response = await fetchImpl(current.toString(), {
-        method: 'GET',
-        redirect: 'manual',
-        headers,
-      });
+      response = await fetchImpl(current.toString(), init);
     } catch (error) {
       if (error instanceof AiError) throw error;
       aiFail(503, 'upstream_unavailable');
@@ -452,6 +471,22 @@ async function upstreamFetch(fetchImpl, target, accept, extraHeaders = null) {
     return response;
   }
   aiFail(502, 'redirect_refused');
+}
+
+async function withTimeout(timeoutMs, fn) {
+  if (!timeoutMs || typeof AbortController !== 'function') return fn(undefined);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fn(controller.signal);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function isUpstreamFailure(error) {
+  return error instanceof AiError
+    && (error.code === 'redirect_refused' || error.code === 'upstream_unavailable' || error.code === 'upstream_invalid');
 }
 
 function concatChunks(chunks, size) {
@@ -651,35 +686,42 @@ function authorNames(work) {
   return names;
 }
 
+function openAlexCandidate(work, seen) {
+  if (!isObject(work)) return null;
+  const location = isObject(work.best_oa_location) ? work.best_oa_location : {};
+  if (!OPENALEX_PREFILTER_LICENSES.has(location.license)) return null;
+  const ids = isObject(work.ids) ? work.ids : {};
+  const rawId = idFromUrl(location.pdf_url) || idFromUrl(location.landing_page_url) || idFromUrl(ids.arxiv) || idFromUrl(ids.doi);
+  if (!rawId) return null;
+  // Canonicalize search ids so OAI license and PDF range/open both resolve the latest arXiv version.
+  const id = canonicalArxivId(rawId);
+  if (seen.has(id)) return null;
+  const title = cleanLine(work.display_name, MAX_TITLE);
+  if (!title) return null;
+  seen.add(id);
+  return {
+    source: 'arxiv',
+    id,
+    title,
+    authors: authorNames(work),
+    year: yearOf(work.publication_year),
+    abstract: abstractFromInverted(work.abstract_inverted_index),
+    landingUrl: landingUrl(id),
+  };
+}
+
 function mapOpenAlex(payload, page) {
-  const results = [];
+  const candidates = [];
   const seen = new Set();
   for (const work of payload.results) {
-    if (!isObject(work)) continue;
-    const location = isObject(work.best_oa_location) ? work.best_oa_location : {};
-    const license = OPENALEX_LICENSES[location.license];
-    if (!license) continue;
-    const ids = isObject(work.ids) ? work.ids : {};
-    const id = idFromUrl(location.pdf_url) || idFromUrl(location.landing_page_url) || idFromUrl(ids.arxiv) || idFromUrl(ids.doi);
-    if (!id || seen.has(id)) continue;
-    const title = cleanLine(work.display_name, MAX_TITLE);
-    if (!title) continue;
-    seen.add(id);
-    results.push({
-      source: 'arxiv',
-      id,
-      title,
-      authors: authorNames(work),
-      year: yearOf(work.publication_year),
-      abstract: abstractFromInverted(work.abstract_inverted_index),
-      license: { id: license.id, url: license.url },
-      licenseVerified: true,
-      landingUrl: landingUrl(id),
-    });
+    const candidate = openAlexCandidate(work, seen);
+    if (candidate) candidates.push(candidate);
   }
+  const rawCount = payload.results.length;
   const total = Number(payload.meta?.count);
-  const hasMore = page < MAX_PAGE && (Number.isFinite(total) ? page * PAGE_SIZE < total : results.length === PAGE_SIZE);
-  return { source: 'arxiv', page, hasMore, results };
+  const hasMore = page < MAX_PAGE && rawCount > 0
+    && (Number.isFinite(total) ? page * PAGE_SIZE < total : rawCount >= PAGE_SIZE);
+  return { candidates, hasMore };
 }
 
 function openAlexUrl(query, page) {
@@ -692,28 +734,32 @@ function openAlexUrl(query, page) {
   return `https://api.openalex.org/works?${params.toString()}`;
 }
 
+async function parseOpenAlexResponse(response, page) {
+  if (response.status !== 200) {
+    await cancelBody(response);
+    return null;
+  }
+  let payload;
+  try {
+    payload = JSON.parse(await readText(response, MAX_METADATA_BYTES));
+  } catch (error) {
+    if (error instanceof AiError && error.code !== 'upstream_invalid') throw error;
+    return null;
+  }
+  if (!isObject(payload) || !Array.isArray(payload.results)) return null;
+  return mapOpenAlex(payload, page);
+}
+
 async function searchOpenAlex(fetchImpl, query, page, apiKey) {
   // The key is a header only. It is never a query parameter and never sent to arXiv.
   const headers = apiKey ? { Authorization: `Bearer ${apiKey}` } : null;
   try {
-    const response = await upstreamFetch(fetchImpl, openAlexUrl(query, page), 'application/json', headers);
-    if (response.status !== 200) {
-      await cancelBody(response);
-      return null;
-    }
-    let payload;
-    try {
-      payload = JSON.parse(await readText(response, MAX_METADATA_BYTES));
-    } catch (error) {
-      if (error instanceof AiError && error.code !== 'upstream_invalid') throw error;
-      return null;
-    }
-    if (!isObject(payload) || !Array.isArray(payload.results)) return null;
-    return mapOpenAlex(payload, page);
+    return await withTimeout(OPENALEX_TIMEOUT_MS, async signal => {
+      const response = await upstreamFetch(fetchImpl, openAlexUrl(query, page), 'application/json', headers, signal);
+      return parseOpenAlexResponse(response, page);
+    });
   } catch (error) {
-    if (error instanceof AiError && error.code !== 'redirect_refused' && error.code !== 'upstream_unavailable' && error.code !== 'upstream_invalid') {
-      throw error;
-    }
+    if (error instanceof AiError && !isUpstreamFailure(error)) throw error;
     return null;
   }
 }
@@ -742,45 +788,56 @@ function tagText(block, tag) {
   return decodeXml(match[1].replace(/<[^>]+>/g, '')).replace(/\s+/g, ' ').trim();
 }
 
+function atomAuthors(block) {
+  const authors = [];
+  const authorRe = /<author\b[^>]*>([\s\S]*?)<\/author>/g;
+  let author;
+  while ((author = authorRe.exec(block)) && authors.length < MAX_AUTHORS) {
+    const name = cleanLine(tagText(author[1], 'name'), 200);
+    if (name) authors.push(name);
+  }
+  return authors;
+}
+
+function atomCandidate(block, seen) {
+  const rawId = tagText(block, 'id');
+  const parsed = isArxivId(rawId) ? rawId : idFromUrl(rawId);
+  if (!parsed) return null;
+  // Canonicalize Atom ids so search results never point at an obsolete version outside the OAI license.
+  const id = canonicalArxivId(parsed);
+  if (seen.has(id)) return null;
+  const title = clipChars(tagText(block, 'title'), MAX_TITLE);
+  if (!title) return null;
+  const published = tagText(block, 'published');
+  seen.add(id);
+  return {
+    source: 'arxiv',
+    id,
+    title,
+    authors: atomAuthors(block),
+    year: yearOf(/^(\d{4})/.exec(published)?.[1]),
+    abstract: clipChars(tagText(block, 'summary'), MAX_ABSTRACT),
+    landingUrl: landingUrl(id),
+  };
+}
+
 function mapAtom(xml, page) {
   if (!xml.includes('<feed') || !xml.includes('http://www.w3.org/2005/Atom')) return null;
-  const results = [];
+  const candidates = [];
   const seen = new Set();
+  let rawCount = 0;
   const entryRe = /<entry\b[^>]*>([\s\S]*?)<\/entry>/g;
   let match;
   while ((match = entryRe.exec(xml))) {
-    const block = match[1];
-    const rawId = tagText(block, 'id');
-    const id = isArxivId(rawId) ? rawId : idFromUrl(rawId);
-    if (!id || seen.has(id)) continue;
-    const title = clipChars(tagText(block, 'title'), MAX_TITLE);
-    if (!title) continue;
-    const authors = [];
-    const authorRe = /<author\b[^>]*>([\s\S]*?)<\/author>/g;
-    let author;
-    while ((author = authorRe.exec(block)) && authors.length < MAX_AUTHORS) {
-      const name = cleanLine(tagText(author[1], 'name'), 200);
-      if (name) authors.push(name);
-    }
-    const published = tagText(block, 'published');
-    seen.add(id);
-    results.push({
-      source: 'arxiv',
-      id,
-      title,
-      authors,
-      year: yearOf(/^(\d{4})/.exec(published)?.[1]),
-      abstract: clipChars(tagText(block, 'summary'), MAX_ABSTRACT),
-      license: null,
-      licenseVerified: false,
-      landingUrl: landingUrl(id),
-    });
+    rawCount += 1;
+    const candidate = atomCandidate(match[1], seen);
+    if (candidate) candidates.push(candidate);
   }
   const totalMatch = /<(?:[\w-]+:)?totalResults>(\d+)<\/(?:[\w-]+:)?totalResults>/.exec(xml);
   const total = totalMatch ? Number(totalMatch[1]) : NaN;
-  const start = (page - 1) * PAGE_SIZE;
-  const hasMore = page < MAX_PAGE && (Number.isFinite(total) ? start + results.length < total : results.length === PAGE_SIZE);
-  return { source: 'arxiv', page, hasMore, results };
+  const hasMore = page < MAX_PAGE && rawCount > 0
+    && (Number.isFinite(total) ? page * PAGE_SIZE < total : rawCount >= PAGE_SIZE);
+  return { candidates, hasMore };
 }
 
 function atomUrl(query, page) {
@@ -792,58 +849,52 @@ function atomUrl(query, page) {
 }
 
 async function searchArxiv(fetchImpl, query, page) {
-  const response = await upstreamFetch(fetchImpl, atomUrl(query, page), 'application/atom+xml');
-  if (response.status !== 200) {
-    await cancelBody(response);
-    aiFail(503, 'upstream_unavailable');
-  }
-  const mapped = mapAtom(await readText(response, MAX_METADATA_BYTES), page);
-  if (!mapped) aiFail(502, 'upstream_invalid');
-  return mapped;
+  return withTimeout(ATOM_TIMEOUT_MS, async signal => {
+    const response = await upstreamFetch(fetchImpl, atomUrl(query, page), 'application/atom+xml', null, signal);
+    if (response.status !== 200) {
+      await cancelBody(response);
+      aiFail(503, 'upstream_unavailable');
+    }
+    const mapped = mapAtom(await readText(response, MAX_METADATA_BYTES), page);
+    if (!mapped) aiFail(502, 'upstream_invalid');
+    return mapped;
+  });
 }
 
-function cc0License(text) {
-  if (text.includes('creativecommons.org/publicdomain/zero') || text === 'cc0') {
+function isDefaultPort(url) {
+  if (!url.port) return true;
+  return (url.protocol === 'http:' && url.port === '80') || (url.protocol === 'https:' && url.port === '443');
+}
+
+function parseCanonicalCcUrl(raw) {
+  const text = String(raw || '').trim();
+  if (!text || text.length > 200) return null;
+  let url;
+  try {
+    url = new URL(text);
+  } catch {
+    return null;
+  }
+  const okScheme = url.protocol === 'http:' || url.protocol === 'https:';
+  if (!okScheme || url.username || url.password || url.search || url.hash) return null;
+  if (!isDefaultPort(url) || url.hostname.toLowerCase() !== CC_HOST) return null;
+  return url.pathname.toLowerCase();
+}
+
+// Strict canonical Creative Commons URI parser. Accepts only http(s)://creativecommons.org URIs
+// for CC0 1.0, CC BY (1.0/2.0/2.5/3.0/4.0), and CC BY-SA (1.0/2.0/2.5/3.0/4.0).
+function classifyLicense(raw) {
+  const pathname = parseCanonicalCcUrl(raw);
+  if (!pathname) return null;
+  if (pathname === '/publicdomain/zero/1.0' || pathname === '/publicdomain/zero/1.0/') {
     return { id: 'cc0', url: 'https://creativecommons.org/publicdomain/zero/1.0/' };
   }
-  return null;
-}
-
-function isBlockedLicense(text) {
-  if (text.includes('nonexclusive')) return true;
-  return text.includes('licenses/by-nc') || text.includes('licenses/by-nd');
-}
-
-function creativeCommonsLicense(kind, version) {
+  const match = /^\/licenses\/(by-sa|by)\/(\d+\.\d+)\/?$/.exec(pathname);
+  if (!match || !CC_VERSIONS.has(match[2])) return null;
   return {
-    id: version ? `cc-${kind}-${version}` : `cc-${kind}`,
-    url: `https://creativecommons.org/licenses/${kind}/${version || '4.0'}/`,
+    id: `cc-${match[1]}-${match[2]}`,
+    url: `https://creativecommons.org/licenses/${match[1]}/${match[2]}/`,
   };
-}
-
-function shareAlikeLicense(text) {
-  const match = /licenses\/by-sa\/(\d+\.\d+)/.exec(text);
-  if (match || text.includes('licenses/by-sa/') || text === 'cc-by-sa') {
-    return creativeCommonsLicense('by-sa', match ? match[1] : '');
-  }
-  return null;
-}
-
-function attributionLicense(text) {
-  const match = /licenses\/by\/(\d+\.\d+)/.exec(text);
-  if (match || text.includes('licenses/by/') || text === 'cc-by') {
-    return creativeCommonsLicense('by', match ? match[1] : '');
-  }
-  return null;
-}
-
-function classifyLicense(raw) {
-  const text = String(raw || '').trim().toLowerCase();
-  if (!text) return null;
-  const zero = cc0License(text);
-  if (zero) return zero;
-  if (isBlockedLicense(text)) return null;
-  return shareAlikeLicense(text) || attributionLicense(text);
 }
 
 function oaiLicenses(xml) {
@@ -859,13 +910,23 @@ function oaiErrorCode(xml) {
   return match ? match[1] : '';
 }
 
+function unanimousAllowedLicense(rawLicenses) {
+  const classified = rawLicenses.map(classifyLicense);
+  if (!classified.every(Boolean)) return null;
+  const first = classified[0];
+  return classified.every(item => item.id === first.id && item.url === first.url) ? first : null;
+}
+
 function verdictFromOai(xml) {
   if (oaiErrorCode(xml) === 'idDoesNotExist') return { kind: 'missing' };
   if (/<error\b/i.test(xml) && !/<license\b/i.test(xml)) return null;
-  const allowed = oaiLicenses(xml).map(classifyLicense).find(Boolean);
-  if (allowed) return { kind: 'allow', id: allowed.id, url: allowed.url };
+  const rawLicenses = oaiLicenses(xml);
+  if (rawLicenses.length > 0) {
+    const allowed = unanimousAllowedLicense(rawLicenses);
+    return allowed ? { kind: 'allow', id: allowed.id, url: allowed.url } : { kind: 'deny' };
+  }
   // A record with no allowed license, including a missing <license>, is a definitive deny.
-  if (/<metadata\b/i.test(xml) || /<license\b/i.test(xml) || /<header\b/i.test(xml)) return { kind: 'deny' };
+  if (/<metadata\b/i.test(xml) || /<header\b/i.test(xml)) return { kind: 'deny' };
   return null;
 }
 
@@ -877,21 +938,219 @@ function oaiUrl(canonicalId) {
   return `https://oaipmh.arxiv.org/oai?${params.toString()}`;
 }
 
-async function licenseVerdict(ctx, id) {
-  const cache = resolveCache(ctx);
-  const canonical = canonicalArxivId(id);
+function isValidLicenseVerdict(value) {
+  if (!isObject(value)) return false;
+  if (value.kind === 'deny' || value.kind === 'missing') return true;
+  if (value.kind !== 'allow') return false;
+  const checked = classifyLicense(value.url);
+  return Boolean(checked && checked.id === value.id && checked.url === value.url);
+}
+
+async function readCachedLicenseVerdict(cache, canonical) {
   const request = cacheRequest('/papers/license', { id: canonical });
   const cached = await readCacheJson(cache, request);
-  if (cached && (cached.kind === 'allow' || cached.kind === 'deny' || cached.kind === 'missing')) return cached;
-  const response = await upstreamFetch(ctx.fetchImpl, oaiUrl(canonical), 'text/xml');
-  if (response.status !== 200) {
-    await cancelBody(response);
-    aiFail(503, 'upstream_unavailable');
-  }
-  const verdict = verdictFromOai(await readText(response, MAX_OAI_BYTES));
-  if (!verdict) aiFail(502, 'upstream_invalid');
+  return isValidLicenseVerdict(cached) ? cached : null;
+}
+
+async function fetchLicenseVerdict(ctx, cache, canonical, timeoutMs = 0) {
+  const request = cacheRequest('/papers/license', { id: canonical });
+  const verdict = await withTimeout(timeoutMs, async signal => {
+    const response = await upstreamFetch(ctx.fetchImpl, oaiUrl(canonical), 'text/xml', null, signal);
+    if (response.status !== 200) {
+      await cancelBody(response);
+      aiFail(503, 'upstream_unavailable');
+    }
+    const parsed = verdictFromOai(await readText(response, MAX_OAI_BYTES));
+    if (!parsed) aiFail(502, 'upstream_invalid');
+    return parsed;
+  });
   await writeCacheJson(cache, request, verdict, LICENSE_CACHE_SECONDS);
   return verdict;
+}
+
+async function licenseVerdict(ctx, id, timeoutMs = 0) {
+  const cache = resolveCache(ctx);
+  const canonical = canonicalArxivId(id);
+  const cached = await readCachedLicenseVerdict(cache, canonical);
+  if (cached) return cached;
+  return fetchLicenseVerdict(ctx, cache, canonical, timeoutMs);
+}
+
+function isValidProbeCacheEntry(value) {
+  if (!isObject(value)) return false;
+  if (value.kind === 'missing' || value.kind === 'invalid') return true;
+  return value.kind === 'ok' && Number.isSafeInteger(value.sizeBytes) && value.sizeBytes >= 5;
+}
+
+function evaluateCachedProbe(entry, cap) {
+  if (entry.kind !== 'ok') return { allow: false, transient: false };
+  return { allow: entry.sizeBytes <= cap, transient: false };
+}
+
+function probeCacheEntry(probe) {
+  const sized = (probe.status === 'ok' || probe.status === 'too_large')
+    && Number.isSafeInteger(probe.sizeBytes) && probe.sizeBytes >= 5;
+  if (sized) return { kind: 'ok', sizeBytes: probe.sizeBytes };
+  if (probe.status === 'missing') return { kind: 'missing' };
+  if (probe.status === 'invalid') return { kind: 'invalid' };
+  return null;
+}
+
+function parseUncompressedHeadSize(response) {
+  if (response.status !== 200 || !contentTypeAllowsPdf(response)) return null;
+  const encoding = (response.headers.get('Content-Encoding') || '').trim().toLowerCase();
+  if (encoding && encoding !== 'identity') return null;
+  const raw = (response.headers.get('Content-Length') || '').trim();
+  if (!/^\d{1,12}$/.test(raw)) return null;
+  const sizeBytes = Number(raw);
+  return Number.isSafeInteger(sizeBytes) && sizeBytes >= 5 ? sizeBytes : null;
+}
+
+async function confirmSizeByHead(ctx, cache, request, id, cap, timeoutMs) {
+  let response;
+  try {
+    response = await withTimeout(timeoutMs, signal => upstreamFetch(
+      ctx.fetchImpl,
+      pdfFetchUrl(id),
+      'application/pdf',
+      null,
+      signal,
+      null,
+      'HEAD',
+    ));
+  } catch (error) {
+    if (error instanceof AiError && !isUpstreamFailure(error)) throw error;
+    return { allow: false, transient: true };
+  }
+  await cancelBody(response);
+  if (response.status === 404 || response.status === 410) {
+    await writeCacheJson(cache, request, { kind: 'missing' }, LICENSE_CACHE_SECONDS);
+    return { allow: false, transient: false };
+  }
+  const sizeBytes = parseUncompressedHeadSize(response);
+  if (sizeBytes === null) return { allow: false, transient: true };
+  await writeCacheJson(cache, request, { kind: 'ok', sizeBytes }, LICENSE_CACHE_SECONDS);
+  return { allow: sizeBytes <= cap, transient: false };
+}
+
+async function checkCandidatePdf(ctx, cache, id, cap, deadline) {
+  const request = cacheRequest('/papers/pdf-probe', { id });
+  const cached = await readCacheJson(cache, request);
+  if (isValidProbeCacheEntry(cached)) return { ...evaluateCachedProbe(cached, cap), live: false };
+
+  const remRange = deadline - Date.now();
+  if (remRange <= 0) return { allow: false, transient: true, live: true };
+  const probe = await withTimeout(Math.min(PDF_PROBE_TIMEOUT_MS, remRange), signal => probePaperPdf(id, {
+    maxBytes: cap,
+    fetchRange: paperId => upstreamFetch(
+      ctx.fetchImpl,
+      pdfFetchUrl(paperId),
+      'application/pdf',
+      null,
+      signal,
+      { Range: 'bytes=0-4' },
+    ),
+  }));
+
+  if (probe.definitive) {
+    const entry = probeCacheEntry(probe);
+    if (entry) await writeCacheJson(cache, request, entry, LICENSE_CACHE_SECONDS);
+    return { allow: probe.status === 'ok', transient: false, live: true };
+  }
+
+  // Magic was verified (%PDF-) but size was indeterminate: try one safe HEAD to confirm the event cap.
+  if (probe.status === 'unknown' && probe.reason === 'size_unknown') {
+    const remHead = deadline - Date.now();
+    if (remHead <= 0) return { allow: false, transient: true, live: true };
+    const head = await confirmSizeByHead(ctx, cache, request, id, cap, Math.min(PDF_PROBE_TIMEOUT_MS, remHead));
+    return { ...head, live: true };
+  }
+
+  return { allow: false, transient: true, live: true };
+}
+
+function verifiedPaper(candidate, verdict) {
+  return {
+    source: 'arxiv',
+    id: candidate.id,
+    title: candidate.title,
+    authors: candidate.authors,
+    year: candidate.year,
+    abstract: candidate.abstract,
+    license: { id: verdict.id, url: verdict.url },
+    licenseVerified: true,
+    landingUrl: candidate.landingUrl,
+  };
+}
+
+function isValidCachedPaper(item) {
+  if (!isObject(item) || item.source !== 'arxiv' || !isArxivId(item.id)) return false;
+  if (item.licenseVerified !== true || !isObject(item.license)) return false;
+  const checked = classifyLicense(item.license.url);
+  return Boolean(checked && checked.id === item.license.id && checked.url === item.license.url);
+}
+
+function isValidCachedSearch(cached, page) {
+  return isObject(cached)
+    && cached.source === 'arxiv'
+    && cached.page === page
+    && typeof cached.hasMore === 'boolean'
+    && Array.isArray(cached.results)
+    && cached.results.every(isValidCachedPaper);
+}
+
+async function resolveCandidateLicense(ctx, cache, id, deadline) {
+  const cached = await readCachedLicenseVerdict(cache, id);
+  if (cached) return { verdict: cached, live: false, transient: false };
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) return { verdict: null, live: true, transient: true };
+  try {
+    const verdict = await fetchLicenseVerdict(ctx, cache, id, Math.min(OAI_SEARCH_TIMEOUT_MS, remaining));
+    return { verdict, live: true, transient: false };
+  } catch (error) {
+    if (error instanceof AiError && !isUpstreamFailure(error)) throw error;
+    return { verdict: null, live: true, transient: true };
+  }
+}
+
+async function verifyOneCandidate(ctx, cache, candidate, pdfCap, deadline) {
+  const lic = await resolveCandidateLicense(ctx, cache, candidate.id, deadline);
+  if (lic.transient) return { paper: null, transient: true, live: lic.live };
+  if (lic.verdict.kind !== 'allow') return { paper: null, transient: false, live: lic.live };
+  if (pdfCap === null) return { paper: verifiedPaper(candidate, lic.verdict), transient: false, live: lic.live };
+  const pdf = await checkCandidatePdf(ctx, cache, candidate.id, pdfCap, deadline);
+  const live = lic.live || pdf.live;
+  if (pdf.transient) return { paper: null, transient: true, live };
+  return { paper: pdf.allow ? verifiedPaper(candidate, lic.verdict) : null, transient: false, live };
+}
+
+async function verifySearchCandidates(ctx, candidates, pdfCap, deadline) {
+  const cache = resolveCache(ctx);
+  const results = [];
+  let transientFailures = 0;
+  let lookupDeadline = deadline;
+
+  for (let start = 0; start < candidates.length; start += VERIFY_CONCURRENCY) {
+    const slice = candidates.slice(start, start + VERIFY_CONCURRENCY);
+    const outcomes = await Promise.all(slice.map(item => verifyOneCandidate(ctx, cache, item, pdfCap, lookupDeadline)));
+    let liveCount = 0;
+    let liveFailed = 0;
+    for (const outcome of outcomes) {
+      if (outcome.live) liveCount += 1;
+      if (outcome.transient) {
+        transientFailures += 1;
+        if (outcome.live) liveFailed += 1;
+      } else if (outcome.paper) {
+        results.push(outcome.paper);
+      }
+    }
+    if (liveCount >= 2 && liveFailed === liveCount) {
+      // Later papers can still have verified license and PDF metadata in the cache.
+      lookupDeadline = 0;
+    }
+  }
+
+  return { results, transientFailures };
 }
 
 function pdfResponse(body, id, licenseId) {
@@ -911,15 +1170,29 @@ async function handleSearch(ctx, ownerId) {
   const { query, page } = searchQuery(requestUrl(ctx));
   await limitSearch(ctx, ownerId);
   const cache = resolveCache(ctx);
-  const request = cacheRequest('/papers/search', { q: query, page: String(page) });
+  const pdfCap = searchPdfCap(ctx.env, ownerId);
+  const request = cacheRequest('/papers/search', {
+    v: SEARCH_CACHE_VERSION,
+    q: query,
+    page: String(page),
+    cap: pdfCap === null ? 'none' : String(pdfCap),
+  });
   const cached = await readCacheJson(cache, request);
-  if (cached && cached.source === 'arxiv' && Array.isArray(cached.results) && cached.page === page) {
+  if (isValidCachedSearch(cached, page)) {
     return json(200, cached, { 'Cache-Control': `public, max-age=${SEARCH_CACHE_SECONDS}` });
   }
-  const fresh = await searchOpenAlex(ctx.fetchImpl, query, page, openAlexKey(ctx.env))
+
+  const deadline = Date.now() + SEARCH_VERIFY_BUDGET_MS;
+  const raw = await searchOpenAlex(ctx.fetchImpl, query, page, openAlexKey(ctx.env))
     || await searchArxiv(ctx.fetchImpl, query, page);
-  await writeCacheJson(cache, request, fresh, SEARCH_CACHE_SECONDS);
-  return json(200, fresh, { 'Cache-Control': `public, max-age=${SEARCH_CACHE_SECONDS}` });
+  const { results, transientFailures } = await verifySearchCandidates(ctx, raw.candidates, pdfCap, deadline);
+  if (results.length === 0 && transientFailures > 0) aiFail(503, 'upstream_unavailable');
+  const payload = { source: 'arxiv', page, hasMore: raw.hasMore, results };
+  if (transientFailures === 0) {
+    await writeCacheJson(cache, request, payload, SEARCH_CACHE_SECONDS);
+    return json(200, payload, { 'Cache-Control': `public, max-age=${SEARCH_CACHE_SECONDS}` });
+  }
+  return json(200, payload, { 'Cache-Control': 'no-store' });
 }
 
 async function handlePdf(ctx, ownerId) {
