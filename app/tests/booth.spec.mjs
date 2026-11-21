@@ -2350,6 +2350,8 @@ test('waiting project row shows while pending, hides when final or withdrawn, an
   const row = h.ids.get('booth-project-wait');
   assert.equal(row.hidden, false, 'visible while queued');
   assert.equal(h.text('booth-project-copy'), '기다리는 동안 가짜연구소 Falsify 프로젝트를 둘러보세요. 마음에 들면 GitHub에서 ★를 눌러 주세요.');
+  /* plan97s-6 */
+  assert.match(h.text('booth-live-capture'), /^이 티켓을 캡처해 두세요/);
   const link = h.ids.get('booth-project-link');
   assert.ok(link && link.tagName === 'a');
   assert.equal(link.textContent, 'GitHub에서 보기 ★');
@@ -2390,6 +2392,8 @@ test('waiting project row shows while pending, hides when final or withdrawn, an
     assert.equal(qr.getAttribute('height'), '120');
     assert.ok((qr.getAttribute('alt') || '').length > 0, 'QR has alt text');
     assert.equal(k.text('booth-project-qr-caption'), '휴대폰 카메라로 찍으면 Falsify 프로젝트가 열려요.');
+    /* plan97s-6 */
+    assert.equal(k.text('booth-live-capture'), '접수번호와 확인키가 보이게 휴대폰으로 이 티켓을 찍어 두세요. 내 휴대폰의 「내 기록」에서 두 코드로 결과를 볼 수 있어요.');
     k.handle.destroy();
   } finally {
     if (prevRt === undefined) delete boothContext.FalsifyBoothRuntime;

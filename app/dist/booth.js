@@ -56,6 +56,7 @@
   const PARTIAL_SUB='결함 근처까지 짚으면 적발로 봐요.';
   const WITHDRAW_WARN='철회하면 되돌릴 수 없고, 선물과 추첨 기회도 함께 사라져요.';
   const CAPTURE_COPY='이 티켓을 캡처해 두세요. 화면을 닫아도 「내 기록」에서 접수번호와 확인키로 다시 볼 수 있어요.';
+  const KIOSK_CAPTURE_COPY='접수번호와 확인키가 보이게 휴대폰으로 이 티켓을 찍어 두세요. 내 휴대폰의 「내 기록」에서 두 코드로 결과를 볼 수 있어요.';
   const PROJECT_URL='https://github.com/Pseudo-Lab/Falsify';
   const PROJECT_QR_SRC='falsify-project-qr.svg';
   const PROJECT_WAIT_COPY='기다리는 동안 가짜연구소 Falsify 프로젝트를 둘러보세요. 마음에 들면 GitHub에서 ★를 눌러 주세요.';
@@ -1067,7 +1068,7 @@
         buildReviewTicket(),
         el('div',{id:'booth-live',className:'booth-live','data-state':'pending'},
           buildProgress(),
-          el('p',{id:'booth-live-capture',className:'booth-small',textContent:CAPTURE_COPY}),
+          el('p',{id:'booth-live-capture',className:'booth-small',textContent:isKiosk()?KIOSK_CAPTURE_COPY:CAPTURE_COPY}),
           buildProjectWait(),
           el('div',{id:'booth-verdict',className:'booth-verdict',hidden:true},
             el('h2',{id:'booth-live-title',className:'booth-headline',role:'status','aria-live':'polite'}),

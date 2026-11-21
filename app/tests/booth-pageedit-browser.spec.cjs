@@ -340,6 +340,12 @@ async function tapFlow(page, wide, isTouch) {
   await pop.waitFor({state: 'visible'});
   const revertBtn = pop.getByRole('button', {name: '원래대로', exact: true});
   assert.equal(await revertBtn.isVisible(), true, '원래대로 button shown for existing edit');
+  /* plan97s-6 */
+  if (await pop.evaluate(n => n.classList.contains('is-bar'))) {
+    const [rb, ab] = [await revertBtn.boundingBox(), await apply.boundingBox()];
+    assert.ok(Math.abs((rb.x + rb.width) - (ab.x + ab.width)) <= 1, '원래대로 right-aligned under 바꾸기 ' + JSON.stringify({rb, ab}));
+  }
+  assert.equal(await revertBtn.evaluate(n => getComputedStyle(n).gridArea), 'undo');
   await revertBtn.click();
   await page.waitForFunction(() => document.querySelector('#booth-pe-pop').hidden);
   assert.equal((await storeEdits(page)).length, 0, '원래대로 removes edit from store');

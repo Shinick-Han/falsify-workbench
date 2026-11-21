@@ -5,7 +5,7 @@
 
 /* Page ground, type and the single centered column. */
 /* The fixed dock (76px) must never hide a focused control (WCAG 2.4.11). */
-html{background:var(--ev-ground,#eef0f1);color-scheme:light;scroll-padding-bottom:96px}
+html{background:var(--ev-ground,#eef0f1);color-scheme:only light;scroll-padding-bottom:96px}
 body{
   --tk-inset:0px;
   margin:0;background:var(--ev-ground,#eef0f1);color:var(--ev-ink,#16191e);
@@ -202,7 +202,7 @@ html[data-booth-step]:not(.booth-pe-zoomed) .paper-compare:has(.paper-inline.is-
      to keep its controls clickable. */
   html[data-booth-step="edit"] :is(#booth,#booth :has(#booth-hint))>#booth-recipe{grid-column:2;grid-row:4;position:relative;z-index:2;margin:0 0 16px}
   html[data-booth-step="edit"] :is(#view-workbench,.paper-intake,#paper-workspace):not([hidden]){display:contents}
-  html[data-booth-step="edit"] #paper-workspace>.paper-toolbar{grid-column:1;grid-row:2;margin:16px 0 0;position:sticky;top:16px;z-index:3}
+  html[data-booth-step="edit"] #paper-workspace>.paper-toolbar{grid-column:1;grid-row:2;margin:16px 0 0;position:sticky;top:16px;z-index:3;background:var(--ev-ground,#eef0f1);box-shadow:0 -16px 0 var(--ev-ground,#eef0f1)}
   html[data-booth-step="edit"] #paper-workspace>.paper-compare{grid-column:1/-1;grid-row:3/7;display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:subgrid;row-gap:0}
   html[data-booth-step="edit"] .paper-compare>.paper-pane:has(>#paper-before-stage){display:contents}
   html[data-booth-step="edit"] #paper-before-stage{grid-row:1/-1;grid-template-rows:subgrid}

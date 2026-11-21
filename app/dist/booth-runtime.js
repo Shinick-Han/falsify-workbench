@@ -1,8 +1,9 @@
 /* Event-page booth runtime (event.html only; loads before booth.js, which reads it when present).
    - Kiosk mode for the booth tablet: event.html?kiosk=1 sets a per-tab flag in sessionStorage
      (?kiosk=0 clears it). In kiosk mode booth.js keeps receipts in sessionStorage, pick and ticket get a
-     「다음 분께 넘기기」 button, and 3 minutes without a touch, key or scroll (5 while a result is
-     pending) open a 20-second 「계속하시겠어요?」 warning (WCAG 2.2.1). Handing over or letting the
+     「다음 분께 넘기기」 button, and 3 minutes without a touch, key or scroll (15, booth.js POLL_STOP_AT,
+     while a result is pending; a step change or the result arriving restarts the count) open a
+     20-second 「계속하시겠어요?」 warning (WCAG 2.2.1). Handing over or letting the
      warning run out clears this visitor's receipts, saved progress, drafts, edits, assist state and
      guest session, then reloads event.html?kiosk=1, so the next visitor gets a fresh guest and 5 chances.
    - Offline: offerRetry puts a 「다시 시도」 button after a status line; the 'online' event presses it.
@@ -22,7 +23,7 @@
   const DRAFT_PREFIX='falsify.paper-draft';
   const OFFLINE_TEXT='인터넷 연결이 끊겼어요. 연결되면 다시 눌러 주세요.';
   const IDLE_MS=180000;
-  const WAIT_IDLE_MS=300000;
+  const WAIT_IDLE_MS=900000;
   const WARN_MS=20000;
   const PROGRESS_TTL=6*3600000;
   const MAX_EDITS=5;
@@ -207,6 +208,7 @@
     return {
       activity(){if(!warning) restart();},
       resume:restart,
+      refresh(){if(timer!=null) restart();},
       stop(){clear();warning=false;},
       warning(){return warning;}
     };
@@ -329,6 +331,27 @@
     const wait=doc.getElementById('booth-ticket-wait');
     return !!(html&&html.dataset&&html.dataset.boothStep==='ticket'&&wait&&!wait.hidden);
   }
+  /* step plus ':wait' while a pending result shows */
+  function boothPhase(doc){
+    return stepOf(doc)+(waitingResult(doc)?':wait':'');
+  }
+  /* A step change or a result arriving re-arms a running idle timer with the new limit. */
+  function watchPhase(doc, idle){
+    const Observer=root.MutationObserver;
+    const html=doc.documentElement;
+    if(typeof Observer!=='function'||!html) return null;
+    let last=boothPhase(doc);
+    const observer=new Observer(()=>{
+      const next=boothPhase(doc);
+      if(next===last) return;
+      last=next;
+      idle.refresh();
+    });
+    observer.observe(html,{attributes:true,attributeFilter:['data-booth-step']});
+    const wait=doc.getElementById('booth-ticket-wait');
+    if(wait) observer.observe(wait,{attributes:true,attributeFilter:['hidden']});
+    return observer;
+  }
   function kioskDialogs(doc, idle){
     const confirm=makeDialog(doc,{
       id:'booth-handoff-dialog',title:'다음 분께 넘길까요?',
@@ -362,6 +385,7 @@
       onExpire:handoff
     });
     dialogs=kioskDialogs(doc,idle);
+    watchPhase(doc,idle);
     placeHandoff(doc,()=>{openDialog(dialogs.confirm);});
     const onActivity=()=>{idle.activity();};
     for(const type of ACTIVITY) doc.addEventListener(type,onActivity,{capture:true,passive:true});

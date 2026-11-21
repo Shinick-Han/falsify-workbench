@@ -274,6 +274,8 @@ async function walk(browser, viewport, desk, pageErrors) {
     {id: 'source-link', text: '이 페이지 소스 · AGPL-3.0', href: 'https://github.com/Shinick-Han/falsify-workbench', target: '_blank', rel: 'noopener noreferrer'},
   ]);
   assert.ok(footerLinks[0].fontSize > footerLinks[1].fontSize, 'project link is larger than muted source link');
+  /* plan97s-6 */
+  assert.equal(await page.locator('#project-link').evaluate(a => getComputedStyle(a).pointerEvents), 'auto');
   assert.equal(await page.locator('#booth-howto').isVisible(), true, 'the how-to is visible');
   assert.equal(await page.locator('#booth-howto li').count(), 3);
   assert.doesNotMatch(await page.locator('#booth-step-pick').textContent(), /2분 안에/);

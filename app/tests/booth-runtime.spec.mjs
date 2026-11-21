@@ -153,9 +153,46 @@ test('idleTimer: nothing before activity, warning at limit-20 s, reset 20 s late
   limit = R.WAIT_IDLE_MS;
   idle.activity();
   clock.advance(R.IDLE_MS);
-  assert.equal(log.length, 3, 'a pending result waits 5 minutes');
+  assert.equal(log.length, 3, 'a pending result waits 15 minutes');
   idle.stop();
   assert.equal(clock.size, 0);
+});
+
+/* plan97s-5 */
+test('idleTimer.refresh re-arms only a running timer with the current limit', () => {
+  const R = load().FalsifyBoothRuntime;
+  const clock = fakeClock(); const log = [];
+  let limit = R.IDLE_MS;
+  const idle = R.idleTimer({later: clock.later, cancel: clock.cancel, warn: R.WARN_MS, limit: () => limit,
+    onWarn: () => log.push('warn'), onExpire: () => log.push('expire')});
+  idle.refresh();
+  assert.equal(clock.size, 0, 'refresh before any activity arms nothing');
+  idle.activity();                       // tap on 「AI에게 제출하기」 at the send step
+  clock.advance(60000);
+  limit = R.WAIT_IDLE_MS; idle.refresh(); // the ticket appears, pending
+  clock.advance(R.WAIT_IDLE_MS - R.WARN_MS - 1);
+  assert.deepEqual(log, [], 'no warning before 15 min on a pending ticket');
+  clock.advance(1);
+  assert.deepEqual(log, ['warn']);
+  limit = R.IDLE_MS; idle.refresh();     // result arrives during the warning
+  assert.equal(idle.warning(), true, 'a state change does not dismiss the warning');
+  clock.advance(R.WARN_MS);
+  assert.deepEqual(log, ['warn', 'expire']);
+  idle.activity(); clock.advance(60000);
+  limit = R.IDLE_MS; idle.refresh();     // result arrives: a fresh 3 minutes
+  clock.advance(R.IDLE_MS - R.WARN_MS - 1);
+  assert.deepEqual(log, ['warn', 'expire']);
+  clock.advance(1);
+  assert.deepEqual(log, ['warn', 'expire', 'warn']);
+  idle.stop();
+});
+
+test('WAIT_IDLE_MS matches booth.js POLL_STOP_AT', () => {
+  const R = load().FalsifyBoothRuntime;
+  const match = /const POLL_STOP_AT=(\d+);/.exec(boothSource);
+  assert.ok(match);
+  assert.equal(R.WAIT_IDLE_MS, Number(match[1]));
+  assert.equal(R.WAIT_IDLE_MS, 900000);
 });
 
 test('clearVisitor and handoff: receipts, progress, drafts, edits, hosted session and guest go; the kiosk flag and access key stay', () => {

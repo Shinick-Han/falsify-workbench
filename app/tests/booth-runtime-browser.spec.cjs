@@ -3,7 +3,7 @@
 // - return to the tab: immediate claim poll on visibilitychange, polling restarts after 15 min, wake lock
 // - offline: config, paper load, polling and submit show offline line with 다시 시도 and retry on 'online'
 // - saved progress: hidden saves FalsifyBoothEdits.serialize(); reload offers 「고친 곳 1개를 이어서 할까요?」 and restores via FalsifyBoothEdits.restore()
-// - kiosk (?kiosk=1): sessionStorage receipts, 「다음 분께 넘기기」 resets guest & BoothEdits, idle warning
+// - kiosk (?kiosk=1): sessionStorage receipts, 「다음 분께 넘기기」 resets guest & BoothEdits, idle warning, pending ticket 15 min wait, capture copy & non-tappable external links
 const {spawn} = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -352,18 +352,37 @@ async function kioskPass(browser, pageErrors) {
   await page.goto(base + 'event.html?kiosk=1');
   const mission = page.locator('#booth-missions .booth-mission').first();
   await mission.waitFor();
+  /* plan97s-6 */
+  for (const sel of ['#project-link', '#source-link']) {
+    assert.equal(await page.locator(sel).isVisible(), true, sel + ' text stays');
+    assert.equal(await page.locator(sel).evaluate(a => getComputedStyle(a).pointerEvents), 'none');
+  }
+  const box = await page.locator('#project-link').boundingBox();
+  const popup = page.waitForEvent('popup', {timeout: 1500}).catch(() => null);
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  assert.equal(await popup, null, 'kiosk footer tap opens no tab');
   assert.equal(await page.evaluate(() => document.documentElement.dataset.kiosk), '1');
   assert.equal(await page.locator('#booth-handoff-desk').isVisible(), true, 'the hand-off button shows on pick');
   await touchSize(page, '#booth-handoff-desk');
 
   await mission.click();
   await stepIs(page, 'edit');
+  /* plan97s-6 */
+  assert.equal(await page.locator('#booth-paper-credit a').first().evaluate(a => getComputedStyle(a).pointerEvents), 'none');
+  await page.locator('#booth-tab-myai').click();
+  await page.locator('#booth-myai-pdf').waitFor({state: 'attached'});
+  assert.equal(await page.locator('#booth-myai-pdf').isHidden(), true, 'kiosk hides 원문 PDF 받기');
+  await page.locator('#booth-tab-find').click();
   assert.equal(await page.locator('#booth-handoff-desk').isHidden(), true, 'not while editing');
   await addOneEdit(page, true);
   await declareAndSubmit(page, context, state);
   // Kiosk waiting state: shows QR code (~120px) + caption, never the outbound GitHub link.
   assert.equal(await page.locator('#booth-project-wait').isVisible(), true, 'kiosk shows waiting project row');
   assert.equal(await page.locator('#booth-project-wait a').count(), 0, 'kiosk shows QR, never the link');
+  /* plan97s-6 */
+  assert.equal(await page.locator('#booth-live-capture').textContent(), '접수번호와 확인키가 보이게 휴대폰으로 이 티켓을 찍어 두세요. 내 휴대폰의 「내 기록」에서 두 코드로 결과를 볼 수 있어요.');
+  assert.equal(await page.locator('#booth-copy').isHidden(), true, 'kiosk has no clipboard copy');
+  assert.equal(await page.locator('#booth-copy-status').isHidden(), true);
   assert.equal(await page.locator('#booth-project-qr-caption').textContent(), '휴대폰 카메라로 찍으면 Falsify 프로젝트가 열려요.');
   const qrImg = page.locator('#booth-project-qr');
   await qrImg.waitFor({state: 'visible'});
@@ -505,6 +524,62 @@ async function finishedDraftPass(browser, pageErrors) {
   assert.equal(await until(async () => state.claims === 3), true, 'reloading from the ticket screen reopens the finished ticket');
   assert.equal(await page.locator('#booth-resume').count(), 0);
   assert.equal(await page.evaluate(() => sessionStorage.getItem('falsify.booth.progress.v1')), null);
+/* plan97s-5 */
+async function kioskWaitPass(browser, pageErrors) {
+  const state = newState();
+  const {context, page} = await openContext(browser, TABLET, state, pageErrors);
+  await page.clock.install({time: new Date('2026-11-22T01:00:00.000Z')});
+  await page.goto(base + 'event.html?kiosk=1');
+  const mission = page.locator('#booth-missions .booth-mission').first();
+  await mission.waitFor();
+  await mission.click();
+  await stepIs(page, 'edit');
+  await addOneEdit(page, true);
+  await declareAndSubmit(page, context, state);
+  await page.evaluate(() => { window.__kioskWaitNoReload = true; });
+  const warning = page.locator('#booth-idle-dialog');
+
+  // 1. After 170 s with no touch, pending ticket stays intact (no warning, no wipe, no reload).
+  await page.clock.fastForward(170000);
+  assert.equal(await warning.isVisible(), false, 'no warning at 170 s on pending ticket');
+  assert.equal(await page.evaluate(() => document.documentElement.dataset.boothStep), 'ticket');
+  assert.deepEqual(await page.evaluate(() => JSON.parse(sessionStorage.getItem('falsify.booth.receipts.v1') || '[]').map(item => item.receipt)), ['F-0041']);
+  assert.equal(await page.locator('#booth-claim-code').textContent(), '7Q3K-M9X1');
+  assert.ok(page.url().includes('kiosk=1'), 'kiosk query stays');
+  assert.equal(await page.evaluate(() => window.__kioskWaitNoReload), true, 'no reload occurred');
+
+  // 2. Still no warning at 860 s (20 s margin under the 880 s warn point).
+  await page.clock.fastForward(860000 - 170000);
+  assert.equal(await warning.isVisible(), false, 'no warning before 15 min wait');
+
+  // 3. Fast-forward in 5 s steps (bounded to 60 s) until warning opens; 계속 keeps receipts.
+  for (let i = 0; i < 12 && !(await warning.isVisible()); i += 1) {
+    await page.clock.fastForward(5000);
+  }
+  await warning.waitFor();
+  assert.equal(await page.locator('#booth-idle-dialog-title').textContent(), '계속하시겠어요?');
+  await page.locator('#booth-idle-dialog-stay').tap();
+  assert.equal(await warning.isVisible(), false);
+  assert.deepEqual(await page.evaluate(() => JSON.parse(sessionStorage.getItem('falsify.booth.receipts.v1') || '[]').map(item => item.receipt)), ['F-0041']);
+
+  // 4. Final result arrives -> phase changes from ticket:wait to ticket.
+  state.hooks.claim = route => json(route, 200, {...FINAL_MISSED, receipt: 'F-0041'});
+  const recheck = page.locator('#booth-live-recheck');
+  if (await recheck.isVisible()) await recheck.click();
+  else await page.clock.fastForward(31000);
+  await page.locator('#booth-ticket-result').waitFor({state: 'visible'});
+
+  // 5. After final result, fresh 3-minute idle rule applies.
+  await page.clock.fastForward(140000);
+  assert.equal(await warning.isVisible(), false, 'no warning at 140 s after final result');
+  await page.clock.fastForward(30000);
+  await warning.waitFor();
+
+  // 6. Expiry reloads to ?kiosk=1 and clears sessionStorage receipts.
+  await Promise.all([page.waitForURL(base + 'event.html?kiosk=1'), page.clock.fastForward(20000)]);
+  await mission.waitFor();
+  assert.equal(await page.evaluate(() => sessionStorage.getItem('falsify.booth.receipts.v1')), null);
+  assert.equal(await page.evaluate(() => sessionStorage.getItem('falsify.booth.kiosk.v1')), '1');
   await context.close();
 }
 
@@ -521,6 +596,7 @@ async function main() {
     if (!only || only === 'progress') await offlineAndProgressPass(browser, pageErrors);
     if (!only || only === 'kiosk') await kioskPass(browser, pageErrors);
     if (!only || only === 'finished-draft') await finishedDraftPass(browser, pageErrors);
+    if (!only || only === 'kiosk-wait') await kioskWaitPass(browser, pageErrors);
     assert.equal(pageErrors.join('\n'), '');
   } catch (error) {
     const open = browser && browser.contexts().flatMap(context => context.pages()).at(-1);

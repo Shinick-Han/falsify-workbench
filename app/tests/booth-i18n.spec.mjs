@@ -270,6 +270,11 @@ test('dictionary and pattern translation, vars interpolation, and whitespace pre
   assert.equal(i18n.t('4개 중 1개가 '), '1 of 4 ');
   assert.equal(i18n.t('AI 눈을 피했어요'), 'slipped past the AI');
   assert.equal(i18n.t('4개 중 1개가 AI 눈을 피했어요'), '1 of 4 slipped past the AI');
+  /* plan97s-6 */
+  assert.equal(
+    i18n.t('접수번호와 확인키가 보이게 휴대폰으로 이 티켓을 찍어 두세요. 내 휴대폰의 「내 기록」에서 두 코드로 결과를 볼 수 있어요.'),
+    'Take a photo of this ticket with your phone, with the ticket no. and claim key in view. On your phone, open My tickets and enter the two codes to see your result.',
+  );
 });
 
 test('DOM walk translates text and attributes, skips translate="no" and input values, and restores cleanly', () => {
