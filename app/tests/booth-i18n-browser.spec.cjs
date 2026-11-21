@@ -20,7 +20,7 @@ const chrome = process.env.BROWSER_EXECUTABLE || undefined;
 const api = 'https://falsify-cloud-api-event.ai-gongbu.workers.dev';
 const port = Number(process.env.BOOTH_I18N_PORT || 19961);
 const base = 'http://127.0.0.1:' + port + '/';
-const shotDir = process.env.BOOTH_I18N_SHOTS || '/home/clouddesk/projects/falsify/wt/reports/sx94a-shots';
+const shotDir = process.env.BOOTH_I18N_SHOTS || '';
 const token = 'fsg_' + 'e'.repeat(43);
 const pdfBytes = fs.readFileSync(pdfPath);
 
@@ -127,7 +127,7 @@ async function stubApi(route, state) {
     return json(route, 200, {
       enabled: true, submissionsOpen: state.submissionsOpen !== false, announcement: '',
       consentVersion: '2026-11-22.v3',
-      limits: {maxDeclared: 5, maxReason: 500, maxNickname: 24, maxPdfBytes: 16777216, perOwner: 5},
+      limits: {maxDeclared: 5, maxReason: 500, maxNickname: 24, maxPdfBytes: 16777216, perOwner: 3},
       missions: MISSIONS,
     });
   }

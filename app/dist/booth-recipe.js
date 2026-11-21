@@ -894,7 +894,7 @@
       const selected=!!chosen&&chosen.pageIndex===item.pageIndex&&chosen.start===item.start&&chosen.end===item.end;
       const button=el('button',{type:'button',className:'booth-find-hit'+(selected?' on':''),role:'option','aria-selected':String(selected)},
         el('span',{className:'pg',textContent:(item.pageIndex+1)+'쪽'}),
-        el('span',{className:'snip'},item.snippet.lead,el('mark',{textContent:item.snippet.hit}),item.snippet.tail));
+        el('span',{className:'snip',translate:'no'},item.snippet.lead,el('mark',{textContent:item.snippet.hit}),item.snippet.tail));
       button.addEventListener('click',()=>pick(item));
       return button;
     }

@@ -101,7 +101,7 @@
     '고칠 숫자나 단어를 눌러 주세요.':'Tap a number or word to edit.',
     '고칠 곳을 누르면 크게 보여요.':'Tap anywhere on the page to zoom in.',
     '바꾸기':'Replace',
-    '문단 전체 고치기':'Edit whole paragraph',
+    '문단 전체 고치기':'Edit paragraph',
     '원래대로':'Revert',
     '앞 단어':'Previous word',
     '다음 단어':'Next word',
@@ -305,6 +305,10 @@
     '기다리는 동안 가짜연구소 Falsify 프로젝트를 둘러보세요. 마음에 들면 GitHub에서 ★를 눌러 주세요.':'While you wait, take a look at Falsify by Pseudo Lab. If you like it, give it a ★ on GitHub.',
     'GitHub에서 보기 ★':'View on GitHub ★',
     '휴대폰 카메라로 찍으면 Falsify 프로젝트가 열려요.':'Scan with your phone camera to open the Falsify project.',
+    'Falsify 프로젝트':'Falsify project',
+    '가짜연구소 Falsify 프로젝트 GitHub QR 코드':'Falsify by Pseudo Lab GitHub QR code',
+    '잠시 후 다시 눌러 주세요.':'Please try again in a moment.',
+    '논문 실험 RED':'Paper editor',
     '행사 안내':'Event notice'
   });
 
@@ -357,7 +361,7 @@
     // Page-edit labels
     [/^(\d+)쪽 · 이 글자 고치기$/,m=>'p. '+m[1]+' · Edit text'],
     [/^(\d+)쪽 · 고친 글자 · 원문 (.*)$/,m=>'p. '+m[1]+' · Edited · Original: '+m[2]],
-    [/^(\d+)쪽 · 문단 전체 고치기$/,m=>'p. '+m[1]+' · Edit whole paragraph'],
+    [/^(\d+)쪽 · 문단 전체 고치기$/,m=>'p. '+m[1]+' · Edit paragraph'],
     // Mission / search aria-labels
     [/^(.+) · (\d+)쪽에서 도전$/,m=>m[1]+' · Try on p. '+m[2]],
     [/^(.+) · 이 논문으로 도전$/,m=>m[1]+' · Try with this paper'],

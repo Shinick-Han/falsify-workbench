@@ -1172,10 +1172,10 @@
     function diffNode(row){
       const parts=diffParts(row.before,row.after);
       return el('p',{className:'booth-diff'},
-        parts.lead?el('span',{className:'ctx',textContent:flat(parts.lead)}):null,
-        parts.removed?el('del',{className:'del',textContent:flat(parts.removed)}):null,
-        el('ins',{className:parts.added?'ins':'ins gone',textContent:parts.added?flat(parts.added):'(지움)'}),
-        parts.tail?el('span',{className:'ctx',textContent:flat(parts.tail)}):null);
+        parts.lead?el('span',{className:'ctx',translate:'no',textContent:flat(parts.lead)}):null,
+        parts.removed?el('del',{className:'del',translate:'no',textContent:flat(parts.removed)}):null,
+        parts.added?el('ins',{className:'ins',translate:'no',textContent:flat(parts.added)}):el('ins',{className:'ins gone',textContent:'(지움)'}),
+        parts.tail?el('span',{className:'ctx',translate:'no',textContent:flat(parts.tail)}):null);
     }
     function chipRow(row, types){
       const box=el('div',{className:'booth-chips',role:'group','aria-label':'결함 유형'});
@@ -1330,8 +1330,8 @@
       const parts=diffParts(edit.originalText,edit.newText,0);
       return [
         el('span',{className:'pg',textContent:(edit.pageIndex+1)+'쪽'}),
-        parts.removed?el('del',{textContent:clip(parts.removed)}):null,
-        el('span',{textContent:'→'+(parts.added?clip(parts.added):'(지움)')})];
+        parts.removed?el('del',{translate:'no',textContent:clip(parts.removed)}):null,
+        parts.added?el('span',{translate:'no',textContent:'→'+clip(parts.added)}):el('span',{textContent:'→(지움)'})];
     }
     function deleteButton(edit){
       const button=el('button',{type:'button',className:'booth-dock-x',textContent:'×','aria-label':(edit.pageIndex+1)+'쪽 고친 곳 지우기'});

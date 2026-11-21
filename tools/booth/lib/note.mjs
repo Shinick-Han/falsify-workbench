@@ -23,7 +23,7 @@ export function notePage(finding) {
 }
 
 // BLUE writes "<Korean> || EN: <English>" in its one rationale field (the runtime schema has no second field).
-const EN_MARK = /\s*\|\|\s*EN:\s*/;
+const EN_MARK = /\s*\|\|\s*EN:\s*/i;
 
 export function splitRationale(value) {
   const text = squash(value);
