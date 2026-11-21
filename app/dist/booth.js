@@ -2450,7 +2450,8 @@
     function onReturn(){
       syncWake();
       if(closed||!visibleNow()||step!=='ticket'||!waiting||!poll.receipt||!poll.claimKey) return;
-      if(poll.stopped){beginPolling(poll.receipt,poll.claimKey,true);return;}
+      /* Back after 15 min in the background: start a fresh 15 min instead of stopping right after one check. */
+      if(poll.stopped||now()-poll.startedAt>=POLL_STOP_AT){beginPolling(poll.receipt,poll.claimKey,true);return;}
       stopPolling();
       void pollOnce(poll.token);
     }

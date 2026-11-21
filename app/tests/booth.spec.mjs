@@ -3076,3 +3076,27 @@ test('plan97s-9: tapping the open mission while another paper loads does not ent
   assert.equal(h.text('booth-hint'), '힌트 · 숫자, 결론 문장, 표 값 중 한 곳을 골라 티 나지 않게 바꿔 보세요.');
   h.handle.destroy();
 });
+
+/* rv97-A F-03: a phone back after 15+ min in the background polls for a fresh 15 min */
+test('rv97-A F-03: coming back after 15+ minutes hidden starts a fresh 15 minutes of polling', async () => {
+  const pending = {receipt: 'F-0042', status: 'received', course: 'quick', declaredCount: 1, published: false};
+  const h = liveBooth({claims: [pending]});
+  await settle();
+  await submitThroughBooth(h);
+  assert.equal(h.step(), 'ticket');
+  assert.equal(await h.tick(), 15000);
+  h.doc.visibilityState = 'hidden';
+  h.doc.dispatchEvent({type: 'visibilitychange'});
+  await h.tick();
+  h.clock.t += 20 * 60000;
+  h.doc.visibilityState = 'visible';
+  h.doc.dispatchEvent({type: 'visibilitychange'});
+  await settle();
+  const calls = h.claimCalls().length;
+  assert.notEqual(h.text('booth-ticket-state'), '자동 확인을 멈췄어요. 「결과 다시 보기」를 눌러 주세요.');
+  assert.equal(h.ids.get('booth-live-recheck').hidden, true, 'no recheck button right after coming back');
+  assert.equal(h.timers.length, 1, 'polling goes on');
+  await h.tick();
+  assert.equal(h.claimCalls().length, calls + 1, 'and asks again on schedule');
+  h.handle.destroy();
+});
