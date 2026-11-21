@@ -2175,12 +2175,12 @@ test('open-access intro does not promise guest BLUE when blueJobs is false', asy
   assert.match(notes[0].textContent, /BLUE 검토는 웹 실행 패널에서 로그인 없이 실행합니다/);
 });
 
-test('receiptRecord validates edits, drops invalid entries, caps at 5, and cuts at 500', () => {
+test('receiptRecord validates edits, drops invalid entries, caps at 5, and cuts at 2000', () => {
   const base = {receipt: 'F-0042', claimKey: '7Q3K-M9XD', createdAt: '2026-11-22T01:00:00Z'};
   // Old records without edits stay valid with no edits field.
   assert.deepEqual(plain(booth.receiptRecord(base)), base);
-  const longBefore = 'a'.repeat(600);
-  const longAfter = 'b'.repeat(600);
+  const longBefore = 'a'.repeat(2100);
+  const longAfter = 'b'.repeat(2100);
   const rec = booth.receiptRecord({
     ...base,
     edits: [
@@ -2202,10 +2202,10 @@ test('receiptRecord validates edits, drops invalid entries, caps at 5, and cuts 
   });
   assert.equal(rec.edits.length, 5);
   assert.equal(rec.edits[0].page, 1);
-  assert.equal(rec.edits[0].before.length, 500);
-  assert.equal(rec.edits[0].after.length, 500);
-  assert.equal(rec.edits[0].before, 'a'.repeat(500));
-  assert.equal(rec.edits[0].after, 'b'.repeat(500));
+  assert.equal(rec.edits[0].before.length, 2000);
+  assert.equal(rec.edits[0].after.length, 2000);
+  assert.equal(rec.edits[0].before, 'a'.repeat(2000));
+  assert.equal(rec.edits[0].after, 'b'.repeat(2000));
   assert.deepEqual(plain(rec.edits.slice(1)), [
     {page: 2, before: 'b2', after: 'a2'},
     {page: 3, before: 'b3', after: 'a3'},
@@ -2302,4 +2302,12 @@ test('pick sentence, edit credit line, search arXiv link and result declared blo
   await settle();
   assert.equal(h.ids.get('booth-live-declared').hidden, true, 'no local record hides block');
   h.handle.destroy();
+});
+
+test('receipt edits keep a change near the end of a long paragraph', () => {
+  const base = {receipt: 'F-0043', claimKey: '7Q3K-M9XE', createdAt: '2026-11-22T01:00:00Z'};
+  const head = 'x'.repeat(630);
+  const rec = booth.receiptRecord({...base, edits: [{page: 5, before: head + ' 0.95 end', after: head + ' 0.50 end'}]});
+  assert.equal(rec.edits[0].before.endsWith('0.95 end'), true);
+  assert.equal(rec.edits[0].after.endsWith('0.50 end'), true);
 });

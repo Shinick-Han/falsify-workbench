@@ -317,7 +317,7 @@
       &&typeof item.createdAt==='string'&&item.createdAt.length<=40;
   }
   const RECEIPT_EDITS_CAP=5;
-  const RECEIPT_EDIT_MAX=500;
+  const RECEIPT_EDIT_MAX=2000;
   /* 1-based changed pages, unique and sorted, at most 20. */
   function receiptPages(value){
     if(!Array.isArray(value)) return [];
@@ -1757,6 +1757,7 @@
       const valid=missions.filter(mission=>mission&&typeof mission==='object'&&typeof mission.paperId==='string');
       box.hidden=!valid.length;
       setHidden('booth-mission-head',!valid.length);
+      setHidden('booth-mission-credit',!valid.length);
       setText('booth-mission-count','오늘의 미션 · '+valid.length);
       for(const mission of valid) box.append(missionTicket(mission));
     }
