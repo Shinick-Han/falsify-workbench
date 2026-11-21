@@ -7,7 +7,8 @@
 // - Legacy 1-summary ticket (no per-edit evidence) compatibility
 // - Safe textContent rendering of HTML markup in evidence & notes
 // Verifies mobile (390x844) and desktop (1280x800), zero horizontal overflow, zero visible Hangul in EN mode.
-const {spawn} = require('node:child_process');
+const http = require('node:http');
+const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const {chromium} = require('playwright');
@@ -15,8 +16,8 @@ const {chromium} = require('playwright');
 const dist = path.resolve(__dirname, '../dist');
 const chrome = process.env.BROWSER_EXECUTABLE || undefined;
 const api = 'https://falsify-cloud-api-event.ai-gongbu.workers.dev';
-const port = Number(process.env.BOOTH_EVIDENCE_PORT || 19937);
-const base = 'http://127.0.0.1:' + port + '/';
+const port = Number(process.env.BOOTH_EVIDENCE_PORT || 0);
+let base = '';
 const token = 'fsg_' + 'a'.repeat(43);
 
 const cors = {
@@ -100,23 +101,45 @@ const CLAIMS = {
   },
 };
 
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.mjs': 'application/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.json': 'application/json; charset=utf-8',
+  '.wasm': 'application/wasm',
+  '.png': 'image/png',
+};
+
 function serve() {
-  const child = spawn('python3', ['-m', 'http.server', String(port), '--bind', '127.0.0.1'], {
-    cwd: dist, stdio: ['ignore', 'pipe', 'pipe'], env: {...process.env, PYTHONUNBUFFERED: '1'},
-  });
-  let out = '';
-  child.stdout.on('data', c => { out += c.toString(); });
-  child.stderr.on('data', c => { out += c.toString(); });
-  const ready = (async () => {
-    const start = Date.now();
-    while (Date.now() - start < 8000) {
-      if (child.exitCode != null) throw new Error('http.server exited ' + child.exitCode + '\n' + out);
-      try { if ((await fetch(base + 'event.html')).ok) return; } catch {}
-      await new Promise(r => setTimeout(r, 100));
+  const server = http.createServer((req, res) => {
+    const clean = (req.url || '/').split('?')[0];
+    const rel = clean === '/' ? 'event.html' : clean.replace(/^\/+/, '');
+    const full = path.resolve(dist, rel);
+    if (!full.startsWith(dist + path.sep) && full !== dist) {
+      res.writeHead(403);
+      res.end();
+      return;
     }
-    throw new Error('http.server did not start\n' + out);
-  })();
-  return {child, ready};
+    fs.readFile(full, (err, data) => {
+      if (err) {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      res.writeHead(200, {'Content-Type': MIME[path.extname(full)] || 'application/octet-stream'});
+      res.end(data);
+    });
+  });
+  const ready = new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(port, '127.0.0.1', () => {
+      base = 'http://127.0.0.1:' + server.address().port + '/';
+      resolve();
+    });
+  });
+  return {close: () => server.close(), ready};
 }
 
 function json(route, status, body) {
@@ -404,7 +427,7 @@ async function main() {
     }
   } finally {
     if (browser) await browser.close();
-    server.child.kill('SIGTERM');
+    server.close();
   }
 }
 
