@@ -22,6 +22,9 @@
   const CTL=/[\u0000-\u001f\u007f]/;
   const CTL_NL=/[\u0000-\u0009\u000b-\u001f\u007f]/;
   const CTL_ALL=/[\u0000-\u001f\u007f]/g;
+  const CURLY=/[\u201c\u201d\u201e\u201f]/;
+  const CURLY_ALL=/[\u201c\u201d\u201e\u201f]/g;
+  const LIST_KEY=/["\u201c\u201d\u201e\u201f](?:edits|changes|defects|modifications|replacements)["\u201c\u201d\u201e\u201f]\s*:/;
   const DEFECT_ALIASES={'숫자':'number','수치':'number','그림':'figure','표':'number','인용':'citation','논리':'logic','방법':'method','기타':'other',numeric:'number',numbers:'number',table:'number',chart:'figure',reference:'citation',references:'citation',methodology:'method'};
   const FIND_KEYS=['find','before','original','old','from','search'];
   const REPLACE_KEYS=['replace','after','replacement','modified','new','to'];
@@ -108,10 +111,36 @@
     }
     return validateLocal(obj);
   }
-  function errorText(error){
+  /* FalsifyBoothRecipe.validate returns {field,code} only; reuse the validateLocal sentences (booth-i18n.js has their EN). */
+  function editNo(field){const m=/^edits\[(\d+)\]/.exec(field);return m?Number(m[1])+1:0;}
+  function textLimit(field){return /\.context$/.test(field)?600:field==='reason'?500:300;}
+  const RULE_TEXT={
+    type:f=>!f?'JSON 객체가 아니에요.':/^edits\[\d+\]$/.test(f)?editNo(f)+'번째 수정이 올바른 모양이 아니에요.':f+'는 글자여야 해요.',
+    empty:f=>f+'가 비어 있어요.',
+    too_long:f=>f+'가 '+textLimit(f)+'자를 넘어요. 더 짧게 잘라 주세요.',
+    control:f=>f+'에 쓸 수 없는 제어 문자가 있어요.',
+    unchanged:f=>editNo(f)+'번째 수정은 바꾸기 전과 후가 같아요.',
+    page:f=>editNo(f)+'번째 수정의 쪽 번호가 1~500 사이 숫자가 아니에요.',
+    unknown:f=>'알 수 없는 항목 "'+f+'"이 있어요.',
+    count:(f,r)=>Array.isArray(r?.edits)&&r.edits.length>5?'수정은 5개까지만 받을 수 있어요.':'수정(edits)이 하나도 없어요.',
+    schema:()=>'schema는 "'+SCHEMA+'"여야 해요.',
+    paper:()=>'paperId가 arXiv 번호 모양이 아니에요.',
+    source:()=>'source 값이 올바르지 않아요.',
+    defect_type:()=>'defectType은 '+DEFECT_TYPES.join(', ')+' 중 하나여야 해요.',
+    too_large:()=>'답이 8KB를 넘어요. 수정을 줄여 주세요.'
+  };
+  function ruleText(error,recipe){
+    const field=str(error.field);
+    if(/^agent\b/.test(field)) return 'agent 항목이 올바르지 않아요.';
+    if(field==='reason') return 'reason이 500자를 넘거나 올바르지 않아요.';
+    if(/^edits\[\d+\]\.context$/.test(field)) return editNo(field)+'번째 수정의 context가 너무 길거나 올바르지 않아요.';
+    const make=RULE_TEXT[error.code];
+    return make?make(field,recipe):'';
+  }
+  function errorText(error,recipe){
     if(typeof error==='string') return error;
     if(!isObj(error)) return String(error);
-    return str(error.message)||[error.code,error.field].filter(Boolean).join(' ')||'알 수 없는 문제';
+    return str(error.message)||ruleText(error,recipe)||[error.code,error.field].filter(Boolean).join(' ')||'알 수 없는 문제';
   }
 
   /* ---------- normalising common model mistakes ---------- */
@@ -237,6 +266,7 @@
   }
   function parseJson(text){
     try{return {ok:true,value:JSON.parse(text)};}catch{/* try a light repair */}
+    try{return {ok:true,value:JSON.parse(text.replace(/,\s*([}\]])/g,'$1'))};}catch{/* then curly quotes as well */}
     try{return {ok:true,value:JSON.parse(repair(text))};}catch(error){return {ok:false,error};}
   }
   function stripFences(text){
@@ -255,7 +285,7 @@
   }
   function tryCandidate(cand,ctx,state){
     const parsed=parseJson(cand.text);
-    if(!parsed.ok){state.syntax+=1;return null;}
+    if(!parsed.ok){state.syntax+=1;if(LIST_KEY.test(cand.text)){state.broken=true;state.skipTo=cand.end;}return null;}
     state.parsed+=1;
     if(isCannotRead(parsed.value)){
       state.cannotRead=true;
@@ -265,18 +295,30 @@
     if(!recipe) return null;
     const check=validate(recipe);
     if(check.ok) return {recipe,notes};
-    state.errors.push(...check.errors.map(errorText));
+    state.errors.push(...check.errors.map(e=>errorText(e,recipe)));
     state.skipTo=cand.end;
     return null;
   }
-  function recipeFromJson(text,ctx,state){
-    const cleaned=stripFences(text).replace(/[\u201c\u201d\u201e\u201f]/g,'"');
-    for(const cand of candidates(cleaned,state.scan)){
+  function scanJson(text,ctx,state){
+    for(const cand of candidates(text,state.scan)){
       if(cand.start<=state.skipTo) continue;
       const found=tryCandidate(cand,ctx,state);
       if(found) return found;
     }
     return null;
+  }
+  /* Curly quotes can be paper text inside a value or the AI's JSON delimiters. Read the text as it is,
+     then (unless that already met a broken or rule-breaking recipe) with them made straight, and keep
+     whichever reading has more edits; a tie keeps the first. */
+  function recipeFromJson(text,ctx,state){
+    const plain=stripFences(text);
+    const kept=scanJson(plain,ctx,state);
+    if(!CURLY.test(plain)||(!kept&&(state.errors.length||state.broken))) return kept;
+    state.skipTo=-1;
+    state.scan={left:SCAN_BUDGET,exhausted:false};
+    const straight=scanJson(plain.replace(CURLY_ALL,'"'),ctx,state);
+    if(!kept||!straight) return kept||straight;
+    return straight.recipe.edits.length>kept.recipe.edits.length?straight:kept;
   }
 
   /* ---------- Before/After fallback through FalsifyExternalExchange ---------- */
@@ -311,7 +353,7 @@
     const notes=items.length>5?[diag('warn','edits_trimmed','수정이 '+items.length+'개라 앞의 5개만 썼어요.')]:[];
     const {recipe}=normalize({edits:items.slice(0,5).map(editFromItem),reason:str(items[0].rationale)||undefined},ctx);
     const check=validate(recipe);
-    if(!check.ok){state.errors.push(...check.errors.map(errorText));return null;}
+    if(!check.ok){state.errors.push(...check.errors.map(e=>errorText(e,recipe)));return null;}
     notes.push(diag('info','before_after','JSON 대신 Before/After 형식으로 읽었어요.'));
     return {recipe,notes};
   }
@@ -330,7 +372,7 @@
       [...new Set(state.errors)].slice(0,5).forEach(msg=>out.push(diag('error','rule',msg)));
     }else if(!state.parsed&&state.scan.exhausted){
       out.push(diag('error','json_unclosed','답이 너무 길거나 JSON이 닫히지 않았어요. AI 답에서 { 로 시작해 } 로 끝나는 부분만 붙여 넣거나, AI에게 "JSON만 다시 보내 줘"라고 말해 보세요.'));
-    }else if(!state.parsed&&(state.syntax||/\{\s*"/.test(text))){
+    }else if(state.broken||!state.parsed&&(state.syntax||/\{\s*"/.test(text))){
       out.push(diag('error','json_syntax','JSON 모양이 깨져 있어요. 따옴표나 쉼표, 괄호가 빠졌을 수 있어요. AI에게 "올바른 JSON으로만 다시 보내 줘"라고 부탁해 보세요.'));
     }else{
       out.push(diag('error','no_json','답에서 수정 내용(JSON)을 찾지 못했어요. AI 답을 통째로 붙여 넣었는지 확인하거나, AI에게 "JSON만 다시 보내 줘"라고 말해 보세요.'));
@@ -592,13 +634,32 @@
     else{link.removeAttribute('href');link.hidden=true;}
   }
   function createController(doc,v){
-    const s={lang:pageLang(),prompt:'',copyTimer:0};
+    const s={lang:pageLang(),prompt:'',copyTimer:0,paperId:'',epoch:0};
     function syncLangChips(){
       for(const [button,on] of [[v.langKo,s.lang==='ko'],[v.langEn,s.lang==='en']]){button.classList.toggle('on',on);button.setAttribute('aria-pressed',String(on));}
     }
     syncLangChips();
+    /* A new paper or a new try starts both steps clean; same-paper refreshes keep them. */
+    function resetSteps(){
+      s.epoch+=1;
+      if(s.copyTimer) root.clearTimeout(s.copyTimer);
+      s.copyTimer=0;
+      v.copy.textContent=COPY_LABEL.idle;
+      v.copyStatus.textContent='';
+      v.full.hidden=true;
+      v.full.value='';
+      v.answer.value='';
+      clear(v.diags);
+      clear(v.result);
+      v.result.hidden=true;
+    }
+    function trackPaper(id){
+      if(id&&s.paperId&&id!==s.paperId) resetSteps();
+      if(id) s.paperId=id;
+    }
     function refresh(){
       const meta=paperInfo(recipeApi());
+      trackPaper(str(meta.paperId));
       s.prompt=buildPrompt({paperId:meta.paperId,title:meta.title,license:meta.license},{lang:s.lang});
       v.preview.textContent=short(s.prompt,180);
       v.size.textContent='전체 '+s.prompt.length.toLocaleString('en-US')+'자';
@@ -632,15 +693,18 @@
       v.result.hidden=true;
     }
     async function runApply(R,recipe,diags){
+      const epoch=s.epoch;
+      const live=()=>epoch===s.epoch;
       v.apply.disabled=true;
       v.result.hidden=false;
       v.result.textContent='적용하는 중…';
       try{
         if(typeof R.setAssist==='function') R.setAssist('my-ai');
-        const res=await R.apply(recipe,{onProgress:p=>{if(typeof p?.message==='string') v.result.textContent=p.message;}});
+        const res=await R.apply(recipe,{onProgress:p=>{if(live()&&typeof p?.message==='string') v.result.textContent=p.message;}});
+        if(!live()) return;
         renderResult(doc,v.result,res);
         renderDiagnostics(doc,v.diags,keptAfterApply(diags));
-      }catch(error){fail('적용하지 못했어요. '+(str(error?.message)||'잠시 후 다시 눌러 주세요.'));}
+      }catch(error){if(live()) fail('적용하지 못했어요. '+(str(error?.message)||'잠시 후 다시 눌러 주세요.'));}
       finally{v.apply.disabled=false;}
     }
     async function onApply(){
@@ -658,18 +722,21 @@
     v.langKo.addEventListener('click',()=>setLang('ko'));
     v.langEn.addEventListener('click',()=>setLang('en'));
     const onIndex=()=>refresh();
+    /* An apply that opens its own paper again (a search-opened mission) clears the document mid-apply:
+       keep the panel then. A real switch to another paper is still caught by trackPaper in refresh(). */
+    const onClear=()=>{if(!v.apply.disabled) resetSteps();refresh();};
     const onLang=event=>{setLang(event&&event.detail&&event.detail.lang==='en'?'en':'ko');};
     if(typeof doc.addEventListener==='function'){
       doc.addEventListener('falsify:booth-index-ready',onIndex);
       /* A paper switch changes the PDF link and the prompt at once, before the new paper is indexed. */
-      doc.addEventListener('falsify:document-clear',onIndex);
+      doc.addEventListener('falsify:document-clear',onClear);
       doc.addEventListener('falsify:paper-workspace-source',onIndex);
       doc.addEventListener('falsify:booth-lang-change',onLang);
     }
     return {refresh,setLang,dispose(){
       if(typeof doc.removeEventListener==='function'){
         doc.removeEventListener('falsify:booth-index-ready',onIndex);
-        doc.removeEventListener('falsify:document-clear',onIndex);
+        doc.removeEventListener('falsify:document-clear',onClear);
         doc.removeEventListener('falsify:paper-workspace-source',onIndex);
         doc.removeEventListener('falsify:booth-lang-change',onLang);
       }

@@ -82,10 +82,10 @@ html.booth-pe-typing .booth-dock{display:none}
 .booth-pe-pop>button,.booth-pe-sheet-actions>button{min-width:44px;min-height:44px;margin:0;padding:0 12px;border-radius:8px;font:500 14px/1.2 var(--ev-sans,sans-serif);white-space:nowrap;cursor:pointer}
 .booth-pe-apply{grid-area:apply;border:1px solid var(--ev-ink,#16191e);background:var(--ev-ink,#16191e);color:#fff}
 .booth-pe-whole{grid-area:whole;border:1px solid var(--ev-ink,#16191e);background:transparent;color:var(--ev-ink,#16191e);overflow:hidden;text-overflow:ellipsis}
-.booth-pe-revert{grid-area:revert;border:1px solid var(--ev-hair,#d6d9dd);background:transparent;color:var(--ev-ink-2,#3a3f47)}
+.booth-pe-revert{grid-area:undo;border:1px solid var(--ev-hair,#d6d9dd);background:transparent;color:var(--ev-ink-2,#3a3f47)}
 .booth-pe-revert[hidden]{display:none}
 .booth-pe-cancel{grid-area:cancel;border:0;background:transparent;color:var(--ev-ink-2,#3a3f47)}
-.booth-pe-pop.has-existing{grid-template-areas:"label label label" "input input input" "apply revert cancel" "whole whole whole"}
+.booth-pe-pop.has-existing{grid-template-areas:"label label label" "input input input" "apply undo cancel" "whole whole whole"}
 .booth-pe-step{display:none;border:1px solid var(--ev-hair,#d6d9dd);background:var(--ev-card,#fff);color:var(--ev-ink,#16191e);font-size:20px!important;padding:0!important}
 .booth-pe-prev{grid-area:prev}
 .booth-pe-next{grid-area:next}
@@ -98,7 +98,7 @@ html.booth-pe-typing .booth-dock{display:none}
   grid-template-columns:44px minmax(0,1fr) 44px auto;
   grid-template-areas:"label label label cancel" "prev input next apply" "whole whole whole whole"
 }
-.booth-pe-pop.is-bar.has-existing{grid-template-areas:"label label label cancel" "prev input next apply" "whole whole revert revert"}
+.booth-pe-pop.is-bar.has-existing{grid-template-areas:"label label label cancel" "prev input next apply" "whole whole undo undo"}
 .booth-pe-pop.is-bar .booth-pe-step{display:block}
 .booth-pe-pop.is-bar .booth-pe-pop-label{align-self:center;font-size:12.5px;color:var(--ev-ink-2,#3a3f47)}
 .booth-pe-pop.is-bar .booth-pe-cancel{min-height:44px;padding:0 8px}

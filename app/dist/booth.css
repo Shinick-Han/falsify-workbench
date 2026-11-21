@@ -210,6 +210,7 @@ html[lang="en"] .booth-opinion-en{display:block}
 .booth-stamp{animation:none}
 .booth-tk-h:active{transform:none}
 }
+#booth-ticket-wait[data-poll="stopped"] .booth-track i{left:0;width:100%;opacity:.3;transform:none;animation:none}
 /* Desktop-only nodes and the wrappers the desktop grid needs. Phones and tablets (<=1023px) keep the
    one-column layout: the wrappers are display:contents, so their children stay items of the same grid. */
 .booth-landing-intro,.booth-landing-list,.booth-send-main,.booth-send-side,.booth-send-confirm,.booth-bp-stub,.booth-live-side,.booth-live-main,.booth-live-actions{display:contents}

@@ -411,3 +411,9 @@ test('removed anchoring, merge, notText and fallbackPatch helpers are gone', () 
     assert.equal(pe[gone], undefined, gone + ' must be deleted');
   }
 });
+
+/* plan97s-6 */
+test('booth-pageedit.css never uses a CSS-wide keyword as a grid-area name', async () => {
+  const css = await readFile(fileURLToPath(new URL('../dist/booth-pageedit.css', import.meta.url)), 'utf8');
+  assert.doesNotMatch(css, /grid-area\s*:\s*(revert|revert-layer|initial|inherit|unset)\b/);
+});

@@ -30,6 +30,9 @@
   const POLL_STOP_AT=900000;
   const POLL_429_MS=60000;
   const PENDING_COPY='AI가 결함을 찾는 중이에요. 보통 1~3분 걸려요. 이 화면을 닫아도 접수번호와 확인키로 나중에 볼 수 있어요.';
+  const POLL_STOP_COPY='자동 확인을 멈췄어요. 「결과 다시 보기」를 눌러 주세요.';
+  const STEP_QUEUED='차례가 오면 AI가 앞뒤 문장과 표를 대조해요';
+  const STEP_CHECKING='AI가 앞뒤 문장과 표를 대조하는 중';
   /* Headline as [plain lead, 600-weight phrase]. partial counts as found. */
   const HEADLINE={
     caught:['AI가 ','찾아냈어요'],partial:['AI가 ','근처를 짚었어요'],missed:['AI가 ','못 찾았어요'],
@@ -53,6 +56,7 @@
   const PARTIAL_SUB='결함 근처까지 짚으면 적발로 봐요.';
   const WITHDRAW_WARN='철회하면 되돌릴 수 없고, 선물과 추첨 기회도 함께 사라져요.';
   const CAPTURE_COPY='이 티켓을 캡처해 두세요. 화면을 닫아도 「내 기록」에서 접수번호와 확인키로 다시 볼 수 있어요.';
+  const KIOSK_CAPTURE_COPY='접수번호와 확인키가 보이게 휴대폰으로 이 티켓을 찍어 두세요. 내 휴대폰의 「내 기록」에서 두 코드로 결과를 볼 수 있어요.';
   const PROJECT_URL='https://github.com/Pseudo-Lab/Falsify';
   const PROJECT_QR_SRC='falsify-project-qr.svg';
   const PROJECT_WAIT_COPY='기다리는 동안 가짜연구소 Falsify 프로젝트를 둘러보세요. 마음에 들면 GitHub에서 ★를 눌러 주세요.';
@@ -224,11 +228,17 @@
   function pageIndexOk(pageIndex){
     return Number.isSafeInteger(pageIndex)&&pageIndex>=0&&pageIndex<=9999;
   }
+  /* The reason box is a textarea: Enter, tabs and other control characters become one space, so a typed
+     line break or a multi-line 「내 AI에게」 reason never blocks submit. Empty means NO_REASON. */
+  function declaredReason(value, max){
+    const text=typeof value==='string'?value.replace(/[\u0000-\u001f\u007f]+/g,' ').replace(/\s+/g,' ').trim():'';
+    return trimCodePoints(text||NO_REASON,max);
+  }
   function declaredTexts(row, limits){
     const before=paperText(row.before);
     const after=paperText(row.after);
-    const reason=cleanText(typeof row.reason==='string'&&row.reason.trim()?row.reason.trim():NO_REASON,limits.maxReason);
-    if(before===null||after===null||reason===null||!before) return null;
+    const reason=declaredReason(row.reason,limits.maxReason);
+    if(before===null||after===null||!before) return null;
     return {before,after,reason};
   }
   function declaredSegment(row){
@@ -397,6 +407,12 @@
     const base=elapsed<POLL_FAST_UNTIL?POLL_FAST_MS:POLL_SLOW_MS;
     const wait=Math.max(base,Number(retryMs)>0?Number(retryMs):0);
     return elapsed+wait<=POLL_STOP_AT?wait:-1;
+  }
+  /* Claim view queue {ahead, slots, etaSec} (cloud/api/src/booth.mjs queueView). Position only, no ETA. '' when nobody is ahead. */
+  function queueLabel(queue){
+    const q=queue&&typeof queue==='object'?queue:{};
+    const ahead=Number.isSafeInteger(q.ahead)&&q.ahead>0&&q.ahead<=9999?q.ahead:0;
+    return ahead?'AI 검증 차례를 기다리는 중 · 앞에 '+ahead+'건':'';
   }
   /* Delta seconds or an HTTP date. Anything else is 0, meaning no hint. */
   function retryAfterMs(value, nowMs){
@@ -588,7 +604,7 @@
     return head.length>28?head.slice(0,27).trimEnd()+'…':head;
   }
   function capMessage(cap){
-    return '기회 '+cap+'번을 모두 썼어요. 아래 접수 목록에서 결과를 볼 수 있어요.';
+    return '기회 '+cap+'번을 모두 썼어요. 「내 기록」에서 결과를 볼 수 있어요.';
   }
   function paperSearchPath(query, page){
     const q=typeof query==='string'?query.trim():'';
@@ -741,7 +757,7 @@
     let dockPopOpen=false;
     const listeners=[];
     const course='quick';
-    let poll={token:0,timer:null,startedAt:0,receipt:'',claimKey:'',stopped:false};
+    let poll={token:0,timer:null,startedAt:0,receipt:'',claimKey:'',stopped:false,last:null};
     let waiting=false;
     const rt=runtime();
     const wake=rt&&typeof rt.wake==='function'?rt.wake(root.navigator):null;
@@ -872,7 +888,7 @@
         el('summary',{textContent:'다른 공개 논문 직접 찾기'}),
         el('form',{id:'booth-search',className:'booth-search',hidden:true},
           el('label',{for:'booth-search-q',className:'booth-field'},el('span',{className:'booth-klab',textContent:'논문 검색 · CC BY, CC BY-SA, CC0만'}),
-            el('input',{id:'booth-search-q',type:'search',maxlength:'200',placeholder:'제목 또는 주제',autocomplete:'off'})),
+            el('input',{id:'booth-search-q',type:'search',maxlength:'200',placeholder:'영어 제목 또는 주제',autocomplete:'off'})),
           el('button',{id:'booth-search-go',type:'submit',className:'booth-btn line',textContent:'검색'}),
           el('p',{id:'booth-search-status',className:'booth-feedback',role:'status','aria-live':'polite'}),
           el('div',{id:'booth-search-results',className:'booth-search-results'}),
@@ -954,7 +970,8 @@
           el('div',{className:'booth-sec booth-send-confirm'},
             el('p',{id:'booth-send-rule',className:'booth-small booth-rule',textContent:RULE_COPY}),
             el('button',{id:'booth-submit-button',type:'submit',className:'booth-btn ink wide',textContent:'AI에게 제출하기',disabled:true}),
-            el('p',{id:'booth-submit-status',className:'booth-feedback',role:'alert','aria-live':'polite'}))));
+            el('p',{id:'booth-submit-status',className:'booth-feedback',role:'alert','aria-live':'polite'}),
+            el('button',{id:'booth-submit-records',type:'button',className:'booth-btn line wide',hidden:true,textContent:'내 기록 보기'}))));
     }
     function cell(label, id, className, noTranslate){
       const ddProps=noTranslate?{id,className,translate:'no'}:{id,className};
@@ -997,7 +1014,7 @@
     function buildProgress(){
       return el('ol',{id:'booth-ticket-steps',className:'booth-list'},
         el('li',{className:'done'},el('i'),'수정본 받음'),
-        el('li',{className:'now'},el('i'),'AI가 앞뒤 문장과 표를 대조하는 중'),
+        el('li',{className:'now'},el('i'),el('span',{id:'booth-step-check',textContent:STEP_CHECKING})),
         el('li',{className:'wait'},el('i'),'결과'));
     }
     function isKiosk(){
@@ -1051,7 +1068,7 @@
         buildReviewTicket(),
         el('div',{id:'booth-live',className:'booth-live','data-state':'pending'},
           buildProgress(),
-          el('p',{id:'booth-live-capture',className:'booth-small',textContent:CAPTURE_COPY}),
+          el('p',{id:'booth-live-capture',className:'booth-small',textContent:isKiosk()?KIOSK_CAPTURE_COPY:CAPTURE_COPY}),
           buildProjectWait(),
           el('div',{id:'booth-verdict',className:'booth-verdict',hidden:true},
             el('h2',{id:'booth-live-title',className:'booth-headline',role:'status','aria-live':'polite'}),
@@ -1239,16 +1256,10 @@
       paint();
       return box;
     }
-    /* AI-made edits keep their source on the send card. */
-    function assistInfo(){
-      const recipe=root.FalsifyBoothRecipe;
-      const out=recipe&&typeof recipe.assist==='function'?recipe.assist():null;
-      return out&&typeof out==='object'?out:{};
-    }
+    /* Each send card names its own edit's source: only a 내 AI edit gets the AI title and chip. */
     function rowTitle(row){
       const page=(row.pageIndex+1)+'쪽';
-      const info=assistInfo();
-      if(info.assist!=='my-ai') return el('p',{className:'booth-klab',textContent:'내가 숨긴 결함 · '+page});
+      if(row.source!=='myai') return el('p',{className:'booth-klab',textContent:'내가 숨긴 결함 · '+page});
       return el('div',{className:'booth-card-head'},
         el('p',{className:'booth-klab',textContent:'AI와 숨긴 결함 · '+page}),
         el('span',{className:'booth-ai-chip',textContent:'AI 제안'}));
@@ -1323,6 +1334,7 @@
         before:edit.originalText,
         after:edit.newText,
         rects:Array.isArray(edit.rects)?edit.rects:[],
+        source:typeof edit.source==='string'?edit.source:'',
         defectType:'',
         reason:''
       };
@@ -1337,10 +1349,17 @@
     function editSignature(edits){
       return edits.map(edit=>[edit.pageIndex,edit.originalText!=null?edit.originalText:edit.before,edit.newText!=null?edit.newText:edit.after,JSON.stringify(edit.rects||[])].join('\u0000')).join('\u0001');
     }
-    /* Same edits as last time keep their chips and reasons. */
+    /* Same edits as last time keep their chips and reasons: by id, else once by the same page and original text.
+       A deleted edit's chip and reason never move to a different edit. */
+    function takeSamePlace(spare, row){
+      const at=spare.findIndex(item=>item.pageIndex===row.pageIndex&&item.before===row.before);
+      return at<0?null:spare.splice(at,1)[0];
+    }
     function keepDeclared(nextRows, previous){
-      return nextRows.map((row,index)=>{
-        const old=(row.id&&previous.find(item=>item&&item.id===row.id))||previous[index];
+      const ids=new Set(nextRows.map(row=>row.id).filter(Boolean));
+      const spare=previous.filter(item=>item&&!ids.has(item.id));
+      return nextRows.map(row=>{
+        const old=(row.id&&previous.find(item=>item&&item.id===row.id))||takeSamePlace(spare,row);
         if(!old) return row;
         const reason=old.reasonInput?old.reasonInput.value:old.reason;
         return Object.assign(row,{defectType:old.defectType||'',reason:reason||''});
@@ -1723,15 +1742,16 @@
       setStep('edit');
       if(pageHint) followPageHint(pageHint);
     }
-    async function startPaper(next, id, statusId, pageHint){
+    async function startPaper(next, id, statusId, pageHint, nextHint){
       if(opening) return false;
       opening=true;
       openFailure=null;
       let ok=false;
       try{ok=await openPdf(id,next,'arxiv-'+String(id).replace(/[^\w.-]+/g,'_')+'.pdf',statusId);}
       finally{opening=false;}
-      if(!ok) offerRetry(statusId,openFailure,()=>startPaper(next,id,statusId,pageHint));
+      if(!ok) offerRetry(statusId,openFailure,()=>startPaper(next,id,statusId,pageHint,nextHint));
       if(!ok||closed) return false;
+      hint=nextHint||'';
       enterEdit(pageHint);
       return true;
     }
@@ -1769,10 +1789,11 @@
     }
     /* One tap: load the paper (unless it is already open), jump to the hint page, then edit. */
     function chooseMission(mission){
-      hint=typeof mission.hint==='string'?mission.hint.trim():'';
+      if(opening) return Promise.resolve(false);
+      const missionHint=typeof mission.hint==='string'?mission.hint.trim():'';
       const n=missionPage(mission);
-      if(paper&&paper.source==='mission'&&paper.id===mission.paperId){enterEdit(n);return Promise.resolve(true);}
-      return startPaper(missionPaper(mission),mission.paperId,'booth-mission-status',n);
+      if(paper&&paper.source==='mission'&&paper.id===mission.paperId){hint=missionHint;enterEdit(n);return Promise.resolve(true);}
+      return startPaper(missionPaper(mission),mission.paperId,'booth-mission-status',n,missionHint);
     }
     function ticketStub(n){
       const parts=n?[el('span',{className:'n',textContent:String(n)}),el('span',{className:'u',textContent:'쪽'})]:[];
@@ -1846,15 +1867,18 @@
       if(label&&lUrl) parts.push(' · ',extLink(lUrl,label));
       return el('p',{className:'booth-credit booth-search-source'},...parts);
     }
+    /* A tap on the paper that is already open goes back to edit with its edits, as missions do. */
+    function chooseSearchResult(item){
+      if(opening) return Promise.resolve(false);
+      if(paper&&paper.id===item.id){enterEdit(0);return Promise.resolve(true);}
+      return startPaper({source:'arxiv',id:item.id,title:typeof item.title==='string'?item.title:'',license:licenseId(item)},item.id,'booth-search-status',0,'');
+    }
     function searchResultCard(item){
       const title=typeof item.title==='string'&&item.title?item.title:item.id;
       const label=['arXiv '+item.id,licenseLabel(licenseId(item))].filter(Boolean).join(' · ');
       const button=paperTicket(label,title,String(searchMeta(item)),0);
       button.setAttribute('aria-label',title+' · 이 논문으로 도전');
-      button.addEventListener('click',()=>{
-        hint='';
-        void startPaper({source:'arxiv',id:item.id,title:typeof item.title==='string'?item.title:'',license:licenseId(item)},item.id,'booth-search-status',0);
-      });
+      button.addEventListener('click',()=>{void chooseSearchResult(item);});
       const source=searchSourceLink(item);
       return source?el('div',{className:'booth-search-item'},button,source):button;
     }
@@ -1871,6 +1895,12 @@
         pages.append(next);
       }
     }
+    /* OpenAlex and arXiv index English text, so a Hangul query that finds nothing points to English. */
+    function emptySearchLine(){
+      return /[\u1100-\u11FF\u3130-\u318F\uAC00-\uD7AF]/.test(searchQuery)
+        ?'검색 결과가 없어요. 영어로 찾아볼까요? 예: medical imaging'
+        :'검색 결과가 없어요. 다른 단어로 찾아볼까요?';
+    }
     function renderSearch(payload){
       const box=byId('booth-search-results');
       const pages=byId('booth-search-pages');
@@ -1878,7 +1908,7 @@
       box.textContent='';
       pages.textContent='';
       const list=payload&&Array.isArray(payload.results)?payload.results:[];
-      if(!list.length){say('booth-search-status','검색 결과가 없어요. 다른 단어로 찾아볼까요?');pages.hidden=true;return;}
+      if(!list.length){say('booth-search-status',emptySearchLine());pages.hidden=true;return;}
       say('booth-search-status','');
       for(const item of list){
         if(!item||typeof item.id!=='string') continue;
@@ -2002,6 +2032,7 @@
     }
     async function submitBooth(event, again){
       stopEvent(event);
+      setHidden('booth-submit-records',true);
       if(!(await ensureSubmissionPdf())) return;
       if(!preflight()) return;
       const payload=submissionFormFor();
@@ -2018,6 +2049,7 @@
       }catch(error){
         if(error.code==='consent_outdated'&&!again&&await refreshConsentVersion()){submitBooth(null,true);return;}
         say('booth-submit-status',submitFailureText(error));
+        setHidden('booth-submit-records',!capHit(error));
         offerRetry('booth-submit-status',error,()=>submitBooth());
         showKnownReceipt(error);
         refreshSubmitButton();
@@ -2100,16 +2132,23 @@
     function perOwnerCap(){
       return declaredCap(liveConfig&&liveConfig.limits&&liveConfig.limits.perOwner);
     }
+    /* A withdrawn try is free again on the Worker (status <> 'withdrawn'), so it is free here too. */
+    function usedTries(){
+      return readReceipts(storage).filter(item=>item.outcome!=='withdrawn').length;
+    }
     function chances(){
-      return chancesLeft(perOwnerCap(),readReceipts(storage).length);
+      return chancesLeft(perOwnerCap(),usedTries());
+    }
+    function capHit(error){
+      return error.code==='rate_limited'&&!(error.retryAfter>0);
     }
     /* The per-guest cap is a 429 with no Retry-After. Booth CORS hides that header today,
        so a visible wait means a short rate limit and local receipts decide the cap copy. */
     function submitFailureText(error){
-      if(error.code!=='rate_limited'||error.retryAfter>0) return errorMessage(error.code,{receipt:error.receipt});
+      if(!capHit(error)) return errorMessage(error.code,{receipt:error.receipt});
       renderReceipts();
       const cap=perOwnerCap();
-      if(readReceipts(storage).length>=cap) return capMessage(cap);
+      if(usedTries()>=cap) return capMessage(cap);
       return '지금 제출이 몰려 있어요. 잠시 뒤 다시 눌러 주세요. 기회 '+cap+'번을 다 썼다면 「내 기록」에서 결과를 볼 수 있어요.';
     }
     /* Withdraw asks once: the first button gives way to 취소 and 철회하기 under the warning. */
@@ -2198,7 +2237,11 @@
       paintBars(pen,[ticket.receipt,ticket.claimKey].filter(Boolean).join('-')||'FALSIFY',width,height);
     }
     function renderPending(data){
-      setText('booth-ticket-state',data.status==='reviewing'?'AI가 논문을 읽는 중':'AI 검증 차례를 기다리는 중');
+      poll.last=data;
+      setAttr('booth-ticket-wait','data-poll','live');
+      const queued=data.status==='received'?queueLabel(data.queue):'';
+      setText('booth-ticket-state',data.status==='reviewing'?'AI가 논문을 읽는 중':queued||'AI 검증 차례를 기다리는 중');
+      setText('booth-step-check',data.status==='received'?STEP_QUEUED:STEP_CHECKING);
       setText('booth-live-title','');
       setHidden('booth-ticket-duration-cell',true);
       setHidden('booth-live-tip',true);
@@ -2250,7 +2293,7 @@
     function noteParts(parsed, state){
       const parts=[];
       const structured=!!(parsed.quote||parsed.opinion||parsed.opinionEn);
-      if(parsed.text&&!structured) parts.push(el('p',{className:'booth-klab',textContent:state==='missed'?'AI가 의심한 곳':state==='invalid'?'운영진 안내':'AI 메모'}));
+      if(parsed.text&&!structured) parts.push(el('p',{className:'booth-klab',textContent:state==='missed'&&(parsed.page||parsed.quote)?'AI가 의심한 곳':state==='invalid'?'운영진 안내':'AI 메모'}));
       if(parsed.text) parts.push(el('p',{className:'booth-txt',textContent:parsed.text}));
       if(parsed.quote) parts.push(el('blockquote',{className:'booth-quote',translate:'no',textContent:parsed.quote}));
       parts.push(...opinionParts(parsed));
@@ -2307,7 +2350,8 @@
     function renderChances(){
       const left=chances();
       setText('booth-chances-top','기회 '+left+'번 남음');
-      setText('booth-live-again','다시 도전하기 · 기회 '+left+'번 남음');
+      setText('booth-live-again',left?'다시 도전하기 · 기회 '+left+'번 남음':'내 기록 보기');
+      if(!left) setHidden('booth-live-records',true);
       setText('booth-pick-limit','1인 '+perOwnerCap()+'번까지 · 이름·연락처는 받지 않아요');
     }
     function renderLive(data){
@@ -2348,11 +2392,13 @@
       poll.timer=null;
     }
     function beginPolling(receipt, claimKey, immediate){
+      const resume=poll.stopped&&waiting?poll.last:null;
       stopPolling();
       poll.startedAt=now();
       poll.receipt=receipt;
       poll.claimKey=claimKey;
       poll.stopped=false;
+      if(resume) renderPending(resume);
       setHidden('booth-live-recheck',true);
       if(immediate) void pollOnce(poll.token);
       else schedulePoll(poll.token,0);
@@ -2360,11 +2406,13 @@
     function pollStopped(){
       poll.timer=null;
       poll.stopped=true;
+      stopClock();
+      setAttr('booth-ticket-wait','data-poll','stopped');
       setHidden('booth-live-recheck',false);
     }
     function schedulePoll(token, retryMs){
       const delay=nextPollDelay(now()-poll.startedAt,retryMs);
-      if(delay<0){pollStopped();return;}
+      if(delay<0){pollStopped();setText('booth-ticket-state',POLL_STOP_COPY);return;}
       if(!later) return;
       poll.timer=later(()=>{void pollOnce(token);},delay);
     }
@@ -2402,7 +2450,8 @@
     function onReturn(){
       syncWake();
       if(closed||!visibleNow()||step!=='ticket'||!waiting||!poll.receipt||!poll.claimKey) return;
-      if(poll.stopped){beginPolling(poll.receipt,poll.claimKey,true);return;}
+      /* Back after 15 min in the background: start a fresh 15 min instead of stopping right after one check. */
+      if(poll.stopped||now()-poll.startedAt>=POLL_STOP_AT){beginPolling(poll.receipt,poll.claimKey,true);return;}
       stopPolling();
       void pollOnce(poll.token);
     }
@@ -2434,13 +2483,22 @@
         setHidden(sectionId,!list.length);
       }
     }
-    /* A reload within 15 min of the newest receipt, or a #booth-result visit, picks the ticket up again. */
+    /* booth-runtime.js saved progress from this tab (try #2's edits) that the reload can offer to resume. */
+    function draftWaiting(){
+      if(!rt||typeof rt.readProgress!=='function') return false;
+      let raw=null;
+      try{raw=root.sessionStorage?root.sessionStorage.getItem(rt.PROGRESS_KEY):null;}catch{return false;}
+      return !!rt.readProgress(raw,now());
+    }
+    /* A reload within 15 min of the newest receipt, or a #booth-result visit, picks the ticket up again.
+       A receipt that already has its result gives way to saved progress, so 「이어서」 can show on pick. */
     function resumeLatest(){
       const latest=readReceipts(storage)[0];
       if(!latest) return;
       const created=Date.parse(latest.createdAt);
       const fresh=Number.isFinite(created)&&now()-created<POLL_STOP_AT;
       if(location.hash!=='#booth-result'&&!fresh) return;
+      if(location.hash!=='#booth-result'&&latest.outcome&&draftWaiting()) return;
       fillClaim(latest);
       void lookupRecord(latest.receipt,latest.claimKey);
     }
@@ -2463,8 +2521,14 @@
       hint='';
       for(const id of ['booth-submit-status','booth-search-status','booth-mission-status','booth-dock-status','booth-copy-status']) say(id,'');
       liveError('');
+      setHidden('booth-submit-records',true);
       setStep('pick');
       refreshSubmitButton();
+    }
+    /* With no tries left the ticket's main button opens 내 기록 after the same reset. */
+    function againOrRecords(event){
+      startAgain();
+      if(!chances()) openResult(event);
     }
     async function copyReceipt(){
       const text=ticket?[ticket.receipt,ticket.claimKey].filter(Boolean).join('\n'):'';
@@ -2512,7 +2576,7 @@
       if(box&&desk&&!box.open){box.open=true;searchOpenedForDesk=true;}
       else if(box&&!desk&&searchOpenedForDesk){box.open=false;searchOpenedForDesk=false;}
       setText('booth-search-go',desk?'찾기':'검색');
-      setAttr('booth-search-q','placeholder',desk?'다른 공개 논문 찾기 · 제목 또는 주제':'제목 또는 주제');
+      setAttr('booth-search-q','placeholder',desk?'다른 공개 논문 찾기 · 영어 제목 또는 주제':'영어 제목 또는 주제');
     }
     function backToPick(){
       cancelMake();
@@ -2595,7 +2659,8 @@
     on(byId('booth-withdraw'),'click',()=>{withdrawAsk(true);});
     on(byId('booth-withdraw-cancel'),'click',()=>{withdrawAsk(false);});
     on(byId('booth-withdraw-confirm'),'click',()=>{void withdraw();});
-    on(byId('booth-live-again'),'click',startAgain);
+    on(byId('booth-live-again'),'click',againOrRecords);
+    on(byId('booth-submit-records'),'click',openResult);
     on(byId('booth-live-recheck'),'click',recheck);
     on(byId('booth-result-link'),'click',openResult);
     on(doc,'falsify:document',onBoothDocument);
@@ -2607,11 +2672,11 @@
     /* Recipe hook for booth-recipe.js: the mission or search load path by arXiv id. null until config loads. */
     function openPaperById(id, meta){
       if(!liveConfig) return null;
+      if(opening) return Promise.resolve(false);
       const mission=(Array.isArray(liveConfig.missions)?liveConfig.missions:[]).find(item=>item&&item.paperId===id);
       if(mission) return chooseMission(mission);
-      hint='';
-      if(paper&&paper.id===id){enterEdit(0);return Promise.resolve(true);}
-      return startPaper(Object.assign({title:'',license:''},meta,{source:'arxiv',id}),id,'booth-mission-status',0);
+      if(paper&&paper.id===id){hint='';enterEdit(0);return Promise.resolve(true);}
+      return startPaper(Object.assign({title:'',license:''},meta,{source:'arxiv',id}),id,'booth-mission-status',0,'');
     }
     root.FalsifyBoothPaper={
       open:openPaperById,
@@ -2646,6 +2711,7 @@
     readReceipts,rememberReceipt,recentReceipts,receiptRecord,paperSearchPath,paperPdfPath,
     nextPollDelay,retryAfterMs,resultView,capMessage,
     parsePublicNote,diffParts,ENGINE_UNAVAILABLE,chancesLeft,formatClock,formatDuration,noteReceiptOutcome,licenseLabel,licenseUrl,arxivUrl,shortTitle,
+    queueLabel,
     NO_REASON,RECEIPT_KEY,RECEIPT_CAP,RECENT_CAP,mount
   };
 })(typeof window==='object'?window:globalThis);

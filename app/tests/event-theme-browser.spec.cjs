@@ -295,6 +295,9 @@ async function main() {
     await assertChromeHidden(page, 'edit');
     assert.equal(await page.locator('#paper-page-label').isVisible(), true);
     assert.match(await page.locator('#paper-page-label').textContent(), /^\d+ \/ \d+쪽$/);
+    /* plan97s-6 */
+    assert.equal(await page.evaluate(() => getComputedStyle(document.documentElement).colorScheme), 'light only');
+    assert.equal(await page.locator('#paper-workspace > .paper-toolbar').evaluate(t => getComputedStyle(t).backgroundColor), 'rgba(0, 0, 0, 0)');
     for (const hidden of ['#paper-zoom-in', '#paper-zoom-out', '#paper-mode-table', '#paper-undo', '#paper-redo',
       '#paper-current-download', '#paper-generate', '#paper-after-stage', '#paper-file']) {
       assert.equal(await page.locator(hidden).count(), 1, hidden + ' must stay in the DOM');
@@ -360,6 +363,11 @@ async function main() {
     await desk.waitForTimeout(100);
     const stuck = await desk.evaluate(() => ({scrollY: window.scrollY, navTop: document.querySelector('#paper-workspace .paper-toolbar').getBoundingClientRect().top}));
     assert.ok(stuck.scrollY > 0 && stuck.navTop >= 0, 'desktop edit: page navigation is not sticky ' + JSON.stringify(stuck));
+    /* plan97s-6 */
+    assert.equal(await desk.evaluate(() => getComputedStyle(document.documentElement).colorScheme), 'light only');
+    await desk.evaluate(() => scrollTo(0, 500));
+    const tb = await desk.evaluate(() => { const t = document.querySelector('#paper-workspace > .paper-toolbar'); const l = document.getElementById('paper-page-label').getBoundingClientRect(); const top = document.elementFromPoint(l.left + l.width / 2, l.top + l.height / 2); return {pos: getComputedStyle(t).position, bg: getComputedStyle(t).backgroundColor, top: top && top.id}; });
+    assert.deepEqual(tb, {pos: 'sticky', bg: 'rgb(238, 240, 241)', top: 'paper-page-label'});
     await desk.evaluate(() => window.scrollTo(0, 0));
     await checkWordAndSheetEdit(desk, true, 'desktop');
     assert.equal(await desk.locator('#paper-edits').isVisible(), false, 'desktop: applied edits list is visible (the dock shows them)');

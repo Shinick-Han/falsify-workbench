@@ -98,7 +98,7 @@ Cache-Control: no-store
 X-Content-Type-Options: nosniff
 ```
 
-`X-Falsify-Paper-License` is the licence id (`cc-by-4.0`, `cc-by-sa-4.0`, `cc0`, or the version that was in the OAI URL). An old-style id keeps its slash on the upstream path (`/pdf/hep-th/9901001`) but the filename replaces `/` with `-` (`arxiv-hep-th-9901001.pdf`) so the header stays one file name.
+`X-Falsify-Paper-License` is the licence id (`cc-by-4.0`, `cc-by-sa-4.0`, `cc0`, or the version that was in the OAI URL). The header is listed in `Access-Control-Expose-Headers`. An old-style id keeps its slash on the upstream path (`/pdf/hep-th/9901001`) but the filename replaces `/` with `-` (`arxiv-hep-th-9901001.pdf`) so the header stays one file name.
 
 The visitor response stays `Cache-Control: no-store`. After a successful allow, the PDF bytes are also stored in the worker cache for 24 hours. The key is the validated id, version included, so `2503.10497` and `2503.10497v2` do not share a file. A later request for that id returns those bytes and does not call OAI-PMH or `arxiv.org`. The caller's upload cap is applied to the cached bytes: a guest whose cap is smaller than the stored file gets `413 payload_too_large` and the cache entry is left in place for a caller with a higher cap.
 

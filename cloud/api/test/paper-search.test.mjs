@@ -494,6 +494,8 @@ test('license allow, deny, missing id, and a cached deny', async () => {
     if (status === 200) {
       assert.equal(response.headers.get('content-type'), 'application/pdf');
       assert.equal(response.headers.get('x-falsify-paper-license'), marker);
+      assert.match(response.headers.get('access-control-expose-headers'), /(^|,\s*)X-Falsify-Paper-License(\s*,|$)/);
+      assert.match(response.headers.get('access-control-expose-headers'), /Retry-After/);
       assert.equal(response.headers.get('content-disposition'), `attachment; filename="arxiv-${id}.pdf"`);
       assert.equal(response.headers.get('cache-control'), 'no-store');
       assert.deepEqual(new Uint8Array(await response.arrayBuffer()), pdf);
@@ -758,7 +760,7 @@ test('search and pdf rate limits return 429 and roll back the earlier slot', asy
   assert.equal(error.code, 'rate_limited');
   assert.equal(error.retryable, true);
   assert.equal(second.headers.get('retry-after'), '30');
-  assert.equal(second.headers.get('access-control-expose-headers'), 'X-Falsify-Confluence-Session, Retry-After');
+  assert.equal(second.headers.get('access-control-expose-headers'), 'X-Falsify-Confluence-Session, Retry-After, X-Falsify-Paper-License');
   assert.equal(routed.calls.length, 1);
   assert.equal(tracked.rateCalls[0].bucket.startsWith('paper-search:owner:'), true);
   assert.equal(tracked.rateCalls[0].bucket.includes(AUTHOR), false);
@@ -947,6 +949,8 @@ test('a warm isolate serves a repeated PDF from memory when no Cache API is avai
   assert.equal(second.status, 200);
   assert.deepEqual(new Uint8Array(await second.arrayBuffer()), firstBytes);
   assert.equal(second.headers.get('x-falsify-paper-license'), 'cc-by-4.0');
+  assert.match(second.headers.get('access-control-expose-headers'), /(^|,\s*)X-Falsify-Paper-License(\s*,|$)/);
+  assert.match(second.headers.get('access-control-expose-headers'), /Retry-After/);
   assert.equal(fetches, 2, 'no OAI or arXiv call for a warm repeat');
   // Twelve entries at most: thirteen more ids push the first one out.
   for (let i = 0; i < 13; i++) assert.equal((await get('2503.001' + String(i).padStart(2, '0'))).status, 200);

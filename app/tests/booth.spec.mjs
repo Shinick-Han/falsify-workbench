@@ -460,6 +460,7 @@ function liveBooth(options = {}) {
     }
     if (path.includes('/v1/papers/pdf')) return options.pdfReply ? options.pdfReply(full) : pdfReply();
     if (path.includes('/v1/papers/search')) {
+      if (options.searchReply) return reply(200, options.searchReply(full));
       return reply(200, {source: 'arxiv', page: 1, hasMore: false, results: [{id: '2503.10497', title: 'Synthetic result', authors: ['Ada'], year: 2026, license: 'cc-by-4.0'}]});
     }
     return reply(404, {error: {code: 'not_found'}});
@@ -937,7 +938,7 @@ test('the ticket polls the claim view until the AI result is published', async (
   h.intervals[0].fn();
   assert.equal(h.text('booth-ticket-elapsed'), '0:42');
   h.clock.t -= 42000;
-  assert.equal(h.text('booth-ticket-steps'), '수정본 받음AI가 앞뒤 문장과 표를 대조하는 중결과');
+  assert.equal(h.text('booth-ticket-steps'), '수정본 받음차례가 오면 AI가 앞뒤 문장과 표를 대조해요결과');
   assert.match(h.text('booth-live-capture'), /^이 티켓을 캡처해 두세요\. 화면을 닫아도 「내 기록」에서/);
   assert.equal(h.ids.get('booth-live-again').hidden, true);
   assert.equal(h.text('booth-chances-top'), '기회 4번 남음');
@@ -945,6 +946,7 @@ test('the ticket polls the claim view until the AI result is published', async (
   assert.equal(await h.tick(), 15000);
   assert.deepEqual(h.claimCalls()[0].body, {receipt: 'F-0042', claimKey: '7Q3K-M9XD'});
   assert.equal(h.text('booth-ticket-state'), 'AI가 논문을 읽는 중');
+  assert.equal(h.text('booth-ticket-steps'), '수정본 받음AI가 앞뒤 문장과 표를 대조하는 중결과');
   assert.equal(await h.tick(), 15000);
   assert.equal(await h.tick(), 45000);
   assert.equal(await h.tick(), 60000);
@@ -965,7 +967,7 @@ test('the ticket polls the claim view until the AI result is published', async (
   assert.equal(h.ids.get('booth-ticket-duration-cell').hidden, false);
   assert.equal(h.ids.get('booth-gift').hidden, false);
   assert.match(h.text('booth-gift'), /^교환권 · 1인 1회부스에서 작은 선물을 받아 가세요/);
-  assert.equal(h.text('booth-live-note'), 'AI가 의심한 곳<b>표</b> 값 변경을 놓쳤어요');
+  assert.equal(h.text('booth-live-note'), 'AI 메모<b>표</b> 값 변경을 놓쳤어요');
   assert.equal(h.ids.get('booth-live-again').hidden, false);
   assert.equal(h.text('booth-live-again'), '다시 도전하기 · 기회 4번 남음');
   assert.equal(booth.readReceipts(h.storage)[0].outcome, 'missed');
@@ -985,7 +987,7 @@ test('the ticket polls the claim view until the AI result is published', async (
 });
 
 test('polling stops after 15 min with a recheck button and lookups reuse the ticket', async () => {
-  const pending = {receipt: 'F-0042', status: 'received', course: 'quick', declaredCount: 1, published: false};
+  const pending = {receipt: 'F-0042', status: 'received', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:00Z', published: false};
   const h = liveBooth({claims: [pending]});
   await settle();
   h.ids.get('booth-result-link').dispatchEvent({type: 'click', preventDefault() {}});
@@ -1011,10 +1013,16 @@ test('polling stops after 15 min with a recheck button and lookups reuse the tic
   assert.equal(h.claimCalls().length, 1 + 36);
   assert.equal(h.ids.get('booth-live-recheck').hidden, false);
   assert.equal(h.text('booth-live-recheck'), '결과 다시 보기');
+  assert.equal(h.text('booth-ticket-state'), '자동 확인을 멈췄어요. 「결과 다시 보기」를 눌러 주세요.');
+  assert.equal(h.intervals.length, 0, 'the clock stops with polling');
+  assert.equal(h.ids.get('booth-ticket-wait').getAttribute('data-poll'), 'stopped');
   h.ids.get('booth-live-recheck').click();
   await settle();
   assert.equal(h.claimCalls().length, 38);
   assert.equal(h.ids.get('booth-live-recheck').hidden, true);
+  assert.equal(h.text('booth-ticket-state'), 'AI 검증 차례를 기다리는 중');
+  assert.equal(h.intervals.length, 1);
+  assert.equal(h.ids.get('booth-ticket-wait').getAttribute('data-poll'), 'live');
   assert.equal(h.timers.length, 1);
   assert.equal(h.timers[0].ms, 15000);
   h.handle.destroy();
@@ -1112,25 +1120,53 @@ test('every final outcome shows its headline, stamp and gift ticket', async () =
   w.handle.destroy();
 });
 
-/* ux-ai-assist P0-2: AI-made edits keep their source on the send card. */
-test('the send card names an AI-assisted edit', async () => {
+/* ux-ai-assist P0-2 + plan97s-7 B-12: each send card names its own edit's source. */
+test('the send card names an AI-assisted edit by its own source', async () => {
   const cases = [
-    [{assist: 'my-ai'}, 'AI와 숨긴 결함 · 2쪽', 'AI 제안'],
-    [{assist: 'manual'}, '내가 숨긴 결함 · 2쪽', null],
-    [null, '내가 숨긴 결함 · 2쪽', null],
+    [{assist: 'my-ai'}, 'myai', 'AI와 숨긴 결함 · 2쪽', 'AI 제안'],
+    [{assist: 'my-ai'}, 'tap', '내가 숨긴 결함 · 2쪽', null],
+    [{assist: 'manual'}, 'find', '내가 숨긴 결함 · 2쪽', null],
+    [null, 'paragraph', '내가 숨긴 결함 · 2쪽', null],
   ];
   try {
-    for (const [info, title, chipText] of cases) {
+    for (const [info, source, title, chipText] of cases) {
       boothContext.FalsifyBoothRecipe = info ? {assist: () => info} : {};
       const h = liveBooth();
       await settle();
-      await reachSend(h);
+      await reachSend(h, [makeBoothEdit({source})]);
       const card = nodesOf(h.ids.get('booth-rows')).find(node => node.className === 'booth-panel booth-card');
-      assert.equal(nodesOf(card).find(node => node.className === 'booth-klab').textContent, title);
+      assert.equal(nodesOf(card).find(node => node.className === 'booth-klab').textContent, title, source);
       const aiChip = nodesOf(card).find(node => node.className === 'booth-ai-chip');
-      assert.equal(aiChip ? aiChip.textContent : null, chipText);
+      assert.equal(aiChip ? aiChip.textContent : null, chipText, source);
       h.handle.destroy();
     }
+  } finally {
+    delete boothContext.FalsifyBoothRecipe;
+  }
+});
+
+test('a manual edit next to a 내 AI edit keeps its own send card title', async () => {
+  boothContext.FalsifyBoothRecipe = {assist: () => ({assist: 'my-ai'})};
+  try {
+    const h = liveBooth();
+    await settle();
+    await reachSend(h, [
+      makeBoothEdit({id: 'e-ai', pageIndex: 4, source: 'myai'}),
+      makeBoothEdit({id: 'e-me', pageIndex: 4, rects: [{x: 0.5, y: 0.6, w: 0.1, h: 0.02}], originalText: '0.78', newText: '0.58', source: 'tap'}),
+    ]);
+    const cards = nodesOf(h.ids.get('booth-rows')).filter(node => node.className === 'booth-panel booth-card');
+    assert.equal(cards.length, 2);
+    const titles = cards.map(card => nodesOf(card).find(node => node.className === 'booth-klab').textContent);
+    const chips = cards.map(card => nodesOf(card).filter(node => node.className === 'booth-ai-chip').length);
+    assert.deepEqual(titles, ['AI와 숨긴 결함 · 5쪽', '내가 숨긴 결함 · 5쪽']);
+    assert.deepEqual(chips, [1, 0]);
+    declare(h, '수치·통계', '값을 바꿨어요');
+    await submit(h);
+    const posted = h.calls.find(call => call.path.endsWith('/v1/booth/submissions'));
+    const meta = JSON.parse(posted.form.get('meta'));
+    assert.equal(meta.assist, 'my-ai', 'the Worker still gets the paper-wide assist value');
+    assert.ok(meta.declared.every(item => !('source' in item)), 'row source never reaches the Worker');
+    h.handle.destroy();
   } finally {
     delete boothContext.FalsifyBoothRecipe;
   }
@@ -1214,12 +1250,12 @@ test('on desktop the paper search is one open row; phones keep the closed disclo
   assert.deepEqual(queries, ['(min-width:1024px)']);
   assert.equal(ids.get('booth-search-box').open, true);
   assert.equal(ids.get('booth-search-go').textContent, '찾기');
-  assert.equal(ids.get('booth-search-q').getAttribute('placeholder'), '다른 공개 논문 찾기 · 제목 또는 주제');
+  assert.equal(ids.get('booth-search-q').getAttribute('placeholder'), '다른 공개 논문 찾기 · 영어 제목 또는 주제');
   media.matches = false;
   for (const fn of media.listeners) fn();
   assert.equal(ids.get('booth-search-box').open, false);
   assert.equal(ids.get('booth-search-go').textContent, '검색');
-  assert.equal(ids.get('booth-search-q').getAttribute('placeholder'), '제목 또는 주제');
+  assert.equal(ids.get('booth-search-q').getAttribute('placeholder'), '영어 제목 또는 주제');
   handle.destroy();
 });
 
@@ -1390,7 +1426,8 @@ test('chances count down from the per-guest cap and never go below zero', async 
   for (let i = 3; i <= 7; i += 1) booth.rememberReceipt(storage, {receipt: 'F-000' + i, claimKey: '7Q3K-M9XD', createdAt: '2026-11-21T01:00:00Z'});
   const full = liveBooth({storage});
   await settle();
-  assert.equal(full.text('booth-live-again'), '다시 도전하기 · 기회 0번 남음');
+  assert.equal(full.text('booth-live-again'), '내 기록 보기');
+  assert.equal(full.text('booth-chances-top'), '기회 0번 남음');
   full.handle.destroy();
 });
 
@@ -1515,14 +1552,20 @@ test('the guest cap gets a friendly line and search stays a secondary path', asy
   await settle();
   await submitThroughBooth(capped);
   assert.equal(capped.calls.filter(call => call.path.endsWith('/v1/booth/submissions')).length, 1);
-  assert.match(capped.text('booth-submit-status'), /기회 5번을 모두 썼어요/);
+  assert.equal(capped.text('booth-submit-status'), '기회 5번을 모두 썼어요. 「내 기록」에서 결과를 볼 수 있어요.');
   assert.equal(capped.step(), 'send');
+  assert.equal(capped.ids.get('booth-submit-records').hidden, false);
+  assert.equal(capped.text('booth-submit-records'), '내 기록 보기');
+  capped.ids.get('booth-submit-records').dispatchEvent({type: 'click', preventDefault() {}});
+  assert.equal(capped.step(), 'pick');
+  assert.equal(capped.ids.get('booth-result').hidden, false);
   capped.handle.destroy();
   const fresh = liveBooth({submitStatus: 429});
   await settle();
   await submitThroughBooth(fresh);
   assert.match(fresh.text('booth-submit-status'), /지금 제출이 몰려 있어요\. 잠시 뒤 다시 눌러 주세요\./);
   assert.match(fresh.text('booth-submit-status'), /「내 기록」/);
+  assert.equal(fresh.ids.get('booth-submit-records').hidden, false);
   fresh.handle.destroy();
   const h = liveBooth();
   await settle();
@@ -2336,6 +2379,8 @@ test('waiting project row shows while pending, hides when final or withdrawn, an
   const row = h.ids.get('booth-project-wait');
   assert.equal(row.hidden, false, 'visible while queued');
   assert.equal(h.text('booth-project-copy'), '기다리는 동안 가짜연구소 Falsify 프로젝트를 둘러보세요. 마음에 들면 GitHub에서 ★를 눌러 주세요.');
+  /* plan97s-6 */
+  assert.match(h.text('booth-live-capture'), /^이 티켓을 캡처해 두세요/);
   const link = h.ids.get('booth-project-link');
   assert.ok(link && link.tagName === 'a');
   assert.equal(link.textContent, 'GitHub에서 보기 ★');
@@ -2376,6 +2421,8 @@ test('waiting project row shows while pending, hides when final or withdrawn, an
     assert.equal(qr.getAttribute('height'), '120');
     assert.ok((qr.getAttribute('alt') || '').length > 0, 'QR has alt text');
     assert.equal(k.text('booth-project-qr-caption'), '휴대폰 카메라로 찍으면 Falsify 프로젝트가 열려요.');
+    /* plan97s-6 */
+    assert.equal(k.text('booth-live-capture'), '접수번호와 확인키가 보이게 휴대폰으로 이 티켓을 찍어 두세요. 내 휴대폰의 「내 기록」에서 두 코드로 결과를 볼 수 있어요.');
     k.handle.destroy();
   } finally {
     if (prevRt === undefined) delete boothContext.FalsifyBoothRuntime;
@@ -2559,4 +2606,497 @@ test('per-defect results drive nothing on an invalid outcome, a short list or du
   assert.equal(dup.editResults.length, 1);
   const whole = booth.resultView({status: 'judged', published: true, outcome: 'missed', declaredCount: 4, editResults: four});
   assert.equal(whole.title, '4개 중 1개가 AI 눈을 피했어요');
+});
+
+/* plan97s-1 */
+test('plan97s-1 F-01: line breaks and controls in the reason become one space and never block', () => {
+  const base = {course: 'quick', consentVersion: 'v1', paper: {source: 'mission', id: '2503.10497', license: 'cc-by-4.0'}, editedSha256: 'a'.repeat(64)};
+  const row = reason => ({pageIndex: 0, before: 'a', after: 'b', defectType: 'number', reason});
+  const reasons = built => plain(built.body.declared.map(item => item.reason));
+  const built = booth.buildSubmission({...base, rows: [row('첫 줄\n둘째 줄'), row('a\r\n\r\nb'), row('tab\there'), row('x\u0000y'), row(' \n \n ')]});
+  assert.equal(built.ok, true);
+  assert.deepEqual(reasons(built), ['첫 줄 둘째 줄', 'a b', 'tab here', 'x y', booth.NO_REASON]);
+  const long = booth.buildSubmission({...base, rows: [row('가'.repeat(600)), row('😀'.repeat(300))]});
+  assert.equal(long.ok, true, 'an over-long programmatic reason is clipped, not rejected');
+  assert.deepEqual(plain(long.body.declared.map(item => [...item.reason].length)), [500, 250]);
+  assert.equal(long.body.declared.every(item => item.reason.length <= 500), true);
+});
+
+test('plan97s-1 F-01: a reason typed over two lines submits as one line', async () => {
+  const h = liveBooth();
+  await settle();
+  await reachSend(h);
+  declare(h, '수치·통계', 'Table 1 숫자를 바꿨어요.\n결론과 모순돼요.');
+  await submit(h);
+  const posts = h.calls.filter(call => call.path.endsWith('/v1/booth/submissions'));
+  assert.equal(posts.length, 1);
+  const meta = JSON.parse(posts[0].form.get('meta'));
+  assert.deepEqual(plain(meta.declared.map(item => [item.defectType, item.reason])), [['number', 'Table 1 숫자를 바꿨어요. 결론과 모순돼요.']]);
+  assert.equal(h.step(), 'ticket');
+  h.handle.destroy();
+});
+
+async function backAndRemake(h, change) {
+  h.ids.get('booth-send-back').click();
+  await settle();
+  assert.equal(h.step(), 'edit');
+  change();
+  h.ids.get('booth-next').click();
+  await waitFor(() => h.step() === 'send');
+}
+function card(h, row) {
+  return nodesOf(h.ids.get('booth-rows')).filter(node => node.className === 'booth-panel booth-card')[row];
+}
+function cardReason(h, row) {
+  return nodesOf(card(h, row)).find(node => node.tagName === 'textarea').value;
+}
+function pressed(h, row) {
+  return nodesOf(card(h, row)).filter(node => node.tagName === 'button' && node.getAttribute('aria-pressed') === 'true').map(node => node.textContent);
+}
+
+test('plan97s-1 A-05: a deleted edit does not lend its type and reason to a new edit', async () => {
+  const h = liveBooth();
+  await settle();
+  await reachSend(h);
+  declare(h, '수치·통계', 'Changed 4.2 to 5.8');
+  await backAndRemake(h, () => {
+    boothEdits.remove('e-1');
+    boothEdits.add(makeBoothEdit({id: 'e-9', pageIndex: 6, rects: [{x: 0.5, y: 0.6, w: 0.2, h: 0.02}], originalText: BEFORE_2, newText: AFTER_2}));
+  });
+  assert.equal(cardReason(h, 0), '');
+  assert.deepEqual(pressed(h, 0), []);
+  await submit(h);
+  const meta = JSON.parse(h.calls.filter(call => call.path.endsWith('/v1/booth/submissions'))[0].form.get('meta'));
+  assert.deepEqual(plain(meta.declared.map(item => [item.pageIndex, item.defectType, item.reason])), [[6, 'other', booth.NO_REASON]]);
+  h.handle.destroy();
+});
+
+test('plan97s-1 A-05: with two edits, deleting the first keeps the second and leaves a new one blank', async () => {
+  const h = liveBooth({maxDeclared: 5});
+  await settle();
+  await reachSend(h, [makeBoothEdit({id: 'e-1'}), makeBoothEdit({id: 'e-2', pageIndex: 6, rects: [{x: 0.5, y: 0.6, w: 0.2, h: 0.02}], originalText: BEFORE_2, newText: AFTER_2})]);
+  declare(h, '수치·통계', 'first', 0);
+  declare(h, '방법·실험 설계', 'second', 1);
+  await backAndRemake(h, () => {
+    boothEdits.remove('e-1');
+    boothEdits.add(makeBoothEdit({id: 'e-3', pageIndex: 3, rects: [{x: 0.1, y: 0.8, w: 0.2, h: 0.02}], originalText: 'alpha', newText: 'beta'}));
+  });
+  assert.deepEqual([cardReason(h, 0), pressed(h, 0)], ['second', ['방법·실험 설계']], 'e-2 keeps its own by id');
+  assert.deepEqual([cardReason(h, 1), pressed(h, 1)], ['', []], 'e-3 starts blank');
+  h.handle.destroy();
+});
+
+test('plan97s-1 A-05: an edit redone in the same place keeps its type and reason', async () => {
+  const h = liveBooth();
+  await settle();
+  await reachSend(h);
+  declare(h, '수치·통계', 'kept');
+  await backAndRemake(h, () => {
+    boothEdits.remove('e-1');
+    boothEdits.add(makeBoothEdit({id: 'e-2', newText: 'The mean was 6.1 (SD 1.1).', source: 'paragraph'}));
+  });
+  assert.equal(cardReason(h, 0), 'kept');
+  assert.deepEqual(pressed(h, 0), ['수치·통계']);
+  // Replacing with different original text on the same page does not inherit; re-editing the same original text keeps it.
+  await backAndRemake(h, () => {
+    boothEdits.remove('e-2');
+    boothEdits.add(makeBoothEdit({id: 'e-9', originalText: BEFORE_2, newText: AFTER_2}));
+  });
+  assert.equal(cardReason(h, 0), '');
+  assert.deepEqual(pressed(h, 0), []);
+  declare(h, '방법·실험 설계', '환자 수를 바꿨어요');
+  await backAndRemake(h, () => {
+    boothEdits.remove('e-9');
+    boothEdits.add(makeBoothEdit({id: 'e-10', originalText: BEFORE_2, newText: 'We included 99 patients.'}));
+  });
+  assert.equal(cardReason(h, 0), '환자 수를 바꿨어요');
+  assert.deepEqual(pressed(h, 0), ['방법·실험 설계']);
+  h.handle.destroy();
+});
+
+/* plan97s-3 */
+test('saved progress wins over a finished newest receipt; pending and #booth-result still resume', async () => {
+  const draft = {raw: null};
+  boothContext.sessionStorage = {getItem(key) { return key === 'falsify.booth.progress.v1' ? draft.raw : null; }};
+  boothContext.FalsifyBoothRuntime = {PROGRESS_KEY: 'falsify.booth.progress.v1', readProgress: raw => (raw ? {count: 1} : null)};
+  try {
+    const finished = memoryStorage();
+    booth.rememberReceipt(finished, {receipt: 'F-0041', claimKey: 'AAAA-BBBB', createdAt: '2026-11-22T00:55:00Z', outcome: 'caught'});
+    const claim = {receipt: 'F-0041', status: 'judged', course: 'quick', declaredCount: 1, published: true, outcome: 'caught', publicNote: 'n'};
+    draft.raw = '{"v":2}';
+    const kept = liveBooth({storage: finished, claims: [claim]});
+    await settle();
+    assert.equal(kept.claimCalls().length, 0, 'a finished receipt is not reopened while a draft waits');
+    assert.equal(kept.step(), 'pick');
+    assert.equal(kept.ids.get('booth-claim-receipt').value, 'F-0041', '내 기록 is still prefilled');
+    kept.handle.destroy();
+    const hashed = liveBooth({storage: finished, hash: '#booth-result', claims: [claim]});
+    await settle();
+    assert.equal(hashed.claimCalls().length, 1, '#booth-result still opens the newest receipt');
+    assert.equal(hashed.step(), 'ticket');
+    hashed.handle.destroy();
+    draft.raw = null;
+    const noDraft = liveBooth({storage: finished, claims: [claim]});
+    await settle();
+    assert.equal(noDraft.claimCalls().length, 1, 'without a draft the finished ticket reopens as before');
+    assert.equal(noDraft.step(), 'ticket');
+    noDraft.handle.destroy();
+    draft.raw = '{"v":2}';
+    const pending = memoryStorage();
+    booth.rememberReceipt(pending, {receipt: 'F-0042', claimKey: '7Q3K-M9XD', createdAt: '2026-11-22T00:55:00Z'});
+    const live = liveBooth({storage: pending, claims: [{receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1, published: false}]});
+    await settle();
+    assert.equal(live.claimCalls().length, 1, 'a pending receipt still auto-resumes over a draft');
+    assert.equal(live.step(), 'ticket');
+    live.handle.destroy();
+  } finally {
+    delete boothContext.sessionStorage;
+    delete boothContext.FalsifyBoothRuntime;
+  }
+});
+/* plan97s-2 */
+test('plan97s-2: withdrawn tries are free again and 0 tries turns the ticket button into 내 기록 보기', async () => {
+  const storage = memoryStorage();
+  for (let i = 1; i <= 3; i += 1) booth.rememberReceipt(storage, {receipt: 'F-000' + i, claimKey: '7Q3K-M9XD', createdAt: '2026-11-21T01:00:00Z'});
+  const out = liveBooth({storage, perOwner: 3, claims: [{receipt: 'F-0003', status: 'judged', published: true, outcome: 'caught'}]});
+  await settle();
+  out.ids.get('booth-claim-receipt').value = 'F-0003';
+  out.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+  out.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(out.step(), 'ticket');
+  assert.equal(out.text('booth-chances-top'), '기회 0번 남음');
+  assert.equal(out.ids.get('booth-live-again').hidden, false);
+  assert.equal(out.text('booth-live-again'), '내 기록 보기');
+  assert.equal(out.ids.get('booth-live-records').hidden, true, 'no second 내 기록 button at 0 tries');
+  out.ids.get('booth-live-again').dispatchEvent({type: 'click', preventDefault() {}});
+  assert.equal(out.step(), 'pick');
+  assert.equal(out.ids.get('booth-result').hidden, false, '내 기록 opens');
+  assert.equal(out.location.hash, '#booth-result');
+  assert.equal(out.ids.get('booth-rows').textContent, '', 'reset ran before opening 내 기록');
+  out.handle.destroy();
+  booth.noteReceiptOutcome(storage, 'F-0002', 'withdrawn');
+  const back = liveBooth({storage, perOwner: 3, claims: [{receipt: 'F-0003', status: 'judged', published: true, outcome: 'caught'}]});
+  await settle();
+  back.ids.get('booth-claim-receipt').value = 'F-0003';
+  back.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+  back.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(back.text('booth-chances-top'), '기회 1번 남음');
+  assert.equal(back.text('booth-live-again'), '다시 도전하기 · 기회 1번 남음');
+  assert.equal(back.ids.get('booth-live-records').hidden, false);
+  back.ids.get('booth-live-again').click();
+  assert.equal(back.step(), 'pick');
+  assert.equal(back.ids.get('booth-result').hidden, true, 'startAgain, not 내 기록');
+  back.handle.destroy();
+});
+
+test('plan97s-2: withdrawing at 0 tries gives the try back on the same ticket', async () => {
+  const storage = memoryStorage();
+  for (const n of ['40', '41', '42']) booth.rememberReceipt(storage, {receipt: 'F-00' + n, claimKey: '7Q3K-M9XD', createdAt: '2026-11-21T01:00:00Z'});
+  const w = liveBooth({storage, perOwner: 3, claims: [{receipt: 'F-0042', status: 'judged', published: true, outcome: 'missed', course: 'quick', declaredCount: 1}],
+    withdrawn: {receipt: 'F-0042', status: 'withdrawn', course: 'quick', declaredCount: 1, published: false}});
+  await settle();
+  w.ids.get('booth-claim-receipt').value = 'F-0042';
+  w.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+  w.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(w.text('booth-chances-top'), '기회 0번 남음');
+  assert.equal(w.text('booth-live-again'), '내 기록 보기');
+  w.ids.get('booth-withdraw').click();
+  w.ids.get('booth-withdraw-confirm').click();
+  await settle();
+  assert.equal(w.text('booth-live-title'), '제출을 철회했어요');
+  assert.equal(booth.readReceipts(storage).find(item => item.receipt === 'F-0042').outcome, 'withdrawn');
+  assert.equal(w.text('booth-chances-top'), '기회 1번 남음');
+  assert.equal(w.text('booth-live-again'), '다시 도전하기 · 기회 1번 남음');
+  assert.equal(w.ids.get('booth-live-records').hidden, false);
+  w.handle.destroy();
+});
+
+test('plan97s-2: non-cap submit errors keep booth-submit-records hidden', async () => {
+  const fail500 = liveBooth({submits: [{status: 500, body: {error: {code: 'server_error'}}}]});
+  await settle();
+  await submitThroughBooth(fail500);
+  assert.equal(fail500.step(), 'send');
+  assert.equal(fail500.ids.get('booth-submit-records').hidden, true);
+  fail500.handle.destroy();
+  const tooLarge = liveBooth({submits: [{status: 413, body: {error: {code: 'payload_too_large'}}}]});
+  await settle();
+  await submitThroughBooth(tooLarge);
+  assert.equal(tooLarge.step(), 'send');
+  assert.equal(tooLarge.ids.get('booth-submit-records').hidden, true);
+  tooLarge.handle.destroy();
+});
+
+/* plan97s-4 */
+test('plan97s-4: queueLabel formats ahead count without ETA, falling back to empty string', () => {
+  assert.equal(booth.queueLabel({ahead: 3, slots: 2, etaSec: 240}), 'AI 검증 차례를 기다리는 중 · 앞에 3건');
+  assert.equal(booth.queueLabel({ahead: 2, etaSec: 61}), 'AI 검증 차례를 기다리는 중 · 앞에 2건');
+  assert.equal(booth.queueLabel({ahead: 1, etaSec: 0}), 'AI 검증 차례를 기다리는 중 · 앞에 1건');
+  assert.equal(booth.queueLabel(null), '');
+  assert.equal(booth.queueLabel({}), '');
+  assert.equal(booth.queueLabel({ahead: 0, etaSec: 120}), '');
+  assert.equal(booth.queueLabel({ahead: -1}), '');
+  assert.equal(booth.queueLabel({ahead: '3'}), '');
+  assert.equal(booth.queueLabel({ahead: 2.5}), '');
+  assert.equal(booth.queueLabel({ahead: 10000}), '');
+});
+
+test('plan97s-4: waiting ticket shows queue position on received and falls back when ahead is 0 or reviewing', async () => {
+  const h = liveBooth({claims: [
+    {receipt: 'F-0042', status: 'received', published: false, queue: {ahead: 3, slots: 2, etaSec: 240}},
+    {receipt: 'F-0042', status: 'received', published: false, queue: {ahead: 0, slots: 2, etaSec: 120}},
+    {receipt: 'F-0042', status: 'reviewing', published: false, queue: {ahead: 0, slots: 2, etaSec: 90}},
+  ]});
+  await settle();
+  await submitThroughBooth(h);
+  assert.equal(await h.tick(), 15000);
+  assert.equal(h.text('booth-ticket-state'), 'AI 검증 차례를 기다리는 중 · 앞에 3건');
+  assert.equal(await h.tick(), 15000);
+  assert.equal(h.text('booth-ticket-state'), 'AI 검증 차례를 기다리는 중');
+  assert.equal(await h.tick(), 15000);
+  assert.equal(h.text('booth-ticket-state'), 'AI가 논문을 읽는 중');
+  h.handle.destroy();
+});
+
+test('plan97s-4: recheck after 15-min stop restores waiting label even if claim returns 500', async () => {
+  const pending = {receipt: 'F-0042', status: 'received', course: 'quick', declaredCount: 1, published: false};
+  const claims = Array.from({length: 37}, () => pending).concat([{status: 500, body: {error: {code: 'server_error'}}}]);
+  const h = liveBooth({claims});
+  await settle();
+  h.ids.get('booth-result-link').dispatchEvent({type: 'click', preventDefault() {}});
+  h.ids.get('booth-claim-receipt').value = 'F-0042';
+  h.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  while (h.timers.length) await h.tick();
+  assert.equal(h.text('booth-ticket-state'), '자동 확인을 멈췄어요. 「결과 다시 보기」를 눌러 주세요.');
+  h.ids.get('booth-live-recheck').click();
+  await settle();
+  assert.equal(h.text('booth-ticket-state'), 'AI 검증 차례를 기다리는 중');
+  assert.equal(h.ids.get('booth-live-recheck').hidden, true);
+  assert.equal(h.timers.length, 1);
+  h.handle.destroy();
+});
+
+test('plan97s-4: not_found during polling stops the clock without the 15-minute copy', async () => {
+  const pending = {receipt: 'F-0042', status: 'received', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:00Z', published: false};
+  const h = liveBooth({claims: [pending, {status: 404, body: {error: {code: 'not_found'}}}]});
+  await settle();
+  h.ids.get('booth-result-link').dispatchEvent({type: 'click', preventDefault() {}});
+  h.ids.get('booth-claim-receipt').value = 'F-0042';
+  h.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(h.intervals.length, 1);
+  assert.equal(await h.tick(), 15000);
+  assert.equal(h.intervals.length, 0);
+  assert.notEqual(h.text('booth-ticket-state'), '자동 확인을 멈췄어요. 「결과 다시 보기」를 눌러 주세요.');
+  assert.equal(h.ids.get('booth-live-error').hidden, false);
+  h.handle.destroy();
+});
+
+test('plan97s-4: missed notes without a page use AI 메모 heading, with a page use AI가 의심한 곳, invalid uses 운영진 안내', async () => {
+  const h = liveBooth({claims: [
+    {receipt: 'F-0042', status: 'judged', published: true, outcome: 'missed', publicNote: 'AI가 이번 수정본에서 결함을 짚지 못했어요. 심어 둔 결함은 AI 눈을 피했어요.'},
+    {receipt: 'F-0043', status: 'judged', published: true, outcome: 'missed', publicNote: 'AI는 다른 곳을 짚었어요. (AI가 짚은 곳: 7쪽)'},
+    {receipt: 'F-0044', status: 'invalid', published: true, outcome: 'invalid', publicNote: '수정 내용을 확인할 수 없어요.'},
+  ]});
+  await settle();
+  h.ids.get('booth-claim-receipt').value = 'F-0042';
+  h.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(h.text('booth-live-note'), 'AI 메모AI가 이번 수정본에서 결함을 짚지 못했어요. 심어 둔 결함은 AI 눈을 피했어요.');
+  assert.equal(h.ids.get('booth-live-page').hidden, true);
+  h.ids.get('booth-claim-receipt').value = 'F-0043';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(h.text('booth-live-note').startsWith('AI가 의심한 곳'), true);
+  assert.equal(h.text('booth-live-page'), 'AI가 짚은 곳 · 7쪽');
+  h.ids.get('booth-claim-receipt').value = 'F-0044';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(h.text('booth-live-note').startsWith('운영진 안내'), true);
+  h.handle.destroy();
+});
+
+/* plan97s-9 */
+test('plan97s-9: a tap while a paper loads keeps the first paper and its hint', async () => {
+  let release; const gate = new Promise(resolve => { release = resolve; });
+  const h = liveBooth({pdfReply: async () => { await gate; return pdfReply(); }});
+  await settle();
+  useWorkspace([]);
+  missionButtons(h)[0].click();                 // mission A, hint '8쪽 표를 고치세요'
+  await settle();
+  missionButtons(h)[1].dispatchEvent({type: 'pointerdown'});
+  missionButtons(h)[1].click();                 // mission B while A loads
+  h.ids.get('booth-search-q').value = 'Synthetic';
+  h.ids.get('booth-search').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  nodesOf(h.ids.get('booth-search-results')).find(node => node.tagName === 'button').click(); // search card while A loads
+  await settle();
+  release();
+  await settle();
+  assert.equal(h.step(), 'edit');
+  assert.equal(h.text('booth-hint'), '힌트 · 8쪽 표를 고치세요');
+  const pdfCalls = h.calls.filter(call => call.path.includes('/v1/papers/pdf'));
+  assert.equal(pdfCalls.length, 1, 'the busy taps start no second PDF request, prefetch included');
+  h.handle.destroy();
+});
+
+test('plan97s-9: tapping the open search paper again keeps the edits and fetches once', async () => {
+  const h = liveBooth({missions: []});
+  await settle();
+  useWorkspace([]);
+  h.ids.get('booth-search-q').value = 'Synthetic';
+  h.ids.get('booth-search').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  const card = () => nodesOf(h.ids.get('booth-search-results')).find(node => node.tagName === 'button');
+  card().click(); await settle();
+  assert.equal(h.step(), 'edit');
+  boothEdits.add(makeBoothEdit());
+  h.ids.get('booth-edit-back').click();
+  assert.equal(h.step(), 'pick');
+  card().click(); await settle();
+  assert.equal(h.step(), 'edit');
+  assert.equal(boothEdits.list().length, 1, 'the edit survives the re-tap');
+  assert.equal(h.calls.filter(call => call.path.includes('/v1/papers/pdf')).length, 1);
+  assert.equal(h.text('booth-hint'), '힌트 · 숫자, 결론 문장, 표 값 중 한 곳을 골라 티 나지 않게 바꿔 보세요.');
+  h.handle.destroy();
+});
+
+test('plan97s-9: a search card for the open mission paper goes back to edit', async () => {
+  const h = liveBooth();            // MISSIONS[0] and the search stub are both 2503.10497
+  await settle();
+  useWorkspace([]);
+  await pickMission(h);
+  boothEdits.add(makeBoothEdit());
+  h.ids.get('booth-edit-back').click();
+  h.ids.get('booth-search-q').value = 'Synthetic';
+  h.ids.get('booth-search').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  nodesOf(h.ids.get('booth-search-results')).find(node => node.tagName === 'button').click();
+  await settle();
+  assert.equal(h.step(), 'edit');
+  assert.equal(boothEdits.list().length, 1);
+  assert.equal(h.text('booth-hint'), '힌트 · 8쪽 표를 고치세요');
+  assert.equal(h.calls.filter(call => call.path.includes('/v1/papers/pdf')).length, 1);
+  h.handle.destroy();
+});
+
+test('plan97s-9: a Korean query with no results points to English', async () => {
+  const h = liveBooth({searchReply: () => ({source: 'arxiv', page: 1, hasMore: false, results: []})});
+  await settle();
+  const search = q => { h.ids.get('booth-search-q').value = q; h.ids.get('booth-search').dispatchEvent({type: 'submit', preventDefault() {}}); return settle(); };
+  await search('의료 영상');
+  assert.equal(h.text('booth-search-status'), '검색 결과가 없어요. 영어로 찾아볼까요? 예: medical imaging');
+  assert.equal(h.ids.get('booth-search-pages').hidden, true);
+  await search('zzqx');
+  assert.equal(h.text('booth-search-status'), '검색 결과가 없어요. 다른 단어로 찾아볼까요?');
+  h.handle.destroy();
+});
+
+test('plan97s-9: a failed open keeps the hint of the open paper and retry restores the requested hint', async () => {
+  let failSecond = true;
+  const retries = [];
+  const prevRuntime = boothContext.FalsifyBoothRuntime;
+  boothContext.FalsifyBoothRuntime = {offerRetry(_doc, _node, run) { retries.push(run); }};
+  const missions = [
+    MISSIONS[0],
+    {paperId: '2503.10498', title: 'Second mission', license: 'cc-by-4.0', course: 'quick', hint: 'B힌트', pageHint: 2},
+  ];
+  const h = liveBooth({
+    missions,
+    pdfReply: async url => {
+      if (url.includes('2503.10498') && failSecond) {
+        return {ok: false, status: 401, headers: {get() { return null; }}, json: async () => ({error: {code: 'unauthorized'}})};
+      }
+      return pdfReply();
+    },
+  });
+  try {
+    await settle();
+    useWorkspace([]);
+    await pickMission(h);
+    assert.equal(h.text('booth-hint'), '힌트 · 8쪽 표를 고치세요');
+    h.ids.get('booth-edit-back').click();
+    missionButtons(h)[1].click();
+    await settle();
+    assert.equal(h.step(), 'pick');
+    assert.equal(retries.length, 1, 'failed open offers retry');
+    // Re-opening A via search card does not rewrite hint, proving the failed open of B never touched A's hint.
+    h.ids.get('booth-search-q').value = 'Synthetic';
+    h.ids.get('booth-search').dispatchEvent({type: 'submit', preventDefault() {}});
+    await settle();
+    nodesOf(h.ids.get('booth-search-results')).find(node => node.tagName === 'button').click();
+    await settle();
+    assert.equal(h.step(), 'edit');
+    assert.equal(h.text('booth-hint'), '힌트 · 8쪽 표를 고치세요');
+    h.ids.get('booth-edit-back').click();
+    failSecond = false;
+    await retries[0]();
+    await settle();
+    assert.equal(h.step(), 'edit');
+    assert.equal(h.text('booth-hint'), '힌트 · B힌트');
+  } finally {
+    h.handle.destroy();
+    if (prevRuntime === undefined) delete boothContext.FalsifyBoothRuntime;
+    else boothContext.FalsifyBoothRuntime = prevRuntime;
+  }
+});
+
+test('plan97s-9: tapping the open mission while another paper loads does not enter edit', async () => {
+  let release; const gate = new Promise(resolve => { release = resolve; });
+  const h = liveBooth({
+    searchReply: () => ({source: 'arxiv', page: 1, hasMore: false, results: [{id: '2503.10499', title: 'Other paper', authors: ['Bo'], year: 2026, license: 'cc-by-4.0'}]}),
+    pdfReply: async url => {
+      if (url.includes('2503.10499')) await gate;
+      return pdfReply();
+    },
+  });
+  await settle();
+  useWorkspace([]);
+  await pickMission(h);
+  boothEdits.add(makeBoothEdit());
+  h.ids.get('booth-edit-back').click();
+  h.ids.get('booth-search-q').value = 'Other';
+  h.ids.get('booth-search').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  nodesOf(h.ids.get('booth-search-results')).find(node => node.tagName === 'button').click();
+  await settle();
+  assert.equal(h.step(), 'pick');
+  missionButtons(h)[0].click();
+  await settle();
+  assert.equal(h.step(), 'pick', 'tapping the already-open mission while another paper loads does not jump into edit');
+  release();
+  await settle();
+  assert.equal(h.step(), 'edit');
+  assert.equal(h.text('booth-hint'), '힌트 · 숫자, 결론 문장, 표 값 중 한 곳을 골라 티 나지 않게 바꿔 보세요.');
+  h.handle.destroy();
+});
+
+/* rv97-A F-03: a phone back after 15+ min in the background polls for a fresh 15 min */
+test('rv97-A F-03: coming back after 15+ minutes hidden starts a fresh 15 minutes of polling', async () => {
+  const pending = {receipt: 'F-0042', status: 'received', course: 'quick', declaredCount: 1, published: false};
+  const h = liveBooth({claims: [pending]});
+  await settle();
+  await submitThroughBooth(h);
+  assert.equal(h.step(), 'ticket');
+  assert.equal(await h.tick(), 15000);
+  h.doc.visibilityState = 'hidden';
+  h.doc.dispatchEvent({type: 'visibilitychange'});
+  await h.tick();
+  h.clock.t += 20 * 60000;
+  h.doc.visibilityState = 'visible';
+  h.doc.dispatchEvent({type: 'visibilitychange'});
+  await settle();
+  const calls = h.claimCalls().length;
+  assert.notEqual(h.text('booth-ticket-state'), '자동 확인을 멈췄어요. 「결과 다시 보기」를 눌러 주세요.');
+  assert.equal(h.ids.get('booth-live-recheck').hidden, true, 'no recheck button right after coming back');
+  assert.equal(h.timers.length, 1, 'polling goes on');
+  await h.tick();
+  assert.equal(h.claimCalls().length, calls + 1, 'and asks again on schedule');
+  h.handle.destroy();
 });

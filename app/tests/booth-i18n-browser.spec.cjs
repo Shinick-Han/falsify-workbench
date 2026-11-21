@@ -400,6 +400,20 @@ async function walkViewport(browser, viewport, desk, pageErrors) {
     await page.locator('#booth-myai-apply').click();
     await page.locator('.booth-myai-diag.error').first().waitFor();
     await assertNoVisibleHangul(page, tag + ' edit-myai-error');
+
+    // plan97s-8: rule error in EN shows plain sentence (never raw code), and curly-quote 2-edit answer keeps both edits
+    await page.locator('#booth-myai-answer').fill(JSON.stringify({edits: [{find: '0.95', replace: '0.95'}]}));
+    await page.locator('#booth-myai-apply').click();
+    await page.waitForFunction(() => /Edit #1 has identical find and replace text\./.test(document.querySelector('#booth-myai-diags')?.textContent || ''));
+    assert.doesNotMatch(await page.locator('#booth-myai-diags').textContent(), /unchanged edits|count edits|control edits/);
+    await assertNoVisibleHangul(page, tag + ' edit-myai-rule');
+
+    await page.locator('#booth-myai-answer').fill(JSON.stringify({edits: [
+      {page: 5, find: '0.70', replace: '0.77', context: 'Ragas 0.95 0.78 0.70'},
+      {find: '\u201cNo such quote\u201d', replace: '\u201cStill none\u201d'}]}));
+    await page.locator('#booth-myai-apply').click();
+    await page.waitForFunction(() => document.querySelector('.booth-myai-count')?.textContent === 'Applied 1 · pick 1 manually');
+    await assertNoVisibleHangul(page, tag + ' edit-myai-curly');
     // Blur textarea (phone hides the dock while typing) before clicking Next
     await page.evaluate(() => { if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); });
     await page.locator('#booth-next').waitFor({state: 'visible'});
@@ -427,6 +441,8 @@ async function walkViewport(browser, viewport, desk, pageErrors) {
     await page.locator('#booth-submit-button').click();
     await page.waitForFunction(() => /Submissions are busy|Too many requests/.test(document.querySelector('#booth-submit-status')?.textContent || ''));
     await assertNoVisibleHangul(page, tag + ' send-rate-limited');
+    assert.equal(await page.locator('#booth-submit-records').isVisible(), true, 'a 내 기록 action sits under the 429 line');
+    assert.equal(await page.locator('#booth-submit-records').textContent(), 'View my tickets');
     state.submitError = null;
 
     // 5. Submit -> Receipt & pending
@@ -501,6 +517,7 @@ async function walkViewport(browser, viewport, desk, pageErrors) {
     await lookupTicket(page, desk, 'F-0046');
     await page.waitForFunction(() => /found no defect/.test(document.querySelector('#booth-live-note')?.textContent || ''));
     await assertNoVisibleHangul(page, tag + ' result-missedNone');
+    assert.equal(await page.locator('#booth-live-note .booth-klab').first().textContent(), 'AI note');
 
     // Withdrawn
     await lookupTicket(page, desk, 'F-0047');
