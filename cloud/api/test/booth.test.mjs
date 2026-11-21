@@ -654,6 +654,13 @@ test('visitor submit, claim, publish, withdraw and admin pdf', async () => {
     assert.equal(wrongKey.body.receipt, undefined);
     assert.equal(unknown.body.receipt, undefined);
 
+    await call('PATCH', `/v1/booth/admin/submissions/${receipt}`, {
+      token: OPERATOR, body: {status: 'reviewing', operatorNote: 'live: failed pdf_corrupt'},
+    });
+    const delayed = await call('POST', '/v1/booth/claim', {body: {receipt, claimKey}});
+    assert.equal(delayed.body.reviewDelayed, true);
+    assert.equal(JSON.stringify(delayed.body).includes('pdf_corrupt'), false);
+
     const hidden = await call('PATCH', `/v1/booth/admin/submissions/${receipt}`, {
       token: OPERATOR,
       body: { prizeMessage: 'GIFT-CODE', publicNote: '잘 봤습니다', outcome: 'caught', published: false },

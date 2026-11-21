@@ -60,7 +60,8 @@ def _page_text_blocks(document, page_index):
             continue
         text = block[4].strip() if isinstance(block[4], str) else ''
         if text:
-            texts.append(text)
+            # Some math fonts yield NUL for an unmapped glyph. Keep its position in quotes.
+            texts.append(text.replace('\0', '\ufffd'))
     return texts
 
 
@@ -84,8 +85,6 @@ def _extraction_result(segments, page_count):
     if not segments:
         raise PdfInputError('pdf_empty_text')
     source_text = '\n\n'.join(segment['text'] for segment in segments)
-    if '\0' in source_text:
-        raise PdfInputError('pdf_corrupt')
     return {
         'segments': segments,
         'sourceHash': _sha256(source_text),

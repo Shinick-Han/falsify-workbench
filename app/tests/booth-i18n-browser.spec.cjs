@@ -138,7 +138,7 @@ async function stubApi(route, state) {
       results: [{
         id: '2309.15217',
         title: 'Ragas: Automated Evaluation of Retrieval Augmented Generation',
-        authors: ['Shahul Es', 'Jithin James'], year: 2023, license: 'cc-by-4.0',
+        authors: ['Shahul Es', 'Jithin James'], year: 2023, licenseVerified: true, license: 'cc-by-4.0',
       }],
       hasMore: false,
     });

@@ -461,7 +461,7 @@ function liveBooth(options = {}) {
     if (path.includes('/v1/papers/pdf')) return options.pdfReply ? options.pdfReply(full) : pdfReply();
     if (path.includes('/v1/papers/search')) {
       if (options.searchReply) return reply(200, options.searchReply(full));
-      return reply(200, {source: 'arxiv', page: 1, hasMore: false, results: [{id: '2503.10497', title: 'Synthetic result', authors: ['Ada'], year: 2026, license: 'cc-by-4.0'}]});
+      return reply(200, {source: 'arxiv', page: 1, hasMore: false, results: [{id: '2503.10497', title: 'Synthetic result', authors: ['Ada'], year: 2026, licenseVerified: true, license: 'cc-by-4.0'}]});
     }
     return reply(404, {error: {code: 'not_found'}});
   };
@@ -733,6 +733,22 @@ test('engine_unavailable is the sole build failure, with one 다시 시도 butto
   assert.equal(h2.step(), 'edit');
   assert.match(h2.text('booth-dock-status'), /아직 원본과 같아요/);
   h2.handle.destroy();
+});
+
+test('an oversized rewrite keeps the edits and stops before upload', async () => {
+  const h = liveBooth();
+  await settle();
+  const bytes = new Uint8Array(16777217);
+  bytes.set(EDITED);
+  useWorkspace([], {rewriteResult: () => bytes});
+  await pickMission(h);
+  boothEdits.add(ONE_EDIT[0]);
+  h.ids.get('booth-next').click();
+  await waitFor(() => h.text('booth-dock-status').includes('16MB'));
+  assert.equal(h.step(), 'edit');
+  assert.equal(boothEdits.list().length, 1);
+  assert.equal(h.calls.some(call => call.path.endsWith('/v1/booth/submissions')), false);
+  h.handle.destroy();
 });
 
 test('blind-pdf strips an untrusted source before rewrite while preserving original sourceSha256', async () => {
@@ -2986,6 +3002,22 @@ test('plan97s-9: a search card for the open mission paper goes back to edit', as
   h.handle.destroy();
 });
 
+test('only confirmed event licenses appear, and a filtered page keeps its next link', async () => {
+  const results = [
+    {id: '2503.10490', license: 'cc-by-4.0', licenseVerified: false},
+    {id: '2503.10491', license: 'cc-by-nd-4.0', licenseVerified: true},
+    {id: '2503.10492', license: null, licenseVerified: false},
+  ];
+  const h = liveBooth({searchReply: () => ({source: 'arxiv', page: 1, hasMore: true, results})});
+  await settle();
+  h.ids.get('booth-search-q').value = 'models';
+  h.ids.get('booth-search').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(nodesOf(h.ids.get('booth-search-results')).filter(node => node.tagName === 'button').length, 0);
+  assert.equal(h.ids.get('booth-search-pages').hidden, false);
+  h.handle.destroy();
+});
+
 test('plan97s-9: a Korean query with no results points to English', async () => {
   const h = liveBooth({searchReply: () => ({source: 'arxiv', page: 1, hasMore: false, results: []})});
   await settle();
@@ -3050,7 +3082,7 @@ test('plan97s-9: a failed open keeps the hint of the open paper and retry restor
 test('plan97s-9: tapping the open mission while another paper loads does not enter edit', async () => {
   let release; const gate = new Promise(resolve => { release = resolve; });
   const h = liveBooth({
-    searchReply: () => ({source: 'arxiv', page: 1, hasMore: false, results: [{id: '2503.10499', title: 'Other paper', authors: ['Bo'], year: 2026, license: 'cc-by-4.0'}]}),
+    searchReply: () => ({source: 'arxiv', page: 1, hasMore: false, results: [{id: '2503.10499', title: 'Other paper', authors: ['Bo'], year: 2026, licenseVerified: true, license: 'cc-by-4.0'}]}),
     pdfReply: async url => {
       if (url.includes('2503.10499')) await gate;
       return pdfReply();

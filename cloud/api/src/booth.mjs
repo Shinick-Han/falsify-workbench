@@ -930,6 +930,7 @@ function claimView(row, env) {
     const editResults = aiOutcome ? editResultsFrom(row.ai_summary, declaredCount) : null;
     if (editResults) view.editResults = editResults;
   }
+  if (!published && row.status === 'reviewing' && row.review_delayed) view.reviewDelayed = true;
   const queue = queueView(row, env);
   if (queue) view.queue = queue;
   return view;
@@ -937,6 +938,7 @@ function claimView(row, env) {
 
 // queue_ahead is one indexed count on booth_submissions_status (status, seq), in the same round trip.
 const CLAIM_SELECT = `id, receipt, status, course, declared, created_at, updated_at, published_at, outcome, public_note, prize_message, ai_summary,
+  operator_note LIKE 'live: failed %' AS review_delayed,
   (SELECT COUNT(*) FROM booth_submissions q WHERE q.status = 'received' AND q.seq < booth_submissions.seq) AS queue_ahead`;
 
 async function loadClaim(db, receipt, claimKey) {

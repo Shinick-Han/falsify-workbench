@@ -1550,6 +1550,15 @@
       if(!sourceBytes||!makeLive(token)) return;
       const outBytes=await rewriteBytes(sourceBytes,ready.edits);
       if(!makeLive(token)) return;
+      if(exposedPdfBytes&&outBytes.byteLength>exposedPdfBytes){
+        generatedFile=null;
+        generatedHash='';
+        adoptedSignature='';
+        settleMake(false);
+        setStep('edit');
+        say('booth-dock-status',errorMessage('payload_too_large'));
+        return;
+      }
       const hash=await digestHex(outBytes);
       if(!makeLive(token)) return;
       if(!hash) throw engineError();
@@ -1698,7 +1707,11 @@
       say(statusId,'논문을 불러오는 중…');
       let payload=null;
       try{payload=await (takePrefetched(id)||request(path,{method:'GET',auth:true,pdf:true}));}
-      catch(error){say(statusId,errorMessage(error.code,error));openFailure=error;return false;}
+      catch(error){
+        say(statusId,error.code==='payload_too_large'?ERROR_TEXT.payload_too_large:errorMessage(error.code,error));
+        openFailure=error;
+        return false;
+      }
       const bytes=payload.bytes;
       if(!pdfMagic(bytes)){say(statusId,errorMessage('invalid_request'));return false;}
       trustFetchedBytes(bytes);
@@ -1907,13 +1920,10 @@
       if(!box||!pages) return;
       box.textContent='';
       pages.textContent='';
-      const list=payload&&Array.isArray(payload.results)?payload.results:[];
-      if(!list.length){say('booth-search-status',emptySearchLine());pages.hidden=true;return;}
-      say('booth-search-status','');
-      for(const item of list){
-        if(!item||typeof item.id!=='string') continue;
-        box.append(searchResultCard(item));
-      }
+      const results=payload&&Array.isArray(payload.results)?payload.results:[];
+      const eligible=results.filter(item=>item&&ARXIV_ID.test(item.id)&&item.licenseVerified===true&&LICENSE_RE.test(licenseId(item)));
+      say('booth-search-status',eligible.length?'':emptySearchLine());
+      for(const item of eligible) box.append(searchResultCard(item));
       searchPager(pages, payload);
     }
     async function runSearch(){
@@ -2242,6 +2252,10 @@
       const queued=data.status==='received'?queueLabel(data.queue):'';
       setText('booth-ticket-state',data.status==='reviewing'?'AI가 논문을 읽는 중':queued||'AI 검증 차례를 기다리는 중');
       setText('booth-step-check',data.status==='received'?STEP_QUEUED:STEP_CHECKING);
+      if(data.reviewDelayed===true){
+        setText('booth-ticket-state','검증이 지연되고 있어요');
+        setText('booth-step-check','저장된 수정본으로 검증을 이어가요');
+      }
       setText('booth-live-title','');
       setHidden('booth-ticket-duration-cell',true);
       setHidden('booth-live-tip',true);
