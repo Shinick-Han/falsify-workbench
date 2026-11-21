@@ -471,23 +471,25 @@ test('operator id, gateway defaults and migration 0006 keep secrets out of the s
   assert.equal(wrangler.split('"AI_GUEST_APPLY_JOBS_PER_HOUR": "600"').length, 2);
   assert.equal(wrangler.split('"PAPER_SEARCH_ENABLED": "true"').length, 2);
   for (const literal of [
-    '"AI_GUESTS_PER_HOUR": "800"',
+    '"AI_GUESTS_PER_HOUR": "4000"',
     '"AI_GUEST_UPLOADS_PER_HOUR": "400"',
     '"AI_GUEST_JOBS_PER_OWNER_HOUR": "20"',
     '"AI_GUEST_APPLY_JOBS_PER_HOUR": "600"',
     '"AI_GUEST_MODEL_JOBS": "false"',
     '"BOOTH_SUBMISSIONS_PER_OWNER": "3"',
-    '"BOOTH_SUBMISSIONS_PER_IP_HOUR": "400"',
-    '"BOOTH_CLAIMS_PER_IP_HOUR": "8000"',
-    '"BOOTH_CLAIMS_PER_HOUR": "15000"',
+    '"BOOTH_SUBMISSIONS_PER_IP_HOUR": "2000"',
+    '"BOOTH_SUBMISSIONS_PER_HOUR": "3000"',
+    '"BOOTH_CLAIMS_PER_IP_HOUR": "40000"',
+    '"BOOTH_CLAIMS_PER_HOUR": "75000"',
     '"BOOTH_OPERATOR_ACTIVE_JOBS": "2"',
-    '"PAPER_SEARCH_PER_IP_HOUR": "2000"',
-    '"PAPER_PDF_PER_IP_HOUR": "600"',
+    '"PAPER_SEARCH_PER_IP_HOUR": "10000"',
+    '"PAPER_SEARCH_PER_HOUR": "15000"',
+    '"PAPER_PDF_PER_IP_HOUR": "3000"',
   ]) {
     assert.equal(wrangler.split(literal).length, 2, literal);
   }
   assert.match(wrangler, /"BOOTH_CONSENT_VERSION": "2026-11-22.v3"/);
-  assert.match(wrangler, /"AI_GUESTS_PER_IP_HOUR": "600"/);
+  assert.match(wrangler, /"AI_GUESTS_PER_IP_HOUR": "3000"/);
   const boothSource = readFileSync(path.join(apiRoot, 'src/booth.mjs'), 'utf8');
   assert.match(boothSource, /const SEQ_ATTEMPTS = 5/);
   assert.match(boothSource, /claimsPerHour: positiveInt\(env\?\.BOOTH_CLAIMS_PER_HOUR, 2000\)/);
