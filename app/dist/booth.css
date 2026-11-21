@@ -52,6 +52,8 @@
 .booth-mk{display:grid;place-items:center;flex:none;width:22px;height:22px;border-radius:5px;background:var(--ev-ink);color:#fff;font-size:12px;font-weight:600}
 .booth-nm{font-size:14px;font-weight:600;letter-spacing:-.01em}
 .booth .booth-toplink{display:inline-flex;align-items:center;justify-content:center;min-height:44px;min-width:44px;margin-left:auto;padding:0 2px;color:var(--ev-ink-2);font-size:13px;text-decoration:none}
+.booth .booth-lang{display:inline-flex;align-items:center;justify-content:center;flex:none;min-height:44px;min-width:44px;padding:0 10px;border:1px solid var(--ev-hair);border-radius:8px;background:var(--ev-card);color:var(--ev-ink-2);font-size:12.5px;font-weight:500;white-space:nowrap;cursor:pointer}
+.booth .booth-lang:hover{border-color:var(--ev-ink);color:var(--ev-ink)}
 .booth-toplabel{margin-left:auto;font-size:12.5px;color:var(--ev-ink-2)}
 .booth-landing{display:grid;gap:14px}
 .booth-hero{display:grid;gap:12px;padding:10px 0 0}
@@ -174,6 +176,11 @@
 .booth-stamp.pass{color:var(--ev-pass)}
 .booth-stamp.fail{color:var(--ev-fail)}
 .booth-stamp.void{color:var(--ev-muted)}
+html[lang="en"] #booth-stamp-latin{display:none}
+html[lang="en"] .booth-stamp b{font-size:17px;letter-spacing:.1em}
+.booth-opinion-en{display:none}
+html[lang="en"] .booth-opinion-ko{display:none}
+html[lang="en"] .booth-opinion-en{display:block}
 .booth-verdict{display:grid;gap:4px;padding:2px 2px 0}
 .booth-tk-v .booth-gift-sec{grid-template-columns:minmax(0,1fr) auto;align-items:center}
 .booth-gift-text{margin-top:2px;font-size:15px;font-weight:500;white-space:pre-wrap;overflow-wrap:anywhere}
@@ -295,6 +302,7 @@ html[data-booth-step="edit"] :is(#booth,#booth :has(#booth-hint))>#booth-paper-c
 .booth-send-main{display:grid;gap:16px;align-content:start;min-width:0}
 .booth-send-main>.booth-stepbar{padding:0}
 #booth-send-back::after{content:"로 돌아가기"}
+html[lang="en"] #booth-send-back::after{content:""}
 .booth-send-head{display:grid;gap:4px}
 .booth-send-head .booth-headline{font-size:34px}
 .booth-send-head .booth-copy{font-size:14.5px}
@@ -328,6 +336,7 @@ html[data-booth-step="edit"] :is(#booth,#booth :has(#booth-hint))>#booth-paper-c
 #booth-ticket-result>div:first-child{justify-self:start}
 #booth-ticket .booth-stamp{margin:0;padding:4px 14px 5px;border-width:2.5px;outline-width:1.2px;outline-offset:2.5px;border-radius:5px}
 #booth-ticket .booth-stamp b{font-size:32px}
+html[lang="en"] #booth-ticket .booth-stamp b{font-size:21px;letter-spacing:.1em}
 #booth-ticket .booth-stamp span{font-size:10px;letter-spacing:.22em}
 /* While waiting the copy button sits right of the progress row, under the ticket. */
 .booth .booth-ticket-step #booth-copy{position:absolute;top:calc(100% + 24px);right:0;min-height:44px}
