@@ -3160,15 +3160,16 @@
     }
     function noteParts(parsed, state, perEditEvidence, allExcluded){
       const parts=[];
+      const noteLabel=state==='invalid'&&!allExcluded?'운영진 안내':'AI 메모';
       if(perEditEvidence){
         const text=remainingNoteText(parsed.text,state);
         if(!text) return parts;
-        parts.push(el('p',{className:'booth-klab',textContent:state==='invalid'&&!allExcluded?'운영진 안내':'AI 메모'}));
+        parts.push(el('p',{className:'booth-klab',textContent:noteLabel}));
         parts.push(el('p',{className:'booth-txt',textContent:text}));
         return parts;
       }
       const structured=!!(parsed.quote||parsed.opinion||parsed.opinionEn);
-      if(parsed.text&&!structured) parts.push(el('p',{className:'booth-klab',textContent:state==='missed'&&(parsed.page||parsed.quote)?'AI가 의심한 곳':state==='invalid'&&!allExcluded?'운영진 안내':'AI 메모'}));
+      if(parsed.text&&!structured) parts.push(el('p',{className:'booth-klab',textContent:state==='missed'&&(parsed.page||parsed.quote)?'AI가 의심한 곳':noteLabel}));
       if(parsed.text) parts.push(el('p',{className:'booth-txt',textContent:parsed.text}));
       if(parsed.quote) parts.push(el('blockquote',{className:'booth-quote',translate:'no',textContent:parsed.quote}));
       parts.push(...opinionParts(parsed));
