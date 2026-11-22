@@ -1385,8 +1385,8 @@
       }
     }
     function cleanCountPair(pair){
-      const j=pair&&Number.isSafeInteger(pair.judged)&&pair.judged>=0?pair.judged:0;
-      const m=pair&&Number.isSafeInteger(pair.missed)&&pair.missed>=0?pair.missed:0;
+      const j=summaryCount(pair?.judged);
+      const m=summaryCount(pair?.missed);
       return {judged:j,missed:Math.min(m,j)};
     }
     function statTile(label, value, sub){
@@ -1425,6 +1425,9 @@
         el('p',{className:'booth-klab',textContent:'정복된 논문'}),
         el('div',{className:'booth-lb-conq-list'},...items));
     }
+    function summaryCount(value){
+      return Number.isSafeInteger(value)&&value>=0?value:0;
+    }
     function renderLeaderboardSummary(){
       const teaser=byId('booth-lb-teaser-stats');
       const box=byId('booth-lb-summary');
@@ -1433,10 +1436,10 @@
         if(box){kidsOf(box);box.hidden=true;}
         return;
       }
-      const judged=Number.isSafeInteger(lbSummary.judged)&&lbSummary.judged>=0?lbSummary.judged:0;
-      const missed=Number.isSafeInteger(lbSummary.missed)&&lbSummary.missed>=0?lbSummary.missed:0;
-      const pending=Number.isSafeInteger(lbSummary.pending)&&lbSummary.pending>=0?lbSummary.pending:0;
-      const conquered=Number.isSafeInteger(lbSummary.conqueredCount)&&lbSummary.conqueredCount>=0?lbSummary.conqueredCount:0;
+      const judged=summaryCount(lbSummary.judged);
+      const missed=summaryCount(lbSummary.missed);
+      const pending=summaryCount(lbSummary.pending);
+      const conquered=summaryCount(lbSummary.conqueredCount);
       if(teaser){
         teaser.textContent='정복 '+conquered+'편 · 판정 '+judged+'건 · LIVE 통과율 '+passRateText(missed,judged);
         teaser.hidden=false;
@@ -1552,8 +1555,7 @@
       const evNode=ev?evidenceBlock({verdict,evidence:ev}):null;
       return el('div',{className:'booth-declared-item'},head,diffNode({before:edit.before||'',after:edit.after||''}),evNode);
     }
-    function galleryPaperCredit(entry){
-      const p=entry&&entry.paper&&typeof entry.paper==='object'?entry.paper:{};
+    function galleryPaperCredit(entry,p){
       const id=typeof p.id==='string'&&p.id?p.id:(typeof entry.paperKey==='string'?entry.paperKey:'');
       const url=arxivUrl(id);
       const lic=licenseId(p);
@@ -1565,23 +1567,25 @@
       if(label) parts.push(' · ',lUrl?extLink(lUrl,label):label);
       return parts.length?el('p',{className:'booth-credit',translate:'no'},...parts):null;
     }
-    function galleryCard(entry, types, isMine){
-      const p=entry&&entry.paper&&typeof entry.paper==='object'?entry.paper:{};
-      const title=sanitizePaperTitle(p.title||'')||p.id||entry.paperKey||'';
+    function galleryBadges(entry,isMine){
       const stamp=stampFor(entry.outcome);
       const roundText=entry.round==='final'?ROUND_LABELS.final:ROUND_LABELS.live;
       const assistText=ASSIST_LABELS[entry.assist]||'';
-      const badges=el('div',{className:'booth-lb-badges'},
+      return el('div',{className:'booth-lb-badges'},
         entry.example===true?el('span',{className:'booth-lb-pill example',textContent:'운영진 예시'}):null,
         isMine?el('span',{className:'booth-lb-pill mine',textContent:'내가 도전한 논문'}):null,
         stamp?el('span',{className:'booth-lb-pill '+stamp.kind,textContent:stamp.word}):null,
         el('span',{className:'booth-lb-pill round',textContent:roundText}),
         assistText?el('span',{className:'booth-lb-pill assist',textContent:assistText}):null);
+    }
+    function galleryCard(entry,types,isMine){
+      const p=entry.paper&&typeof entry.paper==='object'?entry.paper:{};
+      const title=sanitizePaperTitle(p.title||'')||p.id||entry.paperKey||'';
       const edits=(Array.isArray(entry.edits)?entry.edits:[]).slice(0,5);
       return el('article',{className:'booth-panel booth-lb-card'+(entry.example===true?' is-example':'')},
-        badges,
+        galleryBadges(entry,isMine),
         title?el('h3',{className:'booth-lb-card-title',translate:'no',textContent:title}):null,
-        galleryPaperCredit(entry),
+        galleryPaperCredit(entry,p),
         ...edits.map((edit,idx)=>galleryEditNode(edit,idx,edits.length,types)));
     }
     function renderLeaderboardFeed(){
@@ -1621,6 +1625,21 @@
       feed.hidden=false;
       setHidden('booth-lb-gate',true);
     }
+    function setLeaderboardUnlocked(unlocked){
+      ownerState=Object.assign({},ownerState||{used:usedTries(),perOwner:perOwnerCap()},{unlocked});
+    }
+    function showLeaderboardFeedError(error,append){
+      if(closed) return;
+      if(error&&error.code==='leaderboard_locked'){
+        setLeaderboardUnlocked(false);
+        say('booth-lb-status','');
+        renderLeaderboardGate();
+        say('booth-lb-gate-error',errorMessage('leaderboard_locked'));
+        return;
+      }
+      say('booth-lb-status',errorMessage(error&&error.code,error));
+      offerRetry('booth-lb-status',error,()=>loadLeaderboardFeed(append));
+    }
     async function loadLeaderboardFeed(append){
       if(lbLoading||closed) return;
       lbLoading=true;
@@ -1631,23 +1650,14 @@
         const query=append&&lbNextCursor?'?cursor='+encodeURIComponent(lbNextCursor):'';
         const data=await requestFresh('/v1/booth/leaderboard'+query,{method:'GET',auth:true});
         if(closed) return;
-        const incoming=data&&Array.isArray(data.entries)?data.entries:[];
+        const incoming=Array.isArray(data?.entries)?data.entries:[];
         lbEntries=append?lbEntries.concat(incoming):incoming;
-        lbNextCursor=data&&typeof data.nextCursor==='string'&&data.nextCursor?data.nextCursor:null;
+        lbNextCursor=typeof data?.nextCursor==='string'?data.nextCursor||null:null;
         lbLoading=false;
         say('booth-lb-status','');
         renderLeaderboardFeed();
       }catch(error){
-        if(closed) return;
-        if(error&&error.code==='leaderboard_locked'){
-          ownerState=Object.assign({},ownerState||{used:usedTries(),perOwner:perOwnerCap()},{unlocked:false});
-          say('booth-lb-status','');
-          renderLeaderboardGate();
-          say('booth-lb-gate-error',errorMessage('leaderboard_locked'));
-          return;
-        }
-        say('booth-lb-status',errorMessage(error&&error.code,error));
-        offerRetry('booth-lb-status',error,()=>loadLeaderboardFeed(append));
+        showLeaderboardFeedError(error,append);
       }finally{
         lbLoading=false;
         if(more) more.disabled=false;
@@ -1663,7 +1673,7 @@
         const data=await requestFresh('/v1/booth/leaderboard/unlock',{method:'POST',auth:true,body:{}});
         if(closed) return;
         if(data&&data.unlocked===true){
-          ownerState=Object.assign({},ownerState||{used:usedTries(),perOwner:perOwnerCap()},{unlocked:true});
+          setLeaderboardUnlocked(true);
           renderChances();
           renderSendTicket();
           await loadLeaderboardFeed(false);
@@ -2768,7 +2778,7 @@
       }catch(error){
         if(error.code==='consent_outdated'&&!again&&await refreshConsentVersion()){submitBooth(null,true);return;}
         if(error.code==='leaderboard_forfeited'){
-          ownerState=Object.assign({},ownerState||{used:usedTries(),perOwner:perOwnerCap()},{unlocked:true});
+          setLeaderboardUnlocked(true);
           renderChances();
         }
         say('booth-submit-status',submitFailureText(error));
