@@ -43,8 +43,10 @@
     caught:{kind:'fail',word:'적발',latin:'DETECTED'},
     partial:{kind:'fail',word:'적발',latin:'DETECTED'},
     invalid:{kind:'void',word:'무효',latin:'VOID'},
+    excluded:{kind:'void',word:'판정 제외',latin:'EXCLUDED'},
     withdrawn:{kind:'void',word:'철회',latin:'WITHDRAWN'}
   };
+  const PRE_EDIT_NOTICE='단순 오타나 문맥상 뜻이 같은 단어 교체는 통과로 인정되지 않을 수 있어요.';
   const HERO_COPY='공개 논문을 몰래 고쳐 보세요. AI가 결함을 찾아내는지 겨뤄요. 심은 결함 중 하나라도 AI가 놓치면 먼저 승리한 선착순 30분(1인 1회)께 부스에서 선물을 드려요.';
   const RULE_COPY='심은 결함 중 하나라도 AI가 놓치면 성공이에요. 현장 선물은 먼저 승리한 선착순 30분(1인 1회)께 드려요.';
   const GIFT_SUB_COPY='먼저 승리한 선착순 30분께 부스에서 드려요. 이 화면을 보여 주세요.';
@@ -92,7 +94,8 @@
   const EDIT_VERDICTS={
     caught:{text:'AI가 찾음',kind:'caught'},
     partial:{text:'근처를 짚음',kind:'partial'},
-    missed:{text:'AI가 놓침',kind:'missed'}
+    missed:{text:'AI가 놓침',kind:'missed'},
+    excluded:{text:'판정 제외',kind:'excluded'}
   };
   const MISSION_CREDIT='미션 논문은 모두 arXiv에 CC BY 4.0으로 공개된 논문이에요. 부스에서 보는 결함은 방문자가 게임을 위해 심은 거예요.';
   const PARTIAL_SUB='결함 근처까지 짚으면 적발로 봐요.';
@@ -514,13 +517,19 @@
     if(typeof value!=='string') return '';
     return value.trim().slice(0,max);
   }
-  /* Missed edits never carry evidence; caught/partial keep quote and KO/EN rationale when non-empty. */
+  /* Missed edits never carry evidence; caught/partial keep quote and KO/EN rationale; excluded keeps KO/EN rationale only. */
   function cleanEvidence(value, verdict){
-    if((verdict!=='caught'&&verdict!=='partial')||!value||typeof value!=='object') return null;
-    const quote=cleanEvidenceText(value.quote,500);
+    if((verdict!=='caught'&&verdict!=='partial'&&verdict!=='excluded')||!value||typeof value!=='object') return null;
+    const quote=verdict==='excluded'?'':cleanEvidenceText(value.quote,500);
     const rationale=cleanEvidenceText(value.rationale,1000);
     const rationaleEn=cleanEvidenceText(value.rationaleEn,1000);
     if(!quote&&!rationale&&!rationaleEn) return null;
+    if(verdict==='excluded'){
+      const out={};
+      if(rationale) out.rationale=rationale;
+      if(rationaleEn) out.rationaleEn=rationaleEn;
+      return out;
+    }
     const out={quote,rationale};
     if(rationaleEn) out.rationaleEn=rationaleEn;
     return out;
@@ -547,7 +556,13 @@
     return out;
   }
   function hasEditEvidence(results){
-    return Array.isArray(results)&&results.some(item=>item&&(item.verdict==='caught'||item.verdict==='partial')&&!!item.evidence);
+    return Array.isArray(results)&&results.some(item=>item&&(item.verdict==='caught'||item.verdict==='partial'||item.verdict==='excluded')&&!!item.evidence);
+  }
+  function excludedCountOf(results){
+    return Array.isArray(results)?results.filter(item=>item&&item.verdict==='excluded').length:0;
+  }
+  function isAllExcluded(results){
+    return Array.isArray(results)&&results.length>0&&excludedCountOf(results)===results.length;
   }
   const REDUNDANT_NOTES=new Set([
     '내가 심어 둔 결함을 AI가 찾았어요.',
@@ -557,13 +572,21 @@
     return {title:lead+strong,lead,strong,stamp:stampFor(state)};
   }
   function headlineFor(state, results){
-    const n=results.length;
+    const list=Array.isArray(results)?results:[];
+    const excluded=excludedCountOf(list);
+    if(state==='invalid'&&excluded>0&&excluded===list.length){
+      const lead=excluded===1?'이번 도전은 ':excluded+'개 모두 ';
+      const strong='판정 제외예요';
+      return {title:lead+strong,lead,strong,stamp:STAMP.excluded};
+    }
+    const eligible=list.filter(item=>item&&item.verdict!=='excluded');
+    const n=eligible.length;
     if(n<=1) return headlineView(state);
-    if(state==='caught'&&results.every(item=>item.verdict==='caught')){
+    if(state==='caught'&&eligible.every(item=>item.verdict==='caught')){
       return headlineParts('AI가 ',n+'개를 모두 찾아냈어요',state);
     }
     if(state==='missed'){
-      const missed=results.filter(item=>item.verdict==='missed').length;
+      const missed=eligible.filter(item=>item.verdict==='missed').length;
       if(missed===n) return headlineParts('AI가 ',n+'개 모두 놓쳤어요',state);
       if(missed>0) return headlineParts(n+'개 중 '+missed+'개가 ','AI 눈을 피했어요',state);
     }
@@ -577,9 +600,17 @@
     if(data.published!==true) return {state:'pending',title:PENDING_COPY,lead:'',strong:'',stamp:null,note:'',prize:'',final:false};
     const state=publishedState(data);
     const prize=typeof data.prizeMessage==='string'?data.prizeMessage.trim().slice(0,500):'';
-    const editResults=TIMED.includes(state)?cleanEditResults(data.editResults,data.declaredCount):[];
+    const rawResults=(TIMED.includes(state)||state==='invalid')?cleanEditResults(data.editResults,data.declaredCount):[];
+    const editResults=state==='invalid'?(isAllExcluded(rawResults)?rawResults:[]):rawResults;
     const view=Object.assign({state,note:plainNote(data.publicNote),prize,final:true},headlineFor(state,editResults));
-    if(editResults.length) view.editResults=editResults;
+    if(editResults.length){
+      view.editResults=editResults;
+      const excluded=excludedCountOf(editResults);
+      if(excluded>0){
+        view.excludedCount=excluded;
+        view.judgedCount=editResults.length-excluded;
+      }
+    }
     return view;
   }
   function noteLine(raw, out, rest){
@@ -1077,6 +1108,7 @@
         stepBar('booth-edit-back','← 논문 고르기','2 / 3 몰래 고치기',2),
         el('p',{id:'booth-paper-credit',className:'booth-credit',hidden:true}),
         el('p',{id:'booth-hint',className:'booth-hint'}),
+        el('p',{id:'booth-edit-notice',className:'booth-small booth-edit-notice',textContent:PRE_EDIT_NOTICE}),
         el('div',{id:'booth-dock',className:'booth-dock'},
           el('p',{id:'booth-dock-status',className:'booth-dock-status',role:'status','aria-live':'polite'}),
           el('div',{id:'booth-dock-fix',className:'booth-dock-fix',hidden:true}),
@@ -1217,6 +1249,7 @@
           el('div',{id:'booth-verdict',className:'booth-verdict',hidden:true},
             el('h2',{id:'booth-live-title',className:'booth-headline',role:'status','aria-live':'polite'}),
             el('p',{id:'booth-live-sub',className:'booth-copy',hidden:true}),
+            el('p',{id:'booth-live-excluded',className:'booth-small',hidden:true}),
             el('p',{id:'booth-live-rule',className:'booth-small booth-rule',hidden:true,textContent:RULE_COPY}),
             el('p',{id:'booth-live-page',className:'booth-mono-meta',hidden:true})),
           el('div',{className:'booth-live-side'},buildGift(),buildFinal()),
@@ -1583,8 +1616,11 @@
       if(label) parts.push(' · ',lUrl?extLink(lUrl,label):label);
       return parts.length?el('p',{className:'booth-credit',translate:'no'},...parts):null;
     }
-    function galleryBadges(entry,isMine){
-      const stamp=stampFor(entry.outcome);
+    function galleryBadges(entry,isMine,edits){
+      const list=Array.isArray(edits)?edits:[];
+      const excluded=excludedCountOf(list);
+      const judged=list.length-excluded;
+      const stamp=entry.outcome==='invalid'&&isAllExcluded(list)?STAMP.excluded:stampFor(entry.outcome);
       const roundText=entry.round==='final'?ROUND_LABELS.final:ROUND_LABELS.live;
       const assistText=ASSIST_LABELS[entry.assist]||'';
       return el('div',{className:'booth-lb-badges'},
@@ -1592,14 +1628,15 @@
         isMine?el('span',{className:'booth-lb-pill mine',textContent:'내가 도전한 논문'}):null,
         stamp?el('span',{className:'booth-lb-pill '+stamp.kind,textContent:stamp.word}):null,
         el('span',{className:'booth-lb-pill round',textContent:roundText}),
-        assistText?el('span',{className:'booth-lb-pill assist',textContent:assistText}):null);
+        assistText?el('span',{className:'booth-lb-pill assist',textContent:assistText}):null,
+        judged>0&&excluded>0?el('span',{className:'booth-lb-pill wait',textContent:'판정 대상 '+judged+'곳 · 판정 제외 '+excluded+'곳'}):null);
     }
     function galleryCard(entry,types,isMine){
       const p=entry.paper&&typeof entry.paper==='object'?entry.paper:{};
       const title=sanitizePaperTitle(p.title||'')||p.id||entry.paperKey||'';
       const edits=(Array.isArray(entry.edits)?entry.edits:[]).slice(0,5);
       return el('article',{className:'booth-panel booth-lb-card'+(entry.example===true?' is-example':'')},
-        galleryBadges(entry,isMine),
+        galleryBadges(entry,isMine,edits),
         title?el('h3',{className:'booth-lb-card-title',translate:'no',textContent:title}):null,
         galleryPaperCredit(entry,p),
         ...edits.map((edit,idx)=>galleryEditNode(edit,idx,edits.length,types)));
@@ -3058,7 +3095,7 @@
       setText('booth-ticket-state',data.status==='reviewing'?'AI가 논문을 읽는 중':queued||'AI 검증 차례를 기다리는 중');
       setText('booth-step-check',data.status==='received'?STEP_QUEUED:STEP_CHECKING);
       if(data.reviewDelayed===true){
-        setText('booth-ticket-state','검증이 지연되고 있어요');
+        setText('booth-ticket-state',data.passReviewPending===true?'운영진이 수정 내용을 확인하고 있어요':'검증이 지연되고 있어요');
         setText('booth-step-check','저장된 수정본으로 검증을 이어가요');
       }
       setText('booth-live-title','');
@@ -3078,7 +3115,7 @@
       if(!node) return;
       node.hidden=!stamp;
       if(!stamp) return;
-      node.className='booth-stamp '+stamp.kind;
+      node.className='booth-stamp '+stamp.kind+(stamp===STAMP.excluded?' wide':'');
       setText('booth-stamp-word',stamp.word);
       setText('booth-stamp-latin',stamp.latin);
     }
@@ -3096,15 +3133,18 @@
       kidsOf(byId('booth-live-title'),view.lead||null,el('b',{textContent:view.strong}));
       setText('booth-live-sub',view.state==='partial'?PARTIAL_SUB:'');
       setHidden('booth-live-sub',view.state!=='partial');
+      const mixedExcluded=view.judgedCount>0&&view.excludedCount>0;
+      setText('booth-live-excluded',mixedExcluded?'판정 대상 '+view.judgedCount+'곳 · 판정 제외 '+view.excludedCount+'곳':'');
+      setHidden('booth-live-excluded',!mixedExcluded);
       setHidden('booth-live-rule',!TIMED.includes(view.state));
       renderStamp(view.stamp);
       renderDuration(data,view.state);
       setHidden('booth-live-tip',!(view.state==='caught'||view.state==='partial'));
     }
-    function opinionNodes(opinion, opinionEn, gap){
+    function opinionNodes(opinion, opinionEn, gap, label){
       if(!opinion&&!opinionEn) return [];
       const both=!!(opinion&&opinionEn);
-      const out=[el('p',{className:gap?'booth-klab gap':'booth-klab',textContent:'AI 의견'})];
+      const out=[el('p',{className:gap?'booth-klab gap':'booth-klab',textContent:label||'AI 의견'})];
       if(opinion) out.push(el('p',{className:both?'booth-txt booth-opinion-ko':'booth-txt',translate:'no',textContent:opinion}));
       if(opinionEn) out.push(el('p',{className:both?'booth-txt booth-opinion-en':'booth-txt',translate:'no',textContent:opinionEn}));
       return out;
@@ -3118,17 +3158,17 @@
       const kept=state==='caught'||state==='partial'?lines.filter(line=>!REDUNDANT_NOTES.has(line)):lines;
       return kept.join('\n');
     }
-    function noteParts(parsed, state, perEditEvidence){
+    function noteParts(parsed, state, perEditEvidence, allExcluded){
       const parts=[];
       if(perEditEvidence){
         const text=remainingNoteText(parsed.text,state);
         if(!text) return parts;
-        parts.push(el('p',{className:'booth-klab',textContent:state==='invalid'?'운영진 안내':'AI 메모'}));
+        parts.push(el('p',{className:'booth-klab',textContent:state==='invalid'&&!allExcluded?'운영진 안내':'AI 메모'}));
         parts.push(el('p',{className:'booth-txt',textContent:text}));
         return parts;
       }
       const structured=!!(parsed.quote||parsed.opinion||parsed.opinionEn);
-      if(parsed.text&&!structured) parts.push(el('p',{className:'booth-klab',textContent:state==='missed'&&(parsed.page||parsed.quote)?'AI가 의심한 곳':state==='invalid'?'운영진 안내':'AI 메모'}));
+      if(parsed.text&&!structured) parts.push(el('p',{className:'booth-klab',textContent:state==='missed'&&(parsed.page||parsed.quote)?'AI가 의심한 곳':state==='invalid'&&!allExcluded?'운영진 안내':'AI 메모'}));
       if(parsed.text) parts.push(el('p',{className:'booth-txt',textContent:parsed.text}));
       if(parsed.quote) parts.push(el('blockquote',{className:'booth-quote',translate:'no',textContent:parsed.quote}));
       parts.push(...opinionParts(parsed));
@@ -3137,10 +3177,11 @@
     function renderNote(view){
       const parsed=parsePublicNote(view.note);
       const perEditEvidence=hasEditEvidence(view.editResults);
+      const allExcluded=view.state==='invalid'&&isAllExcluded(view.editResults);
       const page=!perEditEvidence?parsed.page:'';
       setText('booth-live-page',page?'AI가 짚은 곳 · '+page+'쪽':'');
       setHidden('booth-live-page',!page);
-      const parts=noteParts(parsed,view.state,perEditEvidence);
+      const parts=noteParts(parsed,view.state,perEditEvidence,allExcluded);
       kidsOf(byId('booth-live-note'),...parts);
       setHidden('booth-live-note',!parts.length);
     }
@@ -3161,14 +3202,15 @@
       return pageText||'결함 '+(index+1);
     }
     function evidenceBlock(result){
-      if(!result||(result.verdict!=='caught'&&result.verdict!=='partial')||!result.evidence) return null;
+      if(!result||(result.verdict!=='caught'&&result.verdict!=='partial'&&result.verdict!=='excluded')||!result.evidence) return null;
       const ev=result.evidence;
+      const isExcluded=result.verdict==='excluded';
       const parts=[];
-      if(ev.quote){
+      if(ev.quote&&!isExcluded){
         parts.push(el('p',{className:'booth-klab',textContent:'AI가 짚은 문장'}));
         parts.push(el('blockquote',{className:'booth-quote',translate:'no',textContent:ev.quote}));
       }
-      parts.push(...opinionNodes(ev.rationale,ev.rationaleEn,!!ev.quote));
+      parts.push(...opinionNodes(ev.rationale,ev.rationaleEn,!!(ev.quote&&!isExcluded),isExcluded?'제외 사유':'AI 의견'));
       if(!parts.length) return null;
       return el('div',{className:'booth-edit-evidence'},...parts);
     }
@@ -3212,7 +3254,7 @@
       const box=byId('booth-live-findings');
       if(!box) return;
       const results=view.final&&view.state!=='withdrawn'&&Array.isArray(view.editResults)?view.editResults:[];
-      if(!results.length||attached||(results.length<=1&&!hasEditEvidence(results))){
+      if(!results.length||attached||(results.length<=1&&!hasEditEvidence(results)&&!isAllExcluded(results))){
         kidsOf(box);
         box.hidden=true;
         return;
@@ -3265,7 +3307,7 @@
       syncWake();
       if(view.final){
         stopPolling();
-        if(ticket) noteReceiptOutcome(storage,ticket.receipt,view.state);
+        if(ticket) noteReceiptOutcome(storage,ticket.receipt,view.state==='invalid'&&isAllExcluded(view.editResults)?'excluded':view.state);
       }
       renderReceipts();
       renderChances();

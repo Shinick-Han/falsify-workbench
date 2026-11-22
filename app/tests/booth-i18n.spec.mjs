@@ -562,3 +562,36 @@ test('v2 leaderboard, opt-in consent, and first-30 prize notices translate clean
     assert.doesNotMatch(en, /[가-힣]/, `Hangul leaked: ${ko} -> ${en}`);
   }
 });
+
+test('pre-edit notice and excluded verdict / all-excluded invalid copy translate cleanly to English with no Hangul', () => {
+  const {i18n} = loadI18n();
+  i18n.setLang('en');
+  assert.equal(
+    i18n.t('단순 오타나 문맥상 뜻이 같은 단어 교체는 통과로 인정되지 않을 수 있어요.'),
+    'Simple typos or swapping in words with the same contextual meaning may not count as a pass.',
+  );
+  assert.equal(i18n.t('판정 제외'), 'Excluded');
+  assert.equal(i18n.t('판정 제외예요'), 'excluded');
+  assert.equal(i18n.t('제외 사유'), 'Why excluded');
+  assert.equal(i18n.t('이번 도전은 판정 제외예요'), 'This entry was excluded');
+  assert.equal(i18n.t('3개 모두 '), 'All 3 were ');
+  assert.equal(i18n.t('3개 모두 판정 제외예요'), 'All 3 were excluded');
+  assert.equal(i18n.t('판정 대상 2곳 · 판정 제외 1곳'), '2 judged · 1 excluded');
+  assert.equal(
+    i18n.t('이번 제출은 결함 판정 기준에 해당하지 않아 무효로 처리되었어요.'),
+    'This submission did not meet the defect criteria and was excluded from judging.',
+  );
+  for (const ko of [
+    '단순 오타나 문맥상 뜻이 같은 단어 교체는 통과로 인정되지 않을 수 있어요.',
+    '판정 제외',
+    '판정 제외예요',
+    '제외 사유',
+    '이번 도전은 판정 제외예요',
+    '2개 모두 판정 제외예요',
+    '판정 대상 1곳 · 판정 제외 2곳',
+    '이번 제출은 결함 판정 기준에 해당하지 않아 무효로 처리되었어요.',
+  ]) {
+    const en = i18n.t(ko);
+    assert.doesNotMatch(en, /[가-힣]/, `Hangul leaked: ${ko} -> ${en}`);
+  }
+});

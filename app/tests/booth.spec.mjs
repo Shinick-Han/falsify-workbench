@@ -3935,3 +3935,276 @@ test('a conquered paper with no public defect shows an empty state without askin
   assert.equal(h.ids.get('booth-lb-feed').hidden, true);
   assert.equal(h.calls.some(c => c.auth), false);
 });
+
+test('pre-edit notice appears discreetly on the edit step without changing the hint text', async () => {
+  const h = liveBooth();
+  await settle();
+  useWorkspace([]);
+  await pickMission(h);
+  assert.equal(h.step(), 'edit');
+  assert.equal(h.text('booth-hint'), '힌트 · 8쪽 표를 고치세요');
+  assert.equal(h.ids.get('booth-edit-notice').hidden, false);
+  assert.equal(h.text('booth-edit-notice'), '단순 오타나 문맥상 뜻이 같은 단어 교체는 통과로 인정되지 않을 수 있어요.');
+  h.handle.destroy();
+});
+
+test('excluded verdict keeps KO/EN rationale only, computes eligible ticket counts, distinguishes all-excluded invalid from manual invalid', () => {
+  // Mixed: 1 missed + 1 caught + 1 excluded (quote on excluded stripped, evidence on missed stripped)
+  const mixed = booth.resultView({
+    status: 'judged', published: true, outcome: 'missed', declaredCount: 3,
+    editResults: [
+      {index: 0, pageIndex: 4, verdict: 'caught', evidence: {quote: 'Q1', rationale: '수치 모순', rationaleEn: 'Numeric conflict'}},
+      {index: 1, pageIndex: 1, verdict: 'missed', evidence: {quote: 'FAKE', rationale: 'FAKE'}},
+      {index: 2, pageIndex: 2, verdict: 'excluded', evidence: {quote: 'IGNORED', rationale: '단순 오타 수정이에요.', rationaleEn: 'Surface typo only.'}},
+    ],
+  });
+  assert.equal(mixed.state, 'missed');
+  assert.equal(mixed.title, '2개 중 1개가 AI 눈을 피했어요');
+  assert.equal(mixed.stamp.word, '통과');
+  assert.equal(mixed.judgedCount, 2);
+  assert.equal(mixed.excludedCount, 1);
+  assert.deepEqual(plain(mixed.editResults), [
+    {index: 0, pageIndex: 4, verdict: 'caught', evidence: {quote: 'Q1', rationale: '수치 모순', rationaleEn: 'Numeric conflict'}},
+    {index: 1, pageIndex: 1, verdict: 'missed'},
+    {index: 2, pageIndex: 2, verdict: 'excluded', evidence: {rationale: '단순 오타 수정이에요.', rationaleEn: 'Surface typo only.'}},
+  ]);
+
+  // Mixed: 1 missed + 1 excluded -> eligible n=1 uses singular headline
+  const oneMissOneEx = booth.resultView({
+    status: 'judged', published: true, outcome: 'missed', declaredCount: 2,
+    editResults: [
+      {index: 0, pageIndex: 4, verdict: 'missed'},
+      {index: 1, pageIndex: 1, verdict: 'excluded', evidence: {rationale: '동의어 교체', rationaleEn: 'Synonym swap'}},
+    ],
+  });
+  assert.equal(oneMissOneEx.title, 'AI가 못 찾았어요');
+  assert.equal(oneMissOneEx.judgedCount, 1);
+  assert.equal(oneMissOneEx.excludedCount, 1);
+
+  // Mixed: 2 missed + 1 excluded -> eligible n=2
+  const twoMissOneEx = booth.resultView({
+    status: 'judged', published: true, outcome: 'missed', declaredCount: 3,
+    editResults: [
+      {index: 0, pageIndex: 4, verdict: 'missed'},
+      {index: 1, pageIndex: 1, verdict: 'missed'},
+      {index: 2, pageIndex: 2, verdict: 'excluded', evidence: {rationale: '동의어 교체', rationaleEn: 'Synonym swap'}},
+    ],
+  });
+  assert.equal(twoMissOneEx.title, 'AI가 2개 모두 놓쳤어요');
+  assert.equal(twoMissOneEx.judgedCount, 2);
+  assert.equal(twoMissOneEx.excludedCount, 1);
+
+  // Mixed: 2 caught + 1 excluded -> counts 2 caught, not 3
+  const twoCaughtOneEx = booth.resultView({
+    status: 'judged', published: true, outcome: 'caught', declaredCount: 3,
+    editResults: [
+      {index: 0, pageIndex: 4, verdict: 'caught', evidence: {quote: 'Q1', rationale: 'R1'}},
+      {index: 1, pageIndex: 1, verdict: 'caught', evidence: {quote: 'Q2', rationale: 'R2'}},
+      {index: 2, pageIndex: 2, verdict: 'excluded', evidence: {rationale: '단순 오타', rationaleEn: 'Typo only'}},
+    ],
+  });
+  assert.equal(twoCaughtOneEx.title, 'AI가 2개를 모두 찾아냈어요');
+  assert.equal(twoCaughtOneEx.judgedCount, 2);
+  assert.equal(twoCaughtOneEx.excludedCount, 1);
+
+  // All-excluded aggregate invalid (1 edit)
+  const oneEx = booth.resultView({
+    status: 'invalid', published: true, outcome: 'invalid', declaredCount: 1,
+    editResults: [
+      {index: 0, pageIndex: 4, verdict: 'excluded', evidence: {rationale: '단순 오타 수정이에요.', rationaleEn: 'Typo only.'}},
+    ],
+  });
+  assert.equal(oneEx.state, 'invalid');
+  assert.equal(oneEx.title, '이번 도전은 판정 제외예요');
+  assert.equal(oneEx.stamp.word, '판정 제외');
+  assert.equal(oneEx.stamp.latin, 'EXCLUDED');
+  assert.equal(oneEx.judgedCount, 0);
+  assert.equal(oneEx.excludedCount, 1);
+  assert.equal(oneEx.editResults.length, 1);
+
+  // All-excluded aggregate invalid (3 edits)
+  const allEx = booth.resultView({
+    status: 'invalid', published: true, outcome: 'invalid', declaredCount: 3,
+    editResults: [
+      {index: 0, pageIndex: 4, verdict: 'excluded', evidence: {rationale: '사유 1', rationaleEn: 'Reason 1'}},
+      {index: 1, pageIndex: 1, verdict: 'excluded', evidence: {rationale: '사유 2', rationaleEn: 'Reason 2'}},
+      {index: 2, pageIndex: 2, verdict: 'excluded', evidence: {rationale: '사유 3', rationaleEn: 'Reason 3'}},
+    ],
+  });
+  assert.equal(allEx.state, 'invalid');
+  assert.equal(allEx.title, '3개 모두 판정 제외예요');
+  assert.equal(allEx.stamp.word, '판정 제외');
+  assert.equal(allEx.stamp.latin, 'EXCLUDED');
+  assert.equal(allEx.judgedCount, 0);
+  assert.equal(allEx.excludedCount, 3);
+  assert.equal(allEx.editResults.length, 3);
+
+  // Manual invalid without editResults preserves 무효 / VOID
+  const manualInvalid = booth.resultView({
+    status: 'invalid', published: true, outcome: 'invalid', declaredCount: 2,
+    publicNote: '수정 내용을 확인할 수 없어요.',
+  });
+  assert.equal(manualInvalid.state, 'invalid');
+  assert.equal(manualInvalid.title, '이번 도전은 무효로 끝났어요');
+  assert.equal(manualInvalid.stamp.word, '무효');
+  assert.equal(manualInvalid.stamp.latin, 'VOID');
+  assert.equal(manualInvalid.editResults, undefined);
+  assert.equal(manualInvalid.excludedCount, undefined);
+});
+
+test('mixed ticket, all-excluded invalid ticket (same & other device), manual invalid, and mixed gallery cards render per-edit excluded explanations', async () => {
+  const threeEdits = [
+    {page: 5, before: 'Ragas 0.95', after: 'Ragas 0.50'},
+    {page: 2, before: 'we used 12 annotators', after: 'we used 30 annotators'},
+    {page: 3, before: 'utilize the model', after: 'use the model'},
+  ];
+  const mixedClaim = {
+    receipt: 'F-0801', status: 'judged', course: 'quick', declaredCount: 3,
+    createdAt: '2026-11-22T01:00:00Z', publishedAt: '2026-11-22T01:01:30Z',
+    published: true, outcome: 'missed',
+    publicNote: '심어 둔 결함 중 일부는 AI가 찾았어요.',
+    prizeMessage: 'AI가 놓쳤어요! 부스 스태프에게 이 화면을 보여 주면 작은 선물을 드려요.',
+    editResults: [
+      {index: 0, pageIndex: 4, verdict: 'caught', evidence: {quote: 'Ragas 0.50', rationale: '표 1 수치 모순', rationaleEn: 'Table 1 numeric conflict'}},
+      {index: 1, pageIndex: 1, verdict: 'missed'},
+      {index: 2, pageIndex: 2, verdict: 'excluded', evidence: {rationale: '문맥상 뜻이 같은 동의어 교체예요.', rationaleEn: 'Contextual synonym swap only.'}},
+    ],
+  };
+  const allExcludedClaim = {
+    receipt: 'F-0802', status: 'invalid', course: 'quick', declaredCount: 3,
+    createdAt: '2026-11-22T01:00:00Z', publishedAt: '2026-11-22T01:01:40Z',
+    published: true, outcome: 'invalid',
+    publicNote: '이번 제출은 결함 판정 기준에 해당하지 않아 무효로 처리되었어요.',
+    editResults: [
+      {index: 0, pageIndex: 4, verdict: 'excluded', evidence: {rationale: '오타만 바꾼 수정이에요.', rationaleEn: 'Simple typo edit.'}},
+      {index: 1, pageIndex: 1, verdict: 'excluded', evidence: {rationale: '뜻이 같은 단어 교체예요.', rationaleEn: 'Same-meaning word swap.'}},
+      {index: 2, pageIndex: 2, verdict: 'excluded', evidence: {rationale: '서식 변경에 가까워요.', rationaleEn: 'Formatting-only edit.'}},
+    ],
+  };
+  const oneExcludedClaim = {
+    receipt: 'F-0803', status: 'invalid', course: 'quick', declaredCount: 1,
+    createdAt: '2026-11-22T01:00:00Z', publishedAt: '2026-11-22T01:01:45Z',
+    published: true, outcome: 'invalid',
+    editResults: [
+      {index: 0, pageIndex: 4, verdict: 'excluded', evidence: {rationale: '단순 오타 수정이에요.', rationaleEn: 'Typo only.'}},
+    ],
+  };
+  const manualInvalidClaim = {
+    receipt: 'F-0804', status: 'invalid', course: 'quick', declaredCount: 1,
+    createdAt: '2026-11-22T01:00:00Z', publishedAt: '2026-11-22T01:01:50Z',
+    published: true, outcome: 'invalid',
+    publicNote: '원본과 동일한 파일이에요.',
+  };
+
+  // Same device (local edits present)
+  const storage = memoryStorage();
+  booth.rememberReceipt(storage, {receipt: 'F-0801', claimKey: '7Q3K-M9XD', createdAt: '2026-11-20T01:00:00Z', title: 'Ragas', pages: [2, 3, 5], count: 3, edits: threeEdits});
+  booth.rememberReceipt(storage, {receipt: 'F-0802', claimKey: '7Q3K-M9XD', createdAt: '2026-11-20T01:00:01Z', title: 'Ragas', pages: [2, 3, 5], count: 3, edits: threeEdits});
+  booth.rememberReceipt(storage, {receipt: 'F-0804', claimKey: '7Q3K-M9XD', createdAt: '2026-11-20T01:00:02Z', title: 'Ragas', pages: [5], count: 1, edits: [threeEdits[0]]});
+  const h = liveBooth({
+    storage,
+    features: {gallery: true, forfeit: true},
+    ownerState: {used: 3, perOwner: 3, unlocked: true},
+    claims: [mixedClaim, allExcludedClaim, manualInvalidClaim],
+    leaderboardReply: () => ({
+      ok: true, status: 200, headers: {get() {return null;}},
+      json: async () => ({
+        entries: [{
+          paperKey: '2309.15217',
+          paper: {id: '2309.15217v1', title: 'Ragas', source: 'mission', license: 'cc-by-4.0'},
+          round: 'live', outcome: 'missed', assist: 'manual',
+          edits: [
+            {index: 0, pageIndex: 4, defectType: 'number', before: '0.95', after: '0.50', verdict: 'caught', evidence: {quote: '0.50', rationale: '수치 모순', rationaleEn: 'Numeric conflict'}},
+            {index: 1, pageIndex: 1, defectType: 'logic', before: '12', after: '30', verdict: 'missed'},
+            {index: 2, pageIndex: 2, defectType: 'other', before: 'utilize', after: 'use', verdict: 'excluded', evidence: {rationale: '동의어 교체예요.', rationaleEn: 'Synonym swap only.'}},
+          ],
+        }],
+        nextCursor: null,
+      }),
+    }),
+  });
+  await settle();
+
+  // 1) Mixed 3-edit ticket on same device
+  h.ids.get('booth-claim-receipt').value = 'F-0801';
+  h.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(h.text('booth-live-title'), '2개 중 1개가 AI 눈을 피했어요');
+  assert.equal(h.ids.get('booth-live-excluded').hidden, false);
+  assert.equal(h.text('booth-live-excluded'), '판정 대상 2곳 · 판정 제외 1곳');
+  const mixedItems = nodesOf(h.ids.get('booth-live-declared')).filter(n => n.className === 'booth-declared-item');
+  assert.equal(mixedItems.length, 3);
+  assert.deepEqual(mixedItems.map(item => nodesOf(item).find(n => String(n.className).startsWith('booth-edit-verdict')).textContent), ['AI가 찾음', 'AI가 놓침', '판정 제외']);
+  assert.equal(nodesOf(mixedItems[2]).some(n => n.tagName === 'blockquote'), false, 'excluded item renders no quote');
+  assert.equal(nodesOf(mixedItems[2]).find(n => n.className === 'booth-txt booth-opinion-ko').textContent, '문맥상 뜻이 같은 동의어 교체예요.');
+  assert.equal(nodesOf(mixedItems[2]).find(n => n.className === 'booth-txt booth-opinion-en').textContent, 'Contextual synonym swap only.');
+
+  // 2) All-excluded 3-edit invalid ticket on same device
+  h.ids.get('booth-claim-receipt').value = 'F-0802';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(h.text('booth-live-title'), '3개 모두 판정 제외예요');
+  assert.equal(h.ids.get('booth-stamp').className, 'booth-stamp void wide');
+  assert.equal(h.text('booth-stamp-word'), '판정 제외');
+  assert.equal(h.text('booth-stamp-latin'), 'EXCLUDED');
+  assert.equal(h.ids.get('booth-live-excluded').hidden, true);
+  assert.equal(h.ids.get('booth-live-rule').hidden, true);
+  assert.equal(h.ids.get('booth-final').hidden, true);
+  assert.equal(h.ids.get('booth-ticket-duration-cell').hidden, true);
+  assert.equal(h.ids.get('booth-live-findings').hidden, true);
+  const allExItems = nodesOf(h.ids.get('booth-live-declared')).filter(n => n.className === 'booth-declared-item');
+  assert.equal(allExItems.length, 3);
+  assert.deepEqual(allExItems.map(item => nodesOf(item).find(n => n.className === 'booth-txt booth-opinion-ko').textContent), [
+    '오타만 바꾼 수정이에요.', '뜻이 같은 단어 교체예요.', '서식 변경에 가까워요.',
+  ]);
+  assert.deepEqual(allExItems.map(item => nodesOf(item).find(n => n.className === 'booth-txt booth-opinion-en').textContent), [
+    'Simple typo edit.', 'Same-meaning word swap.', 'Formatting-only edit.',
+  ]);
+  assert.equal(booth.readReceipts(storage).find(r => r.receipt === 'F-0802').outcome, 'excluded');
+
+  // 3) Manual invalid without edits preserves 무효 / VOID / 운영진 안내
+  h.ids.get('booth-claim-receipt').value = 'F-0804';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(h.text('booth-live-title'), '이번 도전은 무효로 끝났어요');
+  assert.equal(h.ids.get('booth-stamp').className, 'booth-stamp void');
+  assert.equal(h.text('booth-stamp-word'), '무효');
+  assert.equal(h.text('booth-stamp-latin'), 'VOID');
+  assert.equal(h.ids.get('booth-live-excluded').hidden, true);
+  assert.equal(h.ids.get('booth-live-findings').hidden, true);
+  assert.match(h.text('booth-live-note'), /운영진 안내원본과 동일한 파일이에요\./);
+  assert.equal(nodesOf(h.ids.get('booth-live-declared')).some(n => String(n.className).startsWith('booth-edit-verdict')), false);
+  assert.equal(booth.readReceipts(storage).find(r => r.receipt === 'F-0804').outcome, 'invalid');
+
+  // 4) Mixed gallery card shows count pill, excluded badge, and KO/EN rationale
+  h.ids.get('booth-live-leaderboard').click();
+  await settle();
+  const lbText = h.text('booth-lb-list');
+  assert.match(lbText, /판정 대상 2곳 · 판정 제외 1곳/);
+  assert.match(lbText, /판정 제외/);
+  assert.match(lbText, /제외 사유/);
+  assert.match(lbText, /동의어 교체예요\./);
+  assert.match(lbText, /Synonym swap only\./);
+  h.handle.destroy();
+
+  // 5) Other device (no local edits): all-excluded 1-edit and 3-edit tickets show all explanations in #booth-live-findings
+  const other = liveBooth({claims: [allExcludedClaim, oneExcludedClaim]});
+  await settle();
+  other.ids.get('booth-claim-receipt').value = 'F-0802';
+  other.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+  other.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(other.ids.get('booth-live-declared').hidden, true);
+  assert.equal(other.ids.get('booth-live-findings').hidden, false);
+  assert.equal(nodesOf(other.ids.get('booth-live-findings')).filter(n => n.className === 'booth-declared-item').length, 3);
+
+  other.ids.get('booth-claim-receipt').value = 'F-0803';
+  other.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(other.text('booth-live-title'), '이번 도전은 판정 제외예요');
+  assert.equal(other.ids.get('booth-live-declared').hidden, true);
+  assert.equal(other.ids.get('booth-live-findings').hidden, false);
+  assert.match(other.text('booth-live-findings'), /단순 오타 수정이에요\./);
+  other.handle.destroy();
+});
