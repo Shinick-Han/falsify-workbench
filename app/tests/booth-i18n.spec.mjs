@@ -255,8 +255,8 @@ test('dictionary and pattern translation, vars interpolation, and whitespace pre
   assert.equal(i18n.t('전체 1,085자'), '1,085 chars total');
   // Per-defect fair results (sx96) strings and count patterns
   assert.equal(
-    i18n.t('공개 논문을 몰래 고쳐 보세요. AI가 보통 1~3분 안에 찾아내는지 겨뤄요. 심은 결함 중 하나라도 AI가 놓치면 부스에서 선물을 드려요.'),
-    'Sneak defects into an open paper and see if AI catches them (usually 1–3 min). If the AI misses even one, win a prize at the booth.',
+    i18n.t('공개 논문을 몰래 고쳐 보세요. AI가 결함을 찾아내는지 겨뤄요. 심은 결함 중 하나라도 AI가 놓치면 부스에서 선물을 드려요.'),
+    'Sneak defects into an open paper and see if AI catches them. If the AI misses even one, win a prize at the booth.',
   );
   assert.equal(
     i18n.t('심은 결함 중 하나라도 AI가 놓치면 성공이에요.'),
@@ -532,7 +532,7 @@ test('v2 leaderboard, opt-in consent, and first-30 prize notices translate clean
   const {i18n} = loadI18n();
   i18n.setLang('en');
   const samples = [
-    '공개 논문을 몰래 고쳐 보세요. AI가 보통 1~3분 안에 찾아내는지 겨뤄요. 심은 결함 중 하나라도 AI가 놓치면 먼저 승리한 선착순 30분(1인 1회)께 부스에서 선물을 드려요.',
+    '공개 논문을 몰래 고쳐 보세요. AI가 결함을 찾아내는지 겨뤄요. 심은 결함 중 하나라도 AI가 놓치면 먼저 승리한 선착순 30분(1인 1회)께 부스에서 선물을 드려요.',
     '심은 결함 중 하나라도 AI가 놓치면 성공이에요. 현장 선물은 먼저 승리한 선착순 30분(1인 1회)께 드려요.',
     '먼저 승리한 선착순 30분께 부스에서 드려요. 이 화면을 보여 주세요.',
     '현장 선착순 30명 선물과 별도로, 마감 후 더 정밀한 AI가 한 번 더 검증해요. 그때도 못 찾으면 최종 추첨 대상이에요.',

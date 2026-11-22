@@ -29,7 +29,7 @@
   const POLL_FAST_UNTIL=180000;
   const POLL_STOP_AT=900000;
   const POLL_429_MS=60000;
-  const PENDING_COPY='AI가 결함을 찾는 중이에요. 보통 1~3분 걸려요. 이 화면을 닫아도 접수번호와 확인키로 나중에 볼 수 있어요.';
+  const PENDING_COPY='AI가 결함을 찾는 중이에요. 이 화면을 닫아도 접수번호와 확인키로 나중에 볼 수 있어요.';
   const POLL_STOP_COPY='자동 확인을 멈췄어요. 「결과 다시 보기」를 눌러 주세요.';
   const STEP_QUEUED='차례가 오면 AI가 앞뒤 문장과 표를 대조해요';
   const STEP_CHECKING='AI가 앞뒤 문장과 표를 대조하는 중';
@@ -45,7 +45,7 @@
     invalid:{kind:'void',word:'무효',latin:'VOID'},
     withdrawn:{kind:'void',word:'철회',latin:'WITHDRAWN'}
   };
-  const HERO_COPY='공개 논문을 몰래 고쳐 보세요. AI가 보통 1~3분 안에 찾아내는지 겨뤄요. 심은 결함 중 하나라도 AI가 놓치면 먼저 승리한 선착순 30분(1인 1회)께 부스에서 선물을 드려요.';
+  const HERO_COPY='공개 논문을 몰래 고쳐 보세요. AI가 결함을 찾아내는지 겨뤄요. 심은 결함 중 하나라도 AI가 놓치면 먼저 승리한 선착순 30분(1인 1회)께 부스에서 선물을 드려요.';
   const RULE_COPY='심은 결함 중 하나라도 AI가 놓치면 성공이에요. 현장 선물은 먼저 승리한 선착순 30분(1인 1회)께 드려요.';
   const GIFT_SUB_COPY='먼저 승리한 선착순 30분께 부스에서 드려요. 이 화면을 보여 주세요.';
   const GALLERY_CONSENT_LABEL='내가 바꾼 문장과 AI 판정을 행사 갤러리에 공개할게요 (선택)';
@@ -111,7 +111,7 @@
   const DESK_QUERY='(min-width:1024px)';
   const DESK_STEP={pick:1,edit:2,send:3,ticket:3};
   const DESK_STEPS=['논문 고르기','몰래 고치기','AI 검증'];
-  const HOWTO=[['01','논문 고르기','미션 논문이나 공개 논문 하나'],['02','몰래 고치기','숫자, 문장, 결론 어디든 한 곳 이상'],['03','AI 검증','보통 1~3분, 접수번호로 결과 확인']];
+  const HOWTO=[['01','논문 고르기','미션 논문이나 공개 논문 하나'],['02','몰래 고치기','숫자, 문장, 결론 어디든 한 곳 이상'],['03','AI 검증','접수번호로 결과 확인']];
   const DOCK_CHIPS=3;
   const TIMED=['caught','partial','missed'];
   const CHIP_TEXT=14;

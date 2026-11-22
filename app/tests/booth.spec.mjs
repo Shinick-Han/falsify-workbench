@@ -573,7 +573,7 @@ test('the booth mounts only when enabled and starts on pick', async () => {
   assert.equal(h.text('booth-title'), 'AI를 속일 수있을까요?');
   assert.equal(nodesOf(h.ids.get('booth-title')).find(node => node.tagName === 'b').textContent, '속일 수');
   assert.match(h.text('booth-step-pick'), /AI REVIEW CHALLENGE/);
-  assert.match(h.text('booth-step-pick'), /공개 논문을 몰래 고쳐 보세요\. AI가 보통 1~3분 안에 찾아내는지 겨뤄요\. 심은 결함 중 하나라도 AI가 놓치면 먼저 승리한 선착순 30분\(1인 1회\)께 부스에서 선물을 드려요\./);
+  assert.match(h.text('booth-step-pick'), /공개 논문을 몰래 고쳐 보세요\. AI가 결함을 찾아내는지 겨뤄요\. 심은 결함 중 하나라도 AI가 놓치면 먼저 승리한 선착순 30분\(1인 1회\)께 부스에서 선물을 드려요\./);
   assert.doesNotMatch(h.text('booth-step-pick'), /2분 안에/);
   assert.match(h.text('booth-step-pick'), /01논문 고르기.*02몰래 고치기.*03AI 검증/);
   assert.equal(h.text('booth-search-box').startsWith('다른 공개 논문 직접 찾기'), true);
@@ -1260,7 +1260,7 @@ test('the desktop top bar marks the current step bold and earlier steps done', a
 test('the desktop pick step adds the how-to list, the cap line and the mission count', async () => {
   const h = liveBooth({perOwner: 3});
   await settle();
-  assert.equal(h.text('booth-howto'), '01논문 고르기미션 논문이나 공개 논문 하나02몰래 고치기숫자, 문장, 결론 어디든 한 곳 이상03AI 검증보통 1~3분, 접수번호로 결과 확인');
+  assert.equal(h.text('booth-howto'), '01논문 고르기미션 논문이나 공개 논문 하나02몰래 고치기숫자, 문장, 결론 어디든 한 곳 이상03AI 검증접수번호로 결과 확인');
   assert.equal(h.text('booth-pick-limit'), '1인 3번까지 · 이름·연락처는 받지 않아요');
   // Phones see the rules line and the how-to too: neither is a desktop-only node, and the line follows the hero.
   for (const id of ['booth-howto', 'booth-pick-limit']) assert.equal(h.ids.get(id).className.split(' ').includes('booth-desk'), false, id);
@@ -1728,7 +1728,7 @@ test('each claim state maps to the visitor ticket copy', () => {
   assert.equal(pending.state, 'pending');
   assert.equal(pending.final, false);
   assert.equal(pending.stamp, null);
-  assert.equal(pending.title, 'AI가 결함을 찾는 중이에요. 보통 1~3분 걸려요. 이 화면을 닫아도 접수번호와 확인키로 나중에 볼 수 있어요.');
+  assert.equal(pending.title, 'AI가 결함을 찾는 중이에요. 이 화면을 닫아도 접수번호와 확인키로 나중에 볼 수 있어요.');
   assert.equal(booth.resultView({status: 'received', published: false}).state, 'pending');
   assert.equal(booth.resultView({status: 'judged', published: false, outcome: 'missed'}).state, 'pending');
   const caught = booth.resultView({status: 'judged', published: true, outcome: 'caught', publicNote: '3쪽 표의 값을 짚었어요', prizeMessage: ' 정밀 AI는 찾았지만 선물은 유효해요 '});
