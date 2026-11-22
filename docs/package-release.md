@@ -16,7 +16,7 @@ Other WASM paths and private PDFs are rejected; three hash-pinned synthetic PDF 
 
 ## Workflow
 
-`.github/workflows/pages.yml` runs verify jobs on a push to `main` and on `workflow_dispatch` of any branch. The deploy job runs only when `github.ref == refs/heads/main` and the verify jobs passed. A feature-branch dispatch is verify-only. The verify job uploads its tested `app/dist` as `verified-app-dist`; deploy downloads that artifact and creates the separate Pages artifact. A clean detached worktree at the workflow commit produces the source ZIP for mandatory packaged harness acceptance.
+`.github/workflows/pages.yml` runs verify jobs on a push to `main` and on `workflow_dispatch` of any branch. The deploy job runs only when `github.ref == refs/heads/main` and the verify jobs passed. A feature-branch dispatch is verify-only. The verify job packages its tested `app/dist` as a Pages artifact named for the verification attempt. The deploy job publishes that artifact by name. Retrying deployment reuses the verified upload. A clean detached worktree at the workflow commit produces the source ZIP for mandatory packaged harness acceptance.
 
 `verify-macos-arm` (`macos-26`) and `verify-macos-intel` (`macos-15-intel`) use Node 24 and Python 3.12 and run `scripts/test-posix-connection.sh` plus `scripts/test-macos-handler.sh`. The latter compiles and registers an isolated test scheme with real macOS tools, then unregisters it; it does not click a native approval dialog. Windows keeps PowerShell 7 (`pwsh`) and Windows PowerShell 5.1 (`powershell`).
 

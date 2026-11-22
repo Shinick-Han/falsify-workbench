@@ -178,9 +178,13 @@ test('MuPDF browser CI installs dependencies before the test and rejects a skip'
 
 test('Pages deploys the verified dist and requires the produced ZIP acceptance', () => {
   const deploy = workflow.slice(workflow.indexOf('\n  deploy:'));
-  assert.match(workflow, /actions\/upload-artifact@v4[\s\S]*name: verified-app-dist[\s\S]*path: app\/dist/);
-  assert.match(deploy, /actions\/download-artifact@v4[\s\S]*name: verified-app-dist[\s\S]*path: app\/dist/);
-  assert.doesNotMatch(deploy, /actions\/checkout/);
+  const verify = workflow.slice(0, workflow.indexOf('  verify-windows-launcher:'));
+  const artifactName = 'verified-app-dist-${{ github.run_attempt }}';
+  assert.ok(verify.includes('pages_artifact: ' + artifactName));
+  assert.ok(verify.includes('name: ' + artifactName));
+  assert.match(verify, /test_packaged_harness\.py[\s\S]*actions\/upload-pages-artifact@v3[\s\S]*path: app\/dist/);
+  assert.match(deploy, /artifact_name: \$\{\{ needs\.verify\.outputs\.pages_artifact \}\}/);
+  assert.doesNotMatch(deploy, /actions\/(?:checkout|upload-pages-artifact)/);
   assert.match(workflow, /git worktree add --detach [^\n]+\$GITHUB_SHA/);
   assert.match(workflow, /FALSIFY_RELEASE_ZIP=[^\n]+test_packaged_harness\.py/);
   assert.match(readFileSync(join(root, 'scripts/test-macos-native.sh'), 'utf8'), /FALSIFY_RELEASE_ZIP=[^\n]+test_packaged_harness\.py/);

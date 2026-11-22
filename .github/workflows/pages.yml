@@ -10,6 +10,8 @@ concurrency:
   cancel-in-progress: false
 jobs:
   verify:
+    outputs:
+      pages_artifact: verified-app-dist-${{ github.run_attempt }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -123,11 +125,10 @@ jobs:
           archive="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["archive"])' "$RUNNER_TEMP/release/release-manifest.json")"
           FALSIFY_RELEASE_ZIP="$RUNNER_TEMP/release/$archive" python app/tests/test_packaged_harness.py -v
       - name: Preserve verified Pages assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-pages-artifact@v3
         with:
-          name: verified-app-dist
+          name: verified-app-dist-${{ github.run_attempt }}
           path: app/dist
-          if-no-files-found: error
   verify-windows-launcher:
     runs-on: windows-latest
     steps:
@@ -233,14 +234,9 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: verified-app-dist
-          path: app/dist
       - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: app/dist
       - name: Deploy
         id: deployment
         uses: actions/deploy-pages@v4
+        with:
+          artifact_name: ${{ needs.verify.outputs.pages_artifact }}
