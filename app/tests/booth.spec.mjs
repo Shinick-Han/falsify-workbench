@@ -469,6 +469,7 @@ function liveBooth(options = {}) {
       return reply(200, {galleryConsent: body.galleryConsent === true});
     }
     if (path.endsWith('/v1/booth/claim') || path.endsWith('/v1/booth/withdraw')) {
+      if (path.endsWith('/v1/booth/claim') && options.claimReply) return options.claimReply(full, init);
       const next = path.endsWith('/v1/booth/withdraw') ? options.withdrawn : (claims.length > 1 ? claims.shift() : claims[0]);
       if (next && next.status && next.body) return reply(next.status, next.body, next.headers);
       if (!next) return reply(404, {error: {code: 'not_found'}});
@@ -4193,4 +4194,119 @@ test('mixed ticket, all-excluded invalid ticket (same & other device), manual in
   assert.equal(other.ids.get('booth-live-findings').hidden, false);
   assert.match(other.text('booth-live-findings'), /단순 오타 수정이에요\./);
   other.handle.destroy();
+});
+
+test('a stalled claim poll aborts at 20 s, retries on schedule, and lands the published verdict', async () => {
+  let attempt = 0;
+  let aborted = 0;
+  const h = liveBooth({
+    claimReply: (_full, init) => {
+      attempt += 1;
+      if (attempt === 1) {
+        return {ok: true, status: 200, headers: {get() { return null; }}, json: async () => ({
+          receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1,
+          createdAt: '2026-11-22T01:00:30Z', published: false,
+        })};
+      }
+      if (attempt === 2) {
+        return new Promise((_resolve, reject) => {
+          assert.ok(init.signal, 'claim request passes an abort signal');
+          init.signal.addEventListener('abort', () => { aborted += 1; reject(new Error('aborted')); }, {once: true});
+        });
+      }
+      return {ok: true, status: 200, headers: {get() { return null; }}, json: async () => ({
+        receipt: 'F-0042', status: 'judged', course: 'quick', declaredCount: 1,
+        createdAt: '2026-11-22T01:00:30Z', publishedAt: '2026-11-22T01:01:30Z',
+        published: true, outcome: 'caught', publicNote: 'Found it',
+      })};
+    },
+  });
+  await settle();
+  await submitThroughBooth(h);
+  assert.equal(await h.tick(), 15000);
+  assert.equal(attempt, 1);
+  // Second poll stalls; 15 s poll timer triggers it, leaving the 20 s timeout timer pending.
+  assert.equal(await h.tick(), 15000);
+  assert.equal(attempt, 2);
+  assert.equal(aborted, 0);
+  assert.equal(await h.tick(), 20000);
+  assert.equal(aborted, 1, 'stalled claim fetch aborted at 20 s');
+  assert.equal(h.ids.get('booth-live-recheck').hidden, true, 'single timeout stays calm and keeps polling');
+  // Next scheduled poll recovers and lands the verdict.
+  assert.equal(await h.tick(), 15000);
+  assert.equal(attempt, 3);
+  assert.equal(h.text('booth-live-title'), 'AI가 찾아냈어요');
+  assert.equal(h.timers.length, 0);
+  assert.equal(h.intervals.length, 0);
+  h.handle.destroy();
+});
+
+test('repeated consecutive claim errors surface the alert and manual recheck while auto-polling still recovers', async () => {
+  const h = liveBooth({
+    claims: [
+      {receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:30Z', published: false},
+      {status: 502, body: {error: {code: 'internal_error'}}},
+      {status: 502, body: {error: {code: 'internal_error'}}},
+      {receipt: 'F-0042', status: 'judged', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:30Z',
+        publishedAt: '2026-11-22T01:02:00Z', published: true, outcome: 'missed', publicNote: 'Missed it'},
+    ],
+  });
+  await settle();
+  await submitThroughBooth(h);
+  assert.equal(await h.tick(), 15000);
+  // 1st 502 stays calm.
+  assert.equal(await h.tick(), 15000);
+  assert.equal(h.ids.get('booth-live-error').hidden, true);
+  assert.equal(h.ids.get('booth-live-recheck').hidden, true);
+  // 2nd consecutive 502 surfaces error + manual recheck while keeping auto-poll timer active.
+  assert.equal(await h.tick(), 15000);
+  assert.equal(h.ids.get('booth-live-error').hidden, false);
+  assert.match(h.text('booth-live-error'), /처리하지 못했어요/);
+  assert.equal(h.ids.get('booth-live-recheck').hidden, false);
+  assert.equal(h.timers.length, 1);
+  // Next poll succeeds: clears error, hides recheck, renders final verdict.
+  assert.equal(await h.tick(), 15000);
+  assert.equal(h.ids.get('booth-live-error').hidden, true);
+  assert.equal(h.ids.get('booth-live-recheck').hidden, true);
+  assert.equal(h.text('booth-live-title'), 'AI가 못 찾았어요');
+  h.handle.destroy();
+});
+
+test('leaving a pending ticket stops background polling and cancelling back from leaderboard resumes polling and clock', async () => {
+  const pending = {receipt: 'F-0042', status: 'reviewing', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:30Z', published: false};
+  const h = liveBooth({
+    features: {gallery: true, forfeit: true},
+    ownerState: {used: 1, perOwner: 3, unlocked: false},
+    summaryReply: {judged: 0, missed: 0, pending: 1, conqueredCount: 0, conqueredPapers: []},
+    claims: [pending],
+  });
+  await settle();
+  await submitThroughBooth(h);
+  assert.equal(await h.tick(), 15000);
+  assert.equal(h.timers.length, 1);
+  assert.equal(h.intervals.length, 1);
+
+  // Opening leaderboard from pending ticket stops background poll and clock.
+  h.ids.get('booth-desk-leaderboard').click();
+  await settle();
+  assert.equal(h.step(), 'pick');
+  assert.equal(h.timers.length, 0, 'no background poll while on leaderboard');
+  assert.equal(h.intervals.length, 0, 'clock stopped while on leaderboard');
+
+  // Cancelling back to the pending ticket resumes polling at once and restarts the elapsed clock.
+  const callsBeforeReturn = h.claimCalls().length;
+  h.ids.get('booth-lb-unlock-cancel').click();
+  await settle();
+  assert.equal(h.step(), 'ticket');
+  assert.equal(h.claimCalls().length, callsBeforeReturn + 1, 'returning to pending ticket polls at once');
+  assert.equal(h.timers.length, 1, 'polling schedule resumed');
+  assert.equal(h.intervals.length, 1, 'elapsed clock restarted');
+
+  // Opening 내 기록 from pending ticket also stops background polling.
+  h.ids.get('booth-desk-records').click();
+  await settle();
+  assert.equal(h.step(), 'pick');
+  assert.equal(h.timers.length, 0, 'no background poll while on 내 기록');
+  assert.equal(h.intervals.length, 0);
+  h.handle.destroy();
 });

@@ -29,6 +29,8 @@
   const POLL_FAST_UNTIL=180000;
   const POLL_LONG_WAIT_AT=900000;
   const POLL_429_MS=60000;
+  const CLAIM_TIMEOUT_MS=20000;
+  const POLL_ERROR_AFTER=2;
   const PENDING_COPY='AI가 결함을 찾는 중이에요. 이 화면을 닫아도 접수번호와 확인키로 나중에 볼 수 있어요.';
   const STEP_QUEUED='차례가 오면 AI가 앞뒤 문장과 표를 대조해요';
   const STEP_CHECKING='AI가 앞뒤 문장과 표를 대조하는 중';
@@ -887,7 +889,7 @@
     let dockPopOpen=false;
     const listeners=[];
     const course='quick';
-    let poll={token:0,timer:null,startedAt:0,receipt:'',claimKey:'',stopped:false,last:null};
+    let poll={token:0,timer:null,abort:null,startedAt:0,receipt:'',claimKey:'',stopped:false,last:null,failures:0};
     let waiting=false;
     const rt=runtime();
     const wake=rt&&typeof rt.wake==='function'?rt.wake(root.navigator):null;
@@ -1343,22 +1345,50 @@
       const retry=status===429?retryAfterMs(headerValue(res.headers,'Retry-After'),now()):0;
       throw coded(errorCodeFrom(data)||fallback,data,status,retry);
     }
+    function bindAbort(parent, abort){
+      if(!parent) return ()=>{};
+      if(parent.aborted){abort();return ()=>{};}
+      if(typeof parent.addEventListener!=='function') return ()=>{};
+      parent.addEventListener('abort',abort,{once:true});
+      return ()=>{if(typeof parent.removeEventListener==='function') parent.removeEventListener('abort',abort);};
+    }
+    function requestSignal(spec){
+      const timeout=Number(spec.timeout)>0?Number(spec.timeout):0;
+      const parent=spec.signal||null;
+      if(!timeout||typeof AbortController!=='function') return {signal:parent||undefined,timedOut:()=>false,done(){}};
+      const controller=new AbortController();
+      const abort=()=>{try{controller.abort();}catch{}};
+      let timedOut=false;
+      const unbind=bindAbort(parent,abort);
+      const timer=later?later(()=>{timedOut=true;abort();},timeout):null;
+      return {
+        signal:controller.signal,
+        timedOut:()=>timedOut,
+        done(){if(timer!=null&&cancel) cancel(timer);unbind();}
+      };
+    }
     async function request(path, spec){
       const base=requestBase();
       if(!base||typeof fetchImpl!=='function') throw coded('network');
       const headers={Accept:'application/json'};
       const payload=requestPayload(spec, headers);
       await requestAuth(spec, headers);
-      let res=null;
+      const guard=requestSignal(spec);
       try{
-        res=await fetchImpl(base+path,{
-          method:spec.method||'GET',headers,
-          body:payload,signal:spec.signal,
-          credentials:'omit',cache:'no-store',redirect:'error'
-        });
-      }catch{throw coded(offlineCode('network'));}
-      if(spec.pdf) return pdfResult(res);
-      return jsonResult(res);
+        let res=null;
+        try{
+          res=await fetchImpl(base+path,{
+            method:spec.method||'GET',headers,
+            body:payload,signal:guard.signal,
+            credentials:'omit',cache:'no-store',redirect:'error'
+          });
+        }catch{throw coded(offlineCode('network'));}
+        const out=spec.pdf?await pdfResult(res):await jsonResult(res);
+        if(guard.timedOut()) throw coded(offlineCode('network'));
+        return out;
+      }finally{
+        guard.done();
+      }
     }
     function galleryEnabled(){
       return featuresOf(liveConfig).gallery;
@@ -1846,6 +1876,8 @@
       if(lbReturnStep==='ticket'&&ticket){
         lbReturnStep='pick';
         setStep('ticket');
+        if(waiting&&!poll.stopped&&poll.last) startClock(createdAtOf(poll.last));
+        if(waiting) onReturn();
         return;
       }
       setHidden('booth-result',true);
@@ -2913,12 +2945,12 @@
        Worker, so a venue NAT full of pollers cannot run the per-IP claim bucket dry. A Worker without the
        GET route answers 405 once; the page then keeps the older POST. */
     let claimByGet=true;
-    async function claimRequest(receipt, claimKey){
+    async function claimRequest(receipt, claimKey, signal){
       if(claimByGet){
-        try{return await request('/v1/booth/claim?receipt='+encodeURIComponent(receipt)+'&key='+encodeURIComponent(claimKey),{method:'GET',auth:false});}
+        try{return await request('/v1/booth/claim?receipt='+encodeURIComponent(receipt)+'&key='+encodeURIComponent(claimKey),{method:'GET',auth:false,signal,timeout:CLAIM_TIMEOUT_MS});}
         catch(error){if(error.status!==405) throw error;claimByGet=false;}
       }
-      return request('/v1/booth/claim',{method:'POST',auth:false,body:{receipt,claimKey}});
+      return request('/v1/booth/claim',{method:'POST',auth:false,body:{receipt,claimKey},signal,timeout:CLAIM_TIMEOUT_MS});
     }
     async function lookup(event){
       stopEvent(event);
@@ -3316,6 +3348,7 @@
       poll.token+=1;
       if(poll.timer!=null&&cancel) cancel(poll.timer);
       poll.timer=null;
+      if(poll.abort){try{poll.abort.abort();}catch{}poll.abort=null;}
     }
     function beginPolling(receipt, claimKey, immediate){
       const resume=poll.stopped&&waiting?poll.last:null;
@@ -3324,6 +3357,7 @@
       poll.receipt=receipt;
       poll.claimKey=claimKey;
       poll.stopped=false;
+      poll.failures=0;
       if(resume) renderPending(resume);
       setHidden('booth-live-recheck',true);
       if(immediate) void pollOnce(poll.token);
@@ -3344,24 +3378,40 @@
     function pollFailed(token, error){
       if(error.code==='not_found'){liveError(errorMessage('not_found'));pollStopped();return;}
       if(error.code==='offline'){liveError(errorMessage('offline'));offerRetry('booth-live-error',error,recheck);}
+      else if(error.status!==429){
+        poll.failures+=1;
+        if(poll.failures>=POLL_ERROR_AFTER){
+          liveError(errorMessage(error.code,error));
+          setHidden('booth-live-recheck',false);
+        }
+      }
       schedulePoll(token,error.status===429?(error.retryAfter||POLL_429_MS):0);
+    }
+    function pollActive(token){
+      return !closed&&token===poll.token&&step==='ticket';
     }
     /* A hidden tab does not poll. onReturn asks again as soon as the tab is visible. */
     async function pollOnce(token){
-      if(closed||token!==poll.token) return;
+      if(!pollActive(token)) return;
       poll.timer=null;
       if(!visibleNow()) return;
+      const controller=typeof AbortController==='function'?new AbortController():null;
+      poll.abort=controller;
       let data=null;
-      try{data=await claimRequest(poll.receipt,poll.claimKey);}
+      try{data=await claimRequest(poll.receipt,poll.claimKey,controller?controller.signal:null);}
       catch(error){
-        if(!closed&&token===poll.token) pollFailed(token,error);
+        if(pollActive(token)) pollFailed(token,error);
         return;
+      }finally{
+        if(poll.abort===controller) poll.abort=null;
       }
-      if(closed||token!==poll.token) return;
+      if(!pollActive(token)) return;
+      poll.failures=0;
       if(!applyClaim(data).final) schedulePoll(token,0);
     }
     function recheck(){
       if(!poll.receipt||!poll.claimKey) return;
+      liveError('');
       beginPolling(poll.receipt,poll.claimKey,true);
     }
     /* Back on the tab (visibilitychange or pageshow): a pending result is asked for at once, including during longer reviews. The screen stays on while the result is pending. */
@@ -3479,7 +3529,7 @@
       const html=doc.documentElement;
       if(html&&html.dataset) html.dataset.boothStep=next;
       renderDeskSteps(next);
-      if(next!=='ticket') stopClock();
+      if(next!=='ticket'){stopPolling();stopClock();}
       syncWake();
       if(next==='edit'){renderHint();renderCredit();renderDock();}
       if(next==='send'){renderRows();if(!generatedFile&&liveEdits().length) void beginMake();}
