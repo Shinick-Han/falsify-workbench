@@ -21,6 +21,7 @@ const exemptions = new Map(Object.entries({
   'booth-textlayer-accuracy-browser.spec.cjs': 'manual browser harness',
   'booth-r1r2-browser.spec.cjs': 'manual browser harness',
   'booth-i18n-browser.spec.cjs': 'manual browser harness',
+  'booth-excluded-browser.spec.cjs': 'Pages browser suite',
   'booth-perdefect-browser.spec.cjs': 'manual browser harness',
   'booth-tries-browser.spec.cjs': 'manual browser harness',
   'booth-search-open-browser.spec.cjs': 'manual browser harness',
