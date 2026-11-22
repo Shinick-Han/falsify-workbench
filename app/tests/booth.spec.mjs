@@ -1024,9 +1024,10 @@ test('the ticket polls the claim view until the AI result is published', async (
   h.handle.destroy();
 });
 
-test('polling stops after 15 min with a recheck button and lookups reuse the ticket', async () => {
+test('an open ticket receives a late result after 15 min without user action', async () => {
   const pending = {receipt: 'F-0042', status: 'received', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:00Z', published: false};
-  const h = liveBooth({claims: [pending]});
+  const final = {...pending, status: 'judged', outcome: 'caught', published: true};
+  const h = liveBooth({claims: [...Array(37).fill(pending), final]});
   await settle();
   h.ids.get('booth-result-link').dispatchEvent({type: 'click', preventDefault() {}});
   assert.equal(h.location.hash, '#booth-result');
@@ -1045,24 +1046,13 @@ test('polling stops after 15 min with a recheck button and lookups reuse the tic
   assert.equal(h.ids.get('booth-ticket-paper-cell').hidden, true);
   assert.equal(h.text('booth-ticket-pages'), '1곳');
   const delays = [];
-  while (h.timers.length) delays.push(await h.tick());
-  assert.equal(delays.length, 12 + 24);
+  for (let i = 0; i < 36; i += 1) delays.push(await h.tick());
   assert.equal(delays.reduce((sum, ms) => sum + ms, 0), 900000);
-  assert.equal(h.claimCalls().length, 1 + 36);
-  assert.equal(h.ids.get('booth-live-recheck').hidden, false);
-  assert.equal(h.text('booth-live-recheck'), '결과 다시 보기');
-  assert.equal(h.text('booth-ticket-state'), '자동 확인을 멈췄어요. 「결과 다시 보기」를 눌러 주세요.');
-  assert.equal(h.intervals.length, 0, 'the clock stops with polling');
-  assert.equal(h.ids.get('booth-ticket-wait').getAttribute('data-poll'), 'stopped');
-  h.ids.get('booth-live-recheck').click();
-  await settle();
+  assert.equal(h.timers[0].ms, 60000);
+  await h.tick();
   assert.equal(h.claimCalls().length, 38);
-  assert.equal(h.ids.get('booth-live-recheck').hidden, true);
-  assert.equal(h.text('booth-ticket-state'), 'AI 검증 차례를 기다리는 중');
-  assert.equal(h.intervals.length, 1);
-  assert.equal(h.ids.get('booth-ticket-wait').getAttribute('data-poll'), 'live');
-  assert.equal(h.timers.length, 1);
-  assert.equal(h.timers[0].ms, 15000);
+  assert.equal(h.ids.get('booth-ticket').getAttribute('data-state'), 'caught');
+  assert.equal(h.timers.length, 0);
   h.handle.destroy();
   assert.equal(h.timers.length, 0);
   assert.equal(h.intervals.length, 0);
@@ -1828,9 +1818,8 @@ test('a cold #booth-result load keeps the hash and index routes still resolve', 
 test('the claim poll runs every 15 s for 3 min, every 30 s to 15 min, and honours Retry-After', () => {
   const delays = [];
   let elapsed = 0;
-  for (;;) {
+  while (elapsed < 900000) {
     const delay = booth.nextPollDelay(elapsed, 0);
-    if (delay < 0) break;
     delays.push(delay);
     elapsed += delay;
   }
@@ -1838,12 +1827,12 @@ test('the claim poll runs every 15 s for 3 min, every 30 s to 15 min, and honour
   assert.equal(delays.slice(0, 12).every(ms => ms === 15000), true);
   assert.equal(delays.slice(12).every(ms => ms === 30000), true);
   assert.equal(elapsed, 900000);
-  assert.equal(booth.nextPollDelay(900000, 0), -1);
+  assert.equal(booth.nextPollDelay(900000, 0), 60000);
   assert.equal(booth.nextPollDelay(30000, 45000), 45000);
   assert.equal(booth.nextPollDelay(30000, 5000), 15000);
   assert.equal(booth.nextPollDelay(200000, 0), 30000);
-  assert.equal(booth.nextPollDelay(880000, 0), -1);
-  assert.equal(booth.nextPollDelay(800000, 200000), -1);
+  assert.equal(booth.nextPollDelay(880000, 0), 30000);
+  assert.equal(booth.nextPollDelay(800000, 200000), 200000);
   assert.equal(booth.retryAfterMs('45', 0), 45000);
   assert.equal(booth.retryAfterMs(' 7 ', 0), 7000);
   assert.equal(booth.retryAfterMs('99999', 0), 900000);
@@ -2901,7 +2890,7 @@ test('plan97s-4: waiting ticket shows queue position on received and falls back 
   h.handle.destroy();
 });
 
-test('plan97s-4: recheck after 15-min stop restores waiting label even if claim returns 500', async () => {
+test('a temporary claim error after 15 min keeps the pending ticket subscribed', async () => {
   const pending = {receipt: 'F-0042', status: 'received', course: 'quick', declaredCount: 1, published: false};
   const claims = Array.from({length: 37}, () => pending).concat([{status: 500, body: {error: {code: 'server_error'}}}]);
   const h = liveBooth({claims});
@@ -2911,13 +2900,10 @@ test('plan97s-4: recheck after 15-min stop restores waiting label even if claim 
   h.ids.get('booth-claim-key').value = '7Q3K-M9XD';
   h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
   await settle();
-  while (h.timers.length) await h.tick();
-  assert.equal(h.text('booth-ticket-state'), '자동 확인을 멈췄어요. 「결과 다시 보기」를 눌러 주세요.');
-  h.ids.get('booth-live-recheck').click();
-  await settle();
-  assert.equal(h.text('booth-ticket-state'), 'AI 검증 차례를 기다리는 중');
-  assert.equal(h.ids.get('booth-live-recheck').hidden, true);
+  for (let i = 0; i < 37; i += 1) await h.tick();
+  assert.equal(h.claimCalls().length, 38);
   assert.equal(h.timers.length, 1);
+  assert.equal(h.timers[0].ms, 60000);
   h.handle.destroy();
 });
 

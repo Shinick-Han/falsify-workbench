@@ -27,10 +27,9 @@
   const POLL_FAST_MS=15000;
   const POLL_SLOW_MS=30000;
   const POLL_FAST_UNTIL=180000;
-  const POLL_STOP_AT=900000;
+  const POLL_LONG_WAIT_AT=900000;
   const POLL_429_MS=60000;
   const PENDING_COPY='AI가 결함을 찾는 중이에요. 이 화면을 닫아도 접수번호와 확인키로 나중에 볼 수 있어요.';
-  const POLL_STOP_COPY='자동 확인을 멈췄어요. 「결과 다시 보기」를 눌러 주세요.';
   const STEP_QUEUED='차례가 오면 AI가 앞뒤 문장과 표를 대조해요';
   const STEP_CHECKING='AI가 앞뒤 문장과 표를 대조하는 중';
   /* Headline as [plain lead, 600-weight phrase]. partial counts as found. */
@@ -477,12 +476,11 @@
   function recentReceipts(storage){
     return readReceipts(storage).slice(0,RECENT_CAP);
   }
-  /* 15 s for the first 3 min, then 30 s up to 15 min. A Retry-After wait only lengthens a step. -1 stops. */
+  /* Visible pending tickets slow down to one check per minute during long reviews. */
   function nextPollDelay(elapsedMs, retryMs){
     const elapsed=Number(elapsedMs)>0?Number(elapsedMs):0;
-    const base=elapsed<POLL_FAST_UNTIL?POLL_FAST_MS:POLL_SLOW_MS;
-    const wait=Math.max(base,Number(retryMs)>0?Number(retryMs):0);
-    return elapsed+wait<=POLL_STOP_AT?wait:-1;
+    const base=elapsed>=POLL_LONG_WAIT_AT?60000:(elapsed<POLL_FAST_UNTIL?POLL_FAST_MS:POLL_SLOW_MS);
+    return Math.max(base,Number(retryMs)||0);
   }
   /* Claim view queue {ahead, slots, etaSec} (cloud/api/src/booth.mjs queueView). Position only, no ETA. '' when nobody is ahead. */
   function queueLabel(queue){
@@ -494,10 +492,10 @@
   function retryAfterMs(value, nowMs){
     const text=typeof value==='string'?value.trim():'';
     if(!text) return 0;
-    if(/^\d{1,7}$/.test(text)) return Math.min(Number(text)*1000,POLL_STOP_AT);
+    if(/^\d{1,7}$/.test(text)) return Math.min(Number(text)*1000,POLL_LONG_WAIT_AT);
     const at=Date.parse(text);
     if(!Number.isFinite(at)) return 0;
-    return Math.min(Math.max(at-Number(nowMs||0),0),POLL_STOP_AT);
+    return Math.min(Math.max(at-Number(nowMs||0),0),POLL_LONG_WAIT_AT);
   }
   function plainNote(value){
     return typeof value==='string'?value.slice(0,1000):'';
@@ -3340,7 +3338,6 @@
     }
     function schedulePoll(token, retryMs){
       const delay=nextPollDelay(now()-poll.startedAt,retryMs);
-      if(delay<0){pollStopped();setText('booth-ticket-state',POLL_STOP_COPY);return;}
       if(!later) return;
       poll.timer=later(()=>{void pollOnce(token);},delay);
     }
@@ -3367,8 +3364,7 @@
       if(!poll.receipt||!poll.claimKey) return;
       beginPolling(poll.receipt,poll.claimKey,true);
     }
-    /* Back on the tab (visibilitychange or pageshow): a pending result is asked for at once, and polling
-       that stopped after 15 min starts again. The screen stays on while the result is pending. */
+    /* Back on the tab (visibilitychange or pageshow): a pending result is asked for at once, including during longer reviews. The screen stays on while the result is pending. */
     function visibleNow(){
       return !doc.visibilityState||doc.visibilityState==='visible';
     }
@@ -3378,8 +3374,8 @@
     function onReturn(){
       syncWake();
       if(closed||!visibleNow()||step!=='ticket'||!waiting||!poll.receipt||!poll.claimKey) return;
-      /* Back after 15 min in the background: start a fresh 15 min instead of stopping right after one check. */
-      if(poll.stopped||now()-poll.startedAt>=POLL_STOP_AT){beginPolling(poll.receipt,poll.claimKey,true);return;}
+      /* Back after 15 min in the background: resume with the faster initial interval. */
+      if(poll.stopped||now()-poll.startedAt>=POLL_LONG_WAIT_AT){beginPolling(poll.receipt,poll.claimKey,true);return;}
       stopPolling();
       void pollOnce(poll.token);
     }
@@ -3425,7 +3421,7 @@
       const latest=readReceipts(storage)[0];
       if(!latest) return;
       const created=Date.parse(latest.createdAt);
-      const fresh=Number.isFinite(created)&&now()-created<POLL_STOP_AT;
+      const fresh=Number.isFinite(created)&&now()-created<POLL_LONG_WAIT_AT;
       if(location.hash!=='#booth-result'&&!fresh) return;
       if(location.hash!=='#booth-result'&&latest.outcome&&draftWaiting()) return;
       fillClaim(latest);

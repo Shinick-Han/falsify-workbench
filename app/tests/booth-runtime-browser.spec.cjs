@@ -209,17 +209,12 @@ async function returnPass(browser, pageErrors) {
   assert.equal(await until(async () => state.claims === 2, 3000), true, 'back on the tab polls at once');
   assert.equal(await page.evaluate(() => window.__wake.requests), 2, 'the wake lock is asked for again');
 
-  for (let i = 0; i < 40 && await page.locator('#booth-live-recheck').isHidden(); i += 1) {
-    await page.clock.fastForward(30000);
-    await new Promise(resolve => setTimeout(resolve, 30));
-  }
-  assert.equal(await page.locator('#booth-live-recheck').isVisible(), true, 'polling stopped after 15 min');
-  assert.equal(await page.locator('#booth-ticket-state').textContent(), '자동 확인을 멈췄어요. 「결과 다시 보기」를 눌러 주세요.');
-  assert.equal(await page.locator('#booth-ticket-wait').getAttribute('data-poll'), 'stopped');
-  const frozenAt = await page.locator('#booth-ticket-elapsed').textContent();
-  await page.clock.fastForward(5000);
-  await new Promise(resolve => setTimeout(resolve, 30));
-  assert.equal(await page.locator('#booth-ticket-elapsed').textContent(), frozenAt, 'clock is frozen while polling is stopped');
+  await page.clock.fastForward(16 * 60000);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  const claimsBeforeLatePoll = state.claims;
+  await page.clock.fastForward(60000);
+  assert.equal(await until(() => state.claims > claimsBeforeLatePoll), true, 'visible ticket keeps polling after 15 min');
+  assert.equal(await page.locator('#booth-ticket-wait').getAttribute('data-poll'), 'live');
   const stoppedAt = state.claims;
   await visibility(page, 'hidden');
   await visibility(page, 'visible');
