@@ -103,11 +103,11 @@
   const CAPTURE_COPY='이 티켓을 캡처해 두세요. 화면을 닫아도 「내 기록」에서 접수번호와 확인키로 다시 볼 수 있어요.';
   const KIOSK_CAPTURE_COPY='접수번호와 확인키가 보이게 휴대폰으로 이 티켓을 찍어 두세요. 내 휴대폰의 「내 기록」에서 두 코드로 결과를 볼 수 있어요.';
   const PROJECT_URL='https://github.com/Pseudo-Lab/Falsify';
-  const PROJECT_QR_SRC='falsify-project-qr.svg';
+  const PROJECT_QR_SRC='project-assets/project-qr.png';
   const PROJECT_WAIT_COPY='기다리는 동안 가짜연구소 Falsify 프로젝트를 둘러보세요. 마음에 들면 GitHub에서 ★를 눌러 주세요.';
   const PROJECT_LINK_LABEL='GitHub에서 보기 ★';
   const PROJECT_QR_CAPTION='휴대폰 카메라로 찍으면 Falsify 프로젝트가 열려요.';
-  const PROJECT_QR_ALT='가짜연구소 Falsify 프로젝트 GitHub QR 코드';
+  const PROJECT_QR_ALT='Falsify 프로젝트 소개 페이지 QR 코드';
   const GENERIC_HINT='숫자, 결론 문장, 표 값 중 한 곳을 골라 티 나지 않게 바꿔 보세요.';
   const FINAL_COPY='현장 선착순 30명 선물과 별도로, 마감 후 더 정밀한 AI가 한 번 더 검증해요. 그때도 못 찾으면 최종 추첨 대상이에요.';
   /* Desktop layout (booth.css, min-width 1024px): the top bar's step indicator and the dock's edit chips. */

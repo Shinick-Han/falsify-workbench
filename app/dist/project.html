@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Falsify · 논문을 읽는 AI, 무엇을 놓칠까요?</title>
+  <meta name="description" content="공개 논문에 결함을 심는 RED와 그 흔적을 찾는 BLUE. 숫자 하나가 바뀐 예시로 가짜연구소의 논문 검증 프로젝트 Falsify를 만나보세요.">
+  <meta property="og:title" content="Falsify · 논문을 읽는 AI, 무엇을 놓칠까요?">
+  <meta property="og:description" content="표에는 84%, 본문에는 94%. 논문을 읽는 AI는 이 차이를 발견할까요?">
+  <meta property="og:image" content="https://shinick-han.github.io/falsify-workbench/project-assets/falsify-hero.webp">
+  <link rel="canonical" href="https://shinick-han.github.io/falsify-workbench/project.html">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='6' fill='%2317191e'/%3E%3Cpath d='M12 9h17v4.5H17v5h10v4.5H17V30h-5z' fill='%23f7f3ea'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="project-assets/project.css">
+</head>
+<body id="top">
+  <a class="skip" href="#main">본문으로 건너뛰기</a>
+  <header class="mast">
+    <div class="wrap mast-inner">
+      <a class="wordmark" href="#top" aria-label="Falsify 맨 위로">Falsify<span aria-hidden="true">.</span></a>
+      <nav aria-label="페이지 메뉴">
+        <a href="#example">결함 예시</a>
+        <a href="#share">공유</a>
+        <a class="booth-link" href="event.html#booth">부스 체험 <span aria-hidden="true">↗</span></a>
+      </nav>
+    </div>
+  </header>
+  <main id="main">
+    <section class="wrap hero" aria-labelledby="headline">
+      <div class="hero-copy">
+        <p class="eyebrow">가짜연구소 · 시즌 13</p>
+        <h1 id="headline">논문을 읽는 AI,<br>무엇을 <em>놓칠까요?</em></h1>
+        <p class="lead">Falsify에서는 공개 논문의 사본에 그럴듯한 오류를 심습니다. 그리고 AI가 논문 속 근거를 찾아 그 오류를 짚어낼 수 있는지 시험합니다.</p>
+        <a class="action" href="#example">숫자 하나로 체험하기 <span aria-hidden="true">↓</span></a>
+      </div>
+      <img class="hero-art" src="project-assets/falsify-hero.webp" width="1672" height="941" alt="Falsify 프로젝트 삽화. 붉은 조명의 RED가 논문을 고치고, 파란 조명의 BLUE가 조사한 뒤, 함께 결과를 검토한다." fetchpriority="high">
+    </section>
+
+    <section id="example" class="example" aria-labelledby="example-title">
+      <div class="wrap">
+        <p class="eyebrow">설명용 가상 예시</p>
+        <h2 id="example-title">이 문장에서 오류를 찾아보세요.</h2>
+        <div class="specimen">
+          <div class="paper-pane">
+            <h3>표 1. 실험군 응답률</h3>
+            <table>
+              <thead><tr><th scope="col">응답자</th><th scope="col">참가자</th><th scope="col">응답률</th></tr></thead>
+              <tbody><tr><td>42명</td><td>50명</td><td><strong>84%</strong></td></tr></tbody>
+            </table>
+          </div>
+          <div class="paper-pane">
+            <h3>논문 본문</h3>
+            <blockquote>“실험군의 응답률은 <strong>94%</strong>였다.”</blockquote>
+          </div>
+        </div>
+        <details class="result">
+          <summary>BLUE의 검증 결과 보기</summary>
+          <p>50명 중 42명이 응답했으므로 표의 <strong>84%</strong>가 맞습니다. RED가 본문에서 8을 9로 바꿔, 응답률이 실제보다 <strong>10%포인트</strong> 높아졌습니다.</p>
+        </details>
+      </div>
+    </section>
+
+    <section class="wrap research" aria-labelledby="research-title">
+      <div class="research-intro">
+        <p class="eyebrow">프로젝트의 두 역할</p>
+        <h2 id="research-title">AI가 놓친 결함은<br>다음 시험 문제가 됩니다.</h2>
+        <a class="text-link" href="https://github.com/Pseudo-Lab/Falsify">GitHub에서 프로젝트 보기 <span aria-hidden="true">↗</span></a>
+      </div>
+      <dl class="roles">
+        <div><dt class="red">RED <span>결함 심기</span></dt><dd>본문의 수치를 바꾸거나, 없는 논문을 인용하거나, 실험 결과보다 강한 결론을 써넣습니다.</dd></div>
+        <div><dt class="blue">BLUE <span>근거 찾기</span></dt><dd>어디를 고쳤는지 모르는 상태에서 표, 인용 문헌, 실험 결과를 대조해 오류를 찾습니다.</dd></div>
+        <div><dt>검수 <span>다시 시험하기</span></dt><dd>사람이 원문과 수정본을 대조해 판정을 확인합니다. AI가 놓친 사례를 남겨, 다음 검증기가 같은 결함을 잡는지 비교합니다.</dd></div>
+      </dl>
+    </section>
+
+    <section id="share" class="share" aria-labelledby="share-title">
+      <div class="wrap share-inner">
+        <div>
+          <p class="eyebrow">현장에서 함께 보기</p>
+          <h2 id="share-title">이번엔 직접 RED가 되어 보세요.</h2>
+          <p>부스에서 논문을 고치고, AI가 내 수정을 찾아내는지 확인해 보세요.</p>
+          <a class="action light" href="event.html#booth">부스 체험 열기 <span aria-hidden="true">↗</span></a>
+        </div>
+        <div class="share-files">
+          <img src="project-assets/project-qr.png" alt="이 프로젝트 소개 페이지로 연결되는 QR 코드" width="1080" height="1080" loading="lazy">
+          <div>
+            <strong>프로젝트 소개 자료</strong>
+            <a href="project-assets/project-qr.png" download="Falsify-QR.png">QR 이미지 저장 <span aria-hidden="true">↓</span></a>
+            <a href="project-assets/falsify-tablet.gif">태블릿용 GIF 열기 <span aria-hidden="true">↗</span></a>
+            <a href="project-assets/falsify-tablet.gif" download="Falsify-tablet.gif">GIF 저장 <span aria-hidden="true">↓</span></a>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+  <footer class="wrap foot">Falsify · 가짜연구소 <a href="#top">맨 위로 ↑</a></footer>
+</body>
+</html>

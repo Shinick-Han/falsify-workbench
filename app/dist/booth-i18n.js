@@ -333,7 +333,7 @@
     'GitHub에서 보기 ★':'View on GitHub ★',
     '휴대폰 카메라로 찍으면 Falsify 프로젝트가 열려요.':'Scan with your phone camera to open the Falsify project.',
     'Falsify 프로젝트':'Falsify project',
-    '가짜연구소 Falsify 프로젝트 GitHub QR 코드':'Falsify by Pseudo Lab GitHub QR code',
+    'Falsify 프로젝트 소개 페이지 QR 코드':'QR code for the Falsify project introduction',
     '잠시 후 다시 눌러 주세요.':'Please try again in a moment.',
     '논문 실험 RED':'Paper editor',
     '행사 안내':'Event notice',

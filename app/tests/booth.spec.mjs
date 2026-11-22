@@ -2457,7 +2457,7 @@ test('waiting project row shows while pending, hides when final or withdrawn, an
     assert.equal(nodesOf(kRow).some(node => node.tagName === 'a'), false, 'kiosk has no link');
     const qr = k.ids.get('booth-project-qr');
     assert.ok(qr && qr.tagName === 'img');
-    assert.equal(qr.getAttribute('src'), 'falsify-project-qr.svg');
+    assert.equal(qr.getAttribute('src'), 'project-assets/project-qr.png');
     assert.equal(qr.getAttribute('width'), '120');
     assert.equal(qr.getAttribute('height'), '120');
     assert.ok((qr.getAttribute('alt') || '').length > 0, 'QR has alt text');

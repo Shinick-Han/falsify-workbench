@@ -392,9 +392,9 @@ async function kioskPass(browser, pageErrors) {
     naturalWidth: img.naturalWidth,
     rect: img.getBoundingClientRect().toJSON(),
   }));
-  assert.equal(qrInfo.src, 'falsify-project-qr.svg');
+  assert.equal(qrInfo.src, 'project-assets/project-qr.png');
   assert.ok(qrInfo.alt && qrInfo.alt.length > 0, 'QR image has alt text');
-  assert.equal(qrInfo.complete && qrInfo.naturalWidth > 0, true, 'QR SVG loaded');
+  assert.equal(qrInfo.complete && qrInfo.naturalWidth > 0, true, 'Project QR image loaded');
   assert.ok(qrInfo.rect.width >= 115 && qrInfo.rect.width <= 125 && qrInfo.rect.height >= 115 && qrInfo.rect.height <= 125, 'QR is ~120px: ' + JSON.stringify(qrInfo.rect));
   await shot(page, 'kiosk-waiting');
   const first = await page.evaluate(() => ({
