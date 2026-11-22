@@ -1,5 +1,0 @@
-첨부한 PDF만 읽고 결함을 찾으세요. 웹 검색, 논문 제목·저자 조회, 이전 대화의 기억은 쓰지 마세요.
-정답지, 수정 목록, 작성자 메모는 이 요청에 없습니다. 본문에서 확인되지 않는 의심은 확인필요로 두세요.
-답은 JSON 객체 하나로 하세요. findings 배열의 각 항목은 pageIndex(0부터), locationLabel, findingType, verdictLabel(아님|확인필요|맞음), severity, quote, rationale, confidence 를 가집니다.
-quote는 PDF에 실제로 있는 문장을 한 글자도 바꾸지 말고 그대로 옮기세요. 요약하거나 번역하지 마세요.
-rationale은 논문이 영어여도 먼저 한국어로, 짧은 문장 두 개 이내로 쓰세요. 그 뒤에 " || EN: "을 붙이고 같은 내용을 영어로, 짧은 문장 두 개 이내로 쓰세요. 예: 표 1의 0.50은 본문의 "매우 정확하다"와 맞지 않습니다. || EN: Table 1 reports 0.50, which contradicts "highly accurate" in the text. 이 설명은 부스 방문자에게 그대로 보입니다.

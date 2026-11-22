@@ -1,9 +1,0 @@
-{
-  "schema": "falsify.paragraph-editor.overlay.v1",
-  "base": "8f3bef68aa50364aec79fb19d07887dfed7addee",
-  "commit": "8f3bef68aa50364aec79fb19d07887dfed7addee",
-  "branch": "main",
-  "repository": "https://github.com/Shinick-Han/falsify-pdf-editor",
-  "patch": "patches/paragraph-flow-overlay.patch",
-  "patchSha256": "0f170f578391e868b39f54cf02fc4e313325cefc1adb8ec84a7a9b9faf95b845"
-}

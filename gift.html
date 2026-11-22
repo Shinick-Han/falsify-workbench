@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ko">
+<head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
+<meta name="color-scheme" content="light"/><meta name="referrer" content="no-referrer"/>
+<meta name="robots" content="noindex,nofollow,noarchive"/>
+<title>커피 한 잔의 선물 | 가짜연구소 × Falsify</title>
+<style>
+:root{font-family:system-ui,-apple-system,"Segoe UI","Apple SD Gothic Neo","Noto Sans KR",sans-serif;color:#19251d;background:#f6f8f6;font-synthesis:none}
+*{box-sizing:border-box}body{margin:0;min-height:100vh}main{max-width:480px;margin:0 auto;padding:44px 18px 65px}.eyebrow{color:#64806a;font-size:11px;letter-spacing:.15em;font-weight:800}.header h1{margin:12px 0 8px;font-size:30px;letter-spacing:-.07em;line-height:1.32}.header p{margin:0;color:#667569;line-height:1.6;font-size:14px}.panel{margin-top:26px;padding:25px 22px;background:#fff;border:1px solid #e4eae5;border-radius:19px;box-shadow:0 8px 22px rgba(12,33,16,.025)}.tag{font-size:11px;font-weight:800;letter-spacing:.04em;color:#53755d}.big{font-size:28px;font-weight:850;letter-spacing:-.045em;margin:8px 0 4px}.description{font-size:13px;color:#67766b;line-height:1.65}.gift-detail{margin:22px 0 20px;padding:15px 17px;background:#f6f8f6;border-radius:11px}.small{font-size:11px;color:#6d786e}.code-line{display:flex;gap:8px;align-items:center;justify-content:space-between;margin-top:7px}.code{overflow-wrap:anywhere;font-size:16px;font-weight:800;font-family:ui-monospace,Consolas,monospace;letter-spacing:.02em}.copy{background:#fff;border:1px solid #dce4dd;border-radius:8px;font:600 11px system-ui;padding:9px 11px;color:#28422f;flex-shrink:0;cursor:pointer}.copy:disabled{opacity:.5}.expiry{font-size:12px;color:#637268;margin-top:10px}.primary{display:block;text-align:center;background:#193828;color:#fff;padding:16px 12px;border-radius:11px;font-size:14px;font-weight:750;text-decoration:none}.primary:hover{background:#2b5038}.guide{margin:11px 0 0;font-size:11px;color:#788679;text-align:center;line-height:1.6}.error{color:#9b342b;font-size:13px;font-weight:700;line-height:1.6}.section-title{font-size:13px;font-weight:800;letter-spacing:-.01em;margin:33px 0 11px}.links{background:#fff;border:1px solid #e4eae5;border-radius:15px;padding:0 17px}.links a{display:flex;align-items:center;justify-content:space-between;padding:17px 3px;color:#243e2b;text-decoration:none;font-weight:650;font-size:14px;gap:15px}.links a+a{border-top:1px solid #edf0ec}.links a:hover{text-decoration:underline}.links .arrow{font-size:16px;color:#93a096}footer{font-size:11px;color:#8a958b;line-height:1.8;text-align:center;margin-top:25px}
+@media(max-width:360px){.header h1{font-size:25px}.panel{padding:20px 16px}}
+</style></head>
+<body><main><header class="header"><div class="eyebrow">PSEUDO LAB × FALSIFY</div><h1>커피 한 잔을<br>선물합니다 ☕</h1><p>작은 선물과 함께, 함께 성장하는 연구 커뮤니티를 소개합니다.</p></header>
+<section class="panel" aria-label="스타벅스 선물"><div class="tag">STARBUCKS GIFT</div><div id="giftName" class="big">제품 교환권 1만원권</div><div class="description">선물이 도착했습니다!<br>선물코드를 등록하여 선물을 받아보세요.</div><div class="gift-detail"><div class="small">선물코드</div><div class="code-line"><span id="giftCode" class="code">-</span><button class="copy" id="copyCode" type="button" disabled>코드 복사</button></div><div id="expiry" class="expiry"></div></div><a id="register" class="primary" href="#" rel="noreferrer noopener" style="display:none">카카오톡에서 선물 등록하기 ↗</a><p id="guide" class="guide">카카오톡 → 선물하기 → 선물함 → 선물코드 등록</p><div id="error" class="error" role="alert" style="display:none"></div></section>
+<h2 class="section-title">가짜연구소와 Falsify 알아보기</h2><nav class="links" aria-label="프로젝트 링크"><a href="https://pseudo-lab.com/" rel="noreferrer noopener" target="_blank">가짜연구소 홈페이지 <span class="arrow">↗</span></a><a href="https://discord.gg/EPurkHVtp2" rel="noreferrer noopener" target="_blank">가짜연구소 Discord <span class="arrow">↗</span></a><a href="https://github.com/Pseudo-Lab/Falsify" rel="noreferrer noopener" target="_blank">Falsify GitHub <span class="arrow">↗</span></a></nav>
+<footer>이 페이지는 가짜연구소·Falsify 소개와 선물 전달을 위한 비공식 안내 페이지입니다.<br>쿠폰은 한 번만 등록할 수 있습니다. 다른 사람에게 QR을 재전송하지 마세요.</footer></main>
+<script>
+(function(){'use strict';
+ const byId=id=>document.getElementById(id);
+ const allowed=new Set(['kko.to','gift.kakao.com','gift-talk.kakao.com']);
+ function fail(message){byId('error').textContent=message;byId('error').style.display='block';byId('guide').style.display='none';}
+ function readGift(){
+   const hash=window.location.hash;if(!hash.startsWith('#g='))return null;
+   const b64=hash.substring(3).replace(/-/g,'+').replace(/_/g,'/');
+   const bytes=Uint8Array.from(atob(b64.padEnd(Math.ceil(b64.length/4)*4,'=')),c=>c.charCodeAt(0));
+   return JSON.parse(new TextDecoder().decode(bytes));
+ }
+ try{
+  const d=readGift();if(!d){fail('아직 선물 정보가 연결되지 않았습니다. 선물을 보낸 사람에게 받은 QR로 접속해 주세요.');return;}
+  const url=new URL(d.url);if(url.protocol!=='https:'||!allowed.has(url.hostname))throw new Error('카카오톡 선물 등록 링크가 올바르지 않습니다.');
+  const code=(d.code||'').trim();const validCode=code&&!/^[-—–·.\s*]+$/.test(code);
+  byId('giftCode').textContent=validCode?code:'등록 링크에서 확인';
+  byId('copyCode').disabled=!validCode;
+  byId('giftName').textContent=(d.name||'제품 교환권 1만원권').slice(0,80);
+  byId('expiry').textContent=d.expiry?'코드 등록 기한: '+d.expiry:'';
+  byId('register').href=url.href;byId('register').style.display='block';
+  if(!validCode)byId('guide').textContent='선물코드를 요구하는 경우 발신자에게 원본 코드를 확인해 주세요.';
+  byId('copyCode').onclick=async()=>{try{await navigator.clipboard.writeText(code);byId('copyCode').textContent='복사 완료';}catch(_){byId('copyCode').textContent='복사 실패';}};
+ }catch(e){fail(e.message||'선물 정보를 읽을 수 없습니다.');}
+})();
+</script></body></html>

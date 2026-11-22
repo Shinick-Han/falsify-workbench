@@ -1,3 +1,0 @@
-# Pinned for corpus tooling only (tools/corpus figure rendering).
-# The Falsify workbench runtime does not depend on this file.
-matplotlib==3.11.2
