@@ -6,7 +6,7 @@
   const routes={workbench:'red',blue:'blue',review:'review',results:'results',agents:'harness'};
   const fromHash=hash=>Object.keys(routes).find(key=>'#'+routes[key]===hash)||null;
   /* A handout QR returns to event.html#booth or #booth-result. Those are not app views. */
-  function keepBoothHash(hash){return hash==='#booth'||hash==='#booth-result'||/^#recipe=[A-Za-z0-9-]{1,16}$/.test(hash);}
+  function keepBoothHash(hash){return hash==='#booth'||hash==='#booth-result'||/^#booth-leaderboard(?:\/|$)/.test(hash)||/^#recipe=[A-Za-z0-9-]{1,16}$/.test(hash);}
   let view=fromHash(location.hash)||'workbench',documentProgress=null,blueProgress=null,hostedProgress=null,flapTimer;
   let importEpoch=0,importController=null,importedDocument=null,importedFile=null;
 

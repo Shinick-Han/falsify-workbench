@@ -893,6 +893,7 @@
     let lbNextCursor=null;
     let lbFilter='all';
     let lbReturnStep='pick';
+    let lbRoute=null;
     let lbLoading=false;
     let lbUnlocking=false;
     let consentSaving=false;
@@ -1008,7 +1009,7 @@
       return el('section',{id:'booth-leaderboard',className:'booth-lb',hidden:true,'aria-label':'래더보드'},
         el('div',{className:'booth-lb-head'},
           el('button',{id:'booth-lb-back',type:'button',className:'booth-back',textContent:'← 처음으로'}),
-          el('h2',{className:'booth-headline small'},'오늘의 ',el('b',{textContent:'래더보드'}))),
+          el('h2',{id:'booth-lb-heading',className:'booth-headline small',tabindex:'-1'},'오늘의 ',el('b',{textContent:'래더보드'}))),
         el('p',{id:'booth-lb-status',className:'booth-feedback',role:'status','aria-live':'polite'}),
         el('section',{id:'booth-lb-summary',className:'booth-lb-summary',hidden:true,'aria-label':'오늘의 집계'}),
         el('section',{id:'booth-lb-mine',className:'booth-panel booth-lb-mine',hidden:true,'aria-label':'내가 만든 결함'}),
@@ -1022,7 +1023,7 @@
             el('button',{id:'booth-lb-unlock-go',type:'button',className:'booth-btn ink',hidden:true,textContent:'결함 갤러리 열기'}))),
         el('section',{id:'booth-lb-feed',className:'booth-lb-feed',hidden:true,'aria-label':'다른 사람 결함 갤러리'},
           el('div',{className:'booth-lb-feed-head'},
-            el('p',{className:'booth-klab',textContent:'다른 사람들의 결함'}),
+            el('p',{id:'booth-lb-feed-label',className:'booth-klab',textContent:'다른 사람들의 결함'}),
             el('p',{id:'booth-lb-example-note',className:'booth-small',hidden:true,textContent:'아직 공개 선택된 참가자 사례가 없어 운영진 예시를 먼저 보여 드려요. 통계에는 포함되지 않아요.'})),
           el('div',{id:'booth-lb-filters',className:'booth-chips',role:'group','aria-label':'결함 필터'}),
           el('div',{id:'booth-lb-list',className:'booth-lb-list'}),
@@ -1342,8 +1343,15 @@
       const box=byId('booth-gallery-consent');
       if(box) box.checked=false;
     }
+    function leaderboardHash(){
+      return /^#booth-leaderboard(?:\/|$)/.test(location.hash);
+    }
+    function linkedPaper(){
+      const raw=location.hash.slice('#booth-leaderboard/'.length);
+      try{return decodeURIComponent(raw);}catch{return raw;}
+    }
     function leaveResultHash(){
-      try{if(location.hash==='#booth-result'||location.hash==='#booth-leaderboard') location.hash='#booth';}catch{}
+      try{if(location.hash==='#booth-result'||leaderboardHash()) location.hash='#booth';}catch{}
     }
     function showRecords(visible){
       setHidden('booth-result',!visible);
@@ -1370,10 +1378,11 @@
       say('booth-result-error','');
     }
     function syncHashView(){
-      if(location.hash==='#booth-leaderboard'&&galleryEnabled()){
+      if(leaderboardHash()&&galleryEnabled()){
         showLeaderboardView(true);
         return;
       }
+      lbRoute=null;
       if(location.hash==='#booth-result'){
         showResult(true);
         return;
@@ -1417,9 +1426,15 @@
     function conqueredSection(papers){
       const list=Array.isArray(papers)?papers.filter(item=>item&&typeof item==='object'&&typeof item.paperKey==='string'):[];
       const items=list.length
-        ? list.map(item=>el('span',{className:'booth-lb-conq-chip',translate:'no'},
-            el('b',{textContent:shortTitle(item.title||item.paperKey)}),
-            el('small',{textContent:'arXiv '+item.paperKey})))
+        ? list.map(item=>{
+            const link=item.hasPublicDefect===true;
+            const props={className:'booth-lb-conq-chip'};
+            if(link) props.href='#booth-leaderboard/'+encodeURIComponent(item.paperKey);
+            return el(link?'a':'span',props,
+              el('b',{translate:'no',textContent:shortTitle(item.title||item.paperKey)}),
+              el('small',{translate:'no',textContent:'arXiv '+item.paperKey}),
+              el('span',{textContent:link?'정복 결함 보기 →':'공개된 정복 결함 없음'}));
+          })
         : [el('p',{className:'booth-small',textContent:'아직 정복된 논문이 없어요. 첫 정복자가 되어 보세요.'})];
       return el('div',{className:'booth-panel booth-lb-conq'},
         el('p',{className:'booth-klab',textContent:'정복된 논문'}),
@@ -1444,7 +1459,7 @@
         teaser.textContent='정복 '+conquered+'편 · 판정 '+judged+'건 · LIVE 통과율 '+passRateText(missed,judged);
         teaser.hidden=false;
       }
-      if(!box) return;
+      if(!box||lbRoute?.paper) return;
       const types=typesOf(liveConfig);
       const groups=[
         rateGroup('논문 출처별 LIVE 통과율',lbSummary.bySource,k=>SOURCE_LABELS[k]||k),
@@ -1466,6 +1481,7 @@
         if(closed||!data||typeof data!=='object') return;
         lbSummary=data;
         renderLeaderboardSummary();
+        return data;
       }catch{/* summary is independent and never blocks pick or submit */}
     }
     function myReceiptTitles(){
@@ -1544,7 +1560,7 @@
     }
     function galleryEditNode(edit, idx, total, types){
       const page=Number.isSafeInteger(edit.pageIndex)&&edit.pageIndex>=0?edit.pageIndex+1:null;
-      const label=editLabel(Number.isSafeInteger(edit.index)?edit.index:idx,page,total);
+      const label=editLabel(Number.isSafeInteger(edit.index)?edit.index:idx,page,lbRoute?.paper?Math.max(total,edit.index+1):total);
       const dtype=edit.defectType?el('span',{className:'booth-lb-dtype',textContent:defectLabel(edit.defectType,types)}):null;
       const verdict=typeof edit.verdict==='string'?edit.verdict:'';
       const badge=verdictBadge(verdict);
@@ -1588,7 +1604,20 @@
         galleryPaperCredit(entry,p),
         ...edits.map((edit,idx)=>galleryEditNode(edit,idx,edits.length,types)));
     }
+    function renderConquestFeed(){
+      const types=typesOf(liveConfig);
+      const cards=lbEntries.map(entry=>galleryCard(entry,types,false));
+      const empty=el('p',{className:'booth-small',textContent:'공개된 정복 결함이 없어요.'});
+      kidsOf(byId('booth-lb-list'),...(cards.length?cards:[empty]));
+      setHidden('booth-lb-example-note',true);
+      setHidden('booth-lb-filters',true);
+      setHidden('booth-lb-more',!lbNextCursor);
+      setHidden('booth-lb-gate',true);
+      setHidden('booth-lb-feed',false);
+    }
     function renderLeaderboardFeed(){
+      if(lbRoute?.paper) return renderConquestFeed();
+      setHidden('booth-lb-filters',false);
       const feed=byId('booth-lb-feed');
       const filters=byId('booth-lb-filters');
       const listBox=byId('booth-lb-list');
@@ -1640,16 +1669,23 @@
       say('booth-lb-status',errorMessage(error&&error.code,error));
       offerRetry('booth-lb-status',error,()=>loadLeaderboardFeed(append));
     }
+    function leaderboardFeedUrl(route,append){
+      const params=new URLSearchParams();
+      if(route?.paper) params.set('paper',route.paper);
+      if(append&&lbNextCursor) params.set('cursor',lbNextCursor);
+      const query=params.toString();
+      return '/v1/booth/leaderboard'+(query?'?'+query:'');
+    }
     async function loadLeaderboardFeed(append){
       if(lbLoading||closed) return;
+      const route=lbRoute;
       lbLoading=true;
       const more=byId('booth-lb-more');
       if(more) more.disabled=true;
       if(!append) say('booth-lb-status','결함 갤러리를 불러오는 중…');
       try{
-        const query=append&&lbNextCursor?'?cursor='+encodeURIComponent(lbNextCursor):'';
-        const data=await requestFresh('/v1/booth/leaderboard'+query,{method:'GET',auth:true});
-        if(closed) return;
+        const data=await requestFresh(leaderboardFeedUrl(route,append),{method:'GET',auth:true});
+        if(closed||route!==lbRoute) return;
         const incoming=Array.isArray(data?.entries)?data.entries:[];
         lbEntries=append?lbEntries.concat(incoming):incoming;
         lbNextCursor=typeof data?.nextCursor==='string'?data.nextCursor||null:null;
@@ -1657,14 +1693,17 @@
         say('booth-lb-status','');
         renderLeaderboardFeed();
       }catch(error){
-        showLeaderboardFeedError(error,append);
+        if(route===lbRoute) showLeaderboardFeedError(error,append);
       }finally{
-        lbLoading=false;
-        if(more) more.disabled=false;
+        if(route===lbRoute){
+          lbLoading=false;
+          if(more) more.disabled=false;
+        }
       }
     }
     async function unlockLeaderboard(){
       if(lbUnlocking||closed) return;
+      const route=lbRoute;
       lbUnlocking=true;
       const go=byId('booth-lb-unlock-go');
       if(go) go.disabled=true;
@@ -1676,7 +1715,7 @@
           setLeaderboardUnlocked(true);
           renderChances();
           renderSendTicket();
-          await loadLeaderboardFeed(false);
+          if(route===lbRoute) await loadLeaderboardFeed(false);
         }
       }catch(error){
         if(closed) return;
@@ -1688,14 +1727,26 @@
       }
     }
     /* Explicit user journey only: checks ownerState with visitor bearer without delaying initial pick boot. */
+    async function loadConquestHeading(route){
+      const summary=await request('/v1/booth/leaderboard/summary',{method:'GET',auth:false});
+      if(closed||route!==lbRoute) return false;
+      const paper=summary.conqueredPapers.find(item=>item.paperKey===route.paper);
+      byId('booth-lb-heading').textContent=paper?.title||route.paper;
+      if(paper?.hasPublicDefect) return true;
+      say('booth-lb-status','공개된 정복 결함이 없어요.');
+      return false;
+    }
     async function refreshLeaderboardState(){
+      const route=lbRoute;
       say('booth-lb-status','래더보드 상태를 확인하는 중…');
       setHidden('booth-lb-gate',true);
       setHidden('booth-lb-feed',true);
-      void loadLeaderboardSummary();
       try{
+        if(route?.paper){
+          if(!await loadConquestHeading(route)) return;
+        }else void loadLeaderboardSummary();
         const data=await requestFresh('/v1/booth/config',{method:'GET',auth:true});
-        if(closed) return;
+        if(closed||route!==lbRoute) return;
         if(data&&typeof data==='object'){
           if(data.features) liveConfig=Object.assign({},liveConfig,data);
           ownerState=ownerStateFrom(data);
@@ -1705,7 +1756,7 @@
         if(ownerState&&ownerState.unlocked) await loadLeaderboardFeed(false);
         else renderLeaderboardGate();
       }catch(error){
-        if(closed) return;
+        if(closed||route!==lbRoute) return;
         say('booth-lb-status',errorMessage(error&&error.code,error));
         offerRetry('booth-lb-status',error,refreshLeaderboardState);
       }
@@ -1717,8 +1768,26 @@
       if(!visible) return;
       setHidden('booth-landing',true);
       setHidden('booth-result',true);
-      renderLeaderboardSummary();
-      renderLeaderboardMine();
+      if(lbRoute?.hash===location.hash) return;
+      const paper=linkedPaper();
+      lbRoute={hash:location.hash,paper};
+      lbEntries=[];
+      lbNextCursor=null;
+      lbLoading=false;
+      setText('booth-lb-back',paper?'← 래더보드':'← 처음으로');
+      setText('booth-lb-feed-label',paper?'AI가 놓친 결함':'다른 사람들의 결함');
+      const heading=byId('booth-lb-heading');
+      heading.setAttribute('translate',paper?'no':'yes');
+      if(paper){
+        heading.textContent=paper;
+        setHidden('booth-lb-summary',true);
+        setHidden('booth-lb-mine',true);
+        heading.focus?.();
+      }else{
+        kidsOf(heading,'오늘의 ',el('b',{textContent:'래더보드'}));
+        renderLeaderboardSummary();
+        renderLeaderboardMine();
+      }
       void refreshLeaderboardState();
     }
     function openLeaderboard(event){
@@ -1729,6 +1798,12 @@
       showLeaderboardView(true);
     }
     function closeLeaderboard(){
+      if(lbRoute?.paper){
+        location.hash='#booth-leaderboard';
+        showLeaderboardView(true);
+        return;
+      }
+      lbRoute=null;
       leaveResultHash();
       setHidden('booth-leaderboard',true);
       say('booth-lb-status','');
@@ -3303,7 +3378,7 @@
     /* A reload within 15 min of the newest receipt, or a #booth-result visit, picks the ticket up again.
        A receipt that already has its result gives way to saved progress, so 「이어서」 can show on pick. */
     function resumeLatest(){
-      if(location.hash==='#booth-leaderboard'&&galleryEnabled()) return;
+      if(leaderboardHash()&&galleryEnabled()) return;
       const latest=readReceipts(storage)[0];
       if(!latest) return;
       const created=Date.parse(latest.createdAt);
@@ -3437,7 +3512,7 @@
       prefillClaim();
       renderReceipts();
       renderChances();
-      if(hasGallery) void loadLeaderboardSummary();
+      if(hasGallery&&!leaderboardHash()) void loadLeaderboardSummary();
       syncHashView();
       resumeLatest();
     }

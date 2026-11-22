@@ -1803,6 +1803,9 @@ test('a cold #booth-result load keeps the hash and index routes still resolve', 
   const result = boot('#booth-result');
   assert.deepEqual(result.urls, []);
   assert.equal(result.location.hash, '#booth-result');
+  for (const hash of ['#booth-leaderboard', '#booth-leaderboard/2611.16180', '#booth-leaderboard/hep-th%2F9901001']) {
+    assert.equal(boot(hash).location.hash, hash);
+  }
   const boothHash = boot('#booth');
   assert.deepEqual(boothHash.urls, []);
   assert.equal(boothHash.location.hash, '#booth');
@@ -3889,4 +3892,46 @@ test('v2 leaderboard: explicit ownerState, cancel/back safety, forfeit/3-try unl
   assert.match(fullDone.text('booth-submit-status'), /래더보드를 먼저 열어 새 도전이 종료됐어요/);
   assert.equal(fullDone.ids.get('booth-submit-records').hidden, false);
   fullDone.handle.destroy();
+});
+
+test('a conquered paper link keeps the unlock explicit and loads only its public missed edits', async () => {
+  const key = '2611.16180';
+  const summaryReply = {conqueredPapers: [{paperKey: key, title: 'Test Paper', hasPublicDefect: true}]};
+  const queries = [];
+  const h = liveBooth({hash: '#booth-leaderboard/' + key, features: {gallery: true, forfeit: true},
+    summaryReply, ownerState: {used: 0, perOwner: 3, unlocked: false},
+    leaderboardReply: (_url, query) => {
+      queries.push(query.get('paper'));
+      return {ok: true, status: 200, headers: {get() {return null;}}, json: async () => ({
+        entries: [{paperKey: key, paper: {title: 'Test Paper'}, outcome: 'missed', round: 'live',
+          edits: [{index: 1, pageIndex: 3, before: 'Original text', after: 'Changed text', verdict: 'missed'}]}],
+        nextCursor: null,
+      })};
+    },
+  });
+  await settle();
+  assert.equal(h.text('booth-lb-heading'), 'Test Paper');
+  assert.equal(h.ids.get('booth-lb-gate').hidden, false);
+  assert.deepEqual(queries, []);
+  assert.equal(h.calls.some(c => c.path.endsWith('/unlock')), false);
+  h.ids.get('booth-lb-unlock-go').click();
+  await settle();
+  assert.deepEqual(queries, [key]);
+  assert.match(h.text('booth-lb-list'), /결함 2 · 4쪽/);
+  assert.match(h.text('booth-lb-list'), /Changed/);
+  assert.equal(h.ids.get('booth-lb-filters').hidden, true);
+  h.ids.get('booth-lb-back').click();
+  await settle();
+  assert.equal(h.location.hash, '#booth-leaderboard');
+  assert.equal(h.ids.get('booth-lb-summary').hidden, false);
+});
+
+test('a conquered paper with no public defect shows an empty state without asking the visitor to forfeit', async () => {
+  const h = liveBooth({hash: '#booth-leaderboard/2309.15217', features: {gallery: true, forfeit: true},
+    summaryReply: {conqueredPapers: [{paperKey: '2309.15217', title: 'Ragas', hasPublicDefect: false}]}});
+  await settle();
+  assert.match(h.text('booth-lb-status'), /공개된 정복 결함이 없어요/);
+  assert.equal(h.ids.get('booth-lb-gate').hidden, true);
+  assert.equal(h.ids.get('booth-lb-feed').hidden, true);
+  assert.equal(h.calls.some(c => c.auth), false);
 });

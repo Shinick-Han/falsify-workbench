@@ -228,6 +228,10 @@ html[lang="en"] .booth-opinion-en{display:block}
 .booth-lb-conq-list{display:flex;flex-wrap:wrap;gap:8px}
 .booth-lb-conq-chip{display:inline-grid;gap:2px;padding:8px 10px;border:1px solid var(--ev-hair);border-radius:8px;background:var(--ev-soft);max-width:100%}
 .booth-lb-conq-chip b{font-size:12.5px;font-weight:500;color:var(--ev-ink);overflow-wrap:anywhere}
+a.booth-lb-conq-chip{text-decoration:none}
+.booth-lb-conq-chip>span{font-size:12px;color:var(--ev-muted)}
+a.booth-lb-conq-chip>span{color:var(--ev-ink);text-decoration:underline;text-underline-offset:3px}
+a.booth-lb-conq-chip:focus-visible{outline:2px solid currentColor;outline-offset:2px}
 .booth-lb-conq-chip small{font-family:var(--ev-mono);font-size:11px;color:var(--ev-muted)}
 .booth-lb-mine{gap:12px}
 .booth-lb-mine-item{display:grid;gap:8px;min-width:0}
